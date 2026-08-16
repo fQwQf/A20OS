@@ -463,7 +463,7 @@ smoke-virtio-sound:
 	fi
 
 smoke-pci-portability:
-	rm -f $(USER_BUILD_DIR)/nvme.a20drv
+	rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
