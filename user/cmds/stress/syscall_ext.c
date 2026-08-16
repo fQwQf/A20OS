@@ -1049,14 +1049,14 @@ static int test_splice_tee(void)
     int p[2];
     if (pipe(p) != 0)
         return fail("splice pipe", errno);
-    long off = 0;
+    off_t off = 0;
     errno = 0;
     if (splice(p[0], &off, f2, NULL, 1, 0) >= 0 || errno != ESPIPE)
         return fail("splice pipe offset", errno);
 
     /* file -> pipe, then pipe -> file. */
     lseek(f1, 0, SEEK_SET);
-    long in_off = 0, out_off = 0;
+    off_t in_off = 0, out_off = 0;
     ssize_t n = splice(f1, &in_off, p[1], NULL, 12, 0);
     if (n != 12)
         return fail("splice file->pipe", (int)n);
