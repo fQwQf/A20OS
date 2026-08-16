@@ -8,6 +8,7 @@
  */
 
 #include "core/types.h"
+#include "core/lock_counters.h"
 #include "core/smp.h"
 #include "core/timer.h"
 #include "abi/native/ipc_internal.h"
@@ -49,6 +50,16 @@ int g_sched_base_slice_ms = 10;
 /* From kernel/core/timekeeping.c: architecture-independent timer tick. */
 void a20_timer_tick(void) { }
 
+/* Diagnostics omitted from the size-constrained MCU image. */
+uint64_t g_perf_sw_context_switches;
+void psi_tick(void) { }
+void a20_monitor_tick(void) { }
+void lock_counters_register(spinlock_t *lock, const char *name) {
+    (void)lock;
+    (void)name;
+}
+void lock_counters_enable_callsite(spinlock_t *lock) { (void)lock; }
+
 /* NOMMU MCU builds do not own physical pages, but inline frame helpers still
  * reference the allocator descriptor while compiling exit paths. */
 pfa_t pfa;
@@ -82,6 +93,9 @@ void a20_registry_task_exit(int pid) { (void)pid; }
 void kep_release_process(int pid) { (void)pid; }
 void a20_ht_put_ref(struct a20_ht_internal *ht) { (void)ht; }
 void proc_debug_tracer_exiting(task_t *tracer) { (void)tracer; }
+void keyring_release_task(task_t *task) { (void)task; }
+void landlock_release_task(task_t *task) { (void)task; }
+void acct_task_exit(task_t *task) { (void)task; }
 int proc_debug_signal_stop(int sig) { (void)sig; return 0; }
 int proc_debug_event_stop(int sig, int event, uint64_t msg) {
     (void)sig;
@@ -155,6 +169,17 @@ void __atomic_store_8(volatile void *ptr, uint64_t value, int memorder) {
     uint32_t flags = arch_irq_save();
     *p = value;
     arch_irq_restore(flags);
+}
+
+uint64_t __atomic_fetch_add_8(volatile void *ptr, uint64_t value,
+                              int memorder) {
+    (void)memorder;
+    volatile uint64_t *p = (volatile uint64_t *)ptr;
+    uint32_t flags = arch_irq_save();
+    uint64_t old = *p;
+    *p = old + value;
+    arch_irq_restore(flags);
+    return old;
 }
 
 uint64_t __atomic_exchange_8(volatile void *ptr, uint64_t value,
