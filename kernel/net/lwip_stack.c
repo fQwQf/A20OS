@@ -199,6 +199,8 @@ static void a20_lwip_register_netifs(void) {
         device_t *dev = device_find_by_class(DEV_CLASS_NET, i);
         if (!dev || !dev->drv || !dev->drv->class_ops)
             break;
+        if (g_netif_state[i].dev == dev)
+            continue;
         const net_dev_ops_t *ops = (const net_dev_ops_t *)dev->drv->class_ops;
         if (!ops->send || !ops->recv || !ops->mac)
             continue;
@@ -265,6 +267,16 @@ void a20_lwip_init(void) {
     a20_lwip_register_loopif();
     g_lwip_ready = 1;
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
+}
+
+void a20_lwip_attach_netifs(void)
+{
+    if (!g_lwip_ready)
+        return;
+
+    uint64_t flags = a20_lwip_lock();
+    a20_lwip_register_netifs();
+    a20_lwip_unlock(flags);
 }
 
 uint64_t a20_lwip_lock(void)
