@@ -116,13 +116,16 @@ int64_t sys_move_pages(int pid, unsigned long nr_pages, const void *pages,
     /* No page can move on a single-node system; report every page as already
      * on node 0 (status value 0 = MPOL_MF_MOVE success semantics). */
     if (status && nr_pages) {
-        int *st = proc_scratch_buffer(nr_pages * sizeof(int));
-        if (st) {
-            for (unsigned long i = 0; i < nr_pages; i++)
-                st[i] = 0;
-            if (copy_to_user(status, st, nr_pages * sizeof(int)) < 0)
-                return -EFAULT;
-        }
+        if (nr_pages > SIZE_MAX / sizeof(int))
+            return -EINVAL;
+        size_t st_bytes = nr_pages * sizeof(int);
+        int *st = proc_scratch_buffer(st_bytes);
+        if (!st)
+            return -ENOMEM;
+        for (unsigned long i = 0; i < nr_pages; i++)
+            st[i] = 0;
+        if (copy_to_user(status, st, st_bytes) < 0)
+            return -EFAULT;
     }
     return 0;
 }
