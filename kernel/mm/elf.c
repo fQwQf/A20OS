@@ -998,10 +998,18 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     if (r < 0) goto fail64;
 
     vaddr_t tls_va = 0, tls_tp = 0;
+    /*
+     * Keep an initial TLS mapping for the main image, including dynamic
+     * executables, but do not publish its A20 bootstrap TCB to a PT_INTERP
+     * program.  musl's loader owns the dynamic TLS/DTV layout and installs
+     * its own thread pointer before running the executable.
+     */
     r = setup_tls(&mm, pgdir, tls_data, tls_filesz, tls_memsz, tls_align,
                   &tls_va, &tls_tp);
     if (r < 0)
         goto fail64;
+    if (has_interp)
+        tls_tp = 0;
 
     *info = (elf_load_info_t){
         .entry       = has_interp ? interp_entry : (eh->e_entry + load_bias),
