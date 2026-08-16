@@ -338,8 +338,7 @@ int64_t sys_io_submit(uint64_t ctx, long nr, const void *iocbpp);
 int64_t sys_io_getevents(uint64_t ctx, long min_nr, long nr, void *events,
                          const void *timeout);
 int64_t sys_io_pgetevents(uint64_t ctx, long min_nr, long nr, void *events,
-                          const void *timeout, const void *sigmask,
-                          size_t sigsetsize);
+                          const void *timeout, const void *sigarg);
 int64_t sys_io_cancel(uint64_t ctx, const void *iocb, void *result);
 
 /* pidfd (sys_pidfd.c). */

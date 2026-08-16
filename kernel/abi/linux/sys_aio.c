@@ -178,11 +178,9 @@ int64_t sys_io_getevents(uint64_t ctx, long min_nr, long nr, void *events,
 }
 
 int64_t sys_io_pgetevents(uint64_t ctx, long min_nr, long nr, void *events,
-                          const void *timeout, const void *sigmask,
-                          size_t sigsetsize)
+                          const void *timeout, const void *sigarg)
 {
-    (void)sigmask;
-    (void)sigsetsize;
+    (void)sigarg;
     return sys_io_getevents(ctx, min_nr, nr, events, timeout);
 }
 
