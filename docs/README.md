@@ -4,7 +4,7 @@
 
 ---
 
-这里汇集了 A20OS 的设计与开发文档。A20OS 是武汉大学 A20 战队开发的**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务机制。Linux ABI（`syscall_table.def` 登记 343 个 syscall）兼容现有 musl 生态，Native ABI（登记 126 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+这里汇集了 A20OS 的设计与开发文档。A20OS 是武汉大学 A20 战队开发的**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务机制。Linux ABI（`syscall_table.def` 登记 344 个 syscall）兼容现有 musl 生态，Native ABI（登记 126 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 ## 文档范围与权威性
 
@@ -65,7 +65,7 @@
 
 ### Linux ABI 兼容层
 
-- `kernel/abi/linux/syscall_coverage.md`：343 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
+- `kernel/abi/linux/syscall_coverage.md`：344 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
 - `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
 - [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
 
