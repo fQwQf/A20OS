@@ -157,6 +157,10 @@ run_buildstorm_probe() {
     cp /a20/a20-probe/exec-pages-probe "$FINAL_ROOT/a20-probe/exec-pages-probe" || return
     cp /a20/a20-probe/shebang-probe "$FINAL_ROOT/a20-probe/shebang-probe" || return
     cp /a20/a20-probe/stage9-perf-probe "$FINAL_ROOT/a20-probe/stage9-perf-probe" || return
+    if [[ -f /a20/a20-probe/nested-qemu-smoke.elf ]]; then
+        cp /a20/a20-probe/nested-qemu-smoke.elf \
+            "$FINAL_ROOT/a20-probe/nested-qemu-smoke.elf" || return
+    fi
     cp /a20/a20-probe/liba20probe.so "$FINAL_ROOT/a20-probe/liba20probe.so" || return
     cp /a20/arch_context_stress "$FINAL_ROOT/a20-context-stress" || return
     chmod 755 "$FINAL_ROOT/a20-eval-shell" \
@@ -166,6 +170,9 @@ run_buildstorm_probe() {
         "$FINAL_ROOT/a20-probe/shebang-probe" \
         "$FINAL_ROOT/a20-probe/stage9-perf-probe" \
         "$FINAL_ROOT/a20-context-stress"
+    if [[ -f "$FINAL_ROOT/a20-probe/nested-qemu-smoke.elf" ]]; then
+        chmod 755 "$FINAL_ROOT/a20-probe/nested-qemu-smoke.elf"
+    fi
     chmod 644 "$FINAL_ROOT/a20-probe/liba20probe.so"
 
     print "#### A20OS 2026 FINAL EVAL START buildstorm-probe ####"

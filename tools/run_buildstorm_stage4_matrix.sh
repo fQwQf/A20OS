@@ -75,7 +75,9 @@ run_lane() {
         rg -q '^\[BUILDSTORM-PROBE\] summary total=1 failures=0$' "$log"
         [[ $(rg -c '^Hello, world!$' "$log") -ge 2 ]]
         rg -q '^lifetime_errors: 0$' "$log"
+        rg -q '^ARCH_CONTEXT_STRESS: signal-ucontext-pc PASS$' "$log"
         if [[ "$arch" == loongarch64 ]]; then
+            rg -q '^ARCH_CONTEXT_STRESS: unaligned-hwcap PASS$' "$log"
             rg -q '^ARCH_CONTEXT_STRESS: signal-lsx-fcc PASS$' "$log"
             rg -q '^ARCH_CONTEXT_STRESS: schedule-lsx-fcc PASS$' "$log"
         fi

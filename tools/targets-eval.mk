@@ -4,7 +4,8 @@
 .PHONY: eval-check eval-check-rv eval-check-la \
 	final-stage4-rv-buildstorm-1c final-stage4-rv-buildstorm-8c \
 	final-stage4-la-buildstorm-1c final-stage4-la-buildstorm-8c \
-	final-stage5-rv-buildstorm final-stage5-la-buildstorm
+	final-stage5-rv-buildstorm final-stage5-la-buildstorm \
+	final-stage8-rv-nested-qemu final-stage8-la-nested-qemu
 
 EVAL_DIR   := .eval-state
 EVAL_LOGS  := $(EVAL_DIR)/logs
@@ -331,6 +332,16 @@ final-stage7-la-8c-default:
 # compute/MM cost from ext4 writeback cost.  This is never a formal judge path.
 final-stage7-rv-8c-default-tmpfs:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage7-full-default-tmpfs,3000)
+
+# Exercise the online-only nested-QEMU boundary without editing official
+# tests.  RISC-V boots the already-built ArceOS artifact; LoongArch uses a
+# direct serial payload at the official 2 GiB RAM size to isolate QEMU startup,
+# mmap and TCG from the separate tg-xtask UEFI/FAT preparation layer.
+final-stage8-rv-nested-qemu:
+	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,8,stage8-nested-qemu,900)
+
+final-stage8-la-nested-qemu:
+	$(call RUN_FINAL_EVAL,loongarch64,buildstorm-probe,8,stage8-nested-qemu,900)
 
 final-stage9-rv-1c-perf:
 	$(call RUN_FINAL_EVAL,riscv64,buildstorm-probe,1,stage9-perf-feedback,1200)
