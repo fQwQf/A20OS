@@ -138,14 +138,13 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     new_mask &= ~(signal_mask_bit(SIGKILL) | signal_mask_bit(SIGSTOP));
 
     /*
-     * SIGNAL_MASK_PARK_PROTOCOL: proc_lock excludes the sender's wake half
+     * SIGNAL_MASK_PARK_PROTOCOL: park_lock excludes the sender's wake half
      * while the temporary mask is published and the Park token is prepared.
-     * A sender which queues in the small unlocked-signal-lock interval is
-     * observed by proc_park_prepare_locked() before it can sleep.
      */
     signal_state_t *ss = (signal_state_t *)t->signals;
     proc_wait_token_t token = {0};
     uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+    uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
     uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
     t->sigsuspend_old_blocked = t->sig_blocked;
     t->sigsuspend_active = 1;
@@ -153,6 +152,7 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     spin_unlock_irqrestore(&ss->lock, signal_flags);
     if (!signal_task_has_unblocked(t))
         token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
+    spin_unlock_irqrestore(&t->park_lock, park_flags);
     spin_unlock_irqrestore(&proc_lock, proc_flags);
 
     if (token.task) {
@@ -245,6 +245,7 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
         proc_wait_token_t token = {0};
         int selected = 0;
         uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+        uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
         uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
         uint64_t matching = (ss->pending | t->thread_pending) & mask;
         if (matching) {
@@ -268,6 +269,7 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
         spin_unlock_irqrestore(&ss->lock, signal_flags);
         if (!selected && !poll_only)
             token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, until);
+        spin_unlock_irqrestore(&t->park_lock, park_flags);
         spin_unlock_irqrestore(&proc_lock, proc_flags);
 
         if (selected) {

@@ -197,8 +197,10 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
         /* Park like a child waiter; the tracee's stop path wakes child
          * waiters of its (reparented) parent, i.e. us. */
         cur->waiting_for_child = 1;
+        uint64_t park_flags = spin_lock_irqsave(&cur->park_lock);
         proc_wait_token_t token =
             proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, deadline);
+        spin_unlock_irqrestore(&cur->park_lock, park_flags);
         spin_unlock_irqrestore(&proc_lock, flags);
         proc_put(target);
 
