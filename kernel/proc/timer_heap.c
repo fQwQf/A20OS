@@ -47,6 +47,113 @@ static unsigned long wait_timer_full_failures;
 static unsigned long wait_timer_duplicate_rejections;
 static unsigned long wait_timer_stale_expirations;
 
+/*
+ * Per-task SIGALRM (ITIMER_REAL) deadline min-heap.  Protected by
+ * g_alarm_timer_lock; entries hold a task reference released on remove.
+ * proc_wake_child_waiters_locked-style global scans are avoided: the heap
+ * root is the next alarm deadline and expiry pops only due entries.
+ */
+typedef struct alarm_timer {
+    uint64_t deadline;
+    task_t *task;
+} alarm_timer_t;
+
+#define ALARM_TIMER_HEAP_MAX WAIT_TIMER_HEAP_MAX
+
+static spinlock_t g_alarm_timer_lock = SPINLOCK_INIT;
+static alarm_timer_t alarm_timer_heap[ALARM_TIMER_HEAP_MAX];
+static unsigned alarm_timer_count;
+
+static void alarm_timer_swap(unsigned a, unsigned b)
+{
+    alarm_timer_t tmp = alarm_timer_heap[a];
+    alarm_timer_heap[a] = alarm_timer_heap[b];
+    alarm_timer_heap[b] = tmp;
+    alarm_timer_heap[a].task->alarm_timer_index = (int)a;
+    alarm_timer_heap[b].task->alarm_timer_index = (int)b;
+}
+
+static void alarm_timer_sift_up(unsigned index)
+{
+    while (index > 0) {
+        unsigned parent = (index - 1) / 2;
+        if (alarm_timer_heap[parent].deadline <=
+            alarm_timer_heap[index].deadline)
+            break;
+        alarm_timer_swap(parent, index);
+        index = parent;
+    }
+}
+
+static void alarm_timer_sift_down(unsigned index)
+{
+    for (;;) {
+        unsigned left = index * 2 + 1;
+        unsigned right = left + 1;
+        unsigned smallest = index;
+        if (left < alarm_timer_count &&
+            alarm_timer_heap[left].deadline <
+            alarm_timer_heap[smallest].deadline)
+            smallest = left;
+        if (right < alarm_timer_count &&
+            alarm_timer_heap[right].deadline <
+            alarm_timer_heap[smallest].deadline)
+            smallest = right;
+        if (smallest == index)
+            break;
+        alarm_timer_swap(index, smallest);
+        index = smallest;
+    }
+}
+
+static alarm_timer_t alarm_timer_remove_index_locked(unsigned index)
+{
+    alarm_timer_t removed = {0};
+    if (index >= alarm_timer_count)
+        return removed;
+
+    removed = alarm_timer_heap[index];
+    if (removed.task)
+        removed.task->alarm_timer_index = -1;
+    alarm_timer_count--;
+    if (index != alarm_timer_count) {
+        alarm_timer_heap[index] = alarm_timer_heap[alarm_timer_count];
+        alarm_timer_heap[index].task->alarm_timer_index = (int)index;
+        if (index > 0 &&
+            alarm_timer_heap[index].deadline <
+            alarm_timer_heap[(index - 1) / 2].deadline)
+            alarm_timer_sift_up(index);
+        else
+            alarm_timer_sift_down(index);
+    }
+    memset(&alarm_timer_heap[alarm_timer_count], 0,
+           sizeof(alarm_timer_heap[alarm_timer_count]));
+    return removed;
+}
+
+/* Requires g_alarm_timer_lock held.  Drops the entry's task reference. */
+static void alarm_timer_cancel_locked(task_t *t)
+{
+    if (!t || t->alarm_timer_index < 0)
+        return;
+    unsigned index = (unsigned)t->alarm_timer_index;
+    if (index >= alarm_timer_count ||
+        alarm_timer_heap[index].task != t)
+        return;
+    alarm_timer_t removed = alarm_timer_remove_index_locked(index);
+    if (removed.task)
+        proc_put(removed.task);
+}
+
+void proc_alarm_cancel(task_t *t)
+{
+    if (!t)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_alarm_timer_lock);
+    alarm_timer_cancel_locked(t);
+    spin_unlock_irqrestore(&g_alarm_timer_lock, flags);
+}
+
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
 
@@ -291,7 +398,30 @@ void proc_set_alarm_expire(task_t *t, uint64_t alarm_expire)
 {
     if (!t)
         return;
+
+    uint64_t flags = spin_lock_irqsave(&g_alarm_timer_lock);
+    alarm_timer_cancel_locked(t);
+    if (alarm_expire && alarm_timer_count >= ALARM_TIMER_HEAP_MAX) {
+        /* Defensive: capacity is ALARM_TIMER_HEAP_MAX >= the PID limit, so a
+         * live task can never fill it; drop the alarm rather than track a
+         * deadline that would never fire. */
+        alarm_expire = 0;
+    }
+    if (alarm_expire) {
+        task_t *owned = proc_get(t);
+        if (owned) {
+            unsigned index = alarm_timer_count++;
+            alarm_timer_heap[index].deadline = alarm_expire;
+            alarm_timer_heap[index].task = owned;
+            t->alarm_timer_index = (int)index;
+            alarm_timer_sift_up(index);
+        } else {
+            alarm_expire = 0;
+        }
+    }
     __atomic_store_n(&t->alarm_expire, alarm_expire, __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&g_alarm_timer_lock, flags);
+
     if (sched_note_deadline(&next_alarm_scan, alarm_expire))
         sched_rearm_timer();
 }
@@ -363,43 +493,42 @@ void sched_scan_timers(uint64_t now)
             more_due = 0;
             next_alarm = SCHED_NO_DEADLINE;
 
-            flags = spin_lock_irqsave(&proc_lock);
-            for (task_t *t = proc_first_task_locked(); t;
-                 t = proc_next_task_locked(t)) {
-                if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
-                    continue;
-
-                uint64_t alarm =
-                    __atomic_load_n(&t->alarm_expire, __ATOMIC_RELAXED);
-                if (alarm > 0 && now >= alarm) {
-                    if (sigalrm_count >= SCHED_SIGNAL_BATCH) {
-                        more_due = 1;
-                        if (alarm < next_alarm)
-                            next_alarm = alarm;
-                        continue;
-                    }
-                    task_t *owned = proc_get(t);
-                    if (!owned) {
-                        __atomic_store_n(&t->alarm_expire, 0,
-                                         __ATOMIC_RELAXED);
-                        continue;
-                    }
-                    uint64_t interval =
-                        __atomic_load_n(&t->itimer_real_interval,
-                                        __ATOMIC_RELAXED);
-                    alarm = interval ? now + interval : 0;
-                    __atomic_store_n(&t->alarm_expire, alarm,
-                                     __ATOMIC_RELAXED);
-                    sigalrm_tasks[sigalrm_count++] = owned;
+            flags = spin_lock_irqsave(&g_alarm_timer_lock);
+            while (alarm_timer_count > 0) {
+                if (alarm_timer_heap[0].deadline > now)
+                    break;
+                if (sigalrm_count >= SCHED_SIGNAL_BATCH) {
+                    more_due = 1;
+                    break;
                 }
-                if (alarm > 0 && alarm < next_alarm)
-                    next_alarm = alarm;
+                alarm_timer_t expired =
+                    alarm_timer_remove_index_locked(0);
+                /* The heap reference rides along until the signal below. */
+                sigalrm_tasks[sigalrm_count++] = expired.task;
             }
-            spin_unlock_irqrestore(&proc_lock, flags);
+            if (alarm_timer_count > 0)
+                next_alarm = alarm_timer_heap[0].deadline;
+            spin_unlock_irqrestore(&g_alarm_timer_lock, flags);
 
             for (int i = 0; i < sigalrm_count; i++) {
-                (void)signal_send_task(sigalrm_tasks[i], SIGALRM);
-                proc_put(sigalrm_tasks[i]);
+                task_t *t = sigalrm_tasks[i];
+                int state =
+                    __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+                if (state == PROC_UNUSED || state == PROC_ZOMBIE) {
+                    /* Mirror the old scan: zombies are not signalled and
+                     * their stale alarm is not re-armed. */
+                    __atomic_store_n(&t->alarm_expire, 0,
+                                     __ATOMIC_RELAXED);
+                    proc_put(t);
+                    continue;
+                }
+                uint64_t interval =
+                    __atomic_load_n(&t->itimer_real_interval,
+                                    __ATOMIC_RELAXED);
+                uint64_t alarm = interval ? now + interval : 0;
+                proc_set_alarm_expire(t, alarm);
+                (void)signal_send_task(t, SIGALRM);
+                proc_put(t);
             }
         } while (more_due);
 
