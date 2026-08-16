@@ -269,6 +269,7 @@
 #define SYS_io_getevents    4
 #define SYS_io_cancel       3
 #define SYS_io_pgetevents   292
+#define SYS_io_pgetevents_time64 416
 #define SYS_init_module     105
 #define SYS_delete_module   106
 #define SYS_finit_module    273

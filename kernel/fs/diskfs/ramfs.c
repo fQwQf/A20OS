@@ -72,8 +72,7 @@ static ramfs_vnode_cache_t *g_ramfs_vnode_cache;
 static vnode_t *ramfs_vnode_cache_get_locked(uint64_t inum)
 {
     for (ramfs_vnode_cache_t *e = g_ramfs_vnode_cache; e; e = e->next) {
-        if (e->inum == inum && e->vn && vnode_ref_read(e->vn) > 0) {
-            vnode_get(e->vn);
+        if (e->inum == inum && vnode_get_unless_zero(e->vn)) {
             return e->vn;
         }
     }

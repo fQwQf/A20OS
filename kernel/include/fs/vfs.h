@@ -310,6 +310,7 @@ void     vfs_init(void);
 void     vnode_ref_init(vnode_t *vn, int refs);
 size_t   vnode_live_count(void);
 void     vnode_get(vnode_t *vn);
+int      vnode_get_unless_zero(vnode_t *vn);
 int      vnode_ref_read(vnode_t *vn);
 void     vnode_put(vnode_t *vn);
 void     vfile_ref_init(vfile_t *vf, int refs);
