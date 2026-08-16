@@ -34,7 +34,7 @@
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
-`make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke，可能运行较长时间。
+`make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke；阻塞点、信号/退出、timeout、SMP runqueue 与本地 pick 五个边界门禁分别依赖 `smoke-proc-stress`、`smoke-futex-stress` 和 `smoke-sched-stress`（在 QEMU 中 grep 运行时日志，而非源码标记），可能运行较长时间。
 
 ## 运行手册
 
@@ -103,7 +103,7 @@
 - **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 的镜像，在 QEMU 中运行 `syscall_smoke` 与 `poweroff`，确认串口日志出现 `SYSCALL_SMOKE: PASS`。
 - **When it fails**: 检查 `.kernel-build/smoke/abi-linux-riscv64.log` 中是否因 `SYSCALL_SMOKE: PASS` 未出现而超时；修复 `user/cmds/core/syscall_smoke.c` 或 Linux ABI 实现。
 
-`make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它把 watchdog timeout 当作可接受结果，不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
+`make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它要求串口日志出现 `part ok` 与 `System is going down for power-off NOW`（即内核完成 bring-up 并主动关机）；watchdog timeout 视为失败。它不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
 
 ### 信号、停止与退出
 - **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。

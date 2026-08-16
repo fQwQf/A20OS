@@ -166,7 +166,7 @@ check-task-lifetime-boundary:
 		--glob '*.[ch]' --glob '!kernel/external/**'
 	@echo "check-task-lifetime-boundary: PASS"
 
-check-blocking-point-boundary:
+check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
 	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/testing/blocking-point-audit.md
 	@rg -q "PROC_BLOCKED_ALLOCATION_WHITELIST" kernel/proc/task.c
 	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/abi/linux/sys_futex.c
@@ -194,7 +194,7 @@ check-blocking-point-boundary:
 	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/stress/proc_stress.c
 	@echo "check-blocking-point-boundary: PASS"
 
-check-signal-exit-boundary:
+check-signal-exit-boundary: smoke-proc-stress
 	@rg -q "SIGNAL_EXIT_PROTOCOL_AUDIT" docs/testing/signal-exit-audit.md
 	@rg -q "SIGNAL_STATE_LOCK_CONTRACT" kernel/include/proc/signal.h
 	@rg -q "PARK_SIGNAL_MODE_PROTOCOL" kernel/proc/park.c
@@ -220,7 +220,7 @@ check-signal-exit-boundary:
 	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/stress/proc_stress.c
 	@echo "check-signal-exit-boundary: PASS"
 
-check-timeout-ownership-boundary:
+check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test
 	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/testing/timeout-ownership-audit.md
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*deadline[^}]*task[^}]*wait_seq' \
 		kernel/proc/timer_heap.c
@@ -238,7 +238,7 @@ check-timeout-ownership-boundary:
 		'wait_timer_count[\s\S]{0,500}PROC_READY' kernel/proc/sched.c
 	@echo "check-timeout-ownership-boundary: PASS"
 
-check-smp-runqueue-boundary:
+check-smp-runqueue-boundary: smoke-sched-stress
 	@rg -q "SMP_RUNQUEUE_PREEMPT_AUDIT" \
 		docs/testing/smp-runqueue-audit.md
 	@rg -q "SMP_RUNQUEUE_PREEMPT_PROTOCOL" kernel/include/proc/proc.h
@@ -263,7 +263,7 @@ check-smp-runqueue-boundary:
 	@rg -q "SCHED_STRESS: smp-runqueue PASS" user/cmds/stress/sched_stress.c
 	@echo "check-smp-runqueue-boundary: PASS"
 
-check-process-lock-split-boundary:
+check-process-lock-split-boundary: smoke-sched-stress
 	@rg -q "PROCESS_LOCK_SPLIT_AUDIT" \
 		docs/testing/process-lock-split-audit.md
 	@rg -q "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN" kernel/proc/sched.c
