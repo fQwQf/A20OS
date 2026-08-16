@@ -620,6 +620,7 @@ int64_t sys_a20_fs_umount(const a20_syscall_args_t *args)
 
 int64_t sys_a20_fs_sync(const a20_syscall_args_t *args)
 {
+    (void)args;
     return vfs_sync();
 }
 
