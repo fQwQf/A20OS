@@ -86,7 +86,9 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
         }
     }
 
-    int64_t res = (int64_t)proc_mmap(addr, len, prot, flags, gfd, off);
+    vaddr_t mapped = proc_mmap(addr, len, prot, flags, gfd, off);
+    int64_t res = mm_addr_is_error(mapped) ? mm_addr_error(mapped)
+                                           : (int64_t)mapped;
     if (res >= 0) {
         task_t *t = proc_current();
 #ifdef CONFIG_NOMMU
