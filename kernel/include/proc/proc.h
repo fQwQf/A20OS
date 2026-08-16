@@ -324,6 +324,7 @@ typedef struct task_t {
     uint64_t           wait_seq;
     uint64_t           wait_deadline;
     int                wait_timer_index;
+    int                alarm_timer_index;
     proc_park_state_t  park_state;
     proc_wait_mode_t   wait_mode;
     proc_wake_reason_t wake_reason;
