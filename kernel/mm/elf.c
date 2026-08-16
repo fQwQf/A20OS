@@ -1294,12 +1294,6 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
     const char *platform = ARCH_NAME;
     int plat_len = (int)strlen(platform) + 1;
 
-    {
-        size_t fixed = (size_t)plat_len +
-                       (size_t)(envc + argc + 3) * sizeof(uintptr_t);
-        sp_va -= (16 - (fixed & 15)) & 15;
-    }
-
     sp_va -= plat_len;
     vaddr_t platform_va = sp_va;
     if (stack_copy(pgdir, sp_va, platform, (size_t)plat_len,
@@ -1339,6 +1333,14 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
     };
     int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
 
+    /* Keep the entry SP aligned without inserting padding between argc and
+     * argv.  The auxv byte count is not 16-byte aligned on 32-bit targets. */
+    size_t vector_bytes = (size_t)naux * 2 * sizeof(uintptr_t) +
+                          (size_t)(envc + 1) * sizeof(uintptr_t) +
+                          (size_t)(argc + 1) * sizeof(uintptr_t) +
+                          sizeof(uintptr_t);
+    sp_va -= (sp_va - vector_bytes) & 15UL;
+
     sp_va -= naux * 2 * sizeof(uintptr_t);
     if (stack_copy(pgdir, sp_va, auxv,
                    (size_t)naux * 2 * sizeof(uintptr_t),
@@ -1357,13 +1359,8 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                    &stack_bottom) < 0)
         return 0;
 
-    /*
-     * Linux process entry requires SP to satisfy the architecture ABI
-     * alignment (16 bytes on all currently supported targets).  The pointer
-     * vectors above are naturally word aligned but their total word count can
-     * be odd, so align the final argc slot explicitly.
-     */
-    sp_va = (sp_va - sizeof(uintptr_t)) & ~15UL;
+    /* argc is immediately followed by argv at the aligned program entry SP. */
+    sp_va -= sizeof(uintptr_t);
     {
         uintptr_t argc_value = (uintptr_t)argc;
         if (stack_copy(pgdir, sp_va, &argc_value, sizeof(argc_value),
