@@ -35,10 +35,14 @@ struct io_uring_params {
         uint32_t ring_entries;
         uint32_t overflow;
         uint32_t cqes;
-        uint64_t resv[2];
+        uint32_t flags;
+        uint32_t resv1;
         uint64_t user_addr;
     } cq_off;
 };
+
+_Static_assert(sizeof(struct io_uring_params) == 120,
+               "io_uring_params must match the Linux UAPI ABI");
 
 int64_t sys_io_uring_setup(unsigned entries, void *params)
 {

@@ -24,7 +24,10 @@
 #define RISCV_HWPROBE_KEY_MARCHID        1
 #define RISCV_HWPROBE_KEY_MIMPLID        2
 #define RISCV_HWPROBE_KEY_BASE_BEHAVIOR  3
+#define RISCV_HWPROBE_KEY_IMA_EXT_0       4
 #define RISCV_HWPROBE_BASE_BEHAVIOR_IMA  1
+#define RISCV_HWPROBE_IMA_FD              (1ULL << 0)
+#define RISCV_HWPROBE_IMA_C               (1ULL << 1)
 
 struct riscv_hwprobe_kern {
     int64_t key;
@@ -61,6 +64,16 @@ int64_t sys_riscv_hwprobe(const void *pairs, size_t pair_count,
             break;
         case RISCV_HWPROBE_KEY_BASE_BEHAVIOR:
             pr.value = RISCV_HWPROBE_BASE_BEHAVIOR_IMA;
+            break;
+        case RISCV_HWPROBE_KEY_IMA_EXT_0:
+            /*
+             * A20's RISC-V user ABI requires RV64GC.  Report the extensions
+             * that are guaranteed by that execution contract and leave
+             * optional bit-manipulation/vector extensions clear.  Programs
+             * such as QEMU can then select their portable implementation
+             * without executing speculative ISA probes under SIGILL.
+             */
+            pr.value = RISCV_HWPROBE_IMA_FD | RISCV_HWPROBE_IMA_C;
             break;
         default:
             pr.key = RISCV_HWPROBE_KEY_UNSUPPORTED;
