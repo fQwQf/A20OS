@@ -32,8 +32,8 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     vaddr_t dst = mm_mmap_locked(mm, target, len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((src_vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
-    if ((int64_t)dst < 0)
-        return (int)dst;
+    if (mm_addr_is_error(dst))
+        return mm_addr_error(dst);
 
     /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
      * boundaries before turning it into a file-backed mapping. */
@@ -280,8 +280,8 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     vaddr_t dst = mm_mmap_locked(mm, target, new_len, prot,
                            (target ? MAP_FIXED : 0) | MAP_ANONYMOUS |
                            ((vma->vm_flags & VM_SHARED) ? MAP_SHARED : MAP_PRIVATE));
-    if ((int64_t)dst < 0)
-        return (int)dst;
+    if (mm_addr_is_error(dst))
+        return mm_addr_error(dst);
 
     /* mm_mmap can merge the new anonymous VMA with neighbors; force exact
      * boundaries before turning it into a file-backed mapping. */
