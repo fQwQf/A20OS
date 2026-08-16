@@ -1,0 +1,12 @@
+#!/bin/mksh
+
+export LD_LIBRARY_PATH=/bin/qemu-libs
+
+exec /bin/qemu-system-riscv64 \
+    -M virt \
+    -cpu rv64,zicond=true \
+    -bios /bin/opensbi-riscv64-generic-fw_dynamic.bin \
+    -m 256M \
+    -nographic \
+    -drive file=/bin/guest-disk-rv.img,format=raw \
+    -kernel /bin/guest-kernel-rv.elf
