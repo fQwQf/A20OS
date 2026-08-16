@@ -307,7 +307,6 @@ int64_t sys_sched_setattr(int pid, const void *attr, unsigned flags);
 int64_t sys_sched_getattr(int pid, void *attr, unsigned size, unsigned flags);
 int64_t sys_clone3(void *cl_args, size_t size);
 int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t size);
-int64_t sys_inotify_init(int flags);
 int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask);
 int64_t sys_inotify_rm_watch(int fd, int wd);
 int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
