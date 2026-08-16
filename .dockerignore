@@ -1,0 +1,36 @@
+# Git metadata and version-control noise
+.git/
+.gitignore
+.gitmodules
+
+# Build artifacts (mirrors .gitignore; keeps the image context small)
+build/
+.kernel-build/
+user/build/
+*.o
+*.a
+*.elf
+*.bin
+*.img
+*.log
+*.aux
+*.bcf
+*.nav
+*.run.xml
+*.snm
+*.toc
+*.vrb
+out.txt
+test-results/
+test-results.csv
+target/
+kernel-rv
+kernel-la
+disk.img
+disk-la.img
+t.aux
+t.log
+
+# Local toolchain/venv leftovers
+.conda/
+__pycache__/
