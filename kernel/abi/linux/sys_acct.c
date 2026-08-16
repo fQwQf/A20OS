@@ -8,7 +8,8 @@ int64_t sys_acct(const char *filename)
         return acct_disable();
 
     char path[MAX_PATH_LEN];
-    if (user_strncpy(path, filename, sizeof(path)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(path, filename, sizeof(path));
+    if (pr0 < 0)
+        return pr0;
     return acct_enable(path);
 }

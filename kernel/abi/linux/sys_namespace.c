@@ -11,8 +11,8 @@ int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int 
     if (flags & ~1) return -EINVAL;
 
     char kpath[MAX_PATH_LEN];
-    long r = user_strncpy(kpath, path, MAX_PATH_LEN);
-    if (r < 0) return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (pr0 < 0) return pr0;
 
     if (dirfd != AT_FDCWD && kpath[0] != '/') {
         char full[MAX_PATH_LEN];

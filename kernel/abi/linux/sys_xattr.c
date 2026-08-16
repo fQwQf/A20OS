@@ -17,9 +17,8 @@ static int xattr_resolve_path(const char *upath, int nofollow, vnode_t **out_vn)
     *out_vn = NULL;
     if (!upath) return -EFAULT;
     char path[MAX_PATH_LEN];
-    long r = user_strncpy(path, upath, MAX_PATH_LEN);
-    if (r < 0) return -EFAULT;
-    if (r >= MAX_PATH_LEN - 1 && path[MAX_PATH_LEN - 1] == '\0') return -ENAMETOOLONG;
+    long r = user_path_strncpy(path, upath, MAX_PATH_LEN);
+    if (r < 0) return r;
     if (path[0] == '\0') return -ENOENT;
     
     vnode_t *vn = nofollow ? vfs_resolve_no_follow(path) : vfs_resolve(path);
@@ -245,8 +244,9 @@ static int xattr_at_resolve(int dirfd, const char *path, int nofollow,
     if (!path)
         return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
     int r = syscall_path_at(dirfd, kpath, full, sz);
     if (r < 0)
         return r;
