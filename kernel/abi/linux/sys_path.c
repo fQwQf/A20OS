@@ -12,7 +12,8 @@ static uint32_t user_visible_mode(uint32_t mode) {
 int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp1 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp1 < 0) return prp1;
     if (kpath[0] == '\0') return -ENOENT;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
@@ -23,7 +24,8 @@ int64_t sys_mkdirat(int dirfd, const char *path, int mode) {
 int64_t sys_unlinkat(int dirfd, const char *path, int flags) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp2 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp2 < 0) return prp2;
     if (kpath[0] == '\0') return -ENOENT;
     if (flags & ~(AT_REMOVEDIR)) return -EINVAL;
     char full[MAX_PATH_LEN];
@@ -50,8 +52,10 @@ int64_t sys_renameat2(int olddir, const char *oldpath,
         return -EINVAL;
     if (!oldpath || !newpath) return -EFAULT;
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
-    if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
-    if (user_strncpy(knew, newpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp3 = user_path_strncpy(kold, oldpath, MAX_PATH_LEN);
+    if (prp3 < 0) return prp3;
+    long prp4 = user_path_strncpy(knew, newpath, MAX_PATH_LEN);
+    if (prp4 < 0) return prp4;
     if (kold[0] == '\0' || knew[0] == '\0') return -ENOENT;
     char fold[MAX_PATH_LEN], fnew[MAX_PATH_LEN];
     int pr = syscall_path_at(olddir, kold, fold, sizeof(fold));
@@ -145,7 +149,8 @@ int64_t sys_fstat(int fd, void *st) {
 int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
     if (!path || !st) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp5 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp5 < 0) return prp5;
     kstat_t kst;
     int r;
     if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
@@ -168,7 +173,8 @@ int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
 int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp6 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp6 < 0) return prp6;
     char full[MAX_PATH_LEN];
     if (kpath[0] == '\0') {
         if (dirfd == AT_FDCWD) return -ENOENT;
@@ -235,7 +241,8 @@ int64_t sys_fchmod(int fd, int mode) {
 int64_t sys_fchmodat(int dirfd, const char *path, int mode, int flags) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp7 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp7 < 0) return prp7;
     if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         int64_t gfd = fdtable_get_current(dirfd);
         if (gfd < 0) return gfd;
@@ -293,7 +300,8 @@ int64_t sys_statx(int dirfd, const char *path, int flags, unsigned mask, void *b
         return -EINVAL;
     if (mask == 0) mask = STATX_BASIC_STATS;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp8 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp8 < 0) return prp8;
     kstat_t kst;
     int r;
 
@@ -398,8 +406,10 @@ int64_t sys_linkat(int olddirfd, const char *oldpath,
     if (flags & ~(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     if (!oldpath || !newpath) return -EFAULT;
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
-    if (user_strncpy(kold, oldpath, MAX_PATH_LEN) < 0) return -EFAULT;
-    if (user_strncpy(knew, newpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp9 = user_path_strncpy(kold, oldpath, MAX_PATH_LEN);
+    if (prp9 < 0) return prp9;
+    long prp10 = user_path_strncpy(knew, newpath, MAX_PATH_LEN);
+    if (prp10 < 0) return prp10;
     char fold[MAX_PATH_LEN], fnew[MAX_PATH_LEN];
     int pr = syscall_path_at(olddirfd, kold, fold, sizeof(fold));
     if (pr < 0) return pr;
@@ -411,8 +421,10 @@ int64_t sys_linkat(int olddirfd, const char *oldpath,
 int64_t sys_symlinkat(const char *target, int newdirfd, const char *linkpath) {
     if (!target || !linkpath) return -EFAULT;
     char ktarget[MAX_PATH_LEN], klink[MAX_PATH_LEN];
-    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
-    if (user_strncpy(klink, linkpath, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp11 = user_path_strncpy(ktarget, target, MAX_PATH_LEN);
+    if (prp11 < 0) return prp11;
+    long prp12 = user_path_strncpy(klink, linkpath, MAX_PATH_LEN);
+    if (prp12 < 0) return prp12;
     if (klink[0] == '\0') return -ENOENT;
     char flink[MAX_PATH_LEN];
     int pr = syscall_path_at(newdirfd, klink, flink, sizeof(flink));
@@ -462,11 +474,13 @@ int64_t sys_mount(const char *src, const char *target,
     char ksrc[MAX_PATH_LEN], ktarget[MAX_PATH_LEN], kfstype[32];
     char kdata[256];
     if (src) {
-        if (user_strncpy(ksrc, src, MAX_PATH_LEN) < 0) return -EFAULT;
+        long prp13 = user_path_strncpy(ksrc, src, MAX_PATH_LEN);
+    if (prp13 < 0) return prp13;
     } else {
         ksrc[0] = '\0';
     }
-    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp14 = user_path_strncpy(ktarget, target, MAX_PATH_LEN);
+    if (prp14 < 0) return prp14;
     if (user_strncpy(kfstype, fstype, 32) < 0) return -EFAULT;
     if (data) {
         if (user_strncpy(kdata, data, sizeof(kdata)) < 0) return -EFAULT;
@@ -492,7 +506,8 @@ int64_t sys_umount2(const char *target, int flags) {
     (void)flags;
     if (!target) return -EFAULT;
     char ktarget[MAX_PATH_LEN];
-    if (user_strncpy(ktarget, target, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp15 = user_path_strncpy(ktarget, target, MAX_PATH_LEN);
+    if (prp15 < 0) return prp15;
     if (ktarget[0] != '/') {
         char abs[MAX_PATH_LEN];
         task_t *t = proc_current();
@@ -521,7 +536,8 @@ int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {
         return gfd < 0 ? gfd : vfs_futimens((int)gfd, ptimes);
     }
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp16 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp16 < 0) return prp16;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0) return pr;
@@ -532,7 +548,8 @@ int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {
 int64_t sys_utime(const char *path, const void *times) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp17 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp17 < 0) return prp17;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
     if (pr < 0) return pr;
@@ -555,7 +572,8 @@ int64_t sys_utime(const char *path, const void *times) {
 int64_t sys_utimes(const char *path, const void *times) {
     if (!path) return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, MAX_PATH_LEN) < 0) return -EFAULT;
+    long prp18 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
+    if (prp18 < 0) return prp18;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
     if (pr < 0) return pr;
