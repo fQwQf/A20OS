@@ -47,6 +47,10 @@
     热点（约 3.3 万次竞争/1600 万自旋），callsite 归因显示竞争集中于**互斥量 park/wake 协议**与
     **切换发布路径**；把 pick 拆出只是第一步，完整消除需按等待对象分锁并合并切换路径的两次获取，
     见 `docs/roadmap/perf-overhaul.md` §3。
+- [x] 压缩 `proc_lock` 的剩余获取点。
+  - 证据：`sched()` idle 空队列快速路径（无任务可唤醒 idle，跳过两次全局锁获取）；`proc_switch_complete()` 无待交接任务时原子检查后直接返回；EEVDF enqueue 常见情形 O(1) 尾部追加（新 deadline 晚于队尾时不再遍历）；SIGALRM 到期扫描改为 per-task alarm 最小堆（`proc_set_alarm_expire` 维护，expiry O(k log n)，destroy 时移除条目）；`proc_wake_child_waiters_locked` 用 proc_lock 保护的全局面等待者计数在无人 wait 时 O(1) 返回。阻塞切换的 completion 仍必须持 `proc_lock`：wake 竞争 enqueue 的仲裁是 park 协议正确性部件。
+  - 验证：`make smoke-riscv64`、`smoke-sched-stress`、`smoke-proc-stress`、`smoke-futex-stress`、`smoke-abi-linux` 全部 PASS；guest 内 `sleep 1` 的 SIGALRM 正常；`[SMP] 2/2 configured CPUs online` 后干净关机。
+  - 剩余：切换路径的两次获取（出栈发布 + 入栈 completion）需 per-task wake-queue 位才能无锁化；`proc_wait4` 的 child 扫描本身仍是每次 syscall O(N)。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
   - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 和正式 CAgent 10/10；`e33c3219` 未重跑。
@@ -165,7 +169,7 @@
 - [x] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
   - 证据：`check-blocking-point-boundary`、`check-signal-exit-boundary`、`check-timeout-ownership-boundary`、`check-smp-runqueue-boundary`、`check-process-lock-split-boundary` 现在依赖对应 QEMU runtime smoke（`smoke-proc-stress`/`smoke-futex-stress`/`smoke-sched-stress`/`smoke-timeout-test`），在运行时日志 grep 标记而非源码；`smoke-riscv64`/`smoke-loongarch64`/`smoke-aarch64`/`smoke-x86_64` 不再把 watchdog timeout 当 PASS，要求 `part ok` 与正常 poweroff；新增 `smoke-pty-stress` 与 `smoke-timeout-test` 覆盖原本从未运行的压力程序。
   - 验证：`make smoke-riscv64`、`make smoke-loongarch64`、`make smoke-sched-stress`、`make smoke-futex-stress`、`make smoke-proc-stress`、`make smoke-timeout-test`、`make smoke-pty-stress`、`make check-timeout-ownership-boundary` 在 2026-08-16 于 riscv64 全部 PASS。
-  - 剩余：`check-arch-boundary` 未依赖 `smoke-arch-mmu-matrix`，`check-concurrency-foundation` 仍只构建不启动；`pty_stress`/`timeout_test` 的多架构入口未建立。
+  - 后续：`check-arch-boundary` 已依赖 `smoke-arch-mmu-matrix`（8 组合 MMU/NOMMU runtime 矩阵）；`check-concurrency-foundation` 已依赖 `smoke-smp-bringup`（riscv64 `-smp 2` 真实双核启动并干净关机，`[SMP] 2/2 configured CPUs online`）。剩余：`pty_stress`/`timeout_test` 的多架构入口未建立。
 - [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
@@ -181,6 +185,10 @@
 - [x] 从活跃源码目录中移除或隔离 patch artifact 文件。
   - 当前证据：`kernel/` 下已没有 `*.orig`/`*.rej`；历史上的 `fork.c.orig`、`fork.c.rej` 和 `sys_futex.c.orig` 等 artifact 已退出活跃树。
   - 完成条件：活跃源码目录只包含构建输入、文档或有意跟踪的 fixture。
+- [x] 内核编译警告清零并启用 `-Werror`。
+  - 证据：根 `Makefile` 的 `CFLAGS` 默认带 `-Werror`（`KERNEL_WERROR=0` 逃生口）；riscv64/loongarch64 的 `linux` 与 `both` ABI、bringup/dev/SMP2 配置全部零警告。顺带修复：`io_pgetevents` 读取 `arg[6]` 越界（64 位 ABI 无第 7 参）、COW fault 全局计数不在成功分支内、`a20_prepare_start_info` 的 uint32 handle 错误检测恒假（失败时静默写入 0xFFFFFFFF）。架构门禁列表合并为 `SUPPORTED_HOSTED_ARCHES` 单一真源；STM32 产物路径由 `BUILD_VARIANT` 派生，flash/QEMU 目标经嵌套 make 保持同配置。
+  - 验证：`make -B ARCH=riscv64/loongarch64 ABI=linux/both BRINGUP=1 kernel-only` 零警告；`smoke-native-handle`、`smoke-native-contract` PASS。
+  - 剩余：aarch64/x86_64/arm32/riscv32/ppc64le/armv7m/loongarch32 的警告状态未在无工具链主机上复核，首次构建如遇残留警告需 `KERNEL_WERROR=0` 过渡。
 - [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
   - 证据：`docs/project/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
   - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
