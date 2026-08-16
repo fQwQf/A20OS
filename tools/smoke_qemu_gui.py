@@ -20,6 +20,12 @@ def wait_for(predicate, timeout, description):
     raise RuntimeError(f"timed out waiting for {description}")
 
 
+def parse_seconds(value):
+    if value.endswith("s"):
+        value = value[:-1]
+    return float(value)
+
+
 def read_log(path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as stream:
@@ -85,7 +91,7 @@ def main():
     parser.add_argument("--qemu", required=True)
     parser.add_argument("--kernel", required=True)
     parser.add_argument("--disk", required=True)
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=parse_seconds, default=60.0)
     parser.add_argument("--frame-window", type=float, default=15.0,
                         help="seconds to wait for a non-blank framebuffer scanout "
                              "after the drivers report ready")
