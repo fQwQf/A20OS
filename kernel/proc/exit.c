@@ -471,11 +471,18 @@ void proc_force_exit(task_t *t, int exit_code)
              * next syscall/trap boundary.  Uninterruptible waits are left
              * blocked until their resource event; there is no READY fallback.
              */
-            uint64_t plf = spin_lock_irqsave(&t->park_lock);
-            (void)proc_try_wake_locked(
-                t, t->wait_seq, PROC_WAKE_TASK_EXIT);
-            spin_unlock_irqrestore(&t->park_lock, plf);
-        } else if (t->state == PROC_STOPPED) {
+        }
+
+        /*
+         * REMOTE_EXIT_SAFE_BOUNDARY: always meet a concurrent Park under its
+         * lock.  Checking only PROC_BLOCKED misses the PREPARING -> PARKED
+         * transition and can leave an exec sibling asleep forever.
+         */
+        uint64_t plf = spin_lock_irqsave(&t->park_lock);
+        (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_TASK_EXIT);
+        spin_unlock_irqrestore(&t->park_lock, plf);
+
+        if (t->state == PROC_STOPPED) {
             resume_stopped = 1;
         }
     }
