@@ -3,7 +3,7 @@
 #include "sys/usercopy.h"
 
 /*
- * x86_64 Linux struct stat layout (128 bytes, glibc/musl):
+ * x86_64 Linux struct stat layout (144 bytes, glibc/musl):
  *   0:  st_dev     u64
  *   8:  st_ino     u64
  *  16:  st_nlink   u64
@@ -25,7 +25,7 @@
  */
 void arch_copy_kstat_to_user(void *st, const kstat_t *kst)
 {
-    uint64_t buf64[128 / 8];
+    uint64_t buf64[144 / 8];
     memset(buf64, 0, sizeof(buf64));
     uint8_t *buf = (uint8_t *)buf64;
     uint64_t *u64 = (uint64_t *)buf;
