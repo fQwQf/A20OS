@@ -27,7 +27,7 @@ all-architectures: all
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
-check-kernel-build-all: check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup check-visionfive2-build check-ls2k1000-build
+check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build
 
 # Physical-board build gates: keep the VisionFive 2 and LS2K1000 sources
 # building on every commit.  The generic profile is the boot substrate; the
@@ -66,7 +66,7 @@ check-ppc64le-bringup:
 
 check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 
-check-user-build-all: check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user
+check-user-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
 
 check-build-matrix: check-kernel-build check-user-build
 	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
