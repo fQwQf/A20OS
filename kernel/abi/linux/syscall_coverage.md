@@ -332,7 +332,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `io_destroy` | aio | `partial` | `smoke-syscall-ext` | context teardown; reaped automatically on mm destroy |
 | `io_submit` | aio | `partial` | `smoke-syscall-ext` | PREAD/PWRITE/FSYNC/FDSYNC executed synchronously through VFS; POLL/NOOP and other opcodes -EINVAL |
 | `io_getevents` | aio | `partial` | `smoke-syscall-ext` | waits for min_nr completions with timeout; copies io_event records |
-| `io_pgetevents` | aio | `partial` | `smoke-syscall-ext` | io_getevents with sigmask accepted (mask applied as in pwait) |
+| `io_pgetevents` | aio | `partial` | `smoke-syscall-ext` | io_getevents with sigarg accepted; temporary signal-mask semantics are not yet applied |
+| `io_pgetevents_time64` | aio | `partial` | `smoke-syscall-ext` | RISC-V32 time64 alias; shares io_pgetevents signal-mask limitation |
 | `io_cancel` | aio | `partial` | `smoke-syscall-ext` | reports in-flight iocb results; synchronous execution cannot abort a running op |
 | `init_module` | modules | `partial` | `smoke-syscall-ext` | stages a module image and loads it through the A20OS drvmod ET_REL loader; requires CAP_SYS_MODULE |
 | `delete_module` | modules | `partial` | `smoke-syscall-ext` | unloads a drvmod module by name; pinned (driver-registered) modules return -EBUSY |
