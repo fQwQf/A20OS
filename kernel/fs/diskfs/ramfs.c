@@ -1270,7 +1270,7 @@ static int ramfs_populate_entries(const rootfs_overlay_entry_t *entries, size_t 
         if (fd < 0)
             return fd;
 
-        int wn = vfs_write(fd, e->content, e->size);
+        int wn = vfs_write(fd, (const char *)e->content, e->size);
         vfs_close(fd);
         if (wn < 0)
             return wn;

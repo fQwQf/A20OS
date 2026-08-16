@@ -580,7 +580,9 @@ static int exec_install_process(task_t *t,
 {
     /* ---- 1. Build user stack (Linux or Native ABI) ---- */
     uint64_t sp;
+#ifdef CONFIG_ABI_NATIVE
     vaddr_t native_start_info = 0;
+#endif
 #ifdef CONFIG_ABI_NATIVE
     if (info->is_native_abi) {
         sp = exec_setup_native_abi(t, info, bprm->argc,
@@ -608,7 +610,9 @@ static int exec_install_process(task_t *t,
          * exists only as info->pgdir/info->mmap until step 3.  Map the
          * vDSO into the image being built so AT_SYSINFO_EHDR is backed. */
         if (sp != 0 && ehdr != 0 &&
-            vdso_map_image(info->pgdir, &info->mmap) < 0)
+            /* vdso_map_image appends the vDSO VMA to the image being built:
+             * info->mmap is the mutable image list head of a const struct. */
+            vdso_map_image(info->pgdir, (vm_area_t **)&info->mmap) < 0)
             return -ENOMEM;
     }
     if (sp == 0)
