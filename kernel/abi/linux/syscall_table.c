@@ -26,12 +26,18 @@ static int64_t linux_sys_clone_call(const linux_syscall_args_t *args)
 #include "syscall_table.def"
 #undef LINUX_SYSCALL
 
+/* Some syscall numbers alias by design (e.g. SYS_inotify_init ==
+ * SYS_inotify_init1 on several 64-bit ABIs): the later initializer
+ * intentionally wins the designated table slot. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Woverride-init"
 static const linux_syscall_entry_t linux_syscall_table[LINUX_SYSCALL_TABLE_SIZE] = {
 #define LINUX_SYSCALL(name, restores, ...) \
     [SYS_##name] = { SYS_##name, #name, linux_handle_##name, restores },
 #include "syscall_table.def"
 #undef LINUX_SYSCALL
 };
+#pragma GCC diagnostic pop
 
 #undef A
 
