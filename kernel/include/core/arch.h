@@ -133,6 +133,12 @@ static inline int arch_pt_level_entries(int level)
 # define ARCH_FORK_REQUIRES_PRIVATE_COPY 0
 #endif
 
+/* Architecture-specific Linux ELF AT_HWCAP value.  Capabilities must only be
+ * advertised when the kernel and hardware provide the corresponding ABI. */
+#ifndef ARCH_ELF_HWCAP
+# define ARCH_ELF_HWCAP() 0UL
+#endif
+
 #ifndef ARCH_TASK_FIELDS
 # define ARCH_TASK_FIELDS
 #endif

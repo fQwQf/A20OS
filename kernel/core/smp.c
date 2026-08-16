@@ -242,17 +242,24 @@ static _Atomic uint32_t mb_request[CONFIG_NR_CPUS];
 static _Atomic uint32_t mb_ack[CONFIG_NR_CPUS];
 
 /* Called by the reschedule-IPI handler after it has executed the acquire
- * fence.  Advances the acknowledgment only up to the request the caller
- * published, so the initiator's wait loop cannot be satisfied by a stale ack
- * from an unrelated reschedule IPI. */
+ * fence.  arch_fence_i() gives the advertised
+ * PRIVATE_EXPEDITED_SYNC_CORE command its Linux semantics: generated code
+ * published before the membarrier is visible to instruction fetch on every
+ * acknowledged CPU.  Applying the stronger fence to the other commands is
+ * safe and keeps one request/ack transport for all membarrier variants.
+ * Advances the acknowledgment only up to the request the caller published,
+ * so the initiator's wait loop cannot be satisfied by a stale ack from an
+ * unrelated reschedule IPI. */
 void smp_membarrier_ipi_ack(unsigned cpu)
 {
     if (cpu >= CONFIG_NR_CPUS)
         return;
     uint32_t req = __atomic_load_n(&mb_request[cpu], __ATOMIC_ACQUIRE);
     uint32_t ack = __atomic_load_n(&mb_ack[cpu], __ATOMIC_RELAXED);
-    if (ack != req)
+    if (ack != req) {
+        arch_fence_i();
         __atomic_store_n(&mb_ack[cpu], req, __ATOMIC_RELEASE);
+    }
 }
 
 /* Issue a full memory barrier on every online CPU.  On uniprocessor
@@ -264,6 +271,7 @@ int smp_membarrier_sync_all(void)
     uint32_t expected[CONFIG_NR_CPUS] = {0};
 
     if (!target) {
+        arch_fence_i();
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         return 0;
     }
@@ -301,6 +309,7 @@ int smp_membarrier_sync_all(void)
     if (irqs_were_off)
         arch_local_irq_disable();
 
+    arch_fence_i();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return 0;
 }

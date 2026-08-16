@@ -41,13 +41,30 @@ typedef struct arch_ucontext {
     arch_sigcontext_t uc_mcontext;        /* offset 176, matches musl ucontext_t */
 } __attribute__((aligned(16))) arch_ucontext_t;
 
+_Static_assert(sizeof(arch_sigset_t) == 8,
+               "LoongArch kernel signal mask ABI must remain 8 bytes");
+_Static_assert(__builtin_offsetof(arch_ucontext_t, uc_mcontext) == 176,
+               "LoongArch ucontext mcontext offset must match Linux userspace ABI");
+
 typedef struct {
     uint64_t              flag;
     arch_ucontext_t       uc;
-    arch_siginfo_t        info;
+    /*
+     * sc_extcontext is a zero-length, 16-byte-aligned tail of mcontext_t.
+     * Linux therefore places the first sctx_info record immediately after
+     * uc_mcontext.  Keeping it after siginfo makes userspace parse siginfo as
+     * an LSX header and restores vector/FPU state from the wrong bytes.
+     */
     arch_sigframe_extra_t arch_extra;
+    arch_siginfo_t        info;
     uint32_t              tramp[2];
 } __attribute__((aligned(16))) arch_sig_rt_frame_t;
+
+_Static_assert(__builtin_offsetof(arch_sig_rt_frame_t, arch_extra) ==
+               __builtin_offsetof(arch_sig_rt_frame_t, uc) +
+               __builtin_offsetof(arch_ucontext_t, uc_mcontext) +
+               sizeof(arch_sigcontext_t),
+               "LoongArch extension records must follow mcontext directly");
 
 static inline size_t arch_sigframe_flag_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, flag); }
 static inline size_t arch_sigframe_uc_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, uc); }
