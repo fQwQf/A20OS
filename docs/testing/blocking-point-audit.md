@@ -11,7 +11,7 @@
 | 族 | 持久条件与锁 | 等待发布与清理 |
 |---|---|---|
 | 互斥量与 completion | `mutex.lock` 下的 `locked/owner`；`completion.lock` 下的 `done` | 当前任务在对象锁之前准备，在其下重查，链接 `(task ref, seq)`，解锁后提交，然后解除链接并完成。解锁/完成在刷新唤醒令牌之前摘下等待条目。 |
-| wait4 | `proc_lock` 下的子进程状态、父进程关系和 `waiting_for_child` | 子条件在 `proc_lock` 下持久存在；`proc_park_prepare_locked()` 在同一临界区发布令牌。子进程退出改变状态并在该锁下赢得令牌。 |
+| wait4 | `proc_lock` 下的子进程状态、父进程关系和 `waiting_for_child` | 子条件在 `proc_lock` 下持久存在；路径按 `proc_lock -> park_lock` 发布令牌。子进程退出改变状态，并在同一锁顺序下赢得令牌。 |
 | vfork | `CLONE_VFORK`、`vfork_waiting` 以及 `proc_lock` 下的子退出/exec 完成 | 完成遵循正常的 completion 协议。父进程现在从发布到完成解除链接期间拥有一个显式子引用，因此自动回收无法释放内嵌的 completion。 |
 | pipe 与 PTY | pipe/PTY 锁下的环形占用、端点打开计数和挂起状态 | 读/写在对象锁下重查，链接一个带令牌的等待条目，并在每次返回时解除链接。数据/打开状态改变在相同锁下摘下等待者，并在解锁后刷新。 |
 | eventfd 与 timerfd | 对象锁下的计数器/空间或定时器到期 | 对象状态是持久的。等待条目拥有 `(task ref, seq)`，定时器截止时间使用同一个 Park 令牌；唤醒、超时和取消在 `proc_try_wake()` 汇合。 |
@@ -33,7 +33,7 @@
 2. `proc_park_commit()` 是唯一写入 `PROC_BLOCKED` 的活动任务路径。
 3. `proc_make_ready()` 保留用于新任务发布、当前任务让出和 cgroup 解除节流。其 Park 分支委托给 `proc_try_wake_locked(task, wait_seq, EVENT)`，因此无法绕过活动令牌。
 4. 信号、停止和退出路径不再出现在此白名单中。它们使用模式检查的 Park 唤醒原因或显式的 STOPPED 恢复辅助函数，如 `docs/testing/signal-exit-audit.md` 所记录。
-5. Linux `poll`、`select` 和 `epoll` 当前使用有界周期 `proc_park_wait()` 截止时间，并在每个时间片后重扫持久就绪状态。它们不存储异步任务指针，也不会丢失正确性，但它们还不是事件驱动的多对象订阅。这个有界兼容包装在第 4 步被接受，并作为性能/延迟债务保留，而不是作为已完成的 VFS poll-hook 设计呈现。
+5. Linux `poll`、`select` 和 `epoll` 当前通过 `readiness_wait_once()` 订阅各文件的持久 wait queue，并用同一个 Park token 完成“订阅后重查”。没有 `poll_sources` 的文件才使用 1 ms 有界 fallback 后重扫；异步条目保存 task 引用和 `wait_seq`，不存储无所有权的 task 指针。
 
 不再存在 `proc_block_until()` 调用或实现。除任务初始化和调度器之外，没有任何模块写入 `on_rq`、`cpu_id`、`rq_next` 或 `rq_prev`。
 

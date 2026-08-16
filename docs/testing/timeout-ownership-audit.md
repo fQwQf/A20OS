@@ -6,15 +6,15 @@
 
 ## 所有权
 
-每个堆条目恰好持有一个任务引用，并记录不可变三元组 `(task, wait_seq, deadline)`。注册时获取该引用。取消或过期二者恰好其一会在 `proc_lock` 下移除该条目并释放引用。堆移除会在条目被移入空位之前清除任务的堆索引。
+每个堆条目恰好持有一个任务引用，并记录不可变三元组 `(task, wait_seq, deadline)`。注册时获取该引用。取消或过期二者恰好其一会在 `g_wait_timer_lock` 下移除该条目并释放引用。堆移除会在条目被移入空位之前清除任务的堆索引。
 
 任务的 Park 截止时间使用 `wait_deadline` 和 `wake_time`。POSIX `alarm`/`ITIMER_REAL` 使用独立的 `alarm_expire` 和 `itimer_real_interval` 字段。闹钟投递不会创建或移除 Park 堆条目。
 
 ## 线性化与陈旧事件
 
 - 一个任务最多持有一个堆索引。为同一任务注册第二个条目会被拒绝；注册从不取消现有令牌。
-- 事件、信号、退出、取消和超时移除都在 `proc_lock` 下串行化。
-- 过期先移除堆条目，再调用 `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)`。因此迟到的过期无法改写之后的 `wait_seq`。
+- 事件、信号、退出与取消对 Park 状态的修改由目标 `park_lock` 串行化；heap 注册、取消和过期摘除由 `g_wait_timer_lock` 串行化，顺序固定为 `park_lock -> g_wait_timer_lock`。
+- 过期在 heap 锁下先移除条目，释放该锁后再取得目标 `park_lock`，按 `wait_seq` 尝试 `PROC_WAKE_TIMEOUT`。因此迟到的过期无法改写之后的令牌。
 - 定时器回调既不触碰对象锁，也不触碰栈驻留的等待条目。对象等待队列由被唤醒的等待者解除链接。
 - 过期的 Park 截止时间直接通过调度器状态机唤醒。它们不经过有界唤醒数组，因此不存在「无运行队列的 READY」溢出场景。
 

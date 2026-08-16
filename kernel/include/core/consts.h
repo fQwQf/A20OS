@@ -4,7 +4,9 @@
 #include "core/types.h"
 
 /* ---------- Generic page size (same on all supported archs) ---------- */
+#ifndef PAGE_SIZE
 #define PAGE_SIZE          4096UL
+#endif
 #define PAGE_SIZE_BITS     12
 #define PAGE_OFFSET_MASK   ((1UL << PAGE_SIZE_BITS) - 1)
 #ifndef PMD_SHIFT
