@@ -17,12 +17,17 @@ extern int proc_task_pid(const void *task);
 
 /*
  * Global lock order contract (outermost -> innermost).
- * For the full driver-private lock contracts see docs/drivers/lock-order.md.
+ * For the full driver-private lock contracts see
+ * docs/drivers/guide/lock-order.md.
  *
  * Global order:
  *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+ *   proc_lock -> park_lock
  *   proc_lock -> runq_lock
  *   proc_lock -> signal_state.lock
+ *   park_lock -> signal_state.lock
+ *   park_lock -> g_wait_timer_lock
+ *   park_lock -> runq_lock
  *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
  *   proc_lock -> mm_struct.lock
  *   proc_lock -> a20_handle_table.lock
@@ -48,7 +53,7 @@ extern int proc_task_pid(const void *task);
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in
- *   docs/drivers/lock-order.md before use.
+ *   docs/drivers/guide/lock-order.md before use.
  */
 
 typedef struct spinlock {
