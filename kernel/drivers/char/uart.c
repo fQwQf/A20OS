@@ -28,17 +28,6 @@ static spinlock_t rx_lock = SPINLOCK_INIT;
 static wait_queue_t rx_waiters;
 static int tty_foreground_pgid;
 
-static int uart_task_is_interrupt_target(task_t *t)
-{
-    if (!t || !t->pgdir || t->pid <= 1)
-        return 0;
-    return strstr(t->name, "iperf") || strstr(t->name, "netperf") ||
-           strstr(t->name, "hackbench") || strstr(t->name, "unixbench") ||
-           strstr(t->name, "lmbench") || strstr(t->exec_path, "iperf") ||
-           strstr(t->exec_path, "netperf") || strstr(t->exec_path, "hackbench") ||
-           strstr(t->exec_path, "unixbench") || strstr(t->exec_path, "lmbench");
-}
-
 static int uart_task_should_spare(task_t *t)
 {
     if (!t || t->pid <= 1)
