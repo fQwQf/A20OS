@@ -330,6 +330,10 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
 
     size_t total = 0;
     for (int i = 0; i < mh->msg_iovlen; i++) {
+        if (iov[i].len > SIZE_MAX - total) {
+            kfree(iov);
+            return -EINVAL;
+        }
         total += iov[i].len;
     }
     if (total == 0) {
@@ -479,6 +483,10 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
 
     size_t total = 0;
     for (int i = 0; i < mh.msg_iovlen; i++) {
+        if (iov[i].len > SIZE_MAX - total) {
+            kfree(iov);
+            return -EINVAL;
+        }
         total += iov[i].len;
     }
     uint8_t *buf = (uint8_t *)proc_scratch_buffer(total ? total : 1);
