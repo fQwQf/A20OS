@@ -35,8 +35,9 @@ long sys_swapon(const char *path, int flags)
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
 
     block_dev_t *bdev = swap_path_to_block_dev(kpath);
     if (!bdev)
@@ -52,8 +53,9 @@ long sys_mkswap(const char *path, int flags)
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
 
     block_dev_t *bdev = swap_path_to_block_dev(kpath);
     if (!bdev)
@@ -66,8 +68,9 @@ long sys_swapoff(const char *path)
     char kpath[MAX_PATH_LEN];
     if (!path)
         return -EFAULT;
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
 
     for (int type = 0; type < MAX_SWAPFILES; type++) {
         swap_info_struct *si = &swap_info[type];

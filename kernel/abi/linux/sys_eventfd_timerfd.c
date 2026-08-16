@@ -57,8 +57,9 @@ int64_t sys_inotify_add_watch(int fd, const char *pathname, uint32_t mask)
     if (!pathname) return -EFAULT;
 
     char path[MAX_PATH_LEN];
-    if (user_strncpy(path, pathname, sizeof(path)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(path, pathname, sizeof(path));
+    if (pr0 < 0)
+        return pr0;
 
     return inotify_add_watch((int)gfd, path, mask);
 }
