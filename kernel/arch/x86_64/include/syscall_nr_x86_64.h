@@ -799,6 +799,9 @@ static inline int x86_syscall_rewrite_args(uint32_t x86_nr,
                                            linux_syscall_args_t *args)
 {
     switch (x86_nr) {
+        case X86_SYS_inotify_init:
+            args->arg[0] = 0;
+            return 1;
         case X86_SYS_fork:
             args->arg[0] = 17; /* SIGCHLD */
             args->arg[1] = 0;  /* stack */
