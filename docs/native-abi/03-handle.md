@@ -619,4 +619,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
 | 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
 
-**总计：126 个 syscall（`syscall_table.def` 当前登记数）。**
+**总计：136 个 syscall（`syscall_table.def` 当前登记数）。**
