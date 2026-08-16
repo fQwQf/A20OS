@@ -64,7 +64,7 @@ run_case() {
     typeset -i case_timeout=180
 
     case "$name" in
-    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*|stage9-*) case_timeout=900 ;;
+    stage2-*-100|stage3-*-100|stage4-*|stage5-*|stage6-*|stage8-*|stage9-*) case_timeout=900 ;;
     stage7-*) case_timeout=28800 ;;
     esac
 
@@ -814,6 +814,181 @@ probe_stage7_full_build() {
     print "BUILDSTORM_STAGE7_COMPILE ok"
 }
 
+probe_stage8_nested_qemu() {
+    typeset bundle=
+    typeset qemu=
+    typeset artifact=
+    typeset firmware=
+    typeset vars_source=
+    typeset smoke_elf=
+    typeset vars_work=/tmp/a20-stage8-loongarch-vars.fd
+    typeset version_output=/tmp/a20-stage8-nested-qemu-version.out
+    typeset boot_output=/tmp/a20-stage8-nested-qemu-boot.out
+    typeset serial_output=/tmp/a20-stage8-nested-qemu-serial.out
+    typeset boot_fifo=/tmp/a20-stage8-nested-qemu-boot.fifo
+    typeset boot_marker=
+    typeset memory_mib=
+    typeset -i version_rc=0
+    typeset -i boot_rc=0
+    typeset -i boot_timed_out=0
+    typeset -i boot_marker_seen=0
+    typeset -i boot_runner_pid=0
+    typeset -i boot_tee_pid=0
+    typeset -i boot_polls=0
+
+    case "$arch" in
+    riscv64)
+        bundle=/opt/qemu-rv64
+        qemu=$bundle/bin/qemu-system-riscv64
+        artifact=/work/tgoskits/target/riscv64gc-unknown-linux-musl/release/arceos-helloworld.bin
+        firmware=$bundle/share/opensbi-riscv64-generic-fw_dynamic.bin
+        memory_mib=512
+        ;;
+    loongarch64)
+        bundle=/opt/qemu-la64
+        qemu=$bundle/bin/qemu-system-loongarch64
+        artifact=/work/tgoskits/target/loongarch64-unknown-linux-musl/release/arceos-helloworld.bin
+        firmware=$bundle/share/edk2/loongarch64/code.fd
+        vars_source=$bundle/share/edk2/loongarch64/vars.fd
+        smoke_elf=/a20-probe/nested-qemu-smoke.elf
+        # Match the official qemu-loongarch64.toml RAM size.  The direct
+        # payload deliberately bypasses UEFI/FAT preparation so this probe
+        # isolates QEMU process startup, large guest-RAM mmap and TCG codegen.
+        memory_mib=2048
+        ;;
+    esac
+
+    [[ -x "$qemu" && -s "$artifact" && -s "$firmware" ]] || {
+        print "STAGE8_META nested_qemu_inputs=missing"
+        return 1
+    }
+    if [[ "$arch" == loongarch64 && ! -s "$vars_source" ]]; then
+        print "STAGE8_META nested_qemu_vars=missing"
+        return 1
+    fi
+    if [[ "$arch" == loongarch64 && ! -s "$smoke_elf" ]]; then
+        print "STAGE8_META nested_qemu_smoke_elf=missing"
+        return 1
+    fi
+
+    rm -f -- "$version_output" "$boot_output" "$serial_output" \
+        "$boot_fifo" "$vars_work"
+    print "STAGE8_META nested_qemu_case=stage8-nested-qemu"
+    print "STAGE8_META nested_qemu_arch=$arch"
+    print "STAGE8_META nested_qemu_binary=$qemu"
+    print "STAGE8_META nested_qemu_binary_bytes=$(stat -c %s "$qemu")"
+    print "STAGE8_META nested_qemu_artifact=$artifact"
+    print "STAGE8_META nested_qemu_artifact_bytes=$(stat -c %s "$artifact")"
+    print "STAGE8_META nested_qemu_firmware=$firmware"
+    print "STAGE8_META nested_qemu_memory_mib=$memory_mib"
+    if [[ -n "$smoke_elf" ]]; then
+        print "STAGE8_META nested_qemu_boot_payload=$smoke_elf"
+        print "STAGE8_META nested_qemu_boot_payload_bytes=$(stat -c %s "$smoke_elf")"
+    else
+        print "STAGE8_META nested_qemu_boot_payload=$artifact"
+        print "STAGE8_META nested_qemu_boot_payload_bytes=$(stat -c %s "$artifact")"
+    fi
+
+    LD_LIBRARY_PATH="$bundle/lib" /usr/bin/timeout 60 "$qemu" --version \
+        >"$version_output" 2>&1
+    version_rc=$?
+    print -- "----- stage8 nested qemu version begin -----"
+    sed -n '1,2p' "$version_output"
+    print -- "----- stage8 nested qemu version end -----"
+    print "STAGE8_META nested_qemu_version_rc=$version_rc"
+    (( version_rc == 0 )) || return 1
+
+    mkfifo "$boot_fifo" || return 1
+    /usr/bin/tee "$boot_output" <"$boot_fifo" &
+    boot_tee_pid=$!
+
+    if [[ "$arch" == riscv64 ]]; then
+        LD_LIBRARY_PATH="$bundle/lib" "$qemu" \
+            -machine virt -cpu rv64 -accel tcg,thread=multi \
+            -m "${memory_mib}M" -smp 1 -display none \
+            -serial "file:$serial_output" -monitor none \
+            -bios "$firmware" -kernel "$artifact" -net none -no-reboot \
+            >"$boot_fifo" 2>&1 &
+    else
+        LD_LIBRARY_PATH="$bundle/lib" "$qemu" \
+            -machine virt -cpu la464 -accel tcg,thread=multi \
+            -m "${memory_mib}M" -smp 1 -display none \
+            -serial "file:$serial_output" -monitor none \
+            -kernel "$smoke_elf" -net none -no-reboot \
+            >"$boot_fifo" 2>&1 &
+    fi
+
+    boot_runner_pid=$!
+    # Nested TCG advances the outer guest's clock much more slowly than host
+    # wall time.  Keep QEMU diagnostics on a FIFO, capture the emulated serial
+    # port with QEMU's file backend, and stop only this inner instance after a
+    # decisive marker appears.  The enclosing 900-second host watchdog remains
+    # the fail-safe for a wedged inner guest.
+    while kill -0 "$boot_runner_pid" 2>/dev/null; do
+        if grep -aqE '^Hello, world!|^A20_NESTED_QEMU_LOONGARCH_TCG_OK$|stack smashing detected|SIGILL:|Kernel panic|unhandled exception|unaligned access support required' \
+            "$boot_output" "$serial_output" 2>/dev/null; then
+            boot_marker_seen=1
+            kill -TERM "$boot_runner_pid" 2>/dev/null
+            break
+        fi
+        (( boot_polls++ ))
+        sleep 1
+    done
+    wait "$boot_runner_pid"
+    boot_rc=$?
+    wait "$boot_tee_pid"
+    if [[ -s "$serial_output" ]]; then
+        print -- "----- stage8 nested qemu serial begin -----" >>"$boot_output"
+        cat "$serial_output" >>"$boot_output"
+        print -- "----- stage8 nested qemu serial end -----" >>"$boot_output"
+    fi
+    # A short-lived guest can shut QEMU down between two polling iterations.
+    # Re-scan the completed serial capture so the metadata records the marker
+    # that the final pass/fail decision below actually uses.
+    if grep -aqE '^Hello, world!|^A20_NESTED_QEMU_LOONGARCH_TCG_OK$|stack smashing detected|SIGILL:|Kernel panic|unhandled exception|unaligned access support required' \
+        "$boot_output"; then
+        boot_marker_seen=1
+    fi
+    rm -f -- "$boot_fifo" "$vars_work"
+    if (( boot_rc == 124 )); then
+        boot_timed_out=1
+    fi
+
+    print -- "----- stage8 nested qemu boot markers begin -----"
+    grep -aE 'ArceOS|Hello, world!|A20_NESTED_QEMU_LOONGARCH_TCG_OK|memory allocation|panic|stack smashing' \
+        "$boot_output" | tail -n 40
+    print -- "----- stage8 nested qemu boot markers end -----"
+    print -- "----- stage8 nested qemu boot output tail begin -----"
+    tail -n 160 "$boot_output"
+    print -- "----- stage8 nested qemu boot output tail end -----"
+    print "STAGE8_META nested_qemu_boot_rc=$boot_rc"
+    print "STAGE8_META nested_qemu_boot_timed_out=$boot_timed_out"
+    print "STAGE8_META nested_qemu_boot_marker_seen=$boot_marker_seen"
+    print "STAGE8_META nested_qemu_boot_polls=$boot_polls"
+    print "STAGE8_META nested_qemu_boot_output=$boot_output"
+
+    if grep -aqE 'stack smashing detected|SIGILL:|Kernel panic|unhandled exception|unaligned access support required' "$boot_output"; then
+        print "STAGE8_META nested_qemu_boot_marker=fault"
+        return 1
+    fi
+    if grep -aq '^Hello, world!' "$boot_output"; then
+        boot_marker=hello_world
+    elif [[ "$arch" == loongarch64 ]] &&
+         grep -aq '^A20_NESTED_QEMU_LOONGARCH_TCG_OK$' "$boot_output"; then
+        boot_marker=loongarch_tcg_smoke
+    else
+        print "STAGE8_META nested_qemu_boot_marker=missing"
+        return 1
+    fi
+    if (( boot_rc != 0 && boot_rc != 124 && ! boot_marker_seen )); then
+        print "STAGE8_META nested_qemu_boot_marker=$boot_marker"
+        return 1
+    fi
+
+    print "STAGE8_META nested_qemu_boot_marker=$boot_marker"
+    print "BUILDSTORM_STAGE8_NESTED_QEMU ok"
+}
+
 probe_stage9_feedback() {
     print "STAGE9_META stage9_case=stage9-perf-feedback"
     print "STAGE9_META stage9_guest_nproc=$(/usr/bin/nproc)"
@@ -928,6 +1103,7 @@ run_named_case() {
     stage7-writeback-256m) probe_stage7_writeback_256m ;;
     stage7-rustc-j8-tmpfs) probe_stage7_parallel_rustc_tmpfs ;;
     stage7-rustc-llvm-j8) probe_stage7_parallel_llvm ;;
+    stage8-nested-qemu) probe_stage8_nested_qemu ;;
     stage9-perf-feedback) probe_stage9_feedback ;;
     stage9-block-io-stress) probe_stage9_block_io_stress ;;
     stage7-full-j1|stage7-full-j2|stage7-full-j4|stage7-full-j8|stage7-full-default|stage7-full-default-tmpfs)

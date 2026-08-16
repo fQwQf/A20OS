@@ -70,6 +70,13 @@ common_cflags=(
     "$output_dir/objects/cwd_probe.o" \
     "$libc_copy"
 
+if [[ "$arch" == loongarch64 ]]; then
+    "$cc" -nostdlib -static -no-pie -Wl,--build-id=none \
+        -Wl,-T,"$source_dir/nested_qemu_loongarch_smoke.ld" \
+        -o "$output_dir/nested-qemu-smoke.elf" \
+        "$source_dir/nested_qemu_loongarch_smoke.S"
+fi
+
 "$cc" "${common_cflags[@]}" -fPIC -c \
     "$source_dir/exec_pages_dso.c" \
     -o "$output_dir/objects/exec_pages_dso.o"
@@ -110,6 +117,9 @@ common_cflags=(
 
 chmod 0755 "$output_dir/cwd-probe" "$output_dir/exec-pages-probe" \
     "$output_dir/shebang-probe" "$output_dir/stage9-perf-probe"
+if [[ "$arch" == loongarch64 ]]; then
+    chmod 0755 "$output_dir/nested-qemu-smoke.elf"
+fi
 chmod 0644 "$output_dir/liba20probe.so"
 
 echo "[buildstorm-probe] built $arch probes in $output_dir"

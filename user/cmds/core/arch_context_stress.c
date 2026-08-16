@@ -1,12 +1,94 @@
+#define _GNU_SOURCE
 #include <signal.h>
 #include <sched.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/auxv.h>
+#include <ucontext.h>
 #include <unistd.h>
 
+#if defined(__riscv) && __riscv_xlen == 64 || defined(__loongarch64)
+
+static volatile sig_atomic_t sigill_handler_seen;
+static volatile sig_atomic_t sigill_bad_context;
+
+static void sigill_pc_handler(int sig, siginfo_t *info, void *opaque_context)
+{
+    ucontext_t *uc = opaque_context;
+
+    (void)info;
+    if (sig != SIGILL ||
+        offsetof(ucontext_t, uc_mcontext) != 176) {
+        sigill_bad_context = 1;
+        return;
+    }
+#if defined(__riscv) && __riscv_xlen == 64
+    uc->uc_mcontext.__gregs[REG_PC] += 4;
+#elif defined(__loongarch64)
+    uc->uc_mcontext.__pc += 4;
+#endif
+    sigill_handler_seen++;
+}
+
+__attribute__((noinline)) static void execute_illegal_instruction(void)
+{
+#if defined(__riscv) && __riscv_xlen == 64
+    __asm__ volatile(".4byte 0x00000000" ::: "memory");
+#elif defined(__loongarch64)
+    __asm__ volatile(".word 0x00000000" ::: "memory");
+#endif
+}
+
+static int sigill_ucontext_pc_roundtrip(void)
+{
+    struct sigaction sa;
+    struct sigaction old_sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sigill_pc_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGILL, &sa, &old_sa) < 0)
+        return 1;
+
+    sigill_handler_seen = 0;
+    sigill_bad_context = 0;
+    for (int i = 0; i < 32; i++)
+        execute_illegal_instruction();
+
+    if (sigaction(SIGILL, &old_sa, NULL) < 0)
+        return 1;
+    return sigill_bad_context || sigill_handler_seen != 32;
+}
+
+#endif
+
 #if defined(__loongarch64)
+
+static int unaligned_access_roundtrip(void)
+{
+    __attribute__((aligned(16))) unsigned char data[24] = {0};
+    const uint64_t expected = UINT64_C(0x8877665544332211);
+    uint64_t loaded = 0;
+    uint64_t stored = UINT64_C(0xaabbccddeeff0011);
+
+    memcpy(data + 1, &expected, sizeof(expected));
+    __asm__ volatile("ld.d %0, %1, 0"
+                     : "=r"(loaded)
+                     : "r"(data + 1)
+                     : "memory");
+    __asm__ volatile("st.d %0, %1, 0"
+                     :
+                     : "r"(stored), "r"(data + 9)
+                     : "memory");
+
+    return !(getauxval(AT_HWCAP) & HWCAP_LOONGARCH_UAL) ||
+           loaded != expected ||
+           memcmp(data + 9, &stored, sizeof(stored)) != 0;
+}
 
 static volatile sig_atomic_t handler_seen;
 
@@ -103,6 +185,18 @@ static int scheduling_roundtrip(unsigned seed)
 
 int main(void)
 {
+    if (unaligned_access_roundtrip() != 0) {
+        puts("ARCH_CONTEXT_STRESS: unaligned-hwcap FAIL");
+        return 1;
+    }
+    puts("ARCH_CONTEXT_STRESS: unaligned-hwcap PASS");
+
+    if (sigill_ucontext_pc_roundtrip() != 0) {
+        puts("ARCH_CONTEXT_STRESS: signal-ucontext-pc FAIL");
+        return 1;
+    }
+    puts("ARCH_CONTEXT_STRESS: signal-ucontext-pc PASS");
+
     if (signal_roundtrip() != 0) {
         puts("ARCH_CONTEXT_STRESS: signal-lsx-fcc FAIL");
         return 1;
@@ -126,6 +220,19 @@ int main(void)
         }
     }
     puts("ARCH_CONTEXT_STRESS: schedule-lsx-fcc PASS");
+    puts("ARCH_CONTEXT_STRESS: PASS");
+    return 0;
+}
+
+#elif defined(__riscv) && __riscv_xlen == 64
+
+int main(void)
+{
+    if (sigill_ucontext_pc_roundtrip() != 0) {
+        puts("ARCH_CONTEXT_STRESS: signal-ucontext-pc FAIL");
+        return 1;
+    }
+    puts("ARCH_CONTEXT_STRESS: signal-ucontext-pc PASS");
     puts("ARCH_CONTEXT_STRESS: PASS");
     return 0;
 }
