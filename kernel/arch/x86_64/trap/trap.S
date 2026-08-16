@@ -116,16 +116,45 @@ isr_common:
     /* Save CPU-local trap variables. */
     movq  216(%rsp), %rax       /* vec */
     cmpq  $0x80, %rax
-    je    2f                    /* int $0x80 syscall */
+    je    .Ltrap_cause_ready    /* int $0x80 syscall */
     cmpq  $1, %rax
-    jne   1f
+    jne   .Ltrap_not_debug
     movq  $3, %rax              /* #DB (single-step TF) -> CAUSE_BREAKPOINT */
-    jmp   2f
-1:
+    jmp   .Ltrap_cause_ready
+.Ltrap_not_debug:
+    cmpq  $6, %rax
+    jne   .Ltrap_not_invalid_opcode
+    movq  $2, %rax              /* #UD -> CAUSE_ILLEGAL_INSN */
+    jmp   .Ltrap_cause_ready
+.Ltrap_not_invalid_opcode:
+    cmpq  $12, %rax
+    jne   .Ltrap_not_stack_fault
+    movq  $5, %rax              /* #SS -> CAUSE_LOAD_FAULT */
+    jmp   .Ltrap_cause_ready
+.Ltrap_not_stack_fault:
+    cmpq  $13, %rax
+    jne   .Ltrap_not_general_protection
+    movq  $1, %rax              /* #GP -> CAUSE_INSN_FAULT */
+    jmp   .Ltrap_cause_ready
+.Ltrap_not_general_protection:
+    cmpq  $14, %rax
+    jne   .Ltrap_not_page_fault
+    movq  224(%rsp), %rcx       /* CPU-pushed #PF error code */
+    movq  $13, %rax             /* read -> CAUSE_LOAD_PAGE_FAULT */
+    testq $0x10, %rcx           /* instruction fetch */
+    jz    .Ltrap_page_fault_not_exec
+    movq  $12, %rax             /* CAUSE_INSN_PAGE_FAULT */
+    jmp   .Ltrap_cause_ready
+.Ltrap_page_fault_not_exec:
+    testq $0x2, %rcx            /* write access */
+    jz    .Ltrap_cause_ready
+    movq  $14, %rax             /* CAUSE_STORE_PAGE_FAULT */
+    jmp   .Ltrap_cause_ready
+.Ltrap_not_page_fault:
     cmpq  $32, %rax
-    jb    2f
+    jb    .Ltrap_cause_ready
     btsq  $63, %rax             /* Set CAUSE_INTR_MASK for IRQs */
-2:
+.Ltrap_cause_ready:
     movq  %rax, %rdi
     movq  128(%rsp), %rsi       /* ctx->rip */
     movq  168(%rsp), %rdx       /* ctx->kscratch0 (CR2) */
