@@ -14,8 +14,16 @@ static int fail(const char *what)
     return 1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1) {
+        if (argc != 3 || !argv[1] || !argv[2] ||
+            strcmp(argv[1], "exec-argv") != 0 ||
+            strcmp(argv[2], "sentinel") != 0)
+            return fail("exec-argv");
+        return 0;
+    }
+
     printf("SYSCALL_SMOKE: start\n");
 
     if (getpid() <= 0)
@@ -112,6 +120,22 @@ int main(void)
         return fail("waitpid");
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 42)
         return fail("wait-status");
+
+    pid = fork();
+    if (pid < 0)
+        return fail("exec-fork");
+    if (pid == 0) {
+        char *exec_argv[] = {
+            "syscall_smoke", "exec-argv", "sentinel", NULL
+        };
+        execv("/bin/syscall_smoke", exec_argv);
+        _exit(127);
+    }
+    status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return fail("exec-waitpid");
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return fail("exec-status");
 
     printf("SYSCALL_SMOKE: PASS\n");
     return 0;
