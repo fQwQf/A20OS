@@ -65,7 +65,7 @@ typedef struct a20_abi_info {
 } a20_abi_info_t;
 ```
 
-当前 `abi_info` 填充版本、指针/页/handle 宽度以及 feature bits；`syscall_bitmap_addr` 和 `syscall_bitmap_size` 仍保持清零，调用方不能用这两个保留字段枚举 126 个登记入口。
+当前 `abi_info` 填充版本、指针/页/handle 宽度以及 feature bits；`syscall_bitmap_addr` 和 `syscall_bitmap_size` 仍保持清零，调用方不能用这两个保留字段枚举 136 个登记入口。
 
 ---
 
