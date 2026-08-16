@@ -33,8 +33,9 @@ int64_t sys_name_to_handle_at(int dirfd, const char *pathname,
         return -EFAULT;
 
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, pathname, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, pathname, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0)
