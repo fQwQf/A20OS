@@ -399,6 +399,7 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
 }
 
 int64_t sys_writev(int fd, const void *iov, int iovcnt) {
+    if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
@@ -425,6 +426,7 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
 }
 
 int64_t sys_readv(int fd, const void *iov, int iovcnt) {
+    if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
