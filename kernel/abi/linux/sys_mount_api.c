@@ -82,8 +82,9 @@ int64_t sys_fspick(int dirfd, const char *path, unsigned flags)
         return priv;
 
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0)
@@ -107,8 +108,9 @@ int64_t sys_open_tree(int dirfd, const char *path, unsigned flags)
         return -EFAULT;
 
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
     if (pr < 0)
@@ -135,9 +137,10 @@ int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
         return -EFAULT;
 
     char fbuf[MAX_PATH_LEN], tbuf[MAX_PATH_LEN];
-    if (user_strncpy(fbuf, from_path, sizeof(fbuf)) < 0 ||
-        user_strncpy(tbuf, to_path, sizeof(tbuf)) < 0)
-        return -EFAULT;
+    long pr0;
+    if ((pr0 = user_path_strncpy(fbuf, from_path, sizeof(fbuf))) < 0 ||
+        (pr0 = user_path_strncpy(tbuf, to_path, sizeof(tbuf))) < 0)
+        return pr0;
     char full_f[MAX_PATH_LEN], full_t[MAX_PATH_LEN];
     if (syscall_path_at(from_dfd, fbuf, full_f, sizeof(full_f)) < 0)
         return -EFAULT;
@@ -164,8 +167,9 @@ int64_t sys_mount_setattr(int dfd, const char *path, unsigned flags,
     if (!path)
         return -EFAULT;
     char kpath[MAX_PATH_LEN];
-    if (user_strncpy(kpath, path, sizeof(kpath)) < 0)
-        return -EFAULT;
+    long pr0 = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr0 < 0)
+        return pr0;
     /* A20OS does not support per-mount attribute changes beyond the flags
      * stored in the mount table; validate the path exists and report
      * success for read-only attribute sets. */
