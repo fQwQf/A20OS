@@ -11,6 +11,10 @@
 #define WNOWAIT     0x1000000
 #define __WNOTHREAD 0x20000000
 
+/* Count of tasks parked in wait4() with waiting_for_child set.  Guarded by
+ * proc_lock; bumped in proc_wait4() and dropped on wake or forced exit. */
+unsigned long g_proc_waiting_child_waiter_count;
+
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
 {
     if (!parent || !child)
@@ -147,6 +151,7 @@ int proc_wait4(int pid, int *status, int options)
         }
 
         t->waiting_for_child = 1;
+        g_proc_waiting_child_waiter_count++;
         /* proc_lock -> park_lock is the documented order. */
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
         proc_wait_token_t token =
@@ -162,6 +167,8 @@ int proc_wait4(int pid, int *status, int options)
 
         uint64_t pf2 = spin_lock_irqsave(&proc_lock);
         t->waiting_for_child = 0;
+        if (g_proc_waiting_child_waiter_count)
+            g_proc_waiting_child_waiter_count--;
         spin_unlock_irqrestore(&proc_lock, pf2);
         if (proc_wake_reason_is_task_interrupt(reason) || sig)
             return -ERESTARTSYS;
