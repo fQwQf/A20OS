@@ -28,6 +28,7 @@
 #include "proc/proc_internal.h"
 #include "proc/debug.h"
 #include "mm/mm.h"
+#include "mm/vm.h"
 #include "sys/usercopy.h"
 #include "abi/native/types.h"
 #include "abi/native/objects.h"
@@ -474,7 +475,7 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
 
     uint64_t local = proc_mmap(0, (size_t)len, (int)prot ? (int)prot : 3,
                                0x20 /* MAP_ANONYMOUS */, -1, 0);
-    if (local == 0)
+    if (local == 0 || mm_addr_is_error((vaddr_t)local))
         return -A20_ERR_NO_MEMORY;
 
     char kbuf[512];

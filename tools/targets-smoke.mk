@@ -219,10 +219,10 @@ smoke-qemu-gui-arm32:
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
 		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img
+		.kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/gui-fat32.img
 	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
-		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev/kernel.elf \
-		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev/gui-fat32.img \
+		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/kernel.elf \
+		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/gui-fat32.img \
 		--artifacts .kernel-build/smoke/qemu-gui-arm32 \
 		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
@@ -245,7 +245,7 @@ smoke-arm32:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-arm \
 		-machine virt -cpu cortex-a15 -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/arm32-qemu-virt-arm32-linux-bringup/kernel.elf \
+		-kernel .kernel-build/arm32-qemu-virt-arm32-linux-bringup-embedded/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-arm32: PASS; log saved to $$log"; \
@@ -268,7 +268,7 @@ smoke-riscv32:
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv32 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv32-qemu-virt-riscv32-linux-bringup/kernel.elf \
+		-kernel .kernel-build/riscv32-qemu-virt-riscv32-linux-bringup-embedded/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-riscv32: PASS; log saved to $$log"; \
@@ -290,6 +290,7 @@ smoke-arch-mmu-matrix:
 		arch=$${spec%%:*}; nommu=$${spec##*:}; \
 		variant="$$arch"; [ "$$nommu" = 1 ] && variant="$$variant-nommu"; \
 		build=".kernel-build/$$arch-both-dev"; \
+		case "$$arch" in arm32|riscv32) build="$$build-embedded" ;; esac; \
 		[ "$$nommu" = 1 ] && build="$$build-nommu"; \
 		log=".kernel-build/smoke/$$variant-shell.log"; \
 		mkdir -p .kernel-build/smoke; \
@@ -325,7 +326,7 @@ smoke-ppc64le:
 	status=0; \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-ppc64 \
 		-machine pseries -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/ppc64le-qemu-virt-ppc64le-linux-bringup/kernel.elf \
+		-kernel .kernel-build/ppc64le-qemu-virt-ppc64le-linux-bringup-embedded/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-ppc64le: PASS; log saved to $$log"; \
