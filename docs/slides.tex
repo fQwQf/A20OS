@@ -88,8 +88,8 @@
                     mm/.style={box, fill=ThemeColor!30}
                 ]
                     \node[hybrid] (hybrid) at (0,0) {Hybrid Kernel};
-                    \node[abi] (linux) at (-2.1,-1.5) {Linux ABI\\343 syscalls};
-                    \node[abi] (native) at (2.1,-1.5) {Native ABI\\134 syscalls};
+                    \node[abi] (linux) at (-2.1,-1.5) {Linux ABI\\362 syscalls};
+                    \node[abi] (native) at (2.1,-1.5) {Native ABI\\136 syscalls};
                     \node[mm] (mm) at (0,-3) {VMO/VMAR + Page Cache};
                     \node[mm] (sched) at (0,-4.5) {EEVDF 调度器};
                     \draw[-{Stealth}, thick, ThemeColor] (hybrid) -- (linux);
@@ -115,8 +115,8 @@
             \midrule
             内核规模 & 约 18 万行 / 800+ 文件 & \high{约 21.6 万行 / 950+ 文件} \\
             支持架构 & 4 个 & \high{7 hosted + ARMv7-M MCU} \\
-            Linux ABI & 部分 syscall & \high{343 全表覆盖 + 现代 syscall} \\
-            Native ABI & 90 syscall & \high{134 syscall + 深化} \\
+            Linux ABI & 部分 syscall & \high{362 全表覆盖 + 现代 syscall} \\
+            Native ABI & 90 syscall & \high{136 syscall + 深化} \\
             调度器 & 8 级 MLFQ & \high{EEVDF + 空闲窃取} \\
             桌面 & -- & \high{XFCE Wayland + LVGL + 3D} \\
             发行版引导 & -- & \high{Alpine rootfs 直跑} \\
@@ -143,9 +143,9 @@
             \midrule
             内核代码规模 & 完成 & \high{约 21.6 万行} / 950 余个源文件 \\
             支持架构 & 完成 & \high{7 个 hosted 架构} + ARMv7-M MCU \\
-            Linux ABI 兼容 & 完成 & \high{343 个 syscall} 全表覆盖，无未实现空位 \\
+            Linux ABI 兼容 & 完成 & \high{362 个 syscall} 全表覆盖，无未实现空位 \\
             SMP 并发 & 完成 & per-CPU EEVDF + 锁契约，8 核压力门禁 \\
-            Native ABI & 完成 & \high{134 个原生 syscall} + Pager/monitor 深化 \\
+            Native ABI & 完成 & \high{136 个原生 syscall} + Pager/monitor 深化 \\
             桌面环境 & 完成 & XFCE Wayland + LVGL 桌面 + 3D (virgl) \\
             网络栈 & 完成 & lwIP + virtio-net 事件驱动 + DHCP \\
             混合内核服务 & 完成 & 服务监管者 / 用户态驱动 / 资源隔离 \\
@@ -238,7 +238,7 @@
         \begin{column}{0.48\textwidth}
             \begin{alertblock}{Linux ABI 兼容层 \code{kernel/abi/linux/}}
                 \begin{itemize}
-                    \item \high{343 个 syscall}，四条主线架构编号全表覆盖
+                    \item \high{362 个 syscall}，四条主线架构编号全表覆盖
                     \item 覆盖现代 syscall：\code{mseal}、\code{io\_uring}、\code{landlock}、\code{pidfd}、\code{userfaultfd}、\code{perf\_event\_open}
                     \item 直接运行 musl 生态与完整发行版
                 \end{itemize}
@@ -247,7 +247,7 @@
         \begin{column}{0.48\textwidth}
             \begin{exampleblock}{Native ABI 能力层 \code{kernel/abi/native/}}
                 \begin{itemize}
-                    \item \high{134 个原生 syscall}，基于 Capability 的对象句柄
+                    \item \high{136 个原生 syscall}，基于 Capability 的对象句柄
                     \item VMO/VMAR、Channel、EventQ、Pager
                     \item 面向下一代安全内核 API
                 \end{itemize}
@@ -274,7 +274,7 @@
                 svcmgr（监管）· rtcd（RTC）· ubd（virtio-blk）· uinputd（virtio-input）· shmringd};
             \node[ker] (ker) at (0,-1.1) {混合内核层（性能关键路径）\\
                 EEVDF 调度 · MM（VMO·VMAR·缺页）· VFS 核心 · Page Cache · Channel·EventQ · lwIP TCP 数据面};
-            \node[com] (com) at (0,-3.1) {兼容层：Linux ABI（343 syscall）+ vDSO 零陷入快路径};
+            \node[com] (com) at (0,-3.1) {兼容层：Linux ABI（362 syscall）+ vDSO 零陷入快路径};
             \draw[<->, thick, ThemeColor] (usr) -- (ker);
             \draw[<->, thick, ThemeColor] (ker) -- (com);
         \end{tikzpicture}
@@ -588,7 +588,7 @@ a20_vmar_map(receiver, vmo, ...);
         \begin{column}{0.52\textwidth}
             \footnotesize
             \begin{itemize}
-                \item \high{343 个 syscall}入口，四条主线架构编号\high{全表覆盖}
+                \item \high{362 个 syscall}入口，四条主线架构编号\high{全表覆盖}
                 \item x86\_64 表扩展至 \high{463 槽}；LoongArch 私有 \code{file\_getattr/setattr}
                 \item 覆盖内部占位槽，\high{无任何未实现空位}
                 \item 现代 syscall 一应俱全：\code{io\_uring}、\code{landlock}、\code{pidfd}、\code{mseal}、\code{userfaultfd}、\code{perf\_event\_open}
@@ -668,7 +668,7 @@ a20_vmar_map(receiver, vmo, ...);
 \begin{frame}
     \frametitle{Native ABI 设计哲学}
     \begin{itemize}
-        \item \high{系统调用压缩}：343 个 Linux syscall $\rightarrow$ 134 个 Native syscall（约 2.6 倍压缩）
+        \item \high{系统调用压缩}：362 个 Linux syscall $\rightarrow$ 136 个 Native syscall（约 2.7 倍压缩）
         \item \high{统一抽象}：\code{handle\_set\_meta} 替代 chmod/chown/utimes/truncate；\code{handle\_transfer} 统一 splice/sendfile/copy\_file\_range/tee
         \item \high{版本化 ABI}：每个复杂结构以 \code{size + version} 开头，支持运行时协商
         \item 无 fork/exec/signal/ioctl；以 \code{task\_spawn}、Channel、EventQ 替代
