@@ -45,16 +45,16 @@ fork/exit/wait 的任务表扫描。park/wake 只是它众多职责之一，却�
 | `task->park_lock`（新增，per-task） | park 状态机 | `wait_seq`、`park_state`、`wake_reason`、`wait_deadline`、`wake_time`、`wait_mode`，以及 `PREPARING/PARKED/WOKEN` 迁移和 `→READY` 发布 |
 | `g_wait_timer_lock`（新增，全局） | timer heap | heap 数组、`wait_timer_index`、`wait_timer_count`；注册/取消/到期摘除 |
 | per-CPU runqueue 锁（已有） | runqueue | `on_rq`、队列成员、`nr_running`（`proc_runq_enqueue_locked` 已只持 runq 锁） |
-| `proc_lock`（保留） | 非 park/wake | 任务表、父子、signal、**切换发布**、fork/exit/wait 扫描 |
+| `proc_lock`（保留） | 非 park/wake | 任务表、父子、**切换发布**、fork/exit/wait 扫描；组合路径按 `proc_lock -> park_lock` |
 
 关键观察（源码事实）：`proc_runq_enqueue_locked` 已经只取 runqueue 锁（`RUNQ_LOCK_IRQ`），
-不需要 `proc_lock`；`proc_sched_should_preempt_locked` 只读不锁。因此唤醒路径真正依赖
-`proc_lock` 的只有"目标任务的 park 状态迁移 + timer 取消"。
+不需要 `proc_lock`；`proc_sched_should_preempt_locked` 只读不锁。因此普通唤醒不依赖
+`proc_lock`；只有 wait/exit 等同时处理任务表或父子关系的路径按 `proc_lock -> park_lock` 组合。
 
 ## 4. 锁序与无环证明
 
-固定顺序：**`park_lock → timer_lock`，`park_lock → runq_lock`**；`proc_lock` 只与这两者以
-`proc_lock → runq_lock`、`proc_lock → task 字段` 的方式组合（切换发布、task-list）。
+固定顺序：**`proc_lock → park_lock`，`park_lock → timer_lock`，`park_lock → runq_lock`**；
+不涉及 Park 的切换发布仍可直接使用 `proc_lock → runq_lock`。
 
 - park 侧：`task->park_lock` 内注册/取消 timer → `park_lock → timer_lock`。
 - 唤醒侧：`target->park_lock` 内取消 timer → `park_lock → timer_lock`；入队 → `park_lock → runq_lock`。
@@ -63,8 +63,8 @@ fork/exit/wait 的任务表扫描。park/wake 只是它众多职责之一，却�
   `timer_lock → park_lock`，因此与 `park_lock → timer_lock` 不构成环。
 - 调度器：`proc_runq_pick_local` 只持 runq 锁；`sched()` 在释放 runq 锁后才取 `proc_lock`
   （切换发布），无 `runq_lock → park_lock` 或 `runq_lock → proc_lock` 同时持有。
-- 结论：按边 `park_lock→timer_lock`、`park_lock→runq_lock`、`proc_lock→runq_lock`、
-  `proc_lock→(task 字段)`，无向图中无环；`timer_lock` 与 `runq_lock` 之间无直接依赖。
+- 结论：按边 `proc_lock→park_lock`、`park_lock→timer_lock`、`park_lock→runq_lock`、
+  `proc_lock→runq_lock`，有向锁序图中无环；`timer_lock` 与 `runq_lock` 之间无直接依赖。
 
 ## 5. 各操作重写
 
@@ -128,8 +128,9 @@ for each (task, seq):
 同样改为 `task->park_lock`（内部 `park_lock → timer_lock`）。
 
 ### 5.8 仍留在 `proc_lock` 的
-`proc_make_ready`（fork/新任务/信号路径，非 park 语义，且 fork 调用方本就持 `proc_lock`）、
-切换发布、任务表/fork/exit/wait、signal state。这些都是低频或本来就各自持锁的路径。
+`proc_make_ready`（fork/新任务发布与 yield）、切换发布、任务表/fork/exit/wait。这些都是低频
+或本来就持有 `proc_lock` 的路径；信号状态由 `signal_state.lock` 保护，涉及 Park 时遵循
+`park_lock -> signal_state.lock`。
 
 ## 6. 需要关闭的竞态（逐条对应）
 
@@ -154,8 +155,8 @@ for each (task, seq):
   `g_wait_timer_lock`（`park_lock → timer_lock`）；扫描"摘出→释放→按 park_lock 唤醒"；唤醒入队走
   `park_lock → runq_lock`（`proc_runq_enqueue_locked` 本就只持 runq 锁）；`proc_make_ready`、
   exit 唤醒 wait4 按 `proc_lock → park_lock` 顺序取锁；`proc_wake_q_flush` 改为逐目标 park_lock。
-  `proc_park_commit` 在 `sched()` 返回后的 `wake_reason` 读取**刻意保留 proc_lock**——实测移除它会
-  因失去背压而竞争反升。
+  `proc_park_commit` 在 `sched()` 返回后以 acquire 原子读取得 `wake_reason`，不再重新获取
+  `proc_lock`；归因实验确认该无锁读取在 Park 状态迁出后是净收益。
 - **正确性**：riscv64 单核 smoke 全组 + `-smp 8 thread=multi` 下 `futex_stress`/`proc_stress`/
   `sched_stress`/`mm_stress`/`vfs_stress` 连续多轮 PASS（无丢唤醒导致的挂起）；网络套件与基线
   逐字节一致（DNS/TIMEOUT 两项失败为既有环境/语义问题）；`check-concurrency-foundation` PASS。
