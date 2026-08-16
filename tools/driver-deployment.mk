@@ -2,13 +2,13 @@
 #
 # `generic` keeps optional hardware outside the kernel image and activates it
 # from a DriverStore. `embedded` links its complete driver set into the image.
-# The profile is intentionally not named after a board: STM32 is merely the
-# current embedded default.
+# The profile is intentionally not named after a board; defaults follow the
+# module formats supported by the loader.
 
 DEFAULT_DRIVER_DEPLOYMENT := generic
-# MCU targets and platforms without a drvmod cross-toolchain (no .a20drv
-# packages can be built for them) statically link the complete driver set.
-ifeq ($(filter $(ARCH),armv7m ppc64le),$(ARCH))
+# MCU targets and platforms without a supported loadable-driver ELF format
+# statically link the complete driver set.
+ifeq ($(filter $(ARCH),armv7m arm32 riscv32 ppc64le),$(ARCH))
 DEFAULT_DRIVER_DEPLOYMENT := embedded
 endif
 
