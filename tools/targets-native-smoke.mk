@@ -115,7 +115,7 @@ smoke-dual-input:
 	rm -f "$$monsock"; \
 	status=0; \
 	{ sleep 8; $(PYTHON) -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(24)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	{ sleep 14; printf 'poweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \

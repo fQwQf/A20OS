@@ -230,7 +230,6 @@
 #define SYS_fchmodat2      452
 
 #define SYS_sync_file_range 84
-#define SYS_inotify_init    26
 #define SYS_inotify_add_watch 27
 #define SYS_inotify_rm_watch 28
 #define SYS_vhangup         58
