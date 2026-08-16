@@ -256,7 +256,7 @@ smoke-arm32:
 	else \
 		echo "smoke-arm32: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-riscv32:
@@ -279,7 +279,7 @@ smoke-riscv32:
 	else \
 		echo "smoke-riscv32: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-arch-mmu-matrix:
@@ -337,7 +337,7 @@ smoke-ppc64le:
 	else \
 		echo "smoke-ppc64le: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-abi-linux:
@@ -364,7 +364,7 @@ smoke-abi-linux:
 	else \
 		echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-a20-channel:
@@ -391,7 +391,7 @@ smoke-a20-channel:
 	else \
 		echo "smoke-a20-channel: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-ptrace:
@@ -418,7 +418,7 @@ smoke-ptrace:
 	else \
 		echo "smoke-ptrace: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-network-suite:
@@ -446,7 +446,7 @@ smoke-network-suite:
 	else \
 		echo "smoke-network-suite: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-proc-a20:
@@ -647,7 +647,7 @@ smoke-io-event:
 	else \
 		echo "smoke-io-event: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-syscall-ext:
