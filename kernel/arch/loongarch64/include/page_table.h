@@ -14,6 +14,12 @@
 #define ARCH_PT_USER_START 0
 #define ARCH_PT_USER_END  256
 
+/* The current LoongArch refill handler walks all three levels with
+ * lddir/ldpte and does not yet synthesize a PMD-sized TLB entry.  Do not let
+ * the generic THP path install a level-1 leaf that the hardware refill path
+ * would subsequently interpret as a pointer to a level-0 table. */
+#define ARCH_NO_PMD_LEAF 1
+
 /*
  * LoongArch common-page PTE layout:
  *   [0]     V         hardware valid

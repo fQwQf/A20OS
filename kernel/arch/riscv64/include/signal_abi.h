@@ -49,6 +49,11 @@ typedef struct arch_ucontext {
     arch_sigcontext_t uc_mcontext;        /* offset 176, matches musl ucontext_t */
 } __attribute__((aligned(16))) arch_ucontext_t;
 
+_Static_assert(sizeof(arch_sigset_t) == 8,
+               "RISC-V kernel signal mask ABI must remain 8 bytes");
+_Static_assert(__builtin_offsetof(arch_ucontext_t, uc_mcontext) == 176,
+               "RISC-V ucontext mcontext offset must match Linux userspace ABI");
+
 typedef struct {
     uint64_t        flag;
     arch_ucontext_t uc;

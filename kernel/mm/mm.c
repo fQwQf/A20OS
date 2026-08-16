@@ -280,6 +280,13 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
 }
 
 int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
+#ifdef ARCH_NO_PMD_LEAF
+    (void)pgdir;
+    (void)va;
+    (void)pa;
+    (void)flags;
+    return -EOPNOTSUPP;
+#else
     if (!pgdir) return -EINVAL;
     if ((va & (PMD_SIZE - 1)) || (pa & (PMD_SIZE - 1)))
         return -EINVAL;
@@ -316,6 +323,7 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     *pte = arch_pte_leaf(pa, flags);
 #endif
     return 0;
+#endif
 }
 
 static int pt_table_empty(pte_t *table, int level) {

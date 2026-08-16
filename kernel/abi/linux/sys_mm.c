@@ -70,6 +70,18 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                 vfs_put_file_ref(gfd, vf);
                 return drm_ret;
             }
+            /* Anonymous descriptor types without an mmap implementation
+             * (eventfd, epoll, the current partial io_uring backend, ...)
+             * must reject mmap at the syscall boundary.  Creating a
+             * VM_FILE VMA with no vnode used to report success and then
+             * fault forever on first access.  In particular, liburing took
+             * that false success as a usable shared ring, which could trap
+             * QEMU in its SIGSEGV/TCG signal path instead of falling back to
+             * the poll backend.  Linux reports ENODEV for such fds. */
+            if (!vf->vnode) {
+                vfs_put_file_ref(gfd, vf);
+                return -ENODEV;
+            }
             vfs_put_file_ref(gfd, vf);
         }
     }

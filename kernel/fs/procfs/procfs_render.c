@@ -197,7 +197,9 @@ static int snapshot_pid_maps(int pid, int smaps,
         proc_put(task);
         return -EACCES;
     }
+#ifndef ARCH_NO_PMD_LEAF
     int thp_disabled = task->policy.thp_disabled;
+#endif
     mm_struct_t *mm = proc_task_get_mm(task);
     proc_put(task);
     if (!mm)
@@ -243,10 +245,14 @@ static int snapshot_pid_maps(int pid, int smaps,
             rec->end = v->end;
             rec->vm_flags = v->vm_flags;
             rec->file_offset = v->file_offset;
+#ifdef ARCH_NO_PMD_LEAF
+            rec->thp_eligible = 0;
+#else
             rec->thp_eligible = !thp_disabled &&
                 !(v->vm_flags & VM_NOHUGEPAGE) &&
                 (v->vm_flags & (VM_HUGEPAGE | VM_ANON)) &&
                 (v->end - v->start) >= (2UL * 1024 * 1024);
+#endif
             if (v->vm_flags & VM_STACK) {
                 strncpy(rec->name, "[stack]", sizeof(rec->name) - 1);
             } else if (v->start >= mm->start_brk && v->start < mm->brk) {
