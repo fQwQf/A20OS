@@ -114,11 +114,14 @@ static int virtio_scsi_setup_queue(virtio_scsi_dev_t *dev, uint32_t queue,
     memset(avail, 0, sizeof(*avail));
     memset(used, 0, sizeof(*used));
     vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_LOW, (uint32_t)va_to_pa(desc));
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH, (uint32_t)(va_to_pa(desc) >> 32));
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH,
+                (uint32_t)((uint64_t)va_to_pa(desc) >> 32));
     vt->write32(vt, VIRTIO_MMIO_QUEUE_DRIVER_LOW, (uint32_t)va_to_pa(avail));
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_DRIVER_HIGH, (uint32_t)(va_to_pa(avail) >> 32));
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_DRIVER_HIGH,
+                (uint32_t)((uint64_t)va_to_pa(avail) >> 32));
     vt->write32(vt, VIRTIO_MMIO_QUEUE_DEVICE_LOW, (uint32_t)va_to_pa(used));
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_DEVICE_HIGH, (uint32_t)(va_to_pa(used) >> 32));
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_DEVICE_HIGH,
+                (uint32_t)((uint64_t)va_to_pa(used) >> 32));
     wmb();
     vt->write32(vt, VIRTIO_MMIO_QUEUE_READY, 1);
     return 0;

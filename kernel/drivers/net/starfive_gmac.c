@@ -266,9 +266,11 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
     dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
     gmac_write(base, DMA_CH0_TXDESC_LIST_ADDR, (uint32_t)tx_desc_pa);
-    gmac_write(base, DMA_CH0_TXDESC_LIST_HADDR, (uint32_t)(tx_desc_pa >> 32));
+    gmac_write(base, DMA_CH0_TXDESC_LIST_HADDR,
+               (uint32_t)((uint64_t)tx_desc_pa >> 32));
     gmac_write(base, DMA_CH0_RXDESC_LIST_ADDR, (uint32_t)rx_desc_pa);
-    gmac_write(base, DMA_CH0_RXDESC_LIST_HADDR, (uint32_t)(rx_desc_pa >> 32));
+    gmac_write(base, DMA_CH0_RXDESC_LIST_HADDR,
+               (uint32_t)((uint64_t)rx_desc_pa >> 32));
 
     gmac_write(base, DMA_CH0_TXDESC_RING_LEN, GMAC_DESC_NUM - 1);
     gmac_write(base, DMA_CH0_RXDESC_RING_LEN, GMAC_DESC_NUM - 1);
