@@ -844,6 +844,8 @@ static inline int x86_syscall_rewrite_args(uint32_t x86_nr,
                 args->arg[3] = 0x100; /* AT_SYMLINK_NOFOLLOW */
             } else if (x86_nr == X86_SYS_rmdir) {
                 args->arg[2] = 0x200; /* AT_REMOVEDIR */
+            } else if (x86_nr == X86_SYS_unlink) {
+                args->arg[2] = 0;
             } else if (x86_nr == X86_SYS_lchown) {
                 args->arg[4] = 0x100; /* AT_SYMLINK_NOFOLLOW */
             } else if (x86_nr == X86_SYS_chown) {
