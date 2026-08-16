@@ -311,6 +311,7 @@ void udisk_task_exit(int pid)
 
 int udisk_complete(int pid, uint32_t n_done)
 {
+    (void)pid;
     for (int i = 0; i < UDISK_MAX_INST; i++) {
         if (g_insts[i].active && g_insts[i].doorbell) {
             if (n_done) {

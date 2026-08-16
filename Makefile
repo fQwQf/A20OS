@@ -521,6 +521,10 @@ endif
 # score measure diagnostics rather than the kernel.  Development profiles keep
 # the sanitizer by default; bring-up and benchmark profiles opt out explicitly.
 CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,$(if $(filter benchmark,$(PROFILE)),0,1))
+# Warnings are errors for the kernel: a warning that slips into a release build
+# is a regression.  Unverified arches that still carry warnings can build with
+# KERNEL_WERROR=0 while they are cleaned up.
+KERNEL_WERROR ?= 1
 CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -fno-builtin -fno-common -std=gnu99 \
          -MMD -MP \
@@ -532,6 +536,9 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+ifeq ($(filter 1,$(KERNEL_WERROR)),1)
+CFLAGS += -Werror
+endif
 ifeq ($(filter 1,$(CONFIG_UBSAN)),1)
 # Undefined Behavior Sanitizer: kernel/core/ubsan.c provides the handlers.
 # alignment/bounds-strict are excluded to match the packed-struct and
