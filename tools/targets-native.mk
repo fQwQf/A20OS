@@ -32,7 +32,7 @@ NATIVE_CC_loongarch64 := loongarch64-linux-gnu-gcc
 NATIVE_CC_aarch64     := aarch64-linux-gnu-gcc
 NATIVE_CC_x86_64      := x86_64-linux-gnu-gcc
 NATIVE_CC_arm32       := arm-linux-gnueabihf-gcc
-NATIVE_CC_riscv32     := $(RISCV_ELF_PREFIX)gcc
+NATIVE_CC_riscv32     := riscv32-linux-gnu-gcc
 NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
 NATIVE_CC := $(CCACHE_PREFIX)$(NATIVE_CC_$(ARCH))
 NATIVE_CFLAGS_riscv64     := -march=rv64gc -mabi=lp64d -mcmodel=medany

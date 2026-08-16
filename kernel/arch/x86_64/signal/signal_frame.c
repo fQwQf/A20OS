@@ -39,7 +39,7 @@ void arch_setup_signal_trampoline(struct mm_struct *mm)
     uint64_t r = mm_mmap(m, addr, PAGE_SIZE,
                          PROT_READ | PROT_EXEC,
                          MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS);
-    if (r == (uint64_t)-ENOMEM || r == (uint64_t)-EINVAL)
+    if (mm_addr_is_error((vaddr_t)r))
         return;
 
     void *page = frame_alloc();

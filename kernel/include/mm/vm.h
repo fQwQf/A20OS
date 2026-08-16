@@ -193,6 +193,18 @@ void mm_track_nommu_alloc(mm_struct_t *mm, void *ptr, size_t size, uint8_t type)
 void mm_untrack_nommu_alloc(mm_struct_t *mm, void *ptr);
 #endif
 
+/* mmap helpers return either a user address or a negative errno encoded in
+ * vaddr_t.  Convert through intptr_t so 32-bit errors remain negative. */
+static inline int mm_addr_is_error(vaddr_t addr)
+{
+    return (intptr_t)addr < 0;
+}
+
+static inline int mm_addr_error(vaddr_t addr)
+{
+    return (int)(intptr_t)addr;
+}
+
 /* Locked variants: caller must hold mm->lock.  Used by the public wrappers
  * and by internal call chains (mremap etc.) that already hold the lock. */
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,

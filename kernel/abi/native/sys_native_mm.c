@@ -161,7 +161,7 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
                                 a20_prot_to_mmap(prot_eff), MAP_PRIVATE,
                                 gfd, kargs.offset);
             a20_object_release(src.object, src.type);
-            if ((int64_t)addr < 0)
+            if (mm_addr_is_error((vaddr_t)addr))
                 return -A20_ERR_NO_MEMORY;
         } else {
             a20_object_release(src.object, src.type);
@@ -444,7 +444,8 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     uint64_t new_addr = proc_mmap(new_addr_hint, (size_t)new_len,
                                    (int)prot ? (int)prot : 3,
                                    0x20 /* MAP_ANONYMOUS */, -1, 0);
-    if (new_addr == 0) return -A20_ERR_NO_MEMORY;
+    if (new_addr == 0 || mm_addr_is_error((vaddr_t)new_addr))
+        return -A20_ERR_NO_MEMORY;
 
     char kbuf[512];
     uint64_t done = 0;
