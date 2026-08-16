@@ -27,6 +27,7 @@ void riscv_iommu_early_probe(void);
 #include "proc/signal.h"
 #include "drivers/block/loop.h"
 #include "net/socket.h"
+#include "net/lwip_stack.h"
 #include "drivers/core/driver_core.h"
 #include "drvmod/drvmod.h"
 #include "drivers/usb/usb.h"
@@ -226,6 +227,7 @@ void init_kthread(void) {
      * available. Embedded deployments link all drivers into the kernel. */
 #ifdef CONFIG_DRIVER_DEPLOYMENT_GENERIC
     driver_manager_init();
+    a20_lwip_attach_netifs();
 #endif
 
 #ifdef CONFIG_RELEASE_EVAL_ROOT
