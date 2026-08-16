@@ -123,6 +123,10 @@ void proc_wake_child_waiters_locked(task_t *parent)
     if (!parent)
         return;
 
+    /* Fast path: no task is parked in wait4(), so no waiter can match. */
+    if (!g_proc_waiting_child_waiter_count)
+        return;
+
     int parent_tgid = proc_task_tgid(parent);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (!t->waiting_for_child)
@@ -458,6 +462,8 @@ void proc_force_exit(task_t *t, int exit_code)
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
         if (t->state == PROC_BLOCKED) {
             t->waiting_for_child = 0;
+            if (g_proc_waiting_child_waiter_count)
+                g_proc_waiting_child_waiter_count--;
             /*
              * REMOTE_EXIT_SAFE_BOUNDARY: a cancelable Park consumes the task
              * exit reason through its current sequence.  If an event already
