@@ -293,6 +293,10 @@ if [[ "$group" == buildstorm-probe ]]; then
         ::/a20-probe/shebang-probe
     mcopy -o -i "$run_fat32" "$host_probe_dir/stage9-perf-probe" \
         ::/a20-probe/stage9-perf-probe
+    if [[ "$arch" == loongarch64 ]]; then
+        mcopy -o -i "$run_fat32" "$host_probe_dir/nested-qemu-smoke.elf" \
+            ::/a20-probe/nested-qemu-smoke.elf
+    fi
     mcopy -o -i "$run_fat32" "$host_probe_dir/liba20probe.so" \
         ::/a20-probe/liba20probe.so
     for probe_name in cwd-probe exec-pages-probe shebang-probe stage9-perf-probe \
@@ -302,6 +306,11 @@ if [[ "$group" == buildstorm-probe ]]; then
             exit 1
         fi
     done
+    if [[ "$arch" == loongarch64 ]] && \
+       ! mtype -i "$run_fat32" ::/a20-probe/nested-qemu-smoke.elf >/dev/null; then
+        echo "[final-eval] failed to install nested-qemu-smoke.elf" >&2
+        exit 1
+    fi
 fi
 flock -u 8
 
@@ -488,6 +497,15 @@ if [[ "$group" == buildstorm-probe && \
         's/^STAGE7_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
         "$serial_log" >>"$metadata"
     echo "stage7_build_host_log=$probe_artifacts/${probe_case}.log" \
+        >>"$metadata"
+fi
+
+if [[ "$group" == buildstorm-probe && \
+      "$probe_case" == stage8-nested-qemu ]]; then
+    sed -nE \
+        's/^STAGE8_META ([a-z0-9_]+=[^[:space:]]+)$/\1/p' \
+        "$serial_log" >>"$metadata"
+    echo "stage8_nested_qemu_host_log=$probe_artifacts/stage8-nested-qemu.log" \
         >>"$metadata"
 fi
 
