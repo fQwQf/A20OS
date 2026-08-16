@@ -113,7 +113,7 @@
 ### Timeout heap 所有权
 - **How to run**: `make check-timeout-ownership-boundary`；双架构容量和竞态 矩阵使用 `make check-proc-step6-local`。
 - **What it checks**: heap entry 保存 deadline、task 引用和 `wait_seq`； cancel/expiry 唯一摘除；容量满与重复注册显式失败；旧 timeout 不能唤醒 后续 token；压力测试覆盖 capacity-1、capacity、capacity+1。
-- **When it fails**: 检查 register 失败是否完整回滚 Park prepare，cancel 和 expiry 是否都在 `proc_lock` 下先摘除再释放引用，以及 expiry 是否通过 `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)`。
+- **When it fails**: 检查 register 失败是否完整回滚 Park prepare，cancel 和 expiry 是否都在 `g_wait_timer_lock` 下先摘除再释放引用，以及 expiry 是否先释放 heap 锁、再在目标 `park_lock` 下按 `wait_seq` 唤醒。
 
 ### SMP runqueue、迁移与抢占
 - **How to run**: `make check-smp-runqueue-boundary`；双架构 1 核/8 核矩阵 使用 `make check-proc-step7-local`。

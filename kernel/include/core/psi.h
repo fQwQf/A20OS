@@ -4,7 +4,7 @@
 #include "core/types.h"
 
 /*
- * A20OS PSI (pressure stall information) for /proc/pressure.
+ * A20OS PSI (pressure stall information) for /proc/pressure files.
  *
  * The CPU "some" metric is accounted from real scheduler contention: at each
  * timer tick a stall sample is taken where "some" is true when more runnable

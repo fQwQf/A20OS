@@ -291,7 +291,7 @@ check-final-definition: check-doc-test-gates
 	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/include/ipc/handle_table.h
 	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
 	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
-	@rg -q "LINUX_ABI_EXPLICIT_STUB_CONTRACT" kernel/abi/linux/syscall_table.def
+	@rg -q "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
 	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md

@@ -268,7 +268,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 126 个 syscall，而 Linux ABI 表登记 343 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。关键统一机制包括：
+Native ABI 当前登记 126 个 syscall，而 Linux ABI 表登记 344 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。关键统一机制包括：
 
 - `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
 - `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 风格接口；当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝。

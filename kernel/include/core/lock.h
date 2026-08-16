@@ -17,12 +17,17 @@ extern int proc_task_pid(const void *task);
 
 /*
  * Global lock order contract (outermost -> innermost).
- * For the full driver-private lock contracts see docs/drivers/lock-order.md.
+ * For the full driver-private lock contracts see
+ * docs/drivers/guide/lock-order.md.
  *
  * Global order:
  *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+ *   proc_lock -> park_lock
  *   proc_lock -> runq_lock
  *   proc_lock -> signal_state.lock
+ *   park_lock -> signal_state.lock
+ *   park_lock -> g_wait_timer_lock
+ *   park_lock -> runq_lock
  *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
  *   proc_lock -> mm_struct.lock
  *   proc_lock -> a20_handle_table.lock
@@ -48,7 +53,7 @@ extern int proc_task_pid(const void *task);
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in
- *   docs/drivers/lock-order.md before use.
+ *   docs/drivers/guide/lock-order.md before use.
  */
 
 typedef struct spinlock {
@@ -145,7 +150,8 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                     if (owner == cur) {
                         extern void kallsyms_print(uint64_t addr);
                         struct backtrace_frame frames[32];
-                        uint64_t fp = (uint64_t)__builtin_frame_address(0);
+                        uint64_t fp =
+                            (uint64_t)(uintptr_t)__builtin_frame_address(0);
                         int n = arch_unwind_frames(fp, frames, 32);
                         printf("  self-deadlock backtrace irq=%d (%d frames):\n",
                                arch_irqs_enabled() ? 1 : 0, n);
