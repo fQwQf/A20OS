@@ -316,7 +316,7 @@ smoke-socket-stress:
 	else \
 		echo "smoke-socket-stress: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
-		exit "$$status"; \
+		exit 1; \
 	fi
 
 smoke-driver-lifecycle:

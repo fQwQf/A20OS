@@ -125,11 +125,12 @@ void a20_net_config_init(void)
 void a20_net_config_sync_from_lwip(void)
 {
     struct netif *n = netif_default;
-    if (n) {
-        ip4_addr_copy(g_a20_net_config.ip, *netif_ip4_addr(n));
-        ip4_addr_copy(g_a20_net_config.netmask, *netif_ip4_netmask(n));
-        ip4_addr_copy(g_a20_net_config.gateway, *netif_ip4_gw(n));
-    }
+    if (!n)
+        return;
+
+    ip4_addr_copy(g_a20_net_config.ip, *netif_ip4_addr(n));
+    ip4_addr_copy(g_a20_net_config.netmask, *netif_ip4_netmask(n));
+    ip4_addr_copy(g_a20_net_config.gateway, *netif_ip4_gw(n));
 
     g_a20_net_config.dns_count = 0;
 #if LWIP_DNS
