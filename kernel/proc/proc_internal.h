@@ -131,12 +131,19 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
  * park_lock first). */
 int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq);
 void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq);
+/* Count of tasks blocked in wait4() with waiting_for_child set; guarded by
+ * proc_lock.  proc_wake_child_waiters_locked() skips its global task-list
+ * scan when the count is zero. */
+extern unsigned long g_proc_waiting_child_waiter_count;
 /* Park-state wake transition; requires task->park_lock held (and, when the
  * caller holds it, proc_lock -> park_lock is the documented order). */
 int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                                 proc_wake_reason_t reason,
                                 uint64_t *remote_cpus,
                                 uint64_t *priority_cpus);
+/* Remove a task's SIGALRM deadline from the alarm heap (acquires the alarm
+ * heap lock; task destruction calls this while holding proc_lock). */
+void proc_alarm_cancel(task_t *t);
 void proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_local(void);
