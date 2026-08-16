@@ -28,6 +28,11 @@ void vnode_get(vnode_t *vn)
     refcount_inc(&vn->ref_count);
 }
 
+int vnode_get_unless_zero(vnode_t *vn)
+{
+    return vn && refcount_inc_not_zero(&vn->ref_count);
+}
+
 int vnode_ref_read(vnode_t *vn)
 {
     if (!vn)
