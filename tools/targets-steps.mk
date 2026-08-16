@@ -370,6 +370,7 @@ smoke-hda:
 	fi
 
 smoke-audio-userspace:
+	rm -f user/build/x86_64/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
