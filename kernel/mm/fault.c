@@ -421,6 +421,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             return 0;
         }
 
+#ifndef ARCH_NO_PMD_LEAF
         if (!t->policy.thp_disabled && !vma->file_vnode &&
             (vma->vm_flags & VM_HUGEPAGE) &&
             !(vma->vm_flags & VM_NOHUGEPAGE)) {
@@ -446,6 +447,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 }
             }
         }
+#endif
 
         /* Like peer kernels, reserve a small forward window for private writable
          * anonymous store faults.  Compiler allocators usually touch new
