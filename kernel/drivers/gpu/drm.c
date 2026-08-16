@@ -1642,7 +1642,7 @@ int64_t drm_linux_mmap(vfile_t *vf, uint64_t addr, size_t len, int prot,
 
     uint64_t map_addr = mm_mmap_vmo(t->mm, addr, map_len, prot, flags,
                                     b->vmo, 0);
-    if (map_addr == 0 || (int64_t)map_addr < 0) {
+    if (map_addr == 0 || mm_addr_is_error((vaddr_t)map_addr)) {
         return -ENOMEM;
     }
     return (int64_t)map_addr;
