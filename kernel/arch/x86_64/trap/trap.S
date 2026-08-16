@@ -18,8 +18,10 @@ isr_stub_\vec:
     .endm
 
 isr_common:
-    /* Allocate trap_context_t (208 bytes) on stack */
-    subq  $208, %rsp
+    /* Allocate trap_context_t plus one ABI-alignment slot.  The CPU frame
+     * and vec/error pair leave RSP 8 mod 16; C callees require it aligned
+     * before call. */
+    subq  $216, %rsp
 
     /* Save general-purpose registers into trap_context_t */
     movq  %rax, 0(%rsp)
@@ -48,28 +50,28 @@ isr_common:
      */
 
     /* Copy CPU-pushed values into trap_context_t */
-    movq  224(%rsp), %rax
+    movq  232(%rsp), %rax
     movq  %rax, 128(%rsp)       /* ctx->rip */
 
-    movq  240(%rsp), %rax
+    movq  248(%rsp), %rax
     movq  %rax, 136(%rsp)       /* ctx->rflags */
 
-    movq  232(%rsp), %rax
+    movq  240(%rsp), %rax
     movq  %rax, 144(%rsp)       /* ctx->cs */
 
-    movq  232(%rsp), %rax       /* CPU-pushed CS */
+    movq  240(%rsp), %rax       /* CPU-pushed CS */
     testq $3, %rax
     jz    1f
 
-    movq  256(%rsp), %rax
+    movq  264(%rsp), %rax
     movq  %rax, 152(%rsp)       /* ctx->ss */
-    movq  248(%rsp), %rax
+    movq  256(%rsp), %rax
     movq  %rax, 56(%rsp)        /* ctx->rsp */
     jmp   2f
 
 1:
     movq  $0x10, 152(%rsp)      /* current kernel SS */
-    leaq  248(%rsp), %rax       /* interrupted kernel RSP */
+    leaq  256(%rsp), %rax       /* interrupted kernel RSP */
     movq  %rax, 56(%rsp)
 2:
 
@@ -96,7 +98,7 @@ isr_common:
     movq  144(%rsp), %rax       /* ctx->cs */
     testq $3, %rax
     jz    3f
-    leaq  264(%rsp), %rax
+    leaq  272(%rsp), %rax
     movq  %rax, 176(%rsp)       /* ctx->padding[0] */
 3:
 
@@ -112,7 +114,7 @@ isr_common:
 5:
 
     /* Save CPU-local trap variables. */
-    movq  208(%rsp), %rax       /* vec */
+    movq  216(%rsp), %rax       /* vec */
     cmpq  $0x80, %rax
     je    2f                    /* int $0x80 syscall */
     cmpq  $1, %rax
@@ -154,13 +156,13 @@ kernel_trap:
 
     /* Restore the common CPU-pushed frame in case C modified it. */
     movq  128(%rsp), %rax
-    movq  %rax, 224(%rsp)       /* RIP */
+    movq  %rax, 232(%rsp)       /* RIP */
 
     movq  136(%rsp), %rax
-    movq  %rax, 240(%rsp)       /* RFLAGS */
+    movq  %rax, 248(%rsp)       /* RFLAGS */
 
     movq  144(%rsp), %rax
-    movq  %rax, 232(%rsp)       /* CS */
+    movq  %rax, 240(%rsp)       /* CS */
 
     /*
      * Only privilege-changing traps have CPU-pushed RSP/SS slots.  Writing
@@ -170,9 +172,9 @@ kernel_trap:
     testq $3, %rax
     jz    4f
     movq  152(%rsp), %rax
-    movq  %rax, 256(%rsp)       /* SS */
+    movq  %rax, 264(%rsp)       /* SS */
     movq  56(%rsp), %rax
-    movq  %rax, 248(%rsp)       /* old RSP */
+    movq  %rax, 256(%rsp)       /* old RSP */
 4:
 
     /* Restore general-purpose registers */
@@ -192,8 +194,8 @@ kernel_trap:
     movq  112(%rsp), %r14
     movq  120(%rsp), %r15
 
-    /* Free trap_context_t */
-    addq  $208, %rsp
+    /* Free trap_context_t and its ABI-alignment slot. */
+    addq  $216, %rsp
 
     /* Skip vec and error_code (or 0 and vec) from ISR stub */
     addq  $16, %rsp
