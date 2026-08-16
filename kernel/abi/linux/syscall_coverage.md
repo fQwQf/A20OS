@@ -98,8 +98,10 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `close_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendfile` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `select` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `pselect6_time64` | poll | `partial` | `smoke-abi-linux` | 32-bit time64 alias of pselect6 |
 | `poll` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `ppoll` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `ppoll_time64` | poll | `partial` | `smoke-abi-linux` | 32-bit time64 alias of ppoll |
 | `epoll_create1` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `epoll_ctl` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `epoll_pwait` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -107,7 +109,9 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `eventfd2` | poll | `partial` | `smoke-syscall-ext` | read/write/semaphore semantics; O_NONBLOCK honored live via fcntl(F_SETFL) like pipes |
 | `timerfd_create` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timerfd_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `timerfd_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timerfd_settime |
 | `timerfd_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `timerfd_gettime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timerfd_gettime |
 | `inotify_init1` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `socket` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `socketpair` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -127,6 +131,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `recvmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendmmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `recvmmsg` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `recvmmsg_time64` | sockets | `partial` | `smoke-abi-linux` | 32-bit time64 alias of recvmmsg |
 | `mkdirat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `unlinkat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `renameat2` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -168,6 +173,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `swapoff` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mkswap` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `utimensat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `utimensat_time64` | path/fs | `partial` | `smoke-abi-linux` | 32-bit time64 alias of utimensat |
 | `time` | time | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1003); sys_time reads the realtime clock into a time_t |
 | `pause` | signals | `partial` | `smoke-proc-stress` | x86_64-only legacy entry (spare slot 1004); parks the task until a signal arrives, returning -EINTR |
 | `utime` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1005); struct utimbuf wrapper over vfs_utimensat |
@@ -219,6 +225,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `sched_getscheduler` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `sched_setscheduler` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `sched_rr_get_interval` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
+| `sched_rr_get_interval_time64` | scheduler | `partial` | `smoke-abi-linux` | 32-bit time64 alias of sched_rr_get_interval |
 | `getpriority` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `setpriority` | scheduler | `partial` | `smoke-proc-stress` | policy/priority/affinity compatibility is bounded by current scheduler state |
 | `reboot` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -233,6 +240,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `sigaction` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sigprocmask` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sigtimedwait` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `rt_sigtimedwait_time64` | signals | `partial` | `smoke-abi-linux` | 32-bit time64 alias of rt_sigtimedwait |
 | `rt_sigqueueinfo` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `pidfd_send_signal` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `pidfd_open` | process | `partial` | `smoke-syscall-ext` | creates a pidfd for a live pid; requires CAP_SYS_PTRACE or same-user |
@@ -256,6 +264,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `semget` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semctl` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semtimedop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `semtimedop_time64` | ipc | `partial` | `smoke-abi-linux` | 32-bit time64 alias of semtimedop |
 | `semop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `msgget` | ipc | `partial` | `smoke-syscall-ext` | SysV message queue create/open (kernel/ipc/sysv_msg.c) |
 | `msgsnd` | ipc | `partial` | `smoke-syscall-ext` | SysV message send with blocking and IPC_NOWAIT |
@@ -264,23 +273,31 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `mq_open` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq open/create returning an fd (kernel/ipc/posix_mq.c) |
 | `mq_unlink` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq unlink |
 | `mq_timedsend` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority send with absolute timeout |
+| `mq_timedsend_time64` | ipc | `partial` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedsend |
 | `mq_timedreceive` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority receive with absolute timeout |
+| `mq_timedreceive_time64` | ipc | `partial` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedreceive |
 | `mq_notify` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq signal notification registration |
 | `mq_getsetattr` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq attribute get/set (flags only) |
 | `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `clock_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_settime |
 | `clock_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `clock_gettime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_gettime |
 | `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_getres` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `clock_getres_time64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_getres |
 | `nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `clock_nanosleep_time64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_nanosleep |
 | `getitimer` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `setitimer` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timer_create` | time | `partial` | `smoke-syscall-ext` | SIGEV_SIGNAL/NONE/THREAD_ID notification; SIGEV_THREAD refused; overrun fixed 0 |
 | `timer_delete` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timer_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `timer_gettime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timer_gettime |
 | `timer_getoverrun` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `timer_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `timer_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timer_settime |
 | `adjtimex` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_adjtime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `gettimeofday` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -295,6 +312,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; no priority boost |
+| `futex_time64` | futex | `partial` | `smoke-abi-linux` | 32-bit time64 alias of futex |
 | `membarrier` | system | `partial` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
 | `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
