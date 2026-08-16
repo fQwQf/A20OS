@@ -104,14 +104,14 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 | read/write/lseek | Y | — | `g_ext4_fops`（`ext4_file.c`）。 |
 | readdir | Y | — | `ext4_freaddir`（`ext4_file.c`）。返回 `DT_DIR`/`DT_REG`/`DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`。 |
-| fsync | partial | — | 同步 block cache；运行时 mutation 不写 JBD2 journal，因此 metadata 和 data 没有 ext4 ordered/journal 保证。 |
+| fsync | partial | — | 同步共享脏映射与 vnode page cache，再定点刷出该文件的数据、inode 和相关分配元数据；超出定点收集范围时回退为整个 mount 的 block-cache sync。运行时 mutation 不写 JBD2 journal，因此没有 ext4 ordered/journal 保证。 |
 | xattr | partial | — | 无 ext4 xattr 后端 hook；reg/dir/lnk 的值只进入全局 RAM 表。 |
 
 **ext4 顺序保证**
 
 - inode/block allocation 由 `alloc_lock` 保护，namespace mutation 由 `metadata_lock` 串行；运行时没有 journal transaction 或 ordered writeback。
 - 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些运行时更新不受 journal transaction 保护，断电原子性不等同 Linux ext4。
-- `vfs_fsync` 会先同步共享脏映射和 vnode page cache，再对 mount 的 block cache 调用 `bcache_sync`（`kernel/fs/vfs/file.c`）。
+- `vfs_fsync` 会先同步共享脏映射和 vnode page cache；ext4 的 `sync_vnode` 随后用 `bcache_sync_scoped` 刷出文件数据、inode table、bitmap、group descriptor 和 superblock 页，深层 extent 或定点数组不足时回退为整个 mount sync（`kernel/fs/vfs/file.c`、`kernel/fs/diskfs/ext4_sync.c`）。
 
 **ext4 ABI 缺口**
 
@@ -368,7 +368,7 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 
 ### 4.4 Dcache
 
-- dcache 只对 ramfs、FAT32、ext4 启用；它是 512 项 lookup 优化层，不是权威 namespace。`RESOLVE_CACHED` 通过 dcache 命中检查实现：任意组件未缓存即返回 `-EAGAIN`，由调用方去 flag 重试。
+- dcache 只对 ramfs、FAT32、ext4 启用；它是 2048 项、512 个 hash bucket、64 把 bucket lock 的 lookup 优化层，不是权威 namespace。`RESOLVE_CACHED` 通过 dcache 命中检查实现：任意组件未缓存即返回 `-EAGAIN`，由调用方去 flag 重试。
 - create、unlink、rmdir、rename、link、symlink 等路径多数按 `(parent, name)` 定点失效；mount/umount、部分全局状态变更和无法安全定点的情况仍调用 `vfs_dcache_invalidate_all`。
 
 ### 4.5 xattr

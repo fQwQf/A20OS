@@ -31,8 +31,12 @@
 
 ```text
 cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+proc_lock -> park_lock
 proc_lock -> runq_lock
 proc_lock -> signal_state.lock
+park_lock -> signal_state.lock
+park_lock -> g_wait_timer_lock
+park_lock -> runq_lock
 proc_lock -> files_struct.lock -> VFS global-file/vnode locks
 proc_lock -> mm_struct.lock
 proc_lock -> a20_handle_table.lock
@@ -46,7 +50,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 对驱动而言，这意味着：
 
 - 设备私有锁永远是最内层锁。
-- 持有设备私有锁时，绝不能获取 `proc_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
+- 持有设备私有锁时，绝不能获取 `proc_lock`、`park_lock`、`g_wait_timer_lock`、`files_struct.lock`、VFS 锁、`mm_struct.lock`、`a20_handle_table.lock` 或 `runq_lock`，除非下文的具体局部顺序记录了该例外。
 - 持有 spinlock 时绝不能阻塞、睡眠或调入调度器。
 - 持有设备锁或 lwIP 锁时，绝不能调用内存分配、VFS 或 scheduler 路径，除非 callee 明确记录为非阻塞。
 

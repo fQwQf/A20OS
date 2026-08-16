@@ -26,9 +26,9 @@ eventfd 与 timerfd 等待可以安全取消，因为其中断的读或写之后
 - 每任务阻塞掩码与线程待决位；
 - 临时掩码、`sigsuspend` 与 `sigtimedwait` 交接状态。
 
-唯一允许的嵌套是 `proc_lock -> signal_state.lock`。信号产生首先取得信号锁，释放它，然后才在 `proc_lock` 下尝试 Park 唤醒或 STOPPED 转移。调度器停止/恢复与 Park 准备已经持有 `proc_lock`，可以按文档化顺序查询信号状态。
+允许的相关嵌套是 `proc_lock -> signal_state.lock`、`park_lock -> signal_state.lock` 和 `proc_lock -> park_lock -> signal_state.lock`。信号产生首先取得信号锁，释放它，然后才在目标 `park_lock` 下尝试 Park 唤醒；STOPPED 转移仍由 `proc_lock` 串行化。
 
-`SIGNAL_MASK_PARK_PROTOCOL` 覆盖 `sigsuspend`：临时掩码在持有 `proc_lock` 时发布，重查待决状态，并在释放该锁之前准备 Park 令牌。`sigtimedwait` 类似地在准备令牌之前发布其等待掩码。即使信号对普通处理器投递被阻塞，匹配的信号仍会唤醒等待者。
+`SIGNAL_MASK_PARK_PROTOCOL` 覆盖 `sigsuspend`：路径按 `proc_lock -> park_lock -> signal_state.lock` 发布临时掩码并重查待决状态，在释放 `park_lock` 前准备 Park 令牌。`sigtimedwait` 与 signalfd 类似地在同一 Park 临界区内完成“重查 + prepare”。即使信号对普通处理器投递被阻塞，匹配的信号仍会唤醒等待者。
 
 ## STOPPED 状态
 
@@ -47,7 +47,7 @@ eventfd 与 timerfd 等待可以安全取消，因为其中断的读或写之后
 `REMOTE_EXIT_SAFE_BOUNDARY` 实现以下序列：
 
 1. 存储请求的退出码并发布 `exit_pending`；
-2. 对目标当前 Park 序列尝试 `PROC_WAKE_TASK_EXIT`；
+2. 不依赖预读的 task 状态，在 `proc_lock -> park_lock` 下对目标当前 Park 序列尝试 `PROC_WAKE_TASK_EXIT`；
 3. 让不可中断等待者入睡直到其资源事件；
 4. 显式恢复 STOPPED 目标；
 5. 让目标上正常的等待条目与定时器清理完成；
