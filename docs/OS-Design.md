@@ -10,7 +10,7 @@ A20OS 是为 2026 年全国大学生计算机系统能力大赛（操作系统�
 
 A20OS 是一个内核、两套用户接口：
 
-* **Linux ABI**（`kernel/abi/linux/`）：343 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
+* **Linux ABI**（`kernel/abi/linux/`）：344 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
 * **Native ABI**（`kernel/abi/native/`）：126 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
 内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
@@ -155,7 +155,11 @@ on_rq -> dispatching -> on_cpu -> unowned
 
 ```text
 cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+proc_lock -> park_lock
 proc_lock -> signal_state.lock
+park_lock -> signal_state.lock
+park_lock -> g_wait_timer_lock
+park_lock -> runq_lock
 proc_lock -> files_struct.lock -> VFS global-file/vnode locks
 proc_lock -> mm_struct.lock
 proc_lock -> a20_handle_table.lock
@@ -253,7 +257,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 **什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**  Linux ABI：343 个；Native ABI：126 个（均为 `syscall_table.def` 当前登记数）。
+**两套 ABI 各有多少系统调用？**  Linux ABI：344 个；Native ABI：126 个（均为 `syscall_table.def` 当前登记数）。
 
 **支持哪些构建目标？**  七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 
