@@ -319,8 +319,8 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
         vaddr_t mapped = mm_mmap_file(mm, start, file_map_end - start,
                                       prot, MAP_PRIVATE | MAP_FIXED, fd,
                                       file_page_offset);
-        if ((intptr_t)mapped < 0)
-            return (int)(intptr_t)mapped;
+        if (mm_addr_is_error(mapped))
+            return mm_addr_error(mapped);
         /*
          * ppc64le pSeries delivers instruction storage faults to the external
          * vector with SRR0 clobbered to the trap-entry address, so a code page

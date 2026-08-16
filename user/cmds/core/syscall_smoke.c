@@ -92,6 +92,12 @@ int main(void)
     if (munmap(mem, 4096) < 0)
         return fail("munmap");
 
+    errno = 0;
+    mem = mmap(NULL, (size_t)-1, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem != MAP_FAILED || errno == 0)
+        return fail("mmap-error");
+
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
         return fail("clock_gettime");
