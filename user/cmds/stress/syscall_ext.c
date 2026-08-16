@@ -156,7 +156,13 @@ static int test_aio(void)
 
     struct linux_io_event ev;
     struct linux_timespec ts = { 2, 0 };
+#if defined(SYS_io_getevents)
     long got = syscall(SYS_io_getevents, ctx, 1, 1, &ev, &ts);
+#elif defined(SYS_io_pgetevents_time64)
+    long got = syscall(SYS_io_pgetevents_time64, ctx, 1, 1, &ev, &ts, NULL);
+#else
+#error "Linux AIO completion syscall is unavailable on this architecture"
+#endif
     if (got != 1)
         return fail("io_getevents", (int)got);
     if (ev.data != 0x1234)
