@@ -65,7 +65,7 @@ static int connect_timeout_test(void) {
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl((10U << 24) | (2 << 16) | 99);
+    addr.sin_addr.s_addr = htonl((10U << 24) | (2U << 8) | 99U);
     addr.sin_port = htons(12348);
 
     long start = now_ms();
