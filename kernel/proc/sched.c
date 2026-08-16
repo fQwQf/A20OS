@@ -269,8 +269,33 @@ static void sched_runq_eevdf_insert(proc_runq_t *rq, task_t *t)
     }
 
     /* First EEVDF task on this CPU defines the system virtual time. */
-    if (!rq->head[EEVDF_LEVEL])
+    if (!rq->head[EEVDF_LEVEL]) {
         rq->eevdf_vtime = t->eevdf_vruntime;
+        rq->head[EEVDF_LEVEL] = t;
+        rq->tail[EEVDF_LEVEL] = t;
+        t->rq_next = NULL;
+        t->rq_prev = NULL;
+        rq->bitmap |= (1U << EEVDF_LEVEL);
+        rq->eevdf_weight += eevdf_weight(t);
+        return;
+    }
+
+    /*
+     * Common case: the fresh deadline (a new or reset virtual deadline) is
+     * later than every deadline already queued, so append in O(1) instead of
+     * walking the whole list.  Ties append too, preserving the existing
+     * "equal deadlines stay before the new entry" ordering.
+     */
+    task_t *tail = rq->tail[EEVDF_LEVEL];
+    if (tail && t->eevdf_deadline >= tail->eevdf_deadline) {
+        t->rq_next = NULL;
+        t->rq_prev = tail;
+        tail->rq_next = t;
+        rq->tail[EEVDF_LEVEL] = t;
+        rq->bitmap |= (1U << EEVDF_LEVEL);
+        rq->eevdf_weight += eevdf_weight(t);
+        return;
+    }
 
     task_t *it = rq->head[EEVDF_LEVEL];
     while (it && it->eevdf_deadline <= t->eevdf_deadline)
