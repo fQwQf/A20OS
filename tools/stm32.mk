@@ -34,7 +34,6 @@ stm32f103-bringup:
 
 stm32f103-xuanwu:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
-
 check-stm32f103:
 	@! rg -n '0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}' \
 		$(KERNEL_DIR)/platform/stm32f103 --glob '*.[ch]' \
@@ -46,6 +45,12 @@ check-stm32f103:
 	@echo "check-stm32f103: PASS"
 
 flash-stm32f103-xuanwu: stm32f103-xuanwu
+	# Re-run under the xuanwu configuration so the derived artifact paths
+	# (BUILD_DIR/BUILD_VARIANT) resolve to the build that just completed.
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded \
+		STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 flash-xuanwu-openocd
+
+flash-xuanwu-openocd:
 	@command -v openocd >/dev/null 2>&1 || { \
 		echo "openocd not found; install OpenOCD or use STM32CubeProgrammer"; \
 		exit 1; \
@@ -75,5 +80,9 @@ flash-stm32f103-xuanwu: stm32f103-xuanwu
 
 run-stm32f103-qemu:
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded \
+		STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 run-stm32f103-qemu-impl
+
+run-stm32f103-qemu-impl:
 	qemu-system-arm -machine stm32vldiscovery -nographic \
 		-kernel $(STM32_QEMU_BIN)

@@ -18,27 +18,22 @@ DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv
 DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
 DEFAULT_EVAL_TARGETS := eval-rv
 else
+# Canonical hosted build matrix (BUILD_MATRIX_GATE_CONTRACT).  Every per-arch
+# gate list below is derived from this single source of truth so an added or
+# renamed arch cannot drift across targets.  loongarch32 is a kernel-only
+# bring-up member (no QEMU target) and is tracked separately below.
+SUPPORTED_HOSTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
+# Native-ABI check targets use short arch names (riscv64 -> rv, loongarch64 ->
+# la, riscv32 -> rv32; other arches keep their name).
+NATIVE_ARCH_NAME = $(if $(filter riscv64,$(1)),rv,$(if $(filter loongarch64,$(1)),la,$(if $(filter riscv32,$(1)),rv32,$(1))))
+NATIVE_ARCH_LIST = $(foreach a,$(SUPPORTED_HOSTED_ARCHES),$(call NATIVE_ARCH_NAME,$(a)))
+
 DEFAULT_benchmark_TARGETS := benchmark-rv benchmark-la
-DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-loongarch64-bringup \
-                                check-aarch64-bringup check-x86_64-bringup \
-                                check-arm32-bringup check-riscv32-bringup \
-                                check-ppc64le-bringup
-DEFAULT_USER_CHECK_TARGETS := check-riscv64-user check-loongarch64-user \
-                              check-aarch64-user check-x86_64-user \
-                              check-arm32-user check-riscv32-user \
-                              check-ppc64le-user
-DEFAULT_NATIVE_TEST_TARGETS := native-test-rv native-test-la \
-                               native-test-aarch64 native-test-x86_64 \
-                               native-test-arm32 native-test-rv32 \
-                               native-test-ppc64le
-DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv native-handle-test-la \
-                                 native-handle-test-aarch64 native-handle-test-x86_64 \
-                                 native-handle-test-arm32 native-handle-test-rv32 \
-                                 native-handle-test-ppc64le
-DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv native-libc-la \
-                               native-libc-aarch64 native-libc-x86_64 \
-                               native-libc-arm32 native-libc-rv32 \
-                               native-libc-ppc64le
+DEFAULT_KERNEL_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup)
+DEFAULT_USER_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
+DEFAULT_NATIVE_TEST_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-test-$(n))
+DEFAULT_NATIVE_HANDLE_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-handle-test-$(n))
+DEFAULT_NATIVE_LIBC_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-libc-$(n))
 DEFAULT_EVAL_TARGETS := eval-rv eval-la
 endif
 
@@ -70,9 +65,11 @@ STM32_BT_PIN ?= 2233
 STM32_BT_UUID ?= 1101
 STM32_BT_BAUD ?= 38400
 STM32_QEMU ?= 0
-STM32_XUANWU_BUILD_DIR = .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f512k-r64k
+# Derive the artifact dirs from BUILD_VARIANT (f<flash>k-r<ram>k[-qemu]) so a
+# change to STM32_FLASH_KB/RAM_KB/STM32_QEMU never desyncs the hardcoded paths.
+STM32_XUANWU_BUILD_DIR = $(BUILD_DIR)
 STM32_XUANWU_ELF = $(STM32_XUANWU_BUILD_DIR)/kernel.elf
-STM32_QEMU_BUILD_DIR = .kernel-build/armv7m-stm32f103-both-bringup-nommu-stm32f103-f128k-r8k-qemu
+STM32_QEMU_BUILD_DIR = $(BUILD_DIR)
 STM32_QEMU_BIN = $(STM32_QEMU_BUILD_DIR)/kernel.bin
 STM32_WIFI_SSID ?=
 STM32_WIFI_PASSWORD ?=
