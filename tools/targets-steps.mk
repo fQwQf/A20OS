@@ -403,7 +403,7 @@ smoke-audio-userspace:
 	fi
 
 smoke-usb-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 kernel-only
+	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/usb-x86_64.log"; \
@@ -413,13 +413,16 @@ smoke-usb-x86_64:
 		-device qemu-xhci,id=xhci \
 		-device usb-kbd \
 		-device usb-mouse \
+		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-pci,drive=x0 \
 		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q '\[USB-HID\] keyboard ready' "$$log" && \
 	   grep -q '\[USB-HID\] mouse ready' "$$log" && \
 	   grep -q "bound to driver 'usb-hid'" "$$log" && \
 	   ! grep -q '\[USB\] port.*enumeration failed' "$$log" && \
-	   ! grep -q '\[XHCI\].*failed' "$$log"; then \
+	   ! grep -q '\[XHCI\].*failed' "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
 		echo "smoke-usb-x86_64: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-usb-x86_64: failed with status $$status; tail of $$log:"; \
