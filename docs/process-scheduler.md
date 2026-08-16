@@ -62,7 +62,9 @@ IDLE -> PREPARING -> PARKED -> WOKEN -> IDLE
 
 | 数据 | 锁或所有权 |
 | --- | --- |
-| task list、parent/wait、reap、Park 状态、非本地-pick 状态转换 | `proc_lock` |
+| task list、parent/wait、reap、非本地-pick 状态转换 | `proc_lock` |
+| `wait_seq`、Park 状态、唤醒原因与 deadline | 对应 task 的 `park_lock` |
+| Park timeout heap | `g_wait_timer_lock` |
 | PID hash | 独立 PID 锁；查询返回带引用的 task |
 | 每个 CPU 的队列链、bitmap、`on_rq` | 对应 `runq.lock` |
 | signal action、进程/线程 pending、mask、sigwait 交接 | `signal_state.lock` |
@@ -73,7 +75,11 @@ IDLE -> PREPARING -> PARKED -> WOKEN -> IDLE
 
 ```text
 cg_node.lock -> proc_lock -> runq.lock -> pfa.lock
+proc_lock -> park_lock
 proc_lock -> signal_state.lock
+park_lock -> signal_state.lock
+park_lock -> g_wait_timer_lock
+park_lock -> runq.lock
 proc_lock -> files_struct.lock -> VFS locks
 proc_lock -> mm->lock
 proc_lock -> a20_handle_table.lock
@@ -129,7 +135,7 @@ IPI 是通知，不是调度决定。handler 只确认通知和建立 acquire �
 1. 从 wait queue 摘除 entry；
 2. 把 entry 的 task 引用和 `wait_seq` 转移到有界 `proc_wake_q`；
 3. 释放对象锁；
-4. 调用 `proc_wake_q_flush()`，由 `proc_try_wake()` 在 `proc_lock` 下验证 token 并入队。
+4. 调用 `proc_wake_q_flush()`，逐个取得目标 task 的 `park_lock` 验证 token、取消 timeout，并在需要时按 `park_lock -> runq.lock` 入队。
 
 这条边界禁止设备锁、VFS 锁或 wait-queue 锁嵌套进入 scheduler。超过单批容量时，wake-all 分批 drain，不能静默留下 `READY` 但未入队的任务。
 
@@ -150,8 +156,8 @@ IPI 是通知，不是调度决定。handler 只确认通知和建立 acquire �
 Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，并保存`wait_seq`；task 的 `wait_timer_index` 提供 O(log n) 取消。
 
 - register 成功后，引用归 heap；
-- cancel 或 expiry 只有一方能在 `proc_lock` 下摘除条目并释放引用；
-- expiry 先从 heap 摘除，再通过 `proc_try_wake_locked(task, wait_seq, PROC_WAKE_TIMEOUT)` 验证 token；
+- cancel 或 expiry 只有一方能在 `g_wait_timer_lock` 下摘除条目并释放引用；
+- expiry 在 heap 锁下摘除后先释放该锁，再取得目标 `park_lock` 并按 `wait_seq` 验证 token；
 - heap 满、重复注册或引用获取失败必须回滚 prepare 并向调用者传播错误；
 - alarm/itimer 使用独立字段，不占用 Park timeout 项。
 
@@ -163,11 +169,13 @@ Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，
 
 ```text
 proc_lock -> signal_state.lock
+park_lock -> signal_state.lock
+proc_lock -> park_lock -> signal_state.lock
 ```
 
 `PROC_STOPPED` 不使用 Park token，也不通过普通 `proc_make_ready()` 恢复。只有 `SIGCONT`、致命信号或任务退出通过显式 stopped-resume 路径改变状态；`WUNTRACED`/`WCONTINUED` 事件用一次性标志报告给父进程。
 
-远程退出只发布持久 `exit_pending`，并按等待模式尝试`PROC_WAKE_TASK_EXIT`。它不能把任意 `BLOCKED` 任务直接改成 READY；不可中断等待仍需等对象操作结束，再在安全点观察退出请求。
+远程退出发布持久 `exit_pending` 后，总会在 `proc_lock -> park_lock` 下对当前序列尝试 `PROC_WAKE_TASK_EXIT`，从而覆盖 `PREPARING -> PARKED` 窗口。它不能把任意 `BLOCKED` 任务直接改成 READY；不可中断等待仍需等对象操作结束，再在安全点观察退出请求。
 
 ## 9. Task 引用和异步所有者
 
