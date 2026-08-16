@@ -149,6 +149,31 @@ smoke-x86_64:
 		exit "$$status"; \
 	fi
 
+# Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
+# complete bring-up and power off, exercising SMP init on real secondaries.
+smoke-smp-bringup:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/riscv64-smp2-bringup.log"; \
+	status=0; \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 2 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-smp2/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-smp-bringup: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-smp-bringup: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-smp-bringup: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
 # Headless behavioral gate for the QEMU GUI path. QMP injects a real keyboard
 # event and screendump reads the emulated scanout, so this catches regressions
 # that a kernel build or serial-only bring-up cannot observe.

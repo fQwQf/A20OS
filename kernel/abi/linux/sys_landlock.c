@@ -6,6 +6,7 @@ int64_t sys_landlock_create_ruleset(const void *attr, size_t size,
                                     unsigned flags)
 {
     (void)size;
+    (void)flags;
     if (!attr)
         return -EFAULT;
     uint64_t handled = 0;

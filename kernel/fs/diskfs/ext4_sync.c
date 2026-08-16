@@ -24,13 +24,6 @@
 
 #define EXT4_SYNC_MAX_PAGES 2048
 
-static int cmp_u64(const void *a, const void *b)
-{
-    uint64_t x = *(const uint64_t *)a;
-    uint64_t y = *(const uint64_t *)b;
-    return x < y ? -1 : (x > y ? 1 : 0);
-}
-
 /* Append every 4 KiB page covering [byte_start, byte_start + byte_len).
  * Returns -1 when the bounded array is full (caller falls back to full sync). */
 static int sync_add_byte_range(uint64_t *pages, size_t *n, size_t cap,

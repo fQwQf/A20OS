@@ -761,9 +761,10 @@ int handle_cow_fault(task_t *t, uint64_t stval)
         page_cache_put(old_page);
         page_cache_put(old_page);
     }
-    if (r == 0 && t)
+    if (r == 0 && t) {
         __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+    }
     return r;
 #endif
 }
@@ -850,7 +851,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
             a20_perf_count(A20_PERF_MM_FILE_FAULTS);
             __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
             t->perf_page_faults_maj++;
         }
         return r;

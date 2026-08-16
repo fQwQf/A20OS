@@ -65,6 +65,7 @@ static int kep_verify(const bpf_insn_t *insns, uint32_t ninsns,
         unsigned src = insn->src_reg;
         int16_t off = insn->off;
         int32_t imm = insn->imm;
+        (void)imm;
 
         switch (cls) {
         case BPF_LD:
@@ -173,6 +174,7 @@ static uint32_t kep_exec(const kep_prog_t *p, kep_ctx_t *ctx)
         unsigned src = insn->src_reg & 0xf;
         int16_t off = insn->off;
         int32_t imm = insn->imm;
+        (void)imm;
 
         switch (cls) {
         case BPF_LD: {

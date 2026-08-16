@@ -376,6 +376,7 @@ int proc_debug_resume(int pid, int sig, int mode)
 
 int proc_debug_singlestep(int pid, int sig)
 {
+    (void)sig;
     task_t *t = ptrace_tracee_get(pid, 0);
     if (!t)
         return -ESRCH;
@@ -593,6 +594,7 @@ int proc_debug_setregs(int pid, const proc_debug_regs_t *in)
 
 int proc_debug_getregset(int pid, int kind, void *out, size_t *size)
 {
+    (void)kind;
     if (!out || !size)
         return -EINVAL;
     size_t needed = sizeof(proc_debug_regs_t);

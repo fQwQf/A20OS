@@ -27,7 +27,12 @@ static void frame_trace(pfn_t pfn)
                  FRAME_TRACE_ENTRIES;
     g_frame_trace[i].tick = timer_get_ticks();
     g_frame_trace[i].pfn  = pfn;
+    /* Deliberate: capture the allocator call chain for frame-trace dumps;
+     * the diagnostic value outweighs the nonzero-argument caveat. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wframe-address"
     g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(2);
+#pragma GCC diagnostic pop
     g_frame_trace[i].pid  = proc_current() ? proc_task_pid(proc_current()) : -1;
 }
 

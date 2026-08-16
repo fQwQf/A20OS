@@ -301,7 +301,6 @@ int posix_mq_timedsend(int mqd, const char *msg, size_t msg_len,
             return -ETIMEDOUT;
         }
         /* Park until a slot frees. */
-        uint64_t now = timer_get_ticks();
         uint64_t wake = 0;
         if (deadline != 0)
             wake = deadline;
