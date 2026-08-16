@@ -10,8 +10,8 @@ A20OS 是为 2026 年通用与专用场景开发的混合内核操作系统。�
 
 A20OS 是一个内核、两套用户接口：
 
-* **Linux ABI**（`kernel/abi/linux/`）：344 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
-* **Native ABI**（`kernel/abi/native/`）：126 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
+* **Linux ABI**（`kernel/abi/linux/`）：362 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
+* **Native ABI**（`kernel/abi/native/`）：136 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
 内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
 
@@ -40,8 +40,8 @@ A20OS 在运行空间上更像宏内核：
 
 | ABI | 系统调用数 | 路径 | 使用场景 |
 |-----|-----------|------|---------|
-| Linux ABI | 343 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
-| Native ABI | 126 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
+| Linux ABI | 362 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
+| Native ABI | 136 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
 两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](hybrid-kernel/STATUS.md)。
 
@@ -257,7 +257,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 **什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**  Linux ABI：344 个；Native ABI：126 个（均为 `syscall_table.def` 当前登记数）。
+**两套 ABI 各有多少系统调用？**  Linux ABI：362 个；Native ABI：136 个（均为 `syscall_table.def` 当前登记数）。
 
 **支持哪些构建目标？**  七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 
