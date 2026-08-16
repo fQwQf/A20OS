@@ -756,7 +756,7 @@ static int drm_get_magic(drm_context_t *ctx, void *arg)
     if (copy_from_user(&a, arg, sizeof(a)) < 0)
         return -EFAULT;
     if (ctx->magic == 0)
-        ctx->magic = (uint32_t)ctx + 0xA20; /* arbitrary per-open magic */
+        ctx->magic = (uint32_t)(uintptr_t)ctx + 0xA20; /* arbitrary per-open magic */
     a.magic = ctx->magic;
     return copy_to_user(arg, &a, sizeof(a)) < 0 ? -EFAULT : 0;
 }
@@ -787,6 +787,7 @@ static int drm_drop_master(drm_context_t *ctx, void *arg)
 
 static int drm_mode_getresources(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_card_res res;
     if (copy_from_user(&res, arg, sizeof(res)) < 0)
         return -EFAULT;
@@ -1019,6 +1020,7 @@ static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
 
 static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     uint32_t fb_id = 0;
     if (copy_from_user(&fb_id, arg, sizeof(fb_id)) < 0)
         return -EFAULT;
@@ -1094,6 +1096,7 @@ static int drm_mode_dpms(drm_context_t *ctx, void *arg)
 
 static int drm_mode_cursor(drm_context_t *ctx, void *arg)
 {
+    (void)arg;
     (void)ctx;
     /* A20OS virtio-gpu has no hardware cursor plane; accept the request so
      * wlroots' legacy page-flip path can proceed. */
@@ -1102,12 +1105,14 @@ static int drm_mode_cursor(drm_context_t *ctx, void *arg)
 
 static int drm_mode_cursor2(drm_context_t *ctx, void *arg)
 {
+    (void)arg;
     (void)ctx;
     return 0;
 }
 
 static int drm_mode_getgamma(drm_context_t *ctx, void *arg)
 {
+    (void)arg;
     (void)ctx;
     return 0;
 }
@@ -1159,6 +1164,7 @@ static int drm_mode_getpropblob(drm_context_t *ctx, void *arg)
 
 static int drm_mode_setproperty(drm_context_t *ctx, void *arg)
 {
+    (void)arg;
     (void)ctx;
     return 0;
 }
@@ -1353,6 +1359,7 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
 
 static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_prime_handle p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;

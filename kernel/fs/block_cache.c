@@ -210,12 +210,6 @@ static void pcache_hash_insert(bcache_t *bc, pcache_entry_t *e) {
     pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
 }
 
-static void pcache_hash_remove(bcache_t *bc, pcache_entry_t *e) {
-    uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
-    pcache_hash_remove_locked(bc, e);
-    pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
-}
-
 static pcache_entry_t *pcache_find(bcache_t *bc, uint64_t page_no) {
     uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
     pcache_entry_t *e = pcache_find_locked(bc, page_no);
