@@ -126,6 +126,7 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
          */
         proc_wait_token_t token = {0};
         uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+        uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
         uint64_t sflags = spin_lock_irqsave(&ss->lock);
         uint64_t matching = (ss->pending | t->thread_pending) & sfd->mask;
         if (!matching) {
@@ -135,6 +136,7 @@ static int signalfd_read(vfile_t *vf, char *buf, size_t count)
         spin_unlock_irqrestore(&ss->lock, sflags);
         if (!matching)
             token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
+        spin_unlock_irqrestore(&t->park_lock, park_flags);
         spin_unlock_irqrestore(&proc_lock, proc_flags);
 
         if (matching)
