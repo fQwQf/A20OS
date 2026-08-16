@@ -1183,6 +1183,7 @@ void proc_runq_remove_locked(task_t *t) {
  */
 static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
 {
+    (void)lrq;
     for (unsigned remote = 0; remote < CONFIG_NR_CPUS; remote++) {
         if (remote == local || !smp_cpu_is_online(remote))
             continue;

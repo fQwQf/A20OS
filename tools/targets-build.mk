@@ -76,7 +76,7 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
 	@echo "check-build-matrix-all: PASS"
 
-check-arch-boundary:
+check-arch-boundary: smoke-arch-mmu-matrix
 	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
 		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
 		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h' \
@@ -327,7 +327,7 @@ check-benchmark-build:
 check-benchmark-build-all:
 	$(MAKE) all-architectures
 
-check-concurrency-foundation:
+check-concurrency-foundation: smoke-smp-bringup
 	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
 	@rg -q "SCHEDULER_CPU_OWNERSHIP" kernel/proc/sched.c
 	@rg -q "PER_CPU_CURRENT_VALIDATION" kernel/proc/current.c

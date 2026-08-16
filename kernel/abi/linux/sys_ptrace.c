@@ -79,7 +79,7 @@ int64_t sys_ptrace(int request, int pid, void *addr, void *data)
             return -EIO;
         unsigned long off = (unsigned long)addr;
         if (off % sizeof(unsigned long) ||
-            off / sizeof(unsigned long) >= linux_arch_regs_count())
+            off / sizeof(unsigned long) >= (unsigned long)linux_arch_regs_count())
             return -EIO;
         proc_debug_regs_t regs;
         int ret = proc_debug_getregs(pid, &regs);
@@ -95,7 +95,7 @@ int64_t sys_ptrace(int request, int pid, void *addr, void *data)
             return -EIO;
         unsigned long off = (unsigned long)addr;
         if (off % sizeof(unsigned long) ||
-            off / sizeof(unsigned long) >= linux_arch_regs_count())
+            off / sizeof(unsigned long) >= (unsigned long)linux_arch_regs_count())
             return -EIO;
         proc_debug_regs_t regs;
         int ret = proc_debug_getregs(pid, &regs);

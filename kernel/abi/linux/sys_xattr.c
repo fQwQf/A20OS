@@ -241,6 +241,7 @@ int64_t sys_fremovexattr(int fd, const char *name)
 static int xattr_at_resolve(int dirfd, const char *path, int nofollow,
                             char *full, size_t sz)
 {
+    (void)nofollow;
     if (!path)
         return -EFAULT;
     char kpath[MAX_PATH_LEN];
