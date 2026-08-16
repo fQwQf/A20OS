@@ -513,8 +513,10 @@ static int virtio_net_irq_handler(int irq, void *priv) {
         return 0;
 
     uint32_t isr = net->vt.read32(&net->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
-    if (!net->legacy)
-        net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    /* Both legacy and modern virtio-mmio transports require the driver to
+     * write the ISR value back to INTERRUPT_ACK; legacy devices keep the
+     * interrupt line asserted otherwise.  Matches virtio_blk_irq_handler. */
+    net->vt.write32(&net->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
 
     uint64_t flags = a20_lwip_lock();
     a20_lwip_process_netif_irq_locked(net->slot);
