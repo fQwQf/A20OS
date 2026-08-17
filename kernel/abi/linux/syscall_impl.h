@@ -520,4 +520,8 @@ int64_t sys_lsm_list_modules(uint64_t *ids, size_t *size, unsigned int flags);
 
 #endif /* LINUX_SYSCALL_DECLARE_PROTOTYPES */
 
+/* Internal helper shared by the Linux and Native ioctl paths; always
+ * declared (not a syscall). */
+int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg);
+
 #endif /* _LINUX_SYSCALL_IMPL_H */
