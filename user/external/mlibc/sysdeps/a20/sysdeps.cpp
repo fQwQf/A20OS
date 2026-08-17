@@ -30,6 +30,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/select.h>
@@ -263,8 +264,7 @@ static void fd_clear(int fd) {
 		g_fds[fd].flags = 0;
 		g_fds[fd].close_on_spawn = false;
 		g_fds[fd].kind = 0;
-	}
-	fd_unlock();
+	}	fd_unlock();
 	if (fd >= 0 && fd < kPipeFdSlots) {
 		free(g_pipe_rx[fd].buf);
 		g_pipe_rx[fd] = PipeRx{};
@@ -279,6 +279,8 @@ char g_cwd[PATH_MAX] = "/";
 a20_handle_t g_cwd_handle = A20_HANDLE_NULL;
 bool g_cwd_handle_owned = false;
 bool g_cwd_handle_initialized = false;
+static a20_handle_t g_root_handle = A20_HANDLE_NULL;
+static bool g_root_handle_initialized = false;
 
 static void refresh_cwd_from_kernel() {
 	static const char proc_cwd[] = "/proc/self/cwd";
@@ -305,7 +307,39 @@ static a20_handle_t cwd_handle() {
 }
 
 static a20_handle_t root_handle() {
-	return __a20_start_info ? __a20_start_info->root_dir : A20_HANDLE_NULL;
+	/* Cached so task_clone can re-point it at the child's own handle. */
+	if (!g_root_handle_initialized) {
+		g_root_handle = __a20_start_info ? __a20_start_info->root_dir
+		                                 : A20_HANDLE_NULL;
+		g_root_handle_initialized = true;
+	}
+	return g_root_handle;
+}
+
+static a20_handle_t g_self_task = A20_HANDLE_NULL;
+static bool g_self_task_initialized = false;
+
+static a20_handle_t self_task() {
+	if (!g_self_task_initialized) {
+		g_self_task = __a20_start_info ? __a20_start_info->self_task
+		                               : A20_HANDLE_NULL;
+		g_self_task_initialized = true;
+	}
+	return g_self_task;
+}
+
+/* Re-declare the current fd 0/1/2 handles to the kernel (A20_SYS_task_adopt)
+ * so a later exec preserves them (a shell's dup2'ed pipe ends survive
+ * fork+exec).  Called whenever fd 0/1/2 changes. */
+static void a20_adopt_stdio() {
+	a20_handle_t std[6] = { A20_HANDLE_NULL, A20_HANDLE_NULL, A20_HANDLE_NULL,
+	                        g_root_handle, g_cwd_handle, self_task() };
+	fd_lock();
+	std[0] = fd_handle(0);
+	std[1] = fd_handle(1);
+	std[2] = fd_handle(2);
+	fd_unlock();
+	a20_syscall6(A20_SYS_task_adopt, (uint64_t)(uintptr_t)std, 0, 0, 0, 0, 0);
 }
 
 /* Make an absolute path using the libc cwd (kernel path syscalls that do
@@ -510,8 +544,7 @@ static void a20_sig_default(int sig) {
 /* Run the handlers for any delivered signals at an explicit checkpoint.
  * Called from the futex wait path after A20_ERR_INTERRUPTED and from
  * pthread_testcancel; never from an arbitrary instruction boundary. */
-static void a20_dispatch_pending_signals() {
-	int64_t sigs = a20_rt_signal_check();
+static void a20_dispatch_pending_signals_mask(uint64_t sigs) {
 	if (!sigs)
 		return;
 	for (int sig = 1; sig < 64; sig++) {
@@ -525,6 +558,10 @@ static void a20_dispatch_pending_signals() {
 			a20_sig_default(sig);
 		}
 	}
+}
+
+static void a20_dispatch_pending_signals() {
+	a20_dispatch_pending_signals_mask((uint64_t)a20_rt_signal_check());
 }
 
 /* ------------------------------------------------------------------ */
@@ -659,21 +696,23 @@ int Sysdeps<VmProtect>::operator()(void *pointer, size_t size, int prot) {
 	__builtin_trap();
 }
 
+static pid_t g_cached_pid = 0;
+
 pid_t Sysdeps<GetPid>::operator()() {
-	static int cached_pid = 0;
-	if (cached_pid)
-		return cached_pid;
-	if (!__a20_start_info || __a20_start_info->self_task == A20_HANDLE_NULL)
+	if (g_cached_pid > 0)
+		return g_cached_pid;
+	a20_handle_t self = self_task();
+	if (self == A20_HANDLE_NULL)
 		return 1;
 	a20_task_info info{};
 	info.size = sizeof(info);
 	info.version = 1;
 	a20_status_t st = a20_syscall6(A20_SYS_task_info,
-	                               __a20_start_info->self_task, (uint64_t)&info, 0, 0, 0, 0);
+	                               self, (uint64_t)&info, 0, 0, 0, 0);
 	if (st < 0 || info.pid <= 0)
 		return 1;
-	cached_pid = info.pid;
-	return cached_pid;
+	g_cached_pid = info.pid;
+	return g_cached_pid;
 }
 
 pid_t Sysdeps<GetTid>::operator()() {
@@ -681,14 +720,22 @@ pid_t Sysdeps<GetTid>::operator()() {
 }
 
 pid_t Sysdeps<GetPpid>::operator()() {
-	if (!__a20_start_info || __a20_start_info->self_task == A20_HANDLE_NULL)
+	a20_handle_t self = self_task();
+	if (self == A20_HANDLE_NULL)
 		return 0;
 	a20_task_info info{};
 	info.size = sizeof(info);
 	info.version = 1;
 	a20_status_t st = a20_syscall6(A20_SYS_task_info,
-	                               __a20_start_info->self_task, (uint64_t)&info, 0, 0, 0, 0);
+	                               self, (uint64_t)&info, 0, 0, 0, 0);
 	return st < 0 ? 0 : info.ppid;
+}
+
+int Sysdeps<GetPgid>::operator()(pid_t pid, pid_t *pgid) {
+	/* The native ABI has no POSIX process groups (no job control); a
+	 * process's group is itself.  getpgid(0)/getpgrp() yield our pid. */
+	*pgid = (pid <= 0) ? Sysdeps<GetPid>{}() : pid;
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1006,6 +1053,8 @@ int Sysdeps<Close>::operator()(int fd) {
 	a20_status_t st = a20_syscall6(A20_SYS_handle_close, h, 0, 0, 0, 0, 0);
 	if (st < 0)
 		return a20_to_errno(st);
+	if (fd <= 2)
+		a20_adopt_stdio();
 	return 0;
 }
 
@@ -1026,8 +1075,10 @@ int Sysdeps<Stat>::operator()(mlibc::fsfd_target fsfdt, int fd, const char *path
 		h = opened;
 		break;
 	case mlibc::fsfd_target::fd_path: {
-		a20_handle_t base = fd_handle(fd);
-		if (base == A20_HANDLE_NULL)
+		/* AT_FDCWD means "resolve against the kernel cwd" (NULL dir), like
+		 * Openat.  fd_handle(AT_FDCWD) would return a NULL base and EBADF. */
+		a20_handle_t base = (fd == AT_FDCWD) ? A20_HANDLE_NULL : fd_handle(fd);
+		if (fd != AT_FDCWD && base == A20_HANDLE_NULL)
 			return EBADF;
 		open_status = do_path_open(base, path, O_RDONLY, 0, &opened);
 		if (open_status < 0)
@@ -1147,6 +1198,8 @@ int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 		g_fds[newfd].close_on_spawn = (flags & O_CLOEXEC) != 0;
 		g_fds[newfd].kind = (uint8_t)fd_kind(fd);
 		fd_unlock();
+		if (newfd <= 2)
+			a20_adopt_stdio();
 		return 0;
 	}
 	fd_unlock();
@@ -1605,14 +1658,114 @@ gid_t Sysdeps<GetEgid>::operator()() {
 /* fork/exec: intentionally unsupported by the native ABI              */
 /* ------------------------------------------------------------------ */
 
+/* A20 has no fork: task_clone is the capability-safe continuation primitive.
+ * The child continues at the caller PC (a0 == 0) with a COW copy of the
+ * address space, but its handle table is built ONLY from the manifest we
+ * build from our current fd table — no implicit capability inheritance. */
 int Sysdeps<Fork>::operator()(pid_t *child) {
-	(void)child;
-	return ENOSYS; /* design: task_spawn + posix_spawn, never fork */
+	fd_table_init();
+	fd_lock();
+
+	a20_clone_handle manifest[kFdInitial];
+	int n = 0;
+	for (int i = 0; i < g_fd_count && n < kFdInitial; i++) {
+		if (g_fds[i].handle != A20_HANDLE_NULL) {
+			manifest[n].parent_handle = g_fds[i].handle;
+			manifest[n].child_rights = 0; /* inherit the parent's rights */
+			manifest[n].child_handle = A20_HANDLE_NULL;
+			n++;
+		}
+	}
+	fd_unlock();
+
+	a20_clone_args args{};
+	args.size = sizeof(args);
+	args.version = 1;
+	args.flags = A20_CLONE_COW_VM;
+	args.handles = (uint64_t)(uintptr_t)manifest;
+	args.handle_count = (uint32_t)n;
+	args.root_dir = root_handle();
+	args.cwd_dir = cwd_handle();
+	args.stack = 0;
+
+	a20_status_t st = a20_syscall6(A20_SYS_task_clone, (uint64_t)(uintptr_t)&args,
+	                               0, 0, 0, 0, 0);
+	if (st == 0) {
+		/* CHILD: the kernel installed the manifest handles into our fresh
+		 * handle table and wrote each child_handle back into this (COW)
+		 * manifest; rebuild the fd table to match, and re-cache root/cwd and
+		 * the self task handle (the inherited __a20_start_info values point
+		 * at the parent's handle table). */
+		fd_lock();
+		int j = 0;
+		for (int i = 0; i < g_fd_count && j < n; i++) {
+			if (g_fds[i].handle != A20_HANDLE_NULL) {
+				g_fds[i].handle = manifest[j].child_handle;
+				j++;
+			}
+		}
+		fd_unlock();
+		g_root_handle = args.out_root;
+		g_root_handle_initialized = true;
+		g_cwd_handle = args.out_cwd;
+		g_cwd_handle_initialized = true;
+		g_self_task = args.out_self;
+		g_self_task_initialized = true;
+		g_cached_pid = 0;
+
+		/* Declare our standard handles so a subsequent exec preserves them
+		 * (e.g. a pipeline's read/write ends wired by dup2). */
+		a20_adopt_stdio();
+
+		*child = 0;
+		return 0;
+	}
+	if (st < 0)
+		return a20_to_errno(st);
+	/* PARENT: register pid -> task handle so waitpid() can find the child. */
+	if (int e = child_register((pid_t)st, args.out_task)) {
+		a20_syscall6(A20_SYS_handle_close, args.out_task, 0, 0, 0, 0, 0);
+		return e;
+	}
+	*child = (pid_t)st;
+	return 0;
 }
 
 int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *const envp[]) {
-	(void)path; (void)argv; (void)envp;
-	return ENOSYS; /* design: task_spawn replaces exec */
+	/* In-place image replacement (used by the fork() child).  The kernel
+	 * exec path detects the target's ABI and sets abi_mode accordingly. */
+	a20_status_t st = a20_syscall6(A20_SYS_execve, (uint64_t)(uintptr_t)path,
+	                               (uint64_t)(uintptr_t)argv,
+	                               (uint64_t)(uintptr_t)envp, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	return 0; /* not reached on success */
+}
+
+int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *result) {
+	fd_table_init();
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+	a20_status_t st = a20_syscall6(A20_SYS_ioctl, h, request, (uint64_t)(uintptr_t)arg,
+	                               0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	*result = (int)st;
+	return 0;
+}
+
+extern "C" int ioctl(int fd, unsigned long request, ...) {
+	va_list ap;
+	va_start(ap, request);
+	void *arg = va_arg(ap, void *);
+	va_end(ap);
+	int result = 0;
+	if (int e = mlibc::sysdep_or_enosys<Ioctl>(fd, request, arg, &result); e) {
+		errno = e;
+		return -1;
+	}
+	return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1631,8 +1784,7 @@ int Sysdeps<Kill>::operator()(pid_t pid, int sig) {
 	if (ChildReg *c = child_find(pid)) {
 		target = c->task;
 	} else if (pid == Sysdeps<GetPid>{}() || pid == 0 || pid == -1) {
-		target = __a20_start_info ? __a20_start_info->self_task
-		                         : A20_HANDLE_NULL;
+		target = self_task();
 	} else {
 		return ESRCH;
 	}
@@ -1680,8 +1832,34 @@ int Sysdeps<Sigaction>::operator()(int signum, const struct sigaction *__restric
 }
 
 int Sysdeps<Sigsuspend>::operator()(const sigset_t *set) {
-	(void)set;
-	return ENOSYS;
+	/* Checkpoint-style suspend: unblock `set` (mksh passes the default
+	 * mask), then sleep in a loop until a signal arrives; dispatch the
+	 * handlers and return -1/EINTR (POSIX behavior after a handler runs).
+	 * The kernel wakes the interruptible sleep with A20_ERR_INTERRUPTED
+	 * when a signal (e.g. SIGCHLD from a forked child) is queued. */
+	uint64_t save = g_a20_sig_blocked;
+	g_a20_sig_blocked = 0;
+	(void)a20_rt_signal_mask(g_a20_sig_blocked, nullptr);
+
+	while (true) {
+		int64_t sigs = a20_rt_signal_check();
+		if (sigs) {
+			a20_dispatch_pending_signals_mask((uint64_t)sigs);
+			g_a20_sig_blocked = save;
+			(void)a20_rt_signal_mask(save, nullptr);
+			errno = EINTR;
+			return -1;
+		}
+		a20_status_t st = a20_syscall6(A20_SYS_thread_sleep, 2000000ULL,
+		                               0, 0, 0, 0, 0);
+		if (st == -A20_ERR_INTERRUPTED) {
+			a20_dispatch_pending_signals();
+			g_a20_sig_blocked = save;
+			(void)a20_rt_signal_mask(save, nullptr);
+			errno = EINTR;
+			return -1;
+		}
+	}
 }
 
 int Sysdeps<Sigpending>::operator()(sigset_t *set) {
@@ -1736,11 +1914,22 @@ int Sysdeps<Tcflow>::operator()(int fd, int action) { (void)fd; (void)action; re
 int Sysdeps<Tcflush>::operator()(int fd, int queue) { (void)fd; (void)queue; return 0; }
 
 int Sysdeps<Tcgetwinsize>::operator()(int fd, struct winsize *winsz) {
-	(void)fd;
-	winsz->ws_row = 25;
-	winsz->ws_col = 80;
-	winsz->ws_xpixel = 0;
-	winsz->ws_ypixel = 0;
+	/* Typed control (A20_HANDLE_CTRL_GET_WINSIZE) instead of ioctl. */
+	fd_table_init();
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+	a20_winsize_args w{};
+	w.size = sizeof(w);
+	w.version = 1;
+	a20_status_t st = a20_syscall6(A20_SYS_handle_control, h, A20_HANDLE_CTRL_GET_WINSIZE,
+	                               (uint64_t)(uintptr_t)&w, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	winsz->ws_row = w.ws_row;
+	winsz->ws_col = w.ws_col;
+	winsz->ws_xpixel = w.ws_xpixel;
+	winsz->ws_ypixel = w.ws_ypixel;
 	return 0;
 }
 
@@ -1898,11 +2087,12 @@ int Sysdeps<GetRlimit>::operator()(int resource, struct rlimit *limit) {
 int Sysdeps<GetRusage>::operator()(int scope, struct rusage *usage) {
 	(void)scope;
 	memset(usage, 0, sizeof(*usage));
-	if (!__a20_start_info || __a20_start_info->self_task == A20_HANDLE_NULL)
+	a20_handle_t self = self_task();
+	if (self == A20_HANDLE_NULL)
 		return 0;
 	a20_rusage ru{};
 	a20_status_t st = a20_syscall6(A20_SYS_task_get_usage,
-	                               __a20_start_info->self_task, (uint64_t)&ru, 0, 0, 0, 0);
+	                               self, (uint64_t)&ru, 0, 0, 0, 0);
 	if (st < 0)
 		return 0;
 	usage->ru_utime.tv_sec = (time_t)(ru.user_time_ns / 1000000000ULL);
@@ -2180,12 +2370,47 @@ extern "C" int posix_spawnp(pid_t *pid_out, const char *file,
 
 namespace mlibc {
 
-int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
-	ChildReg *c = child_find(pid);
-	if (!c)
-		return ECHILD;
+	int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
+	ChildReg *c = nullptr;
+	if (pid > 0) {
+		c = child_find(pid);
+		if (!c)
+			return ECHILD;
+	} else if (flags & WNOHANG) {
+		/* pid == 0 / -1 with WNOHANG (the SIGCHLD reaper): reap the FIRST
+		 * child that has already exited, not merely the first registered
+		 * child — otherwise a still-running child would mask an exited one
+		 * and the shell's job would never complete. */
+		for (auto &cand : g_children) {
+			if (cand.pid <= 0)
+				continue;
+			uint64_t events = 0;
+			if (a20_rt_handle_poll(cand.task, 1ull << A20_EVENT_EXITED,
+			                       &events) == A20_OK &&
+			    (events & (1ull << A20_EVENT_EXITED))) {
+				c = &cand;
+				break;
+			}
+		}
+		if (!c) {
+			*ret_pid = 0;
+			return 0;
+		}
+	} else {
+		/* Blocking wait for "any child": pick the first registered one
+		 * (the native ABI has no process groups, so 0 and -1 agree). */
+		for (auto &cand : g_children) {
+			if (cand.pid > 0) {
+				c = &cand;
+				break;
+			}
+		}
+		if (!c)
+			return ECHILD;
+	}
 
-	if (flags & WNOHANG) {
+	if ((flags & WNOHANG) && pid > 0) {
+		/* pid > 0 + WNOHANG: verify this specific child has exited. */
 		uint64_t events = 0;
 		if (a20_rt_handle_poll(c->task, 1ull << A20_EVENT_EXITED, &events) < 0 ||
 		    !(events & (1ull << A20_EVENT_EXITED))) {
@@ -2203,7 +2428,7 @@ int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusag
 		*status = (ts.exit_code & 0xff) << 8; /* POSIX "normal exit" encoding */
 	if (ru)
 		memset(ru, 0, sizeof(*ru));
-	*ret_pid = pid;
+	*ret_pid = c->pid;
 
 	a20_syscall6(A20_SYS_handle_close, c->task, 0, 0, 0, 0, 0);
 	c->pid = 0;

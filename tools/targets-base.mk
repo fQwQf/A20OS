@@ -19,7 +19,7 @@
 		qemu-disk-rv qemu-disk-la \
 		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
 		native-test-arch native-handle-test-arch native-libc-arch native-programs \
-	native-futex-arch native-futex-rv smoke-native-futex native-debug-test-arch native-debug-test-rv smoke-native-debug native-ext-test-arch native-ext-test-rv smoke-native-ext mlibc-sysroot mlibc-hello-rv smoke-mlibc \
+	native-futex-arch native-futex-rv smoke-native-futex native-debug-test-arch native-debug-test-rv smoke-native-debug native-ext-test-arch native-ext-test-rv smoke-native-ext mlibc-sysroot mlibc-hello-rv mlibc-sbase mlibc-mksh smoke-mlibc smoke-mlibc-sbase smoke-mlibc-fork smoke-mlibc-mksh \
 		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
 		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \

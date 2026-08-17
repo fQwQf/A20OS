@@ -237,6 +237,18 @@ typedef struct task_t {
     size_t    scratch_size;
     void     *a20_ht;   /* Native ABI handle table (separate from scratch_buf,
                          * which is reused by Linux ABI I/O buffers) */
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    /* Native ABI standard handles (fd 0/1/2 + root/cwd/self) declared by the
+     * libc via A20_SYS_task_adopt.  exec preserves them for native processes
+     * so fork+exec keeps the caller's stdio (e.g. a pipeline read end). */
+    uint32_t a20_stdin_h;
+    uint32_t a20_stdout_h;
+    uint32_t a20_stderr_h;
+    uint32_t a20_root_h;
+    uint32_t a20_cwd_h;
+    uint32_t a20_self_h;
+    int      a20_stdio_adopted;
+#endif
 
     trap_context_t sig_saved_ctx;
     uint64_t       sig_blocked;

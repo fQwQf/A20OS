@@ -28,6 +28,7 @@
 #include "core/timekeeping.h"
 #include "core/timer.h"
 #include "proc/proc.h"
+#include "proc/proc_internal.h"
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "fs/vfs.h"
@@ -352,6 +353,84 @@ int64_t sys_a20_task_exit(const a20_syscall_args_t *args)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/*  task_spawn argv/envp: copy into kernel buffers before use         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Copy a user argv/envp pointer array *and* the strings it points to into
+ * kernel-owned buffers.  elf_setup_stack_a20() reads the strings with plain
+ * strlen()/memcpy(), so the source must be kernel memory; passing raw user
+ * pointers faults when the backing page is not mapped in the current
+ * address space (observed as a kernel strlen page fault on the child's
+ * stack top during posix_spawn).
+ *
+ * @src     user pointer to the string-pointer array, or NULL
+ * @out     pre-zeroed array of char* with room for max_count + 1 entries
+ * @max_count  maximum number of strings to copy
+ *
+ * Returns the number of entries copied (>= 0), or -1 on failure.  On
+ * failure any allocated strings are freed; out is NULL-terminated on
+ * success.  Caller frees the strings with free_arg_vector().
+ */
+static int copy_arg_vector(char *const *src, char **out, int max_count)
+{
+    int count = 0;
+
+    if (!src) {
+        out[0] = NULL;
+        return 0;
+    }
+
+    while (count < max_count) {
+        char *ptr;
+        if (copy_from_user(&ptr, &src[count], sizeof(char *)) < 0)
+            break;
+        if (!ptr)
+            break;
+
+        long measured = user_strnlen(ptr, MAX_ARG_STRLEN - 1);
+        if (measured < 0 || measured >= (long)(MAX_ARG_STRLEN - 1))
+            break;
+        size_t len = (size_t)measured + 1;
+        char *copy = kmalloc(len);
+        if (!copy)
+            break;
+        if (copy_from_user(copy, ptr, len) < 0 || copy[len - 1] != '\0') {
+            kfree(copy);
+            break;
+        }
+        out[count] = copy;
+        count++;
+    }
+
+    /* Detect overflow: if the array has more than max_count entries. */
+    if (count == max_count) {
+        char *extra;
+        if (copy_from_user(&extra, &src[count], sizeof(char *)) == 0 && extra)
+            count = -1;
+    }
+
+    if (count < 0) {
+        for (int i = 0; i < max_count && out[i]; i++) {
+            kfree(out[i]);
+            out[i] = NULL;
+        }
+        return -1;
+    }
+
+    out[count] = NULL;
+    return count;
+}
+
+static void free_arg_vector(char **vec, int count)
+{
+    for (int i = 0; i < count; i++) {
+        kfree(vec[i]);
+        vec[i] = NULL;
+    }
+}
+
 int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 {
     a20_task_spawn_args_t *uargs = (a20_task_spawn_args_t *)A20_ARG(0);
@@ -412,23 +491,36 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         return -A20_ERR_NOT_SUPPORTED;
     }
 
-    char *argv_buf[16] = {0};
-    char *envp_buf[16] = {0};
-    int argc = (int)kargs.argc;
-    int envc = (int)kargs.envc;
+    /* Copy argv/envp strings into kernel buffers while the parent address
+     * space is still authoritative.  elf_setup_stack_a20() reads them with
+     * raw strlen()/memcpy(), so raw user pointers would fault. */
+    char *argv_ks[MAX_ARG_STRINGS + 1];
+    char *envp_ks[MAX_ARG_STRINGS + 1];
+    memset(argv_ks, 0, sizeof(argv_ks));
+    memset(envp_ks, 0, sizeof(envp_ks));
 
-    if (argc > 0 && kargs.argv) {
-        int copy_n = argc < 16 ? argc : 16;
-        if (copy_from_user(argv_buf, (void *)kargs.argv, copy_n * sizeof(char *)) < 0) {
+    int argc = 0, envc = 0;
+    if (kargs.argc > MAX_ARG_STRINGS || kargs.envc > MAX_ARG_STRINGS) {
+        elf_load_info_discard(&info);
+        return -A20_ERR_INVALID_ARGUMENT;
+    }
+    if (kargs.argc > 0 && kargs.argv) {
+        argc = copy_arg_vector((char *const *)kargs.argv, argv_ks,
+                               MAX_ARG_STRINGS);
+        if (argc < 0 || argc != (int)kargs.argc) {
+            free_arg_vector(argv_ks, argc > 0 ? argc : 0);
             elf_load_info_discard(&info);
-            return -A20_ERR_FAULT;
+            return argc < 0 ? -A20_ERR_FAULT : -A20_ERR_INVALID_ARGUMENT;
         }
     }
-    if (envc > 0 && kargs.envp) {
-        int copy_n = envc < 16 ? envc : 16;
-        if (copy_from_user(envp_buf, (void *)kargs.envp, copy_n * sizeof(char *)) < 0) {
+    if (kargs.envc > 0 && kargs.envp) {
+        envc = copy_arg_vector((char *const *)kargs.envp, envp_ks,
+                               MAX_ARG_STRINGS);
+        if (envc < 0 || envc != (int)kargs.envc) {
+            free_arg_vector(argv_ks, argc);
+            free_arg_vector(envp_ks, envc > 0 ? envc : 0);
             elf_load_info_discard(&info);
-            return -A20_ERR_FAULT;
+            return envc < 0 ? -A20_ERR_FAULT : -A20_ERR_INVALID_ARGUMENT;
         }
     }
 
@@ -640,11 +732,13 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         if (rh >= 0) child_registry = (a20_handle_t)rh;
     }
 
-    uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_buf, envp_buf,
+    uint64_t sp = elf_setup_stack_a20(info.stack_top, argc, argv_ks, envp_ks,
                                       &info, child_stdio[0], child_stdio[1],
                                       child_stdio[2], child_self_task,
                                       child_root_h, child_cwd_h,
                                       child_fd_limit, child_registry);
+    free_arg_vector(argv_ks, argc);
+    free_arg_vector(envp_ks, envc);
     if (sp == 0) {
         proc_force_exit(new_task, 1);
         proc_make_ready(new_task);
@@ -660,6 +754,221 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
     proc_make_ready(new_task);
     proc_put(new_task);
     return task_h;
+}
+
+/* ================================================================== */
+/*  task_clone — capability-safe process continuation                  */
+/* ================================================================== */
+
+#define A20_CLONE_MANIFEST_MAX 64
+
+int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
+{
+    a20_clone_args_t *uargs = (a20_clone_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_clone_args_t kargs;
+    memset(&kargs, 0, sizeof(kargs));
+    uint32_t hdr[2];
+    if (copy_from_user(hdr, uargs, sizeof(hdr)) < 0)
+        return -A20_ERR_FAULT;
+    if (hdr[1] < 1 || hdr[1] > 1)
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (hdr[0] < (uint32_t)sizeof(kargs))
+        return -A20_ERR_INVALID_ARGUMENT;
+    if (copy_from_user(&kargs, uargs, sizeof(kargs)) < 0)
+        return -A20_ERR_FAULT;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    if (kargs.handle_count > A20_CLONE_MANIFEST_MAX)
+        return -A20_ERR_INVALID_ARGUMENT;
+    a20_clone_handle_t manifest[A20_CLONE_MANIFEST_MAX];
+    if (kargs.handle_count > 0) {
+        if (copy_from_user(manifest, (void *)kargs.handles,
+                           kargs.handle_count * sizeof(a20_clone_handle_t)) < 0)
+            return -A20_ERR_FAULT;
+    }
+
+    /* Create the child: COW address-space copy + register continuation
+     * (a0 == 0 in the child).  NOT made runnable yet. */
+    task_t *new_task = NULL;
+    vaddr_t child_sp = (kargs.flags & A20_CLONE_STACK) ? (vaddr_t)kargs.stack : 0;
+    int child_pid = proc_clone_deferred(child_sp, &new_task);
+    if (child_pid < 0 || !new_task)
+        return -A20_ERR_NO_MEMORY;
+    new_task->abi_mode = 1;
+
+    /* The child's handle table is built ONLY from the explicit manifest —
+     * no implicit capability inheritance.  Each entry is validated against
+     * the parent's table and installed with rights ⊆ the parent's. */
+    struct a20_ht_internal *new_ht = a20_ht_create();
+    if (!new_ht) {
+        proc_force_exit(new_task, 1);
+        proc_make_ready(new_task);
+        return -A20_ERR_NO_MEMORY;
+    }
+    __atomic_store_n(&new_task->a20_ht, new_ht, __ATOMIC_RELEASE);
+
+    /* Standard handles: self task, root dir, cwd dir (mirror task_spawn). */
+    a20_handle_t child_self = A20_HANDLE_NULL;
+    int64_t self_h = a20_handle_install(new_ht, (void *)(uintptr_t)child_pid,
+                                        A20_OBJ_TASK,
+                                        A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                        A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+                                        A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+    if (self_h >= 0) child_self = (a20_handle_t)self_h;
+
+    a20_handle_t child_root = A20_HANDLE_NULL, child_cwd = A20_HANDLE_NULL;
+    a20_handle_entry_t entry;
+    if (a20_handle_lookup_ref_internal(ht, kargs.root_dir, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT,
+                                       &entry) == A20_OK) {
+        a20_object_ref(entry.object, entry.type);
+        int64_t h = a20_handle_install(new_ht, entry.object, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT |
+                                       A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+        if (h >= 0) child_root = (a20_handle_t)h;
+        else a20_object_release(entry.object, entry.type);
+        a20_object_release(entry.object, entry.type);
+    }
+    if (kargs.cwd_dir != A20_HANDLE_NULL &&
+        a20_handle_lookup_ref_internal(ht, kargs.cwd_dir, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT,
+                                       &entry) == A20_OK) {
+        a20_object_ref(entry.object, entry.type);
+        int64_t h = a20_handle_install(new_ht, entry.object, A20_OBJ_DIRECTORY,
+                                       A20_RIGHT_READ | A20_RIGHT_STAT |
+                                       A20_RIGHT_DUP);
+        if (h >= 0) child_cwd = (a20_handle_t)h;
+        else a20_object_release(entry.object, entry.type);
+        a20_object_release(entry.object, entry.type);
+    }
+    if (child_cwd == A20_HANDLE_NULL)
+        child_cwd = child_root;
+
+    /* Manifest: install each handle; child_rights must be ⊆ the parent's. */
+    for (uint32_t i = 0; i < kargs.handle_count; i++) {
+        a20_handle_entry_t mentry;
+        manifest[i].child_handle = A20_HANDLE_NULL;
+        if (a20_handle_lookup_ref_internal(ht, manifest[i].parent_handle,
+                                           A20_OBJ_INVALID, 0, &mentry) < 0)
+            continue;
+        a20_rights_t rights = manifest[i].child_rights
+                                  ? (manifest[i].child_rights & mentry.rights)
+                                  : mentry.rights;
+        a20_object_ref(mentry.object, mentry.type);
+        int64_t h = a20_handle_install(new_ht, mentry.object, mentry.type,
+                                       rights);
+        if (h >= 0)
+            manifest[i].child_handle = (a20_handle_t)h;
+        else
+            a20_object_release(mentry.object, mentry.type);
+        a20_object_release(mentry.object, mentry.type);
+    }
+
+    /* The parent receives a child task handle. */
+    a20_handle_t task_h = A20_HANDLE_NULL;
+    int64_t ph = a20_handle_install(ht, (void *)(uintptr_t)child_pid, A20_OBJ_TASK,
+                                    A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                    A20_RIGHT_STAT | A20_RIGHT_CONTROL |
+                                    A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
+                                    A20_RIGHT_ADMIN);
+    if (ph >= 0) task_h = (a20_handle_t)ph;
+    kargs.out_task = task_h;
+
+    /* Write the child-side results into the CHILD's memory (the child is a
+     * COW copy; without this the child would read stale handle values). */
+    if (kargs.handle_count > 0) {
+        proc_copy_to_task_user(new_task, (void *)kargs.handles, manifest,
+                               kargs.handle_count * sizeof(a20_clone_handle_t));
+    }
+    proc_copy_to_task_user(new_task, (void *)&uargs->out_root, &child_root,
+                           sizeof(child_root));
+    proc_copy_to_task_user(new_task, (void *)&uargs->out_cwd, &child_cwd,
+                           sizeof(child_cwd));
+    proc_copy_to_task_user(new_task, (void *)&uargs->out_self, &child_self,
+                           sizeof(child_self));
+
+    /* Parent side: report the child task handle. */
+    a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs));
+
+    proc_make_ready(new_task);
+    return child_pid;
+}
+
+/* Declare the process's current native standard handles (fd 0/1/2, root,
+ * cwd, self).  mlibc's fork() child calls this after rebuilding its fd table
+ * so that a subsequent exec can preserve them (pipeline read/write ends). */
+int64_t sys_a20_task_adopt(const a20_syscall_args_t *args)
+{
+    a20_handle_t in[6];
+    if (copy_from_user(in, (void *)A20_ARG(0), sizeof(in)) < 0)
+        return -A20_ERR_FAULT;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    for (int i = 0; i < 6; i++) {
+        if (in[i] == A20_HANDLE_NULL)
+            continue;
+        a20_handle_entry_t e;
+        if (a20_handle_lookup_ref_internal(ht, in[i], A20_OBJ_INVALID, 0, &e) < 0)
+            return -A20_ERR_BAD_HANDLE;
+        a20_object_release(e.object, e.type);
+    }
+
+    cur->a20_stdin_h = in[0];
+    cur->a20_stdout_h = in[1];
+    cur->a20_stderr_h = in[2];
+    cur->a20_root_h = in[3];
+    cur->a20_cwd_h = in[4];
+    cur->a20_self_h = in[5];
+    cur->a20_stdio_adopted = 1;
+    return A20_OK;
+}
+
+/* ================================================================== */
+/*  execve — in-place image replacement (fork's partner in the child)  */
+/* ================================================================== */
+
+extern int sys_execve(const char *path, char **argv, char **envp);
+extern int64_t a20_native_vfs_result(int r);
+extern int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg);
+
+int64_t sys_a20_execve(const a20_syscall_args_t *args)
+{
+    /* Reuse the core exec path (proc_exec).  On success the image is
+     * replaced and exec never returns here; on failure map to A20 errno. */
+    int r = sys_execve((const char *)A20_ARG(0), (char **)A20_ARG(1),
+                       (char **)A20_ARG(2));
+    if (r == 0)
+        return A20_OK;
+    return a20_native_vfs_result(r);
+}
+
+/* ioctl on a native handle: resolve the handle to a gfd, then reuse the
+ * shared Linux ioctl path (tty/pty window-size, foreground pgid, etc.). */
+int64_t sys_a20_ioctl(const a20_syscall_args_t *args)
+{
+    a20_handle_t h = (a20_handle_t)A20_ARG(0);
+    unsigned long req = (unsigned long)A20_ARG(1);
+    void *arg = (void *)A20_ARG(2);
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    a20_handle_entry_t entry;
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID, 0, &entry);
+    if (r < 0) return r;
+    int gfd = (int)(uintptr_t)entry.object;
+    a20_object_release(entry.object, entry.type);
+
+    return a20_native_vfs_result(sys_ioctl_gfd(gfd, req, arg));
 }
 
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args)

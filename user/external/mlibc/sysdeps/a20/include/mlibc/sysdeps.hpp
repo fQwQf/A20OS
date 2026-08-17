@@ -7,10 +7,11 @@ namespace mlibc {
 /*
  * A20OS native ABI sysdep coverage.
  *
- * Deliberately absent (by native ABI design, docs/native-abi/00-overview.md):
- *  - no fork/execve: task_spawn + posix_spawn is the process model
- *  - no signals: sigaction/sigprocmask/kill are inert compatibility stubs
- *  - no epoll/signalfd/timerfd: event_queue is the native replacement
+ * The native ABI deliberately has no POSIX fork/execve: task_spawn and the
+ * capability-safe task_clone continuation are the process model, and
+ * execve is provided in-place for the fork() child (see Sysdeps<Fork>).
+ * Signals are checkpoint-style compatibility stubs; epoll/signalfd/timerfd
+ * are replaced by event_queue.
  */
 struct A20SysdepTags :
 	LibcLog,
@@ -71,6 +72,7 @@ struct A20SysdepTags :
 	GetPid,
 	GetTid,
 	GetPpid,
+	GetPgid,
 	GetUid,
 	GetEuid,
 	GetGid,
@@ -121,7 +123,8 @@ struct A20SysdepTags :
 	Recvfrom,
 	Shutdown,
 	GetSockopt,
-	SetSockopt
+	SetSockopt,
+	Ioctl
 {};
 
 template<typename Tag>
