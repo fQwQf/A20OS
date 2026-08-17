@@ -44,6 +44,10 @@
 #define A20_SYS_signal_mask       0x0210
 #define A20_SYS_task_mem_read     0x0211
 #define A20_SYS_task_mem_write    0x0212
+#define A20_SYS_task_clone        0x0213
+#define A20_SYS_execve            0x0214
+#define A20_SYS_ioctl             0x0215
+#define A20_SYS_task_adopt        0x0216
 
 /* Memory (0x0300) */
 #define A20_SYS_vm_alloc          0x0300

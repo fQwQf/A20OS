@@ -132,6 +132,10 @@ static inline int64_t a20_syscall6(uint64_t nr, uint64_t a0, uint64_t a1,
 /* ===== Task / Thread (0x0200) ===== */
 #define A20_SYS_task_exit         0x0200
 #define A20_SYS_task_spawn        0x0201
+#define A20_SYS_task_clone        0x0213
+#define A20_SYS_execve            0x0214
+#define A20_SYS_ioctl             0x0215
+#define A20_SYS_task_adopt        0x0216
 #define A20_SYS_task_wait         0x0202
 #define A20_SYS_task_kill         0x0203
 #define A20_SYS_task_info         0x0204

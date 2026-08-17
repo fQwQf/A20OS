@@ -551,10 +551,18 @@ int64_t sys_pipe2(int *pipefd, int flags) {
 }
 
 int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
-    req &= 0xffffffffUL;
-
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    return sys_ioctl_gfd(gfd, req, arg);
+}
+
+/* ioctl on an already-resolved global vfile fd.  Shared by the Linux ABI
+ * (sys_ioctl) and the Native ABI (sys_a20_ioctl, which resolves the native
+ * handle to a gfd first). */
+int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
+{
+    req &= 0xffffffffUL;
+
     if (req == TIOCGPGRP || req == PPC64_TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
         return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;

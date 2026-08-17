@@ -67,6 +67,10 @@ inline constexpr uint64_t A20_SYS_handle_transfer   = 0x0106;
 inline constexpr uint64_t A20_SYS_handle_set_meta   = 0x0107;
 inline constexpr uint64_t A20_SYS_task_exit         = 0x0200;
 inline constexpr uint64_t A20_SYS_task_spawn        = 0x0201;
+inline constexpr uint64_t A20_SYS_task_clone        = 0x0213;
+inline constexpr uint64_t A20_SYS_execve            = 0x0214;
+inline constexpr uint64_t A20_SYS_ioctl             = 0x0215;
+inline constexpr uint64_t A20_SYS_task_adopt        = 0x0216;
 inline constexpr uint64_t A20_SYS_task_wait         = 0x0202;
 inline constexpr uint64_t A20_SYS_task_kill         = 0x0203;
 inline constexpr uint64_t A20_SYS_signal_check      = 0x020F;
@@ -392,6 +396,48 @@ struct a20_thread_create_args {
 	uint64_t tls_base;
 	uint32_t flags;
 	a20_handle_t out_thread;
+};
+
+/* task_clone — capability-safe continuation.  Child continues at the caller
+ * PC (a0 == 0) with a COW copy of the address space, but its handle table is
+ * built ONLY from handles[] (no implicit capability inheritance). */
+inline constexpr uint32_t A20_CLONE_COW_VM = (1u << 0);
+inline constexpr uint32_t A20_CLONE_STACK = (1u << 1);
+
+inline constexpr uint32_t A20_HANDLE_CTRL_IOCTL = 0u;
+inline constexpr uint32_t A20_HANDLE_CTRL_SET_TEMPORAL = 2u;
+inline constexpr uint32_t A20_HANDLE_CTRL_GET_WINSIZE = 6u;
+
+struct a20_winsize_args {
+	uint32_t size;
+	uint32_t version;
+	uint16_t ws_row;
+	uint16_t ws_col;
+	uint16_t ws_xpixel;
+	uint16_t ws_ypixel;
+};
+
+struct a20_clone_handle {
+	a20_handle_t parent_handle;  /* in: parent's handle */
+	a20_rights_t child_rights;   /* in: 0 = inherit, else ⊆ parent's */
+	a20_handle_t child_handle;   /* out: handle installed in the child */
+};
+
+struct a20_clone_args {
+	uint32_t size;
+	uint32_t version;
+	uint32_t flags;
+	uint32_t reserved;
+	uint64_t handles;            /* a20_clone_handle[] */
+	uint32_t handle_count;
+	uint32_t reserved1;
+	a20_handle_t root_dir;
+	a20_handle_t cwd_dir;
+	uint64_t stack;              /* child SP when A20_CLONE_STACK */
+	a20_handle_t out_task;       /* out: child task handle in the parent */
+	a20_handle_t out_root;       /* out: child root handle */
+	a20_handle_t out_cwd;        /* out: child cwd handle */
+	a20_handle_t out_self;       /* out: child self-task handle */
 };
 
 struct a20_task_status {

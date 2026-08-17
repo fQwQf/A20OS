@@ -45,6 +45,8 @@ A20OS 是一个**双 ABI 混合内核**：
 | 阻塞 IPC + Park/Wake（无丢失唤醒） | 已实现 + SMP 压力验证 | `docs/roadmap/park-wake-protocol-split.md` |
 | 级联释放 / 无部分投递 | 已实现 | 08-runtime-status §6 |
 | VMAR / Pager / monitor / task_mem 深化 | 已实现 | `docs/native-abi/09-native-abi-deepening.md` |
+| **task_clone（能力安全续体）** | 已实现 + smoke | 08-runtime-status §5d、`smoke-mlibc-fork` |
+| **fork()/execve() + mksh on mlibc** | 已实现 + smoke | `smoke-mlibc-mksh`（内建 + 顺序外部命令） |
 | 性能评估 | **未实测** | 10-evaluation.md |
 | 机器检验 | **未开始** | 08-verification.md |
 

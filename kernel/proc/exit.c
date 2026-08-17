@@ -28,6 +28,15 @@ extern void udisk_task_exit(int pid);
 
 static int proc_ignores_sigchld(task_t *parent)
 {
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    /* Native tasks register signal handlers in the libc (mlibc checkpoint
+     * model), not in the kernel signal state, so the kernel's SIGCHLD
+     * auto-reap heuristic cannot see them.  Always deliver SIGCHLD to a
+     * native parent; the child becomes a zombie until the native parent
+     * reaps it (task_wait). */
+    if (parent && parent->abi_mode == 1)
+        return 0;
+#endif
     return signal_task_sigchld_auto_reap(parent);
 }
 
