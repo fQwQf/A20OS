@@ -217,9 +217,15 @@ static int fd_set_flags(int fd, int flags) {
 	                 0, 0, 0, 0) >= 0 &&
 	    (info.object_type == A20_OBJ_FILE || info.object_type == A20_OBJ_DEVICE ||
 	     info.object_type == A20_OBJ_SOCKET)) {
+		a20_ctl_flags_args cf{};
+		cf.size = sizeof(cf);
+		cf.version = 1;
+		cf.valid_mask = O_APPEND | O_ASYNC | O_DIRECT | O_NOATIME |
+		                O_NONBLOCK | O_DSYNC | O_SYNC;
+		cf.flags = flags;
 		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
-		                               A20_HANDLE_CTRL_FCNTL, F_SETFL,
-		                               (uint64_t)(unsigned int)flags, 0, 0);
+		                               A20_HANDLE_CTRL_SET_FLAGS,
+		                               (uint64_t)(uintptr_t)&cf, 0, 0, 0);
 		if (st < 0 && st != -A20_ERR_ACCESS &&
 		    st != -A20_ERR_INVALID_ARGUMENT)
 			return a20_to_errno(st);
@@ -1286,28 +1292,10 @@ int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 	case F_SETOWN_EX:
 	case F_GETOWN_EX:
 	case F_SETSIG:
-	case F_GETSIG: {
-		/* The Native handle control path already forwards these operations to
-		 * the VFS, including file locks and owner metadata. */
-		uint64_t value = 0;
-		if (request == F_GETLK || request == F_SETLK || request == F_SETLKW
-#ifdef F_OFD_GETLK
-		    || request == F_OFD_GETLK || request == F_OFD_SETLK || request == F_OFD_SETLKW
-#endif
-		    || request == F_SETOWN_EX || request == F_GETOWN_EX)
-			value = (uint64_t)va_arg(args, void *);
-		else if (request == F_GETOWN || request == F_GETSIG)
-			value = 0;
-		else
-			value = (uint64_t)(unsigned long)va_arg(args, int);
-		a20_status_t st = a20_syscall6(A20_SYS_handle_control, fd_handle(fd),
-		                               A20_HANDLE_CTRL_FCNTL, (uint64_t)request,
-		                               value, 0, 0);
-		if (st < 0)
-			return a20_to_errno(st);
-		*result = (int)st;
-		return 0;
-	}
+	case F_GETSIG:
+		/* File locks and owner metadata have no typed native equivalent yet;
+		 * the native ABI does not expose a raw fcntl shim. */
+		return ENOTSUP;
 	default:
 		return EINVAL;
 	}
@@ -1743,16 +1731,81 @@ int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *cons
 }
 
 int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *result) {
+	/* POSIX ioctl() is a compatibility layer over the typed native control
+	 * ops; unknown requests get ENOTTY (no generic ioctl in the native ABI). */
 	fd_table_init();
 	a20_handle_t h = fd_handle(fd);
 	if (h == A20_HANDLE_NULL)
 		return EBADF;
-	a20_status_t st = a20_syscall6(A20_SYS_ioctl, h, request, (uint64_t)(uintptr_t)arg,
-	                               0, 0, 0);
-	if (st < 0)
-		return a20_to_errno(st);
-	*result = (int)st;
-	return 0;
+
+	switch (request) {
+	case TIOCGWINSZ: {
+		struct winsize *ws = (struct winsize *)arg;
+		a20_winsize_args w{};
+		w.size = sizeof(w);
+		w.version = 1;
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
+		                               A20_HANDLE_CTRL_GET_WINSIZE,
+		                               (uint64_t)(uintptr_t)&w, 0, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		ws->ws_row = w.ws_row;
+		ws->ws_col = w.ws_col;
+		ws->ws_xpixel = w.ws_xpixel;
+		ws->ws_ypixel = w.ws_ypixel;
+		*result = 0;
+		return 0;
+	}
+	case TIOCSWINSZ: {
+		const struct winsize *ws = (const struct winsize *)arg;
+		a20_winsize_args w{};
+		w.size = sizeof(w);
+		w.version = 1;
+		w.ws_row = ws->ws_row;
+		w.ws_col = ws->ws_col;
+		w.ws_xpixel = ws->ws_xpixel;
+		w.ws_ypixel = ws->ws_ypixel;
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
+		                               A20_HANDLE_CTRL_SET_WINSIZE,
+		                               (uint64_t)(uintptr_t)&w, 0, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		*result = 0;
+		return 0;
+	}
+	case TCFLSH: {
+		a20_ctl_int_args a{};
+		a.size = sizeof(a);
+		a.version = 1;
+		a.value = arg ? *(int *)arg : 0;
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
+		                               A20_HANDLE_CTRL_TCFLUSH,
+		                               (uint64_t)(uintptr_t)&a, 0, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		*result = 0;
+		return 0;
+	}
+	case FIONBIO: {
+		a20_ctl_flags_args a{};
+		a.size = sizeof(a);
+		a.version = 1;
+		a.valid_mask = O_NONBLOCK;
+		a.flags = (arg && *(int *)arg) ? O_NONBLOCK : 0;
+		a20_status_t st = a20_syscall6(A20_SYS_handle_control, h,
+		                               A20_HANDLE_CTRL_SET_FLAGS,
+		                               (uint64_t)(uintptr_t)&a, 0, 0, 0);
+		if (st < 0)
+			return a20_to_errno(st);
+		*result = 0;
+		return 0;
+	}
+	case TIOCSCTTY:
+		*result = 0; /* job control is not supported (MKSH_UNEMPLOYED) */
+		return 0;
+	default:
+		return ENOTTY;
+	}
 }
 
 extern "C" int ioctl(int fd, unsigned long request, ...) {
@@ -1911,7 +1964,21 @@ int Sysdeps<Tcsetattr>::operator()(int fd, int action, const struct termios *ti)
 int Sysdeps<Tcsendbreak>::operator()(int fd, int duration) { (void)fd; (void)duration; return 0; }
 int Sysdeps<Tcdrain>::operator()(int fd) { (void)fd; return 0; }
 int Sysdeps<Tcflow>::operator()(int fd, int action) { (void)fd; (void)action; return 0; }
-int Sysdeps<Tcflush>::operator()(int fd, int queue) { (void)fd; (void)queue; return 0; }
+int Sysdeps<Tcflush>::operator()(int fd, int queue) {
+	fd_table_init();
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+	a20_ctl_int_args a{};
+	a.size = sizeof(a);
+	a.version = 1;
+	a.value = queue;
+	a20_status_t st = a20_syscall6(A20_SYS_handle_control, h, A20_HANDLE_CTRL_TCFLUSH,
+	                               (uint64_t)(uintptr_t)&a, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
+	return 0;
+}
 
 int Sysdeps<Tcgetwinsize>::operator()(int fd, struct winsize *winsz) {
 	/* Typed control (A20_HANDLE_CTRL_GET_WINSIZE) instead of ioctl. */
@@ -1934,7 +2001,21 @@ int Sysdeps<Tcgetwinsize>::operator()(int fd, struct winsize *winsz) {
 }
 
 int Sysdeps<Tcsetwinsize>::operator()(int fd, const struct winsize *winsz) {
-	(void)fd; (void)winsz;
+	fd_table_init();
+	a20_handle_t h = fd_handle(fd);
+	if (h == A20_HANDLE_NULL)
+		return EBADF;
+	a20_winsize_args w{};
+	w.size = sizeof(w);
+	w.version = 1;
+	w.ws_row = winsz->ws_row;
+	w.ws_col = winsz->ws_col;
+	w.ws_xpixel = winsz->ws_xpixel;
+	w.ws_ypixel = winsz->ws_ypixel;
+	a20_status_t st = a20_syscall6(A20_SYS_handle_control, h, A20_HANDLE_CTRL_SET_WINSIZE,
+	                               (uint64_t)(uintptr_t)&w, 0, 0, 0);
+	if (st < 0)
+		return a20_to_errno(st);
 	return 0;
 }
 

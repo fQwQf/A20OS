@@ -66,7 +66,7 @@ int64_t r = a20_vm_alloc(&args);
 
 **已扩展（2026-08）**：`fork()`/`execve()` 已基于 `task_clone` + native `A20_SYS_execve` 实现（不再 ENOSYS）；新增 `GetPgid`/`Sigsuspend`/`Ioctl`/`GetPgid` 等 sysdep 与 `sys/ioctl.h`/`paths.h` 头；`Sysdeps<Fork>` 用能力清单（当前 fd 表的 handle 集合）构建子进程 handle 表，子进程重建 fd 表并重缓存 root/cwd/self，并经 `A20_SYS_task_adopt`（0x0216）把 fd 0/1/2/root/cwd/self 声明给内核；**native→native exec 保留 handle 表**（`A20_SYS_execve` 0x0214 在 dispatch 侧跳过 SET_RET 保护 a0=start_info），使 fork+exec 保留调用方的 stdio。**mksh 已移植到 Native ABI**（`make mlibc-mksh` / `smoke-mlibc-mksh`）：内建命令与顺序外部命令（fork+exec+waitpid+SIGCHLD 检查点投递）完整可用；管道作业等待（`a|b`）已不再挂起（waitpid 任意子进程扫描 + SIGCHLD 检查点投递修复），但**管道数据流仍有句柄映射待解问题**（seq 写/ cat 读句柄异常，见下文已知限制）。
 
-**类型化控制（A20 对 ioctl 的回答）**：`handle_control` 新增 `A20_HANDLE_CTRL_GET_WINSIZE`（版本化 `a20_winsize_args_t` + Control 门控）；mlibc `tcgetwinsize` 改走它（不再硬编码 25x80）。ioctl 只作为 mlibc POSIX 垫片保留（`A20_SYS_ioctl` 0x0215 / handle_control op 0）。设计见 `docs/native-abi/03-handle.md §2.7`。
+**类型化控制（A20 对 ioctl 的回答，已彻底移除 ioctl shim）**：`handle_control` 的全部数据 op 使用版本化结构体——`GET_WINSIZE`/`SET_WINSIZE`（`a20_winsize_args_t`）、`TCFLUSH`（`a20_ctl_int_args_t`）、`SET_FLAGS`（`a20_ctl_flags_args_t`，替代 `fcntl(F_SETFL)`/`FIONBIO`）。**内核 Native ABI 不再有通用 ioctl**（`A20_SYS_ioctl` 0x0215 已删除；`handle_control` 的 ioctl/fcntl 垫片 op 0/1 已删除）。mlibc 的 POSIX `ioctl()` 是翻译层：`TIOCGWINSZ`→`GET_WINSIZE`、`TIOCSWINSZ`→`SET_WINSIZE`、`TCFLSH`→`TCFLUSH`、`FIONBIO`→`SET_FLAGS`，未知请求返回 `ENOTTY`；`tcgetwinsize`/`tcsetwinsize`/`tcflush` 直接走类型化 op。文件锁/owner 元数据（`fcntl` F_GETLK 等）在 Native 上返回 `ENOTSUP`。设计见 `docs/native-abi/03-handle.md §2.7`。
 
 Phase 2 新增：
 
@@ -87,7 +87,7 @@ A20OS 没有 fork。`task_clone` 是能力安全的"子进程续体"原语：
 - **寄存器续体**：子进程从调用点继续（a0 == 0 区分父子），地址空间按 COW 复制——这是"自我状态"的复制，不构成能力授予。
 - **能力清单**：子进程的 handle 表完全由 `handles[]`（`a20_clone_handle_t`：parent_handle / child_rights ⊆ 父进程 / child_handle 回写）逐项声明构建，与 `task_spawn` 同一纪律。子进程拿不到清单之外的任何 handle——这是与 fork（隐式复制全部能力）的根本区别。
 - 父进程得到子 pid + 子任务 handle；内核把 root/cwd/self 与清单句柄写回**子进程**内存（COW 快照），mlibc 据此重建 fd 表并重缓存。
-- 配套 `A20_SYS_execve`（0x0214，原地替换镜像，复用 `proc_exec`；dispatch 侧跳过 SET_RET 以免覆盖 a0=start_info）与 `A20_SYS_ioctl`（0x0215，复用 Linux `sys_ioctl_gfd`）。
+- 配套 `A20_SYS_execve`（0x0214，原地替换镜像，复用 `proc_exec`；dispatch 侧跳过 SET_RET 以免覆盖 a0=start_info）。终端控制走类型化 `handle_control`（§5a 类型化控制，无通用 ioctl）。
 
 内核侧配套：native 父进程的 SIGCHLD 不再被内核默认忽略自动收割（检查点模型需要僵尸供 `task_wait` 收割），内核信号经 `a20_ht_sig_pend` 桥接进 native 检查点集。
 

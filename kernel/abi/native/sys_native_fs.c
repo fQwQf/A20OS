@@ -491,12 +491,21 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
         return A20_OK;
     }
     if (op == A20_HANDLE_CTRL_SET_LABEL) {
-        if (arg1 != 0) {
+        /* Versioned argument (raise-only label). */
+        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)arg0;
+        if (!ui || arg1 != 0) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
+        a20_ctl_int_args_t ci;
+        r = a20_validate_struct_header(ui, sizeof(ci), 1);
+        if (r < 0) goto out_entry;
+        if (copy_from_user(&ci, ui, sizeof(ci)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
         a20_object_release(entry.object, entry.type);
-        return a20_handle_set_label(ht, h, (uint8_t)arg0);
+        return a20_handle_set_label(ht, h, (uint8_t)ci.value);
     }
 
     if (op == A20_HANDLE_CTRL_CHDIR) {
@@ -534,9 +543,9 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
         goto out_entry;
     }
 
-    if (op == A20_HANDLE_CTRL_GET_WINSIZE) {
-        /* Typed control (replaces ioctl TIOCGWINSZ): versioned argument
-         * struct, requires the Control right (checked at lookup). */
+    /* ---- terminal / open-file control (typed, replaces ioctl) ---- */
+
+    if (op == A20_HANDLE_CTRL_GET_WINSIZE || op == A20_HANDLE_CTRL_SET_WINSIZE) {
         if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
@@ -555,51 +564,84 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
-        a20_winsize_args_t w;
-        memset(&w, 0, sizeof(w));
-        w.size = sizeof(w);
-        w.version = 1;
-        w.ws_row = 24;
-        w.ws_col = 80;
         int gfd = (int)(uintptr_t)entry.object;
         struct { uint16_t r, c, x, y; } ws;
-        if (vfs_ioctl(gfd, 0x5413 /* TIOCGWINSZ */, &ws) == 0) {
-            w.ws_row = ws.r;
-            w.ws_col = ws.c;
-            w.ws_xpixel = ws.x;
-            w.ws_ypixel = ws.y;
-        }
-        if (copy_to_user(uw, &w, sizeof(w)) < 0)
-            r = -A20_ERR_FAULT;
-        else
-            r = A20_OK;
-        goto out_entry;
-    }
-
-    if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DEVICE) {
-        int gfd = (int)(uintptr_t)entry.object;
-        switch (op) {
-        case A20_HANDLE_CTRL_IOCTL:
-            r = vfs_ioctl(gfd, (unsigned long)arg0, (void *)arg1);
-            break;
-        case A20_HANDLE_CTRL_FCNTL:
-            r = vfs_fcntl(gfd, (int)arg0, (long)arg1);
-            break;
-        default:
-            r = -A20_ERR_INVALID_ARGUMENT;
-            break;
-        }
-        goto out_entry;
-    }
-
-    if (entry.type == A20_OBJ_SOCKET) {
-        int gfd = (int)(uintptr_t)entry.object;
-        if (op == A20_HANDLE_CTRL_FCNTL && arg0 == F_SETFL) {
-            int socket_result = net_set_nonblock(gfd, ((int)arg1 & O_NONBLOCK) != 0);
-            r = a20_native_vfs_result(socket_result);
+        if (op == A20_HANDLE_CTRL_GET_WINSIZE) {
+            a20_winsize_args_t w;
+            memset(&w, 0, sizeof(w));
+            w.size = sizeof(w);
+            w.version = 1;
+            w.ws_row = 24;
+            w.ws_col = 80;
+            if (vfs_ioctl(gfd, 0x5413 /* TIOCGWINSZ */, &ws) == 0) {
+                w.ws_row = ws.r;
+                w.ws_col = ws.c;
+                w.ws_xpixel = ws.x;
+                w.ws_ypixel = ws.y;
+            }
+            if (copy_to_user(uw, &w, sizeof(w)) < 0)
+                r = -A20_ERR_FAULT;
+            else
+                r = A20_OK;
             goto out_entry;
         }
-        r = -A20_ERR_NOT_SUPPORTED;
+        if (copy_from_user(&ws, uw, sizeof(ws)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        r = a20_native_vfs_result(vfs_ioctl(gfd, 0x5414 /* TIOCSWINSZ */, &ws));
+        goto out_entry;
+    }
+
+    if (op == A20_HANDLE_CTRL_TCFLUSH) {
+        if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)arg0;
+        if (!ui) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        a20_ctl_int_args_t ci;
+        r = a20_validate_struct_header(ui, sizeof(ci), 1);
+        if (r < 0) goto out_entry;
+        if (copy_from_user(&ci, ui, sizeof(ci)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        int gfd = (int)(uintptr_t)entry.object;
+        r = a20_native_vfs_result(vfs_ioctl(gfd, 0x540B /* TCFLSH */, &ci.value));
+        goto out_entry;
+    }
+
+    if (op == A20_HANDLE_CTRL_SET_FLAGS) {
+        /* Change open-file flags (O_NONBLOCK etc.), like fcntl(F_SETFL) but
+         * typed: valid_mask selects the bits to change. */
+        if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE &&
+            entry.type != A20_OBJ_SOCKET) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+        a20_ctl_flags_args_t *uf = (a20_ctl_flags_args_t *)arg0;
+        if (!uf) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        a20_ctl_flags_args_t cf;
+        r = a20_validate_struct_header(uf, sizeof(cf), 1);
+        if (r < 0) goto out_entry;
+        if (copy_from_user(&cf, uf, sizeof(cf)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        int gfd = (int)(uintptr_t)entry.object;
+        if (entry.type == A20_OBJ_SOCKET) {
+            int nonblock = (cf.flags & O_NONBLOCK) != 0;
+            r = a20_native_vfs_result(net_set_nonblock(gfd, nonblock));
+            goto out_entry;
+        }
+        r = a20_native_vfs_result(vfs_fcntl(gfd, F_SETFL, (long)cf.flags));
         goto out_entry;
     }
 

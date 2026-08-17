@@ -69,7 +69,6 @@ inline constexpr uint64_t A20_SYS_task_exit         = 0x0200;
 inline constexpr uint64_t A20_SYS_task_spawn        = 0x0201;
 inline constexpr uint64_t A20_SYS_task_clone        = 0x0213;
 inline constexpr uint64_t A20_SYS_execve            = 0x0214;
-inline constexpr uint64_t A20_SYS_ioctl             = 0x0215;
 inline constexpr uint64_t A20_SYS_task_adopt        = 0x0216;
 inline constexpr uint64_t A20_SYS_task_wait         = 0x0202;
 inline constexpr uint64_t A20_SYS_task_kill         = 0x0203;
@@ -133,9 +132,6 @@ inline constexpr uint64_t A20_SYS_system_reboot     = 0x0A02;
 inline constexpr uint64_t A20_SYS_futex_wait        = 0x0B00;
 inline constexpr uint64_t A20_SYS_futex_wake        = 0x0B01;
 inline constexpr uint64_t A20_SYS_handle_poll       = 0x010C;
-
-inline constexpr uint32_t A20_HANDLE_CTRL_CHDIR     = 5;
-inline constexpr uint32_t A20_HANDLE_CTRL_FCNTL     = 1;
 
 #if defined(__riscv)
 #define A20_SYSCALL_INSN "ecall"
@@ -404,9 +400,14 @@ struct a20_thread_create_args {
 inline constexpr uint32_t A20_CLONE_COW_VM = (1u << 0);
 inline constexpr uint32_t A20_CLONE_STACK = (1u << 1);
 
-inline constexpr uint32_t A20_HANDLE_CTRL_IOCTL = 0u;
 inline constexpr uint32_t A20_HANDLE_CTRL_SET_TEMPORAL = 2u;
+inline constexpr uint32_t A20_HANDLE_CTRL_GET_TEMPORAL = 3u;
+inline constexpr uint32_t A20_HANDLE_CTRL_SET_LABEL = 4u;
+inline constexpr uint32_t A20_HANDLE_CTRL_CHDIR = 5u;
 inline constexpr uint32_t A20_HANDLE_CTRL_GET_WINSIZE = 6u;
+inline constexpr uint32_t A20_HANDLE_CTRL_SET_WINSIZE = 7u;
+inline constexpr uint32_t A20_HANDLE_CTRL_TCFLUSH = 8u;
+inline constexpr uint32_t A20_HANDLE_CTRL_SET_FLAGS = 9u;
 
 struct a20_winsize_args {
 	uint32_t size;
@@ -415,6 +416,20 @@ struct a20_winsize_args {
 	uint16_t ws_col;
 	uint16_t ws_xpixel;
 	uint16_t ws_ypixel;
+};
+
+struct a20_ctl_int_args {
+	uint32_t size;
+	uint32_t version;
+	int32_t value;
+	uint32_t reserved;
+};
+
+struct a20_ctl_flags_args {
+	uint32_t size;
+	uint32_t version;
+	int32_t valid_mask;
+	int32_t flags;
 };
 
 struct a20_clone_handle {
