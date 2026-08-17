@@ -937,7 +937,6 @@ int64_t sys_a20_task_adopt(const a20_syscall_args_t *args)
 
 extern int sys_execve(const char *path, char **argv, char **envp);
 extern int64_t a20_native_vfs_result(int r);
-extern int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg);
 
 int64_t sys_a20_execve(const a20_syscall_args_t *args)
 {
@@ -948,27 +947,6 @@ int64_t sys_a20_execve(const a20_syscall_args_t *args)
     if (r == 0)
         return A20_OK;
     return a20_native_vfs_result(r);
-}
-
-/* ioctl on a native handle: resolve the handle to a gfd, then reuse the
- * shared Linux ioctl path (tty/pty window-size, foreground pgid, etc.). */
-int64_t sys_a20_ioctl(const a20_syscall_args_t *args)
-{
-    a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    unsigned long req = (unsigned long)A20_ARG(1);
-    void *arg = (void *)A20_ARG(2);
-
-    task_t *cur = proc_current();
-    struct a20_ht_internal *ht = task_get_a20_ht(cur);
-    if (!ht) return -A20_ERR_BAD_HANDLE;
-
-    a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_INVALID, 0, &entry);
-    if (r < 0) return r;
-    int gfd = (int)(uintptr_t)entry.object;
-    a20_object_release(entry.object, entry.type);
-
-    return a20_native_vfs_result(sys_ioctl_gfd(gfd, req, arg));
 }
 
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
