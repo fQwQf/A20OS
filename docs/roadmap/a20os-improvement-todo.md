@@ -46,7 +46,7 @@
   - 新测量（`fqwqf/performance-overhaul`，`-smp 8 thread=multi` mm_stress）：`proc_lock` 仍是唯一显著
     热点（约 3.3 万次竞争/1600 万自旋），callsite 归因显示竞争集中于**互斥量 park/wake 协议**与
     **切换发布路径**；把 pick 拆出只是第一步，完整消除需按等待对象分锁并合并切换路径的两次获取，
-    见 `docs/research/11-perf-overhaul.md` §3。
+    见 `docs/roadmap/perf-overhaul.md` §3。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
   - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 和正式 functional tests 10/10；`e33c3219` 未重跑。

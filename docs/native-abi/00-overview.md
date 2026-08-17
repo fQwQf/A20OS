@@ -152,7 +152,7 @@ Linux userland          Native userland
          mm / proc / vfs / net
 ```
 
-双 ABI 形式化隔离的完整证明见研究笔记 `docs/research/04-theory-deep-dive.md §9`。
+双 ABI 形式化隔离的完整证明见研究笔记 `docs/research/05-capability-envelopes.md`（语义级能力边界）与 `docs/research/06-formal-foundations.md §9`（模块依赖级隔离）。
 
 ## libc / runtime 设计
 
@@ -276,7 +276,7 @@ Native ABI 当前登记 126 个 syscall，而 Linux ABI 表登记 343 个。这�
 - `event_queue`：为 channel/timer/task 等对象提供统一等待模型；file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
 - `security_get_context`/`security_set_context`：统一 uid/gid/cap。
 
-完整分类对比、未覆盖 Linux 功能（由兼容层模拟）以及形式化讨论，见 [OS-Design.md](../OS-Design.md) §4 与 `docs/research/04-theory-deep-dive.md §9`。
+完整分类对比、未覆盖 Linux 功能（由兼容层模拟）以及形式化讨论，见 [OS-Design.md](../OS-Design.md) §4 与 `docs/research/05-capability-envelopes.md`。
 
 ## 当前状态与路线
 
