@@ -120,16 +120,19 @@ typedef struct a20_control_args {
 
 规则：`namespace_id` 表明命令属于哪个对象协议；命令结构也必须版本化；通用操作应优先设计成明确 syscall，不滥用 control。
 
-### handle_control 命令与 a20_handle_temporal_args_t — 时态能力控制
+### handle_control 命令 — 类型化控制（无 ioctl shim）
 
-当前 `handle_control` 的 syscall 形式为 `handle_control(handle, op, arg0, arg1)`。op 0/1 为 file/device 的 ioctl/fcntl 透传；op 2–4 操作 handle 条目本身：
+`handle_control(handle, op, arg0, arg1)` 的 op 定义与版本化参数结构体见 `03-handle.md §2.7`。要点：**Native ABI 无通用 ioctl**；所有携带数据的 op 用 `{size, version}` 版本化结构体（`a20_handle_temporal_args_t`、`a20_winsize_args_t`、`a20_ctl_int_args_t`、`a20_ctl_flags_args_t`），并遵循 E-APPEND 演进规则。
 
 ```c
-#define A20_HANDLE_CTRL_IOCTL          0u
-#define A20_HANDLE_CTRL_FCNTL          1u
 #define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t* */
 #define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t* */
-#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = 新标签（0=L,1=M,2=H，仅可上调） */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = a20_ctl_int_args_t*（仅可上调） */
+#define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> 当前 cwd */
+#define A20_HANDLE_CTRL_GET_WINSIZE    6u  /* arg0 = a20_winsize_args_t*（out） */
+#define A20_HANDLE_CTRL_SET_WINSIZE    7u  /* arg0 = a20_winsize_args_t*（in） */
+#define A20_HANDLE_CTRL_TCFLUSH        8u  /* arg0 = a20_ctl_int_args_t*（queue） */
+#define A20_HANDLE_CTRL_SET_FLAGS      9u  /* arg0 = a20_ctl_flags_args_t* */
 
 /* 时态能力控制（03-handle.md §2.6，06-security.md §6）。
  * SET 仅可增强（non-refreshability）：flag 只能添加不能清除，
