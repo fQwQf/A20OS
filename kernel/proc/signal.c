@@ -201,6 +201,19 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     if (!t || !t->signals)
         return -EINVAL;
 
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+    /* Native tasks observe signals through the handle-table checkpoint set
+     * (sys_a20_signal_check); their handlers live in the libc (mlibc), not
+     * in the kernel signal state.  Pend into the checkpoint set FIRST so the
+     * kernel's default-ignore discard below (e.g. SIGCHLD) cannot swallow a
+     * signal a native sigsuspend/checkpoint must see. */
+    if (t->abi_mode == 1 && t->a20_ht) {
+        struct a20_ht_internal *ht = (struct a20_ht_internal *)t->a20_ht;
+        extern void a20_ht_sig_pend(struct a20_ht_internal *ht, int sig);
+        a20_ht_sig_pend(ht, signum);
+    }
+#endif
+
     signal_state_t *ss = (signal_state_t *)t->signals;
     int is_user = t->pgdir != NULL;
     int fatal = 0;
