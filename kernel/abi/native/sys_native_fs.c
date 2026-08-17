@@ -78,7 +78,7 @@ extern int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
                                        a20_rights_t requested_rights,
                                        a20_handle_t *out_handle);
 
-static int64_t a20_native_vfs_result(int r)
+int64_t a20_native_vfs_result(int r)
 {
     if (r >= 0) return r;
     switch (-r) {
@@ -534,6 +534,48 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
         goto out_entry;
     }
 
+    if (op == A20_HANDLE_CTRL_GET_WINSIZE) {
+        /* Typed control (replaces ioctl TIOCGWINSZ): versioned argument
+         * struct, requires the Control right (checked at lookup). */
+        if (entry.type != A20_OBJ_FILE && entry.type != A20_OBJ_DEVICE) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+        a20_winsize_args_t *uw = (a20_winsize_args_t *)arg0;
+        if (!uw) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        uint32_t hdr[2];
+        if (copy_from_user(hdr, uw, sizeof(hdr)) < 0) {
+            r = -A20_ERR_FAULT;
+            goto out_entry;
+        }
+        if (hdr[1] < 1 || hdr[1] > 1 || hdr[0] < sizeof(a20_winsize_args_t)) {
+            r = -A20_ERR_INVALID_ARGUMENT;
+            goto out_entry;
+        }
+        a20_winsize_args_t w;
+        memset(&w, 0, sizeof(w));
+        w.size = sizeof(w);
+        w.version = 1;
+        w.ws_row = 24;
+        w.ws_col = 80;
+        int gfd = (int)(uintptr_t)entry.object;
+        struct { uint16_t r, c, x, y; } ws;
+        if (vfs_ioctl(gfd, 0x5413 /* TIOCGWINSZ */, &ws) == 0) {
+            w.ws_row = ws.r;
+            w.ws_col = ws.c;
+            w.ws_xpixel = ws.x;
+            w.ws_ypixel = ws.y;
+        }
+        if (copy_to_user(uw, &w, sizeof(w)) < 0)
+            r = -A20_ERR_FAULT;
+        else
+            r = A20_OK;
+        goto out_entry;
+    }
+
     if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DEVICE) {
         int gfd = (int)(uintptr_t)entry.object;
         switch (op) {
@@ -664,7 +706,9 @@ int64_t sys_a20_path_link_at(const a20_syscall_args_t *args)
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_link_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
-    if (kargs.flags != 0)
+    /* AT_SYMLINK_FOLLOW is the default for linkat (vfs_link already resolves
+     * the source through symlinks); reject any other flag. */
+    if (kargs.flags & ~AT_SYMLINK_FOLLOW)
         return -A20_ERR_INVALID_ARGUMENT;
 
     char old_path[MAX_PATH_LEN], new_path[MAX_PATH_LEN];
