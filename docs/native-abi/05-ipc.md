@@ -108,7 +108,7 @@ typedef struct a20_channel_type {
 **设计意图**：类型化通道使得内核能够强制执行 IPC 通信的结构约束，而不是仅依赖用户态协议（如 FIDL）。这提供了：
 - 被攻破的进程无法向 channel 发送错误类型的 handle
 - 系统管理员可以静态分析哪些进程对之间可以传输哪些类型的资源
-- 形式化证明可以建立在通道类型之上（定理 2.1-2.3，见 09-innovation-deep-dive.md §2）
+- 形式化证明可以建立在通道类型之上（定理 2.1-2.3，见 `docs/research/04-typed-channels.md`）
 
 ### 2.4 Channel 创建
 
