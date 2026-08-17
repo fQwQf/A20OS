@@ -24,7 +24,7 @@
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 
-`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
+`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong/龙芯杯，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
 
 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。LoongArch64、x86_64、PPC64LE 的 NOMMU 配置在构建入口被拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
@@ -34,7 +34,7 @@
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
-`make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke，可能运行较长时间。
+`make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke；阻塞点、信号/退出、timeout、SMP runqueue 与本地 pick 五个边界门禁分别依赖 `smoke-proc-stress`、`smoke-futex-stress` 和 `smoke-sched-stress`（在 QEMU 中 grep 运行时日志，而非源码标记），可能运行较长时间。
 
 ## 运行手册
 
@@ -103,7 +103,7 @@
 - **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 的镜像，在 QEMU 中运行 `syscall_smoke` 与 `poweroff`，确认串口日志出现 `SYSCALL_SMOKE: PASS`。
 - **When it fails**: 检查 `.kernel-build/smoke/abi-linux-riscv64.log` 中是否因 `SYSCALL_SMOKE: PASS` 未出现而超时；修复 `user/cmds/core/syscall_smoke.c` 或 Linux ABI 实现。
 
-`make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它把 watchdog timeout 当作可接受结果，不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
+`make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它要求串口日志出现 `part ok` 与 `System is going down for power-off NOW`（即内核完成 bring-up 并主动关机）；watchdog timeout 视为失败。它不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
 
 ### 信号、停止与退出
 - **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。

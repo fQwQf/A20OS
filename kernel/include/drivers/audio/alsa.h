@@ -40,7 +40,7 @@ int alsa_pcm_create_file(int playback);
 /* Create the ALSA control node backend. */
 int alsa_control_create_file(void);
 
-/* vfile variants used by the /dev/snd/* devfs open path. */
+/* vfile variants used by the /dev/snd devfs open path. */
 struct vfile *alsa_pcm_create_vfile(int playback);
 struct vfile *alsa_control_create_vfile(void);
 

@@ -9,13 +9,15 @@ smoke-riscv64:
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if [ "$$status" -eq 124 ]; then \
-		echo "smoke-riscv64: timeout reached; log saved to $$log"; \
-	elif [ "$$status" -eq 0 ]; then \
-		echo "smoke-riscv64: QEMU exited normally; log saved to $$log"; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-riscv64: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-riscv64: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
 	else \
-		echo "smoke-riscv64: QEMU failed with status $$status; tail of $$log:"; \
-		tail -n 40 "$$log"; \
+		echo "smoke-riscv64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
 
@@ -90,13 +92,15 @@ smoke-loongarch64:
 		-machine virt -m 1G -nographic -smp 1 \
 		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if [ "$$status" -eq 124 ]; then \
-		echo "smoke-loongarch64: timeout reached; log saved to $$log"; \
-	elif [ "$$status" -eq 0 ]; then \
-		echo "smoke-loongarch64: QEMU exited normally; log saved to $$log"; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-loongarch64: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-loongarch64: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
 	else \
-		echo "smoke-loongarch64: QEMU failed with status $$status; tail of $$log:"; \
-		tail -n 40 "$$log"; \
+		echo "smoke-loongarch64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
 
@@ -111,13 +115,15 @@ smoke-aarch64:
 		-global virtio-mmio.force-legacy=false \
 		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if [ "$$status" -eq 124 ]; then \
-		echo "smoke-aarch64: timeout reached; log saved to $$log"; \
-	elif [ "$$status" -eq 0 ]; then \
-		echo "smoke-aarch64: QEMU exited normally; log saved to $$log"; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-aarch64: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-aarch64: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
 	else \
-		echo "smoke-aarch64: QEMU failed with status $$status; tail of $$log:"; \
-		tail -n 40 "$$log"; \
+		echo "smoke-aarch64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
 
@@ -131,13 +137,40 @@ smoke-x86_64:
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
 		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-bringup/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if [ "$$status" -eq 124 ]; then \
-		echo "smoke-x86_64: timeout reached; log saved to $$log"; \
-	elif [ "$$status" -eq 0 ]; then \
-		echo "smoke-x86_64: QEMU exited normally; log saved to $$log"; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-x86_64: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-x86_64: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
 	else \
-		echo "smoke-x86_64: QEMU failed with status $$status; tail of $$log:"; \
-		tail -n 40 "$$log"; \
+		echo "smoke-x86_64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit "$$status"; \
+	fi
+
+# Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
+# complete bring-up and power off, exercising SMP init on real secondaries.
+smoke-smp-bringup:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/riscv64-smp2-bringup.log"; \
+	status=0; \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 2 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-smp2/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-smp-bringup: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-smp-bringup: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-smp-bringup: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
 
@@ -750,6 +783,52 @@ smoke-signalfd-stress:
 		echo "smoke-signalfd-stress: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-signalfd-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-pty-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/pty-stress-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'pty_stress\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'pty_stress: PASS' "$$log"; then \
+		echo "smoke-pty-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-pty-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+smoke-timeout-test:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/timeout-test-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'timeout_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'TIMEOUT_TEST: PASS' "$$log"; then \
+		echo "smoke-timeout-test: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-timeout-test: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
