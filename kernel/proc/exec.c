@@ -431,63 +431,101 @@ static uint64_t exec_setup_native_abi(task_t *t,
                                        char *const *k_envp,
                                        vaddr_t *start_info_out)
 {
-    struct a20_ht_internal *ht = a20_ht_create();
-    if (ht) {
-        /* Release the pre-exec table (if any) before installing the new one;
-         * exec replaces the whole address space and capability set. */
-        void *old = __atomic_exchange_n(&t->a20_ht, ht, __ATOMIC_ACQ_REL);
-        if (old)
-            a20_ht_put_ref((struct a20_ht_internal *)old);
+    /* A native->native exec preserves the caller's handle table so that
+     * fork+exec keeps its stdio (pipes/files the fork child wired up via
+     * dup2).  A Linux->native exec builds a fresh table. */
+    struct a20_ht_internal *ht = (struct a20_ht_internal *)t->a20_ht;
+    int preserve = (ht != NULL);
+    if (!ht) {
+        ht = a20_ht_create();
+        if (ht) {
+            void *old = __atomic_exchange_n(&t->a20_ht, ht, __ATOMIC_ACQ_REL);
+            if (old)
+                a20_ht_put_ref((struct a20_ht_internal *)old);
+        }
     }
 
     uint32_t stdin_h = 0xFFFFFFFF, stdout_h = 0xFFFFFFFF, stderr_h = 0xFFFFFFFF;
     if (ht) {
-        int console_rd = vfs_open("/dev/console", O_RDONLY, 0);
-        if (console_rd >= 0) {
-            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_rd,
-                                           A20_OBJ_FILE, A20_RIGHT_READ | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-            if (h >= 0) stdin_h = (uint32_t)h;
-        }
-        int console_wr = vfs_open("/dev/console", O_WRONLY, 0);
-        if (console_wr >= 0) {
-            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr,
-                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-            if (h >= 0) stdout_h = (uint32_t)h;
-        }
-        int console_wr2 = vfs_open("/dev/console", O_WRONLY, 0);
-        if (console_wr2 >= 0) {
-            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)console_wr2,
-                                           A20_OBJ_FILE, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP);
-            if (h >= 0) stderr_h = (uint32_t)h;
+        if (preserve && t->a20_stdio_adopted) {
+            /* mlibc declared its current fd 0/1/2 handles (A20_SYS_task_adopt);
+             * they are valid in the preserved table. */
+            stdin_h = t->a20_stdin_h;
+            stdout_h = t->a20_stdout_h;
+            stderr_h = t->a20_stderr_h;
+        } else {
+            /* Inherit the process's real fds 0/1/2 into the native stdio
+             * handles so that shell redirections (pipes/files) survive a
+             * Linux->Native execve.  Fall back to /dev/console when an fd is
+             * closed. */
+            struct {
+                int         fd;
+                a20_rights_t rights;
+                uint32_t   *out;
+            } stdio[3] = {
+                { 0, A20_RIGHT_READ  | A20_RIGHT_SEEK | A20_RIGHT_DUP | A20_RIGHT_CONTROL, &stdin_h },
+                { 1, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP | A20_RIGHT_CONTROL, &stdout_h },
+                { 2, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP | A20_RIGHT_CONTROL, &stderr_h },
+            };
+            for (int i = 0; i < 3; i++) {
+                int gfd = fdtable_get(t, stdio[i].fd);
+                int owns_ref;
+                if (gfd >= 0) {
+                    vfs_ref_fd(gfd);
+                    owns_ref = 1;
+                } else {
+                    int flags = (stdio[i].rights & A20_RIGHT_READ) ? O_RDONLY : O_WRONLY;
+                    gfd = vfs_open("/dev/console", flags, 0);
+                    if (gfd < 0)
+                        continue;
+                    owns_ref = 1;
+                }
+                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd,
+                                               A20_OBJ_FILE, stdio[i].rights);
+                if (h >= 0) {
+                    *stdio[i].out = (uint32_t)h;
+                } else if (owns_ref) {
+                    vfs_close(gfd);
+                }
+            }
         }
     }
 
     a20_handle_t self_h = 0;
     if (ht) {
-        int64_t h = a20_handle_install(ht, (void *)(uintptr_t)t->pid,
-                                       A20_OBJ_TASK,
-                                       A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
-                                       A20_RIGHT_STAT | A20_RIGHT_DUP);
-        if (h >= 0) self_h = (a20_handle_t)h;
+        if (preserve && t->a20_stdio_adopted) {
+            self_h = t->a20_self_h;
+        } else {
+            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)t->pid,
+                                           A20_OBJ_TASK,
+                                           A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
+                                           A20_RIGHT_STAT | A20_RIGHT_DUP);
+            if (h >= 0) self_h = (a20_handle_t)h;
+        }
     }
 
     uint32_t root_h = 0, cwd_h = 0;
     if (ht) {
-        int root_fd = vfs_open("/", O_RDONLY, 0);
-        if (root_fd >= 0) {
-            int64_t h = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
-                                           A20_OBJ_DIRECTORY,
-                                           A20_RIGHT_READ | A20_RIGHT_STAT |
-                                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-            if (h >= 0) {
-                root_h = (uint32_t)h;
-                vfs_ref_fd(root_fd);
-                int64_t h2 = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
-                                                A20_OBJ_DIRECTORY,
-                                                A20_RIGHT_READ | A20_RIGHT_STAT |
-                                                A20_RIGHT_DUP);
-                if (h2 >= 0) cwd_h = (uint32_t)h2;
-                if (!cwd_h) cwd_h = root_h;
+        if (preserve && t->a20_stdio_adopted) {
+            root_h = t->a20_root_h;
+            cwd_h = t->a20_cwd_h != A20_HANDLE_NULL ? t->a20_cwd_h : root_h;
+        } else {
+            int root_fd = vfs_open("/", O_RDONLY, 0);
+            if (root_fd >= 0) {
+                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
+                                               A20_OBJ_DIRECTORY,
+                                               A20_RIGHT_READ | A20_RIGHT_STAT |
+                                               A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+                if (h >= 0) {
+                    root_h = (uint32_t)h;
+                    vfs_ref_fd(root_fd);
+                    int64_t h2 = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
+                                                    A20_OBJ_DIRECTORY,
+                                                    A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                    A20_RIGHT_DUP);
+                    if (h2 >= 0) cwd_h = (uint32_t)h2;
+                    if (!cwd_h) cwd_h = root_h;
+                }
             }
         }
     }

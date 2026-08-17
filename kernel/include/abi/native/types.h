@@ -101,6 +101,27 @@ typedef struct a20_control_args {
 #define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
 #define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
 #define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> current cwd     */
+#define A20_HANDLE_CTRL_GET_WINSIZE    6u  /* arg0 = a20_winsize_args_t*          */
+
+/*
+ * Typed control operations (the A20 answer to ioctl).  ioctl's problems are
+ * its untyped void* argument, opaque magic-number commands, and lack of any
+ * capability discipline.  A20 control ops are instead:
+ *   - typed: each (object type, op) has a fixed, documented argument struct;
+ *   - versioned: the argument struct carries {size, version} and follows the
+ *     E-APPEND / E-DEPRECATE / E-RESERVED evolution rules, so a newer kernel
+ *     can extend it without breaking older callers;
+ *   - capability-gated: requires the handle's Control right.
+ * A20_HANDLE_CTRL_IOCTL / FCNTL remain as Linux-compatibility shims only.
+ */
+typedef struct a20_winsize_args {
+    uint32_t       size;        /* sizeof(a20_winsize_args_t) */
+    uint32_t       version;     /* 1 */
+    uint16_t       ws_row;
+    uint16_t       ws_col;
+    uint16_t       ws_xpixel;
+    uint16_t       ws_ypixel;
+} a20_winsize_args_t;
 
 /* Temporal capability control (docs/native-abi/03-handle.md §2.6,
  * docs/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only
@@ -250,6 +271,41 @@ typedef struct a20_task_spawn_args {
 
 /* v1 结构体大小（含尾部对齐填充）：即 v2 中 stdin_handle 之前的布局。 */
 #define A20_TASK_SPAWN_ARGS_V1_SIZE  72
+
+/* ---- Capability-safe clone (task_clone) ----
+ *
+ * A20OS 没有 fork。task_clone 是能力安全的"子进程续体"原语：
+ *  - 寄存器续体：子进程从调用点继续（a0 == 0 区分父子），内存按 COW 复制
+ *    （这是"自我状态"的复制，不构成能力授予）。
+ *  - 能力清单：子进程的 handle 表完全由 handles[] 逐项声明构建（与 task_spawn
+ *    同一纪律：权限 ⊆ 父进程、可降级、无隐式继承）。子进程拿不到清单之外的
+ *    任何 handle——这是与 fork（隐式复制全部能力）的根本区别。
+ *  - 返回：父进程得到子进程 pid；子进程 a0 == 0。 */
+#define A20_CLONE_COW_VM   (1u << 0)   /* 子进程 COW 复制地址空间（默认） */
+#define A20_CLONE_STACK    (1u << 1)   /* 使用 stack 字段覆盖子进程 SP */
+
+typedef struct a20_clone_handle {
+    a20_handle_t parent_handle;   /* in: 父进程持有的 handle */
+    a20_rights_t  child_rights;   /* in: 0 = 继承父进程权限，否则 ⊆ 父进程权限 */
+    a20_handle_t  child_handle;   /* out: 安装到子进程 handle 表的值 */
+} a20_clone_handle_t;
+
+typedef struct a20_clone_args {
+    uint32_t       size;
+    uint32_t       version;        /* 1 */
+    uint32_t       flags;
+    uint32_t       reserved;
+    uint64_t       handles;        /* 用户指针：a20_clone_handle_t[] */
+    uint32_t       handle_count;
+    uint32_t       reserved1;
+    a20_handle_t   root_dir;       /* 父进程的 root 目录 handle（写入子进程） */
+    a20_handle_t   cwd_dir;        /* 父进程的 cwd 目录 handle（写入子进程） */
+    uint64_t       stack;          /* A20_CLONE_STACK 时作为子进程 SP */
+    a20_handle_t   out_task;       /* out: 父进程收到的子任务 handle */
+    a20_handle_t   out_root;       /* out: 子进程 root 句柄（写回子进程内存） */
+    a20_handle_t   out_cwd;        /* out: 子进程 cwd 句柄 */
+    a20_handle_t   out_self;       /* out: 子进程 self task 句柄 */
+} a20_clone_args_t;
 
 typedef struct a20_task_status {
     uint32_t       size;

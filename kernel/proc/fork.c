@@ -14,7 +14,7 @@
 #include "ipc/handle_table.h"
 #endif
 
-static int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
+int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n)
 {
     if (!task || !task->pgdir)
         return -EFAULT;
@@ -361,6 +361,17 @@ int proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
                  int exit_signal)
 {
     return proc_clone_impl(flags, stack, ptid, tls, ctid, exit_signal, NULL);
+}
+
+/*
+ * Deferred-ready clone for the Native ABI task_clone: creates the child
+ * (COW address space, register continuation, fd/signal state) but does NOT
+ * make it runnable.  The caller installs the child's handle table and then
+ * calls proc_make_ready().  Returns the child pid; *out_task is referenced.
+ */
+int proc_clone_deferred(vaddr_t stack, task_t **out_task)
+{
+    return proc_clone_impl(0, stack, NULL, 0, NULL, SIGCHLD, out_task);
 }
 
 /*

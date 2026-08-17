@@ -84,6 +84,8 @@ void proc_task_init_idle_state(task_t *t, unsigned cpu);
 void proc_task_first_entry(void) NORETURN;
 void proc_destroy_task(task_t *t);
 task_t *proc_alloc_task_slot(void);
+int proc_clone_deferred(vaddr_t stack, task_t **out_task);
+int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n);
 void proc_complete_vfork(task_t *child);
 void proc_reap_detach_locked(task_t *t);
 
