@@ -95,13 +95,14 @@ typedef struct a20_control_args {
  * handle entry itself (temporal capability + label management).  Op 5 changes
  * the calling task's cwd to a directory handle. */
 
-#define A20_HANDLE_CTRL_IOCTL          0u
-#define A20_HANDLE_CTRL_FCNTL          1u
-#define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t*  */
-#define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
-#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
-#define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> current cwd     */
-#define A20_HANDLE_CTRL_GET_WINSIZE    6u  /* arg0 = a20_winsize_args_t*          */
+#define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t* */
+#define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t* */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = a20_ctl_int_args_t* (label) */
+#define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> current cwd    */
+#define A20_HANDLE_CTRL_GET_WINSIZE    6u  /* arg0 = a20_winsize_args_t* (out)   */
+#define A20_HANDLE_CTRL_SET_WINSIZE    7u  /* arg0 = a20_winsize_args_t* (in)    */
+#define A20_HANDLE_CTRL_TCFLUSH        8u  /* arg0 = a20_ctl_int_args_t* (queue) */
+#define A20_HANDLE_CTRL_SET_FLAGS      9u  /* arg0 = a20_ctl_flags_args_t*       */
 
 /*
  * Typed control operations (the A20 answer to ioctl).  ioctl's problems are
@@ -112,7 +113,10 @@ typedef struct a20_control_args {
  *     E-APPEND / E-DEPRECATE / E-RESERVED evolution rules, so a newer kernel
  *     can extend it without breaking older callers;
  *   - capability-gated: requires the handle's Control right.
- * A20_HANDLE_CTRL_IOCTL / FCNTL remain as Linux-compatibility shims only.
+ * There is no generic ioctl in the native ABI: terminal/device control is
+ * expressed with the typed ops above.  The POSIX ioctl() surface is
+ * translated to these ops in the libc (mlibc) and returns ENOTTY for ops
+ * with no native equivalent.
  */
 typedef struct a20_winsize_args {
     uint32_t       size;        /* sizeof(a20_winsize_args_t) */
@@ -122,6 +126,24 @@ typedef struct a20_winsize_args {
     uint16_t       ws_xpixel;
     uint16_t       ws_ypixel;
 } a20_winsize_args_t;
+
+/* Single-scalar control argument (TCFLUSH queue selector, security label). */
+typedef struct a20_ctl_int_args {
+    uint32_t       size;
+    uint32_t       version;     /* 1 */
+    int32_t        value;
+    uint32_t       reserved;
+} a20_ctl_int_args_t;
+
+/* Open-file flag change (SET_FLAGS): valid_mask selects which O_* bits to
+ * change; flags carries the new bits.  Access mode and creation flags are
+ * immutable after open, like POSIX fcntl(F_SETFL). */
+typedef struct a20_ctl_flags_args {
+    uint32_t       size;
+    uint32_t       version;     /* 1 */
+    int32_t        valid_mask;
+    int32_t        flags;
+} a20_ctl_flags_args_t;
 
 /* Temporal capability control (docs/native-abi/03-handle.md §2.6,
  * docs/native-abi/06-security.md §6).  SET_TEMPORAL is strengthening-only

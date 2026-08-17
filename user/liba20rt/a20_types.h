@@ -103,9 +103,6 @@ typedef uint64_t a20_vaddr_t;      /* Virtual address */
 
 #define A20_RIGHTS_NONE  ((a20_rights_t)0)
 
-/* handle_control operations */
-#define A20_HANDLE_CTRL_CHDIR 5u
-
 /* ========================================================================
  * ABI header convention
  * ======================================================================== */
@@ -286,13 +283,40 @@ typedef struct a20_control_args {
     uint64_t       out_actual;
 } a20_control_args_t;
 
-/* ---- handle_control commands ---- */
+/* ---- handle_control commands (typed, versioned; no ioctl shim) ---- */
 
-#define A20_HANDLE_CTRL_IOCTL          0u
-#define A20_HANDLE_CTRL_FCNTL          1u
 #define A20_HANDLE_CTRL_SET_TEMPORAL   2u  /* arg0 = a20_handle_temporal_args_t*  */
 #define A20_HANDLE_CTRL_GET_TEMPORAL   3u  /* arg0 = a20_handle_temporal_args_t*  */
-#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = new label (raise-only)       */
+#define A20_HANDLE_CTRL_SET_LABEL      4u  /* arg0 = a20_ctl_int_args_t* (label)  */
+#define A20_HANDLE_CTRL_CHDIR          5u  /* directory handle -> current cwd     */
+#define A20_HANDLE_CTRL_GET_WINSIZE    6u  /* arg0 = a20_winsize_args_t* (out)    */
+#define A20_HANDLE_CTRL_SET_WINSIZE    7u  /* arg0 = a20_winsize_args_t* (in)     */
+#define A20_HANDLE_CTRL_TCFLUSH        8u  /* arg0 = a20_ctl_int_args_t* (queue)  */
+#define A20_HANDLE_CTRL_SET_FLAGS      9u  /* arg0 = a20_ctl_flags_args_t*        */
+
+/* Typed control argument structs (versioned; E-APPEND evolution). */
+typedef struct a20_winsize_args {
+    uint32_t       size;
+    uint32_t       version;
+    uint16_t       ws_row;
+    uint16_t       ws_col;
+    uint16_t       ws_xpixel;
+    uint16_t       ws_ypixel;
+} a20_winsize_args_t;
+
+typedef struct a20_ctl_int_args {
+    uint32_t       size;
+    uint32_t       version;
+    int32_t        value;
+    uint32_t       reserved;
+} a20_ctl_int_args_t;
+
+typedef struct a20_ctl_flags_args {
+    uint32_t       size;
+    uint32_t       version;
+    int32_t        valid_mask;
+    int32_t        flags;
+} a20_ctl_flags_args_t;
 
 /* Temporal capability control.  SET is strengthening-only
  * (non-refreshability, docs/native-abi/06-security.md §6.4). */
