@@ -73,7 +73,7 @@
 
 如果你关注赛事设计、研究思路或工程路线图：
 
-- [research/00-index.md](research/00-index.md)：Native ABI 研究笔记的阅读索引
+- [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
 - [project/external-dependencies.md](project/external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明

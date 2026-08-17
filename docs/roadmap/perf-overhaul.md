@@ -8,7 +8,7 @@
 
 ## 1. 动机
 
-审计基线 `e33c3219` 之后（`docs/research/10-...performance-comparison.md`）指出的热路径中，
+审计基线 `e33c3219` 之后（`docs/roadmap/linux-audit-and-performance-comparison.md`）指出的热路径中，
 当前 `main` 仍保留三个高频全局 spinlock 和一条全盘 fsync：
 
 - **page cache 单全局锁**（`g_page_cache_lock`）：每次 warm hit 都要取锁 + 做全局 LRU 摘链/插头。
@@ -95,7 +95,7 @@ proc: 33335 16191822
   `idle_loop` 的 `spin_lock(&proc_lock)`）。
 - 结论：要消除 `proc_lock` 竞争，需要把 tokenized Park/Wake 状态机从单一全局锁改为按等待对象
   （wait queue / mutex / futex）分锁，并合并切换路径里 `sched()`/`context_switch` 的两次获取。
-  这属于 `docs/eevdf-scheduler.md` 与 `docs/research/10-...` 明确警告的"无 BuildStorm 完整验证前
+  这属于 `docs/eevdf-scheduler.md` 与 `docs/roadmap/linux-audit-and-performance-comparison.md` 明确警告的"无 BuildStorm 完整验证前
   不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式 BuildStorm 前可先量化
   收益，而不是靠猜测。
 
@@ -140,7 +140,7 @@ SMP8 mm_stress 测量：`proc` 竞争从 16-30K 区间降到 12-20K（中位数�
 - **`proc_lock` 拆分（park/wake 按对象分锁 + 切换路径合并获取）**：测量证明它是唯一剩余热点，
   但修复必须重构 tokenized Park/Wake 协议与切换发布路径；在无法跑正式 BuildStorm 的前提下，
   先保留 callsite 归因工具，待拿到真实工作负载证据再动。这是本轮最重要、也最需要谨慎的结论。
-- **EEVDF 有序链表 → 树/heap**：`docs/research/10-...` 与 `docs/eevdf-scheduler.md` 均明确
+- **EEVDF 有序链表 → 树/heap**：`docs/roadmap/linux-audit-and-performance-comparison.md` 与 `docs/eevdf-scheduler.md` 均明确
   "BuildStorm 没有证明 runqueue 锁是主瓶颈，不应先做高风险调度重写"；本节测量也显示 runq 竞争不大。
 - **slab per-CPU magazine**：高复杂度、高回归风险，且本次测量未把 slab 锁列为热点；应先用锁计数器
   确认后再做。
