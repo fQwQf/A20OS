@@ -21,7 +21,6 @@ int64_t sys_a20_task_exit(const a20_syscall_args_t *args);
 int64_t sys_a20_task_spawn(const a20_syscall_args_t *args);
 int64_t sys_a20_task_clone(const a20_syscall_args_t *args);
 int64_t sys_a20_execve(const a20_syscall_args_t *args);
-int64_t sys_a20_ioctl(const a20_syscall_args_t *args);
 int64_t sys_a20_task_adopt(const a20_syscall_args_t *args);
 int64_t sys_a20_task_wait(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args);
