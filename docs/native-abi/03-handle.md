@@ -227,16 +227,29 @@ Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle �
 
 ioctl 的三大缺陷是：**无类型**（`void*` 第三参数）、**opaque 命令码**（magic number、命名空间混乱、文档不全）、**无能力纪律**（不要求任何句柄权限）。它成为一切"标准接口说不清"操作的逃逸出口（GPU、终端、杂项设备）。
 
-A20 的控制操作（`handle_control`）用**类型化、版本化、能力门控**的模型替代：
+**A20 的 Native ABI 没有通用 ioctl。** 所有控制操作经 `handle_control(handle, op, args_versioned_struct_ptr)`，且满足：
 
 1. **类型化**：每个（对象类型, op）有固定、文档化的参数结构体，不可能是任意指针。
-2. **版本化**：参数结构体携带 `{size, version}`，遵循 E-APPEND / E-DEPRECATE / E-RESERVED 演进规则（`docs/native-abi/01-types.md §2`）——新内核可扩展结构体而不破坏旧调用方。
+2. **版本化**：参数结构体携带 `{size, version}`，遵循 E-APPEND / E-DEPRECATE / E-RESERVED 演进规则（`docs/native-abi/01-types.md §2`）——新内核可扩展结构体而不破坏旧调用方。**所有携带数据的 op 都用版本化结构体**（无裸 `arg0/arg1` 传数据）。
 3. **能力门控**：`handle_control` 要求 handle 的 `Control` right（`docs/native-abi/06-security.md` 权限表）。
-4. **命名空间清晰**：op 按对象类型解释；`A20_HANDLE_CTRL_GET_WINSIZE` 只对 file/device 有效，`SET_TEMPORAL` 只对任意 handle 有效。
+4. **命名空间清晰**：op 按对象类型解释；终端操作（6-8）只对 file/device 有效，`SET_TEMPORAL`/`SET_LABEL` 对任意 handle 有效，`SET_FLAGS` 对 file/device/socket 有效。
 
-**例：终端几何**。`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。op 0（`A20_HANDLE_CTRL_IOCTL`）和 op 1（`A20_HANDLE_CTRL_FCNTL`）是**保留的 Linux 兼容垫片**（mlibc 的 POSIX `ioctl()` 需要它们），不是推荐的新接口。
+**控制操作表**：
 
-> **定位**：`A20_SYS_ioctl`（0x0215，mlibc POSIX 垫片）与 `handle_control` op 0 是给 mlibc 的 Linux `ioctl()` 兼容用的；Native 程序应使用类型化 `handle_control` 操作。这回答了研究文档 01 §2.4 对 ioctl 的批判——A20 用类型化控制替代它，而不是复刻它。
+| op | 名称 | 参数结构体 | 语义 |
+|---|---|---|---|
+| 2 | `SET_TEMPORAL` | `a20_handle_temporal_args_t*` | 设置时态约束（仅可增强，见 §2.6） |
+| 3 | `GET_TEMPORAL` | `a20_handle_temporal_args_t*` | 查询时态参数 |
+| 4 | `SET_LABEL` | `a20_ctl_int_args_t*` | 上调 Bell-LaPadula 标签（仅可上调） |
+| 5 | `CHDIR` | —（handle 即目录） | 把 directory handle 设为当前 cwd |
+| 6 | `GET_WINSIZE` | `a20_winsize_args_t*`（out） | 查询终端几何（替代 `TIOCGWINSZ`） |
+| 7 | `SET_WINSIZE` | `a20_winsize_args_t*`（in） | 设置终端几何（替代 `TIOCSWINSZ`） |
+| 8 | `TCFLUSH` | `a20_ctl_int_args_t*`（queue） | 清空终端输入/输出队列（替代 `TCFLSH`） |
+| 9 | `SET_FLAGS` | `a20_ctl_flags_args_t*` | 修改 open-file 标志（`O_NONBLOCK` 等，替代 `fcntl(F_SETFL)` / `FIONBIO`） |
+
+**例：终端几何**。`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。`tcflush`、`tcsetwinsize` 同理走 `TCFLUSH`/`SET_WINSIZE`。
+
+> **POSIX 兼容定位**：mlibc 的 `ioctl()` 是**翻译层**——把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件锁/owner 元数据（`fcntl` F_GETLK 等）当前在 Native 上返回 `ENOTSUP`（暂无类型化等价物，作为明确不支持记录）。这回答了研究文档 01 §2.4 对 ioctl 的批判——A20 用类型化控制替代它，而不是复刻它。
 
 ---
 
@@ -477,7 +490,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0404 | `path_create` | `int64_t path_create(a20_path_create_args_t *args)` | 创建节点 |
 | 0x0405 | `path_unlink` | `int64_t path_unlink(const char *path, uint32_t path_len)` | 删除节点（当前按 cwd 解析相对路径） |
 | 0x0406 | `path_rename` | `int64_t path_rename(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 重命名 |
-| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 类型化对象控制（见 §2.7）：op 0/1 为 **Linux 兼容垫片** ioctl/fcntl；op 2/3 为 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，见 §2.6）；op 4 为 `SET_LABEL`（arg0 = 新标签，仅可上调）；op 5 将 directory handle 设置为当前 task 的 cwd；op 6 为 `GET_WINSIZE`（arg0 = `a20_winsize_args_t*`，版本化结构体，返回终端几何） |
+| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 类型化对象控制（见 §2.7，**无通用 ioctl**）：op 2/3 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，§2.6）；op 4 `SET_LABEL`（arg0 = `a20_ctl_int_args_t*`，仅可上调）；op 5 `CHDIR`（handle 即目录）；op 6/7 `GET_WINSIZE`/`SET_WINSIZE`（arg0 = `a20_winsize_args_t*`）；op 8 `TCFLUSH`（arg0 = `a20_ctl_int_args_t*`）；op 9 `SET_FLAGS`（arg0 = `a20_ctl_flags_args_t*`）。所有携带数据的 op 用版本化结构体 |
 | 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_dirent_t *entries, uint32_t buf_len)` | 目录列举（`buf_len` 为字节数） |
 | 0x0409 | `path_link` | `int64_t path_link(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 创建硬链接 |
 | 0x040A | `path_symlink` | `int64_t path_symlink(const char *target, uint32_t target_len, const char *linkpath, uint32_t linkpath_len)` | 创建符号链接 |

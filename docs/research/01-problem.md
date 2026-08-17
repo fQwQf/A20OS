@@ -35,7 +35,7 @@
 为支撑上述问题，保留对 POSIX/能力接口的必要批判（详细分析并入 02-system.md）：
 
 - **TOCTOU 根源**：全局字符串/整数标识符的"重新绑定" → handle 的内核管理绑定消除之（旧 01 §2.7 形式化）。
-- **fd 无法降权、碎片化标识符、ioctl 逃逸** → 统一 handle + rights + event_wait 的动机；ioctl 用**类型化控制**（`handle_control`，版本化参数结构体 + Control 门控）替代，而非复刻（`docs/native-abi/03-handle.md §2.7`）。
+- **fd 无法降权、碎片化标识符、ioctl 逃逸** → 统一 handle + rights + event_wait 的动机；ioctl 用**类型化控制**（`handle_control`，所有数据 op 用 `{size, version}` 版本化结构体 + Control 门控，**Native ABI 无通用 ioctl**）替代而非复刻；mlibc 的 POSIX `ioctl()` 是翻译层（未知请求 `ENOTTY`）（`docs/native-abi/03-handle.md §2.7`）。
 - **fork 隐式继承全部权限** → spawn 显式注入的最小权限可构造性（06 §2.4 S2）。
 
 **定位**：这些是"为什么要造新 Native ABI"的必要动机，**不是论文贡献**。论文贡献是预算能力 + 信封（03/05）。
