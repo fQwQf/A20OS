@@ -288,6 +288,8 @@ typedef struct mount {
     void           *fs_data;
 } mount_t;
 
+#define VFS_MOUNT_RDONLY 0x1
+
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192
 
@@ -407,6 +409,8 @@ int      vfs_getcwd(char *buf, size_t size);
 /* Mount */
 int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data);
 int      vfs_mount_bc(const char *path, const char *fstype, struct bcache *bc);
+int      vfs_mount_bc_flags(const char *path, const char *fstype,
+                            struct bcache *bc, int flags);
 int      vfs_umount(const char *path);
 
 /* Pipe */

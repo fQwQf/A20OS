@@ -3,6 +3,13 @@
 
 #define ARCH_HAS_LOCAL_TLB_FLUSH 1
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+/* Physical-board bring-up runs without interrupt delivery until the LS2K1000
+ * timer and interrupt-controller paths are validated.  Keep syscall dispatch
+ * consistent with that polling model instead of re-enabling CRMD.IE. */
+#define ARCH_SYSCALL_DISPATCH_NONPREEMPTIBLE 1
+#endif
+
 #include "core/types.h"
 #include "core/consts.h"
 #include "platform.h"
@@ -115,13 +122,16 @@ static inline uint64_t arch_read_ra(void) {
  *   Exception: Ecode from ESTAT[21:16]
  */
 static inline uint64_t arch_read_cause(void) {
-    uint64_t estat;
+    uint64_t estat, ecfg;
     __asm__ __volatile("csrrd %0, 0x5" : "=r"(estat));
     uint64_t ecode = (estat >> 16) & 0x3F;
     if (ecode != 0) {
         return ecode;
     }
-    uint64_t is = estat & 0xFFFF;
+    /* ESTAT.IS also reports masked hardware lines.  Firmware can leave those
+     * lines pending, so only dispatch interrupts enabled in ECFG.LIE. */
+    __asm__ __volatile("csrrd %0, 0x4" : "=r"(ecfg));
+    uint64_t is = estat & ecfg & 0x1FFF;
     if (is) {
         int irq = __builtin_ctzl(is);
         return (1UL << 63) | (uint64_t)irq;

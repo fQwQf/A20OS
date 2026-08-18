@@ -37,7 +37,12 @@ typedef struct {
     uint16_t refcount;   /* 0 = free, >0 = in-use */
     uint8_t  order;      /* buddy order */
     uint8_t  flags;      /* FRAME_F_* */
-} frame_meta_t;
+} __attribute__((aligned(8))) frame_meta_t;
+
+/* GCC may merge prev/next initialization into one 64-bit store.  Keep every
+ * array element 8-byte aligned for CPUs that trap unaligned accesses. */
+_Static_assert(sizeof(frame_meta_t) % 8 == 0,
+               "frame metadata must preserve 64-bit alignment");
 
 #define FRAME_F_FREE    0x00
 #define FRAME_F_ALLOC   0x01
