@@ -836,8 +836,17 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
          * to COW before exposing writes, and unmap/exit drops the mapping's
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
-        int fault_around = !shared && !(vma->pte_flags & PTE_W);
         int executable = (vma->pte_flags & PTE_X) != 0;
+#ifdef CONFIG_LOONGARCH64
+        /* LoongArch64 cannot yet retain private page-cache leaves safely
+         * across the parallel loader/fault lifetime.  Keep private file pages
+         * on the proven single-page copy path; direct executable leaves lose
+         * text PTEs, while direct read-only leaves corrupt dynamic symbols in
+         * librustc_driver under parallel-build. */
+        int fault_around = 0;
+#else
+        int fault_around = !shared && !(vma->pte_flags & PTE_W);
+#endif
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);
