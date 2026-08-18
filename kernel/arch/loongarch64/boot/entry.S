@@ -161,11 +161,11 @@ setup_mmu:
     li.d        $t0, 12
     csrwr       $t0, 0x1E              /* CSR_STLBPS */
 
-    /* TLBREHI.PS controls entries created by the refill path.  Linux sets
-     * this independently of STLBPS; leaving it at the firmware value makes
-     * the first user TLB miss implementation-dependent. */
+#ifdef CONFIG_BOARD_LS2K1000
+    /* TLBREHI.PS controls entries created by the LS2K refill path. */
     li.d        $t0, 12
     csrwr       $t0, 0x8E              /* CSR_TLBREHI */
+#endif
 
     /* Enable paging: CRMD.PG=1, DA=0, IE=0, PLV=0
      *   DATF=01 (CC) bit [6:5]  — coherent cached for fetch
