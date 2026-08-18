@@ -44,12 +44,12 @@ run_final_group() {
         return 127
     fi
 
-    # The LoongArch compiler's executable mappings currently use private
-    # pages for correctness.  Bound Cargo concurrency so four large rustc
+    # The LoongArch compiler's private mappings currently use copied pages for
+    # correctness.  Bound Cargo concurrency so two large rustc
     # address spaces fit comfortably in the official 8 GiB guest while QEMU
     # still exposes all eight required CPUs to the judge and workload.
     if [[ $group = buildstorm && $(uname -m) = loongarch64 ]]; then
-        cargo_jobs=4
+        cargo_jobs=2
         print "[FINAL-EVAL] LoongArch BuildStorm CARGO_BUILD_JOBS=$cargo_jobs"
     fi
 
