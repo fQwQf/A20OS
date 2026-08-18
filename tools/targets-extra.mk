@@ -4,6 +4,8 @@
 
 .PHONY: _run_extra_impl extra-fetch-sources
 
+RISCV_GCC_MUSL_LIBC ?= user/external/toolchain/musl-cross-make/output/riscv64-linux-musl/lib/libc.so
+
 # A fresh clone does not materialize optional application gitlinks.  Fetch
 # them before evaluating user/extra.mk so requested packages cannot be
 # silently omitted.  GitHub uses SSH by default; set VF2_GIT_TRANSPORT=https
@@ -16,7 +18,8 @@ extra-user-apps: extra-fetch-sources
 		PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
 		$(USER_BUILD_STAMP)
 	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" \
-		PACKAGES="$(EXTRA_PACKAGES)"
+		PACKAGES="$(EXTRA_PACKAGES)" \
+		CA_CERT_BUNDLE="$(CA_CERT_BUNDLE)"
 
 # Debian/Ubuntu cross toolchains already provide a complete target sysroot and
 # return immediately here.  Fedora's cross GCC omits it, so bootstrap the
@@ -84,6 +87,15 @@ $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
 		fi; \
 		if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
 			find user/external/apps/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
+			for f in user/build/extra/$(ARCH)/git-remote-http user/build/extra/$(ARCH)/git-remote-https; do \
+				[ ! -f "$$f" ] || find -H "$$f" -maxdepth 0 -printf 'git-helper %f %s %T@\n'; \
+			done; \
+			[ -z "$(CA_CERT_BUNDLE)" ] || find -L "$(CA_CERT_BUNDLE)" -maxdepth 0 -type f \
+				-printf 'ca-bundle %p %s %T@\n'; \
+		fi; \
+		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ]; then \
+			find -H "$(RISCV_GCC_MUSL_LIBC)" -maxdepth 0 -type f \
+				-printf 'gcc-musl-libc %p %s %T@\n'; \
 		fi; \
 		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 			for dir in "$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_LIB_DIR)"; do \
@@ -151,6 +163,14 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
 		printf '#!/bin/sh\nexec /test/bin/cc-real --sysroot=/test -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/cc"; \
+		if [ "$(ARCH)" = riscv64 ]; then \
+			MUSL_LIBC="$(RISCV_GCC_MUSL_LIBC)"; \
+			[ -f "$$MUSL_LIBC" ] || { \
+				echo "[EXTRA] missing GCC musl runtime $$MUSL_LIBC"; exit 1; \
+			}; \
+			mkdir -p "$(EXTRA_STAGING_DIR)/musl/lib"; \
+			cp "$$MUSL_LIBC" "$(EXTRA_STAGING_DIR)/musl/lib/libc.so"; \
+		fi; \
 	fi
 	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 		RUST=user/build/extra/$(ARCH)/obj/rust; \
@@ -200,6 +220,21 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ] && [ -d "$$GIT_TEMPLATE_SRC" ]; then \
 		mkdir -p "$$GIT_TEMPLATE_DST"; \
 		cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
+		for helper in git-remote-http git-remote-https; do \
+			src="user/build/extra/$(ARCH)/$$helper"; \
+			[ -x "$$src" ] || { echo "[EXTRA] missing Git HTTPS helper $$src"; exit 1; }; \
+			cp "$$src" "$(EXTRA_STAGING_DIR)/bin/$$helper"; \
+		done; \
+		[ -n "$(CA_CERT_BUNDLE)" ] && [ -f "$(CA_CERT_BUNDLE)" ] || { \
+			echo "[EXTRA] no host CA certificate bundle found; set CA_CERT_BUNDLE"; exit 1; \
+		}; \
+		mkdir -p "$(EXTRA_STAGING_DIR)/etc/ssl/certs"; \
+		cp -L "$(CA_CERT_BUNDLE)" \
+			"$(EXTRA_STAGING_DIR)/etc/ssl/certs/ca-certificates.crt"; \
+		if [ -n "$(EXTRA_DNS)" ]; then \
+			printf 'nameserver %s\noptions timeout:2 attempts:3\n' "$(EXTRA_DNS)" \
+				> "$(EXTRA_STAGING_DIR)/etc/resolv.conf"; \
+		fi; \
 	fi
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(EXTRA_IMG) bs=1048576 count=$(EXTRA_IMAGE_MB) 2>/dev/null
@@ -258,4 +293,10 @@ _run_extra_impl: extra-fetch-sources
 		echo "[EXTRA] fastfetch source unavailable; skipping"; \
 	fi
 	$(MAKE) ARCH=$(ARCH) EXTRA_IMG=$(EXTRA_IMG) extra-img
-	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF)
+	$(QEMU) $(QEMU_FLAGS_NO_SDCARD) $(EXTRA_QEMU_BLK) -kernel $(KERNEL_ELF) \
+		$(EXTRA_QEMU_APPEND)
+
+EXTRA_DNS_riscv64 = 10.0.2.3
+EXTRA_DNS = $(EXTRA_DNS_$(ARCH))
+EXTRA_QEMU_APPEND_riscv64 = -append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=$(EXTRA_DNS_riscv64) a20.hostname=a20os'
+EXTRA_QEMU_APPEND = $(EXTRA_QEMU_APPEND_$(ARCH))
