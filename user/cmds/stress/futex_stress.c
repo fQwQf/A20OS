@@ -143,6 +143,41 @@ static int requeue_cases(void)
     return r;
 }
 
+/* A timeout can win after another task has moved the waiter to a different
+ * futex bucket.  The waiter must unlink from its current bucket; otherwise a
+ * freed node remains on the destination list and the next wake dereferences
+ * recycled heap contents. */
+static int requeue_timeout_cleanup(void)
+{
+    int *words = shared_words(2);
+    if (!words)
+        return fail("requeue-timeout-mmap");
+    words[0] = 11;
+    words[1] = 0;
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("requeue-timeout-fork");
+    if (pid == 0) {
+        struct timespec timeout = {0, 100000000};
+        errno = 0;
+        long r = syscall(SYS_futex, &words[0], FUTEX_WAIT, 11,
+                         &timeout, NULL, 0);
+        _exit(r == -1 && errno == ETIMEDOUT ? 0 : 6);
+    }
+
+    usleep(20000);
+    if (syscall(SYS_futex, &words[0], FUTEX_CMP_REQUEUE, 0, (void *)1,
+                &words[1], 11) != 1)
+        return fail("requeue-timeout-move");
+    int r = wait_exit(pid, 0, "requeue-timeout-child");
+    if (r == 0 && syscall(SYS_futex, &words[1], FUTEX_WAKE, 1,
+                          NULL, NULL, 0) != 0)
+        r = fail("requeue-timeout-stale-wake");
+    munmap(words, 2 * sizeof(int));
+    return r;
+}
+
 static int private_shared_boundary(void)
 {
     int private_word = 0;
@@ -317,6 +352,9 @@ int main(void)
         return 1;
     if (requeue_cases() != 0)
         return 1;
+    if (requeue_timeout_cleanup() != 0)
+        return 1;
+    printf("FUTEX_STRESS: requeue-timeout-cleanup PASS\n");
     if (private_shared_boundary() != 0)
         return 1;
     if (unrelated_wake_isolation() != 0)

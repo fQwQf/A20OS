@@ -123,7 +123,7 @@ $(ZLIB_LIB): $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
 	@echo "[EXTRA] Building zlib for $(ARCH)..."
 	cd $(ZLIB_BUILD) && \
 	  CHOST=$(CROSS_COMPILE:%-=%) \
-	  'CC=$(CC)' 'AR=$(AR)' 'RANLIB=$(RANLIB)' \
+	  CC="$(CC)" AR="$(AR)" RANLIB="$(RANLIB)" \
 	  CFLAGS="$(ZLIB_CFLAGS)" \
 	  $(ZLIB_SRC)/configure --static
 	# Cross-link probes cannot use our bare-metal compiler command directly;
