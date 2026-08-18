@@ -76,12 +76,17 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
-            libevdev stubs libdrm libinput mesa glib dbus atk gdk-pixbuf \
-            cairo pango gtk3 \
-            libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
-            gtk-layer-shell \
-            xfce4-panel xfdesktop xfce4-session thunar \
-            wlroots labwc weston ffmpeg player)
+            libevdev stubs libdrm libinput mesa glib dbus \
+            weston ffmpeg player)
+    if [ "${GUI_DESKTOP:-weston}" = xfce ]; then
+        PHASES+=(atk gdk-pixbuf cairo pango gtk3 \
+                 libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
+                 gtk-layer-shell xfce4-panel xfdesktop xfce4-session thunar \
+                 wlroots labwc)
+    fi
+    # The phase list above is intentionally mode-specific; use it as the
+    # allowlist so Weston builds do not pull in the XFCE stack.
+    WANT_ALL=0
 fi
 
 want() {

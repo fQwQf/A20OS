@@ -47,7 +47,7 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 		user/wayland/desktop-shell.c user/wayland/input-method.c \
 		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
 		user/cmds/core/wayland-session.c \
-		$(WAYLAND_WESTON_PATCH) \
+		$(WAYLAND_WESTON_PATCHES) \
 		user/external/libs/ffmpeg/configure kernel/include/uapi/a20/audio.h
 	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
 		[ user/wayland/build.sh -nt $(WAYLAND_FFMPEG_STAMP) ] || \
@@ -61,7 +61,7 @@ $(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
 	fi
 	@if [ ! -f $(WAYLAND_WESTON_STAMP) ] || \
 		[ user/wayland/build.sh -nt $(WAYLAND_WESTON_STAMP) ] || \
-		[ $(WAYLAND_WESTON_PATCH) -nt $(WAYLAND_WESTON_STAMP) ]; then \
+		find $(WAYLAND_WESTON_PATCHES) -newer $(WAYLAND_WESTON_STAMP) -print -quit | grep -q .; then \
 		rm -f $(WAYLAND_WESTON_STAMP); \
 	fi
 	@rm -f $(WAYLAND_PLAYER_STAMP)
@@ -80,8 +80,17 @@ $(GUI_MEDIA_STAMP): FORCE
 	fi; \
 	trap - EXIT INT TERM
 
+$(GUI_DESKTOP_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@set -e; \
+	tmp="$@.tmp.$$$$"; \
+	trap 'rm -f "$$tmp"' EXIT INT TERM; \
+	printf '%s\n' '$(GUI_DESKTOP)' > "$$tmp"; \
+	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
+	trap - EXIT INT TERM
+
 $(GUI_FAT32_IMG): FAT32_IMAGE_MB = $(GUI_FAT32_IMAGE_MB)
-$(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP)
+$(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP) $(GUI_DESKTOP_STAMP)
 	@set -e; \
 	lock="$(GUI_FAT32_IMG).lock"; \
 	tmp="$(GUI_FAT32_IMG).tmp.$$$$"; \
@@ -92,7 +101,7 @@ $(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP)
 	printf '1\n' | mcopy -o -i "$$tmp" - ::/etc/a20-gui; \
 	printf '1\n' | mcopy -o -i "$$tmp" - ::/a20-gui; \
 	if [ "$(WAYLAND_GUI)" = 1 ]; then \
-		user/wayland/install-image.sh "$$tmp" $(ARCH) "$(GUI_MEDIA)"; \
+		GUI_DESKTOP="$(GUI_DESKTOP)" user/wayland/install-image.sh "$$tmp" $(ARCH) "$(GUI_MEDIA)" "$(GUI_DESKTOP)"; \
 	fi; \
 	mv -f "$$tmp" "$(GUI_FAT32_IMG)"; \
 	trap - EXIT INT TERM

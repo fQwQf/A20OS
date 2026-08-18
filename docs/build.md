@@ -59,13 +59,26 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
 - `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
 - `GUI_MEDIA`: 可选的 H.264/AAC MP4。仅在命令行显式设置时写入 GUI 镜像的 `/media/demo.mp4`；未设置时桌面和播放器仍会安装，但不会创建默认媒体或播放器 launcher。
+- `GUI_DESKTOP`: GUI 默认桌面，默认为 `weston`；可设为 `xfce` 恢复 XFCE/labwc 实验路径。
 
 ## Wayland 媒体播放
 
-`run-gui-riscv64`、`run-gui-aarch64`、`run-gui-x86_64` 和 `run-gui-loongarch64` 会构建并安装 Weston、A20OS SHM desktop helper、精简 FFmpeg 共享库和 `a20-player`。启动后会持久进入 Weston desktop shell；播放器不再由 session 自动启动或退出时关闭桌面，可通过镜像中的 `/bin/run-player.sh` 启动。
+`run-gui-riscv64`、`run-gui-aarch64`、`run-gui-x86_64` 和 `run-gui-loongarch64` 默认进入 Weston desktop shell，并安装 A20OS SHM desktop helper、精简 FFmpeg 共享库和 `a20-player`。需要测试 XFCE/labwc 时可设置 `GUI_DESKTOP=xfce`。播放器不由 session 自动启动，可通过镜像中的 `/bin/run-player.sh` 启动。
 
 ```bash
 make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
+```
+
+启动后，在 Weston 终端中执行：
+
+```sh
+/bin/run-player.sh
+```
+
+也可以播放镜像中的其他文件：
+
+```sh
+/bin/run-player.sh /path/to/video.mp4
 ```
 
 未设置 `GUI_MEDIA` 时，`run-player.sh` 不带参数会显示用法；仍可执行 `run-player.sh /path/to/video.mp4` 播放镜像中其他位置的媒体。显式指定但文件不存在时，镜像构建会失败，而不是静默换用测试素材。

@@ -32,6 +32,9 @@ else
 DRVMOD_MODULES :=
 endif
 DRVMOD_CFLAGS += -std=gnu99
+ifneq ($(filter $(ARCH),riscv64 x86_64 aarch64 loongarch64),)
+DRVMOD_CFLAGS += -DCONFIG_64BIT
+endif
 
 $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk
 
