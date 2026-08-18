@@ -80,6 +80,9 @@ typedef struct net_dev_ops {
     const uint8_t *(*mac)(struct device *dev);
     void           (*poll)(struct device *dev);
     int            (*ioctl)(struct device *dev, unsigned long req, void *arg);
+    /* Optional carrier query. Drivers without PHY/link reporting retain the
+     * historical always-up behavior. */
+    int            (*link_up)(struct device *dev);
 } net_dev_ops_t;
 
 /* net ioctl requests */

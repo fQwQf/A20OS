@@ -55,7 +55,7 @@ void init_kthread(void);
  * ============================================================ */
 
 
-#ifdef BRINGUP
+#if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
 static void bringup_smoke_test(void) {
     int ok = 1;
     void *p = kmalloc(64);
@@ -144,10 +144,18 @@ void kernel_main(void) {
      * mounting /bin; user-service packages still wait for proc_init(). */
     driver_manager_early_init();
 #endif
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    /* The LS2K1000 GMAC/PIC path is not usable yet.  Keep the shell bring-up
+     * independent of lwIP until a net device can be registered successfully. */
+    printf("[INIT] Network deferred during LS2K1000 shell bring-up\n");
+#else
     net_init();
     printf("[INIT] Network initialized\n");
+#endif
 
-#ifdef BRINGUP
+#if defined(CONFIG_STORAGE_READ_ONLY)
+    mount_read_only_storage();
+#elif defined(BRINGUP)
     printf("[INIT] BRINGUP mode: no block devices\n");
 #else
     mount_block_devices();
@@ -164,15 +172,14 @@ void kernel_main(void) {
     arch_unmap_boot_identity();
     loop_init();
 
-#ifdef BRINGUP
+#if defined(BRINGUP) && !defined(CONFIG_RAMFS_USER)
     printf("[INIT] System ready (bringup, no userspace)\n\n");
     bringup_smoke_test();
 #else
 #ifdef CONFIG_COOPERATIVE_BOOT
-    /* VBox has no usable preemption timer yet.  Bootstrap PID 1 directly from
-     * the idle context instead of requiring an otherwise unnecessary first
-     * kernel-thread switch before userspace can exist. */
-    printf("[INIT] bootstrapping userspace directly on VirtualBox\n");
+    /* Bootstrap userspace directly from the idle context on boards using
+     * cooperative scheduling during early bring-up. */
+    printf("[INIT] bootstrapping userspace in cooperative mode\n");
 #else
     int ret = proc_alloc(init_kthread);
     if (ret < 0)
@@ -209,6 +216,22 @@ void kernel_main(void) {
     printf("\033[0m");
     printf("Welcome to A20OS!\n\n");
     printf("[INIT] entering scheduler...\n");
+
+#ifdef CONFIG_BOARD_LS2K1000
+    /* Keep the bootstrap stack non-preemptible until the first runnable task
+     * exists and all one-time boot work is complete. */
+    uint32_t cpucfg1, cpucfg2;
+    __asm__ __volatile__("cpucfg %0, %1" : "=r"(cpucfg1) : "r"(1U));
+    __asm__ __volatile__("cpucfg %0, %1" : "=r"(cpucfg2) : "r"(2U));
+    printf("[INIT] LS2K1000 CPUCFG.1=0x%x CPUCFG.2=0x%x\n",
+           cpucfg1, cpucfg2);
+#ifdef CONFIG_COOPERATIVE_BOOT
+    printf("[INIT] LS2K1000 polling mode; timer interrupts remain disabled\n");
+#else
+    timer_enable();
+    printf("[INIT] LS2K1000 timer interrupts enabled\n");
+#endif
+#endif
 
 #ifdef CONFIG_COOPERATIVE_BOOT
     init_kthread();
@@ -387,6 +410,7 @@ void init_kthread(void) {
 
 #ifdef CONFIG_COOPERATIVE_BOOT
     /* PID 0 remains the reaper and scheduler host. */
+    printf("[INIT] entering cooperative idle loop\n");
     idle_loop();
 #endif
 

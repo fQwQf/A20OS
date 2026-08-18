@@ -73,7 +73,7 @@ MUSL_TARGET_ppc64le := powerpc64le-linux-gnu
 MUSL_TARGET := $(MUSL_TARGET_$(ARCH))
 
 ARCH_CFLAGS_riscv64 := -mabi=lp64d -march=rv64g -mcmodel=medany
-ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic
+ARCH_CFLAGS_loongarch64 := -mabi=lp64d -march=loongarch64 -mcmodel=normal -fno-pic -mstrict-align
 ARCH_CFLAGS_aarch64 := -march=armv8-a -fno-pic -fno-tree-vectorize
 ARCH_CFLAGS_x86_64 := -m64 -fno-pic -fno-pie -mno-red-zone
 ARCH_CFLAGS_arm32 := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -mno-unaligned-access
@@ -91,7 +91,7 @@ ARCH_LDFLAGS_ppc64le := -no-pie
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 
 MUSL_CONFIG_CFLAGS_riscv64 := $(OPT) -mcmodel=medany -march=rv64g -mabi=lp64d
-MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+MUSL_CONFIG_CFLAGS_loongarch64 := $(OPT) -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static -mstrict-align
 MUSL_CONFIG_CFLAGS_aarch64 := $(OPT) -fno-pic -static -fno-tree-vectorize
 MUSL_CONFIG_CFLAGS_x86_64 := $(OPT) -m64 -fno-pic -fno-pie -mno-red-zone -static
 MUSL_CONFIG_CFLAGS_arm32 := $(OPT) -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -mno-unaligned-access -static

@@ -2,19 +2,20 @@
 #define _ARCH_LOONGARCH64_MM_H
 
 #include "core/types.h"
+#include "mmu_layout.h"
 #ifdef CONFIG_SWAP
 #include "mm/swap.h"
 #endif
 
-/* LoongArch 3-level page table (4K pages, software walk matches PWCL/STLBPS) */
-#define ARCH_PT_LEVELS    3
-#define ARCH_PT_ROOT_LEVEL 2
+/* 4K pages; the software shape must match the board's PWCL/PWCH profile. */
+#define ARCH_PT_LEVELS    LA64_PT_LEVELS
+#define ARCH_PT_ROOT_LEVEL LA64_PT_ROOT_LEVEL
 #define ARCH_PT_BITS      9
 #define ARCH_PT_ENTRIES   512
 #define ARCH_PT_USER_START 0
 #define ARCH_PT_USER_END  256
 
-/* The current LoongArch refill handler walks all three levels with
+/* The current LoongArch refill handler walks every configured level with
  * lddir/ldpte and does not yet synthesize a PMD-sized TLB entry.  Do not let
  * the generic THP path install a level-1 leaf that the hardware refill path
  * would subsequently interpret as a pointer to a level-0 table. */
