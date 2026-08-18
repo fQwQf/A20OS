@@ -41,8 +41,11 @@ endif
 # compiler is writing its output, removing the directory after the driver's
 # mkdir and making the compile fail with ENOENT.  Finish the user build (and
 # any required clean) before allowing driver package recipes to enter the
-# shared directory.
-$(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk | $(USER_BUILD_STAMP)
+# shared directory.  This must be a normal prerequisite: when a profile change
+# rebuilds USER_BUILD_STAMP, its clean step can remove driver files that Make
+# had already found during dependency discovery.  A normal dependency makes
+# those packages stale and rebuilds them after the clean finishes.
+$(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk $(USER_BUILD_STAMP)
 
 # Early DriverStore packages: linked into the kernel root ramfs and loaded
 # before the real root disk is mounted.  Every driver that can own the root
