@@ -146,7 +146,7 @@
             \end{tikzpicture}
             \vspace{-0.4em}
             \begin{center}
-                \tiny\textcolor{a20blue}{■} 自研内核 15.7 万 ~\textcolor{a20accent}{■} 自研用户态 3.5 万 ~\textcolor{a20gray}{■} lwIP（隔离）6.5 万
+                \tiny \tikz[baseline=-0.55ex]{\fill[a20blue] (0,0) rectangle (0.75ex,0.75ex);} 自研内核 15.7 万 ~\tikz[baseline=-0.55ex]{\fill[a20accent] (0,0) rectangle (0.75ex,0.75ex);} 自研用户态 3.5 万 ~\tikz[baseline=-0.55ex]{\fill[a20gray!45] (0,0) rectangle (0.75ex,0.75ex);} lwIP（隔离）6.5 万
             \end{center}
             \vspace{0.3em}
             \begin{a20keybox}
@@ -184,7 +184,7 @@
                     \node[circle, fill=a20amber, draw=white, inner sep=1.4pt] at (axis cs:20,159.1) {};
                 \end{axis}
             \end{tikzpicture}
-            \srcnote{\textcolor{a20blue}{——} 内核自研累计（千行）~\textcolor{a20accent!60!black}{■} 周提交次数~\textcolor{a20amber}{●} 里程碑。两者数值同量级故共轴；口径：git numstat 周净增（排除 \code{external/}），曲线单调、无跳变导入。}
+            \srcnote{\textcolor{a20blue}{——} 内核自研累计（千行）~\tikz[baseline=-0.55ex]{\fill[a20accent!40] (0,0) rectangle (0.75ex,0.75ex);} 周提交次数~\tikz[baseline=-0.45ex]{\fill[a20amber] (0,0) circle (0.42ex);} 里程碑。两者数值同量级故共轴；口径：git numstat 周净增（排除 \code{external/}），曲线单调、无跳变导入。}
         \end{column}
         \begin{column}{0.34\textwidth}
             \begin{a20keybox}
@@ -1073,8 +1073,8 @@ a20_vmar_map(receiver, vmo, ...);
         \begin{column}{0.56\textwidth}
             \begin{tikzpicture}[baseline={(current bounding box.north)}]
                 \begin{axis}[
-                    xbar, bar width=5.5pt,
-                    width=0.98\linewidth, height=5.2cm,
+                    xbar, bar width=5pt,
+                    width=0.98\linewidth, height=4.6cm,
                     symbolic y coords={Linux 基线, 决赛快照, 第一批优化, 优化前},
                     ytick=data,
                     xmin=0, xmax=3100,
@@ -1083,15 +1083,17 @@ a20_vmar_map(receiver, vmo, ...);
                     axis line style={draw=none}, tick style={draw=none},
                     yticklabel style={font=\tiny},
                     xticklabel style={font=\tiny, color=a20gray},
-                    legend style={font=\tiny, draw=none, at={(0.98,0.30)}, anchor=east, legend columns=1},
                     nodes near coords, every node near coord/.append style={font=\tiny, color=a20gray},
                 ]
                     \addplot[xbar, fill=a20blue, draw=none] coordinates {(2551,优化前) (1966,第一批优化) (1483,决赛快照) (638,Linux 基线)};
                     \addplot[xbar, fill=a20accent, draw=none] coordinates {(2315,优化前) (1884,第一批优化) (1399,决赛快照) (565,Linux 基线)};
-                    \legend{RISC-V64, LoongArch64}
                 \end{axis}
             \end{tikzpicture}
-            \srcnote{快照 d5ae5a16 / f3e3ce48 / f9732348，同一 workload、8 vCPU、TCG multi；与 Linux 基线跨 QEMU 版本，按各自证据边界解释。}
+            \vspace{-0.4em}
+            \begin{center}
+                \tiny \tikz[baseline=-0.55ex]{\fill[a20blue] (0,0) rectangle (0.75ex,0.75ex);} RISC-V64 ~~ \tikz[baseline=-0.55ex]{\fill[a20accent] (0,0) rectangle (0.75ex,0.75ex);} LoongArch64
+            \end{center}
+            \srcnote{快照 d5ae5a16 / f3e3ce48 / f9732348，同一 workload、8 vCPU、TCG multi；与 Linux 基线跨 QEMU 版本。}
         \end{column}
         \begin{column}{0.41\textwidth}
             \statcard[0.98\linewidth]{-41.9\% / -39.6\%}{RV / LA 相对优化前耗时下降}
@@ -1186,7 +1188,7 @@ a20_vmar_map(receiver, vmo, ...);
         \begin{column}{0.55\textwidth}
             \begin{tikzpicture}[baseline={(current bounding box.north)}]
                 \begin{axis}[
-                    a20bar, width=0.97\linewidth, height=5.6cm,
+                    a20bar, width=0.88\linewidth, height=5.6cm,
                     enlarge y limits=0.09,
                     symbolic y coords={网络套件, 时钟/输入, IOMMU/驱动隔离, GUI 行为判帧, Linux ABI 语义, 架构启动/矩阵, 并发与压力, Native ABI 专项},
                     ytick=data,
@@ -1208,7 +1210,7 @@ a20_vmar_map(receiver, vmo, ...);
             \vspace{0.25em}
             \statcard[0.98\linewidth]{30+}{自研压力 / 语义测试工具（\code{user/cmds}）}
             \vspace{0.25em}
-            \srcnote{调度压力矩阵 \code{check-proc-step8-local}：双架构 1 核 / 8 核累计。}
+            \srcnote{调度压力矩阵 \code{check-proc-step8-local}：\\ 双架构 1 核 / 8 核累计。}
         \end{column}
     \end{columns}
 \end{frame}
