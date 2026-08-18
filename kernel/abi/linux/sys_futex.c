@@ -251,7 +251,14 @@ static int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t b
     /* The park protocol allows one park at a time, so at most one stale node
      * of this task can linger here; drop it defensively before linking. */
     (void)wait_queue_purge_task_locked(q, t);
-    wait_queue_link_locked(q, &node->entry, token, vkey);
+    if (!wait_queue_link_locked(q, &node->entry, token, vkey)) {
+        spin_unlock_irqrestore(&q->lock, flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        kfree(node);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return -ESRCH;
+    }
     spin_unlock_irqrestore(&q->lock, flags);
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
