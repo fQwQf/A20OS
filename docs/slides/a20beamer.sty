@@ -1,0 +1,245 @@
+% a20beamer.sty -- A20OS 决赛答辩自定义 Beamer 主题
+% 用法：\documentclass[aspectratio=1610]{beamer} 后 \usepackage{a20beamer}
+% 编译：xelatex（需要 Noto Sans / Noto Sans CJK SC / DejaVu Sans Mono 字体）
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{a20beamer}[2026/08/19 A20OS final-defense beamer theme]
+
+\RequirePackage{etoolbox}
+\RequirePackage{calc}
+\RequirePackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc}
+\RequirePackage{tcolorbox}
+\tcbuselibrary{skins}
+\RequirePackage{booktabs}
+\RequirePackage{multirow}
+
+% ==================== 配色 ====================
+\definecolor{a20navy}{RGB}{13,43,69}      % 主色：深海军蓝
+\definecolor{a20blue}{RGB}{23,93,153}     % 次级蓝
+\definecolor{a20accent}{RGB}{0,163,160}   % 强调青
+\definecolor{a20amber}{RGB}{233,149,39}   % 警示/亮点琥珀
+\definecolor{a20red}{RGB}{196,55,50}      % 风险红
+\definecolor{a20light}{RGB}{240,245,250}  % 浅底
+\definecolor{a20ink}{RGB}{30,42,56}       % 正文墨色
+\definecolor{a20gray}{RGB}{96,112,128}    % 辅助灰
+
+\setbeamercolor{normal text}{fg=a20ink, bg=white}
+\setbeamercolor{structure}{fg=a20navy}
+\setbeamercolor{alerted text}{fg=a20amber!85!black}
+\setbeamercolor{example text}{fg=a20accent!70!black}
+\setbeamercolor{frametitle}{fg=a20navy}
+\setbeamercolor{footline}{fg=a20gray, bg=white}
+
+\setbeamercolor{block title}{fg=a20navy, bg=a20blue!12}
+\setbeamercolor{block body}{fg=a20ink, bg=a20blue!5}
+\setbeamercolor{block title alerted}{fg=a20amber!70!black, bg=a20amber!16}
+\setbeamercolor{block body alerted}{fg=a20ink, bg=a20amber!7}
+\setbeamercolor{block title example}{fg=a20accent!55!black, bg=a20accent!14}
+\setbeamercolor{block body example}{fg=a20ink, bg=a20accent!6}
+
+% ==================== 字体 ====================
+\RequirePackage{fontspec}
+\RequirePackage{xeCJK}
+\IfFontExistsTF{Noto Sans}{\setsansfont{Noto Sans}}{}
+\IfFontExistsTF{Noto Sans Mono}{\setmonofont{Noto Sans Mono}[Scale=0.92]}{\setmonofont{DejaVu Sans Mono}[Scale=0.88]}
+\IfFontExistsTF{Noto Sans CJK SC}{\setCJKmainfont{Noto Sans CJK SC}}{\setCJKmainfont{Noto Sans Mono CJK SC}}
+\IfFontExistsTF{Noto Sans Mono CJK SC}{\setCJKmonofont{Noto Sans Mono CJK SC}[Scale=0.92]}{}
+\renewcommand{\familydefault}{\sfdefault}
+
+\setbeamerfont{frametitle}{size=\large, series=\bfseries}
+\setbeamerfont{framesubtitle}{size=\scriptsize}
+\setbeamerfont{itemize/enumerate body}{size=\small}
+\setbeamerfont{itemize/enumerate subbody}{size=\footnotesize}
+\setbeamerfont{block body}{size=\small}
+\setbeamerfont{footline}{size=\tiny}
+
+% ==================== 基础版式 ====================
+\setbeamersize{text margin left=1.1em, text margin right=1.1em}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{blocks}[rounded][shadow=false]
+\setlength{\leftmargini}{1.35em}
+\setlength{\leftmarginii}{1.2em}
+
+% itemize：青色小方块 / 短横
+\setbeamertemplate{itemize item}{%
+  \tikz[baseline=-0.62ex]{\fill[a20accent] (0,0) rectangle (0.62ex,0.62ex);}}
+\setbeamertemplate{itemize subitem}{%
+  \tikz[baseline=-0.45ex]{\fill[a20blue!70] (0,0.18ex) rectangle (0.95ex,0.36ex);}}
+\setbeamertemplate{itemize/enumerate body begin}{\vspace{0.15em}}
+
+% ==================== 页眉：kicker + 标题 + 双色分隔线 ====================
+\newcommand{\azkicker}{%
+  {\scriptsize\bfseries\color{a20accent}\strut\insertsection}}
+
+\newlength{\aztitlesep}
+\setbeamertemplate{frametitle}{%
+  \vskip0.55em
+  \azkicker\par
+  \vskip0.12em
+  {\usebeamerfont{frametitle}\usebeamercolor[fg]{frametitle}\insertframetitle\par}%
+  \ifx\insertframesubtitle\empty\else
+    \vskip0.1em{\usebeamerfont{framesubtitle}\color{a20gray}\insertframesubtitle\par}%
+  \fi
+  \vskip0.28em
+  \begin{tikzpicture}[x=1pt,y=1pt]
+    \fill[a20accent] (0,0) rectangle (34,1.7);
+    \fill[a20navy!18] (34,0) rectangle (\linewidth,1.7);
+  \end{tikzpicture}\par
+  \vskip0.15em
+}
+
+% ==================== 页脚：进度条 + 短标题 + 页码 ====================
+\newcommand{\azprogressbar}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[a20navy!12] (current page.south west) rectangle
+      ([yshift=1.6pt]current page.south east);
+    \pgfmathsetmacro{\azp}{min(1,\insertframenumber/max(\inserttotalframenumber,1))}
+    \fill[a20accent] (current page.south west) rectangle
+      ([yshift=1.6pt,xshift=\azp\paperwidth]current page.south west);
+  \end{tikzpicture}}
+
+\setbeamertemplate{footline}{%
+  \azprogressbar
+  \begin{beamercolorbox}[wd=\paperwidth,ht=2.4ex,dp=1.5ex,leftskip=1.1em,rightskip=1.1em]{footline}%
+    \usebeamerfont{footline}%
+    A20OS \,\textcolor{a20navy!40}{|}\, \insertshorttitle
+    \hfill
+    \textcolor{a20navy}{\bfseries\insertframenumber}\,\textcolor{a20navy!40}{/\,\inserttotalframenumber}%
+  \end{beamercolorbox}%
+  \vskip1.6pt
+}
+
+% ==================== 标题页 ====================
+\newlength{\aztitlepanel}
+\setlength{\aztitlepanel}{0.66\paperwidth}
+
+\defbeamertemplate{title page}{a20}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    % 左侧深色主面板
+    \fill[a20navy] (current page.north west) rectangle
+      ([xshift=\aztitlepanel]current page.south west);
+    % 面板右缘青色切角
+    \fill[a20accent] ([xshift=\aztitlepanel]current page.north west) --
+      ([xshift=\aztitlepanel+1.1em]current page.north west) --
+      ([xshift=\aztitlepanel]current page.south west) -- cycle;
+    % 顶部赛事条
+    \node[anchor=north west, text=a20light!85, font=\scriptsize]
+      at ([xshift=1.2em,yshift=-0.9em]current page.north west)
+      {\azeventline};
+    % 主标题
+    \node[anchor=north west, text=white, font=\LARGE\bfseries, align=left,
+          text width=\aztitlepanel-2.4em]
+      at ([xshift=1.2em,yshift=-4.4em]current page.north west)
+      {\inserttitle};
+    % 副标题
+    \node[anchor=north west, text=a20light!90, font=\small, align=left,
+          text width=\aztitlepanel-2.4em]
+      at ([xshift=1.2em,yshift=-8.6em]current page.north west)
+      {\insertsubtitle};
+    % 强调短线
+    \fill[a20accent] ([xshift=1.2em,yshift=-7.9em]current page.north west)
+      rectangle ++(4.2em,0.16em);
+    % 作者/单位/日期
+    \node[anchor=south west, text=a20light, font=\footnotesize, align=left]
+      at ([xshift=1.2em,yshift=1.2em]current page.south west)
+      {\insertauthor\\[0.2em]\insertinstitute\quad\textcolor{a20light!50}{|}\quad\insertdate};
+  \end{tikzpicture}%
+  \begin{tikzpicture}[remember picture, overlay]
+    \node[anchor=center]
+      at ([xshift=0.33\paperwidth,yshift=1.2em]current page.center)
+      {\includegraphics[width=0.22\paperwidth]{a20os-logo.pdf}};
+    \node[anchor=center, text=a20navy, font=\scriptsize\bfseries, align=center]
+      at ([xshift=0.33\paperwidth,yshift=-2.4em]current page.center)
+      {\aztagline};
+  \end{tikzpicture}%
+}
+
+\newcommand{\azeventline}{2026 全国大学生计算机系统能力大赛 · OS 内核实现赛道 · 决赛答辩}
+\newcommand{\aztagline}{混合内核 \texttimes\ 双 ABI \texttimes\ 八大平台}
+\setbeamertemplate{title page}[a20]
+
+% ==================== 节分隔页 ====================
+\newcommand{\aztwodigit}[1]{\ifnum#1<10 0\fi\number#1}
+\defbeamertemplate{section page}{a20}{%
+  \begin{tikzpicture}[remember picture, overlay]
+    \fill[a20light] (current page.north west) rectangle (current page.south east);
+    \fill[a20navy] (current page.north west) rectangle
+      ([yshift=-0.42\paperheight]current page.north east);
+    \fill[a20accent] ([yshift=-0.42\paperheight]current page.north west) rectangle
+      ([yshift=-0.44\paperheight]current page.north east);
+    \node[anchor=west, text=white!30!a20navy, font=\fontsize{52}{52}\bfseries\selectfont]
+      at ([xshift=1.2cm,yshift=-0.21\paperheight]current page.north west)
+      {\aztwodigit{\value{section}}};
+    \node[anchor=west, text=white, font=\LARGE\bfseries]
+      at ([xshift=4.3cm,yshift=-0.21\paperheight]current page.north west)
+      {\insertsection};
+    \node[anchor=north west, text=a20ink, font=\footnotesize, align=left,
+          text width=0.9\paperwidth]
+      at ([xshift=1.2em,yshift=-0.56\paperheight]current page.north west)
+      {\azsectionsummary};
+  \end{tikzpicture}%
+}
+\newcommand{\azsectionsummary}{}
+\setbeamertemplate{section page}[a20]
+
+\AtBeginSection[]{%
+  \begin{frame}[plain]
+    \sectionpage
+  \end{frame}}
+
+% ==================== 自定义组件 ====================
+% 大数字统计卡：\statcard{宽度}{数字}{说明}
+\newtcolorbox{a20statbox}[1][]{%
+  enhanced, colback=a20light, colframe=a20light,
+  boxrule=0pt, arc=1.2mm, left=0.7em, right=0.5em, top=0.55em, bottom=0.55em,
+  borderline west={2.2pt}{0pt}{a20accent}, #1}
+\newcommand{\statcard}[3][0.30\linewidth]{%
+  \begin{minipage}[t]{#1}
+    \begin{a20statbox}
+      {\LARGE\bfseries\color{a20navy}#2\par}
+      \vskip0.1em
+      {\scriptsize\color{a20gray}#3\par}
+    \end{a20statbox}
+  \end{minipage}}
+
+% 源码/验证 脚注行
+\newcommand{\srcnote}[1]{{\footnotesize\color{a20gray}#1\par}}
+\newcommand{\code}[1]{\texttt{\footnotesize\color{a20navy!85!black}#1}}
+\newcommand{\high}[1]{\textbf{\textcolor{a20blue}{#1}}}
+\newcommand{\good}[1]{\textcolor{a20accent!60!black}{\bfseries #1}}
+\newcommand{\bad}[1]{\textcolor{a20red}{#1}}
+
+% 通过徽章
+\newcommand{\pass}{{\footnotesize\bfseries\color{a20accent!55!black}[PASS]}}
+\newcommand{\full}{{\footnotesize\bfseries\color{a20accent!55!black}full}}
+\newcommand{\partl}{{\footnotesize\bfseries\color{a20amber!75!black}partial}}
+
+% 要点框（左侧色条）
+\newtcolorbox{a20keybox}[1][]{%
+  enhanced, colback=a20accent!6, colframe=a20accent!6,
+  boxrule=0pt, arc=1mm, left=0.8em, right=0.6em, top=0.5em, bottom=0.5em,
+  borderline west={2.2pt}{0pt}{a20accent}, #1}
+\newtcolorbox{a20warnbox}[1][]{%
+  enhanced, colback=a20amber!8, colframe=a20amber!8,
+  boxrule=0pt, arc=1mm, left=0.8em, right=0.6em, top=0.5em, bottom=0.5em,
+  borderline west={2.2pt}{0pt}{a20amber}, #1}
+
+% pgfplots 统一风格
+\RequirePackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\pgfplotsset{
+  a20bar/.style={
+    width=\linewidth, height=0.62\linewidth,
+    xbar, xmin=0,
+    bar width=7pt,
+    axis line style={draw=none},
+    tick style={draw=none},
+    xmajorgrids=true, major grid style={a20navy!10},
+    xticklabel style={font=\tiny, color=a20gray},
+    yticklabel style={font=\scriptsize, color=a20ink},
+    nodes near coords, every node near coord/.append style={font=\tiny, color=a20gray},
+    x axis line style={draw=none},
+  },
+}
+
+\endinput
