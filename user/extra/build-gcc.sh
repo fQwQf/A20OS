@@ -250,6 +250,14 @@ for crt in crt1.o crti.o crtn.o Scrt1.o rcrt1.o; do
     done
 done
 
+# GCC's driver adds these compiler-provided startup objects independently of
+# the libc CRT files above.  install-gcc does not install target libraries in
+# this Canadian-cross configuration, so take them from the bootstrap compiler.
+for crt in crtbegin.o crtbeginS.o crtbeginT.o crtend.o crtendS.o; do
+    src="$MCM/lib/gcc/$TARGET_TRIPLET/$GCC_VER/$crt"
+    [ -f "$src" ] && cp "$src" "$INSTALL_DIR/lib/gcc/$TARGET_TRIPLET/$GCC_VER/$crt"
+done
+
 ln -sf gcc "$INSTALL_DIR/bin/cc"
 
 echo "[GCC] Done."

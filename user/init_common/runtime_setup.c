@@ -110,6 +110,23 @@ static const char *find_existing_dir(const char *const candidates[])
     return NULL;
 }
 
+static const char *find_readable_file_dir(const char *const candidates[],
+                                          const char *name)
+{
+    char path[256];
+
+    for (int i = 0; candidates[i]; i++) {
+        snprintf(path, sizeof(path), "%s/%s", candidates[i], name);
+        int fd = open(path, O_RDONLY);
+        if (fd < 0)
+            continue;
+        close(fd);
+        return candidates[i];
+    }
+
+    return NULL;
+}
+
 static int install_runtime_loader(const char *src_dir, const char *src_name,
                                   const char *dst_name)
 {
@@ -118,16 +135,19 @@ static int install_runtime_loader(const char *src_dir, const char *src_name,
     struct stat st;
 
     snprintf(src, sizeof(src), "%s/%s", src_dir, src_name);
-    if (stat(src, &st) != 0 || !S_ISREG(st.st_mode))
-        return -1;
-    int mode = st.st_mode & 0777;
 
     snprintf(dst, sizeof(dst), "/lib/%s", dst_name);
     if (stat(dst, &st) == 0 && S_ISREG(st.st_mode))
         goto try_lib64;
     unlink(dst);
 
-    if (copy_file(src, dst, mode) != 0) {
+    /*
+     * Opening files from the ext4 extra image is supported before every
+     * stat(2) corner case is available.  The loader is a trusted build
+     * artifact with a known mode, so do not reject a readable source merely
+     * because the initial path-based stat failed.
+     */
+    if (copy_file(src, dst, 0755) != 0) {
         printf("[LIBLINK] copy %s -> %s failed errno=%d\n",
                src, dst, errno);
         return -1;
@@ -139,7 +159,7 @@ try_lib64:
     if (stat(dst, &st) == 0 && S_ISREG(st.st_mode))
         return 0;
     unlink(dst);
-    if (copy_file(src, dst, mode) == 0) {
+    if (copy_file(src, dst, 0755) == 0) {
         printf("[LIBLINK] copied %s\n", dst);
     }
     return 0;
@@ -182,6 +202,20 @@ static int ensure_runtime_dirs(void)
         /* non-fatal: some systems don't need /lib64 */
     }
     return 0;
+}
+
+static void prepare_resolver_config(void)
+{
+    struct stat st;
+
+    if (stat("/test/etc/resolv.conf", &st) != 0 || !S_ISREG(st.st_mode))
+        return;
+    if (ensure_dir("/etc") != 0)
+        return;
+    if (copy_file("/test/etc/resolv.conf", "/etc/resolv.conf", 0644) == 0)
+        printf("[NET] installed /etc/resolv.conf from extra image\n");
+    else
+        printf("[NET] could not install /etc/resolv.conf errno=%d\n", errno);
 }
 
 static void prepare_lmbench_helper_path(void)
@@ -321,7 +355,7 @@ static int prepare_musl_lib_links(void)
     if (ensure_runtime_dirs() != 0)
         return -1;
 
-    musl_dir = find_existing_dir(musl_candidates);
+    musl_dir = find_readable_file_dir(musl_candidates, "libc.so");
     if (!musl_dir) {
         printf("[LIBLINK] musl lib dir not found\n");
         return -1;
@@ -336,6 +370,7 @@ static int prepare_musl_lib_links(void)
 
 void setup_runtime_links(void)
 {
+    prepare_resolver_config();
     prepare_runtime_links(NULL);
 }
 
