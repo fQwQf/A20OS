@@ -75,7 +75,7 @@
             \end{itemize}
             \vspace{0.2em}
             \begin{a20keybox}
-                \footnotesize 同一内核：从 64\,KiB Flash 的 MCU，跑到 Alpine 发行版桌面。
+                \footnotesize 同一内核：从 64\,KiB Flash 的 MCU，跑到QEMU桌面。
             \end{a20keybox}
         \end{column}
         \begin{column}{0.36\textwidth}
@@ -97,12 +97,11 @@
             \toprule
             \textbf{维度} & \textbf{初赛} & \textbf{决赛（当前）} \\
             \midrule
-            内核规模 & 约 18 万行 / 800+ 文件 & \high{22.2 万行 / 982 文件}（自研 15.7 万） \\
             支持架构 & 4 个 & \high{7 hosted + ARMv7-M MCU} \\
             Linux ABI & 部分 syscall & \high{361 全表覆盖}，含 io\_uring / landlock / mseal \\
             Native ABI & 90 syscall & \high{139 syscall} + Pager / monitor 深化 \\
             调度器 & 8 级 MLFQ & \high{EEVDF} + per-CPU 队列 + 空闲窃取 \\
-            桌面 / 发行版 & -- & \high{Wayland 桌面 + 3D} / Alpine rootfs 直跑 \\
+            桌面 & -- & \high{Wayland 桌面 + virtio-gpu 3D} \\
             混合内核服务 & -- & \high{svcmgr / 用户态驱动 / KEP 扩展} \\
             BuildStorm 耗时 & 2551 s / 2315 s（RV / LA） & \high{1483 s / 1399 s}（\good{-42\% / -40\%}） \\
             \bottomrule
@@ -110,7 +109,7 @@
     \end{table}
     \vspace{0.2em}
     \begin{center}
-        \small 从“能启动、能跑几个程序”进化到\high{可跑完整桌面与发行版、可跑决赛高性能负载}的通用内核。
+        \small 从“能启动、能跑几个程序”进化到\high{可跑完整桌面、可跑决赛高性能负载}的通用内核。
     \end{center}
 \end{frame}
 
@@ -306,7 +305,7 @@
                 \begin{itemize}
                     \item \high{361 个 syscall} 调度表全表覆盖，无空位占位
                     \item 现代机制：\code{io\_uring}、\code{landlock}、\code{pidfd}、\code{userfaultfd}、\code{mseal}、\code{perf\_event\_open}
-                    \item 直接运行 musl 生态与 Alpine 发行版
+                    \item 直接运行 musl 生态与完整 Linux 用户态
                 \end{itemize}
             \end{alertblock}
         \end{column}
@@ -611,7 +610,7 @@ a20_vmar_map(receiver, vmo, ...);
 % ==================================================
 \renewcommand{\azsectionsummary}{%
     361 个 syscall 调度表全表覆盖、无空位；io\_uring / landlock / pidfd / mseal 等现代机制已实现；%
-    动态链接 Alpine 发行版直接启动。}
+    动态链接 musl 程序直接运行。}
 \section{Linux ABI 兼容}
 
 \begin{frame}{全量 syscall 覆盖：361 项，无一空位}
@@ -643,14 +642,14 @@ a20_vmar_map(receiver, vmo, ...);
     \end{columns}
 \end{frame}
 
-\begin{frame}{动态链接与发行版引导}
+\begin{frame}{动态链接与用户态生态}
     \begin{columns}[t]
         \begin{column}{0.55\textwidth}
             \footnotesize
             \begin{itemize}
                 \item \code{exec} 正确处理 \code{shebang} 与 ELF interpreter（\code{/lib/ld-musl-*.so.1}）
                 \item \code{MAP\_PRIVATE / MAP\_FIXED}、TLS（\code{tp} 寄存器）正确建立
-                \item 全部 musl 动态链接的 Alpine 二进制可直接运行
+                \item 全部 musl 动态链接的二进制可直接运行
                 \item 用户指针边界显式处理（identity-mapped 架构下不误判 argv/envp 来源）
             \end{itemize}
             \vspace{0.2em}
@@ -664,7 +663,7 @@ a20_vmar_map(receiver, vmo, ...);
             \end{a20keybox}
             \vspace{0.3em}
             \begin{a20warnbox}
-                \footnotesize 这是发行版桌面能起来的地基；早期 musl 加载期空指针崩溃即从 exec/mmap 语义修正而来。
+                \footnotesize 这是完整桌面能起来的地基；早期 musl 加载期空指针崩溃即从 exec/mmap 语义修正而来。
             \end{a20warnbox}
         \end{column}
     \end{columns}
@@ -1047,27 +1046,6 @@ a20_vmar_map(receiver, vmo, ...);
     \srcnote{3D 链路：用户态 $\rightarrow$ \code{ioctl(/dev/dri/card0)} $\rightarrow$ \code{drm\_ioctl} $\rightarrow$ \code{gpu\_ioctl} $\rightarrow$ \code{SUBMIT\_3D} $\rightarrow$ virglrenderer $\rightarrow$ 宿主 GPU；自测工具 \code{gpu3d\_test}}
 \end{frame}
 
-\begin{frame}{发行版 rootfs 直跑：拿 A20OS 当发行版的内核}
-    \begin{columns}[t]
-        \begin{column}{0.55\textwidth}
-            \footnotesize
-            \begin{itemize}
-                \item \code{make distro-run}：构建内核 + 包管理器拉取\high{原生 Alpine} rootfs + 启动 QEMU (GUI)
-                \item 磁盘布局：\code{fat32.img}（自研用户态）+ \code{rootfs.img}（发行版）
-                \item init 检测 \code{a20-distro} 标记后 \code{chroot} 进入发行版，由\high{发行版自身的 stage-2 init} 编排桌面会话
-                \item 内核补齐发行版需要的全部行为：netlink uevent、\code{PR\_SET\_PDEATHSIG}、\code{/sys/dev/char}、DRM 能力位、evdev ABI
-            \end{itemize}
-            \vspace{0.2em}
-            \srcnote{关键文件：\code{user/rootfs/alpine/}、\code{user/init.c}；文档 \code{docs/distro/}}
-        \end{column}
-        \begin{column}{0.42\textwidth}
-            \begin{a20warnbox}
-                \footnotesize 理念：“优先在内核实现，而不是删依赖”——distro 路径没有改组件的自由，内核要么行为到位，要么桌面起不来。
-            \end{a20warnbox}
-        \end{column}
-    \end{columns}
-\end{frame}
-
 % ==================================================
 \renewcommand{\azsectionsummary}{%
     面向 BuildStorm 热区的 14 项优化全部保留真实计时；%
@@ -1365,7 +1343,7 @@ a20_vmar_map(receiver, vmo, ...);
             \begin{a20keybox}
                 \footnotesize\textbf{验证方法}\par
                 \vskip0.2em
-                \code{make smoke-abi-linux} 逐组语义验证；\code{smoke-syscall-ext} 覆盖 io\_uring / landlock / userfaultfd / perf 等现代机制；真实负载：Alpine 发行版 + Cargo 全量编译。
+                \code{make smoke-abi-linux} 逐组语义验证；\code{smoke-syscall-ext} 覆盖 io\_uring / landlock / userfaultfd / perf 等现代机制；真实负载：musl 生态 + Cargo 全量编译。
             \end{a20keybox}
         \end{column}
     \end{columns}
