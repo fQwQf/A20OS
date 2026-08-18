@@ -157,6 +157,7 @@ int ext4_fclose(vfile_t *vf) ;
 vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
                                  int type, vnode_t *parent) ;
 vnode_t *ext4_mount(bcache_t *bc) ;
+vnode_t *ext4_mount_flags(bcache_t *bc, int flags) ;
 void ext4_unmount(vnode_t *root) ;
 vfile_t *ext4_open_vnode(vnode_t *vn, int flags) ;
 

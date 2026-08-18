@@ -3,19 +3,23 @@
 
 #include "core/types.h"
 
-/* Identity-mapped: VA == PA. DMW0/DMW1 both map segment 0 → segment 0. */
-
+/* QEMU uses an identity DMW; physical boards may provide their own map. */
+#ifdef CONFIG_BOARD_LS2K1000
+#include "ls2k1000_platform.h"
+#else
 #define PHYS_MEMORY_BASE   0x80000000UL
 #define PHYS_MEMORY_END    0x90000000UL
 #define KERNEL_ENTRY       0x80000000UL
 #define PAGE_OFFSET        0x00000000UL
 #define USER_VA_LIMIT      0x4000000000UL
+#define UART0_BASE         0x1FE001E0UL
+#define UART0_IRQ          2U
+#endif
 
 size_t arch_ram_range_count(void);
 int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 void loongarch64_memory_init(void);
 
-#define UART0_BASE         0x1FE001E0UL
 #define VIRTIO_BASE        0x10001000UL
 #define PLIC_BASE          0x10000000UL
 #define VIRT_GED_EVT_ADDR  0x100E0000UL
@@ -33,7 +37,6 @@ void loongarch64_memory_init(void);
 #define PCIE_BUS_END       127
 #define PCIE_MMIO_BASE     0x40000000UL
 #define PCIE_MMIO_SIZE     0x40000000UL
-#define UART0_IRQ          2
 
 #define CLINT_BASE         0x00000000UL
 #define CLINT_TIMER_FREQ   100000000UL   /* 100 MHz — QEMU loongarch rdtime.d runs at 10ns period */
