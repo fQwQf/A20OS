@@ -555,7 +555,6 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         return -ENOENT;
 
     task_t *t = proc_current();
-    uint64_t charged = 0;
     int ret = 0;
     for (uint64_t off = 0; off < c.len; off += PAGE_SIZE) {
         uint64_t dst = c.dst + off;
@@ -619,7 +618,6 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
         mm->rss++;
         spin_unlock(&mm->lock);
         arch_tlb_flush_page_local(dst);
-        charged++;
         c.copy += (int64_t)PAGE_SIZE;
 
         if (!(c.mode & UFFDIO_COPY_MODE_DONTWAKE))

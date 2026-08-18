@@ -372,15 +372,18 @@ static int dw_sdio_driver_remove(device_t *dev) {
 }
 
 static int dw_sdio_class_read(struct device *dev, uint64_t lba, void *buf, size_t count) {
-    return dw_sdio_read_sector(g_sdio.base, lba, buf, count);
+    sdio_priv_t *priv = (sdio_priv_t *)dev->drv_priv;
+    return dw_sdio_read_sector(priv->base, lba, buf, count);
 }
 
 static int dw_sdio_class_write(struct device *dev, uint64_t lba, const void *buf, size_t count) {
-    return dw_sdio_write_sector(g_sdio.base, lba, buf, count);
+    sdio_priv_t *priv = (sdio_priv_t *)dev->drv_priv;
+    return dw_sdio_write_sector(priv->base, lba, buf, count);
 }
 
 static uint64_t dw_sdio_class_capacity(struct device *dev) {
-    return dw_sdio_capacity(g_sdio.base);
+    sdio_priv_t *priv = (sdio_priv_t *)dev->drv_priv;
+    return dw_sdio_capacity(priv->base);
 }
 
 static uint32_t dw_sdio_class_sector_size(struct device *dev) {

@@ -203,9 +203,7 @@ static void eevdf_account_run(task_t *t, uint64_t dt)
 
 static inline int eevdf_eligible(proc_runq_t *rq, task_t *t)
 {
-    /* Signed modular difference: no wrap hazard when vruntime/vtime
-     * approach U64_MAX (Linux-style comparison). */
-    return (int64_t)(t->eevdf_vruntime - rq->eevdf_vtime) <= 0;
+    return t->eevdf_vruntime <= rq->eevdf_vtime;
 }
 
 /* Charge `now - last_account` of run time to t and advance system vtime. */
@@ -217,13 +215,10 @@ static void eevdf_charge(proc_runq_t *rq, task_t *t, uint64_t now)
     t->eevdf_last_account = now;
     if (!dt)
         return;
-    unsigned cpu = cpu_current_id();
-    uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     eevdf_account_run(t, dt);
     uint64_t total = rq->eevdf_weight;
     if (total)
         rq->eevdf_vtime += (dt * EEVDF_NICE0_LOAD) / total;
-    RUNQ_UNLOCK_IRQ(cpu, rf);
 }
 
 static void sched_runq_unlink_at(proc_runq_t *rq, task_t *t, int q)
@@ -260,42 +255,16 @@ static void sched_runq_eevdf_insert(proc_runq_t *rq, task_t *t)
     if (t->eevdf_deadline == 0)
         eevdf_reset_deadline(t);
 
-    /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU.
-     * Signed difference avoids wrapping when either value is near U64_MAX. */
+    /* Clamp the sleeper bonus so a long-sleeper cannot hog the CPU. */
     if (rq->head[EEVDF_LEVEL] &&
-        (int64_t)(rq->eevdf_vtime - t->eevdf_vruntime) > (int64_t)EEVDF_MAX_LAG) {
+        t->eevdf_vruntime + EEVDF_MAX_LAG < rq->eevdf_vtime) {
         t->eevdf_vruntime = rq->eevdf_vtime - EEVDF_MAX_LAG;
         eevdf_reset_deadline(t);
     }
 
     /* First EEVDF task on this CPU defines the system virtual time. */
-    if (!rq->head[EEVDF_LEVEL]) {
+    if (!rq->head[EEVDF_LEVEL])
         rq->eevdf_vtime = t->eevdf_vruntime;
-        rq->head[EEVDF_LEVEL] = t;
-        rq->tail[EEVDF_LEVEL] = t;
-        t->rq_next = NULL;
-        t->rq_prev = NULL;
-        rq->bitmap |= (1U << EEVDF_LEVEL);
-        rq->eevdf_weight += eevdf_weight(t);
-        return;
-    }
-
-    /*
-     * Common case: the fresh deadline (a new or reset virtual deadline) is
-     * later than every deadline already queued, so append in O(1) instead of
-     * walking the whole list.  Ties append too, preserving the existing
-     * "equal deadlines stay before the new entry" ordering.
-     */
-    task_t *tail = rq->tail[EEVDF_LEVEL];
-    if (tail && t->eevdf_deadline >= tail->eevdf_deadline) {
-        t->rq_next = NULL;
-        t->rq_prev = tail;
-        tail->rq_next = t;
-        rq->tail[EEVDF_LEVEL] = t;
-        rq->bitmap |= (1U << EEVDF_LEVEL);
-        rq->eevdf_weight += eevdf_weight(t);
-        return;
-    }
 
     task_t *it = rq->head[EEVDF_LEVEL];
     while (it && it->eevdf_deadline <= t->eevdf_deadline)
@@ -1547,18 +1516,6 @@ void sched(void) {
      * runqueue lock has been released, for state/ownership publication.
      */
     task_t *next = proc_runq_pick_local();
-    /*
-     * Idle fast path: empty runqueue while the idle task still owns the CPU.
-     * No waker can target the idle task, so the locked late-wake recheck below
-     * can never succeed here; a task woken just after the pick is found by the
-     * next pick iteration without any lost-wakeup window.  Skipping proc_lock
-     * entirely removes 2-3 global acquisitions per idle loop iteration, which
-     * dominates contention on mostly-idle SMP systems.  The state/on_rq guards
-     * conservatively fall back to the slow path in any unexpected state.
-     */
-    if (!next && sched_owner == proc_idle_task() &&
-        sched_owner->state == PROC_RUNNING && !sched_owner->on_rq)
-        goto out;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     task_t *current = proc_current();
     if (next && current && current != proc_idle_task() &&
