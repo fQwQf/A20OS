@@ -382,33 +382,6 @@ static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst, uint32_t index,
     return 0;
 }
 
-/* Fetch the raw capset blob (VIRTIO_GPU_CMD_GET_CAPSET) into buf. */
-static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t index,
-                                 uint32_t version, void *buf, size_t bufsz)
-{
-    struct virtio_gpu_get_capset req ALIGNED(64);
-    uint8_t resp[sizeof(struct virtio_gpu_ctrl_hdr) + 4096] ALIGNED(64);
-    memset(&req, 0, sizeof(req));
-    req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
-    req.capset_index = index;
-    req.capset_version = version;
-    size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + bufsz;
-    if (rsz > sizeof(resp))
-        rsz = sizeof(resp);
-    /* The capset blob follows the response header; use a larger response
-     * buffer than the fixed command slot can hold. */
-    if (virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, rsz) < 0)
-        return -1;
-    struct virtio_gpu_resp_capset *cr = (struct virtio_gpu_resp_capset *)resp;
-    if (cr->hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
-        return -1;
-    size_t copy = rsz - sizeof(struct virtio_gpu_ctrl_hdr);
-    if (copy > bufsz)
-        copy = bufsz;
-    memcpy(buf, resp + sizeof(struct virtio_gpu_ctrl_hdr), copy);
-    return 0;
-}
-
 static int gpu_get_info(struct device *dev, uint32_t *width, uint32_t *height, uint32_t *bpp) {
     virtio_gpu_inst_t *inst = dev->drv_priv;
     *width = inst->width;

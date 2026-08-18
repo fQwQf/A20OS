@@ -288,7 +288,7 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
  * YT8531 PHY.  A scan across 0..31 mirrors the RocketOS reference instead of
  * trusting a fixed address.)
  * ============================================================ */
-static int gmac_phy_init(uintptr_t base, starfive_gmac_priv_t *priv) {
+static int gmac_phy_init(uintptr_t base) {
     int phy_addr = -1;
 
     for (int i = 0; i < 32; i++) {
@@ -389,7 +389,7 @@ int starfive_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_ADDR0_LOW, low);
 
     /* PHY init */
-    if (gmac_phy_init(base, priv) != 0)
+    if (gmac_phy_init(base) != 0)
         return -1;
 
     /* Enable MAC TX/RX */

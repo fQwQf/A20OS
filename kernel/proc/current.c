@@ -112,16 +112,6 @@ void proc_switch_complete(void)
 {
     unsigned cpu = cpu_current_id();
 
-    /*
-     * Fast path: nothing was published for this CPU to complete.  This is the
-     * first boot switch (old slot was NULL) or the case where an incoming
-     * stack was preempted before this hook and proc_set_current() already
-     * completed the predecessor.  The slot is written only by this CPU, so a
-     * NULL read here cannot race with a concurrent publication.
-     */
-    if (!__atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE))
-        return;
-
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     int reap = proc_switch_complete_locked(cpu);
     spin_unlock_irqrestore(&proc_lock, flags);
