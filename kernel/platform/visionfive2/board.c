@@ -38,7 +38,7 @@
 #define VF2_SDIO_SIZE     0x10000UL
 #define VF2_GMAC_BASE     (0x16040000UL + PAGE_OFFSET)  /* EQOS GMAC1 */
 #define VF2_GMAC_SIZE     0x10000UL
-#define VF2_GMAC_IRQ      78UL            /* PLIC line per RocketOS; verify */
+#define VF2_GMAC_IRQ      78UL            /* GMAC1 macirq from the VF2 DTB */
 #define VF2_TIMER_FREQ    24000000UL      /* JH7110 STG oscillator */
 
 /* JH7110 SYS_CRG clock/reset controller used to power the GMAC1 (EQOS)
@@ -50,12 +50,19 @@
 #define VF2_CRG_GMAC1_CLK_PTP   0x198UL
 #define VF2_CRG_GMAC1_CLK_TX    0x1A4UL
 #define VF2_CRG_GMAC1_CLK_GTXC  0x1ACUL
+#define VF2_CRG_GMAC1_CLK_GTX   0x190UL
 #define VF2_CRG_RESET2          0x300UL
 #define VF2_CRG_GMAC_AXI_RST    (1UL << 2)
 #define VF2_CRG_GMAC_AHB_RST    (1UL << 3)
 
 static void vf2_gmac_clock_init(void) {
     volatile uint32_t *crg = (volatile uint32_t *)VF2_SYS_CRG_BASE;
+    /* PLL0 is 1.5 GHz on the VF2 firmware.  GMAC1 GTX must be 125 MHz for
+     * RGMII gigabit mode; JH7110 dividers are encoded as the divisor itself. */
+    crg[VF2_CRG_GMAC1_CLK_GTX / 4] =
+        (crg[VF2_CRG_GMAC1_CLK_GTX / 4] & ~0x00FFFFFFU) | 12U;
+    crg[VF2_CRG_GMAC1_CLK_TX / 4] =
+        (crg[VF2_CRG_GMAC1_CLK_TX / 4] & ~(0xFU << 24)) | (1U << 31);
     /* Enable the GMAC1 clock gates (bit 31 = clock enable). */
     crg[VF2_CRG_GMAC1_CLK_AHB  / 4] |= (1U << 31);
     crg[VF2_CRG_GMAC1_CLK_AXI  / 4] |= (1U << 31);
@@ -74,13 +81,17 @@ static void vf2_plic_init(void) {
 
 static void vf2_plic_enable(uint32_t irq) {
     int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) |= (1U << irq);
+    volatile uint32_t *enable = (volatile uint32_t *)(PLIC_SENABLE(hart) +
+                                                       (irq / 32) * sizeof(uint32_t));
+    *enable |= (1U << (irq % 32));
     *(volatile uint32_t *)(PLIC_PRIORITY + (uint64_t)irq * 4) = 1;
 }
 
 static void vf2_plic_disable(uint32_t irq) {
     int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) &= ~(1U << irq);
+    volatile uint32_t *enable = (volatile uint32_t *)(PLIC_SENABLE(hart) +
+                                                       (irq / 32) * sizeof(uint32_t));
+    *enable &= ~(1U << (irq % 32));
 }
 
 static uint32_t vf2_plic_ack(void) {
