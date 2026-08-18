@@ -90,58 +90,94 @@ _start:
     sd      a1, 0(t0)
 
     /*
-     * Fill the boot page directory with Sv39 1GB megapages:
-     *   pgdir[2..17]    → PA 0x80000000..0x47fffffff (identity RAM)
-     *   pgdir[256]      → PA 0x00000000              (HH MMIO)
-     *   pgdir[258..273] → PA 0x80000000..0x47fffffff (HH RAM)
-     *
-     * QEMU places the DTB near the top of RAM.  The online evaluator uses up
-     * to 16 GiB, so the early map must cover the complete reference memory
-     * window before C code can parse the memory node.  Mapping the maximum is
-     * safe when the VM has less RAM: the allocator later uses the DTB-reported
-     * range and never allocates pages beyond actual memory.
-     *
-     * PTE = (PPN << 10) | flags
-     * flags = V|R|W|X|A|D = 0xAF
-     */
+      * Fill the boot page directory with Sv39 1GB megapages:
+      *   pgdir[i..i+15]     → PA BOOT_MAP_PHYS .. +16 GiB (identity RAM)
+      *   pgdir[256]         → PA 0x00000000               (HH MMIO, 1 GiB)
+      *   pgdir[257]         → PA BOOT_MAP_MMIO_HI         (optional HH MMIO)
+      *   pgdir[256+i..+15]  → PA BOOT_MAP_PHYS .. +16 GiB (HH RAM)
+      * where i = BOOT_MAP_PHYS >> 30.
+      *
+      * BOOT_MAP_PHYS and BOOT_MAP_MMIO_HI are provided by the linker script,
+      * so a board can relocate the RAM window without touching arch code
+      * (QEMU virt: 0x80000000 + high MMIO at 0x40000000;
+      *  StarFive JH7110: 0x40000000, no high-MMIO slot because RAM is there).
+      *
+      * The early map must cover the complete possible memory window before C
+      * code can parse the memory node.  Mapping the maximum is safe when the
+      * machine has less RAM: the allocator later uses the DTB-reported range
+      * and never allocates pages beyond actual memory.
+      *
+      * PTE = (PPN << 10) | flags
+      * flags = V|R|W|X|A|D = 0xAF
+      */
 #ifndef CONFIG_NOMMU
     la      t0, boot_pgdir
 
-    /* Map sixteen 1GB RAM windows in identity and higher-half slots. */
-    li      t1, 0x200000AF
-    li      t2, 2
-    li      t4, 18
+    /* Map sixteen 1GB RAM windows in identity and higher-half slots.  The
+     * linker-provided constants are read through .rodata words: GAS cannot
+     * materialize a linker symbol with li, and la is PC-relative, so an
+     * absolute value must be stored as data. */
+    la      t6, boot_map_phys_value
+    ld      t6, 0(t6)
+    srli    t1, t6, 2           /* PTE base: (PA >> 2) encodes PPN << 10 */
+    ori     t1, t1, 0xAF
+    srli    t2, t6, 30          /* first pgdir index for the RAM window */
+    addi    t4, t2, 16
+
+    /* Identity-map the low MMIO window so the emergency trap path can still
+     * reach the UART after paging is enabled. */
+    li      t6, 0x000000af
+    sd      t6, 0(t0)
+
 .Lmap_boot_ram:
     slli    t3, t2, 3
     add     t3, t0, t3
     sd      t1, 0(t3)
 
-    addi    t5, t2, 256
+    /* Recompute the original RAM window index.  t2 was advanced past the
+     * sixteen-entry identity map above, so using it here would leave the
+     * actual higher-half kernel address unmapped. */
+    la      t6, boot_map_phys_value
+    ld      t6, 0(t6)
+    srli    t6, t6, 30
+    addi    t5, t6, 256
     slli    t5, t5, 3
     add     t5, t0, t5
     sd      t1, 0(t5)
 
-    li      t6, 0x10000000
+    li      t6, 0x10000000      /* +1 GiB in PTE encoding (PA >> 2) */
     add     t1, t1, t6
     addi    t2, t2, 1
     bltu    t2, t4, .Lmap_boot_ram
 
-    /* Higher-half MMIO maps PA 0..1GB. */
+    /* Higher-half MMIO maps PA 0..1GB.  On JH7110 this covers every on-SoC
+     * device (UART/PLIC/CLINT/CRG/SDIO/GMAC all sit below DRAM). */
     li      t1, 0x000000AF
     li      t2, 256*8
     add     t3, t0, t2
     sd      t1, 0(t3)
 
-    /* QEMU virt PCIe MMIO window: PA 1GB..2GB. */
-    li      t1, 0x100000AF
+    /* Optional second higher-half MMIO window (QEMU virt: PA 1GB..2GB).
+     * Boards whose RAM occupies that slot (JH7110) provide 0 and skip it. */
+    la      t1, boot_map_mmio_hi_value
+    ld      t1, 0(t1)
+    beqz    t1, .enable_mmu
+    srli    t1, t1, 2
+    ori     t1, t1, 0xAF
     li      t2, 257*8
     add     t3, t0, t2
     sd      t1, 0(t3)
 
-    j       .enable_mmu
-
 .enable_mmu:
+    /* Keep a physical S-mode trap target active while enabling translation.
+     * If the first post-satp fetch or access faults, this handler reports the
+     * architectural cause through SBI before the normal trap setup exists. */
+    la      t6, .early_trap
+    csrw    stvec, t6
+
     /* satp = (MODE=8 << 60) | (boot_pgdir_phys >> 12) */
+    fence   rw, rw
+    sfence.vma
     la      t0, boot_pgdir
     li      t2, 8
     slli    t2, t2, 60
@@ -149,6 +185,7 @@ _start:
     or      t0, t0, t2
     csrw    satp, t0
     sfence.vma
+    fence.i
 
     /*
      * Jump to HH entry.  la gives PA (identity mapping still active),
@@ -158,6 +195,56 @@ _start:
     li      t1, 0xFFFFFFC000000000
     add     t0, t0, t1
     jr      t0
+
+/* Print scause, stval, and sepc as 16 hexadecimal digits over SBI legacy
+ * console, without relying on a stack or translated data accesses. */
+.early_trap:
+    csrr    t0, scause
+    csrr    t1, stval
+    csrr    t2, sepc
+    li      a0, 0x54              /* T */
+    jal     ra, .early_putc
+    mv      t3, t0
+    jal     ra, .early_hex
+    li      a0, 0x2f              /* / */
+    jal     ra, .early_putc
+    mv      t3, t1
+    jal     ra, .early_hex
+    li      a0, 0x2f
+    jal     ra, .early_putc
+    mv      t3, t2
+    jal     ra, .early_hex
+    li      a0, 0x0a
+    jal     ra, .early_putc
+1:  wfi
+    j       1b
+
+.early_hex:
+    li      t4, 16
+2:  srli    t5, t3, 60
+    slli    t3, t3, 4
+    li      t6, 10
+    bltu    t5, t6, 3f
+    addi    t5, t5, 55
+    j       4f
+3:  addi    t5, t5, 48
+4:  mv      a0, t5
+    jal     ra, .early_putc
+    addi    t4, t4, -1
+    bnez    t4, 2b
+    ret
+
+.early_putc:
+    li      t6, 0x10000000
+    li      t4, 100000             /* bounded wait: do not hide a trap */
+5:  lbu     t5, 5(t6)              /* NS16550 LSR */
+    andi    t5, t5, 0x20           /* THR empty */
+    bnez    t5, 6f
+    addi    t4, t4, -1
+    bnez    t4, 5b
+6:
+    sb      a0, 0(t6)
+    ret
 #else
     la      t0, .Lhh_entry
     jr      t0
@@ -266,3 +353,12 @@ __boot_dtb_ptr:
     .globl __boot_hart_claim
 __boot_hart_claim:
     .dword -1
+
+    /* Linker-script-provided boot map constants (see ldscript.ld).  Stored
+     * as data because GAS cannot materialize linker symbols with li. */
+    .section .rodata
+    .align 3
+boot_map_phys_value:
+    .dword BOOT_MAP_PHYS
+boot_map_mmio_hi_value:
+    .dword BOOT_MAP_MMIO_HI

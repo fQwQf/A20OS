@@ -24,7 +24,7 @@
 #define VIRTIO_NET_BUF_SIZE        (VIRTIO_NET_HDR_SIZE + VIRTIO_NET_FRAME_MAX)
 #define VIRTIO_NET_F_MAC           5
 #define VIRTIO_NET_F_STATUS        16
-#define VIRTIO_NET_TX_TIMEOUT_TICKS (TICKS_PER_SEC * 2)
+#define VIRTIO_NET_TX_TIMEOUT_TICKS (clock_ticks_per_sec() * 2)
 
 typedef struct {
     virtq_desc_t  desc[VIRTIO_QUEUE_SIZE] ALIGNED(16);

@@ -357,6 +357,11 @@ const struct drv_export drv_export_table[] = {
     { "mutex_lock",          (void *)mutex_lock },
     { "mutex_unlock",        (void *)mutex_unlock },
     { "timer_get_ticks",     (void *)timer_get_ticks },
+#ifdef CONFIG_RISCV64
+    /* riscv64 resolves TICKS_PER_SEC at runtime (DTB timebase), so modules
+     * that expand MS_TO_TICKS/US_TO_TICKS reference this symbol. */
+    { "riscv64_timer_freq",  (void *)riscv64_timer_freq },
+#endif
     { "clock_ticks_per_sec", (void *)clock_ticks_per_sec },
     { "clock_get_ticks",     (void *)clock_get_ticks },
     { "klog_write",          (void *)klog_write },

@@ -216,7 +216,11 @@ int uart_try_getc(void) {
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     if (rx_head == rx_tail) {
         spin_unlock_irqrestore(&rx_lock, flags);
+#ifdef CONFIG_BOARD_VISIONFIVE2
+        return arch_uart_poll_getc();
+#else
         return -1;
+#endif
     }
     char c = rx_buffer[rx_tail];
     rx_tail = (rx_tail + 1) % RX_BUF_SIZE;
@@ -226,6 +230,11 @@ int uart_try_getc(void) {
 
 // 检查是否有输入数据
 int uart_has_input(void) {
+#ifdef CONFIG_BOARD_VISIONFIVE2
+    int polled = arch_uart_poll_getc();
+    if (polled >= 0)
+        uart_rx_push((char)polled);
+#endif
     /* LOCK_ORDER: acquire rx_lock to test RX ring non-empty. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int has = rx_head != rx_tail;

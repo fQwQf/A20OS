@@ -52,7 +52,13 @@ PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏�
 - PHY：扫描 MDIO 0..31 定位（VF2 板载 Motorcomm YT8531），复位 + 自协商。
 - DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁，命令/数据路径同步轮询。
 - 已知边界：数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。
-- 架构级 `TICKS_PER_SEC` 仍为 QEMU 的 10 MHz 编译期常量；板上定时器节拍 校准要求把 riscv64 定时器频率改为运行时 DTB 值（board 的 `ticks_per_sec` 已随 DTB 变化，驱动超时已正确）。
+- 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB
+  `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确），
+  `timer_set_interval` 与全部 tick↔时间换算随之按板校准。
+- 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号
+  （`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级
+  `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash
+  烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
 
 ## Loongson LS2K1000（龙芯 2K1000）
 
@@ -98,6 +104,9 @@ make ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedd
 make ARCH=loongarch64 BOARD=ls2k1000 ABI=linux BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 # SMP 链接验证（真机多核验收前需显式 ALLOW_UNVERIFIED_SMP）
 make ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
+# VF2 上板启动链：从源码构建 OpenSBI+U-Boot SPL，打包直接引导 FIT 与 SD 镜像
+make vf2-firmware
+make vf2-image
 ```
 
 CI 目标：`check-visionfive2-build`、`check-ls2k1000-build` （见 `tools/targets-build.mk`），保证两块板随仓库始终可构建。

@@ -1,26 +1,25 @@
 /*
- * A20OS linker script for RISC-V 64-bit (Higher-Half Kernel)
+ * A20OS linker script for RISC-V 64-bit on StarFive VisionFive 2 (JH7110).
  *
- * Strategy: text/rodata/data are loaded at PA 0x80200000 (LMA).
- * Their VMA is 0xFFFFFFC080200000 (HH).  QEMU -kernel kernel.elf
- * loads segments to their LMA, which falls within the physical RAM
- * region that OpenSBI expects (PA 0x80200000+).
+ * Same layout strategy as the arch default (kernel/arch/riscv64/boot/
+ * ldscript.ld), but the JH7110 DRAM window starts at PA 0x40000000 instead
+ * of QEMU virt's 0x80000000.  OpenSBI/U-Boot SPL loads the kernel image at
+ * PA 0x40200000 (LMA); the VMA is the corresponding higher-half address.
  *
- * BSS is not emitted as a loadable segment (NOLOAD), so it doesn't
- * inflate the ELF or confuse QEMU's memory layout.  entry.S zeroes
- * BSS manually before jumping to kernel_main.
+ * BOOT_MAP_PHYS/BOOT_MAP_MMIO_HI feed the entry.S boot page table: sixteen
+ * 1 GiB RAM megapages start at index 0x40000000 >> 30 = 1, and the second
+ * higher-half MMIO slot is disabled because PA 0x40000000 is RAM on this SoC
+ * (all JH7110 devices live below DRAM and are covered by the PA 0..1 GiB
+ * higher-half MMIO megapage).
  */
 
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
-PROVIDE(PHYS_BASE = 0x80200000);
-PROVIDE(VIRT_BASE = 0xFFFFFFC080200000);
-/* Boot-time 1 GiB megapage window consumed by entry.S: PA of the first RAM
- * gigabyte (1 GiB aligned) and an optional second higher-half MMIO window
- * (0 = none).  A board ldscript may override these to relocate RAM. */
-PROVIDE(BOOT_MAP_PHYS = 0x80000000);
-PROVIDE(BOOT_MAP_MMIO_HI = 0x40000000);
+PROVIDE(PHYS_BASE = 0x40200000);
+PROVIDE(VIRT_BASE = 0xFFFFFFC040200000);
+PROVIDE(BOOT_MAP_PHYS = 0x40000000);
+PROVIDE(BOOT_MAP_MMIO_HI = 0x0);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 PHDRS

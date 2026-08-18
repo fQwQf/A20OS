@@ -114,7 +114,18 @@ void vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc)
 
 vaddr_t vdso_auxv_ehdr(void)
 {
+#ifdef CONFIG_BOARD_VISIONFIVE2
+    /*
+     * JH7110 firmware does not consistently grant U-mode access to the time
+     * CSR on every boot hart.  Advertising the RISC-V vDSO in that state
+     * makes libc retry the faulting rdtime instruction forever.  Keep the
+     * mappings available for later bring-up, but make libc use the syscall
+     * path, where the kernel reads the counter in S-mode.
+     */
+    return 0;
+#else
     return g_vdso_pages ? (vaddr_t)A20_VDSO_VA : 0;
+#endif
 }
 
 static void vdso_append_vma(vm_area_t **list, vm_area_t *newv)
