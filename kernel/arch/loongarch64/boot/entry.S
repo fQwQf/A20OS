@@ -1,6 +1,8 @@
 .section .text.entry
 .global _start
 
+#include "mmu_layout.h"
+
 .equ CSR_CRMD,    0x0
 .equ CSR_PRMD,    0x1
 .equ CSR_EUEN,    0x2
@@ -27,15 +29,31 @@ _start:
      * DMW mappings remain active in PG mode for kernel direct access.
      */
 
-    /* DMW0/DMW1: identity map seg0→seg0, cached, PLV0 */
+    /*
+     * LS2K1000 U-Boot enters through the cached VSEG 9 DMW.  Reinstall the
+     * firmware's standard uncached/cached pair without ever dropping the
+     * mapping that contains the current PC.  QEMU keeps its identity DMW.
+     */
+#ifdef CONFIG_BOARD_LS2K1000
+    li.d        $t0, 0x800000000000000f
+    csrwr       $t0, CSR_DMW0
+    li.d        $t0, 0x900000000000001f
+    csrwr       $t0, CSR_DMW1
+#else
     li.d        $t0, 0x11
     csrwr       $t0, CSR_DMW0
     csrwr       $t0, CSR_DMW1
+#endif
 
     invtlb      0, $zero, $zero
 
+#ifdef CONFIG_BOARD_LS2K1000
+    /* U-Boot already runs with paging and the cached DMW active. */
+    li.d        $t0, 0xB0
+#else
     /* CRMD = DA mode, PG=0, IE=0, PLV0 (still in DA for now) */
     li.d        $t0, 0x8
+#endif
     csrwr       $t0, CSR_CRMD
 
     li.d        $t0, 0
@@ -79,10 +97,12 @@ bss_clear:
     addi.d      $t0, $t0, 8
     b           bss_clear
 bss_done:
-    /* QEMU's LoongArch virt machine publishes its FDT in low RAM at 1 MiB.
-     * Preserve the pointer after clearing BSS so early platform code can
-     * discover every RAM bank instead of relying on the 512 MiB fallback. */
+    /* Preserve the firmware DTB pointer after clearing BSS. */
+#ifdef CONFIG_BOARD_LS2K1000
+    li.d        $t0, 0x900000000a000000
+#else
     li.d        $t0, 0x100000
+#endif
     la.global   $t1, __boot_dtb_ptr
     st.d        $t0, $t1, 0
 
@@ -103,31 +123,35 @@ secondary_start:
 
 setup_mmu:
 
-    /* Load boot_pgdir into PGDL and PGDH.
-     * Kernel uses DMW direct mapping; page tables are for user space only.
-     * PGDL/PGDH expect the physical address of the root page table.
-     * Since PAGE_OFFSET=0 (identity mapped), VA == PA. */
+    /* Load the physical boot_pgdir address into PGDL and PGDH. */
     la.global   $t0, boot_pgdir
+#ifdef CONFIG_BOARD_LS2K1000
+    li.d        $t1, 0x9000000000000000
+    sub.d       $t0, $t0, $t1
+#endif
     csrwr       $t0, CSR_PGDL
     csrwr       $t0, CSR_PGDH
 
-    /* Configure Page Walk Controller for 3-level page table.
-     * Matches RocketOS configuration exactly.
+    /* Configure the Page Walk Controller from the board's MMU profile.
+     * QEMU keeps Dir2 folded; LS2K1000LA uses Dir3/Dir2/Dir1/PT.
      *
      * PWCL bit layout (CSR 0x1C):
-     *   [5:0]   ptbase    = 12  (page offset bits, 4KB pages)
-     *   [11:6]  ptwidth   = 9   (PT index width, 512 entries)
-     *   [17:12] dir1_base = 21  (12 + 9)
-     *   [23:18] dir1_width= 9   (512 entries)
-     *   [29:24] dir2_base = 30  (12 + 9 + 9)
-     *   [31:30] = 0
+     *   [4:0]   ptbase     = 12  (page offset bits, 4KB pages)
+     *   [9:5]   ptwidth    = 9   (PT index width, 512 entries)
+     *   [14:10] dir1_base  = 21  (PMD index)
+     *   [19:15] dir1_width = 9
+     *   [24:20] dir2_base  = 30 for the four-level profile
+     *   [29:25] dir2_width = 9, or both fields zero when folded
+     *   [31:30] pte_width  = 0   (8-byte PTEs)
      *
-     * PWCH (CSR 0x1D) = 0:
-     *   No dir3/dir4 levels.  PTEWIDTH[31:30]=0 → 8-byte PTEs.
+     * PWCH bit layout (CSR 0x1D):
+     *   [5:0]   dir3_base  = 30 (QEMU) or 39 (LS2K1000LA)
+     *   [11:6]  dir3_width = 9
+     *   dir4 is folded (zero).
      */
-    li.d        $t0, (12 << 0) | (9 << 5) | (21 << 10) | (9 << 15) | (30 << 20) | (9 << 25)
+    li.d        $t0, LA64_PWCL_VALUE
     csrwr       $t0, CSR_PWCL
-    li.d        $t0, 0
+    li.d        $t0, LA64_PWCH_VALUE
     csrwr       $t0, CSR_PWCH
 
     /* STLBPS: set page size = 4KB (PS=12) for STLB entries.
@@ -136,6 +160,12 @@ setup_mmu:
      * MTLB instead of STLB (works, but suboptimal; also matches RocketOS). */
     li.d        $t0, 12
     csrwr       $t0, 0x1E              /* CSR_STLBPS */
+
+    /* TLBREHI.PS controls entries created by the refill path.  Linux sets
+     * this independently of STLBPS; leaving it at the firmware value makes
+     * the first user TLB miss implementation-dependent. */
+    li.d        $t0, 12
+    csrwr       $t0, 0x8E              /* CSR_TLBREHI */
 
     /* Enable paging: CRMD.PG=1, DA=0, IE=0, PLV=0
      *   DATF=01 (CC) bit [6:5]  — coherent cached for fetch
@@ -161,12 +191,21 @@ setup_mmu:
     invtlb      0, $zero, $zero
 
     csrrd       $a0, CSR_CPUID
+#ifdef CONFIG_BOARD_LS2K1000
+    li.d        $a1, 0x900000000a000000
+#else
     li.d        $a1, 0x100000
+#endif
 
     bnez        $a0, call_secondary
-    /* Preserve the UP bootstrap behavior: kernel_main historically starts
-     * with local interrupts enabled on this architecture. */
+    /* The physical board's 100 MHz timer can fire while the allocator and
+     * networking globals are still being initialized.  Keep IE clear until
+     * kernel_main has initialized the process and progress subsystems. */
+#ifdef CONFIG_BOARD_LS2K1000
+    li.d        $t0, 0xB0
+#else
     li.d        $t0, 0xB4
+#endif
     csrwr       $t0, CSR_CRMD
     bl          kernel_main
     b           halt

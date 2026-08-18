@@ -89,6 +89,24 @@ typedef struct {
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
 
+static int a20_lwip_device_link_up(const a20_lwip_netif_state_t *st)
+{
+    return !st->ops->link_up || st->ops->link_up(st->dev) > 0;
+}
+
+static void a20_lwip_sync_link_state(struct netif *netif)
+{
+    if (!netif || !netif->state)
+        return;
+
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
+    int link_up = a20_lwip_device_link_up(st);
+    if (link_up && !netif_is_link_up(netif))
+        netif_set_link_up(netif);
+    else if (!link_up && netif_is_link_up(netif))
+        netif_set_link_down(netif);
+}
+
 u32_t sys_now(void) {
     return (u32_t)(timer_get_ticks() * 1000UL / TICKS_PER_SEC);
 }
@@ -126,7 +144,9 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
     netif->hwaddr_len = ETH_HWADDR_LEN;
     memcpy(netif->hwaddr, mac, ETH_HWADDR_LEN);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
-                   NETIF_FLAG_LINK_UP | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
+                   NETIF_FLAG_IGMP | NETIF_FLAG_MLD6;
+    if (a20_lwip_device_link_up(st))
+        netif->flags |= NETIF_FLAG_LINK_UP;
     return ERR_OK;
 }
 
@@ -218,7 +238,7 @@ static void a20_lwip_register_netifs(void) {
         }
         netif_set_default(n);
         netif_set_up(n);
-        netif_set_link_up(n);
+        a20_lwip_sync_link_state(n);
 #if LWIP_IPV6
         netif_create_ip6_linklocal_address(n, 1);
 #endif
@@ -295,6 +315,12 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         return;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    a20_lwip_sync_link_state(n);
+
+    if (!netif_is_link_up(n)) {
+        netif_poll(n);
+        return;
+    }
 
     for (;;) {
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));

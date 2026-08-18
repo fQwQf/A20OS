@@ -48,6 +48,15 @@
 #define MII_ADDR_GR_SHIFT 6
 #define MII_ADDR_PA_SHIFT 11
 
+#define MII_BMCR         0
+#define MII_BMSR         1
+#define MII_PHYSID1      2
+#define MII_PHYSID2      3
+#define BMCR_RESET       (1U << 15)
+#define BMCR_ANENABLE    (1U << 12)
+#define BMCR_ANRESTART   (1U << 9)
+#define BMSR_LINK_STATUS (1U << 2)
+
 #define DMA_BUS_MODE      (GMAC_DMA_BASE + 0x0000)
 #define DMA_TX_POLL_DEMAND (GMAC_DMA_BASE + 0x0004)
 #define DMA_RX_POLL_DEMAND (GMAC_DMA_BASE + 0x0008)
@@ -73,6 +82,9 @@
 #define DMA_STATUS_NIS    (1U << 15)
 
 #define DMA_BUS_MODE_SWR  (1U << 0)
+#define DMA_CONTROL_SR    (1U << 1)
+#define DMA_CONTROL_ST    (1U << 13)
+#define DMA_CONTROL_TSF   (1U << 21)
 
 #define MAC_CONF_TE       (1U << 3)
 #define MAC_CONF_RE       (1U << 2)
@@ -93,13 +105,17 @@ typedef struct {
     uint32_t buffer2;
 } gmac_desc_t;
 
-#define DESC_OWN (1U << 31)
-#define DESC_IOC (1U << 30)
-#define DESC_FD  (1U << 29)
-#define DESC_LD  (1U << 28)
-#define DESC_ES  (1U << 15)
-#define DESC_LS  (1U << 8)
-#define DESC_FS  (1U << 9)
+#define TX_DESC_OWN (1U << 31)
+#define TX_DESC_IC  (1U << 30)
+#define TX_DESC_LS  (1U << 29)
+#define TX_DESC_FS  (1U << 28)
+#define TX_DESC_TER (1U << 21)
+#define RX_DESC_OWN (1U << 31)
+#define RX_DESC_ES  (1U << 15)
+#define RX_DESC_RER (1U << 15)
+#define RX_DESC_FRAME_LEN(status) (((status) >> 16) & 0x3FFFU)
+
+#define GMAC_LINK_POLL_HZ 4U
 
 #define GMAC_MAX_INSTANCES 4
 
@@ -114,6 +130,10 @@ typedef struct {
     uint32_t    tx_busy;
     uint32_t    rx_busy;
     uint8_t     mac[6];
+    int         phy_addr;
+    uint32_t    phy_id;
+    int         link_up;
+    uint64_t    last_link_check;
 } ls2k_gmac_priv_t;
 
 static ls2k_gmac_priv_t g_ls2k_gmac_insts[GMAC_MAX_INSTANCES];
@@ -137,6 +157,7 @@ static ls2k_gmac_priv_t *gmac_alloc_instance(uintptr_t base)
             inst = &g_ls2k_gmac_insts[i];
             memset(inst, 0, sizeof(*inst));
             inst->base = base;
+            inst->phy_addr = -1;
             inst->valid = 1;
             spin_init(&inst->lock);
             return inst;
@@ -173,15 +194,24 @@ static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
     return (uint16_t)gmac_read(base, MAC_MII_DATA);
 }
 
-static void gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
-    if (gmac_mdio_wait(base) != 0) return;
+static int gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
+    if (gmac_mdio_wait(base) != 0)
+        return -1;
     gmac_write(base, MAC_MII_DATA, data);
     uint32_t val = MII_ADDR_GB | MII_ADDR_MW |
                    (phy_addr << MII_ADDR_PA_SHIFT) |
                    (reg << MII_ADDR_GR_SHIFT) |
                    (4 << MII_ADDR_CR_SHIFT);
     gmac_write(base, MAC_MII_ADDR, val);
-    gmac_mdio_wait(base);
+    return gmac_mdio_wait(base);
+}
+
+static int ls2k_gmac_read_link(uintptr_t base, int phy_addr)
+{
+    /* BMSR link is latched low, so the current value is the second read. */
+    (void)gmac_mdio_read(base, phy_addr, MII_BMSR);
+    uint16_t bmsr = gmac_mdio_read(base, phy_addr, MII_BMSR);
+    return bmsr != 0xFFFFU && (bmsr & BMSR_LINK_STATUS) != 0;
 }
 
 static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
@@ -195,13 +225,15 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
         paddr_t tx_buf_pa = va_to_pa((const void *)priv->tx_buf[i]);
         paddr_t rx_buf_pa = va_to_pa((const void *)priv->rx_buf[i]);
 
-        priv->tx_desc[i].status = DESC_IOC | DESC_FD | DESC_LD;
+        priv->tx_desc[i].status = i == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0;
         priv->tx_desc[i].buffer1 = (uint32_t)tx_buf_pa;
 
-        priv->rx_desc[i].status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD;
-        priv->rx_desc[i].length = (1 << 16) | GMAC_BUF_SIZE;
+        priv->rx_desc[i].status = RX_DESC_OWN;
+        priv->rx_desc[i].length = GMAC_BUF_SIZE |
+                                  (i == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
         priv->rx_desc[i].buffer1 = (uint32_t)rx_buf_pa;
     }
+    dma_sync_for_device(priv->rx_buf, sizeof(priv->rx_buf));
     dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
     dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
@@ -212,20 +244,22 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     priv->rx_busy = 0;
 }
 
-static int ls2k_gmac_phy_init(uintptr_t base) {
+static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
     int phy_addr = -1;
     uint16_t id1, id2;
     uint32_t phy_id;
 
     for (int i = 0; i < 32; i++) {
-        id1 = gmac_mdio_read(base, i, 2);
-        id2 = gmac_mdio_read(base, i, 3);
+        id1 = gmac_mdio_read(base, i, MII_PHYSID1);
+        id2 = gmac_mdio_read(base, i, MII_PHYSID2);
         if (id1 == 0xFFFF && id2 == 0xFFFF)
             continue;
         phy_id = ((uint32_t)id1 << 16) | id2;
         if ((phy_id & 0x1FFFFFFF) == 0x1FFFFFFF)
             continue;
         phy_addr = i;
+        priv->phy_addr = i;
+        priv->phy_id = phy_id;
         kinfo("[LS2K-GMAC] PHY 0x%02x id 0x%08x\n", i, phy_id);
         break;
     }
@@ -234,32 +268,43 @@ static int ls2k_gmac_phy_init(uintptr_t base) {
         return -1;
     }
 
-    gmac_mdio_write(base, phy_addr, 0, 0x8000);
+    if (gmac_mdio_write(base, phy_addr, MII_BMCR, BMCR_RESET) != 0)
+        return -1;
     uint64_t start = timer_get_ticks();
     while (1) {
-        uint16_t val = gmac_mdio_read(base, phy_addr, 0);
-        if (!(val & 0x8000)) break;
+        uint16_t val = gmac_mdio_read(base, phy_addr, MII_BMCR);
+        if (!(val & BMCR_RESET))
+            break;
         if (timer_get_ticks() - start > clock_ticks_per_sec() * 2) {
             kinfo("[LS2K-GMAC] PHY reset timeout\n");
             return -1;
         }
     }
 
-    gmac_mdio_write(base, phy_addr, 0, 0x1200);
+    if (gmac_mdio_write(base, phy_addr, MII_BMCR,
+                        BMCR_ANENABLE | BMCR_ANRESTART) != 0)
+        return -1;
     mdelay(100);
 
-    start = timer_get_ticks();
-    while (1) {
-        uint16_t val = gmac_mdio_read(base, phy_addr, 1);
-        if (val & 0x0004) break;
-        if (timer_get_ticks() - start > clock_ticks_per_sec() * 5) {
-            kinfo("[LS2K-GMAC] PHY link up timeout\n");
+    int link_up = ls2k_gmac_read_link(base, phy_addr);
+    __atomic_store_n(&priv->link_up, link_up, __ATOMIC_RELEASE);
+    priv->last_link_check = timer_get_ticks();
+    kinfo("[LS2K-GMAC] PHY carrier %s at addr %d%s\n",
+          link_up ? "up" : "down", phy_addr,
+          link_up ? "" : "; continuing without cable");
+    return 0;
+}
+
+static int ls2k_gmac_dma_reset(uintptr_t base)
+{
+    gmac_write(base, DMA_BUS_MODE, DMA_BUS_MODE_SWR);
+    uint64_t start = timer_get_ticks();
+    while (gmac_read(base, DMA_BUS_MODE) & DMA_BUS_MODE_SWR) {
+        if (timer_get_ticks() - start > clock_ticks_per_sec()) {
+            kinfo("[LS2K-GMAC] DMA reset timeout\n");
             return -1;
         }
-        mdelay(10);
     }
-
-    kinfo("[LS2K-GMAC] PHY link up at addr %d\n", phy_addr);
     return 0;
 }
 
@@ -269,8 +314,10 @@ int ls2k_gmac_init(uintptr_t base) {
         return -1;
     memcpy(priv->mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
 
-    gmac_write(base, DMA_BUS_MODE, DMA_BUS_MODE_SWR);
-    while (gmac_read(base, DMA_BUS_MODE) & DMA_BUS_MODE_SWR);
+    uint32_t version = gmac_read(base, MAC_VERSION);
+    kinfo("[LS2K-GMAC] MAC version 0x%08x\n", version);
+    if (ls2k_gmac_dma_reset(base) != 0)
+        return -1;
     mdelay(10);
 
     gmac_write(base, MAC_CONFIGURATION, 0);
@@ -278,6 +325,7 @@ int ls2k_gmac_init(uintptr_t base) {
 
     gmac_write(base, MAC_FRAME_FILTER, 0x80000001);
     gmac_write(base, MAC_FLOW_CTRL, 0);
+    gmac_write(base, MAC_INTERRUPT_MASK, 0xFFFFFFFFU);
 
     uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
     uint32_t low  = (priv->mac[3] << 24) | (priv->mac[2] << 16) |
@@ -285,14 +333,18 @@ int ls2k_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_ADDR0_HIGH, high);
     gmac_write(base, MAC_ADDR0_LOW, low);
 
-    if (ls2k_gmac_phy_init(base) != 0)
+    if (ls2k_gmac_phy_init(base, priv) != 0)
         return -1;
 
     gmac_write(base, MAC_CONFIGURATION,
                MAC_CONF_RE | MAC_CONF_TE | MAC_CONF_DM | MAC_CONF_IPC);
 
-    gmac_write(base, DMA_CONTROL, 0x00202000);
-    gmac_write(base, DMA_INTR_ENABLE, 0x00010043);
+    /* Polling is the deliberate Phase 3 baseline. Device IRQ sources remain
+     * masked in LIOINTC until the data path is validated with a cable. */
+    gmac_write(base, DMA_INTR_ENABLE, 0);
+    gmac_write(base, DMA_STATUS, 0xFFFFFFFFU);
+    gmac_write(base, DMA_CONTROL,
+               DMA_CONTROL_TSF | DMA_CONTROL_ST | DMA_CONTROL_SR);
 
     kinfo("[LS2K-GMAC] Initialized at 0x%lx\n", (unsigned long)base);
     return 0;
@@ -300,57 +352,71 @@ int ls2k_gmac_init(uintptr_t base) {
 
 int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
     ls2k_gmac_priv_t *priv = gmac_instance(base);
-    if (!priv || len > GMAC_BUF_SIZE - 4)
+    if (!priv || !pkt || len == 0 || len > GMAC_BUF_SIZE - 4)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
+    if (!__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
+    }
     uint32_t idx = priv->tx_busy;
     gmac_desc_t *desc = &priv->tx_desc[idx];
 
-    if (desc->status & DESC_OWN) {
+    dma_sync_for_cpu(desc, sizeof(*desc));
+    if (desc->status & TX_DESC_OWN) {
         spin_unlock_irqrestore(&priv->lock, flags);
         return -1;
     }
 
-    memcpy(priv->tx_buf[idx], pkt, len);
-    if (len < 60) {
-        memset(priv->tx_buf[idx] + len, 0, 60 - len);
-        len = 60;
+    size_t packet_len = len;
+    size_t dma_len = len;
+    memcpy(priv->tx_buf[idx], pkt, dma_len);
+    if (dma_len < 60) {
+        memset(priv->tx_buf[idx] + dma_len, 0, 60 - dma_len);
+        dma_len = 60;
     }
-    dma_sync_for_device(priv->tx_buf[idx], len);
+    dma_sync_for_device(priv->tx_buf[idx], dma_len);
 
-    desc->length = (1 << 16) | (uint32_t)len;
+    desc->length = (uint32_t)dma_len;
     __sync_synchronize();
-    desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD | DESC_FS | DESC_LS;
+    desc->status = TX_DESC_OWN | TX_DESC_IC | TX_DESC_FS | TX_DESC_LS |
+                   (idx == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0);
     dma_sync_for_device(desc, sizeof(*desc));
 
     gmac_write(base, DMA_TX_POLL_DEMAND, 1);
 
     priv->tx_busy = (idx + 1) % GMAC_DESC_NUM;
     spin_unlock_irqrestore(&priv->lock, flags);
-    return 0;
+    return (int)packet_len;
 }
 
 int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
     ls2k_gmac_priv_t *priv = gmac_instance(base);
-    if (!priv)
+    if (!priv || !buf || maxlen == 0)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
+    if (!__atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE)) {
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
+    }
     uint32_t idx = priv->rx_busy;
     gmac_desc_t *desc = &priv->rx_desc[idx];
 
-    if (desc->status & DESC_OWN) {
+    dma_sync_for_cpu(desc, sizeof(*desc));
+    if (desc->status & RX_DESC_OWN) {
         spin_unlock_irqrestore(&priv->lock, flags);
         return -1;
     }
 
-    dma_sync_for_cpu(desc, sizeof(*desc));
     dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
-    if (desc->status & DESC_ES) {
-        desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD;
-        desc->length = (1 << 16) | GMAC_BUF_SIZE;
+    if (desc->status & RX_DESC_ES) {
+        dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
+        desc->length = GMAC_BUF_SIZE |
+                       (idx == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
+        desc->status = RX_DESC_OWN;
         dma_sync_for_device(desc, sizeof(*desc));
         priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
         gmac_write(base, DMA_RX_POLL_DEMAND, 1);
@@ -358,12 +424,15 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
         return -1;
     }
 
-    uint32_t len = ((desc->status >> 16) & 0x3FFF) - 4;
+    uint32_t frame_len = RX_DESC_FRAME_LEN(desc->status);
+    uint32_t len = frame_len >= 4 ? frame_len - 4 : 0;
     if (len > maxlen) len = maxlen;
     if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
-    desc->status = DESC_OWN | DESC_IOC | DESC_FD | DESC_LD;
-    desc->length = (1 << 16) | GMAC_BUF_SIZE;
+    dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
+    desc->length = GMAC_BUF_SIZE |
+                   (idx == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
+    desc->status = RX_DESC_OWN;
     dma_sync_for_device(desc, sizeof(*desc));
     gmac_write(base, DMA_RX_POLL_DEMAND, 1);
 
@@ -387,6 +456,19 @@ int ls2k_gmac_poll(uintptr_t base) {
     uint32_t status = gmac_read(base, DMA_STATUS);
     if (status)
         gmac_write(base, DMA_STATUS, status);
+    uint64_t now = timer_get_ticks();
+    uint64_t interval = clock_ticks_per_sec() / GMAC_LINK_POLL_HZ;
+    if (priv->phy_addr >= 0 && now - priv->last_link_check >= interval) {
+        int link_up = ls2k_gmac_read_link(base, priv->phy_addr);
+        priv->last_link_check = now;
+        int old_link_up = __atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE);
+        if (link_up != old_link_up) {
+            __atomic_store_n(&priv->link_up, link_up, __ATOMIC_RELEASE);
+            kinfo("[LS2K-GMAC] PHY carrier %s (rgmii=0x%08x)\n",
+                  link_up ? "up" : "down",
+                  gmac_read(base, MAC_RGMII_STATUS));
+        }
+    }
     spin_unlock_irqrestore(&priv->lock, flags);
     return 0;
 }
@@ -438,6 +520,11 @@ static const uint8_t *ls2k_gmac_class_mac(struct device *dev) {
     return priv ? priv->mac : NULL;
 }
 
+static int ls2k_gmac_class_link_up(struct device *dev) {
+    ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
+    return priv ? __atomic_load_n(&priv->link_up, __ATOMIC_ACQUIRE) : 0;
+}
+
 static void ls2k_gmac_class_poll(struct device *dev) {
     ls2k_gmac_priv_t *priv = (ls2k_gmac_priv_t *)dev->drv_priv;
     if (priv)
@@ -449,6 +536,7 @@ static net_dev_ops_t ls2k_gmac_net_ops = {
     .recv = ls2k_gmac_class_recv,
     .mac  = ls2k_gmac_class_mac,
     .poll = ls2k_gmac_class_poll,
+    .link_up = ls2k_gmac_class_link_up,
 };
 
 static const device_id_t ls2k_gmac_ids[] = {

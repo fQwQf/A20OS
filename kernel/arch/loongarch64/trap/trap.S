@@ -25,6 +25,7 @@
  */
 
 #include "loongarch64_asm.h"
+#include "mmu_layout.h"
 
 #define CTX_SIZE    (102 * 8)
 #define REG_OFF(n)  ((n) * 8)
@@ -47,6 +48,43 @@
     .global arch_idle_wait
     .global loongarch64_idle_region_start
     .global loongarch64_idle_region_end
+
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
+    defined(CONFIG_LS2K_TRAP_TRACE)
+    /* Return/trap checkpoints for physical-board userspace bring-up.  Callers
+     * place these only after the interrupted t0/t1 values are safely stored. */
+    .macro LS2K_TRAP_MARK value
+    li.d    $t0, 0x800000001fe20000
+1:
+    ld.bu   $t1, $t0, 5
+    andi    $t1, $t1, 0x20
+    beqz    $t1, 1b
+    li.w    $t1, \value
+    st.b    $t1, $t0, 0
+    .endm
+
+    /* The refill handler cannot call C code and may fail before the regular
+     * exception vector is usable.  Preserve its two diagnostic temporaries in
+     * otherwise-unused KSAVE registers so single-byte checkpoints can identify
+     * the exact page-walk operation reached on physical hardware. */
+    .macro LS2K_REFILL_MARK value
+    /* TLB refill runs with direct physical addressing, before a translated
+     * DMW alias is guaranteed to be usable. */
+    li.d    $t0, 0x1fe20000
+1:
+    ld.bu   $t1, $t0, 5
+    andi    $t1, $t1, 0x20
+    beqz    $t1, 1b
+    li.w    $t1, \value
+    st.b    $t1, $t0, 0
+    .endm
+#else
+    .macro LS2K_TRAP_MARK value
+    .endm
+
+    .macro LS2K_REFILL_MARK value
+    .endm
+#endif
 
 /* Entered with CRMD.IE clear and returns with it clear. If an interrupt is
  * recognized after IE is set but before idle executes, trap_bridge.c advances
@@ -71,6 +109,12 @@ loongarch64_idle_region_end:
  * If PPLV==3 (user mode): sp = user sp, SAVE0 = kernel sp, SAVE1 = task tp.
  * If PPLV==0 (kernel mode): sp = kernel sp.
  */
+#ifdef CONFIG_BOARD_LS2K1000
+    /* LS2K1000 clears EENTRY[11:0].  Keep this physical-board-only so the
+     * QEMU exception layout and object code remain unchanged. */
+    .section .trap_entry, "ax"
+    .p2align 12
+#endif
 trap_entry_la64:
     /* Save original $t0 before we clobber it.  TLBRSAVE belongs to the TLB
      * refill path; general traps use SAVE2 so interrupts cannot corrupt user
@@ -82,6 +126,9 @@ trap_entry_la64:
     andi    $t0, $t0, 0x3         /* PPLV bits [1:0] */
     bnez    $t0, __trap_from_user /* PPLV != 0 → came from user */
     b       __trap_from_kernel
+#ifdef CONFIG_BOARD_LS2K1000
+    .section .text
+#endif
 
 /* ---- Trap entry from kernel mode (PLV0 → PLV0) ----
  * sp is already the kernel stack.
@@ -113,6 +160,7 @@ __trap_from_kernel:
     csrrd   $t0, 0x32
     st.d    $t0,   $sp, REG_OFF(12)
     st.d    $t1,   $sp, REG_OFF(13)
+    LS2K_TRAP_MARK 75              /* K: kernel exception frame active */
     st.d    $t2,   $sp, REG_OFF(14)
     st.d    $t3,   $sp, REG_OFF(15)
     st.d    $t4,   $sp, REG_OFF(16)
@@ -226,6 +274,20 @@ __trap_from_user:
     csrrd   $t0, 0x32
     st.d    $t0, $sp, REG_OFF(12)
     st.d    $t1, $sp, REG_OFF(13)
+    LS2K_TRAP_MARK 85              /* U: user exception frame active */
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT) && \
+    defined(CONFIG_LS2K_TRAP_TRACE)
+    csrrd   $t0, 0x5               /* ESTAT.Ecode */
+    srli.d  $t0, $t0, 16
+    andi    $t0, $t0, 0x3f
+    li.w    $t1, 11                /* SYS from PLV3 */
+    bne     $t0, $t1, .Lls2k_non_sys_trap
+    LS2K_TRAP_MARK 115             /* s: expected first syscall */
+    b       .Lls2k_trap_cause_done
+.Lls2k_non_sys_trap:
+    LS2K_TRAP_MARK 101             /* e: another exception code */
+.Lls2k_trap_cause_done:
+#endif
 
     /* Read back user sp from SAVE0 into $t0, save to regs[3] */
     csrrd   $t0, 0x30
@@ -274,6 +336,7 @@ __trap_from_user:
     st.d    $s6,   $sp, REG_OFF(29)
     st.d    $s7,   $sp, REG_OFF(30)
     st.d    $s8,   $sp, REG_OFF(31)
+    LS2K_TRAP_MARK 86              /* V: all user GPRs saved */
 
     vst     $vr0,  $sp, VR_OFF(0)
     vst     $vr1,  $sp, VR_OFF(1)
@@ -307,6 +370,7 @@ __trap_from_user:
     vst     $vr29, $sp, VR_OFF(29)
     vst     $vr30, $sp, VR_OFF(30)
     vst     $vr31, $sp, VR_OFF(31)
+    LS2K_TRAP_MARK 87              /* W: LSX state saved */
     movfcsr2gr $t0, $fcsr0
     st.d    $t0, $sp, FCSR_OFF
     movcf2gr $t0, $fcc0
@@ -332,6 +396,7 @@ __trap_from_user:
     slli.d  $t1, $t1, 7
     or      $t0, $t0, $t1
     st.d    $t0, $sp, FCC_OFF
+    LS2K_TRAP_MARK 89              /* Y: scalar FP state saved */
 
     csrrd   $t0, 0x6
     st.d    $t0, $sp, ERA_OFF
@@ -345,6 +410,7 @@ __trap_from_user:
     /* Load task tp into $tp for the C handler */
     ld.d    $tp, $sp, KTP_OFF
 
+    LS2K_TRAP_MARK 90              /* Z: entering C trap handler */
     move    $a0, $sp
     bl      trap_handler_la64
     /* fall through to restore */
@@ -355,6 +421,7 @@ __trap_from_user:
 .Lrestore_and_return:
 __return_to_user:
 user_trap_return:
+    LS2K_TRAP_MARK 73              /* I: return frame selected */
     /* Restore PGDL (page table base) from regs[0] / KScratch0.
      * This is critical after exec(): proc_exec sets regs[0] to the
      * new page directory's satp value, but the PGDL CSR still points
@@ -369,6 +436,7 @@ user_trap_return:
     csrwr   $t0, 0x19              /* PGDL */
     invtlb  0x3, $zero, $zero
 .Lpgdl_done:
+    LS2K_TRAP_MARK 74              /* J: user PGDL installed */
 
     ld.d    $t0, $sp, ERA_OFF
     csrwr   $t0, 0x6               /* ERA */
@@ -384,6 +452,7 @@ user_trap_return:
 
     ld.d    $t3, $sp, KTP_OFF
     csrwr   $t3, 0x31              /* SAVE1 = task tp */
+    LS2K_TRAP_MARK 75              /* K: return CSRs installed */
 
     /* Restore scalar FP and LSX state before GPRs. */
     vld     $vr0,  $sp, VR_OFF(0)
@@ -436,6 +505,7 @@ user_trap_return:
     movgr2cf $fcc6, $t1
     srli.d  $t1, $t0, 7
     movgr2cf $fcc7, $t1
+    LS2K_TRAP_MARK 76              /* L: vector state restored */
 
     /* Restore GPRs (except $sp — that's done last) */
     ld.d    $ra,  $sp, REG_OFF(1)
@@ -470,6 +540,11 @@ user_trap_return:
     ld.d    $s7,  $sp, REG_OFF(30)
     ld.d    $s8,  $sp, REG_OFF(31)
 
+    LS2K_TRAP_MARK 77              /* M: ready to execute ertn */
+    /* The marker uses caller temporaries; restore their user values again. */
+    ld.d    $t0,  $sp, REG_OFF(12)
+    ld.d    $t1,  $sp, REG_OFF(13)
+
     /* Now restore user/kernel sp.
      * For user return: regs[3] = user sp.
      * For kernel return: regs[3] = kernel sp.
@@ -484,37 +559,76 @@ arch_return_to_user:
     move    $sp, $a0
     b       __return_to_user
 
-/* ---- TLB Refill entry (CSR 0x88 = TLBRENTRY) ----
- *
- * 3-level page table walk using lddir + ldpte + tlbfill.
- */
-    .align 12
+/* ---- TLB Refill entry (CSR 0x88 = TLBRENTRY) ---- */
+    /* Keep the refill vector in its own section.  The physical-board linker
+     * script places this section at a 4 KiB boundary, which TLBRENTRY requires
+     * and linker relaxation cannot move. */
+    .section .tlb_refill, "ax"
+    .p2align 12
 tlb_refill_entry_la64:
     csrwr   $r21, 0x8B             /* TLBRSAVE = save $r21 (reserved, not used by user) */
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    csrwr   $t0, 0x33              /* SAVE3 = interrupted $t0 */
+    csrwr   $t1, 0x34              /* SAVE4 = interrupted $t1 */
+#endif
+    LS2K_REFILL_MARK 78            /* N: refill vector entered */
 
-    csrrd   $r21, 0x19             /* $r21 = PGDL */
+    /* CSR.PGD selects PGDL/PGDH from TLBRBADV.  Both profiles start at Dir3;
+     * only the LS2K1000LA profile has a non-folded Dir2. */
+    csrrd   $r21, 0x1B             /* $r21 = selected PGD */
     beqz    $r21, .Ltlb_miss
+    LS2K_REFILL_MARK 79            /* O: root selected */
 
+    lddir   $r21, $r21, 3
+    beqz    $r21, .Ltlb_miss
+    bstrins.d $r21, $zero, 11, 0   /* directory entries carry software flags */
+    LS2K_REFILL_MARK 80            /* P: Dir3 loaded */
+
+#if LA64_PT_HAS_DIR2
     lddir   $r21, $r21, 2
     beqz    $r21, .Ltlb_miss
-    srli.d  $r21, $r21, 12
-    slli.d  $r21, $r21, 12
+    bstrins.d $r21, $zero, 11, 0
+    LS2K_REFILL_MARK 81            /* Q: Dir2 loaded */
+#endif
 
     lddir   $r21, $r21, 1
     beqz    $r21, .Ltlb_miss
-    srli.d  $r21, $r21, 12
-    slli.d  $r21, $r21, 12
+    bstrins.d $r21, $zero, 11, 0
+    LS2K_REFILL_MARK 82            /* R: Dir1 loaded */
 
     ldpte   $r21, 0
     ldpte   $r21, 1
+    LS2K_REFILL_MARK 83            /* S: leaf pair loaded */
     tlbfill
+    LS2K_REFILL_MARK 84            /* T: refill installed */
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    csrrd   $t0, 0x33
+    csrrd   $t1, 0x34
+#endif
     csrrd   $r21, 0x8B             /* restore $r21 */
     ertn
 
 .Ltlb_miss:
+    LS2K_REFILL_MARK 88            /* X: missing directory entry */
+    /*
+     * ldpte normally installs the 4 KiB page size in TLBREHI.  An empty
+     * intermediate directory branches here before ldpte, so set PS explicitly
+     * while preserving the refill VPPN.  Without a valid PS the invalid entry
+     * does not cover TLBRBADV and the CPU immediately refills again instead of
+     * raising the regular PIL/PIS/PIF exception for demand paging.
+     */
+    csrrd   $r21, 0x8E             /* TLBREHI */
+    srli.d  $r21, $r21, 6
+    slli.d  $r21, $r21, 6          /* clear PS[5:0], preserve VPPN */
+    ori     $r21, $r21, 12         /* PS = 4 KiB */
+    csrwr   $r21, 0x8E
     csrwr   $zero, 0x8C
     csrwr   $zero, 0x8D
     tlbfill
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    csrrd   $t0, 0x33
+    csrrd   $t1, 0x34
+#endif
     csrrd   $r21, 0x8B             /* restore $r21 */
     ertn

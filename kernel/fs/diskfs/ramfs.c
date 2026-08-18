@@ -1,6 +1,7 @@
 #include "fs/ramfs.h"
 #include "fs/file.h"
 #include "fs/rootfs_overlay.h"
+#include "fs/rootfs_user.h"
 #include "fs/vfs/stat_perm.h"
 #include "mm/mm.h"
 #include "core/string.h"
@@ -1281,9 +1282,22 @@ static int ramfs_populate_entries(const rootfs_overlay_entry_t *entries, size_t 
 
 int ramfs_populate_overlay(void) {
     rootfs_driver_overlay_init();
+    rootfs_user_overlay_init();
     int r = ramfs_populate_entries(g_rootfs_overlay, g_rootfs_overlay_count);
     if (r < 0)
         return r;
-    return ramfs_populate_entries(g_rootfs_driver_overlay,
-                                  g_rootfs_driver_overlay_count);
+    r = ramfs_populate_entries(g_rootfs_driver_overlay,
+                               g_rootfs_driver_overlay_count);
+    if (r < 0)
+        return r;
+    r = ramfs_populate_entries(g_rootfs_user_overlay,
+                               g_rootfs_user_overlay_count);
+    if (r < 0)
+        return r;
+#ifdef CONFIG_RAMFS_USER
+    r = vfs_symlink("/bin/mksh", "/bin/sh");
+    if (r < 0 && r != -EEXIST)
+        return r;
+#endif
+    return 0;
 }

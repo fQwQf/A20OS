@@ -187,9 +187,12 @@ static int vfs_proc_fd_open(const char *path, int flags)
         mask |= R_OK;
     if (vfs_should_write(flags) || (flags & O_TRUNC))
         mask |= W_OK;
-    if (mask && vfs_vnode_permission(vn, mask) < 0) {
-        vnode_put(vn);
-        return -EACCES;
+    if (mask) {
+        int perm = vfs_vnode_permission(vn, mask);
+        if (perm < 0) {
+            vnode_put(vn);
+            return perm;
+        }
     }
     if (vn->type == VFS_FT_DIR && vfs_should_write(flags)) {
         vnode_put(vn);
@@ -371,9 +374,12 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
         int mask = 0;
         if (vfs_should_read(flags)) mask |= R_OK;
         if (vfs_should_write(flags) || (flags & O_TRUNC)) mask |= W_OK;
-        if (mask && vfs_vnode_permission(vn, mask) < 0) {
-            vnode_put(vn);
-            return -EACCES;
+        if (mask) {
+            int perm = vfs_vnode_permission(vn, mask);
+            if (perm < 0) {
+                vnode_put(vn);
+                return perm;
+            }
         }
         if (vn->type == VFS_FT_DIR && vfs_should_write(flags)) {
             vnode_put(vn);
@@ -559,9 +565,12 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     int mask = 0;
     if (vfs_should_read(flags)) mask |= R_OK;
     if (vfs_should_write(flags) || (flags & O_TRUNC)) mask |= W_OK;
-    if (mask && vfs_vnode_permission(vn, mask) < 0) {
-        vnode_put(vn);
-        return -EACCES;
+    if (mask) {
+        int perm = vfs_vnode_permission(vn, mask);
+        if (perm < 0) {
+            vnode_put(vn);
+            return perm;
+        }
     }
     if (vn->type == VFS_FT_DIR && vfs_should_write(flags)) {
         vnode_put(vn);

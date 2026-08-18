@@ -274,7 +274,7 @@ static inline seg_src_t seg_from_fd(int fd, long offset) {
     return (seg_src_t){ .kind = SEG_FD, .fd = { .fd = fd, .offset = offset } };
 }
 
-#ifndef CONFIG_NOMMU
+#if !defined(CONFIG_NOMMU) && !defined(CONFIG_ELF_EAGER_LOAD)
 /*
  * Install an fd-backed PT_LOAD as a demand-paged private mapping.
  *
@@ -435,11 +435,13 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
     return 0;
 #else
     if (src->kind == SEG_FD) {
+#ifndef CONFIG_ELF_EAGER_LOAD
         int r = map_fd_segment_lazy(mm, pgdir, va, memsz, src->fd.fd,
                                     (uint64_t)src->fd.offset, filesz, flags);
         if (r != -EINVAL)
             return r;
         /* Non-conforming offset/vaddr alignment retains the eager fallback. */
+#endif
     }
 
     for (vaddr_t page = start; page < end; page += PAGE_SIZE) {
