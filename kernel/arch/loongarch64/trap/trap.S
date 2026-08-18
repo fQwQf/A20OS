@@ -567,6 +567,7 @@ arch_return_to_user:
     .p2align 12
 tlb_refill_entry_la64:
     csrwr   $r21, 0x8B             /* TLBRSAVE = save $r21 (reserved, not used by user) */
+#ifdef CONFIG_BOARD_LS2K1000
 #if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
     csrwr   $t0, 0x33              /* SAVE3 = interrupted $t0 */
     csrwr   $t1, 0x34              /* SAVE4 = interrupted $t1 */
@@ -632,3 +633,35 @@ tlb_refill_entry_la64:
 #endif
     csrrd   $r21, 0x8B             /* restore $r21 */
     ertn
+#else
+    /* QEMU virt uses the established folded three-level walk.  Keep this
+     * path independent of the LS2K1000 four-level hardware profile: changing
+     * its PWCL/PWCH interpretation caused intermittent missing executable
+     * pages under parallel rustc/rustfmt workloads. */
+    csrrd   $r21, 0x19             /* $r21 = PGDL */
+    beqz    $r21, .Lqemu_tlb_miss
+
+    lddir   $r21, $r21, 2
+    beqz    $r21, .Lqemu_tlb_miss
+    srli.d  $r21, $r21, 12
+    slli.d  $r21, $r21, 12
+
+    lddir   $r21, $r21, 1
+    beqz    $r21, .Lqemu_tlb_miss
+    srli.d  $r21, $r21, 12
+    slli.d  $r21, $r21, 12
+
+    ldpte   $r21, 0
+    ldpte   $r21, 1
+    tlbfill
+
+    csrrd   $r21, 0x8B             /* restore $r21 */
+    ertn
+
+.Lqemu_tlb_miss:
+    csrwr   $zero, 0x8C
+    csrwr   $zero, 0x8D
+    tlbfill
+    csrrd   $r21, 0x8B             /* restore $r21 */
+    ertn
+#endif
