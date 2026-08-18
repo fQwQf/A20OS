@@ -5,9 +5,12 @@
 #include "core/types.h"
 #include "proc/park.h"
 
+struct wait_queue;
+
 typedef struct wait_queue_entry {
     struct wait_queue_entry *next;
     struct wait_queue_entry *prev;
+    struct wait_queue *queue;
     struct task_t *task;
     uint64_t wait_seq;
     uint32_t flags;
