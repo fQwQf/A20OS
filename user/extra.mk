@@ -44,6 +44,24 @@ ZLIB_SRC     := $(USER_DIR)/external/libs/zlib
 ZLIB_BUILD   := $(OBJ_DIR)/zlib
 ZLIB_LIB     := $(ZLIB_BUILD)/libz.a
 ZLIB_CFLAGS  = $(CFLAGS) -D_LARGEFILE64_SOURCE=1 -DHAVE_HIDDEN -include errno.h
+DOWNLOAD_DIR := $(OBJ_DIR)/downloads
+MBEDTLS_VERSION := 3.6.7
+MBEDTLS_SHA256 := a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+MBEDTLS_ARCHIVE := $(DOWNLOAD_DIR)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
+MBEDTLS_SRC := $(OBJ_DIR)/mbedtls-$(MBEDTLS_VERSION)
+MBEDTLS_PREFIX := $(OBJ_DIR)/mbedtls-prefix
+MBEDTLS_STAMP := $(MBEDTLS_PREFIX)/.built
+MBEDTLS_LIBS := $(MBEDTLS_PREFIX)/lib/libmbedtls.a \
+                $(MBEDTLS_PREFIX)/lib/libmbedx509.a \
+                $(MBEDTLS_PREFIX)/lib/libmbedcrypto.a
+CURL_VERSION := 8.21.0
+CURL_SHA256 := aa1b66a70eace83dc624508745646c08ae561de512ab403adffb93ac87fc72e6
+CURL_ARCHIVE := $(DOWNLOAD_DIR)/curl-$(CURL_VERSION).tar.xz
+CURL_SRC := $(OBJ_DIR)/curl-$(CURL_VERSION)
+CURL_BUILD := $(OBJ_DIR)/curl-build
+CURL_STAMP := $(CURL_BUILD)/.built
+CURL_LIB := $(CURL_BUILD)/lib/.libs/libcurl.a
+CA_CERT_BUNDLE ?= $(firstword $(wildcard /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem))
 BINUTILS_SRC := $(USER_DIR)/external/toolchain/binutils
 GCC_SRC      := $(USER_DIR)/external/gcc
 MCM_DIR      := $(USER_DIR)/external/toolchain/musl-cross-make
@@ -138,6 +156,58 @@ $(ZLIB_LIB): $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
 	mkdir -p $(ZLIB_BUILD)/include
 	cp $(ZLIB_SRC)/zlib.h $(ZLIB_BUILD)/zconf.h $(ZLIB_BUILD)/include/
 	@echo "[EXTRA] zlib -> $@"
+
+$(MBEDTLS_ARCHIVE):
+	@mkdir -p $(DOWNLOAD_DIR)
+	curl -fL --retry 3 -o $@.tmp \
+		https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/mbedtls-$(MBEDTLS_VERSION).tar.bz2
+	@echo "$(MBEDTLS_SHA256)  $@.tmp" | sha256sum -c -
+	mv $@.tmp $@
+
+$(MBEDTLS_STAMP): $(MBEDTLS_ARCHIVE) $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
+	@echo "[EXTRA] Building Mbed TLS $(MBEDTLS_VERSION) for $(ARCH)..."
+	rm -rf $(MBEDTLS_SRC) $(MBEDTLS_PREFIX)
+	tar -xf $(MBEDTLS_ARCHIVE) -C $(OBJ_DIR)
+	$(MAKE) -C $(MBEDTLS_SRC) lib \
+		CC="$(CC)" AR="$(AR)" \
+		CFLAGS="$(CFLAGS) -D__unix__"
+	mkdir -p $(MBEDTLS_PREFIX)/include $(MBEDTLS_PREFIX)/lib
+	cp -a $(MBEDTLS_SRC)/include/. $(MBEDTLS_PREFIX)/include/
+	cp $(MBEDTLS_SRC)/library/libmbedtls.a \
+		$(MBEDTLS_SRC)/library/libmbedx509.a \
+		$(MBEDTLS_SRC)/library/libmbedcrypto.a $(MBEDTLS_PREFIX)/lib/
+	@touch $@
+
+$(CURL_ARCHIVE):
+	@mkdir -p $(DOWNLOAD_DIR)
+	curl -fL --retry 3 -o $@.tmp https://curl.se/download/curl-$(CURL_VERSION).tar.xz
+	@echo "$(CURL_SHA256)  $@.tmp" | sha256sum -c -
+	mv $@.tmp $@
+
+$(CURL_STAMP): $(CURL_ARCHIVE) $(MBEDTLS_STAMP) $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
+	@echo "[EXTRA] Building curl $(CURL_VERSION) with Mbed TLS for $(ARCH)..."
+	rm -rf $(CURL_SRC) $(CURL_BUILD)
+	tar -xf $(CURL_ARCHIVE) -C $(OBJ_DIR)
+	mkdir -p $(CURL_BUILD)
+	cd $(CURL_BUILD) && \
+		CC="$(CC)" AR="$(AR)" RANLIB="$(RANLIB)" \
+		CPPFLAGS="$(MUSL_INC) -D_GNU_SOURCE -D__unix__ -I$(MBEDTLS_PREFIX)/include" \
+		CFLAGS="$(OPT) -ffreestanding -static $(ARCH_CFLAGS)" \
+		LDFLAGS="$(LDFLAGS) $(CRT_START) -L$(MBEDTLS_PREFIX)/lib" \
+		LIBS="$(MBEDTLS_LIBS) $(LIBC) $(CRT_END)" \
+		$(CURL_SRC)/configure \
+			--host=$(ARCH)-unknown-linux-musl --prefix=/test \
+			--disable-shared --enable-static --disable-threaded-resolver \
+			--disable-ipv6 --disable-ldap --disable-ldaps --disable-rtsp \
+			--disable-dict --disable-telnet --disable-tftp --disable-pop3 \
+			--disable-imap --disable-smb --disable-smtp --disable-gopher \
+			--disable-mqtt --disable-manual --disable-docs --without-zlib \
+			--without-libpsl --without-brotli --without-zstd --without-nghttp2 \
+			--without-libidn2 --without-libssh2 --with-mbedtls=$(MBEDTLS_PREFIX) \
+			--with-ca-bundle=/test/etc/ssl/certs/ca-certificates.crt
+	$(MAKE) -C $(CURL_BUILD)/lib
+	@test -f $(CURL_LIB)
+	@touch $@
 
 # Source-availability guards: skip building a package if its upstream source tree is missing.
 VIM_AVAILABLE := $(if $(wildcard $(VIM_SRC)/main.c),1)
@@ -256,14 +326,16 @@ endif
 # git
 # ================================================================
 GIT_BIN := $(BUILD_DIR)/git
+GIT_REMOTE_HTTP_BIN := $(BUILD_DIR)/git-remote-http
+GIT_REMOTE_HTTPS_BIN := $(BUILD_DIR)/git-remote-https
 
-$(GIT_BIN): $(STAMP_DIR)/.git-built
+$(GIT_BIN) $(GIT_REMOTE_HTTP_BIN) $(GIT_REMOTE_HTTPS_BIN): $(STAMP_DIR)/.git-built
 	@mkdir -p $(BUILD_DIR)
-	cp $(GIT_WORK_SRC)/git $@
+	cp $(GIT_WORK_SRC)/$(notdir $@) $@
 	$(CROSS_COMPILE)strip $@ 2>/dev/null || true
-	@echo "[EXTRA] git -> $@"
+	@echo "[EXTRA] $(notdir $@) -> $@"
 
-$(STAMP_DIR)/.git-built: $(ZLIB_LIB) $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
+$(STAMP_DIR)/.git-built: $(ZLIB_LIB) $(CURL_STAMP) $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
 ifeq ($(GIT_AVAILABLE),)
 	@echo "[EXTRA] git source not found in $(GIT_SRC); skipping git"
 	@mkdir -p $(STAMP_DIR)
@@ -277,14 +349,16 @@ else
 	@$(MAKE) -C $(GIT_WORK_SRC) clean >/dev/null 2>&1 || true
 	$(MAKE) -C $(GIT_WORK_SRC) \
 	  prefix=/usr \
+	  gitexecdir=/test/bin \
 	  template_dir=/test/share/git-core/templates \
 	  'CC=$(CC)' \
 	  'AR=$(AR)' \
-	  CFLAGS="$(CFLAGS) -I$(ZLIB_BUILD)/include" \
+	  CFLAGS="$(CFLAGS) -D__unix__ -I$(ZLIB_BUILD)/include" \
 	  LDFLAGS="$(LDFLAGS) $(CRT_START)" \
 	  EXTLIBS="$(ZLIB_LIB) $(LIBC) $(CRT_END)" \
+	  CURL_CFLAGS="-I$(CURL_SRC)/include -I$(CURL_BUILD)/include" \
+	  CURL_LIBCURL="$(CURL_LIB) $(MBEDTLS_LIBS)" \
 	  NO_OPENSSL=YesPlease \
-	  NO_CURL=YesPlease \
 	  NO_EXPAT=YesPlease \
 	  NO_GETTEXT=YesPlease \
 	  NO_TCLTK=YesPlease \
@@ -299,7 +373,8 @@ else
 	  NO_PERL=YesPlease \
 	  DEFAULT_PAGER=cat \
 	  STATIC=YesPlease \
-	  DESTDIR=$(GIT_BUILD)/install
+	  DESTDIR=$(GIT_BUILD)/install \
+	  git git-remote-http git-remote-https
 	@touch $@
 endif
 
@@ -453,7 +528,7 @@ endif
 all: $(REQUESTED_TARGETS)
 
 vim: $(if $(VIM_AVAILABLE),$(VIM_BIN))
-git: $(if $(GIT_AVAILABLE),$(GIT_BIN))
+git: $(if $(GIT_AVAILABLE),$(GIT_BIN) $(GIT_REMOTE_HTTP_BIN) $(GIT_REMOTE_HTTPS_BIN))
 gcc: $(if $(GCC_AVAILABLE),$(GCC_BIN) $(CC_BIN))
 lamina: $(if $(LAMINA_AVAILABLE),$(LAMINA_BIN))
 
