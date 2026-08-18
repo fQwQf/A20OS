@@ -131,13 +131,15 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/$(ARCH)/obj/gcc-install ]; then \
 		cp -a user/build/extra/$(ARCH)/obj/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
 		cp -a user/build/extra/$(ARCH)/obj/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
+		cp -a user/build/extra/$(ARCH)/obj/gcc-install/include "$(EXTRA_STAGING_DIR)/include"; \
 		for t in user/build/extra/$(ARCH)/obj/gcc-install/bin/*; do \
 			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
 		done; \
 		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
-		printf '#!/bin/sh\nexec /test/bin/gcc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
+		printf '#!/bin/sh\nexec /test/bin/gcc-real --sysroot=/test -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
-		printf '#!/bin/sh\nexec /test/bin/cc-real -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
+		printf '#!/bin/sh\nexec /test/bin/cc-real --sysroot=/test -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
+		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/cc"; \
 	fi
 	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
 		RUST=user/build/extra/$(ARCH)/obj/rust; \

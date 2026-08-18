@@ -122,3 +122,6 @@
 [submodule "user/external/gui/libdisplay-info"]
 	path = user/external/gui/libdisplay-info
 	url = https://gitlab.freedesktop.org/emersion/libdisplay-info.git
+[submodule "user/external/gcc"]
+	path = user/external/gcc
+	url = https://github.com/gcc-mirror/gcc.git

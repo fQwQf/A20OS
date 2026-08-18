@@ -5,9 +5,9 @@ set -euo pipefail
 # as the cross-compiler.  Binaries are dynamically linked against musl;
 # the dynamic linker (libc.so) ships on the extra disk image.
 #
-# Usage: build-gcc.sh <arch> <musl_build_dir> <build_dir> <install_dir>
+# Usage: build-gcc.sh <arch> <musl_build_dir> <build_dir> <install_dir> [gcc_src]
 
-ARCH="${1:?Usage: $0 <arch> <musl_build_dir> <build_dir> <install_dir>}"
+ARCH="${1:?Usage: $0 <arch> <musl_build_dir> <build_dir> <install_dir> [gcc_src]}"
 mkdir -p "$2" "$3" "$4"
 MUSL_BUILD="$(cd "$2" && pwd)"
 BUILD_DIR="$(cd "$3" && pwd)"
@@ -17,7 +17,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MCM="$USER_DIR/external/toolchain/musl-cross-make/output"
 BINUTILS_SRC="$USER_DIR/external/toolchain/binutils"
-GCC_SRC="$USER_DIR/external/gcc"
+# Prefer musl-cross-make's composed GCC tree when supplied.  It includes the
+# in-tree GMP, MPFR, and MPC sources required for a Canadian-cross compiler.
+GCC_SRC="${5:-$USER_DIR/external/gcc}"
 
 BUILD_TRIPLET="${BUILD_TRIPLET:-$(gcc -dumpmachine)}"
 HOST_TRIPLET="riscv64-linux-musl"
@@ -129,6 +131,7 @@ if [ ! -f "$GCC_INSTALL/usr/bin/gcc" ]; then
         --without-zstd \
         --with-sysroot=/ \
         --with-build-sysroot="$MCM_SYSROOT" \
+        --with-native-system-header-dir=/include \
         CC="$MCM_CC" \
         CXX="$MCM_CXX" \
         CC_FOR_BUILD=gcc \
@@ -175,8 +178,14 @@ GCC_VER=$(ls "$GCC_INSTALL/usr/libexec/gcc/$TARGET_TRIPLET/" 2>/dev/null | head 
 echo "[GCC] GCC version: $GCC_VER"
 
 mkdir -p "$INSTALL_DIR/bin"
+mkdir -p "$INSTALL_DIR/include"
 mkdir -p "$INSTALL_DIR/libexec/gcc/$TARGET_TRIPLET/$GCC_VER"
 mkdir -p "$INSTALL_DIR/lib/gcc/$TARGET_TRIPLET/$GCC_VER"
+
+# The native compiler uses /include as its system-header directory.  The extra
+# disk is mounted at /test, and its wrapper supplies --sysroot=/test, so install
+# the musl headers alongside the compiler.
+cp -a "$MCM/$TARGET_TRIPLET/include/." "$INSTALL_DIR/include/"
 
 for tool in as ld ar nm ranlib objcopy objdump readelf strip strings addr2line; do
     for cand in "$BINUTILS_INSTALL/usr/bin/$TARGET_TRIPLET-$tool" \
