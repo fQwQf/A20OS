@@ -36,7 +36,13 @@ ifneq ($(filter $(ARCH),riscv64 x86_64 aarch64 loongarch64),)
 DRVMOD_CFLAGS += -DCONFIG_64BIT
 endif
 
-$(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk
+# The user build and generic driver packages share USER_BUILD_DIR.  On a fresh
+# parallel build, USER_BUILD_STAMP may run `make -C user clean` while a driver
+# compiler is writing its output, removing the directory after the driver's
+# mkdir and making the compile fail with ENOENT.  Finish the user build (and
+# any required clean) before allowing driver package recipes to enter the
+# shared directory.
+$(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk | $(USER_BUILD_STAMP)
 
 # Early DriverStore packages: linked into the kernel root ramfs and loaded
 # before the real root disk is mounted.  Every driver that can own the root
