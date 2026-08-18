@@ -35,6 +35,7 @@ prepare_final_shell() {
 run_final_group() {
     typeset group=$1
     typeset script="/glibc/${group}_testcode.sh"
+    typeset cargo_jobs=8
 
     check_final_root || return
     prepare_final_shell || return
@@ -43,9 +44,19 @@ run_final_group() {
         return 127
     fi
 
+    # The LoongArch compiler's executable mappings currently use private
+    # pages for correctness.  Bound Cargo concurrency so four large rustc
+    # address spaces fit comfortably in the official 8 GiB guest while QEMU
+    # still exposes all eight required CPUs to the judge and workload.
+    if [[ $group = buildstorm && $(uname -m) = loongarch64 ]]; then
+        cargo_jobs=4
+        print "[FINAL-EVAL] LoongArch BuildStorm CARGO_BUILD_JOBS=$cargo_jobs"
+    fi
+
     print "#### A20OS 2026 FINAL EVAL START $group ####"
     PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin \
     HOME=/root SHELL="$FINAL_SHELL" LD_LIBRARY_PATH= \
+    CARGO_BUILD_JOBS="$cargo_jobs" \
         "$FINAL_CHROOT" "$FINAL_ROOT" "$FINAL_SHELL" -c \
         'cd /glibc && exec /a20-eval-shell "$1"' \
         a20-eval-shell "$script"

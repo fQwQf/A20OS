@@ -410,11 +410,7 @@ int page_cache_init(void)
     lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
      * retaining MyGO's 1 GiB ceiling in the official 8 GiB evaluator. */
-#ifdef CONFIG_LOONGARCH64
-    g_page_limit = pfa.total_frames / 4;
-#else
     g_page_limit = pfa.total_frames / 8;
-#endif
     if (g_page_limit < PAGE_CACHE_INITIAL_PAGES)
         g_page_limit = PAGE_CACHE_INITIAL_PAGES;
     if (g_page_limit > PAGE_CACHE_MAX_PAGES)
