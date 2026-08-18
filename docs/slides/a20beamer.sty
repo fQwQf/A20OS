@@ -10,6 +10,9 @@
 \usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc}
 \RequirePackage{tcolorbox}
 \tcbuselibrary{skins}
+\RequirePackage{colortbl}
+% 表头单元格（配合 \rowcolor{a20navy} 使用）
+\newcommand{\thd}[1]{{\color{white}\bfseries #1}}
 \RequirePackage{booktabs}
 \RequirePackage{multirow}
 
@@ -122,10 +125,22 @@
     \fill[a20accent] ([xshift=\aztitlepanel]current page.north west) --
       ([xshift=\aztitlepanel+1.1em]current page.north west) --
       ([xshift=\aztitlepanel]current page.south west) -- cycle;
+    % 面板底部点阵装饰
+    \foreach \ix in {0,...,24}
+      \foreach \iy in {0,...,2}
+        \fill[white!14!a20navy]
+          ([xshift=1.2em+\ix*0.42em,yshift=4.6em+\iy*0.42em]current page.south west)
+          circle (0.045em);
+    % 面板幽灵大字
+    \node[anchor=south east, text=white!7!a20navy, font=\fontsize{44}{44}\bfseries\selectfont]
+      at ([xshift=\aztitlepanel-0.5em,yshift=0.35em]current page.south west)
+      {A20OS};
     % 顶部赛事条
     \node[anchor=north west, text=a20light!85, font=\scriptsize]
       at ([xshift=1.2em,yshift=-0.9em]current page.north west)
       {\azeventline};
+    \fill[a20accent] ([xshift=1.2em,yshift=-2.05em]current page.north west)
+      rectangle ++(1.6em,0.09em);
     % 主标题
     \node[anchor=north west, text=white, font=\LARGE\bfseries, align=left,
           text width=\aztitlepanel-2.4em]
@@ -177,8 +192,18 @@
           text width=0.9\paperwidth]
       at ([xshift=1.2em,yshift=-0.56\paperheight]current page.north west)
       {\azsectionsummary};
+    % 节进度点（总节数经 aux 自动获取，两遍编译后生效）
+    \ifdefined\aztotalsections
+      \foreach \i in {1,...,\aztotalsections}
+        \pgfmathparse{\i==\value{section} ? "a20accent" : (\i<\value{section} ? "a20navy!45" : "a20navy!15")}
+        \fill[\pgfmathresult]
+          ([xshift=1.2em+\i*1.05em-1.05em,yshift=1.1em]current page.south west)
+          rectangle ++(0.72em,0.28em);
+    \fi
   \end{tikzpicture}%
 }
+% 文档结束时把总节数写入 aux，供下一遍编译的进度点使用
+\AtEndDocument{\immediate\write\@auxout{\string\gdef\string\aztotalsections{\arabic{section}}}}
 \newcommand{\azsectionsummary}{}
 \setbeamertemplate{section page}[a20]
 
@@ -186,6 +211,15 @@
   \begin{frame}[plain]
     \sectionpage
   \end{frame}}
+
+% ==================== 目录样式 ====================
+\setbeamertemplate{section in toc}{%
+  \tikz[baseline=-0.75ex]{%
+    \node[fill=a20navy, text=white, font=\scriptsize\bfseries,
+          minimum width=1.9em, minimum height=1.55em, inner sep=1pt,
+          rounded corners=1.2pt] {\aztwodigit{\inserttocsectionnumber}};}%
+  ~{\bfseries\inserttocsection}\par
+  \vspace{0.06em}}
 
 % ==================== 自定义组件 ====================
 % 大数字统计卡：\statcard{宽度}{数字}{说明}

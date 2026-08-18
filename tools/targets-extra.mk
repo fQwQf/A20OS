@@ -2,10 +2,21 @@
 # Extra packages (vim / git / gcc) on a separate ext4 disk
 # ----------------------------------------------------------------
 
-.PHONY: _run_extra_impl
+.PHONY: _run_extra_impl extra-fetch-sources
 
-extra-user-apps: $(USER_BUILD_STAMP)
-	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" PACKAGES="$(EXTRA_PACKAGES)"
+# A fresh clone does not materialize optional application gitlinks.  Fetch
+# them before evaluating user/extra.mk so requested packages cannot be
+# silently omitted.  GitHub uses SSH by default; set VF2_GIT_TRANSPORT=https
+# on hosts without a configured SSH key.
+extra-fetch-sources:
+	tools/vf2/fetch-extra-sources.sh
+
+extra-user-apps: extra-fetch-sources
+	$(MAKE) ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" \
+		PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
+		$(USER_BUILD_STAMP)
+	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" \
+		PACKAGES="$(EXTRA_PACKAGES)"
 
 # Debian/Ubuntu cross toolchains already provide a complete target sysroot and
 # return immediately here.  Fedora's cross GCC omits it, so bootstrap the
@@ -238,7 +249,7 @@ run-riscv32-extra:
 run-ppc64le-extra:
 	@echo "run-ppc64le-extra: skipped (extra packages are not supported on PPC64LE)"
 
-_run_extra_impl:
+_run_extra_impl: extra-fetch-sources
 	$(MAKE) ARCH=$(ARCH) BRINGUP=0 dev-build
 	@if [ -f user/external/apps/fastfetch/src/fastfetch.c ]; then \
 		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE) \
