@@ -46,7 +46,13 @@ ZLIB_LIB     := $(ZLIB_BUILD)/libz.a
 ZLIB_CFLAGS  = $(CFLAGS) -D_LARGEFILE64_SOURCE=1 -DHAVE_HIDDEN -include errno.h
 BINUTILS_SRC := $(USER_DIR)/external/toolchain/binutils
 GCC_SRC      := $(USER_DIR)/external/gcc
-MCM_OUTPUT   := $(USER_DIR)/external/toolchain/musl-cross-make/output
+MCM_DIR      := $(USER_DIR)/external/toolchain/musl-cross-make
+MCM_OUTPUT   := $(MCM_DIR)/output
+MCM_TARGET   := riscv64-linux-musl
+MCM_CC       := $(MCM_OUTPUT)/bin/$(MCM_TARGET)-gcc
+MCM_BUILD_DIR ?= build/a20/$(MCM_TARGET)
+MCM_GCC_CONFIG ?= --disable-shared
+MCM_GCC_SRC  := $(MCM_DIR)/$(MCM_BUILD_DIR)/src_gcc
 RUST_INSTALL := $(OBJ_DIR)/rust
 RUST_STAMP   := $(STAMP_DIR)/.rust-built
 RUST_SYSROOT := $(RUST_INSTALL)/a20-sysroot
@@ -136,12 +142,13 @@ $(ZLIB_LIB): $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
 # Source-availability guards: skip building a package if its upstream source tree is missing.
 VIM_AVAILABLE := $(if $(wildcard $(VIM_SRC)/main.c),1)
 GIT_AVAILABLE := $(if $(wildcard $(GIT_SRC)/Makefile),1)
-# build-gcc.sh currently creates a RISC-V Canadian cross and needs all three
-# source/toolchain inputs.  Keep it disabled for other architectures.
+# build-gcc.sh creates a RISC-V Canadian cross.  The musl-cross-make output is
+# bootstrapped below, so source availability -- rather than an already-built
+# cross compiler -- decides whether the native GCC package can be requested.
 GCC_AVAILABLE := $(if $(and $(filter riscv64,$(ARCH)), \
                             $(wildcard $(BINUTILS_SRC)/configure), \
                             $(wildcard $(GCC_SRC)/configure), \
-                            $(wildcard $(MCM_OUTPUT)/bin/riscv64-linux-musl-gcc)),1)
+                            $(wildcard $(MCM_DIR)/Makefile)),1)
 
 VALID_PACKAGES := vim git gcc cc rust rustc cargo rustfmt lamina
 UNKNOWN_PACKAGES := $(filter-out $(VALID_PACKAGES),$(PACKAGES))
@@ -304,6 +311,19 @@ GCC_INSTALL   := $(OBJ_DIR)/gcc-install
 GCC_BIN       := $(BUILD_DIR)/gcc
 CC_BIN        := $(BUILD_DIR)/cc
 
+# musl-cross-make first produces an x86_64-hosted RISC-V cross compiler.  That
+# compiler is then used by build-gcc.sh to produce GCC binaries which run on
+# RISC-V itself.  The bootstrap only needs static libgcc; disabling shared
+# avoids unsupported R_RISCV_JAL relocations when GCC 9 builds libgcc_s.so
+# with newer binutils.  A dedicated build directory also isolates these
+# settings from any prior default musl-cross-make build.
+# Use recursive $(MAKE) so the top-level -j jobserver is shared.
+$(MCM_CC): $(MCM_DIR)/Makefile
+	@echo "[EXTRA] Bootstrapping $(MCM_TARGET) with musl-cross-make..."
+	$(MAKE) -C $(MCM_DIR) TARGET=$(MCM_TARGET) BUILD_DIR=$(MCM_BUILD_DIR) \
+		GCC_CONFIG="$(MCM_GCC_CONFIG)" install
+	@test -x "$@" || { echo "[EXTRA] musl-cross-make did not produce $@"; exit 1; }
+
 $(GCC_BIN): $(STAMP_DIR)/.gcc-built
 	@mkdir -p $(BUILD_DIR)
 	cp $(GCC_INSTALL)/bin/gcc $@
@@ -315,15 +335,18 @@ $(CC_BIN): $(STAMP_DIR)/.gcc-built
 	cp $(GCC_INSTALL)/bin/cc $@
 	@echo "[EXTRA] cc -> $@"
 
-$(STAMP_DIR)/.gcc-built: $(MUSL_CHECK_FILES) $(EXTRA_MAKEFILE) | musl_check
+$(STAMP_DIR)/.gcc-built: $(MUSL_CHECK_FILES) $(if $(GCC_AVAILABLE),$(MCM_CC)) \
+                        $(EXTRA_DIR)/build-gcc.sh $(EXTRA_MAKEFILE) | musl_check
 ifeq ($(GCC_AVAILABLE),)
-	@echo "[EXTRA] GCC source not found in $(GCC_SRC); skipping gcc/cc"
+	@echo "[EXTRA] GCC prerequisites unavailable; skipping gcc/cc"
+	@echo "[EXTRA] Need $(GCC_SRC)/configure, $(BINUTILS_SRC)/configure, and $(MCM_DIR)/Makefile"
 	@mkdir -p $(STAMP_DIR)
 	@touch $@
 else
 	@mkdir -p $(GCC_BUILD_DIR) $(GCC_INSTALL) $(STAMP_DIR)
 	@echo "[EXTRA] Building GCC toolchain for $(ARCH)..."
-	$(EXTRA_DIR)/build-gcc.sh $(ARCH) $(MUSL_BUILD) $(GCC_BUILD_DIR) $(GCC_INSTALL)
+	$(EXTRA_DIR)/build-gcc.sh $(ARCH) $(MUSL_BUILD) $(GCC_BUILD_DIR) $(GCC_INSTALL) $(MCM_GCC_SRC)
+	@touch $@
 endif
 
 # ================================================================
