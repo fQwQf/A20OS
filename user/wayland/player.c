@@ -34,6 +34,16 @@
 #define AUDIO_QUEUE_LIMIT (48000U * 4U)
 #define VIDEO_BUFFER_COUNT 3
 #define VIDEO_LATE_FLOOR 0.040
+#define TITLEBAR_HEIGHT 32
+#define WINDOW_BORDER 8
+#define WINDOW_MIN_WIDTH 320
+#define WINDOW_MIN_HEIGHT 200
+#define WINDOW_MAX_WIDTH 1920
+#define WINDOW_MAX_HEIGHT 1080
+#define POINTER_BUTTON_LEFT 0x110
+#define POINTER_BUTTON_PRESSED 1
+#define CLOSE_BUTTON_WIDTH 42
+#define MAXIMIZE_BUTTON_WIDTH 42
 
 struct video_buffer {
     struct wl_buffer *wl_buffer;
@@ -50,11 +60,22 @@ struct display_state {
     struct wl_surface *surface;
     struct xdg_surface *xdg_surface;
     struct xdg_toplevel *toplevel;
+    struct wl_seat *seat;
+    struct wl_pointer *pointer;
     struct wl_shm_pool *pool;
     struct video_buffer buffers[VIDEO_BUFFER_COUNT];
+    uint8_t *mapping;
+    size_t slot_size;
     int width;
     int height;
     int stride;
+    int source_width;
+    int source_height;
+    int pending_width;
+    int pending_height;
+    int maximized;
+    int pointer_x;
+    int pointer_y;
     int configured;
     int closed;
 };
@@ -136,15 +157,166 @@ static const struct xdg_surface_listener xdg_surface_listener = {
     .configure = xdg_surface_configure,
 };
 
+static int point_in_close_button(const struct display_state *state)
+{
+    return state->pointer_y >= 0 && state->pointer_y < TITLEBAR_HEIGHT &&
+           state->pointer_x >= state->width - CLOSE_BUTTON_WIDTH;
+}
+
+static int point_in_maximize_button(const struct display_state *state)
+{
+    int right = state->width - CLOSE_BUTTON_WIDTH;
+    return state->pointer_y >= 0 && state->pointer_y < TITLEBAR_HEIGHT &&
+           state->pointer_x >= right - MAXIMIZE_BUTTON_WIDTH &&
+           state->pointer_x < right;
+}
+
+static uint32_t resize_edge_at(const struct display_state *state)
+{
+    int left = state->pointer_x < WINDOW_BORDER;
+    int right = state->pointer_x >= state->width - WINDOW_BORDER;
+    int top = state->pointer_y < WINDOW_BORDER;
+    int bottom = state->pointer_y >= state->height - WINDOW_BORDER;
+
+    if (top && left)
+        return XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT;
+    if (top && right)
+        return XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT;
+    if (bottom && left)
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT;
+    if (bottom && right)
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT;
+    if (left)
+        return XDG_TOPLEVEL_RESIZE_EDGE_LEFT;
+    if (right)
+        return XDG_TOPLEVEL_RESIZE_EDGE_RIGHT;
+    if (bottom)
+        return XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM;
+    return XDG_TOPLEVEL_RESIZE_EDGE_NONE;
+}
+
+static void pointer_enter(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface,
+                          wl_fixed_t x, wl_fixed_t y)
+{
+    struct display_state *state = data;
+    (void)pointer;
+    (void)serial;
+    (void)surface;
+    state->pointer_x = wl_fixed_to_int(x);
+    state->pointer_y = wl_fixed_to_int(y);
+}
+
+static void pointer_leave(void *data, struct wl_pointer *pointer,
+                          uint32_t serial, struct wl_surface *surface)
+{
+    (void)data;
+    (void)pointer;
+    (void)serial;
+    (void)surface;
+}
+
+static void pointer_motion(void *data, struct wl_pointer *pointer,
+                           uint32_t time, wl_fixed_t x, wl_fixed_t y)
+{
+    struct display_state *state = data;
+    (void)pointer;
+    (void)time;
+    state->pointer_x = wl_fixed_to_int(x);
+    state->pointer_y = wl_fixed_to_int(y);
+}
+
+static void pointer_button(void *data, struct wl_pointer *pointer,
+                           uint32_t serial, uint32_t time, uint32_t button,
+                           uint32_t button_state)
+{
+    struct display_state *state = data;
+    (void)pointer;
+    (void)time;
+    if (button != POINTER_BUTTON_LEFT ||
+        button_state != POINTER_BUTTON_PRESSED)
+        return;
+
+    if (point_in_close_button(state)) {
+        state->closed = 1;
+        return;
+    }
+    if (point_in_maximize_button(state)) {
+        if (state->maximized)
+            xdg_toplevel_unset_maximized(state->toplevel);
+        else
+            xdg_toplevel_set_maximized(state->toplevel);
+        wl_surface_commit(state->surface);
+        return;
+    }
+
+    uint32_t edge = resize_edge_at(state);
+    if (edge != XDG_TOPLEVEL_RESIZE_EDGE_NONE) {
+        xdg_toplevel_resize(state->toplevel, state->seat, serial, edge);
+    } else if (state->pointer_y < TITLEBAR_HEIGHT) {
+        xdg_toplevel_move(state->toplevel, state->seat, serial);
+    }
+}
+
+static void pointer_axis(void *data, struct wl_pointer *pointer,
+                         uint32_t time, uint32_t axis, wl_fixed_t value)
+{
+    (void)data;
+    (void)pointer;
+    (void)time;
+    (void)axis;
+    (void)value;
+}
+
+static const struct wl_pointer_listener pointer_listener = {
+    .enter = pointer_enter,
+    .leave = pointer_leave,
+    .motion = pointer_motion,
+    .button = pointer_button,
+    .axis = pointer_axis,
+};
+
+static void seat_capabilities(void *data, struct wl_seat *seat,
+                              uint32_t capabilities)
+{
+    struct display_state *state = data;
+    if ((capabilities & WL_SEAT_CAPABILITY_POINTER) && !state->pointer) {
+        state->pointer = wl_seat_get_pointer(seat);
+        wl_pointer_add_listener(state->pointer, &pointer_listener, state);
+    } else if (!(capabilities & WL_SEAT_CAPABILITY_POINTER) && state->pointer) {
+        wl_pointer_destroy(state->pointer);
+        state->pointer = NULL;
+    }
+}
+
+static void seat_name(void *data, struct wl_seat *seat, const char *name)
+{
+    (void)data;
+    (void)seat;
+    (void)name;
+}
+
+static const struct wl_seat_listener seat_listener = {
+    .capabilities = seat_capabilities,
+    .name = seat_name,
+};
+
 static void toplevel_configure(void *data, struct xdg_toplevel *toplevel,
                                int32_t width, int32_t height,
                                struct wl_array *states)
 {
-    (void)data;
+    struct display_state *state = data;
     (void)toplevel;
-    (void)width;
-    (void)height;
-    (void)states;
+    if (width > 0 && height > 0) {
+        state->pending_width = width;
+        state->pending_height = height;
+    }
+    state->maximized = 0;
+    uint32_t *entry;
+    wl_array_for_each(entry, states) {
+        if (*entry == XDG_TOPLEVEL_STATE_MAXIMIZED)
+            state->maximized = 1;
+    }
 }
 
 static void toplevel_close(void *data, struct xdg_toplevel *toplevel)
@@ -173,6 +345,9 @@ static void registry_global(void *data, struct wl_registry *registry,
         state->wm_base = wl_registry_bind(registry, name,
                                            &xdg_wm_base_interface, 1);
         xdg_wm_base_add_listener(state->wm_base, &wm_base_listener, state);
+    } else if (!strcmp(interface, wl_seat_interface.name)) {
+        state->seat = wl_registry_bind(registry, name, &wl_seat_interface, 1);
+        wl_seat_add_listener(state->seat, &seat_listener, state);
     }
 }
 
@@ -203,12 +378,62 @@ static int create_shm_file(size_t size)
     return fd;
 }
 
-static int display_open(struct display_state *state, int width, int height)
+static int clamp_dimension(int value, int minimum, int maximum)
 {
-    memset(state, 0, sizeof(*state));
+    if (value < minimum)
+        return minimum;
+    if (value > maximum)
+        return maximum;
+    return value;
+}
+
+static void choose_initial_size(int source_width, int source_height,
+                                int *width, int *height)
+{
+    double scale = 1.0;
+    if (source_width > 960)
+        scale = 960.0 / source_width;
+    if ((double)source_height * scale > 640.0)
+        scale = 640.0 / source_height;
+    *width = clamp_dimension((int)(source_width * scale), WINDOW_MIN_WIDTH,
+                             WINDOW_MAX_WIDTH);
+    *height = clamp_dimension((int)(source_height * scale) + TITLEBAR_HEIGHT,
+                              WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT);
+}
+
+static int display_create_buffers(struct display_state *state, int width,
+                                  int height)
+{
+    width = clamp_dimension(width, WINDOW_MIN_WIDTH, WINDOW_MAX_WIDTH);
+    height = clamp_dimension(height, WINDOW_MIN_HEIGHT, WINDOW_MAX_HEIGHT);
+    for (int i = 0; i < VIDEO_BUFFER_COUNT; i++) {
+        if (state->buffers[i].wl_buffer)
+            wl_buffer_destroy(state->buffers[i].wl_buffer);
+        state->buffers[i].busy = 0;
+    }
     state->width = width;
     state->height = height;
     state->stride = width * 4;
+    for (int i = 0; i < VIDEO_BUFFER_COUNT; i++) {
+        state->buffers[i].data = state->mapping + state->slot_size * (size_t)i;
+        state->buffers[i].wl_buffer = wl_shm_pool_create_buffer(
+            state->pool, (int32_t)(state->slot_size * (size_t)i), width,
+            height, state->stride, WL_SHM_FORMAT_XRGB8888);
+        if (!state->buffers[i].wl_buffer)
+            return -1;
+        wl_buffer_add_listener(state->buffers[i].wl_buffer, &buffer_listener,
+                               &state->buffers[i]);
+    }
+    return 0;
+}
+
+static int display_open(struct display_state *state, int width, int height)
+{
+    memset(state, 0, sizeof(*state));
+    state->source_width = width;
+    state->source_height = height;
+    choose_initial_size(width, height, &state->width, &state->height);
+    state->stride = state->width * 4;
     for (int attempt = 0; attempt < 100 && !state->display; attempt++) {
         state->display = wl_display_connect(NULL);
         if (!state->display)
@@ -219,7 +444,9 @@ static int display_open(struct display_state *state, int width, int height)
     state->registry = wl_display_get_registry(state->display);
     wl_registry_add_listener(state->registry, &registry_listener, state);
     if (wl_display_roundtrip(state->display) < 0 || !state->compositor ||
-        !state->shm || !state->wm_base)
+        !state->shm || !state->wm_base || !state->seat)
+        return -1;
+    if (wl_display_roundtrip(state->display) < 0 || !state->pointer)
         return -1;
 
     state->surface = wl_compositor_create_surface(state->compositor);
@@ -229,34 +456,30 @@ static int display_open(struct display_state *state, int width, int height)
     state->toplevel = xdg_surface_get_toplevel(state->xdg_surface);
     xdg_toplevel_add_listener(state->toplevel, &toplevel_listener, state);
     xdg_toplevel_set_title(state->toplevel, "A20OS Media Player");
+    xdg_toplevel_set_min_size(state->toplevel, WINDOW_MIN_WIDTH,
+                              WINDOW_MIN_HEIGHT);
+    xdg_toplevel_set_max_size(state->toplevel, WINDOW_MAX_WIDTH,
+                              WINDOW_MAX_HEIGHT);
     wl_surface_commit(state->surface);
     while (!state->configured && wl_display_dispatch(state->display) >= 0)
         ;
     if (!state->configured)
         return -1;
 
-    size_t frame_size = (size_t)state->stride * (size_t)height;
-    size_t pool_size = frame_size * VIDEO_BUFFER_COUNT;
+    state->slot_size = (size_t)WINDOW_MAX_WIDTH * WINDOW_MAX_HEIGHT * 4U;
+    size_t pool_size = state->slot_size * VIDEO_BUFFER_COUNT;
     int fd = create_shm_file(pool_size);
     if (fd < 0)
         return -1;
-    uint8_t *mapping = mmap(NULL, pool_size, PROT_READ | PROT_WRITE,
-                            MAP_SHARED, fd, 0);
-    if (mapping == MAP_FAILED) {
+    state->mapping = mmap(NULL, pool_size, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, 0);
+    if (state->mapping == MAP_FAILED) {
         close(fd);
         return -1;
     }
     state->pool = wl_shm_create_pool(state->shm, fd, (int32_t)pool_size);
     close(fd);
-    for (int i = 0; i < VIDEO_BUFFER_COUNT; i++) {
-        state->buffers[i].data = mapping + frame_size * (size_t)i;
-        state->buffers[i].wl_buffer = wl_shm_pool_create_buffer(
-            state->pool, (int32_t)(frame_size * (size_t)i), width, height,
-            state->stride, WL_SHM_FORMAT_XRGB8888);
-        wl_buffer_add_listener(state->buffers[i].wl_buffer, &buffer_listener,
-                               &state->buffers[i]);
-    }
-    return 0;
+    return display_create_buffers(state, state->width, state->height);
 }
 
 static int display_pump(struct display_state *state, int timeout_ms)
@@ -290,16 +513,105 @@ static struct video_buffer *display_acquire(struct display_state *state)
     }
 }
 
-static int display_frame(struct display_state *state, struct SwsContext *sws,
+static void draw_line(uint32_t *pixels, int stride, int width, int height,
+                      int x0, int y0, int x1, int y1, uint32_t color)
+{
+    int dx = abs(x1 - x0);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int error = dx + dy;
+    for (;;) {
+        if (x0 >= 0 && x0 < width && y0 >= 0 && y0 < height)
+            pixels[(size_t)y0 * (size_t)stride + (size_t)x0] = color;
+        if (x0 == x1 && y0 == y1)
+            break;
+        int twice = error * 2;
+        if (twice >= dy) {
+            error += dy;
+            x0 += sx;
+        }
+        if (twice <= dx) {
+            error += dx;
+            y0 += sy;
+        }
+    }
+}
+
+static void draw_window_chrome(struct display_state *state,
+                               struct video_buffer *buffer)
+{
+    uint32_t *pixels = (uint32_t *)buffer->data;
+    int pixel_stride = state->stride / 4;
+    for (int y = 0; y < TITLEBAR_HEIGHT; y++) {
+        uint32_t color = y == TITLEBAR_HEIGHT - 1 ? 0xff48576a : 0xff182331;
+        for (int x = 0; x < state->width; x++)
+            pixels[(size_t)y * pixel_stride + x] = color;
+    }
+
+    int close_left = state->width - CLOSE_BUTTON_WIDTH;
+    for (int y = 0; y < TITLEBAR_HEIGHT - 1; y++)
+        for (int x = close_left; x < state->width; x++)
+            pixels[(size_t)y * pixel_stride + x] = 0xffb23a48;
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              close_left + 14, 10, close_left + 27, 22, 0xffffffff);
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              close_left + 27, 10, close_left + 14, 22, 0xffffffff);
+
+    int max_left = close_left - MAXIMIZE_BUTTON_WIDTH;
+    for (int y = 0; y < TITLEBAR_HEIGHT - 1; y++)
+        for (int x = max_left; x < close_left; x++)
+            pixels[(size_t)y * pixel_stride + x] = 0xff243447;
+    int box_left = max_left + 13;
+    int box_right = max_left + 28;
+    int box_top = 9;
+    int box_bottom = 23;
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              box_left, box_top, box_right, box_top, 0xffdce5ef);
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              box_right, box_top, box_right, box_bottom, 0xffdce5ef);
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              box_right, box_bottom, box_left, box_bottom, 0xffdce5ef);
+    draw_line(pixels, pixel_stride, state->width, state->height,
+              box_left, box_bottom, box_left, box_top, 0xffdce5ef);
+
+    for (int y = state->height - WINDOW_BORDER; y < state->height; y++)
+        for (int x = state->width - WINDOW_BORDER; x < state->width; x++)
+            pixels[(size_t)y * pixel_stride + x] = 0xff718096;
+}
+
+static int display_frame(struct display_state *state, struct SwsContext **sws,
                          const AVFrame *frame)
 {
+    if (state->pending_width > 0 && state->pending_height > 0 &&
+        (state->pending_width != state->width ||
+         state->pending_height != state->height)) {
+        if (display_create_buffers(state, state->pending_width,
+                                   state->pending_height) < 0)
+            return -1;
+    }
+    state->pending_width = 0;
+    state->pending_height = 0;
     struct video_buffer *buffer = display_acquire(state);
     if (!buffer)
         return -1;
-    uint8_t *planes[4] = { buffer->data, NULL, NULL, NULL };
+    int content_height = state->height - TITLEBAR_HEIGHT;
+    if (content_height < 1)
+        return -1;
+    *sws = sws_getCachedContext(
+        *sws, frame->width, frame->height, frame->format,
+        state->width, content_height, AV_PIX_FMT_BGRA,
+        SWS_BILINEAR, NULL, NULL, NULL);
+    if (!*sws)
+        return -1;
+    uint8_t *planes[4] = {
+        buffer->data + (size_t)TITLEBAR_HEIGHT * state->stride,
+        NULL, NULL, NULL
+    };
     int strides[4] = { state->stride, 0, 0, 0 };
-    sws_scale(sws, (const uint8_t *const *)frame->data, frame->linesize,
+    sws_scale(*sws, (const uint8_t *const *)frame->data, frame->linesize,
               0, frame->height, planes, strides);
+    draw_window_chrome(state, buffer);
     buffer->busy = 1;
     wl_surface_attach(state->surface, buffer->wl_buffer, 0, 0);
     wl_surface_damage(state->surface, 0, 0, state->width, state->height);
@@ -545,12 +857,7 @@ int main(int argc, char **argv)
                 strerror(errno));
         return 1;
     }
-    struct SwsContext *sws = sws_getContext(
-        video->width, video->height, video->pix_fmt,
-        video->width, video->height, AV_PIX_FMT_BGRA,
-        SWS_BILINEAR, NULL, NULL, NULL);
-    if (!sws)
-        return 1;
+    struct SwsContext *sws = NULL;
 
     struct audio_state output;
     output.fd = -1;
@@ -622,7 +929,7 @@ int main(int argc, char **argv)
                     av_frame_unref(frame);
                     continue;
                 }
-                if (!display.closed && display_frame(&display, sws, frame) < 0)
+                if (!display.closed && display_frame(&display, &sws, frame) < 0)
                     failed = 1;
             } else {
                 int out_samples = (int)av_rescale_rnd(

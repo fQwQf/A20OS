@@ -237,7 +237,13 @@ int main(void)
         printf("[init] starting desktop\n");
         desktop_pid = fork();
         if (desktop_pid == 0) {
-            if (access("/bin/run-xfce.sh", F_OK) == 0) {
+            if (access("/bin/etc/weston", F_OK) == 0) {
+                /* Weston is the low-risk presentation desktop. */
+                char *desktop_argv[] = {
+                    "mksh", "/bin/run-desktop.sh", NULL
+                };
+                execve("/bin/mksh", desktop_argv, envp);
+            } else if (access("/bin/run-xfce.sh", F_OK) == 0) {
                 /* Start the native launcher directly.  Keeping mksh out of
                  * this path avoids its background/exec handling interfering
                  * with the compositor and the session bus. */

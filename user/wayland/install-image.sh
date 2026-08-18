@@ -11,6 +11,12 @@ IMG=$1
 ARCH=${2:-riscv64}
 USER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 MEDIA=${3:-}
+DESKTOP=${4:-weston}
+
+case "$DESKTOP" in
+    weston|xfce) ;;
+    *) echo "unsupported GUI desktop: $DESKTOP (expected weston or xfce)" >&2; exit 2 ;;
+esac
 BUILD=$USER_DIR/build/wayland
 SYSROOT=$BUILD/$ARCH/sysroot
 MUSL_SH=$BUILD/musl-$ARCH
@@ -116,7 +122,7 @@ if [ -f "$SYSROOT/lib/libEGL.so.1.0.0" ]; then
     copy_file "$SYSROOT/bin/egl_test" /egl_test
 fi
 
-if [ -f "$SYSROOT/bin/xfce4-session" ]; then
+if [ "$DESKTOP" = xfce ] && [ -f "$SYSROOT/bin/xfce4-session" ]; then
     echo "[image] XFCE desktop"
     printf 'a20os-xfce-machine-id-0000000000000001\n' | mcopy -o -i "$IMG" - ::/etc/machine-id
     # GTK/glib shared libs
@@ -243,7 +249,7 @@ EOS
     rm -f /tmp/opencode/dbus-session-$$.conf
 fi
 
-if [ -x "$SYSROOT/bin/labwc" ]; then
+if [ "$DESKTOP" = xfce ] && [ -x "$SYSROOT/bin/labwc" ]; then
     echo "[image] labwc compositor (wlroots)"
     copy_file "$SYSROOT/bin/labwc" /labwc
     for lib in libwlroots-0.19.so libdisplay-info.so.5 libxml2.so.2 \
@@ -351,6 +357,15 @@ printf '%s' "$WESTON_CONFIG" | \
         mcopy -o -i "$IMG" - ::/etc/xdg/weston/weston.ini
 }
 
+# The init process uses an image marker to choose the default compositor.
+printf '%s\n' "$DESKTOP" | mcopy -o -i "$IMG" - ::/etc/a20-gui-desktop
+printf '%s\n' "$DESKTOP" | mcopy -o -i "$IMG" - ::/etc/a20-gui-desktop-$DESKTOP
+if [ "$DESKTOP" = weston ]; then
+    printf '1\n' | mcopy -o -i "$IMG" - ::/etc/weston
+else
+    printf '1\n' | mcopy -o -i "$IMG" - ::/etc/xfce
+fi
+
 echo "[image] run-weston.sh"
 # Launcher recipe (FAT32 mounts at /bin at runtime):
 #  - modules live in /bin/lib/libweston-9 and /bin/lib/weston
@@ -368,7 +383,7 @@ unset WESTON_LIBINPUT_UDEV
 export WESTON_LIBINPUT_DEVICE=/dev/input/event0
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
-exec weston --backend=fbdev-backend.so --seat=seat1 --shell=kiosk-shell.so "$@"
+exec weston --backend=fbdev-backend.so --device=/dev/fb0 --seat=seat1 --shell=kiosk-shell.so "$@"
 EOS
 chmod 755 /tmp/opencode/run-weston-$$.sh
 copy_file /tmp/opencode/run-weston-$$.sh /run-weston.sh
@@ -389,7 +404,7 @@ chmod 700 /tmp
 mkdir -p /tmp/fontconfig
 export WESTON_MODULE_MAP="fbdev-backend.so=/bin/lib/libweston-9/fbdev-backend.so;kiosk-shell.so=/bin/lib/weston/kiosk-shell.so;desktop-shell.so=/bin/lib/weston/desktop-shell.so;weston-desktop-shell=/bin/libexec/weston-desktop-shell;weston-keyboard=/bin/libexec/weston-keyboard"
 if [ -x /bin/libexec/weston-desktop-shell ]; then
-    exec weston --backend=fbdev-backend.so --seat=seat1 --shell=desktop-shell.so "$@"
+    exec weston --backend=fbdev-backend.so --device=/dev/fb0 --seat=seat1 --shell=desktop-shell.so "$@"
 fi
 echo "run-desktop: weston-desktop-shell is not installed" >&2
 exit 1
