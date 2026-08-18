@@ -5,6 +5,12 @@
 %   TEXINPUTS="slides:" xelatex slides.tex && TEXINPUTS="slides:" xelatex slides.tex
 \documentclass[aspectratio=1610]{beamer}
 
+% 让主题与 figures 无论从 docs/ 还是仓库根目录编译都能找到
+\makeatletter
+\def\input@path{{slides/}{docs/slides/}}
+\makeatother
+\graphicspath{{slides/figures/}{docs/slides/figures/}{figures/}}
+
 % ==================== 基本信息 ====================
 \title{A20OS：高性能混合内核操作系统}
 \subtitle{从 MCU 到完整桌面：双重 ABI · 八大平台 · 工程化并发安全}
@@ -14,7 +20,6 @@
 
 % ==================== 自定义主题 ====================
 \usepackage{a20beamer}
-\graphicspath{{slides/figures/}{figures/}}
 
 % 代码块风格
 \usepackage{listings}
