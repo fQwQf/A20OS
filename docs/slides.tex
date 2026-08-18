@@ -34,21 +34,6 @@
 }
 \lstset{escapechar=@, style=a20c}
 
-% 截图占位：figures/<name> 存在则用真图，否则显示占位框
-\newcommand{\shotslot}[2]{%
-    \begin{tcolorbox}[colback=white, colframe=a20navy!30, arc=1mm, boxrule=0.6pt,
-                      left=1pt, right=1pt, top=1pt, bottom=1pt]
-        \IfFileExists{figures/#1}{%
-            \includegraphics[width=\linewidth]{#1}%
-        }{%
-            \begin{minipage}[c][0.19\paperheight][c]{\linewidth}
-                \centering\color{a20gray}\scriptsize
-                预留截图位\\[0.4em]\ttfamily\footnotesize #1
-            \end{minipage}%
-        }%
-    \end{tcolorbox}
-    \vspace{0.1em}
-    {\scriptsize\color{a20gray}#2\par}}
 
 \begin{document}
 
@@ -1017,33 +1002,18 @@ a20_vmar_map(receiver, vmo, ...);
                 \item 从源码\high{移植} wlroots / labwc / weston / xfce 4.20 组件，submodule 保持纯净
                 \item \high{内核补齐}而非改组件绕行：少量用户态补丁构建期临时应用并还原
                 \item 原生 libinput 后端经 libseat 打开 \code{/dev/input/event*}
-                \item 帧调度链完整：commit $\rightarrow$ frame $\rightarrow$ render $\rightarrow$ pageflip $\rightarrow$ vblank
-                \item \high{LVGL 自研桌面}（\code{user/desktop}）：仪表盘、终端、文件、网络、进程监控
+                \item 帧调度链完整：commit $\rightarrow$ render $\rightarrow$ pageflip $\rightarrow$ vblank
+                \item \high{LVGL 自研桌面}：仪表盘 / 终端 / 文件 / 进程监控
             \end{itemize}
             \vspace{0.2em}
-            \srcnote{关键文件：\code{kernel/drivers/gpu/drm.c}、\code{docs/gui/xfce-wayland-adaptation.md}；验证 \code{make smoke-qemu-gui-riscv64}（QMP 注入键鼠 + 截图判帧）}
+            \srcnote{关键文件：\code{kernel/drivers/gpu/drm.c}；验证 \code{make smoke-qemu-gui-riscv64}（QMP 注入键鼠 + 截图判帧）}
         \end{column}
         \begin{column}{0.45\textwidth}
             \begin{tcolorbox}[colback=a20navy, colframe=a20navy, arc=1mm, boxrule=0pt, left=2pt, right=2pt, top=2pt, bottom=2pt]
                 \includegraphics[width=\linewidth]{desktop-riscv64.png}
             \end{tcolorbox}
             \vspace{-0.3em}
-            \srcnote{实拍：riscv64 QEMU（virtio-gpu + virtio-input）运行 Weston (Wayland) 桌面；终端内 \code{uname} 显示 \code{A20OS 0.5 riscv64}。}
-        \end{column}
-    \end{columns}
-\end{frame}
-
-\begin{frame}{更多运行实拍（预留位）\framesubtitle{把对应文件名的 PNG 放进 docs/slides/figures/ 重新编译，占位框自动替换为真图}}
-    \begin{columns}[t]
-        \begin{column}{0.48\textwidth}
-            \shotslot{lvgl-desktop.png}{LVGL 自研桌面：仪表盘 / 终端 / 文件 / 网络 / 进程监控}
-            \vspace{0.15em}
-            \shotslot{virgl-3d.png}{virtio-gpu virgl 3D 加速（\code{gpu3d\_test} / glxgears）}
-        \end{column}
-        \begin{column}{0.48\textwidth}
-            \shotslot{distro-xfce.png}{Alpine 发行版 XFCE 会话（\code{make distro-run}）}
-            \vspace{0.15em}
-            \shotslot{visionfive2-real.png}{星光 2 / 龙芯 LS2K1000 真机运行}
+            \srcnote{实拍：riscv64 QEMU，Weston 桌面内播放视频。}
         \end{column}
     \end{columns}
 \end{frame}
@@ -1213,7 +1183,7 @@ a20_vmar_map(receiver, vmo, ...);
 
 \begin{frame}{嵌入式与 MCU：同一内核，64 KiB SRAM 起步}
     \begin{columns}[t]
-        \begin{column}{0.5\textwidth}
+        \begin{column}{0.52\textwidth}
             \begin{block}{STM32F103（ARMv7-M / NOMMU）}
                 \begin{itemize}
                     \item 64 KiB Flash / 20 KiB SRAM bring-up（QEMU 验证）
@@ -1221,18 +1191,20 @@ a20_vmar_map(receiver, vmo, ...);
                     \item 外设：LCD、舵机 / 执行器、DHT11 传感器、蓝牙、ESP8266、背光
                 \end{itemize}
             \end{block}
+            \begin{block}{PPC64LE 与跨平台工程}
+                \footnotesize QEMU pSeries 固件（MMU 单核边界）；统一 arch/HAL 抽象 + 七架构构建矩阵，物理板与虚拟平台同构验证。
+            \end{block}
+            \vspace{0.1em}
+            \srcnote{入口：\code{make stm32f103-xuanwu}、\code{make run-stm32f103-qemu}、\code{make ARCH=ppc64le run}}
         \end{column}
-        \begin{column}{0.47\textwidth}
-            \begin{block}{PPC64LE}
-                QEMU pSeries 固件，MMU 单核边界
-            \end{block}
-            \begin{block}{跨平台工程}
-                统一 arch/HAL 抽象、七架构构建矩阵，物理板与虚拟平台同构验证。
-            \end{block}
+        \begin{column}{0.45\textwidth}
+            \begin{tcolorbox}[colback=a20navy, colframe=a20navy, arc=1mm, boxrule=0pt, left=2pt, right=2pt, top=2pt, bottom=2pt]
+                \includegraphics[width=\linewidth, trim=0 190 0 0, clip]{stm32.jpg}
+            \end{tcolorbox}
+            \vspace{-0.3em}
+            \srcnote{实拍：普中玄武 STM32F103ZET6 运行 A20OS，LCD 仪表盘 + 舵机 / DHT11 / 蓝牙外设。}
         \end{column}
     \end{columns}
-    \vspace{0.3em}
-    \srcnote{入口：\code{make stm32f103-bringup}、\code{make stm32f103-xuanwu}、\code{make run-stm32f103-qemu}、\code{make ARCH=ppc64le run}}
 \end{frame}
 
 % ==================================================
