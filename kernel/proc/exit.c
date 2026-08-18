@@ -460,10 +460,16 @@ void proc_force_exit(task_t *t, int exit_code)
     if (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE) {
         t->pending_exit_code = exit_code;
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
-        if (t->state == PROC_BLOCKED) {
+        /* Keep the wait4 aggregate exactly paired with the guarded flag.
+         * The former unconditional decrement for every BLOCKED task let an
+         * unrelated forced exit hide real child waiters, so later child exits
+         * skipped their wake scan and left zombie children behind forever. */
+        if (t->waiting_for_child) {
             t->waiting_for_child = 0;
             if (g_proc_waiting_child_waiter_count)
                 g_proc_waiting_child_waiter_count--;
+        }
+        if (t->state == PROC_BLOCKED) {
             /*
              * REMOTE_EXIT_SAFE_BOUNDARY: a cancelable Park consumes the task
              * exit reason through its current sequence.  If an event already

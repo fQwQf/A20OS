@@ -25,8 +25,46 @@ _start:
      * Only the boot hart runs global initialization; others wait for release.
      * BSS is cleared below, so boot arguments are saved after that. */
 
+#ifdef CONFIG_BOARD_QEMU_VIRT_RISCV64
+    /*
+     * OpenSBI's cold-boot lottery is nondeterministic with QEMU TCG's
+     * multi-threaded CPUs.  The rest of the RISC-V SMP port translates
+     * logical CPU IDs to hardware hart IDs, but keeping a rotated topology
+     * exposed rare, severe wakeup/IRQ-latency regressions in BuildStorm when
+     * a non-zero hart won the lottery.  Hand global initialization to hart 0
+     * before touching BSS so QEMU always uses the identity topology.
+     *
+     * SBI HSM hart_start(0, _start, dtb) is safe here without a stack.  On
+     * success this hart joins the existing secondary wait path.  -6 is
+     * SBI_ERR_ALREADY_AVAILABLE: hart 0 is already entering this payload, so
+     * it is likewise safe to wait for its release.  Other errors retain the
+     * generic arbitrary-boot-hart fallback below.  This is deliberately
+     * QEMU-only; physical RISC-V boards may not expose a supervisor hart 0.
+     */
+    beqz    a0, .Lclaim_boot_prepare
+    mv      s0, a0
+    mv      s1, a1
+    li      a0, 0
+    la      a1, _start
+    mv      a2, s1
+    li      a6, 0
+    li      a7, 0x48534d
+    ecall
+    beqz    a0, .Lhart0_handoff
+    li      t0, -6
+    beq     a0, t0, .Lhart0_handoff
+    mv      a0, s0
+    mv      a1, s1
+    j       .Lclaim_boot_prepare
+.Lhart0_handoff:
+    mv      a0, s0
+    mv      a1, s1
+    j       .secondary_wait
+#endif
+
     /* OpenSBI may choose any hart as the cold-boot hart.  Elect exactly one
      * initializer without touching BSS, which that hart clears below. */
+.Lclaim_boot_prepare:
     la      t0, __boot_hart_claim
 .Lclaim_boot:
     lr.d    t1, 0(t0)
