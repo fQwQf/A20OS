@@ -41,7 +41,9 @@ A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中
 
 - 手动运行：`make run-*` 直接把串口输出打印到终端。
 - smoke 测试：日志保存在 `.kernel-build/smoke/<target>.log`。
-- 旧 `make eval-rv/eval-la`：日志保存在 `.kernel-build/smoke/logs/serial-rv.txt` 和 `serial-la.txt`。
+-  `make release-eval-rv/release-eval-la`（兼容别名为
+  `make eval-rv/eval-la`）：日志保存在 `.kernel-build/smoke/logs/serial-rv.txt` 和
+  `serial-la.txt`。
 - 2026  `release-eval-*`：每次运行在 `.kernel-build/smoke/2026/` 下生成带提交和时间戳的 `logs/`、`metadata/` 与 `scores/` 归档。
 - 崩溃时先看日志末尾的 `[PANIC]` 或 `========== KERNEL PANIC ==========` 行。
 

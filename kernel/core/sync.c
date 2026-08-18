@@ -32,6 +32,10 @@ static void wait_queue_entry_clear(wait_queue_entry_t *entry)
     entry->key = 0;
     entry->priv = NULL;
     entry->linked = false;
+    /* Publish detachment only after every field is no longer touched.  A
+     * timeout-side unlink may free its containing waiter as soon as it sees
+     * a NULL owner. */
+    __atomic_store_n(&entry->queue, NULL, __ATOMIC_RELEASE);
 }
 
 bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
@@ -58,6 +62,7 @@ bool wait_queue_link(wait_queue_t *q, wait_queue_entry_t *entry,
         q->head->prev = entry;
     q->head = entry;
     entry->linked = true;
+    __atomic_store_n(&entry->queue, q, __ATOMIC_RELEASE);
     proc_lifetime_note_wait_add();
     spin_unlock_irqrestore(&q->lock, flags);
     return true;
@@ -84,30 +89,51 @@ bool wait_queue_link_locked(wait_queue_t *q, wait_queue_entry_t *entry,
         q->head->prev = entry;
     q->head = entry;
     entry->linked = true;
+    __atomic_store_n(&entry->queue, q, __ATOMIC_RELEASE);
     proc_lifetime_note_wait_add();
     return true;
 }
 
 void wait_queue_unlink(wait_queue_t *q, wait_queue_entry_t *entry) {
-    if (!q || !entry)
+    if (!entry)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&q->lock);
-    task_t *task = NULL;
-    if (entry->linked) {
-        task = entry->task;
-        if (entry->prev)
-            entry->prev->next = entry->next;
-        else if (q->head == entry)
-            q->head = entry->next;
-        if (entry->next)
-            entry->next->prev = entry->prev;
+    /*
+     * REQUEUE can move an entry after its waiter drops the original object
+     * lock.  Follow the entry's current owner instead of trusting the queue
+     * that was used at link time.  Revalidate after taking the owner lock so
+     * a concurrent move either completes first or retries here.
+     */
+    (void)q;
+    for (;;) {
+        wait_queue_t *owner =
+            __atomic_load_n(&entry->queue, __ATOMIC_ACQUIRE);
+        if (!owner)
+            return;
+
+        uint64_t flags = spin_lock_irqsave(&owner->lock);
+        if (__atomic_load_n(&entry->queue, __ATOMIC_RELAXED) != owner) {
+            spin_unlock_irqrestore(&owner->lock, flags);
+            continue;
+        }
+
+        task_t *task = NULL;
+        if (entry->linked) {
+            task = entry->task;
+            if (entry->prev)
+                entry->prev->next = entry->next;
+            else if (owner->head == entry)
+                owner->head = entry->next;
+            if (entry->next)
+                entry->next->prev = entry->prev;
+        }
+        if (task)
+            proc_lifetime_note_wait_remove();
+        wait_queue_entry_clear(entry);
+        spin_unlock_irqrestore(&owner->lock, flags);
+        proc_put(task);
+        return;
     }
-    if (task)
-        proc_lifetime_note_wait_remove();
-    wait_queue_entry_clear(entry);
-    spin_unlock_irqrestore(&q->lock, flags);
-    proc_put(task);
 }
 
 unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
@@ -282,8 +308,11 @@ unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
         uint64_t flags = spin_lock_irqsave(&q_from->lock);
         for (wait_queue_entry_t *entry = q_from->head;
              entry && n < limit; entry = entry->next) {
-            if (match(entry, arg))
+            if (match(entry, arg)) {
+                if (rekey)
+                    rekey(entry, rekey_arg);
                 n++;
+            }
         }
         spin_unlock_irqrestore(&q_from->lock, flags);
         return n;
@@ -297,7 +326,6 @@ unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
     wait_queue_t *first = q_from < q_to ? q_from : q_to;
     wait_queue_t *second = q_from < q_to ? q_to : q_from;
 
-    wait_queue_entry_t *moved[PROC_WAKE_Q_CAPACITY];
     unsigned n = 0;
 
     uint64_t f1 = spin_lock_irqsave(&first->lock);
@@ -313,11 +341,6 @@ unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
         *pp = entry->next;
         if (entry->next)
             entry->next->prev = entry->prev;
-        moved[n++] = entry;
-    }
-
-    for (unsigned i = 0; i < n; i++) {
-        wait_queue_entry_t *entry = moved[i];
         if (rekey)
             rekey(entry, rekey_arg);
         entry->prev = NULL;
@@ -325,6 +348,8 @@ unsigned wait_queue_requeue_matching(wait_queue_t *q_from, wait_queue_t *q_to,
         if (q_to->head)
             q_to->head->prev = entry;
         q_to->head = entry;
+        __atomic_store_n(&entry->queue, q_to, __ATOMIC_RELEASE);
+        n++;
     }
 
     spin_unlock_irqrestore(&second->lock, f2);
