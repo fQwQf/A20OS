@@ -212,7 +212,7 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     priv->rx_busy = 0;
 }
 
-static int ls2k_gmac_phy_init(uintptr_t base, ls2k_gmac_priv_t *priv) {
+static int ls2k_gmac_phy_init(uintptr_t base) {
     int phy_addr = -1;
     uint16_t id1, id2;
     uint32_t phy_id;
@@ -285,7 +285,7 @@ int ls2k_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_ADDR0_HIGH, high);
     gmac_write(base, MAC_ADDR0_LOW, low);
 
-    if (ls2k_gmac_phy_init(base, priv) != 0)
+    if (ls2k_gmac_phy_init(base) != 0)
         return -1;
 
     gmac_write(base, MAC_CONFIGURATION,

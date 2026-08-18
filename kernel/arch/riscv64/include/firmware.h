@@ -14,6 +14,7 @@
 #define SBI_HSM_EID             0x48534DUL
 #define SBI_RFENCE_EID          0x52464E43UL
 #define SBI_RFENCE_SFENCE_VMA   1
+#define SBI_ERR_ALREADY_AVAILABLE (-6)
 
 void firmware_set_timer(uint64_t time);
 void firmware_console_putchar(char c);
