@@ -122,7 +122,8 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	if [ -n "$(filter lamina,$(EXTRA_PACKAGES))" ]; then \
 		for pat in 'liblaminaCore.so*' 'liblmcas.so*' 'liblmmc.so*' 'libLammpCore.so*' 'libstdc++.so*'; do \
 			for f in user/build/extra/$(ARCH)/$$pat; do \
-				[ -f "$$f" ] && cp -P "$$f" "$(EXTRA_STAGING_DIR)/bin/$$(basename "$$f")"; \
+				[ -f "$$f" ] || continue; \
+				cp -P "$$f" "$(EXTRA_STAGING_DIR)/bin/$$(basename "$$f")"; \
 			done; \
 		done; \
 	fi
