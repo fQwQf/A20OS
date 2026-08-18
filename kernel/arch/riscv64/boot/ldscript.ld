@@ -16,6 +16,11 @@ ENTRY(_start)
 
 PROVIDE(PHYS_BASE = 0x80200000);
 PROVIDE(VIRT_BASE = 0xFFFFFFC080200000);
+/* Boot-time 1 GiB megapage window consumed by entry.S: PA of the first RAM
+ * gigabyte (1 GiB aligned) and an optional second higher-half MMIO window
+ * (0 = none).  A board ldscript may override these to relocate RAM. */
+PROVIDE(BOOT_MAP_PHYS = 0x80000000);
+PROVIDE(BOOT_MAP_MMIO_HI = 0x40000000);
 LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 
 PHDRS

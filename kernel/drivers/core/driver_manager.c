@@ -115,7 +115,11 @@ int driver_descriptor_read(int fd, a20_driver_descriptor_t *out)
 /* Platform devices that optional kernel modules or user services bind
  * to.  The driver core uses user_owned to enforce one owner per device:
  * only read-only kernel probes bind a user-owned device. */
+#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || \
+    defined(CONFIG_BOARD_QEMU_VIRT_AARCH64) || \
+    defined(CONFIG_BOARD_QEMU_VIRT_LOONGARCH64)
 static platform_device_t g_rtc_pdev;
+#endif
 #if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
 static platform_device_t g_blk_pdev;
 static platform_device_t g_vinput_pdev;

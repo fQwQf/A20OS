@@ -20,7 +20,7 @@
 #define VIRTIO_SCSI_MAX_DEVS 4
 #define VIRTIO_SCSI_CDB_SIZE 32
 #define VIRTIO_SCSI_SENSE_SIZE 96
-#define VIRTIO_SCSI_TIMEOUT_TICKS (TICKS_PER_SEC * 10)
+#define VIRTIO_SCSI_TIMEOUT_TICKS (clock_ticks_per_sec() * 10)
 #define VIRTIO_SCSI_POLL_LIMIT    50000000U
 /* Hybrid completion window: bounded spin-poll before parking on the
  * completion IRQ, mirroring the virtio-blk model. */

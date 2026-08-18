@@ -1,0 +1,25 @@
+diff --git a/dts/upstream/src/riscv/starfive/jh7110-common.dtsi b/dts/upstream/src/riscv/starfive/jh7110-common.dtsi
+index a7a1c09a..21b34c94 100644
+--- a/dts/upstream/src/riscv/starfive/jh7110-common.dtsi
++++ b/dts/upstream/src/riscv/starfive/jh7110-common.dtsi
+@@ -429,7 +429,11 @@
+ 	};
+ 
+ 	mmc1_pins: mmc1-0 {
++		bootph-pre-ram;
++
+ 		clk-pins {
++			bootph-pre-ram;
++
+ 			pinmux = <GPIOMUX(10, GPOUT_SYS_SDIO1_CLK,
+ 					      GPOEN_ENABLE,
+ 					      GPI_NONE)>;
+@@ -441,6 +445,8 @@
+ 		};
+ 
+ 		mmc-pins {
++			bootph-pre-ram;
++
+ 			pinmux = <GPIOMUX(9, GPOUT_SYS_SDIO1_CMD,
+ 					     GPOEN_SYS_SDIO1_CMD,
+ 					     GPI_SYS_SDIO1_CMD)>,

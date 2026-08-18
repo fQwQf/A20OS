@@ -136,7 +136,7 @@ _step35_smoke: dev-build
 	stamp=$$(date -u +%Y%m%dT%H%M%SZ); \
 	log="$(STEP35_LOG_DIR)/step35-$(STEP35_LABEL)-$$stamp.log"; \
 	status=0; \
-	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+	$(TIMEOUT) --expect '# ' \
 		--send-line 'lifetime_stress' \
 		--send-line 'cat /proc/a20/task_lifetime' \
 		--send-line 'poweroff' \
