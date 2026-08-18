@@ -24,6 +24,10 @@
 #include "net/socket.h"
 #include "net/net_config.h"
 
+#ifdef CONFIG_BOARD_LS2K1000
+#include "platform.h"
+#endif
+
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
 #include "drivers/core/driver_lifecycle_test.h"
 #endif
@@ -856,6 +860,18 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "0\n");
         break;
     case PF_INTERRUPTS:
+#ifdef CONFIG_BOARD_LS2K1000
+        snprintf(buf, bufsz,
+            "           CPU0\n"
+            "  0: %12lu   LS2K-LIOINTC   edge   ttyS0\n"
+            "CAS: %12lu   LS2K HWI1 cascades\n"
+            "SPU: %12lu   LS2K spurious cascades\n"
+            "STM: %12lu   LS2K masked UART storms\n",
+            (unsigned long)ls2k1000_irq_source_count(UART0_IRQ),
+            (unsigned long)ls2k1000_irq_cascade_count(),
+            (unsigned long)ls2k1000_irq_spurious_count(),
+            (unsigned long)ls2k1000_irq_storm_count());
+#else
         snprintf(buf, bufsz,
             "           CPU0\n"
             "  0:         %lu   IO-APIC   2-edge   timer\n"
@@ -864,6 +880,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "CAL:         %lu   Function call interrupts\n",
             (unsigned long)0, (unsigned long)0,
             (unsigned long)0, (unsigned long)0);
+#endif
         break;
     case PF_SELF: {  // 生成当前进程的 pid
         task_t *t = proc_current();

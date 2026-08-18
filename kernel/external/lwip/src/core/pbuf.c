@@ -731,6 +731,12 @@ pbuf_free(struct pbuf *p)
   u8_t alloc_src;
   struct pbuf *q;
   u8_t count;
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+  void *caller = __builtin_return_address(0);
+  uintptr_t entry_sp;
+
+  __asm__ __volatile__("move %0, $sp" : "=r"(entry_sp));
+#endif
 
   if (p == NULL) {
     LWIP_ASSERT("p != NULL", p != NULL);
@@ -754,6 +760,15 @@ pbuf_free(struct pbuf *p)
      * further protection. */
     SYS_ARCH_PROTECT(old_level);
     /* all pbufs in a chain are referenced at least once */
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    if (p->ref == 0) {
+      printf("[LS2K-DIAG] pbuf_free p=%p caller=%p entry_sp=0x%lx "
+             "next=%p payload=%p type=%u flags=%u ref=%u\n",
+             (void *)p, caller, (unsigned long)entry_sp, (void *)p->next,
+             p->payload, (unsigned)p->type_internal, (unsigned)p->flags,
+             (unsigned)p->ref);
+    }
+#endif
     LWIP_ASSERT("pbuf_free: p->ref > 0", p->ref > 0);
     /* decrease reference count (number of pointers to pbuf) */
     ref = --(p->ref);

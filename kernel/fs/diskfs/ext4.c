@@ -1528,7 +1528,7 @@ vnode_t *ext4_make_vnode(ext4_sb_info_t *sb, uint32_t ino, uint32_t sz,
  * Mount / Unmount
  * ================================================================ */
 
-vnode_t *ext4_mount(bcache_t *bc) {
+vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     ext4_superblock_t sb;
     if (bcache_read_bytes(bc, 1024, &sb, sizeof(sb)) < 0) {
         printf("[EXT4] Failed to read superblock\n");
@@ -1537,6 +1537,12 @@ vnode_t *ext4_mount(bcache_t *bc) {
 
     if (sb.s_magic != EXT4_DISK_MAGIC) {
         printf("[EXT4] Bad magic: 0x%x (expected 0x%x)\n", sb.s_magic, EXT4_DISK_MAGIC);
+        return NULL;
+    }
+
+    if ((flags & VFS_MOUNT_RDONLY) &&
+        (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER)) {
+        printf("[EXT4] Read-only mount refused: filesystem needs journal recovery\n");
         return NULL;
     }
 
@@ -1759,6 +1765,10 @@ vnode_t *ext4_mount(bcache_t *bc) {
     }
     root->parent = root;
     return root;
+}
+
+vnode_t *ext4_mount(bcache_t *bc) {
+    return ext4_mount_flags(bc, 0);
 }
 
 void ext4_unmount(vnode_t *root) {

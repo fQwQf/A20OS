@@ -138,6 +138,12 @@ ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
+$(RAMFS_USER_BLOB_DIR)/%.o: $(USER_BUILD_STAMP)
+	@mkdir -p $(dir $@)
+	cd $(USER_BUILD_DIR) && $(OBJCOPY) -I binary $(RAMFS_USER_OBJCOPY_$(ARCH)) \
+		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
+		$* $(abspath $@)
+
 $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot/uefi/aarch64_kernel_blob.S
 	@mkdir -p $(dir $@)
 	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \

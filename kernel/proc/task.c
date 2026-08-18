@@ -21,6 +21,28 @@
 extern void arch_return_to_user(trap_context_t *ctx) NORETURN;
 #endif
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+static void ls2k_dump_user_pt_path(pt_root_t *root, vaddr_t va,
+                                   const char *name)
+{
+    pte_t *table = root;
+
+    kinfo("[PT] %s va=0x%lx root=%p root_pa=0x%lx\n", name,
+          (unsigned long)va, root,
+          (unsigned long)arch_make_addr_space_token(root));
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        int idx = arch_pt_vpn(va, level);
+        pte_t pte = table[idx];
+
+        kinfo("[PT] %s L%d[%d] table=%p pte=0x%lx\n", name, level,
+              idx, table, (unsigned long)pte);
+        if (level == 0 || !(pte & PTE_V) || arch_pte_is_leaf(pte))
+            break;
+        table = arch_pte_to_ptr(pte);
+    }
+}
+#endif
+
 task_t *proc_task_alloc_storage(void)
 {
     task_t *t = kcalloc(1, sizeof(*t));
@@ -235,12 +257,39 @@ void proc_task_first_entry(void)
     task_t *t = proc_current();
     void (*entry)(void) = t ? (void (*)(void))t->first_kernel_entry : NULL;
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    kinfo("[SCHED] first task entry: pid=%d trap=%p entry=%p\n",
+          t ? t->pid : -1, t ? (void *)t->trap_ctx : NULL, (void *)entry);
+#endif
+
     if (t)
         t->first_kernel_entry = 0;
     proc_switch_complete();
 #ifndef CONFIG_MCU
-    if (t && t->trap_ctx)
+    if (t && t->trap_ctx) {
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+        kinfo("[SCHED] returning pid %d to user: era=0x%lx prmd=0x%lx\n",
+              t->pid, (unsigned long)TRAP_CTX_EPC(t->trap_ctx),
+              (unsigned long)TRAP_CTX_STATUS(t->trap_ctx));
+        uint64_t crmd, eentry, tlbrentry, pgdl, pwcl, pwch, tlbrehi, prcfg1;
+        __asm__ __volatile__("csrrd %0, 0x0" : "=r"(crmd));
+        __asm__ __volatile__("csrrd %0, 0xc" : "=r"(eentry));
+        __asm__ __volatile__("csrrd %0, 0x88" : "=r"(tlbrentry));
+        __asm__ __volatile__("csrrd %0, 0x19" : "=r"(pgdl));
+        __asm__ __volatile__("csrrd %0, 0x1c" : "=r"(pwcl));
+        __asm__ __volatile__("csrrd %0, 0x1d" : "=r"(pwch));
+        __asm__ __volatile__("csrrd %0, 0x8e" : "=r"(tlbrehi));
+        __asm__ __volatile__("csrrd %0, 0x21" : "=r"(prcfg1));
+        kinfo("[SCHED] CSR crmd=%lx eentry=%lx tlbrentry=%lx pgdl=%lx\n",
+              crmd, eentry, tlbrentry, pgdl);
+        kinfo("[SCHED] CSR pwcl=%lx pwch=%lx tlbrehi=%lx prcfg1=%lx\n",
+              pwcl, pwch, tlbrehi, prcfg1);
+        ls2k_dump_user_pt_path(t->pgdir, TRAP_CTX_EPC(t->trap_ctx), "entry");
+        ls2k_dump_user_pt_path(t->pgdir, TRAP_CTX_SP(t->trap_ctx) - 1,
+                               "stack");
+#endif
         arch_return_to_user(t->trap_ctx);
+    }
 #endif
     if (!entry)
         panic("proc_task_first_entry: no entry");
