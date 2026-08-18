@@ -627,8 +627,13 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
      * Single-page backends such as the embedded FAT32 development image keep
      * executable mappings on anonymous copies, so an unrelated late text
      * fault cannot perturb page-cache pin accounting inside a running test. */
-    int direct_private = !shared && fault_around &&
-        (!executable || vf->vnode->ops->readpages);
+    /* Executable mappings may use a direct cache leaf even when an
+     * architecture disables speculative fault-around.  In that mode only the
+     * page that actually faulted is pinned and shared: this avoids both the
+     * 16-page executable readahead pin amplification and one private text
+     * copy per compiler process. */
+    int direct_private = !shared && vf->vnode->ops->readpages &&
+        (fault_around || executable);
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
