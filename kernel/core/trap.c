@@ -209,9 +209,9 @@ static void user_trap_handler(trap_context_t *ctx) {
 #endif
             ARCH_TRAP_FAST_RETURN_ARM(ctx);
             arch_advance_syscall_epc(ctx);
-            arch_syscall_dispatch_enter();
+            arch_syscall_dispatch_enter(); LS2K_SYSCALL_TRACE(TRAP_CTX_SYSCALL_NUM(ctx));
             syscall_dispatch(ctx);
-            arch_syscall_dispatch_leave();
+            LS2K_SYSCALL_DONE(); arch_syscall_dispatch_leave();
             proc_check_exit_pending();
             return;
         }

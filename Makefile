@@ -45,11 +45,13 @@ ARCH ?= riscv64
 ABI ?= both
 MODE ?= release
 BRINGUP ?= 0
+RAMFS_USER ?= 0
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
 FINAL_ROOT ?= 0
 COOPERATIVE_BOOT ?= 0
+STORAGE_READ_ONLY ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
 SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
 PROFILE ?= full
@@ -128,9 +130,9 @@ KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
 
 # Preserve established generic and STM32 output paths used by smoke, contest,
-# flash, and QEMU runners. Explicit embedded builds on non-MCU architectures
-# get their own suffix so they never share objects with generic.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(FINAL_ROOT)),-final-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+# flash, and QEMU runners. Options that change compiled code, including
+# embedded deployment and cooperative boot, get distinct output directories.
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(FINAL_ROOT)),-final-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -315,7 +317,7 @@ CROSS_PREFIX_riscv32     := $(if $(filter-out .,$(RISCV_ELF_RV32_MULTIDIR)),$(RI
 CROSS_PREFIX_ppc64le     := powerpc64le-linux-gnu-
 
 ARCH_CFLAGS_riscv64     := -march=rv64imafdc_zicsr_zifencei -mabi=lp64 -mcmodel=medany
-ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static
+ARCH_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic -static -mstrict-align
 ARCH_CFLAGS_loongarch32 := -march=la32v1.0 -mabi=ilp32s -mcmodel=normal -fno-pic -static -fno-store-merging
 ARCH_CFLAGS_aarch64     := -march=armv8-a -mgeneral-regs-only -fno-pic -mcmodel=large -mno-outline-atomics
 ARCH_CFLAGS_x86_64      := -m64 -mcmodel=large -mno-red-zone -fno-pic -fno-pie -mgeneral-regs-only -fno-omit-frame-pointer
@@ -554,6 +556,20 @@ endif
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
+ifeq ($(STORAGE_READ_ONLY),1)
+CFLAGS += -DCONFIG_STORAGE_READ_ONLY -DCONFIG_AHCI
+endif
+ifeq ($(BOARD),ls2k1000)
+ifeq ($(COOPERATIVE_BOOT),1)
+CFLAGS += -DCONFIG_ELF_EAGER_LOAD
+ifneq ($(NR_CPUS),1)
+$(error COOPERATIVE_BOOT=1 is the single-core recovery profile and cannot be combined with NR_CPUS=$(NR_CPUS))
+endif
+ifeq ($(STORAGE_READ_ONLY),1)
+$(error STORAGE_READ_ONLY=1 is an experiment and cannot be combined with the LS2K1000 cooperative recovery profile)
+endif
+endif
+endif
 ifeq ($(BOARD),virtualbox-aarch64)
 CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
@@ -650,6 +666,9 @@ endif
 # Bringup / contest mode markers for conditional compilation.
 ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
+endif
+ifeq ($(RAMFS_USER),1)
+CFLAGS += -DCONFIG_RAMFS_USER
 endif
 
 ifeq ($(NOMMU),1)
@@ -776,6 +795,24 @@ KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $
               $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
+# Optional self-contained userspace for physical-board bring-up.  Each static
+# ELF is linked as read-only kernel data, then copied into the root ramfs by
+# kernel/fs/rootfs_user.c.  Keep this opt-in so normal disk-backed images do
+# not grow and existing submission artifacts remain unchanged.
+RAMFS_USER_PROGRAMS := init mksh help ls cat ps sleep timer_preempt timer_idle
+ifeq ($(STORAGE_READ_ONLY),1)
+RAMFS_USER_PROGRAMS += storage_read_test
+endif
+RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
+RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
+RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
+ifeq ($(RAMFS_USER),1)
+ifneq ($(ARCH),loongarch64)
+$(error RAMFS_USER=1 is currently supported only for ARCH=loongarch64)
+endif
+KERNEL_OBJ += $(RAMFS_USER_BLOBS)
+endif
+
 # vDSO user image (riscv64/loongarch64): built out-of-tree of ASM_SRC on
 # purpose, it is user code linked with its own script.  The vdso.elf FILE is
 # embedded verbatim: p_offset == p_vaddr makes file layout == memory layout,
@@ -810,7 +847,8 @@ $(VDSO_BLOB): $(VDSO_ELF)
 # ASM sources
 ASM_SRC = $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.S' | sort)
 ASM_OBJ = $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/%.o,$(ASM_SRC))
-DEP_FILES = $(KERNEL_OBJ:.o=.d) $(ASM_OBJ:.o=.d)
+DEP_FILES = $(filter-out $(RAMFS_USER_BLOBS:.o=.d),$(KERNEL_OBJ:.o=.d)) \
+            $(ASM_OBJ:.o=.d)
 
 # Kernel image
 KERNEL_ELF = $(BUILD_DIR)/kernel.elf
