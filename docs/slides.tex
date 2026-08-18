@@ -160,30 +160,20 @@
     \begin{columns}[t]
         \begin{column}{0.63\textwidth}
             \begin{tikzpicture}[baseline={(current bounding box.north)}]
-                \pgfplotsset{set layers}
                 \begin{axis}[
-                    width=0.99\linewidth, height=5.0cm, scale only axis,
-                    xmin=0.5, xmax=20.5, ymin=0, ymax=150,
-                    axis y line*=right, hide x axis,
-                    ytick=\empty,
-                    tick style={draw=none},
-                ]
-                    \addplot[ybar, bar width=4pt, fill=a20accent!40, draw=none] coordinates {
-                        (1,1)(2,16)(3,7)(4,8)(5,9)(6,7)(7,6)(8,5)(9,4)(10,6)
-                        (11,8)(12,7)(13,8)(14,2)(15,65)(16,14)(17,57)(18,137)(19,86)(20,30)};
-                \end{axis}
-                \begin{axis}[
-                    width=0.99\linewidth, height=5.0cm, scale only axis,
+                    width=0.99\linewidth, height=5.0cm,
                     xmin=0.5, xmax=20.5, ymin=0, ymax=185,
-                    axis y line*=left, axis x line*=bottom,
-                    ylabel={内核自研代码（千行，累计净增）}, ylabel style={font=\scriptsize},
+                    ylabel={内核代码累计（千行）/ 周提交次数}, ylabel style={font=\scriptsize},
                     xtick={1,5,10,15,20},
                     xticklabels={第 1 周, 第 5 周, 第 10 周, 第 15 周, 第 20 周},
                     xticklabel style={font=\tiny, color=a20gray},
                     yticklabel style={font=\tiny, color=a20gray},
-                    tick style={draw=none},
+                    axis line style={draw=none}, tick style={draw=none},
                     ymajorgrids, major grid style={a20navy!10},
                 ]
+                    \addplot[ybar, bar width=4pt, fill=a20accent!40, draw=none] coordinates {
+                        (1,1)(2,16)(3,7)(4,8)(5,9)(6,7)(7,6)(8,5)(9,4)(10,6)
+                        (11,8)(12,7)(13,8)(14,2)(15,65)(16,14)(17,57)(18,137)(19,86)(20,30)};
                     \addplot[very thick, a20blue, mark=none] coordinates {
                         (1,8.1)(2,12.8)(3,16.0)(4,33.3)(5,37.1)(6,44.2)(7,45.3)(8,49.2)(9,52.8)(10,60.6)
                         (11,61.7)(12,62.0)(13,63.5)(14,71.3)(15,92.0)(16,94.6)(17,111.9)(18,130.8)(19,155.8)(20,159.1)};
@@ -194,7 +184,7 @@
                     \node[circle, fill=a20amber, draw=white, inner sep=1.4pt] at (axis cs:20,159.1) {};
                 \end{axis}
             \end{tikzpicture}
-            \srcnote{\textcolor{a20blue}{——} 内核自研累计（左轴，千行）~\textcolor{a20accent!60!black}{■} 周提交（右轴）~\textcolor{a20amber}{●} 里程碑。口径：git numstat 周净增（排除 \code{external/}），曲线单调、无跳变导入。}
+            \srcnote{\textcolor{a20blue}{——} 内核自研累计（千行）~\textcolor{a20accent!60!black}{■} 周提交次数~\textcolor{a20amber}{●} 里程碑。两者数值同量级故共轴；口径：git numstat 周净增（排除 \code{external/}），曲线单调、无跳变导入。}
         \end{column}
         \begin{column}{0.34\textwidth}
             \begin{a20keybox}
@@ -726,24 +716,24 @@ a20_vmar_map(receiver, vmo, ...);
             \srcnote{关键文件：\code{kernel/abi/native/syscall\_table.def}（139 项 X-macro 注册）}
         \end{column}
         \begin{column}{0.42\textwidth}
-            \begin{tikzpicture}[baseline={(current bounding box.north)}]
-                \begin{axis}[
-                    ybar, bar width=17pt,
-                    width=0.94\linewidth, height=3.9cm,
-                    symbolic x coords={Linux ABI, Native ABI, xv6 参照},
-                    xtick={Linux ABI, Native ABI, xv6 参照}, ymin=0, ymax=470,
-                    ylabel={syscall 数量}, ylabel style={font=\scriptsize},
-                    ymajorgrids, major grid style={a20navy!10},
-                    axis line style={draw=none}, tick style={draw=none},
-                    xticklabel style={font=\scriptsize},
-                    yticklabel style={font=\tiny, color=a20gray},
-                    nodes near coords, every node near coord/.append style={font=\scriptsize\bfseries, color=a20navy},
-                ]
-                    \addplot[ybar, fill=a20blue, draw=none] coordinates {(Linux ABI,361)};
-                    \addplot[ybar, fill=a20accent, draw=none] coordinates {(Native ABI,139)};
-                    \addplot[ybar, fill=a20gray!45, draw=none] coordinates {(xv6 参照,23)};
-                \end{axis}
-            \end{tikzpicture}
+            \begin{tikzpicture}[baseline={(current bounding box.north)},
+                                x=1cm, y=1cm, font=\scriptsize]
+                % 网格与基线（361 -> 3.3cm）
+                \foreach \gy in {0,100,200,300} {
+                    \draw[a20navy!10] (0.2,\gy*0.00914) -- (5.3,\gy*0.00914);
+                    \node[left, font=\tiny, text=a20gray] at (0.2,\gy*0.00914) {\gy};}
+                \draw[a20navy!35] (0.2,0) -- (5.3,0);
+                % 三根柱：Linux ABI 361 / Native ABI 139 / xv6 23
+                \fill[a20blue]   (0.55,0) rectangle (1.45,3.298);
+                \fill[a20accent] (2.35,0) rectangle (3.25,1.270);
+                \fill[a20gray!45] (4.15,0) rectangle (5.05,0.210);
+                \node[above, font=\scriptsize\bfseries, text=a20navy] at (1.0,3.298) {361};
+                \node[above, font=\scriptsize\bfseries, text=a20navy] at (2.8,1.270) {139};
+                \node[above, font=\scriptsize\bfseries, text=a20navy] at (4.6,0.210) {23};
+                \node[below, text=a20ink] at (1.0,0) {Linux ABI};
+                \node[below, text=a20ink] at (2.8,0) {Native ABI};
+                \node[below, text=a20ink] at (4.6,0) {xv6 参照};
+            \end{tikzpicture}\par
             \srcnote{对照教学内核 xv6-riscv（全表 23 个）：A20OS Linux 兼容面约为其 \high{15.7 倍}；Native 以 139 入口表达同一功能面。}
         \end{column}
     \end{columns}
