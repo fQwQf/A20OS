@@ -838,12 +838,12 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
          * pages independently in every parallel compiler process. */
         int executable = (vma->pte_flags & PTE_X) != 0;
 #ifdef CONFIG_LOONGARCH64
-        /* LoongArch64 cannot yet retain executable page-cache leaves safely
-         * across the parallel loader/fault lifetime.  Keep executable text on
-         * the proven single-page anonymous-copy path; otherwise rustfmt/rustc
-         * lose deterministic librustc_driver text PTEs during parallel-build. */
-        int fault_around = !shared &&
-                           !(vma->pte_flags & (PTE_W | PTE_X));
+        /* LoongArch64 cannot yet retain private page-cache leaves safely
+         * across the parallel loader/fault lifetime.  Keep private file pages
+         * on the proven single-page copy path; direct executable leaves lose
+         * text PTEs, while direct read-only leaves corrupt dynamic symbols in
+         * librustc_driver under parallel-build. */
+        int fault_around = 0;
 #else
         int fault_around = !shared && !(vma->pte_flags & PTE_W);
 #endif
