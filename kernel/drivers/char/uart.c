@@ -14,6 +14,10 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 
+#ifndef UART_POLL_INTERVAL_TICKS
+#define UART_POLL_INTERVAL_TICKS (TICKS_PER_SEC / 20)
+#endif
+
 // 接收缓冲区大小
 #define RX_BUF_SIZE 256
 
@@ -163,6 +167,13 @@ int uart_getc(void) {
             continue;
         }
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+        /* The board's UART IRQ route and timer trap are not available yet.
+         * Keep the foreground shell runnable and poll the 16550 directly. */
+        cpu_relax();
+        continue;
+#endif
+
         task_t *cur = proc_current();
         if (!cur) {
             arch_local_irq_enable();
@@ -178,8 +189,7 @@ int uart_getc(void) {
             uart_rx_push((char)c);
             continue;
         }
-        uint64_t deadline =
-            timer_get_ticks() + (TICKS_PER_SEC / 20);
+        uint64_t deadline = timer_get_ticks() + UART_POLL_INTERVAL_TICKS;
         spin_unlock_irqrestore(&rx_lock, flags);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);

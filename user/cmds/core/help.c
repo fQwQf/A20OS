@@ -1,7 +1,20 @@
 #include <stdio.h>
+#include <unistd.h>
 
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
+    if (access("/etc/a20-ramfs-shell", F_OK) == 0) {
+        printf("\033[1mA20OS RAM Shell - Available Commands\033[0m\n\n");
+        printf("\033[1mBuilt-in commands:\033[0m\n");
+        printf("  cd, echo, exit, export, history, pwd\n");
+        printf("\n\033[1mPrograms in /bin:\033[0m\n");
+        printf("  help, ls, cat, ps, sleep, timer_preempt, timer_idle, mksh\n");
+        if (access("/bin/storage_read_test", X_OK) == 0)
+            printf("  storage_read_test FILE [sample]\n");
+        printf("\n\033[1mFilesystem:\033[0m\n");
+        printf("  / is a writable RAM filesystem; reset restores it\n");
+        return 0;
+    }
     printf("\033[1mA20OS Shell — Available Commands\033[0m\n\n");
     printf("\033[1mBuilt-in commands:\033[0m\n");
     printf("  cd [dir]             Change directory\n");

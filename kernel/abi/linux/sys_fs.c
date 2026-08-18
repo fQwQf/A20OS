@@ -11,6 +11,12 @@
 #define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
 #define LINUX_POLL_ACTIVE_YIELDS 2
 
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#define LS2K_PPOLL_MARK(ch) uart_putc(ch)
+#else
+#define LS2K_PPOLL_MARK(ch) do { } while (0)
+#endif
+
 static int linux_vfile_uses_shared_offset(vfile_t *vf);
 
 static uint64_t linux_poll_wait_quantum(void)
@@ -97,6 +103,7 @@ struct linux_pollfd {
 static int linux_poll_wait_fds(void *fds, int nfds,
                                uint64_t deadline, bool has_deadline)
 {
+    LS2K_PPOLL_MARK('a');
     if (nfds < 0 || nfds > MAX_FILES)
         return -EINVAL;
     if (!fds && nfds)
@@ -107,6 +114,7 @@ static int linux_poll_wait_fds(void *fds, int nfds,
         kcalloc((size_t)nfds, sizeof(*items)) : NULL;
     if (nfds && !items)
         return -ENOMEM;
+    LS2K_PPOLL_MARK('b');
 
     for (int i = 0; i < nfds; i++) {
         struct linux_pollfd pfd;
@@ -117,11 +125,14 @@ static int linux_poll_wait_fds(void *fds, int nfds,
         items[i].fd = pfd.fd;
         items[i].events = pfd.events;
     }
+    LS2K_PPOLL_MARK('c');
 
     int result;
     do {
+        LS2K_PPOLL_MARK('d');
         result = readiness_wait_once(items, (size_t)nfds, NULL, 0, 0,
                                      deadline, has_deadline);
+        LS2K_PPOLL_MARK('e');
     } while (result == READINESS_RETRY);
 
     if (result >= 0) {
@@ -133,6 +144,7 @@ static int linux_poll_wait_fds(void *fds, int nfds,
             }
         }
     }
+    LS2K_PPOLL_MARK('f');
     kfree(items);
     return result;
 }
@@ -701,6 +713,7 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
 }
 
 int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
+    LS2K_PPOLL_MARK('p');
     if (nfds < 0) return -EINVAL;
     task_t *t = proc_current();
     signal_state_t *saved_ss = NULL;
@@ -708,6 +721,7 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     int mask_ret = linux_poll_apply_sigmask(t, sigmask, &saved_ss, &saved_blocked);
     if (mask_ret < 0)
         return mask_ret;
+    LS2K_PPOLL_MARK('q');
 #define PPOLL_RETURN(v) do { linux_poll_restore_sigmask(t, saved_ss, saved_blocked); return (v); } while (0)
 #define PPOLL_SIGNAL_RETURN(v) do { linux_poll_defer_sigmask_restore(t, saved_ss, saved_blocked); return (v); } while (0)
     if (nfds == 0) {
@@ -745,8 +759,11 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if ((ts[0] || ts[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
     }
+    LS2K_PPOLL_MARK('r');
     uint64_t deadline = timer_get_ticks() + timeout_ticks;
+    LS2K_PPOLL_MARK('s');
     int result = linux_poll_wait_fds(fds, nfds, deadline, has_timeout);
+    LS2K_PPOLL_MARK('t');
     if (result == -EINTR)
         PPOLL_SIGNAL_RETURN(-EINTR);
     PPOLL_RETURN(result);
