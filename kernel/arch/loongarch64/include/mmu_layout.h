@@ -20,9 +20,8 @@
 #define LA64_PT_ROOT_LEVEL   2
 #define LA64_PT_HAS_DIR2     0
 #define LA64_PWCL_VALUE      ((12 << 0) | (9 << 5) | \
-                              (21 << 10) | (9 << 15) | \
-                              (30 << 20) | (9 << 25))
-#define LA64_PWCH_VALUE      0
+                              (21 << 10) | (9 << 15))
+#define LA64_PWCH_VALUE      ((30 << 0) | (9 << 6))
 #endif
 
 #endif
