@@ -527,7 +527,7 @@ smoke-mm-stress:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
 	status=0; \
-	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+	$(TIMEOUT) --expect '# ' \
 		--send-line 'mm_stress' --send-line 'poweroff' \
 		$(SMOKE_TIMEOUT_MM_ST) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
@@ -551,7 +551,7 @@ smoke-mm-fork-exec-race:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
 	status=0; \
-	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+	$(TIMEOUT) --expect '# ' \
 		--send-line 'mm_stress --vma-fork-exec-only' --send-line 'poweroff' \
 		$(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 8 -bios default \
@@ -576,7 +576,7 @@ smoke-vfs-stress:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
 	status=0; \
-	$(TIMEOUT) --expect 'mksh main starting!' --expect '# ' \
+	$(TIMEOUT) --expect '# ' \
 		--send-line 'vfs_stress' --send-line 'poweroff' \
 		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \

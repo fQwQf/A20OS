@@ -1,0 +1,90 @@
+/*
+ * FIT image for direct A20OS boot on StarFive VisionFive 2 (JH7110).
+ *
+ * Boot chain: BootROM -> U-Boot SPL -> OpenSBI (fw_dynamic) -> A20OS.
+ * U-Boot proper is not involved: SPL loads this FIT, jumps to OpenSBI in
+ * M-mode, and OpenSBI enters the A20OS kernel in S-mode with
+ * a0 = hart ID, a1 = FDT pointer -- the exact protocol entry.S expects.
+ *
+ * The a20os image intentionally carries os = "U-Boot": SPL's
+ * spl_invoke_opensbi() (CONFIG_SPL_OPENSBI, without OS_BOOT) looks up the
+ * next-stage entry point by that OS name in the recorded /fit-images node.
+ *
+ * Built by tools/vf2/make-boot-image.sh; all /incbin/ paths are resolved
+ * relative to the staging directory that script creates.
+ */
+
+/dts-v1/;
+
+/ {
+	description = "A20OS kernel with OpenSBI for StarFive VisionFive 2";
+	#address-cells = <2>;
+
+	images {
+		a20os {
+			description = "A20OS kernel";
+			type = "standalone";
+			arch = "riscv";
+			os = "U-Boot";
+			compression = "none";
+			load = <0x0 0x40200000>;
+			entry = <0x0 0x40200000>;
+			data = /incbin/("kernel.bin");
+		};
+
+		opensbi {
+			description = "OpenSBI fw_dynamic Firmware";
+			type = "firmware";
+			arch = "riscv";
+			os = "opensbi";
+			compression = "none";
+			load = <0x0 0x40000000>;
+			entry = <0x0 0x40000000>;
+			data = /incbin/("fw_dynamic.bin");
+		};
+
+		fdt-v1_2a {
+			description = "starfive/jh7110-starfive-visionfive-2-v1.2a";
+			type = "flat_dt";
+			arch = "riscv";
+			compression = "none";
+			/* Explicit load address: without it SPL places the FDT right
+			 * after the kernel image (~0x4039_5000), which lies inside
+			 * A20OS's ~11 MiB BSS and would be zeroed by the entry.S
+			 * BSS clear before the kernel ever parses it.  0x46000000
+			 * matches the StarFive SDK convention. */
+			load = <0x0 0x46000000>;
+			data = /incbin/("jh7110-starfive-visionfive-2-v1.2a.dtb");
+		};
+
+		fdt-v1_3b {
+			description = "starfive/jh7110-starfive-visionfive-2-v1.3b";
+			type = "flat_dt";
+			arch = "riscv";
+			compression = "none";
+			load = <0x0 0x46000000>;
+			data = /incbin/("jh7110-starfive-visionfive-2-v1.3b.dtb");
+		};
+	};
+
+	configurations {
+		/* SPL picks the conf matching the on-board EEPROM product ID
+		 * (VF7110A -> v1.2a, VF7110B -> v1.3b); the default covers
+		 * boards whose EEPROM cannot be read. */
+		default = "conf-v1_3b";
+
+		conf-v1_2a {
+			description = "starfive/jh7110-starfive-visionfive-2-v1.2a";
+			firmware = "opensbi";
+			loadables = "a20os";
+			fdt = "fdt-v1_2a";
+		};
+
+		conf-v1_3b {
+			description = "starfive/jh7110-starfive-visionfive-2-v1.3b";
+			firmware = "opensbi";
+			loadables = "a20os";
+			fdt = "fdt-v1_3b";
+		};
+	};
+};
