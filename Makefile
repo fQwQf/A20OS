@@ -173,6 +173,10 @@ EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
 EXTRA_PACKAGES ?= vim git gcc rust lamina
+MUSL_CROSS_ROOT ?= $(firstword $(foreach root,\
+                        user/external/toolchain/musl-cross-make/output \
+                        user/build/wayland/toolchain/riscv64-linux-musl-cross,\
+                        $(if $(wildcard $(root)/bin/riscv64-linux-musl-gcc),$(root))))
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
 RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
