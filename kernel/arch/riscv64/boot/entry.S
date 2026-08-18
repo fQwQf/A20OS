@@ -134,13 +134,9 @@ _start:
     add     t3, t0, t3
     sd      t1, 0(t3)
 
-    /* Recompute the original RAM window index.  t2 was advanced past the
-     * sixteen-entry identity map above, so using it here would leave the
-     * actual higher-half kernel address unmapped. */
-    la      t6, boot_map_phys_value
-    ld      t6, 0(t6)
-    srli    t6, t6, 30
-    addi    t5, t6, 256
+    /* Mirror each current identity-map slot into the higher half.  t2 is the
+     * current RAM-window index and advances once per loop iteration. */
+    addi    t5, t2, 256
     slli    t5, t5, 3
     add     t5, t0, t5
     sd      t1, 0(t5)
@@ -220,6 +216,9 @@ _start:
     j       1b
 
 .early_hex:
+    /* This helper makes nested calls without a stack.  Preserve its caller's
+     * return address in a register that .early_putc leaves untouched. */
+    mv      a3, ra
     li      t4, 16
 2:  srli    t5, t3, 60
     slli    t3, t3, 4
@@ -232,18 +231,20 @@ _start:
     jal     ra, .early_putc
     addi    t4, t4, -1
     bnez    t4, 2b
-    ret
+    jr      a3
 
 .early_putc:
-    li      t6, 0x10000000
-    li      t4, 100000             /* bounded wait: do not hide a trap */
-5:  lbu     t5, 5(t6)              /* NS16550 LSR */
-    andi    t5, t5, 0x20           /* THR empty */
-    bnez    t5, 6f
-    addi    t4, t4, -1
-    bnez    t4, 5b
+    /* Do not clobber t0-t3 (saved trap state), or t4-t6 (the caller's hex
+     * loop state). */
+    li      a1, 0x10000000
+    li      a2, 100000             /* bounded wait: do not hide a trap */
+5:  lbu     a4, 5(a1)              /* NS16550 LSR */
+    andi    a4, a4, 0x20           /* THR empty */
+    bnez    a4, 6f
+    addi    a2, a2, -1
+    bnez    a2, 5b
 6:
-    sb      a0, 0(t6)
+    sb      a0, 0(a1)
     ret
 #else
     la      t0, .Lhh_entry
