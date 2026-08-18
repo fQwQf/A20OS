@@ -148,6 +148,7 @@ int main(void)
     int final_benchmark =
         (access("/a20/etc/release-eval-group", F_OK) == 0 ||
          access("/bin/etc/release-eval-group", F_OK) == 0);
+    int ramfs_shell = (access("/etc/a20-ramfs-shell", F_OK) == 0);
 
     if (external_benchmark && final_benchmark) {
         printf("[init] conflicting benchmark entry markers\n");
@@ -162,12 +163,14 @@ int main(void)
      * the bootstrap init remains available when recovery or mounting fails.
      * Keep the original setup for interactive and legacy benchmark images.
      */
-    if (!final_benchmark)
+    if (!final_benchmark && !ramfs_shell)
         setup_runtime_links();
 
     xmkdir("/tmp");
     xmkdir("/tmp/sysinfo");
-    write_file("/tmp/sysinfo/model", "A20OS Virtual Machine\n", 0644);
+    write_file("/tmp/sysinfo/model",
+               ramfs_shell ? "A20OS RAM-only shell\n" :
+                             "A20OS Virtual Machine\n", 0644);
 
     char path_val[512];
     if (final_benchmark)
@@ -273,7 +276,7 @@ int main(void)
         }
     }
 
-    if (!final_benchmark) {
+    if (!final_benchmark && !ramfs_shell) {
         telnet_pid = fork();
         if (telnet_pid == 0) {
             char *telnet_argv[] = { "telnetd", "2323", NULL };
