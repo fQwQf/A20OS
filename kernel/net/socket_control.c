@@ -673,7 +673,8 @@ int net_poll_file(vfile_t *vf, short events)
         if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
             if (s->peer_closed || ch_pc)
                 revents |= POLLERR;
-            else if (s->type == SOCK_STREAM && s->connected && !s->peer)
+            else if ((s->domain == AF_UNIX || s->local_tcp) &&
+                     s->type == SOCK_STREAM && s->connected && !s->peer)
                 revents |= POLLERR;
             else if (ch_wr || s->rx_count < NET_MAX_QUEUE)
                 revents |= POLLOUT;
@@ -692,7 +693,10 @@ int net_poll_file(vfile_t *vf, short events)
     if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
         if (s->peer_closed)
             revents |= POLLERR;
-        else if (s->type == SOCK_STREAM && s->connected && !s->peer)
+        else if (s->tcp_connecting)
+            revents |= 0;
+        else if ((s->domain == AF_UNIX || s->local_tcp) &&
+                 s->type == SOCK_STREAM && s->connected && !s->peer)
             revents |= POLLERR;
         else if (s->peer && s->type == SOCK_STREAM && s->peer->rx_count >= NET_MAX_QUEUE)
             revents |= 0;

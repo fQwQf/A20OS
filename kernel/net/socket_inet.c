@@ -478,6 +478,9 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
             drain |= NET_BH_DRAIN_READ;
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
     }
 
     if (__atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE)) {
@@ -794,10 +797,6 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         s->connected = 0;
         return -ECONNREFUSED;
     }
-    if (s->nonblock) {
-        s->connected = 0;
-        return -EINPROGRESS;
-    }
     s->tcp_connecting = 1;
     s->tcp_err = ERR_INPROGRESS;
     uint64_t lwip_flags = a20_lwip_lock();
@@ -807,6 +806,8 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         s->tcp_connecting = 0;
         return -ENETUNREACH;
     }
+    if (s->nonblock)
+        return -EINPROGRESS;
 
     uint64_t timeout = s->send_timeout_ticks ? s->send_timeout_ticks : NET_CONNECT_TIMEOUT_TICKS;
     uint64_t deadline = timer_get_ticks() + timeout;
