@@ -156,7 +156,10 @@ STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
 GUI_FAT32_IMAGE_MB ?= 512
 EXT4_IMAGE_MB ?= 128
-EXTRA_IMAGE_MB ?= 1280
+# The complete RISC-V extra set (Rust + native GCC + Git/Vim) needs more than
+# the historical 1 GiB image.  Keep two GiB as the usable default while still
+# allowing smaller package selections to override it on the command line.
+EXTRA_IMAGE_MB ?= 2048
 CA_CERT_BUNDLE ?= $(firstword $(wildcard /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem))
 WAYLAND_GUI_ARCHES := riscv64 loongarch64 aarch64 x86_64
 WAYLAND_GUI ?= $(if $(filter $(ARCH),$(WAYLAND_GUI_ARCHES)),1,0)
@@ -173,7 +176,7 @@ GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
-EXTRA_PACKAGES ?= vim git gcc rust lamina
+EXTRA_PACKAGES ?= vim git gcc
 MUSL_CROSS_ROOT ?= $(firstword $(foreach root,\
                         user/external/toolchain/musl-cross-make/output \
                         user/build/wayland/toolchain/riscv64-linux-musl-cross,\
