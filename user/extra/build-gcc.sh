@@ -15,7 +15,21 @@ INSTALL_DIR="$(cd "$4" && pwd)"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 USER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-MCM="$USER_DIR/external/toolchain/musl-cross-make/output"
+MCM="${MUSL_CROSS_ROOT:-}"
+if [ -z "$MCM" ]; then
+    for candidate in \
+        "$USER_DIR/external/toolchain/musl-cross-make/output" \
+        "$USER_DIR/build/wayland/toolchain/riscv64-linux-musl-cross"; do
+        if [ -x "$candidate/bin/riscv64-linux-musl-gcc" ]; then
+            MCM="$candidate"
+            break
+        fi
+    done
+fi
+if [ ! -x "$MCM/bin/riscv64-linux-musl-gcc" ]; then
+    echo "No usable RISC-V musl cross toolchain; set MUSL_CROSS_ROOT" >&2
+    exit 1
+fi
 BINUTILS_SRC="$USER_DIR/external/toolchain/binutils"
 # Prefer musl-cross-make's composed GCC tree when supplied.  It includes the
 # in-tree GMP, MPFR, and MPC sources required for a Canadian-cross compiler.
@@ -78,7 +92,9 @@ if [ ! -f "$BINUTILS_INSTALL/usr/bin/as" ]; then
         2>&1 | tail -10
 
     echo "[GCC] Compiling binutils..."
-    make -j"$NPROC" 2>&1 | tail -10
+    # The extra image only needs compiler binaries; avoid requiring the
+    # optional host texinfo/makeinfo package while building binutils docs.
+    make MAKEINFO=true -j"$NPROC" 2>&1 | tail -10
 
     echo "[GCC] Installing binutils..."
     make DESTDIR="$BINUTILS_INSTALL" install 2>&1 | tail -5
@@ -150,7 +166,7 @@ if [ ! -f "$GCC_INSTALL/usr/bin/gcc" ]; then
     fi
 
     echo "[GCC] Compiling GCC (all-gcc only, -j$NPROC)..."
-    make -j"$NPROC" all-gcc 2>&1 | tail -10
+    make MAKEINFO=true -j"$NPROC" all-gcc 2>&1 | tail -10
 
     echo "[GCC] Installing GCC (all-gcc only)..."
     make DESTDIR="$GCC_INSTALL" install-gcc 2>&1 | tail -10

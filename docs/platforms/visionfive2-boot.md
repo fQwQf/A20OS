@@ -15,7 +15,8 @@ JH7110 BootROM
             ├─ OpenSBI fw_dynamic   load=0x40000000  (M-mode 常驻,SBI 服务)
             ├─ A20OS kernel.bin     load=0x40200000  (S-mode 入口 _start)
             └─ DTB(v1.2a / v1.3b,SPL 按板载 EEPROM 产品 ID 自动选择)
-  └─ FAT32 userspace       (SD GPT "a20os-rootfs" 分区 @32 MiB,挂载到 /bin)
+  ├─ FAT32 userspace       (SD GPT "a20os-rootfs" 分区 @32 MiB,挂载到 /bin)
+  └─ extra ext4 packages   (SD GPT "a20os-extra",挂载到 /test)
 ```
 
 关键点:
@@ -41,8 +42,16 @@ JH7110 BootROM
 #    可用 OPENSBI_REF/UBOOT_REF 覆盖;工作树在 /tmp/vf2-firmware,增量构建)
 make vf2-firmware
 
-# 2. 内核 + 打包:构建 BOARD=visionfive2 内核并生成 FIT 与 SD 卡裸镜像
+# 2. 内核 + 额外用户态 + 打包:生成 FIT、FAT32 根文件系统和 extra ext4 分区
 make vf2-image
+
+# 只准备 extra 所需源码（GitHub 默认走 SSH；没有 SSH key 时加
+# VF2_GIT_TRANSPORT=https）。GCC 源码从 musl-cross-make 的校验下载规则取得。
+make vf2-extra-sources
+
+# extra/gcc 默认复用 musl-cross-make/output 中已经安装的工具链；也可以
+# 显式指定另一套兼容的 RISC-V musl 工具链根目录：
+MUSL_CROSS_ROOT=/path/to/riscv64-linux-musl-cross make vf2-image
 ```
 
 产物(`build/vf2-firmware/`,不入库):
@@ -51,7 +60,7 @@ make vf2-image
 |---|---|
 | `u-boot-spl.bin.normal.out` | SPL(带 StarFive 头+CRC),flash 0x0 / SD spl 分区 |
 | `a20os.itb` | OpenSBI+A20OS+DTB 的 FIT,flash 0x100000 / SD uboot 分区 |
-| `a20os-sd.img` | 完整 SD 卡裸镜像(GPT 三分区,含 FAT32 userspace),可直接 dd 到 TF 卡 |
+| `a20os-sd.img` | 完整 SD 卡裸镜像(GPT 四分区,含 FAT32 userspace 和 extra ext4),可直接 dd 到 TF 卡 |
 | `u-boot.itb` | OpenSBI+U-Boot proper 的 FIT,救援/开发用 U-Boot 控制台 |
 | `fw_dynamic.bin`、`*.dtb`、`mkimage`、`dtc` | 中间产物与打包工具 |
 
@@ -137,7 +146,7 @@ Flash 布局(JH7110 约定,`u-boot,spl-payload-offset = <0x100000>`):
 
 ## 当前状态
 
-- 启动链固件、FIT、三分区 SD 镜像及 FAT32 userspace 已在 VisionFive 2
+- 启动链固件、FIT、四分区 SD 镜像及 FAT32/extra userspace 已在 VisionFive 2
   真机验证;系统可从 TF 卡完成启动并进入串口 mksh。
 - GMAC IRQ 线号(78)与 SYS_CRG 寄存器偏移沿用 RocketOS 记录,首次上板
   需按 JH7110 文档/实测核对,见 physical-boards.md。
