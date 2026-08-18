@@ -1,56 +1,94 @@
 # ----------------------------------------------------------------
-# Local evaluation: make eval-rv / make eval-la / make eval
+# Preliminary-round local evaluation.
+#
+# `make all` remains the final-round submission build.  The preliminary build
+# entry is `make preliminary-all`, while the targets below run those exact
+# preliminary artifacts with the device order published for the preliminary
+# platform: the writable test filesystem is x0 and A20OS's auxiliary FAT image
+# is x1.  Keep the downloaded base read-only and copy it to a per-run raw image
+# so the QEMU command still matches the platform without modifying the base.
 # ----------------------------------------------------------------
-.PHONY: eval-check eval-check-rv eval-check-la \
+.PHONY: preliminary-eval preliminary-eval-rv preliminary-eval-la \
+	eval eval-all eval-rv eval-la eval-dev-build-rv eval-dev-build-la \
+	eval-check eval-check-rv eval-check-la \
 	final-stage4-rv-buildstorm-1c final-stage4-rv-buildstorm-8c \
 	final-stage4-la-buildstorm-1c final-stage4-la-buildstorm-8c \
 	final-stage5-rv-buildstorm final-stage5-la-buildstorm \
 	final-stage8-rv-nested-qemu final-stage8-la-nested-qemu
 
-EVAL_DIR   := .eval-state
-EVAL_LOGS  := $(EVAL_DIR)/logs
+EVAL_DIR := .eval-state
+EVAL_LOGS := $(EVAL_DIR)/logs
 EVAL_TIMEOUT ?= 36000
+PRELIMINARY_EVAL_MEMORY ?= 1G
+PRELIMINARY_EVAL_SMP ?= 1
+PRELIMINARY_EVAL_IMAGE_DIR ?= /tmp/a20os-preliminary-images
+PRELIMINARY_EVAL_WORK_ROOT ?= /tmp/a20os-preliminary-runs
+PRELIMINARY_QEMU_VERSION ?= 9.2.1
 
 SDCARD_RV_URL := https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-rv.img.xz
 SDCARD_LA_URL := https://github.com/oscomp/testsuits-for-oskernel/releases/download/pre-20250615/sdcard-la.img.xz
+PRELIMINARY_SDCARD_RV := $(PRELIMINARY_EVAL_IMAGE_DIR)/sdcard-rv.img
+PRELIMINARY_SDCARD_LA := $(PRELIMINARY_EVAL_IMAGE_DIR)/sdcard-la.img
 
-$(EVAL_DIR) $(EVAL_LOGS):
+$(EVAL_DIR) $(EVAL_LOGS) $(PRELIMINARY_EVAL_IMAGE_DIR) $(PRELIMINARY_EVAL_WORK_ROOT):
 	mkdir -p $@
 
-# --- sdcard images (download if missing, prefer project-root copy) ---
-$(EVAL_DIR)/sdcard-rv.img: | $(EVAL_DIR)
-	@if [ -f sdcard-rv.img ]; then \
-		ln -sf "$$(pwd)/sdcard-rv.img" $@; \
-	elif [ -f $@ ]; then \
-		echo "[eval] reusing cached sdcard-rv.img"; \
-	else \
-		echo "[eval] downloading sdcard-rv.img ..."; \
-		if command -v curl >/dev/null 2>&1; then \
-			curl -fL --retry 3 -o $(EVAL_DIR)/sdcard-rv.img.xz $(SDCARD_RV_URL); \
-		elif command -v wget >/dev/null 2>&1; then \
-			wget -q -O $(EVAL_DIR)/sdcard-rv.img.xz $(SDCARD_RV_URL); \
+# --- Official preliminary test images ---------------------------------------
+# A project-root image is accepted only when it is a real image.  This avoids
+# treating Windows interix-link placeholders (roughly 100 bytes) as disks.
+$(PRELIMINARY_SDCARD_RV): | $(PRELIMINARY_EVAL_IMAGE_DIR)
+	@set -e; \
+		tmp="$@.tmp"; archive="$@.xz"; archive_tmp="$@.xz.tmp"; \
+		rm -f "$$tmp" "$$archive_tmp"; \
+		if [ -f sdcard-rv.img ] && [ "$$(stat -c %s sdcard-rv.img)" -gt 1048576 ]; then \
+			echo "[preliminary-eval] copying project-root sdcard-rv.img"; \
+			cp --reflink=auto sdcard-rv.img "$$tmp"; \
 		else \
-			echo "[eval] curl or wget is required"; exit 1; \
+			if [ ! -f "$$archive" ]; then \
+				echo "[preliminary-eval] downloading sdcard-rv.img.xz"; \
+				if command -v curl >/dev/null 2>&1; then \
+					curl -fL --retry 3 -o "$$archive_tmp" $(SDCARD_RV_URL); \
+				elif command -v wget >/dev/null 2>&1; then \
+					wget -q -O "$$archive_tmp" $(SDCARD_RV_URL); \
+				else \
+					echo "[preliminary-eval] curl or wget is required" >&2; exit 1; \
+				fi; \
+				xz -t "$$archive_tmp"; \
+				mv "$$archive_tmp" "$$archive"; \
+			fi; \
+			xz -t "$$archive"; \
+			xz -dc "$$archive" > "$$tmp"; \
 		fi; \
-		xz -dc $(EVAL_DIR)/sdcard-rv.img.xz > $@; \
-	fi
+		test "$$(stat -c %s "$$tmp")" -gt 1048576; \
+		chmod 0444 "$$tmp"; \
+		mv "$$tmp" $@
 
-$(EVAL_DIR)/sdcard-la.img: | $(EVAL_DIR)
-	@if [ -f sdcard-la.img ]; then \
-		ln -sf "$$(pwd)/sdcard-la.img" $@; \
-	elif [ -f $@ ]; then \
-		echo "[eval] reusing cached sdcard-la.img"; \
-	else \
-		echo "[eval] downloading sdcard-la.img ..."; \
-		if command -v curl >/dev/null 2>&1; then \
-			curl -fL --retry 3 -o $(EVAL_DIR)/sdcard-la.img.xz $(SDCARD_LA_URL); \
-		elif command -v wget >/dev/null 2>&1; then \
-			wget -q -O $(EVAL_DIR)/sdcard-la.img.xz $(SDCARD_LA_URL); \
+$(PRELIMINARY_SDCARD_LA): | $(PRELIMINARY_EVAL_IMAGE_DIR)
+	@set -e; \
+		tmp="$@.tmp"; archive="$@.xz"; archive_tmp="$@.xz.tmp"; \
+		rm -f "$$tmp" "$$archive_tmp"; \
+		if [ -f sdcard-la.img ] && [ "$$(stat -c %s sdcard-la.img)" -gt 1048576 ]; then \
+			echo "[preliminary-eval] copying project-root sdcard-la.img"; \
+			cp --reflink=auto sdcard-la.img "$$tmp"; \
 		else \
-			echo "[eval] curl or wget is required"; exit 1; \
+			if [ ! -f "$$archive" ]; then \
+				echo "[preliminary-eval] downloading sdcard-la.img.xz"; \
+				if command -v curl >/dev/null 2>&1; then \
+					curl -fL --retry 3 -o "$$archive_tmp" $(SDCARD_LA_URL); \
+				elif command -v wget >/dev/null 2>&1; then \
+					wget -q -O "$$archive_tmp" $(SDCARD_LA_URL); \
+				else \
+					echo "[preliminary-eval] curl or wget is required" >&2; exit 1; \
+				fi; \
+				xz -t "$$archive_tmp"; \
+				mv "$$archive_tmp" "$$archive"; \
+			fi; \
+			xz -t "$$archive"; \
+			xz -dc "$$archive" > "$$tmp"; \
 		fi; \
-		xz -dc $(EVAL_DIR)/sdcard-la.img.xz > $@; \
-	fi
+		test "$$(stat -c %s "$$tmp")" -gt 1048576; \
+		chmod 0444 "$$tmp"; \
+		mv "$$tmp" $@
 
 # --- eval dev-build targets (match run-*, add contest-mode + 128 MB) ---
 EVAL_KERNEL_RV  = .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf
@@ -70,53 +108,82 @@ eval-dev-build-la:
 	$(MAKE) ARCH=loongarch64 FAT32_IMAGE_MB=128 USER_BUILD_DESKTOP=0 dev-build
 	@printf 'auto\n' | mcopy -o -i $(EVAL_FAT32_LA) - ::/etc/contest-mode
 
-# --- QEMU launch ---
-define RUN_QEMU_RV
-	$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
-	qemu-system-riscv64 -machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-kernel $(EVAL_KERNEL_RV) \
-		-drive 'file=$(EVAL_FAT32_RV),if=none,format=raw,id=x0' \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(EVAL_NETDEV_RV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-drive 'file=$(EVAL_DIR)/sdcard-rv.img,if=none,format=raw,id=x1' \
-		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.3 \
-		-no-reboot \
-	2>&1 | tee $(EVAL_LOGS)/serial-rv.txt || true
+# --- QEMU launch ------------------------------------------------------------
+# The published LoongArch command assigns virtio-pci devices to
+# virtio-mmio-bus.*.  QEMU rejects that mixed-bus combination, so let PCI
+# assign slots automatically while retaining the official x0/x1 drive order.
+define RUN_PRELIMINARY_QEMU_RV
+	@set -eu; \
+		actual_version="$$(qemu-system-riscv64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')"; \
+		if [ "$$actual_version" != "$(PRELIMINARY_QEMU_VERSION)" ]; then \
+			echo "[preliminary-eval][rv] warning: QEMU $$actual_version, platform uses $(PRELIMINARY_QEMU_VERSION)"; \
+		fi; \
+		run_dir="$$(mktemp -d '$(PRELIMINARY_EVAL_WORK_ROOT)/riscv64.XXXXXX')"; \
+		trap 'rm -rf -- "$$run_dir"' EXIT INT TERM; \
+		cp --reflink=auto $(PRELIMINARY_SDCARD_RV) "$$run_dir/fs.img"; \
+		chmod 0644 "$$run_dir/fs.img"; \
+		cp --reflink=auto disk.img "$$run_dir/disk.img"; \
+		echo "[preliminary-eval][rv] fs=x0 disk.img=x1 raw timeout=$(EVAL_TIMEOUT)s"; \
+		$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
+		qemu-system-riscv64 -machine virt -kernel kernel-rv \
+			-m $(PRELIMINARY_EVAL_MEMORY) -nographic -smp $(PRELIMINARY_EVAL_SMP) -bios default \
+			-drive "file=$$run_dir/fs.img,if=none,format=raw,id=x0" \
+			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			-no-reboot -device virtio-net-device,netdev=net -netdev user,id=net \
+			-rtc base=utc \
+			-drive "file=$$run_dir/disk.img,if=none,format=raw,id=x1" \
+			-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		2>&1 | tee $(EVAL_LOGS)/serial-rv.txt
 endef
 
-define RUN_QEMU_LA
-	$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
-	qemu-system-loongarch64 -machine virt -m 1G -nographic -smp 1 \
-		-kernel $(EVAL_KERNEL_LA) \
-		-drive 'file=$(EVAL_FAT32_LA),if=none,format=raw,id=x0' \
-		-device virtio-blk-pci,drive=x0 \
-		$(EVAL_NETDEV_LA) -device virtio-net-pci,netdev=net \
-		-drive 'file=$(EVAL_DIR)/sdcard-la.img,if=none,format=raw,id=x1' \
-		-device virtio-blk-pci,drive=x1 \
-		-no-reboot \
-	2>&1 | tee $(EVAL_LOGS)/serial-la.txt || true
+define RUN_PRELIMINARY_QEMU_LA
+	@set -eu; \
+		actual_version="$$(qemu-system-loongarch64 --version | sed -n '1s/.*version \([^ ]*\).*/\1/p')"; \
+		if [ "$$actual_version" != "$(PRELIMINARY_QEMU_VERSION)" ]; then \
+			echo "[preliminary-eval][la] warning: QEMU $$actual_version, platform uses $(PRELIMINARY_QEMU_VERSION)"; \
+		fi; \
+		run_dir="$$(mktemp -d '$(PRELIMINARY_EVAL_WORK_ROOT)/loongarch64.XXXXXX')"; \
+		trap 'rm -rf -- "$$run_dir"' EXIT INT TERM; \
+		cp --reflink=auto $(PRELIMINARY_SDCARD_LA) "$$run_dir/fs.img"; \
+		chmod 0644 "$$run_dir/fs.img"; \
+		cp --reflink=auto disk-la.img "$$run_dir/disk-la.img"; \
+		echo "[preliminary-eval][la] fs=x0 disk-la.img=x1 raw timeout=$(EVAL_TIMEOUT)s"; \
+		$(TIMEOUT) --foreground $(EVAL_TIMEOUT) \
+		qemu-system-loongarch64 -kernel kernel-la \
+			-m $(PRELIMINARY_EVAL_MEMORY) -nographic -smp $(PRELIMINARY_EVAL_SMP) \
+			-drive "file=$$run_dir/fs.img,if=none,format=raw,id=x0" \
+			-device virtio-blk-pci,drive=x0 \
+			-no-reboot -device virtio-net-pci,netdev=net0 \
+			-netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555 \
+			-rtc base=utc \
+			-drive "file=$$run_dir/disk-la.img,if=none,format=raw,id=x1" \
+			-device virtio-blk-pci,drive=x1 \
+		2>&1 | tee $(EVAL_LOGS)/serial-la.txt
 endef
 
-# --- Top-level eval targets ---
-eval-rv: eval-dev-build-rv $(EVAL_DIR)/sdcard-rv.img | $(EVAL_LOGS)
-	@echo "[eval] launching RISC-V QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
-	$(RUN_QEMU_RV)
+# --- Top-level preliminary evaluation targets -------------------------------
+preliminary-eval-rv: contest-rv $(PRELIMINARY_SDCARD_RV) | $(EVAL_LOGS) $(PRELIMINARY_EVAL_WORK_ROOT)
+	@echo "[preliminary-eval] launching RISC-V QEMU"
+	$(RUN_PRELIMINARY_QEMU_RV)
 	$(MAKE) eval-check-rv
 
-eval-la: eval-dev-build-la $(EVAL_DIR)/sdcard-la.img | $(EVAL_LOGS)
-	@echo "[eval] launching LoongArch QEMU (timeout=$(EVAL_TIMEOUT)s) ..."
-	$(RUN_QEMU_LA)
+preliminary-eval-la: contest-la $(PRELIMINARY_SDCARD_LA) | $(EVAL_LOGS) $(PRELIMINARY_EVAL_WORK_ROOT)
+	@echo "[preliminary-eval] launching LoongArch QEMU"
+	$(RUN_PRELIMINARY_QEMU_LA)
 	$(MAKE) eval-check-la
 
-eval:
+preliminary-eval:
 	@set -e; for target in $(DEFAULT_EVAL_TARGETS); do $(MAKE) $$target; done
-	@echo "[eval] complete"
+	@echo "[preliminary-eval] complete"
+
+eval-rv: preliminary-eval-rv
+eval-la: preliminary-eval-la
+eval: preliminary-eval
 
 eval-all:
-	$(MAKE) eval-rv
-	$(MAKE) eval-la
-	@echo "[eval] full architecture evaluation complete"
+	$(MAKE) preliminary-eval-rv
+	$(MAKE) preliminary-eval-la
+	@echo "[preliminary-eval] full architecture evaluation complete"
 
 eval-check-rv:
 	@log="$(EVAL_LOGS)/serial-rv.txt"; \
