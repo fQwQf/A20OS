@@ -6,7 +6,14 @@
 #include "fs/vfs.h"
 #include "mm/frame.h"
 
+#ifdef CONFIG_LOONGARCH64
+/* Large LoongArch rustc processes map roughly 340 MiB each.  Direct text
+ * sharing keeps physical use bounded, but the compiler working set can exceed
+ * the generic 1 GiB descriptor ceiling before exited workers are reaped. */
+#define PAGE_CACHE_MAX_PAGES   524288
+#else
 #define PAGE_CACHE_MAX_PAGES   262144
+#endif
 #define PAGE_CACHE_INITIAL_PAGES 2048
 #define PAGE_CACHE_CHUNK_PAGES 1024
 #define PAGE_CACHE_HASH_BUCKETS 262144
