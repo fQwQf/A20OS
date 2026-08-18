@@ -25,4 +25,8 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype);
  * path.  Compiled in every profile; BRINGUP builds return NULL (no devices). */
 block_dev_t *mount_setup_block_device(int index);
 
+/* Probe DOS/MBR storage and mount its first Linux partition read-only at
+ * /test.  Intended for explicitly selected RAM-only board experiments. */
+void mount_read_only_storage(void);
+
 #endif /* _MOUNT_SETUP_H */

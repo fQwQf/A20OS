@@ -192,9 +192,33 @@ void loongarch64_memory_init(void)
         return;
     }
 
-    memcpy(ram_ranges, discovered,
-           discovered_count * sizeof(discovered[0]));
-    ram_range_count = discovered_count;
+    /* Firmware describes installed RAM, while the board window describes RAM
+     * the kernel is allowed to own.  Intersect the two so reserved firmware,
+     * framebuffer, and recovery regions can never enter the allocator. */
+    la_ram_range_t usable[LA_RAM_RANGES];
+    size_t usable_count = 0;
+    paddr_t window_base = current_board ? current_board->ram_base
+                                        : PHYS_MEMORY_BASE;
+    paddr_t window_end = current_board ? current_board->ram_end
+                                       : PHYS_MEMORY_END;
+    for (size_t i = 0; i < discovered_count; i++) {
+        paddr_t base = discovered[i].base > window_base
+                           ? discovered[i].base : window_base;
+        paddr_t end = discovered[i].end < window_end
+                          ? discovered[i].end : window_end;
+        if (end > base) {
+            usable[usable_count].base = base;
+            usable[usable_count].end = end;
+            usable_count++;
+        }
+    }
+    if (!usable_count) {
+        printf("[FDT] RAM does not overlap board window, using fallback\n");
+        return;
+    }
+
+    memcpy(ram_ranges, usable, usable_count * sizeof(usable[0]));
+    ram_range_count = usable_count;
 
     uint64_t total = 0;
     for (size_t i = 0; i < ram_range_count; i++) {

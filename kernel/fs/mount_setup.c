@@ -23,12 +23,13 @@
  *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  */
 
-#ifndef BRINGUP
+#if !defined(BRINGUP) || defined(CONFIG_STORAGE_READ_ONLY)
 typedef struct {
     block_dev_t block;
     block_dev_t *parent;
     uint64_t first_lba;
     uint64_t sectors;
+    int read_only;
 } partition_block_dev_t;
 
 static int partition_read_sector(block_dev_t *block, uint64_t lba, void *buf,
@@ -46,6 +47,8 @@ static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *
     if (!part || !part->parent || lba > part->sectors ||
         count > part->sectors - lba)
         return -1;
+    if (part->read_only)
+        return -EROFS;
     return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
 }
 
@@ -136,12 +139,72 @@ static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
     partition->parent = parent;
     partition->first_lba = first;
     partition->sectors = last - first + 1;
+    partition->read_only = 0;
     partition->block.read_sector = partition_read_sector;
     partition->block.write_sector = partition_write_sector;
     partition->block.capacity = partition->sectors;
     partition->block.sector_size = parent->sector_size;
     partition->block.priv = partition;
     return &partition->block;
+}
+
+static uint32_t read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static block_dev_t *first_mbr_linux_partition(block_dev_t *parent,
+                                               uint64_t *first_lba,
+                                               uint64_t *sectors) {
+    static partition_block_dev_t partition;
+    uint8_t mbr[512];
+    if (!parent || !parent->read_sector || parent->sector_size != 512 ||
+        parent->read_sector(parent, 0, mbr, 1) != 0) {
+        printf("[STORAGE-RO] failed to read MBR sector\n");
+        return NULL;
+    }
+    if (mbr[510] != 0x55 || mbr[511] != 0xaa) {
+        printf("[STORAGE-RO] MBR signature missing\n");
+        return NULL;
+    }
+
+    printf("[STORAGE-RO] MBR signature 55aa verified\n");
+    for (unsigned i = 0; i < 4; i++) {
+        const uint8_t *entry = mbr + 446 + i * 16;
+        uint8_t type = entry[4];
+        uint64_t first = read_le32(entry + 8);
+        uint64_t count = read_le32(entry + 12);
+        if (!type || !count)
+            continue;
+        printf("[STORAGE-RO] MBR partition %u type=%x start=%lu sectors=%lu\n",
+               i + 1, type, (unsigned long)first, (unsigned long)count);
+        if (type != 0x83)
+            continue;
+        if (!first || first >= parent->capacity ||
+            count > parent->capacity - first) {
+            printf("[STORAGE-RO] Linux partition %u exceeds disk bounds\n",
+                   i + 1);
+            return NULL;
+        }
+
+        memset(&partition, 0, sizeof(partition));
+        partition.parent = parent;
+        partition.first_lba = first;
+        partition.sectors = count;
+        partition.read_only = 1;
+        partition.block.read_sector = partition_read_sector;
+        partition.block.write_sector = partition_write_sector;
+        partition.block.capacity = count;
+        partition.block.sector_size = parent->sector_size;
+        partition.block.priv = &partition;
+        if (first_lba)
+            *first_lba = first;
+        if (sectors)
+            *sectors = count;
+        return &partition.block;
+    }
+    printf("[STORAGE-RO] no primary Linux partition found\n");
+    return NULL;
 }
 
 int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
@@ -160,6 +223,49 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
         bcache_destroy(bc);
     }
     return r;
+}
+
+static int try_mount_read_only(block_dev_t *dev, const char *mnt,
+                               const char *fstype) {
+    if (!dev)
+        return -ENODEV;
+    bcache_t *bc = bcache_create(dev);
+    if (!bc)
+        return -ENOMEM;
+    int mkret = vfs_mkdir(mnt, 0755);
+    if (mkret < 0 && mkret != -EEXIST) {
+        bcache_destroy(bc);
+        return mkret;
+    }
+    int ret = vfs_mount_bc_flags(mnt, fstype, bc, VFS_MOUNT_RDONLY);
+    if (ret < 0) {
+        bcache_destroy(bc);
+        return ret;
+    }
+    printf("[STORAGE-RO] mounted %s read-only at %s\n", fstype, mnt);
+    return 0;
+}
+
+void mount_read_only_storage(void) {
+    printf("[STORAGE-RO] scanning block devices; writes are disabled\n");
+    for (int i = 0; i < 16; i++) {
+        block_dev_t *disk = mount_setup_block_device(i);
+        if (!disk)
+            continue;
+        printf("[STORAGE-RO] disk %d capacity=%lu sectors sector_size=%u\n",
+               i, (unsigned long)disk->capacity, disk->sector_size);
+        uint64_t first = 0, sectors = 0;
+        block_dev_t *part = first_mbr_linux_partition(disk, &first, &sectors);
+        if (!part)
+            continue;
+        printf("[STORAGE-RO] selected Linux partition start=%lu sectors=%lu\n",
+               (unsigned long)first, (unsigned long)sectors);
+        int ret = try_mount_read_only(part, "/test", "ext4");
+        if (ret == 0)
+            return;
+        printf("[STORAGE-RO] ext4 mount refused or failed: %d\n", ret);
+    }
+    printf("[STORAGE-RO] no clean ext4 partition mounted; RAM shell continues\n");
 }
 
 static void mount_final_root_pseudo_filesystems(void) {
@@ -246,7 +352,7 @@ void mount_block_devices(void) {
         mount_final_root_pseudo_filesystems();
     }
 }
-#else /* BRINGUP */
+#else /* BRINGUP without explicit storage experiment */
 
 /* No block devices exist in BRINGUP builds; keep the class lookup linkable
  * for vfs_mount(/dev/vd*) and the swap path. */
@@ -256,4 +362,9 @@ block_dev_t *mount_setup_block_device(int index)
     return NULL;
 }
 
-#endif /* BRINGUP */
+void mount_read_only_storage(void)
+{
+    printf("[INIT] read-only storage experiment is not enabled\n");
+}
+
+#endif /* !BRINGUP || CONFIG_STORAGE_READ_ONLY */

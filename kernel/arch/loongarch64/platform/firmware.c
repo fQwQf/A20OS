@@ -33,7 +33,9 @@ void firmware_set_timer(uint64_t time) {
 
 void firmware_shutdown(void) {
     arch_local_irq_disable();
+#ifndef CONFIG_BOARD_LS2K1000
     qemu_virt_poweroff();
+#endif
     while (1) {
         __asm__ __volatile__("idle 0");
     }
@@ -41,7 +43,9 @@ void firmware_shutdown(void) {
 
 void firmware_reboot(void) {
     arch_local_irq_disable();
+#ifndef CONFIG_BOARD_LS2K1000
     qemu_virt_reset();
+#endif
     while (1) {
         __asm__ __volatile__("idle 0");
     }
