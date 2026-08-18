@@ -34,6 +34,22 @@
 }
 \lstset{escapechar=@, style=a20c}
 
+% 截图占位：figures/<name> 存在则用真图，否则显示占位框
+\newcommand{\shotslot}[2]{%
+    \begin{tcolorbox}[colback=white, colframe=a20navy!30, arc=1mm, boxrule=0.6pt,
+                      left=1pt, right=1pt, top=1pt, bottom=1pt]
+        \IfFileExists{figures/#1}{%
+            \includegraphics[width=\linewidth]{#1}%
+        }{%
+            \begin{minipage}[c][0.19\paperheight][c]{\linewidth}
+                \centering\color{a20gray}\scriptsize
+                预留截图位\\[0.4em]\ttfamily\footnotesize #1
+            \end{minipage}%
+        }%
+    \end{tcolorbox}
+    \vspace{0.1em}
+    {\scriptsize\color{a20gray}#2\par}}
+
 \begin{document}
 
 \begin{frame}[plain]
@@ -259,33 +275,37 @@
     \end{columns}
 \end{frame}
 
-\begin{frame}{跨平台硬件矩阵：一套代码，八种指令集}
+\begin{frame}{跨平台能力矩阵：一套代码，八种指令集}
     \begin{columns}[t]
-        \begin{column}{0.5\textwidth}
-            \begin{block}{QEMU 虚拟平台（8 个 ISA）}
-                \begin{itemize}
-                    \item \high{RISC-V 64} / \high{LoongArch 64}（决赛双架构）
-                    \item ARM64 / x86\_64 / ARM32 / RISC-V 32 / PPC64LE
-                    \item ARMv7-M（STM32 模拟，NOMMU）
-                    \item riscv64 / aarch64 / loongarch64 / x86\_64 SMP 已验证
-                \end{itemize}
-            \end{block}
+        \begin{column}{0.58\textwidth}
+            \begin{table}
+                \centering
+                \scriptsize
+                \renewcommand{\arraystretch}{1.18}
+                \begin{tabular}{lcccc}
+                    \toprule
+                    \textbf{架构} & \textbf{SMP} & \textbf{NOMMU} & \textbf{GUI} & \textbf{真机 / VM} \\
+                    \midrule
+                    \high{RISC-V 64}$\star$ & \good{\checkmark} & \good{\checkmark} & \good{\checkmark} & \good{\checkmark} 星光 2 \\
+                    \high{LoongArch 64}$\star$ & \good{\checkmark} & -- & \good{\checkmark} & \good{\checkmark} LS2K1000 \\
+                    aarch64 & \good{\checkmark} & \good{\checkmark} & \good{\checkmark} & \good{\checkmark} VirtualBox \\
+                    x86\_64 & \good{\checkmark} & -- & \good{\checkmark} & \good{\checkmark} VirtualBox \\
+                    arm32 & -- & \good{\checkmark} & \good{\checkmark} & -- \\
+                    riscv32 & -- & \good{\checkmark} & -- & -- \\
+                    ppc64le & -- & -- & -- & -- \\
+                    armv7m（MCU） & -- & \good{\checkmark}（仅） & -- & \good{\checkmark} STM32 \\
+                    \bottomrule
+                \end{tabular}
+            \end{table}
         \end{column}
-        \begin{column}{0.47\textwidth}
-            \begin{block}{真实硬件与虚拟机}
-                \begin{itemize}
-                    \item 星光 2（StarFive VisionFive 2，RISC-V）
-                    \item 龙芯 LS2K1000（LoongArch）
-                    \item 普中玄武 STM32F103ZET6（64\,KiB SRAM MCU）
-                    \item \high{VirtualBox}：x86\_64 / aarch64，UEFI + ACPI 引导
-                \end{itemize}
-            \end{block}
+        \begin{column}{0.39\textwidth}
+            \begin{a20keybox}
+                \footnotesize \high{8 个 ISA}全部可构建启动；\high{4 架构} SMP 已验证；\high{5 架构}可关 MMU 构建（\code{smoke-arch-mmu-matrix} 把关）；\high{5 架构} GUI 行为冒烟。
+            \end{a20keybox}
+            \vspace{0.3em}
+            \srcnote{$\star$ = 决赛双架构；\code{make all} 产出 \code{kernel-rv/la} 与 \code{disk(-la).img}；VirtualBox 经 UEFI + ACPI 引导。}
         \end{column}
     \end{columns}
-    \vspace{0.3em}
-    \begin{a20keybox}
-        \small NOMMU 支持：riscv64 / riscv32 / aarch64 / arm32 / armv7m 五架构可关 MMU 构建，由验证矩阵 \code{smoke-arch-mmu-matrix} 把关。决赛提交 \code{make all} 直接产出 \code{kernel-rv} / \code{kernel-la} / \code{disk.img} / \code{disk-la.img}。
-    \end{a20keybox}
 \end{frame}
 
 % ==================================================
@@ -724,10 +744,10 @@ a20_vmar_map(receiver, vmo, ...);
         \begin{column}{0.42\textwidth}
             \begin{tikzpicture}[baseline={(current bounding box.north)}]
                 \begin{axis}[
-                    ybar, bar width=26pt,
+                    ybar, bar width=17pt,
                     width=0.94\linewidth, height=3.9cm,
-                    symbolic x coords={Linux ABI, Native ABI},
-                    xtick={Linux ABI, Native ABI}, ymin=0, ymax=470,
+                    symbolic x coords={Linux ABI, Native ABI, xv6 参照},
+                    xtick={Linux ABI, Native ABI, xv6 参照}, ymin=0, ymax=470,
                     ylabel={syscall 数量}, ylabel style={font=\scriptsize},
                     ymajorgrids, major grid style={a20navy!10},
                     axis line style={draw=none}, tick style={draw=none},
@@ -737,9 +757,10 @@ a20_vmar_map(receiver, vmo, ...);
                 ]
                     \addplot[ybar, fill=a20blue, draw=none] coordinates {(Linux ABI,361)};
                     \addplot[ybar, fill=a20accent, draw=none] coordinates {(Native ABI,139)};
+                    \addplot[ybar, fill=a20gray!45, draw=none] coordinates {(xv6 参照,23)};
                 \end{axis}
             \end{tikzpicture}
-            \srcnote{同一功能面，更少入口：更小的攻击面与审计面。}
+            \srcnote{对照教学内核 xv6-riscv（全表 23 个）：A20OS Linux 兼容面约为其 \high{15.7 倍}；Native 以 139 入口表达同一功能面。}
         \end{column}
     \end{columns}
 \end{frame}
@@ -1012,6 +1033,21 @@ a20_vmar_map(receiver, vmo, ...);
     \end{columns}
 \end{frame}
 
+\begin{frame}{更多运行实拍（预留位）\framesubtitle{把对应文件名的 PNG 放进 docs/slides/figures/ 重新编译，占位框自动替换为真图}}
+    \begin{columns}[t]
+        \begin{column}{0.48\textwidth}
+            \shotslot{lvgl-desktop.png}{LVGL 自研桌面：仪表盘 / 终端 / 文件 / 网络 / 进程监控}
+            \vspace{0.15em}
+            \shotslot{virgl-3d.png}{virtio-gpu virgl 3D 加速（\code{gpu3d\_test} / glxgears）}
+        \end{column}
+        \begin{column}{0.48\textwidth}
+            \shotslot{distro-xfce.png}{Alpine 发行版 XFCE 会话（\code{make distro-run}）}
+            \vspace{0.15em}
+            \shotslot{visionfive2-real.png}{星光 2 / 龙芯 LS2K1000 真机运行}
+        \end{column}
+    \end{columns}
+\end{frame}
+
 \begin{frame}{内核 DRM 强化与 3D 图形加速}
     \begin{columns}[t]
         \begin{column}{0.5\textwidth}
@@ -1207,31 +1243,31 @@ a20_vmar_map(receiver, vmo, ...);
 
 \begin{frame}{测试门禁体系：54 项冒烟全部可复现}
     \begin{columns}[t]
-        \begin{column}{0.56\textwidth}
-            \begin{table}
-                \centering
-                \scriptsize
-                \renewcommand{\arraystretch}{1.14}
-                \begin{tabular}{ll}
-                    \toprule
-                    \textbf{测试组} & \textbf{覆盖} \\
-                    \midrule
-                    \code{smoke-abi-linux} & syscall 语义逐组验证 \\
-                    \code{smoke-syscall-ext} & keyring/AIO/io\_uring 等 \\
-                    \code{smoke-*-stress} & 8 核并发压力 × 5 组 \\
-                    \code{smoke-network-suite} & TCP/UDP/ICMP/DNS \\
-                    \code{smoke-qemu-gui-*} & 5 架构桌面行为判帧 \\
-                    \code{smoke-native-*}（16 项） & ipc/svc/registry/ubd… \\
-                    \code{check-build-matrix-all} & 七架构构建矩阵 \\
-                    \bottomrule
-                \end{tabular}
-            \end{table}
+        \begin{column}{0.55\textwidth}
+            \begin{tikzpicture}[baseline={(current bounding box.north)}]
+                \begin{axis}[
+                    a20bar, width=0.97\linewidth, height=5.6cm,
+                    enlarge y limits=0.09,
+                    symbolic y coords={网络套件, 时钟/输入, IOMMU/驱动隔离, GUI 行为判帧, Linux ABI 语义, 架构启动/矩阵, 并发与压力, Native ABI 专项},
+                    ytick=data,
+                    xmax=19,
+                    nodes near coords,
+                ]
+                    \addplot[xbar, fill=a20blue, draw=none] coordinates {
+                        (16,Native ABI 专项) (12,并发与压力) (9,架构启动/矩阵)
+                        (7,Linux ABI 语义) (5,GUI 行为判帧) (2,IOMMU/驱动隔离)
+                        (2,时钟/输入) (1,网络套件)};
+                \end{axis}
+            \end{tikzpicture}
+            \srcnote{54 项 \code{make smoke-*} 按类别分布；明细见备查 D。}
         \end{column}
-        \begin{column}{0.41\textwidth}
+        \begin{column}{0.42\textwidth}
             \statcard[0.98\linewidth]{54}{\code{make smoke-*} 行为冒烟门禁}
-            \vspace{0.35em}
+            \vspace{0.25em}
             \statcard[0.98\linewidth]{61}{项 \code{check-*} 审查 / 构建门禁}
-            \vspace{0.35em}
+            \vspace{0.25em}
+            \statcard[0.98\linewidth]{30+}{自研压力 / 语义测试工具（\code{user/cmds}）}
+            \vspace{0.25em}
             \srcnote{调度压力矩阵 \code{check-proc-step8-local}：双架构 1 核 / 8 核累计。}
         \end{column}
     \end{columns}
@@ -1361,6 +1397,31 @@ a20_vmar_map(receiver, vmo, ...);
             \end{a20keybox}
         \end{column}
     \end{columns}
+\end{frame}
+
+\begin{frame}{备查 D：54 项冒烟门禁明细}
+    \begin{table}
+        \centering
+        \scriptsize
+        \renewcommand{\arraystretch}{1.18}
+        \begin{tabular}{cll}
+            \toprule
+            \textbf{数量} & \textbf{类别} & \textbf{目标} \\
+            \midrule
+            16 & Native ABI 专项 & \code{smoke-native-\{contract,deepen,ext,futex,ipc,} \\
+               & & \code{isolation,linux,mm,registry,rtcd,shmring,svc,ubd,…\}} \\
+            12 & 并发与压力 & \code{\{mm,sched,futex,vfs,proc,procfs,pty,scm,signalfd,evdev\}-stress} 等 \\
+            9 & 架构启动 / 矩阵 & \code{smoke-<arch>} × 7 + \code{smp-bringup} + \code{arch-mmu-matrix} \\
+            7 & Linux ABI 语义 & \code{abi-linux}、\code{syscall-ext}、\code{ptrace}、\code{proc-a20}、\code{vfs-edge} 等 \\
+            5 & GUI 行为判帧 & \code{smoke-qemu-gui-\{riscv64,loongarch64,aarch64,x86\_64,arm32\}} \\
+            2 & IOMMU / 驱动隔离 & \code{iommu-discovery}、\code{iommu-udriver-isolation} \\
+            2 & 时钟 / 输入 & \code{clock-vdso}、\code{dual-input} \\
+            1 & 网络套件 & \code{smoke-network-suite}（TCP/UDP/ICMP/DNS/AF\_UNIX） \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+    \vspace{0.2em}
+    \srcnote{全部经 \code{make smoke-*} 一键复现；超时无 PASS 标记即失败（行为判据，非仅编译通过）。}
 \end{frame}
 
 \end{document}
