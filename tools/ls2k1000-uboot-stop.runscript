@@ -1,0 +1,24 @@
+# Stop the vendor LS2K1000 U-Boot without changing persistent state.
+verbose on
+timeout 180
+
+send "sync\rreboot\r\c"
+
+expect {
+    "Press c to enter u-boot console" break
+    timeout 180 exit 1
+}
+
+# The vendor countdown is zero seconds.  Use only the documented lowercase
+# console key: Ctrl-C can interrupt the OHCI scan before U-Boot reaches its
+# command loop on this board.
+send "cccccccc\c"
+sleep 1
+send "cccccccc\c"
+sleep 1
+send "cccccccc\c"
+
+expect {
+    "=>" exit 0
+    timeout 10 exit 2
+}

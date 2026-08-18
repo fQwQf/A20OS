@@ -48,7 +48,8 @@ static int parse_block_dev(const char *dev, int *out_idx, int *out_part) {
     return 0;
 }
 
-static int mount_block_dev_idx(int dev_idx, const char *path, const char *fstype) {
+static int mount_block_dev_idx(int dev_idx, const char *path,
+                               const char *fstype, int flags) {
     block_dev_t *bdev = mount_setup_block_device(dev_idx);
     if (!bdev) return -ENODEV;
     bcache_t *bc = bcache_create(bdev);
@@ -56,14 +57,14 @@ static int mount_block_dev_idx(int dev_idx, const char *path, const char *fstype
 
     int r;
     if (fstype && fstype[0]) {
-        r = vfs_mount_bc(path, fstype, bc);
+        r = vfs_mount_bc_flags(path, fstype, bc, flags);
     } else {
-        r = vfs_mount_bc(path, "ext4", bc);
+        r = vfs_mount_bc_flags(path, "ext4", bc, flags);
         if (r < 0) {
             bcache_destroy(bc);
             bc = bcache_create(bdev);
             if (!bc) return -ENOMEM;
-            r = vfs_mount_bc(path, "vfat", bc);
+            r = vfs_mount_bc_flags(path, "vfat", bc, flags);
         }
     }
     if (r < 0) bcache_destroy(bc);
@@ -196,11 +197,11 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
     {
         int dev_idx = 0, part_num = 0;
         if (parse_block_dev(dev, &dev_idx, &part_num) == 0) {
-            int r = mount_block_dev_idx(dev_idx, path, fstype);
+            int r = mount_block_dev_idx(dev_idx, path, fstype, flags);
             if (r < 0 && part_num > 1) {
                 int compat_idx = dev_idx + part_num - 1;
                 if (compat_idx != dev_idx)
-                    r = mount_block_dev_idx(compat_idx, path, fstype);
+                    r = mount_block_dev_idx(compat_idx, path, fstype, flags);
             }
             return r;
         }
@@ -208,7 +209,8 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
     return -EINVAL;
 }
 
-int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
+int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
+                       int flags) {
     if (strcmp(fstype, "fat32") == 0 || strcmp(fstype, "vfat") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for FAT32 mount\n"); return -ENODEV; }
 
@@ -225,7 +227,9 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         mnt->type  = FS_TYPE_FAT32;
         strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
         strncpy(mnt->fstype, "vfat", sizeof(mnt->fstype) - 1);
-        strncpy(mnt->opts, "rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro", sizeof(mnt->opts) - 1);
+        strncpy(mnt->opts, (flags & VFS_MOUNT_RDONLY) ? "ro" :
+                "rw,relatime,fmask=0022,dmask=0022,codepage=437,iocharset=ascii,shortname=mixed,errors=remount-ro", sizeof(mnt->opts) - 1);
+        mnt->flags = flags;
         mnt->root  = root;
         mnt->fs_data = bc;
 
@@ -253,7 +257,9 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         mnt->type  = FS_TYPE_NTFS;
         strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
         strncpy(mnt->fstype, "ntfs", sizeof(mnt->fstype) - 1);
-        strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
+        strncpy(mnt->opts, (flags & VFS_MOUNT_RDONLY) ? "ro" : "rw",
+                sizeof(mnt->opts) - 1);
+        mnt->flags = flags;
         mnt->root  = root;
         mnt->fs_data = bc;
 
@@ -270,7 +276,7 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
 
         mount_t *mnt = vfs_mount_alloc();
         if (!mnt) return -ENOMEM;
-        vnode_t *root = ext4_mount(bc);
+        vnode_t *root = ext4_mount_flags(bc, flags);
         if (!root) {
             vfs_mount_remove(mnt);
             return -EIO;
@@ -281,7 +287,9 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
         mnt->type  = FS_TYPE_EXT4;
         strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
         strncpy(mnt->fstype, "ext4", sizeof(mnt->fstype) - 1);
-        strncpy(mnt->opts, "rw,relatime", sizeof(mnt->opts) - 1);
+        strncpy(mnt->opts, (flags & VFS_MOUNT_RDONLY) ? "ro,relatime" :
+                "rw,relatime", sizeof(mnt->opts) - 1);
+        mnt->flags = flags;
         mnt->root  = root;
         mnt->fs_data = bc;
 
@@ -324,6 +332,10 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
 
     kdebug("[VFS] Unknown fstype: %s\n", fstype);
     return -EINVAL;
+}
+
+int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
+    return vfs_mount_bc_flags(path, fstype, bc, 0);
 }
 
 int vfs_umount(const char *path) {

@@ -1478,6 +1478,11 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
     if (prev && prev->trap_ctx)
         ARCH_TRAP_FAST_RETURN_DISARM(prev->trap_ctx);
     ARCH_SCHED_SWITCH(next);
+#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    if (prev && prev->pid == 0)
+        kinfo("[SCHED] switching idle -> pid %d, kstack=0x%lx\n",
+              next->pid, (unsigned long)next->kstack);
+#endif
     __switch(next->kstack);
     proc_switch_complete();
 }
