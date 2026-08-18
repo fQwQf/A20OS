@@ -91,13 +91,18 @@ block_dev_t *mount_setup_block_device(int index)
     return &class_block->block;
 }
 
-/* The VBox UEFI image is GPT-partitioned.  Expose its first partition to the
- * existing FAT/ext4 mount code instead of assuming a superfloppy image. */
-static block_dev_t *first_gpt_partition(block_dev_t *parent) {
-    static partition_block_dev_t partition;
+/* Expose individual GPT partitions to the filesystem probe.  VF2's boot
+ * image has raw SPL/FIT partitions followed by the user FAT32 partition, so
+ * looking only at GPT entry zero can never find /bin. */
+static block_dev_t *gpt_partition(block_dev_t *parent, int parent_index,
+                                  int ordinal) {
+    static partition_block_dev_t partitions[16][16];
     uint8_t entry[128];
+    uint8_t entry_sector[512];
     uint8_t header[512];
-    if (!parent || !parent->read_sector || parent->read_sector(parent, 1, header, 1) != 0)
+    if (!parent || parent_index < 0 || parent_index >= 16 || ordinal < 0 ||
+        ordinal >= 16 || !parent->read_sector ||
+        parent->read_sector(parent, 1, header, 1) != 0)
         return NULL;
     if (memcmp(header, "EFI PART", 8) != 0)
         return NULL;
@@ -105,11 +110,20 @@ static block_dev_t *first_gpt_partition(block_dev_t *parent) {
     uint64_t entries_lba = 0;
     for (int i = 0; i < 8; i++)
         entries_lba |= (uint64_t)header[72 + i] << (i * 8);
+    uint32_t entry_count = (uint32_t)header[80] | ((uint32_t)header[81] << 8) |
+                           ((uint32_t)header[82] << 16) | ((uint32_t)header[83] << 24);
     uint32_t entry_size = (uint32_t)header[84] | ((uint32_t)header[85] << 8) |
                           ((uint32_t)header[86] << 16) | ((uint32_t)header[87] << 24);
-    if (!entries_lba || entry_size < sizeof(entry) || entry_size > 512 ||
-        parent->read_sector(parent, entries_lba, entry, 1) != 0)
+    if (!entries_lba || !entry_count || ordinal >= (int)entry_count ||
+        entry_size < sizeof(entry) || entry_size > 512 ||
+        parent->read_sector(parent, entries_lba +
+                            ((uint64_t)ordinal * entry_size) / 512,
+                            entry_sector, 1) != 0)
         return NULL;
+    uint32_t entry_offset = ((uint32_t)ordinal * entry_size) % 512;
+    if (entry_offset + sizeof(entry) > sizeof(entry_sector))
+        return NULL;
+    memcpy(entry, entry_sector + entry_offset, sizeof(entry));
 
     uint64_t first = 0, last = 0;
     for (int i = 0; i < 8; i++) {
@@ -118,15 +132,16 @@ static block_dev_t *first_gpt_partition(block_dev_t *parent) {
     }
     if (!first || last < first || last >= parent->capacity)
         return NULL;
-    partition.parent = parent;
-    partition.first_lba = first;
-    partition.sectors = last - first + 1;
-    partition.block.read_sector = partition_read_sector;
-    partition.block.write_sector = partition_write_sector;
-    partition.block.capacity = partition.sectors;
-    partition.block.sector_size = parent->sector_size;
-    partition.block.priv = &partition;
-    return &partition.block;
+    partition_block_dev_t *partition = &partitions[parent_index][ordinal];
+    partition->parent = parent;
+    partition->first_lba = first;
+    partition->sectors = last - first + 1;
+    partition->block.read_sector = partition_read_sector;
+    partition->block.write_sector = partition_write_sector;
+    partition->block.capacity = partition->sectors;
+    partition->block.sector_size = parent->sector_size;
+    partition->block.priv = partition;
+    return &partition->block;
 }
 
 int try_mount(block_dev_t *dev, const char *mnt, const char *fstype) {
@@ -208,17 +223,18 @@ void mount_block_devices(void) {
             official_ok = 1;
             continue;
         }
-        block_dev_t *partition = first_gpt_partition(blk);
-        if (!partition)
-            continue;
-        if (!utilities_ok &&
-            try_mount(partition, utilities_path, "fat32") == 0) {
-            utilities_ok = 1;
-            continue;
+        for (int ordinal = 0; ordinal < 16 && (!utilities_ok || !official_ok);
+             ordinal++) {
+            block_dev_t *partition = gpt_partition(blk, i, ordinal);
+            if (!partition)
+                continue;
+            if (!utilities_ok &&
+                try_mount(partition, utilities_path, "fat32") == 0)
+                utilities_ok = 1;
+            if (!official_ok &&
+                try_mount(partition, official_path, "ext4") == 0)
+                official_ok = 1;
         }
-        if (!official_ok &&
-            try_mount(partition, official_path, "ext4") == 0)
-            official_ok = 1;
     }
 
     if (!utilities_ok)

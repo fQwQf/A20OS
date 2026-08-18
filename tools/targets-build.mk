@@ -36,6 +36,23 @@ check-visionfive2-build:
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 kernel-only
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 
+# VisionFive 2 on-hardware boot artifacts (see docs/platforms/visionfive2-boot.md).
+# vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;
+# vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
+# (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
+.PHONY: vf2-firmware vf2-image
+vf2-firmware:
+	tools/vf2/build-firmware.sh
+
+vf2-image:
+	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
+		KERNEL_WERROR=0 USER_BUILD_DESKTOP=0 \
+		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
+		.kernel-build/riscv64-visionfive2-linux-dev-nommu/fat32.img kernel-only
+	tools/vf2/make-boot-image.sh \
+		.kernel-build/riscv64-visionfive2-linux-dev-nommu/kernel.bin \
+		.kernel-build/riscv64-visionfive2-linux-dev-nommu/fat32.img
+
 check-ls2k1000-build:
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 kernel-only
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
