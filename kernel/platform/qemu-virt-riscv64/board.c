@@ -61,6 +61,8 @@ static const timer_ops_t rv64_sbi_timer_ops = {
 
 static unsigned rv64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
                                   uint64_t boot_hart) {
+    printf("[SMP] qemu boot hart=%lu topology=identity\n",
+           (unsigned long)boot_hart);
     for (unsigned cpu = 0; cpu < capacity; cpu++) {
         cpus[cpu].hw_id = (boot_hart + cpu) % capacity;
         cpus[cpu].platform_cookie = 0;
@@ -70,7 +72,12 @@ static unsigned rv64_smp_discover(smp_cpu_desc_t *cpus, unsigned capacity,
 
 static int rv64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
                           uintptr_t logical_context) {
-    return (int)sbi_hart_start(cpu->hw_id, entry_pa, logical_context);
+    int64_t err = sbi_hart_start(cpu->hw_id, entry_pa, logical_context);
+    /* A hart which entered _start before topology publication is already
+     * spinning on riscv64_smp_release and is a valid started secondary. */
+    if (err == SBI_ERR_ALREADY_AVAILABLE)
+        return 0;
+    return (int)err;
 }
 
 static void rv64_smp_send_ipi(const smp_cpu_desc_t *cpu,

@@ -166,9 +166,14 @@ int proc_wait4(int pid, int *status, int options)
         proc_park_finish(token);
 
         uint64_t pf2 = spin_lock_irqsave(&proc_lock);
-        t->waiting_for_child = 0;
-        if (g_proc_waiting_child_waiter_count)
-            g_proc_waiting_child_waiter_count--;
+        /* A remote forced exit may already have removed this waiter while it
+         * was parked.  Update the flag and the aggregate as one guarded
+         * transition so the fast path can never under-count live waiters. */
+        if (t->waiting_for_child) {
+            t->waiting_for_child = 0;
+            if (g_proc_waiting_child_waiter_count)
+                g_proc_waiting_child_waiter_count--;
+        }
         spin_unlock_irqrestore(&proc_lock, pf2);
         if (proc_wake_reason_is_task_interrupt(reason) || sig)
             return -ERESTARTSYS;

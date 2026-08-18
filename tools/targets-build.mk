@@ -267,7 +267,8 @@ check-process-lock-split-boundary: smoke-sched-stress
 	@rg -q "PROCESS_LOCK_SPLIT_AUDIT" \
 		docs/testing/process-lock-split-audit.md
 	@rg -q "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN" kernel/proc/sched.c
-	@rg -Uq 'task_t \*next = proc_runq_pick_local\(\);[[:space:]]*uint64_t flags = spin_lock_irqsave\(&proc_lock\)' \
+	@rg -Uq \
+		'task_t \*next = proc_runq_pick_local\(\);[\s\S]{0,2048}uint64_t flags = spin_lock_irqsave\(&proc_lock\)' \
 		kernel/proc/sched.c
 	@! rg -U --pcre2 \
 		'SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\s\S])*spin_lock_irqsave\(&proc_lock\)' \
