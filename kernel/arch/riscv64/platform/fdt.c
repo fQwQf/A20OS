@@ -397,7 +397,17 @@ const char *arch_bootargs_get(void)
         }
         ready = 1;
     }
-    return bootargs_buf[0] ? bootargs_buf : NULL;
+    if (bootargs_buf[0])
+        return bootargs_buf;
+#ifdef CONFIG_BOARD_VISIONFIVE2
+    /* The direct SPL -> OpenSBI -> A20OS FIT path does not synthesize a
+     * /chosen/bootargs property.  DHCP lets a normal physical LAN provide
+     * the address, gateway and DNS without baking a site-specific subnet into
+     * the image.  DNS is a fallback until the DHCP lease is synchronized. */
+    return "a20.dhcp=1 a20.dns=8.8.8.8 a20.hostname=a20os-vf2";
+#else
+    return NULL;
+#endif
 }
 
 #endif /* CONFIG_RISCV64 */

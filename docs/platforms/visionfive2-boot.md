@@ -144,9 +144,229 @@ Flash 布局(JH7110 约定,`u-boot,spl-payload-offset = <0x100000>`):
 - **QEMU 对照**:同一 arch 代码在 `make ARCH=riscv64 run` 下验证过,
   真机与 QEMU 行为分叉时优先怀疑板级地址/IRQ(board.c)与 DTB 解析。
 
+## 六、修改 A20 代码后的标准迭代流程
+
+上板调试不应该直接在一条命令里“盲烧”。每次修改后按下面的层级推进，
+可以把问题限制在源码、用户态、打包或硬件中的某一层。
+
+### 6.1 开始前保存工作树并同步远程
+
+```sh
+git status --short
+git diff -- kernel user tools Makefile
+git fetch origin
+```
+
+如果工作树干净且本地没有独立提交，可以快进到远程主分支；有本地提交时
+先查看 `git log --oneline --decorate -8`，再选择 `git merge origin/main`
+或 `git rebase origin/main`。不要在未查看 `git status` 的情况下运行会覆盖
+工作树的命令。同步后重新检查 submodule：
+
+```sh
+git submodule sync --recursive
+git submodule status --recursive
+```
+
+extra 软件的 gitlink 没有物化时，使用仓库脚本（默认 GitHub SSH）：
+
+```sh
+make vf2-extra-sources
+# 没有 SSH key 时：
+VF2_GIT_TRANSPORT=https make vf2-extra-sources
+```
+
+### 6.2 先做便宜的编译检查
+
+只改内核或板级代码时，先不要生成大镜像：
+
+```sh
+NPROC=$(getconf _NPROCESSORS_ONLN)
+make -j"$NPROC" ARCH=riscv64 BOARD=visionfive2 \
+  ABI=linux BRINGUP=1 NOMMU=1 KERNEL_WERROR=0 kernel-only
+```
+
+`BRINGUP=1` 只检查内核，不生成 FAT32/extra 镜像；若改动涉及用户程序，
+再做完整用户态构建：
+
+```sh
+NPROC=$(getconf _NPROCESSORS_ONLN)
+make -j"$NPROC" -C user ARCH=riscv64 NOMMU=1 \
+  BUILD_DIR=build/riscv64-nommu
+```
+
+### 6.3 生成板上产物
+
+第一次构建或固件更新时先执行 `make vf2-firmware`；只改 A20OS 内核时可以
+复用已有的 `build/vf2-firmware/`。完整 SD 镜像使用：
+
+```sh
+NPROC=$(getconf _NPROCESSORS_ONLN)
+make -j"$NPROC" vf2-image \
+  EXTRA_PACKAGES='vim git gcc' \
+  EXTRA_IMAGE_MB=2048
+```
+
+`vf2-image` 会重新生成 NOMMU 内核、FAT32 根文件系统、extra ext4 分区和
+FIT。`EXTRA_IMAGE_MB` 必须大于实际 staging 内容；GCC/Git/Vim 的完整组合建议
+至少 2048 MiB，只有少量工具时才在命令行覆盖成更小的值。主机磁盘
+需要同时容纳 staging 目录和镜像，空间不足时先删除可重建的
+`build/vf2-firmware/a20os-sd.img`、`.kernel-build/*/extra.img`，不要删除
+`user/external` 源码。
+
+构建结束后检查产物和 FIT 地址：
+
+```sh
+ls -lh build/vf2-firmware/a20os-sd.img build/vf2-firmware/a20os.itb
+build/vf2-firmware/mkimage -l build/vf2-firmware/a20os.itb
+```
+
+FIT 中 A20OS 的 `load`/`entry` 应为 `0x40200000`。如果只修改内核，
+也可以只重建 `kernel.bin`，再运行 `tools/vf2/make-boot-image.sh`；但最终
+上板前应优先使用完整 `vf2-image`，避免 FAT32 和 extra 内容滞后。
+
+### 6.4 安全写入 TF 卡
+
+写卡前必须确认设备名。`/dev/sda` 只是本次机器的例子，不能照抄到另一台
+电脑：
+
+```sh
+lsblk -o NAME,MODEL,SERIAL,SIZE,TYPE,MOUNTPOINTS
+findmnt -S /dev/sda1; findmnt -S /dev/sda2
+sudo umount /dev/sda1 /dev/sda2 /dev/sda3 /dev/sda4 2>/dev/null || true
+sync
+```
+
+确认目标确实是 TF 卡整盘后才写入，目标必须是磁盘 `/dev/sda`，不能是分区
+`/dev/sda1`：
+
+```sh
+sudo dd if=build/vf2-firmware/a20os-sd.img of=/dev/sda \
+  bs=4M conv=fsync status=progress
+sync
+sudo sgdisk -e /dev/sda
+sudo partprobe /dev/sda
+sudo sgdisk -v /dev/sda
+lsblk -o NAME,SIZE,FSTYPE,PARTLABEL,MOUNTPOINTS /dev/sda
+```
+
+`sgdisk -v` 应报告 `No problems found`。物理卡比镜像大时，GPT 修复后会
+显示尾部空闲扇区，这是正常的；不要为了“填满卡”而把 extra 分区随意扩大，
+除非同时修改镜像构建参数并重新生成 GPT。
+
+### 6.5 串口启动与证据记录
+
+USB-TTL 使用 115200 8N1，连接 GND、板 TX 到转接器 RX、板 RX 到转接器 TX：
+
+```sh
+ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+screen /dev/ttyUSB0 115200
+```
+
+上电前就打开串口，保存完整日志。`screen` 中按 `Ctrl-a H` 开始/停止硬件
+日志；退出按 `Ctrl-a k`。日志应按以下顺序出现：
+
+```text
+U-Boot SPL ...
+Trying to boot from MMC2
+OpenSBI ...
+[FDT] ...
+[INIT] ...
+mksh ...
+#
+```
+
+看到 OpenSBI 但没有 `[FDT]`，优先检查 FIT 的 load/entry、内核链接脚本和
+DTB；看到 `[INIT]` 但没有 `#`，优先检查进程调度、用户栈、标准输入输出
+绑定和 `mksh` 的 fork/exec；看到 `#` 后再检查 `mount`、`/test/bin` 和
+具体软件。每次只改变一个变量，并把源码提交、镜像 SHA256、拨码位置和
+串口日志放在同一份实验记录中：
+
+```sh
+sha256sum build/vf2-firmware/a20os-sd.img
+git rev-parse HEAD
+```
+
+### 6.6 失败后的最小化回归
+
+当完整 extra 组合启动失败时，用最小镜像区分内核问题和用户态问题：
+
+```sh
+make -j"$NPROC" vf2-image EXTRA_PACKAGES='' EXTRA_IMAGE_MB=256
+```
+
+最小镜像能进入 `#`，再逐项增加 `git`、`vim`、`gcc`。Rust 是可选的大型
+工具链，确认磁盘空间和 glibc 运行库后再显式加入：
+
+```sh
+make -j"$NPROC" vf2-image \
+  EXTRA_PACKAGES='vim git gcc rust' EXTRA_IMAGE_MB=2048
+```
+每次增加后在 shell 中运行对应命令，并确认：
+
+```sh
+mount
+ls -l /test/bin
+/test/bin/git --version
+/test/bin/vim --version
+/test/bin/gcc --version
+/bin/fastfetch
+```
+
+### 6.8 VisionFive 2 有线网络配置
+
+GMAC1 使用板上 RJ45 接口。最简单的拓扑是“板子 RJ45 -> 交换机/家用路由器”，
+路由器开启 DHCP；A20OS 在没有网络启动参数时默认发送 DHCP 请求。串口看到
+`[StarFive-GMAC] PHY link up` 后，在 shell 中检查：
+
+```sh
+cat /proc/net/config
+netstat
+ping 192.168.1.1
+ping example.com
+git clone https://github.com/fQwQf/A20OS.git /tmp/A20OS
+```
+
+网线直连电脑时，电脑端需要给以太网口配置静态地址并开启转发/NAT。例如电脑
+以太网口为 `enp3s0`，板子使用 `192.168.50.2/24`：
+
+```sh
+# 电脑（Linux，临时配置；接口名以 `ip link` 实际输出为准）
+sudo ip addr flush dev enp3s0
+sudo ip addr add 192.168.50.1/24 dev enp3s0
+sudo ip link set enp3s0 up
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -t nat -A POSTROUTING -o wlan0 -j MASQUERADE
+```
+
+然后在 U-Boot 的 bootargs 中传入静态参数（或在 FIT/启动脚本中加入同样的
+参数），例如：
+
+```text
+a20.dhcp=0 a20.ip=192.168.50.2 a20.netmask=255.255.255.0 \
+a20.gateway=192.168.50.1 a20.dns=1.1.1.1 a20.hostname=a20os
+```
+
+若电脑只提供链路、不提供 NAT，仍可 `ping 192.168.50.1`，但不能访问公网或
+执行远程 `git clone`。交换机拓扑则不需要电脑转发；将板子和电脑接入同一网段，
+使用路由器分配的地址即可。A20OS 当前网络栈提供 IPv4/IPv6、ARP、DHCP、DNS、
+TCP、UDP、ICMP 和 HTTPS Git helper；`/proc/net/config` 是运行时确认最终地址、
+网关和 DNS 的权威入口。
+
+### 6.7 代码与板卡的回滚
+
+保留上一份可启动的 `a20os-sd.img` 或其校验值。新版本不能启动时，关机、
+将卡插回主机、卸载分区并重新写入上一份镜像即可。不要在板子运行时拔卡，
+也不要用 `git reset --hard` 代替源码级回滚；需要回滚时用已知提交重新构建，
+这样串口日志才能与源码对应。
+
+更换软件或增加新命令的源码适配流程见
+[从源码适配新软件](../development/source-software-porting.md)。
+
 ## 当前状态
 
-- 启动链固件、FIT、四分区 SD 镜像及 FAT32/extra userspace 已在 VisionFive 2
-  真机验证;系统可从 TF 卡完成启动并进入串口 mksh。
-- GMAC IRQ 线号(78)与 SYS_CRG 寄存器偏移沿用 RocketOS 记录,首次上板
-  需按 JH7110 文档/实测核对,见 physical-boards.md。
+- 启动链固件、FIT、四分区 SD 镜像及 FAT32/extra userspace 已完成源码构建；
+  之前的板上镜像已经从 TF 卡启动并进入串口 mksh。每次修改网络驱动后仍需用
+  新镜像重复串口启动记录，不能拿旧镜像日志替代当前提交。
+- GMAC1 IRQ 线号 78、DTB 中的 YT8531 PHY 地址 0 和 RGMII RX 300 ps 延迟已由
+  随镜像构建的 VF2 DTB 核对；当前驱动采用轮询数据面。PHY link-up、DMA 收发、
+  `ping` 和公网 `git clone` 必须在接入网线的目标板上按本页 6.8 节逐项确认。

@@ -41,6 +41,7 @@ check-visionfive2-build:
 # vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
 # (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
 .PHONY: vf2-firmware vf2-extra-sources vf2-image
+VF2_IMAGE_BUILD_DIR := .kernel-build/riscv64-visionfive2-linux-dev-embedded-nommu
 vf2-firmware:
 	tools/vf2/build-firmware.sh
 
@@ -49,17 +50,23 @@ vf2-extra-sources:
 
 vf2-image: vf2-extra-sources
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
+		DRIVER_DEPLOYMENT=embedded \
 		KERNEL_WERROR=0 USER_BUILD_DESKTOP=0 \
 		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
-		.kernel-build/riscv64-visionfive2-linux-dev-nommu/fat32.img kernel-only
+		$(VF2_IMAGE_BUILD_DIR)/fat32.img kernel-only
+	@if [ -f user/external/apps/fastfetch/src/fastfetch.c ]; then \
+		$(MAKE) -C user ARCH=riscv64 NOMMU=1 OPT="-O3" PROFILE=full \
+			BUILD_DIR=build/riscv64-nommu fastfetch; \
+	fi
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
+		DRIVER_DEPLOYMENT=embedded \
 		KERNEL_WERROR=0 USER_BUILD_DESKTOP=0 \
 		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
 		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" extra-img
 	tools/vf2/make-boot-image.sh \
-		.kernel-build/riscv64-visionfive2-linux-dev-nommu/kernel.bin \
-		.kernel-build/riscv64-visionfive2-linux-dev-nommu/fat32.img \
-		.kernel-build/riscv64-visionfive2-linux-dev-nommu/extra.img
+		$(VF2_IMAGE_BUILD_DIR)/kernel.bin \
+		$(VF2_IMAGE_BUILD_DIR)/fat32.img \
+		$(VF2_IMAGE_BUILD_DIR)/extra.img
 
 check-ls2k1000-build:
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 kernel-only
