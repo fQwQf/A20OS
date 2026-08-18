@@ -43,6 +43,7 @@
 - [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
+- [development/source-software-porting.md](development/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
 - [platforms/loongarch32.md](platforms/loongarch32.md)：LoongArch32（LA32R / NaiLoong Core）移植与验证
 - [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
 - [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈

@@ -7,7 +7,7 @@
 
 ARCH ?= riscv64
 OPT ?= -O2
-PACKAGES ?= vim git gcc rust
+PACKAGES ?= vim git gcc
 EXTRA_MAKEFILE := $(lastword $(MAKEFILE_LIST))
 
 .DEFAULT_GOAL := all

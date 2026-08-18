@@ -32,15 +32,15 @@
  * ============================================================ */
 
 #define MAC_BASE  0x0000
-#define MTL_BASE  0x0C00
+#define MTL_BASE  0x0000
 #define DMA_BASE  0x1000
 
 /* MAC registers */
 #define MAC_CONFIGURATION        (MAC_BASE + 0x0000)
-#define MAC_FRAME_FILTER         (MAC_BASE + 0x0004)
+#define MAC_FRAME_FILTER         (MAC_BASE + 0x0008)
 #define MAC_HASH_TABLE_REG0      (MAC_BASE + 0x0008)
-#define MAC_MII_ADDR             (MAC_BASE + 0x0020)
-#define MAC_MII_DATA             (MAC_BASE + 0x0024)
+#define MAC_MII_ADDR             (MAC_BASE + 0x0200)
+#define MAC_MII_DATA             (MAC_BASE + 0x0204)
 #define MAC_FLOW_CTRL            (MAC_BASE + 0x0048)
 #define MAC_DEBUG                (MAC_BASE + 0x005C)
 #define MAC_HW_FEATURE0          (MAC_BASE + 0x011C)
@@ -51,10 +51,10 @@
 #define MAC_ADDR0_LOW            (MAC_BASE + 0x0304)
 
 /* MTL registers */
-#define MTL_OPERATION_MODE       (MTL_BASE + 0x0000)
-#define MTL_TXQ0_OPERATION_MODE  (MTL_BASE + 0x0D00)
-#define MTL_RXQ0_OPERATION_MODE  (MTL_BASE + 0x0D30)
-#define MTL_RXQ0_MISSED_PKT      (MTL_BASE + 0x0D40)
+#define MTL_OPERATION_MODE       0x0C00
+#define MTL_TXQ0_OPERATION_MODE  0x0D00
+#define MTL_RXQ0_OPERATION_MODE  0x0D30
+#define MTL_RXQ0_MISSED_PKT      0x0D40
 
 /* DMA registers */
 #define DMA_MODE                 (DMA_BASE + 0x0000)
@@ -63,15 +63,15 @@
 #define DMA_CH0_CONTROL          (DMA_BASE + 0x0100)
 #define DMA_CH0_TX_CONTROL       (DMA_BASE + 0x0104)
 #define DMA_CH0_RX_CONTROL       (DMA_BASE + 0x0108)
+#define DMA_CH0_TXDESC_LIST_HADDR (DMA_BASE + 0x0110)
 #define DMA_CH0_TXDESC_LIST_ADDR (DMA_BASE + 0x0114)
-#define DMA_CH0_TXDESC_LIST_HADDR (DMA_BASE + 0x0118)
+#define DMA_CH0_RXDESC_LIST_HADDR (DMA_BASE + 0x0118)
 #define DMA_CH0_RXDESC_LIST_ADDR (DMA_BASE + 0x011C)
-#define DMA_CH0_RXDESC_LIST_HADDR (DMA_BASE + 0x0120)
-#define DMA_CH0_TXDESC_TAIL_PTR  (DMA_BASE + 0x0128)
-#define DMA_CH0_RXDESC_TAIL_PTR  (DMA_BASE + 0x012C)
-#define DMA_CH0_TXDESC_RING_LEN  (DMA_BASE + 0x0130)
-#define DMA_CH0_RXDESC_RING_LEN  (DMA_BASE + 0x0134)
-#define DMA_CH0_INTERRUPT_ENABLE (DMA_BASE + 0x0138)
+#define DMA_CH0_TXDESC_TAIL_PTR  (DMA_BASE + 0x0120)
+#define DMA_CH0_RXDESC_TAIL_PTR  (DMA_BASE + 0x0128)
+#define DMA_CH0_TXDESC_RING_LEN  (DMA_BASE + 0x012C)
+#define DMA_CH0_RXDESC_RING_LEN  (DMA_BASE + 0x0130)
+#define DMA_CH0_INTERRUPT_ENABLE (DMA_BASE + 0x0134)
 #define DMA_CH0_STATUS           (DMA_BASE + 0x0160)
 
 /* MAC Configuration bits */
@@ -85,11 +85,13 @@
 
 /* MII Address bits */
 #define MII_ADDR_GB       (1U << 0)
+#define MII_ADDR_GOC_READ (3U << 2)
+#define MII_ADDR_GOC_WRITE (1U << 2)
 #define MII_ADDR_MW       (1U << 1)
-#define MII_ADDR_CR_SHIFT 2
+#define MII_ADDR_CR_SHIFT 8
 #define MII_ADDR_CR_MASK  (0xFU << MII_ADDR_CR_SHIFT)
-#define MII_ADDR_GR_SHIFT 6
-#define MII_ADDR_PA_SHIFT 11
+#define MII_ADDR_GR_SHIFT 16
+#define MII_ADDR_PA_SHIFT 21
 
 /* MTL Operation Mode bits */
 #define MTL_OP_MODE_DTXSTS  (1U << 1)
@@ -103,7 +105,7 @@
 #define MTL_TXQ0_TQS_SHIFT 16
 
 #define MTL_RXQ0_RTC_SHIFT 3
-#define MTL_RXQ0_RQS_SHIFT 16
+#define MTL_RXQ0_RQS_SHIFT 20
 #define MTL_RXQ0_RXQEN    (1U << 0)
 
 /* DMA bits */
@@ -133,10 +135,9 @@
 #define DMA_CH0_STATUS_NIS (1U << 15)
 
 /* Descriptor bits.  For EQOS ring descriptors the TX length is programmed in
- * des2 (with the IOC bit) and des3 carries OWN/FD/LD plus the frame length,
- * matching the RocketOS reference that runs on the VisionFive 2. */
+ * des2 and des3 carries OWN/FD/LD plus the frame length, matching the
+ * VisionFive 2 DWMAC4 ring format. */
 #define DESC3_OWN     (1U << 31)
-#define DESC3_IOC     (1U << 30)
 #define DESC3_FD      (1U << 29)
 #define DESC3_LD      (1U << 28)
 #define DESC3_BUF1V   (1U << 24)
@@ -221,9 +222,10 @@ static int gmac_mdio_wait(uintptr_t base) {
 static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
     if (gmac_mdio_wait(base) != 0) return 0xFFFF;
     uint32_t val = MII_ADDR_GB |
+                   MII_ADDR_GOC_READ |
                    ((phy_addr << MII_ADDR_PA_SHIFT) & (0x1F << MII_ADDR_PA_SHIFT)) |
                    ((reg << MII_ADDR_GR_SHIFT) & (0x1F << MII_ADDR_GR_SHIFT)) |
-                   (4 << MII_ADDR_CR_SHIFT);
+                   (5 << MII_ADDR_CR_SHIFT);
     gmac_write(base, MAC_MII_ADDR, val);
     if (gmac_mdio_wait(base) != 0) return 0xFFFF;
     return (uint16_t)gmac_read(base, MAC_MII_DATA);
@@ -232,12 +234,25 @@ static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
 static void gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
     if (gmac_mdio_wait(base) != 0) return;
     gmac_write(base, MAC_MII_DATA, data);
-    uint32_t val = MII_ADDR_GB | MII_ADDR_MW |
+    uint32_t val = MII_ADDR_GB | MII_ADDR_MW | MII_ADDR_GOC_WRITE |
                    ((phy_addr << MII_ADDR_PA_SHIFT) & (0x1F << MII_ADDR_PA_SHIFT)) |
                    ((reg << MII_ADDR_GR_SHIFT) & (0x1F << MII_ADDR_GR_SHIFT)) |
-                   (4 << MII_ADDR_CR_SHIFT);
+                   (5 << MII_ADDR_CR_SHIFT);
     gmac_write(base, MAC_MII_ADDR, val);
     gmac_mdio_wait(base);
+}
+
+static uint16_t gmac_phy_ext_read(uintptr_t base, int phy_addr, uint16_t reg)
+{
+    gmac_mdio_write(base, phy_addr, 0x1e, reg);
+    return gmac_mdio_read(base, phy_addr, 0x1f);
+}
+
+static void gmac_phy_ext_write(uintptr_t base, int phy_addr,
+                               uint16_t reg, uint16_t value)
+{
+    gmac_mdio_write(base, phy_addr, 0x1e, reg);
+    gmac_mdio_write(base, phy_addr, 0x1f, value);
 }
 
 /* ============================================================
@@ -255,12 +270,13 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
         paddr_t rx_buf_pa = va_to_pa((const void *)priv->rx_buf[i]);
 
         priv->tx_desc[i].des0 = (uint32_t)tx_buf_pa;
-        priv->tx_desc[i].des3 = DESC3_IOC | DESC3_FD | DESC3_LD;
+        priv->tx_desc[i].des1 = (uint32_t)((uint64_t)tx_buf_pa >> 32);
+        priv->tx_desc[i].des3 = DESC3_FD | DESC3_LD;
 
         priv->rx_desc[i].des0 = (uint32_t)rx_buf_pa;
-        priv->rx_desc[i].des1 = 0;
+        priv->rx_desc[i].des1 = (uint32_t)((uint64_t)rx_buf_pa >> 32);
         priv->rx_desc[i].des2 = 0;
-        priv->rx_desc[i].des3 = DESC3_OWN | DESC3_BUF1V | DESC3_IOC | DESC3_FD | DESC3_LD;
+        priv->rx_desc[i].des3 = DESC3_OWN | DESC3_BUF1V;
     }
     dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
     dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
@@ -320,7 +336,16 @@ static int gmac_phy_init(uintptr_t base) {
         }
     }
 
-    /* Auto-negotiation */
+    /* The VF2 GMAC1 RGMII wiring uses the same Motorcomm YT8531 timing
+     * values as the board DT: 0.30 ns RX internal delay and no TX delay. */
+    uint16_t rgmii = gmac_phy_ext_read(base, phy_addr, 0xA003);
+    if (rgmii != 0xFFFF) {
+        /* YT8531 RC1R: RX delay is bits [3:0], GE TX delay [15:12]. */
+        rgmii &= (uint16_t)~((0xFU << 12) | 0xFU);
+        rgmii |= 0x2U;
+        gmac_phy_ext_write(base, phy_addr, 0xA003, rgmii);
+    }
+    /* Start auto-negotiation only after the RGMII timing is programmed. */
     gmac_mdio_write(base, phy_addr, 0, 0x1200);
     mdelay(100);
 
@@ -351,7 +376,13 @@ int starfive_gmac_init(uintptr_t base) {
 
     /* DMA reset */
     gmac_write(base, DMA_MODE, DMA_MODE_SWR);
-    while (gmac_read(base, DMA_MODE) & DMA_MODE_SWR);
+    uint64_t reset_start = timer_get_ticks();
+    while (gmac_read(base, DMA_MODE) & DMA_MODE_SWR) {
+        if (timer_get_ticks() - reset_start > clock_ticks_per_sec() / 10) {
+            kinfo("[StarFive-GMAC] DMA reset timeout\n");
+            return -1;
+        }
+    }
     mdelay(10);
 
     /* MAC reset - disable TX/RX */
@@ -374,8 +405,7 @@ int starfive_gmac_init(uintptr_t base) {
                (0x2 << MTL_TXQ0_TTC_SHIFT) |
                (0x7 << MTL_TXQ0_TQS_SHIFT));
     gmac_write(base, MTL_RXQ0_OPERATION_MODE,
-               MTL_RXQ0_RXQEN |
-               (1536 << MTL_RXQ0_RQS_SHIFT));
+               (0x1FFU << MTL_RXQ0_RQS_SHIFT));
 
     /* MAC configuration */
     gmac_write(base, MAC_FRAME_FILTER, 0x80000001); /* promiscuous for now */
@@ -394,7 +424,7 @@ int starfive_gmac_init(uintptr_t base) {
 
     /* Enable MAC TX/RX */
     gmac_write(base, MAC_CONFIGURATION,
-               MAC_CONF_RE | MAC_CONF_TE | MAC_CONF_DM | MAC_CONF_DO | MAC_CONF_IPC);
+               MAC_CONF_RE | MAC_CONF_TE | MAC_CONF_DM | MAC_CONF_IPC);
 
     /* DMA channel 0 configuration */
     gmac_write(base, DMA_CH0_CONTROL, DMA_CH0_CONTROL_PBLX8);
@@ -434,14 +464,14 @@ int starfive_gmac_send(uintptr_t base, const void *pkt, size_t len) {
     }
     dma_sync_for_device(priv->tx_buf[idx], len);
 
-    desc->des2 = (uint32_t)len | DESC2_IOC_BIT;
+    desc->des2 = (uint32_t)len;
     __sync_synchronize();
     desc->des3 = DESC3_OWN | DESC3_FD | DESC3_LD | (uint32_t)len;
     dma_sync_for_device(desc, sizeof(*desc));
 
     /* Wake DMA: writing the tail pointer is a write barrier for the ring. */
-    paddr_t desc_pa = va_to_pa((const void *)desc);
-    gmac_write(base, DMA_CH0_TXDESC_TAIL_PTR, (uint32_t)desc_pa);
+    paddr_t next_desc_pa = va_to_pa((const void *)&priv->tx_desc[(idx + 1) % GMAC_DESC_NUM]);
+    gmac_write(base, DMA_CH0_TXDESC_TAIL_PTR, (uint32_t)next_desc_pa);
 
     priv->tx_busy = (idx + 1) % GMAC_DESC_NUM;
     spin_unlock_irqrestore(&priv->lock, flags);
@@ -465,15 +495,25 @@ int starfive_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
     dma_sync_for_cpu(desc, sizeof(*desc));
     dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
-    uint32_t len = (desc->des3 & 0x7FFF) - 4; /* strip FCS */
+    uint32_t frame_len = desc->des3 & 0x7FFF;
+    if (frame_len < 4) {
+        desc->des3 = DESC3_OWN | DESC3_BUF1V;
+        dma_sync_for_device(desc, sizeof(*desc));
+        gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR,
+                   (uint32_t)va_to_pa((const void *)desc));
+        priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;
+        spin_unlock_irqrestore(&priv->lock, flags);
+        return -1;
+    }
+    uint32_t len = frame_len - 4; /* strip FCS */
     if (len > maxlen) len = maxlen;
     if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
     /* Return descriptor to DMA */
-    desc->des3 = DESC3_OWN | DESC3_BUF1V | DESC3_IOC | DESC3_FD | DESC3_LD;
+    desc->des3 = DESC3_OWN | DESC3_BUF1V;
     dma_sync_for_device(desc, sizeof(*desc));
 
-    paddr_t tail_pa = va_to_pa((const void *)&priv->rx_desc[(idx + GMAC_DESC_NUM - 1) % GMAC_DESC_NUM]);
+    paddr_t tail_pa = va_to_pa((const void *)desc);
     gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR, (uint32_t)tail_pa);
 
     priv->rx_busy = (idx + 1) % GMAC_DESC_NUM;

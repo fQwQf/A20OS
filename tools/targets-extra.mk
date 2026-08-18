@@ -126,6 +126,7 @@ _extra-img: $(EXTRA_IMG)
 
 $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	@echo "Building extra packages image..."
+	@rm -f "$(EXTRA_IMG)"
 	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
 	@set -e; \
 	for f in $(USER_BUILD_DIR)/*; do \
@@ -217,9 +218,11 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	done
 	@GIT_TEMPLATE_SRC=user/external/apps/git/templates/blt; \
 	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
-	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ] && [ -d "$$GIT_TEMPLATE_SRC" ]; then \
-		mkdir -p "$$GIT_TEMPLATE_DST"; \
-		cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
+	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
+		if [ -d "$$GIT_TEMPLATE_SRC" ]; then \
+			mkdir -p "$$GIT_TEMPLATE_DST"; \
+			cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
+		fi; \
 		for helper in git-remote-http git-remote-https; do \
 			src="user/build/extra/$(ARCH)/$$helper"; \
 			[ -x "$$src" ] || { echo "[EXTRA] missing Git HTTPS helper $$src"; exit 1; }; \

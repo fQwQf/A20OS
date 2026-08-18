@@ -63,12 +63,17 @@ static const char *extract_key_value(const char *tok, const char *tok_end,
 void a20_net_config_init(void)
 {
     memset(&g_a20_net_config, 0, sizeof(g_a20_net_config));
+    /* A physical board with an Ethernet cable should be usable without
+     * hand-editing a boot command line.  Static parameters or an explicit
+     * a20.dhcp=0 below still select the static path. */
+    g_a20_net_config.dhcp_enable = 1;
 
     const char *cmdline = bootargs_get();
     if (!cmdline)
         return;
 
     char val[256];
+    int dhcp_explicit = 0;
 
     const char *p = cmdline;
     while (*p) {
@@ -80,8 +85,10 @@ void a20_net_config_init(void)
         while (*tok_end && *tok_end != ' ' && *tok_end != '\t')
             tok_end++;
 
-        if (extract_key_value(p, tok_end, "a20.dhcp", val, sizeof(val)))
+        if (extract_key_value(p, tok_end, "a20.dhcp", val, sizeof(val))) {
             g_a20_net_config.dhcp_enable = (atoi(val) != 0);
+            dhcp_explicit = 1;
+        }
 
         p = tok_end;
     }
@@ -96,14 +103,12 @@ void a20_net_config_init(void)
         while (*tok_end && *tok_end != ' ' && *tok_end != '\t')
             tok_end++;
 
-        if (!g_a20_net_config.dhcp_enable) {
-            if (extract_key_value(p, tok_end, "a20.ip", val, sizeof(val)))
-                parse_ipv4(val, &g_a20_net_config.ip);
-            else if (extract_key_value(p, tok_end, "a20.netmask", val, sizeof(val)))
-                parse_ipv4(val, &g_a20_net_config.netmask);
-            else if (extract_key_value(p, tok_end, "a20.gateway", val, sizeof(val)))
-                parse_ipv4(val, &g_a20_net_config.gateway);
-        }
+        if (extract_key_value(p, tok_end, "a20.ip", val, sizeof(val)))
+            parse_ipv4(val, &g_a20_net_config.ip);
+        else if (extract_key_value(p, tok_end, "a20.netmask", val, sizeof(val)))
+            parse_ipv4(val, &g_a20_net_config.netmask);
+        else if (extract_key_value(p, tok_end, "a20.gateway", val, sizeof(val)))
+            parse_ipv4(val, &g_a20_net_config.gateway);
 
         if (extract_key_value(p, tok_end, "a20.dns", val, sizeof(val))) {
             if (g_a20_net_config.dns_count < DNS_MAX_SERVERS &&
@@ -120,6 +125,14 @@ void a20_net_config_init(void)
 
         p = tok_end;
     }
+
+    /* Preserve the old static QEMU command lines, which provide an address
+     * but do not carry a20.dhcp=0.  An explicit a20.dhcp=1 always wins. */
+    if (!dhcp_explicit &&
+        (!ip4_addr_isany_val(g_a20_net_config.ip) ||
+         !ip4_addr_isany_val(g_a20_net_config.netmask) ||
+         !ip4_addr_isany_val(g_a20_net_config.gateway)))
+        g_a20_net_config.dhcp_enable = 0;
 }
 
 void a20_net_config_sync_from_lwip(void)
