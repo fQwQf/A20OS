@@ -68,6 +68,99 @@ vf2-image: vf2-extra-sources
 		$(VF2_IMAGE_BUILD_DIR)/fat32.img \
 		$(VF2_IMAGE_BUILD_DIR)/extra.img
 
+# VisionFive 2 SD-card images (three quick-start variants, development profile).
+#
+#   `make vf2-sdcard`   kernel + FAT32 userspace + repo's sdcard-rv.img as the
+#                       extra ext4 partition (oscomp testsuite -> /test).
+#   `make vf2-minimal`  kernel + FAT32 userspace (+ fastfetch), NO extra
+#                       partition: the smallest bootable card.
+#   `make vf2-extra`    kernel + FAT32 userspace + full extra.img built from
+#                       sources (vim / git / gcc / rust ... -> /test).
+#
+# All three use the regular MMU dev kernel + userspace, the same profile as
+# `make run-riscv64`.  Build with VF2_MMU=0 to swap in the validated NOMMU
+# bring-up kernel instead.  No extra-package sources or builds are involved in
+# vf2-sdcard / vf2-minimal; vf2-extra needs `make vf2-extra-sources` and the
+# EXTRA_PACKAGES build (see tools/targets-extra.mk).
+#
+# Prerequisites:
+#   * build/vf2-firmware/ has been produced once by `make vf2-firmware`
+#   * vf2-sdcard: sdcard-rv.img in the repo root (override VF2_EXTRA_IMAGE=)
+#   * vf2-extra:  EXTRA_PACKAGES (default "vim git gcc") sources available
+#
+# Output: build/vf2-firmware/a20os-sd.img (each invocation rewrites it).
+.PHONY: vf2-sdcard vf2-minimal vf2-extra \
+	_vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
+VF2_MMU ?= 1
+ifeq ($(VF2_MMU),1)
+VF2_ABI             := both
+VF2_NOMMU           := 0
+VF2_BUILD_DIR       := .kernel-build/riscv64-visionfive2-both-dev-embedded
+VF2_LDSCRIPT        :=
+VF2_USER_BUILD_DIR  := user/build/riscv64
+# The MMU (dev) kernel compiles warning-clean; keep -Werror as-is.
+VF2_KERNEL_WERROR   :=
+else
+VF2_ABI             := linux
+VF2_NOMMU           := 1
+VF2_BUILD_DIR       := .kernel-build/riscv64-visionfive2-linux-dev-embedded-nommu
+VF2_LDSCRIPT        := LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld
+VF2_USER_BUILD_DIR  := user/build/riscv64-nommu
+# NOMMU leaves MMU-only code (elf seg_start, pte_to_vm_flags, aslr) unused;
+# the validated VF2 build already relaxes -Werror for the same reason.
+VF2_KERNEL_WERROR   := KERNEL_WERROR=0
+endif
+VF2_EXTRA_IMAGE ?= $(wildcard sdcard-rv.img)
+
+_vf2_check_firmware:
+	@test -f build/vf2-firmware/u-boot-spl.bin.normal.out || \
+	    { echo "error: boot firmware missing in build/vf2-firmware/; run 'make vf2-firmware' once" >&2; exit 1; }
+	@test -f build/vf2-firmware/fw_dynamic.bin || \
+	    { echo "error: OpenSBI firmware missing in build/vf2-firmware/; run 'make vf2-firmware' once" >&2; exit 1; }
+
+_vf2_build_base:
+	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 \
+		NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded \
+		USER_BUILD_DESKTOP=0 $(VF2_LDSCRIPT) $(VF2_KERNEL_WERROR) \
+		$(VF2_BUILD_DIR)/fat32.img kernel-only
+
+_vf2_build_fastfetch: _vf2_build_base
+	@test -f user/external/apps/fastfetch/src/fastfetch.c || \
+	    { echo "error: fastfetch source missing; run 'make vf2-extra-sources' or restore user/external/apps/fastfetch" >&2; exit 1; }
+	$(MAKE) -C user ARCH=riscv64 NOMMU=$(VF2_NOMMU) OPT="-O3" PROFILE=full \
+		BUILD_DIR=$(VF2_USER_BUILD_DIR) fastfetch
+
+vf2-sdcard: _vf2_check_firmware _vf2_build_base
+	@test -n "$(VF2_EXTRA_IMAGE)" || \
+	    { echo "error: no extra image; place sdcard-rv.img in the repo root or set VF2_EXTRA_IMAGE=/path/to.img" >&2; exit 1; }
+	@test -f "$(VF2_EXTRA_IMAGE)" || \
+	    { echo "error: extra image not found: $(VF2_EXTRA_IMAGE)" >&2; exit 1; }
+	tools/vf2/make-boot-image.sh \
+		$(VF2_BUILD_DIR)/kernel.bin \
+		$(VF2_BUILD_DIR)/fat32.img \
+		$(VF2_EXTRA_IMAGE)
+
+# Minimal bootable card: FAT32 rootfs carries the extra fastfetch binary.
+vf2-minimal: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
+	@cp $(VF2_BUILD_DIR)/fat32.img $(VF2_BUILD_DIR)/fat32-ff.img
+	@mcopy -o -i $(VF2_BUILD_DIR)/fat32-ff.img \
+		$(VF2_USER_BUILD_DIR)/fastfetch ::/fastfetch
+	tools/vf2/make-boot-image.sh \
+		$(VF2_BUILD_DIR)/kernel.bin \
+		$(VF2_BUILD_DIR)/fat32-ff.img
+
+# Full card: build the extra-package ext4 image (vim/git/gcc/... plus the
+# user tools and fastfetch already staged in $(VF2_USER_BUILD_DIR)).
+vf2-extra: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
+	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 \
+		NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded \
+		USER_BUILD_DESKTOP=0 $(VF2_LDSCRIPT) \
+		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" EXTRA_IMAGE_MB=$(EXTRA_IMAGE_MB) extra-img
+	tools/vf2/make-boot-image.sh \
+		$(VF2_BUILD_DIR)/kernel.bin \
+		$(VF2_BUILD_DIR)/fat32.img \
+		$(VF2_BUILD_DIR)/extra.img
+
 check-ls2k1000-build:
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 kernel-only
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only

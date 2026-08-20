@@ -62,6 +62,30 @@ _start:
     j       .secondary_wait
 #endif
 
+        /* Print a boot-stage marker over the direct UART (PA 0x10000000).
+     * Used to localize a hang in the MMU enable path on boards that have not
+     * yet been MMU-validated.  The char is repeated to survive UART/capture
+     * character loss.  Preserves a0 (hart id); clobbers t6/a1/a2/a4. */
+    .macro  boot_marker ch
+    mv      t6, a0
+    li      a0, \ch
+    jal     ra, .early_putc
+    jal     ra, .early_putc
+    jal     ra, .early_putc
+    jal     ra, .early_putc
+    mv      a0, t6
+    .endm
+
+    /* Entry confirmation: print 'S' before touching anything (the claim, BSS
+     * clear and argument save all come after this, so 'S' proves the kernel
+     * started and the direct UART is writable from S-mode). */
+    mv      t6, a0
+    mv      s0, a1
+    li      a0, 'S'
+    jal     ra, .early_putc
+    mv      a0, t6
+    mv      a1, s0
+
     /* OpenSBI may choose any hart as the cold-boot hart.  Elect exactly one
      * initializer without touching BSS, which that hart clears below. */
 .Lclaim_boot_prepare:
@@ -111,6 +135,7 @@ _start:
       * flags = V|R|W|X|A|D = 0xAF
       */
 #ifndef CONFIG_NOMMU
+    boot_marker '1'             /* MMU: page-table setup reached */
     la      t0, boot_pgdir
 
     /* Map sixteen 1GB RAM windows in identity and higher-half slots.  The
@@ -165,6 +190,7 @@ _start:
     sd      t1, 0(t3)
 
 .enable_mmu:
+    boot_marker '2'             /* MMU: page tables filled */
     /* Keep a physical S-mode trap target active while enabling translation.
      * If the first post-satp fetch or access faults, this handler reports the
      * architectural cause through SBI before the normal trap setup exists. */
@@ -182,6 +208,8 @@ _start:
     csrw    satp, t0
     sfence.vma
     fence.i
+
+    boot_marker '3'             /* MMU: satp written, translations on */
 
     /*
      * Jump to HH entry.  la gives PA (identity mapping still active),
@@ -217,8 +245,8 @@ _start:
 
 .early_hex:
     /* This helper makes nested calls without a stack.  Preserve its caller's
-     * return address in a register that .early_putc leaves untouched. */
-    mv      a3, ra
+     * return address in s0, which the SBI ecall below leaves untouched. */
+    mv      s0, ra
     li      t4, 16
 2:  srli    t5, t3, 60
     slli    t3, t3, 4
@@ -231,20 +259,17 @@ _start:
     jal     ra, .early_putc
     addi    t4, t4, -1
     bnez    t4, 2b
-    jr      a3
+    jr      s0
 
 .early_putc:
-    /* Do not clobber t0-t3 (saved trap state), or t4-t6 (the caller's hex
-     * loop state). */
-    li      a1, 0x10000000
-    li      a2, 100000             /* bounded wait: do not hide a trap */
-5:  lbu     a4, 5(a1)              /* NS16550 LSR */
-    andi    a4, a4, 0x20           /* THR empty */
-    bnez    a4, 6f
-    addi    a2, a2, -1
-    bnez    a2, 5b
-6:
-    sb      a0, 0(a1)
+    /* Do not clobber t0-t3 (saved trap state), t4-t6 (the caller's hex loop
+     * state) or s0 (the hex helper's return address).  Route through the SBI
+     * legacy console ecall: OpenSBI writes the UART in M-mode, so output and
+     * the early-trap report work regardless of whether the kernel's own page
+     * tables (or the identity map of the UART) are valid at this point. */
+    li      a7, 1               /* SBI_EXT_0_1_CONSOLE_PUTCHAR */
+    li      a6, 0
+    ecall
     ret
 #else
     la      t0, .Lhh_entry
@@ -294,6 +319,7 @@ _start:
 #endif
 
 .Lhh_entry:
+    boot_marker '4'             /* jumped to higher-half VA */
     /* The bootstrap CPU is logical CPU 0. Secondaries consume the logical ID
      * selected by the platform and passed through SBI HSM's opaque value. */
     la      t0, __boot_hart_id

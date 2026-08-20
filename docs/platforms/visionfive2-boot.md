@@ -35,6 +35,46 @@ JH7110 BootROM
 - 定时器频率运行时取自 DTB `timebase-frequency`(JH7110 = 24 MHz),
   QEMU virt 路径不受影响(10 MHz)。
 
+## 零、快速上手：一条命令出 SD 卡镜像
+
+不想从源码构建整套 extra 工具链（gcc/git/vim）时，用下面的目标。它们和
+`make run-riscv64` 一样构建常规 MMU 内核 + FAT32 用户态，跳过 extra 源码/编译
+（`vf2-extra` 除外），共用已生成的固件 `build/vf2-firmware/`，产物统一为
+`build/vf2-firmware/a20os-sd.img`。上电后串口进入 mksh `#` 提示符，FAT32 用户态
+挂载到 `/bin`。镜像按稀疏文件生成，只占实际使用空间的磁盘。
+
+```sh
+# 前置：固件只需在 build/vf2-firmware/ 里准备过一次
+make vf2-firmware
+
+# 无 extra、最小可启动卡：必要组件 + fastfetch（fastfetch 位于 /bin，无 /test）
+make vf2-minimal
+
+# 带 sdcard-rv.img 的卡：仓库根目录现成的 oscomp 评测 ext4 镜像挂载到 /test
+# （前置：根目录有 sdcard-rv.img，与 QEMU run-riscv64 用同一份）
+make vf2-sdcard
+
+# 完整 extra 工具链卡：从源码构建 vim/git/gcc(以及可选 rust/lamina) 挂载到 /test
+# （前置：extra 源码已在，见下方 vf2-extra-sources）
+make vf2-extra
+```
+
+可选覆盖：
+
+```sh
+# vf2-sdcard 换用其他 ext4 镜像（空值=只出根文件系统卡）
+make vf2-sdcard VF2_EXTRA_IMAGE=/path/to/extra.img
+
+# vf2-extra 选择/追加 extra 包（默认 "vim git gcc"，可加 rust）
+make vf2-extra EXTRA_PACKAGES='vim git gcc rust' EXTRA_IMAGE_MB=2048
+
+# 退回已在真机验证的 NOMMU bring-up 内核（无法运行依赖 fork/mmap 的评测程序）
+make vf2-sdcard VF2_MMU=0   # 三个目标都支持 VF2_MMU=0
+```
+
+完整 extra 工具链镜像需要 extra 源码（`make vf2-extra-sources` 或 `vf2-extra`
+自动拉取 git 子模块）；构建 gcc 会引导 musl-cross-make，耗时较长，属正常现象。
+
 ## 一、构建(全部从源码)
 
 ```sh

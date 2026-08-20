@@ -20,6 +20,10 @@ WORK_DIR="${WORK_DIR:-/tmp/vf2-firmware}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/vf2-firmware}"
 CROSS_COMPILE="${CROSS_COMPILE:-riscv64-linux-gnu-}"
 JOBS="${JOBS:-$(nproc)}"
+# U-Boot/OpenSBI/kernel console baud.  The default 115200 is fragile over
+# marginal USB-TTL wiring (dropped characters); lower it (e.g. BAUDRATE=9600)
+# for a tolerant bring-up link.
+BAUDRATE="${BAUDRATE:-115200}"
 
 OPENSBI_REPO="${OPENSBI_REPO:-https://github.com/riscv-software-src/opensbi.git}"
 OPENSBI_REF="${OPENSBI_REF:-337c23dd66b821ac04a0f7bea313e7e7b30ecc49}"
@@ -59,7 +63,7 @@ make -C "$WORK_DIR/u-boot" starfive_visionfive2_defconfig
 # Keep OpenSBI's normal boot diagnostics visible on the board console.  The
 # generic Kconfig default suppresses them (0x1), which makes a failed handoff
 # indistinguishable from an SPL hang during bring-up.
-( cd "$WORK_DIR/u-boot" && ./scripts/config --set-val CONFIG_SPL_OPENSBI_SCRATCH_OPTIONS 0x0 && make olddefconfig )
+( cd "$WORK_DIR/u-boot" && ./scripts/config --set-val CONFIG_SPL_OPENSBI_SCRATCH_OPTIONS 0x0 && ./scripts/config --set-val CONFIG_BAUDRATE "$BAUDRATE" && make olddefconfig )
 make -C "$WORK_DIR/u-boot" CROSS_COMPILE="$CROSS_COMPILE" \
     OPENSBI="$WORK_DIR/opensbi/build/platform/generic/firmware/fw_dynamic.bin" \
     -j"$JOBS"
