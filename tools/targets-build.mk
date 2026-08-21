@@ -100,7 +100,10 @@ VF2_USER_BUILD_DIR  := user/build/riscv64-nommu
 # the validated VF2 build already relaxes -Werror for the same reason.
 VF2_KERNEL_WERROR   := KERNEL_WERROR=0
 endif
-VF2_EXTRA_IMAGE ?= $(wildcard sdcard-rv.img)
+# Prefer a user-supplied legacy image; otherwise build the normal extra image
+# so `make vf2-sdcard` is useful in a fresh checkout.
+VF2_EXTRA_IMAGE ?= $(or $(wildcard sdcard-rv.img),$(EXTRA_IMG))
+VF2_SDCARD_EXTRA_PREREQ := $(if $(filter file,$(origin VF2_EXTRA_IMAGE)),extra-img)
 
 _vf2_check_firmware:
 	@test -f build/vf2-firmware/u-boot-spl.bin.normal.out || \
@@ -120,7 +123,7 @@ _vf2_build_fastfetch: _vf2_build_base
 	$(MAKE) -C user ARCH=riscv64 NOMMU=$(VF2_NOMMU) OPT="-O3" PROFILE=full \
 		BUILD_DIR=$(VF2_USER_BUILD_DIR) fastfetch
 
-vf2-sdcard: _vf2_check_firmware _vf2_build_base
+vf2-sdcard: _vf2_check_firmware _vf2_build_base $(VF2_SDCARD_EXTRA_PREREQ)
 	@test -n "$(VF2_EXTRA_IMAGE)" || \
 	    { echo "error: no extra image; place sdcard-rv.img in the repo root or set VF2_EXTRA_IMAGE=/path/to.img" >&2; exit 1; }
 	@test -f "$(VF2_EXTRA_IMAGE)" || \

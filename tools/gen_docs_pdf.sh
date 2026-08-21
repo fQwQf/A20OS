@@ -71,6 +71,18 @@ SANS_FONT="DejaVu Sans"
 CJK_SANS_FONT="Noto Sans CJK SC"
 
 if have_cmd fc-list; then
+    # Fedora's variable Noto CJK collections expose a composite face index
+    # that xdvipdfmx cannot encode ("Invalid TTC index number").  Prefer the
+    # TeX Live Fandol OTF faces when that specific collection is selected.
+    CJK_SERIF_FILE="$(fc-match "$CJK_FONT" -f '%{file}' 2>/dev/null)"
+    CJK_SANS_FILE="$(fc-match "$CJK_SANS_FONT" -f '%{file}' 2>/dev/null)"
+    if [[ "$CJK_SERIF_FILE" == *-VF.ttc ]] && font_present "FandolSong"; then
+        CJK_FONT="FandolSong"
+    fi
+    if [[ "$CJK_SANS_FILE" == *-VF.ttc ]] && font_present "FandolHei"; then
+        CJK_SANS_FONT="FandolHei"
+    fi
+
     if ! font_present "$MAIN_FONT"; then
         missing_fonts+=("$MAIN_FONT")
     fi
