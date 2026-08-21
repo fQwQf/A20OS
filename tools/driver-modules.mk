@@ -16,7 +16,7 @@ else ifeq ($(ARCH),x86_64)
 DRVMOD_GCC := $(CCACHE_PREFIX)x86_64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -mno-red-zone -fno-pic -fno-pie \
                  -mcmodel=large -DCONFIG_X86_64 -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES := pc-spkr.a20drv virtio-blk.a20drv virtio-scsi.a20drv ahci.a20drv ps2.a20drv tpm.a20drv nvme.a20drv e1000.a20drv vmsvga.a20drv xhci.a20drv usb-hid.a20drv usb-storage.a20drv hda.a20drv virtio-snd.a20drv vinput.a20drv
+DRVMOD_MODULES := pc-spkr.a20drv virtio-blk.a20drv virtio-scsi.a20drv ahci.a20drv ps2.a20drv tpm.a20drv nvme.a20drv e1000.a20drv vmsvga.a20drv virtio-gpu.a20drv xhci.a20drv usb-hid.a20drv usb-storage.a20drv hda.a20drv virtio-snd.a20drv vinput.a20drv
 else ifeq ($(ARCH),aarch64)
 DRVMOD_GCC := $(CCACHE_PREFIX)aarch64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=large \
