@@ -566,7 +566,7 @@ static int user_resolve_leaf(task_t *t, uint64_t va, int write,
     va = (uint64_t)(vaddr_t)va;
 #ifdef CONFIG_NOMMU
     (void)t; (void)write;
-    *kaddr_out = (void *)va;
+    *kaddr_out = (void *)(uintptr_t)va;
     *avail_out = USER_VA_LIMIT > va ? USER_VA_LIMIT - va : 0;
     return 0;
 #else
@@ -631,12 +631,12 @@ int user_buffer_segment(const void *user, size_t len, int write,
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
-    if (!user_range_ok((uint64_t)src, n)) return -EFAULT;
+    if (!user_range_ok((uint64_t)(uintptr_t)src, n)) return -EFAULT;
     size_t copied = 0;
     while (copied < n) {
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, (uint64_t)src + copied, 0, &kaddr, &chunk) < 0)
+        if (user_resolve_leaf(t, (uint64_t)(uintptr_t)src + copied, 0, &kaddr, &chunk) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
@@ -650,12 +650,12 @@ long copy_from_user(void *dst, const void *src, size_t n) {
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
-    if (!user_range_ok((uint64_t)dst, n)) return -EFAULT;
+    if (!user_range_ok((uint64_t)(uintptr_t)dst, n)) return -EFAULT;
     size_t copied = 0;
     while (copied < n) {
         void *kaddr;
         size_t chunk;
-        if (user_resolve_leaf(t, (uint64_t)dst + copied, 1, &kaddr, &chunk) < 0)
+        if (user_resolve_leaf(t, (uint64_t)(uintptr_t)dst + copied, 1, &kaddr, &chunk) < 0)
             return -EFAULT;
         if (chunk > n - copied)
             chunk = n - copied;
@@ -672,7 +672,7 @@ long user_strncpy(char *dst, const char *src, size_t max) {
     if (max == 0) return -EINVAL;
     size_t i = 0;
     while (i < max - 1) {
-        uint64_t va = (uint64_t)(src + i);
+        uint64_t va = (uint64_t)(uintptr_t)(src + i);
         if (!user_range_ok(va, 1)) return -EFAULT;
         void *kaddr;
         size_t chunk;
@@ -696,7 +696,7 @@ long user_strnlen(const char *src, size_t max) {
     if (max == 0) return 0;
     size_t i = 0;
     while (i < max) {
-        uint64_t va = (uint64_t)(src + i);
+        uint64_t va = (uint64_t)(uintptr_t)(src + i);
         if (!user_range_ok(va, 1)) return -EFAULT;
         void *kaddr;
         size_t chunk;

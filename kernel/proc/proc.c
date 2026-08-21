@@ -663,10 +663,10 @@ vaddr_t proc_brk(vaddr_t newbrk) {
 // 创建内存映射（mmap 系统调用的实现）
 vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off) {
     task_t *t = proc_current();
-    if (!t || !t->mm) return (uint64_t)-1;
+    if (!t || !t->mm) return (vaddr_t)-1;
 
     size_t map_len = ROUND_UP(len, PAGE_SIZE);
-    if (map_len == 0) return (uint64_t)-EINVAL;
+    if (map_len == 0) return (vaddr_t)-EINVAL;
 
     mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
@@ -677,7 +677,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
         if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
             spin_unlock_irqrestore(&t->mm->lock, lock_flags);
             mm_tlb_invalidate_finish(t->mm);
-            return (uint64_t)-EINVAL;
+            return (vaddr_t)-EINVAL;
         }
 
         ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, fd,

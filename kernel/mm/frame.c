@@ -27,12 +27,9 @@ static void frame_trace(pfn_t pfn)
                  FRAME_TRACE_ENTRIES;
     g_frame_trace[i].tick = timer_get_ticks();
     g_frame_trace[i].pfn  = pfn;
-    /* Deliberate: capture the allocator call chain for frame-trace dumps;
-     * the diagnostic value outweighs the nonzero-argument caveat. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wframe-address"
-    g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(2);
-#pragma GCC diagnostic pop
+    /* Level zero is supported by every target compiler; deeper levels are
+     * rejected outright on ARM even when -Wframe-address is suppressed. */
+    g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(0);
     g_frame_trace[i].pid  = proc_current() ? proc_task_pid(proc_current()) : -1;
 }
 
@@ -417,6 +414,11 @@ void pfa_free(pfn_t pfn, int order) {
 
     int actual_order = (int)pfa.meta[pfn].order;
     if (actual_order < 0 || actual_order > MAX_ORDER) actual_order = order;
+    /* pfa_free() releases the allocation's owning reference.  Clear it
+     * before buddy selection so that, when the lower buddy becomes the
+     * merged head, fl_push_clean() does not leave the released half marked
+     * as independently live. */
+    pfa.meta[pfn].refcount = 0;
     pfa.free_frames += (1u << actual_order);
     const pfa_range_t *range = pfa_range_for_pfn(pfn);
     if (!range) {

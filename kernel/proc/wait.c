@@ -13,7 +13,6 @@
 
 /* Count of tasks parked in wait4() with waiting_for_child set.  Guarded by
  * proc_lock; bumped in proc_wait4() and dropped on wake or forced exit. */
-unsigned long g_proc_waiting_child_waiter_count;
 
 static void wait_accumulate_child_time(task_t *parent, task_t *child)
 {

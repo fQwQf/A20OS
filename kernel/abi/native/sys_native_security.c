@@ -173,7 +173,7 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
 
 int64_t sys_a20_security_get_context(const a20_syscall_args_t *args)
 {
-    a20_security_context_t *out = (a20_security_context_t *)A20_ARG(0);
+    a20_security_context_t *out = (a20_security_context_t *)(uintptr_t)A20_ARG(0);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -203,7 +203,7 @@ int64_t sys_a20_security_get_context(const a20_syscall_args_t *args)
  */
 int64_t sys_a20_security_set_context(const a20_syscall_args_t *args)
 {
-    a20_security_context_t *uargs = (a20_security_context_t *)A20_ARG(0);
+    a20_security_context_t *uargs = (a20_security_context_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_security_context_t ctx;

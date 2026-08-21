@@ -138,7 +138,7 @@ static int64_t a20_native_copy_join(a20_handle_t dir_h, uint64_t upath,
                                     uint32_t path_len, char *out)
 {
     char path[MAX_PATH_LEN];
-    if (copy_path_from_user(path, (const char *)upath, path_len) < 0)
+    if (copy_path_from_user(path, (const char *)(uintptr_t)upath, path_len) < 0)
         return -A20_ERR_FAULT;
     return a20_native_join_dir_path(dir_h, path, out);
 }
@@ -147,14 +147,14 @@ static int64_t a20_native_copy_join(a20_handle_t dir_h, uint64_t upath,
 
 int64_t sys_a20_path_create(const a20_syscall_args_t *args)
 {
-    a20_path_create_args_t *uargs = (a20_path_create_args_t *)A20_ARG(0);
+    a20_path_create_args_t *uargs = (a20_path_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_path_create_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char kpath[MAX_PATH_LEN];
-    if (copy_path_from_user(kpath, (const char *)kargs.path, (uint32_t)kargs.path_len) < 0)
+    if (copy_path_from_user(kpath, (const char *)(uintptr_t)kargs.path, (uint32_t)kargs.path_len) < 0)
         return -A20_ERR_FAULT;
 
     int dirfd;
@@ -226,7 +226,7 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_unlink(const a20_syscall_args_t *args)
 {
-    const char *upath = (const char *)A20_ARG(0);
+    const char *upath = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t path_len = (uint32_t)A20_ARG(1);
     char kpath[MAX_PATH_LEN];
     if (copy_path_from_user(kpath, upath, path_len) < 0)
@@ -242,9 +242,9 @@ int64_t sys_a20_path_unlink(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_rename(const a20_syscall_args_t *args)
 {
-    const char *uold = (const char *)A20_ARG(0);
+    const char *uold = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t old_len = (uint32_t)A20_ARG(1);
-    const char *unew = (const char *)A20_ARG(2);
+    const char *unew = (const char *)(uintptr_t)A20_ARG(2);
     uint32_t new_len = (uint32_t)A20_ARG(3);
 
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
@@ -261,7 +261,7 @@ int64_t sys_a20_path_rename(const a20_syscall_args_t *args)
 int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
 {
     a20_handle_t dir_h = (a20_handle_t)A20_ARG(0);
-    void *buf = (void *)A20_ARG(1);
+    void *buf = (void *)(uintptr_t)A20_ARG(1);
     size_t len = (size_t)A20_ARG(2);
 
     if (!buf || len == 0) return -A20_ERR_INVALID_ARGUMENT;
@@ -311,9 +311,9 @@ int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_link(const a20_syscall_args_t *args)
 {
-    const char *uold = (const char *)A20_ARG(0);
+    const char *uold = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t old_len = (uint32_t)A20_ARG(1);
-    const char *unew = (const char *)A20_ARG(2);
+    const char *unew = (const char *)(uintptr_t)A20_ARG(2);
     uint32_t new_len = (uint32_t)A20_ARG(3);
 
     char kold[MAX_PATH_LEN], knew[MAX_PATH_LEN];
@@ -329,9 +329,9 @@ int64_t sys_a20_path_link(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_symlink(const a20_syscall_args_t *args)
 {
-    const char *utarget = (const char *)A20_ARG(0);
+    const char *utarget = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t tgt_len = (uint32_t)A20_ARG(1);
-    const char *ulinkpath = (const char *)A20_ARG(2);
+    const char *ulinkpath = (const char *)(uintptr_t)A20_ARG(2);
     uint32_t lnk_len = (uint32_t)A20_ARG(3);
 
     char ktgt[MAX_PATH_LEN], klnk[MAX_PATH_LEN];
@@ -346,9 +346,9 @@ int64_t sys_a20_path_symlink(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_readlink(const a20_syscall_args_t *args)
 {
-    const char *upath = (const char *)A20_ARG(0);
+    const char *upath = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t path_len = (uint32_t)A20_ARG(1);
-    char *ubuf = (char *)A20_ARG(2);
+    char *ubuf = (char *)(uintptr_t)A20_ARG(2);
     size_t bufsz = (size_t)A20_ARG(3);
 
     char kpath[MAX_PATH_LEN];
@@ -366,7 +366,7 @@ int64_t sys_a20_path_readlink(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_resolve(const a20_syscall_args_t *args)
 {
-    const char *upath = (const char *)A20_ARG(0);
+    const char *upath = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t path_len = (uint32_t)A20_ARG(1);
 
     char kpath[MAX_PATH_LEN];
@@ -384,7 +384,7 @@ int64_t sys_a20_path_resolve(const a20_syscall_args_t *args)
 int64_t sys_a20_fs_stat(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    a20_fs_stat_t *out = (a20_fs_stat_t *)A20_ARG(1);
+    a20_fs_stat_t *out = (a20_fs_stat_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -433,7 +433,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
     /* Temporal capability management (docs/native-abi/03-handle.md §2.6).
      * The user ABI speaks CLOCK_MONOTONIC nanoseconds; entries store ticks. */
     if (op == A20_HANDLE_CTRL_SET_TEMPORAL) {
-        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)arg0;
+        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)(uintptr_t)arg0;
         if (!uta) {
             r = -A20_ERR_FAULT;
             goto out_entry;
@@ -467,7 +467,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
                                        ta.temporal_flags);
     }
     if (op == A20_HANDLE_CTRL_GET_TEMPORAL) {
-        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)arg0;
+        a20_handle_temporal_args_t *uta = (a20_handle_temporal_args_t *)(uintptr_t)arg0;
         if (!uta) {
             r = -A20_ERR_FAULT;
             goto out_entry;
@@ -492,7 +492,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
     }
     if (op == A20_HANDLE_CTRL_SET_LABEL) {
         /* Versioned argument (raise-only label). */
-        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)arg0;
+        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)(uintptr_t)arg0;
         if (!ui || arg1 != 0) {
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
@@ -550,7 +550,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
-        a20_winsize_args_t *uw = (a20_winsize_args_t *)arg0;
+        a20_winsize_args_t *uw = (a20_winsize_args_t *)(uintptr_t)arg0;
         if (!uw) {
             r = -A20_ERR_FAULT;
             goto out_entry;
@@ -598,7 +598,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
-        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)arg0;
+        a20_ctl_int_args_t *ui = (a20_ctl_int_args_t *)(uintptr_t)arg0;
         if (!ui) {
             r = -A20_ERR_FAULT;
             goto out_entry;
@@ -623,7 +623,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
-        a20_ctl_flags_args_t *uf = (a20_ctl_flags_args_t *)arg0;
+        a20_ctl_flags_args_t *uf = (a20_ctl_flags_args_t *)(uintptr_t)arg0;
         if (!uf) {
             r = -A20_ERR_FAULT;
             goto out_entry;
@@ -661,18 +661,18 @@ out_entry:
 
 int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
 {
-    a20_fs_mount_args_t *uargs = (a20_fs_mount_args_t *)A20_ARG(0);
+    a20_fs_mount_args_t *uargs = (a20_fs_mount_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_fs_mount_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char ksrc[MAX_PATH_LEN], ktgt[MAX_PATH_LEN], kfs[64];
-    if (copy_path_from_user(ksrc, (const char *)kargs.source, kargs.source_len) < 0)
+    if (copy_path_from_user(ksrc, (const char *)(uintptr_t)kargs.source, kargs.source_len) < 0)
         return -A20_ERR_FAULT;
-    if (copy_path_from_user(ktgt, (const char *)kargs.target, kargs.target_len) < 0)
+    if (copy_path_from_user(ktgt, (const char *)(uintptr_t)kargs.target, kargs.target_len) < 0)
         return -A20_ERR_FAULT;
-    if (copy_path_from_user(kfs, (const char *)kargs.fs_type, kargs.fs_type_len) < 0)
+    if (copy_path_from_user(kfs, (const char *)(uintptr_t)kargs.fs_type, kargs.fs_type_len) < 0)
         return -A20_ERR_FAULT;
 
     char full_tgt[MAX_PATH_LEN];
@@ -686,7 +686,7 @@ int64_t sys_a20_fs_mount(const a20_syscall_args_t *args)
 
 int64_t sys_a20_fs_umount(const a20_syscall_args_t *args)
 {
-    const char *utarget = (const char *)A20_ARG(0);
+    const char *utarget = (const char *)(uintptr_t)A20_ARG(0);
     uint32_t tgt_len = (uint32_t)A20_ARG(1);
     uint64_t flags = A20_ARG(2);
     (void)flags;
@@ -710,7 +710,7 @@ int64_t sys_a20_fs_sync(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_unlink_at(const a20_syscall_args_t *args)
 {
-    a20_path_unlink_args_t *uargs = (a20_path_unlink_args_t *)A20_ARG(0);
+    a20_path_unlink_args_t *uargs = (a20_path_unlink_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_unlink_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
@@ -727,7 +727,7 @@ int64_t sys_a20_path_unlink_at(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_rename_at(const a20_syscall_args_t *args)
 {
-    a20_path_rename_args_t *uargs = (a20_path_rename_args_t *)A20_ARG(0);
+    a20_path_rename_args_t *uargs = (a20_path_rename_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_rename_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
@@ -745,7 +745,7 @@ int64_t sys_a20_path_rename_at(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_link_at(const a20_syscall_args_t *args)
 {
-    a20_path_link_args_t *uargs = (a20_path_link_args_t *)A20_ARG(0);
+    a20_path_link_args_t *uargs = (a20_path_link_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_link_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
@@ -766,13 +766,13 @@ int64_t sys_a20_path_link_at(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_symlink_at(const a20_syscall_args_t *args)
 {
-    a20_path_symlink_args_t *uargs = (a20_path_symlink_args_t *)A20_ARG(0);
+    a20_path_symlink_args_t *uargs = (a20_path_symlink_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_symlink_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char target[MAX_PATH_LEN], link_path[MAX_PATH_LEN];
-    if (copy_path_from_user(target, (const char *)kargs.target,
+    if (copy_path_from_user(target, (const char *)(uintptr_t)kargs.target,
                              kargs.target_len) < 0)
         return -A20_ERR_FAULT;
     int64_t r = a20_native_copy_join(kargs.dir, kargs.linkpath,
@@ -783,7 +783,7 @@ int64_t sys_a20_path_symlink_at(const a20_syscall_args_t *args)
 
 int64_t sys_a20_path_readlink_at(const a20_syscall_args_t *args)
 {
-    a20_path_readlink_args_t *uargs = (a20_path_readlink_args_t *)A20_ARG(0);
+    a20_path_readlink_args_t *uargs = (a20_path_readlink_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_path_readlink_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
@@ -800,7 +800,7 @@ int64_t sys_a20_path_readlink_at(const a20_syscall_args_t *args)
     int vr = vfs_readlinkat(-1, full, buffer, size);
     if (vr < 0)
         return a20_native_vfs_result(vr);
-    if (vr > 0 && copy_to_user((void *)kargs.buf, buffer, (size_t)vr) < 0)
+    if (vr > 0 && copy_to_user((void *)(uintptr_t)kargs.buf, buffer, (size_t)vr) < 0)
         return -A20_ERR_FAULT;
     kargs.out_len = (uint64_t)vr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)

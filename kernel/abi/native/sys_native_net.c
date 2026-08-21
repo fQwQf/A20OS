@@ -108,7 +108,7 @@ int64_t sys_a20_net_socket(const a20_syscall_args_t *args)
 int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    const void *addr = (const void *)A20_ARG(1);
+    const void *addr = (const void *)(uintptr_t)A20_ARG(1);
     size_t addrlen = (size_t)A20_ARG(2);
 
     task_t *cur = proc_current();
@@ -129,7 +129,7 @@ int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
 int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    const void *addr = (const void *)A20_ARG(1);
+    const void *addr = (const void *)(uintptr_t)A20_ARG(1);
     size_t addrlen = (size_t)A20_ARG(2);
 
     task_t *cur = proc_current();
@@ -150,8 +150,8 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
 int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    void *addr = (void *)A20_ARG(1);
-    size_t *addrlen = (size_t *)A20_ARG(2);
+    void *addr = (void *)(uintptr_t)A20_ARG(1);
+    size_t *addrlen = (size_t *)(uintptr_t)A20_ARG(2);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -196,7 +196,7 @@ int64_t sys_a20_net_listen(const a20_syscall_args_t *args)
 
 int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
 {
-    a20_net_sendmsg_args_t *uargs = (a20_net_sendmsg_args_t *)A20_ARG(0);
+    a20_net_sendmsg_args_t *uargs = (a20_net_sendmsg_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_net_sendmsg_args_t kargs;
@@ -216,7 +216,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
     size_t kaddrlen = 0;
     if (kargs.addr) {
         kaddrlen = sizeof(a20_net_addr_t);
-        if (copy_from_user(kaddr, (const void *)kargs.addr, kaddrlen) < 0) {
+        if (copy_from_user(kaddr, (const void *)(uintptr_t)kargs.addr, kaddrlen) < 0) {
             a20_object_release(entry.object, entry.type);
             return -A20_ERR_FAULT;
         }
@@ -226,7 +226,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
     uint64_t total_sent = 0;
     char kbuf[512];
 
-    a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
+    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
         if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
@@ -237,7 +237,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
         while (done < v.len) {
             size_t chunk = v.len - done;
             if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-            if (copy_from_user(kbuf, (const void *)(v.base + done), chunk) < 0) {
+            if (copy_from_user(kbuf, (const void *)(uintptr_t)(v.base + done), chunk) < 0) {
                 r = -A20_ERR_FAULT;
                 goto out_entry;
             }
@@ -266,7 +266,7 @@ out_entry:
 
 int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
 {
-    a20_net_recvmsg_args_t *uargs = (a20_net_recvmsg_args_t *)A20_ARG(0);
+    a20_net_recvmsg_args_t *uargs = (a20_net_recvmsg_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_net_recvmsg_args_t kargs;
@@ -289,7 +289,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
     size_t kaddrlen = kargs.addr ? sizeof(kaddr) : 0;
     int have_addr = 0;
 
-    a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
+    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
         if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
@@ -308,7 +308,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
                 goto out_entry;
             }
             if (n == 0) break;
-            if (copy_to_user((void *)(v.base + done), kbuf, (size_t)n) < 0) {
+            if (copy_to_user((void *)(uintptr_t)(v.base + done), kbuf, (size_t)n) < 0) {
                 r = -A20_ERR_FAULT;
                 goto out_entry;
             }
@@ -325,7 +325,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
     if (have_addr) {
         size_t out_len = kaddrlen < sizeof(a20_net_addr_t)
                          ? kaddrlen : sizeof(a20_net_addr_t);
-        if (copy_to_user((void *)kargs.addr, kaddr, out_len) < 0)
+        if (copy_to_user((void *)(uintptr_t)kargs.addr, kaddr, out_len) < 0)
             return -A20_ERR_FAULT;
     }
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
@@ -342,7 +342,7 @@ int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
     int domain = (int)A20_ARG(0);
     int type = (int)A20_ARG(1);
     int protocol = (int)A20_ARG(2);
-    a20_handle_t *out = (a20_handle_t *)A20_ARG(3);
+    a20_handle_t *out = (a20_handle_t *)(uintptr_t)A20_ARG(3);
     if (!out) return -A20_ERR_FAULT;
 
     int gfds[2];
@@ -379,8 +379,8 @@ int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
 int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    void *addr = (void *)A20_ARG(1);
-    size_t *addrlen = (size_t *)A20_ARG(2);
+    void *addr = (void *)(uintptr_t)A20_ARG(1);
+    size_t *addrlen = (size_t *)(uintptr_t)A20_ARG(2);
     int peer = (int)A20_ARG(3);
 
     task_t *cur = proc_current();

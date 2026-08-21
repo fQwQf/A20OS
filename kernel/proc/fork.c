@@ -233,10 +233,10 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     memset(kstack, 0, KERNEL_STACK_SIZE);
     t->kstack_base = kstack;
 
-    uint64_t ks_top = (uint64_t)kstack + KERNEL_STACK_SIZE;
+    uint64_t ks_top = (uint64_t)(uintptr_t)kstack + KERNEL_STACK_SIZE;
 
     if (parent->trap_ctx) {
-        trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
+        trap_context_t *trap = (trap_context_t *)(uintptr_t)(ks_top - sizeof(trap_context_t));
         *trap = *parent->trap_ctx;
         TRAP_CTX_SET_RET(trap, 0);
         uint64_t child_as = t->mm ? mm_address_space_token(t->mm) :
@@ -258,21 +258,21 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
          */
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, trap);
         t->first_kernel_entry = (uintptr_t)user_trap_return;
-        ctx->ra = (uint64_t)proc_task_first_entry;
+        ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
         ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(ctx, TRAP_CTX_TP(trap));
         TASK_CTX_PAGE_TABLE(ctx) = child_as;
         TASK_CTX_STATUS(ctx) = arch_task_user_resume_status();
         arch_task_context_set_initial_sp(ctx, trap, ks_top);
-        t->kstack = (uint64_t)ctx;
+        t->kstack = (uint64_t)(uintptr_t)ctx;
     } else {
         task_context_t *ctx = arch_task_context_base(kstack, ks_top, NULL);
         memset(ctx, 0, sizeof(*ctx));
         t->first_kernel_entry = (uintptr_t)idle_loop;
-        ctx->ra = (uint64_t)proc_task_first_entry;
-        ctx->tp = (uint64_t)t;
+        ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
+        ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_initial_sp(ctx, NULL, ks_top);
-        t->kstack = (uint64_t)ctx;
+        t->kstack = (uint64_t)(uintptr_t)ctx;
     }
 
     if ((flags & CLONE_PARENT_SETTID) && ptid) {
