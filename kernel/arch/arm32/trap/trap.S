@@ -3,7 +3,7 @@
 
     .equ MODE_USR, 0x10
     .equ MODE_SVC, 0x13
-    .equ TASK_TRAP_CTX,         32
+    .equ TASK_TRAP_CTX,         40
 
     .equ TF_SP,                 52
     .equ TF_LR,                 56
@@ -148,14 +148,20 @@ trap_common:
 2:
     str     r2, [r1, #8]               /* trap.pc */
 
-    /* Capture DFAR for data aborts. */
+    /* Capture DFAR for data aborts and IFAR for prefetch aborts. */
     ldr     r2, =CAUSE_STORE_PAGE_FAULT
     ldr     r3, =arm32_trap_flags
     ldr     r3, [r3]
     cmp     r3, r2
     cmpne   r3, #CAUSE_LOAD_PAGE_FAULT
+    beq     7f
+    cmp     r3, #CAUSE_INSN_PAGE_FAULT
     bne     3f
-    mrc     p15, 0, r2, c6, c0, 0
+    mrc     p15, 0, r2, c6, c0, 2       /* IFAR */
+    b       8f
+7:
+    mrc     p15, 0, r2, c6, c0, 0       /* DFAR */
+8:
     ldr     r3, =arm32_fault_addr
     str     r2, [r3]
 3:
