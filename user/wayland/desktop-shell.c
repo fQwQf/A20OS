@@ -32,8 +32,10 @@ static int create_buffer(struct desktop_state *state, int width, int height,
         close(fd);
         return -1;
     }
-    for (size_t i = 0; i < size / sizeof(*pixels); i++)
-        pixels[i] = color;
+    for (size_t i = 0; i < size / sizeof(*pixels); i++) {
+        uint32_t shade = (uint32_t)((i % (size_t)width) / 128u) & 7u;
+        pixels[i] = color + shade * 0x00030303u;
+    }
     struct wl_shm_pool *pool = wl_shm_create_pool(state->shm, fd, (int32_t)size);
     close(fd);
     if (!pool)
@@ -142,6 +144,7 @@ int main(void)
     weston_desktop_shell_desktop_ready(state.shell);
     if (wl_display_flush(state.display) < 0)
         return 1;
+    fprintf(stderr, "AUTOSTART_DONE\n");
     while (wl_display_dispatch(state.display) >= 0)
         ;
     return 0;
