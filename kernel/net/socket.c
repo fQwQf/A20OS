@@ -107,11 +107,17 @@ net_socket_t *net_find_bound_socket_locked(int domain, int type,
     return NULL;
 }
 
-static int net_bind_domains_overlap(int a, int b)
+static int net_bind_sockets_overlap(net_socket_t *a, net_socket_t *b)
 {
-    if (a == b)
+    if (a->domain == b->domain)
         return 1;
-    return (a == AF_INET && b == AF_INET6) || (a == AF_INET6 && b == AF_INET);
+    /* IPv4 vs IPv6 only conflicts when the IPv6 side is dual-stack.
+     * A v6-only (IPV6_V6ONLY) listener shares the port with IPv4. */
+    if (a->domain == AF_INET && b->domain == AF_INET6)
+        return !b->ipv6_v6only;
+    if (a->domain == AF_INET6 && b->domain == AF_INET)
+        return !a->ipv6_v6only;
+    return 0;
 }
 
 static int net_bind_reuse_allowed(net_socket_t *new_s, net_socket_t *old_s)
@@ -120,8 +126,8 @@ static int net_bind_reuse_allowed(net_socket_t *new_s, net_socket_t *old_s)
         return 0;
     if (new_s->type == SOCK_RAW)
         return new_s->protocol == old_s->protocol;
-    if (new_s->type != SOCK_DGRAM)
-        return 0;
+    if (new_s->type == SOCK_STREAM)
+        return new_s->reuseport && old_s->reuseport;
     return (new_s->reuseaddr && old_s->reuseaddr) ||
            (new_s->reuseport && old_s->reuseport);
 }
@@ -139,7 +145,7 @@ static net_socket_t *net_find_bind_conflict_locked(net_socket_t *new_s,
         net_socket_t *s = g_sockets[i];
         if (!s || s == new_s || !s->bound || s->type != new_s->type)
             continue;
-        if (!net_bind_domains_overlap(new_s->domain, s->domain))
+        if (!net_bind_sockets_overlap(new_s, s))
             continue;
         uint16_t s_port = 0;
         if (net_sockaddr_port(s->local, s->local_len, &s_port) < 0 ||

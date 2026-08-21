@@ -143,6 +143,7 @@ typedef struct net_socket {
     int tcp_nodelay;
     int reuseaddr;
     int reuseport;
+    int ipv6_v6only;
     int keepalive;
     int keep_idle;
     int keep_intvl;
