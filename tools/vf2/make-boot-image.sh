@@ -94,7 +94,10 @@ echo "==> FIT: $FW_DIR/a20os.itb"
 
 # ---- raw SD card image ------------------------------------------------
 IMG="$FW_DIR/a20os-sd.img"
-dd if=/dev/zero of="$IMG" bs=1M count="$SD_IMAGE_SIZE_MB" status=none
+# conv=sparse keeps the image sparse: a multi-gigabyte EXTRA_IMG costs only as
+# much real disk as its used blocks, while dd -> /dev/sdX still writes the
+# holes as zeros.
+dd if=/dev/zero of="$IMG" bs=1M count="$SD_IMAGE_SIZE_MB" conv=sparse status=none
 sgdisk -Z "$IMG" >/dev/null
 sgdisk -n "1:$SPL_PART_SECTOR:+1M" -t "1:$SPL_PART_GUID" -c 1:spl "$IMG" >/dev/null
 sgdisk -n "2:$FIT_PART_SECTOR:+12M" -t "2:$FIT_PART_GUID" -c 2:uboot "$IMG" >/dev/null
@@ -107,16 +110,16 @@ if [ -n "$EXTRA_IMG" ]; then
         -t "4:8300" -c 4:a20os-extra "$IMG" >/dev/null
 fi
 dd if="$FW_DIR/u-boot-spl.bin.normal.out" of="$IMG" bs=512 \
-    seek="$SPL_PART_SECTOR" conv=notrunc status=none
+    seek="$SPL_PART_SECTOR" conv=notrunc,sparse status=none
 dd if="$FW_DIR/a20os.itb" of="$IMG" bs=512 \
-    seek="$FIT_PART_SECTOR" conv=notrunc status=none
+    seek="$FIT_PART_SECTOR" conv=notrunc,sparse status=none
 if [ -n "$ROOTFS_IMG" ]; then
     dd if="$ROOTFS_IMG" of="$IMG" bs=512 \
-        seek="$ROOTFS_PART_SECTOR" conv=notrunc status=none
+        seek="$ROOTFS_PART_SECTOR" conv=notrunc,sparse status=none
 fi
 if [ -n "$EXTRA_IMG" ]; then
     dd if="$EXTRA_IMG" of="$IMG" bs=512 \
-        seek="$EXTRA_PART_SECTOR" conv=notrunc status=none
+        seek="$EXTRA_PART_SECTOR" conv=notrunc,sparse status=none
 fi
 echo "==> SD image: $IMG (write with: dd if=$IMG of=/dev/sdX bs=4M conv=fsync)"
 sgdisk -p "$IMG"
