@@ -72,11 +72,13 @@ static int elf_alloc_nommu_image(mm_struct_t *mm, vaddr_t min_vaddr,
 /*  Utilities                                                         */
 /* ------------------------------------------------------------------ */
 
+#ifndef CONFIG_NOMMU
 static uint64_t elf_aslr_bias(void) {
     uint64_t r = random_u64();
     uint64_t bits = (r ^ (r >> 29) ^ (r >> 47)) & ((1UL << ASLR_BITS) - 1);
     return bits << 16;
 }
+#endif
 
 static int elf_path_has_driver_suffix(const char *path)
 {
@@ -143,9 +145,11 @@ static uint64_t seg_flags(uint32_t p_flags) {
     return mm_prot_to_pte_flags(prot);
 }
 
+#ifndef CONFIG_NOMMU
 static uint64_t pte_to_vm_flags(pte_t pte_flags) {
     return VM_ANON | mm_pte_flags_to_vm_flags(pte_flags);
 }
+#endif
 
 static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                        uint64_t vm_flags, pte_t pte_flags) {
@@ -414,26 +418,30 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
                        vaddr_t va, uint64_t memsz,
                        const seg_src_t *src, uint64_t filesz,
                        pte_t flags) {
-    vaddr_t start = va & ~(vaddr_t)(PAGE_SIZE - 1);
-    vaddr_t end   = ROUND_UP(va + memsz, PAGE_SIZE);
-    char tmp[PAGE_SIZE];
-
 #ifdef CONFIG_NOMMU
+    (void)mm;
+    (void)pgdir;
+    (void)flags;
     /* In NOMMU, va is the physical address. We assume the system/loader 
      * has ensured this memory is available for this segment. */
     if (src->kind == SEG_BUF) {
-        memcpy((void *)va, src->buf.data, filesz);
+        memcpy((void *)(uintptr_t)va, src->buf.data, filesz);
     } else {
-        int nr = vfs_pread(src->fd.fd, (void *)va, filesz, src->fd.offset);
+        int nr = vfs_pread(src->fd.fd, (void *)(uintptr_t)va, filesz,
+                           src->fd.offset);
         if (nr != (int)filesz)
             kerr("[ELF] short read: %d/%lu\n", nr, (unsigned long)filesz);
         if (nr < 0) return nr;
     }
     if (memsz > filesz) {
-        memset((void *)(va + filesz), 0, memsz - filesz);
+        memset((void *)(uintptr_t)(va + filesz), 0, memsz - filesz);
     }
     return 0;
 #else
+    vaddr_t start = va & ~(vaddr_t)(PAGE_SIZE - 1);
+    vaddr_t end   = ROUND_UP(va + memsz, PAGE_SIZE);
+    char tmp[PAGE_SIZE];
+
     if (src->kind == SEG_FD) {
 #ifndef CONFIG_ELF_EAGER_LOAD
         int r = map_fd_segment_lazy(mm, pgdir, va, memsz, src->fd.fd,
@@ -513,6 +521,7 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
 
 static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) {
 #ifdef CONFIG_NOMMU
+    (void)pgdir;
     size_t stack_size = (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
     size_t stack_alloc_size = stack_size + PAGE_SIZE;
     void *stack_alloc = kmalloc(stack_alloc_size);
@@ -566,6 +575,7 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
     pte_t pte_flags = mm_user_brk_pte_flags();
 
 #ifdef CONFIG_NOMMU
+    (void)pgdir;
     void *tls_mem = kmalloc(total_pages * PAGE_SIZE);
     if (!tls_mem) return -ENOMEM;
     mm_track_nommu_alloc(mm, tls_mem, total_pages * PAGE_SIZE, NOMMU_ALLOC_TLS);
@@ -736,7 +746,9 @@ static int elf_load_interp_from_fd(mm_struct_t *mm, pt_root_t *pgdir,
                         seg_flags(phdrs[i].p_flags));
         if (r < 0) return r;
 
+#ifndef CONFIG_NOMMU
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
+#endif
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
 #ifdef CONFIG_NOMMU
         if (base == 0) base = load_bias + min_vaddr;
@@ -832,7 +844,9 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
                         &src, ph->p_filesz, seg_flags(ph->p_flags));
         if (r < 0) { pt_destroy_user(pgdir); return r; }
 
+#ifndef CONFIG_NOMMU
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
+#endif
         vaddr_t seg_end   = ROUND_UP(seg_va + ph->p_memsz, PAGE_SIZE);
 #ifdef CONFIG_NOMMU
         if (base == 0) base = load_bias + min_vaddr;
@@ -957,7 +971,9 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
                         seg_flags(phdrs[i].p_flags));
         if (r < 0) goto fail64;
 
+#ifndef CONFIG_NOMMU
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
+#endif
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
         if (phdrs[i].p_offset == 0) head_va = seg_va;
 #ifdef CONFIG_NOMMU
@@ -1119,7 +1135,9 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
                         seg_flags(phdrs[i].p_flags));
         if (r < 0) goto fail32;
 
+#ifndef CONFIG_NOMMU
         vaddr_t seg_start = seg_va & ~(vaddr_t)(PAGE_SIZE - 1);
+#endif
         vaddr_t seg_end   = ROUND_UP(seg_va + (uint64_t)phdrs[i].p_memsz, PAGE_SIZE);
         if (phdrs[i].p_offset == 0) head_va = seg_va;
 #ifdef CONFIG_NOMMU

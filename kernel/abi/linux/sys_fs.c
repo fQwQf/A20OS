@@ -952,7 +952,7 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
         if (copy_from_user(data, sigmask, sizeof(data)) < 0) return -EFAULT;
         if (data[0]) {
             uint64_t user_mask = 0;
-            if (copy_from_user(&user_mask, (void *)data[0], sizeof(user_mask)) < 0)
+            if (copy_from_user(&user_mask, (void *)(uintptr_t)data[0], sizeof(user_mask)) < 0)
                 return -EFAULT;
             if (!t->signals) return -EINVAL;
             saved_ss = (signal_state_t *)t->signals;

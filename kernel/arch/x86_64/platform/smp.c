@@ -20,10 +20,10 @@
 
 #if CONFIG_NR_CPUS > 1
 static uint8_t ap_stacks[CONFIG_NR_CPUS][AP_STACK_SIZE] __attribute__((aligned(16)));
-#endif
-static volatile unsigned ap_started[CONFIG_NR_CPUS];
 static int trampoline_ready;
 static int trampoline_usable = 1;
+#endif
+static volatile unsigned ap_started[CONFIG_NR_CPUS];
 
 extern char x86_64_ap_trampoline_start[];
 extern char x86_64_ap_trampoline_end[];

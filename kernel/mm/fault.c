@@ -220,6 +220,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
+    (void)access;
     return -1;
 #else
     if (!t->mm || !t->mm->pgdir) return -1;

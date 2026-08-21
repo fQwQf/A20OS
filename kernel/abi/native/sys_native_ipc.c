@@ -77,7 +77,7 @@ extern void a20_object_release(void *object, uint16_t type);
 
 int64_t sys_a20_event_queue_create(const a20_syscall_args_t *args)
 {
-    a20_event_queue_create_args_t *uargs = (a20_event_queue_create_args_t *)A20_ARG(0);
+    a20_event_queue_create_args_t *uargs = (a20_event_queue_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_queue_create_args_t kargs;
@@ -108,7 +108,7 @@ int64_t sys_a20_event_queue_create(const a20_syscall_args_t *args)
 
 int64_t sys_a20_event_watch(const a20_syscall_args_t *args)
 {
-    a20_event_watch_args_t *uargs = (a20_event_watch_args_t *)A20_ARG(0);
+    a20_event_watch_args_t *uargs = (a20_event_watch_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_watch_args_t kargs;
@@ -142,7 +142,7 @@ int64_t sys_a20_event_watch(const a20_syscall_args_t *args)
 
 int64_t sys_a20_event_wait(const a20_syscall_args_t *args)
 {
-    a20_event_wait_args_t *uargs = (a20_event_wait_args_t *)A20_ARG(0);
+    a20_event_wait_args_t *uargs = (a20_event_wait_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_wait_args_t kargs;
@@ -170,7 +170,7 @@ int64_t sys_a20_event_wait(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     uint32_t n = (uint32_t)r;
-    if (copy_to_user((void *)kargs.events, evbuf,
+    if (copy_to_user((void *)(uintptr_t)kargs.events, evbuf,
                      n * sizeof(a20_pending_event_t)) < 0)
         return -A20_ERR_FAULT;
     kargs.out_count = n;
@@ -202,7 +202,7 @@ int64_t sys_a20_event_cancel(const a20_syscall_args_t *args)
 
 int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
 {
-    a20_channel_create_args_t *uargs = (a20_channel_create_args_t *)A20_ARG(0);
+    a20_channel_create_args_t *uargs = (a20_channel_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_channel_create_args_t kargs;
@@ -213,7 +213,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
     a20_channel_type_t ktype;
     const a20_channel_type_t *typep = NULL;
     if (kargs.type) {
-        if (copy_from_user(&ktype, (const void *)kargs.type, sizeof(ktype)) < 0)
+        if (copy_from_user(&ktype, (const void *)(uintptr_t)kargs.type, sizeof(ktype)) < 0)
             return -A20_ERR_FAULT;
         if (ktype.version > 1)
             return -A20_ERR_INVALID_ARGUMENT;
@@ -265,7 +265,7 @@ int64_t sys_a20_channel_create(const a20_syscall_args_t *args)
 
 int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 {
-    a20_msg_send_args_t *uargs = (a20_msg_send_args_t *)A20_ARG(0);
+    a20_msg_send_args_t *uargs = (a20_msg_send_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_msg_send_args_t kargs;
@@ -299,7 +299,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
             r = -A20_ERR_NO_MEMORY;
             goto out_ep;
         }
-        if (copy_from_user(kdata, (const void *)kargs.data,
+        if (copy_from_user(kdata, (const void *)(uintptr_t)kargs.data,
                            kargs.data_len) < 0) {
             r = -A20_ERR_FAULT;
             goto out_data;
@@ -317,7 +317,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 
         a20_handle_t user_handles[A20_CH_MAX_HANDLES];
         a20_rights_t user_rights[A20_CH_MAX_HANDLES];
-        if (copy_from_user(user_handles, (void *)kargs.handles,
+        if (copy_from_user(user_handles, (void *)(uintptr_t)kargs.handles,
                            kargs.handle_count * sizeof(a20_handle_t)) < 0) {
             r = -A20_ERR_FAULT;
             goto out_data;
@@ -325,7 +325,7 @@ int64_t sys_a20_channel_send(const a20_syscall_args_t *args)
 
         uint32_t rights_count = 0;
         if (kargs.transfer_rights) {
-            if (copy_from_user(user_rights, (void *)kargs.transfer_rights,
+            if (copy_from_user(user_rights, (void *)(uintptr_t)kargs.transfer_rights,
                                kargs.handle_count * sizeof(a20_rights_t)) < 0) {
                 r = -A20_ERR_FAULT;
                 goto out_data;
@@ -376,7 +376,7 @@ out_ep:
 
 int64_t sys_a20_channel_recv(const a20_syscall_args_t *args)
 {
-    a20_msg_recv_args_t *uargs = (a20_msg_recv_args_t *)A20_ARG(0);
+    a20_msg_recv_args_t *uargs = (a20_msg_recv_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_msg_recv_args_t kargs;
@@ -480,18 +480,18 @@ int64_t sys_a20_channel_recv(const a20_syscall_args_t *args)
     kargs.out_data_len = out_len;
     kargs.out_handle_count = installed;
     if (out_len > 0 &&
-        copy_to_user((void *)kargs.data_buf, kdata, out_len) < 0) {
+        copy_to_user((void *)(uintptr_t)kargs.data_buf, kdata, out_len) < 0) {
         r = -A20_ERR_FAULT;
         goto out_rollback;
     }
     if (installed > 0 &&
-        copy_to_user((void *)kargs.handle_buf, out_handles,
+        copy_to_user((void *)(uintptr_t)kargs.handle_buf, out_handles,
                      installed * sizeof(a20_handle_t)) < 0) {
         r = -A20_ERR_FAULT;
         goto out_rollback;
     }
     if (kargs.out_rights_buf && installed > 0 &&
-        copy_to_user((void *)kargs.out_rights_buf, out_rights,
+        copy_to_user((void *)(uintptr_t)kargs.out_rights_buf, out_rights,
                      installed * sizeof(a20_rights_t)) < 0) {
         r = -A20_ERR_FAULT;
         goto out_rollback;
@@ -531,7 +531,7 @@ out_ep:
  */
 int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
 {
-    a20_channel_call_args_t *uargs = (a20_channel_call_args_t *)A20_ARG(0);
+    a20_channel_call_args_t *uargs = (a20_channel_call_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_channel_call_args_t kargs;
@@ -572,7 +572,7 @@ int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
             r = -A20_ERR_NO_MEMORY;
             goto out_ep;
         }
-        if (copy_from_user(kdata, (const void *)kargs.data,
+        if (copy_from_user(kdata, (const void *)(uintptr_t)kargs.data,
                            kargs.data_len) < 0) {
             r = -A20_ERR_FAULT;
             goto out_data;
@@ -590,7 +590,7 @@ int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
 
         a20_handle_t user_handles[A20_CH_MAX_HANDLES];
         a20_rights_t user_rights[A20_CH_MAX_HANDLES];
-        if (copy_from_user(user_handles, (void *)kargs.handles,
+        if (copy_from_user(user_handles, (void *)(uintptr_t)kargs.handles,
                            kargs.handle_count * sizeof(a20_handle_t)) < 0) {
             r = -A20_ERR_FAULT;
             goto out_data;
@@ -598,7 +598,7 @@ int64_t sys_a20_channel_call(const a20_syscall_args_t *args)
 
         uint32_t rights_count = 0;
         if (kargs.transfer_rights) {
-            if (copy_from_user(user_rights, (void *)kargs.transfer_rights,
+            if (copy_from_user(user_rights, (void *)(uintptr_t)kargs.transfer_rights,
                                kargs.handle_count * sizeof(a20_rights_t)) < 0) {
                 r = -A20_ERR_FAULT;
                 goto out_data;
@@ -719,18 +719,18 @@ out_data:
     kargs.out_reply_len = out_len;
     kargs.out_reply_handles = installed;
     if (out_len > 0 &&
-        copy_to_user((void *)kargs.reply_buf, rdata, out_len) < 0) {
+        copy_to_user((void *)(uintptr_t)kargs.reply_buf, rdata, out_len) < 0) {
         r = -A20_ERR_FAULT;
         goto out_call_rollback;
     }
     if (installed > 0 &&
-        copy_to_user((void *)kargs.reply_handle_buf, out_handles,
+        copy_to_user((void *)(uintptr_t)kargs.reply_handle_buf, out_handles,
                      installed * sizeof(a20_handle_t)) < 0) {
         r = -A20_ERR_FAULT;
         goto out_call_rollback;
     }
     if (kargs.reply_rights_buf && installed > 0 &&
-        copy_to_user((void *)kargs.reply_rights_buf, out_rights,
+        copy_to_user((void *)(uintptr_t)kargs.reply_rights_buf, out_rights,
                      installed * sizeof(a20_rights_t)) < 0) {
         r = -A20_ERR_FAULT;
         goto out_call_rollback;
@@ -758,7 +758,7 @@ out_ep:
 int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
 {
     a20_event_watch_fs_args_t *uargs =
-        (a20_event_watch_fs_args_t *)A20_ARG(0);
+        (a20_event_watch_fs_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_event_watch_fs_args_t kargs;

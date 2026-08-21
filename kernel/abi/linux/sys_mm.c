@@ -90,19 +90,19 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
     int64_t res = mm_addr_is_error(mapped) ? mm_addr_error(mapped)
                                            : (int64_t)mapped;
     if (res >= 0) {
-        task_t *t = proc_current();
 #ifdef CONFIG_NOMMU
         if (!(flags & MAP_ANONYMOUS) && gfd >= 0) {
-            int r = vfs_pread(gfd, (char *)res, len, off);
+            int r = vfs_pread(gfd, (char *)(uintptr_t)res, len, off);
             if (r >= 0 && (size_t)r < len) {
-                memset((void *)(res + r), 0, len - r);
+                memset((void *)(uintptr_t)(res + r), 0, len - r);
             } else if (r < 0) {
-                memset((void *)res, 0, len); // Fallback
+                memset((void *)(uintptr_t)res, 0, len); // Fallback
             }
         } else {
-            memset((void *)res, 0, len);
+            memset((void *)(uintptr_t)res, 0, len);
         }
 #else
+        task_t *t = proc_current();
         if (t && t->mm) {
             int populate_locked = 0;
             uint64_t mm_flags = linux_mm_lock(t);
@@ -325,7 +325,9 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
         ret = -EINVAL;
         break;
     }
+#ifndef CONFIG_NOMMU
 out:
+#endif
     linux_mm_unlock(t, mm_flags);
     mm_tlb_invalidate_finish(t->mm);
     if (ret == 0 && (advice == MADV_POPULATE_READ || advice == MADV_POPULATE_WRITE)) {

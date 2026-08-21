@@ -43,7 +43,7 @@ static int64_t a20_ext_prog_id(struct a20_ht_internal *ht, a20_handle_t h,
 
 int64_t sys_a20_ext_prog_load(const a20_syscall_args_t *args)
 {
-    const bpf_insn_t *instr = (const bpf_insn_t *)A20_ARG(0);
+    const bpf_insn_t *instr = (const bpf_insn_t *)(uintptr_t)A20_ARG(0);
     uint32_t len = (uint32_t)A20_ARG(1);
 
     task_t *cur = proc_current();
@@ -125,7 +125,7 @@ int64_t sys_a20_ext_prog_release(const a20_syscall_args_t *args)
 int64_t sys_a20_ext_point_info(const a20_syscall_args_t *args)
 {
     uint32_t point_id = (uint32_t)A20_ARG(0);
-    a20_ext_point_info_t *out = (a20_ext_point_info_t *)A20_ARG(1);
+    a20_ext_point_info_t *out = (a20_ext_point_info_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     a20_ext_point_info_t info;

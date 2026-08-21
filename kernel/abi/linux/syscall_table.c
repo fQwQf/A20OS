@@ -7,8 +7,9 @@ static int64_t linux_sys_clone_call(const linux_syscall_args_t *args)
 {
     linux_syscall_args_t a = *args;
     arch_adjust_clone_args(&a);
-    return sys_clone(a.arg[0], (void *)a.arg[1], (int *)a.arg[2],
-                     a.arg[3], (int *)a.arg[4]);
+    return sys_clone(a.arg[0], (void *)(uintptr_t)a.arg[1],
+                     (int *)(uintptr_t)a.arg[2], a.arg[3],
+                     (int *)(uintptr_t)a.arg[4]);
 }
 
 #define LINUX_SYSCALL(name, restores, ...) \
