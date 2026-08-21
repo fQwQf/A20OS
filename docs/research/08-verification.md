@@ -125,7 +125,7 @@
 - TLA+：TLC 模型检验器 + Apalache（符号执行），进 `tools/`，CI-like 门禁。
 - Lean：Mathlib 环境，形式化文件进 `research/verification/`（或 `tools/formal/`）。
 - 运行时不变式：`CONFIG_INVARIANT_CHECK` 进 smoke gate，随每轮压力测试运行。
-- **每个验证结果必须可一键复现**（和 parallel-build 测试同等的证据纪律）。
+- **每个验证结果必须可一键复现**（与正式基准测试同等的证据纪律）。
 
 ---
 

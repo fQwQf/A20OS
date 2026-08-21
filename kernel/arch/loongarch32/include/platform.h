@@ -4,7 +4,7 @@
 #include "core/types.h"
 
 /*
- * LoongArch32 (LA32R) memory layout for the NaiLoong Core (NaiLoong 
+ * LoongArch32 (LA32R) memory layout for the NaiLoong Core (LA32R
  * SoC).  DRAM is a 512 MiB window at 0x80000000; MMIO (UART ...) lives in
  * the 0x1C000000-0x1FFFFFFF window.  Both windows are identity mapped
  * (VA == PA) through the two 512 MiB DMW windows (DMW0 / DMW1).

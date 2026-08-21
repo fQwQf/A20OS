@@ -409,7 +409,7 @@ int page_cache_init(void)
         mutex_init(&g_page_cache_writeback_locks[i]);
     lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
-     * retaining peer kernels's 1 GiB ceiling in the official 8 GiB evaluator. */
+     * retaining a 1 GiB ceiling on 8 GiB hosts. */
     g_page_limit = pfa.total_frames / 8;
     if (g_page_limit < PAGE_CACHE_INITIAL_PAGES)
         g_page_limit = PAGE_CACHE_INITIAL_PAGES;

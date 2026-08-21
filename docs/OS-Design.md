@@ -1,6 +1,6 @@
 # A20OS 设计速查
 
-A20OS 是为 2026 年通用与专用场景开发的混合内核操作系统。当前 hosted 构建矩阵包含 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`，另有独立的 `armv7m` MCU profile；内核同时提供 Linux 兼容 musl 程序运行环境和 Native ABI。
+A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`，另有独立的 `armv7m` MCU profile；内核同时提供 Linux 兼容 musl 程序运行环境和 Native ABI。
 
 本文档面向新贡献者，用于快速理解项目整体结构。完整的 Native ABI 规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
@@ -226,7 +226,7 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 * **统一 hwapi**：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
 * **类 ops vtable**：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
 
-静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括 `make all`、ARMv7-M 和 PPC64LE 默认）把完整驱动集静态链接进内核。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
+静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all`、ARMv7-M 和 PPC64LE 默认）把完整驱动集静态链接进内核。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
 
 ```text
 trap/MM/time init -> board->early_init() -> driver_core_init()

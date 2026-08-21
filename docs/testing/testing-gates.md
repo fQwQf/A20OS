@@ -24,7 +24,7 @@
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 
-`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong/NaiLoong，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
+`BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong LA32R，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
 
 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT`：`NOMMU_SUPPORTED_ARCHES` 的构建集合是 `arm32`、`aarch64`、`riscv64`、`riscv32`、`armv7m`。`make smoke-arch-mmu-matrix` 的 hosted runtime 集合只包含前四个架构的 MMU 与 NOMMU 八种组合；ARMv7-M 由 STM32 MCU 目标单独处理。LoongArch64、x86_64、PPC64LE 的 NOMMU 配置在构建入口被拒绝。每个 hosted runtime 组合应进入交互式 shell，执行 shell builtin 与外部程序，并通过用户态 `poweroff` 正常关机。架构差异通过 `kernel/arch/<arch>/` 提供的 hook/capability 表达；`make check-arch-boundary` 禁止通用内核代码直接按具体架构条件编译。
 
@@ -126,7 +126,7 @@
 - **When it fails**: 不要恢复旧的全局 pick 锁。检查 picker 是否在队列锁内 调用需要 `proc_lock` 的 helper，或 unpick/switch completion 是否丢失 dispatch 引用。
 
 ### Proc/Sched 累计矩阵
-- **How to run**: `make check-proc-step8-local`；包含正式双架构 functional tests 时运行 `make check-proc-step8`。
+- **How to run**: `make check-proc-step8-local`；完整聚合矩阵为 `make check-proc-step8`。
 - **What it checks**: 依次包含 task state、引用生命周期、阻塞点、信号/退出、 timeout、SMP runqueue 和本地 pick 门禁，并在 RISC-V64/LoongArch64 的 debug/release、1 核/8 核组合中运行 scheduler、futex、process、I/O、 VFS 和 socket 压力测试。
 - **When it fails**: 从失败日志中的首个 invariant、引用计数或 lock warning 开始定位；后续 timeout 往往只是首个所有权错误的结果。
 

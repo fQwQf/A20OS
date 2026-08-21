@@ -15,8 +15,7 @@
 	step7-rv-release-8c step7-la-release-8c \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c _step35_smoke
-.PHONY: _reset_obj _benchmark_build _benchmark_disk \
-	_final_submit_build _final_submit_disk smoke-usb-x86_64
+.PHONY: _reset_obj _release_build _release_disk smoke-usb-x86_64
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -256,36 +255,30 @@ check-proc-step8-local: check-task-state-boundary \
 	@git diff --check
 	@echo "check-proc-step8-local: PASS"
 
-check-proc-step35: check-proc-step35-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step35: check-proc-step35-local
 	@echo "check-proc-step35: PASS"
 
-check-proc-step6: check-proc-step6-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step6: check-proc-step6-local
 	@echo "check-proc-step6: PASS"
 
-check-proc-step7: check-proc-step7-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step7: check-proc-step7-local
 	@echo "check-proc-step7: PASS"
 
-check-proc-step8: check-proc-step8-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step8: check-proc-step8-local
 	@echo "check-proc-step8: PASS"
 
 check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
 	@git diff --check
 	@echo "check-proc-step4-local: PASS"
 
-check-proc-step4: check-proc-step4-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step4: check-proc-step4-local
 	@echo "check-proc-step4: PASS"
 
 check-proc-step5-local: check-signal-exit-boundary check-proc-step4-local
 	@git diff --check
 	@echo "check-proc-step5-local: PASS"
 
-check-proc-step5: check-proc-step5-local \
-	release-eval-rv-functional tests release-eval-la-functional tests
+check-proc-step5: check-proc-step5-local
 	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
@@ -523,67 +516,30 @@ smoke-native-handle:
 		exit 1; \
 	fi
 
-final-submit-rv:
-	@echo "--- Building RISC-V 64 (2026 final submission) ---"
+release-rv:
+	@echo "--- Building RISC-V 64 (release) ---"
 	$(MAKE) ARCH=riscv64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
 		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
-		_final_submit_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
+		_release_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
 
-final-submit-la:
-	@echo "--- Building LoongArch 64 (2026 final submission) ---"
+release-la:
+	@echo "--- Building LoongArch 64 (release) ---"
 	$(MAKE) ARCH=loongarch64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
 		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
-		_final_submit_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
-
-benchmark-rv:
-	@echo "--- Building RISC-V 64 (benchmark) ---"
-	$(MAKE) ARCH=riscv64 _benchmark_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
-
-benchmark-la:
-	@echo "--- Building LoongArch 64 (benchmark) ---"
-	$(MAKE) ARCH=loongarch64 _benchmark_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
+		_release_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
 
 _reset_obj:
 	find $(KERNEL_DIR) -name '*.o' -delete
 	rm -rf .kernel-build
 	$(MAKE) -C user clean
 
-_benchmark_build: $(KERNEL_ELF) $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
-	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) _benchmark_disk
-	cp $(KERNEL_ELF) $(KERNEL_OUT)
-	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
-
-_benchmark_disk: $(USER_BUILD_STAMP) \
-		user/benchmark_init/benchmark.sh \
-		user/benchmark_init/run_ltp_resume.sh \
-		user/benchmark_init/ltp_blacklist.txt
-	rm -f $(DISK_OUT)
-	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
-	@set -e; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		mcopy -i $(DISK_OUT) "$$f" "::/$$name"; \
-	done
-	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/sh
-	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/bash
-	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
-	-mmd -i $(DISK_OUT) ::/lib >/dev/null 2>&1
-	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
-		mcopy -o -i $(DISK_OUT) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
-	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
-	mcopy -o -i $(DISK_OUT) user/benchmark_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
-	mcopy -o -i $(DISK_OUT) user/benchmark_init/benchmark.sh ::/benchmark.sh
-	mcopy -o -i $(DISK_OUT) user/benchmark_init/run_ltp_resume.sh ::/run_ltp_resume.sh
-	@printf 'auto\n' | mcopy -o -i $(DISK_OUT) - ::/etc/benchmark-mode
-
-_final_submit_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
+_release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \
-		EXTERNAL_ROOT=$(EXTERNAL_ROOT) _final_submit_disk DISK_OUT=$(DISK_OUT)
+		EXTERNAL_ROOT=$(EXTERNAL_ROOT) _release_disk DISK_OUT=$(DISK_OUT)
 	cp $(KERNEL_ELF) $(KERNEL_OUT)
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
 
-_final_submit_disk: $(USER_BUILD_STAMP) user/benchmark_init/final_benchmark.sh
+_release_disk: $(USER_BUILD_STAMP)
 	rm -f $(DISK_OUT)
 	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
 	@set -e; \
@@ -599,5 +555,4 @@ _final_submit_disk: $(USER_BUILD_STAMP) user/benchmark_init/final_benchmark.sh
 	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
 		mcopy -o -i $(DISK_OUT) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
-	mcopy -o -i $(DISK_OUT) user/benchmark_init/final_benchmark.sh ::/final_benchmark.sh
-	@printf 'all\n' | mcopy -o -i $(DISK_OUT) - ::/etc/release-eval-group
+	@printf 'external\n' | mcopy -o -i $(DISK_OUT) - ::/etc/external-root

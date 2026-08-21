@@ -53,7 +53,7 @@
   - 剩余：切换路径的两次获取（出栈发布 + 入栈 completion）需 per-task wake-queue 位才能无锁化；`proc_wait4` 的 child 扫描本身仍是每次 syscall O(N)。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
-  - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 和正式 functional tests 10/10；`e33c3219` 未重跑。
+  - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 与功能测例全通过；`e33c3219` 未重跑。
 - [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
@@ -204,6 +204,6 @@
 - 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应 build/smoke 目标在运行时报告。
 - 审计源码提交为 `e33c3219`；最新完整干净双架构平台记录为 `f9732348`。两者之间有 6 个影响最终构建、内存映射、测试发现、root mount 和磁盘流的提交，因此该审计基线正式未验证。
 - Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
-- 需要同时验证正式 workload 时运行 `make check-proc-step8`，它会追加 RISC-V64 与 LoongArch64 正式 functional tests。
-- 项目 Python 命令统一通过 conda 环境 `a20os`；正式入口负责记录 QEMU 命令、镜像哈希、退出状态、timeout、guest CPU 与 judge 状态。
+- 需要完整双架构运行矩阵时运行 `make check-proc-step8`，它聚合 RISC-V64 与 LoongArch64 的 debug/release、单核/八核压力矩阵。
+- 项目 Python 命令统一通过 conda 环境 `a20os`；长跑基准入口负责记录 QEMU 命令、镜像哈希、退出状态、timeout 与 guest CPU 状态。
 - NOMMU 支持集合由构建入口和 `smoke-arch-mmu-matrix` 验证，不以本文中的 历史成功列表代替当前运行结果。

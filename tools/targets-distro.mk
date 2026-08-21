@@ -4,7 +4,7 @@
 # ================================================================
 # One command that builds the kernel, builds the Alpine distro rootfs
 # (ext4), and boots QEMU with it under the GUI display.  The A20OS init
-# detects the Alpine distro rootfs mounted at /test and chroot(2)s into it,
+# detects the Alpine distro rootfs mounted at /extra and chroot(2)s into it,
 # exec'ing /sbin/init, which brings up dbus / elogind / seatd / udevd and the
 # XFCE Wayland session.  The kernel only supplies the Linux ABI + /dev +
 # /proc + /sys; the distro owns the userspace.

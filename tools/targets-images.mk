@@ -1,10 +1,5 @@
 
-$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
-		user/benchmark_init/benchmark.sh \
-		user/benchmark_init/final_benchmark.sh \
-		user/benchmark_init/parallel-build_probe.sh \
-		user/benchmark_init/run_ltp_resume.sh \
-		user/benchmark_init/ltp_blacklist.txt
+$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building FAT32 image..."
 	@mkdir -p $(BUILD_DIR)
 	dd if=/dev/zero of=$(FAT32_IMG) bs=1048576 count=$(FAT32_IMAGE_MB)
@@ -35,11 +30,6 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) \
 	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
-	mcopy -o -i $(FAT32_IMG) user/benchmark_init/benchmark.sh ::/benchmark.sh
-	mcopy -o -i $(FAT32_IMG) user/benchmark_init/final_benchmark.sh ::/final_benchmark.sh
-	mcopy -o -i $(FAT32_IMG) user/benchmark_init/parallel-build_probe.sh ::/parallel-build_probe.sh
-	mcopy -o -i $(FAT32_IMG) user/benchmark_init/run_ltp_resume.sh ::/run_ltp_resume.sh
-	mcopy -o -i $(FAT32_IMG) user/benchmark_init/ltp_blacklist.txt ::/etc/ltp_blacklist.txt
 
 # Keep GUI state out of fat32.img so a later text-mode run does not inherit it.
 # init uses this marker to replace the serial shell with the LVGL desktop.

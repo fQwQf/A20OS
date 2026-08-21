@@ -196,7 +196,7 @@ $(CURL_STAMP): $(CURL_ARCHIVE) $(MBEDTLS_STAMP) $(MUSL_CHECK_FILES) $(EXTRA_MAKE
 		LDFLAGS="$(LDFLAGS) $(CRT_START) -L$(MBEDTLS_PREFIX)/lib" \
 		LIBS="$(MBEDTLS_LIBS) $(LIBC) $(CRT_END)" \
 		$(CURL_SRC)/configure \
-			--host=$(ARCH)-unknown-linux-musl --prefix=/test \
+			--host=$(ARCH)-unknown-linux-musl --prefix=/extra \
 			--disable-shared --enable-static --disable-threaded-resolver \
 			--disable-ipv6 --disable-ldap --disable-ldaps --disable-rtsp \
 			--disable-dict --disable-telnet --disable-tftp --disable-pop3 \
@@ -204,7 +204,7 @@ $(CURL_STAMP): $(CURL_ARCHIVE) $(MBEDTLS_STAMP) $(MUSL_CHECK_FILES) $(EXTRA_MAKE
 			--disable-mqtt --disable-manual --disable-docs --without-zlib \
 			--without-libpsl --without-brotli --without-zstd --without-nghttp2 \
 			--without-libidn2 --without-libssh2 --with-mbedtls=$(MBEDTLS_PREFIX) \
-			--with-ca-bundle=/test/etc/ssl/certs/ca-certificates.crt
+			--with-ca-bundle=/extra/etc/ssl/certs/ca-certificates.crt
 	$(MAKE) -C $(CURL_BUILD)/lib
 	@test -f $(CURL_LIB)
 	@touch $@
@@ -312,7 +312,7 @@ else
 	@echo "[EXTRA] Building vim..."
 	$(MAKE) -C $(VIM_WORK_SRC) \
 	  VIMRCLOC=$(VIM_BUILD) \
-	  VIMRUNTIMEDIR=/test/share/vim/vim92 \
+	  VIMRUNTIMEDIR=/extra/share/vim/vim92 \
 	  DESTDIR=$(VIM_BUILD)/install \
 	  srcdir=$(VIM_WORK_SRC) \
 	  'CC=$(CC)' \
@@ -349,8 +349,8 @@ else
 	@$(MAKE) -C $(GIT_WORK_SRC) clean >/dev/null 2>&1 || true
 	$(MAKE) -C $(GIT_WORK_SRC) \
 	  prefix=/usr \
-	  gitexecdir=/test/bin \
-	  template_dir=/test/share/git-core/templates \
+	  gitexecdir=/extra/bin \
+	  template_dir=/extra/share/git-core/templates \
 	  'CC=$(CC)' \
 	  'AR=$(AR)' \
 	  CFLAGS="$(CFLAGS) -D__unix__ -I$(ZLIB_BUILD)/include" \

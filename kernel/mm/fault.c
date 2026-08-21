@@ -449,7 +449,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         }
 #endif
 
-        /* Like peer kernels, reserve a small forward window for private writable
+        /* Reserve a small forward window for private writable
          * anonymous store faults.  Compiler allocators usually touch new
          * arenas sequentially; installing four pages under one mm lock and
          * one fault return avoids three traps and repeated page-table walks.
@@ -842,7 +842,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
          * across the parallel loader/fault lifetime.  Keep private file pages
          * on the proven single-page copy path; direct executable leaves lose
          * text PTEs, while direct read-only leaves corrupt dynamic symbols in
-         * librustc_driver under parallel-build. */
+         * librustc_driver under parallel compile load. */
         int fault_around = 0;
 #else
         int fault_around = !shared && !(vma->pte_flags & PTE_W);

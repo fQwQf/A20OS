@@ -11,15 +11,15 @@
  * Block-device mount strategy, split out of kernel/main.c.
  *
  * Probes all virtio-blk / virtio-scsi / AHCI / USB-storage devices and
- * auto-detects filesystems.  Normal and external-root builds retain the legacy
- * layout (FAT32 at /bin, EXT4 at /test).  Final image builds retain the
- * bootstrap ramfs as /, mount A20OS utilities at /a20, and mount the judge's
- * EXT4 image at /mnt.  The final userspace runner enters /mnt with chroot(2),
- * so a failed or unfamiliar evaluator filesystem never removes init and the
- * diagnostics needed to explain the failure.
+ * auto-detects filesystems.  Normal builds retain the legacy
+ * layout (FAT32 at /bin, EXT4 at /extra).  External-root builds retain the
+ * bootstrap ramfs as /, mount A20OS utilities at /a20, and mount the
+ * attached EXT4 image at /mnt; init then runs the shell from /a20, so a
+ * failed or unfamiliar system image never removes the bootstrap
+ * environment and its diagnostics.
  *
  * Works regardless of device ordering:
- *   benchmark QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
+ *   Alt QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
  *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  */
 
@@ -260,7 +260,7 @@ void mount_read_only_storage(void) {
             continue;
         printf("[STORAGE-RO] selected Linux partition start=%lu sectors=%lu\n",
                (unsigned long)first, (unsigned long)sectors);
-        int ret = try_mount_read_only(part, "/test", "ext4");
+        int ret = try_mount_read_only(part, "/extra", "ext4");
         if (ret == 0)
             return;
         printf("[STORAGE-RO] ext4 mount refused or failed: %d\n", ret);
@@ -269,10 +269,10 @@ void mount_read_only_storage(void) {
 }
 
 static void mount_external_root_pseudo_filesystems(void) {
-#ifdef CONFIG_RELEASE_EVAL_ROOT
+#ifdef CONFIG_EXTERNAL_ROOT
 #define EXTERNAL_ROOT_PATH(path) "/mnt" path
 #else
-#define EXTERNAL_ROOT_PATH(path) "/test" path
+#define EXTERNAL_ROOT_PATH(path) "/extra" path
 #endif
     struct {
         const char *path;
@@ -308,14 +308,14 @@ static void mount_external_root_pseudo_filesystems(void) {
 }
 
 void mount_block_devices(void) {
-#ifdef CONFIG_RELEASE_EVAL_ROOT
+#ifdef CONFIG_EXTERNAL_ROOT
     const char *utilities_path = "/a20";
-    const char *official_path = "/mnt";
+    const char *system_path = "/mnt";
 #else
     const char *utilities_path = "/bin";
-    const char *official_path = "/test";
+    const char *system_path = "/extra";
 #endif
-    int utilities_ok = 0, official_ok = 0;
+    int utilities_ok = 0, system_ok = 0;
 
     for (int i = 0; i < 16; i++) {
         block_dev_t *blk = mount_setup_block_device(i);
@@ -325,11 +325,11 @@ void mount_block_devices(void) {
             utilities_ok = 1;
             continue;
         }
-        if (!official_ok && try_mount(blk, official_path, "ext4") == 0) {
-            official_ok = 1;
+        if (!system_ok && try_mount(blk, system_path, "ext4") == 0) {
+            system_ok = 1;
             continue;
         }
-        for (int ordinal = 0; ordinal < 16 && (!utilities_ok || !official_ok);
+        for (int ordinal = 0; ordinal < 16 && (!utilities_ok || !system_ok);
              ordinal++) {
             block_dev_t *partition = gpt_partition(blk, i, ordinal);
             if (!partition)
@@ -337,17 +337,17 @@ void mount_block_devices(void) {
             if (!utilities_ok &&
                 try_mount(partition, utilities_path, "fat32") == 0)
                 utilities_ok = 1;
-            if (!official_ok &&
-                try_mount(partition, official_path, "ext4") == 0)
-                official_ok = 1;
+            if (!system_ok &&
+                try_mount(partition, system_path, "ext4") == 0)
+                system_ok = 1;
         }
     }
 
     if (!utilities_ok)
         printf("[INIT] WARNING: no FAT32 device for %s\n", utilities_path);
-    if (!official_ok) {
+    if (!system_ok) {
         printf("[INIT] no ext4 device for %s (ok without sdcard)\n",
-               official_path);
+               system_path);
     } else {
         mount_external_root_pseudo_filesystems();
     }

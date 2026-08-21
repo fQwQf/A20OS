@@ -9,7 +9,7 @@
  * Probes all virtio-blk / virtio-scsi / AHCI / USB-storage devices and
  * auto-detects filesystems:
  *   fat32 -> /bin   (our utilities: init, mksh, cmds, ...)
- *   ext4  -> /test  (judge sdcard or local sdcard image)
+ *   ext4  -> /extra  (local sdcard image)
  *
  * The logic is independent of device ordering and works regardless of how the
  * disks are enumerated.  In BRINGUP mode there are no block devices and this
@@ -26,7 +26,7 @@ int try_mount(block_dev_t *dev, const char *mnt, const char *fstype);
 block_dev_t *mount_setup_block_device(int index);
 
 /* Probe DOS/MBR storage and mount its first Linux partition read-only at
- * /test.  Intended for explicitly selected RAM-only board experiments. */
+ * /extra.  Intended for explicitly selected RAM-only board experiments. */
 void mount_read_only_storage(void);
 
 #endif /* _MOUNT_SETUP_H */

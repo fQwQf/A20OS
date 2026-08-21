@@ -12,9 +12,9 @@ A20OS 的板上镜像有两个用户态文件系统：
 | 位置 | 构建入口 | 适合的软件 |
 |---|---|---|
 | `/bin`（FAT32 rootfs） | `user/Makefile` | init、shell、基础命令、启动必需的小程序 |
-| `/test`（extra ext4） | `user/extra.mk` + `tools/targets-extra.mk` | Git、Vim、GCC、Rust、实验工具和体积较大的可选软件 |
+| `/extra`（extra ext4） | `user/extra.mk` + `tools/targets-extra.mk` | Git、Vim、GCC、Rust、实验工具和体积较大的可选软件 |
 
-如果软件不是启动必需项，优先放 `/test`。这样不会让 128 MiB 的 FAT32
+如果软件不是启动必需项，优先放 `/extra`。这样不会让 128 MiB 的 FAT32
 根文件系统被开发工具挤满，也可以用 `EXTRA_PACKAGES` 独立增减。需要访问
 硬件的程序通常不是普通用户程序，应先阅读
 [驱动开发手册](../drivers/README.md)，决定是内核驱动、`.a20drv` 模块还是
@@ -35,7 +35,7 @@ Native ABI 用户态服务。
 VisionFive 2 的 A20OS 构建默认使用 `ARCH=riscv64 NOMMU=1`，用户程序通常
 使用 musl 和静态链接；宿主机的 x86_64 可执行文件不能放入镜像。若软件
 必须使用 glibc 或 `dlopen`，必须把对应 RISC-V glibc 运行库和所有共享库
-一起放入 `/test`，并在文档中明确这是动态程序。Lamina 的做法就是把主程序、
+一起放入 `/extra`，并在文档中明确这是动态程序。Lamina 的做法就是把主程序、
 四个共享库和 glibc 运行时一起 staging，而不是假装它是静态程序。
 
 ## 3. 获取源码和固定版本
@@ -157,7 +157,7 @@ make -j"$NPROC" run-riscv64-extra \
   EXTRA_PACKAGES='example vim git'
 ```
 
-QEMU 中的 `/test` 挂载、程序输出和退出码都正常后，再生成 VisionFive 2
+QEMU 中的 `/extra` 挂载、程序输出和退出码都正常后，再生成 VisionFive 2
 镜像。QEMU 通过 VirtIO 块设备挂载 `extra.img`，它不能替代真机对串口、
 JH7110 DTB、SD 分区和板级驱动的验收。
 
@@ -197,11 +197,11 @@ extra 永远从 160 MiB 开始，因为带 FAT32 rootfs 时脚本会按 rootfs �
 
 ```sh
 mount
-ls -l /test/bin /test/lib /test/share
-/test/bin/example --version
+ls -l /extra/bin /extra/lib /extra/share
+/extra/bin/example --version
 ```
 
-程序若通过 PATH 调用，确认 shell 的 PATH 包含 `/test/bin`；否则使用绝对
+程序若通过 PATH 调用，确认 shell 的 PATH 包含 `/extra/bin`；否则使用绝对
 路径。配置文件、Vim runtime、Git templates 等非二进制资源必须和程序一起
 安装到脚本实际使用的路径。动态程序还要检查 ELF interpreter 和每一个
 `DT_NEEDED` 库，不能只看主程序能否被 `file` 识别。

@@ -64,4 +64,4 @@ eventfd 与 timerfd 等待可以安全取消，因为其中断的读或写之后
 - 到 `sigsuspend` 的反复阻塞信号交接不能丢失唤醒；
 - 未阻塞信号中断 eventfd 读，而阻塞信号不会。
 
-`make check-signal-exit-boundary` 强制唤醒模式标记、信号锁所有权、移除 `proc_make_ready()` 后备、中断原因处理以及目标测试标记。`make check-proc-step5-local` 增加双架构调试/发布压力矩阵；`make check-proc-step5` 额外运行两个正式 functional tests 入口。
+`make check-signal-exit-boundary` 强制唤醒模式标记、信号锁所有权、移除 `proc_make_ready()` 后备、中断原因处理以及目标测试标记。`make check-proc-step5-local`（或其聚合别名 `make check-proc-step5`）运行双架构调试/发布压力矩阵。

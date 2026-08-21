@@ -1,11 +1,11 @@
 # LoongArch32 (LA32R) 移植状态
 
 > **目标平台**：NaiLoong Core —— 一个以 Chisel 编写的 `LoongArch32 Reduced`（LA32R）
-> 乱序超标量处理器核，挂接NaiLoong  SoC（32 位 AXI）。README 声称该核可在龙芯
+> 乱序超标量处理器核，挂接 NaiLoong LA32R SoC（32 位 AXI）。README 声称该核可在龙芯
 > 实验箱约 80 MHz 运行性能测试并启动 Linux。
 >
 > **移植性质**：内核 bring-up 已完成并在 LA32R 全系统模拟器（cemu）上验证到
-> `init_kthread (pid=1)`。**尚未**在任何真实 LA32R 硬件（NaiLoong Core / NaiLoong实验箱）
+> `init_kthread (pid=1)`。**尚未**在任何真实 LA32R 硬件（NaiLoong Core / 龙芯实验箱）
 > 上运行，也**尚未**提供用户态（musl loongarch32 尚未移植）。
 
 LoongArch32 是本仓库第五个 32 位架构（在 riscv32 / arm32 / armv7m 之后），也是第三个
@@ -168,13 +168,13 @@ init: no init program found
   Verilator 流程（含 DiffTest）上跑同一内核镜像，核对 DMW/TLB/定时器语义。
 - **用户态**：需要 musl loongarch32（或 glibc）移植与一个 rootfs/initramfs 才能进入
   shell；`exec.c` 的动态链接器回退名、`stat/statfs` 32 位 ABI 布局已就绪。
-- **内存布局假设**：`0x80000000` 的 512 MiB DRAM 窗口、`0x1FE001E0` UART 来自NaiLoong
-  SoC 惯例；若目标 SoC 不同，改 `kernel/platform/nailoong/board.c` 与 `entry.S` 的
+- **内存布局假设**：`0x80000000` 的 512 MiB DRAM 窗口、`0x1FE001E0` UART 来自
+  NaiLoong SoC 惯例；若目标 SoC 不同，改 `kernel/platform/nailoong/board.c` 与 `entry.S` 的
   DMW 常量即可。
 - **SMP**：NaiLoong 核无 IOCSR/IPI，板级保持 `.smp = NULL`；多核 SoC 需要新的 IPI
   机制与 secondary 启动路径。
 - **构建门禁**：`check-loongarch32-bringup` 已登记，但未加入 `make all` 的默认架构集
-  合（提交只构建 RISC-V64 / LoongArch64）。
+  合（发布构建只构建 RISC-V64 / LoongArch64）。
 
 ## 验收记录
 

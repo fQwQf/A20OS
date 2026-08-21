@@ -37,7 +37,7 @@
 </div>
 
 ## 项目简介
-A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)。项目具备长期的演进与迭代计划，当前正作为内核参与系统软件。
+A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)，具备长期的演进与迭代计划。
 
 在架构选型上，A20OS 兼具宏内核与微内核的双重优势：从运行空间视角，驱动、网络栈与文件系统均在单一特权空间执行，保留了极速的函数调用性能；而在内核逻辑抽象层面，系统深度融合了微内核理念，引入了面向能力的 Handle、VMO/VMAR 内存容器以及 Channel 通信机制。
 
@@ -58,23 +58,16 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 * **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）
 * **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
-* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向NaiLoong  SoC / NaiLoong Core（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
+* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向 NaiLoong Core LA32R SoC（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
 
 ## 构建与运行
 
 ### 1. 环境准备
-
-```bash
-# 构建镜像
-
-
-# 启动容器
-
-```
+需要本机安装各架构交叉工具链（RISC-V/LoongArch/AArch64/x86_64/PPC64LE/ARM）、QEMU 与镜像工具（mtools/dosfstools/e2fsprogs），完整的 apt 命令见 [docs/build.md](docs/build.md) 的"环境准备"一节。
 
 ### 2. 编译内核
 
-根目录不带参数的 `make`/`make all` 是 2026 提交入口，而不是单架构开发构建。它构建 RISC-V64 与 LoongArch64 的 `PROFILE=benchmark`、8 核、embedded-driver 产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。
+根目录不带参数的 `make`/`make all` 是双架构发布构建入口，而不是单架构开发构建。它构建 RISC-V64 与 LoongArch64 的 `PROFILE=benchmark`、8 核、embedded-driver 产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。
 
 日常开发仍使用显式的 `ARCH`、`BOARD` 和 `run`：
 ```bash
@@ -87,7 +80,7 @@ make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
 # QEMU pSeries 上运行 PPC64LE（MMU、单核）
 make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 
-# LoongArch32 (LA32R) 内核 bring-up（NaiLoong Core / NaiLoong SoC，需 LA32R 工具链，
+# LoongArch32 (LA32R) 内核 bring-up（NaiLoong Core，需 LA32R 工具链，
 # 无 QEMU 目标；验证走 cemu 模拟器，见 docs/platforms/loongarch32.md）
 make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 
@@ -120,7 +113,7 @@ sudo apt install ccache
 ```bash
 make CCACHE= ...
 ```
-注意：ccache 只加速宿主机上的本地迭代编译，不影响 parallel-build 等测试测试在 guest 内对构建耗时的计量。
+注意：ccache 只加速宿主机上的本地迭代编译，不影响基准负载在 guest 内对构建耗时的计量。
 
 ## 测试与质量保证
 作为一个严肃的底层项目，A20OS 建立了一套完备的测试门禁。开发者在提交代码前可通过 `Makefile` 目标进行本地校验：
@@ -134,12 +127,10 @@ make CCACHE= ...
 * 提交 Pull Request 前，请务必在本地运行相关的验证门禁，确保没有引入新的数据竞争或引发回归错误。
 * 欢迎查阅 [a20os-improvement-todo.md](docs/roadmap/a20os-improvement-todo.md)，了解当前系统面临的核心工程瓶颈，寻找您感兴趣的开发切入点。
 
-## 活动与设计文档
+## 设计文档
 
 有关操作系统设计的完整方案、开发过程中的技术瓶颈、解决思路以及并发模型设计，请参阅：
 * [操作系统设计方案文档 (OS-Design.md)](docs/OS-Design.md)
-* [2026  parallel-build 设计与优化说明](docs/parallel-build-2026.md)
-* [汇报幻灯片 (PDF) LaTeX 源文件](docs/slides.tex)
 
 ## 目录结构
 ```text
@@ -155,7 +146,6 @@ make CCACHE= ...
 │   └── proc/         # 任务调度与状态机
 ├── kernel/platform/  # 板级内存、设备、IRQ、timer 与 SMP 启动
 ├── docs/             # 设计方案与技术专题说明文档
-
 └── Makefile          # 高度定制化跨平台构建脚本
 ```
 
@@ -164,4 +154,3 @@ make CCACHE= ...
 * 第三方组件的集中许可证声明见 **[docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md)**。
 * 项目集成、参考和借鉴的第三方项目与公开标准，以及对应的致谢，请参阅 **[docs/ACKNOWLEDGMENTS.md](docs/ACKNOWLEDGMENTS.md)**。
 * 镜像文件（`disk.img`、`extra.img` 等）是构建产物；其实际分发义务取决于镜像内组件、链接方式和精确版本。部分第三方源码是普通 tracked tree，部分是 submodule，不能用单一模式概括；发布前须按 [第三方声明](docs/THIRD_PARTY_NOTICES.md) 逐项核验。
-* 感谢系统软件的交流机会与测试环境。

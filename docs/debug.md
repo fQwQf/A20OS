@@ -41,10 +41,6 @@ A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中
 
 - 手动运行：`make run-*` 直接把串口输出打印到终端。
 - smoke 测试：日志保存在 `.kernel-build/smoke/<target>.log`。
--  `make release-eval-rv/release-eval-la`（兼容别名为
-  `make eval-rv/eval-la`）：日志保存在 `.kernel-build/smoke/logs/serial-rv.txt` 和
-  `serial-la.txt`。
-- 2026  `release-eval-*`：每次运行在 `.kernel-build/smoke/2026/` 下生成带提交和时间戳的 `logs/`、`metadata/` 与 `scores/` 归档。
 - 崩溃时先看日志末尾的 `[PANIC]` 或 `========== KERNEL PANIC ==========` 行。
 
 ## 如何阅读一次崩溃
@@ -151,6 +147,6 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 
 ## UBSan（未定义行为检测）
 
-开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。 任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。 `BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和提交构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
+开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。 任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。 `BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和发布构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
 
 启动时 `ubsan_selftest()` 输出两行 `UBSAN_SELFTEST: start / PASS`，是**预期的自检**（故意触发一次 handler 验证报告链路，报告文本在自检期间被抑制），不是真实错误；只有当日志出现 `UBSAN: <kind> at ...` 才是真正的未定义行为告警。

@@ -79,9 +79,9 @@ static void reap_children(void)
 
 /*
  * Distro rootfs boot mode.  When a compatible distro image (Alpine + the
- * stage-2 init overlay) is mounted at /test, A20OS stops acting as a
+ * stage-2 init overlay) is mounted at /extra, A20OS stops acting as a
  * self-contained userspace and becomes just the kernel underneath that
- * distro: we chroot(2) into /test and exec /sbin/init, which brings up the
+ * distro: we chroot(2) into /extra and exec /sbin/init, which brings up the
  * login/device services (dbus / elogind / seatd / udevd) and the XFCE
  * Wayland session.  The kernel only provides the Linux ABI + /dev + /proc +
  * /sys; the distro owns the userspace.
@@ -91,17 +91,17 @@ static void do_shutdown(void);
 static int detect_distro_rootfs(void)
 {
     struct stat st;
-    if (access("/test/etc/a20-distro", F_OK) != 0)
+    if (access("/extra/etc/a20-distro", F_OK) != 0)
         return 0;
-    if (stat("/test/sbin/init", &st) != 0 || !S_ISREG(st.st_mode))
+    if (stat("/extra/sbin/init", &st) != 0 || !S_ISREG(st.st_mode))
         return 0;
     return 1;
 }
 
 static void enter_distro_rootfs(void)
 {
-    printf("[init] distro mode: entering rootfs at /test\n");
-    if (chdir("/test") != 0 || chroot("/test") != 0) {
+    printf("[init] distro mode: entering rootfs at /extra\n");
+    if (chdir("/extra") != 0 || chroot("/extra") != 0) {
         perror("chroot distro rootfs");
         do_shutdown();
     }
@@ -143,27 +143,18 @@ int main(void)
     perror("execve mksh");
     do_shutdown();
 #else
-    int external_benchmark =
-        (access("/bin/etc/benchmark-mode", F_OK) == 0);
-    int final_benchmark =
-        (access("/a20/etc/release-eval-group", F_OK) == 0 ||
-         access("/bin/etc/release-eval-group", F_OK) == 0);
+    int external_root =
+        (access("/a20/etc/external-root", F_OK) == 0 ||
+         access("/bin/etc/external-root", F_OK) == 0);
     int ramfs_shell = (access("/etc/a20-ramfs-shell", F_OK) == 0);
 
-    if (external_benchmark && final_benchmark) {
-        printf("[init] conflicting benchmark entry markers\n");
-        printf("[init] use benchmark-mode for external images or "
-               "release-eval-group for release evaluation, not both\n");
-        do_shutdown();
-    }
-
     /*
-     * release builds retain the bootstrap ramfs as / and mount the
-     * published image at /mnt.  The final runner enters it with chroot(2), so
-     * the bootstrap init remains available when recovery or mounting fails.
-     * Keep the original setup for interactive and legacy benchmark images.
+     * External-root builds retain the bootstrap ramfs as / and mount the
+     * attached root disk at /mnt.  The bootstrap init remains available
+     * when recovery or mounting fails.  Keep the original setup for
+     * interactive images.
      */
-    if (!final_benchmark && !ramfs_shell)
+    if (!external_root && !ramfs_shell)
         setup_runtime_links();
 
     xmkdir("/tmp");
@@ -173,37 +164,31 @@ int main(void)
                              "A20OS Virtual Machine\n", 0644);
 
     char path_val[512];
-    if (final_benchmark)
+    if (external_root)
         strcpy(path_val, "/a20");
     else
         strcpy(path_val, "/bin");
+    /* /extra is the extra image: programs at its root, /extra/bin wrappers,
+     * package prefixes under /extra (see tools/targets-extra.mk). */
     static const char *path_dirs[] = {
-        "/usr/bin", "/test", "/test/bin", "/test/glibc", "/test/musl",
-#if defined(__loongarch64)
-        "/testla/glibc", "/testla/musl", "/testrv/glibc", "/testrv/musl",
-#else
-        "/testrv/glibc", "/testrv/musl", "/testla/glibc", "/testla/musl",
-#endif
+        "/usr/bin", "/extra", "/extra/bin",
         NULL,
     };
     for (const char **p = path_dirs; *p; p++)
         append_if_dir(path_val, sizeof(path_val), *p);
 
     char ld_val[256] = "";
+    /* /extra/glibc/lib is staged by the extra image for its glibc-linked
+     * packages (rustc/cargo/lamina); the rest are standard locations. */
     static const char *ld_dirs[] = {
-        "/test/glibc/lib", "/test/lib",
-#if defined(__loongarch64)
-        "/testla/glibc/lib", "/testrv/glibc/lib",
-#else
-        "/testrv/glibc/lib", "/testla/glibc/lib",
-#endif
+        "/extra/glibc/lib", "/extra/lib",
         "/glibc/lib", "/usr/lib", "/lib", "/bin/lib", NULL,
     };
     for (const char **p = ld_dirs; *p; p++)
         append_if_dir(ld_val, sizeof(ld_val), *p);
     if (!ld_val[0]) strcpy(ld_val, "/lib:/bin/lib");
 
-    const char *shell_path = final_benchmark ? "/a20/mksh" : "/bin/mksh";
+    const char *shell_path = external_root ? "/a20/mksh" : "/bin/mksh";
     char path_env[576], ld_env[320], shell_env[64];
     snprintf(path_env, sizeof(path_env), "PATH=%s", path_val);
     snprintf(ld_env, sizeof(ld_env), "LD_LIBRARY_PATH=%s", ld_val);
@@ -226,15 +211,15 @@ int main(void)
         "WESTON_LIBINPUT_UDEV=0",
         "DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus-session", NULL
     };
-    char *final_envp[] = {
+    char *minimal_envp[] = {
         path_env, "HOME=/", shell_env, "TERM=vt100", NULL
     };
-    char **envp = final_benchmark ? final_envp : legacy_envp;
+    char **envp = external_root ? minimal_envp : legacy_envp;
 
     /* The GUI image carries both locations.  Keep the root marker as a
      * fallback for 32-bit ports whose early VFS path walk cannot yet resolve
      * the marker through the /bin mount prefix reliably. */
-    if (!final_benchmark &&
+    if (!external_root &&
         (access("/bin/etc/a20-gui", F_OK) == 0 ||
          access("/bin/a20-gui", F_OK) == 0)) {
         printf("[init] starting desktop\n");
@@ -276,7 +261,7 @@ int main(void)
         }
     }
 
-    if (!final_benchmark && !ramfs_shell) {
+    if (!external_root && !ramfs_shell) {
         telnet_pid = fork();
         if (telnet_pid == 0) {
             char *telnet_argv[] = { "telnetd", "2323", NULL };
@@ -289,9 +274,7 @@ int main(void)
         }
     }
 
-    char *script = final_benchmark ? "/a20/final_benchmark.sh" :
-                   external_benchmark ? "/bin/benchmark.sh" : NULL;
-    char *argv[] = {"mksh", script, NULL};
+    char *argv[] = {"mksh", NULL};
 
     printf("[init] forking...\n");
     shell_pid = fork();

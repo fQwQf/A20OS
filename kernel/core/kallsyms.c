@@ -3,7 +3,7 @@
  *
  * The strong definitions of kallsyms_lookup()/kallsyms_count() live in the
  * generated table object (build-time second link pass, tools/gen_kallsyms
- * .py).  When generation is unavailable (e.g. a judge environment without
+ * .py).  When generation is unavailable (e.g. a minimal environment without
  * python3) these weak defaults keep the kernel linkable and backtraces fall
  * back to raw addresses.
  */
