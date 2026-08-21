@@ -70,6 +70,7 @@ MCM_TARGET   := riscv64-linux-musl
 MCM_CC       := $(MCM_OUTPUT)/bin/$(MCM_TARGET)-gcc
 MCM_BUILD_DIR ?= build/a20/$(MCM_TARGET)
 MCM_GCC_CONFIG ?= --disable-shared
+MCM_GNU_SITE ?= https://ftp.gnu.org/gnu
 MCM_GCC_SRC  := $(MCM_DIR)/$(MCM_BUILD_DIR)/src_gcc
 RUST_INSTALL := $(OBJ_DIR)/rust
 RUST_STAMP   := $(STAMP_DIR)/.rust-built
@@ -396,7 +397,7 @@ CC_BIN        := $(BUILD_DIR)/cc
 $(MCM_CC): $(MCM_DIR)/Makefile
 	@echo "[EXTRA] Bootstrapping $(MCM_TARGET) with musl-cross-make..."
 	$(MAKE) -C $(MCM_DIR) TARGET=$(MCM_TARGET) BUILD_DIR=$(MCM_BUILD_DIR) \
-		GCC_CONFIG="$(MCM_GCC_CONFIG)" install
+		GNU_SITE="$(MCM_GNU_SITE)" GCC_CONFIG="$(MCM_GCC_CONFIG)" install
 	@test -x "$@" || { echo "[EXTRA] musl-cross-make did not produce $@"; exit 1; }
 
 $(GCC_BIN): $(STAMP_DIR)/.gcc-built
