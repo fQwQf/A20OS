@@ -67,7 +67,7 @@ extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
 int64_t sys_a20_handle_transfer(const a20_syscall_args_t *args)
 {
-    a20_transfer_args_t *uargs = (a20_transfer_args_t *)A20_ARG(0);
+    a20_transfer_args_t *uargs = (a20_transfer_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_transfer_args_t kargs;
@@ -342,8 +342,8 @@ out_free:
 int64_t sys_a20_handle_xattr_set(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    const char *name = (const char *)A20_ARG(1);
-    void *value = (void *)A20_ARG(2);
+    const char *name = (const char *)(uintptr_t)A20_ARG(1);
+    void *value = (void *)(uintptr_t)A20_ARG(2);
     size_t size = (size_t)A20_ARG(3);
     return xattr_common(h, name, value, size, 0);
 }
@@ -351,8 +351,8 @@ int64_t sys_a20_handle_xattr_set(const a20_syscall_args_t *args)
 int64_t sys_a20_handle_xattr_get(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    const char *name = (const char *)A20_ARG(1);
-    void *value = (void *)A20_ARG(2);
+    const char *name = (const char *)(uintptr_t)A20_ARG(1);
+    void *value = (void *)(uintptr_t)A20_ARG(2);
     size_t size = (size_t)A20_ARG(3);
     return xattr_common(h, name, value, size, 1);
 }
@@ -360,7 +360,7 @@ int64_t sys_a20_handle_xattr_get(const a20_syscall_args_t *args)
 int64_t sys_a20_handle_xattr_list(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    void *list = (void *)A20_ARG(1);
+    void *list = (void *)(uintptr_t)A20_ARG(1);
     size_t size = (size_t)A20_ARG(2);
     return xattr_common(h, NULL, list, size, 2);
 }
@@ -368,7 +368,7 @@ int64_t sys_a20_handle_xattr_list(const a20_syscall_args_t *args)
 int64_t sys_a20_handle_xattr_remove(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    const char *name = (const char *)A20_ARG(1);
+    const char *name = (const char *)(uintptr_t)A20_ARG(1);
     return xattr_common(h, name, NULL, 0, 3);
 }
 
@@ -382,7 +382,7 @@ extern int vfs_poll_events(int fd, short events);
 
 int64_t sys_a20_handle_poll(const a20_syscall_args_t *args)
 {
-    a20_handle_poll_args_t *uargs = (a20_handle_poll_args_t *)A20_ARG(0);
+    a20_handle_poll_args_t *uargs = (a20_handle_poll_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_handle_poll_args_t kargs;

@@ -170,7 +170,7 @@ static uint16_t lcd_read_data(void) {
     return LCD_DATA;
 }
 
-static uint16_t lcd_read_id_dcs(void) {
+static uint16_t __attribute__((unused)) lcd_read_id_dcs(void) {
     uint16_t id;
 
     lcd_write_cmd(0xD3);
@@ -955,7 +955,7 @@ static void lcd_restore_touch_button(void) {
         lcd_draw_button(72, 364, 176, 32, "SCAN AP", 0);
 }
 
-static void lcd_init_ili9481(void) {
+static void __attribute__((unused)) lcd_init_ili9481(void) {
     lcd_write_cmd(0xFF);
     lcd_write_cmd(0xFF);
     delay_ms(5);
@@ -1067,7 +1067,7 @@ static void lcd_init_hx8357d(void) {
     delay_ms(30);
 }
 
-static void lcd_init_ili9341(void) {
+static void __attribute__((unused)) lcd_init_ili9341(void) {
     lcd_write_cmd(0x01);
     delay_ms(20);
     lcd_write_cmd(0x28);
@@ -1100,7 +1100,7 @@ static void lcd_init_ili9341(void) {
     delay_ms(20);
 }
 
-static void lcd_init_ili9325(void) {
+static void __attribute__((unused)) lcd_init_ili9325(void) {
     lcd_write_cmd(0xE5); lcd_write_data(0x78F0);
     lcd_write_cmd(0x01); lcd_write_data(0x0100);
     lcd_write_cmd(0x02); lcd_write_data(0x0700);

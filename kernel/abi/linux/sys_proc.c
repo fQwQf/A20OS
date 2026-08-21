@@ -551,21 +551,21 @@ int64_t sys_clone3(void *cl_args, size_t size) {
         return -EINVAL;
     if (args.flags & LINUX_CLONE_PIDFD) {
         int tmp;
-        if (copy_from_user(&tmp, (const void *)args.pidfd, sizeof(tmp)) < 0)
+        if (copy_from_user(&tmp, (const void *)(uintptr_t)args.pidfd, sizeof(tmp)) < 0)
             return -EFAULT;
     }
     uint64_t stack = args.stack;
     if (stack && args.stack_size)
         stack += args.stack_size;
-    int pid = proc_clone(args.flags, stack, (int *)args.parent_tid, args.tls,
-                          (int *)args.child_tid, (int)args.exit_signal);
+    int pid = proc_clone(args.flags, stack, (int *)(uintptr_t)args.parent_tid, args.tls,
+                          (int *)(uintptr_t)args.child_tid, (int)args.exit_signal);
     if (pid < 0 || !(args.flags & LINUX_CLONE_PIDFD))
         return pid;
 
     int fd = linux_pidfd_create(pid, 0);
     if (fd < 0)
         return fd;
-    if (copy_to_user((void *)args.pidfd, &fd, sizeof(fd)) < 0) {
+    if (copy_to_user((void *)(uintptr_t)args.pidfd, &fd, sizeof(fd)) < 0) {
         fdtable_close_current(fd);
         return -EFAULT;
     }
@@ -625,7 +625,8 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
         return -EINVAL; /* NOMMU does not support fork without CLONE_VM */
     }
 #endif
-    return proc_clone(flags, (uint64_t)stack, ptid, tls, ctid, (int)(flags & 0xFF));
+    return proc_clone(flags, (uint64_t)(uintptr_t)stack, ptid, tls, ctid,
+                      (int)(flags & 0xFF));
 }
 
 int64_t sys_execve(const char *path, char **argv, char **envp) {
@@ -777,7 +778,7 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
         if (!t)
             return -ESRCH;
         int sig = t->pdeathsig;
-        if (copy_to_user((void *)a1, &sig, sizeof(sig)) < 0)
+        if (copy_to_user((void *)(uintptr_t)a1, &sig, sizeof(sig)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -785,7 +786,7 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
         task_t *t = proc_current();
         if (t) {
             char name[64];
-            if (user_strncpy(name, (const char *)a1, sizeof(name)) >= 0)
+            if (user_strncpy(name, (const char *)(uintptr_t)a1, sizeof(name)) >= 0)
                 proc_set_name(t, name);
         }
         return 0;

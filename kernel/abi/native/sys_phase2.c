@@ -110,7 +110,7 @@ void resolve_path(const char *in, char *out)
 
 int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
 {
-    a20_thread_create_args_t *uargs = (a20_thread_create_args_t *)A20_ARG(0);
+    a20_thread_create_args_t *uargs = (a20_thread_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_thread_create_args_t kargs;
@@ -149,7 +149,7 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
 int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    a20_sched_args_t *uargs = (a20_sched_args_t *)A20_ARG(1);
+    a20_sched_args_t *uargs = (a20_sched_args_t *)(uintptr_t)A20_ARG(1);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_sched_args_t kargs;
@@ -188,7 +188,7 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
 int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    struct a20_resource_limits *out = (struct a20_resource_limits *)A20_ARG(1);
+    struct a20_resource_limits *out = (struct a20_resource_limits *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -215,7 +215,7 @@ int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
 int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    struct a20_resource_limits *uargs = (struct a20_resource_limits *)A20_ARG(1);
+    struct a20_resource_limits *uargs = (struct a20_resource_limits *)(uintptr_t)A20_ARG(1);
     if (!uargs) return -A20_ERR_FAULT;
 
     struct a20_resource_limits kargs;

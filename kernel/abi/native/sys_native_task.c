@@ -105,7 +105,7 @@ int64_t sys_a20_signal_check(const a20_syscall_args_t *args)
 int64_t sys_a20_signal_mask(const a20_syscall_args_t *args)
 {
     uint64_t new_mask = A20_ARG(0);
-    uint64_t *old_out = (uint64_t *)A20_ARG(1);
+    uint64_t *old_out = (uint64_t *)(uintptr_t)A20_ARG(1);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -120,7 +120,7 @@ int64_t sys_a20_signal_mask(const a20_syscall_args_t *args)
 int64_t sys_a20_task_info(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    a20_task_info_t *out = (a20_task_info_t *)A20_ARG(1);
+    a20_task_info_t *out = (a20_task_info_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -201,7 +201,7 @@ int64_t sys_a20_thread_yield(const a20_syscall_args_t *args)
 
 int64_t sys_a20_thread_get_cpu(const a20_syscall_args_t *args)
 {
-    uint32_t *out = (uint32_t *)A20_ARG(0);
+    uint32_t *out = (uint32_t *)(uintptr_t)A20_ARG(0);
     uint32_t cpu = cpu_current_id();
     if (!out || copy_to_user(out, &cpu, sizeof(cpu)) < 0)
         return -A20_ERR_FAULT;
@@ -218,7 +218,7 @@ int64_t sys_a20_thread_exit(const a20_syscall_args_t *args)
 int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    a20_sched_args_t *out = (a20_sched_args_t *)A20_ARG(1);
+    a20_sched_args_t *out = (a20_sched_args_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -253,7 +253,7 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
 int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
-    a20_rusage_t *out = (a20_rusage_t *)A20_ARG(1);
+    a20_rusage_t *out = (a20_rusage_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();

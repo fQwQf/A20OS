@@ -39,7 +39,7 @@ extern int64_t a20_handle_install(struct a20_ht_internal *ht, void *object,
 int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
 {
     a20_device_map_mmio_args_t *uargs =
-        (a20_device_map_mmio_args_t *)A20_ARG(0);
+        (a20_device_map_mmio_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_device_map_mmio_args_t kargs;
@@ -68,7 +68,7 @@ int64_t sys_a20_device_map_mmio(const a20_syscall_args_t *args)
 int64_t sys_a20_device_irq_listen(const a20_syscall_args_t *args)
 {
     a20_device_irq_listen_args_t *uargs =
-        (a20_device_irq_listen_args_t *)A20_ARG(0);
+        (a20_device_irq_listen_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_device_irq_listen_args_t kargs;
@@ -129,7 +129,7 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args)
  */int64_t sys_a20_device_vmo_phys(const a20_syscall_args_t *args)
 {
     a20_device_vmo_phys_args_t *uargs =
-        (a20_device_vmo_phys_args_t *)A20_ARG(0);
+        (a20_device_vmo_phys_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_device_vmo_phys_args_t kargs;
@@ -160,7 +160,7 @@ int64_t sys_a20_device_irq_unlisten(const a20_syscall_args_t *args)
             pfn_t pfn = vmo_peek_page(v, i);
             pa = (pfn == PFN_NONE) ? 0 : (uint64_t)pfn_to_phys(pfn);
         }
-        if (copy_to_user((void *)(kargs.out_paddrs +
+        if (copy_to_user((void *)(uintptr_t)(kargs.out_paddrs +
                                   (uint64_t)i * sizeof(uint64_t)),
                          &pa, sizeof(pa)) < 0) {
             a20_object_release(entry.object, entry.type);
@@ -189,7 +189,7 @@ extern int udisk_attach(struct vmo *vmo, uint64_t capacity,
 int64_t sys_a20_device_block_attach(const a20_syscall_args_t *args)
 {
     a20_device_block_attach_args_t *uargs =
-        (a20_device_block_attach_args_t *)A20_ARG(0);
+        (a20_device_block_attach_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_device_block_attach_args_t kargs;
@@ -356,7 +356,7 @@ int64_t sys_a20_device_free_dma(const a20_syscall_args_t *args)
 int64_t sys_a20_device_get_info(const a20_syscall_args_t *args)
 {
     a20_device_info_args_t *uargs =
-        (a20_device_info_args_t *)A20_ARG(0);
+        (a20_device_info_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs)
         return -A20_ERR_FAULT;
     a20_device_info_args_t kargs;
