@@ -375,7 +375,7 @@ make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 7. remove 后重新 probe，静态槽、默认 registry 和 IRQ 能再次使用。
 8. 目标平台和至少一个共享基础设施回归平台构建成功。
 
-测试向量和提交证据格式见 [../testing/testing-gates.md](../../testing/testing-gates.md)。
+测试向量和提交证据格式见 [../testing-gates.md](../../testing-gates.md)。
 
 ## 15. 下一步读什么
 
@@ -390,6 +390,6 @@ make ARCH=<arch> BOARD=<board> ABI=both kernel-only -j4
 | framebuffer 映射和刷新 | [Display/Framebuffer](../classes/display.md) |
 | VirtualBox 的真实发现链和设备 | [VirtualBox 驱动栈](../../platforms/virtualbox.md) |
 
-## 16. 评审前的自检
+## 16. 提交前的自检
 
 一个驱动达到“可供外部维护”的标准，应当能仅凭源码内寄存器命名、硬件契约表和本文档回答：设备怎样被发现；为什么会匹配；每项资源由谁拥有；哪个时刻设备可以 DMA；每个 class 返回值的单位；哪些字段由哪把锁保护；每个失败点怎样回滚；remove 后调用者看到什么；怎样在目标平台复现成功和失败。任一问题无法回答，都表示接口或文档仍不完整。

@@ -93,4 +93,4 @@ remove 必须先禁止新等待，再唤醒所有等待者并让其返回 `-ENOD
 
 类驱动的 read/write 只处理内核 buffer。VFS/ABI 适配层负责 `copy_to_user/copy_from_user`。audio 通用 ioctl 和 block 的标准查询已在 devfs 封送，但自定义 block/char ioctl 当前仍会收到原始 `arg`；驱动不得直接解引用，应先扩展通用适配层。所有结构长度、枚举值、位图范围、乘加溢出和映射边界必须在适配层验证。
 
-违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing/testing-gates.md)。
+违反这些契约通常会在 `make check-concurrency-foundation` 或 smoke 测试里暴露，详情见 [测试门禁](../../testing-gates.md)。

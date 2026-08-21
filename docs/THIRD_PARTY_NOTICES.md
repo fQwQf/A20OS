@@ -8,7 +8,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 - `kernel/external/lwip` 和 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree；不能称为 submodule。
 - `.gitmodules` 登记外部项目的路径和 URL，超级项目的 gitlink 条目才固定具体 commit。超级项目只跟踪 gitlink，不等于把每个 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
-- `user/external/rust` 与 `user/external/riscv64-glibc-sysroot` 的本地内容不在审计基线 `e33c3219` 中；若把由它们产生或取得的文件装入镜像，必须另行保留来源、版本和许可证材料。
+- `user/external/rust` 与 `user/external/riscv64-glibc-sysroot` 的本地内容未被仓库跟踪（2026-08 核实时）；若把由它们产生或取得的文件装入镜像，必须另行保留来源、版本和许可证材料。
 - 是否需要随附源码、书面 offer、notice、重链接材料或其他内容，取决于实际组件、链接方式和分发形式，不能由“源码可在工作区找到”一概替代。
 
 ## 2. 内核与自研代码
@@ -46,7 +46,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | fastfetch | MIT | `user/external/apps/fastfetch` |
 | zlib | Zlib | `user/external/libs/zlib` |
 | musl-cross-make | MIT | `user/external/toolchain/musl-cross-make` |
-| Rust 工具链 | 必须按实际取得的分发核验 | `user/external/rust`（审计基线 `e33c3219` 未跟踪内容） |
+| Rust 工具链 | 必须按实际取得的分发核验 | `user/external/rust`（2026-08 核实时仓库未跟踪内容） |
 
 ## 5. 用户态程序、静态链接与镜像
 
@@ -56,7 +56,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 |------|--------|------|------|
 | git | GPL-2.0-only | `user/external/apps/git` | 独立可执行文件 |
 | vim | Vim License | `user/external/apps/vim` | 独立可执行文件 |
-| GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（审计基线 `e33c3219` 未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
+| GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（2026-08 核实时仓库未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
 | binutils | GPL-3.0 / LGPL-3.0 | `user/external/toolchain/binutils` | 独立工具链 |
 | lamina (Lamina1) | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` | 独立可执行文件 + 4 个共享库（laminaCore/lmcas/lmmc/LammpCore，含版本化 SONAME 文件）与 libstdc++.so.6，动态链接 glibc（运行库与 rust 包共用） |
 | FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/libs/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
