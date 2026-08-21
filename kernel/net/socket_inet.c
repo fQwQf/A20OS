@@ -122,6 +122,9 @@ static int net_sockaddr_is_local_target(const void *addr, size_t len)
 static net_socket_t *net_find_stream_listener_locked(net_socket_t *s,
                                                      uint16_t port)
 {
+    net_socket_t *first = NULL;
+    net_socket_t *best = NULL;
+    int best_load = NET_MAX_QUEUE + 1;
     for (int i = 0; i < NET_MAX_SOCKETS; i++) {
         net_socket_t *cand = g_sockets[i];
         if (!cand || !cand->bound || !cand->listening ||
@@ -130,11 +133,20 @@ static net_socket_t *net_find_stream_listener_locked(net_socket_t *s,
         if (!net_inet_domains_overlap(cand->domain, s->domain))
             continue;
         uint16_t cand_port = 0;
-        if (net_sockaddr_port(cand->local, cand->local_len, &cand_port) == 0 &&
-            cand_port == port)
-            return cand;
+        if (net_sockaddr_port(cand->local, cand->local_len, &cand_port) != 0 ||
+            cand_port != port)
+            continue;
+        if (!first)
+            first = cand;
+        if (cand->accept_count < NET_MAX_QUEUE &&
+            cand->accept_count < best_load) {
+            best = cand;
+            best_load = cand->accept_count;
+        }
     }
-    return NULL;
+    if (best)
+        return best;
+    return first;
 }
 
 static net_socket_t *net_find_udp_dst_locked(net_socket_t *src,

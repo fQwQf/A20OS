@@ -264,8 +264,14 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         s->ipv6_checksum_offset = offset;
         return 0;
     }
-    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_V6ONLY)
-        return optlen >= sizeof(int) ? 0 : -EINVAL;
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_V6ONLY) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        s->ipv6_v6only = val != 0;
+        return 0;
+    }
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 &&
         (optname == IPV6_RECVPKTINFO || optname == IPV6_RECVTCLASS ||
          optname == IPV6_RECVHOPLIMIT || optname == IPV6_RECVRTHDR ||
