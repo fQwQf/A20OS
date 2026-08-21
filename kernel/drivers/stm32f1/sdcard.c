@@ -131,7 +131,7 @@ static void sdio_note_error(uint32_t status) {
 static int sdio_cmd(uint32_t index, uint32_t arg, uint32_t response,
                     int ignore_crc);
 
-static void sdio_delay_ms(uint32_t ms) {
+static void __attribute__((unused)) sdio_delay_ms(uint32_t ms) {
     uint32_t cycles_per_ms = stm32_hclk_hz() / 1000U;
     if (cycles_per_ms == 0U)
         cycles_per_ms = 1U;
@@ -170,7 +170,7 @@ static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
     *reg = value;
 }
 
-static void sdio_reset(void) {
+static void __attribute__((unused)) sdio_reset(void) {
     RCC_AHBRSTR |= 1U << 10;
     RCC_AHBRSTR &= ~(1U << 10);
 }
@@ -181,7 +181,7 @@ static void sdio_release_pins(void) {
     gpio_config_pin(&GPIOD_CRL, &GPIOD_CRL, 2, 0x8U);
 }
 
-static void sdio_stop(void) {
+static void __attribute__((unused)) sdio_stop(void) {
     SDIO_DCTRL = 0;
     SDIO_CMD = 0;
     SDIO_ICR = SDIO_STATIC_FLAGS;
@@ -230,7 +230,8 @@ static int sdio_cmd(uint32_t index, uint32_t arg, uint32_t response,
     return -1;
 }
 
-static int sdio_app_cmd(uint32_t command, uint32_t arg, int ignore_crc) {
+static int __attribute__((unused))
+sdio_app_cmd(uint32_t command, uint32_t arg, int ignore_crc) {
     if (sdio_cmd(55, (uint32_t)card.rca << 16,
                  SDIO_CMD_WAITRESP_SHORT, 0) != 0)
         return -1;
@@ -377,7 +378,7 @@ static void copy_volume_label(const uint8_t *src) {
     card.volume_label[length] = '\0';
 }
 
-static void detect_fat32(void) {
+static void __attribute__((unused)) detect_fat32(void) {
     card.fat32 = 0;
     card.partition_lba = 0;
     card.fat_sectors = 0;

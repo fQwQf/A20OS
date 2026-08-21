@@ -34,6 +34,7 @@ static size_t align8(size_t value) {
     return (value + 7U) & ~(size_t)7U;
 }
 
+#ifdef CONFIG_STM32_XUANWU
 static void gpio_config_pin(volatile uint32_t *crl, volatile uint32_t *crh,
                             unsigned pin, uint32_t mode) {
     volatile uint32_t *reg = pin < 8U ? crl : crh;
@@ -119,6 +120,7 @@ static int extsram_probe(size_t capacity) {
     }
     return ok;
 }
+#endif
 
 int stm32_extsram_init(void) {
     ext_ready = 0;
