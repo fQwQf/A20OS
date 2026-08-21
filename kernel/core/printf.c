@@ -123,7 +123,7 @@ static void do_format(const char *fmt, va_list args, putc_fn putc, void *ctx) {
         }
         case 'p': {
             num_buf[0] = '0'; num_buf[1] = 'x';
-            uint64_t v = (uint64_t)va_arg(args, void*);
+            uint64_t v = (uint64_t)(uintptr_t)va_arg(args, void*);
             nlen = 2 + utoa(v, num_buf + 2, 16, 0);
             break;
         }

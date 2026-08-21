@@ -61,7 +61,7 @@ extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
 int64_t sys_a20_system_info(const a20_syscall_args_t *args)
 {
-    a20_system_info_t *out = (a20_system_info_t *)A20_ARG(0);
+    a20_system_info_t *out = (a20_system_info_t *)(uintptr_t)A20_ARG(0);
     if (!out) return -A20_ERR_FAULT;
 
     uint32_t user_size;
@@ -100,7 +100,7 @@ int64_t sys_a20_system_info(const a20_syscall_args_t *args)
 
 int64_t sys_a20_system_random(const a20_syscall_args_t *args)
 {
-    void *buf = (void *)A20_ARG(0);
+    void *buf = (void *)(uintptr_t)A20_ARG(0);
     size_t len = (size_t)A20_ARG(1);
     if (!buf || len > 4096) return -A20_ERR_INVALID_ARGUMENT;
 

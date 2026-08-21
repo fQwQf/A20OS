@@ -122,6 +122,9 @@ static platform_device_t g_rtc_pdev;
 #endif
 #if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64)
 static platform_device_t g_blk_pdev;
+#endif
+#if defined(CONFIG_BOARD_QEMU_VIRT_RISCV64) || \
+    defined(CONFIG_BOARD_QEMU_VIRT_AARCH64)
 static platform_device_t g_vinput_pdev;
 #endif
 #if defined(CONFIG_X86_64)

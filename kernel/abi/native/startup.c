@@ -101,7 +101,7 @@ int a20_prepare_start_info(task_t *task, const char *init_path,
     sp -= sizeof(a20_start_info_t);
     sp &= ~15ULL;
 
-    if (copy_to_user((void *)sp, &info, sizeof(info)) < 0)
+    if (copy_to_user((void *)(uintptr_t)sp, &info, sizeof(info)) < 0)
         return -1;
 
     *out_sp = sp;

@@ -87,10 +87,10 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                          int prot, int flags) {
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
-    if (len == 0) return (uint64_t)-EINVAL;
-    if (len > USER_VA_LIMIT) return (uint64_t)-ENOMEM;
+    if (len == 0) return (vaddr_t)-EINVAL;
+    if (len > USER_VA_LIMIT) return (vaddr_t)-ENOMEM;
 
     pte_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vmf = VM_ANON;
@@ -102,7 +102,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL))
-            return (uint64_t)-EEXIST;
+            return (vaddr_t)-EEXIST;
         flags |= MAP_FIXED;
     }
 
@@ -110,7 +110,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if ((flags & MAP_FIXED) && addr != 0) {
         int mr = mm_munmap_locked(mm, addr, len);
         if (mr < 0)
-            return (uint64_t)mr;
+            return (vaddr_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -121,16 +121,16 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     void *nommu_raw = NULL;
     if (addr == 0) {
         nommu_raw = nommu_alloc_aligned(len, &addr);
-        if (!nommu_raw) return (uint64_t)-ENOMEM;
+        if (!nommu_raw) return (vaddr_t)-ENOMEM;
     }
 #else
     // 查找合适的虚拟地址
     if (addr == 0)
         addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
 
-    if (addr == 0) return (uint64_t)-ENOMEM;
+    if (addr == 0) return (vaddr_t)-ENOMEM;
     if (addr + len < addr || addr + len > USER_VA_LIMIT)
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
 #endif
 
     // 创建新的 VMA
@@ -139,7 +139,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
 #endif
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
     }
     vma->start     = addr;
     vma->end       = addr + len;
@@ -155,7 +155,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         task_t *cur = proc_current();
         if (mm->locked_vm + len > cur->limits.memlock && !proc_has_cap(cur, CAP_SYS_ADMIN)) {
             kfree(vma);
-            return (uint64_t)-ENOMEM;
+            return (vaddr_t)-ENOMEM;
         }
         vma->vm_flags |= VM_LOCKED;
         mm->locked_vm += len;
@@ -172,24 +172,24 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                               uint64_t file_offset)
 {
     if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
 
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0)
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     if (len > USER_VA_LIMIT)
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
 
     int rr = vfs_ref_fd(file_fd);
     if (rr < 0)
-        return (uint64_t)rr;
+        return (vaddr_t)rr;
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL)) {
             vfs_close(file_fd);
-            return (uint64_t)-EEXIST;
+            return (vaddr_t)-EEXIST;
         }
         flags |= MAP_FIXED;
     }
@@ -197,7 +197,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if ((flags & MAP_FIXED) && addr != 0) {
         int mr = mm_munmap_locked(mm, addr, len);
         if (mr < 0)
-            return (uint64_t)mr;
+            return (vaddr_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -210,7 +210,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         nommu_raw = nommu_alloc_aligned(len, &addr);
         if (!nommu_raw) {
             vfs_close(file_fd);
-            return (uint64_t)-ENOMEM;
+            return (vaddr_t)-ENOMEM;
         }
     }
 #else
@@ -219,7 +219,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
         vfs_close(file_fd);
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
     }
 #endif
 
@@ -236,7 +236,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         kfree(nommu_raw);
 #endif
         vfs_close(file_fd);
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
     }
     vma->start       = addr;
     vma->end         = addr + len;
@@ -269,7 +269,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
             }
             kfree(vma);
             vfs_close(file_fd);
-            return (uint64_t)-ENOMEM;
+            return (vaddr_t)-ENOMEM;
         }
         vma->vm_flags |= VM_LOCKED;
         mm->locked_vm += len;
@@ -288,30 +288,30 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                               uint64_t vmo_offset)
 {
     if (!mm || !vmo)
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
 
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0)
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     if (len > USER_VA_LIMIT)
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
     if (vmo_offset >= vmo->size || len > vmo->size - vmo_offset)
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
     if (vmo_offset & (PAGE_SIZE - 1))
-        return (uint64_t)-EINVAL;
+        return (vaddr_t)-EINVAL;
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL))
-            return (uint64_t)-EEXIST;
+            return (vaddr_t)-EEXIST;
         flags |= MAP_FIXED;
     }
 
     if ((flags & MAP_FIXED) && addr != 0) {
         int mr = mm_munmap_locked(mm, addr, len);
         if (mr < 0)
-            return (uint64_t)mr;
+            return (vaddr_t)mr;
     } else if (addr != 0) {
         vm_area_t *existing = mm_find_vma(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
@@ -320,13 +320,13 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 #ifdef CONFIG_NOMMU
     (void)vmo_offset;
-    return (uint64_t)-EOPNOTSUPP;
+    return (vaddr_t)-EOPNOTSUPP;
 #else
     if (addr == 0)
         addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT)
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
 #endif
 
     uint64_t vmf = VM_VMO;
@@ -337,7 +337,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma)
-        return (uint64_t)-ENOMEM;
+        return (vaddr_t)-ENOMEM;
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
@@ -355,7 +355,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)
 {
-    if (!mm) return (uint64_t)-EINVAL;
+    if (!mm) return (vaddr_t)-EINVAL;
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_locked(mm, addr, len, prot, flags);
@@ -367,7 +367,7 @@ vaddr_t mm_mmap(mm_struct_t *mm, vaddr_t addr, size_t len, int prot, int flags)
 vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset)
 {
-    if (!mm) return (uint64_t)-EINVAL;
+    if (!mm) return (vaddr_t)-EINVAL;
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file_fd,
@@ -380,7 +380,7 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
 vaddr_t mm_mmap_vmo(mm_struct_t *mm, vaddr_t addr, size_t len,
                     int prot, int flags, struct vmo *vmo, uint64_t vmo_offset)
 {
-    if (!mm) return (uint64_t)-EINVAL;
+    if (!mm) return (vaddr_t)-EINVAL;
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
     vaddr_t r = mm_mmap_vmo_locked(mm, addr, len, prot, flags, vmo,

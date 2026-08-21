@@ -84,7 +84,7 @@ uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 
 int64_t sys_a20_abi_info(const a20_syscall_args_t *args)
 {
-    a20_abi_info_t *out = (a20_abi_info_t *)A20_ARG(0);
+    a20_abi_info_t *out = (a20_abi_info_t *)(uintptr_t)A20_ARG(0);
     if (!out) return -A20_ERR_FAULT;
 
     a20_abi_info_t info;
@@ -142,7 +142,7 @@ int64_t sys_a20_handle_close(const a20_syscall_args_t *args)
 
 int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
 {
-    a20_handle_dup_args_t *uargs = (a20_handle_dup_args_t *)A20_ARG(0);
+    a20_handle_dup_args_t *uargs = (a20_handle_dup_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_handle_dup_args_t kargs;
@@ -190,7 +190,7 @@ int64_t sys_a20_handle_dup(const a20_syscall_args_t *args)
 int64_t sys_a20_handle_query(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    a20_handle_info_t *out = (a20_handle_info_t *)A20_ARG(1);
+    a20_handle_info_t *out = (a20_handle_info_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -217,7 +217,7 @@ int64_t sys_a20_handle_replace(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
     a20_rights_t rights = (a20_rights_t)A20_ARG(1);
-    a20_handle_t *out = (a20_handle_t *)A20_ARG(2);
+    a20_handle_t *out = (a20_handle_t *)(uintptr_t)A20_ARG(2);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -263,7 +263,7 @@ int64_t sys_a20_handle_close_many(const a20_syscall_args_t *args)
 {
     uint64_t handles_ptr = A20_ARG(0);
     uint32_t count = (uint32_t)A20_ARG(1);
-    a20_handle_t *handles = (a20_handle_t *)handles_ptr;
+    a20_handle_t *handles = (a20_handle_t *)(uintptr_t)handles_ptr;
     if (!handles || count > 4096) return -A20_ERR_FAULT;
 
     uint32_t closed = 0;
@@ -288,7 +288,7 @@ int64_t sys_a20_handle_close_many(const a20_syscall_args_t *args)
 int64_t sys_a20_handle_seek(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    a20_off_t *offset_ptr = (a20_off_t *)A20_ARG(1);
+    a20_off_t *offset_ptr = (a20_off_t *)(uintptr_t)A20_ARG(1);
     uint32_t whence = (uint32_t)A20_ARG(2);
 
     if (!offset_ptr) return -A20_ERR_FAULT;
@@ -434,7 +434,7 @@ static void free_arg_vector(char **vec, int count)
 
 int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 {
-    a20_task_spawn_args_t *uargs = (a20_task_spawn_args_t *)A20_ARG(0);
+    a20_task_spawn_args_t *uargs = (a20_task_spawn_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     /* Version-aware validation (types.md §2): v1 = base layout, v2 appends
@@ -506,7 +506,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         return -A20_ERR_INVALID_ARGUMENT;
     }
     if (kargs.argc > 0 && kargs.argv) {
-        argc = copy_arg_vector((char *const *)kargs.argv, argv_ks,
+        argc = copy_arg_vector((char *const *)(uintptr_t)kargs.argv, argv_ks,
                                MAX_ARG_STRINGS);
         if (argc < 0 || argc != (int)kargs.argc) {
             free_arg_vector(argv_ks, argc > 0 ? argc : 0);
@@ -515,7 +515,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         }
     }
     if (kargs.envc > 0 && kargs.envp) {
-        envc = copy_arg_vector((char *const *)kargs.envp, envp_ks,
+        envc = copy_arg_vector((char *const *)(uintptr_t)kargs.envp, envp_ks,
                                MAX_ARG_STRINGS);
         if (envc < 0 || envc != (int)kargs.envc) {
             free_arg_vector(argv_ks, argc);
@@ -643,7 +643,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         uint32_t nh = kargs.handle_count;
         if (nh > 64) nh = 64;
         a20_spawn_handle_t sh_buf[64];
-        if (copy_from_user(sh_buf, (void *)kargs.handles, nh * sizeof(a20_spawn_handle_t)) < 0) {
+        if (copy_from_user(sh_buf, (void *)(uintptr_t)kargs.handles, nh * sizeof(a20_spawn_handle_t)) < 0) {
             proc_force_exit(new_task, 1);
             proc_make_ready(new_task);
             proc_put(new_task);
@@ -747,8 +747,9 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         return -A20_ERR_NO_MEMORY;
     }
 
-    trap_context_t *trap = (trap_context_t *)
-        ((uint64_t)new_task->kstack_base + KERNEL_STACK_SIZE - sizeof(trap_context_t));
+    trap_context_t *trap = (trap_context_t *)(uintptr_t)
+        ((uint64_t)(uintptr_t)new_task->kstack_base + KERNEL_STACK_SIZE -
+         sizeof(trap_context_t));
     TRAP_CTX_SP(trap) = sp;
     TRAP_CTX_SET_ARG0(trap, sp);
 
@@ -765,7 +766,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 
 int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
 {
-    a20_clone_args_t *uargs = (a20_clone_args_t *)A20_ARG(0);
+    a20_clone_args_t *uargs = (a20_clone_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_clone_args_t kargs;
@@ -788,7 +789,7 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
         return -A20_ERR_INVALID_ARGUMENT;
     a20_clone_handle_t manifest[A20_CLONE_MANIFEST_MAX];
     if (kargs.handle_count > 0) {
-        if (copy_from_user(manifest, (void *)kargs.handles,
+        if (copy_from_user(manifest, (void *)(uintptr_t)kargs.handles,
                            kargs.handle_count * sizeof(a20_clone_handle_t)) < 0)
             return -A20_ERR_FAULT;
     }
@@ -883,7 +884,7 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
     /* Write the child-side results into the CHILD's memory (the child is a
      * COW copy; without this the child would read stale handle values). */
     if (kargs.handle_count > 0) {
-        proc_copy_to_task_user(new_task, (void *)kargs.handles, manifest,
+        proc_copy_to_task_user(new_task, (void *)(uintptr_t)kargs.handles, manifest,
                                kargs.handle_count * sizeof(a20_clone_handle_t));
     }
     proc_copy_to_task_user(new_task, (void *)&uargs->out_root, &child_root,
@@ -906,7 +907,7 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
 int64_t sys_a20_task_adopt(const a20_syscall_args_t *args)
 {
     a20_handle_t in[6];
-    if (copy_from_user(in, (void *)A20_ARG(0), sizeof(in)) < 0)
+    if (copy_from_user(in, (void *)(uintptr_t)A20_ARG(0), sizeof(in)) < 0)
         return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -943,8 +944,8 @@ int64_t sys_a20_execve(const a20_syscall_args_t *args)
 {
     /* Reuse the core exec path (proc_exec).  On success the image is
      * replaced and exec never returns here; on failure map to A20 errno. */
-    int r = sys_execve((const char *)A20_ARG(0), (char **)A20_ARG(1),
-                       (char **)A20_ARG(2));
+    int r = sys_execve((const char *)(uintptr_t)A20_ARG(0), (char **)(uintptr_t)A20_ARG(1),
+                       (char **)(uintptr_t)A20_ARG(2));
     if (r == 0)
         return A20_OK;
     return a20_native_vfs_result(r);
@@ -954,7 +955,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_flags_t flags = (a20_flags_t)A20_ARG(1);
-    a20_task_status_t *out = (a20_task_status_t *)A20_ARG(2);
+    a20_task_status_t *out = (a20_task_status_t *)(uintptr_t)A20_ARG(2);
     (void)flags; /* only blocking wait is implemented currently */
 
     task_t *cur = proc_current();
@@ -992,7 +993,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 
 int64_t sys_a20_vm_alloc(const a20_syscall_args_t *args)
 {
-    a20_vm_alloc_args_t *uargs = (a20_vm_alloc_args_t *)A20_ARG(0);
+    a20_vm_alloc_args_t *uargs = (a20_vm_alloc_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_vm_alloc_args_t kargs;
@@ -1091,7 +1092,7 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
 {
     /* Get path string from user */
     char kpath[MAX_PATH_LEN];
-    const char *upath = (const char *)kargs->path;
+    const char *upath = (const char *)(uintptr_t)kargs->path;
     if (!upath) return -A20_ERR_FAULT;
     if (kargs->path_len > 0 && kargs->path_len < MAX_PATH_LEN) {
         if (copy_from_user(kpath, upath, kargs->path_len) < 0)
@@ -1139,7 +1140,7 @@ int64_t a20_path_open_impl(const a20_path_open_args_t *kargs,
 
 int64_t sys_a20_path_open(const a20_syscall_args_t *args)
 {
-    a20_path_open_args_t *uargs = (a20_path_open_args_t *)A20_ARG(0);
+    a20_path_open_args_t *uargs = (a20_path_open_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_path_open_args_t kargs;
@@ -1161,7 +1162,7 @@ int64_t sys_a20_path_open(const a20_syscall_args_t *args)
 
 int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
 {
-    a20_io_args_t *uargs = (a20_io_args_t *)A20_ARG(0);
+    a20_io_args_t *uargs = (a20_io_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_io_args_t kargs;
@@ -1192,7 +1193,7 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
 
     /* Read iov buffers */
     uint64_t total_read = 0;
-    a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
+    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
         if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
@@ -1201,7 +1202,7 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
         }
         if (v.len == 0) continue;
 
-        char *buf = (char *)v.base;
+        char *buf = (char *)(uintptr_t)v.base;
         if (!buf) continue;
 
         char kbuf[512];
@@ -1237,7 +1238,7 @@ read_done:
 
 int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
 {
-    a20_io_args_t *uargs = (a20_io_args_t *)A20_ARG(0);
+    a20_io_args_t *uargs = (a20_io_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_io_args_t kargs;
@@ -1268,7 +1269,7 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
 
 
     uint64_t total_written = 0;
-    a20_iovec_t *iov = (a20_iovec_t *)kargs.iov;
+    a20_iovec_t *iov = (a20_iovec_t *)(uintptr_t)kargs.iov;
     for (uint32_t i = 0; i < kargs.iov_count; i++) {
         a20_iovec_t v;
         if (copy_from_user(&v, &iov[i], sizeof(v)) < 0) {
@@ -1277,7 +1278,7 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
         }
         if (v.len == 0) continue;
 
-        const char *buf = (const char *)v.base;
+        const char *buf = (const char *)(uintptr_t)v.base;
         if (!buf) continue;
 
         char kbuf[512];
@@ -1314,7 +1315,7 @@ write_done:
 int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
-    a20_stat_t *out = (a20_stat_t *)A20_ARG(1);
+    a20_stat_t *out = (a20_stat_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -1374,7 +1375,7 @@ int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
 int64_t sys_a20_clock_get(const a20_syscall_args_t *args)
 {
     uint32_t clock_id = (uint32_t)A20_ARG(0);
-    a20_time_ns_t *out = (a20_time_ns_t *)A20_ARG(1);
+    a20_time_ns_t *out = (a20_time_ns_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     uint64_t ts[2]; /* [seconds, nanoseconds] */

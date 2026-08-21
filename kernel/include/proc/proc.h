@@ -334,6 +334,10 @@ _Static_assert(offsetof(task_t, kstack) == 0,
                "task_t.kstack must remain at assembly ABI offset 0");
 _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
                "task_t.kstack_base must remain at assembly ABI offset 8/4");
+#ifdef CONFIG_ARM32
+_Static_assert(offsetof(task_t, trap_ctx) == 40,
+               "ARM32 trap.S TASK_TRAP_CTX offset is stale");
+#endif
 
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)

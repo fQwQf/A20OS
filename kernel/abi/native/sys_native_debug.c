@@ -149,7 +149,7 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
 {
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
     uint64_t timeout_us = A20_ARG(1);
-    a20_debug_event_info_t *out = (a20_debug_event_info_t *)A20_ARG(2);
+    a20_debug_event_info_t *out = (a20_debug_event_info_t *)(uintptr_t)A20_ARG(2);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -221,7 +221,7 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
 int64_t sys_a20_debug_event(const a20_syscall_args_t *args)
 {
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
-    a20_debug_event_info_t *out = (a20_debug_event_info_t *)A20_ARG(1);
+    a20_debug_event_info_t *out = (a20_debug_event_info_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -320,7 +320,7 @@ int64_t sys_a20_debug_read(const a20_syscall_args_t *args)
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
     uint64_t addr = A20_ARG(1);
     uint64_t len = A20_ARG(2);
-    void *buf = (void *)A20_ARG(3);
+    void *buf = (void *)(uintptr_t)A20_ARG(3);
     if (!buf || len == 0) return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
@@ -355,7 +355,7 @@ int64_t sys_a20_debug_write(const a20_syscall_args_t *args)
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
     uint64_t addr = A20_ARG(1);
     uint64_t len = A20_ARG(2);
-    const void *buf = (const void *)A20_ARG(3);
+    const void *buf = (const void *)(uintptr_t)A20_ARG(3);
     if (!buf || len == 0) return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
@@ -388,7 +388,7 @@ int64_t sys_a20_debug_write(const a20_syscall_args_t *args)
 int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args)
 {
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
-    a20_regs_t *out = (a20_regs_t *)A20_ARG(1);
+    a20_regs_t *out = (a20_regs_t *)(uintptr_t)A20_ARG(1);
     if (!out) return -A20_ERR_FAULT;
 
     task_t *cur = proc_current();
@@ -421,7 +421,7 @@ int64_t sys_a20_debug_read_regs(const a20_syscall_args_t *args)
 int64_t sys_a20_debug_write_regs(const a20_syscall_args_t *args)
 {
     a20_handle_t dbg_h = (a20_handle_t)A20_ARG(0);
-    const a20_regs_t *uregs = (const a20_regs_t *)A20_ARG(1);
+    const a20_regs_t *uregs = (const a20_regs_t *)(uintptr_t)A20_ARG(1);
     if (!uregs) return -A20_ERR_FAULT;
 
     a20_regs_t kregs;
@@ -487,7 +487,7 @@ int64_t sys_a20_debug_map_memory(const a20_syscall_args_t *args)
                                  kbuf, chunk);
         if (n < 0)
             goto out_unmap;
-        if (copy_to_user((void *)(local + done), kbuf, (size_t)n) < 0) {
+        if (copy_to_user((void *)(uintptr_t)(local + done), kbuf, (size_t)n) < 0) {
             r = -A20_ERR_FAULT;
             goto out_unmap;
         }

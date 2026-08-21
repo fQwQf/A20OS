@@ -105,7 +105,7 @@ static uint32_t a20_vm_prot_eff(uint32_t prot, a20_rights_t rights)
 
 int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 {
-    a20_vm_map_args_t *uargs = (a20_vm_map_args_t *)A20_ARG(0);
+    a20_vm_map_args_t *uargs = (a20_vm_map_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_vm_map_args_t kargs;
@@ -263,7 +263,7 @@ out_vmo:
  */
 int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args)
 {
-    a20_vm_share_args_t *uargs = (a20_vm_share_args_t *)A20_ARG(0);
+    a20_vm_share_args_t *uargs = (a20_vm_share_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_vm_share_args_t kargs;
@@ -352,6 +352,9 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     uint64_t addr = A20_ARG(0);
     uint64_t len = A20_ARG(1);
     uint32_t advice = (uint32_t)A20_ARG(2);
+#ifdef CONFIG_NOMMU
+    (void)advice;
+#endif
 
     if (len == 0) return A20_OK;
     if (addr & 4095) return -A20_ERR_INVALID_ARGUMENT;
@@ -452,8 +455,8 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     while (done < old_len) {
         size_t chunk = old_len - done;
         if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-        if (copy_from_user(kbuf, (const void *)(old_addr + done), chunk) < 0 ||
-            copy_to_user((void *)(new_addr + done), kbuf, chunk) < 0) {
+        if (copy_from_user(kbuf, (const void *)(uintptr_t)(old_addr + done), chunk) < 0 ||
+            copy_to_user((void *)(uintptr_t)(new_addr + done), kbuf, chunk) < 0) {
             proc_munmap(new_addr, (size_t)new_len);
             return -A20_ERR_FAULT;
         }

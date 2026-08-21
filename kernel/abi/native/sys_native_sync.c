@@ -34,7 +34,7 @@ static int64_t a20_sync_map_status(int err)
 
 int64_t sys_a20_futex_wait(const a20_syscall_args_t *args)
 {
-    a20_futex_wait_args_t *uargs = (a20_futex_wait_args_t *)args->arg[0];
+    a20_futex_wait_args_t *uargs = (a20_futex_wait_args_t *)(uintptr_t)args->arg[0];
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_futex_wait_args_t kargs;
@@ -50,7 +50,7 @@ int64_t sys_a20_futex_wait(const a20_syscall_args_t *args)
 
 int64_t sys_a20_futex_wake(const a20_syscall_args_t *args)
 {
-    a20_futex_wake_args_t *uargs = (a20_futex_wake_args_t *)args->arg[0];
+    a20_futex_wake_args_t *uargs = (a20_futex_wake_args_t *)(uintptr_t)args->arg[0];
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_futex_wake_args_t kargs;
