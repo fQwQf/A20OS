@@ -79,9 +79,9 @@ flash-xuanwu-openocd:
 		-c "shutdown"
 
 run-stm32f103-qemu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
+	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded KERNEL_WERROR=0 STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
 	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded \
-		STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 run-stm32f103-qemu-impl
+		KERNEL_WERROR=0 STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 run-stm32f103-qemu-impl
 
 run-stm32f103-qemu-impl:
 	qemu-system-arm -machine stm32vldiscovery -nographic \

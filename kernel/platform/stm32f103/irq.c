@@ -20,7 +20,9 @@ uint32_t armv7m_platform_core_clock_hz(void) {
 }
 
 void armv7m_platform_systick(uint64_t ticks) {
+#ifndef CONFIG_STM32_QEMU
     stm32_backlight_systick();
+#endif
     if ((ticks % 500U) == 0U)
         stm32_status_led_toggle();
 }
@@ -29,20 +31,24 @@ void armv7m_platform_irq_dispatch(uint32_t irq) {
     int c;
 
     switch (irq) {
+#ifndef CONFIG_STM32_QEMU
     case STM32_IRQ_EXTI9_5:
         stm32_ir_isr();
         break;
+#endif
     case STM32_IRQ_USART1:
         while ((c = arch_uart_poll_getc()) >= 0)
             uart_receive_char((char)c);
         arch_uart_ack_irq();
         break;
+#ifndef CONFIG_STM32_QEMU
     case STM32_IRQ_USART2:
         stm32_wifi_irq();
         break;
     case STM32_IRQ_USART3:
         stm32_bluetooth_irq();
         break;
+#endif
     default:
         break;
     }
