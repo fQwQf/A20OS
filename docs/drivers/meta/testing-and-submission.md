@@ -60,7 +60,7 @@ make check-stm32f103
 
 跨架构结论分三级记录：只编译通过；设备枚举并绑定；实际 DMA/I/O 完成。只有第三级可以写“运行验证”。某架构的 board 没有 PCI enumerator 时，HDA/NVMe 编译成功只能计入第一级。
 
-不相关架构可按改动范围缩减，但修改 driver core、class、PCI、VirtIO 或 hwapi 时应扩大矩阵。本地门禁入口见 [testing/testing-gates.md](../../testing/testing-gates.md)。
+不相关架构可按改动范围缩减，但修改 driver core、class、PCI、VirtIO 或 hwapi 时应扩大矩阵。本地门禁入口见 [testing-gates.md](../../testing-gates.md)。
 
 ## probe 测试表
 
@@ -88,7 +88,7 @@ QEMU GUI 目标当前状态：
 | `smoke-qemu-gui-aarch64` | 模块清单包含 VirtIO GPU/input，可按改动范围运行；没有匹配日志时只能记为未验证，不能从目标存在推导通过 |
 | `smoke-qemu-gui-loongarch64` | 模块清单包含 VirtIO GPU/input，可按改动范围运行；没有匹配日志时只能记为未验证，不能从目标存在推导通过 |
 
-脚本本身不依赖宿主图形会话。它以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。对模块清单满足前置条件的目标，可使用对应的 `make smoke-qemu-gui-<arch> SMOKE_TIMEOUT=<seconds>` 并保存该架构的串口日志和 PPM；“能链接”或“串口能启动”不能替代行为结果。完整门禁说明见 [testing/testing-gates.md](../../testing/testing-gates.md)。
+脚本本身不依赖宿主图形会话。它以 headless display 启动 GUI rootfs，要求 VirtIO GPU、两个 VirtIO input 实例和用户态 desktop 全部就绪；通过 QMP 抓取实际 scanout 并拒绝纯黑/空 framebuffer；最后注入按键并要求客户机产生 input event。对模块清单满足前置条件的目标，可使用对应的 `make smoke-qemu-gui-<arch> SMOKE_TIMEOUT=<seconds>` 并保存该架构的串口日志和 PPM；“能链接”或“串口能启动”不能替代行为结果。完整门禁说明见 [testing-gates.md](../../testing-gates.md)。
 
 block：首尾 LBA、越界、零长度、跨内部 chunk、读后写回、flush、错误恢复。不要在装有唯一数据的镜像上做破坏性测试。
 
@@ -112,7 +112,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 [LWIP] netif en0 attached to ...
 ```
 
-日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合评审和回归比较。
+日志要包含构建命令、平台/VM 设备配置、成功 I/O，以及已知未验证能力。不要只附截图；串口文本更适合代码审查和回归比较。
 
 ## 门禁失败时怎么办
 

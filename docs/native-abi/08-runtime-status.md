@@ -1,6 +1,6 @@
 # A20OS Native ABI 运行时状态
 
-本文档记录 A20OS Native ABI 当前用户态运行时的真实状态、已知偏差和后续路线图。它已按 `e33c3219` 源码核对；当前提交没有匹配的完整干净双架构平台复验，且多数 Native runtime smoke 固定为 RISC-V64。它是对 [00-overview.md](00-overview.md) 中实现状态的补充。
+本文档记录 A20OS Native ABI 当前用户态运行时的真实状态、已知偏差和后续路线图（最后核实：2026-08）。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。它是对 [00-overview.md](00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
 
@@ -38,7 +38,7 @@ struct a20_vm_alloc_args args = {
 int64_t r = a20_vm_alloc(&args);
 ```
 
-迁移期历史记录中 `smoke-native-libc` 曾跑通；当前源码仍提供该 RISC-V64 目标，但本次未重跑。裸参数数组调用已不存在于 `user/liba20c/*.c`。
+迁移期历史记录中 `smoke-native-libc` 曾跑通；当前源码仍提供该 RISC-V64 目标，引用前需在当前提交复验。裸参数数组调用已不存在于 `user/liba20c/*.c`。
 
 ### 2. liba20rt 类型头与内核类型头已对齐
 
