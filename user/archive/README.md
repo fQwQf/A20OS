@@ -11,7 +11,7 @@
 - `src/`：旧版 musl 桥接代码，包括 pthread、mutex、signal、fork/posix_spawn、fdtable、syscallops 等。
 - `build_sysroot.sh`：旧版 sysroot 构建脚本，引用了 `user/musl-port/` 等当前仓库中不存在的路径。
 - `tests/`：旧版测试程序。
-- `config.a20`、`a20.ld`、`stress.c`、`syscall_bridge.c`、`benchmark_init/`：早期实验代码和初始化材料。
+- `config.a20`、`a20.ld`、`stress.c`、`syscall_bridge.c`：早期实验代码。
 
 ## 重要提示
 

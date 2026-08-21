@@ -103,4 +103,4 @@ typedef struct a20_idl_envelope_t {   // message ENVELOPE
 
 **语义对照**：`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 执行与 native 实现相同的序列（部分读、跨消息字节流、level 就绪），`smoke-native-personality` 要求两个实现输出完全一致的 `PIPE_REF` 行。源码具备该对照入口；本次未运行，不能把目标断言写成当前 PASS。
 
-剩余：fd 表 byte-stream 语义的完整覆盖、epoll level 触发通用化、更大测例集（functional tests 功能项）的语义 diff 与性能对照。本文档不把现有 Linux ABI 直通实现称为已完成的 starnix 人格层；Native ABI 仍是系统本体，完整人格负载是后续工作。
+剩余：fd 表 byte-stream 语义的完整覆盖、epoll level 触发通用化、更大测例集（Linux 功能测例）的语义 diff 与性能对照。本文档不把现有 Linux ABI 直通实现称为已完成的 starnix 人格层；Native ABI 仍是系统本体，完整人格负载是后续工作。

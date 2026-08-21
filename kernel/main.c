@@ -47,10 +47,10 @@ void init_kthread(void);
  *
  * Probe all virtio-blk devices.  Auto-detect by filesystem type:
  *   fat32 → /bin   (our utilities: init, mksh, cmds, …)
- *   ext4  → /test  (judge sdcard or local sdcard image)
+ *   ext4  → /extra  (local sdcard image)
  *
  * Works regardless of device ordering:
- *   benchmark QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
+ *   Alt QEMU:  dev0=ext4(sdcard) dev1=fat32(disk.img)
  *   Dev QEMU:      dev0=fat32(disk.img) dev1=ext4(sdcard)
  * ============================================================ */
 
@@ -253,7 +253,7 @@ void init_kthread(void) {
     a20_lwip_attach_netifs();
 #endif
 
-#ifdef CONFIG_RELEASE_EVAL_ROOT
+#ifdef CONFIG_EXTERNAL_ROOT
     const char *init_path = "/a20/init";
 #else
     const char *init_path = "/bin/init";

@@ -1,7 +1,6 @@
 # ----------------------------------------------------------------
-# release image build.  The release platform invokes `make all`
-# and then consumes kernel-rv, kernel-la, disk.img, and disk-la.img.  Keep the
-# external-root image builder available under an explicit target.
+# Release build.  `make all` produces the dual-architecture release artifacts
+# kernel-rv, kernel-la, disk.img, and disk-la.img in the repository root.
 # ----------------------------------------------------------------
 .PHONY: check-smp-platform-boundary check-io-progress-model
 
@@ -11,19 +10,10 @@
 .NOTPARALLEL: check-doc-test-gates check-final-definition
 
 all:
-	$(MAKE) final-submit-rv
-	$(MAKE) final-submit-la
-	@echo "=== 2026 final image build complete ==="
+	$(MAKE) release-rv
+	$(MAKE) release-la
+	@echo "=== release build complete ==="
 	@echo "  kernel-rv  kernel-la  disk.img  disk-la.img"
-
-final-all: all
-
-release-all:
-	@set -e; for target in $(DEFAULT_benchmark_TARGETS); do $(MAKE) $$target; done
-	@echo "=== external-root reference build complete ==="
-	@echo "  built: $(DEFAULT_benchmark_TARGETS)"
-
-all-architectures: all
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
@@ -354,11 +344,8 @@ check-ppc64le-user:
 check-dev-build:
 	$(MAKE) ARCH=riscv64 ABI=$(ABI) BRINGUP=0 dev-build
 
-check-benchmark-build:
+check-release-build:
 	$(MAKE) all
-
-check-benchmark-build-all:
-	$(MAKE) all-architectures
 
 check-concurrency-foundation: smoke-smp-bringup
 	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c

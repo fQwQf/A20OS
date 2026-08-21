@@ -4,12 +4,23 @@
 
 ## 环境准备
 
-
+需要本机安装各架构交叉工具链与镜像工具。Debian/Ubuntu 上一次装齐：
 
 ```bash
-
-
+sudo apt-get install -y \
+    build-essential curl git vim wget xz-utils file ripgrep \
+    dosfstools e2fsprogs mtools \
+    qemu-system-misc qemu-system-x86 qemu-system-arm openocd \
+    gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
+    gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu gcc-powerpc64le-linux-gnu \
+    gcc-arm-linux-gnueabihf gcc-arm-none-eabi binutils-arm-none-eabi \
+    python3 python3-pip rustc cargo
 ```
+
+注意两点：
+
+- **LoongArch64**：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
+- **Python**：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）；lamina 等 extra 包需要 CMake >= 3.29（`pip install cmake==3.29.6`）。
 
 ## 最常用的构建与运行命令
 
@@ -25,10 +36,7 @@
 | `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
 | `make ARCH=riscv64 NOMMU=1 run` | 以 NOMMU 模式运行 | 测试 NOMMU 路径 |
 | `make debug-riscv64` | 用 `-O0 -g -DDEBUG` 编译并启动 QEMU 等待 GDB | 源码级调试 |
-| `make all` | 构建 双架构发布产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img` | 测试平台入口 |
-| `make final-all` / `make all-architectures` | `make all` 的显式别名；名称 `all-architectures` 不表示七架构矩阵 | 提交前双架构编译 |
-| `make release-all` | 构建保留的双架构入口与脚本 | 回归检查 |
-| `make benchmark-rv` / `make benchmark-la` | 单独构建某架构的产物 | 定点复验 |
+| `make all` | 构建双架构发布产物：`kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img` | 发布构建入口 |
 | `make dev-build` | 生成内核、FAT32 和 ext4 镜像 | 需要完整用户态时 |
 | `make kernel-only` | 只生成内核 | 快速编译验证 |
 | `make stm32f103-bringup` | 生成 STM32F103 64 KiB Flash / 20 KiB SRAM 固件 | MCU 起步 |
@@ -55,7 +63,7 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
 - `NR_CPUS`: 默认 `1`；只有 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 的同名 QEMU virt 板列入已验证 SMP 白名单。
 - `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
-- `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M、PPC64LE 和提交使用 embedded。
+- `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M、PPC64LE 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
 - `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
 - `GUI_MEDIA`: 可选的 H.264/AAC MP4。仅在命令行显式设置时写入 GUI 镜像的 `/media/demo.mp4`；未设置时桌面和播放器仍会安装，但不会创建默认媒体或播放器 launcher。
@@ -106,7 +114,7 @@ WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audiopl
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
--  `make all` 构建 RISC-V64 与 LoongArch64，使用 `PROFILE=benchmark NR_CPUS=8 DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1`，输出根目录的 `kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。默认优化仍来自 `OPT=-O3`；若需要改变优化必须使用 `OPT`。parallel-build 设计与复现说明见 [parallel-build-2026.md](parallel-build-2026.md)。
+- 发布构建 `make all` 构建 RISC-V64 与 LoongArch64，使用 `PROFILE=benchmark NR_CPUS=8 DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1`，输出根目录的 `kernel-rv`、`kernel-la`、`disk.img`、`disk-la.img`。默认优化仍来自 `OPT=-O3`；若需要改变优化必须使用 `OPT`。
 - `ARCH=armv7m` 需要 `arm-none-eabi-gcc` 或 `clang` + `llvm-objcopy`。
 - 图形 QEMU 目标依赖宿主机显示能力；无图形环境请使用普通 `run-*` 目标。
 - 不要直接仿照 Makefile 外的 QEMU 参数手写启动命令，容易遗漏 `-bios default` 等关键选项。

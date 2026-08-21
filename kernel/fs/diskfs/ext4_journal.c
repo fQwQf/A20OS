@@ -500,7 +500,7 @@ int ext4_journal_recover(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
     if (ret < 0)
         return ret;
 
-    /* The official images use 4 KiB journal blocks.  Allocate before
+    /* The published reference images use 4 KiB journal blocks.  Allocate before
      * reading the superblock because the ext4 block size is already known. */
     j.block_size = fs->block_size;
     uint64_t journal_blocks = ext4_inode_size(&j.journal_inode) /

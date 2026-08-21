@@ -6,7 +6,7 @@
 /* Physical memory layout (QEMU virt) */
 #define PHYS_MEMORY_BASE   0x80000000UL
 #define PHYS_MEMORY_END    0xC0000000UL
-/* The online reference evaluator starts RISC-V with as much as 16 GiB of RAM. */
+/* Some hosts start RISC-V guests with as much as 16 GiB of RAM. */
 #define PHYS_MEMORY_MAX_END (PHYS_MEMORY_BASE + (16UL << 30))
 #define KERNEL_ENTRY       0x80200000UL
 #ifdef CONFIG_NOMMU

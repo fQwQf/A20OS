@@ -160,9 +160,9 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
 		done; \
 		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
-		printf '#!/bin/sh\nexec /test/bin/gcc-real --sysroot=/test -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
+		printf '#!/bin/sh\nexec /extra/bin/gcc-real --sysroot=/extra -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
 		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
-		printf '#!/bin/sh\nexec /test/bin/cc-real --sysroot=/test -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
+		printf '#!/bin/sh\nexec /extra/bin/cc-real --sysroot=/extra -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/cc"; \
 		if [ "$(ARCH)" = riscv64 ]; then \
 			MUSL_LIBC="$(RISCV_GCC_MUSL_LIBC)"; \
@@ -193,11 +193,11 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 			exit 1; \
 		}; \
 		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
-		printf '#!/bin/sh\nexec /test/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/test/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/test/rust/a20-sysroot/lib/crt1.o -C link-arg=/test/rust/a20-sysroot/lib/crti.o -C link-arg=/test/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
-		printf '#!/bin/sh\nexport RUSTC=/test/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /test/rust/bin/cargo --config /test/rust/config.toml "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
-		printf '#!/bin/sh\nexec /test/rust/bin/rustfmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustfmt"; \
-		printf '#!/bin/sh\nexec /test/rust/bin/cargo-fmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
-		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/test/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/test/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/test/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/test/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
+		printf '#!/bin/sh\nexec /extra/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/extra/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/extra/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/extra/rust/a20-sysroot/lib/crt1.o -C link-arg=/extra/rust/a20-sysroot/lib/crti.o -C link-arg=/extra/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
+		printf '#!/bin/sh\nexport RUSTC=/extra/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /extra/rust/bin/cargo --config /extra/rust/config.toml "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
+		printf '#!/bin/sh\nexec /extra/rust/bin/rustfmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustfmt"; \
+		printf '#!/bin/sh\nexec /extra/rust/bin/cargo-fmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
+		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/extra/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/extra/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
 		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo" \
 			"$(EXTRA_STAGING_DIR)/bin/rustfmt" "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
 		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
@@ -250,7 +250,7 @@ $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 ifeq ($(ARCH), riscv64)
 # Slot 5 is reserved for the user-space virtio-input placement and is skipped
 # by the kernel's VirtIO-MMIO enumerator.  Keep the extra disk on an otherwise
-# unused slot so it is discovered and mounted at /test during early boot.
+# unused slot so it is discovered and mounted at /extra during early boot.
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-device,drive=xextra,bus=virtio-mmio-bus.1
 else ifeq ($(ARCH), loongarch64)
 EXTRA_QEMU_BLK = -drive file=$(EXTRA_IMG),if=none,format=raw,id=xextra -device virtio-blk-pci,drive=xextra
