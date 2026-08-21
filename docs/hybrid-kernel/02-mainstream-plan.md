@@ -68,7 +68,7 @@ virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行�
 
 loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybrid smoke 的系统化运行矩阵；性能结论应来自明确标注提交和环境的有效样本。
 
-**当前状态**：`f9732348` 曾完成 RISC-V64/LoongArch64 整体平台流程，但这不覆盖所有 Native/hybrid smoke，也不能外推到 `e33c3219`。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
+**当前状态**：`f9732348` 曾完成 RISC-V64/LoongArch64 整体发布流程，但这不覆盖所有 Native/hybrid smoke，也不能外推到 `e33c3219`。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
 
 ## 已做出的设计决策
 

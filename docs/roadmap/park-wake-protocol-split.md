@@ -187,4 +187,4 @@ for each (task, seq):
 - **剩余 `proc_lock` 来源（测量归因）**：切换发布（`sched()` 内联的 `spin_lock(&proc_lock)`，
   每次上下文切换 1 次，结构性且移动有损 "neither selected nor owned" 不变量）与 fork/exit 的任务表
   扫描（O(tasks)，但按进程生命周期触发、频率低）。per-parent 子进程链表与切换发布无锁化均评估为
-  高复杂度/高风险且当前测量价值低，留待正式 parallel-build 证据再定。
+  高复杂度/高风险且当前测量价值低，留待更多端到端基准证据再定。

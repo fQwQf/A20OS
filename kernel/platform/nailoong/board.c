@@ -4,7 +4,7 @@
  * NaiLoong Core (LA32R) board support.
  *
  * The core is a Chisel-designed LoongArch32 Reduced out-of-order core that
- * plugs into the NaiLoong  SoC via a 32-bit AXI master port.  The SoC
+ * plugs into the NaiLoong LA32R SoC via a 32-bit AXI master port.  The SoC
  * publishes DRAM at 0x80000000 (512 MiB window, identity mapped through
  * DMW0) and MMIO (UART at 0x1FE001E0) in the 0x1C000000 window (DMW1).
  *

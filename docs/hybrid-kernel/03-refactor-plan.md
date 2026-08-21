@@ -96,7 +96,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 在 Native 原语上重建 Linux ABI 的关键子集（fd 表→句柄表、mmap→VMO/ VMAR、pipe/AF_UNIX→channel、epoll→EventQ、futex→原生 futex），与现有直通内核实现并存，跑同一测例做语义 diff 与性能对照。
 
-验收：选定测例集（functional tests 功能项为自然候选）在两种实现下同通过； 性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
+验收：选定测例集（Linux 功能测例为自然候选）在两种实现下同通过； 性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
 
 **状态**：人格层已完成两阶段实现——`a20_personality.h`（channel-backed pipe）与 `a20_linux.h`（fd 表/mmap/pipe/socketpair/futex/epoll facade）。 **字节流与 level 语义已完成**：跨消息拼接读取、部分读、pending 数据保持就绪直到耗尽；`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 跑同一序列，`smoke-native-personality` 要求两个实现输出完全一致的 PIPE_REF 行——native 与 Linux ABI 语义对照通过。剩余：fd 表 byte- stream 语义的完整覆盖、epoll level 触发通用化与更大测例集的语义 diff/性能对照，不把直通实现冒充为人格层。
 

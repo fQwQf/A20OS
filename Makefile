@@ -10,13 +10,11 @@ TIMEOUT ?= $(PYTHON) tools/run_with_timeout.py
 HOST_OS ?= $(shell uname -s 2>/dev/null)
 
 ifeq ($(HOST_OS),Darwin)
-DEFAULT_benchmark_TARGETS := benchmark-rv
 DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-stm32f103
 DEFAULT_USER_CHECK_TARGETS := check-riscv64-user
 DEFAULT_NATIVE_TEST_TARGETS := native-test-rv
 DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv
 DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
-DEFAULT_EVAL_TARGETS := eval-rv
 else
 # Canonical hosted build matrix (BUILD_MATRIX_GATE_CONTRACT).  Every per-arch
 # gate list below is derived from this single source of truth so an added or
@@ -28,13 +26,11 @@ SUPPORTED_HOSTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc6
 NATIVE_ARCH_NAME = $(if $(filter riscv64,$(1)),rv,$(if $(filter loongarch64,$(1)),la,$(if $(filter riscv32,$(1)),rv32,$(1))))
 NATIVE_ARCH_LIST = $(foreach a,$(SUPPORTED_HOSTED_ARCHES),$(call NATIVE_ARCH_NAME,$(a)))
 
-DEFAULT_benchmark_TARGETS := benchmark-rv benchmark-la
 DEFAULT_KERNEL_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup)
 DEFAULT_USER_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
 DEFAULT_NATIVE_TEST_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-test-$(n))
 DEFAULT_NATIVE_HANDLE_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-handle-test-$(n))
 DEFAULT_NATIVE_LIBC_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-libc-$(n))
-DEFAULT_EVAL_TARGETS := eval-rv eval-la
 endif
 
 # ================================================================
@@ -129,10 +125,10 @@ endif
 KERNEL_DIR = kernel
 INCLUDE_DIR = $(KERNEL_DIR)/include
 
-# Preserve established generic and STM32 output paths used by smoke, benchmark,
+# Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-final-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -197,7 +193,7 @@ USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
 # (and thus never leave a stale desktop binary in the image).
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):$(USER_BUILD_DESKTOP)
 # $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
-# benchmark build must not fail when a tarball export or a non-recursive clone
+# build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
 USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common user/desktop user/external/gui/lvgl \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
@@ -509,8 +505,8 @@ endif
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
-# Extra-package runs need extra.img to be the ext4 filesystem mounted at /test,
-# so snapshot the flags before an optional benchmark sdcard is appended.
+# Extra-package runs need extra.img to be the ext4 filesystem mounted at /extra,
+# so snapshot the flags before an optional second disk is appended.
 QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
@@ -525,10 +521,11 @@ endif
 endif
 
 # Compiler flags
-# Benchmark/final-submission kernels are production builds.  Keeping UBSAN
-# enabled there instruments the VFS/MM/syscall hot paths and makes the benchmark
-# score measure diagnostics rather than the kernel.  Development profiles keep
-# the sanitizer by default; bring-up and benchmark profiles opt out explicitly.
+# Benchmark/release kernels are production builds.  Keeping UBSAN
+# enabled there instruments the VFS/MM/syscall hot paths and makes
+# benchmark runs measure diagnostics rather than the kernel.  Development
+# profiles keep the sanitizer by default; bring-up and benchmark profiles
+# opt out explicitly.
 CONFIG_UBSAN ?= $(if $(filter 1,$(BRINGUP)),0,$(if $(filter benchmark,$(PROFILE)),0,1))
 # Warnings are errors for the kernel: a warning that slips into a release build
 # is a regression.  Unverified arches that still carry warnings can build with
@@ -583,7 +580,7 @@ CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
 CFLAGS += $(DRIVER_DEPLOYMENT_CPPFLAGS)
 ifeq ($(EXTERNAL_ROOT),1)
-CFLAGS += -DCONFIG_RELEASE_EVAL_ROOT
+CFLAGS += -DCONFIG_EXTERNAL_ROOT
 endif
 
 # ------------------------------------------------------------------
@@ -671,7 +668,7 @@ ifeq ($(ABI),both)
 CFLAGS += -DCONFIG_ABI_NATIVE
 endif
 
-# Bringup / benchmark mode markers for conditional compilation.
+# Bringup / ramfs-user mode markers for conditional compilation.
 ifeq ($(BRINGUP),1)
 CFLAGS += -DBRINGUP
 endif
@@ -783,8 +780,8 @@ endif
 
 # Built-in rootfs overlay.
 #
-# The generated source/header are checked in intentionally so benchmark builds do
-# not depend on Python being present on the judge. After editing
+# The generated source/header are checked in intentionally so archive builds do
+# not depend on Python being present. After editing
 # user/rootfs_overlay/, regenerate them manually with `make regen-rootfs-overlay`.
 ROOTFS_OVERLAY_DIR   = user/rootfs_overlay
 ROOTFS_OVERLAY_SRC   = kernel/fs/rootfs_overlay.c
@@ -885,7 +882,6 @@ include tools/targets-extra.mk
 include tools/targets-native.mk
 include tools/targets-native-smoke.mk
 include tools/targets-mlibc.mk
-include tools/targets-eval.mk
 
 # ================================================================
 # Documentation

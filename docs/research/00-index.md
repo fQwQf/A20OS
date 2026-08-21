@@ -53,7 +53,7 @@
 | [11-threat-model.md](11-threat-model.md) | 攻击者层级、防御映射、攻击测试套件 | 证据 |
 | [12-positioning.md](12-positioning.md) | 论文定位、主会压力测试、拒稿风险 | 策略 |
 
-**已移出研究目录**：`docs/roadmap/linux-audit-and-performance-comparison.md`（Linux 审计）、`docs/roadmap/perf-overhaul.md`、`docs/roadmap/park-wake-protocol-split.md`——工程证据，不作为 Native 研究主张的绩效来源。
+**已移出研究目录**：`docs/roadmap/perf-overhaul.md`、`docs/roadmap/park-wake-protocol-split.md`——工程证据，不作为 Native 研究主张的绩效来源。
 
 ---
 

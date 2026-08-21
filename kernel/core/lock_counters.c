@@ -5,7 +5,7 @@
 #include "core/kallsyms.h"
 #include "mm/slab.h"
 
-/* Fixed registry of the locks the parallel-build audit cares about.  Registration
+/* Fixed registry of the locks the performance audit cares about.  Registration
  * stores the lock pointer and a name; the per-lock counters in spinlock_t
  * accumulate in place, so reads are cheap and race-free at u64 precision. */
 #define LOCK_COUNTERS_MAX 64

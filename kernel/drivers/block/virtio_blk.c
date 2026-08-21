@@ -103,9 +103,8 @@ static void virtio_blk_free_dma(virtio_blk_inst_t *inst)
 /*
  * Never expose an arbitrary kernel buffer as one VirtIO DMA segment.  Block
  * cache pages and batched writeback buffers are not required to be physically
- * contiguous even when their virtual addresses are contiguous.  Both peer kernels
- * and ScintillaOS independently avoid this evaluator-sensitive assumption by
- * using bounded, contiguous bounce storage.  Give every in-flight slot its
+ * contiguous even when their virtual addresses are contiguous.  Avoid this
+ * fragile assumption by using bounded, contiguous bounce storage.  Give every in-flight slot its
  * own 64 KiB DMA buffer so concurrent filesystem requests cannot overwrite
  * each other while the device still owns a descriptor chain.
  */

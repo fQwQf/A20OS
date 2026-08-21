@@ -1,6 +1,6 @@
 # A20OS 文档首页
 
-五分钟上手：先读 [OS-Design.md](OS-Design.md) 把握整体架构，再跑 `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` 把开发镜像在 QEMU 里启动起来。根目录 `make all` 是双架构提交构建，不是这个开发流程的缩写。
+五分钟上手：先读 [OS-Design.md](OS-Design.md) 把握整体架构，再跑 `make ARCH=riscv64 BOARD=qemu-virt-riscv64 run` 把开发镜像在 QEMU 里启动起来。根目录 `make all` 是双架构发布构建，不是这个开发流程的缩写。
 
 ---
 
@@ -10,7 +10,7 @@
 
 - **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[process-scheduler.md](process-scheduler.md) 和 [testing/testing-gates.md](testing/testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - **设计与规划文档**：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- **审计与展示快照**：`testing/*-audit.md`、带日期的平台进展、硬件观察和 `slides.tex` 等展示材料保留历史证据。其数字、PASS 或“已验证”只适用于页面标明的快照，不自动外推到 HEAD。
+- **审计与展示快照**：`testing/*-audit.md` 与带日期的平台进展、硬件观察材料保留历史证据。其数字、PASS 或“已验证”只适用于页面标明的快照，不自动外推到 HEAD。
 - **第三方与研究材料**：`kernel/external/`、`user/external/` 中的 vendor 文档及 `research/` 笔记解释上游或调研背景，不定义 A20OS 当前接口。
 - **冲突时的顺序**：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与同一提交匹配的干净运行证据，最后才是叙述性文档。本轮源码审计基线 `e33c3219` 尚无一套与之完全匹配的正式全流程测试；最新完整、干净的正式证据是 `f9732348`，后续提交的结果不得由该快照推定。
 
@@ -72,9 +72,9 @@
 - `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
 - [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
 
-## 活动、研究与项目背景
+## 研究与项目背景
 
-如果你关注活动设计、研究思路或工程路线图：
+如果你关注研究思路或工程路线图：
 
 - [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图

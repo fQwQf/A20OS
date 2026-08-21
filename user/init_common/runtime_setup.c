@@ -208,94 +208,28 @@ static void prepare_resolver_config(void)
 {
     struct stat st;
 
-    if (stat("/test/etc/resolv.conf", &st) != 0 || !S_ISREG(st.st_mode))
+    if (stat("/extra/etc/resolv.conf", &st) != 0 || !S_ISREG(st.st_mode))
         return;
     if (ensure_dir("/etc") != 0)
         return;
-    if (copy_file("/test/etc/resolv.conf", "/etc/resolv.conf", 0644) == 0)
+    if (copy_file("/extra/etc/resolv.conf", "/etc/resolv.conf", 0644) == 0)
         printf("[NET] installed /etc/resolv.conf from extra image\n");
     else
         printf("[NET] could not install /etc/resolv.conf errno=%d\n", errno);
 }
 
-static void prepare_lmbench_helper_path(void)
-{
-    static int done;
-    static const char script[] = "#!/bin/sh\nexec ./lmbench_all \"$@\"\n";
-    const char *dirs[] = {
-        "/code",
-        "/code/lmbench_src",
-        "/code/lmbench_src/bin",
-        "/code/lmbench_src/bin/build",
-    };
-    const char *path = "/code/lmbench_src/bin/build/lmbench_all";
-    struct stat st;
-
-    if (done)
-        return;
-
-    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
-        if (ensure_dir(dirs[i]) != 0)
-            return;
-    }
-
-    if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-        done = 1;
-        return;
-    }
-
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-    if (fd < 0)
-        return;
-
-    size_t off = 0;
-    size_t len = sizeof(script) - 1;
-    while (off < len) {
-        ssize_t n = write(fd, script + off, len - off);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(fd);
-    chmod(path, 0755);
-    if (off == len)
-        done = 1;
-}
-
 static int prepare_glibc_lib_links(void)
 {
     static int done;
+    /* /extra is the extra image mount point; /glibc matches its staging-root
+     * layout (tools/targets-extra.mk stages glibc under glibc/lib). */
     static const char *const glibc_candidates[] = {
-#if defined(__loongarch64)
-        "/testla/glibc/lib",
-        "/test/glibc/lib",
-        "/testrv/glibc/lib",
-#elif defined(__riscv)
-        "/testrv/glibc/lib",
-        "/test/glibc/lib",
-        "/testla/glibc/lib",
-#else
-        "/test/glibc/lib",
-        "/testrv/glibc/lib",
-        "/testla/glibc/lib",
-#endif
+        "/extra/glibc/lib",
         "/glibc/lib",
         NULL,
     };
     static const char *const libgcc_candidates[] = {
-#if defined(__loongarch64)
-        "/testla/glibc/lib",
-        "/test/glibc/lib",
-        "/testrv/glibc/lib",
-#elif defined(__riscv)
-        "/testrv/glibc/lib",
-        "/test/glibc/lib",
-        "/testla/glibc/lib",
-#else
-        "/test/glibc/lib",
-        "/testrv/glibc/lib",
-        "/testla/glibc/lib",
-#endif
+        "/extra/glibc/lib",
         "/glibc/lib",
         "/bin/lib",
         NULL,
@@ -331,21 +265,10 @@ static int prepare_glibc_lib_links(void)
 static int prepare_musl_lib_links(void)
 {
     static int done;
+    /* The FAT32 utilities image stages musl's libc.so under /musl/lib,
+     * which lands at /bin/musl/lib once mounted (tools/targets-images.mk). */
     static const char *const musl_candidates[] = {
         "/bin/musl/lib",
-#if defined(__loongarch64)
-        "/testla/musl/lib",
-        "/test/musl/lib",
-        "/testrv/musl/lib",
-#elif defined(__riscv)
-        "/testrv/musl/lib",
-        "/test/musl/lib",
-        "/testla/musl/lib",
-#else
-        "/test/musl/lib",
-        "/testrv/musl/lib",
-        "/testla/musl/lib",
-#endif
         NULL,
     };
     const char *musl_dir;
@@ -377,8 +300,6 @@ void setup_runtime_links(void)
 int prepare_runtime_links(const char *runtime)
 {
     int rc = 0;
-
-    prepare_lmbench_helper_path();
 
     if (!runtime || (!is_glibc_runtime(runtime) && !is_musl_runtime(runtime))) {
         if (prepare_glibc_lib_links() != 0)
