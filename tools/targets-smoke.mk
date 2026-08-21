@@ -289,7 +289,13 @@ smoke-arch-mmu-matrix:
 		status=0; \
 		arch=$${spec%%:*}; nommu=$${spec##*:}; \
 		variant="$$arch"; [ "$$nommu" = 1 ] && variant="$$variant-nommu"; \
-		build=".kernel-build/$$arch-both-dev"; \
+		case "$$arch" in \
+		arm32) board=qemu-virt-arm32 ;; \
+		aarch64) board=qemu-virt-aarch64 ;; \
+		riscv64) board=qemu-virt-riscv64 ;; \
+		riscv32) board=qemu-virt-riscv32 ;; \
+		esac; \
+		build=".kernel-build/$$arch-$$board-both-dev"; \
 		case "$$arch" in arm32|riscv32) build="$$build-embedded" ;; esac; \
 		[ "$$nommu" = 1 ] && build="$$build-nommu"; \
 		log=".kernel-build/smoke/$$variant-shell.log"; \
