@@ -1,10 +1,10 @@
 # 阻塞点协议审计
 
-> **历史里程碑审计**：本文保留阻塞族逐项审计与当时的回归覆盖。静态契约标记仍由门禁使用，但历史 PASS 不代表本轮源码审计基线 `e33c3219` 已完成匹配的正式复验。
+> **冻结档案（历史里程碑）**：本文是阻塞族逐项审计收口时的快照，已归档不再随 HEAD 更新。文中的回归覆盖与验收结论只属于该历史时点；当前阻塞协议以 [../process-scheduler.md](../process-scheduler.md) 和 `kernel/include/proc/park.h` 为准。使用约定见 [README.md](README.md)。
 
 `BLOCKING_POINT_PROTOCOL_AUDIT`
 
-这是 `PROC.md` 第 4 步的验收记录。一个阻塞操作只有在它的持久条件、条件锁、Park 令牌、异步任务引用、一次性唤醒赢家以及恢复清理都清晰可辨时才算收口。信号/停止/退出策略由 `docs/testing/signal-exit-audit.md` 收口；超时堆容量仍是第 6 步单独限定的工作。
+这是 `PROC.md` 第 4 步的验收记录。一个阻塞操作只有在它的持久条件、条件锁、Park 令牌、异步任务引用、一次性唤醒赢家以及恢复清理都清晰可辨时才算收口。信号/停止/退出策略由 `signal-exit-audit.md` 收口；超时堆容量仍是第 6 步单独限定的工作。
 
 ## 已审计的阻塞族
 
@@ -32,7 +32,7 @@
 1. `proc_task_alloc_storage()` 将一个新分配、未发布的任务初始化为 `PROC_BLOCKED`。它没有活动 Park 令牌，只会在一个白名单内的任务发布调用点变为可运行。
 2. `proc_park_commit()` 是唯一写入 `PROC_BLOCKED` 的活动任务路径。
 3. `proc_make_ready()` 保留用于新任务发布、当前任务让出和 cgroup 解除节流。其 Park 分支委托给 `proc_try_wake_locked(task, wait_seq, EVENT)`，因此无法绕过活动令牌。
-4. 信号、停止和退出路径不再出现在此白名单中。它们使用模式检查的 Park 唤醒原因或显式的 STOPPED 恢复辅助函数，如 `docs/testing/signal-exit-audit.md` 所记录。
+4. 信号、停止和退出路径不再出现在此白名单中。它们使用模式检查的 Park 唤醒原因或显式的 STOPPED 恢复辅助函数，如 `signal-exit-audit.md` 所记录。
 5. Linux `poll`、`select` 和 `epoll` 当前通过 `readiness_wait_once()` 订阅各文件的持久 wait queue，并用同一个 Park token 完成“订阅后重查”。没有 `poll_sources` 的文件才使用 1 ms 有界 fallback 后重扫；异步条目保存 task 引用和 `wait_seq`，不存储无所有权的 task 指针。
 
 不再存在 `proc_block_until()` 调用或实现。除任务初始化和调度器之外，没有任何模块写入 `on_rq`、`cpu_id`、`rq_next` 或 `rq_prev`。

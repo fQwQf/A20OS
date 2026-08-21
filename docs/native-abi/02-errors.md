@@ -1,6 +1,6 @@
 # A20OS Native ABI：错误码与返回约定
 
-> 本文档定义 A20OS Native ABI 的错误码、返回值约定和错误处理策略，已按 `e33c3219` 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
+> 本文档定义 A20OS Native ABI 的错误码、返回值约定和错误处理策略，已按 2026-08 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
 
 ---
 

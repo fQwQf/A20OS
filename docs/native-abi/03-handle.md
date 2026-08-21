@@ -1,6 +1,6 @@
 # A20OS Native ABI：Handle 子系统设计
 
-> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 `e33c3219` 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 2026-08 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
 

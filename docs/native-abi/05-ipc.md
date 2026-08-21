@@ -1,6 +1,6 @@
 # A20OS Native ABI：IPC 与事件子系统设计
 
-> 本文档定义 Native ABI 的进程间通信机制，包括 Channel（消息通道）和 Event Queue（事件队列）的设计、数据结构、协议和实现架构，已按 `e33c3219` 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
+> 本文档定义 Native ABI 的进程间通信机制，包括 Channel（消息通道）和 Event Queue（事件队列）的设计、数据结构、协议和实现架构，已按 2026-08 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
 
 ---
 
