@@ -184,11 +184,11 @@ check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 check-user-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
 
 check-build-matrix: check-kernel-build check-user-build
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
 	@echo "check-build-matrix: PASS"
 
 check-build-matrix-all: check-kernel-build-all check-user-build-all
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing/testing-gates.md
+	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
 	@echo "check-build-matrix-all: PASS"
 
 check-arch-boundary: smoke-arch-mmu-matrix
@@ -197,7 +197,7 @@ check-arch-boundary: smoke-arch-mmu-matrix
 		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h' \
 		--glob '!kernel/mm/vdso.c' --glob '!kernel/include/mm/vdso.h' \
 		--glob '!kernel/include/mm/vdso_blob.h'
-	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing/testing-gates.md
+	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing-gates.md
 	@rg -q "smoke-arch-mmu-matrix" tools/targets-smoke.mk docs/OS-Design.md
 	@for arch in loongarch64 x86_64 ppc64le; do \
 		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
@@ -249,7 +249,7 @@ check-smp-platform-boundary:
 	@echo "check-smp-platform-boundary: PASS"
 
 check-abi-smoke-gate:
-	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing/testing-gates.md
+	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing-gates.md
 	@rg -q "syscall_smoke" tools/targets-smoke.mk
 	@rg -q "smoke-abi-linux" tools/targets-smoke.mk
 	@rg -q "native-minimal" tools/targets-native.mk
@@ -258,13 +258,13 @@ check-abi-smoke-gate:
 	@echo "check-abi-smoke-gate: PASS"
 
 check-doc-drift:
-	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing/testing-gates.md
+	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing-gates.md
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py
-	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
-	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing/testing-gates.md
-	@rg -q "Future" docs/testing/testing-gates.md kernel/abi/native/sys_core.c
-	@rg -q "not yet" docs/testing/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
-	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing/testing-gates.md' --glob '!kernel/external/**'
+	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
+	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
+	@rg -q "Future" docs/testing-gates.md kernel/abi/native/sys_core.c
+	@rg -q "not yet" docs/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
+	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing-gates.md' --glob '!kernel/external/**'
 	@echo "check-doc-drift: PASS"
 
 check-task-lifetime-boundary:
@@ -276,13 +276,13 @@ check-task-lifetime-boundary:
 	@rg -q "proc_wait_timer_count_locked" kernel/proc/timer_heap.c
 	@rg -q "proc_current_lifetime_violations_locked" kernel/proc/current.c
 	@rg -q "PF_A20_TASK_LIFETIME" kernel/fs/procfs/procfs.c
-	@rg -q "TASK_LIFETIME_OWNERSHIP_AUDIT" docs/testing/task-lifetime-audit.md
+	@rg -q "TASK_LIFETIME_OWNERSHIP_AUDIT" docs/archive/task-lifetime-audit.md
 	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
 		--glob '*.[ch]' --glob '!kernel/external/**'
 	@echo "check-task-lifetime-boundary: PASS"
 
 check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
-	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/testing/blocking-point-audit.md
+	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/archive/blocking-point-audit.md
 	@rg -q "PROC_BLOCKED_ALLOCATION_WHITELIST" kernel/proc/task.c
 	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/abi/linux/sys_futex.c
 	@rg -q "proc_try_wake_locked\(t, t->wait_seq, PROC_WAKE_EVENT\)" kernel/proc/sched.c
@@ -310,7 +310,7 @@ check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
 	@echo "check-blocking-point-boundary: PASS"
 
 check-signal-exit-boundary: smoke-proc-stress
-	@rg -q "SIGNAL_EXIT_PROTOCOL_AUDIT" docs/testing/signal-exit-audit.md
+	@rg -q "SIGNAL_EXIT_PROTOCOL_AUDIT" docs/archive/signal-exit-audit.md
 	@rg -q "SIGNAL_STATE_LOCK_CONTRACT" kernel/include/proc/signal.h
 	@rg -q "PARK_SIGNAL_MODE_PROTOCOL" kernel/proc/park.c
 	@rg -q "SIGNAL_MASK_PARK_PROTOCOL" kernel/abi/linux/sys_signal.c
@@ -336,7 +336,7 @@ check-signal-exit-boundary: smoke-proc-stress
 	@echo "check-signal-exit-boundary: PASS"
 
 check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test
-	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/testing/timeout-ownership-audit.md
+	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/archive/timeout-ownership-audit.md
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*deadline[^}]*task[^}]*wait_seq' \
 		kernel/proc/timer_heap.c
 	@rg -q "PROC_PARK_PREPARE_TIMEOUT_CAPACITY" \
@@ -355,7 +355,7 @@ check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test
 
 check-smp-runqueue-boundary: smoke-sched-stress
 	@rg -q "SMP_RUNQUEUE_PREEMPT_AUDIT" \
-		docs/testing/smp-runqueue-audit.md
+		docs/archive/smp-runqueue-audit.md
 	@rg -q "SMP_RUNQUEUE_PREEMPT_PROTOCOL" kernel/include/proc/proc.h
 	@rg -q "SMP_RUNQUEUE_MIGRATION_PROTOCOL" kernel/proc/sched.c
 	@rg -q "need_resched" kernel/proc/sched.c
@@ -380,7 +380,7 @@ check-smp-runqueue-boundary: smoke-sched-stress
 
 check-process-lock-split-boundary: smoke-sched-stress
 	@rg -q "PROCESS_LOCK_SPLIT_AUDIT" \
-		docs/testing/process-lock-split-audit.md
+		docs/archive/process-lock-split-audit.md
 	@rg -q "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN" kernel/proc/sched.c
 	@rg -Uq \
 		'task_t \*next = proc_runq_pick_local\(\);[\s\S]{0,2048}uint64_t flags = spin_lock_irqsave\(&proc_lock\)' \
@@ -395,8 +395,8 @@ check-process-lock-split-boundary: smoke-sched-stress
 	@echo "check-process-lock-split-boundary: PASS"
 
 check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
-	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing/testing-gates.md
-	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing/testing-gates.md
+	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing-gates.md
+	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing-gates.md
 	@echo "check-doc-test-gates: PASS"
 
 check-final-definition: check-doc-test-gates
@@ -410,7 +410,7 @@ check-final-definition: check-doc-test-gates
 	@rg -q "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT" kernel/abi/linux/syscall_table.def
 	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
 	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/project/external-dependencies.md
+	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
 	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:

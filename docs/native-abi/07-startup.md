@@ -1,6 +1,6 @@
 # A20OS Native ABI：用户态启动协议
 
-> 本文档定义 Native ABI 程序的启动协议、初始 handle 分配和 native libc 分层设计。第 1、7、8 节描述 `e33c3219` 当前协议；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
+> 本文档定义 Native ABI 程序的启动协议、初始 handle 分配和 native libc 分层设计。第 1、7、8 节描述当前协议（2026-08 核实）；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
 
 ---
 

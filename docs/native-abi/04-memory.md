@@ -1,6 +1,6 @@
 # A20OS Native ABI：内存子系统设计
 
-> 本文档记录 Native ABI 当前内存实现及目标抽象，已按 `e33c3219` 的 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c` 和 `abi/native/vmar.c` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
+> 本文档记录 Native ABI 当前内存实现及目标抽象，已按 2026-08 的 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c` 和 `abi/native/vmar.c` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
 
 ---
 

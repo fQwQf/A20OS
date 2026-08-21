@@ -1,6 +1,6 @@
 # 混合内核改造计划：以 Native ABI 为本体的架构演进
 
-本文档记录 A20OS 混合内核的**改造方向与实施路线**，并把历史阶段证据与 `e33c3219` 当前源码状态分开。当前提交没有匹配的完整干净双架构复验。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，本文档回答的问题是： **沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。**
+本文档记录 A20OS 混合内核的**改造方向与实施路线**，并把历史阶段证据与当前源码状态分开（最后核实：2026-08）；运行结论需在当前提交上复验。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，本文档回答的问题是： **沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。**
 
 ## 定位前提
 
@@ -62,7 +62,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收标准：`user/tests/test_native_contract.c` 全分区通过，`make smoke-native-contract` 在 riscv64 通过；loongarch64 构建通过（运行时验证受镜像条件限制时须记录）。契约文档同步更新到 [../native-abi/](../native-abi/)。
 
-**历史状态（2026-08-06）**：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT。该记录不是 `e33c3219` 的当前运行证据。
+**历史状态（2026-08-06）**：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT（历史记录，当前状态需复验）。
 
 ### 阶段二：Native ABI SMP 正确性收口
 

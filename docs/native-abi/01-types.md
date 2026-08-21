@@ -1,6 +1,6 @@
 # A20OS Native ABI：类型与结构体定义
 
-> 本文档记录 A20OS Native ABI 的用户可见类型和结构体。内容已按 `e33c3219` 的内核头与 `user/liba20rt/a20_types.h` 核对；带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
+> 本文档记录 A20OS Native ABI 的用户可见类型和结构体。内容已按 2026-08 的内核头与 `user/liba20rt/a20_types.h` 核对；带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
 
 ---
 

@@ -6,7 +6,7 @@
 
 - `kernel/external/lwip` 与 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree。
 - `.gitmodules` 登记其余外部项目的路径和 URL，超级项目的 gitlink 条目固定具体 commit；许可证必须对该精确 commit 核验。
-- `user/external/rust` 和 `user/external/riscv64-glibc-sysroot` 的本地内容不在审计基线 `e33c3219` 中，不能作为仓库已携带源码或许可证的证据。
+- `user/external/rust` 和 `user/external/riscv64-glibc-sysroot` 的本地内容未被仓库跟踪（2026-08 核实时），不能作为仓库已携带源码或许可证的证据。
 - 基础 `user/Makefile` 和 `user/extra.mk` 都存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
 
 ## lwIP
