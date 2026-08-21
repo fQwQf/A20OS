@@ -8,21 +8,30 @@
 
 ## 文档范围与权威性
 
-- **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[process-scheduler.md](process-scheduler.md) 和 [testing/testing-gates.md](testing/testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - **设计与规划文档**：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- **审计与展示快照**：`testing/*-audit.md` 与带日期的平台进展、硬件观察材料保留历史证据。其数字、PASS 或“已验证”只适用于页面标明的快照，不自动外推到 HEAD。
-- **第三方与研究材料**：`kernel/external/`、`user/external/` 中的 vendor 文档及 `research/` 笔记解释上游或调研背景，不定义 A20OS 当前接口。
-- **冲突时的顺序**：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与同一提交匹配的干净运行证据，最后才是叙述性文档。本轮源码审计基线 `e33c3219` 尚无一套与之完全匹配的正式全流程测试；最新完整、干净的正式证据是 `f9732348`，后续提交的结果不得由该快照推定。
+- **研究笔记**：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
+- **历史档案**：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
+- **第三方材料**：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
+- **冲突时的顺序**：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与当前提交匹配的运行日志，最后才是叙述性文档。
 
-如果你刚接触项目，不知道自己该看什么，下面四条路径应该能帮到你。
+## 文档时效性约定
+
+为避免每篇文档各自维护核对基线，统一约定如下：
+
+- 文档描述的是**接口与设计契约**，以 HEAD 源码为最终依据；发现文档与源码不一致时，以源码为准，并欢迎直接修正文档。
+- 单篇文档头部的"最后核实"日期表示内容在该时点与源码核对过；日期久远不等于内容失效。
+- 运行类结论（PASS、耗时、性能数字）只在附上产生它的命令、配置和提交时有效。引用任何测试结论前，按 [testing-gates.md](testing-gates.md) 的入口在当前提交上重新运行；历史运行记录见 [archive/](archive/)。
+
+如果你刚接触项目，不知道自己该看什么，下面几条路径应该能帮到你。
 
 ## 快速开始（给新贡献者）
 
 如果你准备第一次看代码、改 bug 或者提交补丁：
 
 - [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
-- [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、 Park/Wake、timeout、信号与 SMP 调度协议
-- [testing/testing-gates.md](testing/testing-gates.md)：本地 smoke 测试与门禁检查
+- [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
+- [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
 
@@ -35,7 +44,7 @@
 - [drivers/guide/runtime-contracts.md](drivers/guide/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
 - [drivers/guide/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
-- [gpu/3d-graphics.md](gpu/3d-graphics.md)：virtio-gpu virgl 3D 图形加速栈
+- [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu virgl 3D 图形加速栈
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
@@ -43,10 +52,15 @@
 - [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
-- [development/source-software-porting.md](development/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
 - [platforms/loongarch32.md](platforms/loongarch32.md)：LoongArch32（LA32R / NaiLoong Core）移植与验证
 - [platforms/stm32f103-port.md](platforms/stm32f103-port.md)：STM32F103 移植与硬件验证
 - [platforms/virtualbox.md](platforms/virtualbox.md)：VirtualBox 平台与驱动栈
+
+## 用户态、桌面与发行版
+
+- [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
+- [distro/source-software-porting.md](distro/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
+- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：XFCE Wayland 桌面的内核强化与 submodule 去修改化
 
 ## Native ABI 与子系统细节
 
@@ -78,10 +92,11 @@
 
 - [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
-- [project/external-dependencies.md](project/external-dependencies.md)：外部依赖与协议说明
+- [external-dependencies.md](external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：第三方组件许可证集中声明
+- [archive/](archive/)：历史里程碑的审计快照（冻结档案）
 
 ---
 
-这些文档既包含当前接口说明，也保留工程过程记录。引用能力或测试结论时，请先按上面的范围和证据边界判断其性质。
+这些文档既包含当前接口说明，也包含研究设计与历史记录。引用能力或测试结论时，请先按上面的范围和时效性约定判断其性质。

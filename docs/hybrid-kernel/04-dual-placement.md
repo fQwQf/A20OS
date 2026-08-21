@@ -1,6 +1,6 @@
 # 双态部署驱动框架（dual-placement drivers）
 
-本文档定义“同一源码、双态部署”驱动框架的设计与当前骨架状态，已按 `e33c3219` 的共享头、drvmod 样板与用户服务核对。当前代码尚未满足“完整驱动同一源码双态运行”的阶段验收；下文明确区分环境后端、共享协议 probe 和完整驱动。
+本文档定义“同一源码、双态部署”驱动框架的设计与当前骨架状态，已按 2026-08 的共享头、drvmod 样板与用户服务核对。当前代码尚未满足“完整驱动同一源码双态运行”的阶段验收；下文明确区分环境后端、共享协议 probe 和完整驱动。
 
 ## 问题
 
@@ -33,9 +33,9 @@
 
 ### 语义一致性验证
 
-同一设备协议层应在多种部署下跑同一套可观察行为检查。当前源码中的 virtio-input probe 契约让 DRVMOD 只读 probe 与 USER 驱动读取相同设备身份；历史 smoke 曾运行该序列，但本次未在 `e33c3219` 重跑。完整事件面只由 USER 壳的该契约覆盖。goldfish RTC 的 USER 壳使用共享头，但 DRVMOD probe 仍自行定义寄存器常量，尚不是同源契约测试。
+同一设备协议层应在多种部署下跑同一套可观察行为检查。当前源码中的 virtio-input probe 契约让 DRVMOD 只读 probe 与 USER 驱动读取相同设备身份；历史 smoke 曾运行该序列（2026-08 核实时未重跑）。完整事件面只由 USER 壳的该契约覆盖。goldfish RTC 的 USER 壳使用共享头，但 DRVMOD probe 仍自行定义寄存器常量，尚不是同源契约测试。
 
-## 当前实现状态（`e33c3219` 源码）
+## 当前实现状态（2026-08 源码）
 
 - `kernel/include/drivers/dual/drv_env.h`：环境层定义三个后端（KERNEL/USER/DRVMOD）。ops 集为 MMIO 映射、8/32 位寄存器读写与 DMA 缓冲分配；当前样板源码使用 USER/DRVMOD，KERNEL 后端只有头文件实现；
 - `kernel/include/drivers/dual/goldfish_rtc.h`：USER rtcd 使用的共享寄存器协议头；目标是成为唯一来源，但当前 DRVMOD probe 尚未消费它；
@@ -51,7 +51,7 @@
 - **功能态用户驱动入口**：uinputd 实现设备全权初始化、drv_dma 事件 virtqueue 和 IRQ→EventQ；`smoke-dual-input` 会经 QEMU monitor `sendkey` 注入按键并要求解码 `EV_KEY/KEY_A/press`，但本次未重跑；
 - **DMA 契约修正**：`vmo_phys` 非物化（peek 语义，未触页报 pa=0），drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），该契约已写入 drv_env.h 注释——否则驱动会把物理页 0 交给设备；
 - **构建依赖**：native 构建 stamp 的依赖清单包含 `user/svc` 与共享头目录（svc/共享头修改会触发镜像内二进制重建）；
-- 构建配方支持 riscv64/loongarch64 内核和相应 Native 用户壳；历史构建结果不外推到 `e33c3219`，本次未构建。rtcd/uinputd 以 `-Ikernel/include` 引入共享头。
+- 构建配方支持 riscv64/loongarch64 内核和相应 Native 用户壳；构建结果需在当前提交复验。rtcd/uinputd 以 `-Ikernel/include` 引入共享头。
 
 ## 明确的非目标与后续
 

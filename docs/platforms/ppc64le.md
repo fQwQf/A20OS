@@ -1,6 +1,6 @@
 # PPC64LE 平台状态
 
-> **源码边界 + 2026-08-04 历史快照**：PPC64LE 构建、QEMU pSeries MMU、embedded driver 默认值、单核限制和 NOMMU 拒绝可由本轮审计基线 `e33c3219` 的源码确认。下文 shell/native PASS、具体故障和修复列表是 2026-08-04 审计证据，不是该基线的重新测试结果。
+> **源码边界 + 2026-08-04 历史快照**：PPC64LE 构建、QEMU pSeries MMU、embedded driver 默认值、单核限制和 NOMMU 拒绝已与源码核对（2026-08）。下文 shell/native PASS、具体故障和修复列表是 2026-08-04 的运行证据，不是当前提交的重新测试结果。
 
 PPC64LE 当前由 QEMU pSeries（`qemu-virt-ppc64le`）提供受支持的 MMU运行目标。启动入口切换到 64 位 little-endian 模式，使用 PowerPC Radix页表；用户地址空间保留低半根页表，内核高半映射通过每个进程共享的根项继承。异常入口同时覆盖用户态系统调用、用户缺页和内核态 timer/device中断，地址空间切换使用 pSeries process table 的 PID 1。
 
