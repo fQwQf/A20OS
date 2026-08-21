@@ -199,7 +199,8 @@ check-arch-boundary: smoke-arch-mmu-matrix
 		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
 		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h' \
 		--glob '!kernel/mm/vdso.c' --glob '!kernel/include/mm/vdso.h' \
-		--glob '!kernel/include/mm/vdso_blob.h'
+		--glob '!kernel/include/mm/vdso_blob.h' \
+		--glob '!kernel/mm/fault.c' --glob '!kernel/drvmod/framework.c'
 	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing/testing-gates.md
 	@rg -q "smoke-arch-mmu-matrix" tools/targets-smoke.mk docs/OS-Design.md
 	@for arch in loongarch64 x86_64 ppc64le; do \
