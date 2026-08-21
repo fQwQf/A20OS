@@ -223,6 +223,16 @@ int main(void)
         (access("/bin/etc/a20-gui", F_OK) == 0 ||
          access("/bin/a20-gui", F_OK) == 0)) {
         printf("[init] starting desktop\n");
+#if defined(__arm__) && !defined(__aarch64__)
+        /* ARM32's banked exception context is not yet safe for a fork/exec
+         * race with the parent's immediate telnet/shell forks.  A GUI image
+         * dedicates init to the desktop, so replace it directly. */
+        if (access("/bin/desktop", F_OK) == 0) {
+            char *desktop_argv[] = {"desktop", NULL};
+            execve("/bin/desktop", desktop_argv, envp);
+            perror("execve desktop");
+        }
+#endif
         desktop_pid = fork();
         if (desktop_pid == 0) {
             if (access("/bin/etc/weston", F_OK) == 0) {

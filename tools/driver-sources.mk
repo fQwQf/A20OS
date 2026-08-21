@@ -41,6 +41,7 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/gpu/virtio_gpu.c \
     $(KERNEL_DIR)/drivers/gpu/vmsvga.c \
     $(KERNEL_DIR)/drivers/audio/virtio_snd.c \
+    $(KERNEL_DIR)/drvmod/examples/vinput.c \
     $(KERNEL_DIR)/drivers/usb/host/xhci.c \
     $(KERNEL_DIR)/drivers/usb/class/usb_hid.c \
     $(KERNEL_DIR)/drivers/usb/class/usb_storage.c

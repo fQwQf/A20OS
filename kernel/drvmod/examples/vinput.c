@@ -14,6 +14,10 @@
  * instead of va_to_pa().
  */
 
+#ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+#define DRV_ENV_KERNEL 1
+#include "drivers/core/driver_register.h"
+#else
 #define DRV_ENV_DRVMOD 1
 #include "drvmod/drvmod.h"
 
@@ -22,6 +26,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       0, 2,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_MMIO, 0, 18),
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x1AF4, 0x1052));
+#endif
 #include "drivers/dual/virtio_mmio.h"
 #include "drivers/input/virtio_input.h"
 
@@ -39,8 +44,12 @@ extern void input_mux_wake(void);
 #include "core/timer.h"
 #include "proc/proc.h"
 
+#ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+#define drv_device_get_resource device_get_resource
+#else
 #define kinfo(...) drv_log(__VA_ARGS__)
 #define kerr(...) drv_log(__VA_ARGS__)
+#endif
 
 #define VIRTIO_INPUT_QUEUE_SIZE 32
 #define VIRTIO_INPUT_DMA_LINE   64
@@ -468,9 +477,13 @@ static driver_t vinput_driver = {
     .class_type = DEV_CLASS_INPUT,
 };
 
+#ifdef CONFIG_DRIVER_DEPLOYMENT_EMBEDDED
+DRIVER_REGISTER(vinput_driver);
+#else
 uintptr_t DriverEntry(void)
 {
     int r = drv_driver_register(&vinput_driver);
     drv_log("[VINPUT] driver registered in core: %d\n", r);
     return r == 0 ? 0 : 1;
 }
+#endif

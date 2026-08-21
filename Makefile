@@ -564,6 +564,11 @@ endif
 ifeq ($(STORAGE_READ_ONLY),1)
 CFLAGS += -DCONFIG_STORAGE_READ_ONLY -DCONFIG_AHCI
 endif
+# ARM32's short-descriptor abort path cannot safely demand-page large GUI
+# executables yet; eager loading also handles their shared PT_LOAD tail page.
+ifeq ($(ARCH),arm32)
+CFLAGS += -DCONFIG_ELF_EAGER_LOAD
+endif
 ifeq ($(BOARD),ls2k1000)
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_ELF_EAGER_LOAD
