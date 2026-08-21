@@ -199,7 +199,7 @@ mkdir -p "$INSTALL_DIR/libexec/gcc/$TARGET_TRIPLET/$GCC_VER"
 mkdir -p "$INSTALL_DIR/lib/gcc/$TARGET_TRIPLET/$GCC_VER"
 
 # The native compiler uses /include as its system-header directory.  The extra
-# disk is mounted at /test, and its wrapper supplies --sysroot=/test, so install
+# disk is mounted at /extra, and its wrapper supplies --sysroot=/extra, so install
 # the musl headers alongside the compiler.
 cp -a "$MCM/$TARGET_TRIPLET/include/." "$INSTALL_DIR/include/"
 

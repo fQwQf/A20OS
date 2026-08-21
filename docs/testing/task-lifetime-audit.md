@@ -29,7 +29,7 @@
 - 最终资源销毁只能从最后一次 `proc_put()` 到达，且要求同时满足动态任务与 `destroy_started`。
 - 重复销毁、活动任务 get 失败、引用下溢，或对活动/静态任务的最终 put，都会在不安全路径被阻止之前递增一个单调诊断错误计数。
 
-`make check-task-lifetime-boundary` 保护静态标记与对裸 PID 查找的禁止。`make check-proc-step35-local` 运行双架构调试/发布 smoke 与竞态矩阵；`make check-proc-step35` 额外运行两个正式 functional tests 测试。
+`make check-task-lifetime-boundary` 保护静态标记与对裸 PID 查找的禁止。`make check-proc-step35-local`（或其聚合别名 `make check-proc-step35`）运行双架构调试/发布 smoke 与竞态矩阵。
 
 ## 运行时收口标准
 

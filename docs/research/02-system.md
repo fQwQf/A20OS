@@ -76,8 +76,7 @@ A20OS 是一个**双 ABI 混合内核**：
 ## 5. 工程审计（不属研究主张，但为评估背书）
 
 Linux ABI 侧的工程性能工作已移至 `docs/roadmap/`：
-- `linux-audit-and-performance-comparison.md`：A20 vs Linux 的源码审计与 parallel-build 实测边界（差距约 2.3-2.5×，工程侧）。
-- `perf-overhaul.md`：锁分桶 + fsync 收敛 + callsite 归因工具。
+- `perf-overhaul.md`：锁分桶 + fsync 收敛 + callsite 归因工具（含 A20 vs Linux 的实测边界，差距约 2.3-2.5×，工程侧）。
 - `park-wake-protocol-split.md`：park/wake 分锁与无丢失唤醒协议（亦是 Native 阻塞 IPC 的正确性基础）。
 
 论文引用这些时只能作为"工程可实现性"背书，**不能**作为 Native ABI 性能或能力机制价值的证据。

@@ -16,7 +16,7 @@ JH7110 BootROM
             ├─ A20OS kernel.bin     load=0x40200000  (S-mode 入口 _start)
             └─ DTB(v1.2a / v1.3b,SPL 按板载 EEPROM 产品 ID 自动选择)
   ├─ FAT32 userspace       (SD GPT "a20os-rootfs" 分区 @32 MiB,挂载到 /bin)
-  └─ extra ext4 packages   (SD GPT "a20os-extra",挂载到 /test)
+  └─ extra ext4 packages   (SD GPT "a20os-extra",挂载到 /extra)
 ```
 
 关键点:
@@ -277,7 +277,7 @@ mksh ...
 
 看到 OpenSBI 但没有 `[FDT]`，优先检查 FIT 的 load/entry、内核链接脚本和
 DTB；看到 `[INIT]` 但没有 `#`，优先检查进程调度、用户栈、标准输入输出
-绑定和 `mksh` 的 fork/exec；看到 `#` 后再检查 `mount`、`/test/bin` 和
+绑定和 `mksh` 的 fork/exec；看到 `#` 后再检查 `mount`、`/extra/bin` 和
 具体软件。每次只改变一个变量，并把源码提交、镜像 SHA256、拨码位置和
 串口日志放在同一份实验记录中：
 
@@ -305,10 +305,10 @@ make -j"$NPROC" vf2-image \
 
 ```sh
 mount
-ls -l /test/bin
-/test/bin/git --version
-/test/bin/vim --version
-/test/bin/gcc --version
+ls -l /extra/bin
+/extra/bin/git --version
+/extra/bin/vim --version
+/extra/bin/gcc --version
 /bin/fastfetch
 ```
 

@@ -1,6 +1,6 @@
 # 混合内核：能力与边界清单
 
-本文档以清单形式说明 A20OS 混合内核**当前源码具备的能力**与**已知边界**。源码已按 `e33c3219` 核对；当前提交没有匹配的完整干净双架构平台运行。最新完整平台证据是 `f9732348` 的双架构流程，但它既早于当前提交，也不覆盖全部 Native/hybrid smoke。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
+本文档以清单形式说明 A20OS 混合内核**当前源码具备的能力**与**已知边界**。源码已按 `e33c3219` 核对；当前提交没有匹配的完整干净双架构平台运行。最新完整平台证据是 `f9732348` 的双架构发布流程，但它既早于当前提交，也不覆盖全部 Native/hybrid smoke。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
 
 ## 核心架构原则（总体已贯彻，含已知债务）
 
@@ -64,7 +64,7 @@
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
 - **Native ABI SMP 历史回归**：SMP=2/8 的 `native-shmring` 偶发破坏曾由 M5 修复，并在 2026-08-06 指定分支各连续 20 轮通过；这是历史防退化记录，不是 `e33c3219` 的新复验。`vmo_dirty_frames` 仍提供复用帧观察点；
 - **网络协议栈**：lwIP 是当前内核态唯一实现，旧 netd 路径已移除。`smoke-network-suite` 当前聚合 TCP/UDP/ICMP loopback、DNS、AF_UNIX、AF_ALG 和 timeout，DNS/AF_ALG 可跳过；该 RISC-V64 目标本次未运行，不能写成当前全通过结果。
-- **loongarch64**：`f9732348` 有整体平台成功证据，但当前多个 Native/dual/mlibc smoke 仍只运行 RISC-V64，且 `e33c3219` 无匹配完整复验；
+- **loongarch64**：`f9732348` 有整体发布流程成功证据，但当前多个 Native/dual/mlibc smoke 仍只运行 RISC-V64，且 `e33c3219` 无匹配完整复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DDT/CQ/FQ 与 devid 0 静态 TR_REQ 探测已实现，但用户驱动 DMA 尚未接入动态 per-device domain，fault 队列也未消费；当前仍不能宣称端到端硬件强制隔离。
 

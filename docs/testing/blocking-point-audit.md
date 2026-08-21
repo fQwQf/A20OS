@@ -41,4 +41,4 @@
 
 `futex_stress` 在另一个 futex 必须到达其截止时间时运行无关 futex 的唤醒风暴。这拒绝了被移除的全局唤醒代数捷径，该捷径可能报告虚假的成功等待。`proc_stress` 在父进程阻塞于子进程内嵌的 completion 上时反复自动回收 `vfork` 子进程。`lifetime_stress` 还会运行调度器、futex、进程、I/O 事件、VFS 和 socket 压力，然后验证任务、PID、等待、唤醒、超时和引用计数回到基线。
 
-`make check-blocking-point-boundary` 强制旧 API 禁止、直接状态与运行队列字段边界、有限的 `proc_make_ready()` 白名单、带令牌的异步等待结构以及目标回归标记。`make check-proc-step4-local` 增加双架构调试/发布运行时矩阵；`make check-proc-step4` 额外运行两个正式 functional tests 入口。
+`make check-blocking-point-boundary` 强制旧 API 禁止、直接状态与运行队列字段边界、有限的 `proc_make_ready()` 白名单、带令牌的异步等待结构以及目标回归标记。`make check-proc-step4-local`（或其聚合别名 `make check-proc-step4`）运行双架构调试/发布运行时矩阵。

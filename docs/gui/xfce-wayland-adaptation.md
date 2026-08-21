@@ -104,7 +104,7 @@ git submodule foreach 'git status --short | wc -l'
 
 > **发行版路径的完整文档见 [`docs/distro/`](../distro/README.md)**（构建 / 启动 / 内核依赖 / 已知问题）。本节保留历史简况与 DRM 修复细节。
 
-单条命令构建内核 + 用 `apk.static` 拉取 Alpine 发行版（含 dbus/elogind/polkit/seatd/eudev + XFCE4 + mesa）为 ext4 根镜像，再以 GUI 显示启动 QEMU。A20OS init 检测到 `/test/etc/a20-distro` 标记后 `chroot("/test")` 并 `exec /sbin/init`，由发行版自身的 stage-2 init 编排服务与 XFCE Wayland 会话，内核只提供 Linux ABI + /dev + /proc + /sys。
+单条命令构建内核 + 用 `apk.static` 拉取 Alpine 发行版（含 dbus/elogind/polkit/seatd/eudev + XFCE4 + mesa）为 ext4 根镜像，再以 GUI 显示启动 QEMU。A20OS init 检测到 `/extra/etc/a20-distro` 标记后 `chroot("/extra")` 并 `exec /sbin/init`，由发行版自身的 stage-2 init 编排服务与 XFCE Wayland 会话，内核只提供 Linux ABI + /dev + /proc + /sys。
 
 ```sh
 # riscv64（默认）或 x86_64
