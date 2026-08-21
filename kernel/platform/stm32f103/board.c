@@ -154,15 +154,19 @@ static void stm32_early_init(void) {
     stm32_clock_init();
 #endif
     stm32_status_led_init();
+#ifndef CONFIG_STM32_QEMU
     stm32_bluetooth_early_key_init();
+#endif
 }
 
 static void stm32_poweroff(void) { firmware_shutdown(); }
 static void stm32_reboot(void) { firmware_reboot(); }
 static void stm32_enumerate_devices(void) {
+#ifndef CONFIG_STM32_QEMU
     /* SDIO is a fixed platform device, but it still follows the same
      * register -> match -> probe lifecycle as PCI/VirtIO devices. */
     (void)stm32_sdcard_register_device();
+#endif
 }
 
 static const board_config_t stm32f103_board = {
