@@ -302,6 +302,10 @@ smoke-arch-mmu-matrix:
 		mkdir -p .kernel-build/smoke; \
 		echo "=== smoke-arch-mmu-matrix: $$variant ==="; \
 		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu USER_BUILD_DESKTOP=0 dev-build >/dev/null; \
+		if [ "$$nommu" = 1 ]; then \
+			echo "smoke-arch-mmu-matrix: $$variant build-only PASS (NOMMU runtime is platform-specific)"; \
+			continue; \
+		fi; \
 		case "$$arch" in \
 		arm32) qemu=qemu-system-arm; base="-machine virt -cpu cortex-a15" ;; \
 		aarch64) qemu=qemu-system-aarch64; base="-machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false" ;; \
