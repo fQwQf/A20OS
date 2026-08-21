@@ -755,7 +755,7 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/cg_cpu.c \
              $(KERNEL_DIR)/mm/nommu.c \
              $(KERNEL_DIR)/fs/diskfs/fat32lite.c \
-             $(wildcard $(BOARD_DRIVER_DIR)/*.c) \
+             $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else
