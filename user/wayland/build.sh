@@ -44,6 +44,12 @@ ARCH_CFLAGS_aarch64="-march=armv8-a"
 CPU_FAMILY_aarch64=aarch64
 MUSL_TARGET_aarch64=aarch64
 
+CROSS_arm32=arm-none-eabi-
+ARCH_CFLAGS_arm32="-march=armv7-a -mfpu=neon -mfloat-abi=hard"
+CPU_FAMILY_arm32=arm
+MUSL_TARGET_arm32=arm
+LIBFFI_HOST_arm32=arm-linux-musleabihf
+
 CROSS_x86_64=x86_64-linux-gnu-
 ARCH_CFLAGS_x86_64="-m64"
 CPU_FAMILY_x86_64=x86_64
@@ -76,8 +82,7 @@ if [ ${#PHASES[@]} -eq 0 ]; then
     WANT_ALL=1
     PHASES=(musl wayland-native libffi wayland protocols pixman \
             xkeyboard-config xkbcommon \
-            libevdev stubs libdrm libinput mesa glib dbus \
-            weston ffmpeg player)
+            libevdev stubs libdrm libinput weston ffmpeg player)
     if [ "${GUI_DESKTOP:-weston}" = xfce ]; then
         PHASES+=(atk gdk-pixbuf cairo pango gtk3 \
                  libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
@@ -134,7 +139,7 @@ MUSL_INC=(
 )
 
 # ---------------------------------------------------------------- musl (shared)
-if want musl && ! stamp musl; then
+if want musl && { ! stamp musl || [ ! -f "$MUSL_SH/lib/musl-gcc.specs" ]; }; then
     echo "=== musl (shared) ==="
     rm -rf "$MUSL_SH"
     mkdir -p "$MUSL_SH"
@@ -144,6 +149,9 @@ if want musl && ! stamp musl; then
         CC="$CC" CROSS_COMPILE="$CROSS" \
         CFLAGS="-O2 $ARCH_CFLAGS")
     env -u ARCH make -C "$MUSL_SH" -j"$(nproc)"
+    # Cross builds do not include musl-gcc in ALL_TOOLS, but the wrappers
+    # below still require its specs file.
+    env -u ARCH make -C "$MUSL_SH" lib/musl-gcc.specs
     env -u ARCH make -C "$MUSL_SH" install
     mark musl
 fi
@@ -152,7 +160,7 @@ fi
 MUSL_GCC=$MUSL_SH/musl-gcc-a20
 cat > "$MUSL_GCC" <<EOF
 #!/bin/sh
-exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
+exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" -fno-link-libatomic $ARCH_CFLAGS "\$@"
 EOF
 chmod +x "$MUSL_GCC"
 
@@ -161,7 +169,7 @@ MUSL_CXX=$MUSL_SH/musl-g++-a20
 CXX=${CXX:-${CROSS}g++}
 cat > "$MUSL_CXX" <<EOF
 #!/bin/sh
-exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" $ARCH_CFLAGS "\$@"
+exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" -fno-link-libatomic $ARCH_CFLAGS -nodefaultlibs "\$@" -lc -lgcc
 EOF
 chmod +x "$MUSL_CXX"
 
@@ -212,7 +220,9 @@ EOF
 }
 
 HOST_PC=""
-for d in "$HOST_TOOLS"/wayland/lib/pkgconfig "$HOST_TOOLS"/wayland/lib/*/pkgconfig; do
+for d in "$HOST_TOOLS"/wayland/lib/pkgconfig \
+         "$HOST_TOOLS"/wayland/lib64/pkgconfig \
+         "$HOST_TOOLS"/wayland/lib/*/pkgconfig; do
     [ -d "$d" ] && HOST_PC="${HOST_PC:+$HOST_PC:}$d"
 done
 PKG_ENV=(env "PKG_CONFIG_LIBDIR=$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig" \
@@ -220,7 +230,8 @@ PKG_ENV=(env "PKG_CONFIG_LIBDIR=$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig"
             "PKG_CONFIG_SYSROOT_DIR=")
 
 # ------------------------------------------------- native wayland-scanner
-if want wayland-native && ! stamp wayland-native; then
+if want wayland-native && { ! stamp wayland-native || \
+    [ ! -x "$HOST_TOOLS/wayland/bin/wayland-scanner" ]; }; then
     echo "=== wayland (native scanner) ==="
     rm -rf "$B/build-wayland-native"
     meson setup "$B/build-wayland-native" "$USER_DIR/external/gui/wayland" \
@@ -229,14 +240,18 @@ if want wayland-native && ! stamp wayland-native; then
         --default-library=static
     ninja -C "$B/build-wayland-native"
     ninja -C "$B/build-wayland-native" install
-    # Meson's build-machine pkg-config lookup uses the cross
-    # PKG_CONFIG_LIBDIR; make the native scanner visible there too.
+    mark wayland-native
+fi
+# Meson's build-machine pkg-config lookup uses the cross PKG_CONFIG_LIBDIR;
+# keep the native scanner metadata visible on incremental builds too.
+if want wayland-native; then
     mkdir -p "$SYSROOT/lib/pkgconfig"
-    for d in "$HOST_TOOLS"/wayland/lib/pkgconfig "$HOST_TOOLS"/wayland/lib/*/pkgconfig; do
+    for d in "$HOST_TOOLS"/wayland/lib/pkgconfig \
+             "$HOST_TOOLS"/wayland/lib64/pkgconfig \
+             "$HOST_TOOLS"/wayland/lib/*/pkgconfig; do
         [ -f "$d/wayland-scanner.pc" ] && \
             cp "$d/wayland-scanner.pc" "$SYSROOT/lib/pkgconfig/"
     done
-    mark wayland-native
 fi
 
 meson_cross_ini
@@ -336,17 +351,32 @@ XEOF
 }
 
 # ---------------------------------------------------------------- libffi
-if want libffi && ! stamp libffi; then
+if want libffi && { ! stamp libffi || [ ! -e "$SYSROOT/lib/libffi.so" ]; }; then
     echo "=== libffi ==="
     mkdir -p "$SYSROOT/include/linux"
     cp /usr/include/linux/limits.h "$SYSROOT/include/linux/limits.h"
     SRC=$BUILD/libffi-3.4.6
+    LIBFFI_ARCHIVE=$BUILD/distfiles/libffi-3.4.6.tar.gz
+    if [ ! -x "$SRC/configure" ]; then
+        mkdir -p "$(dirname "$LIBFFI_ARCHIVE")"
+        if [ ! -s "$LIBFFI_ARCHIVE" ]; then
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+                -o "$LIBFFI_ARCHIVE.tmp" \
+                https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
+            mv "$LIBFFI_ARCHIVE.tmp" "$LIBFFI_ARCHIVE"
+        fi
+        echo "b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e  $LIBFFI_ARCHIVE" | \
+            sha256sum -c -
+        rm -rf "$SRC"
+        tar -xzf "$LIBFFI_ARCHIVE" -C "$BUILD"
+    fi
     OB=$B/build-libffi
     rm -rf "$OB" && mkdir -p "$OB"
     (cd "$OB" && "$SRC/configure" \
         --host="$LIBFFI_HOST" \
         --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
         --includedir="$SYSROOT/include" \
+        --disable-multi-os-directory \
         --disable-static --disable-docs --disable-exec-static-tramp \
         CC="$MUSL_GCC" CFLAGS="-O2 -fPIC" \
         CPPFLAGS="-I$SYSROOT/include")
@@ -385,7 +415,8 @@ if want pixman && ! stamp pixman; then
     echo "=== pixman ==="
     meson_pkg pixman "$USER_DIR/external/gui/pixman" \
         -Dtests=disabled -Ddemos=disabled -Dgtk=disabled \
-        -Dlibpng=disabled -Dgnuplot=false -Dopenmp=disabled
+        -Dlibpng=disabled -Dgnuplot=false -Dopenmp=disabled \
+        -Drvv=disabled
     mark pixman
 fi
 
@@ -418,7 +449,13 @@ if want libevdev && ! stamp libevdev; then
     mkdir -p "$SYSROOT/include"
     cp -R /usr/include/linux /usr/include/asm-generic "$SYSROOT/include/"
     rm -rf "$SYSROOT/include/asm"
-    cp -RL "$UAPI_ASM" "$SYSROOT/include/asm"
+    if [ -d "$UAPI_ASM" ]; then
+        cp -RL "$UAPI_ASM" "$SYSROOT/include/asm"
+    else
+        # Fedora's cross GCC packages are headerless; asm-generic supplies
+        # the UAPI types/ioctl definitions needed by linux/input.h.
+        cp -RL /usr/include/asm-generic "$SYSROOT/include/asm"
+    fi
     for h in input.h input-event-codes.h uinput.h; do
         [ -f "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" ] && \
             cp "/usr/$MUSL_TARGET-linux-gnu/include/linux/$h" \
@@ -533,7 +570,7 @@ if want libdrm && ! stamp libdrm; then
         -Dman-pages=disabled -Dvalgrind=disabled \
         -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled \
         -Dnouveau=disabled -Dvmwgfx=disabled -Dexynos=disabled \
-        -Dtegra=disabled -Dfreedreno=disabled -Detnaviv=disabled \
+        -Dtegra=disabled -Detnaviv=disabled \
         -Dvc4=disabled -Domap=disabled
     mark libdrm
 fi
@@ -903,11 +940,13 @@ if want player && ! stamp player; then
         -lwayland-client -lffi -lpthread -lm
     "$MUSL_GCC" -O2 -static "$USER_DIR/cmds/core/wayland-session.c" \
         -o "$SYSROOT/bin/wayland-session"
-    # EGL/GLES smoke client: links against the Mesa libs in the sysroot.
-    "$MESON_CC" -O2 -I"$SYSROOT/include" \
-        "$USER_DIR/cmds/core/egl_test.c" -o "$SYSROOT/bin/egl_test" \
-        -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
-        -lEGL -lGLESv2 -lpthread -lm
+    # EGL/GLES is optional for the fbdev/pixman compositor profile.
+    if [ -f "$SYSROOT/include/EGL/egl.h" ] && [ -f "$SYSROOT/lib/libEGL.so" ]; then
+        "$MESON_CC" -O2 -I"$SYSROOT/include" \
+            "$USER_DIR/cmds/core/egl_test.c" -o "$SYSROOT/bin/egl_test" \
+            -Wl,-rpath-link,"$SYSROOT/lib" -L"$SYSROOT/lib" \
+            -lEGL -lGLESv2 -lpthread -lm
+    fi
     mark player
 fi
 

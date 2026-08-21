@@ -273,10 +273,10 @@ copy_file "$SYSROOT/bin/weston-simple-shm" /weston-simple-shm
 if [ -f "$SYSROOT/bin/weston-terminal" ]; then
     copy_file "$SYSROOT/bin/weston-terminal" /weston-terminal
 fi
-if [ -f "$SYSROOT/libexec/weston-desktop-shell" ]; then
-    copy_file "$SYSROOT/libexec/weston-desktop-shell" /libexec/weston-desktop-shell
-elif [ -f "$SYSROOT/bin/a20-desktop-shell" ]; then
+if [ -f "$SYSROOT/bin/a20-desktop-shell" ]; then
     copy_file "$SYSROOT/bin/a20-desktop-shell" /libexec/weston-desktop-shell
+elif [ -f "$SYSROOT/libexec/weston-desktop-shell" ]; then
+    copy_file "$SYSROOT/libexec/weston-desktop-shell" /libexec/weston-desktop-shell
 fi
 if [ -f "$SYSROOT/libexec/weston-keyboard" ]; then
     copy_file "$SYSROOT/libexec/weston-keyboard" /libexec/weston-keyboard
