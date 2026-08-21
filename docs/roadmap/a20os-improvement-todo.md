@@ -1,6 +1,6 @@
 # A20OS 改进 TODO
 
-本文档记录 A20OS 的工程瓶颈和剩余改进工作，已按 `e33c3219` 源码核对。checkbox 主要表示实现里程碑；运行证据另行标注，`[x]` 不表示该审计基线已重跑。`e33c3219` 没有匹配的完整干净双架构平台复验；最新完整平台证据属于 `f9732348`，不能外推到该审计基线。
+本文档记录 A20OS 的工程瓶颈和剩余改进工作（最后核实：2026-08）。checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；文中带日期的验证记录均为历史记录，引用规则见文末"验证环境说明"。
 
 ## P0：混合内核改造（Native ABI 本体化）
 
@@ -8,9 +8,9 @@
 
 - [x] 阶段一：核心原语契约化（句柄 rights 代数、channel 背压、EventQ 语义、VMO 生命周期）。
   - 源码证据：`user/tests/test_native_contract.c` 覆盖 rights、channel、EventQ 和 VMO 生命周期分区；`kernel/abi/native/handle_table.c` 的 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码包含 STAT，handle query 可用。
-  - 历史验证：2026-08-06 的 `smoke-native-contract` 曾在 riscv64 PASS，loongarch64 构建通过；这不是 `e33c3219` 的当前运行结果。
+  - 历史验证：2026-08-06 `smoke-native-contract` 在 riscv64 PASS，loongarch64 构建通过（历史记录，当前状态需复验）。
 - [x] 阶段二：Native ABI SMP 正确性收口（native-shmring SMP=2/8 偶发破坏）。
-  - 历史验证：SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败零挂起（2026-08-06，日志 `.kernel-build/smoke/shmring-smp{2,8}/`）；M5 修复 `98a1260`/`1af0d02` 在当时复验有效。该结果不是 `e33c3219` 的新运行。
+  - 历史验证：SMP=2 连续 20 轮 + SMP=8 连续 20 轮零失败零挂起（2026-08-06，日志 `.kernel-build/smoke/shmring-smp{2,8}/`）；M5 修复 `98a1260`/`1af0d02` 在当时复验有效（历史记录，当前状态需复验）。
   - 副产品：`[VMO-PAGE]` 串口诊断降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 计数器（合法复用，消除输出交错）；当时还记录了 mm_stress 45s 门禁预算不足。
 - [ ] 阶段三：驱动双态部署框架 + IOMMU/DMA 真隔离。
   - 已有骨架：`drv_env.h` 提供 KERNEL/USER/DRVMOD 三后端；virtio-input 的 DRVMOD 只读 probe 与 USER uinputd 共享配置协议头，USER 路径有 virtq/DMA/IRQ→EventQ；完整 DRVMOD 驱动仍使用独立实现。goldfish RTC DRVMOD probe 仍复制寄存器常量，不是同源双态。
@@ -49,11 +49,11 @@
     见 `docs/roadmap/perf-overhaul.md` §3。
 - [x] 压缩 `proc_lock` 的剩余获取点。
   - 证据：`sched()` idle 空队列快速路径（无任务可唤醒 idle，跳过两次全局锁获取）；`proc_switch_complete()` 无待交接任务时原子检查后直接返回；EEVDF enqueue 常见情形 O(1) 尾部追加（新 deadline 晚于队尾时不再遍历）；SIGALRM 到期扫描改为 per-task alarm 最小堆（`proc_set_alarm_expire` 维护，expiry O(k log n)，destroy 时移除条目）；`proc_wake_child_waiters_locked` 用 proc_lock 保护的全局面等待者计数在无人 wait 时 O(1) 返回。阻塞切换的 completion 仍必须持 `proc_lock`：wake 竞争 enqueue 的仲裁是 park 协议正确性部件。
-  - 验证：`make smoke-riscv64`、`smoke-sched-stress`、`smoke-proc-stress`、`smoke-futex-stress`、`smoke-abi-linux` 全部 PASS；guest 内 `sleep 1` 的 SIGALRM 正常；`[SMP] 2/2 configured CPUs online` 后干净关机。
+  - 验证：`make smoke-riscv64`、`smoke-sched-stress`、`smoke-proc-stress`、`smoke-futex-stress`、`smoke-abi-linux` 全部 PASS；guest 内 `sleep 1` 的 SIGALRM 正常；`[SMP] 2/2 configured CPUs online` 后干净关机（2026-08 历史记录）。
   - 剩余：切换路径的两次获取（出栈发布 + 入栈 completion）需 per-task wake-queue 位才能无锁化；`proc_wait4` 的 child 扫描本身仍是每次 syscall O(N)。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
-  - 历史验证：`f9732348` 平台记录包含双架构 `PROC_STRESS: low-user-argv PASS` 与功能测例全通过；`e33c3219` 未重跑。
+  - 历史验证：双架构 `PROC_STRESS: low-user-argv PASS` 与功能测例全通过（历史平台记录，当前状态需复验）。
 - [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
@@ -62,7 +62,7 @@
   - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
 - [x] 用 EEVDF 替换 8 级 MLFQ，作为普通任务的统一调度核心。
   - 证据：`kernel/proc/sched.c` 实现加权 vruntime、系统虚拟时间资格门控、虚拟截止时间选择、空闲窃取与时间片旋钮；`/proc/a20/sched_base_slice` 可运行时切换桌面/HPC。当前 nice -20/19 权重为 43020/88，理论份额比约 489:1；运行时分布结论必须引用具体历史样本，不能写成当前测量。
-  - 历史验证：`f9732348` 平台记录包含 `check-doc-test-gates`、双架构 sched/futex/proc 压力和 riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS；`e33c3219` 未重跑。
+  - 历史验证：`check-doc-test-gates`、双架构 sched/futex/proc 压力和 riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS（历史平台记录，当前状态需复验）。
   - 设计：`docs/eevdf-scheduler.md`。
 
 ## P0：Linux ABI 正确性
@@ -81,7 +81,7 @@
   - 完成条件：每个占位符都有记录在案的 owner 决策，见 `kernel/abi/linux/syscall_coverage.md` 的 "Placeholder Resolution Record"。
 - [x] 修复 syscall 参数求和/乘法溢出与无界循环。
   - 证据：`sys_sendmsg`/`sys_recvmsg` 的 iov 长度求和增加回绕检查（`SIZE_MAX - total`），`sys_move_pages` 的 `nr_pages * sizeof(int)` 增加乘法溢出检查并把分配失败返回 `-ENOMEM`，`sys_readv`/`sys_writev` 增加 `iovcnt` 负值与 >1024 检查，与 `sys_sendmsg` 的 1024 上限一致。
-  - 验证：riscv64/loongarch64 `BRINGUP=1` 构建通过；`smoke-abi-linux` 类 syscall smoke 未受影响。
+  - 验证：riscv64/loongarch64 `BRINGUP=1` 构建通过；`smoke-abi-linux` 类 syscall smoke 未受影响（2026-08 历史记录）。
 
 ## P0：MM、Page Cache 与文件映射
 
@@ -101,7 +101,7 @@
 ## P1：I/O 进展与网络
 
 - [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
-  - 证据：`docs/project/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
+  - 证据：`docs/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
   - 设计：`docs/drivers/guide/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
@@ -109,7 +109,7 @@
   - 设计：`docs/net/network-lock-contract.md`。
   - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
 - [ ] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
-  - 证据：`docs/project/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
+  - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
   - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
   - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
 - [ ] 扩展现有网络 smoke，使关键语义不依赖可跳过项并覆盖 partial I/O/error path。
@@ -168,7 +168,7 @@
 
 - [x] 将静态 `rg` 风格架构门禁转换为行为测试，只要该行为能在 QEMU 下执行。
   - 证据：`check-blocking-point-boundary`、`check-signal-exit-boundary`、`check-timeout-ownership-boundary`、`check-smp-runqueue-boundary`、`check-process-lock-split-boundary` 现在依赖对应 QEMU runtime smoke（`smoke-proc-stress`/`smoke-futex-stress`/`smoke-sched-stress`/`smoke-timeout-test`），在运行时日志 grep 标记而非源码；`smoke-riscv64`/`smoke-loongarch64`/`smoke-aarch64`/`smoke-x86_64` 不再把 watchdog timeout 当 PASS，要求 `part ok` 与正常 poweroff；新增 `smoke-pty-stress` 与 `smoke-timeout-test` 覆盖原本从未运行的压力程序。
-  - 验证：`make smoke-riscv64`、`make smoke-loongarch64`、`make smoke-sched-stress`、`make smoke-futex-stress`、`make smoke-proc-stress`、`make smoke-timeout-test`、`make smoke-pty-stress`、`make check-timeout-ownership-boundary` 在 2026-08-16 于 riscv64 全部 PASS。
+  - 验证：`make smoke-riscv64`、`make smoke-loongarch64`、`make smoke-sched-stress`、`make smoke-futex-stress`、`make smoke-proc-stress`、`make smoke-timeout-test`、`make smoke-pty-stress`、`make check-timeout-ownership-boundary` 在 2026-08-16 于 riscv64 全部 PASS（历史记录，当前状态需复验）。
   - 后续：`check-arch-boundary` 已依赖 `smoke-arch-mmu-matrix`（8 组合 MMU/NOMMU runtime 矩阵）；`check-concurrency-foundation` 已依赖 `smoke-smp-bringup`（riscv64 `-smp 2` 真实双核启动并干净关机，`[SMP] 2/2 configured CPUs online`）。剩余：`pty_stress`/`timeout_test` 的多架构入口未建立。
 - [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
@@ -187,13 +187,13 @@
   - 完成条件：活跃源码目录只包含构建输入、文档或有意跟踪的 fixture。
 - [x] 内核编译警告清零并启用 `-Werror`。
   - 证据：根 `Makefile` 的 `CFLAGS` 默认带 `-Werror`（`KERNEL_WERROR=0` 逃生口）；riscv64/loongarch64 的 `linux` 与 `both` ABI、bringup/dev/SMP2 配置全部零警告。顺带修复：`io_pgetevents` 读取 `arg[6]` 越界（64 位 ABI 无第 7 参）、COW fault 全局计数不在成功分支内、`a20_prepare_start_info` 的 uint32 handle 错误检测恒假（失败时静默写入 0xFFFFFFFF）。架构门禁列表合并为 `SUPPORTED_HOSTED_ARCHES` 单一真源；STM32 产物路径由 `BUILD_VARIANT` 派生，flash/QEMU 目标经嵌套 make 保持同配置。
-  - 验证：`make -B ARCH=riscv64/loongarch64 ABI=linux/both BRINGUP=1 kernel-only` 零警告；`smoke-native-handle`、`smoke-native-contract` PASS。
+  - 验证：`make -B ARCH=riscv64/loongarch64 ABI=linux/both BRINGUP=1 kernel-only` 零警告；`smoke-native-handle`、`smoke-native-contract` PASS（2026-08 历史记录）。
   - 剩余：aarch64/x86_64/arm32/riscv32/ppc64le/armv7m/loongarch32 的警告状态未在无工具链主机上复核，首次构建如遇残留警告需 `KERNEL_WERROR=0` 过渡。
 - [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
-  - 证据：`docs/project/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
+  - 证据：`docs/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
   - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
 - [ ] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
-  - 证据：`docs/project/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
+  - 证据：`docs/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
   - 完成条件：修改 musl、sbase、mksh、lwIP、TLSe 或 wget 时，有记录在案的命令序列和预期 artifact。
 - [ ] 记录哪些归档用户态代码只是历史参考，哪些预计会恢复。
   - 证据：`user/archive/` 包含 A20 syscall bridge、pthread/mutex 代码、测试，以及带 TODO 和 ENOSYS stub 的旧 coreutils。
@@ -202,7 +202,7 @@
 ## 验证环境说明
 
 - 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应 build/smoke 目标在运行时报告。
-- 审计源码提交为 `e33c3219`；最新完整干净双架构平台记录为 `f9732348`。两者之间有 6 个影响最终构建、内存映射、测试发现、root mount 和磁盘流的提交，因此该审计基线正式未验证。
+- 本文按 2026-08 源码核对。文中的验证记录均为历史记录：PASS 只表示它在标注的日期与配置下通过，引用为当前结论前必须在当前提交上重新运行。
 - Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、1 核/8 核运行矩阵是 `make check-proc-step8-local`。
 - 需要完整双架构运行矩阵时运行 `make check-proc-step8`，它聚合 RISC-V64 与 LoongArch64 的 debug/release、单核/八核压力矩阵。
 - 项目 Python 命令统一通过 conda 环境 `a20os`；长跑基准入口负责记录 QEMU 命令、镜像哈希、退出状态、timeout 与 guest CPU 状态。

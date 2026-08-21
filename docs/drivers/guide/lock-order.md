@@ -275,7 +275,7 @@ read/poll 在 `h->lock` 下调用 HCD `poll`，但 `usb_hid_complete()` 自身�
    USB storage 的锁内同步硬件等待和 USB HID completion 的锁覆盖缺口是已知不符合项，不属于允许例外。
 4. **新的设备锁** 必须符合全局顺序（`driver registry/IRQ locks -> device-private locks`），或在使用前向本文档增加局部顺序条目。
 
-> 不要这样做在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing/testing-gates.md)。
+> 不要这样做在设备锁下调用 `kmalloc`、VFS 或 scheduler；在 spinlock 里轮询硬件直到超时；临时发明一种“先拿设备锁，再拿 proc_lock”的嵌套。这些都会在 `make check-concurrency-foundation` 或 SMP smoke 测试里变成死锁或数据竞争。新增锁顺序前请先跑过 [测试门禁](../../testing-gates.md)。
 
 ## 参考
 
@@ -288,4 +288,4 @@ read/poll 在 `h->lock` 下调用 HCD `poll`，但 `usb_hid_complete()` 自身�
 - `kernel/drivers/block/dw_sdio.c`：`g_sdio.lock` 串行化轮询传输。
 - `kernel/drivers/net/starfive_gmac.c`：per-instance lock 串行化 descriptor ring。
 - `kernel/drivers/net/ls2k_gmac.c`：per-instance lock 串行化 descriptor ring。
-- `kernel/platform/visionfive2/board.c`、`kernel/platform/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../platforms/physical-boards.md)。
+- `kernel/platform/visionfive2/board.c`、`kernel/platform/ls2k1000/board.c`：物理板适配，见 [物理开发板移植](../../platforms/physical-boards.md)。

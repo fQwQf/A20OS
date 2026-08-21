@@ -1,6 +1,6 @@
 # 混合内核：能力与边界清单
 
-本文档以清单形式说明 A20OS 混合内核**当前源码具备的能力**与**已知边界**。源码已按 `e33c3219` 核对；当前提交没有匹配的完整干净双架构平台运行。最新完整平台证据是 `f9732348` 的双架构发布流程，但它既早于当前提交，也不覆盖全部 Native/hybrid smoke。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
+本文档以清单形式说明 A20OS 混合内核**当前源码具备的能力**与**已知边界**（最后核实：2026-08）。能力以源码和测试入口为准；运行类结论需在当前提交上按文末复现入口重新执行，历史里程碑记录见 [../archive/](../archive/)。设计总览见 [00-design.md](00-design.md)，机制语义见 [01-mechanisms.md](01-mechanisms.md)，演进路线见 [03-refactor-plan.md](03-refactor-plan.md)。
 
 ## 核心架构原则（总体已贯彻，含已知债务）
 
@@ -62,20 +62,20 @@
 ## 已知边界
 
 - **时间片捐赠仅限 UP**：SMP 捐赠依赖跨核唤醒/IPI 簿记（`PER_CPU_CURRENT_VALIDATION`），未完成前不开放；
-- **Native ABI SMP 历史回归**：SMP=2/8 的 `native-shmring` 偶发破坏曾由 M5 修复，并在 2026-08-06 指定分支各连续 20 轮通过；这是历史防退化记录，不是 `e33c3219` 的新复验。`vmo_dirty_frames` 仍提供复用帧观察点；
-- **网络协议栈**：lwIP 是当前内核态唯一实现，旧 netd 路径已移除。`smoke-network-suite` 当前聚合 TCP/UDP/ICMP loopback、DNS、AF_UNIX、AF_ALG 和 timeout，DNS/AF_ALG 可跳过；该 RISC-V64 目标本次未运行，不能写成当前全通过结果。
-- **loongarch64**：`f9732348` 有整体发布流程成功证据，但当前多个 Native/dual/mlibc smoke 仍只运行 RISC-V64，且 `e33c3219` 无匹配完整复验；
+- **Native ABI SMP 历史回归**：SMP=2/8 的 `native-shmring` 偶发破坏曾由 M5 修复（2026-08 在当时的分支上连续 20 轮零失败零挂起，属历史记录）；`vmo_dirty_frames` 仍提供复用帧观察点，复验入口 `smoke-native-shmring`；
+- **网络协议栈**：lwIP 是当前内核态唯一实现，旧 netd 路径已移除。`smoke-network-suite` 聚合 TCP/UDP/ICMP loopback、DNS、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可跳过；当前仅 RISC-V64 有运行入口；
+- **loongarch64**：双架构发布流程曾整体通过（历史记录），但当前多个 Native/dual/mlibc smoke 仍只有 RISC-V64 运行入口，LoongArch64 的结论需逐项复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：DDT/CQ/FQ 与 devid 0 静态 TR_REQ 探测已实现，但用户驱动 DMA 尚未接入动态 per-device domain，fault 队列也未消费；当前仍不能宣称端到端硬件强制隔离。
 
-## 历史基线回归观察（2026-08-06）
+## 历史诊断记录（2026-08-06，hybrid-kernel-refactor 分支）
 
-以下只记录当时 `a7eb6d2`/`hybrid-kernel-refactor` 的诊断背景，不是 `e33c3219` 当前缺陷清单，也不能作为当前测试结果：
+以下记录当时 `a7eb6d2`/`hybrid-kernel-refactor` 分支的诊断背景，用于理解相关子系统曾出现的问题形态；它们不是当前缺陷清单，也不能作为当前测试结果：
 
-- **当时分支的构建破损**：`virtio_input.c` 引用 `virtio_transport_t.shared_irq`、loongarch64 缺少 `arch_tlb_flush_page_local`，两者均为当时 IRQ/驱动重构的半成品；诊断分支用单行 shim 补齐。该记录不描述当前 `e33c3219` 的构建状态；
-- **当时分支的线程/阻塞路径挂起（riscv64）**：使用 `a20_thread_create` 的 native smoke（handle 的 `bch` 分区起、ipc、svc 等）在 SMP=1 下挂起至超时；单线程 `smoke-native-contract` 四分区当时通过。stash 对照显示与当时的 STAT 改动无关；该记录不能外推为当前缺陷或当前 PASS；
+- **当时分支的构建破损**：`virtio_input.c` 引用 `virtio_transport_t.shared_irq`、loongarch64 缺少 `arch_tlb_flush_page_local`，两者均为当时 IRQ/驱动重构的半成品；诊断分支用单行 shim 补齐；
+- **当时分支的线程/阻塞路径挂起（riscv64）**：使用 `a20_thread_create` 的 native smoke（handle 的 `bch` 分区起、ipc、svc 等）在 SMP=1 下挂起至超时；单线程 `smoke-native-contract` 四分区当时通过。stash 对照显示与当时的 STAT 改动无关；
 - **[VMO-PAGE] 诊断（已处理）**：契约测试与 shmring 复验期间观察到 `[VMO-PAGE] new pfn ... had content`（buddy 返回未清零复用帧，VMO 侧 memset 兜底，用户可见行为正确）。已降级为 `/proc/a20/objects` 的 `vmo_dirty_frames` 累计计数器，消除串口输出交错；契约测试已把 "新 VMO 页读零"固化为用户态契约（`vmol-zero`）；
-- **当时的 mm_stress 45 秒门禁预算不足**：`smoke-mm-stress`（`SMOKE_TIMEOUT_MM_ST=45s`）在 TCG 下于 `evict-mmap` 段超时，同一镜像以 180s 预算曾完整 PASS。该观察只属于当时分支；当前默认仍是 45s，但 `e33c3219` 未按 180s 重跑。
+- **当时的 mm_stress 45 秒门禁预算不足**：`smoke-mm-stress`（`SMOKE_TIMEOUT_MM_ST=45s`）在 TCG 下于 `evict-mmap` 段超时，同一镜像以 180s 预算曾完整 PASS。当前默认仍是 45s；如需调整预算，应在当前提交上以两种预算对照复验后再决定。
 
 ## 复现入口
 

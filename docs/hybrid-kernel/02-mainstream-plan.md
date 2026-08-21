@@ -1,6 +1,6 @@
 # 混合内核演进方向
 
-本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。内容已按 `e33c3219` 源码核对；“目标能力”不是当前完成声明。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。内容已按 2026-08 源码核对；“目标能力”不是当前完成声明。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
 
 ## 目标能力
 
@@ -18,7 +18,7 @@
 
 ### 1. IPC 直接切换与时间片捐赠
 
-同步 RPC 的往返成本主要由两次上下文切换的 runqueue 排队构成；历史 TCG 样本约为 80µs 量级，本次未在 `e33c3219` 重测。L4 的结论：同步 IPC 应把调用者的剩余时间片直接捐给被调者，跳过两次调度排队。
+同步 RPC 的往返成本主要由两次上下文切换的 runqueue 排队构成；历史 TCG 样本约为 80µs 量级（未在最近核对时重测）。L4 的结论：同步 IPC 应把调用者的剩余时间片直接捐给被调者，跳过两次调度排队。
 
 设计要点：
 
@@ -62,13 +62,13 @@ virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行�
 - **内核块代理**（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动——页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
 - 崩溃恢复：驱动死亡时内核代理把在飞请求标记失败并唤醒等待者，svcmgr 重启驱动后重挂载。
 
-**当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字未在 `e33c3219` 重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见"已做出的设计决策"。
+**当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字为历史样本，引用前需重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见"已做出的设计决策"。
 
 ### 5. 双架构与真实测量
 
 loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybrid smoke 的系统化运行矩阵；性能结论应来自明确标注提交和环境的有效样本。
 
-**当前状态**：`f9732348` 曾完成 RISC-V64/LoongArch64 整体发布流程，但这不覆盖所有 Native/hybrid smoke，也不能外推到 `e33c3219`。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
+**当前状态**：RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆盖所有 Native/hybrid smoke，也不外推为当前结果。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
 
 ## 已做出的设计决策
 
@@ -79,6 +79,6 @@ loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybri
 ## 诚实边界
 
 - **网络协议栈**保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
-- **loongarch64**：有 `f9732348` 的整体平台运行证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前 `e33c3219` 也无匹配完整复验；
+- **loongarch64**：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
 - **IOMMU/DMA 安全**：RISC-V 侧已完成 DDT/CQ/FQ bring-up 和 devid 0 静态 SV39/TR_REQ 探测，但尚未把用户驱动的动态 DMA 分配接入 per-device map/unmap 与 fault 消费；不能称为完整硬件强制隔离。其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。

@@ -20,7 +20,7 @@
 3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [构建、测试与提交](testing-and-submission.md) 中的测试矩阵。
 4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
 
-仓库定义了五个 `smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 目标；脚本会断言 VirtIO GPU、两个 VirtIO input 实例、非空 scanout 和注入按键事件。但它们目前不是一组可统一强制的门禁：x86_64 的默认 generic 模块集合没有 `virtio-gpu.a20drv`，arm32 的默认 generic 模块集合为空，因此这两个目标按默认配置无法满足脚本断言。这是已知的门禁/部署缺陷；修复模块部署前不得要求运行，也不得声称通过。riscv64、aarch64、loongarch64 的模块清单包含相应驱动，但清单存在不等于运行通过，只有与当前提交匹配的实际日志才能形成各自结论。门禁入口见 [testing/testing-gates.md](../../testing/testing-gates.md)。
+仓库定义了五个 `smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 目标；脚本会断言 VirtIO GPU、两个 VirtIO input 实例、非空 scanout 和注入按键事件。但它们目前不是一组可统一强制的门禁：x86_64 的默认 generic 模块集合没有 `virtio-gpu.a20drv`，arm32 的默认 generic 模块集合为空，因此这两个目标按默认配置无法满足脚本断言。这是已知的门禁/部署缺陷；修复模块部署前不得要求运行，也不得声称通过。riscv64、aarch64、loongarch64 的模块清单包含相应驱动，但清单存在不等于运行通过，只有与当前提交匹配的实际日志才能形成各自结论。门禁入口见 [testing-gates.md](../../testing-gates.md)。
 
 ## 核心与公共基础设施
 
@@ -62,7 +62,7 @@
 | virtio-blk | BLOCK | 类接口；remove 停止设备并释放已注册 IRQ；有限静态实例 |
 | virtio-net | NET | 多实例、IRQ/轮询和类接口；remove 释放 IRQ 并复位 transport |
 | virtio-input | INPUT | 类接口、PCI/MMIO、多实例槽和 remove；由 `/dev/event0` 聚合 |
-| virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq；VIRGL 3D feature 协商、capset 查询与 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D` 透传（`A20_GPU_IOCTL_*`，见 [3D 图形加速栈](../../gpu/3d-graphics.md)）；2D-only 设备自动回退 |
+| virtio-gpu | DISPLAY | class registry、framebuffer 页释放和 transport reset；单实例、同步 controlq；VIRGL 3D feature 协商、capset 查询与 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D` 透传（`A20_GPU_IOCTL_*`，见 [3D 图形加速栈](../../graphics/3d-graphics.md)）；2D-only 设备自动回退 |
 | VirtIO-SCSI | BLOCK | VirtualBox ARM 已验证，remove 复位/释放槽；只支持 target/LUN 0、READ/WRITE(10)、512B sector、轮询 |
 | AHCI | BLOCK | VirtualBox x86_64；单 controller/单 port/单 slot、LBA48、轮询；probe 回滚和 remove 释放 DMA/IRQ |
 | NVMe | BLOCK | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 构建，LoongArch QEMU 已验证 BAR、CAP、admin/I/O queue、Identify，以及跨 8 KiB bounce chunk 的写入/flush/读回比较；要求 NVM command set 和兼容 4 KiB memory page，首个活动 namespace、轮询、每 controller 只发布一个 namespace |
@@ -108,7 +108,7 @@ QEMU RISC-V64 board 已提供 ECAM、PCI MMIO BAR 窗口和实际 HDA PCM DMA；
 
 ## 历史基线观察（不代表当前回归状态）
 
-以下两个问题曾在驱动部署重构**之前**的已提交基线（`3bfe64b`）上复现。这里仅保留归因记录；它们没有在本页针对审计基线 `e33c3219` 重新验证，因此不得据此声称该基线仍失败或已经修复：
+以下两个问题曾在驱动部署重构**之前**的已提交基线（`3bfe64b`）上复现。这里仅保留归因记录；它们未在 2026-08 核实时重新验证，因此不得据此声称当前源码仍失败或已经修复：
 
 - **x86_64 用户态 pid=3 崩溃**：generic x86_64 启动可挂载 `/bin`、驱动全部绑定，但 mksh（pid 3）启动期在 `free_vma_pages → frame_put` 触发 `KERNEL PAGE FAULT`（`BADV=0x7fffff9xxxxx`，确定性复现），随后锁自旋。在 `3bfe64b` 干净基线（无任何驱动部署改动）上用同一 fat32 镜像复现相同故障类（`pid=3` + `0x7fffff9xxxxx`），证明为既有 mm/exec 问题；驱动重构只是让 x86 首次能到达用户态而暴露它。修复方向在 mm/vma 释放路径，不在驱动层。
 - **riscv64 `mm_stress` 在 evict 子测试挂起**：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。

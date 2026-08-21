@@ -400,7 +400,7 @@ TCP、UDP、ICMP 和 HTTPS Git helper；`/proc/net/config` 是运行时确认最
 这样串口日志才能与源码对应。
 
 更换软件或增加新命令的源码适配流程见
-[从源码适配新软件](../development/source-software-porting.md)。
+[从源码适配新软件](../distro/source-software-porting.md)。
 
 ## 当前状态
 

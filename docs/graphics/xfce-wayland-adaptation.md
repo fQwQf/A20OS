@@ -2,7 +2,7 @@
 
 ## 背景
 
-XFCE 4.20 Wayland 桌面（labwc/wlroots 合成器 + xfce4-panel/xfdesktop）的适配过程中， 曾以修改 submodule 源码（wlroots、labwc、gtk-layer-shell、libxfce4windowing、xfdesktop 等） 的方式绕过内核缺陷。本任务的目标：
+XFCE 4.20 Wayland 桌面（labwc/wlroots 合成器 + xfce4-panel/xfdesktop）的适配过程中， 曾以修改 submodule 源码（wlroots、labwc、gtk-layer-shell、libxfce4windowing、xfdesktop 等） 的方式绕过内核缺陷。本文档记录的适配工作遵循三条原则：
 
 1. 通过强化操作系统自身（内核 + OS 侧用户态源码）消除这些缺陷；
 2. 撤销所有 submodule 源码修改，保持 submodule checkout 纯净；

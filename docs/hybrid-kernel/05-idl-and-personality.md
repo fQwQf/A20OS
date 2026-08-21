@@ -1,6 +1,6 @@
 # Native 服务 IDL 与 Linux 人格层
 
-本文档定义 A20OS Native 服务的 **IDL 语言规范**、当前实现状态，以及 Linux 人格层的两阶段实现，已按 `e33c3219` 的 IDL、生成器、协议 wrapper 和 personality 头核对。本次只做源码审计，未运行 `make check-a20-idl` 或 smoke。
+本文档定义 A20OS Native 服务的 **IDL 语言规范**、当前实现状态，以及 Linux 人格层的两阶段实现，已按 2026-08 的 IDL、生成器、协议 wrapper 和 personality 头核对。本次只做源码审计，未运行 `make check-a20-idl` 或 smoke。
 
 ## 1. IDL 语言规范
 

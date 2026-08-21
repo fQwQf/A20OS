@@ -1,6 +1,6 @@
 # A20 Native ABI 设计
 
-本文概述 A20OS Native ABI。A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。详细规范见各子文档。本文已按 `e33c3219` 源码核对；源码状态不等于当前提交已完成运行时验收，最新完整干净双架构平台证据属于 `f9732348`，且没有覆盖当前提交的全部 Native smoke。
+本文概述 A20OS Native ABI。A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。详细规范见各子文档。本文已按 2026-08 源码核对；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
 
 ## 设计定位
 

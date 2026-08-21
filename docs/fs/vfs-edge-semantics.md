@@ -1,6 +1,6 @@
 # A20OS VFS 边界语义设计
 
-本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策，并区分当前实现与未完成项。本文已按 `e33c3219` 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；没有与该提交匹配的完整干净双架构平台复验，最新完整平台证据仍属于 `f9732348`，不能外推为当前提交的验证结果。
+本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策，并区分当前实现与未完成项。本文已按 2026-08 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；运行结论需在当前提交上复验，历史平台记录不能外推。
 
 > **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 被接受但未执行检查，`RESOLVE_CACHED` 通过 dentry cache 命中检查实现（未命中返回 `-EAGAIN`），A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 已移除、不再与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
 

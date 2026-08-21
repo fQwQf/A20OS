@@ -8,7 +8,7 @@
 
 ## 1. 动机
 
-既往针对审计基线 `e33c3219` 的性能审计指出的热路径中，
+既往性能审计（2026-08）指出的热路径中，
 当前 `main` 仍保留三个高频全局 spinlock 和一条全盘 fsync：
 
 - **page cache 单全局锁**（`g_page_cache_lock`）：每次 warm hit 都要取锁 + 做全局 LRU 摘链/插头。
@@ -169,4 +169,4 @@ qemu-system-riscv64 -machine virt -m 1G -nographic -smp 8 -accel tcg,thread=mult
 ## 6. 已知（非本分支引入）
 
 基线 `main` 在部分 dev 镜像/配置下，mm_stress 的 `mseal-mprotect` 用例可能返回 errno=0 失败；
-与本节改动无关。审计基线的完整并行编译基准重跑仍按既有边界执行。
+与本节改动无关。完整并行编译基准的重跑仍按既定流程执行。

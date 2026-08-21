@@ -4,7 +4,7 @@
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
 
-本页按源码审计基线 `e33c3219` 描述存在的目标和目标应检查的契约，不把“目标存在”写成“该基线已通过”。该提交没有与源码完全匹配的一套正式全流程结果；最新完整、干净的正式测试证据属于 `f9732348`。后续提交必须重新运行相应目标，不能继承该结果。
+本页描述存在的目标和目标应检查的契约（最后核实：2026-08），不把"目标存在"写成"目标已通过"。任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。
 
 | 领域 | 门禁 |
 | --- | --- |
@@ -80,13 +80,13 @@
 
 ### 外部依赖边界
 - **How to run**: `make check-external-dependency-boundary`
-- **What it checks**: 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中；`docs/project/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
-- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/project/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
+- **What it checks**: 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中；`docs/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
+- **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
 
 ### 架构边界
 - **How to run**: `make check-arch-boundary`
 - **What it checks**: 禁止通用内核代码中出现 `CONFIG_AARCH64`/`CONFIG_ARM32`/`__aarch64__`/`__arm__` 等架构条件编译；验证 LoongArch64、x86_64、PPC64LE 的 NOMMU 构建在入口即被拒绝；确认 `smoke-arch-mmu-matrix` 在 Makefile 与 `docs/OS-Design.md` 中存在。
-- **When it fails**: 检查 `rg` 扫描结果中是否在 `kernel/arch/**`、`kernel/platform/**`、`kernel/external/**`、`kernel/include/core/arch.h` 之外出现架构宏；确认 `docs/testing/testing-gates.md` 与 `docs/OS-Design.md` 包含 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT` 与 `smoke-arch-mmu-matrix`。
+- **When it fails**: 检查 `rg` 扫描结果中是否在 `kernel/arch/**`、`kernel/platform/**`、`kernel/external/**`、`kernel/include/core/arch.h` 之外出现架构宏；确认 `docs/testing-gates.md` 与 `docs/OS-Design.md` 包含 `ARCH_MMU_RUNTIME_MATRIX_CONTRACT` 与 `smoke-arch-mmu-matrix`。
 
 ### 构建矩阵
 - **How to run**: `make check-build-matrix`
@@ -137,5 +137,5 @@
 
 ### 文档漂移关键词
 - **How to run**: `make check-doc-drift`
-- **What it checks**: 重新生成 Linux syscall 覆盖表；扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing/testing-gates.md`、`kernel/external/**` 除外。
+- **What it checks**: 重新生成 Linux syscall 覆盖表；扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。
 - **When it fails**: 若 `for simplicity` 出现在禁用区域，删除或替换为明确 TODO；若 `stub`/`partial`/`Future`/`not yet` 缺失于许可文件，确保它们已绑定到覆盖表或 TODO。
