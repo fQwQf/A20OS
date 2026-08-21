@@ -1,14 +1,14 @@
-# A20OS parallel-build 热路径优化：分桶锁与 fsync 收敛（`fqwqf/performance-overhaul`）
+# A20OS 并行编译负载热路径优化：分桶锁与 fsync 收敛（`fqwqf/performance-overhaul`）
 
 > 分支：`fqwqf/performance-overhaul`，基自 `main` (`ca6c7008`)。
-> 目标：把 8 核 parallel-build 中"page cache / block cache / dcache 单全局锁 + fsync 全盘写回"的
+> 目标：把 8 核并行编译负载中"page cache / block cache / dcache 单全局锁 + fsync 全盘写回"的
 > 结构性开销拆掉，并给后续优化提供可量化的锁竞争观测点。
 > 验证：riscv64 单核 smoke 全组 + 真实 `-smp 8 -accel tcg,thread=multi` 下的
 > `mm_stress`/`vfs_stress`/`sched_stress` 全部 PASS。
 
 ## 1. 动机
 
-审计基线 `e33c3219` 之后（`docs/roadmap/linux-audit-and-performance-comparison.md`）指出的热路径中，
+既往针对审计基线 `e33c3219` 的性能审计指出的热路径中，
 当前 `main` 仍保留三个高频全局 spinlock 和一条全盘 fsync：
 
 - **page cache 单全局锁**（`g_page_cache_lock`）：每次 warm hit 都要取锁 + 做全局 LRU 摘链/插头。
@@ -95,8 +95,8 @@ proc: 33335 16191822
   `idle_loop` 的 `spin_lock(&proc_lock)`）。
 - 结论：要消除 `proc_lock` 竞争，需要把 tokenized Park/Wake 状态机从单一全局锁改为按等待对象
   （wait queue / mutex / futex）分锁，并合并切换路径里 `sched()`/`context_switch` 的两次获取。
-  这属于 `docs/eevdf-scheduler.md` 与 `docs/roadmap/linux-audit-and-performance-comparison.md` 明确警告的"无 parallel-build 完整验证前
-  不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式 parallel-build 前可先量化
+  这属于 `docs/eevdf-scheduler.md` 与既往性能审计明确警告的"无完整并行编译负载验证前
+  不做的高风险核心协议重写"；本分支提供 callsite 归因工具，让该重写在正式基准复测前可先量化
   收益，而不是靠猜测。
 
 ### 3.1 后续回合：切换路径两次 proc_lock 获取合并（已在 `fqwqf/performance-overhaul` 实现）
@@ -138,10 +138,10 @@ SMP8 mm_stress 测量：`proc` 竞争从 16-30K 区间降到 12-20K（中位数�
 ## 4. 明确不做/暂缓（以及原因）
 
 - **`proc_lock` 拆分（park/wake 按对象分锁 + 切换路径合并获取）**：测量证明它是唯一剩余热点，
-  但修复必须重构 tokenized Park/Wake 协议与切换发布路径；在无法跑正式 parallel-build 的前提下，
+  但修复必须重构 tokenized Park/Wake 协议与切换发布路径；在无法跑完整并行编译基准的前提下，
   先保留 callsite 归因工具，待拿到真实工作负载证据再动。这是本轮最重要、也最需要谨慎的结论。
-- **EEVDF 有序链表 → 树/heap**：`docs/roadmap/linux-audit-and-performance-comparison.md` 与 `docs/eevdf-scheduler.md` 均明确
-  "parallel-build 没有证明 runqueue 锁是主瓶颈，不应先做高风险调度重写"；本节测量也显示 runq 竞争不大。
+- **EEVDF 有序链表 → 树/heap**：既往性能审计与 `docs/eevdf-scheduler.md` 均明确
+  "并行编译负载没有证明 runqueue 锁是主瓶颈，不应先做高风险调度重写"；本节测量也显示 runq 竞争不大。
 - **slab per-CPU magazine**：高复杂度、高回归风险，且本次测量未把 slab 锁列为热点；应先用锁计数器
   确认后再做。
 - **ext4 HTree 目录查找**：dirent 已去掉逐块 kmalloc；HTree 是正确性敏感的增量，建议单独验证。
@@ -169,4 +169,4 @@ qemu-system-riscv64 -machine virt -m 1G -nographic -smp 8 -accel tcg,thread=mult
 ## 6. 已知（非本分支引入）
 
 基线 `main` 在部分 dev 镜像/配置下，mm_stress 的 `mseal-mprotect` 用例可能返回 errno=0 失败；
-与本节改动无关。审计基线的完整 parallel-build 重跑仍按 `docs/parallel-build-2026.md` 的边界执行。
+与本节改动无关。审计基线的完整并行编译基准重跑仍按既有边界执行。

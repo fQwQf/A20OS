@@ -63,7 +63,7 @@ static void ppc64le_enumerate_devices(void) {
      * enumeration cannot discover devices.  Probe the RTAS-scanned virtio
      * transports directly (arch_virtio_blk_probe/net_probe in
      * kernel/arch/ppc64le/platform/virtio_probe.c) so mount_block_devices()
-     * finds the /bin and /test disks.
+     * finds the /bin and /extra disks.
      */
     extern int virtio_blk_init(void);
     extern int virtio_net_init(void);

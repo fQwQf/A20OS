@@ -4,22 +4,22 @@
 
 ## 第一段：内核挂载 + A20OS init 交权
 
-内核在 `kernel/fs/mount_setup.c` 里按 `EXTERNAL_ROOT_PATH`（开发构建是 `/test`， 是 `/mnt`）自动挂好这几样：
+内核在 `kernel/fs/mount_setup.c` 里按 `EXTERNAL_ROOT_PATH`（开发构建是 `/extra`， 外部根盘构建是 `/mnt`）自动挂好这几样：
 
 ```
-/test/dev       devtmpfs —— 实际上是 A20OS 的 devfs：/dev/dri/card0、/dev/input/event0 都在这里
-/test/dev/shm   tmpfs
-/test/proc      proc
-/test/sys       sysfs  —— A20OS 精简 sysfs：/sys/class、/sys/dev、/sys/devices/virtual
-/test/run       tmpfs
+/extra/dev       devtmpfs —— 实际上是 A20OS 的 devfs：/dev/dri/card0、/dev/input/event0 都在这里
+/extra/dev/shm   tmpfs
+/extra/proc      proc
+/extra/sys       sysfs  —— A20OS 精简 sysfs：/sys/class、/sys/dev、/sys/devices/virtual
+/extra/run       tmpfs
 ```
 
 `user/init.c` 的 `detect_distro_rootfs()` 检查两个条件，同时满足才进发行版模式：
 
-- `/test/etc/a20-distro` 存在（overlay 里放的标记文件）；
-- `/test/sbin/init` 存在且是常规文件。
+- `/extra/etc/a20-distro` 存在（overlay 里放的标记文件）；
+- `/extra/sbin/init` 存在且是常规文件。
 
-于是 `enter_distro_rootfs()` 执行 `chdir("/test"); chroot("/test"); execve("/sbin/init")`。 A20OS 自己那份用户态到此让位，发行版的 `/sbin/init`（软链到 overlay 里的 `usr/lib/a20/init`）成为 PID 1。这之后 A20OS 只做一件事：当一个"Linux 兼容内核"。
+于是 `enter_distro_rootfs()` 执行 `chdir("/extra"); chroot("/extra"); execve("/sbin/init")`。 A20OS 自己那份用户态到此让位，发行版的 `/sbin/init`（软链到 overlay 里的 `usr/lib/a20/init`）成为 PID 1。这之后 A20OS 只做一件事：当一个"Linux 兼容内核"。
 
 ## 第二段：stage-2 init（overlay `/usr/lib/a20/init`）
 

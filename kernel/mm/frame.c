@@ -482,9 +482,9 @@ void frame_get(pfn_t pfn) {
  * frame_put_locked — the refcount decrement and buddy merge core.  The
  * caller already holds pfa.lock with IRQs disabled.  Split out so batched
  * frees (mm_tlb_invalidate_finish's deferred-frame drain and munmap) take
- * the global lock once per batch instead of once per page: under parallel-build,
- * munmap/exit of large arenas frees thousands of pages and the per-page
- * lock acquisition serialized all vCPUs.
+ * the global lock once per batch instead of once per page: under parallel
+ * compile workloads, munmap/exit of large arenas frees thousands of pages
+ * and the per-page lock acquisition serialized all vCPUs.
  */
 static void frame_put_locked(pfn_t pfn) {
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {

@@ -30,8 +30,8 @@ _start:
      * OpenSBI's cold-boot lottery is nondeterministic with QEMU TCG's
      * multi-threaded CPUs.  The rest of the RISC-V SMP port translates
      * logical CPU IDs to hardware hart IDs, but keeping a rotated topology
-     * exposed rare, severe wakeup/IRQ-latency regressions in parallel-build when
-     * a non-zero hart won the lottery.  Hand global initialization to hart 0
+     * exposed rare, severe wakeup/IRQ-latency regressions under parallel
+     * compile workloads when a non-zero hart won the lottery.  Hand global initialization to hart 0
      * before touching BSS so QEMU always uses the identity topology.
      *
      * SBI HSM hart_start(0, _start, dtb) is safe here without a stack.  On
