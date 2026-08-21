@@ -181,7 +181,7 @@ static uint16_t __attribute__((unused)) lcd_read_id_dcs(void) {
     return id;
 }
 
-static uint16_t lcd_read_id_hx8357d(void) {
+static __attribute__((unused)) uint16_t lcd_read_id_hx8357d(void) {
     lcd_write_cmd(0xD0);
     (void)lcd_read_data();
     return lcd_read_data() & 0xFFU;
@@ -1007,7 +1007,7 @@ static void __attribute__((unused)) lcd_init_ili9481(void) {
     delay_ms(30);
 }
 
-static void lcd_init_hx8357d(void) {
+static __attribute__((unused)) void lcd_init_hx8357d(void) {
     static const uint8_t gamma[] = {
         0x0B, 0x11, 0x1E, 0x30, 0x3A, 0x43, 0x4E, 0x56,
         0x45, 0x3F, 0x39, 0x32, 0x2F, 0x2A, 0x29, 0x21,
@@ -1155,7 +1155,7 @@ static void __attribute__((unused)) lcd_init_ili9325(void) {
     lcd_write_cmd(0x07); lcd_write_data(0x0133);
 }
 
-static void lcd_gpio_fsmc_init(void) {
+static __attribute__((unused)) void lcd_gpio_fsmc_init(void) {
     RCC_APB2ENR |= (1U << 3) | (1U << 5) | (1U << 6) | (1U << 8);
     RCC_AHBENR |= 1U << 8;
 

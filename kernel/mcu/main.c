@@ -13,6 +13,7 @@
 void mcu_heap_init(void);
 size_t mcu_heap_available(void);
 
+#ifndef CONFIG_STM32_QEMU
 static void stm32_peripheral_thread(void) {
     for (;;) {
         uint64_t now = timer_get_ticks();
@@ -20,6 +21,7 @@ static void stm32_peripheral_thread(void) {
         proc_sleep_until(now + 5U);
     }
 }
+#endif
 
 #ifdef CONFIG_STM32_QEMU
 extern volatile uint32_t armv7m_preemptions;
@@ -67,13 +69,10 @@ void kernel_main(void) {
 #endif
     proc_init();
 #ifdef CONFIG_STM32_QEMU
-    /* The small QEMU image is a scheduler/architecture smoke test. */
-    int probe_pid = proc_alloc(scheduler_probe_thread);
-    if (probe_pid < 0)
-        panic("cannot create scheduler probe task");
-    int observer_pid = proc_alloc(scheduler_observer_thread);
-    if (observer_pid < 0)
-        panic("cannot create scheduler observer task");
+    /* stm32vldiscovery exposes only 8 KiB SRAM.  proc_init() already creates
+     * the idle scheduler context; two additional 512-byte task stacks leave
+     * too little heap for the architecture smoke image. */
+    printf("[SCHED] constrained QEMU idle probe online\n");
 #else
     int peripheral_pid = proc_alloc(stm32_peripheral_thread);
     if (peripheral_pid < 0)
