@@ -702,7 +702,7 @@ static int exec_install_process(task_t *t,
 
     if (!t->trap_ctx) {
         uint64_t ks_top = saved_kernel_sp;
-        trap_context_t *trap = (trap_context_t *)(ks_top - sizeof(trap_context_t));
+        trap_context_t *trap = (trap_context_t *)(uintptr_t)(ks_top - sizeof(trap_context_t));
         /*
          * Ask the architecture where the initial task_context_t belongs.
          * x86_64 keeps it at the bottom of the kernel stack; the other arches
@@ -711,14 +711,14 @@ static int exec_install_process(task_t *t,
         task_context_t *new_ctx  = arch_task_context_base(t->kstack_base, ks_top, trap);
         memset(new_ctx, 0, sizeof(*new_ctx));
         t->first_kernel_entry = (uintptr_t)user_trap_return;
-        new_ctx->ra = (uint64_t)proc_task_first_entry;
+        new_ctx->ra = (uint64_t)(uintptr_t)proc_task_first_entry;
         new_ctx->tp = (uint64_t)(uintptr_t)t;
         arch_task_context_set_user_tp(new_ctx, info->tls_tp);
         TASK_CTX_STATUS(new_ctx) = arch_task_user_resume_status();
         TASK_CTX_PAGE_TABLE(new_ctx) = user_as;
         arch_task_context_set_initial_sp(new_ctx, trap, ks_top);
         t->trap_ctx = trap;
-        t->kstack   = (uint64_t)new_ctx;
+        t->kstack   = (uint64_t)(uintptr_t)new_ctx;
     }
 
     {

@@ -59,7 +59,7 @@ extern uint8_t a20_ht_get_label(struct a20_ht_internal *ht);
 
 int64_t sys_a20_pager_create(const a20_syscall_args_t *args)
 {
-    a20_pager_create_args_t *uargs = (a20_pager_create_args_t *)A20_ARG(0);
+    a20_pager_create_args_t *uargs = (a20_pager_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_pager_create_args_t kargs;
@@ -118,7 +118,7 @@ int64_t sys_a20_pager_create(const a20_syscall_args_t *args)
 
 int64_t sys_a20_pager_vmo_attach(const a20_syscall_args_t *args)
 {
-    a20_pager_vmo_args_t *uargs = (a20_pager_vmo_args_t *)A20_ARG(0);
+    a20_pager_vmo_args_t *uargs = (a20_pager_vmo_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_pager_vmo_args_t kargs;
@@ -149,7 +149,7 @@ int64_t sys_a20_pager_vmo_attach(const a20_syscall_args_t *args)
 
 int64_t sys_a20_pager_supply_pages(const a20_syscall_args_t *args)
 {
-    a20_pager_supply_args_t *uargs = (a20_pager_supply_args_t *)A20_ARG(0);
+    a20_pager_supply_args_t *uargs = (a20_pager_supply_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_pager_supply_args_t kargs;
@@ -201,7 +201,7 @@ int64_t sys_a20_pager_supply_pages(const a20_syscall_args_t *args)
 
 int64_t sys_a20_monitor_create(const a20_syscall_args_t *args)
 {
-    a20_monitor_create_args_t *uargs = (a20_monitor_create_args_t *)A20_ARG(0);
+    a20_monitor_create_args_t *uargs = (a20_monitor_create_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_monitor_create_args_t kargs;
@@ -280,7 +280,7 @@ int64_t sys_a20_monitor_query(const a20_syscall_args_t *args)
     val.time_active_ns = now_ns >= mon->time_start_ns
                              ? now_ns - mon->time_start_ns : 0;
     val.prev = mon->last_sample;
-    if (copy_to_user((void *)out_ptr, &val, sizeof(val)) < 0)
+    if (copy_to_user((void *)(uintptr_t)out_ptr, &val, sizeof(val)) < 0)
         return -A20_ERR_FAULT;
     return A20_OK;
 }
@@ -289,7 +289,7 @@ int64_t sys_a20_monitor_query(const a20_syscall_args_t *args)
 
 static int64_t a20_task_mem_rw(const a20_syscall_args_t *args, int write)
 {
-    a20_task_mem_args_t *uargs = (a20_task_mem_args_t *)A20_ARG(0);
+    a20_task_mem_args_t *uargs = (a20_task_mem_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_task_mem_args_t kargs;
@@ -322,9 +322,9 @@ static int64_t a20_task_mem_rw(const a20_syscall_args_t *args, int write)
 
     a20_iovec_t liov[64];
     a20_iovec_t riov[64];
-    if (copy_from_user(liov, (const void *)kargs.local_iov,
+    if (copy_from_user(liov, (const void *)(uintptr_t)kargs.local_iov,
                        kargs.local_iov_count * sizeof(a20_iovec_t)) < 0 ||
-        copy_from_user(riov, (const void *)kargs.remote_iov,
+        copy_from_user(riov, (const void *)(uintptr_t)kargs.remote_iov,
                        kargs.remote_iov_count * sizeof(a20_iovec_t)) < 0) {
         proc_put(target);
         return -A20_ERR_FAULT;
@@ -357,16 +357,16 @@ static int64_t a20_task_mem_rw(const a20_syscall_args_t *args, int write)
             uint64_t rva = riov[i].base + done;
 
             if (write) {
-                if (copy_from_user(kbuf, (const void *)lva, chunk) < 0)
+                if (copy_from_user(kbuf, (const void *)(uintptr_t)lva, chunk) < 0)
                     break;
-                if (process_vm_write_kernel(target, (void *)rva, kbuf,
+                if (process_vm_write_kernel(target, (void *)(uintptr_t)rva, kbuf,
                                             chunk) < 0)
                     break;
             } else {
-                if (process_vm_read_kernel(target, (const void *)rva, kbuf,
+                if (process_vm_read_kernel(target, (const void *)(uintptr_t)rva, kbuf,
                                            chunk) < 0)
                     break;
-                if (copy_to_user((void *)lva, kbuf, chunk) < 0)
+                if (copy_to_user((void *)(uintptr_t)lva, kbuf, chunk) < 0)
                     break;
             }
             done += chunk;

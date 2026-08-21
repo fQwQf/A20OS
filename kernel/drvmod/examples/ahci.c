@@ -9,7 +9,14 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2829));
 
 #undef DRIVER_REGISTER
-#define DRIVER_REGISTER(drv) \
-    uintptr_t DriverEntry(void) { return (uintptr_t)drv_driver_register(&(drv)); }
+#define DRIVER_REGISTER(drv)
 
 #include "../../drivers/block/ahci.c"
+
+uintptr_t DriverEntry(void)
+{
+    int ret = drv_driver_register(&ahci_driver);
+    if (ret < 0)
+        return (uintptr_t)ret;
+    return (uintptr_t)drv_driver_register(&ahci_platform_driver);
+}

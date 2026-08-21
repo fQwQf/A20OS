@@ -401,7 +401,7 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
 }
 
 void virtio_blk_poll_all(void) {
-    for (int i = 0; i < g_ninst; i++)
+    for (int i = 0; i < g_ninst && i < VIRTIO_MAX_DEVS; i++)
         virtio_blk_poll_inst(&g_insts[i]);
 }
 

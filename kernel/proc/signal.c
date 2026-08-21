@@ -201,7 +201,8 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     if (!t || !t->signals)
         return -EINVAL;
 
-#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
+#if (defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)) && \
+    !defined(CONFIG_MCU)
     /* Native tasks observe signals through the handle-table checkpoint set
      * (sys_a20_signal_check); their handlers live in the libc (mlibc), not
      * in the kernel signal state.  Pend into the checkpoint set FIRST so the
@@ -732,7 +733,7 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         if ((action.sa_flags & SA_ONSTACK) &&
             t->sigaltstack.ss_flags == 0 &&
-            t->sigaltstack.ss_sp != NULL &&
+            t->sigaltstack.ss_sp != 0 &&
             t->sigaltstack.ss_size >= MINSIGSTKSZ) {
             sp = (uintptr_t)t->sigaltstack.ss_sp + t->sigaltstack.ss_size;
         }
@@ -755,10 +756,10 @@ void signal_deliver_user(trap_context_t *ctx) {
         uint64_t tramp_addr = sp + arch_sigframe_tramp_offset();
         arch_signal_prepare_frame(&frame, tramp_addr, ctx);
 
-        if (copy_to_user((void *)sp, &frame, sizeof(frame)) < 0)
+        if (copy_to_user((void *)(uintptr_t)sp, &frame, sizeof(frame)) < 0)
             proc_exit_group(-signal_wait_status(SIGSEGV));
 
-        if (copy_to_user((void *)tramp_addr, tramp, sizeof(tramp)) < 0)
+        if (copy_to_user((void *)(uintptr_t)tramp_addr, tramp, sizeof(tramp)) < 0)
             proc_exit_group(-signal_wait_status(SIGSEGV));
 
         signal_make_page_exec(tramp_addr);
@@ -782,7 +783,7 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
 
     uint64_t sp = TRAP_CTX_SP(ctx);
     arch_sig_rt_frame_t frame;
-    if (copy_from_user(&frame, (void *)sp, sizeof(frame)) < 0)
+    if (copy_from_user(&frame, (void *)(uintptr_t)sp, sizeof(frame)) < 0)
         return -EFAULT;
 
     signal_state_t *ss = (signal_state_t *)t->signals;

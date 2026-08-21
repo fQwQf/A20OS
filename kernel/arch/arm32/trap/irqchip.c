@@ -78,7 +78,7 @@ static void handle_timer_irq(int from_user) {
 }
 
 void trap_init(void) {
-    arch_write_tvec((uint64_t)arm32_vector_table);
+    arch_write_tvec((uint64_t)(uintptr_t)arm32_vector_table);
     gic_init();
 }
 
