@@ -463,6 +463,7 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     static uint8_t payload[UFS_MAX_PAYLOAD];
     uint32_t plen = 0;
 
+    /* cookie 语义：已消费的目录项条数。服务端跳过 arg0 项后继续返回。 */
     uxfs_req_init(fc->sb, &req, UFS_OP_READDIR, fc->ino, fc->off, count,
                   NULL, 0);
     int rc = uxfs_rpc(fc->sb, &req, NULL, NULL, &resp, payload,
@@ -475,7 +476,7 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     char *out = (char *)dirp;
     size_t total = 0;
     uint32_t i = 0;
-    uint64_t last_cookie = fc->off;
+    uint64_t ordinal = fc->off;
     while (i + 10 <= plen) {
         uint64_t ino;
         memcpy(&ino, payload + i, 8);
@@ -494,18 +495,18 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 
         vfs_dirent64_t *dent = (vfs_dirent64_t *)(out + total);
         dent->d_ino    = ino;
-        dent->d_off    = (int64_t)i; /* 该项消费完的载荷位置 = 下一 cookie */
+        dent->d_off    = (int64_t)(ordinal + 1); /* 已消费条目数 = 下一 cookie */
         dent->d_reclen = (uint16_t)reclen;
         dent->d_type   = (type == UFS_FT_DIR) ? 4 :
                          (type == UFS_FT_SYMLINK) ? 10 : 8; /* DT_* */
         memcpy(dent->d_name, nm, nlen);
         dent->d_name[nlen] = '\0';
         total += reclen;
-        last_cookie = i;
+        ordinal++;
     }
 
     if (total > 0)
-        fc->off = last_cookie; /* 目录耗尽或缓冲满：推进到已消费位置 */
+        fc->off = ordinal; /* 目录耗尽或调用缓冲满：推进到已消费位置 */
     vf->offset = fc->off;
     return (int)total;
 }
@@ -610,16 +611,12 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     sb->next_req_id = 0;
     mutex_init(&sb->req_lock);
 
-    /* INIT 握手：确认服务真实可用，同时取回根节点身份。 */
-    ufs_req_hdr_t req;
-    ufs_resp_hdr_t resp;
-    uxfs_req_init(sb, &req, UFS_OP_INIT, 0, UFS_PROTO_VERSION, 0, NULL, 0);
-    int rc = uxfs_rpc(sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc != 0) {
-        sb->ep = NULL;
-        return rc;
-    }
-    uint64_t root_ino = resp.out0 ? resp.out0 : UFS_ROOT_INO;
+    /*
+     * 无同步握手：fs_serve 的调用方就是服务进程自身，若在此阻塞等待
+     * INIT 应答会自我死锁。活跃性由第一个真实文件操作验证；服务死亡时
+     * channel 断链使请求以 -EIO 收场。
+     */
+    uint64_t root_ino = UFS_ROOT_INO;
 
     vnode_t *root = uxfs_make_vnode(sb, root_ino, VFS_FT_DIR,
                                     (S_IFDIR | 0755), 0, NULL);
