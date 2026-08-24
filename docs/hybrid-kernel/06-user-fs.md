@@ -37,13 +37,14 @@
 - 注册 syscall `fs_serve(target_path, server_endpoint, block_index)`：
   1. 校验 endpoint 为 CHANNEL_ENDPOINT 句柄且具备 READ|WRITE 权限；
   2. 解析 block_index 对应 `block_dev_t` 并记录服务任务所有权；
-  3. 发送 `UFS_OP_INIT` 握手取得根 ino 后完成挂载。
+  3. 完成挂载。无同步握手——调用方就是服务进程自身，阻塞等 INIT 会自我死锁；活跃性由首个真实文件操作验证。
 - vnode 操作（lookup/create/mkdir/unlink/rmdir/stat/truncate/read/write/readdir/statfs/sync）翻译为 ufs 协议消息；数据内联传输（≤ UFS_MAX_PAYLOAD）。
 - 服务死亡时 channel 断链使在飞请求返回 `-EIO`；svcmgr 重启 ufsd 后需重新挂载（与 ubd_recover 的重挂载语义一致）。
 
 ## 已知边界
 
 - 8.3 短名（fat32lite 语义），单线程服务循环；
+- rmdir 与非零长度 truncate 未支持（fat32lite 无对应原语，返回 ENOSYS）；
 - uxfs 文件读写当前不接入内核页缓存（直通转发）；接入 readpage/writepage 缓存路径是后续工作；
 - 每次 ufsd 重启需要显式重新挂载，无自动重绑；
 - 单挂载点、单服务实例。
