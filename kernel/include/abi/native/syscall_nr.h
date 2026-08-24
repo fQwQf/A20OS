@@ -84,6 +84,8 @@
 #define A20_SYS_path_link_at      0x0413
 #define A20_SYS_path_symlink_at   0x0414
 #define A20_SYS_path_readlink_at  0x0415
+#define A20_SYS_fs_serve          0x0416
+#define A20_SYS_fs_block_io       0x0417
 
 /* Event / IPC (0x0500) */
 #define A20_SYS_event_queue_create 0x0500
