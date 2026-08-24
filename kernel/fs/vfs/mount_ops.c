@@ -375,6 +375,9 @@ int vfs_umount(const char *path) {
                 ntfs_unmount(root);
             } else if (mnt->type == FS_TYPE_ISOFS) {
                 isofs_unmount(root);
+            } else if (mnt->type == FS_TYPE_UXFS) {
+                extern void uxfs_unmount(struct vnode *root);
+                uxfs_unmount(root);
             }
             vfs_mount_remove(mnt);
             return 0;

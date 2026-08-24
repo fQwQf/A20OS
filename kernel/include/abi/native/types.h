@@ -600,6 +600,30 @@ typedef struct a20_fs_mount_args {
     uint32_t       flags;
 } a20_fs_mount_args_t;
 
+/* fs_serve：把调用方的一个 channel 端点注册为挂载点的用户态文件服务
+ * （docs/hybrid-kernel/06-user-fs.md）。block_index < 0 表示无块后端。 */
+typedef struct a20_fs_serve_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   server_channel;  /* A20_OBJ_CHANNEL_ENDPOINT, R|W */
+    int32_t        block_index;     /* DEV_CLASS_BLOCK 序号 */
+    uint64_t       target;
+    uint32_t       target_len;
+    uint32_t       flags;
+} a20_fs_serve_args_t;
+
+/* fs_block_io：uxfs 服务任务的受控块 IO（扇区粒度，同步直通块层）。 */
+typedef struct a20_fs_block_io_args {
+    uint32_t       size;
+    uint32_t       version;
+    int32_t        block_index;
+    uint32_t       write;           /* 0 = read, 1 = write */
+    uint64_t       lba;
+    uint32_t       count;           /* 扇区数 */
+    uint32_t       _pad;
+    uint64_t       buf;
+} a20_fs_block_io_args_t;
+
 /* ---- IPC/Event structures ---- */
 
 typedef struct a20_event_queue_create_args {
