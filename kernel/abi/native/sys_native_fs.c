@@ -878,6 +878,9 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     int rc = uxfs_block_io(cur, (int)kargs.block_index, (int)kargs.write,
                            kargs.lba, kbuf, kargs.count);
     if (rc < 0) {
+        printf("[UXFS] block_io idx=%d write=%d lba=%llu count=%u rc=%d\n",
+               (int)kargs.block_index, (int)kargs.write,
+               (unsigned long long)kargs.lba, kargs.count, rc);
         kfree(kbuf);
         return -A20_ERR_IO;
     }
