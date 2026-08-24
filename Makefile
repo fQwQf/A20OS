@@ -231,6 +231,7 @@ NATIVE_REGISTRY_BIN    := $(NATIVE_BUILD_DIR)/native-registry-$(NATIVE_TAG)
 NATIVE_SVCMGR_BIN      := $(NATIVE_BUILD_DIR)/svcmgr-$(NATIVE_TAG)
 NATIVE_ISOLATION_BIN   := $(NATIVE_BUILD_DIR)/native-isolation-$(NATIVE_TAG)
 NATIVE_UBDD_BIN        := $(NATIVE_BUILD_DIR)/ubd-$(NATIVE_TAG).a20drv
+NATIVE_UFSD_BIN        := $(NATIVE_BUILD_DIR)/ufsd-$(NATIVE_TAG)
 NATIVE_UINPUTD_BIN     := $(NATIVE_BUILD_DIR)/uinputd-$(NATIVE_TAG).a20drv
 NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
@@ -246,6 +247,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) \
                           $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) \
                           $(NATIVE_UEDUD_BIN) \
+                          $(NATIVE_UFSD_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN)
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id

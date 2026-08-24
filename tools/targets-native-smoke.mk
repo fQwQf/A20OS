@@ -33,6 +33,32 @@ $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h kernel/include/drivers/driver_descriptor.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
 
+# ufsd：用户态 FAT32 文件系统服务；fat32lite 与内核 NOMMU 构建同源编译。
+define NATIVE_UFSD_RECIPE
+@mkdir -p $(dir $(5))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt -Ikernel/include \
+    -T$(NATIVE_LD) \
+    $(3) \
+    $(NATIVE_SDK_SRC) \
+    $(NATIVE_COMPILER_RT_SRC) \
+    $(NATIVE_ARCH_SRC) \
+    user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c \
+    $(NATIVE_LIBS) \
+    -o $(5)
+endef
+
+$(NATIVE_UFSD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c \
+		kernel/include/fs/fat32lite.h kernel/include/fs/ufs_proto.h \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+	$(call NATIVE_UFSD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c,$@)
+
+native-ufsd-arch: $(NATIVE_UFSD_BIN)
+
+native-ufsd-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-ufsd-arch
+
 $(NATIVE_UINPUTD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/uinputd.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
 		kernel/include/drivers/driver_descriptor.h kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/virtio_mmio.h kernel/include/drivers/dual/virtio_input.h kernel/include/drivers/dual/virtq.h
@@ -105,6 +131,43 @@ $(UBD_SCRATCH_IMG): $(UBD_SCRATCH_BIG)
 	$(MKFS_FAT) -F 32 $@; \
 	printf 'A20OS-UBD-MARKER' | dd of=$@ bs=1 seek=4096 conv=notrunc 2>/dev/null; \
 	mcopy -o -i $@ $(UBD_SCRATCH_BIG) ::/big.bin
+
+UFS_SCRATCH_IMG := $(BUILD_DIR)/ufs-scratch.img
+
+$(UFS_SCRATCH_IMG): FORCE
+	@rm -f $@; \
+	dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null; \
+	$(MKFS_FAT) -F 32 $@; \
+	printf 'hello-uxfs\n' | mcopy -o -i $@ - ::/hello.txt
+
+# smoke-native-ufs：文件系统实现运行在用户态服务（ufsd）的端到端门禁。
+# 第二块盘挂在空闲槽位 bus.2（bus.3/bus.5 已预留给 ubd/uinputd），
+# DEV_CLASS_BLOCK 序号 1 由 ufsd 经 fs_block_io 访问；FAT32 解析全部发生
+# 在 ufsd 进程内，内核仅保留 VFS 代理。
+smoke-native-ufs:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG)
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-ufs-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ufs_test\npoweroff\n'; } | \
+	$(TIMEOUT) 120s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=$(UFS_SCRATCH_IMG),if=none,format=raw,id=xufs \
+		-device virtio-blk-device,drive=xufs,bus=virtio-mmio-bus.2 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'UXFS_FS: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-ufs: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-ufs: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-dual-input:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
