@@ -19,11 +19,13 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 │ 用户态服务层（可崩溃、可重启）                        │
 │  svcmgr（监管） echod  rtcd（RTC） ubd（virtio-blk） │
 │  uinputd（virtio-input） shmringd/chand              │
+│  ufsd（FAT32 文件系统，经内核 uxfs 代理挂载）          │
 ├────────────────────────────────────────────────────┤
 │ 混合内核层（性能关键路径）                            │
 │  EEVDF 调度 / MM(VMO·VMAR·缺页) / VFS 核心 / 页缓存   │
 │  Channel·EventQ IPC / 驱动框架·中断分发·MMIO 授权     │
 │  内核态驱动（lwIP 网络、virtio-blk 数据面）           │
+│  uxfs 代理 FS（vnode ops ↔ ufsd 的薄转发层）          │
 ├────────────────────────────────────────────────────┤
 │ 兼容层                                               │
 │  Linux ABI(361 syscall) + vDSO 快路径                 │
@@ -117,3 +119,7 @@ vDSO（`clock_gettime`/`gettimeofday`/`getcpu`，与内核 timekeeping 位级一
 - `channel_fd`（`kernel/ipc/channel_fd.c`）：把 channel 端点包装成 fd（`read/write/poll/close`），Linux 程序经 `SYS_a20_channel_pair`（编号 900）与服务注册表 `SYS_a20_registry_client`（编号 901）使用同一 channel 机制；
 - `eventfd`/`signalfd`/`timerfd`/`sysv_sem`/`sysv_shm`（`kernel/ipc/`）：ABI 无关的 vfile 后端，Linux 的 `eventfd2/signalfd4/timerfd_*/sem*/shm*` 建立在其上；
 - 因此两套 ABI 共享同一套对象/等待/IPC 底座，Linux 侧只是线格式翻译。
+
+### 用户态文件系统服务（uxfs + ufsd）
+
+文件系统实现同样可以迁出内核：内核侧 `uxfs`（`kernel/fs/uxfs/`，fstype `"uxfs"`）把 vnode 操作翻译为 ufs 协议消息经 Channel 转发，用户态 `ufsd` 服务持有全部 FAT32 逻辑（同源复用 fat32lite.c），块 IO 经受控的 `fs_serve`/`fs_block_io` syscall 进入内核块层——只有注册挂载的服务任务可以访问其声明的块设备。服务崩溃后在飞请求以 `-EIO` 收场，重启后重新挂载。设计与边界见 [06-user-fs.md](06-user-fs.md)。
