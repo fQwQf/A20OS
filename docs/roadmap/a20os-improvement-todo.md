@@ -27,7 +27,8 @@
 
 已落地：uxfs 内核代理 + ufsd 多人格宿主（fat/ext4 读写、iso9660/ntfs 只读）、svcmgr argv 清单托管、SIGKILL 恢复演练（`smoke-native-fs-all`）。设计见 [../hybrid-kernel/06-user-fs.md](../hybrid-kernel/06-user-fs.md)。
 
-- [ ] ufsd 监管通道接入 EventQ 统一等待，替换 200µs 轮询。
+- [x] ufsd 监管通道接入 EventQ 统一等待，替换 200µs 轮询。
+  - 源码证据：`user/svc/ufsd.c` 的服务循环把 fs 通道（MESSAGE_READY/PEER_CLOSED）与监管 ping 槽位挂到同一 EventQ，空闲时阻塞在 `event_wait`，先排空后等待的顺序保留"watch 注册前已发布消息也要处理"的契约；ping 槽位未安装的启动方式（如 fs-all 冒烟里的多实例）降级为仅 fs 通道唤醒，与 rtcd 的 `have_ping` 先例一致。`make smoke-native-fs-all`、`smoke-native-svc`、`smoke-native-registry` 在 riscv64 PASS（当前提交）。
 - [ ] uxfs 文件读写接入内核页缓存（readpage/writepage 缓存路径），替代直通转发。
 - [ ] ntfs 写使能：先为内核 ntfs 写路径补齐在库正确性测试（当前全仓库零覆盖），再打开 ufsd ntfs 后端读写。
 - [ ] 托管设备序号的板级配置化：清单中 ufsd 的 block_index 目前是编译期约定，VF2/LS2K1000 等实机枚举不同。
