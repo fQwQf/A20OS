@@ -27,7 +27,7 @@
 | 用户态驱动框架（MMIO 授权 + IRQ→EventQ） | 已实现 | goldfish RTC 整体用户态化，`smoke-native-rtcd` |
 | virtio-blk 用户态驱动（零拷贝 DMA） | 已实现 | FAT32 挂载 `/ubd`，`smoke-native-ubd` |
 | 驱动崩溃恢复（在飞请求失败传导 + 重挂载） | 已实现 | `ubd_recover` |
-| 用户态文件系统宿主（uxfs 代理 + ufsd 多后端：fat/ext4/iso9660/ntfs 只读） | 已实现源码与入口 | 四后端端到端，`smoke-native-fs-all`；单格式回归 `smoke-native-ufs` |
+| 用户态文件系统宿主（uxfs 代理 + ufsd 多后端：fat/ext4/iso9660/ntfs 只读） | 已实现源码与入口 | 四后端端到端 + svcmgr 托管 + SIGKILL 恢复演练，`smoke-native-fs-all`；单格式回归 `smoke-native-ufs` |
 | Linux ABI 透明获益（vDSO、唤醒快路径、AF_UNIX 桥接） | 已实现 | `smoke-clock-vdso` + unix 测试 |
 | TCP/IP 协议栈（内核态 lwIP 单一实现） | 已实现 | lwIP 源码位于 `kernel/external/lwip`，由内核 `kernel/net` 编译；`smoke-network-suite` |
 | 统一等待对象层（futex/EventQ/channel/pipe/socket/mutex 共用 `wait_queue_t`） | 已实现 | futex 迁移到共享 `wait_queue_t`（谓词匹配/requeue/purge），`smoke-futex-stress`、`smoke-sched-stress` |

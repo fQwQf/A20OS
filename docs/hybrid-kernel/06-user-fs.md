@@ -46,7 +46,9 @@
   2. 解析 block_index 对应 `block_dev_t` 并记录服务任务所有权；
   3. 完成挂载。无同步握手——调用方就是服务进程自身，阻塞等 INIT 会自我死锁；活跃性由首个真实文件操作验证。
 - vnode 操作（lookup/create/mkdir/unlink/rmdir/stat/truncate/read/write/readdir/statfs/sync）翻译为 ufs 协议消息；数据内联传输（≤ UFS_MAX_PAYLOAD）。
-- 服务死亡时 channel 断链使在飞请求返回 `-EIO`；重新拉起 ufsd 后需重新挂载（与 ubd_recover 的重挂载语义一致）。当前由使用方（如测试进程）负责拉起；svcmgr 清单化托管是后续工作。
+- 服务死亡时 channel 断链使在飞请求返回 `-EIO`；重新拉起后需重新挂载（与 ubd_recover 的重挂载语义一致）。
+- **svcmgr 托管已接入**：清单项 `ufsd args="/ufs 1 fat"`，spawn 支持 argv；ufsd 应答 IDL echo 健康探针；目标块设备缺失时卸载挂载并以 0 干净退出（监管者不计入重启预算）。崩溃恢复由 `smoke-native-fs-all` 的 UXFS_RESTART 段实测：SIGKILL → umount2 → 重启实例 → 数据持久。
+- umount 通知路径：内核侧 uxfs_unmount 经 `a20_channel_ep_peer_shutdown` 单向置对端 peer_closed 并唤醒，服务 recv 随即出错退出，不产生僵尸实例。
 
 ## 已知边界
 
