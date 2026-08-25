@@ -377,6 +377,76 @@ smoke-abi-linux:
 		exit 1; \
 	fi
 
+smoke-envelope:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/envelope-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_smoke\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+		if grep -q 'ENVELOPE_SMOKE: PASS' "$$log"; then \
+			echo "smoke-envelope: PASS; log saved to $$log"; \
+		else \
+			echo "smoke-envelope: failed with status $$status; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit 1; \
+		fi
+
+smoke-envelope-pilot:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/envelope-pilot-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_pilot\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE_PILOT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+		if grep -q 'ENVELOPE_PILOT: PASS' "$$log"; then \
+			echo "smoke-envelope-pilot: PASS; log saved to $$log"; \
+		else \
+			echo "smoke-envelope-pilot: failed with status $$status; tail of $$log:"; \
+			tail -n 80 "$$log"; \
+			exit 1; \
+		fi
+
+smoke-envelope-bench:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/envelope-bench-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_bench\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE_BENCH) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+		if grep -q 'ENVELOPE_BENCH: PASS' "$$log"; then \
+			echo "smoke-envelope-bench: PASS; log saved to $$log"; \
+			grep 'ENVELOPE_BENCH:' "$$log"; \
+		else \
+			echo "smoke-envelope-bench: failed with status $$status; tail of $$log:"; \
+			tail -n 60 "$$log"; \
+			exit 1; \
+		fi
+
 smoke-a20-channel:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
