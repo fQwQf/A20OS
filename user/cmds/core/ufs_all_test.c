@@ -22,6 +22,10 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/mount.h>
 
 static int fail(const char *tag, const char *why)
 {
@@ -29,14 +33,14 @@ static int fail(const char *tag, const char *why)
     return 1;
 }
 
-static void spawn_ufsd(const char *mp, const char *idx, const char *fstype)
+static pid_t spawn_ufsd(const char *mp, const char *idx, const char *fstype)
 {
     pid_t pid = fork();
     if (pid == 0) {
         execl("/bin/ufsd-rv", "ufsd-rv", mp, idx, fstype, (char *)0);
         _exit(90);
     }
-    (void)pid;
+    return pid;
 }
 
 static int wait_path(const char *path, int tries)
@@ -96,7 +100,9 @@ static int roundtrip(const char *tag, const char *dir, const char *name)
 static int test_fat(void)
 {
     const char *tag = "UXFS_FAT";
-    spawn_ufsd("/ufs", "1", "fat");
+    struct stat st0;
+    if (stat("/ufs/HELLO.TXT", &st0) != 0)
+        spawn_ufsd("/ufs", "1", "fat"); /* svcmgr 未托管时兜底自拉起 */
     if (wait_path("/ufs/HELLO.TXT", 500))
         return fail(tag, "/ufs not visible");
 
@@ -212,6 +218,54 @@ static int test_ntfs(void)
     return 0;
 }
 
+/* 崩溃恢复演练：独立挂载点 /ufs2 上验证"杀实例 -> 卸载 -> 重启 ->
+ * 数据持久"的完整契约（06-user-fs.md 的恢复语义实测）。 */
+static int test_restart(void)
+{
+    const char *tag = "UXFS_RESTART";
+    const char *mrk = "/ufs2/RESTART.MRK";
+
+    pid_t a = spawn_ufsd("/ufs2", "1", "fat");
+    if (wait_path(mrk ? "/ufs2" : mrk, 500))
+        return fail(tag, "/ufs2 first instance not visible");
+
+    int fd = open(mrk, O_CREAT | O_WRONLY, 0644);
+    if (fd < 0)
+        return fail(tag, "create marker");
+    if (write(fd, "survive-restart\n", 16) != 16) {
+        close(fd);
+        return fail(tag, "marker write");
+    }
+    close(fd);
+
+    /* 模拟崩溃：SIGKILL 实例 A 并回收 */
+    kill(a, SIGKILL);
+    waitpid(a, NULL, 0);
+
+    /* 内核侧挂载仍指向已死通道：先卸载才能重新注册 */
+    if (umount2("/ufs2", 0) != 0)
+        return fail(tag, "umount after crash");
+
+    pid_t b = spawn_ufsd("/ufs2", "1", "fat");
+    (void)b;
+    if (wait_path(mrk, 500))
+        return fail(tag, "instance B not visible");
+
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    int fd2 = open(mrk, O_RDONLY);
+    if (fd2 < 0)
+        return fail(tag, "marker reopen");
+    ssize_t n = read(fd2, buf, sizeof(buf) - 1);
+    close(fd2);
+    if (n != 16 || strcmp(buf, "survive-restart\n") != 0)
+        return fail(tag, "marker content lost across restart");
+
+    unlink(mrk);
+    printf("%s: PASS\n", tag);
+    return 0;
+}
+
 int main(void)
 {
     if (test_fat())
@@ -221,6 +275,8 @@ int main(void)
     if (test_iso())
         return 1;
     if (test_ntfs())
+        return 1;
+    if (test_restart())
         return 1;
     printf("UXFS_ALL: PASS\n");
     return 0;
