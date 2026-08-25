@@ -182,7 +182,7 @@ smoke-native-fs-all:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-fs-all-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ufs_all_test\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/svcmgr-rv &\nsleep 2\n/bin/ufs_all_test\npoweroff\n'; } | \
 	$(TIMEOUT) 180s qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
