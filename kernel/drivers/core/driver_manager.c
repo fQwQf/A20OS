@@ -34,8 +34,9 @@
 #include "drvmod/drvmod.h"
 
 #ifdef CONFIG_ABI_NATIVE
-#include "abi/native/types.h"
-#include "abi/native/rights.h"
+/* Layering contract: core modules include internal IPC headers directly;
+ * abi/native/types.h and rights.h are mere re-export shims of ipc/ipc.h. */
+#include "ipc/ipc.h"
 #include "ipc/handle_table.h"
 #endif
 
