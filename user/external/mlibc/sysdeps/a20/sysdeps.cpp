@@ -93,12 +93,45 @@ static void fd_table_init() {
 			for (int i = 0; i < g_fd_count; i++)
 				table[i].handle = A20_HANDLE_NULL;
 			if (__a20_start_info) {
-				table[0].handle = __a20_start_info->stdin_handle;
-				table[0].flags = O_RDONLY;
-				table[1].handle = __a20_start_info->stdout_handle;
-				table[1].flags = O_WRONLY;
-				table[2].handle = __a20_start_info->stderr_handle;
-				table[2].flags = O_WRONLY;
+				/* Stdio handles may be plain files/devices or channel
+				 * endpoints (pipes survive execve via task_adopt).
+				 * Query each so kind matches reality; otherwise reads
+				 * on an inherited pipe would hit handle_read with a
+				 * non-vfile object and fail with EBADF. */
+				a20_handle_t stdio[3] = {
+					__a20_start_info->stdin_handle,
+					__a20_start_info->stdout_handle,
+					__a20_start_info->stderr_handle,
+				};
+				for (int i = 0; i < 3; i++) {
+					a20_handle_t h = stdio[i];
+					if (h == A20_HANDLE_NULL)
+						continue;
+					table[i].handle = h;
+					table[i].flags = (i == 0) ? O_RDONLY : O_WRONLY;
+					/* Refine kind/flags when the handle carries STAT.
+					 * Pipes are channel endpoints and must keep their
+					 * kind across execve; classifying them as vfiles
+					 * would route reads through handle_read on a
+					 * non-vfile object and fail with EBADF.  Handles
+					 * without STAT (e.g. console fd service grants)
+					 * keep the conservative defaults above. */
+					a20_handle_info info{};
+					info.size = sizeof(info);
+					info.version = 1;
+					if (a20_syscall6(A20_SYS_handle_query, h,
+					                  (uint64_t)&info, 0, 0, 0, 0) < 0)
+						continue;
+					if ((info.rights & (A20_RIGHT_READ | A20_RIGHT_WRITE)) ==
+					    (A20_RIGHT_READ | A20_RIGHT_WRITE))
+						table[i].flags = O_RDWR;
+					else if (i > 0 && (info.rights & A20_RIGHT_WRITE))
+						table[i].flags = O_WRONLY;
+					else if (info.rights & A20_RIGHT_READ)
+						table[i].flags = O_RDONLY;
+					table[i].kind =
+					    info.object_type == A20_OBJ_CHANNEL_ENDPOINT ? 1 : 0;
+				}
 
 				/* task_spawn places explicit non-stdio file actions in a
 				 * reserved Native handle range.  Reconstruct the POSIX fd
@@ -538,11 +571,17 @@ static void a20_sig_default(int sig) {
 	case SIGILL:
 	case SIGFPE:
 	case SIGTRAP:
+	case SIGALRM:
+	case SIGPROF:
+	case SIGVTALRM:
+	case SIGIO: /* same value as SIGPOLL */
+	case SIGXCPU:
+	case SIGXFSZ:
 		/* Terminate with 128+sig (shell convention). */
 		a20_syscall6(A20_SYS_task_exit, (uint64_t)(128 + sig), 0, 0, 0, 0, 0);
 		break;
 	default:
-		/* SIGCHLD, SIGURG, SIGCONT, SIGTSTP etc.: ignore. */
+		/* SIGCHLD, SIGURG, SIGCONT etc.: ignore. */
 		break;
 	}
 }
@@ -1048,6 +1087,8 @@ int Sysdeps<Writev>::operator()(int fd, const struct iovec *iovs, int iovc, ssiz
 }
 
 int Sysdeps<Seek>::operator()(int fd, off_t offset, int whence, off_t *new_offset) {
+	if (fd >= 0 && fd < kPipeFdSlots && fd_kind(fd) == 1)
+		return ESPIPE;
 	return a20_seek(fd, offset, whence, new_offset);
 }
 
