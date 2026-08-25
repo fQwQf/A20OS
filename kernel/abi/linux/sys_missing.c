@@ -24,10 +24,12 @@
 #include "sys/usercopy.h"
 
 /*
- * Linux syscalls completed in the "finish the Linux ABI" work: small
- * compatibility and cross-process helpers that have a thin ABI wrapper and
- * delegate to the common layer (mm/process_vm.c, fs/page_cache.c) or to
- * existing process/VFS primitives.
+ * Linux syscalls that were last to land in the ABI: each entry here now
+ * carries real semantics (restart-block replay, exact kcmp mapping with
+ * epoll membership, windowed cachestat, dcookie registry, quota core,
+ * remap_file_pages rebinding, owner-scoped memfd_secret, live rseq
+ * publication, cBPF seccomp, staged kexec images and CET shadow-stack
+ * allocation) delegating to their kernel subsystems.
  */
 
 int64_t sys_restart_syscall(void)
