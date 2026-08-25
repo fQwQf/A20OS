@@ -47,8 +47,7 @@
 
 ### 2.3 模块 3：Park/Wake 无丢失唤醒（工程正确性基础）
 
-建模：tokenized Park/Wake（wait_seq、PREPARING/PARKED/WOKEN 状态机、timer heap）。
-这一条来自 `docs/roadmap/park-wake-protocol-split.md` 的工程不变量，是"Native 阻塞 IPC 正确性"的前提，也是双 ABI 共享的基础。
+建模：tokenized Park/Wake（wait_seq、PREPARING/PARKED/WOKEN 状态机、timer heap）。 这一条来自 `docs/roadmap/park-wake-protocol-split.md` 的工程不变量，是"Native 阻塞 IPC 正确性"的前提，也是双 ABI 共享的基础。
 
 待验证性质：**无丢失唤醒**（`∃ 每个 park 要么在 commit 读到 WOKEN，要么被调度回`）、**无重复唤醒**、**陈旧唤醒隔离**（seq 校验）。
 

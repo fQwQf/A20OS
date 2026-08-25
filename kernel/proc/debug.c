@@ -184,7 +184,7 @@ int proc_debug_attach(int pid)
     t->ptrace_orig_parent_pid = t->parent ? t->parent->pid : 0;
     if (t->parent && t->parent->state != PROC_UNUSED)
         t->ppid = caller->pid;
-    t->parent = caller;
+    proc_reparent_task_locked(caller, t);
     spin_unlock_irqrestore(&proc_lock, flags);
 
     /* Queue SIGSTOP: the tracee stops at its next signal boundary and the
@@ -226,7 +226,7 @@ int proc_debug_seize(int pid)
     t->ptrace_orig_parent_pid = t->parent ? t->parent->pid : 0;
     if (t->parent && t->parent->state != PROC_UNUSED)
         t->ppid = caller->pid;
-    t->parent = caller;
+    proc_reparent_task_locked(caller, t);
     spin_unlock_irqrestore(&proc_lock, flags);
     proc_put(t);
     return 0;
@@ -269,8 +269,7 @@ static void ptrace_reparent_to_original(task_t *t, int orig_pid)
         return;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     if (t->state != PROC_UNUSED) {
-        t->parent = reaper;
-        t->ppid = reaper->pid;
+        proc_reparent_task_locked(reaper, t);
         if (t->state == PROC_ZOMBIE)
             proc_wake_child_waiters_locked(reaper);
     }
