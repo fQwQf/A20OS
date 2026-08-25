@@ -625,6 +625,30 @@ smoke-mm-stress:
 		exit 1; \
 	fi
 
+smoke-oom-stress:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/oom-stress-riscv64.log"; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' \
+		--send-line 'oom_stress' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT_OOM) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'OOM_STRESS: PASS' "$$log"; then \
+		echo "smoke-oom-stress: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-oom-stress: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-mm-fork-exec-race:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)

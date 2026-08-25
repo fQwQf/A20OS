@@ -100,8 +100,8 @@
 - [x] 验证 fork、mprotect 和 munmap 下的 huge-page demotion 与 COW 行为。
   - 源码证据：`user/cmds/stress/mm_stress.c` 覆盖 huge-page basic、fork COW、partial munmap demotion 和 mprotect demotion；核心锁模型规定 TLB/refcount 顺序。当前测试不包含 huge-page OOM reclaim，因此该项只表示已覆盖列出的 fork/mprotect/munmap 路径。
   - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
-- [ ] 让 OOM reclaim 策略可观察、可测试。
-  - 当前证据：`kernel/mm/oom.c` 维护 kill count、victim 和 free-page 统计，`kernel/include/mm/vm.h` 规定不可回收仍可达 frame；当前用户态 stress 没有触发并断言 safe kill/reclaim 的专用场景。
+- [x] 让 OOM reclaim 策略可观察、可测试。
+  - 源码证据：`user/cmds/stress/oom_stress.c` 在 cgroup2 `memory.max` 限制下用子进程触发按页耗尽，断言 victim 以 SIGKILL 死亡、`memory.events` 的 `oom_kill`/failcnt 计数推进、幸存父进程仍能分配内存和做文件 I/O；`make smoke-oom-stress` 在 QEMU 中执行该场景。配套修复：`kernel/core/trap.c` 在缺页失败路径先检查 pending fatal signal（cgroup/global OOM kill 刚发出的 SIGKILL），不再把 OOM 受害者误报成 SIGSEGV，与 Linux 对 VM_FAULT_OOM 的 fatal-signal-pending 处理一致。
   - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
 
 ## P1：I/O 进展与网络
