@@ -2,10 +2,7 @@
 
 本文记录两块物理开发板的板级事实、驱动 bring-up 细节和已知边界，作为 `kernel/platform/visionfive2/` 与 `kernel/platform/ls2k1000/` 的配套说明。 硬件细节参考了 [RocketOS (MIT)](../ACKNOWLEDGMENTS.md) 的 StarFive 与 loongson-2K bring-up 驱动；凡未在真机复现的结论都明确标注"未核实"。
 
-与 QEMU virt 的区别：物理板和 QEMU virt 使用不同的地址与中断布局。VisionFive 2
-的启动链、存储挂载和 GMAC1 网络驱动已经完成源码级构建验证；在接入网线前不要把
-PHY link-up、DMA 收发或公网访问写成真机验收结论。LS2K1000 的存储与网络数据面
-仍按各自章节的边界执行。
+与 QEMU virt 的区别：物理板和 QEMU virt 使用不同的地址与中断布局。VisionFive 2 的启动链、存储挂载和 GMAC1 网络驱动已经完成源码级构建验证；在接入网线前不要把 PHY link-up、DMA 收发或公网访问写成真机验收结论。LS2K1000 的存储与网络数据面 仍按各自章节的边界执行。
 
 ## 共同原则
 
@@ -47,26 +44,16 @@ GMAC 上电时被时钟门控并处于复位态，必须先使能再访问寄存
 
 ### 中断
 
-PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前
-hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB
-确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。
-DW-SDIO 当前不提供 IRQ 资源，纯轮询。
+PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前 hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB 确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。 DW-SDIO 当前不提供 IRQ 资源，纯轮询。
 
 ### 驱动状态与边界
 
-- `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len；
-  RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化
-  send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
+- `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len； RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化 send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
 - PHY：扫描 MDIO 0..31 定位（VF2 板载 Motorcomm YT8531），复位 + 自协商。
 - DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁，命令/数据路径同步轮询。
 - 已知边界：数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。
-- 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB
-  `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确），
-  `timer_set_interval` 与全部 tick↔时间换算随之按板校准。
-- 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号
-  （`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级
-  `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash
-  烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
+- 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确）， `timer_set_interval` 与全部 tick↔时间换算随之按板校准。
+- 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号 （`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级 `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash 烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
 
 ## Loongson LS2K1000（龙芯 2K1000）
 

@@ -4,11 +4,7 @@
 
 ## 设计决策
 
-网络栈只解析 `bootargs_get()` 返回的 `a20.*` 键，并可由 DHCP 更新生效状态。物理
-板在没有网络参数时默认启用 DHCP，保证接入交换机/路由器后可以直接工作；提供静态
-地址或显式 `a20.dhcp=0` 时切换为静态配置。bootargs 的来源依架构/板级而异：
-RISC-V64/RISC-V32/PPC64LE 从 FDT `/chosen/bootargs` 读取；QEMU AArch64 和
-VirtualBox AArch64 因尚未接入外部命令行，分别在板级源码中返回编译期 NAT 默认参数。
+网络栈只解析 `bootargs_get()` 返回的 `a20.*` 键，并可由 DHCP 更新生效状态。物理 板在没有网络参数时默认启用 DHCP，保证接入交换机/路由器后可以直接工作；提供静态 地址或显式 `a20.dhcp=0` 时切换为静态配置。bootargs 的来源依架构/板级而异： RISC-V64/RISC-V32/PPC64LE 从 FDT `/chosen/bootargs` 读取；QEMU AArch64 和 VirtualBox AArch64 因尚未接入外部命令行，分别在板级源码中返回编译期 NAT 默认参数。
 
 做出该决策的原因：
 
@@ -44,10 +40,8 @@ QEMU AArch64 当前不导入 FDT `/chosen/bootargs`，所以给 QEMU 增加 `-ap
 ### 键规则
 
 - `a20.dhcp=1` 优先于静态 `a20.ip`、`a20.netmask` 和 `a20.gateway`。内核运行 DHCP，并使用租约填充运行时配置。
-- 如果 `a20.dhcp=0`，内核使用静态值；如果没有提供 `a20.dhcp` 但提供了任一
-  静态地址键，也使用静态值。
-- 如果没有任何网络键，内核默认启用 DHCP；需要保持链路未配置时可显式传入
-  `a20.dhcp=0` 且不提供地址。
+- 如果 `a20.dhcp=0`，内核使用静态值；如果没有提供 `a20.dhcp` 但提供了任一 静态地址键，也使用静态值。
+- 如果没有任何网络键，内核默认启用 DHCP；需要保持链路未配置时可显式传入 `a20.dhcp=0` 且不提供地址。
 - `a20.dns` 可以出现多次。第一次填充 DNS server slot 0，第二次填充 slot 1，依此类推，直到 lwIP DNS server 数量上限。
 - `a20.hostname` 当前只赋给 loopback netif；Ethernet netif 初始化尚未设置 `hostname` 字段。
 - 所有值都在早期启动期间解析一次，并存储到运行时 `a20_net_config` 结构体中。
@@ -68,17 +62,13 @@ typedef struct a20_net_config {
 } a20_net_config_t;
 ```
 
-存储位置是 `kernel/net/net_config.c`。该结构体先清零并把 `dhcp_enable` 置为 1，
-然后从 `bootargs_get()` 的完整字符串解析。`kernel/net/lwip_stack.c` 的
-`a20_lwip_register_netifs()` 读取该结构体，不再自行选择 QEMU 地址；板级编译默认
-仍会以普通 bootargs 的形式进入同一解析器。
+存储位置是 `kernel/net/net_config.c`。该结构体先清零并把 `dhcp_enable` 置为 1， 然后从 `bootargs_get()` 的完整字符串解析。`kernel/net/lwip_stack.c` 的 `a20_lwip_register_netifs()` 读取该结构体，不再自行选择 QEMU 地址；板级编译默认 仍会以普通 bootargs 的形式进入同一解析器。
 
 ## 回退行为
 
 回退行为必须明确且安全：
 
-- 如果最终 bootargs 没有任何网络键，内核默认发起 DHCP；在租约到达前 netif
-  暂时没有 IPv4 地址。需要完全禁用自动配置时传入 `a20.dhcp=0`。
+- 如果最终 bootargs 没有任何网络键，内核默认发起 DHCP；在租约到达前 netif 暂时没有 IPv4 地址。需要完全禁用自动配置时传入 `a20.dhcp=0`。
 - 需要路由的网络系统调用在提供有效配置前返回 `-ENETUNREACH`。
 - 如果提供了 `a20.dhcp=1`，但 DHCP 交换在用户态启动前尚未完成，接口会保持未配置直到交换完成。用户态必须容忍临时 `-ENETUNREACH` 错误，或等待 config-ready 信号。
 - 如果提供 `a20.dhcp=0` 但只提供了部分静态键，缺失值保持为零。例如只有 `a20.ip` 而没有 `a20.netmask` 时，netmask 保持 `0.0.0.0`。

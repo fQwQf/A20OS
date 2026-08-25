@@ -260,7 +260,8 @@ static void bh_ring_consume_commit(net_bh_ring_t *r)
 /*
  * Schedule the per-socket bottom-half.  Called from lwIP callback context
  * with g_lwip_lock held; the pending flag array is accessed atomically so no
- * second lock is taken here.
+ * second lock is taken here.  net_bh_slot_mark() also bumps the global
+ * pending count that gates the per-switch bottom-half scan.
  */
 static void net_inet_bh_schedule(net_socket_t *s)
 {
@@ -270,7 +271,7 @@ static void net_inet_bh_schedule(net_socket_t *s)
     if (idx < 0 || idx >= NET_MAX_SOCKETS)
         return;
     __atomic_store_n(&s->bh_pending, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_net_bh_pending[idx], 1, __ATOMIC_RELEASE);
+    net_bh_slot_mark(idx);
 }
 
 static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
@@ -560,9 +561,7 @@ void net_inet_bottom_half_process_socket(net_socket_t *s)
     if (net_socket_is_valid_locked(s) && !s->closed)
         drain = net_inet_bottom_half_process_socket_locked(s, &wake_q);
     __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
-    int idx = s->reg_idx;
-    if (idx >= 0 && idx < NET_MAX_SOCKETS)
-        __atomic_store_n(&g_net_bh_pending[idx], 0, __ATOMIC_RELEASE);
+    net_bh_slot_clear(s->reg_idx);
     spin_unlock_irqrestore(&g_net_lock, irq);
     (void)proc_wake_q_flush(&wake_q);
     if (drain & NET_BH_DRAIN_READ)
@@ -575,6 +574,10 @@ void net_inet_bottom_half_process_socket(net_socket_t *s)
 
 void net_inet_bottom_half_process_all(void)
 {
+    /* One acquire load replaces a 1024-slot scan per context switch; a mark
+     * racing after this check simply stays pending for the next switch. */
+    if (!__atomic_load_n(&g_net_bh_pending_count, __ATOMIC_ACQUIRE))
+        return;
     for (int i = 0; i < NET_MAX_SOCKETS; i++) {
         if (!__atomic_load_n(&g_net_bh_pending[i], __ATOMIC_ACQUIRE))
             continue;
@@ -584,7 +587,7 @@ void net_inet_bottom_half_process_all(void)
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
         net_socket_t *s = g_sockets[i];
         if (!s || !net_socket_is_valid_locked(s) || s->closed) {
-            __atomic_store_n(&g_net_bh_pending[i], 0, __ATOMIC_RELEASE);
+            net_bh_slot_clear(i);
             if (s)
                 __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
             spin_unlock_irqrestore(&g_net_lock, irq);
@@ -592,7 +595,7 @@ void net_inet_bottom_half_process_all(void)
         }
         drain = net_inet_bottom_half_process_socket_locked(s, &wake_q);
         __atomic_store_n(&s->bh_pending, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&g_net_bh_pending[i], 0, __ATOMIC_RELEASE);
+        net_bh_slot_clear(i);
         spin_unlock_irqrestore(&g_net_lock, irq);
         (void)proc_wake_q_flush(&wake_q);
         if (drain & NET_BH_DRAIN_READ)

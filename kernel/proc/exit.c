@@ -194,7 +194,8 @@ static task_t *proc_find_live_thread_reaper_locked(task_t *dead)
     if (dead_tgid <= 0)
         return NULL;
 
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+    task_t *leader = dead->tg_leader ? dead->tg_leader : dead;
+    for (task_t *t = leader; t; t = t->tg_next) {
         if (t == dead || t == proc_idle_task())
             continue;
         if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
@@ -232,14 +233,13 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     int pdeathsig_signals[64];
     int pdeathsig_count = 0;
 
-    for (task_t *child = proc_first_task_locked(); child; ) {
-        task_t *next = proc_next_task_locked(child);
+    for (task_t *child = dead->children; child; ) {
+        task_t *next = child->sibling_next;
         if (child == proc_idle_task()) {
             child = next;
             continue;
         }
-        if (child->state == PROC_UNUSED ||
-            (child->ppid != dead->pid && child->parent != dead)) {
+        if (child->state == PROC_UNUSED) {
             child = next;
             continue;
         }
@@ -270,8 +270,7 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
                 }
             } else {
                 proc_sched_note_zombie();
-                child->ppid = actual_reaper->pid;
-                child->parent = actual_reaper;
+                proc_reparent_task_locked(actual_reaper, child);
             }
 
             thread_reaper = proc_find_live_thread_reaper_locked(dead);
@@ -294,8 +293,7 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
                 child_pids[child_pid_count++] = child->pid;
         }
 
-        child->ppid = actual_reaper->pid;
-        child->parent = actual_reaper;
+        proc_reparent_task_locked(actual_reaper, child);
         if (child->state == PROC_ZOMBIE)
             proc_wake_child_waiters_locked(actual_reaper);
         child = next;
@@ -408,6 +406,7 @@ void proc_exit(int exit_code)
         proc_sched_note_zombie();
         t->parent = proc_idle_task();
         t->ppid = 0;
+        proc_children_unlink_locked(t);
     } else {
         proc_wake_child_waiters_locked(parent);
     }
@@ -512,8 +511,8 @@ void proc_exec_terminate_siblings(task_t *self)
         pid_count = 0;
         active = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
-        for (task_t *t = proc_first_task_locked(); t;
-             t = proc_next_task_locked(t)) {
+        task_t *leader = self->tg_leader ? self->tg_leader : self;
+        for (task_t *t = leader; t; t = t->tg_next) {
             if (t == self || t->state == PROC_UNUSED ||
                 t->state == PROC_ZOMBIE)
                 continue;
@@ -558,7 +557,8 @@ void proc_exit_group(int exit_code)
     do {
         pid_count = 0;
         uint64_t flags = spin_lock_irqsave(&proc_lock);
-        for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        task_t *leader = self->tg_leader ? self->tg_leader : self;
+        for (task_t *t = leader; t; t = t->tg_next) {
             if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
                 continue;
             if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))

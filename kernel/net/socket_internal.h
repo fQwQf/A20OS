@@ -205,6 +205,9 @@ typedef struct sockaddr_alg_kernel {
 extern spinlock_t g_net_lock;
 extern net_socket_t *g_sockets[NET_MAX_SOCKETS];
 extern volatile int g_net_bh_pending[NET_MAX_SOCKETS];
+extern volatile int g_net_bh_pending_count;
+void net_bh_slot_mark(int idx);
+int net_bh_slot_clear(int idx);
 
 /*
  * Return true when the bounded deferred-wake batch filled before the queue
