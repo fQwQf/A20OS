@@ -71,7 +71,7 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 	     [ ! -x "$(NATIVE_LINUX_BIN)" ] || \
 	     [ ! -x "$(NATIVE_RTCD_BIN)" ] || [ ! -x "$(NATIVE_RTCDD_BIN)" ]; then \
 		need_build=1; \
-	elif find user/liba20rt user/liba20c user/tests user/svc kernel/include/drivers/dual -type f -newer "$@" \
+	elif find user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual -type f -newer "$@" \
 		-print -quit | grep -q .; then \
 		need_build=1; \
 	fi; \
