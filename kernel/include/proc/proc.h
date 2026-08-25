@@ -319,6 +319,11 @@ typedef struct task_t {
      * keyring object, shared with children at fork and released at teardown. */
     void           *session_keyring;
 
+    /* Seccomp state (kernel/ipc/seccomp.c): SECCOMP_MODE_* plus a refcounted
+     * newest-first classic-BPF filter chain shared with children at fork. */
+    void           *seccomp_chain;
+    uint32_t        seccomp_mode;
+
     /* Landlock LSM ruleset list (kernel/ipc/landlock.c), process-local. */
     void           *landlock_rulesets;
 

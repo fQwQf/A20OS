@@ -11,6 +11,7 @@
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
 #include "fs/vfs.h"
+#include "ipc/seccomp.h"
 #include "mm/fault.h"
 #include "mm/mm.h"
 #include "mm/process_vm.h"
@@ -434,14 +435,56 @@ int64_t sys_mseal(uint64_t addr, size_t len, unsigned flags)
 
 int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
 {
-    (void)uargs;
-    /* SECCOMP_SET_MODE_FILTER (1) with SECCOMP_FILTER_FLAG_LOG etc. is not
-     * supported.  Allow SECCOMP_SET_MODE_STRICT (0) which only forbids
-     * syscalls not in a minimal set -- A20OS has no seccomp engine, so report
-     * the op as unsupported rather than silently allow-disabling. */
-    (void)op;
-    (void)flags;
-    return -EINVAL;
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+
+    switch (op) {
+    case SECCOMP_SET_MODE_STRICT:
+        if (flags)
+            return -EINVAL;
+        return seccomp_set_strict(t);
+    case SECCOMP_SET_MODE_FILTER:
+        /* TSYNC/LOG/NEW_LISTENER flags need cross-task or fd plumbing that
+         * does not exist yet; plain filters install with flags == 0. */
+        if (flags)
+            return -EINVAL;
+        if (!uargs)
+            return -EFAULT;
+        return seccomp_install_filter(t, uargs);
+    case SECCOMP_GET_ACTION_AVAIL: {
+        uint32_t action = 0;
+        if (!uargs || copy_from_user(&action, uargs, sizeof(action)) < 0)
+            return -EFAULT;
+        uint32_t cls = action & SECCOMP_RET_ACTION_FULL;
+        int supported = (cls == action) &&
+                        (cls == SECCOMP_RET_KILL_PROCESS ||
+                         cls == SECCOMP_RET_KILL_THREAD ||
+                         cls == SECCOMP_RET_TRAP || cls == SECCOMP_RET_ERRNO ||
+                         cls == SECCOMP_RET_TRACE || cls == SECCOMP_RET_LOG ||
+                         cls == SECCOMP_RET_ALLOW);
+        uint32_t answer = supported ? 1u : 0u;
+        return copy_to_user((void *)uargs, &answer,
+                            sizeof(answer)) < 0 ? -EFAULT : 0;
+    }
+    case SECCOMP_GET_NOTIF_SIZES: {
+        struct {
+            uint16_t notif;
+            uint16_t response;
+            uint16_t data;
+        } sizes = {
+            .notif = (uint16_t)sizeof(seccomp_notif_wire_t),
+            .response = (uint16_t)sizeof(seccomp_notif_resp_wire_t),
+            .data = (uint16_t)sizeof(seccomp_data_t),
+        };
+        if (!uargs)
+            return -EFAULT;
+        return copy_to_user((void *)uargs, &sizes,
+                            sizeof(sizes)) < 0 ? -EFAULT : 0;
+    }
+    default:
+        return -EINVAL;
+    }
 }
 
 int64_t sys_kexec_load(uint64_t entry, uint64_t nr_segments,

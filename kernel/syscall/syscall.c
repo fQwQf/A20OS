@@ -11,6 +11,7 @@
 #include "core/perf.h"
 #include "core/timer.h"
 #include "proc/signal.h"
+#include "ipc/seccomp.h"
 #include "proc/debug.h"
 #include "ext/kep.h"
 #include "sys/syscall.h"
@@ -76,6 +77,22 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 #endif
             TRAP_CTX_SET_RET(ctx, denied);
             return denied;
+        }
+    }
+
+    /*
+     * Seccomp gate: classic-BPF filters evaluate before any ABI handling,
+     * mirroring the KEP filter above but with Linux seccomp semantics
+     * (ERRNO/TRAP/TRACE/KILL/LOG actions).
+     */
+    if (__builtin_expect(cur_task && (cur_task->seccomp_chain ||
+                                      cur_task->seccomp_mode), 0)) {
+        int64_t seccomp_ret = 0;
+        if (seccomp_gate(ctx, num, &seccomp_ret)) {
+            TRAP_CTX_SET_RET(ctx, seccomp_ret);
+            syscall_profile_record(num, start_time, syscall_profile_now());
+            signal_deliver_user(ctx);
+            return seccomp_ret;
         }
     }
 
