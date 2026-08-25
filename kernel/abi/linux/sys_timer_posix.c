@@ -1,19 +1,15 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 #include "proc/proc_internal.h"
+#include "proc/posix_timer.h"
 
-typedef struct {
-    int used;
-    int owner_pid;
-    int signo;
-    int target_tid;      /* SIGEV_THREAD_ID delivery target, 0 = process-wide */
-    uint64_t interval[2];
-    uint64_t value[2];
-    uint64_t expire_tick;
-} posix_timer_t;
-
-#define COMPAT_TIMER_MAX 32
-static posix_timer_t g_posix_timers[COMPAT_TIMER_MAX];
+/*
+ * Linux ABI POSIX-timer surface — wire translation only.
+ *
+ * Timer objects, ownership checks and expiry delivery live in
+ * kernel/proc/timer_posix.c (driven from proc/timer_heap.c).  This file
+ * decodes the sigevent/timespec wire structs onto the core calls.
+ */
 
 typedef struct {
     unsigned modes;
@@ -83,11 +79,6 @@ static int posix_clock_is_monotonic(int clk)
 {
     return clk == 1 || clk == 2 || clk == 3 || clk == 4 ||
            clk == 6 || clk == 7 || clk == 9;
-}
-
-static uint64_t posix_timer_timespec_to_ticks(uint64_t sec, uint64_t nsec)
-{
-    return sec * TICKS_PER_SEC + (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
 }
 
 static uint64_t timeval_to_ticks(uint64_t sec, uint64_t usec)
@@ -272,77 +263,56 @@ int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
     }
 
     task_t *cur = proc_current();
-    for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
-        if (!g_posix_timers[i].used) {
-            memset(&g_posix_timers[i], 0, sizeof(g_posix_timers[i]));
-            g_posix_timers[i].used = 1;
-            g_posix_timers[i].owner_pid = cur ? cur->pid : 0;
-            g_posix_timers[i].signo = signo;
-            g_posix_timers[i].target_tid = target_tid;
-            if (copy_to_user(timerid, &i, sizeof(i)) < 0) return -EFAULT;
-            return 0;
-        }
+    int id = posix_timer_create(cur ? cur->pid : 0, signo, target_tid);
+    if (id < 0)
+        return id;
+    if (copy_to_user(timerid, &id, sizeof(id)) < 0) {
+        posix_timer_delete(cur ? cur->pid : 0, id);
+        return -EFAULT;
     }
-    return -EAGAIN;
+    return 0;
 }
 
 int64_t sys_timer_delete(int timerid)
 {
-    if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
-        return -EINVAL;
     task_t *cur = proc_current();
-    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
-        return -EINVAL;
-    memset(&g_posix_timers[timerid], 0, sizeof(g_posix_timers[timerid]));
-    return 0;
+    int r = posix_timer_delete(cur ? cur->pid : 0, timerid);
+    return r < 0 ? r : 0;
 }
 
 int64_t sys_timer_gettime(int timerid, void *curr_value)
 {
     if (!curr_value) return -EFAULT;
-    if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
-        return -EINVAL;
     task_t *cur = proc_current();
-    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
-        return -EINVAL;
-    uint64_t out[4] = {
-        g_posix_timers[timerid].interval[0],
-        g_posix_timers[timerid].interval[1],
-        g_posix_timers[timerid].value[0],
-        g_posix_timers[timerid].value[1],
-    };
+    uint64_t out[4];
+    int r = posix_timer_get_time(cur ? cur->pid : 0, timerid, out);
+    if (r < 0) return r;
     return copy_to_user(curr_value, out, sizeof(out)) < 0 ? -EFAULT : 0;
 }
 
 int64_t sys_timer_getoverrun(int timerid)
 {
-    if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
-        return -EINVAL;
     task_t *cur = proc_current();
-    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
-        return -EINVAL;
-    return 0;
+    int r = posix_timer_getoverrun(cur ? cur->pid : 0, timerid);
+    return r < 0 ? r : 0;
 }
 
 int64_t sys_timer_settime(int timerid, int flags, const void *new_value, void *old_value)
 {
     (void)flags;
-    if (timerid < 0 || timerid >= COMPAT_TIMER_MAX || !g_posix_timers[timerid].used)
-        return -EINVAL;
     task_t *cur = proc_current();
-    if (cur && g_posix_timers[timerid].owner_pid != cur->pid)
-        return -EINVAL;
+    int pid = cur ? cur->pid : 0;
     if (old_value) {
-        int64_t r = sys_timer_gettime(timerid, old_value);
+        uint64_t old[4];
+        int r = posix_timer_get_time(pid, timerid, old);
         if (r < 0) return r;
+        if (copy_to_user(old_value, old, sizeof(old)) < 0) return -EFAULT;
     }
     if (!new_value) return -EFAULT;
     uint64_t ts[4];
     if (copy_from_user(ts, new_value, sizeof(ts)) < 0) return -EFAULT;
-    memcpy(g_posix_timers[timerid].interval, ts, sizeof(uint64_t) * 2);
-    memcpy(g_posix_timers[timerid].value, ts + 2, sizeof(uint64_t) * 2);
-    g_posix_timers[timerid].expire_tick = timer_get_ticks() + posix_timer_timespec_to_ticks(ts[2], ts[3]);
-    return 0;
+    int r = posix_timer_set_time(pid, timerid, ts);
+    return r < 0 ? r : 0;
 }
 
 int64_t sys_adjtimex(void *buf)
@@ -436,35 +406,4 @@ int64_t sys_clock_adjtime(int clk, void *buf)
     if (modes != 0 && !posix_clock_is_realtime(clk))
         return -EOPNOTSUPP;
     return sys_adjtimex(buf);
-}
-
-extern int signal_send(int pid, int signum);
-extern int signal_send_task(void *task, int signum);
-
-void posix_timer_tick(void)
-{
-    uint64_t now = timer_get_ticks();
-    for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
-        if (!g_posix_timers[i].used || g_posix_timers[i].signo == 0)
-            continue;
-        if (g_posix_timers[i].expire_tick > 0 && now >= g_posix_timers[i].expire_tick) {
-            if (g_posix_timers[i].target_tid > 0) {
-                /* SIGEV_THREAD_ID: deliver to the specific thread. */
-                task_t *target = proc_find_get(g_posix_timers[i].target_tid);
-                if (target) {
-                    (void)signal_send_task(target, g_posix_timers[i].signo);
-                    proc_put(target);
-                }
-            } else {
-                signal_send(g_posix_timers[i].owner_pid, g_posix_timers[i].signo);
-            }
-            if (g_posix_timers[i].interval[0] || g_posix_timers[i].interval[1]) {
-                uint64_t interval_ticks = posix_timer_timespec_to_ticks(
-                    g_posix_timers[i].interval[0], g_posix_timers[i].interval[1]);
-                g_posix_timers[i].expire_tick = now + interval_ticks;
-            } else {
-                g_posix_timers[i].expire_tick = 0;
-            }
-        }
-    }
 }
