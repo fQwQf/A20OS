@@ -492,6 +492,22 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
             *optlen = sizeof(cred);
             return 0;
         }
+        if (optname == SO_PEERPIDFD) {
+            /* Linux 6.5+: pidfd pinning the peer; dbus-daemon uses this for
+             * peer identity when available. */
+            extern int linux_pidfd_create(int pid, int flags);
+            if (s->peer_pid <= 0)
+                return -ENOTCONN;
+            if (*optlen < sizeof(int32_t))
+                return -EINVAL;
+            int pfd = linux_pidfd_create(s->peer_pid, 0);
+            if (pfd < 0)
+                return pfd;
+            int32_t out = pfd;
+            memcpy(optval, &out, sizeof(out));
+            *optlen = sizeof(out);
+            return 0;
+        }
         val = 0;
     }
     else if (level == IPPROTO_TCP) {
