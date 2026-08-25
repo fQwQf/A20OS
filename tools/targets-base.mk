@@ -33,7 +33,7 @@
 		native-registry-arch native-registry-rv smoke-native-registry \
 		native-isolation-arch native-isolation-rv smoke-native-isolation \
 		native-ubd-arch native-ubd-rv smoke-native-ubd \
-		native-ufsd-arch native-ufsd-rv smoke-native-ufs \
+		native-ufsd-arch native-ufsd-rv smoke-native-ufs smoke-native-fs-all \
 		smoke-clock-vdso \
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
