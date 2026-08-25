@@ -154,6 +154,12 @@ static int64_t fat_getattr(uint64_t ino, ufs_resp_hdr_t *r)
     fat_node_t *n = node_by_ino(ino);
     if (!n)
         return -U_ENOENT;
+    /* 根目录不走 fat32lite 路径解析（其对 "/" 返回 EINVAL） */
+    if (n->ino == UFS_ROOT_INO) {
+        r->out0 = 0;
+        r->out1 = (uint64_t)mode_for(1) << 32;
+        return 0;
+    }
     int is_dir = 0;
     uint32_t size = 0;
     int st = fat32lite_stat(&g_fs, n->path, &is_dir, &size);
