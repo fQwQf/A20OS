@@ -43,14 +43,11 @@
 - [x] 从本地 pick 热路径移除全局 `proc_lock`。
   - 证据：`proc_runq_pick_local()` 只持本 CPU runqueue 锁完成 `on_rq -> dispatching`，释放队列锁后调用者才获取 `proc_lock`； `/proc/a20/task_lifetime` 暴露 pick、争用和并行峰值。
   - 验证：`make check-process-lock-split-boundary` 和 `make check-proc-step8-local`。
-  - 新测量（`fqwqf/performance-overhaul`，`-smp 8 thread=multi` mm_stress）：`proc_lock` 仍是唯一显著
-    热点（约 3.3 万次竞争/1600 万自旋），callsite 归因显示竞争集中于**互斥量 park/wake 协议**与
-    **切换发布路径**；把 pick 拆出只是第一步，完整消除需按等待对象分锁并合并切换路径的两次获取，
-    见 `docs/roadmap/perf-overhaul.md` §3。
+  - 新测量（`fqwqf/performance-overhaul`，`-smp 8 thread=multi` mm_stress）：`proc_lock` 仍是唯一显著 热点（约 3.3 万次竞争/1600 万自旋），callsite 归因显示竞争集中于**互斥量 park/wake 协议**与 **切换发布路径**；把 pick 拆出只是第一步，完整消除需按等待对象分锁并合并切换路径的两次获取， 见 `docs/roadmap/perf-overhaul.md` §3。
 - [x] 压缩 `proc_lock` 的剩余获取点。
   - 证据：`sched()` idle 空队列快速路径（无任务可唤醒 idle，跳过两次全局锁获取）；`proc_switch_complete()` 无待交接任务时原子检查后直接返回；EEVDF enqueue 常见情形 O(1) 尾部追加（新 deadline 晚于队尾时不再遍历）；SIGALRM 到期扫描改为 per-task alarm 最小堆（`proc_set_alarm_expire` 维护，expiry O(k log n)，destroy 时移除条目）；`proc_wake_child_waiters_locked` 用 proc_lock 保护的全局面等待者计数在无人 wait 时 O(1) 返回。阻塞切换的 completion 仍必须持 `proc_lock`：wake 竞争 enqueue 的仲裁是 park 协议正确性部件。
   - 验证：`make smoke-riscv64`、`smoke-sched-stress`、`smoke-proc-stress`、`smoke-futex-stress`、`smoke-abi-linux` 全部 PASS；guest 内 `sleep 1` 的 SIGALRM 正常；`[SMP] 2/2 configured CPUs online` 后干净关机（2026-08 历史记录）。
-  - 剩余：切换路径的两次获取（出栈发布 + 入栈 completion）需 per-task wake-queue 位才能无锁化；`proc_wait4` 的 child 扫描本身仍是每次 syscall O(N)。
+  - 剩余：`proc_wait4` 的 child 全局扫描已在 `perf/core-modernization` 解决 （per-task children/线程组链表，见 `docs/roadmap/perf-overhaul.md` §7.2，2026-08-25）； 切换路径的两次获取已在此前回合合并。
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
   - 历史验证：双架构 `PROC_STRESS: low-user-argv PASS` 与功能测例全通过（历史平台记录，当前状态需复验）。

@@ -1,10 +1,6 @@
 # 形式化基础：SOS 模型、不变量与安全证明
 
-> **本文是全部研究贡献（03/04/05）的数学模型基底**（重组自旧理论文档，保留定理编号）。定位：这是"方法/工具箱"——使预算能力、类型化通道、能力信封**可证**的基础，不单独主张为论文贡献（见 12 §2）。
->
-> **预算扩展**：本文的 $\rho_{eff}$（时态模型）即预算能力的特例。完整的预算格（类型 × 权限 × 时间 × 次数 × 传播）定义与单调衰减定理见 03；基础模型本文给出。
->
-> **证明边界（诚实声明）**：本模型面向 53 个形式化核心 syscall；当前实现为 126+ 入口，07 的 trace 分类明确覆盖 43/53。**"设计被证明" ≠ "126 个实现入口全被证明"**，二者必须分开陈述。所有证明为纸笔论证；机器检验计划见 08。
+> **本文是全部研究贡献（03/04/05）的数学模型基底**（重组自旧理论文档，保留定理编号）。定位：这是"方法/工具箱"——使预算能力、类型化通道、能力信封**可证**的基础，不单独主张为论文贡献（见 12 §2）。 **预算扩展**：本文的 $\rho_{eff}$（时态模型）即预算能力的特例。完整的预算格（类型 × 权限 × 时间 × 次数 × 传播）定义与单调衰减定理见 03；基础模型本文给出。 **证明边界（诚实声明）**：本模型面向 53 个形式化核心 syscall；当前实现为 126+ 入口，07 的 trace 分类明确覆盖 43/53。**"设计被证明" ≠ "126 个实现入口全被证明"**，二者必须分开陈述。所有证明为纸笔论证；机器检验计划见 08。
 
 ---
 
@@ -48,8 +44,7 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 **CH-SEND / CH-RECV**（bounded FIFO，$C_{max}=64KB$, $H_{max}=8$）：send 追加完整 $(data, handles)$ 元组并增加 queued 引用（发送方保留 handle，共享语义）；recv 取出完整元组并转交引用。**类型化扩展见 04**。
 
-**定理 2.1（Channel 消息序）** FIFO 顺序保持。
-**定理 2.2（Channel 原子性）** 单次 send/recv 对数据与 handle 转移原子，无部分投递。
+**定理 2.1（Channel 消息序）** FIFO 顺序保持。 **定理 2.2（Channel 原子性）** 单次 send/recv 对数据与 handle 转移原子，无部分投递。
 
 **EQ-WATCH / EQ-WAIT**：watch 注册对象事件；wait 返回 pending 列表或阻塞/超时返回空。
 
@@ -79,11 +74,7 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 ## 4. 活性（精简）
 
-**定理 4.1（Event Wait 终止性）** watch 活跃事件源 + 有限超时 → event_wait 有限时间返回。
-**定理 4.2（Channel 无死锁条件）** 容量 > 0 且不同向操作同一端点 → 通信必然完成。
-**定理 4.3（无引用泄漏）** 正常关闭 + endpoint 清理 → 无"无所有者孤儿对象"。
-**定理 4.4（公平性前提）** 活性性质依赖公平调度假设（per-CPU EEVDF，见 `docs/eevdf-scheduler.md`）。
-**L1-L4（LTL 框架）**：统一活性性质的形式化模板（07 §4.4）。
+**定理 4.1（Event Wait 终止性）** watch 活跃事件源 + 有限超时 → event_wait 有限时间返回。 **定理 4.2（Channel 无死锁条件）** 容量 > 0 且不同向操作同一端点 → 通信必然完成。 **定理 4.3（无引用泄漏）** 正常关闭 + endpoint 清理 → 无"无所有者孤儿对象"。 **定理 4.4（公平性前提）** 活性性质依赖公平调度假设（per-CPU EEVDF，见 `docs/eevdf-scheduler.md`）。 **L1-L4（LTL 框架）**：统一活性性质的形式化模板（07 §4.4）。
 
 ---
 
@@ -100,17 +91,13 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 **VM-SHARE**：`vm_share(addr,len,ρ_grant)` 创建 SHM 对象，backing 指向源地址空间物理页。
 
-**定理 6.1（共享内存权限一致性）** 有效保护 = `prot_map ∩ translate(rights(h))`（handle 权限 ∩ 显式 prot）。
-**定理 6.2（地址空间独立性）** 无 fork，进程地址空间完全独立；共享只能经显式 vm_share + handle transfer。*对研究的意义*：这消除了"fork 隐式继承权限"的能力漏洞面（01 §3）。
+**定理 6.1（共享内存权限一致性）** 有效保护 = `prot_map ∩ translate(rights(h))`（handle 权限 ∩ 显式 prot）。 **定理 6.2（地址空间独立性）** 无 fork，进程地址空间完全独立；共享只能经显式 vm_share + handle transfer。*对研究的意义*：这消除了"fork 隐式继承权限"的能力漏洞面（01 §3）。
 
 ---
 
 ## 7. Capability 撤销
 
-**定义 7.1-7.2**：直接撤销（close）与传递撤销（refcount 归零）。
-**定理 7.1（撤销完备性）** $o$ 被完全撤销 $\iff refcount(o) = 0$。
-**定理 7.2（Task 终止资源回收完备性）** 进程终止释放其全部 handle 引用（经 channel 传出的由接收方持有，不受影响）。
-**设计选择**：不做自动级联撤销（可预测性/最小权限），代之以 `ADMIN` 权限下的显式终止。
+**定义 7.1-7.2**：直接撤销（close）与传递撤销（refcount 归零）。 **定理 7.1（撤销完备性）** $o$ 被完全撤销 $\iff refcount(o) = 0$。 **定理 7.2（Task 终止资源回收完备性）** 进程终止释放其全部 handle 引用（经 channel 传出的由接收方持有，不受影响）。 **设计选择**：不做自动级联撤销（可预测性/最小权限），代之以 `ADMIN` 权限下的显式终止。
 
 **预算撤销对比（03 定理 8.1）**：传统撤销（seL4 CNode 树遍历 $O(d \times f)$）vs 预算过期的 lookup 判定 $O(1)$ + 周期 sweep 回收 $O(H)$。前者把成本放在撤销时刻，后者把成本前移到约束设置。
 
@@ -118,8 +105,7 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 ## 8. 信息流控制
 
-**定义 8.1（Noninterference）** 高密级操作不影响低密级可观察行为。
-**定理 8.1（Capability 隔离 ⇒ 信息流隔离）** 无共享 handle 的进程间无 handle 系统信息流。
+**定义 8.1（Noninterference）** 高密级操作不影响低密级可观察行为。 **定理 8.1（Capability 隔离 ⇒ 信息流隔离）** 无共享 handle 的进程间无 handle 系统信息流。
 
 **隐信道**：资源竞争、全局状态（FS 可用空间）、网络状态。**定理 8.2（隐信道上界）** $BW_{covert} \leq BW_{cpu} + BW_{fs} + BW_{net}$——**承认残余隐信道，不冒充 seL4**（05/11 据此声明不防御 $\mathcal{A}_4$）。
 
@@ -137,8 +123,7 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 **约束 C1（模块依赖图）**：`abi_linux → core`、`abi_native → core`；两 ABI 互不依赖；core 不反向依赖任何 ABI。
 
-**定理 9.1（ABI 隔离）** 一个 ABI 的 bug 不影响另一个的正确性（依赖约束 C1 ⇒ 影响仅经 core 契约）。
-**定理 9.2（状态空间不相交）** `State_linux ∩ State_native = ∅`（fd 表/信号表/pid 与 handle 表/eventq 独立；共享 task 为 core 层）。
+**定理 9.1（ABI 隔离）** 一个 ABI 的 bug 不影响另一个的正确性（依赖约束 C1 ⇒ 影响仅经 core 契约）。 **定理 9.2（状态空间不相交）** `State_linux ∩ State_native = ∅`（fd 表/信号表/pid 与 handle 表/eventq 独立；共享 task 为 core 层）。
 
 > **语义级边界（更强）**：即使共享 VFS，Linux 进程也无法推断 Native handle 权限状态——见 **05 §5**（定理 1.1-1.4，含 $BridgeFree$ 条件）。该边界在 05 中升级为信封的逃逸防线 #2，此处不再重复。
 
@@ -146,11 +131,7 @@ $$\frac{HT_p(s)=(o,\rho_s) \quad \rho_{req} \subseteq \rho_s \quad n_{fresh} \no
 
 ## 10. ABI 可演进性（结构体版本化）
 
-**定义 10.1（结构体版本兼容）** $S_m$ 与 $S_n$（$m \le n$）兼容当且仅当前 $|S_m|$ 字段偏移与类型一致。
-**规则 E-APPEND / E-DEPRECATE / E-RESERVED**。
-**定理 10.1（兼容性保持）** 仅用合法规则演进 ⇒ 旧程序在新内核正确运行（旧字段偏移/类型不变、reserved 位为零）。
-**定理 10.2（编号稳定性）** 稳定 syscall 编号在 major version 内不变（0x0000-0x0FFF 分区，单射）。
-**定位**：设计经验而非论文贡献（02 §4）。
+**定义 10.1（结构体版本兼容）** $S_m$ 与 $S_n$（$m \le n$）兼容当且仅当前 $|S_m|$ 字段偏移与类型一致。 **规则 E-APPEND / E-DEPRECATE / E-RESERVED**。 **定理 10.1（兼容性保持）** 仅用合法规则演进 ⇒ 旧程序在新内核正确运行（旧字段偏移/类型不变、reserved 位为零）。 **定理 10.2（编号稳定性）** 稳定 syscall 编号在 major version 内不变（0x0000-0x0FFF 分区，单射）。 **定位**：设计经验而非论文贡献（02 §4）。
 
 ---
 

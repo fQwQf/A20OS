@@ -124,15 +124,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 7. 仍存在的差距（未实现）
 
-> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
->
-> 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](09-native-abi-deepening.md)）已收口：
-> - **file/socket/pipe 事件源接线**：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。
-> - **event_watch_fs 深化**：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。
-> - **Pager**（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。
-> - **monitor**（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。
-> - **task_mem_read/write**（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。
-> - **vm_share_region**（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
+> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](09-native-abi-deepening.md)）已收口： - **file/socket/pipe 事件源接线**：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。 - **event_watch_fs 深化**：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。 - **Pager**（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。 - **monitor**（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。 - **task_mem_read/write**（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。 - **vm_share_region**（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
 
 - file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
 - `event_watch_fs` 的路径前缀过滤（`path` 字段）未实现，仅目录级 watch。

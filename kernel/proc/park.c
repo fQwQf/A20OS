@@ -57,8 +57,6 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         task->wait_deadline = 0;
         task->wake_time = 0;
         task->state = PROC_READY;
-        if (task->sched_level > 0)
-            task->sched_level--;
         /*
          * An on_cpu task is still executing the commit/sched boundary; a
          * dispatching task has already been selected. The runqueue helper
@@ -413,8 +411,6 @@ proc_wake_reason_t proc_park_commit_donate(proc_wait_token_t token,
         donate_to->wait_deadline = 0;
         donate_to->wake_time = 0;
         donate_to->state = PROC_READY;
-        if (donate_to->sched_level > 0)
-            donate_to->sched_level--;
         donate_to->exec_start = now;
         donate_to->eevdf_last_account = now;
         proc_get(donate_to); /* dispatch ref, consumed by context_switch */

@@ -166,6 +166,23 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     }
     if (flags & CLONE_THREAD)
         t->tgid = parent ? parent->tgid : t->pid;
+
+    uint64_t list_flags = spin_lock_irqsave(&proc_lock);
+    if (flags & CLONE_THREAD) {
+        if (parent && parent->tg_leader)
+            t->tg_leader = parent->tg_leader;
+        else if (parent)
+            t->tg_leader = parent;
+        else
+            t->tg_leader = t;
+    } else {
+        t->tg_leader = t;
+    }
+    proc_children_link_locked(t->parent, t);
+    if (t->tg_leader != t)
+        proc_tg_link_locked(t);
+    spin_unlock_irqrestore(&proc_lock, list_flags);
+
     t->clone_flags = (int)flags;
     if (flags & CLONE_CHILD_CLEARTID)
         t->clear_child_tid = ctid;

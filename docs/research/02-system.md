@@ -1,8 +1,6 @@
 # 系统设计与实现状态速览
 
-> **本文提供研究所需的最小系统背景**，取代旧 02-native-api-design.md（API 规格）、03-implementation-plan.md（实现方案）、08-architecture-deep-dive.md（架构深挖）在研究目录中的位置。完整规格以 `docs/native-abi/` 为准，架构与混合内核设计以 `docs/OS-Design.md`、`docs/hybrid-kernel/` 为准；本文只保留研究论证需要的要点和设计决策记录。
->
-> **数字口径**：实现状态以 `docs/native-abi/08-runtime-status.md` 和源码为准（Native 分发表约 126-134 入口；形式化核心为 53 个 syscall，见 06）。
+> **本文提供研究所需的最小系统背景**，取代旧 02-native-api-design.md（API 规格）、03-implementation-plan.md（实现方案）、08-architecture-deep-dive.md（架构深挖）在研究目录中的位置。完整规格以 `docs/native-abi/` 为准，架构与混合内核设计以 `docs/OS-Design.md`、`docs/hybrid-kernel/` 为准；本文只保留研究论证需要的要点和设计决策记录。 **数字口径**：实现状态以 `docs/native-abi/08-runtime-status.md` 和源码为准（Native 分发表约 126-134 入口；形式化核心为 53 个 syscall，见 06）。
 
 ---
 

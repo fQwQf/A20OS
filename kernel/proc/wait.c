@@ -48,6 +48,23 @@ static int wait_is_child_for_waiter_locked(task_t *child,
     return 0;
 }
 
+/*
+ * WAIT4_CHILDREN_LIST_MODEL:
+ * Every task is linked into its parent's children list and every
+ * CLONE_THREAD task into its leader's thread-group chain (both under
+ * proc_lock; debug attach/detach re-parents go through the same helpers).
+ * wait4 therefore scans the waiting thread group's children lists --
+ * O(children of the group) -- instead of the whole global task list.
+ * Group coverage matches wait_is_child_for_waiter_locked(): a child whose
+ * parent is any thread of the waiter's TGID is reapable by the caller.
+ */
+static task_t *wait_group_start_locked(task_t *t, int options)
+{
+    if (options & __WNOTHREAD)
+        return t;
+    return t->tg_leader ? t->tg_leader : t;
+}
+
 static int wait_child_matches_locked(task_t *child, task_t *waiting_task,
                                      int pid, int options)
 {
@@ -70,66 +87,71 @@ int proc_wait4(int pid, int *status, int options)
         int found = 0;
         int reap_pending = 0;
         uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
-        for (task_t *child = proc_first_task_locked(); child;
-             child = proc_next_task_locked(child)) {
-            int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
-            if (cstate == PROC_UNUSED) continue;
-            if (!wait_child_matches_locked(child, t, pid, options)) continue;
-
-            found = 1;
-            if (cstate == PROC_ZOMBIE) {
-                if (proc_task_is_current_any_cpu(child)) {
-                    reap_pending = 1;
-                    continue;
+        for (task_t *member = wait_group_start_locked(t, options); member;
+             member = member->tg_next) {
+            for (task_t *child = member->children; child; ) {
+                task_t *next = child->sibling_next;
+                int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
+                if (cstate != PROC_UNUSED &&
+                    wait_child_matches_locked(child, t, pid, options)) {
+                    found = 1;
+                    if (cstate == PROC_ZOMBIE) {
+                        if (proc_task_is_current_any_cpu(child)) {
+                            reap_pending = 1;
+                            child = next;
+                            continue;
+                        }
+                        int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+                        if (status) {
+                            if (code >= 0)
+                                *status = (code & 0xFF) << 8;
+                            else
+                                *status = (-code) & 0xFF;
+                        }
+                        int child_pid = child->pid;
+                        if (options & WNOWAIT) {
+                            spin_unlock_irqrestore(&proc_lock, lock_flags);
+                            return child_pid;
+                        }
+                        wait_accumulate_child_time(t, child);
+                        task_t *reap_child = proc_get(child);
+                        if (!reap_child) {
+                            spin_unlock_irqrestore(&proc_lock, lock_flags);
+                            return -ECHILD;
+                        }
+                        proc_reap_detach_locked(child);
+                        spin_unlock_irqrestore(&proc_lock, lock_flags);
+                        proc_destroy_task(reap_child);
+                        proc_put(reap_child);
+                        return child_pid;
+                    }
+                    if (cstate == PROC_STOPPED && child->stop_report_pending &&
+                        ((options & WUNTRACED) || child->ptrace_stop_active)) {
+                        int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
+                        int child_pid = child->pid;
+                        if (status) {
+                            if (child->ptrace_event)
+                                *status = (child->ptrace_event << 16) |
+                                          (SIGTRAP << 8) | 0x7F;
+                            else
+                                *status = (sig << 8) | 0x7F;
+                        }
+                        if (!(options & WNOWAIT))
+                            child->stop_report_pending = 0;
+                        spin_unlock_irqrestore(&proc_lock, lock_flags);
+                        return child_pid;
+                    }
+                    if ((options & WCONTINUED) && child->continue_report_pending) {
+                        int child_pid = child->pid;
+                        if (status)
+                            *status = 0xffff;
+                        if (!(options & WNOWAIT))
+                            child->continue_report_pending = 0;
+                        spin_unlock_irqrestore(&proc_lock, lock_flags);
+                        return child_pid;
+                    }
                 }
-                int code = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
-                if (status) {
-                    if (code >= 0)
-                        *status = (code & 0xFF) << 8;
-                    else
-                        *status = (-code) & 0xFF;
-                }
-                int child_pid = child->pid;
-                if (options & WNOWAIT) {
-                    spin_unlock_irqrestore(&proc_lock, lock_flags);
-                    return child_pid;
-                }
-                wait_accumulate_child_time(t, child);
-                task_t *reap_child = proc_get(child);
-                if (!reap_child) {
-                    spin_unlock_irqrestore(&proc_lock, lock_flags);
-                    return -ECHILD;
-                }
-                proc_reap_detach_locked(child);
-                spin_unlock_irqrestore(&proc_lock, lock_flags);
-                proc_destroy_task(reap_child);
-                proc_put(reap_child);
-                return child_pid;
-            }
-            if (cstate == PROC_STOPPED && child->stop_report_pending &&
-                ((options & WUNTRACED) || child->ptrace_stop_active)) {
-                int sig = __atomic_load_n(&child->exit_code, __ATOMIC_ACQUIRE);
-                int child_pid = child->pid;
-                if (status) {
-                    if (child->ptrace_event)
-                        *status = (child->ptrace_event << 16) |
-                                  (SIGTRAP << 8) | 0x7F;
-                    else
-                        *status = (sig << 8) | 0x7F;
-                }
-                if (!(options & WNOWAIT))
-                    child->stop_report_pending = 0;
-                spin_unlock_irqrestore(&proc_lock, lock_flags);
-                return child_pid;
-            }
-            if ((options & WCONTINUED) && child->continue_report_pending) {
-                int child_pid = child->pid;
-                if (status)
-                    *status = 0xffff;
-                if (!(options & WNOWAIT))
-                    child->continue_report_pending = 0;
-                spin_unlock_irqrestore(&proc_lock, lock_flags);
-                return child_pid;
+                child = next;
             }
         }
 

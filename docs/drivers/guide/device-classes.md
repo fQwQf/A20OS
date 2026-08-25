@@ -79,7 +79,7 @@ static int my_blk_remove(device_t *dev){
 }
 ```
 
- 注意：不要把 `0` 当成“部分成功”。文件系统会把 `0` 理解为整次 I/O 完成，静默短 I/O 会直接破坏文件系统一致性。
+注意：不要把 `0` 当成“部分成功”。文件系统会把 `0` 理解为整次 I/O 完成，静默短 I/O 会直接破坏文件系统一致性。
 
 ## Network：`DEV_CLASS_NET`
 
@@ -163,7 +163,7 @@ static int my_net_remove(device_t *dev){
 }
 ```
 
- 不要这样做：在 `poll` 里分配 mbuf 或尝试获取可能睡眠的锁。`poll` 运行在 lwIP 锁下，一旦睡眠或重入 lwIP 会造成死锁。
+不要这样做：在 `poll` 里分配 mbuf 或尝试获取可能睡眠的锁。`poll` 运行在 lwIP 锁下，一旦睡眠或重入 lwIP 会造成死锁。
 
 ## Character：`DEV_CLASS_CHAR`
 
@@ -223,7 +223,7 @@ static int my_uart_remove(device_t *dev){
 }
 ```
 
- 注意：不要从 UART 驱动里直接实现 `termios` 或行编辑。这些属于 tty 层；把行规塞进硬件驱动会让新板子无法复用同一套 UART 代码。
+注意：不要从 UART 驱动里直接实现 `termios` 或行编辑。这些属于 tty 层；把行规塞进硬件驱动会让新板子无法复用同一套 UART 代码。
 
 ## Input：`DEV_CLASS_INPUT`
 
@@ -321,9 +321,9 @@ static int my_hid_remove(device_t *dev){
 }
 ```
 
- 不要这样做：当 ring 满时直接覆盖旧事件。这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
+不要这样做：当 ring 满时直接覆盖旧事件。这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
 
- `/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.a20drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
+`/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.a20drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
 
 ## Display：`DEV_CLASS_DISPLAY`
 
@@ -404,7 +404,7 @@ static int my_gpu_remove(device_t *dev){
 }
 ```
 
- 注意：注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
+注意：注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
 
 ## Audio：`DEV_CLASS_AUDIO`
 
