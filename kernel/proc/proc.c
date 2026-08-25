@@ -55,6 +55,23 @@ static void proc_link_task_locked(task_t *t)
     task_list_tail = t;
 }
 
+/* Link a freshly created (non-fork) task into the wait4 children-list
+ * model: fork() does this inline, but the a20 task_spawn/exec creation
+ * paths (proc_alloc, proc_alloc_user_image) historically relied on the
+ * old global-list wait4 scan and never linked -- breaking both wait4
+ * (-ECHILD on live children) and orphan reparenting under the list
+ * model.  Takes and releases proc_lock internally. */
+void proc_link_newborn_locked(task_t *t)
+{
+    if (!t)
+        return;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    if (!t->tg_leader)
+        t->tg_leader = t;
+    proc_children_link_locked(t->parent, t);
+    spin_unlock_irqrestore(&proc_lock, flags);
+}
+
 void proc_children_link_locked(task_t *parent, task_t *child)
 {
     if (!parent || !child || child->sibling_prev_ptr)
@@ -487,6 +504,7 @@ int proc_alloc(void (*entry)(void)) {
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
+    proc_link_newborn_locked(t);
     proc_pid_register(t);
 #ifndef CONFIG_MCU
     fdtable_close_all(t);
@@ -543,6 +561,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
+    proc_link_newborn_locked(t);
     proc_pid_register(t);
     t->entry = entry;
     t->pgdir = pgdir;
