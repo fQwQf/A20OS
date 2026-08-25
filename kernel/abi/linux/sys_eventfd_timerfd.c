@@ -3,15 +3,44 @@
 #include "fs/inotify.h"
 #include "ipc/eventfd.h"
 #include "ipc/timerfd.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
 
 int64_t sys_eventfd2(unsigned initval, int flags)
 {
-    return eventfd_create(initval, flags);
+    int ufd = eventfd_create(initval, flags);
+    if (ufd < 0)
+        return ufd;
+    int gfd = fdtable_get_current(ufd);
+    env_kind_register(gfd, A20_OBJ_EVENT_QUEUE);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_EVENT_QUEUE,
+                                     rights, gfd);
+        if (mr) {
+            fdtable_close_current(ufd);
+            return mr;
+        }
+    }
+    return ufd;
 }
 
 int64_t sys_timerfd_create(int clockid, int flags)
 {
-    return timerfd_create_file(clockid, flags);
+    int ufd = timerfd_create_file(clockid, flags);
+    if (ufd < 0)
+        return ufd;
+    int gfd = fdtable_get_current(ufd);
+    env_kind_register(gfd, A20_OBJ_TIMER);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_READ | A20_RIGHT_STAT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_TIMER, rights, gfd);
+        if (mr) {
+            fdtable_close_current(ufd);
+            return mr;
+        }
+    }
+    return ufd;
 }
 
 int64_t sys_timerfd_settime(int fd, int flags, const void *new_value, void *old_value)

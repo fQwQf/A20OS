@@ -394,3 +394,11 @@ LINUX_SYSCALL(lsm_list_modules, 0, sys_lsm_list_modules((uint64_t *)(uintptr_t)A
 /* A20OS extensions: channel IPC bridge (sys_a20_bridge.c) */
 LINUX_SYSCALL(a20_channel_pair, 0, sys_a20_channel_pair(args))
 LINUX_SYSCALL(a20_registry_client, 0, sys_a20_registry_client_fd(args))
+
+/* A20OS extensions: capability envelope control plane (sys_a20_bridge.c +
+ * envelope.c, docs/research/05). */
+LINUX_SYSCALL(a20_envelope_create, 0, sys_a20_envelope_create(args))
+LINUX_SYSCALL(a20_envelope_enter, 0, sys_a20_envelope_enter(args))
+LINUX_SYSCALL(a20_envelope_revoke, 0, sys_a20_envelope_revoke(args))
+LINUX_SYSCALL(a20_envelope_stats, 0, sys_a20_envelope_stats(args))
+LINUX_SYSCALL(a20_envelope_audit, 0, sys_a20_envelope_audit(args))

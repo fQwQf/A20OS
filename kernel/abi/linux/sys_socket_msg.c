@@ -3,6 +3,7 @@
 #include "net/socket_internal.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
+#include "ipc/envelope.h"
 #include "lwip/raw.h"
 
 typedef struct {
@@ -181,6 +182,14 @@ static int parse_send_rights(const socket_msghdr_t *mh, scm_rights_t *out)
                     scm_rights_clear(out);
                     return -EBADF;
                 }
+                if (env_active(proc_current())) {
+                    int ms = env_mediate_send_fd((int)gfd);
+                    if (ms) {
+                        vfs_put_file_ref((int)gfd, vf);
+                        scm_rights_clear(out);
+                        return ms;
+                    }
+                }
                 out->files[out->nfiles++] = vf;
             }
         }
@@ -339,6 +348,23 @@ static int64_t sys_sendmsg_from_msghdr(int fd, const socket_msghdr_t *mh,
     if (total == 0) {
         kfree(iov);
         return sys_sendto(fd, "", 0, flags, mh->msg_name, mh->msg_namelen);
+    }
+
+    /* data-plane charge: total iov bytes, write direction (05 §2.5.1).
+     * Zero-length sends fall through sys_sendto above and are charged
+     * there -- this site must stay AFTER that branch to avoid double
+     * op-charging. */
+    int64_t sgfd = fdtable_get_current(fd);
+    if (sgfd < 0) {
+        kfree(iov);
+        return sgfd;
+    }
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)sgfd, total, 1);
+        if (mr) {
+            kfree(iov);
+            return mr;
+        }
     }
 
     uint8_t *buf = (uint8_t *)proc_scratch_buffer(total);
@@ -500,6 +526,13 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
         kfree(iov);
         return gfd;
     }
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, total, 0);
+        if (mr) {
+            kfree(iov);
+            return mr;
+        }
+    }
     net_socket_t *sock = net_socket_from_file((int)gfd);
 
     uint8_t kaddr[NET_SOCKADDR_MAX];
@@ -639,6 +672,18 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                             vfs_put_file(vf);
                             ctrunc = 1;
                             continue;
+                        }
+                        /* A6 receive side: an incoming descriptor only
+                         * installs if the receiver's envelope authorizes
+                         * its class (docs/research/05 §2.5.3); denied fds
+                         * are closed like other undeliverable ones. */
+                        if (env_active(proc_current())) {
+                            int mr = env_mediate_acquire_gfd(g2);
+                            if (mr) {
+                                vfs_close(g2);
+                                ctrunc = 1;
+                                continue;
+                            }
                         }
                         int u2 = fdtable_install_current(
                             g2, (flags & MSG_CMSG_CLOEXEC) ? O_CLOEXEC : 0);

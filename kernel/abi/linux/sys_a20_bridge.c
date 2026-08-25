@@ -12,6 +12,7 @@
 #include "syscall_impl.h"
 #include "core/errno.h"
 #include "core/fcntl.h"
+#include "ipc/envelope.h"
 #include "ipc/ipc.h"
 #include "ipc/channel_fd.h"
 
@@ -74,3 +75,58 @@ int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args)
     return -EOPNOTSUPP;
 #endif
 }
+
+/*
+ * SYS_a20_envelope_create(policy) — create an envelope from a policy struct
+ * and return its id (for a20_envelope_enter / revoke / stats).
+ */
+int64_t sys_a20_envelope_create(const linux_syscall_args_t *args)
+{
+    extern int64_t env_create(const a20_env_policy_t *policy, uint32_t flags);
+    return env_create((const a20_env_policy_t *)(uintptr_t)args->arg[0],
+                      (uint32_t)args->arg[1]);
+}
+
+/*
+ * SYS_a20_envelope_enter(env_id) — attach the CALLING process to an
+ * envelope.  Intended to run in a forked child before execve: the trusted
+ * supervisor creates the envelope and forks; untrusted code only ever runs
+ * after enter().  Monotone: a second enter fails.
+ */
+int64_t sys_a20_envelope_enter(const linux_syscall_args_t *args)
+{
+    extern int env_enter(int64_t env_id);
+    return env_enter((int64_t)args->arg[0]);
+}
+
+/*
+ * SYS_a20_envelope_revoke(env_id) — active revocation: mark expired and,
+ * with KILL_ON_EXPIRE, kill attached tasks.  Owner or root only.
+ */
+int64_t sys_a20_envelope_revoke(const linux_syscall_args_t *args)
+{
+    extern int env_revoke(int64_t env_id);
+    return env_revoke((int64_t)args->arg[0]);
+}
+
+/*
+ * SYS_a20_envelope_stats(env_id, out) — read mediation counters.
+ */
+int64_t sys_a20_envelope_stats(const linux_syscall_args_t *args)
+{
+    extern int env_stats(int64_t env_id, a20_env_stats_t *out);
+    return env_stats((int64_t)args->arg[0],
+                     (a20_env_stats_t *)(uintptr_t)args->arg[1]);
+}
+
+/*
+ * SYS_a20_envelope_audit(out) -- E8 runtime invariant audit: re-verifies
+ * TypeAllowed / RightsSubCap / budget bounds / attachment consistency
+ * across every live envelope (docs/research/08 §2.4).
+ */
+int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args)
+{
+    extern int64_t env_audit(struct a20_env_audit *out);
+    return env_audit((struct a20_env_audit *)(uintptr_t)args->arg[0]);
+}
+
