@@ -522,4 +522,12 @@ int64_t sys_lsm_list_modules(uint64_t *ids, size_t *size, unsigned int flags);
  * declared (not a syscall). */
 int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg);
 
+/* KCMP_EPOLL_TFD support (sys_epoll.c): 1 when @file_identity is registered
+ * in the epoll instance @epoll_vf owned by @owner, 0 when absent, -EBADF
+ * when @epoll_vf is not an epoll instance. */
+struct task_t;
+struct vfile;
+int epoll_slot_contains_file(struct task_t *owner, struct vfile *epoll_vf,
+                             uint64_t file_identity);
+
 #endif /* _LINUX_SYSCALL_IMPL_H */

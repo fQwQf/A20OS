@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 #include "proc/proc_internal.h"
 #include "fs/vfs/file.h"
+#include "fs/fdtable.h"
 #include "fs/readiness.h"
 #include "core/timer.h"
 #include "mm/slab.h"
@@ -107,6 +108,34 @@ static vfile_ops_t g_epoll_ops = {
     .poll = epoll_poll,
     .close = epoll_close,
 };
+
+int epoll_slot_contains_file(struct task_t *owner, struct vfile *epoll_vf,
+                             uint64_t file_identity)
+{
+    if (!owner || !epoll_vf || epoll_vf->ops != &g_epoll_ops ||
+        !epoll_vf->priv)
+        return -EBADF;
+    epoll_t *ep = epoll_vf->priv;
+    for (int i = 0; i < EPOLL_MAX_FDS; i++) {
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
+        int registered = ep->items[i].registered;
+        int fd = ep->items[i].fd;
+        spin_unlock_irqrestore(&ep->lock, flags);
+        if (!registered)
+            continue;
+        int gfd = fdtable_get(owner, fd);
+        if (gfd < 0)
+            continue;
+        vfile_t *vf = vfs_get_file_ref(gfd);
+        if (!vf)
+            continue;
+        int match = vf->identity == file_identity;
+        vfs_put_file_ref(gfd, vf);
+        if (match)
+            return 1;
+    }
+    return 0;
+}
 
 static int vfile_is_epoll(vfile_t *vf)
 {
