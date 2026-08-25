@@ -1452,3 +1452,34 @@ void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty)
     }
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
+
+void page_cache_file_range_stats(vfile_t *vf, uint64_t off_bytes,
+                                 size_t len_bytes, size_t *resident,
+                                 size_t *dirty)
+{
+    if (resident)
+        *resident = 0;
+    if (dirty)
+        *dirty = 0;
+    if (!vf || !vf->vnode || !g_initialized || len_bytes == 0)
+        return;
+
+    uint64_t first = off_bytes >> PAGE_SIZE_BITS;
+    uint64_t last = (off_bytes + (len_bytes - 1)) >> PAGE_SIZE_BITS;
+    if (last < first)
+        last = ~(uint64_t)0 >> PAGE_SIZE_BITS;
+
+    uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    for (size_t i = 0; i < g_allocated_pages; i++) {
+        page_cache_page_t *page = page_cache_page_at(i);
+        if (!page || !page->valid || page->vnode != vf->vnode)
+            continue;
+        if (page->index < first || page->index > last)
+            continue;
+        if (resident)
+            *resident += PAGE_SIZE;
+        if (page->dirty && dirty)
+            *dirty += PAGE_SIZE;
+    }
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+}
