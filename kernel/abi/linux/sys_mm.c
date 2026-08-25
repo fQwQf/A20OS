@@ -5,6 +5,7 @@
 #include "mm/vm.h"
 #include "mm/mm.h"
 #include "fs/devfs.h"
+#include "fs/memfd.h"
 #include "fs/page_cache.h"
 #include "drivers/gpu/framebuffer.h"
 #include "drivers/gpu/drm.h"
@@ -56,6 +57,11 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
                     vfs_put_file_ref(gfd, vf);
                     return -EBADF;
                 }
+            }
+
+            if (!memfd_secret_may_access(vf, proc_current())) {
+                vfs_put_file_ref(gfd, vf);
+                return -EACCES;
             }
 
             if (devfs_is_fb_vfile(vf)) {

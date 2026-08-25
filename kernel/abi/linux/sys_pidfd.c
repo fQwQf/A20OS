@@ -3,6 +3,7 @@
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
+#include "fs/memfd.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
 
@@ -106,6 +107,11 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     if (!target_file) {
         proc_put(target);
         return -EBADF;
+    }
+    if (!memfd_secret_may_access(target_file, self)) {
+        vfs_put_file_ref(target_gfd, target_file);
+        proc_put(target);
+        return -EACCES;
     }
     int r = fdtable_install_current(target_gfd, (int)flags);
     vfs_put_file_ref(target_gfd, target_file);
