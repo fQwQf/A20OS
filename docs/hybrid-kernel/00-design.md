@@ -123,4 +123,4 @@ vDSO（`clock_gettime`/`gettimeofday`/`getcpu`，与内核 timekeeping 位级一
 
 ### 用户态文件系统服务（uxfs + ufsd）
 
-文件系统实现同样可以迁出内核：内核侧 `uxfs`（`kernel/fs/uxfs/`，fstype `"uxfs"`）把 vnode 操作翻译为 ufs 协议消息经 Channel 转发，用户态 `ufsd` 服务持有全部 FAT32 逻辑（同源复用 fat32lite.c），块 IO 经受控的 `fs_serve`/`fs_block_io` syscall 进入内核块层——只有注册挂载的服务任务可以访问其声明的块设备。服务崩溃后在飞请求以 `-EIO` 收场，重启后重新挂载。设计与边界见 [06-user-fs.md](06-user-fs.md)。
+文件系统实现同样可以迁出内核：内核侧 `uxfs`（`kernel/fs/uxfs/`，fstype `"uxfs"`）把 vnode 操作翻译为 ufs 协议消息经 Channel 转发，用户态宿主 `ufsd` 按参数承载多个后端——fat（fat32lite 同源编译）、ext4/iso9660/ntfs（内核 diskfs 源码经 fscompat 环境原样编译；iso/ntfs 只读）。块 IO 经受控的 `fs_serve`/`fs_block_io` syscall 进入内核块层——只有注册挂载的服务任务可以访问其声明的块设备（含容量查询）。ufsd 由 svcmgr 清单托管（argv 传参、echo 健康探针、缺盘干净退出）；服务崩溃后在飞请求以 `-EIO` 收场，SIGKILL→umount→重启→数据持久的恢复契约由 `smoke-native-fs-all` 的 UXFS_RESTART 段实测。设计与边界见 [06-user-fs.md](06-user-fs.md)。
