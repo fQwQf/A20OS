@@ -314,6 +314,11 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr);
 /* A20OS extensions: channel IPC bridge (sys_a20_bridge.c). */
 int64_t sys_a20_channel_pair(const linux_syscall_args_t *args);
 int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args);
+int64_t sys_a20_envelope_create(const linux_syscall_args_t *args);
+int64_t sys_a20_envelope_enter(const linux_syscall_args_t *args);
+int64_t sys_a20_envelope_revoke(const linux_syscall_args_t *args);
+int64_t sys_a20_envelope_stats(const linux_syscall_args_t *args);
+int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args);
 
 /* Keyring (sys_keyring.c). */
 int64_t sys_add_key(const char *type, const char *description,

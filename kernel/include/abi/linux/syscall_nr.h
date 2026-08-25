@@ -389,4 +389,9 @@
  * musl-generated call; Linux programs use them through syscall(). */
 #define SYS_a20_channel_pair    900
 #define SYS_a20_registry_client 901
+#define SYS_a20_envelope_create 902
+#define SYS_a20_envelope_enter  903
+#define SYS_a20_envelope_revoke 904
+#define SYS_a20_envelope_stats  905
+#define SYS_a20_envelope_audit  906
 #endif /* _ABI_LINUX_SYSCALL_NR_H */
