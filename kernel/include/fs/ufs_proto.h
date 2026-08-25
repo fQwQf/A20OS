@@ -30,6 +30,7 @@
 #define UFS_OP_WRITE 11
 #define UFS_OP_SYNC 12
 #define UFS_OP_STATFS 13
+#define UFS_OP_RENAME 14
 
 /* GETATTR/LOOKUP 应答中的节点类型（与 VFS_FT_* 低 4 位对齐） */
 #define UFS_FT_FILE 1
@@ -46,6 +47,7 @@
  * 无对齐填充。READDIR 的应答 payload 为紧凑目录项序列：
  *   u64 ino | u8 type | u8 name_len | char name[name_len]
  * READ 的应答 payload 为文件字节；WRITE 的请求 payload 为待写字节。
+ * RENAME：ino=源目录，arg0=目标目录 ino，name=源名，payload=目标名字符串。
  */
 typedef struct ufs_req_hdr {
     uint32_t magic;    /* UFS_REQ_MAGIC */

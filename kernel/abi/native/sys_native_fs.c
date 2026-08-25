@@ -857,10 +857,26 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     a20_fs_block_io_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
-    if (!kargs.buf || !kargs.count || kargs.count > 4096)
+    task_t *cur = proc_current();
+
+    /* count==0 为容量查询：buf 指向 u64 出参，返回扇区数 */
+    if (kargs.count == 0) {
+        if (!kargs.buf)
+            return -A20_ERR_INVALID_ARGUMENT;
+        uint64_t sectors = 0;
+        int qrc = uxfs_block_capacity(cur, (int)kargs.block_index,
+                                      &sectors);
+        if (qrc < 0)
+            return -A20_ERR_IO;
+        kargs.lba = sectors; /* 复用出参字段回传 */
+        if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+            return -A20_ERR_FAULT;
+        return A20_OK;
+    }
+
+    if (!kargs.buf || kargs.count > 4096)
         return -A20_ERR_INVALID_ARGUMENT;
 
-    task_t *cur = proc_current();
     uint32_t secsz = 512; /* 先按 512 探测；真实扇区在拿到设备后校验 */
     size_t bytes = (size_t)kargs.count * secsz;
     if (bytes > UFS_BLOCK_IO_MAX_BYTES)
