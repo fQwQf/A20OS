@@ -821,7 +821,10 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
                                         A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                         A20_RIGHT_STAT | A20_RIGHT_CONTROL |
                                         A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-    if (self_h >= 0) child_self = (a20_handle_t)self_h;
+    if (self_h >= 0) {
+        child_self = (a20_handle_t)self_h;
+        new_task->a20_self_h = child_self;
+    }
 
     a20_handle_t child_root = A20_HANDLE_NULL, child_cwd = A20_HANDLE_NULL;
     a20_handle_entry_t entry;
