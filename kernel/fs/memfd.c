@@ -14,6 +14,8 @@ typedef struct {
     size_t size;
     size_t cap;
     mutex_t data_lock;
+    int secret;
+    int owner_euid;
 } memfd_file_t;
 
 static int memfd_file_grow(memfd_file_t *mf, size_t need)
@@ -166,9 +168,10 @@ static vnode_ops_t g_memfile_vops = {
     .release = memfd_file_release,
 };
 
-int memfd_create_file(int flags)
+static int memfd_create_impl(int flags, unsigned allowed_flags, int secret)
 {
-    if (flags & ~(O_CLOEXEC | 0x3U | 0x4U)) return -EINVAL;
+    if (flags & ~(uint32_t)allowed_flags)
+        return -EINVAL;
     memfd_file_t *mf = kmalloc(sizeof(*mf));
     vnode_t *vn = kmalloc(sizeof(*vn));
     vfile_t *vf = vfile_alloc();
@@ -180,6 +183,9 @@ int memfd_create_file(int flags)
     }
     memset(mf, 0, sizeof(*mf));
     mutex_init(&mf->data_lock);
+    mf->secret = secret;
+    task_t *cur = proc_current();
+    mf->owner_euid = cur ? cur->cred.euid : 0;
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)vn;
     vn->type = VFS_FT_REGULAR;
@@ -195,6 +201,32 @@ int memfd_create_file(int flags)
     if (!(flags & 0x2U))
         vf->seals = F_SEAL_SEAL;
     return anonfd_install_vfile(vf, flags);
+}
+
+int memfd_create_file(int flags)
+{
+    return memfd_create_impl(flags, O_CLOEXEC | 0x2U | 0x4U, 0);
+}
+
+int memfd_secret_file(int flags)
+{
+    return memfd_create_impl(flags, O_CLOEXEC | 0x2U, 1);
+}
+
+int vfile_is_memfd_secret(vfile_t *vf)
+{
+    memfd_file_t *mf = vf ? vf->priv : NULL;
+    return mf ? mf->secret : 0;
+}
+
+/* Secret memfds may only be mapped (and stolen through pidfd_getfd) by a
+ * caller whose euid matches the creator; everyone else sees -EACCES. */
+int memfd_secret_may_access(vfile_t *vf, task_t *caller)
+{
+    memfd_file_t *mf;
+    if (!vf || !(mf = vf->priv) || !mf->secret)
+        return 1;
+    return caller && caller->cred.euid == mf->owner_euid;
 }
 
 /* Replace the memfd contents with the given bytes (used by the DRM PRIME
