@@ -37,15 +37,16 @@
 - perf_event_open（`kernel/abi/linux/sys_perf.c`）：PERF_TYPE_SOFTWARE 事件（CPU/TASK clock、page faults、context switches 及无源的软件事件），read(2) 输出 count/time/id，支持 ENABLE/DISABLE/RESET/PERIOD/ID；无 PMU，硬件/raw/breakpoint 事件返回 -EINVAL，无 mmap 采样环。
 - futex：全部标准命令（含有边界的 PI 变体 LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI），不携带优先级继承提升；FUTEX_FD（Linux 5.4 移除）返回 -EINVAL。
 - Landlock：fd-backed ruleset + path-beneath 规则，在 `vfs_open` 强制；没有完整 LSM 框架。
-- rseq：注册/注销每线程 rseq 区域；调度器存在跨 CPU 偷取迁移，但 rseq 尚无内核迁移中止（`rseq_ip_fixup`），这是登记语义（Linux 会写 cpu_id 并回绕到 abort_ip），后续深化方向。
+- rseq：注册/注销每线程 rseq 区域，并在注册时与每次调度分发把 cpu_id/cpu_id_start/node_id/mm_cid 经直接映射写入用户区域（非驻留页静默跳过）；抢占时的序列中止（`rseq_ip_fixup`）仍是后续深化方向。
 - `splice`/`vmsplice`/`tee` 是真实语义（核心 `kernel/fs/splice.c` + pipe peek）：file↔pipe、pipe↔pipe、tee 不消耗源；`SPLICE_F_*` 校验、pipe 端点非空 offset 返回 `-ESPIPE`、无 pipe 端点返回 `-EINVAL`；传输基于拷贝（等价 Linux 非页对齐回退路径）。
 - `membarrier` 实现完整命令集：QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_GLOBAL_EXPEDITED/PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)/REGISTER_PRIVATE_EXPEDITED(+SYNC_CORE/RSEQ)；`PRIVATE_EXPEDITED` 要求先注册（否则 `-EPERM`），真正的跨 CPU 屏障复用 reschedule IPI（远端处理函数执行 acquire fence 并回 ack）。未知命令与非法 flags 返回 `-EINVAL`。
 - `eventfd` 的 `O_NONBLOCK` 改为实时读取 `vf->flags`，因此 `fcntl(F_SETFL, O_NONBLOCK)` 之后 read/write 按管道语义立即 `-EAGAIN`（与 pipe 一致）。
-- `restart_syscall` 返回 `-ERESTARTNOINTR`；`remap_file_pages` 是接受式 no-op；`memfd_secret` 退化为普通 memfd。
+- `restart_syscall` 重放分发器保存的被中断调用（nr+args 重启块）；无挂起重启返回 -ENOSYS（对齐 Linux 默认 restart_block 行为）。`remap_file_pages` 真实重绑定共享文件映射窗口（munmap + MAP_FIXED 重新进入，尊重 VM_SEALED，失败尽力恢复原内容）。`memfd_secret` 为 owner 限定的 secret memfd：mmap 与 pidfd_getfd 仅创建者 euid 可用。
 - SysV 消息队列（`kernel/ipc/sysv_msg.c`）：固定 32 队列表，支持 msgget/msgsnd/msgrcv/msgctl，含阻塞 park/wake 与 IPC_NOWAIT/MSG_NOERROR。
 - POSIX 消息队列（`kernel/ipc/posix_mq.c`）：命名队列 + per-fd mqd，优先级 FIFO，绝对超时（timedsend/timedreceive），mq_notify 用信号投递。
 - ioprio/pkey：每任务 I/O 优先级与 16 槽保护键位图（`kernel/proc/sched_compat.c`），pkey_mprotect 等价 mprotect。
-- `mseal` 是真实 VMA seal 语义：核心 MM 在 `mm_mmap_locked`/`mm_mprotect_locked`/`mm_munmap_locked`/`mm_mremap_locked`/brk shrink 与 `madvise(DONTNEED/FREE/REMOVE)` 中强制 `VM_SEALED`（覆盖 MAP_FIXED 覆写、mprotect、munmap、mremap 均返回 -EPERM），fork 继承 seal；尚无 `/proc/smaps` 的 Sealed 统计与 userfaultfd 交互。`seccomp` 明确返回不支持而非假装过滤；kexec 明确拒绝。
+- `mseal` 是真实 VMA seal 语义：核心 MM 在 `mm_mmap_locked`/`mm_mprotect_locked`/`mm_munmap_locked`/`mm_mremap_locked`/brk shrink 与 `madvise(DONTNEED/FREE/REMOVE)` 中强制 `VM_SEALED`（覆盖 MAP_FIXED 覆写、mprotect、munmap、mremap 均返回 -EPERM），fork 继承 seal；尚无 `/proc/smaps` 的 Sealed 统计与 userfaultfd 交互。
+- `seccomp` 是经典 BPF 引擎（校验器+解释器，`kernel/ipc/seccomp.c`）：STRICT 白名单、fork 继承的过滤器链、分发入口 KILL/TRAP(SIGSYS+SYS_SECCOMP)/ERRNO/LOG 动作；TSYNC/LOG flags 与 USER_NOTIF 在安装期拒绝。`kexec_load/file_load` 完成段装载与内核重叠校验，reboot(KEXEC) 在无 machine_kexec 后端时按已装载/-EINVAL 报告。`quotactl(_fd)` 由配额核心支撑（Q_QUOTAON/OFF、GETFMT、GETINFO/SETINFO、GET/SETQUOTA、GETNEXTQUOTA、Q_SYNC），VFS 写增长/ftruncate/O_CREAT/mkdir/symlink/unlink 挂钩强制 EDQUOT。
 - `renameat` 已补注册（编号 38，glibc 直接调用）：实现为 `renameat2` 的 flags=0 包装。`sched_setattr`/`sched_getattr` 改为完整 `struct sched_attr` 线格式：校验 policy/flags/nice/priority 并经 `proc_sched_set` 落调度器，支持 `SCHED_FLAG_RESET_ON_FORK`；不应用 util-clamp/deadline 字段。
 - `nfsservctl` 返回 -ENOSYS（Linux 4.19 已移除该 syscall，这是正确语义）；`map_shadow_stack` 是 x86 CET 特性，在 RISC-V 返回 -ENOSYS（架构正确）。
 - LSM 自省：`lsm_get_self_attr`/`lsm_list_modules` 报告 Landlock；`lsm_set_self_attr` 由 `landlock_restrict_self` 覆盖。

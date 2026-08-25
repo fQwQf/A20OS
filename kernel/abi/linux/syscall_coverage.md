@@ -358,16 +358,16 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `userfaultfd` | memory | `partial` | `smoke-syscall-ext` | MISSING-mode anonymous ranges; UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE; no fork/shmem/WP modes |
 | `perf_event_open` | perf | `partial` | `smoke-syscall-ext` | PERF_TYPE_SOFTWARE events (CPU/TASK clock, page faults, context switches); read(2)+ENABLE/DISABLE/RESET/PERIOD/ID; no PMU or mmap ring |
 | `arch_prctl` | arch | `partial` | `smoke-proc-stress` | x86_64 ARCH_SET/GET_FS/GS and GET_CPUID; non-x86 fallback -EOPNOTSUPP (arch-correct) |
-| `restart_syscall` | system | `partial` | `smoke-syscall-ext` | returns -ERESTARTNOINTR when no restart is pending; covered by signal restart semantics |
-| `kcmp` | process | `partial` | `smoke-syscall-ext` | KCMP_FILE/VM/FILES/FS/SIGHAND/IO/SYSVSEM comparisons |
+| `restart_syscall` | system | `partial` | `smoke-syscall-ext` | replays the dispatcher-saved interrupted syscall (nr+args restart block); -ENOSYS with nothing pending; nanosleep-style argument rewriting not modeled |
+| `kcmp` | process | `partial` | `smoke-syscall-ext` | Linux-exact type enum incl. KCMP_EPOLL_TFD over open-file identity; both targets gated by CAP_SYS_PTRACE or ptrace access |
 | `readahead` | fd I/O | `partial` | `smoke-vfs-stress` | prefetches pages through the page cache (kernel/fs/page_cache.c) |
-| `cachestat` | fd I/O | `partial` | `smoke-vfs-stress` | reports resident/dirty cache bytes for a file |
-| `lookup_dcookie` | system | `partial` | `smoke-abi-linux` | returns a synthetic "/" cookie path; no cookie filesystems |
-| `quotactl` | system | `partial` | `smoke-abi-linux` | returns -EOPNOTSUPP (no quota subsystem) |
-| `quotactl_fd` | system | `partial` | `smoke-abi-linux` | returns -EOPNOTSUPP (no quota subsystem) |
-| `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | accepts the deprecated op as a no-op; mmap/madvise cover the semantics |
-| `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | falls back to a regular memfd (no secret-memory direct-map exclusion) |
-| `rseq` | process | `partial` | `smoke-proc-stress` | registers/unregisters the per-thread rseq area; no CPU migration to abort |
+| `cachestat` | fd I/O | `partial` | `smoke-vfs-stress` | honors struct cachestat_range byte window via page_cache_file_range_stats; writeback/evicted counters are zero by design |
+| `lookup_dcookie` | system | `partial` | `smoke-abi-linux` | resolves cookies from the kernel dcookie registry (kernel/fs/dcookie.c); producers register (vnode,path) pairs |
+| `quotactl` | system | `partial` | `smoke-abi-linux` | quota core (kernel/fs/quota.c): Q_QUOTAON/OFF, GETFMT, GETINFO/SETINFO, GETQUOTA/SETQUOTA (CAP_SYS_ADMIN), GETNEXTQUOTA, Q_SYNC |
+| `quotactl_fd` | system | `partial` | `smoke-abi-linux` | same command set addressed through the fd's own mount |
+| `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | rebinds a shared file-mapping window to pgoff via munmap+MAP_FIXED re-entry under seal checks; restores original contents on remap failure |
+| `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | secret memfd: mmap and pidfd_getfd restricted to the creator euid (-EACCES otherwise) |
+| `rseq` | process | `partial` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery remains future work |
 | `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |
@@ -401,11 +401,11 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `pkey_mprotect` | memory | `partial` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
 | `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
 | `mseal` | memory | `partial` | `smoke-mm-stress` | real VMA seal semantics: core MM enforces VM_SEALED against mmap-FIXED overwrite, mprotect, munmap, mremap, brk shrink and madvise DONTNEED/FREE/REMOVE with -EPERM; inherited by fork; no /proc/smaps Sealed reporting or userfaultfd interplay |
-| `seccomp` | system | `partial` | `smoke-abi-linux` | no seccomp engine; reports unsupported rather than faking |
-| `kexec_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
-| `kexec_file_load` | system | `partial` | `smoke-abi-linux` | refuses kexec (no image handoff support) |
+| `seccomp` | system | `partial` | `smoke-abi-linux` | classic-BPF engine (verifier+interpreter), STRICT whitelist, filter chains inherited at fork, KILL/TRAP(SIGSYS)/ERRNO/LOG at dispatch; TSYNC/LOG flags and USER_NOTIF refused at install |
+| `kexec_load` | system | `partial` | `smoke-abi-linux` | segments staged into frames with kernel-overlap validation; reboot(KEXEC) needs a machine_kexec backend and reports -ENOSYS with an image loaded |
+| `kexec_file_load` | system | `partial` | `smoke-abi-linux` | reads and ELF-validates the image for the backend; placement deferred like kexec_load execution |
 | `nfsservctl` | system | `full` | `smoke-abi-linux` | removed in Linux 4.19; -ENOSYS is the correct Linux 4.19+ behavior |
-| `map_shadow_stack` | arch | `full` | `smoke-abi-linux` | x86 CET feature; -ENOSYS on RISC-V is the correct arch behavior |
+| `map_shadow_stack` | arch | `full` | `smoke-abi-linux` | x86_64 builds allocate a guard-page-backed CET stack and honor SHADOW_STACK_SET_TOKEN; other architectures keep arch-correct -ENOSYS |
 | `futex_wait` | futex | `partial` | `smoke-proc-stress` | split-out futex_wait with timespec timeout |
 | `futex_wake` | futex | `partial` | `smoke-proc-stress` | split-out futex_wake |
 | `rt_tgsigqueueinfo` | signals | `partial` | `smoke-proc-stress` | queue a signal to a specific thread of a tgid |
