@@ -280,6 +280,9 @@ SMOKE_INPUT_DELAY ?= 8
 # mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
 # page coverage under TCG; it is the heaviest smoke and needs a longer budget.
 SMOKE_TIMEOUT_MM_ST ?= 45s
+# oom_stress exhausts a 32 MiB cgroup limit page by page under TCG; the fault
+# storm plus boot time needs more than the default window.
+SMOKE_TIMEOUT_OOM ?= 60s
 SMOKE_TIMEOUT_MM_FORK_EXEC ?= 120s
 # smoke-native-deepen runs several blocking waits (FS event + socket event) plus
 # a user-space pager round trip under TCG; it needs more than the 20s default.
