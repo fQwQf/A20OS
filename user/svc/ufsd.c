@@ -183,7 +183,9 @@ static int32_t parse_int(const char *s)
 /* 监管通道：svcmgr 固定槽位端点上的 IDL echo 探针                      */
 /* ------------------------------------------------------------------ */
 
-#define UFS_POLL_SLEEP_NS 200000ull /* 200 µs 空闲轮询间隔 */
+/* EventQ watch 的 user_data 标记：区分 fs 通道与监管槽位的唤醒源 */
+#define UFS_EV_FS  1u
+#define UFS_EV_SVC 2u
 
 /* 返回 1 = 处理了一条监管消息 */
 static int svc_ep_pump(a20_handle_t svc_ep)
@@ -299,16 +301,41 @@ int main(int argc, char **argv, char **envp)
     log_str("\n");
 
     /*
-     * 双通道服务循环：fs 通道承载 uxfs 协议（阻塞语义保留在"取到消息
-     * 后同步处理"），监管槽位以非阻塞轮询应答 echo 探针。空闲时短暂
-     * 睡眠避免忙等；EventQ 统一等待是后续优化项。
+     * 双通道统一等待：fs 通道与监管槽位挂到同一个 EventQ，空闲时阻塞
+     * 在 event_wait 上（docs/roadmap 的"监管通道接入 EventQ 统一等待"
+     * 项）。MESSAGE_READY 与对端关闭都会唤醒循环；先排空再等待的顺序
+     * 保证 watch 注册前已发布的消息同样被处理。
      */
     a20_handle_t svc_ep = A20_SVC_PING_HANDLE;
+    a20_handle_t eq;
+    if (a20_event_queue_create(&eq) != A20_OK) {
+        log_str("UFSD: eventq create failed\n");
+        a20_task_exit(1);
+    }
+    if (a20_event_watch(eq, pair.endpoints[0],
+                        A20_EVENT_MASK(A20_EVENT_MESSAGE_READY) |
+                        A20_EVENT_MASK(A20_EVENT_PEER_CLOSED),
+                        UFS_EV_FS) != A20_OK) {
+        log_str("UFSD: watch fs ep failed\n");
+        a20_task_exit(1);
+    }
+    if (a20_event_watch(eq, svc_ep,
+                        A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
+                        UFS_EV_SVC) != A20_OK) {
+        /* 监管槽位可能未被本任务安装（无 ping 通道的启动方式）：
+         * 降级为只由 fs 通道唤醒，监管 echo 由下次 fs 流量顺带处理。 */
+        log_str("UFSD: watch svc ep failed; continuing without it\n");
+    }
+
     static uint8_t rx[UFSD_MSG_MAX];
     static char name_buf[512];
     static char aux_buf[512];
     for (;;) {
-        svc_ep_pump(svc_ep);
+        for (;;) {
+            int pr = svc_ep_pump(svc_ep);
+            if (pr <= 0)
+                break;
+        }
 
         uint32_t blen = sizeof(rx);
         uint32_t hcnt = 0;
@@ -316,8 +343,11 @@ int main(int argc, char **argv, char **envp)
             a20_channel_recv_flags(pair.endpoints[0], rx, &blen, 0, &hcnt,
                                    A20_MSG_NONBLOCK);
         if (st == -A20_ERR_WOULD_BLOCK) {
-            a20_time_t nap = { .secs = 0, .nsecs = UFS_POLL_SLEEP_NS };
-            a20_thread_sleep(nap);
+            a20_event_t ev;
+            if (a20_event_wait(eq, (a20_time_t){ .secs = A20_TIMEOUT_INFINITE,
+                                                 .nsecs = 0 },
+                               &ev) < 0)
+                continue;
             continue;
         }
         if (st < 0)
