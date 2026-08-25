@@ -1,3 +1,4 @@
+#include "proc/posix_timer.h"
 #include "proc/proc_internal.h"
 
 #include "proc/park.h"
@@ -536,7 +537,6 @@ void sched_scan_timers(uint64_t now)
     }
 
 #ifdef CONFIG_ABI_LINUX
-    extern void posix_timer_tick(void);
     posix_timer_tick();
 #endif
 
