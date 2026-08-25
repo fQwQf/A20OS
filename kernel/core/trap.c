@@ -259,6 +259,18 @@ static void user_trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
+            /*
+             * A failing demand fault may itself have queued this task's death:
+             * a memory-limit charge failure fires the OOM kill before the
+             * fault path reports -ENOMEM.  A pending fatal signal must take
+             * precedence over a synthesized SIGSEGV so an OOM victim dies
+             * from its kill, mirroring Linux's fatal-signal-pending handling
+             * of VM_FAULT_OOM.
+             */
+            if (signal_task_has_fatal(cur)) {
+                signal_deliver_user(ctx);
+                return;
+            }
             if (user_sync_signal_is_handled(cur, SIGSEGV) &&
                 deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
