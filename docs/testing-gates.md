@@ -105,6 +105,26 @@
 
 `make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它要求串口日志出现 `part ok` 与 `System is going down for power-off NOW`（即内核完成 bring-up 并主动关机）；watchdog timeout 视为失败。它不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
 
+### 能力信封（研究门禁）
+- **How to run**: `make smoke-envelope`
+- **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 镜像并在 QEMU 中运行 `envelope_smoke`（docs/research/05 的调解器攻击套件）。十三个子场景：信封内正常文件工作、类型拒绝（EPERM）、权限上限拒绝（EACCES）、操作预算耗竭、数据预算预扣、时间预算过期（惰性清扫）、`/proc/self/fd/<n>` 重开不可提权（A8 方向位拒绝）、主动撤销 + KILL_ON_EXPIRE（SIGKILL 工作进程）、SCM_RIGHTS 接收经调解可用（A6）、SCM_RIGHTS 接收类外丢弃、SCM_RIGHTS 发送传播检查（propagation_types=0 → EPERM）、pidfd_getfd 窃取按类裁决（SOCKET 拒 EPERM / FILE 准且可读，A7）、shmat MEMORY 类检查（A5）。串口日志须出现全部 `ENVELOPE_SMOKE: <场景> PASS` 与总 `ENVELOPE_SMOKE: PASS`。套件末尾另通过 syscall 906 执行 E8 运行时不变式审计（TypeAllowed/RightsSubCap/预算界/挂载一致性全量走查），要求零违例。
+- **When it fails**: 查看 `.kernel-build/smoke/envelope-riscv64.log` 中首个 FAIL 场景；对照 `kernel/ipc/envelope.c` 的 `ENVELOPE_MEDIATION_CONTRACT` 与 docs/research/05 §2.5 的逃逸面语义。
+
+### E2 试点矩阵（研究门禁）
+- **How to run**: `make smoke-envelope-pilot`
+- **What it checks**: 在 QEMU 中运行 `envelope_pilot`——五场景 × 四臂（无限制 / Landlock-permissive / Landlock-strict / ENVELOPE）共 20 个单元，验证论文必要性论证：粗粒度机制的两难被量化（permissive 放行全部攻击、strict 连良性安装一起拒绝），信封在"良性可用 × 攻击阻断"两维同时成立。场景定义与预期表见 docs/research/10-evaluation.md §4.1。
+- **When it fails**: 查看 `.kernel-build/smoke/envelope-pilot-riscv64.log` 中首个 FAIL 单元（格式 `<场景>/<臂> FAIL rc=N`）；对照 10 §4.1 的预期结果表与 `kernel/ipc/envelope.c` 的调解语义。
+
+### 咽喉完备性覆盖（研究门禁）
+- **How to run**: `make check-envelope-coverage`
+- **What it checks**: 从 `syscall_table.def` 机械再生成信封覆盖矩阵（docs/research/verification/envelope_coverage.md）并与已提交版本比对。366 个登记入口必须逐一显式分类：ACQUIRE / TRANSFER / USE / FAILCLOSED / PLANNED-W2 / NA——新登记 syscall 未分类即失败，杜绝静默的咽喉缺口。当前计数：30 已调解 / 36 PLANNED-W2 / 300 NA。
+- **When it fails**: 运行 `python3 tools/gen_envelope_coverage.py` 后 diff 该文件，为未分类的新入口补上类目（引用 05 §2.5.1 的进入点编号），重新提交。
+
+### 信封开销微基准（研究门禁）
+- **How to run**: `make smoke-envelope-bench`
+- **What it checks**: 在 QEMU 中运行 `envelope_bench`——每操作族在无限制（off）与信封内（on）各测一轮（CLOCK_MONOTONIC 单点计时，ITERS=20000/族）：open+close（A1 获取调解）、read-64B / write-64B（方向位 R/W + ops/data 计费）、lseek（未调解对照组）。串口日志须出现全部 `ENVELOPE_BENCH:` 行与总 `ENVELOPE_BENCH: PASS`。
+- **When it fails**: 查看 `.kernel-build/smoke/envelope-bench-riscv64.log` 中异常大的 Δ 或 off/on 数值倒挂；对照 docs/research/10-evaluation.md §5.5 的实测基线与 `user/cmds/core/envelope_bench.c` 的预算设定。
+
 ### 信号、停止与退出
 - **How to run**: `make check-signal-exit-boundary`；完整步骤五本地矩阵运行 `make check-proc-step5-local`。
 - **What it checks**: 检查 Park mode 与普通/致命/退出唤醒原因的映射、`signal_state.lock` 所有权、`STOPPED` 的显式恢复路径和远程退出安全边界；禁止信号或退出路径通过 `proc_make_ready()` 绕过 token；确认 `proc_stress` 覆盖停止态隔离、`SIGCONT`、停止态 `SIGKILL`、`sigsuspend` 交接和 eventfd 信号中断。
