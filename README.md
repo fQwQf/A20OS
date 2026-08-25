@@ -39,7 +39,7 @@
 ## 项目简介
 A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)，具备长期的演进与迭代计划。
 
-在架构选型上，A20OS 兼具宏内核与微内核的双重优势：从运行空间视角，驱动、网络栈与文件系统均在单一特权空间执行，保留了极速的函数调用性能；而在内核逻辑抽象层面，系统深度融合了微内核理念，引入了面向能力的 Handle、VMO/VMAR 内存容器以及 Channel 通信机制。
+在架构选型上，A20OS 兼具宏内核与微内核的双重优势：调度、MM、VFS 核心、页缓存与 TCP/IP 数据面等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——面向能力的 Handle、VMO/VMAR 内存容器与 Channel 通信之上，设备驱动（RTC/input/virtio-blk scratch）与文件系统实现（FAT/ext4/ISO9660/NTFS 只读）均可作为可崩溃、可重启的用户态服务运行。
 
 ## Linux ABI 兼容性
 
@@ -120,6 +120,7 @@ make CCACHE= ...
 * **基础 bring-up**：`make smoke-riscv64` 只启动 `BRINGUP=1` 内核，并把 watchdog timeout 视为可接受结果；它不验证系统调用。
 * **系统调用测试**：运行 `make smoke-abi-linux`，在 QEMU 中验证 Linux ABI syscall smoke；`smoke-syscall-ext` 覆盖 keyring/AIO/acct/fanotify/pidfd/io_uring/landlock/userfaultfd/perf/fileattr 等扩展 syscall。
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
+* **用户态服务测试**：运行 `make smoke-native-fs-all`，验证 svcmgr 托管的用户态文件系统宿主 ufsd 四种后端（FAT/ext4 读写、ISO9660/NTFS 只读）及 SIGKILL 崩溃恢复；`smoke-native-svc`/`smoke-native-registry` 覆盖监管自愈与按名重绑。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
 
 ## 参与贡献

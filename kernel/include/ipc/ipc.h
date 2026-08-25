@@ -340,6 +340,8 @@ int64_t a20_channel_recv_finish(a20_channel_ep_t *ep, void *data, uint32_t *data
                                 a20_ch_handle_info_t *handles, uint32_t *handle_count);
 void a20_channel_recv_abort(a20_channel_ep_t *ep);
 void a20_channel_ep_release(a20_channel_ep_t *ep);
+/* 单向断链：置对端 peer_closed 并唤醒其等待者（umount 通知服务退出用） */
+void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep);
 
 /* ---- Event queue API ---- */
 

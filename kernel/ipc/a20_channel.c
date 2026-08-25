@@ -689,6 +689,25 @@ int a20_channel_peer_closed(a20_channel_ep_t *ep)
     return r;
 }
 
+void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep)
+{
+    if (!ep)
+        return;
+    spin_lock(&g_ch_lock);
+    spin_lock(&ep->lock);
+    a20_channel_ep_t *peer = ep->peer;
+    if (peer) {
+        spin_lock(&peer->lock);
+        peer->peer_closed = 1;
+        spin_unlock(&peer->lock);
+        wait_queue_wake_all(&peer->waiters, 0, PROC_WAKE_EVENT);
+        a20_event_notify(peer, A20_OBJ_CHANNEL_ENDPOINT,
+                         A20_EVENT_PEER_CLOSED, 0, 0);
+    }
+    spin_unlock(&ep->lock);
+    spin_unlock(&g_ch_lock);
+}
+
 void a20_channel_ep_release(a20_channel_ep_t *ep)
 {
     if (!ep) return;

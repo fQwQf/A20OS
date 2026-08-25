@@ -75,6 +75,8 @@ int64_t sys_a20_fs_stat(const a20_syscall_args_t *args);
 int64_t sys_a20_fs_mount(const a20_syscall_args_t *args);
 int64_t sys_a20_fs_umount(const a20_syscall_args_t *args);
 int64_t sys_a20_fs_sync(const a20_syscall_args_t *args);
+int64_t sys_a20_fs_serve(const a20_syscall_args_t *args);
+int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args);
 int64_t sys_a20_path_unlink_at(const a20_syscall_args_t *args);
 int64_t sys_a20_path_rename_at(const a20_syscall_args_t *args);
 int64_t sys_a20_path_link_at(const a20_syscall_args_t *args);
