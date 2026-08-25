@@ -596,15 +596,15 @@ static vnode_ops_t g_uxfs_vnops = {
 #define UXFS_MAX_SBS 8
 static uxfs_sb_t g_uxfs_sbs[UXFS_MAX_SBS];
 
+/* 同一盘号允许多个挂载并存（各自独立的服务实例）；只匹配调用方
+ * 自己的注册，其他实例的同号挂载跳过继续找。 */
 static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
 {
     for (int i = 0; i < UXFS_MAX_SBS; i++) {
         uxfs_sb_t *sb = &g_uxfs_sbs[i];
-        if (sb->ep && sb->block_index == block_index) {
-            if (sb->server != task)
-                return NULL;
+        if (sb->ep && sb->block_index == block_index &&
+            sb->server == task)
             return mount_setup_block_device(block_index);
-        }
     }
     return NULL;
 }
@@ -690,6 +690,9 @@ void uxfs_unmount(struct vnode *root)
         return;
     uxfs_sb_t *sb = p->sb;
     if (sb && sb->ep) {
+        /* 先单向断链让服务进程的 recv 返回错误并退出（服务自身仍持有
+         * 配对端点引用，仅靠 release 无法触达对端）；随后释放本侧引用。 */
+        a20_channel_ep_peer_shutdown(sb->ep);
         a20_channel_ep_release(sb->ep);
         sb->ep = NULL;
     }
@@ -710,11 +713,11 @@ int uxfs_block_io(struct task_t *task, int block_index, int write,
 int uxfs_block_capacity(struct task_t *task, int block_index,
                         uint64_t *out_sectors)
 {
+    /* block_dev_t.capacity 的既定单位就是扇区（virtio 配置空间语义，
+     * mount_setup/class_ops 原样传递），不再做字节换算。 */
     block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
     if (!dev || !out_sectors)
         return -ENODEV;
-    *out_sectors = dev->sector_size
-                       ? dev->capacity / dev->sector_size
-                       : 0;
+    *out_sectors = dev->capacity;
     return 0;
 }

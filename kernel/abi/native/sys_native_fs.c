@@ -868,8 +868,8 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
                                       &sectors);
         if (qrc < 0)
             return -A20_ERR_IO;
-        kargs.lba = sectors; /* 复用出参字段回传 */
-        if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0)
+        uint64_t out = sectors;
+        if (copy_to_user((void *)kargs.buf, &out, sizeof(out)) < 0)
             return -A20_ERR_FAULT;
         return A20_OK;
     }
