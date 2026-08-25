@@ -1,4 +1,5 @@
 #include "fs/vfs/file.h"
+#include "fs/quota.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
@@ -132,10 +133,21 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
             vf->offset = vf->vnode->size;
         size_t write_start = vf->offset;
         size_t old_size = vf->vnode ? vf->vnode->size : 0;
+        if (vf->vnode && write_start + count > old_size &&
+            quota_check_space(vf->vnode,
+                              (uint64_t)(write_start + count) - old_size) <
+                0) {
+            if (write_lock)
+                mutex_unlock(write_lock);
+            return -EDQUOT;
+        }
         int r = buffered_write
             ? page_cache_write_vfile(vf, buf, count)
             : vf->ops->write(vf, buf, count);
         if (r > 0 && vf->vnode) {
+            size_t new_end = write_start + (size_t)r;
+            if (new_end > old_size)
+                quota_account_space(vf->vnode, new_end - old_size);
             if ((vf->flags & O_DIRECT) && use_page_cache)
                 page_cache_invalidate_uptodate_range(vf->vnode, write_start,
                                                       write_start + (size_t)r);

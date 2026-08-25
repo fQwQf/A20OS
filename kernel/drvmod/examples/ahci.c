@@ -8,15 +8,18 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2922),
                       A20_DRIVER_MATCH(A20_DRIVER_BUS_PCI, 0x8086, 0x2829));
 
+/* drivers/block/ahci.c registers two drivers through DRIVER_REGISTER; the
+ * ET_REL module ABI allows exactly one DriverEntry per object, so capture
+ * the include and register both explicitly once. */
 #undef DRIVER_REGISTER
-#define DRIVER_REGISTER(drv)
+#define DRIVER_REGISTER(drv) extern char drv##_register_suppressed;
 
 #include "../../drivers/block/ahci.c"
 
 uintptr_t DriverEntry(void)
 {
-    int ret = drv_driver_register(&ahci_driver);
-    if (ret < 0)
-        return (uintptr_t)ret;
-    return (uintptr_t)drv_driver_register(&ahci_platform_driver);
+    uintptr_t id = drv_driver_register(&ahci_driver);
+    if (!(id >> 63))
+        drv_driver_register(&ahci_platform_driver);
+    return id;
 }
