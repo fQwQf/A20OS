@@ -23,6 +23,15 @@
   - 已完成起步：`a20_personality.h` 提供 pipe-shaped channel/EventQ facade， `smoke-native-personality` 验证写入、MESSAGE_READY、读取和关闭。
   - 完成条件：fd 表、byte-stream accumulator、mmap/VMO、socket 等关键 子集在直通实现与人格层实现下同通过，语义 diff 与性能对照归档。
 
+## 用户态文件系统宿主（2026-08 落地，后续项）
+
+已落地：uxfs 内核代理 + ufsd 多人格宿主（fat/ext4 读写、iso9660/ntfs 只读）、svcmgr argv 清单托管、SIGKILL 恢复演练（`smoke-native-fs-all`）。设计见 [../hybrid-kernel/06-user-fs.md](../hybrid-kernel/06-user-fs.md)。
+
+- [ ] ufsd 监管通道接入 EventQ 统一等待，替换 200µs 轮询。
+- [ ] uxfs 文件读写接入内核页缓存（readpage/writepage 缓存路径），替代直通转发。
+- [ ] ntfs 写使能：先为内核 ntfs 写路径补齐在库正确性测试（当前全仓库零覆盖），再打开 ufsd ntfs 后端读写。
+- [ ] 托管设备序号的板级配置化：清单中 ufsd 的 block_index 目前是编译期约定，VF2/LS2K1000 等实机枚举不同。
+
 ## P0：并发与 SMP 就绪
 
 - [x] 建立 tokenized Park/Wake，消除“检查条件后、真正睡眠前”的丢失唤醒窗口。
