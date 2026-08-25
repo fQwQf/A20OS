@@ -40,11 +40,28 @@ int64_t sys_restart_syscall(void)
     return entry->handler(&args);
 }
 
+/* kcmp(2) type indices, fixed by include/uapi/linux/kcmp.h. */
+enum {
+    KCMP_FILE = 0,
+    KCMP_VM,
+    KCMP_FILES,
+    KCMP_FS,
+    KCMP_SIGHAND,
+    KCMP_IO,
+    KCMP_SYSVSEM,
+    KCMP_EPOLL_TFD,
+};
+
+static int64_t kcmp_order(uintptr_t a, uintptr_t b)
+{
+    if (a == b)
+        return 0;
+    return a < b ? 1 : 2;
+}
+
 int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
                  unsigned long idx2)
 {
-    (void)idx1;
-    (void)idx2;
     task_t *t1 = proc_find_get(pid1);
     task_t *t2 = proc_find_get(pid2);
     if (!t1 || !t2) {
@@ -53,47 +70,98 @@ int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
         return -ESRCH;
     }
 
-    int r = 0;
+    int64_t r = -EINVAL;
+    task_t *self = proc_current();
+    if (type < 0 || type >= KCMP_EPOLL_TFD + 1)
+        goto out;
+    if (self && !proc_has_cap(self, CAP_SYS_PTRACE) &&
+        (!proc_task_may_access(self, t1) ||
+         !proc_task_may_access(self, t2))) {
+        r = -EPERM;
+        goto out;
+    }
+
     switch (type) {
-    case 0: /* KCMP_FILE: compare file identity of fd idx1 vs idx2 */
-    {
+    case KCMP_FILE: {
+        /* fd slots hold global open-file numbers, so numeric order over
+         * gfd values is exactly Linux's open-file-description order. */
         int f1 = fdtable_get(t1, (int)idx1);
         int f2 = fdtable_get(t2, (int)idx2);
-        if (f1 < 0 || f2 < 0)
+        if (f1 < 0 || f2 < 0) {
             r = -EBADF;
-        else if (f1 == f2)
-            r = 0;
-        else if (f1 < f2)
-            r = 1;
-        else
-            r = 2;
+            break;
+        }
+        r = kcmp_order((uintptr_t)f1, (uintptr_t)f2);
         break;
     }
-    case 3: /* KCMP_VM: compare address spaces */
-        r = (t1->mm == t2->mm) ? 0 : 1;
+    case KCMP_VM:
+        r = kcmp_order((uintptr_t)t1->mm, (uintptr_t)t2->mm);
         break;
-    case 4: /* KCMP_FILES: compare fd tables */
-        r = (t1->files == t2->files) ? 0 : 1;
+    case KCMP_FILES:
+        r = kcmp_order((uintptr_t)t1->files, (uintptr_t)t2->files);
         break;
-    case 5: /* KCMP_FS: compare fs contexts */
-        r = (t1->fs.cwd[0] == t2->fs.cwd[0] &&
-             strcmp(t1->fs.cwd, t2->fs.cwd) == 0)
-                ? 0
-                : 1;
+    case KCMP_FS: {
+        int c = strncmp(t1->fs.cwd, t2->fs.cwd, MAX_PATH_LEN);
+        if (!c)
+            c = strncmp(t1->fs.root_path, t2->fs.root_path, MAX_PATH_LEN);
+        if (!c)
+            c = (t1->fs.umask > t2->fs.umask) -
+                (t1->fs.umask < t2->fs.umask);
+        r = c ? (c < 0 ? 1 : 2) : 0;
         break;
-    case 6: /* KCMP_SIGHAND */
-        r = (t1->signals == t2->signals) ? 0 : 1;
+    }
+    case KCMP_SIGHAND:
+        r = kcmp_order((uintptr_t)t1->signals, (uintptr_t)t2->signals);
         break;
-    case 7: /* KCMP_IO */
-        r = 1;
+    case KCMP_IO:
+        /* No per-task io_context objects exist; every task compares equal,
+         * matching Linux when neither side has an io_context. */
+        r = 0;
         break;
-    case 8: /* KCMP_SYSVSEM */
-        r = 1;
+    case KCMP_SYSVSEM:
+        /* No per-task SysV-sem undo lists are tracked; both sides are
+         * indistinguishable, mirroring tasks without sem undo state. */
+        r = 0;
         break;
+    case KCMP_EPOLL_TFD: {
+        int efd = fdtable_get(t1, (int)idx1);
+        if (efd < 0) {
+            r = -EBADF;
+            break;
+        }
+        vfile_t *evf = vfs_get_file_ref(efd);
+        if (!evf) {
+            r = -EBADF;
+            break;
+        }
+        uint64_t ident = 0;
+        int tfd = fdtable_get(t2, (int)idx2);
+        if (tfd >= 0) {
+            vfile_t *tvf = vfs_get_file_ref(tfd);
+            if (tvf) {
+                ident = tvf->identity;
+                vfs_put_file_ref(tfd, tvf);
+            }
+        } else {
+            r = -EBADF;
+            vfs_put_file_ref(efd, evf);
+            break;
+        }
+        int contains = epoll_slot_contains_file(t1, evf, ident);
+        vfs_put_file_ref(efd, evf);
+        if (contains < 0) {
+            r = contains;
+            break;
+        }
+        r = contains ? 0 : 1;
+        break;
+    }
     default:
         r = -EINVAL;
         break;
     }
+
+out:
     proc_put(t1);
     proc_put(t2);
     return r;
