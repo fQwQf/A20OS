@@ -11,6 +11,7 @@
 #include "core/perf.h"
 #include "core/timer.h"
 #include "proc/signal.h"
+#include "ipc/seccomp.h"
 #include "proc/debug.h"
 #include "ext/kep.h"
 #include "sys/syscall.h"
@@ -76,6 +77,22 @@ int64_t syscall_dispatch(trap_context_t *ctx)
 #endif
             TRAP_CTX_SET_RET(ctx, denied);
             return denied;
+        }
+    }
+
+    /*
+     * Seccomp gate: classic-BPF filters evaluate before any ABI handling,
+     * mirroring the KEP filter above but with Linux seccomp semantics
+     * (ERRNO/TRAP/TRACE/KILL/LOG actions).
+     */
+    if (__builtin_expect(cur_task && (cur_task->seccomp_chain ||
+                                      cur_task->seccomp_mode), 0)) {
+        int64_t seccomp_ret = 0;
+        if (seccomp_gate(ctx, num, &seccomp_ret)) {
+            TRAP_CTX_SET_RET(ctx, seccomp_ret);
+            syscall_profile_record(num, start_time, syscall_profile_now());
+            signal_deliver_user(ctx);
+            return seccomp_ret;
         }
     }
 
@@ -156,6 +173,14 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     int context_restored = 0;
     const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
 
+    /*
+     * An intervening dispatch proves execution resumed past the interrupted
+     * syscall, so its pending SYS_restart_syscall replay is stale.  The
+     * replay itself must not clear the block before re-running the handler.
+     */
+    if (num != SYS_restart_syscall && cur_task && cur_task->restart_active)
+        cur_task->restart_active = 0;
+
     if (entry) {
         ret = entry->handler(&args);
         context_restored = entry->restores_context;
@@ -172,6 +197,10 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         task_t *cur = proc_current();
         int restart = signal_task_should_restart(cur);
         if (restart) {
+            cur->restart_active = 1;
+            cur->restart_nr = args.nr;
+            for (int i = 0; i < 6; i++)
+                cur->restart_args[i] = args.arg[i];
             TRAP_CTX_EPC(ctx) -= 4;
             restart_syscall = 1;
         } else {
