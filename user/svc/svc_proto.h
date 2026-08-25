@@ -17,6 +17,11 @@
 #define A20_SVC_ENDPOINT_SLOT   (A20_NATIVE_FD_HANDLE_BASE + 40u)
 #define A20_SVC_ENDPOINT_HANDLE ((a20_handle_t)A20_SVC_ENDPOINT_SLOT)
 
+/* 健康探测专用通道端点槽位：ping/pong 走独立通道，监管者绝不读取
+ * client_ep，避免监管流量与客户端 RPC 共享回复队列导致互相抢消息。 */
+#define A20_SVC_PING_SLOT       (A20_NATIVE_FD_HANDLE_BASE + 41u)
+#define A20_SVC_PING_HANDLE     ((a20_handle_t)A20_SVC_PING_SLOT)
+
 /* Request protocol on the service channel:
  *  - payload "crash" (5 bytes): service exits with code 42 (self-heal demo)
  *  - anything else:             service echoes the payload back
