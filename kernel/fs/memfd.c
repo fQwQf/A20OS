@@ -215,16 +215,19 @@ int memfd_secret_file(int flags)
 
 int vfile_is_memfd_secret(vfile_t *vf)
 {
-    memfd_file_t *mf = vf ? vf->priv : NULL;
-    return mf ? mf->secret : 0;
+    if (!vf || vf->ops != &g_memfile_fops || !vf->priv)
+        return 0;
+    return ((memfd_file_t *)vf->priv)->secret;
 }
 
 /* Secret memfds may only be mapped (and stolen through pidfd_getfd) by a
  * caller whose euid matches the creator; everyone else sees -EACCES. */
 int memfd_secret_may_access(vfile_t *vf, task_t *caller)
 {
-    memfd_file_t *mf;
-    if (!vf || !(mf = vf->priv) || !mf->secret)
+    if (!vf || vf->ops != &g_memfile_fops || !vf->priv)
+        return 1;
+    memfd_file_t *mf = vf->priv;
+    if (!mf->secret)
         return 1;
     return caller && caller->cred.euid == mf->owner_euid;
 }
