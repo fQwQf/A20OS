@@ -34,25 +34,37 @@ $(NATIVE_UBDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ubd.c,$@)
 
 # ufsd：用户态 FAT32 文件系统服务；fat32lite 与内核 NOMMU 构建同源编译。
+# ufsd：用户态文件系统宿主。fat32lite 同源编译；ext4/isofs/ntfs 内核
+# diskfs 源码经 fscompat 兼容环境（-Iuser/svc/fscompat 优先解析）原样编译。
+UFSD_CORE_SRCS := user/svc/ufsd.c user/svc/fscompat/compat.c \
+	user/svc/fscompat/bcache_user.c user/svc/ufs_fat_backend.c \
+	user/svc/ufs_vnfs_backend.c kernel/fs/diskfs/fat32lite.c
+UFSD_VNFS_SRCS := kernel/fs/diskfs/ext4.c kernel/fs/diskfs/ext4_file.c \
+	kernel/fs/diskfs/ext4_journal.c kernel/fs/diskfs/ext4_namei.c \
+	kernel/fs/diskfs/ext4_sync.c kernel/fs/diskfs/isofs.c \
+	kernel/fs/diskfs/ntfs.c kernel/fs/diskfs/ntfs_file.c \
+	kernel/fs/diskfs/ntfs_index.c kernel/fs/diskfs/ntfs_namei.c
+
 define NATIVE_UFSD_RECIPE
 @mkdir -p $(dir $(5))
 $(1) -ffreestanding -nostdlib -static \
     $(2) \
-    -Iuser -Iuser/liba20rt -Ikernel/include \
+    -Iuser -Iuser/liba20rt -Iuser/svc/fscompat -Ikernel/include \
     -T$(NATIVE_LD) \
     $(3) \
     $(NATIVE_SDK_SRC) \
     $(NATIVE_COMPILER_RT_SRC) \
     $(NATIVE_ARCH_SRC) \
-    user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c \
+    $(UFSD_CORE_SRCS) $(UFSD_VNFS_SRCS) \
     $(NATIVE_LIBS) \
     -o $(5)
 endef
 
-$(NATIVE_UFSD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c \
+$(NATIVE_UFSD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) $(UFSD_CORE_SRCS) $(UFSD_VNFS_SRCS) \
 		kernel/include/fs/fat32lite.h kernel/include/fs/ufs_proto.h \
+		user/svc/ufs_backends.h user/svc/ufs_fat_backend.c user/svc/ufs_vnfs_backend.c \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
-	$(call NATIVE_UFSD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ufsd.c kernel/fs/diskfs/fat32lite.c,$@)
+	$(call NATIVE_UFSD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/ufsd.c,$@)
 
 native-ufsd-arch: $(NATIVE_UFSD_BIN)
 
@@ -139,6 +151,60 @@ $(UFS_SCRATCH_IMG): FORCE
 	dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null; \
 	$(MKFS_FAT) -F 32 $@; \
 	printf 'hello-uxfs\n' | mcopy -o -i $@ - ::/hello.txt
+
+UFS_EXT4_IMG := $(BUILD_DIR)/ufs-ext4.img
+UFS_ISO_IMG  := $(BUILD_DIR)/ufs-iso.img
+UFS_NTFS_IMG := $(BUILD_DIR)/ufs-ntfs.img
+
+$(UFS_EXT4_IMG): FORCE
+	@rm -rf $(BUILD_DIR)/ufs-ext4-staging; mkdir -p $(BUILD_DIR)/ufs-ext4-staging
+	@printf 'hello ext4 user-space\n' > $(BUILD_DIR)/ufs-ext4-staging/hello.txt
+	@rm -f $@; dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
+	mke2fs -q -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
+		-d $(BUILD_DIR)/ufs-ext4-staging $@
+	@rm -rf $(BUILD_DIR)/ufs-ext4-staging
+
+$(UFS_ISO_IMG): tools/mkisofs_test.c
+	$(HOST_CC) $(HOST_CFLAGS) $< -o $(BUILD_DIR)/a20-mkisofs-gen
+	$(BUILD_DIR)/a20-mkisofs-gen $@
+
+$(UFS_NTFS_IMG): FORCE
+	@rm -f $@; dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
+	mkfs.ntfs -F -Q -L A20NTFS $@ >/dev/null 2>&1
+
+# smoke-native-fs-all：ufsd 全部四种文件系统后端的端到端门禁。
+# 盘位（避开 bus.3/bus.5 的用户驱动预留）：bus.2=fat(1) bus.4=ext4(2)
+# bus.6=iso9660(3) bus.7=ntfs(4)；主存储在 bus.0。
+smoke-native-fs-all:
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG) $(UFS_EXT4_IMG) $(UFS_ISO_IMG) $(UFS_NTFS_IMG)
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/native-fs-all-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ufs_all_test\npoweroff\n'; } | \
+	$(TIMEOUT) 180s qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=$(UFS_SCRATCH_IMG),if=none,format=raw,id=xfs1 \
+		-device virtio-blk-device,drive=xfs1,bus=virtio-mmio-bus.2 \
+		-drive file=$(UFS_EXT4_IMG),if=none,format=raw,id=xfs2 \
+		-device virtio-blk-device,drive=xfs2,bus=virtio-mmio-bus.4 \
+		-drive file=$(UFS_ISO_IMG),if=none,format=raw,id=xfs3 \
+		-device virtio-blk-device,drive=xfs3,bus=virtio-mmio-bus.6 \
+		-drive file=$(UFS_NTFS_IMG),if=none,format=raw,id=xfs4 \
+		-device virtio-blk-device,drive=xfs4,bus=virtio-mmio-bus.7 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'UXFS_ALL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+		echo "smoke-native-fs-all: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-native-fs-all: failed with status $$status; tail of $$log:"; \
+		tail -n 100 "$$log"; \
+		exit 1; \
+	fi
 
 # smoke-native-ufs：文件系统实现运行在用户态服务（ufsd）的端到端门禁。
 # 第二块盘挂在空闲槽位 bus.2（bus.3/bus.5 已预留给 ubd/uinputd），
