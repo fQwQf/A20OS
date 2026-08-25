@@ -303,7 +303,7 @@ int main(int argc, char **argv, char **envp)
      * 后同步处理"），监管槽位以非阻塞轮询应答 echo 探针。空闲时短暂
      * 睡眠避免忙等；EventQ 统一等待是后续优化项。
      */
-    a20_handle_t svc_ep = A20_SVC_ENDPOINT_HANDLE;
+    a20_handle_t svc_ep = A20_SVC_PING_HANDLE;
     static uint8_t rx[UFSD_MSG_MAX];
     static char name_buf[512];
     static char aux_buf[512];
