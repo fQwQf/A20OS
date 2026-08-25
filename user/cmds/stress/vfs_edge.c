@@ -388,6 +388,83 @@ static int openat2_no_symlinks(void)
     return 0;
 }
 
+/* /proc/<pid>/fd/N are jump links to kernel-internal objects: traversal must
+ * be refused under RESOLVE_NO_MAGICLINKS while plain symlinks stay followable
+ * and unrestricted resolution is unchanged. */
+static int openat2_no_magiclinks(void)
+{
+    const char *dir = "/tmp/vfs_edge_magic";
+    const char *target = "target.txt";
+    const char *linkname = "link.txt";
+    rmdir(dir);
+    mkdir(dir, 0755);
+
+    char tpath[128], lpath[128];
+    snprintf(tpath, sizeof(tpath), "%s/%s", dir, target);
+    snprintf(lpath, sizeof(lpath), "%s/%s", dir, linkname);
+
+    int fd = open(tpath, O_CREAT | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("magic-create");
+    if (symlink(target, lpath) < 0) {
+        close(fd);
+        unlink(tpath);
+        rmdir(dir);
+        return fail("magic-symlink");
+    }
+
+    struct open_how how = { .flags = O_RDONLY, .mode = 0,
+                            .resolve = RESOLVE_NO_MAGICLINKS };
+    errno = 0;
+    long r = syscall(SYS_openat2, AT_FDCWD, lpath, &how, sizeof(how));
+    if (r < 0) {
+        close(fd);
+        unlink(lpath);
+        unlink(tpath);
+        rmdir(dir);
+        return fail("magic-plain-symlink-followed");
+    }
+    close((int)r);
+
+    char mpath[64];
+    snprintf(mpath, sizeof(mpath), "/proc/self/fd/%d", fd);
+    errno = 0;
+    r = syscall(SYS_openat2, AT_FDCWD, mpath, &how, sizeof(how));
+    if (r >= 0) {
+        close((int)r);
+        close(fd);
+        unlink(lpath);
+        unlink(tpath);
+        rmdir(dir);
+        return fail("magic-traversed");
+    }
+    if (errno != ELOOP) {
+        close(fd);
+        unlink(lpath);
+        unlink(tpath);
+        rmdir(dir);
+        return fail("magic-errno");
+    }
+
+    struct open_how plain = { .flags = O_RDONLY, .mode = 0, .resolve = 0 };
+    errno = 0;
+    r = syscall(SYS_openat2, AT_FDCWD, mpath, &plain, sizeof(plain));
+    if (r < 0) {
+        close(fd);
+        unlink(lpath);
+        unlink(tpath);
+        rmdir(dir);
+        return fail("magic-unrestricted-open");
+    }
+    close((int)r);
+
+    close(fd);
+    unlink(lpath);
+    unlink(tpath);
+    rmdir(dir);
+    return 0;
+}
+
 /* RESOLVE_CACHED: only succeed when every component is already in the dentry
  * cache; a never-cached path must fail with -EAGAIN, and a cached one must
  * succeed. */
@@ -815,6 +892,8 @@ int main(void)
     if (openat2_beneath_symlink_escape() != 0)
         return 1;
     if (openat2_no_symlinks() != 0)
+        return 1;
+    if (openat2_no_magiclinks() != 0)
         return 1;
     if (openat2_cached() != 0)
         return 1;
