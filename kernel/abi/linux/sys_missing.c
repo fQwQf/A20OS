@@ -10,6 +10,7 @@
 #include "fs/file.h"
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
+#include "fs/quota.h"
 #include "fs/vfs.h"
 #include "ipc/seccomp.h"
 #include "mm/fault.h"
@@ -253,21 +254,14 @@ int64_t sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len)
 
 int64_t sys_quotactl(int cmd, const char *special, int id, void *addr)
 {
-    (void)cmd;
-    (void)id;
-    (void)addr;
     if (!special)
         return -EFAULT;
-    return -EOPNOTSUPP;
+    return quota_cmd((uint32_t)cmd, special, (uint32_t)id, addr);
 }
 
 int64_t sys_quotactl_fd(int fd, int cmd, int id, void *addr)
 {
-    (void)fd;
-    (void)cmd;
-    (void)id;
-    (void)addr;
-    return -EOPNOTSUPP;
+    return quota_cmd_fd(fd, (uint32_t)cmd, (uint32_t)id, addr);
 }
 
 /* remap_file_pages(2): rebind [start, start+size) of an existing shared
