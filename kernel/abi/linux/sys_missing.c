@@ -10,6 +10,8 @@
 #include "fs/memfd.h"
 #include "fs/page_cache.h"
 #include "fs/vfs.h"
+#include "mm/fault.h"
+#include "mm/mm.h"
 #include "mm/process_vm.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
@@ -475,13 +477,62 @@ int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
     return -ENOSYS;
 }
 
-int64_t sys_map_shadow_stack(uint64_t addr, uint64_t size, unsigned flags)
+/* map_shadow_stack(2): guarded CET shadow-stack allocation.  Only built on
+ * x86_64; every other architecture keeps Linux's arch-correct -ENOSYS. */
+int64_t sys_map_shadow_stack(uint64_t addr_hint, uint64_t size, unsigned flags)
 {
-    (void)addr;
+#ifndef CONFIG_X86_64
+    (void)addr_hint;
     (void)size;
     (void)flags;
-    /* map_shadow_stack(2) is an x86_64 CET feature.  On the RISC-V asm-generic
-     * table it is registered for number parity and -ENOSYS is the correct
-     * arch behavior (no shadow-stack syscall on this platform). */
     return -ENOSYS;
+#else
+    const unsigned SHADOW_STACK_SET_TOKEN = 0x1;
+    if (flags & ~SHADOW_STACK_SET_TOKEN)
+        return -EINVAL;
+    if (size == 0)
+        return -EINVAL;
+    if (addr_hint & (PAGE_SIZE - 1))
+        return -EINVAL;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EINVAL;
+
+    uint64_t len = ROUND_UP(size, (uint64_t)PAGE_SIZE);
+    uint64_t total = len + PAGE_SIZE;
+    if (total <= len)
+        return -ENOMEM;
+
+    vaddr_t base = mm_find_gap(t->mm, (vaddr_t)addr_hint, total);
+    if (mm_addr_is_error(base))
+        return mm_addr_error(base);
+
+    vaddr_t guard = proc_mmap(base, PAGE_SIZE, PROT_NONE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (mm_addr_is_error(guard))
+        return mm_addr_error(guard);
+
+    vaddr_t stk = proc_mmap(base + PAGE_SIZE, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (mm_addr_is_error(stk)) {
+        mm_munmap(t->mm, base, PAGE_SIZE);
+        return mm_addr_error(stk);
+    }
+
+    uint64_t top = (uint64_t)stk + len;
+    if (flags & SHADOW_STACK_SET_TOKEN) {
+        uint64_t tok_va = top - 8;
+        handle_demand_fault(t, tok_va);
+        paddr_t pa = pt_translate(t->mm->pgdir, (vaddr_t)tok_va);
+        if (pa) {
+            volatile uint64_t *tok =
+                (volatile uint64_t *)(PAGE_OFFSET + pa +
+                                      (tok_va & (PAGE_SIZE - 1)));
+            *tok = tok_va | 0x1ull;   /* self-referential, not-busy */
+            return (int64_t)(tok_va & ~0x7ull);
+        }
+    }
+    return (int64_t)(top & ~0x7ull);
+#endif
 }
