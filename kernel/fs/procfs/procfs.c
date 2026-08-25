@@ -557,6 +557,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 type == PF_A20 || type == PF_PID_FD ||
                 type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
+    if (fd_symlink)
+        vn->link_flags |= VNODE_MAGICLINK;
     vn->mode = vn->type == VFS_FT_SYMLINK ? (S_IFLNK | 0777) :
                (vn->type == VFS_FT_DIR ? (S_IFDIR | 0555) : (S_IFREG | 0444));
     if (type == PF_A20_DRIVER_LIFECYCLE)
