@@ -1,5 +1,6 @@
 #include "fs/io_uring.h"
 
+#include "ipc/envelope.h"
 #include "core/errno.h"
 #include "core/string.h"
 #include "fs/anonfd.h"
@@ -239,6 +240,13 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
             cqe->res = (int32_t)gfd;
             return gfd;
         }
+        if (env_active(proc_current())) {
+            int mr = env_mediate_use((int)gfd, 0);
+            if (mr) {
+                cqe->res = mr;
+                return mr;
+            }
+        }
         cqe->res = vfs_fsync((int)gfd);
         return 0;
     }
@@ -256,6 +264,16 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
         if (gfd < 0) {
             cqe->res = (int32_t)gfd;
             return gfd;
+        }
+        /* Execution-point mediation (docs/research/05 §2.5.2): io_uring
+         * ops bypass the read/write syscalls, so the budget is charged
+         * where the authority is consumed, per SQE. */
+        if (env_active(proc_current())) {
+            int mr = env_mediate_use_dir((int)gfd, sqe->len, 0);
+            if (mr) {
+                cqe->res = mr;
+                return mr;
+            }
         }
         size_t n = sqe->len;
         if (n == 0) {
@@ -306,6 +324,13 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
         if (n == 0) {
             cqe->res = 0;
             return 0;
+        }
+        if (env_active(proc_current())) {
+            int mr = env_mediate_use_dir((int)gfd, n, 1);
+            if (mr) {
+                cqe->res = mr;
+                return mr;
+            }
         }
         void *kbuf = kmalloc(n ? n : 1);
         if (!kbuf) {
@@ -408,8 +433,12 @@ int io_uring_register(int gfd, unsigned opcode, const void *arg,
 {
     switch (opcode) {
     case IORING_REGISTER_FILES:
-        /* File registration is a fast-path hint; the executor resolves fds
-         * through the fd table anyway, so accept the registration. */
+        /* Fixed-file tables are descriptor-transfer events (docs/research/05
+         * §2.5.1 A9): enveloped tasks may not bulk-import authorities in
+         * v1; the executor resolves fds through the task fd table anyway,
+         * so registration stays a pure fast-path hint elsewhere. */
+        if (env_active(proc_current()))
+            return -EPERM;
         (void)arg;
         (void)nr_args;
         return 0;

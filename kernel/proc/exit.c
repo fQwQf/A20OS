@@ -354,6 +354,7 @@ void proc_exit(int exit_code)
                 (t->clone_flags & CLONE_THREAD) != 0, exit_code);
 
     int *ctid_to_wake = t->clear_child_tid;
+    (void)ctid_to_wake; /* futex wake below is Linux-ABI gated */
     proc_clear_child_tid_direct(t);
 #if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     if (ctid_to_wake)

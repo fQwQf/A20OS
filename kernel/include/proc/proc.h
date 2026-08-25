@@ -322,6 +322,12 @@ typedef struct task_t {
     /* Landlock LSM ruleset list (kernel/ipc/landlock.c), process-local. */
     void           *landlock_rulesets;
 
+    /* Capability envelope (kernel/abi/linux/envelope.c): budgeted-capability
+     * policy attached to this Linux-ABI process by its supervisor.  NULL =
+     * unenveloped (the mediation fast path).  Survives fork (shared refcount)
+     * and execve; a process cannot shed it.  See docs/research/05. */
+    void           *envelope;
+
     /* Restartable sequences (rseq(2)): user-registered per-thread rseq area
      * and signature.  0 when not registered. */
     uintptr_t       rseq_area;

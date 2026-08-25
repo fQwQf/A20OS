@@ -9,6 +9,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "sys/usercopy.h"
+#include "ipc/envelope.h"
 #include "ipc/keyring.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/handle_table.h"
@@ -206,6 +207,10 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
 
     /* Share the session keyring with the parent (kernel/ipc/keyring.c). */
     keyring_inherit(t, parent);
+
+    /* Capability envelopes are inherited (shared root budget, refcounted);
+     * see kernel/abi/linux/envelope.c and docs/research/05. */
+    env_inherit_task(t, parent);
 
     /*
      * Native ABI: the handle table is process-local (docs/native-abi/03-handle.md

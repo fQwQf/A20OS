@@ -1,5 +1,7 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
 
 static int copy_sockaddr_from_user(uint8_t storage[NET_SOCKADDR_MAX],
                                    const void *uaddr, size_t addrlen) {
@@ -28,6 +30,17 @@ int64_t sys_socket(int domain, int type, int protocol) {
     int gfd = net_socket_create(domain, type, protocol);
     if (gfd < 0)
         return gfd;
+    env_kind_register(gfd, A20_OBJ_SOCKET);
+    if (env_active(proc_current())) {
+        /* socket acquisition mediation (05 §2.5.1 A2). */
+        uint64_t rights = A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT |
+                          A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_SOCKET, rights, gfd);
+        if (mr) {
+            vfs_close(gfd);
+            return mr;
+        }
+    }
     task_t *t = proc_current();
     int lfd = fdtable_install(t, gfd, type);
     return lfd;
@@ -61,6 +74,10 @@ int64_t sys_socketpair(int domain, int type, int protocol, int *sv) {
 int64_t sys_bind(int fd, const void *addr, size_t addrlen) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use((int)gfd, 0);
+        if (mr) return mr;
+    }
     uint8_t kaddr[NET_SOCKADDR_MAX];
     int r = copy_sockaddr_from_user(kaddr, addr, addrlen);
     if (r < 0) return r;
@@ -70,6 +87,10 @@ int64_t sys_bind(int fd, const void *addr, size_t addrlen) {
 int64_t sys_connect(int fd, const void *addr, size_t addrlen) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use((int)gfd, 0);
+        if (mr) return mr;
+    }
     uint8_t kaddr[NET_SOCKADDR_MAX];
     int r = copy_sockaddr_from_user(kaddr, addr, addrlen);
     if (r < 0) return r;
@@ -79,6 +100,10 @@ int64_t sys_connect(int fd, const void *addr, size_t addrlen) {
 int64_t sys_listen(int fd, int backlog) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use((int)gfd, 0);
+        if (mr) return mr;
+    }
     return net_listen((int)gfd, backlog);
 }
 
@@ -100,6 +125,18 @@ int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
     int new_gfd = net_accept((int)gfd, kaddr, &klen, flags);
     if (new_gfd < 0)
         return new_gfd;
+    /* A2: accepted connection = new authority instance requiring
+     * acquisition mediation before install into caller fd table. */
+    env_kind_register(new_gfd, A20_OBJ_SOCKET);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
+                          A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_SOCKET, rights, new_gfd);
+        if (mr) {
+            vfs_close(new_gfd);
+            return mr;
+        }
+    }
     ktrace_syscall("[SYS] accept4: new_gfd=%d\n", new_gfd);
     if (flags & SOCK_NONBLOCK)
         net_set_nonblock(new_gfd, 1);
@@ -160,6 +197,10 @@ int64_t sys_sendto(int fd, const void *buf, size_t len, int flags,
     if (!buf && len) return -EFAULT;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, len, 1);
+        if (mr) return mr;
+    }
     uint8_t *kbuf = (uint8_t *)proc_scratch_buffer(len ? len : 1);
     if (!kbuf) return -ENOMEM;
     if (len && copy_from_user(kbuf, buf, len) < 0) return -EFAULT;
@@ -178,6 +219,10 @@ int64_t sys_recvfrom(int fd, void *buf, size_t len, int flags,
     if (!buf && len) return -EFAULT;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, len, 0);
+        if (mr) return mr;
+    }
     uint8_t *kbuf = (uint8_t *)proc_scratch_buffer(len ? len : 1);
     if (!kbuf) return -ENOMEM;
     uint8_t kaddr[NET_SOCKADDR_MAX];

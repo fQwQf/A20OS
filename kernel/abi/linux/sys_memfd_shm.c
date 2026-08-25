@@ -6,6 +6,8 @@
 #include "ipc/sysv_sem.h"
 #include "ipc/sysv_msg.h"
 #include "core/timer.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
 
 struct linux_timespec64 {
     int64_t tv_sec;
@@ -15,7 +17,21 @@ struct linux_timespec64 {
 int64_t sys_memfd_create(const char *name, unsigned flags)
 {
     (void)name;
-    return memfd_create_file((int)flags);
+    int ufd = memfd_create_file((int)flags);
+    if (ufd < 0)
+        return ufd;
+    int gfd = fdtable_get_current(ufd);
+    env_kind_register(gfd, A20_OBJ_FILE);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE |
+                          A20_RIGHT_STAT | A20_RIGHT_SEEK;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_FILE, rights, gfd);
+        if (mr) {
+            fdtable_close_current(ufd);
+            return mr;
+        }
+    }
+    return ufd;
 }
 
 int64_t sys_shmget(int key, size_t size, int shmflg)
@@ -25,6 +41,13 @@ int64_t sys_shmget(int key, size_t size, int shmflg)
 
 int64_t sys_shmat(int shmid, const void *shmaddr, int shmflg)
 {
+    /* A5 (docs/research/05 §2.5.4): attach is a MEMORY-class acquisition;
+     * footprint accounting lands with the shmat rework in W2. */
+    if (env_active(proc_current())) {
+        int mr = env_mediate_class((uint8_t)A20_OBJ_MEMORY);
+        if (mr)
+            return mr;
+    }
     return (int64_t)sysv_shm_at(shmid, (uint64_t)(uintptr_t)shmaddr, shmflg);
 }
 

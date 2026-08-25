@@ -13,6 +13,7 @@
 #include "cg/cgroup.h"
 #include "ipc/keyring.h"
 #include "ipc/landlock.h"
+#include "ipc/envelope.h"
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/handle_table.h"
 #endif
@@ -324,6 +325,7 @@ static void proc_task_release_resources(task_t *t)
 
     keyring_release_task(t);
     landlock_release_task(t);
+    env_release_task(t);
 
     if (t->signals) {
         signal_state_t *ss = (signal_state_t *)t->signals;

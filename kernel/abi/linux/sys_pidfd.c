@@ -1,5 +1,6 @@
 #include "syscall_impl.h"
 
+#include "ipc/envelope.h"
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
@@ -106,6 +107,16 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     if (!target_file) {
         proc_put(target);
         return -EBADF;
+    }
+    /* A7 (docs/research/05 §2.5.1): stealing a descriptor from another
+     * task is a fresh acquisition against THIS task's envelope. */
+    if (self && env_active(self)) {
+        int mr = env_mediate_acquire_gfd(target_gfd);
+        if (mr) {
+            vfs_put_file_ref(target_gfd, target_file);
+            proc_put(target);
+            return mr;
+        }
     }
     int r = fdtable_install_current(target_gfd, (int)flags);
     vfs_put_file_ref(target_gfd, target_file);
