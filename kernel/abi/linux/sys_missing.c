@@ -14,6 +14,7 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "proc/proc.h"
+#include "proc/rseq.h"
 #include "sys/usercopy.h"
 
 /*
@@ -333,10 +334,9 @@ int64_t sys_memfd_secret(unsigned flags)
     return memfd_secret_file((int)flags);
 }
 
-/* rseq(2): register a restartable-sequence area.  A20OS does not migrate
- * threads between CPUs (no preemption-based thread migration in the rseq
- * sense), so the sequence counter never needs to be aborted by the kernel;
- * registration and unregistration are recorded for compatibility. */
+/* rseq(2): register a restartable-sequence area; the kernel publishes
+ * cpu_id/cpu_id_start/node_id/mm_cid into it at registration and on every
+ * dispatch. */
 int64_t sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig)
 {
     task_t *t = proc_current();
@@ -357,6 +357,7 @@ int64_t sys_rseq(void *rseq, uint32_t rseq_len, int flags, uint32_t sig)
     t->rseq_area = (uintptr_t)rseq;
     t->rseq_sig = sig;
     t->rseq_flags = (uint32_t)flags;
+    rseq_publish(t);
     return 0;
 }
 
