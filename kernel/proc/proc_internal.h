@@ -93,6 +93,7 @@ int proc_clone_deferred(vaddr_t stack, task_t **out_task);
 int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n);
 void proc_complete_vfork(task_t *child);
 void proc_reap_detach_locked(task_t *t);
+int proc_tg_group_dead_locked(task_t *t);
 
 void proc_sched_runq_init(void);
 void proc_timer_heap_init(void);
