@@ -12,6 +12,7 @@
 #include "fs/page_cache.h"
 #include "fs/quota.h"
 #include "fs/vfs.h"
+#include "ipc/kexec.h"
 #include "ipc/seccomp.h"
 #include "mm/fault.h"
 #include "mm/mm.h"
@@ -484,30 +485,32 @@ int64_t sys_seccomp(unsigned op, unsigned flags, const void *uargs)
 int64_t sys_kexec_load(uint64_t entry, uint64_t nr_segments,
                        const void *segments, uint64_t flags)
 {
-    (void)entry;
-    (void)nr_segments;
-    (void)segments;
-    (void)flags;
     task_t *t = proc_current();
     if (!t)
         return -ESRCH;
     if (!proc_has_cap(t, CAP_SYS_BOOT) && t->cred.euid != 0)
         return -EPERM;
-    /* kexec reboots into a new kernel; A20OS does not support image
-     * handoff, so refuse rather than fake success. */
-    return -EINVAL;
+    /* KEXEC_CRASH / preserve-context variants need the crash-reservation
+     * machinery; plain replacement loads are validated and staged. */
+    if (flags & ~(1UL << 3))
+        return -EINVAL;
+    return kexec_load_segments(entry, nr_segments, segments,
+                               (unsigned long)flags);
 }
 
 int64_t sys_kexec_file_load(int kernel_fd, int initrd_fd,
                             uint64_t cmdline_len, const void *cmdline,
                             uint64_t flags)
 {
-    (void)kernel_fd;
-    (void)initrd_fd;
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!proc_has_cap(t, CAP_SYS_BOOT) && t->cred.euid != 0)
+        return -EPERM;
     (void)cmdline_len;
     (void)cmdline;
-    (void)flags;
-    return -EINVAL;
+    return kexec_load_file(kernel_fd, initrd_fd, cmdline_len, cmdline,
+                           (unsigned long)flags);
 }
 
 int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
