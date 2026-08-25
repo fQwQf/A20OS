@@ -317,6 +317,22 @@ static int uxfs_rmdir(vnode_t *dir, const char *name)
     return uxfs_rpc(p->sb, &req, name, NULL, &resp, NULL, 0, NULL);
 }
 
+static int uxfs_rename(vnode_t *old_dir, const char *old_name,
+                       vnode_t *new_dir, const char *new_name,
+                       unsigned int flags)
+{
+    uxfs_vpriv_t *p = (uxfs_vpriv_t *)old_dir->fs_data;
+    uxfs_sb_t *sb = p->sb;
+    uint32_t new_len = (uint32_t)strlen(new_name);
+
+    (void)flags; /* RENAME_EXCHANGE 等扩展语义暂不支持 */
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp;
+    uxfs_req_init(sb, &req, UFS_OP_RENAME, old_dir->ino,
+                  new_dir->ino, new_len, old_name, new_len);
+    return uxfs_rpc(sb, &req, old_name, new_name, &resp, NULL, 0, NULL);
+}
+
 static int uxfs_truncate(vnode_t *vn, size_t size)
 {
     uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
@@ -563,7 +579,7 @@ static vnode_ops_t g_uxfs_vnops = {
     .mkdir     = uxfs_mkdir,
     .unlink    = uxfs_unlink,
     .rmdir     = uxfs_rmdir,
-    .rename    = NULL,
+    .rename    = uxfs_rename,
     .stat      = uxfs_stat,
     .statfs    = uxfs_statfs,
     .truncate  = uxfs_truncate,
@@ -577,8 +593,21 @@ static vnode_ops_t g_uxfs_vnops = {
 /* 挂载 / 卸载 / 块 IO 所有权                                          */
 /* ------------------------------------------------------------------ */
 
-#define UXFS_MAX_SBS 4
+#define UXFS_MAX_SBS 8
 static uxfs_sb_t g_uxfs_sbs[UXFS_MAX_SBS];
+
+static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
+{
+    for (int i = 0; i < UXFS_MAX_SBS; i++) {
+        uxfs_sb_t *sb = &g_uxfs_sbs[i];
+        if (sb->ep && sb->block_index == block_index) {
+            if (sb->server != task)
+                return NULL;
+            return mount_setup_block_device(block_index);
+        }
+    }
+    return NULL;
+}
 
 int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
                      struct task_t *server, int block_index)
@@ -670,18 +699,22 @@ void uxfs_unmount(struct vnode *root)
 int uxfs_block_io(struct task_t *task, int block_index, int write,
                   uint64_t lba, void *buf, uint32_t count)
 {
-    for (int i = 0; i < UXFS_MAX_SBS; i++) {
-        uxfs_sb_t *sb = &g_uxfs_sbs[i];
-        if (sb->ep && sb->block_index == block_index) {
-            if (sb->server != task)
-                return -EPERM;
-            block_dev_t *dev = mount_setup_block_device(block_index);
-            if (!dev)
-                return -ENODEV;
-            if (write)
-                return dev->write_sector(dev, lba, buf, count) ? -EIO : 0;
-            return dev->read_sector(dev, lba, buf, count) ? -EIO : 0;
-        }
-    }
-    return -ENODEV;
+    block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
+    if (!dev)
+        return -ENODEV;
+    if (write)
+        return dev->write_sector(dev, lba, buf, count) ? -EIO : 0;
+    return dev->read_sector(dev, lba, buf, count) ? -EIO : 0;
+}
+
+int uxfs_block_capacity(struct task_t *task, int block_index,
+                        uint64_t *out_sectors)
+{
+    block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
+    if (!dev || !out_sectors)
+        return -ENODEV;
+    *out_sectors = dev->sector_size
+                       ? dev->capacity / dev->sector_size
+                       : 0;
+    return 0;
 }

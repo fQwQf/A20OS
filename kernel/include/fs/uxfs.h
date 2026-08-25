@@ -39,4 +39,8 @@ void uxfs_unmount(struct vnode *root);
 int uxfs_block_io(struct task_t *task, int block_index, int write, uint64_t lba,
                   void *buf, uint32_t count);
 
+/* 容量查询（扇区数）：同受控语义；服务进程用于初始化块设备描述符。 */
+int uxfs_block_capacity(struct task_t *task, int block_index,
+                        uint64_t *out_sectors);
+
 #endif /* FS_UXFS_H */
