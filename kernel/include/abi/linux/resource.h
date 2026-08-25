@@ -4,6 +4,8 @@
 #define PR_SET_PDEATHSIG      1
 #define PR_GET_PDEATHSIG      2
 #define PR_SET_NAME          15
+#define PR_GET_SECCOMP       21
+#define PR_SET_SECCOMP       22
 #define PR_CAPBSET_READ      23
 #define PR_CAPBSET_DROP      24
 #define PR_SET_THP_DISABLE   41

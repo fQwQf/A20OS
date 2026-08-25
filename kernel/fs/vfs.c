@@ -10,6 +10,7 @@
  * Inspired by RocketOS fs/ and Linux VFS.
  */
 
+#include "fs/quota.h"
 #include "fs/vfs.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/file.h"
@@ -354,6 +355,12 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
             vnode_put(parent);
             return -ENOSYS;
         }
+        if (cur && quota_check_inode_mnt(parent->mnt,
+                                         (uint32_t)cur->cred.euid,
+                                         (uint32_t)cur->cred.egid) < 0) {
+            vnode_put(parent);
+            return -EDQUOT;
+        }
 
         int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
         int r = parent->ops->create(parent, fname, cmode, &vn);
@@ -362,6 +369,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
             a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
             vfs_dcache_insert(parent, fname, vn);
+            quota_account_inode_create(vn);
         }
         vnode_put(parent);
         if (r < 0) { kdebug("[VFS] open '%s': create failed r=%d\n", resolved, r); return r; }
@@ -536,6 +544,12 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                 vnode_put(parent);
                 return -ENOSYS;
             }
+            if (cur && quota_check_inode_mnt(parent->mnt,
+                                             (uint32_t)cur->cred.euid,
+                                             (uint32_t)cur->cred.egid) < 0) {
+                vnode_put(parent);
+                return -EDQUOT;
+            }
 
             int cmode = (mode & S_IFMT) | ((mode & 07777) & ~(cur ? cur->fs.umask : 022));
             int cr = parent->ops->create(parent, fname, cmode, &vn);
@@ -543,6 +557,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                 vnode_put(parent);
                 return cr;
             }
+            quota_account_inode_create(vn);
             inotify_vnode_event(parent, fname, IN_CREATE);
             a20_fs_notify(parent, A20_EVENT_FS_CREATE, fname, 0, 0);
             vfs_dcache_invalidate(parent, fname);
@@ -696,11 +711,18 @@ int vfs_mkdir(const char *path, int mode) {
         return -EACCES;
     }
     int cmode = (mode & 07777) & ~(cur ? cur->fs.umask : 022);
+    if (cur && quota_check_inode_mnt(mnt, (uint32_t)cur->cred.euid,
+                                     (uint32_t)cur->cred.egid) < 0) {
+        vnode_put(parent);
+        return -EDQUOT;
+    }
     int r = parent->ops->mkdir(parent, name, cmode);
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_CREATE | IN_ISDIR);
         a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
+        quota_account_inode_ids(mnt, cur ? (uint32_t)cur->cred.euid : 0,
+                                cur ? (uint32_t)cur->cred.egid : 0);
     }
     vnode_put(parent);
     return r;
@@ -754,6 +776,8 @@ int vfs_unlink(const char *path) {
     if (r == 0) {
         inotify_vnode_event(parent, name, IN_DELETE);
         a20_fs_notify(parent, A20_EVENT_FS_DELETE, name, 0, 0);
+        if (victim)
+            quota_account_inode_remove(victim, victim->size);
         if (victim)
             inotify_vnode_event(victim, NULL, IN_DELETE_SELF);
         vfs_dcache_invalidate(parent, name);
@@ -1297,6 +1321,8 @@ int vfs_symlink(const char *target, const char *linkpath) {
         inotify_vnode_event(parent, name, IN_CREATE);
         a20_fs_notify(parent, A20_EVENT_FS_CREATE, name, 0, 0);
         vfs_dcache_invalidate(parent, name);
+        quota_account_inode_ids(mnt, cur ? (uint32_t)cur->cred.euid : 0,
+                                cur ? (uint32_t)cur->cred.egid : 0);
     }
     vnode_put(parent);
     return r;
@@ -1580,6 +1606,7 @@ void vfs_init(void) {
     vfs_mount_table_init();
     if (page_cache_init() < 0)
         kdebug("[VFS] page cache init failed; continuing without it\n");
+    quota_init();
 
     {
         mount_t *mnt = vfs_mount_alloc();
