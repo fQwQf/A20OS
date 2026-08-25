@@ -22,11 +22,7 @@ sysfs 是精简实现（`kernel/fs/sysfs.c`），但发行版需要的东西都�
 
 - `/sys/class/drm/card0`，含 `card0-Virtual-1/{enabled,status,modes}` 和 `device/modalias`；
 - `/sys/class/input/event0` / `event1`，含 `dev`、`uevent`、`subsystem` 符号链接；
-- `/sys/dev/char/<maj>:<min>`：libdrm 用它识别 DRM 设备，**它同时响应
-  `readlink()` 返回 class 路径**（保持目录结构供 libdrm 走 `device/drm`
-  子路径）。libudev 的 `udev_device_new_from_devnum()` 解析这个链接后得到与
-  `/sys/class` 枚举一致的 syspath——libinput 打开设备时会逐字节比较两个
-  syspath，不一致就拒收设备。
+- `/sys/dev/char/<maj>:<min>`：libdrm 用它识别 DRM 设备，**它同时响应 `readlink()` 返回 class 路径**（保持目录结构供 libdrm 走 `device/drm` 子路径）。libudev 的 `udev_device_new_from_devnum()` 解析这个链接后得到与 `/sys/class` 枚举一致的 syspath——libinput 打开设备时会逐字节比较两个 syspath，不一致就拒收设备。
 - `/sys/devices/virtual/<subsys>/<name>`：udev 收到 uevent 后按 DEVPATH 来这里找设备。
 
 设备热插拔走 netlink **KOBJECT_UEVENT**（`kernel/net/socket_netlink.c` + `kernel/drivers/core/driver_class.c`）：设备发布时广播 add uevent；udevd 的 netlink socket bind 时把当前设备集重放一遍；sysfs 的 uevent 文件做成可写，让 `udevadm trigger` 的冷插拔路径能走通。**每条 uevent 带全局递增的 `SEQNUM=`**——eudev 的事件队列用 seqnum 判断事件间依赖，缺了它所有事件 seqnum 都为 0，第一个事件会被误判为 busy、worker 永不 spawn。调试时在串口里能看到的 `[UEVENT] add input/event0 -> delivered=1` 就是这条广播的痕迹。
@@ -42,14 +38,7 @@ wlroots 探测显卡的流程极其严格，下面每一条都是实测中卡过
 
 ## 输入 / evdev
 
-`/dev/input/event0` 提供完整的 evdev ioctl 面（`EVIOCGVERSION`/`EVIOCGID`/
-`EVIOCGBIT`/`EVIOCGNAME`/`EVIOCGKEY`/`EVIOCGABS` 等，
-`kernel/drivers/input/input_mux.c`），这样 udev 的 input_id 和 libinput 才能读到
-设备能力位去分类设备。输入设备作为 class device 发布时，其 devt 要和 devfs 节点
-一致（`/dev/input/event0` = 29:1），否则 udev 数据库里的设备对不上实际节点。
-**devfs 的 `/dev/input/` 目录动态列出每个发布的 input class device**，所以
-`/dev/input/event1+` 与 `/sys/class/input/eventN` 一一对应，libseat/seatd 才能
-打开全部设备（seatd 只认 `/dev/input/event*`）。
+`/dev/input/event0` 提供完整的 evdev ioctl 面（`EVIOCGVERSION`/`EVIOCGID`/ `EVIOCGBIT`/`EVIOCGNAME`/`EVIOCGKEY`/`EVIOCGABS` 等， `kernel/drivers/input/input_mux.c`），这样 udev 的 input_id 和 libinput 才能读到 设备能力位去分类设备。输入设备作为 class device 发布时，其 devt 要和 devfs 节点 一致（`/dev/input/event0` = 29:1），否则 udev 数据库里的设备对不上实际节点。 **devfs 的 `/dev/input/` 目录动态列出每个发布的 input class device**，所以 `/dev/input/event1+` 与 `/sys/class/input/eventN` 一一对应，libseat/seatd 才能 打开全部设备（seatd 只认 `/dev/input/event*`）。
 
 ## 其它零零碎碎
 

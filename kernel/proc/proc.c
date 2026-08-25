@@ -55,10 +55,67 @@ static void proc_link_task_locked(task_t *t)
     task_list_tail = t;
 }
 
+void proc_children_link_locked(task_t *parent, task_t *child)
+{
+    if (!parent || !child || child->sibling_prev_ptr)
+        return;
+    child->sibling_next = parent->children;
+    child->sibling_prev_ptr = &parent->children;
+    if (child->sibling_next)
+        child->sibling_next->sibling_prev_ptr = &child->sibling_next;
+    parent->children = child;
+}
+
+void proc_children_unlink_locked(task_t *t)
+{
+    if (!t || !t->sibling_prev_ptr)
+        return;
+    *t->sibling_prev_ptr = t->sibling_next;
+    if (t->sibling_next)
+        t->sibling_next->sibling_prev_ptr = t->sibling_prev_ptr;
+    t->sibling_next = NULL;
+    t->sibling_prev_ptr = NULL;
+}
+
+void proc_reparent_task_locked(task_t *new_parent, task_t *t)
+{
+    if (!t || !new_parent)
+        return;
+    proc_children_unlink_locked(t);
+    t->parent = new_parent;
+    t->ppid = new_parent->pid;
+    proc_children_link_locked(new_parent, t);
+}
+
+void proc_tg_link_locked(task_t *t)
+{
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    if (t == leader || leader == t->tg_next || t->tg_prev_ptr)
+        return;
+    t->tg_next = leader->tg_next;
+    t->tg_prev_ptr = &leader->tg_next;
+    if (t->tg_next)
+        t->tg_next->tg_prev_ptr = &t->tg_next;
+    leader->tg_next = t;
+}
+
+void proc_tg_unlink_locked(task_t *t)
+{
+    if (!t || !t->tg_prev_ptr)
+        return;
+    *t->tg_prev_ptr = t->tg_next;
+    if (t->tg_next)
+        t->tg_next->tg_prev_ptr = t->tg_prev_ptr;
+    t->tg_next = NULL;
+    t->tg_prev_ptr = NULL;
+}
+
 void proc_unlink_task_locked(task_t *t)
 {
     if (!t)
         return;
+    proc_children_unlink_locked(t);
+    proc_tg_unlink_locked(t);
     if (t->all_prev)
         t->all_prev->all_next = t->all_next;
     else if (task_list_head == t)
@@ -321,7 +378,6 @@ void proc_init(void) {
     idle->limits.stack = USER_STACK_MAX_SIZE;
     idle->limits.nofile = MAX_FILES;
     idle->limits.memlock = 64 * 1024;
-    idle->sched_level = SCHED_LEVELS - 1;
     idle->cpus_allowed = CONFIG_NR_CPUS >= 32
                          ? ~0U : (1U << CONFIG_NR_CPUS) - 1U;
     proc_set_name(idle, "idle");
@@ -366,7 +422,6 @@ void proc_init(void) {
         task_t *secondary = &idle_tasks[cpu];
         secondary->pid = 0;
         proc_task_init_idle_state(secondary, cpu);
-        secondary->sched_level = SCHED_LEVELS - 1;
         secondary->cpus_allowed = 1U << cpu;
         secondary->pgdir = kpdir;
         proc_set_name(secondary, "idle");

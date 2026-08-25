@@ -473,7 +473,6 @@ void sched_scan_timers(uint64_t now)
              * the wake a no-op.  A task already woken (WOKEN/IDLE) is left
              * alone. */
             uint64_t plf = spin_lock_irqsave(&t->park_lock);
-            t->sched_level = 0;
             int stale = t->wait_seq != expired[i].seq;
             int woke = proc_try_wake_locked_common(
                 t, expired[i].seq, PROC_WAKE_TIMEOUT, NULL, NULL);

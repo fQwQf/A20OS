@@ -104,7 +104,7 @@ typedef struct proc_vm_stats {
  *   relationships, zombie/reap transitions, and most task state transitions
  *   and scheduler ownership metadata. PID lookup has its own pid_lock and
  *   signal pending/actions have signal_state.lock. Per-CPU runqueue locks
- *   protect rq_next/rq_prev/on_rq and queue membership. Local pick atomically
+ *   protect rq_next/rq_prev/eevdf_node/on_rq and queue membership. Local pick atomically
  *   publishes on_rq -> dispatching under only that CPU's runqueue lock, then
  *   releases it before switch publication takes proc_lock. Every path needing
  *   both locks follows proc_lock -> runq_lock.
@@ -142,6 +142,21 @@ typedef struct nommu_vfork_snap_entry {
 } nommu_vfork_snap_entry_t;
 #endif
 
+/*
+ * Intrusive EEVDF runqueue node (kernel/proc/sched.c owns the tree code).
+ * The per-CPU runqueue keeps normal tasks in a randomized (treap) BST ordered
+ * by earliest virtual deadline and augmented with the subtree-minimum
+ * vruntime so the eligible-gated pick can prune ineligible subtrees in
+ * O(log n) instead of walking a sorted list.
+ */
+typedef struct eevdf_node {
+    struct eevdf_node *left;
+    struct eevdf_node *right;
+    struct eevdf_node *parent;
+    uint64_t min_vruntime;   /* min eevdf_vruntime within this subtree */
+    uint32_t heap_prio;      /* treap heap key (smaller = closer to root) */
+} eevdf_node_t;
+
 typedef struct task_t {
     /*
      * Architecture context-switch assembly depends on these two offsets.
@@ -163,6 +178,17 @@ typedef struct task_t {
     proc_fs_context_t fs;
     int      vfs_open_errno;   /* specific error from the last failed vnode open */
     struct task_t *parent;
+    /* Parent-children membership, kept in lockstep with ->parent under
+     * proc_lock so wait4/reparent walk O(children) instead of the global
+     * task list. */
+    struct task_t *sibling_next;
+    struct task_t **sibling_prev_ptr;
+    struct task_t *children;
+    /* Thread-group chain rooted at the leader (leader excluded from its own
+     * tg_next chain); tg_leader is self for non-thread tasks. */
+    struct task_t *tg_leader;
+    struct task_t *tg_next;
+    struct task_t **tg_prev_ptr;
     uint64_t wake_time;
     uint64_t alarm_expire;
     uint64_t itimer_real_interval;
@@ -182,6 +208,7 @@ typedef struct task_t {
 #endif
     struct task_t *rq_next;
     struct task_t *rq_prev;
+    eevdf_node_t eevdf_node;  /* EEVDF runqueue treap membership (runq lock) */
     struct task_t *wait_next;
     uint64_t total_time;
     uint64_t child_utime;
