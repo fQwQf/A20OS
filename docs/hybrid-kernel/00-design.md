@@ -19,7 +19,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 │ 用户态服务层（可崩溃、可重启）                        │
 │  svcmgr（监管） echod  rtcd（RTC） ubd（virtio-blk） │
 │  uinputd（virtio-input） shmringd/chand              │
-│  ufsd（FAT32 文件系统，经内核 uxfs 代理挂载）          │
+│  ufsd 文件系统宿主（fat/ext4/iso9660/ntfs-ro，经 uxfs）│
 ├────────────────────────────────────────────────────┤
 │ 混合内核层（性能关键路径）                            │
 │  EEVDF 调度 / MM(VMO·VMAR·缺页) / VFS 核心 / 页缓存   │
