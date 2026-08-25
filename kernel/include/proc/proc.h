@@ -328,6 +328,14 @@ typedef struct task_t {
     uint32_t        rseq_sig;
     uint32_t        rseq_flags;
 
+    /* Syscall-restart block (SYS_restart_syscall): nr+args recorded by the
+     * dispatcher on the -ERESTARTSYS accepted-restart rewind, replayed by
+     * SYS_restart_syscall, invalidated when any other syscall dispatches
+     * first.  Not inherited across fork. */
+    int             restart_active;
+    uint64_t        restart_nr;
+    uint64_t        restart_args[6];
+
     /* ioprio_get/ioprio_set(2): the encoded I/O priority (class<<13 | data). */
     int             ioprio;
     /* pkey_alloc/pkey_mprotect(2): allocated protection keys bitmap. */

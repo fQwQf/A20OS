@@ -1,6 +1,7 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
+#include "abi/linux/syscall_entry.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "fs/fdtable.h"
@@ -21,10 +22,22 @@
 
 int64_t sys_restart_syscall(void)
 {
-    /* Only meaningful after a syscall was interrupted and the user restart
-     * sequence requested it; with no pending restart this is a no-op that
-     * returns the interrupted syscall's restart code. */
-    return -ERESTARTNOINTR;
+    task_t *t = proc_current();
+    if (!t || !t->restart_active)
+        return -ENOSYS;
+
+    linux_syscall_args_t args;
+    args.nr = t->restart_nr;
+    for (int i = 0; i < 6; i++)
+        args.arg[i] = t->restart_args[i];
+    args.ctx = t->trap_ctx;
+
+    const linux_syscall_entry_t *entry = linux_syscall_lookup(args.nr);
+    if (!entry) {
+        t->restart_active = 0;
+        return -ENOSYS;
+    }
+    return entry->handler(&args);
 }
 
 int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
