@@ -94,6 +94,13 @@ int proc_wait4(int pid, int *status, int options)
                 int cstate = __atomic_load_n(&child->state, __ATOMIC_ACQUIRE);
                 if (cstate != PROC_UNUSED &&
                     wait_child_matches_locked(child, t, pid, options)) {
+                    if (cstate == PROC_ZOMBIE &&
+                        !proc_tg_group_dead_locked(child)) {
+                        /* zombie leader with live member threads: not
+                         * reportable yet, the group is still dying */
+                        child = next;
+                        continue;
+                    }
                     found = 1;
                     if (cstate == PROC_ZOMBIE) {
                         if (proc_task_is_current_any_cpu(child)) {
