@@ -330,11 +330,7 @@ int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
 
 int64_t sys_memfd_secret(unsigned flags)
 {
-    (void)flags;
-    /* memfd_secret creates an unmapped, sealable anonymous file.  A20OS does
-     * not keep secret memory out of the direct map, so fall back to a regular
-     * memfd which still provides the fd interface. */
-    return memfd_create_file((int)flags);
+    return memfd_secret_file((int)flags);
 }
 
 /* rseq(2): register a restartable-sequence area.  A20OS does not migrate
