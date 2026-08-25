@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 
 #include "abi/linux/syscall_entry.h"
+#include "core/mman.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "fs/fdtable.h"
@@ -11,6 +12,7 @@
 #include "fs/vfs.h"
 #include "mm/process_vm.h"
 #include "mm/slab.h"
+#include "mm/vm.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
 
@@ -257,17 +259,72 @@ int64_t sys_quotactl_fd(int fd, int cmd, int id, void *addr)
     return -EOPNOTSUPP;
 }
 
-int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot,
-                             uint64_t pgoff, int flags)
+/* remap_file_pages(2): rebind [start, start+size) of an existing shared
+ * file mapping to file offset pgoff*PAGE_SIZE. */
+int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
+                             uint64_t pgoff, int flags_unused)
 {
-    (void)start;
-    (void)size;
-    (void)prot;
-    (void)pgoff;
-    (void)flags;
-    /* remap_file_pages is deprecated; the same effect is available through
-     * mmap/madvise.  Accept the call and report success as Linux does for
-     * filesystems that do not support the operation. */
+    (void)prot_unused;
+    (void)flags_unused;
+    if (((start | (uint64_t)size) & (PAGE_SIZE - 1)))
+        return -EINVAL;
+    if (size == 0)
+        return 0;
+    if (pgoff > (~(uint64_t)0 >> PAGE_SIZE_BITS))
+        return -EINVAL;
+
+    task_t *t = proc_current();
+    if (!t || !t->mm)
+        return -EINVAL;
+
+    int gfd = -1;
+    int prot = PROT_READ;
+    uint64_t old_off = 0;
+
+    uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
+    vm_area_t *vma = mm_find_vma(t->mm, (vaddr_t)start);
+    if (!vma || vma->start > start ||
+        (uint64_t)(vma->end - start) < size) {
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        return -EINVAL;
+    }
+    if ((vma->vm_flags & (VM_FILE | VM_SHARED)) != (VM_FILE | VM_SHARED)) {
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        return -EINVAL;
+    }
+    if (mm_mseal_range_is_sealed_locked(t->mm, (vaddr_t)start, size)) {
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        return -EPERM;
+    }
+    gfd = vma->file_fd;
+    prot = mm_pte_flags_to_prot(vma->pte_flags);
+    old_off = vma->file_offset;
+    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+    if (gfd < 0)
+        return -EINVAL;
+
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -EBADF;
+
+    int64_t r = mm_munmap(t->mm, (vaddr_t)start, size);
+    if (r < 0) {
+        vfs_put_file_ref(gfd, vf);
+        return r;
+    }
+
+    uint64_t new_off = pgoff << PAGE_SIZE_BITS;
+    vaddr_t mapped = proc_mmap((vaddr_t)start, size, prot,
+                               MAP_SHARED | MAP_FIXED, gfd, (long)new_off);
+    if (mm_addr_is_error(mapped)) {
+        int64_t err = mm_addr_error(mapped);
+        proc_mmap((vaddr_t)start, size, prot, MAP_SHARED | MAP_FIXED, gfd,
+                  (long)old_off);
+        vfs_put_file_ref(gfd, vf);
+        return err;
+    }
+    vfs_put_file_ref(gfd, vf);
     return 0;
 }
 
