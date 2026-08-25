@@ -12,6 +12,7 @@
 #include "a20_string.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/rtcd_proto.h"
+#include "../svc/svc_proto.h"
 
 #define REG_OP_TAG    0x5245474FULL /* "REGO" — registry channel events */
 #define SVC_EXIT_BASE 0x52545800ULL /* exit event tag base: + index */
@@ -68,6 +69,7 @@ typedef struct {
     uint8_t      state;
     a20_handle_t task;
     a20_handle_t client_ep;
+    a20_handle_t ping_ep;
     uint64_t     last_ok_ms;
     uint64_t     ping_sent_ms;
     uint32_t     restarts;
@@ -87,6 +89,13 @@ static a20_status_t spawn_one(svc_entry_t *se)
     a20_status_t st = a20_channel_create(&pair);
     if (st != A20_OK)
         return st;
+    a20_channel_pair_t ping_pair;
+    st = a20_channel_create(&ping_pair);
+    if (st != A20_OK) {
+        a20_hdl_close(pair.endpoints[0]);
+        a20_hdl_close(pair.endpoints[1]);
+        return st;
+    }
 
     a20_path_open_args_t oa;
     oa.size = sizeof(oa);
@@ -103,14 +112,22 @@ static a20_status_t spawn_one(svc_entry_t *se)
     if (st != A20_OK) {
         a20_hdl_close(pair.endpoints[0]);
         a20_hdl_close(pair.endpoints[1]);
+        a20_hdl_close(ping_pair.endpoints[0]);
+        a20_hdl_close(ping_pair.endpoints[1]);
         return st;
     }
 
-    a20_spawn_handle_t sh;
-    sh.handle = pair.endpoints[1];
-    sh.rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
-    sh.target_slot = se->ep_slot;
-    sh.flags = 0;
+    /* 服务端点 + 健康探测端点：两条独立通道，监管流量与客户端 RPC
+     * 不共享任何队列（见 svc_proto.h A20_SVC_PING_SLOT 注释）。 */
+    a20_spawn_handle_t sh[2];
+    sh[0].handle = pair.endpoints[1];
+    sh[0].rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
+    sh[0].target_slot = se->ep_slot;
+    sh[0].flags = 0;
+    sh[1].handle = ping_pair.endpoints[1];
+    sh[1].rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
+    sh[1].target_slot = A20_SVC_PING_SLOT;
+    sh[1].flags = 0;
 
     a20_task_spawn_args_t ta;
     ta.size = sizeof(ta);
@@ -151,8 +168,8 @@ static a20_status_t spawn_one(svc_entry_t *se)
     args_vec[nargs] = NULL; /* copy_arg_vector 以空指针结尾 */
     ta.argv = (uint64_t)(uintptr_t)args_vec;
     ta.argc = nargs;
-    ta.handles = (uint64_t)(uintptr_t)&sh;
-    ta.handle_count = 1;
+    ta.handles = (uint64_t)(uintptr_t)sh;
+    ta.handle_count = 2;
     ta.flags = 0;
     ta.out_task = A20_HANDLE_NULL;
     ta.stdin_handle = A20_HANDLE_NULL;
@@ -163,13 +180,18 @@ static a20_status_t spawn_one(svc_entry_t *se)
     st = a20_syscall6(A20_SYS_task_spawn, (uint64_t)(uintptr_t)&ta, 0, 0, 0, 0, 0);
     a20_hdl_close(oa.out_handle);
     a20_hdl_close(pair.endpoints[1]);
+    a20_hdl_close(ping_pair.endpoints[1]);
     if (st < 0) {
         a20_hdl_close(pair.endpoints[0]);
+        a20_hdl_close(ping_pair.endpoints[0]);
         return st;
     }
     if (se->client_ep != A20_HANDLE_NULL)
         a20_hdl_close(se->client_ep);
+    if (se->ping_ep != A20_HANDLE_NULL)
+        a20_hdl_close(se->ping_ep);
     se->client_ep = pair.endpoints[0];
+    se->ping_ep = ping_pair.endpoints[0];
     se->task = ta.out_task;
     se->state = SVC_UP;
     se->last_ok_ms = now_ms();
@@ -212,9 +234,9 @@ static void svc_restart(a20_handle_t eq, svc_entry_t *se)
     }
     a20_event_watch(eq, se->task, A20_EVENT_MASK(A20_EVENT_EXITED),
                     SVC_EXIT_BASE + (uint64_t)(se - g_svcs));
-    /* The new client_ep is a fresh channel endpoint: the pong watch must
+    /* The new ping_ep is a fresh channel endpoint: the pong watch must
      * be re-registered on it or health pongs go to the dead endpoint. */
-    a20_event_watch(eq, se->client_ep,
+    a20_event_watch(eq, se->ping_ep,
                     A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                     (uint64_t)(100 + (se - g_svcs)));
     put_str("SVC_MGR: healed name=");
@@ -299,7 +321,7 @@ static void svc_ping(svc_entry_t *se)
         env.version = A20_SERVICES_IDL_VERSION;
         env.size = sizeof(env);
         env.type = (se->ping_kind == 1) ? RTCD_REQ_TIME : SVCMGR_REQ_ECHO;
-        if (a20_channel_send(se->client_ep, &env, sizeof(env), 0, 0) == A20_OK) {
+        if (a20_channel_send(se->ping_ep, &env, sizeof(env), 0, 0) == A20_OK) {
             se->state = SVC_PENDING_PING;
             se->ping_sent_ms = now;
         }
@@ -311,7 +333,7 @@ static void svc_pong(svc_entry_t *se)
     uint8_t buf[64];
     uint32_t blen = sizeof(buf);
     uint32_t hcnt = 0;
-    a20_status_t st = a20_channel_recv_flags(se->client_ep, buf, &blen,
+    a20_status_t st = a20_channel_recv_flags(se->ping_ep, buf, &blen,
                                              0, &hcnt, A20_MSG_NONBLOCK);
     if (st >= 0) {
         se->state = SVC_UP;
@@ -363,6 +385,7 @@ int main(int argc, char **argv, char **envp)
     for (uint32_t i = 0; i < g_nsvcs; i++) {
         g_svcs[i].task = A20_HANDLE_NULL;
         g_svcs[i].client_ep = A20_HANDLE_NULL;
+        g_svcs[i].ping_ep = A20_HANDLE_NULL;
         g_svcs[i].state = SVC_BOOT;
         g_svcs[i].restarts = 0;
         g_svcs[i].window_restarts = 0;
@@ -377,7 +400,7 @@ int main(int argc, char **argv, char **envp)
                             A20_EVENT_MASK(A20_EVENT_EXITED),
                             SVC_EXIT_BASE + (uint64_t)i) != A20_OK)
             return 5;
-        if (a20_event_watch(eq, g_svcs[i].client_ep,
+        if (a20_event_watch(eq, g_svcs[i].ping_ep,
                             A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                             (uint64_t)(i + 100)) != A20_OK)
             return 6;
