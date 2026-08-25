@@ -24,12 +24,19 @@
 
 ## 组件
 
-### ufsd（user/svc/ufsd.c）
+### ufsd（user/svc/ufsd.c）——多人格文件系统宿主
 
-- Native ABI 服务进程，由 svcmgr 按清单拉起并监管（崩溃重启）。
-- 复用 `kernel/fs/diskfs/fat32lite.c`（freestanding、`fat32lite_io_t` 回调注入 IO）直接编入服务进程——与 drvmod 双态部署同源的代码复用方式。
-- 块 IO 经 `fs_block_io` 原生 syscall 进入内核块层；内核校验只有注册该挂载的服务任务可以发起。
-- 服务循环：`channel_recv` 取请求 → fat32lite 执行 → `channel_send` 应答；请求以 `req_id` 匹配，乱序应答丢弃。
+- Native ABI 服务进程；一个二进制承载多种文件系统后端，按 argv 选择：
+  | fstype | 实现来源 | 语义 |
+  |--------|----------|------|
+  | `fat`（默认） | fat32lite 同源编译（freestanding，IO 回调注入） | 读写 |
+  | `ext4` | 内核 diskfs 源码经 fscompat 兼容环境原样编译 | 读写（含 rename/日志） |
+  | `iso9660` | 同上 | 只读 |
+  | `ntfs` | 同上 | 只读（内核 ntfs 写路径无在库测试覆盖，见边界） |
+- fscompat（user/svc/fscompat/）：以遮蔽头 + 等价实现为内核磁盘 FS 源码提供用户态运行环境——kmalloc→malloc、锁退化为 no-op（单线程宿主）、bcache 写穿透实现、vnode/vfile 引用助手、恒等 usercopy。FS 源码零改动。
+- vnode 型后端维护 ino→vnode* 映射；操作全部经由各 FS 自身的 vnode_ops/vfile_ops 表执行。
+- 块 IO 经 `fs_block_io` 原生 syscall 进入内核块层；内核校验只有注册该挂载的服务任务可以发起（含 count==0 的容量查询语义）。
+- 服务循环：`channel_recv` 取请求 → 后端执行 → `channel_send` 应答；请求以 `req_id` 匹配，乱序应答丢弃。线上 name/payload 不带 NUL，分发前统一终止化。
 
 ### uxfs 代理（kernel/fs/uxfs/uxfs.c）
 
@@ -43,11 +50,12 @@
 
 ## 已知边界
 
-- 8.3 短名（fat32lite 语义），单线程服务循环；
-- rmdir 与非零长度 truncate 未支持（fat32lite 无对应原语，返回 ENOSYS）；
+- fat 后端：8.3 短名（fat32lite 语义）；rmdir/rename/非零 truncate 不支持（fat32lite 无对应原语，返回 ENOSYS）；
+- ntfs 后端只读：内核 ntfs 的 create/unlink/truncate 路径在全仓库无任何测试覆盖，写使能前需先补齐其自身正确性验证；
+- iso9660 只读（格式即如此）；驱动将 ISO 名字转小写；
 - uxfs 文件读写当前不接入内核页缓存（直通转发）；接入 readpage/writepage 缓存路径是后续工作；
-- 每次 ufsd 重启需要显式重新挂载，无自动重绑；
-- 单挂载点、单服务实例。
+- 服务重启后映射清空：崩溃恢复契约要求重新挂载（新 ino 空间）；
+- 内核侧仍保留同名 FS 实现（引导期 /bin 挂载与 EXTERNAL_ROOT 发行版路径依赖它们），当前为双态并存；移除需先完成"用户态先于存储可用"的启动序列改造。
 
 ## 验证
 
