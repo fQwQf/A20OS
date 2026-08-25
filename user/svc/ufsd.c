@@ -19,9 +19,11 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "abi/native/syscall_nr.h"
-#include "core/stdio.h"
 #include "core/types.h"
+#include "core/stdio.h"
 #include "ufs_backends.h"
+#include "../svc/a20_services_idl.h"
+#include "../svc/svc_proto.h"
 
 typedef struct {
     uint32_t     size;
@@ -177,6 +179,39 @@ static int32_t parse_int(const char *s)
     return neg ? -v : v;
 }
 
+/* ------------------------------------------------------------------ */
+/* 监管通道：svcmgr 固定槽位端点上的 IDL echo 探针                      */
+/* ------------------------------------------------------------------ */
+
+#define UFS_POLL_SLEEP_NS 200000ull /* 200 µs 空闲轮询间隔 */
+
+/* 返回 1 = 处理了一条监管消息 */
+static int svc_ep_pump(a20_handle_t svc_ep)
+{
+    uint8_t buf[64];
+    uint32_t blen = sizeof(buf);
+    uint32_t hcnt = 0;
+    a20_status_t st =
+        a20_channel_recv_flags(svc_ep, buf, &blen, 0, &hcnt,
+                               A20_MSG_NONBLOCK);
+    if (st == -A20_ERR_WOULD_BLOCK)
+        return 0;
+    if (st < 0)
+        return -1; /* 槽位未安装或监管者消失：静默忽略 */
+    if (blen < sizeof(a20_idl_envelope_t))
+        return 1;
+    a20_idl_envelope_t env;
+    a20_memcpy(&env, buf, sizeof(env));
+    if (env.version != A20_SERVICES_IDL_VERSION || env.size != blen)
+        return 1;
+    if (env.type == SVCMGR_REQ_CRASH)
+        a20_task_exit(A20_SVC_CRASH_CODE);
+    /* SVCMGR_REQ_ECHO 与其他类型：原样回显（echod 契约） */
+    if (a20_channel_send(svc_ep, buf, blen, 0, 0) < 0)
+        return -1;
+    return 1;
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)envp;
@@ -236,6 +271,20 @@ int main(int argc, char **argv, char **envp)
         a20_task_exit(2);
     }
 
+    /*
+     * 缺盘检测：容量查询返回 0 说明该序号没有块设备（如单盘镜像上的
+     * scratch 槽位）。卸载刚注册的挂载并以 0 退出，让监管者视为干净
+     * 完成而不是触发重启预算。
+     */
+    if (fsio_capacity_sectors() == 0) {
+        a20_syscall6(A20_SYS_fs_umount, (uint64_t)(uintptr_t)mount_path,
+                     a20_strlen(mount_path), 0, 0, 0, 0);
+        log_str("UFSD: no block device at index ");
+        log_dec((uint32_t)g_block_index);
+        log_str("; exiting cleanly\n");
+        a20_task_exit(0);
+    }
+
     if (be->mount(fstype) != 0) {
         log_str("UFSD: mount ");
         log_str(fstype);
@@ -249,15 +298,28 @@ int main(int argc, char **argv, char **envp)
     log_str(fstype);
     log_str("\n");
 
+    /*
+     * 双通道服务循环：fs 通道承载 uxfs 协议（阻塞语义保留在"取到消息
+     * 后同步处理"），监管槽位以非阻塞轮询应答 echo 探针。空闲时短暂
+     * 睡眠避免忙等；EventQ 统一等待是后续优化项。
+     */
+    a20_handle_t svc_ep = A20_SVC_ENDPOINT_HANDLE;
     static uint8_t rx[UFSD_MSG_MAX];
-    /* 线上 name/payload 不带 NUL；分发前统一终止化，后端可安全 strlen */
     static char name_buf[512];
     static char aux_buf[512];
     for (;;) {
+        svc_ep_pump(svc_ep);
+
         uint32_t blen = sizeof(rx);
         uint32_t hcnt = 0;
-        a20_status_t st = a20_channel_recv(pair.endpoints[0], rx, &blen, 0,
-                                           &hcnt);
+        a20_status_t st =
+            a20_channel_recv_flags(pair.endpoints[0], rx, &blen, 0, &hcnt,
+                                   A20_MSG_NONBLOCK);
+        if (st == -A20_ERR_WOULD_BLOCK) {
+            a20_time_t nap = { .secs = 0, .nsecs = UFS_POLL_SLEEP_NS };
+            a20_thread_sleep(nap);
+            continue;
+        }
         if (st < 0)
             break; /* 对端关闭：在飞请求已按 -EIO 收场，等待重启重挂载 */
         if (blen < sizeof(ufs_req_hdr_t))
