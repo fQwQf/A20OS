@@ -194,6 +194,9 @@ Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wak
 | ISO9660 | 不支持 | 不支持 | 不支持 | 只读 CD-ROM；名字转小写；跨块目录记录 |
 | ramfs | 支持 | 支持 | 支持 | 单目录 entry 上限 256；总 inode 上限 4096 |
 | pipe | 不适用 | 不适用 | 不适用 | `PIPE_BUF` 原子写 |
+| uxfs | 经服务后端 | 不支持 | 不支持 | 用户态文件系统代理：能力取决于 ufsd 后端（见 hybrid-kernel/06-user-fs.md）；umount 单向断链通知服务退出 |
+
+以上为内核态实现。文件系统实现另有用户态放置：`kernel/fs/uxfs/` 代理 + `user/svc/ufsd.c` 宿主承载 fat/ext4/iso9660/ntfs(只读)，内核副本因引导期挂载与发行版根依赖并存（定位说明见 hybrid-kernel/02-mainstream-plan.md 的放置策略审计）。
 | devfs | 不支持 | 不支持 | 不支持 | 合成只读命名空间；保留静态兼容节点，并为 char/block/audio class 动态发布设备节点 |
 | procfs | 不支持 | 不支持 | 不支持 | 合成文件；open 时生成快照 |
 | sysfs | 不支持 | 不支持 | 不支持 | 合成只读视图；暴露 loop、DRM，以及 `/sys/class/{char,block,net,input,display,audio}` 动态 class 设备 |
