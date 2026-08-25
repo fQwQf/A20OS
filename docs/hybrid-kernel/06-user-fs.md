@@ -45,7 +45,7 @@
   1. 校验 endpoint 为 CHANNEL_ENDPOINT 句柄且具备 READ|WRITE 权限；
   2. 解析 block_index 对应 `block_dev_t` 并记录服务任务所有权；
   3. 完成挂载。无同步握手——调用方就是服务进程自身，阻塞等 INIT 会自我死锁；活跃性由首个真实文件操作验证。
-- vnode 操作（lookup/create/mkdir/unlink/rmdir/stat/truncate/read/write/readdir/statfs/sync）翻译为 ufs 协议消息；数据内联传输（≤ UFS_MAX_PAYLOAD）。
+- vnode 操作（lookup/create/mkdir/unlink/rmdir/rename/stat/truncate/read/write/readdir/statfs/sync）翻译为 ufs 协议消息；数据内联传输（≤ UFS_MAX_PAYLOAD）。
 - 服务死亡时 channel 断链使在飞请求返回 `-EIO`；重新拉起后需重新挂载（与 ubd_recover 的重挂载语义一致）。
 - **svcmgr 托管已接入**：清单项 `ufsd args="/ufs 1 fat"`，spawn 支持 argv；ufsd 应答 IDL echo 健康探针；目标块设备缺失时卸载挂载并以 0 干净退出（监管者不计入重启预算）。崩溃恢复由 `smoke-native-fs-all` 的 UXFS_RESTART 段实测：SIGKILL → umount2 → 重启实例 → 数据持久。
 - umount 通知路径：内核侧 uxfs_unmount 经 `a20_channel_ep_peer_shutdown` 单向置对端 peer_closed 并唤醒，服务 recv 随即出错退出，不产生僵尸实例。
@@ -57,10 +57,12 @@
 - iso9660 只读（格式即如此）；驱动将 ISO 名字转小写；
 - uxfs 文件读写当前不接入内核页缓存（直通转发）；接入 readpage/writepage 缓存路径是后续工作；
 - 服务重启后映射清空：崩溃恢复契约要求重新挂载（新 ino 空间）；
+- 监管通道为 200µs 非阻塞轮询（与 fs 服务循环复用一个线程）；EventQ 统一等待是后续优化项；
 - 内核侧仍保留同名 FS 实现（引导期 /bin 挂载与 EXTERNAL_ROOT 发行版路径依赖它们），当前为双态并存；移除需先完成"用户态先于存储可用"的启动序列改造。
 
 ## 验证
 
 ```bash
-make smoke-native-ufs   # QEMU 中经 ufsd 完成 open/read/write/listing/unlink 全流程
+make smoke-native-fs-all   # 四后端端到端 + svcmgr 托管 + SIGKILL 恢复演练
+make smoke-native-ufs      # 仅 FAT 后端回归
 ```
