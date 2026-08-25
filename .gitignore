@@ -45,3 +45,6 @@ user/desktop/desktop_cursor_breeze.c
 *.log
 *.out
 *.synctex.gz
+# user/cmds/core 目录名同样撞 core dump 规则；显式回纳（同 fscompat 先例）
+!user/cmds/core/
+!user/cmds/core/**
