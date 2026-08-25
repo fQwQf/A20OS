@@ -426,6 +426,11 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
+| `a20_envelope_create` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: create a capability envelope from a policy struct; thin bridge to core env_create |
+| `a20_envelope_enter` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: attach the calling process to an envelope (monotone); thin bridge to core env_enter |
+| `a20_envelope_revoke` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: actively revoke an envelope (owner/root, optional KILL_ON_EXPIRE); thin bridge to core env_revoke |
+| `a20_envelope_stats` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: read envelope mediation counters; thin bridge to core env_stats |
+| `a20_envelope_audit` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: runtime invariant audit across live envelopes; thin bridge to core env_audit |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
 ## Placeholder Resolution Record
