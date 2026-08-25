@@ -1,5 +1,6 @@
 #include "proc/proc_internal.h"
 #include "proc/debug.h"
+#include "proc/rseq.h"
 
 #include "core/cpu.h"
 #include "core/klog.h"
@@ -1662,6 +1663,7 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
         next->dispatching = 0;
         next->on_cpu = 1;
         next->owner_cpu = cpu;
+        rseq_publish(next);
         proc_sched_assert_task_locked(next);
         if (had_dispatch_ref)
             proc_put(next);
@@ -1692,6 +1694,7 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
     next->dispatching = 0;
     next->on_cpu = 1;
     next->owner_cpu = cpu;
+    rseq_publish(next);
     proc_sched_assert_task_locked(next);
     if (had_dispatch_ref)
         proc_put(next);
