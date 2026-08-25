@@ -40,3 +40,8 @@ user/desktop/desktop_cursor_breeze.c
 # fscompat 遮蔽头目录名恰为 core，与 core dump 规则冲突；显式回纳
 !user/svc/fscompat/core/
 !user/svc/fscompat/core/**
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.synctex.gz
