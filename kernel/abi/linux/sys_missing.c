@@ -12,6 +12,7 @@
 #include "mm/process_vm.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
+#include "sys/usercopy.h"
 
 /*
  * Linux syscalls completed in the "finish the Linux ABI" work: small
@@ -182,30 +183,43 @@ int64_t sys_readahead(int fd, long off, size_t count)
     return r;
 }
 
-/* cachestat(2): struct cachestat { u64 nr_cache, nr_dirty, nr_writeback,
- * nr_evicted, nr_recently_evicted } plus a struct cachestat_range. */
-int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat, unsigned flags)
+/* cachestat(2): struct cachestat_range { u64 off, len; } selects the file
+ * window; struct cachestat is five u64 counters copied out wholesale. */
+int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat,
+                      unsigned flags)
 {
     if (flags)
         return -EINVAL;
     if (!cstat_range || !cstat)
         return -EFAULT;
 
+    uint64_t range[2];
+    if (copy_from_user(range, cstat_range, sizeof(range)) < 0)
+        return -EFAULT;
+    uint64_t off = range[0];
+    size_t len = (size_t)range[1];
+
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0)
         return -EBADF;
     vfile_t *vf = vfs_get_file_ref((int)gfd);
-    if (!vf) {
+    if (!vf)
         return -EBADF;
-    }
+
     size_t resident = 0, dirty = 0;
-    page_cache_file_stats(vf, &resident, &dirty);
+    page_cache_file_range_stats(vf, off, len, &resident, &dirty);
     vfs_put_file_ref((int)gfd, vf);
 
-    uint64_t cs[5];
-    memset(cs, 0, sizeof(cs));
-    cs[0] = resident / PAGE_SIZE;   /* nr_cache */
-    cs[1] = dirty / PAGE_SIZE;      /* nr_dirty */
+    /* nr_writeback/evicted/recently_evicted stay zero: writeback here is
+     * synchronous under page_cache_mark_dirty ownership and eviction
+     * counters are not tracked per vnode. */
+    uint64_t cs[5] = {
+        resident >> PAGE_SIZE_BITS,
+        dirty >> PAGE_SIZE_BITS,
+        0,
+        0,
+        0,
+    };
     return copy_to_user(cstat, cs, sizeof(cs)) < 0 ? -EFAULT : 0;
 }
 
