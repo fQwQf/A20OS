@@ -260,6 +260,9 @@ comma := ,
 NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
+SMOKE_TIMEOUT_ENVELOPE ?= 60s
+SMOKE_TIMEOUT_ENVELOPE_PILOT ?= 120s
+SMOKE_TIMEOUT_ENVELOPE_BENCH ?= 180s
 # Full XFCE desktop bring-up under TCG software rendering is slow; the fixed
 # 15s scanout window in smoke_qemu_gui.py is not enough for the riscv64 image
 # to finish its first frame.  Allow each GUI smoke target to size the window.
@@ -899,3 +902,16 @@ include tools/targets-mlibc.mk
 .PHONY: docs
 docs:
 	@bash tools/gen_docs_pdf.sh
+
+# ================================================================
+# Envelope choke-point coverage gate (docs/research/08 §4)
+# ================================================================
+# Regenerates the coverage matrix from syscall_table.def and fails when
+# the committed copy drifts -- a newly registered syscall must be
+# explicitly classified before the gate passes again.
+.PHONY: check-envelope-coverage
+check-envelope-coverage:
+	@python3 tools/gen_envelope_coverage.py
+	@git diff --exit-code --quiet -- docs/research/verification/envelope_coverage.md \
+		&& echo "check-envelope-coverage: PASS" \
+		|| { echo "check-envelope-coverage: FAIL -- matrix drifted; review and commit"; exit 1; }
