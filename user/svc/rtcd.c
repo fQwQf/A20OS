@@ -18,6 +18,7 @@
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/rtcd_proto.h"
+#include "../svc/svc_proto.h"
 #include "drivers/driver_descriptor.h"
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
@@ -43,6 +44,8 @@ static void rtc_set_alarm_ns(uint64_t ns)
 
 /* Returns 1 = handled one message, 0 = queue empty, 42 = crash request,
  * -1 = peer gone (clean shutdown). */
+static a20_handle_t g_alarm_ep = A20_HANDLE_NULL;
+
 static int handle_one(a20_handle_t ep, int *alarm_pending)
 {
     uint8_t buf[64];
@@ -56,7 +59,6 @@ static int handle_one(a20_handle_t ep, int *alarm_pending)
         return -1;
     if (blen < sizeof(a20_idl_envelope_t))
         return 1;
-
     a20_idl_envelope_t env;
     a20_memcpy(&env, buf, sizeof(env));
     if (env.version != A20_SERVICES_IDL_VERSION || env.size != blen)
@@ -85,6 +87,7 @@ static int handle_one(a20_handle_t ep, int *alarm_pending)
         a20_memcpy(&req, &buf[sizeof(a20_idl_envelope_t)], sizeof(req));
         uint32_t ms = req.milliseconds;
         rtc_set_alarm_ns(rtc_read_ns() + (uint64_t)ms * 1000000ULL);
+        g_alarm_ep = ep;
         *alarm_pending = 1; /* async reply is sent when the IRQ fires */
         return 1;
     }
@@ -127,6 +130,10 @@ int main(int argc, char **argv, char **envp)
         return 4;
     }
     RTCD_LOG("rtcd: ep watched\n");
+    a20_handle_t ping_ep = A20_SVC_PING_HANDLE;
+    int have_ping = (a20_event_watch(eq, ping_ep,
+                                     A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
+                                     CH_TAG) == A20_OK);
     if (a20_device_irq_listen(GOLDFISH_RTC_IRQ, eq, IRQ_TAG) != A20_OK) {
         RTCD_LOG("rtcd: irq_listen failed\n");
         return 5;
@@ -144,6 +151,15 @@ int main(int argc, char **argv, char **envp)
                 return 42;
             if (r <= 0)
                 break;
+        }
+        if (have_ping) {
+            for (;;) {
+                int r = handle_one(ping_ep, &alarm_pending);
+                if (r == 42)
+                    return 42;
+                if (r <= 0)
+                    break;
+            }
         }
 
         a20_event_t ev;
@@ -164,7 +180,8 @@ int main(int argc, char **argv, char **envp)
                       sizeof(a20_idl_envelope_t) + sizeof(a20_idl_rtcd_time_response_t) },
                     { ns / 1000000000ULL, ns % 1000000000ULL }
                 };
-                a20_channel_send(ep, &rep, sizeof(rep), 0, 0);
+                a20_channel_send(g_alarm_ep != A20_HANDLE_NULL ? g_alarm_ep : ep,
+                                 &rep, sizeof(rep), 0, 0);
                 alarm_pending = 0;
             }
             a20_device_irq_ack(GOLDFISH_RTC_IRQ);
