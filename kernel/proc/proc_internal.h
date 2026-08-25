@@ -70,6 +70,7 @@ task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);
 void proc_unlink_task_locked(task_t *t);
 void proc_children_link_locked(task_t *parent, task_t *child);
+void proc_link_newborn_locked(task_t *t);
 void proc_children_unlink_locked(task_t *t);
 void proc_reparent_task_locked(task_t *new_parent, task_t *t);
 void proc_tg_link_locked(task_t *t);
