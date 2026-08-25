@@ -226,6 +226,9 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
             if (cur->type == VFS_FT_SYMLINK) {
                 int follow = 1;
                 if (resolve & RESOLVE_NO_SYMLINKS) follow = 0;
+                if ((resolve & RESOLVE_NO_MAGICLINKS) &&
+                    (cur->link_flags & VNODE_MAGICLINK))
+                    follow = 0;
 
                 if (!follow) {
                     vnode_put(parent);
