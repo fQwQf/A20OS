@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
+#include "ipc/kexec.h"
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
@@ -733,9 +734,19 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
     const uint64_t LINUX_REBOOT_MAGIC2C = 537993216UL;
     const uint64_t LINUX_REBOOT_CMD_RESTART = 0x01234567UL;
     const uint64_t LINUX_REBOOT_CMD_POWER_OFF = 0x4321fedcUL;
+    const uint64_t LINUX_REBOOT_CMD_KEXEC = 0x45584543UL;
     const uint64_t LINUX_REBOOT_CMD = 0x424F4F54UL;
 
     if (magic1 == LINUX_REBOOT_CMD ||
+        (magic1 == LINUX_REBOOT_MAGIC1 &&
+         (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
+          magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
+         cmd == LINUX_REBOOT_CMD_KEXEC)) {
+        /* A staged image exists but no architecture provides the
+         * machine_kexec MMU-teardown trampoline yet; Linux reports the
+         * same way on boards without a kexec backend. */
+        return kexec_is_loaded() ? -ENOSYS : -EINVAL;
+    } else if (magic1 == LINUX_REBOOT_CMD ||
         (magic1 == LINUX_REBOOT_MAGIC1 &&
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
           magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
