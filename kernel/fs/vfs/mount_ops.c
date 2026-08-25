@@ -3,6 +3,7 @@
  *
  * This file was mechanically extracted from vfs.c.
  */
+#include "fs/quota.h"
 #include "fs/vfs.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mount.h"
@@ -402,14 +403,19 @@ int vfs_ftruncate(int fd, size_t size) {
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf) return -EBADF;
     int r = 0;
+    size_t old_size = vf->vnode ? vf->vnode->size : 0;
     if (!vfs_should_write(vf->flags)) r = -EINVAL;
     else if (!vf->vnode || !vf->vnode->ops || !vf->vnode->ops->truncate) r = -EINVAL;
     else if ((vf->seals & F_SEAL_SHRINK) && size < vf->vnode->size) r = -EPERM;
     else if ((vf->seals & F_SEAL_GROW) && size > vf->vnode->size) r = -EPERM;
     else if (vf->seals & F_SEAL_WRITE) r = -EPERM;
+    else if (size > old_size &&
+             quota_check_space(vf->vnode, size - old_size) < 0) r = -EDQUOT;
     else r = vf->vnode->ops->truncate(vf->vnode, size);
     if (r == 0) {
         page_cache_truncate(vf->vnode, size);
+        if (vf->vnode && size > old_size)
+            quota_account_space(vf->vnode, size - old_size);
     }
     vfs_put_file_ref(fd, vf);
     return r;

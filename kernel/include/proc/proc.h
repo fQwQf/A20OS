@@ -319,6 +319,11 @@ typedef struct task_t {
      * keyring object, shared with children at fork and released at teardown. */
     void           *session_keyring;
 
+    /* Seccomp state (kernel/ipc/seccomp.c): SECCOMP_MODE_* plus a refcounted
+     * newest-first classic-BPF filter chain shared with children at fork. */
+    void           *seccomp_chain;
+    uint32_t        seccomp_mode;
+
     /* Landlock LSM ruleset list (kernel/ipc/landlock.c), process-local. */
     void           *landlock_rulesets;
 
@@ -333,6 +338,14 @@ typedef struct task_t {
     uintptr_t       rseq_area;
     uint32_t        rseq_sig;
     uint32_t        rseq_flags;
+
+    /* Syscall-restart block (SYS_restart_syscall): nr+args recorded by the
+     * dispatcher on the -ERESTARTSYS accepted-restart rewind, replayed by
+     * SYS_restart_syscall, invalidated when any other syscall dispatches
+     * first.  Not inherited across fork. */
+    int             restart_active;
+    uint64_t        restart_nr;
+    uint64_t        restart_args[6];
 
     /* ioprio_get/ioprio_set(2): the encoded I/O priority (class<<13 | data). */
     int             ioprio;
