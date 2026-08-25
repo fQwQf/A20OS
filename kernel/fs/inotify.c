@@ -206,13 +206,9 @@ static int inotify_ops_read(vfile_t *vf, char *buf, size_t count)
             return -EAGAIN;
         wait_queue_entry_t entry = {0};
         spin_lock(&inst->lock);
-        if (inst->count != 0 || inst->overflow_pending) {
-            spin_unlock(&inst->lock);
-            (void)proc_park_cancel(token);
-            proc_park_finish(token);
-            continue;
-        }
-        bool linked = wait_queue_link(&inst->readers, &entry, token, 0);
+        bool linked = (inst->count == 0 && !inst->overflow_pending)
+                          ? wait_queue_link(&inst->readers, &entry, token, 0)
+                          : false;
         spin_unlock(&inst->lock);
         proc_wake_reason_t reason;
         if (linked)
@@ -227,6 +223,10 @@ static int inotify_ops_read(vfile_t *vf, char *buf, size_t count)
             return -ERESTARTSYS;
         spin_lock(&inst->lock);
     }
+    /* Loop invariant: exit holding inst->lock (fast path enters locked,
+     * every wake path re-acquires before re-testing the condition).  Drop it
+     * here so the drain loop can take the same lock per pop. */
+    spin_unlock(&inst->lock);
 
     size_t written = 0;
     for (;;) {
@@ -265,24 +265,21 @@ static int inotify_ops_read(vfile_t *vf, char *buf, size_t count)
             fid.ino = ino;
 
             char *p = buf + written;
-            if (copy_to_user(p, &fm, sizeof(fm)) < 0)
-                return -EFAULT;
-            if (copy_to_user(p + sizeof(fm), &fid, sizeof(fid)) < 0)
-                return -EFAULT;
-            if (ev.len > 0 &&
-                copy_to_user(p + sizeof(fm) + sizeof(fid), namebuf,
-                             (size_t)ev.len) < 0)
-                return -EFAULT;
+            memcpy(p, &fm, sizeof(fm));
+            memcpy(p + sizeof(fm), &fid, sizeof(fid));
+            if (ev.len > 0)
+                memcpy(p + sizeof(fm) + sizeof(fid), namebuf,
+                       (size_t)ev.len);
             written += ev_size;
         } else {
             size_t ev_size = sizeof(ev) + ev.len;
             if (written + ev_size > count)
                 break;
-            if (ev.len > 0 && copy_to_user(buf + written + sizeof(ev), namebuf,
-                                           (size_t)ev.len) < 0)
-                return -EFAULT;
-            if (copy_to_user(buf + written, &ev, sizeof(ev)) < 0)
-                return -EFAULT;
+            /* `buf` is the kernel-side buffer provided by the read path
+             * (read_into_user scratch), not a user pointer. */
+            if (ev.len > 0)
+                memcpy(buf + written + sizeof(ev), namebuf, (size_t)ev.len);
+            memcpy(buf + written, &ev, sizeof(ev));
             written += ev_size;
         }
     }
