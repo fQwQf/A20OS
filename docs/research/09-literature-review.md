@@ -101,7 +101,10 @@
 | Firejail / bubblewrap | 用户态沙箱（mount/ns/seccomp 组合） | 进程级 | 无 | 无 | 无 | 无对象能力预算；策略组合脆弱 |
 | gVisor | 用户态内核（syscall 拦截） | 进程级 | 无 | 无 | 无 | 用户态开销大；无能力对象模型 |
 | starnix (Android) | Linux 人格层于 Zircon | 进程级 | 无 | 无 | 无 | **最接近的架构**；但无预算/时态，且不主张安全边界形式化 |
-| **A20OS 信封** | **内核调解器 + 影子 handle** | **对象能力级** | **是（时间/次数/类型/传播）** | **预算格 + 逃逸不可行（TLA+/Lean 计划）** | **无** | 唯一同时具备全部维度 |
+| Latch (AsiaCCS'22) | 安装期 manifest 推断 + AppArmor 实时执行 | syscall/path 意图级 | 无 | 无 | 无 | **组(b)最近邻**：manifest 是"观察一次运行得到的路径意图"，非对象能力；无预算维度；实时执行退化为 AppArmor 粗粒度近似 |
+| Leash (ICISSP'25) | FreeBSD Capsicum capability mode + 监督进程代理 | fd 级（Capsicum） | 无 | 无 | 无 | **最透明的 Capsicum 改造**：免源码改动跑安装脚本，但依赖用户态监督进程代持全局命名空间访问（17433 次 syscall 中 12191 次被代理，~10% 开销）；TCB 含监督者，无预算、无传播控制、无形式化 |
+| Decap (RAID'22) | 静态分析提取所需 capabilities(7)，去除 setuid 多余特权 | Linux capability 位 | 无 | 无 | 无 | 针对 setuid 二进制去特权；capability(7) 是 root 特权位而非对象能力；无时间/次数 |
+| **A20OS 信封** | **内核调解器 + 影子 handle** | **对象能力级** | **是（时间/次数/类型/传播）** | **预算格 + 逃逸不可行（TLA+/Lean 计划）** | **无** | 唯一同时具备全部维度；调解在内核内完成，无用户态监督进程 TCB |
 
 ### 4.2 组 (b)：不可信插件 / 包安装脚本的沙箱
 
@@ -111,10 +114,14 @@
 
 **现有缓解**（全部**网络/进程级**，无对象能力预算）：
 - npm `--ignore-scripts`、pip 网络隔离（build isolation）——全局开关或网络层，无资源预算。
-- 沙箱运行包脚本：`[待核]`（社区工具如 `pnpm approve-builds`、`corepack`、`proot` 类）——用户态、无内核保证、无时间/次数。
-- 学术工作：包管理安全（如 "Sok: software supply chain"）、`in-toto`/SLSA（完整性 attestation，非运行时隔离）、`[待核]` OS 级包脚本沙箱研究。
+- 沙箱运行包脚本：社区工具 `pnpm approve-builds`、`corepack`、`proot` 类，以及 pipguard 的 runtime-sandbox 设计稿——用户态（audit hooks/Landlock/bwrap 分层）、无内核保证、无时间/次数。
+- **学术工作（已核对，2026-08）**：
+  - **Latch**（Luo et al., AsiaCCS'22）：安装期行为 manifest（strace 推断的意图集）+ 策略匹配 + AppArmor 实时执行。与信封的根本差异：manifest 是"单次观察的路径意图"，对抗性脚本换一条路径即失效；实时执行退化为 AppArmor 的路径级 MAC；无对象、无预算、无传播。
+  - **Leash**（Jadidi & Anderson, ICISSP'25）：FreeBSD Capsicum capability mode + 用户态监督进程透明代理全局命名空间访问，实测 RVM 安装脚本 ~10% 开销。与信封的差异：监督进程本身在 TCB 内且是吞吐瓶颈；Capsicum 二元权限无预算维度；无传播控制；无形式化。**Leash 的存在证明"免改动沙箱化安装脚本"需求真实且有发表空间，但其用户态架构正是信封内核架构的对照面。**
+  - **Decap**（RAID'22）：静态分析 + Linux capabilities(7) 去特权 setuid 二进制。capability(7) 是特权位不是对象能力。
+- **检测线（动机引用，非竞争）**：OSCAR (ASE'24)、DySec (eBPF+ML, 2025)、MalGuard (USENIX Sec'25)、Cerebro、Donapi——全部是恶意包**检测**（静态/动态/ML），产出黑名单；不提供运行时遏制。DySec 论文数据点：>90% 恶意包在 install/import 阶段激活——直接支撑信封"安装期即防御主战场"的问题陈述。检测线与信封互补：检出后仍需受限执行环境。
 
-**A20OS 信封的回答**：包安装脚本放进信封（05 §4 场景），内核强制 类型×权限×时间×次数，零改动。**这是论文的应用落点，也是"为什么非你不可"的实证。**
+**A20OS 信封的回答**：包安装脚本放进信封（05 §4 场景），内核强制 类型×权限×时间×次数，零改动、零监督进程。相对 Latch/Leash 的增量必须写进论文：对象能力 vs 路径意图/Capsicum-fd；量化预算 vs 二元权限；内核强制 vs 用户态监督 TCB；形式化 vs 无。**这是论文的应用落点，也是"为什么非你不可"的实证。**
 
 ### 4.3 组 (c)：能力纪律的渐进采用 / 混合信任
 
@@ -132,11 +139,27 @@
 
 ### 4.5 必须正面回答的审稿人问题（预备反驳）
 
-1. "为何不做在 Linux 上？" → Linux 无对象能力模型，需 LSM 级大规模 hook 且无形式化；A20OS 双 ABI 内核天然是全局咽喉。
+1. "为何不做在 Linux 上？" → Linux 无对象能力模型，需 LSM 级大规模 hook 且无形式化；A20OS 双 ABI 内核天然是全局咽喉。**注意 2026-01 上游动向**：io_uring task restrictions + cBPF 过滤落地后，"Linux 连 io_uring 都管不了"的旧论据作废——差异化必须落在"操作白名单 ≠ 对象预算"（见 §4.6）。
 2. "信封 = 换马甲 seccomp？" → seccomp 按 syscall 号过滤（可被白名单绕过、无对象/预算）；信封按对象能力 + 预算（无法通过获取方式绕过）。
 3. "时间预算 = OAuth expiry？" → OAuth 用户态、进程可自续、无内核强制、无对象模型；信封内核强制、不可刷新、与类型/次数/传播同构。
+4. **"Latch/Leash 已经免改动沙箱化了安装脚本，你多了什么？"** → 见 §4.1/§4.2 差异矩阵：对象能力 vs 路径意图/Capsicum-fd、量化预算 vs 二元权限、内核强制 vs 用户态监督 TCB、形式化 vs 无。Leash 的 ~10% 代理开销同时是信封 E11 的对照锚点。
+5. **"粗粒度机制（Landlock+seccomp+ulimit）拿走 90% 价值怎么办？"** → 必须用实验回答：构造合法安装与恶意安装共享同一 syscall/path 足迹的场景，证明粗粒度策略放行前者必然放行后者，而信封靠预算耗竭/类型违例区分。此实验（10-E2/E10）是必要性论证的唯一硬证据。
 
-### 4.6 相关形式化基础
+### 4.6 异步执行与描述符传递的逃逸面文献（信封设计必须吸收）★2026-08 新增
+
+**这一组工作直接威胁"全获取咽喉"主张，必须在 05 设计中逐条给出语义答案（见 05 §2.5）。**
+
+| 工作 | 内容 | 对信封的含义 |
+|------|------|-------------|
+| RingGuard (He et al., eBPF'23) | io_uring 请求绕过 seccomp 是公认漏洞；用 eBPF 在 SQE 执行点审计 + 批量化降开销（文件 I/O 场景 7.8%，最坏 25%） | **证明 SQE 执行点调解可行且有开销数据可对照**；信封的 io_uring 调解按同思路落在 op 执行点而非提交点 |
+| 上游 io_uring task restrictions (Axboe patch series, LWN 2026-01) | Linux 正在加 per-task io_uring 操作限制 + cBPF 过滤（IORING_REGISTER_RESTRICTIONS_TASK / BPF_FILTER），deny-by-default 方向演进 | **审稿人必引**：Linux 正在补粗粒度洞。反驳要点：操作级白名单 ≠ 对象级预算——无时间/次数/数据维度、无影子 handle 审计、无法按 fd 收紧；且该机制不能表达"300 秒后全部失效" |
+| MSG_RING SEND_FD 绕过 security_file_receive()（公开披露，2025-26） | io_uring 跨环传 fd 不走 receive_fd() 的 LSM 钩子，低权进程经 fixed-file slot 拿到被拒文件的可用权限 | **fd 传递逃逸类的实锤案例**：任何"每次获取过钩子"的设计都必须覆盖所有 fd 安装路径；信封的影子 handle 表必须把 io_uring fixed-file 安装视为一等 fd 接收事件 |
+| SCM_RIGHTS 经典语义 | Unix 域 socket 传 fd；接收方获得与发送方等价的持久 authority | 预算随渡问题：发送方过期后接收方仍持有可用 fd ⇒ 击穿"过期原子性"（03 定理 3.3）。必须定义"预算随渡/引用计数回收"语义 |
+| Linux revocable 框架（LKML 2025-09） | 内核内部 provider/consumer 可撤销资源引用（SRCU 实现），面向热插拔 | 内核已有"撤销"原语词汇；信封的全局 handle 失效是同一思想在能力空间的推广——主动撤销故事有工程先例可引 |
+| CHERI 时态安全谱系：CHERIvoke、Cornucopia/Reloaded (ASPLOS'24)、Borrowed Capabilities (2024) | 硬件能力架构上的引用撤销（内存扫描/世代计数/lifetime token 层级） | 时态维度的硬件近邻；差异：它们撤销的是内存引用，信封预算约束的是 OS 资源 authority。Borrowed Capabilities 的 lifetime 层级与信封委托链耗散在形式上同构——值得在 03 中对齐术语 |
+| Bounded Resource Reclamation (EuroSys'25 poster) | 进程终止时资源回收延迟无界的问题与分组回收方案 | 信封 KILL_ON_EXPIRE 的"原子回收"主张需要回答回收时延上界——引用此工作作为评估维度来源 |
+
+### 4.7 相关形式化基础
 
 - Noninterference: Goguen & Meseguer (1982)、Bell-LaPadula (1973)——05 §5 的 $\mathcal{L}$-noninterference 与降级精确性建模直接沿用。
 - **Compositional security**：关于"安全机制组合是否保持已有保证"的形式化（如 "composability of security policies"）`[待核]`——08 与 05 的"增量部署单调保证"（05 §6 定理 8.2）需要与这类工作对齐。
@@ -189,3 +212,9 @@
 **隔离与信息流**：Bell & LaPadula (1973)；Goguen & Meseguer (1982)；Hardy, "The Confused Deputy" (1988)；Capsicum；Landlock/seccomp；gVisor；starnix。
 
 **验证**：Klein et al. (2009/2014)；CertiKOS (Gu et al., SOSP'15)；Hyperkernel (Nelson et al., OSDI'17)；FSCQ (Chen et al., SOSP'15)；Lamport, TLA+ (2002)。
+
+**包安装沙箱与供应链（2026-08 核对新增）**：Luo et al., "Latch: Preventing Install-Time Attacks in npm" (AsiaCCS'22)；Jadidi & Anderson, "Leash: A Transparent Capability-Based Sandboxing Supervisor for Unix" (ICISSP'25)；Hasan et al., "Decap: Deprivileging Programs by Reducing Their Capabilities" (RAID'22)；Zheng et al., "OSCAR" (ASE'24)；Mehedi et al., "DySec" (2025, arXiv 2503.00324)；Gao et al., "MalGuard" (USENIX Security'25)；Ohm et al. malicious packages 测量 (RAID'20)。
+
+**异步 I/O 与 fd 传递逃逸面（2026-08 核对新增）**：He et al., "RingGuard: Guard io_uring with eBPF" (eBPF'23)；Axboe, "Task-level io_uring restrictions" (LKML patch series, LWN 2026-01-19)；io_uring MSG_RING SEND_FD security_file_receive() 绕过披露 (lore.gnuweeb.org, 2025-26)；Linux revocable resource management patch v4 (LKML 2025-09-23)。
+
+**撤销与时态安全（2026-08 核对新增）**：Watson et al., "CHERIvoke" (EuroS&P'23)；"Cornucopia Reloaded" (ASPLOS'24)；Kamp et al., "Borrowed Capabilities" (2024)；Asmussen et al., "Bounded Resource Reclamation" (EuroSys'25 poster)。

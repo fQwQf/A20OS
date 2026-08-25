@@ -1,6 +1,8 @@
 # 能力信封（Capability Envelopes）——C2 系统贡献（论文主角）
 
-> **本文是研究主轴的系统贡献，也是论文的主角**：给未修改的 Linux 二进制"包上"能力纪律。能力信封把预算能力（03）从"新程序可用的机制"变成"部署时施加到任何遗留程序的手段"——这是能力系统摆脱"重写命令"（rewrite mandate）的唯一路径，也是 A20OS 双 ABI 内核存在的理由。 **范围说明**：本文吸收旧「双 ABI 混合信任边界」的形式化（原 05-dual-abi-coexistence.md 的全部定理并入本文 §5）——混合信任边界从侧证升级为信封逃逸不可行性的核心防线。实现状态以源码为准；本设计部分尚未实现（W2 计划）。
+> **本文是研究主轴的系统贡献，也是论文的主角**：给未修改的 Linux 二进制"包上"能力纪律。能力信封把预算能力（03）从"新程序可用的机制"变成"部署时施加到任何遗留程序的手段"——这是能力系统摆脱"重写命令"（rewrite mandate）的唯一路径，也是 A20OS 双 ABI 内核存在的理由。
+>
+> **范围说明**：本文吸收旧「双 ABI 混合信任边界」的形式化（原 05-dual-abi-coexistence.md 的全部定理并入本文 §5）——混合信任边界从侧证升级为信封逃逸不可行性的核心防线。实现状态以源码为准；调解器核心与 §2.5 逃逸面语义已于 2026-08 落地（见 §7），W2 剩余增量亦列于 §7。
 
 ---
 
@@ -141,6 +143,54 @@ $$\forall p_l \in P_{linux}, h_n \in H_{native}.\ BridgeFree \implies (\neg Obs(
 
 **评审自问**："没有 Native ABI，信封能成立吗？"——不能：信封的预算机制、类型传播、逃逸防线全部建立在 Native handle 模型上；Native ABI 同时是信封的机制来源与迁移目的地。
 
+### 2.5 逃逸面语义：异步执行、描述符传递与持久对象（防线 #0）
+
+> **咽喉完备性先于咽喉存在性**。§2.2 的调解器若只钩住经典同步 syscall，则"全获取咽喉"是假的。本节枚举三类已知的权威逃逸面并给出规范语义；每条都对应攻击套件的一个 case（11 §4.6）与文献依据（09 §4.6）。设计原则：**凡是"一个新的可用权威实例进入进程的 fd/映射空间"，或"一次对既有权威的使用"，都必须穿过 env_mediate。**
+
+#### 2.5.1 权威进入点的完备清单
+
+| # | 进入/使用路径 | 调解点 | 语义 |
+|---|-------------|--------|------|
+| A1 | `open/openat/creat/mknod` | 打开时创建影子 handle | 类型 ∩ rights ∩ 类上限（§2.2） |
+| A2 | `socket/connect/accept` | 同上 | 网络 rights + 次数 |
+| A3 | `pipe/pipe2/memfd/eventfd/timerfd/signalfd/userfaultfd` | 创建时 | 各自类型位 + 次数预算 |
+| A4 | `mmap`（file-backed） | 映射时 | Map right + 类型 + 时间；映射计入影子表 |
+| A5 | `shmat/shmget`（SysV/POSIX shm） | 挂接时 | 见 §2.5.4 |
+| A6 | `recvmsg` 附带数据（SCM_RIGHTS） | **接收安装时** | 见 §2.5.3 |
+| A7 | `pidfd_getfd`（跨进程取 fd） | 取得时 | 视为全新获取：类型检查 + 信封根预算新子预算 + 强制审计日志 |
+| A8 | `/proc/self/fd/N` 魔链重开 | 解析后 | rights = 请求 ∩ 源影子 rights ∩ 类上限；新影子继承源剩余预算（单调衰减）——堵住"只读 fd 重开成读写"的经典逃逸 |
+| A9 | io_uring fixed-file 注册 / 跨环 fd 安装 | **每个安装事件** | 等同 A6/A7 处理（见 §2.5.2） |
+| A10 | io_uring SQE 执行 | **op 执行点**（非提交点） | 见 §2.5.2 |
+
+#### 2.5.2 io_uring：在执行点调解，而非提交点
+
+提交点是性能路径、执行点才是权威使用点——这与上游 RingGuard 的结论一致（eBPF'23：SQE 执行点审计 + 批量化）。语义：
+
+1. **ring 创建**：信封内 `io_uring_setup` 仅当 flags 无 `IORING_SETUP_SQPOLL` 时放行；SQPOLL 使内核线程代表进程提交操作，破坏"操作归属清晰计数"。V1 直接拒绝 SQPOLL（返回 -EPERM），文档如实声明。
+2. **每次 SQE 执行**：`env_mediate_use(shadow, opcode_class)` —— 类型类检查 + `remaining_ops--` + 时间检查。失败则该 SQE 以 `-EBUDGET`（复用 -EPERM/-EACCES 映射）完成，CQE 如实上报；**不中止整个 ring**。
+3. **批量记账优化**（E11 关键）：per-ring 聚合计数器 + cacheline 对齐，避免每 SQE 一锁；时间检查按 jiffies 粗判 + 到期精确回收。
+4. **fixed-file 表**：注册时逐个验证源 fd 是影子 handle 且类型合规；ring ↔ 影子集合建立边。跨环 fd 安装（MSG_RING SEND_FD 类）按 A6 处理。上游 Linux 已出现此类路径绕过 LSM 的实例（09 §4.6）——信封从第一天就把"任何 fd 安装事件"视为一等获取。
+5. **过期语义**：根预算过期 ⇒ 该信封所有 ring 进入 rejected 态：未执行 SQE 全部以错误码完成，新提交被拒。保证与同步路径同一"过期原子性"（03 定理 3.3 在异步维度的推广）。
+
+#### 2.5.3 描述符传递：预算随渡（budget travels with authority)
+
+SCM_RIGHTS 使权威跨进程持久存在，直接威胁过期原子性。语义分三段：
+
+- **发送（信封 → 外部）**：仅当 policy.propagation 允许该资源类型的对外委托。发送方保留自己的影子；发送本身计一次传播次数。
+- **接收（外部/另一信封 → 信封内）**：为收到的 fd 创建新影子 handle，其预算字段 = **min(接收信封 policy 上限, 发送方剩余预算)**——委托链单调衰减的直接推广（03 继承规则）。无发送方预算信息时（外部非信封进程发来），按接收方 policy 上限新建。
+- **诚实边界（V1）**：被发送到**非信封**进程的 fd，其可用性不受发送方信封过期影响。即：信封约束的是**信封内进程的权威生命周期**，不是对象在全系统的可见性。可选强模式 `ENVELOPE_FD_TIE_LIFETIME`：给底层对象打全局到期戳，内核对所有持有者在使用点检查——把"过期原子性"升级为系统级性质，代价是所有使用者各付一次 tick 比较；作为评估中的开关项（E11d），不作为默认主张。
+
+#### 2.5.4 共享内存与持久对象
+
+- **挂接**：shmat 创建影子 handle；映射足迹一次性计入 data_budget。
+- **写计量**：V1 采用惰性记账——msync/shmdt 时按脏页数补扣 data_budget（页粒度，如实声明粒度上限）；不做逐字节拦截（开销不可接受且可被 mprotect 绕过语义混淆）。
+- **过期**：信封创建的全部 shm 映射原子解除（从信封进程地址空间 unmap）；**已写出的字节不追溯**。
+- **威胁模型对齐（必须写进论文）**：脚本在被授权窗口内主动交出的数据（写入 shm/文件/网络），过期后依然在外部存在——这不是逃逸，是预算语义的定义边界：**信封上界的是"未经授权获取 × 操作量 × 时间窗"，不是信息流控制**。共谋进程事前已有合法权利读取该对象时，泄露责任在策略授予，不在机制。11 §1 的表述与此一致。
+
+#### 2.5.5 小结
+
+三类逃逸面的共同根源是"权威的生命周期与获取路径解耦"。信封的回答统一为一句话：**影子 handle 是权威的唯一记账单位；任何使进程可获得可用权威的事件都是获取事件，任何消费权威的操作都是使用事件；两者分别过 env_mediate 的两个入口。** 咽喉完备性由 §8-verification 的覆盖矩阵从 `syscall_table.def` 自动生成核对，不由人工维护。
+
 ---
 
 ## 6. 单调采用（Monotone Adoption，C3）
@@ -157,13 +207,21 @@ $$\forall p_l \in P_{linux}, h_n \in H_{native}.\ BridgeFree \implies (\neg Obs(
 
 ## 7. 实现状态与工作量
 
-- [ ] **信封调解器未实现**——这是 W2 的核心工作量（8-12 周）：
-  - `kernel/abi/linux/` 资源 syscall 的 `env_mediate()` 钩子；
-  - 影子 handle 表 + 预算根（复用 03 的 handle 表/时态字段）；
-  - `envelope_spawn` + policy 解析 + 继承/耗散；
-  - exec/fork 的复查与继承。
+- [x] **信封调解器核心已实现（2026-08，分支 `research/osdi-envelopes`）**：
+  - `kernel/ipc/envelope.c`（双 ABI 常驻构建）：policy 快照 + 影子 handle 表（按全局 fd 键控）+ 获取/使用双向调解 + 惰性过期清扫 + KILL_ON_EXPIRE + 主动撤销 + 观测计数器；
+  - 控制面 syscall `sys_a20_envelope_{create,enter,revoke,stats}`（902-905）：supervisor create → fork → child enter → execve 部署模式，enter 单调（二次进入 -EINVAL）；
+  - fork 共享根预算继承（refcounted）、execve 不可摆脱、task 退出自动释放；
+  - 钩子全覆盖（§2.5 A1-A10）：openat（A1 权利推导 + A8 重开权利交集、跨 pid fail-closed）/socket（A2）/pipe·memfd·eventfd·timerfd·signalfd 创建即调解并入类登记表（A3）/shmat MEMORY 类检查（A5）/SCM_RIGHTS 发送 propagation 检查 + 接收安装前裁决（A6，被拒 fd 按 Linux 语义关闭并置 MSG_CTRUNC）/pidfd_getfd 全新获取裁决（A7）/io_uring READ·WRITE·FSYNC 执行点带方向位调解 + REGISTER_FILES 对信封任务 fail-closed（A9/A10）；
+  - 方向位仅对已跟踪影子生效；祖父级（enter 前继承的）fd 豁免方向检查但照常计费。
+- [x] **攻击套件已全绿**：`make smoke-envelope` 十三场景 QEMU 实测（清单见 docs/testing-gates.md），头号 case 即 §2.5 三类逃逸面对抗用例。
 - [x] 依赖已就绪：预算能力机制（03）、typed channel（04）、双 ABI 分派、tokenized park/wake。
-- [ ] 攻击套件（信封逃逸）未实现（11 §4.6）。
+- [ ] **W2 剩余增量（不阻塞 pilot 实验）**：
+  - shm 足迹 + 脏页 data_budget 记账（当前挂接仅做 MEMORY 类检查，无字节计费）；
+  - ENVELOPE_FD_TIE_LIFETIME 强模式（对象级系统到期戳，§2.5.3 可选项）；
+  - SCM_RIGHTS 接收预算细化 min(发送方剩余)（当前为接收方 policy 上限）；
+  - readv/writev 仅记操作数不逐 iovec 计字节数；
+  - io_uring fixed-file 注册对信封 fail-closed，正式按安装事件支持待实现；SQPOLL 当前内核不解析 setup flags（天然不存在），未来引入须同步拒绝。
+- [ ] E2 pilot 三对照实验 + E7 攻击扩展 + E11 开销量化（10-evaluation，论文数据主来源）。
 
 ---
 

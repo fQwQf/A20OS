@@ -51,7 +51,7 @@
 
 待验证性质：**无丢失唤醒**（`∃ 每个 park 要么在 commit 读到 WOKEN，要么被调度回`）、**无重复唤醒**、**陈旧唤醒隔离**（seq 校验）。
 
-### 2.4 模块 4：能力信封调解器（对应 05，S2 完成后建模）
+### 2.4 模块 4：能力信封调解器（对应 05；核心状态机已建成并全绿）
 
 **这是 C2 系统的验证核心**——证明"全获取咽喉"成立、信封不可逃逸：
 
@@ -71,6 +71,29 @@
 
 **关键**：模块 4 的"咽喉完备性"枚举必须与 05 §2.2 的 syscall 覆盖清单逐项对应，这是审稿人检查逃逸的第一攻击点。
 
+**进展（2026-08）：状态机核心已建模并全绿**
+
+模型：`docs/research/verification/Envelope.tla`（+ `Envelope.cfg`），抽象自 `kernel/ipc/envelope.c`。
+
+动作全集对应实现语义：Enter（单调进入，无 Leave，execve 不可摆脱）/ Acquire（A1-A3 创建获取，权利 ⊆ 类上限且逐次计费）/ TransferIn（A6 接收 + A7 pidfd_getfd：授权 clamp 到类上限，空授权即拒绝）/ Reopen（A8 重开权利 = 请求 ∩ 源影子，不可提权）/ SendOut（A6 发送侧 propagation_types 门控）/ Use · UseX（已跟踪影子强制方向位；祖父级豁免方向检查但照常计费）/ LazyExpire · Revoke（惰性过期与主动撤销）/ Kill（KILL_ON_EXPIRE 一次性标志）。
+
+已检验不变式：
+- TypeAllowed：影子类型 ∈ allowed_types
+- RightsSubCap：影子权利 ⊆ 类上限
+- OpsNonNeg / DataNonNeg：预算不越界
+- ClockBounded
+
+已检验时序性质：NoResurrect（`[][expired => expired']_vars`，过期单向）、KillOnce（killSent 单向）。
+
+TLC 结果（OpsMax=3, DataMax=4, ExpireAt=3, MaxTick=6，3 任务 × 2 gfd × 2 类型）：**27829 states generated / 4620 distinct / depth 14，全部通过，<1 s**。复现命令：`java -cp tla2tools.jar tlc2.TLC Envelope.tla`。
+
+运行时侧：E8 审计已落地——syscall 906 触发全量信封不变式走查（TypeAllowed / RightsSubCap / 预算界 / 挂载一致性），smoke-envelope 套件末尾自动执行并要求零违例。这是模型不变式与运行时系统之间的持续核对通道。
+
+尚未覆盖（诚实边界）：
+- 咽喉完备性枚举（上表第 1 条）属实现侧覆盖矩阵（§4），不是本状态机模型可表达的命题——由 `syscall_table.def` 自动生成核对（W2）；
+- 委托链预算耗散、单调采用（C3）作为策略精化性质仍未建模；中介层公平性 liveness 已建模并机器检验（2026-08：Envelope.tla 增 Fairness=WF(Tick/LazyExpire/Kill)，ExpiryLiveness `<>expired`、KillLiveness `expired~>killSent`、DenyAfterExpiry 不变式全绿）；
+- 本模型是设计层状态机，不是 C 实现的精化证明——07 §8 的精化议程保持不变。
+
 ---
 
 ## 3. Lean/Isabelle 形式化范围
@@ -88,14 +111,19 @@
 
 **策略**：用归纳类型编码 handle/rights/时态字段，形式化 SOS 转移关系为"前提 → 结果"的归纳谓词，逐定理归纳证明。**2-4 个核心定理形式化即可**，不必全量。
 
+**状态（2026-08 更新）**：Lean v4.33.1 工具链已从 GitHub release 直接获取并验证可用（绕过了 elan 网络超时问题）。形式化产物 `docs/research/verification/lean/BudgetLattice.lean` 已建成并多轮扩展——预算格核心引理（单调衰减 `deduct_le`、传递衰减 `decay_transitive`、严格正衰减 `deduct_strict`、expiry latch 单向性 `latch_true`）、transfer clamp 双向界定（`and_field_le_cap` / `and_field_preserves` / `and_field_idem`）、方向位强制（`xferred_wr_needs_both` / `xferred_rd_needs_both`：经 clamped 转移安装的 shadow 上读/写方向通过 ⇒ 源请求与策略 cap 双真）、委托无升级（`del_wr_needs_both` / `del_rd_needs_both`：委托权行使 ⇒ 委托方授权与接收方 cap 双真，对应 03 §3.2 rights monotone decrease / no-escalation）、跨信封预算细化（`scm_recv_le_receiver` / `scm_recv_le_sender`：SCM_RIGHTS 接收计费的安全规格界 = min(发送方金额, 接收方剩余)；v1 内核构造性满足——接收仅从自身剩余扣 1 个 op、不耦合发送方侧金额，05 §2.5.4）**全部零 sorry 通过**。剩余：Mathlib 依赖的高级引理待后续扩展；时序/liveness 主张按分工归 TLA+——弱公平假设下 ExpiryLiveness/KillLiveness/DenyAfterExpiry 已机器检验（§2.1），Lean 专注代数性质。咽喉完备性走 §2.4 覆盖矩阵路线不变。
+
 ---
 
 ## 4. 理论-实现收口矩阵
 
 审稿人必问："53 个核心 syscall 的证明覆盖 126 个实现入口的哪一部分？"本文档维护这张矩阵，作为论文的 Appendix。
 
+信封侧新增一行（2026-08）：**Linux ABI 咽喉完备性**按 05 §2.5 的契约对全部 365 个登记 syscall 做了机械分类，产物为自动生成的 `docs/research/verification/envelope_coverage.md`（20 已调解 / 46 挂 W2 / 299 无权威参与）；`make check-envelope-coverage` 在矩阵与源码漂移时失败。
+
 | 实现分区 | 实现 syscall 数 | 对应 SOS 规则 | 覆盖状态 | 机器检验 |
 |---------|--------------|-------------|---------|---------|
+| **Linux ABI 咽喉完备性（信封调解，05 §2.5）** | **365 全量** | 05 §2.5 契约 | **20 已调解 / 46 PLANNED-W2 / 299 NA** | **check-envelope-coverage（自动核对）** |
 | handle（dup/close/replace/query/control） | ~15 | 06 §2.2 | 已建模 | TLA+ 模块1 |
 | channel（send/recv/typed） | ~8 | 06 §2.6 + 04 | 已建模 | TLA+ 模块2 |
 | event queue（create/watch/wait） | ~6 | 06 §2.7 | 部分 | 待补 |
@@ -115,7 +143,7 @@
 - 当前实现 126+ syscall，新增入口尚未逐项加入 SOS 规则与 error-path 精化矩阵。
 - 06 的并发精化映射与 C 内存模型论证依赖 spinlock 原子性假设，未机器检验。
 
-**行动计划**：① TLA+ 四模块完成（§2，模块 4 依赖 S2 实现）；② Lean 核心定理（§3）；③ 收口矩阵逐行填实（§4）；④ 运行时不变式检查器（10 §E8）。
+**行动计划**：① TLA+ 四模块完成（§2；模块 4 核心状态机已于 2026-08 建成并全绿——见 §2.4 进展块，剩余为咽喉覆盖矩阵联动；公平性 liveness 已于 2026-08 增补并全绿：Fairness=WF(Tick/LazyExpire/Kill) 下 ExpiryLiveness/KillLiveness/DenyAfterExpiry 通过）；② Lean 核心定理（§3，13 定理零 sorry 完成）；③ 收口矩阵逐行填实（§4）；④ 运行时不变式检查器（10 §E8）。
 
 ---
 
