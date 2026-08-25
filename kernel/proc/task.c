@@ -2,6 +2,7 @@
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
 #include "proc/signal.h"
+#include "ipc/seccomp.h"
 #include "drivers/core/udriver.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
@@ -212,6 +213,8 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
                               : (1U << CONFIG_NR_CPUS) - 1;
     t->cg_throttled = 0;
     t->cg_cpu_start = 0;
+
+    seccomp_inherit(t, parent);
 
     if (parent) {
         memcpy(t->fs.cwd, parent->fs.cwd, MAX_PATH_LEN);

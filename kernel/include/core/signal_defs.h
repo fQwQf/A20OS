@@ -20,6 +20,7 @@
 #define SIGSEGV      11
 #define SIGUSR2      12
 #define SIGPIPE      13
+#define SIGSYS       31
 #define SIGALRM      14
 #define SIGTERM      15
 #define SIGCHLD      17

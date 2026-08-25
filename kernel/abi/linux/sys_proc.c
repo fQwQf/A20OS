@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
+#include "ipc/seccomp.h"
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
 
@@ -809,6 +810,20 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     }
     if (op == PR_GET_THP_DISABLE)
         return t ? t->policy.thp_disabled : 0;
+    if (op == PR_SET_SECCOMP) {
+        /* a1 = mode, a2 = optional sock_fprog pointer for FILTER mode. */
+        if (!t)
+            return -ESRCH;
+        if (a1 == SECCOMP_MODE_STRICT)
+            return seccomp_set_strict(t);
+        if (a1 == SECCOMP_MODE_FILTER)
+            return seccomp_install_filter(t, (const void *)a2);
+        return -EINVAL;
+    }
+    if (op == PR_GET_SECCOMP) {
+        long mode = seccomp_get_mode(t);
+        return mode;
+    }
     return -EINVAL;
 }
 
