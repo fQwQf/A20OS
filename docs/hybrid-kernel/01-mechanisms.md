@@ -32,10 +32,11 @@
 
 `user/svc/svcmgr.c` 是系统监管者（`svcman.c` 是最小自愈演示，见 [00-design.md](00-design.md) 的命名说明）：
 
-- **清单与依赖**：声明式清单（`rtcd`、`echod` 服务名、路径、依赖顺序）拉起服务；
+- **清单与依赖**：声明式清单（服务名、路径、可选 `args` 参数串、依赖顺序）拉起服务；`args` 按空格切分为 argv（`argv[0]`=程序名，向量以空指针结尾）传给 `task_spawn`；
 - **端点传递**：`task_spawn` v2 的 `target_slot` 把服务端点安装到子进程固定槽位（服务以编译期常量命名自己的端点），无需全局注册表；
 - **崩溃检测**：EventQ watch 服务 TASK handle 的 `A20_EVENT_EXITED`，`ev.data0` 即退出码；
 - **健康探针**：周期性 ping（默认 2s 周期、1.5s 超时），超时强杀；pong 通道随服务重启重新注册；
+- **退出语义**：`exit_code != 0` 视为崩溃进入重启策略；`exit_code == 0` 视为按需服务的正常完成（如目标设备不存在的 ufsd），不计入重启预算；
 - **重启策略**：指数退避重启，flap 预算（5 次/30s）防止崩溃风暴；重启 = 新建 channel 对 + 重新 spawn + 重新 watch，旧端点随对端关闭退役；
 - **重绑**：注册表按名解析返回当前端点；服务死亡后查找返回 `NOT_FOUND`，重启后客户端自动重绑。
 
@@ -104,6 +105,16 @@
 - **计数器**（`kernel/include/ipc/objstats.h`）：全局原子计数 `handles / channel_eps / eventqs / vmos / vmo_pages / irq_bindings / vfiles`（七项实时对象计数），覆盖安装/移除/销毁全部路径，只读暴露在 `/proc/a20/objects`；另有累计计数 `vmo_dirty_frames`（buddy 复用未清零帧的合法信号，永不下降，不属于泄漏基线）；
 - **句柄配额**：每任务 native 句柄硬上限 4096（`A20_HT_DEFAULT_QUOTA`），三个安装入口统一以 `NO_SPACE` 拒绝超额；
 - 崩溃/重启循环后七项实时计数器必须回归基线（泄漏审计）。
+
+## 用户态文件系统协议（uxfs ↔ ufsd）
+
+内核 `kernel/fs/uxfs/` 把挂载类型 `"uxfs"` 的 vnode/vfile 操作翻译为线协议消息，经 Channel 往返于用户态宿主 `user/svc/ufsd.c`（协议帧格式见 `kernel/include/fs/ufs_proto.h`）：
+
+- **帧**：请求头（magic/version/opcode/req_id/ino/arg0/arg1/name_len/payload_len）+ name + payload 连续布局；应答头带 status 与 out0..out2。线上 name/payload 不含 NUL，接收侧按长度终止化。
+- **匹配**：服务以 `req_id` 回显应答，陈旧/乱序帧丢弃；单挂载同一时刻只有一个在飞请求（代理侧互斥）。
+- **ino 语义由后端自持**：fat 用 ino↔path 表，vnode 型后端（ext4/iso9660/ntfs）维护 ino→vnode* 映射；服务重启即映射清空，恢复契约要求重新挂载。
+- **生命周期**：注册（`fs_serve`）异步完成——调用方就是服务自身，同步握手会自我死锁；umount 经 `a20_channel_ep_peer_shutdown` 单向置对端 peer_closed 并唤醒，服务 recv 出错退出，不留僵尸。
+- **监管集成**：ufsd 在固定槽位端点上按 magic 解复用应答 `SVCMGR_REQ_ECHO` 探针；目标块设备缺失时卸载并以 exit 0 干净退出。
 
 ## Linux ABI 共享的机制
 

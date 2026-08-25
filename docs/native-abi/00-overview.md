@@ -4,13 +4,13 @@
 
 ## 设计定位
 
-`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 136 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
+`abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 141 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
 
 长期布局：
 
 ```text
 kernel/abi/linux/    Linux-compatible ABI subset（当前主用户态运行时）
-kernel/abi/native/   A20OS native ABI（136 个登记入口，部分功能仍有边界）
+kernel/abi/native/   A20OS native ABI（141 个登记入口，部分功能仍有边界）
 user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（当前仅 riscv64 构建/运行入口）
 ```
 
@@ -194,7 +194,7 @@ Native ABI 一旦稳定，需要遵守：
 |------|------|------|------|
 | Linux ABI | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口 |
 | Native 核心 syscall | `kernel/abi/native/sys_core.c` | 已实现 | Phase 1 核心 syscall |
-| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c`、`sys_native_*.c` | 已登记 | 136 个入口覆盖各分区；`event_watch_fs`、VMAR 层级、部分 EventQ 事件源等仍是有限实现，登记数不表示完整语义 |
+| Native 扩展 syscall | `kernel/abi/native/sys_phase2.c`、`sys_native_*.c` | 已登记 | 141 个入口覆盖各分区；`event_watch_fs`、VMAR 层级、部分 EventQ 事件源等仍是有限实现，登记数不表示完整语义 |
 | Handle table | `kernel/abi/native/handle_table.c` | 已实现 | handle 状态机 + 查找/安装/移除 |
 | 启动协议 | `kernel/abi/native/startup.c` | 已实现 | 用户态 Native 启动 |
 | Channel IPC | `kernel/ipc/a20_channel.c` | 已实现 | Channel 消息传递 |
@@ -268,7 +268,7 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 136 个 syscall，而 Linux ABI 表登记 361 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。关键统一机制包括：
+Native ABI 当前登记 141 个 syscall，而 Linux ABI 表登记 361 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。关键统一机制包括：
 
 - `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
 - `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 风格接口；当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝。
@@ -282,9 +282,9 @@ Native ABI 当前登记 136 个 syscall，而 Linux ABI 表登记 361 个。这�
 
 已完成的阶段：
 
-- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、136 个 syscall 编号、多架构 crt0、hello world 测试）。
+- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、141 个 syscall 编号、多架构 crt0、hello world 测试）。
 - Phase 1：`liba20c` 最小 C 库（malloc、fd↔handle 映射、FILE*、errno、基础 POSIX open/read/write/close 包装）。
-- Phase 2：内核侧 136 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
+- Phase 2：内核侧 141 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
 - mlibc Phase 1-2：`sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
 
 剩余工作：

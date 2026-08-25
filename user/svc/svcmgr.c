@@ -9,6 +9,7 @@
  * restarts them with backoff bounded by a per-service restart budget.
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_string.h"
 #include "liba20rt/crt0_a20.h"
 #include "../svc/rtcd_proto.h"
 
@@ -61,6 +62,7 @@ typedef enum svc_state {
 typedef struct {
     const char  *name;
     const char  *path;
+    const char  *args;           /* 空格分隔的 argv；NULL 表示无参数 */
     uint32_t     ep_slot;
     uint8_t      ping_kind;      /* 0 = SVCMGR_REQ_ECHO, 1 = RTCD_REQ_TIME */
     uint8_t      state;
@@ -117,10 +119,38 @@ static a20_status_t spawn_one(svc_entry_t *se)
     ta.root_dir = g_root;
     ta.cwd_dir = A20_HANDLE_NULL;
     ta.event_queue = A20_HANDLE_NULL;
-    ta.argv = 0;
     ta.envp = 0;
-    ta.argc = 0;
     ta.envc = 0;
+
+    /* argv：清单 args 字段按空格切分为指针数组（内核经 copy_arg_vector
+     * 从本进程地址空间取字符串）。 */
+    /* argv[0] 惯例为程序名；清单 args 提供其余参数 */
+    static char args_buf[128];
+    static char *args_vec[9];
+    uint32_t nargs = 0;
+    args_vec[nargs++] = (char *)se->path;
+    if (se->args && se->args[0]) {
+        a20_strncpy(args_buf, se->args, sizeof(args_buf) - 1);
+        args_buf[sizeof(args_buf) - 1] = '\0';
+        char *tok = args_buf;
+        while (nargs < 9) {
+            while (*tok == ' ')
+                tok++;
+            if (!*tok)
+                break;
+            args_vec[nargs++] = tok;
+            char *sp = tok;
+            while (*sp && *sp != ' ')
+                sp++;
+            if (!*sp)
+                break;
+            *sp++ = '\0';
+            tok = sp;
+        }
+    }
+    args_vec[nargs] = NULL; /* copy_arg_vector 以空指针结尾 */
+    ta.argv = (uint64_t)(uintptr_t)args_vec;
+    ta.argc = nargs;
     ta.handles = (uint64_t)(uintptr_t)&sh;
     ta.handle_count = 1;
     ta.flags = 0;
@@ -170,10 +200,13 @@ static void svc_restart(a20_handle_t eq, svc_entry_t *se)
     a20_time_t bo = { .secs = 0, .nsecs = RESTART_BACKOFF_MS * 1000 * 1000 };
     a20_thread_sleep(bo);
     se->restarts++;
-    if (spawn_one(se) != A20_OK) {
+    a20_status_t rst = spawn_one(se);
+    if (rst != A20_OK) {
         se->state = SVC_FAILED;
         put_str("SVC_MGR: respawn failed name=");
         put_str(se->name);
+        put_str(" st=-");
+        put_u64((uint64_t)-rst);
         put("\n", 1);
         return;
     }
@@ -320,7 +353,12 @@ int main(int argc, char **argv, char **envp)
     g_svcs[1].path = "/bin/svc-echod-rv";
     g_svcs[1].ep_slot = 104u /* A20_SVC_ENDPOINT_SLOT */;
     g_svcs[1].ping_kind = 0;
-    g_nsvcs = 2;
+    g_svcs[2].name = "ufsd";
+    g_svcs[2].path = "/bin/ufsd-rv";
+    g_svcs[2].args = "/ufs 1 fat";
+    g_svcs[2].ep_slot = 104u;
+    g_svcs[2].ping_kind = 0;
+    g_nsvcs = 3;
 
     for (uint32_t i = 0; i < g_nsvcs; i++) {
         g_svcs[i].task = A20_HANDLE_NULL;
@@ -360,15 +398,24 @@ int main(int argc, char **argv, char **envp)
                    ev.user_data < SVC_EXIT_BASE + SVC_MAX) {
             uint32_t i = (uint32_t)(ev.user_data - SVC_EXIT_BASE);
             svc_entry_t *se = &g_svcs[i];
-            se->state = SVC_DEAD;
-            put_str("SVC_MGR: crash detected name=");
-            put_str(se->name);
-            put_str(" exit_code=");
-            put_u64(ev.data0);
-            put("\n", 1);
             a20_event_cancel(eq, se->task);
             a20_hdl_close(se->task);
-            svc_restart(eq, se);
+            if (ev.data0 == 0) {
+                /* 干净退出（如按需服务发现目标设备不存在）：视为正常
+                 * 完成，不消耗重启预算。 */
+                se->state = SVC_DEAD;
+                put_str("SVC_MGR: service completed name=");
+                put_str(se->name);
+                put("\n", 1);
+            } else {
+                se->state = SVC_DEAD;
+                put_str("SVC_MGR: crash detected name=");
+                put_str(se->name);
+                put_str(" exit_code=");
+                put_u64(ev.data0);
+                put("\n", 1);
+                svc_restart(eq, se);
+            }
         } else if (st >= 0 && ev.user_data >= 100) {
             /* Pong (or a plain reply) from service (i+100). */
             svc_entry_t *se = &g_svcs[(uint32_t)(ev.user_data - 100)];

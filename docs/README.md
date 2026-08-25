@@ -4,7 +4,7 @@
 
 ---
 
-这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务机制。Linux ABI（`syscall_table.def` 登记 361 个 syscall）兼容现有 musl 生态，Native ABI（登记 136 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
+这里汇集了 A20OS 的设计与开发文档。A20OS 是一个**混合内核**：性能关键路径（调度、MM、VFS、页缓存）留在内核态，驱动既可按 generic profile 作为内核 `.a20drv` 包部署，也可按 embedded profile 静态链接；Native ABI 还提供用户态驱动服务与文件系统宿主机制（uxfs/ufsd）。Linux ABI（`syscall_table.def` 登记 361 个 syscall）兼容现有 musl 生态，Native ABI（登记 141 个 syscall）探索面向能力、句柄与事件的新接口。混合内核的设计参考见 [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)。
 
 ## 文档范围与权威性
 
@@ -67,8 +67,9 @@
 如果你想深入 Native ABI 或具体内核子系统：
 
 - [hybrid-kernel/00-design.md](hybrid-kernel/00-design.md)：混合内核设计参考（架构形态与分层原则）
-- [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md)：混合内核核心机制语义与契约（channel_call、svcmgr、共享环、用户态驱动、vDSO）
+- [hybrid-kernel/01-mechanisms.md](hybrid-kernel/01-mechanisms.md)：混合内核核心机制语义与契约（channel_call、svcmgr、共享环、用户态驱动、文件系统协议、vDSO）
 - [hybrid-kernel/02-mainstream-plan.md](hybrid-kernel/02-mainstream-plan.md)：与主流混合内核的差距与演进方向
+- [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)：用户态文件系统宿主（uxfs 代理 + ufsd 多后端：fat/ext4/iso9660/ntfs-ro）
 - [hybrid-kernel/STATUS.md](hybrid-kernel/STATUS.md)：能力与边界清单
 - [process-scheduler.md](process-scheduler.md)：进程生命周期、per-CPU runqueue、持久抢占和阻塞协议
 - [native-abi/00-overview.md](native-abi/00-overview.md)：Native ABI 设计概览

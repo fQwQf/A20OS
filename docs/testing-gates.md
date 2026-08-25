@@ -135,6 +135,11 @@
 - **What it checks**: `native-minimal` 与 `native-test` 检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序；`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 - **When it fails**: 检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误；确认 `native-handle-rv` 已生成并放入 fat32 镜像；查看 `.kernel-build/smoke/native-handle-riscv64.log`。
 
+### 用户态文件系统宿主（uxfs + ufsd）
+- **How to run**: `make smoke-native-fs-all`（四后端端到端）；`make smoke-native-ufs`（仅 FAT 后端回归）。
+- **What it checks**: `smoke-native-fs-all` 在 QEMU 中挂四块 scratch 盘（bus.2/4/6/7），由 `/bin/ufs_all_test` 逐后端拉起 `/bin/ufsd-rv` 并执行 POSIX 序列：FAT 预置读回+写读+删除；ext4 预置读回+8 KiB 图案写读+rename+删除；iso9660 小写名嵌套读取；ntfs 只读语义（create 必须失败）。内核侧 uxfs 代理把 vnode ops 经 Channel 转发给服务，块 IO 走受控 fs_block_io。见 [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)。
+- **When it fails**: 查看 `.kernel-build/smoke/native-fs-all-riscv64.log` 中各 `UXFS_*` 标记与 `[fs]` 前缀的 FS 内部日志；确认镜像目标（`ufs-scratch.img`/`ufs-ext4.img`/`ufs-iso.img`/`ufs-ntfs.img`)已生成且盘位未占用 bus.3/bus.5（用户驱动预留）。
+
 ### 文档漂移关键词
 - **How to run**: `make check-doc-drift`
 - **What it checks**: 重新生成 Linux syscall 覆盖表；扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。
