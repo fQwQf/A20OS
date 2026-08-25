@@ -114,4 +114,10 @@ int page_cache_readahead(vfile_t *vf, uint64_t start_byte, size_t count);
  * for @vf.  Used by cachestat(2) and statfs accounting. */
 void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty);
 
+/* Same counters restricted to the byte window [off_bytes, off_bytes+len_bytes):
+ * pages whose cache index falls inside the window. */
+void page_cache_file_range_stats(vfile_t *vf, uint64_t off_bytes,
+                                 size_t len_bytes, size_t *resident,
+                                 size_t *dirty);
+
 #endif /* _FS_PAGE_CACHE_H */
