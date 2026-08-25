@@ -2,7 +2,7 @@
 
 本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策，并区分当前实现与未完成项。本文已按 2026-08 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；运行结论需在当前提交上复验，历史平台记录不能外推。
 
-> **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 被接受但未执行检查，`RESOLVE_CACHED` 通过 dentry cache 命中检查实现（未命中返回 `-EAGAIN`），A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 已移除、不再与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
+> **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 已在 resolver 中执行检查（`/proc/<pid>/fd/N` 类 jump link 拒绝穿越，返回 `-ELOOP`），`RESOLVE_CACHED` 通过 dentry cache 命中检查实现（未命中返回 `-EAGAIN`），A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 已移除、不再与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
 
 ## 1. 范围
 
@@ -23,7 +23,7 @@
 
 ### 2.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `flags` 和 `mode`，但忽略 `resolve` 和 syscall 的 `size` 参数，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝，`RESOLVE_NO_SYMLINKS/BENEATH/IN_ROOT/NO_XDEV/CACHED` 经 `vfs_openat2` 生效；`RESOLVE_NO_MAGICLINKS` 被 allowlist 接受，但 resolver 尚未执行对应检查（`kernel/abi/linux/sys_proc.c`、`kernel/fs/vfs.c`、`kernel/fs/vfs/path_resolution.c`）。
+`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `flags` 和 `mode`，但忽略 `resolve` 和 syscall 的 `size` 参数，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝，全部六个 `RESOLVE_*` flag（含 `NO_MAGICLINKS`）经 `vfs_openat2` 在 resolver 中生效（`kernel/abi/linux/sys_proc.c`、`kernel/fs/vfs.c`、`kernel/fs/vfs/path_resolution.c`）。
 
 ### 2.2 决策
 
@@ -34,13 +34,13 @@
 | `RESOLVE_NO_SYMLINKS` | 整个 walk 期间绝不跟随 symlink | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_BENEATH` | 拒绝 walk 到起始目录之上 | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_IN_ROOT` | 相对于起始目录解析绝对路径和 `..` | `kernel/fs/vfs/path_resolution.c` |
-| `RESOLVE_NO_MAGICLINKS` | 预期拒绝 magic link；当前只被 syscall allowlist 接受，resolver 未执行检查 | `kernel/abi/linux/sys_proc.c`；实现缺口 |
+| `RESOLVE_NO_MAGICLINKS` | 拒绝穿越 magic link（`/proc/<pid>/fd/N` 类 jump link），普通 symlink 仍可跟随；与 `NO_SYMLINKS` 同返回 `-ELOOP` | `kernel/fs/vfs/path_resolution.c`；magic link 由 vnode `VNODE_MAGICLINK` 标记（procfs fd-symlink 创建时设置） |
 | `RESOLVE_NO_XDEV` | 拒绝跨越 mount point | `kernel/fs/vfs/path_resolution.c` |
 | `RESOLVE_CACHED` | 只使用缓存 lookup；任意组件未缓存则返回 `-EAGAIN` | `kernel/fs/vfs/path_resolution.c`；dentry cache 是优化层，未缓存路径由调用方去 flag 重试 |
 
 ### 2.3 实现映射
 
-- `kernel/abi/linux/sys_proc.c`：接受 24 到 A20OS `sizeof(struct open_how)`（88）字节；用 `-EINVAL` 拒绝未知 resolve bit；将 resolve flag 传给 `vfs_openat2`。`RESOLVE_NO_MAGICLINKS` 虽被允许，但下游没有对应检查。函数中检查超长结构尾部是否为零的分支当前因前置 `size > sizeof(khow)` 拒绝而不可达。
+- `kernel/abi/linux/sys_proc.c`：接受 24 到 A20OS `sizeof(struct open_how)`（88）字节；用 `-EINVAL` 拒绝未知 resolve bit；将 resolve flag 传给 `vfs_openat2`。函数中检查超长结构尾部是否为零的分支当前因前置 `size > sizeof(khow)` 拒绝而不可达。
 - `kernel/fs/vfs.c`：`vfs_openat2(dirfd, path, flags, mode, resolve)` 构造 resolution context 并调用 resolver。
 - `kernel/fs/vfs/path_resolution.c`：让 openat2 resolver 接受起始路径、root path 和 `resolve_flags`，并在 walk 中执行 beneath/root/mount 边界检查；`RESOLVE_CACHED` 在 dentry cache 未命中时返回 `-EAGAIN`（不回落真实 lookup）。
 - `kernel/fs/vfs/dcache.c`：`RESOLVE_CACHED` 通过 `vfs_dcache_lookup` 命中检查实现；dentry cache 仍是优化层而非权威 lookup 来源，未缓存路径返回 `-EAGAIN` 由调用方重试。
@@ -53,7 +53,7 @@
 - Linux 当前已知 `struct open_how` 前缀是 24 字节的 `{ u64 flags; u64 mode; u64 resolve; }`，并通过 syscall 的 `size` 参数做尾部扩展；A20OS 内部结构额外声明了 64 字节 padding。
 - A20OS 当前要求 `24 <= size <= 88`，并不接受 Linux 规则允许的更长全零扩展结构。
 - `RESOLVE_CACHED` 与 Linux 一致为 `0x20`；A20OS 自定义的 `RESOLVE_NO_TRAILING_SYMLINKS`（曾占用 `0x20`）已移除，不再与 Linux 冲突。
-- 未知 resolve bit 返回 `-EINVAL`；`RESOLVE_NO_MAGICLINKS` 是已允许但当前无效果的例外。
+- 未知 resolve bit 返回 `-EINVAL`；六个已知 flag 全部在 resolver 中有对应检查。
 
 ## 3. renameat2 flag
 
@@ -242,7 +242,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 必须增加或扩展以下 smoke / stress 门禁：
 
-- `smoke-vfs-edge`：当前 RISC-V64 单核目标，覆盖 openat2 的 `BENEATH`/`NO_SYMLINKS`/`CACHED`、ramfs renameat2、statx、xattr、symlink loop、mount `..` crossing、chroot 等选定场景；不覆盖 `RESOLVE_NO_MAGICLINKS`、全部 resolve flag、全部文件系统后端或其他架构。
+- `smoke-vfs-edge`：当前 RISC-V64 单核目标，覆盖 openat2 的 `BENEATH`/`NO_SYMLINKS`/`NO_MAGICLINKS`/`CACHED`、ramfs renameat2、statx、xattr、symlink loop、mount `..` crossing、chroot 等选定场景；不覆盖全部 resolve flag 组合、全部文件系统后端或其他架构。
 - 现有门禁（`smoke-abi-linux`、`check-vfs-abstraction`）必须保持通过。
 
 `smoke-vfs-fs-specific`（每后端 unsupported-op errno 矩阵）不属于 P1 范围；后端能力差异继续记录在 `docs/fs/fs-consistency-model.md`。

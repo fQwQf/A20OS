@@ -219,7 +219,14 @@ typedef struct vnode {
      * release semantics from VMA create/fork/split (vnode_get sites) and
      * VMA teardown (vma_release_file/vnode_put); readers use acquire loads. */
     int             shared_file_maps;
+    /* Link-class markers for symlink vnodes, set by the filesystem that
+     * creates them.  Magic links jump to kernel-internal objects instead of
+     * resolving through normal path text; openat2 RESOLVE_NO_MAGICLINKS must
+     * refuse to traverse them. */
+    uint32_t        link_flags;
 } vnode_t;
+
+#define VNODE_MAGICLINK 0x1u    /* /proc/<pid>/fd/N style jump link */
 
 static inline void vnode_shared_map_inc(vnode_t *vn)
 {
