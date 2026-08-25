@@ -1,6 +1,8 @@
 #include "syscall_impl.h"
 #include "abi/linux/ioctl.h"
+#include "ipc/envelope.h"
 #include "core/sync.h"
+#include "ipc/ipc.h"
 #include "drivers/char/uart.h"
 #include "fs/pipe.h"
 #include "fs/readiness.h"
@@ -282,6 +284,10 @@ int64_t sys_read(int fd, char *buf, size_t count) {
     if (count == 0) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, count, 0);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
@@ -295,6 +301,10 @@ int64_t sys_write(int fd, const char *buf, size_t count) {
     if (count == 0) return 0;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, count, 1);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     int ar = o_direct_check(vf, buf, count);
     if (ar < 0) { vfs_put_file_ref((int)gfd, vf); return ar; }
@@ -309,6 +319,10 @@ int64_t sys_pread64(int fd, char *buf, size_t count, long off) {
     if (off < 0) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, count, 0);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     if (!vf) return -EBADF;
     if (!vf->ops || !vf->ops->lseek) {
@@ -361,6 +375,10 @@ int64_t sys_pwrite64(int fd, char *buf, size_t count, long off) {
     if (off < 0) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        int mr = env_mediate_use_dir((int)gfd, count, 1);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     if (!vf) return -EBADF;
     if (!vf->ops || !vf->ops->lseek) {
@@ -414,6 +432,21 @@ int64_t sys_writev(int fd, const void *iov, int iovcnt) {
     if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        /* Conservative data-budget pre-charge: sum all segment lengths
+         * so denial fires before any partial transfer. */
+        size_t want = 0;
+        struct { const char *base; size_t len; } seg;
+        for (int i = 0; i < iovcnt; i++) {
+            if (copy_from_user(&seg,
+                    (const char *)iov + (size_t)i * sizeof(seg),
+                    sizeof(seg)) < 0)
+                return -EFAULT;
+            want += seg.len;
+        }
+        int mr = env_mediate_use_dir((int)gfd, want, 1);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     struct iovec { char *base; size_t len; };
     int64_t total = 0;
@@ -441,6 +474,21 @@ int64_t sys_readv(int fd, const void *iov, int iovcnt) {
     if (iovcnt < 0 || iovcnt > 1024) return -EINVAL;
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    if (env_active(proc_current())) {
+        /* Conservative pre-charge matching writev: sum all segment
+         * lengths so denial fires before any partial transfer. */
+        size_t want = 0;
+        struct { const char *base; size_t len; } seg;
+        for (int i = 0; i < iovcnt; i++) {
+            if (copy_from_user(&seg,
+                    (const char *)iov + (size_t)i * sizeof(seg),
+                    sizeof(seg)) < 0)
+                return -EFAULT;
+            want += seg.len;
+        }
+        int mr = env_mediate_use_dir((int)gfd, want, 0);
+        if (mr) return mr;
+    }
     vfile_t *vf = vfs_get_file_ref((int)gfd);
     struct iovec { char *base; size_t len; };
     int64_t total = 0;
@@ -476,6 +524,48 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     int gfd = vfs_open(full, flags, mode);
     if (gfd < 0) {
         return gfd;
+    }
+    env_kind_register(gfd, A20_OBJ_FILE);
+    if (env_active(proc_current())) {
+        /* openat acquisition mediation (05 §2.5.1 A1/A8): rights derive
+         * from the access mode; a reopen through /proc/<pid>/fd/N is
+         * intersected with the source shadow so authority cannot be
+         * upgraded, and foreign-pid fd links fail closed. */
+        uint64_t rights = A20_RIGHT_STAT;
+        int acc = flags & O_ACCMODE;
+        if (acc != O_WRONLY)
+            rights |= A20_RIGHT_READ;
+        if (acc != O_RDONLY)
+            rights |= A20_RIGHT_WRITE;
+        if (!(flags & O_PATH))
+            rights |= A20_RIGHT_SEEK;
+
+        task_t *src_task = NULL;
+        int src_lfd = -1;
+        int pm = vfs_proc_fd_target(full, &src_task, &src_lfd);
+        if (pm > 0) {
+            task_t *cur = proc_current();
+            if (src_task != cur) {
+                proc_put(src_task);
+                vfs_close(gfd);
+                return -EACCES;
+            }
+            int src_gfd = fdtable_get_current(src_lfd);
+            int tracked = 0;
+            uint64_t sr = env_shadow_rights_of_gfd(src_gfd, &tracked);
+            proc_put(src_task);
+            if (tracked)
+                rights &= sr;
+        } else if (pm < 0) {
+            vfs_close(gfd);
+            return pm;
+        }
+
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_FILE, rights, gfd);
+        if (mr) {
+            vfs_close(gfd);
+            return mr;
+        }
     }
     task_t *t = proc_current();
     return fdtable_install(t, gfd, flags);
@@ -536,6 +626,21 @@ int64_t sys_pipe2(int *pipefd, int flags) {
     int gfd[2];
     int r = vfs_pipe(gfd);
     if (r == 0) {
+        env_kind_register(gfd[0], A20_OBJ_PIPE_ENDPOINT);
+        env_kind_register(gfd[1], A20_OBJ_PIPE_ENDPOINT);
+        if (env_active(proc_current())) {
+            uint64_t pr = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+            int m0 = env_mediate_acquire((uint8_t)A20_OBJ_PIPE_ENDPOINT,
+                                         pr, gfd[0]);
+            if (m0 == 0)
+                m0 = env_mediate_acquire((uint8_t)A20_OBJ_PIPE_ENDPOINT,
+                                         pr, gfd[1]);
+            if (m0) {
+                vfs_close(gfd[0]);
+                vfs_close(gfd[1]);
+                return m0;
+            }
+        }
         if (flags & O_NONBLOCK) {
             vfile_t *rd = vfs_get_file_ref(gfd[0]);
             vfile_t *wr = vfs_get_file_ref(gfd[1]);
