@@ -46,7 +46,7 @@
   2. 解析 block_index 对应 `block_dev_t` 并记录服务任务所有权；
   3. 完成挂载。无同步握手——调用方就是服务进程自身，阻塞等 INIT 会自我死锁；活跃性由首个真实文件操作验证。
 - vnode 操作（lookup/create/mkdir/unlink/rmdir/stat/truncate/read/write/readdir/statfs/sync）翻译为 ufs 协议消息；数据内联传输（≤ UFS_MAX_PAYLOAD）。
-- 服务死亡时 channel 断链使在飞请求返回 `-EIO`；svcmgr 重启 ufsd 后需重新挂载（与 ubd_recover 的重挂载语义一致）。
+- 服务死亡时 channel 断链使在飞请求返回 `-EIO`；重新拉起 ufsd 后需重新挂载（与 ubd_recover 的重挂载语义一致）。当前由使用方（如测试进程）负责拉起；svcmgr 清单化托管是后续工作。
 
 ## 已知边界
 

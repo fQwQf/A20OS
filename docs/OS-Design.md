@@ -11,7 +11,7 @@ A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `risc
 A20OS 是一个内核、两套用户接口：
 
 * **Linux ABI**（`kernel/abi/linux/`）：361 个系统调用（`syscall_table.def` 登记），可直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序，无需重新编译。
-* **Native ABI**（`kernel/abi/native/`）：136 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
+* **Native ABI**（`kernel/abi/native/`）：141 个系统调用（`syscall_table.def` 登记），基于 handle、capability 和显式内存对象，是面向 A20OS 新程序的现代接口。
 
 内核代码位于 `kernel/`，约 18 万行（含头文件），分布在 800 余个源文件中；第三方代码（musl、lwIP、git、vim 等）隔离在 `user/external/` 和 `kernel/external/`。
 
@@ -21,7 +21,7 @@ A20OS 是一个内核、两套用户接口：
 
 A20OS 在运行空间上更像宏内核：
 
-* 调度、内存管理、网络栈、文件系统和关键设备路径运行在同一个特权地址空间内；驱动可静态链接、以 `.a20drv` 内核模块部署，也可通过 Native 用户态驱动服务接入。
+* 调度、内存管理、网络栈、VFS 核心和关键设备路径运行在同一个特权地址空间内；驱动可静态链接、以 `.a20drv` 内核模块部署，也可通过 Native 用户态驱动服务接入；文件系统实现另有用户态放置（uxfs 代理 + ufsd 宿主：fat/ext4/iso9660/ntfs-ro），内核副本因引导期挂载与发行版根依赖而并存。
 * 子系统之间通过普通函数调用协作，中断路径和热路径保持低开销。
 
 同时，它在逻辑抽象上吸收微内核思想：
@@ -41,7 +41,7 @@ A20OS 在运行空间上更像宏内核：
 | ABI | 系统调用数 | 路径 | 使用场景 |
 |-----|-----------|------|---------|
 | Linux ABI | 361 | `kernel/abi/linux/` | 运行现有 musl 程序，无需改动。 |
-| Native ABI | 136 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
+| Native ABI | 141 | `kernel/abi/native/` | 编写面向 A20OS 的新程序，使用 handle/capability 接口。 |
 
 两层 ABI 的用户线格式分开维护，`kernel/abi/linux/` 和 `kernel/abi/native/` 尽量把调用翻译成共同的内核内部 API。当前仍有明确例外：`kernel/drivers/core/driver_manager.c` 直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，详见 [混合内核状态](hybrid-kernel/STATUS.md)。
 
@@ -249,7 +249,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 ## 设计速查
 
-**哪些代码运行在内核空间？**  网络栈、文件系统、内存管理、调度器和关键设备路径在同一个特权地址空间内运行；驱动还支持 `.a20drv` 内核模块和 Native 用户态服务两种部署形态。
+**哪些代码运行在内核空间？**  网络栈（lwIP/TCP 数据面）、VFS 核心与页缓存、内存管理、调度器和关键设备路径在同一个特权地址空间内运行；文件系统实现具备内核/用户态双态放置（用户态经 uxfs+ufsd，见 hybrid-kernel/06-user-fs.md）；驱动支持 `.a20drv` 内核模块和 Native 用户态服务两种部署形态。
 
 **Native 用户空间能看到什么隔离？**  Native ABI 对象通过带 rights 的 handle 访问，内核在每次操作时校验 handle 及其权限；其显式内存对象通过 VMO/VMAR 共享或映射。Linux ABI 使用 fd、进程和 POSIX 兼容接口，不应描述为全部由 handle 暴露。
 
@@ -257,7 +257,7 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 **什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**两套 ABI 各有多少系统调用？**  Linux ABI：361 个；Native ABI：136 个（均为 `syscall_table.def` 当前登记数）。
+**两套 ABI 各有多少系统调用？**  Linux ABI：361 个；Native ABI：141 个（均为 `syscall_table.def` 当前登记数）。
 
 **支持哪些构建目标？**  七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 

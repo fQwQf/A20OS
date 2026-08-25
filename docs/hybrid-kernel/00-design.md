@@ -4,7 +4,7 @@
 
 ## 设计定位
 
-A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 361 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 136 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态，把可崩溃、可重启的用户态服务作为系统组成部分**。
+A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 361 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 141 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态，把可崩溃、可重启的用户态服务作为系统组成部分**。
 
 划分依据是一条判定规则：
 
@@ -53,6 +53,7 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 | IOMMU bring-up | `kernel/drivers/core/riscv_iommu.c` | RISC-V IOMMU DDT/CQ/FQ 初始化和 devid 0 静态 SV39 翻译探测；未接入动态 per-device DMA map/fault 消费 |
 | 对象统计与配额 | `/proc/a20/objects` | 七项实时对象计数 + 累计计数审计 + 句柄硬配额 |
 | vDSO | `kernel/vdso/riscv64/vdso.S` | `clock_gettime` 等零陷入读取 |
+| 用户态文件系统层 | `kernel/fs/uxfs/` + `user/svc/ufsd.c` | uxfs 代理把 vnode ops 经 Channel 转发给 ufsd 多人格宿主（fat/ext4/iso9660/ntfs-ro）；块 IO 经受控 fs_block_io 进入内核块层 |
 
 各机制的详细语义见 [01-mechanisms.md](01-mechanisms.md)。
 
