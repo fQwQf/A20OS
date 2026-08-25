@@ -5,6 +5,7 @@
 #include "core/mman.h"
 #include "core/stdio.h"
 #include "core/string.h"
+#include "fs/dcookie.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/memfd.h"
@@ -230,17 +231,23 @@ int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat,
 
 int64_t sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len)
 {
-    (void)cookie;
     if (!buf)
         return -EFAULT;
-    /* DCOOKIE is only meaningful with a cookie from a filesystem that
-     * supports them; A20OS does not, so return the required size as if the
-     * buffer were too small for an empty name. */
-    if (len == 0)
-        return 1;
-    if (copy_to_user(buf, "/", 1) < 0)
-        return -EFAULT;
-    return 1;
+
+    char *path = NULL;
+    int idx = dcookie_resolve(cookie, &path);
+    if (idx < 0)
+        return -EINVAL;
+
+    size_t total = strlen(path) + 1;
+    int64_t r;
+    if (len < total) {
+        r = (int64_t)total;   /* buffer too small: report required size */
+    } else {
+        r = copy_to_user(buf, path, total) < 0 ? -EFAULT : (int64_t)total;
+    }
+    dcookie_release(idx);
+    return r;
 }
 
 int64_t sys_quotactl(int cmd, const char *special, int id, void *addr)
