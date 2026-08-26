@@ -10,6 +10,7 @@
     .global _start
     .extern early_uart_init
 _start:
+    mov     x5, x0
 #ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
     /* The UEFI loader passes the ACPI RSDP physical address in x0. */
     mov     x4, x0
@@ -28,6 +29,9 @@ _start:
     str     xzr, [x0], #8
     b       1b
 2:
+    adrp    x3, aarch64_boot_dtb
+    add     x3, x3, :lo12:aarch64_boot_dtb
+    str     x5, [x3]
 #ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
     adrp    x3, aarch64_boot_acpi_rsdp
     add     x3, x3, :lo12:aarch64_boot_acpi_rsdp
@@ -279,6 +283,11 @@ boot_l1:
     .align 12
 boot_l2:
     .space 4096
+
+    .align 3
+    .global aarch64_boot_dtb
+aarch64_boot_dtb:
+    .quad 0
 
 #ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
     .align 3
