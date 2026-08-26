@@ -26,4 +26,17 @@ interface a20_services version 1 {
   }
   const SVCMGR_REQ_ECHO = 0x21;
   const SVCMGR_REQ_CRASH = 0x22;
+  // Binding slots: task_spawn target_slot values, one service each.
+  // Slot numbers are global conventions; the ping channel shares 41 with
+  // the shmring VMO because they belong to different service tasks.
+  const A20_SVC_ENDPOINT_SLOT = A20_NATIVE_FD_HANDLE_BASE + 40u;
+  const A20_SVC_PING_SLOT = A20_NATIVE_FD_HANDLE_BASE + 41u;
+  const A20_SHMRING_VMO_SLOT = A20_NATIVE_FD_HANDLE_BASE + 41u;
+  const A20_CHAND_EP_SLOT = A20_NATIVE_FD_HANDLE_BASE + 42u;
+  const A20_RTCD_EP_SLOT = A20_NATIVE_FD_HANDLE_BASE + 43u;
+  const A20_UBD_EP_SLOT = A20_NATIVE_FD_HANDLE_BASE + 44u;
+  // shmring benchmark geometry shared by shmringd/chand/test drivers.
+  const A20_SHMRING_VMO_SIZE = 1024u * 1024u;
+  const A20_SHMRING_CAP = 512u * 1024u;
+  const A20_SHMRING_TOTAL = 16u * 1024u * 1024u;
 }

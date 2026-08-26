@@ -1,6 +1,6 @@
 # Native service IDL → C header. The header is generated from the IDL and
-# gitignored; any target that consumes rtcd/svc/ubd proto headers pulls this
-# rule in automatically (see the dependency rules below).
+# gitignored; native service binaries depend on it directly (bindings,
+# version negotiation, and message layout all come from the IDL).
 A20_SERVICES_IDL_SRC := user/svc/a20_services.idl
 A20_SERVICES_IDL_GEN := tools/a20idl.py
 A20_SERVICES_IDL_HDR := user/svc/a20_services_idl.h
@@ -11,12 +11,6 @@ A20_IDL_PYTHON      ?= $(PYTHON)
 $(A20_SERVICES_IDL_HDR): $(A20_SERVICES_IDL_SRC) $(A20_SERVICES_IDL_GEN)
 	@mkdir -p $(dir $@)
 	$(A20_IDL_PYTHON) $(A20_SERVICES_IDL_GEN) $(A20_SERVICES_IDL_SRC) $@
-
-# Consumers: the three proto headers include the generated header, so make
-# them depend on it (targets that list these headers rebuild automatically).
-user/svc/rtcd_proto.h: $(A20_SERVICES_IDL_HDR)
-user/svc/svc_proto.h:  $(A20_SERVICES_IDL_HDR)
-user/svc/ubd_proto.h:  $(A20_SERVICES_IDL_HDR)
 
 NATIVE_TEST_DIR  := user/tests
 NATIVE_LD        := user/liba20rt/a20-generic.ld
@@ -422,11 +416,11 @@ $(1) -ffreestanding -nostdlib -static \
     -o $(5)
 endef
 
-$(NATIVE_SVCMAN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/svcman.c user/svc/svc_proto.h \
+$(NATIVE_SVCMAN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/svcman.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/svcman.c,$@)
 
-$(NATIVE_ECHOD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/echod.c user/svc/svc_proto.h \
+$(NATIVE_ECHOD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/echod.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/echod.c,$@)
 
@@ -435,15 +429,15 @@ native-svc-arch: $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN)
 native-svc-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-svc-arch
 
-$(NATIVE_SHMRING_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_shmring.c user/svc/shmring_proto.h \
+$(NATIVE_SHMRING_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_shmring.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_shmring.h user/liba20rt/a20_mem.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_shmring.c,$@)
 
-$(NATIVE_SHMRINGD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/shmringd.c user/svc/shmring_proto.h \
+$(NATIVE_SHMRINGD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/shmringd.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_shmring.h user/liba20rt/a20_mem.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/shmringd.c,$@)
 
-$(NATIVE_CHAND_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/chand.c user/svc/shmring_proto.h \
+$(NATIVE_CHAND_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/chand.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/chand.c,$@)
 
@@ -452,7 +446,7 @@ native-shmring-arch: $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND
 native-shmring-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-shmring-arch
 
-$(NATIVE_RTCD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_rtcd.c user/svc/rtcd_proto.h \
+$(NATIVE_RTCD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_rtcd.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_rtcd.c,$@)
 
@@ -471,7 +465,7 @@ $(1) -ffreestanding -nostdlib -static \
     -o $(5)
 endef
 
-$(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c user/svc/rtcd_proto.h \
+$(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c $(A20_SERVICES_IDL_HDR) \
 		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
 		kernel/include/drivers/driver_descriptor.h kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)

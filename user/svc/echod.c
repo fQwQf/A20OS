@@ -8,8 +8,8 @@
  * detection + restart (docs/hybrid-kernel/01-roadmap.md phase 2).
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/svc_proto.h"
 
 /* Drain one endpoint non-blockingly.  Returns 1 if a message was
  * handled, 0 if idle, -1 if the (serve) endpoint is gone. */
@@ -42,9 +42,9 @@ int main(int argc, char **argv, char **envp)
     (void)argc; (void)argv; (void)envp;
 
     /* 服务端点 + 监管 ping 端点双通道轮询（ping 通道隔离健康探测
-     * 流量，见 svc_proto.h A20_SVC_PING_SLOT）。 */
-    a20_handle_t ep = A20_SVC_ENDPOINT_HANDLE;
-    a20_handle_t ping_ep = A20_SVC_PING_HANDLE;
+     * 流量，见 a20_services_idl.h A20_SVC_PING_SLOT）。 */
+    a20_handle_t ep = ((a20_handle_t)A20_SVC_ENDPOINT_SLOT);
+    a20_handle_t ping_ep = ((a20_handle_t)A20_SVC_PING_SLOT);
     for (;;) {
         int idle = 1;
         for (;;) {

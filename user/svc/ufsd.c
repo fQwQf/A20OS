@@ -23,7 +23,6 @@
 #include "core/stdio.h"
 #include "ufs_backends.h"
 #include "../svc/a20_services_idl.h"
-#include "../svc/svc_proto.h"
 
 typedef struct {
     uint32_t     size;
@@ -308,7 +307,7 @@ int main(int argc, char **argv, char **envp)
      * 项）。MESSAGE_READY 与对端关闭都会唤醒循环；先排空再等待的顺序
      * 保证 watch 注册前已发布的消息同样被处理。
      */
-    a20_handle_t svc_ep = A20_SVC_PING_HANDLE;
+    a20_handle_t svc_ep = ((a20_handle_t)A20_SVC_PING_SLOT);
     a20_handle_t eq;
     if (a20_event_queue_create(&eq) != A20_OK) {
         log_str("UFSD: eventq create failed\n");
