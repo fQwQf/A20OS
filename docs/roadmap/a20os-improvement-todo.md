@@ -109,7 +109,7 @@
   - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
 - [ ] 修复 shmring 进程组退出后 poweroff 路径的 pfa 空闲链损坏（"corrupted next link"，`kernel/mm/frame.c`）。
   - 复现：`make smoke-native-shmring`——功能基准 NATIVE_SHMRING: PASS 后执行 poweroff 即触发；本工作树与基线 720e16ab0 均复现（2026-08-26 记录）。怀疑方向：共享 VMO 多进程退出时帧归还路径的重复释放或链表破坏；与 IDL 迁移无关（常量值不变、纯编译期挪位）。
-  - 已收集证据（同日）：损坏并非简单双重归还——为 frame.c 加装空闲帧位图检测器（fl_push 查重/fl_remove 清位，双重归还即时 panic）后未触发 DOUBLE-FREE，但症状随内核保留区布局移动一页而从"alloc 时 panic"变为"poweroff 后静默挂起"，属布局敏感的潜在破坏。调用链事实：sys_reboot 的 POWER_OFF 分支直接 firmware_shutdown()，不做任何清理；因此损坏实际发生于数据面运行或进程退出期间，poweroff 前最后一次用户态分配只是引爆点。位图检测器作为永久硬化保留（静默损坏→带归属即时 panic）。
+  - 已收集证据（同日）：损坏并非简单双重归还——为 frame.c 加装空闲帧位图检测器（fl_push 查重/fl_remove 清位，双重归还即时 panic）后未触发 DOUBLE-FREE，但症状随内核保留区布局移动一页而从"alloc 时 panic"变为"poweroff 后静默挂起"，属布局敏感的潜在破坏。调用链事实：sys_reboot 的 POWER_OFF 分支直接 firmware_shutdown()，不做任何清理；因此损坏实际发生于数据面运行或进程退出期间，poweroff 前最后一次用户态分配只是引爆点。位图检测器作为永久硬化保留（静默损坏→带归属即时 panic）。追加操作历史环形缓冲（最近 512 次 push/remove，corruption/double-free panic 时转储最近 48 条）用于下次 panic 现场取证。症状观察：在内核保留区插入位图（整体后移不足一页）后，同场景从"alloc 时 panic"转为"poweroff 后静默挂起"，提示破坏点与表现形态对布局/时序敏感；下一次 panic 发生时操作历史将直接给出破坏前的最后操作序列。
 - [x] 让 OOM reclaim 策略可观察、可测试。
   - 源码证据：`user/cmds/stress/oom_stress.c` 在 cgroup2 `memory.max` 限制下用子进程触发按页耗尽，断言 victim 以 SIGKILL 死亡、`memory.events` 的 `oom_kill`/failcnt 计数推进、幸存父进程仍能分配内存和做文件 I/O；`make smoke-oom-stress` 在 QEMU 中执行该场景。配套修复：`kernel/core/trap.c` 在缺页失败路径先检查 pending fatal signal（cgroup/global OOM kill 刚发出的 SIGKILL），不再把 OOM 受害者误报成 SIGSEGV，与 Linux 对 VM_FAULT_OOM 的 fatal-signal-pending 处理一致。
   - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
