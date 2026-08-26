@@ -282,21 +282,22 @@ __return_to_user:
 __trap_from_kernel:
 #ifndef CONFIG_NOMMU
     /* Stack-pointer guard FIRST -- before any store touches the possibly-
-     * corrupted sp.  Kernel stacks live in the direct map at/above
-     * PAGE_OFFSET; a trap arriving below it would otherwise fault inside
-     * this save path and spin forever with a drifting sp.
-     * t5/t6 carry the stash pointer / comparison base across the check and
-     * are restored from the stash on the good path.  Limitation: the stash
-     * is a single instance -- simultaneous traps on multiple harts racing
-     * these instructions could cross-restore stale values (accepted for a
-     * fatal-path guard).
-     * Violation path: report from the emergency stack (noreturn). */
+     * corrupted sp.  Kernel stacks live in the direct map, between
+     * PAGE_OFFSET and the pfa-exported direct-map end; a trap arriving
+     * outside that window would otherwise fault inside this save path and
+     * spin forever with a drifting sp. */
     la      t5, .Lkf_sp_stash
     sd      sp, 0(t5)
     sd      t6, 8(t5)
     /* PAGE_OFFSET (platform.h) without the C 'UL' suffix: as cannot parse it */
     li      t6, 0xFFFFFFC000000000
-    bgeu    sp, t6, .Lkf_sp_good
+    bgeu    sp, t6, .Lkf_sp_lo_ok
+    j       .Lkf_sp_bad
+.Lkf_sp_lo_ok:
+    la      t6, g_pfa_direct_map_end
+    ld      t6, 0(t6)
+    bltu    sp, t6, .Lkf_sp_good
+.Lkf_sp_bad:
     ld      a0, 0(t5)
     csrr    a1, sstatus
     csrr    a2, sepc
