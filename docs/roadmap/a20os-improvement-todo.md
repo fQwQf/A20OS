@@ -200,8 +200,9 @@
   - 证据：`check-blocking-point-boundary`、`check-signal-exit-boundary`、`check-timeout-ownership-boundary`、`check-smp-runqueue-boundary`、`check-process-lock-split-boundary` 现在依赖对应 QEMU runtime smoke（`smoke-proc-stress`/`smoke-futex-stress`/`smoke-sched-stress`/`smoke-timeout-test`），在运行时日志 grep 标记而非源码；`smoke-riscv64`/`smoke-loongarch64`/`smoke-aarch64`/`smoke-x86_64` 不再把 watchdog timeout 当 PASS，要求 `part ok` 与正常 poweroff；新增 `smoke-pty-stress` 与 `smoke-timeout-test` 覆盖原本从未运行的压力程序。
   - 验证：`make smoke-riscv64`、`make smoke-loongarch64`、`make smoke-sched-stress`、`make smoke-futex-stress`、`make smoke-proc-stress`、`make smoke-timeout-test`、`make smoke-pty-stress`、`make check-timeout-ownership-boundary` 在 2026-08-16 于 riscv64 全部 PASS（历史记录，当前状态需复验）。
   - 后续：`check-arch-boundary` 已依赖 `smoke-arch-mmu-matrix`（8 组合 MMU/NOMMU runtime 矩阵）；`check-concurrency-foundation` 已依赖 `smoke-smp-bringup`（riscv64 `-smp 2` 真实双核启动并干净关机，`[SMP] 2/2 configured CPUs online`）。剩余：`pty_stress`/`timeout_test` 的多架构入口未建立。
-- [ ] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
+- [x] 在声明更广兼容性前，为每个 Linux ABI 覆盖区域增加 LTP 风格分组 smoke 测试。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
+  - 已落地（2026-08-26）：区域汇总表新增"Smoke gates (last known status)"列——37 个区域逐行映射到具体 smoke 目标，今日复验的门禁标注 `PASS 2026-08-26`，未复验的列目标名不留状态。映射来源为逐 syscall 大表的既有 Smoke Gate 列采样核对（keyring/AIO/fanotify/pidfd/io_uring/landlock/membarrier/ioprio/LSM → smoke-syscall-ext；handles/new-mount-api/statmount → smoke-vfs-stress；sched_setaffinity/rseq/timerfd/clock → smoke-proc-stress 等）。同时补齐五个 a20_envelope_* 扩展 syscall 的缺失行（area=a20-envelope, gate=smoke-envelope），修复了 check-doc-drift 的预先存在失败（现 PASS）。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
 - [ ] 将现有 Native ABI 测试聚合为多架构 CI-like 运行矩阵。
   - 当前证据：源码已有 16 个 `test_native_*.c`，以及 liba20c/mlibc、service、personality smoke；不再只是 minimal/libc。问题是目标分散，且多数 QEMU smoke 固定为 RISC-V64。
