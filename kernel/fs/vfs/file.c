@@ -62,8 +62,9 @@ static int vfs_file_uses_page_cache(vnode_t *vn)
 static int vfs_file_uses_buffered_write(vnode_t *vn)
 {
     return vfs_file_uses_page_cache(vn) && vn->mnt &&
-           vn->mnt->type == FS_TYPE_EXT4 && vn->ops &&
-           vn->ops->readpage && vn->ops->writepage;
+           (vn->mnt->type == FS_TYPE_EXT4 || vn->mnt->type == FS_TYPE_UXFS) &&
+           !(vn->mnt->flags & VFS_MOUNT_RDONLY) &&
+           vn->ops && vn->ops->readpage && vn->ops->writepage;
 }
 
 int vfs_read_file(vfile_t *vf, char *buf, size_t count)

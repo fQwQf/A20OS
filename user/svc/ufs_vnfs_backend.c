@@ -382,7 +382,12 @@ static int64_t vn_read(uint64_t ino, uint64_t off, uint32_t count,
     if (count > cap)
         count = cap;
 
-    vf->offset = off; /* 单线程宿主：直接置游标 */
+    /* 经 lseek 同步后端私有游标（如 ntfs 的 fc->file_off）：
+     * 仅设 vf->offset 时，页粒度 RPC 的非零偏移会被忽略。 */
+    if (vf->ops && vf->ops->lseek)
+        vf->ops->lseek(vf, (long)off, 0);
+    else
+        vf->offset = off;
     int n = vf->ops && vf->ops->read ? vf->ops->read(vf,
                                                      (char *)ufs_payload_buf(),
                                                      count)
@@ -410,7 +415,10 @@ static int64_t vn_write(uint64_t ino, uint64_t off, const uint8_t *data,
         put_fail(r, (int)rc);
         return rc;
     }
-    vf->offset = off;
+    if (vf->ops && vf->ops->lseek)
+        vf->ops->lseek(vf, (long)off, 0);
+    else
+        vf->offset = off;
     int n = vf->ops && vf->ops->write ? vf->ops->write(vf,
                                                        (const char *)data,
                                                        count)
