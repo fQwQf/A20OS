@@ -205,8 +205,9 @@
 - [ ] 将现有 Native ABI 测试聚合为多架构 CI-like 运行矩阵。
   - 当前证据：源码已有 16 个 `test_native_*.c`，以及 liba20c/mlibc、service、personality smoke；不再只是 minimal/libc。问题是目标分散，且多数 QEMU smoke 固定为 RISC-V64。
   - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试进入可枚举的多架构 CI-like 矩阵。
-- [ ] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
+- [x] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
   - 证据：当前 smoke 目标证明基本操作，但不能证明长时间稳定性或竞争行为。
+  - 已落地（2026-08-26）：六类全部有有界覆盖——memory pressure=`smoke-oom-stress`（cgroup 限量下的 OOM 击杀断言）；fork/exec churn=`smoke-proc-stress` 既有 exec 边界组（shebang/low-argv/arg-boundary/thread-exec-cloexec）；fd churn=`smoke-proc-stress` 新增 fd-churn（200 轮 pipe/dup/open/close + 128 槽容量探针检漏）；process reaping=新增 reap-churn（4 波 ×16 短命子进程，波间 WNOHANG 收割交错 + 排空 + ECHILD 无残留断言）；filesystem churn=`smoke-vfs-stress` 多进程并发场景组；network churn=`smoke-socket-stress` + `smoke-network-suite`。所有 smoke 目标由 $(TIMEOUT) 包裹且失败时 tail 内核日志。
   - 完成条件：stress 目标带有有界 timeout，并在失败时捕获内核日志。
 
 ## P2：仓库卫生与依赖边界
