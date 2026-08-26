@@ -662,6 +662,227 @@ static int concurrent_rename_unlink(void)
     return 0;
 }
 
+/* concurrent_rw_dup_churn: two children hammer one shared file (a writer
+ * and a reader) while the parent churns dup'd descriptors through
+ * close_range -- exercises fd-table growth, page-cache coherence under
+ * concurrent writers/readers, and per-fd cursor ownership. */
+static int concurrent_rw_dup_churn(void)
+{
+    const char *path = "/tmp/vfs_rw_churn.txt";
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("rwd-create");
+    close(fd);
+
+    pid_t wpid = fork();
+    if (wpid < 0)
+        return fail("rwd-fork-w");
+    if (wpid == 0) {
+        int wfd = open(path, O_WRONLY);
+        if (wfd < 0)
+            _exit(1);
+        for (int i = 0; i < 120; i++) {
+            if (lseek(wfd, 0, SEEK_SET) != 0 ||
+                write(wfd, "CHURN", 5) != 5) {
+                close(wfd);
+                _exit(2);
+            }
+            usleep(200);
+        }
+        close(wfd);
+        _exit(0);
+    }
+
+    pid_t rpid = fork();
+    if (rpid < 0)
+        return fail("rwd-fork-r");
+    if (rpid == 0) {
+        for (int i = 0; i < 120; i++) {
+            int rfd = open(path, O_RDONLY);
+            if (rfd >= 0) {
+                char buf[8];
+                (void)read(rfd, buf, sizeof(buf));
+                close(rfd);
+            }
+            usleep(200);
+        }
+        _exit(0);
+    }
+
+    for (int i = 0; i < 40; i++) {
+        int pfd = open(path, O_RDONLY);
+        if (pfd < 0)
+            return fail("rwd-parent-open");
+        int d1 = dup(pfd), d2 = dup(pfd);
+        if (d1 < 0 || d2 < 0)
+            return fail("rwd-dup");
+        if (syscall(SYS_close_range, d1, d2, 0) < 0)
+            return fail("rwd-close-range");
+        close(pfd);
+    }
+
+    int st = 0;
+    if (waitpid(wpid, &st, 0) != wpid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("rwd-writer");
+    if (waitpid(rpid, &st, 0) != rpid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("rwd-reader");
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return fail("rwd-final-open");
+    char final_buf[8] = {0};
+    ssize_t n = read(fd, final_buf, 5);
+    close(fd);
+    unlink(path);
+    if (n != 5 && n != 0)
+        return fail("rwd-final-size");
+    return 0;
+}
+
+/* concurrent_unlink_open_race: one process cycles unlink->create->write on
+ * a name while another opens/stats it -- ENOENT is a legal outcome of the
+ * race; anything else is not. */
+static int concurrent_unlink_open_race(void)
+{
+    const char *path = "/tmp/vfs_uo_race.txt";
+    int fd = open(path, O_CREAT | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("uo-create");
+    close(fd);
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("uo-fork");
+    if (pid == 0) {
+        for (int i = 0; i < 80; i++) {
+            (void)unlink(path);
+            int cfd = open(path, O_CREAT | O_WRONLY, 0644);
+            if (cfd >= 0) {
+                (void)write(cfd, "x", 1);
+                close(cfd);
+            }
+        }
+        _exit(0);
+    }
+
+    for (int i = 0; i < 150; i++) {
+        errno = 0;
+        int pfd = open(path, O_RDONLY);
+        if (pfd >= 0) {
+            struct stat st;
+            if (fstat(pfd, &st) != 0) {
+                close(pfd);
+                return fail("uo-fstat");
+            }
+            close(pfd);
+        } else if (errno != ENOENT) {
+            printf("VFS_STRESS: uo open errno=%d\n", errno);
+            return fail("uo-open-errno");
+        }
+    }
+
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("uo-child-fail");
+    unlink(path);
+    return 0;
+}
+
+/* concurrent_symlink_resolution: one process tears down and recreates a
+ * symlink while another resolves and reads through it -- the ENOENT window
+ * between unlink and recreate is legal; resolution must otherwise succeed. */
+static int concurrent_symlink_resolution(void)
+{
+    const char *target = "/tmp/vfs_sym_target.txt";
+    const char *link = "/tmp/vfs_sym_link";
+    int fd = open(target, O_CREAT | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("sym-target-create");
+    if (write(fd, "sym", 3) != 3) {
+        close(fd);
+        return fail("sym-target-write");
+    }
+    close(fd);
+    if (symlink(target, link) < 0)
+        return fail("sym-link");
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("sym-fork");
+    if (pid == 0) {
+        for (int i = 0; i < 60; i++) {
+            (void)unlink(link);
+            (void)symlink(target, link);
+        }
+        _exit(0);
+    }
+
+    int resolved_ok = 0;
+    for (int i = 0; i < 150; i++) {
+        errno = 0;
+        int pfd = open(link, O_RDONLY);
+        if (pfd >= 0) {
+            resolved_ok = 1;
+            close(pfd);
+        } else if (errno != ENOENT) {
+            printf("VFS_STRESS: sym open errno=%d\n", errno);
+            return fail("sym-open-errno");
+        }
+    }
+
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("sym-child-fail");
+    if (!resolved_ok)
+        return fail("sym-never-resolved");
+    unlink(link);
+    unlink(target);
+    return 0;
+}
+
+/* concurrent_mount_umount: two processes race ramfs mounts at one
+ * mountpoint while another keeps stat-ing paths beneath it -- EBUSY and
+ * ENOENT are legal race outcomes; crashes or wrong errnos are not. */
+static int concurrent_mount_umount(void)
+{
+    mkdir("/tmp/vfs_mu", 0755);
+
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("mu-fork");
+    if (pid == 0) {
+        for (int i = 0; i < 20; i++) {
+            if (syscall(SYS_mount, "none", "/tmp/vfs_mu", "ramfs", 0, "") == 0) {
+                int fd = open("/tmp/vfs_mu/f.txt", O_CREAT | O_WRONLY, 0644);
+                if (fd >= 0) {
+                    (void)write(fd, "m", 1);
+                    close(fd);
+                }
+                (void)syscall(SYS_umount2, "/tmp/vfs_mu", 0);
+            }
+        }
+        _exit(0);
+    }
+
+    for (int i = 0; i < 80; i++) {
+        errno = 0;
+        struct stat st;
+        if (stat("/tmp/vfs_mu/f.txt", &st) == 0 || errno == ENOENT)
+            continue;
+        if (errno != EBUSY && errno != EINVAL && errno != EACCES) {
+            printf("VFS_STRESS: mu stat errno=%d\n", errno);
+            return fail("mu-stat-errno");
+        }
+    }
+
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("mu-child-fail");
+    (void)syscall(SYS_umount2, "/tmp/vfs_mu", 0);
+    rmdir("/tmp/vfs_mu");
+    return 0;
+}
+
 static int mkdir_immediate_visibility(void)
 {
     const char *base = "/tmp/vfs_mkdir_visibility";
@@ -1211,6 +1432,14 @@ int main(void)
     if (concurrent_open_close() != 0)
         return 1;
     if (concurrent_rename_unlink() != 0)
+        return 1;
+    if (concurrent_rw_dup_churn() != 0)
+        return 1;
+    if (concurrent_unlink_open_race() != 0)
+        return 1;
+    if (concurrent_symlink_resolution() != 0)
+        return 1;
+    if (concurrent_mount_umount() != 0)
         return 1;
     if (mkdir_immediate_visibility() != 0)
         return 1;
