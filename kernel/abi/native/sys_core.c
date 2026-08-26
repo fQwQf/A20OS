@@ -958,8 +958,9 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_flags_t flags = (a20_flags_t)A20_ARG(1);
-    a20_task_status_t *out = (a20_task_status_t *)(uintptr_t)A20_ARG(2);
-    (void)flags; /* only blocking wait is implemented currently */
+    a20_task_status_t *out = (a20_task_status_t *)A20_ARG(2);
+    if (flags & ~A20_TASK_WAIT_NONBLOCK)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -975,9 +976,12 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     int status = 0;
-    int wret = proc_wait4(target->pid, &status, 0);
+    /* WNOHANG=1: non-block mode reports WOULD_BLOCK until the target exits. */
+    int wret = proc_wait4(target->pid, &status,
+                          (flags & A20_TASK_WAIT_NONBLOCK) ? 1 : 0);
     proc_put(target);
     if (wret < 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (wret == 0) return -A20_ERR_WOULD_BLOCK;
 
     if (out) {
         a20_task_status_t ts;

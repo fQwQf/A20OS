@@ -198,6 +198,7 @@ smoke-mlibc-fork:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_FORK_BIN) ::/mlibc-fork-rv
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mlibc-fork-riscv64.log"; \
