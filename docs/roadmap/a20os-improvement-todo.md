@@ -70,9 +70,9 @@
 - [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
-- [ ] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
-  - 当前证据：`kernel/fs/vfs.c` 仍把这些并发场景描述为未来 runtime expansion；`check-vfs-abstraction` 运行 `smoke-vfs-stress` 后还包含静态 marker 检查。
-  - 完成条件：`make check-vfs-abstraction` 能在这些竞争回归时失败，而不仅仅检查文档标记是否存在。
+- [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
+  - 源码证据：`user/cmds/stress/vfs_stress.c` 新增四个多进程竞争场景——`concurrent_rw_dup_churn`（双子进程写/读竞争同一文件 + 父进程 dup/close_range churn）、`concurrent_unlink_open_race`（unlink→create→write 循环 vs open/fstat 竞争，ENOENT 为合法竞态结果、其余 errno 即失败）、`concurrent_symlink_resolution`（symlink 拆除重建 vs 解析读取穿透）、`concurrent_mount_umount`（ramfs 同点挂载/卸载竞争 vs stat，容忍 EBUSY/ENOENT 竞态）。这些场景经 `smoke-vfs-stress` 执行：内核在竞争中崩溃、返回错误 errno 或数据不一致即门禁失败——满足"能在竞争回归时失败"的完成条件。
+  - 验证：`make smoke-vfs-stress` riscv64 PASS（当前提交）。
 - [x] 用 EEVDF 替换 8 级 MLFQ，作为普通任务的统一调度核心。
   - 证据：`kernel/proc/sched.c` 实现加权 vruntime、系统虚拟时间资格门控、虚拟截止时间选择、空闲窃取与时间片旋钮；`/proc/a20/sched_base_slice` 可运行时切换桌面/HPC。当前 nice -20/19 权重为 43020/88，理论份额比约 489:1；运行时分布结论必须引用具体历史样本，不能写成当前测量。
   - 历史验证：`check-doc-test-gates`、双架构 sched/futex/proc 压力和 riscv64 8 核 `sched_stress` smp-runqueue + lock-split PASS（历史平台记录，当前状态需复验）。
