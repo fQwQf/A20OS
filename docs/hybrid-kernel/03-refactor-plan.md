@@ -90,7 +90,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有版本协商；手写 proto 头退出活跃树。
 
-**当前源码状态**：`a20_services.idl`、`tools/a20idl.py` 和 ignored 的构建生成头已接入。rtcd 与 svcmgr/echod 使用 version/size envelope；ubd 只消费生成常量，其块数据面仍是共享环协议。`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h` 仍是活跃 wrapper，尚未“退出活跃树”。`make check-a20-idl` 是重生成比对入口，但本次文档审计未运行它。剩余双端 binding、动态版本协商和手写 wrapper 收口。
+**当前源码状态**：`a20_services.idl`、`tools/a20idl.py` 和 ignored 的构建生成头已接入；服务绑定槽位（svc/ping/shmring/chand/rtcd/ubd）与 shmring 几何常量也已进入 IDL 并随生成头分发。四个手写 wrapper（`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h`、`shmring_proto.h`）已退出活跃树，native 服务二进制直接依赖生成头。剩余动态版本协商扩展（当前为单版本常量）。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 

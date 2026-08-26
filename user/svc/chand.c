@@ -6,14 +6,14 @@
  * shmring benchmark.  Exit code 0 = data intact.
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/shmring_proto.h"
 
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
 
-    a20_handle_t ep = A20_CHAND_EP_HANDLE;
+    a20_handle_t ep = ((a20_handle_t)A20_CHAND_EP_SLOT);
 
     uint8_t hdr[4];
     uint32_t hlen = sizeof(hdr);

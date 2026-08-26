@@ -10,9 +10,9 @@
  * consumers report intact data.
  */
 #include "liba20rt/a20_sdk.h"
+#include "../svc/a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
 #include "liba20rt/a20_shmring.h"
-#include "../svc/shmring_proto.h"
 
 #define CHAN_MSG_SIZE 16384
 

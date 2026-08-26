@@ -8,8 +8,8 @@
  * the supervisor crash path.
  */
 #include "liba20rt/a20_sdk.h"
+#include "../svc/a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/svc_proto.h"
 
 #define AUDIT_CYCLES 100
 

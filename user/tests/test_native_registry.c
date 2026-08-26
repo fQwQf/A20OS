@@ -7,8 +7,8 @@
  * respawns it, and verifies the RPC works again (automatic rebinding).
  */
 #include "liba20rt/a20_sdk.h"
+#include "../svc/a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/rtcd_proto.h"
 
 static a20_handle_t g_out = A20_HANDLE_NULL;
 

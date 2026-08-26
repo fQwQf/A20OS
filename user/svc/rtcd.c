@@ -16,9 +16,14 @@
 #define DRV_ENV_USER 1
 #include "drivers/dual/goldfish_rtc.h"
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
+
+/* QEMU virt goldfish RTC identity (driver-local; same values as
+ * kernel/include/drivers/dual/goldfish_rtc.h). */
+#define GOLDFISH_RTC_BASE   0x101000ULL
+#define GOLDFISH_RTC_SIZE   0x1000ULL
+#define GOLDFISH_RTC_IRQ    11u
 #include "liba20rt/crt0_a20.h"
-#include "../svc/rtcd_proto.h"
-#include "../svc/svc_proto.h"
 #include "drivers/driver_descriptor.h"
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
@@ -123,14 +128,14 @@ int main(int argc, char **argv, char **envp)
     if (a20_event_queue_create(&eq) != A20_OK)
         return 3;
 
-    a20_handle_t ep = A20_RTCD_EP_HANDLE;
+    a20_handle_t ep = ((a20_handle_t)A20_RTCD_EP_SLOT);
     if (a20_event_watch(eq, ep, A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                         CH_TAG) != A20_OK) {
         RTCD_LOG("rtcd: watch ep failed\n");
         return 4;
     }
     RTCD_LOG("rtcd: ep watched\n");
-    a20_handle_t ping_ep = A20_SVC_PING_HANDLE;
+    a20_handle_t ping_ep = ((a20_handle_t)A20_SVC_PING_SLOT);
     int have_ping = (a20_event_watch(eq, ping_ep,
                                      A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                                      CH_TAG) == A20_OK);

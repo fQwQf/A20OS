@@ -6,16 +6,16 @@
  * byte pattern.  Exit code 0 = data intact, 1 = corruption detected.
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
 #include "liba20rt/a20_shmring.h"
-#include "../svc/shmring_proto.h"
 
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
 
     uint64_t base = 0;
-    if (a20_vm_map(A20_SHMRING_VMO_HANDLE, A20_SHMRING_VMO_SIZE, 0,
+    if (a20_vm_map(((a20_handle_t)A20_SHMRING_VMO_SLOT), A20_SHMRING_VMO_SIZE, 0,
                    A20_PROT_READ | A20_PROT_WRITE, &base) < 0)
         return 2;
     a20_shmring_t *r = (a20_shmring_t *)(uintptr_t)base;
