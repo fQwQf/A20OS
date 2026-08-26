@@ -228,7 +228,7 @@ typedef struct a20_task_mem_args {
 | `namespace` 强制 | `ns_apply` 只写字段 | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
 | `event_watch_fs` 路径过滤 | 无 | 前缀匹配（本期后） |
 | `clock_set` | ~~恒 PERM~~ **已落地**：安全标签 0（system）可设 CLOCK_REALTIME；monotonic 拒绝 INVALID_ARGUMENT |
-| EventQ 电平模式 | 事件为边沿触发，`handle_poll` 提供电平快照 | **设计方案（已批准待实现）**：`event_watch` args 按 E-APPEND 追加 `flags`，bit0=`A20_WATCH_LEVEL`；watch 记录保存 level 位；等待侧 park 前对 level watch 先做一轮就绪查询（复用 `handle_poll` 对象分派），就绪即返回、不投递边沿事件。回归：test_native_ipc 增加 level/edge 对照分区。 |
+| EventQ 电平模式 | ~~事件为边沿触发~~ **已落地**：`event_watch` args 按 E-APPEND 追加 `flags`，bit0=`A20_WATCH_LEVEL`（未知位拒绝）；等待侧 park 前（且不进入 readiness 子系统）对非 vfile 类型的 level watch 直接查询对象就绪位（通道端点：msg_count/peer_closed，与 handle_poll 分派一致），就绪即返回、不要求注册后发生状态迁移。回归：test_native_ipc 新增 level/edge 对照分区——同一已就绪端点上 edge watch 零超时返回 WOULDBLOCK、level watch 立即返回 READABLE+user_data。 |
 | `vm_remap` 语义委托 | ~~"新建匿名区+字节拷贝"~~ **已落地**：改调 `mm_mremap(MREMAP_MAYMOVE)`，VMA 语义保留（文件映射/共享帧不丢失）；`a20_mm_errno_map` 完成 A20_ERR↔Linux errno 映射；prot≠0 时对结果区间 mm_mprotect；256MB 上限与范围校验留在 ABI |
 
 ## 9. 演进与兼容

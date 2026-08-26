@@ -90,7 +90,8 @@ a20_eventq_t *a20_eventq_create(uint32_t capacity_hint)
 }
 
 int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_obj,
-                         uint16_t target_type, uint64_t event_mask, uint64_t user_data)
+                         uint16_t target_type, uint64_t event_mask, uint64_t user_data,
+                         uint16_t watch_flags)
 {
     if (!eq || !target_obj) return -A20_ERR_INVALID_ARGUMENT;
 
@@ -104,6 +105,7 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
     w->target_type = target_type;
     w->event_mask = event_mask;
     w->user_data = user_data;
+    w->flags = watch_flags;
     w->owner_queue = eq;
     w->next = NULL;
 
@@ -133,6 +135,28 @@ int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_o
     spin_unlock_irqrestore(&g_evq_hash_lock, hash_flags);
     wait_queue_wake_all(&eq->waiters, 0, PROC_WAKE_EVENT);
     return A20_OK;
+}
+
+uint64_t a20_eventq_level_bits(const void *object, uint16_t type)
+{
+    uint64_t active = 0;
+
+    switch (type) {
+    case A20_OBJ_CHANNEL_ENDPOINT: {
+        const a20_channel_ep_t *ep = (const a20_channel_ep_t *)object;
+        if (ep->msg_count > 0)
+            active |= (1ull << A20_EVENT_READABLE) |
+                      (1ull << A20_EVENT_MESSAGE_READY);
+        if (ep->peer_closed)
+            active |= 1ull << A20_EVENT_CLOSED;
+        else if (ep->msg_count < ep->msg_cap)
+            active |= 1ull << A20_EVENT_WRITABLE;
+        break;
+    }
+    default:
+        break; /* push/readiness paths cover other types */
+    }
+    return active;
 }
 
 static int evq_ring_put(a20_eventq_t *eq, const a20_pending_event_t *ev)
@@ -261,8 +285,34 @@ int64_t a20_eventq_wait(a20_eventq_t *eq, a20_pending_event_t *out,
             result = (int64_t)n;
             break;
         }
-        uint32_t watch_cap = eq->watch_count;
+        /* Level-mode watches answer from current object state before we
+         * invest in the park path: no transition required.  Lifetime is
+         * safe under eq->lock because a20_eventq_on_object_destroy purges
+         * watches before the target object is freed. */
+        a20_pending_event_t lvl;
+        int have_lvl = 0;
+        for (a20_watch_entry_t *lw = eq->watches; lw && !have_lvl;
+             lw = lw->next) {
+            if (!(lw->flags & A20_WATCH_F_LEVEL)) continue;
+            if (a20_object_is_vfile_backed(lw->target_type)) continue;
+            uint64_t bits = a20_eventq_level_bits(lw->target_object,
+                                                  lw->target_type) &
+                            lw->event_mask;
+            if (!bits) continue;
+            memset(&lvl, 0, sizeof(lvl));
+            lvl.source = lw->target_handle;
+            lvl.type = evq_first_event(bits);
+            lvl.events = bits;
+            lvl.user_data = lw->user_data;
+            have_lvl = 1;
+        }
         spin_unlock_irqrestore(&eq->lock, flags);
+        if (have_lvl) {
+            out[0] = lvl;
+            result = 1;
+            break;
+        }
+        uint32_t watch_cap = eq->watch_count;
 
         readiness_interest_t *interests = watch_cap ?
             kcalloc(watch_cap, sizeof(*interests)) : NULL;
