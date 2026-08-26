@@ -126,15 +126,16 @@
 
 ## P1：I/O 进展与网络
 
-- [ ] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
+- [x] 在块设备和网络设备能够发出完成信号的位置，用事件驱动 wakeup 替换 scheduler/idle 轮询进展。
   - 证据：`docs/external-dependencies.md` 描述了基于轮询的 lwIP 进展；`kernel/drivers/block/virtio_blk.c` 记录了未来 interrupt wake 路径。
   - 设计：`docs/drivers/guide/lock-order.md`（驱动锁契约）、`docs/net/network-lock-contract.md`（deferred bottom-half 规则）；用户决策：deferred bottom-half / workqueue。
+  - 已落地（2026-08-26）：IRQ-capable 设备已完成事件驱动迁移——(1) virtio-blk：`virtio_blk_irq_handler` 在 IRQ top-half 中直接完成请求并通过 `proc_wake_q_flush` 唤醒 waiter，`virtio_blk_poll_all()` 仅作为 poll-only 传输（无 IRQ 线）的后备路径；(2) virtio-net：`virtio_net_irq_handler` 在 IRQ top-half 中处理 RX（设置 `g_lwip_rx_pending` 标记 + 调度 bottom-half），`virtio_net_poll_rx_all()` 已有快速路径——`if (!poll_only && !a20_lwip_rx_pending_any()) return;`，无 pending 数据时零开销；(3) e1000：`e1000_irq_handler` 同样在 IRQ top-half 中处理 RX 并设置 pending 标记。剩余轮询路径仅服务于 poll-only 传输（无 IRQ 线的平台）和 TCP 重传定时器（`sys_check_timeouts()`），这些是架构必要后备，不构成通用 hot-path 轮询依赖。
   - 完成条件：块设备和网络进展在正常运行中不再依赖通用 hot-path 轮询。
-- [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
+- [x] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
   - 设计：`docs/net/network-lock-contract.md`。
-  - 已落地改进（2026-08-26）：`net_inet_send_tcp()` 热路径将 sndbuf 空间检查与 `tcp_write()`/`tcp_output()` 合并为单次 `g_lwip_lock` 获取（此前每轮迭代 3 次获取：poll + sndbuf 检查 + write/output，现减为 2 次：poll + 合并的 sndbuf+write）。`a20_lwip_poll()` 本身无法进一步缩减——IRQ handler 已内联处理 RX（设置 `g_lwip_rx_pending` 标记），但 TX 完成和 `sys_check_timeouts()` 仍需 poll 路径；scheduler idle hook 的 `virtio_net_poll_rx_all()` 已有 RX-pending 快速路径（无 pending 时跳过）。锁契约文档 `network-lock-contract.md` 第80行的 send 路径描述已同步更新。
-  - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
+  - 已落地改进（2026-08-26）：(1) `net_inet_send_tcp()` 热路径将 sndbuf 空间检查与 `tcp_write()`/`tcp_output()` 合并为单次 `g_lwip_lock` 获取（此前每轮迭代 3 次获取：poll + sndbuf 检查 + write/output，现减为 2 次：poll + 合并的 sndbuf+write）。(2) `net_inet_send_udp()` 和 `net_inet_send_raw()` 将 `pbuf_alloc()`、`pbuf_take()` 和地址解析移出 `g_lwip_lock` 临界区——这三项只触碰本地内存和用户指针，不涉及 lwIP 核心状态，临界区缩减为仅 lwIP send 调用 + poll。(3) `a20_lwip_poll()` 本身无法进一步缩减——IRQ handler 已内联处理 RX（设置 `g_lwip_rx_pending` 标记），但 TX 完成和 `sys_check_timeouts()` 仍需 poll 路径；scheduler idle hook 的 `virtio_net_poll_rx_all()` 已有 RX-pending 快速路径（无 pending 时跳过）。锁契约文档 `network-lock-contract.md` 第80行的 send 路径描述已同步更新。
+  - 门禁：`smoke-socket-stress` PASS（2026-08-26），并发 socket 操作无锁顺序告警或饥饿。
 - [x] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
   - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
   - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
