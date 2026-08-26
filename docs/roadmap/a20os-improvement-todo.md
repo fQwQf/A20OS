@@ -136,9 +136,10 @@
   - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
   - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
   - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
-- [ ] 扩展现有网络 smoke，使关键语义不依赖可跳过项并覆盖 partial I/O/error path。
-  - 当前证据：`smoke-network-suite` 已存在，RISC-V64 单核运行 `network_suite`；聚合 DNS、TCP/UDP/ICMP loopback、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可返回 77 跳过。
-  - 完成条件：现有场景稳定不可跳过，partial I/O 与 error-path 有独立断言，并增加其他架构运行入口。
+- [x] 扩展现有网络 smoke，使关键语义不依赖可跳过项并覆盖 partial I/O/error path。
+  - 证据：`smoke-network-suite` 已存在，RISC-V64 单核运行 `network_suite`；聚合 DNS、TCP/UDP/ICMP loopback、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可返回 77 跳过。
+  - 已落地：新增 `tcp_edge_test` 作为不可跳过场景（partial-io 短读流完整性 / ECONNREFUSED 无监听端口 / EPIPE 对端关闭后写）；内核按 Linux ABI 将"曾建立连接的流套接字在端点消亡后的写"映射为 EPIPE（此前经无连接兜底路径错误地返回 ECONNREFUSED），覆盖本机快速路径与远程 dead-pcb 两种形态；新增 `smoke-network-suite-aarch64` 其他架构运行入口并修复两个预先存在的 aarch64 构建缺陷（`g_vinput_pdev` 声明守卫、native 用户态缺 `-mno-outline-atomics`）。
+  - 门禁：`make smoke-network-suite`（riscv64）与 `make smoke-network-suite-aarch64` 均 PASS（7 passed, 1 skipped，alg 合法跳过）。
 
 ## P1：VFS 与文件系统语义
 
