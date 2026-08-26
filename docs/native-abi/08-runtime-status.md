@@ -105,16 +105,17 @@ A20OS 没有 fork。`task_clone` 是能力安全的"子进程续体"原语：
 
 Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dynamic()` 的 Native descriptor + conventional auxv 封装；剩余工作主要是把该路径与 mlibc rtld/共享库构建联调并形成测试，而非从零实现 loader：
 
-| 工作项 | 内容 | 预估 |
+| 工作项 | 内容 | 状态（2026-08） |
 |--------|------|------|
-| 内核：native 二进制 PT_INTERP | `elf_setup_stack_a20_dynamic()` 已存在；仍需端到端验证 | 已有源码，待验证 |
-| 启动协议：auxv | dynamic path 已生成 conventional stack/auxv，并另传 start_info 指针 | 已有源码，待 rtld 联调 |
-| 文件映射窗口 | mlibc rtld 需要 `sys_vm_map` 文件回映射：native `vm_map` 入口存在，需验证 demand fault 对文件 VMA 的填充 | 中（内核 MM 联调是主要风险） |
-| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so` 链接脚本（PT_DYNAMIC、GOT/PLT） | 小 |
-| TLS 动态模型 / dlopen | rtld 全部现成，sysdeps 只需 vm_map/vm_protect/文件读取 | 小-中 |
-| 总计 | | 仍是估算项；当前没有可据此承诺的完成周期 |
+| 内核：native 二进制 PT_INTERP | `elf_setup_stack_a20_dynamic()` + 解释器加载/入口切换 | ✅ 已验证：`smoke-native-dynlink`（fakeld 探针经 PT_INTERP 加载、校验 auxv 后回跳应用） |
+| 启动协议：auxv | conventional stack/auxv（AT_BASE/AT_ENTRY/AT_PHDR…），start_info 经 a0 传递给解释器并由其转发 | ✅ 已验证（同上）；AT_PHDR 计算修正为「首 LOAD 的 vaddr−offset+e_phoff」 |
+| 文件映射窗口 | demand fault 对文件 VMA 的填充 | ✅ 已验证：test_native_mm 分区 7（path_open→vm_map FILE→按需调页校验 ELF magic） |
+| 头部页背书（联调中发现并修复） | 首 LOAD 头部半页此前零填充，ELF 头/phdr 表不落内存，AT_PHDR 悬空 | ✅ 已修复：lazy 与 eager 两条加载路径均回填前置文件字节 |
+| mlibc 共享库构建 | `-Ddefault_library=both`，ld.so 与 `libc.so`（PT_DYNAMIC、GOT/PLT） | ⬜ 未执行（估列小；所需内核原语均已验证） |
+| TLS 动态模型 / dlopen | rtld 全部现成，sysdeps 只需 vm_map/vm_protect/文件读取 | 小-中（估列） |
+| 总计 | 内核侧已就绪并通过探针冒烟；剩余为 mlibc rtld 制品与应用级联调 | 可据此启动 rtld 联调排期 |
 
-设计注意：静态 Native 程序不需要 PT_INTERP；动态路径已有内核封装，但 mlibc 动态制品和 smoke 尚未交付。
+设计注意：静态 Native 程序不需要 PT_INTERP。动态探针采用自定义最小解释器（fakeld）验证内核全链路；mlibc 动态制品（ld.so/libc.so）与真实 rtld 应用联调仍为后续排期项。
 
 ### 6. 空转机制接入与缺失实现补齐（已完成）
 
@@ -139,7 +140,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
 - `event_watch_fs` 的路径前缀过滤（`path` 字段）未实现，仅目录级 watch。
 - VMO 映射已是**按需调页**：`vmar_map` 只建立 `VM_VMO` VMA，页面在首次 fault 时经核心 `handle_demand_fault_locked` 的 VMO 分支按 `vmo_get_page()` 物化；VMO 帧由 VMO 自身持有（类比 page-cache 帧），fork 时父子共享同一批 canonical 帧而非 COW。文件映射走核心 `mm_mmap_file`，经 page cache 需求填充。
-- 仍缺：VMAR 不是层级模型；`vm_protect` 的 `vmar_cap` 已落地但完整 VMAR 树未做；`vm_lock` 仍只是 VMA flag；`vm_share` 的旧三参形式保留（新结构化形式为 `vm_share_region`）。
+- ~~仍缺层级 VMAR~~ 层级 VMAR 树已落地（04-memory §3.1：`A20_SYS_vm_create_vmar` + `vm_map` 路由 + `vmar_cap` 印章）；`vm_lock` 仍只是 VMA flag；`vm_share` 的旧三参形式保留（新结构化形式为 `vm_share_region`）。
 - 性能未实测（研究文档 05 的 G1–G7 阈值仍待验证）；静态能力流分析工具未实现。
 
 ## 路线图
@@ -167,7 +168,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 - ~~**VMAR 子树化**~~ **已落地（2026-08）**：`vmar_t` 保留区间树 + `A20_SYS_vm_create_vmar(0x030a)` + `vm_map` E-APPEND 路由字段；天花板经 `vmar_cap` 印章在 protect 路径持续生效（04-memory §3.1）。回归：test_native_mm 第 6 分区（重叠拒绝/上限拒绝/定点映射/cap 印章）。
 - ~~**信号 EventQ 化**~~ **已落地（2026-08）**：`signal_queue_task` 在既有 checkpoint 挂钩旁同步推送 `A20_EVENT_SIGNALED` 事件（signo 走 `data0`，复用现有 pending_event 载荷字段、无需结构演进），TASK/THREAD 两类 watch 皆通知；`a20_task_watch_signals` 包装器就绪，回归见 test_native_deepen 分区 8。mlibc 阻塞路径继续走 checkpoint（futex INTERRUPTED），EventQ 面向监督者/sigwait 式消费推送；CPU 密集循环的完全异步派发仍为文档化限制。
-- **动态链接联调**：内核 PT_INTERP 封装与 conventional auxv 已就绪（见 §8a），剩余为 mlibc rtld 共享库构建与 `sys_vm_map` 文件回映射验证。
+- ~~**动态链接联调**~~ **内核侧已落地（2026-08）**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
 
 ## 与用户决策的对应关系
 
