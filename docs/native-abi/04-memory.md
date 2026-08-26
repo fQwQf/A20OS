@@ -96,7 +96,16 @@ VMO 的核心属性可以形式化为四元组：
 
 ### 3.1 定义
 
-当前内核不分配 `a20_vmar_t`。Native VMAR 操作直接作用于核心 `vm_area_t`，与后端相关的字段可简化为：
+**层级 VMAR（2026-08 落地）**：核心对象 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）
+维护保留区间树——子节点区间必须落在父节点内且与兄弟不相交；能力天花板
+（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射会把天花板写入 VMA 的
+`vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall：
+`A20_SYS_vm_create_vmar (0x030a)` 创建根（parent=NULL）或子节点并发布
+`A20_OBJ_VMAR` 句柄；`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由
+（含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚）。关闭句柄仅减引用：子节点
+持有父引用，树随最后一个引用消亡。
+
+Native VMAR 操作的地址空间语义仍直接作用于核心 `vm_area_t`，与后端相关的字段可简化为：
 
 ```c
 typedef struct vm_area {
@@ -131,7 +140,8 @@ $$VMAR = ([base, base+len), prot, backing)$$
 | `A20_VMAR_CAN_MAP_EXEC` | 允许映射为可执行 |
 | `A20_VMAR_CAN_MAP_SPECIFIC` | 允许在指定地址映射 |
 
-这些常量存在于用户 ABI 头中，但当前 `a20_vmar_map()` 忽略传入 `flags`，也不保存可用于后续 `vm_protect` 的 VMAR capability mask。
+这些常量即 `vm_create_vmar` 的 `flags` 天花板位与 `vm_map` 路由的授权依据；
+定点映射（MAP_FIXED）额外要求 `SPECIFIC` 位。
 
 ---
 
