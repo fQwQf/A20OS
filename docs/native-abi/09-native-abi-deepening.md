@@ -224,10 +224,10 @@ typedef struct a20_task_mem_args {
 |----|------|------|
 | `thread_create` 返回类型 | 返回 TASK handle | 引入 `A20_OBJ_THREAD`（02 §4.2 已有编号），thread_create 返回 THREAD；`debug_read_regs` 等接受 THREAD 目标 |
 | `task_wait` flags | 忽略 flags | 支持 `A20_TASK_WAIT_NONBLOCK` / 按 task 集合等待 |
-| `handle_stat` 非文件类型 | 全零结构 | 按类型填：MEMORY→size、CHANNEL→msg_count 等 |
+| `handle_stat` 非文件类型 | ~~全零结构~~ **已落地**：MEMORY→total_blocks=size/4096、CHANNEL_ENDPOINT→total_files=msg_count，FILE/DIR 维持 block_size |
 | `namespace` 强制 | `ns_apply` 只写字段 | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
 | `event_watch_fs` 路径过滤 | 无 | 前缀匹配（本期后） |
-| `clock_set` | 恒 PERM | 支持特权（ADMIN 或 ns）时设置 |
+| `clock_set` | ~~恒 PERM~~ **已落地**：安全标签 0（system）可设 CLOCK_REALTIME；monotonic 拒绝 INVALID_ARGUMENT |
 
 ## 9. 演进与兼容
 

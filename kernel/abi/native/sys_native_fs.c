@@ -400,13 +400,31 @@ int64_t sys_a20_fs_stat(const a20_syscall_args_t *args)
     a20_fs_stat_t fs;
     memset(&fs, 0, sizeof(fs));
 
-    if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DIRECTORY) {
+    switch (entry.type) {
+    case A20_OBJ_FILE:
+    case A20_OBJ_DIRECTORY: {
         int gfd = (int)(uintptr_t)entry.object;
         vfile_t *vf = vfs_get_file_ref(gfd);
-        if (vf && vf->vnode) {
+        if (vf && vf->vnode)
             fs.block_size = 4096;
-        }
-        if (vf) vfs_put_file_ref(gfd, vf);
+        if (vf)
+            vfs_put_file_ref(gfd, vf);
+        break;
+    }
+    case A20_OBJ_MEMORY: {
+        struct vmo *vmo = (struct vmo *)entry.object;
+        fs.block_size = 4096;
+        fs.total_blocks = vmo->size / 4096;
+        break;
+    }
+    case A20_OBJ_CHANNEL_ENDPOINT: {
+        a20_channel_ep_t *ep = (a20_channel_ep_t *)entry.object;
+        fs.block_size = 4096;
+        fs.total_files = ep->msg_count;
+        break;
+    }
+    default:
+        break;
     }
     a20_object_release(entry.object, entry.type);
 
