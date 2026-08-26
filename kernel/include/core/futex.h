@@ -1,0 +1,85 @@
+#ifndef _CORE_FUTEX_H
+#define _CORE_FUTEX_H
+
+#include <stdint.h>
+
+/*
+ * Kernel-internal Linux-compatible futex constants and the ABI-agnostic
+ * user futex engine API (kernel/ipc/futex.c).
+ *
+ * The wire values intentionally match the Linux ABI; the ABI layer
+ * re-exports them (abi/linux/futex.h).  Internal code must include this
+ * header, never anything under abi/.
+ */
+
+#define FUTEX_WAIT         0
+#define FUTEX_WAKE         1
+#define FUTEX_FD           2
+#define FUTEX_REQUEUE      3
+#define FUTEX_CMP_REQUEUE  4
+#define FUTEX_WAKE_OP      5
+#define FUTEX_LOCK_PI      6
+#define FUTEX_UNLOCK_PI    7
+#define FUTEX_TRYLOCK_PI   8
+#define FUTEX_WAIT_BITSET  9
+#define FUTEX_WAKE_BITSET  10
+#define FUTEX_WAIT_REQUEUE_PI  11
+#define FUTEX_CMP_REQUEUE_PI   12
+#define FUTEX_CMD_MASK     0x7F
+#define FUTEX_PRIVATE_FLAG 0x80
+#define FUTEX_CLOCK_REALTIME 0x100
+#define FUTEX_BITSET_MATCH_ANY 0xffffffffU
+
+/* futex_waitv(2) */
+#define FUTEX_WAITV_MAX        128
+#define FUTEX_WAITV_FLAG_BITSET 0x1
+#define FUTEX_WAITV_BITSET_MASK 0xffffff00U
+
+#define FUTEX_OP_SET            0
+#define FUTEX_OP_ADD            1
+#define FUTEX_OP_OR             2
+#define FUTEX_OP_ANDN           3
+#define FUTEX_OP_XOR            4
+#define FUTEX_OP_OPARG_SHIFT    8
+#define FUTEX_OP_CMP_EQ         0
+#define FUTEX_OP_CMP_NE         1
+#define FUTEX_OP_CMP_LT         2
+#define FUTEX_OP_CMP_LE         3
+#define FUTEX_OP_CMP_GT         4
+#define FUTEX_OP_CMP_GE         5
+
+#define FUTEX_WAITERS    0x80000000U
+#define FUTEX_OWNER_DIED 0x40000000U
+#define FUTEX_TID_MASK   0x3fffffffU
+#define ROBUST_LIST_LIMIT 2048
+
+struct robust_list {
+    uintptr_t next;
+};
+
+struct robust_list_head {
+    struct robust_list list;
+    uint64_t futex_offset;
+    struct robust_list *list_op_pending;
+};
+
+struct task_t;
+
+/* Core user-futex engine (kernel/ipc/futex.c). */
+int futex_wait(int *uaddr, int expected, void *timeout, uint32_t bitset,
+               int absolute_timeout, int realtime_timeout);
+int futex_wake(int *uaddr, int nr, uint32_t bitset, int private);
+int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
+                  int check_cmp, int cmpval, int private);
+int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr, int *uaddr2,
+                  int encoded_op, int private);
+int futex_pi_acquire(int *uaddr, int try_only);
+int futex_pi_release(int *uaddr);
+int futex_timeout_ticks(void *timeout, int absolute, int realtime,
+                        uint64_t *ticks_out);
+int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks,
+                     uint32_t bitset);
+
+void exit_robust_list(struct task_t *t);
+
+#endif /* _CORE_FUTEX_H */
