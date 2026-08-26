@@ -1,5 +1,5 @@
 smoke-riscv64:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv64-bringup.log"; \
@@ -83,7 +83,7 @@ smoke-iommu-udriver-isolation:
 	fi
 
 smoke-loongarch64:
-	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/loongarch64-bringup.log"; \
@@ -105,7 +105,7 @@ smoke-loongarch64:
 	fi
 
 smoke-aarch64:
-	$(MAKE) ARCH=aarch64 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=aarch64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/aarch64-bringup.log"; \
@@ -128,7 +128,7 @@ smoke-aarch64:
 	fi
 
 smoke-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=x86_64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/x86_64-bringup.log"; \
@@ -152,7 +152,7 @@ smoke-x86_64:
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
 smoke-smp-bringup:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv64-smp2-bringup.log"; \
@@ -238,7 +238,7 @@ smoke-qemu-gui-loongarch64:
 		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
 smoke-arm32:
-	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/arm32-bringup.log"; \
@@ -260,7 +260,7 @@ smoke-arm32:
 	fi
 
 smoke-riscv32:
-	$(MAKE) ARCH=riscv32 ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=riscv32 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv32-bringup.log"; \
@@ -329,7 +329,7 @@ smoke-arch-mmu-matrix:
 	done
 
 smoke-ppc64le:
-	$(MAKE) ARCH=ppc64le ABI=linux BRINGUP=1 kernel-only
+	$(MAKE) ARCH=ppc64le ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/ppc64le-bringup.log"; \
