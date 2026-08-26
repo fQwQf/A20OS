@@ -10,6 +10,7 @@
 #include "core/consts.h"
 #include "core/version.h"
 #include "core/timekeeping.h"
+#include "core/mman.h"
 #include "core/timer.h"
 #include "core/random.h"
 #include "trap_frame.h"
@@ -357,6 +358,23 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     return A20_OK;
 }
 
+/* A20_ERR <-> Linux errno mapping for core mm calls (mm/mremap.c et al). */
+static int64_t a20_mm_errno_map(int r)
+{
+    switch (r) {
+    case -EINVAL: return -A20_ERR_INVALID_ARGUMENT;
+    case -ENOMEM: return -A20_ERR_NO_MEMORY;
+    case -EFAULT: return -A20_ERR_FAULT;
+    case -EPERM:  return -A20_ERR_PERM;
+    default:      return -A20_ERR_INVALID_ARGUMENT;
+    }
+}
+
+/*
+ * vm_remap is VMA-aware: grow/shrink/move preserve file mappings and
+ * shared VMO frames (docs/native-abi/09-… §8 vm_remap row).  prot, when
+ * non-zero, re-applies protection over the resulting range.
+ */
 int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
 {
     uint64_t old_addr = A20_ARG(0);
@@ -369,41 +387,25 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     if (new_len > (256ULL << 20) || old_len > (256ULL << 20))
         return -A20_ERR_INVALID_ARGUMENT;
 
-    if (new_len <= old_len) {
-        if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
-            return -A20_ERR_FAULT;
-        if (new_len < old_len)
-            proc_munmap(old_addr + new_len, (size_t)(old_len - new_len));
-        return (int64_t)old_addr;
-    }
-
+    task_t *cur = proc_current();
+    if (!cur || !cur->mm) return -A20_ERR_FAULT;
     if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
         return -A20_ERR_FAULT;
 
-    uint64_t new_addr = proc_mmap(new_addr_hint, (size_t)new_len,
-                                   (int)prot ? (int)prot : 3,
-                                   0x20 /* MAP_ANONYMOUS */, -1, 0);
-    if (new_addr == 0 || mm_addr_is_error((vaddr_t)new_addr))
-        return -A20_ERR_NO_MEMORY;
+    vaddr_t out = 0;
+    int r = mm_mremap(cur->mm, (vaddr_t)old_addr, (size_t)old_len,
+                      (size_t)new_len, MREMAP_MAYMOVE,
+                      (vaddr_t)new_addr_hint, &out);
+    if (r < 0)
+        return a20_mm_errno_map(r);
 
-    char kbuf[512];
-    uint64_t done = 0;
-    while (done < old_len) {
-        size_t chunk = old_len - done;
-        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-        if (copy_from_user(kbuf, (const void *)(uintptr_t)(old_addr + done), chunk) < 0 ||
-            copy_to_user((void *)(uintptr_t)(new_addr + done), kbuf, chunk) < 0) {
-            proc_munmap(new_addr, (size_t)new_len);
-            return -A20_ERR_FAULT;
-        }
-        done += chunk;
+    if (prot && new_len) {
+        int pr = mm_mprotect(cur->mm, out, (size_t)new_len, (int)prot);
+        if (pr < 0)
+            return a20_mm_errno_map(pr);
     }
-    if (old_len > 0)
-        proc_munmap(old_addr, (size_t)old_len);
-
-    return (int64_t)new_addr;
+    return (int64_t)out;
 }
-
 
 int64_t sys_a20_vm_lock(const a20_syscall_args_t *args)
 {

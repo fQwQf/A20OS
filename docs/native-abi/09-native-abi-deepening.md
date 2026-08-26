@@ -229,7 +229,7 @@ typedef struct a20_task_mem_args {
 | `event_watch_fs` 路径过滤 | 无 | 前缀匹配（本期后） |
 | `clock_set` | ~~恒 PERM~~ **已落地**：安全标签 0（system）可设 CLOCK_REALTIME；monotonic 拒绝 INVALID_ARGUMENT |
 | EventQ 电平模式 | 事件为边沿触发，`handle_poll` 提供电平快照 | **设计方案（已批准待实现）**：`event_watch` args 按 E-APPEND 追加 `flags`，bit0=`A20_WATCH_LEVEL`；watch 记录保存 level 位；等待侧 park 前对 level watch 先做一轮就绪查询（复用 `handle_poll` 对象分派），就绪即返回、不投递边沿事件。回归：test_native_ipc 增加 level/edge 对照分区。 |
-| `vm_remap` 语义委托 | ABI 层"新建匿名区+字节拷贝" | **设计方案（已批准，独立评审变更）**：改调 `mm_mremap(MREMAP_MAYMOVE)` 以保留 VMA 语义（文件映射/共享帧不再丢失）；新增 A20_ERR↔Linux errno 映射助手；prot 映射为 remap 后 mprotect；256MB 上限与对齐校验留在 ABI。回归：smoke-mm-stress + 新增 native remap 文件映射用例。 |
+| `vm_remap` 语义委托 | ~~"新建匿名区+字节拷贝"~~ **已落地**：改调 `mm_mremap(MREMAP_MAYMOVE)`，VMA 语义保留（文件映射/共享帧不丢失）；`a20_mm_errno_map` 完成 A20_ERR↔Linux errno 映射；prot≠0 时对结果区间 mm_mprotect；256MB 上限与范围校验留在 ABI |
 
 ## 9. 演进与兼容
 
