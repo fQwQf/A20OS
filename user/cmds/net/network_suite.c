@@ -13,6 +13,7 @@ typedef struct {
 static const test_case_t tests[] = {
     { "dns_test",          "dns_test localhost",       1 },
     { "tcp_loopback_test", "tcp_loopback_test",        0 },
+    { "tcp_edge_test",     "tcp_edge_test",            0 },
     { "udp_loopback_test", "udp_loopback_test",        0 },
     { "icmp_loopback_test","icmp_loopback_test",       0 },
     { "unix_test",         "unix_test",                0 },
