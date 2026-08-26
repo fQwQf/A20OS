@@ -126,3 +126,55 @@ Wayland 桌面：labwc/wlroots 完成 1024x768 modeset、面板 layer surface
 零 LOCK-STALL、零 GLib abort。README 所述能力在这些修复之后才真正成立；
 剩余差距集中在缩略图守护进程挂起、udev 规则引擎完整性与 peer 凭证数据面
 三处，均有明确的下一步定位手段。
+
+
+## 第二轮排查增补（同日，追踪器就位后）
+
+为定位遗留问题新增了 `trace=<comm>` 系统调用追踪器（commit 690c6b5b3）。
+用它把三个遗留问题各向前推进了一步：
+
+### tumblerd 挂起的真实形态
+
+追踪显示 tumblerd 并非死锁：主线程在 TCG 下用数分钟逐个 dlopen 完
+gstreamer/curl 依赖树（libnghttp2 → libcares → libidn2 → libunistring …），
+gdbus/gmain/pool-spawner 三个工作线程随后全部进入**正常空闲等待**
+（ppoll/futex）。也就是说服务已初始化完毕并连上总线，但 dbus-daemon 的
+激活关联始终没有完成 —— 120s 超时只是表象。两个叠加因素：
+
+1. 初始化耗时超过上游默认窗口。session.conf 的 limits 位于文件末尾、在
+   `<includedir>` 之后解析，drop-in 无法覆盖该值（dbus 合并顺序决定），
+   因此 overlay 直接替换 session.conf 将 `service_start_timeout` 提升到
+   600000ms（commit 24c8bd751）。
+2. dbus-daemon 通过 peer 凭证（pid / pidfd）把新连接与挂起的激活关联；
+   A20OS 上该凭证读取返回 pid=-1（见下），关联可能因此失败。修复方向：
+   在 accepted 连接上完整填充 SCM_CREDENTIALS/SO_PEERCRED 数据面，或让
+   SO_PEERPIDFD 返回与 spawn pid 一致的句柄。
+
+### udevd worker 超时的定位
+
+worker 最终都阻塞在 `epoll_pwait`（追踪器 2480 条 slow 报告集中在该调用，
+其余为正常的规则文件加载）。eudev worker 通过控制 socket（SOCK_SEQPACKET）
+的 epoll 就绪等待下一条指令；结合 known-issues 中 dbus 对 SOCK_SEQPACKET
+大消息的怀疑，指向同一处内核缺口：**AF_UNIX SOCK_SEQPACKET 的就绪传播/消息
+边界语义不完整**。这是下一个值得攻坚的单点。
+
+### elogind/cgroup 的精确阻塞点
+
+内核侧 cgroupfs 与 `/sys/fs/cgroup` 锚点目录均已补齐（efbd92df1），overlay
+init 也已尝试 cgroup2 挂载。实测 userspace 的 mount(2) 仍未到达内核
+（vfs_mount 无对应日志）：elogind/util-linux 先做 mountpoint 探测
+（依赖 /proc/self/mountinfo）并以 `/proc/self/fd/N` 魔法链接作为挂载目标，
+两者在 A20OS procfs 上尚不完整。剩余工作：mountinfo 渲染 + 挂载目标解析
+跟随魔法链接。
+
+### 教训：模块符号白名单
+
+virtio-blk 以 `.a20drv` ET_REL 模块加载，其外部符号只能解析 drv_export_table
+白名单。调试探针若在模块内引用白名单外符号（如 bootargs_get），模块加载
+-22 失败、块设备消失、init 找不到 /bin 直接 panic——修改 drivers/block 下
+代码时务必检查 framework.c 的导出表。
+
+## 当前状态
+
+两轮 600s 干净镜像浸泡（soakA/此前 final1）：零 panic、零 LOCK-STALL、
+零 GLib abort，桌面持续渲染。遗留问题均有明确根因假设与下一步手段。
