@@ -222,7 +222,7 @@ typedef struct a20_task_mem_args {
 
 | 项 | 现状 | 深化 |
 |----|------|------|
-| `thread_create` 返回类型 | 返回 TASK handle | 引入 `A20_OBJ_THREAD`（02 §4.2 已有编号）。**落地计划（2026-08 设计冻结）**：① proc_create_thread 发布 THREAD 类型 handle；② 全部 TASK 类型查找点改为接受 THREAD∪TASK：task_wait/kill/info、handle_poll 退出检查、debug 分区目标解析（kernel/proc/debug.c）；③ liba20rt/a20_types.h 与 mlibc sysdeps 同步；④ 回归矩阵：test_native_handle/contract/debug + smoke-native-ipc/mlibc-fork。风险点：NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX 的 STAT 掩码一致性分区。 |
+| `thread_create` 返回类型 | ~~返回 TASK handle~~ **已落地**：proc_create_thread 发布专用 `A20_OBJ_THREAD`（02 §4.2 编号）；全部 task 类查找点经 `a20_handle_lookup_*_task_like` 接受 THREAD∪TASK（task_wait/kill/info/sched/limits、debug 目标、vm/pager/security 目标；handle_poll 原生双类型）；THREAD 权限天花板与 TASK 对齐（WAIT/SIGNAL/ADMIN 等，join 与 debug_attach 可用）。fork/exec 主任务句柄保持 TASK。回归：smoke-native-handle/contract/ipc + smoke-mlibc-fork 全 PASS |
 | `task_wait` flags | ~~忽略 flags~~ **已落地（05854979a）**：A20_TASK_WAIT_NONBLOCK 映射 WNOHANG，未知位拒绝；按 task 集合等待待需求明确后设计 |
 | `handle_stat` 非文件类型 | ~~全零结构~~ **已落地**：MEMORY→total_blocks=size/4096、CHANNEL_ENDPOINT→total_files=msg_count，FILE/DIR 维持 block_size |
 | `namespace` 强制 | `ns_apply` 只写字段 | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
