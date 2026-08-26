@@ -4,6 +4,7 @@
  * This file is part of the mechanically split Native Phase 2 ABI.
  * See sys_phase2.c for shared helpers and forward declarations.
  */
+#include "ipc/ipc.h"
 #include "core/types.h"
 #include "core/defs.h"
 #include "core/string.h"
@@ -87,6 +88,13 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
     struct a20_ht_internal *tht = task_get_a20_ht(target);
     if (tht)
         a20_ht_sig_pend(tht, sig);
+    /* Signals also surface as EventQ events (08-runtime-status deep-water
+     * #2): signo rides data0.  Watch keys are pid-as-pointer under both
+     * TASK and THREAD types, so notify both. */
+    a20_event_notify((void *)(uintptr_t)target->pid, A20_OBJ_TASK,
+                     A20_EVENT_SIGNALED, (uint64_t)sig, 0);
+    a20_event_notify((void *)(uintptr_t)target->pid, A20_OBJ_THREAD,
+                     A20_EVENT_SIGNALED, (uint64_t)sig, 0);
     proc_interrupt_wait(target, PROC_WAKE_SIGNAL);
     proc_put(target);
     return A20_OK;
