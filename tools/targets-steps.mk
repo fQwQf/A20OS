@@ -313,7 +313,7 @@ smoke-socket-stress:
 	fi
 
 smoke-driver-lifecycle:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y USER_BUILD_DESKTOP=0 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/driver-lifecycle-riscv64.log"; \
