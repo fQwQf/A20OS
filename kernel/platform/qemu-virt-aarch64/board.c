@@ -2,7 +2,9 @@
 
 #include "drivers/core/driver_core.h"
 #include "core/arch.h"
+#include "core/bootargs.h"
 #include "core/smp.h"
+#include "core/stdio.h"
 #include "core/timer.h"
 #include "firmware.h"
 
@@ -126,9 +128,26 @@ static const smp_platform_ops_t aa64_smp_ops = {
 static void aa64_early_init(void) {
 }
 
-/* This board does not yet import QEMU's FDT /chosen/bootargs.  Keep the
- * userspace network regression path deterministic until that handoff exists. */
+/* QEMU -kernel hands the DTB in x0 (Linux boot protocol); entry.S stashes it
+ * in aarch64_boot_dtb.  Prefer /chosen/bootargs from the DTB; fall back to
+ * the deterministic slirp defaults when the FDT carries no command line. */
+extern uint64_t aarch64_boot_dtb;
+
 const char *arch_bootargs_get(void) {
+    static char buf[1024];
+    static int ready;
+
+    if (!ready) {
+        buf[0] = '\0';
+        uint64_t dtb_pa = aarch64_boot_dtb;
+        if (dtb_pa &&
+            fdt_extract_bootargs((const void *)(dtb_pa + PAGE_OFFSET),
+                                 buf, sizeof(buf)) == 0)
+            printf("[FDT] bootargs='%s'\n", buf);
+        ready = 1;
+    }
+    if (buf[0])
+        return buf;
     return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
            "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
            "a20.hostname=a20os-qemu";

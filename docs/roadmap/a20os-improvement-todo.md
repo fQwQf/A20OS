@@ -134,9 +134,11 @@
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
   - 设计：`docs/net/network-lock-contract.md`。
   - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
-- [ ] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
+- [x] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
   - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
   - 设计：`docs/net/network-config-design.md`；用户决策：只使用命令行 / 运行时配置，不使用编译期板级默认值。
+  - 已落地（2026-08-26）：FDT `/chosen/bootargs` 提取提升为共享实现 `kernel/core/fdt_bootargs.c`（riscv64 复用同一函数）；aarch64 入口保存 x0 固件交接值到 `aarch64_boot_dtb`，qemu-virt-aarch64 优先采用 DTB bootargs、缺失时回退到板级 slirp 默认值。实证记录：QEMU 10 的 aarch64 ELF `-kernel` 路径不在 guest RAM 放置 DTB 也不置 x0（gdbstub 探测 x0=0x0、全 RAM 扫描无 FDT magic），导入路径面向将来 Image/链式引导的向前兼容；riscv64 FDT 导入与真实板（VisionFive2 的 DHCP 默认）路径不变。通用网络栈无任何 10.0.2.x 硬编码残留。
+  - 门禁：`smoke-network-suite`（riscv64）与 `smoke-network-suite-aarch64` 均 PASS。
   - 完成条件：真实开发板或非 QEMU 后端无需硬编码 QEMU 假设即可配置 IP、gateway 和 DNS。
 - [x] 扩展现有网络 smoke，使关键语义不依赖可跳过项并覆盖 partial I/O/error path。
   - 证据：`smoke-network-suite` 已存在，RISC-V64 单核运行 `network_suite`；聚合 DNS、TCP/UDP/ICMP loopback、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可返回 77 跳过。

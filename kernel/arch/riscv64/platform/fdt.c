@@ -4,6 +4,7 @@
 #include "core/consts.h"
 #include "core/string.h"
 #include "core/stdio.h"
+#include "core/bootargs.h"
 #include "firmware.h"
 #include "platform.h"
 #include "drivers/core/driver_core.h"
@@ -32,13 +33,6 @@ static uint64_t read_be64(const void *p)
 {
     return ((uint64_t)read_be32(p) << 32) |
            (uint64_t)read_be32((const uint8_t *)p + 4);
-}
-
-static const char *skip_name(const char *p)
-{
-    while (*p)
-        p++;
-    return p + 1;
 }
 
 extern uint64_t __boot_dtb_ptr;
@@ -304,83 +298,6 @@ void riscv64_memory_init(void)
            (unsigned long)riscv64_ram_end);
 }
 
-static int fdt_extract_bootargs(uint64_t dtb_pa, char *out, size_t outsz)
-{
-    if (!out || outsz == 0)
-        return -1;
-    out[0] = '\0';
-
-    if (dtb_pa == 0)
-        return -1;
-
-    const uint8_t *base = (const uint8_t *)dtb_pa;
-    if (read_be32(base) != FDT_MAGIC)
-        return -1;
-
-    uint32_t totalsize    = read_be32(base + 4);
-    uint32_t off_struct   = read_be32(base + 8);
-    uint32_t off_strings  = read_be32(base + 12);
-    (void)totalsize;
-
-    const uint8_t *structp  = base + off_struct;
-    const uint8_t *stringsp = base + off_strings;
-    const uint8_t *p = structp;
-
-    int depth = 0;
-    int in_chosen = 0;
-
-    for (;;) {
-        uint32_t token = read_be32(p);
-        p += 4;
-
-        if (token == FDT_END)
-            break;
-
-        switch (token) {
-        case FDT_BEGIN_NODE: {
-            const char *name = (const char *)p;
-            p = (const uint8_t *)skip_name(name);
-            /* Align to 4 bytes */
-            p = (const uint8_t *)(((uintptr_t)p + 3) & ~3UL);
-            depth++;
-            if (depth == 2 && strcmp(name, "chosen") == 0)
-                in_chosen = 1;
-            break;
-        }
-        case FDT_END_NODE:
-            if (depth == 2 && in_chosen)
-                in_chosen = 0;
-            depth--;
-            break;
-        case FDT_PROP: {
-            uint32_t len     = read_be32(p);
-            uint32_t nameoff = read_be32(p + 4);
-            p += 8;
-            const char *propname = (const char *)(stringsp + nameoff);
-            if (in_chosen && strcmp(propname, "bootargs") == 0) {
-                size_t n = len;
-                if (n > outsz - 1)
-                    n = outsz - 1;
-                memcpy(out, p, n);
-                out[n] = '\0';
-                return 0;
-            }
-            p += ((len + 3) & ~3U);
-            break;
-        }
-        case FDT_NOP:
-            break;
-        default:
-            return -1;
-        }
-
-        if (depth < 0)
-            break;
-    }
-
-    return -1;
-}
-
 const char *arch_bootargs_get(void)
 {
     static char bootargs_buf[1024];
@@ -390,7 +307,7 @@ const char *arch_bootargs_get(void)
         bootargs_buf[0] = '\0';
         uint64_t dtb = __boot_dtb_ptr;
         printf("[FDT] dtb_ptr=0x%lx\n", dtb);
-        if (dtb && fdt_extract_bootargs(dtb, bootargs_buf, sizeof(bootargs_buf)) == 0) {
+        if (dtb && fdt_extract_bootargs((const void *)(uintptr_t)dtb, bootargs_buf, sizeof(bootargs_buf)) == 0) {
             printf("[FDT] bootargs='%s'\n", bootargs_buf);
         } else {
             printf("[FDT] no bootargs extracted\n");
