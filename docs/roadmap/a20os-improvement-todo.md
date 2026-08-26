@@ -30,7 +30,9 @@
 - [x] ufsd 监管通道接入 EventQ 统一等待，替换 200µs 轮询。
   - 源码证据：`user/svc/ufsd.c` 的服务循环把 fs 通道（MESSAGE_READY/PEER_CLOSED）与监管 ping 槽位挂到同一 EventQ，空闲时阻塞在 `event_wait`，先排空后等待的顺序保留"watch 注册前已发布消息也要处理"的契约；ping 槽位未安装的启动方式（如 fs-all 冒烟里的多实例）降级为仅 fs 通道唤醒，与 rtcd 的 `have_ping` 先例一致。`make smoke-native-fs-all`、`smoke-native-svc`、`smoke-native-registry` 在 riscv64 PASS（当前提交）。
 - [ ] uxfs 文件读写接入内核页缓存（readpage/writepage 缓存路径），替代直通转发。
-- [ ] ntfs 写使能：先为内核 ntfs 写路径补齐在库正确性测试（当前全仓库零覆盖），再打开 ufsd ntfs 后端读写。
+- [x] ntfs 写使能：先为内核 ntfs 写路径补齐在库正确性测试（此前全仓库零覆盖），再打开 ufsd ntfs 后端读写。
+  - 源码证据：`user/svc/ufs_vnfs_backend.c` ntfs 分支 `g_readonly=0`；`user/cmds/core/ufs_all_test.c` test_ntfs 覆盖新建写读回/mkdir/嵌套读取/SIGKILL 重启持久化/unlink/rmdir。配套修复的内核 ntfs 缺陷：MFT 记录 IO 丢失簇内偏移（读写都定位到错误记录槽）、USA 数组与首属性重叠导致 fixup 破坏记录、索引项字段布局偏离规范（len/stream_len/flags 错位）、`read_directory` 计数遍历恒返回空、`$INDEX_ROOT`/`$Bitmap` 具名属性匹配失败、驻留 `$INDEX_ROOT`/`$DATA` 属性增长不后移后续属性、空闲记录扫描把未初始化槽位当 IO 错误。
+  - 验证：`make smoke-native-fs-all` 在 riscv64 PASS（当前提交）。
 - [ ] 托管设备序号的板级配置化：清单中 ufsd 的 block_index 目前是编译期约定，VF2/LS2K1000 等实机枚举不同。
 
 ## P0：并发与 SMP 就绪

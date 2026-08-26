@@ -207,26 +207,29 @@ int ntfs_read_record(ntfs_sb_t *sb, uint64_t index, uint8_t *rec)
 {
     memset(rec, 0, sb->mft_record_size);
     uint64_t byte_off = index * sb->mft_record_size;
-    uint64_t clusters = (sb->mft_record_size + sb->bytes_per_cluster - 1) /
-                        sb->bytes_per_cluster;
-    uint64_t vcn_base = byte_off / sb->bytes_per_cluster;
-    for (uint64_t i = 0; i < clusters; i++) {
+    uint64_t done = 0;
+    while (done < sb->mft_record_size) {
+        uint64_t abs = byte_off + done;
+        uint64_t vcn = abs / sb->bytes_per_cluster;
+        uint64_t off_in = abs % sb->bytes_per_cluster;
+        size_t chunk = sb->bytes_per_cluster - off_in;
+        if (chunk > sb->mft_record_size - done)
+            chunk = sb->mft_record_size - done;
         uint64_t lcn;
-        int r = ntfs_map_vcn(sb->mft_runs, sb->mft_run_count, vcn_base + i, &lcn);
+        int r = ntfs_map_vcn(sb->mft_runs, sb->mft_run_count, vcn, &lcn);
         if (r < 0)
             return -1;
-        if (r == 0)
-            continue;           /* sparse MFT cluster stays zeroed */
-        size_t chunk = sb->mft_record_size - i * sb->bytes_per_cluster;
-        if (chunk > sb->bytes_per_cluster)
-            chunk = sb->bytes_per_cluster;
-        if (bcache_read_bytes(sb->bc, lcn * sb->bytes_per_cluster,
-                              rec + i * sb->bytes_per_cluster, chunk) < 0)
+        if (r > 0 &&
+            bcache_read_bytes(sb->bc, lcn * sb->bytes_per_cluster + off_in,
+                              rec + done, chunk) < 0)
             return -1;
+        /* r == 0: sparse MFT cluster stays zeroed */
+        done += chunk;
     }
     if (memcmp(rec, "FILE", 4) != 0)
-        return -1;
-    ntfs_unfixup(rec, sb->bytes_per_sector, nget16(rec + 0x04), nget16(rec + 0x06));
+        return -2; /* readable but uninitialized slot: caller may allocate */
+    ntfs_unfixup(rec, sb->bytes_per_sector, nget16(rec + 0x04),
+                 nget16(rec + 0x06));
     return 0;
 }
 
@@ -239,25 +242,27 @@ int ntfs_write_record(ntfs_sb_t *sb, uint64_t index, uint8_t *rec)
     ntfs_fixup(fix, sb->bytes_per_sector, nget16(fix + 0x04), nget16(fix + 0x06));
 
     uint64_t byte_off = index * sb->mft_record_size;
-    uint64_t clusters = (sb->mft_record_size + sb->bytes_per_cluster - 1) /
-                        sb->bytes_per_cluster;
-    uint64_t vcn_base = byte_off / sb->bytes_per_cluster;
+    uint64_t done = 0;
     int result = 0;
-    for (uint64_t i = 0; i < clusters; i++) {
+    while (done < sb->mft_record_size) {
+        uint64_t abs = byte_off + done;
+        uint64_t vcn = abs / sb->bytes_per_cluster;
+        uint64_t off_in = abs % sb->bytes_per_cluster;
+        size_t chunk = sb->bytes_per_cluster - off_in;
+        if (chunk > sb->mft_record_size - done)
+            chunk = sb->mft_record_size - done;
         uint64_t lcn;
-        int r = ntfs_map_vcn(sb->mft_runs, sb->mft_run_count, vcn_base + i, &lcn);
+        int r = ntfs_map_vcn(sb->mft_runs, sb->mft_run_count, vcn, &lcn);
         if (r <= 0) {
             result = -1;
             break;
         }
-        size_t chunk = sb->mft_record_size - i * sb->bytes_per_cluster;
-        if (chunk > sb->bytes_per_cluster)
-            chunk = sb->bytes_per_cluster;
-        if (bcache_write_bytes(sb->bc, lcn * sb->bytes_per_cluster,
-                               fix + i * sb->bytes_per_cluster, chunk) < 0) {
+        if (bcache_write_bytes(sb->bc, lcn * sb->bytes_per_cluster + off_in,
+                               fix + done, chunk) < 0) {
             result = -1;
             break;
         }
+        done += chunk;
     }
     kfree(fix);
     return result;
@@ -340,7 +345,9 @@ int ntfs_resolve_data(ntfs_vnode_priv_t *fp)
     if (data) {
         if (data[8] == 0) {
             fp->data_resident = 1;
-            fp->data_res_off = nget16(data + 0x14);
+            /* Record-relative so fread/fwrite/convert can address the
+             * value directly; 0x14 itself is attribute-relative. */
+            fp->data_res_off = (uint32_t)(data - rec) + nget16(data + 0x14);
             fp->data_res_len = nget32(data + 0x10);
             fp->data_size = fp->data_res_len;
             result = 0;
@@ -384,7 +391,7 @@ int ntfs_load_bmap(ntfs_sb_t *sb, uint8_t **out, uint64_t *out_size)
         kfree(rec);
         return -1;
     }
-    uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_DATA, 1);
+    uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_DATA, 0);
     int result = -1;
     if (attr) {
         if (attr[8] == 0) {
@@ -392,7 +399,7 @@ int ntfs_load_bmap(ntfs_sb_t *sb, uint8_t **out, uint64_t *out_size)
             uint16_t voff = nget16(attr + 0x14);
             uint8_t *data = kmalloc(vlen);
             if (data) {
-                memcpy(data, rec + voff, vlen);
+                memcpy(data, attr + voff, vlen);
                 *out = data;
                 *out_size = vlen;
                 result = 0;
@@ -430,14 +437,14 @@ int ntfs_save_bmap(ntfs_sb_t *sb, uint8_t *data, uint64_t size)
         kfree(rec);
         return -1;
     }
-    uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_DATA, 1);
+    uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_DATA, 0);
     int result = -1;
     if (attr) {
         if (attr[8] == 0) {
             uint32_t vlen = nget32(attr + 0x10);
             uint16_t voff = nget16(attr + 0x14);
             if (vlen >= size) {
-                memcpy(rec + voff, data, size);
+                memcpy(attr + voff, data, size);
                 result = ntfs_write_record(sb, NTFS_MFT_REC_BITMAP, rec);
             }
         } else {
@@ -515,7 +522,14 @@ int64_t ntfs_find_free_record(ntfs_sb_t *sb, uint64_t start)
         return -1;
     uint64_t max_records = sb->mft_data_size / sb->mft_record_size;
     for (uint64_t i = start; i < max_records; i++) {
-        if (ntfs_read_record(sb, i, rec) < 0)
+        int r = ntfs_read_record(sb, i, rec);
+        if (r == -2) {
+            /* Zeroed/uninitialized MFT slot inside the allocated $MFT
+             * range: never used, hand it out. */
+            kfree(rec);
+            return (int64_t)i;
+        }
+        if (r < 0)
             continue;
         if (!(nget16(rec + 0x16) & NTFS_REC_IN_USE)) {
             kfree(rec);
