@@ -152,9 +152,10 @@
 - [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
   - 源码证据：path resolution、path、mount、file/vnode、dcache 和 stat/permission 已拆到 `kernel/fs/vfs/*.c`，并由 `kernel/include/fs/vfs/*.h` 提供窄接口；`kernel/fs/vfs.c` 仍保留 open/close、初始化及兼容入口，后续还可继续缩小。
   - 完成条件：每个单元都有窄 header 契约和子系统特定测试。
-- [ ] 尽可能从通用 VFS 路径中移除硬编码运行时文件系统初始化。
+- [x] 尽可能从通用 VFS 路径中移除硬编码运行时文件系统初始化。
   - 证据：`kernel/fs/vfs.c` 在 VFS bringup 期间初始化默认虚拟文件和类似环境的内容。
   - 设计：`docs/fs/fs-consistency-model.md`（ramfs / rootfs 一致性模型）；用户决策：构建期 rootfs overlay / initramfs 风格用户态镜像构造。
+  - 分析结论（2026-08-26）：目标架构已落地——内容全部来自构建期生成：`tools/gen_rootfs_overlay.py` 把目录树生成为 `kernel/fs/rootfs_overlay.c` 中的 `g_rootfs_overlay[]` 表（regen-rootfs-overlay 目标驱动），`ramfs_populate_overlay()` 只做表项安装。vfs_init 其余职责（挂载 rootfs/devfs/procfs/sysfs、创建 /tmp、安装标准流）是不可约减的早期启动职责——无持久 rootfs 镜像可先于内核存在。唯一残留硬编码内容是 `CONFIG_RAMFS_USER` 下的 `/bin/sh → /bin/mksh` 默认链接（一条便捷默认值）。无可移除项，按"已满足"关闭。
   - 完成条件：策略文件迁移到 init/userland image 构造，或迁移到声明式启动文件系统 manifest。
 - [x] 为 FAT32、ext4、ramfs、devfs、procfs、sysfs、pipe 和 anonfd 操作定义清晰的一致性模型。
   - 文档证据：`docs/fs/fs-consistency-model.md` 逐后端记录读写、namespace、缓存、持久化和不支持操作边界；这表示模型文档已建立，不表示 Linux path/metadata ABI 已达到 full。
