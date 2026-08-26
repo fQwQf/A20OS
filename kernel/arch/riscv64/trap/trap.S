@@ -280,6 +280,34 @@ __return_to_user:
  */
 	.align 2
 __trap_from_kernel:
+#ifndef CONFIG_NOMMU
+    /* Stack-pointer guard FIRST -- before any store touches the possibly-
+     * corrupted sp.  Kernel stacks live in the direct map at/above
+     * PAGE_OFFSET; a trap arriving below it would otherwise fault inside
+     * this save path and spin forever with a drifting sp.
+     * t5/t6 carry the stash pointer / comparison base across the check and
+     * are restored from the stash on the good path.  Limitation: the stash
+     * is a single instance -- simultaneous traps on multiple harts racing
+     * these instructions could cross-restore stale values (accepted for a
+     * fatal-path guard).
+     * Violation path: report from the emergency stack (noreturn). */
+    la      t5, .Lkf_sp_stash
+    sd      sp, 0(t5)
+    sd      t6, 8(t5)
+    /* PAGE_OFFSET (platform.h) without the C 'UL' suffix: as cannot parse it */
+    li      t6, 0xFFFFFFC000000000
+    bgeu    sp, t6, .Lkf_sp_good
+    ld      a0, 0(t5)
+    csrr    a1, sstatus
+    csrr    a2, sepc
+    ld      a3, 8(t5)
+    la      sp, __trap_emerg_top
+    call    trap_sp_corrupted_report
+.Lkf_sp_good:
+    ld      t6, 8(t5)
+    ld      t5, 0(t5)
+#endif
+
     /* No stack swap - already on kernel stack */
     addi    sp, sp, -70*8
 
@@ -357,3 +385,14 @@ user_trap_return:
 arch_return_to_user:
     mv sp, a0
     j __return_to_user
+
+    .section .bss
+    .align 16
+    .globl __trap_emerg_top
+__trap_emerg_top:
+    .space 512
+
+/* Guard stash: bad sp + original t6 across the range check. */
+    .align 8
+.Lkf_sp_stash:
+    .space 16
