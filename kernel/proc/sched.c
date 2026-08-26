@@ -211,7 +211,29 @@ extern int g_sched_base_slice_ms;
 static inline uint64_t eevdf_weight(task_t *t)
 {
     uint32_t w = t->cfs_weight;
-    return w ? (uint64_t)w : EEVDF_NICE0_LOAD;
+    uint64_t base = w ? (uint64_t)w : EEVDF_NICE0_LOAD;
+    uint32_t boost = __atomic_load_n(&t->pi_boost_weight, __ATOMIC_RELAXED);
+    return boost > base ? boost : base;
+}
+
+void proc_sched_pi_boost(task_t *owner, task_t *waiter)
+{
+    if (!owner || !waiter)
+        return;
+    uint32_t w = waiter->cfs_weight;
+    if (!w)
+        w = EEVDF_NICE0_LOAD;
+    uint32_t old = __atomic_load_n(&owner->pi_boost_weight, __ATOMIC_RELAXED);
+    while (old < w &&
+           !__atomic_compare_exchange_n(&owner->pi_boost_weight, &old, w, 1,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        ;
+}
+
+void proc_sched_pi_unboost(task_t *owner)
+{
+    if (owner)
+        __atomic_store_n(&owner->pi_boost_weight, 0, __ATOMIC_RELAXED);
 }
 
 static inline uint64_t eevdf_vslice(task_t *t)

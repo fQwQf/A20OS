@@ -24,8 +24,11 @@
 #define FUTEX_WAKE 1
 #define FUTEX_REQUEUE 3
 #define FUTEX_CMP_REQUEUE 4
+#define FUTEX_LOCK_PI 6
+#define FUTEX_UNLOCK_PI 7
 #define FUTEX_WAIT_BITSET 9
 #define FUTEX_WAKE_BITSET 10
+#define FUTEX_TID_MASK 0x3fffffffU
 #define FUTEX_OWNER_DIED 0x40000000U
 #define FUTEX_WAITERS 0x80000000U
 #define FUTEX_BITSET_MATCH_ANY 0xffffffffU
@@ -292,6 +295,119 @@ static int stale_timeout_isolation(void)
     return result;
 }
 
+static int pi_roundtrip(void)
+{
+    int *w = shared_words(2);
+    if (!w)
+        return fail("pi-map");
+    w[0] = 0;
+    w[1] = 0;
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("pi-fork");
+    if (pid == 0) {
+        long r = syscall(SYS_futex, w, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+        if (r < 0)
+            _exit(2);
+        __atomic_store_n(&w[1], 1, __ATOMIC_SEQ_CST);
+        for (int i = 0; i < 2000; i++) {
+            if (__atomic_load_n(&w[0], __ATOMIC_SEQ_CST) & (int)FUTEX_WAITERS)
+                break;
+            usleep(1000);
+        }
+        r = syscall(SYS_futex, w, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+        _exit(r < 0 ? 3 : 0);
+    }
+    for (int i = 0; i < 2000 && __atomic_load_n(&w[1], __ATOMIC_SEQ_CST) != 1; i++)
+        usleep(1000);
+    if (w[1] != 1)
+        return fail("pi-child-lock");
+    long r = syscall(SYS_futex, w, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-parent-lock");
+    r = syscall(SYS_futex, w, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-parent-unlock");
+    if (wait_exit(pid, 0, "pi-child") < 0)
+        return -1;
+    munmap(w, 2 * sizeof(int));
+    printf("FUTEX_STRESS: pi-roundtrip PASS\n");
+    return 0;
+}
+
+static int pi_self_deadlock(void)
+{
+    int *w = shared_words(1);
+    if (!w)
+        return fail("pi-dlk-map");
+    *w = 0;
+    long r = syscall(SYS_futex, w, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-dlk-lock1");
+    errno = 0;
+    r = syscall(SYS_futex, w, FUTEX_LOCK_PI, 0, NULL, NULL, 0);
+    if (r != -1 || errno != EDEADLK)
+        return fail("pi-dlk-expect");
+    r = syscall(SYS_futex, w, FUTEX_UNLOCK_PI, 0, NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-dlk-unlock");
+    munmap(w, sizeof(int));
+    printf("FUTEX_STRESS: pi-self-deadlock PASS\n");
+    return 0;
+}
+
+struct pi_shared {
+    struct robust_node node; /* node.futex_word is the shared PI futex */
+    int handshake;
+};
+
+static int pi_owner_died(void)
+{
+    struct pi_shared *sh = mmap(NULL, sizeof(*sh), PROT_READ | PROT_WRITE,
+                                MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (sh == MAP_FAILED)
+        return fail("pi-died-map");
+    memset(sh, 0, sizeof(*sh));
+    pid_t pid = fork();
+    if (pid < 0)
+        return fail("pi-died-fork");
+    if (pid == 0) {
+        struct robust_list_head child_head;
+        memset(&child_head, 0, sizeof(child_head));
+        child_head.list.next = (uintptr_t)&sh->node.list;
+        child_head.futex_offset =
+            (uintptr_t)&sh->node.futex_word - (uintptr_t)&sh->node.list;
+        sh->node.list.next = 0;
+        if (syscall(SYS_set_robust_list, &child_head, sizeof(child_head)) < 0)
+            _exit(2);
+        if (syscall(SYS_futex, &sh->node.futex_word, FUTEX_LOCK_PI, 0,
+                    NULL, NULL, 0) < 0)
+            _exit(3);
+        __atomic_store_n(&sh->handshake, 1, __ATOMIC_SEQ_CST);
+        _exit(0); /* die holding the PI futex; robust list marks OWNER_DIED */
+    }
+    for (int i = 0; i < 2000 && __atomic_load_n(&sh->handshake, __ATOMIC_SEQ_CST) != 1; i++)
+        usleep(1000);
+    if (sh->handshake != 1)
+        return fail("pi-died-handshake");
+    if (wait_exit(pid, 0, "pi-died-child") < 0)
+        return -1;
+    /* Owner died while holding: LOCK_PI must succeed, word keeps OWNER_DIED. */
+    long r = syscall(SYS_futex, &sh->node.futex_word, FUTEX_LOCK_PI, 0,
+                     NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-died-reacquire");
+    if (!(sh->node.futex_word & FUTEX_OWNER_DIED))
+        return fail("pi-died-flag");
+    r = syscall(SYS_futex, &sh->node.futex_word, FUTEX_UNLOCK_PI, 0,
+                NULL, NULL, 0);
+    if (r < 0)
+        return fail("pi-died-unlock");
+    munmap(sh, sizeof(*sh));
+    printf("FUTEX_STRESS: pi-owner-died PASS\n");
+    return 0;
+}
+
 static int robust_list_case(void)
 {
     struct robust_list_head head;
@@ -363,6 +479,12 @@ int main(void)
     if (stale_timeout_isolation() != 0)
         return 1;
     printf("FUTEX_STRESS: stale-timeout-isolation PASS\n");
+    if (pi_roundtrip() != 0)
+        return 1;
+    if (pi_self_deadlock() != 0)
+        return 1;
+    if (pi_owner_died() != 0)
+        return 1;
     if (robust_list_case() != 0)
         return 1;
     printf("FUTEX_STRESS: PASS\n");
