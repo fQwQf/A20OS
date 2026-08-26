@@ -567,6 +567,56 @@ void pfa_free(pfn_t pfn, int order) {
 pfn_t pfa_alloc_page(void) { return pfa_alloc(0); }
 void  pfa_free_page(pfn_t pfn) { pfa_free(pfn, 0); }
 
+/*
+ * 关机前审计：遍历全部空闲链，验证双向链接、位图与元数据一致性。
+ * 返回发现的错误数（0 = 链表完好）。带步数上限以防损坏链成环。
+ */
+int pfa_audit_lists(void)
+{
+    int errors = 0;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    for (int o = 0; o <= MAX_ORDER; o++) {
+        pfn_t prev = PFN_NONE;
+        unsigned walked = 0;
+        pfn_t p = pfa.free_lists[o].head;
+        while (p != PFN_NONE && walked <= pfa.total_frames) {
+            if (!pfn_valid(p) ||
+                pfa.meta[p].flags != FRAME_F_FREE ||
+                pfa.meta[p].order != (uint8_t)o ||
+                pfa.meta[p].prev != prev ||
+                !PFA_FREEMAP_TEST(p)) {
+                printf("[PFA AUDIT] order=%d node=%llu BAD: valid=%u "
+                       "flags=0x%x order_meta=%u expected_prev=%llu "
+                       "actual_prev=%llu freemap=%u\n",
+                       o, (unsigned long long)p,
+                       pfn_valid(p) ? 1u : 0u,
+                       pfn_valid(p) ? pfa.meta[p].flags : 0u,
+                       pfn_valid(p) ? pfa.meta[p].order : 0u,
+                       (unsigned long long)prev,
+                       pfn_valid(p) ? (unsigned long long)pfa.meta[p].prev : 0ull,
+                       pfn_valid(p) ? PFA_FREEMAP_TEST(p) : 0u);
+                errors++;
+                break;
+            }
+            walked++;
+            prev = p;
+            p = pfa.meta[p].next;
+        }
+        if (walked > pfa.total_frames) {
+            printf("[PFA AUDIT] order=%d walk overrun (cycle?)\n", o);
+            errors++;
+            continue;
+        }
+        if (walked != pfa.free_lists[o].count) {
+            printf("[PFA AUDIT] order=%d count mismatch: walked=%u stored=%u\n",
+                   o, walked, pfa.free_lists[o].count);
+            errors++;
+        }
+    }
+    spin_unlock_irqrestore(&pfa.lock, flags);
+    return errors;
+}
+
 // 引用计数 +1
 void frame_get(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
