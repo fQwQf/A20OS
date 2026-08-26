@@ -48,3 +48,8 @@ user/desktop/desktop_cursor_breeze.c
 # user/cmds/core 目录名同样撞 core dump 规则；显式回纳（同 fscompat 先例）
 !user/cmds/core/
 !user/cmds/core/**
+# kernel 核心子系统源码目录名同样撞 core dump 规则；显式回纳（同 fscompat/cmds 先例）
+!kernel/core/
+!kernel/core/**
+!kernel/include/core/
+!kernel/include/core/**
