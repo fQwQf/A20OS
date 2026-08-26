@@ -53,6 +53,7 @@ struct vfile;
 #define SO_REUSEPORT 15
 #define SO_PASSCRED  16
 #define SO_PEERCRED  17
+#define SO_PEERPIDFD 80
 #define SO_ACCEPTCONN 30
 #define SO_PROTOCOL  38
 #define SO_DOMAIN    39

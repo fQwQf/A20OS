@@ -1594,6 +1594,8 @@ void sched_reap_zombies(void)
                 reap = 1;
             else if (signal_task_sigchld_auto_reap(parent))
                 reap = 1;
+            if (reap && !proc_tg_group_dead_locked(t))
+                reap = 0;       /* leader still has live member threads */
             if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0]))) {
                 task_t *owned = proc_get(t);
                 if (owned)

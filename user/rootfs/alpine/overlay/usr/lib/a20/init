@@ -40,6 +40,13 @@ fi
 dbus-uuidgen --ensure 2>/dev/null || true
 dbus-daemon --system --fork
 
+# cgroup hierarchy for elogind (session tracking).  A20OS provides a minimal
+# unified cgroup2 mount; without it elogind degrades and polkit context is
+# weaker, though the desktop still runs.
+mkdir -p /sys/fs/cgroup 2>/dev/null || true
+mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || \
+    mount -t cgroup none /sys/fs/cgroup 2>/dev/null || true
+
 # Session/login daemon: XFCE's session manager and polkit talk to it over the
 # org.freedesktop.login1 D-Bus interface.
 if [ -x /usr/libexec/elogind/elogind ]; then
