@@ -259,7 +259,11 @@ int net_socket_create(int domain, int type, int protocol) {
         return r;
     }
 
-    return net_socket_install_file(s, type);
+    /* Sockets are readable+writable per F_GETFL; the socket type must not
+     * leak into the file status flags (SOCK_RAW==3 would read back as an
+     * invalid access mode and SOCK_STREAM as write-only). */
+    return net_socket_install_file(s, O_RDWR |
+                                   ((type & SOCK_NONBLOCK) ? O_NONBLOCK : 0));
 }
 
 int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
