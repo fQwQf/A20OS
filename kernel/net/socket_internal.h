@@ -116,6 +116,7 @@ typedef struct net_socket {
     int peer_closed;
     int bound;
     int connected;
+    int ever_connected;
     int listening;
     uint8_t local[NET_SOCKADDR_MAX];
     size_t local_len;

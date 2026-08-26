@@ -31,7 +31,7 @@ NATIVE_CC_ppc64le     := powerpc64le-linux-gnu-gcc
 NATIVE_CC := $(CCACHE_PREFIX)$(NATIVE_CC_$(ARCH))
 NATIVE_CFLAGS_riscv64     := -march=rv64gc -mabi=lp64d -mcmodel=medany
 NATIVE_CFLAGS_loongarch64 := -march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic
-NATIVE_CFLAGS_aarch64     := -march=armv8-a -fno-pic
+NATIVE_CFLAGS_aarch64     := -march=armv8-a -fno-pic -mno-outline-atomics
 NATIVE_CFLAGS_x86_64      := -m64 -mno-red-zone -fno-pic -fno-pie
 NATIVE_CFLAGS_arm32       := -march=armv7-a -marm -mfpu=vfpv3-d16 -mfloat-abi=hard -fno-pic -fno-builtin
 NATIVE_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-builtin

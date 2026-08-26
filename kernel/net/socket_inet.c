@@ -485,6 +485,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
         s->tcp_err = err;
         if (err == ERR_OK) {
             s->connected = 1;
+            s->ever_connected = 1;
             net_event_notify(s, A20_EVENT_CONNECTION, 0, 0);
             net_event_notify(s, A20_EVENT_WRITABLE, 0, 0);
         }
@@ -759,6 +760,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         child->protocol = s->protocol;
         child->bound = 1;
         child->connected = 1;
+        child->ever_connected = 1;
         memcpy(child->local, listener->local, listener->local_len);
         child->local_len = listener->local_len;
         memcpy(child->peer_addr, s->local, s->local_len);
@@ -766,6 +768,7 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
         child->peer = s;
         s->peer = child;
         s->connected = 1;
+        s->ever_connected = 1;
         s->local_tcp = 1;
         child->local_tcp = 1;
         int rr = net_register_socket_locked(child);
@@ -1071,7 +1074,10 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
 
 static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 {
-    if (!s->connected || s->closed || s->shut_wr)
+    /* Linux ABI: writes on a once-established endpoint that died report EPIPE */
+    if (!s->connected || s->closed)
+        return s->ever_connected ? -EPIPE : -ENOTCONN;
+    if (s->shut_wr)
         return -ENOTCONN;
     if (s->local_tcp) {
         uint64_t irq = spin_lock_irqsave(&g_net_lock);

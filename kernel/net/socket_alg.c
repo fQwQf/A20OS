@@ -87,6 +87,7 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     child->nonblock = (flags & SOCK_NONBLOCK) != 0;
     child->bound = 1;
     child->connected = 1;
+    child->ever_connected = 1;
     memcpy(child->local, s->local, s->local_len);
     child->local_len = s->local_len;
     strncpy(child->alg_type, s->alg_type, sizeof(child->alg_type) - 1);

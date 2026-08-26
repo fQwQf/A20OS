@@ -529,6 +529,34 @@ smoke-network-suite:
 		exit 1; \
 	fi
 
+smoke-network-suite-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/network-suite-aarch64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
+		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETWORK_SUITE: PASS' "$$log"; then \
+		echo "smoke-network-suite-aarch64: PASS; log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-network-suite-aarch64: timeout without PASS; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-network-suite-aarch64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-proc-a20:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
