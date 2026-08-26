@@ -851,6 +851,29 @@ smoke-futex-stress:
 		exit 1; \
 	fi
 
+smoke-futex-stress-aarch64:
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/futex-stress-aarch64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'futex_stress\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
+		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
+		echo "smoke-futex-stress-aarch64: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-futex-stress-aarch64: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-scm-stress:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
