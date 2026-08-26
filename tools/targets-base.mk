@@ -38,7 +38,14 @@
 		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
 		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
-		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all
+		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
+		native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-ppc64le native-futex-all \
+		native-debug-test-rv native-debug-test-la native-debug-test-aarch64 native-debug-test-x86_64 native-debug-test-arm32 native-debug-test-rv32 native-debug-test-ppc64le native-debug-test-all \
+		native-ext-test-rv native-ext-test-la native-ext-test-aarch64 native-ext-test-x86_64 native-ext-test-arm32 native-ext-test-rv32 native-ext-test-ppc64le native-ext-test-all \
+		native-mm-rv native-mm-la native-mm-aarch64 native-mm-x86_64 native-mm-arm32 native-mm-rv32 native-mm-ppc64le native-mm-all \
+		native-signal-rv native-signal-la native-signal-aarch64 native-signal-x86_64 native-signal-arm32 native-signal-rv32 native-signal-ppc64le native-signal-all \
+		native-ipc-rv native-ipc-la native-ipc-aarch64 native-ipc-x86_64 native-ipc-arm32 native-ipc-rv32 native-ipc-ppc64le native-ipc-all \
+		native-contract-rv native-contract-la native-contract-aarch64 native-contract-x86_64 native-contract-arm32 native-contract-rv32 native-contract-ppc64le native-contract-all
 
 FORCE:
 

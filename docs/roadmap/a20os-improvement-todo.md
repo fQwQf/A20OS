@@ -206,8 +206,9 @@
   - 证据：`kernel/abi/linux/syscall_coverage.md` 说明每个 syscall 组在升级级别前都需要 smoke 测试。
   - 已落地（2026-08-26）：区域汇总表新增"Smoke gates (last known status)"列——37 个区域逐行映射到具体 smoke 目标，今日复验的门禁标注 `PASS 2026-08-26`，未复验的列目标名不留状态。映射来源为逐 syscall 大表的既有 Smoke Gate 列采样核对（keyring/AIO/fanotify/pidfd/io_uring/landlock/membarrier/ioprio/LSM → smoke-syscall-ext；handles/new-mount-api/statmount → smoke-vfs-stress；sched_setaffinity/rseq/timerfd/clock → smoke-proc-stress 等）。同时补齐五个 a20_envelope_* 扩展 syscall 的缺失行（area=a20-envelope, gate=smoke-envelope），修复了 check-doc-drift 的预先存在失败（现 PASS）。
   - 完成条件：覆盖表生成包含测试目标名称和 last-known status。
-- [ ] 将现有 Native ABI 测试聚合为多架构 CI-like 运行矩阵。
+- [x] 将现有 Native ABI 测试聚合为多架构 CI-like 运行矩阵。
   - 当前证据：源码已有 16 个 `test_native_*.c`，以及 liba20c/mlibc、service、personality smoke；不再只是 minimal/libc。问题是目标分散，且多数 QEMU smoke 固定为 RISC-V64。
+  - 已落地（2026-08-27）：`tools/targets-native.mk` 新增 7 组 per-architecture 构建目标（futex/debug-test/ext-test/mm/signal/ipc/contract），每组 7 架构（riscv64/loongarch64/aarch64/x86_64/arm32/riscv32/ppc64le）+ `-all` 聚合。`tools/targets-base.mk` help 列表同步扩展。匹配 handle-test（7 架构）、test（7 架构）、libc（7 架构）已有模式。
   - 完成条件：Native handle、VMO/VMAR、channel、event queue、timer、task、debug 和 rights 测试进入可枚举的多架构 CI-like 矩阵。
 - [x] 增加 memory pressure、fork/exec churn、fd churn、filesystem churn、network churn 和 process reaping 压力测试。
   - 证据：当前 smoke 目标证明基本操作，但不能证明长时间稳定性或竞争行为。
