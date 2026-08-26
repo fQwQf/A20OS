@@ -197,8 +197,10 @@ smoke-native-fs-all:
 		-drive file=$(UFS_NTFS_IMG),if=none,format=raw,id=xfs4 \
 		-device virtio-blk-device,drive=xfs4,bus=virtio-mmio-bus.7 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
+		-append 'a20.ufsd_blk=1' \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UXFS_ALL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+	if grep -q 'UXFS_ALL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log" && \
+	   grep -q 'SVC_MGR: ufsd blk=1 (cmdline)' "$$log"; then \
 		echo "smoke-native-fs-all: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-native-fs-all: failed with status $$status; tail of $$log:"; \
