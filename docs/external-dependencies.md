@@ -32,7 +32,7 @@
 
 ## 用户态导入项
 
-- `EXTERNAL_USERLAND_UPGRADE_CHECKLIST`：修改 musl、sbase 或 mksh 源码/构建规则后，接受升级前必须运行 Linux 门禁组（`syscall smoke, shell smoke, and coreutils smoke`）。
+- `EXTERNAL_USERLAND_UPGRADE_CHECKLIST`：修改 musl、sbase 或 mksh 源码/构建规则后，接受升级前必须运行 Linux 门禁组——`make check-upgrade-userland-smokes` 聚合 `smoke-abi-linux`（syscall）、`smoke-mlibc-mksh`（shell）、`smoke-mlibc-sbase`（coreutils）；lwIP 另见网络节，TLSe/wget 见各自集成说明。
 - `EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`：musl、ABI wrapper、启动代码或 syscall 布局变化要求重建所有静态链接的用户程序；`user/build/<arch>[-nommu]/.build-id` 和 Makefile 源文件时间戳检查会发现陈旧二进制。各架构/MMU 变体使用独立目录，可并行构建而不会互相清理或混入错误 ABI 的程序。
 
 ## TLSe 与 wget
