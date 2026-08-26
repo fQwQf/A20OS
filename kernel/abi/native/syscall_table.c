@@ -59,6 +59,7 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_flush(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_advise(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_remap(const a20_syscall_args_t *args);
+int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_lock(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args);
 int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args);

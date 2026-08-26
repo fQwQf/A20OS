@@ -4,10 +4,10 @@
 #include "core/lock.h"
 #include "core/signal_defs.h"
 #include "core/string.h"
+#include "core/syscall_nr.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
-#include "abi/linux/syscall_nr.h"
 #include "sys/usercopy.h"
 
 /* linux/bpf_common.h opcode scaffolding */

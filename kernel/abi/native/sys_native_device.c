@@ -95,7 +95,7 @@ int64_t sys_a20_device_irq_listen(const a20_syscall_args_t *args)
                                   (void *)(uintptr_t)kargs.irq,
                                   A20_OBJ_DEVICE,
                                   A20_EVENT_MASK(A20_EVENT_SIGNALED),
-                                  kargs.user_data);
+                                  kargs.user_data, 0);
     a20_object_release(entry.object, entry.type);
     if (wr < 0) {
         udriver_irq_unlisten(kargs.irq);

@@ -338,6 +338,10 @@ typedef struct a20_task_status {
     uint64_t       stime_ns;
 } a20_task_status_t;
 
+/* task_wait flags (docs/native-abi/09-native-abi-deepening.md §8).
+ * Unknown bits must be zero. */
+#define A20_TASK_WAIT_NONBLOCK 0x1u
+
 typedef struct a20_task_info {
     uint32_t       size;
     uint32_t       version;
@@ -641,7 +645,13 @@ typedef struct a20_event_watch_args {
     a20_handle_t   target;
     uint64_t       event_mask;
     uint64_t       user_data;
+    /* v1.1 E-APPEND: watch delivery mode flags (A20_WATCH_*). */
+    uint64_t       flags;
 } a20_event_watch_args_t;
+
+/* a20_event_watch_args_t.flags */
+#define A20_WATCH_LEVEL   0x1ull /* level-triggered: readiness is re-checked
+                                  * on every wait, not only on transitions */
 
 
 

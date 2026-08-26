@@ -113,6 +113,8 @@ int64_t sys_a20_event_watch(const a20_syscall_args_t *args)
 
     a20_event_watch_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
+    if (kargs.flags & ~A20_WATCH_LEVEL)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -134,7 +136,8 @@ int64_t sys_a20_event_watch(const a20_syscall_args_t *args)
 
     a20_eventq_t *eq = (a20_eventq_t *)eq_entry.object;
     r = a20_eventq_watch(eq, kargs.target, tgt_entry.object,
-                         tgt_entry.type, kargs.event_mask, kargs.user_data);
+                         tgt_entry.type, kargs.event_mask, kargs.user_data,
+                         (uint16_t)kargs.flags);
     a20_object_release(tgt_entry.object, tgt_entry.type);
     a20_object_release(eq_entry.object, eq_entry.type);
     return r;
@@ -805,7 +808,7 @@ int64_t sys_a20_event_watch_fs(const a20_syscall_args_t *args)
 
     a20_eventq_t *eq = (a20_eventq_t *)eq_entry.object;
     r = a20_eventq_watch(eq, dir_h, vn, A20_OBJ_DIRECTORY,
-                         (uint64_t)event_mask, user_data);
+                         (uint64_t)event_mask, user_data, 0);
     vfs_put_file_ref(gfd, vf);
     a20_object_release(eq_entry.object, eq_entry.type);
     a20_object_release(dir_entry.object, dir_entry.type);

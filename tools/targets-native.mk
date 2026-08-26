@@ -477,3 +477,48 @@ $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) 
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
 native-rtcd-arch: $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
+
+# ---- Dynamic-linking bring-up probes (08-runtime-status §8a) ----
+.PHONY: native-fakeld-arch native-fakeld-rv native-dynprobe-arch native-dynprobe-rv
+
+define NATIVE_FAKELD_RECIPE
+@mkdir -p $(dir $(3))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -T$(NATIVE_LD) \
+    -Wl,-e,_start_dyn \
+    user/tests/fake_ld.c \
+    $(NATIVE_LIBS) \
+    -o $(3)
+endef
+
+$(NATIVE_FAKELD_BIN): user/tests/fake_ld.c user/liba20rt/a20-generic.ld \
+		user/liba20rt/a20_types.h user/liba20rt/a20_syscall.h user/liba20rt/a20_handle.h
+	$(call NATIVE_FAKELD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$@)
+
+native-fakeld-arch: $(NATIVE_FAKELD_BIN)
+
+native-fakeld-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-fakeld-arch
+
+define NATIVE_DYNPROBE_RECIPE
+@mkdir -p $(dir $(3))
+$(1) -ffreestanding -nostdlib -Wl,--dynamic-linker=/bin/fakeld-rv \
+    $(2) \
+    -Iuser -Iuser/liba20rt \
+    -Tuser/liba20rt/a20-dynamic.ld \
+    $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) \
+    user/tests/test_native_dynprobe.c \
+    $(NATIVE_LIBS) \
+    -o $(3)
+endef
+
+$(NATIVE_DYNPROBE_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_dynprobe.c \
+		user/liba20rt/a20-dynamic.ld user/liba20rt/crt0_a20.h
+	$(call NATIVE_DYNPROBE_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$@)
+
+native-dynprobe-arch: $(NATIVE_DYNPROBE_BIN)
+
+native-dynprobe-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-dynprobe-arch

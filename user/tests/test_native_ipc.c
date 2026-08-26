@@ -294,6 +294,52 @@ int main(int argc, char **argv, char **envp)
         a20_hdl_close(solo.endpoints[1]);
     }
 
+    /* 5. Event delivery modes: level vs edge over a channel endpoint
+     *    that already holds a message when the watch registers
+     *    (09-native-abi-deepening Â§8 EventQ level mode). */
+    {
+        a20_channel_pair_t lpair;
+        if (a20_channel_create(&lpair) != A20_OK)
+            return fail(24, "level channel_create failed");
+        uint8_t lmsg[8] = {1,2,3,4,5,6,7,8};
+        if (a20_channel_send(lpair.endpoints[0], lmsg, sizeof(lmsg), 0, 0) < 0)
+            return fail(25, "level channel_send failed");
+
+        a20_handle_t levq, edgq;
+        if (a20_event_queue_create(&levq) != A20_OK ||
+            a20_event_queue_create(&edgq) != A20_OK)
+            return fail(26, "event_queue_create failed");
+
+        a20_time_t zero = { .secs = 0, .nsecs = 0 };
+        a20_event_t evbuf;
+
+        /* Edge watch registered after the message exists: no transition
+         * happened since registration, so nothing may be delivered. */
+        if (a20_event_watch(edgq, lpair.endpoints[1],
+                            A20_EVENT_MASK(A20_EVENT_READABLE), 7) != A20_OK)
+            return fail(27, "edge watch failed");
+        st = a20_event_wait(edgq, zero, &evbuf);
+        if (st != -A20_ERR_WOULD_BLOCK)
+            return fail(28, "edge watch delivered without transition");
+
+        /* Level watch over the same ready state: answered immediately
+         * from current object state, carrying the watch's user_data. */
+        if (a20_event_watch_level(levq, lpair.endpoints[1],
+                                  A20_EVENT_MASK(A20_EVENT_READABLE), 42) != A20_OK)
+            return fail(29, "level watch failed");
+        st = a20_event_wait(levq, zero, &evbuf);
+        if (st < 0)
+            return fail(30, "level watch did not answer readiness");
+        if (!(evbuf.events & A20_EVENT_MASK(A20_EVENT_READABLE)) ||
+            evbuf.user_data != 42)
+            return fail(31, "level event payload mismatch");
+
+        a20_hdl_close(levq);
+        a20_hdl_close(edgq);
+        a20_hdl_close(lpair.endpoints[0]);
+        a20_hdl_close(lpair.endpoints[1]);
+    }
+
     a20_hdl_close(pair.endpoints[0]);
     a20_hdl_close(pair.endpoints[1]);
 

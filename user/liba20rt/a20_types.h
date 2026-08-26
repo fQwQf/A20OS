@@ -566,7 +566,22 @@ typedef struct a20_vm_map_args {
     uint32_t       prot;
     uint32_t       flags;
     uint64_t       out_addr;
+    /* v1.1 E-APPEND: map through a VMAR reservation. */
+    a20_handle_t   vmar;
 } a20_vm_map_args_t;
+
+/* Sub-allocate an address-range reservation under a parent VMAR
+ * (04-memory §3); parent = A20_HANDLE_NULL creates a root window. */
+typedef struct a20_vm_create_vmar_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   parent;
+    uint32_t       _pad;
+    uint64_t       base;
+    uint64_t       length;
+    uint64_t       flags;    /* A20_VMAR_CAN_MAP_* ceiling */
+    a20_handle_t   out_vmar;
+} a20_vm_create_vmar_args_t;
 
 typedef struct a20_vm_share_args {
     uint32_t       size;
@@ -840,7 +855,11 @@ typedef struct a20_event_watch_args {
     a20_handle_t   target;
     uint64_t       event_mask;
     uint64_t       user_data;
+    /* v1.1 E-APPEND: watch delivery mode flags (A20_WATCH_*). */
+    uint64_t       flags;
 } a20_event_watch_args_t;
+
+#define A20_WATCH_LEVEL   0x1ull
 
 typedef struct a20_pending_event {
     a20_handle_t   source;

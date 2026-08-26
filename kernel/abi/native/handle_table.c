@@ -177,13 +177,16 @@ static int ht_grow(struct a20_ht_internal *ht)
     return 0;
 }
 
-static const a20_rights_t a20_type_rights[A20_OBJ_MONITOR + 1] = {
+static const a20_rights_t a20_type_rights[A20_OBJ_VMAR + 1] = {
     [A20_OBJ_INVALID]          = 0,
     [A20_OBJ_TASK]             = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
                                  A20_RIGHT_ADMIN | A20_RIGHT_READ | A20_RIGHT_WRITE,
-    [A20_OBJ_THREAD]           = A20_RIGHT_STAT | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
-                                 A20_RIGHT_CONTROL,
+    /* Threads are task-like for the native ABI: same default ceiling as
+     * TASK so join/signal/debug work on THREAD handles (09 §8 rollout). */
+    [A20_OBJ_THREAD]           = A20_RIGHT_WAIT | A20_RIGHT_SIGNAL | A20_RIGHT_STAT |
+                                 A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL |
+                                 A20_RIGHT_ADMIN | A20_RIGHT_READ | A20_RIGHT_WRITE,
     [A20_OBJ_FILE]             = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                                  A20_RIGHT_SEEK | A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
                                  A20_RIGHT_EXEC | A20_RIGHT_MAP | A20_RIGHT_CONTROL,
@@ -218,13 +221,15 @@ static const a20_rights_t a20_type_rights[A20_OBJ_MONITOR + 1] = {
                                  A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
     [A20_OBJ_PAGER]            = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                                  A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
+    [A20_OBJ_VMAR]             = A20_RIGHT_MAP | A20_RIGHT_STAT | A20_RIGHT_DUP |
+                                 A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
     [A20_OBJ_MONITOR]          = A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP |
                                  A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL,
 };
 
 a20_rights_t a20_type_valid_rights(uint16_t type)
 {
-    if (type > A20_OBJ_MONITOR) return 0;
+    if (type > A20_OBJ_VMAR) return 0;
     return a20_type_rights[type];
 }
 
@@ -491,6 +496,35 @@ static int64_t a20_handle_lookup_ref_mode(struct a20_ht_internal *ht,
         a20_object_ref(out->object, out->type);
     spin_unlock_irqrestore(&ht->lock, flags);
     return A20_OK;
+}
+
+/* Task-like lookup: accept TASK or THREAD handles.  Threads became a
+ * distinct object type (09-native-abi-deepening §8); every syscall that
+ * operates on "some runnable thing" must take both. */
+int64_t a20_handle_lookup_task_like(struct a20_ht_internal *ht,
+                                    a20_handle_t h,
+                                    a20_rights_t required_rights,
+                                    a20_handle_entry_t *out)
+{
+    int64_t r = a20_handle_lookup_internal(ht, h, A20_OBJ_TASK,
+                                           required_rights, out);
+    if (r < 0)
+        r = a20_handle_lookup_internal(ht, h, A20_OBJ_THREAD,
+                                       required_rights, out);
+    return r;
+}
+
+int64_t a20_handle_lookup_ref_task_like(struct a20_ht_internal *ht,
+                                        a20_handle_t h,
+                                        a20_rights_t required_rights,
+                                        a20_handle_entry_t *out)
+{
+    int64_t r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_TASK,
+                                               required_rights, out);
+    if (r < 0)
+        r = a20_handle_lookup_ref_internal(ht, h, A20_OBJ_THREAD,
+                                           required_rights, out);
+    return r;
 }
 
 int64_t a20_handle_lookup_internal(struct a20_ht_internal *ht, a20_handle_t h,

@@ -143,6 +143,22 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     int child_pid = t->pid;
     proc_task_init_common(t, parent, flags);
     t->abi_mode = parent ? parent->abi_mode : 0;
+#ifdef CONFIG_ABI_NATIVE
+    /* Adopted native stdio wiring describes the process's fd 0/1/2 and
+     * must survive fork: a clone child that execve()s without re-running
+     * task_adopt would otherwise fall back to the Linux-fdtable stdio,
+     * which is console for native tasks (breaks shell pipelines). */
+    if (parent && parent->a20_stdio_adopted) {
+        t->a20_stdio_adopted = 1;
+        t->a20_stdin_h = parent->a20_stdin_h;
+        t->a20_stdout_h = parent->a20_stdout_h;
+        t->a20_stderr_h = parent->a20_stderr_h;
+        t->a20_root_h = parent->a20_root_h;
+        t->a20_cwd_h = parent->a20_cwd_h;
+        /* a20_self_h left 0 here: it must reference a TASK handle in the
+         * CHILD's table, which only task_clone can install (below). */
+    }
+#endif
     if (parent && parent->sched_reset_on_fork) {
         if (parent->sched_policy == SCHED_FIFO || parent->sched_policy == SCHED_RR) {
             t->sched_policy = SCHED_NORMAL;

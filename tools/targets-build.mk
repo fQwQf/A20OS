@@ -288,7 +288,7 @@ check-task-lifetime-boundary:
 check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
 	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/archive/blocking-point-audit.md
 	@rg -q "PROC_BLOCKED_ALLOCATION_WHITELIST" kernel/proc/task.c
-	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/abi/linux/sys_futex.c
+	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/ipc/futex.c
 	@rg -q "proc_try_wake_locked\(t, t->wait_seq, PROC_WAKE_EVENT\)" kernel/proc/sched.c
 	@! rg -n --pcre2 '\bproc_block_until[[:space:]]*\(' kernel \
 		--glob '*.[ch]' --glob '!kernel/external/**'
@@ -305,8 +305,8 @@ check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
 		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu)\.c|abi/native/sys_core\.c):' || true); \
 		test -z "$$bad" || { echo "$$bad"; exit 1; }
 	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
-	@rg -q "wait_queue_entry_t entry" kernel/abi/linux/sys_futex.c
-	@! rg -n "typedef struct futex_waiter" kernel/abi/linux/sys_futex.c
+	@rg -q "wait_queue_entry_t entry" kernel/ipc/futex.c
+	@! rg -n "typedef struct futex_waiter" kernel/ipc/futex.c
 	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/timer_heap.c
 	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
 	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/stress/futex_stress.c
