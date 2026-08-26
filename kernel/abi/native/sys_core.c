@@ -27,6 +27,7 @@
 #include "core/stdio.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
+#include "handle_table.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "mm/mm.h"
@@ -821,7 +822,10 @@ int64_t sys_a20_task_clone(const a20_syscall_args_t *args)
                                         A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                         A20_RIGHT_STAT | A20_RIGHT_CONTROL |
                                         A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-    if (self_h >= 0) child_self = (a20_handle_t)self_h;
+    if (self_h >= 0) {
+        child_self = (a20_handle_t)self_h;
+        new_task->a20_self_h = child_self;
+    }
 
     a20_handle_t child_root = A20_HANDLE_NULL, child_cwd = A20_HANDLE_NULL;
     a20_handle_entry_t entry;
@@ -955,8 +959,9 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_flags_t flags = (a20_flags_t)A20_ARG(1);
-    a20_task_status_t *out = (a20_task_status_t *)(uintptr_t)A20_ARG(2);
-    (void)flags; /* only blocking wait is implemented currently */
+    a20_task_status_t *out = (a20_task_status_t *)A20_ARG(2);
+    if (flags & ~A20_TASK_WAIT_NONBLOCK)
+        return -A20_ERR_INVALID_ARGUMENT;
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -964,7 +969,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 
     /* Lookup task handle with WAIT right docs/native-abi/06-security.md §3.2) */
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t ret = a20_handle_lookup_task_like(ht, task_h,
                                               A20_RIGHT_WAIT, &entry);
     if (ret < 0) return ret;
 
@@ -972,9 +977,12 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     int status = 0;
-    int wret = proc_wait4(target->pid, &status, 0);
+    /* WNOHANG=1: non-block mode reports WOULD_BLOCK until the target exits. */
+    int wret = proc_wait4(target->pid, &status,
+                          (flags & A20_TASK_WAIT_NONBLOCK) ? 1 : 0);
     proc_put(target);
     if (wret < 0) return -A20_ERR_INVALID_ARGUMENT;
+    if (wret == 0) return -A20_ERR_WOULD_BLOCK;
 
     if (out) {
         a20_task_status_t ts;

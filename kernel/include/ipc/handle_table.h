@@ -98,6 +98,16 @@ int64_t a20_handle_lookup_ref_internal(struct a20_ht_internal *ht,
                                         uint16_t expected_type,
                                         a20_rights_t required_rights,
                                         a20_handle_entry_t *out);
+/* Task-like variants accept TASK or THREAD handles (threads are
+ * task-like objects; docs/native-abi/09-native-abi-deepening.md §8). */
+int64_t a20_handle_lookup_task_like(struct a20_ht_internal *ht,
+                                    a20_handle_t h,
+                                    a20_rights_t required_rights,
+                                    a20_handle_entry_t *out);
+int64_t a20_handle_lookup_ref_task_like(struct a20_ht_internal *ht,
+                                        a20_handle_t h,
+                                        a20_rights_t required_rights,
+                                        a20_handle_entry_t *out);
 int64_t a20_handle_remove(struct a20_ht_internal *ht, a20_handle_t h);
 int64_t a20_handle_reserve_many(struct a20_ht_internal *ht,
                                 a20_handle_t *handles, uint32_t count);

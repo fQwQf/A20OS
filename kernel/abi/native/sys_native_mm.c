@@ -10,6 +10,7 @@
 #include "core/consts.h"
 #include "core/version.h"
 #include "core/timekeeping.h"
+#include "core/mman.h"
 #include "core/timer.h"
 #include "core/random.h"
 #include "trap_frame.h"
@@ -23,7 +24,6 @@
 #include "fs/xattr.h"
 #include "net/socket.h"
 #include "sys/usercopy.h"
-#include "core/klog.h"
 
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
@@ -32,6 +32,7 @@
 #include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
+#include "mm/vmar.h"
 #include "abi/native/vmar.h"
 #include "abi/native/ipc_internal.h"
 #include "abi/native/resource.h"
@@ -116,6 +117,40 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
+    /* Map through a VMAR reservation when one is supplied (04-memory §3):
+     * the range must land inside the node and prot must fit its ceiling. */
+    vmar_t *route = NULL;
+    if (kargs.vmar != A20_HANDLE_NULL) {
+        struct a20_ht_internal *ht0 = task_get_a20_ht(cur);
+        if (!ht0) return -A20_ERR_BAD_HANDLE;
+        a20_handle_entry_t ve;
+        int64_t vr = a20_handle_lookup_ref_internal(
+            ht0, kargs.vmar, A20_OBJ_VMAR, A20_RIGHT_MAP, &ve);
+        if (vr < 0) return vr;
+        route = (vmar_t *)ve.object; /* ref held until after install */
+    }
+
+    /* Ceiling checks for maps routed through a VMAR (04-memory §3):
+     * requested prot bits must fit the node's ceiling and fixed-address
+     * placement needs VMAR_CAN_MAP_SPECIFIC.  After success the ceiling is
+     * stamped into the VMA's vmar_cap so later protect() stays within what
+     * authorized the mapping. */
+    uint32_t route_can = 0;
+    if (route) {
+        if (kargs.prot & A20_PROT_READ)  route_can |= VMAR_CAN_MAP_READ;
+        if (kargs.prot & A20_PROT_WRITE) route_can |= VMAR_CAN_MAP_WRITE;
+        if (kargs.prot & A20_PROT_EXEC)  route_can |= VMAR_CAN_MAP_EXEC;
+        if ((kargs.flags & MAP_FIXED) &&
+            !(route->cap & VMAR_CAN_MAP_SPECIFIC)) {
+            a20_object_release(route, A20_OBJ_VMAR);
+            return -A20_ERR_ACCESS;
+        }
+        if (!vmar_cap_allows(route, route_can)) {
+            a20_object_release(route, A20_OBJ_VMAR);
+            return -A20_ERR_ACCESS;
+        }
+    }
+
     uint64_t addr = 0;
     int64_t r = A20_OK;
 
@@ -176,9 +211,84 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         if (r < 0) return r;
     }
 
+    if (route && !vmar_contains(route, addr, kargs.length)) {
+        a20_vmar_unmap(addr, kargs.length);
+        a20_object_release(route, A20_OBJ_VMAR);
+        return -A20_ERR_NO_SPACE;
+    }
+    if (route) {
+        vm_area_t *nv = mm_find_vma(cur->mm, (vaddr_t)addr);
+        if (nv && nv->start == (vaddr_t)addr) {
+            uint32_t cap_bits = 0;
+            if (route_can & VMAR_CAN_MAP_READ)  cap_bits |= A20_PROT_READ;
+            if (route_can & VMAR_CAN_MAP_WRITE) cap_bits |= A20_PROT_WRITE;
+            if (route_can & VMAR_CAN_MAP_EXEC)  cap_bits |= A20_PROT_EXEC;
+            nv->vmar_cap = nv->vmar_cap ? (nv->vmar_cap & cap_bits) : cap_bits;
+        }
+        a20_object_release(route, A20_OBJ_VMAR);
+    }
+
     kargs.out_addr = addr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
         a20_vmar_unmap(addr, kargs.length);
+        return -A20_ERR_FAULT;
+    }
+    return A20_OK;
+}
+
+/* vm_create_vmar — sub-allocate an address-range reservation under a
+ * parent (or create a root when parent is NULL).  Ceilings narrow
+ * monotonically down the tree; ranges must be page-aligned, inside the
+ * parent, and disjoint from siblings (docs/native-abi/04-memory.md §3). */
+int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
+{
+    a20_vm_create_vmar_args_t *uargs =
+        (a20_vm_create_vmar_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_vm_create_vmar_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    const uint64_t known = A20_VMAR_CAN_MAP_READ | A20_VMAR_CAN_MAP_WRITE |
+                           A20_VMAR_CAN_MAP_EXEC | A20_VMAR_CAN_MAP_SPECIFIC;
+    if (kargs.flags & ~known) return -A20_ERR_INVALID_ARGUMENT;
+    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    vmar_t *parent = NULL;
+    if (kargs.parent != A20_HANDLE_NULL) {
+        a20_handle_entry_t pe;
+        int64_t pr = a20_handle_lookup_ref_internal(
+            ht, kargs.parent, A20_OBJ_VMAR, A20_RIGHT_MAP, &pe);
+        if (pr < 0) return pr;
+        parent = (vmar_t *)pe.object;
+    }
+
+    vmar_t *v = NULL;
+    int64_t r;
+    if (parent) {
+        r = vmar_create_child(parent, kargs.base, kargs.length,
+                              (uint32_t)kargs.flags, &v);
+        a20_object_release(parent, A20_OBJ_VMAR);
+    } else {
+        v = vmar_create_root(cur->mm, kargs.base, kargs.length,
+                             (uint32_t)kargs.flags);
+        r = v ? A20_OK : -A20_ERR_NO_MEMORY;
+    }
+    if (r < 0) return r;
+
+    int64_t h = a20_handle_install(ht, v, A20_OBJ_VMAR,
+                                   A20_RIGHT_MAP | A20_RIGHT_STAT |
+                                   A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
+                                   A20_RIGHT_CONTROL);
+    if (h < 0) { vmar_release(v); return h; }
+
+    kargs.out_vmar = (a20_handle_t)h;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)h); /* drops our reference */
         return -A20_ERR_FAULT;
     }
     return A20_OK;
@@ -203,7 +313,7 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
     struct a20_ht_internal *target_ht = ht;
     if (target_h != A20_HANDLE_NULL) {
         a20_handle_entry_t tgt_entry;
-        r = a20_handle_lookup_internal(ht, target_h, A20_OBJ_TASK,
+        r = a20_handle_lookup_task_like(ht, target_h,
                                        A20_RIGHT_CONTROL, &tgt_entry);
         if (r < 0) goto out_vmo;
 
@@ -279,18 +389,11 @@ int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args)
         kargs.length > USER_VA_LIMIT - kargs.addr)
         return -A20_ERR_INVALID_ARGUMENT;
 
-    uint64_t flags = spin_lock_irqsave(&cur->mm->lock);
-    vm_area_t *vma = mm_find_vma(cur->mm, kargs.addr);
-    if (!vma || (uint64_t)vma->start > kargs.addr ||
-        (uint64_t)vma->end < kargs.addr + kargs.length ||
-        !(vma->vm_flags & VM_VMO) || !vma->vmo) {
-        spin_unlock_irqrestore(&cur->mm->lock, flags);
+    uint32_t prot = 0;
+    struct vmo *vmo = mm_lookup_vmo_region(cur->mm, (vaddr_t)kargs.addr,
+                                           (size_t)kargs.length, &prot);
+    if (!vmo)
         return -A20_ERR_NOT_SUPPORTED;
-    }
-    struct vmo *vmo = vma->vmo;
-    vmo_ref(vmo);
-    uint32_t prot = mm_pte_flags_to_prot(vma->pte_flags);
-    spin_unlock_irqrestore(&cur->mm->lock, flags);
 
     a20_rights_t rights = 0;
     if (prot & A20_PROT_READ)  rights |= A20_RIGHT_READ;
@@ -351,10 +454,6 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
 {
     uint64_t addr = A20_ARG(0);
     uint64_t len = A20_ARG(1);
-    uint32_t advice = (uint32_t)A20_ARG(2);
-#ifdef CONFIG_NOMMU
-    (void)advice;
-#endif
 
     if (len == 0) return A20_OK;
     if (addr & 4095) return -A20_ERR_INVALID_ARGUMENT;
@@ -362,65 +461,29 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
-    uint64_t end = (addr + len + 4095) & ~(uint64_t)4095;
-    for (uint64_t va = addr; va < end; va += 4096) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
-        if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
-    }
-
-#ifndef CONFIG_NOMMU
-    if (advice == 4 /* MADV_DONTNEED */ || advice == 8 /* MADV_FREE */) {
-        mm_tlb_invalidate_begin(cur->mm);
-        uint64_t mm_flags = spin_lock_irqsave(&cur->mm->lock);
-        for (uint64_t va = addr; va < end; ) {
-            int level = 0;
-            vaddr_t base = 0;
-            size_t leaf_size = 0;
-            pte_t *pte = pt_lookup_leaf(cur->mm->pgdir, va, &level, &base, &leaf_size);
-            if (!pte || !(*pte & PTE_V)) { va += 4096; continue; }
-            vm_area_t *vma = mm_find_vma(cur->mm, va);
-            if (vma && (vma->vm_flags & VM_VMO)) {
-                /* VMO frames are owned by the VMO; unmapping a PTE must not
-                 * frame_put() them.  Drop the PTE and let the VMO keep the
-                 * canonical frame. */
-                paddr_t dummy = 0;
-                if (pt_unmap_leaf(cur->mm->pgdir, va, &dummy, &base,
-                                  &leaf_size, NULL) == 0) {
-                    mm_tlb_note_change(cur->mm, base, leaf_size);
-                    cur->mm->rss = (cur->mm->rss > leaf_size / 4096)
-                                       ? cur->mm->rss - leaf_size / 4096 : 0;
-                    va = base + leaf_size;
-                    continue;
-                }
-                va += 4096;
-                continue;
-            }
-            paddr_t pa = 0;
-            pfn_t held = phys_to_pfn(arch_pte_addr(*pte));
-            if (!pfn_valid(held) || mm_tlb_hold_frame(cur->mm, held) < 0) {
-                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
-                mm_tlb_invalidate_finish(cur->mm);
-                return -A20_ERR_NO_MEMORY;
-            }
-            if (pt_unmap_leaf(cur->mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
-                mm_tlb_note_change(cur->mm, base, leaf_size);
-                if (pa) {
-                    frame_put(phys_to_pfn(pa));
-                    size_t pages = leaf_size / 4096;
-                    cur->mm->rss = (cur->mm->rss > pages) ? cur->mm->rss - pages : 0;
-                }
-                va = base + leaf_size;
-            } else {
-                va += 4096;
-            }
-        }
-        spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
-        mm_tlb_invalidate_finish(cur->mm);
-    }
-#endif
+    int r = mm_madvise_dontneed(cur->mm, (vaddr_t)addr, (size_t)len);
+    if (r == -ENOMEM) return -A20_ERR_NO_MEMORY;
+    if (r < 0) return -A20_ERR_INVALID_ARGUMENT;
     return A20_OK;
 }
 
+/* A20_ERR <-> Linux errno mapping for core mm calls (mm/mremap.c et al). */
+static int64_t a20_mm_errno_map(int r)
+{
+    switch (r) {
+    case -EINVAL: return -A20_ERR_INVALID_ARGUMENT;
+    case -ENOMEM: return -A20_ERR_NO_MEMORY;
+    case -EFAULT: return -A20_ERR_FAULT;
+    case -EPERM:  return -A20_ERR_PERM;
+    default:      return -A20_ERR_INVALID_ARGUMENT;
+    }
+}
+
+/*
+ * vm_remap is VMA-aware: grow/shrink/move preserve file mappings and
+ * shared VMO frames (docs/native-abi/09-… §8 vm_remap row).  prot, when
+ * non-zero, re-applies protection over the resulting range.
+ */
 int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
 {
     uint64_t old_addr = A20_ARG(0);
@@ -433,41 +496,25 @@ int64_t sys_a20_vm_remap(const a20_syscall_args_t *args)
     if (new_len > (256ULL << 20) || old_len > (256ULL << 20))
         return -A20_ERR_INVALID_ARGUMENT;
 
-    if (new_len <= old_len) {
-        if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
-            return -A20_ERR_FAULT;
-        if (new_len < old_len)
-            proc_munmap(old_addr + new_len, (size_t)(old_len - new_len));
-        return (int64_t)old_addr;
-    }
-
+    task_t *cur = proc_current();
+    if (!cur || !cur->mm) return -A20_ERR_FAULT;
     if (!a20_mm_user_range_ok(old_addr, (size_t)old_len))
         return -A20_ERR_FAULT;
 
-    uint64_t new_addr = proc_mmap(new_addr_hint, (size_t)new_len,
-                                   (int)prot ? (int)prot : 3,
-                                   0x20 /* MAP_ANONYMOUS */, -1, 0);
-    if (new_addr == 0 || mm_addr_is_error((vaddr_t)new_addr))
-        return -A20_ERR_NO_MEMORY;
+    vaddr_t out = 0;
+    int r = mm_mremap(cur->mm, (vaddr_t)old_addr, (size_t)old_len,
+                      (size_t)new_len, MREMAP_MAYMOVE,
+                      (vaddr_t)new_addr_hint, &out);
+    if (r < 0)
+        return a20_mm_errno_map(r);
 
-    char kbuf[512];
-    uint64_t done = 0;
-    while (done < old_len) {
-        size_t chunk = old_len - done;
-        if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-        if (copy_from_user(kbuf, (const void *)(uintptr_t)(old_addr + done), chunk) < 0 ||
-            copy_to_user((void *)(uintptr_t)(new_addr + done), kbuf, chunk) < 0) {
-            proc_munmap(new_addr, (size_t)new_len);
-            return -A20_ERR_FAULT;
-        }
-        done += chunk;
+    if (prot && new_len) {
+        int pr = mm_mprotect(cur->mm, out, (size_t)new_len, (int)prot);
+        if (pr < 0)
+            return a20_mm_errno_map(pr);
     }
-    if (old_len > 0)
-        proc_munmap(old_addr, (size_t)old_len);
-
-    return (int64_t)new_addr;
+    return (int64_t)out;
 }
-
 
 int64_t sys_a20_vm_lock(const a20_syscall_args_t *args)
 {
@@ -482,15 +529,10 @@ int64_t sys_a20_vm_lock(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
-    for (uint64_t va = start; va < end; va += 4096) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
-        if (!vma) return -A20_ERR_NO_MEMORY;
-        if (flags & 0x01)
-            vma->vm_flags |= 0x08000000;
-        else
-            vma->vm_flags &= ~(uint64_t)0x08000000;
-    }
-    return A20_OK;
+    int r = mm_vma_set_lock(cur->mm, (vaddr_t)start, (vaddr_t)end,
+                            (flags & 0x01) ? 1 : 0);
+    if (r == -ENOMEM) return -A20_ERR_NO_MEMORY;
+    return r < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
 }
 
 int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
