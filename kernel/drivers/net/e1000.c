@@ -89,6 +89,10 @@ typedef struct {
     uint8_t mac[6];
     uint32_t rx_next;
     uint32_t tx_next;
+    /* LOCK_ORDER: per-NIC lock protects MMIO register sequencing and the
+     * TX/RX descriptor rings plus their bounce buffers.  The IRQ handler
+     * takes only g_lwip_lock (never this lock); send/recv take only this
+     * lock (never g_lwip_lock).  No nesting between the two exists. */
     spinlock_t lock;
     int irq;
     int irq_registered;
