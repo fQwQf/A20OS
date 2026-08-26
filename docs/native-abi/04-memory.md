@@ -100,7 +100,7 @@ VMO 的核心属性可以形式化为四元组：
 维护保留区间树——子节点区间必须落在父节点内且与兄弟不相交；能力天花板
 （`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射会把天花板写入 VMA 的
 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall：
-`A20_SYS_vm_create_vmar (0x030a)` 创建根（parent=NULL）或子节点并发布
+`A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布
 `A20_OBJ_VMAR` 句柄；`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由
 （含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚）。关闭句柄仅减引用：子节点
 持有父引用，树随最后一个引用消亡。
