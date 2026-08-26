@@ -1,4 +1,5 @@
 #include "syscall_impl.h"
+#include "proc/cred.h"
 
 /* LINUX_ABI_CAPABILITY_BOUNDARY: capget/capset map to A20 task credentials
  * (effective/permitted/inheritable/bounding sets) with Linux capability-set
@@ -127,30 +128,17 @@ int64_t sys_capset(void *hdrp, const void *datap)
         return -EFAULT;
     if (!cur) return -ESRCH;
 
-    uint64_t old_effective = cur->cred.cap_effective;
-    uint64_t old_permitted = cur->cred.cap_permitted;
-    uint64_t old_inheritable = cur->cred.cap_inheritable;
     uint64_t new_effective = cap_data_effective(data, words);
     uint64_t new_permitted = cap_data_permitted(data, words);
     uint64_t new_inheritable = cap_data_inheritable(data, words);
     if (words == 1) {
-        new_effective |= old_effective & 0xffffffff00000000ULL;
-        new_permitted |= old_permitted & 0xffffffff00000000ULL;
-        new_inheritable |= old_inheritable & 0xffffffff00000000ULL;
+        /* v1 wire data carries only the low 32 bits; keep the upper set. */
+        new_effective |= cur->cred.cap_effective & 0xffffffff00000000ULL;
+        new_permitted |= cur->cred.cap_permitted & 0xffffffff00000000ULL;
+        new_inheritable |= cur->cred.cap_inheritable & 0xffffffff00000000ULL;
     }
 
-    if ((new_effective & ~new_permitted) != 0)
-        return -EPERM;
-    if ((new_permitted & ~old_permitted) != 0)
-        return -EPERM;
-    uint64_t inheritable_allowed = old_inheritable | old_permitted;
-    if (old_effective & (1ULL << CAP_SETPCAP))
-        inheritable_allowed |= cur->cred.cap_bounding;
-    if ((new_inheritable & ~inheritable_allowed) != 0)
-        return -EPERM;
-
-    cur->cred.cap_effective = new_effective;
-    cur->cred.cap_permitted = new_permitted;
-    cur->cred.cap_inheritable = new_inheritable;
-    return 0;
+    return cred_capset_apply(&cur->cred, new_effective, new_permitted,
+                             new_inheritable);
 }
+

@@ -6,6 +6,7 @@
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
+#include "proc/cred.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -187,40 +188,6 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
     return 0;
 }
 
-static int cred_is_root(task_t *t) {
-    return proc_has_cap(t, CAP_SETUID);
-}
-
-static int cred_can_setgid(task_t *t) {
-    return proc_has_cap(t, CAP_SETGID);
-}
-
-static int uid_is_current(task_t *t, int uid) {
-    return uid == t->cred.uid || uid == t->cred.euid || uid == t->cred.suid;
-}
-
-static int gid_is_current(task_t *t, int gid) {
-    return gid == t->cred.gid || gid == t->cred.egid || gid == t->cred.sgid;
-}
-
-static void cred_update_uid_caps(task_t *t, int old_uid, int old_euid, int old_suid) {
-    if (!t) return;
-    int old_had_root = old_uid == 0 || old_euid == 0 || old_suid == 0;
-    int new_has_root = t->cred.uid == 0 || t->cred.euid == 0 || t->cred.suid == 0;
-
-    if (old_had_root && !new_has_root) {
-        t->cred.cap_effective = 0;
-        t->cred.cap_permitted = 0;
-        return;
-    }
-    if (old_euid == 0 && t->cred.euid != 0) {
-        t->cred.cap_effective = 0;
-        return;
-    }
-    if (old_euid != 0 && t->cred.euid == 0)
-        t->cred.cap_effective = t->cred.cap_permitted;
-}
-
 int64_t sys_getuid(void) {
     task_t *t = proc_current();
     return t ? t->cred.uid : 0;
@@ -245,79 +212,35 @@ int64_t sys_setuid(int uid) {
     if (uid < 0) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -EINVAL;
-    if (cred_is_root(t)) {
-        int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-        t->cred.uid = t->cred.euid = t->cred.suid = t->cred.fsuid = uid;
-        cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-        return 0;
-    }
-    if (!uid_is_current(t, uid)) return -EPERM;
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    t->cred.euid = t->cred.fsuid = uid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    return cred_setuid(t, uid);
 }
 
 int64_t sys_setgid(int gid) {
     if (gid < 0) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -EINVAL;
-    if (cred_can_setgid(t)) {
-        t->cred.gid = t->cred.egid = t->cred.sgid = t->cred.fsgid = gid;
-        return 0;
-    }
-    if (!gid_is_current(t, gid)) return -EPERM;
-    t->cred.egid = t->cred.fsgid = gid;
-    return 0;
+    return cred_setgid(t, gid);
 }
 
 int64_t sys_setreuid(int ruid, int euid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (ruid < -1 || euid < -1) return -EINVAL;
-    int privileged = cred_is_root(t);
-    if (!privileged) {
-        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
-        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
-    }
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) t->cred.euid = t->cred.fsuid = euid;
-    if (ruid != -1 || euid != -1) t->cred.suid = t->cred.euid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    return cred_setreuid(t, ruid, euid);
 }
 
 int64_t sys_setregid(int rgid, int egid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (rgid < -1 || egid < -1) return -EINVAL;
-    if (!cred_can_setgid(t)) {
-        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
-        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
-    }
-    if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) t->cred.egid = t->cred.fsgid = egid;
-    if (rgid != -1 || egid != -1) t->cred.sgid = t->cred.egid;
-    return 0;
+    return cred_setregid(t, rgid, egid);
 }
 
 int64_t sys_setresuid(int ruid, int euid, int suid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (ruid < -1 || euid < -1 || suid < -1) return -EINVAL;
-    int privileged = cred_is_root(t);
-    if (!privileged) {
-        if (ruid != -1 && !uid_is_current(t, ruid)) return -EPERM;
-        if (euid != -1 && !uid_is_current(t, euid)) return -EPERM;
-        if (suid != -1 && !uid_is_current(t, suid)) return -EPERM;
-    }
-    int old_uid = t->cred.uid, old_euid = t->cred.euid, old_suid = t->cred.suid;
-    if (ruid != -1) t->cred.uid = ruid;
-    if (euid != -1) t->cred.euid = t->cred.fsuid = euid;
-    if (suid != -1) t->cred.suid = suid;
-    cred_update_uid_caps(t, old_uid, old_euid, old_suid);
-    return 0;
+    return cred_setresuid(t, ruid, euid, suid);
 }
 
 int64_t sys_getresuid(int *ruid, int *euid, int *suid) {
@@ -333,15 +256,7 @@ int64_t sys_setresgid(int rgid, int egid, int sgid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (rgid < -1 || egid < -1 || sgid < -1) return -EINVAL;
-    if (!cred_can_setgid(t)) {
-        if (rgid != -1 && !gid_is_current(t, rgid)) return -EPERM;
-        if (egid != -1 && !gid_is_current(t, egid)) return -EPERM;
-        if (sgid != -1 && !gid_is_current(t, sgid)) return -EPERM;
-    }
-    if (rgid != -1) t->cred.gid = rgid;
-    if (egid != -1) t->cred.egid = t->cred.fsgid = egid;
-    if (sgid != -1) t->cred.sgid = sgid;
-    return 0;
+    return cred_setresgid(t, rgid, egid, sgid);
 }
 
 int64_t sys_getresgid(int *rgid, int *egid, int *sgid) {
@@ -356,19 +271,13 @@ int64_t sys_getresgid(int *rgid, int *egid, int *sgid) {
 int64_t sys_setfsuid(int uid) {
     task_t *t = proc_current();
     if (!t) return 0;
-    int old = t->cred.fsuid;
-    if (uid >= 0 && (cred_is_root(t) || uid_is_current(t, uid)))
-        t->cred.fsuid = uid;
-    return old;
+    return cred_setfsuid(t, uid);
 }
 
 int64_t sys_setfsgid(int gid) {
     task_t *t = proc_current();
     if (!t) return 0;
-    int old = t->cred.fsgid;
-    if (gid >= 0 && (cred_can_setgid(t) || gid_is_current(t, gid)))
-        t->cred.fsgid = gid;
-    return old;
+    return cred_setfsgid(t, gid);
 }
 
 int64_t sys_getpgid(int pid) {
