@@ -181,10 +181,10 @@
 - [x] 在把驱动模型视为通用模型前，增加 hotplug 和 remove-path 生命周期测试。
   - 源码证据：`kernel/drivers/core/driver_lifecycle_test.c`（CONFIG_DRIVER_LIFECYCLE_TEST 门控，读 /proc/a20/driver_lifecycle 或启动时自动运行）覆盖全部完成条件——bind（成功 probe 绑定 + class_dev 发布 online）、probe failure（强制失败断言无半绑定状态且 probe_count==1）、remove（driver_unregister 与 device_unregister 两路径均断言回调触发与 DEV_STATE_REMOVED）、re-probe（re-register 自动重探 probe_count==2 + 显式重探已绑设备返 -EBUSY）、资源清理（stale class_device 访问返 -ENODEV、out 路径保证注册表必然清理）；另覆盖重复注册 -EEXIST×3 与 bus/driver 双层 match 拒绝。
   - 门禁：smoke-driver-lifecycle riscv64 PASS；顺带修复该目标构建命令缺失 USER_BUILD_DESKTOP=0 导致连带编译 GUI 桌面组件的问题——本测试为纯内核侧，无需桌面组件。
-- [ ] 将设备特定锁顺序移动到驱动文档中，放在每个私有锁旁边。
-  - 证据：`kernel/include/core/lock.h` 要求新锁符合全局顺序，或记录局部顺序。
-  - 设计：`docs/drivers/guide/lock-order.md` 和已更新的 `kernel/include/core/lock.h` 注释（Wave 1 已完成）；inline `LOCK_ORDER:` 注释将在实现期间加入。
-  - 完成条件：virtio-blk、virtio-net、UART、PTY、loop、SDIO 和平台 NIC 都记录各自私有锁规则。
+- [x] 将设备特定锁顺序移动到驱动文档中，放在每个私有锁旁边。
+  - 源码证据：以下驱动的私有锁声明旁均已添加 LOCK_ORDER 注释记录各自的保护范围和嵌套规则——virtio-blk（4 处）、virtio-net（8 处）、UART（11 处）、PTY（完整 per-pair + alloc lock 体系）、loop（9 处）、SDIO/dw_sdio、ls2k_gmac、starfive_gmac、e1000（per-NIC lock 与 g_lwip_lock 无嵌套）。
+  - 设计：`docs/drivers/guide/lock-order.md`；用户决策：面向用户的 `/proc/a20/driver_lifecycle` 触发器。
+  - 完成条件达成：virtio-blk、virtio-net、UART、PTY、loop、SDIO 和平台 NIC 都记录了各自私有锁规则。
 
 ## P2：测试门禁与工具
 
