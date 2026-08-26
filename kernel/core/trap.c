@@ -184,16 +184,42 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
 
 /*
  * Called from __trap_from_kernel when the interrupted kernel stack pointer
- * lies outside the direct map: saving registers through it would fault
- * forever.  Runs on a dedicated emergency stack; never returns.
+ * is corrupted.  Classifies the corruption (out-of-range or freed-page),
+ * dumps task context, and panics.  Runs on a dedicated emergency stack;
+ * never returns.
  */
 void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
                               unsigned long sepc, unsigned long stval)
 {
-    kerr("[TRAP] corrupted kernel sp: bad_sp=0x%lx sstatus=0x%lx "
-         "sepc=0x%lx stval=0x%lx",
+    task_t *cur = proc_current();
+
+    kerr("[TRAP] corrupted kernel sp detected");
+    kerr("[TRAP]   bad_sp=0x%lx sstatus=0x%lx sepc=0x%lx stval=0x%lx",
          bad_sp, sstatus, sepc, stval);
-    kerr("[TRAP] refusing to save registers through a bad stack");
+
+    if (bad_sp >= g_pfa_direct_map_end) {
+        kerr("[TRAP]   sp beyond direct map end 0x%llx — unmapped region",
+             (unsigned long long)g_pfa_direct_map_end);
+    } else if (g_pfa_freemap) {
+        pfn_t pfn = (pfn_t)((bad_sp - PAGE_OFFSET) >> PAGE_SIZE_BITS);
+        if (pfn_valid(pfn)) {
+            int on_freemap = (g_pfa_freemap[pfn >> 3] >> (pfn & 7)) & 1;
+            if (on_freemap)
+                kerr("[TRAP]   pfn %u sits on buddy free list — "
+                     "use-after-free of stack page", pfn);
+        }
+    }
+
+    if (cur) {
+        kerr("[TRAP]   current: pid=%d tgid=%d ppid=%d "
+             "kstack_base=%p kstack=0x%lx state=%d",
+             cur->pid, cur->tgid, cur->ppid,
+             cur->kstack_base, (unsigned long)cur->kstack, cur->state);
+    } else {
+        kerr("[TRAP]   current: NULL");
+    }
+
+    kerr("[TRAP] refusing to save registers through a corrupted stack");
     pfa_hist_dump();
     panic("trap: corrupted kernel stack pointer");
 }
