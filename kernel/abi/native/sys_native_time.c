@@ -305,9 +305,22 @@ int64_t sys_a20_clock_set(const a20_syscall_args_t *args)
 {
     uint32_t clock_id = (uint32_t)A20_ARG(0);
     a20_time_ns_t value = (a20_time_ns_t)A20_ARG(1);
-    (void)value;
     if (clock_id > 1) return -A20_ERR_INVALID_ARGUMENT;
-    return -A20_ERR_PERM;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+    /* Wall-clock adjustment is reserved for the system security label
+     * (label lattice: lower = more privileged; 0 = system). */
+    if (a20_ht_get_label(ht) != 0)
+        return -A20_ERR_PERM;
+    /* CLOCK_REALTIME only: CLOCK_MONOTONIC has no settable epoch. */
+    if (clock_id != 0)
+        return -A20_ERR_INVALID_ARGUMENT;
+
+    return timekeeping_set_realtime(value / 1000000000ULL,
+                                    value % 1000000000ULL) == 0
+               ? A20_OK : -A20_ERR_INVALID_ARGUMENT;
 }
 
 int64_t sys_a20_clock_resolution(const a20_syscall_args_t *args)
