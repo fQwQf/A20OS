@@ -215,8 +215,9 @@
   - 证据：根 `Makefile` 的 `CFLAGS` 默认带 `-Werror`（`KERNEL_WERROR=0` 逃生口）；riscv64/loongarch64 的 `linux` 与 `both` ABI、bringup/dev/SMP2 配置全部零警告。顺带修复：`io_pgetevents` 读取 `arg[6]` 越界（64 位 ABI 无第 7 参）、COW fault 全局计数不在成功分支内、`a20_prepare_start_info` 的 uint32 handle 错误检测恒假（失败时静默写入 0xFFFFFFFF）。架构门禁列表合并为 `SUPPORTED_HOSTED_ARCHES` 单一真源；STM32 产物路径由 `BUILD_VARIANT` 派生，flash/QEMU 目标经嵌套 make 保持同配置。
   - 验证：`make -B ARCH=riscv64/loongarch64 ABI=linux/both BRINGUP=1 kernel-only` 零警告；`smoke-native-handle`、`smoke-native-contract` PASS（2026-08 历史记录）。
   - 剩余：aarch64/x86_64/arm32/riscv32/ppc64le/armv7m/loongarch32 的警告状态未在无工具链主机上复核，首次构建如遇残留警告需 `KERNEL_WERROR=0` 过渡。
-- [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
+- [x] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
   - 证据：`docs/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
+  - 审计（2026-08-26）：全部 `kernel` 目录级 `rg` 扫描均携带 `--glob '!kernel/external/**'` 排除（tools/stm32.mk、tools/targets-build.mk 共 5 处）；`user/` 侧检查全部是对具名第一方文件（user/tests/、user/cmds/stress/）的 marker 断言，零目录级扫描，vendored 目录（musl/mlibc/sbase/gcc 等）不被任何第一方门禁触及。政策已明文写入 `docs/testing-gates.md` 的"外部依赖边界"一节，含集成测试例外条款，防止未来检查目标静默漂移。
   - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
 - [x] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
   - 源码证据：`tools/targets-build.mk` 新增 `check-upgrade-userland-smokes` 聚合目标（smoke-abi-linux + smoke-mlibc + smoke-mlibc-sbase + smoke-mlibc-mksh，即 syscall/shell/coreutils 三组）并注册进 check 目标帮助列表；`docs/external-dependencies.md` 的 EXTERNAL_USERLAND_UPGRADE_CHECKLIST 条目现指向具体目标名。修改 musl/sbase/mksh 后一条命令即可运行全部相关门禁组；lwIP 见网络节、TLSe/wget 见各自集成说明。
