@@ -57,6 +57,7 @@ static inline a20_status_t a20_vm_map(a20_handle_t source, uint64_t length,
     args.prot      = prot;
     args.flags     = 0;
     args.out_addr  = 0;
+    args.vmar      = A20_HANDLE_NULL;
     a20_status_t r = a20_syscall6(A20_SYS_vm_map, (uint64_t)&args, 0, 0, 0, 0, 0);
     if (r >= 0 && out_addr) *out_addr = args.out_addr;
     return r;
@@ -66,5 +67,51 @@ void *a20_malloc(uint64_t size);
 void  a20_free(void *ptr);
 void *a20_calloc(uint64_t nmemb, uint64_t size);
 void *a20_realloc(void *ptr, uint64_t size);
+
+/* ---- VMAR reservations (04-memory §3) ---- */
+
+static inline a20_status_t a20_vm_create_vmar(a20_handle_t parent,
+                                              uint64_t base, uint64_t length,
+                                              uint64_t flags,
+                                              a20_handle_t *out_vmar)
+{
+    a20_vm_create_vmar_args_t args;
+    args.size    = sizeof(args);
+    args.version = 1;
+    args.parent  = parent;
+    args._pad    = 0;
+    args.base    = base;
+    args.length  = length;
+    args.flags   = flags;
+    a20_status_t st = a20_syscall6(A20_SYS_vm_create_vmar, (uint64_t)&args, 0, 0, 0, 0, 0);
+    if (st >= 0 && out_vmar) *out_vmar = args.out_vmar;
+    return st;
+}
+
+/* Map through a VMAR: same contract as a20_vm_map plus containment and
+ * ceiling enforcement. */
+static inline a20_status_t a20_vm_map_in_vmar(a20_handle_t vmar,
+                                              a20_handle_t source,
+                                              uint64_t addr_hint,
+                                              uint64_t length, uint64_t offset,
+                                              uint32_t prot, uint32_t flags,
+                                              uint64_t *out_addr)
+{
+    a20_vm_map_args_t args;
+    args.size      = sizeof(args);
+    args.version   = 1;
+    args.source    = source;
+    args._pad      = 0;
+    args.addr_hint = addr_hint;
+    args.length    = length;
+    args.offset    = offset;
+    args.prot      = prot;
+    args.flags     = flags;
+    args.out_addr  = 0;
+    args.vmar      = vmar;
+    a20_status_t st = a20_syscall6(A20_SYS_vm_map, (uint64_t)&args, 0, 0, 0, 0, 0);
+    if (st >= 0 && out_addr) *out_addr = args.out_addr;
+    return st;
+}
 
 #endif

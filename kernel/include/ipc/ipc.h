@@ -41,6 +41,7 @@ typedef enum a20_object_type {
     A20_OBJ_EXT_PROG         = 14,
     A20_OBJ_PAGER            = 15,  /* user-space pager (docs/native-abi/09) */
     A20_OBJ_MONITOR          = 16,  /* perf-style counter object */
+    A20_OBJ_VMAR             = 17,  /* address-region reservation node */
 } a20_object_type_t;
 
 /* 14 capability rights bits (docs/native-abi/06-security.md §1) */
@@ -215,7 +216,8 @@ typedef struct a20_watch_entry {
     a20_handle_t            target_handle;
     void                   *target_object;
     uint16_t                target_type;
-    uint16_t                _pad;
+    uint16_t                flags; /* A20_WATCH_F_* */
+#define A20_WATCH_F_LEVEL  0x0001u
     uint64_t                event_mask;
     uint64_t                user_data;
     struct a20_eventq      *owner_queue;
@@ -347,7 +349,11 @@ void a20_channel_ep_peer_shutdown(a20_channel_ep_t *ep);
 
 a20_eventq_t *a20_eventq_create(uint32_t capacity_hint);
 int64_t a20_eventq_watch(a20_eventq_t *eq, a20_handle_t target_h, void *target_obj,
-                         uint16_t target_type, uint64_t event_mask, uint64_t user_data);
+                         uint16_t target_type, uint64_t event_mask, uint64_t user_data, uint16_t watch_flags);
+
+/* Synchronous readiness bits for non-vfile-backed objects (channel
+ * endpoints today): the level-mode complement of handle_poll's dispatch. */
+uint64_t a20_eventq_level_bits(const void *object, uint16_t type);
 int64_t a20_eventq_wait(a20_eventq_t *eq, a20_pending_event_t *out,
                         uint32_t max_events, uint64_t timeout_ns);
 int64_t a20_eventq_cancel(a20_eventq_t *eq, a20_handle_t target_h);

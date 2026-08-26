@@ -104,6 +104,19 @@ static a20_status_t spawn_pager_thread(void (*fn)(uint64_t))
     return a20_thread_create(&tc);
 }
 
+static a20_handle_t g_sig_rx = A20_HANDLE_NULL;
+static volatile int g_sig_keep = 1;
+static void sig_sleeper_entry(uint64_t arg)
+{
+    (void)arg;
+    static uint8_t sb[8];
+    while (g_sig_keep) {
+        uint32_t bl = sizeof(sb);
+        uint32_t hn = 0;
+        a20_channel_recv(g_sig_rx, sb, &bl, NULL, &hn);
+    }
+}
+
 int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
@@ -290,6 +303,51 @@ int main(int argc, char **argv, char **envp)
     if (st < 0) return fail(31, "sock event wait", 16);
     if (ev.type != A20_EVENT_READABLE || ev.user_data != 0x1234)
         return fail(32, "sock event payload", 18);
+
+    a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: step-sigev\n", 26, (void *)0);
+    /* ---- 8. Signals surface as EventQ events ---- */
+    {
+        a20_channel_pair_t spair;
+        st = a20_channel_create(&spair);
+        if (st < 0) return fail(33, "sig pair", 9);
+        g_sig_rx = spair.endpoints[1];
+
+        uint64_t slstack = 0;
+        st = a20_vm_alloc_pages(8, 3 /* RW */, &slstack);
+        if (st < 0) return fail(34, "sleeper stack", 14);
+        a20_thread_create_args_t tc2 = {0};
+        tc2.entry = (uint64_t)sig_sleeper_entry;
+        tc2.arg = 0;
+        tc2.stack_base = (slstack + 8 * 4096) & ~15ULL;
+        tc2.stack_size = 8 * 4096;
+        tc2.tls_base = 0;
+        st = a20_thread_create(&tc2);
+        if (st < 0) return fail(35, "sleeper create", 15);
+        a20_handle_t child_h = tc2.out_thread;
+
+        a20_handle_t sigq;
+        st = a20_event_queue_create(&sigq);
+        if (st < 0) return fail(36, "sig queue", 10);
+        st = a20_task_watch_signals(sigq, child_h, 0xC0DE);
+        if (st < 0) return fail(37, "sig watch", 10);
+
+        st = a20_syscall6(A20_SYS_task_kill, child_h, 10 /* SIGUSR1 */,
+                          0, 0, 0, 0);
+        if (st < 0) return fail(38, "task_kill", 10);
+
+        a20_event_t sev;
+        a20_memset(&sev, 0, sizeof(sev));
+        a20_time_t sto = { .secs = 0, .nsecs = 0 };
+        st = a20_event_wait(sigq, sto, &sev);
+        if (st < 0) return fail(39, "sig event wait", 15);
+        if (sev.type != A20_EVENT_SIGNALED || sev.data0 != 10 ||
+            sev.user_data != 0xC0DE)
+            return fail(40, "sig event payload", 18);
+
+        g_sig_keep = 0;
+        /* Handles intentionally left open: the child may still be draining
+         * its receive loop, and this process exits immediately after. */
+    }
 
     if (g_out != A20_HANDLE_NULL) {
         a20_hdl_write_buf(g_out, "NATIVE_DEEPEN: PASS\n", 21, (void *)0);

@@ -182,6 +182,17 @@ void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma);
 void mm_vma_flush_deferred(mm_struct_t *mm);
 vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
 
+struct vmo;
+/* VMO-backed range export: returns a referenced VMO when [addr, addr+len)
+ * is fully covered by a single VM_VMO VMA; prot_out receives the mapping's
+ * protection bits.  Returns NULL when the range does not qualify. */
+struct vmo *mm_lookup_vmo_region(mm_struct_t *mm, vaddr_t addr, size_t len,
+                                 uint32_t *prot_out);
+/* MADV_DONTNEED/MADV_FREE page discard over [addr, addr+len). */
+int  mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len);
+/* Toggle the mlock-style VMA flag over [start, end) under mm->lock. */
+int  mm_vma_set_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end, int on);
+
 vaddr_t    mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len);
 void       mm_insert_vma(mm_struct_t *mm, vm_area_t *newv);
 int        mm_split_vma_at(mm_struct_t *mm, vaddr_t addr);

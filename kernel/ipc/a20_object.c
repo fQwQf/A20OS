@@ -8,6 +8,7 @@
  * Timer slots exist only in ABI=both builds; the weak no-ops below keep
  * linux-only links working.
  */
+#include "mm/vmar.h"
 #include "core/types.h"
 #include "core/refcount.h"
 #include "mm/slab.h"
@@ -59,6 +60,9 @@ void a20_object_ref(void *object, uint16_t type)
     case A20_OBJ_MONITOR:
         a20_monitor_ref((a20_monitor_t *)object);
         break;
+    case A20_OBJ_VMAR:
+        vmar_acquire((vmar_t *)object);
+        break;
     default:
         /* TASK/THREAD/DEBUG store integer pids — no backing object. */
         break;
@@ -109,6 +113,9 @@ void a20_object_release(void *object, uint16_t type)
         break;
     case A20_OBJ_MONITOR:
         a20_monitor_release((a20_monitor_t *)object);
+        break;
+    case A20_OBJ_VMAR:
+        vmar_release((vmar_t *)object);
         break;
     case A20_OBJ_EXT_PROG:
         /* Dropping the last handle releases the extension program; the
