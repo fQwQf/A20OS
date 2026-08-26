@@ -705,6 +705,79 @@ static int scenario_eventfd_signal(int block_signal)
     return result;
 }
 
+static int scenario_fd_churn(void)
+{
+    for (int i = 0; i < 200; i++) {
+        int p[2];
+        if (pipe(p) < 0)
+            return fail("fdchurn-pipe");
+        int d = dup(p[0]);
+        if (d < 0)
+            return fail("fdchurn-dup");
+        int f = open("/proc/self/stat", O_RDONLY);
+        if (f < 0)
+            return fail("fdchurn-open");
+        char buf[64];
+        (void)read(f, buf, sizeof(buf));
+        close(f);
+        close(d);
+        close(p[0]);
+        close(p[1]);
+    }
+    int fds[128];
+    int n = 0;
+    for (; n < 128; n++) {
+        fds[n] = open("/proc/self/stat", O_RDONLY);
+        if (fds[n] < 0)
+            break;
+    }
+    for (int i = 0; i < n; i++)
+        close(fds[i]);
+    if (n < 128)
+        return fail("fdchurn-leak");
+    return 0;
+}
+
+static int scenario_reap_churn(void)
+{
+    enum { WAVES = 4, PER_WAVE = 16 };
+    int total = WAVES * PER_WAVE;
+    int reaped = 0;
+    for (int wv = 0; wv < WAVES; wv++) {
+        for (int i = 0; i < PER_WAVE; i++) {
+            pid_t pid = fork();
+            if (pid < 0)
+                return fail("reapchurn-fork");
+            if (pid == 0)
+                _exit(i & 0x7f);
+        }
+        for (;;) {
+            int st;
+            pid_t r = waitpid(-1, &st, WNOHANG);
+            if (r > 0) {
+                reaped++;
+                continue;
+            }
+            if (r == 0 || (r < 0 && errno == ECHILD))
+                break;
+            return fail("reapchurn-sweep");
+        }
+    }
+    while (reaped < total) {
+        int st;
+        pid_t r = waitpid(-1, &st, 0);
+        if (r > 0) {
+            reaped++;
+            continue;
+        }
+        return fail("reapchurn-drain");
+    }
+    errno = 0;
+    if (waitpid(-1, NULL, WNOHANG) != -1 || errno != ECHILD)
+        return fail("reapchurn-stray");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--verify-exec-args") == 0)
@@ -744,6 +817,12 @@ int main(int argc, char **argv)
     if (scenario_vfork_auto_reap() != 0)
         return 1;
     printf("PROC_STRESS: vfork-auto-reap PASS\n");
+    if (scenario_fd_churn() != 0)
+        return 1;
+    printf("PROC_STRESS: fd-churn PASS\n");
+    if (scenario_reap_churn() != 0)
+        return 1;
+    printf("PROC_STRESS: reap-churn PASS\n");
     if (scenario_signal_stop_exit() != 0)
         return 1;
     printf("PROC_STRESS: signal-stop-exit PASS\n");
