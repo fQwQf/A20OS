@@ -24,7 +24,6 @@
 #include "fs/xattr.h"
 #include "net/socket.h"
 #include "sys/usercopy.h"
-#include "core/klog.h"
 
 #include "abi/native/types.h"
 #include "abi/native/errno.h"
@@ -33,6 +32,7 @@
 #include "sys_validate.h"
 #include "abi/native/startup.h"
 #include "abi/native/vmo.h"
+#include "mm/vmar.h"
 #include "abi/native/vmar.h"
 #include "abi/native/ipc_internal.h"
 #include "abi/native/resource.h"
@@ -117,6 +117,40 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
+    /* Map through a VMAR reservation when one is supplied (04-memory §3):
+     * the range must land inside the node and prot must fit its ceiling. */
+    vmar_t *route = NULL;
+    if (kargs.vmar != A20_HANDLE_NULL) {
+        struct a20_ht_internal *ht0 = task_get_a20_ht(cur);
+        if (!ht0) return -A20_ERR_BAD_HANDLE;
+        a20_handle_entry_t ve;
+        int64_t vr = a20_handle_lookup_ref_internal(
+            ht0, kargs.vmar, A20_OBJ_VMAR, A20_RIGHT_MAP, &ve);
+        if (vr < 0) return vr;
+        route = (vmar_t *)ve.object; /* ref held until after install */
+    }
+
+    /* Ceiling checks for maps routed through a VMAR (04-memory §3):
+     * requested prot bits must fit the node's ceiling and fixed-address
+     * placement needs VMAR_CAN_MAP_SPECIFIC.  After success the ceiling is
+     * stamped into the VMA's vmar_cap so later protect() stays within what
+     * authorized the mapping. */
+    uint32_t route_can = 0;
+    if (route) {
+        if (kargs.prot & A20_PROT_READ)  route_can |= VMAR_CAN_MAP_READ;
+        if (kargs.prot & A20_PROT_WRITE) route_can |= VMAR_CAN_MAP_WRITE;
+        if (kargs.prot & A20_PROT_EXEC)  route_can |= VMAR_CAN_MAP_EXEC;
+        if ((kargs.flags & MAP_FIXED) &&
+            !(route->cap & VMAR_CAN_MAP_SPECIFIC)) {
+            a20_object_release(route, A20_OBJ_VMAR);
+            return -A20_ERR_ACCESS;
+        }
+        if (!vmar_cap_allows(route, route_can)) {
+            a20_object_release(route, A20_OBJ_VMAR);
+            return -A20_ERR_ACCESS;
+        }
+    }
+
     uint64_t addr = 0;
     int64_t r = A20_OK;
 
@@ -177,9 +211,84 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         if (r < 0) return r;
     }
 
+    if (route && !vmar_contains(route, addr, kargs.length)) {
+        a20_vmar_unmap(addr, kargs.length);
+        a20_object_release(route, A20_OBJ_VMAR);
+        return -A20_ERR_NO_SPACE;
+    }
+    if (route) {
+        vm_area_t *nv = mm_find_vma(cur->mm, (vaddr_t)addr);
+        if (nv && nv->start == (vaddr_t)addr) {
+            uint32_t cap_bits = 0;
+            if (route_can & VMAR_CAN_MAP_READ)  cap_bits |= A20_PROT_READ;
+            if (route_can & VMAR_CAN_MAP_WRITE) cap_bits |= A20_PROT_WRITE;
+            if (route_can & VMAR_CAN_MAP_EXEC)  cap_bits |= A20_PROT_EXEC;
+            nv->vmar_cap = nv->vmar_cap ? (nv->vmar_cap & cap_bits) : cap_bits;
+        }
+        a20_object_release(route, A20_OBJ_VMAR);
+    }
+
     kargs.out_addr = addr;
     if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
         a20_vmar_unmap(addr, kargs.length);
+        return -A20_ERR_FAULT;
+    }
+    return A20_OK;
+}
+
+/* vm_create_vmar — sub-allocate an address-range reservation under a
+ * parent (or create a root when parent is NULL).  Ceilings narrow
+ * monotonically down the tree; ranges must be page-aligned, inside the
+ * parent, and disjoint from siblings (docs/native-abi/04-memory.md §3). */
+int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
+{
+    a20_vm_create_vmar_args_t *uargs =
+        (a20_vm_create_vmar_args_t *)A20_ARG(0);
+    if (!uargs) return -A20_ERR_FAULT;
+
+    a20_vm_create_vmar_args_t kargs;
+    A20_VALIDATE_AND_COPY(uargs, kargs);
+
+    const uint64_t known = A20_VMAR_CAN_MAP_READ | A20_VMAR_CAN_MAP_WRITE |
+                           A20_VMAR_CAN_MAP_EXEC | A20_VMAR_CAN_MAP_SPECIFIC;
+    if (kargs.flags & ~known) return -A20_ERR_INVALID_ARGUMENT;
+    if (kargs.length == 0) return -A20_ERR_INVALID_ARGUMENT;
+
+    task_t *cur = proc_current();
+    struct a20_ht_internal *ht = task_get_a20_ht(cur);
+    if (!ht) return -A20_ERR_BAD_HANDLE;
+
+    vmar_t *parent = NULL;
+    if (kargs.parent != A20_HANDLE_NULL) {
+        a20_handle_entry_t pe;
+        int64_t pr = a20_handle_lookup_ref_internal(
+            ht, kargs.parent, A20_OBJ_VMAR, A20_RIGHT_MAP, &pe);
+        if (pr < 0) return pr;
+        parent = (vmar_t *)pe.object;
+    }
+
+    vmar_t *v = NULL;
+    int64_t r;
+    if (parent) {
+        r = vmar_create_child(parent, kargs.base, kargs.length,
+                              (uint32_t)kargs.flags, &v);
+        a20_object_release(parent, A20_OBJ_VMAR);
+    } else {
+        v = vmar_create_root(cur->mm, kargs.base, kargs.length,
+                             (uint32_t)kargs.flags);
+        r = v ? A20_OK : -A20_ERR_NO_MEMORY;
+    }
+    if (r < 0) return r;
+
+    int64_t h = a20_handle_install(ht, v, A20_OBJ_VMAR,
+                                   A20_RIGHT_MAP | A20_RIGHT_STAT |
+                                   A20_RIGHT_DUP | A20_RIGHT_TRANSFER |
+                                   A20_RIGHT_CONTROL);
+    if (h < 0) { vmar_release(v); return h; }
+
+    kargs.out_vmar = (a20_handle_t)h;
+    if (a20_copy_struct_to_user(uargs, &kargs, sizeof(kargs)) < 0) {
+        a20_handle_remove(ht, (a20_handle_t)h); /* drops our reference */
         return -A20_ERR_FAULT;
     }
     return A20_OK;

@@ -41,6 +41,7 @@ typedef enum a20_object_type {
     A20_OBJ_EXT_PROG         = 14,
     A20_OBJ_PAGER            = 15,  /* user-space pager (docs/native-abi/09) */
     A20_OBJ_MONITOR          = 16,  /* perf-style counter object */
+    A20_OBJ_VMAR             = 17,  /* address-region reservation node */
 } a20_object_type_t;
 
 /* 14 capability rights bits (docs/native-abi/06-security.md §1) */
