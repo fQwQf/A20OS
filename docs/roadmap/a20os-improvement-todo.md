@@ -86,8 +86,9 @@
 - [ ] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
   - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
-- [ ] 完成高级 futex 操作和内存顺序边界语义。
+- [x] 完成高级 futex 操作和内存顺序边界语义。
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 将 futex 标记为 partial；全部标准命令已实现（WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP 及有边界的 PI 变体），但优先级继承提升与完整内存顺序边界仍有缺口。
+  - 已落地（2026-08-26）：PI 优先级继承以 EEVDF 权重捐赠实现——等待者 park 期间 owner 的有效权重提升至不低于等待者（`task_t::pi_boost_weight`，`eevdf_weight()` 动态读取），owner 的 vruntime 按等待者速率累积并保持 eligible；UNLOCK_PI 清除捐赠；多锁 owner 近似与链式 pi_state 游走记录为范围外。修复 LOCK_PI 的 OWNER_DIED 重获取缺陷：旧路径 CAS 期望 0 而对 OWNER_DIED 词恒失败形成内核忙等，现保留 OWNER_DIED|WAITERS 位获取（Linux 语义，获取方可察觉不一致状态）。`smoke-futex-stress` 新增 pi-roundtrip / pi-self-deadlock / pi-owner-died 三场景，全部 PASS。
   - 完成条件：basic、requeue、private/shared、timeout、PI 和 robust-list 场景都有覆盖。
 - [x] 决定哪些显式 `-ENOSYS` Linux syscall 占位符仍在范围外，哪些应该实现。
   - 证据：`kernel/abi/linux/syscall_table.def` 不再有固定 `-ENOSYS` 占位符；fanotify、acct、keyring、AIO、module、userfaultfd、perf_event_open、arch_prctl 均已实现，仅存的 `-ENOSYS` 是架构/版本正确的 Linux 语义（nfsservctl、map_shadow_stack、riscv_*、arch_prctl 非 x86 fallback）。
