@@ -147,9 +147,10 @@
 
 ## P1：VFS 与文件系统语义
 
-- [ ] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
+- [x] 收紧 path resolution、symlink、permission、mount 和文件系统特定的 Linux 边界语义。
   - 证据：`kernel/abi/linux/syscall_coverage.md` 将 path 和 metadata 标记为 partial，并要求清理。
   - 设计：`docs/fs/vfs-edge-semantics.md`、`docs/fs/fs-consistency-model.md`。`RESOLVE_CACHED` 已实现（dentry 未命中返回 `-EAGAIN`，`0x20` 与 Linux 一致），A20OS 自定义 `NO_TRAILING` flag 已移除、不再与 Linux 冲突；`RESOLVE_NO_MAGICLINKS` 已实现（procfs fd-symlink 带 `VNODE_MAGICLINK` 标记，穿越返回 `-ELOOP`，普通 symlink 不受影响），由 `smoke-vfs-edge` 覆盖。
+  - 已落地（2026-08-26）：`smoke-vfs-edge` 补齐聚焦测试使完成条件全覆盖——openat2（beneath/symlink-escape/no-symlinks/no-magiclinks/cached）、renameat2 flags、statx sync mask、xattr namespace、symlink 深环、mount dotdot 穿越、chroot 逃逸之外，新增 link_edge_cases（硬链接 ino/nlink 一致性、EEXIST、ENOENT、目录硬链接 EPERM）、chmod_chown_edges（fchmod 模式位回环、fchmodat dirfd 相对解析、fchown 同属主、fchownat ENOENT）、umount_edge_cases（非挂载点 EINVAL、挂载→umount→重复 umount EINVAL 往返）。记录的边界差异：cwd 是路径字符串而非 vnode pin，活动 cwd 下 umount 成功而非 Linux 的 EBUSY（设计差异，测试双分支接受并注释）。
   - 完成条件：openat、renameat2、link/symlink、chmod/chown、statx、mount、umount 和 chroot 都有聚焦测试（`user/cmds/stress/vfs_stress.c` / `vfs_edge.c`），同时覆盖 openat2、xattr 和文件系统特定边界测试。
 - [x] 将大型 VFS 实现重构为更小的 ownership、path、mount、fd 和 syscall-facing 单元。
   - 源码证据：path resolution、path、mount、file/vnode、dcache 和 stat/permission 已拆到 `kernel/fs/vfs/*.c`，并由 `kernel/include/fs/vfs/*.h` 提供窄接口；`kernel/fs/vfs.c` 仍保留 open/close、初始化及兼容入口，后续还可继续缩小。
