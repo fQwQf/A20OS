@@ -425,7 +425,24 @@ typedef struct a20_vm_map_args {
     uint32_t       prot;
     uint32_t       flags;
     uint64_t       out_addr;
+    /* v1.1 E-APPEND: map through a VMAR reservation (A20_OBJ_VMAR).
+     * NULL keeps the legacy whole-address-space behavior. */
+    a20_handle_t   vmar;
 } a20_vm_map_args_t;
+
+/* vm_create_vmar: sub-allocate an address range under a parent VMAR
+ * (docs/native-abi/04-memory.md §3).  Ceiling bits are the existing
+ * A20_VMAR_CAN_MAP_* above. */
+typedef struct a20_vm_create_vmar_args {
+    uint32_t       size;
+    uint32_t       version;
+    a20_handle_t   parent;   /* A20_HANDLE_NULL -> root reservation */
+    uint32_t       _pad;
+    uint64_t       base;
+    uint64_t       length;
+    uint64_t       flags;    /* A20_VMAR_CAN_MAP_* ceiling */
+    a20_handle_t   out_vmar;
+} a20_vm_create_vmar_args_t;
 
 typedef struct a20_vm_share_args {
     uint32_t       size;
