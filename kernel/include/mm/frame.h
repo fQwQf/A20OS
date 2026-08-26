@@ -135,4 +135,7 @@ static inline pfn_t virt_to_pfn(const void *va) {
     return phys_to_pfn(pa);
 }
 
+/* 关机前审计：遍历全部 buddy 空闲链验证一致性，返回错误数。 */
+int pfa_audit_lists(void);
+
 #endif /* _FRAME_H */
