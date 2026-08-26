@@ -43,12 +43,12 @@ int ntfs_build_file_name_attr(uint8_t *out, size_t cap,
     nput64(v + 0x28, data_size);
     nput64(v + 0x30, data_size);
     nput32(v + 0x38, is_dir ? NTFS_REC_IS_DIR : 0);
-    nput32(v + 0x3C, 0);
-    v[0x40] = (uint8_t)nlen;
-    v[0x41] = NTFS_FILE_NAME_POSIX;
+    /* Spec layout: name length @0x3C, namespace @0x3D, name @0x3E. */
+    v[0x3C] = (uint8_t)nlen;
+    v[0x3D] = NTFS_FILE_NAME_POSIX;
     for (size_t i = 0; i < nlen; i++) {
-        v[0x42 + 2 * i] = (uint8_t)name[i];
-        v[0x42 + 2 * i + 1] = 0;
+        v[0x3E + 2 * i] = (uint8_t)name[i];
+        v[0x3E + 2 * i + 1] = 0;
     }
     return (int)total;
 }
@@ -65,8 +65,8 @@ void ntfs_walk_node(const uint8_t *node, uint32_t node_size,
         return;
     while (off + 16 <= total) {
         const uint8_t *e = node + off;
-        uint16_t elen = nget16(e + 2);
-        uint16_t flags = nget16(e + 8);
+        uint16_t elen = nget16(e + 8);
+        uint16_t flags = nget16(e + 12);
         if (elen < 16 || off + elen > total)
             break;
         if (visit(e, elen, flags, ctx) < 0)
@@ -83,18 +83,19 @@ int ntfs_entry_info(const uint8_t *e, uint16_t elen, char *name,
                            uint64_t *size)
 {
     const uint8_t *stream = e + 16;
-    uint16_t stream_len = nget16(e + 6);
-    if (stream_len < NTFS_ATTR_HEADER_RES + 0x42 || stream[0] != NTFS_AT_FILE_NAME)
+    uint16_t stream_len = nget16(e + 10);
+    if (stream_len < NTFS_ATTR_HEADER_RES + 0x3E || stream[0] != NTFS_AT_FILE_NAME)
         return 0;
-    /* $FILE_NAME attribute value starts after its resident header. */
+    /* $FILE_NAME attribute value starts after its resident header.
+     * Value layout: ... flags@0x38 name_len@0x3C name@0x3E (UTF-16LE). */
     const uint8_t *v = stream + NTFS_ATTR_HEADER_RES;
-    uint8_t nlen = v[0x40];
+    uint8_t nlen = v[0x3C];
     size_t nbytes = nlen * 2;
-    if (NTFS_ATTR_HEADER_RES + 0x42 + nbytes > stream_len)
+    if (NTFS_ATTR_HEADER_RES + 0x3E + nbytes > stream_len)
         return 0;
     size_t out = 0;
     for (int i = 0; i < nlen; i++) {
-        uint16_t cu = (uint16_t)(v[0x42 + 2 * i] | (v[0x42 + 2 * i + 1] << 8));
+        uint16_t cu = (uint16_t)(v[0x3E + 2 * i] | (v[0x3E + 2 * i + 1] << 8));
         if (cu > 0x7F)
             cu = '?';
         if (out + 1 < name_cap)
@@ -116,6 +117,17 @@ int ntfs_collect_entry(const uint8_t *e, uint16_t elen, uint16_t flags,
     (void)elen;
     if ((flags & NTFS_IDX_ENTRY_LAST) || (e[0] == 0 && e[1] == 0 && e[2] == 0))
         return 0;
+    if (!c->entries) {
+        /* Counting pass: validate the entry so the fill pass gets an
+         * upper bound, without needing a destination array yet. */
+        char scratch[4];
+        int is_dir;
+        uint64_t ref, size;
+        if (ntfs_entry_info(e, elen, scratch, sizeof(scratch), &is_dir,
+                            &ref, &size))
+            (*c->count)++;
+        return 0;
+    }
     if (*c->count >= c->max)
         return 0;
     ntfs_dir_entry_t *d = &c->entries[*c->count];
@@ -139,17 +151,18 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
         return -1;
     }
 
-    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 1);
-    uint8_t *ix_alloc = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ALLOC, 1);
+    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 0);
+    uint8_t *ix_alloc = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ALLOC, 0);
     if (!ix_root) {
         kfree(rec);
         return -1;
     }
 
-    /* Two passes: count then fill. */
+    /* Two passes: count then fill.  entries == NULL selects counting mode. */
     uint32_t count = 0;
     ntfs_collect_ctx_t cctx;
     cctx.sb = sb;
+    cctx.entries = NULL;
     cctx.max = 0;
     cctx.count = &count;
 
@@ -157,7 +170,7 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
     if (ix_root[8] == 0) {
         uint16_t voff = nget16(ix_root + 0x14);
         uint32_t vlen = nget32(ix_root + 0x10);
-        const uint8_t *node = rec + voff + 16;   /* after ntfs_index_root_t */
+        const uint8_t *node = ix_root + voff + 16;   /* after ntfs_index_root_t */
         ntfs_walk_node(node, vlen - 16, ntfs_collect_entry, &cctx);
     }
 
@@ -218,12 +231,12 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
     if (ntfs_read_record(sb, fp->mft_index, rec) < 0) {
         kfree(arr); kfree(rec); return -1;
     }
-    ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 1);
-    ix_alloc = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ALLOC, 1);
+    ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 0);
+    ix_alloc = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ALLOC, 0);
     if (ix_root && ix_root[8] == 0) {
         uint16_t voff = nget16(ix_root + 0x14);
         uint32_t vlen = nget32(ix_root + 0x10);
-        ntfs_walk_node(rec + voff + 16, vlen - 16, ntfs_collect_entry, &c2);
+        ntfs_walk_node(ix_root + voff + 16, vlen - 16, ntfs_collect_entry, &c2);
     }
     blocks = NULL;
     block_count = 0;
@@ -281,11 +294,12 @@ int ntfs_build_index_entry(uint8_t *buf, size_t cap, uint64_t ref,
         return -1;
 
     memset(buf, 0, total);
+    /* $INDEX_ENTRY: file_ref@0x00(8), len@0x08, stream_len@0x0A,
+     * flags@0x0C, stream ($FILE_NAME attr) @0x10. */
     nput64(buf + 0, ref);
-    nput16(buf + 2, (uint16_t)total);
-    nput16(buf + 4, 0);         /* no indexed $FILE_NAME (indexing flag) */
-    nput16(buf + 6, (uint16_t)fn_len);
-    nput16(buf + 8, is_last ? NTFS_IDX_ENTRY_LAST : 0);
+    nput16(buf + 8, (uint16_t)total);
+    nput16(buf + 10, (uint16_t)fn_len);
+    nput16(buf + 12, is_last ? NTFS_IDX_ENTRY_LAST : 0);
     memcpy(buf + 16, fn, fn_len);
     return (int)total;
 }
@@ -303,7 +317,7 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
         return -1;
     }
 
-    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 1);
+    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 0);
     if (!ix_root || ix_root[8] != 0) {
         kfree(rec);
         return -1;
@@ -311,8 +325,10 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
 
     /* Build entry sized for a "last" entry (no following entries needed). */
     uint8_t entry[1024];
+    /* Inserted ahead of the node's real terminator: this entry itself is
+     * not the last one. */
     int elen = ntfs_build_index_entry(entry, sizeof(entry), ref, name, is_dir,
-                                      data_size, 1);
+                                      data_size, 0);
     if (elen < 0) {
         kfree(rec);
         return -1;
@@ -320,7 +336,7 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
 
     uint16_t voff = nget16(ix_root + 0x14);
     uint32_t vlen = nget32(ix_root + 0x10);
-    uint8_t *node = rec + voff + 16;   /* index root node */
+    uint8_t *node = ix_root + voff + 16;   /* index root node */
     uint32_t node_total = nget32(node + 4);
     uint32_t node_alloc = nget32(node + 8);
     uint32_t entries_off = nget32(node + 0);
@@ -330,9 +346,9 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
     uint32_t off = entries_off;
     for (;;) {
         const uint8_t *e = node + off;
-        uint16_t f = nget16(e + 8);
-        uint16_t l = nget16(e + 2);
-        if (f & NTFS_IDX_ENTRY_LAST) {
+        uint16_t f = nget16(e + 12);
+        uint16_t l = nget16(e + 8);
+        if (f & NTFS_IDX_ENTRY_LAST || l == 0) {
             last_off = off;
             break;
         }
@@ -344,13 +360,23 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
      * an 8-byte terminator (file_ref=0, entry_len=8, flags=LAST) plus 8 bytes
      * of padding.  We insert our new entry before it. */
     uint32_t need = (uint32_t)elen;
-    if (last_off + need + 16 > voff + vlen - 16) {
-        /* No room in the index root. */
+
+    /*
+     * Growing a resident $INDEX_ROOT by `need` bytes requires shifting every
+     * attribute that follows it (and the end marker) right by `need`;
+     * resident attribute values are packed, so the record must have that
+     * much slack after its used size.
+     */
+    uint32_t used = nget32(rec + 0x18);
+    if (used + need > sb->mft_record_size) {
         kfree(rec);
         return -ENOSPC;
     }
+    uint32_t attr_end = (uint32_t)(ix_root - rec) + voff + vlen;
+    memmove(rec + attr_end + need, rec + attr_end, used - attr_end);
+    memset(rec + attr_end, 0, need);
+    nput32(rec + 0x18, used + need);
 
-    /* Move the terminator aside and insert the new entry. */
     uint32_t tail_off = last_off;
     uint32_t tail_len = node_total - last_off;
     memmove(node + tail_off + need, node + tail_off, tail_len);
@@ -360,15 +386,7 @@ int ntfs_index_insert(ntfs_vnode_priv_t *fp, const char *name,
     /* Grow the attribute's value length. */
     nput32(ix_root + 0x10, vlen + need);
 
-    /* Update record used size. */
-    uint32_t used = nget32(rec + 0x18);
-    if (used + need <= sb->mft_record_size) {
-        nput32(rec + 0x18, used + need);
-    }
-
-    int r = ntfs_write_record(sb, fp->mft_index, rec);
-    kfree(rec);
-    return r;
+    return ntfs_write_record(sb, fp->mft_index, rec);
 }
 
 
@@ -382,14 +400,14 @@ int ntfs_index_remove(ntfs_vnode_priv_t *fp, const char *name)
         kfree(rec);
         return -1;
     }
-    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 1);
+    uint8_t *ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 0);
     if (!ix_root || ix_root[8] != 0) {
         kfree(rec);
         return -1;
     }
     uint16_t voff = nget16(ix_root + 0x14);
     uint32_t vlen = nget32(ix_root + 0x10);
-    uint8_t *node = rec + voff + 16;
+    uint8_t *node = ix_root + voff + 16;
     uint32_t node_total = nget32(node + 4);
 
     uint32_t off = nget32(node + 0);
@@ -397,8 +415,8 @@ int ntfs_index_remove(ntfs_vnode_priv_t *fp, const char *name)
     int removed = 0;
     while (off + 16 <= node_total) {
         uint8_t *e = node + off;
-        uint16_t flags = nget16(e + 8);
-        uint16_t elen = nget16(e + 2);
+        uint16_t flags = nget16(e + 12);
+        uint16_t elen = nget16(e + 8);
         if (elen < 16 || off + elen > node_total)
             break;
         char n[256];
@@ -471,21 +489,32 @@ int ntfs_ensure_data_runs(ntfs_vnode_priv_t *fp, uint64_t need_end)
                                     fp->run_count);
         if (rlen > 0) {
             uint16_t run_off = nget16(attr + 0x20);
-            /* The run list must fit in the attribute; resize attribute if needed. */
+            /* Grow the attribute when the new run list needs more room:
+             * shift every following attribute (and the end marker) right,
+             * bounded by the record's used size. */
             size_t attr_len = nget32(attr + 4);
             size_t header_len = run_off;
             size_t new_attr_len = header_len + (size_t)rlen;
-            /* Reallocate attribute by rewriting the whole record is complex;
-             * assume the existing attribute slack is enough. */
-            if (new_attr_len <= attr_len) {
-                memcpy(rec + (uintptr_t)attr - (uintptr_t)rec + run_off,
-                       runbuf, rlen);
-                nput64(attr + 0x28, alloc_end + want_clusters * sb->bytes_per_cluster);
-                nput64(attr + 0x38, need_end);
-                nput64(attr + 0x30, need_end);
-                nput32(rec + 0x18, nget32(rec + 0x18) + (uint32_t)(attr_len - attr_len));
-                result = ntfs_write_record(sb, fp->mft_index, rec);
+            uint32_t attr_off = (uint32_t)((uintptr_t)attr - (uintptr_t)rec);
+            if (new_attr_len > attr_len) {
+                uint32_t used = nget32(rec + 0x18);
+                uint32_t grow = (uint32_t)(new_attr_len - attr_len);
+                if (used + grow > sb->mft_record_size) {
+                    kfree(rec);
+                    return -ENOSPC;
+                }
+                memmove(rec + attr_off + new_attr_len,
+                        rec + attr_off + attr_len,
+                        used - (attr_off + attr_len));
+                memset(rec + attr_off + attr_len, 0, grow);
+                nput32(rec + 0x18, used + grow);
             }
+            memcpy(rec + attr_off + run_off, runbuf, rlen);
+            nput32(attr + 4, (uint32_t)new_attr_len);
+            nput64(attr + 0x28, alloc_end + want_clusters * sb->bytes_per_cluster);
+            nput64(attr + 0x38, need_end);
+            nput64(attr + 0x30, need_end);
+            result = ntfs_write_record(sb, fp->mft_index, rec);
         }
     }
     kfree(rec);

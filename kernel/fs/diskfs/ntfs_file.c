@@ -251,17 +251,19 @@ int ntfs_write_file(ntfs_vnode_priv_t *fp, uint64_t off,
         int r = -1;
         if (attr && attr[8] == 0) {
             uint16_t voff = nget16(attr + 0x14);
+            uint8_t *val = attr + voff;
             if (off < fp->data_size)
-                memcpy(rec + voff + off, buf, len);
+                memcpy(val + off, buf, len);
             else {
                 if (off > fp->data_size)
-                    memset(rec + voff + fp->data_size, 0, (size_t)(off - fp->data_size));
-                memcpy(rec + voff + off, buf, len);
+                    memset(val + fp->data_size, 0, (size_t)(off - fp->data_size));
+                memcpy(val + off, buf, len);
             }
             nput32(attr + 0x10, (uint32_t)end);
             uint32_t used = nget32(rec + 0x18);
-            if (used < voff + end)
-                nput32(rec + 0x18, voff + (uint32_t)end);
+            uint32_t val_end_rec = (uint32_t)(attr - rec) + voff + (uint32_t)end;
+            if (used < val_end_rec)
+                nput32(rec + 0x18, val_end_rec);
             fp->data_size = end;
             fp->data_res_len = (uint32_t)end;
             ntfs_update_file_name_size(sb, fp->mft_index, end, 0);

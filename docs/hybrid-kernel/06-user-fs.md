@@ -32,7 +32,7 @@
   | `fat`（默认） | fat32lite 同源编译（freestanding，IO 回调注入） | 读写 |
   | `ext4` | 内核 diskfs 源码经 fscompat 兼容环境原样编译 | 读写（含 rename/日志） |
   | `iso9660` | 同上 | 只读 |
-  | `ntfs` | 同上 | 只读（内核 ntfs 写路径无在库测试覆盖，见边界） |
+  | `ntfs` | 同上 | 读写（内核 ntfs 写路径由 smoke-native-fs-all 在库端到端覆盖，见边界） |
 - fscompat（user/svc/fscompat/）：以遮蔽头 + 等价实现为内核磁盘 FS 源码提供用户态运行环境——kmalloc→malloc、锁退化为 no-op（单线程宿主）、bcache 写穿透实现、vnode/vfile 引用助手、恒等 usercopy。FS 源码零改动。
 - vnode 型后端维护 ino→vnode* 映射；操作全部经由各 FS 自身的 vnode_ops/vfile_ops 表执行。
 - 块 IO 经 `fs_block_io` 原生 syscall 进入内核块层；内核校验只有注册该挂载的服务任务可以发起（含 count==0 的容量查询语义）。
@@ -53,7 +53,7 @@
 ## 已知边界
 
 - fat 后端：8.3 短名（fat32lite 语义）；rmdir/rename/非零 truncate 不支持（fat32lite 无对应原语，返回 ENOSYS）；
-- ntfs 后端只读：内核 ntfs 的 create/unlink/truncate 路径在全仓库无任何测试覆盖，写使能前需先补齐其自身正确性验证；
+- ntfs 后端已开放读写：内核 ntfs 写路径（MFT 记录分配、$INDEX_ROOT 增长、簇位图、驻留→非驻留转换）由 smoke-native-fs-all 端到端覆盖，含 SIGKILL 重启持久化验证；
 - iso9660 只读（格式即如此）；驱动将 ISO 名字转小写；
 - uxfs 文件读写当前不接入内核页缓存（直通转发）；接入 readpage/writepage 缓存路径是后续工作；
 - 服务重启后映射清空：崩溃恢复契约要求重新挂载（新 ino 空间）；
