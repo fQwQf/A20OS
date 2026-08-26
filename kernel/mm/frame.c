@@ -264,6 +264,11 @@ static void fl_remove(pfn_t pfn, int order) {
     pfa_hist_record(0, pfn, order);
 }
 
+/* Exclusive upper bound of the direct map, exported for the riscv64
+ * trap-entry sp guard.  Starts at UINT64_MAX (check disabled) until
+ * pfa_init learns the RAM ranges. */
+uint64_t g_pfa_direct_map_end = (uint64_t)-1;
+
 // Buddy 分配器初始化函数，将物理内存划分为可用页框并构建空闲链表
 void pfa_init(paddr_t kernel_end) {
     pfa.nr_ranges = arch_ram_range_count();
@@ -271,6 +276,7 @@ void pfa_init(paddr_t kernel_end) {
         panic("pfa_init: invalid ram range count");
 
     pfa.total_frames = 0;
+    paddr_t max_end = 0;
     for (size_t i = 0; i < pfa.nr_ranges; i++) {
         paddr_t base = 0, end = 0;
         if (arch_ram_range(i, &base, &end) < 0 || end <= base || (base & (PAGE_SIZE - 1)) ||
@@ -282,7 +288,10 @@ void pfa_init(paddr_t kernel_end) {
         pfa.ranges[i].start_pfn = pfa.total_frames;
         pfa.total_frames += (pfn_t)((end - base) >> PAGE_SIZE_BITS);
         pfa.ranges[i].end_pfn = pfa.total_frames;
+        if (end > max_end)
+            max_end = end;
     }
+    g_pfa_direct_map_end = (uint64_t)max_end + PAGE_OFFSET;
 
     // 分配元数据区 + 空闲帧位图（紧跟 meta 之后，同属内核保留区）
     size_t meta_sz = (size_t)pfa.total_frames * sizeof(frame_meta_t);
