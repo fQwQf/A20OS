@@ -221,6 +221,7 @@ typedef struct task_t {
     uint64_t user_gs_base;         /* x86_64 ARCH_SET_GS value (kernel GS is
                                     * reserved for per-CPU data) */
     uint32_t cfs_weight;
+    uint32_t pi_boost_weight;    /* PI-futex waiter weight donation, atomic */
     uint64_t eevdf_vruntime;     /* weighted virtual run time (ticks) */
     uint64_t eevdf_deadline;     /* virtual deadline: vruntime + virtual slice */
     uint64_t eevdf_last_account; /* tick stamp of the last vruntime charge */
@@ -416,6 +417,8 @@ void     proc_sleep_until(uint64_t wake_time);
  */
 void     proc_sched_handle_reschedule_ipi(void);
 void     proc_sched_tick(int from_user);
+void     proc_sched_pi_boost(task_t *owner, task_t *waiter);
+void     proc_sched_pi_unboost(task_t *owner);
 uint64_t proc_runq_load_sum(void);
 void     proc_sched_request_current(void);
 int      proc_sched_safe_point(void);
