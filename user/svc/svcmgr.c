@@ -9,10 +9,9 @@
  * restarts them with backoff bounded by a per-service restart budget.
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
 #include "a20_string.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/rtcd_proto.h"
-#include "../svc/svc_proto.h"
 
 #define REG_OP_TAG    0x5245474FULL /* "REGO" — registry channel events */
 #define SVC_EXIT_BASE 0x52545800ULL /* exit event tag base: + index */
@@ -52,6 +51,81 @@ static uint64_t now_ms(void)
     a20_time_ns_t t = 0;
     a20_clock_get(A20_CLOCK_MONOTONIC, &t);
     return t / 1000000ULL;
+}
+
+/* ---- 托管设备序号的板级配置（roadmap：清单不再固化 block_index）----
+ * 块设备枚举随平台而异（QEMU virt / VF2 / LS2K1000）。与 net 的 a20.*
+ * 键同一哲学：只认命令行/运行时配置，不做编译期板级表。svcmgr 从
+ * /proc/cmdline 读 a20.ufsd_blk=<n>，缺省回落 QEMU 开发布局的 1。 */
+static char     g_ufsd_args[32];
+static unsigned g_ufsd_blk = 1;
+static int      g_ufsd_blk_from_cmdline;
+
+static void ufsd_blk_config_load(void)
+{
+    a20_path_open_args_t oa;
+    a20_memset(&oa, 0, sizeof(oa));
+    oa.size = sizeof(oa);
+    oa.version = 1;
+    oa.dir = A20_HANDLE_NULL;
+    oa.path = (uint64_t)(uintptr_t)"/proc/cmdline";
+    oa.path_len = (uint32_t)a20_strlen("/proc/cmdline");
+    oa.rights = A20_RIGHT_READ;
+    oa.flags = A20_PATH_OPEN_RDONLY;
+    oa.mode = 0;
+    oa.out_handle = A20_HANDLE_NULL;
+    if (a20_status_is_err(a20_path_open(&oa)))
+        return;
+
+    char buf[512];
+    uint64_t got = 0;
+    if (a20_status_is_err(a20_hdl_read_buf(oa.out_handle, buf,
+                                           sizeof(buf) - 1, &got))) {
+        a20_hdl_close(oa.out_handle);
+        return;
+    }
+    a20_hdl_close(oa.out_handle);
+    buf[got < sizeof(buf) - 1 ? got : sizeof(buf) - 1] = '\0';
+
+    static const char key[] = "a20.ufsd_blk=";
+    size_t klen = sizeof(key) - 1;
+    for (char *p = buf; *p;) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (!*p)
+            break;
+        char *end = p;
+        while (*end && *end != ' ' && *end != '\t' && *end != '\n')
+            end++;
+        if ((size_t)(end - p) > klen && a20_memcmp(p, key, klen) == 0) {
+            unsigned v = 0;
+            int digits = 0;
+            for (char *q = p + klen; q < end && *q >= '0' && *q <= '9'; q++) {
+                v = v * 10 + (unsigned)(*q - '0');
+                digits++;
+            }
+            if (digits && v >= 1 && v <= 15) {
+                g_ufsd_blk = v;
+                g_ufsd_blk_from_cmdline = 1;
+            }
+        }
+        p = end;
+    }
+
+    /* "/ufs <blk> fat" — mount point and fstype stay as manifest data. */
+    unsigned i = 0;
+    static const char prefix[] = "/ufs ";
+    for (unsigned z = 0; z < sizeof(prefix) - 1 && i < sizeof(g_ufsd_args) - 1; z++)
+        g_ufsd_args[i++] = prefix[z];
+    char dec[8];
+    unsigned n = 0, v = g_ufsd_blk;
+    do { dec[n++] = (char)('0' + v % 10); v /= 10; } while (v && n < sizeof(dec));
+    while (n && i < sizeof(g_ufsd_args) - 1)
+        g_ufsd_args[i++] = dec[--n];
+    static const char suffix[] = " fat";
+    for (unsigned z = 0; z < sizeof(suffix) - 1 && i < sizeof(g_ufsd_args) - 1; z++)
+        g_ufsd_args[i++] = suffix[z];
+    g_ufsd_args[i] = '\0';
 }
 
 /* ---- manifest ---- */
@@ -118,7 +192,7 @@ static a20_status_t spawn_one(svc_entry_t *se)
     }
 
     /* 服务端点 + 健康探测端点：两条独立通道，监管流量与客户端 RPC
-     * 不共享任何队列（见 svc_proto.h A20_SVC_PING_SLOT 注释）。 */
+     * 不共享任何队列（见 a20_services_idl.h A20_SVC_PING_SLOT 注释）。 */
     a20_spawn_handle_t sh[2];
     sh[0].handle = pair.endpoints[1];
     sh[0].rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
@@ -376,11 +450,17 @@ int main(int argc, char **argv, char **envp)
     g_svcs[1].ep_slot = 104u /* A20_SVC_ENDPOINT_SLOT */;
     g_svcs[1].ping_kind = 0;
     g_svcs[2].name = "ufsd";
-    g_svcs[2].path = "/bin/ufsd-rv";
-    g_svcs[2].args = "/ufs 1 fat";
     g_svcs[2].ep_slot = 104u;
     g_svcs[2].ping_kind = 0;
+    g_svcs[2].path = "/bin/ufsd-rv";
     g_nsvcs = 3;
+
+    /* 板级配置化的托管序号：命令行覆盖缺省，日志记录解析结果。 */
+    ufsd_blk_config_load();
+    g_svcs[2].args = g_ufsd_args;
+    put_str("SVC_MGR: ufsd blk=");
+    put_u64(g_ufsd_blk);
+    put_str(g_ufsd_blk_from_cmdline ? " (cmdline)\n" : " (default)\n");
 
     for (uint32_t i = 0; i < g_nsvcs; i++) {
         g_svcs[i].task = A20_HANDLE_NULL;
