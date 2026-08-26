@@ -338,6 +338,10 @@ typedef struct a20_task_status {
     uint64_t       stime_ns;
 } a20_task_status_t;
 
+/* task_wait flags (docs/native-abi/09-native-abi-deepening.md §8).
+ * Unknown bits must be zero. */
+#define A20_TASK_WAIT_NONBLOCK 0x1u
+
 typedef struct a20_task_info {
     uint32_t       size;
     uint32_t       version;
