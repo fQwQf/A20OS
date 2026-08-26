@@ -14,44 +14,44 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 `syscall_table.def` currently registers 361 dispatch entries, including two A20OS extensions and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
-| Area | Level | Notes |
-| --- | --- | --- |
-| basic fd I/O | partial | read/write/pread/pwrite/iovec paths exist; concurrent close/lifetime rules need tightening. |
-| path and metadata | partial | openat/stat/chmod/chown/link/symlink/xattr coverage exists; path resolution and permissions need cleanup. |
-| process lifecycle | partial | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
-| signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
-| memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
-| scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
-| futex | partial | all standard commands implemented, including bounded PI variants with EEVDF weight-donation priority boost; chained per-futex pi_state walk out of scope. |
-| poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
-| eventfd/timerfd | partial | fd-backed wait objects exist; full Linux timer semantics are simplified. |
-| fd I/O and splice | partial | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
-| sockets | partial | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
-| bpf | partial | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
-| namespaces | partial | namespace syscalls operate on current task/fs state (root_path/cwd/credentials); no separate Linux namespace object model. |
-| capabilities | partial | capget/capset map to A20 task credentials with Linux capability-set rules; the full Linux security namespace is not replicated. |
-| file advice/copy helpers | partial | implemented for common paths, many flags are approximations. |
-| SysV/POSIX shm and memfd | partial | useful shared-memory objects exist; full Linux accounting/security is incomplete. |
-| keyring | partial | kernel keyring subsystem (kernel/ipc/keyring.c): add/request/keyctl with session and per-uid user keyrings. |
-| fanotify | partial | FAN_CLASS_NOTIF + FID on the shared notify backend; content/pre-content classes not supported. |
-| process accounting | partial | Linux v3 acct records written on process exit. |
-| Linux AIO | partial | aio contexts with synchronous VFS execution of pread/pwrite/fsync/fdatasync. |
-| pidfd | partial | pidfd_open/pidfd_getfd/pidfd_send_signal with capability checks. |
-| driver modules | partial | init/finit/delete_module drive the A20OS drvmod ET_REL loader (privileged). |
-| cross-process memory | partial | process_vm_readv/writev, process_madvise, process_mrelease over the target page table. |
-| mempolicy/NUMA | partial | single-node policy validation/storage; no physical NUMA migration. |
-| file handles | partial | name_to_handle_at/open_by_handle_at over a kernel-side handle registry. |
-| new mount API | partial | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
-| io_uring | partial | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
-| landlock | partial | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
-| rseq | partial | per-thread rseq registration; no CPU migration to abort. |
-| membarrier | partial | full command set with per-mm registration and a real cross-CPU barrier via the reschedule IPI. |
-| SysV/POSIX message queues | partial | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
-| ioprio / pkeys | partial | per-task I/O priority storage; 16-slot protection-key bitmap. |
-| LSM introspection | partial | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
-| statmount/listmount | partial | mount table introspection over the existing mount registry. |
-| RISC-V arch | partial | riscv_hwprobe reports IMA; riscv_flush_icache flushes the range. |
-| userfaultfd | partial | MISSING-mode anonymous ranges with COPY/ZEROPAGE resolution; no UFFD_FEATURE_EVENT_FORK / shmem / WP modes. |
+| Area | Level | Smoke gates (last known status) | Notes |
+| --- | --- | --- | --- |
+| basic fd I/O | partial | smoke-vfs-edge (PASS 2026-08-26), smoke-vfs-stress (PASS 2026-08-26) | read/write/pread/pwrite/iovec paths exist; concurrent close/lifetime rules need tightening. |
+| path and metadata | partial | smoke-vfs-edge (PASS 2026-08-26), smoke-vfs-stress (PASS 2026-08-26) | openat/stat/chmod/chown/link/symlink/xattr coverage exists; path resolution and permissions need cleanup. |
+| process lifecycle | partial | smoke-proc-stress (PASS 2026-08-26) | fork/clone/exec/wait/exit work for current userland; SMP/thread edge semantics remain limited. |
+| signals | partial | smoke-signalfd-stress, smoke-proc-stress (PASS 2026-08-26) | common delivery paths exist; Linux edge behavior is not complete. |
+| memory management | partial | smoke-mm-stress (PASS 2026-08-26), smoke-oom-stress (PASS 2026-08-26) | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
+| scheduler | partial | smoke-sched-stress (PASS 2026-08-26), smoke-proc-stress (PASS 2026-08-26) | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
+| futex | partial | smoke-futex-stress (PASS 2026-08-26), smoke-futex-stress-aarch64 (PASS 2026-08-26) | all standard commands implemented, including bounded PI variants with EEVDF weight-donation priority boost; chained per-futex pi_state walk out of scope. |
+| poll/epoll/select | partial | smoke-io-event, smoke-abi-linux (PASS 2026-08-26) | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
+| eventfd/timerfd | partial | smoke-proc-stress (PASS 2026-08-26) | fd-backed wait objects exist; full Linux timer semantics are simplified. |
+| fd I/O and splice | partial | smoke-syscall-ext | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
+| sockets | partial | smoke-network-suite (PASS 2026-08-26), smoke-network-suite-aarch64 (PASS 2026-08-26), smoke-socket-stress | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
+| bpf | partial | smoke-abi-linux (PASS 2026-08-26) | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
+| namespaces | partial | smoke-abi-linux (PASS 2026-08-26) | namespace syscalls operate on current task/fs state (root_path/cwd/credentials); no separate Linux namespace object model. |
+| capabilities | partial | smoke-abi-linux (PASS 2026-08-26) | capget/capset map to A20 task credentials with Linux capability-set rules; the full Linux security namespace is not replicated. |
+| file advice/copy helpers | partial | smoke-vfs-stress (PASS 2026-08-26) | implemented for common paths, many flags are approximations. |
+| SysV/POSIX shm and memfd | partial | smoke-abi-linux (PASS 2026-08-26) | useful shared-memory objects exist; full Linux accounting/security is incomplete. |
+| keyring | partial | smoke-syscall-ext | kernel keyring subsystem (kernel/ipc/keyring.c): add/request/keyctl with session and per-uid user keyrings. |
+| fanotify | partial | smoke-syscall-ext | FAN_CLASS_NOTIF + FID on the shared notify backend; content/pre-content classes not supported. |
+| process accounting | partial | smoke-syscall-ext | Linux v3 acct records written on process exit. |
+| Linux AIO | partial | smoke-syscall-ext | aio contexts with synchronous VFS execution of pread/pwrite/fsync/fdatasync. |
+| pidfd | partial | smoke-syscall-ext | pidfd_open/pidfd_getfd/pidfd_send_signal with capability checks. |
+| driver modules | partial | smoke-syscall-ext, smoke-drvmod | init/finit/delete_module drive the A20OS drvmod ET_REL loader (privileged). |
+| cross-process memory | partial | smoke-syscall-ext, smoke-ptrace (PASS 2026-08-26) | process_vm_readv/writev, process_madvise, process_mrelease over the target page table. |
+| mempolicy/NUMA | partial | smoke-mm-stress (PASS 2026-08-26) | single-node policy validation/storage; no physical NUMA migration. |
+| file handles | partial | smoke-vfs-stress (PASS 2026-08-26) | name_to_handle_at/open_by_handle_at over a kernel-side handle registry. |
+| new mount API | partial | smoke-vfs-stress (PASS 2026-08-26) | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
+| io_uring | partial | smoke-syscall-ext | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
+| landlock | partial | smoke-syscall-ext | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
+| rseq | partial | smoke-proc-stress (PASS 2026-08-26) | per-thread rseq registration; no CPU migration to abort. |
+| membarrier | partial | smoke-syscall-ext | full command set with per-mm registration and a real cross-CPU barrier via the reschedule IPI. |
+| SysV/POSIX message queues | partial | smoke-syscall-ext | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
+| ioprio / pkeys | partial | smoke-syscall-ext, smoke-mm-stress (PASS 2026-08-26) | per-task I/O priority storage; 16-slot protection-key bitmap. |
+| LSM introspection | partial | smoke-syscall-ext | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
+| statmount/listmount | partial | smoke-vfs-stress (PASS 2026-08-26) | mount table introspection over the existing mount registry. |
+| RISC-V arch | partial | smoke-abi-linux (PASS 2026-08-26) | riscv_hwprobe reports IMA; riscv_flush_icache flushes the range. |
+| userfaultfd | partial | smoke-syscall-ext | MISSING-mode anonymous ranges with COPY/ZEROPAGE resolution; no UFFD_FEATURE_EVENT_FORK / shmem / WP modes. |
 | perf | partial | PERF_TYPE_SOFTWARE events with read(2) and ENABLE/DISABLE/RESET/PERIOD/ID ioctls; no PMU/hardware events and no mmap ring. |
 
 ## Next Steps
@@ -426,11 +426,11 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
-| `a20_envelope_create` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: create a capability envelope from a policy struct; thin bridge to core env_create |
-| `a20_envelope_enter` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: attach the calling process to an envelope (monotone); thin bridge to core env_enter |
-| `a20_envelope_revoke` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: actively revoke an envelope (owner/root, optional KILL_ON_EXPIRE); thin bridge to core env_revoke |
-| `a20_envelope_stats` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: read envelope mediation counters; thin bridge to core env_stats |
-| `a20_envelope_audit` | a20-envelope | `full` | host-tests (envelope) | A20OS extension: runtime invariant audit across live envelopes; thin bridge to core env_audit |
+| `a20_envelope_create` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: create a capability envelope from a policy struct (docs/research/05) |
+| `a20_envelope_enter` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: attach the calling process to an envelope; monotone, a second enter fails |
+| `a20_envelope_revoke` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: revoke an envelope, with optional KILL_ON_EXPIRE of the hosted process |
+| `a20_envelope_stats` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: query envelope budget and usage counters |
+| `a20_envelope_audit` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: run the runtime invariant audit over envelope state (E8) |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
 ## Placeholder Resolution Record
