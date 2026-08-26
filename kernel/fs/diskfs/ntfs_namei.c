@@ -88,6 +88,14 @@ int ntfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     kfree(entries);
     if (!found)
         return -ENOENT;
+    /* Index entries cache the size captured at last directory update and
+     * can lag behind the file's $DATA real size.  Refresh regular files
+     * from their own record so callers see current content size. */
+    if (found->type == VFS_FT_REGULAR) {
+        ntfs_vnode_priv_t *ffp = (ntfs_vnode_priv_t *)found->fs_data;
+        if (ffp && ntfs_resolve_data(ffp) == 0)
+            found->size = ffp->data_size;
+    }
     *out = found;
     return 0;
 }
@@ -137,8 +145,7 @@ void ntfs_update_file_name_size(ntfs_sb_t *sb, uint64_t mft_index,
     }
     uint8_t *fn = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_FILE_NAME, 0);
     if (fn && fn[8] == 0) {
-        uint16_t voff = nget16(fn + 0x14);
-        uint8_t *v = rec + voff;
+        uint8_t *v = fn + nget16(fn + 0x14);
         nput64(v + 0x28, size);
         nput64(v + 0x30, size);
         if (is_dir)
@@ -219,7 +226,12 @@ int ntfs_create_entry(ntfs_vnode_priv_t *dirfp, const char *name,
     nput16(rec + 0x06, usa_count);
     nput16(rec + 0x10, 1);              /* sequence number */
     nput16(rec + 0x12, 1);              /* hard link count */
-    nput16(rec + 0x14, 0x30);           /* first attribute offset */
+    {
+        /* First attribute must start AFTER the update-sequence array
+         * (0x30 + usa_count*2, aligned to 8) or fixup will clobber it. */
+        uint16_t first_attr = (uint16_t)((0x30 + usa_count * 2 + 7) & ~7u);
+        nput16(rec + 0x14, first_attr);
+    }
     nput16(rec + 0x16, NTFS_REC_IN_USE | (is_dir ? NTFS_REC_IS_DIR : 0));
     nput32(rec + 0x1C, sb->mft_record_size);
     nput16(rec + 0x28, 3);              /* next attribute id */
@@ -227,7 +239,7 @@ int ntfs_create_entry(ntfs_vnode_priv_t *dirfp, const char *name,
     /* USA value placeholder (0xFFFF); fixup fills real values. */
     nput16(rec + 0x30, 0xFFFF);
 
-    uint32_t off = 0x30;
+    uint32_t off = (uint32_t)nget16(rec + 0x14);
 
     /* $STANDARD_INFORMATION (resident, 72-byte value). */
     {

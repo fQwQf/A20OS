@@ -12,7 +12,7 @@
  *   fat : 读回 / 写入读回 / 列目录 / 删除
  *   ext4: 预置内容读回 / 新建写读 / rename / 删除
  *   iso : 只读内容校验 / 列目录 / 嵌套路径读取
- *   ntfs: 空卷挂载 / 新建写读 / 列目录 / 删除
+ *   ntfs: 挂载解析 / 新建写读回 / 目录操作 / SIGKILL 重启持久化 / 删除
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -41,6 +41,19 @@ static pid_t spawn_ufsd(const char *mp, const char *idx, const char *fstype)
         _exit(90);
     }
     return pid;
+}
+
+/* 崩溃恢复共用序列：SIGKILL 实例 -> 回收 -> 卸载（内核侧挂载仍指向
+ * 已死通道，必须先卸载才能重新注册）-> 重新拉起。 */
+static int kill_and_remount_ufsd(pid_t victim, const char *mp,
+                                 const char *idx, const char *fstype)
+{
+    kill(victim, SIGKILL);
+    waitpid(victim, NULL, 0);
+    if (umount2(mp, 0) != 0)
+        return -1;
+    spawn_ufsd(mp, idx, fstype);
+    return 0;
 }
 
 static int wait_path(const char *path, int tries)
@@ -78,21 +91,37 @@ static int roundtrip(const char *tag, const char *dir, const char *name)
         pattern[i] = (unsigned char)(i * 31 + 7);
 
     int fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    if (fd < 0)
+    if (fd < 0) {
+        printf("%s: create errno=%d (%s)\n", tag, errno, path);
         return fail(tag, "create");
+    }
     ssize_t wn = write(fd, pattern, sizeof(pattern));
+    if (wn != (ssize_t)sizeof(pattern))
+        printf("%s: write ret=%zd errno=%d\n", tag, wn, errno);
     close(fd);
     if (wn != (ssize_t)sizeof(pattern))
         return fail(tag, "write size");
 
     static unsigned char back[8192];
     fd = open(path, O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+        printf("%s: reopen errno=%d\n", tag, errno);
         return fail(tag, "reopen");
+    }
     ssize_t rn = read(fd, back, sizeof(back));
     close(fd);
-    if (rn != (ssize_t)sizeof(pattern) ||
-        memcmp(pattern, back, sizeof(pattern)) != 0)
+    if (rn != (ssize_t)sizeof(pattern)) {
+        printf("%s: read ret=%zd errno=%d\n", tag, rn, errno);
+        return fail(tag, "read size");
+    }
+    for (size_t i = 0; i < sizeof(pattern); i++) {
+        if (pattern[i] != back[i]) {
+            printf("%s: first diff at %zu want=%02x got=%02x\n",
+                   tag, i, pattern[i], back[i]);
+            break;
+        }
+    }
+    if (memcmp(pattern, back, sizeof(pattern)) != 0)
         return fail(tag, "read-back mismatch");
     return 0;
 }
@@ -181,12 +210,15 @@ static int test_iso(void)
     return 0;
 }
 
-/* ntfs 后端 v1 为只读放置（内核 ntfs 写路径无在库测试覆盖）：
- * 验证挂载/引导扇区+MFT 解析/目录枚举/只读语义。 */
+/* ntfs 后端已开放读写：验证挂载/MFT 解析、新建写读回、目录操作、
+ * 删除，以及 SIGKILL 重启后的数据持久化（内核 ntfs 写路径的在库
+ * 端到端正确性测试）。 */
 static int test_ntfs(void)
 {
     const char *tag = "UXFS_NTFS";
-    spawn_ufsd("/untfs", "4", "ntfs");
+    const char *mrk = "/untfs/RESTART.MRK";
+
+    pid_t a = spawn_ufsd("/untfs", "4", "ntfs");
     if (wait_path("/untfs", 500))
         return fail(tag, "/untfs not visible");
 
@@ -199,22 +231,76 @@ static int test_ntfs(void)
         return fail(tag, "root not a directory");
     }
 
+    /* 新建写读回：8KB 伪随机模式覆盖非驻留数据流与簇分配 */
+    if (roundtrip(tag, "/untfs", "NTFSBIN.BIN"))
+        return 1;
+
+    /* 目录操作：mkdir -> 嵌套创建读取 -> rmdir 前先删文件 */
+    if (mkdir("/untfs/sub", 0755) != 0)
+        return fail(tag, "mkdir");
+    char npath[256];
+    snprintf(npath, sizeof(npath), "%s/%s", "/untfs/sub", "NESTED.TXT");
+    int fd = open(npath, O_CREAT | O_WRONLY, 0644);
+    if (fd < 0)
+        return fail(tag, "nested create");
+    if (write(fd, "ntfs nested\n", 12) != 12) {
+        close(fd);
+        return fail(tag, "nested write");
+    }
+    close(fd);
+
+    /* 持久化标记：跨实例重启必须存活 */
+    fd = open(mrk, O_CREAT | O_WRONLY, 0644);
+    if (fd < 0)
+        return fail(tag, "create marker");
+    if (write(fd, "survive-restart\n", 16) != 16) {
+        close(fd);
+        return fail(tag, "marker write");
+    }
+    close(fd);
+
     DIR *d = opendir("/untfs");
     if (!d)
         return fail(tag, "opendir");
-    /* 空卷合法；枚举调用链本身必须无错完成 */
-    while (readdir(d) != NULL)
-        ;
-    closedir(d);
-
-    /* 只读语义：写必须失败 */
-    int fd = open("/untfs/NOPE.BIN", O_CREAT | O_WRONLY, 0644);
-    if (fd >= 0) {
-        close(fd);
-        return fail(tag, "write unexpectedly succeeded");
+    int saw_bin = 0, saw_sub = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, "NTFSBIN.BIN") == 0)
+            saw_bin = 1;
+        if (strcmp(ent->d_name, "sub") == 0)
+            saw_sub = 1;
     }
+    closedir(d);
+    if (!saw_bin || !saw_sub)
+        return fail(tag, "readdir missing created entries");
 
-    printf("%s: PASS (ro)\n", tag);
+    /* 崩溃恢复演练：SIGKILL 实例 -> 卸载 -> 重启 -> 数据仍在 */
+    if (kill_and_remount_ufsd(a, "/untfs", "4", "ntfs") != 0)
+        return fail(tag, "remount after crash");
+    if (wait_path(mrk, 500))
+        return fail(tag, "instance B not visible");
+
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    if (read_all(mrk, buf, sizeof(buf)) != 16 ||
+        strcmp(buf, "survive-restart\n") != 0)
+        return fail(tag, "marker content lost across restart");
+
+    memset(buf, 0, sizeof(buf));
+    if (read_all(npath, buf, sizeof(buf)) != 12 ||
+        strcmp(buf, "ntfs nested\n") != 0)
+        return fail(tag, "nested content lost across restart");
+
+    /* 清理：删除路径同时回收簇与 MFT 记录 */
+    if (unlink("/untfs/NTFSBIN.BIN") != 0)
+        return fail(tag, "unlink");
+    if (unlink(npath) != 0)
+        return fail(tag, "nested unlink");
+    if (rmdir("/untfs/sub") != 0)
+        return fail(tag, "rmdir");
+    unlink(mrk);
+
+    printf("%s: PASS\n", tag);
     return 0;
 }
 
@@ -238,16 +324,8 @@ static int test_restart(void)
     }
     close(fd);
 
-    /* 模拟崩溃：SIGKILL 实例 A 并回收 */
-    kill(a, SIGKILL);
-    waitpid(a, NULL, 0);
-
-    /* 内核侧挂载仍指向已死通道：先卸载才能重新注册 */
-    if (umount2("/ufs2", 0) != 0)
+    if (kill_and_remount_ufsd(a, "/ufs2", "1", "fat") != 0)
         return fail(tag, "umount after crash");
-
-    pid_t b = spawn_ufsd("/ufs2", "1", "fat");
-    (void)b;
     if (wait_path(mrk, 500))
         return fail(tag, "instance B not visible");
 
