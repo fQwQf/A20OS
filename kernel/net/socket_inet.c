@@ -1006,30 +1006,28 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
     if (s->domain == AF_INET6)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 
-    uint64_t lwip_flags = a20_lwip_lock();
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!p)
-    {
-        a20_lwip_unlock(lwip_flags);
         return -ENOMEM;
-    }
     pbuf_take(p, buf, (u16_t)len);
+    ip_addr_t ip;
+    uint16_t port = 0;
     err_t e;
     if (addr) {
-        ip_addr_t ip;
-        uint16_t port = 0;
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, &port);
         if (r < 0) {
             pbuf_free(p);
-            a20_lwip_unlock(lwip_flags);
             return r;
         }
+    }
+    uint64_t lwip_flags = a20_lwip_lock();
+    if (addr) {
         e = udp_sendto(s->udp, p, &ip, port);
     } else if (s->connected) {
         e = udp_send(s->udp, p);
     } else {
-        pbuf_free(p);
         a20_lwip_unlock(lwip_flags);
+        pbuf_free(p);
         return -EDESTADDRREQ;
     }
     pbuf_free(p);
@@ -1041,29 +1039,27 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
 static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
                              const void *addr, size_t addrlen)
 {
-    uint64_t lwip_flags = a20_lwip_lock();
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!p)
-    {
-        a20_lwip_unlock(lwip_flags);
         return -ENOMEM;
-    }
     pbuf_take(p, buf, (u16_t)len);
+    ip_addr_t ip;
     err_t e;
     if (addr) {
-        ip_addr_t ip;
         int r = net_sockaddr_to_lwip_ip(addr, addrlen, &ip, NULL);
         if (r < 0) {
             pbuf_free(p);
-            a20_lwip_unlock(lwip_flags);
             return r;
         }
+    }
+    uint64_t lwip_flags = a20_lwip_lock();
+    if (addr) {
         e = raw_sendto(s->raw, p, &ip);
     } else if (s->connected) {
         e = raw_send(s->raw, p);
     } else {
-        pbuf_free(p);
         a20_lwip_unlock(lwip_flags);
+        pbuf_free(p);
         return -EDESTADDRREQ;
     }
     pbuf_free(p);
