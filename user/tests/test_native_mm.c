@@ -12,6 +12,7 @@
 #include "liba20rt/crt0_a20.h"
 #include "liba20rt/a20_mem.h"
 #include "liba20rt/a20_syscall.h"
+#include "liba20rt/a20_fs.h"
 
 #define PAGE 4096ULL
 
@@ -159,6 +160,34 @@ int main(int argc, char **argv, char **envp)
         a20_hdl_close(vmo);
         a20_hdl_close(child);
         a20_hdl_close(root);
+    }
+
+    /* 7. FILE-backed mapping: demand fault fills pages via page cache. */
+    {
+        a20_path_open_args_t po;
+        a20_memset(&po, 0, sizeof(po));
+        po.dir = A20_HANDLE_NULL;
+        po.flags = A20_PATH_OPEN_RDONLY;
+        po.rights = A20_RIGHT_READ | A20_RIGHT_MAP;
+        po.path = (uint64_t)(uintptr_t)"/bin/native-mm-rv";
+        po.path_len = 17;
+        st = a20_path_open(&po);
+        if (st != A20_OK || po.out_handle == A20_HANDLE_NULL)
+            return fail(out, 16, "path_open failed", 16);
+
+        uint64_t faddr = 0;
+        st = a20_vm_map(po.out_handle, PAGE, 0, 1 /* R */, &faddr);
+        if (st != A20_OK || !faddr)
+            return fail(out, 17, "vm_map FILE failed", 18);
+
+        volatile const uint8_t *fb = (volatile const uint8_t *)(uintptr_t)faddr;
+        if (!(fb[0] == 0x7f && fb[1] == 'E' && fb[2] == 'L' && fb[3] == 'F'))
+            return fail(out, 18, "file map content", 18);
+
+        st = a20_vm_unmap(faddr, PAGE);
+        if (st != A20_OK)
+            return fail(out, 19, "vm_unmap FILE", 14);
+        a20_hdl_close(po.out_handle);
     }
 
     a20_hdl_write_buf(out, "NATIVE_MM: PASS\n", 16, (void *)0);
