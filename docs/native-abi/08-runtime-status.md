@@ -163,6 +163,12 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 - 若重启，应基于 `user/archive/` 的参考代码重新设计，而不是直接复用旧路径。
 - Debug handle 的 stop/resume/watchpoint 能力也只在有明确调试需求时扩展。
 
+### 已批准设计、待排期的深水区（2026-08 评审通过）
+
+- **VMAR 子树化**（`vm_create_vmar`）：层级 VMAR 对齐 Zircon；前置依赖是 VMA 记录父 VMAR 归属与 rights 继承规则（04-memory §3.3），建议在 vm_protect capability 稳定后启动。
+- **信号 EventQ 化**：以 EventQ 投递信号事件替代 mlibc 检查点轮询，消除 CPU 密集循环收不到信号的模型缺陷；需定义 SIGNAL 事件位与 siginfo 载荷结构（E-APPEND），mlibc sysdeps 切换读取路径。
+- **动态链接联调**：内核 PT_INTERP 封装与 conventional auxv 已就绪（见 §8a），剩余为 mlibc rtld 共享库构建与 `sys_vm_map` 文件回映射验证。
+
 ## 与用户决策的对应关系
 
 - 用户已确认：Linux ABI 继续作为主用户态接口，`abi/native` 保持为辅。
