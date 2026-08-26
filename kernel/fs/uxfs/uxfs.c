@@ -15,6 +15,7 @@
 #include "fs/vfs.h"
 #include "fs/vfs/mount.h"
 #include "fs/vfs/dcache.h"
+#include "fs/page_cache.h"
 #include "drivers/block/block_dev.h"
 #include "ipc/ipc.h"
 #include "mm/mm.h"
@@ -340,9 +341,20 @@ static int uxfs_truncate(vnode_t *vn, size_t size)
     ufs_resp_hdr_t resp;
     uxfs_req_init(p->sb, &req, UFS_OP_TRUNCATE, vn->ino, size, 0, NULL, 0);
     int rc = uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
-    if (rc == 0)
+    if (rc == 0) {
+        page_cache_truncate(vn, size);
         vn->size = size;
+    }
     return rc;
+}
+
+static int uxfs_sync_vnode(vnode_t *vn)
+{
+    uxfs_vpriv_t *p = (uxfs_vpriv_t *)vn->fs_data;
+    ufs_req_hdr_t req;
+    ufs_resp_hdr_t resp;
+    uxfs_req_init(p->sb, &req, UFS_OP_SYNC, vn->ino, 0, 0, NULL, 0);
+    return uxfs_rpc(p->sb, &req, NULL, NULL, &resp, NULL, 0, NULL);
 }
 
 static int uxfs_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
@@ -369,6 +381,13 @@ static int uxfs_writepage(vnode_t *vn, uint64_t index, const void *data,
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp;
     uint64_t off = index * 4096ull;
+    /* Writeback flushes whole pages; only bytes within the file are
+     * authoritative, otherwise ufsd-side size would inflate to the page
+     * boundary on the tail page. */
+    if (off >= vn->size)
+        return 0;
+    if (off + len > vn->size)
+        len = (size_t)(vn->size - off);
     uxfs_req_init(p->sb, &req, UFS_OP_WRITE, vn->ino, off, len, NULL,
                   (uint32_t)len);
     int rc = uxfs_rpc(p->sb, &req, NULL, data, &resp, NULL, 0, NULL);
@@ -531,6 +550,11 @@ static int uxfs_fclose(vfile_t *vf)
 {
     uxfs_fctx_t *fc = (uxfs_fctx_t *)vf->priv;
     if (fc) {
+        /* Flush dirty pages while the ufsd channel is guaranteed alive:
+         * user-space FS servers crash/restart routinely, so write-behind
+         * past close would race server death. */
+        if (vf->vnode)
+            page_cache_writeback_vnode(vf->vnode, NULL, NULL);
         kfree(fc);
         vf->priv = NULL;
     }
@@ -583,8 +607,9 @@ static vnode_ops_t g_uxfs_vnops = {
     .stat      = uxfs_stat,
     .statfs    = uxfs_statfs,
     .truncate  = uxfs_truncate,
-    .readpage  = uxfs_readpage,
-    .writepage = uxfs_writepage,
+    .readpage   = uxfs_readpage,
+    .writepage  = uxfs_writepage,
+    .sync_vnode = uxfs_sync_vnode,
     .open      = uxfs_open_vnode,
     .release   = uxfs_release_vn,
 };
@@ -610,7 +635,8 @@ static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
 }
 
 int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
-                     struct task_t *server, int block_index)
+                     struct task_t *server, int block_index,
+                     uint32_t serve_flags)
 {
     if (!path || !ep)
         return -EINVAL;
@@ -663,7 +689,8 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     strncpy(mnt->path, path, MAX_PATH_LEN - 1);
     mnt->path[MAX_PATH_LEN - 1] = '\0';
     mnt->type  = FS_TYPE_UXFS;
-    mnt->flags = 0;
+    /* bit0: 服务端声明只读后端（如 iso9660）；页缓存缓冲写据此禁用。 */
+    mnt->flags = (serve_flags & 1u) ? VFS_MOUNT_RDONLY : 0;
     mnt->root  = root;
     root->mnt  = mnt;
     mnt->fs_data = sb;
