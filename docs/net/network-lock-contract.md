@@ -77,7 +77,7 @@ send 路径对本地 socket 和远端 socket 行为不同。
 
 对远端 UDP、RAW 或 TCP send，socket 地址/本地队列状态和 lwIP PCB 操作分成互不重叠的临界区。调用 `pbuf_alloc()`、`udp_sendto()`/`udp_send()`、`tcp_sndbuf()`、`tcp_write()` 或 `tcp_output()` 时持有 `g_lwip_lock`，不得同时持有 `g_net_lock`。需要更新本地 socket 状态或等待队列时先释放 lwIP 锁，再进入 `g_net_lock` 临界区。
 
-`net_inet_send_tcp()` 在每轮之间不持有任何锁地轮询 lwIP 进展，然后只在调用 `tcp_sndbuf()`、`tcp_write()` 和 `tcp_output()` 时获取 `g_lwip_lock`。
+`net_inet_send_tcp()` 在每轮迭代中先调用 `a20_lwip_poll()`（内部获取/释放 `g_lwip_lock` 以驱动超时和 RX/TX 进展），随后在同一次 `g_lwip_lock` 持有期内完成 `tcp_sndbuf()` 空间检查与 `tcp_write()` / `tcp_output()`，将 sndbuf 校验与实际写入合并为单次锁获取。
 
 ### Recv
 

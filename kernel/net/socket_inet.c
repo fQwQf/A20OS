@@ -1100,10 +1100,12 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
         uint64_t lwip_flags = a20_lwip_lock();
         int tcp_alive = s->tcp && !s->closed && s->connected;
         u16_t room = tcp_alive ? tcp_sndbuf(s->tcp) : 0;
-        a20_lwip_unlock(lwip_flags);
-        if (!tcp_alive)
+        if (!tcp_alive) {
+            a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
+        }
         if (room == 0) {
+            a20_lwip_unlock(lwip_flags);
             if (sent || s->nonblock)
                 return sent ? (int)sent : -EAGAIN;
             task_t *cur = proc_current();
@@ -1145,12 +1147,14 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -EAGAIN;
             continue;
         }
+        /* room > 0: merge sndbuf check with write/output under one lock
+         * acquisition.  The earlier lock acquired tcp_sndbuf and confirmed
+         * liveness; re-verify under the same lock before writing. */
         size_t n = len - sent;
         if (n > room)
             n = room;
         if (n > 0xffff)
             n = 0xffff;
-        lwip_flags = a20_lwip_lock();
         if (!s->tcp || s->closed || !s->connected) {
             a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;

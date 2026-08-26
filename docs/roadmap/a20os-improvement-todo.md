@@ -133,6 +133,7 @@
 - [ ] 降低 `g_lwip_lock` 竞争，并为所有 socket 路径记录锁安全入口点。
   - 证据：`kernel/net/lwip_stack.c` 用全局锁串行化 lwIP 核心状态；`kernel/include/core/lock.h` 限制 lwIP 锁下的调用。
   - 设计：`docs/net/network-lock-contract.md`。
+  - 已落地改进（2026-08-26）：`net_inet_send_tcp()` 热路径将 sndbuf 空间检查与 `tcp_write()`/`tcp_output()` 合并为单次 `g_lwip_lock` 获取（此前每轮迭代 3 次获取：poll + sndbuf 检查 + write/output，现减为 2 次：poll + 合并的 sndbuf+write）。`a20_lwip_poll()` 本身无法进一步缩减——IRQ handler 已内联处理 RX（设置 `g_lwip_rx_pending` 标记），但 TX 完成和 `sys_check_timeouts()` 仍需 poll 路径；scheduler idle hook 的 `virtio_net_poll_rx_all()` 已有 RX-pending 快速路径（无 pending 时跳过）。锁契约文档 `network-lock-contract.md` 第80行的 send 路径描述已同步更新。
   - 完成条件：socket send/recv/connect/listen/accept 测试可并发运行，且没有锁顺序告警或饥饿。
 - [x] 用 board/network 配置管线替换仅适用于 QEMU 的网络地址默认值。
   - 证据：`docs/external-dependencies.md` 说明 `10.0.2.15`、`10.0.2.2` 和 `10.0.2.3` 只是开发默认值。
