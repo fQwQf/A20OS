@@ -645,7 +645,13 @@ typedef struct a20_event_watch_args {
     a20_handle_t   target;
     uint64_t       event_mask;
     uint64_t       user_data;
+    /* v1.1 E-APPEND: watch delivery mode flags (A20_WATCH_*). */
+    uint64_t       flags;
 } a20_event_watch_args_t;
+
+/* a20_event_watch_args_t.flags */
+#define A20_WATCH_LEVEL   0x1ull /* level-triggered: readiness is re-checked
+                                  * on every wait, not only on transitions */
 
 
 
