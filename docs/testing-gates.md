@@ -82,6 +82,7 @@
 - **How to run**: `make check-external-dependency-boundary`
 - **What it checks**: 检查 `include $(KERNEL_DIR)/external/lwip/sources.mk` 是否在 Makefile 中；`docs/external-dependencies.md` 是否包含 `EXTERNAL_LWIP_SOURCE_MANIFEST`、`EXTERNAL_LWIP_CONFIG_CONTRACT`、`EXTERNAL_USERLAND_UPGRADE_CHECKLIST`、`EXTERNAL_STATIC_LINK_REBUILD_CONTRACT`、`EXTERNAL_TLSE_WGET_LIMITS` 等；确认 `Makefile` 中没有直接定义 `LWIP_SRC`。
 - **When it fails**: 检查 `Makefile` 的 lwIP 包含语句；补充或恢复 `docs/external-dependencies.md` 中的对应契约标题；确认 `kernel/external/lwip/sources.mk` 包含 `LWIP_SRC` 与 `core/timeouts.c`。
+- **Vendored-code policy**: vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第一方质量声明与测试——所有 `kernel` 目录级 `rg` 扫描必须携带 `--glob '!kernel/external/**'` 排除；`user/` 侧检查只允许对具名第一方文件做 marker 断言，禁止目录级扫描。新增检查目标必须遵守同一规则；唯一的例外是明确标注为集成测试的目标（如 `check-external-dependency-boundary` 本身）。
 
 ### 架构边界
 - **How to run**: `make check-arch-boundary`
