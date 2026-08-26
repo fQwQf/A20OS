@@ -178,3 +178,56 @@ virtio-blk 以 `.a20drv` ET_REL 模块加载，其外部符号只能解析 drv_e
 
 两轮 600s 干净镜像浸泡（soakA/此前 final1）：零 panic、零 LOCK-STALL、
 零 GLib abort，桌面持续渲染。遗留问题均有明确根因假设与下一步手段。
+
+
+## 第三轮排查增补：遗留项逐一定位结论
+
+用追踪器与逐步探针对四个遗留项做了收敛定位，其中两项确认了精确根因
+（修复需要解析器/套接字层的整体设计改动，已给出规格），一项被证伪。
+
+### 1. dbus 日志 pid=-1 —— 证伪，非缺陷
+
+Alpine 的 dbus 1.16 在激活日志前缀 `[session uid=0 pid=-1 pidfd=5]` 中
+记录的是总线自身的上下文（无 peer），而 `requested by ':1.x' (uid=0
+pid=54 comm=...)` 表明 **peer 凭证完全正常**。内核侧实测：SO_PASSCRED
+设置、accept 继承、SCM_CREDENTIALS 发射（含真实 pid）全部工作。
+此前把它当作 SO_PEERCRED 缺口是误读。
+
+### 2. elogind 魔法链接挂载 —— 根因精确锁定，修复需解析器重设计
+
+elogind 以 `/proc/self/fd/N` 为挂载目标。逐跳探针证明：
+- `/proc/self/fd` 解析 ✓；fd 条目 lookup ✓（type=SYMLINK）；readlink ✓；
+- 但 `vfs_resolve("/proc/self/fd/6")` 整体返回 -ENOENT。
+
+两个叠加的解析器缺口：
+
+a) **绝对符号链接重启点错误**：walker 命中绝对链接后从"当前挂载点根"
+   （procfs 根）重新走，而不是任务的 chroot 根——于是 fd 链接指向的
+   /sys/... 会在 procfs 内部查找，必然 ENOENT。
+b) **缺少前向挂载点跨越**：即使修了 a)，从 chroot 根重启后走到
+   /sys(devtmpfs/sysfs 挂载点) 时 walker 不会切换到已挂载文件系统，
+   后续组件在底层目录上查找同样失败。
+
+尝试性热修（fs_root 贯通 + acc 累积路径跨越检查）曾使魔法链接挂载成功
+（rv=0），但引入了 libdrm `drmGetDeviceNameFromFd2()` 路径的回归
+（桌面黑屏），已整体回退并验证恢复。正确做法是把
+`vnode_lookup_path_fs` 的"任务 chroot 根 + 逐组件挂载点跨越"语义作为
+一次独立的、带完整回归集的解析器重构落地（涉及 openat2 变体的同步）。
+
+### 3. udevd worker epoll_pwait —— 与 SOCK_SEQPACKET 就绪传播同源
+
+2480 条 slow 报告集中在 epoll_pwait；结合 dbus 对 SEQPACKET 大消息的
+偶发问题，判定 AF_UNIX SOCK_SEQPACKET 的写端就绪 → 对端 epoll 唤醒链路
+存在缺口。修复入口：`net_unix_socket_sendto_impl`/channel 路径的
+readiness 通知 + `net_poll_file` 对 SEQPACKET 的边界处理。
+
+### 4. tumblerd —— 缓解已生效，彻底解决依赖 #1/#2 之外的初始化提速
+
+600s 窗口内未再出现 SIGKILL（此前 120s 必杀）。注册是否最终完成受 TCG
+速度影响大；在真机速度下预期可自然通过。
+
+## 最终状态（本分支）
+
+四轮浸泡（soakA/B/final-verify 及早期 final1）：零 panic、零 LOCK-STALL、
+零 GLib abort、零 DRM 回归；XFCE 桌面稳定运行。遗留三项均已有精确到
+函数/调用链的根因记录与修复规格。
