@@ -264,6 +264,8 @@ int main(int argc, char **argv, char **envp)
     sa.block_index = g_block_index;
     sa.target = (uint64_t)(uintptr_t)mount_path;
     sa.target_len = a20_strlen(mount_path);
+    /* bit0 = 只读后端：内核页缓存缓冲写据此禁用（iso9660 物理只读）。 */
+    sa.flags = (strcmp(fstype, "iso9660") == 0) ? 1u : 0u;
     int64_t serve_st = a20_syscall6(A20_SYS_fs_serve, (uint64_t)&sa,
                                     0, 0, 0, 0, 0);
     if (!a20_status_is_ok(serve_st)) {

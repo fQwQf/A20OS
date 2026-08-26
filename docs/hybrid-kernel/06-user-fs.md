@@ -55,7 +55,7 @@
 - fat 后端：8.3 短名（fat32lite 语义）；rmdir/rename/非零 truncate 不支持（fat32lite 无对应原语，返回 ENOSYS）；
 - ntfs 后端已开放读写：内核 ntfs 写路径（MFT 记录分配、$INDEX_ROOT 增长、簇位图、驻留→非驻留转换）由 smoke-native-fs-all 端到端覆盖，含 SIGKILL 重启持久化验证；
 - iso9660 只读（格式即如此）；驱动将 ISO 名字转小写；
-- uxfs 文件读写当前不接入内核页缓存（直通转发）；接入 readpage/writepage 缓存路径是后续工作；
+- uxfs 文件读写已接入内核页缓存（readpage/writepage 缓存路径）：读经 page_cache 命中免 RPC，写缓冲在脏页并在 close/fsync 时经 writepage 批量回传 ufsd（ufsd 可崩溃，write-behind 不越过 close）；只读后端（iso9660 经 fs_serve flags 声明）禁用缓冲写；
 - 服务重启后映射清空：崩溃恢复契约要求重新挂载（新 ino 空间）；
 - 监管通道为 200µs 非阻塞轮询（与 fs 服务循环复用一个线程）；EventQ 统一等待是后续优化项；
 - 内核侧仍保留同名 FS 实现（引导期 /bin 挂载与 EXTERNAL_ROOT 发行版路径依赖它们），当前为双态并存；移除需先完成"用户态先于存储可用"的启动序列改造。

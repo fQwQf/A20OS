@@ -21,12 +21,15 @@ struct vnode;
  * @ep            服务端 channel 端点；成功后引用所有权移交 uxfs
  * @server        发起注册的服务任务（block IO 所有权校验用）
  * @block_index   服务可访问的块设备 class 序号；<0 表示无块后端
+ * @serve_flags   bit0：服务端声明只读后端（如 iso9660）；置位时挂载
+ *                标记 VFS_MOUNT_RDONLY，页缓存缓冲写据此禁用
  *
  * 返回 0 或负 errno。挂载前会先做 UFS_OP_INIT 握手，服务不可用时报
  * -EIO/-ETIMEDOUT。
  */
 int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
-                     struct task_t *server, int block_index);
+                     struct task_t *server, int block_index,
+                     uint32_t serve_flags);
 
 /* umount 收尾：释放服务端点引用（由 vfs_umount 的 FS_TYPE 分支调用）。 */
 void uxfs_unmount(struct vnode *root);

@@ -860,7 +860,7 @@ int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
      * umount 时经 uxfs_unmount → a20_channel_ep_release 归还。
      */
     r = uxfs_serve_mount(full_tgt, (a20_channel_ep_t *)entry.object, cur,
-                         (int)kargs.block_index);
+                         (int)kargs.block_index, kargs.flags);
     if (r < 0)
         a20_object_release(entry.object, A20_OBJ_CHANNEL_ENDPOINT);
     return (r < 0) ? -A20_ERR_IO : A20_OK;
