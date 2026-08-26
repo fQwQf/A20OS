@@ -374,6 +374,16 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
         size_t copy_off = (size_t)(copy_start - page);
         if (to_copy > PAGE_SIZE - copy_off)
             to_copy = PAGE_SIZE - copy_off;
+
+        /* Head partial page: bytes preceding file_offset are part of this
+         * page too (ELF header + program headers).  Back them so AT_PHDR
+         * resolves for dynamically linked natives (08-runtime-status §8a). */
+        if (copy_off > 0) {
+            int hr = vfs_pread(fd, (char *)frame, copy_off,
+                               file_page_offset);
+            (void)hr; /* short header read simply leaves zeros behind */
+        }
+
         int nr = vfs_pread(fd, (char *)frame + copy_off, (size_t)to_copy,
                            file_offset + src_off);
         if (nr < 0 || (uint64_t)nr != to_copy) {
@@ -468,6 +478,22 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
              * copying only p_filesz otherwise exposes stale data as .bss.
              */
             memset(frame, 0, PAGE_SIZE);
+        }
+
+        /* Head partial page: file bytes preceding p_offset are part of
+         * this page too (ELF header + program headers).  Back them so
+         * AT_PHDR resolves for dynamically linked natives
+         * (docs/native-abi/08-runtime-status.md §8a). */
+        if (page < va && src->kind == SEG_FD) {
+            uint64_t foff = (uint64_t)src->fd.offset;
+            if (foff > 0) {
+                uint64_t back = va - page;
+                uint64_t have = foff < back ? foff : back;
+                int nr = vfs_pread(src->fd.fd, tmp, (size_t)have,
+                                   foff - have);
+                if (nr > 0)
+                    memcpy((char *)frame, tmp, (size_t)nr);
+            }
         }
 
         if (page < va + filesz) {
@@ -929,6 +955,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
     vaddr_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
+    uint64_t hdr_map_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     int has_interp = 0;
@@ -964,6 +991,9 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         }
         if (phdrs[i].p_type != PT_LOAD) continue;
 
+        if (!hdr_map_va)
+            hdr_map_va = (uint64_t)phdrs[i].p_vaddr +
+                         (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
         vaddr_t seg_va = phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
         r = map_segment(&mm, pgdir, seg_va, phdrs[i].p_memsz,
@@ -1035,7 +1065,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         .base        = base,
         .end_va      = max_va,
         .brk         = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE),
-        .phdr_va     = head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff),
+        .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
+                     : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
         .phnum       = (uint32_t)nph,
         .phentsize   = eh->e_phentsize,
         .load_addr   = base,
@@ -1095,6 +1126,7 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     vaddr_t load_bias = (eh->e_type == ET_DYN) ? (USER_DYN_BASE + elf_aslr_bias()) : 0;
 #endif
     vaddr_t base = 0, max_va = 0, brk_va = 0, head_va = 0;
+    uint64_t hdr_map_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     int is_native = 0;
@@ -1128,6 +1160,9 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
         }
         if (phdrs[i].p_type != PT_LOAD) continue;
 
+        if (!hdr_map_va)
+            hdr_map_va = (uint64_t)phdrs[i].p_vaddr +
+                         (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
         vaddr_t seg_va = (vaddr_t)phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
         r = map_segment(&mm, pgdir, seg_va, (uint64_t)phdrs[i].p_memsz,
@@ -1176,7 +1211,8 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
         .base        = base,
         .end_va      = max_va,
         .brk         = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE),
-        .phdr_va     = head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff),
+        .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
+                     : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
         .phnum       = (uint32_t)nph,
         .phentsize   = eh->e_phentsize,
         .load_addr   = base,

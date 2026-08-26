@@ -112,7 +112,7 @@ int64_t sys_a20_debug_attach(const a20_syscall_args_t *args)
     /* docs/native-abi/06-security.md §8.1: attach requires ADMIN right on
      * the target task handle; proc_debug_attach re-checks uid/capability. */
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_ADMIN, &entry);
     if (r < 0) return r;
 

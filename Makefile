@@ -220,6 +220,8 @@ NATIVE_MM_BIN          := $(NATIVE_BUILD_DIR)/native-mm-$(NATIVE_TAG)
 NATIVE_SIGNAL_BIN      := $(NATIVE_BUILD_DIR)/native-signal-$(NATIVE_TAG)
 NATIVE_IPC_BIN         := $(NATIVE_BUILD_DIR)/native-ipc-$(NATIVE_TAG)
 NATIVE_CONTRACT_BIN    := $(NATIVE_BUILD_DIR)/native-contract-$(NATIVE_TAG)
+NATIVE_FAKELD_BIN       := $(NATIVE_BUILD_DIR)/fakeld-$(NATIVE_TAG)
+NATIVE_DYNPROBE_BIN     := $(NATIVE_BUILD_DIR)/dynprobe-$(NATIVE_TAG)
 NATIVE_SVCMAN_BIN      := $(NATIVE_BUILD_DIR)/svcman-$(NATIVE_TAG)
 NATIVE_ECHOD_BIN       := $(NATIVE_BUILD_DIR)/svc-echod-$(NATIVE_TAG)
 NATIVE_SHMRING_BIN     := $(NATIVE_BUILD_DIR)/native-shmring-$(NATIVE_TAG)
@@ -240,6 +242,7 @@ NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
                           $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
+                          $(NATIVE_FAKELD_BIN) $(NATIVE_DYNPROBE_BIN) \
                           $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \
                           $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) \
                           $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) \

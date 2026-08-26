@@ -48,6 +48,10 @@ MLIBC_SIGCHLD_BIN := $(NATIVE_BUILD_DIR)/mlibc-sigchld-$(NATIVE_TAG)
 $(MLIBC_SIGCHLD_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_sigchld.c user/mlibc/a20-mlibc.ld
 	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_sigchld.c,-lc,$@)
 
+MLIBC_PIPEEXEC_BIN := $(NATIVE_BUILD_DIR)/mlibc-pipeexec-$(NATIVE_TAG)
+$(MLIBC_PIPEEXEC_BIN): $(MLIBC_SYSROOT)/lib/libc.a user/tests/test_mlibc_pipeexec.c user/mlibc/a20-mlibc.ld
+	$(call MLIBC_LINK_RECIPE,user/tests/test_mlibc_pipeexec.c,-lc,$@)
+
 # ------------------------------------------------------------------
 # mksh on mlibc (native ABI)
 #
@@ -165,14 +169,15 @@ smoke-mlibc-sbase:
 
 smoke-mlibc:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv
+	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_HELLO_BIN) ::/mlibc-hello-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_PIPEEXEC_BIN) ::/mlibc-pipeexec-rv
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mlibc-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/mlibc-hello-rv\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/mlibc-hello-rv\n/bin/mlibc-pipeexec-rv\n/bin/mlibc-pipeexec-rv\npoweroff\n'; } | \
 	$(TIMEOUT) 40s qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -181,7 +186,7 @@ smoke-mlibc:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MLIBC_A20: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+	if grep -q 'MLIBC_A20: PASS' "$$log" && grep -q 'PIPEEXEC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-mlibc: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-mlibc: failed with status $$status; tail of $$log:"; \
@@ -191,8 +196,9 @@ smoke-mlibc:
 
 smoke-mlibc-fork:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv
+	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_FORK_BIN) ::/mlibc-fork-rv
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mlibc-fork-riscv64.log"; \
@@ -216,11 +222,12 @@ smoke-mlibc-fork:
 
 smoke-mlibc-mksh:
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv mlibc-sbase
+	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv mlibc-sbase user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_MKSH_BIN) ::/mlibc-mksh
 	$(foreach t,$(MLIBC_SBASE_TOOLS),\
 		mcopy -o -i $(FAT32_IMG) $(NATIVE_BUILD_DIR)/mlibc-$(t) ::/mlibc-$(t);)
 	mcopy -o -i $(FAT32_IMG) user/tests/test_mlibc_mksh.sh ::/test-mlibc-mksh.sh
+	mcopy -o -i $(FAT32_IMG) $(MLIBC_PIPEEXEC_BIN) ::/mlibc-pipeexec-rv
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mlibc-mksh-riscv64.log"; \
@@ -235,7 +242,7 @@ smoke-mlibc-mksh:
 		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MKSH_MLIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
+	if grep -q 'MKSH_MLIBC: PASS' "$$log" && grep -q 'MKSH_MLIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
 		echo "smoke-mlibc-mksh: PASS; log saved to $$log"; \
 	else \
 		echo "smoke-mlibc-mksh: failed with status $$status; tail of $$log:"; \
