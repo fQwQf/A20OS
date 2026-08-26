@@ -279,18 +279,11 @@ int64_t sys_a20_vm_share_region(const a20_syscall_args_t *args)
         kargs.length > USER_VA_LIMIT - kargs.addr)
         return -A20_ERR_INVALID_ARGUMENT;
 
-    uint64_t flags = spin_lock_irqsave(&cur->mm->lock);
-    vm_area_t *vma = mm_find_vma(cur->mm, kargs.addr);
-    if (!vma || (uint64_t)vma->start > kargs.addr ||
-        (uint64_t)vma->end < kargs.addr + kargs.length ||
-        !(vma->vm_flags & VM_VMO) || !vma->vmo) {
-        spin_unlock_irqrestore(&cur->mm->lock, flags);
+    uint32_t prot = 0;
+    struct vmo *vmo = mm_lookup_vmo_region(cur->mm, (vaddr_t)kargs.addr,
+                                           (size_t)kargs.length, &prot);
+    if (!vmo)
         return -A20_ERR_NOT_SUPPORTED;
-    }
-    struct vmo *vmo = vma->vmo;
-    vmo_ref(vmo);
-    uint32_t prot = mm_pte_flags_to_prot(vma->pte_flags);
-    spin_unlock_irqrestore(&cur->mm->lock, flags);
 
     a20_rights_t rights = 0;
     if (prot & A20_PROT_READ)  rights |= A20_RIGHT_READ;
@@ -351,10 +344,6 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
 {
     uint64_t addr = A20_ARG(0);
     uint64_t len = A20_ARG(1);
-    uint32_t advice = (uint32_t)A20_ARG(2);
-#ifdef CONFIG_NOMMU
-    (void)advice;
-#endif
 
     if (len == 0) return A20_OK;
     if (addr & 4095) return -A20_ERR_INVALID_ARGUMENT;
@@ -362,62 +351,9 @@ int64_t sys_a20_vm_advise(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
-    uint64_t end = (addr + len + 4095) & ~(uint64_t)4095;
-    for (uint64_t va = addr; va < end; va += 4096) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
-        if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
-    }
-
-#ifndef CONFIG_NOMMU
-    if (advice == 4 /* MADV_DONTNEED */ || advice == 8 /* MADV_FREE */) {
-        mm_tlb_invalidate_begin(cur->mm);
-        uint64_t mm_flags = spin_lock_irqsave(&cur->mm->lock);
-        for (uint64_t va = addr; va < end; ) {
-            int level = 0;
-            vaddr_t base = 0;
-            size_t leaf_size = 0;
-            pte_t *pte = pt_lookup_leaf(cur->mm->pgdir, va, &level, &base, &leaf_size);
-            if (!pte || !(*pte & PTE_V)) { va += 4096; continue; }
-            vm_area_t *vma = mm_find_vma(cur->mm, va);
-            if (vma && (vma->vm_flags & VM_VMO)) {
-                /* VMO frames are owned by the VMO; unmapping a PTE must not
-                 * frame_put() them.  Drop the PTE and let the VMO keep the
-                 * canonical frame. */
-                paddr_t dummy = 0;
-                if (pt_unmap_leaf(cur->mm->pgdir, va, &dummy, &base,
-                                  &leaf_size, NULL) == 0) {
-                    mm_tlb_note_change(cur->mm, base, leaf_size);
-                    cur->mm->rss = (cur->mm->rss > leaf_size / 4096)
-                                       ? cur->mm->rss - leaf_size / 4096 : 0;
-                    va = base + leaf_size;
-                    continue;
-                }
-                va += 4096;
-                continue;
-            }
-            paddr_t pa = 0;
-            pfn_t held = phys_to_pfn(arch_pte_addr(*pte));
-            if (!pfn_valid(held) || mm_tlb_hold_frame(cur->mm, held) < 0) {
-                spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
-                mm_tlb_invalidate_finish(cur->mm);
-                return -A20_ERR_NO_MEMORY;
-            }
-            if (pt_unmap_leaf(cur->mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
-                mm_tlb_note_change(cur->mm, base, leaf_size);
-                if (pa) {
-                    frame_put(phys_to_pfn(pa));
-                    size_t pages = leaf_size / 4096;
-                    cur->mm->rss = (cur->mm->rss > pages) ? cur->mm->rss - pages : 0;
-                }
-                va = base + leaf_size;
-            } else {
-                va += 4096;
-            }
-        }
-        spin_unlock_irqrestore(&cur->mm->lock, mm_flags);
-        mm_tlb_invalidate_finish(cur->mm);
-    }
-#endif
+    int r = mm_madvise_dontneed(cur->mm, (vaddr_t)addr, (size_t)len);
+    if (r == -ENOMEM) return -A20_ERR_NO_MEMORY;
+    if (r < 0) return -A20_ERR_INVALID_ARGUMENT;
     return A20_OK;
 }
 
@@ -482,15 +418,10 @@ int64_t sys_a20_vm_lock(const a20_syscall_args_t *args)
     task_t *cur = proc_current();
     if (!cur || !cur->mm) return -A20_ERR_FAULT;
 
-    for (uint64_t va = start; va < end; va += 4096) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
-        if (!vma) return -A20_ERR_NO_MEMORY;
-        if (flags & 0x01)
-            vma->vm_flags |= 0x08000000;
-        else
-            vma->vm_flags &= ~(uint64_t)0x08000000;
-    }
-    return A20_OK;
+    int r = mm_vma_set_lock(cur->mm, (vaddr_t)start, (vaddr_t)end,
+                            (flags & 0x01) ? 1 : 0);
+    if (r == -ENOMEM) return -A20_ERR_NO_MEMORY;
+    return r < 0 ? -A20_ERR_INVALID_ARGUMENT : A20_OK;
 }
 
 int64_t sys_a20_vm_create_object(const a20_syscall_args_t *args)
