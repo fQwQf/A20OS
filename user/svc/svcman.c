@@ -14,8 +14,8 @@
  * Prints NATIVE_SVC: PASS when the full crash/heal cycle succeeds twice.
  */
 #include "liba20rt/a20_sdk.h"
+#include "a20_services_idl.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/svc_proto.h"
 
 #define ECHOD_PATH   "/bin/svc-echod-rv"
 #define BACKOFF_MS   50

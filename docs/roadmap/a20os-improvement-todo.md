@@ -16,9 +16,9 @@
   - 已有骨架：`drv_env.h` 提供 KERNEL/USER/DRVMOD 三后端；virtio-input 的 DRVMOD 只读 probe 与 USER uinputd 共享配置协议头，USER 路径有 virtq/DMA/IRQ→EventQ；完整 DRVMOD 驱动仍使用独立实现。goldfish RTC DRVMOD probe 仍复制寄存器常量，不是同源双态。
   - 过程中修复：`QUEUE_READY` 偏移（0x044）、DRIVER_OK 时序、 vmo_phys 非物化契约（drv_dma 先触页再翻译）、native 构建 stamp 不含 user/svc 与共享头的陈旧二进制问题。
   - 完成条件：同一完整驱动源码双态部署通过同一契约测试；用户驱动 DMA 动态绑定 per-device IOMMU domain，未授权访问产生并消费 fault。当前只有 RISC-V IOMMU bring-up 与 devid 0 静态 TR_REQ 探测；仍缺动态 map/unmap、fault 消费和 drv_dma 接线。
-- [ ] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
-  - 已完成源码：常量与固定宽度消息 IDL、生成器；rtcd 和 svcmgr/echod 使用 envelope，ubd 使用生成常量。`rtcd_proto.h`/`svc_proto.h`/`ubd_proto.h` 仍是活跃 wrapper；本次未运行 `make check-a20-idl`。
-  - 完成条件：绑定/版本协商由 IDL 生成；手写 proto 头退出活跃树。
+- [x] 阶段四：服务接口 IDL 化（替换 `user/svc/*_proto.h` 手写协议）。
+  - 源码证据：绑定槽位（svc/ping/shmring/chand/rtcd/ubd）、shmring 几何与消息布局全部出自 `user/svc/a20_services.idl`，经 `tools/a20idl.py` 生成单一头；四个手写 wrapper（`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h`、`shmring_proto.h`）已删除出活跃树，native 服务二进制直接依赖 `$(A20_SERVICES_IDL_HDR)`；驱动私有硬件放置常量（goldfish RTC、ubd 的 virtio-mmio 槽位几何）内联回各驱动。版本协商常量 `A20_SERVICES_IDL_VERSION` 由 IDL version 字段生成。
+  - 验证：`make check-a20-idl` + `smoke-native-{fs-all,svc,registry,rtcd}` riscv64 PASS；`smoke-native-shmring` 功能基准 PASS 但其 poweroff 路径命中预先存在的 pfa 空闲链损坏（在未改动基线 720e16ab0 上等价复现），跟踪于 MM 小节新条目。
 - [ ] 阶段五：Linux 人格层在 Native 原语上重建（starnix 式对照）。
   - 已完成起步：`a20_personality.h` 提供 pipe-shaped channel/EventQ facade， `smoke-native-personality` 验证写入、MESSAGE_READY、读取和关闭。
   - 完成条件：fd 表、byte-stream accumulator、mmap/VMO、socket 等关键 子集在直通实现与人格层实现下同通过，语义 diff 与性能对照归档。
@@ -107,6 +107,8 @@
 - [x] 验证 fork、mprotect 和 munmap 下的 huge-page demotion 与 COW 行为。
   - 源码证据：`user/cmds/stress/mm_stress.c` 覆盖 huge-page basic、fork COW、partial munmap demotion 和 mprotect demotion；核心锁模型规定 TLB/refcount 顺序。当前测试不包含 huge-page OOM reclaim，因此该项只表示已覆盖列出的 fork/mprotect/munmap 路径。
   - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
+- [ ] 修复 shmring 进程组退出后 poweroff 路径的 pfa 空闲链损坏（"corrupted next link"，`kernel/mm/frame.c`）。
+  - 复现：`make smoke-native-shmring`——功能基准 NATIVE_SHMRING: PASS 后执行 poweroff 即触发；本工作树与基线 720e16ab0 均复现（2026-08-26 记录）。怀疑方向：共享 VMO 多进程退出时帧归还路径的重复释放或链表破坏；与 IDL 迁移无关（常量值不变、纯编译期挪位）。
 - [x] 让 OOM reclaim 策略可观察、可测试。
   - 源码证据：`user/cmds/stress/oom_stress.c` 在 cgroup2 `memory.max` 限制下用子进程触发按页耗尽，断言 victim 以 SIGKILL 死亡、`memory.events` 的 `oom_kill`/failcnt 计数推进、幸存父进程仍能分配内存和做文件 I/O；`make smoke-oom-stress` 在 QEMU 中执行该场景。配套修复：`kernel/core/trap.c` 在缺页失败路径先检查 pending fatal signal（cgroup/global OOM kill 刚发出的 SIGKILL），不再把 OOM 受害者误报成 SIGSEGV，与 Linux 对 VM_FAULT_OOM 的 fatal-signal-pending 处理一致。
   - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
