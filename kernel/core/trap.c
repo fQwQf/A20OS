@@ -182,6 +182,22 @@ static int user_sync_signal_is_handled(task_t *task, int sig) {
     return signal_task_user_handler_available(task, sig);
 }
 
+/*
+ * Called from __trap_from_kernel when the interrupted kernel stack pointer
+ * lies outside the direct map: saving registers through it would fault
+ * forever.  Runs on a dedicated emergency stack; never returns.
+ */
+void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
+                              unsigned long sepc, unsigned long stval)
+{
+    kerr("[TRAP] corrupted kernel sp: bad_sp=0x%lx sstatus=0x%lx "
+         "sepc=0x%lx stval=0x%lx",
+         bad_sp, sstatus, sepc, stval);
+    kerr("[TRAP] refusing to save registers through a bad stack");
+    pfa_hist_dump();
+    panic("trap: corrupted kernel stack pointer");
+}
+
 static void user_trap_handler(trap_context_t *ctx) {
     ARCH_TRAP_FAST_RETURN_DISARM(ctx);
     reg_t scause = arch_read_cause();
