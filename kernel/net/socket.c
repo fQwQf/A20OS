@@ -283,7 +283,9 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     sa->peer = sb;
     sb->peer = sa;
     sa->connected = 1;
+    sa->ever_connected = 1;
     sb->connected = 1;
+    sb->ever_connected = 1;
     /* SO_PEERCRED for socketpair: both ends belong to this task. */
     {
         task_t *cur = proc_current();
@@ -389,8 +391,10 @@ int net_connect(int gfd, const void *addr, size_t addrlen) {
     if (r < 0 && r != -EINPROGRESS) {
         return r;
     }
-    if (r == 0 && !s->connected)
+    if (r == 0 && !s->connected) {
         s->connected = 1;
+        s->ever_connected = 1;
+    }
     return r;
 }
 
@@ -516,6 +520,9 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     }
     if (!dst) {
         spin_unlock_irqrestore(&g_net_lock, irq);
+        /* Linux ABI: writes on a once-connected stream whose endpoint vanished report EPIPE */
+        if (s->type == SOCK_STREAM && s->ever_connected)
+            return -EPIPE;
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
     if (len <= NET_MAX_PAYLOAD) {

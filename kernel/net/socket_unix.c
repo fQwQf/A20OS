@@ -153,6 +153,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
     memcpy(s->peer_addr, peer_addr, peer_len);
     s->peer_len = peer_len;
     s->connected = 1;
+    s->ever_connected = 1;
 
     net_socket_t *listener = net_find_bound_socket_locked(AF_UNIX, s->type,
                                                           peer_addr, peer_len);
@@ -182,6 +183,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         child->passcred = listener->passcred;
         child->bound = 1;
         child->connected = 1;
+        child->ever_connected = 1;
         child->peer = s;
         s->peer = child;
         memcpy(child->local, listener->local, listener->local_len);
