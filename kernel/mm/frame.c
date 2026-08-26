@@ -120,7 +120,7 @@ static void pfa_hist_record(uint8_t op, uint64_t pfn, int order)
     }
 }
 
-static void pfa_hist_dump(void)
+void pfa_hist_dump(void)
 {
     printf("[PFA HIST] wraps=%u pos=%u (oldest first)\n",
            g_pfa_op_hist_wraps, g_pfa_op_hist_pos);

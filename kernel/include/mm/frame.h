@@ -138,4 +138,11 @@ static inline pfn_t virt_to_pfn(const void *va) {
 /* 关机前审计：遍历全部 buddy 空闲链验证一致性，返回错误数。 */
 int pfa_audit_lists(void);
 
+/* Post-mortem: dump the last buddy push/remove operations (corruption). */
+void pfa_hist_dump(void);
+
+/* Called from trap entry when the interrupted kernel sp is corrupted. */
+void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
+                              unsigned long sepc, unsigned long stval);
+
 #endif /* _FRAME_H */
