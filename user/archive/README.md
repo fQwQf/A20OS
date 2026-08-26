@@ -20,3 +20,4 @@
 - 当前活跃的原生 SDK 在 `user/liba20rt/`，最小原生 C 库在 `user/liba20c/`。
 - 当前主用户态运行时是 Linux ABI 之上的 musl 兼容层，由 `kernel/abi/linux/` 提供接口。
 - 如果未来需要重新启动完整的 Native POSIX 兼容层或 musl 移植，可以本目录作为参考，但需要重新设计路径和实现，而不是直接复用。
+- **恢复预期**：当前没有计划原样恢复任何组件；重启即重设计。若某文件将来被正式移回活跃树，必须同时给出 owner 与覆盖它的测试入口（见 docs/roadmap/a20os-improvement-todo.md 的归档条目）。

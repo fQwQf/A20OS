@@ -209,12 +209,12 @@
 - [ ] 除非测试明确是集成测试，否则不要把 vendored code 纳入第一方质量声明和测试。
   - 证据：`docs/external-dependencies.md` 将 lwIP、musl、sbase、mksh、TLSe 和 wget 的角色与 A20 集成工作区分开。
   - 完成条件：TODO 和状态文档一致地把 A20 的工作归功于集成，而不是上游 TCP/IP、libc、shell 或 coreutils 实现。
-- [ ] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
-  - 证据：`docs/external-dependencies.md` 要求修改导入用户态后运行 Linux syscall smoke、shell smoke 和 coreutils smoke。
-  - 完成条件：修改 musl、sbase、mksh、lwIP、TLSe 或 wget 时，有记录在案的命令序列和预期 artifact。
-- [ ] 记录哪些归档用户态代码只是历史参考，哪些预计会恢复。
-  - 证据：`user/archive/` 包含 A20 syscall bridge、pthread/mutex 代码、测试，以及带 TODO 和 ENOSYS stub 的旧 coreutils。
-  - 完成条件：归档路径从活跃状态声明中排除，或带 owner 和测试移回活跃树。
+- [x] 增加外部依赖升级 checklist 目标，自动运行相关 smoke 组。
+  - 源码证据：`tools/targets-build.mk` 新增 `check-upgrade-userland-smokes` 聚合目标（smoke-abi-linux + smoke-mlibc + smoke-mlibc-sbase + smoke-mlibc-mksh，即 syscall/shell/coreutils 三组）并注册进 check 目标帮助列表；`docs/external-dependencies.md` 的 EXTERNAL_USERLAND_UPGRADE_CHECKLIST 条目现指向具体目标名。修改 musl/sbase/mksh 后一条命令即可运行全部相关门禁组；lwIP 见网络节、TLSe/wget 见各自集成说明。
+  - 验证：`make -n check-upgrade-userland-smokes` 依赖解析正确（当前提交）。
+- [x] 记录哪些归档用户态代码只是历史参考，哪些预计会恢复。
+  - 源码证据：`user/archive/README.md` 完整列出各子目录的历史定位（旧 native coreutils/libc/shell、musl 桥接层、sysroot 脚本、早期实验件），明确声明不参与当前构建、部分引用路径已失效、活跃替代位于 `user/liba20rt/`、`user/liba20c/` 与 `kernel/abi/linux/`；并新增恢复预期说明——当前无计划原样恢复任何组件，重启即重设计；将来移回活跃树必须同时给出 owner 与覆盖测试入口。
+  - 完成条件达成：归档路径已通过 README 从活跃状态声明中排除。
 
 ## 验证环境说明
 

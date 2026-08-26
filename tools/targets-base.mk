@@ -7,7 +7,7 @@
 		run-gui-nommu-arm32 run-nommu-gui-arm32 \
 		stm32f103-bringup stm32f103-xuanwu flash-stm32f103-xuanwu run-stm32f103-qemu \
 		check-stm32f103 \
-		check-kernel-build check-kernel-build-all check-user-build check-user-build-all check-dev-build check-release-build check-build-matrix check-build-matrix-all check-abi-smoke-gate check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
+		check-kernel-build check-kernel-build-all check-user-build check-user-build-all check-dev-build check-release-build check-build-matrix check-build-matrix-all check-abi-smoke-gate check-upgrade-userland-smokes check-doc-drift check-doc-test-gates check-final-definition check-concurrency-foundation check-mm-lock-model check-abi-boundary check-driver-core-model check-external-dependency-boundary \
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \

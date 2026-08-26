@@ -261,6 +261,12 @@ check-abi-smoke-gate:
 	@rg -q "test_liba20c" user/tests/test_liba20c.c tools/targets-native.mk
 	@echo "check-abi-smoke-gate: PASS"
 
+# EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
+# before an upgraded musl/sbase/mksh (or other imported userland) is
+# accepted -- see docs/external-dependencies.md.
+.PHONY: check-upgrade-userland-smokes
+check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
+
 check-doc-drift:
 	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing-gates.md
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py
