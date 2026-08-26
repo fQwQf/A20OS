@@ -502,6 +502,20 @@ void pfa_free(pfn_t pfn, int order) {
     if (pfn >= pfa.total_frames) return;
 
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
+
+    /* Premature-free detector: a frame whose refcount exceeds one still
+     * has an outstanding reference besides the caller asking to free it.
+     * Freeing it now would create a use-after-free for the remaining
+     * holders -- report loudly instead of silently corrupting state. */
+    if (pfa.meta[pfn].flags == FRAME_F_ALLOC && pfa.meta[pfn].refcount > 1) {
+        printf("[PFA PREMATURE-FREE] pfn=%lu order=%d refcount=%u "
+               "flags=0x%x cpu=%u\n",
+               (unsigned long)pfn, order,
+               pfa.meta[pfn].refcount, pfa.meta[pfn].flags,
+               cpu_current_id());
+        panic("pfa: premature free of referenced frame");
+    }
+
     if (pfa.meta[pfn].flags == FRAME_F_FREE) {
         spin_unlock_irqrestore(&pfa.lock, flags);
         return;
