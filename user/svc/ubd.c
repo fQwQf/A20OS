@@ -11,8 +11,17 @@
  */
 #include "liba20rt/a20_sdk.h"
 #include "liba20rt/crt0_a20.h"
-#include "../svc/ubd_proto.h"
+#include "a20_services_idl.h"
 #include "drivers/driver_descriptor.h"
+
+/* QEMU virt: virtio-mmio slot 3 = bus.3, IRQ = irq_base(1) + slot = 4
+ * (driver-private placement, not service protocol). */
+#define UBD_MMIO_BASE     0x10004000ULL
+#define UBD_MMIO_SIZE     0x1000ULL
+#define UBD_MMIO_IRQ      4u
+
+#define UBD_SECTOR_SIZE   512u
+#define UBD_QUEUE_SIZE    64u
 
 A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_USER_SERVICE,
                       A20_DRIVER_TYPE_BLOCK, "virtio-blk-user", A20_DRIVER_ABI, A20_DRIVER_RES_MMIO | A20_DRIVER_RES_IRQ | A20_DRIVER_RES_DMA,
