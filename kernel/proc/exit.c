@@ -45,6 +45,24 @@ static int proc_task_tgid(task_t *t)
     return t ? (t->tgid > 0 ? t->tgid : t->pid) : -1;
 }
 
+/* A zombie thread-group leader must not be reaped while any of its live
+ * member threads remain.  The leader anchors the tg_next chain -- its own
+ * proc_tg_unlink_locked() is a no-op because it has no tg_prev_ptr -- so
+ * freeing it early leaves members traversing freed memory on their next
+ * group walk (proc_find_live_thread_reaper_locked / wait_group_start). */
+int proc_tg_group_dead_locked(task_t *t)
+{
+    if (!t || t->tg_leader != t)
+        return 1;               /* members never anchor the chain */
+    for (task_t *m = t->tg_next; m; m = m->tg_next) {
+        if (m == t || m->state == PROC_UNUSED || m->state == PROC_ZOMBIE)
+            continue;
+        if (proc_task_tgid(m) == proc_task_tgid(t))
+            return 0;
+    }
+    return 1;
+}
+
 void proc_reap_detach_locked(task_t *t)
 {
     if (!t)
@@ -257,6 +275,7 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
         }
 
         if (!thread_reaper &&
+            proc_tg_group_dead_locked(child) &&
             (actual_reaper == proc_idle_task() ||
              child->exit_signal != SIGCHLD ||
              (child->clone_flags & CLONE_THREAD)) &&

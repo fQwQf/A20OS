@@ -182,7 +182,9 @@ int64_t syscall_dispatch(trap_context_t *ctx)
         cur_task->restart_active = 0;
 
     if (entry) {
+        syscall_trace_enter(cur_task, entry, &args);
         ret = entry->handler(&args);
+        syscall_trace_exit(cur_task, entry, ret);
         context_restored = entry->restores_context;
         if (context_restored)
             ARCH_TRAP_FAST_RETURN_DISARM(ctx);
