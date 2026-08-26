@@ -129,11 +129,11 @@ int64_t sys_a20_thread_create(const a20_syscall_args_t *args)
                                  (vaddr_t)kargs.tls_base);
     if (pid < 0) return -A20_ERR_NO_MEMORY;
 
-    /* Thread handles currently use A20_OBJ_TASK so task_wait/task_kill apply;
-     * see docs/native-abi/08-runtime-status.md (THREAD type is reserved).
+    /* Threads publish the dedicated A20_OBJ_THREAD type; task-like
+     * syscalls accept it via a20_handle_lookup_*_task_like
      * ADMIN is granted because the creator owns the thread (debug_attach
      * requires it, docs/native-abi/06-security.md §8.1). */
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_TASK,
+    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)pid, A20_OBJ_THREAD,
                                     A20_RIGHT_WAIT | A20_RIGHT_SIGNAL |
                                     A20_RIGHT_STAT | A20_RIGHT_CONTROL | A20_RIGHT_DUP |
                                     A20_RIGHT_TRANSFER | A20_RIGHT_ADMIN |
@@ -160,7 +160,7 @@ int64_t sys_a20_task_set_sched(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
@@ -196,7 +196,7 @@ int64_t sys_a20_task_get_limits(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
@@ -226,7 +226,7 @@ int64_t sys_a20_task_set_limits(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 

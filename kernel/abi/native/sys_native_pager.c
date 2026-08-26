@@ -218,7 +218,7 @@ int64_t sys_a20_monitor_create(const a20_syscall_args_t *args)
     task_t *target = NULL;
     if (kargs.target != A20_HANDLE_NULL) {
         a20_handle_entry_t te;
-        int64_t r = a20_handle_lookup_internal(ht, kargs.target, A20_OBJ_TASK,
+        int64_t r = a20_handle_lookup_task_like(ht, kargs.target,
                                                A20_RIGHT_STAT, &te);
         if (r < 0) return r;
         target = proc_find_get((int)(uintptr_t)te.object);
@@ -307,7 +307,7 @@ static int64_t a20_task_mem_rw(const a20_syscall_args_t *args, int write)
 
     a20_rights_t need = write ? A20_RIGHT_WRITE : A20_RIGHT_READ;
     a20_handle_entry_t te;
-    int64_t r = a20_handle_lookup_ref_internal(ht, kargs.task, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_ref_task_like(ht, kargs.task,
                                                need, &te);
     if (r < 0) return r;
 

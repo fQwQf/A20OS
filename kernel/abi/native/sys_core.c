@@ -27,6 +27,7 @@
 #include "core/stdio.h"
 #include "core/timekeeping.h"
 #include "core/timer.h"
+#include "handle_table.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "mm/mm.h"
@@ -968,7 +969,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 
     /* Lookup task handle with WAIT right docs/native-abi/06-security.md §3.2) */
     a20_handle_entry_t entry;
-    int64_t ret = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t ret = a20_handle_lookup_task_like(ht, task_h,
                                               A20_RIGHT_WAIT, &entry);
     if (ret < 0) return ret;
 
