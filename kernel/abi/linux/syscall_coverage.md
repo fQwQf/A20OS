@@ -22,7 +22,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | signals | partial | common delivery paths exist; Linux edge behavior is not complete. |
 | memory management | partial | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | APIs map onto the per-CPU EEVDF/SMP scheduler, but Linux policy/priority/affinity, RT, deadline, cgroup, and topology semantics remain bounded. |
-| futex | partial | all standard commands implemented, including bounded PI variants; no priority boost. |
+| futex | partial | all standard commands implemented, including bounded PI variants with EEVDF weight-donation priority boost; chained per-futex pi_state walk out of scope. |
 | poll/epoll/select | partial | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
 | eventfd/timerfd | partial | fd-backed wait objects exist; full Linux timer semantics are simplified. |
 | fd I/O and splice | partial | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
@@ -311,7 +311,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `umask` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; no priority boost |
+| `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; PI waiters donate EEVDF weight to the owner (single-level; chained pi_state walk out of scope); OWNER_DIED reacquire preserves the flag per Linux |
 | `futex_time64` | futex | `partial` | `smoke-abi-linux` | 32-bit time64 alias of futex |
 | `membarrier` | system | `partial` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
