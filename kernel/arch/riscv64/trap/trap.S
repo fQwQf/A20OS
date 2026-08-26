@@ -281,27 +281,33 @@ __return_to_user:
 	.align 2
 __trap_from_kernel:
 #ifndef CONFIG_NOMMU
-    /* Stack-pointer guard FIRST -- before any store touches the possibly-
-     * corrupted sp.  Kernel stacks live in the direct map, between
-     * PAGE_OFFSET and the pfa-exported direct-map end; a trap arriving
-     * outside that window would otherwise fault inside this save path and
-     * spin forever with a drifting sp. */
     la      t5, .Lkf_sp_stash
     sd      sp, 0(t5)
     sd      t6, 8(t5)
-    /* PAGE_OFFSET (platform.h) without the C 'UL' suffix: as cannot parse it */
     li      t6, 0xFFFFFFC000000000
-    bgeu    sp, t6, .Lkf_sp_lo_ok
-    j       .Lkf_sp_bad
-.Lkf_sp_lo_ok:
+    bltu    sp, t6, .Lkf_sp_bad
     la      t6, g_pfa_direct_map_end
     ld      t6, 0(t6)
-    bltu    sp, t6, .Lkf_sp_good
+    bgeu    sp, t6, .Lkf_sp_bad
+    la      t0, g_pfa_freemap
+    ld      t0, 0(t0)
+    beqz    t0, .Lkf_sp_good
+    li      t1, 0xFFFFFFC000000000
+    sub     t1, sp, t1
+    srli    t1, t1, 12
+    srli    t2, t1, 3
+    add     t0, t0, t2
+    andi    t1, t1, 7
+    lbu     t2, 0(t0)
+    srl     t2, t2, t1
+    andi    t2, t2, 1
+    bnez    t2, .Lkf_sp_bad
+    j       .Lkf_sp_good
 .Lkf_sp_bad:
     ld      a0, 0(t5)
     csrr    a1, sstatus
     csrr    a2, sepc
-    ld      a3, 8(t5)
+    csrr    a3, stval
     la      sp, __trap_emerg_top
     call    trap_sp_corrupted_report
 .Lkf_sp_good:

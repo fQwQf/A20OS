@@ -84,7 +84,7 @@ static inline frame_meta_t *meta_of(pfn_t pfn) {
 /* Free-frame bitmap: one bit per physical frame, set while the frame sits
  * on a buddy free list and cleared when it is removed.  Turns silent
  * double frees into an immediate, attributed panic at the second free. */
-static uint8_t *g_pfa_freemap;
+uint8_t *g_pfa_freemap;
 static size_t   g_pfa_freemap_bytes;
 
 #define PFA_FREEMAP_TEST(pfn) \
@@ -570,11 +570,15 @@ void pfa_free(pfn_t pfn, int order) {
     pfa.meta[pfn].next = PFN_NONE;
 
     /* 释放多页块时，清除子页的元数据，使 buddy merge 能正确合并。
-     * 保护性检查：跳过仍在使用的页面（如内核栈），防止 buddy merge
-     * 后的清除循环覆盖独立分配的页面元数据。 */
+     * 保护性检查：
+     * - 跳过仍在使用的页面（refcount > 0），防止 buddy merge
+     *   后的清除循环覆盖独立分配的页面元数据。
+     * - 跳过已在空闲链上的页面（flags == FRAME_F_FREE），防止
+     *   清除 prev/next 链接导致空闲链损坏。 */
     for (pfn_t i = pfn + 1; i < pfn + (1u << actual_order); i++) {
         if (i >= pfa.total_frames) break;
         if (pfa.meta[i].refcount > 0) continue;
+        if (pfa.meta[i].flags == FRAME_F_FREE) continue;
         pfa.meta[i].flags    = FRAME_F_FREE;
         pfa.meta[i].refcount = 0;
         pfa.meta[i].order    = 0;
@@ -694,6 +698,7 @@ static void frame_put_locked(pfn_t pfn) {
         for (pfn_t i = pfn + 1; i < pfn + (1u << actual_order); i++) {
             if (i >= pfa.total_frames) break;
             if (pfa.meta[i].refcount > 0) continue;
+            if (pfa.meta[i].flags == FRAME_F_FREE) continue;
             pfa.meta[i].flags    = FRAME_F_FREE;
             pfa.meta[i].refcount = 0;
             pfa.meta[i].order    = 0;

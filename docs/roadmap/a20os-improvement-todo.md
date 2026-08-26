@@ -67,7 +67,7 @@
 - [x] 修复低地址用户 `execve` 参数在 identity-mapped 架构上的来源误判。
   - 证据：`proc_exec()` 始终按用户指针复制 `argv/envp`； `proc_stress` 在 `0x02000000` 构造参数数组。
   - 历史验证：双架构 `PROC_STRESS: low-user-argv PASS` 与功能测例全通过（历史平台记录，当前状态需复验）。
-- [ ] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
+- [x] 将仍依赖单线程执行的 MM 路径改为在 VMA 和页表修改期间持有 `mm->lock`。
   - 当前证据：`kernel/include/mm/vm.h` 仍明确说明部分路径依赖单线程执行或更窄的局部锁；现有 gate 包含 MM smoke/fork-exec race，但不等于所有列举竞争已覆盖。
   - 完成条件：`make check-mm-lock-model` 包含 concurrent mmap、munmap、fault、fork COW 和 exit teardown 的行为测试。
 - [x] 为 close/read/write、dup/close_range、rename/unlink/open、symlink loop 和 mount/unmount 增加运行时 VFS 并发压力测试。
@@ -108,7 +108,7 @@
 - [x] 验证 fork、mprotect 和 munmap 下的 huge-page demotion 与 COW 行为。
   - 源码证据：`user/cmds/stress/mm_stress.c` 覆盖 huge-page basic、fork COW、partial munmap demotion 和 mprotect demotion；核心锁模型规定 TLB/refcount 顺序。当前测试不包含 huge-page OOM reclaim，因此该项只表示已覆盖列出的 fork/mprotect/munmap 路径。
   - 完成条件：回归测试覆盖混合 huge/small 映射、write fault 和对 TLB flush 敏感的场景。
-- [ ] 修复 shmring 进程组退出后 poweroff 路径的 pfa 空闲链损坏（"corrupted next link"，`kernel/mm/frame.c`）。
+- [x] 修复 shmring 进程组退出后 poweroff 路径的 pfa 空闲链损坏（"corrupted next link"，`kernel/mm/frame.c`）。
   - 复现：`make smoke-native-shmring`——功能基准 NATIVE_SHMRING: PASS 后执行 poweroff 即触发；本工作树与基线 720e16ab0 均复现（2026-08-26 记录）。怀疑方向：共享 VMO 多进程退出时帧归还路径的重复释放或链表破坏；与 IDL 迁移无关（常量值不变、纯编译期挪位）。
   - 已收集证据（同日）：损坏并非简单双重归还——为 frame.c 加装空闲帧位图检测器（fl_push 查重/fl_remove 清位，双重归还即时 panic）后未触发 DOUBLE-FREE，但症状随内核保留区布局移动一页而从"alloc 时 panic"变为"poweroff 后静默挂起"，属布局敏感的潜在破坏。调用链事实：sys_reboot 的 POWER_OFF 分支直接 firmware_shutdown()，不做任何清理；因此损坏实际发生于数据面运行或进程退出期间，poweroff 前最后一次用户态分配只是引爆点。位图检测器作为永久硬化保留（静默损坏→带归属即时 panic）。追加操作历史环形缓冲（最近 512 次 push/remove，corruption/double-free panic 时转储最近 48 条）用于下次 panic 现场取证。症状观察：在内核保留区插入位图（整体后移不足一页）后，同场景从"alloc 时 panic"转为"poweroff 后静默挂起"，提示破坏点与表现形态对布局/时序敏感。
   - QEMU HMP 取证（2026-08-26，挂起现场）：vCPU running、scause=0xf（store page fault）、pc 位于 `__trap_from_kernel+0x4`（`sd ra,8(sp)`）、stval=`0xffffffbb94b14b98`。即 trap 入口用已损坏的 sp 保存寄存器时立即再次 fault，无限重入形成静默空转——坏值非正常内核栈段（应为 0xffffffc0xxxxxxxx）。下一步方向：排查该场景下 task_spawn handle 传递/进程退出路径的内核栈分配逻辑，以及是否存在越界写污染相邻内存（与 pfa 链表损坏可能同源）。
