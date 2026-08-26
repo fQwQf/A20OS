@@ -222,12 +222,14 @@ typedef struct a20_task_mem_args {
 
 | 项 | 现状 | 深化 |
 |----|------|------|
-| `thread_create` 返回类型 | 返回 TASK handle | 引入 `A20_OBJ_THREAD`（02 §4.2 已有编号），thread_create 返回 THREAD；`debug_read_regs` 等接受 THREAD 目标 |
-| `task_wait` flags | 忽略 flags | 支持 `A20_TASK_WAIT_NONBLOCK` / 按 task 集合等待 |
+| `thread_create` 返回类型 | 返回 TASK handle | 引入 `A20_OBJ_THREAD`（02 §4.2 已有编号）。**落地计划（2026-08 设计冻结）**：① proc_create_thread 发布 THREAD 类型 handle；② 全部 TASK 类型查找点改为接受 THREAD∪TASK：task_wait/kill/info、handle_poll 退出检查、debug 分区目标解析（kernel/proc/debug.c）；③ liba20rt/a20_types.h 与 mlibc sysdeps 同步；④ 回归矩阵：test_native_handle/contract/debug + smoke-native-ipc/mlibc-fork。风险点：NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX 的 STAT 掩码一致性分区。 |
+| `task_wait` flags | ~~忽略 flags~~ **已落地（05854979a）**：A20_TASK_WAIT_NONBLOCK 映射 WNOHANG，未知位拒绝；按 task 集合等待待需求明确后设计 |
 | `handle_stat` 非文件类型 | ~~全零结构~~ **已落地**：MEMORY→total_blocks=size/4096、CHANNEL_ENDPOINT→total_files=msg_count，FILE/DIR 维持 block_size |
 | `namespace` 强制 | `ns_apply` 只写字段 | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
 | `event_watch_fs` 路径过滤 | 无 | 前缀匹配（本期后） |
 | `clock_set` | ~~恒 PERM~~ **已落地**：安全标签 0（system）可设 CLOCK_REALTIME；monotonic 拒绝 INVALID_ARGUMENT |
+| EventQ 电平模式 | 事件为边沿触发，`handle_poll` 提供电平快照 | **设计方案（已批准待实现）**：`event_watch` args 按 E-APPEND 追加 `flags`，bit0=`A20_WATCH_LEVEL`；watch 记录保存 level 位；等待侧 park 前对 level watch 先做一轮就绪查询（复用 `handle_poll` 对象分派），就绪即返回、不投递边沿事件。回归：test_native_ipc 增加 level/edge 对照分区。 |
+| `vm_remap` 语义委托 | ABI 层"新建匿名区+字节拷贝" | **设计方案（已批准，独立评审变更）**：改调 `mm_mremap(MREMAP_MAYMOVE)` 以保留 VMA 语义（文件映射/共享帧不再丢失）；新增 A20_ERR↔Linux errno 映射助手；prot 映射为 remap 后 mprotect；256MB 上限与对齐校验留在 ABI。回归：smoke-mm-stress + 新增 native remap 文件映射用例。 |
 
 ## 9. 演进与兼容
 
