@@ -94,6 +94,50 @@ static size_t   g_pfa_freemap_bytes;
 #define PFA_FREEMAP_CLR(pfn) \
     (g_pfa_freemap[(pfn) >> 3] &= (uint8_t)~(1u << ((pfn) & 7)))
 
+/* Post-mortem operation history: the last buddy push/remove events, dumped
+ * when a corruption panic fires so the damaging sequence is visible.
+ * Cheap fixed-size ring, no allocation. */
+#define PFA_OP_HIST_SZ 512u
+typedef struct {
+    uint64_t pfn;
+    uint8_t  order;
+    uint8_t  op;            /* 0 = alloc (remove), 1 = free (push) */
+} pfa_op_rec_t;
+static pfa_op_rec_t g_pfa_op_hist[PFA_OP_HIST_SZ];
+static unsigned     g_pfa_op_hist_pos;
+static unsigned     g_pfa_op_hist_wraps;
+
+static void pfa_hist_record(uint8_t op, uint64_t pfn, int order)
+{
+    pfa_op_rec_t *r = &g_pfa_op_hist[g_pfa_op_hist_pos];
+    r->pfn   = pfn;
+    r->order = (uint8_t)order;
+    r->op    = op;
+    g_pfa_op_hist_pos++;
+    if (g_pfa_op_hist_pos == PFA_OP_HIST_SZ) {
+        g_pfa_op_hist_pos = 0;
+        g_pfa_op_hist_wraps++;
+    }
+}
+
+static void pfa_hist_dump(void)
+{
+    printf("[PFA HIST] wraps=%u pos=%u (oldest first)\n",
+           g_pfa_op_hist_wraps, g_pfa_op_hist_pos);
+    unsigned start = (g_pfa_op_hist_wraps || g_pfa_op_hist_pos >= 48)
+                     ? (g_pfa_op_hist_pos + PFA_OP_HIST_SZ - 48) % PFA_OP_HIST_SZ
+                     : 0;
+    for (unsigned i = 0; i < 48; i++) {
+        unsigned idx = (start + i) % PFA_OP_HIST_SZ;
+        const pfa_op_rec_t *r = &g_pfa_op_hist[idx];
+        if (r->pfn == 0 && r->order == 0 && r->op == 0 && idx != start)
+            continue;
+        printf("[PFA HIST %02u] %s pfn=%llu order=%u\n",
+               i, r->op ? "FREE" : "ALLOC",
+               (unsigned long long)r->pfn, r->order);
+    }
+}
+
 static const pfa_range_t *find_range_by_pa(paddr_t pa) {
     for (size_t i = 0; i < pfa.nr_ranges; i++) {
         const pfa_range_t *range = &pfa.ranges[i];
@@ -120,6 +164,7 @@ static void fl_push(pfn_t pfn, int order) {
         printf("[PFA DOUBLE-FREE] pfn=%lu order=%d flags=0x%x refcount=%u cpu=%u\n",
                (unsigned long)pfn, order, m->flags, m->refcount,
                cpu_current_id());
+        pfa_hist_dump();
         panic("pfa: frame freed while already on free list");
     }
     m->prev = PFN_NONE;
@@ -129,6 +174,7 @@ static void fl_push(pfn_t pfn, int order) {
     pfa.free_lists[order].head = pfn;
     pfa.free_lists[order].count++;
     PFA_FREEMAP_SET(pfn);
+    pfa_hist_record(1, pfn, order);
 }
 
 /*
@@ -187,6 +233,7 @@ static void fl_remove(pfn_t pfn, int order) {
                    pfn_valid(m->prev) ? pfa.meta[m->prev].order : 0u,
                    pfn_valid(m->prev) ? pfa.meta[m->prev].flags : 0u,
                    cpu_current_id());
+            pfa_hist_dump();
             panic("pfa: corrupted prev link");
         }
         meta_of(m->prev)->next = m->next;
@@ -206,6 +253,7 @@ static void fl_remove(pfn_t pfn, int order) {
                    pfn_valid(m->next) ? pfa.meta[m->next].flags : 0u,
                    pfn_valid(m->next) ? pfa.meta[m->next].refcount : 0u,
                    cpu_current_id());
+            pfa_hist_dump();
             panic("pfa: corrupted next link");
         }
         meta_of(m->next)->prev = m->prev;
@@ -213,6 +261,7 @@ static void fl_remove(pfn_t pfn, int order) {
     m->prev = PFN_NONE;
     m->next = PFN_NONE;
     pfa.free_lists[order].count--;
+    pfa_hist_record(0, pfn, order);
 }
 
 // Buddy 分配器初始化函数，将物理内存划分为可用页框并构建空闲链表
