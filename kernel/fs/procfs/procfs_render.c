@@ -1,5 +1,6 @@
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
+#include "core/bootargs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
@@ -475,7 +476,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_CMDLINE:
-        snprintf(buf, bufsz, "console=ttyS0\n");
+        /* Real kernel command line (a20.* keys included); Linux exposes
+         * the same content here. */
+        snprintf(buf, bufsz, "%s\n", bootargs_get() ? bootargs_get() : "");
         break;
     case PF_CPUINFO:  // 生成 CPU 信息
         snprintf(buf, bufsz,
