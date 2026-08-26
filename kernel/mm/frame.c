@@ -81,6 +81,19 @@ static inline frame_meta_t *meta_of(pfn_t pfn) {
     return &pfa.meta[pfn];
 }
 
+/* Free-frame bitmap: one bit per physical frame, set while the frame sits
+ * on a buddy free list and cleared when it is removed.  Turns silent
+ * double frees into an immediate, attributed panic at the second free. */
+static uint8_t *g_pfa_freemap;
+static size_t   g_pfa_freemap_bytes;
+
+#define PFA_FREEMAP_TEST(pfn) \
+    (g_pfa_freemap && ((g_pfa_freemap[(pfn) >> 3] >> ((pfn) & 7)) & 1u))
+#define PFA_FREEMAP_SET(pfn) \
+    (g_pfa_freemap[(pfn) >> 3] |= (uint8_t)(1u << ((pfn) & 7)))
+#define PFA_FREEMAP_CLR(pfn) \
+    (g_pfa_freemap[(pfn) >> 3] &= (uint8_t)~(1u << ((pfn) & 7)))
+
 static const pfa_range_t *find_range_by_pa(paddr_t pa) {
     for (size_t i = 0; i < pfa.nr_ranges; i++) {
         const pfa_range_t *range = &pfa.ranges[i];
@@ -100,12 +113,22 @@ static void fl_push(pfn_t pfn, int order) {
                m->flags, m->refcount, cpu_current_id());
         panic("pfa: duplicate free-list push");
     }
+    if (PFA_FREEMAP_TEST(pfn)) {
+        /* The frame is already sitting on a free list: a double free
+         * whose first half saw no intervening reallocation.  Panic here
+         * instead of corrupting the list for some later allocation. */
+        printf("[PFA DOUBLE-FREE] pfn=%lu order=%d flags=0x%x refcount=%u cpu=%u\n",
+               (unsigned long)pfn, order, m->flags, m->refcount,
+               cpu_current_id());
+        panic("pfa: frame freed while already on free list");
+    }
     m->prev = PFN_NONE;
     m->next = pfa.free_lists[order].head;
     if (m->next != PFN_NONE)
         meta_of(m->next)->prev = pfn;
     pfa.free_lists[order].head = pfn;
     pfa.free_lists[order].count++;
+    PFA_FREEMAP_SET(pfn);
 }
 
 /*
@@ -154,9 +177,16 @@ static void fl_push_clean(pfn_t pfn, int order)
 
 static void fl_remove(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
+    PFA_FREEMAP_CLR(pfn);
     if (m->prev != PFN_NONE) {
         if (!pfn_valid(m->prev) || pfa.meta[m->prev].order != (uint8_t)order ||
             pfa.meta[m->prev].flags != FRAME_F_FREE) {
+            printf("[PFA CORRUPT] prev link: pfn=%lu order=%d "
+                   "prev=%lu prev.order=%u prev.flags=0x%x cpu=%u\n",
+                   (unsigned long)pfn, order, (unsigned long)m->prev,
+                   pfn_valid(m->prev) ? pfa.meta[m->prev].order : 0u,
+                   pfn_valid(m->prev) ? pfa.meta[m->prev].flags : 0u,
+                   cpu_current_id());
             panic("pfa: corrupted prev link");
         }
         meta_of(m->prev)->next = m->next;
@@ -166,6 +196,16 @@ static void fl_remove(pfn_t pfn, int order) {
     if (m->next != PFN_NONE) {
         if (!pfn_valid(m->next) || pfa.meta[m->next].order != (uint8_t)order ||
             pfa.meta[m->next].flags != FRAME_F_FREE) {
+            printf("[PFA CORRUPT] next link: pfn=%lu order=%d head=%lu count=%lu "
+                   "next=%lu next.order=%u next.flags=0x%x next.ref=%u cpu=%u\n",
+                   (unsigned long)pfn, order,
+                   (unsigned long)pfa.free_lists[order].head,
+                   (unsigned long)pfa.free_lists[order].count,
+                   (unsigned long)m->next,
+                   pfn_valid(m->next) ? pfa.meta[m->next].order : 0u,
+                   pfn_valid(m->next) ? pfa.meta[m->next].flags : 0u,
+                   pfn_valid(m->next) ? pfa.meta[m->next].refcount : 0u,
+                   cpu_current_id());
             panic("pfa: corrupted next link");
         }
         meta_of(m->next)->prev = m->prev;
@@ -195,11 +235,12 @@ void pfa_init(paddr_t kernel_end) {
         pfa.ranges[i].end_pfn = pfa.total_frames;
     }
 
-    // 分配元数据区
+    // 分配元数据区 + 空闲帧位图（紧跟 meta 之后，同属内核保留区）
     size_t meta_sz = (size_t)pfa.total_frames * sizeof(frame_meta_t);
+    size_t freemap_sz = ((size_t)pfa.total_frames + 7) / 8;
     paddr_t meta_pa = ROUND_UP(kernel_end, 64);
     const pfa_range_t *kernel_range = find_range_by_pa(meta_pa);
-    if (!kernel_range || meta_pa + meta_sz > kernel_range->end)
+    if (!kernel_range || meta_pa + meta_sz + freemap_sz > kernel_range->end)
         panic("pfa_init: frame metadata does not fit in kernel ram range");
 
     frame_meta_t *meta = (frame_meta_t *)(meta_pa + PAGE_OFFSET);
@@ -211,13 +252,18 @@ void pfa_init(paddr_t kernel_end) {
            (unsigned long)meta_sz);
     spin_init(&pfa.lock);
 
+    /* 空闲帧位图：帧在空闲链上即置位。把静默的双重归还变成即时 panic。 */
+    g_pfa_freemap_bytes = freemap_sz;
+    g_pfa_freemap = (uint8_t *)(meta_pa + meta_sz + PAGE_OFFSET);
+    memset(g_pfa_freemap, 0, g_pfa_freemap_bytes);
+
     for (int i = 0; i <= MAX_ORDER; i++) {
         pfa.free_lists[i].head = PFN_NONE;
         pfa.free_lists[i].count = 0;
     }
 
     // 标记内核已占用页并构建各 RAM 段自己的空闲链表
-    paddr_t used_end_pa = ROUND_UP(meta_pa + meta_sz, PAGE_SIZE);
+    paddr_t used_end_pa = ROUND_UP(meta_pa + meta_sz + freemap_sz, PAGE_SIZE);
     for (size_t r = 0; r < pfa.nr_ranges; r++) {
         const pfa_range_t *range = &pfa.ranges[r];
         pfn_t range_frames = range->end_pfn - range->start_pfn;
