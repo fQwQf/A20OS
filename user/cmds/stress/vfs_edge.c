@@ -881,6 +881,130 @@ static int chroot_escape(void)
     return 0;
 }
 
+static int link_edge_cases(void)
+{
+    const char *src = "/tmp/vfs_edge_link_src";
+    const char *dst = "/tmp/vfs_edge_link_dst";
+    unlink(src);
+    unlink(dst);
+
+    int fd = open(src, O_CREAT | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("link-src-create");
+    close(fd);
+
+    if (link(src, dst) < 0)
+        return fail("link-basic");
+    struct stat sa, sb;
+    if (stat(src, &sa) < 0 || stat(dst, &sb) < 0)
+        return fail("link-stat");
+    if (sa.st_ino != sb.st_ino || sa.st_nlink != 2)
+        return fail("link-ino-nlink");
+
+    errno = 0;
+    if (link(src, dst) != -1 || errno != EEXIST)
+        return fail("link-eexist");
+
+    errno = 0;
+    if (link("/tmp/vfs_edge_link_gone", "/tmp/vfs_edge_link_dst2") != -1 ||
+        errno != ENOENT)
+        return fail("link-enoent");
+
+    errno = 0;
+    if (link("/tmp", "/tmp/vfs_edge_link_dir") != -1 || errno != EPERM)
+        return fail("link-dir-eperm");
+
+    if (unlink(dst) < 0)
+        return fail("link-unlink");
+    if (stat(src, &sa) < 0 || sa.st_nlink != 1)
+        return fail("link-nlink-decay");
+    unlink(src);
+    return 0;
+}
+
+static int chmod_chown_edges(void)
+{
+    const char *p = "/tmp/vfs_edge_chmod";
+    unlink(p);
+    int fd = open(p, O_CREAT | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("chmod-create");
+
+    if (fchmod(fd, 0600) < 0)
+        return fail("fchmod");
+    struct stat st;
+    if (fstat(fd, &st) < 0 || (st.st_mode & 07777) != 0600)
+        return fail("fchmod-stat");
+
+    int dfd = open("/tmp", O_RDONLY);
+    if (dfd < 0)
+        return fail("chmod-opentmp");
+    if (fchmodat(dfd, "vfs_edge_chmod", 0644, 0) < 0)
+        return fail("fchmodat-rel");
+    if (fstat(fd, &st) < 0 || (st.st_mode & 07777) != 0644)
+        return fail("fchmodat-stat");
+
+    if (fchown(fd, getuid(), getgid()) < 0)
+        return fail("fchown-self");
+
+    errno = 0;
+    if (fchownat(AT_FDCWD, "/tmp/vfs_edge_chmod_gone", 0, 0, 0) != -1 ||
+        errno != ENOENT)
+        return fail("fchownat-enoent");
+
+    close(dfd);
+    close(fd);
+    unlink(p);
+    return 0;
+}
+
+static int umount_edge_cases(void)
+{
+    const char *mp = "/tmp/vfs_edge_umount";
+    rmdir(mp);
+    mkdir(mp, 0755);
+
+    errno = 0;
+    if (syscall(SYS_umount2, mp, 0) != -1 || errno != EINVAL)
+        return fail("umount-notmp");
+
+    long r = syscall(SYS_mount, "none", mp, "ramfs", 0, "");
+    if (r < 0) {
+        if (errno != ENOSYS && errno != EPERM && errno != EINVAL && errno != ENOENT)
+            return fail("umount-mount");
+        rmdir(mp);
+        return 0;
+    }
+
+    if (chdir(mp) < 0)
+        return fail("umount-chdir");
+    errno = 0;
+    r = syscall(SYS_umount2, mp, 0);
+    if (r == 0) {
+        /* A20OS keeps cwd as a path string, not a vnode pin: umount under
+         * an active cwd succeeds (documented divergence from Linux EBUSY). */
+        if (chdir("/") < 0)
+            return fail("umount-chdir-out");
+        errno = 0;
+        if (syscall(SYS_umount2, mp, 0) != -1 || errno != EINVAL)
+            return fail("umount-double");
+        rmdir(mp);
+        return 0;
+    }
+    if (errno != EBUSY)
+        return fail("umount-ebusy");
+    if (chdir("/") < 0)
+        return fail("umount-chdir-out");
+
+    if (syscall(SYS_umount2, mp, 0) < 0)
+        return fail("umount-clean");
+    errno = 0;
+    if (syscall(SYS_umount2, mp, 0) != -1 || errno != EINVAL)
+        return fail("umount-double");
+    rmdir(mp);
+    return 0;
+}
+
 int main(void)
 {
     printf("VFS_EDGE: start\n");
@@ -908,6 +1032,12 @@ int main(void)
     if (mount_dotdot_crossing() != 0)
         return 1;
     if (chroot_escape() != 0)
+        return 1;
+    if (link_edge_cases() != 0)
+        return 1;
+    if (chmod_chown_edges() != 0)
+        return 1;
+    if (umount_edge_cases() != 0)
         return 1;
     printf("VFS_EDGE: PASS\n");
     return 0;
