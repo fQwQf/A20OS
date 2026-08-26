@@ -68,7 +68,7 @@ int64_t sys_a20_task_kill(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_SIGNAL, &entry);
     if (r < 0) return r;
 
@@ -128,7 +128,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
@@ -226,7 +226,7 @@ int64_t sys_a20_task_get_sched(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
@@ -261,7 +261,7 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
     a20_handle_entry_t entry;
-    int64_t r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    int64_t r = a20_handle_lookup_task_like(ht, task_h,
                                             A20_RIGHT_STAT, &entry);
     if (r < 0) return r;
 
