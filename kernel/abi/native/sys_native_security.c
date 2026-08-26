@@ -128,7 +128,7 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     a20_handle_entry_t task_entry;
-    r = a20_handle_lookup_internal(ht, task_h, A20_OBJ_TASK,
+    r = a20_handle_lookup_task_like(ht, task_h,
                                     A20_RIGHT_CONTROL, &task_entry);
     if (r < 0) {
         a20_object_release(ns_entry.object, ns_entry.type);

@@ -204,7 +204,7 @@ int64_t sys_a20_vm_share(const a20_syscall_args_t *args)
     struct a20_ht_internal *target_ht = ht;
     if (target_h != A20_HANDLE_NULL) {
         a20_handle_entry_t tgt_entry;
-        r = a20_handle_lookup_internal(ht, target_h, A20_OBJ_TASK,
+        r = a20_handle_lookup_task_like(ht, target_h,
                                        A20_RIGHT_CONTROL, &tgt_entry);
         if (r < 0) goto out_vmo;
 
