@@ -32,6 +32,8 @@
 
 typedef enum {
     SF_ROOT,            /* /sys */
+    SF_FS,              /* /sys/fs */
+    SF_FS_CGROUP,       /* /sys/fs/cgroup */
     SF_BLOCK,           /* /sys/block */
     SF_BLOCK_LOOP,      /* /sys/block/loopN */
     SF_BLOCK_LOOP_DEV,  /* /sys/block/loopN/dev */
@@ -332,6 +334,10 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_type = SF_DEV;
     } else if (dm->type == SF_ROOT && strcmp(name, "devices") == 0) {
         child_type = SF_DEVICES;
+    } else if (dm->type == SF_ROOT && strcmp(name, "fs") == 0) {
+        child_type = SF_FS;
+    } else if (dm->type == SF_FS && strcmp(name, "cgroup") == 0) {
+        child_type = SF_FS_CGROUP;
     } else if (dm->type == SF_DEVICES && strcmp(name, "virtual") == 0) {
         child_type = SF_DEVICES_VIRTUAL;
     } else if (dm->type == SF_DEVICES_VIRTUAL) {
@@ -489,7 +495,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     }
     memset(vn, 0, sizeof(*vn));
 
-    int is_dir = (child_type == SF_ROOT || child_type == SF_BLOCK ||
+    int is_dir = (child_type == SF_ROOT || child_type == SF_FS ||
+                  child_type == SF_FS_CGROUP || child_type == SF_BLOCK ||
                   child_type == SF_BLOCK_LOOP || child_type == SF_CLASS ||
                   child_type == SF_DRM || child_type == SF_DRM_CARD ||
                   child_type == SF_DRM_CONNECTOR || child_type == SF_DRM_CARD_DEVICE ||
@@ -813,6 +820,9 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "class"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "dev"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "devices"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "fs"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_FS) {
+        entries[nent].name = "cgroup"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_DEVICES) {
         entries[nent].name = "virtual"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_DEVICES_VIRTUAL) {
