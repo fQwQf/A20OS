@@ -114,11 +114,11 @@ int vnfs_mount_generic(const char *fstype)
     } else if (strcmp(fstype, "iso9660") == 0) {
         g_root = isofs_mount(g_bc);
         g_readonly = 1;
-    } else if (strcmp(fstype, "ntfs") == 0) {
-        /* 内核 ntfs 的写路径尚无任何在库测试覆盖；用户态放置先以只读
-         * 语义落地（挂载/解析/目录/读取），写使能是独立后续项。 */
+    } else     if (strcmp(fstype, "ntfs") == 0) {
+        /* 内核 ntfs 写路径已由 smoke-native-fs-all 的在库端到端测试覆盖
+         * （创建/写读/目录/删除/崩溃重启持久化），开放读写语义。 */
         g_root = ntfs_mount(g_bc);
-        g_readonly = 1;
+        g_readonly = 0;
     } else {
         return -U_ENOSYS;
     }
@@ -370,6 +370,7 @@ static int64_t vn_rw_open(uint64_t ino, int write, vfile_t **out_vf,
 static int64_t vn_read(uint64_t ino, uint64_t off, uint32_t count,
                        ufs_resp_hdr_t *r)
 {
+
     vfile_t *vf;
     vnode_t *vn;
     int64_t rc = vn_rw_open(ino, 0, &vf, &vn);
@@ -386,6 +387,7 @@ static int64_t vn_read(uint64_t ino, uint64_t off, uint32_t count,
                                                      (char *)ufs_payload_buf(),
                                                      count)
                                      : -U_ENOSYS;
+
     if (vf->ops && vf->ops->close)
         vf->ops->close(vf);
     if (n < 0) {
