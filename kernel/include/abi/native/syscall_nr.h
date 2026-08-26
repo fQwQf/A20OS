@@ -59,6 +59,7 @@
 #define A20_SYS_vm_remap          0x0307
 #define A20_SYS_vm_lock           0x0308
 #define A20_SYS_vm_create_object  0x0309
+#define A20_SYS_vm_create_vmar    0x030b
 #define A20_SYS_vm_share_region   0x030A
 
 /* Path / Filesystem (0x0400) */

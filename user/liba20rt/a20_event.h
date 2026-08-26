@@ -47,6 +47,16 @@ static inline a20_status_t a20_event_watch(a20_handle_t queue, a20_handle_t hand
     return a20_syscall6(A20_SYS_event_watch, (uint64_t)&args, 0, 0, 0, 0, 0);
 }
 
+/* Watch a task/thread for signal delivery: each queued signal surfaces as
+ * an A20_EVENT_SIGNALED event carrying the signo in data0. */
+static inline a20_status_t a20_task_watch_signals(a20_handle_t queue,
+                                                  a20_handle_t task,
+                                                  uint64_t user_data)
+{
+    return a20_event_watch(queue, task,
+                           A20_EVENT_MASK(A20_EVENT_SIGNALED), user_data);
+}
+
 /* Level-triggered watch: readiness is answered from current object state
  * on every wait, even if no transition happened after registration. */
 static inline a20_status_t a20_event_watch_level(a20_handle_t queue,

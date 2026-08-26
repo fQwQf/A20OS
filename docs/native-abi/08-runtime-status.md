@@ -166,7 +166,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 ### 已批准设计、待排期的深水区（2026-08 评审通过）
 
 - ~~**VMAR 子树化**~~ **已落地（2026-08）**：`vmar_t` 保留区间树 + `A20_SYS_vm_create_vmar(0x030a)` + `vm_map` E-APPEND 路由字段；天花板经 `vmar_cap` 印章在 protect 路径持续生效（04-memory §3.1）。回归：test_native_mm 第 6 分区（重叠拒绝/上限拒绝/定点映射/cap 印章）。
-- **信号 EventQ 化**：以 EventQ 投递信号事件替代 mlibc 检查点轮询，消除 CPU 密集循环收不到信号的模型缺陷；需定义 SIGNAL 事件位与 siginfo 载荷结构（E-APPEND），mlibc sysdeps 切换读取路径。
+- ~~**信号 EventQ 化**~~ **已落地（2026-08）**：`signal_queue_task` 在既有 checkpoint 挂钩旁同步推送 `A20_EVENT_SIGNALED` 事件（signo 走 `data0`，复用现有 pending_event 载荷字段、无需结构演进），TASK/THREAD 两类 watch 皆通知；`a20_task_watch_signals` 包装器就绪，回归见 test_native_deepen 分区 8。mlibc 阻塞路径继续走 checkpoint（futex INTERRUPTED），EventQ 面向监督者/sigwait 式消费推送；CPU 密集循环的完全异步派发仍为文档化限制。
 - **动态链接联调**：内核 PT_INTERP 封装与 conventional auxv 已就绪（见 §8a），剩余为 mlibc rtld 共享库构建与 `sys_vm_map` 文件回映射验证。
 
 ## 与用户决策的对应关系

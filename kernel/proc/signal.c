@@ -11,6 +11,7 @@
 #include "proc/debug.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
+#include "ipc/ipc.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/klog.h"
@@ -212,6 +213,13 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
         struct a20_ht_internal *ht = (struct a20_ht_internal *)t->a20_ht;
         extern void a20_ht_sig_pend(struct a20_ht_internal *ht, int sig);
         a20_ht_sig_pend(ht, signum);
+        /* Signals also surface as EventQ events (08-runtime-status
+         * deep-water #2): signo rides data0.  Watch keys are pid-as-pointer
+         * under both TASK and THREAD types, so notify both. */
+        a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_TASK,
+                         A20_EVENT_SIGNALED, (uint64_t)signum, 0);
+        a20_event_notify((void *)(uintptr_t)t->pid, A20_OBJ_THREAD,
+                         A20_EVENT_SIGNALED, (uint64_t)signum, 0);
     }
 #endif
 
