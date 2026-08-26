@@ -10,6 +10,7 @@
 #include "core/string.h"
 #include "core/klog.h"
 #include "core/lock.h"
+#include "core/panic.h"
 #include "mm/slab.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
@@ -70,8 +71,14 @@ static void vmo_destroy(struct vmo *vmo)
         if (any)
             arch_tlb_flush();  /* BEFORE frames return to the buddy */
         for (uint32_t i = 0; i < vmo->page_count; i++) {
-            if (vmo->pages[i] != PFN_NONE)
+            if (vmo->pages[i] != PFN_NONE) {
+                if (!pfn_valid(vmo->pages[i]))
+                    panic("vmo_destroy: vmo %p page %u/%u has out-of-range "
+                          "pfn %llu (pages array corrupted?)",
+                          (void *)vmo, i, vmo->page_count,
+                          (unsigned long long)vmo->pages[i]);
                 pfa_free_page(vmo->pages[i]);
+            }
         }
         kfree(vmo->pages);
     }
@@ -310,6 +317,11 @@ int64_t vmo_resize(struct vmo *vmo, uint64_t new_size)
         int freed = 0;
         for (uint32_t i = new_np; i < vmo->page_count; i++) {
             if (vmo->pages[i] != PFN_NONE) {
+                if (!pfn_valid(vmo->pages[i]))
+                    panic("vmo_resize: vmo %p page %u has out-of-range "
+                          "pfn %llu",
+                          (void *)vmo, i,
+                          (unsigned long long)vmo->pages[i]);
                 pfa_free_page(vmo->pages[i]);
                 vmo->pages[i] = PFN_NONE;
                 a20_objstat_add(&g_a20_objstats.vmo_pages, -1);
