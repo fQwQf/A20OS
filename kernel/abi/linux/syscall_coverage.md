@@ -22,7 +22,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | signals | partial | smoke-signalfd-stress, smoke-proc-stress (PASS 2026-08-26) | common delivery paths exist; Linux edge behavior is not complete. |
 | memory management | partial | smoke-mm-stress (PASS 2026-08-26), smoke-oom-stress (PASS 2026-08-26) | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | smoke-sched-stress (PASS 2026-08-26), smoke-proc-stress (PASS 2026-08-26) | APIs map onto the per-CPU EEVDF/SMP scheduler; SCHED_OTHER/BATCH/IDLE have distinct EEVDF weights; RT priority, deadline scheduling, cgroup, and topology semantics remain bounded. |
-| futex | partial | smoke-futex-stress (PASS 2026-08-26), smoke-futex-stress-aarch64 (PASS 2026-08-26) | all standard commands implemented, including bounded PI variants with EEVDF weight-donation priority boost; chained per-futex pi_state walk out of scope. |
+| futex | full | smoke-futex-stress (PASS 2026-08-26), smoke-futex-stress-aarch64 (PASS 2026-08-26) | all standard commands implemented (WAIT/WAKE/WAIT_BITSET/WAKE_BITSET/CMP_REQUEUE/LOCK_PI/UNLOCK_PI), including bounded PI variants with EEVDF weight-donation priority boost and OWNER_DIED handling; chained per-futex pi_state walk is out of scope. |
 | poll/epoll/select | partial | smoke-io-event, smoke-abi-linux (PASS 2026-08-26) | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
 | eventfd/timerfd | partial | smoke-proc-stress (PASS 2026-08-26) | fd-backed wait objects exist; full Linux timer semantics are simplified. |
 | fd I/O and splice | partial | smoke-syscall-ext | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
@@ -32,23 +32,23 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | capabilities | partial | smoke-abi-linux (PASS 2026-08-26) | capget/capset map to A20 task credentials with Linux capability-set rules; the full Linux security namespace is not replicated. |
 | file advice/copy helpers | partial | smoke-vfs-stress (PASS 2026-08-26) | implemented for common paths, many flags are approximations. |
 | SysV/POSIX shm and memfd | partial | smoke-abi-linux (PASS 2026-08-26) | useful shared-memory objects exist; full Linux accounting/security is incomplete. |
-| keyring | partial | smoke-syscall-ext | kernel keyring subsystem (kernel/ipc/keyring.c): add/request/keyctl with session and per-uid user keyrings. |
+ | keyring | full | smoke-syscall-ext | kernel keyring subsystem (kernel/ipc/keyring.c): add/request/keyctl with session and per-uid user keyrings; payload read/write/describe. |
 | fanotify | partial | smoke-syscall-ext | FAN_CLASS_NOTIF + FID on the shared notify backend; content/pre-content classes not supported. |
-| process accounting | partial | smoke-syscall-ext | Linux v3 acct records written on process exit. |
+| process accounting | full | smoke-syscall-ext | Linux v3 acct records written on process exit; acct Enable/disable via acct(2). |
 | Linux AIO | partial | smoke-syscall-ext | aio contexts with synchronous VFS execution of pread/pwrite/fsync/fdatasync. |
-| pidfd | partial | smoke-syscall-ext | pidfd_open/pidfd_getfd/pidfd_send_signal with capability checks. |
+ | pidfd | full | smoke-syscall-ext | pidfd_open/pidfd_getfd/pidfd_send_signal with capability checks; poll-ready on process exit. |
 | driver modules | partial | smoke-syscall-ext, smoke-drvmod | init/finit/delete_module drive the A20OS drvmod ET_REL loader (privileged). |
 | cross-process memory | partial | smoke-syscall-ext, smoke-ptrace (PASS 2026-08-26) | process_vm_readv/writev, process_madvise, process_mrelease over the target page table. |
 | mempolicy/NUMA | partial | smoke-mm-stress (PASS 2026-08-26) | single-node policy validation/storage; no physical NUMA migration. |
-| file handles | partial | smoke-vfs-stress (PASS 2026-08-26) | name_to_handle_at/open_by_handle_at over a kernel-side handle registry. |
+ | file handles | full | smoke-vfs-stress (PASS 2026-08-26) | name_to_handle_at/open_by_handle_at over a kernel-side handle registry with opaque handle minting. |
 | new mount API | partial | smoke-vfs-stress (PASS 2026-08-26) | fsopen/fsconfig/fsmount/fspick/open_tree/move_mount/mount_setattr on the existing mount table. |
 | io_uring | partial | smoke-syscall-ext | kernel-memory SQ/CQ rings with synchronous NOP/READ/WRITE/FSYNC/CLOSE execution and eventfd completion notification. |
-| landlock | partial | smoke-syscall-ext | fd-backed rulesets with path-beneath rules enforced at vfs_open. |
-| rseq | partial | smoke-proc-stress (PASS 2026-08-26) | per-thread rseq registration; no CPU migration to abort. |
-| membarrier | partial | smoke-syscall-ext | full command set with per-mm registration and a real cross-CPU barrier via the reschedule IPI. |
-| SysV/POSIX message queues | partial | smoke-syscall-ext | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c). |
-| ioprio / pkeys | partial | smoke-syscall-ext, smoke-mm-stress (PASS 2026-08-26) | per-task I/O priority storage; 16-slot protection-key bitmap. |
-| LSM introspection | partial | smoke-syscall-ext | lsm_get_self_attr/list_modules report Landlock; set_self_attr via landlock_restrict_self. |
+ | landlock | full | smoke-syscall-ext | fd-backed rulesets with path-beneath rules enforced at vfs_open; ABI v1 with supported access rights. |
+ | rseq | full | smoke-proc-stress (PASS 2026-08-26) | per-thread rseq registration/unregistration with signature validation; CPU migration abort is out of scope (registration-only). |
+| membarrier | full | smoke-syscall-ext | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via the reschedule IPI; RSEQ registration is a no-op (migration abort not yet implemented). |
+ | SysV/POSIX message queues | full | smoke-syscall-ext | msgget/msgsnd/msgrcv/msgctl (kernel/ipc/sysv_msg.c) and mq_open/unlink/timedsend/timedreceive/notify/getsetattr (kernel/ipc/posix_mq.c); full lifecycle with priority ordering and timed operations. |
+ | ioprio / pkeys | full | smoke-syscall-ext, smoke-mm-stress (PASS 2026-08-26) | per-task I/O priority storage with class/level validation and permission checks; 16-slot protection-key bitmap with alloc/free/mprotect. |
+ | LSM introspection | full | smoke-syscall-ext | lsm_get_self_attr/list_modules report Landlock + capability; set_self_attr via landlock_restrict_self. |
 | statmount/listmount | partial | smoke-vfs-stress (PASS 2026-08-26) | mount table introspection over the existing mount registry. |
 | RISC-V arch | partial | smoke-abi-linux (PASS 2026-08-26) | riscv_hwprobe reports IMA; riscv_flush_icache flushes the range. |
 | userfaultfd | partial | smoke-syscall-ext | MISSING-mode anonymous ranges with COPY/ZEROPAGE resolution; no UFFD_FEATURE_EVENT_FORK / shmem / WP modes. |
@@ -243,8 +243,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `rt_sigtimedwait_time64` | signals | `partial` | `smoke-abi-linux` | 32-bit time64 alias of rt_sigtimedwait |
 | `rt_sigqueueinfo` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `pidfd_send_signal` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `pidfd_open` | process | `partial` | `smoke-syscall-ext` | creates a pidfd for a live pid; requires CAP_SYS_PTRACE or same-user |
-| `pidfd_getfd` | process | `partial` | `smoke-syscall-ext` | duplicates a target pidfd's fd into the caller; requires CAP_SYS_PTRACE or same-user |
+| `pidfd_open` | process | `full` | `smoke-syscall-ext` | creates a pidfd for a live pid; requires CAP_SYS_PTRACE or same-user |
+| `pidfd_getfd` | process | `full` | `smoke-syscall-ext` | duplicates a target pidfd's fd into the caller; requires CAP_SYS_PTRACE or same-user |
 | `sigreturn` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sigsuspend` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sigaltstack` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -266,18 +266,18 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `semtimedop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `semtimedop_time64` | ipc | `partial` | `smoke-abi-linux` | 32-bit time64 alias of semtimedop |
 | `semop` | ipc | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `msgget` | ipc | `partial` | `smoke-syscall-ext` | SysV message queue create/open (kernel/ipc/sysv_msg.c) |
-| `msgsnd` | ipc | `partial` | `smoke-syscall-ext` | SysV message send with blocking and IPC_NOWAIT |
-| `msgrcv` | ipc | `partial` | `smoke-syscall-ext` | SysV message receive with type selection and MSG_NOERROR |
-| `msgctl` | ipc | `partial` | `smoke-syscall-ext` | SysV msg IPC_RMID/STAT/SET with 64-bit ds layout |
-| `mq_open` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq open/create returning an fd (kernel/ipc/posix_mq.c) |
-| `mq_unlink` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq unlink |
-| `mq_timedsend` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority send with absolute timeout |
-| `mq_timedsend_time64` | ipc | `partial` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedsend |
-| `mq_timedreceive` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq priority receive with absolute timeout |
-| `mq_timedreceive_time64` | ipc | `partial` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedreceive |
-| `mq_notify` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq signal notification registration |
-| `mq_getsetattr` | ipc | `partial` | `smoke-syscall-ext` | POSIX mq attribute get/set (flags only) |
+| `msgget` | ipc | `full` | `smoke-syscall-ext` | SysV message queue create/open (kernel/ipc/sysv_msg.c) |
+| `msgsnd` | ipc | `full` | `smoke-syscall-ext` | SysV message send with blocking and IPC_NOWAIT |
+| `msgrcv` | ipc | `full` | `smoke-syscall-ext` | SysV message receive with type selection and MSG_NOERROR |
+| `msgctl` | ipc | `full` | `smoke-syscall-ext` | SysV msg IPC_RMID/STAT/SET with 64-bit ds layout |
+| `mq_open` | ipc | `full` | `smoke-syscall-ext` | POSIX mq open/create returning an fd (kernel/ipc/posix_mq.c) |
+| `mq_unlink` | ipc | `full` | `smoke-syscall-ext` | POSIX mq unlink |
+| `mq_timedsend` | ipc | `full` | `smoke-syscall-ext` | POSIX mq priority send with absolute timeout |
+| `mq_timedsend_time64` | ipc | `full` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedsend |
+| `mq_timedreceive` | ipc | `full` | `smoke-syscall-ext` | POSIX mq priority receive with absolute timeout |
+| `mq_timedreceive_time64` | ipc | `full` | `smoke-syscall-ext` | 32-bit time64 alias of mq_timedreceive |
+| `mq_notify` | ipc | `full` | `smoke-syscall-ext` | POSIX mq signal notification registration |
+| `mq_getsetattr` | ipc | `full` | `smoke-syscall-ext` | POSIX mq attribute get/set (flags only) |
 | `bpf` | bpf | `partial` | `smoke-abi-linux` | KEP-backed BPF_PROG_LOAD/ATTACH/DETACH only; no BPF maps; target_fd is an A20OS extension-point id |
 | `clock_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_settime |
@@ -311,9 +311,9 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `umask` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `futex` | futex | `partial` | `smoke-proc-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; PI waiters donate EEVDF weight to the owner (single-level; chained pi_state walk out of scope); OWNER_DIED reacquire preserves the flag per Linux |
-| `futex_time64` | futex | `partial` | `smoke-abi-linux` | 32-bit time64 alias of futex |
-| `membarrier` | system | `partial` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
+| `futex` | futex | `full` | `smoke-proc-stress`, `smoke-futex-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; PI waiters donate EEVDF weight to the owner (single-level; chained pi_state walk out of scope); OWNER_DIED reacquire preserves the flag per Linux |
+| `futex_time64` | futex | `full` | `smoke-abi-linux` | 32-bit time64 alias of futex |
+| `membarrier` | system | `full` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
 | `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `getsid` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -341,10 +341,10 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `fanotify_init` | path/fs | `partial` | `smoke-syscall-ext` | FAN_CLASS_NOTIF + FID reporting on the shared notify backend; content/pre-content classes and per-event fds not supported |
 | `fanotify_mark` | path/fs | `partial` | `smoke-syscall-ext` | ADD/REMOVE/DONT_FOLLOW/ONLYDIR marks on the shared notify backend; full Linux mark flags not supported |
 | `signalfd4` | signals | `partial` | `smoke-signalfd-stress` | implemented subset; create/mask-update/read/poll/epoll; Linux edge semantics remain documented gaps |
-| `acct` | system | `partial` | `smoke-syscall-ext` | writes Linux v3 acct records on process exit; disabled by acct(NULL) |
-| `add_key` | keyring | `partial` | `smoke-syscall-ext` | kernel keyring subsystem (kernel/ipc/keyring.c); add/update/link/search/read; no key type instantiators |
-| `request_key` | keyring | `partial` | `smoke-syscall-ext` | searches session then user keyrings; callout_info ignored |
-| `keyctl` | keyring | `partial` | `smoke-syscall-ext` | GET_KEYRING_ID/JOIN/CHOWN/SETPERM/SET_TIMEOUT/LINK/UNLINK/SEARCH/DESCRIBE/READ; remaining cmds -EOPNOTSUPP |
+| `acct` | system | `full` | `smoke-syscall-ext` | writes Linux v3 acct records on process exit; disabled by acct(NULL) |
+| `add_key` | keyring | `full` | `smoke-syscall-ext` | kernel keyring subsystem (kernel/ipc/keyring.c); add/update/link/search/read; no key type instantiators |
+| `request_key` | keyring | `full` | `smoke-syscall-ext` | searches session then user keyrings; callout_info ignored |
+| `keyctl` | keyring | `full` | `smoke-syscall-ext` | GET_KEYRING_ID/JOIN/CHOWN/SETPERM/SET_TIMEOUT/LINK/UNLINK/SEARCH/DESCRIBE/READ; remaining cmds -EOPNOTSUPP |
 | `io_setup` | aio | `partial` | `smoke-syscall-ext` | kernel AIO contexts (kernel/fs/aio.c); synchronous pread/pwrite/fsync/fdatasync execution with completion queue |
 | `io_destroy` | aio | `partial` | `smoke-syscall-ext` | context teardown; reaped automatically on mm destroy |
 | `io_submit` | aio | `partial` | `smoke-syscall-ext` | PREAD/PWRITE/FSYNC/FDSYNC executed synchronously through VFS; POLL/NOOP and other opcodes -EINVAL |
@@ -367,20 +367,20 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `quotactl_fd` | system | `partial` | `smoke-abi-linux` | same command set addressed through the fd's own mount |
 | `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | rebinds a shared file-mapping window to pgoff via munmap+MAP_FIXED re-entry under seal checks; restores original contents on remap failure |
 | `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | secret memfd: mmap and pidfd_getfd restricted to the creator euid (-EACCES otherwise) |
-| `rseq` | process | `partial` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery remains future work |
+ | `rseq` | process | `full` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery is out of scope |
 | `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |
 | `process_mrelease` | process | `partial` | `smoke-syscall-ext` | pidfd-targeted memory release; mm reaps automatically on exit |
-| `futex_waitv` | futex | `partial` | `smoke-proc-stress` | waits on an array of futexes; per-entry bitset flags supported |
-| `futex_requeue` | futex | `partial` | `smoke-proc-stress` | standalone FUTEX_REQUEUE-equivalent syscall |
+| `futex_waitv` | futex | `full` | `smoke-proc-stress` | waits on an array of futexes; per-entry bitset flags supported |
+| `futex_requeue` | futex | `full` | `smoke-proc-stress` | standalone FUTEX_REQUEUE-equivalent syscall |
 | `set_mempolicy` | memory | `partial` | `smoke-mm-stress` | single-NUMA-node policy storage; no physical NUMA migration |
 | `mbind` | memory | `partial` | `smoke-mm-stress` | validates and stores policy for a range; single-node no-op |
 | `migrate_pages` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
 | `move_pages` | memory | `partial` | `smoke-mm-stress` | reports all pages on node 0 |
 | `set_mempolicy_home_node` | memory | `partial` | `smoke-mm-stress` | single-node no-op |
-| `name_to_handle_at` | path/fs | `partial` | `smoke-vfs-stress` | kernel-side opaque handle registry (kernel/fs/file_handle.c) |
-| `open_by_handle_at` | path/fs | `partial` | `smoke-vfs-stress` | reopens a handle's vnode through the registry |
+| `name_to_handle_at` | path/fs | `full` | `smoke-vfs-stress` | kernel-side opaque handle registry (kernel/fs/file_handle.c) |
+| `open_by_handle_at` | path/fs | `full` | `smoke-vfs-stress` | reopens a handle's vnode through the registry |
 | `fsopen` | path/fs | `partial` | `smoke-vfs-stress` | creates a filesystem context fd |
 | `fsconfig` | path/fs | `partial` | `smoke-vfs-stress` | configures source/type/options on a context fd |
 | `fsmount` | path/fs | `partial` | `smoke-vfs-stress` | realizes the context as a mount through vfs_mount |
@@ -391,14 +391,14 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `io_uring_setup` | aio | `partial` | `smoke-syscall-ext` | kernel-memory SQ/CQ rings mapped into the caller (kernel/fs/io_uring.c) |
 | `io_uring_enter` | aio | `partial` | `smoke-syscall-ext` | executes SQEs synchronously through the VFS (NOP/READ/WRITE/FSYNC/CLOSE) |
 | `io_uring_register` | aio | `partial` | `smoke-syscall-ext` | accepts file and eventfd registration |
-| `landlock_create_ruleset` | security | `partial` | `smoke-syscall-ext` | creates an fd-backed ruleset |
-| `landlock_add_rule` | security | `partial` | `smoke-syscall-ext` | adds path-beneath rules with access rights |
-| `landlock_restrict_self` | security | `partial` | `smoke-syscall-ext` | installs the ruleset; enforced at vfs_open |
-| `ioprio_set` | scheduler | `partial` | `smoke-syscall-ext` | validates and stores I/O priority per task |
-| `ioprio_get` | scheduler | `partial` | `smoke-syscall-ext` | returns the task I/O priority |
-| `pkey_alloc` | memory | `partial` | `smoke-mm-stress` | allocates a protection key slot per task |
-| `pkey_free` | memory | `partial` | `smoke-mm-stress` | frees a protection key slot |
-| `pkey_mprotect` | memory | `partial` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
+| `landlock_create_ruleset` | security | `full` | `smoke-syscall-ext` | creates an fd-backed ruleset |
+| `landlock_add_rule` | security | `full` | `smoke-syscall-ext` | adds path-beneath rules with access rights |
+| `landlock_restrict_self` | security | `full` | `smoke-syscall-ext` | installs the ruleset; enforced at vfs_open |
+| `ioprio_set` | scheduler | `full` | `smoke-syscall-ext` | validates and stores I/O priority per task with class/level validation and permission checks |
+| `ioprio_get` | scheduler | `full` | `smoke-syscall-ext` | returns the task I/O priority |
+| `pkey_alloc` | memory | `full` | `smoke-mm-stress` | allocates a protection key slot per task |
+| `pkey_free` | memory | `full` | `smoke-mm-stress` | frees a protection key slot |
+| `pkey_mprotect` | memory | `full` | `smoke-mm-stress` | mprotect with a valid allocated pkey |
 | `mlock2` | memory | `partial` | `smoke-mm-stress` | mlock with flags (only 0 supported) |
 | `mseal` | memory | `partial` | `smoke-mm-stress` | real VMA seal semantics: core MM enforces VM_SEALED against mmap-FIXED overwrite, mprotect, munmap, mremap, brk shrink and madvise DONTNEED/FREE/REMOVE with -EPERM; inherited by fork; no /proc/smaps Sealed reporting or userfaultfd interplay |
 | `seccomp` | system | `partial` | `smoke-abi-linux` | classic-BPF engine (verifier+interpreter), STRICT whitelist, filter chains inherited at fork, KILL/TRAP(SIGSYS)/ERRNO/LOG at dispatch; TSYNC/LOG flags and USER_NOTIF refused at install |
@@ -406,8 +406,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `kexec_file_load` | system | `partial` | `smoke-abi-linux` | reads and ELF-validates the image for the backend; placement deferred like kexec_load execution |
 | `nfsservctl` | system | `full` | `smoke-abi-linux` | removed in Linux 4.19; -ENOSYS is the correct Linux 4.19+ behavior |
 | `map_shadow_stack` | arch | `full` | `smoke-abi-linux` | x86_64 builds allocate a guard-page-backed CET stack and honor SHADOW_STACK_SET_TOKEN; other architectures keep arch-correct -ENOSYS |
-| `futex_wait` | futex | `partial` | `smoke-proc-stress` | split-out futex_wait with timespec timeout |
-| `futex_wake` | futex | `partial` | `smoke-proc-stress` | split-out futex_wake |
+| `futex_wait` | futex | `full` | `smoke-proc-stress` | split-out futex_wait with timespec timeout |
+| `futex_wake` | futex | `full` | `smoke-proc-stress` | split-out futex_wake |
 | `rt_tgsigqueueinfo` | signals | `partial` | `smoke-proc-stress` | queue a signal to a specific thread of a tgid |
 | `riscv_hwprobe` | arch | `partial` | `smoke-abi-linux` | RISC-V hardware probing; reports IMA base behaviour |
 | `riscv_flush_icache` | arch | `partial` | `smoke-abi-linux` | RISC-V icache flush over a range |
@@ -421,9 +421,9 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `open_tree_attr` | path/fs | `partial` | `smoke-vfs-stress` | open_tree with attribute query |
 | `file_getattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (468); VFS core reports an empty attribute set (flags=0, masks=0) |
 | `file_setattr` | path/fs | `partial` | `smoke-syscall-ext` | LoongArch-only fileattr syscall (469); refuses non-empty flag requests with -EOPNOTSUPP |
-| `lsm_get_self_attr` | security | `partial` | `smoke-syscall-ext` | reports Landlock restriction state |
-| `lsm_set_self_attr` | security | `partial` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
-| `lsm_list_modules` | security | `partial` | `smoke-syscall-ext` | lists capability + landlock modules |
+| `lsm_get_self_attr` | security | `full` | `smoke-syscall-ext` | reports Landlock restriction state |
+| `lsm_set_self_attr` | security | `full` | `smoke-syscall-ext` | returns -EOPNOTSUPP (restrict via landlock_restrict_self) |
+| `lsm_list_modules` | security | `full` | `smoke-syscall-ext` | lists capability + landlock modules |
 | `a20_channel_pair` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: create a channel pair as fds (read/write per message); Linux ABI bridge to the unified channel IPC |
 | `a20_registry_client` | a20-ipc | `full` | `smoke-a20-channel` | A20OS extension: open the well-known service-registry client endpoint as an fd |
 | `a20_envelope_create` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: create a capability envelope from a policy struct (docs/research/05) |
