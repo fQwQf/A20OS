@@ -83,7 +83,7 @@
 - [ ] 在 syscall 组 smoke 和边界测试齐备后，把满足条件的 Linux syscall 区域从 `partial` 提升到 `full`。
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 fd I/O、path、process lifecycle、signal、MM、futex、poll、socket 和 timer 标记为 partial；当前没有区域完成 `full` 升级条件。
   - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
-- [ ] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
+- [x] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
   - 完成条件：sched policy、priority、affinity 和 cgroup cpuset 行为被 LTP 风格测试覆盖。
 - [x] 完成高级 futex 操作和内存顺序边界语义。
