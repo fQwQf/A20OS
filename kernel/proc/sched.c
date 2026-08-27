@@ -760,6 +760,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
             t->priority = old_nice;
         if (policy == SCHED_IDLE)
             t->cfs_weight = EEVDF_NICE0_LOAD / 4;
+        else if (policy == SCHED_BATCH)
+            t->cfs_weight = sched_weight_for_nice(t->priority + 5);
     }
     if (sched_policy_rt_value(policy))
         t->priority = priority;
@@ -769,6 +771,8 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         t->cfs_weight = sched_weight_for_nice(config->nice);
         if (policy == SCHED_IDLE)
             t->cfs_weight = EEVDF_NICE0_LOAD / 4;
+        else if (policy == SCHED_BATCH)
+            t->cfs_weight = sched_weight_for_nice(config->nice + 5);
         if (!sched_policy_rt_value(policy))
             eevdf_reset_deadline(t);
     }
