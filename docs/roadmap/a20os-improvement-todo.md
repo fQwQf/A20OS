@@ -81,7 +81,7 @@
 ## P0：Linux ABI 正确性
 
 - [ ] 在 syscall 组 smoke 和边界测试齐备后，把满足条件的 Linux syscall 区域从 `partial` 提升到 `full`。
-  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 fd I/O、path、process lifecycle、signal、MM、futex、poll、socket 和 timer 标记为 partial；当前没有区域完成 `full` 升级条件。
+  - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 fd I/O、path、process lifecycle、signal、MM、poll、socket 和 timer 标记为 partial；futex、membarrier、process accounting、rseq、landlock、ioprio/pkeys、file handles、SysV/POSIX message queues、keyring、pidfd、LSM introspection 已提升为 `full`。
   - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
 - [x] 用符合受支持 Linux 语义的行为替换 scheduler policy 和 affinity 近似实现。
   - 当前证据：`kernel/abi/linux/syscall_coverage.md` 仍将 scheduler 标为 partial，RT/deadline/cgroup/topology 语义有边界。
