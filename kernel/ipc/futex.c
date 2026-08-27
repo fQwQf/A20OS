@@ -522,10 +522,18 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
  * FUTEX_OWNER_DIED.  The compare-and-swap on the user word is performed
  * against the kernel-mapped page while the hash-bucket lock is held, so
  * concurrent futex operations on the same word (all hashing to the same
- * bucket) serialize on the read-modify-write.  A20OS does not carry Linux
- * priority inheritance: the waiter parks through the shared futex wait queue
- * and is woken by UNLOCK_PI / exit handling, which preserves the ownership
- * protocol without boosting the owner's scheduling priority.
+ * bucket) serialize on the read-modify-write.
+ *
+ * Priority inheritance is expressed in EEVDF terms as weight donation:
+ * while a waiter parks on a PI futex, the owner's effective weight is
+ * raised to at least the waiter's (task_t::pi_boost_weight, consulted by
+ * eevdf_weight), so the owner's vruntime accrues at the waiter's rate and
+ * it stays eligible ahead of same-weight competitors.  UNLOCK_PI clears
+ * the donation; an owner holding several contended PI futexes loses the
+ * donations of locks it still holds (documented approximation -- Linux
+ * tracks per-futex pi_state chains; chained PI walk is out of scope).
+ * Waiters re-donate whenever they re-block, which retargets the boost
+ * across owner handoff.
  */
 
 /* Map the user futex word to a kernel virtual address, pinning the page
@@ -577,24 +585,21 @@ int futex_pi_acquire(int *uaddr, int try_only)
             return mr;
         }
         int oldv = __atomic_load_n(word, __ATOMIC_ACQUIRE);
-        int expected;
-        if ((oldv & FUTEX_TID_MASK) == 0) {
-            expected = oldv;
-            int zero = 0;
-            if (oldv == 0 || (oldv & FUTEX_OWNER_DIED)) {
-                if (__atomic_compare_exchange_n(word, &zero, (int)tid, 0,
-                                                __ATOMIC_ACQ_REL,
-                                                __ATOMIC_ACQUIRE)) {
-                    spin_unlock_irqrestore(&q->lock, q_flags);
-                    spin_unlock_irqrestore(&t->mm->lock, mm_flags);
-                    return 0;
-                }
-                /* owner died with pid 0: retry */
+        if ((oldv & FUTEX_TID_MASK) == 0 &&
+            (oldv == 0 || (oldv & FUTEX_OWNER_DIED))) {
+            /* Free or owner-died: claim, preserving OWNER_DIED so the
+             * acquirer can detect the inconsistent state (Linux). */
+            int want = (int)tid | (oldv & (FUTEX_OWNER_DIED | FUTEX_WAITERS));
+            if (__atomic_compare_exchange_n(word, &oldv, want, 0,
+                                            __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE)) {
                 spin_unlock_irqrestore(&q->lock, q_flags);
                 spin_unlock_irqrestore(&t->mm->lock, mm_flags);
-                continue;
+                return 0;
             }
-            (void)expected;
+            spin_unlock_irqrestore(&q->lock, q_flags);
+            spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+            continue;
         }
         if ((uint32_t)(oldv & FUTEX_TID_MASK) == tid) {
             spin_unlock_irqrestore(&q->lock, q_flags);
@@ -615,6 +620,18 @@ int futex_pi_acquire(int *uaddr, int try_only)
         int wait_val = oldv | FUTEX_WAITERS;
         spin_unlock_irqrestore(&q->lock, q_flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+        /* Donate our weight to the owner while parked (EEVDF PI).  Safe
+         * outside the bucket lock: a stale donation to a just-released
+         * owner is cleared by its next UNLOCK_PI. */
+        int owner_tid = wait_val & FUTEX_TID_MASK;
+        if (owner_tid > 0) {
+            task_t *owner = proc_find_get(owner_tid);
+            if (owner) {
+                proc_sched_pi_boost(owner, t);
+                proc_put(owner);
+            }
+        }
 
         int wr = futex_wait_ticks(uaddr, wait_val, 0, FUTEX_BITSET_MATCH_ANY);
         if (wr < 0 && wr != -ETIMEDOUT)
@@ -651,6 +668,9 @@ int futex_pi_release(int *uaddr)
     __atomic_store_n(word, zero, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&q->lock, q_flags);
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+
+    /* Clear PI weight donation on unlock. */
+    proc_sched_pi_unboost(t);
 
     if (had_waiters)
         futex_wake(uaddr, 1, FUTEX_BITSET_MATCH_ANY, 0);
