@@ -1,0 +1,12 @@
+# devtools-smoke —— CI 回归门禁用：纯 Alpine 上游编译工具链镜像
+#
+# 配合 `make smoke-devtools`：镜像挂为 /extra，guest 内 chroot 执行
+# tools/tests/devtools-overlay/devtools-smoke.sh（gcc 编译并运行验证）。
+# 守护的回归：trap.S freemap 裸 pfn 误索引导致的 "corrupted kernel stack
+# pointer" 误报（gcc 级负载下必现）。需要网络（首次拉包，之后有缓存）。
+
+busybox
+musl
+gcc
+musl-dev
+fastfetch

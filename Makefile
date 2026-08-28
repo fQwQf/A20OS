@@ -893,6 +893,7 @@ include tools/stm32.mk
 include tools/run-targets.mk
 include tools/targets-images.mk
 include tools/targets-rootfs.mk
+include tools/targets-pkg.mk
 include tools/targets-distro.mk
 include tools/targets-extra.mk
 include tools/targets-native.mk

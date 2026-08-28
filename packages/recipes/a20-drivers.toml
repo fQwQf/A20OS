@@ -1,0 +1,21 @@
+# a20-drivers — 运行时可加载驱动包集合（DriverStore）
+#
+# 对应旧构建中 mcopy 到 /lib/drivers 的那批 *.a20drv。
+# 早期驱动（挂载根盘所需）仍链入内核 ramfs，不在此包内。
+#
+# 构建前提：`make ARCH=<arch> dev-build`（DRIVER_DEPLOYMENT=generic 默认产出）。
+
+[package]
+name = "a20-drivers"
+version = "0.2.0"
+release = 0
+description = "A20OS runtime loadable driver packages (DriverStore)"
+url = "https://github.com/fQwQf/A20OS"
+license = "Apache-2.0"
+maintainer = "A20OS developers"
+archs = ["riscv64", "aarch64", "x86_64", "loongarch64"]
+depends = ["a20-base"]
+
+[[files]]
+src = "{build_dir}/*.a20drv"
+dest = "/lib/drivers/"

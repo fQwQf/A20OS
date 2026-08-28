@@ -1,0 +1,52 @@
+# a20-extra-vim — 从源码构建的 vim（含运行时文件）
+#
+# 对应旧 extra.img 中 vim 的部分：/extra/bin/vim + /extra/share/vim/vim92。
+# 构建前提：`make ARCH=<arch> extra-user-apps EXTRA_PACKAGES=vim`
+# （需要 user/external/apps/vim submodule）。
+
+[package]
+name = "a20-extra-vim"
+version = "9.2.0"
+release = 0
+description = "Vim editor built for A20OS (extra disk layout)"
+url = "https://github.com/fQwQf/A20OS"
+license = "Vim"
+maintainer = "A20OS developers"
+origin = "a20-extra"
+archs = ["riscv64", "aarch64", "loongarch64"]
+depends = ["a20-base"]
+
+[[files]]
+src = "{extra_dir}/vim"
+dest = "/extra/bin/vim"
+mode = "0755"
+
+# 运行时：旧镜像挑选的根目录 *.vim 加上四个目录，这里用递归 glob 保持结构。
+[[files]]
+src = "{repo}/user/external/apps/vim/runtime/*.vim"
+dest = "/extra/share/vim/vim92/"
+mode = "0644"
+
+[[files]]
+src = "{repo}/user/external/apps/vim/runtime/syntax/**"
+dest = "/extra/share/vim/vim92/syntax/"
+mode = "0644"
+optional = true
+
+[[files]]
+src = "{repo}/user/external/apps/vim/runtime/indent/**"
+dest = "/extra/share/vim/vim92/indent/"
+mode = "0644"
+optional = true
+
+[[files]]
+src = "{repo}/user/external/apps/vim/runtime/ftplugin/**"
+dest = "/extra/share/vim/vim92/ftplugin/"
+mode = "0644"
+optional = true
+
+[[files]]
+src = "{repo}/user/external/apps/vim/runtime/autoload/**"
+dest = "/extra/share/vim/vim92/autoload/"
+mode = "0644"
+optional = true

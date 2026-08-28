@@ -1,0 +1,28 @@
+# a20-kernel — 内核镜像（ELF + 扁平二进制）
+#
+# 内核通常不经 rootfs 引导（QEMU -kernel 直接加载），打成包是为了
+# 统一分发与版本管理；默认装进 /boot。
+#
+# 构建前提：`make ARCH=<arch> BOARD=<board> kernel-only` 或任何内核目标。
+# make 集成会自动传入正确的 --kernel-build-dir。
+
+[package]
+name = "a20-kernel"
+version = "0.2.0"
+release = 0
+description = "A20OS hybrid kernel (ELF and flat binary)"
+url = "https://github.com/fQwQf/A20OS"
+license = "Apache-2.0"
+maintainer = "A20OS developers"
+archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
+
+[[files]]
+src = "{kernel_build}/kernel.elf"
+dest = "/boot/kernel.elf"
+mode = "0644"
+
+[[files]]
+src = "{kernel_build}/kernel.bin"
+dest = "/boot/kernel.bin"
+mode = "0644"
+optional = true

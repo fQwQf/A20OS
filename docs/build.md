@@ -2,6 +2,10 @@
 
 本文档列出 A20OS 最常用的构建和运行命令。所有命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](OS-Design.md)。
 
+> **包与镜像**：把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见
+> [packaging/overview.md](packaging/overview.md)；CI 容器（可复现构建环境）见
+> [packaging/ci.md](packaging/ci.md)。
+
 ## 环境准备
 
 需要本机安装各架构交叉工具链与镜像工具。Debian/Ubuntu 上一次装齐：

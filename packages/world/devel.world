@@ -1,0 +1,18 @@
+# devel profile —— 原生用户态 + Alpine 仓库中的开发工具
+#
+# 演示 Route A 的核心能力：自有包（a20-*）与上游 Alpine 包混装。
+# 组镜像时需要能访问 Alpine 镜像源（mkrootfs 默认 USTC，可用
+# --alpine-mirror 切换或 --no-alpine 仅使用本地仓库，此时下列
+# 上游包必须已在本地仓库中，否则会解析失败）。
+
+a20-base
+a20-drivers
+
+# 来自 Alpine 官方仓库的上游包（musl 生态）
+musl
+busybox
+vim
+git
+curl
+ca-certificates
+less

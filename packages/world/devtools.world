@@ -1,0 +1,16 @@
+# devtools —— fastfetch + gcc + git 开发环境（纯 Alpine 上游包）
+#
+# 配套 packages/overlay/devtools/（a20-distro 标记 + stage-2 init），
+# 启动后由 init 自动 chroot 接管，guest 直接落在本 rootfs：
+#   make ARCH=riscv64 run-world PKG_WORLD=devtools PKG_SIZE_MB=1024
+#
+# 首次组镜像需要网络拉取上游包（默认 USTC 镜像源，
+# 可用 --alpine-mirror 切换），之后走 build/cache/apk 缓存。
+
+musl
+busybox
+gcc
+musl-dev
+git
+fastfetch
+ca-certificates
