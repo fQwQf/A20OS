@@ -1,14 +1,20 @@
 # CI/CD 详解
 
-最后核实：2026-08-27。
+最后核实：2026-08-28。
 
 ## 三个 workflow
 
 | 文件 | 触发 | 职责 |
 |------|------|------|
-| `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 构建构建容器镜像，推 `ghcr.io/<owner>/a20os-buildenv` |
-| `ci.yml` | PR / push main / 手动 | 四架构矩阵构建 → 打包建库 → 组 base 镜像 → riscv64 QEMU 冒烟 → 上传 artifact |
+| `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 构建构建容器镜像，推 `ghcr.io/<owner小写>/a20os-buildenv` |
+| `ci.yml` | PR / push main / 手动 | 四架构矩阵构建 → 打包建库 → 组 base 镜像；独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
 | `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release + Pages 包仓库 |
+
+镜像名小写：ghcr 镜像名必须全小写，而 `github.repository_owner` 可能含大写
+（如 `fQwQf`，buildx 会直接报 `repository name must be lowercase`）。三个
+workflow 都先经一个 `buildenv-image` 解析 job 用 shell 小写化 owner，再在
+`container.image` / build-push `tags` 里引用结果；`container.image` 在 job
+启动前解析、用不了步骤内 shell，所以必须走独立的 resolver job。
 
 ## 构建容器（环境可复现的关键）
 
@@ -50,22 +56,36 @@ CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，
 ## ci.yml 的工作分解
 
 ```
-checkout（不拉 submodule——核心构建的第三方源码全部 vendored）
-  → git safe.directory（容器内 root 跑 git 的常规处理）
-  → 恢复 ccache
-  → make dev-build            # 内核 + 用户态（沿用旧构建系统）
-  → make pkg-repo             # 打 a20-base/a20-drivers/a20-kernel 三个包 + 签名建库
-  → make image-world PKG_WORLD=base PKG_ALPINE=0   # 纯本地仓库组镜像
-  → (仅 riscv64) make smoke-riscv64                # QEMU TCG 冒烟
-  → (仅 riscv64) make smoke-devtools               # 上游 Alpine gcc 在 guest 内编译+运行
-  → upload-artifact           # kernel.elf + 镜像 + 仓库包
+buildenv-image（几秒）：把 owner 小写化，产出容器镜像名供其余 job 引用
+
+build-<arch> ×4 并行：
+  checkout（不拉 submodule——核心构建的第三方源码全部 vendored）
+    → git safe.directory（容器内 root 跑 git 的常规处理）
+    → 恢复 ccache
+    → make dev-build            # 内核 + 用户态（沿用旧构建系统）
+    → make pkg-repo             # 打 a20-base/a20-drivers/a20-kernel 三个包 + 签名建库
+    → make image-world PKG_WORLD=base PKG_ALPINE=0   # 纯本地仓库组镜像
+    → upload-artifact           # kernel.elf + 镜像 + 仓库包
+
+smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
+  checkout → git safe.directory → 恢复 ccache
+    → make dev-build + pkg-repo # both-ABI dev 产物 + 包仓库（smoke-devtools 依赖）
+    → QEMU 冒烟门禁（docs/testing-gates.md 核心 runtime 门禁）：
+        smoke-riscv64           # bring-up + 主动关机（watchdog 超时即失败）
+        smoke-abi-linux         # syscall_smoke
+        smoke-syscall-ext       # keyring/AIO/io_uring/landlock 等扩展 syscall
+        smoke-sched-stress / smoke-proc-stress / smoke-futex-stress
+        smoke-mm-stress / smoke-vfs-stress   # FAT/ext4/ISO9660 压力
+        smoke-smp-bringup       # 2 核 SMP bring-up
+    → make smoke-devtools       # 上游 Alpine gcc 在 guest 内编译+运行
+    → 失败也上传 .kernel-build/smoke/ 日志 artifact（smoke-riscv64-logs）
 ```
 
 `smoke-devtools` 是唯一需要外网的 CI 步骤（从 Alpine 镜像站拉包；本地有
 `build/cache/apk` 缓存）。它是 trap.S 内核栈守卫修复的回归门禁。
 
-注意：QEMU 在公共 runner 上没有 KVM，冒烟跑在 TCG 下，`smoke-riscv64`
-的 watchdog 语义本来就是"超时即通过"（见根 README），因此适合 CI。
+注意：QEMU 在公共 runner 上没有 KVM，冒烟跑在 TCG 下；riscv64 QEMU 在
+x86 宿主上本来就只有 TCG，各 smoke 目标的超时按 TCG 校准，适合 CI。
 
 ## release.yml 的工作分解
 
