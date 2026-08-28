@@ -149,5 +149,7 @@ void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
  * Bit set → page is on a buddy free list (not safe to use as stack). */
 extern uint8_t *g_pfa_freemap;
 extern uint64_t g_pfa_direct_map_end;
+extern const pfa_range_t *g_pfa_ranges;
+extern uint64_t g_pfa_nr_ranges;
 
 #endif /* _FRAME_H */

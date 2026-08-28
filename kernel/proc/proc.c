@@ -671,6 +671,21 @@ int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
  * Kill
  * ============================================================ */
 
+/* Console TIOCGPGRP self-heal: is any live user task in this process group? */
+int proc_pgid_alive(int pgid) {
+    if (pgid <= 0) return 0;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    int alive = 0;
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t == proc_idle_task()) continue;
+        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) continue;
+        if (!t->pgdir) continue;
+        if (t->pgid == pgid) { alive = 1; break; }
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return alive;
+}
+
 // 向指定进程发送信号（kill 系统调用的实现）
 int proc_kill(int pid, int signum) {
     return signal_send_user(pid, signum);

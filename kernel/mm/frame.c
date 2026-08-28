@@ -269,6 +269,22 @@ static void fl_remove(pfn_t pfn, int order) {
  * pfa_init learns the RAM ranges. */
 uint64_t g_pfa_direct_map_end = (uint64_t)-1;
 
+/* Read-only views of the RAM range table for the riscv64 trap-entry sp
+ * guard (trap.S __trap_from_kernel), which translates a physical address
+ * to a compacted pfn without calling C.  The freemap is indexed by the
+ * compacted pfn space (start_pfn accumulates from 0), never by raw
+ * physical frame number. */
+const pfa_range_t *g_pfa_ranges = NULL;
+uint64_t g_pfa_nr_ranges = 0;
+
+_Static_assert(sizeof(pfa_range_t) == 24, "trap.S walks pfa_range_t");
+_Static_assert(__builtin_offsetof(pfa_range_t, base) == 0,
+               "trap.S reads pfa_range_t.base at offset 0");
+_Static_assert(__builtin_offsetof(pfa_range_t, end) == 8,
+               "trap.S reads pfa_range_t.end at offset 8");
+_Static_assert(__builtin_offsetof(pfa_range_t, start_pfn) == 16,
+               "trap.S reads pfa_range_t.start_pfn at offset 16");
+
 // Buddy 分配器初始化函数，将物理内存划分为可用页框并构建空闲链表
 void pfa_init(paddr_t kernel_end) {
     pfa.nr_ranges = arch_ram_range_count();
@@ -292,6 +308,8 @@ void pfa_init(paddr_t kernel_end) {
             max_end = end;
     }
     g_pfa_direct_map_end = (uint64_t)max_end + PAGE_OFFSET;
+    g_pfa_ranges = pfa.ranges;
+    g_pfa_nr_ranges = pfa.nr_ranges;
 
     // 分配元数据区 + 空闲帧位图（紧跟 meta 之后，同属内核保留区）
     size_t meta_sz = (size_t)pfa.total_frames * sizeof(frame_meta_t);

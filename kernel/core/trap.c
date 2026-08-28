@@ -201,12 +201,17 @@ void trap_sp_corrupted_report(unsigned long bad_sp, unsigned long sstatus,
         kerr("[TRAP]   sp beyond direct map end 0x%llx — unmapped region",
              (unsigned long long)g_pfa_direct_map_end);
     } else if (g_pfa_freemap) {
-        pfn_t pfn = (pfn_t)((bad_sp - PAGE_OFFSET) >> PAGE_SIZE_BITS);
-        if (pfn_valid(pfn)) {
+        pfn_t pfn = phys_to_pfn((paddr_t)bad_sp - PAGE_OFFSET);
+        if (pfn == PFN_NONE) {
+            kerr("[TRAP]   sp maps to unmanaged physical address 0x%llx",
+                 (unsigned long long)(bad_sp - PAGE_OFFSET));
+        } else {
             int on_freemap = (g_pfa_freemap[pfn >> 3] >> (pfn & 7)) & 1;
             if (on_freemap)
                 kerr("[TRAP]   pfn %u sits on buddy free list — "
                      "use-after-free of stack page", pfn);
+            else
+                kerr("[TRAP]   pfn %u valid, not on free list", pfn);
         }
     }
 

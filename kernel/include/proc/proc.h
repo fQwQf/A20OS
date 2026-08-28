@@ -164,6 +164,10 @@ typedef struct task_t {
      */
     uintptr_t kstack;
     void    *kstack_base;
+    /* trap.S（riscv64）的内核态 sp 守卫在寄存器帧保存之前运行，不能破坏
+     * 任何活寄存器；暂存槽放在任务结构体里，经 tp（内核态恒为当前
+     * task_t，见 switch.S）寻址。守卫以固定偏移访问这些槽。 */
+    uintptr_t trap_guard_scratch[7];
     refcount_t refs;
     int      destroy_started;
     int      pid;
@@ -381,6 +385,8 @@ _Static_assert(offsetof(task_t, kstack) == 0,
                "task_t.kstack must remain at assembly ABI offset 0");
 _Static_assert(offsetof(task_t, kstack_base) == sizeof(uintptr_t),
                "task_t.kstack_base must remain at assembly ABI offset 8/4");
+_Static_assert(offsetof(task_t, trap_guard_scratch) == 2 * sizeof(uintptr_t),
+               "task_t.trap_guard_scratch must remain at assembly ABI offset 16/8");
 
 #define PROC_SCHED_POLICY   (1U << 0)
 #define PROC_SCHED_PRIORITY (1U << 1)
@@ -470,6 +476,7 @@ void     sched_note_timer_deadline(uint64_t deadline);
 void     proc_dump(void);
 int      proc_kill(int pid, int signum);
 int      proc_kill_pgid(int pgid, int signum, int skip_self);
+int      proc_pgid_alive(int pgid);
 void     proc_set_name(task_t *t, const char *name);
 void     proc_make_ready(task_t *t);
 void    *proc_scratch_buffer(size_t size);
