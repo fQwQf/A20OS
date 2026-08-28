@@ -19,11 +19,22 @@ permissions:
   id-token: write
 
 jobs:
+  # 同 ci.yml：ghcr 镜像名必须全小写，owner 含大写时先算好小写镜像名。
+  buildenv-image:
+    name: resolve-buildenv-image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - id: resolve
+        run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+
   build:
     name: release-${{ matrix.arch }}
+    needs: buildenv-image
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/${{ github.repository_owner }}/a20os-buildenv:latest
+      image: ${{ needs.buildenv-image.outputs.image }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
