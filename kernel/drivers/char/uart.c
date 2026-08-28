@@ -134,7 +134,7 @@ static int uart_irq_wrapper(int irq, void *priv);
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
-    tty_foreground_pgid = 1;
+    tty_foreground_pgid = 0;
     /* LOCK_ORDER: initialize rx_lock before any UART paths run. */
     spin_init(&rx_lock);
     wait_queue_init(&rx_waiters);

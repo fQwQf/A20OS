@@ -685,6 +685,16 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
 
     if (req == TIOCGPGRP || req == PPC64_TIOCGPGRP) {
         int pgid = uart_get_foreground_pgid();
+        /* 前台组占位值无人认领：若该组已无存活用户进程，则调用者即事实前台。
+         * busybox ash 的 POSIX job-control 握手依赖此语义，否则它会对本组
+         * 发 SIGTTIN 自停，连带冻结同组的 init/mksh。 */
+        if (!proc_pgid_alive(pgid)) {
+            task_t *self = proc_current();
+            if (self && self->pgid > 0) {
+                pgid = self->pgid;
+                uart_set_foreground_pgid(pgid);
+            }
+        }
         return copy_to_user(arg, &pgid, sizeof(pgid)) < 0 ? -EFAULT : 0;
     }
     if (req == TIOCSPGRP || req == PPC64_TIOCSPGRP) {
