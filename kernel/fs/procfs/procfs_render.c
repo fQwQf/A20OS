@@ -465,8 +465,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_VERSION:
-        snprintf(buf, bufsz, "Linux version %s (%s) (%s)\n",
-                 LINUX_ABI_RELEASE, ARCH_NAME, LINUX_ABI_VERSION);
+        snprintf(buf, bufsz, "%s version %s (%s) (%s)\n",
+                 A20OS_SYSNAME, A20OS_RELEASE, ARCH_NAME, A20OS_VERSION_FULL);
         break;
     case PF_UPTIME: {  // 生成运行时间
         uint64_t ticks = timer_get_ticks();
@@ -830,7 +830,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", proc_pid_max());
         break;
     case PF_SYS_KERNEL_OSRELEASE:
-        snprintf(buf, bufsz, "%s\n", LINUX_ABI_RELEASE);
+        snprintf(buf, bufsz, "%s\n", A20OS_RELEASE);
         break;
     case PF_SYS_KERNEL_PIDMAP:
         proc_format_pidmap(buf, bufsz);
