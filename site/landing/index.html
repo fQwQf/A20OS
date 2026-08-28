@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A20OS — 高性能、高兼容性的混合内核操作系统</title>
+<meta name="description" content="A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)：调度、内存管理、VFS 核心与页缓存等性能关键路径留在内核态，设备驱动与文件系统均可作为可崩溃、可重启的用户态服务运行。">
+<meta name="color-scheme" content="light">
+<link rel="icon" type="image/svg+xml" href="./assets/favicon.svg">
+<link rel="stylesheet" href="./assets/css/style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="#top" aria-label="A20OS 首页">A20OS</a>
+    <nav class="site-nav" aria-label="主导航">
+      <a href="#features">特性</a>
+      <a href="#platforms">平台</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="./docs/">文档</a>
+      <a class="nav-github" href="https://github.com/fQwQf/A20OS" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ===================== HERO ===================== -->
+  <section class="hero" id="top" aria-labelledby="hero-title">
+    <div class="container hero-inner">
+      <div class="hero-copy">
+        <h1 class="hero-title" id="hero-title">A20OS</h1>
+        <p class="hero-tagline">高性能、高兼容性的混合内核操作系统</p>
+        <p class="hero-intro">A20OS 是一款探索现代操作系统架构边界的高级混合内核 (Hybrid Kernel)：调度、内存管理、VFS 核心与页缓存等性能关键路径留在内核态，保留极速的函数调用性能；同时深度融合微内核理念——设备驱动与文件系统均可作为可崩溃、可重启的用户态服务运行。</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href="./docs/">查看文档</a>
+          <a class="btn btn-ghost" href="https://github.com/fQwQf/A20OS" target="_blank" rel="noopener noreferrer">
+            GitHub 仓库
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>
+          </a>
+        </div>
+      </div>
+      <div class="hero-art-wrap" aria-hidden="true">
+        <pre class="hero-art">                    :%%%%%%%.
+                    %%%%%%%*
+                   -%%%%%%%
+                   %%%%%%%-
+                  -%%%%%%%
+                  %%%%%%%=
+                 *%%%%%%%
+                .%%%%%%%:=+
+                @%%%%%%% %%
+                %%%%%%% +%%+
+               #%%%%%%+ %%%%
+              :%%%%%%% %%%%%-
+              %%%%%%%# %%%%%%    ........  .........
+             =%%%%%%% -%%%%%%-   ######### #########=
+             %%%%%%%=  %%%%%%#   ++*+*+*## #*++++++#=
+            *%%%%%%%   :%%%%%%:         ## #+      #=
+            %%%%%%%.    %%%%%%%         ## #+      #=
+           +%%%%%%%     =%%%%%%         *# #+      #=
+           %%%%%%%:      %%%%%%*  ######## #+      #=
+          %%%%%%%%       %%%%%%% :######## #+      #=
+         :%%%%%%%.        %%%%%%::#=       #+      #=
+         %%%%%%%* %%%%%%%%%%%%%%::#=       #+      #=
+        :%%%%%%% -%%%%%%%%%%%%%%::#=       #+      #=
+        %%%%%%%: %%%%%%%%%%%%%%%::######## #########=
+       :======= .===============. -------- ---------:</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== STATS ===================== -->
+  <section class="stats" aria-label="项目数据">
+    <div class="container">
+      <dl class="stats-grid">
+        <div class="stat">
+          <dt class="stat-label">种指令集架构</dt>
+          <dd class="stat-num">7</dd>
+        </div>
+        <div class="stat">
+          <dt class="stat-label">条 x86_64 syscall 全表映射</dt>
+          <dd class="stat-num">463</dd>
+        </div>
+        <div class="stat">
+          <dt class="stat-label">大 QEMU 虚拟平台 + 物理开发板</dt>
+          <dd class="stat-num">4+2</dd>
+        </div>
+        <div class="stat">
+          <dt class="stat-label">Linux syscall 兼容入口</dt>
+          <dd class="stat-num">361+</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <!-- ===================== FEATURES ===================== -->
+  <section class="section" id="features" aria-labelledby="features-title">
+    <div class="container">
+      <h2 class="section-title" id="features-title">架构特性</h2>
+      <div class="feature-grid">
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9.5" y="9.5" width="5" height="5"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg>
+          </div>
+          <h3>混合内核架构</h3>
+          <p>宏内核性能 × 微内核弹性；调度/MM/VFS/TCP-IP 数据面驻留内核态，驱动与文件系统作为用户态服务运行。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>
+          </div>
+          <h3>完整 Linux ABI 兼容</h3>
+          <p>未修改的 musl 程序直接运行；覆盖 mseal、io_uring、landlock、pidfd 等现代 syscall；vDSO 零陷入快路径。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+          </div>
+          <h3>真实用户态</h3>
+          <p>可引导 stock Alpine + XFCE Wayland rootfs，git / vim / fastfetch 开箱即用。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7l10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg>
+          </div>
+          <h3>跨平台移植性</h3>
+          <p>RISC-V64、ARM64、x86_64、LoongArch64/32、PPC64LE、ARMv7-M；星光 2 与龙芯 LS2K1000 实机支持。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 9.4 7.55 4.24"/><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="M3.3 7l8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
+          </div>
+          <h3>apk 包管理体系</h3>
+          <p>Alpine apk 格式声明式 recipe，world 清单组装镜像，CI 多架构构建与签名发布。</p>
+        </article>
+        <article class="card">
+          <div class="card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+          </div>
+          <h3>严肃的质量门禁</h3>
+          <p>syscall 语义 smoke、并发压力测试、用户态 FS 崩溃恢复、SMP 锁模型编译期审查。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== PLATFORMS ===================== -->
+  <section class="section section-alt" id="platforms" aria-labelledby="platforms-title">
+    <div class="container">
+      <h2 class="section-title" id="platforms-title">支持的硬件平台</h2>
+      <div class="platform-grid">
+        <div class="platform-group">
+          <h3 class="platform-heading"><span class="platform-tag">VM</span>虚拟机 (QEMU)</h3>
+          <ul class="chip-list">
+            <li><code>qemu-virt-riscv64</code></li>
+            <li><code>qemu-virt-aarch64</code></li>
+            <li><code>qemu-virt-x86_64</code></li>
+            <li><code>qemu-virt-loongarch64</code></li>
+            <li><code>qemu-virt-ppc64le</code> <span class="chip-note">(pSeries)</span></li>
+          </ul>
+        </div>
+        <div class="platform-group">
+          <h3 class="platform-heading"><span class="platform-tag">BRD</span>物理开发板</h3>
+          <ul class="chip-list">
+            <li><code>StarFive VisionFive 2</code> <span class="chip-note">(星光 2)</span></li>
+            <li><code>Loongson LS2K1000</code> <span class="chip-note">(龙芯)</span></li>
+          </ul>
+        </div>
+        <div class="platform-group">
+          <h3 class="platform-heading"><span class="platform-tag">MCU</span>MCU bring-up</h3>
+          <ul class="chip-list">
+            <li><code>STM32F103</code> <span class="chip-note">(ARMv7-M Cortex-M3, NOMMU)</span></li>
+            <li><code>STM32F103ZET6</code> <span class="chip-note">普中玄武</span></li>
+          </ul>
+        </div>
+        <div class="platform-group">
+          <h3 class="platform-heading"><span class="platform-tag">LA32</span>LA32R</h3>
+          <ul class="chip-list">
+            <li><code>NaiLoong Core SoC</code> <span class="chip-note">(软件 TLB refill)</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== QUICK START ===================== -->
+  <section class="section" id="quickstart" aria-labelledby="quickstart-title">
+    <div class="container container-narrow">
+      <h2 class="section-title" id="quickstart-title">快速开始</h2>
+      <div class="code-block">
+        <button class="copy-btn" type="button" data-copy aria-label="复制命令">复制</button>
+        <pre><code>$ git clone https://github.com/fQwQf/A20OS.git
+$ cd A20OS
+$ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run</code></pre>
+      </div>
+      <p class="quickstart-caption">在 QEMU 中引导 A20OS 只需一条命令，环境准备见<a href="./docs/">完整文档</a>。</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <p class="footer-copy">&copy; 2026 A20OS contributors &middot; Apache-2.0 License</p>
+    <nav class="footer-links" aria-label="页脚导航">
+      <a href="https://github.com/fQwQf/A20OS" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <a href="./docs/">完整文档</a>
+      <a href="./docs/OS-Design/">设计方案</a>
+      <a href="./docs/roadmap/a20os-improvement-todo/">路线图</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="./assets/js/main.js" defer></script>
+</body>
+</html>

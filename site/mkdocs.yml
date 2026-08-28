@@ -1,0 +1,216 @@
+# A20OS 文档站配置（MkDocs Material）
+#
+# 说明：docs_dir 直接指向仓库根目录的 docs/，文档只有一份，不在网站里复制维护。
+# 构建产物输出到 site/_pages/docs/，与手工设计的首页 (site/landing/) 组装后部署到 GitHub Pages。
+# 本地构建：pip install mkdocs-material && bash site/build.sh
+
+site_name: A20OS 文档
+site_description: A20OS — 高性能、高兼容性的混合内核操作系统
+site_author: A20OS contributors
+site_url: https://fqwqf.github.io/A20OS/docs/
+
+repo_url: https://github.com/fQwQf/A20OS
+repo_name: fQwQf/A20OS
+edit_uri: edit/main/docs/
+
+# 文档源：仓库根目录的 docs/（相对本配置文件解析）
+docs_dir: ../docs
+
+# 不纳入文档站的研究性/归档性内容（文件仍保留在仓库中）
+exclude_docs: |
+  research/
+  archive/
+  paper/
+
+theme:
+  name: material
+  language: zh
+  # 自包含：不加载外部字体，使用本地字体栈
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - content.action.edit
+    - content.code.annotate
+    - content.code.copy
+    - content.tooltips
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: 跟随系统配色
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到暗色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: lime
+      toggle:
+        icon: material/weather-night
+        name: 切换到亮色模式
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      # 中文标题生成可用的锚点 slug
+      slugify: !!python/name:markdown.extensions.toc.slugify_unicode
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fQwQf/A20OS
+      name: GitHub 仓库
+
+copyright: Copyright &copy; 2026 A20OS contributors · Apache-2.0 License
+
+nav:
+  - 首页: README.md
+  - 总体设计:
+      - 设计方案总览: OS-Design.md
+      - 混合内核架构:
+          - 概览与设计: hybrid-kernel/00-design.md
+          - 核心机制: hybrid-kernel/01-mechanisms.md
+          - 主流化计划: hybrid-kernel/02-mainstream-plan.md
+          - 重构计划: hybrid-kernel/03-refactor-plan.md
+          - 双重放置策略: hybrid-kernel/04-dual-placement.md
+          - IDL 与 Personality: hybrid-kernel/05-idl-and-personality.md
+          - 用户态文件系统: hybrid-kernel/06-user-fs.md
+          - 实施状态: hybrid-kernel/STATUS.md
+  - 原生 ABI:
+      - 总览: native-abi/00-overview.md
+      - 类型系统: native-abi/01-types.md
+      - 错误处理: native-abi/02-errors.md
+      - Handle 与能力: native-abi/03-handle.md
+      - 内存管理: native-abi/04-memory.md
+      - IPC 通信: native-abi/05-ipc.md
+      - 安全模型: native-abi/06-security.md
+      - 启动流程: native-abi/07-startup.md
+      - 运行时状态: native-abi/08-runtime-status.md
+      - ABI 深化: native-abi/09-native-abi-deepening.md
+  - 内核子系统:
+      - EEVDF 调度器: eevdf-scheduler.md
+      - 进程调度: process-scheduler.md
+      - 内核扩展: extensions.md
+      - 文件系统:
+          - VFS 边界语义: fs/vfs-edge-semantics.md
+          - 一致性模型: fs/fs-consistency-model.md
+          - NTFS 实现: fs/ntfs.md
+      - 网络:
+          - 网络配置设计: net/network-config-design.md
+          - 网络锁契约: net/network-lock-contract.md
+      - 图形:
+          - 3D 图形栈: graphics/3d-graphics.md
+          - XFCE Wayland 适配: graphics/xfce-wayland-adaptation.md
+  - 驱动开发:
+      - 驱动文档总览: drivers/README.md
+      - 开发指南:
+          - 快速上手: drivers/guide/getting-started.md
+          - 核心模型: drivers/guide/core-model.md
+          - 总线与平台设备: drivers/guide/bus-and-platform.md
+          - 设备类: drivers/guide/device-classes.md
+          - PCI 与 VirtIO: drivers/guide/pci-and-virtio.md
+          - 热插拔与 PnP: drivers/guide/hotplug-and-pnp.md
+          - 内核模块: drivers/guide/kernel-modules.md
+          - 运行时契约: drivers/guide/runtime-contracts.md
+          - 锁顺序: drivers/guide/lock-order.md
+          - 部署配置: drivers/guide/deployment-profiles.md
+      - 设备类参考:
+          - 输入: drivers/classes/input.md
+          - 显示: drivers/classes/display.md
+          - 音频: drivers/classes/audio.md
+          - USB 设计: drivers/classes/usb-design.md
+          - 用户态与 devfs: drivers/classes/userspace-and-devfs.md
+      - 工程实践:
+          - 实现状态: drivers/meta/implementation-status.md
+          - 测试与提交: drivers/meta/testing-and-submission.md
+  - 平台移植:
+      - 移植指南: platforms/porting-guide.md
+      - VisionFive 2 启动: platforms/visionfive2-boot.md
+      - LS2K1000: platforms/2k1000.md
+      - PPC64LE: platforms/ppc64le.md
+      - LoongArch32 (LA32R): platforms/loongarch32.md
+      - STM32F103 移植: platforms/stm32f103-port.md
+      - 物理开发板: platforms/physical-boards.md
+      - VirtualBox: platforms/virtualbox.md
+      - VirtualBox x86_64: platforms/virtualbox-x86_64.md
+      - VirtualBox AArch64: platforms/virtualbox-aarch64.md
+  - 构建与测试:
+      - 构建指南: build.md
+      - 测试门禁: testing-gates.md
+      - 调试指南: debug.md
+      - 外部依赖: external-dependencies.md
+  - 打包与发行:
+      - 包管理与镜像分发: packaging/README.md
+      - 体系总览: packaging/overview.md
+      - 快速上手: packaging/quickstart.md
+      - 包清单: packaging/packages.md
+      - apk 格式: packaging/apk-format.md
+      - 镜像组装: packaging/images.md
+      - 仓库与签名: packaging/repository.md
+      - CI/CD: packaging/ci.md
+      - 迁移路线: packaging/migration.md
+      - 发行版 rootfs:
+          - 总览: distro/README.md
+          - 引导: distro/boot.md
+          - 引导差距分析: distro/boot-gap-analysis.md
+          - 构建: distro/build.md
+          - 内核要求: distro/kernel-requirements.md
+          - 源码软件移植: distro/source-software-porting.md
+          - 已知问题: distro/known-issues.md
+  - 路线图:
+      - 工程改进 TODO: roadmap/a20os-improvement-todo.md
+      - 性能大修: roadmap/perf-overhaul.md
+      - Park/Wake 协议拆分: roadmap/park-wake-protocol-split.md
+  - 参与贡献:
+      - 贡献指南: CONTRIBUTING.md
+      - 致谢: ACKNOWLEDGMENTS.md
+      - 第三方声明: THIRD_PARTY_NOTICES.md
