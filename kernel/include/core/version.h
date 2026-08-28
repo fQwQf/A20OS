@@ -14,11 +14,9 @@
 #define A20OS_NODENAME   "a20os"
 #define A20OS_VERSION    "0.9"
 #define A20OS_RELEASE    "20.0.9"
-#define A20OS_VERSION_FULL  "#1 " A20OS_SYSNAME " " A20OS_VERSION
+#define A20OS_VERSION_FULL  A20OS_SYSNAME " " A20OS_VERSION " build " __DATE__ " " __TIME__
 
-/* Backwards-compatible aliases. */
+/* Backwards-compatible alias. */
 #define VERSION             A20OS_VERSION
-#define LINUX_ABI_RELEASE   A20OS_RELEASE
-#define LINUX_ABI_VERSION   A20OS_VERSION_FULL
 
 #endif
