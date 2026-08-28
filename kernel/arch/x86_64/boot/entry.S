@@ -63,16 +63,21 @@ _start:
     /*
      * Higher-half map using 1GB pages.
      * PDPT_hh[0..3] map 0xFFFF800000000000 -> physical 0-4GB.
-     * This covers the kernel (PHYS_BASE), LAPIC, IOAPIC, and PCI ECAM.
+     *
+     * 0-2GB: RAM — normal WB caching (flags 0x83).
+     * 2-4GB: MMIO (PCI ECAM, LAPIC, IOAPIC, PCI BARs) — PCD=1 (bit 3)
+     *        forces Uncacheable access so MMIO reads return live values
+     *        instead of stale cache lines.  On QEMU 2G RAM this entire
+     *        range is device memory so blanket PCD is safe.
      */
     movl  $(boot_pdpt_hh - PAGE_OFFSET), %edi
-    movl  $0x00000083, %eax    /* 1GB page: physical 0-1GB */
+    movl  $0x00000083, %eax    /* 1GB page: physical 0-1GB (RAM, WB) */
     movl  %eax, (%edi)
-    movl  $0x40000083, %eax    /* 1GB page: physical 1-2GB */
+    movl  $0x40000083, %eax    /* 1GB page: physical 1-2GB (RAM, WB) */
     movl  %eax, 8(%edi)
-    movl  $0x80000083, %eax    /* 1GB page: physical 2-3GB */
+    movl  $0x8000008B, %eax    /* 1GB page: physical 2-3GB (MMIO, UC) */
     movl  %eax, 16(%edi)
-    movl  $0xC0000083, %eax    /* 1GB page: physical 3-4GB */
+    movl  $0xC000008B, %eax    /* 1GB page: physical 3-4GB (MMIO, UC) */
     movl  %eax, 24(%edi)
 
     /* Enable PAE and 2 MiB pages used by the temporary identity map. */

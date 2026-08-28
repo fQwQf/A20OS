@@ -263,6 +263,7 @@ FF_COMMON_SRCS := \
 	src/common/impl/font.c \
 	src/common/impl/format.c \
 	src/common/impl/frequency.c \
+	src/common/impl/genconfig.c \
 	src/common/impl/init.c \
 	src/common/impl/jsonconfig.c \
 	src/common/impl/library.c \
@@ -396,6 +397,8 @@ FF_LINUX_DETECT_SRCS := \
 	src/detection/terminalshell/terminalshell_linux.c \
 	src/detection/terminalsize/terminalsize_linux.c \
 	src/detection/theme/theme_linux.c \
+	src/detection/top/top.c \
+	src/detection/top/top_linux.c \
 	src/detection/tpm/tpm_linux.c \
 	src/detection/uptime/uptime_linux.c \
 	src/detection/users/users_linux.c \
@@ -478,6 +481,7 @@ FF_MODULES_SRCS := \
 	src/modules/terminalsize/terminalsize.c \
 	src/modules/theme/theme.c \
 	src/modules/title/title.c \
+	src/modules/top/top.c \
 	src/modules/tpm/tpm.c \
 	src/modules/uptime/uptime.c \
 	src/modules/users/users.c \
