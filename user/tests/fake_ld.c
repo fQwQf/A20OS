@@ -107,10 +107,21 @@ die:
     __builtin_unreachable();
 }
 
-/* Entry: the kernel passes a0 = &start_info; forward sp as second arg. */
+/* Entry: the kernel passes arg0 = &start_info; forward sp as second arg. */
+#if defined(__riscv) && __riscv_xlen == 64
 __asm__(
     ".text\n"
     ".globl _start_dyn\n"
     "_start_dyn:\n"
     "    mv a1, sp\n"
     "    tail dyn_main\n");
+#elif defined(__x86_64__)
+__asm__(
+    ".text\n"
+    ".globl _start_dyn\n"
+    "_start_dyn:\n"
+    "    mov %rsp, %rsi\n"
+    "    jmp dyn_main\n");
+#else
+#error "_start_dyn entry asm not implemented for this architecture"
+#endif

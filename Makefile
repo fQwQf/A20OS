@@ -415,6 +415,7 @@ QEMU_BLK_ppc64le     := virtio-blk-pci
 # the primary disk's bus; PCI transports can continue to use automatic slots.
 QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
 QEMU_BLK_SECOND_loongarch64 := virtio-blk-pci
+QEMU_BLK_SECOND_x86_64      := virtio-blk-pci
 
 QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_loongarch64 := virtio-net-pci

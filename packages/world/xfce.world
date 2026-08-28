@@ -1,0 +1,93 @@
+# xfce profile —— XFCE desktop via Alpine upstream packages
+#
+# 使用 Alpine 仓库中的 xfce4 包，配合 wayland/weston 运行。
+# 需要网络拉取上游包。
+
+a20-base
+a20-drivers
+
+# Alpine 基础
+musl
+busybox
+ca-certificates
+
+# Wayland/Weston 合成器
+wayland
+weston
+
+# XFCE 桌面
+xfce4-session
+xfce4-panel
+xfdesktop
+xfwm4
+thunar
+xfce4-terminal
+xfce4-settings
+xfce4-appfinder
+xfce4-power-manager
+xfce4-notifyd
+xfce4-screensaver
+xfce4-taskmanager
+xfce4-whiskermenu-plugin
+xfce4-clipman-plugin
+xfce4-pulseaudio-plugin
+xfce4-weather-plugin
+xfce4-places-plugin
+xfce4-systemload-plugin
+xfce4-battery-plugin
+xfce4-datetime-plugin
+xfce4-verve-plugin
+xfce4-timer-plugin
+xfce4-cpugraph-plugin
+xfce4-netload-plugin
+xfce4-smartbookmark-plugin
+xfce4-genmon-plugin
+xfce4-fsguard-plugin
+xfce4-i8tem-plugin
+xfce4-calculator-plugin
+xfce4-datetime-plugin
+xfce4-eyes-plugin
+xfce4-gmail-plugin
+xfce4-indicator-plugin
+xfce4-kbdleds-plugin
+xfce4-mpc-plugin
+xfce4-quicklauncher-plugin
+xfce4-radio-plugin
+xfce4-shade-plugin
+xfce4-stopwatch-plugin
+xfce4-timeout-plugin
+xfce4-weather-plugin
+xfce4-webmail-plugin
+xfce4-xfappfinder-plugin
+
+# 输入法
+ibus
+ibus-rime
+
+# 字体
+font-noto
+font-noto-cjk
+font-noto-emoji
+font-dejavu
+
+# 媒体
+ffmpeg
+gst-plugins-good
+gst-plugins-bad
+gst-plugins-ugly
+gst-libav
+
+# 网络
+networkmanager
+nm-applet
+
+# 音频
+pulseaudio
+pavucontrol
+
+# 其他
+xdg-user-dirs
+xdg-utils
+hicolor-icon-theme
+adwaita-icon-theme
+papirus-icon-theme
