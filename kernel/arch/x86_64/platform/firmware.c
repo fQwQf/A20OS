@@ -167,6 +167,49 @@ void firmware_shutdown(void) {
     arch_halt();
 }
 
+/* QEMU fw_cfg (port 0x510 selector / 0x511 data).  With `-kernel`+`-append`
+ * QEMU exposes the command line through FW_CFG_CMDLINE_SIZE/DATA; without
+ * it, bootargs would be empty on x86_64 and every a20.* knob (static
+ * network config, trace=<comm> diagnosis) stays unreachable. */
+#define FW_CFG_SELECTOR_PORT 0x510
+#define FW_CFG_DATA_PORT     0x511
+#define FW_CFG_SIGNATURE     0x0000
+#define FW_CFG_CMDLINE_SIZE  0x0014
+#define FW_CFG_CMDLINE_DATA  0x0015
+
+static uint8_t fw_cfg_read8(void) {
+    return inb(FW_CFG_DATA_PORT);
+}
+
+static uint32_t fw_cfg_read32(void) {
+    uint32_t value = 0;
+    for (int i = 0; i < 4; i++)
+        value = (value << 8) | fw_cfg_read8();
+    return value;
+}
+
+static char g_fw_cfg_cmdline[256];
+
+const char *firmware_bootargs(void) {
+    static int ready;
+    if (!ready) {
+        ready = 1;
+        outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
+        uint32_t sig = fw_cfg_read32();
+        if (sig == 0x51454d55U) {   /* "QEMU", big-endian */
+            outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_SIZE);
+            uint32_t len = fw_cfg_read32();
+            if (len > sizeof(g_fw_cfg_cmdline) - 1)
+                len = sizeof(g_fw_cfg_cmdline) - 1;
+            outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_DATA);
+            for (uint32_t i = 0; i < len; i++)
+                g_fw_cfg_cmdline[i] = (char)fw_cfg_read8();
+            g_fw_cfg_cmdline[len] = '\0';
+        }
+    }
+    return g_fw_cfg_cmdline;
+}
+
 void firmware_reboot(void) {
     uint8_t val;
     do {
