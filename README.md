@@ -115,6 +115,16 @@ make CCACHE= ...
 ```
 注意：ccache 只加速宿主机上的本地迭代编译，不影响基准负载在 guest 内对构建耗时的计量。
 
+## 包管理与镜像分发
+
+A20OS 采用 apk（Alpine 包格式）作为包管理体系：内核、用户态、驱动与移植软件都由 `packages/recipes/` 下的声明式 recipe 打成标准 apk 包，与 Alpine 上游仓库的包一起，按 `packages/world/` 中的 world 清单组合成镜像，并经 GitHub Actions 完成多架构构建、签名与发布。
+
+```bash
+make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像，一步到位
+```
+
+完整文档：[docs/packaging/](docs/packaging/overview.md)（总览、recipe 参考、world 组装、仓库与签名、CI/CD、迁移路线）。
+
 ## 测试与质量保证
 作为一个严肃的底层项目，A20OS 建立了一套完备的测试门禁。开发者在提交代码前可通过 `Makefile` 目标进行本地校验：
 * **基础 bring-up**：`make smoke-riscv64` 只启动 `BRINGUP=1` 内核，并把 watchdog timeout 视为可接受结果；它不验证系统调用。

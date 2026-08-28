@@ -1,0 +1,16 @@
+#!/bin/sh
+# A20OS stage-2 init for the devtools world.  The kernel already mounted
+# devtmpfs/proc/sysfs under /extra before the chroot, so /dev /proc /sys
+# are live here; we only need /dev/pts, /run and a login shell.
+
+export HOME=/root
+export SHELL=/bin/sh
+export TERM=vt100
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mkdir -p /run /tmp
+mkdir -p /dev/pts 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+
+exec /bin/sh -l

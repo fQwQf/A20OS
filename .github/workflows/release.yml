@@ -1,0 +1,125 @@
+# 发布流水线：tag v* 触发。构建全架构镜像与包仓库，签名后发 Release，
+# 并把包仓库部署到 GitHub Pages（即公共 apk 仓库，见 docs/packaging/repository.md）。
+#
+# 一次性准备（仓库管理员）：
+#   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#   2. Settings → Secrets → Actions → 新建 A20_REPO_SIGNING_KEY，
+#      内容为发布私钥 PEM（openssl genrsa 生成；公钥随仓库发布，见下）
+#   3. 未配置 secret 时流程仍可运行，但会用临时密钥签名并打印警告
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: release-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/a20os-buildenv:latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [riscv64, x86_64, aarch64, loongarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust workspace ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install release signing key
+        run: |
+          mkdir -p build/keys
+          if [ -n "${A20_REPO_SIGNING_KEY:-}" ]; then
+            printf '%s\n' "$A20_REPO_SIGNING_KEY" > build/keys/a20os-release.rsa
+            openssl rsa -in build/keys/a20os-release.rsa -pubout \
+              -out build/keys/a20os-release.rsa.pub 2>/dev/null
+            echo "PKG_SIGN_KEY=build/keys/a20os-release.rsa" >> "$GITHUB_ENV"
+            echo "PKG_KEY_NAME=a20os-release.rsa.pub" >> "$GITHUB_ENV"
+          else
+            echo "::warning::A20_REPO_SIGNING_KEY not set; packages and index will be UNSIGNED"
+            echo "PKG_SIGN_KEY=" >> "$GITHUB_ENV"
+          fi
+        env:
+          A20_REPO_SIGNING_KEY: ${{ secrets.A20_REPO_SIGNING_KEY }}
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: build/cache/ccache
+          key: ccache-release-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-release-${{ matrix.arch }}-
+
+      - name: Build kernel + userland
+        run: make ARCH=${{ matrix.arch }} dev-build
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
+      - name: Package, index, sign
+        run: make ARCH=${{ matrix.arch }} pkg-repo
+
+      - name: Compose images (base + devel)
+        run: |
+          make ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
+          make ARCH=${{ matrix.arch }} image-world PKG_WORLD=devel PKG_SIZE_MB=1024
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            build/images/
+            build/repo/${{ matrix.arch }}/
+            build/keys/*.rsa.pub
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Assemble public repository tree
+        run: |
+          mkdir -p site
+          cp -r dist/repo/* site/
+          cp dist/keys/*.rsa.pub site/ 2>/dev/null || true
+          {
+            echo "# A20OS apk repository"
+            echo
+            echo " Architectures: $(ls site | grep -v '\.' | tr '\n' ' ')"
+            echo
+            echo "Usage inside A20OS or any apk-capable rootfs:"
+            echo '  echo "<this site URL>/$(uname -m 映射)/" >> /etc/apk/repositories'
+          } > site/index.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/images/*.img
+          generate_release_notes: true
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

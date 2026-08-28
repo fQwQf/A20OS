@@ -1,0 +1,7 @@
+# a20-base profile —— 最小 A20OS 原生镜像
+#
+# 每行一个包名（apk 语法，可用 name=version 钉版本），# 开头为注释。
+# 对应旧的 disk.img（FAT32）内容：init + 全部用户态程序 + 运行时驱动。
+
+a20-base
+a20-drivers
