@@ -1,0 +1,77 @@
+# a20-base — A20OS 基础用户态包
+#
+# 内容对齐旧 mcopy 时代的 FAT32 根文件系统：全部用户态程序平铺在 /，
+# init 在根上，mksh 同时提供 sh/bash。详见 docs/packaging/packages.md。
+#
+# 构建前提：`make ARCH=<arch> dev-build`（或任何产出 user/build/<variant> 的目标）。
+
+[package]
+name = "a20-base"
+version = "0.2.0"
+release = 0
+description = "A20OS base userland: init, shell, core commands and native services"
+url = "https://github.com/fQwQf/A20OS"
+license = "Apache-2.0"
+maintainer = "A20OS developers"
+archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
+
+# 用户态二进制（init、mksh、coreutils 风格命令、native 服务、测试程序）。
+# 排除驱动包（归 a20-drivers）、编译中间产物，以及构建目录里的 sh
+# 副本（包内用符号链接统一指向 mksh，见下）。
+[[files]]
+src = "{build_dir}/*"
+dest = "/"
+exclude = ["*.o", "*.a", "*.so", "*.d", "*.a20drv", ".build-id", "sh", "bash"]
+
+# musl 动态库：用户态动态链接程序需要，沿用旧镜像的 /musl/lib 布局。
+[[files]]
+src = "{repo}/user/external/musl/build-{variant}/lib/libc.so"
+dest = "/musl/lib/libc.so"
+mode = "0755"
+optional = true
+
+# sh/bash 都指向 mksh（旧镜像里是硬拷贝，包里用符号链接）。
+[[files]]
+dest = "/sh"
+symlink = "/mksh"
+
+[[files]]
+dest = "/bash"
+symlink = "/mksh"
+
+# 网络协议表（与 Makefile PROTOCOLS_LINES 一致）。
+[[files]]
+dest = "/etc/protocols"
+mode = "0644"
+content = """
+hopopt 0 HOPOPT
+icmp 1 ICMP
+igmp 2 IGMP
+tcp 6 TCP
+udp 17 UDP
+ipv6 41 IPv6
+ipv6-route 43 IPv6-Route
+ipv6-frag 44 IPv6-Frag
+esp 50 ESP
+ah 51 AH
+ipv6-icmp 58 IPv6-ICMP
+ipv6-nonxt 59 IPv6-NoNxt
+ipv6-opts 60 IPv6-Opts
+"""
+
+[[files]]
+dest = "/etc/os-release"
+mode = "0644"
+content = """
+ID=A20OS
+NAME="A20OS"
+PRETTY_NAME="A20OS"
+VERSION="{version}"
+VERSION_ID="{version}"
+"""
+
+# 文件系统冒烟测试的标记文件（旧镜像同样携带）。
+[[files]]
+dest = "/test.txt"
+mode = "0644"
+content = "Hello from A20OS!\n"

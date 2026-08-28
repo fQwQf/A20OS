@@ -1,0 +1,40 @@
+# a20-extra-git — 从源码构建的 git（含 https helper、模板与 CA 证书）
+#
+# 对应旧 extra.img 中 git 的部分。构建前提：
+#   make ARCH=<arch> extra-user-apps EXTRA_PACKAGES=git
+# （需要 user/external/apps/git submodule）
+
+[package]
+name = "a20-extra-git"
+version = "2.51.0"
+release = 0
+description = "Git built for A20OS with HTTPS helpers (extra disk layout)"
+url = "https://github.com/fQwQf/A20OS"
+license = "GPL-2.0-only"
+maintainer = "A20OS developers"
+origin = "a20-extra"
+archs = ["riscv64", "aarch64", "loongarch64"]
+depends = ["a20-base"]
+
+[[files]]
+src = "{extra_dir}/git"
+dest = "/extra/bin/git"
+mode = "0755"
+
+[[files]]
+src = "{extra_dir}/git-remote-*"
+dest = "/extra/bin/"
+mode = "0755"
+optional = true
+
+[[files]]
+src = "{repo}/user/external/apps/git/templates/blt/**"
+dest = "/extra/share/git-core/templates/"
+optional = true
+
+# CA 证书包取自宿主机（与旧 extra.img 行为一致）；路径因发行版而异，故 optional。
+[[files]]
+src = "/etc/ssl/certs/ca-certificates.crt"
+dest = "/extra/etc/ssl/certs/ca-certificates.crt"
+mode = "0644"
+optional = true

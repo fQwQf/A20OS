@@ -58,6 +58,7 @@
 
 ## 用户态、桌面与发行版
 
+- [packaging/overview.md](packaging/overview.md)：包管理与镜像分发体系（apk 打包、world 组装、仓库签名、CI/CD）
 - [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
 - [distro/source-software-porting.md](distro/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
 - [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：XFCE Wayland 桌面的内核强化与 submodule 去修改化
