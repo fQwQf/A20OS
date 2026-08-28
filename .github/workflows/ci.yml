@@ -1,0 +1,64 @@
+# PR/主干门禁：多架构矩阵构建 + 打包 + 组镜像 + QEMU 冒烟。
+# 所有 job 运行在 ghcr 的构建容器里，本地可用同一镜像复现（docs/packaging/ci.md）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/a20os-buildenv:latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [riscv64, x86_64, aarch64, loongarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust workspace ownership (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: build/cache/ccache
+          key: ccache-${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.arch }}-
+
+      - name: Build kernel + userland
+        run: make ARCH=${{ matrix.arch }} dev-build
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
+      - name: Package build outputs as .apk and index the repo
+        run: make ARCH=${{ matrix.arch }} pkg-repo
+
+      - name: Compose base image from the package repository
+        run: make ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
+
+      - name: QEMU smoke (riscv64 only; TCG, no KVM)
+        if: matrix.arch == 'riscv64'
+        run: make smoke-riscv64
+        timeout-minutes: 20
+
+      - name: Guest regression: Alpine gcc toolchain via chroot
+        if: matrix.arch == 'riscv64'
+        run: make smoke-devtools
+        timeout-minutes: 20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: a20os-${{ matrix.arch }}
+          path: |
+            .kernel-build/*/kernel.elf
+            build/images/*.img
+            build/repo/${{ matrix.arch }}/
+          if-no-files-found: error
+          retention-days: 14
