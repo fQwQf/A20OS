@@ -1,0 +1,75 @@
+#!/bin/sh
+# A20OS stage-2 init for the XFCE desktop world.
+
+export HOME=/root
+export SHELL=/bin/sh
+export TERM=linux
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export XDG_RUNTIME_DIR=/run/user/0
+export DISPLAY=:0
+# busybox lineedit probes terminal size with an ANSI DSR query when the
+# window size is unknown; the kernel console never answers and ash blocks
+# forever.  Pin the size so lineedit skips the query.
+export COLUMNS=120
+export LINES=40
+
+mkdir -p /run /tmp /dev/pts /dev/shm /var/log /run/dbus /var/lib/dbus
+
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+mount -t tmpfs tmpfs /dev/shm 2>/dev/null
+
+mkdir -p /run/user/0 /root
+
+# apk does not run package post-install scripts during image assembly, so
+# the system accounts dbus expects are added here if missing.
+grep -q '^messagebus:' /etc/passwd 2>/dev/null || \
+    echo 'messagebus:x:102:102:messagebus:/dev/null:/sbin/nologin' >> /etc/passwd
+grep -q '^messagebus:' /etc/group 2>/dev/null || \
+    echo 'messagebus:x:102:' >> /etc/group
+
+# libinput finds devices through the udev database; seed it from sysfs.
+if command -v udevd >/dev/null 2>&1; then
+    udevd --daemon
+    udevadm trigger --settle 2>/dev/null
+    udevadm settle 2>/dev/null
+fi
+
+# System message bus (best effort; the session bus below is what matters).
+dbus-uuidgen --ensure 2>/dev/null
+dbus-daemon --system --fork 2>/dev/null
+
+echo "=== A20OS XFCE Desktop ==="
+
+# Start Xorg
+if [ -x /usr/bin/Xorg ]; then
+    echo "Starting Xorg..."
+    Xorg :0 -config /etc/X11/xorg.conf.d/10-a20os.conf -noreset &
+    XPID=$!
+    sleep 2
+
+    if kill -0 $XPID 2>/dev/null; then
+        echo "Xorg started on :0"
+
+        if [ -x /usr/bin/xfce4-session ]; then
+            echo "Starting XFCE4 session..."
+            eval "$(dbus-launch --sh-syntax 2>/dev/null)"
+            /usr/bin/xfce4-session
+            echo "XFCE4 session exited"
+        fi
+    else
+        echo "Xorg failed to start"
+    fi
+fi
+
+echo "--- /var/log/Xorg.0.log (tail) ---"
+tail -n 60 /var/log/Xorg.0.log 2>/dev/null
+echo "--- end Xorg.0.log ---"
+
+# Remote debug channel through QEMU user networking (host forwards 5555).
+if [ -x /usr/sbin/telnetd ]; then
+    /usr/sbin/telnetd -p 5555 -l /bin/sh
+fi
+
+echo "Falling back to rescue shell"
+exec /bin/sh

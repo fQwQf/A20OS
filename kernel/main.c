@@ -253,20 +253,72 @@ void init_kthread(void) {
     a20_lwip_attach_netifs();
 #endif
 
-#ifdef CONFIG_EXTERNAL_ROOT
-    const char *init_path = "/a20/init";
-#else
-    const char *init_path = "/bin/init";
-#endif
-    printf("[INIT] opening %s...\n", init_path);
-    int fd = vfs_open(init_path, O_RDONLY, 0);
-    if (fd < 0) {
-        printf("[INIT] Cannot open %s: %d\n", init_path, fd);
+    const char *init_path = NULL;
+    int fd = -1;
+    char distro_interp[MAX_PATH_LEN];
+    char distro_script[MAX_PATH_LEN];
+    int is_distro_shebang = 0;
 
-        init_path = "/init";
+    {
+        int marker_fd = vfs_open("/extra/etc/a20-distro", O_RDONLY, 0);
+        if (marker_fd >= 0) {
+            vfs_close(marker_fd);
+            printf("[INIT] Distro rootfs detected (/extra/etc/a20-distro)\n");
+            strncpy(cur->fs.root_path, "/extra", MAX_PATH_LEN - 1);
+            cur->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+            printf("[INIT] Chrooted to /extra\n");
+
+            int init_fd = vfs_open("/sbin/init", O_RDONLY, 0);
+            if (init_fd >= 0) {
+                char magic[2];
+                int n = vfs_read(init_fd, magic, 2);
+                if (n == 2 && magic[0] == '#' && magic[1] == '!') {
+                    char buf[256];
+                    vfs_lseek(init_fd, 0, SEEK_SET);
+                    n = vfs_read(init_fd, buf, sizeof(buf) - 1);
+                    if (n > 0) {
+                        buf[n] = '\0';
+                        char *cp = buf + 2;
+                        while (*cp == ' ' || *cp == '\t') cp++;
+                        char *end = cp;
+                        while (*end && *end != ' ' && *end != '\t' &&
+                               *end != '\n' && *end != '\r')
+                            end++;
+                        *end = '\0';
+                        strncpy(distro_interp, cp, MAX_PATH_LEN - 1);
+                        distro_interp[MAX_PATH_LEN - 1] = '\0';
+                        strncpy(distro_script, "/sbin/init", MAX_PATH_LEN - 1);
+                        is_distro_shebang = 1;
+                        printf("[INIT] Distro shebang: %s %s\n",
+                               distro_interp, distro_script);
+                    }
+                }
+                vfs_close(init_fd);
+            }
+
+            init_path = is_distro_shebang ? distro_interp : "/sbin/init";
+            printf("[INIT] opening %s (distro mode)...\n", init_path);
+            fd = vfs_open(init_path, O_RDONLY, 0);
+            if (fd < 0)
+                panic("init: distro %s not found: %d\n", init_path, fd);
+        }
+    }
+
+    if (!init_path) {
+#ifdef CONFIG_EXTERNAL_ROOT
+        init_path = "/a20/init";
+#else
+        init_path = "/bin/init";
+#endif
+        printf("[INIT] opening %s...\n", init_path);
         fd = vfs_open(init_path, O_RDONLY, 0);
         if (fd < 0) {
-            panic("init: no init program found");
+            printf("[INIT] Cannot open %s: %d\n", init_path, fd);
+            init_path = "/init";
+            fd = vfs_open(init_path, O_RDONLY, 0);
+            if (fd < 0) {
+                panic("init: no init program found");
+            }
         }
     }
 
@@ -372,10 +424,18 @@ void init_kthread(void) {
      * this, __libc_start_main dereferences garbage and the init
      * process crashes silently before ever reaching main().
      */
-    char *init_argv[] = { (char *)init_path, NULL };
+    char *init_argv[4] = { NULL };
+    int init_argc = 1;
+    if (is_distro_shebang) {
+        init_argv[0] = distro_interp;
+        init_argv[1] = distro_script;
+        init_argc = 2;
+    } else {
+        init_argv[0] = (char *)init_path;
+    }
     /* pid 2 keeps the syscall time path (no vDSO); everything it execs
      * gets the vDSO through the regular exec path (proc/exec.c). */
-    uint64_t user_sp = elf_setup_stack(info.stack_top, 1, init_argv, NULL, &info, 0);
+    uint64_t user_sp = elf_setup_stack(info.stack_top, init_argc, init_argv, NULL, &info, 0);
     if (user_sp == 0) {
         panic("init: elf_setup_stack failed");
     }

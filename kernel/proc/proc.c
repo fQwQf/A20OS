@@ -627,6 +627,10 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         t->mm = mm;
         user_as = mm_address_space_token(mm);
         TRAP_CTX_KScratch0(trap) = user_as;
+        /* This path bypasses exec(), which maps the signal return
+         * trampoline in its own mm setup; without it, a handler return
+         * jumps to an unmapped restorer address (x86_64 SIGSEGV). */
+        arch_setup_signal_trampoline(mm);
     }
 
     /*

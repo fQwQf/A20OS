@@ -4,10 +4,24 @@
 #include "drivers/bus/platform_bus.h"
 #include "drivers/audio/pc_speaker.h"
 #include "core/arch.h"
+#include "core/bootargs.h"
 #include "core/smp.h"
 #include "core/stdio.h"
 #include "core/timer.h"
 #include "firmware.h"
+
+/* Bootargs come from the QEMU -append command line via fw_cfg.  On
+ * non-QEMU firmware (empty cmdline) fall back to the static user-network
+ * layout so networking does not depend on DHCP, which only progresses
+ * while guest socket syscalls drive a20_lwip_poll(). */
+const char *arch_bootargs_get(void) {
+    const char *cmdline = firmware_bootargs();
+    if (cmdline[0])
+        return cmdline;
+    return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
+           "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
+           "a20.hostname=a20os-x86";
+}
 
 static void x86_64_irqchip_init(void) {}
 
