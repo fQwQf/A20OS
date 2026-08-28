@@ -53,3 +53,5 @@ user/desktop/desktop_cursor_breeze.c
 !kernel/core/**
 !kernel/include/core/
 !kernel/include/core/**
+# OpenCode work plans / session state
+.omo/
