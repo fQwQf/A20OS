@@ -281,9 +281,20 @@ __return_to_user:
 	.align 2
 __trap_from_kernel:
 #ifndef CONFIG_NOMMU
-    la      t5, .Lkf_sp_stash
-    sd      sp, 0(t5)
-    sd      t6, 8(t5)
+    /* sp guard: runs before the frame save, so it must not clobber any live
+     * register.  In kernel mode tp always points at the current task_t
+     * (switch.S / user-trap entry), whose trap_guard_scratch slots provide
+     * per-task stash space.  tp==0 only before the first task exists (the
+     * freemap is not up then either), so the guard is skipped entirely. */
+    beqz    tp, .Lkf_done
+    sd      sp, 16(tp)
+    sd      t0, 24(tp)
+    sd      t1, 32(tp)
+    sd      t2, 40(tp)
+    sd      t3, 48(tp)
+    sd      t4, 56(tp)
+    sd      t6, 64(tp)
+
     li      t6, 0xFFFFFFC000000000
     bltu    sp, t6, .Lkf_sp_bad
     la      t6, g_pfa_direct_map_end
@@ -291,10 +302,30 @@ __trap_from_kernel:
     bgeu    sp, t6, .Lkf_sp_bad
     la      t0, g_pfa_freemap
     ld      t0, 0(t0)
-    beqz    t0, .Lkf_sp_good
+    beqz    t0, .Lkf_restore
+    /* freemap is indexed by the compacted pfn space (frame.c: start_pfn
+     * accumulates from 0 across RAM ranges), not by raw physical frame
+     * number.  Translate pa -> compacted pfn through the range table
+     * exported by pfa_init; indexing with the raw frame number reads far
+     * past the freemap into arbitrary page contents (false panics under
+     * memory pressure). */
     li      t1, 0xFFFFFFC000000000
     sub     t1, sp, t1
+    la      t2, g_pfa_ranges
+    ld      t2, 0(t2)
+    beqz    t2, .Lkf_restore
+    la      t3, g_pfa_nr_ranges
+    ld      t3, 0(t3)
+.Lkf_range_walk:
+    beqz    t3, .Lkf_restore
+    ld      t4, 0(t2)
+    bltu    t1, t4, .Lkf_range_next
+    ld      t6, 8(t2)
+    bgeu    t1, t6, .Lkf_range_next
+    sub     t1, t1, t4
     srli    t1, t1, 12
+    lwu     t4, 16(t2)
+    add     t1, t1, t4
     srli    t2, t1, 3
     add     t0, t0, t2
     andi    t1, t1, 7
@@ -302,17 +333,26 @@ __trap_from_kernel:
     srl     t2, t2, t1
     andi    t2, t2, 1
     bnez    t2, .Lkf_sp_bad
-    j       .Lkf_sp_good
+    j       .Lkf_restore
+.Lkf_range_next:
+    addi    t2, t2, 24
+    addi    t3, t3, -1
+    j       .Lkf_range_walk
 .Lkf_sp_bad:
-    ld      a0, 0(t5)
+    ld      a0, 16(tp)
     csrr    a1, sstatus
     csrr    a2, sepc
     csrr    a3, stval
     la      sp, __trap_emerg_top
     call    trap_sp_corrupted_report
-.Lkf_sp_good:
-    ld      t6, 8(t5)
-    ld      t5, 0(t5)
+.Lkf_restore:
+    ld      t0, 24(tp)
+    ld      t1, 32(tp)
+    ld      t2, 40(tp)
+    ld      t3, 48(tp)
+    ld      t4, 56(tp)
+    ld      t6, 64(tp)
+.Lkf_done:
 #endif
 
     /* No stack swap - already on kernel stack */
@@ -398,8 +438,3 @@ arch_return_to_user:
     .globl __trap_emerg_top
 __trap_emerg_top:
     .space 512
-
-/* Guard stash: bad sp + original t6 across the range check. */
-    .align 8
-.Lkf_sp_stash:
-    .space 16
