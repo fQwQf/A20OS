@@ -9,11 +9,24 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ghcr 镜像名必须全小写，而 github.repository_owner 可能含大写（如 fQwQf）。
+  # container.image 在 job 启动前解析，用不了步骤内的 shell，因此先在此
+  # 算出小写镜像名，供下方所有 job 的 container 引用。
+  buildenv-image:
+    name: resolve-buildenv-image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    steps:
+      - id: resolve
+        run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+
   build:
     name: build-${{ matrix.arch }}
+    needs: buildenv-image
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/${{ github.repository_owner }}/a20os-buildenv:latest
+      image: ${{ needs.buildenv-image.outputs.image }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -43,16 +56,6 @@ jobs:
       - name: Compose base image from the package repository
         run: make ARCH=${{ matrix.arch }} image-world PKG_WORLD=base PKG_ALPINE=0
 
-      - name: QEMU smoke (riscv64 only; TCG, no KVM)
-        if: matrix.arch == 'riscv64'
-        run: make smoke-riscv64
-        timeout-minutes: 20
-
-      - name: Guest regression: Alpine gcc toolchain via chroot
-        if: matrix.arch == 'riscv64'
-        run: make smoke-devtools
-        timeout-minutes: 20
-
       - uses: actions/upload-artifact@v4
         with:
           name: a20os-${{ matrix.arch }}
@@ -61,4 +64,69 @@ jobs:
             build/images/*.img
             build/repo/${{ matrix.arch }}/
           if-no-files-found: error
+          retention-days: 14
+
+  # QEMU 冒烟门禁（riscv64，TCG）：PR 与主干同一标准，套件对应
+  # docs/testing-gates.md 的核心 runtime 门禁（bring-up、Linux ABI syscall、
+  # 调度/进程/futex/MM/VFS 压力、SMP），最后跑需要网络与包仓库的
+  # smoke-devtools（Alpine gcc 在 guest 内编译运行）。
+  # 各 make 目标自带的 dev-build 增量复用同一构建目录与 ccache。
+  smoke:
+    name: smoke-riscv64
+    needs: buildenv-image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.buildenv-image.outputs.image }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust workspace ownership (container runs as root)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: build/cache/ccache
+          key: ccache-smoke-riscv64-${{ github.sha }}
+          restore-keys: |
+            ccache-smoke-riscv64-
+            ccache-riscv64-
+
+      - name: Build kernel + userland (both-ABI dev, feeds pkg-repo & smoke-devtools)
+        run: make ARCH=riscv64 dev-build
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
+      - name: Package build outputs as .apk and index the repo
+        run: make ARCH=riscv64 pkg-repo
+
+      - name: QEMU smoke gates
+        run: |
+          make smoke-riscv64
+          make smoke-abi-linux
+          make smoke-syscall-ext
+          make smoke-sched-stress
+          make smoke-proc-stress
+          make smoke-futex-stress
+          make smoke-mm-stress
+          make smoke-vfs-stress
+          make smoke-smp-bringup
+        timeout-minutes: 60
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
+      - name: "Guest regression: Alpine gcc toolchain via chroot"
+        run: make smoke-devtools
+        timeout-minutes: 20
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-riscv64-logs
+          path: .kernel-build/smoke/
+          if-no-files-found: ignore
           retention-days: 14
