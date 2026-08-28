@@ -77,10 +77,10 @@ int64_t sys_a20_system_info(const a20_syscall_args_t *args)
     memset(&info, 0, sizeof(info));
     info.size = sizeof(info);
     info.struct_version = 2;
-    strncpy(info.sysname, "A20OS", sizeof(info.sysname));
-    strncpy(info.nodename, "a20", sizeof(info.nodename));
-    strncpy(info.release, VERSION, sizeof(info.release));
-    strncpy(info.version, "Native ABI", sizeof(info.version));
+    strncpy(info.sysname, A20OS_SYSNAME, sizeof(info.sysname));
+    strncpy(info.nodename, A20OS_NODENAME, sizeof(info.nodename));
+    strncpy(info.release, A20OS_VERSION, sizeof(info.release));
+    strncpy(info.version, A20OS_VERSION_FULL, sizeof(info.version));
     strncpy(info.machine, ARCH_NAME, sizeof(info.machine));
     info.total_ram = (uint64_t)pfa.total_frames * 4096;
     info.free_ram = (uint64_t)pfa.free_frames * 4096;
