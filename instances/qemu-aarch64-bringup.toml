@@ -1,0 +1,8 @@
+# Kernel-only aarch64 bring-up (no rootfs image).
+# Replaces: make ARCH=aarch64 BRINGUP=1 run
+name = "qemu-aarch64-bringup"
+description = "aarch64 kernel-only bring-up without filesystem images"
+arch = "aarch64"
+
+[kernel]
+bringup = true

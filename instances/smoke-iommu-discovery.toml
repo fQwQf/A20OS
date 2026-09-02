@@ -1,0 +1,19 @@
+# RISC-V IOMMU discovery smoke: standard dev boot plus a riscv-iommu PCI
+# device; the kernel must initialize it, verify a translation domain, and
+# fault an unmapped IOVA before power-off.
+name = "smoke-iommu-discovery"
+description = "RISC-V 64 IOMMU discovery smoke (riscv-iommu-pci)"
+arch = "riscv64"
+abi = "both"
+
+[machine]
+extra_qemu = ["-device", "riscv-iommu-pci,bus=pcie.0"]
+
+[test]
+commands = ["poweroff"]
+expect = [
+    "[IOMMU] hardware initialized",
+    "translation domain verified",
+    "unmapped iova=0x20000000 -> fault=1",
+    "System is going down for power-off",
+]

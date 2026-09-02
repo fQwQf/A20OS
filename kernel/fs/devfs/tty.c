@@ -70,9 +70,141 @@ typedef struct {
     int kbmode;      /* K_XLATE / K_RAW — keyboard mode of the console */
     int kdmode;      /* KD_TEXT / KD_GRAPHICS — display mode of the console */
     int vt_process;  /* VT mode: 0 = VT_AUTO, 1 = VT_PROCESS */
+    /* xterm mouse protocol state */
+    uint8_t  mouse_enabled;   /* bit 0: 1000h (X10), bit 1: 1002h (btn), bit 2: 1003h (any) */
+    uint8_t  mouse_sgr;       /* 1 = SGR mode (1006h), 0 = X10 default */
+    int32_t  mouse_x;         /* accumulated absolute X (pixels) */
+    int32_t  mouse_y;         /* accumulated absolute Y (pixels) */
+    uint8_t  mouse_btn;       /* current button state (bitmask: bit0=L, bit1=R, bit2=M) */
+    /* ring buffer for mouse escape sequence bytes pending on stdin */
+    uint8_t  mouse_buf[128];
+    int      mouse_head;
+    int      mouse_tail;
 } tty_state_t;
 
 static tty_state_t g_dev_tty;
+
+/* ---- mouse escape-sequence ring buffer helpers ---- */
+
+static int mouse_buf_empty(void)
+{
+    return g_dev_tty.mouse_head == g_dev_tty.mouse_tail;
+}
+
+static void mouse_buf_push_byte(uint8_t b)
+{
+    int next = (g_dev_tty.mouse_head + 1) % (int)sizeof(g_dev_tty.mouse_buf);
+    if (next == g_dev_tty.mouse_tail)
+        return; /* full — drop */
+    g_dev_tty.mouse_buf[g_dev_tty.mouse_head] = b;
+    g_dev_tty.mouse_head = next;
+}
+
+static int mouse_buf_pop_byte(void)
+{
+    if (mouse_buf_empty())
+        return -1;
+    uint8_t b = g_dev_tty.mouse_buf[g_dev_tty.mouse_tail];
+    g_dev_tty.mouse_tail = (g_dev_tty.mouse_tail + 1) % (int)sizeof(g_dev_tty.mouse_buf);
+    return b;
+}
+
+/*
+ * Append a decimal integer to the mouse byte buffer as ASCII digits.
+ * Used to encode row/column values in SGR mouse sequences.
+ */
+static void mouse_buf_push_int(int val)
+{
+    char tmp[12];
+    int len = 0;
+    if (val < 0) { mouse_buf_push_byte('-'); val = -val; }
+    if (val == 0) { mouse_buf_push_byte('0'); return; }
+    while (val > 0 && len < (int)sizeof(tmp)) {
+        tmp[len++] = '0' + (val % 10);
+        val /= 10;
+    }
+    for (int i = len - 1; i >= 0; i--)
+        mouse_buf_push_byte((uint8_t)tmp[i]);
+}
+
+int tty_mouse_mode_active(void)
+{
+    return g_dev_tty.mouse_enabled != 0;
+}
+
+void tty_push_mouse_event(uint16_t type, uint16_t code, int32_t value)
+{
+    if (!g_dev_tty.mouse_enabled)
+        return;
+
+    if (type == 0x02 /* EV_REL */) {
+        if (code == 0 /* REL_X */)
+            g_dev_tty.mouse_x += value;
+        else if (code == 1 /* REL_Y */)
+            g_dev_tty.mouse_y += value;
+        else if (code == 8 /* REL_WHEEL */) {
+            /* wheel: encode as button 64/65 up/down */
+            int btn = value > 0 ? 64 : 65;
+            int col = g_dev_tty.mouse_x;
+            int row = g_dev_tty.mouse_y;
+            if (col < 0) col = 0;
+            if (row < 0) row = 0;
+            if (g_dev_tty.mouse_sgr) {
+                mouse_buf_push_byte('\033');
+                mouse_buf_push_byte('[');
+                mouse_buf_push_byte('<');
+                mouse_buf_push_int(btn);
+                mouse_buf_push_byte(';');
+                mouse_buf_push_int(col + 1);
+                mouse_buf_push_byte(';');
+                mouse_buf_push_int(row + 1);
+                mouse_buf_push_byte('M');
+            }
+        }
+        return;
+    }
+
+    if (type == 0x01 /* EV_KEY */) {
+        uint32_t btn_code = code;
+        int pressed = value != 0;
+        int btn;
+        if (btn_code == 0x110 /* BTN_LEFT */)   btn = 0;
+        else if (btn_code == 0x111 /* BTN_RIGHT */)  btn = 1;
+        else if (btn_code == 0x112 /* BTN_MIDDLE */) btn = 2;
+        else return;
+
+        if (pressed)
+            g_dev_tty.mouse_btn |= (1u << btn);
+        else
+            g_dev_tty.mouse_btn &= ~(1u << btn);
+
+        int col = g_dev_tty.mouse_x;
+        int row = g_dev_tty.mouse_y;
+        if (col < 0) col = 0;
+        if (row < 0) row = 0;
+
+        if (g_dev_tty.mouse_sgr) {
+            /* SGR: \033[<button;col;rowM (press) or \033[<button;col;rowm (release) */
+            mouse_buf_push_byte('\033');
+            mouse_buf_push_byte('[');
+            mouse_buf_push_byte('<');
+            mouse_buf_push_int(btn + g_dev_tty.mouse_btn);
+            mouse_buf_push_byte(';');
+            mouse_buf_push_int(col + 1);
+            mouse_buf_push_byte(';');
+            mouse_buf_push_int(row + 1);
+            mouse_buf_push_byte(pressed ? 'M' : 'm');
+        } else {
+            /* X10 legacy: \033[M<btn+32><col+32><row+32> */
+            mouse_buf_push_byte('\033');
+            mouse_buf_push_byte('[');
+            mouse_buf_push_byte('M');
+            mouse_buf_push_byte((uint8_t)(btn + 32));
+            mouse_buf_push_byte((uint8_t)(col + 1 + 32));
+            mouse_buf_push_byte((uint8_t)(row + 1 + 32));
+        }
+    }
+}
 
 static void fill_default_termios(ktty_termios_t *tio) {
     memset(tio, 0, sizeof(*tio));
@@ -98,6 +230,7 @@ static void fill_default_termios(ktty_termios_t *tio) {
 
 void tty_console_init(void) {
     tty_state_t *tty = &g_dev_tty;
+    memset(tty, 0, sizeof(*tty));
     fill_default_termios(&tty->termios);
     tty->winsize.ws_row = 24;
     tty->winsize.ws_col = 80;
@@ -111,6 +244,18 @@ void tty_console_init(void) {
 int tty_console_read(vfile_t *vf, char *buf, size_t count) {
     (void)vf;
     if (count == 0) return 0;
+
+    /* drain pending mouse escape-sequence bytes first */
+    if (g_dev_tty.mouse_enabled && !mouse_buf_empty()) {
+        size_t i = 0;
+        while (i < count && !mouse_buf_empty()) {
+            int b = mouse_buf_pop_byte();
+            if (b < 0) break;
+            buf[i++] = (char)b;
+        }
+        return (int)i;
+    }
+
     int c = uart_getc();
     if (c < 0) return 0;
     if (c == '\r') c = '\n';
@@ -200,10 +345,47 @@ static void tty_buffer_pending_char(int pid, char c) {
     b->data[b->len++] = c;
 }
 
+/*
+ * Scan a console write buffer for xterm private-mode escape sequences
+ * ("\033[?NNNh" / "\033[?NNNl") that enable/disable mouse tracking.
+ * Returns 1 if mouse mode was toggled, 0 otherwise.
+ */
+static int tty_parse_mouse_mode(const char *buf, size_t count)
+{
+    for (size_t i = 0; i + 4 < count; i++) {
+        if (buf[i] != '\033' || buf[i+1] != '[' || buf[i+2] != '?')
+            continue;
+        size_t j = i + 3;
+        int num = 0;
+        int digits = 0;
+        while (j < count && buf[j] >= '0' && buf[j] <= '9' && digits < 6) {
+            num = num * 10 + (buf[j] - '0');
+            digits++;
+            j++;
+        }
+        if (digits == 0 || j >= count)
+            continue;
+        char mode = buf[j];
+        if (mode == 'h' || mode == 'l') {
+            int enable = (mode == 'h');
+            switch (num) {
+            case 1000: g_dev_tty.mouse_enabled = enable ? 1 : 0; break;
+            case 1002: g_dev_tty.mouse_enabled = enable ? 2 : 0; break;
+            case 1003: g_dev_tty.mouse_enabled = enable ? 4 : 0; break;
+            case 1006: g_dev_tty.mouse_sgr = enable ? 1 : 0; break;
+            }
+        }
+    }
+    return 0;
+}
+
 int tty_console_write(vfile_t *vf, const char *buf, size_t count) {
     (void)vf;
     task_t *t = proc_current();
     int pid = t ? t->pid : -1;
+
+    tty_parse_mouse_mode(buf, count);
+
     mutex_lock(&g_tty_write_lock);
     tty_release_dead_owner_locked();
     for (size_t i = 0; i < count; i++) {

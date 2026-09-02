@@ -9,6 +9,7 @@
 ```bash
 make debug-riscv64
 # 也可替换为 debug-loongarch64 / debug-arm64 / debug-x86_64 / debug-arm32 / debug-riscv32 / debug-ppc64le
+# 这些目标是实例系统的薄包装；等价的实例写法：tools/a20 debug qemu-riscv64（见 instances.md）
 ```
 
 在另一个终端启动 GDB：

@@ -1,0 +1,134 @@
+# Loadable driver component registry (.a20drv packages).
+#
+# This file is the single source of truth for which loadable drivers exist,
+# which architectures each supports, and which ones are embedded into the
+# kernel root ramfs (early DriverStore, owning the boot disk).  `make
+# check-component-registry` cross-checks it against the build lists in
+# tools/driver-modules.mk; instances select runtime drivers by name through
+# [rootfs].drivers (see docs/instances.md).
+
+[[driver]]
+name = "rtc"
+source = "kernel/drvmod/examples/goldfish_rtc.c"
+arches = ["riscv64", "aarch64", "loongarch64"]
+early_arches = ["riscv64", "aarch64", "loongarch64"]
+description = "Goldfish RTC clock"
+
+[[driver]]
+name = "virtio-blk"
+source = "kernel/drvmod/examples/virtio_blk.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+early_arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio block device (boot disk candidate)"
+
+[[driver]]
+name = "virtio-scsi"
+source = "kernel/drvmod/examples/virtio_scsi.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+early_arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio SCSI host (boot disk candidate)"
+
+[[driver]]
+name = "dw-sdio"
+source = "kernel/drvmod/examples/dw_sdio.c"
+arches = ["riscv64"]
+early_arches = ["riscv64"]
+description = "DesignWare SDIO (VisionFive 2 SD card, boot disk candidate)"
+
+[[driver]]
+name = "ahci"
+source = "kernel/drvmod/examples/ahci.c"
+arches = ["x86_64"]
+early_arches = ["x86_64"]
+description = "AHCI SATA (boot disk candidate)"
+
+[[driver]]
+name = "pc-spkr"
+source = "kernel/drvmod/examples/pc_spkr.c"
+arches = ["x86_64"]
+early_arches = ["x86_64"]
+description = "PC speaker"
+
+[[driver]]
+name = "virtio-net"
+source = "kernel/drvmod/examples/virtio_net.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio network device"
+
+[[driver]]
+name = "virtio-gpu"
+source = "kernel/drvmod/examples/virtio_gpu.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio GPU"
+
+[[driver]]
+name = "virtio-snd"
+source = "kernel/drvmod/examples/virtio_snd.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio sound device"
+
+[[driver]]
+name = "vinput"
+source = "kernel/drvmod/examples/vinput.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio input (keyboard/mouse)"
+
+[[driver]]
+name = "vinput-probe"
+source = "kernel/drvmod/examples/vinput_probe.c"
+arches = ["riscv64", "aarch64"]
+description = "virtio input prober"
+
+[[driver]]
+name = "hda"
+source = "kernel/drvmod/examples/hda.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "Intel HDA audio"
+
+[[driver]]
+name = "nvme"
+source = "kernel/drvmod/examples/nvme.c"
+arches = ["x86_64", "loongarch64"]
+description = "NVMe block device"
+
+[[driver]]
+name = "ps2"
+source = "kernel/drvmod/examples/ps2.c"
+arches = ["x86_64"]
+description = "PS/2 keyboard/mouse controller"
+
+[[driver]]
+name = "tpm"
+source = "kernel/drvmod/examples/tpm.c"
+arches = ["x86_64"]
+description = "TPM device"
+
+[[driver]]
+name = "e1000"
+source = "kernel/drvmod/examples/e1000.c"
+arches = ["x86_64"]
+description = "Intel e1000 NIC"
+
+[[driver]]
+name = "vmsvga"
+source = "kernel/drvmod/examples/vmsvga.c"
+arches = ["x86_64"]
+description = "VMware SVGA II GPU"
+
+[[driver]]
+name = "xhci"
+source = "kernel/drvmod/examples/xhci.c"
+arches = ["x86_64", "aarch64", "loongarch64"]
+description = "xHCI USB host controller"
+
+[[driver]]
+name = "usb-hid"
+source = "kernel/drvmod/examples/usb_hid.c"
+arches = ["x86_64", "aarch64", "loongarch64"]
+description = "USB HID class driver"
+
+[[driver]]
+name = "usb-storage"
+source = "kernel/drvmod/examples/usb_storage.c"
+arches = ["x86_64", "aarch64", "loongarch64"]
+description = "USB mass-storage class driver"

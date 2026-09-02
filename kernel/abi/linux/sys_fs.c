@@ -7,8 +7,12 @@
 #include "fs/pipe.h"
 #include "fs/readiness.h"
 #include "fs/vfs/file.h"
+#include "fs/devfs.h"
 #include "mm/slab.h"
 #include "proc/proc_internal.h"
+
+int g_fb_open_window_pid = -1;
+int g_fb_open_window_active = 0;
 
 #define LINUX_POLL_WAIT_TICKS (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
 #define LINUX_POLL_ACTIVE_YIELDS 2
@@ -521,10 +525,22 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
     if (pr < 0) {
         return pr;
     }
+    /* Trace opens of /dev/fb* (handles chroot prefix like /extra/dev/fb0) */
+    int _is_fb = 0;
+    for (int _i = 0; _i < MAX_PATH_LEN - 5 && full[_i]; _i++) {
+        if (full[_i] == 'd' && full[_i+1] == 'e' && full[_i+2] == 'v' &&
+            full[_i+3] == '/' && full[_i+4] == 'f' && full[_i+5] == 'b') {
+            _is_fb = 1; break;
+        }
+    }
     int gfd = vfs_open(full, flags, mode);
     if (gfd < 0) {
+        if (_is_fb)
+            printf("[SYS_OPENAT] FAIL path=%s gfd=%d flags=0x%x\n", full, (int)gfd, flags);
         return gfd;
     }
+    if (_is_fb)
+        printf("[SYS_OPENAT] OK path=%s gfd=%d flags=0x%x\n", full, (int)gfd, flags);
     env_kind_register(gfd, A20_OBJ_FILE);
     if (env_active(proc_current())) {
         /* openat acquisition mediation (05 §2.5.1 A1/A8): rights derive
@@ -563,15 +579,44 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
 
         int mr = env_mediate_acquire((uint8_t)A20_OBJ_FILE, rights, gfd);
         if (mr) {
+            if (_is_fb)
+                printf("[SYS_OPENAT] ENV_DENIED path=%s gfd=%d rights=0x%llx ret=%d\n",
+                       full, (int)gfd, (unsigned long long)rights, mr);
             vfs_close(gfd);
             return mr;
         }
     }
     task_t *t = proc_current();
-    return fdtable_install(t, gfd, flags);
+    int fd = fdtable_install(t, gfd, flags);
+    if (_is_fb) {
+        printf("[SYS_OPENAT] INSTALLED path=%s gfd=%d userfd=%d pid=%d\n",
+               full, (int)gfd, fd, t ? t->pid : -1);
+        /* Arm the catch-all window: next syscalls from this pid will be logged */
+        extern int g_fb_open_window_pid;
+        extern int g_fb_open_window_active;
+        if (t && fd >= 0) {
+            g_fb_open_window_pid = t->pid;
+            g_fb_open_window_active = 1;
+        }
+    }
+    return fd;
 }
 
 int64_t sys_close(int fd) {
+    int gfd = fdtable_get_current(fd);
+    int _is_fb = 0;
+    if (gfd >= 0) {
+        vfile_t *_vf = vfs_get_file_ref(gfd);
+        if (_vf && _vf->ops == &g_devfs_fb_ops) _is_fb = 1;
+        if (_vf) vfs_put_file_ref(gfd, _vf);
+    }
+    if (_is_fb) {
+        task_t *cur = proc_current();
+        printf("[SYS_CLOSE] fb fd=%d gfd=%d pid=%d name=%s\n",
+               fd, gfd, cur ? cur->pid : -1, cur ? cur->name : "?");
+        g_fb_open_window_active = 0;
+        g_fb_open_window_pid = -1;
+    }
     int64_t r = fdtable_close_current(fd);
     ktrace_syscall("[SYS] close: fd=%d ret=%ld\n", fd, (long)r);
     return r;
@@ -580,6 +625,16 @@ int64_t sys_close(int fd) {
 int64_t sys_lseek(int fd, long offset, int whence) {
     int gfd = fdtable_get_current(fd);
     if (gfd < 0) return -EBADF;
+    int _is_fb = 0;
+    vfile_t *_vf = vfs_get_file_ref(gfd);
+    if (_vf && _vf->ops == &g_devfs_fb_ops) _is_fb = 1;
+    if (_vf) vfs_put_file_ref(gfd, _vf);
+    if (_is_fb) {
+        task_t *cur = proc_current();
+        printf("[SYS_LSEEK] fb fd=%d gfd=%d off=%ld whence=%d pid=%d name=%s\n",
+               fd, gfd, (long)offset, whence,
+               cur ? cur->pid : -1, cur ? cur->name : "?");
+    }
     return vfs_lseek(gfd, offset, whence);
 }
 
@@ -673,6 +728,15 @@ int64_t sys_pipe2(int *pipefd, int flags) {
 int64_t sys_ioctl(int fd, unsigned long req, void *arg) {
     int64_t gfd = fdtable_get_current(fd);
     if (gfd < 0) return gfd;
+    vfile_t *_vf = vfs_get_file_ref((int)gfd);
+    int _is_fb = (_vf && _vf->ops == &g_devfs_fb_ops);
+    if (_vf) vfs_put_file_ref((int)gfd, _vf);
+    if (_is_fb || ((req & 0xff00) == 0x4600)) {
+        task_t *cur = proc_current();
+        printf("[SYSCALL] ioctl fd=%d gfd=%ld req=0x%lx is_fb=%d pid=%d name=%s\n",
+               fd, gfd, (unsigned long)req, _is_fb,
+               cur ? cur->pid : -1, cur ? cur->name : "?");
+    }
     return sys_ioctl_gfd(gfd, req, arg);
 }
 

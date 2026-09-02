@@ -1,0 +1,16 @@
+# 普中玄武 STM32F103ZET6 固件（512 KiB Flash / 64 KiB SRAM），支持 OpenOCD 烧录。
+# Replaces: make stm32f103-xuanwu / make flash-stm32f103-xuanwu
+name = "stm32f103-xuanwu"
+description = "Xuanwu STM32F103ZET6 firmware + OpenOCD flashing"
+arch = "armv7m"
+
+[stm32]
+flash_kb = 512
+ram_kb = 64
+xuanwu = true
+
+[flash]
+tool = "openocd"
+interface = "interface/cmsis-dap.cfg"
+transport = "swd"
+adapter_khz = 1000

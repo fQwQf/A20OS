@@ -46,6 +46,13 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
             vfs_put_file_ref(gfd, vf);
             gfd = -1;
         } else {
+            int _is_fb = (vf->ops == &g_devfs_fb_ops);
+            if (_is_fb) {
+                task_t *cur = proc_current();
+                printf("[SYS_MMAP] fb fd=%d gfd=%d len=%zu prot=%d flags=0x%x pid=%d name=%s\n",
+                       fd, gfd, len, prot, flags,
+                       cur ? cur->pid : -1, cur ? cur->name : "?");
+            }
             int acc = vf->flags & 3;
             if (acc == 1) { // O_WRONLY
                 vfs_put_file_ref(gfd, vf);

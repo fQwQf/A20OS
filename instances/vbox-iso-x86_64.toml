@@ -1,0 +1,9 @@
+# VirtualBox x86_64 GRUB ISO 镜像。
+# Replaces: make vbox-iso-x86_64
+name = "vbox-iso-x86_64"
+description = "VirtualBox x86_64 GRUB ISO image"
+arch = "x86_64"
+abi = "both"
+
+[package]
+kind = "grub-iso"

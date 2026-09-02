@@ -73,7 +73,20 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 ```bash
 # RISC-V 64 开发镜像并在 QEMU 中运行
 make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
+```
 
+也可以用**实例化入口**：`instances/` 下的 TOML 文件声明完整配置，`tools/a20` 负责校验与执行（下面的 `run-*`/`debug-*`/`smoke-*` make 目标都已是它的薄包装）：
+```bash
+tools/a20 list                     # 列出所有预定义实例
+tools/a20 run qemu-riscv64         # 等价于 make ARCH=riscv64 run
+tools/a20 run qemu-x86_64-gui      # GUI 实例
+tools/a20 debug qemu-riscv64       # GDB 调试实例
+tools/a20 test smoke-riscv64       # 冒烟测试实例
+```
+实例字段参考、组件注册表与门禁详见 [docs/instances.md](docs/instances.md)。
+
+其他架构：
+```bash
 # 构建其他架构 (例: aarch64)
 make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
 
