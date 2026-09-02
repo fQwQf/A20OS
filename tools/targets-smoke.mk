@@ -1,25 +1,6 @@
+# Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
 smoke-riscv64:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/riscv64-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-riscv64: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-riscv64: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-riscv64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit "$$status"; \
-	fi
+	tools/a20 test smoke-riscv64
 
 check-a20-idl: user/svc/a20_services_idl.h
 	@tmp="$$(mktemp)"; \
@@ -29,30 +10,9 @@ check-a20-idl: user/svc/a20_services_idl.h
 		echo "check-a20-idl: generated header is stale"; exit 1; }; \
 	echo "check-a20-idl: PASS"
 
+# Thin wrapper: the smoke definition lives in instances/smoke-iommu-discovery.toml.
 smoke-iommu-discovery:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/iommu-discovery-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-device riscv-iommu-pci,bus=pcie.0 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[IOMMU\] hardware initialized' "$$log" && \
-	   grep -q 'translation domain verified' "$$log" && \
-	   grep -q 'unmapped iova=0x20000000 -> fault=1' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-iommu-discovery: PASS (hardware initialized, translation verified); log saved to $$log"; \
-	else \
-		echo "smoke-iommu-discovery: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	tools/a20 test smoke-iommu-discovery
 
 smoke-iommu-udriver-isolation:
 	$(MAKE) -j1 ARCH=riscv64 ABI=both BRINGUP=0 PROFILE=benchmark dev-build
@@ -82,72 +42,17 @@ smoke-iommu-udriver-isolation:
 		tail -n 120 "$$log"; exit 1; \
 	fi
 
+# Thin wrapper: the smoke definition lives in instances/smoke-loongarch64.toml.
 smoke-loongarch64:
-	$(MAKE) ARCH=loongarch64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/loongarch64-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
-		-machine virt -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-linux-bringup/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-loongarch64: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-loongarch64: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-loongarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit "$$status"; \
-	fi
+	tools/a20 test smoke-loongarch64
 
+# Thin wrapper: the smoke definition lives in instances/smoke-aarch64.toml.
 smoke-aarch64:
-	$(MAKE) ARCH=aarch64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/aarch64-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
-		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-bringup/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-aarch64: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-aarch64: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-aarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit "$$status"; \
-	fi
+	tools/a20 test smoke-aarch64
 
+# Thin wrapper: the smoke definition lives in instances/smoke-x86_64.toml.
 smoke-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/x86_64-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-bringup/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-x86_64: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-x86_64: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-x86_64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit "$$status"; \
-	fi
+	tools/a20 test smoke-x86_64
 
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
@@ -237,50 +142,13 @@ smoke-qemu-gui-loongarch64:
 		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 \
 		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
+# Thin wrapper: the smoke definition lives in instances/smoke-arm32.toml.
 smoke-arm32:
-	$(MAKE) ARCH=arm32 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/arm32-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-arm \
-		-machine virt -cpu cortex-a15 -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/arm32-qemu-virt-arm32-linux-bringup-embedded/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-arm32: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-arm32: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-arm32: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	tools/a20 test smoke-arm32
 
+# Thin wrapper: the smoke definition lives in instances/smoke-riscv32.toml.
 smoke-riscv32:
-	$(MAKE) ARCH=riscv32 ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/riscv32-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv32 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv32-qemu-virt-riscv32-linux-bringup-embedded/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-riscv32: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-riscv32: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-riscv32: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	tools/a20 test smoke-riscv32
 
 smoke-arch-mmu-matrix:
 	@set -e; \
@@ -328,54 +196,13 @@ smoke-arch-mmu-matrix:
 		echo "smoke-arch-mmu-matrix: $$variant PASS"; \
 	done
 
+# Thin wrapper: the smoke definition lives in instances/smoke-ppc64le.toml.
 smoke-ppc64le:
-	$(MAKE) ARCH=ppc64le ABI=linux BRINGUP=1 USER_BUILD_DESKTOP=0 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/ppc64le-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-ppc64 \
-		-machine pseries -m 1G -nographic -smp 1 \
-		-kernel .kernel-build/ppc64le-qemu-virt-ppc64le-linux-bringup-embedded/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-ppc64le: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-ppc64le: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-ppc64le: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	tools/a20 test smoke-ppc64le
 
+# Thin wrapper: the smoke definition lives in instances/smoke-abi-linux.toml.
 smoke-abi-linux:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/abi-linux-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'syscall_smoke\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'SYSCALL_SMOKE: PASS' "$$log"; then \
-			echo "smoke-abi-linux: PASS; log saved to $$log"; \
-		elif [ "$$status" -eq 124 ]; then \
-			echo "smoke-abi-linux: timeout without PASS; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit 1; \
-	else \
-		echo "smoke-abi-linux: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	tools/a20 test smoke-abi-linux
 
 smoke-envelope:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build

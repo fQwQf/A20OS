@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
+"""a20 — declarative instance runner for A20OS.
+
+Reads an instance manifest (TOML under instances/), validates it, derives
+the corresponding Makefile variables, and delegates execution to make. The
+Makefile remains the build engine; this tool owns configuration derivation.
+See docs/instances.md for the manifest reference.
+
+# ─── How to run ───
+#   tools/a20 check                        validate every instances/*.toml
+#   tools/a20 check-registry               validate components/drivers.toml
+#   tools/a20 list                         list known instances
+#   tools/a20 show-vars qemu-riscv64       print derived make variables
+#   tools/a20 build   qemu-riscv64         make <vars> dev-build|kernel-only
+#   tools/a20 run     qemu-riscv64-gui     build + boot in QEMU
+#   tools/a20 debug   qemu-riscv64         build -O0 -g + qemu -S -s (GDB)
+#   tools/a20 test    smoke-riscv64        build, boot, inject commands, grep log
+#   tools/a20 flash   stm32f103-xuanwu     build firmware + OpenOCD flash
+#   tools/a20 package vbox-iso-x86_64      build + assemble a release artifact
+# Extra arguments after `--` are passed to make verbatim, e.g.
+#   tools/a20 build qemu-riscv64 -- -j8
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+from typing import assert_never
+
+from a20_board import run_flash, run_package
+from a20_derive import derive_make_vars
+from a20_instance import (
+    QEMU_RUNNABLE_ARCHES,
+    Instance,
+    InstanceError,
+    parse_instance,
+)
+from a20_make import REPO_ROOT, build_instance, exec_make
+from a20_registry import (
+    DriverComponent,
+    RegistryError,
+    cross_check_make,
+    load_registry,
+    validate_driver_selection,
+    validate_registry,
+)
+from a20_test import run_test
+from a20_validate import validate_instance
+
+INSTANCES_DIR = REPO_ROOT / "instances"
+
+
+def _resolve(arg: str) -> Path:
+    """Accept either a manifest path or an instance name from instances/."""
+    p = Path(arg)
+    if p.is_file():
+        return p
+    candidate = INSTANCES_DIR / f"{arg}.toml"
+    if candidate.is_file():
+        return candidate
+    raise SystemExit(f"error: no such instance '{arg}' (tried {arg} and {candidate})")
+
+
+def _load_registry() -> tuple[DriverComponent, ...]:
+    try:
+        entries = load_registry(REPO_ROOT)
+    except RegistryError as e:
+        raise SystemExit(f"error: component registry:\n{e}") from None
+    errors = validate_registry(entries, REPO_ROOT)
+    if errors:
+        listing = "\n".join(f"  - {err}" for err in errors)
+        raise SystemExit(f"error: component registry:\n{listing}")
+    return entries
+
+
+def _load(arg: str) -> Instance:
+    path = _resolve(arg)
+    try:
+        inst = parse_instance(path)
+    except InstanceError as e:
+        raise SystemExit(f"error: {path}:\n{e}") from None
+    errors = validate_instance(inst, REPO_ROOT)
+    if inst.rootfs.drivers is not None:
+        errors = errors + validate_driver_selection(inst, _load_registry())
+    if errors:
+        listing = "\n".join(f"  - {e}" for e in errors)
+        raise SystemExit(f"error: {path}:\n{listing}")
+    return inst
+
+
+def _check_runnable(inst: Instance, action: str) -> None:
+    if inst.arch not in QEMU_RUNNABLE_ARCHES:
+        raise SystemExit(
+            f"error: '{action}' has no generic QEMU path for {inst.arch} "
+            "(armv7m uses tools/stm32.mk, loongarch32 uses the cemu simulator)"
+        )
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    return build_instance(_load(args.instance), list(args.make_args), args.dry_run)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    inst = _load(args.instance)
+    if inst.arch == "armv7m":
+        if not inst.stm32.qemu:
+            raise SystemExit(
+                f"error: {inst.source}: armv7m has no generic QEMU path; "
+                "set [stm32] qemu = true to run on the stm32vldiscovery machine"
+            )
+        build_rc = build_instance(inst, list(args.make_args), args.dry_run)
+        if build_rc != 0:
+            return build_rc
+        return exec_make(inst, "run-stm32f103-qemu-impl", [], args.dry_run)
+    _check_runnable(inst, "run")
+    target = "_run_gui_impl" if inst.gui.enabled else "_run_impl"
+    return exec_make(inst, target, list(args.make_args), args.dry_run)
+
+
+def cmd_debug(args: argparse.Namespace) -> int:
+    inst = _load(args.instance)
+    _check_runnable(inst, "debug")
+    return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
+
+
+def cmd_test(args: argparse.Namespace) -> int:
+    inst = _load(args.instance)
+    _check_runnable(inst, "test")
+    return run_test(inst, list(args.make_args), args.dry_run)
+
+
+def cmd_flash(args: argparse.Namespace) -> int:
+    return run_flash(_load(args.instance), list(args.make_args), args.dry_run)
+
+
+def cmd_package(args: argparse.Namespace) -> int:
+    return run_package(_load(args.instance), list(args.make_args), args.dry_run)
+
+
+def cmd_show_vars(args: argparse.Namespace) -> int:
+    for var in derive_make_vars(_load(args.instance)):
+        print(var)
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    paths = sorted(INSTANCES_DIR.glob("*.toml"))
+    if not paths:
+        print(f"no instances found in {INSTANCES_DIR}")
+        return 0
+    for path in paths:
+        try:
+            inst = parse_instance(path)
+            errors = validate_instance(inst, REPO_ROOT)
+        except InstanceError as e:
+            print(f"{path.stem:<28} INVALID\n{e}")
+            continue
+        mode = "gui" if inst.gui.enabled else "text"
+        status = "ok" if not errors else f"{len(errors)} error(s)"
+        print(f"{inst.name:<28} {inst.arch:<12} {mode:<5} {status:<12} {inst.description or ''}")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    paths = [_resolve(a) for a in args.instances] or sorted(INSTANCES_DIR.glob("*.toml"))
+    failed = 0
+    covered_arches: set[str] = set()
+    registry: tuple[DriverComponent, ...] | None = None
+    for path in paths:
+        try:
+            inst = parse_instance(path)
+            errors = validate_instance(inst, REPO_ROOT)
+        except InstanceError as e:
+            print(f"FAIL {path.name}:\n{e}")
+            failed += 1
+            continue
+        if inst.rootfs.drivers is not None:
+            if registry is None:
+                registry = _load_registry()
+            errors = errors + validate_driver_selection(inst, registry)
+        if errors:
+            listing = "\n".join(f"  - {e}" for e in errors)
+            print(f"FAIL {path.name}:\n{listing}")
+            failed += 1
+        else:
+            print(f"OK   {path.name}")
+            covered_arches.add(inst.arch)
+    for arch in args.require_arch:
+        if arch not in covered_arches:
+            print(f"FAIL matrix: no valid instance covers required arch '{arch}'")
+            failed += 1
+    if failed:
+        print(f"check: {failed} failure(s) across {len(paths)} instance(s)")
+        return 1
+    print(f"check: {len(paths)} instance(s) OK")
+    return 0
+
+
+def cmd_check_registry(_args: argparse.Namespace) -> int:
+    """Validate the component registry and cross-check it against the Makefile."""
+    try:
+        entries = load_registry(REPO_ROOT)
+    except RegistryError as e:
+        print(f"FAIL components/drivers.toml:\n{e}")
+        return 1
+    errors = validate_registry(entries, REPO_ROOT) + cross_check_make(entries, REPO_ROOT)
+    if errors:
+        listing = "\n".join(f"  - {e}" for e in errors)
+        print(f"FAIL components/drivers.toml:\n{listing}")
+        return 1
+    print(f"check-registry: {len(entries)} driver component(s) OK, Makefile lists in sync")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="a20",
+        description="Declarative instance runner for A20OS (see docs/instances.md).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_instance_cmd(name: str, help_text: str, with_make_args: bool) -> argparse.ArgumentParser:
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("instance", help="instance name from instances/ or path to a TOML manifest")
+        if with_make_args:
+            p.add_argument("--dry-run", action="store_true",
+                           help="print the make/QEMU command instead of executing it")
+        return p
+
+    p_check = sub.add_parser("check", help="validate instance manifests")
+    p_check.add_argument("instances", nargs="*", help="manifests to check (default: all)")
+    p_check.add_argument("--require-arch", nargs="*", default=(), metavar="ARCH",
+                         help="fail unless every listed arch is covered by a valid instance")
+    sub.add_parser("check-registry", help="validate components/drivers.toml against the Makefile")
+    sub.add_parser("list", help="list known instances")
+    add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
+    add_instance_cmd("build", "build the instance image", with_make_args=True)
+    add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
+    add_instance_cmd("debug", "build with -O0 -g and boot under QEMU GDB stub", with_make_args=True)
+    add_instance_cmd("test", "build, boot, inject [test].commands, and check [test].expect",
+                     with_make_args=True)
+    add_instance_cmd("flash", "build firmware and flash it to the board ([flash] section)",
+                     with_make_args=True)
+    add_instance_cmd("package", "build and assemble the artifact in [package]",
+                     with_make_args=True)
+
+    # Unknown arguments (after an optional `--`) are forwarded to make. Using
+    # parse_known_args instead of a REMAINDER positional keeps --dry-run
+    # parseable in any position.
+    ns, make_args = parser.parse_known_args(argv)
+    if make_args and make_args[0] == "--":
+        make_args = make_args[1:]
+    ns.make_args = make_args
+
+    match ns.command:
+        case "check":
+            return cmd_check(ns)
+        case "check-registry":
+            return cmd_check_registry(ns)
+        case "list":
+            return cmd_list(ns)
+        case "show-vars":
+            return cmd_show_vars(ns)
+        case "build":
+            return cmd_build(ns)
+        case "run":
+            return cmd_run(ns)
+        case "debug":
+            return cmd_debug(ns)
+        case "test":
+            return cmd_test(ns)
+        case "flash":
+            return cmd_flash(ns)
+        case "package":
+            return cmd_package(ns)
+        case unreachable:
+            assert_never(unreachable)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

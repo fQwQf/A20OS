@@ -1,0 +1,19 @@
+# LoongArch64 发布构建：benchmark profile、8 核、embedded 驱动、external root。
+# Replaces: make release-la
+name = "release-loongarch64"
+description = "LoongArch64 release build (kernel-la + disk-la.img)"
+arch = "loongarch64"
+abi = "both"
+
+[kernel]
+profile = "benchmark"
+driver_deployment = "embedded"
+external_root = true
+
+[machine]
+smp = 8
+
+[package]
+kind = "release"
+kernel_out = "kernel-la"
+disk_out = "disk-la.img"

@@ -14,6 +14,7 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/char/uart.h"
 #include "drivers/audio/audio_core.h"
+#include "drivers/gpu/gpu_core.h"
 #include "mm/slab.h"
 
 extern void uart_putc(char c);
@@ -33,11 +34,26 @@ static int devfs_stat(vnode_t *vn, kstat_t *st);
 static void devfs_release(vnode_t *vn);
 static vfile_t *devfs_open_vnode(vnode_t *vn, int flags);
 
+static int devfs_chmod(vnode_t *vn, int mode) {
+    if (!vn) return -ENOENT;
+    vn->mode = (vn->mode & ~07777u) | ((uint32_t)mode & 07777u);
+    return 0;
+}
+
+static int devfs_chown(vnode_t *vn, int uid, int gid) {
+    if (!vn) return -ENOENT;
+    if (uid >= 0) vn->uid = (uint32_t)uid;
+    if (gid >= 0) vn->gid = (uint32_t)gid;
+    return 0;
+}
+
 static vnode_ops_t g_devfs_ops = {
     .lookup = devfs_lookup,
     .stat = devfs_stat,
     .open = devfs_open_vnode,
     .release = devfs_release,
+    .chmod = devfs_chmod,
+    .chown = devfs_chown,
 };
 
 #define STATIC_NODE(k, n, d) { .kind = (k), .name = (n), .rdev = (d) }
@@ -75,6 +91,8 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_LOOP, "loop7", 0x707),
     STATIC_NODE(DEVFS_LOOP_CTRL, "loop-control", 0x70c),
     STATIC_NODE(DEVFS_PTMX, "ptmx", 0x502),
+    STATIC_NODE(DEVFS_BLOCK_DIR, "block", 0),
+    STATIC_NODE(DEVFS_CHAR_DIR, "char", 0),
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
     STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
     STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
@@ -114,6 +132,8 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     { "loop-control", DT_CHR },
     { "ptmx", DT_CHR },
     { "pts", DT_DIR },
+        { "block", DT_DIR },
+        { "char", DT_DIR },
         { "dri", DT_DIR },
         { "snd", DT_DIR },
         { "shm", DT_DIR },
@@ -174,6 +194,9 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     } else if (kind == DEVFS_SND_DIR) {
         entries_void = snd_entries;
         nentries = sizeof(snd_entries) / sizeof(snd_entries[0]);
+    } else if (kind == DEVFS_BLOCK_DIR || kind == DEVFS_CHAR_DIR) {
+        entries_void = NULL;
+        nentries = 0;
     } else {
         return -ENOTDIR;
     }
@@ -274,6 +297,44 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
             idx++;
             class_device_put(cdev);
             ordinal++;
+        }
+    } else if ((kind == DEVFS_BLOCK_DIR || kind == DEVFS_CHAR_DIR) && idx >= nentries) {
+        /* List all class devices as major:minor, matching Linux /dev/block
+         * and /dev/char conventions so eudev can resolve them. */
+        unsigned want_type = (kind == DEVFS_BLOCK_DIR) ? DEV_CLASS_BLOCK : DEV_CLASS_CHAR;
+        unsigned visible = (unsigned)(idx - nentries);
+        unsigned ordinal = 0;
+        for (;;) {
+            class_device_t *cdev = class_device_get_nth(ordinal++);
+            if (!cdev) break;
+            if (cdev->class_type != want_type) {
+                class_device_put(cdev);
+                continue;
+            }
+            if (visible > 0) {
+                visible--;
+                class_device_put(cdev);
+                continue;
+            }
+            unsigned major = (unsigned)(cdev->devt >> 8);
+            unsigned minor = (unsigned)(cdev->devt & 0xffU);
+            char name[16];
+            snprintf(name, sizeof(name), "%u:%u", major, minor);
+            size_t namelen = strlen(name);
+            size_t reclen = (offsetof(vfs_dirent64_t, d_name) + namelen + 1 + 7) & ~7UL;
+            if (total + reclen > count) {
+                class_device_put(cdev);
+                break;
+            }
+            vfs_dirent64_t *d = (vfs_dirent64_t *)(out + total);
+            d->d_ino = 0x30000U + cdev->index;
+            d->d_off = (int64_t)(idx + 1);
+            d->d_reclen = (uint16_t)reclen;
+            d->d_type = (kind == DEVFS_BLOCK_DIR) ? DT_BLK : DT_CHR;
+            memcpy(d->d_name, name, namelen + 1);
+            total += reclen;
+            idx++;
+            class_device_put(cdev);
         }
     }
     vf->offset = idx;
@@ -691,6 +752,49 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 return 0;
             }
         }
+    } else if (node->kind == DEVFS_BLOCK_DIR || node->kind == DEVFS_CHAR_DIR) {
+        unsigned want_type = (node->kind == DEVFS_BLOCK_DIR) ? DEV_CLASS_BLOCK : DEV_CLASS_CHAR;
+        unsigned major = 0, minor = 0;
+        const char *p = name;
+        while (*p >= '0' && *p <= '9') major = major * 10 + (unsigned)(*p++ - '0');
+        if (*p == ':' && p[1] >= '0' && p[1] <= '9') {
+            p++;
+            while (*p >= '0' && *p <= '9') minor = minor * 10 + (unsigned)(*p++ - '0');
+            if (*p == '\0') {
+                uint64_t want_devt = ((uint64_t)major << 8) | (minor & 0xffU);
+                unsigned ordinal = 0;
+                for (;;) {
+                    class_device_t *cdev = class_device_get_nth(ordinal++);
+                    if (!cdev) break;
+                    if (cdev->class_type == want_type && cdev->devt == want_devt) {
+                        devfs_node_t *dynamic = kcalloc(1, sizeof(*dynamic));
+                        vnode_t *vn = kcalloc(1, sizeof(*vn));
+                        if (!dynamic || !vn) {
+                            kfree(dynamic);
+                            kfree(vn);
+                            class_device_put(cdev);
+                            return -ENOMEM;
+                        }
+                        dynamic->kind = DEVFS_CLASS;
+                        dynamic->name = cdev->name;
+                        dynamic->rdev = cdev->devt;
+                        dynamic->class_dev = cdev;
+                        dynamic->dynamic = 1;
+                        vn->ino = 0x30000U + cdev->index;
+                        vn->type = VFS_FT_REGULAR;
+                        vn->mode = (want_type == DEV_CLASS_BLOCK ? S_IFBLK : S_IFCHR) | 0660;
+                        vnode_ref_init(vn, 1);
+                        vn->parent = dir;
+                        vnode_get(dir);
+                        vn->fs_data = dynamic;
+                        vn->ops = &g_devfs_ops;
+                        *out = vn;
+                        return 0;
+                    }
+                    class_device_put(cdev);
+                }
+            }
+        }
     }
     return -ENOENT;
 }
@@ -712,7 +816,8 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
     if (node->kind == DEVFS_ROOT || node->kind == DEVFS_MISC ||
         node->kind == DEVFS_SHM_DIR || node->kind == DEVFS_PTS_DIR ||
         node->kind == DEVFS_DRI_DIR || node->kind == DEVFS_SND_DIR ||
-        node->kind == DEVFS_INPUT_DIR) {
+        node->kind == DEVFS_INPUT_DIR || node->kind == DEVFS_BLOCK_DIR ||
+        node->kind == DEVFS_CHAR_DIR) {
         st->st_mode = S_IFDIR | 0555;
         st->st_uid = 0;
         st->st_gid = 0;
@@ -779,7 +884,15 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_KMSG: vf->ops = &g_devfs_kmsg_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
-    case DEVFS_FB:   vf->ops = &g_devfs_fb_ops; break;
+    case DEVFS_FB: {
+        task_t *_cur = proc_current();
+        printf("[DEVFS] open fb0: pid=%d name=%s gpu_dev=%p\n",
+               _cur ? _cur->pid : -1,
+               _cur ? _cur->name : "?",
+               gpu_device_get_default());
+        vf->ops = &g_devfs_fb_ops;
+        break;
+    }
     case DEVFS_INPUT: vf->ops = &g_devfs_input_ops; break;
     case DEVFS_CLASS:
         if (!node->class_dev || !__atomic_load_n(&node->class_dev->online,

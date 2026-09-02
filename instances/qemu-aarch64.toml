@@ -1,0 +1,5 @@
+# Text-mode AArch64 development instance (QEMU virt, cortex-a57).
+# Replaces: make ARCH=aarch64 BOARD=qemu-virt-aarch64 run
+name = "qemu-aarch64"
+description = "AArch64 text-mode development boot in QEMU (virt)"
+arch = "aarch64"

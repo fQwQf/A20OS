@@ -1,0 +1,11 @@
+# NOMMU ARM32 GUI instance (LVGL desktop).
+# Replaces: make run-gui-nommu-arm32 (alias run-nommu-gui-arm32)
+name = "qemu-arm32-nommu-gui"
+description = "ARM32 NOMMU GUI boot in QEMU with virtio-gpu"
+arch = "arm32"
+
+[kernel]
+nommu = true
+
+[gui]
+enabled = true

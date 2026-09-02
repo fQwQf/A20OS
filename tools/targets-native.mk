@@ -618,3 +618,45 @@ native-dynprobe-arch: $(NATIVE_DYNPROBE_BIN)
 
 native-dynprobe-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-dynprobe-arch
+
+# ---- Chess game (native ABI with liba20c) ----
+NATIVE_CHESS_SRC := user/cmds/core/chess.c
+
+define NATIVE_CHESS_RECIPE
+@mkdir -p $(dir $(4))
+$(1) -ffreestanding -nostdlib -static \
+    $(2) \
+    -Iuser -Iuser/liba20rt -Iuser/liba20c/include \
+    -T$(NATIVE_LD) \
+    $(3) \
+	    $(NATIVE_SDK_SRC) \
+	    $(NATIVE_LIBC_SRC) \
+	    $(NATIVE_ARCH_SRC) \
+	    $(NATIVE_CHESS_SRC) \
+	    $(NATIVE_LIBS) \
+	    -o $(4)
+endef
+
+$(NATIVE_CHESS_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_LIBC_SRC) $(NATIVE_ARCH_SRC) \
+		$(NATIVE_CHESS_SRC) user/liba20rt/a20-generic.ld \
+		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20c/include/stdio.h
+	$(call NATIVE_CHESS_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
+
+native-chess-arch: $(NATIVE_CHESS_BIN)
+
+native-chess-rv:
+	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-chess-arch
+native-chess-la:
+	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-chess-arch
+native-chess-aarch64:
+	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-chess-arch
+native-chess-x86_64:
+	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-chess-arch
+native-chess-arm32:
+	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-chess-arch
+native-chess-rv32:
+	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-chess-arch
+native-chess-ppc64le:
+	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-chess-arch
+
+native-chess-all: native-chess-rv native-chess-la native-chess-aarch64 native-chess-x86_64 native-chess-arm32 native-chess-rv32 native-chess-ppc64le

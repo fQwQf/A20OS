@@ -8,7 +8,7 @@
 
 ## 文档范围与权威性
 
-- **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
 - **设计与规划文档**：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
 - **研究笔记**：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - **历史档案**：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
@@ -30,6 +30,7 @@
 如果你准备第一次看代码、改 bug 或者提交补丁：
 
 - [OS-Design.md](OS-Design.md)：总体架构、双重 ABI 与模块组织
+- [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式

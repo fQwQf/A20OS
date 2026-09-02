@@ -82,7 +82,13 @@ static void fb_autoflush_kick(void) {
 
 int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
                          uint64_t off) {
+    static int first_mmap = 1;
     struct device *dev = gpu_device_get_default();
+    if (first_mmap) {
+        printf("[FB] fbdev_linux_mmap: dev=%p addr=0x%lx len=0x%lx prot=%d flags=0x%x off=0x%lx\n",
+               dev, addr, len, prot, flags, off);
+        first_mmap = 0;
+    }
     if (!dev) return -ENODEV;
     gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
     if (!ops) return -ENODEV;
@@ -218,19 +224,31 @@ static int fb_write(vfile_t *vf, const char *buf, size_t count) {
 static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     (void)vf;
     struct device *dev = gpu_device_get_default();
-    if (!dev) return -ENODEV;
+    printf("[FB] fb_ioctl: req=0x%lx dev=%p pid=%d\n",
+           (unsigned long)req, dev, proc_current() ? proc_current()->pid : 0);
+    if (!dev) {
+        printf("[FB] fb_ioctl: no default GPU device\n");
+        return -ENODEV;
+    }
     
     gpu_dev_ops_t *ops = (gpu_dev_ops_t *)dev->drv->class_ops;
-    if (!ops) return -ENODEV;
+    if (!ops) {
+        printf("[FB] fb_ioctl: no class_ops\n");
+        return -ENODEV;
+    }
     
     switch (req) {
         case FBIOGET_VSCREENINFO: {
             struct fb_var_screeninfo var;
             uint32_t w, h, bpp;
             int r = ops->get_info(dev, &w, &h, &bpp);
+            printf("[FB] FBIOGET_VSCREENINFO: get_info=%d w=%u h=%u bpp=%u\n",
+                   r, w, h, bpp);
             if (r < 0)
                 return r;
             fb_fill_var_screeninfo(&var, w, h, bpp);
+            printf("[FB] FBIOGET_VSCREENINFO: xres=%u yres=%u bpp=%u\n",
+                   var.xres, var.yres, var.bits_per_pixel);
             return copy_to_user(arg, &var, sizeof(var)) < 0 ? -EFAULT : 0;
         }
         case FBIOPUT_VSCREENINFO: {

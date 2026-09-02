@@ -1,0 +1,8 @@
+# Kernel-only arm32 bring-up (no rootfs image).
+# Replaces: make ARCH=arm32 BRINGUP=1 run
+name = "qemu-arm32-bringup"
+description = "arm32 kernel-only bring-up without filesystem images"
+arch = "arm32"
+
+[kernel]
+bringup = true

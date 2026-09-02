@@ -1,0 +1,8 @@
+# Kernel-only RISC-V 64 bring-up (no rootfs image, boot to early init).
+# Replaces: make ARCH=riscv64 BRINGUP=1 run
+name = "qemu-riscv64-bringup"
+description = "RISC-V 64 kernel-only bring-up without filesystem images"
+arch = "riscv64"
+
+[kernel]
+bringup = true

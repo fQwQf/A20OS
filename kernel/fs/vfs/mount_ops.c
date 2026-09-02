@@ -129,7 +129,8 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
     if (strcmp(fstype, "proc") == 0 ||
         strcmp(fstype, "sysfs") == 0 ||
         strcmp(fstype, "devtmpfs") == 0 ||
-        strcmp(fstype, "devfs") == 0) {
+        strcmp(fstype, "devfs") == 0 ||
+        strcmp(fstype, "devpts") == 0) {
         vnode_t *target = vfs_resolve(path);
         if (!target) return -ENOENT;
         int is_dir = target->type == VFS_FT_DIR;
@@ -138,7 +139,11 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
 
         vnode_t *root = NULL;
         int type = 0;
-        if (strcmp(fstype, "proc") == 0) {
+        if (strcmp(fstype, "devpts") == 0) {
+            /* devpts: pts slave devices are statically provided by devfs.
+             * The mount is a formality for Linux compat; succeed silently. */
+            return 0;
+        } else if (strcmp(fstype, "proc") == 0) {
             root = procfs_mount();
             type = FS_TYPE_PROCFS;
         } else if (strcmp(fstype, "sysfs") == 0) {

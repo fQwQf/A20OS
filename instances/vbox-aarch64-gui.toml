@@ -1,0 +1,14 @@
+# VirtualBox ARM64 GUI UEFI 镜像（含 GUI rootfs）。
+# Replaces: make vbox-gui-image-aarch64
+name = "vbox-aarch64-gui"
+description = "VirtualBox ARM64 UEFI image (GUI)"
+arch = "aarch64"
+board = "virtualbox-aarch64"
+abi = "both"
+
+[gui]
+enabled = true
+
+[package]
+kind = "uefi-image"
+variant = "gui"

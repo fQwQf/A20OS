@@ -6,6 +6,7 @@
 #include "console.h"
 #include "platform.h"
 #include "core/string.h"
+#include "core/stdio.h"
 
 typedef struct {
     char signature[8];
@@ -196,15 +197,20 @@ const char *firmware_bootargs(void) {
         ready = 1;
         outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
         uint32_t sig = fw_cfg_read32();
+        printf("[FW_CFG] signature=0x%08x\n", sig);
         if (sig == 0x51454d55U) {   /* "QEMU", big-endian */
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_SIZE);
             uint32_t len = fw_cfg_read32();
+            printf("[FW_CFG] cmdline_size=%u\n", len);
             if (len > sizeof(g_fw_cfg_cmdline) - 1)
                 len = sizeof(g_fw_cfg_cmdline) - 1;
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_DATA);
             for (uint32_t i = 0; i < len; i++)
                 g_fw_cfg_cmdline[i] = (char)fw_cfg_read8();
             g_fw_cfg_cmdline[len] = '\0';
+            printf("[FW_CFG] cmdline='%s'\n", g_fw_cfg_cmdline);
+        } else {
+            printf("[FW_CFG] no QEMU fw_cfg, using fallback bootargs\n");
         }
     }
     return g_fw_cfg_cmdline;

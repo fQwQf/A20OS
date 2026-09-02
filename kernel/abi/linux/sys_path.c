@@ -4,6 +4,10 @@
 #include "abi/linux/fcntl.h"
 #include "abi/linux/stat.h"
 #include "abi/linux/stat_abi.h"
+#include "fs/devfs.h"
+#include "proc/proc_internal.h"
+extern int g_fb_open_window_pid;
+extern int g_fb_open_window_active;
 
 static uint32_t user_visible_mode(uint32_t mode) {
     return mode;
@@ -140,6 +144,16 @@ int64_t sys_fstat(int fd, void *st) {
     if (gfd < 0) return gfd;
     kstat_t kst;
     int r = vfs_fstat(gfd, &kst);
+    if (r >= 0) {
+        vfile_t *_vf = vfs_get_file_ref((int)gfd);
+        if (_vf && _vf->ops == &g_devfs_fb_ops) {
+            task_t *cur = proc_current();
+            printf("[SYS_FSTAT] fb fd=%d gfd=%ld r=%d mode=0x%x pid=%d name=%s\n",
+                   fd, gfd, r, (unsigned)kst.st_mode,
+                   cur ? cur->pid : -1, cur ? cur->name : "?");
+        }
+        if (_vf) vfs_put_file_ref((int)gfd, _vf);
+    }
     if (r < 0) return r;
     if (!st) return -EFAULT;
     arch_copy_kstat_to_user(st, &kst);
@@ -156,6 +170,15 @@ int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
     if ((flags & AT_EMPTY_PATH) && kpath[0] == '\0') {
         int64_t gfd = fdtable_get_current(dirfd);
         if (gfd < 0) return gfd;
+        vfile_t *_vf = vfs_get_file_ref((int)gfd);
+        int _is_fb = (_vf && _vf->ops == &g_devfs_fb_ops);
+        if (_vf) vfs_put_file_ref((int)gfd, _vf);
+        if (_is_fb) {
+            task_t *cur = proc_current();
+            printf("[SYS_FSTATAT] fb dirfd=%d gfd=%ld flags=0x%x pid=%d name=%s\n",
+                   dirfd, gfd, flags,
+                   cur ? cur->pid : -1, cur ? cur->name : "?");
+        }
         r = vfs_fstat((int)gfd, &kst);
     } else {
         char full[MAX_PATH_LEN];
@@ -170,14 +193,15 @@ int64_t sys_fstatat(int dirfd, const char *path, void *st, int flags) {
     return 0;
 }
 
-int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
-    if (!path) return -EFAULT;
+__attribute__((noinline)) int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
+    printf("[FBREADLINK-ENTER] dirfd=%d path=%p\n", dirfd, (void *)path);
+    if (!path) { printf("[FBREADLINK-NULL] dirfd=%d\n", dirfd); return -EFAULT; }
     char kpath[MAX_PATH_LEN];
     long prp6 = user_path_strncpy(kpath, path, MAX_PATH_LEN);
-    if (prp6 < 0) return prp6;
+    if (prp6 < 0) { printf("[FBREADLINK-CPYERR] dirfd=%d prp6=%ld\n", dirfd, prp6); return prp6; }
     char full[MAX_PATH_LEN];
     if (kpath[0] == '\0') {
-        if (dirfd == AT_FDCWD) return -ENOENT;
+        if (dirfd == AT_FDCWD) { printf("[FBREADLINK-EMPTY-FDCWD] dirfd=%d\n", dirfd); return -ENOENT; }
         int gfd = fdtable_get_current(dirfd);
         if (gfd < 0) return gfd;
         vfile_t *vf = vfs_get_file_ref(gfd);
@@ -191,12 +215,14 @@ int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
         vfs_put_file_ref(gfd, vf);
     } else {
         int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-        if (pr < 0) return pr;
+        if (pr < 0) { printf("[FBREADLINK-RESOLVE] dirfd=%d kpath=%s pr=%d\n", dirfd, kpath, pr); return pr; }
     }
     if (sz > LINUX_IO_CHUNK_SIZE) sz = LINUX_IO_CHUNK_SIZE;
     char *kbuf = proc_scratch_buffer(LINUX_IO_CHUNK_SIZE);
     if (!kbuf) return -ENOMEM;
     int64_t r = vfs_readlinkat(AT_FDCWD, full, kbuf, sz);
+    if (r < 0)
+        printf("[FBREADLINK] dirfd=%d path=%s full=%s ret=%ld\n", dirfd, kpath, full, r);
     if (r > 0) {
         if (copy_to_user(buf, kbuf, (size_t)r) < 0) return -EFAULT;
     }
@@ -204,16 +230,22 @@ int64_t sys_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
 }
 
 int64_t sys_faccessat(int dirfd, const char *path, int mode) {
-    if (!path) return -EFAULT;
+    if (!path) { printf("[FBFACCES-NULL] dirfd=%d\n", dirfd); return -EFAULT; }
     char kpath[MAX_PATH_LEN];
     long copied = user_strncpy(kpath, path, MAX_PATH_LEN);
-    if (copied < 0) return -EFAULT;
-    if (copied >= MAX_PATH_LEN - 1) return -ENAMETOOLONG;
-    if (kpath[0] == '\0') return -ENOENT;
+    if (copied < 0) { printf("[FBFACCES-CPYERR] dirfd=%d copied=%ld\n", dirfd, copied); return -EFAULT; }
+    if (copied >= MAX_PATH_LEN - 1) { printf("[FBFACCES-LONG] dirfd=%d copied=%ld\n", dirfd, copied); return -ENAMETOOLONG; }
+    if (kpath[0] == '\0') { printf("[FBFACCES-EMPTY] dirfd=%d copied=%ld\n", dirfd, copied); return -ENOENT; }
     char full[MAX_PATH_LEN];
     int pr = syscall_path_at(dirfd, kpath, full, sizeof(full));
-    if (pr < 0) return pr;
-    return vfs_faccessat(AT_FDCWD, full, mode);
+    if (pr < 0) {
+        printf("[FBFACCES-PATH] dirfd=%d kpath=%s pr=%d\n", dirfd, kpath, pr);
+        return pr;
+    }
+    int64_t ret = vfs_faccessat(AT_FDCWD, full, mode);
+    if (ret < 0)
+        printf("[FBFACCES] dirfd=%d path=%s mode=%d ret=%ld\n", dirfd, full, mode, ret);
+    return ret;
 }
 
 int64_t sys_faccessat2(int dirfd, const char *path, int mode, int flags) {

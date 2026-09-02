@@ -1,0 +1,10 @@
+# Linux ABI syscall smoke: disk boot, run syscall_smoke from the injected
+# shell commands, require its PASS marker.
+name = "smoke-abi-linux"
+description = "RISC-V 64 Linux ABI syscall smoke (syscall_smoke PASS)"
+arch = "riscv64"
+abi = "linux"
+
+[test]
+commands = ["syscall_smoke", "poweroff"]
+expect = ["SYSCALL_SMOKE: PASS"]

@@ -19,6 +19,7 @@
 #include "drivers/core/driver_class.h"
 #include "fs/devfs.h"
 #include "fs/vfs.h"
+#include "fs/tty.h"
 #include "proc/proc.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -54,6 +55,9 @@ static void evdev_mux_track_event(uint16_t type, uint16_t code, int32_t value) {
         g_mux_abs_value[code] = value;
         spin_unlock_irqrestore(&g_mux_state_lock, flags);
     }
+
+    if (type == EV_REL || (type == EV_KEY && code >= BTN_MOUSE_FIRST && code <= BTN_MOUSE_LAST))
+        tty_push_mouse_event(type, code, value);
 }
 
 static void evdev_mux_track_buffer(const char *buf, size_t copied) {

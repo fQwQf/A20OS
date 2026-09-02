@@ -8,6 +8,7 @@
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
 #include "core/klog.h"
+#include "core/panic.h"
 #include "core/perf.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -104,6 +105,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "filesystems") == 0) return PF_FSTYPE;
     if (strcmp(name, "cgroups") == 0) return PF_CGROUPS;
     if (strcmp(name, "swaps") == 0) return PF_SWAPS;
+    if (strcmp(name, "sysrq-trigger") == 0) return PF_SYSRQ_TRIGGER;
     if (strcmp(name, "interrupts") == 0) return PF_INTERRUPTS;
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
@@ -215,6 +217,7 @@ static int procfs_root_file_type(pf_type_t type)
     case PF_TTY:
     case PF_LDISCS:
     case PF_DRIVERS:
+    case PF_SYSRQ_TRIGGER:
         return 1;
     default:
         return 0;
@@ -561,7 +564,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         vn->link_flags |= VNODE_MAGICLINK;
     vn->mode = vn->type == VFS_FT_SYMLINK ? (S_IFLNK | 0777) :
                (vn->type == VFS_FT_DIR ? (S_IFDIR | 0555) : (S_IFREG | 0444));
-    if (type == PF_A20_DRIVER_LIFECYCLE)
+    if (type == PF_A20_DRIVER_LIFECYCLE || type == PF_SYSRQ_TRIGGER)
         vn->mode = S_IFREG | 0200;
     else if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_A20_SCHED_BASE_SLICE || type == PF_SYS_FS_PIPE_MAX_SIZE ||
@@ -819,6 +822,33 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         p->type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES) {
         return (int)count;
     }
+    if (p->type == PF_SYSRQ_TRIGGER) {
+        /*
+         * Linux-compatible manual sysrq entry point.  Only the crash command
+         * ('c') is implemented; it is the deliberate-panic path used to
+         * exercise the panic dump.  Restricted to CAP_SYS_ADMIN, matching
+         * both Linux and the driver_lifecycle test hook below.
+         */
+        task_t *cur = proc_current();
+        if (!proc_has_cap(cur, CAP_SYS_ADMIN))
+            return -EPERM;
+        char cmd = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (buf[i] == '\n' || buf[i] == '\r' || buf[i] == ' ')
+                continue;
+            cmd = buf[i];
+            break;
+        }
+        if (cmd != 'c') {
+            kerr("sysrq: unsupported command '%c' (only 'c' = crash)\n",
+                 cmd ? cmd : '?');
+            return -EINVAL;
+        }
+        kerr("sysrq: crash triggered via /proc/sysrq-trigger by pid=%d\n",
+             cur ? cur->pid : -1);
+        panic("sysrq: deliberate crash requested by pid=%d",
+              cur ? cur->pid : -1);
+    }
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     if (p->type == PF_A20_DRIVER_LIFECYCLE) {
         /* Permission check: require CAP_SYS_ADMIN (root has all caps). */
@@ -923,7 +953,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         "boot_id", "cap_last_cap", "nr_open", "pressure", "uid_map", "gid_map",
         "setgroups", "sysvipc", "devices", "partitions", "diskstats", "modules",
         "misc", "iomem", "ioports", "softirqs", "route", "arp", "tty", "ldiscs",
-        "drivers", NULL
+        "drivers", "sysrq-trigger", NULL
     };
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",

@@ -1,0 +1,8 @@
+# GUI LoongArch64 instance (QEMU virt, virtio-gpu-pci).
+# Replaces: make run-gui-loongarch64
+name = "qemu-loongarch64-gui"
+description = "LoongArch64 GUI desktop in QEMU with virtio-gpu"
+arch = "loongarch64"
+
+[gui]
+enabled = true

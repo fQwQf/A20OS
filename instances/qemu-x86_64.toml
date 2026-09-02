@@ -1,0 +1,5 @@
+# Text-mode x86_64 development instance (QEMU q35).
+# Replaces: make ARCH=x86_64 BOARD=qemu-virt-x86_64 run
+name = "qemu-x86_64"
+description = "x86_64 text-mode development boot in QEMU (q35)"
+arch = "x86_64"

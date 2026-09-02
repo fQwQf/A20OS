@@ -1,0 +1,15 @@
+# VisionFive 2 标准 SD 卡：内核 + FAT32 用户态 + extra ext4 分区
+# （默认用仓库根的 sdcard-rv.img，没有则由 vf2-sdcard 目标现建）。
+# 需要先跑一次 make vf2-firmware。
+name = "vf2-sdcard"
+description = "VisionFive 2 SD card with extra partition"
+arch = "riscv64"
+board = "visionfive2"
+abi = "both"
+
+[kernel]
+driver_deployment = "embedded"
+
+[package]
+kind = "fit-sdcard"
+variant = "sdcard"

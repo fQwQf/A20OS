@@ -1,0 +1,13 @@
+# Bring-up smoke for loongarch64: boot the kernel-only image and require the boot
+# stages plus a clean self power-off.  Replaces the former handwritten
+# smoke-loongarch64 recipe in tools/targets-smoke.mk.
+name = "smoke-loongarch64"
+description = "loongarch64 kernel bring-up smoke (boot stages + self power-off)"
+arch = "loongarch64"
+abi = "linux"
+
+[kernel]
+bringup = true
+
+[test]
+expect = ["part ok", "System is going down for power-off NOW"]

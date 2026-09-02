@@ -1,0 +1,5 @@
+# Text-mode ARM32 development instance (QEMU virt, cortex-a15).
+# Replaces: make ARCH=arm32 BOARD=qemu-virt-arm32 run
+name = "qemu-arm32"
+description = "ARM32 text-mode development boot in QEMU (virt)"
+arch = "arm32"
