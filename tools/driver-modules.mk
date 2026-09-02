@@ -73,6 +73,14 @@ endif
 EARLY_DRIVER_BLOBS := $(addprefix $(BUILD_DIR)/rootfs-drivers/,$(EARLY_DRVMOD_MODULES:.a20drv=.o))
 RUNTIME_DRVMOD_MODULES := $(filter-out $(EARLY_DRVMOD_MODULES),$(DRVMOD_MODULES))
 
+# Optional instance-driven runtime driver selection (tools/a20
+# [rootfs].drivers; see docs/instances.md).  Restricts which packages land in
+# /lib/drivers; early DriverStore members are always built and embedded.
+# a20 validates the names against components/drivers.toml before make runs.
+ifneq ($(strip $(DRIVER_SELECTION)),)
+RUNTIME_DRVMOD_MODULES := $(DRIVER_SELECTION)
+endif
+
 $(BUILD_DIR)/rootfs-drivers/%.o: $(USER_BUILD_DIR)/%.a20drv
 	@mkdir -p $(dir $@)
 	cd $(USER_BUILD_DIR) && $(OBJCOPY) -I binary -O $(word 1,$(EARLY_DRIVER_BFD)) -B $(word 3,$(EARLY_DRIVER_BFD)) \

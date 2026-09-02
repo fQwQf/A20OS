@@ -1,0 +1,8 @@
+# Kernel-only riscv32 bring-up (no rootfs image).
+# Replaces: make ARCH=riscv32 BRINGUP=1 run
+name = "qemu-riscv32-bringup"
+description = "riscv32 kernel-only bring-up without filesystem images"
+arch = "riscv32"
+
+[kernel]
+bringup = true

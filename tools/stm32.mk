@@ -29,11 +29,12 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 $(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
 $(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
 
+# Thin wrappers: STM32 configurations live in instances/stm32f103*.toml.
 stm32f103-bringup:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=64 STM32_RAM_KB=20 kernel-only
+	tools/a20 build stm32f103
 
 stm32f103-xuanwu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 kernel-only
+	tools/a20 build stm32f103-xuanwu
 check-stm32f103:
 	@! rg -n '0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}' \
 		$(KERNEL_DIR)/platform/stm32f103 --glob '*.[ch]' \
@@ -44,11 +45,9 @@ check-stm32f103:
 	$(MAKE) stm32f103-xuanwu
 	@echo "check-stm32f103: PASS"
 
-flash-stm32f103-xuanwu: stm32f103-xuanwu
-	# Re-run under the xuanwu configuration so the derived artifact paths
-	# (BUILD_DIR/BUILD_VARIANT) resolve to the build that just completed.
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded \
-		STM32_FLASH_KB=512 STM32_RAM_KB=64 STM32_XUANWU=1 flash-xuanwu-openocd
+# Thin wrapper: configuration in instances/stm32f103-xuanwu.toml.
+flash-stm32f103-xuanwu:
+	tools/a20 flash stm32f103-xuanwu
 
 flash-xuanwu-openocd:
 	@command -v openocd >/dev/null 2>&1 || { \
@@ -78,10 +77,9 @@ flash-xuanwu-openocd:
 		-c "resume" \
 		-c "shutdown"
 
+# Thin wrapper: configuration in instances/stm32f103-qemu.toml.
 run-stm32f103-qemu:
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded KERNEL_WERROR=0 STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 kernel-only
-	$(MAKE) ARCH=armv7m BOARD=stm32f103 PROFILE=mcu DRIVER_DEPLOYMENT=embedded \
-		KERNEL_WERROR=0 STM32_FLASH_KB=128 STM32_RAM_KB=8 STM32_QEMU=1 run-stm32f103-qemu-impl
+	tools/a20 run stm32f103-qemu
 
 run-stm32f103-qemu-impl:
 	qemu-system-arm -machine stm32vldiscovery -nographic \

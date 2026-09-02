@@ -65,6 +65,14 @@ typedef enum {
     SF_DEV_CHAR_UEVENT, /* /sys/dev/char/<maj>:<min>/uevent */
     SF_DEV_CHAR_DEVICE, /* /sys/dev/char/<maj>:<min>/device */
     SF_DEV_CHAR_DEVICE_DRM, /* /sys/dev/char/<maj>:<min>/device/drm */
+    SF_FB,                 /* /sys/class/fb */
+    SF_FB_DEVICE,          /* /sys/class/fb/fbN */
+    SF_FB_NAME,            /* /sys/class/fb/fbN/name */
+    SF_FB_BPP,             /* /sys/class/fb/fbN/bits_per_pixel */
+    SF_FB_STRIDE,          /* /sys/class/fb/fbN/stride */
+    SF_FB_VSIZE,           /* /sys/class/fb/fbN/virtual_size */
+    SF_FB_STATE,           /* /sys/class/fb/fbN/state */
+    SF_FB_MODE,            /* /sys/class/fb/fbN/mode */
 } sf_type_t;
 
 /* Metadata stored in vnode->fs_data */
@@ -293,6 +301,49 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
         } else {
             p->content_len = 0;
         }
+    } else if (type == SF_FB_NAME) {
+        memcpy(p->content, "A20OS FB\n", 9);
+        p->content_len = 9;
+    } else if (type == SF_FB_BPP) {
+        uint32_t w, h, bpp = 32;
+        device_t *dev = gpu_device_get_default();
+        if (dev && dev->drv && dev->drv->class_ops) {
+            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+            if (ops->get_info) ops->get_info(dev, &w, &h, &bpp);
+        }
+        int n = snprintf(p->content, sizeof(p->content), "%u\n", bpp);
+        p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_FB_STRIDE) {
+        uint32_t w, h, bpp;
+        device_t *dev = gpu_device_get_default();
+        uint32_t stride = 0;
+        if (dev && dev->drv && dev->drv->class_ops) {
+            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+            if (ops->get_fb && ops->get_info) {
+                uintptr_t phys; size_t sz;
+                if (ops->get_fb(dev, &phys, &sz) == 0 &&
+                    ops->get_info(dev, &w, &h, &bpp) == 0 && h > 0)
+                    stride = (uint32_t)(sz / h);
+            }
+        }
+        int n = snprintf(p->content, sizeof(p->content), "%u\n", stride);
+        p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_FB_VSIZE) {
+        uint32_t w, h, bpp;
+        device_t *dev = gpu_device_get_default();
+        w = 1024; h = 768;
+        if (dev && dev->drv && dev->drv->class_ops) {
+            const gpu_dev_ops_t *ops = (const gpu_dev_ops_t *)dev->drv->class_ops;
+            if (ops->get_info) ops->get_info(dev, &w, &h, &bpp);
+        }
+        int n = snprintf(p->content, sizeof(p->content), "%u,%u\n", w, h);
+        p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_FB_STATE) {
+        memcpy(p->content, "0\n", 2);
+        p->content_len = 2;
+    } else if (type == SF_FB_MODE) {
+        memcpy(p->content, "U:1024x768-0\n", 13);
+        p->content_len = 13;
     } else {
         p->content_len = 0;
     }
@@ -402,6 +453,32 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_idx = dm->loop_idx;
     } else if (dm->type == SF_CLASS && strcmp(name, "drm") == 0) {
         child_type = SF_DRM;
+    } else if (dm->type == SF_CLASS && strcmp(name, "fb") == 0) {
+        child_type = SF_FB;
+    } else if (dm->type == SF_FB) {
+        /* /sys/class/fb/fbN: accept "fb0" */
+        if (name[0] == 'f' && name[1] == 'b') {
+            const char *num = name + 2;
+            int idx = 0;
+            if (*num < '0' || *num > '9') return -ENOENT;
+            while (*num >= '0' && *num <= '9') {
+                idx = idx * 10 + (*num - '0');
+                num++;
+            }
+            if (*num != '\0' || idx != 0) return -ENOENT; /* only fb0 */
+            child_type = SF_FB_DEVICE;
+            child_idx = idx;
+        } else {
+            return -ENOENT;
+        }
+    } else if (dm->type == SF_FB_DEVICE) {
+        if (strcmp(name, "name") == 0) child_type = SF_FB_NAME;
+        else if (strcmp(name, "bits_per_pixel") == 0) child_type = SF_FB_BPP;
+        else if (strcmp(name, "stride") == 0) child_type = SF_FB_STRIDE;
+        else if (strcmp(name, "virtual_size") == 0) child_type = SF_FB_VSIZE;
+        else if (strcmp(name, "state") == 0) child_type = SF_FB_STATE;
+        else if (strcmp(name, "mode") == 0) child_type = SF_FB_MODE;
+        else return -ENOENT;
     } else if (dm->type == SF_CLASS) {
         static const struct { const char *name; uint32_t type; } classes[] = {
             { "char", DEV_CLASS_CHAR }, { "block", DEV_CLASS_BLOCK },
@@ -506,7 +583,8 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_DEV || child_type == SF_DEV_CHAR ||
                   child_type == SF_DEV_CHAR_ENTRY ||
                   child_type == SF_DEV_CHAR_DEVICE ||
-                  child_type == SF_DEV_CHAR_DEVICE_DRM);
+                  child_type == SF_DEV_CHAR_DEVICE_DRM ||
+                  child_type == SF_FB || child_type == SF_FB_DEVICE);
 
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
     if (child_type == SF_CLASS_DEVICE_SUBSYS) {
@@ -564,6 +642,18 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_UEVENT) {
             vn->size = 64;
+        } else if (child_type == SF_FB_NAME) {
+            vn->size = 9;
+        } else if (child_type == SF_FB_BPP) {
+            vn->size = 4;
+        } else if (child_type == SF_FB_STRIDE) {
+            vn->size = 8;
+        } else if (child_type == SF_FB_VSIZE) {
+            vn->size = 16;
+        } else if (child_type == SF_FB_STATE) {
+            vn->size = 2;
+        } else if (child_type == SF_FB_MODE) {
+            vn->size = 13;
         }
     } else {
         class_device_put(dynamic_cdev);
@@ -840,12 +930,22 @@ static int sysfs_freaddir(vfile_t *vf, void *dirp, size_t count)
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
     } else if (dm->type == SF_CLASS) {
         entries[nent].name = "drm"; entries[nent].dtype = 4; nent++;
+        entries[nent].name = "fb"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "char"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "block"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "net"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "input"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "display"; entries[nent].dtype = 4; nent++;
         entries[nent].name = "audio"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_FB) {
+        entries[nent].name = "fb0"; entries[nent].dtype = 4; nent++;
+    } else if (dm->type == SF_FB_DEVICE) {
+        entries[nent].name = "name"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "bits_per_pixel"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "stride"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "virtual_size"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "state"; entries[nent].dtype = 8; nent++;
+        entries[nent].name = "mode"; entries[nent].dtype = 8; nent++;
     } else if (dm->type == SF_CLASS_DEVICE) {
         entries[nent].name = "dev"; entries[nent].dtype = 8; nent++;
         entries[nent].name = "uevent"; entries[nent].dtype = 8; nent++;
