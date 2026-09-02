@@ -1,0 +1,5 @@
+# Text-mode PPC64LE instance (QEMU pSeries, MMU, single core).
+# Replaces: make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
+name = "qemu-ppc64le"
+description = "PPC64LE text-mode boot in QEMU (pSeries)"
+arch = "ppc64le"

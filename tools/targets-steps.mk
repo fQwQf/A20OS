@@ -516,17 +516,12 @@ smoke-native-handle:
 		exit 1; \
 	fi
 
+# Thin wrappers: release configurations live in instances/release-*.toml.
 release-rv:
-	@echo "--- Building RISC-V 64 (release) ---"
-	$(MAKE) ARCH=riscv64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
-		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
-		_release_build KERNEL_OUT=kernel-rv DISK_OUT=disk.img
+	tools/a20 package release-riscv64
 
 release-la:
-	@echo "--- Building LoongArch 64 (release) ---"
-	$(MAKE) ARCH=loongarch64 ABI=both MODE=release PROFILE=benchmark NR_CPUS=8 \
-		DRIVER_DEPLOYMENT=embedded EXTERNAL_ROOT=1 \
-		_release_build KERNEL_OUT=kernel-la DISK_OUT=disk-la.img
+	tools/a20 package release-loongarch64
 
 _reset_obj:
 	find $(KERNEL_DIR) -name '*.o' -delete

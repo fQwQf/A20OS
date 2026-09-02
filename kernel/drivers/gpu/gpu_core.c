@@ -2,6 +2,7 @@
 #include "drivers/core/driver_class.h"
 #include "core/errno.h"
 #include "core/lock.h"
+#include "core/stdio.h"
 
 static device_t *g_default_gpu;
 static spinlock_t g_gpu_lock = SPINLOCK_INIT;
@@ -12,8 +13,11 @@ int gpu_device_register(device_t *dev) {
         return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&g_gpu_lock);
-    if (!g_default_gpu)
+    if (!g_default_gpu) {
         g_default_gpu = dev;
+        printf("[GPU] gpu_device_register: default_gpu=%p class_type=%d\n",
+               dev, dev->drv->class_type);
+    }
     spin_unlock_irqrestore(&g_gpu_lock, flags);
     return 0;
 }

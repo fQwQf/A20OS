@@ -1,0 +1,8 @@
+# Kernel-only x86_64 bring-up (no rootfs image).
+# Replaces: make ARCH=x86_64 BRINGUP=1 run
+name = "qemu-x86_64-bringup"
+description = "x86_64 kernel-only bring-up without filesystem images"
+arch = "x86_64"
+
+[kernel]
+bringup = true

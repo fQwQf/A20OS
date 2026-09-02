@@ -41,6 +41,8 @@ enum {
     DEVFS_SND_DIR,
     DEVFS_ALSA_CTL,
     DEVFS_ALSA_PCM,
+    DEVFS_BLOCK_DIR,
+    DEVFS_CHAR_DIR,
 };
 
 /* shared helpers defined in devfs_mem.c */

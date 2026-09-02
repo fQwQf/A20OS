@@ -1,0 +1,19 @@
+# RISC-V 64 发布构建：benchmark profile、8 核、embedded 驱动、external root。
+# Replaces: make release-rv
+name = "release-riscv64"
+description = "RISC-V 64 release build (kernel-rv + disk.img)"
+arch = "riscv64"
+abi = "both"
+
+[kernel]
+profile = "benchmark"
+driver_deployment = "embedded"
+external_root = true
+
+[machine]
+smp = 8
+
+[package]
+kind = "release"
+kernel_out = "kernel-rv"
+disk_out = "disk.img"

@@ -1,0 +1,8 @@
+# SMP RISC-V 64 instance; riscv64/qemu-virt is a verified SMP platform.
+# Replaces: make ARCH=riscv64 NR_CPUS=4 run
+name = "qemu-riscv64-smp4"
+description = "RISC-V 64 with 4 vCPUs (verified QEMU SMP platform)"
+arch = "riscv64"
+
+[machine]
+smp = 4

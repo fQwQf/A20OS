@@ -17,6 +17,9 @@
 #include "sys/syscall.h"
 #include "sys/usercopy.h"
 
+extern int g_fb_open_window_pid;
+extern int g_fb_open_window_active;
+
 syscall_prof_t sys_prof[SYSCALL_PROFILE_MAX];
 
 static inline uint64_t syscall_profile_now(void)
@@ -184,6 +187,13 @@ int64_t syscall_dispatch(trap_context_t *ctx)
     if (entry) {
         syscall_trace_enter(cur_task, entry, &args);
         ret = entry->handler(&args);
+        if (g_fb_open_window_active && cur_task &&
+            cur_task->pid == g_fb_open_window_pid &&
+            args.nr != SYS_openat && args.nr != SYS_close) {
+            printf("[FBWIN] pid=%d nr=%ld ret=%ld arg0=0x%lx\n",
+                   cur_task->pid, (long)args.nr, (long)ret,
+                   (unsigned long)args.arg[0]);
+        }
         syscall_trace_exit(cur_task, entry, ret);
         context_restored = entry->restores_context;
         if (context_restored)

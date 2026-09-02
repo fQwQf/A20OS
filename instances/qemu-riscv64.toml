@@ -1,0 +1,5 @@
+# Text-mode RISC-V 64 development instance (QEMU virt).
+# Replaces: make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
+name = "qemu-riscv64"
+description = "RISC-V 64 text-mode development boot in QEMU (virt)"
+arch = "riscv64"

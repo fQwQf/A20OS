@@ -1,0 +1,8 @@
+# Kernel-only ppc64le bring-up (no rootfs image).
+# Replaces: make ARCH=ppc64le BRINGUP=1 run
+name = "qemu-ppc64le-bringup"
+description = "ppc64le kernel-only bring-up without filesystem images"
+arch = "ppc64le"
+
+[kernel]
+bringup = true

@@ -1,0 +1,8 @@
+# NOMMU ARM32 instance.
+# Replaces: make run-nommu-arm32
+name = "qemu-arm32-nommu"
+description = "ARM32 NOMMU development boot in QEMU"
+arch = "arm32"
+
+[kernel]
+nommu = true

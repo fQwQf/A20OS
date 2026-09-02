@@ -1,0 +1,11 @@
+# VirtualBox ARM64 默认 UEFI 镜像。
+# Replaces: make vbox-image-aarch64
+name = "vbox-aarch64"
+description = "VirtualBox ARM64 UEFI image"
+arch = "aarch64"
+board = "virtualbox-aarch64"
+abi = "both"
+
+[package]
+kind = "uefi-image"
+variant = "default"

@@ -1,0 +1,5 @@
+# Text-mode LoongArch64 development instance (QEMU virt).
+# Replaces: make ARCH=loongarch64 BOARD=qemu-virt-loongarch64 run
+name = "qemu-loongarch64"
+description = "LoongArch64 text-mode development boot in QEMU (virt)"
+arch = "loongarch64"

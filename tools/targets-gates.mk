@@ -6,7 +6,19 @@ HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
-.PHONY: host-tests check-vfs-abstraction
+.PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix check-component-registry
+
+# Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
+# hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
+# at least one valid instance, so the matrix and instances/ cannot drift.
+check-instances:
+	@tools/a20 check
+
+check-instance-matrix:
+	@tools/a20 check --require-arch $(SUPPORTED_HOSTED_ARCHES)
+
+check-component-registry:
+	@tools/a20 check-registry
 
 host-tests: $(HOST_TESTS_BIN)
 	@for t in $(HOST_TESTS_BIN); do \

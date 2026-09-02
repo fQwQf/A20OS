@@ -36,10 +36,17 @@ export PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR=
 
 TOOLCHAIN=$BUILD/toolchain/$MUSL_TARGET-linux-musl-cross
-CC=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc
-CXX=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-g++
-AR=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-ar
-STRIP=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip
+if [ -x "$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc" ]; then
+    CC=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-gcc
+    CXX=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-g++
+    AR=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-ar
+    STRIP=$TOOLCHAIN/bin/$MUSL_TARGET-linux-musl-strip
+else
+    CC=$BUILD/musl-$ARCH/musl-gcc-a20
+    CXX=$BUILD/musl-$ARCH/musl-g++-a20
+    AR=x86_64-linux-gnu-ar
+    STRIP=x86_64-linux-gnu-strip
+fi
 
 cat > /tmp/wlr-cross-$ARCH.ini <<EOF
 [host_machine]
@@ -93,6 +100,7 @@ if [ -z "$PHASE" ] || [ "$PHASE" = "wlroots" ]; then
         --cross-file /tmp/wlr-cross-$ARCH.ini \
         --prefix="$SYSROOT" --libdir=lib \
         -Dexamples=false -Dxwayland=disabled \
+        -Dcolor-management=disabled \
         -Drenderers=gles2 -Dbackends=drm,libinput -Dallocators=gbm
     ninja -C "$OB"
     ninja -C "$OB" install

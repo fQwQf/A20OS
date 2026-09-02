@@ -623,6 +623,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_A20_DRIVER_LIFECYCLE:
         buf[0] = '\0';
         return 0;
+    case PF_SYSRQ_TRIGGER:
+        return snprintf(buf, bufsz,
+                        "sysrq commands: c (crash — deliberate kernel panic)\n");
     case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }

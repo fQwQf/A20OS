@@ -1,0 +1,13 @@
+# QEMU stm32vldiscovery 上的 STM32 bring-up（128 KiB Flash / 8 KiB SRAM）。
+# Replaces: make run-stm32f103-qemu
+name = "stm32f103-qemu"
+description = "STM32F103 bring-up on QEMU stm32vldiscovery"
+arch = "armv7m"
+
+[kernel]
+werror = false
+
+[stm32]
+flash_kb = 128
+ram_kb = 8
+qemu = true

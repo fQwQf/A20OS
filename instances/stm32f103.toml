@@ -1,0 +1,10 @@
+# STM32F103 基础固件（64 KiB Flash / 20 KiB SRAM），armv7m 自动为
+# PROFILE=mcu、NOMMU、BRINGUP、embedded 驱动。仅构建（烧录见 xuanwu 实例）。
+# Replaces: make stm32f103-bringup
+name = "stm32f103"
+description = "STM32F103 firmware, 64 KiB flash / 20 KiB SRAM"
+arch = "armv7m"
+
+[stm32]
+flash_kb = 64
+ram_kb = 20

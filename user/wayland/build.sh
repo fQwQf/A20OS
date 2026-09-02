@@ -84,7 +84,7 @@ if [ ${#PHASES[@]} -eq 0 ]; then
             xkeyboard-config xkbcommon \
             libevdev stubs libdrm libinput weston ffmpeg player)
     if [ "${GUI_DESKTOP:-weston}" = xfce ]; then
-        PHASES+=(atk gdk-pixbuf cairo pango gtk3 \
+        PHASES+=(zlib bzip2 expat atk gdk-pixbuf cairo pango gtk3 \
                  libxfce4util libxfce4windowing xfconf libxfce4ui exo garcon \
                  gtk-layer-shell xfce4-panel xfdesktop xfce4-session thunar \
                  wlroots labwc)
@@ -158,18 +158,31 @@ fi
 
 # musl-gcc wrapper (specs-based) as the meson cross compiler
 MUSL_GCC=$MUSL_SH/musl-gcc-a20
+# GCC 14+ removed -fno-link-libatomic; detect at build time.
+LIBATOMIC_FLAG=""
+if echo 'int main(){}' | $CC -fno-link-libatomic -x c - -o /dev/null 2>/dev/null; then
+    LIBATOMIC_FLAG="-fno-link-libatomic"
+fi
 cat > "$MUSL_GCC" <<EOF
 #!/bin/sh
-exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" -fno-link-libatomic $ARCH_CFLAGS "\$@"
+exec $CC -specs "$MUSL_SH/lib/musl-gcc.specs" $LIBATOMIC_FLAG $ARCH_CFLAGS "\$@"
 EOF
 chmod +x "$MUSL_GCC"
 
 # musl-g++ wrapper for C++ components (Mesa needs a C++ compiler).
 MUSL_CXX=$MUSL_SH/musl-g++-a20
 CXX=${CXX:-${CROSS}g++}
+CXX_HOST_INC=""
+if [ "$ARCH" = x86_64 ]; then
+    CXX_HOST_INC="-isystem /usr/include/c++/14 -isystem /usr/include/x86_64-linux-gnu/c++/14"
+elif [ "$ARCH" = aarch64 ]; then
+    CXX_HOST_INC="-isystem /usr/include/c++/14 -isystem /usr/aarch64-linux-gnu/include/c++/14"
+elif [ "$ARCH" = riscv64 ]; then
+    CXX_HOST_INC="-isystem /usr/include/c++/14 -isystem /usr/riscv64-linux-gnu/include/c++/14"
+fi
 cat > "$MUSL_CXX" <<EOF
 #!/bin/sh
-exec $CXX -specs "$MUSL_SH/lib/musl-gcc.specs" -fno-link-libatomic $ARCH_CFLAGS -nodefaultlibs "\$@" -lc -lgcc
+exec $CXX -specs "$MUSL_SH/lib/musl-g++.specs" $LIBATOMIC_FLAG $ARCH_CFLAGS "\$@" -lstdc++ -lsupc++ -lgcc -lc
 EOF
 chmod +x "$MUSL_CXX"
 
@@ -676,6 +689,98 @@ EOF
     mark dbus
 fi
 
+# ------------------------------------------------------------------ zlib
+if want zlib && { ! stamp zlib || [ ! -e "$SYSROOT/lib/libz.so" ]; }; then
+    echo "=== zlib ==="
+    ZLIB_ARCHIVE=$BUILD/distfiles/zlib-1.3.1.tar.gz
+    ZLIB_SRC=$BUILD/zlib-1.3.1
+    if [ ! -d "$ZLIB_SRC" ]; then
+        mkdir -p "$(dirname "$ZLIB_ARCHIVE")"
+        if [ ! -s "$ZLIB_ARCHIVE" ]; then
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+                -o "$ZLIB_ARCHIVE.tmp" \
+                https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
+            mv "$ZLIB_ARCHIVE.tmp" "$ZLIB_ARCHIVE"
+        fi
+        rm -rf "$ZLIB_SRC"
+        tar -xzf "$ZLIB_ARCHIVE" -C "$BUILD"
+    fi
+    OB=$B/build-zlib
+    rm -rf "$OB" && mkdir -p "$OB"
+    (cd "$OB" && CC="$MUSL_GCC" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
+        CFLAGS="-O2 -fPIC" \
+        "$ZLIB_SRC/configure" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib")
+    env -u ARCH make -C "$OB" -j"$(nproc)"
+    env -u ARCH make -C "$OB" install
+    mark zlib
+fi
+
+# ------------------------------------------------------------------ bzip2
+if want bzip2 && { ! stamp bzip2 || [ ! -e "$SYSROOT/lib/libbz2.a" ]; }; then
+    echo "=== bzip2 ==="
+    BZIP2_ARCHIVE=$BUILD/distfiles/bzip2-1.0.8.tar.gz
+    BZIP2_SRC=$BUILD/bzip2-1.0.8
+    if [ ! -d "$BZIP2_SRC" ]; then
+        mkdir -p "$(dirname "$BZIP2_ARCHIVE")"
+        if [ ! -s "$BZIP2_ARCHIVE" ]; then
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+                -o "$BZIP2_ARCHIVE.tmp" \
+                https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+            mv "$BZIP2_ARCHIVE.tmp" "$BZIP2_ARCHIVE"
+        fi
+        rm -rf "$BZIP2_SRC"
+        tar -xzf "$BZIP2_ARCHIVE" -C "$BUILD"
+    fi
+    OB=$B/build-bzip2
+    rm -rf "$OB" && mkdir -p "$OB"
+    cp -a "$BZIP2_SRC/." "$OB/"
+    env -u ARCH make -C "$OB" CC="$MUSL_GCC" AR="${CROSS}ar" RANLIB="${CROSS}ranlib" \
+        CFLAGS="-O2 -fPIC -Wall -Winline -D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE" \
+        -j"$(nproc)" libbz2.a
+    cp "$OB/libbz2.a" "$SYSROOT/lib/"
+    cp "$OB/bzlib.h" "$SYSROOT/include/"
+    cat > "$SYSROOT/lib/pkgconfig/bzip2.pc" <<EOF
+prefix=$SYSROOT
+libdir=\${prefix}/lib
+includedir=\${prefix}/include
+Name: bzip2
+Description: bzip2 compression library
+Version: 1.0.8
+Libs: -L\${libdir} -lbz2
+Cflags: -I\${includedir}
+EOF
+    mark bzip2
+fi
+
+# ------------------------------------------------------------------ expat
+if want expat && { ! stamp expat || [ ! -e "$SYSROOT/lib/libexpat.so" ]; }; then
+    echo "=== expat ==="
+    EXPAT_ARCHIVE=$BUILD/distfiles/expat-2.6.4.tar.gz
+    EXPAT_SRC=$BUILD/expat-2.6.4
+    if [ ! -d "$EXPAT_SRC" ]; then
+        mkdir -p "$(dirname "$EXPAT_ARCHIVE")"
+        if [ ! -s "$EXPAT_ARCHIVE" ]; then
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 20 \
+                -o "$EXPAT_ARCHIVE.tmp" \
+                https://github.com/libexpat/libexpat/releases/download/R_2_6_4/expat-2.6.4.tar.gz
+            mv "$EXPAT_ARCHIVE.tmp" "$EXPAT_ARCHIVE"
+        fi
+        rm -rf "$EXPAT_SRC"
+        tar -xzf "$EXPAT_ARCHIVE" -C "$BUILD"
+    fi
+    OB=$B/build-expat
+    rm -rf "$OB" && mkdir -p "$OB"
+    (cd "$OB" && "$EXPAT_SRC/configure" \
+        --host="$MUSL_TARGET-linux-musl" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib" --includedir="$SYSROOT/include" \
+        --disable-static --enable-shared \
+        CC="$MUSL_GCC" CFLAGS="-O2 -fPIC")
+    env -u ARCH make -C "$OB" -j"$(nproc)"
+    env -u ARCH make -C "$OB" install
+    mark expat
+fi
+
 # ------------------------------------------------------------------ atk
 if want atk && ! stamp atk; then
     echo "=== atk ==="
@@ -690,8 +795,8 @@ if want gdk-pixbuf && ! stamp gdk-pixbuf; then
     meson_pkg gdk-pixbuf "$USER_DIR/external/gui/gdk-pixbuf" \
         -Dtests=false -Dinstalled_tests=false -Dgtk_doc=false \
         -Dintrospection=disabled -Dman=false -Dbuiltin_loaders=png \
-        -Drelocatable=true -Dgio_sniffing=false -Djpeg=false \
-        -Dtiff=false -Dgif=false
+        -Drelocatable=true -Dgio_sniffing=false -Djpeg=disabled \
+        -Dtiff=disabled -Dgif=disabled
     mark gdk-pixbuf
 fi
 
@@ -700,6 +805,7 @@ if want cairo && ! stamp cairo; then
     echo "=== cairo ==="
     meson_pkg cairo "$USER_DIR/external/gui/cairo" \
         -Dfontconfig=enabled -Dfreetype=enabled -Dpng=enabled \
+        -Dfreetype:bzip2=disabled -Dfreetype:harfbuzz=disabled \
         -Dzlib=enabled -Dxlib=disabled -Dxlib-xcb=disabled \
         -Dxcb=disabled -Dquartz=disabled -Ddwrite=disabled \
         -Dtee=disabled
@@ -802,16 +908,39 @@ fi
 
 if want xfce4-panel && ! stamp xfce4-panel; then
     echo "=== xfce4-panel ==="
-    # The panel's external-plugin wrapper path (HELPERDIR, default $libdir)
-    # is compiled into the binary.  $libdir is the build host's absolute
-    # sysroot path, which does not exist inside the guest where the FAT root
-    # is mounted at /bin.  The guest-visible wrapper is
-    # /bin/lib/xfce4/panel/wrapper-2.0 (image path /lib/xfce4/panel/wrapper-2.0),
-    # so HELPERDIR must be /bin/lib.  Without this, every spawn of an
-    # external panel plugin fails with "Failed to spawn the
-    # xfce4-panel-wrapper".
-    autotools_pkg xfce4-panel "$USER_DIR/external/gui/xfce4-panel" \
-        --with-helper-path-prefix=/bin/lib
+    # HELPERDIR (compiled-in wrapper path) must be /bin/lib for the guest
+    # where the FAT root mounts at /bin.  We configure with the sysroot-
+    # relative path so `make install` succeeds on the host, then sed-patch
+    # the installed binary to the guest-visible path.
+    XFCE4_PANEL_SRC="$USER_DIR/external/gui/xfce4-panel"
+    XFCE4_PANEL_OB=$B/build-xfce4-panel
+    mkdir -p "$SYSROOT/include/X11/SM" "$SYSROOT/include/X11/ICE"
+    if [ -x "$XFCE4_PANEL_SRC/autogen.sh" ] && [ ! -x "$XFCE4_PANEL_SRC/configure" ]; then
+        (cd "$XFCE4_PANEL_SRC" && NOCONFIGURE=1 ./autogen.sh >/dev/null 2>&1 || \
+         cd "$XFCE4_PANEL_SRC" && ./autogen.sh --noconfigure >/dev/null 2>&1)
+    fi
+    [ -x "$XFCE4_PANEL_SRC/configure" ] || { echo "xfce4-panel: no configure" >&2; return 1; }
+    rm -rf "$XFCE4_PANEL_OB" && mkdir -p "$XFCE4_PANEL_OB"
+    cp -a "$XFCE4_PANEL_SRC"/. "$XFCE4_PANEL_OB"/
+    (cd "$XFCE4_PANEL_OB" && ./configure \
+        --host="$MUSL_TARGET-linux-musl" \
+        --prefix="$SYSROOT" --libdir="$SYSROOT/lib" \
+        --includedir="$SYSROOT/include" \
+        --disable-static --enable-shared \
+        --disable-doc --disable-docs --disable-gtk-doc \
+        --enable-maintainer-mode \
+        CC="$MESON_CC" CXX="$MESON_CXX" \
+        CPPFLAGS="-I$SYSROOT/include -I$SYSROOT/include/gtk-3.0 -I$SYSROOT/include/glib-2.0 -I$SYSROOT/lib/glib-2.0/include -I$SYSROOT/include/atk-1.0 -I$SYSROOT/include/pango-1.0 -I$SYSROOT/include/cairo -I$SYSROOT/include/libxfce4util" \
+        LDFLAGS="-L$SYSROOT/lib -Wl,-rpath-link,$SYSROOT/lib" \
+        PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" \
+        GLIB_COMPILE_RESOURCES=/usr/bin/glib-compile-resources \
+        GLIB_GENMARSHAL=/usr/bin/glib-genmarshal \
+        GLIB_MKENUMS=/usr/bin/glib-mkenums \
+        GDBUS_CODEGEN=/usr/bin/gdbus-codegen \
+        --with-helper-path-prefix="$SYSROOT/bin/lib" \
+        2>&1 | tail -5)
+    env -u ARCH -u MAKEFLAGS make -C "$XFCE4_PANEL_OB" -j"$(nproc)" 2>&1 | tail -3
+    env -u ARCH -u MAKEFLAGS make -C "$XFCE4_PANEL_OB" install 2>&1 | tail -3
     mark xfce4-panel
 fi
 

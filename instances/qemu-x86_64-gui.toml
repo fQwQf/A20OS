@@ -1,0 +1,8 @@
+# GUI x86_64 instance (QEMU q35, virtio-gpu-pci + HDA audio).
+# Replaces: make run-gui-x86_64
+name = "qemu-x86_64-gui"
+description = "x86_64 GUI desktop in QEMU with virtio-gpu and HDA audio"
+arch = "x86_64"
+
+[gui]
+enabled = true

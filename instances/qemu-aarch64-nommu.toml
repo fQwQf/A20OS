@@ -1,0 +1,8 @@
+# NOMMU AArch64 instance.
+# Replaces: make run-nommu-aarch64 (alias run-nommu-arm64)
+name = "qemu-aarch64-nommu"
+description = "AArch64 NOMMU development boot in QEMU"
+arch = "aarch64"
+
+[kernel]
+nommu = true

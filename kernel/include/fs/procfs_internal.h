@@ -124,6 +124,7 @@ typedef enum {
     PF_SELF,
     PF_FSTYPE,
     PF_SWAPS,
+    PF_SYSRQ_TRIGGER,
 } pf_type_t;
 
 int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,

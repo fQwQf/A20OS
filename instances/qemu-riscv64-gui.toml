@@ -1,0 +1,8 @@
+# GUI RISC-V 64 instance (QEMU virt, virtio-gpu).
+# Replaces: make run-gui-riscv64
+name = "qemu-riscv64-gui"
+description = "RISC-V 64 GUI desktop in QEMU with virtio-gpu/keyboard/mouse"
+arch = "riscv64"
+
+[gui]
+enabled = true

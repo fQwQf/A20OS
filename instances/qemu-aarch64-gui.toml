@@ -1,0 +1,8 @@
+# GUI AArch64 instance (QEMU virt, virtio-gpu).
+# Replaces: make run-gui-aarch64 (alias run-gui-arm64)
+name = "qemu-aarch64-gui"
+description = "AArch64 GUI desktop in QEMU with virtio-gpu"
+arch = "aarch64"
+
+[gui]
+enabled = true

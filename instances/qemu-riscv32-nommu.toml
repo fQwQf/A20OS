@@ -1,0 +1,8 @@
+# NOMMU RISC-V 32 instance.
+# Replaces: make run-nommu-riscv32
+name = "qemu-riscv32-nommu"
+description = "RISC-V 32 NOMMU development boot in QEMU"
+arch = "riscv32"
+
+[kernel]
+nommu = true

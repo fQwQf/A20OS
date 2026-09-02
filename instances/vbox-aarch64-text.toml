@@ -1,0 +1,11 @@
+# VirtualBox ARM64 文本模式 UEFI 镜像。
+# Replaces: make vbox-text-image-aarch64
+name = "vbox-aarch64-text"
+description = "VirtualBox ARM64 UEFI image (text mode)"
+arch = "aarch64"
+board = "virtualbox-aarch64"
+abi = "both"
+
+[package]
+kind = "uefi-image"
+variant = "text"

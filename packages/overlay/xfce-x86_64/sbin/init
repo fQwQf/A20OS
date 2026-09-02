@@ -29,10 +29,14 @@ grep -q '^messagebus:' /etc/group 2>/dev/null || \
     echo 'messagebus:x:102:' >> /etc/group
 
 # libinput finds devices through the udev database; seed it from sysfs.
+# eudev workers may stall on unsupported devfs operations (symlinks,
+# permissions), so use short timeouts and kill lingering workers.
 if command -v udevd >/dev/null 2>&1; then
     udevd --daemon
-    udevadm trigger --settle 2>/dev/null
-    udevadm settle 2>/dev/null
+    timeout 5 udevadm trigger 2>/dev/null || true
+    timeout 5 udevadm settle 2>/dev/null || true
+    # Kill any workers still stuck — we proceed without full udev setup.
+    killall -9 udevd 2>/dev/null || true
 fi
 
 # System message bus (best effort; the session bus below is what matters).
@@ -41,12 +45,28 @@ dbus-daemon --system --fork 2>/dev/null
 
 echo "=== A20OS XFCE Desktop ==="
 
+# Diagnostic: test /dev/fb0 accessibility before starting Xorg
+echo "--- fb0 diagnostic ---"
+ls -la /dev/fb0 2>&1 || echo "  /dev/fb0 not found"
+if [ -e /dev/fb0 ]; then
+    ls /sys/class/fb/ 2>/dev/null || echo "  /sys/class/fb/ missing"
+    ls /sys/class/fb/fb0/ 2>/dev/null || echo "  /sys/class/fb/fb0/ missing"
+    cat /sys/class/fb/fb0/name 2>/dev/null || echo "  name missing"
+    cat /sys/class/fb/fb0/bits_per_pixel 2>/dev/null || echo "  bpp missing"
+    cat /sys/class/fb/fb0/stride 2>/dev/null || echo "  stride missing"
+    cat /sys/class/fb/fb0/virtual_size 2>/dev/null || echo "  vsize missing"
+    # Non-blocking read test with timeout
+    timeout 1 dd if=/dev/fb0 of=/dev/null bs=4096 count=1 2>&1 || echo "  read timed out or failed (expected)"
+fi
+echo "--- end fb0 diagnostic ---"
+
 # Start Xorg
 if [ -x /usr/bin/Xorg ]; then
     echo "Starting Xorg..."
-    Xorg :0 -config /etc/X11/xorg.conf.d/10-a20os.conf -noreset &
+    # Force log to /tmp/ which is always writable in chroot
+    Xorg :0 -config /etc/X11/xorg.conf.d/10-a20os.conf -noreset -logfile /tmp/Xorg.0.log -logverbose 6 &
     XPID=$!
-    sleep 2
+    sleep 3
 
     if kill -0 $XPID 2>/dev/null; then
         echo "Xorg started on :0"
@@ -62,8 +82,8 @@ if [ -x /usr/bin/Xorg ]; then
     fi
 fi
 
-echo "--- /var/log/Xorg.0.log (tail) ---"
-tail -n 60 /var/log/Xorg.0.log 2>/dev/null
+echo "--- /tmp/Xorg.0.log (tail) ---"
+tail -n 80 /tmp/Xorg.0.log 2>/dev/null
 echo "--- end Xorg.0.log ---"
 
 # Remote debug channel through QEMU user networking (host forwards 5555).

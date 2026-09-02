@@ -1,0 +1,13 @@
+# Bring-up smoke for ppc64le: boot the kernel-only image and require the boot
+# stages plus a clean self power-off.  Replaces the former handwritten
+# smoke-ppc64le recipe in tools/targets-smoke.mk.
+name = "smoke-ppc64le"
+description = "ppc64le kernel bring-up smoke (boot stages + self power-off)"
+arch = "ppc64le"
+abi = "linux"
+
+[kernel]
+bringup = true
+
+[test]
+expect = ["part ok", "System is going down for power-off NOW"]
