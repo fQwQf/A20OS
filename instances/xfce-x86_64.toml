@@ -1,0 +1,18 @@
+# XFCE 桌面的 x86_64 版本（X11/xorg + xfce4 元包），经 apk 从
+# xfce-x86_64 world 安装；overlay packages/overlay/xfce-x86_64 提供
+# etc/passwd 与 X 配置。包集合比 riscv64 的 wayland world 小，镜像 2 GiB。
+#
+#   tools/a20 run xfce-x86_64
+name = "xfce-x86_64"
+description = "XFCE desktop via apk world 'xfce-x86_64' (X11/xorg, Alpine upstream packages)"
+arch = "x86_64"
+
+[machine]
+memory = "2G"
+
+[gui]
+enabled = true
+
+[rootfs]
+world = "xfce-x86_64"
+world_size_mb = 2048

@@ -43,6 +43,10 @@ enum {
     DEVFS_ALSA_PCM,
     DEVFS_BLOCK_DIR,
     DEVFS_CHAR_DIR,
+    /* udev-created writable entries (devtmpfs semantics): directories and
+     * symlinks created at runtime under /dev. */
+    DEVFS_DYN_DIR,
+    DEVFS_DYN_SYMLINK,
 };
 
 /* shared helpers defined in devfs_mem.c */

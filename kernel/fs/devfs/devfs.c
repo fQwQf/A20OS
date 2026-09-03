@@ -9,6 +9,7 @@
 #include "core/consts.h"
 #include "core/defs.h"
 #include "core/sync.h"
+#include "fs/vfs/dcache.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
@@ -21,18 +22,202 @@ extern void uart_putc(char c);
 extern int  uart_getc(void);
 
 
+typedef struct devfs_dyn_s devfs_dyn_t;
+
+static vnode_ops_t g_devfs_ops;
+static int devfs_name_is_static(const char *name);
+
 typedef struct {
     int kind;
     const char *name;
     uint64_t rdev;
     class_device_t *class_dev;
     int dynamic;
+    devfs_dyn_t *dyn;
 } devfs_node_t;
+
+/* Registry of runtime-created (udev) entries.  Entries are keyed by a
+ * stable parent token (the static node or the parent dynamic entry), never
+ * by vnode, because each lookup mints a fresh vnode for dynamic nodes.
+ * Removed entries are marked and hidden but never freed: devfs lives for
+ * the whole boot and udev creates only a bounded set of links. */
+struct devfs_dyn_s {
+    devfs_dyn_t *next;
+    const void *parent_key;
+    int   kind;             /* DEVFS_DYN_DIR / DEVFS_DYN_SYMLINK */
+    int   removed;
+    uint64_t ino;
+    char *name;
+    char *target;           /* symlinks only */
+};
+
+static devfs_dyn_t *g_devfs_dyn;
+static spinlock_t g_devfs_dyn_lock = SPINLOCK_INIT;
+static uint64_t g_devfs_dyn_ino = 0x40000;
+
+static const void *devfs_parent_key(vnode_t *dir)
+{
+    devfs_node_t *node = dir ? (devfs_node_t *)dir->fs_data : NULL;
+    if (!node)
+        return NULL;
+    return node->dyn ? (const void *)node->dyn : (const void *)node;
+}
+
+static devfs_dyn_t *devfs_dyn_find(const void *parent_key, const char *name)
+{
+    for (devfs_dyn_t *d = g_devfs_dyn; d; d = d->next)
+        if (!d->removed && d->parent_key == parent_key &&
+            strcmp(d->name, name) == 0)
+            return d;
+    return NULL;
+}
+
+static char *devfs_strdup(const char *s)
+{
+    size_t len = strlen(s) + 1;
+    char *copy = (char *)kmalloc(len);
+    if (copy)
+        memcpy(copy, s, len);
+    return copy;
+}
+
+static int devfs_dyn_create(vnode_t *dir, const char *name, int kind,
+                            const char *target)
+{
+    if (!dir || !name || !*name || strchr(name, '/'))
+        return -EINVAL;
+    if (dir->type != VFS_FT_DIR)
+        return -ENOTDIR;
+    const void *key = devfs_parent_key(dir);
+    if (!key)
+        return -ENOENT;
+    /* Never shadow a static device node (e.g. /dev/null, /dev/console). */
+    devfs_node_t *dir_node = (devfs_node_t *)dir->fs_data;
+    if (dir_node && dir_node->kind == DEVFS_ROOT && devfs_name_is_static(name))
+        return -EEXIST;
+
+    uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
+    if (devfs_dyn_find(key, name)) {
+        spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+        return -EEXIST;
+    }
+    devfs_dyn_t *d = (devfs_dyn_t *)kcalloc(1, sizeof(*d));
+    if (d)
+        d->name = devfs_strdup(name);
+    if (d && kind == DEVFS_DYN_SYMLINK)
+        d->target = devfs_strdup(target ? target : "");
+    if (!d || !d->name || (kind == DEVFS_DYN_SYMLINK && !d->target)) {
+        if (d) {
+            kfree(d->name);
+            kfree(d->target);
+            kfree(d);
+        }
+        spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+        return -ENOMEM;
+    }
+    d->parent_key = key;
+    d->kind = kind;
+    d->ino = g_devfs_dyn_ino++;
+    d->next = g_devfs_dyn;
+    g_devfs_dyn = d;
+    spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
+
+static int devfs_dyn_remove(vnode_t *dir, const char *name, int kind)
+{
+    const void *key = devfs_parent_key(dir);
+    if (!key)
+        return -ENOENT;
+    uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
+    devfs_dyn_t *d = devfs_dyn_find(key, name);
+    if (!d || d->kind != kind) {
+        spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+        return -ENOENT;
+    }
+    if (kind == DEVFS_DYN_DIR) {
+        for (devfs_dyn_t *c = g_devfs_dyn; c; c = c->next)
+            if (!c->removed && c->parent_key == (const void *)d) {
+                spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+                return -ENOTEMPTY;
+            }
+    }
+    d->removed = 1;
+    spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+    vfs_dcache_invalidate_all();
+    return 0;
+}
+
+static int devfs_mkdir(vnode_t *dir, const char *name, int mode)
+{
+    (void)mode;
+    return devfs_dyn_create(dir, name, DEVFS_DYN_DIR, NULL);
+}
+
+static int devfs_symlink(vnode_t *dir, const char *name, const char *target)
+{
+    return devfs_dyn_create(dir, name, DEVFS_DYN_SYMLINK, target);
+}
+
+static int devfs_unlink(vnode_t *dir, const char *name)
+{
+    return devfs_dyn_remove(dir, name, DEVFS_DYN_SYMLINK);
+}
+
+static int devfs_rmdir(vnode_t *dir, const char *name)
+{
+    return devfs_dyn_remove(dir, name, DEVFS_DYN_DIR);
+}
+
+static int devfs_readlink(vnode_t *vn, char *buf, size_t sz)
+{
+    devfs_node_t *node = vn ? (devfs_node_t *)vn->fs_data : NULL;
+    if (!node || node->kind != DEVFS_DYN_SYMLINK || !node->dyn)
+        return -EINVAL;
+    size_t len = strlen(node->dyn->target);
+    if (len >= sz)
+        return -ENAMETOOLONG;
+    memcpy(buf, node->dyn->target, len);
+    return (int)len;
+}
+
+static vnode_t *devfs_dyn_to_vnode(vnode_t *dir, devfs_dyn_t *d)
+{
+    devfs_node_t *node = (devfs_node_t *)kcalloc(1, sizeof(*node));
+    vnode_t *vn = (vnode_t *)kcalloc(1, sizeof(*vn));
+    if (!node || !vn) {
+        kfree(node);
+        kfree(vn);
+        return NULL;
+    }
+    node->kind = d->kind;
+    node->name = d->name;
+    node->dynamic = 1;
+    node->dyn = d;
+    vn->ino = d->ino;
+    if (d->kind == DEVFS_DYN_DIR) {
+        vn->type = VFS_FT_DIR;
+        vn->mode = S_IFDIR | 0755;
+    } else {
+        vn->type = VFS_FT_SYMLINK;
+        vn->mode = S_IFLNK | 0777;
+        vn->size = strlen(d->target);
+    }
+    vnode_ref_init(vn, 1);
+    vn->parent = dir;
+    vnode_get(dir);
+    vn->fs_data = node;
+    vn->ops = &g_devfs_ops;
+    return vn;
+}
+
 
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out);
 static int devfs_stat(vnode_t *vn, kstat_t *st);
 static void devfs_release(vnode_t *vn);
 static vfile_t *devfs_open_vnode(vnode_t *vn, int flags);
+
 
 static int devfs_chmod(vnode_t *vn, int mode) {
     if (!vn) return -ENOENT;
@@ -54,6 +239,11 @@ static vnode_ops_t g_devfs_ops = {
     .release = devfs_release,
     .chmod = devfs_chmod,
     .chown = devfs_chown,
+    .mkdir = devfs_mkdir,
+    .symlink = devfs_symlink,
+    .unlink = devfs_unlink,
+    .rmdir = devfs_rmdir,
+    .readlink = devfs_readlink,
 };
 
 #define STATIC_NODE(k, n, d) { .kind = (k), .name = (n), .rdev = (d) }
@@ -113,6 +303,53 @@ static devfs_node_t g_nodes[] = {
 
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
 
+
+static int devfs_dyn_readdir(vfile_t *vf, void *dirp, size_t count)
+{
+    const void *key = devfs_parent_key(vf->vnode);
+    size_t pos = vf->offset;
+    size_t total = 0;
+    char *out = (char *)dirp;
+    uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
+    for (size_t idx = 0;; idx++) {
+        const char *name;
+        uint8_t dtype;
+        if (idx == 0) { name = "."; dtype = DT_DIR; }
+        else if (idx == 1) { name = ".."; dtype = DT_DIR; }
+        else {
+            size_t seen = 0;
+            devfs_dyn_t *d = NULL;
+            for (devfs_dyn_t *c = g_devfs_dyn; c; c = c->next) {
+                if (c->removed || c->parent_key != key)
+                    continue;
+                if (seen++ == idx - 2) {
+                    d = c;
+                    break;
+                }
+            }
+        if (!d)
+            break;
+        name = d->name;
+        dtype = (d->kind == DEVFS_DYN_DIR) ? DT_DIR : DT_LNK;
+        }
+        size_t nlen = strlen(name);
+        size_t reclen = (offsetof(vfs_dirent64_t, d_name) + nlen + 1 + 7) & ~7UL;
+        if (total + reclen > count)
+            break;
+        vfs_dirent64_t *de = (vfs_dirent64_t *)(out + total);
+        memset(de, 0, reclen);
+        de->d_ino = idx + 1;
+        de->d_off = (int64_t)(idx + 1);
+        de->d_reclen = (uint16_t)reclen;
+        de->d_type = dtype;
+        memcpy(de->d_name, name, nlen + 1);
+        total += reclen;
+        pos = idx + 1;
+    }
+    spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+    vf->offset = pos;
+    return (int)total;
+}
 
 static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     static const struct {
@@ -174,6 +411,8 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
     };
 
     int kind = (int)(intptr_t)vf->priv;
+    if (kind == DEVFS_DYN_DIR)
+        return devfs_dyn_readdir(vf, dirp, count);
     const void *entries_void = NULL;
     size_t nentries = 0;
     if (kind == DEVFS_ROOT) {
@@ -628,10 +867,34 @@ static vnode_t *node_to_vnode(size_t idx) {
     return &g_vnodes[idx];
 }
 
+static int devfs_name_is_static(const char *name)
+{
+    for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++)
+        if (strcmp(name, g_nodes[i].name) == 0)
+            return 1;
+    return 0;
+}
+
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     devfs_node_t *node = (devfs_node_t *)dir->fs_data;
     if (!node || !out) return -ENOENT;
     *out = NULL;
+
+    /* Runtime-created (udev) entries shadow the class-device emulation:
+     * on Linux /dev/block/<maj>:<min> etc. are exactly those udev symlinks. */
+    const void *key = devfs_parent_key(dir);
+    if (key) {
+        uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
+        devfs_dyn_t *d = devfs_dyn_find(key, name);
+        spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+        if (d) {
+            vnode_t *vn = devfs_dyn_to_vnode(dir, d);
+            if (!vn)
+                return -ENOMEM;
+            *out = vn;
+            return 0;
+        }
+    }
 
     if (node->kind == DEVFS_ROOT) {
         for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
@@ -817,12 +1080,16 @@ static int devfs_stat(vnode_t *vn, kstat_t *st) {
         node->kind == DEVFS_SHM_DIR || node->kind == DEVFS_PTS_DIR ||
         node->kind == DEVFS_DRI_DIR || node->kind == DEVFS_SND_DIR ||
         node->kind == DEVFS_INPUT_DIR || node->kind == DEVFS_BLOCK_DIR ||
-        node->kind == DEVFS_CHAR_DIR) {
+        node->kind == DEVFS_CHAR_DIR || node->kind == DEVFS_DYN_DIR) {
         st->st_mode = S_IFDIR | 0555;
         st->st_uid = 0;
         st->st_gid = 0;
         st->st_nlink = 2;
         st->st_blksize = 4096;
+    } else if (node->kind == DEVFS_DYN_SYMLINK && node->dyn) {
+        st->st_mode = S_IFLNK | 0777;
+        st->st_size = strlen(node->dyn->target);
+        st->st_nlink = 1;
     } else if (node->kind == DEVFS_CLASS && node->class_dev) {
         st->st_mode = (node->class_dev->class_type == DEV_CLASS_BLOCK ?
                        S_IFBLK : S_IFCHR) | 0660;
@@ -931,6 +1198,12 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_INPUT_DIR:
+        vf->ops = &g_devfs_dir_ops;
+        break;
+    case DEVFS_BLOCK_DIR:
+    case DEVFS_CHAR_DIR:
+    case DEVFS_DYN_DIR:
+    case DEVFS_DYN_SYMLINK:
         vf->ops = &g_devfs_dir_ops;
         break;
     case DEVFS_SND_DIR:
@@ -1071,7 +1344,9 @@ vnode_t *devfs_mount(void) {
     g_vnodes[i].type = (g_nodes[i].kind == DEVFS_ROOT || g_nodes[i].kind == DEVFS_MISC
                          || g_nodes[i].kind == DEVFS_SHM_DIR || g_nodes[i].kind == DEVFS_PTS_DIR
                          || g_nodes[i].kind == DEVFS_DRI_DIR || g_nodes[i].kind == DEVFS_SND_DIR
-                         || g_nodes[i].kind == DEVFS_INPUT_DIR)
+                         || g_nodes[i].kind == DEVFS_INPUT_DIR
+                         || g_nodes[i].kind == DEVFS_BLOCK_DIR
+                         || g_nodes[i].kind == DEVFS_CHAR_DIR)
                      ? VFS_FT_DIR : VFS_FT_REGULAR;
         g_vnodes[i].mode = (g_vnodes[i].type == VFS_FT_DIR) ? (S_IFDIR | 0555) : (S_IFCHR | 0666);
         vnode_ref_init(&g_vnodes[i], 1);
