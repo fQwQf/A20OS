@@ -109,19 +109,37 @@ static void env_kill_tasks(a20_envelope_t *e)
      * under proc_lock (task-list membership) and signalled after release —
      * signal_send takes its own locks, and the documented lock order does
      * not include signal locks under proc_lock. */
-    int pids[32];
-    int n = 0;
+    enum { KILL_BATCH = 32 };
+    int cursor = -1;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    for (task_t *t = proc_first_task_locked(); t && n < (int)(sizeof(pids) / sizeof(pids[0]));
-         t = proc_next_task_locked(t)) {
-        if (__atomic_load_n(&t->envelope, __ATOMIC_ACQUIRE) == (void *)e)
-            pids[n++] = t->pid;
+    for (;;) {
+        int pids[KILL_BATCH];
+        int n = 0;
+        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        for (task_t *t = proc_first_task_locked(); t;
+             t = proc_next_task_locked(t)) {
+            if (__atomic_load_n(&t->envelope, __ATOMIC_ACQUIRE) != (void *)e ||
+                t->pid <= cursor)
+                continue;
+
+            if (n == KILL_BATCH && t->pid >= pids[KILL_BATCH - 1])
+                continue;
+            int pos = n < KILL_BATCH ? n++ : KILL_BATCH - 1;
+            while (pos > 0 && pids[pos - 1] > t->pid) {
+                if (pos < KILL_BATCH)
+                    pids[pos] = pids[pos - 1];
+                pos--;
+            }
+            pids[pos] = t->pid;
+        }
+        spin_unlock_irqrestore(&proc_lock, flags);
+
+        if (n == 0)
+            break;
+        for (int i = 0; i < n; i++)
+            signal_send(pids[i], SIGKILL);
+        cursor = pids[n - 1];
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
-
-    for (int i = 0; i < n; i++)
-        signal_send(pids[i], SIGKILL);
 }
 
 /* Lazy expiry check shared by all mediation entry points.
@@ -528,12 +546,24 @@ int env_enter(int64_t env_id)
     if (!e)
         return -ENOENT;
 
+    if (env_check_expired(e)) {
+        env_put_ref(e);
+        return -EACCES;
+    }
+
     task_t *t = proc_current();
     void *expected = NULL;
     if (!__atomic_compare_exchange_n(&t->envelope, &expected, e, false,
                                      __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
         env_put_ref(e);
         return -EINVAL; /* already enveloped: envelopes are monotone */
+    }
+    /* Close the revoke/expiry race between the pre-attach check and CAS.
+     * A task never returns successfully while attached to an expired root. */
+    if (env_check_expired(e)) {
+        __atomic_store_n(&t->envelope, NULL, __ATOMIC_RELEASE);
+        env_put_ref(e);
+        return -EACCES;
     }
     return 0;
 }
