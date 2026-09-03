@@ -2,6 +2,11 @@
 #include "syscall_impl.h"
 
 #include "fs/io_uring.h"
+#include "ipc/envelope.h"
+#include "ipc/ipc.h"
+#include "proc/proc.h"
+
+#define IORING_SETUP_SQPOLL (1u << 1)
 
 /*
  * io_uring syscalls.  The ring is created in kernel/fs/io_uring.c; the setup
@@ -49,15 +54,39 @@ int64_t sys_io_uring_setup(unsigned entries, void *params)
     if (!params)
         return -EFAULT;
 
+    struct io_uring_params requested;
+    if (copy_from_user(&requested, params, sizeof(requested)) < 0)
+        return -EFAULT;
+    if (env_active(proc_current()) &&
+        (requested.flags & IORING_SETUP_SQPOLL))
+        return -EPERM;
+
     int fd = io_uring_create(entries);
     if (fd < 0)
         return fd;
+
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) {
+        sys_close(fd);
+        return gfd;
+    }
+    env_kind_register((int)gfd, A20_OBJ_EVENT_QUEUE);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_EVENT_QUEUE, rights,
+                                     (int)gfd);
+        if (mr) {
+            sys_close(fd);
+            return mr;
+        }
+    }
 
     /* The kernel-allocated ring pages are not mapped at a user address that
      * userland knows, so report the standard field layout with the ring mask
      * so direct SQ/CQ access can be driven through io_uring_enter(). */
     struct io_uring_params up;
     memset(&up, 0, sizeof(up));
+    up.flags = requested.flags;
     up.sq_entries = entries;
     up.cq_entries = entries;
     up.sq_off.ring_mask = 0;

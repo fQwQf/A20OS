@@ -327,8 +327,9 @@ int main(void)
         printf("CORPUS: %s/%s cls=%s none=%d env=%d%s\n", c->eco, c->name,
                cls_name[c->cls], first_none, first_env,
                stable ? "" : " UNSTABLE");
-        if (!fidelity_ok || !stable) {
-            printf("CORPUS-FAIL: %s/%s fidelity/stability\n",
+        int env_blocked = first_env == 1;
+        if (!fidelity_ok || !stable || !env_blocked) {
+            printf("CORPUS-FAIL: %s/%s fidelity/stability/env-block\n",
                    c->eco, c->name);
             failures++;
         }
@@ -355,11 +356,9 @@ int main(void)
            "fidelity-bad=%d\n",
            BENIGN_N - benign_fail, BENIGN_N, unstable, fidelity_bad);
 
-    /* PASS gate: replay fidelity (all attacks succeed unprotected),
-     * outcome stability across reps, and all benign installs complete
-     * under the envelope.  Per-class block rates are reported, not
-     * gated: persist/creds classes are path-dimension cases outside
-     * envelope v1 scope (compose with Landlock), matching the paper. */
+    /* PASS gate: replay fidelity (all attacks succeed unprotected), every
+     * malicious canonical entry is blocked under the envelope, outcomes are
+     * stable across reps, and every benign install completes. */
     if (failures == 0) {
         printf("ENVELOPE_CORPUS: PASS\n");
         return 0;

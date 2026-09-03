@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 
 #ifndef SYS_a20_channel_pair
 #define SYS_a20_channel_pair    900
@@ -21,6 +22,18 @@
 #ifndef SYS_a20_registry_client
 #define SYS_a20_registry_client 901
 #endif
+#define SYS_a20_envelope_create 902
+#define SYS_a20_envelope_enter  903
+
+struct env_policy {
+    unsigned int allowed_types;
+    unsigned long long rights_by_class[32];
+    unsigned long long time_budget_ns;
+    unsigned long long op_budget;
+    unsigned long long data_budget;
+    unsigned int propagation_types;
+    unsigned int flags;
+};
 
 int main(void)
 {
@@ -60,6 +73,41 @@ int main(void)
     close(regfd);
     close(fds[0]);
     close(fds[1]);
+
+    /* Both Linux bridge calls grant CHANNEL_ENDPOINT authority and must be
+     * rejected by a file-only envelope. */
+    struct env_policy policy;
+    memset(&policy, 0, sizeof(policy));
+    policy.allowed_types = 1u << 3; /* A20_OBJ_FILE */
+    policy.rights_by_class[3] = (1ull << 0) | (1ull << 1) |
+                                (1ull << 3) | (1ull << 4);
+    policy.op_budget = 16;
+    policy.data_budget = 4096;
+    long env_id = syscall(SYS_a20_envelope_create, &policy, 0L);
+    if (env_id < 0)
+        return 7;
+    pid_t child = fork();
+    if (child < 0)
+        return 8;
+    if (child == 0) {
+        if (syscall(SYS_a20_envelope_enter, env_id) < 0)
+            _exit(9);
+        int denied[2];
+        errno = 0;
+        if (syscall(SYS_a20_channel_pair, denied) != -1 || errno != EPERM)
+            _exit(10);
+        errno = 0;
+        if (syscall(SYS_a20_registry_client) != -1 || errno != EPERM)
+            _exit(11);
+        _exit(0);
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("A20_CHANNEL: FAIL envelope mediation status=%d\n", status);
+        return 9;
+    }
+    printf("A20_CHANNEL: envelope-deny PASS\n");
 
     printf("A20_CHANNEL: PASS\n");
     return 0;

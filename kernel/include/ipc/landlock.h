@@ -13,6 +13,7 @@
  */
 
 #include "core/types.h"
+#include "core/refcount.h"
 
 struct task_t;
 
@@ -56,6 +57,7 @@ struct task_t;
 
 /* The ruleset object stored in the task. */
 typedef struct landlock_ruleset {
+    refcount_t refs;                    /* fd + restricted-task ownership */
     struct landlock_ruleset *next; /* process-local list */
     int fd;                        /* ruleset fd (anonfd) */
     int used;
