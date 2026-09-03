@@ -268,6 +268,7 @@ SMOKE_TIMEOUT ?= 20s
 SMOKE_TIMEOUT_ENVELOPE ?= 60s
 SMOKE_TIMEOUT_ENVELOPE_PILOT ?= 120s
 SMOKE_TIMEOUT_ENVELOPE_BENCH ?= 180s
+SMOKE_TIMEOUT_ENVELOPE_CORPUS ?= 300s
 # Full XFCE desktop bring-up under TCG software rendering is slow; the fixed
 # 15s scanout window in smoke_qemu_gui.py is not enough for the riscv64 image
 # to finish its first frame.  Allow each GUI smoke target to size the window.
