@@ -103,24 +103,33 @@ $(FS_TEST_IMG): $(FAT32_IMG)
 
 ext4_img_only: $(EXT4_IMG)
 
+# Recursive gates can overlap builds that share BUILD_DIR.  Keep staging private
+# to each invocation and publish the image atomically while holding one lock.
 $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
-	@echo "Building ext4 image..."
-	@rm -rf $(EXT4_STAGING_DIR) && mkdir -p $(EXT4_STAGING_DIR)
 	@set -e; \
+	echo "Building ext4 image..."; \
+	mkdir -p "$(BUILD_DIR)"; \
+	lock="$(EXT4_IMG).lock"; \
+	exec 9>"$$lock"; \
+	flock 9; \
+	staging=$$(mktemp -d "$(EXT4_STAGING_DIR).XXXXXX"); \
+	tmp="$(EXT4_IMG).tmp.$$$$"; \
+	trap 'rm -rf -- "$$staging"; rm -f -- "$$tmp"' EXIT HUP INT TERM; \
 	for f in $(USER_BUILD_DIR)/*; do \
 		[ -f "$$f" ] || continue; \
-		cp "$$f" "$(EXT4_STAGING_DIR)/$$(basename "$$f")"; \
-	done
-	cp $(USER_BUILD_DIR)/mksh $(EXT4_STAGING_DIR)/sh
-	cp $(USER_BUILD_DIR)/mksh $(EXT4_STAGING_DIR)/bash
-	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > $(EXT4_STAGING_DIR)/test.txt
-	@mkdir -p $(EXT4_STAGING_DIR)/etc
-	@printf '%s\n' $(PROTOCOLS_LINES) > $(EXT4_STAGING_DIR)/etc/protocols
-	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > $(EXT4_STAGING_DIR)/etc/os-release
-	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(EXT4_IMG) bs=1048576 count=$(EXT4_IMAGE_MB)
-	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d $(EXT4_STAGING_DIR) $(EXT4_IMG)
-	@rm -rf $(EXT4_STAGING_DIR)
+		cp "$$f" "$$staging/$$(basename "$$f")"; \
+	done; \
+	cp "$(USER_BUILD_DIR)/mksh" "$$staging/sh"; \
+	cp "$(USER_BUILD_DIR)/mksh" "$$staging/bash"; \
+	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > "$$staging/test.txt"; \
+	mkdir -p "$$staging/etc"; \
+	printf '%s\n' $(PROTOCOLS_LINES) > "$$staging/etc/protocols"; \
+	printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > "$$staging/etc/os-release"; \
+	dd if=/dev/zero of="$$tmp" bs=1048576 count=$(EXT4_IMAGE_MB); \
+	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d "$$staging" "$$tmp"; \
+	mv -f "$$tmp" "$(EXT4_IMG)"; \
+	rm -rf -- "$$staging"; \
+	trap - EXIT HUP INT TERM
 
 ext4_img: $(USER_BUILD_STAMP) ext4_img_only
 	cp $(EXT4_IMG) $(FS_TEST_IMG)
