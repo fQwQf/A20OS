@@ -82,7 +82,9 @@ size_mb = 128                # FAT32 根盘大小
 gui_size_mb = 512            # GUI 根盘大小
 ext4_size_mb = 128
 extra_size_mb = 2048
-world = "base"               # packages/world/<name>.world 必须存在
+world = "base"               # packages/world/<name>.world 必须存在；设置后走 apk 镜像流程
+world_size_mb = 4096         # world 镜像大小（→ PKG_SIZE_MB）
+alpine = true                # world 组装是否引入 Alpine 上游仓库（→ PKG_ALPINE）
 extra_packages = ["vim", "git", "gcc"]
 drivers = ["virtio-net", "hda"]   # 运行时驱动子集，见下文"组件注册表"
 
@@ -132,7 +134,8 @@ disk_out = "disk.img"        # 仅 release
 | `gui.display` / `audio_driver` / `audio_device` / `frame_window` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` / `GUI_FRAME_WINDOW` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
 | `rootfs.size_mb` / `gui_size_mb` / `ext4_size_mb` / `extra_size_mb` | `FAT32_IMAGE_MB` / `GUI_FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` / `EXTRA_IMAGE_MB` |
-| `rootfs.world` / `extra_packages` | `PKG_WORLD` / `EXTRA_PACKAGES` |
+| `rootfs.world` / `world_size_mb` / `alpine` | `PKG_WORLD` / `PKG_SIZE_MB` / `PKG_ALPINE` |
+| `rootfs.extra_packages` | `EXTRA_PACKAGES` |
 | `rootfs.drivers` | `DRIVER_SELECTION`（自动补 `.a20drv` 后缀） |
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
@@ -144,8 +147,8 @@ disk_out = "disk.img"        # 仅 release
 
 | 动作 | 说明 |
 |---|---|
-| `build` | 所有架构；bringup 或 armv7m 实例自动选 `kernel-only`，其余 `dev-build`（文本模式附带 `USER_BUILD_DESKTOP=0`） |
-| `run` | 有通用 QEMU 路径的架构；armv7m 需 `[stm32] qemu = true`（走 stm32vldiscovery） |
+| `build` | 所有架构；bringup 或 armv7m 实例自动选 `kernel-only`，设了 `rootfs.world` 走 `image-world`，其余 `dev-build`（文本模式附带 `USER_BUILD_DESKTOP=0`） |
+| `run` | 有通用 QEMU 路径的架构；armv7m 需 `[stm32] qemu = true`（走 stm32vldiscovery）；`rootfs.world` 实例走 `run-world`/`run-world-gui`（world 镜像作第二块盘，distro 模式） |
 | `debug` | 通用 QEMU 架构；`-O0 -g` + GDB stub |
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
 | `flash` | 需要 `[flash]` 段；当前为 armv7m/STM32 OpenOCD 流程（先构建再烧录） |
@@ -198,6 +201,37 @@ description = "virtio network device"
 | `make check-instances` | 校验 `instances/` 全部实例（schema + 语义 + 驱动选择） |
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
+
+## apk world 镜像实例（用包管理组装用户态）
+
+`[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见
+[packaging/overview.md](packaging/overview.md)）：`build` 等价于
+`make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于
+`run-world` / `run-world-gui`——world 镜像作为第二块盘挂载，含
+`/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
+
+例如用 apk 安装完整 XFCE 桌面的实例（`instances/xfce-riscv64.toml`）：
+
+```toml
+name = "xfce-riscv64"
+arch = "riscv64"
+
+[machine]
+memory = "2G"
+
+[gui]
+enabled = true
+
+[rootfs]
+world = "xfce"        # packages/world/xfce.world：labwc + xfce4-* + 字体 + 输入法……
+world_size_mb = 4096
+```
+
+`tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从
+Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false`
+可做纯本地仓库组合。x86_64 另有 X11/xorg 变体 `xfce-x86_64`（world
+`xfce-x86_64`）。注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted
+架构。
 
 ## 与旧 make 目标的对照
 

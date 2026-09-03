@@ -147,7 +147,12 @@ int64_t sys_mprotect(uint64_t addr, size_t len, int prot) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EINVAL;
     /* The public MM wrapper owns mm->lock and the deferred TLB flush. */
-    return mm_mprotect(t->mm, addr, len, prot);
+    int64_t r = mm_mprotect(t->mm, addr, len, prot);
+    if (r < 0)
+        ktrace_mm("[MM] mprotect fail pid=%d comm=%s addr=%lx len=%lu "
+                  "prot=%d ret=%ld\n", t->pid, t->name,
+                  (unsigned long)addr, (unsigned long)len, prot, (long)r);
+    return r;
 }
 
 int64_t sys_msync(uint64_t addr, size_t len, int flags) {
@@ -373,7 +378,8 @@ int64_t sys_mremap(uint64_t old_addr, size_t old_size, size_t new_size, int flag
 
 int64_t sys_shm_open(const char *name, int oflag, int mode) {
     (void)mode;
-    return sys_memfd_create(name, (unsigned)(oflag & O_CLOEXEC));
+    /* shm_open oflags use O_CLOEXEC; sys_memfd_create takes MFD_* flags. */
+    return sys_memfd_create(name, (oflag & O_CLOEXEC) ? MFD_CLOEXEC : 0);
 }
 
 int64_t sys_mlock(uint64_t addr, size_t len) {

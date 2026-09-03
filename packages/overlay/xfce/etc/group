@@ -1,0 +1,13 @@
+root:x:0:
+tty:x:5:
+disk:x:6:
+lp:x:7:
+dialout:x:20:
+audio:x:29:
+video:x:44:
+kvm:x:47:
+cdrom:x:51:
+tape:x:58:
+kmem:x:85:
+messagebus:x:102:
+input:x:290:
