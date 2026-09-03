@@ -112,9 +112,19 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         if (mr < 0)
             return (vaddr_t)mr;
     } else if (addr != 0) {
-        vm_area_t *existing = mm_find_vma(mm, addr);
-        if (existing && existing->start < addr + len && existing->end > addr)
+        /* Linux hint semantics: a hint outside the user VA range (or
+         * colliding with an existing VMA) is ignored, never fatal --
+         * V8's GetRandomMmapAddr generates hints up to 2^46 and relies
+         * on the kernel falling back to a legal address.  Only
+         * MAP_FIXED above may fail for an out-of-range address. */
+        if (addr + len < addr || addr + len > USER_VA_LIMIT) {
             addr = 0;
+        } else {
+            vm_area_t *existing = mm_find_vma(mm, addr);
+            if (existing && existing->start < addr + len &&
+                existing->end > addr)
+                addr = 0;
+        }
     }
 
 #ifdef CONFIG_NOMMU
@@ -199,9 +209,16 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         if (mr < 0)
             return (vaddr_t)mr;
     } else if (addr != 0) {
-        vm_area_t *existing = mm_find_vma(mm, addr);
-        if (existing && existing->start < addr + len && existing->end > addr)
+        /* Same hint semantics as the anonymous path: out-of-range or
+         * colliding hints fall back to the gap search. */
+        if (addr + len < addr || addr + len > USER_VA_LIMIT) {
             addr = 0;
+        } else {
+            vm_area_t *existing = mm_find_vma(mm, addr);
+            if (existing && existing->start < addr + len &&
+                existing->end > addr)
+                addr = 0;
+        }
     }
 
 #ifdef CONFIG_NOMMU
