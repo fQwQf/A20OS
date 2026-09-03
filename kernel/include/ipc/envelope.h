@@ -34,8 +34,11 @@ struct task_t;
 #define A20_ENV_F_KILL_ON_EXPIRE  (1u << 0) /* kill attached tasks on expiry */
 #define A20_ENV_F_MONITOR         (1u << 1) /* count/log grandfathered fds   */
 
-/* Registry limits. */
-#define A20_ENV_MAX_INSTANCES 16
+/* Registry limits.  Instance slots are freed only on envelope destroy
+ * (refcount zero); a supervisor that wraps many launches (CI runner,
+ * corpus evaluation) holds one ref per live launch, so the cap must
+ * cover a session's concurrent envelopes, not a handful. */
+#define A20_ENV_MAX_INSTANCES 1024
 #define A20_ENV_MAX_SHADOWS   128
 
 /* Object types reused from the Native object model (ipc/ipc.h); the policy

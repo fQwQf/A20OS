@@ -769,13 +769,10 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
         return 0;
     }
     if (req == TIOCGWINSZ || req == PPC64_TIOCGWINSZ) {
-        int r = vfs_ioctl((int)gfd, req, arg);
-        if (r != -ENOTTY)
-            return r;
-
-        /* Child tools such as rust-lld inherit pipes, not the tty itself. */
-        linux_winsize_t ws = { .ws_row = 24, .ws_col = 80 };
-        return copy_to_user(arg, &ws, sizeof(ws)) < 0 ? -EFAULT : 0;
+        /* Linux semantics: ENOTTY on non-terminals.  musl's isatty() is
+         * TIOCGWINSZ-based, so faking success here makes pipes/files look
+         * like ttys and trips Node.js's PlatformInit tcgetattr check. */
+        return vfs_ioctl((int)gfd, req, arg);
     }
     if (req == TIOCGPTN) {
         int pty_number = 0;
