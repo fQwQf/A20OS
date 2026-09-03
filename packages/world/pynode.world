@@ -1,0 +1,20 @@
+# pynode profile —— Python 3 + Node.js/npm 运行时（纯 Alpine 上游包）
+#
+# 配套 packages/overlay/pynode/（a20-distro 标记 + stage-2 init），
+# 启动后由 init 自动 chroot 接管，guest 直接落在本 rootfs。
+# 用途：真实包评估——guest 内原生执行 pip/npm 安装期脚本。
+#
+#   tools/a20 run pynode-riscv64
+#
+# 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk 缓存。
+
+musl
+busybox
+ca-certificates
+curl
+git
+python3
+py3-pip
+py3-setuptools
+nodejs
+npm
