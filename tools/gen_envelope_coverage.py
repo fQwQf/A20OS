@@ -24,7 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEF = ROOT / "kernel" / "abi" / "linux" / "syscall_table.def"
-NR = ROOT / "kernel" / "include" / "abi" / "linux" / "syscall_nr.h"
+NR = ROOT / "kernel" / "include" / "core" / "syscall_nr.h"
 OUT = ROOT / "docs" / "research" / "verification" / "envelope_coverage.md"
 
 # ---------------------------------------------------------------- curation
@@ -40,6 +40,10 @@ ACQUIRE = {
     "shmat":         "A5 MEMORY 类检查（足迹计费 W2）",
     "accept4":       "A2 派生 socket 全新获取裁决",
     "accept":        "同 accept4（薄委托）",
+    "socketpair":    "A2 双端 SOCKET 获取，各自安装影子",
+    "io_uring_setup":"A9 ring fd 按 EVENT_QUEUE 获取；SQPOLL 拒绝",
+    "a20_channel_pair": "Linux bridge 双端 CHANNEL_ENDPOINT 获取",
+    "a20_registry_client": "Linux bridge registry CHANNEL_ENDPOINT 获取",
 }
 TRANSFER = {
     "pidfd_getfd":   "A7 全新获取裁决（安装前）",
@@ -47,8 +51,7 @@ TRANSFER = {
     "recvmsg":       "A6 接收侧逐 fd 安装裁决 + 数据面 total 字节 R 计费",
 }
 FAILCLOSED = {
-    "io_uring_setup":    "ring 本身不授予权威；SQE 执行点统一调解",
-    "io_uring_register": "A9 fixed-file 批量导入对信封任务 -EPERM",
+    "io_uring_register": "A9 REGISTER_FILES 分支对信封任务 -EPERM；EVENTFD 完成通知在执行点调解",
 }
 USE = {
     "read":      "方向位 R", "readv": "方向位 R", "pread64": "方向位 R",
@@ -63,7 +66,6 @@ USE = {
 PLANNED = {
     # socket control-plane odds and ends
     "setsockopt": "W2 审计", "shutdown": "W2",
-    "socketpair": "W2: 双端创建获取（当前未钩）",
     # memory mappings (A4 设计已写、实现未接)
     "mmap": "W2: A4 file-backed Map right + 时间",
     # SysV / POSIX IPC
@@ -81,6 +83,61 @@ PLANNED = {
     "ptrace": "W2: 跨进程内省对信封拒绝", "process_vm_readv": "W2 同 ptrace", "process_vm_writev": "W2 同 ptrace",
     "open_tree_attr": "W2 mount-api 族", "listmount": "W2 mount-api 族", "statmount": "W2 mount-api 族",
 }
+
+# Syscalls with no resource-authority acquisition, transfer, or consumption
+# under the envelope contract.  This allowlist is intentionally exhaustive:
+# a new syscall must be placed in one of the curated sets instead of silently
+# falling through to NA.
+NA = frozenset("""
+io_setup io_destroy io_submit io_cancel io_getevents
+setxattr lsetxattr fsetxattr getxattr lgetxattr fgetxattr listxattr
+llistxattr flistxattr removexattr lremovexattr fremovexattr getcwd
+lookup_dcookie epoll_ctl epoll_pwait dup dup3 fcntl inotify_add_watch
+inotify_rm_watch ioctl ioprio_set ioprio_get flock mknodat mkdirat unlinkat
+symlinkat linkat renameat pivot_root nfsservctl statfs fstatfs truncate
+ftruncate fallocate faccessat chdir fchdir chroot fchmod fchmodat fchownat
+fchown close vhangup quotactl getdents64 lseek preadv pwritev sendfile
+select ppoll vmsplice splice tee readlinkat fstatat fstat sync fsync
+fdatasync sync_file_range timerfd_settime timerfd_gettime utimensat acct
+capget capset personality exit exit_group waitid set_tid_address unshare
+futex set_robust_list get_robust_list nanosleep getitimer setitimer
+kexec_load init_module delete_module timer_create timer_gettime
+timer_getoverrun timer_settime timer_delete clock_settime clock_gettime
+clock_getres clock_nanosleep syslog sched_setparam sched_setscheduler
+sched_getscheduler sched_getparam sched_setaffinity sched_getaffinity
+sched_yield sched_get_priority_max sched_get_priority_min
+sched_rr_get_interval restart_syscall kill tkill tgkill sigaltstack
+sigsuspend sigaction sigprocmask rt_sigpending sigtimedwait rt_sigqueueinfo
+sigreturn setpriority getpriority reboot setregid setgid setreuid setuid
+setresuid getresuid setresgid getresgid setfsuid setfsgid times setpgid
+getpgid getsid setsid getgroups setgroups uname sethostname setdomainname
+getrlimit setrlimit getrusage umask prctl getcpu gettimeofday settimeofday
+adjtimex getpid getppid getuid geteuid getgid getegid gettid sysinfo
+mq_unlink mq_notify mq_getsetattr shmdt getsockname getpeername getsockopt
+readahead brk munmap mremap add_key request_key keyctl clone execve
+fadvise64 mprotect msync mlock munlock mlockall munlockall mincore madvise
+remap_file_pages mbind get_mempolicy set_mempolicy migrate_pages move_pages
+rt_tgsigqueueinfo riscv_hwprobe riscv_flush_icache wait4 prlimit64
+fanotify_mark name_to_handle_at open_by_handle_at clock_adjtime syncfs setns
+kcmp finit_module sched_setattr sched_getattr renameat2 seccomp getrandom
+execveat membarrier mlock2 copy_file_range preadv2 pwritev2 pkey_mprotect
+pkey_alloc pkey_free statx io_pgetevents rseq kexec_file_load
+clock_gettime64 clock_settime64 clock_getres_time64 clock_nanosleep_time64
+timer_gettime64 timer_settime64 timerfd_gettime64 timerfd_settime64
+utimensat_time64 pselect6_time64 ppoll_time64 io_pgetevents_time64
+rt_sigtimedwait_time64 futex_time64 sched_rr_get_interval_time64
+pidfd_send_signal open_tree move_mount fsopen fsconfig fsmount fspick
+pidfd_open clone3 close_range openat2 faccessat2 process_madvise
+epoll_pwait2 mount_setattr quotactl_fd landlock_create_ruleset
+landlock_add_rule landlock_restrict_self memfd_secret process_mrelease
+futex_waitv set_mempolicy_home_node cachestat fchmodat2 map_shadow_stack
+futex_wake futex_wait futex_requeue lsm_get_self_attr lsm_set_self_attr
+lsm_list_modules mseal setxattrat getxattrat listxattrat removexattrat
+file_getattr file_setattr listns a20_envelope_create a20_envelope_enter
+a20_envelope_revoke a20_envelope_stats a20_envelope_audit arch_prctl
+set_thread_area poll time pause utime utimes get_thread_area mkswap shm_open
+alarm clock_gettime32
+""".split())
 
 def parse_defs():
     txt = DEF.read_text()
@@ -105,11 +162,29 @@ def classify(name):
         return "FAILCLOSED", FAILCLOSED[name]
     if name in PLANNED:
         return "PLANNED", PLANNED[name]
-    return "NA", ""
+    if name in NA:
+        return "NA", ""
+    raise ValueError(f"unclassified syscall: {name}")
 
 def main():
     names = parse_defs()
     nums = parse_numbers()
+    groups = {
+        "ACQUIRE": set(ACQUIRE), "TRANSFER": set(TRANSFER),
+        "USE": set(USE), "FAILCLOSED": set(FAILCLOSED),
+        "PLANNED": set(PLANNED), "NA": set(NA),
+    }
+    memberships = {}
+    for cls, members in groups.items():
+        for name in members:
+            memberships.setdefault(name, []).append(cls)
+    duplicates = {n: cs for n, cs in memberships.items() if len(cs) != 1}
+    stale = set(memberships) - set(names)
+    if duplicates:
+        raise ValueError(f"multiply classified syscalls: {duplicates}")
+    if stale:
+        raise ValueError(f"classified syscalls absent from table: {sorted(stale)}")
+
     rows = []
     counts = {"ACQUIRE": 0, "TRANSFER": 0, "USE": 0, "FAILCLOSED": 0,
               "PLANNED": 0, "NA": 0}

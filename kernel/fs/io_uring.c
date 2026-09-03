@@ -419,7 +419,10 @@ long io_uring_enter(int gfd, unsigned to_submit, unsigned min_complete,
             if (evf) {
                 if (eventfd_vfile_is(evf)) {
                     uint64_t one = 1;
-                    (void)vfs_write_file(evf, (const char *)&one, sizeof(one));
+                    if (!env_active(proc_current()) ||
+                        env_mediate_use_dir((int)egfd, sizeof(one), 1) == 0)
+                        (void)vfs_write_file(evf, (const char *)&one,
+                                             sizeof(one));
                 }
                 vfs_put_file_ref((int)egfd, evf);
             }

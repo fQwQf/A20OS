@@ -922,7 +922,15 @@ docs:
 # explicitly classified before the gate passes again.
 .PHONY: check-envelope-coverage
 check-envelope-coverage:
-	@python3 tools/gen_envelope_coverage.py
-	@git diff --exit-code --quiet -- docs/research/verification/envelope_coverage.md \
-		&& echo "check-envelope-coverage: PASS" \
-		|| { echo "check-envelope-coverage: FAIL -- matrix drifted; review and commit"; exit 1; }
+	@tmp="$$(mktemp)"; \
+		cp docs/research/verification/envelope_coverage.md "$$tmp"; \
+		status=0; \
+		python3 tools/gen_envelope_coverage.py || status=$$?; \
+		if [ "$$status" -eq 0 ] && cmp -s "$$tmp" docs/research/verification/envelope_coverage.md; then \
+			echo "check-envelope-coverage: PASS"; \
+		else \
+			echo "check-envelope-coverage: FAIL -- matrix drifted; review and commit"; \
+			status=1; \
+		fi; \
+		rm -f "$$tmp"; \
+		exit "$$status"

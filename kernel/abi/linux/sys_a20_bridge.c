@@ -12,9 +12,33 @@
 #include "syscall_impl.h"
 #include "core/errno.h"
 #include "core/fcntl.h"
+#include "fs/fdtable.h"
 #include "ipc/envelope.h"
 #include "ipc/ipc.h"
 #include "ipc/channel_fd.h"
+#include "proc/proc.h"
+
+/* a20_channel_fd_install() returns a task-local fd.  Resolve its global fd
+ * before exposing it to userspace so the bridge follows the same acquisition
+ * contract as the other Linux fd-creation paths. */
+static int mediate_channel_fd(int fd)
+{
+    int64_t gfd = fdtable_get_current(fd);
+    if (gfd < 0) {
+        fdtable_close_current(fd);
+        return (int)gfd;
+    }
+    env_kind_register((int)gfd, A20_OBJ_CHANNEL_ENDPOINT);
+    if (!env_active(proc_current()))
+        return 0;
+
+    uint64_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+    int r = env_mediate_acquire((uint8_t)A20_OBJ_CHANNEL_ENDPOINT, rights,
+                                (int)gfd);
+    if (r)
+        fdtable_close_current(fd);
+    return r;
+}
 
 /*
  * SYS_a20_channel_pair(int fds[2]) — create a channel pair and return both
@@ -34,21 +58,29 @@ int64_t sys_a20_channel_pair(const linux_syscall_args_t *args)
 
     int a = a20_channel_fd_install(ep0, O_RDWR);
     if (a < 0) {
-        a20_channel_ep_release(ep0);
         a20_channel_ep_release(ep1);
         return a;
     }
+    int mr = mediate_channel_fd(a);
+    if (mr) {
+        a20_channel_ep_release(ep1);
+        return mr;
+    }
     int b = a20_channel_fd_install(ep1, O_RDWR);
     if (b < 0) {
-        vfs_close(a);
-        a20_channel_ep_release(ep1);
+        fdtable_close_current(a);
         return b;
+    }
+    mr = mediate_channel_fd(b);
+    if (mr) {
+        fdtable_close_current(a);
+        return mr;
     }
 
     int out[2] = { a, b };
     if (copy_to_user(fds, out, sizeof(out)) < 0) {
-        vfs_close(a);
-        vfs_close(b);
+        fdtable_close_current(a);
+        fdtable_close_current(b);
         return -EFAULT;
     }
     return 0;
@@ -69,7 +101,11 @@ int64_t sys_a20_registry_client_fd(const linux_syscall_args_t *args)
     if (!ep)
         return -EOPNOTSUPP;
     a20_object_ref(ep, A20_OBJ_CHANNEL_ENDPOINT);
-    return a20_channel_fd_install(ep, O_RDWR);
+    int fd = a20_channel_fd_install(ep, O_RDWR);
+    if (fd < 0)
+        return fd;
+    int mr = mediate_channel_fd(fd);
+    return mr ? mr : fd;
 #else
     /* Native ABI support is not built into this kernel image. */
     return -EOPNOTSUPP;
@@ -129,4 +165,3 @@ int64_t sys_a20_envelope_audit(const linux_syscall_args_t *args)
     extern int64_t env_audit(struct a20_env_audit *out);
     return env_audit((struct a20_env_audit *)(uintptr_t)args->arg[0]);
 }
-

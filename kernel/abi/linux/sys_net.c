@@ -51,6 +51,22 @@ int64_t sys_socketpair(int domain, int type, int protocol, int *sv) {
     int gfds[2];
     int r = net_socketpair_create(domain, type, protocol, gfds);
     if (r < 0) return r;
+    env_kind_register(gfds[0], A20_OBJ_SOCKET);
+    env_kind_register(gfds[1], A20_OBJ_SOCKET);
+    if (env_active(proc_current())) {
+        uint64_t rights = A20_RIGHT_CONNECT | A20_RIGHT_ACCEPT |
+                          A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT;
+        int mr = env_mediate_acquire((uint8_t)A20_OBJ_SOCKET, rights,
+                                     gfds[0]);
+        if (mr == 0)
+            mr = env_mediate_acquire((uint8_t)A20_OBJ_SOCKET, rights,
+                                     gfds[1]);
+        if (mr) {
+            vfs_close(gfds[0]);
+            vfs_close(gfds[1]);
+            return mr;
+        }
+    }
     task_t *t = proc_current();
     int l0 = fdtable_install(t, gfds[0], 0);
     if (l0 < 0) {
