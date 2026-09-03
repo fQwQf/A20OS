@@ -37,11 +37,17 @@ A 20-cell pilot experiment across four defense configurations
 (unrestricted, Landlock-permissive, Landlock-strict, envelope)
 demonstrates the coarse-grained dilemma: permissive path-based policies
 admit all tested attacks while strict variants block legitimate installs.
-Envelopes simultaneously achieve 100\% benign-install completion and
-block all tested attack vectors through type denial, rights clamping,
-and budget exhaustion.  Overhead microbenchmarks show acquisition-path
-cost of $+5.1\%$ and use-path cost of $+14$--$28\%$ under full-system
-emulation.
+Within this pilot, only the envelope arm simultaneously completes the
+benign installation and blocks all four tested attack classes, through
+type denial, rights clamping, and budget exhaustion.  An
+exact-execution experiment runs the unmodified install scripts of 66
+real malicious packages on stock Node.js and CPython under A20OS:
+every one of the 25 samples that attempted a network operation is
+blocked at \texttt{socket()} under an install-time envelope, while the
+same payloads reach live C2 infrastructure undefended; a complementary
+canonical-replay study covers 87 samples with identical conclusions.
+Overhead microbenchmarks under full-system emulation show $+4.1\%$ on
+the acquisition path and $+17.7$--$29.2\%$ on the file use path.
 \end{abstract}
 
 %%------------------------------------------------------------------------
@@ -100,9 +106,16 @@ entries with direction-aware right checks.
 \item An A1--A10 entry-point taxonomy covering 366 registered syscalls,
       mechanically verified against the syscall table via a drift gate
       (\S\ref{sec:impl});
-\item A 13-scenario attack suite demonstrating type denial, rights
-      enforcement, and budget exhaustion across file, network, and IPC
-      surfaces (\S\ref{sec:eval});
+\item A 15-scenario exercise suite (12 attack scenarios, 2 benign
+      multi-process flows, 1 runtime audit) covering file, network,
+      and IPC surfaces (\S\ref{sec:eval});
+\item An exact-execution evaluation: 66 real malicious packages run
+      unmodified on stock Node.js/CPython under A20OS---all 25 samples
+      that reach the network at runtime are blocked at
+      \texttt{socket()}, while reaching live C2 infrastructure
+      undefended---plus an 87-sample canonical-replay study and 20
+      benign install footprints completing under budget
+      (\S\ref{sec:corpus});
 \item A 20-cell pilot experiment across four defense arms quantifying
       the coarse-grained dilemma and showing envelopes resolve it
       (\S\ref{sec:eval});
@@ -151,10 +164,10 @@ between permissiveness (which admits attacks) and restrictiveness
 We target \emph{install-time attacks} in package managers (npm
 postinstall, pip setup.py, cargo build scripts), CI/CD runners, and
 plugin loading systems.  In these scenarios, untrusted code executes
-with the user's full privileges during package installation.  Over
-90\% of documented malicious packages in npm and PyPI activate during
-the install or import phase rather than during normal runtime
-execution.
+with the user's full privileges during package installation.  Empirical
+studies of malicious packages in npm and PyPI find that the majority
+activate during the install or import phase rather than during normal
+runtime execution~\cite{duan2021measuring,ohm2020backstabber,ladisa2023taxonomy}.
 
 The attacker controls the package content but not the OS configuration.
 The defender (user or CI operator) seeks to constrain the installation
@@ -169,6 +182,57 @@ We do not address:
 \item Supply-chain compromise upstream of the package registry;
 \item Social engineering convincing users to weaken envelope policies.
 \end{itemize}
+
+\subsection{Why Not Existing Linux Mechanisms?}
+\label{sec:positioning}
+
+A natural question is whether the same policy expressiveness could be
+deployed on commodity Linux without a new kernel.  We survey the four
+closest mechanisms and the structural gap each leaves open.
+
+\paragraph{rlimits and cgroups.}
+POSIX resource limits~\cite{setrlimit2017} and cgroups
+v2~\cite{cgroupsv2} are the budget mechanisms Linux already deploys.
+Both constrain \emph{resource consumption} (file size, memory, CPU,
+I/O bandwidth) rather than \emph{authority}: an rlimit cannot express
+``read but not write,'' neither mechanism reasons about object types or
+descriptor transfers between processes, and neither offers temporal
+expiry with atomic revocation.  Resource containers~\cite{banga1999rc}
+established the value of kernel-visible resource principals; envelopes
+borrow that insight but budget \emph{operations on authorities} rather
+than scheduler-visible consumption.
+
+\paragraph{eBPF-LSM.}
+BPF LSM (KRSI)~\cite{krsi2019} attaches custom policy to object-level
+security hooks and is the closest programmable neighbor.  Three
+structural differences remain.  First, \emph{deployment privilege}:
+loading BPF LSM programs requires \texttt{CAP\_BPF} and installs global
+policy, whereas envelopes attach unprivileged and per-launch, in the
+spirit of Landlock's self-restriction model.  Second,
+\emph{structural non-refreshability}: a BPF-map budget can be
+re-incremented by any component that can reach the map---the verifier
+guarantees memory safety, not that a policy never tops a counter back
+up.  Envelope counters live in kernel-owned state, and the only
+mutation exposed to user space is decrement-by-charge
+(\S\ref{sec:design}).  Third, \emph{io\_uring}: fixed-file
+registrations bypass the file-based LSM hooks, and submission-point
+hooks cannot charge operations that execute later in kernel context;
+our mediation sits at the SQE execution point and fails closed on
+fixed files (\S\ref{sec:impl}).  A privileged BPF-LSM reimplementation
+could approximate much of the envelope policy surface; we view such a
+Linux port as worthwhile future work and position envelopes as the
+unprivileged, deployment-time formulation with mechanically verified
+coverage.
+
+\paragraph{Sandbox runtimes.}
+gVisor~\cite{gvisor2019} and WebAssembly~\cite{haas2017wasm} confine
+unmodified (resp.~recompiled) code behind an interposed runtime.
+gVisor demonstrates that user-space ABI interception is deployable at
+the cost of a second system-call surface and non-trivial compatibility
+and performance overheads; neither substrate provides budget, expiry,
+or transfer-clamping dimensions.  Envelopes mediate in-kernel at
+object granularity, so one policy engine covers both the Linux-ABI
+compatibility path and native capability-aware services.
 
 %%------------------------------------------------------------------------
 \section{Design}
@@ -342,8 +406,9 @@ reproducible by others.
 
 \subsection{Attack Suite}
 
-We exercise 14 attack scenarios, each verifying a specific
-enforcement property (Table~\ref{tab:attacks}).  Every scenario runs
+We exercise 15 scenarios---12 attack scenarios each verifying a specific
+enforcement property, two benign multi-process flows, and one runtime
+invariant audit (Table~\ref{tab:attacks}).  Every scenario runs
 in a forked worker inside the envelope; the parent verifies the
 expected outcome.
 
@@ -376,7 +441,11 @@ Audit walk & Post-exercise invariant check & zero viol. \\
 \end{table}
 
 Every scenario passes: the mediator blocks all tested attacks while
-permitting benign operations within policy bounds.
+permitting benign operations within policy bounds.  We emphasize that
+these are mechanism tests we authored: they establish that each
+enforcement property fires as designed, not adversarial completeness
+against an independent attacker; \S\ref{sec:corpus} evaluates against
+real malicious packages.
 
 \subsection{Pilot Experiment: Coarse-Grained Dilemma}
 
@@ -410,6 +479,83 @@ but also kills the benign install (S0 blocked).  Only the envelope
 achieves both goals simultaneously: S0 completes while A1/A2/A4 are
 blocked.  A3 (path escape) passes through the envelope v1 honestly
 (no path dimension), composing with Landlock for combined coverage.
+Each cell is a single deterministic run whose exit code encodes a
+permit/deny outcome that is deterministic by construction; we
+deliberately scope the claim to these five scenarios and do not
+extrapolate to package-installation workloads in general.
+
+\subsection{Corpus Evaluation: Real Malicious Packages}
+\label{sec:corpus}
+
+To move beyond self-authored scenarios, we evaluate against \emph{real}
+malicious packages in two complementary ways: exact execution under
+stock interpreters, and canonical replay for broader coverage.
+
+\paragraph{Exact execution.}
+From the DataDog malicious-software-packages dataset~\cite{datadogdataset}
+we drew a seeded random sample of 100 packages (60 npm, 40 PyPI, from
+pools of 12{,}601 and 1{,}816).  67 samples carry an install-time entry
+point (34 npm lifecycle scripts, 33 PyPI \texttt{setup.py}); 66 executed
+to completion in our matrix.  Samples run \emph{unmodified} on stock
+Alpine Node.js 24.18.1 and CPython 3.12.14 inside A20OS (the
+\texttt{pynode} instance), each twice: bare (NONE) and wrapped by an
+install-time envelope (ENV: FILE+PIPE+event-queue+timer classes, no
+SOCKET, 100k-op / 256-MiB budgets) via a \texttt{create}-\texttt{fork}-
+\texttt{enter}-\texttt{execve} supervisor that also reads back the
+mediator's audit counters.
+
+Of the 66 samples, 25 reached a network operation at runtime---the
+mediator's \texttt{acquire\_deny\_type} counter proves a
+\texttt{socket()} call occurred---and \emph{all 25 were blocked} under
+the envelope (Table~\ref{tab:exec}).  Under NONE, the same payloads
+progressed to live network behavior: an exfiltration POST to a
+\texttt{oastify.com} listener that sent data before the connection
+broke, a completed TLS handshake to \texttt{webhook.site}, and DNS
+resolution of an AWS Lambda C2 hostname; under ENV, each died at
+\texttt{socket()} with EPERM.  The remaining 41 samples never reached
+the network at runtime (payloads dormant, or crashing on interpreter
+version/environment differences in \emph{both} arms)---a normal hit
+rate for detonation of aged samples~\cite{duan2021measuring}.  No
+interpreter aborted under the envelope, and no benign behavior was
+denied.
+
+\begin{table}[t]
+\centering
+\caption{Exact execution of 66 real malicious packages, NONE vs.\
+ENVELOPE.  ``Reached net'' counts samples whose payload issued a
+\texttt{socket()} (mediator counter).}
+\label{tab:exec}
+\small
+\begin{tabular}{lcc}
+\toprule
+ & \textbf{NONE} & \textbf{ENVELOPE} \\
+\midrule
+Reached network, attack proceeds & 25 & 0 \\
+Reached network, blocked at \texttt{socket()} & 0 & 25 \\
+No network attempt at runtime & 41 & 41 \\
+Interpreter aborted by policy & --- & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Canonical replay for coverage.}
+Separately, a static classifier
+(\texttt{tools/corpus/extract\_corpus.py}) maps 87 of the 100 samples to
+a canonical behavior class (6 credential exfiltration, 25 network
+beaconing, 56 second-stage download) without executing them.  Replaying
+each class's syscall sequence under the same two arms confirms the
+mechanism at scale: every attack goal succeeds under NONE (87/87,
+validating replay fidelity) and is blocked under the envelope (87/87),
+stable across three repetitions.  The install footprints of 20 popular
+benign npm packages (120 files, 258\,KiB of real tarball writes)
+complete under manifest-sized budgets with $2\times$ headroom (20/20).
+
+We stress the boundary of each method: replay covers more samples but
+executes canonical sequences, not the original code; exact execution
+runs the original code but only as far as aged, partially dormant
+payloads go in a fresh sandbox.  The two agree on the claim that
+matters: whenever install-time code reaches for the network, the
+envelope denies it.
 
 \subsection{Real-Binary Compatibility}
 
@@ -523,40 +669,115 @@ We formalize core budget lattice properties in Lean~4
       party.
 \end{itemize}
 
+\subsection{From Models to Code}
+\label{sec:trace}
+
+We do not claim refinement between the models and the C implementation.
+Instead, each model-checked property is tied to a single auditable code
+point in \texttt{kernel/ipc/envelope.c}, and---unusually---the same
+invariants are \emph{re-checked at runtime}: the \texttt{env\_audit}
+syscall walks every live envelope and re-verifies
+\textsc{TypeAllowed}, \textsc{RightsSubCap}, and the budget bounds on
+live kernel state (the \emph{Audit walk} row of
+Table~\ref{tab:attacks}).  The correspondence is:
+
+\begin{itemize}
+\item \textsc{TypeAllowed}: the \texttt{allowed\_types} gate in
+      \texttt{env\_mediate\_acquire} and \texttt{env\_mediate\_class}
+      precedes shadow installation;
+\item \textsc{RightsSubCap}: \texttt{env\_acquire\_charge\_install\_locked}
+      stores \texttt{rights \& cap}, and the transfer path
+      (\texttt{env\_mediate\_acquire\_gfd}) stores
+      \texttt{want \& rights\_by\_class[kind]};
+\item \textsc{OpsNonNeg}/\textsc{DataNonNeg}: every charge site checks
+      the counter for zero (resp.~sufficiency) \emph{before}
+      decrementing, so counters cannot underflow;
+\item \textsc{NoResurrect}: the \texttt{expired} flag is set only by
+      \texttt{env\_mark\_expired\_locked} and has no clear path;
+\item \textsc{KillOnce}: \texttt{kill\_sent} is an atomic test-and-set
+      shared by the expiry path and \texttt{env\_revoke};
+\item Monotone attachment: \texttt{env\_enter} is a compare-and-swap
+      from \texttt{NULL} only, so an enveloped task can neither switch
+      envelopes nor leave.
+\end{itemize}
+
+The runtime audit turns the model-checked invariants into executable
+checks on real kernel state, catching divergence between the models and
+the implementation as a testable violation rather than a silent gap.
+
 %%------------------------------------------------------------------------
 \section{Related Work}
 \label{sec:related}
 
 \paragraph{Capability systems.}
-Capsicum~\cite{watson2010capsicum} provides capability mode and
-capability descriptors on FreeBSD but requires source modification.
-CHERI~\cite{woodruff2014cheri} provides hardware capabilities but
-requires architectural support.  Our approach operates on unmodified
-binaries using software-only mediation.
+KeyKOS~\cite{hardy1985keykos} and EROS~\cite{shapiro1999eros}
+established pure capability operating systems with persistent,
+delegatable authority, but required applications written against their
+object model.  Capsicum~\cite{watson2010capsicum} brought capability
+mode to a commodity UNIX at the cost of the rewrite mandate we target.
+Zircon~\cite{zircon2023} exposes handle-based objects in a production
+microkernel---our native ABI follows a similar shape---but its security
+story targets new userspace, not legacy Linux binaries.
+CHERI~\cite{woodruff2014cheri} provides hardware capabilities with
+architectural support; envelopes are software-only and operate on
+unmodified binaries.
 
-\paragraph{Path-based access control.}
+\paragraph{Unprivileged self-restriction.}
+OpenBSD's pledge~\cite{pledge2} narrows the syscall surface by promise
+group but requires source modification and offers no budget dimensions;
+unveil~\cite{unveil2} restricts path visibility but, like Landlock,
+cannot express volume or time.
 Landlock~\cite{landlock2023} provides unprivileged filesystem access
-control on Linux.  AppArmor and SELinux provide mandatory access
-control but require policy files and root privileges.  Both operate on
-paths rather than objects and lack budget dimensions.
+control on Linux; our pilot experiment quantifies its coarse-grained
+dilemma.  seccomp-BPF~\cite{seccomp2012} filters by syscall number and
+scalar arguments but cannot inspect pointer-indirect arguments and
+carries no per-object state.
 
-\paragraph{System call filtering.}
-seccomp-BPF filters by syscall number but cannot inspect pointer
-dereferences.  Our approach mediates at object granularity with
-direction enforcement and budget accounting.
+\paragraph{Mandatory access control and the LSM framework.}
+The LSM framework~\cite{wright2002lsm} made Linux security policy
+pluggable; SELinux~\cite{loscocco2001selinux} and
+AppArmor~\cite{cowan2000subdomain} provide mandatory access control
+behind it, requiring administrator-installed global policy and, in the
+path-based AppArmor case, inheriting the path granularity we avoid.
+BPF LSM~\cite{krsi2019} adds programmability at the same hooks;
+\S\ref{sec:positioning} details the structural differences from
+envelopes (deployment privilege, non-refreshability, io\_uring).
+
+\paragraph{Resource accounting.}
+Resource containers~\cite{banga1999rc} introduced kernel-visible
+resource principals for consumption accounting; POSIX
+rlimits~\cite{setrlimit2017} and cgroups v2~\cite{cgroupsv2} are their
+deployed descendants.  All three meter consumption rather than
+authority and provide neither direction enforcement nor transfer
+clamping (\S\ref{sec:positioning}).
+
+\paragraph{Sandbox runtimes.}
+Native Client~\cite{yee2009nacl} and WebAssembly~\cite{haas2017wasm}
+confine code through software fault isolation at the cost of
+recompilation or restricted toolchains.  gVisor~\cite{gvisor2019}
+interposes a user-space kernel for unmodified containers, trading a
+second system-call surface and compatibility overhead for isolation;
+it has no budget or expiry dimensions.
 
 \paragraph{Supply-chain security.}
-Latch~\cite{latch2022} infers install-time manifests via strace and
-enforces them via AppArmor.  Leash~\cite{leash2025} sandboxes
-installer scripts using FreeBSD Capsicum with a user-space supervisor.
-Both operate at coarser granularity than our object-level mediation
-and lack budget dimensions.
+Measurement studies document the scale and install-time character of
+open-source supply-chain attacks~\cite{ohm2020backstabber,duan2021measuring,zimmermann2019smallworld,ladisa2023taxonomy}.
+On the defense side, Latch~\cite{latch2022} infers install-time
+manifests via strace and enforces them via AppArmor, and
+Leash~\cite{leash2025} sandboxes installer scripts using FreeBSD
+Capsicum with a user-space supervisor.  Both operate at coarser
+granularity than object-level mediation and lack budget dimensions.
 
 \paragraph{Formal verification of OS kernels.}
-seL4~\cite{klein2009sel4} achieved full functional correctness of a
-microkernel.  Our approach targets specific security properties of a
-single subsystem rather than whole-kernel refinement, using TLA+ model
-checking and Lean proofs as complementary tools.
+seL4~\cite{klein2009sel4} achieved full functional-correctness
+verification of a microkernel; CertiKOS~\cite{gu2016certikos} verified
+concurrent kernels via layered refinement; Serval~\cite{nelson2019serval}
+automated verification of systems code through symbolic evaluation.  We
+target specific security properties of one subsystem rather than
+whole-kernel refinement, using TLA+ model
+checking~\cite{lamport2002specifying} and Lean~4
+proofs~\cite{demoura2021lean4} as complementary tools, with runtime
+re-verification bridging models and code (\S\ref{sec:trace}).
 
 %%------------------------------------------------------------------------
 \section{Discussion and Limitations}
@@ -580,6 +801,19 @@ TCG amplifies syscall-dense loops, so absolute values should be read
 as same-configuration comparisons rather than native-hardware costs.
 Application-level end-to-end benchmarks remain future work.
 
+\paragraph{Evaluation breadth.}
+The corpus evaluation (\S\ref{sec:corpus}) grounds the security claim
+in real malicious packages executed on stock interpreters, but two
+boundaries remain.  First, aged samples detonate imperfectly: 41 of 66
+payloads never reached the network in \emph{either} arm (dormancy,
+interpreter drift, dead infrastructure), so our block rate is measured
+on the 25 samples that demonstrably attacked.  Second, all 25 were
+network-dependent; path-only classes (persistence writes, credential
+reads without exfiltration) are outside envelope v1's scope and compose
+with Landlock, as in the pilot's A3.  A privileged BPF-LSM port of the
+envelope policy surface would enable same-host comparison against
+commodity Linux (\S\ref{sec:positioning}).
+
 \paragraph{PLANNED-W2 surfaces.}
 Forty-six syscalls are classified PLANNED-W2 (unmediated but
 enumerated).  Key items include socket data-plane charging
@@ -599,40 +833,153 @@ architecture enables transparent enforcement across 366 registered
 syscalls with direction-aware right checks, conservative data-budget
 pre-charging, and mechanical coverage verification.
 
-Our evaluation demonstrates that envelopes resolve the coarse-grained
-dilemma that plagues path-based policies: they simultaneously permit
-benign installations and block all tested attack vectors through type
-denial, rights clamping, and budget exhaustion.  Overhead is modest
-(+5.1\% acquisition, +15--28\% use-path under emulation).  A TLA+
-model exhaustively verifies safety over a bounded state space, and
-Lean proofs establish core lattice properties without external
-dependencies.
+Our pilot evaluation demonstrates that envelopes resolve the
+coarse-grained dilemma that plagues path-based policies \emph{within
+the tested scenarios}: the envelope arm is the only configuration that
+both completes the benign installation and blocks the tested attack
+classes, through type denial, rights clamping, and budget exhaustion.
+Exact execution of 66 real malicious packages on stock interpreters
+confirms the result at corpus scale: every sample that reached the
+network (25/25) was denied at \texttt{socket()}, while undefended
+payloads reached live C2 infrastructure; an 87-sample canonical replay
+shows the same boundary.
+Overhead under emulation is $+4.1\%$ on the acquisition path and
+$+17.7$--$29.2\%$ on the file use path.  A TLA+ model exhaustively
+verifies safety over a bounded state space, Lean proofs establish core
+lattice properties without external dependencies, and a runtime audit
+re-checks the model-checked invariants on live kernel state.
+
+\paragraph{Availability.}
+The A20OS kernel, the envelope mediator, the attack-suite and pilot
+harnesses, the TLA+ model, and the Lean~4 proofs are open source and
+publicly reproducible under the fixed QEMU configuration reported in
+\S\ref{sec:eval}.
 
 %%------------------------------------------------------------------------
-\begin{thebibliography}{9}
+\begin{thebibliography}{10}
 
 \bibitem{watson2010capsicum}
-R.\,N.\,M. Watson et al.,
-``Capsicum: practical capabilities for UNIX,''
+R.~N.~M. Watson, J. Anderson, B. Laurie, and K. Kennaway,
+``Capsicum: Practical capabilities for UNIX,''
 in \emph{Proc.\ 19th USENIX Security Symposium}, 2010.
 
-\bibitem{landlock2023}
-M. Mickaël,
-``Landlock: unprivileged access control,'' Linux kernel v6.2+, 2023.
+\bibitem{hardy1985keykos}
+N. Hardy,
+``The KeyKOS architecture,''
+\emph{ACM Operating Systems Review}, 19(4):8--25, 1985.
 
-\bibitem{seccomp2012}
-W. Will,
-``seccomp filter,'' Linux kernel v3.5+, 2012.
+\bibitem{shapiro1999eros}
+J.~S. Shapiro, J.~M. Smith, and D.~J. Farber,
+``EROS: A fast capability system,''
+in \emph{Proc.\ 17th ACM Symposium on Operating Systems Principles (SOSP)}, 1999.
+
+\bibitem{zircon2023}
+Google,
+``Fuchsia: Zircon kernel and handle-based object model,''
+Fuchsia project documentation, 2023. \url{https://fuchsia.dev/fuchsia-src/concepts/kernel}.
 
 \bibitem{woodruff2014cheri}
-J. Woodruff et al.,
-``CHERI: A research platform de-conflating hardware virtualization and protection,''
-in \emph{Proc.\ 12th Intl.\ Conf.\ on Architectural Support for Programming Languages and Operating Systems (ASPLOS)}, 2014.
+J. Woodruff, R.~N.~M. Watson, D. Chisnall, S.~W. Moore, J. Anderson,
+B. Davis, B. Laurie, P.~G. Neumann, R. Norton, and M. Roe,
+``The CHERI capability model: Revisiting RISC in an age of risk,''
+in \emph{Proc.\ 41st International Symposium on Computer Architecture (ISCA)}, 2014.
 
-\bibitem{klein2009sel4}
-G. Klein et al.,
-``seL4: Formal verification of an OS kernel,''
-in \emph{Proc.\ 22nd ACM Symposium on Operating Systems Principles (SOSP)}, 2009.
+\bibitem{pledge2}
+OpenBSD,
+``\texttt{pledge(2)} --- restrict system operations,''
+OpenBSD Programmer's Manual, 2015.
+
+\bibitem{unveil2}
+OpenBSD,
+``\texttt{unveil(2)} --- unveil parts of a directory tree,''
+OpenBSD Programmer's Manual, 2018.
+
+\bibitem{landlock2023}
+M. Sala\"un,
+``Landlock: Unprivileged access control,''
+Linux kernel documentation, v6.2+, 2023.
+
+\bibitem{seccomp2012}
+W. Drewry,
+``Seccomp BPF (SECure COMPuting with filters),''
+Linux kernel documentation, v3.5+, 2012.
+
+\bibitem{wright2002lsm}
+C. Wright, C. Cowan, S. Smalley, J. Morris, and G. Kroah-Hartman,
+``Linux Security Modules: General security support for the Linux kernel,''
+in \emph{Proc.\ 11th USENIX Security Symposium}, 2002.
+
+\bibitem{loscocco2001selinux}
+P. Loscocco and S. Smalley,
+``Integrating flexible support for security policies into the Linux operating system,''
+in \emph{Proc.\ USENIX Annual Technical Conference (Freenix Track)}, 2001.
+
+\bibitem{cowan2000subdomain}
+C. Cowan, S. Beattie, G. Kroah-Hartman, C. Pu, P. Wagle, and V. Gligor,
+``SubDomain: Parsimonious server security,''
+in \emph{Proc.\ 14th USENIX Conference on System Administration (LISA)}, 2000.
+
+\bibitem{krsi2019}
+K.~P. Singh,
+``Kernel Runtime Security Instrumentation (BPF LSM),''
+Linux kernel documentation, 2019.
+
+\bibitem{banga1999rc}
+G. Banga, P. Druschel, and J.~C. Mogul,
+``Resource containers: A new facility for resource management in server systems,''
+in \emph{Proc.\ 3rd USENIX Symposium on Operating Systems Design and Implementation (OSDI)}, 1999.
+
+\bibitem{setrlimit2017}
+IEEE and The Open Group,
+``\texttt{setrlimit()} --- control maximum resource consumption,''
+POSIX.1-2017, 2017.
+
+\bibitem{cgroupsv2}
+The Linux kernel documentation,
+``Control Group v2,''
+online. \url{https://docs.kernel.org/admin-guide/cgroup-v2.html}.
+
+\bibitem{yee2009nacl}
+B. Yee, D. Sehr, G. Dardyk, J.~B. Chen, R. Muth, T. Ormandy,
+S. Okasaka, N. Narula, and N. Fullagar,
+``Native Client: A sandbox for portable, untrusted x86 native code,''
+in \emph{Proc.\ 30th IEEE Symposium on Security and Privacy (S\&P)}, 2009.
+
+\bibitem{gvisor2019}
+Google,
+``gVisor: A container sandbox runtime,''
+online, 2019. \url{https://gvisor.dev/docs}.
+
+\bibitem{haas2017wasm}
+A. Haas, A. Rossberg, D.~L. Schuff, B.~L. Titzer, M. Holman,
+D. Gohman, L. Wagner, A. Zakai, and J. Bastien,
+``Bringing the Web up to speed with WebAssembly,''
+in \emph{Proc.\ 38th ACM Conference on Programming Language Design and Implementation (PLDI)}, 2017.
+
+\bibitem{ohm2020backstabber}
+M. Ohm, H. Plate, A. Sykosch, and M. Meier,
+``Backstabber's knife collection: A review of open source software supply chain attacks,''
+in \emph{Proc.\ 17th International Conference on Detection of Intrusions and Malware, and Vulnerability Assessment (DIMVA)}, 2020.
+
+\bibitem{duan2021measuring}
+R. Duan, O. Alrawi, R.~P. Kasturi, R. Elder, B. Saltaformaggio, and W. Lee,
+``Towards measuring supply chain attacks on package managers for interpreted languages,''
+in \emph{Proc.\ 28th Network and Distributed System Security Symposium (NDSS)}, 2021.
+
+\bibitem{zimmermann2019smallworld}
+M. Zimmermann, C.-A. Staicu, C. Tenny, and M. Pradel,
+``Small world with high risks: A study of security threats in the npm ecosystem,''
+in \emph{Proc.\ 28th USENIX Security Symposium}, 2019.
+
+\bibitem{ladisa2023taxonomy}
+P. Ladisa, H. Plate, M. Martinez, and O. Barais,
+``SoK: Taxonomy of attacks on open-source software supply chains,''
+in \emph{Proc.\ 44th IEEE Symposium on Security and Privacy (S\&P)}, 2023.
+
+\bibitem{datadogdataset}
+DataDog,
+``Malicious software packages dataset,''
+online, 2023--2026. \url{https://github.com/DataDog/malicious-software-packages-dataset}.
 
 \bibitem{latch2022}
 Z. Luo et al.,
@@ -643,6 +990,33 @@ in \emph{Proc.\ 17th ACM Asia Conference on Computer and Communications Security
 S. Jadidi and J. Anderson,
 ``Leash: A transparent capability-based sandboxing supervisor for Unix,''
 in \emph{Proc.\ 11th International Conference on Information Systems Security and Privacy (ICISSP)}, 2025.
+
+\bibitem{klein2009sel4}
+G. Klein, K. Elphinstone, G. Heiser, J. Andronick, D. Cock, P. Derrin,
+D. Elkaduwe, K. Engelhardt, R. Kolanski, M. Norrish, T. Sewell,
+H. Tuch, and S. Winwood,
+``seL4: Formal verification of an OS kernel,''
+in \emph{Proc.\ 22nd ACM Symposium on Operating Systems Principles (SOSP)}, 2009.
+
+\bibitem{gu2016certikos}
+R. Gu, Z. Shao, H. Chen, X.~N. Wu, J. Kim, V. Sj\"oberg, and D. Costanzo,
+``CertiKOS: An extensible architecture for building certified concurrent OS kernels,''
+in \emph{Proc.\ 12th USENIX Symposium on Operating Systems Design and Implementation (OSDI)}, 2016.
+
+\bibitem{nelson2019serval}
+L. Nelson, J. Bornholt, R. Gu, A. Baumann, E. Torlak, and X. Wang,
+``Scaling symbolic evaluation for automated verification of systems code with Serval,''
+in \emph{Proc.\ 27th ACM Symposium on Operating Systems Principles (SOSP)}, 2019.
+
+\bibitem{lamport2002specifying}
+L. Lamport,
+\emph{Specifying Systems: The TLA+ Language and Tools for Hardware and Software Engineers},
+Addison-Wesley, 2002.
+
+\bibitem{demoura2021lean4}
+L. de Moura and S. Ullrich,
+``The Lean 4 theorem prover and programming language,''
+in \emph{Proc.\ 28th International Conference on Automated Deduction (CADE)}, 2021.
 
 \end{thebibliography}
 
