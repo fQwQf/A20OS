@@ -19,6 +19,8 @@
 #define SYS_a20_envelope_revoke 904
 #define SYS_a20_envelope_stats  905
 #define SYS_a20_envelope_audit  906
+#define SYS_a20_channel_pair    900
+#define SYS_io_uring_setup      425
 
 /* Must match kernel/include/ipc/ipc.h object types and right bits. */
 #define ENV_OBJ_FILE    3
@@ -29,6 +31,7 @@
 #define ENV_R_STAT      (1ull << 3)
 #define ENV_R_SEEK      (1ull << 4)
 #define ENV_R_CONNECT   (1ull << 9)
+#define ENV_R_ACCEPT    (1ull << 10)
 #define ENV_F_KILL      (1u << 0)
 
 struct env_policy {
@@ -111,6 +114,22 @@ static int t2_type_deny(long env_id)
     long s = socket(AF_INET, SOCK_STREAM, 0);
     if (expect_errno(s, EPERM, "type-deny socket"))
         die(22);
+
+    int sv[2];
+    if (expect_errno(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), EPERM,
+                     "type-deny socketpair"))
+        die(24);
+
+    int ch[2];
+    if (expect_errno(syscall(SYS_a20_channel_pair, ch), EPERM,
+                     "type-deny channel-pair"))
+        die(25);
+
+    unsigned char ring_params[120];
+    memset(ring_params, 0, sizeof(ring_params));
+    if (expect_errno(syscall(SYS_io_uring_setup, 8, ring_params), EPERM,
+                     "type-deny io-uring"))
+        die(26);
 
     int fd = open("/tmp/env_t2.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
     if (fd < 0)
@@ -229,9 +248,9 @@ static int t8_reopen(long env_id)
     return 0;
 }
 
-/* T9: socket data plane -- byte budgets charge on sendto/recvfrom even
- * for untracked (grandfathered) descriptors, and in-budget traffic
- * moves end-to-end (05 §2.5.1 USE surface).  An AF_UNIX pair keeps the
+/* T9: socket data plane -- byte budgets charge on sendto/recvfrom for
+ * tracked socketpair descriptors, and in-budget traffic moves end-to-end
+ * (05 §2.5.1 USE surface).  An AF_UNIX pair keeps the
  * test deterministic: no NIC needed, peers pre-connected; over-budget
  * sends must fail EACCES inside the mediator BEFORE any dispatch. */
 static int t9_net_data_plane(long env_id)
@@ -257,6 +276,18 @@ static int t9_net_data_plane(long env_id)
     r = recvfrom(sv[1], rxbuf, sizeof(rxbuf), 0, NULL, NULL);
     if (r != 16)
         die(85);
+
+    unsigned int ring_params[30]; /* Linux io_uring_params is 120 bytes. */
+    memset(ring_params, 0, sizeof(ring_params));
+    int ringfd = syscall(SYS_io_uring_setup, 8, ring_params);
+    if (ringfd < 0)
+        die(86);
+    close(ringfd);
+    memset(ring_params, 0, sizeof(ring_params));
+    ring_params[2] = 1u << 1; /* IORING_SETUP_SQPOLL */
+    if (expect_errno(syscall(SYS_io_uring_setup, 8, ring_params), EPERM,
+                     "io-uring SQPOLL"))
+        die(87);
 
     close(sv[0]);
     close(sv[1]);
@@ -289,6 +320,12 @@ int main(void)
     policy_file_rw(&p);
     ids[6] = env_create(&p);
     policy_file_rw(&p);
+    p.allowed_types |= 1u << ENV_OBJ_SOCKET;
+    p.allowed_types |= 1u << ENV_OBJ_EVENT_QUEUE;
+    p.rights_by_class[ENV_OBJ_SOCKET] =
+        ENV_R_READ | ENV_R_WRITE | ENV_R_STAT | ENV_R_CONNECT | ENV_R_ACCEPT;
+    p.rights_by_class[ENV_OBJ_EVENT_QUEUE] =
+        ENV_R_READ | ENV_R_WRITE | ENV_R_STAT;
     ids[7] = env_create(&p);
     for (int i = 0; i < 8; i++)
         if (ids[i] < 0) {
@@ -323,41 +360,51 @@ int main(void)
             failures++;
     }
 
-    /* T7: active revocation with KILL_ON_EXPIRE kills the worker. */
+    /* T7: active revocation with KILL_ON_EXPIRE kills every attached worker,
+     * including a population larger than the mediator's internal batch. */
     policy_file_rw(&p);
     p.flags = ENV_F_KILL;
     long kid = env_create(&p);
     int sync_pipe[2];
     if (kid < 0 || pipe(sync_pipe) < 0)
         return 1;
-    pid_t c = fork();
-    if (c == 0) {
-        if (env_enter(kid) < 0)
-            _exit(71);
-        int fd = open("/tmp/env_t7.txt", O_CREAT | O_TRUNC | O_RDWR, 0644);
-        if (fd < 0)
-            _exit(72);
-        char ready = 'R';
-        if (write(sync_pipe[1], &ready, 1) != 1)
-            _exit(73);
-        for (;;) {
-            char b[32];
-            read(fd, b, sizeof(b));
-            usleep(20000);
+    enum { KILL_WORKERS = 40 };
+    pid_t workers[KILL_WORKERS];
+    for (int i = 0; i < KILL_WORKERS; i++) {
+        workers[i] = fork();
+        if (workers[i] < 0)
+            return 1;
+        if (workers[i] == 0) {
+            close(sync_pipe[0]);
+            if (env_enter(kid) < 0)
+                _exit(71);
+            char ready = 'R';
+            if (write(sync_pipe[1], &ready, 1) != 1)
+                _exit(73);
+            for (;;)
+                pause();
         }
     }
-    char ready;
-    if (read(sync_pipe[0], &ready, 1) != 1)
-        return 1;
-    usleep(50000);
+    close(sync_pipe[1]);
+    for (int i = 0; i < KILL_WORKERS; i++) {
+        char ready;
+        if (read(sync_pipe[0], &ready, 1) != 1)
+            return 1;
+    }
     long rr = env_revoke(kid);
-    int st = 0;
-    waitpid(c, &st, 0);
-    if (rr == 0 && WIFSIGNALED(st) && WTERMSIG(st) == 9) {
+    int killed = 0;
+    for (int i = 0; i < KILL_WORKERS; i++) {
+        int st = 0;
+        waitpid(workers[i], &st, 0);
+        if (WIFSIGNALED(st) && WTERMSIG(st) == 9)
+            killed++;
+    }
+    close(sync_pipe[0]);
+    if (rr == 0 && killed == KILL_WORKERS) {
         printf("ENVELOPE_SMOKE: revoke-kill PASS\n");
     } else {
-        printf("ENVELOPE_SMOKE: revoke-kill FAIL rr=%ld signaled=%d sig=%d\n",
-               rr, WIFSIGNALED(st), WTERMSIG(st));
+        printf("ENVELOPE_SMOKE: revoke-kill FAIL rr=%ld killed=%d/%d\n",
+               rr, killed, KILL_WORKERS);
         failures++;
     }
 

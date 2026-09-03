@@ -29,17 +29,26 @@ typedef struct landlock_attr_path_beneath {
     int32_t  parent_fd;
 } landlock_attr_path_beneath_t;
 
+static vfile_ops_t g_landlock_ops;
+
+static void landlock_ruleset_put(landlock_ruleset_t *rs)
+{
+    if (rs && refcount_dec_and_test(&rs->refs))
+        kfree(rs);
+}
+
 static int landlock_ruleset_from_fd(int gfd, landlock_ruleset_t **out)
 {
     *out = NULL;
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
         return -EBADF;
-    if (vf->ops && vf->ops->close) {
-        /* The ruleset fd is an anonfd whose priv points at the ruleset. */
+    if (vf->ops != &g_landlock_ops) {
+        vfs_put_file_ref(gfd, vf);
+        return -EBADF;
     }
     landlock_ruleset_t *rs = vf->priv;
-    if (!rs || !rs->used) {
+    if (!rs || !rs->used || !refcount_inc_not_zero(&rs->refs)) {
         vfs_put_file_ref(gfd, vf);
         return -EBADF;
     }
@@ -52,13 +61,8 @@ static int landlock_ruleset_close(vfile_t *vf)
 {
     landlock_ruleset_t *rs = vf ? vf->priv : NULL;
     if (rs) {
-        if (rs->used && proc_current() &&
-            proc_current()->landlock_rulesets == rs) {
-            /* A restricted process keeps its ruleset for enforcement; only
-             * drop the pointer when it is being replaced or the task exits. */
-        }
-        kfree(rs);
         vf->priv = NULL;
+        landlock_ruleset_put(rs);
     }
     return 0;
 }
@@ -79,6 +83,7 @@ int landlock_create_ruleset(uint64_t handled_access_fs)
         if (vf) vfile_free(vf);
         return -ENOMEM;
     }
+    refcount_set(&rs->refs, 1); /* anonymous fd owns the initial reference */
     rs->used = 1;
     vf->flags = O_RDONLY;
     vfile_ref_init(vf, 1);
@@ -105,16 +110,24 @@ int landlock_add_rule(int ruleset_fd, int rule_type, const void *attr_user,
     int r = landlock_ruleset_from_fd((int)gfd, &rs);
     if (r < 0)
         return r;
-    if (rs->restricted)
-        return -EINVAL;
-    if (rs->nr_rules >= LANDLOCK_MAX_RULES)
-        return -E2BIG;
+    if (rs->restricted) {
+        r = -EINVAL;
+        goto out;
+    }
+    if (rs->nr_rules >= LANDLOCK_MAX_RULES) {
+        r = -E2BIG;
+        goto out;
+    }
 
     landlock_attr_path_beneath_t attr;
-    if (copy_from_user(&attr, attr_user, sizeof(attr)) < 0)
-        return -EFAULT;
-    if (attr.allowed_access & ~LANDLOCK_ACCESS_FS_ALL)
-        return -EINVAL;
+    if (copy_from_user(&attr, attr_user, sizeof(attr)) < 0) {
+        r = -EFAULT;
+        goto out;
+    }
+    if (attr.allowed_access & ~LANDLOCK_ACCESS_FS_ALL) {
+        r = -EINVAL;
+        goto out;
+    }
 
     /* Resolve parent_fd + (implicitly empty) path: parent_fd refers to a
      * directory vnode.  We store the directory's resolved path. */
@@ -125,15 +138,20 @@ int landlock_add_rule(int ruleset_fd, int rule_type, const void *attr_user,
         strncpy(full, cwd, sizeof(full) - 1);
         full[sizeof(full) - 1] = '\0';
     } else {
-        if (vfs_dirfd_path((int)attr.parent_fd, full, sizeof(full)) < 0)
-            return -EBADF;
+        if (vfs_dirfd_path((int)attr.parent_fd, full, sizeof(full)) < 0) {
+            r = -EBADF;
+            goto out;
+        }
     }
     struct vnode *vn = vfs_resolve_no_follow(full);
-    if (!vn)
-        return -ENOENT;
+    if (!vn) {
+        r = -ENOENT;
+        goto out;
+    }
     if (vn->type != VFS_FT_DIR) {
         vnode_put(vn);
-        return -ENOTDIR;
+        r = -ENOTDIR;
+        goto out;
     }
     vnode_put(vn);
 
@@ -141,7 +159,10 @@ int landlock_add_rule(int ruleset_fd, int rule_type, const void *attr_user,
     rs->paths[rs->nr_rules][LANDLOCK_RULE_MAX_PREFIX - 1] = '\0';
     rs->access[rs->nr_rules] = attr.allowed_access;
     rs->nr_rules++;
-    return 0;
+    r = 0;
+out:
+    landlock_ruleset_put(rs);
+    return r;
 }
 
 int landlock_restrict_self(int ruleset_fd, unsigned flags)
@@ -156,12 +177,20 @@ int landlock_restrict_self(int ruleset_fd, unsigned flags)
     int r = landlock_ruleset_from_fd((int)gfd, &rs);
     if (r < 0)
         return r;
-    if (rs->restricted)
+    if (rs->restricted) {
+        landlock_ruleset_put(rs);
         return -EINVAL;
+    }
 
     task_t *t = proc_current();
+    if (t->landlock_rulesets) {
+        landlock_ruleset_put(rs);
+        return -EINVAL;
+    }
     /* Install the ruleset as the process's active set. */
     rs->restricted = 1;
+    /* The reference returned by landlock_ruleset_from_fd becomes the task's
+     * ownership.  Closing the userspace fd can now safely drop its own ref. */
     t->landlock_rulesets = rs;
     return 0;
 }
@@ -202,7 +231,7 @@ void landlock_release_task(struct task_t *t)
 {
     if (!t)
         return;
-    /* The ruleset fd close path frees the object; at teardown the fd table
-     * is already closed, so drop the pointer to avoid a dangling reference. */
+    landlock_ruleset_t *rs = t->landlock_rulesets;
     t->landlock_rulesets = NULL;
+    landlock_ruleset_put(rs);
 }

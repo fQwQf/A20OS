@@ -34,10 +34,13 @@ struct env_policy {
 };
 
 #define OBJ_FILE 3
+#define OBJ_SOCKET 5
 #define R_READ  (1ull << 0)
 #define R_WRITE (1ull << 1)
 #define R_STAT  (1ull << 3)
 #define R_SEEK  (1ull << 4)
+#define R_CONNECT (1ull << 9)
+#define R_ACCEPT  (1ull << 10)
 
 static double now_ns(void)
 {
@@ -74,7 +77,7 @@ static double bench_read(int fd, char *buf, int iters)
     double t0 = now_ns();
     unsigned long long acc = 0;
     for (int i = 0; i < iters; i++) {
-        ssize_t n = read(fd, buf, 64);
+        ssize_t n = pread(fd, buf, 64, 0);
         if (n > 0)
             acc += (unsigned long)n;
     }
@@ -142,9 +145,7 @@ static void run_phase(struct result *r, int iters)
     r->lseek = bench_lseek(rd, iters);
     r->write64 = bench_write(wr, buf, iters);
 
-    /* socket data plane: fresh AF_UNIX pair per phase; fds are
-     * grandfathered (untracked), so this exercises pure budget
-     * charging on sendto/recvfrom without shadow direction bits. */
+    /* socket data plane: fresh, tracked AF_UNIX pair per phase. */
     int sv[2];
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
         sv[0] = sv[1] = -1;
@@ -193,9 +194,11 @@ int main(void)
     /* ---- phase 2: enveloped ---- */
     struct env_policy p;
     memset(&p, 0, sizeof(p));
-    p.allowed_types = 1u << OBJ_FILE;
+    p.allowed_types = (1u << OBJ_FILE) | (1u << OBJ_SOCKET);
     p.rights_by_class[OBJ_FILE] =
         R_READ | R_WRITE | R_STAT | R_SEEK;
+    p.rights_by_class[OBJ_SOCKET] =
+        R_READ | R_WRITE | R_STAT | R_CONNECT | R_ACCEPT;
     p.op_budget = 6ull * ITERS + 1024; /* open+rd+wr+send+drain per iter */
     p.data_budget = 16ull << 20; /* 16 MiB: reads+writes both charged */
     long id = env_create(&p);

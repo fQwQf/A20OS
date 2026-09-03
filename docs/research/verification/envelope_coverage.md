@@ -3,13 +3,13 @@
 由 `tools/gen_envelope_coverage.py` 从 `kernel/abi/linux/syscall_table.def` 机械生成——每登记一个新 syscall，`make check-envelope-coverage` 即失败直至其被显式分类。
 
 - 登记入口总数：**366**
-- ACQUIRE：10
+- ACQUIRE：14
 - TRANSFER：3
 - USE：15
-- FAILCLOSED：2
-- PLANNED：36
-- NA：300
-- **资源权威相关且已调解：30**；已知未调解面（PLANNED）：36（全部挂 W2 行项）；无权威参与（NA）：300
+- FAILCLOSED：1
+- PLANNED：35
+- NA：298
+- **资源权威相关且已调解：33**；已知未调解面（PLANNED）：35（全部挂 W2 行项）；无权威参与（NA）：298
 
 分类语义见 docs/research/05 §2.5；类目定义见生成脚本头部。PLANNED 行项清零是论文投稿前条件（审稿人第一攻击点）。
 
@@ -214,7 +214,7 @@
 | 196 | `shmat` | ACQUIRE | A5 MEMORY 类检查（足迹计费 W2） |
 | 197 | `shmdt` | NA |  |
 | 198 | `socket` | ACQUIRE | A2 网络 rights + 类上限 |
-| 199 | `socketpair` | PLANNED | W2: 双端创建获取（当前未钩） |
+| 199 | `socketpair` | ACQUIRE | A2 双端 SOCKET 获取，各自安装影子 |
 | 200 | `bind` | USE | 同 connect |
 | 201 | `listen` | USE | 同 connect |
 | 202 | `accept` | ACQUIRE | 同 accept4（薄委托） |
@@ -316,9 +316,9 @@
 | 422 | `futex_time64` | NA |  |
 | 423 | `sched_rr_get_interval_time64` | NA |  |
 | 424 | `pidfd_send_signal` | NA |  |
-| 425 | `io_uring_setup` | FAILCLOSED | ring 本身不授予权威；SQE 执行点统一调解 |
+| 425 | `io_uring_setup` | ACQUIRE | A9 ring fd 按 EVENT_QUEUE 获取；SQPOLL 拒绝 |
 | 426 | `io_uring_enter` | USE | A10 SQE 执行点 READ/WRITE/FSYNC 调解 |
-| 427 | `io_uring_register` | FAILCLOSED | A9 fixed-file 批量导入对信封任务 -EPERM |
+| 427 | `io_uring_register` | FAILCLOSED | A9 REGISTER_FILES 分支对信封任务 -EPERM；EVENTFD 完成通知在执行点调解 |
 | 428 | `open_tree` | NA |  |
 | 429 | `move_mount` | NA |  |
 | 430 | `fsopen` | NA |  |
@@ -362,8 +362,8 @@
 | 468 | `file_getattr` | NA |  |
 | 469 | `file_setattr` | NA |  |
 | 470 | `listns` | NA |  |
-| 900 | `a20_channel_pair` | NA |  |
-| 901 | `a20_registry_client` | NA |  |
+| 900 | `a20_channel_pair` | ACQUIRE | Linux bridge 双端 CHANNEL_ENDPOINT 获取 |
+| 901 | `a20_registry_client` | ACQUIRE | Linux bridge registry CHANNEL_ENDPOINT 获取 |
 | 902 | `a20_envelope_create` | NA |  |
 | 903 | `a20_envelope_enter` | NA |  |
 | 904 | `a20_envelope_revoke` | NA |  |
