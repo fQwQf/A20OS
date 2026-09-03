@@ -118,6 +118,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             return build_rc
         return exec_make(inst, "run-stm32f103-qemu-impl", [], args.dry_run)
     _check_runnable(inst, "run")
+    if inst.rootfs.world is not None:
+        # apk world images boot as the second disk; init chroots into them.
+        target = "run-world-gui" if inst.gui.enabled else "run-world"
+        return exec_make(inst, target, list(args.make_args), args.dry_run)
     target = "_run_gui_impl" if inst.gui.enabled else "_run_impl"
     return exec_make(inst, target, list(args.make_args), args.dry_run)
 

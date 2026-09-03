@@ -3,7 +3,6 @@
 #include "core/klog.h"
 #include "core/stdio.h"
 #include "core/string.h"
-#include "core/timekeeping.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_class.h"
 
@@ -241,30 +240,6 @@ static int netlink_uevent_broadcast_locked(const char *action,
 {
     unsigned major = (unsigned)((devt >> 8) & 0xffU);
     unsigned minor = (unsigned)(devt & 0xffU);
-
-    /* Cooldown: skip re-emission of the same device within 100ms to break
-     * the udevadm trigger → eudev → uevent ping-pong loop. */
-    static struct { uint64_t devt; uint64_t sec; uint32_t nsec; } cooldown[64];
-    static unsigned cooldown_idx;
-    uint64_t now[2];
-    timekeeping_get_monotonic(now);
-    for (unsigned i = 0; i < 64; i++) {
-        if (cooldown[i].devt == devt) {
-            uint64_t ds = now[0] - cooldown[i].sec;
-            if (ds < 1 || (ds == 0 && (uint32_t)(now[1] / 1000000) - cooldown[i].nsec < 100))
-                return 0;
-            cooldown[i].sec = now[0];
-            cooldown[i].nsec = (uint32_t)(now[1] / 1000000);
-            goto do_emit;
-        }
-    }
-    cooldown[cooldown_idx & 63] = (typeof(cooldown[0])){
-        .devt = devt, .sec = now[0],
-        .nsec = (uint32_t)(now[1] / 1000000)
-    };
-    cooldown_idx++;
-
-do_emit:;
 
     /* Linux assigns every uevent a globally unique, strictly increasing
      * sequence number.  udevd's event ordering (event_queue_insert,

@@ -85,6 +85,7 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
                 e.append(f"net.hostfwd: '{fwd}' must look like tcp::5555-:5555")
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
+    has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))
     for field_name, entries in (("test.commands", t.commands), ("test.expect", t.expect),
                                 ("machine.extra_qemu", m.extra_qemu),
                                 ("rootfs.drivers", r.drivers),
@@ -93,7 +94,19 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
             e.append(f"{field_name}: entries must be non-empty strings")
     if r.world is not None and not (repo_root / "packages" / "world" / f"{r.world}.world").is_file():
         e.append(f"rootfs.world: no packages/world/{r.world}.world")
-    has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))
+    if r.world is not None:
+        if k.bringup:
+            e.append("rootfs.world: cannot combine with kernel.bringup (world images carry userspace)")
+        if inst.arch in ("armv7m", "loongarch32"):
+            e.append(f"rootfs.world: apk world images are only supported on hosted arches, not {inst.arch}")
+        if has_test:
+            e.append("rootfs.world: cannot combine with [test] (world images boot via run-world, "
+                     "which the a20 test harness does not drive)")
+    if r.world is None:
+        if r.world_size_mb is not None:
+            e.append("rootfs.world_size_mb: only meaningful together with rootfs.world")
+        if r.alpine is not None:
+            e.append("rootfs.alpine: only meaningful together with rootfs.world")
     if has_test and g.enabled:
         e.append("test.*: the a20 test harness drives the serial console; "
                  "GUI smokes use tools/smoke_qemu_gui.py and cannot combine with [test]")

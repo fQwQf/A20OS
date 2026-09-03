@@ -95,6 +95,8 @@ class RootfsCfg:
     ext4_size_mb: int | None = None
     extra_size_mb: int | None = None
     world: str | None = None
+    world_size_mb: int | None = None
+    alpine: bool | None = None
     extra_packages: tuple[str, ...] | None = None
     drivers: tuple[str, ...] | None = None
 
@@ -190,7 +192,8 @@ _SECTION_SPECS: Final = {
             for f in GuiCfg.__dataclass_fields__},
     "net": {f: "str_list" for f in NetCfg.__dataclass_fields__},
     "rootfs": {f: ("str_list" if f in ("extra_packages", "drivers")
-                   else "str" if f == "world" else "int")
+                   else "str" if f == "world"
+                   else "bool" if f == "alpine" else "int")
                for f in RootfsCfg.__dataclass_fields__},
     "test": {f: ("int" if f == "input_delay" else "str_list" if f in ("commands", "expect") else "str")
              for f in TestCfg.__dataclass_fields__},

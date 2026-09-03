@@ -3,6 +3,11 @@
 
 #include <stddef.h>
 
+/* Linux memfd_create(2) flag values (note: MFD_CLOEXEC != O_CLOEXEC). */
+#define MFD_CLOEXEC       0x1U
+#define MFD_ALLOW_SEALING 0x2U
+#define MFD_HUGETLB       0x4U
+
 struct task_t;
 struct vfile;
 

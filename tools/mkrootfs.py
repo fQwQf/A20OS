@@ -54,6 +54,22 @@ def run(cmd: list[str], sudo: list[str], **kw) -> None:
         die(f"command failed ({proc.returncode}): {' '.join(sudo + cmd)}")
 
 
+def apply_overlay(overlay: Path, staging: Path, sudo: list[str],
+                  keep_account_files: bool = False) -> None:
+    overlay = overlay.resolve()
+    if not overlay.is_dir():
+        die(f"overlay {overlay} is not a directory")
+    if keep_account_files:
+        # Package maintainer scripts append system users/groups to the
+        # overlay-provided /etc/passwd and /etc/group; the second apply must
+        # not clobber them.
+        run(["sh", "-c",
+             f"tar -C {overlay} --exclude=./etc/passwd --exclude=./etc/group -cf - . "
+             f"| tar -C {staging} -xf -"], sudo)
+    else:
+        run(["cp", "-a", "--remove-destination", f"{overlay}/.", f"{staging}/"], sudo)
+
+
 def read_world(paths: list[Path]) -> list[str]:
     pkgs: list[str] = []
     for path in paths:
@@ -250,13 +266,15 @@ def main() -> None:
         # apk --usermode applies the caller's umask to extracted files;
         # pin it so dev images get sane 0755/0644 permissions.
         preexec = (lambda: os.umask(0o022)) if args.usermode else None
+
+        # Overlays must be visible to apk's maintainer scripts and must also
+        # win over packaged files, so they apply both before and after add.
+        for overlay in args.overlay:
+            apply_overlay(overlay, staging, sudo)
         run(cmd, sudo, preexec_fn=preexec)
 
         for overlay in args.overlay:
-            overlay = overlay.resolve()
-            if not overlay.is_dir():
-                die(f"overlay {overlay} is not a directory")
-            run(["cp", "-a", "--remove-destination", f"{overlay}/.", f"{staging}/"], sudo)
+            apply_overlay(overlay, staging, sudo, keep_account_files=True)
 
         if remote_repos:
             apk_etc = staging / "etc" / "apk"
