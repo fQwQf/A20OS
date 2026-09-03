@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Extract install-time attack behaviors from real malicious package
+samples (DataDog malicious-software-packages-dataset) and bake them into
+a replay scenario table for the A20OS envelope corpus harness.
+
+STATIC ANALYSIS ONLY -- no sample code is ever executed.
+
+Usage:
+    extract_corpus.py <zip-root> <out-header> <out-stats.json>
+
+Inputs:  zip files as checked out from the dataset (samples/<eco>/...).
+Outputs: C header with the baked scenario table + JSON stats for the
+         paper (class distribution, indicator hit rates, examples).
+"""
+import json
+import os
+import re
+import sys
+import zipfile
+
+# Behavior indicators (regex over install-relevant sources).
+NET = re.compile(
+    r"(https?\.request|https?\.get|fetch\(|axios|urllib|requests\.(get|post)"
+    r"|socket\.(connect|create_connection)|net\.connect|require\(['\"]https?"
+    r"|\bcurl\b|\bwget\b|webhook|api\.telegram|discord(app)?\.com/api/webhooks"
+    r"|\.onion|child_process|subprocess|os\.system|os\.popen)", re.I)
+CRED = re.compile(
+    r"(\.ssh|id_rsa|\.aws|\.npmrc|\.pypirc|\.netrc|\.gitconfig|/etc/passwd"
+    r"|\.bash_history|\.kube|process\.env|os\.environ|getenv|\.env['\"/]"
+    r"|metamask|wallet|\.config/gcloud|credentials|secret)", re.I)
+PERSIST = re.compile(
+    r"(\.bashrc|\.bash_profile|\.zshrc|\.profile|crontab|autostart"
+    r"|LaunchAgents|\.config/systemd)", re.I)
+STAGE2 = re.compile(
+    r"(chmod|child_process|subprocess|os\.system|Popen|execfile"
+    r"|\|\s*(ba|z)?sh\b|eval\(|Function\(|exec\()", re.I)
+RUNAWAY = re.compile(
+    r"(while\s*\(\s*true\s*\)|while\s+1\s*:|fork\s*\(\s*\)\s*\.\s*fork"
+    r"|:\(\)\s*{\s*:\|:&\s*}\s*;\s*:)", re.I)
+URL = re.compile(r"https?://([a-z0-9.-]+)", re.I)
+
+# Canonical replay classes (harness enum order must match).
+CLS_EXFIL = 1       # read bait secret -> UDP send to gateway
+CLS_NET_ONLY = 2    # connect + send beacon
+CLS_STAGE2 = 3      # fetch + write + execve /tmp payload
+CLS_PERSIST = 4     # append to ~/.bashrc (path-dimension: v1 honest pass)
+CLS_RUNAWAY = 5     # unbounded write loop (op budget)
+CLS_CREDS = 6       # sensitive-file reads only
+
+# Dataset zips are encrypted with the standard malware-sharing password.
+ZIP_PASSWORD = b"infected"
+
+NPM_SRC = (".js", ".json", ".mjs", ".cjs", ".sh")
+PYPI_SRC = (".py", ".cfg", ".toml", ".sh")
+
+
+def read_sources(zf, exts):
+    """Concatenate install-relevant sources inside a sample zip."""
+    chunks = []
+    for name in zf.namelist():
+        low = name.lower()
+        base = os.path.basename(low)
+        if base.startswith("package_info"):
+            continue  # dataset metadata, not package content
+        if low.endswith(exts) and zf.getinfo(name).file_size < 1 << 20:
+            try:
+                chunks.append(zf.read(name, pwd=ZIP_PASSWORD)
+                              .decode("utf-8", "replace"))
+            except Exception:
+                pass
+    return "\n".join(chunks)
+
+
+def classify(text):
+    """Assign one canonical replay class by attack-goal priority."""
+    net = bool(NET.search(text))
+    if net and STAGE2.search(text):
+        return CLS_STAGE2
+    if net and CRED.search(text):
+        return CLS_EXFIL
+    if net:
+        return CLS_NET_ONLY
+    if PERSIST.search(text):
+        return CLS_PERSIST
+    if RUNAWAY.search(text):
+        return CLS_RUNAWAY
+    if CRED.search(text):
+        return CLS_CREDS
+    return 0
+
+
+def c_escape(s):
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def main():
+    root, out_h, out_json = sys.argv[1], sys.argv[2], sys.argv[3]
+    benign_path = sys.argv[4] if len(sys.argv) > 4 else None
+    zips = []
+    for dirpath, _dirs, files in os.walk(root):
+        for f in sorted(files):
+            if f.endswith(".zip"):
+                zips.append(os.path.join(dirpath, f))
+    zips.sort()
+
+    entries = []          # (name, eco, cls)
+    stats = {
+        "total_zips": len(zips), "mapped": 0, "unmapped": 0,
+        "by_class": {}, "by_eco": {}, "domains": {}, "unmapped_names": [],
+    }
+    for zp in zips:
+        rel = zp.split("samples/")[-1]
+        parts = rel.split("/")
+        eco = parts[0]
+        name = parts[2] if len(parts) > 3 else parts[-1]
+        try:
+            zf = zipfile.ZipFile(zp)
+        except zipfile.BadZipFile:
+            continue
+        text = read_sources(zf, NPM_SRC if eco == "npm" else PYPI_SRC)
+        cls = classify(text)
+        for m in URL.finditer(text):
+            d = m.group(1).lower()
+            stats["domains"][d] = stats["domains"].get(d, 0) + 1
+        stats["by_eco"][eco] = stats["by_eco"].get(eco, 0) + 1
+        if cls == 0:
+            stats["unmapped"] += 1
+            stats["unmapped_names"].append(f"{eco}/{name}")
+            continue
+        stats["mapped"] += 1
+        stats["by_class"][str(cls)] = stats["by_class"].get(str(cls), 0) + 1
+        entries.append((name, eco, cls))
+
+    with open(out_h, "w") as fh:
+        fh.write("/* Generated by tools/corpus/extract_corpus.py -- do not edit.\n")
+        fh.write(" * Real malicious packages from the DataDog\n")
+        fh.write(" * malicious-software-packages-dataset, classified by\n")
+        fh.write(" * static install-time behavior (never executed). */\n")
+        fh.write("#ifndef ENVELOPE_CORPUS_DATA_H\n#define ENVELOPE_CORPUS_DATA_H\n\n")
+        fh.write("static const struct corpus_entry corpus[] = {\n")
+        for name, eco, cls in entries:
+            fh.write('    { "%s", "%s", %d },\n' % (c_escape(name), eco, cls))
+        fh.write("};\n")
+        fh.write("#define CORPUS_N %d\n\n" % len(entries))
+        if benign_path:
+            with open(benign_path) as fb:
+                benign = json.load(fb)
+            fh.write("static const struct benign_entry benign[] = {\n")
+            for b in benign:
+                fh.write('    { "%s", "%s", %d, %d },\n'
+                         % (c_escape(b["name"]), c_escape(b["version"]),
+                            b["n_files"], b["total_bytes"]))
+            fh.write("};\n#define BENIGN_N %d\n\n" % len(benign))
+        fh.write("#endif\n")
+
+    stats["domains"] = dict(sorted(stats["domains"].items(),
+                                   key=lambda kv: -kv[1])[:25])
+    with open(out_json, "w") as fj:
+        json.dump(stats, fj, indent=2)
+    print(f"mapped={stats['mapped']} unmapped={stats['unmapped']} "
+          f"by_class={stats['by_class']} by_eco={stats['by_eco']}")
+
+
+if __name__ == "__main__":
+    main()
