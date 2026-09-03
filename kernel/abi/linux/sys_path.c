@@ -531,6 +531,15 @@ int64_t sys_mount(const char *src, const char *target,
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
     vfs_path_normalize_absolute(ktarget);
+    /* Mount points are stored in the global VFS namespace: apply the
+     * caller's chroot root, same as every other path syscall. */
+    {
+        char rooted[MAX_PATH_LEN];
+        int pr = syscall_path_at(AT_FDCWD, ktarget, rooted, sizeof(rooted));
+        if (pr < 0) return pr;
+        strncpy(ktarget, rooted, sizeof(ktarget) - 1);
+        ktarget[sizeof(ktarget) - 1] = '\0';
+    }
     return vfs_mount(ksrc, ktarget, kfstype, flags, kdata);
 }
 
@@ -552,6 +561,14 @@ int64_t sys_umount2(const char *target, int flags) {
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
     vfs_path_normalize_absolute(ktarget);
+    /* See sys_mount: umount targets live in the global namespace too. */
+    {
+        char rooted[MAX_PATH_LEN];
+        int pr = syscall_path_at(AT_FDCWD, ktarget, rooted, sizeof(rooted));
+        if (pr < 0) return pr;
+        strncpy(ktarget, rooted, sizeof(ktarget) - 1);
+        ktarget[sizeof(ktarget) - 1] = '\0';
+    }
     return vfs_umount(ktarget);
 }
 
