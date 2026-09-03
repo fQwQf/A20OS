@@ -1,0 +1,17 @@
+# XFCE 桌面（Wayland/labwc）的 AArch64 版本，经 apk 从 xfce world 安装。
+# 细节见 xfce-riscv64.toml 的注释。
+#
+#   tools/a20 run xfce-aarch64
+name = "xfce-aarch64"
+description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream packages)"
+arch = "aarch64"
+
+[machine]
+memory = "2G"
+
+[gui]
+enabled = true
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096

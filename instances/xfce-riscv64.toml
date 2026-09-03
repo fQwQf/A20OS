@@ -1,0 +1,21 @@
+# XFCE 桌面（Wayland/labwc），经 apk 从 xfce world 安装：
+# A20OS 自有包（a20-base/a20-drivers）+ Alpine 上游包（labwc、xfce4-*、
+# 字体、输入法、脉冲音频……）由 mkrootfs 组进 build/images/xfce-riscv64.img，
+# 启动时作为第二块盘挂载并由 init chroot 接管（distro 模式）。
+# 首次组装需要从 Alpine 镜像站拉取上游包（之后走 build/cache/apk 缓存）。
+#
+#   tools/a20 run xfce-riscv64      # 组镜像并以 GUI 启动（等价 make run-world-gui PKG_WORLD=xfce）
+#   tools/a20 build xfce-riscv64    # 只组镜像（等价 make image-world PKG_WORLD=xfce）
+name = "xfce-riscv64"
+description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream packages)"
+arch = "riscv64"
+
+[machine]
+memory = "2G"
+
+[gui]
+enabled = true
+
+[rootfs]
+world = "xfce"
+world_size_mb = 4096

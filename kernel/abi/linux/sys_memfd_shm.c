@@ -17,7 +17,15 @@ struct linux_timespec64 {
 int64_t sys_memfd_create(const char *name, unsigned flags)
 {
     (void)name;
-    int ufd = memfd_create_file((int)flags);
+    /* Linux MFD_* flag values differ from O_CLOEXEC: MFD_CLOEXEC is 0x1
+     * while O_CLOEXEC is 0x80000.  memfd_create_file() takes internal
+     * O_CLOEXEC-style flags, so translate at the syscall boundary. */
+    if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB))
+        return -EINVAL;
+    unsigned internal = (flags & MFD_ALLOW_SEALING) | (flags & MFD_HUGETLB);
+    if (flags & MFD_CLOEXEC)
+        internal |= O_CLOEXEC;
+    int ufd = memfd_create_file((int)internal);
     if (ufd < 0)
         return ufd;
     int gfd = fdtable_get_current(ufd);

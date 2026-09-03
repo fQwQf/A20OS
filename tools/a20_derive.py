@@ -72,6 +72,10 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"EXTRA_IMAGE_MB={r.extra_size_mb}")
     if r.world is not None:
         v.append(f"PKG_WORLD={r.world}")
+    if r.world_size_mb is not None:
+        v.append(f"PKG_SIZE_MB={r.world_size_mb}")
+    if r.alpine is not None:
+        v.append(f"PKG_ALPINE={_b(r.alpine)}")
     if r.extra_packages is not None:
         v.append(f"EXTRA_PACKAGES={' '.join(r.extra_packages)}")
     if r.drivers is not None:

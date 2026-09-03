@@ -1,6 +1,7 @@
 # xfce profile —— XFCE desktop via Alpine upstream packages
 #
-# 使用 Alpine 仓库中的 xfce4 包，配合 wayland/weston 运行。
+# 使用 Alpine 仓库中的 xfce4 包，配合 wayland/labwc 运行（与
+# user/rootfs/alpine 的 distro 参考流程同栈；不采用本地魔改的 weston）。
 # 需要网络拉取上游包。
 
 a20-base
@@ -11,9 +12,20 @@ musl
 busybox
 ca-certificates
 
-# Wayland/Weston 合成器
+# 设备/登录/会话服务层（stage-2 init 依赖：dbus -> elogind -> seatd -> udevd）
+dbus
+dbus-x11
+elogind
+seatd
+seatd-launch
+eudev
+polkit
+runuser
+
+# Wayland 合成器（labwc/wlroots）+ X 兼容层
 wayland
-weston
+labwc
+xwayland
 
 # XFCE 桌面
 xfce4-session
@@ -35,7 +47,6 @@ xfce4-weather-plugin
 xfce4-places-plugin
 xfce4-systemload-plugin
 xfce4-battery-plugin
-xfce4-datetime-plugin
 xfce4-verve-plugin
 xfce4-timer-plugin
 xfce4-cpugraph-plugin
@@ -43,22 +54,13 @@ xfce4-netload-plugin
 xfce4-smartbookmark-plugin
 xfce4-genmon-plugin
 xfce4-fsguard-plugin
-xfce4-i8tem-plugin
 xfce4-calculator-plugin
-xfce4-datetime-plugin
-xfce4-eyes-plugin
-xfce4-gmail-plugin
-xfce4-indicator-plugin
-xfce4-kbdleds-plugin
 xfce4-mpc-plugin
-xfce4-quicklauncher-plugin
-xfce4-radio-plugin
-xfce4-shade-plugin
 xfce4-stopwatch-plugin
-xfce4-timeout-plugin
-xfce4-weather-plugin
-xfce4-webmail-plugin
-xfce4-xfappfinder-plugin
+# 邮件提醒插件：Alpine v3.23 起 webmail-plugin 由 mailwatch-plugin 替代
+xfce4-mailwatch-plugin
+# 已在 Alpine v3.23 全架构下架（勿加回）：xfce4-eyes/gmail/indicator/kbdleds/
+# quicklauncher/radio/shade/timeout/xfappfinder/datetime-plugin、ibus 系部分插件
 
 # 输入法
 ibus
@@ -79,7 +81,7 @@ gst-libav
 
 # 网络
 networkmanager
-nm-applet
+network-manager-applet
 
 # 音频
 pulseaudio

@@ -32,7 +32,7 @@ PKG_WORLD     ?= base
 PKG_SIZE_MB   ?= 512
 PKG_ALPINE    ?= 1
 
-.PHONY: pkg-key pkgs pkgs-check pkg-repo image-world
+.PHONY: pkg-key pkgs pkgs-check pkg-repo image-world run-world run-world-gui
 
 # 本地开发签名密钥：不入库，仅用于本机/CI 内的签名验证闭环。
 # 正式发布密钥由 CI secret 注入（见 docs/packaging/repository.md）。
@@ -80,6 +80,14 @@ image-world: pkg-repo
 		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
 		--output $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img \
 		--size-mb $(PKG_SIZE_MB)
+
+# GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
+# but with the virtio-gpu display stack and audio like _run_gui_impl.
+run-world-gui: image-world $(FAT32_IMG)
+	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS_NO_SDCARD)) \
+		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
+		-device $(QEMU_BLK_SECOND),drive=xworld \
+		-kernel $(KERNEL_ELF)
 
 # 组装并直接启动：world 镜像作为第二块盘（内核挂载为 /extra；
 # 含 /usr/lib/a20/init 标记的镜像会被 init chroot 接管，即 distro 模式）。
