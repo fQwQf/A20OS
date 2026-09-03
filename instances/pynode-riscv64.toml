@@ -1,0 +1,18 @@
+# Python 3 + Node.js/npm 运行时实例（apk world 'pynode'，distro 模式）：
+# Alpine v3.23 上游包（python3/py3-pip/nodejs/npm）由 mkrootfs 组进
+# build/images/pynode-riscv64.img，启动时作第二块盘挂载并由 init
+# chroot 接管（与 devtools world 同一模式）。首次组装需要从 Alpine
+# 镜像站拉取上游包（之后走 build/cache/apk 缓存）。
+#
+#   tools/a20 run pynode-riscv64      # 组镜像并启动（等价 make run-world PKG_WORLD=pynode）
+#   tools/a20 build pynode-riscv64    # 只组镜像（等价 make image-world PKG_WORLD=pynode）
+name = "pynode-riscv64"
+description = "Python 3 + Node.js/npm runtime via apk world 'pynode' (Alpine upstream packages)"
+arch = "riscv64"
+
+[machine]
+memory = "2G"
+
+[rootfs]
+world = "pynode"
+world_size_mb = 2048
