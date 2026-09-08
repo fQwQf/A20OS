@@ -38,6 +38,7 @@ static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
 #define IRQ_VECTOR_PCI     0x22
 #define IRQ_VECTOR_KEYBOARD 0x21
 #define IRQ_VECTOR_RESCHEDULE 0xF0
+#define IRQ_VECTOR_TLB_FLUSH 0xF1
 
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
 /* Mask/unmask the IOAPIC entry backing a routed PCI vector (0x40+gsi).
@@ -52,6 +53,15 @@ unsigned x86_64_apic_to_cpu(unsigned apic_id);
 int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
                         unsigned logical_id);
 void x86_64_smp_send_ipi(unsigned apic_id, uint32_t vector);
+/* Remote TLB shootdown (SMP): sends an IPI to each target CPU and waits for
+ * its CR3 reload to complete before returning.  Registered as the board's
+ * remote_tlb_flush op; without it, x86_64 SMP leaves stale user translations
+ * on remote CPUs after COW/mmap/munmap PTE changes. */
+int x86_64_smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr,
+                                uint64_t size);
+/* IPI handler run on the target CPU: reloads CR3 (full local TLB flush) and
+ * acknowledges the request generation. */
+void x86_64_ipi_tlb_flush_handler(void);
 void x86_64_smp_secondary_init(void);
 
 /* Exception / pseudo-cause codes
