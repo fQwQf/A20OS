@@ -15,6 +15,7 @@
 #include "core/lock.h"
 #include "core/perf.h"
 #include "core/panic.h"
+#include "core/klog.h"
 #include "core/string.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
@@ -52,11 +53,18 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 
     uint64_t index = file_pos / PAGE_SIZE;
     page_cache_page_t *pcp = page_cache_get(vf->vnode, index, 1);
-    if (!pcp)
+    if (!pcp) {
+        kerr("[SHFAULT] cache_get failed pid=%d va=0x%lx fd=%d idx=%lu\n",
+             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             (unsigned long)index);
         return -1;
+    }
 
     if (!page_cache_is_uptodate(pcp)) {
         if (page_cache_fill_vfile_page(vf, pcp) < 0) {
+            kerr("[SHFAULT] fill failed pid=%d va=0x%lx fd=%d idx=%lu\n",
+                 proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+                 (unsigned long)index);
             page_cache_put(pcp);
             return -1;
         }
@@ -64,6 +72,9 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 
     pfn_t cache_pfn = page_cache_pfn(pcp);
     if (!pfn_valid(cache_pfn)) {
+        kerr("[SHFAULT] bad pfn pid=%d va=0x%lx fd=%d idx=%lu pfn=%lu\n",
+             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             (unsigned long)index, (unsigned long)cache_pfn);
         page_cache_put(pcp);
         return -1;
     }
@@ -72,6 +83,9 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
         arch_flush_icache_range(page_cache_data(pcp), PAGE_SIZE);
     int r = pt_map(mm->pgdir, page_va, pfn_to_phys(cache_pfn), vma->pte_flags);
     if (r < 0) {
+        kerr("[SHFAULT] pt_map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
+             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             (unsigned long)index, r);
         page_cache_put(pcp);
         return -1;
     }
@@ -330,15 +344,25 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
             vfile_t *vf = vfs_get_file_ref(vma->file_fd);
-            if (!vf)
+            if (!vf) {
+                kerr("[MFAULT] file_fd dead pid=%d va=0x%lx fd=%d flags=0x%lx\n",
+                     t->pid, (unsigned long)page_va, vma->file_fd,
+                     (unsigned long)vma->vm_flags);
                 return -1;
+            }
             if (!vf->vnode) {
+                kerr("[MFAULT] no vnode pid=%d va=0x%lx fd=%d\n",
+                     t->pid, (unsigned long)page_va, vma->file_fd);
                 vfs_put_file_ref(vma->file_fd, vf);
                 return -1;
             }
 
             uint64_t file_pos = vma->file_offset + (page_va - vma->start);
             if (file_pos >= vf->vnode->size) {
+                kerr("[MFAULT] oob pid=%d va=0x%lx fd=%d pos=%lu size=%llu\n",
+                     t->pid, (unsigned long)page_va, vma->file_fd,
+                     (unsigned long)file_pos,
+                     (unsigned long long)vf->vnode->size);
                 signal_send(t->pid, SIGBUS);
                 vfs_put_file_ref(vma->file_fd, vf);
                 return -1;
@@ -551,6 +575,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         return -1;
     }
     if (!vf->vnode->ops || !vf->vnode->ops->readpage) {
+        kerr("[HFF] no readpage pid=%d fd=%d shared=%d\n",
+             t->pid, file_fd, shared);
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
@@ -559,6 +585,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     size_t window_count = 1;
     window[0] = page_cache_get(vf->vnode, file_pos / PAGE_SIZE, 1);
     if (!window[0]) {
+        kerr("[HFF] cache_get NULL pid=%d fd=%d pos=%lu shared=%d\n",
+             t->pid, file_fd, (unsigned long)file_pos, shared);
         vfs_put_file_ref(file_fd, vf);
         return -1;
     }
@@ -602,6 +630,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
             fill_r = 0;
     }
     if (fill_r < 0) {
+        kerr("[HFF] fill fail pid=%d fd=%d pos=%lu shared=%d\n",
+             t->pid, file_fd, (unsigned long)file_pos, shared);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
         vfs_put_file_ref(file_fd, vf);
@@ -627,9 +657,16 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
      * complete fault-around window.  That is the hot ext4 parallel-build path.
      * Single-page backends such as the embedded FAT32 development image keep
      * executable mappings on anonymous copies, so an unrelated late text
-     * fault cannot perturb page-cache pin accounting inside a running test. */
+     * fault cannot perturb page-cache pin accounting inside a running test.
+     * LoongArch64 and x86_64 additionally keep ALL executable private leaves
+     * on the anonymous-copy path: direct exec leaves can lose text PTEs under
+     * parallel loader/fault lifetimes there (dynamic-loader SIGSEGVs). */
     int direct_private = !shared && fault_around &&
+#ifdef CONFIG_X86_64
+        !executable;
+#else
         (!executable || vf->vnode->ops->readpages);
+#endif
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
@@ -658,6 +695,9 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     }
 
     if (candidate_count == 0) {
+        kerr("[HFF] no candidate pid=%d fd=%d pos=%lu shared=%d window=%lu\n",
+             t->pid, file_fd, (unsigned long)file_pos, shared,
+             (unsigned long)window_count);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
         vfs_put_file_ref(file_fd, vf);

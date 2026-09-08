@@ -21,6 +21,7 @@ extern int g_sched_base_slice_ms;
 typedef enum {
     PF_ROOT,
     PF_MEMINFO,
+    PF_STAT,
     PF_VERSION,
     PF_UPTIME,
     PF_CMDLINE,

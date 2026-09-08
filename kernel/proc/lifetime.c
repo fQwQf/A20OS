@@ -9,6 +9,7 @@
 #include "mm/mm.h"
 
 static unsigned long g_task_objects;
+static unsigned long g_tasks_created;
 static unsigned long g_task_refs;
 static unsigned long g_pid_entries;
 static unsigned long g_wait_entries;
@@ -45,6 +46,7 @@ void proc_lifetime_note_task_init(int dynamic)
     if (dynamic)
         counter_inc(&g_task_objects);
     counter_inc(&g_task_refs);
+    counter_inc(&g_tasks_created);
 }
 
 void proc_lifetime_note_task_free(void)
@@ -120,6 +122,7 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     memset(stats, 0, sizeof(*stats));
 
     stats->task_objects = counter_read(&g_task_objects);
+    stats->tasks_created = counter_read(&g_tasks_created);
     stats->task_refs = counter_read(&g_task_refs);
     stats->pid_entries = counter_read(&g_pid_entries);
     stats->wait_entries = counter_read(&g_wait_entries);

@@ -17,6 +17,7 @@
 #include "core/psi.h"
 #include "mm/swap.h"
 #include "core/timer.h"
+#include "core/timekeeping.h"
 #include "core/perf.h"
 #include "core/lock_counters.h"
 #include "core/string.h"
@@ -381,22 +382,63 @@ int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,
 int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     buf[0] = '\0';
     switch (type) {
+    case PF_STAT: {
+        size_t off = 0;
+        uint64_t tot_user = 0, tot_sys = 0, tot_idle = 0;
+        uint64_t u[CONFIG_NR_CPUS], s[CONFIG_NR_CPUS], idl[CONFIG_NR_CPUS];
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+            proc_get_cpu_times(cpu, &u[cpu], &s[cpu], &idl[cpu]);
+            tot_user += u[cpu];
+            tot_sys += s[cpu];
+            tot_idle += idl[cpu];
+        }
+        appendf(buf, bufsz, &off, "cpu  %llu 0 %llu %llu 0 0 0 0 0 0\n",
+                (unsigned long long)tot_user, (unsigned long long)tot_sys,
+                (unsigned long long)tot_idle);
+        for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++)
+            appendf(buf, bufsz, &off, "cpu%u %llu 0 %llu %llu 0 0 0 0 0 0\n",
+                    cpu, (unsigned long long)u[cpu],
+                    (unsigned long long)s[cpu], (unsigned long long)idl[cpu]);
+        uint64_t rt[2], mono[2];
+        timekeeping_get_realtime(rt);
+        timekeeping_get_monotonic(mono);
+        proc_lifetime_stats_t lt;
+        proc_lifetime_snapshot(&lt);
+        appendf(buf, bufsz, &off,
+                "intr 0\n"
+                "ctxt 0\n"
+                "btime %llu\n"
+                "processes %lu\n"
+                "procs_running %llu\n"
+                "procs_blocked 0\n",
+                (unsigned long long)(rt[0] > mono[0] ? rt[0] - mono[0] : 0),
+                lt.tasks_created,
+                (unsigned long long)proc_runq_load_sum());
+        break;
+    }
     case PF_MEMINFO: {
         size_t free_frames = frame_free_count();
         size_t total_kb = pfa.total_frames * PAGE_SIZE / 1024;
         size_t free_kb = free_frames * PAGE_SIZE / 1024;
         slab_stats_t slab;
         bcache_stats_t bc;
+        page_cache_stats_t pc;
         proc_vm_stats_t vmstats;
         pfa_huge_stats_t huge;
         slab_get_stats(&slab);
         bcache_get_stats(&bc);
+        page_cache_get_stats(&pc);
         proc_get_vm_stats(&vmstats);
         pfa_get_huge_stats(&huge);
         size_t buffers_kb = bc.block_pool_bytes / 1024;
-        size_t cached_kb = bc.valid_pages * PCACHE_PAGE_SIZE / 1024;
+        /* Cached = block cache + VFS page cache; both are reclaimable and
+         * must be visible to userspace monitors, otherwise page-cache
+         * growth (up to RAM/8) looks exactly like a memory leak. */
+        size_t cached_kb = (bc.valid_pages * PCACHE_PAGE_SIZE +
+                            pc.valid * PAGE_SIZE) / 1024;
         size_t dirty_kb = (bc.dirty_blocks * BCACHE_BLOCK_SIZE +
-                           bc.dirty_pages * PCACHE_PAGE_SIZE) / 1024;
+                           bc.dirty_pages * PCACHE_PAGE_SIZE +
+                           pc.dirty * PAGE_SIZE) / 1024;
         size_t slab_kb = slab.total_bytes / 1024;
         size_t sreclaim_kb = slab.reclaimable_bytes / 1024;
         size_t sunreclaim_kb = slab_kb > sreclaim_kb ? slab_kb - sreclaim_kb : 0;
@@ -629,11 +671,22 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_PID_STAT: {  // 生成进程 stat 信息
         task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
+        /* Linux field order: pid comm state ppid pgrp session tty_nr tpgid
+         * flags minflt cminflt majflt cmajflt utime stime cutime cstime
+         * priority nice num_threads itrealvalue starttime vsize rss */
+        size_t vsize = t->mm ? t->mm->total_vm * PAGE_SIZE : 0;
+        long rss_pages = t->mm ? (long)t->mm->rss : 0;
         snprintf(buf, bufsz,
-            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 0 %lu 0\n",
+            "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 %lu %lu %ld %ld %d %d %d 0 %lu %lu %ld\n",
             t->pid, t->name, procfs_task_state_char(t),
             t->ppid, t->pgid, t->sid,
-            (unsigned long)t->total_time);
+            (unsigned long)t->utime_ticks,
+            (unsigned long)t->stime_ticks,
+            (long)t->child_utime,
+            (long)t->child_stime,
+            t->priority, 0, 1,
+            (unsigned long)t->start_jiffies,
+            (unsigned long)vsize, rss_pages);
         proc_put(t);
         break;
     }

@@ -473,8 +473,14 @@ ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
 QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m $(QEMU_MEMORY) -nographic -smp $(NR_CPUS)
-ifneq ($(NR_CPUS),1)
-QEMU_FLAGS += -accel tcg,thread=multi
+# Virtualization back-end.  Non-x86_64 targets run under QEMU TCG
+# (multi-threaded once SMP).  x86_64 guests on an x86_64 host prefer KVM
+# when /dev/kvm is present, falling back to TCG otherwise.
+QEMU_TCG_ACCEL ?= tcg,thread=multi
+QEMU_ACCEL_x86_64 := $(if $(wildcard /dev/kvm),kvm,$(QEMU_TCG_ACCEL))
+QEMU_ACCEL := $(if $(QEMU_ACCEL_$(ARCH)),$(QEMU_ACCEL_$(ARCH)),$(if $(filter-out 1,$(NR_CPUS)),$(QEMU_TCG_ACCEL)))
+ifneq ($(QEMU_ACCEL),)
+QEMU_FLAGS += -accel $(QEMU_ACCEL)
 endif
 
 QEMU_BLK     := $(QEMU_BLK_$(ARCH))

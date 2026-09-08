@@ -945,6 +945,55 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 return 0;
             }
         }
+        /* Beyond the static 0-7 entries: accept any numeric slave name in
+         * [0, MAX_PTYS) so ptsname() results stay openable.  Name storage
+         * is a static per-index buffer because devfs_release never frees
+         * node->name. */
+        if (name[0] >= '0' && name[0] <= '9') {
+            unsigned idx = 0;
+            const char *p = name;
+            while (*p >= '0' && *p <= '9') {
+                idx = idx * 10 + (unsigned)(*p - '0');
+                if (idx >= 64)
+                    return -ENOENT;
+                p++;
+            }
+            if (*p != '\0')
+                return -ENOENT;
+            static char pts_dyn_names[64][4];
+            char *stored = pts_dyn_names[idx];
+            if (!stored[0]) {
+                if (idx >= 10) {
+                    stored[0] = (char)('0' + idx / 10);
+                    stored[1] = (char)('0' + idx % 10);
+                    stored[2] = '\0';
+                } else {
+                    stored[0] = (char)('0' + idx);
+                    stored[1] = '\0';
+                }
+            }
+            devfs_node_t *dynamic = kcalloc(1, sizeof(*dynamic));
+            vnode_t *vn = kcalloc(1, sizeof(*vn));
+            if (!dynamic || !vn) {
+                kfree(dynamic);
+                kfree(vn);
+                return -ENOMEM;
+            }
+            dynamic->kind = DEVFS_PTS;
+            dynamic->name = stored;
+            dynamic->rdev = 0x8000U + idx;
+            dynamic->dynamic = 1;
+            vn->ino = 0x30000U + idx;
+            vn->type = VFS_FT_REGULAR;
+            vn->mode = S_IFCHR | 0660;
+            vnode_ref_init(vn, 1);
+            vn->parent = dir;
+            vnode_get(dir);
+            vn->fs_data = dynamic;
+            vn->ops = &g_devfs_ops;
+            *out = vn;
+            return 0;
+        }
     } else if (node->kind == DEVFS_DRI_DIR) {
         for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
             if (g_nodes[i].kind == DEVFS_DRM && strcmp(name, g_nodes[i].name) == 0) {
@@ -1151,15 +1200,9 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
     case DEVFS_KMSG: vf->ops = &g_devfs_kmsg_ops; break;
     case DEVFS_TTY:  vf->ops = &g_devfs_tty_ops; break;
     case DEVFS_RTC:  vf->ops = &g_devfs_rtc_ops; break;
-    case DEVFS_FB: {
-        task_t *_cur = proc_current();
-        printf("[DEVFS] open fb0: pid=%d name=%s gpu_dev=%p\n",
-               _cur ? _cur->pid : -1,
-               _cur ? _cur->name : "?",
-               gpu_device_get_default());
+    case DEVFS_FB:
         vf->ops = &g_devfs_fb_ops;
         break;
-    }
     case DEVFS_INPUT: vf->ops = &g_devfs_input_ops; break;
     case DEVFS_CLASS:
         if (!node->class_dev || !__atomic_load_n(&node->class_dev->online,

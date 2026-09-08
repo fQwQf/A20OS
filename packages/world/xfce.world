@@ -12,6 +12,10 @@ musl
 busybox
 ca-certificates
 
+# Shell 与系统信息工具（xfce4-terminal 默认 shell 走 /etc/passwd）
+zsh
+fastfetch
+
 # 设备/登录/会话服务层（stage-2 init 依赖：dbus -> elogind -> seatd -> udevd）
 dbus
 dbus-x11

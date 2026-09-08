@@ -7,6 +7,9 @@ description = "XFCE desktop via apk world 'xfce' (labwc, Alpine upstream package
 arch = "aarch64"
 
 [machine]
+# TCG emulation + software rendering make the desktop CPU-bound;
+# 4 vCPUs are a verified SMP configuration on qemu-virt.
+smp = 4
 memory = "2G"
 
 [gui]
