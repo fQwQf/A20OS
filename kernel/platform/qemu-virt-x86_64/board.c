@@ -105,7 +105,9 @@ static const smp_platform_ops_t x86_64_smp_ops = {
     .discover = x86_64_smp_discover,
     .start = x86_64_smp_start,
     .send_ipi = x86_64_smp_send,
+#if CONFIG_NR_CPUS > 1
     .remote_tlb_flush = x86_64_smp_remote_tlb_flush,
+#endif
     .secondary_init = x86_64_smp_secondary,
 };
 
