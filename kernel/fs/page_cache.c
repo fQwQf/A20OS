@@ -345,16 +345,17 @@ static page_cache_page_t *evict_locked(vnode_t **deferred_put)
  * reserved 8 MiB at boot and thrashed on every large compiler image.  Lazy
  * chunks retain a large clean-file working set when memory is available while
  * leaving untouched systems at the old initial footprint. */
-static int page_cache_grow(void)
+static int page_cache_grow_internal(int force)
 {
     mutex_lock(&g_page_cache_grow_lock);
     uint64_t cache_flags = spin_lock_irqsave(&g_page_cache_lock);
-    int growth_unneeded = g_allocated_pages >= g_page_limit ||
+    size_t ceiling = force ? PAGE_CACHE_MAX_PAGES : g_page_limit;
+    int growth_unneeded = g_allocated_pages >= ceiling ||
                           (g_initialized && g_free_pages != NULL);
     spin_unlock_irqrestore(&g_page_cache_lock, cache_flags);
     if (growth_unneeded) {
         mutex_unlock(&g_page_cache_grow_lock);
-        return 0;
+        return g_allocated_pages >= ceiling ? -ENOSPC : 0;
     }
 
     page_cache_page_t *chunk =
@@ -382,6 +383,11 @@ static int page_cache_grow(void)
     }
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
+    if (g_allocated_pages / PAGE_CACHE_CHUNK_PAGES >= PAGE_CACHE_CHUNKS) {
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        mutex_unlock(&g_page_cache_grow_lock);
+        return -ENOSPC;
+    }
     size_t chunk_index = g_allocated_pages / PAGE_CACHE_CHUNK_PAGES;
     g_page_chunks[chunk_index] = chunk;
     for (size_t i = 0; i < PAGE_CACHE_CHUNK_PAGES; i++) {
@@ -393,6 +399,11 @@ static int page_cache_grow(void)
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     mutex_unlock(&g_page_cache_grow_lock);
     return 0;
+}
+
+static int page_cache_grow(void)
+{
+    return page_cache_grow_internal(0);
 }
 
 int page_cache_init(void)
@@ -511,6 +522,13 @@ retry:
         int written = page_cache_writeback_some(
             PAGE_CACHE_PRESSURE_WRITEBACK_PAGES);
         if (written > 0)
+            goto retry;
+        /* Nothing evictable remains: the cache holds mostly pages pinned by
+         * live MAP_SHARED mappings (wl_shm pools etc.).  A user demand fault
+         * must not SIGSEGV because the cache refuses to grow past its soft
+         * working-set limit while plenty of RAM is free, so exceed the soft
+         * limit up to the hard array bound and retry once. */
+        if (page_cache_grow_internal(1) == 0)
             goto retry;
         return NULL;
     }
