@@ -326,11 +326,15 @@ void arch_handle_irq(uint64_t irq, int from_user) {
         lapic_write(LAPIC_EOI, 0);
         proc_sched_handle_reschedule_ipi();
         return;
-    } else if (irq == IRQ_VECTOR_TLB_FLUSH) {
+    }
+#if CONFIG_NR_CPUS > 1
+    if (irq == IRQ_VECTOR_TLB_FLUSH) {
         lapic_write(LAPIC_EOI, 0);
         x86_64_ipi_tlb_flush_handler();
         return;
-    } else if (irq == IRQ_VECTOR_TIMER) {
+    }
+#endif
+    if (irq == IRQ_VECTOR_TIMER) {
         handle_timer_irq(from_user);
     } else if (irq == IRQ_VECTOR_UART || irq == IRQ_VECTOR_KEYBOARD ||
                irq == PS2_MOUSE_IRQ_VECTOR || irq == IRQ_VECTOR_PCI ||
