@@ -2,7 +2,7 @@
 # A20OS stage-2 init for the XFCE desktop world.
 
 export HOME=/root
-export SHELL=/bin/sh
+export SHELL=/bin/zsh
 export TERM=linux
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export XDG_RUNTIME_DIR=/run/user/0

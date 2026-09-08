@@ -905,13 +905,44 @@ void proc_sched_handle_reschedule_ipi(void)
     smp_membarrier_ipi_ack(cpu);
 }
 
+/* Per-CPU jiffy accounting backing /proc/stat and /proc/<pid>/stat.  One
+ * tick (10 ms) is charged per timer interrupt to the running context class:
+ * idle task, user mode, or kernel mode.  Only the local CPU writes its own
+ * slots; readers take benign races on 64-bit values. */
+static uint64_t g_cpu_user_ticks[CONFIG_NR_CPUS];
+static uint64_t g_cpu_system_ticks[CONFIG_NR_CPUS];
+static uint64_t g_cpu_idle_ticks[CONFIG_NR_CPUS];
+
+void proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
+                        uint64_t *idle)
+{
+    if (!user || !system || !idle || cpu >= CONFIG_NR_CPUS)
+        return;
+    *user = __atomic_load_n(&g_cpu_user_ticks[cpu], __ATOMIC_RELAXED);
+    *system = __atomic_load_n(&g_cpu_system_ticks[cpu], __ATOMIC_RELAXED);
+    *idle = __atomic_load_n(&g_cpu_idle_ticks[cpu], __ATOMIC_RELAXED);
+}
+
 void proc_sched_tick(int from_user)
 {
     task_t *cur = proc_current();
     if (!cur)
         return;
-    if (from_user)
+    unsigned tick_cpu = cpu_current_id();
+    if (tick_cpu < CONFIG_NR_CPUS) {
+        if (cur->pid == 0)
+            __atomic_fetch_add(&g_cpu_idle_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+        else if (from_user)
+            __atomic_fetch_add(&g_cpu_user_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&g_cpu_system_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+    }
+    if (from_user) {
         cur->total_time++;
+        cur->utime_ticks++;
+    } else if (cur->pid != 0) {
+        cur->stime_ticks++;
+    }
     if (cur->pid == 0 || cur->state != PROC_RUNNING)
         return;
 

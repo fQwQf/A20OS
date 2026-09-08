@@ -6,7 +6,7 @@
 # (busybox shell, no bash).
 
 export HOME=/root
-export SHELL=/bin/sh
+export SHELL=/bin/zsh
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 export XDG_RUNTIME_DIR=/run/user/0
 

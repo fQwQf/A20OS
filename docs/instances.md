@@ -229,9 +229,9 @@ world_size_mb = 4096
 
 `tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从
 Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false`
-可做纯本地仓库组合。x86_64 另有 X11/xorg 变体 `xfce-x86_64`（world
-`xfce-x86_64`）。注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted
-架构。
+可做纯本地仓库组合。x86_64 变体 `xfce-x86_64` 使用同一个 `xfce` world
+（Wayland/labwc），并在带 `/dev/kvm` 的宿主机上自动启用 KVM 加速。
+注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted 架构。
 
 ## 与旧 make 目标的对照
 

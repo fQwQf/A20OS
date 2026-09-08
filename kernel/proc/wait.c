@@ -19,6 +19,7 @@ static void wait_accumulate_child_time(task_t *parent, task_t *child)
     if (!parent || !child)
         return;
     parent->child_utime += child->total_time;
+    parent->child_stime += child->stime_ticks;
 }
 
 static int wait_task_tgid(task_t *t)

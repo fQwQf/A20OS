@@ -11,6 +11,7 @@
 #include "core/cpu.h"
 #include "core/panic.h"
 #include "core/string.h"
+#include "core/timekeeping.h"
 #include "cg/cgroup.h"
 #include "ipc/keyring.h"
 #include "ipc/landlock.h"
@@ -155,6 +156,13 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->itimer_real_interval = 0;
     memset(t->itimer_values, 0, sizeof(t->itimer_values));
     t->total_time = 0;
+    t->utime_ticks = 0;
+    t->stime_ticks = 0;
+    {
+        uint64_t mono[2];
+        timekeeping_get_monotonic(mono);
+        t->start_jiffies = mono[0] * 100 + mono[1] / 10000000ULL;
+    }
     t->child_utime = 0;
     t->child_stime = 0;
     t->pgid      = parent ? (parent_pgid > 0 ? parent_pgid : parent->pid) : t->pid;

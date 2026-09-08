@@ -183,6 +183,7 @@ static int procfs_root_file_type(pf_type_t type)
 {
     switch (type) {
     case PF_MEMINFO:
+    case PF_STAT:
     case PF_VERSION:
     case PF_UPTIME:
     case PF_CMDLINE:
@@ -317,7 +318,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     pf_entry_t *child = NULL;
     int fd_entry = -1;
     int fd_symlink = 0;
-    if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
+    if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "stat") == 0) {
+        child = new_entry(name, PF_STAT, 0);
+        type = PF_STAT;
+    } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
         child = new_entry(name, PF_SYS, 0);
         type = PF_SYS;
     } else if (dp && dp->type == PF_SYS && strcmp(name, "fs") == 0) {
@@ -947,7 +951,7 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
 // procfs 的 readdir 操作（读取目录项）
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
-        ".", "..", "meminfo", "version", "uptime", "cmdline",
+        ".", "..", "meminfo", "stat", "version", "uptime", "cmdline",
         "cpuinfo", "mounts", "self", "thread-self", "loadavg", "net", "config.gz",
         "filesystems", "cgroups", "swaps", "interrupts", "pidmap", "sys", "a20",
         "boot_id", "cap_last_cap", "nr_open", "pressure", "uid_map", "gid_map",
