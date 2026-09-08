@@ -340,4 +340,21 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     lapic_write(LAPIC_EOI, 0);
 }
 
+/* x86_64 full-register dump on user traps: core/trap.c prints rdi/rsi/rdx/
+ * rcx/r8/r9/rbp/rsp only, never rbx/r12-r15 which hold the faulting base
+ * and scratch pointers in most libc/GTK code. */
+void arch_dump_trap_extra_context(const trap_context_t *ctx)
+{
+    if (!ctx)
+        return;
+    printf("  [x86] rbx=0x%lx r12=0x%lx r13=0x%lx\n",
+           (unsigned long)ctx->rbx, (unsigned long)ctx->r12,
+           (unsigned long)ctx->r13);
+    printf("  [x86] r14=0x%lx r15=0x%lx rflags=0x%lx\n",
+           (unsigned long)ctx->r14, (unsigned long)ctx->r15,
+           (unsigned long)ctx->rflags);
+    printf("  [x86] r10=0x%lx r11=0x%lx\n",
+           (unsigned long)ctx->r10, (unsigned long)ctx->r11);
+}
+
 #endif

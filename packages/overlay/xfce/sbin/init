@@ -9,6 +9,9 @@ export HOME=/root
 export SHELL=/bin/zsh
 export PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 export XDG_RUNTIME_DIR=/run/user/0
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_CACHE_HOME="$HOME/.cache"
 
 # A20OS' devfs already populates /dev, so only mount devtmpfs when the
 # kernel did not do it for us.
@@ -24,6 +27,8 @@ mount -t devpts devpts /dev/pts 2>/dev/null || true
 mkdir -p /run
 
 mkdir -p /tmp/.X11-unix /tmp/.ICE-unix "$HOME/.config/dconf" \
+    "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml" \
+    "$HOME/.local/share" "$HOME/.cache" \
     /run/dbus /var/lib/dbus "$XDG_RUNTIME_DIR"
 chmod 01777 /tmp/.X11-unix
 chmod 0777 /tmp/.ICE-unix
