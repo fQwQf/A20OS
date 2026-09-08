@@ -5,6 +5,7 @@
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/timer.h"
+#include "core/panic.h"
 #include "proc/proc.h"
 #include "cpu.h"
 #include "platform.h"
@@ -189,5 +190,84 @@ void x86_64_secondary_entry(unsigned cpu_id)
     arch_local_irq_enable();
     idle_loop();
 }
+
+#if CONFIG_NR_CPUS > 1
+/*
+ * Remote TLB shootdown via a dedicated IPI: each target CPU reloads CR3
+ * (flushing its user TLB) and acknowledges its request generation.  The
+ * requester spins with interrupts enabled so an ABBA pair of flushing CPUs
+ * can service each other's IPIs.
+ */
+static _Atomic uint32_t tlb_flush_request[CONFIG_NR_CPUS];
+static _Atomic uint32_t tlb_flush_ack[CONFIG_NR_CPUS];
+
+void x86_64_ipi_tlb_flush_handler(void)
+{
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    for (;;) {
+        uint32_t request = __atomic_load_n(&tlb_flush_request[cpu],
+                                           __ATOMIC_ACQUIRE);
+        uint32_t ack = __atomic_load_n(&tlb_flush_ack[cpu],
+                                       __ATOMIC_RELAXED);
+        if (ack == request)
+            break;
+        arch_tlb_flush();
+        __atomic_store_n(&tlb_flush_ack[cpu], request, __ATOMIC_RELEASE);
+    }
+}
+
+int x86_64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
+                                uint64_t size)
+{
+    (void)addr;
+    (void)size;
+    uint32_t expected[CONFIG_NR_CPUS] = {0};
+    uint32_t self = 1U << arch_current_cpu_id();
+    pending &= ~self;
+    if (!pending)
+        return 0;
+
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        uint64_t hw_id;
+        if (smp_logical_to_hw(cpu, &hw_id) < 0)
+            continue;
+        expected[cpu] = __atomic_add_fetch(&tlb_flush_request[cpu], 1,
+                                           __ATOMIC_ACQ_REL);
+        x86_64_smp_send_ipi((unsigned)hw_id, IRQ_VECTOR_TLB_FLUSH);
+    }
+
+    int irqs_were_off = !arch_irqs_enabled();
+    if (irqs_were_off)
+        arch_local_irq_enable();
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        if (!(pending & (1U << cpu)))
+            continue;
+        uint64_t wait_start = timer_get_ticks();
+        while ((int32_t)(__atomic_load_n(&tlb_flush_ack[cpu],
+                                         __ATOMIC_ACQUIRE) -
+                         expected[cpu]) < 0) {
+            if (timer_get_ticks() - wait_start > 5UL * TICKS_PER_SEC) {
+                printf("[X86_64 TLB] timeout self=%u target=%u expected=%u "
+                       "request=%u ack=%u online=0x%x\n",
+                       arch_current_cpu_id(), cpu, expected[cpu],
+                       __atomic_load_n(&tlb_flush_request[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       __atomic_load_n(&tlb_flush_ack[cpu],
+                                       __ATOMIC_ACQUIRE),
+                       smp_online_cpu_mask());
+                panic("x86_64 remote TLB shootdown timed out");
+            }
+            cpu_relax();
+        }
+    }
+    if (irqs_were_off)
+        arch_local_irq_disable();
+    return 0;
+}
+#endif
 
 #endif
