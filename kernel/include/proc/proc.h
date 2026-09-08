@@ -215,6 +215,9 @@ typedef struct task_t {
     eevdf_node_t eevdf_node;  /* EEVDF runqueue treap membership (runq lock) */
     struct task_t *wait_next;
     uint64_t total_time;
+    uint64_t utime_ticks;          /* scheduler ticks charged in user mode */
+    uint64_t stime_ticks;          /* scheduler ticks charged in kernel mode */
+    uint64_t start_jiffies;        /* creation time, 10 ms jiffies since boot */
     uint64_t child_utime;
     uint64_t child_stime;
     uint64_t exec_start;
@@ -426,6 +429,8 @@ void     proc_sched_tick(int from_user);
 void     proc_sched_pi_boost(task_t *owner, task_t *waiter);
 void     proc_sched_pi_unboost(task_t *owner);
 uint64_t proc_runq_load_sum(void);
+void     proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
+                            uint64_t *idle);
 void     proc_sched_request_current(void);
 int      proc_sched_safe_point(void);
 /*

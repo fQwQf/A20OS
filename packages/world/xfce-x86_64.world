@@ -8,6 +8,8 @@ musl
 busybox
 busybox-extras
 bash
+zsh
+fastfetch
 ca-certificates
 # X server + init
 xinit

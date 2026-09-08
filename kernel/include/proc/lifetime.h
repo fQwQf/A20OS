@@ -12,6 +12,7 @@
  */
 typedef struct proc_lifetime_stats {
     unsigned long task_objects;
+    unsigned long tasks_created;    /* cumulative forks since boot */
     unsigned long task_refs;
     unsigned long listed_tasks;
     unsigned long listed_refs;
