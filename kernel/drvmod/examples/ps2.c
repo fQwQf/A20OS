@@ -23,10 +23,13 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/char/uart.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
+#include "drivers/core/driver_class.h"
 #include "proc/park.h"
 #include "core/lock.h"
 #include "core/string.h"
 #include "core/errno.h"
+
+extern void input_mux_wake(void);
 
 #define PS2_DATA_PORT       0x60
 #define PS2_STATUS_PORT     0x64
@@ -114,6 +117,7 @@ static void ps2_push_event(uint16_t type, uint16_t code, int32_t value)
         g_ps2.head = next;
     }
     spin_unlock_irqrestore(&g_ps2.lock, flags);
+    input_mux_wake();
 }
 
 static uint16_t ps2_extended_keycode(uint8_t scancode)
@@ -372,13 +376,58 @@ static const device_id_t ps2_ids[] = {
     { 0 },
 };
 
+/* Publish the ring as an input class device so /dev/event0 (input_mux)
+ * drains it: QEMU's monitor/VNC input targets the PS/2 controller by
+ * default, which is the reliable injection path on x86_64. */
+static int ps2_class_read(device_t *dev, void *buf, size_t count)
+{
+    (void)dev;
+    if (!buf || count < sizeof(struct input_event))
+        return -EINVAL;
+    uint64_t flags = spin_lock_irqsave(&g_ps2.lock);
+    size_t copied = 0;
+    while (g_ps2.head != g_ps2.tail &&
+           copied + sizeof(struct input_event) <= count) {
+        *(struct input_event *)((char *)buf + copied) = g_ps2.ring[g_ps2.tail];
+        g_ps2.tail = (g_ps2.tail + 1) % PS2_RING_SIZE;
+        copied += sizeof(struct input_event);
+    }
+    spin_unlock_irqrestore(&g_ps2.lock, flags);
+    return copied ? (int)copied : -EAGAIN;
+}
+
+static int ps2_class_poll(device_t *dev, short events)
+{
+    (void)dev;
+    (void)events;
+    uint64_t flags = spin_lock_irqsave(&g_ps2.lock);
+    int ready = g_ps2.head != g_ps2.tail;
+    spin_unlock_irqrestore(&g_ps2.lock, flags);
+    return ready;
+}
+
+static int ps2_class_ioctl(device_t *dev, unsigned long req, void *arg)
+{
+    (void)dev;
+    (void)req;
+    (void)arg;
+    return -ENOSYS;
+}
+
+static const input_dev_ops_t ps2_class_ops = {
+    .read  = ps2_class_read,
+    .poll  = ps2_class_poll,
+    .ioctl = ps2_class_ioctl,
+};
+
 static driver_t ps2_driver = {
     .name = "ps2",
     .id_table = ps2_ids,
     .bus = &platform_bus,
     .probe = ps2_probe,
     .remove = ps2_remove,
-    .class_type = DEV_CLASS_NONE,
+    .class_ops = &ps2_class_ops,
+    .class_type = DEV_CLASS_INPUT,
 };
 
 uintptr_t DriverEntry(void)
