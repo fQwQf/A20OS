@@ -79,7 +79,20 @@ task_t *proc_current(void)
     if (current && arch_is_kernel_address(current))
         return current;
 #endif
+#if CONFIG_NR_CPUS == 1
+    /*
+     * Single-CPU build: skip cpu_current_id() entirely.  On x86_64 that
+     * helper executes CPUID, which is a KVM VM-exit (~microseconds) and this
+     * is an extreme hot path -- readiness scans call proc_current() once per
+     * polled fd, and the desktop workload polls constantly.  With one slot
+     * there is nothing to index, so load g_cpu_current[0] directly.  The
+     * slot is written only by proc_set_current() on this same CPU (RELEASE),
+     * so an ACQUIRE load observes each published current task.
+     */
+    return __atomic_load_n(&g_cpu_current[0], __ATOMIC_ACQUIRE);
+#else
     return g_cpu_current[cpu_current_id()];
+#endif
 }
 
 task_t *proc_set_current(task_t *next)
