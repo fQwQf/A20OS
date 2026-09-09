@@ -95,6 +95,18 @@ static int has_invariant_tsc(void) {
     return !!(edx & (1U << 8));
 }
 
+/*
+ * KVM keeps the guest TSC stable even when it does not advertise the
+ * invariant-TSC bit (CPUID 0x80000007:EDX[8]) for the virtual CPU model.
+ * Skipping the HPET there avoids the slow MMIO read and the frequency
+ * rounding error that made the x86_64 clock run measurably behind real time.
+ */
+static int running_under_kvm(void) {
+    uint32_t max, ebx, ecx, edx;
+    cpuid(0x40000000U, 0, &max, &ebx, &ecx, &edx);
+    return max >= 0x40000000U && ebx == 0x4b4d564bU;
+}
+
 static uint64_t calibrate_tsc_with_pit(void) {
     uint8_t speaker = inb(0x61);
     outb(0x61, speaker & ~3U);
@@ -161,7 +173,7 @@ static void ensure_tsc_freq(void) {
     if (__atomic_compare_exchange_n(&tsc_freq_state, &expected, 1, 0,
                                     __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         tsc_freq = discover_tsc_freq();
-        if (!has_invariant_tsc() && enable_hpet())
+        if (!has_invariant_tsc() && !running_under_kvm() && enable_hpet())
             use_hpet = 1;
         __atomic_store_n(&tsc_freq_state, 2, __ATOMIC_RELEASE);
         return;
