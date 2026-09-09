@@ -437,14 +437,10 @@ QEMU_GUI_DEVICES_riscv64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5
 QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                           -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
                           -device virtio-gpu-device,bus=virtio-mmio-bus.7
-# x86_64 input is served by the xhci-hcd + usb-hid drivers (the PS/2 module
-# only fills a private ring and there is no virtio-input PCI front-end yet),
-# so expose the keyboard/mouse over an emulated xHCI controller.
+# x86_64 input comes from the PS/2 controller (QEMU's default keyboard/mouse
+# injection target); the ps2 drvmod publishes its ring to /dev/event0.
 QEMU_GUI_DEVICES_x86_64 := -vga none \
-                           -device virtio-gpu-pci \
-                           -device qemu-xhci,id=a20xhci \
-                           -device usb-kbd,bus=a20xhci.0 \
-                           -device usb-mouse,bus=a20xhci.0
+                           -device virtio-gpu-pci
 QEMU_GUI_DEVICES_loongarch64 := -vga none \
                                  -device virtio-gpu-pci \
                                  -device virtio-keyboard-pci \
