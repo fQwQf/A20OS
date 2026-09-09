@@ -9,8 +9,10 @@ description = "XFCE Wayland/labwc desktop via apk world 'xfce', KVM-accelerated 
 arch = "x86_64"
 
 [machine]
-# KVM 下多 vCPU 收益明显（每核一个宿主线程）。
-smp = 4
+# smp>1 (CONFIG_SMP build) currently hangs during XFCE session bring-up on
+# x86_64 (components block on socket/dbus wakeups); single-core is the
+# verified-working configuration until that scheduler bug is fixed.
+smp = 1
 memory = "2G"
 
 [gui]
