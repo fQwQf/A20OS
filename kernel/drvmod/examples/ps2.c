@@ -24,6 +24,7 @@ A20_DRIVER_DESCRIPTOR(A20_DRIVER_PLACEMENT_KERNEL_MODULE,
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
+#include "core/input.h"
 #include "proc/park.h"
 #include "core/lock.h"
 #include "core/string.h"
@@ -167,8 +168,10 @@ static void ps2_handle_keyboard_byte(uint8_t byte)
         g_ps2.right_shift = !released;
 
     uint16_t keycode = extended ? ps2_extended_keycode(scancode) : scancode;
-    if (keycode)
+    if (keycode) {
         ps2_push_event(EV_KEY, keycode, released ? 0 : 1);
+        ps2_push_event(EV_SYN, SYN_REPORT, 0);
+    }
 
     if (!released && !extended) {
         char c = (g_ps2.left_shift || g_ps2.right_shift) ?
@@ -209,6 +212,7 @@ static void ps2_handle_mouse_byte(uint8_t byte)
     if (changed & 0x04)
         ps2_push_event(EV_KEY, 0x112, (buttons >> 2) & 0x01); /* BTN_MIDDLE */
     g_ps2.mouse_buttons = buttons;
+    ps2_push_event(EV_SYN, SYN_REPORT, 0);
 }
 
 static void ps2_handle_irq(void)
