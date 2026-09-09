@@ -19,6 +19,12 @@ static inline void arch_wfi(void) {
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
 
 static inline unsigned arch_current_cpu_id(void) {
+#if CONFIG_NR_CPUS == 1
+    /* Single-CPU build: every caller would pay a CPUID (a KVM VM-exit on
+     * x86_64) to learn what is already known.  Per-CPU state reduces to
+     * index 0, matching cpu_current_id()'s clamp. */
+    return 0;
+#else
     /* Use CPUID leaf 1 initial APIC ID.  Reading x2APIC MSR 0x802 only works
      * when the CPU is in x2APIC mode, which the kernel does not enable. */
     uint32_t eax, ebx, ecx, edx;
@@ -27,6 +33,7 @@ static inline unsigned arch_current_cpu_id(void) {
                          : "a"(1)
                          :);
     return x86_64_apic_to_cpu((unsigned)(ebx >> 24));
+#endif
 }
 
 static inline void arch_local_irq_disable(void) {
