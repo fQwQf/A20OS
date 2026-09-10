@@ -12,12 +12,38 @@ typedef struct pidfd_file {
     int pid;
 } pidfd_file_t;
 
+/*
+ * Linux pidfd semantics: poll() blocks while the target task is alive and
+ * reports EPOLLIN|EPOLLHUP once it has exited.  A pidfd with no poll op fell
+ * through vfs_poll_file() to POLLNVAL, which made an event loop that watches
+ * its children spin at 100% CPU instead of blocking.
+ */
+static int pidfd_poll(vfile_t *vf, short events)
+{
+    pidfd_file_t *pf = vf ? (pidfd_file_t *)vf->priv : NULL;
+    if (!pf)
+        return POLLNVAL;
+
+    task_t *t = proc_find_get(pf->pid);
+    int exited = !t || t->state == PROC_ZOMBIE;
+    if (t)
+        proc_put(t);
+    if (!exited)
+        return 0;
+
+    short revents = POLLHUP;
+    if (events & POLLIN)
+        revents |= POLLIN;
+    return revents;
+}
+
 static int pidfd_close(vfile_t *vf)
 {
     return anonfd_free_priv_close(vf);
 }
 
 static vfile_ops_t g_pidfd_ops = {
+    .poll = pidfd_poll,
     .close = pidfd_close,
 };
 
