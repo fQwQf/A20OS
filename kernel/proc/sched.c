@@ -928,6 +928,8 @@ void proc_sched_tick(int from_user)
     task_t *cur = proc_current();
     if (!cur)
         return;
+    uint64_t now = timer_get_ticks();
+    proc_sched_expire_wait_timers(now);
     unsigned tick_cpu = cpu_current_id();
     if (tick_cpu < CONFIG_NR_CPUS) {
         if (cur->pid == 0)
@@ -946,7 +948,6 @@ void proc_sched_tick(int from_user)
     if (cur->pid == 0 || cur->state != PROC_RUNNING)
         return;
 
-    uint64_t now = timer_get_ticks();
     eevdf_charge(&sched_runq[cpu_current_id()], cur, now);
 
     uint64_t slice = EEVDF_BASE_SLICE;

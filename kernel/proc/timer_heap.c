@@ -440,14 +440,15 @@ void sched_note_timer_deadline(uint64_t deadline)
         sched_rearm_timer();
 }
 
-void sched_scan_timers(uint64_t now)
+/*
+ * Wake every task whose wait-timer deadline has passed.  Safe to call from
+ * IRQ context (spinlocks and atomics only): the timer interrupt invokes this
+ * so an expired deadline is reaped immediately, which advances next_wake_scan
+ * and keeps the one-shot timer from re-arming at the 100us floor until the
+ * next sched() pass.  sched() also calls it before scanning alarms.
+ */
+void proc_sched_expire_wait_timers(uint64_t now)
 {
-    int scan_alarms =
-        now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
-    if (scan_alarms)
-        __atomic_exchange_n(&next_alarm_scan, SCHED_NO_DEADLINE,
-                            __ATOMIC_RELAXED);
-
     struct { task_t *task; uint64_t seq; } expired[128];
     unsigned expired_count;
     uint64_t flags;
@@ -483,9 +484,21 @@ void sched_scan_timers(uint64_t now)
             proc_put(t);
         }
     } while (expired_count == 128);
+}
+
+void sched_scan_timers(uint64_t now)
+{
+    int scan_alarms =
+        now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
+    if (scan_alarms)
+        __atomic_exchange_n(&next_alarm_scan, SCHED_NO_DEADLINE,
+                            __ATOMIC_RELAXED);
+
+    proc_sched_expire_wait_timers(now);
 
     if (scan_alarms) {
         uint64_t next_alarm = SCHED_NO_DEADLINE;
+        uint64_t flags;
         int more_due;
         do {
             task_t *sigalrm_tasks[SCHED_SIGNAL_BATCH];
