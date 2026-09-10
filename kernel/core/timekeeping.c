@@ -6,7 +6,9 @@
 #include "build_time.h"
 
 static uint64_t g_boot_ticks;
+static uint64_t g_boot_cycles;
 static uint64_t g_realtime_base_ticks;
+static uint64_t g_realtime_base_cycles;
 static uint64_t g_realtime_base_sec;
 static uint64_t g_realtime_base_nsec;
 static spinlock_t g_timekeeping_lock = SPINLOCK_INIT;
@@ -18,15 +20,16 @@ static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
 
 void timekeeping_init(void) {
     g_boot_ticks = timer_get_ticks();
+    g_boot_cycles = arch_vdso_counter();
     timekeeping_set_realtime(A20_BUILD_UNIX_TIME, 0);
 }
 
 /* The vDSO image/vvar need the frame allocator, so they are set up after
  * mm_init rather than here (kernel/main.c call order). */
 void timekeeping_vdso_init(void) {
-    vdso_init(g_boot_ticks, TICKS_PER_SEC);
+    vdso_init(g_boot_cycles, arch_vdso_counter_freq());
     vdso_sync_realtime(g_realtime_base_sec, g_realtime_base_nsec,
-                       g_realtime_base_ticks);
+                       g_realtime_base_cycles);
 }
 
 void timekeeping_get_monotonic(uint64_t ts[2]) {
@@ -57,11 +60,12 @@ int timekeeping_set_realtime(uint64_t sec, uint64_t nsec) {
     }
     uint64_t flags = spin_lock_irqsave(&g_timekeeping_lock);
     g_realtime_base_ticks = timer_get_ticks();
+    g_realtime_base_cycles = arch_vdso_counter();
     g_realtime_base_sec = sec;
     g_realtime_base_nsec = nsec;
     spin_unlock_irqrestore(&g_timekeeping_lock, flags);
     /* Keep the vDSO realtime anchor in sync (seqlock on the reader side);
-     * pass the recorded tick so both paths agree bit for bit. */
-    vdso_sync_realtime(sec, nsec, g_realtime_base_ticks);
+     * pass the recorded cycle so both paths agree bit for bit. */
+    vdso_sync_realtime(sec, nsec, g_realtime_base_cycles);
     return 0;
 }

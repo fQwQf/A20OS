@@ -844,23 +844,26 @@ endif
 KERNEL_OBJ += $(RAMFS_USER_BLOBS)
 endif
 
-# vDSO user image (riscv64/loongarch64): built out-of-tree of ASM_SRC on
-# purpose, it is user code linked with its own script.  The vdso.elf FILE is
-# embedded verbatim: p_offset == p_vaddr makes file layout == memory layout,
-# ELF header included (objcopy -O binary would strip the header and break
-# musl's vDSO parser).
+# vDSO user image (riscv64/loongarch64/x86_64/aarch64/ppc64le): built
+# out-of-tree of ASM_SRC on purpose, it is user code linked with its own
+# script.  The vdso.elf FILE is embedded verbatim: p_offset == p_vaddr makes
+# file layout == memory layout, ELF header included (objcopy -O binary would
+# strip the header and break musl's vDSO parser).
 VDSO_CC_riscv64       ?= $(CCACHE_PREFIX)$(RISCV_GNU_CC)
 VDSO_CC_loongarch64   ?= $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
+VDSO_CC_x86_64        ?= $(CCACHE_PREFIX)x86_64-linux-gnu-gcc
+VDSO_CC_aarch64       ?= $(CCACHE_PREFIX)aarch64-linux-gnu-gcc
+VDSO_CC_ppc64le       ?= $(CCACHE_PREFIX)powerpc64le-linux-gnu-gcc
 VDSO_CC               ?= $(VDSO_CC_$(ARCH))
 VDSO_OBJCOPY_riscv64     := -O elf64-littleriscv -B riscv:rv64
 VDSO_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
+VDSO_OBJCOPY_x86_64      := -O elf64-x86-64 -B i386:x86-64
+VDSO_OBJCOPY_aarch64     := -O elf64-littleaarch64 -B aarch64
+VDSO_OBJCOPY_ppc64le     := -O elf64-powerpcle -B powerpc:common64
 VDSO_SRC_DIR := $(KERNEL_DIR)/vdso/$(ARCH)
 VDSO_ELF  := $(BUILD_DIR)/vdso/vdso.elf
 VDSO_BLOB := $(BUILD_DIR)/vdso/vdso_blob.o
-ifeq ($(ARCH),riscv64)
-KERNEL_OBJ += $(VDSO_BLOB)
-endif
-ifeq ($(ARCH),loongarch64)
+ifneq ($(filter riscv64 loongarch64 x86_64 aarch64 ppc64le,$(ARCH)),)
 KERNEL_OBJ += $(VDSO_BLOB)
 endif
 
