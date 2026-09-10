@@ -1,6 +1,8 @@
 #ifndef _ARCH_PPC64LE_H
 #define _ARCH_PPC64LE_H
 
+#define ARCH_HAS_VDSO 1
+
 #include "platform.h"
 #include "console.h"
 #include "cpu.h"
