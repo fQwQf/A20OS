@@ -47,6 +47,23 @@ static vfile_ops_t g_pidfd_ops = {
     .close = pidfd_close,
 };
 
+int linux_pidfd_pid(int pidfd)
+{
+    int gfd = fdtable_get_current(pidfd);
+    if (gfd < 0)
+        return gfd;
+    vfile_t *vf = vfs_get_file_ref(gfd);
+    if (!vf)
+        return -EBADF;
+    if (vf->ops != &g_pidfd_ops || !vf->priv) {
+        vfs_put_file_ref(gfd, vf);
+        return -EBADF;
+    }
+    int pid = ((pidfd_file_t *)vf->priv)->pid;
+    vfs_put_file_ref(gfd, vf);
+    return pid;
+}
+
 int linux_pidfd_create(int pid, int flags)
 {
     if (flags & ~O_CLOEXEC)
