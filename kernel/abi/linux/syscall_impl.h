@@ -348,6 +348,7 @@ int64_t sys_io_cancel(uint64_t ctx, const void *iocb, void *result);
 /* pidfd (sys_pidfd.c). */
 int64_t sys_pidfd_open(int pid, unsigned flags);
 int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags);
+int linux_pidfd_pid(int pidfd);
 
 /* epoll_pwait2 (sys_epoll.c). */
 int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
