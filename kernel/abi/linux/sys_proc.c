@@ -587,6 +587,11 @@ int64_t sys_waitid(int type, int id, void *info, int options, void *rusage) {
     case 2: /* P_PGID */
         pid = (id == 0) ? 0 : -id;
         break;
+    case 3: /* P_PIDFD */
+        pid = linux_pidfd_pid(id);
+        if (pid < 0)
+            return pid;
+        break;
     default:
         return -EINVAL;
     }
