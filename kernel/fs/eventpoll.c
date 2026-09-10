@@ -450,29 +450,63 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
         deadline = timer_get_ticks() + ticks;
     }
 
-    readiness_interest_t *interests =
-        kcalloc(EPOLL_MAX_FDS, sizeof(*interests));
-    epoll_wait_item_t *snapshots =
-        kcalloc(EPOLL_MAX_FDS, sizeof(*snapshots));
-    if (!interests || !snapshots) {
-        if (sigmask && saved_ss)
-            signal_task_restore_mask(t, saved_blocked);
-        kfree(interests);
-        kfree(snapshots);
-        epoll_put_ref(ep_gfd, ep_vf);
-        return -ENOMEM;
-    }
+    /*
+     * Scratch arrays are sized to the registered-item count rather than
+     * EPOLL_MAX_FDS: a hot epoll_wait() would otherwise zero ~96 KiB per call
+     * (kcalloc plus an explicit memset of both 1024-entry arrays).  Both arrays
+     * are fully written for [0, interest_count) below, so zeroing is unneeded.
+     * epoll_ctl() during the wait bumps change_seq (forcing a re-snapshot) and
+     * may grow ep->count; the overflow path falls back to the hard maximum.
+     */
+    size_t scratch_cap = 0;
+    bool force_max = false;
+    readiness_interest_t *interests = NULL;
+    epoll_wait_item_t *snapshots = NULL;
 
     int total_ready = 0;
     for (;;) {
-        memset(interests, 0, EPOLL_MAX_FDS * sizeof(*interests));
-        memset(snapshots, 0, EPOLL_MAX_FDS * sizeof(*snapshots));
+        size_t need;
+        if (force_max) {
+            need = EPOLL_MAX_FDS;
+        } else {
+            uint64_t cap_flags = spin_lock_irqsave(&ep->lock);
+            need = (size_t)ep->count;
+            spin_unlock_irqrestore(&ep->lock, cap_flags);
+            if (need == 0)
+                need = 1;
+        }
+        if (need > scratch_cap) {
+            readiness_interest_t *new_interests =
+                kmalloc(need * sizeof(*new_interests));
+            epoll_wait_item_t *new_snapshots =
+                kmalloc(need * sizeof(*new_snapshots));
+            if (!new_interests || !new_snapshots) {
+                kfree(new_interests);
+                kfree(new_snapshots);
+                kfree(interests);
+                kfree(snapshots);
+                if (sigmask && saved_ss)
+                    signal_task_restore_mask(t, saved_blocked);
+                epoll_put_ref(ep_gfd, ep_vf);
+                return -ENOMEM;
+            }
+            kfree(interests);
+            kfree(snapshots);
+            interests = new_interests;
+            snapshots = new_snapshots;
+            scratch_cap = need;
+        }
         size_t interest_count = 0;
+        bool overflow = false;
         uint64_t lock_flags = spin_lock_irqsave(&ep->lock);
         epoll_change_probe_t probe = { .ep = ep, .sequence = ep->change_seq };
         for (int i = 0; i < EPOLL_MAX_FDS; i++) {
             if (!ep->items[i].registered || !ep->items[i].state.enabled)
                 continue;
+            if (interest_count >= scratch_cap) {
+                overflow = true;
+                break;
+            }
             snapshots[interest_count] = (epoll_wait_item_t){
                 .index = i,
                 .fd = ep->items[i].fd,
@@ -489,6 +523,10 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
             };
         }
         spin_unlock_irqrestore(&ep->lock, lock_flags);
+        if (overflow) {
+            force_max = true;
+            continue;
+        }
         readiness_extra_t control = {
             .source = { &ep->control_waiters, 0, 0 },
             .ready = epoll_change_pending,
