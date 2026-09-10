@@ -47,8 +47,22 @@ static uint32_t       g_vdso_pages;
 static pfn_t          g_vvar_pfn;
 static a20_vvar_t    *g_vvar;
 
+__attribute__((weak)) uint64_t arch_vdso_counter(void)
+{
+    return timer_get_ticks();
+}
+
+__attribute__((weak)) uint64_t arch_vdso_counter_freq(void)
+{
+    return TICKS_PER_SEC;
+}
+
 void vdso_init(uint64_t boot_cycles, uint64_t timer_freq)
 {
+    if (!timer_freq) {
+        klog(KLOG_INFO, "vdso: no user-readable counter; disabled\n");
+        return;
+    }
     /* The raw vdso.elf file is embedded: with p_offset == p_vaddr for the
      * single LOAD segment, the file layout is the in-memory layout, ELF
      * header included (musl parses it via AT_SYSINFO_EHDR). */
