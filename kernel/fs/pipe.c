@@ -413,7 +413,7 @@ int pipe_poll_events(vfile_t *vf, short events)
     short revents = 0;
     spin_lock(&pb->lock);
     if (vf->ops == &g_pipe_read_ops) {
-        if ((events & POLLIN) && (pb->used > 0 || pb->writer_closed))
+        if ((events & POLLIN) && pb->used > 0)
             revents |= POLLIN;
         if (pb->writer_closed)
             revents |= POLLHUP;
