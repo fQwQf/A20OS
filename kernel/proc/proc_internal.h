@@ -100,6 +100,7 @@ void proc_sched_runq_init(void);
 void proc_timer_heap_init(void);
 int  proc_sched_timers_due(uint64_t now);
 void sched_scan_timers(uint64_t now);
+void proc_sched_expire_wait_timers(uint64_t now);
 unsigned proc_sched_select_cpu_locked(task_t *t);
 void proc_sched_kick_cpu(unsigned cpu);
 void proc_sched_request_cpu(unsigned cpu, int priority);
