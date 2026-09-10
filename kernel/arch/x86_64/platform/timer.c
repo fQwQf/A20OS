@@ -282,4 +282,20 @@ void timer_disable(void) {
     lapic_write(LAPIC_LVT_TIMER, lapic_read(LAPIC_LVT_TIMER) | LAPIC_LVT_MASKED);
 }
 
+uint64_t arch_vdso_counter(void)
+{
+    return read_tsc();
+}
+
+uint64_t arch_vdso_counter_freq(void)
+{
+    ensure_tsc_freq();
+    /* When HPET is the time source user space cannot read it; report no
+     * usable counter so the vDSO stays off rather than disagreeing with the
+     * syscall path. */
+    if (use_hpet)
+        return 0;
+    return tsc_freq ? tsc_freq : ARCH_TIMER_FREQ;
+}
+
 #endif
