@@ -56,6 +56,42 @@ static uint64_t scale_ticks(uint64_t value, uint64_t from, uint64_t to) {
     return whole + fraction;
 }
 
+/* Scale using an already-reduced from/to pair, skipping the per-call gcd. */
+static uint64_t scale_ticks_reduced(uint64_t value, uint64_t from, uint64_t to) {
+    uint64_t whole = value / from;
+    uint64_t fraction = (value % from) * to / from;
+    uint64_t max = ~0ULL;
+
+    if (whole > max / to)
+        return max;
+    whole *= to;
+    if (fraction > max - whole)
+        return max;
+    return whole + fraction;
+}
+
+static uint64_t gcd_u64(uint64_t a, uint64_t b) {
+    while (b) {
+        uint64_t remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    return a ? a : 1;
+}
+
+/* Reduced (source_freq, ARCH_TIMER_FREQ) pair for the active clock source. */
+static uint64_t clk_scale_num = 1;
+static uint64_t clk_scale_den = 1;
+
+static void timer_update_clk_scale(void) {
+    uint64_t src = use_hpet ? hpet_freq : tsc_freq;
+    if (!src)
+        src = ARCH_TIMER_FREQ;
+    uint64_t g = gcd_u64(src, ARCH_TIMER_FREQ);
+    clk_scale_num = src / g;
+    clk_scale_den = ARCH_TIMER_FREQ / g;
+}
+
 static uint64_t read_tsc(void) {
     uint32_t lo, hi;
     __asm__ __volatile__("lfence; rdtsc" : "=a"(lo), "=d"(hi) :: "memory");
@@ -175,6 +211,7 @@ static void ensure_tsc_freq(void) {
         tsc_freq = discover_tsc_freq();
         if (!has_invariant_tsc() && !running_under_kvm() && enable_hpet())
             use_hpet = 1;
+        timer_update_clk_scale();
         __atomic_store_n(&tsc_freq_state, 2, __ATOMIC_RELEASE);
         return;
     }
@@ -221,9 +258,10 @@ uint64_t timer_get_ticks(void) {
     ensure_tsc_freq();
     uint64_t ticks;
     if (use_hpet)
-        ticks = scale_ticks(hpet_read(HPET_COUNTER), hpet_freq, ARCH_TIMER_FREQ);
+        ticks = scale_ticks_reduced(hpet_read(HPET_COUNTER),
+                                    clk_scale_num, clk_scale_den);
     else
-        ticks = scale_ticks(read_tsc(), tsc_freq, ARCH_TIMER_FREQ);
+        ticks = scale_ticks_reduced(read_tsc(), clk_scale_num, clk_scale_den);
 
     uint64_t previous = __atomic_load_n(&last_ticks, __ATOMIC_RELAXED);
     while (ticks > previous &&
