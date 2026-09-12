@@ -38,6 +38,15 @@ xfce4-mpc-plugin
 xfce4-stopwatch-plugin
 xfce4-verve-plugin
 xfce4-timer-plugin
+# Media playback (parole = XFCE media player, GStreamer backend)
+ffmpeg
+gstreamer
+gst-plugins-base
+gst-plugins-good
+gst-plugins-bad
+gst-plugins-ugly
+gst-libav
+parole
 # Fonts
 font-noto
 font-dejavu
