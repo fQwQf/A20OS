@@ -32,6 +32,15 @@ PKG_WORLD     ?= base
 PKG_SIZE_MB   ?= 512
 PKG_ALPINE    ?= 1
 
+# 可选：往 world 镜像里注入本地媒体文件（演示视频等），对应旧 GUI 流程的
+# GUI_MEDIA。用法：
+#   make ARCH=x86_64 image-world PKG_WORLD=xfce-x86_64 PKG_MEDIA=/path/to/video.mp4
+# 文件落到镜像内 $(PKG_MEDIA_DIR)/<原文件名>，桌面里用 parole 打开或
+# 在 Thunar 中双击即可播放。
+PKG_MEDIA          ?=
+PKG_MEDIA_DIR      ?= /usr/share/a20-media
+PKG_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
+
 .PHONY: pkg-key pkgs pkgs-check pkg-repo image-world run-world run-world-gui
 
 # 本地开发签名密钥：不入库，仅用于本机/CI 内的签名验证闭环。
@@ -70,11 +79,21 @@ pkg-repo: pkgs
 	tools/mka20repo.sh $(if $(PKG_SIGN_KEY),--sign-key $(PKG_SIGN_KEY) --key-name $(PKG_KEY_NAME),) \
 		$(PKG_REPO_DIR)/$(PKG_ARCH)
 
-image-world: pkg-repo
+# 生成只含媒体文件的临时 overlay，由 mkrootfs 的 --overlay 机制合入镜像。
+.PHONY: pkg-media-overlay
+pkg-media-overlay:
+	@test -f "$(PKG_MEDIA)" || { echo "[PKG] PKG_MEDIA not found: $(PKG_MEDIA)"; exit 1; }
+	@rm -rf "$(PKG_MEDIA_OVERLAY)"
+	@mkdir -p "$(PKG_MEDIA_OVERLAY)$(PKG_MEDIA_DIR)"
+	@cp "$(PKG_MEDIA)" "$(PKG_MEDIA_OVERLAY)$(PKG_MEDIA_DIR)/"
+	@echo "[PKG] media: $(PKG_MEDIA) -> $(PKG_MEDIA_DIR)/$$(basename '$(PKG_MEDIA)')"
+
+image-world: pkg-repo $(if $(PKG_MEDIA),pkg-media-overlay)
 	$(PYTHON) tools/mkrootfs.py --arch $(PKG_ARCH) \
 		--world packages/world/$(PKG_WORLD).world \
 		--repo $(abspath $(PKG_REPO_DIR)) \
 		$(if $(wildcard packages/overlay/$(PKG_WORLD)),--overlay packages/overlay/$(PKG_WORLD),) \
+		$(if $(PKG_MEDIA),--overlay $(abspath $(PKG_MEDIA_OVERLAY)),) \
 		$(if $(PKG_SIGN_KEY),--keys-dir $(PKG_KEYS_DIR),--allow-untrusted) \
 		$(if $(filter 0,$(PKG_ALPINE)),--no-alpine,) \
 		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
