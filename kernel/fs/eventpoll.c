@@ -333,6 +333,11 @@ int eventpoll_ctl(int epfd, int op, int fd, uint32_t events, uint64_t data)
         }
         if (target_vf->vnode && target_vf->vnode->type == VFS_FT_DIR)
             EPOLL_CTL_RETURN(-EPERM);
+        /* Linux file_can_poll(): files without a real ->poll (regular,
+         * procfs, sysfs, cgroup) cannot join an epoll set.  Accepting them
+         * would hand the event loop an always-ready fd and spin it. */
+        if (!vfs_file_is_pollable(target_vf))
+            EPOLL_CTL_RETURN(-EPERM);
 
         uint64_t flags = spin_lock_irqsave(&ep->lock);
         int idx = epoll_find(ep, fd);

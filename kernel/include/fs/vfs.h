@@ -365,6 +365,7 @@ int      vfs_fsync(int fd);
 int      vfs_fdatasync(int fd);
 int      vfs_poll_events(int fd, short events);
 int      vfs_poll_file(vfile_t *vf, short events);
+int      vfs_file_is_pollable(vfile_t *vf);
 
 /* Directory operations */
 int      vfs_mkdir(const char *path, int mode);

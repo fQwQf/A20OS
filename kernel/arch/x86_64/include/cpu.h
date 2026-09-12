@@ -4,6 +4,12 @@
 #include "core/types.h"
 #include "platform.h"
 
+/* HLT-based idle is safe on x86_64: the LAPIC timer and cross-CPU reschedule
+ * IPIs are delivered while halted, and STI+HLT cannot lose a wakeup (the
+ * instruction after STI executes before interrupts are recognized, so a
+ * pending interrupt is taken immediately after HLT parks the CPU). */
+#define ARCH_HAS_SAFE_IDLE_WAIT 1
+
 static inline void arch_mb(void) {
     __asm__ __volatile__("lock; addl $0, 0(%%rsp)" ::: "memory");
 }
@@ -15,6 +21,9 @@ static inline void arch_wmb(void) {
 }
 static inline void arch_wfi(void) {
     __asm__ __volatile__("sti; hlt");
+}
+static inline void arch_idle_wait(void) {
+    __asm__ __volatile__("sti; hlt" ::: "memory");
 }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("pause" ::: "memory"); }
 

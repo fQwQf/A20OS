@@ -1369,6 +1369,32 @@ int vfs_getcwd(char *buf, size_t size) {
     return 0;
 }
 
+/*
+ * Linux file_can_poll() equivalent.  A file may join an epoll set only when
+ * its f_op provides ->poll.  Regular, procfs, sysfs and cgroup files have no
+ * real ->poll: poll() still reports them always ready (as Linux does), but
+ * epoll_ctl() must reject them with EPERM, or an always-ready fd makes
+ * epoll_wait() return immediately forever and the event loop spins at 100%.
+ * devfs device nodes keep the historical fallback because some of them (fb,
+ * kmsg, ...) reach readiness only through the vnode path.
+ */
+int vfs_file_is_pollable(vfile_t *vf)
+{
+    if (!vf || !vf->ops)
+        return 0;
+    if (vf->ops->poll)
+        return 1;
+    if (signalfd_poll_events(vf, 0) >= 0)
+        return 1;
+    if (vfs_is_pipe_vfile(vf))
+        return 1;
+    if (vfs_is_char_device_vfile(vf))
+        return 1;
+    if (vf->vnode && vf->vnode->mnt && vf->vnode->mnt->type == FS_TYPE_DEVFS)
+        return 1;
+    return 0;
+}
+
 int vfs_poll_file(vfile_t *vf, short events) {
     if (!vf) return POLLNVAL;
     int sr = signalfd_poll_events(vf, events);
