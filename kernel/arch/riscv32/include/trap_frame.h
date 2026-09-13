@@ -12,6 +12,8 @@ typedef struct {
     uint32_t sepc;
     uint32_t last_a0;
     uint32_t kernel_tp;
+    uint64_t f[32];
+    uint32_t fcsr;
 } __attribute__((aligned(16))) trap_context_t;
 
 typedef struct {
@@ -26,14 +28,15 @@ typedef struct {
     uint32_t sc_regs[32];
     uint32_t sc_pc;
     uint32_t sc_status;
+    uint64_t sc_fpregs[32];
+    uint32_t sc_fcsr;
 } __attribute__((aligned(16))) arch_sigcontext_t;
 
 #define ARCH_UCONTEXT_PAD_FIELDS uint32_t uc_pad;
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint32_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE (36 * 4)
-#define TASK_CONTEXT_SIZE (16 * 4)
-#define KTRAP_CONTEXT_SIZE (36 * 4)
+#define TRAP_CONTEXT_SIZE (36 * 4 + 32 * 8 + 4)
+#define KTRAP_CONTEXT_SIZE (36 * 4 + 32 * 8 + 4)
 #define ARCH_SYSCALL_TRACE_MIN_PID 5
 
 extern void __trap_from_user(void);
@@ -129,6 +132,9 @@ static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc, const trap_
         sc->sc_regs[i] = ctx->x[i];
     sc->sc_pc = ctx->sepc;
     sc->sc_status = ctx->sstatus;
+    for (int i = 0; i < 32; i++)
+        sc->sc_fpregs[i] = ctx->f[i];
+    sc->sc_fcsr = ctx->fcsr;
 }
 
 static inline void arch_signal_build_frame_extra(void *extra, const trap_context_t *ctx) {
@@ -141,6 +147,9 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx, const arch_
         ctx->x[i] = sc->sc_regs[i];
     ctx->sepc = sc->sc_pc;
     ctx->sstatus = sc->sc_status;
+    for (int i = 0; i < 32; i++)
+        ctx->f[i] = sc->sc_fpregs[i];
+    ctx->fcsr = sc->sc_fcsr;
 }
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx, const void *extra) {
