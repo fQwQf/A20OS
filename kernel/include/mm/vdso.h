@@ -40,16 +40,6 @@ int      vdso_exec_map(struct mm_struct *mm);
 int      vdso_fork_map(struct mm_struct *child_mm);
 vaddr_t  vdso_auxv_ehdr(void);
 
-/*
- * Raw free-running counter that user space can read for the vDSO, and its
- * frequency in Hz.  The weak defaults use the kernel tick counter, which is
- * exactly what user space reads on riscv64/loongarch64/aarch64/ppc64le.
- * x86_64 overrides them because user space reads the TSC (3.8 GHz) while the
- * kernel tick counter is the TSC scaled to ARCH_TIMER_FREQ (1 GHz).
- */
-uint64_t arch_vdso_counter(void);
-uint64_t arch_vdso_counter_freq(void);
-
 #else /* !ARCH_HAS_VDSO */
 
 struct mm_struct;
@@ -66,5 +56,16 @@ static inline int vdso_fork_map(struct mm_struct *child_mm) { (void)child_mm; re
 static inline vaddr_t vdso_auxv_ehdr(void) { return 0; }
 
 #endif
+
+/*
+ * Raw free-running counter that user space can read for the vDSO, and its
+ * frequency in Hz.  The weak defaults use the kernel tick counter, which is
+ * what user space reads on riscv64/loongarch64/aarch64/ppc64le; x86_64
+ * overrides them because user space reads the TSC while the kernel tick
+ * counter is that TSC scaled to ARCH_TIMER_FREQ.  Declared for every arch
+ * because timekeeping.c seeds its bases from them unconditionally.
+ */
+uint64_t arch_vdso_counter(void);
+uint64_t arch_vdso_counter_freq(void);
 
 #endif

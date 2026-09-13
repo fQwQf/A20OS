@@ -5,6 +5,14 @@
 .macro LOAD_GP n
     lw x\n, \n*4(sp)
 .endm
+.macro SAVE_FP n
+    fsd f\n, (144 + \n*8)(sp)
+.endm
+.macro LOAD_FP n
+    fld f\n, (144 + \n*8)(sp)
+.endm
+
+.set RISCV32_FRAME_SIZE, 416
 
     .section .text
     .globl __trap_from_user
@@ -15,7 +23,7 @@
 
 __trap_from_user:
     csrrw   sp, sscratch, sp
-    addi    sp, sp, -36*4
+    addi    sp, sp, -RISCV32_FRAME_SIZE
     sw      x1, 1*4(sp)
     sw      x3, 3*4(sp)
     sw      x4, 4*4(sp)
@@ -31,6 +39,13 @@ __trap_from_user:
     csrr    t2, sscratch
     sw      t2, 2*4(sp)
     sw      a0, 34*4(sp)
+    frcsr   t0
+    sw      t0, 400(sp)
+    .set n, 0
+    .rept 32
+        SAVE_FP %n
+        .set n, n+1
+    .endr
     mv      a0, sp
     lw      tp, 35*4(sp)
     la      t0, __trap_from_kernel
@@ -58,6 +73,13 @@ __return_to_user:
     csrw    sstatus, t0
     csrw    sepc, t1
     csrw    sscratch, t2
+    lw      t0, 400(sp)
+    fscsr   t0
+    .set n, 0
+    .rept 32
+        LOAD_FP %n
+        .set n, n+1
+    .endr
     lw      x1, 1*4(sp)
     lw      x3, 3*4(sp)
     .set n, 5
@@ -67,7 +89,7 @@ __return_to_user:
     .endr
     sw      x4, 35*4(sp)
     lw      x4, 4*4(sp)
-    addi    sp, sp, 36*4
+    addi    sp, sp, RISCV32_FRAME_SIZE
     csrrw   sp, sscratch, sp
     csrc    sstatus, 8
     sret

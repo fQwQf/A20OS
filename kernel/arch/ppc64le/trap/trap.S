@@ -9,7 +9,8 @@
     .globl user_trap_return
 
     .set PPC64_VECTOR_CONTEXT_OFFSET, 336
-    .set PPC64_TRAP_CONTEXT_SIZE, 848
+    .set PPC64_FPR_CONTEXT_OFFSET, 848
+    .set PPC64_TRAP_CONTEXT_SIZE, 1120
 
     .macro LOAD_ADDR reg,sym
     lis     \reg,\sym@highest
@@ -23,6 +24,16 @@
     lis     \reg,0xc000
     sldi    \reg,\reg,32
     ori     \reg,\reg,PPC64_TRAP_SCRATCH_PA
+    .endm
+
+    .macro SAVE_FPR reg
+    stfd    \reg,0(4)
+    addi    4,4,8
+    .endm
+
+    .macro LOAD_FPR reg
+    lfd     \reg,0(4)
+    addi    4,4,8
     .endm
 
     .macro SAVE_VECTOR_REG reg
@@ -153,6 +164,42 @@ __trap_from_user:
     SAVE_VECTOR_REG 31
 .Lvector_save_done:
 
+    addi    4,1,PPC64_FPR_CONTEXT_OFFSET
+    SAVE_FPR 0
+    SAVE_FPR 1
+    SAVE_FPR 2
+    SAVE_FPR 3
+    SAVE_FPR 4
+    SAVE_FPR 5
+    SAVE_FPR 6
+    SAVE_FPR 7
+    SAVE_FPR 8
+    SAVE_FPR 9
+    SAVE_FPR 10
+    SAVE_FPR 11
+    SAVE_FPR 12
+    SAVE_FPR 13
+    SAVE_FPR 14
+    SAVE_FPR 15
+    SAVE_FPR 16
+    SAVE_FPR 17
+    SAVE_FPR 18
+    SAVE_FPR 19
+    SAVE_FPR 20
+    SAVE_FPR 21
+    SAVE_FPR 22
+    SAVE_FPR 23
+    SAVE_FPR 24
+    SAVE_FPR 25
+    SAVE_FPR 26
+    SAVE_FPR 27
+    SAVE_FPR 28
+    SAVE_FPR 29
+    SAVE_FPR 30
+    SAVE_FPR 31
+    mffs    0
+    stfd    0,0(4)
+
     ld      13,72(12)
     ld      2,80(12)
     /*
@@ -210,6 +257,42 @@ __return_to_user:
     LOAD_VECTOR_REG 30
     LOAD_VECTOR_REG 31
 .Lvector_restore_done:
+
+    addi    4,12,PPC64_FPR_CONTEXT_OFFSET
+    LOAD_FPR 0
+    LOAD_FPR 1
+    LOAD_FPR 2
+    LOAD_FPR 3
+    LOAD_FPR 4
+    LOAD_FPR 5
+    LOAD_FPR 6
+    LOAD_FPR 7
+    LOAD_FPR 8
+    LOAD_FPR 9
+    LOAD_FPR 10
+    LOAD_FPR 11
+    LOAD_FPR 12
+    LOAD_FPR 13
+    LOAD_FPR 14
+    LOAD_FPR 15
+    LOAD_FPR 16
+    LOAD_FPR 17
+    LOAD_FPR 18
+    LOAD_FPR 19
+    LOAD_FPR 20
+    LOAD_FPR 21
+    LOAD_FPR 22
+    LOAD_FPR 23
+    LOAD_FPR 24
+    LOAD_FPR 25
+    LOAD_FPR 26
+    LOAD_FPR 27
+    LOAD_FPR 28
+    LOAD_FPR 29
+    LOAD_FPR 30
+    LOAD_FPR 31
+    lfd     0,0(4)
+    mtfsf   0xff,0
 
     ld      4,256(12)
     mtsrr0  4
