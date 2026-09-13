@@ -1,4 +1,6 @@
-# XFCE Wayland 适配：内核强化与 submodule 去修改化
+# XFCE Wayland 适配（历史）
+
+> **历史文档。** 本文描述的 from-source Wayland/XFCE 适配栈（`user/wayland/` + `user/external/gui/*` 子模块、`make run-gui-*`、`make smoke-qemu-gui-*`）以及 LVGL 原生桌面已退役，归档在分支 `archive/legacy-desktop`。当前实际发布与使用的桌面是 Alpine `xfce` world（`packages/world/xfce.world` + `packages/overlay/xfce`，见 [../distro/README.md](../distro/README.md)）。以下内容保留用于追溯当时的适配工作。
 
 ## 背景
 

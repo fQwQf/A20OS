@@ -1,10 +1,10 @@
 # A20OS 发行版 rootfs 运行（`make distro-run`）
 
-A20OS 有两条 XFCE Wayland 桌面路径。
+A20OS 当前唯一的 XFCE Wayland 桌面路径就是本目录描述的 **distro 路径**：直接用包管理器拉一个原生 Alpine Linux 发行版做用户态，A20OS 只当内核。
 
-一条是 from-source：`user/wayland/` 下自研编译的 wlroots/labwc/xfce 组件， dbus/elogind/seatd/eudev 等服务层用 stub 替代，见 `docs/graphics/xfce-wayland-adaptation.md`。另一条就是本目录描述的 **distro 路径**： 直接用包管理器拉一个原生 Alpine Linux 发行版做用户态，A20OS 只当内核。
+（历史上还有一条 from-source 路径：`user/wayland/` 下自研编译的 wlroots/labwc/xfce 组件，dbus/elogind/seatd/eudev 等服务层用 stub 替代。该路径与 LVGL 原生桌面已退役，归档在分支 `archive/legacy-desktop`，见 `docs/graphics/xfce-wayland-adaptation.md`。）
 
-两条路径的区别，本质上是"内核要为发行版补多少课"。from-source 路径里很多缺口 可以靠改自研组件绕过去；distro 路径没有这个自由度——内核要么把行为做到位， 要么桌面起不来。本任务坚持"优先在内核实现，而不是删依赖"，所以 distro 路径 顺手把一批 Linux 行为在内核侧补齐了（netlink uevent、`PR_SET_PDEATHSIG`、 `/sys/dev/char`、DRM 能力位、唯一 KMS 对象 ID 等），这些内容单独写在 `kernel-requirements.md`。
+distro 路径的价值，在于它没有"改自研组件绕过去"的自由度——内核要么把行为做到位，要么桌面起不来。为此在 内核侧补齐了一批 Linux 行为（netlink uevent、`PR_SET_PDEATHSIG`、`/sys/dev/char`、DRM 能力位、唯一 KMS 对象 ID 等），这些内容单独写在 `kernel-requirements.md`。
 
 ## 快速开始
 

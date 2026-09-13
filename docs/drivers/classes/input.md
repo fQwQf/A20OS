@@ -15,7 +15,7 @@ input class 设备（DEV_CLASS_INPUT，统一核心发布）
 /dev/event0 mux（kernel/drivers/input/input_mux.c）
         │  EVIOCG* ioctl + evdev 状态跟踪（键/ABS）
         ▼
-用户空间（weston、evdev_stress、shell）
+用户空间（evdev_stress、shell、桌面会话）
 ```
 
 - 驱动与 mux 的职责分离：驱动只负责把硬件事件变成 `struct input_event` 填入 class ring；mux 负责聚合、ioctl 面与等待语义。任何 input class 设备（VBox xHCI HID、PCI/MMIO virtio-input）都自动并入 `/dev/event0`。
@@ -48,5 +48,4 @@ udriver 白名单（`kernel/drivers/core/udriver.c` 的 `g_mmio_windows`）把 v
 
 - `smoke-dual-input`（riscv64）：uinputd 两次运行（user placement）与 vinput-probe（kernel placement）读到同一设备身份 + sendkey 注入按键事件；
 - `evdev_stress`（`smoke-evdev-stress`）：/dev/event0 的 ioctl 面与空读语义；
-- QEMU 手动验证事件流：`cat /dev/event0 &` + monitor `sendkey a` → 内核日志 `[INPUT] event type=1 code=30 value=1`（EV_KEY/KEY_A/press）与 EV_SYN；
-- GUI smoke（`tools/smoke_qemu_gui.py`）：要求 `[INPUT] virtio-input ready` ×2（键盘+鼠标）与 sendkey 后事件计数增加。
+- QEMU 手动验证事件流：`cat /dev/event0 &` + monitor `sendkey a` → 内核日志 `[INPUT] event type=1 code=30 value=1`（EV_KEY/KEY_A/press）与 EV_SYN。

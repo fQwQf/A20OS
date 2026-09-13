@@ -42,7 +42,7 @@ $(USER_BUILD_STAMP): user/Makefile force_user_build | $(USER_BUILD_CHECK_DIRS)
 			$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" \
 				PROFILE=$(PROFILE) BUILD_DIR=build/$(USER_VARIANT) clean; \
 		fi; \
-		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
+		$(MAKE) -C user ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" PROFILE=$(PROFILE)  \
 			BUILD_DIR=build/$(USER_VARIANT); \
 		printf '%s\n' '$(USER_BUILD_ID)' > "$@"; \
 	else \

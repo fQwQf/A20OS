@@ -57,7 +57,7 @@ smoke-x86_64:
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
 smoke-smp-bringup:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 USER_BUILD_DESKTOP=0 kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/riscv64-smp2-bringup.log"; \
@@ -78,69 +78,6 @@ smoke-smp-bringup:
 		tail -n 80 "$$log"; \
 		exit "$$status"; \
 	fi
-
-# Headless behavioral gate for the QEMU GUI path. QMP injects a real keyboard
-# event and screendump reads the emulated scanout, so this catches regressions
-# that a kernel build or serial-only bring-up cannot observe.
-smoke-qemu-gui-x86_64:
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
-		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img
-	$(PYTHON) tools/smoke_qemu_gui.py \
-		--arch x86_64 \
-		--qemu qemu-system-x86_64 \
-		--kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
-		--disk .kernel-build/x86_64-qemu-virt-x86_64-both-dev/gui-fat32.img \
-		--frame-window $(GUI_FRAME_WINDOW) \
-		--timeout $(SMOKE_TIMEOUT)
-
-smoke-qemu-gui-riscv64:
-	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 \
-		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img
-	$(PYTHON) tools/smoke_qemu_gui.py \
-		--arch riscv64 \
-		--qemu qemu-system-riscv64 \
-		--kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		--disk .kernel-build/riscv64-qemu-virt-riscv64-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-riscv64 \
-		--frame-window $(GUI_FRAME_WINDOW_RV64) \
-		--timeout $(SMOKE_TIMEOUT)
-
-smoke-qemu-gui-aarch64:
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 \
-		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img
-	$(PYTHON) tools/smoke_qemu_gui.py --arch aarch64 --qemu qemu-system-aarch64 \
-		--kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
-		--disk .kernel-build/aarch64-qemu-virt-aarch64-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-aarch64 \
-		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
-
-smoke-qemu-gui-arm32:
-	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=arm32 BOARD=qemu-virt-arm32 ABI=both BRINGUP=0 \
-		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/gui-fat32.img
-	$(PYTHON) tools/smoke_qemu_gui.py --arch arm32 --qemu qemu-system-arm \
-		--kernel .kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/kernel.elf \
-		--disk .kernel-build/arm32-qemu-virt-arm32-both-dev-embedded/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-arm32 \
-		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
-
-smoke-qemu-gui-loongarch64:
-	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
-		GUI_FAT32_IMAGE_MB=$(GUI_FAT32_IMAGE_MB) \
-		.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img
-	$(PYTHON) tools/smoke_qemu_gui.py --arch loongarch64 --qemu qemu-system-loongarch64 \
-		--kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
-		--disk .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/gui-fat32.img \
-		--artifacts .kernel-build/smoke/qemu-gui-loongarch64 \
-		--frame-window $(GUI_FRAME_WINDOW) --timeout $(SMOKE_TIMEOUT)
 
 # Thin wrapper: the smoke definition lives in instances/smoke-arm32.toml.
 smoke-arm32:
@@ -169,7 +106,7 @@ smoke-arch-mmu-matrix:
 		log=".kernel-build/smoke/$$variant-shell.log"; \
 		mkdir -p .kernel-build/smoke; \
 		echo "=== smoke-arch-mmu-matrix: $$variant ==="; \
-		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu USER_BUILD_DESKTOP=0 dev-build >/dev/null; \
+		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu dev-build >/dev/null; \
 		if [ "$$nommu" = 1 ]; then \
 			echo "smoke-arch-mmu-matrix: $$variant build-only PASS (NOMMU runtime is platform-specific)"; \
 			continue; \
@@ -205,7 +142,7 @@ smoke-abi-linux:
 	tools/a20 test smoke-abi-linux
 
 smoke-envelope:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/envelope-riscv64.log"; \
@@ -228,7 +165,7 @@ smoke-envelope:
 		fi
 
 smoke-envelope-pilot:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/envelope-pilot-riscv64.log"; \
@@ -251,7 +188,7 @@ smoke-envelope-pilot:
 		fi
 
 smoke-envelope-bench:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/envelope-bench-riscv64.log"; \
@@ -275,7 +212,7 @@ smoke-envelope-bench:
 		fi
 
 smoke-envelope-corpus:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/envelope-corpus-riscv64.log"; \
@@ -299,7 +236,7 @@ smoke-envelope-corpus:
 		fi
 
 smoke-a20-channel:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/a20-channel-riscv64.log"; \
@@ -326,7 +263,7 @@ smoke-a20-channel:
 	fi
 
 smoke-ptrace:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/ptrace-riscv64.log"; \
@@ -353,7 +290,7 @@ smoke-ptrace:
 	fi
 
 smoke-network-suite:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/network-suite-riscv64.log"; \
@@ -381,7 +318,7 @@ smoke-network-suite:
 	fi
 
 smoke-network-suite-aarch64:
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/network-suite-aarch64.log"; \
@@ -409,7 +346,7 @@ smoke-network-suite-aarch64:
 	fi
 
 smoke-proc-a20:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/proc-a20-riscv64.log"; \
@@ -432,7 +369,7 @@ smoke-proc-a20:
 	fi
 
 smoke-proc-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/proc-stress-riscv64.log"; \
@@ -458,7 +395,7 @@ smoke-proc-stress:
 	fi
 
 smoke-procfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/procfs-stress-riscv64.log"; \
@@ -481,7 +418,7 @@ smoke-procfs-stress:
 	fi
 
 smoke-mm-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
@@ -507,7 +444,7 @@ smoke-mm-stress:
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
 smoke-mmprobe:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mmprobe-riscv64.log"; \
@@ -530,7 +467,7 @@ smoke-mmprobe:
 	fi
 
 smoke-oom-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/oom-stress-riscv64.log"; \
@@ -554,7 +491,7 @@ smoke-oom-stress:
 	fi
 
 smoke-mm-fork-exec-race:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
@@ -578,7 +515,7 @@ smoke-mm-fork-exec-race:
 	fi
 
 smoke-vfs-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -607,7 +544,7 @@ smoke-vfs-stress:
 		fi
 
 smoke-vfs-edge:
-		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 		@mkdir -p $(SMOKE_LOG_DIR)
 		@set -e; \
 		log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
@@ -631,7 +568,7 @@ smoke-vfs-edge:
 		fi
 
 smoke-io-event:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/io-event-riscv64.log"; \
@@ -659,7 +596,7 @@ smoke-io-event:
 	fi
 
 smoke-syscall-ext:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/syscall-ext-riscv64.log"; \
@@ -682,7 +619,7 @@ smoke-syscall-ext:
 	fi
 
 smoke-sched-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
@@ -705,7 +642,7 @@ smoke-sched-stress:
 	fi
 
 smoke-futex-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/futex-stress-riscv64.log"; \
@@ -728,7 +665,7 @@ smoke-futex-stress:
 	fi
 
 smoke-futex-stress-aarch64:
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/futex-stress-aarch64.log"; \
@@ -751,7 +688,7 @@ smoke-futex-stress-aarch64:
 	fi
 
 smoke-scm-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/scm-stress-riscv64.log"; \
@@ -774,7 +711,7 @@ smoke-scm-stress:
 	fi
 
 smoke-evdev-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/evdev-stress-riscv64.log"; \
@@ -797,7 +734,7 @@ smoke-evdev-stress:
 	fi
 
 smoke-signalfd-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/signalfd-stress-riscv64.log"; \
@@ -820,7 +757,7 @@ smoke-signalfd-stress:
 	fi
 
 smoke-pty-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/pty-stress-riscv64.log"; \
@@ -843,7 +780,7 @@ smoke-pty-stress:
 	fi
 
 smoke-timeout-test:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/timeout-test-riscv64.log"; \

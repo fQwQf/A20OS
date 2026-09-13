@@ -31,7 +31,4 @@ def build_instance(inst: Instance, extra: list[str], dry_run: bool) -> int:
         return exec_make(inst, "kernel-only", extra, dry_run)
     if inst.rootfs.world is not None:
         return exec_make(inst, "image-world", extra, dry_run)
-    if not inst.gui.enabled:
-        # Mirror _run_impl: text-mode boots skip the LVGL desktop.
-        extra.append("USER_BUILD_DESKTOP=0")
     return exec_make(inst, "dev-build", extra, dry_run)

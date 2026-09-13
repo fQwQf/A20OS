@@ -144,7 +144,7 @@ mlibc-sbase-rootfs: mlibc-sbase
 	mcopy -o -i $(FAT32_IMG) user/tests/test_mlibc_sbase.sh ::/test-mlibc-sbase.sh
 
 smoke-mlibc-sbase:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-sbase-rootfs
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -168,7 +168,7 @@ smoke-mlibc-sbase:
 	fi
 
 smoke-mlibc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_HELLO_BIN) ::/mlibc-hello-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
@@ -195,7 +195,7 @@ smoke-mlibc:
 	fi
 
 smoke-mlibc-fork:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_FORK_BIN) ::/mlibc-fork-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
@@ -221,7 +221,7 @@ smoke-mlibc-fork:
 	fi
 
 smoke-mlibc-mksh:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv mlibc-sbase user/build/riscv64/mlibc-pipeexec-rv
 	mcopy -o -i $(FAT32_IMG) $(MLIBC_MKSH_BIN) ::/mlibc-mksh
 	$(foreach t,$(MLIBC_SBASE_TOOLS),\
@@ -251,7 +251,7 @@ smoke-mlibc-mksh:
 	fi
 
 smoke-native-libc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-libc-riscv64.log"; \

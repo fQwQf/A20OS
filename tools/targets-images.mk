@@ -31,70 +31,6 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
 	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
 
-# Keep GUI state out of fat32.img so a later text-mode run does not inherit it.
-# init uses this marker to replace the serial shell with the LVGL desktop.
-$(WAYLAND_PLAYER_STAMP): user/wayland/build.sh user/wayland/player.c \
-		user/wayland/desktop-shell.c user/wayland/input-method.c \
-		user/wayland/stub/udev.c user/wayland/stub/mtdev.c \
-		user/cmds/core/wayland-session.c \
-		$(WAYLAND_WESTON_PATCHES) \
-		user/external/libs/ffmpeg/configure kernel/include/uapi/a20/audio.h
-	@if [ ! -f $(WAYLAND_FFMPEG_STAMP) ] || \
-		[ user/wayland/build.sh -nt $(WAYLAND_FFMPEG_STAMP) ] || \
-		[ user/external/libs/ffmpeg/configure -nt $(WAYLAND_FFMPEG_STAMP) ]; then \
-		rm -f $(WAYLAND_FFMPEG_STAMP); \
-	fi
-	@if [ ! -f $(WAYLAND_STUBS_STAMP) ] || \
-		[ user/wayland/stub/udev.c -nt $(WAYLAND_STUBS_STAMP) ] || \
-		[ user/wayland/stub/mtdev.c -nt $(WAYLAND_STUBS_STAMP) ]; then \
-		rm -f $(WAYLAND_STUBS_STAMP); \
-	fi
-	@if [ ! -f $(WAYLAND_WESTON_STAMP) ] || \
-		[ user/wayland/build.sh -nt $(WAYLAND_WESTON_STAMP) ] || \
-		find $(WAYLAND_WESTON_PATCHES) -newer $(WAYLAND_WESTON_STAMP) -print -quit | grep -q .; then \
-		rm -f $(WAYLAND_WESTON_STAMP); \
-	fi
-	@rm -f $(WAYLAND_PLAYER_STAMP)
-	user/wayland/build.sh $(ARCH)
-
-$(GUI_MEDIA_STAMP): FORCE
-	@mkdir -p $(dir $@)
-	@set -e; \
-	tmp="$@.tmp.$$$$"; \
-	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	printf '%s\n' '$(GUI_MEDIA)' > "$$tmp"; \
-	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi; \
-	trap - EXIT INT TERM
-
-$(GUI_DESKTOP_STAMP): FORCE
-	@mkdir -p $(dir $@)
-	@set -e; \
-	tmp="$@.tmp.$$$$"; \
-	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	printf '%s\n' '$(GUI_DESKTOP)' > "$$tmp"; \
-	if [ -f "$@" ] && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
-	trap - EXIT INT TERM
-
-$(GUI_FAT32_IMG): FAT32_IMAGE_MB = $(GUI_FAT32_IMAGE_MB)
-$(GUI_FAT32_IMG): $(FAT32_IMG) $(GUI_WAYLAND_DEPS) $(GUI_MEDIA_STAMP) $(GUI_DESKTOP_STAMP)
-	@set -e; \
-	lock="$(GUI_FAT32_IMG).lock"; \
-	tmp="$(GUI_FAT32_IMG).tmp.$$$$"; \
-	exec 9>"$$lock"; \
-	flock 9; \
-	trap 'rm -f "$$tmp"' EXIT INT TERM; \
-	cp "$(FAT32_IMG)" "$$tmp"; \
-	printf '1\n' | mcopy -o -i "$$tmp" - ::/etc/a20-gui; \
-	printf '1\n' | mcopy -o -i "$$tmp" - ::/a20-gui; \
-	if [ "$(WAYLAND_GUI)" = 1 ]; then \
-		GUI_DESKTOP="$(GUI_DESKTOP)" user/wayland/install-image.sh "$$tmp" $(ARCH) "$(GUI_MEDIA)" "$(GUI_DESKTOP)"; \
-	fi; \
-	mv -f "$$tmp" "$(GUI_FAT32_IMG)"; \
-	trap - EXIT INT TERM
 
 $(FS_TEST_IMG): $(FAT32_IMG)
 	cp $(FAT32_IMG) $(FS_TEST_IMG)
@@ -167,23 +103,23 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot
 # Verify the staged /init byte-for-byte every time a VBox image is requested;
 # otherwise make's timestamp graph can leave a bootable but stale userspace in
 # place after interrupted or manually-invoked sub-builds.
-$(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(GUI_FAT32_IMG) $(USER_BUILD_STAMP)
+$(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER_BUILD_STAMP)
 	@set -e; \
 	tmp=$$(mktemp); \
 	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	mcopy -i $(GUI_FAT32_IMG) ::/init "$$tmp"; \
+	mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
 	cmp -s "$$tmp" "$(USER_BUILD_DIR)/init" || { \
-		echo "[VBOX] stale /init detected; rebuilding GUI root filesystem"; \
-		rm -f $(FAT32_IMG) $(GUI_FAT32_IMG); \
+		echo "[VBOX] stale /init detected; rebuilding root filesystem"; \
+		rm -f $(FAT32_IMG); \
 		$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) \
-			NOMMU=$(NOMMU) OPT="$(OPT)" $(GUI_FAT32_IMG); \
-		mcopy -i $(GUI_FAT32_IMG) ::/init "$$tmp"; \
+			NOMMU=$(NOMMU) OPT="$(OPT)" $(FAT32_IMG); \
+		mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
 		cmp -s "$$tmp" "$(USER_BUILD_DIR)/init"; \
 	}; \
 	touch $@
 
 $(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/mk_uefi_fat_image.sh
-	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(GUI_FAT32_IMG)
+	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
 
 $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/mk_uefi_fat_image.sh
 	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)

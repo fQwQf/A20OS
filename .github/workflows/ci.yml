@@ -34,6 +34,8 @@ jobs:
         arch: [riscv64, x86_64, aarch64, loongarch64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Trust workspace ownership (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -80,6 +82,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Trust workspace ownership (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
