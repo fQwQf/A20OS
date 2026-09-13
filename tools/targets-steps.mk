@@ -282,7 +282,7 @@ check-proc-step5: check-proc-step5-local
 	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/socket-stress-riscv64.log"; \
@@ -313,7 +313,7 @@ smoke-socket-stress:
 	fi
 
 smoke-driver-lifecycle:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y USER_BUILD_DESKTOP=0 kernel-only
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/driver-lifecycle-riscv64.log"; \
@@ -338,7 +338,7 @@ smoke-driver-lifecycle:
 smoke-hda:
 	rm -f user/build/x86_64/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
+		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/hda-x86_64.log"; \
@@ -364,7 +364,7 @@ smoke-hda:
 
 smoke-audio-userspace:
 	rm -f user/build/x86_64/hda.a20drv
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.log"; \
@@ -397,7 +397,7 @@ smoke-audio-userspace:
 	fi
 
 smoke-usb-x86_64:
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/usb-x86_64.log"; \
@@ -425,7 +425,7 @@ smoke-usb-x86_64:
 	fi
 
 smoke-virtio-sound:
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/virtio-sound-x86_64.log"; \
@@ -459,7 +459,7 @@ smoke-virtio-sound:
 smoke-pci-portability:
 	rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 USER_BUILD_DESKTOP=0 dev-build
+		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/pci-portability-loongarch64.log"; \
@@ -491,7 +491,7 @@ smoke-pci-portability:
 	fi
 
 smoke-native-handle:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-handle-riscv64.log"; \

@@ -138,7 +138,7 @@ check-external-dependency-boundary:
 	@rg -q "EXTERNAL_QEMU_NET_DEFAULTS" docs/external-dependencies.md
 	@rg -q "10\.0\.2\.15" docs/external-dependencies.md kernel/net/lwip_stack.c
 	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
-	@rg -q "syscall smoke, shell smoke, and coreutils smoke" docs/external-dependencies.md
+	@rg -q "check-upgrade-userland-smokes.*smoke-abi-linux.*smoke-mlibc-mksh.*smoke-mlibc-sbase" docs/external-dependencies.md
 	@rg -q "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT" docs/external-dependencies.md
 	@rg -q "user/build/<arch>\\[-nommu\\]/\\.build-id" docs/external-dependencies.md
 	@rg -q "EXTERNAL_TLSE_WGET_LIMITS" docs/external-dependencies.md

@@ -35,8 +35,7 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> int:
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",
-                      "text": "_vbox_text_image_aarch64_impl",
-                      "gui": "_vbox_gui_image_aarch64_impl"}[variant]
+                      "text": "_vbox_text_image_aarch64_impl"}[variant]
             return exec_make(inst, target, list(make_args), dry_run)
         case "fit-sdcard":
             # VF2 image assembly (firmware check, extra partition variants)
