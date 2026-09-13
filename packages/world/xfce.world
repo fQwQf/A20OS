@@ -83,6 +83,8 @@ gst-plugins-bad
 gst-plugins-ugly
 gst-libav
 parole
+# 缩略图服务（thunar/xfdesktop 通过 D-Bus 激活 org.freedesktop.thumbnails.Thumbnailer1）
+tumbler
 
 # 网络
 networkmanager

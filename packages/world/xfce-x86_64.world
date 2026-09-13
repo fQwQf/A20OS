@@ -47,6 +47,8 @@ gst-plugins-bad
 gst-plugins-ugly
 gst-libav
 parole
+# Thumbnail service (thunar/xfdesktop activate org.freedesktop.thumbnails.Thumbnailer1)
+tumbler
 # Fonts
 font-noto
 font-dejavu
