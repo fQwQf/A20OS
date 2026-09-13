@@ -27,6 +27,7 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "core/timer.h"
+#include "core/timekeeping.h"
 #include "core/errno.h"
 #include "core/input.h"
 #include "core/poll.h"
@@ -66,6 +67,19 @@ static void evdev_mux_track_buffer(const char *buf, size_t copied) {
          off += sizeof(struct input_event)) {
         const struct input_event *ev = (const struct input_event *)(buf + off);
         evdev_mux_track_event(ev->type, ev->code, ev->value);
+    }
+}
+
+/* evdev timestamps must be CLOCK_MONOTONIC; libinput computes its processing
+ * lag as now - event.time and mis-schedules debounce when it is zero. */
+static void evdev_mux_stamp_buffer(char *buf, size_t copied) {
+    uint64_t ts[2];
+    timekeeping_get_monotonic(ts);
+    for (size_t off = 0; off + sizeof(struct input_event) <= copied;
+         off += sizeof(struct input_event)) {
+        struct input_event *ev = (struct input_event *)(buf + off);
+        ev->time_sec = ts[0];
+        ev->time_usec = ts[1] / 1000;
     }
 }
 
@@ -119,6 +133,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
          * virtio-input devices driven by the vinput module. */
         int class_result = input_read_class_devices(buf, count);
         if (class_result > 0) {
+            evdev_mux_stamp_buffer(buf, (size_t)class_result);
             evdev_mux_track_buffer(buf, (size_t)class_result);
             return class_result;
         }
@@ -128,6 +143,7 @@ static int input_read(vfile_t *vf, char *buf, size_t count) {
         input_class_poll_all();
         class_result = input_read_class_devices(buf, count);
         if (class_result > 0) {
+            evdev_mux_stamp_buffer(buf, (size_t)class_result);
             evdev_mux_track_buffer(buf, (size_t)class_result);
             return class_result;
         }
