@@ -28,6 +28,17 @@
 - 症状：GDK 报 `Truncating shared memory file failed: Out of memory`，随后 libwayland 空指针崩溃。
 - 提示：wl_shm 池是 memfd，其数据曾用单个连续 kmalloc 缓冲（1024x768x4 需 order-10 连续块），内存碎片化后 ftruncate 失败。现改为按需 order-0 页数组（`kernel/fs/memfd.c`）；页缓存写回/回收仍可继续观察。
 
+### elogind 启动失败
+- 症状：`elogind-daemon: Failed to open pin file` 紧接 `Failed to allocate manager object`。
+- 提示：elogind 在 manager setup 阶段 pin 自己的 cgroup，路径取自 `/proc/1/cgroup`（`init.scope`）。需先建好该目录与 `/run/elogind`；用**普通 `mkdir`**（busybox `mkdir -p` 会误判 sysfs 父目录为「Not a directory」）。
+
+### thunar 缩略图服务缺失
+- 症状：`Thumbnailer1 was not provided by any .service files`，并反复 `Thumbnailer Proxy Failed ... re-initialize`。
+- 提示：world 清单补 `tumbler`（提供 `org.freedesktop.thumbnails.Thumbnailer1`）。
+
+### 桌面没有壁纸
+- 提示：`xfdesktop` 包自带 `/usr/share/backgrounds/xfce/*`；backdrop 属性路径是 `/backdrop/screen0/monitor<id>/workspace0/last-image`，其中 `<id>` 是 libxfce4windowing 用 make/model/serial/connector 计算的 **SHA1**（不是固定名字），配置时需按实际显示器标识写入。
+
 ## 二、未解决
 
 ### dbus 同步调用偶发超时
