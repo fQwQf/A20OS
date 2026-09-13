@@ -20,6 +20,14 @@
 - 症状：xfdesktop/panel/thunar/gst 等随机野指针崩溃，仅 x86_64。
 - 提示：x86_64 要在上下文切换与信号帧保存/恢复 FPU/SSE。对照 aarch64/riscv64/loongarch64 的 trap 帧已保存 SIMD——缺这层时被抢占线程的 XMM 会被下一个任务覆盖。
 
+### 点击异常：下拉菜单项不启动应用、窗口控制键无效
+- 症状：指针能动、能点，但菜单项不启动应用，最小化/最大化/关闭无响应。
+- 提示：evdev 事件时间戳必须是 CLOCK_MONOTONIC。PS/2 与 USB-HID 驱动曾填 0，libinput 因此报 ~130s 处理延迟并把按键去抖定时器排在过去；由 `kernel/drivers/input/input_mux.c` 在交给用户态前统一打戳。
+
+### thunar 运行一段时间后崩溃
+- 症状：GDK 报 `Truncating shared memory file failed: Out of memory`，随后 libwayland 空指针崩溃。
+- 提示：wl_shm 池是 memfd，其数据曾用单个连续 kmalloc 缓冲（1024x768x4 需 order-10 连续块），内存碎片化后 ftruncate 失败。现改为按需 order-0 页数组（`kernel/fs/memfd.c`）；页缓存写回/回收仍可继续观察。
+
 ## 二、未解决
 
 ### dbus 同步调用偶发超时
