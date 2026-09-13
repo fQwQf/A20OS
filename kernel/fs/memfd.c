@@ -5,33 +5,58 @@
 #include "fs/anonfd.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
+#include "fs/page_cache.h"
 #include "fs/vfs.h"
 #include "fs/vfs/stat_perm.h"
+#include "mm/frame.h"
 #include "mm/slab.h"
 
 typedef struct {
-    uint8_t *data;
-    size_t size;
+    pfn_t *pages;
+    size_t npages;
     size_t cap;
+    size_t size;
     mutex_t data_lock;
     int secret;
     int owner_euid;
 } memfd_file_t;
 
+static uint8_t *memfd_page_ptr(memfd_file_t *mf, size_t index)
+{
+    if (index >= mf->npages || mf->pages[index] == PFN_NONE)
+        return NULL;
+    return (uint8_t *)pfn_to_virt(mf->pages[index]);
+}
+
 static int memfd_file_grow(memfd_file_t *mf, size_t need)
 {
-    if (need <= mf->cap) return 0;
-    size_t cap = mf->cap ? mf->cap : 4096;
-    while (cap < need) cap *= 2;
-    uint8_t *data = kmalloc(cap);
-    if (!data) return -ENOMEM;
-    memset(data, 0, cap);
-    if (mf->data) {
-        memcpy(data, mf->data, mf->size);
-        kfree(mf->data);
+    size_t need_pages = (need + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (need_pages <= mf->npages)
+        return 0;
+    if (need_pages > mf->cap) {
+        size_t cap = mf->cap ? mf->cap : 16;
+        while (cap < need_pages)
+            cap *= 2;
+        pfn_t *pages = kmalloc(cap * sizeof(pfn_t));
+        if (!pages)
+            return -ENOMEM;
+        for (size_t i = 0; i < mf->npages; i++)
+            pages[i] = mf->pages[i];
+        for (size_t i = mf->npages; i < cap; i++)
+            pages[i] = PFN_NONE;
+        if (mf->pages)
+            kfree(mf->pages);
+        mf->pages = pages;
+        mf->cap = cap;
     }
-    mf->data = data;
-    mf->cap = cap;
+    for (size_t i = mf->npages; i < need_pages; i++) {
+        pfn_t p = pfa_alloc_page();
+        if (p == PFN_NONE)
+            return -ENOMEM;
+        memset(pfn_to_virt(p), 0, PAGE_SIZE);
+        mf->pages[i] = p;
+        mf->npages = i + 1;
+    }
     return 0;
 }
 
@@ -46,7 +71,19 @@ static int memfd_file_read(vfile_t *vf, char *buf, size_t count)
     }
     size_t n = mf->size - vf->offset;
     if (n > count) n = count;
-    memcpy(buf, mf->data + vf->offset, n);
+    size_t done = 0;
+    while (done < n) {
+        size_t off = vf->offset + done;
+        size_t poff = off % PAGE_SIZE;
+        size_t chunk = PAGE_SIZE - poff;
+        if (chunk > n - done) chunk = n - done;
+        uint8_t *p = memfd_page_ptr(mf, off / PAGE_SIZE);
+        if (p)
+            memcpy(buf + done, p + poff, chunk);
+        else
+            memset(buf + done, 0, chunk);
+        done += chunk;
+    }
     vf->offset += n;
     mutex_unlock(&mf->data_lock);
     return (int)n;
@@ -62,7 +99,17 @@ static int memfd_file_write(vfile_t *vf, const char *buf, size_t count)
         mutex_unlock(&mf->data_lock);
         return r;
     }
-    memcpy(mf->data + vf->offset, buf, count);
+    size_t done = 0;
+    while (done < count) {
+        size_t off = vf->offset + done;
+        size_t poff = off % PAGE_SIZE;
+        size_t chunk = PAGE_SIZE - poff;
+        if (chunk > count - done) chunk = count - done;
+        uint8_t *p = memfd_page_ptr(mf, off / PAGE_SIZE);
+        if (p)
+            memcpy(p + poff, buf + done, chunk);
+        done += chunk;
+    }
     vf->offset += count;
     if (vf->offset > mf->size) mf->size = vf->offset;
     if (vf->vnode) vf->vnode->size = mf->size;
@@ -88,7 +135,11 @@ static int memfd_file_close(vfile_t *vf)
 {
     memfd_file_t *mf = vf ? vf->priv : NULL;
     if (mf) {
-        if (mf->data) kfree(mf->data);
+        for (size_t i = 0; i < mf->npages; i++)
+            if (mf->pages[i] != PFN_NONE)
+                pfa_free(mf->pages[i], 0);
+        if (mf->pages)
+            kfree(mf->pages);
         kfree(mf);
         vf->priv = NULL;
     }
@@ -118,7 +169,16 @@ static int memfd_file_truncate(vnode_t *vn, size_t size)
         mutex_unlock(&mf->data_lock);
         return r;
     }
-    if (size > mf->size) memset(mf->data + mf->size, 0, size - mf->size);
+    size_t done = mf->size;
+    while (done < size) {
+        size_t poff = done % PAGE_SIZE;
+        size_t chunk = PAGE_SIZE - poff;
+        if (chunk > size - done) chunk = size - done;
+        uint8_t *p = memfd_page_ptr(mf, done / PAGE_SIZE);
+        if (p)
+            memset(p + poff, 0, chunk);
+        done += chunk;
+    }
     mf->size = size;
     vn->size = size;
     mutex_unlock(&mf->data_lock);
@@ -134,21 +194,45 @@ static int memfd_file_readpage(vnode_t *vn, uint64_t index,
     mutex_lock(&mf->data_lock);
     memset(data, 0, len);
     uint64_t off = index * PAGE_SIZE;
-    if (off >= mf->size || !mf->data) {
-        mutex_unlock(&mf->data_lock);
-        return 0;
+    size_t n = 0;
+    if (off < mf->size) {
+        n = mf->size - (size_t)off;
+        if (n > len)
+            n = len;
+        uint8_t *p = memfd_page_ptr(mf, (size_t)index);
+        if (p)
+            memcpy(data, p, n);
     }
-    size_t n = mf->size - (size_t)off;
-    if (n > len)
-        n = len;
-    memcpy(data, mf->data + off, n);
     mutex_unlock(&mf->data_lock);
     return (int)n;
+}
+
+static int memfd_file_writepage(vnode_t *vn, uint64_t index,
+                                const void *data, size_t len)
+{
+    if (!vn || !vn->fs_data || !data)
+        return -EINVAL;
+    memfd_file_t *mf = vn->fs_data;
+    mutex_lock(&mf->data_lock);
+    uint64_t off = index * PAGE_SIZE;
+    if (off < mf->size) {
+        size_t n = mf->size - (size_t)off;
+        if (n > len)
+            n = len;
+        uint8_t *p = memfd_page_ptr(mf, (size_t)index);
+        if (p)
+            memcpy(p, data, n);
+    }
+    mutex_unlock(&mf->data_lock);
+    return 0;
 }
 
 static void memfd_file_release(vnode_t *vn)
 {
     if (vn) {
+        /* mmap faults cached the file's pages against this vnode; nothing
+         * else drops them, so a shm pool would leak its whole mapping. */
+        page_cache_truncate(vn, 0);
         vfs_drop_time_meta(vn);
         kfree(vn);
     }
@@ -165,6 +249,7 @@ static vnode_ops_t g_memfile_vops = {
     .stat = memfd_file_stat,
     .truncate = memfd_file_truncate,
     .readpage = memfd_file_readpage,
+    .writepage = memfd_file_writepage,
     .release = memfd_file_release,
 };
 
@@ -252,7 +337,16 @@ int memfd_set_contents(int fd, const void *data, size_t len)
     mutex_lock(&mf->data_lock);
     int r = memfd_file_grow(mf, len);
     if (r == 0) {
-        memcpy(mf->data, data, len);
+        size_t done = 0;
+        while (done < len) {
+            size_t poff = done % PAGE_SIZE;
+            size_t chunk = PAGE_SIZE - poff;
+            if (chunk > len - done) chunk = len - done;
+            uint8_t *p = memfd_page_ptr(mf, done / PAGE_SIZE);
+            if (p)
+                memcpy(p + poff, (const uint8_t *)data + done, chunk);
+            done += chunk;
+        }
         mf->size = len;
         if (vf->vnode) vf->vnode->size = len;
     }
