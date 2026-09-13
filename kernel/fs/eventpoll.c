@@ -83,8 +83,48 @@ static int epoll_close(vfile_t *vf)
     return 0;
 }
 
+static size_t epoll_poll_sources(vfile_t *vf, short events,
+                                 readiness_source_t *sources, size_t max)
+{
+    epoll_t *ep = vf ? vf->priv : NULL;
+    if (!ep || !sources || max == 0 || !(events & POLLIN))
+        return 0;
+
+    size_t count = 0;
+    for (int i = 0; i < EPOLL_MAX_FDS; i++) {
+        uint64_t flags = spin_lock_irqsave(&ep->lock);
+        if (!ep->items[i].registered || !ep->items[i].state.enabled) {
+            spin_unlock_irqrestore(&ep->lock, flags);
+            continue;
+        }
+        int fd = ep->items[i].fd;
+        uint64_t identity = ep->items[i].identity;
+        struct eventpoll_event ev = ep->items[i].ev;
+        spin_unlock_irqrestore(&ep->lock, flags);
+
+        int gfd = -1;
+        vfile_t *target = fdtable_get_current_file_ref(fd, &gfd);
+        if (!target)
+            continue;
+        bool pollable = target->identity == identity && target->ops &&
+                        target->ops->poll_sources;
+        size_t n = 0;
+        if (pollable)
+            n = target->ops->poll_sources(
+                target, epoll_events_to_poll(ev.events),
+                count < max ? sources + count : NULL,
+                count < max ? max - count : 0);
+        vfs_put_file_ref(gfd, target);
+        if (!pollable || count + n > max)
+            return 0;
+        count += n;
+    }
+    return count;
+}
+
 static vfile_ops_t g_epoll_ops = {
     .poll = epoll_poll,
+    .poll_sources = epoll_poll_sources,
     .close = epoll_close,
 };
 
