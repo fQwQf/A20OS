@@ -133,16 +133,11 @@ static long memfd_file_lseek(vfile_t *vf, long offset, int whence)
 
 static int memfd_file_close(vfile_t *vf)
 {
-    memfd_file_t *mf = vf ? vf->priv : NULL;
-    if (mf) {
-        for (size_t i = 0; i < mf->npages; i++)
-            if (mf->pages[i] != PFN_NONE)
-                pfa_free(mf->pages[i], 0);
-        if (mf->pages)
-            kfree(mf->pages);
-        kfree(mf);
+    /* The vnode can outlive the last descriptor (the page cache holds
+     * references while pages remain), so its backing store is freed in
+     * memfd_file_release, not here. */
+    if (vf)
         vf->priv = NULL;
-    }
     return 0;
 }
 
@@ -230,6 +225,15 @@ static int memfd_file_writepage(vnode_t *vn, uint64_t index,
 static void memfd_file_release(vnode_t *vn)
 {
     if (vn) {
+        memfd_file_t *mf = vn->fs_data;
+        if (mf) {
+            for (size_t i = 0; i < mf->npages; i++)
+                if (mf->pages[i] != PFN_NONE)
+                    pfa_free(mf->pages[i], 0);
+            if (mf->pages)
+                kfree(mf->pages);
+            kfree(mf);
+        }
         /* mmap faults cached the file's pages against this vnode; nothing
          * else drops them, so a shm pool would leak its whole mapping. */
         page_cache_truncate(vn, 0);
