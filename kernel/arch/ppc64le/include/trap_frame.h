@@ -20,9 +20,11 @@ typedef struct {
     uint64_t addr_space;
     uint64_t vector_pad;
     uint64_t vr[32][2];
+    uint64_t fpr[32];
+    uint64_t fpscr;
 } __attribute__((aligned(16))) trap_context_t;
 
-_Static_assert(sizeof(trap_context_t) == 106 * 8, "TrapContext must be 848 bytes");
+_Static_assert(sizeof(trap_context_t) == 140 * 8, "TrapContext must be 1120 bytes");
 
 typedef struct {
     uint64_t ra;
@@ -133,7 +135,7 @@ static inline task_context_t *arch_task_context_base(void *kstack_base,
 
 static inline uint64_t arch_task_kernel_status(void) {
     return PPC64_MSR_SF | PPC64_MSR_IR |
-           PPC64_MSR_DR | PPC64_MSR_RI | PPC64_MSR_LE;
+           PPC64_MSR_DR | PPC64_MSR_RI | PPC64_MSR_LE | PPC64_MSR_FP;
 }
 
 static inline uint64_t arch_user_initial_status(void) {

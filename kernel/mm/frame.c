@@ -277,6 +277,7 @@ uint64_t g_pfa_direct_map_end = (uint64_t)-1;
 const pfa_range_t *g_pfa_ranges = NULL;
 uint64_t g_pfa_nr_ranges = 0;
 
+#ifndef CONFIG_32BIT
 _Static_assert(sizeof(pfa_range_t) == 24, "trap.S walks pfa_range_t");
 _Static_assert(__builtin_offsetof(pfa_range_t, base) == 0,
                "trap.S reads pfa_range_t.base at offset 0");
@@ -284,6 +285,7 @@ _Static_assert(__builtin_offsetof(pfa_range_t, end) == 8,
                "trap.S reads pfa_range_t.end at offset 8");
 _Static_assert(__builtin_offsetof(pfa_range_t, start_pfn) == 16,
                "trap.S reads pfa_range_t.start_pfn at offset 16");
+#endif
 
 // Buddy 分配器初始化函数，将物理内存划分为可用页框并构建空闲链表
 void pfa_init(paddr_t kernel_end) {

@@ -14,10 +14,21 @@
  * and the vDSO read the same free-running time CSR.
  */
 #include "core/arch.h"
+#include "core/types.h"
+#include "core/timer.h"
+
+__attribute__((weak)) uint64_t arch_vdso_counter(void)
+{
+    return timer_get_ticks();
+}
+
+__attribute__((weak)) uint64_t arch_vdso_counter_freq(void)
+{
+    return TICKS_PER_SEC;
+}
 
 #ifdef ARCH_HAS_VDSO
 
-#include "core/types.h"
 #include "core/string.h"
 #include "core/klog.h"
 #include "mm/vdso.h"
@@ -46,16 +57,6 @@ static pfn_t          g_vdso_pfn[A20_VDSO_MAX_PAGES];
 static uint32_t       g_vdso_pages;
 static pfn_t          g_vvar_pfn;
 static a20_vvar_t    *g_vvar;
-
-__attribute__((weak)) uint64_t arch_vdso_counter(void)
-{
-    return timer_get_ticks();
-}
-
-__attribute__((weak)) uint64_t arch_vdso_counter_freq(void)
-{
-    return TICKS_PER_SEC;
-}
 
 void vdso_init(uint64_t boot_cycles, uint64_t timer_freq)
 {
