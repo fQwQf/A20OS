@@ -68,7 +68,7 @@
     </property>
   </property>
   <property name="desktop-icons" type="empty">
-    <property name="style" type="int" value="0"/>
+    <property name="style" type="int" value="1"/>
     <property name="icon-size" type="uint" value="48"/>
     <property name="show-hidden-files" type="bool" value="false"/>
     <property name="show-tooltips" type="bool" value="true"/>
