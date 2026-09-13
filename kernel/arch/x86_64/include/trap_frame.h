@@ -37,16 +37,30 @@ typedef struct {
     uint64_t rflags;
     uint64_t cr3;
     uint64_t padding[5];  /* total = 16*8 = 128 bytes */
+    /*
+     * FPU/SSE state (fxsave64 area).  XMM registers are caller-saved in the
+     * SysV ABI, so a timer preemption must preserve them or the next task
+     * clobbers the interrupted thread's SIMD state -- musl memcpy/memset,
+     * glib and GTK all use SSE, and corruption there produces the wild
+     * pointers seen as SIGSEGV.  The kernel is built -mgeneral-regs-only and
+     * never touches the FPU itself.  __switch fxsaves/fxrstors this area;
+     * it must be 16-byte aligned.
+     */
+    uint8_t fpu[512] __attribute__((aligned(16)));
 } task_context_t;
 
-_Static_assert(sizeof(task_context_t) == 16 * 8, "TaskContext must be 128 bytes");
+_Static_assert(sizeof(task_context_t) == 16 * 8 + 512,
+               "TaskContext must be 640 bytes");
 
 /* Signal context */
 typedef struct {
     uint64_t fault_addr;
     uint64_t regs[23];
     uint64_t rflags;
-    uint64_t reserved[512];
+    uint64_t _pad;
+    /* Interrupted FPU/SSE state; a signal handler may clobber XMM and
+     * rt_sigreturn must put the interrupted thread's state back. */
+    uint8_t fpu[512] __attribute__((aligned(16)));
 } __attribute__((aligned(16))) arch_sigcontext_t;
 
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
@@ -155,6 +169,11 @@ static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
      * (kernel thread).  Keep it in an unused padding slot; use a volatile
      * store so the compiler cannot dead-store-eliminate the write. */
     *(volatile uint64_t *)&ctx->padding[0] = stack_top;
+    /* A fresh task must start with the architectural FPU defaults (x87
+     * control word 0x037F, MXCSR 0x1F80); the caller zeroed the context, and
+     * a zeroed MXCSR would unmask every SSE exception. */
+    *(uint16_t *)(void *)(ctx->fpu + 0) = 0x037F;
+    *(uint32_t *)(void *)(ctx->fpu + 24) = 0x1F80;
 }
 
 static inline task_context_t *arch_task_context_base(void *kstack_base,
@@ -257,6 +276,7 @@ static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
     sc->regs[18] = ctx->cs;
     sc->regs[19] = ctx->ss;
     sc->rflags = ctx->rflags;
+    __asm__ __volatile__("fxsave64 (%0)" :: "r"((void *)sc->fpu) : "memory");
 }
 
 static inline void arch_signal_build_frame_extra(void *extra,
@@ -285,6 +305,7 @@ static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
     ctx->r15 = sc->regs[15];
     ctx->rip = sc->regs[16];
     ctx->rflags = sc->rflags;
+    __asm__ __volatile__("fxrstor64 (%0)" :: "r"((void *)sc->fpu) : "memory");
 }
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,

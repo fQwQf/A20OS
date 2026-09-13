@@ -59,6 +59,9 @@ __switch:
     /* Update current task->kstack to point to the saved context at the bottom. */
     movq  %r10, 0(%r9)
 
+    /* Preserve the outgoing task's FPU/SSE state (task_context_t.fpu). */
+    fxsave64 128(%r10)
+
     /* Restore next task's context. */
     movq  0(%rdi), %r11         /* ra */
     movq  8(%rdi), %rcx         /* tp */
@@ -71,6 +74,10 @@ __switch:
     movq  64(%rdi), %r8         /* rsp */
     movq  72(%rdi), %r10        /* rflags */
     movq  80(%rdi), %rsi        /* cr3 */
+
+    /* Load the incoming task's FPU/SSE state while %rdi is still the context
+     * pointer (the GS-base setup below clobbers %edi). */
+    fxrstor64 128(%rdi)
 
     /* Set tp via gsbase */
     movq  %rcx, %rax
