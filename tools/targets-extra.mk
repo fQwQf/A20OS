@@ -15,7 +15,7 @@ extra-fetch-sources:
 
 extra-user-apps: extra-fetch-sources
 	$(MAKE) ARCH=$(ARCH) NOMMU=$(NOMMU) OPT="$(USER_OPT)" \
-		PROFILE=$(PROFILE) BUILD_DESKTOP=$(USER_BUILD_DESKTOP) \
+		PROFILE=$(PROFILE)  \
 		$(USER_BUILD_STAMP)
 	$(MAKE) -f user/extra.mk ARCH=$(ARCH) OPT="$(OPT)" \
 		PACKAGES="$(EXTRA_PACKAGES)" \

@@ -122,7 +122,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # apk world images boot as the second disk; init chroots into them.
         target = "run-world-gui" if inst.gui.enabled else "run-world"
         return exec_make(inst, target, list(args.make_args), args.dry_run)
-    target = "_run_gui_impl" if inst.gui.enabled else "_run_impl"
+    target = "_run_impl"
     return exec_make(inst, target, list(args.make_args), args.dry_run)
 
 

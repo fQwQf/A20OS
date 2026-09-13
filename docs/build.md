@@ -39,7 +39,6 @@ sudo apt-get install -y \
 | `make run-riscv64` | 等价于 `make ARCH=riscv64 run` | 记住目标名即可 |
 | `make run-loongarch64` / `make run-arm64` / `make run-x86_64` | 在对应架构的 QEMU 中启动 | 跨架构测试 |
 | `make run-ppc64le` | 在 QEMU pSeries 中启动 PPC64LE | PPC64LE 单核 bring-up 和 shell 验证 |
-| `make run-gui-riscv64` / `make run-gui-aarch64` / `make run-gui-x86_64` / `make run-gui-loongarch64` | 启动带 virtio-gpu 的图形 QEMU；RISC-V/x86_64/LoongArch64 默认挂载 HDA，也可切换 virtio-sound | 测试桌面、GUI 和音频应用 |
 | `make ARCH=riscv64 BRINGUP=1 kernel-only` | 仅编译内核，不生成文件系统镜像 | 只改内核、不需要用户态 |
 | `make ARCH=riscv64 BRINGUP=1 run` | 仅编译内核并在 QEMU 启动 | 内核 bring-up 测试 |
 | `make ARCH=riscv64 NOMMU=1 run` | 以 NOMMU 模式运行 | 测试 NOMMU 路径 |
@@ -74,39 +73,16 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 - `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M、PPC64LE 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
 - `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
-- `GUI_MEDIA`: 可选的 H.264/AAC MP4。仅在命令行显式设置时写入 GUI 镜像的 `/media/demo.mp4`；未设置时桌面和播放器仍会安装，但不会创建默认媒体或播放器 launcher。
-- `GUI_DESKTOP`: GUI 默认桌面，默认为 `weston`；可设为 `xfce` 恢复 XFCE/labwc 实验路径。
+- `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。
 
-## Wayland 媒体播放
-
-`run-gui-riscv64`、`run-gui-aarch64`、`run-gui-x86_64` 和 `run-gui-loongarch64` 默认进入 Weston desktop shell，并安装 A20OS SHM desktop helper、精简 FFmpeg 共享库和 `a20-player`。需要测试 XFCE/labwc 时可设置 `GUI_DESKTOP=xfce`。播放器不由 session 自动启动，可通过镜像中的 `/bin/run-player.sh` 启动。
-
-```bash
-make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
-```
-
-启动后，在 Weston 终端中执行：
-
-```sh
-/bin/run-player.sh
-```
-
-也可以播放镜像中的其他文件：
-
-```sh
-/bin/run-player.sh /path/to/video.mp4
-```
-
-未设置 `GUI_MEDIA` 时，`run-player.sh` 不带参数会显示用法；仍可执行 `run-player.sh /path/to/video.mp4` 播放镜像中其他位置的媒体。显式指定但文件不存在时，镜像构建会失败，而不是静默换用测试素材。
-
-播放器支持本地 MP4 中的 H.264 视频和 AAC 音频，视频使用 Wayland SHM，音频自动寻找 `/dev/audioN` PCM 设备，并重采样为 48 kHz 双声道 S16_LE。没有 PCM 设备的架构会继续静音播放视频。
+> 桌面环境已改为 Alpine xfce world（`make image-world PKG_WORLD=xfce` 组镜像，`make run-world-gui PKG_WORLD=xfce` 以 GUI 启动）。原先基于 `user/wayland` + `user/external/gui` 从源码构建的 Weston/XFCE 路径与 LVGL 原生桌面已退役，归档在 `archive/legacy-desktop`。
 
 ## QEMU 音频
 
-`make run-gui-riscv64`、`make run-gui-x86_64` 和 `make run-gui-loongarch64` 默认挂载标准 Intel HDA controller 与 duplex codec。以下命令切换到第二个 PCM backend；RISC-V 使用 VirtIO-MMIO，x86_64 和 LoongArch64 使用 modern VirtIO PCI：
+`make run-world-gui PKG_WORLD=xfce` 默认挂载标准 Intel HDA controller 与 duplex codec。以下命令切换到第二个 PCM backend；RISC-V 使用 VirtIO-MMIO，x86_64 和 LoongArch64 使用 modern VirtIO PCI：
 
 ```bash
-make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
+make run-world-gui PKG_WORLD=xfce QEMU_GUI_AUDIO_DEVICE=virtio
 ```
 
 启动后可在终端直接验证 PCM 输出：
@@ -116,7 +92,7 @@ audioplay --tone 440
 audioplay music.wav
 ```
 
-WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定具体驱动或动态编号。PCM 客户端可使用 `A20_AUDIO_IOCTL_DRAIN` 等待已提交音频播放完毕，关闭设备时也会自动 drain。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-gui-x86_64 QEMU_GUI_AUDIO_DRIVER=pipewire`。
+WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定具体驱动或动态编号。PCM 客户端可使用 `A20_AUDIO_IOCTL_DRAIN` 等待已提交音频播放完毕，关闭设备时也会自动 drain。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-world-gui PKG_WORLD=xfce QEMU_GUI_AUDIO_DRIVER=pipewire`。
 
 ##  注意
 

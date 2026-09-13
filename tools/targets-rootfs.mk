@@ -3,9 +3,8 @@
 # Distro rootfs (package-manager provisioning path)
 # ================================================================
 # Build an Alpine Linux ext4 rootfs containing XFCE4 and the login/device
-# service layer (dbus / elogind / polkit / seatd / eudev) that the
-# from-source user/wayland path stubs out.  This is the package-manager
-# path: the kernel only has to provide a Linux ABI + ext4 + /dev + /sys.
+# service layer (dbus / elogind / polkit / seatd / eudev).  This is the
+# package-manager path: the kernel only has to provide a Linux ABI + ext4 + /dev + /sys.
 #
 #   make rootfs-alpine ARCH=riscv64
 #   make rootfs-alpine ARCH=x86_64  ALPINE_ROOTFS_OUTPUT=build/alpine/rootfs.img
