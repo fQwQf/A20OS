@@ -32,8 +32,7 @@ PKG_WORLD     ?= base
 PKG_SIZE_MB   ?= 512
 PKG_ALPINE    ?= 1
 
-# 可选：往 world 镜像里注入本地媒体文件（演示视频等），对应旧 GUI 流程的
-# GUI_MEDIA。用法：
+# 可选：往 world 镜像里注入本地媒体文件（演示视频等）。用法：
 #   make ARCH=x86_64 image-world PKG_WORLD=xfce-x86_64 PKG_MEDIA=/path/to/video.mp4
 # 文件落到镜像内 $(PKG_MEDIA_DIR)/<原文件名>，桌面里用 parole 打开或
 # 在 Thunar 中双击即可播放。
@@ -101,7 +100,7 @@ image-world: pkg-repo $(if $(PKG_MEDIA),pkg-media-overlay)
 		--size-mb $(PKG_SIZE_MB)
 
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
-# but with the virtio-gpu display stack and audio like _run_gui_impl.
+# but with the virtio-gpu display stack and audio.
 run-world-gui: image-world $(FAT32_IMG)
 	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS_NO_SDCARD)) \
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \

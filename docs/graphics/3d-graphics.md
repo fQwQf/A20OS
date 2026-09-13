@@ -162,7 +162,7 @@ gpu3d_test
 
 内核透传只是搬运层。要跑起真实 GL 应用，需要用户态：
 
-1. **libdrm**：`drmOpen` `/dev/dri/card0`、dumb-buffer 管理（已有，`user/external/gui/libdrm`）。
+1. **libdrm**：`drmOpen` `/dev/dri/card0`、dumb-buffer 管理（由 Alpine `libdrm` 包提供）。
 2. **libgbm**：GBM 提供 EGL 平台抽象；Mesa 的 `virtio_gpu` 后端把 GBM surface 映射到 virgl resource。
 3. **Mesa**（EGL/GLES2）：`eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, ...)` 创建 EGL display；virgl 驱动把 GL 调用序列化进 command buffer，经 `A20_GPU_IOCTL_SUBMIT_3D` 提交。
 4. **合成器/应用**：Wayland 合成器（Weston 的 DRM backend + EGL 渲染器）或直接 EGL 客户端。

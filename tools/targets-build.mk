@@ -41,7 +41,7 @@ vf2-extra-sources:
 vf2-image: vf2-extra-sources
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
 		DRIVER_DEPLOYMENT=embedded \
-		KERNEL_WERROR=0 USER_BUILD_DESKTOP=0 \
+		KERNEL_WERROR=0 \
 		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
 		$(VF2_IMAGE_BUILD_DIR)/fat32.img kernel-only
 	@if [ -f user/external/apps/fastfetch/src/fastfetch.c ]; then \
@@ -50,7 +50,7 @@ vf2-image: vf2-extra-sources
 	fi
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
 		DRIVER_DEPLOYMENT=embedded \
-		KERNEL_WERROR=0 USER_BUILD_DESKTOP=0 \
+		KERNEL_WERROR=0 \
 		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
 		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" extra-img
 	tools/vf2/make-boot-image.sh \
@@ -114,7 +114,7 @@ _vf2_check_firmware:
 _vf2_build_base:
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 \
 		NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded \
-		USER_BUILD_DESKTOP=0 $(VF2_LDSCRIPT) $(VF2_KERNEL_WERROR) \
+		$(VF2_LDSCRIPT) $(VF2_KERNEL_WERROR) \
 		$(VF2_BUILD_DIR)/fat32.img kernel-only
 
 _vf2_build_fastfetch: _vf2_build_base
@@ -147,7 +147,7 @@ vf2-minimal: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 vf2-extra: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 \
 		NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded \
-		USER_BUILD_DESKTOP=0 $(VF2_LDSCRIPT) \
+		$(VF2_LDSCRIPT) \
 		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" EXTRA_IMAGE_MB=$(EXTRA_IMAGE_MB) extra-img
 	tools/vf2/make-boot-image.sh \
 		$(VF2_BUILD_DIR)/kernel.bin \

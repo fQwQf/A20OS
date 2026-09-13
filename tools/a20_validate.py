@@ -35,7 +35,7 @@ _MEMORY_RE: Final = re.compile(r"[0-9]+[KMGT]")
 _HOSTFWD_RE: Final = re.compile(r"(tcp|udp)::[0-9]*-[0-9]*:[0-9]+")
 _TIMEOUT_RE: Final = re.compile(r"[0-9]+s")
 
-_UEFI_VARIANTS: Final = ("default", "text", "gui")
+_UEFI_VARIANTS: Final = ("default", "text")
 _FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard", "extra")
 
 
@@ -75,7 +75,7 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
             e.append("gui.enabled: cannot combine with kernel.bringup (no rootfs in bringup mode)")
         if inst.arch not in QEMU_RUNNABLE_ARCHES:
             e.append(f"gui.enabled: no QEMU GUI path for {inst.arch}")
-    for size_name, size in (("size_mb", r.size_mb), ("gui_size_mb", r.gui_size_mb),
+    for size_name, size in (("size_mb", r.size_mb),
                             ("ext4_size_mb", r.ext4_size_mb), ("extra_size_mb", r.extra_size_mb)):
         if size is not None and size < 1:
             e.append(f"rootfs.{size_name}: must be >= 1")
@@ -108,8 +108,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         if r.alpine is not None:
             e.append("rootfs.alpine: only meaningful together with rootfs.world")
     if has_test and g.enabled:
-        e.append("test.*: the a20 test harness drives the serial console; "
-                 "GUI smokes use tools/smoke_qemu_gui.py and cannot combine with [test]")
+        e.append("test.*: the a20 test harness drives the serial console and "
+                 "cannot combine with gui.enabled")
     _validate_board_sections(inst, e)
     return e
 
@@ -143,8 +143,6 @@ def _validate_board_sections(inst: Instance, e: list[str]) -> None:
             if variant not in _UEFI_VARIANTS:
                 e.append(f"package.variant: unsupported '{variant}' for uefi-image; "
                          f"supported: {', '.join(_UEFI_VARIANTS)}")
-            if variant == "gui" and not inst.gui.enabled:
-                e.append("package.variant \"gui\": requires gui.enabled = true")
         case "fit-sdcard":
             if inst.board != "visionfive2":
                 e.append("package.kind fit-sdcard: requires board = \"visionfive2\"")

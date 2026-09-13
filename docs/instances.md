@@ -131,9 +131,9 @@ disk_out = "disk.img"        # 仅 release
 | `kernel.swap` | `CONFIG_SWAP`（y/n） |
 | `kernel.cooperative_boot` / `storage_read_only` / `external_root` / `ramfs_user` | `COOPERATIVE_BOOT` / `STORAGE_READ_ONLY` / `EXTERNAL_ROOT` / `RAMFS_USER` |
 | `machine.smp` / `memory` / `allow_unverified_smp` | `NR_CPUS` / `QEMU_MEMORY` / `ALLOW_UNVERIFIED_SMP` |
-| `gui.display` / `audio_driver` / `audio_device` / `frame_window` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` / `GUI_FRAME_WINDOW` |
+| `gui.display` / `audio_driver` / `audio_device` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
-| `rootfs.size_mb` / `gui_size_mb` / `ext4_size_mb` / `extra_size_mb` | `FAT32_IMAGE_MB` / `GUI_FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` / `EXTRA_IMAGE_MB` |
+| `rootfs.size_mb` / `ext4_size_mb` / `extra_size_mb` | `FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` / `EXTRA_IMAGE_MB` |
 | `rootfs.world` / `world_size_mb` / `alpine` | `PKG_WORLD` / `PKG_SIZE_MB` / `PKG_ALPINE` |
 | `rootfs.extra_packages` | `EXTRA_PACKAGES` |
 | `rootfs.drivers` | `DRIVER_SELECTION`（自动补 `.a20drv` 后缀） |
@@ -147,19 +147,19 @@ disk_out = "disk.img"        # 仅 release
 
 | 动作 | 说明 |
 |---|---|
-| `build` | 所有架构；bringup 或 armv7m 实例自动选 `kernel-only`，设了 `rootfs.world` 走 `image-world`，其余 `dev-build`（文本模式附带 `USER_BUILD_DESKTOP=0`） |
+| `build` | 所有架构；bringup 或 armv7m 实例自动选 `kernel-only`，设了 `rootfs.world` 走 `image-world`，其余 `dev-build` |
 | `run` | 有通用 QEMU 路径的架构；armv7m 需 `[stm32] qemu = true`（走 stm32vldiscovery）；`rootfs.world` 实例走 `run-world`/`run-world-gui`（world 镜像作第二块盘，distro 模式） |
 | `debug` | 通用 QEMU 架构；`-O0 -g` + GDB stub |
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
 | `flash` | 需要 `[flash]` 段；当前为 armv7m/STM32 OpenOCD 流程（先构建再烧录） |
-| `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text/gui）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
+| `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里——实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
 ### 校验规则（选摘）
 
 - `smp > 1` 只允许在已验证的 QEMU virt 平台（riscv64/aarch64/loongarch64/x86_64），否则必须显式 `allow_unverified_smp = true`。
-- `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥（GUI 冒烟走 `tools/smoke_qemu_gui.py`）。
+- `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`ramfs_user`、`driver_deployment` 都有架构白名单，写错会在编译前被拒绝。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
 
@@ -241,7 +241,6 @@ Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpin
 |---|---|
 | `make run-riscv64` | `tools/a20 run qemu-riscv64` |
 | `make run-riscv64 BRINGUP=1` | `tools/a20 run qemu-riscv64-bringup` |
-| `make run-gui-x86_64` | `tools/a20 run qemu-x86_64-gui` |
 | `make run-nommu-riscv64` | `tools/a20 run qemu-riscv64-nommu` |
 | `make debug-arm64` | `tools/a20 debug qemu-aarch64` |
 | `make smoke-riscv64` | `tools/a20 test smoke-riscv64` |
@@ -249,7 +248,7 @@ Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpin
 | `make run-stm32f103-qemu` | `tools/a20 run stm32f103-qemu` |
 | `make flash-stm32f103-xuanwu` | `tools/a20 flash stm32f103-xuanwu` |
 | `make vbox-iso-x86_64` | `tools/a20 package vbox-iso-x86_64` |
-| `make vbox-image-aarch64` / `vbox-text-image-aarch64` / `vbox-gui-image-aarch64` | `tools/a20 package vbox-aarch64` / `vbox-aarch64-text` / `vbox-aarch64-gui` |
+| `make vbox-image-aarch64` / `vbox-text-image-aarch64` | `tools/a20 package vbox-aarch64` / `vbox-aarch64-text` |
 | `make vf2-minimal` / `vf2-sdcard` / `vf2-extra` | `tools/a20 package vf2-minimal` / `vf2-sdcard` / `vf2-extra` |
 | `make release-rv` / `release-la` | `tools/a20 package release-riscv64` / `release-loongarch64` |
 

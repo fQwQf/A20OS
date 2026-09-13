@@ -176,7 +176,7 @@ $(UFS_NTFS_IMG): FORCE
 # 盘位（避开 bus.3/bus.5 的用户驱动预留）：bus.2=fat(1) bus.4=ext4(2)
 # bus.6=iso9660(3) bus.7=ntfs(4)；主存储在 bus.0。
 smoke-native-fs-all:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG) $(UFS_EXT4_IMG) $(UFS_ISO_IMG) $(UFS_NTFS_IMG)
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -213,7 +213,7 @@ smoke-native-fs-all:
 # DEV_CLASS_BLOCK 序号 1 由 ufsd 经 fs_block_io 访问；FAT32 解析全部发生
 # 在 ufsd 进程内，内核仅保留 VFS 代理。
 smoke-native-ufs:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG)
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -238,7 +238,7 @@ smoke-native-ufs:
 	fi
 
 smoke-dual-input:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/dual-input-riscv64.log"; \
@@ -272,7 +272,7 @@ smoke-dual-input:
 	fi
 
 smoke-native-ubd:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UBD_SCRATCH_IMG)
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -298,7 +298,7 @@ smoke-native-ubd:
 	fi
 
 smoke-native-isolation:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-isolation-riscv64.log"; \
@@ -321,7 +321,7 @@ smoke-native-isolation:
 	fi
 
 smoke-native-registry:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-registry-riscv64.log"; \
@@ -344,7 +344,7 @@ smoke-native-registry:
 	fi
 
 smoke-native-rtcd:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-rtcd-riscv64.log"; \
@@ -367,7 +367,7 @@ smoke-native-rtcd:
 	fi
 
 smoke-native-shmring:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-shmring-riscv64.log"; \
@@ -390,7 +390,7 @@ smoke-native-shmring:
 	fi
 
 smoke-clock-vdso:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/clock-vdso-riscv64.log"; \
@@ -413,7 +413,7 @@ smoke-clock-vdso:
 	fi
 
 smoke-native-svc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-svc-riscv64.log"; \
@@ -436,7 +436,7 @@ smoke-native-svc:
 	fi
 
 smoke-native-contract:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-contract-riscv64.log"; \
@@ -462,7 +462,7 @@ smoke-native-contract:
 	fi
 
 smoke-native-personality:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-personality-riscv64.log"; \
@@ -486,7 +486,7 @@ smoke-native-personality:
 	fi
 
 smoke-native-linux:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-linux-riscv64.log"; \
@@ -512,7 +512,7 @@ smoke-native-linux:
 	fi
 
 smoke-native-ipc:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-ipc-riscv64.log"; \
@@ -535,7 +535,7 @@ smoke-native-ipc:
 	fi
 
 smoke-native-signal:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-signal-riscv64.log"; \
@@ -558,7 +558,7 @@ smoke-native-signal:
 	fi
 
 smoke-native-dynlink:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-dynlink-riscv64.log"; \
@@ -581,7 +581,7 @@ smoke-native-dynlink:
 	fi
 
 smoke-native-mm:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-mm-riscv64.log"; \
@@ -604,7 +604,7 @@ smoke-native-mm:
 	fi
 
 smoke-native-futex:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-futex-riscv64.log"; \
@@ -627,7 +627,7 @@ smoke-native-futex:
 	fi
 
 smoke-native-deepen:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 native-deepen-rv
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -651,7 +651,7 @@ smoke-native-deepen:
 	fi
 
 smoke-native-ext:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-ext-riscv64.log"; \
@@ -674,7 +674,7 @@ smoke-native-ext:
 	fi
 
 smoke-native-debug:
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 USER_BUILD_DESKTOP=0 dev-build
+	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/native-debug-riscv64.log"; \

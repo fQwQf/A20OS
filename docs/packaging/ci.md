@@ -59,7 +59,7 @@ CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，
 buildenv-image（几秒）：把 owner 小写化，产出容器镜像名供其余 job 引用
 
 build-<arch> ×4 并行：
-  checkout（不拉 submodule——核心构建的第三方源码全部 vendored）
+  checkout（核心构建的第三方源码全部 vendored；actions/checkout 仍带 submodules: recursive 作为防御）
     → git safe.directory（容器内 root 跑 git 的常规处理）
     → 恢复 ccache
     → make dev-build            # 内核 + 用户态（沿用旧构建系统）

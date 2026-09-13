@@ -80,7 +80,6 @@ class GuiCfg:
     display: str | None = None
     audio_driver: str | None = None
     audio_device: str | None = None
-    frame_window: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +90,6 @@ class NetCfg:
 @dataclass(frozen=True, slots=True)
 class RootfsCfg:
     size_mb: int | None = None
-    gui_size_mb: int | None = None
     ext4_size_mb: int | None = None
     extra_size_mb: int | None = None
     world: str | None = None
@@ -188,7 +186,7 @@ _SECTION_SPECS: Final = {
     "machine": {f: ("int" if f == "smp" else "bool" if f == "allow_unverified_smp"
                     else "str_list" if f == "extra_qemu" else "str")
                 for f in MachineCfg.__dataclass_fields__},
-    "gui": {f: ("bool" if f == "enabled" else "int" if f == "frame_window" else "str")
+    "gui": {f: ("bool" if f == "enabled" else "str")
             for f in GuiCfg.__dataclass_fields__},
     "net": {f: "str_list" for f in NetCfg.__dataclass_fields__},
     "rootfs": {f: ("str_list" if f in ("extra_packages", "drivers")

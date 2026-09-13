@@ -33,16 +33,6 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git` |
 | sbase | MIT | `user/external/sbase` |
 | TLSe | BSD-2-Clause OR Unlicense | `user/external/tlse` |
-| LVGL | MIT | `user/external/gui/lvgl` |
-| Weston | MIT | `user/external/gui/weston` |
-| Wayland | MIT | `user/external/gui/wayland` |
-| wayland-protocols | MIT | `user/external/gui/wayland-protocols` |
-| pixman | MIT | `user/external/gui/pixman` |
-| libxkbcommon | MIT/X11 | `user/external/gui/libxkbcommon` |
-| libevdev | MIT | `user/external/gui/libevdev` |
-| libinput | MIT | `user/external/gui/libinput` |
-| xkeyboard-config | MIT | `user/external/gui/xkeyboard-config` |
-| libdrm | MIT | `user/external/gui/libdrm` |
 | fastfetch | MIT | `user/external/apps/fastfetch` |
 | zlib | Zlib | `user/external/libs/zlib` |
 | musl-cross-make | MIT | `user/external/toolchain/musl-cross-make` |
@@ -50,7 +40,7 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 ## 5. 用户态程序、静态链接与镜像
 
-基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。`user/extra.mk` 同样设置 `-static`，Vim、Git 及其辅助库也链接 musl CRT/`libc.a`。不能声称这些独立程序“不与 musl 静态链接”。Wayland 构建则同时产生共享库，FFmpeg 配置为 shared。
+基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。`user/extra.mk` 同样设置 `-static`，Vim、Git 及其辅助库也链接 musl CRT/`libc.a`。不能声称这些独立程序“不与 musl 静态链接”。
 
 | 组件 | 许可证 | 位置 | 备注 |
 |------|--------|------|------|
@@ -59,10 +49,8 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（2026-08 核实时仓库未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
 | binutils | GPL-3.0 / LGPL-3.0 | `user/external/toolchain/binutils` | 独立工具链 |
 | lamina (Lamina1) | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` | 独立可执行文件 + 4 个共享库（laminaCore/lmcas/lmmc/LammpCore，含版本化 SONAME 文件）与 libstdc++.so.6，动态链接 glibc（运行库与 rust 包共用） |
-| FFmpeg | LGPL-2.1-or-later（以固定 revision 配置为准） | `user/external/libs/ffmpeg` | `user/wayland/build.sh` 构建共享库，非 `user/extra.mk` 独立程序 |
-| Breeze | 多种 GPL/LGPL 版本，按资源文件核验 | `user/external/gui/breeze` | 资源/图标 |
 
-> 分发 `fat32.img`、`extra.img`、GUI 镜像或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖和 gitlink revision，再准备相应许可证、notice 与源码提供材料。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
+> 分发 `fat32.img`、`extra.img` 或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖和 gitlink revision，再准备相应许可证、notice 与源码提供材料。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
 
 ## 6. 设计参考与对照系统
 

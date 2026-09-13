@@ -135,7 +135,6 @@ BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
 endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
-GUI_FAT32_IMG = $(BUILD_DIR)/gui-fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 ISOFS_IMG = $(BUILD_DIR)/isofs.img
@@ -150,32 +149,18 @@ BUILD_TIME_HDR = $(BUILD_DIR)/generated/build_time.h
 STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
-GUI_FAT32_IMAGE_MB ?= 512
 EXT4_IMAGE_MB ?= 128
 # The complete RISC-V extra set (Rust + native GCC + Git/Vim) needs more than
 # the historical 1 GiB image.  Keep two GiB as the usable default while still
 # allowing smaller package selections to override it on the command line.
 EXTRA_IMAGE_MB ?= 2048
 CA_CERT_BUNDLE ?= $(firstword $(wildcard /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem))
-WAYLAND_GUI_ARCHES := riscv64 loongarch64 aarch64 x86_64
-WAYLAND_GUI ?= $(if $(filter $(ARCH),$(WAYLAND_GUI_ARCHES)),1,0)
-GUI_MEDIA ?=
-GUI_MEDIA_STAMP = $(BUILD_DIR)/.gui-media-id
-GUI_DESKTOP ?= weston
-GUI_DESKTOP_STAMP = $(BUILD_DIR)/.gui-desktop-id
-WAYLAND_PLAYER_STAMP = user/build/wayland/$(ARCH)/stamp/player
-WAYLAND_FFMPEG_STAMP = user/build/wayland/$(ARCH)/stamp/ffmpeg
-WAYLAND_STUBS_STAMP = user/build/wayland/$(ARCH)/stamp/stubs
-WAYLAND_WESTON_STAMP = user/build/wayland/$(ARCH)/stamp/weston
-WAYLAND_WESTON_PATCHES = $(wildcard user/wayland/patches/weston-*.patch)
-GUI_WAYLAND_DEPS = $(if $(filter 1,$(WAYLAND_GUI)),$(WAYLAND_PLAYER_STAMP) user/wayland/install-image.sh $(if $(strip $(GUI_MEDIA)),$(GUI_MEDIA),),)
 EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
 EXTRA_PACKAGES ?= vim git gcc
 MUSL_CROSS_ROOT ?= $(firstword $(foreach root,\
-                        user/external/toolchain/musl-cross-make/output \
-                        user/build/wayland/toolchain/riscv64-linux-musl-cross,\
+                        user/external/toolchain/musl-cross-make/output,\
                         $(if $(wildcard $(root)/bin/riscv64-linux-musl-gcc),$(root))))
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
@@ -187,15 +172,11 @@ RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
 RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
 RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
 FEDORA_RISCV_RELEASE ?=
-USER_BUILD_DESKTOP = $(if $(filter benchmark,$(PROFILE)),0,1)
-# The desktop (LVGL) binary is only produced when USER_BUILD_DESKTOP=1; include
-# it in the build signature so text-mode and GUI builds never share a stamp
-# (and thus never leave a stale desktop binary in the image).
-USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE):$(USER_BUILD_DESKTOP)
-# $(wildcard) drops uninitialized git submodules (lvgl, fastfetch).  The
+USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
+# $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
 # leaves those directories absent entirely.
-USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common user/desktop user/external/gui/lvgl \
+USER_BUILD_CHECK_DIRS = $(wildcard user/init.c user/cmds user/init_common \
                         user/external/musl user/external/sbase user/external/mksh-cvs2git \
                         user/external/tlse user/external/apps/fastfetch)
 NATIVE_TAG_riscv64     := rv
@@ -269,13 +250,6 @@ SMOKE_TIMEOUT_ENVELOPE ?= 60s
 SMOKE_TIMEOUT_ENVELOPE_PILOT ?= 120s
 SMOKE_TIMEOUT_ENVELOPE_BENCH ?= 180s
 SMOKE_TIMEOUT_ENVELOPE_CORPUS ?= 300s
-# Full XFCE desktop bring-up under TCG software rendering is slow; the fixed
-# 15s scanout window in smoke_qemu_gui.py is not enough for the riscv64 image
-# to finish its first frame.  Allow each GUI smoke target to size the window.
-GUI_FRAME_WINDOW ?= 15
-# riscv64 software rendering in TCG needs substantially longer than the
-# default to complete the XFCE desktop's first scanout.
-GUI_FRAME_WINDOW_RV64 ?= 45
 # TCG boot can take longer than two seconds after a full image rebuild.  Wait
 # until the interactive mksh has had time to print its prompt before injecting
 # smoke commands; PASS markers and clean poweroff still decide the result.

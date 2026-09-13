@@ -20,7 +20,7 @@
 3. 如果改动了现有项的状态或限制，必须同步更新相关平台文档和 [构建、测试与提交](testing-and-submission.md) 中的测试矩阵。
 4. 不要只改状态不改说明。新改动不得扩大已知边界，除非文档里已经解释了原因。
 
-仓库定义了五个 `smoke-qemu-gui-{x86_64,riscv64,aarch64,arm32,loongarch64}` 目标；脚本会断言 VirtIO GPU、两个 VirtIO input 实例、非空 scanout 和注入按键事件。但它们目前不是一组可统一强制的门禁：x86_64 的默认 generic 模块集合没有 `virtio-gpu.a20drv`，arm32 的默认 generic 模块集合为空，因此这两个目标按默认配置无法满足脚本断言。这是已知的门禁/部署缺陷；修复模块部署前不得要求运行，也不得声称通过。riscv64、aarch64、loongarch64 的模块清单包含相应驱动，但清单存在不等于运行通过，只有与当前提交匹配的实际日志才能形成各自结论。门禁入口见 [testing-gates.md](../../testing-gates.md)。
+from-source GUI 栈与 LVGL 原生桌面已退役（归档在分支 `archive/legacy-desktop`），其 `smoke-qemu-gui-*` 冒烟目标与 `tools/smoke_qemu_gui.py` 一并移除。当前 GUI 桌面由 Alpine `xfce` world 提供，验证走 `make run-world-gui PKG_WORLD=xfce`。门禁入口见 [testing-gates.md](../../testing-gates.md)。
 
 ## 核心与公共基础设施
 
@@ -73,7 +73,7 @@
 | TPM 2.0 (TIS) | x86 安全 | `tpm.a20drv` 模块：ACPI TPM2 表发现 + TIS FIFO 状态机 + Startup/GetRandom；无 TPM 时 probe 优雅返回 |
 | PS/2 | x86 板级服务 | drvmod 模块（`ps2.a20drv`，x86_64），初始化 + 双向量 ISR；键盘字符经 `uart_receive_char` 进控制台 |
 | PC Speaker | AUDIO | drvmod 模块（`pc-spkr.a20drv`，x86_64），动态 `/dev/audioN`；支持 19 Hz–20 kHz 有界 tone/stop ABI，不冒充 PCM |
-| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 通过 BDL DMA smoke，x86_64 用户态 tone 到 QEMU WAV 验证，RISC-V64 已完成完整 Wayland/FFmpeg/PulseAudio 播放；三个 `run-gui` 目标连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
+| Intel HDA | AUDIO | 架构无关 PCI class 驱动；x86_64 与 LoongArch64 QEMU 通过 BDL DMA smoke，x86_64 用户态 tone 到 QEMU WAV 验证，RISC-V64 曾在 from-source Wayland/FFmpeg/PulseAudio 路径完成播放（该路径已退役）；`make run-world-gui PKG_WORLD=xfce` 连接宿主音频；支持 48 kHz 双声道 S16_LE、环形 DMA、stop/drain、完整 remove 和用户态 WAV/raw/tone 播放器 |
 | STM32 SDIO | BLOCK | 统一类 + MCU bridge；板级 bus 仍用名称匹配 |
 | STM32 简单外设 | 允许例外 | 板级轮询轻量 API，不强制统一对象；扩展到多实例/用户 ABI 时必须迁移 |
 | StarFive/LS2K GMAC、DW SDIO | 有条件 | 已增加 per-instance 私有锁（GMAC）与 `g_sdio.lock`（SDIO），send/recv/poll 在锁内轮询，多实例池按 MMIO 基址分配；数据面仍未接 IRQ（VF2 GMAC 线号未核实，LS2K1000 缺 PIC 路由），GMAC 当前要求 embedded 部署，真机未复现 |

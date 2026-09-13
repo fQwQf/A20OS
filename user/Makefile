@@ -562,15 +562,7 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
 USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
                              $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
                              $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
-                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
-                             $(DESKTOP_OBJS) $(LVGL_OBJS)
-
-BUILD_DESKTOP ?= 1
-ifeq ($(BUILD_DESKTOP),1)
-DESKTOP_TARGET := $(BUILD_DIR)/desktop
-else
-DESKTOP_TARGET :=
-endif
+                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB)
 
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
@@ -580,7 +572,7 @@ FF_AVAILABLE :=
 FASTFETCH_TARGET :=
 endif
 
-all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(DESKTOP_TARGET) $(FASTFETCH_TARGET)
+all: build_dir $(BUILD_DIR)/init $(BUILD_DIR)/mksh $(BUILD_DIR)/sh $(SBASE_CMDS) $(LOCAL_CMDS) $(WGET_CMD) $(FASTFETCH_TARGET)
 
 fastfetch: build_dir $(FF_CMD)
 
@@ -657,37 +649,6 @@ $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIB
 $(WGET_CMD): $(WGET_OBJ) $(TLSE_OBJ) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $(WGET_OBJ) $(TLSE_OBJ) $(CRT_END) $(LIBC)
-
-LVGL_DIR := external/gui/lvgl
-# The lvgl git submodule may be absent (non-recursive clone or tarball
-# export); keep the find silent and let BUILD_DESKTOP=0 builds proceed.
-LVGL_SRCS := $(shell find $(LVGL_DIR)/src -type f -name '*.c' 2>/dev/null)
-LVGL_OBJS := $(patsubst $(LVGL_DIR)/%.c,$(OBJ_DIR)/lvgl/%.o,$(LVGL_SRCS))
-LVGL_CFLAGS := $(CFLAGS) -I$(LVGL_DIR) -Iexternal -Idesktop -DLV_CONF_INCLUDE_SIMPLE -DLV_LVGL_H_INCLUDE_SIMPLE
-ifeq ($(NOMMU),1)
-LVGL_CFLAGS += -DA20OS_NOMMU
-endif
-
-DESKTOP_SRCS := desktop/desktop.c desktop/desktop_terminal.c desktop/lv_port_disp.c desktop/lv_port_indev.c \
-desktop/desktop_utils.c desktop/desktop_cursor_breeze.c \
-desktop/desktop_dashboard.c desktop/desktop_monitor.c desktop/desktop_processes.c \
-desktop/desktop_files.c desktop/desktop_network.c desktop/desktop_system.c
-DESKTOP_OBJS := $(patsubst desktop/%.c,$(OBJ_DIR)/desktop/%.o,$(DESKTOP_SRCS))
-
-desktop/desktop_cursor_breeze.c: desktop/gen_breeze_cursor.py
-	$(PYTHON) $< $@ external/gui/breeze
-
-$(OBJ_DIR)/lvgl/%.o: $(LVGL_DIR)/%.c desktop/lv_conf.h | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LVGL_CFLAGS) -c -o $@ $<
-
-$(OBJ_DIR)/desktop/%.o: desktop/%.c | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LVGL_CFLAGS) -c -o $@ $<
-
-$(BUILD_DIR)/desktop: $(DESKTOP_OBJS) $(LVGL_OBJS) | build_dir musl_prepare
-	@mkdir -p $(dir $@)
-	$(CC) $(LDFLAGS) -o $@ $(CRT_START) $^ $(CRT_END) $(LIBC)
 
 $(INIT_OBJ): $(INIT_MAIN_SRC) Makefile | build_dir musl_prepare
 	@mkdir -p $(dir $@)

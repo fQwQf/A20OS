@@ -367,7 +367,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `quotactl_fd` | system | `partial` | `smoke-abi-linux` | same command set addressed through the fd's own mount |
 | `remap_file_pages` | memory | `partial` | `smoke-mm-stress` | rebinds a shared file-mapping window to pgoff via munmap+MAP_FIXED re-entry under seal checks; restores original contents on remap failure |
 | `memfd_secret` | ipc | `partial` | `smoke-abi-linux` | secret memfd: mmap and pidfd_getfd restricted to the creator euid (-EACCES otherwise) |
- | `rseq` | process | `full` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery is out of scope |
+| `rseq` | process | `full` | `smoke-proc-stress` | publishes cpu_id/cpu_id_start/node_id/mm_cid into the registered area at registration and every dispatch; preemption sequence-abort delivery is out of scope |
 | `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |

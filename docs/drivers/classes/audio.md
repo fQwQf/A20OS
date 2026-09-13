@@ -12,7 +12,6 @@ A20OS 音频栈把设备发现、通用用户接口和具体硬件协议分开�
 - `kernel/drivers/audio/virtio_snd.c`：VirtIO 1.2 sound 共享实现；generic 由 `kernel/drvmod/examples/virtio_snd.c` 包装为 `virtio-snd.a20drv`，embedded 静态链接。
 - `kernel/drvmod/examples/pc_spkr.c (pc-spkr.a20drv)`：只支持 tone 的 x86 PC Speaker。
 - `user/cmds/core/audioplay.c`：WAV、raw PCM 和测试 tone 客户端。
-- `user/wayland/player.c`：FFmpeg 解码、48 kHz 重采样和异步 PCM 输出。
 
 HDA 是架构无关的 PCI class 驱动，匹配 PCI class `04:03:00`。源码不得包含 CPU 架构门禁；平台负责提供 ECAM、可映射 BAR、DMA handle、cache 同步和必要的中断或轮询能力。
 
@@ -66,7 +65,7 @@ controlq 串行执行 SET_PARAMS、PREPARE、START、STOP 和 RELEASE。txq 使�
 
 ## 平台与 QEMU
 
-`run-gui-riscv64`、`run-gui-x86_64` 和 `run-gui-loongarch64` 默认挂载 QEMU `intel-hda` 与 `hda-duplex`。设置 `QEMU_GUI_AUDIO_DEVICE=virtio` 后，RISC-V64 改用 MMIO `virtio-sound-device`，x86_64 和 LoongArch64 改用 `virtio-sound-pci`。宿主 backend 由 `QEMU_GUI_AUDIO_DRIVER` 选择，Linux 默认 `pa`，也可使用 `pipewire`、`alsa`、`sdl` 或 `none`。
+`make run-world-gui PKG_WORLD=xfce` 默认挂载 QEMU `intel-hda` 与 `hda-duplex`。设置 `QEMU_GUI_AUDIO_DEVICE=virtio` 后，RISC-V64 改用 MMIO `virtio-sound-device`，x86_64 和 LoongArch64 改用 `virtio-sound-pci`。宿主 backend 由 `QEMU_GUI_AUDIO_DRIVER` 选择，Linux 默认 `pa`，也可使用 `pipewire`、`alsa`、`sdl` 或 `none`。
 
 RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 ECAM 和 BAR 映射，以及 `kernel/platform/qemu-virt-riscv64/board.c` 启动 PCI 枚举。AArch64 QEMU virt 尚未提供相同 PCI host 路径，因此目前只有编译覆盖。
 
@@ -76,8 +75,7 @@ RISC-V64 的 HDA 运行依赖 `kernel/arch/riscv64/platform/pci_host.c` 提供 E
 make smoke-hda
 make smoke-audio-userspace
 make PYTHON='conda run -n a20os python' smoke-virtio-sound
-make run-gui-riscv64 GUI_MEDIA=/path/to/video.mp4
-make run-gui-riscv64 QEMU_GUI_AUDIO_DEVICE=virtio
+make run-world-gui PKG_WORLD=xfce QEMU_GUI_AUDIO_DEVICE=virtio
 ```
 
 `smoke-hda` 验证 codec topology、driver binding 和 BDL DMA。`smoke-audio-userspace` 播放五秒 tone，通过 QEMU WAV backend 检查 HDA 的帧数、非静音、采样连续性，并要求一次 stream start、零 underrun。`smoke-virtio-sound` 在同样的用户态负载下只挂载 `virtio-sound-pci`，验证协议发现、control/TX queue、DRAIN/RELEASE 和 WAV 输出。

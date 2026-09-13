@@ -97,11 +97,6 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 # 无 QEMU 目标；验证走 cemu 模拟器，见 docs/platforms/loongarch32.md）
 make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 
-# 带 GUI 的 QEMU 运行
-make run-gui-x86_64
-make run-gui-aarch64    # 或 run-gui-arm64
-make run-gui-riscv64
-
 # STM32F103 64 KiB Flash / 20 KiB SRAM 固件
 make stm32f103-bringup
 
