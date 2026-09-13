@@ -175,7 +175,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
             return -ENOMEM;
         }
         child->domain = AF_UNIX;
-        child->type = SOCK_STREAM;
+        child->type = s->type;
         child->protocol = s->protocol;
         /* Linux inherits SO_PASSCRED on accepted AF_UNIX sockets.  D-Bus
          * enables it on the listener and expects the initial NUL byte on the
