@@ -15,6 +15,7 @@
 #include "fs/anonfd.h"
 #include "fs/file.h"
 #include "fs/memfd.h"
+#include "fs/readiness.h"
 #include "fs/vfs.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
@@ -1459,6 +1460,17 @@ static int drm_poll(vfile_t *vf, short events)
     return revents;
 }
 
+static size_t drm_poll_sources(vfile_t *vf, short events,
+                               readiness_source_t *sources, size_t max)
+{
+    (void)vf;
+    if (!sources || max == 0 || !(events & POLLIN))
+        return 0;
+    drm_vblank_init_once();
+    sources[0] = (readiness_source_t){ &g_vblank.waiters, 0, 0 };
+    return 1;
+}
+
 static int drm_close(vfile_t *vf)
 {
     drm_context_t *ctx = vf ? vf->priv : NULL;
@@ -1575,6 +1587,7 @@ static vfile_ops_t g_drm_ops = {
     .lseek = drm_lseek,
     .ioctl = drm_ioctl,
     .poll = drm_poll,
+    .poll_sources = drm_poll_sources,
     .close = drm_close,
 };
 

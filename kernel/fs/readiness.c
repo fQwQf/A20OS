@@ -230,7 +230,7 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
         slot->identity = slot->file->identity;
         if (!readiness_collect_sources(slot, item))
             sources_stable = false;
-        if (!slot->source_count)
+        if (!slot->source_count && item->events != 0)
             fallback = true;
         for (size_t j = 0; j < slot->source_count; j++)
             park_deadline = readiness_min_deadline(
