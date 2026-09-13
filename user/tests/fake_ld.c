@@ -122,6 +122,20 @@ __asm__(
     "_start_dyn:\n"
     "    mov %rsp, %rsi\n"
     "    jmp dyn_main\n");
+#elif defined(__aarch64__)
+__asm__(
+    ".text\n"
+    ".globl _start_dyn\n"
+    "_start_dyn:\n"
+    "    mov x1, sp\n"
+    "    b dyn_main\n");
+#elif defined(__loongarch64)
+__asm__(
+    ".text\n"
+    ".globl _start_dyn\n"
+    "_start_dyn:\n"
+    "    move $a1, $sp\n"
+    "    b dyn_main\n");
 #else
 #error "_start_dyn entry asm not implemented for this architecture"
 #endif
