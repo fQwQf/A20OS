@@ -18,6 +18,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_class.h"
 #include "fs/devfs.h"
+#include "fs/readiness.h"
 #include "fs/vfs.h"
 #include "fs/tty.h"
 #include "proc/proc.h"
@@ -317,8 +318,19 @@ static int input_ioctl(vfile_t *vf, unsigned long req, void *arg) {
     return -EINVAL;
 }
 
+static size_t input_poll_sources(vfile_t *vf, short events,
+                                 readiness_source_t *sources, size_t max)
+{
+    (void)vf;
+    if (!sources || max == 0 || !(events & POLLIN))
+        return 0;
+    sources[0] = (readiness_source_t){ &g_input_waiters, 0, 0 };
+    return 1;
+}
+
 vfile_ops_t g_devfs_input_ops = {
     .read  = input_read,
     .ioctl = input_ioctl,
     .poll  = input_poll,
+    .poll_sources = input_poll_sources,
 };
