@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl git ca-certificates xz-utils file \
         dosfstools e2fsprogs mtools fakeroot sudo openssl \
-        qemu-system-misc qemu-system-x86 qemu-system-arm \
+        qemu-system-misc qemu-system-x86 qemu-system-arm qemu-user-static \
         gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
         gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu \
         gcc-powerpc64le-linux-gnu gcc-arm-linux-gnueabihf \
