@@ -97,13 +97,15 @@ jobs:
           if ! ls /usr/lib/binfmt.d/qemu-*.conf >/dev/null 2>&1; then
             apt-get update && apt-get install -y --no-install-recommends qemu-user-static
           fi
+          mkdir -p /mnt/binfmt_misc
+          mountpoint -q /mnt/binfmt_misc || mount -t binfmt_misc binfmt_misc /mnt/binfmt_misc
           for f in /usr/lib/binfmt.d/qemu-*.conf; do
             [ -e "$f" ] || continue
             name="$(basename "$f" .conf)"
-            [ -e "/proc/sys/fs/binfmt_misc/$name" ] && continue
-            cat "$f" > /proc/sys/fs/binfmt_misc/register
+            [ -e "/mnt/binfmt_misc/$name" ] && continue
+            cat "$f" > /mnt/binfmt_misc/register
           done
-          ls /proc/sys/fs/binfmt_misc/
+          ls /mnt/binfmt_misc/
 
       - name: ccache
         uses: actions/cache@v4
