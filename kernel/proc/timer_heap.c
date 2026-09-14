@@ -157,6 +157,7 @@ void proc_alarm_cancel(task_t *t)
 
 static uint64_t next_wake_scan = SCHED_NO_DEADLINE;
 static uint64_t next_alarm_scan = SCHED_NO_DEADLINE;
+static uint64_t next_posix_scan = SCHED_NO_DEADLINE;
 
 unsigned proc_wait_timer_count_locked(void)
 {
@@ -216,11 +217,14 @@ uint64_t proc_next_timer_interval(uint64_t now)
     uint64_t next = now + SCHED_TICK_INTERVAL;
     uint64_t wake = __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED);
     uint64_t alarm = __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
+    uint64_t posix = __atomic_load_n(&next_posix_scan, __ATOMIC_RELAXED);
 
     if (wake < next)
         next = wake;
     if (alarm < next)
         next = alarm;
+    if (posix < next)
+        next = posix;
     if (next <= now)
         return SCHED_MIN_TIMER_INTERVAL;
 
@@ -441,6 +445,18 @@ void sched_note_timer_deadline(uint64_t deadline)
 }
 
 /*
+ * Full store (not min): posix_timer_tick() recomputes the earliest POSIX
+ * expiry after every scan and may move it later or clear it.
+ */
+void sched_set_posix_deadline(uint64_t deadline)
+{
+    __atomic_store_n(&next_posix_scan,
+                     deadline ? deadline : SCHED_NO_DEADLINE,
+                     __ATOMIC_RELAXED);
+    sched_rearm_timer();
+}
+
+/*
  * Wake every task whose wait-timer deadline has passed.  Safe to call from
  * IRQ context (spinlocks and atomics only): the timer interrupt invokes this
  * so an expired deadline is reaped immediately, which advances next_wake_scan
@@ -574,10 +590,12 @@ void proc_timer_heap_init(void)
     wait_timer_stale_expirations = 0;
     __atomic_store_n(&next_wake_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
     __atomic_store_n(&next_alarm_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
+    __atomic_store_n(&next_posix_scan, SCHED_NO_DEADLINE, __ATOMIC_RELAXED);
 }
 
 int proc_sched_timers_due(uint64_t now)
 {
     return now >= __atomic_load_n(&next_wake_scan, __ATOMIC_RELAXED) ||
-           now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
+           now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED) ||
+           now >= __atomic_load_n(&next_posix_scan, __ATOMIC_RELAXED);
 }

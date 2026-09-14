@@ -478,6 +478,7 @@ void     context_switch(task_t *next);
 uint64_t proc_next_timer_interval(uint64_t now);
 void     proc_set_alarm_expire(task_t *t, uint64_t alarm_expire);
 void     sched_note_timer_deadline(uint64_t deadline);
+void     sched_set_posix_deadline(uint64_t deadline);
 void     proc_dump(void);
 int      proc_kill(int pid, int signum);
 int      proc_kill_pgid(int pgid, int signum, int skip_self);
