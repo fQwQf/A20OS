@@ -1,11 +1,12 @@
-# 发布流水线：tag v* 触发。构建全架构镜像与包仓库，签名后发 Release，
-# 并把包仓库部署到 GitHub Pages（即公共 apk 仓库，见 docs/packaging/repository.md）。
+# 发布流水线：tag v* 触发。构建全架构镜像与包仓库，签名后发 GitHub Release。
 #
 # 一次性准备（仓库管理员）：
-#   1. Settings → Pages → Build and deployment → Source: "GitHub Actions"
-#   2. Settings → Secrets → Actions → 新建 A20_REPO_SIGNING_KEY，
-#      内容为发布私钥 PEM（openssl genrsa 生成；公钥随仓库发布，见下）
-#   3. 未配置 secret 时流程仍可运行，但会用临时密钥签名并打印警告
+#   Settings → Secrets → Actions → 新建 A20_REPO_SIGNING_KEY，
+#   内容为发布私钥 PEM（openssl genrsa 4096 生成；公钥随包仓库发布，见下）。
+#   未配置 secret 时流程仍可运行，但产物不签名并打印警告。
+#
+# TODO(publishing): 包仓库暂未发布到 Pages——原先的部署既与 pages.yml 抢同一个
+#   站点，又把 build/repo 拷进 site/ 源目录且从不执行 site/build.sh；见 docs/packaging/repository.md。
 name: release
 
 on:
@@ -15,8 +16,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   # 同 ci.yml：ghcr 镜像名必须全小写，owner 含大写时先算好小写镜像名。
@@ -112,46 +111,22 @@ jobs:
             build/keys/*.rsa.pub
           if-no-files-found: error
 
-  publish:
-    name: publish
+  # 只创建 GitHub Release。刻意不挂 github-pages environment：该 environment
+  # 只允许 main 分支，而带 environment 的 job 会在任何 step 之前被拒绝，
+  # 于是 tag 触发的 Release 永远建不出来。
+  release:
+    name: release
     needs: build
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
 
-      - name: Assemble public repository tree
-        run: |
-          mkdir -p site
-          cp -r dist/repo/* site/
-          cp dist/keys/*.rsa.pub site/ 2>/dev/null || true
-          {
-            echo "# A20OS apk repository"
-            echo
-            echo " Architectures: $(ls site | grep -v '\.' | tr '\n' ' ')"
-            echo
-            echo "Usage inside A20OS or any apk-capable rootfs:"
-            echo '  echo "<this site URL>/$(uname -m 映射)/" >> /etc/apk/repositories'
-          } > site/index.md
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/images/*.img
           generate_release_notes: true
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
