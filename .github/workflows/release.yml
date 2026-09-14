@@ -119,14 +119,24 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
           merge-multiple: true
           path: dist
 
+      # body_path 与 generate_release_notes 同时给是有意的：action 会把 body
+      # 前置到 GitHub 生成的 changelog 之前（见 action.yml 同名输入的说明）。
+      - name: Use the annotated tag message as the release body
+        run: git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/images/*.img
+          body_path: release-notes.md
           generate_release_notes: true
