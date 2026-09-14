@@ -1,6 +1,6 @@
 # CI/CD 详解
 
-最后核实：2026-08-28。
+最后核实：2026-09-14。
 
 ## 三个 workflow
 
@@ -8,7 +8,7 @@
 |------|------|------|
 | `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 构建构建容器镜像，推 `ghcr.io/<owner小写>/a20os-buildenv` |
 | `ci.yml` | PR / push main / 手动 | 四架构矩阵构建 → 打包建库 → 组 base 镜像；独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
-| `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release + Pages 包仓库 |
+| `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release（附件 = 各架构镜像） |
 
 镜像名小写：ghcr 镜像名必须全小写，而 `github.repository_owner` 可能含大写
 （如 `fQwQf`，buildx 会直接报 `repository name must be lowercase`）。三个
@@ -95,24 +95,30 @@ x86 宿主上本来就只有 TCG，各 smoke 目标的超时按 TCG 校准，适
   → dev-build → pkg-repo → image-world base + devel
   → 上传 artifact（镜像 + 各架构仓库目录 + 公钥）
 
-publish（等全部架构完成）：
-  合并 artifact → 组装站点目录（repo/<arch>/* + 公钥 + index.md）
+release（等全部架构完成）：
+  合并 artifact → 取注解 tag 正文作发布说明
   → softprops/action-gh-release 发 Release（附件 = 全部镜像）
-  → actions/deploy-pages 部署包仓库到 GitHub Pages
+
+该 job 刻意不挂 github-pages environment：该 environment 只允许 main
+分支，带 environment 的 tag 触发会在任何 step 之前被拒绝，Release 就永远
+建不出来。包仓库的对外发布（Pages）暂缓，见 repository.md。
 ```
 
 ### 发布准备（一次性）
 
-1. **Pages**：Settings → Pages → Build and deployment → Source 选
-   "GitHub Actions"；
-2. **发布密钥**（可选但推荐）：
+1. **发布密钥**（可选但推荐）：
    ```bash
    openssl genrsa -out a20os-release.rsa 4096
    openssl rsa -in a20os-release.rsa -pubout -out a20os-release.rsa.pub
    ```
    私钥内容粘进 Settings → Secrets → Actions 的
-   `A20_REPO_SIGNING_KEY`；公钥会随 Pages 站点自动发布，无需入库；
-3. 打 tag：`git tag v0.3.0 && git push --tags`。
+   `A20_REPO_SIGNING_KEY`；公钥由 workflow 从私钥导出并随 artifact 上传，
+   无需入库；
+2. 打注解 tag（tag 正文会成为 Release 的发布说明）：
+   `git tag -a v0.13 -m "..." && git push origin v0.13`。
+
+Pages（Settings → Pages → Source 选 "GitHub Actions"）只服务于 `pages.yml`
+的官网站点，与 release 无关。
 
 ## 常见故障
 
