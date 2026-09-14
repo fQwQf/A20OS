@@ -1,6 +1,6 @@
 # 包仓库与签名
 
-最后核实：2026-08-27。
+最后核实：2026-09-14。
 
 ## 仓库布局
 
@@ -35,7 +35,7 @@ make pkg-repo ARCH=riscv64
 每个 .apk 包                APKINDEX.tar.gz（仓库索引）
    │                            │
    └── 消费侧用公钥验证 ──────────┘
-        公钥目录：Alpine 官方公钥（自动获取）+ A20OS 发布公钥（随仓库发布）
+        公钥目录：Alpine 官方公钥（自动获取）+ A20OS 发布公钥（随发布产物提供）
 ```
 
 - **包签名**：`mka20pkg.py --sign-key` 在包内写入
@@ -66,15 +66,25 @@ openssl rsa -in a20os-release.rsa -pubout -out a20os-release.rsa.pub
 
 - 私钥 → GitHub 仓库 secret `A20_REPO_SIGNING_KEY`（release workflow
   自动使用）；
-- 公钥 → 随 Pages 仓库站点发布（workflow 自动拷贝），用户下载一次放入
-  信任目录即可永久验证包与索引；
+- 公钥 → 由 workflow 从私钥导出（`build/keys/a20os-release.rsa.pub`），
+  随各架构的 workflow artifact 上传；对外分发方式待定（见下节）；
 - 未配置 secret 时，release workflow 仍能运行，但产物**不签名**
   （workflow 会打印醒目警告），消费侧需要 `--allow-untrusted`；
 - 私钥泄露 = 立刻吊销：换密钥对、重发索引、公告用户换公钥。
 
-## 发布仓库（GitHub Pages）
+## 发布仓库（对外发布暂缓）
 
-release workflow 把 `build/repo/` 部署到 Pages，得到公共仓库：
+**当前状态**：release workflow 会签名并组装好每个架构的仓库
+（`build/repo/<arch>/`，含 `APKINDEX.tar.gz`），但产物只随 workflow
+artifact（`release-<arch>`）上传，**尚未对外发布**；GitHub Release 只附带
+各架构镜像。
+
+原先的 Pages 部署已移除：它既与 `pages.yml`（它拥有 GitHub Pages 站点）
+互相覆盖，又组装了错误的目录树（把 `build/repo` 拷进仓库自己的 `site/`
+源目录，且从不执行 `site/build.sh`）。恢复对外发布前需先定发布模型，见
+`.github/workflows/release.yml` 头部的 TODO。
+
+**目标形态**（发布后）：仓库是静态目录，每个架构一个子目录：
 
 ```
 https://<owner>.github.io/<repo>/riscv64/APKINDEX.tar.gz   （+ 各架构）
