@@ -34,6 +34,19 @@ static uint64_t posix_timer_timespec_to_ticks(uint64_t sec, uint64_t nsec)
            (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
 }
 
+static void posix_timer_update_deadline(void)
+{
+    uint64_t next = 0;
+    for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
+        if (!g_posix_timers[i].used || g_posix_timers[i].signo == 0)
+            continue;
+        uint64_t expire = g_posix_timers[i].expire_tick;
+        if (expire && (next == 0 || expire < next))
+            next = expire;
+    }
+    sched_set_posix_deadline(next);
+}
+
 int posix_timer_create(int owner_pid, int signo, int target_tid)
 {
     for (int i = 0; i < COMPAT_TIMER_MAX; i++) {
@@ -56,6 +69,7 @@ int posix_timer_delete(int owner_pid, int id)
     if (g_posix_timers[id].owner_pid != owner_pid)
         return -EINVAL;
     memset(&g_posix_timers[id], 0, sizeof(g_posix_timers[id]));
+    posix_timer_update_deadline();
     return 0;
 }
 
@@ -82,6 +96,7 @@ int posix_timer_set_time(int owner_pid, int id, const uint64_t ts[4])
     memcpy(g_posix_timers[id].value, ts + 2, sizeof(uint64_t) * 2);
     g_posix_timers[id].expire_tick =
         timer_get_ticks() + posix_timer_timespec_to_ticks(ts[2], ts[3]);
+    posix_timer_update_deadline();
     return 0;
 }
 
@@ -122,4 +137,5 @@ void posix_timer_tick(void)
             }
         }
     }
+    posix_timer_update_deadline();
 }

@@ -79,6 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ${{ needs.buildenv-image.outputs.image }}
+      options: --privileged
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +88,22 @@ jobs:
 
       - name: Trust workspace ownership (container runs as root)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Alpine world composition (smoke-devtools) runs target-arch maintainer
+      # scripts; qemu-user + binfmt lets them execute on the x86_64 runner.
+      - name: Register foreign-arch binfmt (qemu-user)
+        run: |
+          set -e
+          if ! ls /usr/lib/binfmt.d/qemu-*.conf >/dev/null 2>&1; then
+            apt-get update && apt-get install -y --no-install-recommends qemu-user-static
+          fi
+          for f in /usr/lib/binfmt.d/qemu-*.conf; do
+            [ -e "$f" ] || continue
+            name="$(basename "$f" .conf)"
+            [ -e "/proc/sys/fs/binfmt_misc/$name" ] && continue
+            cat "$f" > /proc/sys/fs/binfmt_misc/register
+          done
+          ls /proc/sys/fs/binfmt_misc/
 
       - name: ccache
         uses: actions/cache@v4
