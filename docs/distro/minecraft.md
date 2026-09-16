@@ -76,19 +76,44 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
 
 **已验证（有实测证据）**：
 
-- LWJGL 的 native 在客体里能加载。用上游真实二进制实测：
-  `dlopen(liblwjgl.so)` / `liblwjgl_opengles.so` / `libglfw.so` **全部 OK**。
-  前置条件是 `gcompat` + `libdl.so.2` 软链（见 `docs/graphics/3d-graphics.md` §9.14/§9.15）。
-- Wayland 上的 GL 渲染可用：`eglinfo -p wayland` 报 `llvmpipe (LLVM 21.1.2)` + `OpenGL ES 3.2`，
-  真实 GLES 客户端 `es2gears_wayland` 跑到 `EGL_VERSION = 1.5`。
+- **取件脚本产出的布局就是启动器要的布局**：107 个 library、106 条 classpath、9 个 native 已解出、
+  4591 个 asset 对象，全部按清单 SHA1 校验，总计 553MB。
+- **装载方法可用且不损坏文件**：用 `GUI_MEDIA` 重建镜像后，从镜像里 dump 出 `client.jar` 与宿主副本
+  **逐字节一致**（sha1 `ba2df812c2d12e02`、31152600 字节、zip 魔数 `PK\x03\x04`、28163 个条目、
+  `net/minecraft/client/main/Main.class` 存在）。启动器 `/usr/local/bin/minecraft` 与
+  `/root/Desktop/a20-media` 软链都在镜像里。
+- LWJGL 的 native 能加载（`gcompat` + `libdl.so.2` 软链，见 `3d-graphics.md` §9.14/§9.15）。
+- **启动器本身工作正常**：客体里 `minecraft` 能跑起来，正确解析出版本 `1.21.11` 与 asset index `29`，
+  并拉起 `java`。
 
-**未验证（不要当成结论）**：
+**未跑通，以及为什么（实测，不是猜测）**：
 
-- **游戏本体没有实际跑起来过。** 我备齐并校验了官方文件、修好了 JVM/JNI 与 GL 两侧的前置条件，
-  但没有启动过游戏，所以帧率、稳定性、以及 Minecraft 需要的桌面 OpenGL 3.2 core 上下文
-  在 llvmpipe 上是否足够，都还没有数据。
-- 客体的启动器是**按官方启动器的参数拼的**，可能需要按实际报错微调。
-- **联机 / Realms / 皮肤需要账号**：这里用的是占位 token，只能单人。
+- **游戏卡在 `ClassNotFoundException: net.minecraft.client.main.Main`**，但**这不是 classpath 拼错**——
+  该类确实在 jar 里（28163 条目中的一个）。隔离测试（只用 `client.jar` 作 classpath）暴露了真正的根因：
+  JVM 读取 jar 时**反复触发对齐异常**：
+
+  ```
+  ADE/ALE: pid=165 sepc=0x418739a0 stval=0xc code=1
+  [ERR] a3=0x8080808080808080        # SSE 向量化写的典型模式
+  ```
+
+  x86_64 上普通非对齐访问本不该陷入（只有 `movdqa` 这类要求对齐的指令会），而日志显示它**反复发生**，
+  说明**内核对对齐异常（#AC）的处理有问题**——JVM 因此读不出 jar 内容，才报类找不到。
+  这是**内核 bug**，不是 Minecraft 或镜像配置的问题；修内核之前游戏不可能起来。
+
+**另一个独立的内核 bug**：把内存从 2G 加到 3G 启动时，内核在早期启动阶段 **panic**：
+
+```
+[BUS] pci 00:02.0 id=1af4:1050 ...
+[ERR]   [0] pc=pci_virtio_write32+0x2db
+========== KERNEL PANIC ========== Unhandled kernel page fault
+[PANIC] task: <none/early boot>
+```
+
+即**我的内存修复（`884ef373`）只覆盖了 2G，3G 时在 PCI virtio 探测期间页错误**。
+Minecraft 需要大于 2G 的堆，所以这个 bug 也是前置障碍。两者都需要新的内核修复。
+
+**桌面启动器的参数是按官方启动器拼的**，在类加载问题修好之前无法判断是否需要微调。
 
 ## 已知限制
 
