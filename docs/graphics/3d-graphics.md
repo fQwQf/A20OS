@@ -243,7 +243,7 @@ boot 日志应出现：
 |---|---|---|
 | `DRM_IOCTL_GEM_CREATE` / `GEM_MMAP`（+ `GEM_FLINK`/`GEM_OPEN`） | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | 未实现（只有 `MODE_CREATE_DUMB`/`MAP_DUMB`，那是给 scanout 的线性缓冲） |
 | render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | **已加**：devfs 现在暴露 `renderD128`（226,128），打开它的 DRM 上下文标记为 render-only（`SET_MASTER` 返回 `-EACCES`，KMS ioctl 本就需要 master）。实测加上后 EGL 能在 Wayland 平台初始化（`EGL driver name: swrast`，且带 `EGL_EXT_image_dma_buf_import`） |
-| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **缺，且试过一版已回退**。没有它时 `EGL_PLATFORM=gbm` 报 `eglinfo: eglInitialize failed`，debug 日志 `No DRI config supports native format R8G8B8A8_UNORM`（config 全被否掉）。加上一版 `drm_format_modifier_blob`（header 24B / formats@24 / modifier@32，ARGB8888+XRGB8888、LINEAR、`formats=0x3 offset=0`）并让 `MODE_GETPLANE` 报同样两个 fourcc 后，wlroots 变成 `Failed to create DRM backend` → `Failed to open any DRM device`（静默失败，无具体日志）。已完整回退。 |
+| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **已实现**（`adeffcb9`）：plane 现在带 `type`(id=2) + `IN_FORMATS`(id=3) 两个属性，IN_FORMATS 指向一个 56B `drm_format_modifier_blob`（header 24B / formats@24 / modifier@32，ARGB8888+XRGB8888、LINEAR）。boot 验证：桌面正常起来（page-flip 正常、xfsettingsd/xfdesktop 都在、**不再** `Failed to create DRM backend`）。注意 wlroots 只在用 GL 渲染器时才**懒读**这个 blob——`WLR_RENDERER=pixman` 下根本不取它，所以本改动对当前桌面零影响。blob 是否被 wlroots/Mesa 正确解析，要等 GL 渲染器链路打通后才能端到端验证。 |
 
 **IN_FORMATS 四次尝试的二分结论**（关键：触发器不是 blob，而是「plane 报了多于一个属性」）：
 
@@ -257,6 +257,8 @@ boot 日志应出现：
 | **两个属性都是已知可用的 `type`/PRIMARY** | 同样失败 → **不是第二个属性的处理代码** |
 
 并且：在全部失败变体里，**IN_FORMATS 的 blob 从未被取过**（我在 `drm_in_formats_blob()` 里加的打印一次都没出现），说明失败发生在 wlroots 读 plane 属性列表的阶段，**早于**格式/blob 解析；wlroots 也没有打出任何具体错误行（静默失败）。所以问题不在内核返回的 blob 字节，而在「这个驱动上 plane 有 2 个属性」这一事实本身触发 wlroots/libdrm 的某个前置检查失败。
+
+> **更正（adeffcb9，已落地）**：上面这条「plane 有 2 个属性就失败」的结论是错的。后来用一个干净的「两个 `type` 属性」复现（count_props=2）发现 wlroots **完全正常**（桌面起来、page-flip 正常）——所以多属性列表编码从来不是问题，之前那几次 IN_FORMATS 失败是**那些尝试自身的接线/编码 bug**（与本会话里我几次探针自身的栈 bug 同理）。`adeffcb9` 的实现让 plane 同时暴露 `type` + `IN_FORMATS`，boot 验证桌面无恙。IN_FORMATS 这条路本身已经通了；剩下要验证的是 blob 内容被 wlroots/Mesa 正确解析（需 GL 渲染器链路），以及后续的 GBM/EGL/真 PRIME。
 
 下一步（下次接手时的第一件事）：写一个最小用户态程序，用 libdrm 调 `drmModeGetPlane()` + `drmModeObjectGetProperties()`，把 1 属性与 2 属性两种情况的返回值打出来；或直接读 wlroots 的 plane 属性循环源码（本机网络取不到，需离线准备）。
 
@@ -296,7 +298,22 @@ libEGL warning: egl: failed to create dri2 screen
    + `MODE_GETFB2`；
 2. 把 PRIME 做成真 dma-buf（或至少让 `kms_swrast` 的 dumb buffer 能被合成器
    直接采样）；
-3. 放开 `WLR_RENDERER`，让 wlroots 用 GL 渲染器（llvmpipe 软件渲染先跑通）；
-4. 再考虑 virgl：host 开 `virtio-gpu-gl-pci`，guest 用 `virtio_gpu_dri.so`；
-5. 注意 **LWJGL 只提供 x86_64/aarch64 native**，riscv64 实例跑不了 Minecraft
-   （Java 本身可以）。
+ 3. 放开 `WLR_RENDERER`，让 wlroots 用 GL 渲染器（llvmpipe 软件渲染先跑通）；
+ 4. 再考虑 virgl：host 开 `virtio-gpu-gl-pci`，guest 用 `virtio_gpu_dri.so`；
+ 5. 注意 **LWJGL 只提供 x86_64/aarch64 native**，riscv64 实例跑不了 Minecraft
+    （Java 本身可以）。
+
+### GBM/EGL 的实测定位（本轮）与一条可能更短的路
+
+- `eglinfo -p gbm` 现在能给出精确失败点：`eglInitialize` → `DRI2: failed to create gbm device`。
+  即 Mesa 的 GBM 后端（镜像里有 `/usr/lib/gbm/dri_gbm.so`）在为本驱动的设备建 `gbm_device` 时失败。
+  `MESA_LOADER_DRIVER_OVERRIDE=kms_swrast` 和 `swrast` 都试过、**都不改变结果** → 说明卡点不在
+  「驱动名→DRI 驱动」的映射，而在 dri_gbm 的设备初始化本身（它对本 DRM 设备的某些查询/调用不满意）。
+  下一步要么 guest 里 strace（world 没装 strace）看 gbm_create_device 里哪一步失败，要么在内核 DRM ioctl
+  分发上挂临时 trace 看 Mesa 在初始化阶段问了什么、哪条答得不对。
+- **可能更短的路（待验证，不要当结论）**：Minecraft 走 LWJGL → `EGL_PLATFORM_WAYLAND`，而 EGL 在 Wayland
+  平台**已经能初始化**（swrast）。真正的问号是**呈现**：eglSwapBuffers 时 Mesa 把渲染结果作为 `wl_buffer` 交给
+  合成器。若 Mesa 的 Wayland EGL 对软件渲染用 `wl_shm`（CPU 共享内存，wlroots 原生支持）而非 `wl_dmabuf`，
+  那 Minecraft 也许**根本不需要 GBM/真 dma-buf 这条链**。验证方法：跑一个真正的 EGL-Wayland 客户端
+  （镜像里没有编译器，也无 weston-simple-egl，需要离线准备一个静态 musl 的 Wayland EGL 测试程序）。
+- 另一个独立于 GL 的硬前提：**LWJGL natives + Minecraft jars 不在镜像里**，离线取不到，需另行准备。
