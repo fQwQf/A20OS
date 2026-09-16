@@ -170,6 +170,9 @@ typedef struct net_socket {
     int32_t peer_pid;   /* SO_PEERCRED: peer pid captured on connect/accept */
     int32_t peer_uid;
     int32_t peer_gid;
+    int32_t owner_pid;  /* binder creds: what a connecting peer reports */
+    int32_t owner_uid;
+    int32_t owner_gid;
     /* Channel-backed AF_UNIX: latest sender credentials for SCM_CREDENTIALS
      * when the data plane bypasses the legacy net_msg queue. */
     int32_t ch_cred_pid;
