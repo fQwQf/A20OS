@@ -434,3 +434,41 @@ BDF 用哪个都行，**只要 realpath 与 `/sys/bus/pci/devices/<bdf>` 自洽*
 
 `/sys/bus/pci/devices/<bdf>` 只被 `drmGetDevices2` 枚举路径用到（9.1 第 7 条），若首轮验证只关心
 `gbm_create_device`，可以先不提供，等确认需要再补。
+
+### 9.6 实施状态（本轮已落地，commit `193ee6b3`）
+
+已在内核 `kernel/fs/sysfs.c` 按 9.5 实现，**纯加法**，未改动任何既有节点的类型或 readlink：
+
+| 节点 | 状态 |
+|---|---|
+| `/sys/dev/char/226:0/device/subsystem` | 软链 → `/sys/bus/virtio` |
+| `/sys/dev/char/226:0/subsystem` | 软链 → `/sys/bus/pci` |
+| `.../device/{revision,vendor,device,subsystem_vendor,subsystem_device}` | 十六进制文本，实测可读 |
+| `.../device/uevent` | 含 `PCI_SLOT_NAME=0000:00:01.0` |
+| `.../device/config` | 64B PCI 配置头 |
+| `.../device/drm/{card0,renderD128}` | 条目 |
+| `/sys/dev/char/226:128` | 新增 render 节点识别（此前完全不可解析） |
+
+**两条 subsystem 链接必须目标不同**：反汇编显示 `drmGetNodeType()` 把 readlink 出的目标串拿去匹配一张
+7 项表，`/pci`→0、`/virtio`→0x10，且代码显式比较 `0x10`；`device/subsystem` 命中 `/virtio` 才会进入
+libdrm 的 virtio 分支（再上溯一级读 PCI 属性），父级链接则命中 `/pci`。
+
+**实测（客体）**：所有节点读回正确；桌面（labwc + xfwm4 + panel + thunar，含 polkit/dbus）无回归、无
+panic/UBSAN；在内核 `sysfs_lookup` 挂临时 trace 后可见 libdrm 的完整查找序列——
+`device→drm`、`device→subsystem`、`subsystem`、`device→uevent`、`device→vendor`、`device→device`、
+`device→subsystem_vendor`、`device→subsystem_device`——说明**设备身份识别已走通**（此前直接放弃）。
+
+**仍未通**：`eglinfo -p gbm` 依旧 `DRI2: failed to create gbm device`，且 Mesa 仍打印
+`failed to retrieve device information`。trace 里 **`config` 与 `revision` 始终未被查找**，说明流程在属性读取
+附近就中止了。
+
+**下一步（最有依据的一条）**：把设备路径摆成**真实 Linux 的 virtio/PCI 层级**——
+`/sys/dev/char/226:0/device` 应解析到 `/sys/devices/pci0000:00/0000:00:01.0/virtio0`，这样
+`drmGetDeviceName()` 的 `/virtio` 截断才会得到 PCI 父目录 `/sys/devices/pci0000:00/0000:00:01.0`，
+`<realpath>/../subsystem` 才解析得到 `/sys/bus/pci`，`PCI_SLOT_NAME` 与 `config` 也才从那个父目录读取。
+这需要新增 `/sys/devices/pci0000:00/...` 子树（约 100 行，仍是纯加法 + 把 DRM 的 `device` 改成软链）。
+另需 `strace`/更细的 trace 确认 `config` 为何未被读取。
+
+**另一条已实测可行的路（对 Minecraft 可能已够）**：`eglinfo -p wayland` **成功**，渲染器为
+`llvmpipe (LLVM 21.1.2, 128 bits)`。LWJGL 走 `EGL_PLATFORM_WAYLAND`，若其呈现走 `wl_shm` 而非
+`wl_dmabuf`，则 Minecraft 可能**不需要 GBM 这条链**。代价仍是 LWJGL natives + jars 不在镜像里。
