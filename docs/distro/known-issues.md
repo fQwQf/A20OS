@@ -140,7 +140,7 @@
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 
-### x86_64 QEMU 平台把可用 RAM 硬编码成 1 GiB（与 JVM 堆 ergonomics、Minecraft 内存都相关）
+### x86_64 可用 RAM 曾硬编码成 1 GiB（**已修复**：改从 multiboot 内存图取）
 - 事实：`kernel/arch/x86_64/include/platform.h:8` 把 `PHYS_MEMORY_END` 写死为 `0x40000000`（1 GiB），
   `arch_ram_range()`（同文件 :17）只返回 `[0, 1 GiB)`；所以即便 QEMU 给 `-m 2G`，内核仍只管理 262144 个页框
   （启动日志 `[PFA] total_frames=262144`、`[MM] ... 256061 free (1000 MB)`）。
@@ -150,17 +150,23 @@
   **注意**：1–2 GiB 区在 q35 上可能含 ACPI/固件保留区，不能直接整段当可用帧，否则分配器会把保留页发出去。
 - 关联（待验证，非结论）：JVM 不带 `-Xms/-Xmx` 时报 `Too small maximum heap`（`/usr/bin/java` 封装已用
   `-Xms256m -Xmx512m` 绕过），疑似与其读到的内存 ergonomics 有关；1 GiB 对 Minecraft 也偏紧。
-- 处置：它**不是** Minecraft 的第一障碍（GL 链才是），且改动落在最脆弱的启动期/帧分配路径上，
-  需要配套的内存压测回归；建议在有充分验证窗口的会话里单独做，不在本条里顺手改。
+- **修复（`884ef373`）**：`_start` 现在在清 BSS 前把 multiboot magic(EAX)/info(EBX) 存进 `.data`，
+  `firmware.c` 解析 multiboot 内存图：取 type 1（available）区间、丢掉低于 1 MiB 的部分（IVT/BDA/legacy hole）、
+  按页对齐、并裁到 `entry.S` 直接用 1GB 页映射的 2 GiB 窗口；取不到就回退旧的 1 GiB，不回归。
+  实测客体：`[RAM] usable 0x100000..0x7ffd9000 (2046 MiB)`、`[PFA] total_frames=523993`（原 262144）、
+  `Buddy+Slab ... 2020 MB free`，桌面与 ffplay 照常。
 
-### 视频播放：用 ffplay（mpv 会偶发崩溃）
-- `mpv` 播视频约 **1/10** 次崩溃（内核打印 `SIGSEGV: ... sepc=0x638a6320 stval=0x8` + `comm=lua/<script>`）；
-  根因是上面「每线程状态被写坏」那条，关掉它的 Lua 脚本（`load-scripts/osc/ytdl/stats=no`）**不能**消除。
-- **可用方案（已落地）**：world 增加了 **ffplay**（ffmpeg 自带播放器，同一套软件解码）。实测 guest 内
-  `ffplay -nodisp` **10/10**、带真实显示 **5/5** 全过、0 崩溃；`ffmpeg` 解码 **5/5** 全过。
-- 用法：`Super+Enter` 开终端 → `ffplay /usr/share/a20-media/<你的视频>`，或在 Thunar 里打开
-  `/usr/share/a20-media/`。会话已强制 `SDL_RENDER_DRIVER=software`（还没有 GL）；`~/.config/mpv/mpv.conf`
-  保留一份关闭 Lua 脚本的缓解配置。
+### 视频播放：已默认用 ffplay（mpv 在 A20OS 上不可靠）
+- **现状（已落地，`7ff4b14c`）**：`ffplay` 现在是视频 MIME 的**默认处理器**（overlay 里 `ffplay.desktop`
+  + `/etc/xdg/mimeapps.list`；客体 `xdg-mime query default video/mp4` → `ffplay.desktop`），双击视频即用它播放。
+  实测客体播 5s H.264 全片跑完（窗口路径、`-autoexit` 干净退出），`ffmpeg` 解码同一文件也是 0 错。
+- **mpv 为什么不可靠**：它把每个内建 Lua 脚本（osc/stats/console/…）跑在**各自线程**里，会踩到上面那条
+  per-thread 状态 bug → SIGSEGV。`load-scripts=no` **并不能**关掉这些内建脚本（崩溃只是从 `lua/stats` 换成了
+  `lua/console`）；而旧 conf 里的 `stats=no` 是**无效选项**（mpv 0.40 没这个 option），会让 mpv 每次启动报错。
+  已删掉那行非法配置、保留 `load-scripts/osc/ytdl=no` 作缓解，但 mpv 仍不可靠——**用 ffplay**。
+- **两个注意点**：`ffplay -nodisp`（无显示）会 `Failed to open file ... or configure filtergraph`（无显示路径的
+  怪癖，**窗口路径正常**）；被 SIGTERM 杀掉时 ffplay 会 SIGSEGV 退出（播完或 `-autoexit` 不会）。
+- 用法：双击视频文件，或 `Super+Enter` 开终端 → `ffplay -autoexit /usr/share/a20-media/<视频>`。
 
 ### JVM：需要 `/usr/bin/java` 封装（exec_path 不解析符号链接 + 堆参数）
 - 现象：`java -version` 报 `Error loading shared library libjli.so: No such file or directory (needed by java)`；直接用真实路径
