@@ -25,7 +25,7 @@ WITH_ASSETS=${WITH_ASSETS:-1}
 MANIFEST=${MANIFEST:-https://piston-meta.mojang.com/mc/game/version_manifest_v2.json}
 
 python3 - "$VERSION" "$OUT" "$WITH_ASSETS" "$MANIFEST" <<'PY'
-import hashlib, json, os, sys, urllib.request
+import concurrent.futures, hashlib, json, os, sys, threading, urllib.request
 
 version, out, with_assets, manifest = sys.argv[1], sys.argv[2], sys.argv[3] == "1", sys.argv[4]
 
@@ -97,14 +97,19 @@ if with_assets:
         idx = json.loads(get(ai["url"]))
         os.makedirs(os.path.join(out, "assets", "indexes"), exist_ok=True)
         json.dump(idx, open(os.path.join(out, "assets", "indexes", ai["id"] + ".json"), "w"))
-        objs = idx["objects"]
-        for i, (name, o) in enumerate(objs.items()):
-            h = o["hash"]
-            fetch("assets/objects/" + h[:2] + "/" + h,
-                  "https://resources.download.minecraft.net/" + h[:2] + "/" + h, h)
-            if i and i % 1000 == 0:
-                print("[minecraft]   assets %d/%d" % (i, len(objs)))
-        print("[minecraft] assets: %d objects" % len(objs))
+        items = [("assets/objects/" + o["hash"][:2] + "/" + o["hash"],
+                  "https://resources.download.minecraft.net/" + o["hash"][:2] + "/" + o["hash"],
+                  o["hash"]) for o in idx["objects"].values()]
+        lock, progress = threading.Lock(), [0]
+        def one(it):
+            fetch(*it)
+            with lock:
+                progress[0] += 1
+                if progress[0] % 500 == 0:
+                    print("[minecraft]   assets %d/%d" % (progress[0], len(items)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+            list(ex.map(one, items))
+        print("[minecraft] assets: %d objects" % len(items))
 
 print("[minecraft] done")
 PY
