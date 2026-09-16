@@ -317,3 +317,120 @@ libEGL warning: egl: failed to create dri2 screen
   那 Minecraft 也许**根本不需要 GBM/真 dma-buf 这条链**。验证方法：跑一个真正的 EGL-Wayland 客户端
   （镜像里没有编译器，也无 weston-simple-egl，需要离线准备一个静态 musl 的 Wayland EGL 测试程序）。
 - 另一个独立于 GL 的硬前提：**LWJGL natives + Minecraft jars 不在镜像里**，离线取不到，需另行准备。
+- **补测（环境侧已齐备，"缺驱动"这条排除）**：镜像 `/usr/lib/dri/` 里其实**全都有**——`swrast_dri.so`、
+  `kms_swrast_dri.so`、`virtio_gpu_dri.so`、`zink_dri.so`，以及 crocus/i915/iris/nouveau/r300/r600/radeonsi/vmwgfx；
+  GBM 后端 `/usr/lib/gbm/dri_gbm.so` 也在。即便如此，带 `MESA_LOADER_DRIVER_OVERRIDE=kms_swrast` 的
+  `eglinfo -p gbm` 仍然 `DRI2: failed to create gbm device`，而且**内核侧没有任何 DRM ioctl 返回错误**
+  （用临时 trace 覆盖了整个 ioctl 分发验证过）。→ 卡点在 **Mesa `gbm_create_device()` 内部**（设备识别/后端
+  初始化），既不是缺文件也不是内核答错。要继续需要 Mesa 源码，或在 guest 里 strace（world 现无 strace）
+  看它到底哪一步返回 NULL。
+- **真正的卡点定位（libdrm 读不到设备身份）**：`MESA-LOADER: failed to retrieve device information` 出在 libdrm 的
+  `drmGetDevice2()`。从 `libdrm.so.2` 的字符串可以读出它要访问的 sysfs 路径：
+  `/sys/dev/char/<maj>:<min>` → `/device` → `/device/drm`，以及
+  `/sys/bus/pci/devices/<bdf>/` + `<bdf>/config` + `<bdf>/uevent`。
+  而客体里实测：**`/sys/bus` 根本不存在**；`/sys/dev/char/226:0` 的 readlink 是 `../../class/drm/card0`
+  （路径里没有 `pci`，libdrm 因此识别不出这是 PCI 设备）；`/sys/dev/char/226:0/device` 是个**空目录**
+  （没有 `uevent`/`config`）。→ libdrm 拿不到 vendor/device，Mesa loader 无法把设备映射到 DRI 驱动，
+  `gbm_create_device()` 于是返回 NULL，往外就是 `DRI2: failed to create gbm device`。
+- **修法（内核 sysfs，尚未动手）**：把 DRM 设备的 sysfs 摆成 Linux 的形态——`/sys/dev/char/226:0` 应指向
+  `/sys/devices/pci0000:00/<bdf>/drm/card0`，在 `<bdf>/` 下提供 `uevent`（含 `PCI_ID=1AF4:1050` 等）、
+  `config`（PCI 配置空间）、`vendor`/`device`，并提供 `/sys/bus/pci/devices/<bdf>` 的链接。
+  内核侧信息是齐的（`pci_dev_info` 带 vendor/device，`pci_slot_for_bdf()` 带槽位）。
+  **注意**：这会动到现有 `/sys/class/drm/*` 布局，而 wlroots/libinput 现在依赖它——改之前必须先跑桌面回归，
+  别把已经能用的桌面弄坏；而且这只是 GL 链的第一环，后面还有 kms_swrast 建 screen、EGL、真 dma-buf PRIME、
+  MODE_GETFB2、以及放开 `WLR_RENDERER`。
+
+## 9. libdrm 设备识别所需的 sysfs 形态（反汇编实证，可直接照做）
+
+上一节的结论来自字符串，本节把它升级为**逐条反汇编核实**的事实。样本：客体实际使用的
+`libdrm 2.4.131`（从 `build/cache/apk/x86_64/libdrm-2.4.131-r0.400a5d6e.apk` 取出）。
+复现命令：
+
+```bash
+cd /tmp/opencode && mkdir drmx && tar -xzf <apk> -C drmx
+objdump -d --no-show-raw-insn drmx/usr/lib/libdrm.so.2.131.0 > drm.asm
+python3 -c "d=open('libdrm.so.2.131.0','rb').read(); print(repr(d[0x10a08:0x10a30].split(b'\0')[0]))"
+```
+
+### 9.1 调用链（Mesa 的 `gbm_create_device` 走的就是这条）
+
+`drmGetDevice2(fd)` → `drmGetDeviceFromDevId(dev_id, flags, &dev)`：
+
+1. 枚举 `/dev/dri/*`（字符串 `/dev/dri`，0x101e6；名字前缀匹配 `card`(4) / `renderD`(7)，0x101fc/0x10201）。
+2. 对每个 node 先 `stat("/sys/dev/char/<maj>:<min>/device/drm")`（格式串 0x10a08）。
+   **失败即 `-EINVAL` 直接返回** —— 这是整条链的**第一个、也是最硬的失败点**。
+3. `drmGetNodeType(maj, min)`：`snprintf("/sys/dev/char/<maj>:<min>/device")`（0x1021f）→ 解析该路径
+   → 用一张 7 项表把路径后缀映射成 bus 类型（见 9.2）。**它必须被识别成某一种 bus**，否则 node 类型
+   未知、直接失败。
+4. `drmGetDeviceName()`（0x66a0）：`realpath("/sys/dev/char/<maj>:<min>/device")`；若最后一段以
+   **`/virtio`** 开头则截断到它的父目录（对应 Linux 上 `.../0000:00:01.0/virtio0` 的经典布局）。
+5. PCI 分支：从第 4 步得到的目录读 **5 个属性文件**（表 @0x14840，`fscanf("%x")` 0x1031e）：
+   `revision`、`vendor`、`device`、`subsystem_vendor`、`subsystem_device`。任一读不到即失败。
+6. PCI 分支另读 `<pci>/uevent`（0x10215）并用 `sscanf("%04x:%02x:%02x.%1u")`（0x102e3）解析
+   **`PCI_SLOT_NAME=`**（0x102d5），以及 `<pci>/config`（0x102f6）。
+7. 枚举路径（`drmGetDevices2`）另用 `/sys/bus/pci/devices/%04x:%02x:%02x.%d/`（0x10c40）与
+   其 `/drm`（0x10c10）。
+
+### 9.2 bus 类型判定表（0x61b0，7 项 {后缀, 类型}）
+
+| 路径后缀 | 判定 |
+|---|---|
+| `/pci` | PCI |
+| `/usb` | USB |
+| `/platform` | platform |
+| `/spi` | platform |
+| `/host1x` | host1x |
+| `/virtio` | virtio |
+| `/faux` | faux |
+
+→ **关键**：`/sys/dev/char/226:0` 解析后的路径里必须出现上表之一。当前客体是 `../../class/drm/card0`
+（`/sys/class/drm/card0`），**一个都不匹配** —— 这就是「libdrm 识别不出这是 PCI 设备」的确切原因。
+
+### 9.3 因此需要的 sysfs 节点（Linux `virtio-pci` 形态）
+
+```
+/sys/dev/char/226:0            -> symlink 到 /sys/devices/pci0000:00/0000:00:01.0/drm/card0
+/sys/dev/char/226:0/device     -> .../0000:00:01.0/virtio0        （含 /pci + /virtio，两种判定都能命中）
+/sys/devices/pci0000:00/                                          （目录，父名含 /pci 供 "/.." 判定）
+/sys/devices/pci0000:00/0000:00:01.0/
+    vendor device subsystem_vendor subsystem_device revision       （`%x` 文本）
+    config                                                        （PCI 配置空间前 64B）
+    uevent                                                        （含 PCI_SLOT_NAME=0000:00:01.0）
+    drm/                                                          （目录）
+        card0  renderD128                                         （条目）
+/sys/bus/pci/devices/0000:00:01.0 -> 上述 PCI 目录              （枚举路径）
+```
+
+其中 vendor/device 直接用 `pci_dev_info` 里的值（QEMU 的 virtio-gpu-pci 是 `1af4:1050`）；
+BDF 用哪个都行，**只要 realpath 与 `/sys/bus/pci/devices/<bdf>` 自洽**——libdrm 是从 realpath 反解 BDF 的。
+
+### 9.4 实施要点与风险
+
+- 落点：`kernel/fs/sysfs.c`（枚举 `sf_type_t`、`sysfs_lookup`、`sysfs_content`、stat/readlink 四处），
+  需要时给 `kernel/drivers/bus/pci_bus.c` 加一个公开的 PCI 信息访问器（`g_pci_infos[]` 目前是 `static`）。
+- **必须保持加法式**：`/sys/class/drm/*` 与 `/sys/dev/char/<maj>:<min>` 的现有 readlink 是
+  wlroots/libinput 正在依赖的布局，先跑桌面回归再谈其它。
+- 改完的验收信号：`eglinfo -p gbm` 的报错**不再是** `MESA-LOADER: failed to retrieve device information`，
+  而是越过设备识别、进到建 screen / 选 renderer 的下一层；同时桌面（labwc + 视频）无回归。
+
+### 9.5 更低侵入的实现变体（推荐先试这个）
+
+9.3 里把 `/sys/dev/char/226:0` 本身改成指向 `/sys/devices/...` 的软链，会动到一条**有明确不变量**的
+现有 readlink：`sysfs_readlink()` 对 `SF_DEV_CHAR_ENTRY` 生成 `../../class/<sub>/<name>` 是刻意的——
+注释写明 libudev 的 `util_resolve_sys_link()` 解析结果必须与「从 `/sys/class` 枚举得到的 syspath」
+**逐字节相等**，否则 libinput 的 `evdev_device_have_same_syspath()` 会失配（输入设备依赖这条）。
+**因此不要去改它。**
+
+够用且几乎纯加法的做法：**只把 `/sys/dev/char/226:0/device` 改成一个符号链接**
+（该节点当前是个没人读的空目录），指向 `/sys/devices/pci0000:00/0000:00:01.0/virtio0`：
+
+- `drmGetNodeType()`：解析 `/sys/dev/char/226:0/device` → `/sys/devices/pci0000:00/0000:00:01.0/virtio0`
+  → 同时命中 `/pci` 与 `/virtio` → 判定为 PCI ✓
+- `drmGetDeviceName()`：realpath 同上，按 `/virtio` 截断 → `/sys/devices/pci0000:00/0000:00:01.0`
+  → 从那里读 5 个属性 ✓
+- `stat("/sys/dev/char/226:0/device/drm")` → `.../0000:00:01.0/virtio0/drm` 存在 ✓
+- 注意要**只对 DRM 226:0 特判**：`SF_DEV_CHAR_ENTRY` 的 `device` 子节点是输入设备共用的，
+  全局改成软链会牵动 evdev 一侧。
+
+`/sys/bus/pci/devices/<bdf>` 只被 `drmGetDevices2` 枚举路径用到（9.1 第 7 条），若首轮验证只关心
+`gbm_create_device`，可以先不提供，等确认需要再补。
