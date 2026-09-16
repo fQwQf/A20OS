@@ -92,6 +92,10 @@ tumbler
 # JVM（Minecraft 等 Java 程序；openjdk21 在 x86_64/aarch64/riscv64 均有包。
 # 注意 LWJGL 只提供 x86_64/aarch64 native，riscv64 跑不了 Minecraft）
 openjdk21-jre
+# LWJGL 的 Linux native 是 glibc 链接（DT_NEEDED 为 libc.so.6/libdl.so.2/
+# libpthread.so.0），且上游不提供 musl 变体；本镜像是纯 musl，缺了它 JNI 层
+# 无法 dlopen。gcompat 提供 glibc ABI 兼容层，是 Java + LWJGL 的前置包。
+gcompat
 
 # 图形 API：OpenGL / OpenGL ES / EGL / GBM（Mesa 软件渲染 llvmpipe + virgl）。
 # 桌面合成器默认仍是 pixman；GL 客户端需要合成器用 GL 渲染器（见 docs）。
