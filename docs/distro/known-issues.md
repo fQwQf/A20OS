@@ -48,6 +48,24 @@
 
 ## 二、未解决
 
+### mpv 播视频偶发崩溃（Lua 脚本线程里的 LuaJIT GC 链表被写坏）
+- 症状：`mpv` 播视频约 **1/10** 次崩溃；内核打印 `SIGSEGV: ... sepc=0x638a6320 stval=0x8` 与
+  `FATAL: ... comm=lua/osc|lua/stats|lua/ytdl_hook path=/extra/usr/bin/mpv`。用户看到的「thunar 报错后 mpv 崩溃」即此。
+- 已定位（反汇编 + 变体实验）：
+  - 故障指令在 `libluajit-5.1.so.2 + 0x53320`：`testb $0x7,0x8(%r8)`，而 `r8 = *(G+0x130)` —— LuaJIT 正在遍历 GC 链表，
+    链表头读出来是 **NULL**。即 LuaJIT 的 `global_State` 被写坏（一个应为哨兵/对象的 GCRef 变成 0），不是缺功能。
+  - **单线程 LuaJIT 完全正常**：`luajit -e '<loop>'` 跑 6 次 JIT-on + 4 次 `-joff` 全 OK。
+  - mpv 的每个内建 Lua 脚本跑在**自己的线程**里（`comm=lua/<script>`），崩溃只出现在这些线程，且每次崩的脚本不同
+    （osc/stats/ytdl_hook）→ 指向 **x86_64 的每线程状态（FS base / TLS）**。
+  - 关掉 Lua 脚本（`load-scripts/osc/ytdl/stats=no`）**没有消除**崩溃（仍 ~1/10，日志里照样有 `comm=lua/stats`）。
+- 影响：任何**多线程**程序都可能中招 —— Minecraft 的 JVM 线程同理，所以这个内核 bug 比 GL 更前置。
+- 规避（已落地）：world 增加 **ffplay**（ffmpeg 自带播放器，同一套软件解码）。实测 guest 内
+  `ffplay -nodisp` **10/10**、带真实显示 **5/5** 全过、0 崩溃；`ffmpeg` 解码 **5/5** 全过。桌面里播
+  `/usr/share/a20-media/` 的视频用 ffplay 即可。
+- 提示：下一步在 x86_64 上找「每线程状态在上下文切换/嵌套 trap 时被写坏」的路径。候选一：`arch_prctl(ARCH_SET_FS)`
+  写的是 `t->trap_ctx`（`kernel/core/trap.c:237` 每次 trap 都覆盖 `current->trap_ctx`，嵌套的内核态 trap 是否把它指到
+  被丢弃的帧上需确认）；候选二：switch.S 保存了 ra/tp/rbx/rbp/r12-r15/rsp/cr3/fxsave64，是否有其它每线程寄存器漏存。
+
 ### JVM：需要 `/usr/bin/java` 封装（exec_path 不解析符号链接 + 堆参数）
 - 现象：`java -version` 报 `Error loading shared library libjli.so: No such file or directory (needed by java)`；直接用真实路径
   `/usr/lib/jvm/java-21-openjdk/bin/java -Xms256m -Xmx512m -version` 则正常输出 `openjdk version "21.0.12"`。

@@ -13,6 +13,8 @@ export XCURSOR_SIZE=24
 export XCURSOR_PATH=/usr/share/icons:/usr/share/pixmaps
 export SDL_VIDEODRIVER=wayland
 export SDL_AUDIODRIVER=dummy
+# SDL2 没有 GL 可用，强制软件渲染器（ffplay 用它出画）
+export SDL_RENDER_DRIVER=software
 export SEATD_VTBOUND=0
 # runuser -l resets the inherited environment, so the session re-establishes
 # the full home/XDG set here.  xfconfd/dconf need explicit config dirs or
