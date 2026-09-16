@@ -84,6 +84,8 @@ gst-plugins-ugly
 gst-libav
 parole
 mpv
+# ffplay: ffmpeg 自带播放器，软件解码实测稳定（mpv 的 Lua 线程在 A20OS 上会偶发崩溃）
+ffplay
 # 缩略图服务（thunar/xfdesktop 通过 D-Bus 激活 org.freedesktop.thumbnails.Thumbnailer1）
 tumbler
 
