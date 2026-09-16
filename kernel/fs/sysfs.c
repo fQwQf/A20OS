@@ -73,6 +73,14 @@ typedef enum {
     SF_DEV_CHAR_DEVICE_CONFIG,   /* .../device/config (PCI config space) */
     SF_DEV_CHAR_DEVICE_UEVENT,   /* .../device/uevent (PCI_SLOT_NAME=...) */
     SF_DEV_CHAR_DEVICE_DRM_ENTRY, /* .../device/drm/{card0,renderD128} */
+    SF_BUS,              /* /sys/bus */
+    SF_BUS_PCI,          /* /sys/bus/pci */
+    SF_BUS_PCI_DEVICES,  /* /sys/bus/pci/devices */
+    SF_BUS_PCI_DEV,      /* /sys/bus/pci/devices/<bdf> */
+    SF_BUS_PCI_DEV_CONFIG, /* .../<bdf>/config */
+    SF_BUS_PCI_DEV_UEVENT, /* .../<bdf>/uevent */
+    SF_BUS_PCI_DEV_ATTR,   /* .../<bdf>/{vendor,device,revision,...} */
+    SF_BUS_PCI_DEV_DRM,    /* .../<bdf>/drm */
     SF_FB,                 /* /sys/class/fb */
     SF_FB_DEVICE,          /* /sys/class/fb/fbN */
     SF_FB_NAME,            /* /sys/class/fb/fbN/name */
@@ -325,7 +333,7 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
         } else {
             p->content_len = 0;
         }
-    } else if (type == SF_DEV_CHAR_DEVICE_ATTR) {
+    } else if (type == SF_DEV_CHAR_DEVICE_ATTR || type == SF_BUS_PCI_DEV_ATTR) {
         static const char *const pci_vals[5] = {
             "01", "1af4", "1050", "1af4", "1100"
         };
@@ -333,7 +341,7 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                          (loop_idx >= 0 && loop_idx < 5) ? pci_vals[loop_idx]
                                                          : "00");
         p->content_len = (size_t)(n > 0 ? n : 0);
-    } else if (type == SF_DEV_CHAR_DEVICE_CONFIG) {
+    } else if (type == SF_DEV_CHAR_DEVICE_CONFIG || type == SF_BUS_PCI_DEV_CONFIG) {
         memset(p->content, 0, sizeof(p->content));
         p->content[0x00] = 0xf4; p->content[0x01] = 0x1a;
         p->content[0x02] = 0x50; p->content[0x03] = 0x10;
@@ -343,7 +351,7 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
         p->content[0x2c] = 0xf4; p->content[0x2d] = 0x1a;
         p->content[0x2e] = 0x00; p->content[0x2f] = 0x11;
         p->content_len = 64;
-    } else if (type == SF_DEV_CHAR_DEVICE_UEVENT) {
+    } else if (type == SF_DEV_CHAR_DEVICE_UEVENT || type == SF_BUS_PCI_DEV_UEVENT) {
         const char *ue = "PCI_SLOT_NAME=0000:00:01.0\n"
                          "PCI_ID=1AF4:1050\n"
                          "PCI_SUBSYS_ID=1AF4:1100\n"
@@ -443,6 +451,26 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         child_type = SF_DEVICES;
     } else if (dm->type == SF_ROOT && strcmp(name, "fs") == 0) {
         child_type = SF_FS;
+    } else if (dm->type == SF_ROOT && strcmp(name, "bus") == 0) {
+        child_type = SF_BUS;
+    } else if (dm->type == SF_BUS && strcmp(name, "pci") == 0) {
+        child_type = SF_BUS_PCI;
+    } else if (dm->type == SF_BUS_PCI && strcmp(name, "devices") == 0) {
+        child_type = SF_BUS_PCI_DEVICES;
+    } else if (dm->type == SF_BUS_PCI_DEVICES &&
+               strcmp(name, "0000:00:01.0") == 0) {
+        child_type = SF_BUS_PCI_DEV;
+    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "config") == 0) {
+        child_type = SF_BUS_PCI_DEV_CONFIG;
+    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "uevent") == 0) {
+        child_type = SF_BUS_PCI_DEV_UEVENT;
+    } else if (dm->type == SF_BUS_PCI_DEV && strcmp(name, "drm") == 0) {
+        child_type = SF_BUS_PCI_DEV_DRM;
+    } else if (dm->type == SF_BUS_PCI_DEV) {
+        child_type = SF_BUS_PCI_DEV_ATTR;
+        child_idx = sysfs_pci_attr_index(name);
+        if (child_idx < 0)
+            return -ENOENT;
     } else if (dm->type == SF_FS && strcmp(name, "cgroup") == 0) {
         child_type = SF_FS_CGROUP;
     } else if (dm->type == SF_DEVICES && strcmp(name, "virtual") == 0) {
@@ -661,6 +689,9 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
                   child_type == SF_DEV_CHAR_ENTRY ||
                   child_type == SF_DEV_CHAR_DEVICE ||
                   child_type == SF_DEV_CHAR_DEVICE_DRM ||
+                  child_type == SF_BUS || child_type == SF_BUS_PCI ||
+                  child_type == SF_BUS_PCI_DEVICES || child_type == SF_BUS_PCI_DEV ||
+                  child_type == SF_BUS_PCI_DEV_DRM ||
                   child_type == SF_FB || child_type == SF_FB_DEVICE);
 
     vn->ino = (uint64_t)((child_type << 8) | ((child_idx + 1) & 0xFF));
@@ -723,11 +754,11 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_UEVENT) {
             vn->size = 64;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_ATTR) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_ATTR || child_type == SF_BUS_PCI_DEV_ATTR) {
             vn->size = 16;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_CONFIG) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_CONFIG || child_type == SF_BUS_PCI_DEV_CONFIG) {
             vn->size = 64;
-        } else if (child_type == SF_DEV_CHAR_DEVICE_UEVENT) {
+        } else if (child_type == SF_DEV_CHAR_DEVICE_UEVENT || child_type == SF_BUS_PCI_DEV_UEVENT) {
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
             vn->size = 16;
