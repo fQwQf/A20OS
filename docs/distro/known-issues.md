@@ -48,23 +48,119 @@
 
 ## 二、未解决
 
-### mpv 播视频偶发崩溃（Lua 脚本线程里的 LuaJIT GC 链表被写坏）
-- 症状：`mpv` 播视频约 **1/10** 次崩溃；内核打印 `SIGSEGV: ... sepc=0x638a6320 stval=0x8` 与
-  `FATAL: ... comm=lua/osc|lua/stats|lua/ytdl_hook path=/extra/usr/bin/mpv`。用户看到的「thunar 报错后 mpv 崩溃」即此。
-- 已定位（反汇编 + 变体实验）：
-  - 故障指令在 `libluajit-5.1.so.2 + 0x53320`：`testb $0x7,0x8(%r8)`，而 `r8 = *(G+0x130)` —— LuaJIT 正在遍历 GC 链表，
-    链表头读出来是 **NULL**。即 LuaJIT 的 `global_State` 被写坏（一个应为哨兵/对象的 GCRef 变成 0），不是缺功能。
-  - **单线程 LuaJIT 完全正常**：`luajit -e '<loop>'` 跑 6 次 JIT-on + 4 次 `-joff` 全 OK。
-  - mpv 的每个内建 Lua 脚本跑在**自己的线程**里（`comm=lua/<script>`），崩溃只出现在这些线程，且每次崩的脚本不同
-    （osc/stats/ytdl_hook）→ 指向 **x86_64 的每线程状态（FS base / TLS）**。
-  - 关掉 Lua 脚本（`load-scripts/osc/ytdl/stats=no`）**没有消除**崩溃（仍 ~1/10，日志里照样有 `comm=lua/stats`）。
-- 影响：任何**多线程**程序都可能中招 —— Minecraft 的 JVM 线程同理，所以这个内核 bug 比 GL 更前置。
-- 规避（已落地）：world 增加 **ffplay**（ffmpeg 自带播放器，同一套软件解码）。实测 guest 内
-  `ffplay -nodisp` **10/10**、带真实显示 **5/5** 全过、0 崩溃；`ffmpeg` 解码 **5/5** 全过。桌面里播
-  `/usr/share/a20-media/` 的视频用 ffplay 即可。
-- 提示：下一步在 x86_64 上找「每线程状态在上下文切换/嵌套 trap 时被写坏」的路径。候选一：`arch_prctl(ARCH_SET_FS)`
-  写的是 `t->trap_ctx`（`kernel/core/trap.c:237` 每次 trap 都覆盖 `current->trap_ctx`，嵌套的内核态 trap 是否把它指到
-  被丢弃的帧上需确认）；候选二：switch.S 保存了 ra/tp/rbx/rbp/r12-r15/rsp/cr3/fxsave64，是否有其它每线程寄存器漏存。
+### java 退出码 255 / mpv 偶发崩溃（JVM 本身可用；多线程内存仍待查）
+- 症状 A（JVM）：`java -version` 能打印**完整且正确**的版本号，但**每隔一次就 exit 255**（20 次里 9 次失败；另一次 6 次里 3 次失败，模式是 255/0/255/0），**没有任何 SIGSEGV**。
+- 症状 B（mpv）：约 1/10 次崩溃（`sepc=0x638a6320 stval=0x8`、`comm=lua/<script>`）；反汇编为 LuaJIT 在 `libluajit+0x53320` 读 `*(G+0x130)` 得到 NULL（GC 链表头被写坏）。
+- 已排除：
+  - 单线程 LuaJIT 完全正常（6× JIT-on + 4× `-joff` 全过）；
+  - 上下文切换已保存/恢复 ra/tp/rbx/rbp/r12-r15/rsp/rflags/cr3 + `fxsave64`/`fxrstor64`（`kernel/arch/x86_64/boot/switch.S`）；
+  - 两条 trap 入口（`isr_common` 与 `syscall` 快速路径）都把 `MSR_FS_BASE` 存进 trap 帧 offset 184（`trap.S`），返回时写回（`trap.S` 尾部）；内核态嵌套 trap 走的是 `kernel_trap_handler`（不是 `user_trap_handler`）。
+- 仍未定位。已排除的候选（都逐一验证过）：`arch_prctl(ARCH_SET_FS)` 的落点没问题 —— syscall 快速路径同样经 `trap_handler`
+  → `user_trap_handler` 设置 `current->trap_ctx`（`trap.S:413`、`trap.c:237`）；内核态嵌套 trap 走 `kernel_trap_handler`；
+  switch.S 的寄存器/FPU 保存完整。
+- **新证据（按 JVM 子系统分层）**：`java -version` 的退出码在三种配置下分别是
+  `plain: 255 0 255 0 255`、`-Xshare:off: 255 255 255 255 255`（**每次都失败**）、`-XX:-UsePerfData: 0 255 0 255 0`（仍交替）。
+  说明与 perf-data 无关，而与 **CDS/类数据加载（`lib/modules` jimage 的文件映射）** 强相关。
+- **已排除「文件数据/页缓存被读坏」**（这是原来的首选假设，实测被否掉）：
+  - 宿主侧用 `debugfs dump` 取出镜像里的 `java-21-openjdk/lib/modules`（142,510,592 B），md5 = `3d61e008965241fd1254b98b438184ee`；
+  - 客体内 `md5sum` 同一文件 **3/3 次都返回同一个正确 md5**，`dd bs=1M/64k/4k` 也都完整读满 142510592 B；
+  - 即读路径（read/page cache）本身正确，JVM 不是被坏数据喂死的。
+- **但抓到了一个转瞬即逝的**用户态**崩溃**：另一次 diag 里，紧接着「`exit 7` / `kill -9 $$` / SIGSEGV」三个**进程退出**测试之后，
+  `md5sum` 同一个大文件时 **自己 SIGSEGV（core dumped）**，而同一次会话里再跑就正常。说明是**偶发的内存损坏**，
+  且**与进程/线程的创建-销毁活动相关**，不是文件内容问题。
+- 退出状态编码本身是对的（`exit 7` → `$?=7`，`kill -9` → `137`），所以 `java` 的 255 是它自己真的 `exit(-1)`，
+  不是内核把信号死亡报错。
+- **也已排除「进程/线程退出清理写坏内存」**：按上面的思路做了复现器 —— 用 142MB jimage 的已知正确 md5
+  （`3d61e008965241fd1254b98b438184ee`）当金丝雀，依次施加 `5× (java 后台 + kill -9)`、`5× java 正常退出`、
+  `20× SIGSEGV`、`30× kill -9`，**每一阶段后校验都 OK**；内核日志里也没有 OOM/oom-killer、没有 `[SHFAULT]`/坏 pfn 之类的记录。
+- **大文件 mmap 也验证通过**：用宿主 gcc 编了一个**无 libc、纯 syscall** 的静态 x86_64 小程序
+  （`gcc -static -nostdlib -ffreestanding -fno-builtin -fno-pie`；同一二进制在宿主和客体都能跑），
+  它对同一个 142MB jimage 同时做 `read()` 与 `mmap(MAP_PRIVATE)` 并各算一遍 FNV-1a：
+  客体里 **8/8 次** `read fnv == mmap fnv == 宿主参考值 a14113a3dd22099e`（bytes=0x87e8a00=142510592）。
+  → **读路径和 mmap 缺页路径都正确**，「文件映射/页缓存被读坏」这条彻底排除。
+- **JVM 其实没坏（本轮最重要的修正）**：加 `-Xlog:class+load=info` 后，`java -version` 在**每一次**运行
+  （含 `-Xshare:off`）都加载到 `java.lang.Shutdown` / `java.lang.Shutdown$Lock` 并打印完整正确的版本号 ——
+  JVM **每次都跑完了**，只是**退出码**变成 255 而不是 0。所以「JVM 启动约 50% 失败」的说法不成立，
+  JVM 本身可用（退出码不影响 Minecraft 启动）。
+- 退出码 255 的来源：`kernel/proc/wait.c:112-118` 把 `exit_code` 映射成 wait status ——
+  `code >= 0` → `(code & 0xFF) << 8`，`code < 0` → `(-code) & 0xFF`。所以 `$?=255` **不可能**来自 `exit_code = -1`
+  （那会得到 `$?`=1/129），只能是 **`exit_code = 255`**（或信号死亡的 127 编码）—— 即 JVM launcher 真的返回了 255，
+  与其 `DestroyJavaVM`/launcher 在「仍有线程没退干净」时返回 -1 的行为吻合。属于线程生命周期问题，不影响 JVM 计算。
+- 本轮新增排除：进程/线程退出 churn（金丝雀 md5 四阶段全 OK）、OOM（内核日志无 oom-killer）、
+  简单退出码编码（`exit 7`→7、`kill -9`→137），以及三条回收/映射路径（`mm_shared_file_fault` 的 pin、
+  `swap_out_victim_pages` 的 PTE 替换、`MAP_PRIVATE` COW）。
+- **并发线程互踩内存也已排除**：另一个无 libc 静态小程序（raw `clone(CLONE_VM|FS|FILES|SIGHAND|THREAD|SYSVSEM)`，
+  4 个子线程各有独立 mmap 栈和 4KB canary 缓冲，各自反复写/校验自己的 id 图案 30000 轮）在客体里
+  **5/5 次全部 `RESULT: CLEAN`**（每个线程 mismatches=0），与宿主结果一致 → 线程之间不会互相写坏缓冲区。
+- **退出路径探针（第三个无 libc 静态程序，`clone(SIGCHLD)` 每个变体 fork 一个子进程，父进程用 `wait4` 打印原始 status）**：
+  客体 3/3 次结果完全一致，与宿主参考对比 ——
+  | 变体 | 含义 | 宿主 | 客体 |
+  |---|---|---|---|
+  | v0 | `exit_group(0)` | code=0 | code=0 ✅ |
+  | v1 | `exit_group(42)` | code=42 | code=42 ✅ |
+  | v2 | 3 个自旋线程 + 主线程 `exit_group(0)`（**JVM 的退出模式**） | code=0 | code=0 ✅ |
+  | v3 | 3 个自旋线程 + **非 leader 工作线程** `exit_group(42)` | code=42 | **status=0xb、sig=11(SIGSEGV)、exited=0** ❌ |
+  | v4 | `exit_group(255)` | code=255 | code=255 ✅ |
+  | v5 | `exit_group(-1)` | code=255 | **status=0x1、sig=1** ❌ |
+- **v3 是本轮抓到的可复现内核 bug**：**从非 leader 线程调用 `exit_group` 时，进程被上报为「被 SIGSEGV 杀死」而不是带着退出码正常退出**。
+  这很可能就是 `mpv` 那条「Lua 线程里 SIGSEGV」症状的来源（每个 Lua 脚本线程自己退出/收尾），值得优先修
+  （`proc_exit_group()` 对 leader 的 `proc_force_exit()` 与 `proc_exit(self)` 组合，见 `kernel/proc/exit.c:562`）。
+- 试过并**否掉**的一个候选：`proc_release_exiting_mm()`（`kernel/proc/exit.c:161`）在**每个**线程退出时都会
+  `arch_switch_addr_space_token(kernel_as)` + `mm_context_leave(t->mm, cpu)`，看起来像「兄弟线程还在跑就把本 CPU
+  从共享 mm 上摘掉」。按「只有 mm 最后一个引用才允许摘」加了 `refcount_read(&mm->refcount) == 1` 守卫、重新编译内核并复测：
+  **v3 仍是 `sig=11`，java 仍是 `255 0 255 0 255 0`**，桌面无回归 → 该假设不成立，改动已 `git checkout` 撤回。
+  说明 leader 是**真的**发生了缺页（`signal.c:768` 用 `-signal_wait_status(SIGSEGV)` 收尾），而不是 active_cpus 记账问题；
+  下一步应从「强制一个正在用户态自旋的线程退出」这条路径查（`proc_force_exit` → `exit_pending` → 调度器/trap 边界消费），
+  以及 leader 缺页时它的 mm 到底处于什么状态。
+- **v2 与 v3 的差别把范围缩得更小**：v2（**leader 自己**调 `exit_group`，其他线程还活着）正常；v3（**非 leader** 调 `exit_group`，
+  于是 leader 被 `proc_force_exit()` 强制退出）报 SIGSEGV。也就是说触发点是「**从非 leader 线程强制退出 group leader**」，
+  而不是「有活线程时退出 group」本身。
+- 想再区分「被强制的线程处于用户态自旋 vs 阻塞在系统调用」而加的 v6/v7 变体**在宿主上也是 sig=11**，说明**是我探针自己写错了**
+  （宿主不该 SIGSEGV），这两个变体作废、该区分仍未被测到；不影响 v3 的有效性（v3 宿主 code=42、客体 sig=11）。
+- **更正：v3 本身也是我探针的 bug，不是内核 bug（本条作废上面 v3/v2 的结论）**。把内核日志里的 `SIGSEGV: sepc=0x40135b stval=0x60030008, sp=0x60030000`
+  反汇编后发现：崩溃点是 `worker_group` 线程**启动后的第一条指令** `movq $0x0, 0x8(%rsp)`（初始化循环计数器），而 `sp=0x60030000` 恰好是
+  该线程 `mmap` 出来的栈区的**上界**，于是 `[rsp+8]` 落在映射区**之外**。也就是说探针把 `child_stack` 设成了 region 的**末尾**（exclusive），
+  `call fn()` 把返回地址压到 `rsp-8` 后，callee 的第一个局部变量又写回 `rsp+8`，正好越界。Linux 上"碰巧"没事，是因为相邻的匿名 `mmap`
+  往往首尾相接、越界那几字节落进了下一个映射；A20OS 不这么排布 → **正确地** fault。给 `child_stack` 留了 4KB 余量后，
+  客体里 `v3` **5/5 次都是 `code=42/sig0`，与宿主一致**。所以：`exit_group`（含非 leader 触发、强制退出自旋中的 leader）在 A20OS 上是
+  **正确的**；此前归因于它的分析撤回。这个教训值得记下：**手写 clone 的 child_stack 不能落在映射末尾**，且"宿主能跑"不等于"探针没问题"。
+- **结论：内核的核心线程/内存/退出机制经逐一探测均正确**。同一套「宿主+客体对跑」的无 libc 静态探针证明了：文件 `read()` 与 `mmap()`
+  数据完全一致（142MB jimage FNV 匹配 8/8）、并发线程不互踩各自缓冲（5/5）、`exit_group` 各形态（含非 leader 触发）退出码正确（5/5）、
+  每线程 FS base/TLS 独立不被共享（每线程 `arch_prctl(ARCH_SET_FS)` 指向自己的块再循环读 `%fs:0`，4/4 次全 0 错配）。
+  因此 `mpv` 偶发崩溃与 `java` 退出码 255 **不是**由这些机制引起的；剩下可查的方向是 futex/信号等更细的语义，
+  或它俩本就是程序层行为。对「视频可用」这个目标而言不受影响（ffplay 已验证可用，见下文 ffplay 条目）。
+- **v5 是编码分歧**：A20OS 把负的 `exit_code` 当作信号死亡编码（`wait.c:112-118` 的 `code < 0` 分支 → `(-code) & 0xFF`），
+  而 Linux 对 `exit_group(-1)` 报的是正常退出 code=255。属于 ABI 语义差异，单独记录。
+- v2 与宿主一致说明「主线程带活线程 `exit_group`」这条 JVM 路径本身没问题；结合前面 `java.lang.Shutdown` 的证据，
+  java 的 255 更可能是某个退出码/编码产物（例如内部以负值或 255 收尾），**不影响 JVM 运行**。
+- **剩余真正待查的是「多线程进程的匿名内存偶发被写坏」**：唯一还站得住的症状是 `mpv` 约 1/10 崩溃
+  （LuaJIT GC 链表头变 NULL），单线程 LuaJIT 完全正常。方向应查**线程生命周期**（线程退出/reap、内核栈、
+  per-thread trap 帧归属），而不是继续在文件 I/O 上找。建议下一步给内核线程退出路径加 trace/校验
+  （`proc_exit`/`proc_force_exit`/`exit_pending` 与 `pending_exit_code` 的一致性），并用 `mpv --vo=null` ×N 复现。
+- 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
+  剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
+
+### x86_64 QEMU 平台把可用 RAM 硬编码成 1 GiB（与 JVM 堆 ergonomics、Minecraft 内存都相关）
+- 事实：`kernel/arch/x86_64/include/platform.h:8` 把 `PHYS_MEMORY_END` 写死为 `0x40000000`（1 GiB），
+  `arch_ram_range()`（同文件 :17）只返回 `[0, 1 GiB)`；所以即便 QEMU 给 `-m 2G`，内核仍只管理 262144 个页框
+  （启动日志 `[PFA] total_frames=262144`、`[MM] ... 256061 free (1000 MB)`）。
+- 高位直接映射**已经**覆盖物理 0–2 GiB（`kernel/arch/x86_64/boot/entry.S:74-77` 用两个 1GB 大页映为 RAM/WB），
+  所以扩大上限只缺"知道真实 RAM 大小"。正确做法：在 `_start`（32 位段、`cld` 之后、清 BSS 之前）把 multiboot
+  的 magic(EAX) 与 info 指针(EBX) 存进 `.data` 全局，再解析 `multiboot_info.mem_upper`；或走 fw_cfg 的 `etc/e820`。
+  **注意**：1–2 GiB 区在 q35 上可能含 ACPI/固件保留区，不能直接整段当可用帧，否则分配器会把保留页发出去。
+- 关联（待验证，非结论）：JVM 不带 `-Xms/-Xmx` 时报 `Too small maximum heap`（`/usr/bin/java` 封装已用
+  `-Xms256m -Xmx512m` 绕过），疑似与其读到的内存 ergonomics 有关；1 GiB 对 Minecraft 也偏紧。
+- 处置：它**不是** Minecraft 的第一障碍（GL 链才是），且改动落在最脆弱的启动期/帧分配路径上，
+  需要配套的内存压测回归；建议在有充分验证窗口的会话里单独做，不在本条里顺手改。
+
+### 视频播放：用 ffplay（mpv 会偶发崩溃）
+- `mpv` 播视频约 **1/10** 次崩溃（内核打印 `SIGSEGV: ... sepc=0x638a6320 stval=0x8` + `comm=lua/<script>`）；
+  根因是上面「每线程状态被写坏」那条，关掉它的 Lua 脚本（`load-scripts/osc/ytdl/stats=no`）**不能**消除。
+- **可用方案（已落地）**：world 增加了 **ffplay**（ffmpeg 自带播放器，同一套软件解码）。实测 guest 内
+  `ffplay -nodisp` **10/10**、带真实显示 **5/5** 全过、0 崩溃；`ffmpeg` 解码 **5/5** 全过。
+- 用法：`Super+Enter` 开终端 → `ffplay /usr/share/a20-media/<你的视频>`，或在 Thunar 里打开
+  `/usr/share/a20-media/`。会话已强制 `SDL_RENDER_DRIVER=software`（还没有 GL）；`~/.config/mpv/mpv.conf`
+  保留一份关闭 Lua 脚本的缓解配置。
 
 ### JVM：需要 `/usr/bin/java` 封装（exec_path 不解析符号链接 + 堆参数）
 - 现象：`java -version` 报 `Error loading shared library libjli.so: No such file or directory (needed by java)`；直接用真实路径
