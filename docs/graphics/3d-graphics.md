@@ -472,3 +472,35 @@ panic/UBSAN；在内核 `sysfs_lookup` 挂临时 trace 后可见 libdrm 的完�
 **另一条已实测可行的路（对 Minecraft 可能已够）**：`eglinfo -p wayland` **成功**，渲染器为
 `llvmpipe (LLVM 21.1.2, 128 bits)`。LWJGL 走 `EGL_PLATFORM_WAYLAND`，若其呈现走 `wl_shm` 而非
 `wl_dmabuf`，则 Minecraft 可能**不需要 GBM 这条链**。代价仍是 LWJGL natives + jars 不在镜像里。
+
+### 9.7 补进 `/sys/bus` 之后：trace 修正与真正的停点（commit `7a6ad59c`）
+
+已补 `/sys/bus/pci/devices/0000:00:01.0/{config,uevent,vendor,device,revision,subsystem_vendor,
+subsystem_device,drm}`（内容生成器与 char-device 侧共用）。实测 `config` / `uevent` / `vendor`
+均可读回，`config` 是合法的 64B PCI 头。
+
+**但必须纠正一条中途的错误结论**：先前看到 `SYSLOOKUP t=0 name=bus` 就认定 `/sys/bus` 是卡点。
+把 trace 扩到顶层后对照才发现——那 6 次 `bus` 查找**来自诊断脚本自己的 `ls`/`cat`**（我在读
+`/sys/bus/...` 的节点），而 **`eglinfo -p gbm` 运行期间 libdrm 一次都没查 `/sys/bus`**。
+所以这个补丁本身**并没有**解开 `gbm_create_device()`。教训：trace 只能看"问了什么"，
+不能直接归因到某个消费者；要区分必须按进程/时间窗隔离。
+
+**eglinfo 运行期间 libdrm 的真实序列**（t=30 是 `/sys/dev/char/<maj>:<min>`，t=32 是 `.../device`）：
+
+```
+device→drm, device→subsystem, subsystem(char级),
+device→uevent,
+device→vendor, device→device, device→subsystem_vendor, device→subsystem_device
+```
+
+然后序列就停了。**`revision` 与 `config` 从头到尾没有被查找过。**
+
+**由此得到的真正停点**：libdrm 读完了 uevent 与 4 个属性（缺 `revision`），随后中止。两种可能：
+(a) 属性表顺序与预期不同，`revision` 不是 index 0，而第 5 个属性读取失败导致整轮失败；
+(b) 流程在属性读取之后、读 `config` 之前因为别的判断而返回错误。
+要区分，下一步的 trace 需要**记录查找结果**（而不只是尝试），并覆盖 `sysfs_stat`/`sysfs_open_vnode`
+与 attr 文件的 `read`，才能看出是"没问"还是"问了但失败"。
+
+**结论**：设备身份识别已从"完全放弃"推进到"读完 uevent + 4 属性"；`gbm_create_device()` 仍未通，
+且**已验证它不是 `/sys/bus` 缺失导致**。同时 `eglinfo -p wayland` 依旧成功（llvmpipe），
+这仍是对 Minecraft 最有希望的一条路。
