@@ -1,10 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  labwc reads exactly ONE rc.xml - the first hit in the XDG config dirs, which
+  is $XDG_CONFIG_HOME/labwc/rc.xml (/root/.config/labwc/rc.xml here).  It does
+  NOT merge /etc/xdg/labwc/rc.xml, and its built-in default key/mouse bindings
+  are only installed when the parsed file left rc.keybinds / rc.mousebinds
+  EMPTY (rcxml.c post_processing()).
+
+  Defining any binding here therefore suppressed every default: no
+  click-to-focus/raise, no titlebar close/iconify/maximize buttons, no window
+  drag/resize, no Alt-Tab/Alt-F4.  Pull the defaults back in explicitly with
+  <default/>.  It must come FIRST because deduplicate_*_bindings() keeps the
+  LAST definition, so the explicit bindings below still override the defaults.
+-->
 <labwc_config>
   <core>
     <xwayland>yes</xwayland>
   </core>
 
   <keyboard>
+    <default />
     <keybind key="W-Return">
       <action name="Execute" command="xfce4-terminal" />
     </keybind>
@@ -23,6 +37,9 @@
   </keyboard>
 
   <mouse>
+    <!-- Restores Client/Frame/Titlebar/Border Press->Focus+Raise, Title
+         Drag->Move, Close/Iconify/Maximize Click->actions, etc. -->
+    <default />
     <context name="Root">
       <mousebind button="Right" action="Press">
         <action name="ShowMenu" menu="root-menu" />

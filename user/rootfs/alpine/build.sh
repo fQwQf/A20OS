@@ -85,15 +85,27 @@ $sudo "$apk_static" \
   -X "$ALPINE_MIRROR/community" \
   --initdb add $packages
 
-# --- Apply overlay ---
+# --- Apply overlays ---
+# packages/overlay/xfce shares the Wayland session layer; its etc/ is skipped
+# so this rootfs keeps the accounts alpine-base installed (root's shell must
+# stay /bin/ash, which is what runuser needs).
 $sudo cp -a "$overlay_dir/." "$rootfs_dir/"
+$sudo tar -C "$project_root/packages/overlay/xfce" --exclude=./etc -cf - . \
+  | $sudo tar -C "$rootfs_dir" -xf -
 
 printf '%s\n' "$ALPINE_MIRROR/main" "$ALPINE_MIRROR/community" | \
   $sudo tee "$rootfs_dir/etc/apk/repositories" >/dev/null
 
 $sudo chmod 0755 \
   "$rootfs_dir/usr/lib/a20/init" \
-  "$rootfs_dir/usr/lib/a20/start-xfce4-session"
+  "$rootfs_dir/usr/lib/a20/start-xfce4-session" \
+  "$rootfs_dir/usr/lib/a20/start-desktop-components.sh"
+$sudo chmod 0644 \
+  "$rootfs_dir/root/.config/labwc/rc.xml" \
+  "$rootfs_dir/root/.config/labwc/autostart" \
+  "$rootfs_dir/root/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml" \
+  "$rootfs_dir/usr/share/dbus-1/session.conf" \
+  "$rootfs_dir/usr/lib/udev/rules.d/99-a20-input.rules"
 $sudo chmod 0440 "$rootfs_dir/etc/sudoers" 2>/dev/null || true
 $sudo chmod 0400 "$rootfs_dir/etc/shadow" 2>/dev/null || true
 $sudo ln -snf /usr/lib/a20/init "$rootfs_dir/sbin/init"
