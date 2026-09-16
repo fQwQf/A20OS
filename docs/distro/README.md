@@ -37,9 +37,10 @@ make run-gui-riscv64 GUI_MEDIA=~/Videos/demo.mp4       # 其他架构同理
 启动），只构建镜像用 `make ARCH=<arch> image-world PKG_WORLD=xfce
 GUI_MEDIA=...`。
 
-镜像内自带的播放器：**parole**（GStreamer 后端）和 **mpv**（命令行/兜底，
-实测 `mpv v0.40.0` 可运行）。桌面里也可以直接用 Thunar 打开
-`/usr/share/a20-media/` 双击播放。
+镜像内自带的播放器：**ffplay**（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、
+**parole**（GStreamer 后端）、**mpv**（命令行）。注意 **mpv 目前约 1/10 次崩溃**——它每个内建 Lua 脚本跑在自己的
+线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [known-issues.md](known-issues.md)）；用 ffplay 或重试即可。
+命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
 
 ### 桌面里的 JVM 与图形栈
 
