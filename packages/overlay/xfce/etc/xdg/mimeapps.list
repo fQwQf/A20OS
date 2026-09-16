@@ -1,0 +1,22 @@
+[Default Applications]
+video/mp4=ffplay.desktop
+video/x-matroska=ffplay.desktop
+video/webm=ffplay.desktop
+video/quicktime=ffplay.desktop
+video/x-msvideo=ffplay.desktop
+video/mpeg=ffplay.desktop
+video/ogg=ffplay.desktop
+video/x-flv=ffplay.desktop
+video/3gpp=ffplay.desktop
+video/x-ms-wmv=ffplay.desktop
+video/mp2t=ffplay.desktop
+video/x-m4v=ffplay.desktop
+
+[Added Associations]
+video/mp4=ffplay.desktop;mpv.desktop;parole.desktop;
+video/x-matroska=ffplay.desktop;mpv.desktop;parole.desktop;
+video/webm=ffplay.desktop;mpv.desktop;parole.desktop;
+video/quicktime=ffplay.desktop;mpv.desktop;parole.desktop;
+video/x-msvideo=ffplay.desktop;mpv.desktop;parole.desktop;
+video/mpeg=ffplay.desktop;mpv.desktop;parole.desktop;
+video/ogg=ffplay.desktop;mpv.desktop;parole.desktop;
