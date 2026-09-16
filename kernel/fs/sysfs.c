@@ -65,6 +65,14 @@ typedef enum {
     SF_DEV_CHAR_UEVENT, /* /sys/dev/char/<maj>:<min>/uevent */
     SF_DEV_CHAR_DEVICE, /* /sys/dev/char/<maj>:<min>/device */
     SF_DEV_CHAR_DEVICE_DRM, /* /sys/dev/char/<maj>:<min>/device/drm */
+    /* PCI identity the DRM device must expose for libdrm to classify it;
+     * see docs/graphics/3d-graphics.md section 9. */
+    SF_DEV_CHAR_SUBSYS,          /* /sys/dev/char/<maj>:<min>/subsystem (symlink) */
+    SF_DEV_CHAR_DEVICE_SUBSYS,   /* .../device/subsystem (symlink) */
+    SF_DEV_CHAR_DEVICE_ATTR,     /* .../device/{revision,vendor,device,subsystem_*} */
+    SF_DEV_CHAR_DEVICE_CONFIG,   /* .../device/config (PCI config space) */
+    SF_DEV_CHAR_DEVICE_UEVENT,   /* .../device/uevent (PCI_SLOT_NAME=...) */
+    SF_DEV_CHAR_DEVICE_DRM_ENTRY, /* .../device/drm/{card0,renderD128} */
     SF_FB,                 /* /sys/class/fb */
     SF_FB_DEVICE,          /* /sys/class/fb/fbN */
     SF_FB_NAME,            /* /sys/class/fb/fbN/name */
@@ -115,9 +123,12 @@ static int sysfs_devchar_name(uint64_t devt, const char **devname_out,
     static char devname[64];
     const char *subsystem = NULL;
 
-    if (maj == DRM_MAJOR && min == 0) {
+    if (maj == DRM_MAJOR && (min == 0 || min == 128)) {
         subsystem = "drm";
-        snprintf(devname, sizeof(devname), "dri/card0");
+        if (min == 0)
+            snprintf(devname, sizeof(devname), "dri/card0");
+        else
+            snprintf(devname, sizeof(devname), "dri/renderD128");
         *devname_out = devname;
         *subsystem_out = subsystem;
         return 0;
@@ -214,6 +225,19 @@ static sysfs_meta_t *sysfs_meta_create(sf_type_t type, int loop_idx)
     return m;
 }
 
+/* Order matches libdrm's attribute table in drmGetPciDeviceInfo(). */
+static const char *const g_pci_attrs[5] = {
+    "revision", "vendor", "device", "subsystem_vendor", "subsystem_device"
+};
+
+static int sysfs_pci_attr_index(const char *name)
+{
+    for (int i = 0; i < 5; i++)
+        if (strcmp(name, g_pci_attrs[i]) == 0)
+            return i;
+    return -1;
+}
+
 static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                                        uint32_t width, uint32_t height,
                                        uint64_t devt)
@@ -301,6 +325,38 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
         } else {
             p->content_len = 0;
         }
+    } else if (type == SF_DEV_CHAR_DEVICE_ATTR) {
+        static const char *const pci_vals[5] = {
+            "01", "1af4", "1050", "1af4", "1100"
+        };
+        int n = snprintf(p->content, sizeof(p->content), "%s\n",
+                         (loop_idx >= 0 && loop_idx < 5) ? pci_vals[loop_idx]
+                                                         : "00");
+        p->content_len = (size_t)(n > 0 ? n : 0);
+    } else if (type == SF_DEV_CHAR_DEVICE_CONFIG) {
+        memset(p->content, 0, sizeof(p->content));
+        p->content[0x00] = 0xf4; p->content[0x01] = 0x1a;
+        p->content[0x02] = 0x50; p->content[0x03] = 0x10;
+        p->content[0x06] = 0x10;
+        p->content[0x08] = 0x01;
+        p->content[0x0a] = 0x03; p->content[0x0b] = 0x02;
+        p->content[0x2c] = 0xf4; p->content[0x2d] = 0x1a;
+        p->content[0x2e] = 0x00; p->content[0x2f] = 0x11;
+        p->content_len = 64;
+    } else if (type == SF_DEV_CHAR_DEVICE_UEVENT) {
+        const char *ue = "PCI_SLOT_NAME=0000:00:01.0\n"
+                         "PCI_ID=1AF4:1050\n"
+                         "PCI_SUBSYS_ID=1AF4:1100\n"
+                         "DRIVER=virtio-pci\n";
+        size_t n = strlen(ue);
+        if (n > sizeof(p->content)) n = sizeof(p->content);
+        memcpy(p->content, ue, n);
+        p->content_len = n;
+    } else if (type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
+        unsigned dmaj = (unsigned)(((unsigned)loop_idx >> 8) & 0xffU);
+        unsigned dmin = (unsigned)((unsigned)loop_idx & 0xffU);
+        int n = snprintf(p->content, sizeof(p->content), "%u:%u\n", dmaj, dmin);
+        p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_FB_NAME) {
         memcpy(p->content, "A20OS FB\n", 9);
         p->content_len = 9;
@@ -451,6 +507,27 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
     } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "drm") == 0) {
         child_type = SF_DEV_CHAR_DEVICE_DRM;
         child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_ENTRY && strcmp(name, "subsystem") == 0) {
+        child_type = SF_DEV_CHAR_SUBSYS;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "subsystem") == 0) {
+        child_type = SF_DEV_CHAR_DEVICE_SUBSYS;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "config") == 0) {
+        child_type = SF_DEV_CHAR_DEVICE_CONFIG;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE && strcmp(name, "uevent") == 0) {
+        child_type = SF_DEV_CHAR_DEVICE_UEVENT;
+        child_idx = dm->loop_idx;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE) {
+        child_type = SF_DEV_CHAR_DEVICE_ATTR;
+        child_idx = sysfs_pci_attr_index(name);
+        if (child_idx < 0)
+            return -ENOENT;
+    } else if (dm->type == SF_DEV_CHAR_DEVICE_DRM &&
+               (strcmp(name, "card0") == 0 || strcmp(name, "renderD128") == 0)) {
+        child_type = SF_DEV_CHAR_DEVICE_DRM_ENTRY;
+        child_idx = dm->loop_idx;
     } else if (dm->type == SF_CLASS && strcmp(name, "drm") == 0) {
         child_type = SF_DRM;
     } else if (dm->type == SF_CLASS && strcmp(name, "fb") == 0) {
@@ -594,6 +671,10 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         /* uevent files are writable so udevadm trigger can coldplug. */
         vn->type = VFS_FT_REGULAR;
         vn->mode = S_IFREG | 0644;
+    } else if (child_type == SF_DEV_CHAR_SUBSYS ||
+               child_type == SF_DEV_CHAR_DEVICE_SUBSYS) {
+        vn->type = VFS_FT_SYMLINK;
+        vn->mode = S_IFLNK | 0777;
     } else {
         vn->type = is_dir ? VFS_FT_DIR : VFS_FT_REGULAR;
         vn->mode = is_dir ? (S_IFDIR | 0555) : (S_IFREG | 0444);
@@ -642,6 +723,14 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
             vn->size = 96;
         } else if (child_type == SF_DEV_CHAR_UEVENT) {
             vn->size = 64;
+        } else if (child_type == SF_DEV_CHAR_DEVICE_ATTR) {
+            vn->size = 16;
+        } else if (child_type == SF_DEV_CHAR_DEVICE_CONFIG) {
+            vn->size = 64;
+        } else if (child_type == SF_DEV_CHAR_DEVICE_UEVENT) {
+            vn->size = 96;
+        } else if (child_type == SF_DEV_CHAR_DEVICE_DRM_ENTRY) {
+            vn->size = 16;
         } else if (child_type == SF_FB_NAME) {
             vn->size = 9;
         } else if (child_type == SF_FB_BPP) {
@@ -699,6 +788,19 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
     sysfs_meta_t *dm = (sysfs_meta_t *)vn->fs_data;
     if (!dm)
         return -EINVAL;
+
+    if (dm->type == SF_DEV_CHAR_SUBSYS || dm->type == SF_DEV_CHAR_DEVICE_SUBSYS) {
+        /* The two links must differ: libdrm tests the target string, and
+         * ".../device/subsystem" selects the virtio branch. */
+        const char *target = (dm->type == SF_DEV_CHAR_DEVICE_SUBSYS)
+                                 ? "/sys/bus/virtio"
+                                 : "/sys/bus/pci";
+        size_t n = strlen(target);
+        if (n + 1 > sz)
+            return -ENAMETOOLONG;
+        memcpy(buf, target, n + 1);
+        return (int)n;
+    }
 
     if (dm->type == SF_CLASS_DEVICE_SUBSYS) {
         const char *sub = class_device_subsystem(dm->class_type);
