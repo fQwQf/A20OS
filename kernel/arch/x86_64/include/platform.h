@@ -10,16 +10,11 @@
 #define PAGE_OFFSET        0xFFFF800000000000UL
 #define USER_VA_LIMIT      0x0000800000000000UL
 
-static inline size_t arch_ram_range_count(void) {
-    return 1;
-}
-
-static inline int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
-    if (idx != 0 || !base || !end) return -1;
-    *base = PHYS_MEMORY_BASE;
-    *end = PHYS_MEMORY_END;
-    return 0;
-}
+/* RAM ranges are discovered at boot from the multiboot memory map (see
+ * arch/x86_64/platform/firmware.c).  The old inline here returned a hardcoded
+ * [0, PHYS_MEMORY_END) that ignored -m and capped the kernel at 1 GiB. */
+size_t arch_ram_range_count(void);
+int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 
 /* MMIO base addresses (kernel virtual) */
 #define LAPIC_BASE         (0xFEE00000UL + PAGE_OFFSET)
