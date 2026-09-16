@@ -504,3 +504,219 @@ device→vendor, device→device, device→subsystem_vendor, device→subsystem_
 **结论**：设备身份识别已从"完全放弃"推进到"读完 uevent + 4 属性"；`gbm_create_device()` 仍未通，
 且**已验证它不是 `/sys/bus` 缺失导致**。同时 `eglinfo -p wayland` 依旧成功（llvmpipe），
 这仍是对 Minecraft 最有希望的一条路。
+
+### 9.8 细粒度 trace：卡点不在 sysfs 侧（commit `d8d593b1`）
+
+把 trace 下沉到 `sysfs_lookup` + `sysfs_open_vnode` + `sysfs_fread` 三处（分别记「查找/打开/读取」），
+拿到了本轮最硬的一组事实。`eglinfo -p gbm` 期间，**libdrm 的全部 sysfs 交互**是：
+
+```
+SYSOPEN t=38 idx=57984   SYSREAD t=38 idx=57984 len=86   ← uevent（57984=0xE280 → 226:128 render 节点）
+SYSOPEN t=36 idx=1       SYSREAD t=36 idx=1 len=5        ← vendor            = "1af4"
+SYSOPEN t=36 idx=2       SYSREAD t=36 idx=2 len=5        ← device            = "1050"
+SYSOPEN t=36 idx=3       SYSREAD t=36 idx=3 len=5        ← subsystem_vendor  = "1af4"
+SYSOPEN t=36 idx=4       SYSREAD t=36 idx=4 len=5        ← subsystem_device  = "1100"
+```
+
+三条关键推论：
+
+1. **libdrm 处理的是 render 节点 226:128**（`idx=57984`），不是 card0。9.6 里给 render 节点补的身份识别
+   是这条链的必需项，不是可选项。
+2. **`revision`（idx=0）和 `config` 从未被 open/read。** 而 libdrm 实际读的那 4 个属性**全部读到了正确值**。
+   → **内核侧没有任何一个节点"提供不出来"**：卡点在读完这 4 个属性**之后**，不在 sysfs。
+3. **改 subsystem 链接目标（`/sys/bus/pci` ↔ `/sys/bus/virtio`）对读取序列没有任何影响**——逐字节相同。
+   因此 `d8d593b1` 选择 `/sys/bus/pci` 是基于 Mesa `loader_get_pci_id_for_fd()` 要求 `DRM_BUS_PCI`
+   这一契约的**主动选择**，而非观测到的修复。
+
+**因此下一步不该再往 sysfs 加节点。** 要解开 `gbm_create_device()`，需要看到那 4 次读之后 libdrm/Mesa
+做了什么——可行手段：
+- 给内核 syscall trace 加上**进程过滤**，把 eglinfo 之后的 `ioctl`（尤其 DRM ioctl）/`mmap`/后续 `openat`
+  完整记下来（9.7 的教训：trace 必须能归因到具体消费者）；
+- 或者拿到 Mesa/libdrm 源码后直接对照 `loader_get_pci_id_for_fd()` 与 `gbm_create_device()` 的分支条件
+  （当前只能从反汇编推断"要求 DRM_BUS_PCI"）。
+- `strace` 仍是最省事的工具，但 world 里没有，需离线准备静态 musl 版本。
+
+**已验证可行的替代路径没有变化**：`eglinfo -p wayland` 成功、渲染器 `llvmpipe (LLVM 21.1.2, 128 bits)`。
+考虑 Minecraft 走 `EGL_PLATFORM_WAYLAND`，这条路值得优先于继续啃 GBM。
+
+### 9.9 环境覆盖开关全部无效：GBM 失败与驱动选择无关
+
+为排除"只是选错了驱动"这一可能，一次性测了 Mesa 的全部常用覆盖开关（均在 `eglinfo -p gbm` 下）：
+
+| 环境 | 结果 |
+|---|---|
+| `LIBGL_ALWAYS_SOFTWARE=1` | `eglInitialize failed` |
+| `GALLIUM_DRIVER=llvmpipe` | `eglInitialize failed` |
+| `MESA_LOADER_DRIVER_OVERRIDE=virtio_gpu` | `eglInitialize failed` |
+| `MESA_LOADER_DRIVER_OVERRIDE=swrast` | `eglInitialize failed` |
+| `MESA_LOADER_DRIVER_OVERRIDE=zink` | `eglInitialize failed` |
+
+全部失败。对照之下 `eglinfo -p wayland` 成功、`eglinfo -p surfaceless` 报的是另一套错
+（`egl: failed to create dri2 screen` / `DRI2: failed to create screen`）。
+
+**结论**：`EGL_PLATFORM=GBM` 的失败**与驱动选择、与 sysfs、与软件/硬件路径都无关**，卡在 Mesa
+`gbm_create_device()` 内部（`dri_gbm` 后端为这台设备建设备时返回 NULL）。这一点**无法再靠黑盒手段推进**，
+必须读 Mesa 源码（`src/gbm/backends/dri/gbm_dri.c` 与 `src/egl/drivers/dri2/platform_drm.c`），
+或拿到这个版本对应的调试符号。
+
+**同时确认的可用面**：
+- `EGL_PLATFORM=wayland` → 成功，`llvmpipe` 渲染器可用（Minecraft/LWJGL 走的就是这条）；
+- `EGL_PLATFORM=GBM` → 不通（wlroots 的 GL 渲染器需要它，因此当前只能继续用 `WLR_RENDERER=pixman`）。
+
+### 9.10 反汇编 Mesa 的 loader：内核侧已满足其全部 sysfs 契约
+
+Mesa 源码拿不到，但**客体里的 Mesa 二进制可以反汇编**——和当初破解 libdrm 是同一套方法，而且更直接。
+目标：`dri_gbm.so` 里内联的 mesa-loader。
+
+**`loader_get_pci_id_for_fd()` 的完整逻辑（0x4190 起）：**
+
+```
+fstat(fd)                              失败 → 打印 "MESA-LOADER: failed to fstat fd"
+  成功 → 从 st_rdev 拆出 maj/min
+       → 读 /sys/dev/char/%d:%d/device/vendor   （格式串 @0x99e2，strtoll 以 16 进制解析）
+       → 读 /sys/dev/char/%d:%d/device/device
+  两者都非 0 → return true                      ← 直接返回，根本不会调用 drmGetDevice2
+  否则      → drmGetDevice2(fd)        失败 → "failed to retrieve device information"
+                                       bustype≠0 → "device is not located on the PCI bus"
+```
+
+**三条推论：**
+
+1. **Mesa 直读的路径正是 `/sys/dev/char/<maj>:<min>/device/{vendor,device}`**，且按 **16 进制**解析。
+   我提供的节点（`1af4` / `1050`）**完全满足**，两者皆非 0 → `loader_get_pci_id_for_fd()` **返回 true**。
+   → 内核侧对这个契约是**完备**的。
+2. 我们看到的 `failed to retrieve device information` **不来自这个函数的主路径**（那条主路径根本不会走到
+   `drmGetDevice2`）。同类型的字符串在多个 Mesa 库里都有，不能只按文案归因——这也再次印证 9.7 的教训。
+3. `GBM_ALWAYS_SOFTWARE`（该 .so 里确实存在、此前漏测）实测**无效**；`get_driver_name` 走 `drmGetVersion`，
+   其失败文案是 `failed to get driver name for fd %d`，也不是我们看到的那个。
+
+**因此结论收敛为**：`gbm_create_device()` 的失败发生在 Mesa 的 gbm-dri 后端内部、**在 PCI ID 解析与驱动名
+解析之后**。
+
+**并且 `modifier` 这条线索也已排除**：反汇编 0x2440 处可见 `Only invalid modifier specified` 是通过
+`fwrite` 写 stderr 且置 `errno=EINVAL` 的一条独立分支，**在我们的任何一次运行输出里都没有出现过**。
+不能在"字符串里出现过"和"实际被执行过"之间划等号——这是 9.7 那条教训的又一实例。
+
+**内核侧到此可以定论：所有 Mesa/libdrm 文档化与可反汇编出的 sysfs 需求都已满足。**
+再往下必须在 Mesa 内部（或其调试符号）里推进，而非继续改内核。可用的抓手只剩：
+给 `dri_gbm.so`/`libgallium-25.2.7.so` 配对应的 **debug 符号**（Alpine 有 `-dbg` 包，需离线准备），
+或把 Mesa 的 `-Dbuildtype=debug` 版本换进镜像。
+
+### 9.11 前提纠正：网络是通的；并且 Wayland 路径上的真实 GL 渲染已跑通
+
+**先纠正一个贯穿多轮的错误前提。** 本项目此前把"网络被封"当成既定事实，并据此得出
+"拿不到 Mesa 源码 → GL 阻塞"。实测 `curl https://dl-cdn.alpinelinux.org/...` 返回 200、
+DNS 正常。**该前提是错的**，所有建立在它之上的"阻塞"结论都不可靠。
+
+用这个能力做了两件事，都拿到了源码级证据：
+
+1. **取到 Mesa 25.2.7 源码并核对**：`src/loader/loader.c` 的 `loader_get_pci_id_for_fd()`
+   确实先走 `loader_get_linux_pci_id_for_fd()`——读
+   `/sys/dev/char/<maj>:<min>/device/{vendor,device}` 并按十六进制解析——与 9.10 的反汇编完全一致。
+   两个值都非 0 即返回 true，**根本不会调用 `drmGetDevice2()`**。内核侧对该契约是完备的。
+   失败点收敛到 `dri_device_create()` → `dri_screen_create[ _sw ]()` →
+   `dri_screen_create_for_driver()` → `driCreateNewScreen3()` 返回 NULL，
+   即 `dri2_init_screen`（硬件）或 `dri_swrast_kms_init_screen`（软件，`GBM_ALWAYS_SOFTWARE` 走这条）
+   失败。**"缺共享库"假设已排除**：`libgbm.so.1`、`libgallium-25.2.7.so`、`libLLVM`、`libdrm.so.2`
+   在镜像里都在，`/usr/lib/dri/*` 是指向 `libdril_dri.so` 的正常符号链接。
+
+2. **验证 Wayland 路径上的真实 GL 渲染（Minecraft 实际走的路径）**：
+   把 `mesa-demos` 的 `egltri_wayland` / `es2gears_wayland` 注入镜像，在 labwc 会话
+   （`XDG_RUNTIME_DIR=/run/user/0`、`WAYLAND_DISPLAY=wayland-0`）里运行：
+
+   ```
+   es2gears_wayland:  EGL_VERSION = 1.5          然后持续运行到测试超时（Terminated）
+   eglinfo -p wayland: OpenGL core profile renderer: llvmpipe (LLVM 21.1.2, 128 bits)
+                       OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7
+   ```
+
+   即 **EGL + GLES 3.2 的完整渲染在 Wayland 平台上可用**。途中出现的
+   `failed to get driver name for fd -1` / `MESA-LOADER: failed to retrieve device information`
+   是 Mesa **先用 fd=-1 探测"无设备"配置**（`drmGetVersion(-1)` 失败）再回退的中间步骤，
+   不是最终失败——`EGL_VERSION = 1.5` 与持续运行证明最终配置成功。
+
+**结论（对目标的影响）**：
+- **Minecraft/LWJGL 走 `EGL_PLATFORM_WAYLAND`，这条路已验证可渲染**，很可能**不需要 GBM**；
+- GBM 仍是坏的（`WLR_RENDERER=pixman` 暂时保留），但它不再是 Minecraft 的前置条件；
+- "LWJGL natives + jars 取不到"这条**也不再成立**——网络是通的。是否要拉取由你决定。
+
+### 9.12 GBM 排查补记：又两条假设被排除，失败点已钉到源码函数
+
+拿到 Mesa 源码后继续收窄，先排除两条：
+
+1. **"缺共享库"——排除。** 逐个对照镜像：`libgallium-25.2.7.so` 的全部 20 个 `DT_NEEDED`
+   （`libLLVM.so.21.1`、`libSPIRV-Tools.so`、`libstdc++.so.6`、`libxcb-*`、`libdrm*`、`libexpat`、
+   `libgcc_s`、`libz/libzstd` …）在镜像里**全都在**；`/usr/lib/dri/*` 是指向 `libdril_dri.so` 的正常
+   符号链接，`libdril_dri.so` 仅依赖 `libgbm.so.1` + libc，也都在。
+2. **"render 节点上 KMS ioctl 被整体拒绝"——排除（我自己的内核里就否掉了）。**
+   `kernel/drivers/gpu/drm.c`：`drm_mode_getresources()` 等 KMS 入口**都没有检查 `ctx->render_only`**，
+   照常执行；整个文件里只有一处 `render_only` 门控——`drm_set_master()`（第 798 行）
+   `return -EACCES`。所以 render 节点上 `MODE_GETRESOURCES` 是**放行**的。
+
+**失败点（源码级）**：`gbm_create_device()` → `dri_device_create()` →
+`dri_screen_create()`（硬件）或 `dri_screen_create_sw()`（`GBM_ALWAYS_SOFTWARE`）→
+`dri_screen_create_for_driver()` → `driCreateNewScreen3()` **返回 NULL**。
+软件路径更具体：`pipe_loader_sw_probe_kms()` 里 `create_winsys_kms_dri(fd)` 返回 NULL 就 `goto fail`。
+
+**剩下的两个候选**（都还没验证，供下一轮参考）：
+- Mesa 的 winsys/初始化是否调用 `drmSetMaster`——本内核与 Linux 一样对 render 节点返回 `-EACCES`；
+- 某条 KMS ioctl 的**返回数据**不对。注意"错误返回"与"数据错误"要分开：此前实测**没有任何 DRM ioctl
+  返回错误**，所以如果问题出在 ioctl 层，形状应是"**成功但内容不对**"，而不是"被拒绝"。
+
+**这一条不再阻塞 Minecraft**：Wayland 路径已验证可渲染（9.11）。GBM 只影响 wlroots 自己的渲染器质量。
+
+**再补两条排除，以及一条有价值的对照：**
+
+3. **"KMS winsys 创建失败"——排除。** `kms_dri_create_winsys()`
+   （`src/gallium/winsys/sw/kms-dri/kms_dri_sw_winsys.c:510`）**除 `CALLOC_STRUCT` 失败（OOM）外不可能返回
+   NULL**——它只是填一张函数指针表。所以 `create_winsys_kms_dri()` 是成功的。
+4. **"DUMB ioctl 缺失"——排除。** `DRM_IOCTL_MODE_CREATE_DUMB` / `MAP_DUMB` / `DESTROY_DUMB`
+   在本内核里都已实现（`drm.c:1603` 起）。
+
+**有价值的对照（这条才是关键线索）**：`eglinfo -p wayland` 能出 `llvmpipe` 渲染器，说明 **`swrast`
+（llvmpipe）这个 DRI 驱动在客体里是能正常加载并建 screen 的**。而 GBM 路径上的 `kms_swrast`
+（以及硬件路径的 `virtio_gpu`）**建 screen 失败**。两者唯一的实质差别是：**`kms_swrast` 需要 KMS winsys，
+`swrast` 不需要**。
+
+→ 因此卡点几乎可以确定在**「KMS 路径」**上（而不是驱动加载、依赖、sysfs、modifier）。
+剩下的两个候选也正好落在这里：Mesa 是否调用 `drmSetMaster`（本内核与 Linux 一样对 render 节点返回
+`-EACCES`，见 `drm.c:798`），或某条 KMS ioctl **成功但数据不对**（注意：从未观测到任何 DRM ioctl
+返回错误，所以若在 ioctl 层，形状必然是"成功但内容错"）。这两个都还没验证。
+
+**候选一已排除**：对 Mesa 25.2.7 全源码 grep `drmSetMaster|drmAuthMagic|drmGetMagic|drmDropMaster`，
+在 gbm / dri2 / kms-dri 路径上**没有任何 `drmSetMaster` 调用**——只有
+`platform_drm.c:403` 的 `drmAuthMagic`（X/DRM 认证）与 `platform_wayland.c:1974` 的 `drmGetMagic`。
+所以 render 节点的 `SET_MASTER` 返回 `-EACCES` 不是原因。
+
+**只剩候选二**：kms_swrast 建 screen 时某条 KMS ioctl **成功但返回的数据不对**。
+下一步应当在 `kms_swrast` 的 screen 创建路径（`src/gallium/drivers/.../kms_swrast` 与
+`drmModeGetResources`/`drmModeGetConnector` 等）上，把内核实际返回的结构体与 Linux 的逐字段对照。
+
+### 9.13 GBM 最终状态：不再当作阻塞项（含两条新观测）
+
+**新观测一：换成 GL 变体设备也没用。** 用
+`-display egl-headless -device virtio-gpu-gl-pci`（virgl 能力）启动，QEMU 接受该设备（stderr 为空），
+但 `eglinfo -p gbm` **仍然** `eglInitialize failed`。所以"用非 GL 变体所以没有 virgl"这条解释**不成立**。
+
+**新观测二：`kms_swrast` 这个名字在这套 Mesa 构建里可能根本不可用。**
+
+```
+libgallium-25.2.7.so 里 "kms_swrast" 出现次数：0
+                  而 "swrast" / "virtio_gpu" / "kmsro" / "zink" 均存在
+libdril_dri.so 只导出 60 个 __driDriverGetExtensions_<驱动名> 形式的后缀符号，
+              没有通用的 __driDriverGetExtensions
+```
+
+（注意：前一轮我用 `strings -x` 精确匹配得出的"不存在"结论有方法缺陷，此处是**用 `grep -c` 复核后**的数字。）
+
+**GBM 的累计结论**：失败被钉在 Mesa 的 DRI screen 创建、且**在 KMS 路径上**（`swrast` 能建 screen、
+`kms_swrast` 不能，二者唯一实质差别是是否需要 KMS winsys）。已排除的假设累计 10 条：
+sysfs 缺节点、全部驱动选择开关、modifier 分支、缺共享库、render 节点 KMS 被整体拒绝、缺 DUMB ioctl、
+winsys 创建失败、Mesa 调用 `drmSetMaster`、virgl/QEMU 设备变体、以及"网络不可用"这个前提本身。
+
+**建议（重要）**：**不要再把 GBM 当成阻塞项**。
+- 对 Minecraft 无影响——`EGL_PLATFORM=wayland` 已用真实客户端（`es2gears_wayland`，`EGL_VERSION=1.5`
+  + GLES 3.2 llvmpipe）验证可渲染（9.11）；
+- GBM 只影响 wlroots 自己的渲染器质量，当前 `WLR_RENDERER=pixman` 是**正确且可用**的配置；
+- 若将来确实要 GBM 加速，最有效的下一步是用 **strace**（网络已通，依赖可现取）看 DRI screen 创建
+  到底停在哪一步——那比继续做假设-验证循环划算得多。
