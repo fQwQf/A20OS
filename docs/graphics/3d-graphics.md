@@ -243,7 +243,29 @@ boot 日志应出现：
 |---|---|---|
 | `DRM_IOCTL_GEM_CREATE` / `GEM_MMAP`（+ `GEM_FLINK`/`GEM_OPEN`） | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | 未实现（只有 `MODE_CREATE_DUMB`/`MAP_DUMB`，那是给 scanout 的线性缓冲） |
 | render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | **已加**：devfs 现在暴露 `renderD128`（226,128），打开它的 DRM 上下文标记为 render-only（`SET_MASTER` 返回 `-EACCES`，KMS ioctl 本就需要 master）。实测加上后 EGL 能在 Wayland 平台初始化（`EGL driver name: swrast`，且带 `EGL_EXT_image_dma_buf_import`） |
-| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **缺**：没有它，`EGL_PLATFORM=gbm` 报 `eglinfo: eglInitialize failed`，debug 日志是 `No DRI config supports native format R8G8B8A8_UNORM`（config 全被否掉）。⚠️ 试过一版 `drm_format_modifier_blob`（ARGB8888/XRGB8888 + LINEAR）后 wlroots 直接 `Failed to create DRM backend` → `Failed to open any DRM device`，已回退；重做时要用 `drm_mode_obj_getproperties` 的两属性数组 + blob 布局逐字段核对（wlroots 在 plane 初始化时就会解析它） |
+| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **缺，且试过一版已回退**。没有它时 `EGL_PLATFORM=gbm` 报 `eglinfo: eglInitialize failed`，debug 日志 `No DRI config supports native format R8G8B8A8_UNORM`（config 全被否掉）。加上一版 `drm_format_modifier_blob`（header 24B / formats@24 / modifier@32，ARGB8888+XRGB8888、LINEAR、`formats=0x3 offset=0`）并让 `MODE_GETPLANE` 报同样两个 fourcc 后，wlroots 变成 `Failed to create DRM backend` → `Failed to open any DRM device`（静默失败，无具体日志）。已完整回退。 |
+
+**IN_FORMATS 四次尝试的二分结论**（关键：触发器不是 blob，而是「plane 报了多于一个属性」）：
+
+| 变体 | 结果 |
+|---|---|
+| 裸 blob（IN_FORMATS，BLOB+LINEAR） | `Failed to create DRM backend` |
+| blob + `MODE_GETPLANE` 报同样两个 fourcc | 同样失败 |
+| blob + `WLR_DRM_NO_MODIFIERS=1` | 同样失败 |
+| 属性改名为 `FOO`（wlroots 认不出） | 同样失败 → **不是名字** |
+| 属性改成 ENUM（不是 BLOB） | 同样失败 → **不是 BLOB 类型** |
+| **两个属性都是已知可用的 `type`/PRIMARY** | 同样失败 → **不是第二个属性的处理代码** |
+
+并且：在全部失败变体里，**IN_FORMATS 的 blob 从未被取过**（我在 `drm_in_formats_blob()` 里加的打印一次都没出现），说明失败发生在 wlroots 读 plane 属性列表的阶段，**早于**格式/blob 解析；wlroots 也没有打出任何具体错误行（静默失败）。所以问题不在内核返回的 blob 字节，而在「这个驱动上 plane 有 2 个属性」这一事实本身触发 wlroots/libdrm 的某个前置检查失败。
+
+下一步（下次接手时的第一件事）：写一个最小用户态程序，用 libdrm 调 `drmModeGetPlane()` + `drmModeObjectGetProperties()`，把 1 属性与 2 属性两种情况的返回值打出来；或直接读 wlroots 的 plane 属性循环源码（本机网络取不到，需离线准备）。
+
+**上一轮用临时 ioctl 打印得到的调用序列**：
+
+- wlroots 调用序列（失败前最后一段）：`GETRESOURCES` → `GETCRTC` → `OBJ_GETPROPERTIES`×2 → `GETPLANERESOURCES`×2 → `GETPLANE`×2 → `OBJ_GETPROPERTIES`×2 → `GETPROPERTY`×4（= plane 两个属性各两次「先取长度再取值」）→ `OBJ_GETPROPERTIES`×2 → `DROP_MASTER`(0x641f) → 失败。
+- 最后的 `DROP_MASTER` 是 libdrm `drmGetNodeTypeFromFd()` 的 node-type 探测，即它发生在一个**新打开的 fd** 上——对应 wlroots 的 allocator 阶段（`wlr_drm_allocator_create`：先试 `drmModeCreateLease`，失败后 plain open 再探测），而不是 plane 循环。所以失败点在 **allocator**（dumb/gbm 后端用 plane 的格式集），不在属性本身。
+- 全流程里 wlroots 唯一未实现的 ioctl 是 `DRM_IOCTL_MODE_CREATE_LEASE`（`0xc6`），它自己会 `falling back to plain open`，非致命。
+- 下一步建议：写个用户态小程序 `drmModeGetPropertyBlob(IN_FORMATS)` + `drmModeGetPlane`，把内核返回的字节与 wlroots/Mesa 的解析逐字段对齐；或先只让 **dumb allocator** 的格式来源自洽（GETPLANE 与 IN_FORMATS 完全一致、并确认 modifier 解析出 XRGB8888+LINEAR），再往上试 GBM。
 | 真正的 dma-buf（PRIME） | 客户端把渲染结果当 `wl_buffer` 交给合成器（`zwp_linux_dmabuf_v1`）；dumb buffer 导不出 dma-buf | `DRM_IOCTL_PRIME_HANDLE_TO_FD` 现在是**把缓冲内容 memcpy 进 memfd** 再返回该 fd（`drm_prime_handle_to_fd`），不是可共享的 dma-buf |
 | `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | 只有 `MODE_GETFB` |
 
