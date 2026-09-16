@@ -751,3 +751,41 @@ winsys 创建失败、Mesa 调用 `drmSetMaster`、virgl/QEMU 设备变体、以
 
 **边界（不要过度解读）**：gcompat 是**部分** glibc 兼容层，所以这只证明"JNI 加载路径通了"这个前置条件成立，
 **不等于** LWJGL/游戏已可运行。游戏自身的 jar 与资源是受版权保护的商业内容，**未下载**。
+
+### 9.15 还缺 `libdl.so.2`：用真实 LWJGL native 验证的第二个前提
+
+9.14 加 gcompat 时**还没做完**：清点 gcompat 实际提供的文件后发现，它只给了
+`libc.so.6` / `libm.so.6` / `libpthread.so.0` / `librt.so.1` / `libcrypt.so.1` / `libresolv.so.2` /
+`libutil.so.1` + `ld-linux-x86-64.so.2`，**唯独没有 `libdl.so.2`**。
+
+而 LWJGL 的 native 依赖里**正好要它**：
+
+```
+liblwjgl.so            DT_NEEDED: libdl.so.2, libpthread.so.0, libc.so.6
+libglfw.so             DT_NEEDED: librt.so.1, libm.so.6, libdl.so.2, libpthread.so.0, libc.so.6
+liblwjgl_opengles.so   DT_NEEDED: libpthread.so.0, libc.so.6
+```
+
+**修法**：glibc ≥2.34 起 `libdl` 已并入 libc，所以补一个软链即可——
+`packages/overlay/xfce/lib/libdl.so.2 -> libc.so.6`。
+
+**验证（重建镜像 + 注入真实 LWJGL 3.3.6 native 实测，不是推断）**：
+
+```
+/lib/libdl.so.2 -> libc.so.6                              （镜像内已落地）
+LWJGLT: dlopen(libdl.so.2)            = OK
+LWJGLT: dlopen(/usr/lib/liblwjgl.so)          = OK
+LWJGLT: dlopen(/usr/lib/liblwjgl_opengles.so) = OK
+LWJGLT: dlopen(/usr/lib/libglfw.so)           = OK
+rc=0
+```
+
+即 **JNI + glibc 依赖这条路上，LWJGL 的三个 native 库都能真正加载**。
+
+**仍存边界**：这验证的是"native 能被加载"（用的是上游真实二进制），**不是**"Java 侧绑定可用"——
+客体只有 JRE（无 `javac`），Java 侧的 EGL/GLES 调用没能在此验证；游戏 jar/资源是版权内容，未下载。
+
+**一处流程教训**：这次注入 native 时我第一次用 `find -maxdepth 4` 定位解包产物，而实际路径深度是 7，
+`find` 静默返回空、循环里的 `[ -z ] && continue` 把三个 native 全跳过了——日志里表现为
+"natives present: No such file"。**"注入成功"没有输出不等于真的写进去了**；后来改用显式路径并加
+`injected <dst>` 回显才确认。这类静默跳过值得在脚本里一律显式回显。
