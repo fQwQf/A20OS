@@ -22,6 +22,13 @@ _start:
     cli
     cld
 
+    /* Multiboot leaves a magic value in EAX and a pointer to its info
+     * structure in EBX.  Save both into .data before the BSS clear below
+     * zeroes EAX; the info pointer is what lets C size RAM from the real
+     * memory map instead of a hardcoded 1 GiB. */
+    movl  %eax, (g_mb_magic - PAGE_OFFSET)
+    movl  %ebx, (g_mb_info - PAGE_OFFSET)
+
     /* Set up stack */
     movl  $(_stack_end - PAGE_OFFSET), %esp
 

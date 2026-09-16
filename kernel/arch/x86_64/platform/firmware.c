@@ -237,4 +237,110 @@ int firmware_console_getchar(void) {
     return arch_uart_poll_getc();
 }
 
+/*
+ * RAM sizing.  boot/entry.S saves the multiboot magic and info pointer (see
+ * the comment there) so we can read the real memory map instead of assuming
+ * 1 GiB.  Only "available" (type 1) regions above the low 1 MiB are offered
+ * (the low page holds the IVT/BDA/legacy hole and must never be handed out),
+ * and nothing past the 2 GiB direct-map window that entry.S builds with 1 GiB
+ * pages.  If anything is missing we fall back to the old 1 GiB range.
+ */
+#define X86_MB_BOOTLOADER_MAGIC 0x2BADB002u
+#define X86_MB_INFO_MEM_MAP     0x00000040u
+#define X86_PAGE_SIZE           4096u
+#define X86_RAM_RANGE_MAX       8
+#define X86_LOW_RESERVED_END    0x100000ULL
+#define X86_DIRECT_MAP_END      0x80000000ULL
+#define X86_MB_MMAP_MIN_SIZE    20u
+
+struct x86_mb_info {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+};
+
+struct x86_mb_mmap_entry {
+    uint32_t size;
+    uint64_t addr;
+    uint64_t len;
+    uint32_t type;
+} __attribute__((packed));
+
+__attribute__((section(".data"))) volatile uint32_t g_mb_magic;
+__attribute__((section(".data"))) volatile uint32_t g_mb_info;
+
+static paddr_t g_ram_base[X86_RAM_RANGE_MAX];
+static paddr_t g_ram_end[X86_RAM_RANGE_MAX];
+static size_t g_ram_count;
+static int g_ram_done;
+
+static void x86_ram_detect(void) {
+    g_ram_done = 1;
+    g_ram_count = 1;
+    g_ram_base[0] = PHYS_MEMORY_BASE;
+    g_ram_end[0] = PHYS_MEMORY_END;
+
+    if (g_mb_magic != X86_MB_BOOTLOADER_MAGIC || g_mb_info == 0)
+        return;
+
+    const struct x86_mb_info *mi =
+        (const struct x86_mb_info *)(uintptr_t)(g_mb_info + PAGE_OFFSET);
+    if (!(mi->flags & X86_MB_INFO_MEM_MAP))
+        return;
+
+    size_t n = 0;
+    uintptr_t p = (uintptr_t)(mi->mmap_addr + PAGE_OFFSET);
+    uintptr_t stop = p + mi->mmap_length;
+    while (n < X86_RAM_RANGE_MAX && p + X86_MB_MMAP_MIN_SIZE <= stop) {
+        const struct x86_mb_mmap_entry *e = (const struct x86_mb_mmap_entry *)p;
+        if (e->type == 1 && e->len != 0) {
+            paddr_t base = (paddr_t)e->addr;
+            paddr_t end = (paddr_t)(e->addr + e->len);
+            if (end > X86_DIRECT_MAP_END)
+                end = X86_DIRECT_MAP_END;
+            if (base < X86_LOW_RESERVED_END)
+                base = X86_LOW_RESERVED_END;
+            base = (base + X86_PAGE_SIZE - 1) & ~((paddr_t)X86_PAGE_SIZE - 1);
+            end &= ~((paddr_t)X86_PAGE_SIZE - 1);
+            if (end > base) {
+                g_ram_base[n] = base;
+                g_ram_end[n] = end;
+                n++;
+            }
+        }
+        p += e->size + sizeof(uint32_t);
+    }
+    if (n == 0)
+        return;
+
+    g_ram_count = n;
+    for (size_t i = 0; i < n; i++)
+        printf("[RAM] usable %p..%p (%lu MiB)\n",
+               (void *)g_ram_base[i], (void *)g_ram_end[i],
+               (unsigned long)((g_ram_end[i] - g_ram_base[i]) >> 20));
+}
+
+size_t arch_ram_range_count(void) {
+    if (!g_ram_done)
+        x86_ram_detect();
+    return g_ram_count;
+}
+
+int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end) {
+    if (!g_ram_done)
+        x86_ram_detect();
+    if (idx >= g_ram_count || !base || !end)
+        return -1;
+    *base = g_ram_base[idx];
+    *end = g_ram_end[idx];
+    return 0;
+}
+
 #endif
