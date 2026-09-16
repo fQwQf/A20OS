@@ -110,6 +110,7 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
             return -EADDRINUSE;
     }
 
+    task_t *owner = proc_current();
     uint64_t flags = spin_lock_irqsave(&g_net_lock);
     if (net_find_bound_socket_locked(AF_UNIX, s->type, bind_addr, bind_len)) {
         spin_unlock_irqrestore(&g_net_lock, flags);
@@ -118,6 +119,11 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     memcpy(s->local, bind_addr, bind_len);
     s->local_len = bind_len;
     s->bound = 1;
+    if (owner) {
+        s->owner_pid = owner->pid;
+        s->owner_uid = owner->cred.uid;
+        s->owner_gid = owner->cred.gid;
+    }
     spin_unlock_irqrestore(&g_net_lock, flags);
 
     if (unix_pathname) {
@@ -206,18 +212,19 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
     } else {
         s->peer = listener;
     }
-    /* SO_PEERCRED: record the connecting task credentials on both ends. */
+    /* SO_PEERCRED: the accepted end's peer is the connecting task; the
+     * connecting end's peer is the task that owns the bound socket. */
     {
         task_t *cur = proc_current();
         if (cur) {
-            s->peer_pid = cur->pid;
-            s->peer_uid = cur->cred.uid;
-            s->peer_gid = cur->cred.gid;
             if (s->peer && s->peer->connected) {
                 s->peer->peer_pid = cur->pid;
                 s->peer->peer_uid = cur->cred.uid;
                 s->peer->peer_gid = cur->cred.gid;
             }
+            s->peer_pid = listener->owner_pid;
+            s->peer_uid = listener->owner_uid;
+            s->peer_gid = listener->owner_gid;
         }
     }
     spin_unlock_irqrestore(&g_net_lock, irq);
