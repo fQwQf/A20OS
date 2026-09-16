@@ -720,3 +720,34 @@ winsys 创建失败、Mesa 调用 `drmSetMaster`、virgl/QEMU 设备变体、以
 - GBM 只影响 wlroots 自己的渲染器质量，当前 `WLR_RENDERER=pixman` 是**正确且可用**的配置；
 - 若将来确实要 GBM 加速，最有效的下一步是用 **strace**（网络已通，依赖可现取）看 DRI screen 创建
   到底停在哪一步——那比继续做假设-验证循环划算得多。
+
+### 9.14 Minecraft 的 JNI 前置条件：已补齐并实测通过（commit `bcd18ec8`）
+
+排查 Minecraft 还剩什么时，找到的**不是又一条假设，而是一个具体且可修的前提**：
+
+- LWJGL 是开源的（BSD），所以直接取 `lwjgl-3.3.6-natives-linux.jar` 检查：
+  `liblwjgl.so` 的 `DT_NEEDED` 是 **`libc.so.6` / `libdl.so.2` / `libpthread.so.0`——glibc 的 soname**；
+  可选的 classifier 只有 freebsd / linux / linux-arm32 / linux-arm64 / linux-ppc64le / linux-riscv64 /
+  macos / macos-arm64 / windows / windows-arm64 / windows-x86——**上游不提供 musl 变体**。
+- 而本镜像是**纯 musl**（`ld-musl-x86_64.so.1`），既没有 glibc 也没有 gcompat，缓存里也没有——
+  也就是 **JNI 层根本无法 `dlopen` 任何 LWJGL native**。
+
+**修法**：把 `gcompat`（Alpine main，1.1.0-r4）加进 `packages/world/xfce.world` 的 JVM 段。
+
+**验证（重建镜像 + 实机运行，不是假设）**：
+- 构建日志：`(158/518) Installing gcompat (1.1.0-r4)`；
+- 新镜像内：`/lib/ld-linux-x86-64.so.2`（22728 B）+ `libc.so.6 -> libgcompat.so.0` +
+  `libm.so.6` / `libpthread.so.0` / `librt.so.1`；
+- 在客体里跑**宿主用 glibc 动态链接编出来的**测试程序：
+
+  ```
+  GLIBCTEST: start
+  GLIBCTEST: dlopen(libm.so.6)=OK
+  GLIBCTEST: dlopen(libpthread)=OK
+  GLIBCTEST: end            rc=0
+  ```
+
+  glibc 动态二进制能加载、且能继续 `dlopen` 其它 glibc 共享库。
+
+**边界（不要过度解读）**：gcompat 是**部分** glibc 兼容层，所以这只证明"JNI 加载路径通了"这个前置条件成立，
+**不等于** LWJGL/游戏已可运行。游戏自身的 jar 与资源是受版权保护的商业内容，**未下载**。
