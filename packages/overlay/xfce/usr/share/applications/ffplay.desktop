@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ffplay
+GenericName=Media Player
+Comment=Play media with ffplay (ffmpeg software decoder)
+Exec=ffplay -autoexit %f
+Icon=multimedia-player
+Terminal=false
+Categories=AudioVideo;Player;Video;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/ogg;video/x-flv;video/3gpp;video/x-ms-wmv;video/mp2t;video/x-m4v;
