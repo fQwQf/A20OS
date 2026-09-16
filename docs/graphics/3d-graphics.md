@@ -242,7 +242,8 @@ boot 日志应出现：
 | 缺口 | 为什么需要 | 现状 |
 |---|---|---|
 | `DRM_IOCTL_GEM_CREATE` / `GEM_MMAP`（+ `GEM_FLINK`/`GEM_OPEN`） | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | 未实现（只有 `MODE_CREATE_DUMB`/`MAP_DUMB`，那是给 scanout 的线性缓冲） |
-| render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | devfs 只建 `/dev/dri/card0`（实测 `ls -l /dev/dri` 只有 card0） |
+| render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | **已加**：devfs 现在暴露 `renderD128`（226,128），打开它的 DRM 上下文标记为 render-only（`SET_MASTER` 返回 `-EACCES`，KMS ioctl 本就需要 master）。实测加上后 EGL 能在 Wayland 平台初始化（`EGL driver name: swrast`，且带 `EGL_EXT_image_dma_buf_import`） |
+| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **缺**：没有它，`EGL_PLATFORM=gbm` 报 `eglinfo: eglInitialize failed`，debug 日志是 `No DRI config supports native format R8G8B8A8_UNORM`（config 全被否掉）。⚠️ 试过一版 `drm_format_modifier_blob`（ARGB8888/XRGB8888 + LINEAR）后 wlroots 直接 `Failed to create DRM backend` → `Failed to open any DRM device`，已回退；重做时要用 `drm_mode_obj_getproperties` 的两属性数组 + blob 布局逐字段核对（wlroots 在 plane 初始化时就会解析它） |
 | 真正的 dma-buf（PRIME） | 客户端把渲染结果当 `wl_buffer` 交给合成器（`zwp_linux_dmabuf_v1`）；dumb buffer 导不出 dma-buf | `DRM_IOCTL_PRIME_HANDLE_TO_FD` 现在是**把缓冲内容 memcpy 进 memfd** 再返回该 fd（`drm_prime_handle_to_fd`），不是可共享的 dma-buf |
 | `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | 只有 `MODE_GETFB` |
 

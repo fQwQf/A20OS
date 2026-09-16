@@ -286,6 +286,7 @@ static devfs_node_t g_nodes[] = {
     STATIC_NODE(DEVFS_PTS_DIR, "pts", 0),
     STATIC_NODE(DEVFS_DRI_DIR, "dri", 0),
     STATIC_NODE(DEVFS_DRM, "card0", 0xe200),
+    STATIC_NODE(DEVFS_DRM, "renderD128", 0xe280),
     STATIC_NODE(DEVFS_SND_DIR, "snd", 0),
     STATIC_NODE(DEVFS_ALSA_CTL, "controlC0", 0x1400),
     STATIC_NODE(DEVFS_ALSA_PCM, "pcmC0D0p", 0x1401),
@@ -395,6 +396,7 @@ static int devfs_dir_readdir(vfile_t *vf, void *dirp, size_t count) {
         uint8_t type;
     } dri_entries[] = {
         { ".", DT_DIR }, { "..", DT_DIR }, { "card0", DT_CHR },
+        { "renderD128", DT_CHR },
     };
     static const struct {
         const char *name;
@@ -1282,14 +1284,17 @@ static vfile_t *devfs_open_vnode(vnode_t *vn, int flags) {
         return avf;
     }
     case DEVFS_DRM: {
-        /* Each open of /dev/dri/card0 creates a fresh DRM context. */
+        /* Each open of a /dev/dri node creates a fresh DRM context. */
         extern struct vfile *drm_create_vfile(void);
+        extern void drm_vfile_set_render_only(struct vfile *vf);
         vfile_t *drm = drm_create_vfile();
         if (!drm) {
             vnode_put(vf->vnode);
             vfile_free(vf);
             return NULL;
         }
+        if (node->name && strcmp(node->name, "renderD128") == 0)
+            drm_vfile_set_render_only(drm);
         /* Adopt the devfs vnode so stat/fstat on the fd works. */
         vnode_put(vf->vnode);
         vfile_free(vf);
