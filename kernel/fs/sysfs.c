@@ -821,11 +821,10 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
         return -EINVAL;
 
     if (dm->type == SF_DEV_CHAR_SUBSYS || dm->type == SF_DEV_CHAR_DEVICE_SUBSYS) {
-        /* The two links must differ: libdrm tests the target string, and
-         * ".../device/subsystem" selects the virtio branch. */
-        const char *target = (dm->type == SF_DEV_CHAR_DEVICE_SUBSYS)
-                                 ? "/sys/bus/virtio"
-                                 : "/sys/bus/pci";
+        /* Mesa's loader_get_pci_id_for_fd() rejects anything whose libdrm
+         * bus type is not DRM_BUS_PCI, and libdrm derives the type from this
+         * link's target string, so it must read /sys/bus/pci. */
+        const char *target = "/sys/bus/pci";
         size_t n = strlen(target);
         if (n + 1 > sz)
             return -ENAMETOOLONG;
