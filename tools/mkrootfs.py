@@ -25,11 +25,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
+
+ELF_MACHINES = {
+    "riscv64": 243, "riscv32": 243,
+    "aarch64": 183,
+    "x86_64": 62,
+    "loongarch64": 258,
+    "arm32": 40, "armv7m": 40,
+    "ppc64le": 21,
+}
 
 DEFAULT_ALPINE_MIRROR = "https://mirrors.ustc.edu.cn/alpine"
 DEFAULT_ALPINE_VERSION = "v3.23"
@@ -68,6 +80,127 @@ def apply_overlay(overlay: Path, staging: Path, sudo: list[str],
              f"| tar -C {staging} -xf -"], sudo)
     else:
         run(["cp", "-a", "--remove-destination", f"{overlay}/.", f"{staging}/"], sudo)
+    normalize_overlay_modes(overlay, staging, sudo)
+
+
+def normalize_overlay_modes(overlay: Path, staging: Path,
+                            sudo: list[str]) -> None:
+    """Force overlay entries to 0644/0755.
+
+    `cp -a` and `tar -x` preserve the source mode, so a developer umask of 002
+    leaks group-writable configuration files (and 0775 scripts) into the
+    image.  Normalise to what git would check out: 0755 for directories and
+    executables, 0644 otherwise.
+    """
+    for src in sorted(overlay.rglob("*")):
+        if src.is_symlink():
+            continue
+        dst = staging / src.relative_to(overlay)
+        if not dst.exists():
+            continue
+        if src.is_dir():
+            mode = 0o755
+        elif src.lstat().st_mode & 0o111:
+            mode = 0o755
+        else:
+            mode = 0o644
+        run(["chmod", f"{mode:04o}", str(dst)], sudo)
+
+
+def check_overlay_elf_arch(overlay: Path, arch: str) -> None:
+    """Reject an overlay ELF built for a different target architecture."""
+    want = ELF_MACHINES.get(arch)
+    if want is None:
+        return
+    for src in overlay.rglob("*"):
+        if src.is_symlink() or not src.is_file():
+            continue
+        try:
+            with src.open("rb") as fh:
+                head = fh.read(20)
+        except OSError:
+            continue
+        if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] == 2:
+            continue
+        machine = struct.unpack_from("<H", head, 18)[0]
+        if machine != want:
+            die(f"overlay {overlay} ships an ELF for another architecture: "
+                f"{src.relative_to(overlay)} (e_machine={machine}, --arch "
+                f"{arch} expects {want})")
+
+
+def read_name_id_map(path: Path) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ids
+    for line in text.splitlines():
+        fields = line.split(":")
+        if len(fields) < 3:
+            continue
+        try:
+            ids.setdefault(fields[0], int(fields[2]))
+        except ValueError:
+            continue
+    return ids
+
+
+def installed_archives(staging: Path, cache_dir: Path) -> list[Path]:
+    """Map the installed apk database to archives present in the package cache."""
+    db = staging / "lib" / "apk" / "db" / "installed"
+    try:
+        lines = db.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    names: list[str] = []
+    current: dict[str, str] = {}
+    for line in lines:
+        if line[:2] in ("P:", "V:") and len(line) > 2:
+            current[line[0]] = line[2:]
+        elif not line.strip():
+            if "P" in current and "V" in current:
+                names.append(f"{current['P']}-{current['V']}")
+            current = {}
+    if "P" in current and "V" in current:
+        names.append(f"{current['P']}-{current['V']}")
+    archives: list[Path] = []
+    for name in names:
+        archives.extend(sorted(cache_dir.glob(f"{name}.*.apk")))
+    return archives
+
+
+def collect_nonroot_ownership(staging: Path,
+                              cache_dir: Path) -> list[tuple[Path, int, int]]:
+    """Ownership the installed packages declare for non-root service accounts.
+
+    `apk --usermode` cannot chown, so files a package owns as a service
+    account (e.g. polkit's 0700 rules, owned by polkitd) end up owned by the
+    caller and are then recorded as root in the image -- the daemon can no
+    longer read them.  Re-derive the intended owner from the package archives,
+    resolving account names against the staging /etc/passwd and /etc/group.
+    """
+    users = read_name_id_map(staging / "etc" / "passwd")
+    groups = read_name_id_map(staging / "etc" / "group")
+    fixups: list[tuple[Path, int, int]] = []
+    for archive in installed_archives(staging, cache_dir):
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                members = tar.getmembers()
+        except (tarfile.TarError, OSError):
+            continue
+        for member in members:
+            if not member.uname or member.uname == "root":
+                continue
+            dst = staging / member.name
+            if not dst.exists():
+                continue
+            uid = member.uid or users.get(member.uname)
+            gid = member.gid or groups.get(member.gname)
+            if uid is None or gid is None:
+                continue
+            fixups.append((dst, uid, gid))
+    return fixups
 
 
 def read_world(paths: list[Path]) -> list[str]:
@@ -267,6 +400,9 @@ def main() -> None:
         # pin it so dev images get sane 0755/0644 permissions.
         preexec = (lambda: os.umask(0o022)) if args.usermode else None
 
+        for overlay in args.overlay:
+            check_overlay_elf_arch(overlay.resolve(), args.arch)
+
         # Overlays must be visible to apk's maintainer scripts and must also
         # win over packaged files, so they apply both before and after add.
         for overlay in args.overlay:
@@ -303,16 +439,28 @@ def main() -> None:
         mkfs_sudo = sudo
         if args.usermode:
             # Staging files are owned by the caller; record them as root in
-            # the image.  fakeroot intercepts mkfs' ownership reads;
-            # root_owner additionally fixes the inodes mkfs creates itself.
-            if shutil.which("fakeroot"):
-                mkfs = ["fakeroot"] + mkfs
-            else:
+            # the image.  root_owner fixes the inodes mkfs creates itself.
+            mkfs += ["-E", "root_owner=0:0"]
+        mkfs += ["-d", str(staging), str(tmp_img)]
+
+        if args.usermode:
+            if not shutil.which("fakeroot"):
                 mkfs_sudo = []
                 print("mkrootfs: warning: fakeroot not found; image files "
                       "will be owned by the caller", file=sys.stderr)
-            mkfs += ["-E", "root_owner=0:0"]
-        mkfs += ["-d", str(staging), str(tmp_img)]
+            else:
+                chowns = [
+                    f"chown -h {uid}:{gid} {shlex.quote(str(p))}"
+                    for p, uid, gid in
+                    collect_nonroot_ownership(staging, cache_dir)
+                ]
+                if chowns:
+                    # The chown must share mkfs' fakeroot session for the
+                    # faked ids to reach the image.
+                    mkfs = ["fakeroot", "sh", "-c", " && ".join(chowns + [
+                        "exec " + " ".join(shlex.quote(a) for a in mkfs)])]
+                else:
+                    mkfs = ["fakeroot"] + mkfs
         run(mkfs, mkfs_sudo)
         os.replace(tmp_img, output)
         print(f"mkrootfs: wrote {output} ({args.size_mb} MiB, "

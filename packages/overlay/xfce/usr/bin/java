@@ -1,0 +1,11 @@
+#!/bin/sh
+# A20OS shim around the openjdk launcher.  Two guest-side gaps it works around:
+#  1. the kernel records exec_path as written, so launching through the
+#     /usr/bin/java symlink makes $ORIGIN resolve to /usr/bin and the JVM
+#     cannot find libjli.so -- exec the real path instead;
+#  2. the launcher's memory ergonomics pick a heap the VM then rejects
+#     ("Too small maximum/initial heap"), so seed JAVA_TOOL_OPTIONS with an
+#     explicit initial and maximum heap (command-line flags still win).
+JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:--Xms256m -Xmx512m}"
+exec "$JAVA_HOME/bin/java" "$@"

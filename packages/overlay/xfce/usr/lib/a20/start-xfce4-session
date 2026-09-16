@@ -4,6 +4,8 @@
 # xfdesktop, xfce4-panel and thunar once the compositor is up.
 
 export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=XFCE
+export XDG_SESSION_DESKTOP=xfce
 export XDG_CONFIG_DIRS=/etc/xdg
 export NO_AT_BRIDGE=1
 export XCURSOR_THEME=Adwaita
@@ -40,4 +42,5 @@ mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/dconf" \
     "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
-exec dbus-run-session -- labwc -d
+# Set LABWC_DEBUG=1 to bring the compositor up with -d debug logging.
+exec dbus-run-session -- labwc ${LABWC_DEBUG:+-d}

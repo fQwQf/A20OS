@@ -24,7 +24,9 @@ mount -t devpts devpts /dev/pts 2>/dev/null || true
 mkdir -p /run
 
 mkdir -p /tmp/.X11-unix /tmp/.ICE-unix "$HOME/.config/dconf" \
-    /run/dbus /var/lib/dbus "$XDG_RUNTIME_DIR"
+    "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml" \
+    /run/dbus /var/lib/dbus /run/elogind /var/lib/elogind /run/systemd \
+    "$XDG_RUNTIME_DIR"
 chmod 01777 /tmp/.X11-unix
 chmod 0777 /tmp/.ICE-unix
 chmod 0700 "$XDG_RUNTIME_DIR"
@@ -46,6 +48,13 @@ dbus-daemon --system --fork
 mkdir -p /sys/fs/cgroup 2>/dev/null || true
 mount -t cgroup2 none /sys/fs/cgroup 2>/dev/null || \
     mount -t cgroup none /sys/fs/cgroup 2>/dev/null || true
+# elogind pins its own cgroup during manager setup; without the directory it
+# aborts with "Failed to open pin file".  It derives the path from
+# /proc/1/cgroup, which names init.scope.  Create the children with a plain
+# mkdir: busybox mkdir -p mishandles the sysfs parent here.
+mkdir /sys/fs/cgroup/init.scope 2>/dev/null || true
+mkdir /sys/fs/cgroup/elogind 2>/dev/null || true
+mkdir /sys/fs/cgroup/systemd 2>/dev/null || true
 
 # Session/login daemon: XFCE's session manager and polkit talk to it over the
 # org.freedesktop.login1 D-Bus interface.
@@ -55,8 +64,10 @@ fi
 
 # Seat management (libseat backend used by labwc/wlroots).
 SEATD_VTBOUND=0 seatd 2>/dev/null &
-while [ ! -S /run/seatd.sock ]; do
+i=0
+while [ ! -S /run/seatd.sock ] && [ "$i" -lt 50 ]; do
     sleep 0.1
+    i=$((i + 1))
 done
 
 # Device enumeration.  The A20OS kernel broadcasts KOBJECT_UEVENT with a real

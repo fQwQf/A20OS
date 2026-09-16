@@ -227,3 +227,53 @@ boot 日志应出现：
 - **同步命令串行**：controlq 一次一个 in-flight 链，用 `command_lock` 保护；等待期间保持中断开启，避免 `spin_lock_irqsave` 包裹设备完成等待。
 - **reloc 限制**：drvmod 模块的 `gpu_ioctl` 必须用 if-chain，不用 switch（PIC 跳转表 reloc 不被 loader 支持）。
 - **2D/3D 共存**：2D fbdev 路径与 3D 透传路径互不干扰；无 virgl 时自动回退 2D。
+
+---
+
+## 8. 用户态 GL（Mesa/EGL/GBM）的前置条件
+
+内核侧 3D 命令透传（第 2 节）可用，`xfce` world 现在也装了 Mesa
+（`mesa`/`mesa-dri-gallium`/`mesa-gl`/`mesa-gles`/`mesa-egl`/`mesa-gbm`/
+`virglrenderer` + `mesa-utils`/`mesa-demos`）。镜像里能查到
+`swrast_dri.so`/`kms_swrast_dri.so`/`virtio_gpu_dri.so`/`zink_dri.so` 与
+`libGL.so.1`/`libEGL.so.1`/`libgbm.so.1`/`libGLESv2.so.2`。但**用户态 GL
+仍然起不来**，缺的是 DRM 侧的三样东西：
+
+| 缺口 | 为什么需要 | 现状 |
+|---|---|---|
+| `DRM_IOCTL_GEM_CREATE` / `GEM_MMAP`（+ `GEM_FLINK`/`GEM_OPEN`） | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | 未实现（只有 `MODE_CREATE_DUMB`/`MAP_DUMB`，那是给 scanout 的线性缓冲） |
+| render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | devfs 只建 `/dev/dri/card0`（实测 `ls -l /dev/dri` 只有 card0） |
+| 真正的 dma-buf（PRIME） | 客户端把渲染结果当 `wl_buffer` 交给合成器（`zwp_linux_dmabuf_v1`）；dumb buffer 导不出 dma-buf | `DRM_IOCTL_PRIME_HANDLE_TO_FD` 现在是**把缓冲内容 memcpy 进 memfd** 再返回该 fd（`drm_prime_handle_to_fd`），不是可共享的 dma-buf |
+| `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | 只有 `MODE_GETFB` |
+
+实测（guest 内 `eglinfo`）：
+
+```
+libEGL warning: failed to get driver name for fd -1
+libEGL warning: MESA-LOADER: failed to retrieve device information
+MESA: error: ZINK: vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)
+libEGL warning: egl: failed to create dri2 screen
+```
+
+直接后果：
+
+- **合成器只能跑 pixman**：`start-xfce4-session` 写死 `WLR_RENDERER=pixman`，
+  因为 wlroots 的 GL 渲染器要先 `gbm_create_device()` +
+  `eglGetPlatformDisplayEXT(EGL_PLATFORM_GBM_KHR)`，上面几样缺一不可。
+  XWayland 也只能 `Failed to initialize glamor, falling back to sw`。
+- **GL 客户端（Minecraft 等）无法出图**：即使 llvmpipe 能软件渲染，结果也
+  无法作为 dma-buf 交给合成器。
+- **host 侧也没有 3D**：GUI 实例用 `-device virtio-gpu-pci`（无 virgl），
+  所以 `A20_GPU_IOCTL_VIRGL_CHECK` 返回 `-ENXIO`；要试硬件 3D 得换
+  `virtio-gpu-gl-pci`（或 `virgl=on`）。
+
+### 让 Minecraft 跑起来的顺序
+
+1. 内核补 `GEM_CREATE`/`GEM_MMAP`（把现有 vmo 暴露成 GEM 对象）+ render node
+   + `MODE_GETFB2`；
+2. 把 PRIME 做成真 dma-buf（或至少让 `kms_swrast` 的 dumb buffer 能被合成器
+   直接采样）；
+3. 放开 `WLR_RENDERER`，让 wlroots 用 GL 渲染器（llvmpipe 软件渲染先跑通）；
+4. 再考虑 virgl：host 开 `virtio-gpu-gl-pci`，guest 用 `virtio_gpu_dri.so`；
+5. 注意 **LWJGL 只提供 x86_64/aarch64 native**，riscv64 实例跑不了 Minecraft
+   （Java 本身可以）。
