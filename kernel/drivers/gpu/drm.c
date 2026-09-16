@@ -53,6 +53,7 @@ typedef struct drm_context {
     uint32_t next_handle;
     uint32_t magic;
     int is_master;
+    int render_only;   /* opened via /dev/dri/renderD128: no master, no KMS */
     /* FIFO of completed DRM events (fixed 32-byte drm_event_vblank records)
      * destined for this open file.  Linux never overwrites a queued event,
      * so neither do we: wlroots matches page-flip completions to pending
@@ -516,6 +517,7 @@ static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
 
 #define DRM_EDID_PROP_ID 1u
 #define DRM_EDID_BLOB_ID 1u
+
 #define DRM_PLANE_TYPE_PROP_ID 2u
 #define DRM_MODE_OBJECT_PLANE 0xeeeeeeeeu
 #define DRM_PLANE_TYPE_PRIMARY 1u
@@ -775,6 +777,8 @@ static int drm_auth_magic(drm_context_t *ctx, void *arg)
 static int drm_set_master(drm_context_t *ctx, void *arg)
 {
     (void)arg;
+    if (ctx->render_only)
+        return -EACCES;
     ctx->is_master = 1;
     return 0;
 }
@@ -1616,6 +1620,13 @@ vfile_t *drm_create_vfile(void)
     vf->ops = &g_drm_ops;
     vf->priv = ctx;
     return vf;
+}
+
+void drm_vfile_set_render_only(vfile_t *vf)
+{
+    drm_context_t *ctx = vf ? vf->priv : NULL;
+    if (ctx)
+        ctx->render_only = 1;
 }
 
 void drm_device_bind(void)
