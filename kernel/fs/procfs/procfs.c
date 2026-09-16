@@ -555,7 +555,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!vn) { kfree(child); return -ENOMEM; }
     memset(vn, 0, sizeof(*vn));
     vn->ino = (uint64_t)(uintptr_t)child;
-    vn->type = fd_symlink ? VFS_FT_SYMLINK :
+    int magic_symlink = fd_symlink || type == PF_PID_EXE ||
+                        type == PF_PID_CWD;
+    vn->type = magic_symlink ? VFS_FT_SYMLINK :
                ((type == PF_ROOT && is_pid_str(name)) || type == PF_SELF ||
                 type == PF_THREAD_SELF ||
                 type == PF_SYS || type == PF_SYS_FS || type == PF_SYS_KERNEL ||
@@ -564,7 +566,7 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 type == PF_A20 || type == PF_PID_FD ||
                 type == PF_PID_NS || type == PF_PID_FDINFO) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
-    if (fd_symlink)
+    if (magic_symlink)
         vn->link_flags |= VNODE_MAGICLINK;
     vn->mode = vn->type == VFS_FT_SYMLINK ? (S_IFLNK | 0777) :
                (vn->type == VFS_FT_DIR ? (S_IFDIR | 0555) : (S_IFREG | 0444));
@@ -618,7 +620,36 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         return -EINVAL;
     procfs_meta_t *meta = (procfs_meta_t *)vn->fs_data;
     pf_entry_t *entry = (pf_entry_t *)(uintptr_t)vn->ino;
-    if (!meta || !entry || meta->type != PF_PID_FD)
+    if (!meta || !entry)
+        return -EINVAL;
+
+    /* Linux magic symlinks: musl readlinks /proc/self/exe to expand $ORIGIN
+     * in RPATH (Alpine's openjdk relies on it). */
+    if (meta->type == PF_PID_EXE || meta->type == PF_PID_CWD) {
+        int exe_pid = meta->pid;
+        if (exe_pid == -1) {
+            task_t *cur = proc_current();
+            exe_pid = cur ? cur->pid : 0;
+        }
+        task_t *exe_task = proc_find_get(exe_pid);
+        if (!exe_task)
+            return -ENOENT;
+        if (!proc_task_may_access(proc_current(), exe_task)) {
+            proc_put(exe_task);
+            return -EACCES;
+        }
+        const char *target = meta->type == PF_PID_EXE ?
+            (exe_task->exec_path[0] ? exe_task->exec_path : "/sbin/init") :
+            exe_task->fs.cwd;
+        size_t tlen = strlen(target);
+        if (tlen > sz)
+            tlen = sz;
+        memcpy(buf, target, tlen);
+        proc_put(exe_task);
+        return (int)tlen;
+    }
+
+    if (meta->type != PF_PID_FD)
         return -EINVAL;
 
     int fd;
