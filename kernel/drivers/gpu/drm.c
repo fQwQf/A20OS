@@ -521,6 +521,24 @@ static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
 #define DRM_PLANE_TYPE_PROP_ID 2u
 #define DRM_MODE_OBJECT_PLANE 0xeeeeeeeeu
 #define DRM_PLANE_TYPE_PRIMARY 1u
+
+#define DRM_IN_FORMATS_PROP_ID 3u
+#define DRM_IN_FORMATS_BLOB_ID 2u
+
+/* IN_FORMATS blob: struct drm_format_modifier_blob (little-endian), telling
+ * wlroots the primary plane supports ARGB8888 + XRGB8888 with
+ * DRM_FORMAT_MOD_LINEAR.  Layout: 24-byte header, then the format fourcc list
+ * at formats_offset, then struct drm_format_modifier entries at
+ * modifiers_offset. */
+static const uint8_t g_in_formats_blob[56] = {
+    0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,  /* version=1, flags=0 */
+    0x02,0x00,0x00,0x00, 0x18,0x00,0x00,0x00,  /* count_formats=2, formats_offset=24 */
+    0x01,0x00,0x00,0x00, 0x20,0x00,0x00,0x00,  /* count_modifiers=1, modifiers_offset=32 */
+    0x41,0x52,0x32,0x34, 0x58,0x52,0x32,0x34,  /* "AR24" (ARGB8888), "XR24" (XRGB8888) */
+    0x03,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,  /* modifier.formats bitmask=0b11 */
+    0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,  /* modifier.offset=0, pad=0 */
+    0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,  /* modifier.modifier=0 (LINEAR) */
+};
 /* KMS object IDs must be unique across all object types (like real DRM
  * drivers, which allocate them from a single IDR): wlroots reads object
  * properties with DRM_MODE_OBJECT_ANY and resolves the object purely by ID. */
@@ -1145,6 +1163,15 @@ static int drm_mode_getproperty(drm_context_t *ctx, void *arg)
         p.flags = 0x08 | 0x04; /* DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE */
         p.count_values = 0;
         p.count_enum_blobs = 0;
+    } else if (p.prop_id == DRM_IN_FORMATS_PROP_ID) {
+        strncpy(p.name, "IN_FORMATS", sizeof(p.name) - 1);
+        p.flags = 0x10 | 0x04; /* DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE */
+        p.count_values = 1;
+        p.count_enum_blobs = 0;
+        if (p.values_ptr && copy_to_user((void *)(uintptr_t)p.values_ptr,
+                                         &(uint64_t){ DRM_IN_FORMATS_BLOB_ID },
+                                         sizeof(uint64_t)) < 0)
+            return -EFAULT;
     } else {
         return -ENOENT;
     }
@@ -1157,13 +1184,21 @@ static int drm_mode_getpropblob(drm_context_t *ctx, void *arg)
     struct drm_mode_get_blob b;
     if (copy_from_user(&b, arg, sizeof(b)) < 0)
         return -EFAULT;
-    if (b.blob_id != DRM_EDID_BLOB_ID)
+    const uint8_t *data = NULL;
+    uint32_t len = 0;
+    if (b.blob_id == DRM_EDID_BLOB_ID) {
+        data = drm_edid_get();
+        len = 128;
+    } else if (b.blob_id == DRM_IN_FORMATS_BLOB_ID) {
+        data = g_in_formats_blob;
+        len = sizeof(g_in_formats_blob);
+    } else {
         return -ENOENT;
-    const uint8_t *edid = drm_edid_get();
-    if (b.data && b.length >= 128 &&
-        copy_to_user((void *)(uintptr_t)b.data, edid, 128) < 0)
+    }
+    if (b.data && b.length >= len &&
+        copy_to_user((void *)(uintptr_t)b.data, data, len) < 0)
         return -EFAULT;
-    b.length = 128;
+    b.length = len;
     return copy_to_user(arg, &b, sizeof(b)) < 0 ? -EFAULT : 0;
 }
 
@@ -1199,16 +1234,17 @@ static int drm_mode_obj_getproperties(drm_context_t *ctx, void *arg)
     } else if (o.obj_id == DRM_PLANE_ID) {
         /* The single plane exposes an immutable "type" property set to
          * DRM_PLANE_TYPE_PRIMARY so universal-plane clients (wlroots) find a
-         * primary plane. */
-        o.count_props = 1;
+         * primary plane, plus the immutable IN_FORMATS blob advertising the
+         * supported format/modifier set. */
+        static const uint32_t ids[2] = { DRM_PLANE_TYPE_PROP_ID, DRM_IN_FORMATS_PROP_ID };
+        static const uint64_t vals[2] = { DRM_PLANE_TYPE_PRIMARY, DRM_IN_FORMATS_BLOB_ID };
+        o.count_props = 2;
         if (o.props_ptr && copy_to_user((void *)(uintptr_t)o.props_ptr,
-                                        &(uint32_t){ DRM_PLANE_TYPE_PROP_ID },
-                                        sizeof(uint32_t)) < 0)
+                                        ids, sizeof(ids)) < 0)
             return -EFAULT;
         if (o.prop_values_ptr &&
             copy_to_user((void *)(uintptr_t)o.prop_values_ptr,
-                         &(uint64_t){ DRM_PLANE_TYPE_PRIMARY },
-                         sizeof(uint64_t)) < 0)
+                         vals, sizeof(vals)) < 0)
             return -EFAULT;
     } else {
         o.count_props = 0;
