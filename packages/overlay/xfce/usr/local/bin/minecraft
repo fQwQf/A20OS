@@ -1,0 +1,61 @@
+#!/bin/sh
+# Launch Minecraft Java Edition from the files installed under $MC_HOME.
+#
+# The files come from tools/fetch-minecraft.sh on the host (official client
+# jar + libraries + assets + natives) and are loaded into the image with
+# GUI_MEDIA.  Single-player runs with a placeholder token; online play,
+# Realms and skins need the official launcher and a Minecraft account.
+#
+#   minecraft                  # newest version under /usr/share/a20-media
+#   MC_HOME=/path minecraft    # explicit
+#   USERNAME=Steve minecraft   # in-game name for single-player
+#
+# LWJGL's bundled GLFW picks its backend from the environment.  On the labwc
+# session the Wayland backend is used, so run this from inside the desktop
+# (WAYLAND_DISPLAY and XDG_RUNTIME_DIR must point at the running session).
+set -eu
+
+A20_MEDIA=${A20_MEDIA:-/usr/share/a20-media}
+
+if [ -z "${MC_HOME:-}" ]; then
+    for d in "$A20_MEDIA"/*; do
+        [ -f "$d/client.jar" ] && MC_HOME=$d
+    done
+fi
+[ -n "${MC_HOME:-}" ] && [ -f "$MC_HOME/client.jar" ] || {
+    echo "minecraft: no client.jar under $A20_MEDIA (set MC_HOME=...)" >&2
+    exit 1
+}
+
+VERSION=$(basename "$MC_HOME")
+ASSET_INDEX=$(basename "$(ls "$MC_HOME"/assets/indexes/*.json 2>/dev/null | head -1)" .json)
+GAMEDIR=${GAMEDIR:-$HOME/.minecraft}
+USERNAME=${USERNAME:-Player}
+
+[ -n "$ASSET_INDEX" ] || {
+    echo "minecraft: no asset index under $MC_HOME/assets/indexes (fetch with WITH_ASSETS=1)" >&2
+    exit 1
+}
+[ -d "$MC_HOME/natives" ] || {
+    echo "minecraft: no natives under $MC_HOME/natives" >&2
+    exit 1
+}
+
+CP=$(sed "s|^.*/libraries/|$MC_HOME/libraries/|" "$MC_HOME/classpath.txt" | tr '\n' ':')
+mkdir -p "$GAMEDIR"
+
+echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
+exec java \
+    -cp "$CP$MC_HOME/client.jar" \
+    -Djava.library.path="$MC_HOME/natives" \
+    -Dorg.lwjgl.librarypath="$MC_HOME/natives" \
+    net.minecraft.client.main.Main \
+    --username "$USERNAME" \
+    --version "$VERSION" \
+    --gameDir "$GAMEDIR" \
+    --assetsDir "$MC_HOME/assets" \
+    --assetIndex "$ASSET_INDEX" \
+    --accessToken 0 \
+    --userType legacy \
+    --versionType release \
+    "$@"
