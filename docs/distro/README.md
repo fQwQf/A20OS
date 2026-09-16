@@ -20,6 +20,40 @@ make rootfs-alpine ARCH=riscv64
 
 `make distro-run` 做三件事：`dev-build` 编内核、`rootfs-alpine` 出发行版镜像、 最后用 `QEMU_GUI_DISPLAY` 指定的显示后端启动。磁盘布局是 `dev0=fat32.img` （A20OS 自研用户态）+ `dev1=rootfs.img`（发行版），内核从 fat32 引导， 发行版 rootfs 挂到 `/extra`。
 
+### 用实例放视频（`run-gui-*` + `GUI_MEDIA`）
+
+`xfce` world 的桌面实例可以直接带媒体文件启动：`GUI_MEDIA` 接受空格分隔的
+多个文件或目录，全部注入镜像的 `/usr/share/a20-media/`，并在 `~/Desktop/`
+放一个 `a20-media` 链接（双击即可在文件管理器里打开）。
+
+```sh
+make run-gui-x86_64                                    # 只启动桌面
+make run-gui-x86_64 GUI_MEDIA=~/Videos/demo.mp4        # 注入一个视频
+make run-gui-x86_64 GUI_MEDIA="a.mp4 b.mkv clips/"     # 多文件 + 目录
+make run-gui-riscv64 GUI_MEDIA=~/Videos/demo.mp4       # 其他架构同理
+```
+
+`run-gui-<arch>` 等价于 `tools/a20 run xfce-<arch>`（先 `image-world` 再 GUI
+启动），只构建镜像用 `make ARCH=<arch> image-world PKG_WORLD=xfce
+GUI_MEDIA=...`。
+
+镜像内自带的播放器：**parole**（GStreamer 后端）和 **mpv**（命令行/兜底，
+实测 `mpv v0.40.0` 可运行）。桌面里也可以直接用 Thunar 打开
+`/usr/share/a20-media/` 双击播放。
+
+### 桌面里的 JVM 与图形栈
+
+- **JVM**：world 装了 `openjdk21-jre`。`/usr/bin/java` 是 overlay 提供的
+  薄封装（直接 exec 真实路径 + 给一组默认堆参数），原因见
+  [known-issues.md](known-issues.md) 的 JVM 条目。`java -version` 可用。
+- **图形 API**：world 装了 Mesa（`mesa`/`mesa-dri-gallium`/`mesa-gl`/
+  `mesa-gles`/`mesa-egl`/`mesa-gbm` + `mesa-utils`/`mesa-demos`）与
+  `virglrenderer`，镜像里有 `swrast`/`kms_swrast`/`virtio_gpu`/`zink` DRI
+  驱动和 `libGL/libEGL/libgbm`。但 **GL 客户端目前出不了图**：内核的 DRM
+  是 dumb-buffer KMS，缺 GEM 对象分配与 render node，PRIME 也只是 memfd
+  拷贝。细节与 Minecraft 的前置条件见
+  [../graphics/3d-graphics.md](../graphics/3d-graphics.md) 第 8 节。
+
 ## 阅读顺序
 
 - [`build.md`](build.md)：rootfs 是怎么构建出来的，以及构建环境里踩过的坑。

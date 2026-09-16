@@ -32,13 +32,14 @@ PKG_WORLD     ?= base
 PKG_SIZE_MB   ?= 512
 PKG_ALPINE    ?= 1
 
-# 可选：往 world 镜像里注入本地媒体文件（演示视频等）。用法：
-#   make ARCH=x86_64 image-world PKG_WORLD=xfce-x86_64 PKG_MEDIA=/path/to/video.mp4
-# 文件落到镜像内 $(PKG_MEDIA_DIR)/<原文件名>，桌面里用 parole 打开或
-# 在 Thunar 中双击即可播放。
-PKG_MEDIA          ?=
-PKG_MEDIA_DIR      ?= /usr/share/a20-media
-PKG_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
+# 可选：往 world 镜像里注入本地媒体文件（演示视频等）。GUI_MEDIA 可写空格
+# 分隔的多个文件或目录，全部落到镜像内 $(GUI_MEDIA_DIR)/。
+#   make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
+#   make run-gui-x86_64 GUI_MEDIA="/a.mp4 /b.mp4 clips/"
+# 桌面里用 parole / mpv 打开，或在 Thunar 里双击即可播放。
+GUI_MEDIA          ?=
+GUI_MEDIA_DIR      ?= /usr/share/a20-media
+GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 
 .PHONY: pkg-key pkgs pkgs-check pkg-repo image-world run-world run-world-gui
 
@@ -81,18 +82,22 @@ pkg-repo: pkgs
 # 生成只含媒体文件的临时 overlay，由 mkrootfs 的 --overlay 机制合入镜像。
 .PHONY: pkg-media-overlay
 pkg-media-overlay:
-	@test -f "$(PKG_MEDIA)" || { echo "[PKG] PKG_MEDIA not found: $(PKG_MEDIA)"; exit 1; }
-	@rm -rf "$(PKG_MEDIA_OVERLAY)"
-	@mkdir -p "$(PKG_MEDIA_OVERLAY)$(PKG_MEDIA_DIR)"
-	@cp "$(PKG_MEDIA)" "$(PKG_MEDIA_OVERLAY)$(PKG_MEDIA_DIR)/"
-	@echo "[PKG] media: $(PKG_MEDIA) -> $(PKG_MEDIA_DIR)/$$(basename '$(PKG_MEDIA)')"
+	@set -e; \
+	rm -rf "$(GUI_MEDIA_OVERLAY)"; \
+	mkdir -p "$(GUI_MEDIA_OVERLAY)$(GUI_MEDIA_DIR)" "$(GUI_MEDIA_OVERLAY)/root/Desktop"; \
+	for m in $(GUI_MEDIA); do \
+		[ -e "$$m" ] || { echo "[PKG] GUI_MEDIA not found: $$m" >&2; exit 1; }; \
+		cp -a "$$m" "$(GUI_MEDIA_OVERLAY)$(GUI_MEDIA_DIR)/"; \
+		echo "[PKG] media: $$m -> $(GUI_MEDIA_DIR)/$$(basename "$$m")"; \
+	done; \
+	ln -sfn "$(GUI_MEDIA_DIR)" "$(GUI_MEDIA_OVERLAY)/root/Desktop/a20-media"
 
-image-world: pkg-repo $(if $(PKG_MEDIA),pkg-media-overlay)
+image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 	$(PYTHON) tools/mkrootfs.py --arch $(PKG_ARCH) \
 		--world packages/world/$(PKG_WORLD).world \
 		--repo $(abspath $(PKG_REPO_DIR)) \
 		$(if $(wildcard packages/overlay/$(PKG_WORLD)),--overlay packages/overlay/$(PKG_WORLD),) \
-		$(if $(PKG_MEDIA),--overlay $(abspath $(PKG_MEDIA_OVERLAY)),) \
+		$(if $(GUI_MEDIA),--overlay $(abspath $(GUI_MEDIA_OVERLAY)),) \
 		$(if $(PKG_SIGN_KEY),--keys-dir $(PKG_KEYS_DIR),--allow-untrusted) \
 		$(if $(filter 0,$(PKG_ALPINE)),--no-alpine,) \
 		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
@@ -106,6 +111,22 @@ run-world-gui: image-world $(FAT32_IMG)
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
 		-device $(QEMU_BLK_SECOND),drive=xworld \
 		-kernel $(KERNEL_ELF)
+
+# 传统入口：以 GUI + 音频启动 XFCE 桌面实例（等价 tools/a20 run xfce-<arch>）。
+# GUI_MEDIA 会在启动前注入镜像，例如：
+#   make run-gui-x86_64 GUI_MEDIA=~/Videos/demo.mp4
+.PHONY: run-gui run-gui-riscv64 run-gui-aarch64 run-gui-x86_64 run-gui-loongarch64
+run-gui-riscv64:
+	$(MAKE) ARCH=riscv64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+run-gui-aarch64:
+	$(MAKE) ARCH=aarch64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+run-gui-x86_64:
+	$(MAKE) ARCH=x86_64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+run-gui-loongarch64:
+	$(MAKE) ARCH=loongarch64 PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
+
+run-gui:
+	$(MAKE) ARCH=$(ARCH) PKG_WORLD=xfce GUI_MEDIA="$(GUI_MEDIA)" run-world-gui
 
 # 组装并直接启动：world 镜像作为第二块盘（内核挂载为 /extra；
 # 含 /usr/lib/a20/init 标记的镜像会被 init chroot 接管，即 distro 模式）。

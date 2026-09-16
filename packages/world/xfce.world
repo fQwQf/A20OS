@@ -76,15 +76,33 @@ font-noto-cjk
 font-noto-emoji
 font-dejavu
 
-# 媒体
+# 媒体（播放器：parole 走 GStreamer，mpv 作为兜底/命令行播放）
 ffmpeg
 gst-plugins-good
 gst-plugins-bad
 gst-plugins-ugly
 gst-libav
 parole
+mpv
 # 缩略图服务（thunar/xfdesktop 通过 D-Bus 激活 org.freedesktop.thumbnails.Thumbnailer1）
 tumbler
+
+# JVM（Minecraft 等 Java 程序；openjdk21 在 x86_64/aarch64/riscv64 均有包。
+# 注意 LWJGL 只提供 x86_64/aarch64 native，riscv64 跑不了 Minecraft）
+openjdk21-jre
+
+# 图形 API：OpenGL / OpenGL ES / EGL / GBM（Mesa 软件渲染 llvmpipe + virgl）。
+# 桌面合成器默认仍是 pixman；GL 客户端需要合成器用 GL 渲染器（见 docs）。
+mesa
+mesa-dri-gallium
+mesa-gl
+mesa-gles
+mesa-egl
+mesa-gbm
+virglrenderer
+# 诊断工具：glxinfo / eglinfo / glxgears / es2_info
+mesa-utils
+mesa-demos
 
 # 网络
 networkmanager

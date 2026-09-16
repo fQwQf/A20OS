@@ -17,17 +17,24 @@ done
 # a bounded number of times so a single transient crash does not leave the
 # desktop headless; give up after MAX_TRIES consecutive fast deaths.
 MAX_TRIES=5
+FAST_DEATH_SECS=10
 spawn() {
     app=$1
     shift
-    n=0
-    while [ "$n" -lt "$MAX_TRIES" ]; do
+    fast_deaths=0
+    while [ "$fast_deaths" -lt "$MAX_TRIES" ]; do
+        started=$(date +%s)
         "$app" "$@" &
         pid=$!
         wait "$pid"
-        n=$((n + 1))
-        [ "$n" -lt "$MAX_TRIES" ] && sleep 1
+        if [ "$(( $(date +%s) - started ))" -lt "$FAST_DEATH_SECS" ]; then
+            fast_deaths=$((fast_deaths + 1))
+        else
+            fast_deaths=0
+        fi
+        [ "$fast_deaths" -lt "$MAX_TRIES" ] && sleep 1
     done
+    echo "a20: $app gave up after $MAX_TRIES fast deaths" >&2
 }
 
 spawn xfsettingsd &

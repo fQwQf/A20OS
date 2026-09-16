@@ -4,71 +4,83 @@
     <property name="screen0" type="empty">
       <property name="monitor4b9d2b25a6be727d8efd7c968a0afc568538c0a0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor4670f7a8a98d8f9125eb67c5cb0ce0e7ee3f0a5e" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitorb3439d84fdf6ad809751f2dec35205e0fdfbc3e9" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor669a085354f6b24408eb9cbb812fa08054832941" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor07ecc3dc47b44d471cf1d0679cedac259314c3ca" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor219c758276014cf095bbaa65c548f7934ea6afe1" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor889ecd9691c8bcdb413191d2059780e394fda966" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor50bd2648760ae0523d0d2a414f82e0a7ceb3dbe2" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
       <property name="monitor0" type="empty">
         <property name="workspace0" type="empty">
-          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-blue.jpg"/>
+          <property name="last-image" type="string" value="/usr/share/backgrounds/xfce/xfce-flower.svg"/>
           <property name="image-style" type="int" value="5"/>
           <property name="color-style" type="int" value="0"/>
+          <property name="image-show" type="bool" value="true"/>
         </property>
       </property>
     </property>
   </property>
   <property name="desktop-icons" type="empty">
-    <property name="style" type="int" value="1"/>
+    <!-- xfdesktop icon style enum: 0=None, 1=Minimized application icons,
+         2=File/launcher icons.  Must be 2 here: the file-icons block below
+         (show-home/trash/filesystem/removable) only applies to style 2. -->
+    <property name="style" type="int" value="2"/>
     <property name="icon-size" type="uint" value="48"/>
     <property name="show-hidden-files" type="bool" value="false"/>
     <property name="show-tooltips" type="bool" value="true"/>
