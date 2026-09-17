@@ -253,6 +253,29 @@ int firmware_console_getchar(void) {
 #define X86_DIRECT_MAP_END      0x80000000ULL
 #define X86_MB_MMAP_MIN_SIZE    20u
 
+/*
+ * QEMU puts a large guest's second half above 4 GiB (with -m 4G: 0-2 GiB below
+ * and 4-6 GiB above), and nothing of the kernel's MMIO lives up there: the PCI
+ * ECAM and the MMIO window are at 2.75/3 GiB, inside the uncacheable part of
+ * the boot map.  The boot map stops at 4 GiB, so map the whole 1 GiB chunks a
+ * usable range fully covers, as cacheable RAM, and report them as usable.
+ * Chunks are all-or-nothing on purpose: a partially RAM 1 GiB page would also
+ * make whatever else is in it cacheable.
+ */
+#define X86_HIGH_RAM_BASE       0x100000000ULL
+#define X86_HIGH_RAM_MAP_END    0x200000000ULL
+#define X86_HIGH_PAGE           0x40000000ULL
+
+extern uint64_t boot_pdpt_hh[512];
+
+static void x86_high_ram_map_flush(void)
+{
+    __asm__ __volatile__(
+        "movq %%cr3, %%rax\n\t"
+        "movq %%rax, %%cr3\n\t"
+        ::: "rax", "memory");
+}
+
 struct x86_mb_info {
     uint32_t flags;
     uint32_t mem_lower;
@@ -296,27 +319,49 @@ static void x86_ram_detect(void) {
         return;
 
     size_t n = 0;
+    int mapped_high = 0;
     uintptr_t p = (uintptr_t)(mi->mmap_addr + PAGE_OFFSET);
     uintptr_t stop = p + mi->mmap_length;
-    while (n < X86_RAM_RANGE_MAX && p + X86_MB_MMAP_MIN_SIZE <= stop) {
+    while (p + X86_MB_MMAP_MIN_SIZE <= stop) {
         const struct x86_mb_mmap_entry *e = (const struct x86_mb_mmap_entry *)p;
         if (e->type == 1 && e->len != 0) {
-            paddr_t base = (paddr_t)e->addr;
-            paddr_t end = (paddr_t)(e->addr + e->len);
+            paddr_t raw_base = (paddr_t)e->addr;
+            paddr_t raw_end = (paddr_t)(e->addr + e->len);
+            if (raw_base < X86_LOW_RESERVED_END)
+                raw_base = X86_LOW_RESERVED_END;
+
+            paddr_t base = (raw_base + X86_PAGE_SIZE - 1) &
+                           ~((paddr_t)X86_PAGE_SIZE - 1);
+            paddr_t end = raw_end;
             if (end > X86_DIRECT_MAP_END)
                 end = X86_DIRECT_MAP_END;
-            if (base < X86_LOW_RESERVED_END)
-                base = X86_LOW_RESERVED_END;
-            base = (base + X86_PAGE_SIZE - 1) & ~((paddr_t)X86_PAGE_SIZE - 1);
             end &= ~((paddr_t)X86_PAGE_SIZE - 1);
-            if (end > base) {
+            if (end > base && n < X86_RAM_RANGE_MAX) {
                 g_ram_base[n] = base;
                 g_ram_end[n] = end;
                 n++;
             }
+
+            paddr_t chunk = raw_base > X86_HIGH_RAM_BASE ?
+                            (raw_base + X86_HIGH_PAGE - 1) &
+                                ~(X86_HIGH_PAGE - 1)
+                            : X86_HIGH_RAM_BASE;
+            for (; chunk + X86_HIGH_PAGE <= raw_end &&
+                   chunk + X86_HIGH_PAGE <= X86_HIGH_RAM_MAP_END &&
+                   n < X86_RAM_RANGE_MAX;
+                 chunk += X86_HIGH_PAGE) {
+                boot_pdpt_hh[chunk >> 30] = (uint64_t)chunk | 0x83ULL;
+                mapped_high = 1;
+                g_ram_base[n] = chunk;
+                g_ram_end[n] = chunk + X86_HIGH_PAGE;
+                n++;
+            }
         }
+        if (p + e->size + sizeof(uint32_t) <= p)
+            break;
         p += e->size + sizeof(uint32_t);
     }
+
     if (n == 0)
         return;
 
@@ -325,6 +370,8 @@ static void x86_ram_detect(void) {
         printf("[RAM] usable %p..%p (%lu MiB)\n",
                (void *)g_ram_base[i], (void *)g_ram_end[i],
                (unsigned long)((g_ram_end[i] - g_ram_base[i]) >> 20));
+    if (mapped_high)
+        x86_high_ram_map_flush();
 }
 
 size_t arch_ram_range_count(void) {
