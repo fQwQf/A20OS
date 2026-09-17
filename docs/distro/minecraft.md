@@ -171,6 +171,152 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
   （`RTM_GETLINK`/`RTM_NEWADDR`）与 `net0` 在 `/proc/net/dev` 里的注册；`/usr/share/udhcpc/default.script`
   在套用租约时报 `arithmetic syntax error`（发行版脚本问题，与 socket 层无关）。
 
+- **当前的阻塞点：游戏卡在 `glfwCreateWindow()` 里不返回（实测线程转储，不是猜测）**。网络修好之后，
+  游戏能走完 Datafixer（287 项，1.6s）→ `Environment[...PROD]` → `Setting user: Player` →
+  `Backend library: LWJGL version 3.3.3+5`，然后停在**创建窗口**这一步：MC 的深灰加载窗口已经出现在
+  屏幕上，但渲染线程此后不再前进（观察 9 分钟无任何新日志）。期间唯一的活动是 authlib 每 5 分钟重试
+  一次（`UnknownHostException: sessionserver.mojang.com` / `api.minecraftservices.com`——DNS 仍不通，
+  但单机不需要它，不致命）。
+
+  用 `kill -QUIT` 让 HotSpot 打线程转储（**必须把 launcher 的 stdout 重定向到 `/dev/console`** 才能从
+  串口日志拿到它），渲染线程在 200 秒时的位置精确是：
+
+  ```
+  "Render thread" #1 ... cpu=-0.00ms elapsed=199.82s  java.lang.Thread.State: RUNNABLE
+      at org.lwjgl.system.JNI.invokePPPP(Native Method)
+      at org.lwjgl.glfw.GLFW.nglfwCreateWindow(GLFW.java:2058)
+      at org.lwjgl.glfw.GLFW.glfwCreateWindow(GLFW.java:2229)
+      at fyk.<init>(SourceFile:107)
+      at hps.a(SourceFile:20)
+      at gfj.<init>(SourceFile:504)
+      at net.minecraft.client.main.Main.main(SourceFile:234)
+  ```
+
+  要点：**该线程 CPU 消耗约 0**、其余 12 个线程全部 WAITING/空闲、内核侧零 `[ERR]`/fault。
+  即不是崩溃、不是 JVM 内部死锁，而是**阻塞在 native 的 X11 窗口创建里**：`XSync` 那类同步往返
+  等不到 Xwayland 应答，或者 Xwayland 自己被卡住。它与
+  `Xwayland glamor: GBM Wayland interfaces not available` + `falling back to sw`、以及紧随其后的
+  一堆 xkbcomp warnings 出现在同一位置——XKB keymap 是一大块数据，正好走 Xwayland 那条 AF_UNIX 连接，
+  所以「AF_UNIX 大消息/背压路径丢了唤醒」是很自然的怀疑对象。
+
+  用户侧看到的现象（窗口一闪而过然后退出）是同一处卡死的另一种表现：X 窗口建出来、随即被拆掉，
+  客户端永远等不到返回。
+
+  **判别实验（尚未做）**：① 同一内核用 `-m 2G` 跑同一段注入——`-m 2G` 时新的 >4GiB RAM 映射完全不生效
+  （见 `67b47c16`），若照样卡住就排除内存改动；② 卡住后在同一会话里跑 `xdpyinfo`/`xeyes`：新的 X 客户端
+  也卡 ⇒ Xwayland 自己死了；只有 GLFW 卡 ⇒ 是那一条连接/那一次往返。
+
+  另外记一笔：启动器当前继承到 `JAVA_TOOL_OPTIONS: -Xms256m -Xmx512m`（镜像里 `/usr/bin/java`
+  包装脚本给的默认堆）。内存现在能到 4G 了，这个 512MB 上限迟早要抬。
+
+  **两个控制实验都做完了，都排除了一批嫌疑**：
+
+  - **`-m 2G` 对照**：`[RAM] usable` 只有 `0x100000..0x7ffd9000 (2046 MiB)`（此时 >4GiB 映射
+    完全不生效），OOM 计数 0，渲染线程**卡在同一行**：`nglfwCreateWindow` RUNNABLE、
+    `cpu=-0.00ms elapsed=199.77s`。⇒ **`67b47c16` 的内存改动与此无关**，这是既有 bug。
+  - **延后启动对照**：把游戏从「会话起来后 30s」推迟到 **150s**（远晚于 swaybg 铺背景面的
+    25–45s 窗口）再启动，仍然**卡在同一行**（`elapsed=149.75s`）。⇒ 也**不是** swaybg 与
+    建窗撞车。
+
+  即这是一个**确定性**的卡死，与内存大小、启动时机都无关，症状是：客户端在 native
+  `glfwCreateWindow` 里等 Xwayland 应答而 ~0 CPU（纯阻塞），内核侧零 `[ERR]`。
+  卡住的那一刻正好是 `xkbcomp` 输出 keymap 的时候 —— **XKB keymap 是一大块数据**，
+  因此优先查 AF_UNIX STREAM 的大消息/唤醒路径：
+
+  - `kernel/net/socket_unix.c:unix_ch_send()` 在 `A20_ERR_WOULD_BLOCK` 时**无条件返回
+    `-EAGAIN`**（`return sent ? (int)sent : -EAGAIN;`），对**阻塞** socket 而言这不符合
+    Linux 语义——阻塞写应当等待，而不是给上层一个短写/EAGAIN。
+  - `net_unix_socket_sendto_impl()` 的**旧队列**路径（SCM_RIGHTS 那条）只唤醒**一个**
+    等待者（`wait_queue_collect_one(&dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q)`），
+    存在「读者判空 → 写者入队并唤醒（此时无等待者）→ 读者才 park」的丢唤醒窗口；一旦发生，
+    双方都停住，与实测现象一致。（channel 路径用的是 `wait_queue_wake_all()`，那条没有这个问题。）
+
+  **阻塞点已定位到具体 syscall（实测线程级 syscall 追踪）**：内核自带一个 bootarg 门控的追踪器
+  （`kernel/syscall/trace.c`；`nm kernel.elf` 确认 `syscall_trace_enter/exit/slow_scanner` 都在，
+  它会把 in-flight 的 syscall 作为 `[TRACE-SLOW]` 报出来）。它在 x86_64 上无法从宿主开启（原因见下），
+  于是临时把它的 prefix 默认成 `java` 跑了一次（**该临时改动已还原，未提交**）。追踪把渲染线程
+  卡住前最后的 syscall 序列钉死为：
+
+  ```
+  [TRACE] 159(Render thread) recvfrom(78 cf7e20c0 1faa0)    # 请求 129696 字节
+  [TRACE] 159(Render thread) recvfrom = 40640               # 只拿到 40640（部分读）
+  [TRACE] 159(Render thread) recvfrom(78 cf7ebf80 15be0)    # 再要剩下的 89056
+  [TRACE] 159(Render thread) recvfrom = -11                 # EAGAIN
+  [TRACE] 159(Render thread) poll(614ee360 1 ffffffffffffffff)
+  [TRACE-SLOW] pid=159(Render thread) stuck in poll for 1.6e11 ticks (args 614ee360 1 ffffffffffffffff)
+  ```
+
+  即：**客户端读到一条大 X 回包的“前半截”（40640 / 129696）之后，剩下的字节再也没到，于是它对一个
+  fd 做无限 `poll` 等在那里** —— 这就是 `glfwCreateWindow` 不返回的直接原因。所以问题不在窗口创建
+  本身，而在 Xwayland↔客户端这条 AF_UNIX 流上「大消息只送出一部分，其余没被送出/没有重发」。
+  头号嫌疑仍是 `unix_ch_send()`：通道返回 `A20_ERR_WOULD_BLOCK` 时它**无条件**
+  `return sent ? (int)sent : -EAGAIN;`，而对**阻塞** socket 来说正确语义是等待后把剩余字节继续送完，
+  不该把短写/EAGAIN 抛给上层；一旦发生，大回包的后半截就永远到不了，客户端无限 poll 等它。
+  （按这条线索改过一版并实测：**没能修好**——MC 仍停在 `Backend library` 之后、没有 renderer 行，
+  所以那版改动已还原，没有留在树里。）
+
+- **换个进程追踪后又得到两个新事实**（把追踪 prefix 临时换成 `Xwayland` 跑的一轮，改动同样已还原）：
+
+  1. **这一轮 MC 穿过了建窗**：日志里出现了 `[11:40:33] [Render thread/INFO]: Using optional
+     rendering extensions: GL_ARB_buffer_storage, GL_KHR_debug, GL_ARB_vertex_attrib_binding,
+     GL_ARB_direct_state_access, GL_EXT_texture_filter_anisotropic` —— 说明上面那个「无限 poll」
+     **不是必然发生**，而是与调度/时序有关（追踪改变了时序就不触发）。这也解释了为什么单改
+     `unix_ch_send()` 没用：真正的竞态在别处。同时 Xwayland 侧看：它的 `writev` 全是小包
+     （`writev = 32`）、随后长期停在 `epoll_pwait`，**没有**看到「写一半就不写了」的证据。
+  2. **这一轮最后内核 panic 了（新 bug，只观测到一次，可复现性未验证）**：
+
+     ```
+     [ERR] Kernel Address Error: code=1
+     [ERR] Faulting PC (ERA): 0xffff8000002a0c99
+     [ERR] Fault Address (BADV): 0x6fa0f1b8
+     [ERR] Current Task: pid=0 name=idle
+     [PANIC] backtrace:
+       [0] kernel_trap_handler+0x372
+       [1] ethernet_output+0x52a
+     ```
+
+     即**网络发送路径（lwIP `ethernet_output`）在 idle 任务上下文里踩了一个野指针**。
+     时间点正好在 MC 尝试连 sessionserver/api.minecraftservices 之后（这轮那些请求报的是
+     `SocketException: Broken pipe`，是 panic 的后果而不是原因）。怀疑与 AF_PACKET 那套
+     （`29357cbc` 的 RX tap / poll 下半部）或延迟 TX 有关；修它之前先要能稳定复现并确认是不是
+     同一处被踩坏。
+
+- **已排除的假设（读码确认，别再追）**：通道「发送方等空间」的 park/wake 配对是**对的** ——
+  发送方在 `peer->waiters` 上以 `A20_CH_WAIT_SEND` 挂起（`a20_channel.c:312`，`peer` 是接收端
+  的 endpoint），接收方 `a20_channel_recv_finish()` 在**同一把** `peer->lock` 下让出空间并唤醒
+  `ep->waiters`（`a20_channel.c:618`），两者是同一条队列且对锁原子，不存在丢唤醒。
+  同理 `unix_ch_recv()` 对半消费消息的暂存（`s->ch_buf`/`s->ch_len` + `memmove`）逻辑也是对的。
+  ⇒ 客户端那次「只拿到 40640 就 EAGAIN」确实是**当时通道里就这么多**，问题在更上游：
+  要么 Xwayland 没把剩下的写出去，要么写了但在到达客户端前被丢掉。
+  **下一步（唯一还没做的观测）**：在**真的卡住**的那一轮里同时追踪 Xwayland 与客户端，
+  看 `fd 78` 上那条大回包的剩余部分有没有出现在 Xwayland 的 write/writev 里；
+  要留意多个线程并发 `recv` 同一个 socket 时 `unix_ch_recv()` 的暂存缓冲没有加锁这一点
+  （它会丢字节，且丢字节在流上是不可检测的——症状正好是「剩余部分永不到、客户端无限 poll」）。
+
+  **定位手段本身也撞墙了（已实测）**：内核自带一个 bootarg 门控的 syscall 追踪器
+  （`kernel/syscall/trace.c`，`trace=<comm-prefix>`，并会把 in-flight 的 syscall 作为
+  "slow" 报出来——"最后一个只有 enter 没有 return 的就是阻塞点"，正是查这种卡死要的东西；
+  `nm kernel.elf` 确认 `syscall_trace_enter/exit/slow_scanner` 都编进去了）。**但它打不开**：
+
+  - `-append "trace=java"` 无效：x86_64 的 bootargs 走 fw_cfg 的 `FW_CFG_CMDLINE_SIZE/DATA`
+    （`kernel/arch/x86_64/platform/firmware.c` 用 0x0014/0x0015），而 **QEMU 只在 Linux boot
+    protocol 下才填这两个 key**；本内核是 multiboot `-kernel kernel.elf`，于是客体内实测
+    `[FW_CFG] cmdline_size=0` / `cmdline=''`。
+  - `-fw_cfg name=etc/cmdline,string=...` 也没用（那注册的是另一个文件选择子，不是 0x0014/0x0015）。
+
+  ⇒ **x86_64 上 `-append` bootargs 实际上是坏的**（`kernel/platform/qemu-virt-x86_64/board.c`
+  的注释声称走 `-append`，与实测不符；平时被静态网络兜底掩盖了）。另外实测 QEMU 在 multiboot 这条
+  路径上也没有把 `-append` 传进内核（multiboot info 的 cmdline 同样为空），所以追踪器只能用上面
+  那次临时默认才跑得起来 —— 修好 bootargs 这条链本身（改用 multiboot cmdline 作来源）就值得单独做。
+
+  **要接通观察手段**，二选一：① 让 x86_64 去读 **multiboot** 的 cmdline（QEMU 的 multiboot info
+  里有，顺带修掉上面那个 bootargs bug）；② 临时把 `trace.c` 的 prefix 默认成 `java`。
+  接通后再跑 `trace=java`，读那条 slow/in-flight 记录即可定位阻塞 syscall。
+
+  **另外提醒**：`/proc/<pid>/wchan` 与 `/proc/<pid>/stack` 目前是**残桩**，不能用——
+  wchan 对**每个**任务（连 `dbus-daemon` 都算）都返回同一个 `do_wait`，stack 打印
+  `[<0000000000000000>] 0`，且没有 `/proc/<pid>/task/`。
+
 
 
 
