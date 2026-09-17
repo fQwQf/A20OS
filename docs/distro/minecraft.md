@@ -138,13 +138,17 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
 
 - **当前能走到哪**：修完上面这些，启动器能跑完整套真实启动流程——Datafixer（287 项优化）、
   Environment/sessionHost、`Setting user: Player`、进入 Render thread、
-  **`Backend library: LWJGL version 3.3.3+5` 成功加载**。LWJGL 自带的 `libjemalloc.so` 随后会 fault
-  （`C [libjemalloc.so+0x10055] _init+0x8055`，pc=0x81a6）；用
-  `-Dorg.lwjgl.system.allocator=system` 换掉分配器后不再加载它，游戏继续到**开窗**阶段，然后被 X11 打断：
-  `XIO: fatal IO error 90 (Message too large) on X server ":0"`——GLFW 走了 Xwayland 的 X11 路径，
-  报错来自 AF_UNIX 发送过大的 X 请求（errno 90 = EMSGSIZE）。这是下一个要查的点：要么让
-  GLFW/游戏走原生 Wayland（会话就是 labwc Wayland），要么查 A20OS 的 AF_UNIX 大消息路径。
-  网络/鉴权（Yggdrasil 公钥、session profile 查询）在此之前也会跑，失败于 DNS（客体未配 resolver）。
+  **`Backend library: LWJGL version 3.3.3+5` 成功加载**，并且**开窗成功**（XIO 错误没有了）。
+  这中间还修/绕了两处：
+  - LWJGL 自带的 `libjemalloc.so` 会 fault（`C [libjemalloc.so+0x10055] _init+0x8055`，pc=0x81a6）；
+    用 `-Dorg.lwjgl.system.allocator=system` 换掉分配器即绕过。
+  - 开窗时 GLFW 走 Xwayland 的 X11 路径，曾报
+    `XIO: fatal IO error 90 (Message too large) on X server ":0"`：A20OS 的 AF_UNIX 旧队列路径把单条消息
+    卡在 `NET_MAX_PAYLOAD`(64KiB)，更大的写直接 `EMSGSIZE`。**已修（`4e2aeb9f`）**：STREAM 写超过一条
+    消息时按 64KiB 分片（读端仍是同一字节流）。
+- **下一个真正的阻塞点是 DNS**：游戏走到网络/鉴权阶段（Yggdrasil 公钥、session profile 查询）时报
+  `UnknownHostException: api.minecraftservices.com`——客体没配 resolver（内核网络栈本身 `curl` 是通的，
+  网络不阻塞）。这是发行版 rootfs 的配置项，不是内核 bug。
 
 
 
