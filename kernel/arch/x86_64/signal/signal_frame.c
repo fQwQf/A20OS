@@ -11,10 +11,12 @@
 
 /*
  * x86_64 uses the normal C calling convention: a signal handler returns with
- * RET, which pops the return address from the top-of-stack word.  We therefore
- * replace the magic flag word at the frame base with the address of a
- * dedicated, executable trampoline page.  The trampoline first pushes %rax to
- * restore the stack pointer to the frame base, then invokes rt_sigreturn.
+ * RET, which pops the return address from the top-of-stack word.  We place the
+ * address of a dedicated, executable trampoline page there (see the delivery
+ * path in signal.c, which puts it 8 bytes below the 16-aligned frame so the
+ * handler is entered with rsp ≡ 8 (mod 16) per the SysV ABI).  The handler's
+ * RET pops that word, leaving rsp pointing at the frame base, and the
+ * trampoline invokes rt_sigreturn.
  */
 void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, uint64_t tramp_addr,
                                 trap_context_t *ctx)
@@ -22,6 +24,19 @@ void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, uint64_t tramp_addr,
     (void)tramp_addr;
     (void)ctx;
     frame->flag = X86_64_SIGRET_TRAMP_ADDR;
+}
+
+/*
+ * The SysV ABI requires a function -- and a signal handler -- to be entered
+ * with rsp ≡ 8 (mod 16), as if reached through a call that pushed an 8-byte
+ * return address onto a 16-aligned stack.  The signal frame base is kept
+ * 16-aligned so the embedded fxsave64 area stays aligned, so the handler is
+ * entered 8 bytes below it.  Without this, SSE-using handlers (musl/HotSpot
+ * prologues doing `movaps [rsp+X], xmmN`) take a #GP on a misaligned stack.
+ */
+uint64_t arch_signal_handler_sp(uint64_t frame_sp)
+{
+    return frame_sp - 8;
 }
 
 /*
@@ -47,15 +62,16 @@ void arch_setup_signal_trampoline(struct mm_struct *mm)
         return;
     memset(page, 0, PAGE_SIZE);
 
+    /* The handler's RET already leaves rsp pointing at the signal frame base,
+     * so the trampoline only needs to invoke rt_sigreturn. */
     uint8_t *p = (uint8_t *)page;
-    p[0] = 0x50;         /* pushq %rax */
-    p[1] = 0xB8;         /* mov imm32,%eax */
-    p[2] = 15;           /* rt_sigreturn */
+    p[0] = 0xB8;         /* mov imm32,%eax */
+    p[1] = 15;           /* rt_sigreturn */
+    p[2] = 0;
     p[3] = 0;
     p[4] = 0;
-    p[5] = 0;
-    p[6] = 0x0F;         /* syscall */
-    p[7] = 0x05;
+    p[5] = 0x0F;         /* syscall */
+    p[6] = 0x05;
 
     paddr_t pa = va_to_pa(page);
     pt_map(m->pgdir, addr, pa,

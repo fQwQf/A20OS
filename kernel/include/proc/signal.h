@@ -142,6 +142,15 @@ void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, vaddr_t tramp_addr,
                                 trap_context_t *ctx);
 
 /*
+ * Architecture-specific hook returning the stack pointer the signal handler
+ * is entered with, given the 16-aligned frame base.  The default returns the
+ * frame base.  x86_64 overrides it to enter 8 bytes lower (rsp ≡ 8 mod 16 per
+ * the SysV ABI); the generic delivery then places the handler's return address
+ * at the returned sp.
+ */
+uint64_t arch_signal_handler_sp(uint64_t frame_sp);
+
+/*
  * Architecture-specific hook called once when a new user address space is
  * created (exec).  It can map a per-process signal-trampoline page.  The
  * default weak implementation is a no-op.
