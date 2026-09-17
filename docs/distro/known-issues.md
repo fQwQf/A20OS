@@ -155,17 +155,21 @@
   （`proc_exit`/`proc_force_exit`/`exit_pending` 与 `pending_exit_code` 的一致性），并用 `mpv --vo=null` ×N 复现。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
-- **2026-09 更新（信号对齐修复后）**：上面那条「信号处理器入口栈对齐错 8 字节」修掉后（`68abf68f`），
-  JVM 从「handler 一进就 #GP 死循环」变成**能跑 handler 并打印崩溃报告**。于是暴露出真正的崩溃：
-  `java -cp client.jar net.minecraft.client.main.Main` 干净地崩在 **`pc=0x0`（跳到 NULL）**，
-  hs_err 显示 `JavaThread "main"` 正在算 `sun.security.provider.SHA5$SHA384`（jar 清单摘要校验），
-  `RIP=0`。`-XX:-UseSHA` 关闭 SHA 内联**无效** → 不是 SHA 内联 stub；更像 JIT 代码跳到空指针，
-  或返回地址被写坏（与本文档那条「多线程匿名内存偶发被写坏」同源）。
-- **另一个确认的 ABI 缺口**：hs_err 报 `bad uc->uc_mcontext.fpregs: 0x0`。A20OS 的 `arch_sigcontext_t`
-  把 `fpu[512]` **内嵌**在 sigcontext 里，而 Linux 的 `ucontext.uc_mcontext` 在该位置是
-  **指向 fpstate 的指针**（`gregs[23]` + `fpregs`），二者布局不一致。读 ucontext 的程序
-  （JVM 的隐式空指针检查、崩溃报告）会读错偏移；要彻底修需把 `arch_sigcontext_t`/
-  `arch_ucontext_t` 改成与 Linux/glibc 一致。
+- **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
+  能打印崩溃报告；暴露出的真正崩溃是 **HotSpot 的隐式空指针检查**（`SHA5.implCompress0` 的数组访问依赖
+  「空数组 fault → 处理器抛 NPE」，A20OS 上没被识别 → JVM 当致命崩溃）。最小复现器（宿主 javac 编 `.class`
+  注入客体）显示 `o.hashCode()` 能正常抛 NPE、`arr[0]` 直接把 JVM 打崩。用
+  `-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks` 可规避（`java -cp client.jar Main` 不再崩，
+  只在缺失的 `joptsimple` 上报 `NoClassDefFoundError`）。
+- **ucontext/siginfo ABI（均已修）**：A20OS 的 ucontext 与 Linux/musl 不一致（`uc_sigmask` 排在
+  `uc_mcontext` **前**、mcontext 私有寄存器序、FPU 内嵌而非 `fpregs` 指针），已按 musl 对齐
+  （`_Static_assert` 钉死偏移与尺寸；`2c1d0dbe`）；同步 SIGSEGV 的 siginfo 也改成 Linux 的
+  `SEGV_MAPERR` + 故障地址（`4cf43e37`）。修完后 `bad uc->uc_mcontext.fpregs` 与错误报告自身 fault 都消失。
+- **启动器两个 classpath bug（已修 `f3469887`）**：`classpath.txt` 是**单行冒号分隔**，启动器的贪婪
+  `sed '^.*/libraries/'` 把整条 classpath 塌成一条，又把 client.jar 粘在无结尾冒号的 CP 后面——这正是
+  最初那个 `ClassNotFoundException` 的来源；并加上 `-Dos.name=Linux`（LWJGL/Minecraft 拒绝平台名 "A20OS"）。
+- **现状**：启动器能跑完整套真实启动流程并成功加载 **LWJGL 3.3.3+5**，随后崩在 LWJGL 自带的
+  `libjemalloc.so`（下一个要查的点）。完整过程与证据见 [minecraft.md](minecraft.md)。
 
 ### x86_64 可用 RAM 曾硬编码成 1 GiB（**已修复**：改从 multiboot 内存图取）
 - 事实：`kernel/arch/x86_64/include/platform.h:8` 把 `PHYS_MEMORY_END` 写死为 `0x40000000`（1 GiB），
