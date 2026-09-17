@@ -10,7 +10,23 @@ struct vfile;
 #define AF_INET    2
 #define AF_INET6   10
 #define AF_NETLINK 16
+#define AF_PACKET  17
 #define AF_ALG     38
+
+/* Values and layout frozen by Linux <linux/if_packet.h>: user space passes
+ * them across the syscall ABI, so they cannot be changed unilaterally. */
+#define ETH_P_ALL  0x0003
+#define ETH_P_IP   0x0800
+#define ETH_P_ARP  0x0806
+#define ETH_P_IPV6 0x86dd
+#define ARPHRD_ETHER 1
+#define PACKET_HOST      0
+#define PACKET_BROADCAST 1
+#define PACKET_MULTICAST 2
+#define PACKET_OTHERHOST 3
+#define PACKET_OUTGOING  4
+#define ETH_HLEN   14
+#define ETH_ALEN   6
 
 #define SOCK_STREAM 1
 #define SOCK_DGRAM  2
@@ -141,6 +157,16 @@ typedef struct net_sockaddr_nl {
     uint32_t nl_pid;
     uint32_t nl_groups;
 } net_sockaddr_nl_t;
+
+typedef struct net_sockaddr_ll {
+    uint16_t sll_family;
+    uint16_t sll_protocol;
+    int32_t  sll_ifindex;
+    uint16_t sll_hatype;
+    uint8_t  sll_pkttype;
+    uint8_t  sll_halen;
+    uint8_t  sll_addr[8];
+} net_sockaddr_ll_t;
 
 void net_init(void);
 int  net_format_status(char *buf, size_t bufsz);

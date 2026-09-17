@@ -203,14 +203,17 @@ int net_format_status(char *buf, size_t bufsz) {
 int net_socket_create(int domain, int type, int protocol) {
     int base_type = type & 0xf;
     if (domain != AF_UNIX && domain != AF_INET && domain != AF_INET6 &&
-        domain != AF_NETLINK && domain != AF_ALG)
+        domain != AF_NETLINK && domain != AF_ALG && domain != AF_PACKET)
         return -EAFNOSUPPORT;
     if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM && base_type != SOCK_RAW &&
         base_type != SOCK_SEQPACKET)
         return -EPROTOTYPE;
     if (domain == AF_ALG && base_type != SOCK_SEQPACKET)
         return -EPROTOTYPE;
-    if (base_type == SOCK_RAW && domain != AF_NETLINK &&
+    if (domain == AF_PACKET &&
+        base_type != SOCK_RAW && base_type != SOCK_DGRAM)
+        return -EPROTOTYPE;
+    if (base_type == SOCK_RAW && domain != AF_NETLINK && domain != AF_PACKET &&
         ((domain != AF_INET && domain != AF_INET6) || protocol < 0 || protocol > 255))
         return -EPROTONOSUPPORT;
     if (domain == AF_NETLINK &&
@@ -232,6 +235,12 @@ int net_socket_create(int domain, int type, int protocol) {
             if (!cur || !(cur->cred.cap_effective & (1ULL << CAP_NET_RAW)))
                 return -EACCES;
         }
+    }
+
+    if (domain == AF_PACKET && base_type == SOCK_RAW) {
+        task_t *cur = proc_current();
+        if (!cur || !(cur->cred.cap_effective & (1ULL << CAP_NET_RAW)))
+            return -EACCES;
     }
 
     net_socket_t *s = net_socket_alloc();
@@ -323,6 +332,8 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
     if (family == AF_UNSPEC && (s->domain == AF_INET || s->domain == AF_INET6))
         *(uint16_t *)bind_addr = (uint16_t)s->domain;
     size_t bind_len = addrlen;
+    if (s->domain == AF_PACKET)
+        return net_packet_socket_bind(s, addr, addrlen);
     if (s->bound) {
         if (s->type != SOCK_RAW)
             return -EINVAL;
@@ -479,6 +490,8 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
         return net_alg_socket_send(s, buf, len);
+    if (s->domain == AF_PACKET)
+        return net_packet_socket_send(s, buf, len, addr, addrlen);
     if (s->domain == AF_NETLINK) {
         if (s->protocol == NETLINK_SOCK_DIAG)
             return net_netlink_diag_request(s, buf, len, addr, addrlen);
