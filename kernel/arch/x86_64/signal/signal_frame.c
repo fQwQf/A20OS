@@ -21,9 +21,13 @@
 void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame, uint64_t tramp_addr,
                                 trap_context_t *ctx)
 {
-    (void)tramp_addr;
     (void)ctx;
     frame->flag = X86_64_SIGRET_TRAMP_ADDR;
+    /* fpregs must be the *user* address of the fpstate: the frame is copied to
+     * user memory, so a kernel-side __fpregs_mem address would be wrong there.
+     * The trampoline lives in that frame, so recover the frame base from it. */
+    uint64_t frame_base = tramp_addr - arch_sigframe_tramp_offset();
+    frame->uc.uc_mcontext.fpregs = frame_base + arch_sigframe_fpstate_offset();
 }
 
 /*

@@ -35,9 +35,15 @@ typedef struct arch_ucontext {
     uint64_t          uc_flags;
     uintptr_t         uc_link;
     arch_stack_t      uc_stack;
-    arch_sigset_t     uc_sigmask;
     arch_sigcontext_t uc_mcontext;
+    arch_sigset_t     uc_sigmask;
+    uint64_t          __fpregs_mem[64];
 } __attribute__((aligned(16))) arch_ucontext_t;
+
+_Static_assert(__builtin_offsetof(arch_ucontext_t, uc_mcontext) == 40,
+               "uc_mcontext must sit at the Linux offset (musl ucontext_t)");
+_Static_assert(sizeof(arch_ucontext_t) == 816,
+               "ucontext must match the Linux/musl ucontext_t size");
 
 typedef struct {
     uint64_t        flag;
@@ -51,6 +57,7 @@ static inline size_t arch_sigframe_flag_offset(void) { return __builtin_offsetof
 static inline size_t arch_sigframe_uc_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, uc); }
 static inline size_t arch_sigframe_info_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, info); }
 static inline size_t arch_sigframe_tramp_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, tramp); }
+static inline size_t arch_sigframe_fpstate_offset(void) { return __builtin_offsetof(arch_sig_rt_frame_t, uc.__fpregs_mem); }
 static inline uint64_t arch_sigframe_flag_get(const arch_sig_rt_frame_t *frame) { return frame->flag; }
 static inline void arch_sigframe_flag_set(arch_sig_rt_frame_t *frame, uint64_t val) { frame->flag = val; }
 static inline size_t arch_sigframe_size(void) { return sizeof(arch_sig_rt_frame_t); }
