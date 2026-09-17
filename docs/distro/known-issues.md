@@ -20,6 +20,22 @@
 - 症状：xfdesktop/panel/thunar/gst 等随机野指针崩溃，仅 x86_64。
 - 提示：x86_64 要在上下文切换与信号帧保存/恢复 FPU/SSE。对照 aarch64/riscv64/loongarch64 的 trap 帧已保存 SIMD——缺这层时被抢占线程的 XMM 会被下一个任务覆盖。
 
+### x86_64 信号处理器入口栈对齐错 8 字节（**已修复**：`68abf68f`）
+- 症状：**任何使用 SSE 的信号处理器**在入口即 `#GP`，内核反复重投 SIGSEGV，栈逐帧下压直到耗尽；
+  串口刷 `ADE/ALE: ... code=1` + `insn@sepc=0x...`（如 JVM 读 jar 时 `0x418739a0` 的
+  `movaps [rsp+X], xmm0`）。`code=1` 是 `CAUSE_INSN_FAULT`，x86_64 上**只由 #GP 产生**
+  （不是 #AC 对齐异常），`stval` 对 #GP 是**过期 CR2**、不是故障地址。
+- 根因：投递路径把帧基对齐到 16（`sp &= ~15`）并让 handler 入口 `rsp` **等于帧基**，
+  于是入口 `rsp ≡ 0 (mod 16)`；而 x86_64 SysV ABI 要求函数入口 `rsp ≡ 8 (mod 16)`
+  （相当于经 `call` 压了 8 字节返回地址）。handler 序言按标准 ABI 对齐栈做 SSE 溢出
+  （`movaps [rsp+X]`），就落在错位 8 字节的地址上 → #GP；#GP 又在 handler 内 → 再投递 → 递归。
+- 修法：帧基保持 16 对齐（内嵌 `fxsave64` 区域必须 16 对齐），handler 改在**帧基下方 8 字节**
+  进入，sigreturn trampoline 地址放在那儿供 handler 最后的 `ret` 弹出；专用 trampoline 页
+  去掉补偿用的 `pushq %rax`。用新 arch 钩子 `arch_signal_handler_sp()` 只对 x86_64 生效。
+- 验证：JVM 读 jar 的 `ADE/ALE` 归零、其 SIGSEGV 处理器能正常打印崩溃报告；
+  XFCE 桌面起来、组件无 SIGSEGV、无内核 panic。
+
+
 ### thunar 运行一段时间后崩溃
 - 症状：GDK 报 `Truncating shared memory file failed: Out of memory`，随后 libwayland 空指针崩溃。
 - 提示：wl_shm 池是 memfd，其数据曾用单个连续 kmalloc 缓冲（1024x768x4 需 order-10 连续块），内存碎片化后 ftruncate 失败。现改为按需 order-0 页数组（`kernel/fs/memfd.c`）；页缓存写回/回收仍可继续观察。
@@ -139,6 +155,17 @@
   （`proc_exit`/`proc_force_exit`/`exit_pending` 与 `pending_exit_code` 的一致性），并用 `mpv --vo=null` ×N 复现。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
+- **2026-09 更新（信号对齐修复后）**：上面那条「信号处理器入口栈对齐错 8 字节」修掉后（`68abf68f`），
+  JVM 从「handler 一进就 #GP 死循环」变成**能跑 handler 并打印崩溃报告**。于是暴露出真正的崩溃：
+  `java -cp client.jar net.minecraft.client.main.Main` 干净地崩在 **`pc=0x0`（跳到 NULL）**，
+  hs_err 显示 `JavaThread "main"` 正在算 `sun.security.provider.SHA5$SHA384`（jar 清单摘要校验），
+  `RIP=0`。`-XX:-UseSHA` 关闭 SHA 内联**无效** → 不是 SHA 内联 stub；更像 JIT 代码跳到空指针，
+  或返回地址被写坏（与本文档那条「多线程匿名内存偶发被写坏」同源）。
+- **另一个确认的 ABI 缺口**：hs_err 报 `bad uc->uc_mcontext.fpregs: 0x0`。A20OS 的 `arch_sigcontext_t`
+  把 `fpu[512]` **内嵌**在 sigcontext 里，而 Linux 的 `ucontext.uc_mcontext` 在该位置是
+  **指向 fpstate 的指针**（`gregs[23]` + `fpregs`），二者布局不一致。读 ucontext 的程序
+  （JVM 的隐式空指针检查、崩溃报告）会读错偏移；要彻底修需把 `arch_sigcontext_t`/
+  `arch_ucontext_t` 改成与 Linux/glibc 一致。
 
 ### x86_64 可用 RAM 曾硬编码成 1 GiB（**已修复**：改从 multiboot 内存图取）
 - 事实：`kernel/arch/x86_64/include/platform.h:8` 把 `PHYS_MEMORY_END` 写死为 `0x40000000`（1 GiB），

@@ -88,20 +88,42 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
 
 **未跑通，以及为什么（实测，不是猜测）**：
 
-- **游戏卡在 `ClassNotFoundException: net.minecraft.client.main.Main`**，但**这不是 classpath 拼错**——
+- **游戏曾卡在 `ClassNotFoundException: net.minecraft.client.main.Main`**，但**这不是 classpath 拼错**——
   该类确实在 jar 里（28163 条目中的一个）。隔离测试（只用 `client.jar` 作 classpath）暴露了真正的根因：
-  JVM 读取 jar 时**反复触发对齐异常**：
+  JVM 读取 jar 时 JVM 自己的 SIGSEGV 处理器**反复触发 #GP**：
 
   ```
   ADE/ALE: pid=165 sepc=0x418739a0 stval=0xc code=1
-  [ERR] a3=0x8080808080808080        # SSE 向量化写的典型模式
+  [ERR]   insn@sepc=0x2444290f          # 0f 29 44 24 .. = movaps [rsp+X], xmm0
   ```
 
-  x86_64 上普通非对齐访问本不该陷入（只有 `movdqa` 这类要求对齐的指令会），而日志显示它**反复发生**，
-  说明**内核对对齐异常（#AC）的处理有问题**——JVM 因此读不出 jar 内容，才报类找不到。
-  这是**内核 bug**，不是 Minecraft 或镜像配置的问题；修内核之前游戏不可能起来。
+  `code=1` 是 `CAUSE_INSN_FAULT`（**x86_64 上只由 #GP 产生**，不是 #AC 对齐异常），
+  而 `stval` 对 #GP 是**过期的 CR2**（#GP 不写 CR2），所以 `0xc` 是误导。
+  真因是**信号处理器入口栈对齐错了**：内核把 handler 入口 `rsp` 设成 16 对齐
+  （≡0 mod 16），而 x86_64 SysV ABI 要求函数入口 `rsp ≡ 8 (mod 16)`。
+  handler 的编译器序言据此对齐，于是它的 `movaps [rsp+X], xmm0` 在错位 8 字节的栈上
+  触发 #GP；该 #GP 又落在 handler 里 → 内核再次投递 SIGSEGV → 再压一帧 → 无限递归。
 
-**另一个独立的内核 bug**：把内存从 2G 加到 3G 启动时，内核在早期启动阶段 **panic**：
+  **已修（`68abf68f`）**：帧基保持 16 对齐（内嵌的 fxsave64 区域必须 16 对齐），
+  但 handler 在帧基下方 8 字节处进入，sigreturn trampoline 地址就放在那里给 handler 的 `ret`。
+  修复后 `ADE/ALE` 归零，JVM 的 SIGSEGV 处理器**能正常运行**（能打印崩溃报告），
+  桌面无回归。
+
+- **仍阻塞（修复后暴露出的真正崩溃）**：JVM 现在干净地崩溃在 `pc=0x0`（跳转到 NULL），
+  `hs_err` 显示当前线程 `JavaThread "main"` 正在算 `sun.security.provider.SHA5$SHA384`
+  （jar 清单的摘要校验），寄存器 `RIP=0`。用 `-XX:-UseSHA` 关闭 SHA 内联**没有帮助**，
+  说明不是 SHA 内联 stub；更像 JIT 出来的代码跳到了空指针（或返回地址被写坏）。
+  这正是本文档另一条「多线程匿名内存偶发被写坏」的形态，需要单独继续查。
+
+- **另一个确认的 ABI 缺口（非本次崩溃主因，但会破坏信号语义）**：`hs_err` 报
+  `bad uc->uc_mcontext.fpregs: 0x0`——A20OS 的 `arch_sigcontext_t` 把 `fpu[512]`
+  **内嵌**在 sigcontext 里，而 Linux 的 `ucontext.uc_mcontext` 在同样位置是
+  **指向 fpstate 的指针**（`gregs[23]` + `fpregs`）。布局不一致，读 ucontext 的
+  JVM（隐式空指针检查和崩溃报告都读它）会读错偏移。要彻底修，得把
+  `arch_sigcontext_t`/`arch_ucontext_t` 改成与 Linux/glibc 一致。
+
+
+**另一个独立的内核 bug（已修）**：把内存从 2G 加到 3G 启动时，内核在早期启动阶段 **panic**：
 
 ```
 [BUS] pci 00:02.0 id=1af4:1050 ...
@@ -110,8 +132,12 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
 [PANIC] task: <none/early boot>
 ```
 
-即**我的内存修复（`884ef373`）只覆盖了 2G，3G 时在 PCI virtio 探测期间页错误**。
-Minecraft 需要大于 2G 的堆，所以这个 bug 也是前置障碍。两者都需要新的内核修复。
+根因：3G 时 QEMU 把 virtio-gpu 的 64-bit BAR 放到 `0xc000000000`（>4 GiB），
+而入口 `boot_pdpt_hh` 只直接映射了物理 0–4 GiB，`arch_pci_bar_to_resource` 直接加
+`PAGE_OFFSET` 得到一个不可达地址，于是早期探测 virtio 时写它就页错误。
+**已修（`568cf392`）**：`pci_assign_bars` 把任何地址 ≥ `PHYS_MAP_LIMIT`（4 GiB）
+的非 I/O BAR 重新分配到覆盖窗口内。实测 `-m 3G` 无 panic、桌面起来。
+（注意 RAM 仍被内存图裁剪在 2 GiB，是另一条已记录的边界。）
 
 **桌面启动器的参数是按官方启动器拼的**，在类加载问题修好之前无法判断是否需要微调。
 
