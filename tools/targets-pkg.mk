@@ -34,10 +34,11 @@ PKG_SIZE_MB   ?= $(PKG_SIZE_MB_DEFAULT)
 PKG_ALPINE    ?= 1
 
 # 桌面 world（xfce 等）解包后 >1 GiB，通用默认 512 MiB 装不下（mkfs.ext4 会以
-# "Could not allocate block in ext2 filesystem" 失败）。GUI 启动入口在调用方
-# 没有显式给出大小时，把「还是默认值」这一情况提升成 PKG_SIZE_MB_GUI。
+# "Could not allocate block in ext2 filesystem" 失败，看起来像磁盘满）。只要调用方
+# 没显式给出大小，桌面 world 就提升到 PKG_SIZE_MB_GUI；非桌面 world 仍用默认值。
 PKG_SIZE_MB_GUI   ?= 4096
-PKG_SIZE_MB_WORLD := $(if $(filter $(PKG_SIZE_MB_DEFAULT),$(PKG_SIZE_MB)),$(PKG_SIZE_MB_GUI),$(PKG_SIZE_MB))
+PKG_WORLD_GUI     ?= xfce
+PKG_SIZE_MB_WORLD := $(if $(filter $(PKG_SIZE_MB_DEFAULT),$(PKG_SIZE_MB)),$(if $(filter $(PKG_WORLD_GUI),$(PKG_WORLD)),$(PKG_SIZE_MB_GUI),$(PKG_SIZE_MB)),$(PKG_SIZE_MB))
 
 # 可选：往 world 镜像里注入本地媒体文件（演示视频等）。GUI_MEDIA 可写空格
 # 分隔的多个文件或目录，全部落到镜像内 $(GUI_MEDIA_DIR)/。
@@ -109,7 +110,7 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 		$(if $(filter 0,$(PKG_ALPINE)),--no-alpine,) \
 		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
 		--output $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img \
-		--size-mb $(PKG_SIZE_MB)
+		--size-mb $(PKG_SIZE_MB_WORLD)
 
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
 # but with the virtio-gpu display stack and audio.  The image is built here (in
