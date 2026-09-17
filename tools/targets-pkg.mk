@@ -11,7 +11,7 @@
 # 常用变量：
 #   PKG_RECIPES   要打包的 recipe 名列表（默认核心三件；extra 包见下）
 #   PKG_WORLD     packages/world/ 下的清单名（默认 base）
-#   PKG_SIZE_MB   镜像大小（默认 512）
+#   PKG_SIZE_MB   镜像大小（默认 512；桌面 world 见 PKG_SIZE_MB_GUI）
 #   PKG_ALPINE    image-world 是否引入 Alpine 仓库（默认 1；纯本地组合设 0）
 #   PKG_SIGN_KEY  签名私钥（默认 build/keys/a20os-dev.rsa，自动生成）
 #
@@ -29,8 +29,15 @@ PKG_REPO_DIR  ?= build/repo
 PKG_IMAGE_DIR ?= build/images
 PKG_RECIPES   ?= a20-base a20-drivers a20-kernel
 PKG_WORLD     ?= base
-PKG_SIZE_MB   ?= 512
+PKG_SIZE_MB_DEFAULT ?= 512
+PKG_SIZE_MB   ?= $(PKG_SIZE_MB_DEFAULT)
 PKG_ALPINE    ?= 1
+
+# 桌面 world（xfce 等）解包后 >1 GiB，通用默认 512 MiB 装不下（mkfs.ext4 会以
+# "Could not allocate block in ext2 filesystem" 失败）。GUI 启动入口在调用方
+# 没有显式给出大小时，把「还是默认值」这一情况提升成 PKG_SIZE_MB_GUI。
+PKG_SIZE_MB_GUI   ?= 4096
+PKG_SIZE_MB_WORLD := $(if $(filter $(PKG_SIZE_MB_DEFAULT),$(PKG_SIZE_MB)),$(PKG_SIZE_MB_GUI),$(PKG_SIZE_MB))
 
 # 可选：往 world 镜像里注入本地媒体文件（演示视频等）。GUI_MEDIA 可写空格
 # 分隔的多个文件或目录，全部落到镜像内 $(GUI_MEDIA_DIR)/。
@@ -105,8 +112,12 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 		--size-mb $(PKG_SIZE_MB)
 
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
-# but with the virtio-gpu display stack and audio.
-run-world-gui: image-world $(FAT32_IMG)
+# but with the virtio-gpu display stack and audio.  The image is built here (in
+# its own make invocation) rather than as a prerequisite so that the desktop
+# size default above actually applies.
+run-world-gui: $(FAT32_IMG)
+	$(MAKE) ARCH=$(ARCH) PKG_WORLD=$(PKG_WORLD) GUI_MEDIA="$(GUI_MEDIA)" \
+		PKG_SIZE_MB=$(PKG_SIZE_MB_WORLD) image-world
 	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS_NO_SDCARD)) \
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
 		-device $(QEMU_BLK_SECOND),drive=xworld \
