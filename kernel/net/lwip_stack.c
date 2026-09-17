@@ -326,6 +326,8 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
+        net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
+                            (size_t)len);
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
         if (!p) {
             LINK_STATS_INC(link.memerr);
@@ -395,6 +397,7 @@ void a20_lwip_poll(void) {
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
     net_inet_bottom_half_process_all();
+    net_packet_bottom_half_process();
 }
 
 int a20_lwip_format_status(char *buf, size_t bufsz) {
@@ -455,4 +458,69 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     if ((size_t)n >= bufsz)
         return (int)bufsz - 1;
     return n;
+}
+
+static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
+{
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->state && (unsigned)netif_get_index(n) == ifindex)
+            return n;
+    }
+    return NULL;
+}
+
+int a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8])
+{
+    if (!out)
+        return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    memcpy(out, n->hwaddr, ETH_ALEN);
+    a20_lwip_unlock(flags);
+    return 0;
+}
+
+int a20_lwip_if_up(unsigned ifindex)
+{
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    int up;
+    if (!n)
+        up = -ENODEV;
+    else
+        up = (netif_is_up(n) && netif_is_link_up(n)) ? 1 : 0;
+    a20_lwip_unlock(flags);
+    return up;
+}
+
+int a20_lwip_if_default_index(void)
+{
+    uint64_t flags = a20_lwip_lock();
+    int idx = netif_default ? (int)netif_get_index(netif_default) : -ENODEV;
+    a20_lwip_unlock(flags);
+    return idx;
+}
+
+int a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len)
+{
+    if (!frame || len == 0 || len > 0xffff)
+        return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n || !n->state) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    if (!st->dev || !st->ops || !st->ops->send) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    int r = st->ops->send(st->dev, frame, (int)len);
+    a20_lwip_unlock(flags);
+    return r == (int)len ? (int)len : -EIO;
 }

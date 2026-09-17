@@ -18,4 +18,12 @@ int  a20_lwip_format_status(char *buf, size_t bufsz);
 int  a20_lwip_rx_pending_any(void);
 void a20_lwip_signal_rx_pending(void);
 
+/* AF_PACKET L2 access.  ifindex is the netif index (see
+ * net_packet_ifindex_by_name in socket_internal.h); frame is a full
+ * Ethernet frame including the 14-byte header. */
+int  a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len);
+int  a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8]);
+int  a20_lwip_if_up(unsigned ifindex);
+int  a20_lwip_if_default_index(void);
+
 #endif /* _NET_LWIP_STACK_H */
