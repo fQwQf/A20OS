@@ -47,6 +47,12 @@ __attribute__((weak)) void arch_setup_signal_trampoline(struct mm_struct *mm) {
     (void)mm;
 }
 
+/* Default: the handler is entered at the (16-aligned) frame base.  x86_64
+ * overrides this to enter 8 bytes lower, per the SysV ABI. */
+__attribute__((weak)) uint64_t arch_signal_handler_sp(uint64_t frame_sp) {
+    return frame_sp;
+}
+
 static int signal_core_dump_default(int sig) {
     switch (sig) {
         case SIGQUIT:
@@ -772,7 +778,17 @@ void signal_deliver_user(trap_context_t *ctx) {
 
         signal_make_page_exec(tramp_addr);
 
-        TRAP_CTX_SP(ctx) = sp;
+        /* x86_64 enters the handler below the 16-aligned frame (see
+         * arch_signal_handler_sp); its return address goes at that entry sp
+         * so the handler's final `ret` reaches the sigreturn trampoline. */
+        uint64_t handler_sp = arch_signal_handler_sp(sp);
+        if (handler_sp != sp) {
+            uint64_t restorer = (uint64_t)arch_sigframe_flag_get(&frame);
+            if (copy_to_user((void *)(uintptr_t)handler_sp, &restorer, sizeof(restorer)) < 0)
+                proc_exit_group(-signal_wait_status(SIGSEGV));
+        }
+
+        TRAP_CTX_SP(ctx) = handler_sp;
         TRAP_CTX_EPC(ctx) = action.sa_handler;
         TRAP_CTX_ARG0(ctx) = sig;
 
