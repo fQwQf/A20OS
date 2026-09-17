@@ -109,18 +109,38 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
   修复后 `ADE/ALE` 归零，JVM 的 SIGSEGV 处理器**能正常运行**（能打印崩溃报告），
   桌面无回归。
 
-- **仍阻塞（修复后暴露出的真正崩溃）**：JVM 现在干净地崩溃在 `pc=0x0`（跳转到 NULL），
-  `hs_err` 显示当前线程 `JavaThread "main"` 正在算 `sun.security.provider.SHA5$SHA384`
-  （jar 清单的摘要校验），寄存器 `RIP=0`。用 `-XX:-UseSHA` 关闭 SHA 内联**没有帮助**，
-  说明不是 SHA 内联 stub；更像 JIT 出来的代码跳到了空指针（或返回地址被写坏）。
-  这正是本文档另一条「多线程匿名内存偶发被写坏」的形态，需要单独继续查。
+- **根因是 HotSpot 的隐式空指针检查（implicit null check）**，不是内存被写坏。JVM 读 jar 清单
+  算 SHA-384，`SHA5.implCompress0` 里一条数组访问依赖「空数组会 fault、SIGSEGV 处理器再抛 NPE」
+  这套机制；A20OS 上这条路径没被识别成空检查，于是 JVM 把它当致命崩溃。最小复现器
+  （宿主 javac 编 `.class` 注入客体跑）分别试了 `o.hashCode()`（字段/虚调用）和 `arr[0]`（数组访问）：
+  前者正常抛 NPE，后者直接把 JVM 打崩。用
+  `-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks` 关掉隐式检查后，
+  `java -cp client.jar Main` **不再崩**，只在 `joptsimple/OptionSpec`（本就不在 client.jar 里）上报
+  `NoClassDefFoundError` —— 即 jar 读路径本身已经通了。**这是 JVM 侧规避，不是根治**。
 
-- **另一个确认的 ABI 缺口（非本次崩溃主因，但会破坏信号语义）**：`hs_err` 报
-  `bad uc->uc_mcontext.fpregs: 0x0`——A20OS 的 `arch_sigcontext_t` 把 `fpu[512]`
-  **内嵌**在 sigcontext 里，而 Linux 的 `ucontext.uc_mcontext` 在同样位置是
-  **指向 fpstate 的指针**（`gregs[23]` + `fpregs`）。布局不一致，读 ucontext 的
-  JVM（隐式空指针检查和崩溃报告都读它）会读错偏移。要彻底修，得把
-  `arch_sigcontext_t`/`arch_ucontext_t` 改成与 Linux/glibc 一致。
+- **ucontext 布局（已修 `2c1d0dbe`）**：`hs_err` 曾报 `bad uc->uc_mcontext.fpregs: 0x0`，
+  "Problematic frame" 打印本身也一直 fault、`RIP=0`。A20OS 的 `uc_sigmask` 排在 `uc_mcontext`
+  **之前**、mcontext 用私有寄存器序、FPU 直接内嵌；Linux/musl 则是 `uc_mcontext`（`gregs[23]`
+  按 REG_R8..REG_CR2 序）在前、`fpregs` 为指向 `__fpregs_mem[64]` 的**指针**。已按 musl 的
+  `ucontext_t`/`mcontext_t` 对齐，`_Static_assert` 钉死偏移与尺寸。修完 `fpregs` 报错消失、
+  崩溃报告能正确给出 "Problematic frame"（`J ... SHA5.implCompress0`）。
+
+- **同步 SIGSEGV 的 siginfo（已修 `4cf43e37`）**：原先 `si_code`= `SI_KERNEL`、`si_addr` 恒 0；
+  Linux 用 `SEGV_MAPERR` + 故障地址。已按 Linux 填（HotSpot 会据此判空检查）。
+
+- **启动器两个 classpath bug + 两个规避（已修 `f3469887`）**：`classpath.txt` 是**单行冒号分隔**
+  （0 换行、106 个冒号），启动器却用贪婪 `sed 's|^.*/libraries/|…|'` 改前缀——`^.*` 吃到全行
+  最后一个 `/libraries/`，把整个 classpath 塌成一条；它又把 `client.jar` 直接粘在（无结尾冒号的）
+  CP 之后，于是 client.jar 根本没进 classpath → 就是一开始那个 `ClassNotFoundException`。
+  已改成逐条（`[^:]*`）重写并补结尾冒号。启动器另带两个 A20OS 规避：
+  `-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks` 与 `-Dos.name=Linux`
+  （LWJGL/Minecraft 拒绝未知平台名 "A20OS"）。
+
+- **当前能走到哪**：修完上面这些，启动器能跑完整套真实启动流程——Datafixer（287 项优化）、
+  Environment/sessionHost、`Setting user: Player`、进入 Render thread、
+  **`Backend library: LWJGL version 3.3.3+5` 成功加载**；随后崩在 LWJGL 自带的
+  **`libjemalloc.so`**（`_init+0x8055`，pc=0x81a6）。这是下一个要查的点。
+
 
 
 **另一个独立的内核 bug（已修）**：把内存从 2G 加到 3G 启动时，内核在早期启动阶段 **panic**：
