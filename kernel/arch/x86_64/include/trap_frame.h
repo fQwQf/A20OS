@@ -52,16 +52,26 @@ typedef struct {
 _Static_assert(sizeof(task_context_t) == 16 * 8 + 512,
                "TaskContext must be 640 bytes");
 
-/* Signal context */
+/*
+ * Signal context (Linux `struct sigcontext` / libc `mcontext_t`).  The layout
+ * must match the x86_64 ABI exactly: a signal handler inspects it through its
+ * own libc headers (musl's <sys/ucontext.h>), so `gregs` uses the REG_* order
+ * (r8..cr2) and `fpregs` is a user pointer to the fpstate -- not an embedded
+ * copy.  rt_sigreturn reads the register state back from here.
+ */
 typedef struct {
-    uint64_t fault_addr;
-    uint64_t regs[23];
-    uint64_t rflags;
-    uint64_t _pad;
-    /* Interrupted FPU/SSE state; a signal handler may clobber XMM and
-     * rt_sigreturn must put the interrupted thread's state back. */
-    uint8_t fpu[512] __attribute__((aligned(16)));
-} __attribute__((aligned(16))) arch_sigcontext_t;
+    uint64_t gregs[23];       /* REG_R8..R15, RDI..RSP, RIP, EFL, CSGSFS, ERR, TRAPNO, OLDMASK, CR2 */
+    uint64_t fpregs;          /* user pointer to the fpstate (ucontext __fpregs_mem) */
+    uint64_t __reserved1[8];
+} arch_sigcontext_t;
+
+/* Distance from uc_mcontext to the fpstate storage (__fpregs_mem) in the
+ * ucontext: sizeof(mcontext) + sizeof(sigmask).  The fpstate itself lives in
+ * the ucontext, so it stays 16-aligned with the frame; only its address is
+ * stored in the mcontext. */
+#define X86_SIGCTX_FPSTATE_OFF (256 + 8)
+
+_Static_assert(sizeof(arch_sigcontext_t) == 256, "sigcontext must match Linux mcontext_t");
 
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
 
@@ -254,29 +264,32 @@ static inline uint64_t arch_signal_tramp_pte_flags(void) {
 
 static inline void arch_signal_build_mcontext(arch_sigcontext_t *sc,
                                               const trap_context_t *ctx) {
-    sc->fault_addr = 0;
-    sc->regs[0]  = ctx->rax;
-    sc->regs[1]  = ctx->rbx;
-    sc->regs[2]  = ctx->rcx;
-    sc->regs[3]  = ctx->rdx;
-    sc->regs[4]  = ctx->rsi;
-    sc->regs[5]  = ctx->rdi;
-    sc->regs[6]  = ctx->rbp;
-    sc->regs[7]  = ctx->rsp;
-    sc->regs[8]  = ctx->r8;
-    sc->regs[9]  = ctx->r9;
-    sc->regs[10] = ctx->r10;
-    sc->regs[11] = ctx->r11;
-    sc->regs[12] = ctx->r12;
-    sc->regs[13] = ctx->r13;
-    sc->regs[14] = ctx->r14;
-    sc->regs[15] = ctx->r15;
-    sc->regs[16] = ctx->rip;
-    sc->regs[17] = ctx->rflags;
-    sc->regs[18] = ctx->cs;
-    sc->regs[19] = ctx->ss;
-    sc->rflags = ctx->rflags;
-    __asm__ __volatile__("fxsave64 (%0)" :: "r"((void *)sc->fpu) : "memory");
+    sc->gregs[0]  = ctx->r8;
+    sc->gregs[1]  = ctx->r9;
+    sc->gregs[2]  = ctx->r10;
+    sc->gregs[3]  = ctx->r11;
+    sc->gregs[4]  = ctx->r12;
+    sc->gregs[5]  = ctx->r13;
+    sc->gregs[6]  = ctx->r14;
+    sc->gregs[7]  = ctx->r15;
+    sc->gregs[8]  = ctx->rdi;
+    sc->gregs[9]  = ctx->rsi;
+    sc->gregs[10] = ctx->rbp;
+    sc->gregs[11] = ctx->rbx;
+    sc->gregs[12] = ctx->rdx;
+    sc->gregs[13] = ctx->rax;
+    sc->gregs[14] = ctx->rcx;
+    sc->gregs[15] = ctx->rsp;
+    sc->gregs[16] = ctx->rip;
+    sc->gregs[17] = ctx->rflags;
+    sc->gregs[18] = ctx->cs & 0xffff;
+    sc->gregs[19] = 0;
+    sc->gregs[20] = 0;
+    sc->gregs[21] = 0;
+    sc->gregs[22] = 0;
+    sc->fpregs = 0;
+    __asm__ __volatile__("fxsave64 (%0)" ::
+                         "r"((void *)((char *)sc + X86_SIGCTX_FPSTATE_OFF)) : "memory");
 }
 
 static inline void arch_signal_build_frame_extra(void *extra,
@@ -287,25 +300,26 @@ static inline void arch_signal_build_frame_extra(void *extra,
 
 static inline void arch_signal_restore_mcontext(trap_context_t *ctx,
                                                 const arch_sigcontext_t *sc) {
-    ctx->rax = sc->regs[0];
-    ctx->rbx = sc->regs[1];
-    ctx->rcx = sc->regs[2];
-    ctx->rdx = sc->regs[3];
-    ctx->rsi = sc->regs[4];
-    ctx->rdi = sc->regs[5];
-    ctx->rbp = sc->regs[6];
-    ctx->rsp = sc->regs[7];
-    ctx->r8  = sc->regs[8];
-    ctx->r9  = sc->regs[9];
-    ctx->r10 = sc->regs[10];
-    ctx->r11 = sc->regs[11];
-    ctx->r12 = sc->regs[12];
-    ctx->r13 = sc->regs[13];
-    ctx->r14 = sc->regs[14];
-    ctx->r15 = sc->regs[15];
-    ctx->rip = sc->regs[16];
-    ctx->rflags = sc->rflags;
-    __asm__ __volatile__("fxrstor64 (%0)" :: "r"((void *)sc->fpu) : "memory");
+    ctx->r8  = sc->gregs[0];
+    ctx->r9  = sc->gregs[1];
+    ctx->r10 = sc->gregs[2];
+    ctx->r11 = sc->gregs[3];
+    ctx->r12 = sc->gregs[4];
+    ctx->r13 = sc->gregs[5];
+    ctx->r14 = sc->gregs[6];
+    ctx->r15 = sc->gregs[7];
+    ctx->rdi = sc->gregs[8];
+    ctx->rsi = sc->gregs[9];
+    ctx->rbp = sc->gregs[10];
+    ctx->rbx = sc->gregs[11];
+    ctx->rdx = sc->gregs[12];
+    ctx->rax = sc->gregs[13];
+    ctx->rcx = sc->gregs[14];
+    ctx->rsp = sc->gregs[15];
+    ctx->rip = sc->gregs[16];
+    ctx->rflags = sc->gregs[17];
+    __asm__ __volatile__("fxrstor64 (%0)" ::
+                         "r"((const void *)((const char *)sc + X86_SIGCTX_FPSTATE_OFF)) : "memory");
 }
 
 static inline void arch_signal_restore_frame_extra(trap_context_t *ctx,
