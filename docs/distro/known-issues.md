@@ -249,6 +249,26 @@
   也不是 xfdesktop 的 backdrop 开关（第四、五轮的结论需要按此修正）。下一步：在 labwc 侧看 background 层表面的
   map/commit 与 pixman renderer 的 damage 处理，单独排除 `WLR_RENDERER=pixman`、`WLR_NO_HARDWARE_CURSORS=1`、
   `WLR_DRM_NO_ATOMIC=1` 三个开关。
+- **第七轮（时间维度采样：上面第六轮的结论是错的）**：第六轮的截图都是在启动 ~60s 之后拍的，而壁纸在那之前就
+  已经**画出来过又被盖掉**。用户观察「刚启动有壁纸，过一会儿变黑」后按时间重采（headless，每 5s 一张，
+  统计桌面区非黑像素）：
+
+  | t(s) | 颜色数 | 最大占比色 | 黑像素 |
+  |---|---|---|---|
+  | 5–20 | 1–2 | (0,0,0) | ~100% |
+  | **25** | **202** | **(0,144,188)** | **0.0%** |
+  | 30+ | 26 | (0,0,0) | 99.4% |
+
+  即 **swaybg 的壁纸确实画上去了（t=25s），5 秒后就被纯黑盖掉**。
+- 决定性实验：把 `spawn xfdesktop` 换成一句 echo（不启动 xfdesktop）后重采，壁纸从 t=25s **一直保持到
+  t=110s**（202 色 / 0% 黑）。→ **凶手是 xfdesktop**：它不画配置的 backdrop，而是铺了一块**不透明的黑色
+  桌面表面**，把 background 层上的壁纸整个盖住。（第六轮「`pkill -x xfdesktop` 之后仍是纯黑」之所以
+  误导，是因为那时黑面已经合成进 scanout，杀掉进程并不会让合成器回到上一帧。）
+- **修法（已验证）**：xfdesktop 留着（桌面图标照常），但让 swaybg 在**它之后**再创建自己的 background
+  表面 —— wlr-layer-shell 同一层内后创建的表面在上面。实测「等 xfdesktop 进程出现 + settle 20s 再起
+  swaybg」：壁纸从 t=54s 稳定保持到 t=144s（229 色 / 0% 黑），面板与图标同时在。
+  代价：启动后约 30s 内桌面是黑的。若日后能把 xfdesktop 的 Wayland backdrop 修好、或让它别铺那块黑面，
+  这段等待就可以去掉。
 - 顺带：同一批次里 `tumblerd` 以 `code=1`(#GP, `insn 0f b6 48 ..`) 崩溃多次（`FATAL: pid=... comm=tumblerd`），是独立的用户态坏指针崩溃。
 - **同一轮抓到一个确定的用户态崩溃**：`FATAL: pid=140 ... comm=tumblerd`，内核侧是
   `ADE/ALE: pid=140 sepc=0x40226031 stval=0x8136a00e code=1` —— 又是 **#GP**（`code=1`，x86_64 上只由 #GP 产生；`stval` 对 #GP 是过期 CR2），`insn@sepc=0x48b60ff4`（`0f b6 48 ..` 一个字节 load）。即**缩略图守护进程 tumblerd 在解引用一个坏地址而挂**（xfdesktop 用它给桌面图标出缩略图）。这与 JVM 最初那条 #GP 同类（非规范地址/坏指针），是**另一个独立的用户态崩溃**，值得单独查。
