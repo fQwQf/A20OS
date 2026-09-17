@@ -367,6 +367,13 @@ int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len
         p += n;
         left -= n;
         sent += n;
+        /* Wake the peer as soon as each chunk lands.  The caller only wakes
+         * read_waitq once this whole write returns, so a writer that blocks
+         * part-way (channel full) would leave bytes sitting in the channel
+         * while a reader already parked in poll() waits for them -- and the
+         * space this writer needs can only be freed by that very reader. */
+        net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
+        wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
     }
     return (int)sent;
 }
