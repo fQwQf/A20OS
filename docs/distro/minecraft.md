@@ -156,10 +156,21 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
 - **光补 resolver 不够（实测）**：客体里 `net0` 只出现在 `/sys/class/net`，`/proc/net/dev` 是空的、也没有路由
   —— 接口根本没起来。`udhcpc -i net0` 卡在 `ioctl 0x8933`（SIOCGIFHWADDR）`Not a tty`；`ip addr` 也报
   `socket(AF_NETLINK,3,0): Protocol not supported`。即 A20OS 的网络栈（lwIP）**没有实现 SIOCGIF* 这套
-  接口 ioctl**，标准 DHCP/`ifconfig`/`ip` 都带不起接口（这也是为什么 /proc/net/dev 里没有 net0）。
-  真实实例是**用别的方式**配网的（`curl` 可通，网络不阻塞），最小测试启动没配。要让客体常规网络工具链可用，
-  需要在内核侧补 SIOCGIF* ioctl 与 netdev 的 /proc/net/dev 注册 —— 属于网络子系统/发行版配置，
-  不是 JVM/Minecraft 这条线的问题。
+  接口 ioctl**，标准 DHCP/`ifconfig`/`ip` 都带不起接口。
+- **已修（`8a66c9a4` + `29357cbc`）**：内核侧补齐了 SIOCGIF* 接口 ioctl 与 **AF_PACKET 裸 L2 socket**
+  （`SOCK_DGRAM`/`SOCK_RAW`、`bind(sockaddr_ll)`、收发以太网帧；RX 经 lwIP 锁下的延迟环 + poll 下半部投递）。
+  实测客体里 busybox `udhcpc` 走完整条 DHCP：
+
+  ```
+  udhcpc: broadcasting discover
+  udhcpc: broadcasting select for 10.0.2.15, server 10.0.2.2
+  udhcpc: lease of 10.0.2.15 obtained from 10.0.2.2, lease time 86400
+  ```
+
+  即 socket/bind/发/收全部打通。**仍未做**（udhcpc 不需要，但 `ip` 等工具要）：路由 netlink
+  （`RTM_GETLINK`/`RTM_NEWADDR`）与 `net0` 在 `/proc/net/dev` 里的注册；`/usr/share/udhcpc/default.script`
+  在套用租约时报 `arithmetic syntax error`（发行版脚本问题，与 socket 层无关）。
+
 
 
 
