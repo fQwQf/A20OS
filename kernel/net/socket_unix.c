@@ -287,9 +287,37 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
     /*
      * On success the enqueued message takes ownership of the fd
      * references; on failure the caller still owns them.
+     *
+     * A stream socket carries a byte stream, so a write larger than one
+     * queued message is split across several messages (Linux fragments it
+     * into skbs); without this a large request -- e.g. an X11 client writing
+     * a big request to Xwayland -- fails with EMSGSIZE.  The SCM_RIGHTS fds
+     * ride on the final chunk.
      */
-    int r = net_enqueue_msg_locked_fds(dst, buf, len, s->local, s->local_len,
+    int r;
+    if (s->type == SOCK_STREAM && len > NET_MAX_PAYLOAD) {
+        const uint8_t *p = (const uint8_t *)buf;
+        size_t left = len;
+        r = 0;
+        while (left > 0) {
+            size_t n = left > NET_MAX_PAYLOAD ? NET_MAX_PAYLOAD : left;
+            int rc = (left > n)
+                   ? net_enqueue_msg_locked(dst, p, n, s->local, s->local_len)
+                   : net_enqueue_msg_locked_fds(dst, p, n, s->local, s->local_len,
+                                                files, nfiles);
+            if (rc < 0) {
+                if (r == 0)
+                    r = rc;
+                break;
+            }
+            r += rc;
+            p += n;
+            left -= n;
+        }
+    } else {
+        r = net_enqueue_msg_locked_fds(dst, buf, len, s->local, s->local_len,
                                        files, nfiles);
+    }
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     if (r >= 0) {
