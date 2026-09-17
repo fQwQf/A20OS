@@ -41,4 +41,12 @@ spawn xfsettingsd &
 spawn xfdesktop &
 spawn xfce4-panel &
 thunar --daemon &
+
+# Wallpaper.  xfdesktop 4.20.1 never paints a Wayland backdrop on A20OS (see
+# docs/distro/known-issues.md), so a compositor-level background tool draws
+# it on the wlr-layer-shell background layer instead.
+if command -v swaybg >/dev/null 2>&1; then
+    swaybg -i /usr/share/backgrounds/xfce/xfce-flower.svg -m fill &
+fi
+
 wait

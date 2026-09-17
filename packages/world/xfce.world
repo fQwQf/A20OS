@@ -124,3 +124,7 @@ xdg-utils
 hicolor-icon-theme
 adwaita-icon-theme
 papirus-icon-theme
+
+# 壁纸：xfdesktop 4.20.1 的 Wayland backdrop 不绘制（见 docs/distro/known-issues.md），
+# 用合成器层面的背景工具补上（挂 wlr-layer-shell 的 background 层）。
+swaybg
