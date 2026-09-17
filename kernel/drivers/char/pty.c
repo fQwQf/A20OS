@@ -535,6 +535,29 @@ int pty_slave_write(int idx, const char *buf, size_t count) {
 
 int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (idx < 0 || idx >= MAX_PTYS || !g_ptys[idx].in_use) return -EIO;
+    /* Linux serves the same termios through both ends of a pty pair: they
+     * share one line discipline.  Terminal emulators rely on that --
+     * VTE-based ones (xfce4-terminal) resolve their "auto" Backspace
+     * binding by calling tcgetattr() on the *master*.  Answering ENOTTY
+     * here leaves them unable to learn the erase character, and Backspace
+     * then silently does nothing even though the key itself is delivered
+     * correctly all the way to /dev/input/event0. */
+    if (req == TCGETS) {
+        pty_termios_t termios;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        termios = g_ptys[idx].termios;
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        if (copy_to_user(arg, &termios, sizeof(termios)) < 0) return -EFAULT;
+        return 0;
+    }
+    if (req == TCSETS || req == TCSETSW || req == TCSETSF) {
+        pty_termios_t termios;
+        if (copy_from_user(&termios, arg, sizeof(termios)) < 0) return -EFAULT;
+        uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
+        g_ptys[idx].termios = termios;
+        spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
+        return 0;
+    }
     if (req == TIOCGPTN) {
         int n = idx;
         if (copy_to_user(arg, &n, sizeof(n)) < 0) return -EFAULT;
