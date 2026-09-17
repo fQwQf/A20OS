@@ -42,11 +42,21 @@ spawn xfdesktop &
 spawn xfce4-panel &
 thunar --daemon &
 
-# Wallpaper.  xfdesktop 4.20.1 never paints a Wayland backdrop on A20OS (see
-# docs/distro/known-issues.md), so a compositor-level background tool draws
-# it on the wlr-layer-shell background layer instead.
+# Wallpaper.  xfdesktop 4.20.1 never draws the configured backdrop; instead its
+# opaque black desktop surface covers whatever is on the background layer, so
+# swaybg has to create its own background surface *after* xfdesktop's.  Waiting
+# on the process plus a settle delay is what makes the wallpaper stick (see
+# docs/distro/known-issues.md).
 if command -v swaybg >/dev/null 2>&1; then
-    swaybg -i /usr/share/backgrounds/xfce/xfce-flower.svg -m fill &
+    (
+        i=0
+        while [ "$i" -lt 120 ] && ! pgrep -x xfdesktop >/dev/null 2>&1; do
+            sleep 0.5
+            i=$((i + 1))
+        done
+        sleep 20
+        exec swaybg -i /usr/share/backgrounds/xfce/xfce-flower.svg -m fill
+    ) &
 fi
 
 wait
