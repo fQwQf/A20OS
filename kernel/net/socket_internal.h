@@ -186,6 +186,13 @@ typedef struct net_socket {
     struct net_socket *accept_head;
     struct net_socket *accept_tail;
     int accept_count;
+    /* AF_PACKET: bound L2 filter.  pkt_protocol is host order. */
+    int pkt_ifindex;
+    uint16_t pkt_protocol;
+    uint16_t pkt_hatype;
+    uint8_t pkt_halen;
+    uint8_t pkt_haddr[8];
+    int pkt_bound;
     int in_registry;
     int reg_idx;
     int gfd;                       /* global fd carrying this socket vfile */
@@ -302,6 +309,23 @@ int      net_unix_socket_sendto_fds(net_socket_t *s, const void *buf,
                                     size_t addrlen,
                                     vfile_t **files, int nfiles);
  int      net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen);
+ int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
+                                   const void *addr, size_t addrlen);
+ int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
+                                  const void *addr, size_t addrlen);
+ void     netlink_uevent_emit(const char *action, const char *subsystem,
+                              const char *name, uint64_t devt);
+
+/* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
+ * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held
+ * together with g_net_lock. */
+int      net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen);
+int      net_packet_socket_send(net_socket_t *s, const void *buf, size_t len,
+                                const void *addr, size_t addrlen);
+void     net_packet_rx_defer(unsigned ifindex, const uint8_t *frame, size_t len);
+void     net_packet_bottom_half_process(void);
+int      net_packet_rx_pending(void);
+int      net_packet_ifindex_by_name(const char *name);
  int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
  int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
