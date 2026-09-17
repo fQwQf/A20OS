@@ -162,6 +162,7 @@ boot_pgdir:
 boot_pdpt_id:
     .space 4096
     .align 4096
+    .globl boot_pdpt_hh
 boot_pdpt_hh:
     .space 4096
     .align 4096
