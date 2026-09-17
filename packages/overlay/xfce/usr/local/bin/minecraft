@@ -46,15 +46,18 @@ CP="${CP%:}:"
 mkdir -p "$GAMEDIR"
 
 echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
-# A20OS workarounds, both required to get this far:
+# A20OS workarounds, all required to get this far (see docs/distro/minecraft.md):
 #   * -XX:-ImplicitNullChecks (diagnostic, hence the Unlock flag): A20OS's
-#     SIGSEGV path trips HotSpot's implicit null check, which aborts the VM
-#     while it loads classes from client.jar (see docs/distro/minecraft.md).
+#     SIGSEGV path trips HotSpot's implicit null check, which otherwise aborts
+#     the VM while it loads classes from client.jar.
 #   * -Dos.name=Linux: LWJGL/Minecraft refuse to run on an unknown platform
-#     name ("A20OS"); see the same document.
+#     name ("A20OS").
+#   * org.lwjgl.system.allocator=system: LWJGL's bundled libjemalloc faults on
+#     A20OS shortly after it loads.
 exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
+    -Dorg.lwjgl.system.allocator=system \
     -cp "$CP$MC_HOME/client.jar" \
     -Djava.library.path="$MC_HOME/natives" \
     -Dorg.lwjgl.librarypath="$MC_HOME/natives" \
