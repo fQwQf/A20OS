@@ -168,9 +168,11 @@
 - **启动器两个 classpath bug（已修 `f3469887`）**：`classpath.txt` 是**单行冒号分隔**，启动器的贪婪
   `sed '^.*/libraries/'` 把整条 classpath 塌成一条，又把 client.jar 粘在无结尾冒号的 CP 后面——这正是
   最初那个 `ClassNotFoundException` 的来源；并加上 `-Dos.name=Linux`（LWJGL/Minecraft 拒绝平台名 "A20OS"）。
-- **现状**：启动器能跑完整套真实启动流程并成功加载 **LWJGL 3.3.3+5**。LWJGL 自带的 `libjemalloc.so`
-  随后会 fault；`-Dorg.lwjgl.system.allocator=system` 换掉分配器后游戏继续到**开窗**阶段，被
-  `XIO: fatal IO error 90 (Message too large) on X server ":0"` 打断（GLFW 走了 Xwayland 的 X11 路径）。
+- **现状**：启动器能跑完整套真实启动流程、成功加载 **LWJGL 3.3.3+5** 并**开窗成功**。LWJGL 自带的
+  `libjemalloc.so` 会 fault（`-Dorg.lwjgl.system.allocator=system` 绕过）；开窗时 X11 曾报
+  `XIO: fatal IO error 90 (Message too large)`，根因是 A20OS 的 AF_UNIX 旧队列路径把单条消息卡在
+  `NET_MAX_PAYLOAD`(64KiB)，**已修（`4e2aeb9f`）**：STREAM 大写按 64KiB 分片。现在卡在 **DNS**
+  （`UnknownHostException: api.minecraftservices.com`，客体未配 resolver）。
   完整过程与证据见 [minecraft.md](minecraft.md)。
 
 ### x86_64 可用 RAM 曾硬编码成 1 GiB（**已修复**：改从 multiboot 内存图取）
