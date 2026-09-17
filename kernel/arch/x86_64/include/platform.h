@@ -22,6 +22,10 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 #define PCI_ECAM_BASE      (0xB0000000UL + PAGE_OFFSET)
 #define PCI_MMIO_BASE      (0xC0000000UL + PAGE_OFFSET)
 
+/* The higher-half direct map (boot_pdpt_hh in entry.S) covers physical
+ * 0..4 GiB.  Anything above this is unreachable via addr + PAGE_OFFSET. */
+#define PHYS_MAP_LIMIT     0x100000000ULL
+
 /* UART - COM1 uses I/O ports, not MMIO */
 #define UART0_PORT         0x3F8
 #define UART0_IRQ          4

@@ -273,7 +273,11 @@ static int pci_assign_bars(device_t *dev, int bus_master) {
                                 pci_bar_address(info, bar, bar_lo, is_64);
 
 #ifdef CONFIG_PCI_MMIO_ALLOC
-        if (!is_io && addr == 0) {
+        /* The firmware may place a 64-bit BAR above the 4 GiB the
+         * higher-half direct map covers; then addr + PAGE_OFFSET is
+         * unreachable and any access faults.  Relocate such a BAR into the
+         * covered 32-bit window, same as an unassigned one. */
+        if (!is_io && (addr == 0 || addr >= PHYS_MAP_LIMIT)) {
             uintptr_t aligned = (g_pci_mmio_alloc + (uintptr_t)size - 1U) &
                                 ~((uintptr_t)size - 1U);
 #ifdef CONFIG_PCI_MMIO_BASE_ECAM
