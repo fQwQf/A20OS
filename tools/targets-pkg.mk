@@ -40,6 +40,12 @@ PKG_SIZE_MB_GUI   ?= 4096
 PKG_WORLD_GUI     ?= xfce
 PKG_SIZE_MB_WORLD := $(if $(filter $(PKG_SIZE_MB_DEFAULT),$(PKG_SIZE_MB)),$(if $(filter $(PKG_WORLD_GUI),$(PKG_WORLD)),$(PKG_SIZE_MB_GUI),$(PKG_SIZE_MB)),$(PKG_SIZE_MB))
 
+# 同理：桌面跑 Xwayland + 软件 GL，通用默认的 1G 一定会被 OOM 杀掉（Xwayland 首当其冲）。
+# 调用方没显式指定内存时，GUI 入口把内存提升到这个值。
+QEMU_MEMORY_DEFAULT ?= 1G
+QEMU_MEMORY_GUI     ?= 4G
+QEMU_MEMORY_WORLD   := $(if $(filter $(QEMU_MEMORY_DEFAULT),$(QEMU_MEMORY)),$(QEMU_MEMORY_GUI),$(QEMU_MEMORY))
+
 # 可选：往 world 镜像里注入本地媒体文件（演示视频等）。GUI_MEDIA 可写空格
 # 分隔的多个文件或目录，全部落到镜像内 $(GUI_MEDIA_DIR)/。
 #   make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
@@ -124,7 +130,7 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 run-world-gui: $(FAT32_IMG)
 	$(MAKE) ARCH=$(ARCH) PKG_WORLD=$(PKG_WORLD) GUI_MEDIA="$(GUI_MEDIA)" \
 		PKG_SIZE_MB=$(PKG_SIZE_MB_WORLD) image-world
-	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(QEMU_FLAGS_NO_SDCARD)) \
+	$(QEMU) $(patsubst -nographic,-display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) $(QEMU_GUI_AUDIO) -serial stdio,$(patsubst -m $(QEMU_MEMORY),-m $(QEMU_MEMORY_WORLD),$(QEMU_FLAGS_NO_SDCARD))) \
 		-drive file=$(abspath $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img),if=none,format=raw,id=xworld \
 		-device $(QEMU_BLK_SECOND),drive=xworld \
 		-kernel $(KERNEL_ELF)
