@@ -45,7 +45,12 @@ PKG_SIZE_MB_WORLD := $(if $(filter $(PKG_SIZE_MB_DEFAULT),$(PKG_SIZE_MB)),$(if $
 #   make run-gui-x86_64 GUI_MEDIA=/path/to/video.mp4
 #   make run-gui-x86_64 GUI_MEDIA="/a.mp4 /b.mp4 clips/"
 # 桌面里用 parole / mpv 打开，或在 Thunar 里双击即可播放。
-GUI_MEDIA          ?=
+# GUI_MEDIA 默认是「粘性」的：桌面镜像在每次 run 时都会重建，而 overlay 只在给出
+# GUI_MEDIA 时才生成 —— 于是 `make run-gui-x86_64`（不带变量）会把上次注入的
+# /usr/share/a20-media 悄悄丢掉，看起来像"媒体没进镜像"。默认从已取件的
+# build/minecraft/* 注入；要显式关掉就传 `GUI_MEDIA=`。
+GUI_MEDIA_AUTO     := $(wildcard build/minecraft/*)
+GUI_MEDIA          ?= $(GUI_MEDIA_AUTO)
 GUI_MEDIA_DIR      ?= /usr/share/a20-media
 GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 
