@@ -146,9 +146,20 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
     `XIO: fatal IO error 90 (Message too large) on X server ":0"`：A20OS 的 AF_UNIX 旧队列路径把单条消息
     卡在 `NET_MAX_PAYLOAD`(64KiB)，更大的写直接 `EMSGSIZE`。**已修（`4e2aeb9f`）**：STREAM 写超过一条
     消息时按 64KiB 分片（读端仍是同一字节流）。
-- **下一个真正的阻塞点是 DNS**：游戏走到网络/鉴权阶段（Yggdrasil 公钥、session profile 查询）时报
-  `UnknownHostException: api.minecraftservices.com`——客体没配 resolver（内核网络栈本身 `curl` 是通的，
-  网络不阻塞）。这是发行版 rootfs 的配置项，不是内核 bug。
+- **GL 链对 Minecraft 是通的（实测）**：开窗之后游戏继续初始化 OpenGL 渲染器并成功，日志打出
+  `Using optional rendering extensions: GL_ARB_buffer_storage, GL_KHR_debug, GL_ARB_vertex_attrib_binding,
+  GL_ARB_direct_state_access, GL_EXT_texture_filter_anisotropic`（GLX/Xwayland + llvmpipe），
+  **没有崩溃**。即游戏已经渲染起来了，剩下的不是「起不来」而是这些收尾项。
+- **下一个阻塞点是网络/DNS**：游戏走到网络/鉴权阶段（Yggdrasil 公钥、session profile 查询）时报
+  `UnknownHostException: api.minecraftservices.com`。xfce overlay 原先既没有 `/etc/hosts` 也没有
+  `/etc/resolv.conf`，已补上（`bff441f7`；resolv.conf 指 QEMU user-mode 的 `10.0.2.3`，与 pynode overlay 一致）。
+- **光补 resolver 不够（实测）**：客体里 `net0` 只出现在 `/sys/class/net`，`/proc/net/dev` 是空的、也没有路由
+  —— 接口根本没起来。`udhcpc -i net0` 卡在 `ioctl 0x8933`（SIOCGIFHWADDR）`Not a tty`；`ip addr` 也报
+  `socket(AF_NETLINK,3,0): Protocol not supported`。即 A20OS 的网络栈（lwIP）**没有实现 SIOCGIF* 这套
+  接口 ioctl**，标准 DHCP/`ifconfig`/`ip` 都带不起接口（这也是为什么 /proc/net/dev 里没有 net0）。
+  真实实例是**用别的方式**配网的（`curl` 可通，网络不阻塞），最小测试启动没配。要让客体常规网络工具链可用，
+  需要在内核侧补 SIOCGIF* ioctl 与 netdev 的 /proc/net/dev 注册 —— 属于网络子系统/发行版配置，
+  不是 JVM/Minecraft 这条线的问题。
 
 
 
