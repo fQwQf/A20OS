@@ -221,9 +221,24 @@
 
 ### 桌面壁纸不显示（backdrop 不渲染）
 - 症状：xfdesktop 在跑（桌面图标正常、root 被背景层覆盖），但桌面是纯黑；1024x768 下 94% 像素为 `(0,0,0)`。
-- 已核实：`/backdrop/screen0/monitor<id>/workspace0/last-image` 的 `<id>` 用的是 `sha1(connector)`，而 `sha1("Virtual-1")` **正好在** overlay 的 9 个 monitor key 里，所以不是 key 不匹配；`image-style=5`、`color-style=0` 合法；改成 SVG 壁纸并显式加 `image-show=true` 后**仍然全黑**。
-- 新发现：镜像里 **没有 jpeg/png 的 gdk-pixbuf loader**（`loaders.cache` 只有 ani/bmp/gif/icns/ico/pnm/qtif/svg/tga/tiff/xbm/xpm），`gdk-pixbuf` 也不依赖 libjpeg/libpng，所以 `xfce-blue.jpg` 本来就无法解码（这也是已改指向 `xfce-flower.svg` 的原因）。但换成 SVG 后壁纸依旧不渲染，说明还有第二个原因。
-- 提示：需要在 guest 内 dump `xfconf-query -c xfce4-desktop -lv` 看 xfdesktop 实际读到的 backdrop 树，以及 `gdk-pixbuf-query-loaders`。本轮无法做这个诊断：guest 写盘后 ext4 位图校验和就不一致（见下条），无法从宿主机读回 guest 写过的文件。
+- 已核实（第一轮）：`/backdrop/screen0/monitor<id>/workspace0/last-image` 的 `<id>` 用的是 `sha1(connector)`，而 `sha1("Virtual-1")` **正好在** overlay 的 9 个 monitor key 里，所以不是 key 不匹配；`image-style=5`、`color-style=0` 合法；改成 SVG 壁纸并显式加 `image-show=true` 后**仍然全黑**。
+- 镜像里 **没有 jpeg/png 的 gdk-pixbuf loader**（`loaders.cache` 有 ani/bmp/gif/icns/ico/pnm/qtif/svg/tga/tiff/xbm/xpm），`gdk-pixbuf` 也不依赖 libjpeg/libpng，所以 `xfce-blue.jpg` 本来就无法解码（这也是已改指向 `xfce-flower.svg` 的原因）。
+- **guest 内实测（第二轮）**：
+  - `xfconf-query -c xfce4-desktop -lv` 里 backdrop 树**完全正确**：`monitor0/workspace0` 与 9 个 `monitor<sha1(connector)>/workspace0` 全是
+    `image-show=true` / `image-style=5` / `last-image=/usr/share/backgrounds/xfce/xfce-flower.svg` / `color-style=0`；
+  - SVG 文件确实存在（16972 B），`libpixbufloader_svg.so` 在 loaders.cache 里注册了，`librsvg-2.so.2`(2.61.2) 也在镜像里。
+  - 也就是说**解码链（gdk-pixbuf → svg loader → librsvg）应该可用**，`last-image` 指向的文件也在，但画面仍全黑。
+  - 所以第二个原因在**渲染侧**：xfdesktop 的 backdrop 窗口（layer-shell 表面）到 labwc(WLR_RENDERER=pixman) 合成这一段，或 xfdesktop 对 SVG 的 rasterize 失败。
+- **第三轮（二分 decode vs render）**：把壁纸换成一个 `loaders.cache` 一定支持的 BMP（宿主造了张纯红 64×64 BMP，`debugfs` 注入 `/root/red.bmp`，两个 monitor key 都改成它并 restart xfdesktop）——
+  截图里**红色像素为 0**，画面还是纯黑。也就是说**连 BMP 都不渲染**，问题不在解码，而在「backdrop 上图 / 合成」这一段。
+  另外同一轮里出现了 `SIGSEGV: pid=163 code=13 stval=0x12`（用户态空指针附近访问），很可能是 xfdesktop/缩略图相关组件在画 backdrop 时挂掉。
+- 下一步（渲染侧）：`xfdesktop` 加 `--enable-debug`/`G_MESSAGES_DEBUG=all` 看 backdrop 的加载与绘制；确认 backdrop 的 layer-shell 表面是否真的 `commit`（labwc 日志 / `wayland-info`）；并查那个 `stval=0x12` 的 SIGSEGV 属于哪个进程。
+- **第四轮（xfdesktop 全量 debug）**：`G_MESSAGES_DEBUG=all xfdesktop` 输出里**完全没有 backdrop/image/draw 相关日志**，只有 dconf/GTK/GIO 的常规初始化（`Compositor prefers decoration mode 'server'`、`Connecting to session manager`、没有 session manager/portal、`mnt_monitor_get_fd failed: Operation not permitted`）。也就是说 xfdesktop **根本没走到「加载并绘制 backdrop」**（或那一段无日志），backdrop 表面上没有被真正画出来。
+- **第五轮（xfdesktop 版本/协议）**：镜像是 **xfdesktop 4.20.1**，链接了 `libgtk-layer-shell.so.0`；二进制里有 `Your compositor must support the zwlr_layer_shell_v1 protocol` 这条串，说明它的 Wayland backdrop 依赖 wlr-layer-shell。但日志里**并没有**这条报错，也没有任何 backdrop 行；同时 `xfdesktop --version` 正常、xfce4-panel 正常。
+  → 收敛判断：**xfdesktop 4.20.1 的 Wayland backdrop 很可能根本没被绘制**（该版本 Wayland 支持较新且有缺口），而不是协议缺失或解码失败。可行修法：改用**合成器层面的背景工具**（`swaybg`/`wbg` 之类，仅需一张图并挂 background 层），或在 xfdesktop 里确认 Wayland backdrop 的开关/补丁。镜像里目前**没有** swaybg/wbg/hsetroot/feh 任何一个。
+- 顺带：同一批次里 `tumblerd` 以 `code=1`(#GP, `insn 0f b6 48 ..`) 崩溃多次（`FATAL: pid=... comm=tumblerd`），是独立的用户态坏指针崩溃。
+- **同一轮抓到一个确定的用户态崩溃**：`FATAL: pid=140 ... comm=tumblerd`，内核侧是
+  `ADE/ALE: pid=140 sepc=0x40226031 stval=0x8136a00e code=1` —— 又是 **#GP**（`code=1`，x86_64 上只由 #GP 产生；`stval` 对 #GP 是过期 CR2），`insn@sepc=0x48b60ff4`（`0f b6 48 ..` 一个字节 load）。即**缩略图守护进程 tumblerd 在解引用一个坏地址而挂**（xfdesktop 用它给桌面图标出缩略图）。这与 JVM 最初那条 #GP 同类（非规范地址/坏指针），是**另一个独立的用户态崩溃**，值得单独查。
 
 ### guest 写盘后 ext4 位图校验和不一致
 - 症状：`image-world` 产物 `e2fsck -fn` 干净；但 guest 启动一次后，从宿主机看（QEMU `-snapshot` 的 qcow2 overlay，或 kill 后的镜像）会出现 `Block bitmap checksum does not match bitmap`，`debugfs` 直接打不开。
