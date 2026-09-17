@@ -41,11 +41,20 @@ USERNAME=${USERNAME:-Player}
     exit 1
 }
 
-CP=$(sed "s|^.*/libraries/|$MC_HOME/libraries/|" "$MC_HOME/classpath.txt" | tr '\n' ':')
+CP=$(sed "s|[^:]*/libraries/|$MC_HOME/libraries/|g" "$MC_HOME/classpath.txt" | tr '\n' ':')
+CP="${CP%:}:"
 mkdir -p "$GAMEDIR"
 
 echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
+# A20OS workarounds, both required to get this far:
+#   * -XX:-ImplicitNullChecks (diagnostic, hence the Unlock flag): A20OS's
+#     SIGSEGV path trips HotSpot's implicit null check, which aborts the VM
+#     while it loads classes from client.jar (see docs/distro/minecraft.md).
+#   * -Dos.name=Linux: LWJGL/Minecraft refuse to run on an unknown platform
+#     name ("A20OS"); see the same document.
 exec java \
+    -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
+    -Dos.name=Linux \
     -cp "$CP$MC_HOME/client.jar" \
     -Djava.library.path="$MC_HOME/natives" \
     -Dorg.lwjgl.librarypath="$MC_HOME/natives" \
