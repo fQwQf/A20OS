@@ -168,8 +168,10 @@
 - **启动器两个 classpath bug（已修 `f3469887`）**：`classpath.txt` 是**单行冒号分隔**，启动器的贪婪
   `sed '^.*/libraries/'` 把整条 classpath 塌成一条，又把 client.jar 粘在无结尾冒号的 CP 后面——这正是
   最初那个 `ClassNotFoundException` 的来源；并加上 `-Dos.name=Linux`（LWJGL/Minecraft 拒绝平台名 "A20OS"）。
-- **现状**：启动器能跑完整套真实启动流程并成功加载 **LWJGL 3.3.3+5**，随后崩在 LWJGL 自带的
-  `libjemalloc.so`（下一个要查的点）。完整过程与证据见 [minecraft.md](minecraft.md)。
+- **现状**：启动器能跑完整套真实启动流程并成功加载 **LWJGL 3.3.3+5**。LWJGL 自带的 `libjemalloc.so`
+  随后会 fault；`-Dorg.lwjgl.system.allocator=system` 换掉分配器后游戏继续到**开窗**阶段，被
+  `XIO: fatal IO error 90 (Message too large) on X server ":0"` 打断（GLFW 走了 Xwayland 的 X11 路径）。
+  完整过程与证据见 [minecraft.md](minecraft.md)。
 
 ### x86_64 可用 RAM 曾硬编码成 1 GiB（**已修复**：改从 multiboot 内存图取）
 - 事实：`kernel/arch/x86_64/include/platform.h:8` 把 `PHYS_MEMORY_END` 写死为 `0x40000000`（1 GiB），
