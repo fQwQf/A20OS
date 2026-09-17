@@ -13,7 +13,7 @@ arch = "x86_64"
 # x86_64 (components block on socket/dbus wakeups); single-core is the
 # verified-working configuration until that scheduler bug is fixed.
 smp = 1
-memory = "2G"
+memory = "4G"
 
 [gui]
 enabled = true
