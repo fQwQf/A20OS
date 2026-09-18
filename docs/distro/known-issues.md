@@ -468,6 +468,119 @@
   - **为什么它是偶发的**：只有当任务的 `clear_child_tid` 所指的页**此刻与另一个任务 COW 共享**时才发作，
     所以表现为「约 1/10」；一旦发作就是**把另一个任务（通常是 fork 出来的父子进程）的 4 字节字段清零**，
     于是症状永远是「某个指针字段变成 NULL」。这与 mpv / tumblerd / JVM 那几条症状完全对得上。
+
+- **【重要更正】cleartid 这个缺陷是真的、也真的修好了，但它**不是** mpv/tumblerd 那几条崩溃的原因**
+
+  修完之后，用**同一套会复现症状的负载**（这次加大到 60× `java -version` + 120× `mpv --vo=null`）
+  在**修复后的内核**上再跑一遍，结果**症状照旧出现**：
+
+  ```
+  VF java done=60   VF mpv done=120                      # 负载确实跑完了
+  SIGSEGV: pid=869 code=13 sepc=0x638a6320 stval=0x8     # 与修复前**同样的**签名
+  FATAL:   pid=869 ... comm=lua/osc path=/extra/usr/bin/mpv
+  ADE/ALE: pid=123 sepc=0x45bb6031 stval=0x8136a00e code=1
+  FATAL:   pid=123 ... comm=tumblerd                     # tumblerd 也照旧崩
+  ```
+
+  ⇒ **必须更正上面那句「完全对得上」**：
+  - `clear_child_tid` 的缺陷**本身是真的**、修复也是对的（`ctidtest`：修复前 20/20 污染、
+    修复后 20/20 干净，宿主对照 5/5 全对）—— 它确实是一个**独立的、确定性的**跨进程内存损坏 bug，
+    **修复应当保留**；
+  - 但它**不是** mpv / LuaJIT / tumblerd 这些偶发崩溃的原因：修复后这些症状**依然复现**，
+    且签名逐字相同（`comm=lua/osc`、`sepc=0x638a6320`、`stval=0x8`）。
+    此前仅凭「形状一致」就把它认定为那些症状的根因，属于**过度推断，在此撤回**；
+  - 同理，MC 那次 `ld-musl+0x4602b` 崩溃**没有**在修复后复测过，所以对它同样**不能**下这个结论；
+  - ⇒「多线程进程的匿名内存偶发被写坏」这条**仍未解决**（只是排除项又多了一条：
+    cleartid 的 COW 缺陷已被证明是另一回事）。**mpv 崩溃的根因仍然未知。**
+
+- **【同类缺陷：审计发现第二处】`futex` 的 PI 路径也在「自己翻译地址、裸写物理帧」，而且写的也是 0**
+
+  在排查 mpv 那条崩溃时，把「自己 `pt_translate` 出物理帧再直接写」这个**已被证明有害**的写法在核心里
+  过了一遍，发现**第二处同类代码**：
+
+  - `kernel/ipc/futex.c` 的 `futex_user_word_map()`（541-564 行）`pt_translate` → `pfn_to_virt` 后
+    **返回一个指向内核线性映射的 `volatile int *word`**，调用方拿它做**原子写**：
+    ```c
+    volatile int *word = NULL;
+    futex_user_word_map(t, uaddr, &word, &pkey);      // 581 / 654 行
+    ...
+    __atomic_store_n(word, zero, __ATOMIC_RELEASE);   // 668 行：同样是裸帧写，写的也是 0
+    ```
+    ⇒ 与 cleartid 那条**完全同类**：若目标页此刻与别的任务 **COW 共享**，这一写会把**对方那份**
+    也改成 0。
+  - **已核对为「正确」的一处**：`exit_robust_list()`（680-713 行）用的是 `copy_from_user()` /
+    `copy_to_user()` ✓ —— 说明核心里**正确写法是有的**，出问题的两处（cleartid 与这里）都是**自己手写**。
+  - 也顺带澄清语义边界：**对 MAP_SHARED 页裸写帧是对的**（大家都映射同一帧，本就该一起改），
+    错的只是 **COW-private** 的情况；`user_resolve_leaf()` 两种情形都能正确处理 ✓。
+
+  **为什么这次记录为待修、而不当场改**：
+  - **触发面很窄**：这条只在 **PI（优先级继承）/ robust futex** 路径上写；而 mpv / LuaJIT /
+    tumblerd / JVM 用的是**普通 futex**（`FUTEX_WAIT/WAKE`，走的是只读的 `futex_user_load_locked()`）
+    ⇒ 它**大概率解释不了**那几条偶发崩溃（这也是为什么先不动它）。
+  - **修复有死锁风险**：`futex_user_word_map()` 的调用点在 **`mm->lock` 之内**（该函数注释明确写了
+    “Caller must hold mm->lock”），而正确的 COW 破坏要调 `handle_cow_fault()`
+    （声明在 `kernel/include/mm/fault.h:11`）；若它内部也取 `mm->lock`，原地调用就会**自死锁**。
+    因此修法必须把 COW 破坏挪到取 `mm->lock` **之前**（或另设无锁路径）；
+    也不能照搬 cleartid 那招——这里要的是**原子写**，而 `copy_to_user()` 是 memcpy，不适用。
+  ⇒ 记为**已定位、待修的同类缺陷**，修法要点如上。
+
+- **【已实测，阴性】COW 破坏本身是保数据的：宿主/客体对跑 20/20 都干净 ⇒ 这条假设排除**
+
+  **动机（此前测试的一个盲点）**：32 MiB 金丝雀**只读不写**，所以它**从未触发过 COW 破坏** ——
+  也就是说「**COW 破坏是否正确**」这一路此前**完全没测过**。而 mpv 会 `fork()`（ytdl/osc 脚本），
+  fork 之后**父进程**再写那些继承来的页就必须触发 COW 破坏；若破坏时拷错（或拷成零页），
+  父进程的页就会变成 0 ⇒ 指针字段变 NULL，与签名吻合。于是补了这个确定性最小复现器：
+
+  - 父进程把整页填成 `i ^ 0x5A` 的图案 → `fork()` → 子进程**睡 300ms 保持存活**（让页面仍与父
+    COW 共享）→ 父进程只写 **1 个字节**（必然触发 COW 破坏）→ 校验**其余 4095 字节**是否原样；
+  - `control` 轮：同样填+写但**不 fork**（无 COW）⇒ 任何实现都应干净，用于证明探针本身没问题。
+
+  实测：
+  ```
+  宿主（参照）：cow 00000000 clean   control 00000000 clean    # 5/5 全干净
+  客体（A20OS）：cow 00000000 clean   control 00000000 clean    # 20/20 全干净
+  ```
+  ⇒ **「COW 破坏会损坏数据」这条假设被排除**（`bad=0`，与宿主逐项一致）。
+  （复现器：`/tmp/opencode/cowtest.c`，同样是静态、无 libc、宿主客体都能跑的 freestanding 程序。）
+
+- **【已实测，阳性】PI futex 那条同类缺陷被证实：`pi 00000001 POLLUTED` 20/20（宿主 5/5 干净）**
+
+  用与 cleartid 完全相同的「确定性最小复现 + 宿主对照」方法，证实了审计发现的那**第二处**
+  同类缺陷（这次是**先证实、再下结论**）：
+
+  - 父进程把整页填成 `i ^ 0x5A` 图案，把页内偏移 64 处的 futex word 置 **0**（未锁），然后 `fork()`；
+  - 子进程 `futex(FUTEX_LOCK_PI)`（PI 锁会把 owner TID 写进该 word），随后**持锁退出**（不 unlock）；
+  - 父进程 `wait4()` 后检查自己那一份：word 应仍为 **0**、整页图案应原样。
+
+  正确实现会在写之前破坏 COW（写落到子进程的私有副本）⇒ 父进程不受影响；而 A20OS 的
+  `futex_user_word_map()` 返回的是**裸帧指针**、`__atomic_store_n()` 直接写它 ⇒ 写进两者共享的那一帧
+  ⇒ 父进程的 word 被改写。
+
+  ```
+  宿主（参照）：pi 00000000 clean      pi-control 00000000 clean   # 5/5 全干净
+  客体（A20OS）：pi 00000001 POLLUTED   pi-control 00000000 clean   # 20/20 全 POLLUTED
+  ```
+
+  - `bad=1` 正是「word 不再是 0」这一项坏掉（图案本身完好）⇒ **父进程的 futex word 被跨进程改写**；
+  - `pi-control` 轮（子进程**先**脏了该页、COW 已由子进程自己破坏）客体**也是 clean** ✓
+    ⇒ 与 cleartid 一样，失效点**精确地**是「**内核没有为这次写破坏 COW**」；
+  - 复现率 **20/20（确定性）**、宿主全对 ⇒ **第二个真实的跨进程内存损坏 bug，已证实**。
+  - 复现器：`/tmp/opencode/pitest.c`（静态、无 libc、宿主客体都能跑）。
+
+  ⇒ 这确认了上一条的**审计推断是对的**。**但它仍未修复**：修法必须「在取 `mm->lock` 之前完成 COW 破坏」
+  （原地调用 `handle_cow_fault()` 会自死锁），且此处需要**原子写**，不能用 `copy_to_user()` 替代。
+
+  **修复方案（插入点已找好，供下一步实施）**：
+  - **调用点**：`kernel/abi/linux/sys_futex.c:49` / `:51` / `:63` 三处 `futex_pi_acquire()`
+    （`FUTEX_LOCK_PI` / `FUTEX_TRYLOCK_PI` 及相邻分支）—— 它们都在**引擎取 `mm->lock` 之前**，
+    正是可以安全破坏 COW 的位置；
+  - 核心里**没有**现成的「为写而破坏 COW」独立 helper（`user_resolve_leaf()` 里那段是 `static`），
+    所以需要把那段逻辑（叶子不存在 → `handle_demand_fault()`；存在但不可写 → `handle_cow_fault()`）
+    **提炼成一个可导出的 helper**，在这几处**先调它、再进引擎**；
+  - 做完之后，`futex_user_word_map()` 返回裸帧指针才是安全的（此时该页已是本任务私有），
+    并且仍需保留原子写（不能换成 `copy_to_user()`）。
+  - **验证方式**：用同一个 `pitest` 复现器 —— 修复后客体应当变成
+    `pi 00000000 clean`，与宿主一致（就像 cleartid 那次 `20/20 POLLUTED → 20/20 clean` 一样）。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 - **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
