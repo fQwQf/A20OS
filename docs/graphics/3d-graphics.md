@@ -821,6 +821,44 @@ rc=0
 （b）让 MC 在声音引擎初始化失败时**优雅降级**（它本该如此），而不是让 glibc native 的 C++ 异常
     逃逸成 `terminate`。
 
+### 9.17 OpenAL 这一环解决了：MC 走到了主菜单（但仍受另一个间歇性停点影响）
+
+9.16 的回滚结论只对了一半：把 OpenAL 指向 musl 版之所以变成回归，是因为**只换了库、没换后端**。
+真正起作用的组合是**两件事一起**（已落在 launcher overlay 里）：
+
+```
+export ALSOFT_DRIVERS=null                                # 让 OpenAL Soft 用空设备后端
+-Dorg.lwjgl.openal.libname=/nonexistent/libopenal.so      # 让 LWJGL 不走它自带的 glibc OpenAL
+```
+
+**实测（客体，有一轮完整走通）**：MC 的日志一路到
+
+```
+Using optional rendering extensions: ...
+Reloading ResourceManager: vanilla
+OpenAL initialized on device No Output        ← 声音引擎这次起来了
+Sound engine started
+Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
+...（blocks / gui / items / chest / shulker_boxes 等整套 atlas 都建了）
+[Download-*/ERROR]: Failed to fetch Realms feature flags / yggdrasil public key
+```
+
+最后几行网络错误正是**标题界面**会做的事（拉 Realms 通知与用户资料），并且**全程没有任何
+`CXA_THROW` / `terminate called`** ⇒ **MC 走到了主菜单** ✓。
+
+**机制**：LWJGL 自带的 `libopenal.so` 是 **glibc 构建**，在这个 musl 客体里经 gcompat 运行，
+在声音引擎初始化时抛**未捕获的 C++ 异常**（先看到 `std::system_error`；沿这条线改到走 fallback 后，
+看到 OpenAL Soft 自己的 `al::backend_exception`）⇒ `terminate` ⇒ 进程死。
+`ALSOFT_DRIVERS=null` 把后端变成空设备（日志里即 `No Output`），于是不再抛。
+**两件事缺一不可**：只给 `ALSOFT_DRIVERS=null`（不改 libname）时，MC 仍停在
+`Backend library: LWJGL version 3.3.3+5` 之后（实测一轮一致）。
+
+**仍不稳定（必须记下）**：**同一配置换一轮**会停在 `Backend library: LWJGL version 3.3.3+5` 之后、
+到不了 `Using optional rendering extensions` —— 与本文件第 8 节记的「渲染器起来之后输出就停」
+是**同一现象**，它**独立于 OpenAL**，是另一条间歇性停点（与 mpv/LuaJIT 那类未解释的崩溃同属一类）。
+
+⇒ **结论**：OpenAL 这一环**已解决**，MC 能到达主菜单；要「稳定地能玩」，还需要解决那条间歇性停点。
+
 **顺带更正两条陈旧记录**：
 - 本文 8 节末的「LWJGL natives + Minecraft jars 不在镜像里」**已经不成立** —— 现在的 xfce 镜像里
   `/usr/share/a20-media/1.21.11/` 完整存在：`client.jar`(31 MB)、`libraries/`、`assets/`、
