@@ -561,6 +561,43 @@ static inline int user_range_ok(uint64_t va, size_t n) {
     return n <= USER_VA_LIMIT - va;
 }
 
+int user_prepare_write(struct task_t *t, uint64_t va)
+{
+    if (!t || !t->mm)
+        return -EFAULT;
+    if (!user_range_ok(va, 1))
+        return -EFAULT;
+#ifdef CONFIG_NOMMU
+    return 0;
+#else
+    if (!t->pgdir)
+        return -EFAULT;
+    va = (uint64_t)(vaddr_t)va;
+    pte_t *pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
+    if (!pte || !(*pte & PTE_V)) {
+        int r = handle_demand_fault(t, va);
+        if (r < 0)
+            return -EFAULT;
+        pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
+        if (!pte || !(*pte & PTE_V))
+            return -EFAULT;
+    }
+    if (!arch_pte_is_leaf(*pte) || !(*pte & PTE_U))
+        return -EFAULT;
+    if (!(*pte & PTE_W)) {
+        int r = handle_cow_fault(t, va);
+        if (r < 0)
+            return -EFAULT;
+        pte = pt_lookup_leaf(t->pgdir, va, NULL, NULL, NULL);
+        if (!pte || !(*pte & PTE_V))
+            return -EFAULT;
+    }
+    if (!pte_user_writable(*pte))
+        return -EFAULT;
+    return 0;
+#endif
+}
+
 static int user_resolve_leaf(task_t *t, uint64_t va, int write,
                              void **kaddr_out, size_t *avail_out) {
     va = (uint64_t)(vaddr_t)va;

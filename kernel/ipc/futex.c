@@ -573,6 +573,10 @@ int futex_pi_acquire(int *uaddr, int try_only)
     wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
 
     for (;;) {
+        int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
+        if (pr < 0)
+            return pr;
+
         uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
         uint64_t q_flags = spin_lock_irqsave(&q->lock);
 
@@ -647,6 +651,10 @@ int futex_pi_release(int *uaddr)
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
     wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+
+    int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
+    if (pr < 0)
+        return pr;
 
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
     uint64_t q_flags = spin_lock_irqsave(&q->lock);
