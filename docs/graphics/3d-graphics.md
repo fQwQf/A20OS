@@ -789,3 +789,41 @@ rc=0
 `find` 静默返回空、循环里的 `[ -z ] && continue` 把三个 native 全跳过了——日志里表现为
 "natives present: No such file"。**"注入成功"没有输出不等于真的写进去了**；后来改用显式路径并加
 `injected <dst>` 回显才确认。这类静默跳过值得在脚本里一律显式回显。
+
+### 9.16 OpenAL：把 LWJGL 重定向到发行版的 musl 版（本轮实测）
+
+承接 9.14/9.15 那条「LWJGL 的 native 是 glibc 构建」的线：MC 的死因最后落在
+`natives/libopenal.so`（glibc）抛出的**未捕获 `std::system_error`**（稳定抛点
+`libopenal.so + 0xf168`，详见 `docs/distro/known-issues.md`）。而镜像里其实**已经有 musl 版的 OpenAL**
+（Alpine `openal-soft`：`/usr/lib/libopenal.so.1 -> libopenal.so.1.24.3`）。
+
+**修法（本次已落地）**：给 launcher 的 java 命令行加一行
+
+```
+-Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1
+```
+
+（`packages/overlay/xfce/usr/local/bin/minecraft`）。
+
+**实测结果（三次采样一致）⇒ 结论是：这条改动有害，已回滚**：
+- `CXA_THROW` / `terminate called` / `MAP_HIT` **全部消失**，`DLOPEN ... openal` 也没有出现
+  ⇒ glibc OpenAL 的抛异常路径**确实被绕开了**；
+- **但 MC 反而停得更早**：加了这个 flag 之后三次采样都停在
+  `Backend library: LWJGL version 3.3.3+5` 之后，**再也到不了 `Using optional rendering extensions`**；
+  而**不加** flag 时，多次采样都能走到 `Using optional rendering extensions`（只是随后被 OpenAL 的抛异常打死）。
+- ⇒ **`-Dorg.lwjgl.openal.libname` 把失败点提前了**（很可能是 LWJGL 因此提早去碰 OpenAL，
+  而「glibc 语境里 `dlopen` 一个 musl 库」这条路本身会卡）。**这是一次回归，已从 overlay 回滚。**
+
+**修正后的判断**：MC 的 OpenAL 抛异常**不是**渲染阶段的直接阻塞点 —— 不加 flag 时 MC 能走到
+`Using optional rendering extensions`，抛异常发生在**那之后**（声音引擎初始化阶段）。所以下一步不是
+「换一个 OpenAL」，而应该是：
+（a）查清 glibc 版 OpenAL 在 gcompat 下**为什么**抛（稳定抛点 `libopenal.so + 0xf168`），或
+（b）让 MC 在声音引擎初始化失败时**优雅降级**（它本该如此），而不是让 glibc native 的 C++ 异常
+    逃逸成 `terminate`。
+
+**顺带更正两条陈旧记录**：
+- 本文 8 节末的「LWJGL natives + Minecraft jars 不在镜像里」**已经不成立** —— 现在的 xfce 镜像里
+  `/usr/share/a20-media/1.21.11/` 完整存在：`client.jar`(31 MB)、`libraries/`、`assets/`、
+  `natives/`（libglfw/libopenal/liblwjgl/libjemalloc/... 齐全）、`classpath.txt`。
+- 结合 9.13 的结论（**GBM 不是阻塞项**、Wayland 路径上真实 GL 渲染已跑通），Minecraft 现在的**真正
+  卡点**是上面那条「停点」与 glibc-native 类问题，**不是** GEM/dma-buf 那条链。
