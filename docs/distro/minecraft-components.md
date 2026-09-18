@@ -246,10 +246,23 @@ The selection now scans for a device advertising `A20_AUDIO_CAP_PCM`.  All five 
 sites are PCM-related (`PCM_NEXT_DEVICE` included), so nothing tone-related changes; a
 tone-only system now reports `-ENODEV` for PCM instead of pretending.
 
-Real audio still needs an audio device in the VM: add e.g.
-`-device intel-hda -device hda-duplex` to the instance and let the `hda` module load.
-Until then the null backend is the right answer and Minecraft is unaffected by any of
-this.
+Real audio needs an audio device in the VM, and that half is now verified: with
+`-device intel-hda -device hda-duplex` on the command line and `hda.a20drv` staged in a
+path the driver manager scans (`/bin/lib/drivers`, or `/boot/drivers` — the stock image
+also carries it in `/lib/drivers`), the kernel binds it:
+
+    [DRIVER] registered driver 'hda' (class=6)
+    [HDA] pci-8086:2668-2 codec=0 afg=1 dac=2 pin=3, 48000 Hz stereo S16_LE
+    [DRIVER] device 'pci-8086:2668-2' bound to driver 'hda'
+
+udev then reports two audio class devices (`audio0` and `audio1`) instead of one, which
+is exactly the case the selection fix above exists for.  `instances/xfce-x86_64.toml`
+now carries the audio device.
+
+Whether ALSA then opens is still unobserved: the run used for the test stalled before
+sound initialisation, so no `[ALSOFT]` line appeared.  `drivers = null` therefore stays
+in `/etc/openal/alsoft.conf` until a run reaches sound init and reports an ALSA device.
+Minecraft is unaffected either way.
 
 
 
