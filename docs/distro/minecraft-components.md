@@ -224,6 +224,33 @@ modules exist in `user/build/x86_64/*.a20drv` but nothing binds without a device
 `pc-spkr` is linked into the kernel and may be the only audio device present — so the
 capabilities that device advertises decide whether a PCM can open at all.
 
+#### Root cause: the ALSA layer bound the tone-only PC speaker
+
+Settled statically.  Only one audio device registers in this configuration — the
+in-kernel PC speaker — and what it advertises is
+
+    .flags = A20_AUDIO_CAP_TONE
+
+with no `A20_AUDIO_CAP_PCM`.  The two drivers that do advertise PCM are modules
+(`hda.a20drv`, `virtio-snd.a20drv`) and they need a matching QEMU device, which this
+instance does not pass.
+
+`alsa_audio_get()` made that worse by taking the first audio class device
+unconditionally — `class_device_get_by_type(DEV_CLASS_AUDIO, 0)`, which is the PC
+speaker — so every PCM path returned `-EOPNOTSUPP`, HW_REFINE among them.  libasound
+calls HW_REFINE from `snd_pcm_open()` through `snd_pcm_hw_params_any()`, so the open
+failed right there.  That is the whole "Could not open ALSA device" story, and it means
+the wrong ABI and the wrong device were two separate defects stacked on each other.
+
+The selection now scans for a device advertising `A20_AUDIO_CAP_PCM`.  All five call
+sites are PCM-related (`PCM_NEXT_DEVICE` included), so nothing tone-related changes; a
+tone-only system now reports `-ENODEV` for PCM instead of pretending.
+
+Real audio still needs an audio device in the VM: add e.g.
+`-device intel-hda -device hda-duplex` to the instance and let the `hda` module load.
+Until then the null backend is the right answer and Minecraft is unaffected by any of
+this.
+
 
 
 ### Measured results in the guest

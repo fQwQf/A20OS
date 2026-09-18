@@ -152,12 +152,18 @@ static int alsa_audio_get(device_t **dev_out, audio_dev_ops_t **ops_out)
 {
     *dev_out = NULL;
     *ops_out = NULL;
-    class_device_t *cdev = class_device_get_by_type(DEV_CLASS_AUDIO, 0);
-    if (!cdev || !cdev->dev)
-        return -ENODEV;
-    *dev_out = cdev->dev;
-    *ops_out = (audio_dev_ops_t *)cdev->dev->drv->class_ops;
-    return 0;
+    for (unsigned i = 0; i < 16; i++) {
+        class_device_t *cdev = class_device_get_by_type(DEV_CLASS_AUDIO, i);
+        if (!cdev || !cdev->dev)
+            break;
+        audio_dev_ops_t *ops = (audio_dev_ops_t *)cdev->dev->drv->class_ops;
+        if (ops && (ops->caps.flags & A20_AUDIO_CAP_PCM)) {
+            *dev_out = cdev->dev;
+            *ops_out = ops;
+            return 0;
+        }
+    }
+    return -ENODEV;
 }
 
 /* ---- PCM ioctls ---- */
