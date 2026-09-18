@@ -259,10 +259,24 @@ udev then reports two audio class devices (`audio0` and `audio1`) instead of one
 is exactly the case the selection fix above exists for.  `instances/xfce-x86_64.toml`
 now carries the audio device.
 
-Whether ALSA then opens is still unobserved: the run used for the test stalled before
-sound initialisation, so no `[ALSOFT]` line appeared.  `drivers = null` therefore stays
-in `/etc/openal/alsoft.conf` until a run reaches sound init and reports an ALSA device.
-Minecraft is unaffected either way.
+Whether ALSA can then open the PCM is answered: yes, and deterministically.  A
+freestanding probe (`open()` plus the raw ioctls — no libasound and no Minecraft, so the
+intermittent startup stall cannot interfere) walks the whole open path against
+`/dev/snd/pcmC0D0p`, and every call returns 0:
+
+    PCM_OPEN=3  PVERSION=0  INFO=0   REFINE=0  PARAMS=0  PREPARE=0  START=0
+    WRITEI=0    DRAIN=0     STATUS=0
+    CTL_OPEN=3  CARD_INFO=0 CTL_PVER=0 PCM_INFO=0
+
+The kernel side is therefore whole: with the ABI corrected, a PCM-capable device
+selected and an HDA card present, a client can open the stream, negotiate format,
+prepare, start, write frames, drain and read status.  (The three Minecraft runs tried for
+this check had all stalled before sound init, which is why the raw probe replaced them.)
+
+`/etc/openal/alsoft.conf` still says `drivers = null`: that is the configuration MC is
+verified to start its sound engine on, and the one-line switch to `alsa` is now backed by
+the probe above — worth doing together with a run that reaches sound init and prints
+`OpenAL initialized on device ...`.
 
 
 
