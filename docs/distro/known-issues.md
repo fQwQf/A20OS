@@ -581,6 +581,25 @@
     并且仍需保留原子写（不能换成 `copy_to_user()`）。
   - **验证方式**：用同一个 `pitest` 复现器 —— 修复后客体应当变成
     `pi 00000000 clean`，与宿主一致（就像 cleartid 那次 `20/20 POLLUTED → 20/20 clean` 一样）。
+
+  **✅ 已按上述方案修复并验证**：
+  - **实现**：在 `kernel/mm/mm.c` 新增可导出的 `user_prepare_write(task_t*, uint64_t)` —— 把
+    `user_resolve_leaf()` 里那段「叶子不存在 → `handle_demand_fault()`；存在但不可写 →
+    `handle_cow_fault()`；最后确认可写」的逻辑独立出来，并在 `kernel/include/sys/usercopy.h` 声明；
+    然后在 `kernel/ipc/futex.c` 的 **`futex_pi_acquire()` 循环顶部**与 **`futex_pi_release()` 取锁之前**
+    各调用一次 —— 即在**取 `mm->lock` 之前**完成 COW 破坏，之后 `futex_user_word_map()` 返回的裸帧指针
+    才是安全的。放在引擎里（而不是 Linux ABI 的 `sys_futex.c`）可**同时覆盖 Native ABI**。
+  - **编译踩坑**：`usercopy.h` 原来不认识 `task_t`，原型里的 `struct task_t *` 被当成「在参数表里声明
+    新 struct」，`-Werror` 直接报错；在头里补一句 `struct task_t;` 前置声明即可。
+  - **验证（同一个 `pitest`、同一个镜像，只换内核）**：
+    ```
+    修复前：pi 00000001 POLLUTED   pi-control 00000000 clean   # 20/20 与 20/20
+    修复后：pi 00000000 clean      pi-control 00000000 clean   # 20/20 与 20/20 ← 与宿主逐项一致
+    ```
+    ⇒ 20/20 的跨进程污染**全部消失**，与宿主（Linux，5/5 clean）一致。
+  - **残留（诚实记录）**：`user_prepare_write()` 是在取锁**之前**破坏 COW，因此「prepare 之后、
+    锁内存储之前」若恰好发生 `fork()` 使该页重新变成 COW，理论上仍有**极窄的竞态窗口**。
+    要彻底关闭它，需在 `mm->lock` 内**复查 PTE 可写性**（不可写则解锁重试）；本轮未实施。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 - **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
