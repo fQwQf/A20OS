@@ -28,17 +28,36 @@
 #define SNDRV_PCM_STATE_SETUP 1
 #define SNDRV_PCM_STATE_PREPARED 2
 #define SNDRV_PCM_STATE_RUNNING 3
-#define SNDRV_PCM_STATE_DRAINING 4
-#define SNDRV_PCM_STATE_PAUSED 5
+#define SNDRV_PCM_STATE_XRUN 4
+#define SNDRV_PCM_STATE_DRAINING 5
+#define SNDRV_PCM_STATE_PAUSED 6
 
 #define SNDRV_PCM_FORMAT_S16_LE 2
 #define SNDRV_PCM_FORMAT_U8 1
+#define SNDRV_PCM_ACCESS_RW_INTERLEAVED 3
+#define SNDRV_PCM_SUBFORMAT_STD 0
 
-#define SNDRV_PCM_HW_PARAM_FORMAT 0
-#define SNDRV_PCM_HW_PARAM_RATE 3
-#define SNDRV_PCM_HW_PARAM_CHANNELS 1
-#define SNDRV_PCM_HW_PARAM_PERIOD_SIZE 10
-#define SNDRV_PCM_HW_PARAM_PERIODS 11
+#define SNDRV_PCM_HW_PARAM_ACCESS 0
+#define SNDRV_PCM_HW_PARAM_FORMAT 1
+#define SNDRV_PCM_HW_PARAM_SUBFORMAT 2
+#define SNDRV_PCM_HW_PARAM_FIRST_MASK 0
+#define SNDRV_PCM_HW_PARAM_SAMPLE_BITS 8
+#define SNDRV_PCM_HW_PARAM_FRAME_BITS 9
+#define SNDRV_PCM_HW_PARAM_CHANNELS 10
+#define SNDRV_PCM_HW_PARAM_RATE 11
+#define SNDRV_PCM_HW_PARAM_PERIOD_TIME 12
+#define SNDRV_PCM_HW_PARAM_PERIOD_SIZE 13
+#define SNDRV_PCM_HW_PARAM_PERIOD_BYTES 14
+#define SNDRV_PCM_HW_PARAM_PERIODS 15
+#define SNDRV_PCM_HW_PARAM_BUFFER_TIME 16
+#define SNDRV_PCM_HW_PARAM_BUFFER_SIZE 17
+#define SNDRV_PCM_HW_PARAM_BUFFER_BYTES 18
+#define SNDRV_PCM_HW_PARAM_TICK_TIME 19
+#define SNDRV_PCM_HW_PARAM_FIRST_INTERVAL 8
+#define SNDRV_PCM_HW_PARAM_LAST_INTERVAL 19
+
+#define HW_PARAM_MASK_IDX(p) ((p) - SNDRV_PCM_HW_PARAM_FIRST_MASK)
+#define HW_PARAM_INT_IDX(p) ((p) - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL)
 
 #define SNDRV_PCM_INFO_BLOCK_TRANSFER 0x00010000
 
@@ -62,31 +81,51 @@ struct snd_interval {
 struct snd_pcm_hw_params {
     unsigned int flags;
     struct snd_mask masks[3];
+    struct snd_mask mres[5];
     struct snd_interval intervals[12];
-    unsigned int rmask, info, msbits, rate_num, rate_den;
+    struct snd_interval ires[9];
+    unsigned int rmask;
+    unsigned int cmask;
+    unsigned int info;
+    unsigned int msbits;
+    unsigned int rate_num;
+    unsigned int rate_den;
     uint64_t fifo_size;
-    unsigned char reserved[64];
+    unsigned char sync[16];
+    unsigned char reserved[48];
 };
 struct snd_pcm_sw_params {
     int tstamp_mode;
-    unsigned int period_step, sleep_min;
-    uint64_t avail_min, xfer_align, start_threshold, stop_threshold;
-    uint64_t silence_threshold, silence_size, boundary;
+    unsigned int period_step;
+    unsigned int sleep_min;
+    uint64_t avail_min;
+    uint64_t xfer_align;
+    uint64_t start_threshold;
+    uint64_t stop_threshold;
+    uint64_t silence_threshold;
+    uint64_t silence_size;
+    uint64_t boundary;
+    unsigned int proto;
     unsigned int tstamp_type;
     unsigned char reserved[56];
 };
-struct snd_timespec { int sec, nsec; };
+struct snd_timespec { int64_t sec, nsec; };
 struct snd_pcm_status {
     int state;
-    struct snd_timespec trigger_tstamp, tstamp;
-    uint64_t appl_ptr, hw_ptr;
+    int pad;
+    struct snd_timespec trigger_tstamp;
+    struct snd_timespec tstamp;
+    uint64_t appl_ptr;
+    uint64_t hw_ptr;
     int64_t delay;
-    uint64_t avail, avail_max, hw_ptr_base;
-    unsigned int overrange;
+    uint64_t avail;
+    uint64_t avail_max;
+    uint64_t overrange;
     int suspended_state;
     unsigned int audio_tstamp_data;
-    struct snd_timespec audio_tstamp, driver_tstamp;
-    uint64_t audio_tstamp_accuracy;
+    struct snd_timespec audio_tstamp;
+    struct snd_timespec driver_tstamp;
+    unsigned int audio_tstamp_accuracy;
     unsigned char reserved[20];
 };
 struct snd_xferi {
@@ -104,6 +143,7 @@ struct snd_pcm_info {
     int stream, card;
     unsigned char id[64], name[80], subname[32];
     unsigned int dev_class, dev_subclass, subdevices_count, subdevices_avail;
+    unsigned char pad1[16];
     unsigned char reserved[64];
 };
 
@@ -122,6 +162,99 @@ static int alsa_audio_get(device_t **dev_out, audio_dev_ops_t **ops_out)
 
 /* ---- PCM ioctls ---- */
 
+static void hw_params_mask_set(struct snd_mask *mask, unsigned int value)
+{
+    memset(mask, 0, sizeof(*mask));
+    mask->bits[value / 32] |= 1u << (value % 32);
+}
+
+static void hw_params_interval_set(struct snd_interval *itv, unsigned int lo,
+                                   unsigned int hi)
+{
+    memset(itv, 0, sizeof(*itv));
+    itv->min = lo;
+    itv->max = hi;
+    itv->integer = 1;
+}
+
+static void hw_params_fill_supported(struct snd_pcm_hw_params *hp,
+                                     audio_dev_ops_t *ops)
+{
+    unsigned int rate_min = ops->caps.min_rate ? ops->caps.min_rate : 8000;
+    unsigned int rate_max = ops->caps.max_rate ? ops->caps.max_rate : 48000;
+
+    hw_params_mask_set(&hp->masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_ACCESS)],
+                       SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+    hw_params_mask_set(&hp->masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_FORMAT)],
+                       SNDRV_PCM_FORMAT_S16_LE);
+    hw_params_mask_set(&hp->masks[HW_PARAM_MASK_IDX(SNDRV_PCM_HW_PARAM_SUBFORMAT)],
+                       SNDRV_PCM_SUBFORMAT_STD);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_SAMPLE_BITS)], 16, 16);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_FRAME_BITS)], 16, 32);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)], 1, 2);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)], rate_min, rate_max);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_TIME)], 0, 0xffffffffu);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)], 16, 1u << 20);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_BYTES)], 16, 1u << 20);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIODS)], 2, 1024);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_TIME)], 0, 0xffffffffu);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_SIZE)], 16, 1u << 22);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_BUFFER_BYTES)], 16, 1u << 22);
+    hw_params_interval_set(&hp->intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_TICK_TIME)], 0, 0xffffffffu);
+
+    hp->flags = 0;
+    hp->rmask = 0x000fffff;
+    hp->cmask = 0x000fffff;
+    hp->info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
+    hp->msbits = 16;
+    hp->fifo_size = 0;
+}
+
+static unsigned int hw_params_clamp(unsigned int value, unsigned int lo,
+                                    unsigned int hi, unsigned int fallback)
+{
+    if (value == 0)
+        value = fallback;
+    if (value < lo)
+        value = lo;
+    if (value > hi)
+        value = hi;
+    return value;
+}
+
+static int alsa_pcm_hw_refine(alsa_pcm_ctx_t *ctx, void *arg)
+{
+    struct snd_pcm_hw_params hp;
+    device_t *dev;
+    audio_dev_ops_t *ops;
+    int r;
+
+    (void)ctx;
+    if (copy_from_user(&hp, arg, sizeof(hp)) < 0)
+        return -EFAULT;
+    r = alsa_audio_get(&dev, &ops);
+    if (r < 0)
+        return r;
+    if (!(ops->caps.flags & A20_AUDIO_CAP_PCM))
+        return -EOPNOTSUPP;
+    hw_params_fill_supported(&hp, ops);
+    return copy_to_user(arg, &hp, sizeof(hp)) < 0 ? -EFAULT : 0;
+}
+
+static int alsa_pcm_info(alsa_pcm_ctx_t *ctx, void *arg)
+{
+    struct snd_pcm_info info;
+
+    memset(&info, 0, sizeof(info));
+    memcpy(info.id, "A20PCM", 6);
+    memcpy(info.name, "A20OS Audio", 11);
+    memcpy(info.subname, "A20 PCM", 7);
+    info.stream = ctx->playback ? 0 : 1;
+    info.subdevices_count = 1;
+    info.subdevices_avail = 1;
+    return copy_to_user(arg, &info, sizeof(info)) < 0 ? -EFAULT : 0;
+}
+
 static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
 {
     struct snd_pcm_hw_params hp;
@@ -137,17 +270,29 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
         return -EOPNOTSUPP;
 
     /* Negotiate format/rate/channels from the user's requested values. */
-    ctx->format = hp.intervals[SNDRV_PCM_HW_PARAM_FORMAT].min;
-    ctx->rate = hp.intervals[SNDRV_PCM_HW_PARAM_RATE].min;
-    ctx->channels = hp.intervals[SNDRV_PCM_HW_PARAM_CHANNELS].min;
-    ctx->period_size = hp.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE].min;
+    unsigned int want_channels =
+        hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)].min;
+    unsigned int want_rate = hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)].min;
+    unsigned int want_period =
+        hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)].min;
+    unsigned int rate_min = ops->caps.min_rate ? ops->caps.min_rate : 8000;
+    unsigned int rate_max = ops->caps.max_rate ? ops->caps.max_rate : 48000;
+
+    hw_params_fill_supported(&hp, ops);
+
+    ctx->format = SNDRV_PCM_FORMAT_S16_LE;
+    ctx->channels = hw_params_clamp(want_channels, 1, 2, 2);
+    ctx->rate = hw_params_clamp(want_rate, rate_min, rate_max, 48000);
+    ctx->period_size = hw_params_clamp(want_period, 16, 1u << 20, 1024);
     ctx->buffer_size = ctx->period_size;
-    if (ctx->rate == 0)
-        ctx->rate = ops->caps.min_rate ? ops->caps.min_rate : 48000;
-    if (ctx->channels == 0)
-        ctx->channels = 1;
-    if (ctx->period_size == 0)
-        ctx->period_size = 1024;
+
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_CHANNELS)],
+                           ctx->channels, ctx->channels);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_RATE)],
+                           ctx->rate, ctx->rate);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIOD_SIZE)],
+                           ctx->period_size, ctx->period_size);
+    hw_params_interval_set(&hp.intervals[HW_PARAM_INT_IDX(SNDRV_PCM_HW_PARAM_PERIODS)], 2, 2);
 
     /* Configure the A20 backend. */
     a20_audio_format_t fmt;
@@ -161,23 +306,6 @@ static int alsa_pcm_hw_params(alsa_pcm_ctx_t *ctx, void *arg)
             return r;
     }
 
-    /* Reply: mark format/rate/channels/period as fixed by clearing the
-     * empty flag and reporting the negotiated values. */
-    hp.intervals[SNDRV_PCM_HW_PARAM_FORMAT].empty = 0;
-    hp.intervals[SNDRV_PCM_HW_PARAM_FORMAT].min =
-        hp.intervals[SNDRV_PCM_HW_PARAM_FORMAT].max = ctx->format;
-    hp.intervals[SNDRV_PCM_HW_PARAM_RATE].empty = 0;
-    hp.intervals[SNDRV_PCM_HW_PARAM_RATE].min =
-        hp.intervals[SNDRV_PCM_HW_PARAM_RATE].max = ctx->rate;
-    hp.intervals[SNDRV_PCM_HW_PARAM_CHANNELS].empty = 0;
-    hp.intervals[SNDRV_PCM_HW_PARAM_CHANNELS].min =
-        hp.intervals[SNDRV_PCM_HW_PARAM_CHANNELS].max = ctx->channels;
-    hp.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE].empty = 0;
-    hp.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE].min =
-        hp.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE].max = ctx->period_size;
-    hp.intervals[SNDRV_PCM_HW_PARAM_PERIODS].min = 2;
-    hp.intervals[SNDRV_PCM_HW_PARAM_PERIODS].max = 2;
-    hp.info = SNDRV_PCM_INFO_BLOCK_TRANSFER;
     ctx->state = SNDRV_PCM_STATE_SETUP;
     return copy_to_user(arg, &hp, sizeof(hp)) < 0 ? -EFAULT : 0;
 }
@@ -276,6 +404,14 @@ static int alsa_pcm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return -EBADF;
 
     switch (req) {
+    case SNDRV_PCM_IOCTL_PVERSION: {
+        int version = SNDRV_PCM_VERSION;
+        return copy_to_user(arg, &version, sizeof(version)) < 0 ? -EFAULT : 0;
+    }
+    case SNDRV_PCM_IOCTL_INFO:
+        return alsa_pcm_info(ctx, arg);
+    case SNDRV_PCM_IOCTL_HW_REFINE:
+        return alsa_pcm_hw_refine(ctx, arg);
     case SNDRV_PCM_IOCTL_HW_PARAMS:
         return alsa_pcm_hw_params(ctx, arg);
     case SNDRV_PCM_IOCTL_SW_PARAMS:
