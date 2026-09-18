@@ -54,19 +54,23 @@ echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
 #     name ("A20OS").
 #   * org.lwjgl.system.allocator=system: LWJGL's bundled libjemalloc faults on
 #     A20OS shortly after it loads.
-#   * ALSOFT_DRIVERS=null together with an OpenAL libname that cannot be loaded:
-#     LWJGL's bundled libopenal is a GLIBC build and, under gcompat in this musl
-#     guest, it throws an uncaught C++ exception during sound-engine init
-#     (al::backend_exception, or std::system_error via pthread/mutex), which kills
-#     the process and is what stopped MC before the main menu.  Sending LWJGL down
-#     its fallback path and handing OpenAL Soft a null backend makes the sound
-#     engine start on a "No Output" device, after which MC reaches the main menu.
-export ALSOFT_DRIVERS=null
+#   * org.lwjgl.openal.libname=/usr/lib/libopenal.so.1: LWJGL's bundled libopenal is
+#     a GLIBC build, and under gcompat in this musl guest its C++ exception machinery
+#     faults during sound-engine init (al::backend_exception / std::system_error,
+#     from libopenal.so+0xf168), which killed the process before the main menu.  The
+#     image already carries a musl build of the same library and LWJGL's OpenAL
+#     support is pure dynamic binding (there is no liblwjgl_openal.so), so pointing
+#     libname at it takes the glibc C++ library out of the process altogether.
+#     That build currently opens no device: alcOpenDevice(NULL) returns NULL and MC
+#     logs "Failed to open OpenAL device", then disables sound and carries on.  It
+#     NEEDs no libasound/libpulse, so no backend it was built with can come up here;
+#     set ALSOFT_DRIVERS or run a sound server to change that.  Either way the
+#     process no longer dies at this point, which is the part that mattered.
 exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
     -Dorg.lwjgl.system.allocator=system \
-    -Dorg.lwjgl.openal.libname=/nonexistent/libopenal.so \
+    -Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1 \
     -cp "$CP$MC_HOME/client.jar" \
     -Djava.library.path="$MC_HOME/natives" \
     -Dorg.lwjgl.librarypath="$MC_HOME/natives" \
