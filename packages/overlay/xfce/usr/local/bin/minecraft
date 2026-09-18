@@ -58,6 +58,7 @@ exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
     -Dorg.lwjgl.system.allocator=system \
+    -Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1 \
     -cp "$CP$MC_HOME/client.jar" \
     -Djava.library.path="$MC_HOME/natives" \
     -Dorg.lwjgl.librarypath="$MC_HOME/natives" \

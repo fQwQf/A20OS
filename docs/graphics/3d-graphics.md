@@ -789,3 +789,36 @@ rc=0
 `find` 静默返回空、循环里的 `[ -z ] && continue` 把三个 native 全跳过了——日志里表现为
 "natives present: No such file"。**"注入成功"没有输出不等于真的写进去了**；后来改用显式路径并加
 `injected <dst>` 回显才确认。这类静默跳过值得在脚本里一律显式回显。
+
+### 9.16 OpenAL：把 LWJGL 重定向到发行版的 musl 版（本轮实测）
+
+承接 9.14/9.15 那条「LWJGL 的 native 是 glibc 构建」的线：MC 的死因最后落在
+`natives/libopenal.so`（glibc）抛出的**未捕获 `std::system_error`**（稳定抛点
+`libopenal.so + 0xf168`，详见 `docs/distro/known-issues.md`）。而镜像里其实**已经有 musl 版的 OpenAL**
+（Alpine `openal-soft`：`/usr/lib/libopenal.so.1 -> libopenal.so.1.24.3`）。
+
+**修法（本次已落地）**：给 launcher 的 java 命令行加一行
+
+```
+-Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1
+```
+
+（`packages/overlay/xfce/usr/local/bin/minecraft`）。
+
+**实测结果（两次采样一致）**：
+- `CXA_THROW` / `terminate called` / `MAP_HIT` **全部消失**，`DLOPEN ... openal` **没有出现**
+  ⇒ 那个 glibc OpenAL 的抛异常路径**确实被绕开了** ✓；
+- 但 MC **仍然没有走到 `Using optional rendering extensions`**（两次都停在
+  `Backend library: LWJGL version 3.3.3+5` 之后；进程还活着，STATW 显示仍在烧 CPU）
+  ⇒ **这一步并没有让 MC 前进** ✗。
+
+**结论**：重定向到 musl OpenAL 消掉了一个**已被证实的**失败模式（glibc native 抛 C++ 异常），
+但 MC 仍卡在**另一个更早的、此前已记录过的点**上（「渲染器起来之后输出就停」那条）。
+它是**必要但不充分**的一步；下一步仍要查那个「停在 renderer 之后」的停点。
+
+**顺带更正两条陈旧记录**：
+- 本文 8 节末的「LWJGL natives + Minecraft jars 不在镜像里」**已经不成立** —— 现在的 xfce 镜像里
+  `/usr/share/a20-media/1.21.11/` 完整存在：`client.jar`(31 MB)、`libraries/`、`assets/`、
+  `natives/`（libglfw/libopenal/liblwjgl/libjemalloc/... 齐全）、`classpath.txt`。
+- 结合 9.13 的结论（**GBM 不是阻塞项**、Wayland 路径上真实 GL 渲染已跑通），Minecraft 现在的**真正
+  卡点**是上面那条「停点」与 glibc-native 类问题，**不是** GEM/dma-buf 那条链。
