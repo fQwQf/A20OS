@@ -346,18 +346,9 @@ static void proc_clear_child_tid_direct(task_t *t)
     int *ctid = t->clear_child_tid;
     t->clear_child_tid = NULL;
 
-    if (!t->pgdir)
-        return;
-
-    paddr_t pa = pt_translate(t->pgdir, (vaddr_t)(uintptr_t)ctid);
-    if (!pa)
-        return;
-    pfn_t pfn = phys_to_pfn(pa);
-    if (!pfn_valid(pfn))
-        return;
-    int *kv = (int *)((char *)pfn_to_virt(pfn) +
-                      ((uintptr_t)ctid & (PAGE_SIZE - 1)));
-    *kv = 0;
+    /* The checked copy is required: it breaks COW before storing. */
+    int zero = 0;
+    (void)copy_to_user(ctid, &zero, sizeof(zero));
 }
 
 void proc_exit(int exit_code)
