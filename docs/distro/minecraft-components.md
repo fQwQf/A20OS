@@ -82,28 +82,54 @@ reports a Java-level failure instead —
 — after which MC keeps going (resource manager reload, unifont, title-screen
 requests) with **zero** native aborts.  Sound is off; the process is alive.
 
-### Audio is the one component that still does not come up
+### Audio: OpenAL is fine, the kernel PCM does not open through ALSA
 
-The kernel side is fine: `/dev/snd/{controlC0,pcmC0D0p,pcmC0D0c}` exist and the
-kernel exports `A20OS Audio` / `A20OS PCM` (`alsa_pcm_*`, `a20pcm`).
+The kernel side exposes the device: `/dev/snd/{controlC0,pcmC0D0p,pcmC0D0c}` exist
+and the kernel carries `A20OS Audio` / `A20OS PCM` (`alsa_pcm_*`, `a20pcm`).
 
-The user-space side is not.  `/usr/lib/libopenal.so.1` (openal-soft 1.24.3) NEEDs
-only `libstdc++.so.6 libgcc_s.so.1 libc.musl-x86_64.so.1` — **no `libasound`, no
-`libpulse`, no `libpipewire`** — so whatever backends it was built with cannot
-initialize; `alcOpenDevice(NULL)` returns NULL.  With `ALSOFT_DRIVERS=null` forced
-it still returns NULL, so its null backend is not available either.
+OpenAL Soft itself is fine.  Asked to log at level 3 it reports its own backends and
+where it gives up:
 
-Consequently:
+    [ALSOFT] (II) Initializing library v1.24.3-unknown UNKNOWN
+    [ALSOFT] (II) Supported backends: pulse, alsa, oss, port, jack, null, wave
+    [ALSOFT] (WW) Failed to initialize backend "pulse"
+    [ALSOFT] (II) Initialized backend "alsa"
+    [ALSOFT] (II) Added "alsa" for playback
+    [ALSOFT] (II) Opening playback device "ALSA Default"
+    [ALSOFT] (II) Opening device "default"
+    [ALSOFT] (WW) Failed to open playback device: Could not open ALSA device "default"
 
-* `/etc/asound.conf` is now installed (overlay) to point ALSA's `default` at
-  `hw:0,0` instead of the PulseAudio plugin chain, which otherwise fails with
-  `ALSA lib pulse.c:242:(pulse_connect) PulseAudio: Unable to connect` — that
-  removes a misleading failure path even though it does not by itself give
-  OpenAL a device.
-* To get real sound, either run a sound server (`pulseaudio` is installed) so a
-  backend with a matching client library can connect, or use an openal-soft build
-  that NEEDs `libasound`.
-* MC does not require any of this: it disables sound and continues.
+An earlier reading of the dynamic section concluded this build had no working
+backend, because the library NEEDs only
+`libstdc++.so.6 libgcc_s.so.1 libc.musl-x86_64.so.1`.  That was wrong: this
+openal-soft **dlopens its backends**.  It imports `dlopen`/`dlsym` and carries
+`AlsaBackendFactory`/`PulseBackendFactory`/`JackBackendFactory`/`NullBackendFactory`
+plus `libasound.so.2`, `libpulse.so.0`, `libjack.so.0` as open targets — which is
+exactly why none of them shows up as NEEDED.
+
+So the single failing step is `snd_pcm_open("default")`.  Two things about it:
+
+* libasound resolves devices through `/dev/snd/*` (its strings contain
+  `/dev/snd/pcmC%iD%ic`, `/dev/snd/pcmC%iD%ip`, `/dev/snd/controlC%i`, ...) and does
+  **not** reference `/proc/asound`, so the absence of `/proc/asound` in A20OS is not
+  the cause.
+* OpenAL Soft does not try another backend once one has initialized, so
+  `drivers = alsa, null` still yields no device: alsa initializes, its device open
+  fails, and the search stops there.
+
+Two files therefore ship to remove the noise and give applications a device:
+
+* `/etc/asound.conf` points ALSA's `default` at `hw:0,0` instead of the PulseAudio
+  plugin chain (which otherwise fails with
+  `ALSA lib pulse.c:242:(pulse_connect) PulseAudio: Unable to connect`).
+* `/etc/openal/alsoft.conf` selects the null backend, so applications get a real
+  device — the "No Output" one — and their audio subsystems initialise quietly
+  instead of failing.  Switch `drivers` to `alsa` once the PCM opens.
+
+What remains is the PCM open itself: something in the A20OS ALSA layer or in
+resolving `hw:0,0` rejects it.  Getting the actual `snd_pcm_open` errno needs a
+working in-guest client, which is what the harness note below is about.  MC does not
+require any of this: with no device it disables sound and carries on.
 
 ### Measured results in the guest
 
@@ -111,10 +137,12 @@ Consequently:
 |---|---|
 | `java -version` | `openjdk version "21.0.12" ... alpine-r0` |
 | `/dev/snd` | `controlC0`, `pcmC0D0p`, `pcmC0D0c` present |
-| `alcOpenDevice(NULL)` on the musl openal | NULL |
+| `alcOpenDevice(NULL)` on the musl openal, default driver order | NULL (pulse fails to init; alsa inits but cannot open `default`) |
 | MC with musl OpenAL | GL init, `Reloading ResourceManager: vanilla`, sound disabled, no native abort (0 occurrences of `CXA_THROW`/`terminate`) |
 | MC natives `dlopen`ed | `liblwjgl`, `liblwjgl_opengl`, `liblwjgl_stb`, `libglfw`, `libopenal` — all reached their call sites successfully |
-| Compile-on-the-fly Java (`java Foo.java`) | aborts (in-process compiler); use `javac` + `java -cp` |
+| Compile-on-the-fly Java (`java Foo.java`) | aborts (rc=134) in the in-process compiler — use `javac` then `java -cp` |
+| `$JAVA_HOME/bin/java` invoked directly | exits 1 with no output; the `/usr/bin/java` wrapper seeds `-Xms/-Xmx` because the default heap is rejected |
+| an in-guest Java harness | must mirror the launcher's flags (`-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks`), as MC does |
 | `python3` + ctypes | segfaulted once (null deref inside `libpython3.12.so.1.0`, `stval=0x0`) — a new instance of the still-unexplained crash class, not a MC component |
 
 

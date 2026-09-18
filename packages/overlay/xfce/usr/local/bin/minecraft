@@ -61,11 +61,9 @@ echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
 #     image already carries a musl build of the same library and LWJGL's OpenAL
 #     support is pure dynamic binding (there is no liblwjgl_openal.so), so pointing
 #     libname at it takes the glibc C++ library out of the process altogether.
-#     That build currently opens no device: alcOpenDevice(NULL) returns NULL and MC
-#     logs "Failed to open OpenAL device", then disables sound and carries on.  It
-#     NEEDs no libasound/libpulse, so no backend it was built with can come up here;
-#     set ALSOFT_DRIVERS or run a sound server to change that.  Either way the
-#     process no longer dies at this point, which is the part that mattered.
+#     MC then reports a Java-level failure and carries on instead of dying.  Which
+#     device it ends up with is decided by /etc/openal/alsoft.conf; see
+#     docs/distro/minecraft-components.md for the audio stack's current state.
 exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
