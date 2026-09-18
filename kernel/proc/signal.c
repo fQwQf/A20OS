@@ -15,6 +15,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/klog.h"
+#include "sys/usercopy.h"
 
 /*
  * Make the page containing @addr executable so the signal trampoline
@@ -27,6 +28,7 @@ static void signal_make_page_exec(uint64_t addr) {
     task_t *t = proc_current();
     if (!t || !t->pgdir) return;
     vaddr_t page = addr & ~(vaddr_t)(PAGE_SIZE - 1);
+    if (user_prepare_write(t, (uint64_t)page) < 0) return;
     paddr_t pa = pt_translate(t->pgdir, page);
     if (!pa) return;
     pt_unmap(t->pgdir, page);
