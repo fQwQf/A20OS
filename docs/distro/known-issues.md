@@ -600,6 +600,42 @@
   - **残留（诚实记录）**：`user_prepare_write()` 是在取锁**之前**破坏 COW，因此「prepare 之后、
     锁内存储之前」若恰好发生 `fork()` 使该页重新变成 COW，理论上仍有**极窄的竞态窗口**。
     要彻底关闭它，需在 `mm->lock` 内**复查 PTE 可写性**（不可写则解锁重试）；本轮未实施。
+
+- **【第三处 + 第四处同类缺陷】信号投递路径也在「拿裸帧重新映射」；另有影子栈 token 一处**
+
+  沿同一 bug 类继续审计 `pt_translate` / `pfn_to_virt` 的用法，又找到两处：
+
+  - **`kernel/proc/signal.c` 的 `signal_make_page_exec()`（26-36 行；唯一调用点 796 行）** ——
+    **信号投递路径**：为了让栈上的 sigreturn trampoline 可执行，它 `pt_translate` 取出**物理帧**，
+    然后 `pt_unmap()` + `pt_map(同一个 pa, ...writable_dirty_exec...)`，即**把同一个帧重新映射成
+    可写可执行**。要注意：**信号帧本身是用 `copy_to_user()` 写的（790/793 行）✓**，所以帧写是安全的；
+    危险的是**这个重映射** —— 若该页此刻仍与另一个任务 **COW 共享**，这一步会让本任务拿到
+    **共享帧的可写别名**，此后本任务的任何写入都会改到**对方**那一份 ✗。
+  - **`kernel/abi/linux/sys_missing.c:573-581`（CET 影子栈 token）**：`handle_demand_fault` 之后
+    `pt_translate` + `pfn_to_virt` 直接 `*tok = ...` —— 同样是裸帧写（影子栈少见，但同类）。
+
+  **为什么信号这处最可疑**：`signal_make_page_exec()` 在**每次投递信号**时都会执行，而它操作的页就是
+  **用户栈**；`fork()` 之后父进程的栈页与子进程 **COW 共享**，而 mpv（ytdl 助手）、tumblerd（GLib 起助手）
+  都会 **fork 子进程、并在子进程退出时收到 SIGCHLD** ⇒「**信号投递 + 刚 fork 过的栈页**」正好凑齐。
+  这比 futex PI 那条（触发面很窄）更有可能解释那几条偶发崩溃。
+  （**谨慎**：本轮做的是代码定位与修复，症状层面的因果**尚未**用端到端方式证实，故措辞按「可疑」处理。）
+
+  **修法（本轮已实施）**：在 `signal_make_page_exec()` 的 `pt_translate` **之前**调用
+  `user_prepare_write(t, page)` —— 先确保该页是本任务私有（必要时破坏 COW），
+  之后的 unmap/map 操作的是**私有帧**，不会再产生共享别名。与 cleartid / futex 两处同一修法。
+
+  **⚠️ 更正（同一轮验证的结果）**：修好之后，用**同一套症状负载**（60× `java -version` +
+  120× `mpv --vo=null`）在**修复后的内核**上再跑一遍，症状**依旧复现**：
+  ```
+  SIGSEGV: pid=925 code=13 sepc=0x638a6320 stval=0x8
+  FATAL:   pid=925 signal=11 abi=0 pc=0x638a6320 sp=0x77dbbc40 comm=lua/console path=/extra/usr/bin/mpv
+  ```
+  ⇒ 上面那句「更有可能解释那几条偶发崩溃」是**过度推断，在此撤回**：
+  信号这一处**确实是同类缺陷、也确实该修**（已修），但它**不是**那些偶发崩溃的原因。
+  - **同一轮的回归探针全部干净**：`ctidtest` 5/5、`cowtest` 5/5、`pitest` 5/5
+    ⇒ 说明这一轮内核改动**没有破坏** COW / cleartid / futex 这几条路径 ✓。
+  - ⇒ 至此**同类缺陷共找到 3 处、修了 3 处**（cleartid、futex PI、signal），
+    但 mpv / LuaJIT / tumblerd 那几条症状**仍未解释**。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 - **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
