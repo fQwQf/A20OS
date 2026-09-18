@@ -126,6 +126,14 @@ Two files therefore ship to remove the noise and give applications a device:
   device — the "No Output" one — and their audio subsystems initialise quietly
   instead of failing.  Switch `drivers` to `alsa` once the PCM opens.
 
+Verified in a guest run with the configuration installed:
+
+    [Render thread/INFO]: OpenAL initialized on device No Output
+    [Render thread/INFO]: Sound engine started
+
+with zero native aborts, i.e. the musl library hands MC a device and its sound
+subsystem comes up normally instead of failing and disabling itself.
+
 What remains is the PCM open itself: something in the A20OS ALSA layer or in
 resolving `hw:0,0` rejects it.  Getting the actual `snd_pcm_open` errno needs a
 working in-guest client, which is what the harness note below is about.  MC does not
@@ -138,9 +146,11 @@ require any of this: with no device it disables sound and carries on.
 | `java -version` | `openjdk version "21.0.12" ... alpine-r0` |
 | `/dev/snd` | `controlC0`, `pcmC0D0p`, `pcmC0D0c` present |
 | `alcOpenDevice(NULL)` on the musl openal, default driver order | NULL (pulse fails to init; alsa inits but cannot open `default`) |
-| MC with musl OpenAL | GL init, `Reloading ResourceManager: vanilla`, sound disabled, no native abort (0 occurrences of `CXA_THROW`/`terminate`) |
+| MC with musl OpenAL, no openal config | GL init, `Reloading ResourceManager: vanilla`, sound disabled, 0 native aborts |
+| MC with musl OpenAL + `/etc/openal/alsoft.conf` | `OpenAL initialized on device No Output`, `Sound engine started`, 0 native aborts |
 | MC natives `dlopen`ed | `liblwjgl`, `liblwjgl_opengl`, `liblwjgl_stb`, `libglfw`, `libopenal` — all reached their call sites successfully |
 | Compile-on-the-fly Java (`java Foo.java`) | aborts (rc=134) in the in-process compiler — use `javac` then `java -cp` |
+| `javac` in the same harness | completed with no message and left no class file, so in-guest JVM tooling needs the launcher's flags too |
 | `$JAVA_HOME/bin/java` invoked directly | exits 1 with no output; the `/usr/bin/java` wrapper seeds `-Xms/-Xmx` because the default heap is rejected |
 | an in-guest Java harness | must mirror the launcher's flags (`-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks`), as MC does |
 | `python3` + ctypes | segfaulted once (null deref inside `libpython3.12.so.1.0`, `stval=0x0`) — a new instance of the still-unexplained crash class, not a MC component |
