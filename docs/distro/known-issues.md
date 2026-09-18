@@ -636,6 +636,33 @@
     ⇒ 说明这一轮内核改动**没有破坏** COW / cleartid / futex 这几条路径 ✓。
   - ⇒ 至此**同类缺陷共找到 3 处、修了 3 处**（cleartid、futex PI、signal），
     但 mpv / LuaJIT / tumblerd 那几条症状**仍未解释**。
+
+- **【MC 的 OpenAL 有结论了：不是内核 bug，而是「把 glibc 版原生库塞进 musl 客体」】**
+
+  用和 `ld-musl+0x4602b` 相同的办法（把 `__cxa_throw` 的调用方地址减去它所在 mapping 的基址），
+  拿到了抛出点的**稳定偏移**：**`libopenal.so + 0xf168`**（多轮都落在这个偏移上，低位一直是 `...168`）。
+  顺着这条线查下去，根因清楚了：
+
+  - 抛异常的 `libopenal.so` 是 **LWJGL 自带的 natives**（客体里
+    `/usr/share/a20-media/1.21.11/natives/libopenal.so`，运行时被 LWJGL 解到
+    `/tmp/lwjgl_root/3.3.3+5/x64/`）。把它从镜像里抠出来看 `NEEDED`：
+    ```
+    libdl.so.2  libstdc++.so.6  libm.so.6  libgcc_s.so.1  libpthread.so.0  libc.so.6
+    ld-linux-x86-64.so.2
+    ```
+    ⇒ **这是一个 glibc 构建的库**（`ld-linux-x86-64.so.2` / `libc.so.6`），**不是 musl 的** ✗；
+    而 `libstdc++.so.6` 出现在 `NEEDED` 里 ⇒ 抛 `std::system_error` 的 C++ 代码就在**这个库内部** ✓。
+  - 它能被加载起来，是因为客体装了 Alpine 的 **gcompat**（`/lib/libgcompat.so.0`，以及
+    `/lib/ld-linux-x86-64.so.2`、`libc.so.6`、`libpthread.so.0`、`libdl.so.2`、`libm.so.6` 这些
+    glibc ABI 的桩）；这个库**一共从 glibc ABI 导入 283 个符号**。
+  - ⇒ **结论：MC 的 OpenAL 失败属于「glibc 版原生库 + gcompat 兼容层」这条链**，
+    而不是 A20OS 内核缺陷 —— `std::system_error` 正是 C++ 在 `pthread`/`mutex`/`std::thread`
+    一类调用拿到错误码后抛出的典型形态，而这类调用在 gcompat 上最易失真。
+  - **可行动方向**：改用 **musl 构建**的 OpenAL / LWJGL natives（或让 LWJGL 指向 musl natives），
+    或补齐 gcompat 在这一路上的语义 —— **不必再往内核里找**。
+
+  （附注：`+0xf168` 落在该库的第一个 LOAD 段内，且该库已 strip；要继续点名具体函数，
+  需要用它的 `.eh_frame` 或带符号构建，但对「glibc/gcompat」这个结论已非必要。）
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 - **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
