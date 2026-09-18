@@ -805,16 +805,21 @@ rc=0
 
 （`packages/overlay/xfce/usr/local/bin/minecraft`）。
 
-**实测结果（两次采样一致）**：
-- `CXA_THROW` / `terminate called` / `MAP_HIT` **全部消失**，`DLOPEN ... openal` **没有出现**
-  ⇒ 那个 glibc OpenAL 的抛异常路径**确实被绕开了** ✓；
-- 但 MC **仍然没有走到 `Using optional rendering extensions`**（两次都停在
-  `Backend library: LWJGL version 3.3.3+5` 之后；进程还活着，STATW 显示仍在烧 CPU）
-  ⇒ **这一步并没有让 MC 前进** ✗。
+**实测结果（三次采样一致）⇒ 结论是：这条改动有害，已回滚**：
+- `CXA_THROW` / `terminate called` / `MAP_HIT` **全部消失**，`DLOPEN ... openal` 也没有出现
+  ⇒ glibc OpenAL 的抛异常路径**确实被绕开了**；
+- **但 MC 反而停得更早**：加了这个 flag 之后三次采样都停在
+  `Backend library: LWJGL version 3.3.3+5` 之后，**再也到不了 `Using optional rendering extensions`**；
+  而**不加** flag 时，多次采样都能走到 `Using optional rendering extensions`（只是随后被 OpenAL 的抛异常打死）。
+- ⇒ **`-Dorg.lwjgl.openal.libname` 把失败点提前了**（很可能是 LWJGL 因此提早去碰 OpenAL，
+  而「glibc 语境里 `dlopen` 一个 musl 库」这条路本身会卡）。**这是一次回归，已从 overlay 回滚。**
 
-**结论**：重定向到 musl OpenAL 消掉了一个**已被证实的**失败模式（glibc native 抛 C++ 异常），
-但 MC 仍卡在**另一个更早的、此前已记录过的点**上（「渲染器起来之后输出就停」那条）。
-它是**必要但不充分**的一步；下一步仍要查那个「停在 renderer 之后」的停点。
+**修正后的判断**：MC 的 OpenAL 抛异常**不是**渲染阶段的直接阻塞点 —— 不加 flag 时 MC 能走到
+`Using optional rendering extensions`，抛异常发生在**那之后**（声音引擎初始化阶段）。所以下一步不是
+「换一个 OpenAL」，而应该是：
+（a）查清 glibc 版 OpenAL 在 gcompat 下**为什么**抛（稳定抛点 `libopenal.so + 0xf168`），或
+（b）让 MC 在声音引擎初始化失败时**优雅降级**（它本该如此），而不是让 glibc native 的 C++ 异常
+    逃逸成 `terminate`。
 
 **顺带更正两条陈旧记录**：
 - 本文 8 节末的「LWJGL natives + Minecraft jars 不在镜像里」**已经不成立** —— 现在的 xfce 镜像里
