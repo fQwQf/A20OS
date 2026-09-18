@@ -54,10 +54,19 @@ echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
 #     name ("A20OS").
 #   * org.lwjgl.system.allocator=system: LWJGL's bundled libjemalloc faults on
 #     A20OS shortly after it loads.
+#   * ALSOFT_DRIVERS=null together with an OpenAL libname that cannot be loaded:
+#     LWJGL's bundled libopenal is a GLIBC build and, under gcompat in this musl
+#     guest, it throws an uncaught C++ exception during sound-engine init
+#     (al::backend_exception, or std::system_error via pthread/mutex), which kills
+#     the process and is what stopped MC before the main menu.  Sending LWJGL down
+#     its fallback path and handing OpenAL Soft a null backend makes the sound
+#     engine start on a "No Output" device, after which MC reaches the main menu.
+export ALSOFT_DRIVERS=null
 exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
     -Dorg.lwjgl.system.allocator=system \
+    -Dorg.lwjgl.openal.libname=/nonexistent/libopenal.so \
     -cp "$CP$MC_HOME/client.jar" \
     -Djava.library.path="$MC_HOME/natives" \
     -Dorg.lwjgl.librarypath="$MC_HOME/natives" \
