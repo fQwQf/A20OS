@@ -13,26 +13,33 @@
 
 #include "core/types.h"
 
-/* ALSA PCM ioctls (Linux ABI). */
+/* ALSA PCM ioctls (Linux ABI); each number encodes its struct's size. */
+#define SNDRV_PCM_IOCTL_PVERSION     0x80044100
+#define SNDRV_PCM_IOCTL_INFO         0x81204101
+#define SNDRV_PCM_IOCTL_TSTAMP       0x40044102
+#define SNDRV_PCM_IOCTL_HW_REFINE    0xc2604110
+#define SNDRV_PCM_IOCTL_HW_PARAMS    0xc2604111
 #define SNDRV_PCM_IOCTL_HW_FREE      0x00004112
+#define SNDRV_PCM_IOCTL_SW_PARAMS    0xc0884113
+#define SNDRV_PCM_IOCTL_STATUS       0x80984120
+#define SNDRV_PCM_IOCTL_SYNC_PTR     0xc0884123
 #define SNDRV_PCM_IOCTL_PREPARE      0x00004140
 #define SNDRV_PCM_IOCTL_RESET        0x00004141
 #define SNDRV_PCM_IOCTL_START        0x00004142
 #define SNDRV_PCM_IOCTL_DROP         0x00004143
 #define SNDRV_PCM_IOCTL_DRAIN        0x00004144
 #define SNDRV_PCM_IOCTL_PAUSE        0x40044145
-#define SNDRV_PCM_IOCTL_TSTAMP       0x40044102
-#define SNDRV_PCM_IOCTL_HW_PARAMS    0xc1504111
-#define SNDRV_PCM_IOCTL_SW_PARAMS    0xc0884113
-#define SNDRV_PCM_IOCTL_STATUS       0x80884120
 #define SNDRV_PCM_IOCTL_WRITEI_FRAMES 0x40184150
 #define SNDRV_PCM_IOCTL_READI_FRAMES 0x80184151
+
+/* Protocol version reported by SNDRV_PCM_IOCTL_PVERSION (ALSA 2.0.18). */
+#define SNDRV_PCM_VERSION            0x00020012
 
 /* ALSA control ioctls. */
 #define SNDRV_CTL_IOCTL_PVERSION     0x80045500
 #define SNDRV_CTL_IOCTL_CARD_INFO    0x81a85501
 #define SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE 0xc0045511
-#define SNDRV_CTL_IOCTL_PCM_INFO     0xc1105512
+#define SNDRV_CTL_IOCTL_PCM_INFO     0xc1205512
 
 /* Create the ALSA PCM node backend (playback=1 or capture=0). */
 int alsa_pcm_create_file(int playback);

@@ -134,10 +134,137 @@ Verified in a guest run with the configuration installed:
 with zero native aborts, i.e. the musl library hands MC a device and its sound
 subsystem comes up normally instead of failing and disabling itself.
 
-What remains is the PCM open itself: something in the A20OS ALSA layer or in
-resolving `hw:0,0` rejects it.  Getting the actual `snd_pcm_open` errno needs a
-working in-guest client, which is what the harness note below is about.  MC does not
-require any of this: with no device it disables sound and carries on.
+#### The PCM wire structs in alsa.c do not match the Linux ABI
+
+Compiling the kernel's own structs against the real header
+(`/usr/include/sound/asound.h`, same 64-bit ABI) shows the layouts differ:
+
+    struct                 kernel   real    note
+    snd_pcm_hw_params         384    608    intervals at offset 100, real 260
+    snd_pcm_info              272    288    missing pad1[16]
+    snd_interval               16     12    four bitfields pack into 4 bytes
+
+`snd_pcm_hw_params` in the kernel goes `flags; masks[3]; intervals[12]; rmask;
+info; ...`, but the real struct is `flags; masks[3]; mres[5]; intervals[12];
+ires[9]; rmask; cmask; info; msbits; rate_num; rate_den; fifo_size; ...`.  Every
+field after `masks` therefore sits at the wrong offset, `cmask` does not exist at
+all, and the `intervals[]` that `alsa_pcm_hw_params` negotiates from and the `info`
+it writes are read and written in the wrong place.  That breaks `HW_PARAMS`, which
+*is* implemented — the defect is not only in what is missing.
+
+The parameter numbers are not the ABI's either:
+
+    parameter      kernel   real
+    FORMAT              0      1
+    CHANNELS            1     10
+    RATE                3     11
+    PERIOD_SIZE        10     13
+    PERIODS            11     15
+
+so even with the layout corrected the negotiated fields would name the wrong
+parameters.
+
+#### Why the PCM does not open: three ioctls libasound needs are missing
+
+The kernel's ALSA surface is real but narrower than libasound's open path.
+`kernel/include/drivers/audio/alsa.h` defines, and `kernel/drivers/audio/alsa.c`
+handles:
+
+    PCM:  HW_PARAMS  SW_PARAMS  STATUS  WRITEI_FRAMES  READI_FRAMES
+          PREPARE  RESET  START  DROP  HW_FREE  DRAIN  PAUSE  TSTAMP
+    CTL:  PVERSION  CARD_INFO  PCM_NEXT_DEVICE  PCM_INFO
+
+Everything else falls through to `default: return -EINVAL`.  What is absent includes
+
+    SNDRV_PCM_IOCTL_PVERSION   0x80044100    (protocol version; SNDRV_PCM_VERSION = 0x20012)
+    SNDRV_PCM_IOCTL_INFO       0x81204101    (snd_pcm_info; the size field encodes 288 bytes)
+    SNDRV_PCM_IOCTL_HW_REFINE  0xc2604110    (snd_pcm_hw_params; 608 bytes)
+
+and all three sit in libasound's open path before an application sets anything:
+`snd_pcm_open` reaches the hw plugin, which asks for the PCM info and then calls
+`snd_pcm_hw_params_any()` — HW_REFINE — to learn what the device supports.  With
+those returning `-EINVAL`, OpenAL Soft's device open fails exactly where its log
+says it does.
+
+Fixing this is kernel work, in this order: put `snd_pcm_hw_params`, `snd_pcm_info` and
+`snd_interval` on the Linux layout, use the ABI's parameter numbers, implement
+HW_REFINE (report the supported format/rate/channel/period masks and intervals — the
+same negotiation `alsa_pcm_hw_params` already performs for the set path), INFO and
+PVERSION, then switch `/etc/openal/alsoft.conf` from `drivers = null` to `alsa`.
+#### The ABI fix landed, and it was not the whole blocker
+
+The layouts and ioctls above have since been corrected in `alsa.c` (commit
+`e29049c0`): `snd_pcm_hw_params` is 608 bytes with `mres[5]`/`ires[9]`/`cmask`/`sync`,
+`snd_pcm_info` has `pad1[16]`, `snd_pcm_sw_params` has `proto`, `snd_pcm_status` uses
+64-bit timespecs, the parameter numbers are the ABI's, and PVERSION/INFO/HW_REFINE are
+implemented.  Every size and offset was checked against the real header (twelve
+expectations, all matching) and the kernel builds clean under `-Werror`.
+
+Booting that kernel and asking OpenAL Soft for an ALSA device still fails the same way:
+
+    [ALSOFT] (II) Initialized backend "alsa"
+    [ALSOFT] (II) Opening device "default"
+    [ALSOFT] (WW) Failed to open playback device: Could not open ALSA device "default"
+
+So the wrong ABI was one defect rather than the whole cause, and the remaining one is
+*below* the ioctl layer — the open does not get far enough to be explained by a
+rejected request alone, which points at the devfs open path
+(`DEVFS_ALSA_PCM` -> `alsa_pcm_create_vfile()`, which fails the whole `open()` if it
+returns NULL) or at how the audio device itself is registered.
+
+Nothing was regressed in the meantime: `/etc/openal/alsoft.conf` still selects the null
+backend, so Minecraft reaches `OpenAL initialized on device No Output` and
+`Sound engine started` with zero native aborts.
+
+The next step is a kernel-side instrument, not another guessing boot: print the request
+number in the `default:` branch of the PCM and control dispatch (and a line in the devfs
+open path) so one run shows exactly which call fails.  Two other things to settle at the
+same time: the QEMU instance passes **no audio device** (`hda`/`virtio-snd` driver
+modules exist in `user/build/x86_64/*.a20drv` but nothing binds without a device), while
+`pc-spkr` is linked into the kernel and may be the only audio device present — so the
+capabilities that device advertises decide whether a PCM can open at all.
+
+#### Root cause: the ALSA layer bound the tone-only PC speaker
+
+Settled statically.  Only one audio device registers in this configuration — the
+in-kernel PC speaker — and what it advertises is
+
+    .flags = A20_AUDIO_CAP_TONE
+
+with no `A20_AUDIO_CAP_PCM`.  The two drivers that do advertise PCM are modules
+(`hda.a20drv`, `virtio-snd.a20drv`) and they need a matching QEMU device, which this
+instance does not pass.
+
+`alsa_audio_get()` made that worse by taking the first audio class device
+unconditionally — `class_device_get_by_type(DEV_CLASS_AUDIO, 0)`, which is the PC
+speaker — so every PCM path returned `-EOPNOTSUPP`, HW_REFINE among them.  libasound
+calls HW_REFINE from `snd_pcm_open()` through `snd_pcm_hw_params_any()`, so the open
+failed right there.  That is the whole "Could not open ALSA device" story, and it means
+the wrong ABI and the wrong device were two separate defects stacked on each other.
+
+The selection now scans for a device advertising `A20_AUDIO_CAP_PCM`.  All five call
+sites are PCM-related (`PCM_NEXT_DEVICE` included), so nothing tone-related changes; a
+tone-only system now reports `-ENODEV` for PCM instead of pretending.
+
+Real audio needs an audio device in the VM, and that half is now verified: with
+`-device intel-hda -device hda-duplex` on the command line and `hda.a20drv` staged in a
+path the driver manager scans (`/bin/lib/drivers`, or `/boot/drivers` — the stock image
+also carries it in `/lib/drivers`), the kernel binds it:
+
+    [DRIVER] registered driver 'hda' (class=6)
+    [HDA] pci-8086:2668-2 codec=0 afg=1 dac=2 pin=3, 48000 Hz stereo S16_LE
+    [DRIVER] device 'pci-8086:2668-2' bound to driver 'hda'
+
+udev then reports two audio class devices (`audio0` and `audio1`) instead of one, which
+is exactly the case the selection fix above exists for.  `instances/xfce-x86_64.toml`
+now carries the audio device.
+
+Whether ALSA then opens is still unobserved: the run used for the test stalled before
+sound initialisation, so no `[ALSOFT]` line appeared.  `drivers = null` therefore stays
+in `/etc/openal/alsoft.conf` until a run reaches sound init and reports an ALSA device.
+Minecraft is unaffected either way.
+
+
 
 ### Measured results in the guest
 
