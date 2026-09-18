@@ -191,10 +191,40 @@ Fixing this is kernel work, in this order: put `snd_pcm_hw_params`, `snd_pcm_inf
 HW_REFINE (report the supported format/rate/channel/period masks and intervals — the
 same negotiation `alsa_pcm_hw_params` already performs for the set path), INFO and
 PVERSION, then switch `/etc/openal/alsoft.conf` from `drivers = null` to `alsa`.
-This is not Minecraft-specific: no ALSA application can open audio on A20OS until it
-is done, which is why the null backend and `/etc/asound.conf` are the current
-answer.  MC itself does not require any of it: with no device it disables sound and
-carries on.
+#### The ABI fix landed, and it was not the whole blocker
+
+The layouts and ioctls above have since been corrected in `alsa.c` (commit
+`e29049c0`): `snd_pcm_hw_params` is 608 bytes with `mres[5]`/`ires[9]`/`cmask`/`sync`,
+`snd_pcm_info` has `pad1[16]`, `snd_pcm_sw_params` has `proto`, `snd_pcm_status` uses
+64-bit timespecs, the parameter numbers are the ABI's, and PVERSION/INFO/HW_REFINE are
+implemented.  Every size and offset was checked against the real header (twelve
+expectations, all matching) and the kernel builds clean under `-Werror`.
+
+Booting that kernel and asking OpenAL Soft for an ALSA device still fails the same way:
+
+    [ALSOFT] (II) Initialized backend "alsa"
+    [ALSOFT] (II) Opening device "default"
+    [ALSOFT] (WW) Failed to open playback device: Could not open ALSA device "default"
+
+So the wrong ABI was one defect rather than the whole cause, and the remaining one is
+*below* the ioctl layer — the open does not get far enough to be explained by a
+rejected request alone, which points at the devfs open path
+(`DEVFS_ALSA_PCM` -> `alsa_pcm_create_vfile()`, which fails the whole `open()` if it
+returns NULL) or at how the audio device itself is registered.
+
+Nothing was regressed in the meantime: `/etc/openal/alsoft.conf` still selects the null
+backend, so Minecraft reaches `OpenAL initialized on device No Output` and
+`Sound engine started` with zero native aborts.
+
+The next step is a kernel-side instrument, not another guessing boot: print the request
+number in the `default:` branch of the PCM and control dispatch (and a line in the devfs
+open path) so one run shows exactly which call fails.  Two other things to settle at the
+same time: the QEMU instance passes **no audio device** (`hda`/`virtio-snd` driver
+modules exist in `user/build/x86_64/*.a20drv` but nothing binds without a device), while
+`pc-spkr` is linked into the kernel and may be the only audio device present — so the
+capabilities that device advertises decide whether a PCM can open at all.
+
+
 
 ### Measured results in the guest
 
