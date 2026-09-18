@@ -451,6 +451,23 @@
   **修法**：把这条裸写换成**受检查的用户写**，等价于 Linux 的 `put_user(0, ctid)` ——
   若目标页是 COW（或只读），先按正常流程**破坏 COW**、拿到本任务私有副本，再写 0；
   不可写/未映射时安全失败（像 Linux 一样直接返回）。
+
+  **修复与验证（均为已实测）**：
+  - **修法**：把 `proc_clear_child_tid_direct()` 里的裸物理写换成**受检查的用户写**
+    `copy_to_user(ctid, &zero, sizeof(zero))`。核心里这条路径本来就会做该做的事 ——
+    `user_resolve_leaf(..., write=1, ...)`（`kernel/mm/mm.c:585-597`）在叶子不存在时走
+    `handle_demand_fault()`、在存在但**不可写**时调用 `handle_cow_fault()` **破坏 COW**，
+    再重读 PTE，最后对未映射/不可写的地址安全返回 `-EFAULT` —— 即 Linux `put_user(0, tidptr)` 的语义。
+    出问题的那个函数绕过了它，自己 `pt_translate + pfn_to_virt` 直接写帧 → 跳过了 COW 破坏。
+  - **验证（同一个复现器、同一个镜像，只换内核）**：
+    ```
+    修复前：test 00000000 POLLUTED   control 0badf00d clean   # 20/20 与 20/20
+    修复后：test 12345678 clean      control 0badf00d clean   # 20/20 与 20/20  ← 与宿主逐项一致
+    ```
+    修复后 `test` 轮 20/20 的污染**全部消失**，且与宿主（Linux）结果一致。
+  - **为什么它是偶发的**：只有当任务的 `clear_child_tid` 所指的页**此刻与另一个任务 COW 共享**时才发作，
+    所以表现为「约 1/10」；一旦发作就是**把另一个任务（通常是 fork 出来的父子进程）的 4 字节字段清零**，
+    于是症状永远是「某个指针字段变成 NULL」。这与 mpv / tumblerd / JVM 那几条症状完全对得上。
 - 影响：**JVM 可用**，所以 Minecraft 的第一障碍其实是 **GL 链**（IN_FORMATS → PRIME → GL 渲染器）；
   剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
 - **2026-09 更新（信号对齐 + ucontext 布局修掉后）**：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
