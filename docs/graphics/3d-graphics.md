@@ -859,6 +859,297 @@ Created: 512x256x0 minecraft:textures/atlas/particles.png-atlas
 
 ⇒ **结论**：OpenAL 这一环**已解决**，MC 能到达主菜单；要「稳定地能玩」，还需要解决那条间歇性停点。
 
+### 9.18 但窗口并没有出现在屏上（10 张实时截屏的证据）
+
+9.17 的「走到主菜单」是**客户端逻辑层**的事实：资源重载、声音引擎、全套 atlas 全部完成，且全程无异常。
+但**画面上并没有 MC 的窗口**。证据来自同一轮里的 3 次 MC 尝试 + 从 boot 起每 45 秒一次的 QMP 截屏（共 10 张，
+覆盖 3 次尝试的整个时间窗）：
+
+- 10 张的**像素统计完全一致**（蓝色 95%、绿 0%、棕 0% —— 都是蓝色壁纸的桌面）；
+- **但扫描输出是活的**：10 张里有 **8 个不同的 md5**，且 shot1 与 shot10 的差异 bbox 恰好是
+  **右上角时钟**（`x=960..972, y=15..23`，82 个像素不同）⇒ 截屏是真的、在动，**不是冻结画面**；
+- ⇒ 整段时间里**桌面上从未出现过 MC 的窗口**（3 次尝试都没有）。
+
+**因此**：目前只能说 MC 到达了**客户端内部逻辑**层面的主菜单；
+**要「能玩」，还差让它的窗口真正被合成器映射/呈现出来** ✗ —— 这与第 8 节早先记过的
+「窗口建出来之后又消失」是同一族问题。
+
+⇒ **下一步方向**：查 MC 的 `wl_surface` 生命周期 —— 窗口创建后是否 `commit`/被映射、labwc 是否收下、
+是否落在别的 workspace —— 而不是继续在音频/GL 上找。
+
+### 9.19 对照实验：别的 Wayland GL 客户端窗口正常，**只有 MC 的窗口不出**（病灶收窄到 MC/GLFW）
+
+9.18 里 MC 的窗口从未出现。为区分「合成器 / GL 链的问题」与「MC 自己的问题」，做了一次对照：
+
+- **对照客户端**：`es2gears_wayland`（mesa-demos，镜像里本来就有；9.11 已用它证明 Wayland 路径能真渲染）。
+- 同一轮里先跑它 80 秒，再跑 MC 120 秒；主机每 30 秒截一次屏，共 12 张。
+
+**结果**：
+
+- `es2gears_wayland` **确实在渲染**：日志稳定打出
+  `1417 frames in 5.0 seconds = 283.400 FPS`（之后每 5 秒一条，283~302 FPS 持续）。
+  （它启动时同样会打那几行已知警告
+  `libEGL warning: failed to get driver name for fd -1` / `MESA-LOADER: failed to retrieve device information`
+  / `ZINK: vkCreateInstance failed` / `egl: failed to create dri2 screen` —— **但它们是非致命的**，齿轮照跑。）
+- **截屏画像把两者分得很清楚**：
+  ```
+  ct2/ct3/ct4（es2gears 那段）: blue=84% dark=10%   ← 多出一块暗色区域 = 它的窗口 ✓
+  ct5..ct12（MC 那段及之后） : blue=95% dark= 2%   ← 与纯桌面一致，没有 MC 窗口
+  ```
+
+⇒ **合成器完全能呈现一个真实的 Wayland GL 客户端窗口** ✓；**不出现的是 MC 自己的窗口** ✗。
+
+**结论（病灶收窄）**：窗口呈现问题**不在合成器、也不在 EGL/Wayland 链**（对照客户端一切正常），
+而在 **MC / GLFW 这条自身路径**上（窗口是否创建、`wl_surface` 是否 `attach`/`commit`、是否被过早销毁）。
+
+**下一步（具体）**：在已有的 `LD_PRELOAD` 垫片里再拦 `libwayland-client` 的
+`wl_surface_attach` / `wl_surface_commit` / `wl_surface_damage`（都是导出符号，垫片先加载即可截获），
+看 MC 的 GLFW 到底有没有走到「提交一帧」——
+这能把问题直接分成「MC 从没建/提交 surface」还是「提交了但没被收下」两类。
+
+### 9.20 探针本身踩空：`wl_surface_*` 是 static inline，拦不到（应拦 `wl_proxy_marshal_flags`）
+
+按 9.19 定的下一步做了：在垫片里拦 `libwayland-client` 的
+`wl_surface_attach` / `wl_surface_commit` / `wl_surface_damage` / `wl_surface_damage_buffer`，
+并做对照（先跑 `es2gears_wayland` 60 秒，再跑 MC 150 秒）。**结果三类计数全是 0**：
+
+```
+WL_ATTACH=0   WL_COMMIT=0   WL_DAMAGE=0
+```
+
+**连对照客户端 es2gears 也是 0** —— 而它明明在渲染（日志里稳定 280~306 FPS），
+所以**不是「没人调用」，而是「拦错了符号」** ✗。
+
+**原因**：在 wayland-client 的头文件里，`wl_surface_attach` / `wl_surface_commit` /
+`wl_surface_damage` / `wl_surface_damage_buffer` **全都是 `static inline` 包装**，
+会被内联**编译进调用方**（libglfw / es2gears 自己），**不经过动态符号表** ⇒
+`LD_PRELOAD` 对这几个名字**无效**。它们真正调用到的导出函数是
+**`wl_proxy_marshal_flags`**（以及 `wl_proxy_marshal_array_flags`）。
+
+**对下一步的意义**：要追踪「谁提交了什么」，应当拦 **`wl_proxy_marshal_flags`**，
+并用它的 `opcode` 参数区分 attach / commit / damage
+（`wl_surface` 的 opcode：destroy=0, attach=1, damage=2, frame=3, …, commit=6）。
+
+**本轮顺手拿到的另一条信息**：这一轮里 MC（用 9.17 那套 env）**又走通了**
+`Using optional rendering extensions` → `Sound engine started` ✓
+—— 说明 OpenAL 那套配置是**稳定可用**的（客户端逻辑层一路到声音引擎），
+问题依旧集中在**窗口不呈现**这一件事上。
+
+### 9.21 修好的探针 + 依赖证据：MC 走的是 **X11 后端（XWayland）**，不是 Wayland 直接呈现
+
+9.20 的修正是对的：改拦 `wl_proxy_marshal_array_flags` 之后，同一套负载立刻抓到 **322 条 marshal** ✓
+（拦静态内联那版是 0）。
+
+按接口名统计（整份日志）：
+
+```
+139  WL_MARSHAL (non-ctor)      ← 绝大多数是非构造请求（bind 等）
+  9  WL_MARSHAL wl_callback
+  6  WL_MARSHAL wl_registry
+  3  WL_MARSHAL wp_presentation
+  1  WL_MARSHAL wl_surface       ← 全日志只有一次 wl_surface 构造，且落在 es2gears 段内
+  1  WL_MARSHAL wl_shm
+  1  WL_MARSHAL wl_seat
+  1  WL_MARSHAL wl_compositor
+```
+
+- 那唯一一次 `wl_surface` 构造在第 447 行，位于 **es2gears 相**（`WL1`=362 … `WL2`=1199）；
+  **MC 相（1200..2361）没有 `wl_surface`**。
+  （取样说明：探针每进程只记前 24 条、其后每 1024 条记一条，所以这条是**旁证**，不是铁证。）
+
+**更硬的证据在别处**：早先几轮垫片的 `DLOPEN` 日志显示，MC 的进程加载的是 **X11 那一套** ——
+`libX11.so.6`、`libXxf86vm.so.1`、`libXi.so.6`、`libXrandr.so.2`、`libXcursor.so.1`、
+`libXinerama.so.1`、`libX11-xcb.so.1`、`libXrender.so.1`、`libXext.so.6`、`libGLX.so.0`、`libGL.so.1`
+—— 这正是 **GLFW 的 X11 后端**依赖集（GLFW 3.3 的后端是**编译期**选定的，LWJGL 带的就是 X11 版）。
+
+⇒ **MC 的窗口是 X11 窗口，靠 XWayland 映射进 Wayland 合成器** ✓。因此：
+- 它**本来就不会**创建 `wl_surface`（那 322 条里的 Wayland 流量基本属于 es2gears）✓；
+- 「窗口不出」的病灶在 **XWayland / labwc 的 xwm 一侧**，**不在** Wayland 客户端的窗口路径上。
+
+**日志里已经有 XWayland 的报错**（前面几轮多次出现）：
+
+```
+[xwayland/xwm.c:1928] xcb error: op 12:0, code 3, sequence 175, value 4194311
+```
+
+（op 12 = `ConfigureWindow`，code 3 = `BadWindow`。）
+
+⇒ **下一步方向**：查 labwc 的 XWayland 集成（xwm）—— XWayland 的窗口是否被 map/收下、
+这些 `xcb error` 具体指谁、XWayland 的 root window 是否正常。
+这比继续追 Wayland 侧要靠谱得多。
+
+### 9.23 更正 9.21 的一半 + 一次被间歇性停点打断的实验
+
+**先更正 9.21 的一半**：9.21 从「垫片日志里 MC 加载了 libX11 一套」推断「LWJGL 带的是 **X11-only**
+的 GLFW」。这个推断**不成立** —— 直接看镜像里 `natives/libglfw.so` 的动态符号，它**导出了 Wayland 接口**：
+
+```
+glfwGetWaylandDisplay
+glfwGetWaylandMonitor
+glfwGetWaylandWindow
+```
+
+⇒ 这个 GLFW **编译了 Wayland 支持**（双后端），后端是**运行期**选的；而双后端构建**也会**链接 libX11
+（GLFW 的 Wayland 路径仍会用到 X11 的一些设施），所以「日志里有 libX11」并不能证明它选了 X11 ✗。
+
+**由此得到一个便宜的判别手段**：会话里 `DISPLAY=:0`（XWayland）是设着的；若 GLFW 因此选了 X11，
+那么**把 `DISPLAY` unset** 就可能把它逼上 Wayland —— 而「Wayland 原生呈现」已被 9.22 的对照证明是通的 ✓。
+
+**本轮实验（MC 的 `DISPLAY` unset）没能给出结论** ✗：这一轮 MC **又停在**
+`Backend library: LWJGL version 3.3.3+5` 之后（就是那个间歇性停点），**根本没走到 GLFW 建窗口那一步**：
+
+```
+W21 env WAYLAND_DISPLAY=wayland-0 DISPLAY=[unset]
+[11:40:16] [Render thread/INFO]: Backend library: LWJGL version 3.3.3+5
+（之后无输出；wl_surface 构造 0 次；6 张截屏全是 blue=95% dark=3% 的纯桌面）
+```
+
+⇒ 「unset `DISPLAY` 能不能把 MC 逼上 Wayland」**仍未被验证**（不是被否定，是被停点挡住了）。
+
+**因此下一步的方法学要求**：实验脚本必须**一轮里连跑多次 MC**（9.18 那次一轮 3 次里第 1 次就过了），
+每次之后截屏 / 查 `wl_surface`，用**真正走过渲染器的那些轮**来判定 —— 否则单次实验会被停点吃掉。
+
+### 9.24 定案：GLFW 默认选 **X11**（证据是 dlopen 清单）；两条路现在都还出不了窗
+
+垫片一直在记 `dlopen`，而 **GLFW 的每个后端都会加载自己那套客户端库** —— 于是可以直接从**已有日志**
+判定它选了哪个后端（**不用再开机**）：
+
+| 日志 | `DISPLAY` | libX11 一族 | libwayland* | libxkbcommon |
+|---|---|---|---|---|
+| `wl2` `wl` `null` `min` `win` `soft` `noal` `al3`（会话默认） | 已设 `:0` | **8~16** | **0** | **0** |
+| `w2`（DISPLAY unset 实验） | **unset** | 1 | **3** | 1 |
+| `w3`（同上，3 次尝试） | **unset** | 3 | **9** | 3 |
+
+⇒ **结论一（9.21 的推断其实是对的）**：会话默认（`DISPLAY=:0` 已设）时，MC 的进程**只加载 X11 那一套**，
+**完全不加载 `libwayland-client` / `libxkbcommon`** ⇒ **GLFW 选的就是 X11 后端**，
+MC 的窗口是 **XWayland 的 X11 窗口** ✓。
+（9.23 说「它也可能选 Wayland」在**机制上**成立 —— 它确实编译了 Wayland 支持 —— 但**实测没有选**。）
+
+⇒ **结论二（`unset DISPLAY` 这个杠杆确实有效）**：unset 之后 MC 改加载 Wayland 那一套
+（`libwayland-client` / `libwayland-cursor` / `libwayland-egl` + `libxkbcommon`）
+⇒ **后端被成功切到 Wayland** ✓。
+
+⇒ **结论三（但两条路现在都走不到「窗口出现」）**：
+- **X11 路（默认）**：MC 约 1/3 的尝试能走到主菜单逻辑，但 **X11 窗口根本不会被呈现** ——
+  9.22 已用 `glxgears` 证明**任何** X11 客户端都不出现 ⇒ 这条路上 MC **不可能**有窗口 ✗；
+- **Wayland 路（unset `DISPLAY`）**：**3/3 全部**停在 `Backend library: LWJGL version 3.3.3+5` 之后
+  （比默认的 ~1/3 更差）⇒ 这条路上 MC **走不到建窗** ✗。
+
+**所以「窗口不出现」至此被拆成两条独立的工作线**：
+
+1. **修 XWayland / labwc-xwm 的 X11 窗口呈现**（入口就是 9.21/9.22 里的
+   `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`）—— 修好后，MC 走**默认的 X11 路**就能出窗；
+2. **修「Wayland 路在 renderer 之后停住」** —— 修好后，用 `unset DISPLAY` 把 MC 切到 Wayland 即可出窗
+   （而「Wayland 原生呈现」已被 `es2gears_wayland` 证明是通的 ✓）。
+
+### 9.25 MC 的进程**从不调用 `XMapWindow`** —— 哪怕是走到 `Sound engine started` 的那一轮
+
+为回答「MC 到底有没有把 X 窗口建/映射出来」，在垫片里拦了 libX11 的三个**真实导出符号**
+（`XMapWindow` / `XMapRaised` / `XMapSubwindows`；它们经 PLT 调用，可被 `LD_PRELOAD` 截获），
+然后跑一轮**默认 X11 路**的 MC（`DISPLAY=:0`）。
+
+**这一轮是「好轮」**：MC 走到了
+
+```
+[11:40:12] [Render thread/INFO]: Backend library: LWJGL version 3.3.3+5
+[11:40:18] [Render thread/INFO]: Using optional rendering extensions: ...
+[11:40:43] [Render thread/INFO]: Sound engine started
+```
+
+**但计数全是 0**：
+
+```
+XMAPWINDOW=0   XMAPRAISED=0   XMAPSUBWINDOWS=0
+```
+
+同轮的 dlopen 再次确认后端（只加载 libX11 一族，没有 libwayland / libxkbcommon）。
+
+**这说明**：即便这一轮 MC 走到了声音引擎，**它也没有 map 出任何 X 窗口** ✗。
+
+**一个很可能的解释（下一步该先验证）**：**原版 MC 的窗口是「先隐藏创建、到主菜单才显示」**——
+GLFW 先 `XCreateWindow`（不 map），真要显示时才由 `glfwShowWindow` 调 `XMapWindow`。
+也就是说「窗口不出现」**可能不是呈现问题，而是 MC 根本没走到「显示窗口」那一步** ✗ ——
+那就应当把重心移回**停点**（工作线 B），而不是合成器。
+
+**但另一边的问题依然独立存在**：`glxgears`（一个**会** map 自己窗口的普通 X11 客户端，见 9.22）
+同样不出现在屏上 ✗ ⇒ **X11 窗口的呈现确实也坏着** ✓（工作线 A 仍然成立）。
+
+⇒ 两条工作线都还在，但**优先级应当调整**：先修**停点（B）**——
+因为 MC 连「显示窗口」那一步都还没走到，先修呈现（A）也看不出结果。
+（要继续验证这一点，可以再拦 `XCreateWindow` / `glfwShowWindow`，看 MC 究竟走到哪一步。）
+
+### 9.26 对照组验证了探针：**MC 真的从不创建 X 窗口**；而 X11 客户端创建了也不被呈现
+
+9.25 里 MC 的 `XCreateWindow` / `XMapWindow` 计数为 0。为排除「探针根本没生效」，做了对照：
+**同一个垫片**下先跑 `glxgears`（一个确实会建窗并 map 的 X11 客户端）60 秒，再跑 MC 150 秒。
+
+**对照证明探针有效**：
+
+```
+XK1 glxgears start（行 308） … XK2 glxgears end（行 1096）
+行 352: XCREATEWINDOW  a=0x12c0000012c b=0x1     ← 落在 glxgears 相内 ✓
+行 386: XMAPWINDOW     a=0x1 b=0x400002          ← 落在 glxgears 相内 ✓
+counts: create=1  map=1（全部落在 glxgears 相）
+```
+
+（glxgears 也确实在渲染：`3624 frames in 5.0 seconds = 724.628 FPS`。）
+而 **MC 相（行 1099..2153）里这两个计数都是 0** ✓。
+
+⇒ 两个结论，现在都建立在**经过验证的仪器**上：
+
+1. **MC 真的从不创建、也不 map 任何 X 窗口** ✓（不是探针失灵）—— 即使它走到
+   `Sound engine started`（9.25 那一轮）也没有 ✗。
+   也就是说 MC 的 GL 链路是在**没有窗口**的情况下走完的（很可能是 headless /
+   `EGL_PLATFORM=surfaceless` 那类路径；而 render node `renderD128` 恰好是后来才加上的，见本文件早先记录）。
+   这条要么查「MC/GLFW 的窗口创建为什么失败」，要么查「它为什么被绕过」。
+2. **X11 窗口确实被创建/map 了，但不会被呈现** ✓：`glxgears` 明明建了窗也 map 了（上面两行），
+   而 9.22 的截屏证明它**不出现在屏上** ⇒ **XWayland / wlroots-xwm 没有把它合成出来** ✓
+   （入口仍是 `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`）。
+
+**因此最终把两件事分清**：
+
+- **A（呈现）**：X11 客户端的窗口不被呈现 —— `glxgears` 为证（它 map 了却不显示）；
+- **B（MC 自己的窗口）**：MC 连窗口都没创建 —— 本条为证。
+
+两者**互相独立**；而 MC 要能玩，**B 必须先解决**（否则 A 修好了也没有窗口可呈现）。
+
+### 9.22 决定性对照：**X11（XWayland）的窗口在这台桌面上根本不出现**
+
+按 9.21 的方向，用**同一套方法**做了第二个对照：跑一个**真正的 X11 客户端**
+（`glxgears -display :0`，即 XWayland 的 DISPLAY），每 35 秒截一次屏。
+
+**结果**：
+
+- **XWayland 本身是活的**：`/tmp/.X11-unix/X0` 存在 ✓；`xprop -root` 有响应 ✓，
+  且其启动横幅如实打印了已知问题：
+  ```
+  Xwayland glamor: GBM Wayland interfaces not available
+  Failed to initialize glamor, falling back to sw
+  The XKEYBOARD keymap compiler (xkbcomp) reports: ...
+  Errors from xkbcomp are not fatal to the X server
+  ```
+- **但 X11 客户端的窗口同样不出现**：6 张截屏里 xt2..xt6 全是 `blue=95% dark=3%`（纯桌面），
+  与 MC 那几轮**一模一样** ✗。
+
+**三个对照放在一起，结论唯一**：
+
+| 客户端 | 类型 | 窗口是否出现 |
+|---|---|---|
+| `es2gears_wayland` | **Wayland 原生** GL | ✅ 出现（画像 `blue=84% dark=10%`） |
+| `glxgears`（经 XWayland） | **X11** | ❌ 不出现 |
+| Minecraft（GLFW 的 X11 后端，经 XWayland） | **X11** | ❌ 不出现 |
+
+⇒ **这台桌面上「X11（XWayland）的窗口不会被呈现」**；Wayland 原生窗口则一切正常。
+MC 恰好是 X11 客户端（见 9.21：LWJGL 带的 GLFW 是 X11 构建），所以它**必然**是受害者 ——
+**这与 MC 自身无关**，是 **XWayland / labwc 的 xwm 集成**问题。
+
+**两个可行动方向**：
+
+1. **让 MC 走 Wayland（最干净）**：给它一个 **Wayland 构建的 GLFW**（LWJGL 现带的是 X11 版），
+   于是它不再经过 XWayland —— 而「Wayland 原生呈现」这条路已被对照证明是通的 ✓；
+2. **修 XWayland / labwc-xwm**：查清为什么 X11 窗口不被呈现（9.21 里 labwc 已在报
+   `xcb error: op 12 (ConfigureWindow), code 3 (BadWindow)`）。这条更深，但能根治所有 X11 应用。
+
 **顺带更正两条陈旧记录**：
 - 本文 8 节末的「LWJGL natives + Minecraft jars 不在镜像里」**已经不成立** —— 现在的 xfce 镜像里
   `/usr/share/a20-media/1.21.11/` 完整存在：`client.jar`(31 MB)、`libraries/`、`assets/`、
