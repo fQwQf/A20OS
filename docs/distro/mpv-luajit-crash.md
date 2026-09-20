@@ -101,7 +101,58 @@ TLS itself was checked and looks right: `ARCH_SET_FS` stores the value in the ta
 frame (`TRAP_CTX_TP`) and the clone path sets it from the `tls` argument, so a per-thread
 FS base is maintained.  That hypothesis is weakened but not eliminated.
 
-## Next steps for the systemic class
+## Measured: the object is live, the link fields are a hole
+
+Booted the instrumented kernel three times; the crash reproduces every time.  The dump
+now prints the object behind `rbx` and a per-64-byte-block all-zero map of its page.
+
+Register facts re-confirmed on a fresh dump (`comm=lua/stats`):
+
+    a0 (rdi) = 0x77dbe380          lua_State
+    a0 + 0x10 = 0x77dbe3f0         == rbx  ->  rbx is the global_State
+    insn@sepc = 41 f6 40 08 07     testb $0x7, 0x8(%r8) with r8 = 0   (stval = 0x8)
+
+So the decoded instruction and the identity of `rbx` hold.  What the object dump adds:
+
+    rbx+0x100  ffffffffffffffff
+    rbx+0x108  ffffffffffffffff
+    rbx+0x110  fffa000077c56400      last live word
+    rbx+0x118  0000000000000000  <--  sentinel, zero
+    rbx+0x130  0000000000000000  <--  the head r8 loaded, zero
+    rbx+0x138  0000000000000000
+    rbx+0x148  0000000000000000
+
+The rest of the object is healthy: live pointers at `+0x28`, `+0x30`, `+0x40`, `+0x48`,
+`+0x70`, `+0x98`, `+0xc0`, `+0xe8`, `+0x110`.
+
+Page state at the fault:
+
+    refs=1  fflags=0x1              private, not COW-shared at fault time
+    nonzero_bytes = 1288 / 4096     ~31% live, the rest is untouched space
+    all-zero 64B blocks = 0xffcffffe30001c00
+
+That bitmap is a normal heap arena: live chunks separated by never-written (still zero)
+free space — blocks 8-12, 28-29, 33-51, 54-63 are free, 52-53 and 30-32 are live.
+
+**What this rules out:** the whole page or the whole object being lost or replaced.  The
+object is live; only the link field group (`+0x118` onward) is a hole in it.
+
+**What it leaves:** the write that initialises those link fields never landed, while the
+writes to the fields before them did.  That is a lost-write in the strict sense, and it
+is why the next step is to audit the kernel write paths rather than read more of LuaJIT:
+the userspace side is stock Alpine and its stores are correct.
+
+  Next concrete probes, cheapest first:
+
+  1. Wake the fault dump for a *userspace store* (a `CAUSE_PAGE_*` write fault) that maps
+     a fresh zero frame, and check the frame is actually installed before the retry.
+  2. Check the `munmap`/`mremap` paths for a region overlapping a live heap page, since a
+     partially freed page would show exactly this free-space-with-live-objects layout.
+  3. Keep the `FAULT-BX`/`PAGE-ZEROMAP` dump in place -- it costs nothing unless a
+     SIGSEGV happens and it is what produced all of the above.
+
+
+## The systemic crash class
 
 ### Both crashes are the same kind of failure: a NULL link pointer
 
