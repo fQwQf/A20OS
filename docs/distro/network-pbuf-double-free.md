@@ -147,7 +147,98 @@ command panicked at the ARP stage.  `nc -u` to the resolver also returns 0.
 Worth noting: this bug was only reachable after the page-cache fix (36c14858) removed the
 first-run corruption that had been masking it.
 
-## Remaining: DNS resolution still fails
+## Correction: the fix removed one source, the assertion is still reachable
+
+Boot-by-boot, after the fix:
+
+    net2: PANIC lines 0  assertion 0    (pbuf fix)
+    net3: PANIC lines 0  assertion 0    (the reverted bottom-half attempt)
+    net4: PANIC lines 0  assertion 0    (baseline rebuild)
+    net5: PANIC lines 6  assertion 1    (two kerr probes added -- which never fired)
+
+The probes were never reached (`udp_rx=0`, `bh_consume=0` in the whole log), so they cannot have
+caused the panic.  It came back on its own, and that boot died at the ARP stage again
+(`qemu rc=0`, "attempting firmware poweroff") before the DNS test could run.
+
+**So the earlier "fixed and verified" wording was too strong.**  What `12b3df6a` did is real and
+worth keeping -- it removed a *deterministic* double free (the extra `pbuf_free` after
+`udp_sendto`/`raw_sendto`, which fired on every UDP/raw send) -- but the assertion is still
+reachable, so there is a **second, racy source** of pbuf double free.  Three clean boots were
+luck, not proof; the honest statement is "reduced, not eliminated".
+
+That reframes the earlier IRQ lead rather than retiring it: `a20_lwip_process_netif_irq_locked`
+(IRQ top-half, per-device) and `virtio_net_poll_rx_all` -> `a20_lwip_poll_locked` (progress
+poller, all netifs) are two independent drainers of the same receive work, and a timing-sensitive
+failure fits them better than the deterministic TX bug did.  `virtio_net_recv` serialises the
+ring itself under `net->lock`, so the suspect is not the descriptor hand-off but the lwIP/pbuf
+side reached from two contexts.
+
+Next: instrument the panic site to capture the pbuf's `ref`/`next`/`tot_len` **and the caller
+that already freed it**, then run the ARP-triggering test repeatedly, since a single clean run
+proves nothing here.
+
+
+Rebuilt from the reverted tree and re-ran the same test:
+
+    PANIC=0
+    wget: can't connect to remote host (10.0.2.2): Connection refused
+
+So `Connection refused` is the stable behaviour of the unmodified kernel, and the
+`Network unreachable` seen with the bottom-half change was caused by that change, not by
+run-to-run variation.  DNS still fails (`bad address 'example.com'`) on the baseline.
+
+That leaves two candidates for the DNS reply, in the order worth testing:
+
+  1. **Readiness notification.**  musl's resolver sends the query and then waits with `poll`
+     (or a timed `recvfrom`).  If `poll` on a UDP socket never reports readable when a datagram
+     is queued, the resolver times out and reports `bad address` -- and TCP would still appear to
+     work because wget's connect is a blocking call that does not depend on `poll`.  This is
+     worth reading in the socket poll path before anything else, since it is cheap and fits the
+     TCP-works/UDP-fails asymmetry.
+  2. **The bottom-half path**, which the failed experiment above did not settle either way --
+     the change disturbed receive handling, so it did not isolate the BH.  If this is the cause,
+     it needs instrumentation (log in `net_inet_bottom_half_process_all()` and at the reader)
+     rather than another call-site edit.
+
+Do not re-apply the `a20_lwip_poll()` change at that call site: it is measured to break ARP.
+
+
+The asymmetry that looked like the answer: `a20_lwip_poll()` runs the socket bottom-halves --
+
+    void a20_lwip_poll(void) {
+        uint64_t flags = a20_lwip_lock();
+        a20_lwip_poll_locked();            /* drains RX into bh_ring, clears rx_pending */
+        a20_lwip_unlock(flags);
+        net_inet_bottom_half_process_all();  /* enqueues messages + wakes readers */
+        net_packet_bottom_half_process();
+    }
+
+-- while `virtio_net_poll_rx_all()`, which the progress poller drives (`progress.c:43-44`),
+called `a20_lwip_poll_locked()` directly and never ran them.  So an RX-queued datagram sat in
+`bh_ring` with nobody to enqueue it or wake the reader, which would explain a DNS reply never
+reaching the application.
+
+Changed `virtio_net_poll_rx_all()` to call `a20_lwip_poll()` instead, rebuilt and re-ran.
+
+Result: **DNS still failed (`bad address 'example.com'`), and the raw-IP case got worse** --
+
+    before: wget: can't connect to remote host (10.0.2.2): Connection refused
+    after:  wget: can't connect to remote host (10.0.2.2): Network unreachable
+
+`Network unreachable` means route/ARP resolution is now failing, so running the bottom-halves
+from the progress poller disturbs the receive path rather than helping it.  The change was
+reverted (`git checkout -- kernel/drivers/net/virtio_net.c`); the tree carries no unverified
+change.
+
+So the missing bottom-half run is either not the cause, or not something to fix at that call
+site.  Two things worth doing before the next attempt:
+
+  1. re-run the **unmodified** kernel and confirm `Connection refused` returns, so the
+     regression is attributed correctly rather than to run-to-run variation;
+  2. instrument instead of inferring: log in `net_inet_bottom_half_process_all()` and in the
+     socket reader whether the DNS datagram reaches `bh_ring` and whether a reader is woken,
+     which separates "BH never runs" from "BH runs but the message is lost".
+
 
     === NETTEST hostname dns:
     wget: bad address 'example.com'
