@@ -119,7 +119,49 @@ Do **not** guess between them.  **Resolved -- and it is neither.**  Reading the 
 not a double free.  (Worth stating plainly: the "obvious" fix of deleting that `pbuf_free` would
 have changed nothing at all, which is why guessing here was worth refusing.)
 
-## The lead: a single device's IRQ polls every device
+## FIXED (12b3df6a)
+
+lwIP is upstream, so the ownership error had to be ours.  It was: `kernel/net/socket_inet.c`
+freed the pbuf **after** handing it to lwIP, and lwIP's send calls take ownership and free it
+themselves --
+
+    e = udp_sendto(s->udp, p, &ip, port);   /* udp.c frees p: 371/407/425/428/440 */
+    e = raw_sendto(s->raw, p, &ip);         /* raw.c frees p: 75/113 */
+    pbuf_free(p);                            /* double free */
+
+So every UDP and raw send freed the same pbuf twice, corrupting the pbuf pool; the damage then
+surfaced on an unrelated receive, as the assertion inside `etharp_input`'s own free.  Both paths
+were fixed by dropping the trailing free.  The branch where lwIP is never called (no destination,
+not connected) still frees the pbuf, which is correct.
+
+Verified in a clean boot:
+
+    PANIC count: 0
+    Connecting to 10.0.2.2 (10.0.2.2:80)
+    wget: can't connect to remote host (10.0.2.2): Connection refused
+
+`Connection refused` is the right answer -- 10.0.2.2 is the QEMU gateway with nothing listening
+on :80 -- and it means ARP resolution, the TCP SYN and the RST all worked.  Previously the same
+command panicked at the ARP stage.  `nc -u` to the resolver also returns 0.
+
+Worth noting: this bug was only reachable after the page-cache fix (36c14858) removed the
+first-run corruption that had been masking it.
+
+## Remaining: DNS resolution still fails
+
+    === NETTEST hostname dns:
+    wget: bad address 'example.com'
+    rc=1
+
+`/etc/resolv.conf` is readable (`nameserver 10.0.2.3`) and UDP traffic to that port reports no
+error, so the query leaves but the answer is not reaching the application.  Next: check that a
+UDP reply is queued to the socket that sent the query -- i.e. the socket-layer receive path for
+UDP (`socket_inet.c` receive/bind handling) rather than lwIP itself, since TCP receive works.
+This is what still blocks Minecraft's authentication.
+
+Also still true: `ip addr show` fails (`AF_NETLINK` unsupported) and `ifconfig` fails
+(`ioctl 0x8912`, no such device), which makes in-guest network debugging harder than it needs to
+be.
 
 `kernel/net/lwip_stack.c`, IRQ top-half (lines 346-373):
 
