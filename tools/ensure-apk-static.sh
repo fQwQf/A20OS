@@ -26,9 +26,18 @@ project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
 ALPINE_MIRROR_ROOT=${ALPINE_MIRROR_ROOT:-https://mirrors.ustc.edu.cn/alpine}
 OFFICIAL_CDN=${A20_OFFICIAL_CDN:-https://dl-cdn.alpinelinux.org/alpine}
-REPO_PATH=edge/main/x86_64
+# apk.static is executed on this host, so it must match the host architecture
+# (not a fixed x86_64): a build host may itself be aarch64/riscv64/...
+host_machine=$(uname -m)
+case "$host_machine" in
+    x86_64|aarch64|riscv64|ppc64le|s390x) apk_arch=$host_machine ;;
+    armv7l|armv6l|armv8l) apk_arch=armv7 ;;
+    i386|i486|i586|i686) apk_arch=x86 ;;
+    *) apk_arch=$host_machine ;;
+esac
+REPO_PATH=${APK_TOOLS_REPO_PATH:-edge/main/$apk_arch}
 cache_root=${A20_CACHE_DIR:-$project_root/build/cache}
-cache_dir="$cache_root/apk-tools/$(uname -m)"
+cache_dir="$cache_root/apk-tools/$host_machine"
 extract_dir="$cache_dir/apk"
 
 if [ -x "$extract_dir/sbin/apk.static" ]; then
