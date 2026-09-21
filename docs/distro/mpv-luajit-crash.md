@@ -459,7 +459,32 @@ with the harness still running tlstest / forktest / mmapchurn / filefill first, 
 regression in any of those counters (bad_fs, bad_magic, bad_parent, bad_child, bad_slot,
 overlaps, bad_anon) means the change is wrong.
 
-## Packaging note
+## After the fix: Minecraft
+
+Booted the same image with the launcher added to the harness (no page-cache warming):
+
+    === mc rc=143
+    minecraft: 1.21.11, assets 29, home /usr/share/a20-media/1.21.11
+    [11:43:53] [Render thread/INFO]: Backend library: LWJGL version 3.3.3+5
+
+and the boot log contains **zero** SIGSEGV/FATAL, with all four probes and all three mpv
+commands still returning 0.
+
+So with the fill race fixed the launcher gets all the way to initialising LWJGL on the render
+thread, and `rc=143` is SIGTERM from the harness timeout -- it was killed while still running,
+not crashed.  The error it then reports is unrelated to memory:
+
+    UnknownHostException: sessionserver.mojang.com
+    UnknownHostException: api.minecraftservices.com
+
+i.e. the guest has no route to Mojang, so it cannot authenticate.  Xwayland also started and
+took a client in this boot (xkbcomp messages), which means an X11 window path was exercised.
+
+Next for Minecraft: give it a working auth path (offline/demo or a reachable session server)
+and a much longer timeout, then look for the window itself.  Note the previous conclusion about
+MC -- "the GL path completes with no X window created" -- was reached on the **buggy** kernel
+and should not be trusted until re-checked here.
+
 
 Any userspace part of the fix (a patched mpv, LuaJIT, or an added helper package) is to
 be delivered as an apk via `packages/recipes/`, not by copying files into an image.
