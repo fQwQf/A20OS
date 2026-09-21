@@ -62,6 +62,7 @@ static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frame
     }
 }
 
+#if defined(__x86_64__)
 /*
  * Prints refs so the caller can tell a shared (refs > 1, i.e. writes go through
  * COW) page from a private one; the surrounding zeros-vs-one-zero pattern then
@@ -128,6 +129,7 @@ static void dump_user_object(task_t *task, vaddr_t va, const char *tag) {
     kerr("  [%s] PAGE-ZEROMAP 64B-blocks all-zero=0x%016lx nonzero_bytes=%d/%d\n",
          tag, (unsigned long)zero_blocks, nonzero_bytes, (int)PAGE_SIZE);
 }
+#endif
 
 static void dump_fault_pte(task_t *task, vaddr_t va) {
     if (!task || !task->mm || !task->mm->pgdir)

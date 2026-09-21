@@ -14,6 +14,15 @@
 #include "core/klog.h"
 #include "core/string.h"
 
+/*
+ * The 64-bit-BAR relocation below exists because x86_64's higher-half direct map
+ * only covers the first 4 GiB.  On arches whose direct map covers all of RAM
+ * there is nothing to relocate, so no address can reach this limit.
+ */
+#ifndef PHYS_MAP_LIMIT
+#define PHYS_MAP_LIMIT (~(uintptr_t)0)
+#endif
+
 #ifdef CONFIG_PCI_MMIO_ALLOC
 #include "platform.h"
 #endif
