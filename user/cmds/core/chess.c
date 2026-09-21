@@ -423,6 +423,29 @@ static int castle_legal(const Game *g, int side, int kingside)
            !is_attacked(g, SQ(row, 4 + 2 * step), enemy);
 }
 
+/* Could a piece standing on `from` move to `to`?  Ignores occupancy of `from`
+ * (callers pass a square holding that piece type), and is used for SAN
+ * disambiguation only, so it just needs the movement geometry. */
+static int piece_reaches(const Game *g, int from, int to)
+{
+    int type = PIECE_TYPE(g->board[from]);
+    int r = ROW(from), c = COL(from);
+    int tr = ROW(to), tc = COL(to);
+
+    if (type == KNIGHT) {
+        int dr = abs_val(tr - r), dc = abs_val(tc - c);
+        return (dr == 1 && dc == 2) || (dr == 2 && dc == 1);
+    }
+    if (type == BISHOP)
+        return abs_val(tr - r) == abs_val(tc - c) && tr != r;
+    if (type == ROOK)
+        return (tr == r) != (tc == c);
+    if (type == QUEEN)
+        return (tr == r || tc == c) ||
+               (abs_val(tr - r) == abs_val(tc - c) && tr != r);
+    return 0;
+}
+
 /* All pseudo-legal moves, ignoring whether the king is left in check. */
 static int gen_pseudo_legal(const Game *g, Move *moves)
 {
@@ -1232,6 +1255,7 @@ static void show_help(void)
     printf("  \033[33mhistory\033[0m    - show move history\r\n");
     printf("  \033[33mbalance\033[0m    - show material balance\r\n");
     printf("  \033[33mfen\033[0m        - show FEN string\r\n");
+    printf("  \033[33mpgn\033[0m        - export the game to chess.pgn\r\n");
     printf("  \033[33mquit\033[0m        - exit\r\n");
     printf("  \033[33mhelp\033[0m        - this message\r\n");
     printf("  Mouse: click piece, then click destination\r\n\r\n");
@@ -1288,25 +1312,7 @@ static int parse_move(const char *input, Game *g, Move *out)
     /* Find matching legal move */
     for (i = 0; i < count; i++) {
         if (legal[i].from == from && legal[i].to == to) {
-            if (promo != EMPTY) {
-                if (legal[i].promoted == promo) {
-                    *out = legal[i];
-                    return 0;
-                }
-            } else {
-                if (legal[i].promoted == EMPTY) {
-                    *out = legal[i];
-                    return 0;
-                }
-                /* If only one promotion choice, use it */
-            }
-        }
-    }
-
-    /* If promotion specified but not found with that piece, try any promotion */
-    if (promo != EMPTY) {
-        for (i = 0; i < count; i++) {
-            if (legal[i].from == from && legal[i].to == to && legal[i].promoted != EMPTY) {
+            if (legal[i].promoted == promo || promo == EMPTY) {
                 *out = legal[i];
                 return 0;
             }
@@ -1316,9 +1322,47 @@ static int parse_move(const char *input, Game *g, Move *out)
     return -1;
 }
 
-/* ======================================================================
- * Mouse protocol (SGR xterm)
- * ====================================================================== */
+/* Return the square the player picks from stdin, or -1 to cancel.  Promotions
+ * need an extra choice the mouse cannot express, so they are asked here. */
+static int choose_promotion(void)
+{
+    static const char letters[4] = {'q', 'r', 'b', 'n'};
+    static const int types[4] = {QUEEN, ROOK, BISHOP, KNIGHT};
+
+    printf("  Promote to (q)ueen (r)ook (b)ishop k(n)ight: ");
+    fflush(stdout);
+    int ch = fgetc(stdin);
+    while (ch != '\n' && ch != '\r' && ch != -1) {
+        for (int i = 0; i < 4; i++) {
+            if (ch == letters[i] || ch == (letters[i] - 'a' + 'A')) {
+                while (ch != '\n' && ch != '\r' && ch != -1)
+                    ch = fgetc(stdin);
+                return types[i];
+            }
+        }
+        ch = fgetc(stdin);
+    }
+    return -1;
+}
+
+/* Complete a mouse move.  `m` is the base move found for sq->to; if it is a
+ * promotion the player is prompted and `m` is refined to the chosen piece. */
+static int resolve_promotion(Game *g, Move *m)
+{
+    if (m->promoted == EMPTY)
+        return 0;
+    int piece = choose_promotion();
+    if (piece == EMPTY)
+        return -1;
+    Move legal[MAX_MOVES];
+    int n = gen_legal(g, legal);
+    for (int i = 0; i < n; i++)
+        if (legal[i].from == m->from && legal[i].to == m->to && legal[i].promoted == piece) {
+            *m = legal[i];
+            return 0;
+        }
+    return -1;
+}
 
 #ifdef HAS_TERMIOS
 static struct termios g_orig_termios;
@@ -1693,6 +1737,88 @@ static void record_move(Game *g, const Move *m)
 }
 
 /* ======================================================================
+ * PGN export
+ * ====================================================================== */
+
+/* Natural move text for move `i` (a half-move).  Check/mate needs the position
+ * after the move; disambiguation needs every square a same-type piece could
+ * have reached the destination from. */
+static void san_append(const Game *g, int i, char *out)
+{
+    const char *note = g->move_notation[i];
+    int side = PIECE_COLOR(g->history[i].piece);
+    int type = PIECE_TYPE(g->history[i].piece);
+    int to = g->history[i].to;
+    int len = 0;
+
+    while (note[len] && len < 6) {
+        out[len] = note[len];
+        len++;
+    }
+
+    if (in_check(g, g->side)) {
+        Move replies[MAX_MOVES];
+        out[len++] = gen_legal(g, replies) == 0 ? '#' : '+';
+    }
+    out[len] = '\0';
+
+    /* Long algebraic already includes from-file for pawns and captures. */
+    if (type == PAWN || strchr(note, 'x'))
+        return;
+
+    /* Count same-type pieces that could also move to `to`. */
+    int rivals = 0, same_file = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (sq == g->history[i].from || g->board[sq] != (type | side))
+            continue;
+        if (!piece_reaches(g, sq, to))
+            continue;
+        rivals++;
+        if (COL(sq) == COL(g->history[i].from))
+            same_file = 1;
+    }
+    if (rivals == 0)
+        return;
+
+    char hint = same_file ? '0' + (8 - ROW(g->history[i].from)) : 'a' + COL(g->history[i].from);
+    memmove(out + 2, out + 1, len - 1);
+    out[1] = hint;
+}
+
+static int export_pgn(const Game *g, const char *path)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        printf("  \033[31mCannot write '%s'.\033[0m\r\n", path);
+        return -1;
+    }
+
+    fprintf(f, "[Event \"A20OS Chess\"]\r\n");
+    fprintf(f, "[Site \"A20OS\"]\r\n");
+    fprintf(f, "[White \"A20OS AI (%s)\"]\r\n", difficulty_name(g_difficulty));
+    fprintf(f, "[Black \"Human\"]\r\n");
+    fprintf(f, "[Result \"*\"]\r\n\r\n");
+
+    int line = 0;
+    for (int i = 0; i < g->notation_count; i++) {
+        char san[12];
+        san_append(g, i, san);
+        if (i % 2 == 0)
+            line += fprintf(f, "%d. ", i / 2 + 1);
+        line += fprintf(f, "%s ", san);
+        if (line >= 76) {
+            fprintf(f, "\r\n");
+            line = 0;
+        }
+    }
+    fprintf(f, "*\r\n");
+    fclose(f);
+
+    printf("  PGN written to \033[33m%s\033[0m (%d plies)\r\n\r\n", path, g->notation_count);
+    return 0;
+}
+
+/* ======================================================================
  * Main game loop
  * ====================================================================== */
 
@@ -1873,7 +1999,7 @@ int main(void)
                     move_str[3] = '0' + mr;
                     move_str[4] = '\0';
                     Move m;
-                    if (parse_move(move_str, &game, &m) == 0) {
+                    if (parse_move(move_str, &game, &m) == 0 && resolve_promotion(&game, &m) == 0) {
                         record_move(&game, &m);
                         last_from = m.from;
                         last_to = m.to;
@@ -1929,6 +2055,7 @@ int main(void)
         if (strcmp(input, "history") == 0) { print_history(&game); continue; }
         if (strcmp(input, "balance") == 0) { print_material_balance(&game); continue; }
         if (strcmp(input, "fen") == 0) { print_fen(&game); continue; }
+        if (strcmp(input, "pgn") == 0) { export_pgn(&game, "chess.pgn"); continue; }
         if (strcmp(input, "undo") == 0) {
             if (game.history_len >= 2) {
                 unmake_move(&game);
@@ -1951,6 +2078,10 @@ int main(void)
             Move m;
             if (parse_move(input, &game, &m) < 0) {
                 printf("  \033[31mInvalid move.\033[0m Use format: e2e4 (type '\033[33mhelp\033[0m' for commands)\r\n");
+                continue;
+            }
+            if (resolve_promotion(&game, &m) < 0) {
+                printf("  Promotion cancelled.\r\n");
                 continue;
             }
             record_move(&game, &m);
