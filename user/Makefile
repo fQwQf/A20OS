@@ -513,10 +513,17 @@ FF_ALL_LIB_SRCS := $(FF_COMMON_SRCS) $(FF_DETECT_SRCS) $(FF_LINUX_DETECT_SRCS) \
 FF_LIB_OBJS := $(patsubst %.c,$(OBJ_DIR)/fastfetch/%.o,$(FF_ALL_LIB_SRCS))
 FF_LIB := $(OBJ_DIR)/fastfetch/libfastfetch.a
 
-FF_LINUX_INC_riscv64 := -isystem /usr/include/riscv64-linux-gnu
-FF_LINUX_INC_loongarch64 := -isystem /usr/include/loongarch64-linux-gnu
-FF_LINUX_INC_aarch64 := -isystem /usr/include/aarch64-linux-gnu
-FF_LINUX_INC_x86_64 := -isystem /usr/include/x86_64-linux-gnu
+# glibc/kernel uapi headers live under /usr/<triple>/include for Debian/Ubuntu
+# cross toolchains, but under /usr/include/<triple> for native multiarch.  Pick
+# whichever exists on this host so the build also works when the host arch
+# differs from the target (e.g. building riscv64 on an aarch64 machine).
+FF_LINUX_INC_DIR = $(or $(firstword $(wildcard \
+                    /usr/include/$(1) /usr/$(1)/include /usr/$(1)/sysroot/usr/include)),\
+                    /usr/include/$(1))
+FF_LINUX_INC_riscv64 := -isystem $(call FF_LINUX_INC_DIR,riscv64-linux-gnu)
+FF_LINUX_INC_loongarch64 := -isystem $(call FF_LINUX_INC_DIR,loongarch64-linux-gnu)
+FF_LINUX_INC_aarch64 := -isystem $(call FF_LINUX_INC_DIR,aarch64-linux-gnu)
+FF_LINUX_INC_x86_64 := -isystem $(call FF_LINUX_INC_DIR,x86_64-linux-gnu)
 FF_LINUX_INC := $(FF_LINUX_INC_$(ARCH)) \
                 -isystem $(shell $(CC) -print-file-name=include)
 
