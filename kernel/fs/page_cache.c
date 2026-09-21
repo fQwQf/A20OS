@@ -21,6 +21,17 @@ static mutex_t g_page_cache_grow_lock;
 #define PAGE_CACHE_WRITEBACK_LOCKS 64
 static mutex_t g_page_cache_writeback_lock;
 static mutex_t g_page_cache_writeback_locks[PAGE_CACHE_WRITEBACK_LOCKS];
+/*
+ * The vfile fill path reaches the filesystem through vf->ops->read/lseek, which
+ * the syscall layer protects with vf->offset_lock but which the fill calls
+ * directly.  Two threads filling different pages of one file would otherwise
+ * interleave on the shared vf->offset and read from the wrong file position, so
+ * fills are striped by vfile pointer here (every page of one file lands on the
+ * same lock).  vf->offset_lock itself cannot be reused: a fault taken inside a
+ * read() syscall re-enters this path and would deadlock on that mutex.
+ */
+#define PAGE_CACHE_FILL_LOCKS 16
+static mutex_t g_page_cache_fill_locks[PAGE_CACHE_FILL_LOCKS];
 #define PAGE_CACHE_CHUNKS \
     (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
 static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
@@ -418,6 +429,8 @@ int page_cache_init(void)
     mutex_init(&g_page_cache_writeback_lock);
     for (size_t i = 0; i < PAGE_CACHE_WRITEBACK_LOCKS; i++)
         mutex_init(&g_page_cache_writeback_locks[i]);
+    for (size_t i = 0; i < PAGE_CACHE_FILL_LOCKS; i++)
+        mutex_init(&g_page_cache_fill_locks[i]);
     lock_counters_register(&g_page_cache_lock, "page_cache");
     /* Keep the cache bounded to one eighth of RAM on small normal boots while
      * retaining a 1 GiB ceiling on 8 GiB hosts. */
@@ -655,16 +668,22 @@ retry:
         return r;
     }
 
+    mutex_t *fill_offset_lock =
+        &g_page_cache_fill_locks[((uintptr_t)vf >> 4) & (PAGE_CACHE_FILL_LOCKS - 1)];
+    mutex_lock(fill_offset_lock);
+
     size_t saved = vf->offset;
 
     long seek_r = vf->ops->lseek(vf, (long)page_base, SEEK_SET);
     if (seek_r < 0) {
+        mutex_unlock(fill_offset_lock);
         mutex_unlock(&page->fill_lock);
         return (int)seek_r;
     }
 
     int r = vf->ops->read(vf, (char *)data, PAGE_SIZE);
     int restore_r = vf->ops->lseek(vf, (long)saved, SEEK_SET);
+    mutex_unlock(fill_offset_lock);
     if (restore_r < 0 && r >= 0)
         r = restore_r;
     if (r < 0) {
