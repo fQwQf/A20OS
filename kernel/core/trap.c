@@ -62,6 +62,73 @@ static void dump_kernel_backtrace(trap_context_t *ctx, vaddr_t pc, int max_frame
     }
 }
 
+/*
+ * Prints refs so the caller can tell a shared (refs > 1, i.e. writes go through
+ * COW) page from a private one; the surrounding zeros-vs-one-zero pattern then
+ * separates a never-initialised object from a single lost write.
+ */
+static void dump_user_object(task_t *task, vaddr_t va, const char *tag) {
+    if (!task || !task->mm || !task->mm->pgdir || !va)
+        return;
+
+    uintptr_t pte_slot = 0;
+    pte_t pte_value = 0;
+    mm_debug_pte_value(task->mm->pgdir, va, &pte_slot, &pte_value);
+    mm_leaf_info_t leaf;
+    if (!mm_query_leaf(task->mm->pgdir, va, &leaf)) {
+        kerr("  [%s] va=0x%lx pte=0x%lx UNMAPPED\n", tag,
+             (unsigned long)va, (unsigned long)pte_value);
+        return;
+    }
+    paddr_t page_pa = leaf.pa & ~(paddr_t)(PAGE_SIZE - 1);
+    pfn_t pfn = phys_to_pfn(page_pa);
+    if (!pfn_valid(pfn))
+        return;
+
+    uint16_t refs = 0;
+    uint8_t frame_flags = 0;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    refs = pfa.meta[pfn].refcount;
+    frame_flags = pfa.meta[pfn].flags;
+    spin_unlock_irqrestore(&pfa.lock, flags);
+
+    vaddr_t window_base = va & ~(vaddr_t)0x3f;
+    size_t spare = PAGE_SIZE - (size_t)(window_base & (PAGE_SIZE - 1));
+    size_t words = spare / sizeof(uint64_t);
+    if (words > 48)
+        words = 48;
+
+    const uint64_t *w = (const uint64_t *)((const char *)pfn_to_virt(pfn) +
+                                           (window_base & (PAGE_SIZE - 1)));
+    kerr("  [%s] va=0x%lx base=0x%lx pfn=%lu refs=%u fflags=0x%x\n",
+         tag, (unsigned long)va, (unsigned long)window_base,
+         (unsigned long)pfn, refs, frame_flags);
+    for (size_t i = 0; i < words; i++) {
+        vaddr_t a = window_base + (vaddr_t)(8 * i);
+        kerr("    +0x%03lx %016lx%s\n", (unsigned long)(a & (PAGE_SIZE - 1)),
+             (unsigned long)w[i],
+             (a <= va && va < a + 8) ? "  <==" : "");
+    }
+
+    uint64_t zero_blocks = 0;
+    int nonzero_bytes = 0;
+    const char *page = (const char *)pfn_to_virt(pfn);
+    for (size_t b = 0; b < PAGE_SIZE / 64; b++) {
+        const uint64_t *q = (const uint64_t *)(page + b * 64);
+        int all_zero = 1;
+        for (int j = 0; j < 8; j++) {
+            if (q[j]) {
+                all_zero = 0;
+                nonzero_bytes += 8;
+            }
+        }
+        if (all_zero)
+            zero_blocks |= (uint64_t)1 << b;
+    }
+    kerr("  [%s] PAGE-ZEROMAP 64B-blocks all-zero=0x%016lx nonzero_bytes=%d/%d\n",
+         tag, (unsigned long)zero_blocks, nonzero_bytes, (int)PAGE_SIZE);
+}
+
 static void dump_fault_pte(task_t *task, vaddr_t va) {
     if (!task || !task->mm || !task->mm->pgdir)
         return;
@@ -351,6 +418,13 @@ static void user_trap_handler(trap_context_t *ctx) {
                      (unsigned long)TRAP_CTX_FP(ctx));
                 dump_fault_pte(cur, TRAP_CTX_FP(ctx));
             }
+#if defined(__x86_64__)
+            {
+                vaddr_t rbx = (vaddr_t)arch_trap_ctx_reg(ctx, 1);
+                if (rbx && rbx != stval)
+                    dump_user_object(cur, rbx, "FAULT-BX");
+            }
+#endif
             if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                 return;
             proc_exit_group(-SIGSEGV);
