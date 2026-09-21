@@ -1030,7 +1030,8 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         pbuf_free(p);
         return -EDESTADDRREQ;
     }
-    pbuf_free(p);
+    /* udp_sendto()/udp_send() take ownership of the pbuf and free it on every
+     * path, including error, so it must not be freed again here. */
     a20_lwip_poll_locked();
     a20_lwip_unlock(lwip_flags);
     return e == ERR_OK ? (int)len : -EIO;
@@ -1062,7 +1063,8 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
         pbuf_free(p);
         return -EDESTADDRREQ;
     }
-    pbuf_free(p);
+    /* raw_sendto()/raw_send() take ownership of the pbuf and free it on every
+     * path, including error, so it must not be freed again here. */
     a20_lwip_poll_locked();
     a20_lwip_unlock(lwip_flags);
     return e == ERR_OK ? (int)len : -EIO;
