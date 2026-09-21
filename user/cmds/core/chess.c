@@ -37,6 +37,17 @@
 #define COLOR_MASK (WHITE | BLACK)
 #define PIECE_MASK 0x07
 
+/* Castling rights */
+#define WK 1
+#define WQ 2
+#define BK 4
+#define BQ 8
+
+/* Transposition-table bound types */
+#define TT_EXACT 0
+#define TT_LOWER 1
+#define TT_UPPER 2
+
 #define PIECE(type, color) ((type) | (color))
 #define PIECE_TYPE(p) ((p) & PIECE_MASK)
 #define PIECE_COLOR(p) ((p) & COLOR_MASK)
@@ -49,7 +60,12 @@
 #define COL(sq) ((sq) % 8)
 
 #define MAX_MOVES 256
-#define MAX_UNDO   64
+/* Maximum number of half-moves kept on the game/search stack.  A full game can
+ * easily exceed 64 plies, so this must comfortably cover a whole game plus the
+ * deepest search recursion; the value below is also used for the notation
+ * ring.  copy_position() avoids duplicating this array on every search node,
+ * so growing it does not cost per-node memcpy time. */
+#define MAX_UNDO   1024
 #define HASH_SIZE  (1 << 16)
 #define INF  1000000
 
@@ -81,25 +97,26 @@ typedef struct {
     int piece;
     int captured;
     int promoted;    /* piece type promoted to, or EMPTY */
-    int castle;      /* 0=none, 1= kingside, 2=queenside */
+    int castle;      /* 0=none, 1=kingside, 2=queenside */
     int en_passant;  /* 1 if en passant capture */
-    int prev_ep;     /* previous en passant square, -1 if none */
-    int prev_castle; /* previous castling rights */
-    int halfmove;    /* prev halfmove clock */
+    int prev_ep;     /* undo state, filled in by make_move */
+    int prev_castle;
+    int halfmove;
+    uint64_t prev_hash;
 } Move;
 
 typedef struct {
     int board[64];
     int side;          /* WHITE or BLACK */
     int ep_square;     /* en passant target square, -1 if none */
-    int castle;        /* castling rights bitmask: 1=wk, 2=wq, 4=bk, 8=bq */
+    int castle;        /* castling rights bitmask, see WK/WQ/BK/BQ */
     int halfmove_clock;
     int fullmove;
+    uint64_t hash;     /* Zobrist key, kept in sync by make_move/unmake_move */
     Move history[MAX_UNDO];
     int history_len;
     int white_captured[7];
     int black_captured[7];
-    int move_number;
     char move_notation[MAX_UNDO][8];
     int notation_count;
 } Game;
@@ -109,7 +126,7 @@ typedef struct {
     uint64_t key;
     int depth;
     int score;
-    int flag;   /* 0=exact, 1=lower, 2=upper */
+    int flag;   /* TT_EXACT / TT_LOWER / TT_UPPER */
     int best_move;
 } TTEntry;
 
@@ -144,7 +161,7 @@ static int abs_val(int x)
 
 static uint64_t zobrist_pieces[64][7][2]; /* [sq][piece_type][color] */
 static uint64_t zobrist_castle[16];
-static uint64_t zobrist_ep[65];  /* 0-63 = file, 64 = none */
+static uint64_t zobrist_ep[8];   /* indexed by ep file */
 static uint64_t zobrist_side;
 static int zobrist_initialized = 0;
 
@@ -159,11 +176,16 @@ static void init_zobrist(void)
                 zobrist_pieces[sq][p][c] = ((uint64_t)xorshift32() << 32) | xorshift32();
     for (p = 0; p < 16; p++)
         zobrist_castle[p] = ((uint64_t)xorshift32() << 32) | xorshift32();
-    for (p = 0; p < 65; p++)
+    for (p = 0; p < 8; p++)
         zobrist_ep[p] = ((uint64_t)xorshift32() << 32) | xorshift32();
     zobrist_side = ((uint64_t)xorshift32() << 32) | xorshift32();
     rng_state = 0xDEADBEEF;
     zobrist_initialized = 1;
+}
+
+static uint64_t piece_key(int sq, int piece)
+{
+    return zobrist_pieces[sq][PIECE_TYPE(piece)][IS_WHITE(piece) ? 0 : 1];
 }
 
 static uint64_t compute_hash(const Game *g)
@@ -172,21 +194,21 @@ static uint64_t compute_hash(const Game *g)
     int sq;
     for (sq = 0; sq < 64; sq++) {
         int p = g->board[sq];
-        if (!IS_EMPTY(p)) {
-            int pt = PIECE_TYPE(p);
-            int c = IS_WHITE(p) ? 0 : 1;
-            h ^= zobrist_pieces[sq][pt][c];
-        }
+        if (!IS_EMPTY(p))
+            h ^= piece_key(sq, p);
     }
     h ^= zobrist_castle[g->castle & 0xF];
     if (g->ep_square >= 0)
         h ^= zobrist_ep[COL(g->ep_square)];
-    else
-        h ^= zobrist_ep[64];
     if (g->side == BLACK)
         h ^= zobrist_side;
     return h;
 }
+
+/* TT move is packed as from | (to << 6); both fit in six bits. */
+static int move_key(int from, int to) { return from | (to << 6); }
+static int move_key_from(int key) { return key & 0x3F; }
+static int move_key_to(int key) { return (key >> 6) & 0x3F; }
 
 /* ======================================================================
  * Transposition Table
@@ -208,15 +230,15 @@ static int tt_probe(uint64_t key, int depth, int alpha, int beta, int *score, in
     TTEntry *e = &tt_table[key & (HASH_SIZE - 1)];
     if (e->key == key && e->depth >= depth) {
         *best_move = e->best_move;
-        if (e->flag == 0) { /* exact */
+        if (e->flag == TT_EXACT) {
             *score = e->score;
             return 1;
         }
-        if (e->flag == 1 && e->score >= beta) { /* lower bound */
+        if (e->flag == TT_LOWER && e->score >= beta) {
             *score = e->score;
             return 1;
         }
-        if (e->flag == 2 && e->score <= alpha) { /* upper bound */
+        if (e->flag == TT_UPPER && e->score <= alpha) {
             *score = e->score;
             return 1;
         }
@@ -259,10 +281,32 @@ static void init_board(Game *g)
         g->board[i] = setup[i];
     g->side = WHITE;
     g->ep_square = -1;
-    g->castle = 1 | 2 | 4 | 8; /* all rights */
+    g->castle = WK | WQ | BK | BQ;
     g->halfmove_clock = 0;
     g->fullmove = 1;
     g->history_len = 0;
+    g->notation_count = 0;
+    memset(g->white_captured, 0, sizeof(g->white_captured));
+    memset(g->black_captured, 0, sizeof(g->black_captured));
+    g->hash = compute_hash(g);
+}
+
+/* Copy the board and game state but not the history stacks.  The search copies
+ * a position at every node, so duplicating MAX_UNDO entries would dominate
+ * runtime; searches always start from an empty stack they unwind themselves. */
+static void copy_position(Game *dst, const Game *src)
+{
+    memcpy(dst->board, src->board, sizeof(dst->board));
+    dst->side = src->side;
+    dst->ep_square = src->ep_square;
+    dst->castle = src->castle;
+    dst->halfmove_clock = src->halfmove_clock;
+    dst->fullmove = src->fullmove;
+    dst->hash = src->hash;
+    dst->history_len = 0;
+    dst->notation_count = 0;
+    memset(dst->white_captured, 0, sizeof(dst->white_captured));
+    memset(dst->black_captured, 0, sizeof(dst->black_captured));
 }
 
 /* ======================================================================
@@ -274,81 +318,54 @@ static int in_bounds(int r, int c)
     return r >= 0 && r < 8 && c >= 0 && c < 8;
 }
 
-/* Check if square is attacked by the given side */
+/* Is `sq` attacked by any piece of `by_side`? */
 static int is_attacked(const Game *g, int sq, int by_side)
 {
+    static const int knight[8][2] = {{-2,-1},{-2,1},{-1,-2},{-1,2},{1,-2},{1,2},{2,-1},{2,1}};
+    static const int king[8][2]   = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
+    static const int diag[4][2]   = {{-1,-1},{-1,1},{1,-1},{1,1}};
+    static const int orth[4][2]   = {{-1,0},{1,0},{0,-1},{0,1}};
     int r = ROW(sq), c = COL(sq);
-    int dr, dc, i, nr, nc;
+    int i;
 
-    /* Knight attacks */
-    static const int knight_dr[] = {-2,-2,-1,-1, 1, 1, 2, 2};
-    static const int knight_dc[] = {-1, 1,-2, 2,-2, 2,-1, 1};
-    for (i = 0; i < 8; i++) {
-        nr = r + knight_dr[i];
-        nc = c + knight_dc[i];
-        if (in_bounds(nr, nc)) {
-            int p = g->board[SQ(nr, nc)];
-            if (!IS_EMPTY(p) && PIECE_TYPE(p) == KNIGHT && IS_WHITE(p) == (by_side == WHITE))
-                return 1;
-        }
-    }
+    for (i = 0; i < 8; i++)
+        if (in_bounds(r + knight[i][0], c + knight[i][1]) &&
+            g->board[SQ(r + knight[i][0], c + knight[i][1])] == (KNIGHT | by_side))
+            return 1;
 
-    /* Pawn attacks */
     if (by_side == WHITE) {
-        /* White pawns attack upward (from row+1 to row) */
-        if (r + 1 <= 7) {
-            if (c - 1 >= 0 && g->board[SQ(r+1, c-1)] == (PAWN | WHITE)) return 1;
-            if (c + 1 <= 7 && g->board[SQ(r+1, c+1)] == (PAWN | WHITE)) return 1;
-        }
+        if (r < 7 && c > 0 && g->board[SQ(r+1, c-1)] == (PAWN | WHITE)) return 1;
+        if (r < 7 && c < 7 && g->board[SQ(r+1, c+1)] == (PAWN | WHITE)) return 1;
     } else {
-        /* Black pawns attack downward (from row-1 to row) */
-        if (r - 1 >= 0) {
-            if (c - 1 >= 0 && g->board[SQ(r-1, c-1)] == (PAWN | BLACK)) return 1;
-            if (c + 1 <= 7 && g->board[SQ(r-1, c+1)] == (PAWN | BLACK)) return 1;
-        }
+        if (r > 0 && c > 0 && g->board[SQ(r-1, c-1)] == (PAWN | BLACK)) return 1;
+        if (r > 0 && c < 7 && g->board[SQ(r-1, c+1)] == (PAWN | BLACK)) return 1;
     }
 
-    /* Sliding pieces: bishop/queen (diagonals), rook/queen (straights) */
-    static const int diag_dr[] = {-1,-1, 1, 1};
-    static const int diag_dc[] = {-1, 1,-1, 1};
-    static const int str_dr[] = {-1, 1, 0, 0};
-    static const int str_dc[] = { 0, 0,-1, 1};
-    int is_diag;
-
-    for (is_diag = 0; is_diag < 2; is_diag++) {
-        const int *ddr = is_diag ? diag_dr : str_dr;
-        const int *ddc = is_diag ? diag_dc : str_dc;
-        for (i = 0; i < 4; i++) {
-            dr = ddr[i]; dc = ddc[i];
-            nr = r + dr; nc = c + dc;
-            while (in_bounds(nr, nc)) {
-                int p = g->board[SQ(nr, nc)];
-                if (!IS_EMPTY(p)) {
-                    if (IS_WHITE(p) == (by_side == WHITE)) {
-                        int pt = PIECE_TYPE(p);
-                        if (is_diag && (pt == BISHOP || pt == QUEEN)) return 1;
-                        if (!is_diag && (pt == ROOK || pt == QUEEN)) return 1;
-                    }
-                    break;
-                }
-                nr += dr;
-                nc += dc;
+    for (i = 0; i < 4; i++) {
+        int nr = r + diag[i][0], nc = c + diag[i][1];
+        while (in_bounds(nr, nc)) {
+            int p = g->board[SQ(nr, nc)];
+            if (!IS_EMPTY(p)) {
+                if (p == (BISHOP | by_side) || p == (QUEEN | by_side)) return 1;
+                break;
             }
+            nr += diag[i][0]; nc += diag[i][1];
+        }
+        nr = r + orth[i][0]; nc = c + orth[i][1];
+        while (in_bounds(nr, nc)) {
+            int p = g->board[SQ(nr, nc)];
+            if (!IS_EMPTY(p)) {
+                if (p == (ROOK | by_side) || p == (QUEEN | by_side)) return 1;
+                break;
+            }
+            nr += orth[i][0]; nc += orth[i][1];
         }
     }
 
-    /* King attacks */
-    for (dr = -1; dr <= 1; dr++) {
-        for (dc = -1; dc <= 1; dc++) {
-            if (dr == 0 && dc == 0) continue;
-            nr = r + dr; nc = c + dc;
-            if (in_bounds(nr, nc)) {
-                int p = g->board[SQ(nr, nc)];
-                if (!IS_EMPTY(p) && PIECE_TYPE(p) == KING && IS_WHITE(p) == (by_side == WHITE))
-                    return 1;
-            }
-        }
-    }
+    for (i = 0; i < 8; i++)
+        if (in_bounds(r + king[i][0], c + king[i][1]) &&
+            g->board[SQ(r + king[i][0], c + king[i][1])] == (KING | by_side))
+            return 1;
 
     return 0;
 }
@@ -370,322 +387,124 @@ static int in_check(const Game *g, int side)
     return is_attacked(g, ksq, side == WHITE ? BLACK : WHITE);
 }
 
-/* Generate pseudo-legal moves (may leave king in check) */
+static void add_move(Move *moves, int *count, int from, int to, int piece,
+                     int captured, int promoted, int castle, int en_passant)
+{
+    if (*count >= MAX_MOVES)
+        return;
+    Move *m = &moves[(*count)++];
+    m->from = from;
+    m->to = to;
+    m->piece = piece;
+    m->captured = captured;
+    m->promoted = promoted;
+    m->castle = castle;
+    m->en_passant = en_passant;
+}
+
+/* Castling needs intact rights, a rook at home, a clear path, and a king that
+ * neither starts on, crosses, nor lands on an attacked square. */
+static int castle_legal(const Game *g, int side, int kingside)
+{
+    int row = side == WHITE ? 7 : 0;
+    int step = kingside ? 1 : -1;
+    int enemy = side == WHITE ? BLACK : WHITE;
+    int right = kingside ? (side == WHITE ? WK : BK) : (side == WHITE ? WQ : BQ);
+
+    if (!(g->castle & right) || g->board[SQ(row, kingside ? 7 : 0)] != (ROOK | side))
+        return 0;
+    if (!IS_EMPTY(g->board[SQ(row, 4 + step)]) ||
+        !IS_EMPTY(g->board[SQ(row, 4 + 2 * step)]))
+        return 0;
+    if (!kingside && !IS_EMPTY(g->board[SQ(row, 1)]))
+        return 0;
+    return !is_attacked(g, SQ(row, 4), enemy) &&
+           !is_attacked(g, SQ(row, 4 + step), enemy) &&
+           !is_attacked(g, SQ(row, 4 + 2 * step), enemy);
+}
+
+/* All pseudo-legal moves, ignoring whether the king is left in check. */
 static int gen_pseudo_legal(const Game *g, Move *moves)
 {
-    int count = 0;
-    int sq, r, c, nr, nc, i, dr, dc;
+    static const int knight[8][2] = {{-2,-1},{-2,1},{-1,-2},{-1,2},{1,-2},{1,2},{2,-1},{2,1}};
+    static const int king[8][2]   = {{-1,-1},{-1,0},{-1,1},{0,-1},{0,1},{1,-1},{1,0},{1,1}};
+    static const int slide[8][2]  = {{-1,-1},{-1,1},{1,-1},{1,1},{-1,0},{1,0},{0,-1},{0,1}};
     int side = g->side;
     int enemy = side == WHITE ? BLACK : WHITE;
+    int count = 0;
 
-    for (sq = 0; sq < 64; sq++) {
+    for (int sq = 0; sq < 64; sq++) {
         int p = g->board[sq];
-        if (IS_EMPTY(p) || PIECE_COLOR(p) != side) continue;
-        int pt = PIECE_TYPE(p);
-        r = ROW(sq); c = COL(sq);
+        if (IS_EMPTY(p) || PIECE_COLOR(p) != side)
+            continue;
+        int r = ROW(sq), c = COL(sq);
+        int type = PIECE_TYPE(p);
 
-        switch (pt) {
-        case PAWN: {
-            int dir = (side == WHITE) ? -1 : 1;
-            int start_row = (side == WHITE) ? 6 : 1;
-            int promo_row = (side == WHITE) ? 0 : 7;
-
-            /* Forward */
-            nr = r + dir;
-            if (in_bounds(nr, c) && IS_EMPTY(g->board[SQ(nr, c)])) {
-                if (nr == promo_row) {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, c);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = QUEEN;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, c);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = ROOK;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, c);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = BISHOP;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, c);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = KNIGHT;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
+        if (type == PAWN) {
+            int dir = side == WHITE ? -1 : 1;
+            int last = side == WHITE ? 0 : 7;
+            int start = side == WHITE ? 6 : 1;
+            int fwd = SQ(r + dir, c);
+            if (IS_EMPTY(g->board[fwd])) {
+                if (r + dir == last) {
+                    for (int q = QUEEN; q >= KNIGHT; q--)
+                        add_move(moves, &count, sq, fwd, p, EMPTY, q, 0, 0);
                 } else {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, c);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                }
-                /* Double push */
-                if (r == start_row) {
-                    nr = r + 2 * dir;
-                    if (in_bounds(nr, c) && IS_EMPTY(g->board[SQ(nr, c)])) {
-                        moves[count].from = sq;
-                        moves[count].to = SQ(nr, c);
-                        moves[count].piece = p;
-                        moves[count].captured = EMPTY;
-                        moves[count].promoted = EMPTY;
-                        moves[count].castle = 0;
-                        moves[count].en_passant = 0;
-                        moves[count].prev_ep = g->ep_square;
-                        moves[count].prev_castle = g->castle;
-                        moves[count].halfmove = g->halfmove_clock;
-                        count++;
-                    }
+                    add_move(moves, &count, sq, fwd, p, EMPTY, EMPTY, 0, 0);
+                    if (r == start && IS_EMPTY(g->board[SQ(r + 2 * dir, c)]))
+                        add_move(moves, &count, sq, SQ(r + 2 * dir, c), p, EMPTY, EMPTY, 0, 0);
                 }
             }
-
-            /* Captures */
-            for (dc = -1; dc <= 1; dc += 2) {
-                nc = c + dc;
-                nr = r + dir;
-                if (!in_bounds(nr, nc)) continue;
+            for (int dc = -1; dc <= 1; dc += 2) {
+                int nr = r + dir, nc = c + dc;
+                if (!in_bounds(nr, nc))
+                    continue;
                 int target = g->board[SQ(nr, nc)];
-                int is_ep = (g->ep_square == SQ(nr, nc));
-                if ((!IS_EMPTY(target) && PIECE_COLOR(target) == enemy) || is_ep) {
-                    int cap = is_ep ? (PAWN | enemy) : target;
-                    if (nr == promo_row) {
-                        int promos[] = {QUEEN, ROOK, BISHOP, KNIGHT};
-                        int pi;
-                        for (pi = 0; pi < 4; pi++) {
-                            moves[count].from = sq;
-                            moves[count].to = SQ(nr, nc);
-                            moves[count].piece = p;
-                            moves[count].captured = cap;
-                            moves[count].promoted = promos[pi];
-                            moves[count].castle = 0;
-                            moves[count].en_passant = is_ep;
-                            moves[count].prev_ep = g->ep_square;
-                            moves[count].prev_castle = g->castle;
-                            moves[count].halfmove = g->halfmove_clock;
-                            count++;
-                        }
-                    } else {
-                        moves[count].from = sq;
-                        moves[count].to = SQ(nr, nc);
-                        moves[count].piece = p;
-                        moves[count].captured = cap;
-                        moves[count].promoted = EMPTY;
-                        moves[count].castle = 0;
-                        moves[count].en_passant = is_ep;
-                        moves[count].prev_ep = g->ep_square;
-                        moves[count].prev_castle = g->castle;
-                        moves[count].halfmove = g->halfmove_clock;
-                        count++;
-                    }
+                int ep = (g->ep_square == SQ(nr, nc));
+                if (IS_EMPTY(target) ? !ep : PIECE_COLOR(target) == side)
+                    continue;
+                int captured = ep ? (PAWN | enemy) : target;
+                if (nr == last) {
+                    for (int q = QUEEN; q >= KNIGHT; q--)
+                        add_move(moves, &count, sq, SQ(nr, nc), p, captured, q, 0, ep);
+                } else {
+                    add_move(moves, &count, sq, SQ(nr, nc), p, captured, EMPTY, 0, ep);
                 }
             }
-            break;
-        }
-
-        case KNIGHT: {
-            static const int ndr[] = {-2,-2,-1,-1, 1, 1, 2, 2};
-            static const int ndc[] = {-1, 1,-2, 2,-2, 2,-1, 1};
-            for (i = 0; i < 8; i++) {
-                nr = r + ndr[i]; nc = c + ndc[i];
-                if (!in_bounds(nr, nc)) continue;
+        } else if (type == KNIGHT || type == KING) {
+            const int (*steps)[2] = type == KNIGHT ? knight : king;
+            for (int i = 0; i < 8; i++) {
+                int nr = r + steps[i][0], nc = c + steps[i][1];
+                if (!in_bounds(nr, nc))
+                    continue;
                 int target = g->board[SQ(nr, nc)];
-                if (!IS_EMPTY(target) && PIECE_COLOR(target) == side) continue;
-                moves[count].from = sq;
-                moves[count].to = SQ(nr, nc);
-                moves[count].piece = p;
-                moves[count].captured = target;
-                moves[count].promoted = EMPTY;
-                moves[count].castle = 0;
-                moves[count].en_passant = 0;
-                moves[count].prev_ep = g->ep_square;
-                moves[count].prev_castle = g->castle;
-                moves[count].halfmove = g->halfmove_clock;
-                count++;
+                if (!IS_EMPTY(target) && PIECE_COLOR(target) == side)
+                    continue;
+                add_move(moves, &count, sq, SQ(nr, nc), p, target, EMPTY, 0, 0);
             }
-            break;
-        }
-
-        case BISHOP: case ROOK: case QUEEN: {
-            /* Diagonals (0-3), straights (4-7) */
-            static const int sdr[] = {-1,-1, 1, 1, -1, 0, 0, 1};
-            static const int sdc[] = {-1, 1,-1, 1,  0,-1, 1, 0};
-            int start = (pt == BISHOP) ? 0 : (pt == ROOK) ? 4 : 0;
-            int end = (pt == BISHOP) ? 4 : (pt == ROOK) ? 8 : 8;
-            for (i = start; i < end; i++) {
-                dr = sdr[i]; dc = sdc[i];
-                nr = r + dr; nc = c + dc;
+            if (type == KING && c == 4 && r == (side == WHITE ? 7 : 0)) {
+                if (castle_legal(g, side, 1))
+                    add_move(moves, &count, sq, SQ(r, 6), p, EMPTY, EMPTY, 1, 0);
+                if (castle_legal(g, side, 0))
+                    add_move(moves, &count, sq, SQ(r, 2), p, EMPTY, EMPTY, 2, 0);
+            }
+        } else {
+            int first = type == BISHOP ? 0 : type == ROOK ? 4 : 0;
+            int stop = type == BISHOP ? 4 : type == ROOK ? 8 : 8;
+            for (int i = first; i < stop; i++) {
+                int nr = r + slide[i][0], nc = c + slide[i][1];
                 while (in_bounds(nr, nc)) {
                     int target = g->board[SQ(nr, nc)];
                     if (!IS_EMPTY(target)) {
-                        if (PIECE_COLOR(target) != side) {
-                            moves[count].from = sq;
-                            moves[count].to = SQ(nr, nc);
-                            moves[count].piece = p;
-                            moves[count].captured = target;
-                            moves[count].promoted = EMPTY;
-                            moves[count].castle = 0;
-                            moves[count].en_passant = 0;
-                            moves[count].prev_ep = g->ep_square;
-                            moves[count].prev_castle = g->castle;
-                            moves[count].halfmove = g->halfmove_clock;
-                            count++;
-                        }
+                        if (PIECE_COLOR(target) != side)
+                            add_move(moves, &count, sq, SQ(nr, nc), p, target, EMPTY, 0, 0);
                         break;
                     }
-                    moves[count].from = sq;
-                    moves[count].to = SQ(nr, nc);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 0;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                    nr += dr; nc += dc;
+                    add_move(moves, &count, sq, SQ(nr, nc), p, EMPTY, EMPTY, 0, 0);
+                    nr += slide[i][0];
+                    nc += slide[i][1];
                 }
             }
-            break;
-        }
-
-        case KING: {
-            static const int kdr[] = {-1,-1,-1, 0, 0, 1, 1, 1};
-            static const int kdc[] = {-1, 0, 1,-1, 1,-1, 0, 1};
-            for (i = 0; i < 8; i++) {
-                nr = r + kdr[i]; nc = c + kdc[i];
-                if (!in_bounds(nr, nc)) continue;
-                int target = g->board[SQ(nr, nc)];
-                if (!IS_EMPTY(target) && PIECE_COLOR(target) == side) continue;
-                moves[count].from = sq;
-                moves[count].to = SQ(nr, nc);
-                moves[count].piece = p;
-                moves[count].captured = target;
-                moves[count].promoted = EMPTY;
-                moves[count].castle = 0;
-                moves[count].en_passant = 0;
-                moves[count].prev_ep = g->ep_square;
-                moves[count].prev_castle = g->castle;
-                moves[count].halfmove = g->halfmove_clock;
-                count++;
-            }
-
-            /* Castling */
-            if (side == WHITE && r == 7 && c == 4) {
-                /* Kingside */
-                if ((g->castle & 1) && IS_EMPTY(g->board[SQ(7,5)]) &&
-                    IS_EMPTY(g->board[SQ(7,6)]) &&
-                    g->board[SQ(7,7)] == (ROOK|WHITE) &&
-                    !is_attacked(g, SQ(7,4), BLACK) &&
-                    !is_attacked(g, SQ(7,5), BLACK) &&
-                    !is_attacked(g, SQ(7,6), BLACK)) {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(7, 6);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 1;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                }
-                /* Queenside */
-                if ((g->castle & 2) && IS_EMPTY(g->board[SQ(7,3)]) &&
-                    IS_EMPTY(g->board[SQ(7,2)]) &&
-                    IS_EMPTY(g->board[SQ(7,1)]) &&
-                    g->board[SQ(7,0)] == (ROOK|WHITE) &&
-                    !is_attacked(g, SQ(7,4), BLACK) &&
-                    !is_attacked(g, SQ(7,3), BLACK) &&
-                    !is_attacked(g, SQ(7,2), BLACK)) {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(7, 2);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 2;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                }
-            }
-            if (side == BLACK && r == 0 && c == 4) {
-                /* Kingside */
-                if ((g->castle & 4) && IS_EMPTY(g->board[SQ(0,5)]) &&
-                    IS_EMPTY(g->board[SQ(0,6)]) &&
-                    g->board[SQ(0,7)] == (ROOK|BLACK) &&
-                    !is_attacked(g, SQ(0,4), WHITE) &&
-                    !is_attacked(g, SQ(0,5), WHITE) &&
-                    !is_attacked(g, SQ(0,6), WHITE)) {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(0, 6);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 1;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                }
-                /* Queenside */
-                if ((g->castle & 8) && IS_EMPTY(g->board[SQ(0,3)]) &&
-                    IS_EMPTY(g->board[SQ(0,2)]) &&
-                    IS_EMPTY(g->board[SQ(0,1)]) &&
-                    g->board[SQ(0,0)] == (ROOK|BLACK) &&
-                    !is_attacked(g, SQ(0,4), WHITE) &&
-                    !is_attacked(g, SQ(0,3), WHITE) &&
-                    !is_attacked(g, SQ(0,2), WHITE)) {
-                    moves[count].from = sq;
-                    moves[count].to = SQ(0, 2);
-                    moves[count].piece = p;
-                    moves[count].captured = EMPTY;
-                    moves[count].promoted = EMPTY;
-                    moves[count].castle = 2;
-                    moves[count].en_passant = 0;
-                    moves[count].prev_ep = g->ep_square;
-                    moves[count].prev_castle = g->castle;
-                    moves[count].halfmove = g->halfmove_clock;
-                    count++;
-                }
-            }
-            break;
-        }
         }
     }
 
@@ -696,156 +515,131 @@ static int gen_pseudo_legal(const Game *g, Move *moves)
  * Make / Unmake move
  * ====================================================================== */
 
+/* Castling right stripped when a rook leaves or is captured on `sq`. */
+static int rook_right(int sq)
+{
+    if (sq == SQ(7, 0)) return WQ;
+    if (sq == SQ(7, 7)) return WK;
+    if (sq == SQ(0, 0)) return BQ;
+    if (sq == SQ(0, 7)) return BK;
+    return 0;
+}
+
+static void note_capture(Game *g, int piece)
+{
+    if (IS_WHITE(piece)) g->white_captured[PIECE_TYPE(piece)]++;
+    else g->black_captured[PIECE_TYPE(piece)]++;
+}
+
+static void undo_capture(Game *g, int piece)
+{
+    int *count = IS_WHITE(piece) ? g->white_captured : g->black_captured;
+    int type = PIECE_TYPE(piece);
+    if (count[type] > 0)
+        count[type]--;
+}
+
+/* Apply `m`, recording the previous state for unmake_move.  The Zobrist key is
+ * updated here so every caller (game and search) can trust g->hash. */
 static void make_move(Game *g, const Move *m)
 {
-    int from = m->from;
-    int to = m->to;
+    if (g->history_len >= MAX_UNDO)
+        return;
 
-    g->history[g->history_len] = *m;
-    g->history_len++;
+    Move *entry = &g->history[g->history_len++];
+    *entry = *m;
+    entry->prev_ep = g->ep_square;
+    entry->prev_castle = g->castle;
+    entry->halfmove = g->halfmove_clock;
+    entry->prev_hash = g->hash;
 
-    /* Handle castling rook movement */
+    int from = m->from, to = m->to;
+    uint64_t key = g->hash ^ zobrist_side;
+
+    if (g->ep_square >= 0)
+        key ^= zobrist_ep[COL(g->ep_square)];
+    key ^= zobrist_castle[g->castle];
+
     if (m->castle) {
-        if (m->castle == 1) { /* kingside */
-            if (IS_WHITE(m->piece)) {
-                g->board[SQ(7,5)] = g->board[SQ(7,7)];
-                g->board[SQ(7,7)] = EMPTY;
-            } else {
-                g->board[SQ(0,5)] = g->board[SQ(0,7)];
-                g->board[SQ(0,7)] = EMPTY;
-            }
-        } else { /* queenside */
-            if (IS_WHITE(m->piece)) {
-                g->board[SQ(7,3)] = g->board[SQ(7,0)];
-                g->board[SQ(7,0)] = EMPTY;
-            } else {
-                g->board[SQ(0,3)] = g->board[SQ(0,0)];
-                g->board[SQ(0,0)] = EMPTY;
-            }
-        }
+        int rf = SQ(ROW(from), m->castle == 1 ? 7 : 0);
+        int rt = SQ(ROW(from), m->castle == 1 ? 5 : 3);
+        g->board[rt] = g->board[rf];
+        g->board[rf] = EMPTY;
+        key ^= piece_key(rf, g->board[rt]) ^ piece_key(rt, g->board[rt]);
     }
 
-    /* Handle en passant capture */
     if (m->en_passant) {
-        int cap_sq = ROW(from) * 8 + COL(to); /* captured pawn is on same row as capturer */
-        int cap_piece = g->board[cap_sq];
+        int cap_sq = SQ(ROW(from), COL(to));
+        int captured = g->board[cap_sq];
         g->board[cap_sq] = EMPTY;
-        if (!IS_EMPTY(cap_piece)) {
-            int cap_type = PIECE_TYPE(cap_piece);
-            if (IS_WHITE(cap_piece)) g->white_captured[cap_type]++;
-            else g->black_captured[cap_type]++;
+        if (!IS_EMPTY(captured)) {
+            key ^= piece_key(cap_sq, captured);
+            note_capture(g, captured);
         }
+    } else if (!IS_EMPTY(m->captured)) {
+        key ^= piece_key(to, m->captured);
+        note_capture(g, m->captured);
     }
 
-    if (!IS_EMPTY(m->captured) && !m->en_passant) {
-        int cap_type = PIECE_TYPE(m->captured);
-        if (IS_WHITE(m->captured)) g->white_captured[cap_type]++;
-        else g->black_captured[cap_type]++;
-    }
-
-    /* Move piece */
-    g->board[to] = m->piece;
+    int placed = m->promoted != EMPTY ? PIECE(m->promoted, PIECE_COLOR(m->piece)) : m->piece;
+    key ^= piece_key(from, m->piece) ^ piece_key(to, placed);
     g->board[from] = EMPTY;
+    g->board[to] = placed;
 
-    /* Handle promotion */
-    if (m->promoted != EMPTY) {
-        int color = PIECE_COLOR(m->piece);
-        g->board[to] = PIECE(m->promoted, color);
-    }
+    g->ep_square = PIECE_TYPE(m->piece) == PAWN && abs_val(ROW(to) - ROW(from)) == 2
+                 ? SQ((ROW(from) + ROW(to)) / 2, COL(from)) : -1;
+    if (g->ep_square >= 0)
+        key ^= zobrist_ep[COL(g->ep_square)];
 
-    /* Update en passant square */
-    if (PIECE_TYPE(m->piece) == PAWN && abs_val(ROW(to) - ROW(from)) == 2) {
-        g->ep_square = (ROW(from) + ROW(to)) / 2 * 8 + COL(from);
-    } else {
-        g->ep_square = -1;
-    }
+    if (PIECE_TYPE(m->piece) == KING)
+        g->castle &= IS_WHITE(m->piece) ? ~(WK | WQ) : ~(BK | BQ);
+    g->castle &= ~rook_right(from) & ~rook_right(to);
+    key ^= zobrist_castle[g->castle];
 
-    /* Update castling rights */
-    if (PIECE_TYPE(m->piece) == KING) {
-        if (IS_WHITE(m->piece)) g->castle &= ~(1 | 2);
-        else g->castle &= ~(4 | 8);
-    }
-    if (PIECE_TYPE(m->piece) == ROOK) {
-        if (from == SQ(7,0)) g->castle &= ~2;
-        if (from == SQ(7,7)) g->castle &= ~1;
-        if (from == SQ(0,0)) g->castle &= ~8;
-        if (from == SQ(0,7)) g->castle &= ~4;
-    }
-    /* If rook captured */
-    if (to == SQ(7,0)) g->castle &= ~2;
-    if (to == SQ(7,7)) g->castle &= ~1;
-    if (to == SQ(0,0)) g->castle &= ~8;
-    if (to == SQ(0,7)) g->castle &= ~4;
+    g->halfmove_clock = (PIECE_TYPE(m->piece) == PAWN || !IS_EMPTY(m->captured))
+                      ? 0 : g->halfmove_clock + 1;
+    g->hash = key;
 
-    /* Update halfmove clock */
-    if (PIECE_TYPE(m->piece) == PAWN || !IS_EMPTY(m->captured))
-        g->halfmove_clock = 0;
-    else
-        g->halfmove_clock++;
-
-    /* Switch side */
     g->side = (g->side == WHITE) ? BLACK : WHITE;
-    if (g->side == WHITE) g->fullmove++;
+    if (g->side == WHITE)
+        g->fullmove++;
 }
 
 static void unmake_move(Game *g)
 {
-    Move m;
-    int from, to;
+    if (g->history_len <= 0)
+        return;
+    Move m = g->history[--g->history_len];
+    int from = m.from, to = m.to;
 
-    if (g->history_len <= 0) return;
-    g->history_len--;
-    m = g->history[g->history_len];
-
-    from = m.from;
-    to = m.to;
-
-    /* Switch side back */
     g->side = (g->side == WHITE) ? BLACK : WHITE;
-    if (g->side == BLACK) g->fullmove--;
+    if (g->side == BLACK)
+        g->fullmove--;
 
-    /* Move piece back */
     g->board[from] = m.piece;
     g->board[to] = m.captured;
 
-    /* Handle promotion */
-    if (m.promoted != EMPTY) {
-        g->board[from] = m.piece; /* restore original pawn */
-    }
-
-    /* Handle en passant restore */
     if (m.en_passant) {
-        int cap_sq = ROW(from) * 8 + COL(to);
-        int enemy = IS_WHITE(m.piece) ? BLACK : WHITE;
-        g->board[cap_sq] = PAWN | enemy;
-        g->board[to] = EMPTY; /* the target square was empty */
+        int cap_sq = SQ(ROW(from), COL(to));
+        int captured = PAWN | (IS_WHITE(m.piece) ? BLACK : WHITE);
+        g->board[cap_sq] = captured;
+        g->board[to] = EMPTY;
+        undo_capture(g, captured);
+    } else if (!IS_EMPTY(m.captured)) {
+        undo_capture(g, m.captured);
     }
 
-    /* Handle castling rook restore */
     if (m.castle) {
-        if (m.castle == 1) { /* kingside */
-            if (IS_WHITE(m.piece)) {
-                g->board[SQ(7,7)] = g->board[SQ(7,5)];
-                g->board[SQ(7,5)] = EMPTY;
-            } else {
-                g->board[SQ(0,7)] = g->board[SQ(0,5)];
-                g->board[SQ(0,5)] = EMPTY;
-            }
-        } else { /* queenside */
-            if (IS_WHITE(m.piece)) {
-                g->board[SQ(7,0)] = g->board[SQ(7,3)];
-                g->board[SQ(7,3)] = EMPTY;
-            } else {
-                g->board[SQ(0,0)] = g->board[SQ(0,3)];
-                g->board[SQ(0,3)] = EMPTY;
-            }
-        }
+        int rf = SQ(ROW(from), m.castle == 1 ? 7 : 0);
+        int rt = SQ(ROW(from), m.castle == 1 ? 5 : 3);
+        g->board[rf] = g->board[rt];
+        g->board[rt] = EMPTY;
     }
 
-    /* Restore state */
     g->ep_square = m.prev_ep;
     g->castle = m.prev_castle;
     g->halfmove_clock = m.halfmove;
+    g->hash = m.prev_hash;
 }
 
 /* Generate legal moves */
@@ -858,7 +652,7 @@ static int gen_legal(const Game *g, Move *moves)
     Game copy;
 
     for (i = 0; i < count; i++) {
-        copy = *g;
+        copy_position(&copy, g);
         make_move(&copy, &pseudo[i]);
         /* After make_move, side switched; check if our king is in check */
         if (!in_check(&copy, g->side)) {
@@ -954,88 +748,80 @@ static int has_pawn_on_file(const Game *g, int color, int file)
     return count_pawn(g, color, file) > 0;
 }
 
+/* A pawn is passed when no enemy pawn stands ahead of it on its own or an
+ * adjacent file. */
 static int is_passed_pawn(const Game *g, int sq, int color)
 {
     int r = ROW(sq), c = COL(sq);
-    int i;
-    int enemy_pawn = PAWN | (color ? BLACK : WHITE);
-    (void)enemy_pawn;
+    int enemy = PAWN | (color ? WHITE : BLACK);
+    int dir = color ? 1 : -1;
 
-    if (color == 0) {
-        for (i = 0; i < r; i++) {
-            if (c - 1 >= 0 && g->board[SQ(i, c - 1)] == (PAWN | BLACK)) return 0;
-            if (g->board[SQ(i, c)] == (PAWN | BLACK)) return 0;
-            if (c + 1 <= 7 && g->board[SQ(i, c + 1)] == (PAWN | BLACK)) return 0;
-        }
-    } else {
-        for (i = r + 1; i < 8; i++) {
-            if (c - 1 >= 0 && g->board[SQ(i, c - 1)] == (PAWN | WHITE)) return 0;
-            if (g->board[SQ(i, c)] == (PAWN | WHITE)) return 0;
-            if (c + 1 <= 7 && g->board[SQ(i, c + 1)] == (PAWN | WHITE)) return 0;
-        }
-    }
+    for (int i = r + dir; i >= 0 && i < 8; i += dir)
+        for (int dc = -1; dc <= 1; dc++)
+            if (c + dc >= 0 && c + dc < 8 && g->board[SQ(i, c + dc)] == enemy)
+                return 0;
     return 1;
 }
 
+/* Danger score around a king: enemy material nearby, weak pawn shield and open
+ * files.  Higher means more exposed. */
 static int king_safety(const Game *g, int color)
 {
-    int king_sq = -1;
-    int sq, r, c, nr, nc, i;
-    int penalty = 0;
+    static const int weight[7] = {0, 0, 15, 8, 10, 20, 0};
     int king = KING | (color ? BLACK : WHITE);
-    int enemy = color ? WHITE : BLACK;
+    int enemy_color = color ? WHITE : BLACK;
+    int king_sq = -1, sq;
 
     for (sq = 0; sq < 64; sq++)
         if (g->board[sq] == king) { king_sq = sq; break; }
-    if (king_sq < 0) return 0;
+    if (king_sq < 0)
+        return 0;
 
-    r = ROW(king_sq); c = COL(king_sq);
+    int r = ROW(king_sq), c = COL(king_sq);
+    int penalty = 0;
 
-    static const int knight_dr[] = {-2,-2,-1,-1, 1, 1, 2, 2};
-    static const int knight_dc[] = {-1, 1,-2, 2,-2, 2,-1, 1};
+    for (int nr = r - 2; nr <= r + 2; nr++)
+        for (int nc = c - 2; nc <= c + 2; nc++)
+            if (in_bounds(nr, nc) && PIECE_COLOR(g->board[SQ(nr, nc)]) == enemy_color)
+                penalty += weight[PIECE_TYPE(g->board[SQ(nr, nc)])];
 
-    for (nr = r - 2; nr <= r + 2; nr++) {
-        for (nc = c - 2; nc <= c + 2; nc++) {
-            if (!in_bounds(nr, nc)) continue;
-            int p = g->board[SQ(nr, nc)];
-            if (IS_EMPTY(p) || PIECE_COLOR(p) != (enemy ? BLACK : WHITE)) continue;
-            int pt = PIECE_TYPE(p);
-            int dist = abs_val(nr - r) + abs_val(nc - c);
-            if (pt == QUEEN) penalty += (dist <= 2) ? 20 : 10;
-            else if (pt == ROOK) penalty += (dist <= 2) ? 10 : 5;
-            else if (pt == BISHOP) penalty += (dist <= 2) ? 8 : 4;
-            else if (pt == KNIGHT) penalty += (dist <= 1) ? 15 : 5;
-        }
-    }
+    int shield_row = r + (color ? 1 : -1);
+    for (int nc = c - 1; nc <= c + 1; nc++)
+        if (in_bounds(shield_row, nc) &&
+            g->board[SQ(shield_row, nc)] == (PAWN | (color ? BLACK : WHITE)))
+            penalty -= 8;
 
-    for (i = 0; i < 8; i++) {
-        nr = r + knight_dr[i]; nc = c + knight_dc[i];
-        if (in_bounds(nr, nc)) {
-            int p = g->board[SQ(nr, nc)];
-            if (!IS_EMPTY(p) && PIECE_TYPE(p) == KNIGHT &&
-                PIECE_COLOR(p) == (enemy ? BLACK : WHITE)) {
-                penalty += 15;
-            }
-        }
-    }
-
-    int pawn_dir = color ? -1 : 1;
-    int shield_count = 0;
-    for (nc = c - 1; nc <= c + 1; nc++) {
-        if (!in_bounds(r + pawn_dir, nc)) continue;
-        int p = g->board[SQ(r + pawn_dir, nc)];
-        if (p == (PAWN | (color ? BLACK : WHITE))) shield_count++;
-    }
-    penalty -= shield_count * 8;
-
-    int open_files_near = 0;
-    for (nc = c - 1; nc <= c + 1; nc++) {
-        if (!in_bounds(0, nc)) continue;
-        if (!has_pawn_on_file(g, color, nc)) open_files_near++;
-    }
-    penalty += open_files_near * 10;
+    for (int nc = c - 1; nc <= c + 1; nc++)
+        if (nc >= 0 && nc < 8 && !has_pawn_on_file(g, color, nc))
+            penalty += 10;
 
     return penalty;
+}
+
+/* One pseudo-legal pass per side gives both a mobility count and a bonus for
+ * pawns/minors attacking something more valuable.  Scores are White-positive. */
+static void compute_mobility_threats(const Game *g, int *mobility, int *threats)
+{
+    static const int value[7] = {0, VAL_PAWN, VAL_KNIGHT, VAL_BISHOP, VAL_ROOK, VAL_QUEEN, VAL_KING};
+    Move moves[MAX_MOVES];
+    Game probe;
+    int moves_for[2], threats_for[2];
+
+    copy_position(&probe, g);
+    for (int side = 0; side < 2; side++) {
+        int color = side == 0 ? WHITE : BLACK;
+        probe.side = color;
+        int count = gen_pseudo_legal(&probe, moves);
+        moves_for[side] = count;
+        threats_for[side] = 0;
+        for (int i = 0; i < count; i++)
+            if (!IS_EMPTY(moves[i].captured) &&
+                value[PIECE_TYPE(moves[i].captured)] > value[PIECE_TYPE(moves[i].piece)])
+                threats_for[side]++;
+    }
+
+    *mobility = (moves_for[0] - moves_for[1]) * 3;
+    *threats = (threats_for[0] - threats_for[1]) * 10;
 }
 
 static int evaluate(const Game *g)
@@ -1044,7 +830,6 @@ static int evaluate(const Game *g)
     int sq, p, pt, c;
     int white_pawns_on_file[8] = {0};
     int black_pawns_on_file[8] = {0};
-    int white_pawn_count = 0, black_pawn_count = 0;
 
     eval_material = 0;
     eval_position = 0;
@@ -1065,8 +850,8 @@ static int evaluate(const Game *g)
         case PAWN:
             eval_material += sign * VAL_PAWN;
             eval_position += sign * (c == 0 ? pst_pawn[sq] : pst_pawn[sq ^ 56]);
-            if (c == 0) { white_pawns_on_file[COL(sq)]++; white_pawn_count++; }
-            else { black_pawns_on_file[COL(sq)]++; black_pawn_count++; }
+            if (c == 0) white_pawns_on_file[COL(sq)]++;
+            else black_pawns_on_file[COL(sq)]++;
             break;
         case KNIGHT:
             eval_material += sign * VAL_KNIGHT;
@@ -1097,27 +882,17 @@ static int evaluate(const Game *g)
             if (IS_EMPTY(p) || PIECE_TYPE(p) != PAWN) continue;
             c = IS_WHITE(p) ? 0 : 1;
             int file = COL(sq);
+            const int *pawns = c == 0 ? white_pawns_on_file : black_pawns_on_file;
+            int sign = c == 0 ? 1 : -1;
+            int neighbours = (file > 0 && pawns[file - 1]) +
+                             (file < 7 && pawns[file + 1]);
 
-            if (c == 0) {
-                if (white_pawns_on_file[file] > 1) eval_pawn_structure -= 15;
-                int left_ok = (file > 0) ? has_pawn_on_file(g, 0, file - 1) : 0;
-                int right_ok = (file < 7) ? has_pawn_on_file(g, 0, file + 1) : 0;
-                if (!left_ok && !right_ok) eval_pawn_structure -= 20;
-                else if (!left_ok || !right_ok) eval_pawn_structure -= 8;
-                if (is_passed_pawn(g, sq, 0)) {
-                    int adv = ROW(sq);
-                    eval_pawn_structure += 10 + adv * adv * 5;
-                }
-            } else {
-                if (black_pawns_on_file[file] > 1) eval_pawn_structure += 15;
-                int left_ok = (file > 0) ? has_pawn_on_file(g, 1, file - 1) : 0;
-                int right_ok = (file < 7) ? has_pawn_on_file(g, 1, file + 1) : 0;
-                if (!left_ok && !right_ok) eval_pawn_structure += 20;
-                else if (!left_ok || !right_ok) eval_pawn_structure += 8;
-                if (is_passed_pawn(g, sq, 1)) {
-                    int adv = 7 - ROW(sq);
-                    eval_pawn_structure -= 10 + adv * adv * 5;
-                }
+            if (pawns[file] > 1) eval_pawn_structure -= sign * 15;
+            if (neighbours == 0) eval_pawn_structure -= sign * 20;
+            else if (neighbours == 1) eval_pawn_structure -= sign * 8;
+            if (is_passed_pawn(g, sq, c)) {
+                int adv = c == 0 ? ROW(sq) : 7 - ROW(sq);
+                eval_pawn_structure += sign * (10 + adv * adv * 5);
             }
         }
         score += eval_pawn_structure;
@@ -1129,8 +904,8 @@ static int evaluate(const Game *g)
     }
 
     if (g_difficulty >= DIFF_HARD) {
-        int center_bonus_arr[4] = {3, 5, 5, 3};
-        static const int center_sq_arr[4][2] = {{3,3},{3,4},{4,3},{4,4}};
+        static const int center_bonus[4] = {3, 5, 5, 3};
+        static const int center_sq[4][2] = {{3,3},{3,4},{4,3},{4,4}};
         for (sq = 0; sq < 64; sq++) {
             p = g->board[sq];
             if (IS_EMPTY(p)) continue;
@@ -1138,8 +913,8 @@ static int evaluate(const Game *g)
             int sign = c == 0 ? 1 : -1;
             int r = ROW(sq), col = COL(sq);
             for (int k = 0; k < 4; k++) {
-                if (r == center_sq_arr[k][0] && col == center_sq_arr[k][1]) {
-                    eval_center += sign * center_bonus_arr[k];
+                if (r == center_sq[k][0] && col == center_sq[k][1]) {
+                    eval_center += sign * center_bonus[k];
                     break;
                 }
             }
@@ -1148,83 +923,13 @@ static int evaluate(const Game *g)
     }
 
     {
-        Move moves[MAX_MOVES];
-        int mobility;
-        mobility = gen_legal(g, moves);
-        eval_mobility = (g->side == WHITE ? 1 : -1) * mobility * 3;
-        Game copy = *g;
-        copy.side = (g->side == WHITE) ? BLACK : WHITE;
-        mobility = gen_legal(&copy, moves);
-        eval_mobility += (g->side == WHITE ? -1 : 1) * mobility * 3;
+        int mobility, threats;
+        compute_mobility_threats(g, &mobility, &threats);
+        eval_mobility = mobility;
+        eval_threats = threats;
         score += eval_mobility;
-    }
-
-    if (g_difficulty >= DIFF_HARD) {
-        for (sq = 0; sq < 64; sq++) {
-            p = g->board[sq];
-            if (IS_EMPTY(p)) continue;
-            pt = PIECE_TYPE(p);
-            c = IS_WHITE(p) ? 0 : 1;
-            int sign = c == 0 ? 1 : -1;
-            int r = ROW(sq), col = COL(sq);
-            int dr, dc, nr, nc, i;
-
-            if (pt == PAWN) {
-                int pawn_dir = c == 0 ? -1 : 1;
-                for (dc = -1; dc <= 1; dc += 2) {
-                    nr = r + pawn_dir; nc = col + dc;
-                    if (!in_bounds(nr, nc)) continue;
-                    int target = g->board[SQ(nr, nc)];
-                    if (!IS_EMPTY(target) && PIECE_COLOR(target) != (c == 0 ? WHITE : BLACK)) {
-                        int tp = PIECE_TYPE(target);
-                        if (tp == KNIGHT || tp == BISHOP) eval_threats += sign * 15;
-                        else if (tp == ROOK) eval_threats += sign * 25;
-                        else if (tp == QUEEN) eval_threats += sign * 40;
-                    }
-                }
-            }
-            else if (pt == KNIGHT || pt == BISHOP) {
-                int attack_val = (pt == KNIGHT) ? VAL_KNIGHT : VAL_BISHOP;
-                static const int kdr[] = {-2,-2,-1,-1,1,1,2,2};
-                static const int kdc[] = {-1,1,-2,2,-2,2,-1,1};
-                static const int bdr[] = {-1,-1,1,1};
-                static const int bdc[] = {-1,1,-1,1};
-                if (pt == KNIGHT) {
-                    for (i = 0; i < 8; i++) {
-                        nr = r + kdr[i]; nc = col + kdc[i];
-                        if (!in_bounds(nr, nc)) continue;
-                        int target = g->board[SQ(nr, nc)];
-                        if (!IS_EMPTY(target) && PIECE_COLOR(target) != (c == 0 ? WHITE : BLACK)) {
-                            int tp = PIECE_TYPE(target);
-                            int tval = (tp == PAWN) ? VAL_PAWN : (tp == KNIGHT) ? VAL_KNIGHT :
-                                       (tp == BISHOP) ? VAL_BISHOP : (tp == ROOK) ? VAL_ROOK :
-                                       (tp == QUEEN) ? VAL_QUEEN : 0;
-                            if (tval > attack_val) eval_threats += sign * 10;
-                        }
-                    }
-                } else {
-                    for (i = 0; i < 4; i++) {
-                        dr = bdr[i]; dc = bdc[i];
-                        nr = r + dr; nc = col + dc;
-                        while (in_bounds(nr, nc)) {
-                            int target = g->board[SQ(nr, nc)];
-                            if (!IS_EMPTY(target)) {
-                                if (PIECE_COLOR(target) != (c == 0 ? WHITE : BLACK)) {
-                                    int tp = PIECE_TYPE(target);
-                                    int tval = (tp == PAWN) ? VAL_PAWN : (tp == KNIGHT) ? VAL_KNIGHT :
-                                               (tp == BISHOP) ? VAL_BISHOP : (tp == ROOK) ? VAL_ROOK :
-                                               (tp == QUEEN) ? VAL_QUEEN : 0;
-                                    if (tval > attack_val) eval_threats += sign * 10;
-                                }
-                                break;
-                            }
-                            nr += dr; nc += dc;
-                        }
-                    }
-                }
-            }
-        }
-        score += eval_threats;
+        if (g_difficulty >= DIFF_HARD)
+            score += eval_threats;
     }
 
     return score;
@@ -1237,38 +942,35 @@ static int evaluate(const Game *g)
 /* MVV-LVA ordering */
 static int mvv_lva(const Move *m)
 {
-    static const int piece_value[] = {0, 1, 3, 3, 5, 9, 100};
+    static const int value[] = {0, 1, 3, 3, 5, 9, 100};
     int victim = PIECE_TYPE(m->captured);
-    int attacker = PIECE_TYPE(m->piece);
-    if (victim == 0) return 0;
-    return piece_value[victim] * 10 - piece_value[attacker];
+    if (victim == 0)
+        return 0;
+    return value[victim] * 10 - value[PIECE_TYPE(m->piece)];
 }
 
+/* Sort by a cheap static score: TT move, captures (MVV-LVA), promotions, then
+ * centralisation. */
 static void order_moves(Move *moves, int count, int tt_move)
 {
-    int i;
     int scores[MAX_MOVES];
 
-    for (i = 0; i < count; i++) {
-        scores[i] = 0;
-        if (moves[i].from == (tt_move & 0x3F) && moves[i].to == ((tt_move >> 6) & 0x3F))
+    for (int i = 0; i < count; i++) {
+        int r = ROW(moves[i].to), c = COL(moves[i].to);
+        scores[i] = mvv_lva(&moves[i]) * 10;
+        if (tt_move >= 0 &&
+            moves[i].from == move_key_from(tt_move) && moves[i].to == move_key_to(tt_move))
             scores[i] += 1000000;
-        scores[i] += mvv_lva(&moves[i]) * 10;
         if (moves[i].promoted != EMPTY) scores[i] += 500;
         if (moves[i].castle) scores[i] += 200;
-        /* Center control */
-        {
-            int r = ROW(moves[i].to), c = COL(moves[i].to);
-            if (r >= 2 && r <= 5 && c >= 2 && c <= 5) scores[i] += 10;
-            if (r >= 3 && r <= 4 && c >= 3 && c <= 4) scores[i] += 20;
-        }
+        if (r >= 2 && r <= 5 && c >= 2 && c <= 5) scores[i] += 10;
     }
 
-    /* Simple selection sort by score */
-    for (i = 0; i < count - 1; i++) {
-        int j, best = i;
-        for (j = i + 1; j < count; j++)
-            if (scores[j] > scores[best]) best = j;
+    for (int i = 0; i + 1 < count; i++) {
+        int best = i;
+        for (int j = i + 1; j < count; j++)
+            if (scores[j] > scores[best])
+                best = j;
         if (best != i) {
             Move tm = moves[i]; moves[i] = moves[best]; moves[best] = tm;
             int ts = scores[i]; scores[i] = scores[best]; scores[best] = ts;
@@ -1276,184 +978,138 @@ static void order_moves(Move *moves, int count, int tt_move)
     }
 }
 
+/* Search only captures after the main search horizon, so the evaluation is not
+ * fooled by a pending recapture. */
 static int quiesce(Game *g, int alpha, int beta, int depth)
 {
-    int stand_pat = evaluate(g);
-    Move moves[MAX_MOVES];
-    int count, i;
-
-    if (stand_pat >= beta) return beta;
-    if (alpha < stand_pat) alpha = stand_pat;
+    int stand = evaluate(g);
+    if (stand >= beta) return beta;
+    if (stand > alpha) alpha = stand;
     if (depth <= 0) return alpha;
 
-    count = gen_legal(g, moves);
+    Move moves[MAX_MOVES];
+    int count = gen_legal(g, moves);
+    order_moves(moves, count, -1);
 
-    /* Only consider captures in quiescence */
-    for (i = 0; i < count; i++) {
-        if (IS_EMPTY(moves[i].captured)) continue;
-
+    for (int i = 0; i < count; i++) {
+        if (IS_EMPTY(moves[i].captured))
+            continue;
         make_move(g, &moves[i]);
         int score = -quiesce(g, -beta, -alpha, depth - 1);
         unmake_move(g);
-
         if (score >= beta) return beta;
         if (score > alpha) alpha = score;
     }
-
     return alpha;
 }
 
-static int alpha_beta(Game *g, int depth, int alpha, int beta, uint64_t key, int do_null)
+static int alpha_beta(Game *g, int depth, int alpha, int beta, int do_null)
 {
     Move moves[MAX_MOVES];
-    int count, i;
-    int score;
-    int tt_move = -1;
+    int count = gen_legal(g, moves);
 
-    /* Terminal conditions */
-    count = gen_legal(g, moves);
-    if (count == 0) {
-        if (in_check(g, g->side))
-            return -INF - depth; /* checkmate (prefer faster mate) */
-        return 0; /* stalemate */
-    }
+    if (count == 0)
+        return in_check(g, g->side) ? -INF - depth : 0; /* mate / stalemate */
+    if (g->halfmove_clock >= 100)
+        return 0; /* 50-move rule */
 
-    if (g->halfmove_clock >= 100) return 0; /* 50-move rule */
+    int tt_move = -1, tt_score;
+    if (tt_probe(g->hash, depth, alpha, beta, &tt_score, &tt_move))
+        return tt_score;
 
-    /* Mate distance pruning */
-    if (alpha < -INF) alpha = -INF;
-    if (beta > INF) beta = INF;
-    if (alpha >= beta) return alpha;
-
-    /* TT probe */
-    if (tt_probe(key, depth, alpha, beta, &score, &tt_move)) {
-        return score;
-    }
-
-    if (depth <= 0) {
+    if (depth <= 0)
         return quiesce(g, alpha, beta, 6);
-    }
 
-    /* Null move pruning (skip if in check) */
+    /* Null move: if giving the opponent a free move still fails high, assume a
+     * real move would too.  The key is patched by hand since no move is made. */
     if (do_null && depth >= 3 && !in_check(g, g->side)) {
-        int R = 3;
-        Game copy = *g;
-        copy.ep_square = -1;
-        copy.side = (copy.side == WHITE) ? BLACK : WHITE;
-        uint64_t nkey = compute_hash(&copy);
-        score = -alpha_beta(&copy, depth - R - 1, -beta, -beta + 1, nkey, 0);
-        if (score >= beta) return beta;
-    }
-
-    /* IID if no TT move */
-    if (tt_move < 0 && depth >= 3) {
-        alpha_beta(g, depth - 2, alpha, beta, key, do_null);
-        tt_probe(key, depth - 2, alpha, beta, &score, &tt_move);
+        Game child;
+        copy_position(&child, g);
+        child.side = (g->side == WHITE) ? BLACK : WHITE;
+        child.hash = g->hash ^ zobrist_side;
+        if (g->ep_square >= 0)
+            child.hash ^= zobrist_ep[COL(g->ep_square)];
+        child.ep_square = -1;
+        if (-alpha_beta(&child, depth - 4, -beta, -beta + 1, 0) >= beta)
+            return beta;
     }
 
     order_moves(moves, count, tt_move);
 
-    int best_score = -INF - 10;
-    int best_move = -1;
-    int flag = 2; /* upper bound */
-
-    for (i = 0; i < count; i++) {
+    int best = -INF - 1, best_move = -1, flag = TT_UPPER;
+    for (int i = 0; i < count; i++) {
         make_move(g, &moves[i]);
-        uint64_t nkey = key ^ zobrist_side;
-        if (g->ep_square >= 0)
-            nkey ^= zobrist_ep[COL(g->ep_square)];
-
-        /* Late move reduction */
-        int new_depth = depth - 1;
-        if (i >= 4 && depth >= 3 &&
-            IS_EMPTY(moves[i].captured) && moves[i].promoted == EMPTY) {
-            new_depth = depth - 2;
-        }
-
+        int score;
         if (i == 0) {
-            score = -alpha_beta(g, new_depth, -beta, -alpha, nkey, 1);
+            score = -alpha_beta(g, depth - 1, -beta, -alpha, 1);
         } else {
-            /* PVS */
-            score = -alpha_beta(g, new_depth, -alpha - 1, -alpha, nkey, 1);
+            /* PVS: verify the first move of every later branch with a null
+             * window, re-searching only when it beats alpha. */
+            score = -alpha_beta(g, depth - 1, -alpha - 1, -alpha, 1);
             if (score > alpha && score < beta)
-                score = -alpha_beta(g, new_depth, -beta, -alpha, nkey, 1);
+                score = -alpha_beta(g, depth - 1, -beta, -alpha, 1);
         }
-
         unmake_move(g);
 
-        if (score > best_score) {
-            best_score = score;
-            best_move = moves[i].from | (moves[i].to << 6);
+        if (score > best) {
+            best = score;
+            best_move = move_key(moves[i].from, moves[i].to);
         }
         if (score > alpha) {
             alpha = score;
-            flag = 0; /* exact */
+            flag = TT_EXACT;
         }
         if (alpha >= beta) {
-            flag = 1; /* lower bound */
+            flag = TT_LOWER;
             break;
         }
     }
 
-    tt_store(key, depth, best_score, flag, best_move);
-    return best_score;
+    tt_store(g->hash, depth, best, flag, best_move);
+    return best;
 }
 
-/* Find best move for the AI */
+/* Iterative deepening: search depth 1, 2, ... keeping the best root move so a
+ * later iteration can order it first (and so a timeout would still have a
+ * usable result). */
 static Move find_best_move(Game *g, int max_depth)
 {
     Move moves[MAX_MOVES];
-    int count, i, d;
-    Move best = {0};
-    uint64_t key = compute_hash(g);
+    int count = gen_legal(g, moves);
 
-    count = gen_legal(g, moves);
     if (count == 0) {
-        best.from = -1;
-        best.to = -1;
-        return best;
+        Move none = {0};
+        none.from = none.to = -1;
+        return none;
     }
-    if (count == 1) {
-        return moves[0]; /* only one legal move */
-    }
+    if (count == 1)
+        return moves[0];
 
-    /* Iterative deepening */
-    for (d = 1; d <= max_depth; d++) {
-        int score;
-        int local_best = -1;
-        int local_best_score = -INF - 1;
-
-        /* TT move for root ordering */
-        int tt_move = -1;
-        tt_probe(key, d, -INF, INF, &score, &tt_move);
+    Move best = moves[0];
+    for (int d = 1; d <= max_depth; d++) {
+        int tt_move = -1, score;
+        tt_probe(g->hash, d, -INF, INF, &score, &tt_move);
         order_moves(moves, count, tt_move);
 
-        for (i = 0; i < count; i++) {
+        int best_score = -INF - 1, best_idx = -1;
+        for (int i = 0; i < count; i++) {
             make_move(g, &moves[i]);
-            uint64_t nkey = key ^ zobrist_side;
-
             if (i == 0) {
-                score = -alpha_beta(g, d - 1, -INF, -local_best_score, nkey, 1);
+                score = -alpha_beta(g, d - 1, -INF, -best_score, 1);
             } else {
-                score = -alpha_beta(g, d - 1, -local_best_score - 1, -local_best_score, nkey, 1);
-                if (score > local_best_score) {
-                    score = -alpha_beta(g, d - 1, -INF, -local_best_score, nkey, 1);
-                }
+                score = -alpha_beta(g, d - 1, -best_score - 1, -best_score, 1);
+                if (score > best_score)
+                    score = -alpha_beta(g, d - 1, -INF, -best_score, 1);
             }
-
             unmake_move(g);
-
-            if (score > local_best_score) {
-                local_best_score = score;
-                local_best = i;
+            if (score > best_score) {
+                best_score = score;
+                best_idx = i;
             }
         }
-
-        if (local_best >= 0) {
-            best = moves[local_best];
-        }
+        if (best_idx >= 0)
+            best = moves[best_idx];
     }
-
     return best;
 }
 
@@ -1503,21 +1159,27 @@ static void print_board(const Game *g, int last_from, int last_to, int flip)
                 is_king_check = 1;
             }
 
-            /* Background color */
+            /* Background color.  Both square colours are kept light so that
+             * pieces drawn in dark foreground colours stay readable. */
             if (is_king_check)
                 printf("\033[41m"); /* red for check */
             else if (is_last)
                 printf("\033[43m"); /* yellow for last move */
             else if (is_light)
-                printf("\033[47m"); /* light background */
+                printf("\033[47m"); /* white light square */
             else
-                printf("\033[44m"); /* dark background */
+                printf("\033[46m"); /* cyan dark square */
 
-            /* Foreground color */
-            if (!IS_EMPTY(p) && IS_WHITE(p))
-                printf("\033[97m"); /* bright white */
+            /* Foreground color.  The old scheme drew white pieces bright white
+             * on a white square, which made them invisible.  Use two dark
+             * colours against the light squares instead, and bright white for
+             * the checked king on its red square. */
+            if (is_king_check)
+                printf("\033[1;97m");
+            else if (!IS_EMPTY(p) && IS_WHITE(p))
+                printf("\033[1;31m"); /* white pieces: bold red */
             else if (!IS_EMPTY(p))
-                printf("\033[30m"); /* black */
+                printf("\033[1;30m"); /* black pieces: bold black */
 
             printf(" %s ", piece_str(p));
             printf("\033[0m");
@@ -1653,8 +1315,6 @@ static int parse_move(const char *input, Game *g, Move *out)
 
     return -1;
 }
-
-static int parse_move(const char *input, Game *g, Move *out);
 
 /* ======================================================================
  * Mouse protocol (SGR xterm)
@@ -1997,9 +1657,14 @@ static void print_material_balance(const Game *g)
 static void record_move(Game *g, const Move *m)
 {
     int pt = PIECE_TYPE(m->piece);
-    char *dest = g->move_notation[g->notation_count];
+    char *dest;
     int idx = 0;
     char cols[] = "abcdefgh";
+
+    /* Defensive: never index past the notation array. */
+    if (g->notation_count < 0 || g->notation_count >= MAX_UNDO)
+        return;
+    dest = g->move_notation[g->notation_count];
 
     if (m->castle == 1) { dest[idx++] = 'O'; dest[idx++] = '-'; dest[idx++] = 'O'; }
     else if (m->castle == 2) {
@@ -2268,6 +1933,8 @@ int main(void)
             if (game.history_len >= 2) {
                 unmake_move(&game);
                 unmake_move(&game);
+                if (game.notation_count >= 2) game.notation_count -= 2;
+                else game.notation_count = 0;
                 last_from = -1;
                 last_to = -1;
                 selected_sq = -1;
