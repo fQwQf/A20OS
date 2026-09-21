@@ -7,7 +7,6 @@
 name = "xfce-x86_64"
 description = "XFCE Wayland/labwc desktop via apk world 'xfce', KVM-accelerated on x86_64"
 arch = "x86_64"
-extra_qemu = ["-device", "intel-hda", "-device", "hda-duplex"]
 
 [machine]
 # smp>1 (CONFIG_SMP build) currently hangs during XFCE session bring-up on
@@ -15,6 +14,7 @@ extra_qemu = ["-device", "intel-hda", "-device", "hda-duplex"]
 # verified-working configuration until that scheduler bug is fixed.
 smp = 1
 memory = "4G"
+extra_qemu = ["-device", "intel-hda", "-device", "hda-duplex"]
 
 [gui]
 enabled = true
