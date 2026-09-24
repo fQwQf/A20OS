@@ -1,5 +1,6 @@
 #include "syscall_impl.h"
 #include "core/errno.h"
+#include "drivers/block/loop.h"
 #include "fs/mount_setup.h"
 
 #ifdef CONFIG_SWAP
@@ -7,7 +8,23 @@
 static block_dev_t *swap_path_to_block_dev(const char *path)
 {
     static const char prefix[] = "/dev/vd";
+    static const char loop_prefix[] = "/dev/loop";
     const char *p = path;
+
+    if (strncmp(p, loop_prefix, sizeof(loop_prefix) - 1) == 0) {
+        p += sizeof(loop_prefix) - 1;
+        if (*p < '0' || *p > '9')
+            return NULL;
+        int index = 0;
+        while (*p >= '0' && *p <= '9') {
+            if (index > 214748364)
+                return NULL;
+            index = index * 10 + (*p++ - '0');
+        }
+        if (*p != '\0')
+            return NULL;
+        return loop_block_device(index);
+    }
 
     if (strncmp(p, prefix, sizeof(prefix) - 1) != 0)
         return NULL;
