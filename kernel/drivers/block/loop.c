@@ -9,6 +9,7 @@
 #include "fs/file.h"
 #include "core/errno.h"
 #include "mm/mm.h"
+#include "drivers/block/loop.h"
 
 #define MAX_LOOP_DEVS 8
 #define LOOP_SECTOR_SIZE 512
@@ -265,4 +266,50 @@ int loop_control_ioctl(unsigned long req, void *arg) {
 
 int loop_dev_count(void) {
     return MAX_LOOP_DEVS;
+}
+
+/* Sector-addressed block_dev_t view used by the swap subsystem.  The backing
+ * file is looked up per call through loop_dev_read/write, so rebinding the
+ * loop device (LOOP_CLR_FD + LOOP_SET_FD) never leaves a stale vfile here. */
+typedef struct {
+    block_dev_t block;
+    int         idx;
+} loop_block_t;
+
+static loop_block_t g_loop_block[MAX_LOOP_DEVS];
+
+static int loop_block_read_sector(block_dev_t *block, uint64_t lba, void *buf,
+                                  size_t count) {
+    loop_block_t *lb = (loop_block_t *)block->priv;
+    size_t bytes = count * LOOP_SECTOR_SIZE;
+    int r = loop_dev_read(lb->idx, buf, bytes, lba * LOOP_SECTOR_SIZE);
+    return (r >= 0 && (size_t)r == bytes) ? 0 : -EIO;
+}
+
+static int loop_block_write_sector(block_dev_t *block, uint64_t lba,
+                                   const void *buf, size_t count) {
+    loop_block_t *lb = (loop_block_t *)block->priv;
+    size_t bytes = count * LOOP_SECTOR_SIZE;
+    int r = loop_dev_write(lb->idx, buf, bytes, lba * LOOP_SECTOR_SIZE);
+    return (r >= 0 && (size_t)r == bytes) ? 0 : -EIO;
+}
+
+block_dev_t *loop_block_device(int idx) {
+    if (idx < 0 || idx >= MAX_LOOP_DEVS)
+        return NULL;
+    /* LOCK_ORDER: acquire the loop lock only to snapshot binding state. */
+    uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
+    int in_use = g_loop[idx].in_use;
+    uint64_t bsz = g_loop[idx].backing_size;
+    spin_unlock_irqrestore(&g_loop[idx].lock, flags);
+    if (!in_use || !bsz)
+        return NULL;
+    loop_block_t *lb = &g_loop_block[idx];
+    lb->idx = idx;
+    lb->block.read_sector = loop_block_read_sector;
+    lb->block.write_sector = loop_block_write_sector;
+    lb->block.capacity = bsz / LOOP_SECTOR_SIZE;
+    lb->block.sector_size = LOOP_SECTOR_SIZE;
+    lb->block.priv = lb;
+    return &lb->block;
 }

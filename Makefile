@@ -51,7 +51,11 @@ STORAGE_READ_ONLY ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
 SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
 PROFILE ?= full
-CONFIG_SWAP ?= n
+# Swap is on by default; the NOMMU override below forces it back off where
+# there is no MMU to demand-page from.  A toggle is rebuild-safe without a
+# BUILD_VARIANT component because BUILD_FLAGS_STAMP in tools/targets-images.mk
+# keys on $(CFLAGS), which gains -DCONFIG_SWAP when this flips.
+CONFIG_SWAP ?= y
 
 # STM32-specific configuration. These values are inert for other boards.
 STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
@@ -260,6 +264,9 @@ SMOKE_TIMEOUT_MM_ST ?= 45s
 # oom_stress exhausts a 32 MiB cgroup limit page by page under TCG; the fault
 # storm plus boot time needs more than the default window.
 SMOKE_TIMEOUT_OOM ?= 60s
+# swap_test formats and enables a loop-backed swap device, then touches anon
+# memory; 16 MiB of ramfs backing writes plus boot fits well under this.
+SMOKE_TIMEOUT_SWAP ?= 45s
 SMOKE_TIMEOUT_MM_FORK_EXEC ?= 120s
 # smoke-native-deepen runs several blocking waits (FS event + socket event) plus
 # a user-space pager round trip under TCG; it needs more than the 20s default.
