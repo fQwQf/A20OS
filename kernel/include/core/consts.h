@@ -75,6 +75,10 @@
 #define USER_TLS_BASE     0x3E000000UL
 #define INTERP_BASE_ADDR  0x40000000UL
 
+/* 用户栈增长/随机化的下界：vDSO/vvar 固定在 0x3F7F9000-0x3F800000
+ * （见 mm/vdso_layout.h），栈 VMA 与栈增长不得越过此地板。 */
+#define USER_STACK_FLOOR  0x3F800000UL
+
 #define PIPE_BUF_SIZE 4096
 #define FIRST_USER_FD 3
 

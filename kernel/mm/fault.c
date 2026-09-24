@@ -291,6 +291,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             stack_size_limit = USER_STACK_MAX_SIZE;
         stack_size_limit = ROUND_UP(stack_size_limit, PAGE_SIZE);
         uint64_t stack_limit = t->mm->stack_top - stack_size_limit;
+        /* ASLR 把栈顶向下移动后，栈增长下限随之下降；钳制到 USER_STACK_FLOOR，
+         * 保证永不侵入下方的固定 vDSO/vvar/TLS 区（见 mm/vdso_layout.h）。 */
+        if (stack_limit < USER_STACK_FLOOR)
+            stack_limit = USER_STACK_FLOOR;
         if (page_va >= stack_limit && page_va < t->mm->stack_top) {
             pte_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
             if (pte && (*pte & PTE_V))

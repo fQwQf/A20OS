@@ -446,7 +446,7 @@ mm_struct_t *mm_create(void) {
     mm->mmap       = NULL;
     mm->brk        = 0;
     mm->start_brk  = 0;
-    mm->mmap_base  = MMAP_BASE_ADDR;
+    mm->mmap_base  = mm_aslr_mmap_base();
     mm->stack_top  = 0;
     mm->stack_bottom = 0;
     mm->total_vm   = 0;

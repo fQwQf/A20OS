@@ -26,6 +26,10 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
 
+    /* W^X：把已有映射提升为 W|X 与新映射受同一策略约束 */
+    prot = mm_wx_filter_prot(prot, "mprotect");
+    if (prot < 0) return prot;
+
     pte_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vm_prot = 0;
     if (prot & 1) vm_prot |= VM_READ;
