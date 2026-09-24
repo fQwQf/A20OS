@@ -261,7 +261,8 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
 
     uint64_t addr = shmaddr;
     if (addr == 0)
-        addr = mm_find_gap(t->mm, MMAP_BASE_ADDR, shm_size);
+        addr = mm_find_gap(t->mm, t->mm->mmap_base ? t->mm->mmap_base
+                                                   : MMAP_BASE_ADDR, shm_size);
     if (addr == 0) {
         sysv_shm_unref_attach(shmid);
         return (uint64_t)-ENOMEM;

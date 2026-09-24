@@ -123,7 +123,8 @@ static vfile_ops_t g_io_uring_ops = {
 
 static int io_uring_map_page(mm_struct_t *mm, pfn_t pfn, uint64_t *va_out)
 {
-    uint64_t addr = mm_find_gap(mm, MMAP_BASE_ADDR, PAGE_SIZE);
+    uint64_t addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base
+                                                  : MMAP_BASE_ADDR, PAGE_SIZE);
     if (addr == 0)
         return -ENOMEM;
     paddr_t pa = pfn_to_phys(pfn);

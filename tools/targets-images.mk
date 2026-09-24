@@ -182,9 +182,10 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME
 
 # lwIP lives under the kernel tree (kernel/external/lwip); the kernel compiles
 # the shared sources, objects land under $(BUILD_DIR)/external/lwip as before.
+# vendored 代码不参与内核栈金丝雀加固，保持其编译行为不变。
 $(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
