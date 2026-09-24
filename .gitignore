@@ -56,3 +56,5 @@ user/external/sbase/id
 .omo/
 # GitHub Pages 组装产物（site/build.sh 生成）
 site/_pages/
+# corpus 工具统计产物（tools/corpus/ 生成）
+docs/research/verification/corpus_stats.json
