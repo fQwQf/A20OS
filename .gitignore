@@ -52,6 +52,15 @@ user/external/sbase/id
 !kernel/core/**
 !kernel/include/core/
 !kernel/include/core/**
+# 驱动核心与 USB 核心目录同名；显式回纳（否则新文件会被静默忽略）
+!kernel/drivers/core/
+!kernel/drivers/core/**
+!kernel/include/drivers/core/
+!kernel/include/drivers/core/**
+!kernel/drivers/usb/core/
+!kernel/drivers/usb/core/**
+!kernel/external/lwip/src/core/
+!kernel/external/lwip/src/core/**
 # OpenCode work plans / session state
 .omo/
 # GitHub Pages 组装产物（site/build.sh 生成）
