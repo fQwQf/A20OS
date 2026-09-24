@@ -16,4 +16,25 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
                             uint64_t *iova, int *blocked);
 int riscv_iommu_domain_release(uint16_t devid, int owner_pid);
 
+/* Global counters for /proc/a20/iommu.  All fields are cumulative since
+ * probe, except mapped_pages (current) and the last_fault_* tuple. */
+typedef struct riscv_iommu_stats {
+    int      enabled;
+    uint64_t domains_claimed;
+    uint64_t domains_released;
+    uint64_t maps;
+    uint64_t map_failures;
+    uint64_t unmaps;
+    uint64_t mapped_pages;
+    uint64_t fault_records;  /* every FQ record consumed, any devid */
+    uint64_t faults;         /* records attributed to the user domain */
+    uint64_t blocked_events; /* times a domain was fail-closed */
+    uint16_t last_fault_devid;
+    uint32_t last_fault_cause;
+    uint64_t last_fault_iova;
+    int      last_fault_owner;
+} riscv_iommu_stats_t;
+
+void riscv_iommu_get_stats(riscv_iommu_stats_t *out);
+
 #endif

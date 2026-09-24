@@ -32,7 +32,7 @@
 | 核心受信驱动（virtio-blk/net、启动中断控制器） | 内核 | 内核 | 启动路径与数据面关键 |
 | 多样性/第三方驱动（USB 外设、GPU、WiFi、传感器、RTC） | 用户态 | 仅 RTC/scratch 盘 | 多设备通用性的核心：种类爆炸的驱动不可能全内核化 |
 | 服务监管、组件管理、命名/注册 | 用户态 | 用户态（已实现） | 纯控制面 |
-| DMA 隔离 | 动态 per-device IOMMU 强制 | RISC-V 静态 bring-up/TR_REQ 探测；用户 DMA 仍是信任模型 | 用户态驱动“真隔离”的前提，见阶段三 |
+| DMA 隔离 | 动态 per-device IOMMU 强制 | RISC-V IOMMU 动态 per-device domain + fault 消费已在 QEMU 落地（edu/uedud 样板）；覆盖面仅限 PCI 单设备，其他设备的用户 DMA 仍是信任模型 | 用户态驱动“真隔离”的前提，见阶段三 |
 
 ## 可移动边界：同一源码，双态部署
 
@@ -82,7 +82,7 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试； 无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
 
-**当前源码状态**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。`drv_env.h` 有 USER/DRVMOD/KERNEL 三后端，但活跃样板使用 USER 与 DRVMOD；virtio-input 的只读内核 probe 与用户驱动共享协议头，完整内核驱动仍是另一套实现；goldfish RTC 内核模块仍复制寄存器常量。DMA ops、连续 DMA heap和所有权 claim/release 已存在。RISC-V IOMMU 已完成 DDT/CQ/FQ bring-up 和 devid 0 静态 TR_REQ 翻译探测，但 fault 消费、动态 per-device 页表以及用户 DMA 接线未完成。因此阶段三的“完整同源双态 + 未授权 DMA 被设备实际拒绝”验收仍未完成。
+**当前源码状态**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。`drv_env.h` 有 USER/DRVMOD/KERNEL 三后端，但活跃样板使用 USER 与 DRVMOD；virtio-input 的只读内核 probe 与用户驱动共享协议头，完整内核驱动仍是另一套实现；goldfish RTC 内核模块仍复制寄存器常量。DMA ops、连续 DMA heap和所有权 claim/release 已存在。RISC-V IOMMU 侧已完成 DDT/CQ/FQ bring-up、per-device 翻译 domain 的动态 claim/map/unmap/release（SV39 二级页表，fail-closed）、fault queue 消费（匹配 devid 的 fault record 计数并上报 owner，触发即阻断设备上下文并关闭 bus mastering）以及用户态 DMA 接线（udriver claim 时建 domain，`drv_dma` 的 VMO 翻译走 IOVA）；`/proc/a20/iommu` 暴露 domain/map/fault 计数器。端到端样板是 edu PCI 设备 + `user/svc/uedud.c`（授权窗口内 DMA 成功、窗口外产生并消费 fault、release 后重新 claim 恢复），门禁为 `smoke-iommu-udriver-isolation` 与 `smoke-iommu-discovery`。仍缺：同一完整驱动源码双态部署的契约测试（DRVMOD 完整驱动仍独立实现）、fault 消费的中断驱动化（当前由 `a20_device_get_info` 拉取 FQ）、多设备并发 domain（当前单实例 `g_user_domain`）。因此阶段三的"完整同源双态"验收仍未完成，"未授权 DMA 被设备实际拒绝"子项已在 QEMU riscv-iommu-pci 上达成。
 
 ### 阶段四：服务接口 IDL 化
 

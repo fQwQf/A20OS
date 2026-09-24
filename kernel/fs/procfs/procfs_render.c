@@ -25,6 +25,7 @@
 #include "core/version.h"
 #include "net/socket.h"
 #include "net/net_config.h"
+#include "drivers/core/riscv_iommu.h"
 
 #ifdef CONFIG_BOARD_LS2K1000
 #include "platform.h"
@@ -665,6 +666,40 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_A20_DRIVER_LIFECYCLE:
         buf[0] = '\0';
         return 0;
+    case PF_A20_IOMMU: {
+        riscv_iommu_stats_t st;
+        riscv_iommu_get_stats(&st);
+        snprintf(buf, bufsz,
+            "enabled: %d\n"
+            "domains_claimed: %lu\n"
+            "domains_released: %lu\n"
+            "maps: %lu\n"
+            "map_failures: %lu\n"
+            "unmaps: %lu\n"
+            "mapped_pages: %lu\n"
+            "fault_records: %lu\n"
+            "faults: %lu\n"
+            "blocked_events: %lu\n"
+            "last_fault_devid: %u\n"
+            "last_fault_cause: %lu\n"
+            "last_fault_iova: 0x%lx\n"
+            "last_fault_owner: %d\n",
+            st.enabled,
+            (unsigned long)st.domains_claimed,
+            (unsigned long)st.domains_released,
+            (unsigned long)st.maps,
+            (unsigned long)st.map_failures,
+            (unsigned long)st.unmaps,
+            (unsigned long)st.mapped_pages,
+            (unsigned long)st.fault_records,
+            (unsigned long)st.faults,
+            (unsigned long)st.blocked_events,
+            (unsigned)st.last_fault_devid,
+            (unsigned long)st.last_fault_cause,
+            (unsigned long)st.last_fault_iova,
+            st.last_fault_owner);
+        break;
+    }
     case PF_SYSRQ_TRIGGER:
         return snprintf(buf, bufsz,
                         "sysrq commands: c (crash — deliberate kernel panic)\n");
