@@ -40,7 +40,8 @@ uint64_t a20_vmar_find_free(uint64_t hint, uint64_t length)
             return hint;
     }
 
-    vaddr_t addr = mm_find_gap(cur->mm, MMAP_BASE_ADDR, length);
+    vaddr_t addr = mm_find_gap(cur->mm, cur->mm->mmap_base ? cur->mm->mmap_base
+                                                           : MMAP_BASE_ADDR, length);
     if (addr == 0 || addr + length < addr || addr + length > USER_VA_LIMIT)
         return 0;
     return addr;

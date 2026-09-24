@@ -540,6 +540,13 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
+# 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
+# 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
+# tools/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
+CONFIG_STACK_PROTECTOR ?= 1
+ifeq ($(filter 1,$(CONFIG_STACK_PROTECTOR)),1)
+CFLAGS += -fstack-protector-strong -DCONFIG_STACK_PROTECTOR=1
+endif
 ifeq ($(filter 1,$(CONFIG_UBSAN)),1)
 # Undefined Behavior Sanitizer: kernel/core/ubsan.c provides the handlers.
 # alignment/bounds-strict are excluded to match the packed-struct and
@@ -738,6 +745,7 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/core/sync.c \
              $(KERNEL_DIR)/core/klog.c \
              $(KERNEL_DIR)/core/timekeeping.c \
+             $(KERNEL_DIR)/core/stack_protector.c \
              $(KERNEL_DIR)/proc/sched.c \
              $(KERNEL_DIR)/proc/park.c \
              $(KERNEL_DIR)/proc/timer_heap.c \
