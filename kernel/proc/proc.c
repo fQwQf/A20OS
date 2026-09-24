@@ -598,7 +598,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         mm->pgdir       = pgdir;
         mm->brk         = brk;
         mm->start_brk   = brk;
-        mm->mmap_base   = MMAP_BASE_ADDR;
+        mm->mmap_base   = mm_aslr_mmap_base();
         mm->stack_top   = stack_top ? stack_top : sp;
         mm->stack_bottom = mm->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
         mm->total_vm    = total_vm;

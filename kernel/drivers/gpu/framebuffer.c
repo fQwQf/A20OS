@@ -156,7 +156,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
             addr = 0;
     }
     if (addr == 0)
-        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
         spin_unlock(&mm->lock);
         return -ENOMEM;

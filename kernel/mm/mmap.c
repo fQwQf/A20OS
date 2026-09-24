@@ -92,6 +92,10 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (len == 0) return (vaddr_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (vaddr_t)-ENOMEM;
 
+    /* W^X：MAP_FIXED 覆盖现有 VMA 也走这里，同样受策略约束 */
+    prot = mm_wx_filter_prot(prot, "mmap");
+    if (prot < 0) return (vaddr_t)prot;
+
     pte_t ptef = mm_prot_to_pte_flags(prot);
     uint64_t vmf = VM_ANON;
     if (prot & 1) vmf |= VM_READ;
@@ -136,7 +140,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #else
     // 查找合适的虚拟地址
     if (addr == 0)
-        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
     if (addr == 0) return (vaddr_t)-ENOMEM;
     if (addr + len < addr || addr + len > USER_VA_LIMIT)
@@ -192,6 +196,11 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (len > USER_VA_LIMIT)
         return (vaddr_t)-ENOMEM;
 
+    /* W^X：在引用 fd 之前过滤，避免无谓的引用计数抖动 */
+    prot = mm_wx_filter_prot(prot, "mmap_file");
+    if (prot < 0)
+        return (vaddr_t)prot;
+
     int rr = vfs_ref_fd(file_fd);
     if (rr < 0)
         return (vaddr_t)rr;
@@ -229,7 +238,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 #else
     if (addr == 0)
-        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
         vfs_close(file_fd);
@@ -316,6 +325,11 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (vmo_offset & (PAGE_SIZE - 1))
         return (vaddr_t)-EINVAL;
 
+    /* W^X：Native VMO 映射与 Linux mmap 走同一策略 */
+    prot = mm_wx_filter_prot(prot, "mmap_vmo");
+    if (prot < 0)
+        return (vaddr_t)prot;
+
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL))
             return (vaddr_t)-EEXIST;
@@ -337,7 +351,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     return (vaddr_t)-EOPNOTSUPP;
 #else
     if (addr == 0)
-        addr = mm_find_gap(mm, MMAP_BASE_ADDR, len);
+        addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT)
         return (vaddr_t)-ENOMEM;

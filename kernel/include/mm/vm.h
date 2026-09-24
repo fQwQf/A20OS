@@ -279,4 +279,13 @@ int   mm_pte_flags_allow_access(pte_t pte_flags);
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags);
 pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags);
 
+/* 用户态 W^X 策略（mm/wx.c）：解析 a20.wx= cmdline，过滤 W|X prot。 */
+void mm_wx_policy_init(void);
+int  mm_wx_filter_prot(int prot, const char *ctx);
+
+/* 用户态 ASLR（mm/aslr.c）：exec 时的 per-process 随机布局偏移。 */
+vaddr_t mm_aslr_mmap_base(void);
+vaddr_t mm_aslr_stack_offset(void);
+vaddr_t mm_aslr_brk_offset(vaddr_t brk_base);
+
 #endif

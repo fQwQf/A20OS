@@ -17,6 +17,7 @@ void riscv_iommu_early_probe(void);
 #include "core/panic.h"
 #include "core/timekeeping.h"
 #include "core/random.h"
+#include "core/stack_protector.h"
 #include "fs/vfs.h"
 #include "fs/mount_setup.h"
 #include "drivers/block/virtio_blk.h"
@@ -107,8 +108,13 @@ void kernel_main(void) {
 #endif
     random_init();
     printf("[INIT] Random initialized\n");
+    /* 熵池就绪后立即随机化栈金丝雀：此时引导栈上只有 kernel_main 一帧
+     * 且其永不返回，更换 guard 不会造成误报。 */
+    stack_protector_init();
     bootargs_init();
     printf("[INIT] Boot arguments parsed\n");
+    /* W^X 策略依赖 cmdline（a20.wx=deny|strip|off），须在 bootargs 之后 */
+    mm_wx_policy_init();
     driver_core_init();
     printf("[INIT] Driver core initialized\n");
     usb_core_init();

@@ -137,12 +137,18 @@ static int elf_machine_supported(uint16_t machine, int elf_class) {
     return elf_class == ARCH_ELF_CLASS && machine == ARCH_ELF_MACHINE;
 }
 
-static uint64_t seg_flags(uint32_t p_flags) {
+static int seg_prot(uint32_t p_flags) {
     int prot = 0;
-    if (p_flags & PF_R) prot |= 1;
-    if (p_flags & PF_W) prot |= 2;
-    if (p_flags & PF_X) prot |= 4;
-    return mm_prot_to_pte_flags(prot);
+    if (p_flags & PF_R) prot |= PROT_READ;
+    if (p_flags & PF_W) prot |= PROT_WRITE;
+    if (p_flags & PF_X) prot |= PROT_EXEC;
+    return prot;
+}
+
+/* W^X：PT_LOAD 段的权限组合与 mmap/mprotect 走同一策略；
+ * 返回负 errno（deny）或过滤后的 prot。 */
+static int seg_prot_filtered(uint32_t p_flags) {
+    return mm_wx_filter_prot(seg_prot(p_flags), "elf-load");
 }
 
 #ifndef CONFIG_NOMMU
@@ -564,13 +570,15 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
                        VM_ANON | VM_READ | VM_WRITE | VM_STACK,
                        mm_user_stack_pte_flags());
 #else
-    vaddr_t stack_top    = USER_STACK_TOP + PAGE_SIZE;
+    /* ASLR：栈顶在 [USER_STACK_FLOOR+初始栈, USER_STACK_TOP+PAGE) 窗口内
+     * 向下随机偏移（页对齐）。窗口下界之外是固定 vDSO/vvar 与 TLS 区。 */
+    vaddr_t stack_top    = USER_STACK_TOP + PAGE_SIZE - mm_aslr_stack_offset();
     vaddr_t stack_bottom = stack_top -
         (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
 
     for (int i = 0; i < USER_STACK_INITIAL_PAGES; i++) {
-        vaddr_t va = USER_STACK_TOP -
-                      (uint64_t)(USER_STACK_INITIAL_PAGES - 1 - i) * PAGE_SIZE;
+        vaddr_t va = stack_top -
+                      (uint64_t)(USER_STACK_INITIAL_PAGES - i) * PAGE_SIZE;
         void *frame = frame_alloc();
         if (!frame) return -ENOMEM;
         memset(frame, 0, PAGE_SIZE);
@@ -765,9 +773,11 @@ static int elf_load_interp_from_fd(mm_struct_t *mm, pt_root_t *pgdir,
 
         vaddr_t seg_va = phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
+        int sprot = seg_prot_filtered(phdrs[i].p_flags);
+        if (sprot < 0) return sprot;
         r = map_segment(mm, pgdir, seg_va, phdrs[i].p_memsz,
                         &src, phdrs[i].p_filesz,
-                        seg_flags(phdrs[i].p_flags));
+                        mm_prot_to_pte_flags(sprot));
         if (r < 0) return r;
 
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
@@ -862,8 +872,10 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
 
         vaddr_t seg_va = ph->p_vaddr + load_bias;
         seg_src_t src = seg_from_buf((const char *)buf + ph->p_offset);
+        int sprot = seg_prot_filtered(ph->p_flags);
+        if (sprot < 0) { pt_destroy_user(pgdir); return sprot; }
         r = map_segment(&mm, pgdir, seg_va, ph->p_memsz,
-                        &src, ph->p_filesz, seg_flags(ph->p_flags));
+                        &src, ph->p_filesz, mm_prot_to_pte_flags(sprot));
         if (r < 0) { pt_destroy_user(pgdir); return r; }
 
         vaddr_t seg_end   = ROUND_UP(seg_va + ph->p_memsz, PAGE_SIZE);
@@ -892,12 +904,15 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
                   &tls_va, &tls_tp);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
+    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
+
     *info = (elf_load_info_t){
         .entry       = eh->e_entry + load_bias,
         .exec_entry  = eh->e_entry + load_bias,
         .base        = base,
         .end_va      = max_va,
-        .brk         = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE),
+        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
         .phdr_va     = base + eh->e_phoff,
         .phnum       = eh->e_phnum,
         .phentsize   = eh->e_phentsize,
@@ -990,9 +1005,11 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
                          (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
         vaddr_t seg_va = phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
+        int sprot = seg_prot_filtered(phdrs[i].p_flags);
+        if (sprot < 0) { r = sprot; goto fail64; }
         r = map_segment(&mm, pgdir, seg_va, phdrs[i].p_memsz,
                         &src, phdrs[i].p_filesz,
-                        seg_flags(phdrs[i].p_flags));
+                        mm_prot_to_pte_flags(sprot));
         if (r < 0) goto fail64;
 
         vaddr_t seg_end   = ROUND_UP(seg_va + phdrs[i].p_memsz, PAGE_SIZE);
@@ -1051,12 +1068,15 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     if (has_interp)
         tls_tp = 0;
 
+    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
+
     *info = (elf_load_info_t){
         .entry       = has_interp ? interp_entry : (eh->e_entry + load_bias),
         .exec_entry  = eh->e_entry + load_bias,
         .base        = base,
         .end_va      = max_va,
-        .brk         = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE),
+        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
         .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
                      : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
         .phnum       = (uint32_t)nph,
@@ -1157,9 +1177,11 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
                          (uint64_t)load_bias - (uint64_t)phdrs[i].p_offset;
         vaddr_t seg_va = (vaddr_t)phdrs[i].p_vaddr + load_bias;
         seg_src_t src = seg_from_fd(fd, (long)phdrs[i].p_offset);
+        int sprot = seg_prot_filtered(phdrs[i].p_flags);
+        if (sprot < 0) { r = sprot; goto fail32; }
         r = map_segment(&mm, pgdir, seg_va, (uint64_t)phdrs[i].p_memsz,
                         &src, (uint64_t)phdrs[i].p_filesz,
-                        seg_flags(phdrs[i].p_flags));
+                        mm_prot_to_pte_flags(sprot));
         if (r < 0) goto fail32;
 
         vaddr_t seg_end   = ROUND_UP(seg_va + (uint64_t)phdrs[i].p_memsz, PAGE_SIZE);
@@ -1195,12 +1217,15 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     if (r < 0)
         goto fail32;
 
+    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
+
     *info = (elf_load_info_t){
         .entry       = (vaddr_t)eh->e_entry + load_bias,
         .exec_entry  = (vaddr_t)eh->e_entry + load_bias,
         .base        = base,
         .end_va      = max_va,
-        .brk         = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE),
+        .brk         = brk_base + mm_aslr_brk_offset(brk_base),
         .phdr_va     = hdr_map_va ? (hdr_map_va + eh->e_phoff)
                      : (head_va ? (head_va + eh->e_phoff) : (base + eh->e_phoff)),
         .phnum       = (uint32_t)nph,
