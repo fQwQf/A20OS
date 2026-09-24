@@ -14,7 +14,9 @@
  *   - verifies queue-on and DDTP completion, then reports the IOMMU
  *     as enabled with observable queue registers.
  *   - provides one fail-closed per-device domain for a user driver, including
- *     IOVA map/unmap, context/IOTLB invalidation and fault-queue cleanup.
+ *     IOVA map/unmap, context/IOTLB invalidation and fault-queue cleanup;
+ *   - exports cumulative domain/map/fault counters via riscv_iommu_get_stats()
+ *     for /proc/a20/iommu.
  */
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
@@ -60,6 +62,7 @@
 
 #define IOMMU_QUEUE_ENABLE  (1u << 0)
 #define IOMMU_QUEUE_ACTIVE  (1u << 16)
+#define IOMMU_QUEUE_BUSY    (1u << 17)
 #define IOMMU_QUEUE_ERROR    ((1u << 8) | (1u << 9) | (1u << 10))
 
 #define IOMMU_CAP_SV39      (1ull << 9)
@@ -129,6 +132,17 @@ typedef struct iommu_user_domain {
 } iommu_user_domain_t;
 
 static iommu_user_domain_t g_user_domain;
+static riscv_iommu_stats_t g_iommu_stats;
+
+void riscv_iommu_get_stats(riscv_iommu_stats_t *out)
+{
+    if (!out)
+        return;
+    uint64_t flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    *out = g_iommu_stats;
+    out->enabled = g_iommu_ready;
+    spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
+}
 
 static uint32_t iommu_read32(uint32_t off)
 {
@@ -288,7 +302,12 @@ static int riscv_iommu_verify_translation(void)
     iommu_write64(IOMMU_REG_TR_REQ_CTL,
                   IOMMU_TR_CTL_GO | IOMMU_TR_CTL_NW);
     uint64_t resp = iommu_read64(IOMMU_REG_TR_RESPONSE);
+    /* Spec 1.0: TR_RESPONSE.PPN is bits [53:10] holding ppn << 10.
+     * QEMU <= 10.0 stores (ppn & field_mask) without the shift (fixed on
+     * master by set_field()); accept both encodings, the fault bit and the
+     * page identity are what this probe needs. */
     uint64_t expect_field = (data_phys >> 2) & IOMMU_TR_RESP_PPN;
+    uint64_t legacy_field = (data_phys >> 12) & IOMMU_TR_RESP_PPN;
     uint64_t got_field = resp & IOMMU_TR_RESP_PPN;
     kinfo("[IOMMU] TR_REQ mapped iova=0x%lx -> field=0x%08lx%08lx "
           "(expected 0x%08lx%08lx) fault=%u raw=0x%08lx%08lx\n",
@@ -297,10 +316,13 @@ static int riscv_iommu_verify_translation(void)
           (unsigned long)(expect_field >> 32), (unsigned long)(uint32_t)expect_field,
           !!(resp & IOMMU_TR_RESP_FAULT),
           (unsigned long)(resp >> 32), (unsigned long)(uint32_t)resp);
-    if ((resp & IOMMU_TR_RESP_FAULT) || got_field != expect_field) {
+    if ((resp & IOMMU_TR_RESP_FAULT) ||
+        (got_field != expect_field && got_field != legacy_field)) {
         kerr("[IOMMU] TR_REQ mapped translation mismatch\n");
         return -1;
     }
+    if (got_field == legacy_field && got_field != expect_field)
+        kinfo("[IOMMU] TR_REQ uses legacy (QEMU <= 10.0) PPN encoding\n");
 
     /* TR_REQ: unmapped IOVA must be rejected by the hardware. */
     iommu_write64(IOMMU_REG_TR_REQ_IOVA, IOMMU_PROBE_BAD_IOVA);
@@ -344,6 +366,21 @@ static int riscv_iommu_probe(device_t *dev)
     if (!(cap & IOMMU_CAP_SV39)) {
         kerr("[IOMMU] SV39 translation is unavailable\n");
         return -1;
+    }
+
+    /* A previous failed probe may have left translation and queues running
+     * with non-zero head/tail indices; the queue head/tail registers only
+     * reset on an off->on transition.  Disable translation and both queues
+     * first and wait for the hardware to go quiescent. */
+    iommu_write64(IOMMU_REG_DDTP, 0);
+    iommu_write32(IOMMU_REG_CQCSR, 0);
+    iommu_write32(IOMMU_REG_FQCSR, 0);
+    for (unsigned i = 0; i < 1000000; i++) {
+        if (!(iommu_read32(IOMMU_REG_CQCSR) &
+              (IOMMU_QUEUE_ACTIVE | IOMMU_QUEUE_BUSY)) &&
+            !(iommu_read32(IOMMU_REG_FQCSR) &
+              (IOMMU_QUEUE_ACTIVE | IOMMU_QUEUE_BUSY)))
+            break;
     }
 
     /* Allocate DDT (doubles as the DC array in 1LVL mode), CQ, FQ. */
@@ -492,6 +529,7 @@ int riscv_iommu_domain_claim(uint16_t devid, int owner_pid)
     g_user_domain.last_iova = 0;
     g_user_domain.blocked = 0;
     g_user_domain.active = 1;
+    g_iommu_stats.domains_claimed++;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     kinfo("[IOMMU] user domain attached did=%u owner=%d\n",
           devid, owner_pid);
@@ -508,6 +546,7 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
     iommu_user_domain_t *d = &g_user_domain;
     if (d->active != 1 || d->blocked || d->devid != devid ||
         d->owner_pid != owner_pid) {
+        g_iommu_stats.map_failures++;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
@@ -517,6 +556,7 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
            (d->mapped_pages & (run << first)))
         first++;
     if (first + npages > IOMMU_USER_MAX_PAGES) {
+        g_iommu_stats.map_failures++;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
@@ -530,10 +570,13 @@ int riscv_iommu_domain_map(uint16_t devid, int owner_pid, uint64_t phys,
         iommu_cmd(IOMMU_CMD_IOFENCE, 0) < 0) {
         for (uint32_t i = 0; i < npages; i++)
             d->l0[first + i] = 0;
+        g_iommu_stats.map_failures++;
         spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
         return -1;
     }
     d->mapped_pages |= run << first;
+    g_iommu_stats.maps++;
+    g_iommu_stats.mapped_pages += npages;
     *out_iova = IOMMU_USER_IOVA + (uint64_t)first * PAGE_SIZE;
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return 0;
@@ -561,8 +604,11 @@ int riscv_iommu_domain_unmap(uint16_t devid, int owner_pid, uint64_t iova,
     wmb();
     int r = iommu_cmd(IOMMU_CMD_IOTINVAL, 0) < 0 ||
             iommu_cmd(IOMMU_CMD_IOFENCE, 0) < 0 ? -1 : 0;
-    if (r == 0)
+    if (r == 0) {
         d->mapped_pages &= ~mask;
+        g_iommu_stats.unmaps++;
+        g_iommu_stats.mapped_pages -= npages;
+    }
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     return r;
 }
@@ -586,17 +632,25 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
         uint64_t *record = &g_iommu_fq[head * 4];
         uint64_t hdr = record[0];
         uint16_t record_devid = (uint16_t)(hdr >> 40);
+        g_iommu_stats.fault_records++;
         if (record_devid == devid) {
             d->fault_count++;
             d->last_cause = (uint32_t)(hdr & 0xfff);
             d->last_iova = record[2];
+            g_iommu_stats.faults++;
+            g_iommu_stats.last_fault_devid = record_devid;
+            g_iommu_stats.last_fault_cause = d->last_cause;
+            g_iommu_stats.last_fault_iova = d->last_iova;
+            g_iommu_stats.last_fault_owner = owner_pid;
             new_fault = 1;
         }
         head = (head + 1) & IOMMU_FQ_MASK;
     }
     iommu_write32(IOMMU_REG_FQH, head);
-    if (new_fault)
+    if (new_fault) {
         d->blocked = 1;
+        g_iommu_stats.blocked_events++;
+    }
     uint32_t report_cause = d->last_cause;
     uint64_t report_iova = d->last_iova;
     if (count) *count = d->fault_count;
@@ -639,6 +693,8 @@ int riscv_iommu_domain_release(uint16_t devid, int owner_pid)
     pfa_free_page(l1_pfn);
     pfa_free_page(l0_pfn);
     flags = spin_lock_irqsave(&g_iommu_domain_lock);
+    g_iommu_stats.domains_released++;
+    g_iommu_stats.mapped_pages = 0;
     memset(d, 0, sizeof(*d));
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
     kinfo("[IOMMU] user domain released did=%u owner=%d\n",

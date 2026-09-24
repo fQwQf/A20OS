@@ -104,4 +104,4 @@ loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybri
 - **网络协议栈**保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
 - **loongarch64**：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：RISC-V 侧已完成 DDT/CQ/FQ bring-up 和 devid 0 静态 SV39/TR_REQ 探测，但尚未把用户驱动的动态 DMA 分配接入 per-device map/unmap 与 fault 消费；不能称为完整硬件强制隔离。其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。
+- **IOMMU/DMA 安全**：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖"内核分配 + pin + 物理地址上报"的信任模型。
