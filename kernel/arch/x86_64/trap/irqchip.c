@@ -293,6 +293,10 @@ void trap_init(void) {
     efer |= EFER_SCE | EFER_NXE;
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_EFER), "a"((uint32_t)efer), "d"((uint32_t)(efer >> 32)));
 
+    /* Supervisor-mode access/execution prevention, per CPU.  No-op on CPU
+     * models that do not advertise the features (e.g. QEMU qemu64). */
+    x86_64_enable_smep_smap();
+
     /* STAR: bits 47:32 = syscall CS=0x08 (SS=0x10); bits 63:48 = sysret
      * user CS=0x1b (SS=0x23).  We still return through iretq, but the MSR
      * must be programmed correctly so the syscall instruction loads CS=0x08. */
