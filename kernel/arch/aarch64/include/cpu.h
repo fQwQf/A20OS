@@ -84,6 +84,24 @@ static inline int arch_irqs_enabled(void) {
     return (daif & (1UL << 7)) == 0;
 }
 
+/* Enable SCTLR_EL1.PAN (privileged access never) when the CPU implements
+ * ARMv8.1 PAN (ID_AA64MMFR1_EL1.PAN, bits [23:20], nonzero).  All kernel
+ * access to user memory goes through the direct map after explicit PTE
+ * permission checks (kernel/mm/mm.c), so no PAN-toggle windows are needed:
+ * a stray EL1 access to a user page indicates a bug and must fault loudly.
+ * QEMU's cortex-a57 (v8.0) reports PAN=0 and this is a no-op there. */
+static inline void aarch64_enable_pan(void) {
+    uint64_t mmfr1;
+    __asm__ __volatile__("mrs %0, id_aa64mmfr1_el1" : "=r"(mmfr1));
+    if (((mmfr1 >> 20) & 0xf) == 0)
+        return;
+    uint64_t sctlr;
+    __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr |= 1UL << 22; /* PAN */
+    __asm__ __volatile__("msr sctlr_el1, %0" :: "r"(sctlr) : "memory");
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
 static inline void arch_tlb_flush(void) {
 #ifndef CONFIG_NOMMU
     __asm__ __volatile__(
