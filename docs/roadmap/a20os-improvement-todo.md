@@ -125,6 +125,10 @@
 - [x] 让 OOM reclaim 策略可观察、可测试。
   - 源码证据：`user/cmds/stress/oom_stress.c` 在 cgroup2 `memory.max` 限制下用子进程触发按页耗尽，断言 victim 以 SIGKILL 死亡、`memory.events` 的 `oom_kill`/failcnt 计数推进、幸存父进程仍能分配内存和做文件 I/O；`make smoke-oom-stress` 在 QEMU 中执行该场景。配套修复：`kernel/core/trap.c` 在缺页失败路径先检查 pending fatal signal（cgroup/global OOM kill 刚发出的 SIGKILL），不再把 OOM 受害者误报成 SIGSEGV，与 Linux 对 VM_FAULT_OOM 的 fatal-signal-pending 处理一致。
   - 完成条件：OOM 测试证明 safe kill/reclaim 行为，而不是只记录分配失败日志。
+- [x] Swap 从"写完但默认关闭"转为默认开启并建立运行门禁。
+  - 源码证据：根 `Makefile` `CONFIG_SWAP ?= y`（NOMMU 强制 n 保留；toggle 不加 `BUILD_VARIANT` 分量——`tools/targets-images.mk` 的 `BUILD_FLAGS_STAMP` 以 `$(CFLAGS)` 为签名，`-DCONFIG_SWAP` 变化自动触发全量内核重建）；`kernel/abi/linux/sys_swap.c` 的 `swap_path_to_block_dev` 新增 `/dev/loopN` 解析（此前只认 `/dev/vd*`，loop 设备上的 swapon/mkswap 恒 -EINVAL），配套 `kernel/drivers/block/loop.c` 新增 `loop_block_device()` 扇区视图适配器；`kernel/mm/swap.c` 的 `swap_register_device` 新增同一 bdev 重复 swapon 返回 -EBUSY（此前同设备可重复注册成两个 swap 区）；`kernel/fs/procfs/procfs_render.c` 的 `/proc/swaps` 条目行去掉内核 printf 不支持的 `%-40s` 左对齐格式（此前条目静默丢失、只渲染表头）。
+  - 验证：`make smoke-swap`（`user/cmds/stress/swap_test.c`：ramfs backing 文件 → loop-control `LOOP_CTL_GET_FREE` + `LOOP_SET_FD` 绑定 → mkswap → swapon → sysinfo totalswap>0 与 `/proc/swaps` 条目断言 → 重复 swapon 返回 EBUSY → 8 MiB 匿名内存触访校验 → swapoff → totalswap 归零）riscv64 PASS；`make smoke-riscv64`、`make smoke-abi-linux` PASS；riscv64/x86_64/aarch64 三架构 `CONFIG_SWAP=y kernel-only` 与 riscv64 NOMMU（强制 n）均零内核警告编译（2026-09-24，当前工作树）。
+  - 遗留边界：门禁未驱动真实换出——OOM reclaim 每次最多换出 `MAX_SWAP_RECLAIM`=8 页且受 2s 冷却限制，1 GiB QEMU 冒烟中无法现实触发；`swap_read_page`/缺页读回路径只有编译覆盖，需低内存实例补充运行门禁。
 
 ## P1：I/O 进展与网络
 

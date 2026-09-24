@@ -499,7 +499,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             swap_info_struct *si = &swap_info[type];
             if (!si->active)
                 continue;
-            appendf(buf, bufsz, &off, "%-40s\tpartition\t%llu\t%lu\t-2\n",
+            /* core/printf.c has no '-' flag support; emit unaligned fields. */
+            appendf(buf, bufsz, &off, "%s\tpartition\t%llu\t%lu\t-2\n",
                     si->name ? si->name : "",
                     (unsigned long long)si->pages,
                     (unsigned long)si->inuse_pages);

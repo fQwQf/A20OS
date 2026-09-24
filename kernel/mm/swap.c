@@ -72,6 +72,15 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
     if (!name || !swap_device_valid(bdev))
         return -EINVAL;
 
+    /* Linux rejects a second swapon of an already-active device. */
+    for (int type = 0; type < MAX_SWAPFILES; type++) {
+        uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
+        int dup = swap_info[type].active && swap_info[type].bdev == bdev;
+        spin_unlock_irqrestore(&swap_locks[type], flags);
+        if (dup)
+            return -EBUSY;
+    }
+
     uint8_t *header_page = kmalloc(PAGE_SIZE);
     if (!header_page)
         return -ENOMEM;
