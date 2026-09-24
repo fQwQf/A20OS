@@ -41,7 +41,8 @@
 | 连续 DMA heap | 已实现 | `device_alloc_dma` 预物化连续 VMO，`test_native_contract` 的 `dma` 分区验证连续物理地址与零填充 |
 | 动态设备所有权 | 已实现 | `device_claim/release`，uinputd 两次启动验证自动释放 |
 | IOMMU PCI 发现 | 已实现 | `smoke-iommu-discovery` 识别 QEMU `riscv-iommu-pci` |
-| IOMMU bring-up/静态翻译探测 | 已实现源码与入口 | `smoke-iommu-discovery` 检查 DDT/DC/CQ/FQ 与静态 TR_REQ；动态 per-device DMA map/fault 消费未实现 |
+| IOMMU bring-up/静态翻译探测 | 已实现 | `smoke-iommu-discovery` 检查 DDT/DC/CQ/FQ 与静态 TR_REQ |
+| IOMMU 动态 per-device domain 与 fault 消费 | 已实现（PCI edu 样板） | 动态 claim/map/unmap/release、FQ 消费 fail-closed、`/proc/a20/iommu` 计数器；`smoke-iommu-udriver-isolation` 端到端（uedud：授权内 DMA 成功、窗口外 fault 被消费并阻断、re-claim 恢复），2026-09-24 PASS |
 | 服务协议 IDL 常量/固定消息层 | 已实现（阶段四起步） | `a20_services.idl` + `tools/a20idl.py`，rtcd payload 已生成；`make check-a20-idl` |
 | IDL 版本化请求/响应信封 | 部分已实现 | rtcd 与 svcmgr/echod 使用 version/size envelope；ubd 仅使用生成常量，数据面走共享环 |
 | Linux pipe 人格层 PoC | 已实现（阶段五起步） | `smoke-native-personality`：channel/EventQ 的 pipe-shaped facade |
@@ -67,7 +68,7 @@
 - **网络协议栈**：lwIP 是当前内核态唯一实现，旧 netd 路径已移除。`smoke-network-suite` 聚合 TCP/UDP/ICMP loopback、DNS、AF_UNIX、AF_ALG 和 timeout，其中 DNS/AF_ALG 可跳过；当前仅 RISC-V64 有运行入口；
 - **loongarch64**：双架构发布流程曾整体通过（历史记录），但当前多个 Native/dual/mlibc smoke 仍只有 RISC-V64 运行入口，LoongArch64 的结论需逐项复验；
 - **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：DDT/CQ/FQ 与 devid 0 静态 TR_REQ 探测已实现，但用户驱动 DMA 尚未接入动态 per-device domain，fault 队列也未消费；当前仍不能宣称端到端硬件强制隔离。
+- **IOMMU/DMA 安全**：PCI 设备（edu 样板）的用户驱动 DMA 已接入动态 per-device domain，未授权访问产生并被消费 fault（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）；边界：fault 消费由 `a20_device_get_info` 拉取而非中断驱动、domain 单实例、virtio-mmio 用户驱动（uinputd/ubd）不在 riscv-iommu 管理范围内仍是信任模型。
 
 ## 历史诊断记录（2026-08-06，hybrid-kernel-refactor 分支）
 

@@ -20,7 +20,7 @@ smoke-iommu-udriver-isolation:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/iommu-udriver-isolation-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/iommu\npoweroff\n'; } | \
 	$(TIMEOUT) 30s qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 1 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -35,6 +35,13 @@ smoke-iommu-udriver-isolation:
 	   grep -q '\[IOMMU\] DMA fault blocked did=16 cause=15' "$$log" && \
 	   grep -q 'UEDUD: recovered' "$$log" && \
 	   grep -q 'UEDUD: PASS' "$$log" && \
+	   grep -q 'enabled: 1' "$$log" && \
+	   grep -Eq 'domains_claimed: [1-9]' "$$log" && \
+	   grep -Eq 'maps: [1-9]' "$$log" && \
+	   grep -Eq 'unmaps: [1-9]' "$$log" && \
+	   grep -Eq 'faults: [1-9]' "$$log" && \
+	   grep -Eq 'blocked_events: [1-9]' "$$log" && \
+	   grep -Eq 'last_fault_cause: 15' "$$log" && \
 	   grep -q 'System is going down for power-off' "$$log"; then \
 		echo "smoke-iommu-udriver-isolation: PASS; log saved to $$log"; \
 	else \
