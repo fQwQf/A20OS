@@ -74,6 +74,36 @@ static inline void x86_64_enable_fpu_sse(void) {
     __asm__ __volatile__("fninit");
 }
 
+/* Enable SMEP (CR4 bit 20) and SMAP (CR4 bit 21) when the CPU advertises
+ * them (CPUID leaf 7 EBX bits 7/20).  All kernel access to user memory goes
+ * through the direct map after explicit PTE permission checks
+ * (kernel/mm/mm.c), so no stac/clac windows are required: any supervisor
+ * access to a user page indicates a bug and should fault loudly.  QEMU's
+ * default qemu64 model does not advertise these features, so this is a
+ * no-op there; real CPUs and -cpu host/max get the protection. */
+static inline void x86_64_enable_smep_smap(void) {
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(0) :);
+    if (eax < 7)
+        return;
+    __asm__ __volatile__("cpuid"
+                         : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(7), "c"(0) :);
+    uint64_t bits = 0;
+    if (ebx & (1U << 7))   /* SMEP */
+        bits |= 1UL << 20;
+    if (ebx & (1U << 20))  /* SMAP */
+        bits |= 1UL << 21;
+    if (!bits)
+        return;
+    uint64_t cr4;
+    __asm__ __volatile__("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= bits;
+    __asm__ __volatile__("mov %0, %%cr4" :: "r"(cr4) : "memory");
+}
+
 static inline void arch_tlb_flush(void) {
     uint64_t cr3;
     __asm__ __volatile__("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");

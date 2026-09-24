@@ -221,6 +221,7 @@ static void handle_timer_irq(int from_user) {
 
 void trap_init(void) {
     arch_write_tvec((uint64_t)aarch64_vector_table);
+    aarch64_enable_pan();
     gic_init();
 }
 
