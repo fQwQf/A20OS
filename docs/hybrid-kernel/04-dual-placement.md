@@ -29,7 +29,7 @@
 
 ### ops 扩展的准入规则
 
-一个 op 进入 drv_env 的前提是各部署下语义可定义一致且可测。DMA 分配 helper 已进入环境层，但 USER 后端当前依赖内核分配连续 VMO 与物理地址上报；RISC-V IOMMU 尚未把该分配动态映射到 per-device domain，因此“相同隔离强度”仍未成立。
+一个 op 进入 drv_env 的前提是各部署下语义可定义一致且可测。DMA 分配 helper 已进入环境层；在 RISC-V QEMU 平台上，USER 后端的 `drv_dma` 对已 claim 的 PCI 隔离设备（edu 样板）经 per-device IOMMU domain 走 IOVA 翻译，授权窗口外的访问由硬件拒绝并消费 fault；virtio-mmio 用户驱动（uinputd/ubd）的设备不在 riscv-iommu 管理范围内，仍是内核分配连续 VMO 的信任模型，因此"所有 USER 驱动相同隔离强度"仍未成立。
 
 ### 语义一致性验证
 
@@ -57,6 +57,6 @@
 
 - 内核壳接入 timekeeping/alarm 子系统是后续工作；接入前必须先解决设备所有权（udriver 窗口当前默认 user-owned，见 `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。约定：白名单 `user_owned=1` 的设备内核侧只做只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态 `device_claim/release` 已实现，`smoke-dual-input` 源码会用两次启动检查自动释放，但本次未运行；user-owned 窗口的 MMIO 映射现在强制要求当前任务先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- **IOMMU bring-up**：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，并用 devid 0 的静态 SV39 domain 做 TR_REQ 映射/拒绝探测；fault 队列消费、per-device 动态页表及 `drv_dma` 接线仍为后续工作；
+- **IOMMU 动态隔离**：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，devid 0 静态 SV39 domain 的 TR_REQ 映射/拒绝探测之上，已实现 per-device domain 的动态 claim/map/unmap/release、fault queue 消费（归属 owner、fail-closed 阻断）与 `/proc/a20/iommu` 计数器；`drv_dma` 对 edu PCI 样板的 VMO 翻译已接到 domain（`user/svc/uedud.c` 端到端验证授权内 DMA 成功、窗口外 fault、release 后恢复），门禁 `smoke-iommu-udriver-isolation`（2026-09-24 PASS）。后续：fault 消费中断化、多设备并发 domain、virtio-mmio 设备接入；
 - virtio-input 事件面有 USER uinputd 路径和独立 DRVMOD 完整驱动路径；尚缺同一设备、同一完整协议源码、同一契约套件的双态 A/B；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。

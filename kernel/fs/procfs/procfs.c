@@ -118,6 +118,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "lock_contention") == 0) return PF_A20_LOCK_CONTENTION;
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
+    if (strcmp(name, "iommu") == 0) return PF_A20_IOMMU;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
@@ -434,6 +435,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "objects") == 0) {
         child = new_entry(name, PF_A20_OBJECTS, 0);
         type = PF_A20_OBJECTS;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
+        child = new_entry(name, PF_A20_IOMMU, 0);
+        type = PF_A20_IOMMU;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
@@ -1021,7 +1025,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
-        "driver_lifecycle", "objects", NULL
+        "driver_lifecycle", "objects", "iommu", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
