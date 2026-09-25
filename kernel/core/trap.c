@@ -1,6 +1,7 @@
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
+#include "proc/coredump.h"
 #include "sys/syscall.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
@@ -236,6 +237,13 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
                (unsigned long)TRAP_CTX_EPC(ctx),
                (unsigned long)TRAP_CTX_SP(ctx),
                cur->name, cur->exec_path);
+        /* CORE_DUMP_HOOK: for signals whose default action dumps core, emit
+         * the ELF core file while the mm/registers are live and report the
+         * WCOREDUMP exit status, mirroring the async fatal-signal path. */
+        if (signal_dumps_core(sig)) {
+            coredump_on_fatal_signal(sig, ctx);
+            fatal_code = signal_fatal_exit_code(sig);
+        }
         proc_exit_group(fatal_code);
     }
 

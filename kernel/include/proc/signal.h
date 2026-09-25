@@ -56,6 +56,10 @@ typedef struct signal_state {
     uint64_t    pending;     /* bitmask of pending signals */
     uint8_t     pending_has_info[NSIG];
     uint8_t     pending_info[NSIG][SIGNAL_INFO_SIZE];
+    /* Per-process RLIMIT_CORE (soft limit; Linux keeps rlimits in the shared
+     * signal struct).  Inherited across fork via signal_copy(), preserved by
+     * signal_exec_reset().  0 suppresses core dumps. */
+    uint64_t    rlim_core;
 } signal_state_t;
 
 /*
@@ -112,6 +116,17 @@ void signal_task_defer_mask_restore(void *task, uint64_t old_mask);
 void signal_task_restore_sigsuspend(void *task);
 void signal_exec_reset(void *task);
 uint64_t signal_task_pending_blocked(void *task);
+
+/* Per-process RLIMIT_CORE accessors (stored in signal_state; guarded by its
+ * lock).  Used by the rlimit syscalls and the fatal-signal coredump hook. */
+uint64_t signal_task_rlim_core(void *task);
+void     signal_task_set_rlim_core(void *task, uint64_t soft);
+
+/* Fatal-signal classification helpers shared with the trap.c unhandled-fault
+ * fast path: whether the default action dumps core, and the wait-status
+ * encoded exit code (negative, with the WCOREDUMP 0x80 bit when dumping). */
+int signal_dumps_core(int sig);
+int signal_fatal_exit_code(int sig);
 
 void signal_deliver(void);
 void signal_deliver_user(trap_context_t *ctx);
