@@ -12,6 +12,7 @@
 #define PR_GET_THP_DISABLE   42
 
 #define RLIMIT_STACK   3
+#define RLIMIT_CORE    4
 #define RLIMIT_NOFILE  7
 #define RLIM_NLIMITS   16
 

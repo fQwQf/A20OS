@@ -18,6 +18,7 @@
 #include "fs/vfs/dcache.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/coredump.h"
 #include "proc/lifetime.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
@@ -855,8 +856,11 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         }
         return (int)count;
     }
-    if (p->type == PF_SYS_KERNEL_CORE_PATTERN ||
-        p->type == PF_SYS_KERNEL_IO_URING_DISABLED ||
+    if (p->type == PF_SYS_KERNEL_CORE_PATTERN) {
+        int r = coredump_set_pattern(buf, count);
+        return r < 0 ? r : (int)count;
+    }
+    if (p->type == PF_SYS_KERNEL_IO_URING_DISABLED ||
         p->type == PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS ||
         p->type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES) {
         return (int)count;

@@ -7,6 +7,7 @@
 #include "sys/usercopy.h"
 #include "proc/proc_internal.h"
 #include "proc/cred.h"
+#include "proc/signal.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -765,6 +766,7 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         task_t *t = proc_current();
         switch (resource) {
             case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
+            case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
             case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
             default: r[0] = 0; r[1] = (uint64_t)-1; break;
         }
@@ -777,6 +779,7 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         if (!t) return -ESRCH;
         switch (resource) {
             case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
+            case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
             case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
             default: break;
         }
@@ -792,6 +795,7 @@ int64_t sys_getrlimit(int resource, void *rlim) {
     task_t *t = proc_current();
     switch (resource) {
         case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
+        case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
         case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
         default: r[0] = 0; r[1] = (uint64_t)-1; break;
     }
@@ -809,6 +813,7 @@ int64_t sys_setrlimit(int resource, void *rlim) {
     if (!t) return -ESRCH;
     switch (resource) {
         case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
+        case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
         case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
         default: break;
     }
