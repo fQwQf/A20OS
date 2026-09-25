@@ -8,6 +8,7 @@
 #include "proc/signal.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/coredump.h"
 #include "proc/debug.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
@@ -55,6 +56,19 @@ __attribute__((weak)) uint64_t arch_signal_handler_sp(uint64_t frame_sp) {
     return frame_sp;
 }
 
+/*
+ * CORE_DUMP_HOOK: the fatal default-action path below calls this before
+ * proc_exit_group() for signals whose default action dumps core.  The strong
+ * definition in kernel/proc/coredump.c emits the ELF core file; this weak
+ * default is a no-op so MCU/profile builds that do not link coredump.c keep
+ * working.  Registered-hook style: signal.c does not know the dump details.
+ */
+__attribute__((weak)) void coredump_on_fatal_signal(int sig,
+                                                    trap_context_t *ctx) {
+    (void)sig;
+    (void)ctx;
+}
+
 static int signal_core_dump_default(int sig) {
     switch (sig) {
         case SIGQUIT:
@@ -75,6 +89,16 @@ static int signal_wait_status(int sig) {
     if (signal_core_dump_default(sig))
         status |= 0x80;
     return status;
+}
+
+/* Exported for kernel/core/trap.c's unhandled-fault fast path (the other
+ * fatal termination route besides signal_deliver_user). */
+int signal_dumps_core(int sig) {
+    return signal_core_dump_default(sig);
+}
+
+int signal_fatal_exit_code(int sig) {
+    return -signal_wait_status(sig);
 }
 
 static int signal_default_terminate(int sig) {
@@ -166,6 +190,7 @@ void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     signal_state_t *mutable_src = (signal_state_t *)src;
     uint64_t flags = spin_lock_irqsave(&mutable_src->lock);
     memcpy(dst->actions, src->actions, sizeof(dst->actions));
+    dst->rlim_core = src->rlim_core;
     spin_unlock_irqrestore(&mutable_src->lock, flags);
 }
 
@@ -594,6 +619,29 @@ uint64_t signal_task_pending_blocked(void *task)
     return pending;
 }
 
+uint64_t signal_task_rlim_core(void *task)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t limit = ss->rlim_core;
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return limit;
+}
+
+void signal_task_set_rlim_core(void *task, uint64_t soft)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals)
+        return;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    ss->rlim_core = soft;
+    spin_unlock_irqrestore(&ss->lock, flags);
+}
+
 // 传递信号（内核线程使用）
 void signal_deliver(void) {
     task_t *t = proc_current();
@@ -728,6 +776,10 @@ void signal_deliver_user(trap_context_t *ctx) {
                 continue;
             }
             spin_unlock_irqrestore(&ss->lock, flags);
+            /* CORE_DUMP_HOOK: emit the ELF core dump while the task's mm and
+             * register context are still live, then terminate the group. */
+            if (signal_core_dump_default(sig))
+                coredump_on_fatal_signal(sig, ctx);
             proc_exit_group(-signal_wait_status(sig));
         }
 
