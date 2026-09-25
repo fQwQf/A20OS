@@ -104,14 +104,16 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
 
         page_cache_page_t *pcp =
             mm_file_cache_mapping_get(src_vma, src_va, pfn);
-        if (!pcp)
+        /* VMO frames are owned by the VMO; mappings never hold frame refs. */
+        int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
+        if (!pcp && !vmo_owned)
             frame_get(pfn);
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
                             : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
         if (r < 0) {
             if (pcp) {
                 page_cache_put(pcp);
-            } else {
+            } else if (!vmo_owned) {
                 frame_put(pfn);
             }
             mm_munmap_locked(mm, dst, len);
@@ -155,14 +157,16 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         vm_area_t *src_vma = mm_find_vma(mm, src_va);
         page_cache_page_t *pcp =
             mm_file_cache_mapping_get(src_vma, src_va, pfn);
-        if (!pcp)
+        /* VMO frames are owned by the VMO; mappings never hold frame refs. */
+        int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
+        if (!pcp && !vmo_owned)
             frame_get(pfn);
         int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
             if (pcp) {
                 page_cache_put(pcp);
-            } else {
+            } else if (!vmo_owned) {
                 frame_put(pfn);
             }
             return r;
@@ -174,7 +178,7 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         if (pcp) {
             if (!dontunmap)
                 page_cache_put(pcp);
-        } else {
+        } else if (!vmo_owned) {
             if (!dontunmap)
                 frame_put(pfn);
         }

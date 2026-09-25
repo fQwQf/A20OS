@@ -131,10 +131,15 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     }
 
     vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
+    /* VMO frames are owned by the VMO object; mappings never hold frame
+     * references (vmo_get_page contract).  Cloning a VMO PTE as shared must
+     * not frame_get: the VMA's own vmo reference (vma_ref_fork) keeps the
+     * frames alive, and teardown never puts them. */
+    int is_vmo = vma && (vma->vm_flags & VM_VMO);
     page_cache_page_t *pcp =
-        mm_file_cache_mapping_get(vma, va, pfn);
+        is_vmo ? NULL : mm_file_cache_mapping_get(vma, va, pfn);
 
-    if (!pcp)
+    if (!pcp && !is_vmo)
         frame_get(pfn);
 
     pte_t flags = shared ? arch_pte_flags(*src_pte) : mm_cow_flags(*src_pte);
@@ -143,7 +148,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     if (r < 0) {
         if (pcp) {
             page_cache_put(pcp);
-        } else {
+        } else if (!is_vmo) {
             frame_put(pfn);
         }
         return r;
