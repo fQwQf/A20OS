@@ -835,3 +835,29 @@ smoke-timeout-test:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# Coredump smoke (fatal-signal ELF core dump generation)
+# ================================================================
+smoke-coredump:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/coredump-riscv64.log"; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' \
+		--send-line 'coredump_test' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'COREDUMP_TEST: PASS' "$$log"; then \
+		echo "smoke-coredump: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-coredump: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi

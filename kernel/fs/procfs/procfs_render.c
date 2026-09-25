@@ -9,6 +9,7 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
+#include "proc/coredump.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -934,7 +935,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "0\n");
         break;
     case PF_SYS_KERNEL_CORE_PATTERN:
-        snprintf(buf, bufsz, "core\n");
+        coredump_get_pattern(buf, bufsz);
         break;
     case PF_SYS_KERNEL_IO_URING_DISABLED:
         snprintf(buf, bufsz, "0\n");
