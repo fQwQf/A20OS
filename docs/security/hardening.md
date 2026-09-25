@@ -32,12 +32,12 @@
 重构，收益主要在远程内核信息泄漏威胁模型下；当前威胁模型（研究型
 OS、无远程攻击面压力）下暂缓，先完成直映射访问器化作为前置。
 
-### riscv64 SUM blanket（进行中）
+### riscv64 SUM blanket（已收口）
 
-`kernel/arch/riscv64/trap/trap.S` 的用户 trap 入口 blanket 置 SUM=1
-（与 SMAP 反向）。由于用户内存访问已全部直映射化，计划直接移除该
-置位；与 trap 取证硬化（内核态不可恢复 fault dump + panic）配合，
-任何隐藏的直接用户解引用都会变成带现场的 panic 而非静默越权。
+`kernel/arch/riscv64/trap/trap.S` 用户 trap 入口的 blanket SUM=1 已移除
+（保持 SUM=0）。由于用户内存访问全部直映射化，任何遗漏的监督态
+用户页访问都会立即 fault，与 frame.c 取证加固配合成为带现场的
+panic；`smoke-riscv64`/`smoke-abi-linux` 验证无隐藏直接解引用。
 
 ### 内核自身 W^X 段权限分离（进行中）
 
