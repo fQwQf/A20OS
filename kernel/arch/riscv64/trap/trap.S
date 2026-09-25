@@ -123,8 +123,13 @@ __trap_from_user:
     la      t0, __trap_from_kernel
     csrw    stvec, t0
 
-    /* Set SPP=1 (entering supervisor mode), SUM=1, and keep FP usable. */
-    li      t0, (1 << 8) | (1 << 18)
+    /* Set SPP=1 (entering supervisor mode) and keep FP usable.
+     * SUM stays clear: kernel code never dereferences user virtual
+     * addresses directly — all user memory access goes through the
+     * direct map after explicit PTE permission checks (kernel/mm/mm.c).
+     * A stray supervisor access to a user page now faults loudly instead
+     * of silently succeeding. */
+    li      t0, (1 << 8)
     csrs    sstatus, t0
 
     /* Call C trap handler */
