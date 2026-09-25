@@ -431,7 +431,12 @@ void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
                     /* Temporary lookup plus the PTE's retained cache pin. */
                     page_cache_put(mapped_page);
                     page_cache_put(mapped_page);
-                } else if (!(vma->vm_flags & VM_PFNMAP)) {
+                } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
+                    /* VMO frames are owned by the VMO (see vmo_get_page);
+                     * unmapping a PTE never releases them — same rule as
+                     * mm_munmap_locked()/madvise.  Putting them here freed
+                     * live VMO pages while other mappers (and vmo->pages[])
+                     * still referenced them. */
                     frame_put(pfn);
                 }
             }

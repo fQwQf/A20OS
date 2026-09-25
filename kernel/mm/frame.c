@@ -100,6 +100,7 @@ static size_t   g_pfa_freemap_bytes;
 #define PFA_OP_HIST_SZ 512u
 typedef struct {
     uint64_t pfn;
+    uintptr_t ra;       /* caller of fl_push/fl_remove */
     uint8_t  order;
     uint8_t  op;            /* 0 = alloc (remove), 1 = free (push) */
 } pfa_op_rec_t;
@@ -107,12 +108,13 @@ static pfa_op_rec_t g_pfa_op_hist[PFA_OP_HIST_SZ];
 static unsigned     g_pfa_op_hist_pos;
 static unsigned     g_pfa_op_hist_wraps;
 
-static void pfa_hist_record(uint8_t op, uint64_t pfn, int order)
+static void pfa_hist_record(uint8_t op, uint64_t pfn, int order, uintptr_t ra)
 {
     pfa_op_rec_t *r = &g_pfa_op_hist[g_pfa_op_hist_pos];
     r->pfn   = pfn;
     r->order = (uint8_t)order;
     r->op    = op;
+    r->ra    = ra;
     g_pfa_op_hist_pos++;
     if (g_pfa_op_hist_pos == PFA_OP_HIST_SZ) {
         g_pfa_op_hist_pos = 0;
@@ -132,9 +134,26 @@ void pfa_hist_dump(void)
         const pfa_op_rec_t *r = &g_pfa_op_hist[idx];
         if (r->pfn == 0 && r->order == 0 && r->op == 0 && idx != start)
             continue;
-        printf("[PFA HIST %02u] %s pfn=%llu order=%u\n",
+        printf("[PFA HIST %02u] %s pfn=%llu order=%u ra=%p\n",
                i, r->op ? "FREE" : "ALLOC",
-               (unsigned long long)r->pfn, r->order);
+               (unsigned long long)r->pfn, r->order, (void *)r->ra);
+    }
+}
+
+/* Full-history variant for the shutdown audit: the corruption typically
+ * happened long before the audit runs, so the last-48 window misses it. */
+void pfa_hist_dump_all(void)
+{
+    printf("[PFA HISTALL] wraps=%u pos=%u (oldest first)\n",
+           g_pfa_op_hist_wraps, g_pfa_op_hist_pos);
+    unsigned n = g_pfa_op_hist_wraps ? PFA_OP_HIST_SZ : g_pfa_op_hist_pos;
+    unsigned start = g_pfa_op_hist_wraps ? g_pfa_op_hist_pos : 0;
+    for (unsigned i = 0; i < n; i++) {
+        unsigned idx = (start + i) % PFA_OP_HIST_SZ;
+        const pfa_op_rec_t *r = &g_pfa_op_hist[idx];
+        printf("[PFA HISTALL %03u] %s pfn=%llu order=%u ra=%p\n",
+               i, r->op ? "FREE" : "ALLOC",
+               (unsigned long long)r->pfn, r->order, (void *)r->ra);
     }
 }
 
@@ -174,7 +193,7 @@ static void fl_push(pfn_t pfn, int order) {
     pfa.free_lists[order].head = pfn;
     pfa.free_lists[order].count++;
     PFA_FREEMAP_SET(pfn);
-    pfa_hist_record(1, pfn, order);
+    pfa_hist_record(1, pfn, order, (uintptr_t)__builtin_return_address(0));
 }
 
 /*
@@ -183,12 +202,18 @@ static void fl_push(pfn_t pfn, int order) {
  * live interior PFNs after the block head reaches zero references.  Putting
  * the whole block on a free list would let a later allocation overwrite those
  * live pages.  Split recursively and publish only completely unused pieces.
+ *
+ * A frame whose freemap bit is set is already on some free list; swallowing
+ * it into a larger published block would double-list it (a later allocation
+ * of the block overwrites its links and silently decapitates the other
+ * list), so such frames also force the split path.
  */
 static void fl_push_clean(pfn_t pfn, int order)
 {
     if (order == 0) {
         if (pfa.meta[pfn].refcount > 0 ||
-            pfa.meta[pfn].flags == FRAME_F_ALLOC)
+            pfa.meta[pfn].flags == FRAME_F_ALLOC ||
+            PFA_FREEMAP_TEST(pfn))
             return;
         pfa.meta[pfn].flags = FRAME_F_FREE;
         pfa.meta[pfn].refcount = 0;
@@ -201,7 +226,7 @@ static void fl_push_clean(pfn_t pfn, int order)
 
     int used = 0;
     for (pfn_t i = pfn; i < pfn + (1u << order); i++) {
-        if (pfa.meta[i].refcount > 0) {
+        if (pfa.meta[i].refcount > 0 || PFA_FREEMAP_TEST(i)) {
             used = 1;
             break;
         }
@@ -224,6 +249,47 @@ static void fl_push_clean(pfn_t pfn, int order)
 static void fl_remove(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
     PFA_FREEMAP_CLR(pfn);
+    /* Membership traps: a node that claims prev==NONE must be the list head,
+     * and claimed neighbors must link back.  Removing a node that fails these
+     * checks would silently decapitate or scramble the list (observed as
+     * later count-vs-walk mismatch and orphaned sub-chains at audit time). */
+    if (m->prev == PFN_NONE && pfa.free_lists[order].head != pfn) {
+        printf("[PFA CORRUPT] remove of non-head head-claimant: pfn=%lu "
+               "order=%d head=%lu count=%lu next=%lu flags=0x%x ref=%u "
+               "ra=%p cpu=%u\n",
+               (unsigned long)pfn, order,
+               (unsigned long)pfa.free_lists[order].head,
+               (unsigned long)pfa.free_lists[order].count,
+               (unsigned long)m->next, m->flags, m->refcount,
+               (void *)__builtin_return_address(0),
+               cpu_current_id());
+        frame_trace_dump_pfn(pfn);
+        frame_trace_dump_pfn(pfn ^ 1u);
+        pfa_hist_dump_all();
+        panic("pfa: free-list remove of unlisted node");
+    }
+    if (m->prev != PFN_NONE && pfn_valid(m->prev) &&
+        pfa.meta[m->prev].order == (uint8_t)order &&
+        pfa.meta[m->prev].flags == FRAME_F_FREE &&
+        pfa.meta[m->prev].next != pfn) {
+        printf("[PFA CORRUPT] prev back-link: pfn=%lu order=%d prev=%lu "
+               "prev.next=%lu cpu=%u\n",
+               (unsigned long)pfn, order, (unsigned long)m->prev,
+               (unsigned long)pfa.meta[m->prev].next, cpu_current_id());
+        pfa_hist_dump();
+        panic("pfa: free-list prev back-link mismatch");
+    }
+    if (m->next != PFN_NONE && pfn_valid(m->next) &&
+        pfa.meta[m->next].order == (uint8_t)order &&
+        pfa.meta[m->next].flags == FRAME_F_FREE &&
+        pfa.meta[m->next].prev != pfn) {
+        printf("[PFA CORRUPT] next back-link: pfn=%lu order=%d next=%lu "
+               "next.prev=%lu cpu=%u\n",
+               (unsigned long)pfn, order, (unsigned long)m->next,
+               (unsigned long)pfa.meta[m->next].prev, cpu_current_id());
+        pfa_hist_dump();
+        panic("pfa: free-list next back-link mismatch");
+    }
     if (m->prev != PFN_NONE) {
         if (!pfn_valid(m->prev) || pfa.meta[m->prev].order != (uint8_t)order ||
             pfa.meta[m->prev].flags != FRAME_F_FREE) {
@@ -261,7 +327,7 @@ static void fl_remove(pfn_t pfn, int order) {
     m->prev = PFN_NONE;
     m->next = PFN_NONE;
     pfa.free_lists[order].count--;
-    pfa_hist_record(0, pfn, order);
+    pfa_hist_record(0, pfn, order, (uintptr_t)__builtin_return_address(0));
 }
 
 /* Exclusive upper bound of the direct map, exported for the riscv64
@@ -557,6 +623,7 @@ void pfa_free(pfn_t pfn, int order) {
      * merged head, fl_push_clean() does not leave the released half marked
      * as independently live. */
     pfa.meta[pfn].refcount = 0;
+    frame_trace(pfn);
     pfa.free_frames += (1u << actual_order);
     const pfa_range_t *range = pfa_range_for_pfn(pfn);
     if (!range) {
@@ -571,10 +638,19 @@ void pfa_free(pfn_t pfn, int order) {
         if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
         if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
         if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
+        /* Stale metadata of a former block head keeps flags=FREE/order after
+         * its frame was merged into a larger block or allocated (fl_remove
+         * and the sub-page clearing loop deliberately skip FREE frames).
+         * Only a frame actually sitting on this order's free list may be
+         * merged out of it — everything else must stop the merge. */
+        if (!PFA_FREEMAP_TEST(buddy)) break;
         int buddy_dirty = 0;
         for (pfn_t i = buddy + 1; i < buddy + (1u << actual_order); i++) {
             if (i >= pfa.total_frames) break;
-            if (pfa.meta[i].refcount > 0) { buddy_dirty = 1; break; }
+            if (pfa.meta[i].refcount > 0 || PFA_FREEMAP_TEST(i)) {
+                buddy_dirty = 1;
+                break;
+            }
         }
         if (buddy_dirty) break;
 
@@ -613,6 +689,60 @@ void pfa_free(pfn_t pfn, int order) {
 // 简化接口
 pfn_t pfa_alloc_page(void) { return pfa_alloc(0); }
 void  pfa_free_page(pfn_t pfn) { pfa_free(pfn, 0); }
+
+/* Audit orphan scan: frames whose freemap bit is set (claimed on a buddy
+ * free list) but that no list walk can reach.  A set-bit/unreachable frame
+ * means its list links were severed after insertion — the signature of a
+ * listed node being swallowed by a larger block or having its meta
+ * overwritten.  Sized for 1M frames (4GB RAM); the scan is skipped on
+ * larger machines rather than allocating. */
+#define PFA_AUDIT_MAX_FRAMES (1u << 20)
+static uint8_t g_pfa_audit_seen[PFA_AUDIT_MAX_FRAMES / 8];
+
+static void pfa_audit_orphan_scan(void)
+{
+    if (!g_pfa_freemap || pfa.total_frames > PFA_AUDIT_MAX_FRAMES) {
+        printf("[PFA AUDIT] orphan scan skipped (frames=%lu)\n",
+               (unsigned long)pfa.total_frames);
+        return;
+    }
+    memset(g_pfa_audit_seen, 0, (pfa.total_frames + 7) / 8);
+
+    for (int o = 0; o <= MAX_ORDER; o++) {
+        unsigned walked = 0;
+        pfn_t p = pfa.free_lists[o].head;
+        while (p != PFN_NONE && walked <= pfa.total_frames) {
+            if (p < PFA_AUDIT_MAX_FRAMES)
+                g_pfa_audit_seen[p >> 3] |= (uint8_t)(1u << (p & 7));
+            walked++;
+            pfn_t n = pfn_valid(p) ? pfa.meta[p].next : PFN_NONE;
+            if (n == p)
+                break;
+            p = n;
+        }
+    }
+
+    unsigned orphans = 0;
+    for (pfn_t pfn = 0; pfn < pfa.total_frames; pfn++) {
+        if (!PFA_FREEMAP_TEST(pfn))
+            continue;
+        if (g_pfa_audit_seen[pfn >> 3] & (uint8_t)(1u << (pfn & 7)))
+            continue;
+        orphans++;
+        if (orphans <= 16) {
+            printf("[PFA AUDIT] ORPHAN pfn=%lu flags=0x%x order=%u "
+                   "refcount=%u prev=%lu next=%lu\n",
+                   (unsigned long)pfn, pfa.meta[pfn].flags,
+                   pfa.meta[pfn].order, pfa.meta[pfn].refcount,
+                   (unsigned long)pfa.meta[pfn].prev,
+                   (unsigned long)pfa.meta[pfn].next);
+            frame_trace_dump_pfn(pfn);
+        }
+    }
+    printf("[PFA AUDIT] orphan scan: %u frame(s) on freemap but unreachable\n",
+           orphans);
+    pfa_hist_dump_all();
+}
 
 /*
  * 关机前审计：遍历全部空闲链，验证双向链接、位图与元数据一致性。
@@ -660,6 +790,8 @@ int pfa_audit_lists(void)
             errors++;
         }
     }
+    if (errors)
+        pfa_audit_orphan_scan();
     spin_unlock_irqrestore(&pfa.lock, flags);
     return errors;
 }
@@ -668,6 +800,18 @@ int pfa_audit_lists(void)
 void frame_get(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    /* A zero-refcount frame is free or unowned: taking a reference on it
+     * means the caller found it through a dangling PTE/stale bookkeeping.
+     * Resurrecting it here would later surface as a double free or as a
+     * bogus buddy merge against stale metadata — fail loudly instead. */
+    if (pfa.meta[pfn].refcount == 0) {
+        printf("[PFA GET-FREE] pfn=%lu flags=0x%x order=%u pid=%d ra=%p cpu=%u\n",
+               (unsigned long)pfn, pfa.meta[pfn].flags, pfa.meta[pfn].order,
+               proc_current() ? proc_task_pid(proc_current()) : -1,
+               (void *)__builtin_return_address(0), cpu_current_id());
+        frame_trace_dump_pfn(pfn);
+        panic("pfa: frame_get on unreferenced frame");
+    }
     pfa.meta[pfn].refcount++;
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
@@ -700,10 +844,17 @@ static void frame_put_locked(pfn_t pfn) {
             if (buddy < range->start_pfn || buddy >= range->end_pfn) break;
             if (pfa.meta[buddy].flags != FRAME_F_FREE) break;
             if (pfa.meta[buddy].order != (uint8_t)actual_order) break;
+            /* See pfa_free: only a frame actually on this order's free list
+             * (freemap bit set) may be merged out of it; stale FREE metadata
+             * of a former block head must stop the merge. */
+            if (!PFA_FREEMAP_TEST(buddy)) break;
             int buddy_dirty = 0;
             for (pfn_t i = buddy + 1; i < buddy + (1u << actual_order); i++) {
                 if (i >= pfa.total_frames) break;
-                if (pfa.meta[i].refcount > 0) { buddy_dirty = 1; break; }
+                if (pfa.meta[i].refcount > 0 || PFA_FREEMAP_TEST(i)) {
+                    buddy_dirty = 1;
+                    break;
+                }
             }
             if (buddy_dirty) break;
             fl_remove(buddy, actual_order);
