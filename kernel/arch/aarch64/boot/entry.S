@@ -150,7 +150,8 @@ _start:
     mrs     x2, sctlr_el1
     /* Do not inherit firmware byte order or execute-never policy.  A20OS's
      * initial direct map deliberately contains writable executable kernel
-     * blocks, so WXN must remain clear until the kernel map is split. */
+     * blocks, so WXN must remain clear until arch_kernel_wx_finalize()
+     * (arch/aarch64/mm/kwx.c) splits the map and sets it from C. */
     bic     x2, x2, #(1 << 25)  /* EE: little-endian EL1 */
     bic     x2, x2, #(1 << 24)  /* E0E: little-endian EL0 */
     bic     x2, x2, #(1 << 19)  /* WXN */
@@ -237,7 +238,14 @@ aarch64_secondary_start:
     mrs     x2, sctlr_el1
     bic     x2, x2, #(1 << 25)
     bic     x2, x2, #(1 << 24)
+#if !defined(CONFIG_NOMMU) && !defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
+    /* Secondaries enable the MMU after arch_kernel_wx_finalize() has split
+     * the boot map into W^X-clean sections, so they can adopt WXN from the
+     * start (the primary sets it in C once the split is done). */
+    orr     x2, x2, #(1 << 19)
+#else
     bic     x2, x2, #(1 << 19)
+#endif
     orr     x2, x2, #(1 << 0)
     orr     x2, x2, #(1 << 2)
     orr     x2, x2, #(1 << 12)

@@ -8,6 +8,7 @@ LOAD_DELTA = VIRT_BASE - PHYS_BASE;
 SECTIONS
 {
     . = VIRT_BASE;
+    __text_start = .;
 
     .text : AT(ADDR(.text) - LOAD_DELTA) {
         *(.multiboot)
@@ -16,12 +17,14 @@ SECTIONS
     }
 
     . = ALIGN(4096);
+    __rodata_start = .;
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
         KEEP(*(.rodata.ap_trampoline))
         *(.rodata .rodata.*)
     }
 
     . = ALIGN(4096);
+    __data_start = .;
     .data : AT(ADDR(.data) - LOAD_DELTA) {
         *(.data .data.*)
         *(.sdata .sdata.*)
