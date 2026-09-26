@@ -105,7 +105,8 @@ int64_t sys_nanosleep(void *req, void *rem) {
     if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
     uint64_t sec  = ts[0];
     uint64_t nsec = ts[1];
-    if (nsec >= 1000000000ULL) return -EINVAL;
+    if ((int64_t)sec < 0 || (int64_t)nsec < 0 || nsec >= 1000000000ULL)
+        return -EINVAL;
     uint64_t ticks = sec * TICKS_PER_SEC +
                      (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
     if (ticks == 0)

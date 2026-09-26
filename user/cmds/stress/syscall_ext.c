@@ -653,18 +653,39 @@ drm_skipped:
     }
     int pcm = open("/dev/snd/pcmC0D0p", O_WRONLY);
     if (pcm >= 0) {
-        /* HW_PARAMS with S16_LE 48000Hz 2ch. */
-        struct { unsigned int flags; unsigned int m[24]; unsigned int iv[12*2]; unsigned int rmask,info,msbits,rate_num,rate_den; unsigned long fifo; unsigned char r[64]; } hp;
+        /* HW_PARAMS with S16_LE 48000Hz 2ch.  The wire struct and ioctl
+         * number follow the real Linux sound/asound.h layout (the kernel
+         * side has been on that ABI since the ALSA PCM ABI fix). */
+        struct alsa_interval { unsigned int min, max, flags; };
+        struct alsa_hw_params {
+            unsigned int flags;
+            unsigned int masks[3][8];
+            unsigned int mres[5][8];
+            struct alsa_interval intervals[12];
+            struct alsa_interval ires[9];
+            unsigned int rmask, cmask, info, msbits, rate_num, rate_den;
+            unsigned long fifo_size;
+            unsigned char sync[16];
+            unsigned char reserved[48];
+        } hp;
         memset(&hp, 0, sizeof(hp));
-        /* Set rate=48000, channels=2, format S16_LE, period=1024 in the
-         * interval array; index layout: format=0, channels=1, rate=3,
-         * period_size=10, periods=11. */
-        if (ioctl(pcm, 0xc1504111UL /* SNDRV_PCM_IOCTL_HW_PARAMS */, &hp) != 0) {
+        /* Param indices (Linux): CHANNELS=10 -> intervals[2],
+         * RATE=11 -> intervals[3], PERIOD_SIZE=13 -> intervals[5]. */
+        hp.intervals[2].min = 2;
+        hp.intervals[3].min = 48000;
+        hp.intervals[5].min = 1024;
+        if (ioctl(pcm, 0xc2604111UL /* SNDRV_PCM_IOCTL_HW_PARAMS */, &hp) != 0) {
             int e = errno;
             close(pcm);
             if (e == ENODEV || e == ENXIO)
                 goto alsa_skipped;
             return fail("alsa HW_PARAMS", e);
+        }
+        /* The kernel negotiates by pinning min=max to the chosen values. */
+        if (hp.intervals[2].min < 1 || hp.intervals[2].min > 2 ||
+            hp.intervals[3].min < 8000 || hp.intervals[3].min > 48000) {
+            close(pcm);
+            return fail("alsa HW_PARAMS negotiation", hp.intervals[3].min);
         }
         close(pcm);
     }
