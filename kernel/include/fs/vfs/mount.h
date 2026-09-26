@@ -16,4 +16,11 @@ const char *vfs_strip_mount_prefix(const char *path, const mount_t *mnt);
  * @to.  Returns 0 on success or a negative errno. */
 int      vfs_move_mount(const char *from, const char *to);
 
+/* Internal mount_t.flags bit: the entry was duplicated by a mount-namespace
+ * copy (unshare/clone CLONE_NEWNS) and shares its root vnode and fs_data
+ * with the same mount in another namespace.  vfs_umount() detaches such an
+ * entry from the local table only, without running the filesystem unmount
+ * destructor the other namespace still depends on. */
+#define VFS_MOUNT_NS_SHARED 0x40000000
+
 #endif /* _FS_VFS_MOUNT_H */

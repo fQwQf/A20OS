@@ -28,6 +28,7 @@
 #define CLONE_VFORK          0x00004000
 #define CLONE_PARENT         0x00008000
 #define CLONE_THREAD         0x00010000
+#define CLONE_NEWNS          0x00020000
 #define CLONE_SETTLS         0x00080000
 #define CLONE_PARENT_SETTID  0x00100000
 #define CLONE_CHILD_CLEARTID 0x00200000
@@ -99,6 +100,7 @@ int proc_tg_group_dead_locked(task_t *t);
 void proc_sched_runq_init(void);
 void proc_timer_heap_init(void);
 int  proc_sched_timers_due(uint64_t now);
+void proc_sched_scan_signal_timers(uint64_t now);
 void sched_scan_timers(uint64_t now);
 void proc_sched_expire_wait_timers(uint64_t now);
 unsigned proc_sched_select_cpu_locked(task_t *t);

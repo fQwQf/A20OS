@@ -1,9 +1,10 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
 
-/* LINUX_ABI_NAMESPACE_BOUNDARY: namespace syscalls operate on current task/fs
- * state (root_path/cwd credentials) without a separate Linux namespace object
- * model, matching the documented ABI boundary. */
+/* LINUX_ABI_NAMESPACE_BOUNDARY: chroot/execveat operate on current task/fs
+ * state (root_path/cwd credentials).  Mount namespaces have a real object
+ * model in kernel/fs/vfs/mntns.c (see unshare/setns/clone CLONE_NEWNS in
+ * sys_proc.c); the remaining namespace types are system-wide singletons. */
 
 int64_t sys_execveat(int dirfd, const char *path, char **argv, char **envp, int flags)
 {
