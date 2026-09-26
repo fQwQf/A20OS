@@ -102,6 +102,11 @@ void kernel_main(void) {
     printf("[INIT] Timekeeping initialized\n");
     mm_init();
     printf("[INIT] Memory initialized\n");
+    /* Split the boot megapage map into per-section kernel permissions
+     * (text ROX / rodata RO / data RW+NX, direct map NX).  Must run before
+     * the first process page table copies the kernel half and before SMP
+     * secondaries start sharing boot_pgdir. */
+    arch_kernel_wx_finalize();
     timekeeping_vdso_init();
 #ifdef CONFIG_SWAP
     swap_init();

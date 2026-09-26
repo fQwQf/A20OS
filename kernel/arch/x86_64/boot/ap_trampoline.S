@@ -28,9 +28,12 @@ x86_64_ap_trampoline_start:
     movl AP_TRAMPOLINE_PA + (x86_64_ap_trampoline_cr3 - x86_64_ap_trampoline_start), %eax
     movl %eax, %cr3
 
+    /* EFER.LME|NXE: long mode plus no-execute.  NXE must be on before paging
+     * is enabled because the kernel's higher-half tables carry NX bits once
+     * arch_kernel_wx_finalize() has split the boot map (kernel W^X). */
     movl $0xc0000080, %ecx
     rdmsr
-    orl  $0x100, %eax
+    orl  $0x900, %eax
     wrmsr
 
     movl %cr0, %eax

@@ -89,6 +89,19 @@ isr_common:
     orq   %rdx, %rax
     movq  %rax, 184(%rsp)       /* ctx->padding[1] */
 
+    /* Switch FS base to the kernel canary stub for the duration of kernel
+     * execution.  The compiler emits TLS-style stack-protector reads
+     * (mov %fs:0x28,...) under -fstack-protector-strong; leaving the user TLS
+     * in place makes kernel C read a user page that may be demand-paged,
+     * which recurses the fault handler.  __return_to_user restores the saved
+     * value before iretq. */
+    movabsq $__stack_chk_guard, %rax
+    subq  $0x28, %rax
+    movq  %rax, %rdx
+    shrq  $32, %rdx
+    movl  $0xC0000100, %ecx
+    wrmsr
+
     /* Read CR2 for kscratch0 (tval) */
     movq  %cr2, %rax
     movq  %rax, 168(%rsp)       /* ctx->kscratch0 */
@@ -396,6 +409,14 @@ syscall_entry_saved:
     shlq  $32, %rdx
     orq   %rdx, %rax
     movq  %rax, 184(%rsp)
+
+    /* Switch FS base to the kernel canary stub (see isr_common). */
+    movabsq $__stack_chk_guard, %rax
+    subq  $0x28, %rax
+    movq  %rax, %rdx
+    shrq  $32, %rdx
+    movl  $0xC0000100, %ecx
+    wrmsr
 
     /* Original task->kstack so __return_to_user / __switch can restore it. */
     movq  %r14, 192(%rsp)

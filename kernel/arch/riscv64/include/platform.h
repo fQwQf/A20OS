@@ -83,6 +83,14 @@ uint64_t riscv64_fdt_timebase_freq(void);
 
 extern uint64_t boot_pgdir[512];
 
-static inline void arch_unmap_boot_identity(void) { }
+/*
+ * Clear the boot-time identity map (root entries [0,256): low MMIO slot plus
+ * the RAM megapages).  It is transitional: secondary harts still execute a
+ * handful of instructions at identity addresses right after writing satp in
+ * .enable_mmu, so the map must stay valid (and executable) until all
+ * secondaries are past that point.  kernel_main calls this after
+ * smp_boot_secondaries().  Defined in arch/riscv64/mm/kwx.c.
+ */
+void arch_unmap_boot_identity(void);
 
 #endif
