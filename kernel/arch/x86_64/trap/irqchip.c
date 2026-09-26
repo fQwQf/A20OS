@@ -101,9 +101,12 @@ extern void *syscall_entry_table[CONFIG_NR_CPUS];
 #define MSR_STAR        0xC0000081
 #define MSR_LSTAR       0xC0000082
 #define MSR_SFMASK      0xC0000084
+#define MSR_FS_BASE     0xC0000100
 #define EFER_SCE        (1ULL << 0)
 #define EFER_NXE        (1ULL << 11)
 #define RFLAGS_IF       (1ULL << 9)
+
+extern uintptr_t __stack_chk_guard;
 
 static uint64_t make_gdt_entry(uint32_t base, uint32_t limit, uint8_t access, uint8_t flags) {
     return ((uint64_t)(limit & 0xFFFF)) |
@@ -292,6 +295,21 @@ void trap_init(void) {
     __asm__ __volatile__("rdmsr" : "=a"(efer) : "c"((uint32_t)MSR_EFER) : "rdx");
     efer |= EFER_SCE | EFER_NXE;
     __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_EFER), "a"((uint32_t)efer), "d"((uint32_t)(efer >> 32)));
+
+    /* The compiler emits TLS-style canary reads (mov %fs:0x28,...) under
+     * -fstack-protector-strong, but kernel mode has no TLS and FS base stays
+     * 0.  That only "worked" while linear address 0x28 was reachable through
+     * the boot identity map, which task page tables do not carry.  Point the
+     * kernel FS base at a stub whose +0x28 slot is __stack_chk_guard so the
+     * canary check resolves to the global guard value.  Per CPU (trap_init
+     * also runs on APs).  User mode keeps its own TLS: the trap frame saves
+     * and restores the user FS base around kernel/user transitions. */
+    {
+        uint64_t fsbase = (uint64_t)(uintptr_t)&__stack_chk_guard - 0x28;
+        __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_FS_BASE),
+                             "a"((uint32_t)fsbase),
+                             "d"((uint32_t)(fsbase >> 32)));
+    }
 
     /* Supervisor-mode access/execution prevention, per CPU.  No-op on CPU
      * models that do not advertise the features (e.g. QEMU qemu64). */

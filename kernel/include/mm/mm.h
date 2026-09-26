@@ -60,4 +60,20 @@ int  pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t f
 pte_t *pt_clone(pt_root_t *src_pgdir);
 void pt_destroy_user(pt_root_t *pgdir);
 
+/*
+ * Kernel-image W^X (KXAN).  arch_kernel_wx_finalize() splits the boot-time
+ * megapage map into per-section mappings (text ROX / rodata RO / data RW+NX)
+ * and makes the direct map non-executable; call once after mm_init() while
+ * the boot page table is still the only kernel address space.  Architectures
+ * that cannot split their boot map keep the weak no-op default.
+ *
+ * arch_kwx_module_protect()/unprotect() flip direct-map pages backing a
+ * drvmod module between RX (text region) and RW+NX; the default no-ops match
+ * architectures whose direct map remains executable.
+ */
+void arch_kernel_wx_finalize(void);
+int  arch_kwx_module_protect(paddr_t base_pa, size_t exec_bytes,
+                             size_t total_bytes);
+void arch_kwx_module_unprotect(paddr_t base_pa, size_t total_bytes);
+
 #endif
