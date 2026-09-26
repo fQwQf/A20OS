@@ -472,7 +472,8 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
 
         /* Preserve existing page contents if page already mapped */
         pte_t *old_pte = pt_walk(pgdir, page, 0);
-        if (old_pte && (*old_pte & PTE_V)) {
+        int page_already_mapped = old_pte && (*old_pte & PTE_V);
+        if (page_already_mapped) {
             paddr_t old_pa = arch_pte_addr(*old_pte);
             memcpy(frame, (void *)(old_pa + PAGE_OFFSET), PAGE_SIZE);
         } else {
@@ -487,8 +488,14 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
         /* Head partial page: file bytes preceding p_offset are part of
          * this page too (ELF header + program headers).  Back them so
          * AT_PHDR resolves for dynamically linked natives
-         * (docs/native-abi/08-runtime-status.md §8a). */
-        if (page < va && src->kind == SEG_FD) {
+         * (docs/native-abi/08-runtime-status.md §8a).
+         * Only when no earlier PT_LOAD already backed this page: the bytes
+         * [page, va) then belong to that earlier segment, and overlaying
+         * this segment's preceding file bytes would clobber them (a
+         * filesz==0 BSS LOAD whose p_offset does not continue the previous
+         * segment's file range would rewrite live .data with ELF header
+         * bytes). */
+        if (page < va && src->kind == SEG_FD && !page_already_mapped) {
             uint64_t foff = (uint64_t)src->fd.offset;
             if (foff > 0) {
                 uint64_t back = va - page;
