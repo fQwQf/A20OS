@@ -11,6 +11,9 @@ static uint64_t g_realtime_base_ticks;
 static uint64_t g_realtime_base_cycles;
 static uint64_t g_realtime_base_sec;
 static uint64_t g_realtime_base_nsec;
+/* Bumped on every discontinuous realtime-clock set; timerfd
+ * TFD_TIMER_CANCEL_ON_SET compares against the generation at arm time. */
+static uint64_t g_realtime_set_gen;
 static spinlock_t g_timekeeping_lock = SPINLOCK_INIT;
 
 static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
@@ -63,9 +66,17 @@ int timekeeping_set_realtime(uint64_t sec, uint64_t nsec) {
     g_realtime_base_cycles = arch_vdso_counter();
     g_realtime_base_sec = sec;
     g_realtime_base_nsec = nsec;
+    g_realtime_set_gen++;
     spin_unlock_irqrestore(&g_timekeeping_lock, flags);
     /* Keep the vDSO realtime anchor in sync (seqlock on the reader side);
      * pass the recorded cycle so both paths agree bit for bit. */
     vdso_sync_realtime(sec, nsec, g_realtime_base_cycles);
     return 0;
+}
+
+uint64_t timekeeping_realtime_set_generation(void) {
+    uint64_t flags = spin_lock_irqsave(&g_timekeeping_lock);
+    uint64_t gen = g_realtime_set_gen;
+    spin_unlock_irqrestore(&g_timekeeping_lock, flags);
+    return gen;
 }

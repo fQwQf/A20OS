@@ -825,9 +825,10 @@ int64_t sys_sendfile(int out_fd, int in_fd, long *off, size_t count) {
     return total;
 }
 
-int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
+int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask, size_t sigsetsize) {
     LS2K_PPOLL_MARK('p');
     if (nfds < 0) return -EINVAL;
+    if (sigmask && sigsetsize != sizeof(uint64_t)) return -EINVAL;
     task_t *t = proc_current();
     signal_state_t *saved_ss = NULL;
     uint64_t saved_blocked = 0;
@@ -841,7 +842,8 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
         if (tmo) {
             uint64_t ts[2];
             if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
-            if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
+            if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 ||
+                ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
             uint64_t ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
             if ((ts[0] || ts[1]) && ticks == 0)
                 ticks = 1;
@@ -867,7 +869,8 @@ int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask) {
     if (tmo) {
         uint64_t ts[2];
         if (copy_from_user(ts, tmo, sizeof(ts)) < 0) PPOLL_RETURN(-EFAULT);
-        if (ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
+        if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 ||
+            ts[1] >= 1000000000ULL) PPOLL_RETURN(-EINVAL);
         timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
         if ((ts[0] || ts[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
@@ -1031,7 +1034,8 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
     if (timeout) {
         uint64_t tv[2];
         if (copy_from_user(tv, timeout, sizeof(tv)) < 0) return -EFAULT;
-        if (tv[1] >= 1000000ULL) return -EINVAL;
+        if ((int64_t)tv[0] < 0 || (int64_t)tv[1] < 0 ||
+            tv[1] >= 1000000ULL) return -EINVAL;
         timeout_ticks = tv[0] * TICKS_PER_SEC + tv[1] * TICKS_PER_SEC / 1000000ULL;
         if ((tv[0] || tv[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
@@ -1053,7 +1057,8 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
     if (timeout) {
         uint64_t ts[2];
         if (copy_from_user(ts, timeout, sizeof(ts)) < 0) return -EFAULT;
-        if (ts[1] >= 1000000000ULL) return -EINVAL;
+        if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 ||
+            ts[1] >= 1000000000ULL) return -EINVAL;
         timeout_ticks = ts[0] * TICKS_PER_SEC + ts[1] * TICKS_PER_SEC / 1000000000ULL;
         if ((ts[0] || ts[1]) && timeout_ticks == 0)
             timeout_ticks = 1;
@@ -1063,6 +1068,7 @@ int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
     if (sigmask) {
         uint64_t data[2];
         if (copy_from_user(data, sigmask, sizeof(data)) < 0) return -EFAULT;
+        if (data[0] && data[1] != sizeof(uint64_t)) return -EINVAL;
         if (data[0]) {
             uint64_t user_mask = 0;
             if (copy_from_user(&user_mask, (void *)(uintptr_t)data[0], sizeof(user_mask)) < 0)

@@ -86,6 +86,22 @@ static uint64_t timeval_to_ticks(uint64_t sec, uint64_t usec)
     return sec * TICKS_PER_SEC + (usec * TICKS_PER_SEC + 999999ULL) / 1000000ULL;
 }
 
+/*
+ * ITIMER_VIRTUAL/PROF are accounted in scheduler accounting ticks
+ * (proc_sched_tick runs at a nominal 100 Hz): utime_ticks/stime_ticks
+ * count those ticks, not timer ticks.
+ */
+static uint64_t timeval_to_sched_ticks(uint64_t sec, uint64_t usec)
+{
+    return sec * 100ULL + (usec + 9999ULL) / 10000ULL;
+}
+
+static void sched_ticks_to_timeval(uint64_t ticks, uint64_t out[2])
+{
+    out[0] = ticks / 100ULL;
+    out[1] = (ticks % 100ULL) * 10000ULL;
+}
+
 static void ticks_to_timeval(uint64_t ticks, uint64_t out[2])
 {
     out[0] = ticks / TICKS_PER_SEC;
@@ -97,7 +113,13 @@ static int fill_getitimer(task_t *t, int which, uint64_t out[4])
     if (!t || which < 0 || which >= 3) return -EINVAL;
     memset(out, 0, sizeof(uint64_t) * 4);
     if (which != 0) {
-        memcpy(out, t->itimer_values[which], sizeof(uint64_t) * 4);
+        /* ITIMER_VIRTUAL/ITIMER_PROF: cpu-time timers driven by the
+         * scheduler tick accounting (kernel/proc/timer_posix.c). */
+        uint64_t cpu[2];
+        int r = posix_itimer_get(t, which - 1, cpu);
+        if (r < 0) return r;
+        sched_ticks_to_timeval(cpu[0], out);
+        sched_ticks_to_timeval(cpu[1], out + 2);
         return 0;
     }
 
@@ -118,49 +140,76 @@ int64_t sys_clock_nanosleep(int clk, int flags, const void *req, void *rem)
     if (flags & ~TIMER_ABSTIME) return -EINVAL;
     if (!req) return -EFAULT;
 
+    /* CLOCK_PROCESS/THREAD_CPUTIME_ID sleeps are not modeled; refuse them
+     * rather than silently sleeping on the monotonic clock. */
+    if (clk == 2 || clk == 3) return -EOPNOTSUPP;
+    int realtime = posix_clock_is_realtime(clk);
+    int monotonic = posix_clock_is_monotonic(clk);
+    if (!realtime && !monotonic) return -EINVAL;
+
     uint64_t ts[2];
     if (copy_from_user(ts, req, sizeof(ts)) < 0) return -EFAULT;
-    if (ts[1] >= 1000000000ULL) return -EINVAL;
+    if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 ||
+        ts[1] >= 1000000000ULL) return -EINVAL;
 
-    if (!(flags & TIMER_ABSTIME))
-        return sys_nanosleep((void *)req, rem);
+    uint64_t until;
+    if (flags & TIMER_ABSTIME) {
+        uint64_t now_ts[2];
+        if (realtime) timekeeping_get_realtime(now_ts);
+        else timekeeping_get_monotonic(now_ts);
 
-    uint64_t now_ts[2];
-    if (posix_clock_is_realtime(clk)) timekeeping_get_realtime(now_ts);
-    else if (posix_clock_is_monotonic(clk)) timekeeping_get_monotonic(now_ts);
-    else return -EINVAL;
+        if (ts[0] < now_ts[0] || (ts[0] == now_ts[0] && ts[1] <= now_ts[1]))
+            return 0;
 
-    if (ts[0] < now_ts[0] || (ts[0] == now_ts[0] && ts[1] <= now_ts[1]))
-        return 0;
-
-    uint64_t sec = ts[0] - now_ts[0];
-    uint64_t nsec;
-    if (ts[1] >= now_ts[1]) {
-        nsec = ts[1] - now_ts[1];
+        uint64_t sec = ts[0] - now_ts[0];
+        uint64_t nsec;
+        if (ts[1] >= now_ts[1]) {
+            nsec = ts[1] - now_ts[1];
+        } else {
+            if (sec == 0) return 0;
+            sec--;
+            nsec = 1000000000ULL + ts[1] - now_ts[1];
+        }
+        uint64_t ticks = sec * TICKS_PER_SEC +
+                         (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+        until = timer_get_ticks() + ticks;
     } else {
-        if (sec == 0) return 0;
-        sec--;
-        nsec = 1000000000ULL + ts[1] - now_ts[1];
+        uint64_t ticks = ts[0] * TICKS_PER_SEC +
+                         (ts[1] * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+        if (ticks == 0)
+            return 0;
+        until = timer_get_ticks() + ticks;
     }
 
-    (void)rem;
-    uint64_t ticks = sec * TICKS_PER_SEC +
-                     (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
-    uint64_t until = timer_get_ticks() + ticks;
-
     task_t *t = proc_current();
-    if (t) {
+    if (!t) {
+        while (timer_get_ticks() < until) cpu_relax();
+        return 0;
+    }
+    for (;;) {
         proc_wake_reason_t reason =
             proc_park_wait(PROC_WAIT_INTERRUPTIBLE, until);
         if (reason == PROC_WAKE_TIMEOUT_CAPACITY)
             return -EAGAIN;
         if (proc_wake_reason_is_task_interrupt(reason) ||
-            signal_task_has_unblocked(t))
-            return -ERESTARTSYS;
-    } else {
-        while (timer_get_ticks() < until) cpu_relax();
+            signal_task_has_unblocked(t)) {
+            /* Linux: clock_nanosleep is never restarted; relative sleeps
+             * report the remaining time through rem. */
+            if (!(flags & TIMER_ABSTIME) && rem) {
+                uint64_t now = timer_get_ticks();
+                uint64_t left = until > now ? until - now : 0;
+                uint64_t out[2] = {
+                    left / TICKS_PER_SEC,
+                    (left % TICKS_PER_SEC) * 1000000000ULL / TICKS_PER_SEC,
+                };
+                if (copy_to_user(rem, out, sizeof(out)) < 0)
+                    return -EFAULT;
+            }
+            return -EINTR;
+        }
+        if (timer_get_ticks() >= until)
+            return 0;
     }
-    return 0;
 }
 
 int64_t sys_getitimer(int which, void *curr_value)
@@ -188,9 +237,15 @@ int64_t sys_setitimer(int which, const void *new_value, void *old_value)
     if (!new_value) return -EFAULT;
     uint64_t next[4];
     if (copy_from_user(next, new_value, sizeof(next)) < 0) return -EFAULT;
-    if (next[1] >= 1000000ULL || next[3] >= 1000000ULL) return -EINVAL;
+    if ((int64_t)next[0] < 0 || (int64_t)next[1] < 0 || next[1] >= 1000000ULL ||
+        (int64_t)next[2] < 0 || (int64_t)next[3] < 0 || next[3] >= 1000000ULL) return -EINVAL;
+    if (which != 0) {
+        return posix_itimer_set(cur, which - 1,
+                                timeval_to_sched_ticks(next[2], next[3]),
+                                timeval_to_sched_ticks(next[0], next[1]));
+    }
     memcpy(cur->itimer_values[which], next, sizeof(next));
-    if (which == 0) {
+    {
         __atomic_store_n(&cur->itimer_real_interval,
                          timeval_to_ticks(next[0], next[1]),
                          __ATOMIC_RELAXED);
@@ -237,11 +292,14 @@ typedef struct {
 
 int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
 {
-    if (clockid != 0 && clockid != 1 && clockid != 7) return -EINVAL;
+    /* CPU-time clocks are not modeled; refuse them explicitly. */
+    if (clockid == 2 || clockid == 3) return -EOPNOTSUPP;
+    if (!posix_timer_clock_supported(clockid)) return -EINVAL;
     if (!timerid) return -EFAULT;
 
     int signo = SIGALRM;
     int target_tid = 0;
+    int no_notify = 0;
     if (sevp) {
         kernel_sigevent_t sev;
         if (copy_from_user(&sev, sevp, sizeof(sev)) < 0) return -EFAULT;
@@ -251,19 +309,27 @@ int64_t sys_timer_create(int clockid, void *sevp, int *timerid)
         } else if (sev.sigev_notify == 1) {
             /* SIGEV_NONE — no notification */
             signo = 0;
+            no_notify = 1;
         } else if (sev.sigev_notify == 4) {
             /* SIGEV_THREAD_ID — deliver sigev_signo to a specific thread */
             signo = sev.sigev_signo;
             target_tid = sev.un.tid;
             if (target_tid <= 0)
                 return -EINVAL;
+        } else {
+            /* SIGEV_THREAD (2) needs a user function+attribute to spawn a
+             * thread (a libc-side construct; musl/glibc translate it to
+             * SIGEV_THREAD_ID before the syscall).  It and any unknown
+             * notify value are refused rather than silently ignored. */
+            return -EINVAL;
         }
-        /* SIGEV_THREAD (2) needs a user function+attribute to spawn a thread;
-         * it is refused rather than silently ignored. */
+        if (!no_notify && (signo < 1 || signo >= NSIG))
+            return -EINVAL;
     }
 
     task_t *cur = proc_current();
-    int id = posix_timer_create(cur ? cur->pid : 0, signo, target_tid);
+    int id = posix_timer_create(cur ? cur->pid : 0, signo, target_tid,
+                                clockid);
     if (id < 0)
         return id;
     if (copy_to_user(timerid, &id, sizeof(id)) < 0) {
@@ -293,13 +359,11 @@ int64_t sys_timer_gettime(int timerid, void *curr_value)
 int64_t sys_timer_getoverrun(int timerid)
 {
     task_t *cur = proc_current();
-    int r = posix_timer_getoverrun(cur ? cur->pid : 0, timerid);
-    return r < 0 ? r : 0;
+    return posix_timer_getoverrun(cur ? cur->pid : 0, timerid);
 }
 
 int64_t sys_timer_settime(int timerid, int flags, const void *new_value, void *old_value)
 {
-    (void)flags;
     task_t *cur = proc_current();
     int pid = cur ? cur->pid : 0;
     if (old_value) {
@@ -311,7 +375,10 @@ int64_t sys_timer_settime(int timerid, int flags, const void *new_value, void *o
     if (!new_value) return -EFAULT;
     uint64_t ts[4];
     if (copy_from_user(ts, new_value, sizeof(ts)) < 0) return -EFAULT;
-    int r = posix_timer_set_time(pid, timerid, ts);
+    if ((int64_t)ts[0] < 0 || (int64_t)ts[1] < 0 || ts[1] >= 1000000000ULL ||
+        (int64_t)ts[2] < 0 || (int64_t)ts[3] < 0 || ts[3] >= 1000000000ULL)
+        return -EINVAL;
+    int r = posix_timer_set_time(pid, timerid, ts, flags);
     return r < 0 ? r : 0;
 }
 
