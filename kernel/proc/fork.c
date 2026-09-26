@@ -5,6 +5,7 @@
 #include "core/string.h"
 #include "core/trap.h"
 #include "fs/fdtable.h"
+#include "fs/vfs/mntns.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/vm.h"
@@ -223,6 +224,13 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
 
     /* Share the session keyring with the parent (kernel/ipc/keyring.c). */
     keyring_inherit(t, parent);
+
+    /* Mount namespace: share the parent's, or deep-copy the mount table
+     * when CLONE_NEWNS is set (kernel/fs/vfs/mntns.c). */
+    if (mntns_fork(t, parent, flags) < 0) {
+        proc_destroy_task(t);
+        return -ENOMEM;
+    }
 
     /* Capability envelopes are inherited (shared root budget, refcounted);
      * see kernel/abi/linux/envelope.c and docs/research/05. */

@@ -1,5 +1,6 @@
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
+#include "fs/vfs/mntns.h"
 #include "core/bootargs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -882,25 +883,31 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_PID_NS_PID:
-        snprintf(buf, bufsz, "pid:[0]\n");
+        /* Singleton namespaces: static identifiers (init-namespace inos). */
+        snprintf(buf, bufsz, "pid:[4026531836]\n");
         break;
     case PF_PID_NS_UTS:
-        snprintf(buf, bufsz, "uts:[0]\n");
+        snprintf(buf, bufsz, "uts:[4026531838]\n");
         break;
     case PF_PID_NS_USER:
-        snprintf(buf, bufsz, "user:[0]\n");
+        snprintf(buf, bufsz, "user:[4026531837]\n");
         break;
     case PF_PID_NS_IPC:
-        snprintf(buf, bufsz, "ipc:[0]\n");
+        snprintf(buf, bufsz, "ipc:[4026531839]\n");
         break;
-    case PF_PID_NS_MNT:
-        snprintf(buf, bufsz, "mnt:[0]\n");
+    case PF_PID_NS_MNT: {
+        /* Real mount namespaces: report the target task's namespace ino. */
+        task_t *t = proc_find_get(pid);
+        snprintf(buf, bufsz, "mnt:[%llu]\n",
+                 (unsigned long long)mntns_task_ino(t));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_NET:
-        snprintf(buf, bufsz, "net:[0]\n");
+        snprintf(buf, bufsz, "net:[4026531841]\n");
         break;
     case PF_PID_NS_CGROUP:
-        snprintf(buf, bufsz, "cgroup:[0]\n");
+        snprintf(buf, bufsz, "cgroup:[4026531835]\n");
         break;
     case PF_PID_MOUNTINFO: {
         buf[0] = '\0';
