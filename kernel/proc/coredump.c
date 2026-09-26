@@ -23,6 +23,7 @@
  */
 
 #include "proc/coredump.h"
+#include <stdint.h>
 #include "proc/proc.h"
 #include "proc/signal.h"
 #include "proc/debug_regs.h"
