@@ -107,7 +107,8 @@ int64_t sys_epoll_pwait2(int epfd, void *events, int maxevents,
             return -EINVAL;
         uint64_t total_ns = (uint64_t)ts.tv_sec * 1000000000ULL +
                             (uint64_t)ts.tv_nsec;
-        uint64_t ms = total_ns / 1000000ULL;
+        /* Round up: a sub-millisecond timeout must still wait. */
+        uint64_t ms = (total_ns + 999999ULL) / 1000000ULL;
         timeout_ms = ms > (uint64_t)0x7fffffff ? 0x7fffffff : (int)ms;
     }
     return epoll_wait_common(epfd, events, maxevents, timeout_ms,

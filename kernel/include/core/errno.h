@@ -71,6 +71,7 @@
 #define ETIME        62
 #define EOVERFLOW    75
 #define ESTALE       116
+#define ECANCELED    125
 #define ERESTARTNOINTR 513
 
 #define ERESTARTSYS  512   /* restart syscall after signal delivery */

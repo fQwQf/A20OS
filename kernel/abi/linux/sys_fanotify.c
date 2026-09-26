@@ -27,8 +27,16 @@ int64_t sys_fanotify_mark(int fanotify_fd, unsigned flags, uint64_t mask,
     if (gfd < 0)
         return -EBADF;
 
+    /* path is a user pointer: copy it in before syscall_path_at, which
+     * expects a kernel buffer (direct user strlen is an illegal kernel
+     * access with SUM cleared). */
+    char kpath[MAX_PATH_LEN];
+    long pr = user_path_strncpy(kpath, path, sizeof(kpath));
+    if (pr < 0)
+        return pr;
+
     char full[MAX_PATH_LEN];
-    int r = syscall_path_at(dfd, path, full, sizeof(full));
+    int r = syscall_path_at(dfd, kpath, full, sizeof(full));
     if (r < 0)
         return r;
 

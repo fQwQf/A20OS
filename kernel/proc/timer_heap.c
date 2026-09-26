@@ -502,15 +502,19 @@ void proc_sched_expire_wait_timers(uint64_t now)
     } while (expired_count == 128);
 }
 
-void sched_scan_timers(uint64_t now)
+/*
+ * Signal-timer scan (per-task SIGALRM alarms and POSIX compat timers).
+ * IRQ-safe: runs both from sched() passes and from the timer IRQ
+ * (proc_sched_tick) so timers fire on deadline even when every task is
+ * asleep and no sched() pass would otherwise happen.
+ */
+void proc_sched_scan_signal_timers(uint64_t now)
 {
     int scan_alarms =
         now >= __atomic_load_n(&next_alarm_scan, __ATOMIC_RELAXED);
     if (scan_alarms)
         __atomic_exchange_n(&next_alarm_scan, SCHED_NO_DEADLINE,
                             __ATOMIC_RELAXED);
-
-    proc_sched_expire_wait_timers(now);
 
     if (scan_alarms) {
         uint64_t next_alarm = SCHED_NO_DEADLINE;
@@ -568,6 +572,13 @@ void sched_scan_timers(uint64_t now)
 #ifdef CONFIG_ABI_LINUX
     posix_timer_tick();
 #endif
+}
+
+void sched_scan_timers(uint64_t now)
+{
+    proc_sched_expire_wait_timers(now);
+
+    proc_sched_scan_signal_timers(now);
 
     /* PSI stall accounting sample (kernel/core/psi.c). */
     extern void psi_tick(void);

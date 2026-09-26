@@ -76,7 +76,7 @@ int64_t sys_select(int nfds, void *readfds, void *writefds,
 int64_t sys_pselect6(int nfds, void *readfds, void *writefds,
                      void *exceptfds, void *timeout, void *sigmask);
 int64_t sys_poll(void *fds, int nfds, int timeout);
-int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask);
+int64_t sys_ppoll(void *fds, int nfds, void *tmo, void *sigmask, size_t sigsetsize);
 int64_t sys_epoll_create(int size);
 int64_t sys_epoll_create1(int flags);
 int64_t sys_epoll_ctl(int epfd, int op, int fd, void *event);

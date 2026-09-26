@@ -23,8 +23,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | memory management | partial | smoke-mm-stress (PASS 2026-08-26), smoke-oom-stress (PASS 2026-08-26) | brk/mmap/munmap/mprotect/mremap and COW exist; mseal enforces VM_SEALED against layout/protection changes; userfaultfd MISSING mode parks faults on registered ranges; file mmap/page cache semantics need work. |
 | scheduler | partial | smoke-sched-stress (PASS 2026-08-26), smoke-proc-stress (PASS 2026-08-26) | APIs map onto the per-CPU EEVDF/SMP scheduler; SCHED_OTHER/BATCH/IDLE have distinct EEVDF weights; RT priority, deadline scheduling, cgroup, and topology semantics remain bounded. |
 | futex | full | smoke-futex-stress (PASS 2026-08-26), smoke-futex-stress-aarch64 (PASS 2026-08-26) | all standard commands implemented (WAIT/WAKE/WAIT_BITSET/WAKE_BITSET/CMP_REQUEUE/LOCK_PI/UNLOCK_PI), including bounded PI variants with EEVDF weight-donation priority boost and OWNER_DIED handling; chained per-futex pi_state walk is out of scope. |
-| poll/epoll/select | partial | smoke-io-event, smoke-abi-linux (PASS 2026-08-26) | fd readiness works for common objects; wait infrastructure should move to formal wait queues. |
-| eventfd/timerfd | partial | smoke-proc-stress (PASS 2026-08-26) | fd-backed wait objects exist; full Linux timer semantics are simplified. |
+| poll/epoll/select | full | smoke-poll-edge (PASS 2026-09-26), smoke-io-event, smoke-abi-linux (PASS 2026-08-26，历史记录需复验) | fd readiness sits on formal wait queues (kernel/fs/readiness.c); timeout boundaries (0/-1/short), POLLNVAL/POLLHUP/ERR reporting rules, negative-time EINVAL, ppoll/pselect6 sigsetsize validation, epoll LT/ET/EPOLLONESHOT, dup-shared instances and nested epoll with ELOOP cycle refusal are covered by poll_edge. Fork-shared epoll interest lists stay per-process (fd-number keyed), a documented gap. |
+| eventfd/timerfd | full | smoke-poll-edge (PASS 2026-09-26), smoke-timer-edge (PASS 2026-09-26), smoke-proc-stress (PASS 2026-08-26，历史记录需复验) | eventfd counter/semaphore/overflow edges in poll_edge; timerfd relative and TFD_TIMER_ABSTIME arming, periodic expiration counting, disarm-on-zero and TFD_TIMER_CANCEL_ON_SET (ECANCELED after a realtime clock set) in timer_edge. CLOCK_*_ALARM clockids are refused (EINVAL), no wake-from-suspend source exists. |
 | fd I/O and splice | partial | smoke-syscall-ext | read/write/ioctl core plus real splice/tee/vmsplice (kernel/fs/splice.c) with SPLICE_F_* validation; remaining Linux edge semantics are documented per syscall. |
 | sockets | partial | smoke-network-suite (PASS 2026-08-26), smoke-network-suite-aarch64 (PASS 2026-08-26), smoke-socket-stress | AF_INET/AF_UNIX/AF_ALG subset exists via lwIP/socket layer; many protocol details are simplified. |
 | bpf | partial | smoke-abi-linux (PASS 2026-08-26) | KEP-backed program load/attach/detach only; no BPF maps, and attach targets are A20OS extension-point ids rather than Linux attach objects. |
@@ -97,21 +97,21 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `tee` | fd I/O | `partial` | `smoke-syscall-ext` | pipe-to-pipe duplicate without consuming the source; SPLICE_F_NONBLOCK/MORE validated |
 | `close_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sendfile` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `select` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `pselect6_time64` | poll | `partial` | `smoke-abi-linux` | 32-bit time64 alias of pselect6 |
-| `poll` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `ppoll` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `ppoll_time64` | poll | `partial` | `smoke-abi-linux` | 32-bit time64 alias of ppoll |
-| `epoll_create1` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `epoll_ctl` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `epoll_pwait` | poll | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `epoll_pwait2` | poll | `partial` | `smoke-syscall-ext` | epoll_pwait with a timespec64 timeout; Linux edge semantics remain documented gaps |
-| `eventfd2` | poll | `partial` | `smoke-syscall-ext` | read/write/semaphore semantics; O_NONBLOCK honored live via fcntl(F_SETFL) like pipes |
-| `timerfd_create` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timerfd_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timerfd_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timerfd_settime |
-| `timerfd_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timerfd_gettime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timerfd_gettime |
+| `select` | poll | `full` | `smoke-poll-edge` | wait-queue readiness engine; result-set pruning and negative-time EINVAL covered by smoke-poll-edge (PASS 2026-09-26) |
+| `pselect6_time64` | poll | `full` | `smoke-poll-edge` | 32-bit time64 alias of pselect6; sigsetsize and negative-time EINVAL validated by smoke-poll-edge (PASS 2026-09-26) |
+| `poll` | poll | `full` | `smoke-poll-edge` | timeout boundaries (0/-1/short), POLLNVAL on closed fds, fd<0 entries ignored, HUP/ERR reported regardless of requested events; smoke-poll-edge (PASS 2026-09-26) |
+| `ppoll` | poll | `full` | `smoke-poll-edge` | timespec timeout boundaries, nfds==0 sleep form, sigsetsize and negative-time EINVAL; smoke-poll-edge (PASS 2026-09-26) |
+| `ppoll_time64` | poll | `full` | `smoke-poll-edge` | 32-bit time64 alias of ppoll; smoke-poll-edge (PASS 2026-09-26) |
+| `epoll_create1` | poll | `full` | `smoke-poll-edge` | flag/size validation; smoke-poll-edge (PASS 2026-09-26) |
+| `epoll_ctl` | poll | `full` | `smoke-poll-edge` | EEXIST/ENOENT/EPERM/EBADF/self-EINVAL validation, nested epoll with ELOOP cycle refusal; smoke-poll-edge (PASS 2026-09-26) |
+| `epoll_pwait` | poll | `full` | `smoke-poll-edge` | LT/ET/EPOLLONESHOT state machine, dup-shared instances, unrequested EPOLLHUP delivery, data roundtrip; fork-shared interest lists stay per-process (documented); smoke-poll-edge (PASS 2026-09-26) |
+| `epoll_pwait2` | poll | `full` | `smoke-poll-edge` | epoll_pwait with a timespec64 timeout (sub-ms values round up, zero is poll-only); smoke-poll-edge (PASS 2026-09-26) |
+| `eventfd2` | poll | `full` | `smoke-poll-edge` | counter read/write, EFD_SEMAPHORE decrement, overflow/empty EAGAIN; O_NONBLOCK honored live via fcntl(F_SETFL) like pipes; smoke-poll-edge (PASS 2026-09-26) |
+| `timerfd_create` | time | `full` | `smoke-timer-edge` | CLOCK_REALTIME/MONOTONIC/BOOTTIME with clockid+flag validation; *_ALARM clockids refused EINVAL (no wake-from-suspend source); smoke-timer-edge (PASS 2026-09-26) |
+| `timerfd_settime` | time | `full` | `smoke-timer-edge` | relative and TFD_TIMER_ABSTIME arming against the fd clock, disarm-on-zero, old_value remaining time, flag validation; TFD_TIMER_CANCEL_ON_SET reads back -ECANCELED after a realtime clock set; smoke-timer-edge (PASS 2026-09-26) |
+| `timerfd_settime64` | time | `full` | `smoke-timer-edge` | 32-bit time64 alias of timerfd_settime |
+| `timerfd_gettime` | time | `full` | `smoke-timer-edge` | reports remaining time until expiry; smoke-timer-edge (PASS 2026-09-26) |
+| `timerfd_gettime64` | time | `full` | `smoke-timer-edge` | 32-bit time64 alias of timerfd_gettime |
 | `inotify_init1` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `socket` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `socketpair` | sockets | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
@@ -286,18 +286,18 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `clock_gettime32` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_getres` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_getres_time64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_getres |
-| `nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `clock_nanosleep` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `clock_nanosleep_time64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of clock_nanosleep |
-| `getitimer` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `setitimer` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timer_create` | time | `partial` | `smoke-syscall-ext` | SIGEV_SIGNAL/NONE/THREAD_ID notification; SIGEV_THREAD refused; overrun fixed 0 |
-| `timer_delete` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timer_gettime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timer_gettime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timer_gettime |
-| `timer_getoverrun` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timer_settime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `timer_settime64` | time | `partial` | `smoke-abi-linux` | 32-bit time64 alias of timer_settime |
+| `nanosleep` | time | `partial` | `smoke-proc-stress` | negative-time EINVAL validated by smoke-timer-edge (PASS 2026-09-26); a signal-interrupted sleep is restarted with the full original request (restart_syscall does not rewrite remaining time) |
+| `clock_nanosleep` | time | `full` | `smoke-timer-edge` | relative and TIMER_ABSTIME sleeps, past-abstime immediate return, EINTR with remaining time filled (never restarted), EINVAL validation; smoke-timer-edge (PASS 2026-09-26) |
+| `clock_nanosleep_time64` | time | `full` | `smoke-timer-edge` | 32-bit time64 alias of clock_nanosleep |
+| `getitimer` | time | `full` | `smoke-timer-edge` | ITIMER_REAL remaining from the alarm heap; ITIMER_VIRTUAL/PROF remaining in scheduler accounting ticks; smoke-timer-edge (PASS 2026-09-26) |
+| `setitimer` | time | `full` | `smoke-timer-edge` | ITIMER_REAL delivers SIGALRM off the wall-clock alarm heap; ITIMER_VIRTUAL/PROF deliver SIGVTALRM/SIGPROF off the scheduler tick accounting (utime / utime+stime) with interval reload and disarm-on-zero; EINVAL validation; smoke-timer-edge (PASS 2026-09-26) |
+| `timer_create` | time | `full` | `smoke-timer-edge` | SIGEV_SIGNAL/NONE/THREAD_ID with signo/tid validation; SIGEV_THREAD and unknown notify values refused EINVAL; clockids REALTIME/MONOTONIC/BOOTTIME plus RAW/COARSE/TAI aliases; CLOCK_PROCESS/THREAD_CPUTIME_ID refused EOPNOTSUPP (out of scope); smoke-timer-edge (PASS 2026-09-26) |
+| `timer_delete` | time | `full` | `smoke-timer-edge` | deleted timers never deliver again; smoke-timer-edge (PASS 2026-09-26) |
+| `timer_gettime` | time | `full` | `smoke-timer-edge` | reports the remaining time until expiry (zero when disarmed) plus the interval; smoke-timer-edge (PASS 2026-09-26) |
+| `timer_gettime64` | time | `full` | `smoke-timer-edge` | 32-bit time64 alias of timer_gettime |
+| `timer_getoverrun` | time | `full` | `smoke-timer-edge` | real overrun counting: expirations coalescing against a still-pending notification are counted and reported after delivery; smoke-timer-edge (PASS 2026-09-26) |
+| `timer_settime` | time | `full` | `smoke-timer-edge` | TIMER_ABSTIME against the timer's clock, disarm-on-zero, drift-free periodic rearm, old_value remaining time, EINVAL validation; smoke-timer-edge (PASS 2026-09-26) |
+| `timer_settime64` | time | `full` | `smoke-timer-edge` | 32-bit time64 alias of timer_settime |
 | `adjtimex` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `clock_adjtime` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `gettimeofday` | time | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -327,8 +327,8 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `mincore` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `personality` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `vhangup` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `unshare` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
-| `setns` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
+| `unshare` | namespaces | `partial` | `smoke-mntns` | CLONE_NEWNS creates a real mount namespace; other CLONE_NEW* and non-namespace unshare flags refuse with -EINVAL |
+| `setns` | namespaces | `partial` | `smoke-mntns` | joins mount namespaces via /proc/<pid>/ns/mnt fds (CAP_SYS_ADMIN/root/same-uid); non-mnt targets refuse with -EINVAL |
 | `pivot_root` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
 | `get_mempolicy` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; validates policy/flags/nice/priority and routes through proc_sched_set; no util-clamp or deadline fields |
