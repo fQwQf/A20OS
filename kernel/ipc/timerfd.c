@@ -5,6 +5,7 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "core/string.h"
+#include "core/timekeeping.h"
 #include "core/timer.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
@@ -17,15 +18,25 @@ typedef struct {
     spinlock_t    lock;
     wait_queue_t  waiters;
     uint64_t interval_sec, interval_nsec;
-    uint64_t value_sec, value_nsec;
     uint64_t expire_tick;
     int armed;
     int nonblock;
+    int clockid;
+    int cancel_on_set;
+    uint64_t cancel_gen;
 } timerfd_t;
 
 static uint64_t timerfd_timespec_to_ticks(uint64_t sec, uint64_t nsec)
 {
     return sec * TICKS_PER_SEC + (nsec * TICKS_PER_SEC + 999999999ULL) / 1000000000ULL;
+}
+
+/* Linux TFD_TIMER_CANCEL_ON_SET: an armed realtime-abstime timer becomes
+ * readable-with-ECANCELED when the realtime clock is set discontinuously. */
+static int timerfd_canceled_locked(timerfd_t *tfd)
+{
+    return tfd->armed && tfd->cancel_on_set &&
+           timekeeping_realtime_set_generation() != tfd->cancel_gen;
 }
 
 static void timerfd_remaining_locked(timerfd_t *tfd, uint64_t out[4])
@@ -47,6 +58,10 @@ static int timerfd_read(vfile_t *vf, char *buf, size_t count)
     if (count < sizeof(uint64_t)) return -EINVAL;
 
     spin_lock(&tfd->lock);
+    if (timerfd_canceled_locked(tfd)) {
+        spin_unlock(&tfd->lock);
+        return -ECANCELED;
+    }
     while (!tfd->armed || timer_get_ticks() < tfd->expire_tick) {
         if (tfd->nonblock) {
             spin_unlock(&tfd->lock);
@@ -105,8 +120,10 @@ static int timerfd_poll(vfile_t *vf, short events)
 
     int revents = 0;
     spin_lock(&tfd->lock);
-    if ((events & POLLIN) && tfd->armed &&
-        timer_get_ticks() >= tfd->expire_tick)
+    if ((events & POLLIN) && timerfd_canceled_locked(tfd))
+        revents |= POLLIN;
+    else if ((events & POLLIN) && tfd->armed &&
+             timer_get_ticks() >= tfd->expire_tick)
         revents |= POLLIN;
     spin_unlock(&tfd->lock);
     return revents;
@@ -139,6 +156,8 @@ static vfile_ops_t g_timerfd_ops = {
 
 int timerfd_create_file(int clockid, int flags)
 {
+    /* CLOCK_REALTIME/MONOTONIC/BOOTTIME; the *_ALARM clocks need a
+     * suspend/resume wake source this kernel does not have. */
     if (clockid != 0 && clockid != 1 && clockid != 7) return -EINVAL;
     if (flags & ~(O_CLOEXEC | O_NONBLOCK)) return -EINVAL;
     timerfd_t *tfd = kmalloc(sizeof(*tfd));
@@ -152,6 +171,7 @@ int timerfd_create_file(int clockid, int flags)
     spin_init(&tfd->lock);
     wait_queue_init(&tfd->waiters);
     tfd->nonblock = (flags & O_NONBLOCK) != 0;
+    tfd->clockid = clockid;
     vf->flags = O_RDONLY | (flags & O_NONBLOCK);
     refcount_set(&vf->ref_count, 1);
     vf->ops = &g_timerfd_ops;
@@ -161,6 +181,11 @@ int timerfd_create_file(int clockid, int flags)
 
 int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64_t old_value[4])
 {
+    /* TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET are the only valid flags;
+     * CANCEL_ON_SET is only meaningful together with ABSTIME. */
+    if (flags & ~3) return -EINVAL;
+    if ((flags & 2) && !(flags & 1)) return -EINVAL;
+    if ((int64_t)new_value[0] < 0 || (int64_t)new_value[2] < 0) return -EINVAL;
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf) return -EINVAL;
     if (vf->ops != &g_timerfd_ops) {
@@ -171,22 +196,48 @@ int timerfd_settime_file(int gfd, int flags, const uint64_t new_value[4], uint64
     spin_lock(&tfd->lock);
     if (old_value)
         timerfd_remaining_locked(tfd, old_value);
-    if (new_value[1] >= 1000000000ULL || new_value[3] >= 1000000000ULL) {
+    if ((int64_t)new_value[1] < 0 || new_value[1] >= 1000000000ULL ||
+        (int64_t)new_value[3] < 0 || new_value[3] >= 1000000000ULL) {
         spin_unlock(&tfd->lock);
         vfs_put_file_ref(gfd, vf);
         return -EINVAL;
     }
     tfd->interval_sec = new_value[0];
     tfd->interval_nsec = new_value[1];
-    tfd->value_sec = new_value[2];
-    tfd->value_nsec = new_value[3];
     uint64_t ticks = timerfd_timespec_to_ticks(new_value[2], new_value[3]);
     tfd->armed = ticks != 0;
+    tfd->cancel_on_set = 0;
+    tfd->cancel_gen = 0;
     if (tfd->armed) {
-        if (flags & 1)
-            tfd->expire_tick = ticks;
-        else
+        if (flags & 1) {
+            /* TFD_TIMER_ABSTIME: value is absolute on the timer's clock. */
+            uint64_t now_ts[2];
+            if (tfd->clockid == 0)
+                timekeeping_get_realtime(now_ts);
+            else
+                timekeeping_get_monotonic(now_ts);
+            uint64_t delta_ticks = 0;
+            if (new_value[2] > now_ts[0] ||
+                (new_value[2] == now_ts[0] && new_value[3] > now_ts[1])) {
+                uint64_t sec = new_value[2] - now_ts[0];
+                uint64_t nsec;
+                if (new_value[3] >= now_ts[1]) {
+                    nsec = new_value[3] - now_ts[1];
+                } else {
+                    sec--;
+                    nsec = 1000000000ULL + new_value[3] - now_ts[1];
+                }
+                delta_ticks = timerfd_timespec_to_ticks(sec, nsec);
+            }
+            /* A past absolute time expires immediately. */
+            tfd->expire_tick = timer_get_ticks() + delta_ticks;
+            if ((flags & 2) && tfd->clockid == 0) {
+                tfd->cancel_on_set = 1;
+                tfd->cancel_gen = timekeeping_realtime_set_generation();
+            }
+        } else {
             tfd->expire_tick = timer_get_ticks() + ticks;
+        }
     }
     spin_unlock(&tfd->lock);
     wait_queue_wake_all(&tfd->waiters, 0, PROC_WAKE_EVENT);

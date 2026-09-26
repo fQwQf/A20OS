@@ -1,6 +1,7 @@
 #include "proc/proc_internal.h"
 #include "proc/debug.h"
 #include "proc/rseq.h"
+#include "proc/posix_timer.h"
 
 #include "core/cpu.h"
 #include "core/klog.h"
@@ -930,6 +931,10 @@ void proc_sched_tick(int from_user)
         return;
     uint64_t now = timer_get_ticks();
     proc_sched_expire_wait_timers(now);
+    /* Signal timers (SIGALRM alarms, POSIX compat timers) must fire on
+     * deadline even when every task is asleep and no sched() pass runs. */
+    if (proc_sched_timers_due(now))
+        proc_sched_scan_signal_timers(now);
     unsigned tick_cpu = cpu_current_id();
     if (tick_cpu < CONFIG_NR_CPUS) {
         if (cur->pid == 0)
@@ -945,6 +950,10 @@ void proc_sched_tick(int from_user)
     } else if (cur->pid != 0) {
         cur->stime_ticks++;
     }
+#ifdef CONFIG_ABI_LINUX
+    /* ITIMER_VIRTUAL/ITIMER_PROF expiry is driven off these counters. */
+    posix_itimer_cpu_tick(cur);
+#endif
     if (cur->pid == 0 || cur->state != PROC_RUNNING)
         return;
 

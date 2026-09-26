@@ -22,7 +22,7 @@
 - Futex：已有基础 wait/wake 路径，但高级操作和所有 Linux memory-ordering 边界语义尚不完整。
 - VFS：已有很多路径和文件操作，但 mount namespace、symlink、权限、文件系统特定行为和并发语义仍不完整。
 - Sockets：AF_INET/AF_UNIX/AF_ALG 兼容面足够覆盖测试，但没有实现完整 Linux network stack 行为。
-- POSIX timers 和 timerfd：足够支撑常见等待场景；SIGEV_SIGNAL/NONE/THREAD_ID 通知已实现，SIGEV_THREAD 明确拒绝，overrun 计数固定为 0。
+- POSIX timers 和 timerfd：SIGEV_SIGNAL/NONE/THREAD_ID 通知已实现（SIGEV_THREAD 明确拒绝 EINVAL），overrun 计数按 pending 通知真实累计；timerfd 支持 TFD_TIMER_ABSTIME 与 TFD_TIMER_CANCEL_ON_SET（realtime 被设置后读返回 ECANCELED）；ITIMER_REAL/VIRTUAL/PROF 均有真实交付。CLOCK_PROCESS/THREAD_CPUTIME_ID 的 timer_create 与 clock_nanosleep 仍以 -EOPNOTSUPP 拒绝（范围外）；nanosleep 被信号打断后的重放仍用整条原始请求（restart_syscall 不建模剩余时间）。
 - Keyring：`kernel/ipc/keyring.c` 实现 add/request/keyctl 的核心命令与 session/user keyring，但没有 key type instantiator、`KEYCTL_*` 全部命令或完整 Linux 安全语义。
 - fanotify：基于共享 notify 后端（`kernel/fs/inotify.c`）实现 FAN_CLASS_NOTIF + FID；content/pre-content 类和 per-event fd 不在范围内。
 - acct(2)：写入 Linux v3 记账记录，但没有 BSD 风格的 `ac_btime` 高精度或完整字段集合。
