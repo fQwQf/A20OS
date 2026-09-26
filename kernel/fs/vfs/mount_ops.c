@@ -373,17 +373,21 @@ int vfs_umount(const char *path) {
             vfs_dcache_invalidate_all();
             vfs_drop_time_meta_mount(mnt);
             vnode_t *root = mnt->root;
-            if (mnt->type == FS_TYPE_FAT32) {
-                fat32_unmount(root);
-            } else if (mnt->type == FS_TYPE_EXT4) {
-                ext4_unmount(root);
-            } else if (mnt->type == FS_TYPE_NTFS) {
-                ntfs_unmount(root);
-            } else if (mnt->type == FS_TYPE_ISOFS) {
-                isofs_unmount(root);
-            } else if (mnt->type == FS_TYPE_UXFS) {
-                extern void uxfs_unmount(struct vnode *root);
-                uxfs_unmount(root);
+            if (!(mnt->flags & VFS_MOUNT_NS_SHARED)) {
+                /* Mounts copied into another namespace share the filesystem;
+                 * only a namespace-private mount may run the fs teardown. */
+                if (mnt->type == FS_TYPE_FAT32) {
+                    fat32_unmount(root);
+                } else if (mnt->type == FS_TYPE_EXT4) {
+                    ext4_unmount(root);
+                } else if (mnt->type == FS_TYPE_NTFS) {
+                    ntfs_unmount(root);
+                } else if (mnt->type == FS_TYPE_ISOFS) {
+                    isofs_unmount(root);
+                } else if (mnt->type == FS_TYPE_UXFS) {
+                    extern void uxfs_unmount(struct vnode *root);
+                    uxfs_unmount(root);
+                }
             }
             vfs_mount_remove(mnt);
             return 0;
