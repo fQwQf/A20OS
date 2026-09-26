@@ -32,6 +32,7 @@ PHDRS
 SECTIONS
 {
     . = VIRT_BASE;
+    __text_start = .;
 
     .text : AT(ADDR(.text) - LOAD_DELTA) {
         *(.text.entry)
@@ -39,11 +40,13 @@ SECTIONS
     } :text
 
     . = ALIGN(4096);
+    __rodata_start = .;
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
         *(.rodata .rodata.*)
     } :rodata
 
     . = ALIGN(4096);
+    __data_start = .;
     .data : AT(ADDR(.data) - LOAD_DELTA) {
         *(.data .data.*)
         *(.sdata .sdata.*)

@@ -1042,7 +1042,11 @@ int drvmod_load(int fd, const char *name)
     drvmod_secmap_t secmap[DRV_MOD_MAX_PLACED];
     uint32_t nmap = 0;
 
-    /* Layout: .text at 0; each data/bss section follows it. */
+    /* Layout: [.text][veneers] page-aligned, then data/bss, then the GOT.
+     * The text+veneer region is remapped read-only/executable after the
+     * copy below (arch_kwx_module_protect, kernel W^X); data and the GOT
+     * stay writable and non-executable.  Offsets for data sections are
+     * assigned in the placement pass after the veneer count is known. */
     for (uint32_t i = 0; i < nshdrs; i++) {
         elf_shdr_t *sh = &shdrs[i];
         const char *n = shstr + sh->sh_name;
@@ -1062,7 +1066,6 @@ int drvmod_load(int fd, const char *name)
             secmap[nmap].load_off = 0;
             secmap[nmap].size = (uint32_t)sh->sh_size;
             nmap++;
-            total_size = text_size;
         } else if ((sh->sh_flags & SHF_ALLOC) &&
                    !(sh->sh_flags & SHF_EXECINSTR) &&
                    (sh->sh_type == SHT_PROGBITS ||
@@ -1074,15 +1077,10 @@ int drvmod_load(int fd, const char *name)
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
-            uint32_t align = (uint32_t)sh->sh_addralign;
-            if (align < 4)
-                align = 4;
-            total_size = (total_size + align - 1) & ~(align - 1);
             secmap[nmap].idx = i;
-            secmap[nmap].load_off = total_size;
+            secmap[nmap].load_off = 0;  /* assigned by the placement pass */
             secmap[nmap].size = (uint32_t)sh->sh_size;
             nmap++;
-            total_size += (uint32_t)sh->sh_size;
         } else if (sh->sh_type == SHT_SYMTAB) {
             if (sh->sh_size % sizeof(elf_sym_t) != 0 ||
                 sh->sh_link >= nshdrs) {
@@ -1145,14 +1143,16 @@ int drvmod_load(int fd, const char *name)
         }
     }
 
-    /* AArch64 and RISC-V external calls may need a veneer at the module
-     * tail.  Reserve one for every external call relocation before the
-     * final load address is known; relocation only uses it when the direct
-     * displacement is out of range. */
+    /* AArch64 and RISC-V external calls may need a veneer.  Veneers are
+     * executable, so they live immediately after .text inside the RX region
+     * (kernel W^X), not at the module tail.  Reserve one for every external
+     * call relocation before the final load address is known; relocation
+     * only uses it when the direct displacement is out of range. */
     uint32_t *veneer_off = NULL;
     uint32_t nveneers = 0;
     uint32_t veneer_size = machine == EM_RISCV ? 24U : 16U;
     uint32_t veneer_align = machine == EM_RISCV ? 8U : 16U;
+    uint32_t veneer_base = 0;
     if ((machine == EM_AARCH64 || machine == EM_RISCV) && nrela_text) {
         for (uint32_t i = 0; i < nrela_text; i++) {
             uint32_t type = ELF_R_TYPE(rela_text[i].r_info);
@@ -1169,8 +1169,8 @@ int drvmod_load(int fd, const char *name)
             nveneers++;
         }
         if (nveneers) {
-            total_size = (total_size + veneer_align - 1) & ~(veneer_align - 1);
-            if (total_size + nveneers * veneer_size > DRV_MOD_MAX_SIZE) {
+            veneer_base = (text_size + veneer_align - 1) & ~(veneer_align - 1);
+            if (veneer_base + nveneers * veneer_size > DRV_MOD_MAX_SIZE) {
                 drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
                 return -ENOEXEC;
             }
@@ -1180,7 +1180,7 @@ int drvmod_load(int fd, const char *name)
                 return -ENOMEM;
             }
             memset(veneer_off, 0, nrela_text * sizeof(uint32_t));
-            uint32_t voff = total_size;
+            uint32_t voff = veneer_base;
             for (uint32_t i = 0; i < nrela_text; i++) {
                 uint32_t type = ELF_R_TYPE(rela_text[i].r_info);
                 int is_call = machine == EM_AARCH64
@@ -1194,8 +1194,31 @@ int drvmod_load(int fd, const char *name)
                 veneer_off[i] = voff;
                 voff += veneer_size;
             }
-            total_size += nveneers * veneer_size;
         }
+    }
+
+    /* Placement pass: the RX text region is page-aligned apart from the
+     * writable data area so the post-load permission split never shares a
+     * page between code and data.  Veneers (riscv64/aarch64 only) sit right
+     * after .text inside the RX region; on machines without veneers the
+     * region still must cover .text itself. */
+    uint32_t text_end = veneer_base + nveneers * veneer_size;
+    if (text_end < text_size)
+        text_end = text_size;
+    uint32_t text_region_size =
+        (text_end + PAGE_SIZE - 1) & ~(uint32_t)(PAGE_SIZE - 1);
+    total_size = text_region_size;
+    for (uint32_t k = 0; k < nmap; k++) {
+        elf_shdr_t *sh = &shdrs[secmap[k].idx];
+        const char *n = shstr + sh->sh_name;
+        if (strcmp(n, ".text") == 0)
+            continue;
+        uint32_t align = (uint32_t)sh->sh_addralign;
+        if (align < 4)
+            align = 4;
+        total_size = (total_size + align - 1) & ~(align - 1);
+        secmap[k].load_off = total_size;
+        total_size += secmap[k].size;
     }
 
     /* RISC-V and LoongArch64 external data references load the symbol address
@@ -1440,6 +1463,18 @@ int drvmod_load(int fd, const char *name)
     arch_flush_icache_range((void *)load_base, total_size);
     drvmod_free_pages(shadow_pfn, alloc_order);
 
+    /* Kernel W^X: the direct map is non-executable, so the module's text
+     * region must be marked read-only/executable (and the data region
+     * explicitly non-executable) before DriverEntry can run.  The text
+     * region holds .text plus loader veneers and is page-aligned apart
+     * from data by the layout above. */
+    if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,
+                                total_size) < 0) {
+        kerr("[DRVMOD] %s: cannot mark module text executable\n", name);
+        drvmod_free_pages(alloc_pfn, alloc_order);
+        return -ENOMEM;
+    }
+
     drv_module_t *m = &drv_modules[slot];
     memset(m, 0, sizeof(*m));
     m->used = 1;
@@ -1465,6 +1500,10 @@ int drvmod_unload(int id)
     if (m->pinned)
         return -EBUSY;
     kdebug("[DRVMOD] unload '%s'\n", m->name);
+    /* Restore the module pages to the plain RW+NX direct-map state before
+     * returning them to the allocator, so the next owner never inherits an
+     * executable (or read-only) mapping. */
+    arch_kwx_module_unprotect(pfn_to_phys(m->alloc_pfn), m->total_size);
     drvmod_free_pages(m->alloc_pfn, m->alloc_order);
     memset(m, 0, sizeof(*m));
     return 0;
