@@ -1,5 +1,6 @@
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
+#include "fs/vfs/mntns.h"
 #include "proc/proc_internal.h"
 #include "core/consts.h"
 #include "core/panic.h"
@@ -288,7 +289,14 @@ int fdtable_unshare(task_t *task)
 
 void fdtable_close_all(task_t *task)
 {
-    if (!task || !task->files)
+    if (!task)
+        return;
+    /* Per-task teardown also drops the mount-namespace reference.  This is
+     * the only fs-layer hook the process core calls on every teardown path
+     * (exit and final task destruction); mntns_release_task() NULLs the
+     * field, so the double call is safe. */
+    mntns_release_task(task);
+    if (!task->files)
         return;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     files_struct_t *files = (files_struct_t *)task->files;

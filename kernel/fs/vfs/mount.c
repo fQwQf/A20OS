@@ -1,34 +1,38 @@
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mntns.h"
 #include "core/string.h"
 
-#define MAX_MOUNTS 64
-
-static mount_t g_mounts[MAX_MOUNTS];
-static int g_nmounts;
+/*
+ * The mount table lives inside the caller's mount namespace
+ * (kernel/fs/vfs/mntns.c).  Every accessor below implicitly operates on the
+ * current task's namespace — the initial namespace when there is no current
+ * task (boot, kernel threads) — so existing VFS call sites need no changes.
+ */
 
 void vfs_mount_table_init(void)
 {
-    memset(g_mounts, 0, sizeof(g_mounts));
-    g_nmounts = 0;
+    mntns_early_init();
 }
 
 int vfs_mount_count(void)
 {
-    return g_nmounts;
+    return mntns_current()->nmounts;
 }
 
 mount_t *vfs_mount_at(int index)
 {
-    if (index < 0 || index >= g_nmounts)
+    mnt_namespace_t *ns = mntns_current();
+    if (index < 0 || index >= ns->nmounts)
         return NULL;
-    return &g_mounts[index];
+    return &ns->mounts[index];
 }
 
 mount_t *vfs_mount_alloc(void)
 {
-    if (g_nmounts >= MAX_MOUNTS)
+    mnt_namespace_t *ns = mntns_current();
+    if (ns->nmounts >= MNTNS_MAX_MOUNTS)
         return NULL;
-    mount_t *mnt = &g_mounts[g_nmounts++];
+    mount_t *mnt = &ns->mounts[ns->nmounts++];
     memset(mnt, 0, sizeof(*mnt));
     return mnt;
 }
@@ -37,28 +41,30 @@ void vfs_mount_remove(mount_t *mnt)
 {
     if (!mnt)
         return;
+    mnt_namespace_t *ns = mntns_current();
     int idx = -1;
-    for (int i = 0; i < g_nmounts; i++) {
-        if (&g_mounts[i] == mnt) {
+    for (int i = 0; i < ns->nmounts; i++) {
+        if (&ns->mounts[i] == mnt) {
             idx = i;
             break;
         }
     }
     if (idx < 0)
         return;
-    for (int i = idx; i < g_nmounts - 1; i++)
-        g_mounts[i] = g_mounts[i + 1];
-    memset(&g_mounts[g_nmounts - 1], 0, sizeof(g_mounts[g_nmounts - 1]));
-    g_nmounts--;
+    for (int i = idx; i < ns->nmounts - 1; i++)
+        ns->mounts[i] = ns->mounts[i + 1];
+    memset(&ns->mounts[ns->nmounts - 1], 0, sizeof(ns->mounts[ns->nmounts - 1]));
+    ns->nmounts--;
 }
 
 mount_t *vfs_find_mount(const char *path)
 {
+    mnt_namespace_t *ns = mntns_current();
     mount_t *best = NULL;
     size_t best_len = 0;
-    for (int i = 0; i < g_nmounts; i++) {
-        size_t len = strlen(g_mounts[i].path);
-        if (strncmp(path, g_mounts[i].path, len) == 0 &&
+    for (int i = 0; i < ns->nmounts; i++) {
+        size_t len = strlen(ns->mounts[i].path);
+        if (strncmp(path, ns->mounts[i].path, len) == 0 &&
             (len == 1 || path[len] == '\0' || path[len] == '/') &&
             (len > best_len
 #ifdef CONFIG_EXTERNAL_ROOT
@@ -68,7 +74,7 @@ mount_t *vfs_find_mount(const char *path)
              || (len == 1 && best_len == 1)
 #endif
             )) {
-            best = &g_mounts[i];
+            best = &ns->mounts[i];
             best_len = len;
         }
     }

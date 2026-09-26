@@ -2,6 +2,8 @@
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
+#include "fs/procfs.h"
+#include "fs/vfs/mntns.h"
 #include "ipc/kexec.h"
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
@@ -85,9 +87,27 @@ __attribute__((weak)) int64_t sys_pause(void) {
     (LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES | \
      LINUX_CLONE_SIGHAND | LINUX_CLONE_PIDFD | LINUX_CLONE_PTRACE | \
      LINUX_CLONE_VFORK | LINUX_CLONE_PARENT | LINUX_CLONE_THREAD | \
+     LINUX_CLONE_NEWNS | \
      LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
      LINUX_CLONE_PARENT_SETTID | LINUX_CLONE_CHILD_CLEARTID | \
      LINUX_CLONE_CHILD_SETTID | LINUX_CLONE_IO | 0xFFULL)
+
+/* Namespace types other than mount namespaces are not implemented; both
+ * clone and clone3 refuse them instead of silently ignoring the flag. */
+#define LINUX_CLONE_UNSUPPORTED_NS_FLAGS \
+    (LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS | LINUX_CLONE_NEWIPC | \
+     LINUX_CLONE_NEWUSER | LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET)
+
+/* CLONE_NEWNS requires privilege in the caller (Linux: CAP_SYS_ADMIN in the
+ * current user namespace; simplified here to CAP_SYS_ADMIN or root). */
+static int linux_clone_newns_perm_check(void) {
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!proc_has_cap(t, CAP_SYS_ADMIN) && t->cred.euid != 0)
+        return -EPERM;
+    return 0;
+}
 
 static uint64_t clamp_stack_rlimit(uint64_t cur, uint64_t max) {
     uint64_t limit = cur < max ? cur : max;
@@ -396,17 +416,89 @@ int64_t sys_vhangup(void) {
 }
 
 int64_t sys_unshare(int flags) {
-    if (flags & ~(0x00000100U | 0x00000200U | 0x00000400U | 0x00020000U |
-                  0x04000000U | 0x08000000U | 0x10000000U | 0x20000000U |
-                  0x40000000U | 0x80000000U))
+    /* Honest namespace semantics: CLONE_NEWNS creates a real mount
+     * namespace; every other namespace type is refused with -EINVAL
+     * (Linux's error for unsupported types) instead of faking success.
+     * The non-namespace unshare flags (CLONE_FS/FILES/SIGHAND/VM/THREAD/
+     * SYSVSEM) are likewise not implemented and refuse honestly. */
+    const int known = (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
+                      LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
+                      LINUX_CLONE_NEWNS | LINUX_CLONE_SYSVSEM |
+                      LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS |
+                      LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWUSER |
+                      LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET);
+    if (flags & ~known)
         return -EINVAL;
+    if (flags & (int)(LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS |
+                      LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWUSER |
+                      LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET))
+        return -EINVAL;
+    if (flags & (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
+                      LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
+                      LINUX_CLONE_SYSVSEM))
+        return -EINVAL;
+    if (flags & (int)LINUX_CLONE_NEWNS) {
+        task_t *t = proc_current();
+        if (!t)
+            return -ESRCH;
+        if (!proc_has_cap(t, CAP_SYS_ADMIN) && t->cred.euid != 0)
+            return -EPERM;
+        return mntns_unshare(t);
+    }
     return 0;
 }
 
 int64_t sys_setns(int fd, int nstype) {
-    (void)fd;
-    (void)nstype;
-    return 0;
+    int gfd = -1;
+    vfile_t *vf = fdtable_get_current_file_ref(fd, &gfd);
+    if (!vf)
+        return -EBADF;
+    int kind = procfs_ns_file_kind(vf);
+    if (kind < 0) {
+        /* fd is not a /proc/<pid>/ns/<type> file */
+        vfs_put_file_ref(gfd, vf);
+        return -EINVAL;
+    }
+    /* Map the target kind to its CLONE_NEW* bit for the nstype check. */
+    static const int kind_flags[] = {
+        [PROCNS_MNT]    = 0x00020000,  /* CLONE_NEWNS */
+        [PROCNS_PID]    = 0x20000000,  /* CLONE_NEWPID */
+        [PROCNS_UTS]    = 0x04000000,  /* CLONE_NEWUTS */
+        [PROCNS_USER]   = 0x10000000,  /* CLONE_NEWUSER */
+        [PROCNS_IPC]    = 0x08000000,  /* CLONE_NEWIPC */
+        [PROCNS_NET]    = 0x40000000,  /* CLONE_NEWNET */
+        [PROCNS_CGROUP] = 0x02000000,  /* CLONE_NEWCGROUP */
+    };
+    if (nstype != 0 && nstype != kind_flags[kind]) {
+        vfs_put_file_ref(gfd, vf);
+        return -EINVAL;
+    }
+    /* Only mount namespaces can be joined; the other namespace types are
+     * system-wide singletons and setns is honestly refused. */
+    if (kind != PROCNS_MNT) {
+        vfs_put_file_ref(gfd, vf);
+        return -EINVAL;
+    }
+    int owner_uid = -1;
+    mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid);
+    if (!ns) {
+        vfs_put_file_ref(gfd, vf);
+        return -EINVAL;
+    }
+    task_t *cur = proc_current();
+    /* Permission model (documented simplification of Linux's
+     * CAP_SYS_ADMIN-in-target-user-ns rule, which needs user namespaces):
+     * the caller must hold CAP_SYS_ADMIN, run as root, or share the
+     * namespace owner's uid recorded when the fd was opened. */
+    if (!cur || (!proc_has_cap(cur, CAP_SYS_ADMIN) && cur->cred.euid != 0 &&
+                 cur->cred.euid != owner_uid)) {
+        mntns_put(ns);
+        vfs_put_file_ref(gfd, vf);
+        return -EPERM;
+    }
+    int r = mntns_join(cur, ns);  /* consumes the reference */
+    vfs_put_file_ref(gfd, vf);
+    return r;
 }
 
 int64_t sys_pivot_root(const char *new_root, const char *put_old) {
@@ -459,6 +551,11 @@ int64_t sys_clone3(void *cl_args, size_t size) {
         return -EINVAL;
     if ((args.flags & LINUX_CLONE_FS) && (args.flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
+    if (args.flags & LINUX_CLONE_NEWNS) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
     if (!!args.stack != !!args.stack_size)
         return -EINVAL;
     if (args.flags & LINUX_CLONE_PIDFD) {
@@ -537,6 +634,15 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
         return -EINVAL; /* NOMMU does not support fork without CLONE_VM */
     }
 #endif
+    if (flags & LINUX_CLONE_UNSUPPORTED_NS_FLAGS)
+        return -EINVAL;
+    if ((flags & LINUX_CLONE_FS) && (flags & LINUX_CLONE_NEWNS))
+        return -EINVAL;
+    if (flags & LINUX_CLONE_NEWNS) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
     return proc_clone(flags, (uint64_t)(uintptr_t)stack, ptid, tls, ctid,
                       (int)(flags & 0xFF));
 }

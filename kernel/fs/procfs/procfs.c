@@ -16,6 +16,7 @@
 #include "fs/page_cache.h"
 #include "fs/ext4.h"
 #include "fs/vfs/dcache.h"
+#include "fs/vfs/mntns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/coredump.h"
@@ -241,6 +242,11 @@ typedef struct {
     int pid;
     size_t content_len;
     char *content;
+    /* setns(2) pinning: an open /proc/<pid>/ns/mnt file holds one
+     * mnt_namespace reference so the fd stays a valid setns target after
+     * the target process leaves or exits the namespace. */
+    void *ns_ref;
+    int   ns_owner_uid;
 } procfs_priv_t;
 
 static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
@@ -305,6 +311,17 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
             return NULL;
         }
         p->content_len = (size_t)len;
+    }
+    if (type == PF_PID_NS_MNT) {
+        /* Pin the target's mount namespace for setns(2); released from
+         * procfs_fclose().  Done last so the failure paths above have no
+         * reference to drop. */
+        task_t *target = proc_find_get(real_pid);
+        if (target) {
+            p->ns_ref = mntns_task_get(target);
+            p->ns_owner_uid = target->cred.uid;
+            proc_put(target);
+        }
     }
     return p;
 }
@@ -1133,6 +1150,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 static int procfs_fclose(vfile_t *vf) {
     if (vf && vf->priv) {
         procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+        if (p->ns_ref)
+            mntns_put((mnt_namespace_t *)p->ns_ref);
         kfree(p->content);
         kfree(p);
         vf->priv = NULL;
@@ -1156,6 +1175,43 @@ static vfile_ops_t g_procfs_fops = {
 int vfs_is_procfs_vfile(const vfile_t *vf)
 {
     return vf && vf->ops == &g_procfs_fops;
+}
+
+/* setns(2) support: classify an open vfile as a /proc/<pid>/ns/<type> file.
+ * Returns one of the PROCNS_* kind constants, or -1 when the file is not a
+ * procfs namespace file. */
+int procfs_ns_file_kind(const vfile_t *vf)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv)
+        return -1;
+    switch (((const procfs_priv_t *)vf->priv)->type) {
+    case PF_PID_NS_MNT:    return PROCNS_MNT;
+    case PF_PID_NS_PID:    return PROCNS_PID;
+    case PF_PID_NS_UTS:    return PROCNS_UTS;
+    case PF_PID_NS_USER:   return PROCNS_USER;
+    case PF_PID_NS_IPC:    return PROCNS_IPC;
+    case PF_PID_NS_NET:    return PROCNS_NET;
+    case PF_PID_NS_CGROUP: return PROCNS_CGROUP;
+    default:               return -1;
+    }
+}
+
+/* setns(2) support: for an open /proc/<pid>/ns/mnt file, return the pinned
+ * mount namespace with an extra reference (caller mntns_put()s it) and the
+ * namespace owner's uid recorded at open time.  Returns NULL when the
+ * namespace could not be pinned (target already gone at open). */
+mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv)
+        return NULL;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p->type != PF_PID_NS_MNT || !p->ns_ref)
+        return NULL;
+    mnt_namespace_t *ns = (mnt_namespace_t *)p->ns_ref;
+    refcount_inc(&ns->refs);
+    if (out_owner_uid)
+        *out_owner_uid = p->ns_owner_uid;
+    return ns;
 }
 
 // 挂载 procfs 文件系统

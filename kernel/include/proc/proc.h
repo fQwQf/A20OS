@@ -11,6 +11,7 @@
 #include <signal_abi.h>
 
 struct signal_state;
+struct mnt_namespace;
 struct mm_struct;
 struct vm_area;
 struct files_struct;
@@ -321,6 +322,12 @@ typedef struct task_t {
     uint32_t       abi_mode;        /* 0 = Linux ABI, 1 = Native ABI */
     struct vmo *stack_vmo;
     struct vmo *heap_vmo;
+    /* Mount namespace membership (kernel/fs/vfs/mntns.c).  NULL means the
+     * initial namespace, which is statically pinned and needs no reference.
+     * A non-NULL pointer owns one mnt_namespace reference, taken at
+     * fork/unshare/setns and released by mntns_release_task() from the
+     * per-task teardown in fdtable_close_all(). */
+    struct mnt_namespace *mnt_ns;
     proc_ns_context_t ns_ctx;
 
     /* Kernel keyring subsystem (kernel/ipc/keyring.c).  Owning reference to a
