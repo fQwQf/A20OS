@@ -526,6 +526,16 @@ ifneq ($(strip $(EXTRA_QEMU)),)
 QEMU_FLAGS += $(EXTRA_QEMU)
 endif
 
+# DISPLAY_MODE=gui replaces -nographic with a real display plus the per-arch
+# GUI device set (keyboard/mouse/GPU).  Needed by any test that has to see a
+# display device: -nographic suppresses the display, and text mode attaches no
+# virtio-gpu at all, so a GPU test there would be vacuous.  -serial stdio is
+# kept because the smoke harness injects commands and matches the log there.
+DISPLAY_MODE ?= text
+ifeq ($(DISPLAY_MODE),gui)
+QEMU_FLAGS := $(filter-out -nographic,$(QEMU_FLAGS)) -display $(QEMU_GUI_DISPLAY) $(QEMU_GUI_DEVICES) -serial stdio
+endif
+
 ifeq ($(ARCH),armv7m)
 ifeq ($(CROSS_PREFIX),)
 CLANG_ARMV7M := $(or $(shell command -v clang-19 2>/dev/null),$(shell command -v clang 2>/dev/null))
