@@ -338,191 +338,22 @@ smoke-driver-lifecycle:
 	fi
 
 smoke-hda:
-	$(call smoke-gate,1G,1)
-	rm -f user/build/x86_64/hda.a20drv
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/hda-x86_64.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-audiodev driver=none,id=audio0 \
-		-device intel-hda -device hda-duplex,audiodev=audio0 \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev-hda-smoke/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev-hda-smoke/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
-	   grep -q "bound to driver 'hda'" "$$log" && \
-	   grep -q '\[HDA\] driver registered in core: 0' "$$log" && \
-	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-hda: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-hda: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-hda
 
 smoke-audio-userspace:
-	$(call smoke-gate,1G,1)
-	rm -f user/build/x86_64/hda.a20drv
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.log"; \
-	wav="$(SMOKE_LOG_DIR)/audio-userspace-x86_64.wav"; \
-	rm -f "$$wav"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/audioplay --tone 440 --duration 5000\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot -snapshot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-audiodev driver=wav,id=audio0,path="$$wav" \
-		-device intel-hda -device hda-duplex,audiodev=audio0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'audioplay: 440 Hz for 5000 ms -> /dev/audio' "$$log" && \
-	   grep -q 'audioplay: playback complete' "$$log" && \
-	   grep -q '\[HDA\] playback starts=1 underruns=0' "$$log" && \
-	   grep -q "bound to driver 'hda'" "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log" && \
-	   ! grep -q 'audioplay: playback failed' "$$log" && \
-	   ! grep -qi 'panic' "$$log" && \
-	   $(PYTHON) tools/check_wav_pcm.py --max-delta 1000 \
-	       --min-frames 200000 "$$wav"; then \
-		echo "smoke-audio-userspace: PASS; log=$$log wav=$$wav"; \
-	else \
-		echo "smoke-audio-userspace: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-audio-userspace
 
 smoke-usb-x86_64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/usb-x86_64.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-device qemu-xhci,id=xhci \
-		-device usb-kbd \
-		-device usb-mouse \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[USB-HID\] keyboard ready' "$$log" && \
-	   grep -q '\[USB-HID\] mouse ready' "$$log" && \
-	   grep -q "bound to driver 'usb-hid'" "$$log" && \
-	   ! grep -q '\[USB\] port.*enumeration failed' "$$log" && \
-	   ! grep -q '\[XHCI\].*failed' "$$log" && \
-	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-usb-x86_64: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-usb-x86_64: failed with status $$status; tail of $$log:"; \
-		tail -n 60 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-usb-x86_64
 
 smoke-virtio-sound:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/virtio-sound-x86_64.log"; \
-	wav="$(SMOKE_LOG_DIR)/virtio-sound-x86_64.wav"; \
-	rm -f "$$wav"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/audioplay --tone 440 --duration 5000\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot -snapshot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-audiodev driver=wav,id=audio0,path="$$wav" \
-		-device virtio-sound-pci,audiodev=audio0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'audioplay: 440 Hz for 5000 ms -> /dev/audio' "$$log" && \
-	   grep -q 'audioplay: playback complete' "$$log" && \
-	   grep -q "bound to driver 'virtio-snd'" "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log" && \
-	   ! grep -q 'audioplay: playback failed' "$$log" && \
-	   ! grep -qi 'panic' "$$log" && \
-	   $(PYTHON) tools/check_wav_pcm.py --max-delta 1000 \
-	       --min-frames 200000 "$$wav"; then \
-		echo "smoke-virtio-sound: PASS; log=$$log wav=$$wav"; \
-	else \
-		echo "smoke-virtio-sound: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-virtio-sound
 
 smoke-pci-portability:
-	$(call smoke-gate,1G,1)
-	rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv
-	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
-		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/pci-portability-loongarch64.log"; \
-	image="$(SMOKE_LOG_DIR)/pci-portability-nvme.img"; \
-	truncate -s 128M "$$image"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
-		-machine virt -m 1G -nographic -smp 1 -no-reboot -snapshot \
-		-audiodev driver=none,id=audio0 \
-		-device intel-hda -device hda-duplex,audiodev=audio0 \
-		-drive file="$$image",if=none,format=raw,id=nvme0 \
-		-device nvme,drive=nvme0,serial=A20NVME \
-		-drive file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'HDA_STREAM_SMOKE: PASS' "$$log" && \
-	   grep -q 'NVME_CAP_SMOKE: PASS' "$$log" && \
-	   grep -q 'NVME_IO_SMOKE: PASS' "$$log" && \
-	   grep -q "bound to driver 'hda'" "$$log" && \
-	   grep -q "bound to driver 'nvme'" "$$log" && \
-	   grep -q '\[NVME\] driver registered in core: 0' "$$log" && \
-	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-pci-portability: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-pci-portability: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-pci-portability
 
 smoke-native-handle:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-handle-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-handle-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'tchan ok' "$$log" && \
-	   grep -q 'bch ok' "$$log" && grep -q 'evq ok' "$$log" && \
-	   grep -q 'opc ok' "$$log" && grep -q 'ac ok' "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-handle: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-handle: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-handle
 
 # Thin wrappers: release configurations live in instances/release-*.toml.
 release-rv:

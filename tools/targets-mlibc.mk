@@ -144,137 +144,17 @@ mlibc-sbase-rootfs: mlibc-sbase
 	mcopy -o -i $(FAT32_IMG) user/tests/test_mlibc_sbase.sh ::/test-mlibc-sbase.sh
 
 smoke-mlibc-sbase:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-sbase-rootfs
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mlibc-sbase-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/test-mlibc-sbase.sh\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=$(FAT32_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MLIBC_SBASE: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-mlibc-sbase: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mlibc-sbase: failed with status $$status; tail of $$log:"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mlibc-sbase
 
 smoke-mlibc:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_HELLO_BIN) ::/mlibc-hello-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_PIPEEXEC_BIN) ::/mlibc-pipeexec-rv
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mlibc-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/mlibc-hello-rv\n/bin/mlibc-pipeexec-rv\n/bin/mlibc-pipeexec-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 40s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=$(FAT32_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MLIBC_A20: PASS' "$$log" && grep -q 'PIPEEXEC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-mlibc: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mlibc: failed with status $$status; tail of $$log:"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mlibc
 
 smoke-mlibc-fork:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv user/build/riscv64/mlibc-pipeexec-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_FORK_BIN) ::/mlibc-fork-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_CHILD_BIN) ::/mlibc-child-rv
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mlibc-fork-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/mlibc-fork-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 40s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=$(FAT32_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MLIBC_FORK: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-mlibc-fork: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mlibc-fork: failed with status $$status; tail of $$log:"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mlibc-fork
 
 smoke-mlibc-mksh:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 NOMMU=0 mlibc-hello-rv mlibc-sbase user/build/riscv64/mlibc-pipeexec-rv
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_MKSH_BIN) ::/mlibc-mksh
-	$(foreach t,$(MLIBC_SBASE_TOOLS),\
-		mcopy -o -i $(FAT32_IMG) $(NATIVE_BUILD_DIR)/mlibc-$(t) ::/mlibc-$(t);)
-	mcopy -o -i $(FAT32_IMG) user/tests/test_mlibc_mksh.sh ::/test-mlibc-mksh.sh
-	mcopy -o -i $(FAT32_IMG) $(MLIBC_PIPEEXEC_BIN) ::/mlibc-pipeexec-rv
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mlibc-mksh-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); \
-	  printf '/bin/mlibc-mksh /bin/test-mlibc-mksh.sh\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=$(FAT32_IMG),if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MKSH_MLIBC: PASS' "$$log" && grep -q 'MKSH_MLIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-mlibc-mksh: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mlibc-mksh: failed with status $$status; tail of $$log:"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mlibc-mksh
 
 smoke-native-libc:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-libc-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-libc-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_LIBC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-libc: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-libc: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-libc
 
