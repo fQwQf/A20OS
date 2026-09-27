@@ -1,15 +1,31 @@
 /*
- * gpu3d_test: exercise the A20 virtio-gpu 3D (virgl) passthrough path.
+ * gpu3d_test: exercise the A20 virtio-gpu 3D (virgl) transport path.
  *
  * Opens /dev/dri/card0 and drives the A20_GPU_IOCTL_* family directly:
  *   - VIRGL_CHECK:  verify the host offered VIRTIO_GPU_F_VIRGL
  *   - CTX_CREATE:   create a host-side virgl rendering context
- *   - RES_CREATE_3D: create a 3D texture/storage resource in that context
- *   - CTX_DESTROY / RES_UNREF: teardown
+ *   - RES_CREATE_3D: create a 3D resource in that context
+ *   - RES_UNREF / CTX_DESTROY: teardown
  *
- * Requires a QEMU virtio-gpu-gl device (or an equivalent virgl backend).
- * On a 2D-only virtio-gpu-device the check reports ENXIO and the test
- * exits 0 (that configuration intentionally has no 3D path).
+ * Exit codes are meaningful and must stay that way:
+ *   0   PASS  -- a virgl device was present and every transport step was
+ *                accepted by the host
+ *   77  SKIP  -- the device is 2D-only, so there is no 3D path to test
+ *                (autotools convention; distinct from PASS on purpose)
+ *   1   FAIL
+ *
+ * SKIP is deliberately not 0.  An earlier revision of this test returned 0
+ * on a 2D-only device, which made it green in every configuration and
+ * therefore carried no information at all.  A verification step that cannot
+ * fail is not a verification step.
+ *
+ * What this does NOT cover: no command stream is submitted, so it does not
+ * prove that anything was rendered, and the created resource has no backing
+ * attached (the host has no memory for it).  Until backing attach and a real
+ * SUBMIT_3D land, treat this as a *transport reachability* check only.  See
+ * docs/graphics/gpu-3d-roadmap.md sections 4.3, 4.4 and 5.
+ *
+ * Requires a QEMU virtio-gpu-gl device: build with GPU_3D=1.
  *
  * The ioctl codes and the request struct are duplicated here (rather than
  * including the kernel header) so this test builds standalone against the
@@ -30,6 +46,10 @@
 #define A20_GPU_IOCTL_RES_UNREF    (A20_GPU_IOCTL_BASE + 4)
 #define A20_GPU_IOCTL_SUBMIT_3D    (A20_GPU_IOCTL_BASE + 5)
 #define A20_GPU_IOCTL_VIRGL_CHECK  (A20_GPU_IOCTL_BASE + 6)
+
+#define EXIT_PASS 0
+#define EXIT_FAIL 1
+#define EXIT_SKIP 77
 
 struct virtio_gpu_3d_req {
     uint32_t ctx_id;
@@ -53,7 +73,7 @@ struct virtio_gpu_3d_req {
 static int fail(const char *what)
 {
     printf("GPU3D_TEST: FAIL %s errno=%d\n", what, errno);
-    return 1;
+    return EXIT_FAIL;
 }
 
 int main(void)
@@ -67,9 +87,9 @@ int main(void)
 
     if (ioctl(fd, A20_GPU_IOCTL_VIRGL_CHECK, &r) < 0) {
         if (errno == ENXIO) {
-            printf("GPU3D_TEST: 2D-only device, skipping 3D path\n");
+            printf("GPU3D_TEST: SKIP 2D-only device (build with GPU_3D=1 to test 3D)\n");
             close(fd);
-            return 0;
+            return EXIT_SKIP;
         }
         return fail("VIRGL_CHECK");
     }
@@ -110,6 +130,7 @@ int main(void)
     printf("GPU3D_TEST: context destroyed\n");
 
     close(fd);
-    printf("GPU3D_TEST: PASS\n");
-    return 0;
+    printf("GPU3D_TEST: PASS (transport only -- no command stream submitted, "
+           "rendering unverified)\n");
+    return EXIT_PASS;
 }
