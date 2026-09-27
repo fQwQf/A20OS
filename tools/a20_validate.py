@@ -86,6 +86,11 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
     has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))
+    if has_test and not t.expect:
+        # Without expect the gate can only ever pass vacuously, so require it
+        # here rather than letting `a20 test` discover it after the build.
+        e.append("test.expect: required when [test] is present (a gate with no "
+                 "expect substring can only pass vacuously)")
     for field_name, entries in (("test.commands", t.commands), ("test.expect", t.expect),
                                 ("machine.extra_qemu", m.extra_qemu),
                                 ("rootfs.drivers", r.drivers),
