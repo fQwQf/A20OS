@@ -409,6 +409,39 @@ QEMU_BLK_arm32       := virtio-blk-device,bus=virtio-mmio-bus.0
 QEMU_BLK_riscv32     := virtio-blk-device,bus=virtio-mmio-bus.0
 QEMU_BLK_ppc64le     := virtio-blk-pci
 
+# ---- GPU device selection -------------------------------------------------
+# GPU_3D=1 selects the virgl-capable virtio-gpu variant so the host offers
+# VIRTIO_GPU_F_VIRGL and the guest's 3D passthrough path becomes reachable.
+# The plain variant is 2D-only: the guest still scans out, but every 3D ioctl
+# fails with -ENXIO.
+#
+# This only changes what the *host* offers.  virglrenderer runs host-side, so
+# a TCG guest still gets host-GPU rendering — which is the only practical way
+# to exercise the 3D path on riscv64/aarch64/arm32, where no KVM exists.
+# It does, however, require host virgl support (libvirglrenderer + a GL/EGL
+# capable host display); under a headless host use QEMU_GUI_DISPLAY=egl-headless.
+GPU_3D ?= 0
+ifeq ($(GPU_3D),1)
+QEMU_GPU_riscv64     := virtio-gpu-gl-device,bus=virtio-mmio-bus.7
+QEMU_GPU_loongarch64 := virtio-gpu-gl-pci
+QEMU_GPU_aarch64     := virtio-gpu-gl-device,bus=virtio-mmio-bus.7
+QEMU_GPU_x86_64      := virtio-gpu-gl-pci
+QEMU_GPU_arm32       := virtio-gpu-gl-device,bus=virtio-mmio-bus.7
+QEMU_GPU_riscv32     := virtio-gpu-gl-device,bus=virtio-mmio-bus.7
+QEMU_GPU_ppc64le     := virtio-gpu-gl-pci
+QEMU_GPU_DEFAULT     := virtio-gpu-gl-device
+else
+QEMU_GPU_riscv64     := virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GPU_loongarch64 := virtio-gpu-pci
+QEMU_GPU_aarch64     := virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GPU_x86_64      := virtio-gpu-pci
+QEMU_GPU_arm32       := virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GPU_riscv32     := virtio-gpu-device,bus=virtio-mmio-bus.7
+QEMU_GPU_ppc64le     := virtio-gpu-pci
+QEMU_GPU_DEFAULT     := virtio-gpu-device
+endif
+QEMU_GPU := $(if $(QEMU_GPU_$(ARCH)),$(QEMU_GPU_$(ARCH)),$(QEMU_GPU_DEFAULT))
+
 # A virtio-mmio bus accepts only one device.  Keep an optional second disk off
 # the primary disk's bus; PCI transports can continue to use automatic slots.
 QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
@@ -425,21 +458,21 @@ QEMU_NET_ppc64le     := virtio-net-pci
 
 QEMU_GUI_DEVICES_aarch64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                             -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
-                            -device virtio-gpu-device,bus=virtio-mmio-bus.7
+                            -device $(QEMU_GPU)
 QEMU_GUI_DEVICES_riscv64 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                             -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
-                            -device virtio-gpu-device,bus=virtio-mmio-bus.7
+                            -device $(QEMU_GPU)
 QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                           -device virtio-mouse-device,bus=virtio-mmio-bus.6 \
-                          -device virtio-gpu-device,bus=virtio-mmio-bus.7
+                          -device $(QEMU_GPU)
 # x86_64 input comes from the PS/2 controller (QEMU's default keyboard/mouse
 # injection target); the ps2 drvmod publishes its ring to /dev/event0.
 QEMU_GUI_DEVICES_x86_64 := -vga none \
-                           -device virtio-gpu-pci
+                           -device $(QEMU_GPU)
 QEMU_GUI_DEVICES_loongarch64 := -vga none \
-                                 -device virtio-gpu-pci \
-                                 -device virtio-keyboard-pci \
-                                 -device virtio-mouse-pci
+                                  -device $(QEMU_GPU) \
+                                  -device virtio-keyboard-pci \
+                                  -device virtio-mouse-pci
 QEMU_GUI_AUDIO_HW_hda_x86_64 := -device intel-hda \
                                  -device hda-duplex,audiodev=a20audio
 QEMU_GUI_AUDIO_HW_hda_riscv64 := -device intel-hda \
@@ -452,7 +485,7 @@ QEMU_GUI_AUDIO_HW_virtio_loongarch64 := -device virtio-sound-pci,audiodev=a20aud
 QEMU_GUI_AUDIO_x86_64 = -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio $(QEMU_GUI_AUDIO_HW_$(QEMU_GUI_AUDIO_DEVICE)_x86_64)
 QEMU_GUI_AUDIO_riscv64 = -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio $(QEMU_GUI_AUDIO_HW_$(QEMU_GUI_AUDIO_DEVICE)_riscv64)
 QEMU_GUI_AUDIO_loongarch64 = -audiodev driver=$(QEMU_GUI_AUDIO_DRIVER),id=a20audio $(QEMU_GUI_AUDIO_HW_$(QEMU_GUI_AUDIO_DEVICE)_loongarch64)
-QEMU_GUI_DEVICES_DEFAULT := -device virtio-gpu-device \
+QEMU_GUI_DEVICES_DEFAULT := -device $(QEMU_GPU) \
                             -device virtio-keyboard-device \
                             -device virtio-mouse-device
 
@@ -483,6 +516,15 @@ QEMU_BLK_SECOND := $(QEMU_BLK_SECOND_$(ARCH))
 QEMU_NET     := $(QEMU_NET_$(ARCH))
 QEMU_GUI_DEVICES := $(if $(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_$(ARCH)),$(QEMU_GUI_DEVICES_DEFAULT))
 QEMU_GUI_AUDIO := $(QEMU_GUI_AUDIO_$(ARCH))
+
+# Arbitrary extra QEMU arguments, appended verbatim to every launch.  This is
+# the single hook for instance manifests (machine.extra_qemu) to add devices
+# without a Makefile change; the GUI path appends it after the built-in
+# device set so it can add rather than replace.  Set by tools/a20.
+EXTRA_QEMU ?=
+ifneq ($(strip $(EXTRA_QEMU)),)
+QEMU_FLAGS += $(EXTRA_QEMU)
+endif
 
 ifeq ($(ARCH),armv7m)
 ifeq ($(CROSS_PREFIX),)

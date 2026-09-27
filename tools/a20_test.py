@@ -1,10 +1,10 @@
 """Smoke-test execution for a20: boot an instance and check expect patterns.
 
 The QEMU command line is extracted from `make -n _run_impl` (the single
-source of truth), extended with the instance's machine.extra_qemu, then run
-with a timeout while [test].commands are injected over the serial console.
-PASS semantics match the historical handwritten smokes: every [test].expect
-substring must appear in the log.
+source of truth, which already includes machine.extra_qemu via EXTRA_QEMU),
+then run with a timeout while [test].commands are injected over the serial
+console.  PASS semantics match the historical handwritten smokes: every
+[test].expect substring must appear in the log.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ def _qemu_cmdline(inst: Instance) -> list[str]:
     )
     for line in out.stdout.splitlines():
         if line.startswith("qemu-system"):
-            cmd = shlex.split(line)
-            cmd.extend(inst.machine.extra_qemu or ())
-            return cmd
+            # machine.extra_qemu is already part of the derived make variables
+            # (EXTRA_QEMU), so the Makefile emitted it -- do not add it twice.
+            return shlex.split(line)
     raise SystemExit(f"error: no qemu-system command found in 'make -n _run_impl' output:\n{out.stdout}")
 
 
