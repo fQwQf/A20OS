@@ -40,6 +40,9 @@ from a20_instance import (
     InstanceError,
     parse_instance,
 )
+from a20_manifest import formats as ledger_formats
+from a20_manifest import collect as collect_manifest
+from a20_manifest import render_json, render_markdown, render_table, write as write_ledger
 from a20_make import REPO_ROOT, build_instance, exec_make
 from a20_resource import (
     HostResources,
@@ -178,6 +181,23 @@ def cmd_test(args: argparse.Namespace) -> int:
     _check_runnable(inst, "test")
     _gate_resources(inst, args)
     return run_test(inst, list(args.make_args), args.dry_run)
+
+
+def cmd_ledger(args: argparse.Namespace) -> int:
+    """Report what an instance actually produced: sizes, hashes, revision."""
+    manifest = collect_manifest(_load(args.instance))
+    if args.format == "json":
+        text = render_json(manifest)
+    elif args.format == "markdown":
+        text = render_markdown(manifest)
+    else:
+        text = render_table(manifest)
+    if args.out:
+        write_ledger(manifest, Path(args.out), args.format)
+        print(f"{manifest.instance}: ledger written to {args.out}")
+    else:
+        print(text)
+    return 0 if manifest.artifacts else 1
 
 
 def cmd_flash(args: argparse.Namespace) -> int:
@@ -336,6 +356,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="validate components/flash-backends.toml against the makefiles")
     sub.add_parser("list", help="list known instances")
     sub.add_parser("resources", help="show the host budget instance runs are gated against")
+
+    p_ledger = sub.add_parser(
+        "ledger", help="report an instance's artifacts with size and sha256")
+    p_ledger.add_argument("instance", help="instance name from instances/ or path to a TOML manifest")
+    p_ledger.add_argument("--format", choices=ledger_formats(), default="table",
+                          help="table (human), json (machine), markdown (doc block)")
+    p_ledger.add_argument("--out", metavar="FILE", help="write to FILE instead of stdout")
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
     add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
@@ -376,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list(ns)
         case "resources":
             return cmd_resources(ns)
+        case "ledger":
+            return cmd_ledger(ns)
         case "show-vars":
             return cmd_show_vars(ns)
         case "build":
