@@ -28,21 +28,42 @@ typedef struct {
     pfn_t   end_pfn;
 } pfa_range_t;
 
+struct pt_meta;
+
 /* Per-frame metadata.
  * prev/next live here instead of inside the free page itself, so a stray
- * write into a freed frame cannot corrupt the buddy free lists. */
+ * write into a freed frame cannot corrupt the buddy free lists.
+ *
+ * A frame that backs a page-table page instead carries a pointer to that
+ * page's descriptor (pt_meta_t, see mm/pt.h).  The two are mutually
+ * exclusive by construction: prev/next are only live while the frame is on
+ * a buddy free list, and pt is only live while the frame is FRAME_F_PT.
+ * Sharing one union keeps the array at 16 bytes per frame, so the
+ * single-level model costs no extra memory for the frame table itself. */
 typedef struct {
-    pfn_t    prev;       /* free-list prev (valid when FRAME_F_FREE) */
-    pfn_t    next;       /* free-list next (valid when FRAME_F_FREE) */
+    union {
+        struct {
+            pfn_t prev;       /* free-list prev (valid when FRAME_F_FREE) */
+            pfn_t next;       /* free-list next (valid when FRAME_F_FREE) */
+        };
+        struct pt_meta *pt;   /* page-table descriptor (FRAME_F_PT) */
+    };
     uint16_t refcount;   /* 0 = free, >0 = in-use */
     uint8_t  order;      /* buddy order */
     uint8_t  flags;      /* FRAME_F_* */
 } __attribute__((aligned(8))) frame_meta_t;
 
 /* GCC may merge prev/next initialization into one 64-bit store.  Keep every
- * array element 8-byte aligned for CPUs that trap unaligned accesses. */
-_Static_assert(sizeof(frame_meta_t) % 8 == 0,
-               "frame metadata must preserve 64-bit alignment");
+ * array element 8-byte aligned for CPUs that trap unaligned accesses.
+ *
+ * The size is also pinned: the page-table descriptor pointer shares the
+ * free-list union, so the single-level model must not grow the per-frame
+ * array.  A regression here is a silent per-frame memory regression on
+ * every boot, which is exactly the kind of change a compile-time assert is
+ * for. */
+_Static_assert(sizeof(frame_meta_t) == 16,
+               "frame metadata must stay 16 bytes: the PT descriptor reuses "
+               "the free-list union and must not grow the per-frame array");
 
 #define FRAME_F_FREE    0x00
 #define FRAME_F_ALLOC   0x01
