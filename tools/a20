@@ -41,6 +41,11 @@ from a20_instance import (
     parse_instance,
 )
 from a20_make import REPO_ROOT, build_instance, exec_make
+from a20_resource import (
+    HostResources,
+    Policy,
+    preflight,
+)
 from a20_registry import (
     DriverComponent,
     RegistryError,
@@ -104,6 +109,36 @@ def _check_runnable(inst: Instance, action: str) -> None:
         )
 
 
+def _gate_resources(inst, args) -> None:
+    """Refuse to start a guest the host cannot host, waiting if allowed to."""
+    policy = Policy.from_env()
+    if getattr(args, "wait_timeout", None) is not None:
+        policy = Policy(policy.reserve_mem_mb, policy.min_disk_mb,
+                        policy.max_concurrent, args.wait_timeout)
+    preflight(inst, policy, REPO_ROOT, wait=not args.no_wait, echo=_echo)
+
+
+def _echo(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def cmd_resources(_args: argparse.Namespace) -> int:
+    """Report the host budget a20 will gate instance runs against."""
+    policy = Policy.from_env()
+    have = HostResources.snapshot(REPO_ROOT)
+    cap = policy.max_concurrent or max(1, have.cpu_count // 4)
+    print(f"memory available : {have.mem_available_mb} MiB "
+          f"(+{policy.reserve_mem_mb} MiB reserved per run)")
+    print(f"cpu              : {have.cpu_count} online, load {have.load1:.1f}")
+    print(f"guest slots      : {cap - have.running_guests} free of {cap} "
+          f"({have.running_guests} running)")
+    print(f"disk free        : {have.disk_free_mb} MiB "
+          f"(floor {policy.min_disk_mb} MiB per run)")
+    print(f"wait timeout     : "
+          f"{'forever' if policy.wait_timeout_s <= 0 else f'{policy.wait_timeout_s:.0f}s'}")
+    return 0
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     return build_instance(_load(args.instance), list(args.make_args), args.dry_run)
 
@@ -116,11 +151,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                 f"error: {inst.source}: armv7m has no generic QEMU path; "
                 "set [stm32] qemu = true to run on the stm32vldiscovery machine"
             )
+        _gate_resources(inst, args)
         build_rc = build_instance(inst, list(args.make_args), args.dry_run)
         if build_rc != 0:
             return build_rc
         return exec_make(inst, "run-stm32f103-qemu-impl", [], args.dry_run)
     _check_runnable(inst, "run")
+    _gate_resources(inst, args)
     if inst.rootfs.world is not None:
         # apk world images boot as the second disk; init chroots into them.
         target = "run-world-gui" if inst.gui.enabled else "run-world"
@@ -132,12 +169,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_debug(args: argparse.Namespace) -> int:
     inst = _load(args.instance)
     _check_runnable(inst, "debug")
+    _gate_resources(inst, args)
     return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
 
 
 def cmd_test(args: argparse.Namespace) -> int:
     inst = _load(args.instance)
     _check_runnable(inst, "test")
+    _gate_resources(inst, args)
     return run_test(inst, list(args.make_args), args.dry_run)
 
 
@@ -255,6 +294,19 @@ def cmd_check_flash_backends(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_resource_flags(parser: argparse.ArgumentParser) -> None:
+    g = parser.add_argument_group(
+        "host resources",
+        "Refuse to start a guest the host cannot host. By default a20 waits for "
+        "memory, CPU, disk and a free guest slot, because a QEMU that overcommits "
+        "gets the OOM killer to pick a victim. Override the budget with "
+        "A20_RESERVE_MEM_MB / A20_MAX_CONCURRENT / A20_WAIT_TIMEOUT / A20_MIN_DISK_MB.")
+    g.add_argument("--no-wait", action="store_true",
+                   help="fail immediately instead of waiting for resources")
+    g.add_argument("--wait-timeout", type=float, metavar="SEC",
+                   help="give up waiting after SEC seconds (0 waits forever)")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="a20",
@@ -278,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check-flash-backends",
                    help="validate components/flash-backends.toml against the makefiles")
     sub.add_parser("list", help="list known instances")
+    sub.add_parser("resources", help="show the host budget instance runs are gated against")
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
     add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
@@ -288,6 +341,9 @@ def main(argv: list[str] | None = None) -> int:
                      with_make_args=True)
     add_instance_cmd("package", "build and assemble the artifact in [package]",
                      with_make_args=True)
+
+    for boot in ("run", "debug", "test"):
+        _add_resource_flags(sub.choices[boot])
 
     # Unknown arguments (after an optional `--`) are forwarded to make. Using
     # parse_known_args instead of a REMAINDER positional keeps --dry-run
@@ -306,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_check_flash_backends(ns)
         case "list":
             return cmd_list(ns)
+        case "resources":
+            return cmd_resources(ns)
         case "show-vars":
             return cmd_show_vars(ns)
         case "build":

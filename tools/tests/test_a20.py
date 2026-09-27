@@ -25,6 +25,16 @@ from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance  # noqa: E402
 from a20_make import REPO_ROOT  # noqa: E402
+from a20_resource import (  # noqa: E402
+    DEFAULT_RESERVE_MEM_MB,
+    HostResources,
+    MemorySpecError,
+    Policy,
+    Requirement,
+    evaluate,
+    parse_memory_mb,
+    requirement_for,
+)
 from a20_registry import (  # noqa: E402
     RegistryError,
     load_flash_backends,
@@ -491,3 +501,198 @@ class TestRepositoryInstances(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParseMemory(unittest.TestCase):
+    def test_qemu_spellings(self) -> None:
+        for text, want in (("1G", 1024), ("512M", 512), ("2GiB", 2048), ("1024", 1024),
+                           ("1.5G", 1536), ("2T", 2097152), ("64K", 1), (" 1g ", 1024)):
+            self.assertEqual(parse_memory_mb(text), want, text)
+
+    def test_fractional_mib_rounds_up(self) -> None:
+        self.assertEqual(parse_memory_mb("0.5M"), 1)
+
+    def test_garbage_is_rejected(self) -> None:
+        for text in ("", "abc", "1 GB x", "1GiBx", "-1G", "G"):
+            with self.assertRaises(MemorySpecError, msg=text):
+                parse_memory_mb(text)
+
+    def test_zero_does_not_produce_a_zero_budget(self) -> None:
+        self.assertGreaterEqual(parse_memory_mb("0"), 1)
+
+
+class TestResourceGate(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.policy = Policy(reserve_mem_mb=1024, min_disk_mb=2048, max_concurrent=4,
+                             wait_timeout_s=0.0)
+
+    def host(self, **kw) -> HostResources:
+        base = dict(mem_available_mb=16384, cpu_count=16, load1=1.0,
+                    disk_free_mb=40000, running_guests=0)
+        base.update(kw)
+        return HostResources(**base)
+
+    def need(self, **kw) -> Requirement:
+        base = dict(mem_mb=2048, cpus=2, disk_mb=4096)
+        base.update(kw)
+        return Requirement(**base)
+
+    def test_ample_host_passes(self) -> None:
+        self.assertTrue(evaluate(self.need(), self.host(), self.policy).ok)
+
+    def test_memory_shortfall_is_reported(self) -> None:
+        v = evaluate(self.need(), self.host(mem_available_mb=1500), self.policy)
+        self.assertFalse(v.ok)
+        self.assertIn("memory", v.reason())
+
+    def test_memory_uses_available_not_free(self) -> None:
+        """A host with almost all memory in page cache is available, not full.
+
+        Reading `free` here would report a few hundred MiB and block forever on
+        an idle machine.
+        """
+        self.assertTrue(evaluate(self.need(), self.host(mem_available_mb=25600),
+                                 self.policy).ok)
+
+    def test_cpu_pressure_is_reported(self) -> None:
+        v = evaluate(self.need(cpus=16), self.host(load1=4.0), self.policy)
+        self.assertFalse(v.ok)
+        self.assertIn("cpu", v.reason())
+
+    def test_disk_shortfall_is_reported(self) -> None:
+        v = evaluate(self.need(), self.host(disk_free_mb=500), self.policy)
+        self.assertFalse(v.ok)
+        self.assertIn("disk", v.reason())
+
+    def test_guest_slot_cap_is_enforced(self) -> None:
+        v = evaluate(self.need(), self.host(running_guests=4), self.policy)
+        self.assertFalse(v.ok)
+        self.assertIn("guest slots", v.reason())
+
+    def test_slot_cap_defaults_to_a_quarter_of_cpus(self) -> None:
+        loose = Policy(max_concurrent=0)
+        self.assertTrue(evaluate(self.need(), self.host(running_guests=3), loose).ok)
+        self.assertFalse(evaluate(self.need(), self.host(running_guests=4), loose).ok)
+
+    def test_all_shortfalls_are_listed_together(self) -> None:
+        v = evaluate(self.need(), self.host(mem_available_mb=10, disk_free_mb=10,
+                                            running_guests=99), self.policy)
+        self.assertEqual(len(v.deficits), 3)
+
+    def test_requirement_derives_from_instance_fields(self) -> None:
+        inst = load(self.tmp, """
+            arch = "riscv64"
+            [machine]
+            memory = "2G"
+            smp = 4
+            [rootfs]
+            size_mb = 128
+            world_size_mb = 4096
+        """)
+        need = requirement_for(inst, self.policy)
+        self.assertEqual(need.mem_mb, 2048 + 1024)
+        self.assertEqual(need.cpus, 4)
+        self.assertEqual(need.disk_mb, 4096 + 128)
+
+    def test_disk_floor_applies_when_instance_declares_nothing(self) -> None:
+        inst = load(self.tmp, 'arch = "riscv64"\n')
+        self.assertEqual(requirement_for(inst, self.policy).disk_mb, 2048)
+
+    def test_smp_defaults_to_one_when_unset(self) -> None:
+        inst = load(self.tmp, 'arch = "riscv64"\n')
+        self.assertEqual(requirement_for(inst, self.policy).cpus, 1)
+
+    def test_policy_reads_the_environment(self) -> None:
+        import os
+        saved = {k: os.environ.get(k) for k in
+                 ("A20_RESERVE_MEM_MB", "A20_MIN_DISK_MB", "A20_MAX_CONCURRENT",
+                  "A20_WAIT_TIMEOUT")}
+        try:
+            os.environ.update(A20_RESERVE_MEM_MB="4096", A20_MIN_DISK_MB="8192",
+                              A20_MAX_CONCURRENT="7", A20_WAIT_TIMEOUT="90")
+            p = Policy.from_env()
+            self.assertEqual((p.reserve_mem_mb, p.min_disk_mb, p.max_concurrent), (4096, 8192, 7))
+            self.assertEqual(p.wait_timeout_s, 90.0)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_unparseable_env_falls_back_to_defaults(self) -> None:
+        import os
+        saved = os.environ.get("A20_RESERVE_MEM_MB")
+        try:
+            os.environ["A20_RESERVE_MEM_MB"] = "not-a-number"
+            self.assertEqual(Policy.from_env().reserve_mem_mb, DEFAULT_RESERVE_MEM_MB)
+        finally:
+            if saved is None:
+                os.environ.pop("A20_RESERVE_MEM_MB", None)
+            else:
+                os.environ["A20_RESERVE_MEM_MB"] = saved
+
+    def test_no_wait_fails_instead_of_blocking(self) -> None:
+        from a20_resource import preflight
+        inst = load(self.tmp, 'arch = "riscv64"\n[machine]\nmemory = "64G"\n')
+        with self.assertRaises(SystemExit) as cm:
+            preflight(inst, self.policy, self.tmp, wait=False)
+        self.assertIn("insufficient host resources", str(cm.exception))
+
+    def test_wait_returns_once_the_host_has_room(self) -> None:
+        from unittest.mock import patch
+        from a20_resource import preflight
+        inst = load(self.tmp, 'arch = "riscv64"\n')
+        scarce = self.host(mem_available_mb=10)
+        ample = self.host(mem_available_mb=16000)
+        with patch("a20_resource.HostResources.snapshot",
+                   side_effect=[scarce, scarce, ample]), \
+             patch("a20_resource.time.sleep"):
+            verdict = preflight(inst, self.policy, self.tmp, wait=True, echo=lambda _m: None)
+        self.assertTrue(verdict.ok)
+
+
+class TestHostMeasurement(unittest.TestCase):
+    """The snapshot functions are what the gate actually trusts, so they get
+    tested against the real /proc rather than only through injected values."""
+
+    def _meminfo(self) -> dict[str, int]:
+        fields = {}
+        with open("/proc/meminfo", encoding="ascii") as f:
+            for line in f:
+                key, _, rest = line.partition(":")
+                if key in ("MemTotal", "MemFree", "MemAvailable", "Cached"):
+                    fields[key] = int(rest.split()[0]) // 1024
+        return fields
+
+    def test_mem_available_is_read_not_free(self) -> None:
+        from a20_resource import _mem_available_mb
+        info = self._meminfo()
+        self.assertEqual(_mem_available_mb(), info["MemAvailable"])
+
+    def test_mem_available_exceeds_free_on_a_cached_host(self) -> None:
+        """The property the whole design turns on: on an idle machine the two
+        differ by an order of magnitude, and reading `free` would block forever."""
+        from a20_resource import _mem_available_mb
+        info = self._meminfo()
+        self.assertGreaterEqual(_mem_available_mb(), info["MemFree"])
+        self.assertGreater(info["MemTotal"] - _mem_available_mb(), 0)
+
+    def test_measurement_is_plausible(self) -> None:
+        info = self._meminfo()
+        avail = HostResources.snapshot(REPO_ROOT).mem_available_mb
+        self.assertGreater(avail, 0)
+        self.assertLessEqual(avail, info["MemTotal"])
+
+    def test_guest_count_is_a_nonnegative_int(self) -> None:
+        from a20_resource import count_running_guests
+        self.assertGreaterEqual(count_running_guests(), 0)
+
+    def test_snapshot_reports_a_usable_cpu_and_disk(self) -> None:
+        h = HostResources.snapshot(REPO_ROOT)
+        self.assertGreaterEqual(h.cpu_count, 1)
+        self.assertGreater(h.disk_free_mb, 0)
+        self.assertGreaterEqual(h.load1, 0.0)
