@@ -182,6 +182,11 @@
 - **What it checks**: `swap_test.c` 在 ramfs 上造 backing 文件 → loop-control `LOOP_CTL_GET_FREE` + `LOOP_SET_FD` 绑定 → `mkswap` → `swapon` → `sysinfo` totalswap>0 与 `/proc/swaps` 条目断言 → 重复 swapon 返回 EBUSY → 触访匿名内存 → `swapoff` 后 totalswap 归零。
 - **When it fails**: 查看 `.kernel-build/smoke/swap-riscv64.log` 中首个 `SWAP_TEST: FAIL`；对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c` 与 `kernel/drivers/block/loop.c`。已知边界：门禁不驱动真实换出（1 GiB 冒烟无法现实触发），`swap_read_page` 缺页读回只有编译覆盖；`CONFIG_SWAP` 在 riscv32/loongarch32（无 swap PTE 编码）与 NOMMU 目标上被构建入口强制关闭。
 
+### 用户态网络控制面（SIOCGIFCONF / /proc/net / MSG_OOB）
+- **How to run**: `make smoke-netctl`
+- **What it checks**: `netctl.c` 用 musl 自己的 `<net/if.h>` 结构体（而非私有副本）做断言，因此内核布局必须与用户态实际编译的布局一致——这正是兼容性契约本身，私有的一对自洽结构体什么都验证不了。覆盖：SIOCGIFCONF 的 size query（`ifc_len` 为 `sizeof(struct ifreq)` 的正整数倍）与 fill（字节数必须与 size query 承诺的一致）；每个枚举出的接口名必须能被 `SIOCGIFADDR` 反查（否则枚举对使用者毫无用处）；`/proc/net/dev` 的接口行数不得少于枚举数；`/proc/net/config` 报告了网关时 `/proc/net/route` 必须有对应路由行；`MSG_OOB` 在 send/recv 两侧都必须是 `EOPNOTSUPP`（本栈无 out-of-band 路径，静默当作普通数据返回比报错更糟）；`MSG_NOSIGNAL` 不得被当作未知 flag 拒绝。
+- **When it fails**: 查看 `.kernel-build/smoke/netctl-riscv64.log` 中首个 `NETCTL: FAIL`；对照 `kernel/net/socket_file.c`（SIOCGIFCONF 与 `struct a20_ifreq` 线格式）、`kernel/net/lwip_stack.c`（`/proc/net` 渲染与 netif 命名）、`kernel/net/socket.c`（`net_msg_flags_check`）。已知边界：本栈无路由表，`/proc/net/route` 只报告各 netif 的默认网关；loopback 不经过驱动收发路径，其计数寄存器读零是真实值而非统计缺失；`SIOCSIFMTU`/`SIOCSIFDSTADDR`/`SIOCSIFBRDADDR` 仍是已分发但未实现、返回 `-ENOTTY`，而不是伪造成功。
+
 ### 文档漂移关键词
 - **How to run**: `make check-doc-drift`
 - **What it checks**: 重新生成 Linux syscall 覆盖表；扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。

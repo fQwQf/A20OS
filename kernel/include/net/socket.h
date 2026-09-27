@@ -36,6 +36,7 @@ struct vfile;
 #define SOCK_NONBLOCK 04000
 #define SOCK_CLOEXEC  02000000
 
+#define MSG_OOB        0x0001
 #define MSG_PEEK       0x0002
 #define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040

@@ -482,10 +482,20 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
     return delivered ? (int)len : -ECONNREFUSED;
 }
 
+/* This stack has no out-of-band data path, so MSG_OOB cannot be honoured.
+ * Rejecting it is the honest answer; ignoring the flag would quietly hand
+ * back ordinary in-band bytes as if they were the urgent one. */
+static int net_msg_flags_check(int flags)
+{
+    return (flags & MSG_OOB) ? -EOPNOTSUPP : 0;
+}
+
 int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
     net_socket_t *s = (gfd >= 0) ? net_socket_from_file(gfd) : NULL;
     if (!s) return -ENOTSOCK;
+    int bad = net_msg_flags_check(flags);
+    if (bad) return bad;
     if (len > NET_MAX_PAYLOAD && s->type != SOCK_STREAM) return -EMSGSIZE;
     int dontwait = s->nonblock || ((flags & MSG_DONTWAIT) != 0);
     if (s->domain == AF_ALG)
@@ -576,6 +586,9 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                              net_recv_meta_t *meta) {
     if (!s)
         return -ENOTSOCK;
+    int bad = net_msg_flags_check(flags);
+    if (bad)
+        return bad;
     if (s->domain == AF_ALG)
         return net_alg_socket_recv(s, buf, len);
     int dontwait = (flags & MSG_DONTWAIT) != 0;
