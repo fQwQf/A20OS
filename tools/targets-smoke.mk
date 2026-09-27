@@ -54,28 +54,7 @@ smoke-x86_64:
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
 smoke-smp-bringup:
-	$(call smoke-gate,1G,2)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/riscv64-smp2-bringup.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 2 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-smp2/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'part ok' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-smp-bringup: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-smp-bringup: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-smp-bringup: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit "$$status"; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-smp-bringup
 
 # Thin wrapper: the smoke definition lives in instances/smoke-arm32.toml.
 smoke-arm32:
@@ -156,123 +135,22 @@ smoke-envelope-corpus:
 	$(PYTHON) tools/smoke.py smoke-envelope-corpus
 
 smoke-a20-channel:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/a20-channel-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'a20_channel_test\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'A20_CHANNEL: PASS' "$$log"; then \
-		echo "smoke-a20-channel: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-a20-channel: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-a20-channel: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-a20-channel
 
 smoke-ptrace:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/ptrace-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'ptrace_smoke\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'PTRACE_SMOKE: PASS' "$$log"; then \
-		echo "smoke-ptrace: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-ptrace: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-ptrace: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-ptrace
 
 smoke-network-suite:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/network-suite-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NETWORK_SUITE: PASS' "$$log"; then \
-		echo "smoke-network-suite: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-network-suite: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-network-suite: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-network-suite
 
 # netctl only inspects local kernel state; it never accepts an inbound
 # connection, so it must not depend on a free host port 5555.  That is now
 # baked into the case argv in tools/smoke_cases.py (no hostfwd token), so the
 # old `NET_HOSTFWD=` target-specific override has nothing left to do.
-smoke-netctl: NET_HOSTFWD=
+smoke-netctl:
+	$(PYTHON) tools/smoke.py smoke-netctl
 smoke-network-suite-aarch64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/network-suite-aarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
-		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NETWORK_SUITE: PASS' "$$log"; then \
-		echo "smoke-network-suite-aarch64: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-network-suite-aarch64: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-network-suite-aarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-network-suite-aarch64
 
 smoke-proc-a20:
 	$(PYTHON) tools/smoke.py smoke-proc-a20
@@ -310,33 +188,7 @@ smoke-vfs-edge:
 	$(PYTHON) tools/smoke.py smoke-vfs-edge
 
 smoke-io-event:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/io-event-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'io_event_test\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'IO_EVENT_TEST: PASS' "$$log"; then \
-		echo "smoke-io-event: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-io-event: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-io-event: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-io-event
 
 smoke-syscall-ext:
 	$(PYTHON) tools/smoke.py smoke-syscall-ext

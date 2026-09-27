@@ -116,13 +116,25 @@ def report(name: str, case: dict, status: int) -> int:
     log = Path(case["log"])
     text = log.read_text(encoding="utf-8", errors="replace")
     missing = [p for p in case["expect"] if not grep_matches(p, text)]
-    if not missing:
+    violated = [p for p in case.get("forbid") or [] if grep_matches(p, text)]
+    if not missing and not violated:
         # pass_msg was captured from the make recipe, where $log was a shell
         # variable; render it with this case's real path.
         print(case["pass_msg"].replace("$log", str(log)))
         return 0
-    print(f"{name}: failed with status {status}; missing "
-          f"{missing!r}; tail of {log}:")
+    # A forbidden pattern is a stronger signal than a missing one: the gate ran
+    # and reported the thing it exists to catch.  Say so, and show the evidence.
+    if violated:
+        print(f"{name}: FAIL forbidden pattern present: {violated!r}; "
+              f"matching lines from {log}:")
+        for pat in violated:
+            shown = [ln for ln in text.splitlines() if grep_matches(pat, ln)][:5]
+            for ln in shown:
+                print(f"  {ln}")
+        return 1
+    reason = "timeout without PASS" if (case.get("timeout_msg") and status == 124) \
+        else f"failed with status {status}"
+    print(f"{name}: {reason}; missing {missing!r}; tail of {log}:")
     print("\n".join(text.splitlines()[-80:]))
     return 1
 
