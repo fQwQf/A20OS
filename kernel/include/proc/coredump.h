@@ -28,7 +28,10 @@
  * Emits the core file when the signal's default action dumps core, the
  * process has a user mm, RLIMIT_CORE permits it, and core_pattern is a file
  * pattern. */
-void coredump_on_fatal_signal(int sig, trap_context_t *ctx);
+/* Returns 1 when a core file was actually written, 0 when the dump was
+ * suppressed (no mm, RLIMIT_CORE==0, pipe pattern, allocation/write failure).
+ * The caller uses that to decide whether to set the 0x80 WCOREDUMP bit. */
+int coredump_on_fatal_signal(int sig, trap_context_t *ctx);
 
 /* /proc/sys/kernel/core_pattern backing store.  set strips a trailing
  * newline; get appends one.  Both return 0 or a negative errno. */

@@ -105,11 +105,46 @@ int64_t sys_a20_net_socket(const a20_syscall_args_t *args)
     return h;
 }
 
+/* The core net_* helpers take a sockaddr and a socklen_t* and dereference
+ * both directly, so the native wrappers must stage them in kernel memory:
+ * a raw user pointer would be read/written in supervisor mode. */
+static int native_net_addr_in(uint8_t storage[NET_SOCKADDR_MAX],
+                              const void *uaddr, size_t addrlen) {
+    if (!uaddr || addrlen == 0) return -EINVAL;
+    if (addrlen > NET_SOCKADDR_MAX) return -EINVAL;
+    if (copy_from_user(storage, uaddr, addrlen) < 0) return -EFAULT;
+    return 0;
+}
+
+static int native_net_addrlen_in(size_t *len, const void *uaddrlen) {
+    uint32_t v;
+    if (!uaddrlen) return -EFAULT;
+    if (copy_from_user(&v, uaddrlen, sizeof(v)) < 0) return -EFAULT;
+    if (v > NET_SOCKADDR_MAX) v = NET_SOCKADDR_MAX;
+    *len = v;
+    return 0;
+}
+
+static int native_net_addr_out(void *uaddr, const void *kaddr, size_t len) {
+    if (!uaddr) return -EFAULT;
+    if (copy_to_user(uaddr, kaddr, len) < 0) return -EFAULT;
+    return 0;
+}
+
+static int native_net_addrlen_out(void *uaddrlen, size_t len) {
+    uint32_t v = (uint32_t)len;
+    if (!uaddrlen) return -EFAULT;
+    return copy_to_user(uaddrlen, &v, sizeof(v)) < 0 ? -EFAULT : 0;
+}
+
 int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
 {
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
     const void *addr = (const void *)(uintptr_t)A20_ARG(1);
     size_t addrlen = (size_t)A20_ARG(2);
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    int ar = native_net_addr_in(kaddr, addr, addrlen);
+    if (ar < 0) return a20_native_net_result(ar);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -120,7 +155,7 @@ int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
                                                A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    r = net_bind((int)(uintptr_t)entry.object, addr, addrlen);
+    r = net_bind((int)(uintptr_t)entry.object, kaddr, addrlen);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 
@@ -131,6 +166,9 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
     const void *addr = (const void *)(uintptr_t)A20_ARG(1);
     size_t addrlen = (size_t)A20_ARG(2);
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    int ar = native_net_addr_in(kaddr, addr, addrlen);
+    if (ar < 0) return a20_native_net_result(ar);
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -141,7 +179,7 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
                                                A20_RIGHT_WRITE, &entry);
     if (r < 0) return r;
 
-    r = net_connect((int)(uintptr_t)entry.object, addr, addrlen);
+    r = net_connect((int)(uintptr_t)entry.object, kaddr, addrlen);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 
@@ -152,6 +190,12 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
     a20_handle_t h = (a20_handle_t)A20_ARG(0);
     void *addr = (void *)(uintptr_t)A20_ARG(1);
     size_t *addrlen = (size_t *)(uintptr_t)A20_ARG(2);
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    size_t klen = 0;
+    if (addr || addrlen) {
+        int ar = native_net_addrlen_in(&klen, addrlen);
+        if (ar < 0) return a20_native_net_result(ar);
+    }
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -162,9 +206,19 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
                                                A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    int new_gfd = net_accept((int)(uintptr_t)entry.object, addr, addrlen, 0);
+    int new_gfd = net_accept((int)(uintptr_t)entry.object,
+                             (addr && addrlen) ? kaddr : NULL,
+                             (addr && addrlen) ? &klen : NULL, 0);
     a20_object_release(entry.object, entry.type);
     if (new_gfd < 0) return a20_native_net_result(new_gfd);
+
+    if (addr && addrlen) {
+        if (native_net_addr_out(addr, kaddr, klen) < 0 ||
+            native_net_addrlen_out(addrlen, klen) < 0) {
+            a20_object_release((void *)(uintptr_t)new_gfd, A20_OBJ_SOCKET);
+            return a20_native_net_result(-EFAULT);
+        }
+    }
 
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
@@ -382,6 +436,12 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     void *addr = (void *)(uintptr_t)A20_ARG(1);
     size_t *addrlen = (size_t *)(uintptr_t)A20_ARG(2);
     int peer = (int)A20_ARG(3);
+    uint8_t kaddr[NET_SOCKADDR_MAX];
+    size_t klen = 0;
+    if (addr || addrlen) {
+        int ar = native_net_addrlen_in(&klen, addrlen);
+        if (ar < 0) return a20_native_net_result(ar);
+    }
 
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
@@ -393,10 +453,20 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     if (peer)
-        r = net_getpeername((int)(uintptr_t)entry.object, addr, addrlen);
+        r = net_getpeername((int)(uintptr_t)entry.object,
+                            (addr && addrlen) ? kaddr : NULL,
+                            (addr && addrlen) ? &klen : NULL);
     else
-        r = net_getsockname((int)(uintptr_t)entry.object, addr, addrlen);
+        r = net_getsockname((int)(uintptr_t)entry.object,
+                            (addr && addrlen) ? kaddr : NULL,
+                            (addr && addrlen) ? &klen : NULL);
     a20_object_release(entry.object, entry.type);
+    if (r < 0) return a20_native_net_result(r);
+    if (addr && addrlen) {
+        if (native_net_addr_out(addr, kaddr, klen) < 0 ||
+            native_net_addrlen_out(addrlen, klen) < 0)
+            return a20_native_net_result(-EFAULT);
+    }
     return a20_native_net_result(r);
 
 }

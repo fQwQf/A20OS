@@ -11,6 +11,9 @@ typedef struct block_dev {
     uint64_t capacity;
     uint32_t sector_size;
     void *priv;
+    /* Optional: called when the last consumer drops this device. Lets a
+     * provider refuse being rebound while a consumer is still attached. */
+    void (*release)(struct block_dev *dev);
 } block_dev_t;
 
 #endif
