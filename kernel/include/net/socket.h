@@ -49,6 +49,7 @@ struct vfile;
 #define SCM_RIGHTS   1
 #define SCM_CREDENTIALS 2
 #define SOL_ALG      279
+#define NETLINK_ROUTE        0
 #define NETLINK_SOCK_DIAG 4
 #define NETLINK_KOBJECT_UEVENT 15
 #define NETLINK_GENERIC        16
