@@ -346,3 +346,29 @@ per-PTE 状态。但这引出一个结构性问题：per-PTE 状态挂在**页�
 TCG 无可用多线程 TCG，vCPU 本身即被串行化（`cpu_scale` 实测 0.89x–0.96x），
 任何内存管理改动都不可能在该环境下显示加速。x86_64/KVM 下 `cpu_scale` 为
 3.93x，是有效的度量环境。
+
+### 8.7 P5 并行快路径：四次尝试、四种失败（已全部回退）
+
+P5 的目标是让 fault 路径不持 `mm->lock`。本轮实际尝试了"锁内快照 VMA 字段、
+锁外用 cursor 装 PTE、装完再回锁复核"的透明快路径，四次尝试各自撞上不同的深层
+问题，全部回退。记录在此，因为每一种失败都指向下一步必须解决的具体事项。
+
+| 尝试 | 现象 | 根因 |
+|---|---|---|
+| 1 | `signal=11` @ `stval=0x6a170` | fault-around 把 **PFN 当物理地址**传给 `mm_cursor_map`，装入无效物理地址，表现为访问故障而非缺页 |
+| 2 | 复核失败分支二次 `frame_put` | `mm_cursor_unmap()` 已释放被替换帧，再 put 即**双重释放** |
+| 3 | `[MCS DEADLOCK] already_holding=1` | P3 修双减时把 `depth--` 从 `mcs_unlock` 删掉，而下降循环的内联 lock/unlock **依赖它**，导致每分配一次中间节点泄漏一个深度槽 |
+| 4 | panic in `x86_64_smp_remote_tlb_flush` | 摘锁后持页表锁的 CPU 妨碍远端 TLB IPU 完成——正是 Oracle 风险 #3 |
+
+第 3 项是真实缺陷且已修复并提交（`91f3eafc`）；第 1、2、4 项随快路径一并回退。
+
+**第 4 项是关键教训**，也是下一步的硬性前提：Oracle 风险 #3 要求
+"cursor 必须在派发远端 shootdown **之前**释放所有页表锁"，而当前
+`mm_tlb_invalidate_begin/finish` 的事务边界是围绕 `mm->lock` 建的
+（`vm.h` 的 `MM_LOCK_MODEL` 明确记录：带 IRQ 关闭自旋在 `mm->lock` 上的远端
+CPU 必须能退出临界区去响应 TLB IPI）。摘掉 `mm->lock` 就必须**同时**重建这条
+边界，否则会制造一类新的 TLB-IPI 死锁。
+
+结论：P5 不是一次"把锁挪走"的改动，而是必须与 P4 延迟释放接线、TLB 事务边界
+重建、以及 VMA 生命周期方案一起设计并整体验证。单独做局部版本会连续踩到上述四
+类问题中的三类。
