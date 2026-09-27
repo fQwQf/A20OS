@@ -45,6 +45,10 @@ from a20_registry import (  # noqa: E402
 from a20_validate import validate_instance  # noqa: E402
 
 
+def load_instance(name: str):
+    return parse_instance(REPO_ROOT / "instances" / f"{name}.toml")
+
+
 def load(tmp: Path, text: str):
     path = tmp / "case.toml"
     path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
@@ -696,3 +700,216 @@ class TestHostMeasurement(unittest.TestCase):
         self.assertGreaterEqual(h.cpu_count, 1)
         self.assertGreater(h.disk_free_mb, 0)
         self.assertGreaterEqual(h.load1, 0.0)
+
+
+class TestSmokeHarnessRobustness(unittest.TestCase):
+    """The harness used to swallow the failures that cost the most debugging
+    time: a make error reported as "no qemu command found", a Ctrl-C leaving an
+    orphaned QEMU, and two runs writing into one log."""
+
+    def test_make_failure_reports_stderr_not_the_dry_run_plan(self) -> None:
+        from unittest.mock import patch
+        import a20_test
+        inst = load_instance("qemu-riscv64")
+
+        class Result:
+            returncode = 2
+            stdout = "qemu-system-riscv64 -machine virt\n"
+            stderr = "Makefile:42: *** missing separator.  Stop.\n"
+
+        with patch("a20_test.subprocess.run", return_value=Result()):
+            with self.assertRaises(SystemExit) as cm:
+                a20_test._qemu_cmdline(inst)
+        msg = str(cm.exception)
+        self.assertIn("missing separator", msg)
+        self.assertNotIn("machine virt", msg)
+
+    def test_absent_qemu_line_is_distinct_from_make_failure(self) -> None:
+        from unittest.mock import patch
+        import a20_test
+        inst = load_instance("qemu-riscv64")
+
+        class Result:
+            returncode = 0
+            stdout = "gcc -o kernel.elf kernel/main.c\n"
+            stderr = ""
+
+        with patch("a20_test.subprocess.run", return_value=Result()):
+            with self.assertRaises(SystemExit) as cm:
+                a20_test._qemu_cmdline(inst)
+        self.assertIn("no qemu-system command found", str(cm.exception))
+
+    def test_qemu_token_survives_make_and_shell_wrappers(self) -> None:
+        from a20_test import _QEMU_TOKEN
+        for line, want in (
+            ("qemu-system-riscv64 -machine virt", "qemu-system-riscv64"),
+            ("make[1]: qemu-system-aarch64 -M virt", "qemu-system-aarch64"),
+            ("cd /x && qemu-system-loongarch64 -M virt", "qemu-system-loongarch64"),
+            ("/usr/bin/qemu-system-x86_64 -machine q35", "/usr/bin/qemu-system-x86_64"),
+        ):
+            m = _QEMU_TOKEN.search(line)
+            self.assertIsNotNone(m, line)
+            self.assertEqual(m.group(1), want)
+
+    def test_qemu_token_does_not_match_unrelated_recipes(self) -> None:
+        from a20_test import _QEMU_TOKEN
+        for line in ("gcc -o kernel.elf kernel/main.c",
+                     "make[1]: Entering directory '/tmp/build'",
+                     "echo qemu-system-fake-not-really"):
+            self.assertIsNone(_QEMU_TOKEN.search(line), line)
+
+    def test_timeout_parsing(self) -> None:
+        from a20_test import _parse_timeout
+        self.assertEqual(_parse_timeout("45s"), 45.0)
+        self.assertEqual(_parse_timeout(" 1.5s "), 1.5)
+        for bad in ("45", "45sec", "", "s", "s45"):
+            with self.assertRaises(SystemExit, msg=bad):
+                _parse_timeout(bad)
+
+    def test_same_instance_cannot_run_twice(self) -> None:
+        from a20_test import _exclusive
+        with _exclusive("unit-test-instance"):
+            with self.assertRaises(SystemExit) as cm:
+                with _exclusive("unit-test-instance"):
+                    pass
+        self.assertIn("already running", str(cm.exception))
+
+    def test_lock_is_released_when_the_holder_exits(self) -> None:
+        """flock is released by the kernel on process death, so a killed run
+        cannot leave an instance permanently unusable."""
+        import subprocess as sp
+        from a20_test import _exclusive
+        code = ("import sys; sys.path.insert(0, 'tools');"
+                "from a20_test import _exclusive\n"
+                "with _exclusive('unit-test-reclaim'):\n"
+                "    print('held', flush=True)\n")
+        first = sp.Popen([sys.executable, "-c", code], stdout=sp.PIPE, text=True)
+        self.assertEqual(first.stdout.readline().strip(), "held")
+        first.kill()
+        first.wait()
+        with _exclusive("unit-test-reclaim"):
+            pass  # reacquired, so the lock really was released
+
+    def test_reap_kills_the_whole_process_group(self) -> None:
+        """A plain kill() leaves whatever QEMU spawned running.  The child here
+        ignores SIGTERM and spawns a grandchild that also ignores it, so only a
+        process-group signal plus SIGKILL escalation can clear both."""
+        import os
+        import subprocess as sp
+        import time
+        from a20_test import _reap
+        inner = ("import signal,subprocess,sys,time\n"
+                 "k=subprocess.Popen([sys.executable,'-c',"
+                 "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                 "time.sleep(300)'])\n"
+                 "print(k.pid,flush=True)\n"
+                 "signal.signal(signal.SIG_IGN if False else signal.SIGTERM,"
+                 "signal.SIG_IGN)\n"
+                 "time.sleep(300)\n")
+        proc = sp.Popen([sys.executable, "-c", inner], stdout=sp.PIPE,
+                        start_new_session=True, text=True)
+        grandchild = int(proc.stdout.readline().strip())
+        try:
+            _reap(proc)
+            self.assertIsNotNone(proc.poll())
+            time.sleep(0.3)
+            for pid in (proc.pid, grandchild):
+                with self.assertRaises(ProcessLookupError, msg=f"pid {pid} leaked"):
+                    os.kill(pid, 0)
+        finally:
+            for pid in (proc.pid, grandchild):
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+
+
+class TestCliArgumentHandling(unittest.TestCase):
+    """A mistyped a20 flag used to be forwarded to make, where it silently
+    became a variable override or a goal -- the build changed and nothing said
+    so.  Only an explicit "--" may pass arguments through.
+
+    Every test here stubs the action boundary.  Without that, a regression in
+    the argument gate does not fail the test -- it lets the call through to a
+    real QEMU boot, and the suite hangs instead of reporting.
+    """
+
+    def cli(self):
+        """Load tools/a20 as a module with every action replaced by a stub."""
+        import contextlib
+        import importlib.machinery
+        import importlib.util
+        import io
+        from unittest.mock import patch
+        loader = importlib.machinery.SourceFileLoader(f"a20_cli_{id(self)}", str(REPO_ROOT / "tools" / "a20"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+
+        def stub(*_a, **_k):
+            raise AssertionError("an action ran; the argument gate let it through")
+
+        patches = [patch.object(mod, name, stub) for name in
+                   ("exec_make", "build_instance", "run_test", "run_flash", "run_package")]
+        for ctx in patches:
+            ctx.start()
+            self.addCleanup(ctx.stop)
+        return mod, contextlib.nullcontext()
+
+    def run_main(self, argv: list[str]) -> int:
+        mod, _ = self.cli()
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return mod.main(argv)
+
+    def test_typo_is_an_error_not_a_forwarded_flag(self) -> None:
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["run", "qemu-riscv64", "--dry-rnu"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_typo_after_a_valid_flag_is_still_caught(self) -> None:
+        with self.assertRaises(SystemExit):
+            self.run_main(["run", "qemu-riscv64", "--dry-run", "--wait-timout", "5"])
+
+    def test_explicit_double_dash_forwards_to_make(self) -> None:
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        seen = {}
+
+        def record(_inst, extra, _dry):
+            seen["extra"] = extra
+            return 0
+
+        mod.build_instance = record
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = mod.main(["build", "qemu-riscv64", "--dry-run", "--", "-j8"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["extra"], ["-j8"])
+
+    def test_show_vars_prints_without_running_anything(self) -> None:
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(mod.main(["show-vars", "qemu-riscv64"]), 0)
+        self.assertIn("ARCH=riscv64", buf.getvalue())
+
+    def test_list_reports_success_on_a_clean_tree(self) -> None:
+        self.assertEqual(self.run_main(["list"]), 0)
+
+    def test_list_fails_when_an_instance_is_invalid(self) -> None:
+        """`a20 list` always returned 0, so it could not be used as a gate."""
+        import contextlib
+        import io
+        from unittest.mock import patch
+        mod, _ = self.cli()
+        broken = Path(self.id().replace(".", "_") + ".toml")
+        broken.write_text('arch = "riscv64"\nname = "broken"\n', encoding="utf-8")
+        self.addCleanup(broken.unlink)
+        with patch.object(mod, "INSTANCES_DIR", broken.parent), \
+             patch.object(mod, "validate_instance", return_value=["synthetic failure"]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mod.main(["list"]), 1)
