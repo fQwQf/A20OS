@@ -39,6 +39,17 @@ def query_make(inst: Instance | None, names: Sequence[str],
     that formula is a second source of truth that silently rots the first time
     the Makefile grows a variant suffix, so every consumer that needs a path
     asks make for it in one round trip.
+
+    Measured, because this has come up as an optimisation target and the
+    numbers say otherwise: the round trip is ~190 ms, it has exactly one caller
+    (a20_manifest.collect), that caller is invoked once per `a20 ledger
+    <instance>`, and the whole command runs in ~0.45 s.  The 8.4 s figure you
+    get by looping it over all 45 instances is a synthetic worst case nobody
+    pays -- no code path does that.  Moving the formula into Python would make
+    BUILD_DIR wrong the moment the Makefile grows a variant, and would require
+    make to call Python at parse time: ~37 ms across the 256 recursive $(MAKE)
+    sites in this build, on every make invocation, to save 190 ms on a command
+    that is not on the build path.  Keep asking make.
     """
     if not names:
         return {}
