@@ -6,8 +6,10 @@ different vocabularies.
 
 `components/drivers.toml` declares which .a20drv driver packages exist, which
 architectures each supports, and which are embedded early into the kernel root
-ramfs.  `a20 check-registry` cross-checks it against the Makefile's own build
-lists (DRVMOD_MODULES / EARLY_DRVMOD_MODULES).
+ramfs.  It is the only place a driver is declared: the Makefile's per-arch
+DRVMOD_MODULES / EARLY_DRVMOD_MODULES lists are generated from it into
+`components/drivers.mk`, which make includes.  `a20 check-registry` fails if
+that generated file is stale.
 
 `components/flash-backends.toml` declares which ways of programming a board's
 non-volatile memory exist, which boards each is validated for, and which make
@@ -18,11 +20,10 @@ manifest naming a board outside it is rejected before anything is built.
 from __future__ import annotations
 
 import re
-import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Sequence
 
 from a20_instance import KNOWN_ARCHES, Instance
 
@@ -139,6 +140,58 @@ def registry_path(repo_root: Path) -> Path:
     return repo_root / "components" / "drivers.toml"
 
 
+def make_fragment_path(repo_root: Path) -> Path:
+    return repo_root / "components" / "drivers.mk"
+
+
+def _modules_for(entries: tuple[DriverComponent, ...], arch: str,
+                 *, early: bool) -> tuple[str, ...]:
+    out: list[str] = []
+    for d in entries:
+        if arch not in d.arches:
+            continue
+        if early and arch not in d.early_arches:
+            continue
+        out.append(d.package)
+    return tuple(out)
+
+
+def render_make_fragment(entries: tuple[DriverComponent, ...],
+                         arches: Sequence[str] = GENERIC_DEPLOYMENT_ARCHES) -> str:
+    """Render the make fragment that carries the per-arch module lists.
+
+    The lists used to be hand-maintained in tools/driver-modules.mk next to a
+    cross-check that compared the two copies.  Generating the fragment removes
+    the hand-maintained copy, so the TOML is the only place a driver is
+    declared; `check-component-registry` now only has to prove this file is
+    current, which costs one parse instead of eight make subprocesses.
+
+    Make still reads plain assignments, so nothing here costs a parse-time
+    $(shell) -- worth avoiding, since the recursive $(MAKE) in this build means
+    a per-invocation cost is paid dozens of times over.
+    """
+    lines = [
+        "# GENERATED from components/drivers.toml by `make regen-driver-fragment`.",
+        "# Do not edit by hand: edit the TOML and regenerate.  `make",
+        "# check-component-registry` fails if this file is stale.",
+        "",
+    ]
+    for arch in arches:
+        mods = " ".join(_modules_for(entries, arch, early=False))
+        early = " ".join(_modules_for(entries, arch, early=True))
+        lines.append(f"DRVMOD_MODULES_{arch} := {mods}")
+        lines.append(f"EARLY_DRVMOD_MODULES_{arch} := {early}")
+    lines += [
+        "",
+        "# Unset for any other ARCH, matching the previous explicit empty",
+        "# assignment: undefined and empty are equivalent for every consumer.",
+        "DRVMOD_MODULES := $(DRVMOD_MODULES_$(ARCH))",
+        "EARLY_DRVMOD_MODULES := $(EARLY_DRVMOD_MODULES_$(ARCH))",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def flash_backends_path(repo_root: Path) -> Path:
     return repo_root / "components" / "flash-backends.toml"
 
@@ -244,35 +297,27 @@ def validate_driver_selection(inst: Instance, entries: tuple[DriverComponent, ..
     return e
 
 
-def _make_var(repo_root: Path, arch: str, var: str) -> tuple[str, ...]:
-    """Print one variable from the Makefile without parsing it ourselves."""
-    out = subprocess.run(
-        ["make", "-s", "-C", str(repo_root), f"ARCH={arch}", "DRIVER_DEPLOYMENT=generic",
-         "--eval", f"print-a20-registry:;@echo $({var})", "print-a20-registry"],
-        check=False, capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        raise RegistryError(errors=(f"make failed for ARCH={arch}: {out.stderr.strip()}",))
-    return tuple(out.stdout.split())
+def check_make_fragment(entries: tuple[DriverComponent, ...],
+                        repo_root: Path) -> list[str]:
+    """Report if components/drivers.mk is stale with respect to the TOML.
 
-
-def cross_check_make(entries: tuple[DriverComponent, ...], repo_root: Path) -> list[str]:
-    """Compare the registry against DRVMOD_MODULES/EARLY_DRVMOD_MODULES per arch."""
-    e: list[str] = []
-    for arch in GENERIC_DEPLOYMENT_ARCHES:
-        make_modules = set(_make_var(repo_root, arch, "DRVMOD_MODULES"))
-        make_early = set(_make_var(repo_root, arch, "EARLY_DRVMOD_MODULES"))
-        reg_modules = {d.package for d in entries if arch in d.arches}
-        reg_early = {d.package for d in entries if arch in d.early_arches}
-        if make_modules != reg_modules:
-            e.append(f"{arch}: DRVMOD_MODULES drift — "
-                     f"only in Makefile: {sorted(make_modules - reg_modules)}, "
-                     f"only in registry: {sorted(reg_modules - make_modules)}")
-        if make_early != reg_early:
-            e.append(f"{arch}: EARLY_DRVMOD_MODULES drift — "
-                     f"only in Makefile: {sorted(make_early - reg_early)}, "
-                     f"only in registry: {sorted(reg_early - make_early)}")
-    return e
+    This replaces the old DRVMOD_MODULES/EARLY_DRVMOD_MODULES cross-check.
+    That one compared two hand-maintained lists, which meant it could only ever
+    tell you they had drifted -- it could not remove the second copy.  The lists
+    are generated now, so the only question left is whether the checked-in
+    fragment still matches its source, and that is a string comparison rather
+    than eight make subprocesses (1.7s -> ~40ms).
+    """
+    want = render_make_fragment(entries)
+    path = make_fragment_path(repo_root)
+    try:
+        have = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"{path.name}: cannot read ({exc}); run `make regen-driver-fragment`"]
+    if have == want:
+        return []
+    return [f"{path.name} is stale with respect to {registry_path(repo_root).name}; "
+            "run `make regen-driver-fragment`"]
 
 
 def validate_flash_backends(entries: tuple[FlashBackend, ...], repo_root: Path) -> list[str]:
