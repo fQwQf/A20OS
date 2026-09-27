@@ -13,10 +13,10 @@ import re
 from pathlib import Path
 from typing import Final, assert_never
 
+from a20_registry import RegistryError, load_flash_backends
 from a20_instance import (
     ABI_CHOICES,
     DRIVER_DEPLOYMENTS,
-    FLASH_TOOLS,
     KNOWN_ARCHES,
     NOMMU_ARCHES,
     PACKAGE_KINDS,
@@ -110,19 +110,49 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if has_test and g.enabled:
         e.append("test.*: the a20 test harness drives the serial console and "
                  "cannot combine with gui.enabled")
-    _validate_board_sections(inst, e)
+    _validate_board_sections(inst, e, repo_root)
     return e
 
 
-def _validate_board_sections(inst: Instance, e: list[str]) -> None:
+def _validate_flash(inst: Instance, e: list[str], repo_root: Path) -> None:
+    """Resolve [flash].tool against the backend registry and check the board.
+
+    A board/backend mismatch is reported here, at `a20 check` time, rather than
+    left to the flash action: the build is long and the mistake is destructive,
+    so it must be caught before either.
+    """
+    if not section_is_set(inst.flash):
+        return
+    tool = inst.flash.tool
+    if tool is None:
+        e.append("flash.tool: required when [flash] is present")
+        return
+    try:
+        backends = load_flash_backends(repo_root)
+    except RegistryError as err:
+        e.append(f"flash.tool: cannot resolve backends: {err}")
+        return
+    backend = next((b for b in backends if b.name == tool), None)
+    if backend is None:
+        supported = ", ".join(sorted(b.name for b in backends)) or "(none)"
+        e.append(f"flash.tool: '{tool}' is not a registered backend; "
+                 f"see components/flash-backends.toml (registered: {supported})")
+        return
+    if inst.board not in backend.boards:
+        e.append(f"flash.tool: backend '{tool}' is not validated for board "
+                 f"'{inst.board}'; it covers {', '.join(backend.boards)}")
+        return
+    mismatch = backend.geometry_mismatch(inst.stm32.flash_kb, inst.stm32.ram_kb)
+    if mismatch:
+        e.append(f"flash.tool: backend '{tool}' is written for a different flash geometry "
+                 f"than this manifest declares ({mismatch})")
+
+
+def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> None:
     """Cross-section rules for [stm32], [flash], and [package]."""
     if section_is_set(inst.stm32) and inst.arch != "armv7m":
         e.append("stm32.*: only valid for arch = \"armv7m\"")
-    if section_is_set(inst.flash):
-        if inst.arch != "armv7m":
-            e.append("flash.*: only the armv7m/STM32 OpenOCD flow is currently supported")
-        if inst.flash.tool is not None and inst.flash.tool not in FLASH_TOOLS:
-            e.append(f"flash.tool: unsupported '{inst.flash.tool}'; supported: {', '.join(FLASH_TOOLS)}")
+    _validate_flash(inst, e, repo_root)
     p = inst.package
     if not section_is_set(p):
         return
