@@ -1,0 +1,99 @@
+# a20-min — 面向真实设备的最小 A20OS 用户态
+#
+# 为什么需要这个包：a20-base 会把 user/build/<arch> 下**所有**产物平铺进根
+# 文件系统，实测 riscv64 下是 201 个二进制 / 29 MiB，其中 35 个是 *_test /
+# *_stress 回归程序。放进 128 MiB 的 FAT32 卡里尚可，在 512 MiB RAM + 128 MiB
+# eMMC 的真机上就很勉强；而在只有 64 MiB NOR flash 的板子上直接放不下。
+# 这些测试程序只在宿主上跑（`make smoke-*`、`make run-test-*`），从不随设备
+# 出厂，所以它们不该出现在设备镜像里。
+#
+# 这里用 recipe 的 `include`（`exclude` 的正向形式，按 basename 匹配）显式列出
+# 一个可启动、可诊断的最小集合，而不是"排除掉所有看起来像测试的东西"——后者
+# 在有人新加一个 xxx_test 时会静默漏掉，也会误伤正式工具。
+#
+# 集合的取舍标准：能启动到 shell、能做基本文件操作、能有一条可用的诊断链
+# （ls/cat/ps/grep/head/tail/wc/date/uname）、能干净地开关机。
+# 刻意**不含**：网络工具（该板用 SDK/host 侧部署）、shell 脚本解释器之外的
+# 编译器、所有 *_test / *_stress 回归程序。完整工具链见 devel.world /
+# devtools.world。
+#
+# 构建前提：`make ARCH=<arch> dev-build`（或任何产出 user/build/<variant> 的目标）。
+
+[package]
+name = "a20-min"
+version = "0.1.0"
+release = 0
+description = "A20OS minimal userland for real devices: init, shell, core file ops and diagnostics"
+url = "https://github.com/fQwQf/A20OS"
+license = "Apache-2.0"
+maintainer = "A20OS developers"
+archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
+# 虚拟包：任何实现了"根文件系统里有可用用户态"这一点的包都 provide 它。
+# a20-drivers 依赖 a20-userland 而不是 a20-base，这样 min/base 两种
+# 用户态都能满足它——之前硬依赖 a20-base 会把 a20-min 顶回冲突。
+provides = ["a20-userland"]
+
+[[files]]
+src = "{build_dir}/*"
+dest = "/"
+include = [
+    # 启动必需：init 是 PID 1，mksh 是唯一的 shell。
+    "init", "mksh",
+    # 与内核内建 initramfs（RAMFS_USER_PROGRAMS）保持一致的那一组，
+    # 保证"内建 initramfs 启动"和"根文件系统启动"下用户能敲到同样的命令。
+    "help", "ls", "cat", "ps", "echo", "sleep",
+    # 基本文件操作：设备上没有 shell 脚本可依赖，只能手动操作。
+    "mkdir", "rmdir", "rm", "cp", "mv",
+    # 开关机与诊断链。
+    "poweroff", "reboot", "sync", "true", "false", "test",
+    "grep", "head", "tail", "wc", "uname", "env", "date",
+]
+# 与 a20-base 相同的构建产物排除：这些不该作为可执行文件进根文件系统。
+exclude = ["*.o", "*.a", "*.so", "*.d", "*.a20drv", ".build-id", "bash"]
+
+# musl 动态库：用户态动态链接程序需要，沿用旧镜像的 /musl/lib 布局。
+[[files]]
+src = "{repo}/user/external/musl/build-{variant}/lib/libc.so"
+dest = "/musl/lib/libc.so"
+mode = "0755"
+optional = true
+
+# sh/bash 都指向 mksh（旧镜像里是硬拷贝，包里用符号链接）。
+[[files]]
+dest = "/sh"
+symlink = "/mksh"
+
+[[files]]
+dest = "/bash"
+symlink = "/mksh"
+
+# 网络协议表（与 Makefile PROTOCOLS_LINES 一致）。
+[[files]]
+dest = "/etc/protocols"
+mode = "0644"
+content = """
+hopopt 0 HOPOPT
+icmp 1 ICMP
+igmp 2 IGMP
+tcp 6 TCP
+udp 17 UDP
+ipv6 41 IPv6
+ipv6-route 43 IPv6-Route
+ipv6-frag 44 IPv6-Frag
+esp 50 ESP
+ah 51 AH
+ipv6-icmp 58 IPv6-ICMP
+ipv6-nonxt 59 IPv6-NoNxt
+ipv6-opts 60 IPv6-Opts
+"""
+
+[[files]]
+dest = "/etc/os-release"
+mode = "0644"
+content = """
+ID=A20OS
+NAME="A20OS"
+PRETTY_NAME="A20OS"
+VERSION="{version}"
+VERSION_ID="{version}"
+"""
