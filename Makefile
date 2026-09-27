@@ -725,6 +725,14 @@ ifeq ($(CONFIG_SWAP),y)
 CFLAGS += -DCONFIG_SWAP
 endif
 
+# RISC-V IOMMU probe: accept QEMU <= 10.0's unshifted TR_RESPONSE.PPN field.
+# QEMU fixed this on master (set_field); set to 0 once the required QEMU
+# baseline no longer needs the exception.
+CONFIG_IOMMU_TRRESP_LEGACY_PPN ?= 1
+ifeq ($(CONFIG_IOMMU_TRRESP_LEGACY_PPN),1)
+CFLAGS += -DCONFIG_IOMMU_TRRESP_LEGACY_PPN
+endif
+
 BOARD_LDSCRIPT = $(KERNEL_DIR)/platform/$(BOARD)/ldscript.ld
 ifeq ($(wildcard $(BOARD_LDSCRIPT)),)
 LDSCRIPT = $(KERNEL_DIR)/arch/$(ARCH)/boot/ldscript.ld

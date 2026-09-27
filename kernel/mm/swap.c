@@ -228,6 +228,7 @@ void swap_unregister_device(int type) {
     uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
     uint8_t *map = si->swap_map;
     const char *name = si->name;
+    block_dev_t *bdev = si->bdev;
     if (!si->active) {
         spin_unlock_irqrestore(&swap_locks[type], flags);
         return;
@@ -251,8 +252,34 @@ void swap_unregister_device(int type) {
     si->inuse_pages = 0;
     si->active = 0;
     spin_unlock_irqrestore(&swap_locks[type], flags);
+    /* Released after the swap lock so the provider's own lock is never
+     * nested under it. */
+    if (bdev && bdev->release)
+        bdev->release(bdev);
     kfree(map);
     kfree((void *)name);
+}
+
+int swap_list_area(int type, swap_listing_t *out) {
+    if (type < 0 || type >= MAX_SWAPFILES || !out)
+        return -EINVAL;
+    swap_info_struct *si = &swap_info[type];
+    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
+    int rc = -EINVAL;
+    if (si->active) {
+        out->name[0] = '\0';
+        if (si->name) {
+            size_t n = 0;
+            for (; n + 1 < sizeof(out->name) && si->name[n]; n++)
+                out->name[n] = si->name[n];
+            out->name[n] = '\0';
+        }
+        out->pages = si->pages;
+        out->inuse_pages = si->inuse_pages;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&swap_locks[type], flags);
+    return rc;
 }
 
 swap_entry_t get_swap_page(void) {

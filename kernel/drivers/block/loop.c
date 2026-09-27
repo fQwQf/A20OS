@@ -43,9 +43,13 @@ typedef struct {
     int         in_use;
     vfile_t    *backing_vf;
     uint64_t    backing_size;
-    /* LOCK_ORDER: g_loop[i].lock protects in_use, backing_vf, backing_size.
-     * Local order: none. Lock is always released before any backing-file VFS
-     * operation or memory allocation. */
+    /* Set while a block_dev_t consumer (swap) still resolves this index.
+     * Rebinding underneath such a consumer would make it read and write a
+     * different file at its own offsets, so both mutators refuse instead. */
+    int         claimed;
+    /* LOCK_ORDER: g_loop[i].lock protects in_use, backing_vf, backing_size,
+     * claimed. Local order: none. Lock is always released before any
+     * backing-file VFS operation or memory allocation. */
     spinlock_t  lock;
 } loop_dev_t;
 
@@ -84,7 +88,7 @@ static int loop_set_fd(int loop_idx, int user_fd) {
     /* LOCK_ORDER: acquire loop lock after VFS lookup; released before
      * subsequent VFS operations on the backing file. */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
-    if (g_loop[loop_idx].in_use) {
+    if (g_loop[loop_idx].in_use || g_loop[loop_idx].claimed) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
         return -EBUSY;
     }
@@ -104,6 +108,10 @@ static int loop_clr_fd(int loop_idx) {
     if (!g_loop[loop_idx].in_use) {
         spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
         return -EINVAL;
+    }
+    if (g_loop[loop_idx].claimed) {
+        spin_unlock_irqrestore(&g_loop[loop_idx].lock, flags);
+        return -EBUSY;
     }
     vfile_t *vf = g_loop[loop_idx].backing_vf;
     g_loop[loop_idx].in_use = 0;
@@ -294,6 +302,20 @@ static int loop_block_write_sector(block_dev_t *block, uint64_t lba,
     return (r >= 0 && (size_t)r == bytes) ? 0 : -EIO;
 }
 
+void loop_block_release(block_dev_t *bdev) {
+    loop_block_t *lb = (loop_block_t *)bdev->priv;
+    if (!lb)
+        return;
+    /* LOCK_ORDER: acquire the loop lock to drop the consumer claim. */
+    uint64_t flags = spin_lock_irqsave(&g_loop[lb->idx].lock);
+    g_loop[lb->idx].claimed = 0;
+    spin_unlock_irqrestore(&g_loop[lb->idx].lock, flags);
+}
+
+static void loop_block_release_cb(block_dev_t *bdev) {
+    loop_block_release(bdev);
+}
+
 block_dev_t *loop_block_device(int idx) {
     if (idx < 0 || idx >= MAX_LOOP_DEVS)
         return NULL;
@@ -301,6 +323,8 @@ block_dev_t *loop_block_device(int idx) {
     uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
     int in_use = g_loop[idx].in_use;
     uint64_t bsz = g_loop[idx].backing_size;
+    if (in_use && bsz)
+        g_loop[idx].claimed = 1;
     spin_unlock_irqrestore(&g_loop[idx].lock, flags);
     if (!in_use || !bsz)
         return NULL;
@@ -311,5 +335,6 @@ block_dev_t *loop_block_device(int idx) {
     lb->block.capacity = bsz / LOOP_SECTOR_SIZE;
     lb->block.sector_size = LOOP_SECTOR_SIZE;
     lb->block.priv = lb;
+    lb->block.release = loop_block_release_cb;
     return &lb->block;
 }

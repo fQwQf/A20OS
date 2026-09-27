@@ -499,14 +499,14 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                 "Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n");
 #ifdef CONFIG_SWAP
         for (int type = 0; type < MAX_SWAPFILES; type++) {
-            swap_info_struct *si = &swap_info[type];
-            if (!si->active)
+            swap_listing_t sl;
+            if (swap_list_area(type, &sl) != 0)
                 continue;
             /* core/printf.c has no '-' flag support; emit unaligned fields. */
             appendf(buf, bufsz, &off, "%s\tpartition\t%llu\t%lu\t-2\n",
-                    si->name ? si->name : "",
-                    (unsigned long long)si->pages,
-                    (unsigned long)si->inuse_pages);
+                    sl.name,
+                    (unsigned long long)sl.pages,
+                    (unsigned long)sl.inuse_pages);
         }
 #endif
         break;
@@ -886,16 +886,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     }
     case PF_PID_NS_PID:
         /* Singleton namespaces: static identifiers (init-namespace inos). */
-        snprintf(buf, bufsz, "pid:[4026531836]\n");
+        snprintf(buf, bufsz, "pid:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_PID);
         break;
     case PF_PID_NS_UTS:
-        snprintf(buf, bufsz, "uts:[4026531838]\n");
+        snprintf(buf, bufsz, "uts:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_UTS);
         break;
     case PF_PID_NS_USER:
-        snprintf(buf, bufsz, "user:[4026531837]\n");
+        snprintf(buf, bufsz, "user:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_USER);
         break;
     case PF_PID_NS_IPC:
-        snprintf(buf, bufsz, "ipc:[4026531839]\n");
+        snprintf(buf, bufsz, "ipc:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_IPC);
         break;
     case PF_PID_NS_MNT: {
         /* Real mount namespaces: report the target task's namespace ino. */
@@ -906,10 +910,12 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_PID_NS_NET:
-        snprintf(buf, bufsz, "net:[4026531841]\n");
+        snprintf(buf, bufsz, "net:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_NET);
         break;
     case PF_PID_NS_CGROUP:
-        snprintf(buf, bufsz, "cgroup:[4026531835]\n");
+        snprintf(buf, bufsz, "cgroup:[%llu]\n",
+                 (unsigned long long)MNTNS_INIT_INO_CGROUP);
         break;
     case PF_PID_MOUNTINFO: {
         buf[0] = '\0';
