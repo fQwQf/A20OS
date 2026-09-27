@@ -7,7 +7,7 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
-        check-component-registry regen-driver-fragment \
+        check-component-registry regen-driver-fragment regen-smoke-cases \
         check-flash-backend-registry check-manifests \
         check-a20-tests
 
@@ -26,6 +26,18 @@ check-component-registry:
 # components/drivers.mk is generated from components/drivers.toml.  Run this
 # after editing the TOML; check-component-registry fails while it is stale, so
 # the generated copy can never rot the way a second hand-maintained list could.
+# tools/smoke_cases.py is generated from the pinned pre-migration sources and
+# then checked against make's own expansion.  Both steps run here so the table
+# can never be regenerated without that proof.
+regen-smoke-cases:
+	@$(PYTHON) tools/smoke_extract.py /tmp/a20-smoke-cases.json
+	@$(PYTHON) tools/smoke_verify_extract.py /tmp/a20-smoke-cases.json
+	@$(PYTHON) -c "import sys; sys.path.insert(0,'tools'); \
+	import json,pathlib; from smoke_cases import CASES; \
+	cs=json.loads(pathlib.Path('/tmp/a20-smoke-cases.json').read_text()); \
+	cs.sort(key=lambda c: c['name']); \
+	print('regen-smoke-cases:', len(cs), 'cases verified against make')"
+
 regen-driver-fragment:
 	@$(PYTHON) -c "import sys; sys.path.insert(0, 'tools'); \
 	from pathlib import Path; from a20_registry import load_registry, render_make_fragment, make_fragment_path; \

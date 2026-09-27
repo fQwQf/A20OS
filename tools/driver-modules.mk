@@ -186,98 +186,16 @@ DRIVER_STORE_USER_PACKAGES = $(notdir $(NATIVE_RTCDD_BIN)) \
                              $(notdir $(NATIVE_UEDUD_BIN))
 
 smoke-drvmod-riscv64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'drvctl list\nsyscall_smoke\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'SYSCALL_SMOKE: PASS' "$$log" && \
-	   grep -q 'rtc.a20drv' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-riscv64: PASS (rtc.a20drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-riscv64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-drvmod-riscv64
 
 smoke-drvmod-aarch64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=aarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-aarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
-		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-kernel .kernel-build/aarch64-qemu-virt-aarch64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-aarch64: PASS (rtc.a20drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-aarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-drvmod-aarch64
 
 smoke-drvmod-loongarch64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=loongarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-loongarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-loongarch64 \
-		-machine virt -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[GOLDFISH-RTC\] probe ok' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-drvmod-loongarch64: PASS (rtc.a20drv loaded and bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-loongarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-drvmod-loongarch64
 
 smoke-drvmod-x86_64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/drvmod-x86_64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'drvctl list\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
-		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-pci,drive=x0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '\[PC-SPKR\] driver registered in core: 0' "$$log" && \
-	   grep -q "device 'pc-speaker' bound to driver 'pc-speaker'" "$$log" && \
-	   grep -q '\[PS2\] module init ok' "$$log"; then \
-		echo "smoke-drvmod-x86_64: PASS (pc-spkr.a20drv + ps2.a20drv loaded, registered, bound); log saved to $$log"; \
-	else \
-		echo "smoke-drvmod-x86_64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-drvmod-x86_64
 
 smoke-drvmod: smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64
 

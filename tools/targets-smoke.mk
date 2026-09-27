@@ -37,40 +37,7 @@ smoke-iommu-discovery:
 	tools/a20 test smoke-iommu-discovery
 
 smoke-iommu-udriver-isolation:
-	$(call smoke-gate,1G,1)
-	$(MAKE) -j1 ARCH=riscv64 ABI=both BRINGUP=0 PROFILE=benchmark dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/iommu-udriver-isolation-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/iommu\npoweroff\n'; } | \
-	$(TIMEOUT) 30s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-device riscv-iommu-pci,bus=pcie.0,addr=1.0 \
-		-device edu,bus=pcie.0,addr=2.0,dma_mask=0xffffffffffffffff \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UEDUD: mapped DMA ok' "$$log" && \
-	   grep -q 'UEDUD: unmapped DMA fault' "$$log" && \
-	   grep -q '\[IOMMU\] DMA fault blocked did=16 cause=15' "$$log" && \
-	   grep -q 'UEDUD: recovered' "$$log" && \
-	   grep -q 'UEDUD: PASS' "$$log" && \
-	   grep -q 'enabled: 1' "$$log" && \
-	   grep -Eq 'domains_claimed: [1-9]' "$$log" && \
-	   grep -Eq 'maps: [1-9]' "$$log" && \
-	   grep -Eq 'unmaps: [1-9]' "$$log" && \
-	   grep -Eq 'faults: [1-9]' "$$log" && \
-	   grep -Eq 'blocked_events: [1-9]' "$$log" && \
-	   grep -Eq 'last_fault_cause: 15' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-iommu-udriver-isolation: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-iommu-udriver-isolation: failed with status $$status; tail of $$log:"; \
-		tail -n 120 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-iommu-udriver-isolation
 
 # Thin wrapper: the smoke definition lives in instances/smoke-loongarch64.toml.
 smoke-loongarch64:
@@ -177,102 +144,16 @@ smoke-net-iface:
 	tools/a20 test smoke-net-iface
 
 smoke-envelope:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/envelope-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_smoke\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'ENVELOPE_SMOKE: PASS' "$$log"; then \
-			echo "smoke-envelope: PASS; log saved to $$log"; \
-		else \
-			echo "smoke-envelope: failed with status $$status; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit 1; \
-		fi
+	$(PYTHON) tools/smoke.py smoke-envelope
 
 smoke-envelope-pilot:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/envelope-pilot-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_pilot\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE_PILOT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'ENVELOPE_PILOT: PASS' "$$log"; then \
-			echo "smoke-envelope-pilot: PASS; log saved to $$log"; \
-		else \
-			echo "smoke-envelope-pilot: failed with status $$status; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit 1; \
-		fi
+	$(PYTHON) tools/smoke.py smoke-envelope-pilot
 
 smoke-envelope-bench:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/envelope-bench-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_bench\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE_BENCH) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'ENVELOPE_BENCH: PASS' "$$log"; then \
-			echo "smoke-envelope-bench: PASS; log saved to $$log"; \
-			grep 'ENVELOPE_BENCH:' "$$log"; \
-		else \
-			echo "smoke-envelope-bench: failed with status $$status; tail of $$log:"; \
-			tail -n 60 "$$log"; \
-			exit 1; \
-		fi
+	$(PYTHON) tools/smoke.py smoke-envelope-bench
 
 smoke-envelope-corpus:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/envelope-corpus-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'envelope_corpus\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_ENVELOPE_CORPUS) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'ENVELOPE_CORPUS: PASS' "$$log"; then \
-			echo "smoke-envelope-corpus: PASS; log saved to $$log"; \
-			grep 'ENVELOPE_CORPUS:' "$$log"; \
-		else \
-			echo "smoke-envelope-corpus: failed with status $$status; tail of $$log:"; \
-			tail -n 60 "$$log"; \
-			exit 1; \
-		fi
+	$(PYTHON) tools/smoke.py smoke-envelope-corpus
 
 smoke-a20-channel:
 	$(call smoke-gate,1G,1)
@@ -360,37 +241,10 @@ smoke-network-suite:
 	fi
 
 # netctl only inspects local kernel state; it never accepts an inbound
-# connection, so it must not depend on a free host port 5555.
+# connection, so it must not depend on a free host port 5555.  That is now
+# baked into the case argv in tools/smoke_cases.py (no hostfwd token), so the
+# old `NET_HOSTFWD=` target-specific override has nothing left to do.
 smoke-netctl: NET_HOSTFWD=
-smoke-netctl:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/netctl-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'netctl\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NETCTL: PASS' "$$log"; then \
-		echo "smoke-netctl: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-netctl: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-netctl: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
-
 smoke-network-suite-aarch64:
 	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
@@ -421,263 +275,39 @@ smoke-network-suite-aarch64:
 	fi
 
 smoke-proc-a20:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/proc-a20-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/bcache\ncat /proc/a20/page_cache\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q '^valid_pages:' "$$log" && grep -q '^capacity:' "$$log"; then \
-		echo "smoke-proc-a20: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-proc-a20: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-proc-a20
 
 smoke-proc-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/proc-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'proc_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'PROC_STRESS: PASS' "$$log" && \
-	   grep -q 'PROC_STRESS: signal-stop-exit PASS' "$$log" && \
-	   grep -q 'PROC_STRESS: signal-mask-park PASS' "$$log" && \
-	   grep -q 'PROC_STRESS: thread-exec-cloexec PASS' "$$log"; then \
-		echo "smoke-proc-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-proc-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-proc-stress
 
 smoke-procfs-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/procfs-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'procfs_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'PROCFS_STRESS: PASS' "$$log"; then \
-		echo "smoke-procfs-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-procfs-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-procfs-stress
 
 smoke-mm-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mm-stress-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'mm_stress' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT_MM_ST) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MM_STRESS: PASS' "$$log"; then \
-		echo "smoke-mm-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mm-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mm-stress
 
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
 smoke-mmprobe:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mmprobe-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'mmprobe\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MMPROBE: PASS' "$$log"; then \
-		echo "smoke-mmprobe: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mmprobe: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mmprobe
 
 smoke-oom-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/oom-stress-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'oom_stress' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT_OOM) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'OOM_STRESS: PASS' "$$log"; then \
-		echo "smoke-oom-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-oom-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-oom-stress
 
 # Swap runtime gate: swap_test binds a ramfs-backed loop device, then runs
 # mkswap -> swapon -> duplicate-swapon(EBUSY) -> swapoff, asserting
 # /proc/swaps and sysinfo totalswap transitions along the way.
 smoke-swap:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/swap-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'swap_test' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT_SWAP) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SWAP_TEST: PASS' "$$log"; then \
-		echo "smoke-swap: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-swap: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-swap
 
 smoke-mm-fork-exec-race:
-	$(call smoke-gate,1G,8)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mm-fork-exec-race-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'mm_stress --vma-fork-exec-only' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT_MM_FORK_EXEC) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 8 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MM_VMA_FORK_EXEC: PASS' "$$log"; then \
-		echo "smoke-mm-fork-exec-race: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mm-fork-exec-race: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mm-fork-exec-race
 
 smoke-vfs-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/vfs-stress-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'vfs_stress' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
-		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img,if=none,format=raw,id=x2 \
-		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-			> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'VFS_STRESS: PASS' "$$log"; then \
-			echo "smoke-vfs-stress: PASS; log saved to $$log"; \
-		else \
-			echo "smoke-vfs-stress: failed with status $$status; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit 1; \
-		fi
+	$(PYTHON) tools/smoke.py smoke-vfs-stress
 
 smoke-vfs-edge:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_edge\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-	$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-	-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-	-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-	> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'VFS_EDGE: PASS' "$$log"; then \
-		echo "smoke-vfs-edge: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-vfs-edge: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-vfs-edge
 
 smoke-io-event:
 	$(call smoke-gate,1G,1)
@@ -709,322 +339,49 @@ smoke-io-event:
 	fi
 
 smoke-syscall-ext:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/syscall-ext-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'syscall_ext\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SYSCALL_EXT: PASS' "$$log"; then \
-		echo "smoke-syscall-ext: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-syscall-ext: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-syscall-ext
 
 smoke-sched-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/sched-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'sched_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
-		echo "smoke-sched-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-sched-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-sched-stress
 
 smoke-futex-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/futex-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'futex_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
-		echo "smoke-futex-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-futex-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-futex-stress
 
 smoke-futex-stress-aarch64:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/futex-stress-aarch64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'futex_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-aarch64 \
-		-machine virt -cpu cortex-a57 -m 1G -nographic -smp 1 \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
-		echo "smoke-futex-stress-aarch64: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-futex-stress-aarch64: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-futex-stress-aarch64
 
 smoke-scm-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/scm-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'scm_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SCM_STRESS: PASS' "$$log"; then \
-		echo "smoke-scm-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-scm-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-scm-stress
 
 smoke-evdev-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/evdev-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'evdev_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'EVDEV_STRESS: PASS' "$$log"; then \
-		echo "smoke-evdev-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-evdev-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-evdev-stress
 
 smoke-signalfd-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/signalfd-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'signalfd_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SIGNALFD_STRESS: PASS' "$$log"; then \
-		echo "smoke-signalfd-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-signalfd-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-signalfd-stress
 
 smoke-pty-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/pty-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'pty_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'pty_stress: PASS' "$$log"; then \
-		echo "smoke-pty-stress: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-pty-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-pty-stress
 
 smoke-timeout-test:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/timeout-test-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'timeout_test\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'TIMEOUT_TEST: PASS' "$$log"; then \
-		echo "smoke-timeout-test: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-timeout-test: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-timeout-test
 
 # ================================================================
 # Coredump smoke (fatal-signal ELF core dump generation)
 # ================================================================
 smoke-coredump:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/coredump-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'coredump_test' --send-line 'poweroff' \
-		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'COREDUMP_TEST: PASS' "$$log"; then \
-		echo "smoke-coredump: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-coredump: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-coredump
 
 # ================================================================
 # Poll/timer edge-semantics smokes (Linux ABI poll + timer areas)
 # ================================================================
 smoke-poll-edge:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/poll-edge-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'poll_edge\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'POLL_EDGE: PASS' "$$log"; then \
-		echo "smoke-poll-edge: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-poll-edge: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-poll-edge
 
 smoke-timer-edge:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/timer-edge-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'timer_edge\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'TIMER_EDGE: PASS' "$$log"; then \
-		echo "smoke-timer-edge: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-timer-edge: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-timer-edge
 
 # ================================================================
 # Mount namespace smoke (unshare/setns CLONE_NEWNS + /proc/<pid>/ns/mnt)
 # ================================================================
 smoke-mntns:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/mntns-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'mntns_test\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'MNTNS_TEST: PASS' "$$log"; then \
-		echo "smoke-mntns: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-mntns: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-mntns
