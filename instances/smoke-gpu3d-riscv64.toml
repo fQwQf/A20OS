@@ -24,8 +24,10 @@ display = "egl-headless"
 [test]
 commands = ["/bin/gpu3d_test", "poweroff"]
 expect = [
-  "GPU3D_TEST: virgl available",
-  "GPU3D_TEST: context 1 created",
+  "GPU3D_TEST: GETPARAM 3D_FEATURES=1",
+  "GPU3D_TEST: GETPARAM capset mask=",
+  "GPU3D_TEST: 3D resource",
+  "GPU3D_TEST: RESOURCE_INFO round-trip ok",
   "GPU3D_TEST: PASS",
 ]
 input_delay = 20

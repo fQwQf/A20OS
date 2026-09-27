@@ -151,59 +151,90 @@ DRM_CAP_ASYNC_PAGE_FLIP      0x7   DRM_CAP_DRAW_MESH          7
 
 ---
 
-## 4. 待完成：DRM_IOCTL_VIRTGPU_* + 3D backing
+## 4. 已完成：DRM_IOCTL_VIRTGPU_* 与 3D backing
 
-这是把"内核能透传 3D"变成"Mesa 能用 3D"的一步。按依赖顺序：
+原先列为"待完成"的四步已全部落地，实测见 §4.1。
 
-### 4.1 第一步：能力探测（让 Mesa 不再直接放弃）
+### 4.1 实测结果（`tools/a20 test smoke-gpu3d-riscv64`）
 
-Mesa 的 virtio-gpu 驱动上来就 `DRM_IOCTL_VIRTGPU_GETPARAM` 问
-`VIRTGPU_PARAM_3D_FEATURES` / `VIRTGPU_PARAM_CONTEXT_INIT` /
-`VIRTGPU_PARAM_CAPSET_QUERY_FIX` / `VIRTGPU_PARAM_RESOURCE_BLOB` /
-`VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs`。**答错或不答，驱动直接判定本设备无 3D**，
-后面全部不发生。这一步最便宜、收益最直接。
+```
+GPU3D_TEST: virgl device present
+GPU3D_TEST: transport ctx created / resource created / teardown clean
+GPU3D_TEST: GETPARAM 3D_FEATURES=1
+GPU3D_TEST: GETPARAM capset mask=0x7 (virgl present)
+GPU3D_TEST: GEM handle 1 allocated (16384 bytes)
+GPU3D_TEST: 3D resource 2 created with host backing
+GPU3D_TEST: RESOURCE_INFO round-trip ok (res 2, size 16384)
+GPU3D_TEST: EXECBUFFER accepted a 16 byte stream
+GPU3D_TEST: PASS (UAPI surface works; rendering still unproven)
+```
 
-`VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs` 是位图，bit *n* 表示 capset id *n* 可用；
-host 侧信息已有（`virtio_gpu_get_capset_info()`），但目前只用于开机日志。
+关键点：**3D 资源带 backing 被 host 接受了**（`3D resource 2 created with host
+backing`）。这正是原先最大的缺口——此前 `RESOURCE_CREATE_3D` 不带
+`ATTACH_BACKING`，host 侧资源没有任何内存，命令流提交上去也是空转。
 
-### 4.2 第二步：capset 转交（`VIRTGPU_GET_CAPS`）
+backing 的实现要点（§4.3 的落地形态）：
 
-`virtio_gpu_get_capset()` 已实现（含大响应缓冲路径），但被
-`__attribute__((unused))` 挂起。`GET_CAPS` 需要把它接到用户态提供的地址上。
-注意：`virgl_renderer_config` 结构体布局必须与 host virglrenderer 一致，**不要
-凭记忆写**，按 virglrenderer 源码或 Mesa 内 `virgl_hw.h` 的副本逐字段核对。
+- 3D 资源挂在 **GEM handle** 上，与 Linux 一致：VIRTGPU 资源由一个 GEM 对象承载，
+  内核把该 GEM 的 VMO 页转成 `virtio_gpu_mem_entry[]` 再发
+  `RESOURCE_ATTACH_BACKING`。
+- 页面必须用 `vmo_get_page_charged()` **materialize**，不能用
+  `vmo_peek_page()`：host 要往这些页里写结果，未分配的页没有帧可写。
+- backing 数组是内核构造的**物理地址**，不能走 `ioctl()` 的 `copy_from_user`
+  路径，因此在 `gpu_dev_ops_t` 上新增了 3D 专用 op
+  （`resource_attach_backing` / `ctx_create` / `submit_3d` / `get_capset` …），
+  把 virtio-gpu 细节留在 `virtio_gpu.c`，GEM 语义留在 `drm.c`。
+- virgl context 按 **per-open** 模型惰性创建（`drm_virtgpu_ensure_ctx()`），
+  与 Linux 的 `virtgpu_fprivs` 一致；context id 0 不可用（协议保留）。
 
-### 4.3 第三步：3D 资源 + backing（本轮的真正硬骨头）
+### 4.2 宿主前置条件：virglrenderer 需要 Mesa 风格的 EGL
 
-`RESOURCE_CREATE_3D` 目前**不挂 backing**，host 侧资源没有任何内存。这条修好
-之前，即使命令流被接受也是空转。
+**这不是 A20OS 的 bug，但会让人误判成 bug，因此必须记下来。**
 
-正确形态（与 Linux 一致）：VIRTGPU 资源由一个 **GEM handle** 承载，内核把
-该 GEM 的 VMO 页转成 `virtio_gpu_mem_entry[]`（`pfn_to_phys(vmo_peek_page(...))`）
-再发 `RESOURCE_ATTACH_BACKING`。基础设施已就位：
+`GET_CAPS` 在本机会失败：
 
-- `vmo_peek_page(vmo, index) -> pfn_t`
-- `pfn_to_phys(pfn_t) -> paddr_t`（`kernel/include/mm/frame.h:117`）
-- `struct virtio_gpu_resource_attach_backing` / `virtio_gpu_mem_entry`
-  已在 `virtio_gpu.h`
+```
+[GPU] get_capset: resp=0x1205 want=0x1103 | sent ctx=1 idx=0 ver=1
+                    | host idx=0 -> id=1 ver=1 size=308 (rc=0)
+```
 
-注意驱动接口分层：`gpu_dev_ops_t.ioctl()` 走的是 `copy_from_user`，而 backing
-数组是内核构造的物理地址，**不能**走这条路。建议在 `gpu_dev_ops_t` 上加一个
-3D 专用 op（`resource_attach_backing`），把 virtio-gpu 细节留在
-`virtio_gpu.c`，GEM 语义留在 `drm.c`。
+`0x1205` = `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`。注意**我们发的参数与 host
+自己 advertise 的完全一致**（idx=0 → id=1 ver=1 size=308），所以这不是请求
+错误，而是 host 在 `virgl_renderer_get_capset()` 内部失败——它需要一个
+**离屏 desktop GL context**。
 
-### 4.4 第四步：提交（`VIRTGPU_EXECBUFFER`）
+本机 `10_nvidia.json` 让 EGL vendor 选择落到 NVIDIA 的私有 EGL：它能
+`eglInitialize` 成功，但无法提供 virglrenderer 要的离屏 GL context。强制改用
+Mesa 的 EGL（`__EGL_VENDOR_LIBRARY_FILENAMES=.../50_mesa.json`）后，失败点
+前移到 QEMU 启动期，印证了 QEMU 的 virgl 层本身就依赖 EGL：
 
-把 `drm_virtgpu_execbuffer.command` / `.size` 指向的用户命令流原样送
-`VIRTIO_GPU_CMD_SUBMIT_3D`。现有 `virtio_gpu_submit_3d()` 已处理
-DMA 可见性与三段描述符链，**但它当前由私有 `A20_GPU_IOCTL_SUBMIT_3D` 驱动，
-且上限 128 KiB**——Mesa 的命令流经常更大，上限需要复核。
+```
+qemu-system-riscv64: egl: eglInitialize failed: EGL_NOT_INITIALIZED
+qemu-system-riscv64: egl: render node init failed
+```
 
-### 4.5 第五步：retire 私有 ABI
+**结论**：在 NVIDIA 专有 EGL 主导的宿主上，virgl 的 `GET_CAPS` 不可用。
+`gpu3d_test` 因此把 `GET_CAPS` 记为 NOTE 而非 FAIL——它反映的是**宿主 GL
+栈**的能力，不是内核的能力。后续步骤的断言不依赖它。
 
-`A20_GPU_IOCTL_*`（`virtio_gpu.h:272-277`）是 A20 私有 fork。一旦 VIRTGPU
-UAPI 可用，它就没有存在理由：留着等于维护两套 3D ABI。届时删除，并同步修正
-`docs/graphics/3d-graphics.md` 的 §2 与 §4。
+### 4.3 仍然未验证：命令流语义
+
+`EXECBUFFER accepted a 16 byte stream` 只证明**往返通了**：命令流送到了 host
+并拿到了应答。内核不解析命令流，所以这**不证明渲染了任何东西**。
+
+要让 `gpu3d_test` 真正验证"渲染"，需要提交一条内容符合 virgl 命令编码的
+命令流，并回读像素做比对。这要求逐字段核对 virglrenderer 的
+`virgl_hw.h`（命令类型号、`struct virgl_cmd_header`、各命令结构体布局），
+**不要凭记忆写**——写错只会得到一个静默失败或 host 崩溃，且 guest 侧无从判断。
+
+Mesa 挂载后这件事会自动发生：命令流由 Mesa 生成，A20OS 只搬运。
+
+### 4.4 仍然未做：retire 私有 ABI
+
+`A20_GPU_IOCTL_*`（`virtio_gpu.h:272-277`）是 A20 私有 fork。VIRTGPU UAPI
+可用后它就没有存在理由：留着等于维护两套 3D ABI。尚未删除，因为
+`gpu3d_test` 的第一层仍在用它做廉价的传输层回归；等 §4.3 的命令流验证补上
+之后即可一并 retire，并同步修正 `3d-graphics.md` 的 §2 与 §4。
 
 ---
 
@@ -237,13 +268,20 @@ UAPI 可用，它就没有存在理由：留着等于维护两套 3D ABI。届�
 
 | 配置 | guest 日志 | 门禁结果 |
 |---|---|---|
-| `GPU_3D=1` | `[GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1`，随后 `CTX_CREATE` / `RES_CREATE_3D` / `RES_UNREF` / `CTX_DESTROY` 全部被 host 接受 | **PASS** |
-| `GPU_3D=0` | `[GPU] virtio-gpu 2D only (no VIRGL feature)` → `GPU3D_TEST: SKIP` | **FAIL**（点名三条缺失 pattern） |
+| `GPU_3D=1` | `[GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1`；`GETPARAM 3D_FEATURES=1`；`capset mask=0x7`；`GEM handle 1 allocated (16384 bytes)`；`3D resource 2 created with host backing`；`RESOURCE_INFO round-trip ok`；`EXECBUFFER accepted a 16 byte stream` | **PASS** |
+| `GPU_3D=0` | `[GPU] virtio-gpu 2D only (no VIRGL feature)` → `GPU3D_TEST: SKIP`（exit 77） | **FAIL**（点名五条缺失 pattern） |
 
-即：**3D 传输通路首次被真正验证**，且这个验证会失败。
+即：**3D 传输通路 + VIRTGPU UAPI 表面（含 backing attach）已验证**，且这个
+验证会失败——反向用例确认了门禁不是空转的。
 
-尚未被覆盖的（因此仍不能说"3D 可用"）：命令流提交、资源 backing、像素回读。
-这三项分别对应 §4.3 / §4.4。
+仍然**不能**说的话（因此"3D 可用"这句话要限定在传输层与 UAPI 层）：
+
+| 未覆盖 | 对应 |
+|---|---|
+| 命令流的**语义**（host 是否真的执行了渲染） | §4.3 |
+| 像素回读比对 | §4.3 |
+| stock Mesa 实际挂载（需完整 xfce 镜像） | §8 |
+| `GET_CAPS`（本机宿主 EGL 限制，见 §4.2） | §4.2 |
 
 文档里的 PASS 只在附上产生它的命令、配置与提交时有效。
 
@@ -291,14 +329,27 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 
 ## 8. 建议顺序
 
-1. ~~修 `gpu3d_test` 的三态退出码 + 新增可证伪门禁~~ — **本轮已完成**（§5）
-2. `VIRTGPU_GETPARAM`（§4.1）——最便宜，且是所有后续尝试的前提
-3. XWayland 呈现（§7）——独立、可并行、解锁所有 X11 应用
-4. `VIRTGPU_GET_CAPS` + capset 核对（§4.2）
-5. 3D 资源 backing（§4.3）——真正的硬骨头
-6. `VIRTGPU_EXECBUFFER`（§4.4）
-7. 放开 `A20_RENDERER=gl`，合成器切 GL 渲染器
-8. retire `A20_GPU_IOCTL_*`（§4.5）
+已完成（本轮）：
 
-做完 2–6 之后，`gpu3d_test` 应当扩展为提交命令流并回读像素；在那之前，
-"3D 可用"这句话只对**传输层**成立。
+1. `GPU_3D` 开关 + `extra_qemu` 在 run 路径生效（§2）
+2. GEM 对象模型 + `MODE_GETFB2` + `GEM_CLOSE` 真正释放（§3）
+3. `VIRTGPU_GETPARAM` / `GET_CAPS` / `RESOURCE_CREATE`（含 backing attach）/
+   `RESOURCE_INFO` / `EXECBUFFER` / `WAIT` / `MAP` / `CONTEXT_INIT` /
+   `TRANSFER_*`（§4.1）
+4. 可证伪门禁与三态退出码（§5）
+
+接下来：
+
+5. **stock Mesa 实际挂载** —— 用 `GPU_3D=1` + xfce world 跑一次，看
+   `virtio_gpu_dri.so` 能否 attach。这是判定"VIRTGPU UAPI 是否真的够用"的
+   唯一办法，也是本轮唯一没做的大项。
+   前置：本机宿主 EGL 是 NVIDIA，virglrenderer 取不到 GL context（§4.2），
+   需先让宿主用 Mesa EGL，否则 Mesa 侧会先失败在别处。
+6. **XWayland 呈现**（§7）——独立、可并行、解锁所有 X11 应用（含 Minecraft）。
+   性价比高于继续啃 GPU。
+7. 命令流语义验证 + 像素回读（§4.3）——需要逐字段核对 virgl 的
+   `virgl_hw.h`；Mesa 挂载后这件事自动发生，优先级低于 5 与 6。
+8. 放开 `A20_RENDERER=gl`，合成器切 GL 渲染器。
+9. retire `A20_GPU_IOCTL_*`（§4.4）。
+
+在 5 完成之前，"3D 可用"这句话只对**传输层与 UAPI 表面**成立。
