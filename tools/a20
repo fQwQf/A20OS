@@ -44,9 +44,12 @@ from a20_make import REPO_ROOT, build_instance, exec_make
 from a20_registry import (
     DriverComponent,
     RegistryError,
+    cross_check_flash_targets,
     cross_check_make,
+    load_flash_backends,
     load_registry,
     validate_driver_selection,
+    validate_flash_backends,
     validate_registry,
 )
 from a20_test import run_test
@@ -139,7 +142,16 @@ def cmd_test(args: argparse.Namespace) -> int:
 
 
 def cmd_flash(args: argparse.Namespace) -> int:
-    return run_flash(_load(args.instance), list(args.make_args), args.dry_run)
+    """Build the firmware and program the board with the declared backend."""
+    return run_flash(_load(args.instance), _flash_backends(), list(args.make_args), args.dry_run)
+
+
+def _flash_backends():
+    try:
+        return load_flash_backends(REPO_ROOT)
+    except RegistryError as e:
+        print(f"FAIL components/flash-backends.toml:\n{e}")
+        raise SystemExit(1) from None
 
 
 def cmd_package(args: argparse.Namespace) -> int:
@@ -221,6 +233,28 @@ def cmd_check_registry(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check_flash_backends(_args: argparse.Namespace) -> int:
+    """Validate the flash-backend registry and cross-check it against the makefiles."""
+    try:
+        entries = load_flash_backends(REPO_ROOT)
+    except RegistryError as e:
+        print(f"FAIL components/flash-backends.toml:\n{e}")
+        return 1
+    try:
+        errors = (validate_flash_backends(entries, REPO_ROOT)
+                  + cross_check_flash_targets(entries, REPO_ROOT))
+    except RegistryError as e:
+        print(f"FAIL components/flash-backends.toml:\n{e}")
+        return 1
+    if errors:
+        print(f"FAIL components/flash-backends.toml:\n" + "\n".join(f"  - {e}" for e in errors))
+        return 1
+    boards = sorted({b for e in entries for b in e.boards})
+    print(f"check-flash-backends: {len(entries)} backend(s) OK covering {len(boards)} board(s): "
+          f"{', '.join(boards)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="a20",
@@ -241,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--require-arch", nargs="*", default=(), metavar="ARCH",
                          help="fail unless every listed arch is covered by a valid instance")
     sub.add_parser("check-registry", help="validate components/drivers.toml against the Makefile")
+    sub.add_parser("check-flash-backends",
+                   help="validate components/flash-backends.toml against the makefiles")
     sub.add_parser("list", help="list known instances")
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
@@ -266,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_check(ns)
         case "check-registry":
             return cmd_check_registry(ns)
+        case "check-flash-backends":
+            return cmd_check_flash_backends(ns)
         case "list":
             return cmd_list(ns)
         case "show-vars":

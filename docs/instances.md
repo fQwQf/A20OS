@@ -22,6 +22,7 @@ tools/a20 build qemu-riscv64 -- -j8       # 只构建；`--` 后参数透传给 
 tools/a20 show-vars qemu-riscv64-smp4     # 查看实例推导出的 make 变量
 tools/a20 check                           # 校验全部实例（CI 门禁同款）
 tools/a20 check-registry                  # 校验驱动组件注册表并与 Makefile 交叉比对
+tools/a20 check-flash-backends            # 校验烧录后端注册表并与 makefile 交叉比对
 ```
 
 实例参数既可以是 `instances/` 下的名字（`qemu-riscv64`），也可以是任意 TOML 文件路径。`--dry-run` 打印将执行的 make/QEMU 命令而不执行。
@@ -105,8 +106,8 @@ bt_baud = 38400
 wifi_ssid = "..."            # 可选；留空表示不内置 Wi-Fi 配置
 wifi_password = "..."
 
-[flash]                      # a20 flash：烧录开发板（当前支持 openocd/STM32）
-tool = "openocd"
+[flash]                      # a20 flash：烧录开发板；tool 必须是已注册后端（见下）
+tool = "openocd"              # components/flash-backends.toml 里的后端名
 interface = "interface/cmsis-dap.cfg"
 transport = "swd"
 adapter_khz = 1000
@@ -151,7 +152,7 @@ disk_out = "disk.img"        # 仅 release
 | `run` | 有通用 QEMU 路径的架构；armv7m 需 `[stm32] qemu = true`（走 stm32vldiscovery）；`rootfs.world` 实例走 `run-world`/`run-world-gui`（world 镜像作第二块盘，distro 模式） |
 | `debug` | 通用 QEMU 架构；`-O0 -g` + GDB stub |
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
-| `flash` | 需要 `[flash]` 段；当前为 armv7m/STM32 OpenOCD 流程（先构建再烧录） |
+| `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里——实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
@@ -194,6 +195,28 @@ description = "virtio network device"
 
 `make check-component-registry`（= `tools/a20 check-registry`）会做两层校验：注册表自身（重名、未知架构、early ⊆ arches、源文件存在），以及与 Makefile 的 `DRVMOD_MODULES`/`EARLY_DRVMOD_MODULES` 按架构逐一比对——两边任何一边漂移都会 FAIL。
 
+## 烧录后端注册表（components/flash-backends.toml）
+
+`a20 flash` 用哪个烧录器由这里决定，而不是写在 Python 里：
+
+```toml
+[[backend]]
+name = "openocd"
+description = "OpenOCD over CMSIS-DAP/SWD with STM32F1x target scripts"
+boards = ["stm32f103"]      # 允许的 board
+flash_kb = 512              # 该配方所针对的 flash 几何
+ram_kb = 64
+make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python 里
+```
+
+`boards` + `flash_kb`/`ram_kb` 是**安全契约，不是说明文档**：实例的 board 或 flash 几何落在允许范围外时，`a20 check` 就直接拒绝，编译根本不会开始。用错几何去擦除不是编译错误那种可回退的失误——一段 512 KiB 的擦除脚本打到 64 KiB 的片子上，会从片子末尾跑出去。
+
+几何必须进 key，因为一个 `board` 名会承载多种 flash 尺寸：`board = "stm32f103"` 既指 64 KiB 的 C8，也指 512 KiB 的 ZET6（"xuanwu"）变体，由 `[stm32].xuanwu` 区分。只按 board 判断会让 64 KiB 的实例和 512 KiB 的实例走同一道门，而这正是这个注册表要防的那个 bug。
+
+新增烧录方式只需两步，Python 不用改：加一条 `[[backend]]`，再写对应的 make 目标。
+
+`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里——两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
+
 ## CI 门禁
 
 | 目标 | 作用 |
@@ -202,6 +225,7 @@ description = "virtio network device"
 | `make check-instances` | 校验 `instances/` 全部实例（schema + 语义 + 驱动选择） |
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
+| `make check-flash-backend-registry` | 校验烧录后端注册表，并交叉比对每个 `make_target` 在 makefile 中存在、且 a20 确实能派发到它 |
 
 ## apk world 镜像实例（用包管理组装用户态）
 
