@@ -6,6 +6,7 @@
 #include "fs/fscontext.h"
 #include "fs/vfs.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mntns.h"
 #include "proc/proc.h"
 
 /*
@@ -279,16 +280,37 @@ int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id,
     return (int64_t)n;
 }
 
+/* listns(2): report the namespace id of the calling task.  A20OS implements
+ * mount namespaces as real objects; the other ns types are system-wide
+ * singletons rendered with their Linux init-namespace inos, exactly as
+ * /proc/<pid>/ns does.  An nstype A20OS has no namespace for is refused
+ * rather than answered with a fabricated id. */
 int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr)
 {
-    (void)nstype;
-    if (nsids && nr > 0) {
-        uint64_t zero = 0;
-        if (copy_to_user(nsids, &zero, sizeof(zero)) < 0)
-            return -EFAULT;
-        return 1;
+    if (!nsids || nr == 0)
+        return 0;
+    uint64_t ino;
+    if (nstype == 0 || nstype == LINUX_CLONE_NEWNS) {
+        task_t *t = proc_current();
+        ino = mntns_task_ino(t);
+    } else if (nstype == LINUX_CLONE_NEWPID) {
+        ino = MNTNS_INIT_INO_PID;
+    } else if (nstype == LINUX_CLONE_NEWUSER) {
+        ino = MNTNS_INIT_INO_USER;
+    } else if (nstype == LINUX_CLONE_NEWUTS) {
+        ino = MNTNS_INIT_INO_UTS;
+    } else if (nstype == LINUX_CLONE_NEWIPC) {
+        ino = MNTNS_INIT_INO_IPC;
+    } else if (nstype == LINUX_CLONE_NEWNET) {
+        ino = MNTNS_INIT_INO_NET;
+    } else if (nstype == LINUX_CLONE_NEWCGROUP) {
+        ino = MNTNS_INIT_INO_CGROUP;
+    } else {
+        return -EINVAL;
     }
-    return 0;
+    if (copy_to_user(nsids, &ino, sizeof(ino)) < 0)
+        return -EFAULT;
+    return 1;
 }
 
 int64_t sys_open_tree_attr(int dfd, const char *path, unsigned int flags,

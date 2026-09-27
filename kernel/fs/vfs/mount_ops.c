@@ -7,6 +7,7 @@
 #include "fs/vfs.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mount.h"
+#include "fs/vfs/mntns.h"
 #include "fs/vfs/file.h"
 #include "fs/vfs/stat_perm.h"
 #include "fs/file.h"
@@ -344,6 +345,48 @@ int vfs_mount_bc(const char *path, const char *fstype, bcache_t *bc) {
     return vfs_mount_bc_flags(path, fstype, bc, 0);
 }
 
+/* Release one namespace's hold on a mount entry.
+ *
+ * mntns_copy_mounts() marks every copied entry VFS_MOUNT_NS_SHARED and leaves
+ * the real holder count on the *source* entry (ns_users counts source + every
+ * copy).  A copy is only ever detached here: running the destructor for it
+ * would tear down a filesystem the source namespace is still using.  The
+ * destructor runs when the source's own count reaches zero. */
+void vfs_mount_fs_teardown(mount_t *mnt) {
+    if (!mnt) return;
+    if (mnt->flags & VFS_MOUNT_NS_SHARED) {
+        /* Detach-only path (this entry is a copy): never destroy the fs. */
+        return;
+    }
+    if (mnt->ns_users > 0) mnt->ns_users--;
+    if (mnt->ns_users > 0) return;   /* a copied namespace still uses it */
+    vnode_t *root = mnt->root;
+    if (mnt->type == FS_TYPE_FAT32) {
+        fat32_unmount(root);
+    } else if (mnt->type == FS_TYPE_EXT4) {
+        ext4_unmount(root);
+    } else if (mnt->type == FS_TYPE_NTFS) {
+        ntfs_unmount(root);
+    } else if (mnt->type == FS_TYPE_ISOFS) {
+        isofs_unmount(root);
+    } else if (mnt->type == FS_TYPE_UXFS) {
+        extern void uxfs_unmount(struct vnode *root);
+        uxfs_unmount(root);
+    }
+}
+
+/* Drop every hold this namespace's table has, so a namespace going away
+ * cannot leak a shared filesystem forever.  Copied entries detach without
+ * running the destructor; the source entry's ns_users is decremented when its
+ * own namespace unmounts or is torn down. */
+void vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
+    if (!ns) return;
+    for (int i = 0; i < ns->nmounts; i++) {
+        mount_t *mnt = &ns->mounts[i];
+        if (mnt->ns_users > 0) vfs_mount_fs_teardown(mnt);
+    }
+}
+
 int vfs_umount(const char *path) {
     if (!path) return -EINVAL;
     char norm_path[MAX_PATH_LEN];
@@ -372,23 +415,7 @@ int vfs_umount(const char *path) {
         if (strcmp(mnt_norm, norm_path) == 0) {
             vfs_dcache_invalidate_all();
             vfs_drop_time_meta_mount(mnt);
-            vnode_t *root = mnt->root;
-            if (!(mnt->flags & VFS_MOUNT_NS_SHARED)) {
-                /* Mounts copied into another namespace share the filesystem;
-                 * only a namespace-private mount may run the fs teardown. */
-                if (mnt->type == FS_TYPE_FAT32) {
-                    fat32_unmount(root);
-                } else if (mnt->type == FS_TYPE_EXT4) {
-                    ext4_unmount(root);
-                } else if (mnt->type == FS_TYPE_NTFS) {
-                    ntfs_unmount(root);
-                } else if (mnt->type == FS_TYPE_ISOFS) {
-                    isofs_unmount(root);
-                } else if (mnt->type == FS_TYPE_UXFS) {
-                    extern void uxfs_unmount(struct vnode *root);
-                    uxfs_unmount(root);
-                }
-            }
+            vfs_mount_fs_teardown(mnt);
             vfs_mount_remove(mnt);
             return 0;
         }
