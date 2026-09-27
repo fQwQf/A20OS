@@ -27,6 +27,11 @@ static inline paddr_t va_to_pa(const void *va) {
 pte_t *pt_create(void);
 void pt_destroy(pt_root_t *pgdir);
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
+/* pt_map with an explicit per-page status class (see mm/pt.h).  Callers that
+ * know the page is file-backed, fork-shared or VMO-backed pass the real class
+ * so a later fault resolves it from the metadata instead of a VMA. */
+int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+               uint8_t cls);
 int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
 int pt_unmap(pt_root_t *pgdir, vaddr_t va);
 int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,

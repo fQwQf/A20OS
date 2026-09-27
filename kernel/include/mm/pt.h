@@ -1,0 +1,233 @@
+#ifndef _MM_PT_H
+#define _MM_PT_H
+
+#include "core/types.h"
+#include "core/arch.h"
+#include "core/lock.h"
+
+/*
+ * MM_AS_MODEL — single-level address-space model (CortenMM-style).
+ *
+ * The traditional design keeps TWO representations of a mapping and must
+ * keep them consistent: a software-level interval structure (mm->mmap, the
+ * VMA list, guarded by mm->lock) and the hardware page tables.  Every
+ * operation has to reconcile both, which is where the locking complexity and
+ * the concurrency bugs come from.
+ *
+ * This model removes the software-level abstraction as the SOURCE OF TRUTH
+ * for mapping state.  The authoritative per-virtual-page state is the
+ * per-PTE metadata array attached to the page-table page that covers it.
+ * A transactional cursor is the only way to program the MMU, and the
+ * concurrency control is expressed directly on page-table-page locks, which
+ * lets transactions over disjoint ranges proceed in parallel.
+ *
+ * MM_AS_CURSOR_ONLY_ENTRY
+ * -----------------------
+ * Invariants that hold for every code path in kernel/mm:
+ *
+ *  1. Every read or write of a user PTE happens inside an mm_cursor_t, i.e.
+ *     between mm_addrspace_lock() and mm_cursor_unlock().  No code path may
+ *     walk a user page table with pt_walk()/pt_lookup_leaf() and then keep
+ *     the resulting pte_t* across a lock acquisition, a blocking call, or a
+ *     return to userspace.  pt_walk()/pt_lookup_leaf() remain as
+ *     non-authoritative helpers for teardown, auditing and /proc reporting,
+ *     where no mutation follows.
+ *  2. Every page-table WRITE allocates intermediate page-table pages only
+ *     through the cursor, and every such allocation installs a metadata
+ *     block (pt_meta_t) so the covering node always has a lock.
+ *  3. The page-table-page lock is the unit of writer exclusion.  A cursor
+ *     acquires locks in page-table preorder and releases them in exactly
+ *     the reverse order.
+ *  4. The kernel half of a page table is SHARED between every address space
+ *     (pt_map_kernel() copies the boot PTE words).  Those nodes must never
+ *     be locked, mutated, or freed through a cursor: mm_addrspace_lock()
+ *     refuses any range that intersects them.  Kernel mappings are
+ *     programmed by the boot path, never by a cursor.
+ *  5. The VMA list (mm->mmap) is NOT the source of truth for mapping state.
+ *     During the transition it is a non-authoritative interval index used
+ *     only for: interval policy that is genuinely range-shaped (brk bounds,
+ *     mseal sealing, mlock accounting), backing-store ownership
+ *     (file_fd/vmo references), and /proc/{maps,smaps} reporting.
+ *     mm_pt_audit_addrspace() proves the two representations agree; it is
+ *     the only sanctioned way to treat the VMA list as derived state.
+ */
+
+/* ------------------------------------------------------------------ *
+ * Per-virtual-page status
+ * ------------------------------------------------------------------ *
+ * A per-PTE metadata entry packs into one byte:
+ *
+ *   bits 7..4  status class
+ *   bit  3     COW "shared" bit (multiple mappings may reference the frame)
+ *   bits 2..0  access permission R/W/X
+ *
+ * The physical frame of a mapped page is NOT duplicated here: it is already
+ * in the PTE, and its reference count lives in pfa.meta[].refcount.  The
+ * metadata only carries what the MMU cannot express, which is exactly the
+ * information a page fault needs to decide what to do.
+ *
+ * Storing this in the PTE's software-usable bits is not an option on A20OS:
+ * riscv32 and arm32 have no free software bits at their root levels, and
+ * loongarch64 aliases PTE_R/W/X onto the LA_PTE memory-attribute field.  The
+ * existing PTE_SWAP already steals a hardware-meaningful bit per
+ * architecture, which is precisely the hazard a general status encoding
+ * would multiply.
+ */
+#define MM_ST_INVALID        0u  /* no mapping, no backing */
+#define MM_ST_ANON_VIRT      1u  /* virtually allocated, not yet backed */
+#define MM_ST_ANON_MAPPED    2u  /* mapped to a private frame */
+#define MM_ST_ANON_SHARED    3u  /* mapped to a frame shared via fork */
+#define MM_ST_FILE_PRIVATE   4u  /* file-backed, private copy on write */
+#define MM_ST_FILE_SHARED    5u  /* file-backed, canonical cache frame */
+#define MM_ST_VMO            6u  /* backed by a native-ABI VMO */
+#define MM_ST_SWAPPED        7u  /* contents live on a swap device */
+#define MM_ST_PT_NODE        8u  /* this entry is an intermediate PT page */
+#define MM_ST_CLASS_MAX      9u
+
+#define MM_ST_CLS_BYTE(c)    ((uint8_t)(((c) & 0xFu) << 4))
+#define MM_ST_GET_CLASS(b)   ((uint8_t)(((b) >> 4) & 0xFu))
+#define MM_ST_COW_BIT        0x08u
+#define MM_ST_PROT_R         0x01u
+#define MM_ST_PROT_W         0x02u
+#define MM_ST_PROT_X         0x04u
+#define MM_ST_PROT_MASK      0x07u
+#define MM_ST_PROT_ALL       (MM_ST_PROT_R | MM_ST_PROT_W | MM_ST_PROT_X)
+
+#define MM_ST_IS_MAPPED(c)                                            \
+    ((c) == MM_ST_ANON_MAPPED || (c) == MM_ST_ANON_SHARED ||           \
+     (c) == MM_ST_FILE_SHARED)
+
+/* ------------------------------------------------------------------ *
+ * Page-table page descriptor
+ * ------------------------------------------------------------------ *
+ * pt_meta_t hangs off the physical frame that backs a page-table page.  It
+ * is reached through pfa.meta[], which is already a contiguous, PPN-indexed,
+ * permanently direct-mapped array, so the descriptor lookup is one indexed
+ * load (see mm_pt_meta()) rather than a hash or slab probe.  The ADV locking
+ * protocol needs the descriptor during its LOCKLESS traversal -- to read
+ * `stale` and to take the covering node's lock -- which is the hottest path
+ * in the system, so the lookup must be cheap.
+ *
+ * The pointer is stored in the frame metadata union that is otherwise only
+ * live while a frame sits on a buddy free list, so this costs no additional
+ * memory per frame.  The block itself is allocated on demand, one per
+ * page-table page, and freed together with that page-table page.
+ */
+#ifndef MM_PT_META_ENTRIES
+# define MM_PT_META_ENTRIES ARCH_PT_LEVEL_ENTRIES(0)
+#endif
+
+typedef struct pt_meta {
+    /* MCS lock body.  A queued lock rather than a flat spinlock: a cursor
+     * may hold a hierarchy of up to ARCH_PT_LEVELS nodes covering many
+     * descendants, and FIFO ordering avoids the convoy/inversion pathology
+     * a flat spinlock exhibits there. */
+    volatile uintptr_t lock;
+    /* Holder-private MCS node, stashed here while the lock is held so it can
+     * be recovered at unlock.  Touched only by the holder. */
+    uintptr_t         node;
+    uint16_t          nr_present;   /* present or PT-node entries */
+    uint8_t           level;        /* page-table depth of this page */
+    uint8_t           stale;        /* detached from parent; subtree poisoned */
+    uint8_t           cls[MM_PT_META_ENTRIES];
+    uint8_t           cow[(MM_PT_META_ENTRIES + 7) / 8];
+} pt_meta_t;
+
+struct mm_struct;
+
+/* A transaction over one virtual address range.  Every field is private;
+ * callers use the accessors below. */
+typedef struct mm_cursor {
+    struct mm_struct *mm;
+    vaddr_t           start;
+    vaddr_t           end;
+    int               locked;
+} mm_cursor_t;
+
+/* The report is plain data so NOMMU builds can still reference the type and
+ * report zeros; the walkers themselves are page-table builds only. */
+/* ---- invariant auditing ---- */
+typedef struct mm_pt_audit_report {
+    uint64_t pt_pages;
+    uint64_t entries;
+    uint64_t missing_meta;   /* PT page live with no metadata block */
+    uint64_t present_mismatch;/* PTE present but class says otherwise */
+    uint64_t absent_mismatch;/* class non-Invalid but no PTE */
+    uint64_t prot_mismatch;  /* permission bits disagree with the PTE */
+    uint64_t cow_mismatch;   /* COW bit disagrees with PTE_COW */
+    uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
+} mm_pt_audit_report_t;
+
+static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
+{
+    return r->missing_meta + r->present_mismatch + r->absent_mismatch +
+           r->prot_mismatch + r->cow_mismatch + r->vma_mismatch;
+}
+
+
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+
+/* Descriptor access.  table is a direct-mapped pointer to a page-table page. */
+pt_meta_t *mm_pt_meta(pte_t *table);
+static inline int mm_pt_meta_level(const pt_meta_t *m) { return m->level; }
+static inline int mm_pt_meta_stale(const pt_meta_t *m)  { return m->stale; }
+void mm_pt_meta_set_stale(pt_meta_t *m, int stale);
+
+/* The table that owns the leaf slot for addr, i.e. the parent of the leaf.
+ * This is the table whose metadata array describes that virtual page -- NOT
+ * the table pt_walk() returns, which is the leaf table itself. */
+pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr);
+
+/* Map hardware PTE permission bits onto the status byte's R/W/X field. */
+uint8_t mm_pt_prot_bits(pte_t flags);
+
+/* Install / tear down the metadata block for a freshly allocated PT page. */
+int  mm_pt_node_init(pte_t *table, int level);
+void mm_pt_node_fini(pte_t *table);
+
+/* Per-PTE metadata maintenance.  mm_pt_note_present() and
+ * mm_pt_note_absent() bracket every PTE write; the level-0 helpers are the
+ * leaf forms.  The AUDIT-only entry point exists so the auditor can compare
+ * the two representations without going through a cursor. */
+void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte);
+void mm_pt_note_absent(pte_t *table, int level, int idx);
+uint8_t mm_pt_peek(pte_t *table, int level, int idx);
+int mm_pt_cow(pte_t *table, int level, int idx);
+void mm_pt_set_cow(pte_t *table, int level, int idx, int on);
+
+/* Copy a page-table page's metadata to a freshly cloned page. */
+int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level);
+
+/* True when [start,end) lies entirely in the user half, i.e. it is safe to
+ * lock and mutate those page-table nodes.  The kernel half is shared with
+ * every other address space and must never be touched by a cursor. */
+int mm_pt_range_is_user(vaddr_t start, vaddr_t end);
+
+/* ---- transactional interface ---- */
+int  mm_addrspace_lock(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                       mm_cursor_t *cur);
+void mm_cursor_unlock(mm_cursor_t *cur);
+
+/* Returns 1 and fills *cls_out when a leaf covers addr.  Returns 0 when the
+ * address is not mapped.  *pa_out receives the physical address when the
+ * leaf is present. */
+int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
+                    paddr_t *pa_out);
+int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
+                  uint8_t cls);
+int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
+int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
+
+/* Walk an address space and prove metadata == page tables (and, when
+ * check_vma is set, == VMA coverage).  Returns 0 when the address space is
+ * fully consistent. */
+int mm_pt_audit_addrspace(struct mm_struct *mm, int check_vma,
+                          mm_pt_audit_report_t *out);
+
+/* Audit every live address space, aggregating into *out.  Callers must not
+ * hold proc_lock. */
+int mm_pt_audit_all(mm_pt_audit_report_t *out);
+
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
+#endif /* _MM_PT_H */
