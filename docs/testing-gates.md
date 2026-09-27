@@ -4,7 +4,7 @@
 
 `TEST_FIRST_ARCHITECTURE_MATRIX`：每个架构债务领域在 TODO 条目可以勾选完成前，都必须有一个可重复执行的门禁。
 
-本页描述存在的目标和目标应检查的契约（最后核实：2026-08），不把"目标存在"写成"目标已通过"。任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。
+本页描述存在的目标和目标应检查的契约（最后核实：2026-09），不把"目标存在"写成"目标已通过"。任何 PASS 结论都必须来自当前提交上的实际运行，不能继承历史结果。
 
 | 领域 | 门禁 |
 | --- | --- |
@@ -161,6 +161,26 @@
 - **How to run**: `make smoke-native-fs-all`（四后端端到端）；`make smoke-native-ufs`（仅 FAT 后端回归）。
 - **What it checks**: `smoke-native-fs-all` 在 QEMU 中挂四块 scratch 盘（bus.2/4/6/7），由 `/bin/ufs_all_test` 逐后端拉起 `/bin/ufsd-rv` 并执行 POSIX 序列：FAT 预置读回+写读+删除；ext4 预置读回+8 KiB 图案写读+rename+删除；iso9660 小写名嵌套读取；ntfs 只读语义（create 必须失败）。内核侧 uxfs 代理把 vnode ops 经 Channel 转发给服务，块 IO 走受控 fs_block_io。见 [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)。
 - **When it fails**: 查看 `.kernel-build/smoke/native-fs-all-riscv64.log` 中各 `UXFS_*` 标记与 `[fs]` 前缀的 FS 内部日志；确认镜像目标（`ufs-scratch.img`/`ufs-ext4.img`/`ufs-iso.img`/`ufs-ntfs.img`)已生成且盘位未占用 bus.3/bus.5（用户驱动预留）。
+
+### poll / timer 边界语义（Linux ABI poll 与 timer 区域）
+- **How to run**: `make smoke-poll-edge`、`make smoke-timer-edge`
+- **What it checks**: `poll_edge.c` 十二组（poll 超时边界与 POLLNVAL/HUP/ERR、select 语义与结果集剪枝、ppoll 超时与 sigsetsize/负时间 EINVAL、epoll 参数校验、嵌套 epoll 的 ELOOP 环路拒绝、dup 共享 interest list、ET/LT、EPOLLONESHOT、HUP+数据、epoll_pwait2 亚毫秒向上取整、eventfd 计数/信号量/溢出边沿）；`timer_edge.c` 十二组（timer_create 的 clockid 与 sigev 校验、settime/gettime 剩余时间、TIMER_ABSTIME、overrun 计数、delete 后不再投递、timerfd 基础语义、TFD_TIMER_CANCEL_ON_SET、itimer REAL/VIRTUAL/PROF 实际投递、clock_nanosleep 相对与 ABSTIME、EINTR + remaining）。这两组是把覆盖表 poll/timer 区域提升到 `full` 的依据（`nanosleep` 的 restart 语义仍是记录在案的 partial）。
+- **When it fails**: 查看 `.kernel-build/smoke/poll-edge-riscv64.log` / `timer-edge-riscv64.log` 中首个 `POLL_EDGE: FAIL` / `TIMER_EDGE: FAIL` 组名；对照 `kernel/abi/linux/sys_epoll.c`、`kernel/abi/linux/{sys_timer_posix,sys_time,sys_fs}.c`、`kernel/proc/timer_posix.c`、`kernel/ipc/timerfd.c`、`kernel/proc/timer_heap.c`。
+
+### mount namespace（unshare/setns CLONE_NEWNS）
+- **How to run**: `make smoke-mntns`
+- **What it checks**: `mntns_test.c` 覆盖 init 命名空间 ino 非零、`/proc/self/ns/{pid,net}` 渲染、fork 共享挂载命名空间、`unshare(CLONE_NEWNEWPID|NEWNET|NEWUSER)` 诚实返回 EINVAL（不假成功）、`unshare(CLONE_NEWNS)` 生成不同 ino 且其挂载对父进程不可见、setns 经 `/proc/<pid>/ns/mnt` fd 加入（目标先退出仍可加入）、非 mnt 目标 EINVAL。
+- **When it fails**: 查看 `.kernel-build/smoke/mntns-riscv64.log` 中首个 `MNTNS_TEST: FAIL` 行（含行号与 errno）；对照 `kernel/fs/vfs/mntns.c`、`kernel/abi/linux/sys_namespace.c` 与 `kernel/fs/procfs/procfs.c` 的 ns 渲染。
+
+### 致命信号 core dump
+- **How to run**: `make smoke-coredump`
+- **What it checks**: `coredump_test.c` 让子进程 SIGSEGV，断言 core 文件的 ELF64/LSB magic、`e_type == ET_CORE`、program header 布局、每个 PT_LOAD 的 `filesz <= memsz`、存在 PT_NOTE 且含 prstatus/prpsinfo/fpregset 三类 note；再验证 `core_pattern` 读写往返、子进程 wait status 的 core 位，以及 `RLIMIT_CORE=0` 时不产生文件。
+- **When it fails**: 查看 `.kernel-build/smoke/coredump-riscv64.log` 中首个 `COREDUMP_TEST: FAIL`；宿主侧可用 `readelf -a` 检查 `.kernel-build` 之外的 core 产物。已知边界：仅 64 位、不发 NT_FILE、非驻留页写零、VMA 快照上限 1024、`|pipe` 不支持。
+
+### swap
+- **How to run**: `make smoke-swap`
+- **What it checks**: `swap_test.c` 在 ramfs 上造 backing 文件 → loop-control `LOOP_CTL_GET_FREE` + `LOOP_SET_FD` 绑定 → `mkswap` → `swapon` → `sysinfo` totalswap>0 与 `/proc/swaps` 条目断言 → 重复 swapon 返回 EBUSY → 触访匿名内存 → `swapoff` 后 totalswap 归零。
+- **When it fails**: 查看 `.kernel-build/smoke/swap-riscv64.log` 中首个 `SWAP_TEST: FAIL`；对照 `kernel/abi/linux/sys_swap.c`、`kernel/mm/swap.c` 与 `kernel/drivers/block/loop.c`。已知边界：门禁不驱动真实换出（1 GiB 冒烟无法现实触发），`swap_read_page` 缺页读回只有编译覆盖；`CONFIG_SWAP` 在 riscv32/loongarch32（无 swap PTE 编码）与 NOMMU 目标上被构建入口强制关闭。
 
 ### 文档漂移关键词
 - **How to run**: `make check-doc-drift`

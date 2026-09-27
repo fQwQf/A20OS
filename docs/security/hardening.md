@@ -9,7 +9,7 @@
 | 特性 | 实现 | 验证 |
 |---|---|---|
 | 用户指针校验 | `kernel/mm/mm.c` 的 `copy_from_user`/`copy_to_user` 统一入口：范围检查（`user_range_ok`，防回绕）+ 逐页 PTE_V/PTE_U/可写校验 + COW 折断；无 KERNEL_DS/set_fs 模式 | 全部 syscall 路径强制经过 |
-| 监督模式访问防护 | x86_64 `x86_64_enable_smep_smap()`（CPUID leaf 7 门控 CR4.SMEP/SMAP，`trap_init` 每 CPU 调用）；aarch64 `aarch64_enable_pan()`（ID_AA64MMFR1_EL1.PAN 门控 SCTLR_EL1.PAN）。内核从不直接解引用用户 VA（全部经直映射拷贝辅助），故无需 stac/clac 窗口 | `smoke-x86_64`/`smoke-aarch64`（默认 CPU 空操作路径）；`-cpu max` 完整引导到 mksh 无 fault（防护实际生效路径） |
+| 监督模式访问防护 | x86_64 `x86_64_enable_smep_smap()`（CPUID leaf 7 门控 CR4.SMEP/SMAP，`trap_init` 每 CPU 调用）；aarch64 `aarch64_enable_pan()`（ID_AA64MMFR1_EL1.PAN 门控 SCTLR_EL1.PAN）；riscv64 用户 trap 入口不再置 SUM（保持 SUM=0，blanket SUM=1 已移除）。内核从不直接解引用用户 VA（全部经直映射拷贝辅助），故无需 stac/clac 窗口；riscv64 侧任何遗漏的监督态用户页访问立即 fault，与 frame.c 取证加固配合成为带现场的 panic | `smoke-x86_64`/`smoke-aarch64`（默认 CPU 空操作路径）；`-cpu max` 完整引导到 mksh 无 fault（防护实际生效路径）；`smoke-riscv64`/`smoke-abi-linux` 验证 riscv64 无隐藏直接解引用 |
 | 用户态 W^X | `kernel/mm/wx.c` 单一策略 `mm_wx_filter_prot()`，mmap/mprotect/ELF 装载全路径过滤；默认 deny（-EACCES），cmdline `a20.wx=strip|off` 可降级 | `user/cmds/stress/wx_aslr_test.c`（RWX 拒绝）；全量 195 个静态 musl 二进制扫描零 RWX PT_LOAD |
 | 内核自身 W^X（KXAN） | `kernel/arch/{riscv64,x86_64,aarch64}/mm/kwx.c`：`arch_kernel_wx_finalize()` 在 `mm_init()` 后把引导大页旁路重建为 text=ROX/rodata=RO/data=RW+NX、直映射 NX；drvmod 模块 text=RX（`arch_kwx_module_protect`）；aarch64 置回 SCTLR_EL1.WXN | 启动自检（`mm_query_leaf` 四点断言，失败 panic）+ `[KXAN]` 日志行；smoke-riscv64/abi-linux/x86_64/aarch64 + smoke-smp-bringup（2 核）全 PASS。边界见 `docs/security/kernel-wx.md` |
 | ASLR | `kernel/mm/aslr.c`：栈顶向下页对齐偏移（64 位 10 位熵，受 vdso_layout 约束）、mmap 基址 per-process 随机（64 位 20 位熵）、brk 起始随机偏移；PIE 基址原有 11 位熵。fork 继承布局（Linux 语义） | `wx_aslr_test`：两次 exec 栈/mmap 地址不同；`cat /proc/self/maps` 两次运行 `[stack]` 区间不同 |
@@ -32,20 +32,6 @@
 随机选取偏移并重建引导页表。这是一次横跨 arch/mm/drivers 的大型
 重构，收益主要在远程内核信息泄漏威胁模型下；当前威胁模型（研究型
 OS、无远程攻击面压力）下暂缓，先完成直映射访问器化作为前置。
-
-### riscv64 SUM blanket（已收口）
-
-`kernel/arch/riscv64/trap/trap.S` 用户 trap 入口的 blanket SUM=1 已移除
-（保持 SUM=0）。由于用户内存访问全部直映射化，任何遗漏的监督态
-用户页访问都会立即 fault，与 frame.c 取证加固配合成为带现场的
-panic；`smoke-riscv64`/`smoke-abi-linux` 验证无隐藏直接解引用。
-
-### 内核自身 W^X 段权限分离（进行中）
-
-早期引导 megapage 把内核映像整块 RWX 映射（aarch64 入口还显式清除
-WXN）。ldscript 已有 text/rodata/data PHDRS 分段；工作方向是在最终
-页表按 PHDRS 边界分权限（text=ROX、rodata=RO、data/bss=RW+NX、
-直映射 NX），aarch64 置回 WXN。
 
 ### 内核栈 guard page（未做，替代缓解已部分就位）
 
