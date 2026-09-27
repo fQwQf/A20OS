@@ -16,6 +16,9 @@
 
 #define CHAN_MSG_SIZE 16384
 
+/* Sized for emulation speed, not host speed. */
+#define SHMRING_WAIT_NS (20ull * 1000 * 1000 * 1000)
+
 static a20_handle_t g_out = A20_HANDLE_NULL;
 static a20_handle_t g_root = A20_HANDLE_NULL;
 
@@ -143,7 +146,8 @@ int main(int argc, char **argv, char **envp)
                     A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP,
                     &ring_task) != A20_OK)
         return fail(3, "shmringd spawn failed");
-    a20_shmring_wait_ready(r);
+    if (a20_shmring_wait_ready_timeout(r, SHMRING_WAIT_NS) < 0)
+        return fail(4, "consumer never signalled ready (it prints its own reason on failure)");
 
     uint8_t wbuf[32768];
     uint64_t t0 = now_ns();
@@ -156,7 +160,8 @@ int main(int argc, char **argv, char **envp)
         a20_shmring_write(r, wbuf, n);
         produced += n;
     }
-    a20_shmring_wait_done(r);
+    if (a20_shmring_wait_done_timeout(r, SHMRING_WAIT_NS) < 0)
+        return fail(5, "consumer never signalled done");
     uint64_t t1 = now_ns();
     int rc = wait_child_ok(ring_task);
     a20_hdl_close(ring_task);
