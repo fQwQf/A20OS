@@ -39,6 +39,7 @@ int main(int argc, char **argv, char **envp)
 
     a20_start_info_t *si = a20_get_start_info();
     g_out = si ? si->stdout_handle : A20_HANDLE_NULL;
+    say_str("SHMRINGD: entered main\n");
 
     uint64_t base = 0;
     if (a20_vm_map(((a20_handle_t)A20_SHMRING_VMO_SLOT), A20_SHMRING_VMO_SIZE, 0,

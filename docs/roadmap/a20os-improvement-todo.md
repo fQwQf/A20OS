@@ -89,24 +89,35 @@ IDL 化）已落地，已从本文删除。
   - 完成条件：低内存实例（或可注入的换出阈值）下门禁真实触发一次换出-读回，并校验
     换出前后的数据一致性。
 - [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留，非 2026-09 改进周期引入**）
-  - [x] 让门禁能报告原因：消费者现在自报失败，父进程等待有界。挂起从 60s 且**零输出**
-    变成一次带原因的失败（`NATIVE_SHMRING: FAIL consumer never signalled ready`）。
-  - [ ] **根因未解决**：`a20_task_spawn` 返回成功且 `sys_a20_task_spawn` 确实调用了
-    `proc_make_ready(new_task)`（kernel/abi/native/sys_core.c:757），但子进程从未运行——
-    全程只出现 2 个 user task（mksh pid=2、父 pid=6），没有 shmringd 的
-    `[PROC] user task` 行，它也没有任何输出。待查：make_ready 之后为何不调度。
-  - 复现（2026-09-28，HEAD 含本周期全部改动）：`make smoke-native-shmring` 连续 3 次
-    全部挂起——串口日志停在 `[PROC] user task pid=6`（`/bin/native-shmring-rv` 已 exec
-    但无输出），QEMU 被 60s 超时 SIGTERM 杀掉，`NATIVE_SHMRING: PASS` 从未出现。
-  - 归因：shmring 门禁在 2026-08 的 pfa 空闲链损坏条目里已记录"本工作树与基线
-    720e16ab0 均复现"，即在本轮改动落地前就已挂起。逐提交扫描（`origin/main..HEAD`
-    的 17 条提交）显示挂起与具体提交无对应关系。
-  - 仍缺：根因未定位。VMO 帧所有权（`free_vma_pages` 跳过 `VM_VMO`）已在本周期修复，
-    但该门禁仍挂起，说明存在与 VMO 所有权之外的第二因素。
+  - [x] 门禁不再挂起：消费者自报失败、父进程等待有界（20s）、退出码单一真源
+        （`A20_SHMRING_EXIT_*`）。60s 零输出挂起 → 29s 带明确原因的失败。
+  - [x] 根因已定位（2026-09-28）：**跨进程 futex 唤醒丢失，不是 spawn/调度/park 问题。**
+  - 机制：`futex_bucket_index()` 只用**唤醒方的虚拟地址**选桶
+    （kernel/ipc/futex.c:338 + :82-87），而 `task_spawn` 给子进程的是**全新且独立
+    ASLR 随机化**的 mm（kernel/proc/proc.c:596-601，mmap_base = 0x60000000 +
+    rand(20bit)·0x1000，kernel/mm/aslr.c:45-48）。于是父子把**同一物理页**映射到
+    不同虚拟地址 → 不同桶 → 子进程的 `futex_wake(&r->ready)` 扫的是空桶，唤醒真的丢了，
+    父进程睡满整个超时。物理键 pkey 只作为**桶内匹配谓词**，从不参与选桶。
+  - 这恰好违反 kernel/ipc/futex.c:74-79 自己写下的设计假设："fork 继承的 MAP_SHARED
+    映射在父子中保持同一虚拟地址"。该假设对 `fork()` 成立，对 `task_spawn` 不成立。
+  - 证据：消费者**确实运行了**（在 main 入口加一行 announce 即可见 `SHMRINGD: entered
+    main`），3/3 复现，耗时与 20s 超时精确吻合。
+  - **修的时候注意这个坑**：不能直接把桶键换成 pkey。Linux ABI 侧 wake 会传
+    `private`（kernel/abi/linux/sys_futex.c:30-32，private 时 pkey 置 0），而
+    **wait 侧根本没有把 private 传下来**（同文件 :60 的 `futex_wait_ticks(...)` 没有该
+    参数，:25 算出的 private 只用于 WAKE/REQUEUE）。所以 wait 侧永远持有物理 pkey、
+    wake 侧 private 时却是 0：若无条件按 pkey 选桶，**musl/libc 大量使用的进程内私有
+    futex 会全部丢失唤醒**。正确改法需要把 private 一路打通到 `futex_wait_ticks`
+    及其 5 个调用点（futex.c:298/318/640、sys_futex.c:60/137），并同步
+    `futex_requeue`。
+  - 更保守的变体：命中为 0 且 pkey != 0 时，按 `sched_runq_steal_locked`
+    （sched.c:1474-1520）同样的纪律逐桶扫 pkey 匹配。只动 miss 路径，命中路径逐字节
+    不变，风险小得多。
+  - 纯用户态绕行（把父进程地址当 hint 让子进程 map 到同一 vaddr）**不可靠**：
+    kernel/mm/mmap.c:341-344 在 hint 与已有 VMA 重叠时会静默把 addr 归 0 退回 ASLR，
+    实测即失败。已在该实验中放弃。
   - 完成条件：`smoke-native-shmring` 稳定 PASS 且能正常 poweroff；在此之前该门禁不得
-    被计入"已验证"，`docs/testing-gates.md` 中相关结论按历史记录处理。
-
-## P2：测试门禁与工具
+    被计入"已验证"。
 
 - [ ] 为 driver/device/bus registry 的容量耗尽补运行测试
   - 现状：`kernel/drivers/core/driver_core.c` 的 registry 已从初始容量起在锁保护下
