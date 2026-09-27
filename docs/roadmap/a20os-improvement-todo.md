@@ -88,6 +88,17 @@ IDL 化）已落地，已从本文删除。
     编译覆盖。
   - 完成条件：低内存实例（或可注入的换出阈值）下门禁真实触发一次换出-读回，并校验
     换出前后的数据一致性。
+- [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留，非 2026-09 改进周期引入**）
+  - 复现（2026-09-28，HEAD 含本周期全部改动）：`make smoke-native-shmring` 连续 3 次
+    全部挂起——串口日志停在 `[PROC] user task pid=6`（`/bin/native-shmring-rv` 已 exec
+    但无输出），QEMU 被 60s 超时 SIGTERM 杀掉，`NATIVE_SHMRING: PASS` 从未出现。
+  - 归因：shmring 门禁在 2026-08 的 pfa 空闲链损坏条目里已记录"本工作树与基线
+    720e16ab0 均复现"，即在本轮改动落地前就已挂起。逐提交扫描（`origin/main..HEAD`
+    的 17 条提交）显示挂起与具体提交无对应关系。
+  - 仍缺：根因未定位。VMO 帧所有权（`free_vma_pages` 跳过 `VM_VMO`）已在本周期修复，
+    但该门禁仍挂起，说明存在与 VMO 所有权之外的第二因素。
+  - 完成条件：`smoke-native-shmring` 稳定 PASS 且能正常 poweroff；在此之前该门禁不得
+    被计入"已验证"，`docs/testing-gates.md` 中相关结论按历史记录处理。
 
 ## P2：测试门禁与工具
 

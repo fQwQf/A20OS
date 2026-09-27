@@ -63,10 +63,11 @@ __attribute__((weak)) uint64_t arch_signal_handler_sp(uint64_t frame_sp) {
  * default is a no-op so MCU/profile builds that do not link coredump.c keep
  * working.  Registered-hook style: signal.c does not know the dump details.
  */
-__attribute__((weak)) void coredump_on_fatal_signal(int sig,
-                                                    trap_context_t *ctx) {
+__attribute__((weak)) int coredump_on_fatal_signal(int sig,
+                                                   trap_context_t *ctx) {
     (void)sig;
     (void)ctx;
+    return 0;
 }
 
 static int signal_core_dump_default(int sig) {
@@ -84,11 +85,18 @@ static int signal_core_dump_default(int sig) {
     }
 }
 
-static int signal_wait_status(int sig) {
+/* Linux sets the 0x80 WCOREDUMP bit only when a core file was actually
+ * produced, so the caller passes whether coredump_on_fatal_signal() wrote
+ * one rather than only whether the signal is core-dump-by-default. */
+static int signal_wait_status_dumped(int sig, int dumped) {
     int status = sig & 0x7f;
-    if (signal_core_dump_default(sig))
+    if (dumped)
         status |= 0x80;
     return status;
+}
+
+static int signal_wait_status(int sig) {
+    return signal_wait_status_dumped(sig, signal_core_dump_default(sig));
 }
 
 /* Exported for kernel/core/trap.c's unhandled-fault fast path (the other
@@ -99,6 +107,12 @@ int signal_dumps_core(int sig) {
 
 int signal_fatal_exit_code(int sig) {
     return -signal_wait_status(sig);
+}
+
+/* Same, but truthful about whether a core file was produced: the 0x80
+ * WCOREDUMP bit is only set when coredump_on_fatal_signal() wrote one. */
+int signal_fatal_exit_code_dumped(int sig, int dumped) {
+    return -signal_wait_status_dumped(sig, dumped);
 }
 
 static int signal_default_terminate(int sig) {
@@ -322,7 +336,7 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     wait_queue_wake_all(&ss->readiness_waiters, 0, PROC_WAKE_EVENT);
 
     if (immediate_kernel_exit) {
-        proc_force_exit(t, -signal_wait_status(signum));
+        proc_force_exit(t, -signal_wait_status_dumped(signum, 0));
         return 0;
     }
 
@@ -683,7 +697,9 @@ void signal_deliver(void) {
                 proc_sched_stop_current(sig);
                 continue;
             }
-            proc_exit_group(-signal_wait_status(sig));
+            /* Kernel-context delivery cannot produce a core file, so the
+             * WCOREDUMP bit must stay clear here. */
+            proc_exit_group(-signal_wait_status_dumped(sig, 0));
         }
 
         void (*handler)(int) =
@@ -778,9 +794,10 @@ void signal_deliver_user(trap_context_t *ctx) {
             spin_unlock_irqrestore(&ss->lock, flags);
             /* CORE_DUMP_HOOK: emit the ELF core dump while the task's mm and
              * register context are still live, then terminate the group. */
+            int dumped = 0;
             if (signal_core_dump_default(sig))
-                coredump_on_fatal_signal(sig, ctx);
-            proc_exit_group(-signal_wait_status(sig));
+                dumped = coredump_on_fatal_signal(sig, ctx);
+            proc_exit_group(-signal_wait_status_dumped(sig, dumped));
         }
 
         arch_siginfo_t queued_info;
@@ -842,10 +859,10 @@ void signal_deliver_user(trap_context_t *ctx) {
         arch_signal_prepare_frame(&frame, tramp_addr, ctx);
 
         if (copy_to_user((void *)(uintptr_t)sp, &frame, sizeof(frame)) < 0)
-            proc_exit_group(-signal_wait_status(SIGSEGV));
+            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
 
         if (copy_to_user((void *)(uintptr_t)tramp_addr, tramp, sizeof(tramp)) < 0)
-            proc_exit_group(-signal_wait_status(SIGSEGV));
+            proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
 
         signal_make_page_exec(tramp_addr);
 
@@ -856,7 +873,7 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (handler_sp != sp) {
             uint64_t restorer = (uint64_t)arch_sigframe_flag_get(&frame);
             if (copy_to_user((void *)(uintptr_t)handler_sp, &restorer, sizeof(restorer)) < 0)
-                proc_exit_group(-signal_wait_status(SIGSEGV));
+                proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
         }
 
         TRAP_CTX_SP(ctx) = handler_sp;
