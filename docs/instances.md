@@ -6,7 +6,7 @@ A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明�
 
 - **未写的字段不落任何变量**，直接落回 Makefile 默认值。策略只有一个出处（Makefile），实例只携带自己的增量。
 - **校验前置**：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
-- **声明即门禁**：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`，由 CI 的 `manifest-gates` job 强制，保证实例、架构矩阵、驱动注册表与构建系统永不漂移。这三个门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
+- **声明即门禁**：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
 
 ## 快速上手
 
@@ -226,6 +226,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
 | `make check-flash-backend-registry` | 校验烧录后端注册表，并交叉比对每个 `make_target` 在 makefile 中存在、且 a20 确实能派发到它 |
+| `make check-a20-tests` | a20 工具自身的单元测试（stdlib unittest，见 `tools/tests/test_a20.py`） |
 
 ## apk world 镜像实例（用包管理组装用户态）
 
