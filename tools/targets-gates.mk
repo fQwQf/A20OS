@@ -8,6 +8,7 @@ HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment regen-smoke-cases \
+        check-smoke-cases \
         check-flash-backend-registry check-manifests \
         check-a20-tests
 
@@ -26,6 +27,11 @@ check-component-registry:
 # components/drivers.mk is generated from components/drivers.toml.  Run this
 # after editing the TOML; check-component-registry fails while it is stale, so
 # the generated copy can never rot the way a second hand-maintained list could.
+# Every smoke case must be reachable as a make target, and every target that
+# calls tools/smoke.py must name a case that exists.  One make spawn.
+check-smoke-cases:
+	@$(PYTHON) tools/smoke_audit.py
+
 # tools/smoke_cases.py is generated from the pinned pre-migration sources and
 # then checked against make's own expansion.  Both steps run here so the table
 # can never be regenerated without that proof.
