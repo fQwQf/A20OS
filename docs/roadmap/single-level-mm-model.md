@@ -209,3 +209,83 @@ period 内被回收；file/COW/swap/fault-around 的分派由逐页状态而非�
 **注意**：`smoke-mm-stress` 之类的门通过 grep `MM_STRESS: PASS` 判定，而该标记
 在关机审计之前打印，所以关机路径上的 panic 不会让门失败。审计行必须与 PASS
 标记一起检查。
+
+---
+
+## 8. 实施记录（2026-09-28）与 P5 的实测结论
+
+本节记录 P0–P4 的实际落地结果，以及一次把 P5 的前提测了出来的重要实验。
+所有数字均为 smp4 QEMU 实测。
+
+### 8.1 已完成并验证
+
+| 阶段 | 状态 | 证据 |
+|---|---|---|
+| P0 描述符 | ✅ | `pt_meta_t` 并入 `frame_meta_t` 联合体，16 字节零开销（`_Static_assert` 钉住） |
+| P1 per-PTE 状态 | ✅ | 关机审计：7 架构构建 OK，`missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0` |
+| P2 fault 走 cursor | ✅ | 缓存下降路径；6 个构建 + `mm_stress`(smp1/smp4) + `mm-fork-exec-race`(smp8) + `smoke-abi-linux` + `check-mm-lock-model` 全 PASS |
+| P3 页表页锁为互斥单元 | ✅ | covering-node MCS；修掉 depth 双减自死锁 |
+| P4 延迟回收机制 | ✅ | 读侧计数 + `tlb_holds`  graveyard + stale；已就位待 P5 接线 |
+| 度量基准 | ✅ | `user/cmds/stress/mm_pt_scale.c`，把并行主张变成可证伪验收门 |
+
+期间修掉两个真实缺陷：fault-around 曾把 PFN 当物理地址传给 `mm_cursor_map`
+（装入无效物理地址，表现为访问故障而非缺页，C 无法发现类型不匹配）；MCS
+回退循环与 `mcs_unlock` 双减 per-CPU depth 导致同节点自死锁（LOCK-STALL
+报 `waiter==owner` 同址）。
+
+### 8.2 P5 实测：为何"不相交区间并行"尚未兑现
+
+`mm_pt_scale` 基线（smp4，每线程每轮 mmap 新鲜区域以产生真实 demand fault）：
+
+```
+1T=0.807s  4T=3.137s   speedup=1.03x      ← 无并行
+```
+
+**原因已定位**：fault 路径仍在 `handle_demand_fault_access` 顶部持有
+地址空间级 `mm->lock`，而 fault 必须 `mm_find_vma()` 查 VMA（VMA 可被并发
+munmap 释放且无引用计数保护）。因此每个 fault 仍在这把全局锁上排队，无论
+它触及哪个页表节点——单级模型的并行语义被这把锁整体压制。
+
+**一次失败但有价值的实验**：为"匿名写 fault 加一条不放 `mm->lock` 的快路径"
+（锁内只快照 VMA 字段值、锁外用 cursor 装 PTE、靠节点锁 + PTE-present 复查
+防重复映射）。实测**更慢**（1T 0.835s→1.423s，4T speedup 仍 ~1.0x）：快路径
+仍要取 `mm->lock` 查 VMA，故毫无并行收益，却多了一次 `pt_lock` 区间外的
+`pt_lookup_leaf` 与重复遍历。已回滚。该实验证明：**只要 fault 仍需查 VMA，
+"摘掉 mm->lock" 就得不到并行、只会加开销。**
+
+### 8.3 P5 的真正前提：fault 必须能从 per-PTE 状态解析（P6）
+
+要让 fault 不碰 VMA，`mmap` 必须把"这段是私有匿名、按需分页"的意图写进
+per-PTE 状态。但这引出一个结构性问题：per-PTE 状态挂在**页表页的**元数据
+上，而 on-demand 区域此刻尚无叶子页表页。若按论文 `mark` 语义在 mmap 时就
+为整段分配叶子页表页，则 1 GB 映射要预分配 2 M 个叶子页表页（2 GB 页表内存
+才能表达"尚未 fault"）——这是 A20OS 现有 on-demand 设计刻意避免的成本。
+论文靠大页状态规避，A20OS 的大页尚未建模（P9）。
+
+因此 P5 存在一个必须显式决策的架构分叉（**不属于可以顺手做掉的量级**）：
+- **(a) 大地址空间按需标记**：只在已有叶子页表页的页上记状态，其余仍回落 VMA。
+  内存友好，但并行收益不完整。
+- **(b) 论文式 eager 叶子页表分配**：完整兑现并行语义，接受大映射的页表内存
+  开销（可用大页状态缓解）。
+- **(c) 给 VMA 加快照/引用计数**：fault 在锁内取引用、锁外用引用解析，mm->lock
+  只在"取引用"这一瞬被持有。这是 Linux 等成熟内核的通用做法，改动面集中在
+  VMA 生命周期，风险中等。
+
+本轮刻意**未**替用户选定 (a)/(b)/(c) 并强行实施——它牵涉内存/兼容性权衡，
+且必须与"P4 延迟释放接进拆链路径"同一次提交（P5 摘锁正是 UAF 变真实的时刻）。
+当前交付停在"机制齐备 + 前提测清 + 验收门就位"，是诚实且可回退的中间态。
+
+### 8.4 P5 接线时的硬性要求（留给下一步）
+
+1. 摘 `mm->lock` 与"把 P4 延迟释放接进 `pt_unmap`/`pt_unmap_leaf`/`pt_destroy_*`"
+   必须**同一次提交**：摘锁正是"并发 cursor 缓存指针 + 拆链立即释放"这一 UAF
+   变真实的时刻。
+2. 远端 TLB shootdown 必须在释放所有页表锁**之后**派发（`vm.h` 的
+   `MM_LOCK_MODEL` 明确记录：带 IRQ 关闭自旋在锁上的 CPU 必须能退出临界区去
+   响应 TLB IPI）。
+3. COW 路径的 `0x63636363` 顺序（fault.c 内注释）必须逐字保留，其
+   `rc==1` 分支已在 `pfa.lock` 下运行，合并式 map 会自锁。
+4. 每次提交后跑：7 架构构建 + `mm_stress`(smp1/smp4) + `mm-fork-exec-race`(smp8)
+   + `smoke-abi-linux` + `check-mm-lock-model` + 关机审计全 0。
+5. 提示：QEMU smoke 门会因遗留 qemu 占住 host 5555 端口而假失败，可用
+   `make ARCH=riscv64 NET_HOSTFWD=hostfwd=tcp::6099-:6099,... <target>` 换端口。
