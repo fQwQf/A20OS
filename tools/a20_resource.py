@@ -30,10 +30,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Sequence
 
 from a20_instance import Instance
 
@@ -54,6 +55,32 @@ _HEARTBEAT_SECONDS: Final = 30.0
 
 class MemorySpecError(ValueError):
     """A -m style size string that cannot be parsed."""
+
+
+# QEMU's hostfwd grammar: [tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport
+_HOSTFWD_RE = re.compile(
+    r"^(?:tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)-(?P<gaddr>[^:]*):(?P<gport>\d+)$")
+
+
+def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int], ...]:
+    """Host ports an instance's [net].hostfwd will claim.
+
+    Port 0 means "let the OS pick", which is exactly the case the preflight must
+    not gate: nothing is contended in advance and QEMU reports the result only
+    on its own console.  Entries that do not parse are ignored rather than
+    rejected here -- `a20 check` is the layer that reports malformed hostfwd,
+    and a preflight that refuses to start would be the wrong place to learn it.
+    """
+    out: list[tuple[str, int]] = []
+    for entry in entries or ():
+        m = _HOSTFWD_RE.match(entry.strip())
+        if m is None:
+            continue
+        port = int(m.group("hport"))
+        if port == 0:
+            continue
+        out.append((m.group("haddr") or "0.0.0.0", port))
+    return tuple(out)
 
 
 def parse_memory_mb(text: str) -> int:
@@ -114,15 +141,18 @@ class HostResources:
     load1: float
     disk_free_mb: int
     running_guests: int
+    busy_ports: tuple[tuple[str, int], ...] = ()
 
     @classmethod
-    def snapshot(cls, disk_path: Path) -> HostResources:
+    def snapshot(cls, disk_path: Path,
+                 want_ports: Sequence[tuple[str, int]] = ()) -> HostResources:
         return cls(
             mem_available_mb=_mem_available_mb(),
             cpu_count=os.cpu_count() or 1,
             load1=os.getloadavg()[0],
             disk_free_mb=shutil.disk_usage(disk_path).free // _MIB,
             running_guests=count_running_guests(),
+            busy_ports=busy_ports(want_ports),
         )
 
 
@@ -170,15 +200,39 @@ def count_running_guests() -> int:
     return count
 
 
+def busy_ports(want: Sequence[tuple[str, int]]) -> tuple[tuple[str, int], ...]:
+    """Which of the requested host ports cannot be bound right now.
+
+    Probed by actually binding, rather than by reading /proc or ss: a port held
+    by another QEMU, by a leftover process, or by a socket in TIME_WAIT all show
+    up the same way here, which is the only answer that actually predicts
+    whether QEMU's bind will succeed.
+    """
+    taken: list[tuple[str, int]] = []
+    for addr, port in want:
+        family = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as s:
+            # Deliberately no SO_REUSEADDR: QEMU does not set it either, so
+            # this reproduces QEMU's own bind semantics rather than a laxer one.
+            try:
+                s.bind((addr, port))
+            except OSError:
+                taken.append((addr, port))
+    return tuple(taken)
+
+
 @dataclass(frozen=True, slots=True)
 class Requirement:
     mem_mb: int
     cpus: int
     disk_mb: int
     guests: int = 1
+    ports: tuple[tuple[str, int], ...] = ()
 
     def describe(self) -> str:
         parts = [f"mem {self.mem_mb} MiB", f"{self.cpus} vCPU", f"disk {self.disk_mb} MiB"]
+        if self.ports:
+            parts.append("ports " + ",".join(f"{a}:{p}" for a, p in self.ports))
         return ", ".join(parts)
 
 
@@ -193,6 +247,7 @@ def requirement_for(inst: Instance, policy: Policy) -> Requirement:
         mem_mb=mem_mb + policy.reserve_mem_mb,
         cpus=max(1, cpus),
         disk_mb=max(disk_mb, policy.min_disk_mb),
+        ports=parse_hostfwd_ports(inst.net.hostfwd),
     )
 
 
@@ -216,6 +271,8 @@ def evaluate(need: Requirement, have: HostResources, policy: Policy) -> Verdict:
         d.append(f"disk: need {need.disk_mb} MiB, free {have.disk_free_mb} MiB")
     if have.running_guests + need.guests > cap:
         d.append(f"guest slots: {have.running_guests} running, cap {cap}")
+    for addr, port in have.busy_ports:
+        d.append(f"host port: {addr}:{port} is already in use by another process")
     return Verdict(ok=not d, deficits=tuple(d))
 
 
@@ -243,7 +300,7 @@ def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | No
     last_emit = 0.0
 
     while True:
-        have = HostResources.snapshot(root)
+        have = HostResources.snapshot(root, need.ports)
         verdict = evaluate(need, have, policy)
         if verdict.ok:
             return verdict
