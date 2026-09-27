@@ -655,28 +655,29 @@ smoke-vfs-stress:
 		fi
 
 smoke-vfs-edge:
-		$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-		@mkdir -p $(SMOKE_LOG_DIR)
-		@set -e; \
-		log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
-		status=0; \
-		{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_edge\npoweroff\n'; } | \
-		$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-			-machine virt -m 1G -nographic -smp 1 -bios default \
-			-global virtio-mmio.force-legacy=false \
-			-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-		if grep -q 'VFS_EDGE: PASS' "$$log"; then \
-			echo "smoke-vfs-edge: PASS; log saved to $$log"; \
-		else \
-			echo "smoke-vfs-edge: failed with status $$status; tail of $$log:"; \
-			tail -n 80 "$$log"; \
-			exit 1; \
-		fi
+	$(call smoke-gate,1G,1)
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/vfs-edge-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'vfs_edge\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+	$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+	-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+	-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+	> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'VFS_EDGE: PASS' "$$log"; then \
+		echo "smoke-vfs-edge: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-vfs-edge: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-io-event:
 	$(call smoke-gate,1G,1)
