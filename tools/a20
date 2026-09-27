@@ -208,17 +208,22 @@ def cmd_list(_args: argparse.Namespace) -> int:
     if not paths:
         print(f"no instances found in {INSTANCES_DIR}")
         return 0
+    failed = 0
     for path in paths:
         try:
             inst = parse_instance(path)
             errors = validate_instance(inst, REPO_ROOT)
         except InstanceError as e:
+            failed += 1
             print(f"{path.stem:<28} INVALID\n{e}")
             continue
         mode = "gui" if inst.gui.enabled else "text"
         status = "ok" if not errors else f"{len(errors)} error(s)"
         print(f"{inst.name:<28} {inst.arch:<12} {mode:<5} {status:<12} {inst.description or ''}")
-    return 0
+        failed += bool(errors)
+    if failed:
+        print(f"list: {failed} instance(s) invalid")
+    return 1 if failed else 0
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -346,12 +351,19 @@ def main(argv: list[str] | None = None) -> int:
         _add_resource_flags(sub.choices[boot])
 
     # Unknown arguments (after an optional `--`) are forwarded to make. Using
-    # parse_known_args instead of a REMAINDER positional keeps --dry-run
-    # parseable in any position.
-    ns, make_args = parser.parse_known_args(argv)
-    if make_args and make_args[0] == "--":
-        make_args = make_args[1:]
-    ns.make_args = make_args
+    ns, passthrough = parser.parse_known_args(argv)
+    # Everything after an explicit "--" is make's.  Anything else that a20 did
+    # not recognise is a typo, and forwarding it would hand it to make as a
+    # variable override or goal -- so `--dry-rnu` has to be an error, not a
+    # silently-ignored flag that changes what gets built.
+    if passthrough and passthrough[0] == "--":
+        ns.make_args = passthrough[1:]
+    elif passthrough:
+        parser.error(f"unrecognized argument(s): {' '.join(passthrough)}\n"
+                     "a20 flags must be spelled correctly; make arguments go after '--', "
+                     "e.g. `a20 build <instance> -- -j8`")
+    else:
+        ns.make_args = []
 
     match ns.command:
         case "check":
