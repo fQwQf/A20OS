@@ -220,6 +220,7 @@ int net_socket_create(int domain, int type, int protocol) {
         (base_type != SOCK_RAW ||
          (protocol != NETLINK_SOCK_DIAG &&
           protocol != NETLINK_KOBJECT_UEVENT &&
+          protocol != NETLINK_ROUTE &&
           protocol != NETLINK_GENERIC)))
         return -EPROTONOSUPPORT;
 
@@ -505,6 +506,8 @@ int net_sendto(int gfd, const void *buf, size_t len, int flags,
     if (s->domain == AF_NETLINK) {
         if (s->protocol == NETLINK_SOCK_DIAG)
             return net_netlink_diag_request(s, buf, len, addr, addrlen);
+        if (s->protocol == NETLINK_ROUTE)
+            return net_netlink_route_request(s, buf, len, addr, addrlen);
         if (s->protocol == NETLINK_KOBJECT_UEVENT ||
             s->protocol == NETLINK_GENERIC)
             return net_netlink_uevent_send(s, buf, len, addr, addrlen);
