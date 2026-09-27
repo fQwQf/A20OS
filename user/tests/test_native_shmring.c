@@ -58,9 +58,9 @@ static uint64_t now_ns(void)
     return t;
 }
 
-static a20_status_t spawn_child(const char *path, a20_handle_t pass_h,
-                                uint32_t pass_slot, a20_rights_t pass_rights,
-                                a20_handle_t *out_task)
+static int64_t spawn_child(const char *path, a20_handle_t pass_h,
+                           uint32_t pass_slot, a20_rights_t pass_rights,
+                           a20_handle_t *out_task)
 {
     a20_path_open_args_t oa;
     oa.size = sizeof(oa);
@@ -105,10 +105,8 @@ static a20_status_t spawn_child(const char *path, a20_handle_t pass_h,
 
     st = a20_syscall6(A20_SYS_task_spawn, (uint64_t)(uintptr_t)&ta, 0, 0, 0, 0, 0);
     a20_hdl_close(oa.out_handle);
-    if (st < 0)
-        return st;
     *out_task = ta.out_task;
-    return A20_OK;
+    return st;
 }
 
 static int wait_child_ok(a20_handle_t task)
@@ -117,6 +115,34 @@ static int wait_child_ok(a20_handle_t task)
     if (a20_task_wait(task, 0, &ts) != A20_OK)
         return -1;
     return ts.exit_code;
+}
+
+/* A consumer that never signalled ready is either already dead (exit code names
+ * why) or still stuck.  Poll rather than block: a blocking wait here would just
+ * re-create the hang this bounded timeout exists to break. */
+static int report_consumer_stall(a20_handle_t task, int code, const char *what)
+{
+    a20_task_status_t ts;
+    ts.size = sizeof(ts);
+    ts.version = 1;
+    put_str("NATIVE_SHMRING: FAIL ");
+    put_str(what);
+    if (a20_task_wait(task, A20_TASK_WAIT_NONBLOCK, &ts) == A20_OK) {
+        put_str("; consumer exited code=");
+        put_u64((uint64_t)(uint32_t)ts.exit_code);
+        put_str(" reason=");
+        switch (ts.exit_code) {
+        case A20_SHMRING_EXIT_VM_MAP:     put_str("vm_map(slot) failed"); break;
+        case A20_SHMRING_EXIT_ATTACH:     put_str("attach failed, magic mismatch"); break;
+        case A20_SHMRING_EXIT_CORRUPT:    put_str("data corruption"); break;
+        case A20_SHMRING_EXIT_SHORT_READ: put_str("read returned 0 before total"); break;
+        default: put_str("see consumer output"); break;
+        }
+    } else {
+        put_str("; consumer still running (never scheduled or stuck)");
+    }
+    put("\n", 1);
+    return code;
 }
 
 int main(int argc, char **argv, char **envp)
@@ -142,12 +168,19 @@ int main(int argc, char **argv, char **envp)
     r->total_lo = A20_SHMRING_TOTAL;
 
     a20_handle_t ring_task;
-    if (spawn_child("/bin/shmringd-rv", vmo, A20_SHMRING_VMO_SLOT,
-                    A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP,
-                    &ring_task) != A20_OK)
-        return fail(3, "shmringd spawn failed");
+    int64_t spawn_rc = spawn_child("/bin/shmringd-rv", vmo, A20_SHMRING_VMO_SLOT,
+                                   A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_MAP,
+                                   &ring_task);
+    put_str("NATIVE_SHMRING: spawn rc=");
+    put_u64((uint64_t)spawn_rc);
+    put_str(" out_task=");
+    put_u64((uint64_t)ring_task);
+    put("\n", 1);
+    if (spawn_rc < 0)
+        return 3;
     if (a20_shmring_wait_ready_timeout(r, SHMRING_WAIT_NS) < 0)
-        return fail(4, "consumer never signalled ready (it prints its own reason on failure)");
+        return report_consumer_stall(ring_task, 4,
+                                     "consumer never signalled ready");
 
     uint8_t wbuf[32768];
     uint64_t t0 = now_ns();

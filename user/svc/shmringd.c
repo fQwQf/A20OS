@@ -43,10 +43,10 @@ int main(int argc, char **argv, char **envp)
     uint64_t base = 0;
     if (a20_vm_map(((a20_handle_t)A20_SHMRING_VMO_SLOT), A20_SHMRING_VMO_SIZE, 0,
                    A20_PROT_READ | A20_PROT_WRITE, &base) < 0)
-        return bail(2, "vm_map(slot) failed");
+        return bail(A20_SHMRING_EXIT_VM_MAP, "vm_map(slot) failed");
     a20_shmring_t *r = (a20_shmring_t *)(uintptr_t)base;
     if (a20_shmring_attach(r) < 0)
-        return bail(3, "attach failed (magic mismatch)");
+        return bail(A20_SHMRING_EXIT_ATTACH, "attach failed (magic mismatch)");
 
     uint32_t total = r->total_lo;
     a20_shmring_signal_ready(r);
@@ -59,10 +59,10 @@ int main(int argc, char **argv, char **envp)
         if (want > sizeof(buf)) want = sizeof(buf);
         uint32_t n = a20_shmring_read(r, buf, want);
         if (n == 0)
-            return bail(4, "read returned 0 before total");
+            return bail(A20_SHMRING_EXIT_SHORT_READ, "read returned 0 before total");
         for (uint32_t i = 0; i < n; i++) {
             if (buf[i] != (uint8_t)(expect & 0xff))
-                return bail(1, "data corruption");
+                return bail(A20_SHMRING_EXIT_CORRUPT, "data corruption");
             expect++;
         }
         got += n;

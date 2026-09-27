@@ -84,6 +84,13 @@ static inline void a20_shmring_wait_ready(a20_shmring_t *r)
         a20_futex_wait((uint32_t *)&r->ready, 0, A20_TIMEOUT_INFINITE);
 }
 
+/* Consumer exit codes.  Shared so the producer and the reporter cannot drift. */
+#define A20_SHMRING_EXIT_OK        0
+#define A20_SHMRING_EXIT_CORRUPT   1
+#define A20_SHMRING_EXIT_VM_MAP    2
+#define A20_SHMRING_EXIT_ATTACH    3
+#define A20_SHMRING_EXIT_SHORT_READ 4
+
 /* Bounded wait for ready/done.  Returns 0 once the flag is set, -1 on timeout.
  *
  * Why this exists: the consumer in the shmring benchmark can die *before* it
