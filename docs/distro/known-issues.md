@@ -810,6 +810,57 @@
 - 状态：riscv32 在 HEAD 上有多处既有编译错误（`arch_vdso_counter` 声明、`pfa_range_t` 断言、`proc.c` type-limits 等）；前两处已修，`proc.c` 等仍待处理。
 - 提示：非 VDSO 架构（riscv32/arm32/loongarch32）都会撞到 `arch_vdso_counter` 声明缺失。
 
+### x86_64 桌面：lwIP IPv6 收包路径 pbuf 引用计数被破坏
+- 症状：x86_64 桌面起来后约 1 分钟**不确定性地**打死内核，报
+  `lwIP assertion failed: pbuf_free: p->ref > 0`；调用链为
+  `ip6_input` → `ethernet_input` → `a20_lwip_process_netif_rx_tx_locked`。
+  桌面会话因此活不过约 55s。**这条是既有问题，rebase 到当前 main 后依旧复现。**
+- 已修（调用侧，真实缺陷）：`kernel/net/lwip_stack.c` 的 RX 循环在 `netif->input()`
+  返回错误时又 `pbuf_free(p)`，但 lwIP 的 `ethernet_input` 在自己的错误路径上
+  「先释放再返回 `ERR_OK`」（源码注释：so the caller doesn't have to free it again），
+  这是对已移交所有权的 pbuf 二次释放。已修（`687f8271`）。
+- 已修（可二分性）：`kernel/net/socket_inet.c` 的 UDP/raw 收包回调原先无条件调用
+  `ip6_current_dest_addr()` / `IP6H_HOPLIM()` 等，导致 `LWIP_IPV6=0` **根本编不过**，
+  IPv6 路径无法单独二分。已加 `#if LWIP_IPV6` 保护（`0154a7fc`）。
+- 已定位到 IPv6 收包路径：`LWIP_IPV6=0` 时桌面稳定存活 250s+、零 panic。
+- **关键坑（务必注意）**：想「只关一个开关」时，我把 `LWIP_IPV6_DHCP6` 与
+  `LWIP_IPV6_AUTOCONFIG` 关掉、其余 IPv6 全留，也**不复现**——但那是因为
+  guest 根本没拿到 IPv6 地址，IPv6 收包路径几乎没被触发（日志里仅 1 处 IPv6、
+  无任何地址行）。所以这条只是**混杂变量**的阴性结果，**不能**据此判定
+  DHCPv6/SLAAC 无罪。真正结论是：**panic 需要真实 IPv6 收包流量才会发生。**
+- 已排除（逐一验证）：
+  - `g_lwip_lock` 确实在 IRQ 路径（`virtio_net.c:521`）与 poll 路径都持有，RX 循环本身已串行化；
+  - `net_packet_rx_defer()` 在自旋锁下 `memcpy` 拷贝帧，不会保留共享 `rx_frame` 指针；
+  - vendored lwIP 的重组路径已审：`ip6_reass_free_complete_datagram()` 与
+    `ip6_reass()` 完成时的 `pbuf_cat` 链接逻辑均与上游所有权约定一致，未见缺陷。
+- 下一步：保持 SLAAC 可用以便复现，在 `ip6_input` 入口打印 `p->ref` 与报文类别
+  （MLD / ICMPv6 echo / 邻居通告）定位触发包；同时检查 pbuf pool 是否存在
+  **相邻缓冲区越界写**——pool 是连续 `struct pbuf` 数组，一次越界即可把邻居的
+  `ref` 写坏，从外部看与双重释放完全一样。**注意**：`pbuf_free: p->ref > 0` 断言失败
+  只能说明 `ref == 0`，无法区分「同一地址被释放两次」与「被邻居越界写坏」，
+  两种情况需要上述日志才能区分。
+
+### x86_64 桌面：间歇性 `Failed to set CRTC`（ENOENT），显示起不来
+- 症状：wlroots legacy 后端反复报
+  `[backend/drm/legacy.c:122] connector Virtual-1: Failed to set CRTC: No such file or directory`，
+  桌面没有画面。**间歇性**：同一份配置有的运行一次都不报，有的报 20 次。
+- 内核侧唯一来源：`drm_mode_setcrtc()` 中 `drm_find_gem(ctx, c.fb_id)` 返回 NULL
+  → `-ENOENT`（`drm.c` 内该函数仅此一处 `-ENOENT`）。
+- 已排除（逐一验证）：
+  - **GEM 表耗尽**：插桩统计整个运行期只有 2 次 `drm_gem_alloc`（`slot=0`），
+    `DRM_MAX_GEMS 64` 远未用满，表满的打印一次都没出现；
+  - **`MODE_DESTROY_DUMB` 释放了仍被帧缓冲引用的 GEM**：插桩后该 ioctl 调用次数为 0；
+  - **`GEM_CLOSE` 释放了仍被引用的 GEM**（即本分支 GEM_CLOSE 改动的嫌疑）：插桩后同样为 0，
+    该 ioctl 在这条链路上根本不被调用；把 GEM_CLOSE 改成 no-op 也不改变现象；
+  - **内核与用户态 `drm_mode_crtc` ABI 不一致**：本以为内核 `struct drm_mode_crtc`
+    （`set_connectors_ptr`/`count_connectors`/`mode_valid`/`mode`）与 Linux UAPI
+    不同构会导致 `fb_id` 读偏——但用户态 `user/external/mlibc/.../drm.cpp` 走的是
+    `<drm/drm.h>` 里**同一份 vendored 定义**，字段一致，不存在错位。
+- 影响：**这条同时卡住 XWayland 呈现验证与 x86_64 `smp>1` 挂起调查**——两者都需要
+  一块真正能出画面的显示器。
+- 下一步：需要在前台（wlroots legacy 后端）侧抓 `drmModeSetCrtc` 实际传入的 `fb_id`
+  与 `drmModeAddFB2` 返回的 `fb_id` 做比对，判断二者是否真的不一致。
+
 ## 三、测试环境注意事项
 
 - **测试前先 `e2fsck -fn` 校验镜像**：损坏的 rootfs 会**伪造出内核 bug**。实测一个报 `Block bitmap checksum does not match`、`Entry 'sys' ... unused inodes area` 的镜像，会让 6 个 udev worker 全部 `timeout; kill it`；换干净镜像后为 0。损坏镜像还会造成 `failed to create cairo scaled font`、应用起不来等假象。**新 `image-world` 产物 `e2fsck -fn` 是干净的**（5 个 pass 全过），说明损坏不是构建期引入、而是之后发生，具体来源未定位。
