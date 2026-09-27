@@ -91,6 +91,7 @@ block_dev_t *mount_setup_block_device(int index)
     class_block->block.capacity = ops->capacity(dev);
     class_block->block.sector_size = ops->sector_size(dev);
     class_block->block.priv = class_block;
+    class_block->block.release = NULL;
     return &class_block->block;
 }
 

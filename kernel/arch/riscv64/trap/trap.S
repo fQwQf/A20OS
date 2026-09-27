@@ -131,6 +131,11 @@ __trap_from_user:
      * of silently succeeding. */
     li      t0, (1 << 8)
     csrs    sstatus, t0
+    /* SUM (sstatus bit 18) must be 0, not merely never-set: clear it so a
+     * later csrs that happens to carry the bit cannot silently re-enable
+     * supervisor user-page access. */
+    li      t0, (1 << 18)
+    csrc    sstatus, t0
 
     /* Call C trap handler */
     call    trap_handler
