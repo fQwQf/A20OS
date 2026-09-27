@@ -54,11 +54,21 @@ def from_make(target: str) -> dict:
                    r"(?:--send-line '[^']*'\s+)*(\S+)\s+qemu-system", text)
     start = text.index(q.group(1))
     end = text.index('> "$log"', start)
+    cond = re.search(r"if (grep .*?); then", text)
+    expect: list[str] = []
+    forbid: list[str] = []
+    if cond:
+        for part in cond.group(1).split("&&"):
+            m2 = re.search(r"grep -q '([^']*)'", part)
+            if m2:
+                (forbid if part.lstrip().startswith("!") else expect).append(m2.group(1))
     return {
         "log": lg.group(1) if lg else None,
         "timeout": to.group(1) if to else None,
         "argv": shlex.split(text[start:end].strip()),
-        "expect": re.findall(r"grep -q '([^']*)' \"\$log\"", text),
+        "expect": expect,
+        "forbid": forbid,
+        "timeout_msg": bool(re.search(r'\[ "?\$status"? -eq 124 \]', text)),
     }
 
 
@@ -76,7 +86,7 @@ def main() -> int:
     bad = 0
     for c in cases:
         m = from_make(c["name"])
-        for field in ("log", "timeout", "argv", "expect"):
+        for field in ("log", "timeout", "argv", "expect", "forbid", "timeout_msg"):
             if c[field] != m[field]:
                 bad += 1
                 print(f"MISMATCH {c['name']} [{field}]")
