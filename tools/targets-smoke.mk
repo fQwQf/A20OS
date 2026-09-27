@@ -1,3 +1,21 @@
+# 冒烟门禁的资源预检。
+#
+# 下面绝大多数 smoke-* 目标直接起 qemu-system-*，绕过了 tools/a20，因此没有实例
+# TOML 可供门禁，也就完全没有资源检查。这恰恰是 tools/a20_resource.py 存在的理由：
+# QEMU 申请到宿主机给不出的内存时，不会得到一个非零退出码，而是宿主 OOM killer
+# 挑一个进程杀掉——被杀的那个通常不是你在调试的东西。所以这里复用同一套 A20_*
+# 策略，在起 QEMU 之前等一次。
+#
+# 参数必须与该目标 qemu 命令行里的 -m/-smp 一致；否则门禁在保护另一件事，比没有
+# 门禁更糟。默认值取自脚本里逐个目标的实际取值（全部 -m 1G）。
+#
+# 与 `tools/a20 run` 的区别：a20 的 A20_WAIT_TIMEOUT 默认 0（一直等），因为交互式
+# 跑实例时"等资源释放"正是期望行为；CI 门禁不能永远等下去（宿主机磁盘真的满了
+# 时会挂死而不是失败），所以这里给一个可覆盖的有界默认 900s。
+define smoke-gate
+A20_WAIT_TIMEOUT=$${A20_WAIT_TIMEOUT:-900} $(PYTHON) tools/a20_resource.py -m $(1) -c $(2)
+endef
+
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
 smoke-riscv64:
 	tools/a20 test smoke-riscv64
@@ -15,6 +33,7 @@ smoke-iommu-discovery:
 	tools/a20 test smoke-iommu-discovery
 
 smoke-iommu-udriver-isolation:
+	$(call smoke-gate,1G,1)
 	$(MAKE) -j1 ARCH=riscv64 ABI=both BRINGUP=0 PROFILE=benchmark dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -64,6 +83,7 @@ smoke-x86_64:
 # Behavioral SMP gate: boot a NR_CPUS=2 BRINGUP kernel and require it to
 # complete bring-up and power off, exercising SMP init on real secondaries.
 smoke-smp-bringup:
+	$(call smoke-gate,1G,2)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -95,6 +115,7 @@ smoke-riscv32:
 	tools/a20 test smoke-riscv32
 
 smoke-arch-mmu-matrix:
+	$(call smoke-gate,1G,1)
 	@set -e; \
 	for spec in arm32:0 aarch64:0 riscv64:0 riscv32:0 \
 		    arm32:1 aarch64:1 riscv64:1 riscv32:1; do \
@@ -152,6 +173,7 @@ smoke-net-iface:
 	tools/a20 test smoke-net-iface
 
 smoke-envelope:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -175,6 +197,7 @@ smoke-envelope:
 		fi
 
 smoke-envelope-pilot:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -198,6 +221,7 @@ smoke-envelope-pilot:
 		fi
 
 smoke-envelope-bench:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -222,6 +246,7 @@ smoke-envelope-bench:
 		fi
 
 smoke-envelope-corpus:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -246,6 +271,7 @@ smoke-envelope-corpus:
 		fi
 
 smoke-a20-channel:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -273,6 +299,7 @@ smoke-a20-channel:
 	fi
 
 smoke-ptrace:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -300,6 +327,7 @@ smoke-ptrace:
 	fi
 
 smoke-network-suite:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -331,6 +359,7 @@ smoke-network-suite:
 # connection, so it must not depend on a free host port 5555.
 smoke-netctl: NET_HOSTFWD=
 smoke-netctl:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -359,6 +388,7 @@ smoke-netctl:
 	fi
 
 smoke-network-suite-aarch64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -387,6 +417,7 @@ smoke-network-suite-aarch64:
 	fi
 
 smoke-proc-a20:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -410,6 +441,7 @@ smoke-proc-a20:
 	fi
 
 smoke-proc-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -436,6 +468,7 @@ smoke-proc-stress:
 	fi
 
 smoke-procfs-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -459,6 +492,7 @@ smoke-procfs-stress:
 	fi
 
 smoke-mm-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -485,6 +519,7 @@ smoke-mm-stress:
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
 smoke-mmprobe:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -508,6 +543,7 @@ smoke-mmprobe:
 	fi
 
 smoke-oom-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -535,6 +571,7 @@ smoke-oom-stress:
 # mkswap -> swapon -> duplicate-swapon(EBUSY) -> swapoff, asserting
 # /proc/swaps and sysinfo totalswap transitions along the way.
 smoke-swap:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -559,6 +596,7 @@ smoke-swap:
 	fi
 
 smoke-mm-fork-exec-race:
+	$(call smoke-gate,1G,8)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=8 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -583,6 +621,7 @@ smoke-mm-fork-exec-race:
 	fi
 
 smoke-vfs-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -636,6 +675,7 @@ smoke-vfs-edge:
 		fi
 
 smoke-io-event:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -664,6 +704,7 @@ smoke-io-event:
 	fi
 
 smoke-syscall-ext:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -687,6 +728,7 @@ smoke-syscall-ext:
 	fi
 
 smoke-sched-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -710,6 +752,7 @@ smoke-sched-stress:
 	fi
 
 smoke-futex-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -733,6 +776,7 @@ smoke-futex-stress:
 	fi
 
 smoke-futex-stress-aarch64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -756,6 +800,7 @@ smoke-futex-stress-aarch64:
 	fi
 
 smoke-scm-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -779,6 +824,7 @@ smoke-scm-stress:
 	fi
 
 smoke-evdev-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -802,6 +848,7 @@ smoke-evdev-stress:
 	fi
 
 smoke-signalfd-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -825,6 +872,7 @@ smoke-signalfd-stress:
 	fi
 
 smoke-pty-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -848,6 +896,7 @@ smoke-pty-stress:
 	fi
 
 smoke-timeout-test:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -874,6 +923,7 @@ smoke-timeout-test:
 # Coredump smoke (fatal-signal ELF core dump generation)
 # ================================================================
 smoke-coredump:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -900,6 +950,7 @@ smoke-coredump:
 # Poll/timer edge-semantics smokes (Linux ABI poll + timer areas)
 # ================================================================
 smoke-poll-edge:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -923,6 +974,7 @@ smoke-poll-edge:
 	fi
 
 smoke-timer-edge:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -949,6 +1001,7 @@ smoke-timer-edge:
 # Mount namespace smoke (unshare/setns CLONE_NEWNS + /proc/<pid>/ns/mnt)
 # ================================================================
 smoke-mntns:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
