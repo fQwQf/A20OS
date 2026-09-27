@@ -294,6 +294,10 @@ typedef struct mount {
     char            opts[256];      /* mount options */
     vnode_t        *root;           /* root vnode of this mount */
     void           *fs_data;
+    /* Number of mount namespaces whose table still holds this entry.  1 for a
+     * namespace-private mount.  The filesystem teardown runs only when the
+     * last namespace drops it; VFS_MOUNT_NS_SHARED marks the shared case. */
+    int             ns_users;
 } mount_t;
 
 #define VFS_MOUNT_RDONLY 0x1
