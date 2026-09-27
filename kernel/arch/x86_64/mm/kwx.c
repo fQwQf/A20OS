@@ -48,17 +48,27 @@ static uint64_t *x86_kwx_pd(vaddr_t va)
 static uint64_t *x86_kwx_split_pmd(vaddr_t va)
 {
     uint64_t *pd = x86_kwx_pd(va);
-    if (!pd)
+    if (!pd) {
+        kerr("[KWX] split_pmd: no PD for va=0x%lx vpn2=%u pdpt=0x%lx\n",
+             (unsigned long)va, arch_pt_vpn(va, 2),
+             (unsigned long)boot_pdpt_hh[arch_pt_vpn(va, 2)]);
         return NULL;
+    }
     uint64_t *slot = &pd[arch_pt_vpn(va, 1)];
     uint64_t e = *slot;
     if ((e & PTE_V) && !(e & PTE_PS))
         return arch_pte_to_ptr(e);
-    if (!(e & PTE_V))
+    if (!(e & PTE_V)) {
+        kerr("[KWX] split_pmd: hole at va=0x%lx vpn1=%u pmd=0x%lx\n",
+             (unsigned long)va, arch_pt_vpn(va, 1), (unsigned long)e);
         return NULL;
+    }
     uint64_t *pt = frame_alloc();
-    if (!pt)
+    if (!pt) {
+        kerr("[KWX] split_pmd: frame_alloc failed for va=0x%lx pmd=0x%lx\n",
+             (unsigned long)va, (unsigned long)e);
         return NULL;
+    }
     paddr_t base = arch_pte_addr(e);
     for (int i = 0; i < 512; i++)
         pt[i] = arch_pte_leaf(base + (paddr_t)i * PAGE_SIZE, PTE_R | PTE_W);
@@ -129,7 +139,15 @@ void arch_kernel_wx_finalize(void)
      * 旁路构建完整，再用一次写入替换 PDPT 项。整个过程中现有映射始终
      * 有效——若先装 NX 大页再拆块，TLB miss 会在 NX 的 .text 上取指
      * 故障，trap 处理程序同样 NX，直接三连环复位。 */
-    for (int slot = 0; slot < 4; slot++) {
+    /* Rebuild every present 1 GiB slot, not just the first four.  The
+     * buddy allocator can hand out order-7 (2 MiB) pages anywhere in the
+     * direct map, and a host may well have usable RAM above 4 GiB (QEMU's
+     * default 8 GiB does).  A module landing in a slot that was left as a
+     * 1 GiB page cannot be split by x86_kwx_split_pmd(), so
+     * arch_kwx_module_protect() fails and *every* drvmod fails to load --
+     * which costs virtio-blk, hence the rootfs, hence the boot.  Entries
+     * that are absent or already 4 KiB-granular are skipped below. */
+    for (int slot = 0; slot < 512; slot++) {
         uint64_t e = boot_pdpt_hh[slot];
         if (!(e & PTE_V) || !(e & PTE_PS))
             continue;
