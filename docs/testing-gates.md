@@ -162,6 +162,12 @@
 - **What it checks**: `smoke-native-fs-all` 在 QEMU 中挂四块 scratch 盘（bus.2/4/6/7），由 `/bin/ufs_all_test` 逐后端拉起 `/bin/ufsd-rv` 并执行 POSIX 序列：FAT 预置读回+写读+删除；ext4 预置读回+8 KiB 图案写读+rename+删除；iso9660 小写名嵌套读取；ntfs 只读语义（create 必须失败）。内核侧 uxfs 代理把 vnode ops 经 Channel 转发给服务，块 IO 走受控 fs_block_io。见 [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)。
 - **When it fails**: 查看 `.kernel-build/smoke/native-fs-all-riscv64.log` 中各 `UXFS_*` 标记与 `[fs]` 前缀的 FS 内部日志；确认镜像目标（`ufs-scratch.img`/`ufs-ext4.img`/`ufs-iso.img`/`ufs-ntfs.img`)已生成且盘位未占用 bus.3/bus.5（用户驱动预留）。
 
+### SIOCGIFCONF 与 per-interface getter（Linux ABI sockets 区域）
+- **How to run**: `make smoke-net-iface`（同时被 `smoke-network-suite` 覆盖，因为 `net_iface_test` 已列入 `network_suite` 的用例表）
+- **What it checks**: `user/cmds/net/net_iface_test.c` 二十项。SIOCGIFCONF 的空 `ifc_buf` 尺寸查询（必须是整条目数，估算值会让调用方反复扩容）、按 `struct ifreq` 步长填充、行数与查询值一致、接口名 NUL 终止、每行是 `AF_INET` sockaddr、不足一个条目的缓冲返回 0 且不写入、单条目缓冲不溢出且只返回整条目、非 IPv4 族请求返回空列表、负 `ifc_len` 返回 EINVAL；再用枚举出的名字回灌 SIOCGIFADDR / SIOCGIFFLAGS，并确认未知接口名被拒。
+- **为什么必须有它**: getifaddrs()、ifconfig 与 busybox `ip` 全部建立在 SIOCGIFCONF 上，而 per-interface getter 在没有枚举手段之前不可达。SIOCGIFCONF 此前是"派发但未实现"（-ENOTTY），该区域没有任何运行门禁，因此下面两个真实缺陷是写这个门禁时才暴露的。
+- **When it fails**: 查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行；对照 `kernel/net/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
+
 ### poll / timer 边界语义（Linux ABI poll 与 timer 区域）
 - **How to run**: `make smoke-poll-edge`、`make smoke-timer-edge`
 - **What it checks**: `poll_edge.c` 十二组（poll 超时边界与 POLLNVAL/HUP/ERR、select 语义与结果集剪枝、ppoll 超时与 sigsetsize/负时间 EINVAL、epoll 参数校验、嵌套 epoll 的 ELOOP 环路拒绝、dup 共享 interest list、ET/LT、EPOLLONESHOT、HUP+数据、epoll_pwait2 亚毫秒向上取整、eventfd 计数/信号量/溢出边沿）；`timer_edge.c` 十二组（timer_create 的 clockid 与 sigev 校验、settime/gettime 剩余时间、TIMER_ABSTIME、overrun 计数、delete 后不再投递、timerfd 基础语义、TFD_TIMER_CANCEL_ON_SET、itimer REAL/VIRTUAL/PROF 实际投递、clock_nanosleep 相对与 ABSTIME、EINTR + remaining）。这两组是把覆盖表 poll/timer 区域提升到 `full` 的依据（`nanosleep` 的 restart 语义仍是记录在案的 partial）。

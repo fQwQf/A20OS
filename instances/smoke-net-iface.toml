@@ -1,0 +1,28 @@
+# SIOCGIFCONF / SIOCGIF* runtime gate.
+#
+# The SIOCGIF* area had no runtime coverage: SIOCGIFCONF was previously
+# dispatched-but-unimplemented (-ENOTTY), so getifaddrs(), ifconfig and busybox
+# `ip` were all broken and the per-interface getters were unreachable. The
+# kernel side now implements it, and this instance is the gate that keeps it
+# working.
+#
+# The default QEMU flags already attach a virtio-net on bus 4, so an interface
+# exists as soon as the stack comes up; enumeration needs no IP configuration,
+# which is why this instance sets no a20.* kernel arguments.
+name = "smoke-net-iface"
+description = "RISC-V 64 SIOCGIFCONF enumeration and per-interface getter gate"
+arch = "riscv64"
+abi = "linux"
+
+[net]
+# Claim no host ports. The Makefile defaults NET_HOSTFWD to hostfwd on 5555, but
+# this gate is serial-only and needs no forwarding; without this the run dies
+# with a confusing "could not set up host forwarding rule" whenever anything
+# else on the host happens to hold that port.
+hostfwd = []
+
+[test]
+timeout = "60s"
+input_delay = 10
+commands = ["net_iface_test", "poweroff"]
+expect = ["NET_IFACE: PASS"]
