@@ -382,16 +382,21 @@ static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst, uint32_t index,
     return 0;
 }
 
-/* Fetch the raw capset blob (VIRTIO_GPU_CMD_GET_CAPSET) into buf.  Kept for
- * the virgl 3D path; currently unused, so silence -Wunused-function. */
-static int __attribute__((unused))
-virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t index,
-                      uint32_t version, void *buf, size_t bufsz)
+/* Fetch the raw capset blob (VIRTIO_GPU_CMD_GET_CAPSET) into buf.  Backs
+ * DRM_IOCTL_VIRTGPU_GET_CAPS, which is how the capset reaches userspace.
+ *
+ * hdr.ctx_id must name a live context: the host answers
+ * VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER (0x1205) when it is 0, which is what
+ * a zeroed request struct would otherwise send. */
+static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t ctx_id,
+                                 uint32_t index, uint32_t version,
+                                 void *buf, size_t bufsz)
 {
     struct virtio_gpu_get_capset req ALIGNED(64);
     uint8_t resp[sizeof(struct virtio_gpu_ctrl_hdr) + 4096] ALIGNED(64);
     memset(&req, 0, sizeof(req));
     req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
+    req.hdr.ctx_id = ctx_id;
     req.capset_index = index;
     req.capset_version = version;
     size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + bufsz;
@@ -399,11 +404,22 @@ virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t index,
         rsz = sizeof(resp);
     /* The capset blob follows the response header; use a larger response
      * buffer than the fixed command slot can hold. */
-    if (virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, rsz) < 0)
-        return -1;
+    int rc = virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, rsz);
+    if (rc < 0) {
+        kinfo("[GPU] get_capset: send_cmd_big failed rc=%d\n", rc);
+        return rc;
+    }
     struct virtio_gpu_resp_capset *cr = (struct virtio_gpu_resp_capset *)resp;
-    if (cr->hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
+    if (cr->hdr.type != VIRTIO_GPU_RESP_OK_CAPSET) {
+        uint32_t info_id = 0, info_ver = 0, info_size = 0;
+        int info_rc = virtio_gpu_get_capset_info(inst, index, &info_id,
+                                                 &info_ver, &info_size);
+        kinfo("[GPU] get_capset: resp=0x%x want=0x%x | sent ctx=%u idx=%u ver=%u"
+              " | host idx=%u -> id=%u ver=%u size=%u (rc=%d)\n",
+              cr->hdr.type, VIRTIO_GPU_RESP_OK_CAPSET, ctx_id, index, version,
+              index, info_id, info_ver, info_size, info_rc);
         return -1;
+    }
     size_t copy = rsz - sizeof(struct virtio_gpu_ctrl_hdr);
     if (copy > bufsz)
         copy = bufsz;
@@ -778,12 +794,194 @@ static int virtio_gpu_resource_unref(virtio_gpu_inst_t *inst, uint32_t resource_
     return 0;
 }
 
+/* VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: hand the host the physical pages
+ * backing a resource.  Without this a 3D resource has no memory on the host
+ * side, so a submitted command stream would operate on nothing.  The command
+ * is variable-length (one mem_entry per page), hence the big send path. */
+static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
+                                              uint32_t resource_id,
+                                              const struct virtio_gpu_mem_entry *entries,
+                                              uint32_t nr_entries)
+{
+    if (!inst->virgl)
+        return -ENXIO;
+    if (!entries || nr_entries == 0)
+        return -EINVAL;
+
+    size_t body = sizeof(struct virtio_gpu_resource_attach_backing) +
+                  (size_t)nr_entries * sizeof(struct virtio_gpu_mem_entry);
+    if (body > inst->big_req_cap) {
+        uint8_t *nb = kmalloc(body);
+        if (!nb)
+            return -ENOMEM;
+        if (inst->big_req)
+            kfree(inst->big_req);
+        inst->big_req = nb;
+        inst->big_req_cap = body;
+    }
+
+    struct virtio_gpu_resource_attach_backing *hdr =
+        (struct virtio_gpu_resource_attach_backing *)inst->big_req;
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    hdr->resource_id = resource_id;
+    hdr->nr_entries = nr_entries;
+    memcpy(inst->big_req + sizeof(*hdr), entries,
+           (size_t)nr_entries * sizeof(*entries));
+    arch_dma_sync_for_device(inst->big_req, body);
+
+    mutex_lock(&inst->command_lock);
+    if (inst->big_resp_cap < sizeof(struct virtio_gpu_ctrl_hdr)) {
+        uint8_t *nb = kmalloc(sizeof(struct virtio_gpu_ctrl_hdr));
+        if (!nb) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
+        if (inst->big_resp) kfree(inst->big_resp);
+        inst->big_resp = nb;
+        inst->big_resp_cap = sizeof(struct virtio_gpu_ctrl_hdr);
+    }
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)inst->big_resp;
+    memset(resp, 0, sizeof(*resp));
+
+    uint16_t s0 = 0, s1 = 1;
+    inst->desc[s0].addr  = va_to_pa(inst->big_req);
+    inst->desc[s0].len   = (uint32_t)body;
+    inst->desc[s0].flags = VIRTQ_DESC_F_NEXT;
+    inst->desc[s0].next  = s1;
+    inst->desc[s1].addr  = va_to_pa(resp);
+    inst->desc[s1].len   = (uint32_t)sizeof(*resp);
+    inst->desc[s1].flags = VIRTQ_DESC_F_WRITE;
+    inst->desc[s1].next  = 0;
+    arch_dma_sync_for_device(inst->desc, sizeof(virtq_desc_t) * 2);
+    arch_dma_sync_for_device(resp, sizeof(*resp));
+
+    arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
+    uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
+    uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
+    inst->avail.ring[avail_slot] = s0;
+    wmb();
+    inst->avail.idx++;
+    wmb();
+    arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
+    inst->vt.write32(&inst->vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+    mb();
+
+    volatile virtq_used_t *used = &inst->used;
+    uint32_t spins = 100000000U;
+    int completed = 0;
+    while (spins--) {
+        arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+        if (used->idx != used_before) { completed = 1; break; }
+        arch_cpu_relax();
+        if ((spins & 0xffffU) == 0 && proc_current())
+            proc_yield();
+    }
+    if (!completed) {
+        mutex_unlock(&inst->command_lock);
+        return -EIO;
+    }
+    uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
+    arch_dma_sync_for_cpu(resp, sizeof(*resp));
+    int ok = (used->ring[ring_idx].id == s0) &&
+             (resp->type == VIRTIO_GPU_RESP_OK_NODATA);
+    uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
+    if (!inst->vt.legacy && isr)
+        inst->vt.write32(&inst->vt, VIRTIO_MMIO_INTERRUPT_ACK, isr);
+    inst->last_used = used->idx;
+    inst->desc_idx = 0;
+    mutex_unlock(&inst->command_lock);
+    return ok ? 0 : -EIO;
+}
+
+static int gpu_capset_info(struct device *dev, uint32_t index,
+                           uint32_t *id, uint32_t *max_version, uint32_t *max_size)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_get_capset_info(inst, index, id, max_version, max_size);
+}
+
+static int gpu_get_capset(struct device *dev, uint32_t ctx_id, uint32_t index,
+                          uint32_t version, void *buf, size_t len)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_get_capset(inst, ctx_id, index, version, buf, len);
+}
+
+static int gpu_resource_attach_backing(struct device *dev, uint32_t resource_id,
+                                       const struct virtio_gpu_mem_entry *entries,
+                                       uint32_t nr_entries)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_resource_attach_backing(inst, resource_id, entries, nr_entries);
+}
+
+static int gpu_ctx_create(struct device *dev, uint32_t ctx_id, uint32_t context_init,
+                          const char *name, size_t nlen)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_ctx_create(inst, ctx_id, context_init, name, nlen);
+}
+
+static int gpu_ctx_destroy(struct device *dev, uint32_t ctx_id)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_ctx_destroy(inst, ctx_id);
+}
+
+static int gpu_res_create_3d(struct device *dev, uint32_t ctx_id,
+                             uint32_t resource_id, uint32_t target, uint32_t format,
+                             uint32_t bind, uint32_t width, uint32_t height,
+                             uint32_t depth, uint32_t array_size,
+                             uint32_t last_level, uint32_t nr_samples, uint32_t flags)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_resource_create_3d(inst, ctx_id, resource_id, target, format,
+                                         bind, width, height, depth, array_size,
+                                         last_level, nr_samples, flags);
+}
+
+static int gpu_res_unref(struct device *dev, uint32_t resource_id)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_resource_unref(inst, resource_id);
+}
+
+static int gpu_submit_3d(struct device *dev, uint32_t ctx_id,
+                         const void *cmdbuf, size_t len)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_submit_3d(inst, ctx_id, cmdbuf, len);
+}
+
 static const gpu_dev_ops_t gpu_ops = {
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
     .flush    = gpu_flush,
     .ioctl    = gpu_ioctl,
     .get_edid = gpu_get_edid,
+    .get_capset = gpu_get_capset,
+    .capset_info = gpu_capset_info,
+    .resource_attach_backing = gpu_resource_attach_backing,
+    .ctx_create = gpu_ctx_create,
+    .ctx_destroy = gpu_ctx_destroy,
+    .resource_create_3d = gpu_res_create_3d,
+    .resource_unref = gpu_res_unref,
+    .submit_3d = gpu_submit_3d,
 };
 
 static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {

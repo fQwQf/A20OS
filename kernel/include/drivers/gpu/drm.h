@@ -73,6 +73,59 @@
  * GBM still issues it while probing, so it must not be left as a hole. */
 #define DRM_IOCTL_MODE_GETFB2           0xc04864caUL
 
+/* ---- virtio-gpu 3D UAPI (include/uapi/drm/virtgpu_drm.h) ----------------
+ *
+ * This is the interface Mesa's virtio_gpu_dri.so actually speaks.  It is NOT
+ * the legacy DRM_IOCTL_VIRGL_* family (command letter 'A'); that one is unused
+ * by modern Mesa.  Commands sit at DRM_COMMAND_BASE + n, type letter 'd'.
+ * Numbers below were derived from the kernel uapi header and checked against
+ * the _IOWR encoding; see docs/graphics/gpu-3d-roadmap.md section 1.
+ */
+#define DRM_VIRTGPU_MAP                  0x40 + 0x01
+#define DRM_VIRTGPU_EXECBUFFER           0x40 + 0x02
+#define DRM_VIRTGPU_GETPARAM             0x40 + 0x03
+#define DRM_VIRTGPU_RESOURCE_CREATE      0x40 + 0x04
+#define DRM_VIRTGPU_RESOURCE_INFO        0x40 + 0x05
+#define DRM_VIRTGPU_TRANSFER_FROM_HOST   0x40 + 0x06
+#define DRM_VIRTGPU_TRANSFER_TO_HOST     0x40 + 0x07
+#define DRM_VIRTGPU_WAIT                 0x40 + 0x08
+#define DRM_VIRTGPU_GET_CAPS             0x40 + 0x09
+#define DRM_VIRTGPU_RESOURCE_CREATE_BLOB 0x40 + 0x0a
+#define DRM_VIRTGPU_CONTEXT_INIT         0x40 + 0x0b
+
+#define DRM_IOCTL_VIRTGPU_MAP            0xc0106441UL
+#define DRM_IOCTL_VIRTGPU_EXECBUFFER     0xc0406442UL
+#define DRM_IOCTL_VIRTGPU_GETPARAM       0xc0106443UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE 0xc0386444UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_INFO  0xc0106445UL
+#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST 0xc02c6446UL
+#define DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST   0xc02c6447UL
+#define DRM_IOCTL_VIRTGPU_WAIT           0xc0086448UL
+#define DRM_IOCTL_VIRTGPU_GET_CAPS       0xc0186449UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB 0xc030644aUL
+#define DRM_IOCTL_VIRTGPU_CONTEXT_INIT   0xc010644bUL
+
+/* VIRTGPU_PARAM_* queried through DRM_IOCTL_VIRTGPU_GETPARAM.  Mesa asks for
+ * these before anything else and abandons the device if the answers are
+ * wrong, so they are the cheapest high-value thing to get right. */
+#define VIRTGPU_PARAM_3D_FEATURES            1
+#define VIRTGPU_PARAM_CAPSET_QUERY_FIX       2
+#define VIRTGPU_PARAM_RESOURCE_BLOB          3
+#define VIRTGPU_PARAM_HOST_VISIBLE           4
+#define VIRTGPU_PARAM_CROSS_DEVICE           5
+#define VIRTGPU_PARAM_CONTEXT_INIT           6
+#define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs   7
+#define VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME    8
+
+#define VIRTGPU_EXECBUF_FENCE_FD_IN     0x01
+#define VIRTGPU_EXECBUF_FENCE_FD_OUT    0x02
+#define VIRTGPU_EXECBUF_RING_IDX        0x04
+#define VIRTGPU_EXECBUF_FLAGS \
+    (VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT | \
+     VIRTGPU_EXECBUF_RING_IDX | 0)
+
+#define VIRTGPU_WAIT_NOWAIT 1
+
 /* Capability ids for DRM_IOCTL_GET_CAP.  These are libdrm's legacy
  * DRM_CAP_* numbering, which is *not* the same order as the newer
  * DRM_CAP_* in include/uapi/drm/drm.h -- verified against

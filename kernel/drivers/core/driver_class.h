@@ -14,6 +14,7 @@
 
 struct device;
 struct audio_dev_ops;
+struct virtio_gpu_mem_entry;
 
 #define CLASS_DEVICE_NAME_MAX 32
 
@@ -129,6 +130,28 @@ typedef struct gpu_dev_ops {
      * Returns the EDID length (>=128) or a negative errno when the device
      * has no EDID source. */
     int     (*get_edid)(struct device *dev, uint8_t *buf, size_t cap);
+    /* 3D (virgl) transport.  These take kernel-built arguments, not user
+     * pointers, so they cannot go through ioctl()'s copy_from_user path.
+     * capset_buf/len fetch the host capability blob; attach_backing hands
+     * the host physical pages backing a 3D resource. */
+    int     (*get_capset)(struct device *dev, uint32_t ctx_id, uint32_t index,
+                          uint32_t version, void *buf, size_t len);
+    int     (*capset_info)(struct device *dev, uint32_t index,
+                           uint32_t *id, uint32_t *max_version, uint32_t *max_size);
+    int     (*resource_attach_backing)(struct device *dev, uint32_t resource_id,
+                                       const struct virtio_gpu_mem_entry *entries,
+                                       uint32_t nr_entries);
+    int     (*ctx_create)(struct device *dev, uint32_t ctx_id, uint32_t context_init,
+                          const char *name, size_t nlen);
+    int     (*ctx_destroy)(struct device *dev, uint32_t ctx_id);
+    int     (*resource_create_3d)(struct device *dev, uint32_t ctx_id,
+                                  uint32_t resource_id, uint32_t target, uint32_t format,
+                                  uint32_t bind, uint32_t width, uint32_t height,
+                                  uint32_t depth, uint32_t array_size,
+                                  uint32_t last_level, uint32_t nr_samples, uint32_t flags);
+    int     (*resource_unref)(struct device *dev, uint32_t resource_id);
+    int     (*submit_3d)(struct device *dev, uint32_t ctx_id,
+                         const void *cmdbuf, size_t len);
 } gpu_dev_ops_t;
 
 typedef struct audio_dev_ops audio_dev_ops_t;
