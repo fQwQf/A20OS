@@ -18,6 +18,7 @@ tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:123
 tools/a20 test smoke-riscv64              # 跑一个冒烟测试实例
 tools/a20 flash stm32f103-xuanwu          # 构建固件并经 OpenOCD 烧录开发板
 tools/a20 package vbox-iso-x86_64         # 构建并组装发布产物（ISO/UEFI 镜像/SD 卡/发布件）
+tools/a20 resources                     # 查看实例运行所依据的宿主资源预算
 tools/a20 build qemu-riscv64 -- -j8       # 只构建；`--` 后参数透传给 make
 tools/a20 show-vars qemu-riscv64-smp4     # 查看实例推导出的 make 变量
 tools/a20 check                           # 校验全部实例（CI 门禁同款）
@@ -26,6 +27,8 @@ tools/a20 check-flash-backends            # 校验烧录后端注册表并与 ma
 ```
 
 实例参数既可以是 `instances/` 下的名字（`qemu-riscv64`），也可以是任意 TOML 文件路径。`--dry-run` 打印将执行的 make/QEMU 命令而不执行。
+
+`run` / `debug` / `test` 在启动 guest 前会做宿主资源预检，不足则**等待**而不是硬启动——见下文。
 
 需要 Python ≥ 3.11（只用标准库，无第三方依赖）。
 
@@ -163,6 +166,38 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`ramfs_user`、`driver_deployment` 都有架构白名单，写错会在编译前被拒绝。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
+
+## 宿主资源预检
+
+`run` / `debug` / `test` 是 a20 唯一几种失败方式不是非零退出码、而是"把宿主机搞死"的动作：QEMU 在可用内存不足时申请 4 GiB，结果由 OOM killer 决定谁死，而被杀的通常不是你在调试的那个进程。所以这三个动作在启动 guest 前先做预检，**资源不足时等待到释放**，而不是硬上。
+
+`tools/a20 resources` 打印当前预算：
+
+```text
+memory available : 25672 MiB (+1024 MiB reserved per run)
+cpu              : 16 online, load 5.3
+guest slots      : 4 free of 4 (0 running)
+disk free        : 42944 MiB (floor 2048 MiB per run)
+wait timeout     : forever
+```
+
+需求从实例自身字段推导：guest 内存取 `machine.memory`（缺省 1G，与 Makefile 的 `QEMU_MEMORY` 一致），vCPU 取 `machine.smp`，磁盘取 `[rootfs]` 声明的各镜像大小之和。
+
+两个测量点容易做错，代码里都标了原因：
+
+- **可用内存必须取 `MemAvailable`，不能取 `free`。** `free` 不算可回收的 page cache，所以在一台其实很空闲的机器上它常常只有几百 MiB（本机就是 365 MiB，而 `MemAvailable` 是 25 GiB）。用 `free` 的门禁会永远等下去。
+- **空闲的 vCPU 不出现在 load average 里。** 所以 load 单独无法判断"另一个 guest 是否已经占住了这台机器想要的 CPU"，并发数因此单独统计（扫 `/proc` 数 `qemu-system-*`，不用 pgrep）。
+
+`--no-wait` 改为立即失败，`--wait-timeout SEC` 限定等待时长。预算可用环境变量覆盖，CI 机器余量不同不必改代码：
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `A20_RESERVE_MEM_MB` | 1024 | 每次运行额外预留（覆盖构建本身与宿主自身） |
+| `A20_MAX_CONCURRENT` | CPU 数 / 4 | 同时允许的 guest 数 |
+| `A20_WAIT_TIMEOUT` | 0（无限） | 等待上限秒数 |
+| `A20_MIN_DISK_MB` | 2048 | 磁盘需求的下限 |
+
+等待期间只在**缺项种类**变化时播报，另有 30 秒心跳，因此长时间等待不会每 5 秒刷一行。
 
 ## 冒烟测试实例
 
