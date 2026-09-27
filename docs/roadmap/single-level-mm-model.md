@@ -1,0 +1,211 @@
+# 单级内存模型迁移（MM_AS_MODEL）
+
+本文记录把 A20OS 的内存管理从**两级模型**（软件级区间抽象 VMA + 硬件页表，
+两者必须保持一致）迁移到 **CortenMM 式单级模型**的目标设计、逐特性结论、
+分阶段计划，以及**明确不做**的部分。
+
+参考：J. Zhang 等，*CortenMM: Efficient Memory Management with Strong
+Correctness Guarantees*，SOSP '25（DOI 10.1145/3731569.3764836）。
+参考实现：<https://github.com/TELOS-syslab/CortenMM-Artifact>（Rust / Asterinas）。
+
+代码位置：`kernel/include/mm/pt.h`、`kernel/mm/pt.c`。
+契约：`MM_AS_MODEL`（`kernel/include/mm/vm.h`）、`MM_AS_CURSOR_ONLY_ENTRY`
+（`kernel/include/mm/pt.h`）。
+
+---
+
+## 1. 为什么要迁移
+
+两级模型要求每个操作同时调和两个差异极大的数据结构：区间树适合表达
+on-demand paging 这类高级语义、且与具体 MMU 无关，代价是必须正确且高效地
+同步它与页表。论文的观察是这两个目标已经基本消失：
+
+* x86 / ARM / RISC-V 都使用基于多级 radix 树的页表，架构差异本来就用
+  C 宏（我们是 `arch_pt_*` 系列 inline）掩盖，不需要另一个抽象层。
+* 高级语义确实需要 MMU 之外的状态，但那不构成另起一层的理由。
+
+对 A20OS 而言，动机**不是论文的可伸缩性收益**。当前 `mm->lock` 已经把
+地址空间的全部变更串行化，可伸缩性尚未到手。真实的动机是正确性与
+结构性债务：`mm_vma_defer()`（`kernel/mm/vma.c`）存在的原因仅仅是区间世界
+需要在页表世界里睡眠（`vma_release()` 可能触发 VFS 回写），两种粒度的
+锁需求打架。可伸缩性是这套改造的附带收益，且必须**实测**才算数。
+
+## 2. 目标模型
+
+```
+                 ┌─────────────────────────────────────────┐
+   映射状态 ────▶ │ per-PTE 元数据数组（权威）              │
+   (唯一真相)     │ 挂在覆盖该页的页表页描述符 pt_meta_t 上   │
+                 └─────────────────────────────────────────┘
+                              ▲
+   事务式接口 ────▶ mm_addrspace_lock(range) → mm_cursor_t
+                     query / map / mark / unmap（原子应用，析构时逆序解锁）
+                              ▲
+   写者互斥 ────▶ 页表页锁（MCS 队列锁），不相交区间不串行
+```
+
+一个状态字节：
+
+| 位 | 含义 |
+|---|---|
+| `[7:4]` | class：`INVALID` / `ANON_VIRT` / `ANON_MAPPED` / `ANON_SHARED` / `FILE_PRIVATE` / `FILE_SHARED` / `VMO` / `SWAPPED` / `PT_NODE` |
+| `[3]` | COW `shared` 位（多映射引用同一帧） |
+| `[2:0]` | 有效权限 R/W/X |
+
+已映射页的物理帧**不在**元数据里重复存放：它在 PTE 中，引用计数在
+`pfa.meta[].refcount`。元数据只承载 MMU 无法表达、而 fault 必须知道的信息。
+
+### 2.1 为什么状态不能放进 PTE 的软件位
+
+参考实现把 `Status` 编码进 PTE 的 `paddr` 字段并配 `has_map = false`。这条路
+在 A20OS 上被架构表直接否掉：
+
+| 架构 | 根层可用软件位 | 结论 |
+|---|---|---|
+| riscv32 (Sv32) | 0（PPN 占 bit10–31） | 根层放不下任何 payload |
+| arm32 | 0（8 位索引 + 30 位 PPN） | 同上；且 L0 有 4096 项，16 B/项的元数据超过页本身 |
+| loongarch64 / la32r | 0（`PTE_R/W/X` 映射到 `LA_PTE_MAT1` 内存属性位） | 会破坏 MA |
+| aarch64 | 55–58 已被 LEAF/W/X/COW 占用，且表描述符与叶子描述符位布局不同 | 非均匀 |
+| riscv64 / x86_64 / ppc64le | 充裕 | 可行但不统一 |
+
+参考实现的 `Status::MASK = ((1 << 39) - 1) / PAGE_SIZE` 隐含假设**整棵页表
+树每一层都有统一的约 27 位 payload 预算**，A20OS 没有这个前提。此外现有的
+`PTE_SWAP` 已经在逐架构窃取硬件有语义的位（riscv64 bit9、aarch64 = `PTE_LEAF`
+bit55、x86_64 = `PTE_LEAF` bit10、ppc64le bit1、arm32 bit7、la64 = `PTE_LEAF`
+bit11）——通用状态编码会把这一类损坏风险成倍放大。
+
+### 2.2 描述符可达性：内联进 `frame_meta_t`
+
+`pfa.meta` 已经是启动时分配、常驻直映、按 PPN 索引的连续数组，这正是论文的
+描述符区域。描述符指针放进 `frame_meta_t` 中**仅在空闲链表上有效**的
+`prev/next` 联合体，因此 `sizeof(frame_meta_t)` 仍是 16 字节——单级模型对帧表
+本身零额外开销（已用 `_Static_assert` 钉住）。`pt_meta_t` 块按页表页按需分配，
+随该页表页释放。
+
+拒绝 slab 侧表：ADV 协议的无锁遍历需要在最热路径上取描述符（读 `stale`、
+取 covering node 锁），一次索引加载胜过哈希探测。
+
+### 2.3 协议选择：ADV，不做 RW
+
+论文的 `CortenMMrw` 在遇到任何非 `PageTable` 子节点时 `break`，**要求页表
+完全填充**。A20OS 的 `pt_walk()` 是惰性分配中间节点的，而完全填充的代价不可
+接受：4 级 / 512 项架构上 1 GB 用户虚拟地址空间需要 512 个 L1 页 = 每个地址
+空间 2 MB 纯脚手架，再乘以数百个进程；riscv32 / la32r 只有 2 级。
+`CortenMMadv` 的 `try_traverse_and_lock_subtree_root` 处理的正是惰性情形
+（锁住父节点、分配缺失的子节点、下降）。
+
+MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
+
+### 2.4 一个必须现在设计进去的约束：共享内核半
+
+`pt_map_kernel()` 把 `boot_pgdir[ARCH_PT_USER_END..]` 的 PTE 字复制进每个进程
+根页表，所以**内核半的整棵子树在所有地址空间之间是同一批物理页**。写锁它会
+让全系统串行；释放它是系统级 use-after-free。因此
+`mm_addrspace_lock()` 在**代码层面**拒绝任何触及该半区的区间，而不是靠注释。
+内核映射永远不经由 cursor 建立。
+
+## 3. 论文未覆盖的特性的逐项结论
+
+| 特性 | 结论 | 成本 / 风险 |
+|---|---|---|
+| **brk** | **残留区间结构**。`mm->brk` / `start_brk` 本来就是 `mm_struct_t` 标量而非 VMA。把 `fault.c` 里第三个子句 `!mm_find_vma(...)` 换成"该区间内没有已映射状态"——比现在**更精确**。 | 低。真实风险：brk 收缩必须同时清元数据与 PTE；brk 增长不得覆盖 mmap。 |
+| **mseal** | **残留区间结构，非权威**。`mm_struct_t` 里的 `seal_range_t` 列表，在开启 cursor **之前**被查询。区间性就是它的语义。**不要假装它变成了逐页属性。** | 低成本，但你确实保留了一个区间结构。 |
+| **madvise DONTNEED/FREE** | **完全逐页**。开 cursor 遍历区间，`unmap()` 掉每个 class 为 Private/Shared/VMO 的页，置 `INVALID`。seal 检查作为前置门。 | 低。 |
+| **mlock 记账** | **残留区间**（今天就只是 `VM_LOCKED` / `locked_vm` 记账）。保留区间位，通过把它排除在 madvise/reclaim 之外来生效。P1 不加逐页 `Locked` 状态。 | 低。 |
+| **THP** | **P1–P6 作为无元数据的旁路**；P9 再建模。保留 `pt_map_huge` / `mm_demote_huge_page`，实现参考实现的 `split_if_mapped_huge`（`locking.rs:149`）以便 covering node 撞上 PMD 叶子时降级。 | **功能风险最高**。`ARCH_NO_PMD_LEAF` 已挡掉 3 个架构。 |
+| **NUMA 策略** | **免费，完全不动**。`mm/mempolicy.c` 是 *节点* 属性而非映射属性，从不查询 VMA 列表。 | 无。 |
+| **/proc maps + smaps** | **残留——这是诚实性关键**。maps 本质是区间视图。要么在逐页状态上重新实现区间合并（等于把论文要删的合并逻辑再写一遍），要么保留副本。**永久保留 VMA 列表作为派生、非权威的区间提示，由同一批 mutator 维护，由调试期双向一致性检查器校验。** | **VMA 列表不会消失。承认这一点。** |
+| **fork / 文件页 COW** | **逐页，而且模型在这里占优**。`pt_clone()` 变成"克隆页表 + 复制 cls/cow 数组 + DFS 标记所有用户叶子"。这**删掉**了 `mm_file_cache_mapping_get()`——它今天在**每一次私有文件叶子的 COW fault** 上做一次 `page_cache_get`（加锁 + 引用计数），只为回答"这是不是那个规范 cache 帧"。一个状态字节即可回答。 | **新失败面**：不能忘复制数组，不能重复引用计数。高风险。 |
+| **VMO（原生 ABI）** | **逐页，需新增 class**。`mm_lookup_vmo_region()` 回答的是区间问题（"这整段是不是同一个 VMO"）→ 保留 VMA 作其权威。新增 `VMO` class 供拆除决策使用。 | 低。 |
+| **swap** | **逐页，也是最干净的正确性收益**。`Status::SWAPPED` 消掉 `PTE_SWAP` 逐架构窃取硬件位，并消掉**六处先于 `PTE_V` 检查 `pte_is_swap()` 的顺序依赖**（`mm.c` 与 `fault.c` 中）。这些顺序是承重的，正是 cursor 重写最容易踩坏的东西。 | 代码量低、示范价值高。 |
+| **fault-around** | **存活，且更便宜**。4 页 = 1 次 cursor 而非 4 次页表遍历。`handle_file_fault` 的"放锁 → I/O → 重锁 → 重校验"编排变成"无锁做 I/O，然后**从元数据**重校验（`FILE_*` class + 偏移匹配）而不是从 VMA"。 | 中。LoongArch64 自己的注释指出私有 cache 叶子在并行 rustc 下已经会破坏动态符号——迁移时**不要**"统一" la64/x86_64 的 `direct_private` 路径。 |
+
+## 4. 分阶段计划
+
+**过渡态的调度规则**：cursor 拥有映射真相；VMA 列表拥有区间策略、资源引用
+（file_fd / vmo）与报告。这是下面各阶段能独立落地的原因。
+
+| # | 交付物 | 结束时成立的不变式 | 验证门 |
+|---|---|---|---|
+| **P0** ✅ | `pt_meta_t` 并入 `frame_meta_t`；`mm_pt_meta()`；`FRAME_F_PT` 审计 | 零可观测变化；`sizeof(frame_meta_t) == 16` | 7 个架构/NOMMU 构建；`pfa_audit_lists()` |
+| **P1** ✅ | 按页表页分配 `cls`/`cow`；`kernel/mm/mm.c` 每个页表写点同步元数据；**独立遍历页表与元数据并逐一比对的审计器**，挂在关机审计点 | *元数据 ≡ 页表状态，始终成立且机器可证* | `smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux`、`check-mm-lock-model`；实测审计全 0 |
+| **P2** | 让 fault 路径经由 cursor 写 PTE（仍在 `mm->lock` 之下） | 所有 PTE 写入只有一条代码路径 | 上述三个 smoke + `smoke-vfs-stress` |
+| **P3** | covering node 之上 DFS 预序锁全部后代；逆序释放 | 每次 cursor 都按预序加锁、逆序解锁 | 新 `check-mm-pt-lock-order`（释放序断言 + 计数器）；`smoke-mm-stress` @ `NR_CPUS=4` |
+| **P4** | `core/rcu.c`；`stale` + 重试；`pt_unmap` / `pt_unmap_leaf` / `pt_destroy_*` 中的 `frame_free(child)` 改为延迟释放 | 任何遍历都到不了的页表页不会被回收 | 新 `smoke-mm-pt-race`：N 线程大范围 unmap 同时 N 线程 fault |
+| **P5** | **从 fault 路径摘掉 `mm->lock`**，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`；新增"两线程不相交区间测临界区重叠"测试；`smoke-sched-stress`、`smoke-mm-stress` @ `NR_CPUS=4+` |
+| **P6** | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
+| **P7** | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
+| **P8** | 双向一致性检查器（P1 审计器覆盖反方向）；`MM_LOCK_MODEL` → `MM_AS_MODEL`；**同一提交内**更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
+| **P9** | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
+
+**P1 是整个计划里性价比最高的一步，且不可能搞坏启动**：它是影子状态、可机器
+验证，而且会找出你不知道自己有的 bug。
+
+## 5. 风险排序
+
+1. **页表页或帧在有 cursor 处于其子树内、或存在可抵达它的陈旧 TLB 项时被释放。**
+   这正是本项目历史上 `0x63636363` 与"进程退出 teardown 提前释放 VMO 帧"的
+   形状。P4 未落地前，`pt_unmap` / `pt_unmap_leaf` 里的 `frame_free(child)` 与
+   `pt_destroy_level` / `pt_destroy_user_recursive` 的递归释放**都无锁、无
+   TLB flush**。`mm_demote_huge_page` 先 `pt_unmap_leaf` 再 `frame_put`，中间
+   只有 `mm_tlb_hold_frame` 引用而非真正的 shootdown。
+2. **锁或释放共享内核半子树** → 全系统死锁或系统级 UAF。已在代码层面拒绝，但
+   P3 的 DFS 锁必须继承这条约束。
+3. **P5 收窄锁范围引入 TLB-IPI 死锁。** `vm.h` 的 `MM_LOCK_MODEL` 精确记录了
+   这条约束：远端 CPU 带中断关闭地自旋在 `mm->lock` 上，必须能退出该临界区
+   去响应 TLB IPI。一旦 fault 路径不再持有 `mm->lock`，"带 IRQ 关闭持有页表页
+   锁"就成了同一类死锁。**cursor 必须在派发远端 shootdown 之前释放所有锁**，
+   这正是 `mm_tlb_invalidate_finish` 现有形状。
+4. **文件映射 / COW 路径。** `handle_cow_fault_locked` 有三条按
+   `mm_file_cache_mapping_get` + `refcount` 区分的所有权规则；源码里那两段注释
+   是 `0x63636363` 事故的疤，编码了**特定顺序**（在 `pfa.lock` 下先更新 PTE、
+   再 `frame_put`）。把 page-cache 查找换成一次元数据读取会改变引用计数读取
+   相对 PTE 写入的**时序**。这些顺序必须逐字保留。
+5. **swap 的 PTE 检查顺序**（六处）。若 cursor 的 `query()` 只报"是否 present"，
+   swap-in 会被静默当成"未映射"。P7 的 `Status::SWAPPED` 是强制项。
+6. **元数据与 PTE 静默分叉**（P1 漏掉某个写点）。审计器是唯一防线，且必须在
+   `smoke-mm-stress` 构建里启用，而不是只在一个 debug 变体里。
+7. **loongarch32 的软件 TLB refill** 从异常处理器**异步无锁读 PTE**——这是任何
+   cursor 协议都保护不到的读者。在 refill 被纳入 RCU 读侧之前，**把 la32r 排除
+   在迁移范围之外**。
+8. **在 PTE 写入时把元数据标错类型**（只读别名 / NX 冲突）。注意 aarch64 上
+   `PTE_D == PTE_W`（bit 56），x86_64/loongarch64/arm32/la64 上
+   **`PTE_SWAP == PTE_LEAF`**——"叶子"标记就是"swap"标记。任何从零重建 flags
+   而不是保留旧字的地方都会破坏这个区分。
+
+## 6. 明确不承诺（不要声称）
+
+1. **"VMA 抽象已经没了。"** 没有。它永久降级为非权威区间索引，服务于
+   `/proc/{maps,smaps}` 与区间策略（brk、mseal、mlock）。声称已删除是最容易被
+   抓到的谎言。
+2. **"不相交区间并行执行。"** 在 **P5 落地并有实测之前**都不成立。
+3. **"大页已进入模型。"** P1–P6 期间 THP 是无元数据旁路。
+4. **"mseal 已成为逐页属性。"** 它仍是区间结构。
+5. **"arm32 与 armv7m-NOMMU 参与其中。"** `kernel/arch/arm32/mm/pgtbl.c` 有自己
+   的页表核心且 L0 有 4096 项（元数据开销超过页本身）；armv7m 是 `CONFIG_NOMMU`。
+   两者都留在同一套 `mm_*_locked` API 背后的旧路径上。*接口*是统一的，*引擎*
+   按架构组划分——这正是 `mm.c` 现有的 `#if ARCH_HAS_PGTABLE_OPS` 形态。
+   目标是 5 个 512 项的 64 位架构。
+6. **"loongarch32 参与其中。"** 软件 TLB refill 是无保护的异步读者。
+7. **"swap 已迁移。"** 除非 P7 落地**且** CI 里有 `CONFIG_SWAP=y` 构建。
+8. **"`/proc` maps 由 `Status` 派生。"** 它由 VMA 副本派生，并对照 `Status` 校验。
+
+**P1–P6 落地后可以诚实声称的**（在 5 个 512 项 64 位架构上）：单一权威的映射
+表示；它与旧 VMA 路径之间的机器可证等价；所有 PTE 变更经由一条 cursor 代码
+路径；所有写者互斥落在页表页锁上且释放顺序可证；任何页表页都不会在 grace
+period 内被回收；file/COW/swap/fault-around 的分派由逐页状态而非区间查询驱动。
+这是一个真实的结果，但它不等于"CortenMM 已移植"，两者相差约六周的工作量。
+
+## 7. 门禁
+
+`check-mm-lock-model` 依赖 `smoke-mm-stress` + `smoke-mm-fork-exec-race`，
+这两个是全部 9 个阶段的回归地板。当前它还额外 grep
+`MM_AS_CURSOR_ONLY_ENTRY`、`mm_pt_note_present|mm_pt_note_absent`、
+`mm_pt_audit_all`，以便门禁真正强制新模型而不是随实现一起腐化。
+
+关机时的 `MM-ASM` 审计行是事实记录而非断言：`pt_pages / entries / missing_meta
+/ present / absent / prot / cow / vma` 全部为 0 表示两个表示在整个工作负载上一致。
+
+**注意**：`smoke-mm-stress` 之类的门通过 grep `MM_STRESS: PASS` 判定，而该标记
+在关机审计之前打印，所以关机路径上的 panic 不会让门失败。审计行必须与 PASS
+标记一起检查。
