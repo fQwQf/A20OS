@@ -233,25 +233,35 @@ period 内被回收；file/COW/swap/fault-around 的分派由逐页状态而非�
 回退循环与 `mcs_unlock` 双减 per-CPU depth 导致同节点自死锁（LOCK-STALL
 报 `waiter==owner` 同址）。
 
-### 8.2 P5 实测：为何"不相交区间并行"尚未兑现
+### 8.2 P5 实测：并行性的有效基线（2026-09-28 修正）
 
-`mm_pt_scale` 基线（smp4，每线程每轮 mmap 新鲜区域以产生真实 demand fault）：
+> **本节此前的一版结论是错的，已作废并重写。** 原版在 riscv64/TCG 下测得
+> speedup=1.03x，据此断言"fault 被 mm->lock 串行化"。该测量无法区分**内核串行**
+> 与**环境串行**，而 riscv64 guest 跑在 x86_64 host 上只有 TCG、跨架构无可用的
+> 多线程 TCG，vCPU 本身即被串行化。
 
-```
-1T=0.807s  4T=3.137s   speedup=1.03x      ← 无并行
-```
+新增环境探针 `user/cmds/stress/cpu_scale.c`：纯整数计算、不碰内存、不碰任何
+内核锁。它给出该环境能否呈现并行性的上界：
 
-**原因已定位**：fault 路径仍在 `handle_demand_fault_access` 顶部持有
-地址空间级 `mm->lock`，而 fault 必须 `mm_find_vma()` 查 VMA（VMA 可被并发
-munmap 释放且无引用计数保护）。因此每个 fault 仍在这把全局锁上排队，无论
-它触及哪个页表节点——单级模型的并行语义被这把锁整体压制。
+| 配置 | cpu_scale（纯计算上限） | mm_pt_scale（真实 demand fault） |
+|---|---|---|
+| riscv64 / TCG / smp4 | **0.89x – 0.96x** | 1.03x（无效，无参考价值） |
+| x86_64 / **KVM** / smp4 | **3.93x** | **1.48x – 1.53x** |
 
-**一次失败但有价值的实验**：为"匿名写 fault 加一条不放 `mm->lock` 的快路径"
-（锁内只快照 VMA 字段值、锁外用 cursor 装 PTE、靠节点锁 + PTE-present 复查
-防重复映射）。实测**更慢**（1T 0.835s→1.423s，4T speedup 仍 ~1.0x）：快路径
-仍要取 `mm->lock` 查 VMA，故毫无并行收益，却多了一次 `pt_lock` 区间外的
-`pt_lookup_leaf` 与重复遍历。已回滚。该实验证明：**只要 fault 仍需查 VMA，
-"摘掉 mm->lock" 就得不到并行、只会加开销。**
+结论（以 KVM 为准）：
+
+* 环境本身能线性并行（3.93x），所以 x86_64/KVM 是唯一有效的并行性度量环境。
+* 真实 demand fault 工作负载只拿到 1.48x，相对环境上限损失约 2.4x —— 说明
+  fault 路径**确实**存在实质串行化，P5 值得做。
+* 但"串行化来自 mm->lock"这一归因**仍未被单独证实**：该工作负载每轮还要 mmap
+  新区域（`mmap` 本身要取 `mm->lock` 做区间分配与 VMA 插入），且每页 fault 都要
+  `pfa_alloc_page()` 走 buddy 的全局锁、以及整页 `memset`。在把这三项成本分离
+  之前，不能断言瓶颈就是 `mm->lock`。
+
+**因此本节修正后的结论是**：单级模型的并行优势在 A20OS 上**尚未兑现**
+（1.48x vs 环境上限 3.93x），P5 方向成立且值得继续，但需要先分离 mmap / buddy
+分配器 / 页清零这三项串行成本，才能确定瓶颈归因。P0–P4 的单级机制本身
+（per-PTE 状态、covering-node 页表锁、延迟回收）已完成并验证，与本结论不冲突。
 
 ### 8.3 P5 的真正前提：fault 必须能从 per-PTE 状态解析（P6）
 
