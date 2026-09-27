@@ -7,7 +7,8 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
-        check-component-registry check-flash-backend-registry check-manifests
+        check-component-registry check-flash-backend-registry check-manifests \
+        check-a20-tests
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
@@ -36,6 +37,13 @@ check-flash-backend-registry:
 check-manifests: check-instances check-instance-matrix check-component-registry \
                  check-flash-backend-registry
 	@echo "check-manifests: PASS"
+
+# Unit tests for the a20 toolchain itself (tools/tests/test_a20.py).  Stdlib
+# unittest, matching the tool's zero-dependency promise.  Runs from a checkout
+# with no submodules, same as the manifest gates.
+check-a20-tests:
+	@$(PYTHON) -m unittest discover --start-directory tools/tests --pattern 'test_*.py'
+	@echo "check-a20-tests: PASS"
 
 host-tests: $(HOST_TESTS_BIN)
 	@for t in $(HOST_TESTS_BIN); do \
