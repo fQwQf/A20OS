@@ -10,6 +10,7 @@
 #include "proc/proc_internal.h"
 #include "proc/cred.h"
 #include "proc/signal.h"
+#include "mm/pt.h"
 
 __attribute__((weak)) int64_t sys_set_thread_area(void *ptr) {
     task_t *t = proc_current();
@@ -777,6 +778,23 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
         kinfo("[SD] POWER_OFF entry");
         int audit = pfa_audit_lists();
         kinfo("[SD] audit errors=%d", audit);
+#if !defined(CONFIG_NOMMU) && defined(ARCH_HAS_PGTABLE_OPS)
+        /* MM_AS_MODEL: prove the per-PTE status and the hardware page tables
+         * agreed in every live address space across the whole run. */
+        {
+            mm_pt_audit_report_t rep;
+            mm_pt_audit_all(&rep);
+            kinfo("[MM-ASM] pt_pages=%lu entries=%lu missing_meta=%lu "
+                  "present=%lu absent=%lu prot=%lu cow=%lu vma=%lu\n",
+                  (unsigned long)rep.pt_pages, (unsigned long)rep.entries,
+                  (unsigned long)rep.missing_meta,
+                  (unsigned long)rep.present_mismatch,
+                  (unsigned long)rep.absent_mismatch,
+                  (unsigned long)rep.prot_mismatch,
+                  (unsigned long)rep.cow_mismatch,
+                  (unsigned long)rep.vma_mismatch);
+        }
+#endif
         firmware_shutdown();
     } else {
         return -EINVAL;
