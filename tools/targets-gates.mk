@@ -6,7 +6,8 @@ HOST_CFLAGS ?= -std=gnu99 -O2 -Wall -Wextra
 HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
-.PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix check-component-registry
+.PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
+        check-component-registry check-manifests
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
@@ -19,6 +20,13 @@ check-instance-matrix:
 
 check-component-registry:
 	@tools/a20 check-registry
+
+# Aggregate for the manifest-layer gates.  These are host-side, pure-Python and
+# arch-independent, so they are cheap enough to always run: instances/,
+# components/ and the Makefile must never drift apart.  Wired into CI as the
+# `manifest-gates` job.
+check-manifests: check-instances check-instance-matrix check-component-registry
+	@echo "check-manifests: PASS"
 
 host-tests: $(HOST_TESTS_BIN)
 	@for t in $(HOST_TESTS_BIN); do \
