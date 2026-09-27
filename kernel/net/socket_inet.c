@@ -289,6 +289,7 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     }
 
     net_lwip_ip_to_sockaddr(addr, port, e->addr, &e->addrlen);
+#if LWIP_IPV6
     if (ip_current_is_v6()) {
         e->has_pktinfo = 1;
         e->pktinfo_ifindex = ip_current_input_netif() ?
@@ -299,6 +300,7 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         e->has_tclass = 1;
         e->tclass = IP6H_TC(ip6_current_header());
     }
+#endif
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
@@ -338,6 +340,7 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
     }
 
     net_lwip_ip_to_sockaddr(addr, 0, e->addr, &e->addrlen);
+#if LWIP_IPV6
     if (ip_current_is_v6()) {
         e->has_pktinfo = 1;
         e->pktinfo_ifindex = ip_current_input_netif() ?
@@ -348,6 +351,7 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
         e->has_tclass = 1;
         e->tclass = IP6H_TC(ip6_current_header());
     }
+#endif
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
