@@ -27,6 +27,7 @@
 #include "core/version.h"
 #include "net/socket.h"
 #include "net/net_config.h"
+#include "net/lwip_stack.h"
 #include "drivers/core/riscv_iommu.h"
 
 #ifdef CONFIG_BOARD_LS2K1000
@@ -558,11 +559,6 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_NET_STATUS:
         net_format_status(buf, bufsz);
         break;
-    case PF_NET_DEV:
-        snprintf(buf, bufsz,
-                 "Inter-|   Receive                                                |  Transmit\n"
-                 " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n");
-        break;
     case PF_NET_TCP:
     case PF_NET_UDP:
         snprintf(buf, bufsz,
@@ -574,6 +570,12 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     case PF_NET_CONFIG:
         a20_net_config_format(buf, bufsz);
+        break;
+    case PF_NET_DEV:
+        a20_lwip_format_net_dev(buf, bufsz);
+        break;
+    case PF_ROUTE:
+        a20_lwip_format_route(buf, bufsz);
         break;
     case PF_CONFIG_GZ: {
         size_t n = sizeof(g_proc_config_gz) < bufsz ? sizeof(g_proc_config_gz) : bufsz;
@@ -1142,12 +1144,6 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
                  "    HI: 0\n TIMER: 0\n NET_TX: 0\n NET_RX: 0\n"
                  " BLOCK: 0\n IRQ_POLL: 0\n TASKLET: 0\n SCHED: 0\n"
                  " HRTIMER: 0\n RCU: 0\n");
-        break;
-    }
-    case PF_ROUTE: {
-        /* /proc/net/route-style header; no routes configured. */
-        snprintf(buf, bufsz,
-                 "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n");
         break;
     }
     case PF_ARP: {
