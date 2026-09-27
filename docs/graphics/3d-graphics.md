@@ -29,7 +29,7 @@
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
 | 命令流提交 | ⚠️ **往返已验证，语义未验证** | `EXECBUFFER accepted a 16 byte stream` 只证明命令流送到 host 并拿到应答；内核不解析命令流，因此**不证明渲染了任何东西**（[gpu-3d-roadmap.md §4.3](gpu-3d-roadmap.md)） |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号由内核 `virtgpu_drm.h` 推导并按 `_IOWR` 编码校验过，**未与 legacy `DRM_IOCTL_VIRGL_*` 混淆**（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
-| `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**；根因是本机 EGL 由 NVIDIA 主导，virglrenderer 取不到离屏 desktop GL context（[gpu-3d-roadmap.md §4.2](gpu-3d-roadmap.md)）。非内核缺陷 |
+| `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**。根因是宿主 `libvirglrenderer1 1.1.0` 太老（capset 仅 308 字节；现代 virgl 是数 KB），建不出 Mesa 25.2 需要的离屏 desktop GL context。四种 display×EGL 组合均失败，见 [gpu-3d-roadmap.md §4.2](gpu-3d-roadmap.md)。非内核缺陷 |
 | stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用（[gpu-3d-roadmap.md §8](gpu-3d-roadmap.md)） |
 | DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_CREATE`/`OPEN`/`MMAP`/`GET_HANDLE`，`GEM_CLOSE` 真正释放，`MODE_GETFB2`；dumb buffer 复用同一分配器 |
 | 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见 |
