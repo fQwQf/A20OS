@@ -89,6 +89,12 @@ IDL 化）已落地，已从本文删除。
   - 完成条件：低内存实例（或可注入的换出阈值）下门禁真实触发一次换出-读回，并校验
     换出前后的数据一致性。
 - [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留，非 2026-09 改进周期引入**）
+  - [x] 让门禁能报告原因：消费者现在自报失败，父进程等待有界。挂起从 60s 且**零输出**
+    变成一次带原因的失败（`NATIVE_SHMRING: FAIL consumer never signalled ready`）。
+  - [ ] **根因未解决**：`a20_task_spawn` 返回成功且 `sys_a20_task_spawn` 确实调用了
+    `proc_make_ready(new_task)`（kernel/abi/native/sys_core.c:757），但子进程从未运行——
+    全程只出现 2 个 user task（mksh pid=2、父 pid=6），没有 shmringd 的
+    `[PROC] user task` 行，它也没有任何输出。待查：make_ready 之后为何不调度。
   - 复现（2026-09-28，HEAD 含本周期全部改动）：`make smoke-native-shmring` 连续 3 次
     全部挂起——串口日志停在 `[PROC] user task pid=6`（`/bin/native-shmring-rv` 已 exec
     但无输出），QEMU 被 60s 超时 SIGTERM 杀掉，`NATIVE_SHMRING: PASS` 从未出现。
