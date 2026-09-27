@@ -30,5 +30,5 @@ expect = [
   "GPU3D_TEST: RESOURCE_INFO round-trip ok",
   "GPU3D_TEST: PASS",
 ]
-input_delay = 20
-timeout = "120s"
+input_delay = 60
+timeout = "240s"

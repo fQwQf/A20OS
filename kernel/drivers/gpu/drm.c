@@ -1901,7 +1901,7 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
         return -EINVAL;
     /* Mesa's command streams routinely exceed the small staging buffer the
      * legacy private ioctl allowed; the host accepts whatever we forward. */
-    if (e.size > 16u * 1024 * 1024)
+    if (e.size > VIRTIO_GPU_3D_MAX_CMD_BYTES)
         return -EINVAL;
 
     int cid = drm_virtgpu_ensure_ctx(ctx);
