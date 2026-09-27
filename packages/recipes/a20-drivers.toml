@@ -14,7 +14,7 @@ url = "https://github.com/fQwQf/A20OS"
 license = "Apache-2.0"
 maintainer = "A20OS developers"
 archs = ["riscv64", "aarch64", "x86_64", "loongarch64"]
-depends = ["a20-base"]
+depends = ["a20-userland"]
 
 [[files]]
 src = "{build_dir}/*.a20drv"
