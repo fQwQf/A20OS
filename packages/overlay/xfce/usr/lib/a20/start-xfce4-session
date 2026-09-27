@@ -28,12 +28,19 @@ export XDG_CACHE_HOME="$HOME/.cache"
 # A20OS exposes virtio-gpu as /dev/dri/card0 via its kernel devfs; the udev
 # database does not describe it, so pin the KMS device explicitly (wlroots
 # opens WLR_DRM_DEVICES directly instead of relying on udev enumeration).
-# Software rendering: no virgl userspace yet, and pixman keeps the desktop
-# up under plain TCG.
 export WLR_DRM_DEVICES=/dev/dri/card0
 export WLR_DRM_NO_ATOMIC=1
 export WLR_NO_HARDWARE_CURSORS=1
-export WLR_RENDERER=pixman
+
+# Compositor renderer.  labwc/wlroots needs gbm_create_device() to succeed
+# for its GL renderer, which in turn needs the DRM GEM object model; until
+# that is available the honest default is the pixman software compositor,
+# which keeps the desktop up under plain TCG.  A20_RENDERER lets an operator
+# (or a future gate) select gl once the GBM path is verified -- see
+# docs/graphics/3d-graphics.md.  Never hardcode 'gl' here: wlroots aborts
+# rather than falling back, so a wrong choice takes the whole session down.
+: "${A20_RENDERER:=pixman}"
+export WLR_RENDERER="$A20_RENDERER"
 
 # Input devices are published as /dev/input/event* with /sys/devices/virtual/
 # input/* nodes, and the uevent stream carries a real per-event SEQNUM so
