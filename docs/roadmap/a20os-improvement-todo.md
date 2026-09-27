@@ -91,10 +91,16 @@ IDL 化）已落地，已从本文删除。
 - [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留，非 2026-09 改进周期引入**）
   - [x] 让门禁能报告原因：消费者现在自报失败，父进程等待有界。挂起从 60s 且**零输出**
     变成一次带原因的失败（`NATIVE_SHMRING: FAIL consumer never signalled ready`）。
-  - [ ] **根因未解决**：`a20_task_spawn` 返回成功且 `sys_a20_task_spawn` 确实调用了
-    `proc_make_ready(new_task)`（kernel/abi/native/sys_core.c:757），但子进程从未运行——
-    全程只出现 2 个 user task（mksh pid=2、父 pid=6），没有 shmringd 的
-    `[PROC] user task` 行，它也没有任何输出。待查：make_ready 之后为何不调度。
+  - [ ] **根因未解决，但已定位到调度器派发一侧**（2026-09-28 实测）：
+    - `a20_task_spawn` **成功**：`spawn rc=9`、`out_task=9`，返回值就是装好的句柄。
+    - 更正一个先前的错误判断：那行 `[PROC] user task pid=6` **就是子进程自己的**，
+      它在父进程的 syscall 内被打印；父进程走 mksh 的 Linux-ABI exec 路径，不打这行。
+      所以"子进程从未分配"是错的。
+    - 在 `proc_make_ready(new_task)` 之后加临时探针测得：子进程 `state=1`(READY)、
+      `on_rq=1`——**确已入就绪队列且可运行**，却始终没有被调度执行；非阻塞
+      `task_wait` 轮询显示它仍在运行。即 spawn 与入队都正常，问题在调度器选中并派发
+      这一侧。临时探针已撤，内核树已恢复干净。
+    - 待查：就绪队列上已有可运行任务时，派发路径为何不选中它。
   - 复现（2026-09-28，HEAD 含本周期全部改动）：`make smoke-native-shmring` 连续 3 次
     全部挂起——串口日志停在 `[PROC] user task pid=6`（`/bin/native-shmring-rv` 已 exec
     但无输出），QEMU 被 60s 超时 SIGTERM 杀掉，`NATIVE_SHMRING: PASS` 从未出现。
