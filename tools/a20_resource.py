@@ -283,9 +283,14 @@ def format_report(need: Requirement, have: HostResources) -> str:
             f"guests {have.running_guests}")
 
 
-def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | None = None,
-              *, wait: bool = True, echo=lambda _msg: None) -> Verdict:
-    """Gate one instance run, waiting for the host if necessary.
+def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None = None,
+         *, wait: bool = True, echo=lambda _msg: None, label: str = "instance") -> Verdict:
+    """Gate one guest launch, waiting for the host if necessary.
+
+    Takes a ``Requirement`` rather than an ``Instance`` so that callers which
+    launch QEMU by hand (the ``smoke-*`` make targets) can reuse exactly the
+    same wait loop and the same policy as ``tools/a20``, instead of either
+    duplicating the loop or skipping the gate.
 
     Returns the final verdict.  Raises SystemExit only when the wait was
     requested, the wait timed out, or waiting was declined and the host is
@@ -294,7 +299,6 @@ def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | No
     """
     policy = policy or Policy.from_env()
     root = disk_path or Path.cwd()
-    need = requirement_for(inst, policy)
     deadline = time.monotonic() + policy.wait_timeout_s if policy.wait_timeout_s > 0 else None
     reported: tuple[str, ...] | None = None
     last_emit = 0.0
@@ -305,7 +309,7 @@ def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | No
         if verdict.ok:
             return verdict
         if not wait:
-            raise SystemExit(f"error: insufficient host resources for {inst.name}: {verdict.reason()}")
+            raise SystemExit(f"error: insufficient host resources for {label}: {verdict.reason()}")
         # Re-announce only when the *kind* of shortfall changes, so a long wait
         # does not scroll a line per poll, plus a periodic heartbeat so the
         # process does not look hung.
@@ -317,5 +321,91 @@ def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | No
         if deadline is not None and now >= deadline:
             raise SystemExit(
                 f"error: gave up waiting {policy.wait_timeout_s:.0f}s for host resources "
-                f"to run {inst.name}: {verdict.reason()}")
+                f"to run {label}: {verdict.reason()}")
         time.sleep(_POLL_SECONDS)
+
+
+def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | None = None,
+              *, wait: bool = True, echo=lambda _msg: None) -> Verdict:
+    """Gate one instance run; see :func:`gate` for the wait semantics."""
+    policy = policy or Policy.from_env()
+    return gate(requirement_for(inst, policy), policy, disk_path,
+                wait=wait, echo=echo, label=inst.name)
+
+
+# --------------------------------------------------------------------------
+# Standalone CLI.
+#
+# The `smoke-*` make targets launch `qemu-system-*` directly instead of going
+# through `tools/a20 test`, so they have no instance TOML to gate against. They
+# used to launch with no gate at all, which is exactly the case this module
+# exists for: QEMU asking for memory the host does not have turns into the host
+# OOM killer choosing a victim, and the victim is rarely the thing being
+# debugged. This entry point gives those targets the same wait-for-resources
+# behaviour, reading the same A20_* environment policy.
+#
+#   python3 tools/a20_resource.py --mem-mb 1024 --cpus 2
+#   python3 tools/a20_resource.py -m 1G -c 1 --hostfwd 127.0.0.1:5555
+# --------------------------------------------------------------------------
+def _parse_size_mb(text: str) -> int:
+    """Accept plain MiB or the QEMU `-m` spelling (1G, 512M, 2G)."""
+    t = text.strip()
+    mult = 1
+    if t and t[-1] in "kKmMgGtT":
+        mult = {"k": 1 // 1024, "m": 1, "g": 1024, "t": 1024 * 1024}[t[-1].lower()]
+        t = t[:-1]
+    if t.endswith("b"):  # trailing "B" is legal for QEMU ("1GB")
+        t = t[:-1]
+    return int(float(t) * mult)
+
+
+def _parse_hostfwd(values: Sequence[str]) -> tuple[tuple[str, int], ...]:
+    out: list[tuple[str, int]] = []
+    for v in values:
+        addr, _, port = v.rpartition(":")
+        if not port.isdigit():
+            raise SystemExit(f"error: --hostfwd wants addr:port, got {v!r}")
+        out.append((addr or "127.0.0.1", int(port)))
+    return tuple(out)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="a20_resource",
+        description="Gate a QEMU launch on host resources, waiting if necessary.")
+    ap.add_argument("-m", "--mem", required=True,
+                    help="guest memory the launch will ask for (e.g. 1024, 1G)")
+    ap.add_argument("-c", "--cpus", type=int, default=1,
+                    help="vCPUs the launch will ask for (default: 1)")
+    ap.add_argument("--disk-mb", type=int, default=0,
+                    help="free space the launch needs; 0 means the A20_MIN_DISK_MB floor")
+    ap.add_argument("--hostfwd", action="append", default=[], metavar="ADDR:PORT",
+                    help="host port the launch will bind; repeatable")
+    ap.add_argument("--disk-path", default=None,
+                    help="path whose filesystem free space to measure (default: cwd)")
+    ap.add_argument("--no-wait", action="store_true",
+                    help="fail immediately instead of waiting for resources")
+    ap.add_argument("--quiet", action="store_true", help="suppress the pass line")
+    args = ap.parse_args(argv)
+
+    policy = Policy.from_env()
+    need = Requirement(
+        mem_mb=_parse_size_mb(args.mem) + policy.reserve_mem_mb,
+        cpus=max(1, args.cpus),
+        disk_mb=max(args.disk_mb, policy.min_disk_mb),
+        ports=_parse_hostfwd(args.hostfwd),
+    )
+    root = Path(args.disk_path) if args.disk_path else Path.cwd()
+    verdict = gate(need, policy, root, wait=not args.no_wait,
+                   echo=lambda m: print(m, flush=True),
+                   label=f"{need.describe()}")
+    if not args.quiet:
+        have = HostResources.snapshot(root, need.ports)
+        print(f"a20: resources OK -- {format_report(need, have)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
