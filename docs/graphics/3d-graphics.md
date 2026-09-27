@@ -2,7 +2,42 @@
 
 本文档描述 A20OS 的 3D 图形加速实现：原理、内核接口、驱动实现、用户态对接方式和开发指南。阅读前提是理解 [Display/Framebuffer 驱动](../drivers/classes/display.md) 与 [PCI 与 VirtIO](../drivers/guide/pci-and-virtio.md)。
 
-> 当前状态：**内核侧 3D 命令路径已可用**（feature 协商、capset 查询、context/resource/submit 透传、DRM 入口），用户态 virgl 客户端（Mesa/GBM/EGL）为后续阶段。
+> **核对基线**：本文档的状态结论以 `kernel/drivers/gpu/` 的 HEAD 源码为准。
+> 任何"已实现/已验证"的判断都必须能指向一个**可以失败**的门禁；不能失败的检查
+> 不构成验证（见 §0）。
+
+---
+
+## 0. 当前状态（诚实清单）
+
+本文档早期版本在开头断言"内核侧 3D 命令路径已可用"，并给出
+`GPU3D_TEST: PASS` 作为验收输出。这两条都**不成立**，已按实测更正：
+
+- 曾经的 `gpu3d_test` 只创建 context 与一个空的 16×16 纹理就销毁，
+  `A20_GPU_IOCTL_SUBMIT_3D` 定义了却从未被调用——**一个命令流都没提交过**；
+- 更严重的是它在 2D-only 设备上打印 `skipping 3D path` 后 `return 0`，
+  于是**任何配置下这个测试都是绿的**，绿灯不携带任何信息。
+
+按能力逐条核对当前状态：
+
+| 能力 | 状态 | 依据 / 缺口 |
+|---|---|---|
+| virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
+| virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
+| QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
+| 3D 资源挂载 backing | ❌ **未实现** | `RESOURCE_CREATE_3D` 不带 `ATTACH_BACKING`，host 侧资源无内存可读写 |
+| 命令流被 host 接受（可证伪的验证） | ❌ **本轮之前不存在** | 旧 `gpu3d_test` 走的是空分配路径 |
+| 上游 Linux `DRM_IOCTL_VIRGL_*` UAPI | ❌ **未实现** | 只有 A20 私有 `A20_GPU_IOCTL_*`，Mesa 的 `virtio_gpu_dri.so` **无法挂载** |
+| DRM GEM 对象模型（`GEM_CREATE`/`GEM_MMAP`…） | ❌ **未实现** | 只有 dumb buffer；这是 `gbm_bo_create` 失败的根因 |
+| 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见 |
+| `MODE_GETFB2` | ❌ 未实现 | 只有 `MODE_GETFB` |
+| 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
+| Mesa/virgl 用户态客户端 | ❌ 未实现 | 依赖上游 virgl UAPI；A20OS 不自建 DRI 驱动 |
+
+**由此得到本文档后续所有工作的出发点**：A20OS 不自研着色器编译器，也不自研
+DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，SPIR-V→host GPU 由 virglrenderer 完成；
+A20OS 要做的是把中间的**运输层**补齐（GEM 对象模型 + 上游 virgl UAPI），
+让 stock Mesa 能挂上来。
 
 ---
 
@@ -18,7 +53,7 @@
 | 模式 | 命令 | 作用 | A20 状态 |
 |---|---|---|---|
 | 2D | `RESOURCE_CREATE_2D` / `TRANSFER_TO_HOST_2D` / `FLUSH` | 把像素块 blit 到 scanout | ✅ 现有 fbdev 路径 |
-| 3D (virgl) | `CTX_CREATE` / `RESOURCE_CREATE_3D` / `SUBMIT_3D` / `TRANSFER_TO_HOST_3D` / BLOB | host 端 GL 上下文 + 命令流 | ✅ 内核透传已实现 |
+| 3D (virgl) | `CTX_CREATE` / `RESOURCE_CREATE_3D` / `SUBMIT_3D` / `TRANSFER_TO_HOST_3D` / BLOB | host 端 GL 上下文 + 命令流 | ⚠️ 命令封装已实现，但**无 backing、无用户态客户端**（见 §0） |
 
 设备 feature 位：`VIRTIO_GPU_F_VIRGL (bit 0)` 表示 host 支持 3D；`VIRTIO_GPU_F_CONTEXT_INIT (bit 4)` 表示 context 初始化协议。
 
