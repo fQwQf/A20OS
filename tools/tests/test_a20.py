@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import json
 import os
+import pty
 import shutil
 import sys
 import tempfile
+import time
 import textwrap
 import unittest
 from pathlib import Path
@@ -26,8 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402
-from a20_instance import InstanceError, parse_instance  # noqa: E402
+from a20_instance import InstanceError, parse_instance, section_is_set  # noqa: E402
 from a20_make import REPO_ROOT  # noqa: E402
+from a20_console import (  # noqa: E402
+    ConsoleError,
+    SerialTransport,
+    run_console_session,
+)
 from a20_manifest import Artifact, GitState  # noqa: E402
 from a20_resource import (  # noqa: E402
     DEFAULT_RESERVE_MEM_MB,
@@ -47,6 +54,14 @@ from a20_registry import (  # noqa: E402
     validate_registry,
 )
 from a20_validate import validate_instance  # noqa: E402
+
+
+def _alive(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+        return True
+    except OSError:
+        return False
 
 
 def load_instance(name: str):
@@ -1082,3 +1097,444 @@ def _manifest():
         variables={"BUILD_DIR": ".kernel-build/x"},
         artifacts=(Artifact("kernel-elf", ".kernel-build/x/kernel.elf", 10, "abc123"),),
     )
+
+
+class TestTargetSection(unittest.TestCase):
+    """[target] is the first non-QEMU-shaped section in the schema: it describes
+    the board on the other side of the serial cable."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def check(self, text: str) -> list[str]:
+        return validate_instance(load(self.tmp, text), REPO_ROOT)
+
+    BASE = """
+        arch = "riscv64"
+        board = "visionfive2"
+        [target]
+        serial = "/dev/ttyUSB0"
+        console_check = ["System ready"]
+    """
+
+    def test_minimal_target_validates(self) -> None:
+        self.assertEqual(self.check(self.BASE), [])
+
+    def test_absent_section_is_not_an_error(self) -> None:
+        self.assertEqual(self.check('arch = "riscv64"\n'), [])
+
+    def test_section_is_set_detects_it(self) -> None:
+        inst = load(self.tmp, self.BASE)
+        self.assertTrue(section_is_set(inst.target))
+        self.assertFalse(section_is_set(load(self.tmp, 'arch = "riscv64"\n').target))
+
+    def test_serial_is_required(self) -> None:
+        errs = self.check('arch = "riscv64"\nboard = "visionfive2"\n[target]\nbaud = 115200\n')
+        self.assertTrue(any("target.serial" in e for e in errs), errs)
+
+    def test_commands_without_expect_is_rejected(self) -> None:
+        errs = self.check(self.BASE + 'commands = ["ps"]\n')
+        self.assertTrue(any("vacuously" in e for e in errs), errs)
+
+    def test_expect_with_nothing_to_observe_is_rejected(self) -> None:
+        errs = self.check('arch = "riscv64"\nboard = "visionfive2"\n[target]\n'
+                          'serial = "/dev/ttyUSB0"\nexpect = ["PASS"]\n')
+        self.assertTrue(any("nothing would be running" in e for e in errs), errs)
+
+    def test_expect_alone_with_console_check_is_fine(self) -> None:
+        self.assertEqual(self.check(self.BASE + 'expect = ["System ready"]\n'), [])
+
+    def test_negative_boot_wait_is_rejected(self) -> None:
+        errs = self.check(self.BASE + "boot_wait = -1\n")
+        self.assertTrue(any("boot_wait" in e for e in errs), errs)
+
+    def test_boot_timeout_must_carry_the_s_suffix(self) -> None:
+        errs = self.check(self.BASE + 'boot_timeout = "90"\n')
+        self.assertTrue(any("boot_timeout" in e for e in errs), errs)
+        self.assertEqual(self.check(self.BASE + 'boot_timeout = "90s"\n'), [])
+
+    def test_absolute_log_path_is_rejected(self) -> None:
+        errs = self.check(self.BASE + 'log = "/tmp/console.log"\n')
+        self.assertTrue(any("repository-relative" in e for e in errs), errs)
+
+    def test_nonpositive_baud_is_rejected(self) -> None:
+        self.assertTrue(self.check(self.BASE + "baud = 0\n"))
+
+    def test_unknown_target_key_is_rejected(self) -> None:
+        """Unknown keys are a structural failure, so they surface as an
+        InstanceError from the parser rather than a validate() message."""
+        with self.assertRaises(InstanceError) as cm:
+            load(self.tmp, self.BASE + "jtag = true\n")
+        self.assertIn("jtag", str(cm.exception))
+
+    def test_derive_maps_every_target_field(self) -> None:
+        got = derived(self.tmp, """
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            baud = 115200
+            reset = "openocd -c 'init' -c 'reset run'"
+            boot_wait = 4
+            boot_timeout = "90s"
+            console_check = ["System ready", "A20OS"]
+            commands = ["ps", "poweroff"]
+            expect = ["A20OS"]
+            boot_media = ["build/a.img", "build/b.img"]
+            log = ".kernel-build/console/x.log"
+        """)
+        self.assertEqual(got["TARGET_SERIAL"], "/dev/ttyUSB0")
+        self.assertEqual(got["TARGET_BAUD"], "115200")
+        self.assertEqual(got["TARGET_RESET_CMD"], "openocd -c 'init' -c 'reset run'")
+        self.assertEqual(got["TARGET_BOOT_WAIT"], "4")
+        self.assertEqual(got["TARGET_BOOT_TIMEOUT"], "90s")
+        self.assertEqual(got["TARGET_CONSOLE_CHECK"], "System ready,A20OS")
+        self.assertEqual(got["TARGET_COMMANDS"], "ps poweroff")
+        self.assertEqual(got["TARGET_EXPECT"], "A20OS")
+        self.assertEqual(got["TARGET_BOOT_MEDIA"], "build/a.img build/b.img")
+        self.assertEqual(got["TARGET_CONSOLE_LOG"], ".kernel-build/console/x.log")
+
+    def test_absent_target_emits_no_variables(self) -> None:
+        got = derived(self.tmp, 'arch = "riscv64"\n')
+        self.assertFalse([k for k in got if k.startswith("TARGET_")])
+
+    def test_partial_target_only_emits_what_is_set(self) -> None:
+        got = derived(self.tmp, """
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+        """)
+        self.assertEqual([k for k in got if k.startswith("TARGET_")], ["TARGET_SERIAL"])
+
+
+class FakeTransport:
+    """Scripted stand-in for a serial port, so the session logic is testable
+    without a board."""
+
+    def __init__(self, script=(), replies=None, read_budget=400):
+        self.script = list(script)
+        self.replies = replies or {}
+        self.sent: list[bytes] = []
+        self.closed = False
+        self.reads = 0
+        self.read_budget = read_budget
+
+    def read(self, _timeout: float) -> bytes:
+        # A session that keeps polling without ever reaching its deadline would
+        # spin forever under the real clock, turning a regression into a hung
+        # suite.  Exhausting the budget makes it a failure instead.
+        self.reads += 1
+        if self.reads > self.read_budget:
+            raise AssertionError("session polled past its deadline without terminating")
+        return self.script.pop(0) if self.script else b""
+
+    def write(self, data: bytes) -> None:
+        self.sent.append(data)
+        for needle, reply in self.replies.items():
+            if needle.encode() in data:
+                self.script.append(reply)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeClock:
+    """Deterministic clock: the deadline paths then terminate in a couple of
+    iterations instead of spinning for a real second, which is both faster and
+    the reason a broken deadline shows up as a failure rather than a hang."""
+
+    def __init__(self, step: float = 0.5) -> None:
+        self.t = 0.0
+        self.step = step
+
+    def now(self) -> float:
+        t, self.t = self.t, self.t + self.step
+        return t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
+class TestConsoleSession(unittest.TestCase):
+    """The session decides whether a board actually came up, so it is exercised
+    through a fake transport rather than only on hardware."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def inst(self, text: str):
+        return load(self.tmp, text)
+
+    def test_boot_signature_then_commands_then_expect(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "2s"
+            console_check = ["System ready"]
+            commands = ["ps"]
+            expect = ["init 0"]
+        """)
+        t = FakeTransport([b"boot: ", b"System ready\n"], {"ps": b"init 0 root\n"})
+        r = run_console_session(t, i, sleep=lambda _s: None)
+        self.assertTrue(r.ok, r.missing)
+        self.assertEqual(r.stage, "done")
+        self.assertEqual(t.sent, [b"ps\n"])
+        self.assertTrue(t.closed)
+
+    def test_boot_signature_never_arrives_fails_with_the_missing_pattern(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            console_check = ["System ready"]
+        """)
+        clk = FakeClock()
+        r = run_console_session(FakeTransport([b"nothing\n"] * 100), i,
+                               sleep=clk.sleep, now=clk.now)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.stage, "console_check")
+        self.assertEqual(r.missing, ("System ready",))
+
+    def test_expect_never_arrives_fails_at_the_expect_stage(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            commands = ["ps"]
+            expect = ["NEVER"]
+        """)
+        clk = FakeClock()
+        r = run_console_session(FakeTransport([b"garbage\n"] * 200), i,
+                               sleep=clk.sleep, now=clk.now)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.stage, "expect")
+        self.assertEqual(r.missing, ("NEVER",))
+
+    def test_transport_is_always_closed_even_on_failure(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            console_check = ["NEVER"]
+        """)
+        t = FakeTransport([b"x\n"] * 100)
+        clk = FakeClock()
+        run_console_session(t, i, sleep=clk.sleep, now=clk.now)
+        self.assertTrue(t.closed)
+
+    def test_every_command_is_sent_with_a_newline(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            commands = ["ps", "cat /etc/os-release"]
+            expect = ["done"]
+        """)
+        t = FakeTransport([b"done\n"])
+        run_console_session(t, i, sleep=lambda _s: None)
+        self.assertEqual(t.sent, [b"ps\ncat /etc/os-release\n"])
+
+    def test_partial_output_is_still_captured_in_the_transcript(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            console_check = ["System ready"]
+        """)
+        r = run_console_session(FakeTransport([b"a\n", b"b\n", b"System ready\n"]), i)
+        self.assertTrue(r.ok)
+        self.assertIn("a\nb\nSystem ready", r.transcript.text)
+
+    def test_on_output_streams_as_it_arrives(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_timeout = "1s"
+            console_check = ["READY"]
+        """)
+        seen: list[str] = []
+        run_console_session(FakeTransport([b"one ", b"two ", b"READY\n"]), i,
+                            on_output=seen.append)
+        self.assertEqual("".join(seen), "one two READY\n")
+
+    def test_no_console_check_still_works_as_a_passive_attach(self) -> None:
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+        """)
+        t = FakeTransport([b"anything\n"])
+        r = run_console_session(t, i, sleep=lambda _s: None)
+        self.assertTrue(r.ok)
+        self.assertEqual(t.sent, [])
+
+    def test_reset_command_is_run_before_reading(self) -> None:
+        from unittest.mock import patch
+        import a20_console
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "myreset --hard"
+            boot_timeout = "1s"
+            console_check = ["READY"]
+        """)
+        with patch("a20_console.subprocess.run") as run:
+            run.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+            run_console_session(FakeTransport([b"READY\n"]), i, sleep=lambda _s: None)
+        self.assertEqual(run.call_args.args[0], ["myreset", "--hard"])
+
+    def test_failing_reset_is_reported_with_its_own_stderr(self) -> None:
+        from unittest.mock import patch
+        import a20_console
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "myreset --hard"
+        """)
+        with patch("a20_console.subprocess.run") as run:
+            run.return_value = type("R", (), {"returncode": 3, "stderr": "no adapter"})()
+            with self.assertRaises(ConsoleError) as cm:
+                run_console_session(FakeTransport(), i, sleep=lambda _s: None)
+        self.assertIn("no adapter", str(cm.exception))
+
+    def test_reset_uses_argv_not_a_shell(self) -> None:
+        """A manifest must not be able to smuggle in a pipeline via reset."""
+        from unittest.mock import patch
+        import a20_console
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "reset-cmd; rm -rf /"
+        """)
+        with patch("a20_console.subprocess.run") as run:
+            run.return_value = type("R", (), {"returncode": 0, "stderr": ""})()
+            run_console_session(FakeTransport(), i, sleep=lambda _s: None)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv, ["reset-cmd;", "rm", "-rf", "/"])
+
+    def test_duration_parsing(self) -> None:
+        from a20_console import _seconds
+        self.assertEqual(_seconds("90s", 0), 90.0)
+        self.assertEqual(_seconds("1.5s", 0), 1.5)
+        self.assertEqual(_seconds(None, 7.0), 7.0)
+        for bad in ("90", "s", "abc", "90S"):
+            with self.assertRaises(ConsoleError, msg=bad):
+                _seconds(bad, 0)
+
+    def test_log_path_defaults_under_the_build_tree(self) -> None:
+        from a20_console import console_log_path
+        p = console_log_path(self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+        """))
+        self.assertEqual(p.name, "case.log")
+        self.assertIn(".kernel-build", str(p))
+        self.assertTrue(str(p).startswith(str(REPO_ROOT)))
+
+    def test_log_path_honours_an_explicit_relative_override(self) -> None:
+        from a20_console import console_log_path
+        p = console_log_path(self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            log = "mylogs/board.log"
+        """))
+        self.assertEqual(str(p), str(REPO_ROOT / "mylogs" / "board.log"))
+
+
+@unittest.skipUnless(hasattr(os, "fork"), "requires pty semantics")
+class TestSerialTransportAgainstPty(unittest.TestCase):
+    """Exercised against a real tty, since the termios setup is exactly the part
+    that cannot be faked.  Each case takes a fresh pty: TIOCEXCL on a pty stays
+    latched while its master is open, so a device is never opened twice."""
+
+    def fresh(self):
+        master, slave = pty.openpty()
+        self.addCleanup(lambda: (os.close(master) if _alive(master) else None))
+        self.addCleanup(lambda: (os.close(slave) if _alive(slave) else None))
+        return master, os.ttyname(slave)
+
+    def test_opens_and_round_trips_data(self) -> None:
+        master, dev = self.fresh()
+        t = SerialTransport(dev, 115200)
+        self.addCleanup(t.close)
+        os.write(master, b"hello from board\n")
+        self.assertEqual(t.read(1.0), b"hello from board\n")
+        t.write(b"ps\n")
+        self.assertEqual(os.read(master, 100), b"ps\n")
+
+    def test_baud_rate_is_actually_encoded(self) -> None:
+        import termios
+        for baud in (9600, 38400, 115200, 921600):
+            _m, dev = self.fresh()
+            t = SerialTransport(dev, baud)
+            self.assertEqual(termios.tcgetattr(t._fd)[4], getattr(termios, f"B{baud}"), baud)
+            t.close()
+
+    def test_raw_mode_preserves_board_crlf(self) -> None:
+        """ICRNL/OPOST would rewrite a board's CRLF, so the expect patterns a
+        manifest writes could silently never match."""
+        import termios
+        master, dev = self.fresh()
+        t = SerialTransport(dev, 115200)
+        self.addCleanup(t.close)
+        attrs = termios.tcgetattr(t._fd)
+        self.assertFalse(attrs[3] & termios.ECHO, "ECHO must be off")
+        self.assertFalse(attrs[3] & termios.ICANON, "ICANON must be off")
+        self.assertFalse(attrs[0] & termios.ICRNL, "ICRNL must be off")
+        os.write(master, b"line1\r\nline2\r\n")
+        self.assertIn(b"\r\n", t.read(1.0))
+
+    def test_read_returns_promptly_when_nothing_arrives(self) -> None:
+        _m, dev = self.fresh()
+        t = SerialTransport(dev, 115200)
+        self.addCleanup(t.close)
+        start = time.monotonic()
+        self.assertEqual(t.read(0.4), b"")
+        self.assertLess(time.monotonic() - start, 2.0)
+
+    def test_concurrent_opener_is_refused(self) -> None:
+        _m, dev = self.fresh()
+        first = SerialTransport(dev, 115200)
+        self.addCleanup(first.close)
+        with self.assertRaises(OSError):
+            SerialTransport(dev, 115200)
+
+    def test_unsupported_baud_names_the_alternatives(self) -> None:
+        _m, dev = self.fresh()
+        with self.assertRaises(ConsoleError) as cm:
+            SerialTransport(dev, 12345)
+        self.assertIn("115200", str(cm.exception))
+
+    def test_missing_device_raises_oserror(self) -> None:
+        with self.assertRaises(OSError):
+            SerialTransport("/dev/a20-not-a-real-tty", 115200)
