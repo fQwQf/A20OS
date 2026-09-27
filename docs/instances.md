@@ -65,14 +65,16 @@ ramfs_user = false           # 仅 loongarch64
 smp = 1                      # >1 仅限已验证 QEMU 平台，否则需 allow_unverified_smp
 memory = "1G"                # QEMU -m 参数格式
 allow_unverified_smp = false
-extra_qemu = ["-device", "riscv-iommu-pci,bus=pcie.0"]  # 追加的 QEMU 参数（测试用）
+extra_qemu = ["-device", "riscv-iommu-pci,bus=pcie.0"]  # 追加的 QEMU 参数
+gpu_3d = false               # true = 选 virgl-capable virtio-gpu（GPU_3D=1）
+display_mode = "text"        # text = -nographic；gui = 真实显示 + GUI 设备集
 
 [gui]
 enabled = false              # true = virtio-gpu GUI 启动
 display = "gtk"              # QEMU -display
 audio_driver = "pa"          # QEMU audiodev 后端
 audio_device = "hda"         # hda | virtio
-frame_window = 15            # GUI 冒烟首帧窗口（秒）
+frame_window = 15            # GUI 冒烟首帧窗口（秒，尚未实现）
 
 [net]
 hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]  # 空列表 = 不做端口转发
@@ -141,7 +143,7 @@ disk_out = "disk.img"        # 仅 release
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
 
-`gui.enabled`、`machine.extra_qemu`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。
+`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。`machine.extra_qemu` → `EXTRA_QEMU`，`machine.gpu_3d` → `GPU_3D`，`machine.display_mode` → `DISPLAY_MODE`（均由 Makefile 消费）。
 
 ### 各动作的适用条件
 
@@ -165,7 +167,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 ## 冒烟测试实例
 
-带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 的流程：构建（bringup → `kernel-only`，否则 `dev-build`）→ 从 `make -n _run_impl` 提取该实例的精确 QEMU 命令行（单一事实来源，不复制 Makefile 逻辑）→ 追加 `machine.extra_qemu` → 启动，等待 `input_delay` 秒后经串口注入 `commands` → 在 `timeout` 内等待退出或超时杀掉。
+带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 的流程：构建（bringup → `kernel-only`，否则 `dev-build`）→ 从 `make -n _run_impl` 提取该实例的精确 QEMU 命令行（单一事实来源，不复制 Makefile 逻辑）→ 启动（`machine.extra_qemu` 已并入 `EXTRA_QEMU` 参与该命令行的生成），等待 `input_delay` 秒后经串口注入 `commands` → 在 `timeout` 内等待退出或超时杀掉。
 
 判定规则与旧的手写冒烟一致：**日志中 `expect` 的全部子串都出现即 PASS**（超时杀掉但日志已齐也算 PASS）；否则 FAIL 并打印日志末尾 80 行。日志保存在 `.kernel-build/smoke/<实例名>.log`。
 
@@ -175,7 +177,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 2. 把 `printf` 注入的命令写进 `test.commands`，把 `grep -q` 的模式写进 `test.expect`（注意：expect 是**子串**匹配，不是正则），超时差异写进 `test.timeout`；
 3. 额外的 `-device` 参数写进 `machine.extra_qemu`（QEMU 参数顺序无关）；然后把 make 目标改成一行包装：`smoke-foo: ; tools/a20 test smoke-foo`。
 
-已迁移的参考样例：`instances/smoke-riscv64.toml`（纯 expect）、`instances/smoke-abi-linux.toml`（commands + expect）、`instances/smoke-iommu-discovery.toml`（extra_qemu）。
+已迁移的参考样例：`instances/smoke-riscv64.toml`（纯 expect）、`instances/smoke-abi-linux.toml`（commands + expect）、`instances/smoke-iommu-discovery.toml`（extra_qemu）、`instances/smoke-gpu3d-riscv64.toml`（gpu_3d + display_mode = "gui"：文本模式不挂 virtio-gpu，做 GPU 门禁必须切到 gui）。
 
 ## 组件注册表（components/drivers.toml）
 
