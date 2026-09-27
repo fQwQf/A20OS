@@ -7,7 +7,7 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
-        check-component-registry check-manifests
+        check-component-registry check-flash-backend-registry check-manifests
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
 # hosted-arch matrix: every SUPPORTED_HOSTED_ARCHES member must be covered by
@@ -21,11 +21,20 @@ check-instance-matrix:
 check-component-registry:
 	@tools/a20 check-registry
 
+# Flash-programmer registry (components/flash-backends.toml).  Two layers, like
+# the driver registry: the toml is self-validated (unique names, boards that
+# exist, targets that exist as make rules), then every make target is
+# cross-checked against the set a20 can actually dispatch to.  Neither side can
+# drift without FAIL.
+check-flash-backend-registry:
+	@tools/a20 check-flash-backends
+
 # Aggregate for the manifest-layer gates.  These are host-side, pure-Python and
 # arch-independent, so they are cheap enough to always run: instances/,
 # components/ and the Makefile must never drift apart.  Wired into CI as the
 # `manifest-gates` job.
-check-manifests: check-instances check-instance-matrix check-component-registry
+check-manifests: check-instances check-instance-matrix check-component-registry \
+                 check-flash-backend-registry
 	@echo "check-manifests: PASS"
 
 host-tests: $(HOST_TESTS_BIN)

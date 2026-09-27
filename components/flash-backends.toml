@@ -1,0 +1,29 @@
+# Flash-programmer backend registry.
+#
+# A backend is one concrete way of programming a board's non-volatile memory
+# over a debug or boot interface.  The instance names a backend; the recipe
+# lives in the make target named by `make_target`, never in Python.
+#
+# `boards` plus `flash_kb`/`ram_kb` is a safety contract, not documentation.  A
+# manifest whose board or flash geometry falls outside it is rejected before
+# anything is built, because programming the wrong geometry is not a recoverable
+# mistake the way a compile error is: a 512 KiB erase script aimed at a 64 KiB
+# part runs off the end of the part.
+#
+# Geometry belongs in the key because one `board` name carries several flash
+# sizes -- `board = "stm32f103"` is both the 64 KiB C8 and the 512 KiB ZET6
+# "xuanwu" variant, with `[stm32].xuanwu` selecting between them.  Dropping the
+# geometry fields would let the 64 KiB manifest through the same door as the
+# 512 KiB one, which is the bug this registry exists to prevent.
+#
+# `a20 check-flash-backends` validates this file and cross-checks every
+# `make_target` against the makefiles, so a renamed or deleted recipe fails the
+# gate instead of being discovered mid-flash.
+
+[[backend]]
+name = "openocd"
+description = "OpenOCD over CMSIS-DAP/SWD with STM32F1x target scripts"
+boards = ["stm32f103"]
+flash_kb = 512
+ram_kb = 64
+make_target = "flash-xuanwu-openocd"
