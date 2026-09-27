@@ -17,6 +17,8 @@ tools/a20 run qemu-x86_64-gui             # GUI 实例（virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
 tools/a20 test smoke-riscv64              # 跑一个冒烟测试实例
 tools/a20 flash stm32f103-xuanwu          # 构建固件并经 OpenOCD 烧录开发板
+tools/a20 console vf2-physical           # 接开发板串口，按 [target] 做上板检查
+tools/a20 deploy  vf2-physical           # 烧录 + 写启动介质 + 上板验证，一条命令走完
 tools/a20 package vbox-iso-x86_64         # 构建并组装发布产物（ISO/UEFI 镜像/SD 卡/发布件）
 tools/a20 resources                     # 查看实例运行所依据的宿主资源预算
 tools/a20 build qemu-riscv64 -- -j8       # 只构建；`--` 后参数透传给 make
@@ -121,6 +123,19 @@ kind = "release"             # grub-iso | uefi-image | fit-sdcard | release
 variant = "..."              # uefi-image: default|text|gui；fit-sdcard: minimal|sdcard|extra
 kernel_out = "kernel-rv"     # 仅 release：产物文件名（缺省按架构惯例）
 disk_out = "disk.img"        # 仅 release
+
+[target]                    # a20 console / a20 deploy：串口那头的物理板
+serial = "/dev/ttyUSB0"      # 必填；控制台设备节点
+baud = 115200
+reset = "openocd -f interface/cmsis-dap.cfg -c 'init' -c 'reset run'"  # 复位命令（shlex 拆成 argv，不走 shell）
+boot_wait = 4               # 复位后等待注入命令的秒数
+boot_timeout = "90s"        # 等 console_check / expect 的上限
+console_check = ["[FDT] RAM range", "System ready"]   # 内核真的起来了的证据
+commands = ["cat /etc/os-release", "poweroff"]        # 注入命令
+expect = ["A20OS", "poweroff"]                        # 必须出现的子串
+boot_media = ["build/vf2-firmware/a20os-sd.img"]     # 要写进板子的镜像
+media_device = "/dev/sda"     # 写到哪里；不写就不写启动介质
+log = ".kernel-build/console/board.log"   # 仓库相对路径
 ```
 
 ### 字段到 make 变量的映射
@@ -144,8 +159,9 @@ disk_out = "disk.img"        # 仅 release
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
+| `target.*` | `TARGET_SERIAL` / `TARGET_BAUD` / `TARGET_RESET_CMD` / `TARGET_BOOT_WAIT` / `TARGET_BOOT_TIMEOUT` / `TARGET_CONSOLE_CHECK` / `TARGET_COMMANDS` / `TARGET_EXPECT` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` / `TARGET_CONSOLE_LOG` |
 
-`gui.enabled`、`machine.extra_qemu`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。
+`gui.enabled`、`machine.extra_qemu`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。`target.*` 同时两侧都用：变量给 make 配方，字段本身给 a20 的控制台状态机。
 
 ### 各动作的适用条件
 
@@ -156,6 +172,8 @@ disk_out = "disk.img"        # 仅 release
 | `debug` | 通用 QEMU 架构；`-O0 -g` + GDB stub |
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
 | `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
+| `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
+| `deploy` | 需要 `[target]`；有 `[flash]` 则先烧录，`boot_media` + `media_device` 则先写启动介质，最后同 `console` 验证 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里——实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
@@ -166,6 +184,76 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`ramfs_user`、`driver_deployment` 都有架构白名单，写错会在编译前被拒绝。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
+
+## 物理目标与上板验证（`[target]`）
+
+其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口
+线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。
+这个段存在，就意味着这是一个物理目标——所以没有 `kind` 字段可以跟它自相矛盾。
+
+```bash
+tools/a20 console vf2-physical    # 只接串口做上板检查
+tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
+```
+
+`deploy` 的每一步都对应一个既有机制，而不是新写一套：烧录走
+「烧录后端注册表」一节，写启动介质走 make
+的 `target-write-media`，最后一步与 `console` 完全相同。
+
+`console` 的执行顺序是：复位（可选）→ 等 `console_check` → 等 `boot_wait` →
+注入 `commands` → 等 `expect`。**每一处等待都有上限**：板子没起来、或者起来了
+但不回话，会在一个具名的阶段上结束，而不是把终端挂住。
+
+### 为什么没有 pyserial
+
+串口是用标准库的 `termios`/`fcntl`/`select` 说的。`tools/a20` 的 PEP 723 头声明
+`dependencies = []`，docs 也承诺只用标准库——为了设置六个标志位而引入
+pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍。
+
+波特率编码交给平台自己：Linux 上 `B115200` 是 `0o10002`，BSD 上编号又不一样，
+`termios` 模块里已经带着正确的常量，所以这里不再手写一张表。
+
+### 安全边界
+
+- `reset` 用 `shlex.split` 拆成 argv 后执行，**不走 shell**——清单因此无法把管道
+  或 `;`  smuggle 进来（`reset-cmd; rm -rf /` 会被当成一个字面量参数名）。
+- `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。
+  写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
+- `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，
+  正是 「产物账本」一节 要消灭的那类东西。
+- 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
+
+## 产物账本（`a20 ledger`）
+
+`tools/a20 ledger <instance>` 报告这个实例**实际**产出了什么：build 目录、源码版本
+（head + 分支 + dirty）、实例解析出的 make 变量，以及每个产物的 size 与 sha256。
+
+```text
+$ tools/a20 ledger qemu-riscv64
+instance : qemu-riscv64
+arch     : riscv64   board: qemu-virt-riscv64   abi: both
+build    : .kernel-build/riscv64-qemu-virt-riscv64-both-dev
+git      : 47192790cb81 on embedded/instance-manager
+
+role                   size  sha256                                                           path
+kernel-elf          4.0 MiB  9c52b54a0b45bbe0ef58d71def3315be1e598e8c315900e8e08113600ae393e9  .kernel-build/.../kernel.elf
+rootfs-fat32      128.0 MiB  c14b40170fc1a9dceaafafd84fa10b5c8dac1011e8f1b412d1f9f37cc162b127  .kernel-build/.../fat32.img
+
+not built yet:
+  .kernel-build/.../extra.img
+```
+
+三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进
+平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**——正是绝对路径让
+旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
+
+它取代的是 `docs/platforms/physical-boards.md` 里手抄的那种记录：镜像大小和
+SHA-256 从终端里抄出来、标上日期、旁边写着某个贡献者家目录的绝对路径。那些数字
+无法校验，改了一个字节也没人会发现；重新生成一份账本比重新敲一遍便宜，而手抄的
+数字在长期维护下必然失真。
+
+产物路径向 make 查询而不是在 Python 里重算 `BUILD_DIR`——那个名字把 ARCH、BOARD、
+ABI、BRINGUP、NOMMU、SMP 数、驱动部署等十几个开关都编码了进去。
 
 ## 宿主资源预检
 

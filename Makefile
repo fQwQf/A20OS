@@ -906,6 +906,7 @@ include tools/targets-smoke.mk
 include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
+include tools/target-console.mk
 include tools/run-targets.mk
 include tools/targets-images.mk
 include tools/targets-rootfs.mk

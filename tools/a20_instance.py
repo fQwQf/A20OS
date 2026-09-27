@@ -144,6 +144,30 @@ class PackageCfg:
 
 
 @dataclass(frozen=True, slots=True)
+class TargetCfg:
+    """Physical target for `a20 console` / `a20 deploy`.
+
+    Every other section describes either the build or a QEMU guest.  This one
+    describes the board on the other side of the serial cable: where its console
+    is, how to make it reboot, and what its boot log must contain before the
+    board counts as up.  Its presence is what makes an instance a physical
+    target, so there is no `kind` field to disagree with.
+    """
+
+    serial: str | None = None
+    baud: int | None = None
+    reset: str | None = None
+    boot_wait: int | None = None
+    boot_timeout: str | None = None
+    console_check: tuple[str, ...] | None = None
+    commands: tuple[str, ...] | None = None
+    expect: tuple[str, ...] | None = None
+    boot_media: tuple[str, ...] | None = None
+    media_device: str | None = None
+    log: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Instance:
     name: str
     arch: str
@@ -159,10 +183,12 @@ class Instance:
     stm32: Stm32Cfg
     flash: FlashCfg
     package: PackageCfg
+    target: TargetCfg
     source: Path
 
 
-CfgSection = KernelCfg | MachineCfg | GuiCfg | NetCfg | RootfsCfg | TestCfg | Stm32Cfg | FlashCfg | PackageCfg
+CfgSection = (KernelCfg | MachineCfg | GuiCfg | NetCfg | RootfsCfg | TestCfg
+               | Stm32Cfg | FlashCfg | PackageCfg | TargetCfg)
 
 
 def section_is_set(cfg: CfgSection) -> bool:
@@ -199,6 +225,11 @@ _SECTION_SPECS: Final = {
               for f in Stm32Cfg.__dataclass_fields__},
     "flash": {f: ("int" if f == "adapter_khz" else "str") for f in FlashCfg.__dataclass_fields__},
     "package": {f: "str" for f in PackageCfg.__dataclass_fields__},
+    "target": {f: ("int" if f in ("baud", "boot_wait")
+                   else "str" if f in ("serial", "reset", "boot_timeout", "log", "media_device")
+                   else "str_list" if f in ("console_check", "commands", "expect", "boot_media")
+                   else "str")
+               for f in TargetCfg.__dataclass_fields__},
 }
 
 
@@ -282,5 +313,6 @@ def parse_instance(path: Path) -> Instance:
         stm32=Stm32Cfg(**sections.get("stm32", {})),
         flash=FlashCfg(**sections.get("flash", {})),
         package=PackageCfg(**sections.get("package", {})),
+        target=TargetCfg(**sections.get("target", {})),
         source=path,
     )
