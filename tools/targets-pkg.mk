@@ -9,7 +9,7 @@
 #   make pkg-key       # 生成本地开发签名密钥（build/keys/，不提交）
 #
 # 常用变量：
-#   PKG_RECIPES   要打包的 recipe 名列表（默认核心三件；extra 包见下）
+#   PKG_RECIPES   要打包的 recipe 名列表（默认核心四件；extra 包见下）
 #   PKG_WORLD     packages/world/ 下的清单名（默认 base）
 #   PKG_SIZE_MB   镜像大小（默认 512；桌面 world 见 PKG_SIZE_MB_GUI）
 #   PKG_ALPINE    image-world 是否引入 Alpine 仓库（默认 1；纯本地组合设 0）
@@ -27,7 +27,10 @@ PKG_KEY_NAME  ?= a20os-dev.rsa.pub
 PKG_OUT_DIR   := build/packages/$(PKG_ARCH)
 PKG_REPO_DIR  ?= build/repo
 PKG_IMAGE_DIR ?= build/images
-PKG_RECIPES   ?= a20-base a20-drivers a20-kernel
+# a20-base 与 a20-min 是**互斥的替代**用户态（都 provide a20-userland），
+# 默认两个都打：CI 的 pkg-repo 由此验证两个 recipe 都能构建，并让 min.world
+# 在发布的仓库里可用。只想要其中一个时覆盖本变量即可。
+PKG_RECIPES   ?= a20-base a20-min a20-drivers a20-kernel
 PKG_WORLD     ?= base
 PKG_SIZE_MB_DEFAULT ?= 512
 PKG_SIZE_MB   ?= $(PKG_SIZE_MB_DEFAULT)
