@@ -472,6 +472,9 @@ check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
 	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
 	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
 	@rg -q "MM_STRESS: PASS" user/cmds/stress/mm_stress.c
+	@rg -q "MM_AS_CURSOR_ONLY_ENTRY" kernel/include/mm/pt.h
+	@rg -q "mm_pt_note_present|mm_pt_note_absent" kernel/mm/mm.c
+	@rg -q "mm_pt_audit_all" kernel/abi/linux/sys_proc.c
 	@echo "check-mm-lock-model: PASS"
 
 check-io-progress-model:
