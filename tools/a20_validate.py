@@ -116,7 +116,42 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         e.append("test.*: the a20 test harness drives the serial console and "
                  "cannot combine with gui.enabled")
     _validate_board_sections(inst, e, repo_root)
+    _validate_target(inst, e)
     return e
+
+
+def _validate_target(inst: Instance, e: list[str]) -> None:
+    """Rules for [target], the physical board behind the serial cable.
+
+    The theme is that a deploy must be able to fail.  Every field that could
+    make the check vacuous -- a board with no console, commands with nothing to
+    assert -- is rejected here rather than discovered after a power cycle.
+    """
+    t = inst.target
+    if not section_is_set(t):
+        return
+    if t.serial is None:
+        e.append("target.serial: required when [target] is present; a physical target "
+                 "with no console cannot be observed or verified")
+    if t.baud is not None and t.baud <= 0:
+        e.append("target.baud: must be a positive integer")
+    if t.boot_wait is not None and t.boot_wait < 0:
+        e.append("target.boot_wait: must not be negative")
+    if t.boot_timeout is not None and not _TIMEOUT_RE.fullmatch(t.boot_timeout):
+        e.append(f"target.boot_timeout: expected e.g. '90s', got '{t.boot_timeout}'")
+    if t.commands is not None and not t.expect:
+        e.append("target.expect: required when target.commands is set; without it the "
+                 "on-board check can only pass vacuously")
+    if t.console_check is not None and not t.console_check:
+        e.append("target.console_check: present but empty")
+    if t.log is not None and Path(t.log).is_absolute():
+        e.append("target.log: must be a repository-relative path, so console logs stay "
+                 "portable between machines")
+    if t.boot_media is not None and not t.boot_media:
+        e.append("target.boot_media: present but empty")
+    if t.expect is not None and t.commands is None and t.console_check is None:
+        e.append("target.expect: nothing would be running to observe; set target.commands "
+                 "or target.console_check as well")
 
 
 def _validate_flash(inst: Instance, e: list[str], repo_root: Path) -> None:
