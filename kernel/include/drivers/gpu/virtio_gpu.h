@@ -263,6 +263,14 @@ struct virtio_gpu_resp_map_info {
 struct device;
 struct device *virtio_gpu_get_dev(void);
 
+/* Upper bound on a 3D command stream.  Shared by the DRM VIRTGPU layer and
+ * the driver so the two cannot disagree: if the ioctl accepts a size the
+ * driver then rejects, a large Mesa command stream fails deep in the driver
+ * with -EINVAL instead of at the call that caused it.  The submit path stages
+ * the blob in a buffer it grows on demand, so this is a sanity limit, not a
+ * structural one. */
+#define VIRTIO_GPU_3D_MAX_CMD_BYTES (16u * 1024u * 1024u)
+
 /* ---- A20 virtio-gpu 3D passthrough ioctls ----
  * Exposed through gpu_dev_ops_t.ioctl (req = _IOW('G', nr, size) style
  * codes local to the A20 GPU layer).  User space (the virgl client stack)
