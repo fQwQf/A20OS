@@ -14,7 +14,6 @@ arch = "x86_64"
 # verified-working configuration until that scheduler bug is fixed.
 smp = 1
 memory = "4G"
-extra_qemu = ["-device", "intel-hda", "-device", "hda-duplex"]
 
 [gui]
 enabled = true
