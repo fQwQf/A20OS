@@ -288,22 +288,23 @@ int mm_pt_range_is_user(vaddr_t start, vaddr_t end)
  * ------------------------------------------------------------------ */
 
 /* The lowest level whose page-table page completely covers [start,end): the
- * paper's "covering PT page". */
+ * paper's "covering PT page".  Ascending matters -- for a single page that is
+ * level 0, and picking the root instead would mean holding the root's lock
+ * while mutating unlocked descendants. */
 static int pt_covering_level(vaddr_t start, vaddr_t end)
 {
-    int level = ARCH_PT_ROOT_LEVEL;
-    while (level > 0) {
+    for (int level = 0; level <= ARCH_PT_ROOT_LEVEL; level++) {
         vaddr_t span = (vaddr_t)PAGE_SIZE << (ARCH_PT_BITS * level);
         vaddr_t base = start & ~(span - 1);
         if (base + span >= end)
-            break;
-        level--;
+            return level;
     }
-    return level;
+    return ARCH_PT_ROOT_LEVEL;
 }
 
-/* Table that holds the leaf slot for addr, i.e. the parent of the leaf.  This
- * is the table whose metadata array describes the page. */
+/* Table that owns the leaf slot for addr, reached by a fresh walk from the
+ * root.  For code that does not hold a cursor (the legacy pt_map_cls path and
+ * the auditor); a cursor uses its cached path instead. */
 pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr)
 {
     pte_t *table = pgdir;
@@ -316,21 +317,38 @@ pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr)
     return table;
 }
 
-static pte_t *leaf_slot(pt_root_t *pgdir, vaddr_t addr, int *level_out)
+/* Index the cached path down to the leaf slot for addr, allocating any
+ * missing intermediate node.  Caller holds the cursor, so the cached path
+ * cannot be unlinked underneath it. */
+static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
 {
-    pte_t *table = pgdir;
-    for (int l = ARCH_PT_ROOT_LEVEL; l > 0; l--) {
-        pte_t e = table[arch_pt_vpn(addr, l)];
-        if (!(e & PTE_V) || arch_pte_is_leaf(e)) {
-            if (level_out)
-                *level_out = l;
-            return &table[arch_pt_vpn(addr, 0)];
+    for (int l = cur->guard_level; l > 0; l--) {
+        pte_t *table = cur->path[l];
+        int idx = arch_pt_vpn(addr, l);
+        pte_t e = table[idx];
+        if (!(e & PTE_V)) {
+            if (!create)
+                return NULL;
+            pte_t *next = (pte_t *)frame_alloc();
+            if (!next)
+                return NULL;
+            mm_pt_node_init(next, l - 1);
+            table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            mm_pt_note_present(table, l, idx,
+                               MM_ST_CLS_BYTE(MM_ST_PT_NODE));
+            cur->path[l - 1] = next;
+            continue;
         }
-        table = arch_pte_to_ptr(e);
+        if (arch_pte_is_leaf(e))
+            return NULL;      /* huge leaf covers more than one page */
+        cur->path[l - 1] = arch_pte_to_ptr(e);
     }
-    if (level_out)
-        *level_out = 0;
-    return &table[arch_pt_vpn(addr, 0)];
+    return &cur->path[0][arch_pt_vpn(addr, 0)];
+}
+
+static inline pte_t *cursor_leaf_table(const mm_cursor_t *cur)
+{
+    return cur->path[0];
 }
 
 /* ------------------------------------------------------------------ *
@@ -347,20 +365,89 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -EFAULT;
 
     int level = pt_covering_level(start, end);
+
+    cur->mm = NULL;
+    cur->locked = 0;
+    cur->start = start;
+    cur->end = end;
+    cur->guard_level = level;
+    cur->path[ARCH_PT_ROOT_LEVEL] = mm->pgdir;
+
     pte_t *table = mm->pgdir;
-    for (int l = ARCH_PT_ROOT_LEVEL; l > level; l--) {
-        pte_t pte = table[arch_pt_vpn(start, l)];
-        if (!(pte & PTE_V) || arch_pte_is_leaf(pte)) {
-            /* A larger-than-needed leaf already covers the range.  The caller
-             * must demote it (mm_demote_huge_page) before a transaction can
-             * address individual pages inside it. */
-            cur->mm = NULL;
-            cur->start = start;
-            cur->end = end;
-            cur->locked = 0;
-            return 1;
+
+    /* Walk down, allocating missing levels.  A first-touch fault routinely
+     * arrives with no intermediate node at all, so this must be able to
+     * create the path -- and it must do so under the parent's lock, which is
+     * why RW (which requires a fully populated table) is not an option here.
+     * On a stale node we drop everything and retry, because a subtree may
+     * have been detached while we were descending. */
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int retry = 0;
+        table = mm->pgdir;
+        cur->path[ARCH_PT_ROOT_LEVEL] = table;
+
+        for (int l = ARCH_PT_ROOT_LEVEL; l > level; l--) {
+            int idx = arch_pt_vpn(start, l);
+            pte_t e = table[idx];
+
+            if ((e & PTE_V) && !arch_pte_is_leaf(e)) {
+                table = arch_pte_to_ptr(e);
+                cur->path[l - 1] = table;
+                continue;
+            }
+
+            if ((e & PTE_V) && arch_pte_is_leaf(e)) {
+                /* A larger-than-needed leaf already covers the range.  The
+                 * caller must demote it (mm_demote_huge_page) before a
+                 * transaction can address individual pages inside it. */
+                return 1;
+            }
+
+            pt_meta_t *pm = mm_pt_meta(table);
+            if (!pm && mm_pt_node_init(table, l) < 0)
+                return -ENOMEM;
+            pm = mm_pt_meta(table);
+            if (!pm)
+                return -ENOMEM;
+
+            mcs_lock(pm);
+            if (pm->stale) {
+                mcs_unlock(pm);
+                retry = 1;
+                break;
+            }
+
+            /* Re-read under the lock: another cursor may have created it. */
+            e = table[idx];
+            if ((e & PTE_V) && !arch_pte_is_leaf(e)) {
+                mcs_unlock(pm);
+                table = arch_pte_to_ptr(e);
+                cur->path[l - 1] = table;
+                continue;
+            }
+            if ((e & PTE_V) && arch_pte_is_leaf(e)) {
+                mcs_unlock(pm);
+                return 1;
+            }
+
+            pte_t *next = (pte_t *)frame_alloc();
+            if (!next) {
+                mcs_unlock(pm);
+                return -ENOMEM;
+            }
+            mm_pt_node_init(next, l - 1);
+            table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            mm_pt_note_present(table, l, idx,
+                               MM_ST_CLS_BYTE(MM_ST_PT_NODE));
+            mcs_unlock(pm);
+
+            table = next;
+            cur->path[l - 1] = table;
         }
-        table = arch_pte_to_ptr(pte);
+        if (!retry)
+            break;
+        if (attempt == 7)
+            return -EAGAIN;
     }
 
     pt_meta_t *m = mm_pt_meta(table);
@@ -377,8 +464,6 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     }
 
     cur->mm = mm;
-    cur->start = start;
-    cur->end = end;
     cur->locked = 1;
     return 0;
 }
@@ -387,18 +472,11 @@ void mm_cursor_unlock(mm_cursor_t *cur)
 {
     if (!cur || !cur->locked || !cur->mm)
         return;
-    int level = pt_covering_level(cur->start, cur->end);
-    pte_t *table = cur->mm->pgdir;
-    for (int l = ARCH_PT_ROOT_LEVEL; l > level; l--) {
-        pte_t pte = table[arch_pt_vpn(cur->start, l)];
-        if (!(pte & PTE_V) || arch_pte_is_leaf(pte))
-            break;
-        table = arch_pte_to_ptr(pte);
-    }
-    pt_meta_t *m = mm_pt_meta(table);
+    pt_meta_t *m = mm_pt_meta(cur->path[cur->guard_level]);
     if (m)
         mcs_unlock(m);
     cur->locked = 0;
+    cur->mm = NULL;
 }
 
 static int cursor_span_ok(const mm_cursor_t *cur, vaddr_t addr)
@@ -416,80 +494,71 @@ uint8_t mm_pt_prot_bits(pte_t flags)
     return prot;
 }
 
-int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
-                    paddr_t *pa_out)
+/* Compose the status byte a mapping with these PTE flags must carry. */
+static inline uint8_t status_byte(uint8_t cls, pte_t flags)
 {
-    if (cls_out)
-        *cls_out = MM_ST_CLS_BYTE(MM_ST_INVALID);
-    if (pa_out)
-        *pa_out = 0;
-    if (!cursor_span_ok(cur, addr))
-        return -EINVAL;
-
-    pte_t *pte = leaf_slot(cur->mm->pgdir, addr, NULL);
-    if (!pte)
-        return 0;
-
-#ifdef CONFIG_SWAP
-    if (pte_is_swap(*pte)) {
-        if (cls_out)
-            *cls_out = MM_ST_CLS_BYTE(MM_ST_SWAPPED) |
-                       mm_pt_prot_bits(arch_pte_flags(*pte));
-        return 1;
-    }
-#endif
-    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
-        return 0;
-
-    /* The metadata is authoritative for the class; the PTE is authoritative
-     * for the frame and for the effective permission bits. */
-    pte_t *table = mm_pt_leaf_table(cur->mm->pgdir, addr);
-    int idx = arch_pt_vpn(addr, 0);
-    uint8_t byte = mm_pt_peek(table, 0, idx);
-    if (MM_ST_GET_CLASS(byte) == MM_ST_INVALID)
-        byte = MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
-    byte = (uint8_t)((byte & (uint8_t)~MM_ST_PROT_MASK) |
-                     mm_pt_prot_bits(*pte));
-
-    if (cls_out)
-        *cls_out = byte;
-    if (pa_out)
-        *pa_out = arch_pte_addr(*pte) + (addr & (PAGE_SIZE - 1));
-    return 1;
+    return (uint8_t)(MM_ST_CLS_BYTE(cls) |
+                     (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
+                     mm_pt_prot_bits(flags));
 }
 
-int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
-                  uint8_t cls)
+/*
+ * Install a mapping and hand back the frame it displaced WITHOUT releasing
+ * it.  The COW path needs this: the old reference must survive until after
+ * the remote TLB shootdown, and the rc==1 branch runs with pfa.lock already
+ * held, so a frame_put() inside here would deadlock against itself.
+ */
+int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
+                      uint8_t cls, paddr_t *old_pa_out)
 {
+    if (old_pa_out)
+        *old_pa_out = 0;
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
     if (cls >= MM_ST_CLASS_MAX)
         return -EINVAL;
 
-    pte_t *table = mm_pt_leaf_table(cur->mm->pgdir, addr);
-    int idx = arch_pt_vpn(addr, 0);
-    pte_t *pte = &table[idx];
+    pte_t *pte = cursor_leaf_slot(cur, addr, 1);
+    if (!pte)
+        return -ENOMEM;
 
-    if (*pte & PTE_V) {
-        paddr_t old_pa = arch_pte_addr(*pte);
-        if (old_pa != pa && arch_pte_is_leaf(*pte))
-            frame_put(phys_to_pfn(old_pa));
+    pte_t old = *pte;
+    pte_t old_pa = 0;
+    int had_old = 0;
+#ifdef CONFIG_SWAP
+    if (!pte_is_swap(old))
+#endif
+    if ((old & PTE_V) && arch_pte_is_leaf(old)) {
+        old_pa = arch_pte_addr(old);
+        had_old = 1;
     }
+
     /* Executable mappings may be populated through PAGE_OFFSET before being
      * installed at their user VA; synchronise the I-cache before the PTE
-     * becomes visible so demand paging, fork/COW, VMO maps and ELF loading
-     * all obey the same contract. */
+     * becomes visible. */
     if (flags & PTE_X) {
         pfn_t pfn = phys_to_pfn(pa);
         if (pfn_valid(pfn))
             arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
     }
     *pte = arch_pte_leaf(pa, flags);
+    mm_pt_note_present(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
+                       status_byte(cls, flags));
 
-    mm_pt_note_present(table, 0, idx,
-                       (uint8_t)(MM_ST_CLS_BYTE(cls) |
-                                 (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
-                                 mm_pt_prot_bits(flags)));
+    if (had_old && old_pa_out)
+        *old_pa_out = old_pa;
+    return 0;
+}
+
+int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
+                  uint8_t cls)
+{
+    paddr_t old_pa = 0;
+    int r = mm_cursor_replace(cur, addr, pa, flags, cls, &old_pa);
+    if (r < 0)
+        return r;
+    if (old_pa && old_pa != pa)
+        frame_put(phys_to_pfn(old_pa));
     return 0;
 }
 
@@ -498,7 +567,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
 
-    pte_t *table = mm_pt_leaf_table(cur->mm->pgdir, addr);
+    pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
     pte_t *pte = &table[idx];
 
@@ -528,12 +597,52 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
     if (cls >= MM_ST_CLASS_MAX)
         return -EINVAL;
 
-    pte_t *table = mm_pt_leaf_table(cur->mm->pgdir, addr);
+    pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
     if (table[idx] & PTE_V)
         return -EEXIST;
     mm_pt_note_present(table, 0, idx, MM_ST_CLS_BYTE(cls));
     return 0;
+}
+
+int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
+                    paddr_t *pa_out)
+{
+    if (cls_out)
+        *cls_out = MM_ST_CLS_BYTE(MM_ST_INVALID);
+    if (pa_out)
+        *pa_out = 0;
+    if (!cursor_span_ok(cur, addr))
+        return -EINVAL;
+
+    pte_t *table = cursor_leaf_table(cur);
+    int idx = arch_pt_vpn(addr, 0);
+    pte_t pte = table[idx];
+
+#ifdef CONFIG_SWAP
+    if (pte_is_swap(pte)) {
+        if (cls_out)
+            *cls_out = MM_ST_CLS_BYTE(MM_ST_SWAPPED) |
+                       mm_pt_prot_bits(arch_pte_flags(pte));
+        return 1;
+    }
+#endif
+    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+        return 0;
+
+    /* The metadata is authoritative for the class; the PTE is authoritative
+     * for the frame and for the effective permission bits. */
+    uint8_t byte = mm_pt_peek(table, 0, idx);
+    if (MM_ST_GET_CLASS(byte) == MM_ST_INVALID)
+        byte = MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+    byte = (uint8_t)((byte & (uint8_t)~MM_ST_PROT_MASK) |
+                     mm_pt_prot_bits(pte));
+
+    if (cls_out)
+        *cls_out = byte;
+    if (pa_out)
+        *pa_out = arch_pte_addr(pte) + (addr & (PAGE_SIZE - 1));
+    return 1;
 }
 
 /* ------------------------------------------------------------------ *

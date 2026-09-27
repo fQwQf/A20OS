@@ -136,12 +136,24 @@ typedef struct pt_meta {
 struct mm_struct;
 
 /* A transaction over one virtual address range.  Every field is private;
- * callers use the accessors below. */
+ * callers use the accessors below.
+ *
+ * The descent is cached at lock time.  A cursor must not re-walk the page
+ * table per operation: that would make a transaction cost more than the bare
+ * pt_walk() it replaces, and -- once mm->lock no longer serialises mutators
+ * in P5 -- a re-descent could observe a path that a concurrent unmap has
+ * already unlinked.  Caching is what makes the cursor a single-descent
+ * primitive, and it is why the lock must cover the whole subtree (P3).
+ */
+#define MM_CURSOR_PATH_MAX (ARCH_PT_ROOT_LEVEL + 1)
+
 typedef struct mm_cursor {
     struct mm_struct *mm;
     vaddr_t           start;
     vaddr_t           end;
     int               locked;
+    int               guard_level;  /* level of the node whose lock is held */
+    pte_t            *path[MM_CURSOR_PATH_MAX];
 } mm_cursor_t;
 
 /* The report is plain data so NOMMU builds can still reference the type and
@@ -215,6 +227,14 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
                     paddr_t *pa_out);
 int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
                   uint8_t cls);
+
+/* Install a mapping and report the displaced frame in *old_pa_out WITHOUT
+ * releasing it.  The COW path must hold the old reference until after the
+ * remote TLB shootdown, and its rc==1 branch already runs under pfa.lock, so
+ * a frame_put() inside a combined map would deadlock. */
+int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
+                      uint8_t cls, paddr_t *old_pa_out);
+
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
 
