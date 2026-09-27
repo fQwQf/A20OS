@@ -203,45 +203,64 @@ backing 的实现要点（§4.3 的落地形态）：
 错误，而是 host 在 `virgl_renderer_get_capset()` 内部失败——它需要一个
 **离屏 desktop GL context**。
 
-本机试遍了两条路，**都不通**：
+本机把 **display backend × EGL vendor** 四种组合全试了一遍，结论一致：
 
-| 宿主 EGL | QEMU 表现 | `GET_CAPS` |
-|---|---|---|
-| 默认（`10_nvidia.json` → NVIDIA 私有 EGL） | 正常启动，guest 可跑，`GETPARAM` 全部正确 | ❌ `ERR_INVALID_PARAMETER`（host 取不到离屏 GL context） |
-| 强制 Mesa（`__EGL_VENDOR_LIBRARY_FILENAMES=.../50_mesa.json`） | ❌ 启动即失败：`egl: eglInitialize failed: EGL_NOT_INITIALIZED` / `egl: render node init failed` | 走不到 |
+| display | EGL vendor | QEMU 表现 | `GET_CAPS` |
+|---|---|---|---|
+| `egl-headless` | 默认（NVIDIA） | 正常启动，`GETPARAM` 全对 | ❌ `0x1205` |
+| `gtk` | 默认（NVIDIA） | ❌ `The display backend does not have OpenGL support enabled` | 走不到 |
+| `gtk,gl=on` | 默认（NVIDIA） | 正常启动，GL 设备挂上 | ❌ `0x1205` |
+| `gtk,gl=on` | 强制 Mesa（`50_mesa.json`） | 正常启动 | ❌ `0x1205` |
 
-`eglinfo` 直接印证了第二条：强制 Mesa 后，**surfaceless / GBM 平台起不来**
-（`libEGL warning: egl: failed to create dri2 screen` → `eglInitialize failed`），
-而 **Wayland 平台正常**，能给出真实的桌面 GL：
+**关键判据是第三行**：`-display gtk,gl=on` 已经给 display backend 开上了 GL，
+QEMU 也确实把 `-device virtio-gpu-gl-device` 挂上了，但 `GET_CAPS` 依然
+`0x1205`。所以"EGL vendor 选到 NVIDIA"只是**表层现象**，不是根因——换成 Mesa
+的 EGL、给它一个带 GL 的 display backend，都没有用。
+
+真正的根因指向 **virglrenderer 本身太老**：
 
 ```
-Wayland platform:
-EGL vendor string: Mesa Project
-OpenGL core profile renderer: AMD Radeon 780M (radeonsi, phoenix, LLVM 19.1.7, DRM 3.61)
+libvirglrenderer1:amd64 1.1.0-2        # Debian 13，2020 年的版本
+[GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308
 ```
 
-两个容易踩的排查陷阱（都实际浪费过时间，记下来）：
+`size=308` 是决定性线索：现代 virgl 的 capset 是**数 KB** 量级（里面要描述
+shader 能力、格式表、参数上限等），308 字节只能是极老的 renderer。1.1.0
+既没有现代 Mesa（25.2）所依赖的 virgl 协议演进，也建不出它需要的离屏
+desktop GL context，于是 `virgl_renderer_get_capset()` 失败并回
+`ERR_INVALID_PARAMETER`。
 
-- `LIBGL_ALWAYS_SOFTWARE=1` 与 surfaceless **互相矛盾**，Mesa 会直接拒绝：
-  `Not allowed to force software rendering when API explicitly selects a
-  hardware device.`。所以"加软件渲染试试"会让 QEMU 提前失败，看起来像
-  unrelated 的新问题。去掉它之后 QEMU 仍然以同样的 `eglInitialize failed`
-  失败，说明软件渲染不是解法。
-- 权限**不是**原因：`/dev/dri/renderD128` 虽然是 `root:render` 且当前用户不在
-  `render` 组，但设备上有 ACL，`test -r/-w` 均为 yes，可以正常访问。
+**结论**：本机 virglrenderer 1.1.0 太老，无法为 Mesa 25.2 提供可用的 3D 通路。
+下列验证在本机**无法进行**，且**与 A20OS 内核无关**：
 
-**结论**：本机（双 GPU：AMD 780M + NVIDIA RTX 4060，EGL vendor 落到 NVIDIA）
-**无法向 virglrenderer 提供离屏 desktop GL context**。因此下列验证在本机
-**无法进行**，与 A20OS 内核无关：
-
-- `GET_CAPS`（故 `gpu3d_test` 记为 NOTE 而非 FAIL——它反映宿主 GL 栈能力）
+- `GET_CAPS`（故 `gpu3d_test` 记为 NOTE 而非 FAIL——它反映宿主能力）
 - stock Mesa `virtio_gpu_dri.so` 实际挂载
 - `GBM` / `A20_RENDERER=gl`
 - 像素回读（需要 host 真的执行渲染）
 
-**换一台宿主即可解锁**：只要 virglrenderer 能拿到离屏 GL（Mesa EGL +
-可用的 DRM 设备，或纯软件 `virgl` 路径），上面四项应逐项跟进。届时先把
-`GET_CAPS` 变成硬断言，再往下走 §8 的第 5 项。
+**解锁办法**：装一个现代 virglrenderer（≥ 0.11），或换一台带新 virglrenderer
+的宿主。这不是改 A20OS 能解决的。
+
+注意本机 **apt 源里没有更新的版本**（Debian trixie 只有 1.1.0-2）：
+
+```
+$ apt-cache policy libvirglrenderer1
+已安装：1.1.0-2
+候选：  1.1.0-2          # 没有更新版本
+```
+
+所以在本机只有两条路：**从源码编译 virglrenderer**（装到 `QEMU_` 前缀，或用
+`LD_LIBRARY_PATH` 覆盖），或者**换宿主/发行版**。这是环境动作，需要 root，
+不应由自动化代理擅自改动宿主机。
+
+### 4.2.1 两个排查陷阱（都实际浪费过时间）
+
+- `LIBGL_ALWAYS_SOFTWARE=1` 与 `EGL_PLATFORM=surfaceless` **互相矛盾**，Mesa
+  直接拒绝：`Not allowed to force software rendering when API explicitly
+  selects a hardware device.`。表现为 QEMU 提前失败，像 unrelated 的新问题。
+- 权限**不是**原因：`/dev/dri/renderD128` 是 `root:render` 且当前用户不在
+  `render` 组，但设备带 ACL，`test -r/-w` 均为 yes，可正常访问。
+  （另外：别对字符设备做 `head -c1`，会阻塞——用 `test -r/-w` 判权限。）
 
 ### 4.3 仍然未验证：命令流语义
 
@@ -366,12 +385,13 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 
 接下来：
 
-5. **换一台能提供离屏 GL 的宿主，然后验证 stock Mesa 实际挂载** —— 用
-   `GPU_3D=1` + xfce world 跑一次，看 `virtio_gpu_dri.so` 能否 attach。
+5. **装一个现代 virglrenderer（≥ 0.11），然后验证 stock Mesa 实际挂载** ——
+   用 `GPU_3D=1` + xfce world 跑一次，看 `virtio_gpu_dri.so` 能否 attach。
    这是判定"VIRTGPU UAPI 是否真的够用"的唯一办法，也是本轮唯一没做的大项。
-   **前置：第 5、7、8 项在本机全部被宿主挡住**——virglrenderer 取不到离屏
-   desktop GL context，NVIDIA EGL 与强制 Mesa EGL 两条路都试过且都不通
-   （§4.2 有完整证据与两个排查陷阱）。这不是 A20OS 的问题，换宿主即可解锁。
+   **前置：第 5、7、8 项在本机全部被宿主挡住**——宿主 `libvirglrenderer1 1.1.0`
+   太老，建不出 Mesa 25.2 需要的离屏 desktop GL context；四种
+   display×EGL 组合（含 `-display gtk,gl=on` + 强制 Mesa EGL）均失败，
+   完整证据与两个排查陷阱见 §4.2。**这不是 A20OS 的问题，改宿主即可解锁。**
 6. **XWayland 呈现**（§7）——独立、可并行、解锁所有 X11 应用（含 Minecraft）。
    **本机可做，不受上述宿主限制影响**，性价比高于继续啃 GPU。
 7. 命令流语义验证 + 像素回读（§4.3）——需要逐字段核对 virgl 的
