@@ -121,16 +121,24 @@ static void mcs_lock(pt_meta_t *m)
         uint32_t spins = 0;
         while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
             arch_cpu_relax();
-            /* Bounded spin: a page-table lock must never be held across a
-             * blocking operation, so a long wait is a lock-order bug, not
-             * contention.  Fail loudly with the waiter's own hold count --
-             * which is the number of page-table nodes this CPU already has
-             * locked, which is exactly the diagnostic that matters. */
+            /* Bounded spin.  A page-table lock is never held across a
+             * blocking operation, so a long wait means a lock-order bug --
+             * except under KVM, where the holder can be descheduled by the
+             * host and make a legitimate wait look arbitrarily long.  Report
+             * whether the node we wait on is one this CPU already holds: that
+             * is the self-deadlock signature, and it is the only condition
+             * that justifies aborting. */
             if (++spins == (1u << 26)) {
-                kerr("[MCS DEADLOCK] cpu=%u waits on level=%u "
-                     "already_holding=%u\\n", cpu, m->level,
-                     (unsigned)(d - 1));
-                panic("page-table lock wait exceeded bound");
+                int mine = (d > 0 && pool->held[d - 1] == m);
+                if (mine) {
+                    kerr("[MCS DEADLOCK] cpu=%u SELF node=%p level=%u "
+                         "depth=%u\\n", cpu, (void *)m, m->level,
+                         (unsigned)d);
+                    panic("page-table lock self-deadlock");
+                }
+                /* Remote holder: not a deadlock, keep waiting.  Reset the
+                 * counter so the watchdog only fires on a true self-lock. */
+                spins = 0;
             }
         }
     }
