@@ -321,3 +321,28 @@ per-PTE 状态。但这引出一个结构性问题：per-PTE 状态挂在**页�
    + `smoke-abi-linux` + `check-mm-lock-model` + 关机审计全 0。
 5. 提示：QEMU smoke 门会因遗留 qemu 占住 host 5555 端口而假失败，可用
    `make ARCH=riscv64 NET_HOSTFWD=hostfwd=tcp::6099-:6099,... <target>` 换端口。
+
+### 8.5 与本改造无关的既有缺陷（勿误判为回归）
+
+在 x86_64 目标上验证时发现 `syscall_smoke` 失败：
+`SYSCALL_SMOKE: FAIL renameat errno=22`（EINVAL）。
+
+**已在未修改的 `main`（31055cd9）上复现同样失败**，故为 A20OS 既有的 x86_64
+缺陷，与单级内存模型改造无关。同一目标上 `mm_stress` 通过、关机审计全 0。
+
+另有既有问题（非本轮引入）：
+
+* `riscv32` 在 `main` 上即构建失败（`kernel/ipc/kexec.c` 指针转换），因此
+  `smoke-arch-mmu-matrix` 覆盖不到 riscv32。
+* `arm32` 缺 `arm-linux-gnueabihf` 工具链，本机无法构建。
+* smoke 门以 grep `*_PASS` 标记判定，而该标记在关机审计之前打印，因此关机
+  路径上的 panic 不会让门失败。审计行必须与 PASS 标记一并检查。
+* QEMU smoke 门会因遗留 qemu 占用 host 5555 而假失败；可用
+  `make ARCH=... NET_HOSTFWD=hostfwd=tcp::6099-:6099,...` 换端口。
+
+### 8.6 验收环境的硬性要求
+
+**并行性度量只以 x86_64/KVM 为准。** riscv64/TCG 只能用于功能正确性：跨架构
+TCG 无可用多线程 TCG，vCPU 本身即被串行化（`cpu_scale` 实测 0.89x–0.96x），
+任何内存管理改动都不可能在该环境下显示加速。x86_64/KVM 下 `cpu_scale` 为
+3.93x，是有效的度量环境。
