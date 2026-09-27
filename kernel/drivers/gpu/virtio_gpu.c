@@ -581,7 +581,7 @@ static int gpu_ioctl(struct device *dev, unsigned long req, void *arg) {
     if (req == A20_GPU_IOCTL_RES_UNREF)
         return virtio_gpu_resource_unref(inst, r.resource_id);
     if (req == A20_GPU_IOCTL_SUBMIT_3D) {
-        if (r.cmdlen == 0 || r.cmdlen > (uint64_t)128 * 1024)
+        if (r.cmdlen == 0 || r.cmdlen > VIRTIO_GPU_3D_MAX_CMD_BYTES)
             return -EINVAL;
         uint8_t *tmp = kmalloc((size_t)r.cmdlen);
         if (!tmp)
@@ -682,7 +682,7 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
 {
     if (!inst->virgl)
         return -ENXIO;
-    if (len > (size_t)128 * 1024)
+    if (len > VIRTIO_GPU_3D_MAX_CMD_BYTES)
         return -EINVAL;
 
     /* The command blob must be DMA-visible; stage it in the driver buffer
