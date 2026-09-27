@@ -437,6 +437,12 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     cur->guard_level = level;
     cur->path[ARCH_PT_ROOT_LEVEL] = mm->pgdir;
 
+    /* Read-side section: from here on the descent caches physical pointers,
+     * so a concurrent detach must be prevented from recycling them.  Paired
+     * in mm_cursor_unlock, including every error return below. */
+    cur->in_read_side = 1;
+    mm_pt_read_enter(mm);
+
     pte_t *table = mm->pgdir;
 
     /* Walk down, allocating missing levels.  A first-touch fault routinely
@@ -468,11 +474,17 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             }
 
             pt_meta_t *pm = mm_pt_meta(table);
-            if (!pm && mm_pt_node_init(table, l) < 0)
+            if (!pm && mm_pt_node_init(table, l) < 0) {
+                mm_pt_read_exit(mm);
+                cur->in_read_side = 0;
                 return -ENOMEM;
+            }
             pm = mm_pt_meta(table);
-            if (!pm)
+            if (!pm) {
+                mm_pt_read_exit(mm);
+                cur->in_read_side = 0;
                 return -ENOMEM;
+            }
 
             mcs_lock(pm);
             if (pm->stale) {
@@ -491,12 +503,16 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             }
             if ((e & PTE_V) && arch_pte_is_leaf(e)) {
                 mcs_unlock(pm);
+                mm_pt_read_exit(mm);
+                cur->in_read_side = 0;
                 return 1;
             }
 
             pte_t *next = (pte_t *)frame_alloc();
             if (!next) {
                 mcs_unlock(pm);
+                mm_pt_read_exit(mm);
+                cur->in_read_side = 0;
                 return -ENOMEM;
             }
             mm_pt_node_init(next, l - 1);
@@ -510,22 +526,33 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         }
         if (!retry)
             break;
-        if (attempt == 7)
+        if (attempt == 7) {
+            mm_pt_read_exit(mm);
+            cur->in_read_side = 0;
             return -EAGAIN;
+        }
     }
 
     pt_meta_t *m = mm_pt_meta(table);
-    if (!m && mm_pt_node_init(table, level) < 0)
+    if (!m && mm_pt_node_init(table, level) < 0) {
+        mm_pt_read_exit(mm);
+        cur->in_read_side = 0;
         return -ENOMEM;
+    }
     m = mm_pt_meta(table);
-    if (!m)
+    if (!m) {
+        mm_pt_read_exit(mm);
+        cur->in_read_side = 0;
         return -ENOMEM;
+    }
 
     cur->lock_base_depth = (int)g_pt_mcs_pool[pt_cpu()].depth;
     mcs_lock(m);
     if (m->stale) {
         mcs_unlock(m);
         cur->lock_base_depth = 0;
+        mm_pt_read_exit(mm);
+        cur->in_read_side = 0;
         return -EAGAIN;      /* racing a subtree detach; caller retries */
     }
 
@@ -555,6 +582,10 @@ void mm_cursor_unlock(mm_cursor_t *cur)
         pool->depth--;
         if (m)
             mcs_unlock(m);
+    }
+    if (cur->in_read_side) {
+        mm_pt_read_exit(cur->mm);
+        cur->in_read_side = 0;
     }
     cur->locked = 0;
     cur->mm = NULL;
@@ -724,6 +755,53 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
     if (pa_out)
         *pa_out = arch_pte_addr(pte) + (addr & (PAGE_SIZE - 1));
     return 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Deferred page-table page reclamation (P4)
+ * ------------------------------------------------------------------ */
+void mm_pt_read_enter(struct mm_struct *mm)
+{
+    if (mm)
+        __atomic_fetch_add(&mm->pt_readers, 1, __ATOMIC_ACQ_REL);
+}
+
+void mm_pt_read_exit(struct mm_struct *mm)
+{
+    if (mm)
+        __atomic_fetch_sub(&mm->pt_readers, 1, __ATOMIC_ACQ_REL);
+}
+
+int mm_pt_defer_free(struct mm_struct *mm, pte_t *table, int level)
+{
+    if (!mm || !table)
+        return -EINVAL;
+    pfn_t pfn = virt_to_pfn((const void *)table);
+    if (!pfn_valid(pfn))
+        return -EINVAL;
+    int r = mm_pt_hold_table(mm, pfn, level);
+    if (r < 0)
+        return r;
+    /* The page is now unreachable through the page table; a cursor that had
+     * already cached it either still holds a read-side reference (so the
+     * drain waits) or will observe `stale` and retry. */
+    mm_pt_node_fini(table);
+    return 0;
+}
+
+void mm_pt_mark_stale_recursive(pte_t *table, int level)
+{
+    pt_meta_t *m = mm_pt_meta(table);
+    if (m)
+        mm_pt_meta_set_stale(m, 1);
+    if (level <= 0)
+        return;
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
+        pte_t e = table[i];
+        if ((e & PTE_V) && !arch_pte_is_leaf(e))
+            mm_pt_mark_stale_recursive(arch_pte_to_ptr(e), level - 1);
+    }
 }
 
 /* ------------------------------------------------------------------ *

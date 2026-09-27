@@ -25,7 +25,33 @@
 enum {
     MM_TLB_HOLD_FRAME = 1,
     MM_TLB_HOLD_PAGE = 2,
+    MM_TLB_HOLD_PT = 3,
 };
+
+/* Queue a detached page-table page for release after the shootdown barrier.
+ * The PT frame is pinned like any other deferred frame so the buddy cannot
+ * reuse it while a cursor might still hold a cached pointer into the subtree. */
+int mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level)
+{
+    mm_tlb_hold_t *hold = kcalloc_atomic(1, sizeof(*hold));
+    if (!hold)
+        return -ENOMEM;
+    if (!pfn_valid(pfn)) {
+        kfree(hold);
+        return -EINVAL;
+    }
+    hold->frame = pfn;
+    hold->page = NULL;
+    hold->kind = MM_TLB_HOLD_PT;
+    hold->pt_level = (uint8_t)level;
+    /* Caller holds mm->lock (or the final mm reference).  The deferred list
+     * itself is the pin: nothing else can free a PT page except this drain,
+     * so no refcount manipulation is needed (PT pages are owned by the page
+     * table, not by frame refcounting). */
+    hold->next = mm->tlb_holds;
+    mm->tlb_holds = hold;
+    return 0;
+}
 
 void mm_arch_context_init(mm_struct_t *mm)
 {
@@ -226,6 +252,30 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
     mm->tlb_holds = NULL;
     spin_unlock_irqrestore(&mm->lock, flags);
 
+    /* A detached page-table page may still be reachable by a cursor that
+     * cached the pointer during its descent, so releasing it needs both the
+     * shootdown above AND an empty read-side section.  The loop is bounded:
+     * a cursor holds its lock only for the length of a few page-table
+     * operations, so a stuck count means a lost cursor, not contention. */
+    if (hold) {
+        for (hold = hold; hold && __atomic_load_n(&mm->pt_readers,
+                                                  __ATOMIC_ACQUIRE);
+             hold = mm->tlb_holds) {
+            uint64_t spin_flags = spin_lock_irqsave(&mm->lock);
+            mm_tlb_hold_t *again = mm->tlb_holds;
+            mm->tlb_holds = NULL;
+            spin_unlock_irqrestore(&mm->lock, spin_flags);
+            /* Republish so a concurrent queue survives the wait. */
+            for (mm_tlb_hold_t *t = again; t; ) {
+                mm_tlb_hold_t *n = t->next;
+                t->next = hold;
+                hold = t;
+                t = n;
+            }
+            arch_cpu_relax();
+        }
+    }
+
     /* Drain the deferred frame frees in batches so one munmap/exit of a
      * large arena takes pfa.lock once per chunk instead of once per page
      * (frame_put_many).  Page-cache holds keep their per-page release. */
@@ -234,7 +284,17 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm)
         size_t frame_count = 0;
         while (hold) {
             mm_tlb_hold_t *next = hold->next;
-            if (hold->kind == MM_TLB_HOLD_FRAME) {
+            if (hold->kind == MM_TLB_HOLD_PT) {
+                int order = (hold->pt_level == ARCH_PT_ROOT_LEVEL)
+                                ? ARCH_PT_ROOT_ORDER : 0;
+                if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
+                    frame_put_many(frame_chunk, frame_count);
+                    frame_count = 0;
+                }
+                frame_chunk[frame_count++] = hold->frame;
+                pfa_free(hold->frame, order);
+                hold->frame = PFN_NONE;
+            } else if (hold->kind == MM_TLB_HOLD_FRAME) {
                 if (frame_count == sizeof(frame_chunk) / sizeof(frame_chunk[0])) {
                     frame_put_many(frame_chunk, frame_count);
                     frame_count = 0;

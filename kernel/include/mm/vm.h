@@ -77,6 +77,7 @@ typedef struct mm_tlb_hold {
     pfn_t frame;
     struct page_cache_page *page;
     uint8_t kind;
+    uint8_t pt_level;     /* MM_TLB_HOLD_PT: order to free the PT frame at */
 } mm_tlb_hold_t;
 
 /*
@@ -163,6 +164,7 @@ typedef struct mm_struct {
      */
     mutex_t tlb_lock;
     uint32_t active_cpus;    /* CPUs whose hardware context currently uses mm */
+    uint32_t pt_readers;     /* cursors currently traversing this address space */
     uint32_t arch_asid;      /* nonzero tagged user address-space id */
     uint8_t tlb_pending;     /* transaction cleared/replaced at least one PTE */
     uint8_t _pad_tlb[3];
@@ -295,6 +297,7 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm);
 void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr);
 void mm_tlb_note_change(mm_struct_t *mm, vaddr_t addr, size_t size);
 int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
+int  mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level);
 int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);
 void mm_context_enter(mm_struct_t *mm, unsigned cpu);
 void mm_context_leave(mm_struct_t *mm, unsigned cpu);
