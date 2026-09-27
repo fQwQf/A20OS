@@ -35,9 +35,18 @@
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
+`HOST_RESOURCE_GATE_CONTRACT`：任何会启动 guest 的门禁都必须先做宿主资源预检。QEMU 申请到宿主机给不出的内存时不会返回非零退出码，而是宿主 OOM killer 挑一个进程杀掉，被杀的通常不是正在被调试的那个对象——所以"启动失败"在这里不是一个可观测的错误路径。预检由 `tools/a20_resource.py` 单一实现：经 `tools/a20` 的实例路径和经 `tools/targets-smoke.mk` 的 `smoke-gate` 宏（35 个直接起 `qemu-system-*` 的目标）调用的是同一个 `gate()` 与同一套 `A20_*` 环境策略，两者不得各自实现等待逻辑。门禁参数必须与该目标 `qemu` 命令行里的 `-m`/`-smp` 一致，否则预检在保护另一件事。等待策略有意分两种：`tools/a20 run/debug/test` 的 `A20_WAIT_TIMEOUT` 默认 `0`（一直等，因为交互式跑实例时"等资源释放"正是期望行为）；`smoke-*` 门禁的可覆盖默认是 `900s` 有界等待，因为 CI 在宿主机磁盘真的满时必须失败而不是挂死。可用性取 `/proc/meminfo` 的 `MemAvailable` 而非 `free`（后者不含可回收 page cache，会让门禁永远阻塞），并发 guest 数单独统计（空闲 vCPU 不进 loadavg，只看 load 无法判断是否已有 guest 占着 CPU）。
+
 `make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke；阻塞点、信号/退出、timeout、SMP runqueue 与本地 pick 五个边界门禁分别依赖 `smoke-proc-stress`、`smoke-futex-stress` 和 `smoke-sched-stress`（在 QEMU 中 grep 运行时日志，而非源码标记），可能运行较长时间。
 
 ## 运行手册
+
+### 宿主资源预检
+- **How to run**: 无独立入口，随门禁自动执行。手动预检一个即将发起的启动：
+  `python3 tools/a20_resource.py -m 1G -c 1 [--hostfwd 127.0.0.1:5555] [--no-wait]`
+  查看策略与当前余量用 `tools/a20 resources`（不带参数，输出门禁所依据的宿主预算）。
+- **What it checks**: 内存（`MemAvailable`）、空闲 vCPU、磁盘余量、并发 guest 数、以及本次启动会绑定的宿主端口。任一不足则按策略等待或退出。
+- **When it fails**: 门禁卡在 `a20: waiting for host resources (mem ... MiB, ... vCPU, ...)` 而不是启动失败，是预期行为——先释放资源，或调 `A20_RESERVE_MEM_MB` / `A20_MAX_CONCURRENT` / `A20_MIN_DISK_MB`。`--no-wait` 下会以非零退出码立即失败，用于确认某个需求是否真的能满足。CI 上若持续超时，检查的是宿主而非被测系统。
 
 ### 并发基础
 - **How to run**: `make check-concurrency-foundation`
