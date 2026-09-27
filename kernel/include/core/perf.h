@@ -45,6 +45,15 @@ typedef enum a20_perf_counter {
     A20_PERF_MM_ANON_BATCH_WINDOWS,
     A20_PERF_MM_ANON_BATCH_PAGES,
     A20_PERF_MM_COW_FAULTS,
+    /* Single-level model: page-table lock behaviour.  A cursor that finds the
+     * covering node busy is contending with a transaction on an overlapping
+     * range; the ratio of contended to total acquisitions is the direct
+     * measure of how well disjoint ranges avoid serialising. */
+    A20_PERF_MM_PT_LOCK_ACQUIRES,
+    A20_PERF_MM_PT_LOCK_CONTENDED,
+    A20_PERF_MM_PT_LOCK_WAITS,
+    A20_PERF_MM_CURSOR_OPEN,
+    A20_PERF_MM_CURSOR_STALE_RETRY,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,
