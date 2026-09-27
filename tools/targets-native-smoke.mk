@@ -176,543 +176,68 @@ $(UFS_NTFS_IMG): FORCE
 # 盘位（避开 bus.3/bus.5 的用户驱动预留）：bus.2=fat(1) bus.4=ext4(2)
 # bus.6=iso9660(3) bus.7=ntfs(4)；主存储在 bus.0。
 smoke-native-fs-all:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG) $(UFS_EXT4_IMG) $(UFS_ISO_IMG) $(UFS_NTFS_IMG)
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-fs-all-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/svcmgr-rv &\nsleep 2\n/bin/ufs_all_test\npoweroff\n'; } | \
-	$(TIMEOUT) 180s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=$(UFS_SCRATCH_IMG),if=none,format=raw,id=xfs1 \
-		-device virtio-blk-device,drive=xfs1,bus=virtio-mmio-bus.2 \
-		-drive file=$(UFS_EXT4_IMG),if=none,format=raw,id=xfs2 \
-		-device virtio-blk-device,drive=xfs2,bus=virtio-mmio-bus.4 \
-		-drive file=$(UFS_ISO_IMG),if=none,format=raw,id=xfs3 \
-		-device virtio-blk-device,drive=xfs3,bus=virtio-mmio-bus.6 \
-		-drive file=$(UFS_NTFS_IMG),if=none,format=raw,id=xfs4 \
-		-device virtio-blk-device,drive=xfs4,bus=virtio-mmio-bus.7 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		-append 'a20.ufsd_blk=1' \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UXFS_ALL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log" && \
-	   grep -q 'SVC_MGR: ufsd blk=1 (cmdline)' "$$log"; then \
-		echo "smoke-native-fs-all: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-fs-all: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-fs-all
 
 # smoke-native-ufs：文件系统实现运行在用户态服务（ufsd）的端到端门禁。
 # 第二块盘挂在空闲槽位 bus.2（bus.3/bus.5 已预留给 ubd/uinputd），
 # DEV_CLASS_BLOCK 序号 1 由 ufsd 经 fs_block_io 访问；FAT32 解析全部发生
 # 在 ufsd 进程内，内核仅保留 VFS 代理。
 smoke-native-ufs:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UFS_SCRATCH_IMG)
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-ufs-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ufs_test\npoweroff\n'; } | \
-	$(TIMEOUT) 120s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=$(UFS_SCRATCH_IMG),if=none,format=raw,id=xufs \
-		-device virtio-blk-device,drive=xufs,bus=virtio-mmio-bus.2 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UXFS_FS: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-ufs: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-ufs: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-ufs
 
 smoke-dual-input:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/dual-input-riscv64.log"; \
-	monsock="$(SMOKE_LOG_DIR)/dual-input-monitor.sock"; \
-	rm -f "$$monsock"; \
-	status=0; \
-	{ sleep 8; $(PYTHON) -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); [(s.sendall(b"sendkey a\n"), time.sleep(1)) for _ in range(24)]; s.close()' "$$monsock" 2>/dev/null || true; } & \
-	{ sleep 14; printf 'poweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
-		-monitor unix:$$monsock,server,nowait \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UINPUT] kernel-placement probe: id=18 version=2 name=QEMU Virtio Keyboard' "$$log" && \
-	   grep -q 'UINPUTD: name=QEMU Virtio Keyboard' "$$log" && \
-	   grep -q 'UINPUTD: ready' "$$log" && \
-	   grep -q 'UINPUTD: ev type=1 code=30 value=1' "$$log" && \
-	   grep -q 'UINPUTD: claimed' "$$log" && \
-	   grep -q 'UINPUTD: PASS' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-dual-input: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-dual-input: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-dual-input
 
 smoke-native-ubd:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 $(UBD_SCRATCH_IMG)
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-ubd-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/ubd_fs_test\npoweroff\n'; } | \
-	$(TIMEOUT) 120s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		-drive file=$(UBD_SCRATCH_IMG),if=none,format=raw,id=xubd \
-		-device virtio-blk-device,drive=xubd,bus=virtio-mmio-bus.3 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'UBD_FS: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-ubd: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-ubd: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-ubd
 
 smoke-native-isolation:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-isolation-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-isolation-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 90s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_ISOLATION: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-isolation: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-isolation: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-isolation
 
 smoke-native-registry:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-registry-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/svcmgr-rv &\nsleep 1\n/bin/native-registry-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_REGISTRY: PASS' "$$log" && grep -q 'SVC_MGR: ready' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-registry: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-registry: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-registry
 
 smoke-native-rtcd:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-rtcd-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-rtcd-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_RTCD: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-rtcd: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-rtcd: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-rtcd
 
 smoke-native-shmring:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-shmring-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-shmring-rv\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_SHMRING: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-shmring: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-shmring: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-shmring
 
 smoke-clock-vdso:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/clock-vdso-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/clock_bench\npoweroff\n'; } | \
-	$(TIMEOUT) 60s qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'CLOCK_BENCH: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-clock-vdso: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-clock-vdso: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-clock-vdso
 
 smoke-native-svc:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-svc-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/svcman-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_SVC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-svc: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-svc: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-svc
 
 smoke-native-contract:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-contract-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-contract-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'ralg ok' "$$log" && grep -q 'bp ok' "$$log" && \
-	   grep -q 'evqc ok' "$$log" && grep -q 'vmol ok' "$$log" && \
-	   grep -q 'dma ok' "$$log" && \
-	   grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-contract: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-contract: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-contract
 
 smoke-native-personality:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-personality-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-personality-rv\n/bin/pipe_ref\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_PERSONALITY: PASS' "$$log" && \
-	   [ "$$(grep -c 'PIPE_REF: partial=6 rest=5 joined=hello world level=ok' "$$log")" = "2" ] && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-native-personality: PASS (native + Linux ABI reference agree); log saved to $$log"; \
-	else \
-		echo "smoke-native-personality: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-personality
 
 smoke-native-linux:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-linux-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-linux-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'linux fd ok' "$$log" && grep -q 'linux mmap ok' "$$log" && \
-	   grep -q 'linux pipe ok' "$$log" && grep -q 'linux sockpair ok' "$$log" && \
-	   grep -q 'linux futex ok' "$$log" && grep -q 'linux epoll ok' "$$log" && \
-	   grep -q 'NATIVE_LINUX: PASS' "$$log" && \
-	   grep -q 'System is going down for power-off' "$$log"; then \
-		echo "smoke-native-linux: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-linux: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-linux
 
 smoke-native-ipc:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-ipc-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-ipc-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_IPC: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-ipc: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-ipc: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-ipc
 
 smoke-native-signal:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-signal-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-signal-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_SIGNAL: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-signal: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-signal: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-signal
 
 smoke-native-dynlink:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-dynlink-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/dynprobe-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'FAKELD:.*ok' "$$log" && grep -q 'DYNPROBE: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-dynlink: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-dynlink: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-dynlink
 
 smoke-native-mm:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-mm-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-mm-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_MM: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-mm: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-mm: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-mm
 
 smoke-native-futex:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-futex-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-futex-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_FUTEX: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-futex: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-futex: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-futex
 
 smoke-native-deepen:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 native-deepen-rv
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-deepen-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-deepen-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT_DEEPEN) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_DEEPEN: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-deepen: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-deepen: failed with status $$status; tail of $$log:"; \
-		tail -n 100 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-deepen
 
 smoke-native-ext:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-ext-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-ext-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_EXT: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-ext: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-ext: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-ext
 
 smoke-native-debug:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/native-debug-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '/bin/native-debug-rv\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'NATIVE_DEBUG: PASS' "$$log" && grep -q 'System is going down for power-off NOW' "$$log"; then \
-		echo "smoke-native-debug: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-native-debug: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-native-debug
