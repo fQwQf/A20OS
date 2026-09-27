@@ -7,7 +7,8 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
-        check-component-registry check-flash-backend-registry check-manifests \
+        check-component-registry regen-driver-fragment \
+        check-flash-backend-registry check-manifests \
         check-a20-tests
 
 # Instance/manifest gates (docs/instances.md).  check-instance-matrix pins the
@@ -21,6 +22,15 @@ check-instance-matrix:
 
 check-component-registry:
 	@tools/a20 check-registry
+
+# components/drivers.mk is generated from components/drivers.toml.  Run this
+# after editing the TOML; check-component-registry fails while it is stale, so
+# the generated copy can never rot the way a second hand-maintained list could.
+regen-driver-fragment:
+	@$(PYTHON) -c "import sys; sys.path.insert(0, 'tools'); \
+	from pathlib import Path; from a20_registry import load_registry, render_make_fragment, make_fragment_path; \
+	r = Path('.'); p = make_fragment_path(r); p.write_text(render_make_fragment(load_registry(r))); \
+	print('regen-driver-fragment: wrote', p)"
 
 # Flash-programmer registry (components/flash-backends.toml).  Two layers, like
 # the driver registry: the toml is self-validated (unique names, boards that

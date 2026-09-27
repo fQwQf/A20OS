@@ -63,7 +63,7 @@ from a20_registry import (
     DriverComponent,
     RegistryError,
     cross_check_flash_targets,
-    cross_check_make,
+    check_make_fragment,
     load_flash_backends,
     load_registry,
     validate_driver_selection,
@@ -421,12 +421,17 @@ def cmd_check_registry(_args: argparse.Namespace) -> int:
     except RegistryError as e:
         print(f"FAIL components/drivers.toml:\n{e}")
         return 1
-    errors = validate_registry(entries, REPO_ROOT) + cross_check_make(entries, REPO_ROOT)
+    errors = validate_registry(entries, REPO_ROOT)
     if errors:
         listing = "\n".join(f"  - {e}" for e in errors)
         print(f"FAIL components/drivers.toml:\n{listing}")
         return 1
-    print(f"check-registry: {len(entries)} driver component(s) OK, Makefile lists in sync")
+    stale = check_make_fragment(entries, REPO_ROOT)
+    if stale:
+        listing = "\n".join(f"  - {e}" for e in stale)
+        print(f"FAIL components/drivers.mk (generated):\n{listing}")
+        return 1
+    print(f"check-registry: {len(entries)} driver component(s) OK, generated fragment current")
     return 0
 
 
@@ -484,7 +489,7 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("instances", nargs="*", help="manifests to check (default: all)")
     p_check.add_argument("--require-arch", nargs="*", default=(), metavar="ARCH",
                          help="fail unless every listed arch is covered by a valid instance")
-    sub.add_parser("check-registry", help="validate components/drivers.toml against the Makefile")
+    sub.add_parser("check-registry", help="validate components/drivers.toml and its generated make fragment")
     sub.add_parser("check-flash-backends",
                    help="validate components/flash-backends.toml against the makefiles")
     sub.add_parser("list", help="list known instances")

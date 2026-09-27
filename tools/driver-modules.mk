@@ -6,30 +6,30 @@
 
 ifeq ($(DRIVER_DEPLOYMENT),generic)
 
+# DRVMOD_MODULES / EARLY_DRVMOD_MODULES are generated from
+# components/drivers.toml -- the only place a driver is declared.  Regenerate
+# with `make regen-driver-fragment` after editing the TOML; `make
+# check-component-registry` fails if the generated file is stale.
+include components/drivers.mk
+
 DRVMOD_DIR := kernel/drvmod/examples
 ifeq ($(ARCH),riscv64)
 DRVMOD_GCC := $(CCACHE_PREFIX)$(RISCV_ELF_PREFIX)gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -mcmodel=medany -fPIC -mno-relax \
                  -march=rv64g -mabi=lp64d -DCONFIG_RISCV64 -Ikernel/arch/riscv64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv dw-sdio.a20drv virtio-net.a20drv virtio-gpu.a20drv virtio-snd.a20drv vinput-probe.a20drv vinput.a20drv hda.a20drv
 else ifeq ($(ARCH),x86_64)
 DRVMOD_GCC := $(CCACHE_PREFIX)x86_64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -mno-red-zone -fno-pic -fno-pie \
                  -mcmodel=large -DCONFIG_X86_64 -Ikernel/arch/x86_64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES := pc-spkr.a20drv virtio-blk.a20drv virtio-scsi.a20drv ahci.a20drv ps2.a20drv tpm.a20drv nvme.a20drv e1000.a20drv virtio-net.a20drv vmsvga.a20drv virtio-gpu.a20drv xhci.a20drv usb-hid.a20drv usb-storage.a20drv hda.a20drv virtio-snd.a20drv vinput.a20drv
 else ifeq ($(ARCH),aarch64)
 DRVMOD_GCC := $(CCACHE_PREFIX)aarch64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=large \
                  -mno-outline-atomics \
                  -DCONFIG_AARCH64 -DCONFIG_NR_CPUS=1 -Ikernel/arch/aarch64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv virtio-net.a20drv virtio-gpu.a20drv virtio-snd.a20drv xhci.a20drv usb-hid.a20drv usb-storage.a20drv vinput-probe.a20drv vinput.a20drv hda.a20drv
 else ifeq ($(ARCH),loongarch64)
 DRVMOD_GCC := $(CCACHE_PREFIX)loongarch64-linux-gnu-gcc
 DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
-DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv nvme.a20drv virtio-net.a20drv virtio-gpu.a20drv virtio-snd.a20drv xhci.a20drv usb-hid.a20drv usb-storage.a20drv vinput.a20drv hda.a20drv
-else
-DRVMOD_MODULES :=
 endif
 DRVMOD_CFLAGS += -std=gnu99
 ifneq ($(filter $(ARCH),riscv64 x86_64 aarch64 loongarch64),)
@@ -53,22 +53,15 @@ $(addprefix $(USER_BUILD_DIR)/,$(DRVMOD_MODULES)): tools/driver-modules.mk $(USE
 # must be present here; anything else may live in the Runtime DriverStore.
 ifeq ($(DRIVER_DEPLOYMENT),generic)
 ifeq ($(ARCH),x86_64)
-EARLY_DRVMOD_MODULES := pc-spkr.a20drv virtio-blk.a20drv virtio-scsi.a20drv ahci.a20drv
 EARLY_DRIVER_BFD := elf64-x86-64 -B i386:x86-64
 else ifneq ($(filter $(ARCH),riscv64 aarch64 loongarch64),)
-EARLY_DRVMOD_MODULES := rtc.a20drv virtio-blk.a20drv virtio-scsi.a20drv
 ifeq ($(ARCH),riscv64)
-EARLY_DRVMOD_MODULES += dw-sdio.a20drv
 endif
 EARLY_DRIVER_BFD_riscv64 := elf64-littleriscv -B riscv:rv64
 EARLY_DRIVER_BFD_aarch64 := elf64-littleaarch64 -B aarch64
 EARLY_DRIVER_BFD_loongarch64 := elf64-loongarch -B loongarch
 EARLY_DRIVER_BFD := $(EARLY_DRIVER_BFD_$(ARCH))
-else
-EARLY_DRVMOD_MODULES :=
 endif
-else
-EARLY_DRVMOD_MODULES :=
 endif
 EARLY_DRIVER_BLOBS := $(addprefix $(BUILD_DIR)/rootfs-drivers/,$(EARLY_DRVMOD_MODULES:.a20drv=.o))
 RUNTIME_DRVMOD_MODULES := $(filter-out $(EARLY_DRVMOD_MODULES),$(DRVMOD_MODULES))
@@ -290,7 +283,6 @@ smoke-drvmod: smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smok
 
 else
 
-DRVMOD_MODULES :=
 DRIVER_STORE_USER_PACKAGES :=
 
 drvmod-examples:
