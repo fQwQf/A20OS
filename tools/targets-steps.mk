@@ -282,6 +282,7 @@ check-proc-step5: check-proc-step5-local
 	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -313,6 +314,7 @@ smoke-socket-stress:
 	fi
 
 smoke-driver-lifecycle:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y kernel-only
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -336,6 +338,7 @@ smoke-driver-lifecycle:
 	fi
 
 smoke-hda:
+	$(call smoke-gate,1G,1)
 	rm -f user/build/x86_64/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
@@ -363,6 +366,7 @@ smoke-hda:
 	fi
 
 smoke-audio-userspace:
+	$(call smoke-gate,1G,1)
 	rm -f user/build/x86_64/hda.a20drv
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
@@ -397,6 +401,7 @@ smoke-audio-userspace:
 	fi
 
 smoke-usb-x86_64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -425,6 +430,7 @@ smoke-usb-x86_64:
 	fi
 
 smoke-virtio-sound:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=x86_64 BOARD=qemu-virt-x86_64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -457,6 +463,7 @@ smoke-virtio-sound:
 	fi
 
 smoke-pci-portability:
+	$(call smoke-gate,1G,1)
 	rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv
 	$(MAKE) ARCH=loongarch64 BOARD=qemu-virt-loongarch64 ABI=both BRINGUP=0 \
 		CONFIG_HDA_SMOKE_TEST=y DRVMOD_SMOKE=1 dev-build
@@ -491,6 +498,7 @@ smoke-pci-portability:
 	fi
 
 smoke-native-handle:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \

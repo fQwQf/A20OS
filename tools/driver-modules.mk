@@ -193,6 +193,7 @@ DRIVER_STORE_USER_PACKAGES = $(notdir $(NATIVE_RTCDD_BIN)) \
                              $(notdir $(NATIVE_UEDUD_BIN))
 
 smoke-drvmod-riscv64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=riscv64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -217,6 +218,7 @@ smoke-drvmod-riscv64:
 	fi
 
 smoke-drvmod-aarch64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=aarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -239,6 +241,7 @@ smoke-drvmod-aarch64:
 	fi
 
 smoke-drvmod-loongarch64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=loongarch64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
@@ -261,6 +264,7 @@ smoke-drvmod-loongarch64:
 	fi
 
 smoke-drvmod-x86_64:
+	$(call smoke-gate,1G,1)
 	$(MAKE) ARCH=x86_64 ABI=both BRINGUP=0 DRIVER_DEPLOYMENT=generic dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \

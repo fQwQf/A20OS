@@ -12,6 +12,10 @@
 # 与 `tools/a20 run` 的区别：a20 的 A20_WAIT_TIMEOUT 默认 0（一直等），因为交互式
 # 跑实例时"等资源释放"正是期望行为；CI 门禁不能永远等下去（宿主机磁盘真的满了
 # 时会挂死而不是失败），所以这里给一个可覆盖的有界默认 900s。
+# 例外：tools/stm32.mk 的 run-stm32f103-qemu 不走这个门禁。它的 machine 是
+# stm32vldiscovery，内存是芯片固定的 20 KiB SRAM，没有 -m/-smp 可读；填一个
+# "看起来合理"的数字等于凭空发明一个事实，而且 MCU 仿真也根本不具备把宿主机
+# 撑爆的能力——门禁在这里保护不了任何东西，只会在读代码时误导人。
 define smoke-gate
 A20_WAIT_TIMEOUT=$${A20_WAIT_TIMEOUT:-900} $(PYTHON) tools/a20_resource.py -m $(1) -c $(2)
 endef
