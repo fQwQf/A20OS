@@ -52,6 +52,10 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"QEMU_MEMORY={m.memory}")
     if m.allow_unverified_smp is not None:
         v.append(f"ALLOW_UNVERIFIED_SMP={_b(m.allow_unverified_smp)}")
+    if m.extra_qemu:
+        # Forwarded to the Makefile, which appends it to every QEMU launch.
+        # The Makefile stays the single source of truth for the command line.
+        v.append(f"EXTRA_QEMU={' '.join(m.extra_qemu)}")
     if g.display is not None:
         v.append(f"QEMU_GUI_DISPLAY={g.display}")
     if g.audio_driver is not None:
