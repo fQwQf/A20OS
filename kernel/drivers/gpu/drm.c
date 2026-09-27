@@ -1696,13 +1696,12 @@ static int drm_virtgpu_ensure_ctx(drm_context_t *ctx)
     if (!ops || !ops->ctx_create || !ops->ctx_destroy)
         return -ENODEV;
 
-    uint32_t id = g_virtgpu_next_res;
+    uint32_t id = g_virtgpu_next_res++;
     if (id == 0)
-        id = g_virtgpu_next_res;
+        id = g_virtgpu_next_res++;
     int rc = ops->ctx_create(drm_gpu_device(), id, 1, "a20-drm", 7);
     if (rc < 0)
         return rc;
-    g_virtgpu_next_res++;
     ctx->virtgpu_ctx_id = id;
     ctx->virtgpu_ctx_created = 1;
     return (int)id;
