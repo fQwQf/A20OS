@@ -21,6 +21,20 @@ jobs:
       - id: resolve
         run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
+  # 清单层门禁：instances/、components/ 与 Makefile 三者不许漂移。宿主侧纯
+  # Python 且与架构无关，所以不进容器、不做矩阵，排在所有重量级 job 之前。
+  # 刻意不拉 submodule——门禁只读 instances/、components/、tools/、Makefile
+  # 与 kernel/drvmod 的源文件路径，不碰 user/external 与 kernel/external。
+  manifest-gates:
+    name: manifest-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate instances, arch matrix and component registry
+        run: make check-manifests
+
   build:
     name: build-${{ matrix.arch }}
     needs: buildenv-image
