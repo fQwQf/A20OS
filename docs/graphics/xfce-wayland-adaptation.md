@@ -1,6 +1,22 @@
 # XFCE Wayland 适配（历史）
 
-> **历史文档。** 本文描述的 from-source Wayland/XFCE 适配栈（`user/wayland/` + `user/external/gui/*` 子模块、`make run-gui-*`、`make smoke-qemu-gui-*`）以及 LVGL 原生桌面已退役，归档在分支 `archive/legacy-desktop`。当前实际发布与使用的桌面是 Alpine `xfce` world（`packages/world/xfce.world` + `packages/overlay/xfce`，见 [../distro/README.md](../distro/README.md)）。以下内容保留用于追溯当时的适配工作。
+> **⚠️ 已完全退役 — 本文不是当前状态文档。**
+>
+> 本文描述的 from-source Wayland/XFCE 适配栈（`user/wayland/`、
+> `user/cmds/core/wayland-session.c`、`user/external/gui/*` 子模块、
+> `make run-gui-*`、`make smoke-qemu-gui-*`、`tools/smoke_qemu_gui.py`）
+> 以及 LVGL 原生桌面（`user/desktop/`）**已从 main 删除**，归档在
+> `archive/legacy-desktop`（commit `8faae7a9`）。文中提到的 `make run-gui-*`
+> 与 `smoke-qemu-gui-*` 目标、`[gui]` 实例字段都已不存在。
+>
+> **当前实际发布与使用的桌面**是 Alpine `xfce` world
+> （`packages/world/xfce.world` + `packages/overlay/xfce`，
+> 见 [../distro/README.md](../distro/README.md)）：合成器是上游 **labwc/wlroots**，
+> 不是 OS 自有实现。因此下文的"三条原则"与"OS 树内构建期补丁"
+> （`user/wayland/patches/`）**只适用于已删除的那套栈**，不描述今天的代码。
+>
+> 今天与图形栈相关的当前文档是 [3d-graphics.md](3d-graphics.md) 与
+> [gpu-3d-roadmap.md](gpu-3d-roadmap.md)。以下内容仅保留用于追溯。
 
 ## 背景
 

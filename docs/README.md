@@ -45,7 +45,9 @@
 - [drivers/guide/runtime-contracts.md](drivers/guide/runtime-contracts.md)：MMIO、IRQ、DMA 与锁的运行时契约
 - [drivers/guide/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
-- [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu virgl 3D 图形加速栈
+- [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu 3D 图形加速栈的原理、内核接口与当前状态清单
+- [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂载的路线图（VIRTGPU UAPI、QEMU 3D 开关、测试矩阵、非目标）
+- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：**已完全退役**（描述已删除的 `user/wayland/` 栈），仅供追溯
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 
 ## 平台移植与运行
@@ -62,7 +64,7 @@
 - [packaging/overview.md](packaging/overview.md)：包管理与镜像分发体系（apk 打包、world 组装、仓库签名、CI/CD）
 - [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
 - [distro/source-software-porting.md](distro/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
-- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：XFCE Wayland 桌面的内核强化与 submodule 去修改化
+- [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：已退役的 XFCE Wayland 适配记录（仅供追溯，勿据此判断现状）
 
 ## Native ABI 与子系统细节
 
