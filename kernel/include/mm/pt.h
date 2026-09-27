@@ -144,6 +144,12 @@ struct mm_struct;
  * in P5 -- a re-descent could observe a path that a concurrent unmap has
  * already unlinked.  Caching is what makes the cursor a single-descent
  * primitive, and it is why the lock must cover the whole subtree (P3).
+ *
+ * P3: the cursor also holds a lock on EVERY descendant of the covering node
+ * (preorder DFS), and releases them in exactly reverse order.  Two cursors
+ * conflict iff their ranges' covering nodes are equal or ancestor/descendant,
+ * which is precisely the paper's concurrency semantics: disjoint ranges run
+ * in parallel, overlapping ranges serialise.
  */
 #define MM_CURSOR_PATH_MAX (ARCH_PT_ROOT_LEVEL + 1)
 
@@ -152,8 +158,12 @@ typedef struct mm_cursor {
     vaddr_t           start;
     vaddr_t           end;
     int               locked;
-    int               guard_level;  /* level of the node whose lock is held */
+    int               guard_level;  /* level of the covering node */
     pte_t            *path[MM_CURSOR_PATH_MAX];
+    /* Per-CPU page-table lock depth when the cursor opened.  Unlock pops
+     * back to this depth, so a preorder DFS of any width unwinds in reverse
+     * without the cursor having to store one entry per locked node. */
+    int               lock_base_depth;
 } mm_cursor_t;
 
 /* The report is plain data so NOMMU builds can still reference the type and
@@ -192,6 +202,10 @@ pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr);
 
 /* Map hardware PTE permission bits onto the status byte's R/W/X field. */
 uint8_t mm_pt_prot_bits(pte_t flags);
+
+/* One-time core init: pre-size the per-CPU MCS node pools so the page-table
+ * lock path never allocates.  Call once from mm_init(). */
+void mm_pt_core_init(void);
 
 /* Install / tear down the metadata block for a freshly allocated PT page. */
 int  mm_pt_node_init(pte_t *table, int level);

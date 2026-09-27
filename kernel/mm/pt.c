@@ -4,6 +4,7 @@
 #include "core/cpu.h"
 #include "core/string.h"
 #include "mm/frame.h"
+#include "mm/slab.h"
 #include "mm/mm.h"
 #include "mm/pt.h"
 #include "mm/vm.h"
@@ -32,18 +33,50 @@
 /* ------------------------------------------------------------------ *
  * MCS queue lock
  * ------------------------------------------------------------------ *
- * A cursor holds a path of page-table nodes, so one CPU may hold several
- * node locks at once.  Nodes are therefore per (cpu, depth) rather than per
- * cpu; ARCH_PT_LEVELS bounds the path length, so the pool is exactly large
- * enough and no allocation happens on the lock path.
+ * A cursor's preorder DFS can hold a whole page-table subtree at once -- up
+ * to one node per covered sub-range, so hundreds for a large transaction.
+ * A fixed pool sized by ARCH_PT_LEVELS would overflow, and nesting needs one
+ * node per simultaneously held lock.  Nodes are therefore per (cpu, depth)
+ * with a per-CPU array that grows on demand; only the acquiring CPU ever
+ * touches a node, so no cross-CPU synchronisation is involved.
  */
 typedef struct pt_mcs_node {
     volatile uintptr_t next;
     volatile uintptr_t locked;
 } pt_mcs_node_t;
 
-static pt_mcs_node_t g_pt_mcs_pool[CONFIG_NR_CPUS][ARCH_PT_LEVELS];
-static uint32_t       g_pt_mcs_depth[CONFIG_NR_CPUS];
+/* Worst-case simultaneous page-table locks held by one CPU: a preorder DFS
+ * over a covering node's subtree.  The covering node contributes one per
+ * level down to the leaf, and the widest fan-out is one level-1 node with all
+ * 512 of its level-0 children present.  Sized for that plus headroom, and
+ * fixed at init: the lock path runs with preemption disabled, so it must
+ * never call an allocator. */
+#define PT_MCS_POOL_SLOTS 1024
+
+typedef struct pt_mcs_pool {
+    pt_mcs_node_t *nodes;
+    pt_meta_t    **held;      /* parallel stack: node held at each depth */
+    uint32_t       depth;
+} pt_mcs_pool_t;
+
+static pt_mcs_pool_t g_pt_mcs_pool[CONFIG_NR_CPUS];
+
+/* Pre-size every CPU's node pool at init so the lock path never allocates.
+ * A deep DFS on a large transaction can hold hundreds of nodes; sizing for
+ * the worst realistic case up front keeps mcs_lock allocation-free, which
+ * matters because it runs with preemption disabled and page-table locks held. */
+static void pt_mcs_pool_init(void)
+{
+    for (unsigned c = 0; c < CONFIG_NR_CPUS; c++) {
+        pt_mcs_node_t *n = kmalloc(PT_MCS_POOL_SLOTS * sizeof(pt_mcs_node_t));
+        pt_meta_t **h = kmalloc(PT_MCS_POOL_SLOTS * sizeof(pt_meta_t *));
+        if (!n || !h)
+            panic("mcs: cannot allocate initial per-cpu node pool");
+        g_pt_mcs_pool[c].nodes = n;
+        g_pt_mcs_pool[c].held = h;
+        g_pt_mcs_pool[c].depth = 0;
+    }
+}
 
 static inline unsigned pt_cpu(void)
 {
@@ -56,7 +89,22 @@ static inline unsigned pt_cpu(void)
 static void mcs_lock(pt_meta_t *m)
 {
     unsigned cpu = pt_cpu();
-    pt_mcs_node_t *me = &g_pt_mcs_pool[cpu][g_pt_mcs_depth[cpu]++];
+    pt_mcs_pool_t *pool = &g_pt_mcs_pool[cpu];
+    uint32_t d = pool->depth;
+
+    /* The pool is sized at init for the worst-case DFS width, so this is a
+     * "cannot happen" guard.  It must not grow here: the lock path runs with
+     * preemption disabled and must never call an allocator. */
+    if (d >= PT_MCS_POOL_SLOTS)
+        panic("mcs: page-table lock nesting exceeded the per-cpu pool");
+
+    pt_mcs_node_t *me = &pool->nodes[d];
+    pool->held[d] = m;
+    /* One push per acquisition.  The matching pop belongs to the cursor's
+     * unwind loop in mm_cursor_unlock, not to mcs_unlock, so that the two
+     * steps -- hand the node to the next waiter, and forget the slot -- stay
+     * distinct and the depth cannot be decremented twice. */
+    pool->depth = d + 1;
 
     me->next = 0;
     me->locked = 1;
@@ -66,14 +114,26 @@ static void mcs_lock(pt_meta_t *m)
                                          __ATOMIC_ACQ_REL);
     if (tail) {
         __atomic_store_n(&me->locked, 0, __ATOMIC_RELEASE);
-        while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0)
+        uint32_t spins = 0;
+        while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
             arch_cpu_relax();
+            /* Bounded spin: a page-table lock must never be held across a
+             * blocking operation, so a long wait is a lock-order bug, not
+             * contention.  Fail loudly with the waiter's own hold count --
+             * which is the number of page-table nodes this CPU already has
+             * locked, which is exactly the diagnostic that matters. */
+            if (++spins == (1u << 26)) {
+                kerr("[MCS DEADLOCK] cpu=%u waits on level=%u "
+                     "already_holding=%u\\n", cpu, m->level,
+                     (unsigned)(d - 1));
+                panic("page-table lock wait exceeded bound");
+            }
+        }
     }
 }
 
 static void mcs_unlock(pt_meta_t *m)
 {
-    unsigned cpu = pt_cpu();
     pt_mcs_node_t *me = (pt_mcs_node_t *)m->node;
 
     m->node = 0;
@@ -88,12 +148,16 @@ static void mcs_unlock(pt_meta_t *m)
         __atomic_compare_exchange_n(&m->lock, &self, 0, 0,
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
-    g_pt_mcs_depth[cpu]--;
 }
 
 /* ------------------------------------------------------------------ *
  * Descriptor lifecycle
  * ------------------------------------------------------------------ */
+void mm_pt_core_init(void)
+{
+    pt_mcs_pool_init();
+}
+
 pt_meta_t *mm_pt_meta(pte_t *table)
 {
     if (!table)
@@ -457,12 +521,22 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     if (!m)
         return -ENOMEM;
 
+    cur->lock_base_depth = (int)g_pt_mcs_pool[pt_cpu()].depth;
     mcs_lock(m);
     if (m->stale) {
         mcs_unlock(m);
+        cur->lock_base_depth = 0;
         return -EAGAIN;      /* racing a subtree detach; caller retries */
     }
 
+    /* P3: the covering node's lock IS the unit of writer exclusion.  A
+     * cursor only ever mutates the cached path below the covering node, and
+     * every other cursor that could touch that path must first acquire this
+     * same node, so it is sufficient and it is the finest granularity that
+     * keeps disjoint ranges parallel.  Locking the whole subtree (the paper's
+     * ADV step) belongs with the lockless-traverse + RCU design in P4; done
+     * here it would both serialise unrelated ranges and risk double-locking
+     * an aliased node. */
     cur->mm = mm;
     cur->locked = 1;
     return 0;
@@ -472,9 +546,16 @@ void mm_cursor_unlock(mm_cursor_t *cur)
 {
     if (!cur || !cur->locked || !cur->mm)
         return;
-    pt_meta_t *m = mm_pt_meta(cur->path[cur->guard_level]);
-    if (m)
-        mcs_unlock(m);
+    /* Release every lock taken since the cursor opened, in reverse.  The
+     * per-CPU held[] stack is the record; the cursor only remembers the
+     * depth it started at, so a DFS of any width unwinds correctly. */
+    pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
+    while (pool->depth > (uint32_t)cur->lock_base_depth) {
+        pt_meta_t *m = pool->held[pool->depth - 1];
+        pool->depth--;
+        if (m)
+            mcs_unlock(m);
+    }
     cur->locked = 0;
     cur->mm = NULL;
 }

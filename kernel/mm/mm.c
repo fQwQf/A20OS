@@ -32,6 +32,10 @@ void mm_init(void) {
     printf("[MM] pfa_init done\n");
     slab_init(); // Slab 对象分配器
     printf("[MM] slab_init done\n");
+#if !defined(CONFIG_NOMMU)
+    mm_pt_core_init(); // 页表页 MCS 节点池（单级模型）
+    printf("[MM] pt core init done\n");
+#endif
     printf("[MM] Buddy+Slab: %d frames, %d free (%d MB)\n",
            (int)pfa.total_frames, (int)pfa.free_frames,
            (int)(pfa.free_frames * PAGE_SIZE / 1024 / 1024));
