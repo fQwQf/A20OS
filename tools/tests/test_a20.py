@@ -12,6 +12,9 @@ is the one place that intentionally reads the real tree.
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import sys
 import tempfile
 import textwrap
@@ -25,6 +28,7 @@ from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance  # noqa: E402
 from a20_make import REPO_ROOT  # noqa: E402
+from a20_manifest import Artifact, GitState  # noqa: E402
 from a20_resource import (  # noqa: E402
     DEFAULT_RESERVE_MEM_MB,
     HostResources,
@@ -779,7 +783,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
         cannot leave an instance permanently unusable."""
         import subprocess as sp
         from a20_test import _exclusive
-        code = ("import sys; sys.path.insert(0, 'tools');"
+        code = (f"import sys; sys.path.insert(0, {str(REPO_ROOT / 'tools')!r});"
                 "from a20_test import _exclusive\n"
                 "with _exclusive('unit-test-reclaim'):\n"
                 "    print('held', flush=True)\n")
@@ -913,3 +917,168 @@ class TestCliArgumentHandling(unittest.TestCase):
              patch.object(mod, "validate_instance", return_value=["synthetic failure"]), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mod.main(["list"]), 1)
+
+
+class TestMakeQuery(unittest.TestCase):
+    """Artifact paths must come from make, never from a Python copy of the
+    BUILD_DIR formula -- that name encodes a dozen build switches."""
+
+    def test_returns_one_value_per_requested_name(self) -> None:
+        from a20_make import query_make
+        got = query_make(load_instance("qemu-riscv64"),
+                         ["BUILD_DIR", "KERNEL_ELF", "KERNEL_BIN"])
+        self.assertEqual(len(got), 3)
+        self.assertTrue(got["BUILD_DIR"].startswith(".kernel-build/riscv64-qemu-virt-riscv64-"))
+        self.assertTrue(got["KERNEL_ELF"].endswith("kernel.elf"))
+
+    def test_derived_instance_variables_reach_make(self) -> None:
+        from a20_make import query_make
+        got = query_make(load_instance("qemu-riscv64-smp4"), ["BUILD_DIR"])
+        self.assertIn("-smp4", got["BUILD_DIR"])
+
+    def test_no_names_is_a_no_op(self) -> None:
+        from a20_make import query_make
+        self.assertEqual(query_make(load_instance("qemu-riscv64"), []), {})
+
+    def test_undefined_variable_yields_empty_not_an_error(self) -> None:
+        """make expands an undefined variable to "" and exits 0, so a typo in a
+        requested name is indistinguishable from a legitimately empty one.  Pinned
+        so nobody relies on it raising."""
+        from a20_make import query_make
+        self.assertEqual(query_make(load_instance("qemu-riscv64"), ["NO_SUCH_VARIABLE_XYZ"]),
+                         {"NO_SUCH_VARIABLE_XYZ": ""})
+
+
+class TestArtifactLedger(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_sha256_matches_hashlib(self) -> None:
+        import hashlib
+        from a20_manifest import sha256_file
+        blob = os.urandom(3 * 1024 * 1024 + 17)  # spans several chunks
+        f = self.tmp / "blob.bin"
+        f.write_bytes(blob)
+        self.assertEqual(sha256_file(f), hashlib.sha256(blob).hexdigest())
+
+    def test_human_sizes(self) -> None:
+        from a20_manifest import _human
+        self.assertEqual(_human(512), "512 B")
+        self.assertEqual(_human(2048), "2.0 KiB")
+        self.assertEqual(_human(4 * 1024 * 1024), "4.0 MiB")
+
+    def test_bringup_instance_offers_no_rootfs_images(self) -> None:
+        from a20_manifest import _candidates
+        roles = [r for r, _p in _candidates(load_instance("qemu-riscv64-bringup"),
+                                            _vars_for("qemu-riscv64-bringup"))]
+        self.assertNotIn("rootfs-fat32", roles)
+        self.assertIn("kernel-elf", roles)
+
+    @unittest.skipUnless(shutil.which("arm-none-eabi-gcc"),
+                         "arm-none-eabi toolchain absent; make refuses to resolve MCU paths")
+    def test_mcu_instance_offers_no_rootfs_images(self) -> None:
+        from a20_manifest import _candidates
+        roles = [r for r, _p in _candidates(load_instance("stm32f103-xuanwu"),
+                                            _vars_for("stm32f103-xuanwu"))]
+        self.assertNotIn("rootfs-fat32", roles)
+
+    def test_dev_instance_offers_rootfs_images(self) -> None:
+        from a20_manifest import _candidates
+        roles = [r for r, _p in _candidates(load_instance("qemu-riscv64"),
+                                            _vars_for("qemu-riscv64"))]
+        self.assertIn("rootfs-fat32", roles)
+        self.assertIn("rootfs-ext4", roles)
+
+    def test_visionfive2_offers_the_boot_chain(self) -> None:
+        from a20_manifest import _candidates
+        roles = [r for r, _p in _candidates(load_instance("vf2-sdcard"),
+                                            _vars_for("vf2-sdcard"))]
+        for role in ("opensbi-fw_dynamic", "u-boot-itb", "fit-image", "sd-card"):
+            self.assertIn(role, roles)
+
+    def test_absent_artifacts_are_reported_not_invented(self) -> None:
+        from a20_manifest import _artifact
+        got = _artifact(self.tmp, "kernel-elf", "nope/kernel.elf")
+        self.assertIsInstance(got, str)
+        self.assertEqual(got, "nope/kernel.elf")
+
+    def test_present_artifact_carries_size_and_hash(self) -> None:
+        from a20_manifest import _artifact
+        f = self.tmp / "k.elf"
+        f.write_bytes(b"x" * 100)
+        got = _artifact(self.tmp, "kernel-elf", "k.elf")
+        self.assertIsInstance(got, Artifact)
+        self.assertEqual(got.size, 100)
+        self.assertEqual(len(got.sha256), 64)
+
+    def test_json_is_parseable_and_sorted(self) -> None:
+        from a20_manifest import Manifest, render_json
+        m = _manifest()
+        parsed = json.loads(render_json(m))
+        self.assertEqual(parsed["instance"], "qemu-riscv64")
+        self.assertEqual(parsed["git"]["head"], "deadbeef")
+        self.assertEqual(parsed["artifacts"][0]["size"], 10)
+
+    def test_markdown_is_a_pasteable_block(self) -> None:
+        from a20_manifest import render_markdown
+        text = render_markdown(_manifest())
+        self.assertTrue(text.startswith("<!-- generated by:"))
+        self.assertIn("| artifact | size | sha256 |", text)
+        self.assertIn("`abc123`", text)
+
+    def test_table_states_when_nothing_is_built(self) -> None:
+        from a20_manifest import Manifest, render_table
+        text = render_table(Manifest(instance="x", arch="riscv64", board="b", abi=None,
+                                     build_dir="d", git=GitState("h", "br", False),
+                                     variables={}, artifacts=(), missing=("a/b",)))
+        self.assertIn("no artifacts present", text)
+        self.assertIn("a/b", text)
+
+    def test_paths_are_repository_relative(self) -> None:
+        """A ledger full of one contributor's home paths is not portable, which
+        is how the hand-copied board records became unverifiable."""
+        from a20_manifest import collect
+        names = ["qemu-riscv64", "vf2-sdcard", "qemu-x86_64", "release-riscv64"]
+        if shutil.which("arm-none-eabi-gcc"):
+            names.append("stm32f103-xuanwu")
+        for inst_name in names:
+            for a in collect(load_instance(inst_name)).artifacts:
+                self.assertFalse(a.path.startswith("/"), a.path)
+                self.assertNotIn("/home/", a.path)
+
+    @unittest.skipIf(shutil.which("arm-none-eabi-gcc"),
+                     "toolchain present, so the ledger resolves MCU paths normally")
+    def test_missing_cross_toolchain_is_reported_not_faked(self) -> None:
+        """A ledger that silently omitted the artifacts it could not resolve
+        would be worse than useless on a board. make refuses to evaluate the
+        Makefile without the cross toolchain, and that refusal must surface."""
+        from a20_make import MakeQueryError
+        from a20_manifest import collect
+        with self.assertRaises(MakeQueryError) as cm:
+            collect(load_instance("stm32f103-xuanwu"))
+        self.assertIn("arm-none-eabi", str(cm.exception))
+
+    def test_git_state_reports_head_and_dirtiness(self) -> None:
+        from a20_manifest import git_state
+        g = git_state(REPO_ROOT)
+        self.assertTrue(g.head)
+        self.assertIsInstance(g.dirty, bool)
+
+
+def _vars_for(instance_name: str) -> dict[str, str]:
+    from a20_make import query_make
+    return query_make(load_instance(instance_name),
+                      ("BUILD_DIR", "KERNEL_ELF", "KERNEL_BIN", "FAT32_IMG",
+                       "EXT4_IMG", "EXTRA_IMG", "PKG_IMAGE_DIR", "PKG_ARCH"))
+
+
+def _manifest():
+    from a20_manifest import Artifact, GitState, Manifest
+    return Manifest(
+        instance="qemu-riscv64", arch="riscv64", board="qemu-virt-riscv64", abi="both",
+        build_dir=".kernel-build/x", git=GitState("deadbeef", "br", True),
+        variables={"BUILD_DIR": ".kernel-build/x"},
+        artifacts=(Artifact("kernel-elf", ".kernel-build/x/kernel.elf", 10, "abc123"),),
+    )
