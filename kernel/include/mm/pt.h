@@ -164,10 +164,31 @@ typedef struct mm_cursor {
      * back to this depth, so a preorder DFS of any width unwinds in reverse
      * without the cursor having to store one entry per locked node. */
     int               lock_base_depth;
+    int               in_read_side;   /* holds mm->pt_readers */
 } mm_cursor_t;
 
 /* The report is plain data so NOMMU builds can still reference the type and
  * report zeros; the walkers themselves are page-table builds only. */
+/* Deferred page-table page reclamation (P4).
+ *
+ * A cursor's descent caches physical page-table pointers, so a concurrent
+ * unmap that frees such a page would let the cursor keep operating on
+ * recycled memory.  Detach therefore does not free: it marks the subtree
+ * stale, unlinks it, and queues the page with the address space's TLB
+ * invalidation barrier.  The page is released only once the shootdown has
+ * completed AND no cursor remains in a read-side critical section, which
+ * together prove no traversal can still reach it. */
+void mm_pt_read_enter(struct mm_struct *mm);
+void mm_pt_read_exit(struct mm_struct *mm);
+
+/* Queue a detached page-table page.  level is the page-table depth, used to
+ * recover the buddy order at drain time.  Caller holds the covering node's
+ * lock (or mm->lock) and must already have unlinked the page. */
+int  mm_pt_defer_free(struct mm_struct *mm, pte_t *table, int level);
+
+/* Mark a detached subtree stale so a cursor that acquires it retries. */
+void mm_pt_mark_stale_recursive(pte_t *table, int level);
+
 /* ---- invariant auditing ---- */
 typedef struct mm_pt_audit_report {
     uint64_t pt_pages;
