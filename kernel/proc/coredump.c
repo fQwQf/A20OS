@@ -231,6 +231,11 @@ static uint64_t coredump_align_up(uint64_t v, uint64_t a)
     return (v + a - 1) & ~(a - 1);
 }
 
+static uint64_t coredump_align_down(uint64_t v, uint64_t a)
+{
+    return v & ~(a - 1);
+}
+
 /* ---- core_pattern expansion (%p %e %s %u %g %t %%) ---- */
 
 static void coredump_expand_pattern(const char *pattern, task_t *t, int sig,
@@ -435,16 +440,16 @@ static void coredump_build_notes(task_t *t, int sig, trap_context_t *ctx,
     cd_blob_note(blob, "CORE", CORE_NT_PRPSINFO, &psi, sizeof(psi));
 }
 
-void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
+int coredump_on_fatal_signal(int sig, trap_context_t *ctx)
 {
     task_t *t = proc_current();
     if (!t || !t->mm || !t->pgdir)
-        return;
+        return 0;
 
     /* RLIMIT_CORE == 0 suppresses the dump (Linux semantics). */
     uint64_t rlim = signal_task_rlim_core(t);
     if (rlim == 0)
-        return;
+        return 0;
 
     char pattern[CORE_PATTERN_MAX];
     uint64_t pflags = spin_lock_irqsave(&g_core_pattern_lock);
@@ -455,13 +460,13 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
     if (pattern[0] == '|') {
         kwarn("coredump: pid=%d skipped, core_pattern pipe mode unsupported\n",
               t->pid);
-        return;
+        return 0;
     }
 
     cd_vma_t *vmas = NULL;
     int nvma = coredump_snapshot_vmas(t->mm, &vmas);
     if (nvma < 0)
-        return;
+        return 0;
 
     cd_blob_t notes;
     notes.cap = 2048;
@@ -470,13 +475,13 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
     notes.buf = (char *)kmalloc(notes.cap);
     if (!notes.buf) {
         kfree(vmas);
-        return;
+        return 0;
     }
     coredump_build_notes(t, sig, ctx, &notes);
     if (notes.overflow) {
         kfree(notes.buf);
         kfree(vmas);
-        return;
+        return 0;
     }
 
     /* Layout: ehdr, phdrs, notes, then page-aligned PT_LOAD data.  Segment
@@ -491,7 +496,7 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
     if (!phdrs) {
         kfree(notes.buf);
         kfree(vmas);
-        return;
+        return 0;
     }
     memset(phdrs, 0, (size_t)phnum * sizeof(core_phdr_t));
     phdrs[0].p_type = CORE_PT_NOTE;
@@ -506,6 +511,9 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
         uint64_t filesz = size;
         if (limit != UINT64_MAX && off + filesz > limit)
             filesz = off < limit ? limit - off : 0;
+        /* p_offset must stay congruent to p_vaddr modulo p_align, so a
+         * limit-clamped segment rounds down to a page multiple. */
+        filesz = coredump_align_down(filesz, PAGE_SIZE);
         core_phdr_t *ph = &phdrs[1 + i];
         ph->p_type = CORE_PT_LOAD;
         ph->p_flags = coredump_vma_pflags(vmas[i].flags);
@@ -517,6 +525,7 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
         off += filesz;
     }
 
+    int rc = 0;
     char path[MAX_PATH_LEN];
     coredump_expand_pattern(pattern, t, sig, path, sizeof(path));
     if (!path[0])
@@ -545,7 +554,7 @@ void coredump_on_fatal_signal(int sig, trap_context_t *ctx)
     eh.e_phentsize = sizeof(core_phdr_t);
     eh.e_phnum = phnum;
 
-    int rc = cd_write_at(fd, 0, &eh, sizeof(eh));
+    rc = cd_write_at(fd, 0, &eh, sizeof(eh));
     if (rc == 0)
         rc = cd_write_at(fd, sizeof(core_ehdr_t), phdrs,
                          (size_t)phnum * sizeof(core_phdr_t));
@@ -592,6 +601,7 @@ out:
     kfree(phdrs);
     kfree(notes.buf);
     kfree(vmas);
+    return rc == 0;
 }
 
 #endif /* COREDUMP_SUPPORTED */

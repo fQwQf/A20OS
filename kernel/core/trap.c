@@ -241,8 +241,8 @@ static int deliver_user_sync_signal(trap_context_t *ctx, int sig, int fatal_code
          * the ELF core file while the mm/registers are live and report the
          * WCOREDUMP exit status, mirroring the async fatal-signal path. */
         if (signal_dumps_core(sig)) {
-            coredump_on_fatal_signal(sig, ctx);
-            fatal_code = signal_fatal_exit_code(sig);
+            int dumped = coredump_on_fatal_signal(sig, ctx);
+            fatal_code = signal_fatal_exit_code_dumped(sig, dumped);
         }
         proc_exit_group(fatal_code);
     }

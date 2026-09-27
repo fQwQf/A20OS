@@ -67,18 +67,11 @@ __attribute__((weak)) int64_t sys_pause(void) {
 #define LINUX_CLONE_VFORK    0x00004000ULL
 #define LINUX_CLONE_PARENT   0x00008000ULL
 #define LINUX_CLONE_THREAD   0x00010000ULL
-#define LINUX_CLONE_NEWNS    0x00020000ULL
 #define LINUX_CLONE_SYSVSEM  0x00040000ULL
 #define LINUX_CLONE_SETTLS   0x00080000ULL
 #define LINUX_CLONE_PARENT_SETTID  0x00100000ULL
 #define LINUX_CLONE_CHILD_CLEARTID 0x00200000ULL
 #define LINUX_CLONE_CHILD_SETTID   0x01000000ULL
-#define LINUX_CLONE_NEWCGROUP  0x02000000ULL
-#define LINUX_CLONE_NEWUTS     0x04000000ULL
-#define LINUX_CLONE_NEWIPC     0x08000000ULL
-#define LINUX_CLONE_NEWUSER    0x10000000ULL
-#define LINUX_CLONE_NEWPID     0x20000000ULL
-#define LINUX_CLONE_NEWNET     0x40000000ULL
 #define LINUX_CLONE_IO         0x80000000ULL
 #define LINUX_CLONE_CLEAR_SIGHAND  0x100000000ULL
 #define LINUX_CLONE_INTO_CGROUP    0x200000000ULL
@@ -382,6 +375,7 @@ int linux_kernel_set_domainname(const char *buf, size_t len)
 
 int64_t sys_sethostname(const char *name, size_t len) {
     if (!name) return -EFAULT;
+    if (len >= sizeof(g_hostname)) return -EINVAL;
     task_t *t = proc_current();
     if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
         return -EPERM;
@@ -393,6 +387,7 @@ int64_t sys_sethostname(const char *name, size_t len) {
 
 int64_t sys_setdomainname(const char *name, size_t len) {
     if (!name) return -EFAULT;
+    if (len >= sizeof(g_domainname)) return -EINVAL;
     task_t *t = proc_current();
     if (!t || (t->cred.uid != 0 && t->cred.euid != 0))
         return -EPERM;

@@ -5,6 +5,22 @@
 
 #ifdef CONFIG_SWAP
 
+/* Guard before the multiply-add so the running value can never exceed INT_MAX. */
+static int swap_decimal_index(const char **pp)
+{
+    const char *p = *pp;
+    if (*p < '0' || *p > '9')
+        return -1;
+    int index = 0;
+    while (*p >= '0' && *p <= '9') {
+        if (index > (2147483647 - 9) / 10)
+            return -1;
+        index = index * 10 + (*p++ - '0');
+    }
+    *pp = p;
+    return index;
+}
+
 static block_dev_t *swap_path_to_block_dev(const char *path)
 {
     static const char prefix[] = "/dev/vd";
@@ -13,14 +29,9 @@ static block_dev_t *swap_path_to_block_dev(const char *path)
 
     if (strncmp(p, loop_prefix, sizeof(loop_prefix) - 1) == 0) {
         p += sizeof(loop_prefix) - 1;
-        if (*p < '0' || *p > '9')
+        int index = swap_decimal_index(&p);
+        if (index < 0)
             return NULL;
-        int index = 0;
-        while (*p >= '0' && *p <= '9') {
-            if (index > 214748364)
-                return NULL;
-            index = index * 10 + (*p++ - '0');
-        }
         if (*p != '\0')
             return NULL;
         return loop_block_device(index);
@@ -30,17 +41,13 @@ static block_dev_t *swap_path_to_block_dev(const char *path)
         return NULL;
     p += sizeof(prefix) - 1;
 
-    int index = 0;
+    int index;
     if (*p >= 'a' && *p <= 'z' && p[1] == '\0') {
         index = *p - 'a';
     } else {
-        if (*p < '0' || *p > '9')
+        index = swap_decimal_index(&p);
+        if (index < 0)
             return NULL;
-        while (*p >= '0' && *p <= '9') {
-            if (index > 214748364)
-                return NULL;
-            index = index * 10 + (*p++ - '0');
-        }
         if (*p != '\0')
             return NULL;
     }
