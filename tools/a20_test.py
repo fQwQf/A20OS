@@ -25,9 +25,10 @@ DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_INPUT_DELAY_S = 8
 
 
-def _qemu_cmdline(inst: Instance) -> list[str]:
+def _qemu_cmdline(inst: Instance, make_args: list[str]) -> list[str]:
     out = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), "-n", *derive_make_vars(inst), "_run_impl"],
+        ["make", "-C", str(REPO_ROOT), "-n", *derive_make_vars(inst), *make_args,
+         "_run_impl"],
         check=False, capture_output=True, text=True,
     )
     for line in out.stdout.splitlines():
@@ -58,7 +59,7 @@ def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
     build_rc = build_instance(inst, list(make_args), dry_run)
     if build_rc != 0:
         return build_rc
-    qemu_cmd = _qemu_cmdline(inst)
+    qemu_cmd = _qemu_cmdline(inst, list(make_args))
     if dry_run:
         print(shlex.join(qemu_cmd))
         return 0

@@ -72,6 +72,8 @@ class MachineCfg:
     memory: str | None = None
     allow_unverified_smp: bool | None = None
     extra_qemu: tuple[str, ...] | None = None
+    gpu_3d: bool | None = None
+    display_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +185,7 @@ _SECTION_SPECS: Final = {
         "bringup", "nommu", "ubsan", "swap", "werror",
         "cooperative_boot", "storage_read_only", "external_root", "ramfs_user",
     } else "str") for f in KernelCfg.__dataclass_fields__},
-    "machine": {f: ("int" if f == "smp" else "bool" if f == "allow_unverified_smp"
+    "machine": {f: ("int" if f == "smp" else "bool" if f in ("allow_unverified_smp", "gpu_3d")
                     else "str_list" if f == "extra_qemu" else "str")
                 for f in MachineCfg.__dataclass_fields__},
     "gui": {f: ("bool" if f == "enabled" else "str")
