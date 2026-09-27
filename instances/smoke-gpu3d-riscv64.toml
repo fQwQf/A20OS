@@ -1,0 +1,32 @@
+# virgl 3D transport smoke: attach a virgl-capable virtio-gpu and require the
+# guest to negotiate VIRTIO_GPU_F_VIRGL and drive a 3D context end to end.
+#
+# This is the gate that makes "3D is available" a falsifiable claim.  The old
+# gpu3d_test returned 0 on a 2D-only device, so it passed everywhere; it now
+# exits 77 (SKIP) when the device is 2D-only, which is distinct from PASS.
+# Expect SKIP rather than PASS to be a failure here -- it means GPU_3D did not
+# reach QEMU, which is exactly the regression this instance exists to catch.
+#
+# Requires host virgl support (libvirglrenderer + a GL/EGL-capable display).
+# On a headless host, set gui.display = "egl-headless".
+name = "smoke-gpu3d-riscv64"
+description = "riscv64 virtio-gpu virgl 3D transport smoke (GPU_3D device + gpu3d_test)"
+arch = "riscv64"
+abi = "linux"
+
+[machine]
+gpu_3d = true
+display_mode = "gui"
+
+[gui]
+display = "egl-headless"
+
+[test]
+commands = ["/bin/gpu3d_test", "poweroff"]
+expect = [
+  "GPU3D_TEST: virgl available",
+  "GPU3D_TEST: context 1 created",
+  "GPU3D_TEST: PASS",
+]
+input_delay = 20
+timeout = "120s"
