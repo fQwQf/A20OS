@@ -261,7 +261,15 @@ NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 # ================================================================
 
 comma := ,
-NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
+# No implicit host port forwarding.  A host port is a shared, contended
+# resource, and this default made every QEMU launch -- including the dozens of
+# serial-console smoke gates that never open an inbound connection -- claim
+# 5555, so two runs could never be in flight at once and the loser died with
+# QEMU's "could not set up host forwarding rule" instead of anything
+# diagnosable.  Forwarding is now declared per instance via [net].hostfwd, and
+# tools/a20 checks the declared ports are free before starting (waiting, like
+# the memory/CPU preflight, when they are not).
+NET_HOSTFWD ?=
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
 SMOKE_TIMEOUT_ENVELOPE ?= 60s
