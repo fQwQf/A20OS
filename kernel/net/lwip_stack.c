@@ -348,8 +348,11 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
+        /* ethernet_input() takes ownership of p on every path -- it frees
+         * the pbuf itself on its error paths and returns ERR_OK, so the
+         * caller must not free it again (see the "so the caller doesn't
+         * have to free it again" note in lwip ethernet.c). */
         if (n->input(p, n) != ERR_OK) {
-            pbuf_free(p);
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
         }
