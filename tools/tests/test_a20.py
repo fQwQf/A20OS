@@ -1538,3 +1538,120 @@ class TestSerialTransportAgainstPty(unittest.TestCase):
     def test_missing_device_raises_oserror(self) -> None:
         with self.assertRaises(OSError):
             SerialTransport("/dev/a20-not-a-real-tty", 115200)
+
+
+class TestHostPortGate(unittest.TestCase):
+    """A host port is a contended resource like memory, so it is declared per
+    instance, checked before launch, and waited on -- not defaulted."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def inst(self, hostfwd: str) -> "object":
+        return load(self.tmp, f"""
+            arch = "riscv64"
+            board = "qemu-virt-riscv64"
+            [net]
+            hostfwd = {hostfwd}
+        """)
+
+    def test_parses_fixed_ports(self) -> None:
+        from a20_resource import parse_hostfwd_ports
+        self.assertEqual(parse_hostfwd_ports(["tcp::5555-:5555"]),
+                         (("0.0.0.0", 5555),))
+
+    def test_ephemeral_port_is_not_gated(self) -> None:
+        """Port 0 is allocated by the OS at bind time, so nothing is contended
+        in advance and there is nothing for a preflight to wait on."""
+        from a20_resource import parse_hostfwd_ports
+        self.assertEqual(parse_hostfwd_ports(["tcp::0-:5555"]), ())
+
+    def test_bound_address_is_kept(self) -> None:
+        from a20_resource import parse_hostfwd_ports
+        self.assertEqual(parse_hostfwd_ports(["tcp:127.0.0.1:8080-:80"]),
+                         (("127.0.0.1", 8080),))
+
+    def test_malformed_entries_are_ignored_not_fatal(self) -> None:
+        from a20_resource import parse_hostfwd_ports
+        self.assertEqual(parse_hostfwd_ports(["nonsense", "tcp::x-:1"]), ())
+
+    def test_tcp_and_udp_of_one_instance_yield_one_port(self) -> None:
+        from a20_resource import parse_hostfwd_ports
+        self.assertEqual(parse_hostfwd_ports(["tcp::5555-:5555", "udp::5555-:5555"]),
+                         (("0.0.0.0", 5555), ("0.0.0.0", 5555)))
+
+    def test_busy_ports_detects_a_held_port(self) -> None:
+        import socket as sk
+        from a20_resource import busy_ports
+        held = sk.socket()
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        try:
+            self.assertIn(("0.0.0.0", port), busy_ports([("0.0.0.0", port)]))
+        finally:
+            held.close()
+
+    def test_free_port_is_not_reported_busy(self) -> None:
+        import socket as sk
+        from a20_resource import busy_ports
+        probe = sk.socket()
+        probe.bind(("0.0.0.0", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        self.assertEqual(busy_ports([("0.0.0.0", port)]), ())
+
+    def test_requirement_carries_the_declared_ports(self) -> None:
+        from a20_resource import Policy, requirement_for
+        got = requirement_for(self.inst('["tcp::5555-:5555"]'), Policy())
+        self.assertEqual(got.ports, (("0.0.0.0", 5555),))
+
+    def test_instance_without_hostfwd_claims_no_port(self) -> None:
+        from a20_resource import Policy, requirement_for
+        self.assertEqual(requirement_for(self.inst("[]"), Policy()).ports, ())
+
+    def test_busy_port_is_a_deficit(self) -> None:
+        from a20_resource import evaluate
+        need = Requirement(mem_mb=1, cpus=1, disk_mb=1, ports=(("0.0.0.0", 5555),))
+        have = HostResources(mem_available_mb=99999, cpu_count=64, load1=0.0,
+                             disk_free_mb=99999, running_guests=0,
+                             busy_ports=(("0.0.0.0", 5555),))
+        v = evaluate(need, have, Policy())
+        self.assertFalse(v.ok)
+        self.assertIn("5555", v.reason())
+
+    def test_preflight_refuses_a_busy_port(self) -> None:
+        import socket as sk
+        from a20_resource import preflight
+        held = sk.socket()
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        try:
+            inst = self.inst(f'["tcp::{port}-:5555"]')
+            with self.assertRaises(SystemExit) as cm:
+                preflight(inst, Policy(), self.tmp, wait=False)
+            self.assertIn(str(port), str(cm.exception))
+        finally:
+            held.close()
+
+    def test_preflight_waits_then_proceeds_when_the_port_frees(self) -> None:
+        import socket as sk
+        import threading
+        from a20_resource import preflight
+        held = sk.socket()
+        held.bind(("0.0.0.0", 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        inst = self.inst(f'["tcp::{port}-:5555"]')
+
+        def release():
+            time.sleep(0.2)
+            held.close()
+
+        threading.Thread(target=release, daemon=True).start()
+        with patch("a20_resource._POLL_SECONDS", 0.05):
+            verdict = preflight(inst, Policy(), self.tmp, wait=True, echo=lambda _m: None)
+        self.assertTrue(verdict.ok)

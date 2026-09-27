@@ -171,6 +171,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return exec_make(inst, "run-stm32f103-qemu-impl", [], args.dry_run)
     _check_runnable(inst, "run")
     _gate_resources(inst, args)
+    _echo(_port_note(inst))
     if inst.rootfs.world is not None:
         # apk world images boot as the second disk; init chroots into them.
         target = "run-world-gui" if inst.gui.enabled else "run-world"
@@ -183,6 +184,7 @@ def cmd_debug(args: argparse.Namespace) -> int:
     inst = _load(args.instance)
     _check_runnable(inst, "debug")
     _gate_resources(inst, args)
+    _echo(_port_note(inst))
     return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
 
 
@@ -190,6 +192,7 @@ def cmd_test(args: argparse.Namespace) -> int:
     inst = _load(args.instance)
     _check_runnable(inst, "test")
     _gate_resources(inst, args)
+    _echo(_port_note(inst))
     return run_test(inst, list(args.make_args), args.dry_run)
 
 
@@ -254,6 +257,64 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 return rc
     return cmd_console(args)
 
+
+def _port_note(inst) -> str:
+    """One line describing what host ports this instance will claim.
+
+    Printed before launch because with the default no longer claiming 5555, the
+    port a guest is reachable on is a property of the instance, and the operator
+    needs to see it rather than infer it.
+    """
+    entries = inst.net.hostfwd or ()
+    if not entries:
+        return f"{inst.name}: no host port forwarding (nothing to connect to)"
+    return f"{inst.name}: host forwarding {', '.join(entries)}"
+
+
+def cmd_ports(args: argparse.Namespace) -> int:
+    """Show which host ports instances claim, and whether they are free now.
+
+    Two instances declaring the same port is a legitimate choice -- you may only
+    ever run one of them at a time -- so this reports rather than fails.  It
+    exists because the failure mode otherwise shows up as QEMU refusing to bind
+    several minutes into a build.
+    """
+    from a20_resource import busy_ports, parse_hostfwd_ports
+    names = list(getattr(args, "instance", None) or ())
+    paths = [Path(n) for n in names] if names else sorted(INSTANCES_DIR.glob("*.toml"))
+    claimed: dict[tuple[str, int], list[str]] = {}
+    rows: list[tuple[str, str, str]] = []
+    for path in paths:
+        try:
+            inst = _load(str(path))
+        except SystemExit as e:
+            rows.append((path.stem, "-", f"invalid manifest: {e}"))
+            continue
+        want = parse_hostfwd_ports(inst.net.hostfwd)
+        if not want:
+            state = "ephemeral" if inst.net.hostfwd else "none"
+            rows.append((inst.name, state, "declares no fixed host port"))
+            continue
+        busy = set(busy_ports(want))
+        for addr, port in want:
+            # tcp and udp forwards of one instance share a port number; list the
+            # instance once so the collision note reads as "who", not "how many".
+            holders = claimed.setdefault((addr, port), [])
+            if inst.name not in holders:
+                holders.append(inst.name)
+            rows.append((inst.name, f"{addr}:{port}",
+                         "IN USE" if (addr, port) in busy else "free"))
+    width = max((len(r[0]) for r in rows), default=10)
+    for name, where, state in rows:
+        print(f"{name:<{width}}  {where:<22} {state}")
+    clashes = {k: v for k, v in claimed.items() if len(v) > 1}
+    if clashes:
+        print()
+        for (addr, port), names in sorted(clashes.items()):
+            print(f"note: {addr}:{port} is claimed by {', '.join(sorted(names))}"
+                  " -- fine if you never run them together, otherwise give one an ephemeral"
+                  " port (hostfwd = [\"tcp::0-<guestport>\"])")
+    return 0
 
 def cmd_ledger(args: argparse.Namespace) -> int:
     """Report what an instance actually produced: sizes, hashes, revision."""
@@ -438,6 +499,11 @@ def main(argv: list[str] | None = None) -> int:
             pc.add_argument("--no-flash", action="store_true",
                             help="skip the [flash] programming step")
 
+    p_ports = sub.add_parser(
+        "ports", help="show which host ports instances claim, and whether they are free now")
+    p_ports.add_argument("instance", nargs="*",
+                         help="instance names or TOML paths; defaults to every instance")
+
     p_ledger = sub.add_parser(
         "ledger", help="report an instance's artifacts with size and sha256")
     p_ledger.add_argument("instance", help="instance name from instances/ or path to a TOML manifest")
@@ -488,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_console(ns)
         case "deploy":
             return cmd_deploy(ns)
+        case "ports":
+            return cmd_ports(ns)
         case "ledger":
             return cmd_ledger(ns)
         case "show-vars":
