@@ -9,6 +9,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "mm/vmo.h"
 #include "core/consts.h"
 #include "core/defs.h"
@@ -39,6 +40,34 @@
  * - Read() on the same file uses the same page cache, so shared mmap writes are
  *   visible to read() without an explicit sync.
  */
+/*
+ * Install one mapping through the transactional cursor.  Every fault-path PTE
+ * write goes through here, so the per-PTE status and the hardware entry are
+ * always updated in the same step and no path can update one without the
+ * other.  A return of 1 from mm_addrspace_lock means a larger-than-needed
+ * leaf already covers the address, which a leaf map must not silently ignore.
+ */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    mm_cursor_t cur;
+    int r = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur);
+    if (r != 0)
+        return r < 0 ? r : -EFAULT;
+    r = mm_cursor_map(&cur, page_va, pfn_to_phys(pfn), flags, cls);
+    mm_cursor_unlock(&cur);
+    return r;
+}
+#else
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    (void)cls;
+    return pt_map(mm->pgdir, page_va, pfn_to_phys(pfn), flags);
+}
+#endif
+
 int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
                          vfile_t *vf)
 {
@@ -81,9 +110,10 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 
     if (vma->pte_flags & PTE_X)
         arch_flush_icache_range(page_cache_data(pcp), PAGE_SIZE);
-    int r = pt_map(mm->pgdir, page_va, pfn_to_phys(cache_pfn), vma->pte_flags);
+    int r = fault_map(mm, page_va, cache_pfn, vma->pte_flags,
+                      MM_ST_FILE_SHARED);
     if (r < 0) {
-        kerr("[SHFAULT] pt_map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
+        kerr("[SHFAULT] map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
              proc_current()->pid, (unsigned long)page_va, vma->file_fd,
              (unsigned long)index, r);
         page_cache_put(pcp);
@@ -264,8 +294,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             return -1;
         }
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                       vma->pte_flags);
+        int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
+                          MM_ST_ANON_MAPPED);
         if (r < 0) {
             cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
@@ -308,8 +338,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             }
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                           mm_user_stack_pte_flags());
+            int r = fault_map(t->mm, page_va, pfn, mm_user_stack_pte_flags(),
+                              MM_ST_ANON_MAPPED);
             if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
             if (page_va < t->mm->stack_bottom)
@@ -330,8 +360,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (pfn == PFN_NONE) { cg_mem_uncharge(t->cgroup, 1); return -1; }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                       mm_user_brk_pte_flags());
+        int r = fault_map(t->mm, page_va, pfn, mm_user_brk_pte_flags(),
+                          MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
@@ -412,8 +442,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 if (vma->pte_flags & PTE_X)
                     arch_flush_icache_range(pfn_to_virt(copy), PAGE_SIZE);
                 page_cache_put(pcp);
-                int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(copy),
-                               vma->pte_flags);
+                int r = fault_map(t->mm, page_va, copy, vma->pte_flags,
+                                  MM_ST_FILE_PRIVATE);
                 if (r < 0) {
                     cg_mem_uncharge(t->cgroup, 1);
                     frame_put(copy);
@@ -441,8 +471,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 return -1;
 
 
-            if (pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
-                       vma->pte_flags) < 0)
+            if (fault_map(t->mm, page_va, vpfn, vma->pte_flags,
+                          MM_ST_VMO) < 0)
                 return -1;
 
             t->mm->rss++;
@@ -513,12 +543,20 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 pfns[prepared++] = candidate;
             }
 
-            for (size_t i = 0; i < prepared; i++) {
-                uint64_t va = page_va + i * PAGE_SIZE;
-                if (pt_map(t->mm->pgdir, va, pfn_to_phys(pfns[i]),
-                           vma->pte_flags) < 0)
-                    break;
-                mapped++;
+            /* One transaction for the whole window: a single covering-node
+             * lock and a single descent, instead of one page-table walk per
+             * page.  This is the property the single-level model exists for. */
+            mm_cursor_t wcur;
+            int lr = mm_addrspace_lock(t->mm, page_va, end, &wcur);
+            if (lr == 0) {
+                for (size_t i = 0; i < prepared; i++) {
+                    uint64_t va = page_va + i * PAGE_SIZE;
+                    if (mm_cursor_map(&wcur, va, pfn_to_phys(pfns[i]),
+                                      vma->pte_flags, MM_ST_ANON_MAPPED) < 0)
+                        break;
+                    mapped++;
+                }
+                mm_cursor_unlock(&wcur);
             }
             for (size_t i = mapped; i < prepared; i++) {
                 cg_mem_uncharge(t->cgroup, 1);
@@ -542,8 +580,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                        vma->pte_flags);
+        int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
+                          MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
@@ -749,8 +787,10 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
             if (direct_private && executable)
                 arch_flush_icache_range(page_cache_data(window[i]),
                                         PAGE_SIZE);
-            if (pt_map(mm->pgdir, va, pfn_to_phys(candidates[i]),
-                       map_flags) < 0)
+            if (pt_map_cls(mm->pgdir, va, pfn_to_phys(candidates[i]),
+                           map_flags,
+                           shared ? MM_ST_FILE_SHARED
+                                  : MM_ST_FILE_PRIVATE) < 0)
                 break;
             mm->rss++;
             installed++;
