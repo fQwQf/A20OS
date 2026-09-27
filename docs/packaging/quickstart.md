@@ -31,6 +31,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base PKG_ALPINE=0
 | 只打包（不建库） | `make ARCH=riscv64 pkgs` |
 | 只打包指定包 | `make pkgs PKG_RECIPES="a20-base a20-drivers"` |
 | 校验 recipe 不写包 | `make pkgs-check` |
+| 组真机最小镜像（出厂用，1.38 MiB） | `make ARCH=riscv64 image-world PKG_WORLD=min` |
 | 组 devel 镜像（含 Alpine 上游 vim/git） | `make ARCH=riscv64 image-world PKG_WORLD=devel PKG_SIZE_MB=1024` |
 | 组镜像但不碰网络 | `make image-world PKG_ALPINE=0` |
 | 手工组装（更细控制） | `tools/mkrootfs.py --arch riscv64 --world packages/world/base.world --repo build/repo --keys-dir build/keys --no-alpine` |
