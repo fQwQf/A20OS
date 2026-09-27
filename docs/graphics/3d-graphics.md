@@ -25,14 +25,14 @@
 | virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
 | virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
+| **3D 传输通路端到端** | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。见 [gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ❌ **未实现** | `RESOURCE_CREATE_3D` 不带 `ATTACH_BACKING`，host 侧资源无内存可读写 |
-| 命令流被 host 接受（可证伪的验证） | ❌ **本轮之前不存在** | 旧 `gpu3d_test` 走的是空分配路径 |
-| 上游 Linux `DRM_IOCTL_VIRGL_*` UAPI | ❌ **未实现** | 只有 A20 私有 `A20_GPU_IOCTL_*`，Mesa 的 `virtio_gpu_dri.so` **无法挂载** |
-| DRM GEM 对象模型（`GEM_CREATE`/`GEM_MMAP`…） | ❌ **未实现** | 只有 dumb buffer；这是 `gbm_bo_create` 失败的根因 |
+| 命令流提交（`SUBMIT_3D`） | ❌ 未验证 | ioctl 存在且 128 KiB 上限，但**没有任何调用方**；host 端能否接受有效命令流未知 |
+| 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ❌ **未实现** | 只有 A20 私有 `A20_GPU_IOCTL_*`，Mesa 的 `virtio_gpu_dri.so` **无法挂载**（目标 UAPI 见 [gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
+| DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_CREATE`/`OPEN`/`MMAP`/`GET_HANDLE`，`GEM_CLOSE` 真正释放，`MODE_GETFB2`；dumb buffer 复用同一分配器 |
 | 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见 |
-| `MODE_GETFB2` | ❌ 未实现 | 只有 `MODE_GETFB` |
 | 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
-| Mesa/virgl 用户态客户端 | ❌ 未实现 | 依赖上游 virgl UAPI；A20OS 不自建 DRI 驱动 |
+| Mesa/virgl 用户态客户端 | ❌ 未实现 | 依赖 VIRTGPU UAPI；A20OS 不自建 DRI 驱动 |
 
 **由此得到本文档后续所有工作的出发点**：A20OS 不自研着色器编译器，也不自研
 DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，SPIR-V→host GPU 由 virglrenderer 完成；
@@ -177,21 +177,36 @@ drvmod 模块以 `-fPIC` 编译，`gpu_ioctl` 若用 `switch` 分发会生成 PI
 
 ### 4.1 自建测试：`gpu3d_test`
 
-`user/cmds/core/gpu3d_test.c` 是验证内核 3D 链路的独立工具，ioctl 号与结构在文件内自包含（不依赖内核头）：
+`user/cmds/core/gpu3d_test.c` 是验证内核 3D 链路的独立工具，ioctl 号与结构在文件内自包含（不依赖内核头）。它需要 **virgl-capable** 设备（`GPU_3D=1`）：
 
 ```sh
-# 在 QEMU 里运行
-gpu3d_test
-# 期望输出：
+# 推荐走门禁（见 gpu-3d-roadmap.md §5）
+tools/a20 test smoke-gpu3d-riscv64
+# 实测期望输出：
+#   [GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1
 #   GPU3D_TEST: virgl available
 #   GPU3D_TEST: context 1 created
 #   GPU3D_TEST: 3D resource 2 created (16x16 RGBA8)
 #   GPU3D_TEST: resource 2 released
 #   GPU3D_TEST: context destroyed
-#   GPU3D_TEST: PASS
+#   GPU3D_TEST: PASS (transport only -- no command stream submitted, rendering unverified)
 ```
 
-2D-only 设备（`virtio-gpu-device`）输出 `2D-only device, skipping 3D path` 并返回 0。
+退出码是三态且**必须**保持三态：
+
+| 码 | 含义 |
+|---|---|
+| 0 | PASS：virgl 可用，且每一步传输都被 host 接受 |
+| 77 | SKIP：设备 2D-only，没有 3D 通路可测（autotools 约定） |
+| 1 | FAIL |
+
+2D-only 设备输出 `GPU3D_TEST: SKIP 2D-only device` 并返回 **77**。旧版本在这里
+`return 0`，于是该测试**在任何配置下都是绿的**，绿灯不携带任何信息——这正是
+§0 那两条失真结论的来源。SKIP 故意不等于 PASS。
+
+还要注意 PASS 那行的自我限定：**它没有提交命令流，资源也没有 backing**，
+所以它证明的是*传输可达性*，不是"渲染成功"。命令流与 backing 见
+[gpu-3d-roadmap.md §4.3–4.4](gpu-3d-roadmap.md)。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 

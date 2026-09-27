@@ -217,13 +217,35 @@ UAPI 可用，它就没有存在理由：留着等于维护两套 3D ABI。届�
 规则（本轮确立，替代旧做法）：**一个"已验证"结论必须指向一个可以失败的门禁；
 不能失败的检查不构成验证。**
 
-因此：
+本轮已落地：
 
-- `gpu3d_test` 的退出码要三态：`0` = 3D 已验证、`77` = SKIP（autotools 约定，
-  2D-only 设备）、`1` = FAIL。SKIP 不得与 PASS 混淆。
-- 新增 `instances/smoke-gpu3d-*.toml`，`expect` 断言**真实提交的**结果。
-  `tools/a20 test` 这条路径已经支持（`[test].commands` + `expect`）。
-- 文档里的 PASS 只在附上产生它的命令、配置与提交时有效。
+- `gpu3d_test` 退出码三态：`0` = PASS（virgl 可用且每一步传输都被 host 接受）、
+  `77` = SKIP（2D-only，autotools 约定，**故意**与 PASS 不同）、`1` = FAIL。
+  PASS 那行同时声明它**没有**覆盖什么：未提交命令流、资源无 backing，所以这只是
+  *传输可达性*检查，不是"渲染成功"的证明。
+- 新增 `instances/smoke-gpu3d-riscv64.toml`，并补上它所需的两个能力：
+  - `machine.gpu_3d` 以清单方式选择 virgl 设备；
+  - `machine.display_mode = "gui"` 把一次启动从 `-nographic` 切到真实显示 +
+    按架构的 GUI 设备集（保留 `-serial stdio`，因为门禁靠串口注入命令与匹配日志）。
+    这一步是必需的：冒烟门禁走 `_run_impl`（文本模式），而**文本模式根本不挂
+    virtio-gpu**——在那儿做 GPU 测试只能是空转。
+- 顺带修掉一个门禁自身的 bug：`a20 test` 生成 QEMU 命令行时会**静默丢弃**
+  额外 make 参数（它们只到了 build，没到 launch），于是
+  `a20 test <inst> GPU_3D=0` 会"用一个配置编译、跑另一个配置"。
+
+### 5.1 已完成的可证伪验证（双向实测）
+
+| 配置 | guest 日志 | 门禁结果 |
+|---|---|---|
+| `GPU_3D=1` | `[GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1`，随后 `CTX_CREATE` / `RES_CREATE_3D` / `RES_UNREF` / `CTX_DESTROY` 全部被 host 接受 | **PASS** |
+| `GPU_3D=0` | `[GPU] virtio-gpu 2D only (no VIRGL feature)` → `GPU3D_TEST: SKIP` | **FAIL**（点名三条缺失 pattern） |
+
+即：**3D 传输通路首次被真正验证**，且这个验证会失败。
+
+尚未被覆盖的（因此仍不能说"3D 可用"）：命令流提交、资源 backing、像素回读。
+这三项分别对应 §4.3 / §4.4。
+
+文档里的 PASS 只在附上产生它的命令、配置与提交时有效。
 
 ---
 
@@ -231,10 +253,15 @@ UAPI 可用，它就没有存在理由：留着等于维护两套 3D ABI。届�
 
 | 目标 | 实例 | 备注 |
 |---|---|---|
-| 内核 3D 透传 | `GPU_3D=1` + `smoke-gpu3d-*` | 需要宿主 virgl |
+| 内核 3D 传输 | `tools/a20 test smoke-gpu3d-riscv64` | 需要宿主 virgl；已双向验证 |
 | Mesa 3D 挂载 | `GPU_3D=1` + xfce world | 需完整镜像，最重 |
 | 桌面回归 | `GPU_3D=0` + `xfce-*` | 每次 DRM 改动必跑 |
 | 引导 | `smoke-riscv64` / `smoke-abi-linux` | 便宜，可频繁跑 |
+
+```bash
+tools/a20 test smoke-gpu3d-riscv64              # 期望 PASS
+tools/a20 test smoke-gpu3d-riscv64 GPU_3D=0     # 期望 FAIL（反向验证门禁有效）
+```
 
 **迭代目标选择**：x86_64 + KVM 是唯一快的环境（LWJGL 也只提供
 x86_64/aarch64 native，Minecraft 本来就只能在这两个架构上跑）。riscv64 只有
@@ -264,7 +291,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 
 ## 8. 建议顺序
 
-1. 修 `gpu3d_test` 的三态退出码 + 真实提交（本轮未做，成本最低、防自欺）
+1. ~~修 `gpu3d_test` 的三态退出码 + 新增可证伪门禁~~ — **本轮已完成**（§5）
 2. `VIRTGPU_GETPARAM`（§4.1）——最便宜，且是所有后续尝试的前提
 3. XWayland 呈现（§7）——独立、可并行、解锁所有 X11 应用
 4. `VIRTGPU_GET_CAPS` + capset 核对（§4.2）
@@ -272,3 +299,6 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 6. `VIRTGPU_EXECBUFFER`（§4.4）
 7. 放开 `A20_RENDERER=gl`，合成器切 GL 渲染器
 8. retire `A20_GPU_IOCTL_*`（§4.5）
+
+做完 2–6 之后，`gpu3d_test` 应当扩展为提交命令流并回读像素；在那之前，
+"3D 可用"这句话只对**传输层**成立。
