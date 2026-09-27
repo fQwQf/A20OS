@@ -5,6 +5,10 @@
 #include "core/string.h"
 #include "proc/proc.h"
 #include "drivers/core/driver_class.h"
+#include "net/lwip_stack.h"
+
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
 
 #define NLMSG_DONE              3
 #define NLM_F_MULTI             0x2
@@ -321,4 +325,263 @@ int net_netlink_uevent_send(net_socket_t *requester, const void *buf,
     (void)addrlen;
     class_device_emit_uevents("add");
     return (int)len;
+}
+
+/* ------------------------------------------------------------------ */
+/* NETLINK_ROUTE (ip / ifconfig / NetworkManager)                       */
+/* ------------------------------------------------------------------ */
+
+#define RTM_GETLINK      18
+#define RTM_GETADDR      22
+#define RTM_GETROUTE     26
+
+#define IFLA_ADDRESS     1
+#define IFLA_IFNAME      3
+#define IFLA_MTU         4
+
+#define IFA_ADDRESS      1
+#define IFA_LOCAL        2
+#define IFA_LABEL        3
+
+#define RTA_GATEWAY      3
+#define RTA_OIF          4
+
+#define NLMSG_ALIGNTO    4
+#define NLRT_IF_FLAGS_UP 0x1
+#define NLRT_IF_FLAGS_LOOPBACK 0x8
+#define NLRT_IF_FLAGS_RUNNING  0x40
+#define NLRT_RTPROT_BOOT 3
+#define NLRT_SCOPE_UNIVERSE 0
+#define NLRT_MAX_LINKS   8
+#define NLRT_MSG_MAX     256
+
+typedef struct {
+    uint8_t  ifi_family;
+    uint8_t  ifi_pad;
+    uint16_t ifi_type;
+    int32_t  ifi_index;
+    uint32_t ifi_flags;
+    uint32_t ifi_change;
+} ifinfomsg_t;
+
+typedef struct {
+    uint8_t  ifa_family;
+    uint8_t  ifa_prefixlen;
+    uint8_t  ifa_flags;
+    uint8_t  ifa_scope;
+    uint32_t ifa_index;
+} ifaddrmsg_t;
+
+typedef struct {
+    uint8_t  rtm_family, rtm_dst_len, rtm_src_len, rtm_tos;
+    uint8_t  rtm_table, rtm_protocol, rtm_scope, rtm_type;
+    uint32_t rtm_flags;
+} rtmsg_t;
+
+typedef struct {
+    uint16_t rta_len;
+    uint16_t rta_type;
+} rtattr_t;
+
+_Static_assert(sizeof(ifinfomsg_t) == 16, "ifinfomsg wire layout");
+_Static_assert(sizeof(ifaddrmsg_t) == 8, "ifaddrmsg wire layout");
+_Static_assert(sizeof(rtmsg_t) == 12, "rtmsg wire layout");
+_Static_assert(sizeof(rtattr_t) == 4, "rtattr wire layout");
+
+/* One netif's user-visible state, copied out from under g_lwip_lock. */
+typedef struct {
+    char     name[16];
+    uint32_t index;
+    uint32_t mtu;
+    uint32_t flags;
+    uint8_t  mac[6];
+    uint8_t  loopback;
+    uint8_t  has_ip, has_gw;
+    uint8_t  ip[4], mask[4], gw[4];
+} nlrt_link_t;
+
+static void nlrt_copy_ip4(uint8_t out[4], const ip4_addr_t *a)
+{
+    out[0] = ip4_addr1(a);
+    out[1] = ip4_addr2(a);
+    out[2] = ip4_addr3(a);
+    out[3] = ip4_addr4(a);
+}
+
+/*
+ * Copy the interface list out of lwIP.  The lock contract forbids holding
+ * g_lwip_lock together with g_net_lock, so the snapshot is taken and the lwIP
+ * lock dropped before any reply is enqueued.
+ */
+static int nlrt_snapshot(nlrt_link_t *out, int max)
+{
+    uint64_t lf = a20_lwip_lock();
+    int n = 0;
+    for (struct netif *ni = netif_list; ni && n < max; ni = ni->next) {
+        nlrt_link_t *e = &out[n++];
+        memset(e, 0, sizeof(*e));
+        snprintf(e->name, sizeof(e->name), "%c%c%u",
+                 ni->name[0], ni->name[1], ni->num);
+        e->index = (uint32_t)netif_get_index(ni);
+        e->mtu = ni->mtu;
+        e->flags = NLRT_IF_FLAGS_LOOPBACK;
+        if (netif_is_up(ni))
+            e->flags |= NLRT_IF_FLAGS_UP;
+        if (netif_is_link_up(ni))
+            e->flags |= NLRT_IF_FLAGS_RUNNING;
+        if (ni->flags & NETIF_FLAG_ETHERNET)
+            e->loopback = 0, e->flags &= ~(uint32_t)NLRT_IF_FLAGS_LOOPBACK;
+        else
+            e->loopback = 1;
+        memcpy(e->mac, ni->hwaddr, 6);
+        const ip4_addr_t *ip = netif_ip4_addr(ni);
+        const ip4_addr_t *mask = netif_ip4_netmask(ni);
+        const ip4_addr_t *gw = netif_ip4_gw(ni);
+        if (ip && !ip4_addr_isany_val(*ip)) {
+            e->has_ip = 1;
+            nlrt_copy_ip4(e->ip, ip);
+        }
+        if (mask)
+            nlrt_copy_ip4(e->mask, mask);
+        if (gw && !ip4_addr_isany_val(*gw)) {
+            e->has_gw = 1;
+            nlrt_copy_ip4(e->gw, gw);
+        }
+    }
+    a20_lwip_unlock(lf);
+    return n;
+}
+
+/* Append one rtattr, padding the payload to NLMSG_ALIGNTO. */
+static size_t nlrt_put_attr(uint8_t *buf, size_t off, uint16_t type,
+                            const void *data, size_t len)
+{
+    size_t need = sizeof(rtattr_t) + len;
+    size_t padded = (need + (NLMSG_ALIGNTO - 1)) & ~(size_t)(NLMSG_ALIGNTO - 1);
+    if (off + padded > NLRT_MSG_MAX)
+        return off;
+    rtattr_t *a = (rtattr_t *)(buf + off);
+    a->rta_len = (uint16_t)need;
+    a->rta_type = type;
+    if (len)
+        memcpy(buf + off + sizeof(rtattr_t), data, len);
+    memset(buf + off + need, 0, padded - need);
+    return off + padded;
+}
+
+static void nlrt_fill_hdr(netlink_msghdr_t *nlh, uint16_t type, uint32_t total,
+                          uint32_t seq, uint32_t pid)
+{
+    nlh->nlmsg_len = total;
+    nlh->nlmsg_type = type;
+    nlh->nlmsg_flags = NLM_F_MULTI;
+    nlh->nlmsg_seq = seq;
+    nlh->nlmsg_pid = pid;
+}
+
+int net_netlink_route_request(net_socket_t *requester, const void *buf,
+                              size_t len, const void *addr, size_t addrlen)
+{
+    if (!requester || requester->domain != AF_NETLINK ||
+        requester->protocol != NETLINK_ROUTE)
+        return -EPROTONOSUPPORT;
+    if (!buf || len < sizeof(netlink_msghdr_t))
+        return -EINVAL;
+    /* musl's send() passes a pointer to a zeroed sockaddr with addrlen 0, so an
+     * absent address looks like a present one; only validate a real length. */
+    if (addr && addrlen >= sizeof(net_sockaddr_nl_t) &&
+        ((const net_sockaddr_nl_t *)addr)->nl_family != AF_NETLINK)
+        return -EAFNOSUPPORT;
+
+    const netlink_msghdr_t *req = (const netlink_msghdr_t *)buf;
+    size_t payload = len - sizeof(netlink_msghdr_t);
+    uint16_t type = req->nlmsg_type;
+    size_t want;
+    if (type == RTM_GETLINK)
+        want = sizeof(ifinfomsg_t);
+    else if (type == RTM_GETADDR)
+        want = sizeof(ifaddrmsg_t);
+    else if (type == RTM_GETROUTE)
+        want = sizeof(rtmsg_t);
+    else
+        return -EOPNOTSUPP;
+    if (req->nlmsg_len < sizeof(netlink_msghdr_t) + want ||
+        req->nlmsg_len > len || payload < want)
+        return -EINVAL;
+
+    nlrt_link_t links[NLRT_MAX_LINKS];
+    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+
+    net_sockaddr_nl_t from = { .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = 0 };
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    uint32_t pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
+        ? ((const net_sockaddr_nl_t *)requester->local)->nl_pid : 0;
+
+    union { uint64_t align; uint8_t b[NLRT_MSG_MAX]; } msg;
+    int rc = 0;
+
+    for (int i = 0; i < nlinks && rc >= 0; i++) {
+        const nlrt_link_t *e = &links[i];
+        /* The payload follows the header, so it starts past it -- writing the
+         * header last would otherwise clobber the leading struct. */
+        size_t off = sizeof(netlink_msghdr_t);
+        if (type == RTM_GETLINK) {
+            ifinfomsg_t *ifi = (ifinfomsg_t *)(msg.b + off);
+            memset(ifi, 0, sizeof(*ifi));
+            ifi->ifi_family = AF_UNSPEC;
+            ifi->ifi_index = (int32_t)e->index;
+            ifi->ifi_flags = e->flags;
+            ifi->ifi_change = 0xffffffffU;
+            off += sizeof(*ifi);
+            if (e->mtu)
+                off = nlrt_put_attr(msg.b, off, IFLA_MTU, &e->mtu, sizeof(e->mtu));
+            off = nlrt_put_attr(msg.b, off, IFLA_ADDRESS, e->mac, sizeof(e->mac));
+            off = nlrt_put_attr(msg.b, off, IFLA_IFNAME, e->name,
+                                strlen(e->name) + 1);
+        } else if (type == RTM_GETADDR) {
+            if (!e->has_ip)
+                continue;
+            ifaddrmsg_t *ifa = (ifaddrmsg_t *)(msg.b + off);
+            memset(ifa, 0, sizeof(*ifa));
+            ifa->ifa_family = AF_INET;
+            ifa->ifa_prefixlen = (uint8_t)(e->mask[0] ? 24 : 0);
+            ifa->ifa_scope = e->loopback ? 254 : NLRT_SCOPE_UNIVERSE;
+            ifa->ifa_index = e->index;
+            off += sizeof(*ifa);
+            off = nlrt_put_attr(msg.b, off, IFA_ADDRESS, e->ip, sizeof(e->ip));
+            off = nlrt_put_attr(msg.b, off, IFA_LOCAL, e->ip, sizeof(e->ip));
+            off = nlrt_put_attr(msg.b, off, IFA_LABEL, e->name,
+                                strlen(e->name) + 1);
+        } else {
+            if (!e->has_gw)
+                continue;
+            rtmsg_t *rt = (rtmsg_t *)(msg.b + off);
+            memset(rt, 0, sizeof(*rt));
+            rt->rtm_family = AF_INET;
+            rt->rtm_dst_len = 0;
+            rt->rtm_table = 254;             /* RT_TABLE_MAIN */
+            rt->rtm_protocol = NLRT_RTPROT_BOOT;
+            rt->rtm_scope = NLRT_SCOPE_UNIVERSE;
+            rt->rtm_type = 1;                /* RTN_UNICAST */
+            off += sizeof(*rt);
+            off = nlrt_put_attr(msg.b, off, RTA_GATEWAY, e->gw, sizeof(e->gw));
+            uint32_t oif = e->index;
+            off = nlrt_put_attr(msg.b, off, RTA_OIF, &oif, sizeof(oif));
+        }
+        size_t total = sizeof(netlink_msghdr_t) + off;
+        nlrt_fill_hdr((netlink_msghdr_t *)msg.b, type, (uint32_t)total,
+                      req->nlmsg_seq, pid);
+        rc = net_enqueue_msg_locked(requester, msg.b, total, &from, sizeof(from));
+    }
+
+    if (rc >= 0) {
+        netlink_done_t done;
+        memset(&done, 0, sizeof(done));
+        nlrt_fill_hdr(&done.nlh, NLMSG_DONE, (uint32_t)sizeof(done),
+                      req->nlmsg_seq, pid);
+        rc = net_enqueue_msg_locked(requester, &done, sizeof(done),
+                                    &from, sizeof(from));
+    }
+    spin_unlock_irqrestore(&g_net_lock, irq);
+    return rc < 0 ? rc : (int)len;
 }

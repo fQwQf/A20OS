@@ -36,6 +36,7 @@ struct vfile;
 #define SOCK_NONBLOCK 04000
 #define SOCK_CLOEXEC  02000000
 
+#define MSG_OOB        0x0001
 #define MSG_PEEK       0x0002
 #define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040
@@ -48,6 +49,7 @@ struct vfile;
 #define SCM_RIGHTS   1
 #define SCM_CREDENTIALS 2
 #define SOL_ALG      279
+#define NETLINK_ROUTE        0
 #define NETLINK_SOCK_DIAG 4
 #define NETLINK_KOBJECT_UEVENT 15
 #define NETLINK_GENERIC        16
