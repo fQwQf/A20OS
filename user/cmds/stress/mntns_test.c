@@ -254,6 +254,43 @@ int main(void)
     CHECK(access("/tmp/ns_test/from_child", F_OK) == -1 && errno == ENOENT,
           "umount detached the namespaced mount");
 
+    /* 13. Shared-mount path: a mount that existed before the unshare is
+     * inherited by the new namespace.  Unmounting it there must only detach
+     * the copy -- the parent keeps its mount and its files. */
+    CHECK(mkdir("/tmp/ns_shared", 0755) == 0 || errno == EEXIST,
+          "create shared mount point");
+    CHECK(mount("none", "/tmp/ns_shared", "ramfs", 0, NULL) == 0,
+          "mount ramfs before unshare");
+    {
+        int fd = open("/tmp/ns_shared/before", O_CREAT | O_WRONLY, 0644);
+        CHECK(fd >= 0, "create file on pre-unshare mount");
+        if (fd >= 0) close(fd);
+    }
+    CHECK(xunshare(CLONE_NEWNS) == 0, "unshare for shared-mount case");
+    {
+        unsigned long long shared_ino = 0;
+        CHECK(read_ns_file("/proc/self/ns/mnt", "mnt", &shared_ino) == 0 &&
+              shared_ino != new_ino,
+              "second unshare yields another namespace");
+        errno = 0;
+        CHECK(access("/tmp/ns_shared/before", F_OK) == 0,
+              "inherited mount is visible in the new namespace");
+        CHECK(umount2("/tmp/ns_shared", 0) == 0,
+              "umount inherited mount inside the new namespace");
+        errno = 0;
+        CHECK(access("/tmp/ns_shared/before", F_OK) == -1 && errno == ENOENT,
+              "inherited mount detached in the new namespace");
+    }
+    /* setns back to the namespace that created the mount (new_ino) and
+     * confirm it survived the other namespace's detach. */
+    if (fd_newns >= 0) {
+        CHECK(xsetns(fd_newns, CLONE_NEWNS) == 0, "setns back to mounting ns");
+        errno = 0;
+        CHECK(access("/tmp/ns_shared/before", F_OK) == 0,
+              "mounting namespace keeps its mount after the other detached it");
+        CHECK(umount2("/tmp/ns_shared", 0) == 0, "umount shared mount in owner");
+    }
+
 out:
     if (witness > 0) {
         if (pipe_to_witness[1] >= 0) {

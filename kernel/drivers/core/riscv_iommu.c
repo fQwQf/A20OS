@@ -304,11 +304,17 @@ static int riscv_iommu_verify_translation(void)
     uint64_t resp = iommu_read64(IOMMU_REG_TR_RESPONSE);
     /* Spec 1.0: TR_RESPONSE.PPN is bits [53:10] holding ppn << 10.
      * QEMU <= 10.0 stores (ppn & field_mask) without the shift (fixed on
-     * master by set_field()); accept both encodings, the fault bit and the
-     * page identity are what this probe needs. */
+     * master by set_field()).  The unshifted encoding is accepted only when
+     * CONFIG_IOMMU_TRRESP_LEGACY_PPN is set, so the exception is explicit and
+     * can be dropped once the required QEMU baseline no longer needs it. */
     uint64_t expect_field = (data_phys >> 2) & IOMMU_TR_RESP_PPN;
     uint64_t legacy_field = (data_phys >> 12) & IOMMU_TR_RESP_PPN;
     uint64_t got_field = resp & IOMMU_TR_RESP_PPN;
+#ifdef CONFIG_IOMMU_TRRESP_LEGACY_PPN
+    int legacy_ok = (got_field == legacy_field);
+#else
+    int legacy_ok = 0;
+#endif
     kinfo("[IOMMU] TR_REQ mapped iova=0x%lx -> field=0x%08lx%08lx "
           "(expected 0x%08lx%08lx) fault=%u raw=0x%08lx%08lx\n",
           (unsigned long)IOMMU_PROBE_IOVA,
@@ -317,11 +323,11 @@ static int riscv_iommu_verify_translation(void)
           !!(resp & IOMMU_TR_RESP_FAULT),
           (unsigned long)(resp >> 32), (unsigned long)(uint32_t)resp);
     if ((resp & IOMMU_TR_RESP_FAULT) ||
-        (got_field != expect_field && got_field != legacy_field)) {
+        (got_field != expect_field && !legacy_ok)) {
         kerr("[IOMMU] TR_REQ mapped translation mismatch\n");
         return -1;
     }
-    if (got_field == legacy_field && got_field != expect_field)
+    if (legacy_ok && got_field != expect_field)
         kinfo("[IOMMU] TR_REQ uses legacy (QEMU <= 10.0) PPN encoding\n");
 
     /* TR_REQ: unmapped IOVA must be rejected by the hardware. */
@@ -375,12 +381,19 @@ static int riscv_iommu_probe(device_t *dev)
     iommu_write64(IOMMU_REG_DDTP, 0);
     iommu_write32(IOMMU_REG_CQCSR, 0);
     iommu_write32(IOMMU_REG_FQCSR, 0);
+    int quiesced = 0;
     for (unsigned i = 0; i < 1000000; i++) {
         if (!(iommu_read32(IOMMU_REG_CQCSR) &
               (IOMMU_QUEUE_ACTIVE | IOMMU_QUEUE_BUSY)) &&
             !(iommu_read32(IOMMU_REG_FQCSR) &
-              (IOMMU_QUEUE_ACTIVE | IOMMU_QUEUE_BUSY)))
+              (IOMMU_QUEUE_ACTIVE | IOMMU_QUEUE_BUSY))) {
+            quiesced = 1;
             break;
+        }
+    }
+    if (!quiesced) {
+        kerr("[IOMMU] queues did not quiesce; aborting probe\n");
+        return -1;
     }
 
     /* Allocate DDT (doubles as the DC array in 1LVL mode), CQ, FQ. */
@@ -660,8 +673,18 @@ int riscv_iommu_domain_fault(uint16_t devid, int owner_pid,
     spin_unlock_irqrestore(&g_iommu_domain_lock, flags);
 
     if (new_fault) {
-        if (iommu_context_block(devid) < 0)
-            return -1;
+        /* Block the device at fault time, not on the caller's next poll:
+         * invalidating the device context alone still leaves bus mastering
+         * enabled, so the device could keep issuing DMA. */
+        extern int pci_user_device_bus_master(uint16_t devid, int enable);
+        pci_user_device_bus_master(devid, 0);
+        if (iommu_context_block(devid) < 0) {
+            /* The context is already invalid (fail-closed); the fault report
+             * was filled above, so do not discard it on this path. */
+            kinfo("[IOMMU] DMA fault blocked did=%u cause=%u iova=0x%lx\n",
+                  devid, report_cause, (unsigned long)report_iova);
+            return 0;
+        }
         kinfo("[IOMMU] DMA fault blocked did=%u cause=%u iova=0x%lx\n",
               devid, report_cause, (unsigned long)report_iova);
     }

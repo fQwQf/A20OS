@@ -63,6 +63,14 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     dst_vma->file_fd = src_vma->file_fd;
     dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
     dst_vma->file_vnode = src_vma->file_vnode;
+    /* A VM_VMO VMA owns a vmo reference; the destination inherits it, or the
+     * source's later teardown would free frames this VMA still maps. */
+    if (src_vma->vm_flags & VM_VMO) {
+        dst_vma->vmo = src_vma->vmo;
+        dst_vma->vmo_offset = src_vma->vmo_offset + (src_addr - src_vma->start);
+        if (dst_vma->vmo)
+            vmo_ref(dst_vma->vmo);
+    }
     if (vma_ref_file(dst_vma) < 0) {
         dst_vma->file_fd = -1;
         if (dst_vma->file_vnode) {
@@ -311,6 +319,12 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     dst_vma->file_fd = vma->file_fd;
     dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
     dst_vma->file_vnode = vma->file_vnode;
+    if (vma->vm_flags & VM_VMO) {
+        dst_vma->vmo = vma->vmo;
+        dst_vma->vmo_offset = vma->vmo_offset + (old_addr - vma->start);
+        if (dst_vma->vmo)
+            vmo_ref(dst_vma->vmo);
+    }
     if (vma_ref_file(dst_vma) < 0) {
         dst_vma->file_fd = -1;
         if (dst_vma->file_vnode) {

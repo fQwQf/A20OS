@@ -22,16 +22,17 @@ void mntns_early_init(void)
     g_ns_list = &g_init_ns;
 }
 
-mnt_namespace_t *mntns_init_ns(void)
-{
-    return &g_init_ns;
-}
-
 mnt_namespace_t *mntns_current(void)
 {
     task_t *t = proc_current();
-    if (t && t->mnt_ns)
-        return (mnt_namespace_t *)t->mnt_ns;
+    if (t) {
+        /* All writers take g_mntns_lock; read with matching acquire so the
+         * pointer and the table it points at are seen consistently. */
+        mnt_namespace_t *ns = (mnt_namespace_t *)__atomic_load_n(
+            &t->mnt_ns, __ATOMIC_ACQUIRE);
+        if (ns)
+            return ns;
+    }
     return &g_init_ns;
 }
 
@@ -70,15 +71,22 @@ static mnt_namespace_t *mntns_alloc(void)
 }
 
 /* Deep-copy the mount table: entries are duplicated, root vnodes and
- * fs_data stay shared with the source namespace.  Both copies are marked
- * VFS_MOUNT_NS_SHARED so a later umount detaches only the local table
- * entry instead of destroying a filesystem the other namespace still uses. */
+ * fs_data stay shared with the source namespace.  The source entry keeps the
+ * real holder count (ns_users: itself + every copy) and is the only entry
+ * allowed to run the filesystem teardown; each copy is marked
+ * VFS_MOUNT_NS_SHARED so an umount there only detaches the local table entry.
+ * Because a copy cannot reach back to its source to decrement the count, the
+ * count is deliberately conservative: a shared filesystem is destroyed when
+ * the source unmounts it, and a source that still lists copies simply keeps
+ * the fs alive rather than risking a use-after-free. */
 static void mntns_copy_mounts(mnt_namespace_t *dst, mnt_namespace_t *src)
 {
     dst->nmounts = src->nmounts;
     memcpy(dst->mounts, src->mounts, sizeof(mount_t) * (size_t)src->nmounts);
     for (int i = 0; i < src->nmounts; i++) {
+        src->mounts[i].ns_users++;
         src->mounts[i].flags |= VFS_MOUNT_NS_SHARED;
+        dst->mounts[i].ns_users = 0;  /* copy: detach-only, never destroys */
         dst->mounts[i].flags |= VFS_MOUNT_NS_SHARED;
     }
 }
@@ -132,11 +140,16 @@ int mntns_join(task_t *t, mnt_namespace_t *ns)
 {
     if (!t || !ns)
         return -EINVAL;
+    int to_init = (ns == &g_init_ns);
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
     mnt_namespace_t *old = (mnt_namespace_t *)t->mnt_ns;
     /* NULL means the initial namespace; its reference is not tracked. */
-    t->mnt_ns = (ns == &g_init_ns) ? NULL : ns;
+    t->mnt_ns = to_init ? NULL : ns;
     spin_unlock_irqrestore(&g_mntns_lock, flags);
+    if (to_init) {
+        /* The caller's pin on the initial namespace is not a counted one. */
+        return 0;
+    }
     if (old)
         mntns_put(old);
     return 0;
@@ -146,9 +159,11 @@ void mntns_put(mnt_namespace_t *ns)
 {
     if (!ns || ns == &g_init_ns)
         return;
-    if (!refcount_dec_and_test(&ns->refs))
-        return;
     uint64_t flags = spin_lock_irqsave(&g_mntns_lock);
+    if (!refcount_dec_and_test(&ns->refs)) {
+        spin_unlock_irqrestore(&g_mntns_lock, flags);
+        return;
+    }
     mnt_namespace_t **pp = &g_ns_list;
     while (*pp) {
         if (*pp == ns) {
@@ -158,6 +173,9 @@ void mntns_put(mnt_namespace_t *ns)
         pp = &(*pp)->next;
     }
     spin_unlock_irqrestore(&g_mntns_lock, flags);
+    /* Release this namespace's holds on its mounts before freeing the table,
+     * so a shared filesystem still gets its teardown from the last holder. */
+    vfs_mount_namespace_teardown(ns);
     kfree(ns);
 }
 

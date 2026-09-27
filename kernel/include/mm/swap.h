@@ -63,6 +63,17 @@ int swap_register_device(block_dev_t *bdev, const char *name);
 int swap_format_device(block_dev_t *bdev, const char *name, int priority,
                        const char *label);
 void swap_unregister_device(int type);
+
+/* Snapshot of one swap area for /proc/swaps.  The name is copied under the
+ * per-area lock: swap_unregister_device() frees it once the lock is dropped,
+ * so a reader must not touch swap_info[type].name directly. */
+typedef struct swap_listing {
+    char name[64];
+    uint64_t pages;
+    size_t inuse_pages;
+} swap_listing_t;
+
+int swap_list_area(int type, swap_listing_t *out);
 long sys_swapon(const char *path, int flags);
 long sys_swapoff(const char *path);
 long sys_mkswap(const char *path, int flags);
