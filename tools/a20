@@ -33,12 +33,22 @@ from pathlib import Path
 from typing import assert_never
 
 from a20_board import run_flash, run_package
+from a20_console import (
+    ConsoleError,
+    console_log_path,
+    open_transport,
+    run_console_session,
+    write_console_log,
+)
 from a20_derive import derive_make_vars
+from dataclasses import replace
+
 from a20_instance import (
     QEMU_RUNNABLE_ARCHES,
     Instance,
     InstanceError,
     parse_instance,
+    section_is_set,
 )
 from a20_manifest import formats as ledger_formats
 from a20_manifest import collect as collect_manifest
@@ -181,6 +191,68 @@ def cmd_test(args: argparse.Namespace) -> int:
     _check_runnable(inst, "test")
     _gate_resources(inst, args)
     return run_test(inst, list(args.make_args), args.dry_run)
+
+
+def _report(inst, result, log) -> int:
+    """Print the verdict and keep the transcript either way."""
+    write_console_log(log, result.transcript)
+    if result.ok:
+        print(f"{inst.name}: console OK ({result.stage}); transcript in {log}")
+        return 0
+    print(f"{inst.name}: console FAIL at {result.stage}; missing {list(result.missing)}; "
+          f"transcript in {log}", file=sys.stderr)
+    print("\n".join(result.transcript.tail(60)), file=sys.stderr)
+    return 1
+
+
+def cmd_console(args: argparse.Namespace) -> int:
+    """Attach to a board's serial console and run the declared on-board check."""
+    inst = _load(args.instance)
+    if not section_is_set(inst.target):
+        raise SystemExit(f"error: {inst.source}: a20 console needs a [target] section "
+                         "(serial, console_check, commands, expect)")
+    if args.no_reset:
+        inst = replace(inst, target=replace(inst.target, reset=None))
+    log = console_log_path(inst)
+    try:
+        transport = open_transport(inst)
+    except OSError as e:
+        raise SystemExit(f"error: cannot open console {inst.target.serial!r}: {e}. "
+                         "Is the board attached, and is this user in the dialout group?") from None
+    try:
+        result = run_console_session(transport, inst, on_output=_echo)
+    except ConsoleError as e:
+        transport.close()
+        raise SystemExit(f"error: {e}") from None
+    return _report(inst, result, log)
+
+
+def cmd_deploy(args: argparse.Namespace) -> int:
+    """Build, program the board, write boot media, then verify it over the console."""
+    inst = _load(args.instance)
+    if not section_is_set(inst.target):
+        raise SystemExit(f"error: {inst.source}: a20 deploy needs a [target] section")
+    if inst.target.boot_media and not inst.target.media_device:
+        raise SystemExit(f"error: {inst.source}: target.boot_media is declared but "
+                         "target.media_device is not, so there is nowhere to write it")
+    if not args.no_flash and section_is_set(inst.flash):
+        rc = run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
+        if rc != 0:
+            return rc
+    elif section_is_set(inst.flash):
+        pass
+    elif not args.dry_run:
+        rc = build_instance(inst, list(args.make_args), args.dry_run)
+        if rc != 0:
+            return rc
+    if inst.target.boot_media:
+        if args.dry_run:
+            print(f"would write {list(inst.target.boot_media)} to {inst.target.media_device}")
+        else:
+            rc = exec_make(inst, "target-write-media", [], args.dry_run)
+            if rc != 0:
+                return rc
+    return cmd_console(args)
 
 
 def cmd_ledger(args: argparse.Namespace) -> int:
@@ -357,6 +429,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list", help="list known instances")
     sub.add_parser("resources", help="show the host budget instance runs are gated against")
 
+    for name, help_text in (("console", "attach to a board console and run its on-board check"),
+                            ("deploy", "program the board, write boot media, then verify it")):
+        pc = add_instance_cmd(name, help_text, True)
+        pc.add_argument("--no-reset", action="store_true",
+                        help="attach without pulsing the board's reset line")
+        if name == "deploy":
+            pc.add_argument("--no-flash", action="store_true",
+                            help="skip the [flash] programming step")
+
     p_ledger = sub.add_parser(
         "ledger", help="report an instance's artifacts with size and sha256")
     p_ledger.add_argument("instance", help="instance name from instances/ or path to a TOML manifest")
@@ -403,6 +484,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_list(ns)
         case "resources":
             return cmd_resources(ns)
+        case "console":
+            return cmd_console(ns)
+        case "deploy":
+            return cmd_deploy(ns)
         case "ledger":
             return cmd_ledger(ns)
         case "show-vars":
