@@ -2,6 +2,7 @@
 #include "core/panic.h"
 #include "core/klog.h"
 #include "core/cpu.h"
+#include "core/perf.h"
 #include "core/string.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -112,7 +113,10 @@ static void mcs_lock(pt_meta_t *m)
 
     uintptr_t tail = __atomic_exchange_n(&m->lock, (uintptr_t)me,
                                          __ATOMIC_ACQ_REL);
+    a20_perf_count(A20_PERF_MM_PT_LOCK_ACQUIRES);
     if (tail) {
+        a20_perf_count(A20_PERF_MM_PT_LOCK_CONTENDED);
+        a20_perf_count(A20_PERF_MM_PT_LOCK_WAITS);
         __atomic_store_n(&me->locked, 0, __ATOMIC_RELEASE);
         uint32_t spins = 0;
         while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
@@ -489,6 +493,7 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             mcs_lock(pm);
             if (pm->stale) {
                 mcs_unlock(pm);
+                a20_perf_count(A20_PERF_MM_CURSOR_STALE_RETRY);
                 retry = 1;
                 break;
             }
@@ -566,6 +571,7 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
      * an aliased node. */
     cur->mm = mm;
     cur->locked = 1;
+    a20_perf_count(A20_PERF_MM_CURSOR_OPEN);
     return 0;
 }
 
