@@ -152,6 +152,12 @@ static void mcs_unlock(pt_meta_t *m)
         __atomic_compare_exchange_n(&m->lock, &self, 0, 0,
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
+    /* Every acquisition pushed exactly one slot in mcs_lock, so every release
+     * pops exactly one here.  This is the ONLY place the depth is
+     * decremented: the descent loop's inline lock/unlock pairs and the
+     * cursor's unwind loop both rely on it, and pre-decrementing in a caller
+     * as well is a double decrement that corrupts the stack discipline. */
+    g_pt_mcs_pool[pt_cpu()].depth--;
 }
 
 /* ------------------------------------------------------------------ *
@@ -585,9 +591,11 @@ void mm_cursor_unlock(mm_cursor_t *cur)
     pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
     while (pool->depth > (uint32_t)cur->lock_base_depth) {
         pt_meta_t *m = pool->held[pool->depth - 1];
-        pool->depth--;
-        if (m)
-            mcs_unlock(m);
+        if (m) {
+            mcs_unlock(m);          /* pops the depth slot itself */
+        } else {
+            pool->depth--;          /* no node recorded: pop the slot */
+        }
     }
     if (cur->in_read_side) {
         mm_pt_read_exit(cur->mm);
