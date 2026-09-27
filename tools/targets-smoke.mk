@@ -148,6 +148,9 @@ smoke-ppc64le:
 smoke-abi-linux:
 	tools/a20 test smoke-abi-linux
 
+smoke-net-iface:
+	tools/a20 test smoke-net-iface
+
 smoke-envelope:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)

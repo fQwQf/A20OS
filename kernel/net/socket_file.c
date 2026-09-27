@@ -367,20 +367,43 @@ static size_t net_vfile_poll_sources(vfile_t *vf, short events,
 #define A20_AF_UNSPEC       0
 #define A20_AF_INET         2
 
+/* `struct ifmap` is in the ABI for one reason: it is the largest member of the
+ * ifreq union, and therefore what sizes `struct ifreq`.  On LP64 it is 24
+ * bytes, which makes every real libc's `struct ifreq` 40 bytes, not 32.  A
+ * union holding only 16-byte members makes the kernel's struct 8 bytes shorter
+ * than user space's, and a caller walking the SIOCGIFCONF buffer in whole
+ * `struct ifreq` strides then desynchronises after the first entry. */
+struct a20_ifmap {
+    unsigned long mem_start;
+    unsigned long mem_end;
+    unsigned short base_addr;
+    unsigned char  irq;
+    unsigned char  dma;
+    unsigned short port;
+};
+
 struct a20_ifreq {
     char ifr_name[A20_IFNAMSIZ];
     union {
         uint8_t raw[16];
-        struct { uint16_t sa_family; uint8_t sa_data[14]; } addr;
+        struct { uint16_t sa_family; uint16_t sa_port; uint32_t sa_addr; uint8_t sa_zero[8]; } addr;
+        struct a20_ifmap map;
         short flags;
         int ivalue;
     } ifr_ifru;
 };
 
 /* User space walks the SIOCGIFCONF buffer in whole `struct ifreq` strides, so
- * the wire layout has to be exactly IFNAMSIZ + a 16-byte union. */
-_Static_assert(sizeof(struct a20_ifreq) == 32,
-               "struct ifreq wire layout must match Linux");
+ * the size has to agree with musl and glibc, which is 40 on LP64 and 32 on
+ * ILP32.  A bare `sizeof == 32` assertion here is what let the mismatch ship:
+ * it passed while every real caller was reading garbage. */
+#if defined(CONFIG_64BIT)
+_Static_assert(sizeof(struct a20_ifreq) == 40, "struct ifreq must match libc (LP64)");
+_Static_assert(offsetof(struct a20_ifreq, ifr_ifru) == 16, "ifreq union offset");
+#else
+_Static_assert(sizeof(struct a20_ifreq) == 32, "struct ifreq must match libc (ILP32)");
+_Static_assert(offsetof(struct a20_ifreq, ifr_ifru) == 16, "ifreq union offset");
+#endif
 
 /* Linux `struct ifconf`: ifc_len is in/out.  With a NULL ifc_buf the caller is
  * asking how large a full listing would be, which is why the size query below
@@ -403,9 +426,16 @@ static void net_ifreq_fill(struct a20_ifreq *ifr, const struct netif *nif)
         n = A20_IFNAMSIZ - 1;
     memcpy(ifr->ifr_name, nif->name, n);
     ifr->ifr_name[n] = '\0';
-    ifr->ifr_ifru.raw[0] = (uint8_t)A20_AF_INET;
-    ifr->ifr_ifru.raw[1] = (uint8_t)(A20_AF_INET >> 8);
-    memcpy(ifr->ifr_ifru.raw + 2, &nif->ip_addr, 4);
+
+    /* The row carries a `struct sockaddr_in`.  sin_family is a raw host-order
+     * constant -- Linux code writes `sin_family = AF_INET` and every libc
+     * header documents it that way, so it must not be byteswapped.  sin_addr
+     * is what needed fixing: it lives at offset 4, after sin_family and
+     * sin_port, and writing it at offset 2 lands in sin_port, which is how
+     * 10.0.2.15 was reported as 2.15.0.0. */
+    ifr->ifr_ifru.addr.sa_family = A20_AF_INET;
+    ifr->ifr_ifru.addr.sa_port = 0;
+    memcpy(&ifr->ifr_ifru.addr.sa_addr, &nif->ip_addr, sizeof(nif->ip_addr));
 }
 
 /* SIOCGIFCONF: enumerate the configured interfaces.  getifaddrs(), ifconfig
@@ -479,11 +509,15 @@ static int net_ifreq_put_addr(void *uarg, uint16_t family,
 {
     uint8_t out[16];
     memset(out, 0, sizeof(out));
+    /* sockaddr_in, not a two-byte-family header: sin_family, sin_port, then
+     * sin_addr at offset 4.  Writing the address at offset 2 puts it in
+     * sin_port and shifts every address by two bytes, so 10.0.2.15 was read
+     * back as 2.15.0.0. */
     out[0] = (uint8_t)family;
     out[1] = (uint8_t)(family >> 8);
-    if (n > 14)
-        n = 14;
-    memcpy(out + 2, bytes, n);
+    if (n > sizeof(out) - 4)
+        n = sizeof(out) - 4;
+    memcpy(out + 4, bytes, n);
     return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, out, sizeof(out)) < 0
            ? -EFAULT : 0;
 }
