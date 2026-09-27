@@ -91,10 +91,24 @@ endif
 include tools/driver-deployment.mk
 
 NOMMU ?= 0
+NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
+
+# Swap needs a PTE encoding for the 64-bit swap entry (pte_is_swap /
+# pte_to_swp_entry / swp_entry_to_pte in kernel/arch/<arch>/include/page_table.h).
+# riscv32 and loongarch32 have not defined one, so CONFIG_SWAP=y does not merely
+# leave them featureless there -- kernel/mm/{fault,mm,munmap}.c and
+# kernel/proc/exit.c fail to compile.  Mirrors the NOMMU gate above: force the
+# feature off outside the supported set instead of letting the build break.
+SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le
 ifeq ($(NOMMU),1)
 CONFIG_SWAP := n
+else
+ifeq ($(filter $(CONFIG_SWAP),y),y)
+ifeq ($(filter $(ARCH),$(SWAP_SUPPORTED_ARCHES)),)
+CONFIG_SWAP := n
 endif
-NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
+endif
+endif
 
 ifeq ($(NOMMU),1)
 ifeq ($(filter $(ARCH),$(NOMMU_SUPPORTED_ARCHES)),)
