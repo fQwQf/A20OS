@@ -778,7 +778,9 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);
     mm_tlb_invalidate_finish(t->mm);
-    if ((int64_t)ret < 0 && (int64_t)ret >= -4095)
+    /* Test the errno range through a signed type of pointer width: an int64_t
+     * cast zero-extends on 32-bit and silently makes this dead code. */
+    if ((long)ret < 0 && (long)ret >= -4095)
         ktrace_mm("[MM] mmap fail pid=%d comm=%s addr=%lx len=%lu prot=%d "
                   "flags=%x fd=%d ret=%ld\n", t->pid, t->name,
                   (unsigned long)addr, (unsigned long)len, prot,
