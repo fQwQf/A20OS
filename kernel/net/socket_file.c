@@ -364,6 +364,7 @@ static size_t net_vfile_poll_sources(vfile_t *vf, short events,
 #define A20_IFF_RUNNING     0x40
 #define A20_ARPHRD_ETHER    1
 #define A20_ARPHRD_LOOPBACK 772
+#define A20_AF_UNSPEC       0
 #define A20_AF_INET         2
 
 struct a20_ifreq {
@@ -375,6 +376,88 @@ struct a20_ifreq {
         int ivalue;
     } ifr_ifru;
 };
+
+/* User space walks the SIOCGIFCONF buffer in whole `struct ifreq` strides, so
+ * the wire layout has to be exactly IFNAMSIZ + a 16-byte union. */
+_Static_assert(sizeof(struct a20_ifreq) == 32,
+               "struct ifreq wire layout must match Linux");
+
+/* Linux `struct ifconf`: ifc_len is in/out.  With a NULL ifc_buf the caller is
+ * asking how large a full listing would be, which is why the size query below
+ * is computed exactly rather than estimated. */
+struct a20_ifconf {
+    int   ifc_len;
+    void *ifc_buf;
+};
+
+/* Fill one SIOCGIFCONF row: interface name plus its IPv4 address.
+ *
+ * lwIP stores the name in a fixed 2-byte, non-terminated field (this tree
+ * pins `char name[2]`), so the name is copied by length and terminated here
+ * rather than treated as a C string. */
+static void net_ifreq_fill(struct a20_ifreq *ifr, const struct netif *nif)
+{
+    memset(ifr, 0, sizeof(*ifr));
+    size_t n = sizeof(nif->name);
+    if (n > A20_IFNAMSIZ - 1)
+        n = A20_IFNAMSIZ - 1;
+    memcpy(ifr->ifr_name, nif->name, n);
+    ifr->ifr_name[n] = '\0';
+    ifr->ifr_ifru.raw[0] = (uint8_t)A20_AF_INET;
+    ifr->ifr_ifru.raw[1] = (uint8_t)(A20_AF_INET >> 8);
+    memcpy(ifr->ifr_ifru.raw + 2, &nif->ip_addr, 4);
+}
+
+/* SIOCGIFCONF: enumerate the configured interfaces.  getifaddrs(), ifconfig
+ * and busybox `ip` are all built on it, and the per-interface getters above
+ * are unreachable without it. */
+static int net_ifreq_getconf(void *uarg)
+{
+    struct a20_ifconf ifc;
+    if (copy_from_user(&ifc, uarg, sizeof(ifc)) < 0)
+        return -EFAULT;
+    if (ifc.ifc_len < 0)
+        return -EINVAL;
+
+    int needed = 0;
+    for (struct netif *n = netif_list; n; n = n->next)
+        needed += (int)sizeof(struct a20_ifreq);
+
+    if (!ifc.ifc_buf) {
+        ifc.ifc_len = needed;
+        return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
+    }
+
+    /* Linux reads the wanted address family from the first entry of a
+     * non-empty buffer.  Only IPv4 is reported, so a caller asking for
+     * another family gets an empty list rather than IPv4 rows wearing the
+     * wrong family tag. */
+    if (ifc.ifc_len >= (int)sizeof(struct a20_ifreq)) {
+        struct a20_ifreq probe;
+        if (copy_from_user(&probe, ifc.ifc_buf, sizeof(probe)) < 0)
+            return -EFAULT;
+        uint16_t want = (uint16_t)probe.ifr_ifru.raw[0] |
+                        ((uint16_t)probe.ifr_ifru.raw[1] << 8);
+        if (want != A20_AF_UNSPEC && want != A20_AF_INET) {
+            ifc.ifc_len = 0;
+            return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
+        }
+    }
+
+    int limit = ifc.ifc_len;
+    int used = 0;
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (used + (int)sizeof(struct a20_ifreq) > limit)
+            break;
+        struct a20_ifreq ifr;
+        net_ifreq_fill(&ifr, n);
+        if (copy_to_user((uint8_t *)ifc.ifc_buf + used, &ifr, sizeof(ifr)) < 0)
+            return -EFAULT;
+        used += (int)sizeof(ifr);
+    }
+    ifc.ifc_len = used;
+    return copy_to_user(uarg, &ifc, sizeof(ifc)) < 0 ? -EFAULT : 0;
+}
 
 static struct netif *net_ifreq_lookup(const char *name)
 {
@@ -487,8 +570,10 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
 static int net_vfile_ioctl(vfile_t *vf, unsigned long req, void *arg)
 {
     (void)vf;
+    if (req == A20_SIOCGIFCONF)
+        return net_ifreq_getconf(arg);
     switch (req) {
-    case A20_SIOCGIFNAME: case A20_SIOCGIFCONF: case A20_SIOCGIFFLAGS:
+    case A20_SIOCGIFNAME: case A20_SIOCGIFFLAGS:
     case A20_SIOCSIFFLAGS: case A20_SIOCGIFADDR: case A20_SIOCSIFADDR:
     case A20_SIOCGIFDSTADDR: case A20_SIOCSIFDSTADDR: case A20_SIOCGIFBRDADDR:
     case A20_SIOCSIFBRDADDR: case A20_SIOCGIFNETMASK: case A20_SIOCSIFNETMASK:
