@@ -1,3 +1,12 @@
+# The smoke suite drives the guest entirely over the serial console -- inject a
+# command, grep the log.  Nothing here accepts an inbound host connection, so
+# $(NETDEV_USER)'s default hostfwd on port 5555 buys nothing and costs a lot:
+# it makes every target in this file mutually exclusive, and a second run dies
+# with QEMU's "could not set up host forwarding rule" rather than anything
+# diagnosable.  Keep the NIC (loopback, DNS and socket tests need it), drop the
+# forwarding.  A target that genuinely needs a host port sets NET_HOSTFWD itself.
+SMOKE_NETDEV = -netdev user,id=net
+
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
 smoke-riscv64:
 	tools/a20 test smoke-riscv64
@@ -163,7 +172,7 @@ smoke-envelope:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'ENVELOPE_SMOKE: PASS' "$$log"; then \
@@ -186,7 +195,7 @@ smoke-envelope-pilot:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'ENVELOPE_PILOT: PASS' "$$log"; then \
@@ -209,7 +218,7 @@ smoke-envelope-bench:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'ENVELOPE_BENCH: PASS' "$$log"; then \
@@ -233,7 +242,7 @@ smoke-envelope-corpus:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'ENVELOPE_CORPUS: PASS' "$$log"; then \
@@ -257,7 +266,7 @@ smoke-a20-channel:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'A20_CHANNEL: PASS' "$$log"; then \
@@ -284,7 +293,7 @@ smoke-ptrace:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PTRACE_SMOKE: PASS' "$$log"; then \
@@ -311,7 +320,7 @@ smoke-network-suite:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
@@ -342,7 +351,7 @@ smoke-netctl:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
@@ -370,7 +379,7 @@ smoke-network-suite-aarch64:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
@@ -398,7 +407,7 @@ smoke-proc-a20:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q '^valid_pages:' "$$log" && grep -q '^capacity:' "$$log"; then \
@@ -421,7 +430,7 @@ smoke-proc-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PROC_STRESS: PASS' "$$log" && \
@@ -447,7 +456,7 @@ smoke-procfs-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'PROCFS_STRESS: PASS' "$$log"; then \
@@ -471,7 +480,7 @@ smoke-mm-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'MM_STRESS: PASS' "$$log"; then \
@@ -496,7 +505,7 @@ smoke-mmprobe:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'MMPROBE: PASS' "$$log"; then \
@@ -520,7 +529,7 @@ smoke-oom-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'OOM_STRESS: PASS' "$$log"; then \
@@ -547,7 +556,7 @@ smoke-swap:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SWAP_TEST: PASS' "$$log"; then \
@@ -571,7 +580,7 @@ smoke-mm-fork-exec-race:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'MM_VMA_FORK_EXEC: PASS' "$$log"; then \
@@ -600,7 +609,7 @@ smoke-vfs-stress:
 		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/isofs.img,if=none,format=raw,id=x2 \
 		-device virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 			> "$$log" 2>&1 || status=$$?; \
 		if grep -q 'VFS_STRESS: PASS' "$$log"; then \
@@ -623,7 +632,7 @@ smoke-vfs-edge:
 			-global virtio-mmio.force-legacy=false \
 			-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
@@ -647,7 +656,7 @@ smoke-io-event:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
@@ -675,7 +684,7 @@ smoke-syscall-ext:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SYSCALL_EXT: PASS' "$$log"; then \
@@ -698,7 +707,7 @@ smoke-sched-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SCHED_STRESS: PASS' "$$log"; then \
@@ -721,7 +730,7 @@ smoke-futex-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
@@ -744,7 +753,7 @@ smoke-futex-stress-aarch64:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/aarch64-qemu-virt-aarch64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/aarch64-qemu-virt-aarch64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'FUTEX_STRESS: PASS' "$$log"; then \
@@ -767,7 +776,7 @@ smoke-scm-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SCM_STRESS: PASS' "$$log"; then \
@@ -790,7 +799,7 @@ smoke-evdev-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'EVDEV_STRESS: PASS' "$$log"; then \
@@ -813,7 +822,7 @@ smoke-signalfd-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'SIGNALFD_STRESS: PASS' "$$log"; then \
@@ -836,7 +845,7 @@ smoke-pty-stress:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'pty_stress: PASS' "$$log"; then \
@@ -859,7 +868,7 @@ smoke-timeout-test:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'TIMEOUT_TEST: PASS' "$$log"; then \
@@ -911,7 +920,7 @@ smoke-poll-edge:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'POLL_EDGE: PASS' "$$log"; then \
@@ -934,7 +943,7 @@ smoke-timer-edge:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'TIMER_EDGE: PASS' "$$log"; then \
@@ -960,7 +969,7 @@ smoke-mntns:
 		-global virtio-mmio.force-legacy=false \
 		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
 		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		$(SMOKE_NETDEV) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'MNTNS_TEST: PASS' "$$log"; then \
