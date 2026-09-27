@@ -81,7 +81,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 | `fcntl` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `flock` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `pipe2` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
-| `ioctl` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `ioctl` | fd I/O | `partial` | `smoke-vfs-stress`, `smoke-netctl` (PASS 2026-09-28) | implemented subset; socket interface ioctls cover SIOCGIFCONF enumeration plus the per-interface SIOCGIFADDR/NETMASK/HWADDR/FLAGS/INDEX/MTU and the SIOCSIF* setters. SIOCSIFMTU/SIOCSIFDSTADDR/SIOCSIFBRDADDR stay -ENOTTY rather than faking success. |
 | `pread64` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `pwrite64` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sync` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |

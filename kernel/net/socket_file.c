@@ -367,20 +367,39 @@ static size_t net_vfile_poll_sources(vfile_t *vf, short events,
 #define A20_AF_UNSPEC       0
 #define A20_AF_INET         2
 
+/* Linux's `struct ifmap`, which is what sizes the ifreq union.  It is included
+ * because its width depends on `unsigned long`, exactly as upstream's does, so
+ * the resulting ifreq size comes out right on both LP64 and ILP32. */
+struct a20_ifmap {
+    unsigned long mem_start;
+    unsigned long mem_end;
+    unsigned short base_addr;
+    unsigned char irq;
+    unsigned char dma;
+    unsigned char port;
+};
+
 struct a20_ifreq {
     char ifr_name[A20_IFNAMSIZ];
     union {
         uint8_t raw[16];
         struct { uint16_t sa_family; uint8_t sa_data[14]; } addr;
+        struct a20_ifmap map;
+        char slave[A20_IFNAMSIZ];
+        char newname[A20_IFNAMSIZ];
+        void *data;
         short flags;
         int ivalue;
     } ifr_ifru;
 };
 
-/* User space walks the SIOCGIFCONF buffer in whole `struct ifreq` strides, so
- * the wire layout has to be exactly IFNAMSIZ + a 16-byte union. */
-_Static_assert(sizeof(struct a20_ifreq) == 32,
-               "struct ifreq wire layout must match Linux");
+/* User space indexes the SIOCGIFCONF buffer with its own libc definition of
+ * this struct, so the size must match musl/glibc exactly.  It is 40 bytes on
+ * LP64 and 32 on ILP32, so one hardcoded constant would be wrong on one of
+ * them and both are asserted instead. */
+_Static_assert(sizeof(void *) == 8 ? sizeof(struct a20_ifreq) == 40
+                                   : sizeof(struct a20_ifreq) == 32,
+               "struct ifreq wire layout must match Linux/musl");
 
 /* Linux `struct ifconf`: ifc_len is in/out.  With a NULL ifc_buf the caller is
  * asking how large a full listing would be, which is why the size query below
@@ -392,17 +411,16 @@ struct a20_ifconf {
 
 /* Fill one SIOCGIFCONF row: interface name plus its IPv4 address.
  *
- * lwIP stores the name in a fixed 2-byte, non-terminated field (this tree
- * pins `char name[2]`), so the name is copied by length and terminated here
- * rather than treated as a C string. */
+ * A netif's identity here is (name[0], name[1], num), and lwIP's netif_find
+ * parses the number out of name[2] -- it rejects a name with no digit there.
+ * The reported name is therefore composed rather than copied, which is also
+ * the spelling /proc/net/status already uses and the only one
+ * net_ifreq_lookup can resolve. */
 static void net_ifreq_fill(struct a20_ifreq *ifr, const struct netif *nif)
 {
     memset(ifr, 0, sizeof(*ifr));
-    size_t n = sizeof(nif->name);
-    if (n > A20_IFNAMSIZ - 1)
-        n = A20_IFNAMSIZ - 1;
-    memcpy(ifr->ifr_name, nif->name, n);
-    ifr->ifr_name[n] = '\0';
+    snprintf(ifr->ifr_name, sizeof(ifr->ifr_name), "%c%c%u",
+             nif->name[0], nif->name[1], nif->num);
     ifr->ifr_ifru.raw[0] = (uint8_t)A20_AF_INET;
     ifr->ifr_ifru.raw[1] = (uint8_t)(A20_AF_INET >> 8);
     memcpy(ifr->ifr_ifru.raw + 2, &nif->ip_addr, 4);
