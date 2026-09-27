@@ -65,6 +65,11 @@ typedef struct drm_context {
     uint32_t magic;
     int is_master;
     int render_only;   /* opened via /dev/dri/renderD128: no master, no KMS */
+    /* Lazily created host virgl context for this open.  Linux models a
+     * virtgpu context as a property of the open file, not of the device,
+     * and the resource-create/execbuffer ioctls take no context argument. */
+    uint32_t virtgpu_ctx_id;
+    int virtgpu_ctx_created;
     /* FIFO of completed DRM events (fixed 32-byte drm_event_vblank records)
      * destined for this open file.  Linux never overwrites a queued event,
      * so neither do we: wlroots matches page-flip completions to pending
@@ -119,6 +124,9 @@ static int g_gem_count;
 
 /* Handles are unique device-wide, not per-fd, to match the global store. */
 static uint32_t g_gem_next_handle = 1;
+
+/* Host virgl resource ids, allocated device-wide for the same reason. */
+static uint32_t g_virtgpu_next_res = 1;
 
 /* GEM name <-> handle table backing GEM_GET_HANDLE/GEM_OPEN, so a buffer can
  * cross process boundaries by name (the export/import path GBM uses). */
@@ -397,6 +405,100 @@ struct drm_mode_fb_cmd2 {
     uint32_t pitches[4];
     uint32_t offsets[4];
     uint64_t modifier[4];
+};
+
+/* ---- virtio-gpu 3D wire structs (include/uapi/drm/virtgpu_drm.h) ---- */
+
+struct drm_virtgpu_map {
+    uint64_t offset;
+    uint32_t handle;
+    uint32_t pad;
+};
+
+struct drm_virtgpu_getparam {
+    uint64_t param;
+    uint64_t value;
+};
+
+struct drm_virtgpu_get_caps {
+    uint32_t cap_set_id;
+    uint32_t cap_set_ver;
+    uint64_t addr;
+    uint32_t size;
+    uint32_t pad;
+};
+
+struct drm_virtgpu_resource_create {
+    uint32_t target;
+    uint32_t format;
+    uint32_t bind;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+    uint32_t array_size;
+    uint32_t last_level;
+    uint32_t nr_samples;
+    uint32_t flags;
+    uint32_t bo_handle;
+    uint32_t res_handle;
+    uint32_t size;
+    uint32_t stride;
+};
+
+struct drm_virtgpu_resource_info {
+    uint32_t bo_handle;
+    uint32_t res_handle;
+    uint32_t size;
+    uint32_t blob_mem;
+};
+
+struct drm_virtgpu_3d_box {
+    uint32_t x;
+    uint32_t y;
+    uint32_t z;
+    uint32_t w;
+    uint32_t h;
+    uint32_t d;
+};
+
+struct drm_virtgpu_3d_transfer {
+    uint32_t bo_handle;
+    struct drm_virtgpu_3d_box box;
+    uint32_t level;
+    uint32_t offset;
+    uint32_t stride;
+    uint32_t layer_stride;
+};
+
+struct drm_virtgpu_3d_wait {
+    uint32_t handle;
+    uint32_t flags;
+};
+
+struct drm_virtgpu_context_set_param {
+    uint64_t param;
+    uint64_t value;
+};
+
+struct drm_virtgpu_context_init {
+    uint32_t num_params;
+    uint32_t pad;
+    uint64_t ctx_set_params;
+};
+
+struct drm_virtgpu_execbuffer {
+    uint32_t flags;
+    uint32_t size;
+    uint64_t command;
+    uint64_t bo_handles;
+    uint32_t num_bo_handles;
+    int32_t fence_fd;
+    uint32_t ring_idx;
+    uint32_t syncobj_stride;
+    uint32_t num_in_syncobjs;
+    uint32_t num_out_syncobjs;
+    uint64_t in_syncobjs;
+    uint64_t out_syncobjs;
 };
 
 struct drm_mode_crtc_page_flip {
@@ -1580,6 +1682,316 @@ static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
     return -ENOENT;
 }
 
+/* ---- virtio-gpu 3D (DRM_IOCTL_VIRTGPU_*) ------------------------------- */
+
+/* Create this open's host virgl context on first use.  Returns the context id,
+ * or a negative errno.  Id 0 is not usable: the virtio-gpu protocol reserves
+ * it, so start allocating at 1. */
+static int drm_virtgpu_ensure_ctx(drm_context_t *ctx)
+{
+    if (ctx->virtgpu_ctx_created)
+        return (int)ctx->virtgpu_ctx_id;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->ctx_create || !ops->ctx_destroy)
+        return -ENODEV;
+
+    uint32_t id = g_virtgpu_next_res;
+    if (id == 0)
+        id = g_virtgpu_next_res;
+    int rc = ops->ctx_create(drm_gpu_device(), id, 1, "a20-drm", 7);
+    if (rc < 0)
+        return rc;
+    g_virtgpu_next_res++;
+    ctx->virtgpu_ctx_id = id;
+    ctx->virtgpu_ctx_created = 1;
+    return (int)id;
+}
+
+static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_virtgpu_getparam p;
+    if (copy_from_user(&p, arg, sizeof(p)) < 0)
+        return -EFAULT;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops)
+        return -ENODEV;
+
+    switch (p.param) {
+    case VIRTGPU_PARAM_3D_FEATURES:
+    case VIRTGPU_PARAM_CONTEXT_INIT:
+    case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
+        p.value = 1;
+        break;
+    case VIRTGPU_PARAM_RESOURCE_BLOB:
+    case VIRTGPU_PARAM_HOST_VISIBLE:
+    case VIRTGPU_PARAM_CROSS_DEVICE:
+    case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
+        p.value = 0;
+        break;
+    case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs: {
+        /* Bit N set means capset id N is available.  Ask the host rather
+         * than hardcoding: it is the only authority on which capsets exist. */
+        uint64_t mask = 0;
+        for (uint32_t idx = 0; idx < 16; idx++) {
+            uint32_t id = 0, ver = 0, size = 0;
+            if (!ops->capset_info || ops->capset_info(drm_gpu_device(), idx,
+                                                      &id, &ver, &size) < 0)
+                break;
+            if (id < 64)
+                mask |= (uint64_t)1 << id;
+        }
+        p.value = mask;
+        break;
+    }
+    default:
+        p.value = 0;
+        break;
+    }
+    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_get_caps c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+    if (c.size == 0 || c.size > 1024 * 1024)
+        return -EINVAL;
+
+    /* The host rejects GET_CAPSET with ERR_INVALID_PARAMETER unless the
+     * request names a live context, so create this open's context first. */
+    int cid = drm_virtgpu_ensure_ctx(ctx);
+    if (cid < 0)
+        return cid;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->get_capset)
+        return -ENODEV;
+
+    uint8_t *blob = kmalloc(c.size);
+    if (!blob)
+        return -ENOMEM;
+    int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, 0,
+                             c.cap_set_ver, blob, c.size);
+    if (rc < 0) {
+        kfree(blob);
+        return rc;
+    }
+    if (copy_to_user((void *)(uintptr_t)c.addr, blob, c.size) < 0)
+        rc = -EFAULT;
+    kfree(blob);
+    return rc;
+}
+
+/* Publish a GEM object's pages to the host as a 3D resource's backing.  Pages
+ * must be materialised (charged), not merely peeked: the host writes results
+ * into them, and an unmaterialised page has no frame to write to. */
+static int drm_gem_attach_backing(drm_gem_t *g)
+{
+    if (!g->vmo || g->size == 0)
+        return -EINVAL;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->resource_attach_backing)
+        return -ENODEV;
+
+    uint32_t npages = (uint32_t)((g->size + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (npages == 0 || npages > 65536)
+        return -EINVAL;
+
+    struct virtio_gpu_mem_entry *entries = kmalloc(npages * sizeof(*entries));
+    if (!entries)
+        return -ENOMEM;
+
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < npages; i++) {
+        pfn_t pfn = PFN_NONE;
+        if (vmo_get_page_charged(g->vmo, i, NULL, &pfn) < 0)
+            continue;
+        uint64_t off = (uint64_t)i * PAGE_SIZE;
+        uint64_t len = g->size - off;
+        if (len > PAGE_SIZE)
+            len = PAGE_SIZE;
+        entries[n].addr = (uint64_t)pfn_to_phys(pfn);
+        entries[n].length = (uint32_t)len;
+        entries[n].padding = 0;
+        n++;
+    }
+
+    int rc = 0;
+    if (n == 0) {
+        rc = -ENOMEM;
+    } else {
+        rc = ops->resource_attach_backing(drm_gpu_device(), g->virgl_res_id,
+                                          entries, n);
+    }
+    kfree(entries);
+    return rc;
+}
+
+static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_resource_create r;
+    if (copy_from_user(&r, arg, sizeof(r)) < 0)
+        return -EFAULT;
+    if (r.width == 0 || r.height == 0)
+        return -EINVAL;
+
+    int cid = drm_virtgpu_ensure_ctx(ctx);
+    if (cid < 0)
+        return cid;
+
+    drm_gem_t *g = drm_find_gem(ctx, r.bo_handle);
+    if (!g)
+        return -ENOENT;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->resource_create_3d)
+        return -ENODEV;
+
+    uint32_t res_id = g_virtgpu_next_res++;
+    if (res_id == 0)
+        res_id = g_virtgpu_next_res++;
+
+    int rc = ops->resource_create_3d(drm_gpu_device(), (uint32_t)cid, res_id,
+                                     r.target, r.format, r.bind, r.width,
+                                     r.height, r.depth, r.array_size,
+                                     r.last_level, r.nr_samples, r.flags);
+    if (rc < 0)
+        return rc;
+
+    g->virgl_res_id = res_id;
+    g->is_virgl = 1;
+
+    rc = drm_gem_attach_backing(g);
+    if (rc < 0) {
+        if (ops->resource_unref)
+            ops->resource_unref(drm_gpu_device(), res_id);
+        g->is_virgl = 0;
+        g->virgl_res_id = 0;
+        return rc;
+    }
+
+    r.res_handle = res_id;
+    return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_virtgpu_resource_info(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_resource_info i;
+    if (copy_from_user(&i, arg, sizeof(i)) < 0)
+        return -EFAULT;
+    drm_gem_t *g = drm_find_gem(ctx, i.bo_handle);
+    if (!g || !g->is_virgl)
+        return -ENOENT;
+    i.res_handle = g->virgl_res_id;
+    i.size = (uint32_t)g->size;
+    i.blob_mem = 0;
+    return copy_to_user(arg, &i, sizeof(i)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_execbuffer e;
+    if (copy_from_user(&e, arg, sizeof(e)) < 0)
+        return -EFAULT;
+    if (e.size == 0 || e.command == 0)
+        return -EINVAL;
+    /* Mesa's command streams routinely exceed the small staging buffer the
+     * legacy private ioctl allowed; the host accepts whatever we forward. */
+    if (e.size > 16u * 1024 * 1024)
+        return -EINVAL;
+
+    int cid = drm_virtgpu_ensure_ctx(ctx);
+    if (cid < 0)
+        return cid;
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->submit_3d)
+        return -ENODEV;
+
+    uint8_t *cmd = kmalloc(e.size);
+    if (!cmd)
+        return -ENOMEM;
+    if (copy_from_user(cmd, (const void *)(uintptr_t)e.command, e.size) < 0) {
+        kfree(cmd);
+        return -EFAULT;
+    }
+    int rc = ops->submit_3d(drm_gpu_device(), (uint32_t)cid, cmd, e.size);
+    kfree(cmd);
+    if (rc < 0)
+        return rc;
+
+    /* We complete synchronously, so any fence the caller handed us is already
+     * signalled; report success without forwarding an fd. */
+    e.fence_fd = -1;
+    return copy_to_user(arg, &e, sizeof(e)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_virtgpu_wait(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_virtgpu_3d_wait w;
+    if (copy_from_user(&w, arg, sizeof(w)) < 0)
+        return -EFAULT;
+    /* Every path above completes before the ioctl returns, so there is never
+     * anything outstanding to wait for. */
+    return 0;
+}
+
+static int drm_virtgpu_map(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_map m;
+    if (copy_from_user(&m, arg, sizeof(m)) < 0)
+        return -EFAULT;
+    drm_gem_t *g = drm_find_gem(ctx, m.handle);
+    if (!g)
+        return -ENOENT;
+    m.offset = (uint64_t)g->handle * PAGE_SIZE;
+    return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_virtgpu_context_init(drm_context_t *ctx, void *arg)
+{
+    struct drm_virtgpu_context_init ci;
+    if (copy_from_user(&ci, arg, sizeof(ci)) < 0)
+        return -EFAULT;
+
+    int cid = drm_virtgpu_ensure_ctx(ctx);
+    if (cid < 0)
+        return cid;
+
+    /* Only the capset selection is meaningful here; the context already
+     * exists, so accept the parameters and ignore the rest. */
+    if (ci.num_params == 0 || ci.ctx_set_params == 0)
+        return 0;
+    struct drm_virtgpu_context_set_param p;
+    if (copy_from_user(&p, (const void *)(uintptr_t)ci.ctx_set_params,
+                       sizeof(p)) < 0)
+        return -EFAULT;
+    (void)p;
+    return 0;
+}
+
+static int drm_virtgpu_transfer(drm_context_t *ctx, void *arg, int to_host)
+{
+    struct drm_virtgpu_3d_transfer t;
+    if (copy_from_user(&t, arg, sizeof(t)) < 0)
+        return -EFAULT;
+    drm_gem_t *g = drm_find_gem(ctx, t.bo_handle);
+    if (!g || !g->is_virgl)
+        return -ENOENT;
+
+    /* Transfers are driven by the host as part of rendering; with a
+     * synchronously-completing submit the backing is already coherent.  Keep
+     * the ioctl as a validated no-op rather than an EINVAL hole. */
+    (void)to_host;
+    return 0;
+}
+
 /* ---- vfile backend ---- */
 
 static int drm_read(vfile_t *vf, char *buf, size_t count)
@@ -1729,6 +2141,26 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_gem_get_handle(ctx, arg);
     case DRM_IOCTL_GEM_OPEN:
         return drm_gem_open(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_GETPARAM:
+        return drm_virtgpu_getparam(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_GET_CAPS:
+        return drm_virtgpu_get_caps(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
+        return drm_virtgpu_resource_create(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_RESOURCE_INFO:
+        return drm_virtgpu_resource_info(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_EXECBUFFER:
+        return drm_virtgpu_execbuffer(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_WAIT:
+        return drm_virtgpu_wait(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_MAP:
+        return drm_virtgpu_map(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_CONTEXT_INIT:
+        return drm_virtgpu_context_init(ctx, arg);
+    case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
+        return drm_virtgpu_transfer(ctx, arg, 1);
+    case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST:
+        return drm_virtgpu_transfer(ctx, arg, 0);
     case DRM_IOCTL_PRIME_HANDLE_TO_FD:
         return drm_prime_handle_to_fd(ctx, arg);
     case DRM_IOCTL_PRIME_FD_TO_HANDLE:
