@@ -85,6 +85,8 @@ typedef struct {
     const net_dev_ops_t *ops;
     uint8_t rx_frame[1536];
     uint8_t tx_frame[1536];
+    uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
+    uint64_t tx_packets, tx_bytes, tx_errors;
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
@@ -121,7 +123,13 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
 
     pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
     int r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
-    return (r == (int)p->tot_len) ? ERR_OK : ERR_IF;
+    if (r == (int)p->tot_len) {
+        st->tx_packets++;
+        st->tx_bytes += p->tot_len;
+        return ERR_OK;
+    }
+    st->tx_errors++;
+    return ERR_IF;
 }
 
 static err_t a20_lwip_netif_init_cb(struct netif *netif) {
@@ -155,6 +163,8 @@ static err_t a20_lwip_loopif_init_cb(struct netif *netif)
     const char *hostname = g_a20_net_config.hostname[0] ?
                            g_a20_net_config.hostname : "a20os";
     netif->hostname = hostname;
+    netif->name[0] = 'l';
+    netif->name[1] = 'o';
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_LINK_UP;
 #if LWIP_IPV6
@@ -326,18 +336,22 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
+        st->rx_packets++;
+        st->rx_bytes += (uint64_t)len;
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
                             (size_t)len);
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
         if (!p) {
             LINK_STATS_INC(link.memerr);
             LINK_STATS_INC(link.drop);
+            st->rx_dropped++;
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
         if (n->input(p, n) != ERR_OK) {
             pbuf_free(p);
             LINK_STATS_INC(link.drop);
+            st->rx_dropped++;
         }
     }
     netif_poll(n);
@@ -458,6 +472,104 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     if ((size_t)n >= bufsz)
         return (int)bufsz - 1;
     return n;
+}
+
+/* core/printf.c has no '-' flag, so rows are assembled in a local buffer and
+ * appended by hand rather than with a single wide snprintf. */
+static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
+                            const char *row)
+{
+    if (*off + 1 >= bufsz)
+        return;
+    size_t len = strlen(row);
+    size_t room = bufsz - *off - 1;
+    if (len > room)
+        len = room;
+    memcpy(buf + *off, row, len);
+    *off += len;
+    buf[*off] = '\0';
+}
+
+/* A netif's identity here is (name[0], name[1], num): lwIP's netif_find parses
+ * the number out of name[2] and rejects a name with no digit there, so a bare
+ * two-byte name is not a name user space can resolve. */
+static void a20_lwip_ifname(char *out, size_t outsz, const struct netif *nif)
+{
+    if (outsz == 0)
+        return;
+    snprintf(out, outsz, "%c%c%u", nif->name[0], nif->name[1], nif->num);
+}
+
+/* /proc/net/route prints addresses as host-order hex. */
+static uint32_t a20_ip4_host(const ip4_addr_t *a)
+{
+    return ((uint32_t)ip4_addr1(a) << 24) | ((uint32_t)ip4_addr2(a) << 16) |
+           ((uint32_t)ip4_addr3(a) << 8) | (uint32_t)ip4_addr4(a);
+}
+
+/* This stack has no FIB: the only route it holds is each netif's default
+ * gateway, so that is all that is reported. */
+int a20_lwip_format_route(char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0)
+        return 0;
+
+    uint64_t flags = a20_lwip_lock();
+    size_t off = 0;
+    char row[192], name[8];
+
+    a20_lwip_append(buf, bufsz, &off,
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\t"
+        "Mask\t\tMTU\tWindow\tIRTT\n");
+    for (struct netif *n = netif_list; n; n = n->next) {
+        uint32_t gw = a20_ip4_host(netif_ip4_gw(n));
+        if (gw == 0)
+            continue;
+        a20_lwip_ifname(name, sizeof(name), n);
+        snprintf(row, sizeof(row), "%s\t%08X\t%08X\t%04X\t%d\t%d\t%d\t"
+                 "%08X\t%d\t%d\t%d\n",
+                 name, 0u, gw, 0x0003u, 0, 0, 0, 0u, 0, 0, 0);
+        a20_lwip_append(buf, bufsz, &off, row);
+    }
+    a20_lwip_unlock(flags);
+    return (int)off;
+}
+
+/* /proc/net/dev.  Counters come from the per-netif state the RX drain and
+ * linkoutput maintain; loopback bypasses the driver path, so its registers
+ * legitimately read zero. */
+int a20_lwip_format_net_dev(char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0)
+        return 0;
+
+    uint64_t flags = a20_lwip_lock();
+    size_t off = 0;
+    char row[256], name[8];
+
+    a20_lwip_append(buf, bufsz, &off,
+        "Inter-|   Receive                            "
+        "          |  Transmit\n"
+        " face |bytes    packets errs drop fifo frame "
+        "compressed multicast|bytes    packets errs drop fifo "
+        "colls carrier compressed\n");
+    for (struct netif *n = netif_list; n; n = n->next) {
+        const a20_lwip_netif_state_t *st =
+            (const a20_lwip_netif_state_t *)n->state;
+        a20_lwip_ifname(name, sizeof(name), n);
+        snprintf(row, sizeof(row),
+                 "%s: %8llu %7llu %4llu %4llu %4llu %4llu %4llu %10llu "
+                 "%8llu %8llu %4llu %4llu %4llu %4llu %4llu %6llu\n",
+                 name,
+                 st ? st->rx_bytes : 0ULL, st ? st->rx_packets : 0ULL,
+                 st ? st->rx_errors : 0ULL, st ? st->rx_dropped : 0ULL,
+                 0ULL, 0ULL, 0ULL, 0ULL,
+                 st ? st->tx_bytes : 0ULL, st ? st->tx_packets : 0ULL,
+                 st ? st->tx_errors : 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL);
+        a20_lwip_append(buf, bufsz, &off, row);
+    }
+    a20_lwip_unlock(flags);
+    return (int)off;
 }
 
 static struct netif *a20_lwip_netif_by_index(unsigned ifindex)

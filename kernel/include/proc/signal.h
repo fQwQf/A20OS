@@ -127,6 +127,7 @@ void     signal_task_set_rlim_core(void *task, uint64_t soft);
  * encoded exit code (negative, with the WCOREDUMP 0x80 bit when dumping). */
 int signal_dumps_core(int sig);
 int signal_fatal_exit_code(int sig);
+int signal_fatal_exit_code_dumped(int sig, int dumped);
 
 void signal_deliver(void);
 void signal_deliver_user(trap_context_t *ctx);
