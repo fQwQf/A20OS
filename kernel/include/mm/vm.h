@@ -80,7 +80,37 @@ typedef struct mm_tlb_hold {
 } mm_tlb_hold_t;
 
 /*
- * mm_struct lifetime and address-space invariants:
+ * MM_AS_MODEL — the single-level memory model.
+ *
+ * MM_LOCK_MODEL below describes the two-level model this file is being
+ * migrated away from, and still governs every mutator that has not yet been
+ * converted.  The target model is specified in mm/pt.h; the short version:
+ *
+ *  - The authoritative per-virtual-page state is the per-PTE metadata array
+ *    attached to the covering page-table page (pt_meta_t.cls[]), not a VMA.
+ *    A VMA is an interval claim; the metadata is a per-page claim, and a page
+ *    fault resolves from the latter.
+ *  - All page-table programming goes through the transactional cursor
+ *    (mm_addrspace_lock / mm_cursor_{query,map,mark,unmap}), whose unit of
+ *    writer exclusion is the page-table-page lock.  Transactions over
+ *    disjoint ranges do not serialize.
+ *  - Status lives in a side array rather than in the PTE's software bits,
+ *    because riscv32/arm32 have no free software bits at their root levels
+ *    and loongarch64 aliases PTE_R/W/X onto its memory-attribute field.
+ *  - The VMA list survives as a non-authoritative interval index for the
+ *    things that are genuinely range-shaped (brk bounds, mseal, mlock
+ *    accounting, /proc maps).  It is proved derived, not assumed, by
+ *    mm_pt_audit_addrspace(), which runs over every live address space at
+ *    shutdown.
+ *
+ * Migration status: the descriptor, the per-PTE metadata, the cursor and
+ * the auditor are in place and the metadata is maintained at every page-table
+ * write in kernel/mm/mm.c.  Page faults still resolve through mm_find_vma();
+ * moving fault dispatch onto the status is the next step.  Until then the
+ * two representations are both live and the auditor is what keeps them
+ * honest, so do not treat the cursor as the only entry point yet.
+ *
+ * mm_struct_t lifetime and address-space invariants:
  * - refcount is shared by every task/thread that uses the same address space.
  *   A task_t may store mm == NULL only for kernel-only tasks or after teardown
  *   has detached it from user memory.
