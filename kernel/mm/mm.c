@@ -3,6 +3,7 @@
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "mm/fault.h"
 #include "core/panic.h"
 #include "core/stdio.h"
@@ -74,6 +75,8 @@ pte_t *pt_create(void) {
         return NULL;
     pte_t *root = (pte_t *)pfn_to_virt(pfn);
     memset(root, 0, PAGE_SIZE << ARCH_PT_ROOT_ORDER);
+    /* Give the root a descriptor so a cursor always has a node lock to take. */
+    mm_pt_node_init(root, ARCH_PT_ROOT_LEVEL);
     return root;
 }
 
@@ -83,6 +86,7 @@ static void pt_free_table(pte_t *table, int level) {
     pfn_t pfn = virt_to_pfn(table);
     if (!pfn_valid(pfn))
         return;
+    mm_pt_node_fini(table);
     pfa_free(pfn, level == ARCH_PT_ROOT_LEVEL ? ARCH_PT_ROOT_ORDER : 0);
 }
 
@@ -131,7 +135,13 @@ pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
             if (!alloc) return NULL;
             pte_t *next = (pte_t *)frame_alloc();
             if (!next) return NULL;
+            /* A new intermediate node needs its descriptor before the parent
+             * entry becomes reachable, so a cursor that descends into it
+             * always finds a lock. */
+            mm_pt_node_init(next, level - 1);
             table[vpn] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            mm_pt_note_present(table, level, vpn,
+                               MM_ST_CLS_BYTE(MM_ST_PT_NODE));
             table = next;
         }
     }
@@ -256,6 +266,18 @@ int mm_debug_pte_value(pt_root_t *pgdir, vaddr_t va, uintptr_t *slot_out,
 
 // 建立虚拟地址到物理地址的映射
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
+    return pt_map_cls(pgdir, va, pa, flags, MM_ST_ANON_MAPPED);
+}
+
+/*
+ * pt_map_cls is pt_map with an explicit per-page status.  The status is the
+ * authoritative record of what this page is; the PTE records only the frame
+ * and the effective permissions.  Callers that know more than "a private
+ * anonymous page" -- a file-backed mapping, a fork-shared page, a VMO page --
+ * pass the real class, so a later fault needs no interval lookup.
+ */
+int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
+               uint8_t cls) {
     pte_t *pte = pt_walk(pgdir, va, 1);
     if (!pte) return -ENOMEM;
     if (*pte & PTE_V) {
@@ -276,6 +298,14 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
             arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
     }
     *pte = arch_pte_leaf(pa, flags);
+
+    /* Record the status in the table that owns this PTE slot. */
+    pte_t *owner = mm_pt_leaf_table(pgdir, va);
+    if (owner)
+        mm_pt_note_present(owner, 0, arch_pt_vpn(va, 0),
+                           (uint8_t)(MM_ST_CLS_BYTE(cls) |
+                                     (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
+                                     mm_pt_prot_bits(flags)));
     return 0;
 }
 
@@ -302,7 +332,10 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
         } else {
             pte_t *next = (pte_t *)frame_alloc();
             if (!next) return -ENOMEM;
+            mm_pt_node_init(next, level - 1);
             table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
+            mm_pt_note_present(table, level, idx,
+                               MM_ST_CLS_BYTE(MM_ST_PT_NODE));
             table = next;
         }
     }
@@ -361,6 +394,7 @@ int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
     if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
         return -EINVAL;
     *pte = 0;
+    mm_pt_note_absent(path[0], 0, leaf_idx);
 
     for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
         pte_t *child = path[level];
@@ -368,8 +402,12 @@ int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
         if (!pt_table_empty(child, level))
             break;
         parent[idx_path[level + 1]] = 0;
+        mm_pt_note_absent(parent, level + 1, idx_path[level + 1]);
+        mm_pt_node_fini(child);
         frame_free(child);
     }
+    /* The leaf frame reference is NOT dropped here: pt_unmap never owned it.
+     * Callers (io_uring, signal, framebuffer) release it themselves. */
     return 0;
 }
 
@@ -391,6 +429,7 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
                 return -EINVAL;
             swap_free(pte_to_swp_entry(*pte));
             *pte = 0;
+            mm_pt_note_absent(path[level], level, idx_path[level]);
             if (pa_out) *pa_out = 0;
             if (base_out) *base_out = va & ~(vaddr_t)(PAGE_SIZE - 1);
             if (size_out) *size_out = PAGE_SIZE;
@@ -405,6 +444,7 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
             vaddr_t base = va & ~(vaddr_t)(sz - 1);
             paddr_t pa = arch_pte_addr(*pte);
             *pte = 0;
+            mm_pt_note_absent(path[level], level, idx_path[level]);
 
             for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++) {
                 pte_t *child = path[l];
@@ -412,6 +452,8 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
                 if (!pt_table_empty(child, l))
                     break;
                 parent[idx_path[l + 1]] = 0;
+                mm_pt_note_absent(parent, l + 1, idx_path[l + 1]);
+                mm_pt_node_fini(child);
                 frame_free(child);
             }
 
@@ -443,8 +485,15 @@ paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
 // 可以置空来节省开销
 void pt_map_kernel(pt_root_t *pgdir) {
     for (int i = ARCH_PT_USER_END; i < ARCH_PT_ENTRIES; i++) {
-        if (boot_pgdir[i] & PTE_V)
+        if (boot_pgdir[i] & PTE_V) {
             pgdir[i] = boot_pgdir[i];
+            /* These nodes are shared with every other address space and are
+             * owned by the boot page table.  Mark them so a cursor can tell a
+             * shared node from a private one; mm_addrspace_lock() refuses any
+             * range that reaches them. */
+            mm_pt_note_present(pgdir, ARCH_PT_ROOT_LEVEL, i,
+                               MM_ST_CLS_BYTE(MM_ST_PT_NODE));
+        }
     }
 }
 
@@ -493,6 +542,10 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
             dst[i] = arch_pte_from_pa(va_to_pa(next_dst)) | PTE_DIR;
         }
     }
+    /* A clone must reproduce the source's per-page status exactly; the
+     * auditor compares the two representations, so a partial copy here is
+     * precisely the divergence it exists to catch. */
+    mm_pt_meta_clone(dst, src, level);
     return dst;
 }
 
@@ -539,6 +592,7 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
             pt_destroy_user_recursive(next, level - 1);
             pt_free_table(next, level - 1);
             table[i] = 0;
+            mm_pt_note_absent(table, level, i);
         }
     }
 }
