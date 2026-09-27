@@ -32,11 +32,7 @@ check-component-registry:
 regen-smoke-cases:
 	@$(PYTHON) tools/smoke_extract.py /tmp/a20-smoke-cases.json
 	@$(PYTHON) tools/smoke_verify_extract.py /tmp/a20-smoke-cases.json
-	@$(PYTHON) -c "import sys; sys.path.insert(0,'tools'); \
-	import json,pathlib; from smoke_cases import CASES; \
-	cs=json.loads(pathlib.Path('/tmp/a20-smoke-cases.json').read_text()); \
-	cs.sort(key=lambda c: c['name']); \
-	print('regen-smoke-cases:', len(cs), 'cases verified against make')"
+	@$(PYTHON) tools/smoke_gen_cases.py /tmp/a20-smoke-cases.json tools/smoke_cases.py
 
 regen-driver-fragment:
 	@$(PYTHON) -c "import sys; sys.path.insert(0, 'tools'); \

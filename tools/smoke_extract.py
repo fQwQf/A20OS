@@ -33,19 +33,22 @@ MK_FILES = ["tools/targets-smoke.mk", "tools/targets-native-smoke.mk",
 # failure remain a meaningful signal instead of a known-exception to ignore.
 SKIP = {"run-stm32f103-qemu-impl", "smoke-arch-mmu-matrix"}
 
-# Failure logic richer than "every pass pattern is present -> PASS".  These keep
-# their make recipes:
-#   * eight of them branch on the timeout status to print a different message
-#     (`elif [ "$status" -eq 124 ]`), and
-#   * smoke-socket-stress passes only when SOCKET_STRESS: PASS is present AND
-#     no [LOCK] line is.  A pattern-membership check cannot express that
-#     negation, so migrating it would turn a LOCK warning into a silent pass --
-#     strictly weaker than the gate is today.
-RICH_FAILURE = {
-    "smoke-smp-bringup", "smoke-a20-channel", "smoke-ptrace", "smoke-network-suite",
-    "smoke-netctl", "smoke-network-suite-aarch64", "smoke-io-event",
-    "smoke-driver-lifecycle", "smoke-socket-stress",
-}
+# Targets whose failure logic is not "every required pattern is present -> PASS".
+# Empty: the schema grew `forbid` and `timeout_msg` to cover the two shapes that
+# used to be excluded here, and all 73 targets now migrate.  Kept as a hook for
+# the next gate that needs something the schema still cannot say.
+#
+# What the two shapes were, because they are easy to get wrong again:
+#   * nine targets branch on the timeout status to word the failure differently
+#     (`elif [ "$status" -eq 124 ]`) -> `timeout_msg`.
+#   * four forbid a pattern in the pass condition.  smoke-socket-stress passes
+#     only when SOCKET_STRESS: PASS is present AND no [LOCK] line is, and
+#     smoke-audio-userspace / -virtio-sound fail on "audioplay: playback failed".
+#     Reading patterns from the whole recipe would have turned that negation into
+#     a requirement, i.e. made the gate demand the very [LOCK] line it exists to
+#     catch.  The pass condition has to be split per conjunct -- and note that
+#     "! grep" has a space in it, so a lookbehind cannot do the split.
+RICH_FAILURE: set[str] = set()
 
 
 def make_vars(names: list[str]) -> dict[str, str]:
@@ -155,10 +158,30 @@ def parse_target(name: str, body: str, V: dict[str, str]) -> dict:
     stop = text.index('> "$log"', start)
     case["argv"] = shlex.split(text[start:stop].strip())
 
-    pats = re.findall(r"grep -q '([^']*)' \"\$log\"", text)
-    if not pats:
-        raise ValueError("no pass patterns found")
-    case["expect"] = pats
+    # The pass condition, not the whole recipe: `if grep -q A && ! grep -q B`
+    # means A required and B forbidden.  Reading patterns from the whole body
+    # would also pick up the elif branches, which are failure diagnostics.
+    cond = re.search(r"if (grep .*?); then", text)
+    if not cond:
+        raise ValueError("no pass condition found")
+    c = cond.group(1)
+    # Classify per conjunct: a lookbehind cannot do this because the negation
+    # is written "! grep", with a space between.  Splitting on && and testing
+    # each part's first character is what actually separates required from
+    # forbidden -- getting it wrong put \[LOCK\] in both lists at once, which
+    # would have made the gate unsatisfiable.
+    expect: list[str] = []
+    forbid: list[str] = []
+    for part in c.split("&&"):
+        m = re.search(r"grep -q '([^']*)'", part)
+        if not m:
+            continue
+        (forbid if part.lstrip().startswith("!") else expect).append(m.group(1))
+    case["expect"] = expect
+    case["forbid"] = forbid
+    if not case["expect"]:
+        raise ValueError("pass condition requires no patterns")
+    case["timeout_msg"] = bool(re.search(r'\[ "?\$status"? -eq 124 \]', text))
 
     pm = re.search(r'echo "([^"]*PASS[^"]*)"', text)
     case["pass_msg"] = pm.group(1) if pm else f"{name}: PASS; log saved to $log"

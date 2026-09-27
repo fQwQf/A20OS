@@ -282,60 +282,10 @@ check-proc-step5: check-proc-step5-local
 	@echo "check-proc-step5: PASS"
 
 smoke-socket-stress:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/socket-stress-riscv64.log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'socket_stress\npoweroff\n'; } | \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
-		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'SOCKET_STRESS: PASS' "$$log" && ! grep -q '\[LOCK\]' "$$log"; then \
-		echo "smoke-socket-stress: PASS; log saved to $$log"; \
-	elif grep -q '\[LOCK\]' "$$log"; then \
-		echo "smoke-socket-stress: FAIL [LOCK] warning detected; log saved to $$log"; \
-		grep '\[LOCK\]' "$$log" | head -n 5; \
-		exit 1; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-socket-stress: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-socket-stress: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-socket-stress
 
 smoke-driver-lifecycle:
-	$(call smoke-gate,1G,1)
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=1 CONFIG_DRIVER_LIFECYCLE_TEST=y kernel-only
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/driver-lifecycle-riscv64.log"; \
-	status=0; \
-	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
-		-machine virt -m 1G -nographic -smp 1 -bios default \
-		-global virtio-mmio.force-legacy=false \
-		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-driver-lifecycle/kernel.elf \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'DRIVER_LIFECYCLE: PASS' "$$log"; then \
-		echo "smoke-driver-lifecycle: PASS; log saved to $$log"; \
-	elif [ "$$status" -eq 124 ]; then \
-		echo "smoke-driver-lifecycle: timeout without PASS; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	else \
-		echo "smoke-driver-lifecycle: failed with status $$status; tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	$(PYTHON) tools/smoke.py smoke-driver-lifecycle
 
 smoke-hda:
 	$(PYTHON) tools/smoke.py smoke-hda
