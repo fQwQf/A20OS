@@ -34,23 +34,34 @@
  * gpu_dev_ops_t.  Dumb buffers are VMO-backed so userland can mmap them.
  */
 
-#define DRM_MAX_BUFFERS 16
+#define DRM_MAX_GEMS 64
+#define DRM_MAX_GEM_NAMES 64
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 #define DRM_CTX_EVENT_MAX 16
 
-typedef struct drm_buffer {
+/*
+ * The single buffer abstraction.  A GEM object is a VMO plus the metadata
+ * clients need to interpret it.  Dumb buffers are GEM objects that also carry
+ * a linear layout (pitch/bpp); virgl resources are GEM objects the host
+ * renders into.  Keeping one type means mmap, PRIME, ADDFB2 and the future
+ * virgl path all operate on the same object, as in Linux.
+ */
+typedef struct drm_gem {
     int used;
     uint32_t handle;
     uint32_t width;
     uint32_t height;
-    uint32_t pitch;
-    uint32_t bpp;
+    uint32_t pitch;      /* 0 when the object has no linear layout */
+    uint32_t bpp;        /* 0 when the object has no linear layout */
+    uint32_t format;     /* DRM_FORMAT_* (drm_fourcc) */
+    uint32_t usage;      /* DRM_BO_USE_* */
     struct vmo *vmo;
     uint64_t size;
-} drm_buffer_t;
+    int is_virgl;        /* a host-side virgl resource mirrors this object */
+    uint32_t virgl_res_id;
+} drm_gem_t;
 
 typedef struct drm_context {
-    uint32_t next_handle;
     uint32_t magic;
     int is_master;
     int render_only;   /* opened via /dev/dri/renderD128: no master, no KMS */
@@ -98,12 +109,24 @@ static void drm_vblank_init_once(void)
         ;
 }
 
-/* DRM dumb buffers are global to the device, so a handle created by one open
- * (the wlroots dumb allocator) is visible to another (the wlroots backend),
- * matching Linux DRM semantics.  wlroots exports a dumb buffer via PRIME on
- * one fd and imports it on another, then creates an FB and pages it in. */
-static drm_buffer_t g_buffers[DRM_MAX_BUFFERS];
-static int g_buffer_count;
+/* GEM objects are global to the device, so a handle created by one open (the
+ * wlroots allocator, or a GBM client on renderD128) is visible to another
+ * (the wlroots backend), matching Linux DRM semantics.  wlroots exports a
+ * buffer via PRIME on one fd and imports it on another, then creates an FB
+ * and pages it in. */
+static drm_gem_t g_gems[DRM_MAX_GEMS];
+static int g_gem_count;
+
+/* Handles are unique device-wide, not per-fd, to match the global store. */
+static uint32_t g_gem_next_handle = 1;
+
+/* GEM name <-> handle table backing GEM_GET_HANDLE/GEM_OPEN, so a buffer can
+ * cross process boundaries by name (the export/import path GBM uses). */
+static struct {
+    uint32_t name;
+    uint32_t handle;
+} g_gem_names[DRM_MAX_GEM_NAMES];
+static int g_gem_name_count;
 
 /* PRIME fd <-> GEM handle mapping.  The dumb allocator exports a buffer
  * through one DRM open and the backend imports it through another, so the
@@ -133,7 +156,7 @@ static gpu_dev_ops_t *drm_gpu_ops(void)
  * and PAGE_FLIP acknowledge the commit but the host keeps displaying the
  * untouched black primary resource.
  */
-static int drm_present_buffer(drm_buffer_t *b)
+static int drm_present_buffer(drm_gem_t *b)
 {
     static unsigned int present_count;
     if (!b || !b->vmo)
@@ -212,6 +235,34 @@ struct drm_get_cap {
 struct drm_gem_close {
     uint32_t handle;
     uint32_t pad;
+};
+
+struct drm_gem_create {
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t bpp;
+    uint32_t size;
+    uint32_t handle;
+};
+
+struct drm_gem_mmap {
+    uint32_t handle;
+    uint32_t pad;
+    uint64_t offset;
+};
+
+struct drm_gem_get_handle {
+    uint32_t handle;
+    uint32_t pad;
+    uint32_t name;
+};
+
+struct drm_gem_open {
+    uint32_t name;
+    uint32_t pad;
+    uint64_t handle;
+    uint32_t pad2;
 };
 
 struct drm_auth {
@@ -477,22 +528,93 @@ struct drm_mode_atomic {
 
 /* ---- helpers ---- */
 
-static drm_buffer_t *drm_find_buffer(drm_context_t *ctx, uint32_t handle)
+static drm_gem_t *drm_find_gem(drm_context_t *ctx, uint32_t handle)
 {
     (void)ctx;
-    for (int i = 0; i < g_buffer_count; i++)
-        if (g_buffers[i].used && g_buffers[i].handle == handle)
-            return &g_buffers[i];
+    for (int i = 0; i < g_gem_count; i++)
+        if (g_gems[i].used && g_gems[i].handle == handle)
+            return &g_gems[i];
     return NULL;
 }
 
-static void drm_free_buffer(drm_context_t *ctx, drm_buffer_t *b)
+static void drm_free_gem(drm_context_t *ctx, drm_gem_t *b)
 {
     (void)ctx;
+    for (int i = 0; i < g_gem_name_count; i++) {
+        if (g_gem_names[i].handle == b->handle) {
+            g_gem_names[i] = g_gem_names[--g_gem_name_count];
+            break;
+        }
+    }
     if (b->vmo)
         vmo_release(b->vmo);
     memset(b, 0, sizeof(*b));
     b->used = 0;
+}
+
+/*
+ * Allocate a GEM object backed by a fresh anonymous VMO.  Both the GEM and the
+ * dumb-buffer paths funnel through here so there is exactly one place that
+ * hands out handles and VMOs.
+ */
+static drm_gem_t *drm_gem_alloc(uint32_t width, uint32_t height,
+                                uint32_t pitch, uint32_t bpp,
+                                uint32_t format, uint32_t usage,
+                                uint64_t size)
+{
+    if (size == 0)
+        return NULL;
+    for (int i = 0; i < DRM_MAX_GEMS; i++) {
+        if (g_gems[i].used)
+            continue;
+        struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, 0);
+        if (!vmo)
+            return NULL;
+        drm_gem_t *g = &g_gems[i];
+        memset(g, 0, sizeof(*g));
+        g->used = 1;
+        g->handle = g_gem_next_handle++;
+        if (g->handle == 0)
+            g->handle = g_gem_next_handle++;
+        g->width = width;
+        g->height = height;
+        g->pitch = pitch;
+        g->bpp = bpp;
+        g->format = format;
+        g->usage = usage;
+        g->vmo = vmo;
+        g->size = size;
+        if (i + 1 > g_gem_count)
+            g_gem_count = i + 1;
+        return g;
+    }
+    return NULL;
+}
+
+static void drm_gem_name_bind(uint32_t name, uint32_t handle)
+{
+    for (int i = 0; i < g_gem_name_count; i++) {
+        if (g_gem_names[i].name == name) {
+            g_gem_names[i].handle = handle;
+            return;
+        }
+    }
+    if (g_gem_name_count >= DRM_MAX_GEM_NAMES)
+        return;
+    g_gem_names[g_gem_name_count].name = name;
+    g_gem_names[g_gem_name_count].handle = handle;
+    g_gem_name_count++;
+}
+
+static int drm_gem_name_lookup(uint32_t name, uint32_t *handle)
+{
+    for (int i = 0; i < g_gem_name_count; i++) {
+        if (g_gem_names[i].name == name) {
+            *handle = g_gem_names[i].handle;
+            return 0;
+        }
+    }
+    return -ENOENT;
 }
 
 static void drm_mode_fill(struct drm_mode_modeinfo *m, uint32_t w, uint32_t h,
@@ -823,18 +945,18 @@ static int drm_mode_getresources(drm_context_t *ctx, void *arg)
     }
 
     int nfbs = 0;
-    for (int i = 0; i < g_buffer_count; i++)
-        if (g_buffers[i].used)
+    for (int i = 0; i < g_gem_count; i++)
+        if (g_gems[i].used)
             nfbs++;
 
-    uint32_t fbs[DRM_MAX_BUFFERS];
+    uint32_t fbs[DRM_MAX_GEMS];
     uint32_t crtcs[1] = { DRM_CRTC_ID };
     uint32_t conns[1] = { DRM_CONN_ID };
     uint32_t encs[1] = { DRM_ENC_ID };
     int fi = 0;
-    for (int i = 0; i < g_buffer_count; i++)
-        if (g_buffers[i].used)
-            fbs[fi++] = g_buffers[i].handle;
+    for (int i = 0; i < g_gem_count; i++)
+        if (g_gems[i].used)
+            fbs[fi++] = g_gems[i].handle;
 
     res.count_fbs = (uint32_t)nfbs;
     res.count_crtcs = 1;
@@ -888,7 +1010,7 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
     if (c.fb_id != 0) {
-        drm_buffer_t *b = drm_find_buffer(ctx, c.fb_id);
+        drm_gem_t *b = drm_find_gem(ctx, c.fb_id);
         if (!b)
             return -ENOENT;
         /* The minimal KMS implementation presents by copying into the GPU's
@@ -999,7 +1121,7 @@ static int drm_mode_getfb(drm_context_t *ctx, void *arg)
     struct drm_mode_fb_cmd fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, fb.fb_id);
+    drm_gem_t *b = drm_find_gem(ctx, fb.fb_id);
     if (!b)
         return -ENOENT;
     fb.width = b->width;
@@ -1016,7 +1138,7 @@ static int drm_mode_addfb(drm_context_t *ctx, void *arg)
     struct drm_mode_fb_cmd fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, fb.handle);
+    drm_gem_t *b = drm_find_gem(ctx, fb.handle);
     if (!b)
         return -ENOENT;
     fb.fb_id = b->handle;
@@ -1033,7 +1155,7 @@ static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
         return -EFAULT;
     if (fb.handles[0] == 0)
         return -EINVAL;
-    drm_buffer_t *b = drm_find_buffer(ctx, fb.handles[0]);
+    drm_gem_t *b = drm_find_gem(ctx, fb.handles[0]);
     if (!b)
         return -ENOENT;
     fb.fb_id = b->handle;
@@ -1057,7 +1179,7 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
     struct drm_mode_crtc_page_flip pf;
     if (copy_from_user(&pf, arg, sizeof(pf)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, pf.fb_id);
+    drm_gem_t *b = drm_find_gem(ctx, pf.fb_id);
     if (!b)
         return -ENOENT;
 
@@ -1265,8 +1387,76 @@ static int drm_mode_atomic(drm_context_t *ctx, void *arg)
     return -EINVAL;
 }
 
+static int drm_gem_create(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_gem_create c;
+    if (copy_from_user(&c, arg, sizeof(c)) < 0)
+        return -EFAULT;
+    if (c.size == 0)
+        return -EINVAL;
+
+    drm_gem_t *g = drm_gem_alloc(c.width, c.height, 0, c.bpp, c.format,
+                                0, c.size);
+    if (!g)
+        return -ENOMEM;
+    c.handle = g->handle;
+    return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_gem_mmap_ioctl(drm_context_t *ctx, void *arg)
+{
+    struct drm_gem_mmap m;
+    if (copy_from_user(&m, arg, sizeof(m)) < 0)
+        return -EFAULT;
+    drm_gem_t *g = drm_find_gem(ctx, m.handle);
+    if (!g)
+        return -ENOENT;
+    /* Same encoding as MAP_DUMB, so drm_linux_mmap() serves both. */
+    m.offset = (uint64_t)g->handle * PAGE_SIZE;
+    return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_gem_get_handle(drm_context_t *ctx, void *arg)
+{
+    struct drm_gem_get_handle h;
+    if (copy_from_user(&h, arg, sizeof(h)) < 0)
+        return -EFAULT;
+    drm_gem_t *g = drm_find_gem(ctx, h.handle);
+    if (!g)
+        return -ENOENT;
+    drm_gem_name_bind(h.name, g->handle);
+    h.handle = g->handle;
+    return copy_to_user(arg, &h, sizeof(h)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_gem_open(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_gem_open o;
+    if (copy_from_user(&o, arg, sizeof(o)) < 0)
+        return -EFAULT;
+    uint32_t handle = 0;
+    int rc = drm_gem_name_lookup(o.name, &handle);
+    if (rc < 0)
+        return rc;
+    o.handle = handle;
+    return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
+}
+
+static int drm_mode_getfb2(drm_context_t *ctx, void *arg)
+{
+    (void)ctx;
+    struct drm_mode_fb_cmd2 fb;
+    if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
+        return -EFAULT;
+    memset(&fb, 0, sizeof(fb));
+    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+}
+
 static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_create_dumb d;
     if (copy_from_user(&d, arg, sizeof(d)) < 0)
         return -EFAULT;
@@ -1275,35 +1465,13 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
     if (d.flags != 0)
         return -EINVAL;
 
-    int slot = -1;
-    for (int i = 0; i < DRM_MAX_BUFFERS; i++) {
-        if (!g_buffers[i].used) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot < 0)
-        return -ENOMEM;
-
     uint32_t pitch = ((d.width * d.bpp + 7) / 8 + 63) & ~63u;
     uint64_t size = (uint64_t)pitch * d.height;
-    struct vmo *vmo = vmo_create(VMO_ANONYMOUS, size, 0);
-    if (!vmo)
-        return -ENOMEM;
 
-    drm_buffer_t *b = &g_buffers[slot];
-    b->used = 1;
-    b->handle = ctx->next_handle++;
-    if (b->handle == 0)
-        b->handle = ctx->next_handle++;
-    b->width = d.width;
-    b->height = d.height;
-    b->pitch = pitch;
-    b->bpp = d.bpp;
-    b->vmo = vmo;
-    if (slot + 1 > g_buffer_count)
-        g_buffer_count = slot + 1;
-    b->size = size;
+    drm_gem_t *b = drm_gem_alloc(d.width, d.height, pitch, d.bpp, 0,
+                                DRM_BO_USE_LINEAR, size);
+    if (!b)
+        return -ENOMEM;
 
     d.handle = b->handle;
     d.pitch = pitch;
@@ -1316,7 +1484,7 @@ static int drm_mode_map_dumb(drm_context_t *ctx, void *arg)
     struct drm_mode_map_dumb m;
     if (copy_from_user(&m, arg, sizeof(m)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, m.handle);
+    drm_gem_t *b = drm_find_gem(ctx, m.handle);
     if (!b)
         return -ENOENT;
     /* The Linux DRM ABI uses the fake offset handed back here as the
@@ -1332,10 +1500,10 @@ static int drm_mode_destroy_dumb(drm_context_t *ctx, void *arg)
     struct drm_mode_destroy_dumb d;
     if (copy_from_user(&d, arg, sizeof(d)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, d.handle);
+    drm_gem_t *b = drm_find_gem(ctx, d.handle);
     if (!b)
         return -ENOENT;
-    drm_free_buffer(ctx, b);
+    drm_free_gem(ctx, b);
     return 0;
 }
 
@@ -1344,11 +1512,10 @@ static int drm_gem_close(drm_context_t *ctx, void *arg)
     struct drm_gem_close c;
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, c.handle);
+    drm_gem_t *b = drm_find_gem(ctx, c.handle);
     if (!b)
         return -ENOENT;
-    /* Keep the dumb buffer alive; the handle owns the VMO and is dropped by
-     * DRM_IOCTL_MODE_DESTROY_DUMB.  GEM close is a no-op for our handles. */
+    drm_free_gem(ctx, b);
     return 0;
 }
 
@@ -1357,7 +1524,7 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
     struct drm_prime_handle p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    drm_buffer_t *b = drm_find_buffer(ctx, p.handle);
+    drm_gem_t *b = drm_find_gem(ctx, p.handle);
     if (!b)
         return -ENOENT;
 
@@ -1554,6 +1721,14 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_set_client_cap(ctx, arg);
     case DRM_IOCTL_GEM_CLOSE:
         return drm_gem_close(ctx, arg);
+    case DRM_IOCTL_GEM_CREATE:
+        return drm_gem_create(ctx, arg);
+    case DRM_IOCTL_GEM_MMAP:
+        return drm_gem_mmap_ioctl(ctx, arg);
+    case DRM_IOCTL_GEM_GET_HANDLE:
+        return drm_gem_get_handle(ctx, arg);
+    case DRM_IOCTL_GEM_OPEN:
+        return drm_gem_open(ctx, arg);
     case DRM_IOCTL_PRIME_HANDLE_TO_FD:
         return drm_prime_handle_to_fd(ctx, arg);
     case DRM_IOCTL_PRIME_FD_TO_HANDLE:
@@ -1574,6 +1749,8 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_mode_getplaneres(ctx, arg);
     case DRM_IOCTL_MODE_GETFB:
         return drm_mode_getfb(ctx, arg);
+    case DRM_IOCTL_MODE_GETFB2:
+        return drm_mode_getfb2(ctx, arg);
     case DRM_IOCTL_MODE_ADDFB:
         return drm_mode_addfb(ctx, arg);
     case DRM_IOCTL_MODE_ADDFB2:
@@ -1650,7 +1827,6 @@ vfile_t *drm_create_vfile(void)
         if (vf) vfile_free(vf);
         return NULL;
     }
-    ctx->next_handle = 1;
     vfile_ref_init(vf, 1);
     vf->flags = O_RDWR;
     vf->ops = &g_drm_ops;
@@ -1684,7 +1860,7 @@ int64_t drm_linux_mmap(vfile_t *vf, uint64_t addr, size_t len, int prot,
     if (!ctx)
         return -EBADF;
 
-    drm_buffer_t *b = drm_find_buffer(ctx, (uint32_t)(off / PAGE_SIZE));
+    drm_gem_t *b = drm_find_gem(ctx, (uint32_t)(off / PAGE_SIZE));
     if (!b)
         return -ENOENT;
 
