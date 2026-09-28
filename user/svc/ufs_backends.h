@@ -1,9 +1,11 @@
 /*
- * ufs_backends.h — ufsd 多人格后端接口。
+ * ufs_backends.h — the ufsd multi-personality backend interface.
  *
- * 每个后端实现同一组 ufs_proto 操作；payload 直接构造在应答头部之后
- * （连续布局，见 ufs_proto.h）。ino 寻址语义由各后端自行维护：
- * fat 用 ino↔path 表，vnode 型后端用 ino→vnode* 映射。
+ * Each backend implements the same set of ufs_proto operations; the payload
+ * is built directly after the response header (contiguous layout, see
+ * ufs_proto.h). ino addressing semantics are maintained by each backend
+ * itself: fat uses an ino-to-path table, vnode-type backends use an
+ * ino-to-vnode map.
  */
 #ifndef UFS_BACKENDS_H
 #define UFS_BACKENDS_H
@@ -16,7 +18,8 @@
 
 #define UFSD_MSG_MAX 65536u
 
-/* 与内核 VFS 一致的 errno 值（freestanding 环境自持） */
+/* errno values consistent with the kernel VFS (self-hosted in the
+ * freestanding environment) */
 #define U_ENOENT 2
 #define U_EIO 5
 #define U_EEXIST 17
@@ -29,7 +32,8 @@
 #define U_ENOSYS 38
 #define U_ESTALE 116
 
-/* 应答载荷区：紧随应答头部的连续缓冲 */
+/* Response payload area: the contiguous buffer immediately following the
+ * response header */
 extern uint8_t ufs_tx[UFSD_MSG_MAX];
 extern void   (*ufs_log_sink)(const char *line);
 
@@ -45,7 +49,8 @@ static inline uint32_t ufs_payload_cap(void)
 
 typedef struct ufs_backend {
     const char *name;
-    /* 挂载：成功返回 0，负值为 -errno；INIT 握手由主循环处理 */
+    /* Mount: returns 0 on success, a negative -errno on failure; the INIT
+     * handshake is handled by the main loop */
     int (*mount)(const char *fstype);
     int64_t (*lookup)(uint64_t dir_ino, const char *name, uint32_t name_len,
                       ufs_resp_hdr_t *r);

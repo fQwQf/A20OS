@@ -1,8 +1,10 @@
 /*
- * fscompat/mm/slab.h — 用户态 FS 宿主的 kmalloc 家族声明。
- * 与内核版签名一致；实现位于 fscompat/compat.c（malloc 之上）。
- * 额外引入 core/defs.h：部分 FS 翻译单元经此获得 offsetof 等宏
- * （内核构建中该传递路径由 mm/mm.h 提供）。
+ * fscompat/mm/slab.h — declarations for the kmalloc family of the user-space FS
+ * host.  Signatures match the kernel version; the implementation is in
+ * fscompat/compat.c (on top of malloc).
+ * Additionally pulls in core/defs.h: some FS translation units obtain macros
+ * such as offsetof through it (in the kernel build that transitive path is
+ * provided by mm/mm.h).
  */
 #ifndef _SLAB_H
 #define _SLAB_H

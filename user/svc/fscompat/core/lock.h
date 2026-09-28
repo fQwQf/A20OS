@@ -1,8 +1,10 @@
 /*
- * fscompat/core/lock.h — 用户态 FS 宿主的空实现自旋锁。
+ * fscompat/core/lock.h — a no-op spinlock for the user-space FS host.
  *
- * 服务进程单线程运行，锁操作退化为no-op；仅保留类型与 API 形状，
- * 使内核磁盘文件系统源码可原样编译进用户态（docs/hybrid-kernel/06-user-fs.md）。
+ * The service process runs single-threaded, so lock operations degrade to
+ * no-ops; only the type and API shape are kept, so that kernel disk filesystem
+ * sources can compile as-is into user space
+ * (docs/hybrid-kernel/06-user-fs.md).
  */
 #ifndef _LOCK_H
 #define _LOCK_H

@@ -1,7 +1,8 @@
 /*
- * fscompat/mm/mm.h — 用户态 FS 宿主的内存管理垫片。
- * 磁盘文件系统源码仅需 kmalloc 家族（mm/slab.h 真实声明）；
- * 内核的物理帧分配器与页表设施在宿主中不存在。
+ * fscompat/mm/mm.h — the memory management shim of the user-space FS host.
+ * The disk filesystem sources only need the kmalloc family (truly declared in
+ * mm/slab.h); the kernel's physical frame allocator and page table facilities
+ * do not exist in the host.
  */
 #ifndef _MM_H
 #define _MM_H

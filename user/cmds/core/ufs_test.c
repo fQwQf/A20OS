@@ -1,14 +1,16 @@
 /*
- * ufs_test — 用户态文件系统服务（ufsd）端到端验证。
+ * ufs_test — end-to-end validation of the user-space filesystem service
+ * (ufsd).
  *
- * 前置：QEMU 已挂第三块 virtio-blk 盘（DEV_CLASS_BLOCK 序号 2，FAT32，
- * 内含 HELLO.TXT）。流程：
- *   1. fork/exec /bin/ufsd-rv，让它把块设备 2 以 uxfs 形态挂到 /ufs；
- *   2. 轮询 /ufs/HELLO.TXT 可见（挂载 + INIT 握手完成）；
- *   3. 读回 HELLO.TXT 内容并比对；
- *   4. 新建 ROUND.BIN 写入校验图案、读回比对；
- *   5. 列目录应含两个文件；
- *   6. unlink ROUND.BIN 后确认消失。
+ * Precondition: QEMU already has a third virtio-blk disk attached
+ * (DEV_CLASS_BLOCK index 2, FAT32, containing HELLO.TXT). Flow:
+ *   1. fork/exec /bin/ufsd-rv and have it mount block device 2 onto /ufs as
+ *      a uxfs;
+ *   2. Poll until /ufs/HELLO.TXT is visible (mount + INIT handshake done);
+ *   3. Read back the HELLO.TXT content and compare;
+ *   4. Create ROUND.BIN, write a check pattern, and read it back to compare;
+ *   5. Listing the directory should contain both files;
+ *   6. After unlinking ROUND.BIN, confirm it is gone.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -32,7 +34,8 @@ static void spawn_ufsd(void)
         execl("/bin/ufsd-rv", "ufsd-rv", "/ufs", "1", (char *)0);
         _exit(90);
     }
-    (void)pid; /* 服务常驻；父进程继续轮询挂载点 */
+    (void)pid; /* the service stays resident; the parent keeps polling the
+            * mount point */
 }
 
 int main(void)
@@ -40,7 +43,7 @@ int main(void)
     const char *hello_path = "/ufs/HELLO.TXT";
     const char *expect = "hello-uxfs\n";
 
-    /* 1-2. 拉起服务并等待挂载可见。 */
+    /* 1-2. Bring the service up and wait for the mount to become visible. */
     int mounted = 0;
     struct stat st;
     if (stat(hello_path, &st) == 0) {
@@ -56,7 +59,7 @@ int main(void)
         return fail("/ufs not visible after ufsd spawn");
     printf("UXFS_FS: /ufs mounted, HELLO.TXT present\n");
 
-    /* 3. 读回预置内容。 */
+    /* 3. Read back the preseeded content. */
     char buf[64];
     memset(buf, 0, sizeof(buf));
     int fd = open(hello_path, O_RDONLY);
@@ -68,7 +71,7 @@ int main(void)
         return fail("HELLO.TXT content mismatch");
     printf("UXFS_FS: read-back ok (%zd bytes)\n", n);
 
-    /* 4. 新建文件写入图案并读回。 */
+    /* 4. Create a file, write the pattern, and read it back. */
     const char *round_path = "/ufs/ROUND.BIN";
     static unsigned char pattern[8192];
     for (size_t i = 0; i < sizeof(pattern); i++)
@@ -91,7 +94,7 @@ int main(void)
         return fail("read-back mismatch on ROUND.BIN");
     printf("UXFS_FS: create/write/read ok (%zd bytes)\n", rn);
 
-    /* 5. 目录列举。 */
+    /* 5. Directory listing. */
     DIR *d = opendir("/ufs");
     if (!d)
         return fail("opendir /ufs");
@@ -106,7 +109,7 @@ int main(void)
         return fail("readdir missing entries");
     printf("UXFS_FS: readdir ok\n");
 
-    /* 6. 删除后确认消失。 */
+    /* 6. Confirm it is gone after deletion. */
     if (unlink(round_path) != 0)
         return fail("unlink ROUND.BIN");
     if (stat(round_path, &st) == 0)

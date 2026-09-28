@@ -1,4 +1,4 @@
-/* fscompat/core/arch.h — 隔离 defs.h 对架构内联汇编的引用。 */
+/* fscompat/core/arch.h — shields defs.h from referencing arch inline assembly. */
 #ifndef _ARCH_COMPAT_H
 #define _ARCH_COMPAT_H
 
