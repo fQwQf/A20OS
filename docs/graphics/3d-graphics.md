@@ -394,7 +394,7 @@ libEGL warning: egl: failed to create dri2 screen
   即 Mesa 的 GBM 后端（镜像里有 `/usr/lib/gbm/dri_gbm.so`）在为本驱动的设备建 `gbm_device` 时失败。
   `MESA_LOADER_DRIVER_OVERRIDE=kms_swrast` 和 `swrast` 都试过、**都不改变结果** → 说明卡点不在
   「驱动名→DRI 驱动」的映射，而在 dri_gbm 的设备初始化本身（它对本 DRM 设备的某些查询/调用不满意）。
-  下一步要么 guest 里 strace（world 没装 strace）看 gbm_create_device 里哪一步失败，要么在内核 DRM ioctl
+  下一步要么 guest 里 strace（**已加入 `xfce.world`，无需再离线准备**）看 gbm_create_device 里哪一步失败，要么在内核 DRM ioctl
   分发上挂临时 trace 看 Mesa 在初始化阶段问了什么、哪条答得不对。
 - **可能更短的路（待验证，不要当结论）**：Minecraft 走 LWJGL → `EGL_PLATFORM_WAYLAND`，而 EGL 在 Wayland
   平台**已经能初始化**（swrast）。真正的问号是**呈现**：eglSwapBuffers 时 Mesa 把渲染结果作为 `wl_buffer` 交给
@@ -407,7 +407,7 @@ libEGL warning: egl: failed to create dri2 screen
   GBM 后端 `/usr/lib/gbm/dri_gbm.so` 也在。即便如此，带 `MESA_LOADER_DRIVER_OVERRIDE=kms_swrast` 的
   `eglinfo -p gbm` 仍然 `DRI2: failed to create gbm device`，而且**内核侧没有任何 DRM ioctl 返回错误**
   （用临时 trace 覆盖了整个 ioctl 分发验证过）。→ 卡点在 **Mesa `gbm_create_device()` 内部**（设备识别/后端
-  初始化），既不是缺文件也不是内核答错。要继续需要 Mesa 源码，或在 guest 里 strace（world 现无 strace）
+  初始化），既不是缺文件也不是内核答错。要继续需要 Mesa 源码，或在 guest 里 strace（**已加入 `xfce.world`**）
   看它到底哪一步返回 NULL。
 - **真正的卡点定位（libdrm 读不到设备身份）**：`MESA-LOADER: failed to retrieve device information` 出在 libdrm 的
   `drmGetDevice2()`。从 `libdrm.so.2` 的字符串可以读出它要访问的 sysfs 路径：
@@ -604,7 +604,7 @@ panic/UBSAN；在内核 `sysfs_lookup` 挂临时 trace 后可见 libdrm 的完�
 `drmGetDeviceName()` 的 `/virtio` 截断才会得到 PCI 父目录 `/sys/devices/pci0000:00/0000:00:01.0`，
 `<realpath>/../subsystem` 才解析得到 `/sys/bus/pci`，`PCI_SLOT_NAME` 与 `config` 也才从那个父目录读取。
 这需要新增 `/sys/devices/pci0000:00/...` 子树（约 100 行，仍是纯加法 + 把 DRM 的 `device` 改成软链）。
-另需 `strace`/更细的 trace 确认 `config` 为何未被读取。
+另需 `strace`（已加入 `xfce.world`）/更细的 trace 确认 `config` 为何未被读取。
 
 **另一条已实测可行的路（对 Minecraft 可能已够）**：`eglinfo -p wayland` **成功**，渲染器为
 `llvmpipe (LLVM 21.1.2, 128 bits)`。LWJGL 走 `EGL_PLATFORM_WAYLAND`，若其呈现走 `wl_shm` 而非
@@ -671,7 +671,8 @@ SYSOPEN t=36 idx=4       SYSREAD t=36 idx=4 len=5        ← subsystem_device  =
   完整记下来（9.7 的教训：trace 必须能归因到具体消费者）；
 - 或者拿到 Mesa/libdrm 源码后直接对照 `loader_get_pci_id_for_fd()` 与 `gbm_create_device()` 的分支条件
   （当前只能从反汇编推断"要求 DRM_BUS_PCI"）。
-- `strace` 仍是最省事的工具，但 world 里没有，需离线准备静态 musl 版本。
+- `strace` 仍是最省事的工具；现已加入 `xfce.world`（`strace` 在 v3.23 与 edge 均有），
+  不再需要离线准备静态 musl 版本。
 
 **已验证可行的替代路径没有变化**：`eglinfo -p wayland` 成功、渲染器 `llvmpipe (LLVM 21.1.2, 128 bits)`。
 考虑 Minecraft 走 `EGL_PLATFORM_WAYLAND`，这条路值得优先于继续啃 GBM。
@@ -855,7 +856,7 @@ winsys 创建失败、Mesa 调用 `drmSetMaster`、virgl/QEMU 设备变体、以
 - 对 Minecraft 无影响——`EGL_PLATFORM=wayland` 已用真实客户端（`es2gears_wayland`，`EGL_VERSION=1.5`
   + GLES 3.2 llvmpipe）验证可渲染（9.11）；
 - GBM 只影响 wlroots 自己的渲染器质量，当前 `WLR_RENDERER=pixman` 是**正确且可用**的配置；
-- 若将来确实要 GBM 加速，最有效的下一步是用 **strace**（网络已通，依赖可现取）看 DRI screen 创建
+- 若将来确实要 GBM 加速，最有效的下一步是用 **strace**（已加入 `xfce.world`）看 DRI screen 创建
   到底停在哪一步——那比继续做假设-验证循环划算得多。
 
 ### 9.14 Minecraft 的 JNI 前置条件：已补齐并实测通过（commit `bcd18ec8`）
