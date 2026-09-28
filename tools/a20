@@ -28,11 +28,22 @@ See docs/instances.md for the manifest reference.
 from __future__ import annotations
 
 import argparse
+import difflib
 import sys
 from pathlib import Path
 from typing import assert_never
 
 from a20_board import run_flash, run_package
+from a20_error import (
+    A20Error,
+    BoardUnreachable,
+    EXIT_FAIL,
+    EXIT_OK,
+    InstanceBusy,
+    ResourceShortage,
+    ToolError,
+    report,
+)
 from a20_console import (
     ConsoleError,
     console_log_path,
@@ -47,13 +58,15 @@ from a20_instance import (
     QEMU_RUNNABLE_ARCHES,
     Instance,
     InstanceError,
+    applicable_actions,
+    default_board,
     parse_instance,
     section_is_set,
 )
 from a20_manifest import formats as ledger_formats
 from a20_manifest import collect as collect_manifest
 from a20_manifest import render_json, render_markdown, render_table, write as write_ledger
-from a20_make import REPO_ROOT, build_instance, exec_make
+from a20_make import REPO_ROOT, MakeQueryError, build_instance, exec_make
 from a20_resource import (
     HostResources,
     Policy,
@@ -77,6 +90,15 @@ from a20_validate import validate_instance
 
 INSTANCES_DIR = REPO_ROOT / "instances"
 
+# Tools a20 execs.  Used only to decide whether a FileNotFoundError means
+# "install it" or "you named a path that isn't there".
+_TOOLS = frozenset({"make", "git"})
+_TOOL_HINT = "a20 shells out to make and git; install them or fix PATH"
+
+
+def _known_names() -> list[str]:
+    return sorted(p.stem for p in INSTANCES_DIR.glob("*.toml"))
+
 
 def _resolve(arg: str) -> Path:
     """Accept either a manifest path or an instance name from instances/."""
@@ -86,18 +108,25 @@ def _resolve(arg: str) -> Path:
     candidate = INSTANCES_DIR / f"{arg}.toml"
     if candidate.is_file():
         return candidate
-    raise SystemExit(f"error: no such instance '{arg}' (tried {arg} and {candidate})")
+    # A near-miss is almost always a typo or a half-remembered name; there are
+    # dozens of instances, so guessing beats making the user go and list them.
+    # 0.75 rather than something looser: at 0.6 a name that is not an instance
+    # at all (`smoke-poll-edge` is a make target) came back with a confident,
+    # wrong suggestion, which is worse than no suggestion.
+    close = difflib.get_close_matches(arg, _known_names(), n=3, cutoff=0.75)
+    hint = f"did you mean: {', '.join(close)}?" if close else "run 'a20 list' to see them"
+    raise A20Error(f"no such instance '{arg}' (tried {arg} and {candidate})", hint=hint)
 
 
 def _load_registry() -> tuple[DriverComponent, ...]:
     try:
         entries = load_registry(REPO_ROOT)
     except RegistryError as e:
-        raise SystemExit(f"error: component registry:\n{e}") from None
+        raise A20Error(f"component registry: {e}") from None
     errors = validate_registry(entries, REPO_ROOT)
     if errors:
-        listing = "\n".join(f"  - {err}" for err in errors)
-        raise SystemExit(f"error: component registry:\n{listing}")
+        listing = "; ".join(errors)
+        raise A20Error(f"component registry: {listing}")
     return entries
 
 
@@ -106,31 +135,45 @@ def _load(arg: str) -> Instance:
     try:
         inst = parse_instance(path)
     except InstanceError as e:
-        raise SystemExit(f"error: {path}:\n{e}") from None
+        raise A20Error(f"{path}: {e}") from None
     errors = validate_instance(inst, REPO_ROOT)
     if inst.rootfs.drivers is not None:
         errors = errors + validate_driver_selection(inst, _load_registry())
     if errors:
-        listing = "\n".join(f"  - {e}" for e in errors)
-        raise SystemExit(f"error: {path}:\n{listing}")
+        listing = "; ".join(errors)
+        raise A20Error(f"{path}: {listing}")
     return inst
 
 
 def _check_runnable(inst: Instance, action: str) -> None:
     if inst.arch not in QEMU_RUNNABLE_ARCHES:
-        raise SystemExit(
-            f"error: '{action}' has no generic QEMU path for {inst.arch} "
-            "(armv7m uses tools/stm32.mk, loongarch32 uses the cemu simulator)"
-        )
+        raise A20Error(
+            f"'{action}' has no generic QEMU path for {inst.arch}",
+            hint="armv7m runs through tools/stm32.mk ([stm32] qemu = true); "
+                 "loongarch32 runs on the cemu simulator, not QEMU")
 
 
-def _gate_resources(inst, args) -> None:
-    """Refuse to start a guest the host cannot host, waiting if allowed to."""
+def _gate_resources(inst, args, *, guest: bool = True) -> None:
+    """Refuse to start work the host cannot afford, waiting if allowed to.
+
+    `guest=True` is the launch gate -- memory, CPU, guest slots and the host
+    ports this instance claims, because a QEMU that overcommits gets the OOM
+    killer to choose a victim.  `guest=False` is the build gate: disk only, so
+    `a20 package` is not blocked by a guest that happens to be running.
+
+    A dry run must not block.  `--dry-run` promises to print the command rather
+    than execute it, and waiting for a resource it will never consume is both a
+    lie about what it does and, with the default unlimited wait, an apparent
+    hang.
+    """
+    if getattr(args, "dry_run", False):
+        return
     policy = Policy.from_env()
     if getattr(args, "wait_timeout", None) is not None:
         policy = Policy(policy.reserve_mem_mb, policy.min_disk_mb,
                         policy.max_concurrent, args.wait_timeout)
-    preflight(inst, policy, REPO_ROOT, wait=not args.no_wait, echo=_echo)
+    preflight(inst, policy, REPO_ROOT, wait=not getattr(args, "no_wait", False),
+              echo=_echo, guest=guest)
 
 
 def _echo(msg: str) -> None:
@@ -151,43 +194,44 @@ def cmd_resources(_args: argparse.Namespace) -> int:
           f"(floor {policy.min_disk_mb} MiB per run)")
     print(f"wait timeout     : "
           f"{'forever' if policy.wait_timeout_s <= 0 else f'{policy.wait_timeout_s:.0f}s'}")
-    return 0
+    return EXIT_OK
 
 
-def cmd_build(args: argparse.Namespace) -> int:
-    return build_instance(_load(args.instance), list(args.make_args), args.dry_run)
+def cmd_build(args: argparse.Namespace) -> None:
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    build_instance(inst, list(args.make_args), args.dry_run)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def cmd_run(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
     if inst.arch == "armv7m":
         if not inst.stm32.qemu:
-            raise SystemExit(
-                f"error: {inst.source}: armv7m has no generic QEMU path; "
-                "set [stm32] qemu = true to run on the stm32vldiscovery machine"
-            )
+            raise A20Error(
+                f"{inst.source}: armv7m has no generic QEMU path",
+                hint="set [stm32] qemu = true to run on the stm32vldiscovery machine")
         _gate_resources(inst, args)
-        build_rc = build_instance(inst, list(args.make_args), args.dry_run)
-        if build_rc != 0:
-            return build_rc
-        return exec_make(inst, "run-stm32f103-qemu-impl", [], args.dry_run)
+        build_instance(inst, list(args.make_args), args.dry_run)
+        exec_make(inst, "run-stm32f103-qemu-impl",
+                 list(args.make_args), args.dry_run)
+        return
     _check_runnable(inst, "run")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
     if inst.rootfs.world is not None:
         # apk world images boot as the second disk; init chroots into them.
         target = "run-world-gui" if inst.gui.enabled else "run-world"
-        return exec_make(inst, target, list(args.make_args), args.dry_run)
-    target = "_run_impl"
-    return exec_make(inst, target, list(args.make_args), args.dry_run)
+        exec_make(inst, target, list(args.make_args), args.dry_run)
+        return
+    exec_make(inst, "_run_impl", list(args.make_args), args.dry_run)
 
 
-def cmd_debug(args: argparse.Namespace) -> int:
+def cmd_debug(args: argparse.Namespace) -> None:
     inst = _load(args.instance)
     _check_runnable(inst, "debug")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
-    return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
+    exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
 
 
 def cmd_test(args: argparse.Namespace) -> int:
@@ -203,32 +247,51 @@ def _report(inst, result, log) -> int:
     write_console_log(log, result.transcript)
     if result.ok:
         print(f"{inst.name}: console OK ({result.stage}); transcript in {log}")
-        return 0
+        return EXIT_OK
     print(f"{inst.name}: console FAIL at {result.stage}; missing {list(result.missing)}; "
           f"transcript in {log}", file=sys.stderr)
     print("\n".join(result.transcript.tail(60)), file=sys.stderr)
-    return 1
+    return EXIT_FAIL
 
 
 def cmd_console(args: argparse.Namespace) -> int:
     """Attach to a board's serial console and run the declared on-board check."""
     inst = _load(args.instance)
     if not section_is_set(inst.target):
-        raise SystemExit(f"error: {inst.source}: a20 console needs a [target] section "
-                         "(serial, console_check, commands, expect)")
+        raise A20Error(f"{inst.source}: a20 console needs a [target] section",
+                       hint="a [target] section declares serial, console_check, "
+                            "commands and expect")
     if args.no_reset:
         inst = replace(inst, target=replace(inst.target, reset=None))
+    if args.dry_run:
+        # Previously ignored: `a20 console --dry-run` opened the real serial
+        # port and injected target.commands at a live board, which is the exact
+        # opposite of what the flag says.
+        t = inst.target
+        print(f"would open {t.serial} at {t.baud or 115200} baud")
+        if t.reset:
+            print(f"would reset: {t.reset}")
+        if t.console_check:
+            print(f"would wait for prompt: {t.console_check!r} "
+                  f"(timeout {t.boot_timeout or '120s'})")
+        for cmd in t.commands or ():
+            print(f"would send: {cmd}")
+        for want in t.expect or ():
+            print(f"would require: {want!r}")
+        print(f"transcript would go to {console_log_path(inst)}")
+        return EXIT_OK
     log = console_log_path(inst)
     try:
         transport = open_transport(inst)
     except OSError as e:
-        raise SystemExit(f"error: cannot open console {inst.target.serial!r}: {e}. "
-                         "Is the board attached, and is this user in the dialout group?") from None
+        raise BoardUnreachable(
+            f"cannot open console {inst.target.serial!r}: {e}",
+            hint="is the board attached, and is this user in the dialout group?") from None
     try:
         result = run_console_session(transport, inst, on_output=_echo)
     except ConsoleError as e:
         transport.close()
-        raise SystemExit(f"error: {e}") from None
+        raise BoardUnreachable(str(e)) from None
     return _report(inst, result, log)
 
 
@@ -236,27 +299,26 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     """Build, program the board, write boot media, then verify it over the console."""
     inst = _load(args.instance)
     if not section_is_set(inst.target):
-        raise SystemExit(f"error: {inst.source}: a20 deploy needs a [target] section")
+        raise A20Error(f"{inst.source}: a20 deploy needs a [target] section")
     if inst.target.boot_media and not inst.target.media_device:
-        raise SystemExit(f"error: {inst.source}: target.boot_media is declared but "
-                         "target.media_device is not, so there is nowhere to write it")
+        raise A20Error(f"{inst.source}: target.boot_media is declared but "
+                       "target.media_device is not, so there is nowhere to write it")
     if not args.no_flash and section_is_set(inst.flash):
-        rc = run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
-        if rc != 0:
-            return rc
+        run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
     elif section_is_set(inst.flash):
         pass
     elif not args.dry_run:
-        rc = build_instance(inst, list(args.make_args), args.dry_run)
-        if rc != 0:
-            return rc
+        build_instance(inst, list(args.make_args), args.dry_run)
     if inst.target.boot_media:
         if args.dry_run:
-            print(f"would write {list(inst.target.boot_media)} to {inst.target.media_device}")
+            print(f"would write {' '.join(inst.target.boot_media)} "
+                  f"to {inst.target.media_device}")
         else:
-            rc = exec_make(inst, "target-write-media", [], args.dry_run)
-            if rc != 0:
-                return rc
+            # exec_make raises on failure, so there is no status to check. The
+            # `rc = ...; if rc != 0` that used to be here bound None, compared
+            # unequal to 0, and returned None -- an accidental exit code 0 that
+            # hid the fact this goal was the one call site dropping make args.
+            exec_make(inst, "target-write-media", list(args.make_args), args.dry_run)
     return cmd_console(args)
 
 
@@ -286,10 +348,12 @@ def cmd_ports(args: argparse.Namespace) -> int:
     paths = [Path(n) for n in names] if names else sorted(INSTANCES_DIR.glob("*.toml"))
     claimed: dict[tuple[str, int], list[str]] = {}
     rows: list[tuple[str, str, str]] = []
+    bad = 0
     for path in paths:
         try:
             inst = _load(str(path))
-        except SystemExit as e:
+        except A20Error as e:
+            bad += 1
             rows.append((path.stem, "-", f"invalid manifest: {e}"))
             continue
         want = parse_hostfwd_ports(inst.net.hostfwd)
@@ -315,8 +379,11 @@ def cmd_ports(args: argparse.Namespace) -> int:
         for (addr, port), names in sorted(clashes.items()):
             print(f"note: {addr}:{port} is claimed by {', '.join(sorted(names))}"
                   " -- fine if you never run them together, otherwise give one an ephemeral"
-                  " port (hostfwd = [\"tcp::0-<guestport>\"])")
-    return 0
+                  " port (hostfwd = [\"tcp::0-<guestport>\"])", file=sys.stderr)
+    if bad:
+        print(f"ports: {bad} instance(s) could not be read", file=sys.stderr)
+        return EXIT_FAIL
+    return EXIT_OK
 
 def cmd_ledger(args: argparse.Namespace) -> int:
     """Report what an instance actually produced: sizes, hashes, revision."""
@@ -335,50 +402,100 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0 if manifest.artifacts else 1
 
 
-def cmd_flash(args: argparse.Namespace) -> int:
+def cmd_flash(args: argparse.Namespace) -> None:
     """Build the firmware and program the board with the declared backend."""
-    return run_flash(_load(args.instance), _flash_backends(), list(args.make_args), args.dry_run)
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
 
 
 def _flash_backends():
     try:
         return load_flash_backends(REPO_ROOT)
     except RegistryError as e:
-        print(f"FAIL components/flash-backends.toml:\n{e}")
-        raise SystemExit(1) from None
+        raise A20Error(f"components/flash-backends.toml: {e}") from None
 
 
-def cmd_package(args: argparse.Namespace) -> int:
-    return run_package(_load(args.instance), list(args.make_args), args.dry_run)
+def cmd_package(args: argparse.Namespace) -> None:
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    run_package(inst, list(args.make_args), args.dry_run)
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Everything an operator needs before choosing a command, in one screen.
+
+    `show-vars` answers "what would make see"; this answers "can I run this, what
+    will it cost me, and what will it touch" -- the questions that come first
+    when picking between 46 instances.
+    """
+    inst = _load(args.instance)
+    acts = applicable_actions(inst)
+    print(f"{inst.name}  [{inst.arch}]  {inst.description or ''}")
+
+    from a20_resource import Policy, parse_hostfwd_ports, requirement_for
+    need = requirement_for(inst, Policy.from_env())
+    print(f"  actions     {', '.join(acts)}")
+    print(f"  board       {inst.board or default_board(inst.arch)}")
+    print(f"  needs       {need.describe()}")
+
+    ports = parse_hostfwd_ports(inst.net.hostfwd)
+    print(f"  host ports  {', '.join(f'{a}:{p}' for a, p in ports) if ports else 'none (nothing to connect to)'}")
+
+    if inst.target and section_is_set(inst.target):
+        t = inst.target
+        print(f"  console     {t.serial} at {t.baud or 115200} baud"
+              f"{', resets the board' if t.reset else ''}")
+        if t.boot_media:
+            print(f"  boot media  {' '.join(t.boot_media)} -> {t.media_device or '(unset!)'}")
+        if t.expect:
+            print(f"  expects     {', '.join(t.expect)}")
+    if inst.flash.tool:
+        print(f"  flashes via {inst.flash.tool}")
+    if inst.test.expect:
+        print(f"  smoke waits {', '.join(inst.test.expect)}")
+    print(f"  manifest    {inst.source}")
+    return EXIT_OK
 
 
 def cmd_show_vars(args: argparse.Namespace) -> int:
     for var in derive_make_vars(_load(args.instance)):
         print(var)
-    return 0
+    return EXIT_OK
 
 
-def cmd_list(_args: argparse.Namespace) -> int:
+def cmd_list(args: argparse.Namespace) -> int:
     paths = sorted(INSTANCES_DIR.glob("*.toml"))
     if not paths:
         print(f"no instances found in {INSTANCES_DIR}")
-        return 0
+        return EXIT_OK
+    want_arch = set(args.arch or ())
+    want_act = set(args.action or ())
     failed = 0
+    shown = 0
     for path in paths:
         try:
             inst = parse_instance(path)
             errors = validate_instance(inst, REPO_ROOT)
         except InstanceError as e:
             failed += 1
-            print(f"{path.stem:<28} INVALID\n{e}")
+            print(f"{path.stem:<28} INVALID  {e}", file=sys.stderr)
             continue
-        mode = "gui" if inst.gui.enabled else "text"
-        status = "ok" if not errors else f"{len(errors)} error(s)"
-        print(f"{inst.name:<28} {inst.arch:<12} {mode:<5} {status:<12} {inst.description or ''}")
         failed += bool(errors)
+        acts = applicable_actions(inst)
+        if (want_arch and inst.arch not in want_arch) or (
+                want_act and not want_act <= set(acts)):
+            continue
+        shown += 1
+        status = "ok" if not errors else f"{len(errors)} error(s)"
+        print(f"{inst.name:<26} {inst.arch:<11} {','.join(acts):<30} "
+              f"{status:<11} {inst.description or ''}")
+    if not shown and (want_arch or want_act):
+        print(f"list: no instance matches arch={sorted(want_arch) or 'any'} "
+              f"action={sorted(want_act) or 'any'}", file=sys.stderr)
     if failed:
-        print(f"list: {failed} instance(s) invalid")
-    return 1 if failed else 0
+        print(f"list: {failed} instance(s) invalid", file=sys.stderr)
+    return EXIT_FAIL if failed else EXIT_OK
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -391,7 +508,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             inst = parse_instance(path)
             errors = validate_instance(inst, REPO_ROOT)
         except InstanceError as e:
-            print(f"FAIL {path.name}:\n{e}")
+            print(f"FAIL {path.name}: {e}", file=sys.stderr)
             failed += 1
             continue
         if inst.rootfs.drivers is not None:
@@ -399,21 +516,22 @@ def cmd_check(args: argparse.Namespace) -> int:
                 registry = _load_registry()
             errors = errors + validate_driver_selection(inst, registry)
         if errors:
-            listing = "\n".join(f"  - {e}" for e in errors)
-            print(f"FAIL {path.name}:\n{listing}")
+            print(f"FAIL {path.name}: {'; '.join(errors)}", file=sys.stderr)
             failed += 1
         else:
             print(f"OK   {path.name}")
             covered_arches.add(inst.arch)
     for arch in args.require_arch:
         if arch not in covered_arches:
-            print(f"FAIL matrix: no valid instance covers required arch '{arch}'")
+            print(f"FAIL matrix: no valid instance covers required arch '{arch}'",
+                  file=sys.stderr)
             failed += 1
     if failed:
-        print(f"check: {failed} failure(s) across {len(paths)} instance(s)")
-        return 1
+        print(f"check: {failed} failure(s) across {len(paths)} instance(s)",
+              file=sys.stderr)
+        return EXIT_FAIL
     print(f"check: {len(paths)} instance(s) OK")
-    return 0
+    return EXIT_OK
 
 
 def cmd_check_registry(_args: argparse.Namespace) -> int:
@@ -421,33 +539,44 @@ def cmd_check_registry(_args: argparse.Namespace) -> int:
     try:
         entries = load_registry(REPO_ROOT)
     except RegistryError as e:
-        print(f"FAIL components/drivers.toml:\n{e}")
-        return 1
+        print(f"error: components/drivers.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
     errors = validate_registry(entries, REPO_ROOT)
     if errors:
-        listing = "\n".join(f"  - {e}" for e in errors)
-        print(f"FAIL components/drivers.toml:\n{listing}")
-        return 1
+        print(f"error: components/drivers.toml: {'; '.join(errors)}", file=sys.stderr)
+        return EXIT_FAIL
     stale = check_make_fragment(entries, REPO_ROOT)
     if stale:
-        listing = "\n".join(f"  - {e}" for e in stale)
-        print(f"FAIL components/drivers.mk (generated):\n{listing}")
-        return 1
+        print(f"error: components/drivers.mk is stale: {'; '.join(stale)}", file=sys.stderr)
+        print("hint: run 'a20 regen-drivers' to regenerate it", file=sys.stderr)
+        return EXIT_FAIL
     print(f"check-registry: {len(entries)} driver component(s) OK, generated fragment current")
-    return 0
+    return EXIT_OK
 
 
-def cmd_regen_drivers(_args: argparse.Namespace) -> int:
+def cmd_regen_drivers(args: argparse.Namespace) -> int:
     """Regenerate components/drivers.mk from components/drivers.toml."""
     try:
         entries = load_registry(REPO_ROOT)
     except RegistryError as e:
-        print(f"FAIL components/drivers.toml:\n{e}")
-        return 1
+        print(f"error: components/drivers.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
     path = make_fragment_path(REPO_ROOT)
-    path.write_text(render_make_fragment(entries))
-    print(f"regen-driver-fragment: wrote {path}")
-    return 0
+    rendered = render_make_fragment(entries)
+    if args.dry_run:
+        current = path.read_text() if path.is_file() else ""
+        if current == rendered:
+            print(f"regen-drivers: {path} is already up to date")
+        else:
+            print(f"regen-drivers: would rewrite {path} "
+                  f"({len(rendered.splitlines())} lines)")
+        return EXIT_OK
+    try:
+        path.write_text(rendered)
+    except OSError as e:
+        raise A20Error(f"cannot write {path}: {e}") from None
+    print(f"regen-drivers: wrote {path}")
+    return EXIT_OK
 
 
 def cmd_check_flash_backends(_args: argparse.Namespace) -> int:
@@ -455,21 +584,22 @@ def cmd_check_flash_backends(_args: argparse.Namespace) -> int:
     try:
         entries = load_flash_backends(REPO_ROOT)
     except RegistryError as e:
-        print(f"FAIL components/flash-backends.toml:\n{e}")
-        return 1
+        print(f"error: components/flash-backends.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
     try:
         errors = (validate_flash_backends(entries, REPO_ROOT)
                   + cross_check_flash_targets(entries, REPO_ROOT))
     except RegistryError as e:
-        print(f"FAIL components/flash-backends.toml:\n{e}")
-        return 1
+        print(f"error: components/flash-backends.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
     if errors:
-        print(f"FAIL components/flash-backends.toml:\n" + "\n".join(f"  - {e}" for e in errors))
-        return 1
+        print(f"error: components/flash-backends.toml: {'; '.join(errors)}",
+              file=sys.stderr)
+        return EXIT_FAIL
     boards = sorted({b for e in entries for b in e.boards})
     print(f"check-flash-backends: {len(entries)} backend(s) OK covering {len(boards)} board(s): "
           f"{', '.join(boards)}")
-    return 0
+    return EXIT_OK
 
 
 def _add_resource_flags(parser: argparse.ArgumentParser) -> None:
@@ -505,11 +635,20 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--require-arch", nargs="*", default=(), metavar="ARCH",
                          help="fail unless every listed arch is covered by a valid instance")
     sub.add_parser("check-registry", help="validate components/drivers.toml and its generated make fragment")
-    sub.add_parser("regen-drivers",
-                   help="regenerate components/drivers.mk from components/drivers.toml")
+    p_regen = sub.add_parser(
+        "regen-drivers",
+        help="regenerate components/drivers.mk from components/drivers.toml")
+    p_regen.add_argument("--dry-run", action="store_true",
+                         help="report whether the fragment would change, without writing")
     sub.add_parser("check-flash-backends",
                    help="validate components/flash-backends.toml against the makefiles")
-    sub.add_parser("list", help="list known instances")
+    pl = sub.add_parser("list", help="list known instances")
+    pl.add_argument("--arch", nargs="*", default=(), metavar="ARCH",
+                    help="only instances built for these architectures")
+    pl.add_argument("--action", nargs="*", default=(), metavar="ACT",
+                    help="only instances that support every one of these "
+                         "actions (build run debug test flash package "
+                         "console deploy)")
     sub.add_parser("resources", help="show the host budget instance runs are gated against")
 
     for name, help_text in (("console", "attach to a board console and run its on-board check"),
@@ -532,6 +671,8 @@ def main(argv: list[str] | None = None) -> int:
     p_ledger.add_argument("--format", choices=ledger_formats(), default="table",
                           help="table (human), json (machine), markdown (doc block)")
     p_ledger.add_argument("--out", metavar="FILE", help="write to FILE instead of stdout")
+    add_instance_cmd("show", "show what an instance needs and supports",
+                   with_make_args=False)
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
     add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
@@ -543,8 +684,12 @@ def main(argv: list[str] | None = None) -> int:
     add_instance_cmd("package", "build and assemble the artifact in [package]",
                      with_make_args=True)
 
-    for boot in ("run", "debug", "test"):
-        _add_resource_flags(sub.choices[boot])
+    # Every command that calls _gate_resources needs the waiting flags, not just
+    # the three that launch a guest: build, flash and package are gated too, and
+    # omitting them left them crashing on a missing attribute before doing any
+    # work at all.
+    for gated in ("build", "run", "debug", "test", "flash", "package"):
+        _add_resource_flags(sub.choices[gated])
 
     # Unknown arguments (after an optional `--`) are forwarded to make. Using
     ns, passthrough = parser.parse_known_args(argv)
@@ -561,6 +706,13 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ns.make_args = []
 
+    rc = _dispatch(ns)
+    # Commands that delegate to make report success by returning None; main()
+    # always speaks the exit-code contract, whoever calls it.
+    return EXIT_OK if rc is None else rc
+
+
+def _dispatch(ns: argparse.Namespace) -> int | None:
     match ns.command:
         case "check":
             return cmd_check(ns)
@@ -582,6 +734,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_ports(ns)
         case "ledger":
             return cmd_ledger(ns)
+        case "show":
+            return cmd_show(ns)
         case "show-vars":
             return cmd_show_vars(ns)
         case "build":
@@ -600,5 +754,45 @@ def main(argv: list[str] | None = None) -> int:
             assert_never(unreachable)
 
 
+def _run() -> int:
+    """main(), with every escape route turned into one operator-facing line.
+
+    Without this the exit status and the message both came from whatever
+    exception happened to escape: a missing `make` surfaced as
+    `FileNotFoundError: [Errno 2] ... 'make'`, and a make query that the
+    Makefile rejected surfaced as a five-frame `a20_make.MakeQueryError`
+    traceback.  Both are ordinary operator mistakes with known remedies.
+    """
+    try:
+        return main()
+    except A20Error as e:
+        return report(e)
+    except KeyboardInterrupt:
+        print("\ninterrupted", file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        # `a20 list | head` closes the pipe early; that is not an error.
+        try:
+            sys.stdout.close()
+        finally:
+            return EXIT_OK
+    except ConsoleError as e:
+        return report(BoardUnreachable(str(e)))
+    except MakeQueryError as e:
+        return report(e)
+    except FileNotFoundError as e:
+        # Only claim "not on PATH" when the missing name really is a tool we
+        # exec.  A bad --out path also raises FileNotFoundError, and telling
+        # the operator to install make when their output directory is missing
+        # sends them off in exactly the wrong direction.
+        name = Path(e.filename).name if e.filename else "?"
+        if name in _TOOLS:
+            return report(A20Error(f"{name} is not on PATH",
+                                   hint=_TOOL_HINT))
+        return report(A20Error(f"{e.strerror}: {e.filename}"))
+    except OSError as e:
+        return report(A20Error(str(e)))
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_run())

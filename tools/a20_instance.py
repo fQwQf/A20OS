@@ -318,3 +318,34 @@ def parse_instance(path: Path) -> Instance:
         target=TargetCfg(**sections.get("target", {})),
         source=path,
     )
+
+
+
+def applicable_actions(inst: Instance) -> tuple[str, ...]:
+    """Which of a20's commands this instance will actually accept.
+
+    Each entry mirrors a guard that already exists in the command it names, so
+    the answer cannot drift into promising something the command then refuses.
+    Adding a command means adding its guard here too, which is the point: the
+    capability column in `a20 list` and the rejection in `a20 flash` are then
+    two readings of one rule.
+    """
+    acts: list[str] = ["build"]
+    # cmd_run: the generic QEMU path, or armv7m reaching a guest only through
+    # stm32vldiscovery, which QEMU_RUNNABLE_ARCHES deliberately excludes.
+    runnable = (inst.arch in QEMU_RUNNABLE_ARCHES
+                or (inst.arch == "armv7m" and bool(inst.stm32.qemu)))
+    if runnable:
+        acts += ["run", "debug"]
+    if runnable and inst.test.expect:
+        acts.append("test")          # run_test: [test].expect is required
+    if inst.flash.tool:
+        acts.append("flash")         # run_flash: [flash].tool is required
+    if inst.package.kind:
+        acts.append("package")       # run_package: [package].kind is required
+    if section_is_set(inst.target):
+        acts.append("console")       # cmd_console: needs a [target] section
+        if not inst.target.boot_media or inst.target.media_device:
+            # cmd_deploy: boot_media without media_device has nowhere to go.
+            acts.append("deploy")
+    return tuple(acts)
