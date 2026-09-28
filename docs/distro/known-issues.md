@@ -859,7 +859,68 @@
 >    元素已被污染，说明**破坏发生在这次分配之前**，与 IPv6 解析无关。
 >    IPv6 只是流量形态——它把这条路径的包量和包长分布推到了会踩中的区间。
 >
-> **仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
+> **首要嫌疑（机制已查清，尚未证实触发）**：`ip6_frag.c` 的 IPv6 重组助手。
+
+`IPV6_FRAG_COPYHEADER 1` 是 A20OS 在 `lwipopts.h` 里**唯一**一处偏离 lwIP 默认值
+的 IPv6 配置，其自带注释就写明「64-bit targets cannot fit lwIP's IPv6 reassembly
+helper into IP6_FRAG_HLEN」。开启后：
+
+- `IPV6_FRAG_REQROOM = sizeof(struct ip6_reass_helper) - IP6_FRAG_HLEN`
+  = **12 − 8 = 4**（64 位下 `struct pbuf *` 占 8 字节）；
+- `ip6_frag.c:415` 用 `pbuf_header_force(p, 4)` **把 payload 指针往回挪 4 字节**，
+  就地覆盖片外扩展头；
+- 而 `pbuf_add_header_impl()` 的越界检查**只对连续型 pbuf 存在**
+  （`payload < p + SIZEOF_STRUCT_PBUF`）。**非连续型 pbuf 走 `force` 分支时
+  完全不做检查**，直接 `payload - 4`；
+- 注释声称「This cannot fail since we already checked when receiving this fragment」，
+  但那个「already checked」是 `ip6_frag.c:289` 的
+  `p->len >= sizeof(struct ip6_frag_hdr)`——它只验证**片头往后放得下**，
+  **完全没有验证前面有没有 4 字节可借**。
+
+若该片落在**非连续** pbuf（例如 PBUF_POOL 链上的元素）上，这 4 字节就直接写进
+**前一个元素的 payload 尾部 / `struct memp` 空闲链表指针**——与 canary 报出的
+「underflow in pool PBUF_POOL」完全吻合（underflow 与前一个元素的 overflow 是
+同一处物理写坏，只是被哪一侧的检查先发现）。
+
+这条假设能同时解释全部四个观察：**仅 IPv6**（`ip6_frag` 是 IPv6 专属路径）、
+**写坏 pool**、**underflow 而非 overflow**（往 payload 之前写）、
+**在分配路径被发现**。
+
+**已证伪（保留记录）**：上面的 `ip6_frag` 假设经实测**不成立**。以
+`LWIP_IPV6_FRAG=0`（其余配置不变、canary 保持开启）重建并运行 xfce 桌面，
+panic 原样复现：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+[3] a20_lwip_process_netif_rx_tx_locked
+[2] pbuf_alloc
+[1] do_memp_malloc_pool_fn
+[0] mem_overflow_check_raw
+```
+
+与开启分片时的栈完全一致，因此写坏内存的**不是** IPv6 分片重组。
+附带一条观测：该次 panic 出现在**启动期**（elogind 刚起来，桌面未起），
+说明损坏在**首次网络活动**时就已经存在，而不是桌面负载才触发。
+
+**canary 语义的精确含义**（`memp.c:130` 传入 `payload = element + MEMP_SIZE`，
+即 `struct memp` 之后的 8 字节对齐偏移）：
+
+- BEFORE 保护区 = `[payload - 16, payload)`，其中 8 字节落在**前一个元素**的
+  payload 尾部，另外 8 字节是本元素的 `struct memp` 空闲链表指针；
+- 保护区在 free 时填 `0xcd`、alloc 时校验，所以 alloc 期报错意味着
+  「该元素被 free 之后，仍有代码往它的 payload 起始处回写」。
+
+结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
+`PBUF_POOL` payload 的尾部，落在下一个元素的头部。
+
+**顺带发现的独立缺陷**（非本 panic 的成因，尚未修）：
+`lwip_stack.c` 的 RX 循环只用 `len <= 0` 挡住了 `recv()` 的错误返回，
+**没有上界校验**；`len` 随后原样进入 `pbuf_take(p, st->rx_frame, (u16_t)len)`。
+若某个 `recv` 实现返回大于 `sizeof(rx_frame)`（1536）的长度，
+`pbuf_take` 会越过 1536 字节的 `rx_frame` 读取。当前各 `recv` 实现均未观察到
+越界返回，故尚未触发，但这是一处真实的边界缺失，应补上裁剪。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
 > 落在 PBUF_POOL 相邻元素），不给身份。下一步应从 pool 元素尺寸与
 > `PBUF_POOL_BUFSIZE`（1536）的边界关系入手，找哪个子系统按 1536 以上的
 > 步长写入 pool 附近内存——`MEMP_OVERFLOW_CHECK` 无法回答这个问题，
