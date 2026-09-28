@@ -773,3 +773,82 @@ fault-around 窗口、把 `rss`/TLB 刷新批量化），而不是继续摘锁�
 表现：4 线程做 4 倍工作耗时 3.5 倍（1T 0.060s vs 4T 0.214s），有效并行加速约
 1.15x。在 4 vCPU KVM 客户机 + 共享宿主内存的条件下，这更像是内存带宽/宿主资源
 上限，而非内核可优化的锁竞争。
+
+## 9. 真实 CortenMM 设计：论文核对结果与重做计划（2026-09-28）
+
+§8 的结论是「P0–P5 已把该做的锁都摘了，但没有收益」。用户指出**实现没有抓住
+CortenMM 的关键**，这个判断是对的。逐条核对论文原文（§3.3/§4.1/§4.2/§4.3/§4.5）
+后，确认我们缺的不是调优，而是**设计的核心机制**。
+
+### 9.1 我们已经对上的部分
+
+* 每个 PT 页一个**页描述符**，按 PFN 索引，挂在常驻的 per-frame 数组上——
+  这正是论文 §3.3「descriptor indexed by the physical page number」。
+* per-PTE 元数据数组，存状态（invalid / 虚拟已分配未映射 / 已映射 / swapped）
+  与附加状态（权限、COW 位）——§4.3 的 Table 2。
+* 每个 PT 页一把 MCS 自旋锁，存在描述符里——§4.5「The lock of each PT page is
+  stored in the corresponding page descriptor」。
+* 事务式 cursor（`mm_addrspace_lock` + `mm_cursor_{query,map,mark,unmap}`）——
+  §3.3 的 transactional interface 与 Figure 4。
+* 覆盖节点锁 + stale 标记 + `pt_readers` 读侧计数。
+
+所以 §8.22 那句「没抓住关键」需要精确化：**数据结构层面对了，协议层面没对。**
+
+### 9.2 真正缺的东西（论文的核心主张）
+
+1. **fault 决策完全不查 VMA。** 论文 Figure 8 的缺页处理只做
+   `rcursor.query(faulting_addr)`，返回 `Status::PrivateAnon(perm)` /
+   `Status::Mapped(page, perm)` / `Invalid`，然后直接 `rcursor.map(...)`。
+   整段在事务内原子完成（L18–L40），**从头到尾没有 VMA**。
+   论文明确把 Linux 的劣势归因于 "the time Linux spends in the VMA"（§6.2）。
+   我们的 fault 至今仍以 `mm_find_vma()` 为决策入口——**这是最关键的缺失**。
+2. **整个 fault 在一个事务内原子完成。** 我们是「锁外 prepare → 取回 `mm->lock`
+   → 复核 → 装入」的多阶段结构（§8.12），论文是一个 RCursor 走到底。
+3. **CortenMMadv 的无锁下降 + DFS 锁全部后代。** 论文 §4.1 Figure 6：遍历阶段
+   **不加任何锁**（在 RCU 读侧临界区内），再加锁阶段锁住覆盖 PT 页**及其所有后代**。
+   我们只有覆盖节点一把锁。
+4. **RCU monitor 真正接线。** 论文：unmap PT 页时先原子清父 PTE，再把 PT 页挂进
+   全局 RCU monitor，读侧临界区退出后才释放；被锁到 stale PT 页的线程**重新下降重试**。
+   我们的 `mm_pt_defer_free` **零调用者**（§8.13），这条链完全没接。
+5. **per-core 虚拟地址分配器**（§4.5 优化项）。
+6. **惰性 TLB shootdown（LATR）+ 早期 ack**（§4.5）。
+7. **shared 位**（§4.3：每个虚拟页两bit，shared + writable，用于 fork COW）。
+   我们只有 `MM_ST_COW_BIT`，没有 shared 位。
+
+### 9.3 测量能力是当前的硬约束（已补上）
+
+在此之前无法判断任何改动，因为 `mm_pt_scale` 只覆盖论文五个微基准里的 PF 一个。
+已新增 `user/cmds/stress/cortenmm_bench.c`，实现论文 §6.2 的五个基准
+（mmap / mmap-PF / PF / unmap-virt / unmap），每个都有 low-contention 与
+high-contention 两个变体，并遵循 §8.20 的计数预热要求。
+
+**riscv64/TCG 基线（4 线程，ROUNDS=256，仅作后续对照的相对基线）：**
+
+| 基准 | low scaling | high scaling | 备注 |
+|---|---|---|---|
+| mmap | 1.29x | 1.33x | |
+| mmap-PF | 1.09x | 0.96x | |
+| PF | 1.60x | 30.13x | 30x 是 1T 窗口太短造成的噪声，不可信 |
+| unmap-virt | 0.98x | 1.42x | |
+| unmap | 1.97x | 1.08x | |
+
+TCG 单核慢、计时窗口偏短，比例只能作相对参考；论文的 33x–2270x 是 384 核
+数据，本机 4 核不可能复现。**可信的对照结论要等 P6 落地后在同一环境重测。**
+
+### 9.4 顺带发现的一个无关既有缺陷
+
+`ARCH=x86_64 ABI=linux dev-build` 产出的 FAT32 镜像**开不了机**：
+`[INIT] Cannot open /bin/init: -2`，回退 `/init` 也失败，最终
+`panic("init: no init program found")`。该镜像没有 `/bin` 目录（所以
+`/bin/init` 必然失败），而 `/init` 回退也读不出来。
+**与本次改动无关**：移除 `cortenmm_bench.c` 后重新构建仍然复现。
+仓库的 x86_64 smoke 门走 `tools/a20 test`（另一套镜像），不受影响；
+所有 riscv64 门正常。这是 x86_64 `dev-build` 路径的既有缺陷，另行记录。
+
+### 9.5 下一步（按论文优先级）
+
+1. fault 改为**只依据 per-PTE 状态**决策，去掉 VMA 依赖——论文的核心，第一优先。
+2. 整个 fault 收进**单个事务**。
+3. 接线 RCU monitor：PT 页延迟释放 + stale 重下降。
+4. CortenMMadv 协议：无锁遍历 + DFS 锁后代。
+5. 之后才是 per-core VA 分配器与 LATR。
