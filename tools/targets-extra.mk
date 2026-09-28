@@ -34,88 +34,20 @@ force_extra_image_stamp:
 	@:
 
 $(EXTRA_IMAGE_STAMP): force_extra_image_stamp
-	@set -e; \
-	mkdir -p "$(dir $@)"; \
-	tmp="$@.tmp"; \
-	{ \
-		printf '%s\n' \
-			"arch=$(ARCH)" \
-			"nommu=$(NOMMU)" \
-			"opt=$(OPT)" \
-			"profile=$(PROFILE)" \
-			"user_variant=$(USER_VARIANT)" \
-			"packages=$(sort $(EXTRA_PACKAGES))" \
-			"image_mb=$(EXTRA_IMAGE_MB)" \
-			"image=$(EXTRA_IMG)" \
-			"glibc_dir=$(RISCV_GLIBC_LIB_DIR)" \
-			"glibc_local_dir=$(RISCV_GLIBC_LOCAL_LIB_DIR)"; \
-		for f in "$(USER_BUILD_DIR)"/*; do \
-			[ -f "$$f" ] || continue; \
-			name=$$(basename "$$f"); \
-			case "$$name" in *.o|*.a|*.so|*.d) continue ;; esac; \
-			find -H "$$f" -maxdepth 0 -printf 'user %f %s %T@\n'; \
-		done; \
-	for f in user/build/extra/$(ARCH)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		case " $(EXTRA_PACKAGES) " in *" $$name "*) \
-			find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n' ;; \
-		esac; \
-	done; \
-	if [ -n "$(filter lamina,$(EXTRA_PACKAGES))" ]; then \
-		for pat in 'liblaminaCore.so*' 'liblmcas.so*' 'liblmmc.so*' 'libLammpCore.so*' 'libstdc++.so*'; do \
-			for f in user/build/extra/$(ARCH)/$$pat; do \
-				[ -f "$$f" ] || continue; \
-				find -H "$$f" -maxdepth 0 -printf 'extra %f %s %T@\n'; \
-			done; \
-		done; \
-	fi; \
-		for package in $(sort $(EXTRA_PACKAGES)); do \
-			case "$$package" in \
-				vim) stamp=.vim-built ;; \
-				git) stamp=.git-built ;; \
-				gcc|cc) stamp=.gcc-built ;; \
-				rust|rustc|cargo|rustfmt) stamp=.rust-built ;; \
-				lamina) stamp=.lamina-built ;; \
-				*) continue ;; \
-			esac; \
-			f="user/build/extra/$(ARCH)/stamp/$$stamp"; \
-			[ ! -f "$$f" ] || find "$$f" -maxdepth 0 -printf 'stamp %f %s %T@\n'; \
-		done; \
-		if [ -n "$(filter vim,$(EXTRA_PACKAGES))" ]; then \
-			find user/external/apps/vim/runtime -type f -printf 'vim-runtime %P %s %T@\n' 2>/dev/null || true; \
-		fi; \
-		if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
-			find user/external/apps/git/templates/blt -type f -printf 'git-template %P %s %T@\n' 2>/dev/null || true; \
-			for f in user/build/extra/$(ARCH)/git-remote-http user/build/extra/$(ARCH)/git-remote-https; do \
-				[ ! -f "$$f" ] || find -H "$$f" -maxdepth 0 -printf 'git-helper %f %s %T@\n'; \
-			done; \
-			[ -z "$(CA_CERT_BUNDLE)" ] || find -L "$(CA_CERT_BUNDLE)" -maxdepth 0 -type f \
-				-printf 'ca-bundle %p %s %T@\n'; \
-		fi; \
-		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ]; then \
-			find -H "$(RISCV_GCC_MUSL_LIBC)" -maxdepth 0 -type f \
-				-printf 'gcc-musl-libc %p %s %T@\n'; \
-		fi; \
-		if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
-			for dir in "$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_LIB_DIR)"; do \
-				[ -n "$$dir" ] || continue; \
-				for name in ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 \
-					libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1; do \
-					f="$$dir/$$name"; \
-					[ ! -f "$$f" ] || find -H "$$f" -maxdepth 0 -printf 'glibc %p %s %T@\n'; \
-				done; \
-			done; \
-		fi; \
-		find Makefile user/extra.mk -maxdepth 0 -type f -printf 'recipe %p %s %T@\n'; \
-	} | LC_ALL=C sort > "$$tmp"; \
-	if [ -f "$@" ] && cmp -s "$@" "$$tmp"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv "$$tmp" "$@"; \
-		echo "[EXTRA] image inputs changed"; \
-	fi
-
+	@$(PYTHON) tools/stamps.py extra-inputs \
+		--stamp "$@" --arch "$(ARCH)" --nommu "$(NOMMU)" \
+		--opt="$(OPT)" --profile "$(PROFILE)" \
+		--user-variant "$(USER_VARIANT)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--extra-packages "$(EXTRA_PACKAGES)" \
+		--extra-mb "$(EXTRA_IMAGE_MB)" --extra-img "$(EXTRA_IMG)" \
+		--extra-dir "user/build/extra/$(ARCH)" \
+		--riscv-gcc-musl-libc "$(RISCV_GCC_MUSL_LIBC)" \
+		--riscv-glibc-lib-dir "$(RISCV_GLIBC_LIB_DIR)" \
+		--riscv-glibc-local-lib-dir "$(RISCV_GLIBC_LOCAL_LIB_DIR)" \
+		--ca-cert-bundle "$(CA_CERT_BUNDLE)" \
+		--vim-runtime "user/external/apps/vim/runtime" \
+		--git-templates "user/external/apps/git/templates/blt"
 # Refresh the input manifest after package preparation, then let a second make
 # decide from real timestamps whether the expensive image recipe is necessary.
 extra-img: extra-user-apps prepare-riscv64-glibc-sysroot
