@@ -1,19 +1,23 @@
 /*
- * ufsd — 用户态文件系统宿主（docs/hybrid-kernel/06-user-fs.md）。
+ * ufsd — user-space filesystem host (docs/hybrid-kernel/06-user-fs.md).
  *
- * 与内核 uxfs 代理共同构成"文件系统实现迁出内核态"的完整路径。单进程
- * 承载多种文件系统后端：
+ * Together with the kernel uxfs agent, this forms the complete "migrate the
+ * filesystem implementation out of kernel mode" path. A single process
+ * carries multiple filesystem backends:
  *
- *   fat      — fat32lite 路径模型（同源复用 kernel/fs/diskfs/fat32lite.c）
- *   ext4     — 内核 diskfs 源码经 fscompat 兼容环境原样编译
- *   ntfs     — 同上（只读语义由后端声明）
- *   iso9660  — 同上（只读）
+ *   fat      — fat32lite path model (same source reused from
+ *              kernel/fs/diskfs/fat32lite.c)
+ *   ext4     — kernel diskfs sources compiled as-is under the fscompat
+ *              environment
+ *   ntfs     — same (read-only semantics declared by the backend)
+ *   iso9660  — same (read-only)
  *
- * 块 IO 统一经受控的 fs_block_io syscall 进入内核块层；内核校验只有
- * 注册该挂载的服务任务可以访问其声明的块设备。
+ * Block IO uniformly enters the kernel block layer through the gated
+ * fs_block_io syscall; the kernel only lets the service task that registered
+ * this mount access its declared block device.
  *
- * 用法：ufsd <mount_path> <block_index> [fat|ext4|ntfs|iso9660]
- * 默认 fstype=fat 以兼容既有调用方。
+ * Usage: ufsd <mount_path> <block_index> [fat|ext4|ntfs|iso9660]
+ * Defaults to fstype=fat for compatibility with existing callers.
  */
 #include <stdint.h>
 #include "liba20rt/a20_sdk.h"
@@ -49,7 +53,7 @@ uint8_t ufs_tx[UFSD_MSG_MAX];
 void (*ufs_log_sink)(const char *line);
 
 /* ------------------------------------------------------------------ */
-/* 日志                                                                 */
+/* Logging                                                             */
 /* ------------------------------------------------------------------ */
 
 static a20_handle_t g_out;
@@ -84,7 +88,8 @@ static void sink_line(const char *line)
 }
 
 /* ------------------------------------------------------------------ */
-/* 受控块 IO：fs_block_io 的授权以 fs_serve 注册记录为前提               */
+/* Controlled block IO: authorization for fs_block_io presupposes the fs_serve
+ * registration record */
 /* ------------------------------------------------------------------ */
 
 static int32_t g_block_index = -1;
@@ -136,7 +141,8 @@ uint64_t fsio_capacity_sectors(void)
     a.version = 1;
     a.block_index = g_block_index;
     a.write = 0;
-    a.count = 0; /* 容量查询语义：经 kargs.lba 回传扇区数 */
+    a.count = 0; /* capacity query semantics: the sector count is returned
+                 * via kargs.lba */
     a.buf = (uint64_t)(uintptr_t)&cached;
     if (!a20_status_is_ok(a20_syscall6(A20_SYS_fs_block_io,
                                        (uint64_t)&a, 0, 0, 0, 0, 0)))
@@ -179,14 +185,15 @@ static int32_t parse_int(const char *s)
 }
 
 /* ------------------------------------------------------------------ */
-/* 监管通道：svcmgr 固定槽位端点上的 IDL echo 探针                      */
+/* Supervision channel: IDL echo probe on svcmgr's fixed slot endpoint */
 /* ------------------------------------------------------------------ */
 
-/* EventQ watch 的 user_data 标记：区分 fs 通道与监管槽位的唤醒源 */
+/* user_data tags for the EventQ watch: distinguish the fs channel from the
+ * supervision slot as a wakeup source */
 #define UFS_EV_FS  1u
 #define UFS_EV_SVC 2u
 
-/* 返回 1 = 处理了一条监管消息 */
+/* Returns 1 = one supervision message was handled */
 static int svc_ep_pump(a20_handle_t svc_ep)
 {
     uint8_t buf[64];
@@ -198,7 +205,8 @@ static int svc_ep_pump(a20_handle_t svc_ep)
     if (st == -A20_ERR_WOULD_BLOCK)
         return 0;
     if (st < 0)
-        return -1; /* 槽位未安装或监管者消失：静默忽略 */
+        return -1; /* slot not installed or supervisor gone: ignore
+         * silently */
     if (blen < sizeof(a20_idl_envelope_t))
         return 1;
     a20_idl_envelope_t env;
@@ -207,7 +215,8 @@ static int svc_ep_pump(a20_handle_t svc_ep)
         return 1;
     if (env.type == SVCMGR_REQ_CRASH)
         a20_task_exit(A20_SVC_CRASH_CODE);
-    /* SVCMGR_REQ_ECHO 与其他类型：原样回显（echod 契约） */
+    /* SVCMGR_REQ_ECHO and other types: echo back verbatim (echod
+     * contract) */
     if (a20_channel_send(svc_ep, buf, blen, 0, 0) < 0)
         return -1;
     return 1;
@@ -233,9 +242,10 @@ int main(int argc, char **argv, char **envp)
     }
 
     /*
-     * 先注册（内核记录块设备所有权并完成挂载），再挂具体 FS：
-     * fs_block_io 的授权以注册记录为前提，顺序颠倒会在首个扇区读上
-     * 得到 EPERM。
+     * Register first (the kernel records block device ownership and
+     * completes the mount), then mount the concrete FS: authorization for
+     * fs_block_io presupposes the registration record, so reversing the
+     * order yields EPERM on the very first sector read.
      */
     a20_channel_pair_t pair;
     if (a20_channel_create(&pair) != A20_OK) {
@@ -243,13 +253,14 @@ int main(int argc, char **argv, char **envp)
         a20_task_exit(1);
     }
 
-    /* 挂载点须预先存在（VFS 惯例）；已存在则忽略。 */
+    /* The mount point must already exist (VFS convention); ignore if it
+     * does. */
     a20_path_create_args_t ca;
     a20_memset(&ca, 0, sizeof(ca));
     ca.size = sizeof(ca);
     ca.version = 1;
     ca.dir = A20_HANDLE_NULL;
-    ca.type = 1; /* path_create 的 dir 语义 */
+    ca.type = 1; /* dir semantics of path_create */
     ca.mode = 0755;
     ca.path = (uint64_t)(uintptr_t)mount_path;
     ca.path_len = a20_strlen(mount_path);
@@ -263,7 +274,8 @@ int main(int argc, char **argv, char **envp)
     sa.block_index = g_block_index;
     sa.target = (uint64_t)(uintptr_t)mount_path;
     sa.target_len = a20_strlen(mount_path);
-    /* bit0 = 只读后端：内核页缓存缓冲写据此禁用（iso9660 物理只读）。 */
+    /* bit0 = read-only backend: the kernel page cache disables buffered
+     * writes on this basis (iso9660 is physically read-only). */
     sa.flags = (strcmp(fstype, "iso9660") == 0) ? 1u : 0u;
     int64_t serve_st = a20_syscall6(A20_SYS_fs_serve, (uint64_t)&sa,
                                     0, 0, 0, 0, 0);
@@ -275,9 +287,10 @@ int main(int argc, char **argv, char **envp)
     }
 
     /*
-     * 缺盘检测：容量查询返回 0 说明该序号没有块设备（如单盘镜像上的
-     * scratch 槽位）。卸载刚注册的挂载并以 0 退出，让监管者视为干净
-     * 完成而不是触发重启预算。
+     * Missing-disk detection: a capacity query returning 0 means no block
+     * device at that index (e.g. a scratch slot on a single-disk image).
+     * Unmount the mount just registered and exit 0, so the supervisor sees a
+     * clean completion rather than consuming the restart budget.
      */
     if (fsio_capacity_sectors() == 0) {
         a20_syscall6(A20_SYS_fs_umount, (uint64_t)(uintptr_t)mount_path,
@@ -302,10 +315,12 @@ int main(int argc, char **argv, char **envp)
     log_str("\n");
 
     /*
-     * 双通道统一等待：fs 通道与监管槽位挂到同一个 EventQ，空闲时阻塞
-     * 在 event_wait 上（docs/roadmap 的"监管通道接入 EventQ 统一等待"
-     * 项）。MESSAGE_READY 与对端关闭都会唤醒循环；先排空再等待的顺序
-     * 保证 watch 注册前已发布的消息同样被处理。
+     * Unified wait across both channels: the fs channel and the supervision
+     * slot are attached to the same EventQ, blocking in event_wait while idle
+     * (the "supervision channel joins the unified EventQ wait" item in
+     * docs/roadmap). Both MESSAGE_READY and peer close wake the loop; the
+     * drain-before-wait order guarantees that messages already published
+     * before the watch was registered are still processed.
      */
     a20_handle_t svc_ep = ((a20_handle_t)A20_SVC_PING_SLOT);
     a20_handle_t eq;
@@ -323,8 +338,10 @@ int main(int argc, char **argv, char **envp)
     if (a20_event_watch(eq, svc_ep,
                         A20_EVENT_MASK(A20_EVENT_MESSAGE_READY),
                         UFS_EV_SVC) != A20_OK) {
-        /* 监管槽位可能未被本任务安装（无 ping 通道的启动方式）：
-         * 降级为只由 fs 通道唤醒，监管 echo 由下次 fs 流量顺带处理。 */
+        /* The supervision slot may not have been installed by this task
+         * (startup modes with no ping channel): degrade to being woken only
+         * by the fs channel; the supervision echo is handled incidentally on
+         * the next fs traffic. */
         log_str("UFSD: watch svc ep failed; continuing without it\n");
     }
 
@@ -352,7 +369,8 @@ int main(int argc, char **argv, char **envp)
             continue;
         }
         if (st < 0)
-            break; /* 对端关闭：在飞请求已按 -EIO 收场，等待重启重挂载 */
+            break; /* peer closed: in-flight requests have ended -EIO,
+         * waiting for a restart and re-mount */
         if (blen < sizeof(ufs_req_hdr_t))
             continue;
         const ufs_req_hdr_t *q = (const ufs_req_hdr_t *)rx;

@@ -41,8 +41,9 @@ int main(int argc, char **argv, char **envp)
 {
     (void)argc; (void)argv; (void)envp;
 
-    /* 服务端点 + 监管 ping 端点双通道轮询（ping 通道隔离健康探测
-     * 流量，见 a20_services_idl.h A20_SVC_PING_SLOT）。 */
+    /* Poll both the server endpoint and the supervision ping endpoint on two
+     * channels (the ping channel isolates health probe traffic, see
+     * A20_SVC_PING_SLOT in a20_services_idl.h). */
     a20_handle_t ep = ((a20_handle_t)A20_SVC_ENDPOINT_SLOT);
     a20_handle_t ping_ep = ((a20_handle_t)A20_SVC_PING_SLOT);
     for (;;) {
