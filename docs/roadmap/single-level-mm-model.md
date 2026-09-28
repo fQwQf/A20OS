@@ -3299,3 +3299,50 @@ int r = fault_map(t->mm, page_va, copy, vma->pte_flags, MM_ST_FILE_PRIVATE);
 
 **riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、三个门全通过、关机审计全 0
 （含 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.51 安装链已读通：`PTE_COW` 在整条链上**从未被置位**
+
+顺着 §10.50 的修复前置条件，把私有文件页的安装链一路读到底：
+
+| 环节 | 位置 | 是否处理 `PTE_COW` |
+|---|---|---|
+| 私有文件缺页准备副本 | `fault.c:428-447`（`memcpy` + icache） | **否** |
+| `fault_map()` | `fault.c:~470` | **否**，纯转发 `flags` |
+| `mm_cursor_map()` | `pt.c:795-802` | **否**，纯转发 `flags` |
+| `mm_cursor_replace()` | `pt.c:786` | **否**，`*pte = arch_pte_leaf(pa, flags);` 原样写入 |
+| `status_byte(cls, flags)` | `pt.c:~840` | 只在 `PTE_COW` 已置时才记 `MM_ST_COW_BIT` |
+
+**结论：整条安装链没有任何一处会为私有文件页置 `PTE_COW`。** 唯一置位点是
+`mprotect.c:120-133` 的**已映射**分支。因此只要一个私有文件段**先被 mprotect 放宽权限、
+之后才首次缺页**（本次正是如此：`[MM-DIV]` 的 33 次全部 `pte=0`），它的页就永远拿不到
+`PTE_COW`；而 `handle_cow_fault_locked()` 又只认 `PTE_COW` 或 `PTE_W`，两者皆无即
+`return -1`——**缺陷的结构性成因至此完全确认**：
+
+> **COW 标记的建立只挂在「页已映射」路径上；「页首次装帧」路径上从未建立。**
+
+#### 仍未解决的一个细节（需下一次实验，不要凭猜测下手）
+
+观测到的 PTE 是 `0x425`（无 `PTE_W`），而 §10.43 读到的那次 VMA `pte_flags=0x467`（**含
+`PTE_W`**）——但**这是两次不同的运行**，`[MM-DIV]` 那次运行从未打印 `vma->pte_flags`。
+所以「`PTE_W` 是在哪一步丢的」**尚未确定**，两种可能都还活着：
+
+1. `arch_pte_leaf()` 在 x86_64 上按某种方式滤掉了 `PTE_W`；
+2. 调用点传入的 `vma->pte_flags` 在缺页当时**本来就不含 `PTE_W`**（例如该段先被
+   `mprotect(PROT_READ)` 收窄过、随后又被放宽，而 VMA 上的 `pte_flags` 与实际不符）。
+
+**决定性实验（一次即可）**：在 `fault.c:445` 的 `fault_map(... MM_ST_FILE_PRIVATE)` 处打印
+`vma->pte_flags` 与传入的 `flags`，并同时打印 `PTE_COW`/`PTE_W` 位。缺 `PTE_COW` 这一点
+**已经确证**；`PTE_W` 的去向**尚待确证**。二者的修法落点不同：
+* 若 `vma->pte_flags` 本就含 W 而 PTE 里没有 → 修 `arch_pte_leaf()` 或安装点的掩码；
+* 若 `vma->pte_flags` 本就不含 W → 修 VMA 权限与 `pte_flags` 的同步（另一处 bug）。
+
+**因此本节不实施修复。** 缺 `PTE_COW` 的结论已足够坚实，但把它写进去之前必须先确定
+`PTE_W` 的去向——否则很可能修好 COW 却留下「页仍然只读」的第二个症状，浪费一次验证。
+
+**当前状态**：诊断插桩仍在 `kernel/mm/pt.c`（declined 区分）与 `kernel/mm/mprotect.c`
+（`[MM-DIV]`），**故意保留**，下一次实验要一并复用来打印 `vma->pte_flags`。
+HEAD `3258ebe3` 已记录根因机制；工作树仅含这两处已知插桩。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。默认 `g_anon_prov_max=0`。
