@@ -68,64 +68,56 @@ GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 # 本地开发签名密钥：不入库，仅用于本机/CI 内的签名验证闭环。
 # 正式发布密钥由 CI secret 注入（见 docs/packaging/repository.md）。
 pkg-key:
-	@mkdir -p $(PKG_KEYS_DIR)
-	@if [ ! -f "$(PKG_SIGN_KEY)" ]; then \
-		openssl genrsa -out "$(PKG_SIGN_KEY)" 2048 2>/dev/null; \
-		openssl rsa -in "$(PKG_SIGN_KEY)" -pubout \
-			-out "$(PKG_KEYS_DIR)/$(PKG_KEY_NAME)" 2>/dev/null; \
-		echo "[PKG] generated development signing key: $(PKG_SIGN_KEY)"; \
-	fi
-
+	$(PYTHON) tools/pkg.py pkg-key  \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
 # 只校验 recipe 与产物路径，不写包（CI 快速门禁用）。
 pkgs-check:
-	@set -e; for name in $(PKG_RECIPES); do \
-		recipe="packages/recipes/$$name.toml"; \
-		[ -f "$$recipe" ] || { echo "[PKG] unknown recipe: $$name"; exit 1; }; \
-		$(PYTHON) tools/mka20pkg.py "$$recipe" --arch $(PKG_ARCH) \
-			--variant $(PKG_VARIANT) --kernel-build-dir $(BUILD_DIR) --check; \
-	done
-
-pkgs: $(USER_BUILD_STAMP) $(KERNEL_ELF) $(if $(PKG_SIGN_KEY),pkg-key,)
-	@set -e; for name in $(PKG_RECIPES); do \
-		recipe="packages/recipes/$$name.toml"; \
-		[ -f "$$recipe" ] || { echo "[PKG] unknown recipe: $$name"; exit 1; }; \
-		$(PYTHON) tools/mka20pkg.py "$$recipe" --arch $(PKG_ARCH) \
-			--variant $(PKG_VARIANT) --kernel-build-dir $(BUILD_DIR) \
-			$(if $(PKG_SIGN_KEY),--sign-key $(abspath $(PKG_SIGN_KEY)) --key-name $(PKG_KEY_NAME),) \
-			-o $(PKG_OUT_DIR); \
-	done
-
-pkg-repo: pkgs
-	@mkdir -p $(PKG_REPO_DIR)/$(PKG_ARCH)
-	@cp -f $(PKG_OUT_DIR)/*.apk $(PKG_REPO_DIR)/$(PKG_ARCH)/
-	tools/mka20repo.sh $(if $(PKG_SIGN_KEY),--sign-key $(PKG_SIGN_KEY) --key-name $(PKG_KEY_NAME),) \
-		$(PKG_REPO_DIR)/$(PKG_ARCH)
-
+	$(PYTHON) tools/pkg.py pkgs-check  \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
+pkgs:
+	$(PYTHON) tools/pkg.py pkgs  \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
+pkg-repo:
+	$(PYTHON) tools/pkg.py pkg-repo  \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
 # 生成只含媒体文件的临时 overlay，由 mkrootfs 的 --overlay 机制合入镜像。
 .PHONY: pkg-media-overlay
 pkg-media-overlay:
-	@set -e; \
-	rm -rf "$(GUI_MEDIA_OVERLAY)"; \
-	mkdir -p "$(GUI_MEDIA_OVERLAY)$(GUI_MEDIA_DIR)" "$(GUI_MEDIA_OVERLAY)/root/Desktop"; \
-	for m in $(GUI_MEDIA); do \
-		[ -e "$$m" ] || { echo "[PKG] GUI_MEDIA not found: $$m" >&2; exit 1; }; \
-		cp -a "$$m" "$(GUI_MEDIA_OVERLAY)$(GUI_MEDIA_DIR)/"; \
-		echo "[PKG] media: $$m -> $(GUI_MEDIA_DIR)/$$(basename "$$m")"; \
-	done; \
-	ln -sfn "$(GUI_MEDIA_DIR)" "$(GUI_MEDIA_OVERLAY)/root/Desktop/a20-media"
-
-image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
-	$(PYTHON) tools/mkrootfs.py --arch $(PKG_ARCH) \
-		--world packages/world/$(PKG_WORLD).world \
-		--repo $(abspath $(PKG_REPO_DIR)) \
-		$(if $(wildcard packages/overlay/$(PKG_WORLD)),--overlay packages/overlay/$(PKG_WORLD),) \
-		$(if $(GUI_MEDIA),--overlay $(abspath $(GUI_MEDIA_OVERLAY)),) \
-		$(if $(PKG_SIGN_KEY),--keys-dir $(PKG_KEYS_DIR),--allow-untrusted) \
-		$(if $(filter 0,$(PKG_ALPINE)),--no-alpine,) \
-		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
-		--output $(PKG_IMAGE_DIR)/$(PKG_WORLD)-$(PKG_ARCH).img \
-		--size-mb $(PKG_SIZE_MB_WORLD)
-
+	$(PYTHON) tools/pkg.py media-overlay --media "$(GUI_MEDIA)" --media-dir "$(GUI_MEDIA_DIR)" --media-overlay "$(GUI_MEDIA_OVERLAY)" \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
+image-world:
+	$(PYTHON) tools/pkg.py image-world --media "$(GUI_MEDIA)" --media-dir "$(GUI_MEDIA_DIR)" --media-overlay "$(GUI_MEDIA_OVERLAY)" \
+	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
+	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
+	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
+	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
+	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
 # but with the virtio-gpu display stack and audio.  The image is built here (in
 # its own make invocation) rather than as a prerequisite so that the desktop
