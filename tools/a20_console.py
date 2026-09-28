@@ -43,6 +43,8 @@ DEFAULT_BOOT_TIMEOUT_S = 120.0
 DEFAULT_EXPECT_TIMEOUT_S = 60.0
 _POLL_S = 0.2
 _READ_CHUNK = 4096
+_WRITE_TIMEOUT_S = 10.0  # a line drains in well under a second; past this the board is wedged
+_RESET_TIMEOUT_S = 60.0  # a reset is a pulse; if it is still running it is waiting on something else
 
 # Baud encodings are platform-specific and not a short, memorable list: Linux
 # uses B9600=13, B115200=0o10002, while BSD numbers them differently.  The
@@ -66,7 +68,7 @@ class Transport(Protocol):
     """Byte source/sink; a real serial port and a fake both satisfy this."""
 
     def read(self, timeout: float) -> bytes: ...
-    def write(self, data: bytes) -> None: ...
+    def write(self, data: bytes, timeout: float = _WRITE_TIMEOUT_S) -> None: ...
     def close(self) -> None: ...
 
 
@@ -100,7 +102,8 @@ class SerialTransport:
             cc[termios.VTIME] = 0
             termios.tcsetattr(self._fd, termios.TCSANOW,
                               [iflag, oflag, cflag, lflag, speed, speed, cc])
-        # Refuse to let a second process fight over the same adapter.
+        # Best-effort courtesy to a well-behaved second opener, not a guarantee:
+        # suppressing the error means a refused TIOCEXCL still yields the port.
         with contextlib.suppress(OSError):
             fcntl.ioctl(self._fd, termios.TIOCEXCL)
 
@@ -130,11 +133,26 @@ class SerialTransport:
             chunks.append(data)
         return b"".join(chunks)
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, timeout: float = _WRITE_TIMEOUT_S) -> None:
+        """Push `data` out, giving up rather than spinning forever.
+
+        A board whose UART stops draining -- wedged in a tight loop, or held by a
+        second process -- leaves os.write raising BlockingIOError forever. The
+        retry loop therefore needs a deadline of its own: without one the console
+        session hangs on a board that will never read, which is the one situation
+        where hanging is least acceptable because the operator is waiting on
+        hardware they may have to power-cycle anyway.
+        """
+        deadline = time.monotonic() + timeout
         while data:
             try:
                 written = os.write(self._fd, data)
             except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ConsoleError(
+                        f"serial write stalled for {timeout:.0f}s: the board is "
+                        f"not draining {self.device}; is another program holding "
+                        f"the adapter, or is it wedged?") from None
                 time.sleep(0.01)
                 continue
             data = data[written:]
@@ -248,7 +266,13 @@ def _run_reset(command: str) -> None:
     argv = shlex.split(command)
     if not argv:
         raise ConsoleError("target.reset is empty")
-    proc = subprocess.run(argv, check=False, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(argv, check=False, capture_output=True,
+                              text=True, timeout=_RESET_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ConsoleError(
+            f"reset command did not finish within {_RESET_TIMEOUT_S:.0f}s: {command}\n"
+            f"it is probably waiting for a probe or for input, not pulsing the board") from None
     if proc.returncode != 0:
         raise ConsoleError(f"reset command failed ({proc.returncode}): {command}\n"
                            f"{proc.stderr.strip()}")
