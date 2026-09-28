@@ -59,6 +59,7 @@ typedef struct drm_gem {
     struct vmo *vmo;
     uint64_t size;
     int is_virgl;        /* a host-side virgl resource mirrors this object */
+    int backing_attached;/* host already has this object's physical pages */
     uint32_t virgl_res_id;
     int fb_refs;         /* live framebuffers referencing this GEM */
     int dumb_live;       /* userspace still holds the dumb-buffer handle */
@@ -138,6 +139,25 @@ static int g_gem_count;
 static uint32_t g_gem_next_handle = 1;
 static drm_fb_t g_fbs[DRM_MAX_FBS];
 static uint32_t g_fb_next_id = 1;
+
+/*
+ * KMS state of the single CRTC.
+ *
+ * Linux treats a CRTC's current framebuffer, position and mode validity as
+ * object state that clients read back.  Presenting without recording it makes
+ * GETCRTC report fb_id 0 forever, which a client cannot distinguish from
+ * "nothing has been displayed" -- and wlroots in particular reads the primary
+ * plane's fb to decide whether it still owns the screen.  The primary plane
+ * mirrors this binding rather than tracking a second, independently-writable
+ * copy, so the two can never disagree.
+ */
+static struct {
+    uint32_t fb_id;   /* 0 = nothing bound */
+    uint32_t x;
+    uint32_t y;
+    uint32_t connector_ids[1];
+    uint32_t count_connectors;
+} g_crtc;
 
 /* Host virgl resource ids, allocated device-wide for the same reason. */
 static uint32_t g_virtgpu_next_res = 1;
@@ -274,17 +294,15 @@ struct drm_gem_mmap {
     uint64_t offset;
 };
 
-struct drm_gem_get_handle {
+struct drm_gem_flink {
     uint32_t handle;
-    uint32_t pad;
     uint32_t name;
 };
 
 struct drm_gem_open {
     uint32_t name;
-    uint32_t pad;
-    uint64_t handle;
-    uint32_t pad2;
+    uint32_t handle;
+    uint64_t size;
 };
 
 struct drm_auth {
@@ -655,6 +673,18 @@ static drm_gem_t *drm_find_gem(drm_context_t *ctx, uint32_t handle)
 
 static void drm_gem_reclaim(drm_gem_t *b)
 {
+    /* A 3D resource is still mapped by the host after userspace drops its
+     * handle: the host writes rendered results straight into these frames.
+     * Releasing the VMO first would hand those frames back to the allocator
+     * while the host can still write to them, so drop the resource first and
+     * only then free the pages. */
+    if (b->is_virgl && b->virgl_res_id) {
+        gpu_dev_ops_t *ops = drm_gpu_ops();
+        if (ops && ops->resource_unref)
+            ops->resource_unref(drm_gpu_device(), b->virgl_res_id);
+        b->is_virgl = 0;
+        b->virgl_res_id = 0;
+    }
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].handle == b->handle) {
             g_gem_names[i] = g_gem_names[--g_gem_name_count];
@@ -1043,6 +1073,23 @@ static int drm_get_cap(drm_context_t *ctx, void *arg)
     case 0x7: /* DRM_CAP_ASYNC_PAGE_FLIP */
         c.value = 0;
         break;
+    case 0x8: /* DRM_CAP_CURSOR_WIDTH: MODE_CURSOR is a stub, so no cursor
+               * plane is exposed and the width must read as 0 rather than
+               * leaving clients to guess. */
+        c.value = 0;
+        break;
+    case 0x9: /* DRM_CAP_CURSOR_HEIGHT */
+        c.value = 0;
+        break;
+    case 0x10: /* DRM_CAP_ADDFB2_MODIFIERS: ADDFB2 takes no modifier and every
+                * buffer is linear.  Advertising this would make Mesa build a
+                * modifier list and then reject our frames. */
+        c.value = 0;
+        break;
+    case 0x11: /* DRM_CAP_PAGE_FLIP_TARGET: PAGE_FLIP targets the one CRTC and
+                * never reads flip_target. */
+        c.value = 0;
+        break;
     case 0x12: /* DRM_CAP_CRTC_IN_VBLANK_EVENT */
         c.value = 1;
         break;
@@ -1161,9 +1208,26 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
         (void)ops->get_info(dev, &w, &h, &bpp);
     }
     c.crtc_id = DRM_CRTC_ID;
-    c.mode_valid = 1;
     c.gamma_size = 0;
+    c.fb_id = g_crtc.fb_id;
+    c.x = g_crtc.x;
+    c.y = g_crtc.y;
+    /* mode_valid means "the CRTC/connector pair has a programmed mode", not
+     * "a framebuffer is bound".  The connector is permanently connected here
+     * and its mode comes from the device, so this stays 1 even with fb_id 0;
+     * reporting 0 would tell wlroots the output has no mode at all and make it
+     * abandon the output during backend init. */
+    c.mode_valid = 1;
     drm_mode_fill(&c.mode, w, h, 60);
+    /* Linux has GETCRTC write the CRTC's current connector list back through
+     * set_connectors_ptr; libdrm reads count_connectors to size the buffer
+     * and the list itself to learn the routing. */
+    c.count_connectors = g_crtc.count_connectors;
+    if (c.count_connectors && c.set_connectors_ptr &&
+        copy_to_user((void *)(uintptr_t)c.set_connectors_ptr,
+                     g_crtc.connector_ids,
+                     (size_t)c.count_connectors * sizeof(uint32_t)) < 0)
+        return -EFAULT;
     return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
 }
 
@@ -1172,18 +1236,47 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
     struct drm_mode_crtc c;
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
-    if (c.fb_id != 0) {
-        drm_fb_t *f = drm_find_fb(c.fb_id);
-        if (!f)
-            return -ENOENT;
-        drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
-        if (!b)
-            return -ENOENT;
-        /* The minimal KMS implementation presents by copying into the GPU's
-         * primary scanout resource before issuing TRANSFER_TO_HOST_2D. */
-        if (drm_present_buffer(b) < 0)
-            return -EIO;
+
+    uint32_t conns[1];
+    uint32_t nconns = 0;
+    if (c.count_connectors > 0) {
+        if (c.count_connectors > 1 || !c.set_connectors_ptr)
+            return -EINVAL;
+        if (copy_from_user(conns, (const void *)(uintptr_t)c.set_connectors_ptr,
+                           sizeof(conns)) < 0)
+            return -EFAULT;
+        if (conns[0] != DRM_CONN_ID)
+            return -EINVAL;
+        nconns = 1;
     }
+
+    if (c.fb_id == 0) {
+        /* fb_id 0 is how Linux detaches the plane, so this is a real state
+         * change rather than a no-op. */
+        g_crtc.fb_id = 0;
+        g_crtc.x = 0;
+        g_crtc.y = 0;
+        g_crtc.count_connectors = nconns;
+        g_crtc.connector_ids[0] = DRM_CONN_ID;
+        return 0;
+    }
+
+    drm_fb_t *f = drm_find_fb(c.fb_id);
+    if (!f)
+        return -ENOENT;
+    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
+    if (!b)
+        return -ENOENT;
+    /* The minimal KMS implementation presents by copying into the GPU's
+     * primary scanout resource before issuing TRANSFER_TO_HOST_2D. */
+    if (drm_present_buffer(b) < 0)
+        return -EIO;
+
+    g_crtc.fb_id = c.fb_id;
+    g_crtc.x = c.x;
+    g_crtc.y = c.y;
+    g_crtc.count_connectors = nconns;
+    g_crtc.connector_ids[0] = DRM_CONN_ID;
     return 0;
 }
 
@@ -1256,8 +1349,11 @@ static int drm_mode_getplane(drm_context_t *ctx, void *arg)
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
     p.plane_id = DRM_PLANE_ID;
-    p.crtc_id = DRM_CRTC_ID;
-    p.fb_id = 0;
+    /* The primary plane is bound exactly when the CRTC has a framebuffer, and
+     * it reports that same fb.  Linux clients read this to learn whether their
+     * buffer is the one on screen. */
+    p.crtc_id = g_crtc.fb_id ? DRM_CRTC_ID : 0;
+    p.fb_id = g_crtc.fb_id;
     p.possible_crtcs = 1;
     p.gamma_size = 0;
     p.count_format_types = 1;
@@ -1355,7 +1451,14 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
     struct drm_mode_crtc_page_flip pf;
     if (copy_from_user(&pf, arg, sizeof(pf)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, pf.fb_id);
+    /* pf.fb_id is a framebuffer id, not a GEM handle; the two id spaces are
+     * allocated independently and only coincide while both counters are at the
+     * same value, so resolving it as a handle works until it silently presents
+     * the wrong buffer.  Go through the framebuffer like SETCRTC does. */
+    drm_fb_t *f = drm_find_fb(pf.fb_id);
+    if (!f)
+        return -ENOENT;
+    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
     if (!b)
         return -ENOENT;
 
@@ -1385,6 +1488,11 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
         }
         return -EIO;
     }
+
+    /* A flip changes which buffer is on screen, so the binding moves with it.
+     * Without this the primary plane would keep reporting whatever SETCRTC last
+     * bound while the scanout shows a different buffer. */
+    g_crtc.fb_id = pf.fb_id;
 
     if (wants_event) {
         /* Deliver the completion synchronously, exactly as the hardware
@@ -1593,9 +1701,9 @@ static int drm_gem_mmap_ioctl(drm_context_t *ctx, void *arg)
     return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
 }
 
-static int drm_gem_get_handle(drm_context_t *ctx, void *arg)
+static int drm_gem_flink(drm_context_t *ctx, void *arg)
 {
-    struct drm_gem_get_handle h;
+    struct drm_gem_flink h;
     if (copy_from_user(&h, arg, sizeof(h)) < 0)
         return -EFAULT;
     drm_gem_t *g = drm_find_gem(ctx, h.handle);
@@ -1608,7 +1716,6 @@ static int drm_gem_get_handle(drm_context_t *ctx, void *arg)
 
 static int drm_gem_open(drm_context_t *ctx, void *arg)
 {
-    (void)ctx;
     struct drm_gem_open o;
     if (copy_from_user(&o, arg, sizeof(o)) < 0)
         return -EFAULT;
@@ -1616,17 +1723,38 @@ static int drm_gem_open(drm_context_t *ctx, void *arg)
     int rc = drm_gem_name_lookup(o.name, &handle);
     if (rc < 0)
         return rc;
+    drm_gem_t *g = drm_find_gem(ctx, handle);
+    if (!g)
+        return -ENOENT;
     o.handle = handle;
+    o.size = g->size;
     return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_getfb2(drm_context_t *ctx, void *arg)
 {
-    (void)ctx;
     struct drm_mode_fb_cmd2 fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
+    /* This used to zero the struct and report success, which made every lookup
+     * of a real framebuffer look like a lookup of framebuffer 0 with no
+     * geometry.  Answer it from the backing GEM like GETFB does. */
+    drm_fb_t *f = drm_find_fb(fb.fb_id);
+    if (!f)
+        return -ENOENT;
+    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
+    if (!b)
+        return -ENOENT;
     memset(&fb, 0, sizeof(fb));
+    fb.fb_id = f->fb_id;
+    fb.width = b->width;
+    fb.height = b->height;
+    fb.pixel_format = b->format;
+    fb.pitches[0] = b->pitch;
+    fb.handles[0] = b->handle;
+    /* One GEM object, linear layout, no modifier.  ADDFB2 does not accept a
+     * modifier today, so reporting one here would be a lie; leave it 0. */
+    fb.modifier[0] = 0;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
 
@@ -1900,6 +2028,8 @@ static int drm_gem_attach_backing(drm_gem_t *g)
     } else {
         rc = ops->resource_attach_backing(drm_gpu_device(), g->virgl_res_id,
                                           entries, n);
+        if (rc == 0)
+            g->backing_attached = 1;
     }
     kfree(entries);
     return rc;
@@ -1986,6 +2116,41 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
     if (!ops || !ops->submit_3d)
         return -ENODEV;
 
+    /* Publish the buffers this frame references before the stream runs.
+     * RESOURCE_CREATE already backs a resource's pages once, but a GEM that
+     * became a 3D resource without that step -- and any handle Mesa adds to a
+     * later frame -- would reach the host with no memory mapped, so the host
+     * renders into nothing.  The command stream names bo_handles, not resource
+     * ids, so the kernel is the only place that can resolve them. */
+    if (e.num_bo_handles) {
+        if (!e.bo_handles || e.num_bo_handles > 4096)
+            return -EINVAL;
+        uint32_t *handles = kmalloc((size_t)e.num_bo_handles * sizeof(uint32_t));
+        if (!handles)
+            return -ENOMEM;
+        int rc = copy_from_user(handles, (const void *)(uintptr_t)e.bo_handles,
+                                (size_t)e.num_bo_handles * sizeof(uint32_t));
+        if (rc < 0) {
+            kfree(handles);
+            return -EFAULT;
+        }
+        for (uint32_t i = 0; i < e.num_bo_handles; i++) {
+            drm_gem_t *g = drm_find_gem(ctx, handles[i]);
+            if (!g || !g->is_virgl) {
+                kfree(handles);
+                return -ENOENT;
+            }
+            if (!g->backing_attached) {
+                rc = drm_gem_attach_backing(g);
+                if (rc < 0) {
+                    kfree(handles);
+                    return rc;
+                }
+            }
+        }
+        kfree(handles);
+    }
+
     uint8_t *cmd = kmalloc(e.size);
     if (!cmd)
         return -ENOMEM;
@@ -2010,8 +2175,13 @@ static int drm_virtgpu_wait(drm_context_t *ctx, void *arg)
     struct drm_virtgpu_3d_wait w;
     if (copy_from_user(&w, arg, sizeof(w)) < 0)
         return -EFAULT;
-    /* Every path above completes before the ioctl returns, so there is never
-     * anything outstanding to wait for. */
+    /* Submission completes before the ioctl returns, so there is never
+     * anything outstanding to block on.  Validating the handle still matters:
+     * a blind success turns a caller that is waiting on the wrong resource
+     * into a race that only shows up as corrupted pixels much later. */
+    drm_gem_t *g = drm_find_gem(ctx, w.handle);
+    if (!g || !g->is_virgl)
+        return -ENOENT;
     return 0;
 }
 
@@ -2206,12 +2376,12 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return drm_set_client_cap(ctx, arg);
     case DRM_IOCTL_GEM_CLOSE:
         return drm_gem_close(ctx, arg);
-    case DRM_IOCTL_GEM_CREATE:
+    case A20_GPU_IOCTL_GEM_CREATE:
         return drm_gem_create(ctx, arg);
-    case DRM_IOCTL_GEM_MMAP:
+    case A20_GPU_IOCTL_GEM_MMAP:
         return drm_gem_mmap_ioctl(ctx, arg);
-    case DRM_IOCTL_GEM_GET_HANDLE:
-        return drm_gem_get_handle(ctx, arg);
+    case DRM_IOCTL_GEM_FLINK:
+        return drm_gem_flink(ctx, arg);
     case DRM_IOCTL_GEM_OPEN:
         return drm_gem_open(ctx, arg);
     case DRM_IOCTL_VIRTGPU_GETPARAM:
