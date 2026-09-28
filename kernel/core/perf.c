@@ -68,6 +68,7 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_MM_PFA_LOCK_ACQUIRES] = "mm_pfa_lock_acquires",
     [A20_PERF_MM_PFA_LOCK_CONTENDED] = "mm_pfa_lock_contended",
     [A20_PERF_MM_ANON_PROVISIONED] = "mm_anon_provisioned",
+    [A20_PERF_MM_FAULT_FROM_STATUS] = "mm_fault_from_status",
     [A20_PERF_VIRTIO_BLK_POLLS] = "virtio_blk_polls",
     [A20_PERF_VIRTIO_BLK_ACTIVE_POLLS] = "virtio_blk_active_polls",
     [A20_PERF_VIRTIO_BLK_USED_CHECKS] = "virtio_blk_used_checks",

@@ -940,6 +940,61 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         spin_unlock(&mm->lock);
         return -1;
     }
+
+    /*
+     * MM_AS_FAULT_FROM_STATUS -- the paper's fault handler (Fig. 8) decides
+     * from per-PTE status alone: query() yields Status::PrivateAnon / Mapped /
+     * Invalid, and PrivateAnon is mapped directly using the permissions
+     * recorded at mmap.  No VMA is consulted, which is exactly what the paper
+     * credits for its advantage over Linux -- "the time Linux spends in the
+     * VMA" (§6.2).
+     *
+     * Only a range that mm_pt_provision_anon() marked as MM_ST_ANON_VIRT is
+     * served here.  Anything else -- never provisioned (too large to provision
+     * eagerly), already mapped, an intermediate node, a file/VMO mapping, a
+     * huge leaf -- reports a different status and falls through to the
+     * VMA-based path below unchanged, so no other behaviour is affected.
+     */
+    {
+        mm_cursor_t qcur;
+        int qr = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur);
+        if (qr == 0) {
+            uint8_t cls_byte = 0;
+            int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
+            if (!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT) {
+                /* Round-trip the recorded prot bits back to PTE flags: they
+                 * were produced by mm_pt_prot_bits() from the same encoding,
+                 * so the access check matches the VMA path exactly. */
+                pte_t allow = 0;
+                if (cls_byte & MM_ST_PROT_R) allow |= PTE_R;
+                if (cls_byte & MM_ST_PROT_W) allow |= PTE_W;
+                if (cls_byte & MM_ST_PROT_X) allow |= PTE_X;
+                if (mm_pte_flags_allow_access(allow)) {
+                    pfn_t np = pfa_alloc_page();
+                    if (np != PFN_NONE) {
+                        if (cg_mem_charge(t->cgroup, 1) == 0) {
+                            memset(pfn_to_virt(np), 0, PAGE_SIZE);
+                            if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
+                                              allow, MM_ST_ANON_MAPPED) == 0) {
+                                mm_cursor_unlock(&qcur);
+                                mm->rss++;
+                                a20_perf_count(A20_PERF_MM_ANON_FAULTS);
+                                a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+                                a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
+                                arch_tlb_flush_page_local(stval);
+                                spin_unlock(&mm->lock);
+                                return 0;
+                            }
+                            cg_mem_uncharge(t->cgroup, 1);
+                        }
+                        frame_put(np);
+                    }
+                }
+            }
+            mm_cursor_unlock(&qcur);
+        }
+    }
+
     vm_area_t *vma = mm_find_vma(mm, page_va);
     /*
      * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
