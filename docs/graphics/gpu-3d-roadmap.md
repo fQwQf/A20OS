@@ -469,14 +469,39 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 | 命令流**语义** | ❌ **未验证** | `EXECBUFFER` 往返只证明字节到了 host，**不证明渲染了任何东西**。内核按设计不解析命令流。**没有像素回读** |
 | 像素回读比对 | ❌ 未实现 | 需要逐字段核对 virglrenderer 的 `virgl_hw.h`（命令类型号、`struct virgl_cmd_header`、各命令结构体布局）。**不要凭记忆写**——写错只会得到静默失败或 host 崩溃，guest 侧无从判断 |
 | `GBM` | ❌ 未通 | `gbm_create_device()` 返回 NULL，钉在 Mesa 的 DRI screen 创建（KMS 路径）。已排除十条假设。**对 Wayland 客户端不是阻塞项**。最有效的下一步是 guest 里 strace，不是再来一轮假设 |
-| 真 DMA-BUF | ❌ 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO **快照**进 memfd，导出后再写入不可见。A20OS **没有**跨进程 VMO 共享，也没有 mmap-offset 协议，所以真 dma-buf 是**从零做**，不是打补丁。**不要假装做了** |
-| `VIRTGPU_RESOURCE_CREATE_BLOB` | ⚠️ 定义了但**未分发** | `VIRTGPU_PARAM_RESOURCE_BLOB` 报 0，至少是自洽的；现代 Mesa 偏好 blob 路径，但缺了也能工作 |
+| 真 DMA-BUF | ❌ 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO **快照**进 memfd，导出后再写入不可见。**但基座是现成的**，比"从零做"的说法轻：memfd 持有一个 `pfn_t *pages` 物理页数组，mmap 直接把这些 PFN 映射进 VMA，所以它本身已经是可跨进程共享的物理内存对象。真正缺的是**一个由 GEM 的 VMO 支撑的 fd**——DRM 自己的 mmap 是把 handle 编进 offset 后直接 `mm_mmap_vmo`，PRIME 需要的是一个 mmap op 映射 VMO 的新 vfile 类型，外加 fd 生命周期与引用计数接线。跨文件改动，涉及 `fs/vfs` 与 `mm`，仍然单独立项。**不要假装做了** |
+| `VIRTGPU_RESOURCE_CREATE_BLOB` | ✅ **报 0 是正确答案，不是缺口** | 见下方专条 |
 | 窗口化/局部 present | ✅ 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
 | 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | ✅ 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留——为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
 | 硬件视频解码 | ❌ 不存在，且在 QEMU 里**不可能存在** | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是**不可达**。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/distro/mpv-luajit-crash.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
 | `A20_RENDERER=gl`（合成器 GL 渲染器） | ❌ 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
 
 ---
+
+### 7.1 为什么 `VIRTGPU_PARAM_RESOURCE_BLOB` 报 0 是正确的
+
+这一条曾被列为"定义了但未分发"的缺口。核对 QEMU 官方 virtio-gpu 文档后，结论相反：
+**报 0 是在当前 QEMU 命令行下唯一安全的答案**，补上分发反而会让 Mesa 走进一条死路。
+
+- **不开 blob，virgl 的 OpenGL 透传本来就能用**。QEMU 文档对 OpenGL pass-through 的
+  宿主要求写的是"Any Linux version compatible with QEMU **if not using host blobs
+  feature**"。
+- blob 的作用是**把 guest OpenGL 从 4.3 抬到 4.6**。文档原文：默认上限 4.3，
+  要 4.6 才需要 `hostmem=` 与 `blob=true`。所以它是一个**能力等级**，不是**能否挂载**的前提。
+- **Venus（Vulkan）与 DRM native context 则确实强制要求 blob**。文档对二者的宿主要求
+  都写着"requires host blob support (hostmem and blob fields)"。也就是说 Vulkan 不是
+  "没实现"，而是被宿主配置挡在门外。
+- A20OS 的 QEMU 命令行里**没有任何** `memory-backend-file` / `vhost-user` / `hostmem=`
+  （已核对根 Makefile 与 `tools/targets-*.mk`），因此宿主侧根本没有 blob 内存窗口。
+- **blob 没有 virtio feature 位**，它是设备属性（`hostmem`/`blob`），guest 侧无从探测。
+  既然探测不到，报 0 就是唯一诚实的选择；报 1 会让 Mesa 以为有 blob 而走
+  `RESOURCE_CREATE_BLOB`，然后在 host 上失败。
+
+若要开这条路，代价与收益是明确的：QEMU 侧加 `hostmem=8G,blob=true`，宿主内核要
+6.13+（QEMU 文档对用 blob 的 OpenGL 透传要求"Linux 6.13+"），并且 blob 内存要真正
+可用还需要 vhost-user / vhost-kernel 的共享 `memory-backend-file`。收益是 virgl 下
+OpenGL 4.6，以及解锁 Venus/Vulkan。**这是一条需要单独决策的宿主配置改动，不是内核补一个
+分发分支的事**，因此本轮不做。
 
 ## 8. 验证门禁：必须能失败
 
@@ -540,9 +565,9 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 | 2 | **宿主 renderer 升级** + 验证 stock Mesa attach | 否（环境） | **是** | 里程碑 C1 | 环境动作 |
 | 3 | 命令流语义验证 + 像素回读 | 是 | 否 | "3D 可用"这句话才成立 | 中 |
 | 4 | 合成器呈现（`WLR_RENDERER`/windowed present） | 部分 | 否 | 里程碑 B | 中 |
-| 5 | 真 DMA-BUF | 是 | 否 | PRIME/跨进程零拷贝 | **大（从零）** |
+| 5 | 真 DMA-BUF | 是 | 否 | PRIME/跨进程零拷贝 | 中（基座现成，见 §7） |
 | 6 | retire `A20_GPU_IOCTL_*` 私有 3D ABI | **已完成** | 否 | 去掉两套 3D ABI | — |
-| 7 | `VIRTGPU_RESOURCE_CREATE_BLOB` 分发 | 是 | 否 | 现代 Mesa 偏好路径 | 小 |
+| 7 | `VIRTGPU_RESOURCE_CREATE_BLOB` 分发 | **不必做** | 否 | 报 0 已是正确答案 | —（见 §7.1） |
 
 第 1 项已经落地：`packages/overlay/xfce/usr/local/bin/minecraft` 现在设置
 `XDG_SESSION_TYPE=wayland`，并在缺少 `WAYLAND_DISPLAY` 或 `XDG_RUNTIME_DIR`
@@ -646,8 +671,8 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 11. 命令流语义验证 + 像素回读（§7）——需要逐字段核对 virgl 的 `virgl_hw.h`；
     Mesa 挂载后这件事自动发生，优先级低于 9 与 10。
 12. 放开 `A20_RENDERER=gl`（依赖 9 与 10）。
-13. `VIRTGPU_RESOURCE_CREATE_BLOB` 分发（§7）。
-15. 真 DMA-BUF（§7）——**从零做**，单独立项。
+15. 真 DMA-BUF（§7）——基座（memfd 的物理页数组）现成，缺的是 VMO 支撑的 fd，
+    单独立项。
 
 在第 9 项完成之前，"3D 可用"这句话只对**传输层与 UAPI 表面**成立；
 "GLES 3.2 可用"这句话则**已经**对 llvmpipe + Wayland 路径成立（§0）。
