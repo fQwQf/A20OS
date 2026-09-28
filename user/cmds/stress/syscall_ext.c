@@ -808,6 +808,141 @@ static int test_userfaultfd(void)
     return 0;
 }
 
+/* A page registered on two uffd objects and then unregistered from one must
+ * still be parked for the other.  The per-entry MM_SAFE_UFFD mark is
+ * authoritative for the status fault path, so unregister has to clear it only
+ * for pages no registration still covers; a range-wide clear would let the
+ * still-registered page be satisfied without ever being parked, and the read
+ * below would block forever instead of returning an event
+ * (docs 10.59-10.61). */
+static int test_uffd_double_registration(void)
+{
+    long fda = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fda < 0)
+        return fail("uffd2 create a", (int)fda);
+    long fdb = syscall(SYS_userfaultfd, O_CLOEXEC);
+    if (fdb < 0) {
+        close(fda);
+        return fail("uffd2 create b", (int)fdb);
+    }
+
+    struct uffdio_api api;
+    memset(&api, 0, sizeof(api));
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fda, UFFDIO_API, &api) != 0) {
+        close(fda);
+        close(fdb);
+        return fail("uffd2 api a", errno);
+    }
+    memset(&api, 0, sizeof(api));
+    api.api = UFFD_API_VERSION;
+    if (ioctl(fdb, UFFDIO_API, &api) != 0) {
+        close(fda);
+        close(fdb);
+        return fail("uffd2 api b", errno);
+    }
+
+    void *page = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) {
+        close(fda);
+        close(fdb);
+        return fail("uffd2 mmap", errno);
+    }
+
+    struct uffdio_register reg;
+    memset(&reg, 0, sizeof(reg));
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fda, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        close(fda);
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 register a", e);
+    }
+    memset(&reg, 0, sizeof(reg));
+    reg.range.start = (uint64_t)(uintptr_t)page;
+    reg.range.len = 4096;
+    reg.mode = UFFDIO_REGISTER_MODE_MISSING;
+    if (ioctl(fdb, UFFDIO_REGISTER, &reg) != 0) {
+        int e = errno;
+        close(fda);
+        close(fdb);
+        munmap(page, 4096);
+        /* Co-registration refused: the over-clear cannot arise this way. */
+        if (e == EEXIST)
+            return 0;
+        return fail("uffd2 register b", e);
+    }
+
+    /* Drop A's registration.  B still covers the page. */
+    struct uffdio_range ur;
+    memset(&ur, 0, sizeof(ur));
+    ur.start = (uint64_t)(uintptr_t)page;
+    ur.len = 4096;
+    if (ioctl(fda, UFFDIO_UNREGISTER, &ur) != 0) {
+        int e = errno;
+        close(fda);
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 unregister a", e);
+    }
+    close(fda);
+
+    g_uffd_read_byte = -1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, uffd_fault_worker, page) != 0) {
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 pthread_create", errno);
+    }
+
+    /* Must still be parked for B. */
+    struct uffd_msg msg;
+    ssize_t n = read(fdb, &msg, sizeof(msg));
+    if (n != (ssize_t)sizeof(msg) || msg.event != UFFD_EVENT_PAGEFAULT) {
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 read event", errno);
+    }
+    if (msg.arg.pagefault.address != (uint64_t)(uintptr_t)page) {
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 event address", 0);
+    }
+
+    for (int i = 0; i < 4096; i++)
+        g_uffd_payload[i] = (char)(0x50 + (i % 16));
+
+    struct uffdio_copy cp;
+    memset(&cp, 0, sizeof(cp));
+    cp.dst = (uint64_t)(uintptr_t)page;
+    cp.src = (uint64_t)(uintptr_t)g_uffd_payload;
+    cp.len = 4096;
+    if (ioctl(fdb, UFFDIO_COPY, &cp) != 0) {
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 copy", errno);
+    }
+
+    pthread_join(th, NULL);
+    if (g_uffd_read_byte != g_uffd_payload[0]) {
+        close(fdb);
+        munmap(page, 4096);
+        return fail("uffd2 content", 0);
+    }
+
+    memset(&ur, 0, sizeof(ur));
+    ur.start = (uint64_t)(uintptr_t)page;
+    ur.len = 4096;
+    ioctl(fdb, UFFDIO_UNREGISTER, &ur);
+    close(fdb);
+    munmap(page, 4096);
+    return 0;
+}
+
 /* ---- perf_event_open (kernel/abi/linux/sys_perf.c) ---- */
 
 #define PERF_TYPE_SOFTWARE 1
@@ -1289,6 +1424,8 @@ int main(void)
         return 1;
     if (test_file_interfaces() < 0)
         return 1;
+    if (test_uffd_double_registration() < 0)
+        return -1;
     if (test_userfaultfd() < 0)
         return 1;
     if (test_perf() < 0)
