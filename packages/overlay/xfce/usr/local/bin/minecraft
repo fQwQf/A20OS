@@ -64,6 +64,29 @@ echo "minecraft: $VERSION, assets $ASSET_INDEX, home $MC_HOME"
 #     MC then reports a Java-level failure and carries on instead of dying.  Which
 #     device it ends up with is decided by /etc/openal/alsoft.conf; see
 #     docs/distro/minecraft-components.md for the audio stack's current state.
+#   * XDG_SESSION_TYPE=wayland: force GLFW onto its Wayland backend and off the
+#     broken XWayland one.  The bundled GLFW is 3.4.0 and it picks its backend in
+#     _glfwSelectPlatform (glfw src/platform.c): 3.4 has no GLFW_PLATFORM
+#     environment variable, and MC never calls glfwInitHint(GLFW_PLATFORM, ...),
+#     so the environment is the only lever.  With GLFW_ANY_PLATFORM and both
+#     backends compiled in, that function honours XDG_SESSION_TYPE=wayland +
+#     WAYLAND_DISPLAY first, and only otherwise falls back to trying Wayland and
+#     then X11 -- which lands on X11 as soon as DISPLAY is set (XWayland), and
+#     labwc's xwm never presents those windows (docs/graphics/3d-graphics.md
+#     9.22/9.24).  The Wayland backend needs only xdg-shell, wl_shm, wl_compositor
+#     and wl_seat (glfw src/wl_init.c), so llvmpipe's wl_shm path is enough and no
+#     zwp_linux_dmabuf_v1 is involved.  Undo with XDG_SESSION_TYPE=x11.
+: "${XDG_SESSION_TYPE:=wayland}"
+export XDG_SESSION_TYPE
+# The Wayland branch is only taken when WAYLAND_DISPLAY is set, and resolving it
+# also needs XDG_RUNTIME_DIR; without either GLFW silently falls back to X11
+# again, so say so instead of showing an invisible game.
+[ -n "${WAYLAND_DISPLAY:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] || {
+    echo "minecraft: WAYLAND_DISPLAY/XDG_RUNTIME_DIR is unset, so GLFW would fall" >&2
+    echo "minecraft: back to its X11 backend and the window would never be" >&2
+    echo "minecraft: presented on A20OS.  Run this from inside the labwc session." >&2
+    exit 1
+}
 exec java \
     -XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks \
     -Dos.name=Linux \
