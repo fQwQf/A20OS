@@ -101,6 +101,26 @@ AHCI（`FLUSH CACHE EXT`）。
    已撤回。**真正的结构问题是：一个阻塞读会高频触发 whole-stack poll，
    而 poll 在全局锁内跨越无界收包排空**——读路径与收包路径被同一把锁串在
    一起，且排空长度无上界。分片本身仍未完成。
+
+   **下一步已经很明确：读路径应复用既有的 RX-pending 门控。**
+   这套门控**早就存在**，而且正是为了解决同一类问题，只是读路径没走它：
+   - `core/progress.c:38-44` 明写 *"NO_SYS lwIP has one global core lock.
+     Letting every idle CPU poll it turns an otherwise idle SMP guest into a
+     permanent lock convoy"*，因此 `kernel_progress_poll()` 只允许 CPU 0 轮询。
+   - `kernel_progress_timer_tick()` 同样限定 CPU 0，且只有设备真的上报了
+     pending 才重新取 `g_lwip_lock`；注释明确目标是"让 per-context-switch
+     调度热路径不碰这把锁"。
+   - `net/lwip_stack.c:55-62` 的 RX progress hint 契约：virtio-net IRQ 顶半部
+     在排空前置位，`a20_lwip_poll_locked()` 消费它。
+   而 `net_vfile_read()`（`socket_file.c:28`）**绕过该 hint**，在 `for(;;)`
+   里无条件 `a20_lwip_poll()`，每轮都取一次全局锁——哪怕设备毫无数据。
+   这就是实测里 acquire 侧集中在读路径的直接原因。
+
+   **但这不是能顺手改的一行。** 前提是先确认：跳过 poll 后读路径仍能推进
+   （IRQ 顶半部置位 + 唤醒是否足以交付数据？读路径是否依赖 poll 推进自己的
+   TCP 重传定时器？`a20_lwip_poll()` 还会跑 bottom-half，跳过会不会漏掉
+   延迟处理？）。**改错就是 read 挂死**，所以必须配套门禁验证，而不是盲改。
+   本轮只定位到此，未动该路径。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
