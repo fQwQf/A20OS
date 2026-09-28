@@ -950,6 +950,17 @@ lwIP assertion failed: detected mem underflow in pool PBUF_POOL
 A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一区域此前
 修过一次双重释放，与「pool 元素被写坏」的症状方向一致。
 
+**进一步推论（重要）**：`raw_input()` 在没有任何匹配的 raw pcb 时会**提前返回**，
+什么都不做。也就是说，仅靠 `ip6_input` 这一行不足以致害——**必须同时存在一个
+绑定了该协议的 raw socket**。这正好把嫌疑引向 A20OS 自己的代码：
+`net_packet_rx_defer()` 会在**每个**收到的帧上喂一次 raw socket 通道，
+与「首次网络活动即损坏」的现象吻合。若该推断成立，真正的越界写发生在
+`kernel/net/socket_packet.c` 消费 raw pbuf 时按（被 force 失败弄脏的）
+IP 头去算长度的那一段，而不在 lwIP 内。
+
+因此下一步 instrument 应当**同时**覆盖两处：`ip6_input:1054` 的 force 失败分支，
+以及 `socket_packet.c` 里 raw 接收的长度计算。只看 lwIP 侧可能看不到越界写。
+
 **未证实**：这是一条机制自洽、位置明确的线索，不是结论。下一步应在该处加
 instrumentation——检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
 与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
