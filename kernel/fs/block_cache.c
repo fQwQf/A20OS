@@ -54,13 +54,11 @@ static inline void cache_ref_put(int *ref)
     }
 }
 
-// 从 LRU 链表中移除一个条目
 static void lru_remove(bcache_entry_t *e) {
     e->prev->next = e->next;
     e->next->prev = e->prev;
 }
 
-// 将条目插入到 LRU 链表头部（表示最近使用）
 static void lru_insert_front(bcache_t *bc, bcache_entry_t *e) {
     e->next             = bc->lru_head.next;
     e->prev             = &bc->lru_head;
@@ -290,7 +288,6 @@ bcache_t *bcache_create(block_dev_t *dev) {
     bc->page_lru_tail.next = NULL;
     bc->page_lru_tail.prev = &bc->page_lru_head;
 
-    // 初始化所有缓存条目
     memset(bc->pool, 0, sizeof(bcache_entry_t) * bc->pool_size);
     for (int i = 0; i < bc->pool_size; i++) {
         bc->pool[i].valid = 0;
@@ -321,10 +318,9 @@ bcache_t *bcache_create(block_dev_t *dev) {
     return bc;
 }
 
-// 销毁块缓存（同步所有脏块并释放内存）
 void bcache_destroy(bcache_t *bc) {
     if (!bc) return;
-    bcache_sync(bc);  // 先同步所有脏块到磁盘
+    bcache_sync(bc);
     for (int i = 0; i < g_bcache_count; i++) {
         if (g_bcache_list[i] == bc) {
             g_bcache_list[i] = g_bcache_list[g_bcache_count - 1];
@@ -374,9 +370,9 @@ void bcache_get_stats(bcache_stats_t *stats)
 // 驱逐一个块（第二机会 LRU：从尾部找最久未使用的块，accessed 位可留一次）
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
     int quarantined = bcache_write_quarantined(bc);
-    bcache_entry_t *e = bc->lru_tail.prev;  // 从最久未使用的开始
+    bcache_entry_t *e = bc->lru_tail.prev;
     while (e != &bc->lru_head) {
-        if (cache_ref_read(&e->ref) == 0) {  // 只能驱逐引用计数为 0 的块
+        if (cache_ref_read(&e->ref) == 0) {
             /* While the device is known-wedged, prefer clean victims: a dirty
              * victim would force a flush that can only time out again. */
             if (quarantined && e->valid && e->dirty) {
@@ -412,14 +408,12 @@ static bcache_entry_t *bcache_evict(bcache_t *bc) {
     return NULL;
 }
 
-// 获取一个块（从缓存或从磁盘读取）
 bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     /* Warm hit fast path: only the bucket lock is taken; the accessed bit
      * feeds the second-chance evictor instead of a per-hit global LRU move. */
     uint64_t bf = bcache_bucket_lock_irqsave(bc, lba);
     bcache_entry_t *e = bcache_find_locked(bc, lba);
     if (e) {
-        // 命中缓存，增加引用计数
         cache_ref_get(&e->ref);
         e->accessed = 1;
         bcache_bucket_unlock_irqrestore(bc, lba, bf);
@@ -430,7 +424,6 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     uint64_t flags = spin_lock_irqsave(&bc->lock);
     e = bcache_find(bc, lba);
     if (e) {
-        // 命中缓存，增加引用计数并移到 LRU 头部
         cache_ref_get(&e->ref);
         lru_remove(e);
         lru_insert_front(bc, e);
@@ -453,7 +446,6 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
         return e;
     }
 
-    // 缓存未命中，驱逐一个旧块
     e = bcache_evict(bc);
     if (!e) {
         spin_unlock_irqrestore(&bc->lock, flags);
@@ -484,7 +476,6 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     }
     rw_mutex_write_unlock(&bc->writeback_lock);
 
-    // 从磁盘读取数据
     if (bc->dev) {
         int r = bc->dev->read_sector(bc->dev, lba, e->data, 1);
         if (r < 0) {
@@ -529,13 +520,11 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
     return e;
 }
 
-// 释放块引用（减少引用计数）
 void bcache_release(bcache_entry_t *e) {
     if (!e) return;
     cache_ref_put(&e->ref);
 }
 
-// 标记块为脏（数据已修改，需要写回磁盘）
 void bcache_mark_dirty(bcache_entry_t *e) {
     if (!e) return;
     e->dirty_gen++;
@@ -734,7 +723,6 @@ void bcache_sync(bcache_t *bc) {
     (void)bcache_sync_checked(bc);
 }
 
-// 使缓存中的块失效（磁盘上的数据已改变）
 void bcache_invalidate(bcache_t *bc, uint64_t lba) {
     if (!bc) return;
     uint64_t flags = spin_lock_irqsave(&bc->lock);
@@ -1079,7 +1067,6 @@ int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,
     return result < 0 ? result : 0;
 }
 
-// 读取字节数据（可能跨多个块）
 #define READAHEAD_PAGES 1
 
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
@@ -1118,7 +1105,6 @@ int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len) {
     return 0;
 }
 
-// 写入字节数据（可能跨多个块，标记块为脏）
 int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t len) {
     if (len == 0)
         return 0;

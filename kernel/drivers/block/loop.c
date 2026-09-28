@@ -58,7 +58,6 @@ static loop_dev_t g_loop[MAX_LOOP_DEVS];
 void loop_init(void) {
     for (int i = 0; i < MAX_LOOP_DEVS; i++) {
         memset(&g_loop[i], 0, sizeof(g_loop[i]));
-        /* LOCK_ORDER: initialize each per-device loop lock at boot. */
         spin_init(&g_loop[i].lock);
         g_loop[i].backing_vf = NULL;
     }
@@ -131,7 +130,6 @@ static int loop_get_status64(int loop_idx, void *arg) {
     if (loop_idx < 0 || loop_idx >= MAX_LOOP_DEVS) return -EINVAL;
     loop_info64_t info;
     memset(&info, 0, sizeof(info));
-    /* LOCK_ORDER: acquire loop lock to copy status fields. */
     uint64_t flags = spin_lock_irqsave(&g_loop[loop_idx].lock);
     info.lo_number = (uint32_t)loop_idx;
     if (g_loop[loop_idx].in_use) {
@@ -218,7 +216,6 @@ int loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         return 0;
     }
     if (req == BLKGETSIZE64) {
-        /* LOCK_ORDER: acquire loop lock to copy backing size. */
         uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
         uint64_t sz = g_loop[idx].in_use ? g_loop[idx].backing_size : 0;
         spin_unlock_irqrestore(&g_loop[idx].lock, flags);
@@ -226,7 +223,6 @@ int loop_dev_ioctl(vfile_t *vf, unsigned long req, void *arg) {
         return 0;
     }
     if (req == BLKGETSIZE) {
-        /* LOCK_ORDER: acquire loop lock to copy backing size in sectors. */
         uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
         uint64_t sz = g_loop[idx].in_use ? (g_loop[idx].backing_size / LOOP_SECTOR_SIZE) : 0;
         spin_unlock_irqrestore(&g_loop[idx].lock, flags);
@@ -306,7 +302,6 @@ void loop_block_release(block_dev_t *bdev) {
     loop_block_t *lb = (loop_block_t *)bdev->priv;
     if (!lb)
         return;
-    /* LOCK_ORDER: acquire the loop lock to drop the consumer claim. */
     uint64_t flags = spin_lock_irqsave(&g_loop[lb->idx].lock);
     g_loop[lb->idx].claimed = 0;
     spin_unlock_irqrestore(&g_loop[lb->idx].lock, flags);
@@ -319,7 +314,6 @@ static void loop_block_release_cb(block_dev_t *bdev) {
 block_dev_t *loop_block_device(int idx) {
     if (idx < 0 || idx >= MAX_LOOP_DEVS)
         return NULL;
-    /* LOCK_ORDER: acquire the loop lock only to snapshot binding state. */
     uint64_t flags = spin_lock_irqsave(&g_loop[idx].lock);
     int in_use = g_loop[idx].in_use;
     uint64_t bsz = g_loop[idx].backing_size;

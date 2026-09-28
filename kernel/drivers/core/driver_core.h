@@ -194,7 +194,6 @@ void bus_unregister(bus_type_t *bus);
 /* probe a specific device against all registered drivers */
 int  bus_probe_device(device_t *dev);
 
-/* find resource by type and index */
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index);
 
 /* iterate devices by class */

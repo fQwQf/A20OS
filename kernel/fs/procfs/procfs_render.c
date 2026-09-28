@@ -382,7 +382,6 @@ int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,
     return 0;
 }
 
-// 生成 procfs 文件的内容
 int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     buf[0] = '\0';
     switch (type) {
@@ -515,7 +514,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%s version %s (%s) (%s)\n",
                  A20OS_SYSNAME, A20OS_RELEASE, ARCH_NAME, A20OS_VERSION_FULL);
         break;
-    case PF_UPTIME: {  // 生成运行时间
+    case PF_UPTIME: {
         uint64_t ticks = timer_get_ticks();
         uint64_t sec = ticks / TICKS_PER_SEC;
         uint64_t frac = (ticks % TICKS_PER_SEC) * 100 / TICKS_PER_SEC;
@@ -527,7 +526,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
          * the same content here. */
         snprintf(buf, bufsz, "%s\n", bootargs_get() ? bootargs_get() : "");
         break;
-    case PF_CPUINFO:  // 生成 CPU 信息
+    case PF_CPUINFO:
         snprintf(buf, bufsz,
             "processor\t: 0\n"
             "hart\t\t: 0\n"
@@ -550,7 +549,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         }
         break;
     }
-    case PF_LOADAVG:  // 生成负载平均值
+    case PF_LOADAVG:
         snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
         break;
     case PF_NET:
@@ -708,7 +707,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_SYSRQ_TRIGGER:
         return snprintf(buf, bufsz,
                         "sysrq commands: c (crash — deliberate kernel panic)\n");
-    case PF_PID_STAT: {  // 生成进程 stat 信息
+    case PF_PID_STAT: {
         task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "%d (unknown) S 0 0\n", pid); break; }
         /* Linux field order: pid comm state ppid pgrp session tty_nr tpgid
@@ -730,7 +729,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_STATUS: {  // 生成进程 status 信息
+    case PF_PID_STATUS: {
         task_t *t = proc_find_get(pid);
         if (!t) { snprintf(buf, bufsz, "Name:\tunknown\nPid:\t%d\n", pid); break; }
         const char *state = procfs_task_state_text(t);
@@ -993,7 +992,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             (unsigned long)0, (unsigned long)0);
 #endif
         break;
-    case PF_SELF: {  // 生成当前进程的 pid
+    case PF_SELF: {
         task_t *t = proc_current();
         snprintf(buf, bufsz, "%d\n", t ? t->pid : 0);
         break;
