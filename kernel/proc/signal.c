@@ -27,12 +27,12 @@
  */
 static void signal_make_page_exec(uint64_t addr) {
     task_t *t = proc_current();
-    if (!t || !t->pgdir) return;
+    if (!t || !t->mm || !t->mm->pgdir) return;
     vaddr_t page = addr & ~(vaddr_t)(PAGE_SIZE - 1);
     if (user_prepare_write(t, (uint64_t)page) < 0) return;
     paddr_t pa = pt_translate(t->pgdir, page);
     if (!pa) return;
-    pt_unmap(t->pgdir, page);
+    pt_unmap(t->mm, page);
     pt_map(t->pgdir, page, pa,
            mm_pte_flags_make_writable_dirty(arch_signal_tramp_pte_flags()));
     arch_tlb_flush_page(page);
