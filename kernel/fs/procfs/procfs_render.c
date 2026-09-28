@@ -1,5 +1,6 @@
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
+#include "mm/pt.h"
 #include "fs/vfs/mntns.h"
 #include "core/bootargs.h"
 #include "fs/file.h"
@@ -582,6 +583,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         memcpy(buf, g_proc_config_gz, n);
         return (int)n;
     }
+    case PF_A20_ANONPROV:
+        snprintf(buf, bufsz, "%u\n", mm_pt_anon_prov_max());
+        return (int)strlen(buf);
     case PF_A20_SCHED_BASE_SLICE:
         snprintf(buf, bufsz, "%d\n", g_sched_base_slice_ms);
         return (int)strlen(buf);
