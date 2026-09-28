@@ -248,7 +248,10 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
             return optlen ? 0 : -EINVAL;
         if (optname == MCAST_LEAVE_GROUP)
             return -EADDRNOTAVAIL;
-        return 0;
+        /* Reject the unimplemented remainder (IP_TTL, IP_TOS, IP_OPTIONS,
+         * IP_TRANSPARENT, ...).  Policy: a setsockopt a caller cannot honour
+         * must fail, never silently succeed. */
+        return -EOPNOTSUPP;
     }
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_CHECKSUM) {
         if (!optval || optlen < sizeof(int))
@@ -441,8 +444,11 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         s->passcred = val != 0;
         return 0;
     }
-    if (level == SOL_SOCKET)
-        return 0;
+    /* Unhandled SOL_SOCKET options (SO_BINDTODEVICE, SO_DOMAIN,
+     * SO_PROTOCOL, SO_RXQ_OVFL, ...) are not implemented.  Returning 0 here
+     * would report success for a setting that was discarded, which is worse
+     * than refusing: a server that sets SO_BINDTODEVICE for tenant isolation
+     * would believe it isolated and would not be. */
     return -EOPNOTSUPP;
 }
 
@@ -510,7 +516,12 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;
         if (optname == TCP_CONGESTION) {
-            static const char congestion[] = "cubic";
+            /* lwIP's only congestion control is Reno (src/core/tcp.c).
+             * Reporting "cubic" made monitoring and tuning tools believe
+             * a CUBIC implementation existed.  setsockopt rejects every
+             * name, so reporting the one real algorithm keeps the two
+             * consistent. */
+            static const char congestion[] = "reno";
             size_t n = *optlen < sizeof(congestion) ? *optlen : sizeof(congestion);
             if (n)
                 memcpy(optval, congestion, n);
@@ -518,11 +529,10 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
             return 0;
         }
         if (optname == TCP_INFO) {
-            size_t n = *optlen;
-            memset(optval, 0, n);
-            if (n)
-                ((uint8_t *)optval)[0] = s->listening ? 10 : (s->connected ? 1 : 7);
-            return 0;
+            /* No struct tcp_info is modelled.  The old handler wrote a state
+             * byte at offset 0 and zeroed the rest, which callers read as
+             * tcpi_rtt/tcpi_total_retrans being measured-and-zero.  Refuse. */
+            return -EOPNOTSUPP;
         }
         switch (optname) {
         case TCP_NODELAY:
