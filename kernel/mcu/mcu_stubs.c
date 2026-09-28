@@ -53,6 +53,7 @@ void a20_timer_tick(void) { }
 /* Diagnostics omitted from the size-constrained MCU image. */
 uint64_t g_perf_sw_context_switches;
 void psi_tick(void) { }
+void proc_loadavg_tick(void) { }
 void a20_monitor_tick(void) { }
 void lock_counters_register(spinlock_t *lock, const char *name) {
     (void)lock;
