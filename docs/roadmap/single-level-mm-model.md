@@ -3816,3 +3816,43 @@ the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类**恰�
 
 **当前状态**：默认构建安全（预标记关闭），UFFD 语义正确。**在 1 或 2 完成之前，
 不要把预标记默认打开。**
+
+### 10.60 UFFD 修复的锁序障碍**已排除**（§10.59 的方案 1 现可实施）
+
+§10.59 留下的唯一疑问是锁序：在 `mm->lock` 内再取 `g_uffd_lock` 做逐页 presence 复查，
+会不会与某处「持 `g_uffd_lock` 再取 `mm->lock」形成环路。**已查证：不会。**
+
+**证据一：`userfaultfd.c` 里没有任何路径在持有 `g_uffd_lock` 时去取 `mm->lock`。**
+逐个核对 `g_uffd_lock` 的临界区（128-136、146-155、163-171、439-463、496-516、574-587、
+681-690），其中**没有一处**包含 `spin_lock(&mm->lock)`；`mm->lock` 的取用点（209、212、
+241、244、421、428、435）全部位于 `g_uffd_lock` 临界区**之外**。
+unregister 更是明确地**先放掉** `g_uffd_lock`（第 516 行）**再取** `mm->lock`（约 530 行），
+两者从不嵌套。
+
+**证据二：`mm->lock → g_uffd_lock` 这个顺序**早已在本代码库里实际使用**——
+`kernel/mm/fault.c:1036` 在**仍然持有 `mm->lock`** 的情况下调用
+`userfaultfd_range_present()`，紧接着的下一行才是 `spin_unlock(&mm->lock);`：
+
+```c
+if (vma &&
+    (vma->vm_flags & (VM_ANON | VM_FILE | VM_VMO | VM_SHARED)) == VM_ANON &&
+    userfaultfd_range_present(mm, page_va)) {
+    spin_unlock(&mm->lock);
+    ...
+```
+
+**结论**：`mm->lock → g_uffd_lock` 是**既有且在用**的顺序，而反向嵌套全仓库不存在。
+因此 §10.59 的**方案 1**（在 `mm->lock` 内逐页清除 `MM_SAFE_UFFD`、每页清除前重新判定
+presence）**不引入任何新的锁嵌套，不构成死锁**，可以安全实施。
+
+**实施要点（供下一轮直接落地）**：
+1. `mm_pt_set_safe_range()` 增加一个「清 UFFD 标记前先复查 presence」的钩子，或在
+   `userfaultfd.c` 里改成**逐页**处理而非整段一次性清除；
+2. presence 复查复用既有的 `userfaultfd_range_present(mm, page_va)`（它查 range 链表，
+   已在 `fault.c:1036` 于 `mm->lock` 内被调用，安全）；
+3. 顺带修正 `fault.c:967` 那句**对 `ANON_VIRT` 已不成立**的注释（§10.59 第 3 条）；
+4. 验证：需覆盖「**同一页被两次注册**」的场景——现有 `mm_stress` 未必包含，
+   应补一个针对性用例，否则改完也无法证明过度清除已消除。
+
+**本轮到此为止**：锁序已查清、方案已确定、但**未实施**——实施需要新增逐页复查逻辑并补
+一个「双重注册」测试用例，属于需要完整上下文才能一次做对并验证的改动，不宜在收尾阶段动手。
