@@ -181,20 +181,29 @@ def _watch(proc: subprocess.Popen[bytes], log: Path, expected: tuple[str, ...],
     seen: set[str] = set()
     offset = 0
     text_so_far = ""
+
+    def absorb(now: float) -> None:
+        nonlocal offset, text_so_far
+        chunk, offset = _progress_read(log, offset)
+        if not chunk:
+            return
+        text_so_far += chunk
+        for pat in expected:
+            if pat not in seen and pat in text_so_far:
+                seen.add(pat)
+                echo(f"  [{now - start:5.1f}s] seen: {pat}")
+
     while True:
         rc = proc.poll()
         now = time.monotonic()
         if rc is not None:
+            # Read once more: a guest can write its last marker and exit between
+            # two polls, and skipping this calls a healthy boot a missing marker.
+            absorb(now)
             return False
         if now - start >= timeout:
             return True
-        chunk, offset = _progress_read(log, offset)
-        if chunk:
-            text_so_far += chunk
-            for pat in expected:
-                if pat not in seen and pat in text_so_far:
-                    seen.add(pat)
-                    echo(f"  [{now - start:5.1f}s] seen: {pat}")
+        absorb(now)
         if now - last_beat >= _PROGRESS_HEARTBEAT_S:
             echo(f"  [{now - start:5.1f}s] waiting: {len(seen)}/{len(expected)} "
                  f"markers, {offset} bytes of guest output so far")

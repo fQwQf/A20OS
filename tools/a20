@@ -59,6 +59,7 @@ from a20_instance import (
     Instance,
     InstanceError,
     applicable_actions,
+    default_board,
     parse_instance,
     section_is_set,
 )
@@ -421,6 +422,42 @@ def cmd_package(args: argparse.Namespace) -> None:
     run_package(inst, list(args.make_args), args.dry_run)
 
 
+def cmd_show(args: argparse.Namespace) -> int:
+    """Everything an operator needs before choosing a command, in one screen.
+
+    `show-vars` answers "what would make see"; this answers "can I run this, what
+    will it cost me, and what will it touch" -- the questions that come first
+    when picking between 46 instances.
+    """
+    inst = _load(args.instance)
+    acts = applicable_actions(inst)
+    print(f"{inst.name}  [{inst.arch}]  {inst.description or ''}")
+
+    from a20_resource import Policy, parse_hostfwd_ports, requirement_for
+    need = requirement_for(inst, Policy.from_env())
+    print(f"  actions     {', '.join(acts)}")
+    print(f"  board       {inst.board or default_board(inst.arch)}")
+    print(f"  needs       {need.describe()}")
+
+    ports = parse_hostfwd_ports(inst.net.hostfwd)
+    print(f"  host ports  {', '.join(f'{a}:{p}' for a, p in ports) if ports else 'none (nothing to connect to)'}")
+
+    if inst.target and section_is_set(inst.target):
+        t = inst.target
+        print(f"  console     {t.serial} at {t.baud or 115200} baud"
+              f"{', resets the board' if t.reset else ''}")
+        if t.boot_media:
+            print(f"  boot media  {' '.join(t.boot_media)} -> {t.media_device or '(unset!)'}")
+        if t.expect:
+            print(f"  expects     {', '.join(t.expect)}")
+    if inst.flash.tool:
+        print(f"  flashes via {inst.flash.tool}")
+    if inst.test.expect:
+        print(f"  smoke waits {', '.join(inst.test.expect)}")
+    print(f"  manifest    {inst.source}")
+    return EXIT_OK
+
+
 def cmd_show_vars(args: argparse.Namespace) -> int:
     for var in derive_make_vars(_load(args.instance)):
         print(var)
@@ -634,6 +671,8 @@ def main(argv: list[str] | None = None) -> int:
     p_ledger.add_argument("--format", choices=ledger_formats(), default="table",
                           help="table (human), json (machine), markdown (doc block)")
     p_ledger.add_argument("--out", metavar="FILE", help="write to FILE instead of stdout")
+    add_instance_cmd("show", "show what an instance needs and supports",
+                   with_make_args=False)
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
     add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
@@ -691,6 +730,8 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_ports(ns)
         case "ledger":
             return cmd_ledger(ns)
+        case "show":
+            return cmd_show(ns)
         case "show-vars":
             return cmd_show_vars(ns)
         case "build":

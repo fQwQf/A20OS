@@ -14,6 +14,7 @@ A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明�
 tools/a20 list                            # 列出所有实例（名称、架构、可用动作、状态）
 tools/a20 list --arch riscv64 armv7m      # 只看这些架构
 tools/a20 list --action test              # 只看能跑冒烟的实例
+tools/a20 show vf2-physical                # 这个实例支持什么、要多少资源、会碰什么
 tools/a20 run qemu-riscv64                # 构建并在 QEMU 启动（文本模式）
 tools/a20 run xfce-x86_64                 # 图形桌面实例（apk world，含 virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
@@ -215,6 +216,28 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 | `[stm32]` ↔ 非 `armv7m` 架构 | STM32 段只对 `arch = "armv7m"` 有意义 |
 | `[flash]` ↔ 非 STM32 板 | `tool = "openocd"` 这个后端只覆盖 `stm32f103` 系列板 |
 | `package.variant` ↔ `package.kind = "release"` | release 按架构约定命名产物，没有 variant 概念 |
+
+### `a20 show`：选命令之前先看这一屏
+
+`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"
+——在 46 个实例里挑一个时先问的就是这三个问题：
+
+```text
+$ tools/a20 show vf2-physical
+vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 console/deploy
+  actions     build, run, debug, package, console, deploy
+  board       visionfive2
+  needs       mem 2048 MiB, 1 vCPU, disk 2048 MiB
+  host ports  none (nothing to connect to)
+  console     /dev/ttyUSB0 at 115200 baud
+  boot media  build/vf2-firmware/a20os-sd.img -> /dev/sda
+  expects     A20OS, SMC: System ready, poweroff
+  manifest    .../instances/vf2-physical.toml
+```
+
+`needs` 走的是启动前门控用的同一个 `requirement_for`，所以这里看到的数字就是
+真跑起来时被检查的数字；`actions` 与 `list` 的能力列同源。`boot media` 指向
+`(unset!)` 表示 manifest 写了 `boot_media` 却没给 `media_device`，`deploy` 会被拒绝。
 
 ### 退出码
 
