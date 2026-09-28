@@ -27,6 +27,7 @@
 #include "core/smp.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
+#include "platform.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], _bss_end[];
 extern uint64_t boot_pdpt_hh[512];  /* entry.S, 挂在 PML4[256] 下 */
@@ -129,7 +130,15 @@ void arch_kernel_wx_finalize(void)
      * 旁路构建完整，再用一次写入替换 PDPT 项。整个过程中现有映射始终
      * 有效——若先装 NX 大页再拆块，TLB miss 会在 NX 的 .text 上取指
      * 故障，trap 处理程序同样 NX，直接三连环复位。 */
-    for (int slot = 0; slot < 4; slot++) {
+    /* Every 1 GiB slot the direct map covers must be demoted, not just the
+     * first four.  The direct map reaches X86_HIGH_RAM_MAP_END (8 GiB), and
+     * the firmware maps usable RAM above 4 GiB a whole chunk at a time, so a
+     * slot like 4 (4-5 GiB) is real RAM holding real module pages.  Leaving it
+     * as a 1 GiB huge page made x86_kwx_pd() return NULL for those addresses,
+     * so arch_kwx_module_protect() failed with -ENOMEM and *every* kernel
+     * module load failed -- including all three block drivers, which left the
+     * guest with no FAT32 device, no /bin, and a panic at PID 1. */
+    for (int slot = 0; slot < (int)(X86_HIGH_RAM_MAP_END >> 30); slot++) {
         uint64_t e = boot_pdpt_hh[slot];
         if (!(e & PTE_V) || !(e & PTE_PS))
             continue;
