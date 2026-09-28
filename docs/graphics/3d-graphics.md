@@ -14,7 +14,9 @@
 `GPU3D_TEST: PASS` 作为验收输出。这两条都**不成立**，已按实测更正：
 
 - 曾经的 `gpu3d_test` 只创建 context 与一个空的 16×16 纹理就销毁，
-  `A20_GPU_IOCTL_SUBMIT_3D` 定义了却从未被调用——**一个命令流都没提交过**；
+  `A20_GPU_IOCTL_SUBMIT_3D` 定义了却从未被调用——**一个命令流都没提交过**
+  （该私有 ioctl 已随 §2.2 一起删除；同一条通路现在由
+  `DRM_IOCTL_VIRTGPU_EXECBUFFER` 承担，并被门禁实际调用）；
 - 更严重的是它在 2D-only 设备上打印 `skipping 3D path` 后 `return 0`，
   于是**任何配置下这个测试都是绿的**，绿灯不携带任何信息。
 
@@ -84,49 +86,42 @@ A20OS 要做的是把中间的**运输层**补齐（GEM 对象模型 + 上游 vi
 - **响应码**：`RESP_OK_NODATA/DISPLAY_INFO/CAPSET_INFO/CAPSET/EDID/RESOURCE_UUID/MAP_INFO` 与 `RESP_ERR_*`。
 - **capset**：`VIRTIO_GPU_CAPSET_VIRGL`(1)、`VIRTIO_GPU_CAPSET_VIRGL2`(2)、`VIRTIO_GPU_CAPSET_VENUS`(4)、`VIRTIO_GPU_CAPSET_DRM`(6)。
 
-### 2.2 A20 3D 透传 ioctl（`A20_GPU_IOCTL_*`）
+### 2.2 （已删除）A20 私有 3D 透传 ioctl
 
-为隔离 Linux DRM ABI 与 A20 私有的 virgl 透传，A20 定义了一组私有 ioctl 号，由 `gpu_dev_ops_t.ioctl` 分发，再经 `/dev/dri/card0` 暴露给用户态：
+历史记录：本节曾描述一组 A20 私有的 3D 透传 ioctl（`A20_GPU_IOCTL_*`，0x4700 段），
+经 `gpu_dev_ops_t.ioctl` 转发给 GPU 驱动，参数统一为 `struct virtio_gpu_3d_req`：
 
-| ioctl | 语义 |
-|---|---|
-| `A20_GPU_IOCTL_VIRGL_CHECK` | 查询设备是否协商出 virgl；`-ENXIO` 表示 2D-only |
-| `A20_GPU_IOCTL_CTX_CREATE` | 创建 host 端 virgl 上下文 |
-| `A20_GPU_IOCTL_CTX_DESTROY` | 销毁上下文 |
-| `A20_GPU_IOCTL_RES_CREATE_3D` | 创建 3D 资源（纹理等） |
-| `A20_GPU_IOCTL_RES_UNREF` | 释放资源 |
-| `A20_GPU_IOCTL_SUBMIT_3D` | 提交 virgl 命令流 blob |
+| 曾存在的 ioctl | 语义 | 现在的等价物 |
+|---|---|---|
+| `VIRGL_CHECK` | 查询是否协商出 virgl | `DRM_IOCTL_VIRTGPU_GETPARAM` 读 `VIRTGPU_PARAM_3D_FEATURES` |
+| `CTX_CREATE` | 创建 host 端 virgl 上下文 | `RESOURCE_CREATE` 内部惰性建 ctx；或 `DRM_IOCTL_VIRTGPU_CONTEXT_INIT` |
+| `CTX_DESTROY` | 销毁上下文 | 随 open file 关闭 |
+| `RES_CREATE_3D` | 创建 3D 资源 | `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE` |
+| `RES_UNREF` | 释放资源 | GEM 回收时自动（`drm_gem_reclaim`） |
+| `SUBMIT_3D` | 提交命令流 blob | `DRM_IOCTL_VIRTGPU_EXECBUFFER` |
 
-参数统一为 `struct virtio_gpu_3d_req`：
+**为什么删掉**：这组 ioctl 与上游 VIRTGPU UAPI 逐条重复。维护两套 3D ABI 意味着两条
+可能各自漂移的代码路径，而**只有上游那套是 Mesa 真正会说的**——花在私有这套上的每一小时
+都不能被任何真实客户端用到。
 
-```c
-struct virtio_gpu_3d_req {
-    uint32_t ctx_id;       /* 目标 virgl 上下文 */
-    uint32_t resource_id;  /* 目标资源 */
-    uint32_t target;       /* create_3d: GL 目标类型（GL_TEXTURE_2D=2 ...） */
-    uint32_t format;       /* create_3d: GL 格式（GL_RGBA8=0x8058 ...） */
-    uint32_t bind;         /* create_3d: VIRGL_BIND_* */
-    uint32_t width, height, depth, array_size, last_level, nr_samples, flags;
-    uint32_t context_init; /* ctx_create: CONTEXT_INIT capset id */
-    uint64_t cmdbuf;       /* submit_3d: 用户态命令流指针 */
-    uint64_t cmdlen;       /* submit_3d: 命令流长度（<=128 KiB） */
-    char     name[32];     /* ctx_create: 调试名 */
-};
-```
+删除时唯一被刻意保留下来的是 `gpu3d_test` 的**三态退出码**：`77`（SKIP，2D-only 设备）
+是门禁可证伪性的来源，否则"没有 virgl 的设备"与"virgl 坏了的设备"无法区分，门禁会空转
+通过。这个信息现在从上游 `VIRTGPU_PARAM_3D_FEATURES` 读——而该参数原先被硬编码为 1，
+必须先让它如实报告已协商的 feature 位，SKIP 才重新可达。
 
 ### 2.3 分发路径
 
 ```
-用户态 (virgl client / gpu3d_test)
-   │ ioctl(/dev/dri/card0, A20_GPU_IOCTL_*)
+用户态 (Mesa virtio_gpu_dri.so / gpu3d_test)
+   │ ioctl(/dev/dri/card0, DRM_IOCTL_VIRTGPU_*)
    ▼
 kernel/fs/devfs/devfs.c   DEVFS_DRM open → drm_create_vfile()
    ▼
-kernel/drivers/gpu/drm.c drm_ioctl() default 分支
-   │  req ∈ [A20_GPU_IOCTL_BASE, +16) → ops->ioctl(gpu_device, req, arg)
+kernel/drivers/gpu/drm.c drm_ioctl() → drm_virtgpu_*
+   │  解析 GEM handle、attach backing、copy 命令流（内核不解码 virgl 字节）
    ▼
-kernel/drivers/gpu/virtio_gpu.c gpu_ioctl()
-   │  copy_from_user(req) → 分发到 CTX_CREATE / RES_CREATE_3D / SUBMIT_3D ...
+kernel/drivers/gpu/virtio_gpu.c 的 gpu_dev_ops_t 3D ops
+   │  ctx_create / resource_create_3d / resource_attach_backing / submit_3d
    ▼
 virtio_gpu_send_cmd() / virtio_gpu_send_cmd_big() / virtio_gpu_submit_3d()
    │  controlq 描述符链 + MMIO notify
@@ -135,6 +130,7 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 ```
 
 ---
+
 
 ## 3. 内核驱动实现
 
@@ -165,7 +161,7 @@ QEMU virtio-gpu-gl → virglrenderer → 宿主 GPU/CPU
 
 ### 3.4 DRM 透传（`kernel/drivers/gpu/drm.c`）
 
-`drm_ioctl()` 的 `default` 分支识别 `A20_GPU_IOCTL_*` 区间并转发到 GPU 驱动的 `ioctl`。`/dev/dri/card0` 因此成为 3D 与 KMS 的统一入口。
+`drm_ioctl()` 按 `DRM_IOCTL_VIRTGPU_*` 直接分发到 `drm_virtgpu_*`，后者再经 `gpu_dev_ops_t` 的 3D ops 触达驱动。`/dev/dri/card0` 是 3D 与 KMS 的统一入口；`default` 分支一律 `-EINVAL`（私有 3D 段已删除，见 §2.2）。
 
 ### 3.5 drvmod 导出
 
@@ -218,7 +214,7 @@ tools/a20 test smoke-gpu3d-riscv64
 
 1. **libdrm**：`drmOpen` `/dev/dri/card0`、dumb-buffer 管理（由 Alpine `libdrm` 包提供）。
 2. **libgbm**：GBM 提供 EGL 平台抽象；Mesa 的 `virtio_gpu` 后端把 GBM surface 映射到 virgl resource。
-3. **Mesa**（EGL/GLES2）：`eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, ...)` 创建 EGL display；virgl 驱动把 GL 调用序列化进 command buffer，经 `A20_GPU_IOCTL_SUBMIT_3D` 提交。
+3. **Mesa**（EGL/GLES2）：`eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, ...)` 创建 EGL display；virgl 驱动把 GL 调用序列化进 command buffer，经 `DRM_IOCTL_VIRTGPU_EXECBUFFER` 提交。
 4. **合成器/应用**：Wayland 合成器（Weston 的 DRM backend + EGL 渲染器）或直接 EGL 客户端。
 
 对接时内核侧需要补充的部分（按依赖顺序）：
@@ -367,7 +363,7 @@ libEGL warning: egl: failed to create dri2 screen
 - **GL 客户端（Minecraft 等）无法出图**：即使 llvmpipe 能软件渲染，结果也
   无法作为 dma-buf 交给合成器。
 - **host 侧也没有 3D**：GUI 实例用 `-device virtio-gpu-pci`（无 virgl），
-  所以 `A20_GPU_IOCTL_VIRGL_CHECK` 返回 `-ENXIO`；要试硬件 3D 得换
+  所以 `VIRTGPU_PARAM_3D_FEATURES` 报 0、3D ops 返回 `-ENXIO`；要试硬件 3D 得换
   `virtio-gpu-gl-pci`（或 `virgl=on`）。
 
 ### 让 Minecraft 跑起来的顺序
