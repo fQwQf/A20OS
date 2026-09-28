@@ -10,7 +10,7 @@
  * the GMAC1 clocks/reset in early_init() (SoC clock gating is a board-level
  * fact), so this driver only programs the EQOS interface.  The data path is
  * still poll-driven; IRQ-driven TX/RX can reuse the same lock but must be
- * added deliberately and documented in docs/drivers/lock-order.md.
+ * added deliberately and documented in docs/drivers/guide/lock-order.md.
  */
 
 #include "drivers/net/starfive_gmac.h"
