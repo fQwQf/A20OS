@@ -307,7 +307,23 @@ static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
     t->rq_prev = NULL;
 }
 
-/* Highest-priority non-empty RT queue via bitmap word scan: O(words). */
+/*
+ * Highest-priority non-empty RT queue via bitmap word scan: O(words).
+ *
+ * SCHED_RR rotates: when the head of a busy queue is a round-robin task it is
+ * moved to the tail before being returned, so each pick advances to the next
+ * peer.  SCHED_FIFO heads are never rotated, which is what makes FIFO
+ * run-to-completion and keeps it ahead of an RR peer at equal priority, as in
+ * Linux.
+ *
+ * A lone RR task is not rotated (the tail is NULL), so it keeps the CPU
+ * instead of being penalised for having no competition.
+ *
+ * Note this yields RR among peers when the scheduler next runs, not on a timer
+ * slice.  Forcing a switch mid-slice needs kernel preemption, which A20OS does
+ * not have; without it an RR task that never blocks still runs until it does.
+ * That limit is why the fix is at pick time rather than in the tick.
+ */
 static task_t *rt_pick_best_locked(proc_runq_t *rq)
 {
     for (int w = RT_BITMAP_WORDS - 1; w >= 0; w--) {
@@ -316,9 +332,16 @@ static task_t *rt_pick_best_locked(proc_runq_t *rq)
             int off = 31;
             while (off >= 0 && !(bits & (1U << off)))
                 off--;
-            task_t *t = rq->rt_q[(w << 5) + off].head;
-            if (t)
+            unsigned s = (unsigned)(w << 5) + (unsigned)off;
+            task_t *t = rq->rt_q[s].head;
+            if (t) {
+                if (t->sched_policy == SCHED_RR && t->rq_next) {
+                    rt_unlink_locked(rq, t);
+                    rt_enqueue_locked(rq, t);
+                    t = rq->rt_q[s].head;
+                }
                 return t;
+            }
             /* Repair a stale bit whose list drained without bookkeeping. */
             bits &= ~(1U << off);
             rq->rt_bitmap[w] &= ~(1U << off);
