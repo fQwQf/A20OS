@@ -145,8 +145,9 @@ static int seg_prot(uint32_t p_flags) {
     return prot;
 }
 
-/* W^X：PT_LOAD 段的权限组合与 mmap/mprotect 走同一策略；
- * 返回负 errno（deny）或过滤后的 prot。 */
+/* W^X: the permission combination of a PT_LOAD segment follows the same
+ * policy as mmap/mprotect; returns a negative errno (deny) or the filtered
+ * prot. */
 static int seg_prot_filtered(uint32_t p_flags) {
     return mm_wx_filter_prot(seg_prot(p_flags), "elf-load");
 }
@@ -216,16 +217,18 @@ static void *phys_for_va(pt_root_t *pgdir, vaddr_t va) {
 }
 
 /*
- * 确保 sp_va 所在的页面已映射到页表中。
- * 如果 sp_va 低于当前栈底，则分配新的物理页并映射。
- * 这是为了防止 execve 时参数/环境变量过大导致栈溢出，
- * 写入未映射地址时页表脏数据被当作物理地址引发崩溃。
+ * Make sure the page containing sp_va is mapped in the page table.
+ * If sp_va lies below the current stack bottom, allocate a new physical page
+ * and map it.  This stops execve from overflowing the stack when argv/envp are
+ * large: the write to an unmapped address would leave a stale page-table entry
+ * that is then used as a physical address and crashes.
  *
- * @pgdir         页表根指针
- * @sp_va         需要访问的虚拟地址
- * @stack_bottom  当前栈底（传入指针，会被更新）
- * @max_grow      最多向下扩展多少页
- * @return        映射后的物理地址（内核直映射），或 NULL 失败
+ * @pgdir         page table root pointer
+ * @sp_va         the virtual address to make accessible
+ * @stack_bottom  current stack bottom (passed as a pointer, may be updated)
+ * @max_grow      how many pages the stack may grow downwards at most
+ * @return        the mapped physical address (kernel direct map), or NULL on
+ *                failure
  */
 static void *stack_ensure_mapped(pt_root_t *pgdir, vaddr_t sp_va,
                                  vaddr_t *stack_bottom, int max_grow) {
@@ -577,8 +580,9 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
                        VM_ANON | VM_READ | VM_WRITE | VM_STACK,
                        mm_user_stack_pte_flags());
 #else
-    /* ASLR：栈顶在 [USER_STACK_FLOOR+初始栈, USER_STACK_TOP+PAGE) 窗口内
-     * 向下随机偏移（页对齐）。窗口下界之外是固定 vDSO/vvar 与 TLS 区。 */
+    /* ASLR: the stack top is offset downwards at page granularity inside the
+     * [USER_STACK_FLOOR + initial stack, USER_STACK_TOP + PAGE) window.  Below
+     * that window are the fixed vDSO/vvar and TLS regions. */
     vaddr_t stack_top    = USER_STACK_TOP + PAGE_SIZE - mm_aslr_stack_offset();
     vaddr_t stack_bottom = stack_top -
         (uint64_t)USER_STACK_INITIAL_PAGES * PAGE_SIZE;
@@ -911,7 +915,8 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
                   &tls_va, &tls_tp);
     if (r < 0) { pt_destroy_user(pgdir); return r; }
 
-    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    /* ASLR: the brk start is the end of the image plus a random offset, the
+     * cap being bounded by USER_TLS_BASE */
     vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
 
     *info = (elf_load_info_t){
@@ -1075,7 +1080,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     if (has_interp)
         tls_tp = 0;
 
-    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    /* ASLR: the brk start is the end of the image plus a random offset, the
+     * cap being bounded by USER_TLS_BASE */
     vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
 
     *info = (elf_load_info_t){
@@ -1224,7 +1230,8 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     if (r < 0)
         goto fail32;
 
-    /* ASLR：brk 起始在镜像末尾之上加随机偏移（上限受 USER_TLS_BASE 约束） */
+    /* ASLR: the brk start is the end of the image plus a random offset, the
+     * cap being bounded by USER_TLS_BASE */
     vaddr_t brk_base = ROUND_UP(brk_va ? brk_va : max_va, PAGE_SIZE);
 
     *info = (elf_load_info_t){

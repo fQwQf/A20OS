@@ -1,16 +1,21 @@
 /*
- * A20OS — 内核栈金丝雀（stack canary）运行时
+ * A20OS — kernel stack canary runtime
  *
- * 为 -fstack-protector-strong 提供编译器 ABI 符号：
- *   - __stack_chk_guard：全局金丝雀值。启动早期（random_init() 之前）
- *     使用编译期固定值兜底，保证从头运行的早期 C 代码也在保护之下；
- *     熵池就绪后由 stack_protector_init() 换成随机值（低字节清零，
- *     模仿 terminator canary，使字符串类溢出难以顺带覆写）。
- *   - __stack_chk_fail：校验失败即带调用现场 panic。
+ * Supplies the two symbols -fstack-protector-strong expects from the compiler
+ * ABI:
+ *   - __stack_chk_guard: the global canary.  During the early boot window
+ *     (before random_init()) it falls back to a compile-time constant so the
+ *     early C code that runs from the very beginning is protected too; once the
+ *     entropy pool is ready, stack_protector_init() replaces it with a random
+ *     value whose low byte is cleared, mimicking a terminator canary so a
+ *     string-style overflow cannot overwrite it in passing.
+ *   - __stack_chk_fail: panics with the call site on a failed check.
  *
- * 时序约束：更换 guard 时引导栈上只有 kernel_main 一帧（各架构汇编
- * 直接跳入），而 kernel_main 永不返回，因此不会出现“旧值入栈、新值
- * 校验”的误报。MCU profile 不链接 core/random.c，金丝雀保持固定值。
+ * Timing constraint: when the guard is swapped there is exactly one frame on
+ * the boot stack, kernel_main (each architecture's assembly jumps straight
+ * into it), and kernel_main never returns, so the "old value pushed, new value
+ * checked" false positive cannot occur.  The MCU profile does not link
+ * core/random.c, so the canary keeps its fixed value there.
  */
 
 #include "core/types.h"

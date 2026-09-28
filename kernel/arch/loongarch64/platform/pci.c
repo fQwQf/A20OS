@@ -121,7 +121,7 @@ static void alloc_device_bars(int dev) {
          * multifunction device's function 0 does not make max_bar collapse. */
         uint8_t ht = ecam_read8(0, dev, 0, PCI_HEADER_TYPE);
         int hdr_type = ht & 0x7F;
-        int max_bar = (hdr_type == 1) ? 2 : 6; // Type 1 是 Bridge (2个BAR)，Type 0 是普通设备 (6个BAR)
+        int max_bar = (hdr_type == 1) ? 2 : 6; // Type 1 is a bridge (2 BARs), Type 0 is a plain device (6 BARs)
 
     for (int i = 0; i < max_bar; i++) {
         uint32_t bar_val = read_bar(dev, i);
@@ -206,7 +206,7 @@ static int find_virtio_caps(int dev, pci_virtio_dev_t *vd) {
         uint8_t bar_idx = bar_word & 0xFF;
 
         uint32_t cap_offset = ecam_read(0, dev, 0, ptr + 8);
-        // length 字段在 ptr + 12 处
+        // the length field is at ptr + 12
 
         /* The BAR number here indexes the header, not the allocated window, so
          * it is the *programmed* value that is read: clearing the low four bits
@@ -430,7 +430,7 @@ static uint32_t pci_vt_read32(virtio_transport_t *t, uint32_t mmio_off) {
      * as an error from here. */
     case VIRTIO_MMIO_INTERRUPT_STATUS:
         if (vd->isr_base)
-            return *(volatile uint8_t *)(vd->isr_base); // ISR 寄存器是 8 位的
+            return *(volatile uint8_t *)(vd->isr_base); // the ISR register is 8 bits wide
         return 0;
     /* Device configuration is BAR-relative, at whatever offset the DEVICE_CFG
      * capability named, and it is plain device-defined data rather than a fixed

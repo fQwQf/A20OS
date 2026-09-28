@@ -773,7 +773,8 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                 (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
                  magic2 == LINUX_REBOOT_MAGIC2B || magic2 == LINUX_REBOOT_MAGIC2C) &&
                 cmd == LINUX_REBOOT_CMD_POWER_OFF)) {
-        /* TEMP-DIAG: 关机前审计 buddy 空闲链完整性（shmring poweroff 损坏调查）*/
+        /* TEMP-DIAG: audit buddy free-list integrity before poweroff, for the
+         * shmring poweroff corruption investigation */
         kinfo("[SD] POWER_OFF entry");
         int audit = pfa_audit_lists();
         kinfo("[SD] audit errors=%d", audit);

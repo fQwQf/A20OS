@@ -125,10 +125,11 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
 
         pfn_t new_pfn = PFN_NONE;
 
-        /* 在 pfa.lock 内完成引用计数操作和 reuse 决策。
-         * 对于 reuse（独占页）的情况，在释放锁之前就更新 PTE，
-         * 防止定时器中断调度其他任务导致同一页面被 frame_put 释放后
-         * 被 buddy 回收并分配给用户数据（0x63636363 损坏的根因）。 */
+        /* Do the refcount work and the reuse decision inside pfa.lock.  In
+         * the reuse (exclusive page) case the PTE is updated before the lock is
+         * dropped: otherwise a timer interrupt can schedule another task which
+         * frame_put()s the same page, buddy recycles it, and it is handed out as
+         * user data -- the root cause of the 0x63636363 corruption. */
         uint64_t flags = (*pte & (PTE_R | PTE_X | PTE_U | PTE_A |
                                   PTE_G | PTE_MAT1 | PTE_LEAF)) |
                          PTE_W | PTE_D;
@@ -177,13 +178,15 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
 
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), leaf_size);
 
-            /* 在 frame_put 之前更新 PTE，防止以下竞争：
-             * 两个任务同时对同一物理页做 COW fault，都读到 rc>1 并释放锁。
-             * 如果先 frame_put 再更新 PTE，第二次 frame_put 可能使引用
-             * 计数归零并释放页面，而 PTE 仍指向已释放的物理页。
-             * 该页面被 buddy 回收后可能立刻分配给 slab 或用户数据（产生
-             * 0x63636363 损坏），TLB fill 走查过期 PTE 时读取到损坏内容。
-             * 先更新 PTE 再 frame_put，确保 PTE 不再引用旧页后才释放。 */
+            /* Update the PTE before frame_put(), against this race: two tasks
+             * take a COW fault on the same physical page, both read rc>1, and
+             * both drop the lock.  If frame_put ran first, the second one could
+             * take the refcount to zero and free the page while the PTE still
+             * points at it.  Once buddy recycles that frame it may go straight
+             * to slab or to user data -- the 0x63636363 corruption -- and a TLB
+             * fill walking the stale PTE reads the corrupted contents.  Updating
+             * the PTE first means the page is released only after nothing
+             * references it any more. */
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
             arch_tlb_flush_page_local(stval);
 
@@ -291,8 +294,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             stack_size_limit = USER_STACK_MAX_SIZE;
         stack_size_limit = ROUND_UP(stack_size_limit, PAGE_SIZE);
         uint64_t stack_limit = t->mm->stack_top - stack_size_limit;
-        /* ASLR 把栈顶向下移动后，栈增长下限随之下降；钳制到 USER_STACK_FLOOR，
-         * 保证永不侵入下方的固定 vDSO/vvar/TLS 区（见 mm/vdso_layout.h）。 */
+        /* Once ASLR has moved the stack top down, the lower bound for stack
+         * growth moves down with it.  Clamp to USER_STACK_FLOOR so it can never
+         * intrude into the fixed vDSO/vvar/TLS region below (see
+         * mm/vdso_layout.h). */
         if (stack_limit < USER_STACK_FLOOR)
             stack_limit = USER_STACK_FLOOR;
         if (page_va >= stack_limit && page_va < t->mm->stack_top) {

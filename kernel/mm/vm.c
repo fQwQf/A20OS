@@ -534,13 +534,17 @@ void mm_destroy(mm_struct_t *mm) {
 }
 
 /* MM_FORK_COW_REGRESSION_GUARD:
- * 在修改父进程页表（设置 COW 标志）时持有 parent->lock，防止与父进程
- * 的并发页错误处理产生竞争。回归场景：父进程多线程或模拟并发 page
- * fault 与 mm_fork() 同时触碰同一 writable PTE，父/子必须都看到 COW
- * PTE，且旧页引用计数在最后一个 PTE 替换后才下降。
- * 原代码未加锁直接修改父进程 PTE，在以下场景会导致数据损坏：
- *   1. 多线程程序中，父进程的另一个线程同时触发页错误
- *   2. SMP 模式下，另一个 CPU 在处理父进程的页错误 */
+ * parent->lock is held while the parent's page table is modified (the COW flags
+ * are set), which keeps this out of a race with the parent's concurrent page
+ * fault handling.  Regression scenario: a multithreaded parent, or a simulated
+ * concurrent page fault, touches the same writable PTE at the same time as
+ * mm_fork(); both parent and child must see the COW PTE, and the old page's
+ * refcount may only drop after the last PTE is replaced.
+ * The original code modified the parent's PTE without taking the lock, which
+ * corrupts data in these cases:
+ *   1. in a multithreaded program, another thread of the parent faults at the
+ *      same time;
+ *   2. under SMP, another CPU is handling a page fault in the parent. */
 mm_struct_t *mm_fork(mm_struct_t *parent) {
     if (!parent) return NULL;
     mm_struct_t *child = kcalloc(1, sizeof(mm_struct_t));
@@ -631,7 +635,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
 
     child->pgdir = child_pgdir;
 
-    // 复制所有 VMA
+    // Copy every VMA
     vm_area_t **tail = &child->mmap;
     vm_area_t *prev = NULL;
     for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {

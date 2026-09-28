@@ -258,7 +258,7 @@ bcache_t *bcache_create(block_dev_t *dev) {
     if (!bc) return NULL;
     memset(bc, 0, sizeof(*bc));
 
-    bc->dev = dev;  // 绑定底层块设备
+    bc->dev = dev;  // bind the underlying block device
     bc->pool_size = BCACHE_MAX_BLOCKS;
     spin_init(&bc->lock);
     lock_counters_register(&bc->lock, "block_cache");
@@ -281,7 +281,7 @@ bcache_t *bcache_create(block_dev_t *dev) {
         return NULL;
     }
 
-    // 初始化 LRU 链表（头尾哨兵节点）
+    // initialise the LRU lists (head and tail sentinel nodes)
     bc->lru_head.prev = NULL;
     bc->lru_head.next = &bc->lru_tail;
     bc->lru_tail.next = NULL;
@@ -370,7 +370,7 @@ void bcache_get_stats(bcache_stats_t *stats)
     }
 }
 
-// 驱逐一个块（第二机会 LRU：从尾部找最久未使用的块，accessed 位可留一次）
+// Evict one block (second-chance LRU: find the least recently used block from the tail; the accessed bit earns a reprieve once)
 static bcache_entry_t *bcache_evict(bcache_t *bc) {
     int quarantined = bcache_write_quarantined(bc);
     bcache_entry_t *e = bc->lru_tail.prev;
@@ -491,7 +491,7 @@ bcache_entry_t *bcache_get(bcache_t *bc, uint64_t lba) {
             return NULL;
         }
     } else {
-        // 没有底层设备，清零（用于内存文件系统）
+        // no underlying device, zero it (used by the in-memory filesystems)
         memset(e->data, 0, BCACHE_BLOCK_SIZE);
     }
 
@@ -721,7 +721,7 @@ int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos, size_t count) {
     return bcache_sync_common(bc, page_nos, count);
 }
 
-// 兼容不需要向上传播错误的历史 fsync/unmount 调用点。
+// Exists for legacy fsync/unmount call sites that do not propagate errors upward.
 void bcache_sync(bcache_t *bc) {
     (void)bcache_sync_checked(bc);
 }

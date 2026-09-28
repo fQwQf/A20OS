@@ -318,11 +318,11 @@ const uint8_t *virtio_net_mac(int idx) {
     return g_net[idx].mac;
 }
 
-/* lwIP linkoutput 在持有 g_lwip_lock 时调用此函数发送网络帧。
- * 如果此函数阻塞（等待 TX slot 或等待发送完成），会导致死锁：
- *   g_lwip_lock → virtio_net_send（阻塞等待完成）→ IRQ → lwIP 回调 → 需要 g_lwip_lock
- * 解决方案：nonblock=1 时不等待完成，提交描述符后立即返回。
- * 非 nonblock 模式保持原有行为（busy-wait 直到完成），用于非锁内调用。 */
+/* lwIP linkoutput calls this to send a frame while holding g_lwip_lock.
+ * Blocking here (waiting for a TX slot, or for send completion) deadlocks:
+ *   g_lwip_lock -> virtio_net_send (blocks) -> IRQ -> lwIP cb -> needs g_lwip_lock
+ * Fix: with nonblock=1, submit the descriptor and return without waiting.
+ * The non-nonblock path keeps busy-waiting until done, for unlocked callers. */
 int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     if (!packet || len == 0 || len > VIRTIO_NET_FRAME_MAX)
         return -1;
@@ -380,8 +380,8 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     virtio_net_kick(net, VIRTIO_NET_QUEUE_TX);
     spin_unlock_irqrestore(&net->lock, flags);
 
-    /* nonblock 模式：提交后立即返回，不等待完成。
-     * TX 完成中断会在 virtio_net_poll_all() 中清理 tx_busy。 */
+    /* nonblock mode: submit, then return without waiting for completion; the
+     * TX completion IRQ clears tx_busy in virtio_net_poll_all(). */
     if (nonblock) {
         net->tx_packets++;
         return (int)len;

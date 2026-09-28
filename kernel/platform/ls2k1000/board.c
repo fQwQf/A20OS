@@ -1,7 +1,7 @@
 #ifdef CONFIG_BOARD_LS2K1000
 
 /*
- * Loongson 2K1000 (龙芯 LS2K1000) board support.
+ * Loongson 2K1000 board support.
  *
  * The LS2K1000 SoC boots under PMON/UEFI and exposes its peripherals at fixed
  * physical addresses through LoongArch DMW aliases.  The GMAC

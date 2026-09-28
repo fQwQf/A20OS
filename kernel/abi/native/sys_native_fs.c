@@ -828,7 +828,7 @@ int64_t sys_a20_path_readlink_at(const a20_syscall_args_t *args)
 }
 
 /* ------------------------------------------------------------------ */
-/* uxfs：用户态文件服务注册与受控块 IO                                  */
+/* uxfs: user-space file service registration and controlled block IO     */
 /* ------------------------------------------------------------------ */
 
 int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
@@ -856,8 +856,9 @@ int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     /*
-     * 成功路径：端点对象引用（lookup_ref 所加）移交 uxfs 挂载持有，
-     * umount 时经 uxfs_unmount → a20_channel_ep_release 归还。
+     * Success path: the endpoint object reference taken by lookup_ref is
+     * handed to the uxfs mount to own, and returned on umount through
+     * uxfs_unmount -> a20_channel_ep_release.
      */
     r = uxfs_serve_mount(full_tgt, (a20_channel_ep_t *)entry.object, cur,
                          (int)kargs.block_index, kargs.flags);
@@ -877,7 +878,8 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
 
     task_t *cur = proc_current();
 
-    /* count==0 为容量查询：buf 指向 u64 出参，返回扇区数 */
+    /* count == 0 is the capacity query: buf receives a u64 holding the
+     * sector count */
     if (kargs.count == 0) {
         if (!kargs.buf)
             return -A20_ERR_INVALID_ARGUMENT;
@@ -895,7 +897,8 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     if (!kargs.buf || kargs.count > 4096)
         return -A20_ERR_INVALID_ARGUMENT;
 
-    uint32_t secsz = 512; /* 先按 512 探测；真实扇区在拿到设备后校验 */
+    uint32_t secsz = 512; /* probe with 512 first; the real sector size is
+                          * verified once the device is in hand */
     size_t bytes = (size_t)kargs.count * secsz;
     if (bytes > UFS_BLOCK_IO_MAX_BYTES)
         return -A20_ERR_INVALID_ARGUMENT;

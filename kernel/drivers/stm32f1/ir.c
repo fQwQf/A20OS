@@ -5,7 +5,7 @@
  * between one falling edge and the next (leader 13.5ms, '0' 1.125ms, '1'
  * 2.25ms), so timestamping edges is enough — no pulse needs to be watched.
  *
- * This replaces a register-level port of docs/pz/28-红外遥控实验 that measured
+ * This replaces a register-level port of the docs/pz/28 infrared remote
  * every high pulse by busy-waiting inside the ISR, ~60ms per frame. That cost
  * more than it looked: it starved the USART RX interrupt (a byte is 1ms at
  * 9600, so a frame could eat 60 of them) and it was the reason SDIO's polled

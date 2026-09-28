@@ -271,7 +271,7 @@ void proc_sleep_until(uint64_t wake_time) {
     }
 }
 
-// idle 进程的主循环，系统无任务时运行
+// The idle process's main loop, which runs when the system has no tasks
 void idle_loop(void) {
 #if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
     int first_schedule = 1;
@@ -353,7 +353,7 @@ void idle_loop(void) {
     }
 }
 
-// 初始化进程管理模块，创建 idle 进程
+// Initialise the process management module and create the idle process
 void proc_init(void) {
     memset(idle_tasks, 0, sizeof(idle_tasks));
     task_list_head = NULL;
@@ -458,7 +458,7 @@ void proc_init(void) {
         g_idle_kstack[cpu] = secondary->kstack;
     }
 
-    arch_set_task_pointer(idle);  // 设置 tp 寄存器
+    arch_set_task_pointer(idle);  // set the tp register
     proc_set_current(idle);
 
     kdebug("[PROC] Initialized, idle task pid=0\n");
@@ -491,7 +491,7 @@ task_t *proc_alloc_task_slot(void) {
     return t;
 }
 
-// 分配一个内核线程
+// Allocate a kernel thread
 int proc_alloc(void (*entry)(void)) {
     task_t *t = proc_alloc_task_slot();
     if (!t) return -EAGAIN;
@@ -686,7 +686,7 @@ int proc_pgid_alive(int pgid) {
     return alive;
 }
 
-// 向指定进程发送信号（kill 系统调用的实现）
+// Send a signal to the given process; the implementation of the kill syscall
 int proc_kill(int pid, int signum) {
     return signal_send_user(pid, signum);
 }
@@ -726,16 +726,16 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
  * mmap / brk
  * ============================================================ */
 
-// 调整堆大小（brk 系统调用的实现）
+// Adjust the heap size; the implementation of the brk syscall
 vaddr_t proc_brk(vaddr_t newbrk) {
     task_t *t = proc_current();
-    if (!t || !t->mm) return 0; // 理论上不应发生
+    if (!t || !t->mm) return 0; // should not happen in theory
 
     if (newbrk != 0)
         mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
 
-    // 如果 newbrk 为 0，通常是 C 库在查询当前堆位置
+    // A newbrk of 0 usually means the C library is querying the current break
     if (newbrk == 0) {
         vaddr_t brk = t->mm->brk;
         spin_unlock_irqrestore(&t->mm->lock, lock_flags);
@@ -749,7 +749,7 @@ vaddr_t proc_brk(vaddr_t newbrk) {
     return brk;
 }
 
-// 创建内存映射（mmap 系统调用的实现）
+// Create a memory mapping; the implementation of the mmap syscall
 vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off) {
     task_t *t = proc_current();
     if (!t || !t->mm) return (vaddr_t)-1;
@@ -784,7 +784,7 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
     return ret;
 }
 
-// 取消内存映射（munmap 系统调用的实现）
+// Remove a memory mapping; the implementation of the munmap syscall
 int proc_munmap(vaddr_t addr, size_t len) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -1;

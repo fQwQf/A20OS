@@ -1,23 +1,23 @@
 /*
- * A20OS x86_64 — 内核自身 W^X（KXAN）
+ * A20OS x86_64 — kernel's own W^X (KXAN)
  *
- * 引导期 entry.S 用四个 1 GiB 大页把物理 0..4 GiB 映射到高半区
- * （boot_pdpt_hh，RWX；EFER.NXE 由 trap_init 打开）。本文件在 mm_init()
- * 之后（arch_kernel_wx_finalize，由 kernel_main 调用、仍在 BSP 单核阶段）
- * 细化为：
+ * At boot, entry.S maps physical 0..4 GiB into the high half with four 1 GiB
+ * huge pages (boot_pdpt_hh, RWX; EFER.NXE is turned on by trap_init).  This
+ * file runs after mm_init() (arch_kernel_wx_finalize, from kernel_main, still
+ * in the BSP single-core stage) and refines them into:
  *
- *   - 与 RAM 相交的 1 GiB 槽位降级为 PD 中的 2 MiB NX 块。boot_pdpt_hh
- *     经 PML4[256] 被所有进程页表共享，之后的修改对所有地址空间生效。
- *   - 内核映像占用的 2 MiB 块再降级为 PT 中的 4 KiB 页，按段打权限：
- *     .text ROX、.rodata RO+NX、.data/.bss RW+NX。
- *   - 其余 1 GiB 槽位（MMIO，PCD）只补 NX 位。
+ *   - the 1 GiB slot intersecting RAM becomes 2 MiB NX blocks in a PD;
+ *     boot_pdpt_hh is shared with all process page tables via PML4[256], so
+ *     later modifications reach every address space.  The 2 MiB block holding
+ *     the kernel image is split into 4 KiB PT pages per segment (.text ROX,
+ *     .rodata RO+NX, .data/.bss RW+NX); MMIO/PCD slots only get the NX bit.
  *
- * 恒等映射（PML4[0]）不在此处理：AP 蹦床在 64 位入口前还要经恒等映射取指，
- * 既有 arch_unmap_boot_identity() 已在 smp_boot_secondaries 之后将其整段
- * 清除。
+ * The identity mapping (PML4[0]) is not handled here: the AP trampoline still
+ * fetches through it before the 64-bit entry, and the existing
+ * arch_unmap_boot_identity() already clears it after smp_boot_secondaries.
  *
- * drvmod 模块经直映射执行：arch_kwx_module_protect() 把模块页拆成 4 KiB
- * 并置 text=RX、data=RW+NX，卸载时恢复 RW+NX。
+ * drvmod modules execute through the direct map: arch_kwx_module_protect()
+ * splits the module pages into 4 KiB, text=RX, data=RW+NX, restored on unload.
  */
 
 #include "core/arch.h"
@@ -29,13 +29,13 @@
 #include "mm/frame.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], _bss_end[];
-extern uint64_t boot_pdpt_hh[512];  /* entry.S, 挂在 PML4[256] 下 */
+extern uint64_t boot_pdpt_hh[512];  /* entry.S, hung under PML4[256] */
 
 #define X86_GIGA_SIZE   (1UL << 30)
 #define X86_EFER        0xC0000080U
 #define X86_EFER_NXE    (1ULL << 11)
 
-/* 找到覆盖 va 的共享 PD（对应 1 GiB 槽位须已降级）。 */
+/* the shared PD covering va (its 1 GiB slot must be downgraded already) */
 static uint64_t *x86_kwx_pd(vaddr_t va)
 {
     uint64_t e = boot_pdpt_hh[arch_pt_vpn(va, 2)];
@@ -44,7 +44,7 @@ static uint64_t *x86_kwx_pd(vaddr_t va)
     return arch_pte_to_ptr(e);
 }
 
-/* 确保 va 所在的 2 MiB 块已拆成 4 KiB 页表；返回 PT 或 NULL。 */
+/* ensure the 2 MiB block holding va is split into 4 KiB; PT or NULL */
 static uint64_t *x86_kwx_split_pmd(vaddr_t va)
 {
     uint64_t *pd = x86_kwx_pd(va);
@@ -124,8 +124,8 @@ void arch_kwx_module_unprotect(paddr_t base_pa, size_t total_bytes)
 
 void arch_kernel_wx_finalize(void)
 {
-    /* trap_init() 已在 BSP 上打开 NXE；这里兜底一次，因为本函数会在引导
-     * 大页上首次写入 NX 位。 */
+    /* trap_init() already enabled NXE on the BSP; double-check it here, since
+     * this function first writes the NX bit into the boot huge pages. */
     uint64_t efer = rdmsr(X86_EFER);
     if (!(efer & X86_EFER_NXE))
         wrmsr(X86_EFER, efer | X86_EFER_NXE);
@@ -135,10 +135,10 @@ void arch_kernel_wx_finalize(void)
     vaddr_t img_start  = (vaddr_t)(uintptr_t)__text_start;
     vaddr_t img_end    = (vaddr_t)ROUND_UP((uintptr_t)_bss_end, PAGE_SIZE);
 
-    /* 高半区 1 GiB 大页逐槽位重建：新 PD（连同内核映像块的 PT 拆分）先在
-     * 旁路构建完整，再用一次写入替换 PDPT 项。整个过程中现有映射始终
-     * 有效——若先装 NX 大页再拆块，TLB miss 会在 NX 的 .text 上取指
-     * 故障，trap 处理程序同样 NX，直接三连环复位。 */
+    /* Rebuild the high-half 1 GiB huge pages slot by slot: the new PD (with
+     * the PT split of the kernel image block) is built off to the side and
+     * installed with one write, so existing mappings stay valid: NX huge
+     * pages first would reset three ways (.text, TLB miss, NX handler). */
     /* Rebuild every present 1 GiB slot, not just the first four.  The
      * buddy allocator can hand out order-7 (2 MiB) pages anywhere in the
      * direct map, and a host may well have usable RAM above 4 GiB (QEMU's
@@ -152,7 +152,7 @@ void arch_kernel_wx_finalize(void)
         if (!(e & PTE_V) || !(e & PTE_PS))
             continue;
         paddr_t base = (paddr_t)slot * X86_GIGA_SIZE;
-        int covers_ram = (slot == 0);   /* 槽位 0 含内核映像，必须降级 */
+        int covers_ram = (slot == 0);   /* slot 0 holds the image; must downgrade */
         size_t nranges = arch_ram_range_count();
         for (size_t r = 0; r < nranges && !covers_ram; r++) {
             paddr_t rb = 0, re = 0;
@@ -171,7 +171,7 @@ void arch_kernel_wx_finalize(void)
         for (int i = 0; i < 512; i++)
             pd[i] = (base + (paddr_t)i * PMD_SIZE) | (e & 0xFFFUL) | PTE_NX;
 
-        /* 本槽位内内核映像占用的 2 MiB 块：旁路建好 PT 后链入。 */
+        /* the image's 2 MiB block in this slot, linked in once its PT is built */
         for (vaddr_t blk = ROUND_DOWN(img_start, PMD_SIZE); blk < img_end;
              blk += PMD_SIZE) {
             if (arch_pt_vpn(blk, 2) != slot)
@@ -196,14 +196,14 @@ void arch_kernel_wx_finalize(void)
                 ((uint64_t)(uintptr_t)pt - PAGE_OFFSET) | PTE_V | PTE_W;
         }
 
-        /* 表已完整，一次写入切换。 */
+        /* the table is complete; switch over with a single write. */
         boot_pdpt_hh[slot] = ((uint64_t)(uintptr_t)pd - PAGE_OFFSET) |
                              PTE_V | PTE_W;
     }
 
     arch_tlb_flush();
 
-    /* 自检：直接查询页表确认关键页权限。 */
+    /* Self-check: query the page tables for the permissions of critical pages. */
     mm_leaf_info_t li;
     int ok = mm_query_leaf(boot_pgdir, img_start, &li) &&
              (li.flags & PTE_X) && !(li.flags & PTE_W);

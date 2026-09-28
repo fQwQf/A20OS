@@ -1,26 +1,26 @@
 /*
- * A20OS aarch64 — 内核自身 W^X（KXAN）
+ * A20OS aarch64 — kernel's own W^X (KXAN)
  *
- * 引导期 entry.S 用单个 1 GiB L1 block（boot_l1[1]，PA 0x40000000 起的
- * DRAM）把内核映像以 EL1 RW + 可执行映射到恒等区与高半区（boot_pgdir[0]
- * 与 [1] 共享同一张 boot_l1），并在启动注释中说明因此暂时清除
- * SCTLR_EL1.WXN。本文件在 mm_init() 之后（arch_kernel_wx_finalize，由
- * kernel_main 调用、仍在 BSP 单核阶段）把 DRAM block 细化为：
+ * At boot, entry.S uses a single 1 GiB L1 block (boot_l1[1], the DRAM at PA
+ * 0x40000000) to map the kernel image as EL1 RW + executable into the identity
+ * region and the high half (boot_pgdir[0] and [1] share one boot_l1); the boot
+ * comment there notes that SCTLR_EL1.WXN is cleared for now.  This file runs
+ * after mm_init() (arch_kernel_wx_finalize, still on the BSP single-core path).
  *
- *   - boot_l1[1] 降级为共享 L2 表中的 2 MiB NX block（普通内存、EL1 RW、
- *     PXN|UXN）。boot_l1 经 boot_pgdir[1] 被所有进程页表共享，之后的修改
- *     对所有地址空间同时生效；恒等别名走同一张表，自动一致。
- *   - 内核映像占用的 2 MiB block 再降级为 L3 4 KiB 页，按段打权限：
- *     .text RO+EL1X、.rodata RO+NX、.data/.bss RW+NX。
- *   - boot_l1[0]（设备 MMIO）本已 PXN|UXN，无需处理。
+ *   - boot_l1[1] becomes 2 MiB NX blocks in a shared L2 table (ordinary
+ *     memory, EL1 RW, PXN|UXN), shared via boot_pgdir[1] with every process
+ *     page table, so edits reach all spaces; the identity alias shares it too.
+ *   - the image's 2 MiB block splits into L3 4 KiB pages, per segment:
+ *     .text RO+EL1X, .rodata RO+NX, .data/.bss RW+NX.
+ *   - boot_l1[0] (device MMIO) is already PXN|UXN; nothing to do there.
  *
- * 拆分完成后在 C 中置回 SCTLR_EL1.WXN；entry.S 从核路径同步改为置位
- * （qemu-virt 非 NOMMU 构建）。
+ * Once the split is done, SCTLR_EL1.WXN is set back from C; the entry.S
+ * secondary-core path was changed to set the bit (qemu-virt non-NOMMU builds).
  *
- * drvmod 模块经直映射执行：arch_kwx_module_protect() 把模块页拆成 4 KiB
- * 并置 text=RX、data=RW+NX，卸载时恢复 RW+NX。aarch64 的 QEMU 板尚未接
- * 远程 TLB shootdown，模块打标只做本核 tlbi vmalle1（已知边界，见
- * docs/mm/kernel-wx.md）。
+ * drvmod modules execute through the direct map: arch_kwx_module_protect()
+ * splits the module pages into 4 KiB, text=RX, data=RW+NX, restored on unload.
+ * The aarch64 QEMU board has no remote TLB shootdown yet, so tagging a module
+ * only does a local tlbi vmalle1 (known boundary, see docs/mm/kernel-wx.md).
  */
 
 #include "core/arch.h"
@@ -39,7 +39,7 @@ extern char __text_start[], __rodata_start[], __data_start[], _bss_end[];
 #define A64_KFLAGS_RO    (PTE_R | PTE_MAT1 | PTE_LEAF)
 #define A64_KFLAGS_DATA  (PTE_R | PTE_W | PTE_MAT1 | PTE_LEAF)
 
-/* boot_l1：boot_pgdir[0] 与 [1] 共享的 L1 表。 */
+/* boot_l1: the L1 table shared by boot_pgdir[0] and [1]. */
 static uint64_t *a64_kwx_l1(void)
 {
     uint64_t e = boot_pgdir[1];
@@ -48,7 +48,7 @@ static uint64_t *a64_kwx_l1(void)
     return arch_pte_to_ptr(e);
 }
 
-/* 覆盖 va 的共享 L2 表（DRAM block 已在 finalize 时降级）。 */
+/* the shared L2 table covering va (the DRAM block was downgraded earlier) */
 static uint64_t *a64_kwx_l2(vaddr_t va)
 {
     uint64_t *l1 = a64_kwx_l1();
@@ -60,7 +60,7 @@ static uint64_t *a64_kwx_l2(vaddr_t va)
     return arch_pte_to_ptr(e);
 }
 
-/* 确保 va 所在的 2 MiB block 已拆成 L3 4 KiB 页表；返回 L3 表或 NULL。 */
+/* ensure the 2 MiB block holding va is split into an L3; L3 or NULL */
 static uint64_t *a64_kwx_split_block(vaddr_t va)
 {
     uint64_t *l2 = a64_kwx_l2(va);
@@ -141,10 +141,10 @@ void arch_kernel_wx_finalize(void)
               (unsigned long)e);
     paddr_t dram_base = arch_pte_addr(e);
 
-    /* DRAM 1 GiB block 重建：新 L2 表（连同内核映像块的 L3 拆分）先在
-     * 旁路构建完整，再用一次写入替换 L1 项。整个过程中现有映射始终
-     * 有效——若先装 NX block 再拆页，TLB miss 会在 NX 的 .text 上取指
-     * 故障，trap vector 同样 NX，直接卡死。 */
+    /* Rebuild the DRAM 1 GiB block: the new L2 table (with the L3 split of
+     * the image block) is built off to the side and installed with one write,
+     * so existing mappings stay valid throughout: NX blocks installed first
+     * hang the CPU on a TLB miss into the NX .text, trap vector NX too. */
     uint64_t *l2 = frame_alloc();
     if (!l2)
         panic("kwx: cannot allocate L2 table");
@@ -175,19 +175,19 @@ void arch_kernel_wx_finalize(void)
             arch_pte_from_pa(va_to_pa(l3)) | PTE_DIR;
     }
 
-    /* 表已完整，一次写入切换。 */
+    /* the table is complete; switch over with a single write. */
     l1[dram_idx] = arch_pte_from_pa(va_to_pa(l2)) | PTE_DIR;
 
     arch_tlb_flush();
 
-    /* 3. 映射已无 EL1 可写且可执行的页，置回 WXN。 */
+    /* 3. no EL1-writable and executable page is left; set WXN back. */
     uint64_t sctlr;
     __asm__ __volatile__("mrs %0, sctlr_el1" : "=r"(sctlr));
     sctlr |= 1UL << 19; /* WXN */
     __asm__ __volatile__("msr sctlr_el1, %0" :: "r"(sctlr) : "memory");
     __asm__ __volatile__("isb" ::: "memory");
 
-    /* 4. 自检：直接查询页表确认关键页权限。 */
+    /* 4. Self-check: query the page tables for critical page permissions. */
     mm_leaf_info_t li;
     int ok = mm_query_leaf(boot_pgdir, img_start, &li) &&
              (li.flags & PTE_X) && !(li.flags & PTE_W);
