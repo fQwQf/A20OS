@@ -702,6 +702,11 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 | 私有 3D ABI 已删除且门禁仍可失败 | `tools/a20 test smoke-gpu3d-riscv64` / 同上 `GPU_3D=0` | `ARCH=riscv64` | `62b6b17f`（正向退出 0；反向退出 1，日志为 `virtio-gpu 2D only (no VIRGL feature)` + `SKIP`） |
 | drvmod 模块变体仍可编译 | `make ARCH=riscv64 BOARD=qemu-virt-riscv64 kernel-only DRIVER_DEPLOYMENT=generic` | 通用 profile | `62b6b17f` |
 | `strace` 可解析进 world | `tools/a20 build xfce-x86_64` | `xfce.world`，Alpine v3.23 | `7164a94d`（安装 `strace 6.17-r0`，包数 519 → 522） |
+| pbuf 崩溃成因已判开 | `make ARCH=x86_64 ... NR_CPUS=4 CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1 run-world-gui` | x86_64 + KVM 桌面 | 本轮（canary 选项由 `25402c3e` 引入）。报 `detected mem underflow in pool PBUF_POOL` 而非 `pbuf_free: p->ref > 0` → **成因是 pool 越界写，不是重复释放**，详见 known-issues.md |
+
+**注意**：这一行是本轮唯一**推翻了既有文档结论**的测量。此前的记录（无论"是真正的
+重复释放"还是"两种假设不可区分"）都不成立；`CONFIG_LWIP_MEMP_OVERFLOW_CHECK` 正是
+为区分这两者而加的，它做到了。
 
 **未运行的**：`tools/build-virglrenderer.sh build`（需 root + 4 个 apt 包，见 §5.1）。
 因此**"stock Mesa `virtio_gpu_dri.so` 能挂上"至今没有任何证据**，既不支持也不反对。
