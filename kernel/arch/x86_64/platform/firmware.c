@@ -263,7 +263,6 @@ int firmware_console_getchar(void) {
  * make whatever else is in it cacheable.
  */
 #define X86_HIGH_RAM_BASE       0x100000000ULL
-#define X86_HIGH_RAM_MAP_END    0x200000000ULL
 #define X86_HIGH_PAGE           0x40000000ULL
 
 extern uint64_t boot_pdpt_hh[512];

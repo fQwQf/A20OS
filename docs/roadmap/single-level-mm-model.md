@@ -1211,3 +1211,48 @@ x86_64 实现（`kernel/arch/x86_64/mm/kwx.c:92`）转发到 `x86_kwx_set_pages(
 **影响**：这是 x86_64 上**所有**内核态驱动模块（含全部块驱动）都加载不了的前置 bug，
 与 CortenMM 改动无关，属既有问题；但它挡住了唯一能分辨性能结论的平台（TCG 采样离散度
 最高到 45%，见 §10.8），因此在修好之前 §10 的性能问题无法收口。
+
+### 10.10 修好 x86_64 引导：两个独立故障，其中一个是真实内核 bug
+
+§10.9 定位到失败点在 `x86_kwx_split_pmd()` 返回 NULL，但当时有两个候选分支。**插桩实测**
+（两处 NULL 各加一条 `kerr`，事后已移除）给出确定答案：
+
+```
+[ERR] [kwx-diag] pd NULL va=ffff80013fb80000 slot=4 e=1000000e3 V=1 PS=1
+[ERR] [kwx-diag] pd NULL va=ffff80013fb88000 slot=4 ...
+（"pdslot-absent" 命中 0 次）
+```
+
+命中的是**第 1 条**：`boot_pdpt_hh[4]` 的 `V=1, PS=1`——1 GiB 槽位 4 仍是**大页，从未降级**。
+`va=ffff80013fb80000` 对应物理 `0x13fb80000`（≈4.99 GiB），而启动日志报告
+`[RAM] usable 0x100000000..0x140000000 (1024 MiB)`，即 4–5 GiB 是**真实 RAM**，pfa 分配
+到这里完全正常，不是越界。
+
+**Bug 本体**：`arch_kernel_wx_finalize()` 写的是
+
+```c
+for (int slot = 0; slot < 4; slot++)      /* kernel/arch/x86_64/mm/kwx.c */
+```
+
+但直映射并不止 4 GiB——`firmware.c` 的 `X86_HIGH_RAM_MAP_END = 0x200000000`（8 GiB），
+固件按整 1 GiB 块把 4 GiB 以上的可用内存映射进来。于是槽位 4–7 是真实 RAM，装着真实的
+模块页，却因为循环只扫 0–3 而从未降级。后果是 `x86_kwx_pd()` 对这些地址返回 NULL →
+`x86_kwx_split_pmd()` 返回 NULL → `arch_kwx_module_protect()` 返 -ENOMEM →
+**virtio-blk / virtio-scsi / ahci 三个块驱动全部加载失败**（-12）→ 扫不到 FAT32 →
+`/bin/init` ENOENT → PID 1 panic。**x86_64 上所有内核态驱动模块都加载不了。**
+
+**修法**：把直映射范围常量提到共享头 `arch/x86_64/include/platform.h`（原先只在
+`firmware.c` 里局部定义，提上来是为了避免与 `firmware.c` 漂移），循环上界改为
+`X86_HIGH_RAM_MAP_END >> 30`，即覆盖直映射实际映射的每一个 1 GiB 槽位。槽位 0 含内核
+映像、其降级路径（旁路建好新 PD 再单次写入替换 PDPT 项）原样保留。
+
+**第二个故障不是内核问题**：修完驱动能加载后，仍报 `no FAT32 device for /bin`。那是我
+自己的 QEMU 参数不对（用了默认 i440fx machine + `if=virtio`）。改用仓库自己
+`tools/targets-steps.mk` 里的写法（`-machine q35 -device virtio-blk-pci,drive=x0`）即
+正常。**所以我此前「x86_64 dev 镜像坏了」的结论是错的**：镜像没坏，坏的是驱动加载，
+而那半是我参数错。
+
+修后 x86_64 完整启动：`[INIT] Block device -> /bin (fat32)` → execve mksh →
+`audit errors=0`、`MM-ASM pt_pages=9 missing_meta=0 present=0 absent=0 prot=0 cow=0
+vma=0 anon_virt=0`。riscv64 侧无回归（smoke-mm-stress / smoke-mm-fork-exec-race 通过，
+审计全 0），x86_64/riscv64/aarch64 构建通过。
