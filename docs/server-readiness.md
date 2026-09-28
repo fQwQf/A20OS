@@ -52,19 +52,30 @@ AHCI（`FLUSH CACHE EXT`）。
    `g_lwip_lock` 保护全部 lwIP 核心状态，每次 raw lwIP 调用都必须持有
    （`docs/net/network-lock-contract.md`）。**多核服务器最核心的收益在这里
    直接归零**——这不是性能调优能解决的，需要重构 lwIP 集成。
-   *测量前置已就位，但还没有并发负载去用它*：该锁已注册进
-   `/proc/a20/lock_contention` 并开启 callsite 归因（`netfilter_test` 断言
-   该条目存在）。实测 `-smp 4` 跑完 `smoke-network-suite` 后
-   **`lwip: 0 0`**（acquires/spins 皆 0），而且 `vfile_table`、`page_cache`、
-   `dcache`、`block_cache`、`runq`、`proc` 同样全 0。
-   **这个 0 不能解读为"锁没问题"，而是"负载不对"**：`smoke-network-suite`
-   是功能套件，子测试逐个 fork+wait 串行跑（dns/tcp_loopback/tcp_edge/
-   udp_loopback/icmp_loopback/unix/alg/timeout），根本不产生并行网络流量，
-   因此它在结构上就无法回答分片是否有收益。
-   **结论：分片的取舍目前缺乏证据支撑。** 要做这个决定，前置件是先有一个
-   真正的并发网络压力负载（多路并发 TCP 传输）来打出真实 contention 分布，
-   再看归因指向哪些调用点。现在贸然分片就是在没有热点数据的情况下改并发
-   协议，风险与收益完全不对等。分片本身仍是未完成项。
+   **实测（`NR_CPUS=4` 真实 SMP 构建 + `net_stress_test` 4 路并发 × 4 MiB TCP）**：
+   ```
+   lwip:   27 acquires / 1149170 spins
+   proc:  3487 acquires / 5687843 spins
+   runq:   14 / 103859      (每 CPU 一把)
+   ```
+   两把锁的 spin 量都极高，`lwip` 平均每次争用要空转约 4.2 万次。
+   **而且真正更大的热点是 `proc_lock`**：争用次数约为 lwIP 的 126 倍、
+   spin 量约 5 倍。原排序把 `proc_lock` 放在 P2（"进程数上去后的扩展性"）
+   低估了——按这份数据它比 lwIP 全局锁更该先处理。
+
+   **一个必须记下来的坑：默认配置根本测不出这类问题。** `Makefile` 里
+   `NR_CPUS ?= 1`，所以所有默认 dev/smoke 门禁都是单核构建，给 QEMU 传
+   `-smp 4` 也没用——内核只起 1 个 CPU，而单核永远不可能争用自旋锁。
+   换句话说，之前观察到的 `lwip: 0 0` 是**单核默认配置伪造出来的假阴性**，
+   不能解读为"锁没问题"。跨核锁竞争只有显式 `NR_CPUS>1` 才可见。
+
+   **诚实的边界：callsite 归因只覆盖 acquire，不覆盖 spin。** 表中 27 次
+   acquire 全部归因到了具体调用点（`net_vfile_read` 21、`net_tcp_drop_pcb` 3、
+   `net_inet_bind_pcb` 2、`net_inet_socket_destroy` 1），但这些点的 spin 合计
+   只有 27，相对 1149170 几乎为零。所以"spin 具体发生在哪个调用点"目前
+   **没有可信数据**，不能据此设计分片方案；能信的只是"锁确实在被激烈争用"。
+   另注意 `net_vfile_read` 占了大头，说明相当部分争用来自 syscall 读路径，
+   而非纯收包路径。分片本身仍是未完成项。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
@@ -214,7 +225,7 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| P0 | lwIP 全局锁分片 | 决定多核网络收益能否兑现，其余网络工作都在它之下 |
+| P0 | lwIP 全局锁分片 | 已有实测证据（4 核并发 27 次争用/114 万自旋）；但 spin 归因不可信，需先修归因再设计方案 |
 | P0 | PID ns + userns + `pivot_root` | 多租户前置件；`pivot_root` 需先把 root/cwd 从路径字符串改为真实 mount 引用 |
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
@@ -224,7 +235,7 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |
-| P2 | `proc_lock` 按等待对象分锁 | 进程数上去后的扩展性 |
+| P0 | `proc_lock` 按等待对象分锁 | 实测比 lwIP 全局锁更热：4 核 3487 次争用/569 万自旋，8 核 33335 次/1619 万自旋 |
 | P2 | virtio-fs/DAX | 共享存储 |
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |
