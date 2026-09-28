@@ -28,8 +28,13 @@
 
 set -euo pipefail
 
-VIRGL_VERSION="${VIRGL_VERSION:-0.11.2}"
-VIRGL_URL="https://gitlab.freedesktop.org/mesa/virglrenderer/-/archive/${VIRGL_VERSION}/virglrenderer-${VIRGL_VERSION}.tar.gz"
+# Upstream is gitlab.freedesktop.org/virgl/virglrenderer -- NOT under mesa/,
+# which is a different (nonexistent for this project) path and answers with a
+# sign-in page rather than a 404, so a wrong path here looks like an auth
+# problem instead of a typo.  The archive is .tar.bz2, and releases are tagged
+# both as "1.3.0" and "virglrenderer-1.3.0"; the latter is the release tag.
+VIRGL_VERSION="${VIRGL_VERSION:-1.3.0}"
+VIRGL_URL="${VIRGL_URL:-https://gitlab.freedesktop.org/virgl/virglrenderer/-/archive/virglrenderer-${VIRGL_VERSION}/virglrenderer-virglrenderer-${VIRGL_VERSION}.tar.bz2}"
 VIRGL_REPO="https://gitlab.freedesktop.org/mesa/virglrenderer"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,7 +43,8 @@ SRC_DIR="${REPO_ROOT}/tools/virgl/src"
 BUILD_DIR="${REPO_ROOT}/tools/virgl/build"
 
 # Beyond 0.8.2 QEMU can pass GL through at all; 1.0.0 adds the Venus protocol a
-# modern Mesa prefers.  Anything below the first is useless to us.
+# modern Mesa prefers.  Anything below the first is useless to us.  1.3.0 is the
+# newest release and the one this script is verified to build.
 MIN_VIRGL=0.8.2
 # A 2020-era 1.1.0 reports a capset of ~308 bytes.  A renderer with the modern
 # protocol reports kilobytes, because the capset has to describe shader
@@ -52,10 +58,13 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # pkg-config names differ from apt package names.
+# python3-yaml is not optional: 1.3.0's gallium build imports it, and meson
+# reports the missing module only after a long configure, so a "check" that
+# omits it passes and then the build dies two minutes in.
 APT_PACKAGES=(
     meson ninja-build pkg-config flex bison
     libepoxy-dev libgbm-dev libdrm-dev libudev-dev
-    python3-mako libgl-dev libegl-dev
+    python3-mako python3-yaml libgl-dev libegl-dev
 )
 # llvm-dev is only needed for the gallium/virgl shader path; name it separately
 # so its absence is reported as optional rather than as a hard dependency.
@@ -150,32 +159,57 @@ cmd_build() {
 
     mkdir -p "$(dirname -- "$PREFIX")" "$SRC_DIR" "$BUILD_DIR"
 
-    local tarball="${SRC_DIR}/virglrenderer-${VIRGL_VERSION}.tar.gz"
+    local tarball="${SRC_DIR}/virglrenderer-${VIRGL_VERSION}.tar.bz2"
     if [[ ! -s "$tarball" ]]; then
         log "fetching virglrenderer ${VIRGL_VERSION}"
         curl -fL --retry 3 -o "${tarball}.part" "$VIRGL_URL" \
             || die "download failed: $VIRGL_URL"
+        # A wrong path on gitlab answers 200 with a sign-in HTML page, so
+        # curl succeeding proves nothing.  Decompressing is the real check.
+        bzip2 -t "${tarball}.part" 2>/dev/null \
+            || die "downloaded file is not a bzip2 archive -- wrong URL?
+       got $(file -b "${tarball}.part")
+       url: $VIRGL_URL"
         mv "${tarball}.part" "$tarball"
     fi
 
-    local src="${SRC_DIR}/virglrenderer-${VIRGL_VERSION}"
-    if [[ ! -d "$src" ]]; then
+    # The archive unpacks to "virglrenderer-<tag>", whose exact name depends on
+    # whether the tag carries the "virglrenderer-" prefix.  Discover it instead
+    # of assuming, so a tag rename cannot turn into "no meson.build" here.
+    local src=""
+    local d
+    for d in "${SRC_DIR}"/virglrenderer-"${VIRGL_VERSION}" "${SRC_DIR}"/virglrenderer-virglrenderer-"${VIRGL_VERSION}"; do
+        if [[ -f "$d/meson.build" ]]; then
+            src="$d"
+            break
+        fi
+    done
+    if [[ -z "$src" ]]; then
         log "unpacking"
         tar -xf "$tarball" -C "$SRC_DIR"
+        for d in "${SRC_DIR}"/virglrenderer-*; do
+            if [[ -f "$d/meson.build" ]]; then
+                src="$d"
+                break
+            fi
+        done
     fi
+    [[ -n "$src" ]] || die "archive unpacked but no meson.build found under ${SRC_DIR}"
 
     log "configuring (prefix ${PREFIX})"
-    # -Dvalgrind=disabled: the helper is optional and its absence is not an error.
-    # x86 asm: the renderer JIT-compiles shaders and this is the fast path.
+    # Only pass options that exist in this release.  meson treats an unknown
+    # -D as a hard error, not a warning, so an option that was renamed or
+    # removed upstream stops the configure outright.  valgrind=false because
+    # the helper is optional; it is a boolean, so "disabled" is rejected.
+    # venus=false: the Venus protocol needs host blob support, which this
+    # script's QEMU command line does not set up, and its absence is not an
+    # error for the virgl path we actually use.
     meson setup "$BUILD_DIR" "$src" \
         --prefix="$PREFIX" \
         --buildtype=release \
-        --wipe >/dev/null 2>&1 \
-    || meson setup "$BUILD_DIR" "$src" \
-        --prefix="$PREFIX" \
-        --buildtype=release \
-        -Dvalgrind=disabled \
-        -Dx86-asm=true
+        --wipe \
+        -Dvalgrind=false \
+        -Dvenus=false
 
     log "compiling ($(nproc) jobs)"
     meson compile -C "$BUILD_DIR" -j "$(nproc)"
@@ -185,8 +219,12 @@ cmd_build() {
     printf '%s\n' "$VIRGL_VERSION" > "${PREFIX}/.virgl-version"
     ldconfig 2>/dev/null || true
 
+    local libpath
+    if ! libpath="$(lib_dir)"; then
+        die "build finished but no libvirglrenderer.so.1 under ${PREFIX}"
+    fi
     log ""
-    log "installed: $(ls -1 "${PREFIX}"/lib/libvirglrenderer.so* 2>/dev/null | tr '\n' ' ')"
+    log "installed: ${libpath}/libvirglrenderer.so.1 -> $(readlink -f "${libpath}/libvirglrenderer.so.1")"
     log "version:   ${VIRGL_VERSION} (floor for QEMU GL passthrough is ${MIN_VIRGL})"
     log ""
     log "Now run a 3D instance. The Makefile uses this prefix automatically:"
@@ -198,9 +236,21 @@ cmd_build() {
     log "  tools/a20 test smoke-gpu3d-riscv64"
 }
 
+# meson installs under lib/<triplet>/ when built natively, so the lib dir is
+# discovered rather than assumed.  Guessing "lib" gives an LD_LIBRARY_PATH that
+# silently does nothing, and the symptom is the old library still being loaded.
+lib_dir() {
+    local d
+    for d in "$PREFIX/lib" "$PREFIX/lib/"*"-linux-gnu" "$PREFIX/lib64"; do
+        [[ -e "$d/libvirglrenderer.so.1" ]] && { printf '%s\n' "$d"; return 0; }
+    done
+    return 1
+}
+
 cmd_env() {
-    [[ -d "$PREFIX" ]] || die "no build at ${PREFIX}; run '$0 build' first"
-    printf 'LD_LIBRARY_PATH=%s\n' "$PREFIX/lib"
+    local d
+    d="$(lib_dir)" || die "no build at ${PREFIX}; run '$0 build' first"
+    printf 'LD_LIBRARY_PATH=%s\n' "$d"
 }
 
 case "${1:-check}" in

@@ -508,7 +508,13 @@ QEMU         := $(QEMU_$(ARCH))
 # local prefix.  Point QEMU_LIBPATH at that prefix's lib directory, or leave
 # it empty to use the system one.  Applied as an env prefix rather than via
 # -L because -L is QEMU's *data* search path, not its shared-library path.
-QEMU_LIBPATH ?= $(if $(wildcard tools/virgl/install/lib/libvirglrenderer.so.1),$(CURDIR)/tools/virgl/install/lib)
+# meson installs natively under lib/<triplet>/, so both layouts are probed.
+# Pointing at a directory that holds no library produces an LD_LIBRARY_PATH
+# that silently does nothing, and the symptom is the stale system library still
+# being loaded -- which looks exactly like "the build did not take effect".
+QEMU_VIRGL_LIB := $(firstword $(wildcard tools/virgl/install/lib/libvirglrenderer.so.1) \
+                   $(wildcard tools/virgl/install/lib/*-linux-gnu/libvirglrenderer.so.1))
+QEMU_LIBPATH ?= $(patsubst %/,%,$(abspath $(dir $(QEMU_VIRGL_LIB))))
 ifneq ($(strip $(QEMU_LIBPATH)),)
 QEMU         := env LD_LIBRARY_PATH=$(QEMU_LIBPATH):$$LD_LIBRARY_PATH $(QEMU)
 endif
