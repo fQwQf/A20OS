@@ -3,6 +3,7 @@
 #include "mm/mm.h"
 #include "mm/vdso.h"
 #include "mm/frame.h"
+#include "mm/pt.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
 #include "mm/fault.h"
@@ -418,7 +419,7 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
                PAGE_SIZE);
     }
 
-    if (pt_unmap_leaf(mm->pgdir, base, NULL, NULL, NULL, NULL) < 0) {
+    if (pt_unmap_leaf(mm, base, NULL, NULL, NULL, NULL) < 0) {
         for (size_t i = 0; i < PMD_PAGE_COUNT; i++)
             frame_put(pages[i]);
         return -EINVAL;
@@ -562,6 +563,12 @@ void mm_destroy(mm_struct_t *mm) {
         vma = next;
     }
     mm_vma_flush_deferred(mm);
+
+    /* free_vma_pages() retired the now-empty page-table pages through
+     * mm_pt_retire_table(); reclaim them before the page table itself goes
+     * away.  The final mm cannot be entered again, so pt_readers is zero here
+     * and the drain completes on its first pass. */
+    mm_pt_retire_drain(mm);
 
 #ifdef CONFIG_NOMMU
     for (int i = 0; i < mm->num_nommu_allocs; i++) {

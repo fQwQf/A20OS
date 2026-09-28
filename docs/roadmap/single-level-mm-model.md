@@ -1414,3 +1414,87 @@ riscv64/TCG + `taskset -c 12-15`）。因为每对的 ON 与 OFF 在时间上紧
 一行 `Could not open ...`。当时那个 `stress-pass: 0` 看起来像内核回归，其实是**我的测试
 脚本 bug**。这与 §10.8 那次「误把热页当缺页」是同一类错误：把工具链/脚本故障当成被测
 系统的结论。**在把一次失败归因于被测代码之前，先确认测试装置本身是对的。**
+
+### 10.16 PT 页 UAF：拆表点逐个审计（修复的前置条件）
+
+UAF 本身：`pt_unmap()` / `pt_unmap_leaf()` 的拆表循环用
+`mm_pt_node_fini(child); frame_free(child);` **同步释放** PT 页，而
+`mm_addrspace_lock()` 只锁覆盖节点、**后代是无锁遍历的**——另一 CPU 上正沿该后代下降的
+cursor 可能在帧被 buddy 回收后继续读它。`mm_pt_defer_free()` /
+`mm_pt_mark_stale_recursive()` 没有任何调用者，`vm.c` 排空循环等的是一条永远不会被
+填充的链表。
+
+修复必须接上生产端（拆表时先标记 stale 再交给排空），但前提是**每个拆表点都在
+`mm->lock` + TLB 事务内**，否则 `mm_pt_hold_table()` 会无锁改写 `mm->tlb_holds`，
+且没有事务就永远没人排空。逐点审计结果：
+
+| 拆表点 | 所在函数 | `mm->lock` | TLB 事务 | 结论 |
+|---|---|---|---|---|
+| `munmap.c:111` | `mm_munmap_locked` | 是（`mm_munmap` 287） | 是（287/291） | **安全** |
+| `munmap.c:241` | `mm_brk_locked` | 是（`mm_brk` 299） | 是（298/302） | **安全** |
+| `madvise.c:68/86` | `mm_madvise_dontneed` | 是（55） | 是（54/99） | **安全** |
+| `mprotect.c:103` | `mm_mprotect_locked` | 是（162） | 是（161/165） | **安全** |
+| `vm.c:421` | `mm_demote_huge_page` | 视调用者 | 视调用者 | **混合，见下** |
+| `vma.c:466` | `free_vma_pages` | 否 | 是（`vm.c:545`） | 缺 `mm->lock` |
+| `vma.c:442` | `mm_demote_huge_page` 的调用点 | 否 | 否 | **不安全** |
+| `sysv_shm.c:80` | `sysv_shm_unmap_attached_pages` | 否 | 否 | **不安全** |
+| `mremap.c:184` | `mm_move_mapping_pages` | — | — | `__attribute__((unused))` 死代码 |
+
+**关键的非显然结论**：`mm_demote_huge_page()` 自身**不能**被当作安全点——它的调用者
+安全性不一致（`munmap.c:90/232`、`mprotect.c:103` 安全，而 `vma.c:442` 既不持锁也不在
+事务内）。所以不能只在 `mm_demote_huge_page()` 内部加 `mm_pt_defer_free()`，否则从
+`vma.c:442` 进来时依旧是无锁改链表。要么把 `vma.c:442` 的调用者补齐锁与事务，要么让
+拆表本身**不依赖** TLB 事务（例如独立的、由 `mm->lock` 保护的回收队列 + 在
+`mm_tlb_invalidate_finish()` 之外也能排空的路径）。
+
+**建议方向**：优先后者。理由是 TLB 事务的语义是「本事务内我改了哪些地址，需要
+shootdown」，而 PT 页回收的语义是「这个节点已不可达，等读侧退出再释放」，两者本来
+不该耦合。把它塞进 TLB 事务导致**每个拆表调用点都必须开事务**，这是不必要的耦合，也是
+本次修复差点不安全的根因。独立队列只需 `mm->lock` 保护链表 + 一个可在任意上下文
+调用��排空点。
+
+### 10.17 修好 PT 页 UAF：回收与 TLB 事务解耦
+
+UAF 一直存在：`pt_unmap()` / `pt_unmap_leaf()` 的拆表循环用
+`mm_pt_node_fini(child); frame_free(child);` **同步释放** PT 页，而
+`mm_addrspace_lock()` 只锁覆盖节点、**后代是无锁遍历的**——另一 CPU 上正沿该后代下降的
+cursor，可能在该帧被 buddy 回收后继续读它。`mm_pt_defer_free()` /
+`mm_pt_mark_stale_recursive()` 此前**没有任何调用者**，排空循环等的是一条永远不会被
+填充的链表。
+
+**为什么上次接不上**：把 `mm_pt_defer_free()` 塞进 `pt_unmap*` 内部，要求每个拆表点都在
+`mm->lock` + TLB 事务内，但 8 个调用点里有 6 个两者皆无（`vma.c:466`、
+`vma.c:442`、`sysv_shm.c:80` …），于是只能无锁改写 `mm->tlb_holds`——那版已回退。
+根因是**把两件无关的事耦合了**：TLB 事务的语义是「本事务改了哪些地址、需要
+shootdown」，而 PT 页回收的语义是「该节点已不可达、等读侧退出再释放」。
+
+**本次修法**：`mm_struct` 新增 `pt_retire` 链表与**自己的** `pt_retire_lock`，
+与 TLB 事务彻底无关，因此**任何上下文都能调用**——不需要 `mm->lock`，也不需要开事务。
+`mm_pt_retire_table()` 做三件事：
+
+1. `mm_pt_mark_stale_recursive()`——让缓存了该节点的 cursor 观察到 `stale` 并重下降
+   （`mm_addrspace_lock` 本来就在下降途中 `mcs_lock` 之后和加锁之前各查一次）；
+2. **不**立即释放：帧保持 `FRAME_F_PT`，所以 buddy 不会把它发给别人；元数据也留到
+   排空时才丢，这样「已脱离」的状态由 `stale` 表达，而不是靠元数据消失来暗示；
+3. 入队后立刻尝试排空——若此刻 `mm->pt_readers == 0` 就当场回收，否则留给下一次
+   retire 或 `mm_destroy` 的兜底排空。
+
+**为什么这个宽限期是成立的**：`mm_addrspace_lock()` 在**下降读任何 PT 项之前**就
+`mm_pt_read_enter()`，且每层只读一次父项。于是父项被清零之后，**新的** cursor 不可能
+再到达该页；而已经持有它的 cursor 一定被计入 `pt_readers`。所以「等 `pt_readers` 归零」
+正好覆盖窗口。（注意这修的是**帧回收**这一半；`pt_unmap_leaf()` 的裸遍历与 cursor
+下降之间对 PTE 本身的无锁竞争是另一件事，本次未处理。）
+
+**验证**：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与
+riscv64 / aarch64 / x86_64 的 NOMMU 全部构建通过；`smoke-mm-stress`、
+`smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过，审计
+`missing_meta/present/absent/prot/cow/vma/anon_virt` 全 0。关键证据是
+**`pt_pages=6` 与改动前一致**，且在 churn 最猛的 `smoke-mm-fork-exec-race` 下同样为 6
+——若退役的帧没被真正回收，这个计数会随拆表次数上升。
+
+`mm_destroy()` 在 VMA 拆除之后、`mm_destroy` 早期补一次 `mm_pt_retire_drain()`：此时
+最终引用已归零、地址空间无法再被进入，`pt_readers` 必为 0，一次即可排空，不会泄漏。
+
+**未能验证**：arm32 在本环境**改动前就无法构建**（`arm-linux-gnueabihf-gcc` 不在
+PATH），其自有的一份 `pt_unmap` / `pt_unmap_leaf` 已同步改签名并从 `mm->pgdir` 取
+pgdir，但编译未经检验。
