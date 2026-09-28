@@ -148,13 +148,27 @@ def _check_runnable(inst: Instance, action: str) -> None:
                  "loongarch32 runs on the cemu simulator, not QEMU")
 
 
-def _gate_resources(inst, args) -> None:
-    """Refuse to start a guest the host cannot host, waiting if allowed to."""
+def _gate_resources(inst, args, *, guest: bool = True) -> None:
+    """Refuse to start work the host cannot afford, waiting if allowed to.
+
+    `guest=True` is the launch gate -- memory, CPU, guest slots and the host
+    ports this instance claims, because a QEMU that overcommits gets the OOM
+    killer to choose a victim.  `guest=False` is the build gate: disk only, so
+    `a20 package` is not blocked by a guest that happens to be running.
+
+    A dry run must not block.  `--dry-run` promises to print the command rather
+    than execute it, and waiting for a resource it will never consume is both a
+    lie about what it does and, with the default unlimited wait, an apparent
+    hang.
+    """
+    if getattr(args, "dry_run", False):
+        return
     policy = Policy.from_env()
     if getattr(args, "wait_timeout", None) is not None:
         policy = Policy(policy.reserve_mem_mb, policy.min_disk_mb,
                         policy.max_concurrent, args.wait_timeout)
-    preflight(inst, policy, REPO_ROOT, wait=not args.no_wait, echo=_echo)
+    preflight(inst, policy, REPO_ROOT, wait=not args.no_wait, echo=_echo,
+              guest=guest)
 
 
 def _echo(msg: str) -> None:
@@ -179,7 +193,9 @@ def cmd_resources(_args: argparse.Namespace) -> int:
 
 
 def cmd_build(args: argparse.Namespace) -> None:
-    build_instance(_load(args.instance), list(args.make_args), args.dry_run)
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    build_instance(inst, list(args.make_args), args.dry_run)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -242,6 +258,23 @@ def cmd_console(args: argparse.Namespace) -> int:
                             "commands and expect")
     if args.no_reset:
         inst = replace(inst, target=replace(inst.target, reset=None))
+    if args.dry_run:
+        # Previously ignored: `a20 console --dry-run` opened the real serial
+        # port and injected target.commands at a live board, which is the exact
+        # opposite of what the flag says.
+        t = inst.target
+        print(f"would open {t.serial} at {t.baud or 115200} baud")
+        if t.reset:
+            print(f"would reset: {t.reset}")
+        if t.console_check:
+            print(f"would wait for prompt: {t.console_check!r} "
+                  f"(timeout {t.boot_timeout or '120s'})")
+        for cmd in t.commands or ():
+            print(f"would send: {cmd}")
+        for want in t.expect or ():
+            print(f"would require: {want!r}")
+        print(f"transcript would go to {console_log_path(inst)}")
+        return EXIT_OK
     log = console_log_path(inst)
     try:
         transport = open_transport(inst)
@@ -361,9 +394,11 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     return 0 if manifest.artifacts else 1
 
 
-def cmd_flash(args: argparse.Namespace) -> int:
+def cmd_flash(args: argparse.Namespace) -> None:
     """Build the firmware and program the board with the declared backend."""
-    return run_flash(_load(args.instance), _flash_backends(), list(args.make_args), args.dry_run)
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
 
 
 def _flash_backends():
@@ -373,8 +408,10 @@ def _flash_backends():
         raise A20Error(f"components/flash-backends.toml: {e}") from None
 
 
-def cmd_package(args: argparse.Namespace) -> int:
-    return run_package(_load(args.instance), list(args.make_args), args.dry_run)
+def cmd_package(args: argparse.Namespace) -> None:
+    inst = _load(args.instance)
+    _gate_resources(inst, args, guest=False)
+    run_package(inst, list(args.make_args), args.dry_run)
 
 
 def cmd_show_vars(args: argparse.Namespace) -> int:

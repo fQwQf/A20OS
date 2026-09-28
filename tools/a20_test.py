@@ -26,6 +26,7 @@ from a20_derive import derive_make_vars
 from a20_error import InstanceBusy, ToolError
 from a20_instance import Instance
 from a20_make import REPO_ROOT, build_instance
+from a20_resource import Policy, preflight
 
 SMOKE_LOG_DIR = REPO_ROOT / ".kernel-build" / "smoke"
 DEFAULT_TIMEOUT_S = 20.0
@@ -162,6 +163,14 @@ def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
     delay = float(inst.test.input_delay) if inst.test.input_delay is not None else DEFAULT_INPUT_DELAY_S
     timeout = _parse_timeout(inst.test.timeout)
     log = SMOKE_LOG_DIR / f"{inst.name}.log"
+
+    # Re-check here, not only before the build.  The first gate can be minutes
+    # and a full kernel build old by the time QEMU starts, and the scarce
+    # resources -- the host ports in particular -- can be taken in between.
+    # This one is the authoritative one; the earlier gate exists to fail fast
+    # rather than to grant permission.
+    preflight(inst, Policy.from_env(), REPO_ROOT, wait=True,
+              echo=lambda m: print(m, flush=True), guest=True)
 
     with _exclusive(inst.name):
         with log.open("wb") as logf:
