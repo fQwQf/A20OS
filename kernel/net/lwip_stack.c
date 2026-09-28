@@ -448,6 +448,42 @@ void a20_lwip_poll(void) {
     net_packet_bottom_half_process();
 }
 
+/*
+ * Poll for a waiter that is only blocked on network progress (a socket read
+ * with no data queued).  The g_lwip_lock acquisition is skipped unless some
+ * device has actually signalled work, so a blocked reader stops serialising on
+ * a global lock to discover there is nothing to do.  This is the same gating
+ * virtio_net_poll_rx_all() applies on the scheduler path, and it is safe here
+ * because delivery does not run through this call: the IRQ top-half drains the
+ * device, and sched() runs the socket bottom-halves (which move bh_ring into
+ * the socket queues and wake read_waitq) before picking the next task.  TCP
+ * timers likewise advance from kernel_progress_timer_tick() on the timer IRQ.
+ *
+ * The bottom-halves are NOT gated: they take g_net_lock rather than g_lwip_lock,
+ * and the waiter needs them to drain its own deferred receive data.
+ */
+void a20_lwip_poll_waiter(void) {
+    int need_lock = a20_lwip_rx_pending_any();
+    for (int i = 0; i < A20_NET_MAX_DEVS && !need_lock; i++) {
+        const a20_lwip_netif_state_t *st = &g_netif_state[i];
+        if (!st->dev)
+            continue;
+        /* A driver that does not report IRQ-driven RX may only be making
+         * progress through polling, so it must be drained unconditionally. */
+        if (!st->ops || !st->ops->rx_irq_driven ||
+            !st->ops->rx_irq_driven(st->dev))
+            need_lock = 1;
+    }
+    if (need_lock) {
+        uint64_t flags = a20_lwip_lock();
+        a20_lwip_poll_locked();
+        a20_lwip_unlock(flags);
+    }
+    net_inet_bottom_half_process_all();
+    net_packet_bottom_half_process();
+}
+
+
 int a20_lwip_format_status(char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
         return 0;
