@@ -548,56 +548,6 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                 const void *cmdbuf, size_t len);
 static int virtio_gpu_resource_unref(virtio_gpu_inst_t *inst, uint32_t resource_id);
 
-static int gpu_ioctl(struct device *dev, unsigned long req, void *arg) {
-    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
-    if (!inst || !arg)
-        return -EINVAL;
-
-    struct virtio_gpu_3d_req r;
-    if (copy_from_user(&r, arg, sizeof(r)) < 0)
-        return -EFAULT;
-
-    /* A switch would emit a PIC jump table (R_RISCV_ADD32/SUB32) that the
-     * drvmod loader does not relocate; keep the dispatch a plain chain. */
-    if (req == A20_GPU_IOCTL_VIRGL_CHECK) {
-        return inst->virgl ? 0 : -ENXIO;
-    }
-    if (req == A20_GPU_IOCTL_CTX_CREATE) {
-        size_t nl = 0;
-        r.name[sizeof(r.name) - 1] = '\0';
-        while (nl + 1 < sizeof(r.name) && r.name[nl])
-            nl++;
-        return virtio_gpu_ctx_create(inst, r.ctx_id, r.context_init,
-                                     r.name, nl);
-    }
-    if (req == A20_GPU_IOCTL_CTX_DESTROY)
-        return virtio_gpu_ctx_destroy(inst, r.ctx_id);
-    if (req == A20_GPU_IOCTL_RES_CREATE_3D)
-        return virtio_gpu_resource_create_3d(inst, r.ctx_id, r.resource_id,
-                                             r.target, r.format, r.bind,
-                                             r.width, r.height, r.depth,
-                                             r.array_size, r.last_level,
-                                             r.nr_samples, r.flags);
-    if (req == A20_GPU_IOCTL_RES_UNREF)
-        return virtio_gpu_resource_unref(inst, r.resource_id);
-    if (req == A20_GPU_IOCTL_SUBMIT_3D) {
-        if (r.cmdlen == 0 || r.cmdlen > VIRTIO_GPU_3D_MAX_CMD_BYTES)
-            return -EINVAL;
-        uint8_t *tmp = kmalloc((size_t)r.cmdlen);
-        if (!tmp)
-            return -ENOMEM;
-        if (copy_from_user(tmp, (const void *)(uintptr_t)r.cmdbuf,
-                           (size_t)r.cmdlen) < 0) {
-            kfree(tmp);
-            return -EFAULT;
-        }
-        int rc = virtio_gpu_submit_3d(inst, r.ctx_id, tmp, (size_t)r.cmdlen);
-        kfree(tmp);
-        return rc;
-    }
-    return -ENOTTY;
-}
-
 /* ---- virtio-gpu 3D command wrappers (virgl passthrough) ---------------- */
 
 /* VIRTIO_GPU_CMD_CTX_CREATE: create a virgl rendering context. */
@@ -901,6 +851,19 @@ static int gpu_capset_info(struct device *dev, uint32_t index,
     return virtio_gpu_get_capset_info(inst, index, id, max_version, max_size);
 }
 
+static int gpu_get_features(struct device *dev, uint32_t *out_3d,
+                            uint32_t *out_context_init)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    if (out_3d)
+        *out_3d = inst->virgl ? 1u : 0u;
+    if (out_context_init)
+        *out_context_init = inst->context_init ? 1u : 0u;
+    return 0;
+}
+
 static int gpu_get_capset(struct device *dev, uint32_t ctx_id, uint32_t index,
                           uint32_t version, void *buf, size_t len)
 {
@@ -972,10 +935,10 @@ static const gpu_dev_ops_t gpu_ops = {
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
     .flush    = gpu_flush,
-    .ioctl    = gpu_ioctl,
     .get_edid = gpu_get_edid,
     .get_capset = gpu_get_capset,
     .capset_info = gpu_capset_info,
+    .get_features = gpu_get_features,
     .resource_attach_backing = gpu_resource_attach_backing,
     .ctx_create = gpu_ctx_create,
     .ctx_destroy = gpu_ctx_destroy,
