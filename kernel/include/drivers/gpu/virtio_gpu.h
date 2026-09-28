@@ -141,6 +141,22 @@ struct virtio_gpu_get_edid {
     uint32_t padding;
 } __attribute__((packed));
 
+struct virtio_gpu_get_display_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t padding;
+} __attribute__((packed));
+
+struct virtio_gpu_resp_display_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t enabled;
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} __attribute__((packed));
+
 #define VIRTIO_GPU_EDID_MAX_BYTES 1024
 
 struct virtio_gpu_resp_edid {
@@ -271,38 +287,8 @@ struct device *virtio_gpu_get_dev(void);
  * structural one. */
 #define VIRTIO_GPU_3D_MAX_CMD_BYTES (16u * 1024u * 1024u)
 
-/* ---- A20 virtio-gpu 3D passthrough ioctls ----
- * Exposed through gpu_dev_ops_t.ioctl (req = _IOW('G', nr, size) style
- * codes local to the A20 GPU layer).  User space (the virgl client stack)
- * uses these to drive the host-side GL context over the virtio-gpu 3D
- * controlq.  arg points to a virtio_gpu_3d_req for all of them. */
-#define A20_GPU_IOCTL_BASE  0x4700UL   /* 'G' family, A20 private */
-#define A20_GPU_IOCTL_CTX_CREATE     (A20_GPU_IOCTL_BASE + 1)
-#define A20_GPU_IOCTL_CTX_DESTROY    (A20_GPU_IOCTL_BASE + 2)
-#define A20_GPU_IOCTL_RES_CREATE_3D  (A20_GPU_IOCTL_BASE + 3)
-#define A20_GPU_IOCTL_RES_UNREF      (A20_GPU_IOCTL_BASE + 4)
-#define A20_GPU_IOCTL_SUBMIT_3D      (A20_GPU_IOCTL_BASE + 5)
-#define A20_GPU_IOCTL_VIRGL_CHECK    (A20_GPU_IOCTL_BASE + 6)
 
 /* A20 3D passthrough request payload.  The submit path points cmdbuf at
  * user memory holding a virgl command stream. */
-struct virtio_gpu_3d_req {
-    uint32_t ctx_id;
-    uint32_t resource_id;
-    uint32_t target;        /* create_3d */
-    uint32_t format;        /* create_3d */
-    uint32_t bind;          /* create_3d */
-    uint32_t width;
-    uint32_t height;
-    uint32_t depth;
-    uint32_t array_size;
-    uint32_t last_level;
-    uint32_t nr_samples;
-    uint32_t flags;
-    uint32_t context_init;
-    uint64_t cmdbuf;        /* submit_3d: user pointer */
-    uint64_t cmdlen;        /* submit_3d */
-    char     name[32];      /* ctx_create debug name */
-};
 
 #endif

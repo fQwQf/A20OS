@@ -249,11 +249,23 @@ static int vmsvga_ioctl(device_t *dev, unsigned long req, void *arg) {
     return -1;
 }
 
+static int vmsvga_get_features(struct device *dev, uint32_t *out_3d,
+                               uint32_t *out_context_init)
+{
+    (void)dev;
+    if (out_3d)
+        *out_3d = 0;
+    if (out_context_init)
+        *out_context_init = 0;
+    return 0;
+}
+
 static const gpu_dev_ops_t vmsvga_ops = {
     .get_info = vmsvga_get_info,
     .get_fb = vmsvga_get_fb,
     .flush = vmsvga_flush,
     .ioctl = vmsvga_ioctl,
+    .get_features = vmsvga_get_features,
 };
 
 static int vmsvga_probe(device_t *dev) {

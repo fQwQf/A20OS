@@ -109,6 +109,10 @@ virglrenderer
 # 诊断工具：glxinfo / eglinfo / glxgears / es2_info
 mesa-utils
 mesa-demos
+# strace：GBM 排查的实际下一步。已知失败点是 Mesa 的 gbm_create_device() 内部
+# （3d-graphics.md §9.13，累计排除 10 条假设），继续做假设-验证循环的性价比
+# 低于直接看它停在哪一步；宿主网络已通，依赖随取随装。
+strace
 
 # 网络
 networkmanager
