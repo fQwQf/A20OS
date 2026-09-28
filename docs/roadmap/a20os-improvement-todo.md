@@ -7,6 +7,9 @@
 [../../kernel/abi/linux/syscall_coverage.md](../../kernel/abi/linux/syscall_coverage.md)）中，
 下一个量级的方向评估见 [next-horizon.md](next-horizon.md)。
 
+面向服务器部署的**当前能力边界与阻塞项排序**见
+[../server-readiness.md](../server-readiness.md)。
+
 checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；文中带日期的验证记录均为
 历史记录，引用规则见文末"验证环境说明"。
 

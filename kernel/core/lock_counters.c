@@ -73,8 +73,11 @@ static size_t lock_counters_format_one(char *buf, size_t bufsz,
                                    __ATOMIC_RELAXED);
     uint64_t spn = __atomic_load_n(&lock->contended_spins,
                                    __ATOMIC_RELAXED);
-    int n = snprintf(buf + off, bufsz - off, "%s: %lu %lu\n",
-                     name ? name : "?", (unsigned long)acq, (unsigned long)spn);
+    uint64_t mx = __atomic_load_n(&lock->contended_max_spins,
+                                  __ATOMIC_RELAXED);
+    int n = snprintf(buf + off, bufsz - off, "%s: %lu %lu max=%lu\n",
+                     name ? name : "?", (unsigned long)acq, (unsigned long)spn,
+                     (unsigned long)mx);
     if (n < 0)
         return bufsz ? bufsz - 1 : 0;
     if ((size_t)n >= bufsz - off)
@@ -88,14 +91,21 @@ static size_t lock_counters_format_one(char *buf, size_t bufsz,
     for (int i = 0; i < LOCK_CALLSITE_SAMPLES; i++) {
         uintptr_t ra = __atomic_load_n(&samples[i].ra, __ATOMIC_RELAXED);
         uint64_t c = __atomic_load_n(&samples[i].contended, __ATOMIC_RELAXED);
-        if (!ra || !c)
+        if (!c)
             continue;
         uint64_t s = __atomic_load_n(&samples[i].spins, __ATOMIC_RELAXED);
+        uint64_t sm = __atomic_load_n(&samples[i].max_spins, __ATOMIC_RELAXED);
         uint64_t sym_off = 0;
-        const char *sym = kallsyms_lookup(ra, &sym_off);
-        n = snprintf(buf + off, bufsz - off, "  [%s] %s+0x%lx: %lu %lu\n",
+        /* ra == 0 means the waiter had no recoverable return address, e.g. an
+         * interrupt context.  Report it as "?" instead of dropping the sample,
+         * so per-site spins still account for the lock's contended_spins rather
+         * than silently losing whatever could not be symbolised. */
+        const char *sym = ra ? kallsyms_lookup(ra, &sym_off) : NULL;
+        n = snprintf(buf + off, bufsz - off,
+                     "  [%s] %s+0x%lx: %lu %lu max=%lu\n",
                      name ? name : "?", sym ? sym : "?",
-                     (unsigned long)sym_off, (unsigned long)c, (unsigned long)s);
+                     (unsigned long)sym_off, (unsigned long)c,
+                     (unsigned long)s, (unsigned long)sm);
         if (n < 0)
             break;
         if ((size_t)n >= bufsz - off) {

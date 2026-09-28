@@ -93,11 +93,18 @@ int vfs_read_file(vfile_t *vf, char *buf, size_t count)
          */
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int r = page_cache_read_vfile(vf, buf, count);
-        if (r != -ENOSYS)
+        if (r != -ENOSYS) {
+            if (r > 0)
+                proc_io_account((uint64_t)r, 0, 0, 0);
             return r;
+        }
     }
-    if (vf->ops && vf->ops->read)
-        return vf->ops->read(vf, buf, count);
+    if (vf->ops && vf->ops->read) {
+        int r = vf->ops->read(vf, buf, count);
+        if (r > 0)
+            proc_io_account((uint64_t)r, 0, 0, 0);
+        return r;
+    }
     return -EBADF;
 }
 
@@ -164,6 +171,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
         }
         if (write_lock)
             mutex_unlock(write_lock);
+        if (r > 0)
+            proc_io_account(0, (uint64_t)r, 0, 0);
         return r;
     }
     return -EBADF;
@@ -281,19 +290,16 @@ int vfs_sync(void)
     return 0;
 }
 
-int vfs_fsync(int fd)
+int vfs_fsync_vfile(vfile_t *vf)
 {
-    vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf)
         return -EBADF;
     int r = 0;
     if (vf->vnode) {
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
-        if (pc_r < 0) {
-            vfs_put_file_ref(fd, vf);
+        if (pc_r < 0)
             return pc_r;
-        }
         /* A filesystem-provided sync scopes the block-cache flush to this
          * vnode's own data and allocation metadata instead of flushing the
          * whole mount (which makes one fsync pay for every concurrent
@@ -305,6 +311,15 @@ int vfs_fsync(int fd)
             r = bcache_sync_checked((bcache_t *)vf->vnode->mnt->fs_data);
         }
     }
+    return r;
+}
+
+int vfs_fsync(int fd)
+{
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf)
+        return -EBADF;
+    int r = vfs_fsync_vfile(vf);
     vfs_put_file_ref(fd, vf);
     return r;
 }

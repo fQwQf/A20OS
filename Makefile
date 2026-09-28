@@ -283,6 +283,9 @@ SMOKE_INPUT_DELAY ?= 8
 # mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
 # page coverage under TCG; it is the heaviest smoke and needs a longer budget.
 SMOKE_TIMEOUT_MM_ST ?= 45s
+# A 4-core TCG run plus net_stress_test's 4 concurrent x 4 MiB transfers is
+# much slower than the single-core defaults, so it needs its own budget.
+SMOKE_TIMEOUT_SMP ?= 180s
 # oom_stress exhausts a 32 MiB cgroup limit page by page under TCG; the fault
 # storm plus boot time needs more than the default window.
 SMOKE_TIMEOUT_OOM ?= 60s

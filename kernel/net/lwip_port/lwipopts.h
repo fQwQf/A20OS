@@ -59,12 +59,28 @@
 #define PBUF_POOL_SIZE                  256
 #define PBUF_POOL_BUFSIZE               1536
 #define TCP_MSS                         1460
-#define TCP_WND                         (32 * TCP_MSS)
-#define TCP_SND_BUF                     (32 * TCP_MSS)
+
+/*
+ * lwIP leaves LWIP_WND_SCALE at 0, so the advertised window is a raw 16-bit
+ * field and both directions stall at 65535 B however large TCP_WND is.  The
+ * wire value is TCP_WND >> TCP_RCV_SCALE, hence TCP_WND <= 0xFFFF << the shift.
+ * TCP_WND is capped by receive buffering, not by the protocol: segments park in
+ * the pbuf pool, so 64 * MSS (~91 KiB, ~64 of 256 bufs) leaves 4x headroom
+ * rather than risking a mid-connection pool exhaustion and the drops it causes.
+ */
+#define LWIP_WND_SCALE                  1
+#define TCP_RCV_SCALE                   3
+#define TCP_WND                         (64 * TCP_MSS)
+#define TCP_SND_BUF                     (64 * TCP_MSS)
 #define TCP_SND_QUEUELEN                128
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_LISTEN_BACKLOG              1
 #define TCP_DEFAULT_LISTEN_BACKLOG      16
+
+/* lwIP truncates the advertised window to 16 bits after shifting; a larger
+ * TCP_WND would silently wrap rather than negotiate a wider window. */
+_Static_assert(TCP_WND <= (0xFFFF << TCP_RCV_SCALE),
+               "TCP_WND must fit the 16-bit window field after TCP_RCV_SCALE");
 
 #define IP_REASSEMBLY                   1
 #define IP_FRAG                         1

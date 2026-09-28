@@ -36,6 +36,7 @@
 - [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及**代码与注释规范**（语言、格式、何时该写注释、锁序与 ABI 注释约定）
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
+- [server-readiness.md](server-readiness.md)：把系统当服务器用之前，先读这篇（它直说了还差什么）
 
 ## 驱动开发
 
@@ -98,6 +99,8 @@
 
 - [research/00-index.md](research/00-index.md)：A20OS 研究笔记的索引与论点（能力信封为核心贡献）
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前改进清单与开发路线图
+- [server-readiness.md](server-readiness.md)：面向服务器部署的当前能力边界、结构性限制与阻塞项排序
+- [security/hardening.md](security/hardening.md)：安全加固状态，含「诚实性原则（fail-closed）」
 - [external-dependencies.md](external-dependencies.md)：外部依赖与协议说明
 - [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md)：第三方项目致谢与出处说明
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)：第三方组件许可证集中声明

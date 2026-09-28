@@ -1,4 +1,5 @@
 #include "fs/procfs.h"
+#include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "fs/vfs/mntns.h"
 #include "core/bootargs.h"
@@ -550,7 +551,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_LOADAVG:
-        snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
+    {
+        uint64_t a1, a5, a15;
+        unsigned running, total;
+        int max_pid;
+        proc_loadavg_snapshot(&a1, &a5, &a15, &running, &total, &max_pid);
+        /* Linux prints load in 1/100ths with two decimals, unpadded. */
+        unsigned l1 = (unsigned)((a1 * 100ULL) >> 16);
+        unsigned l5 = (unsigned)((a5 * 100ULL) >> 16);
+        unsigned l15 = (unsigned)((a15 * 100ULL) >> 16);
+        snprintf(buf, bufsz, "%u.%02u %u.%02u %u.%02u %u/%u %d\n",
+                 l1 / 100, l1 % 100, l5 / 100, l5 % 100,
+                 l15 / 100, l15 % 100, running, total, max_pid);
+        break;
+    }
         break;
     case PF_NET:
         net_format_status(buf, bufsz);
@@ -648,6 +662,11 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)a20_perf_format(buf, bufsz);
     case PF_A20_LOCK_CONTENTION:
         return (int)lock_counters_format(buf, bufsz);
+    case PF_A20_NETFILTER:
+        netfilter_format(buf, bufsz);
+        return (int)strlen(buf);
+    case PF_A20_NETMEM:
+        return a20_lwip_format_memp(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
@@ -863,15 +882,26 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return 0;
     case PF_PID_IO: {
         task_t *t = proc_find_get(pid);
+        unsigned long rchar = 0, wchar = 0, syscr = 0, syscw = 0;
+        unsigned long rd_bytes = 0, wr_bytes = 0;
+        if (t) {
+            rchar = (unsigned long)__atomic_load_n(&t->io_rchar, __ATOMIC_RELAXED);
+            wchar = (unsigned long)__atomic_load_n(&t->io_wchar, __ATOMIC_RELAXED);
+            syscr = (unsigned long)__atomic_load_n(&t->io_syscr, __ATOMIC_RELAXED);
+            syscw = (unsigned long)__atomic_load_n(&t->io_syscw, __ATOMIC_RELAXED);
+            rd_bytes = (unsigned long)__atomic_load_n(&t->io_read_bytes, __ATOMIC_RELAXED);
+            wr_bytes = (unsigned long)__atomic_load_n(&t->io_write_bytes, __ATOMIC_RELAXED);
+            proc_put(t);
+        }
         snprintf(buf, bufsz,
             "rchar: %lu\n"
             "wchar: %lu\n"
-            "syscr: 0\nsyscw: 0\n"
-            "read_bytes: 0\nwrite_bytes: 0\n"
+            "syscr: %lu\n"
+            "syscw: %lu\n"
+            "read_bytes: %lu\n"
+            "write_bytes: %lu\n"
             "cancelled_write_bytes: 0\n",
-            (unsigned long)(t ? t->total_time : 0),
-            (unsigned long)(t ? t->child_stime : 0));
-        proc_put(t);
+            rchar, wchar, syscr, syscw, rd_bytes, wr_bytes);
         break;
     }
     case PF_PID_LOGINUID:
@@ -1034,34 +1064,25 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", MAX_FILES);
         break;
     case PF_PRESSURE:
-        /* /proc/pressure: real CPU PSI from scheduler contention (psi.c);
-         * memory and I/O stall sources are not instrumented, so those lines
-         * report the accounted zero-stall baseline in the same "some" format. */
-        if (bufsz < 128) return 0;
-        {
-            char tmp[64];
-            psi_render_cpu(tmp, sizeof(tmp));
-            size_t off = 0;
-            size_t n = strlen(tmp);
-            if (n < bufsz - 1) {
-                memcpy(buf, tmp, n);
-                off = n;
-            }
-            psi_render_memio(tmp, sizeof(tmp));
-            n = strlen(tmp);
-            if (off + n < bufsz - 1) {
-                memcpy(buf + off, tmp, n);
-                off += n;
-            }
-            psi_render_memio(tmp, sizeof(tmp));
-            n = strlen(tmp);
-            if (off + n < bufsz - 1) {
-                memcpy(buf + off, tmp, n);
-                off += n;
-            }
-            buf[off] = '\0';
+    case PF_PRESSURE_CPU:
+    case PF_PRESSURE_MEM:
+    case PF_PRESSURE_IO: {
+        /* Linux exposes /proc/pressure as a directory of cpu|memory|io
+         * files; systemd and pressure-stall tooling read those paths, so a
+         * single flat file is not substitutable.  The parent carries the
+         * cpu line so a whole-tree cat still shows something useful. */
+        if (bufsz < 64)
+            return 0;
+        char tmp[64];
+        switch (type) {
+        case PF_PRESSURE_MEM: psi_render_mem(tmp, sizeof(tmp)); break;
+        case PF_PRESSURE_IO:  psi_render_io(tmp, sizeof(tmp)); break;
+        default:              psi_render_cpu(tmp, sizeof(tmp)); break;
         }
-        break;
+        int n = snprintf(buf, bufsz, "%s", tmp);
+        return n < 0 ? 0 : n;
+    }
+
     case PF_UID_MAP:
     case PF_GID_MAP: {
         /* User namespace mapping: the single root namespace identity maps

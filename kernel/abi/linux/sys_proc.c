@@ -753,6 +753,15 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
     const uint64_t LINUX_REBOOT_CMD_KEXEC = 0x45584543UL;
     const uint64_t LINUX_REBOOT_CMD = 0x424F4F54UL;
 
+    /* The magic values are public ABI constants, not a secret, so they
+     * authorise nothing.  Gate the whole call on CAP_SYS_BOOT, as the kexec
+     * entry points in sys_missing.c do. */
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!proc_has_cap(t, CAP_SYS_BOOT) && t->cred.euid != 0)
+        return -EPERM;
+
     if (magic1 == LINUX_REBOOT_CMD ||
         (magic1 == LINUX_REBOOT_MAGIC1 &&
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
@@ -859,47 +868,105 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     return -EINVAL;
 }
 
-int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
-    (void)pid;
-    if (resource < 0 || resource >= RLIM_NLIMITS)
-        return -EINVAL;
-    if (old_rlim) {
-        uint64_t r[2] = {0};
-        task_t *t = proc_current();
-        switch (resource) {
-            case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-            case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
-            case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
-            default: r[0] = 0; r[1] = (uint64_t)-1; break;
-        }
-        if (copy_to_user(old_rlim, r, sizeof(r)) < 0) return -EFAULT;
+/*
+ * Report a task's limit.  An unenforced resource reports RLIM_INFINITY, which
+ * is the truthful answer: no limit applies.  It is not a claim that a limit
+ * exists and happens to be large.
+ */
+static int rlimit_get(task_t *t, int resource, uint64_t pair[2])
+{
+    uint64_t v = 0;
+    switch (resource) {
+    case RLIMIT_STACK: v = t ? t->limits.stack : USER_STACK_MAX_SIZE; break;
+    case RLIMIT_CORE:  v = signal_task_rlim_core(t); break;
+    case RLIMIT_NOFILE: v = t ? t->limits.nofile : MAX_FILES; break;
+    case RLIMIT_AS:    v = t ? t->limits.as : 0; break;
+    case RLIMIT_NPROC: v = t ? t->limits.nproc : 0; break;
+    default: return -ENOSYS;
     }
-    if (new_rlim) {
-        uint64_t r[2];
-        if (copy_from_user(r, new_rlim, sizeof(r)) < 0) return -EFAULT;
-        task_t *t = proc_current();
-        if (!t) return -ESRCH;
-        switch (resource) {
-            case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-            case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
-            case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
-            default: break;
-        }
+    set_uniform_rlimit(pair, v);
+    return 0;
+}
+
+/*
+ * Install a limit.  A resource with no enforcement returns -EINVAL rather than
+ * a silent success: a caller that sets RLIMIT_AS and is told "ok" will believe
+ * the address space is capped when nothing caps it.
+ */
+static int rlimit_set(task_t *t, int resource, uint64_t cur, uint64_t max)
+{
+    if (!t)
+        return -ESRCH;
+    switch (resource) {
+    case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(cur, max); break;
+    case RLIMIT_CORE:  signal_task_set_rlim_core(t, cur); break;
+    case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(cur, max); break;
+    case RLIMIT_AS:    t->limits.as = cur; break;
+    case RLIMIT_NPROC: t->limits.nproc = cur; break;
+    default: return -EINVAL;
     }
     return 0;
+}
+
+int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
+    if (resource < 0 || resource >= RLIM_NLIMITS)
+        return -EINVAL;
+    if (!new_rlim && !old_rlim)
+        return 0;
+
+    /* Previously the pid argument was discarded outright, so a supervisor
+     * could only ever inspect or change its own limits. */
+    task_t *self = proc_current();
+    if (!self)
+        return -ESRCH;
+    task_t *t = self;
+    if (pid != 0) {
+        t = proc_find_get(pid);
+        if (!t)
+            return -ESRCH;
+    }
+
+    int ret = 0;
+    if (old_rlim) {
+        uint64_t r[2] = { 0, 0 };
+        int gr = rlimit_get(t, resource, r);
+        if (gr < 0) {
+            /* Nothing enforces this resource, so there is no value to report.
+             * RLIM_INFINITY is the truth; ENOSYS would be a lie about which
+             * resources exist. */
+            r[0] = 0;
+            r[1] = (uint64_t)-1;
+        }
+        if (copy_to_user(old_rlim, r, sizeof(r)) < 0)
+            ret = -EFAULT;
+    }
+    if (ret == 0 && new_rlim) {
+        /* Changing another task's limits is a privilege operation. */
+        if (t != self && !proc_has_cap(self, CAP_SYS_RESOURCE) &&
+            t->cred.uid != self->cred.uid) {
+            ret = -EPERM;
+        } else {
+            uint64_t r[2];
+            if (copy_from_user(r, new_rlim, sizeof(r)) < 0)
+                ret = -EFAULT;
+            else
+                ret = rlimit_set(t, resource, r[0], r[1]);
+        }
+    }
+    if (t != self)
+        proc_put(t);
+    return ret;
 }
 
 int64_t sys_getrlimit(int resource, void *rlim) {
     if (resource < 0 || resource >= RLIM_NLIMITS)
         return -EINVAL;
     if (!rlim) return -EFAULT;
-    uint64_t r[2] = {0};
     task_t *t = proc_current();
-    switch (resource) {
-        case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-        case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
-        case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
-        default: r[0] = 0; r[1] = (uint64_t)-1; break;
+    uint64_t r[2] = { 0, 0 };
+    if (rlimit_get(t, resource, r) < 0) {
+        r[0] = 0;
+        r[1] = (uint64_t)-1;
     }
     if (copy_to_user(rlim, r, sizeof(r)) < 0) return -EFAULT;
     return 0;
@@ -913,13 +980,7 @@ int64_t sys_setrlimit(int resource, void *rlim) {
     if (copy_from_user(r, rlim, sizeof(r)) < 0) return -EFAULT;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
-    switch (resource) {
-        case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-        case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
-        case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
-        default: break;
-    }
-    return 0;
+    return rlimit_set(t, resource, r[0], r[1]);
 }
 
 int64_t sys_getrusage(int who, void *usage) {
@@ -927,15 +988,34 @@ int64_t sys_getrusage(int who, void *usage) {
         who != RUSAGE_THREAD)
         return -EINVAL;
     if (!usage) return -EFAULT;
-    uint64_t u[18]; /* 144 bytes / 8 */
+    /* 64-bit struct rusage: two timevals then sixteen longs, matching the
+     * u[] slots used below.  Unfilled slots stay zero, which for
+     * ixrss/idrss/isrss/nswap/msgsnd/msgrcv is the truthful answer (no
+     * such accounting exists) rather than a missing measurement. */
+    uint64_t u[18];
     memset(u, 0, sizeof(u));
     task_t *t = proc_current();
     if (t) {
-        uint64_t ticks = t->total_time;
-        if (who == RUSAGE_CHILDREN)
-            ticks = t->child_utime + t->child_stime;
-        u[0] = ticks / 100;
-        u[1] = (ticks % 100) * 10000;
+        uint64_t uticks,sticks;
+        if (who == RUSAGE_CHILDREN) {
+            uticks = t->child_utime;
+            sticks = t->child_stime;
+        } else {
+            uticks = t->utime_ticks;
+            sticks = t->stime_ticks;
+        }
+        /* Accounting runs once per 100 Hz scheduler pass, so ticks/100 is
+         * seconds and the remainder is centiseconds -> microseconds. */
+        u[0] = uticks / 100;
+        u[1] = (uticks % 100) * 10000;
+        u[2] = sticks / 100;
+        u[3] = (sticks % 100) * 10000;
+        u[8] = __atomic_load_n(&t->perf_page_faults, __ATOMIC_RELAXED);
+        u[9] = __atomic_load_n(&t->perf_page_faults_maj, __ATOMIC_RELAXED);
+        u[11] = __atomic_load_n(&t->io_read_bytes, __ATOMIC_RELAXED);
+        u[12] = __atomic_load_n(&t->io_write_bytes, __ATOMIC_RELAXED);
+        u[16] = __atomic_load_n(&t->perf_switches_vol, __ATOMIC_RELAXED);
+        u[17] = __atomic_load_n(&t->perf_switches_invol, __ATOMIC_RELAXED);
     }
     if (copy_to_user(usage, u, 144) < 0) return -EFAULT;
     return 0;
