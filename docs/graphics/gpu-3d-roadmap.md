@@ -782,3 +782,37 @@ OpenGL core profile version: 4.5 (Core Profile) Mesa 25.2.7
 - 默认 EGL 驱动是 **ZINK**（Vulkan），在本 guest 里
   `vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`，导致 dri2 screen
   创建失败、回落 surfaceless。llvmpipe 仍然可用，但这是绕路而非正常路径。
+
+
+## 关键发现：guest 内没有可用的显示服务器
+
+`es2_info` / `glxinfo` / `glxgears` 全部失败，根因不是 GL 栈坏了，而是
+**根本没有 compositor 在跑**：
+
+- `/run/user/0/wayland-*` 不存在（`X1_SOCK=` 为空），即没有任何 Wayland socket；
+- `/tmp/.X11-unix/` 为空，`pgrep Xwayland` 无结果，即没有 X server；
+- 整份启动日志中 `labwc` / `wlr` **出现次数为 0** —— `/sbin/init` 声称会把会话
+  交给 XFCE Wayland session，但实测该交接没有发生。
+
+部分用户态确实起来了（`xfdesktop`、`dbus-daemon`、`PolicyKit1`、thumbnailer
+都有日志），所以「桌面起来了」这个观察是**误导性的**：起来了的是会话组件，
+不是承载 GL 应用的显示服务器。
+
+因此当前 guest 的 GL 能力必须这样表述：
+
+| 能力 | 状态 |
+| --- | --- |
+| llvmpipe OpenGL 4.5 core / GLES 上下文（`EGL_PLATFORM=surfaceless`） | **可用，已实测** |
+| 在真实显示上呈现（present）给 GL 应用 | **不可用**：无 compositor、无 X server |
+| `glxgears` / `glxinfo` | **不可用**：默认走 GLX，guest 内无 X display |
+| stock Mesa attach virgl | **不可用**：`GET_CAPS` 恒回 `0x1205`（已实测重试 8 次） |
+
+**这修正了此前的表述**：「软件 3D 可用」应严格限定为
+「surfaceless 上下文的 GL 4.5/GLES 可用」。要真正跑起 3D 游戏，还差两件事，
+且都不在 GPU 驱动层：
+
+1. **让 `/sbin/init` 真正把会话交给 labwc**（当前这一步没发生，需先定位为何
+   labwc 未启动）；
+2. 在其之上解决 virgl `GET_CAPS`，否则只能靠 llvmpipe 软件渲染。
+
+（以上均在不挂网卡的情况下实测，以避开已知的 pbuf 崩溃。）
