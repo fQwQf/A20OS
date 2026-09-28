@@ -971,21 +971,19 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                 /* Round-trip the recorded prot bits back to PTE flags: they
                  * were produced by mm_pt_prot_bits() from the same encoding,
                  * so the access check matches the VMA path exactly. */
-                pte_t allow = 0;
-                if (cls_byte & MM_ST_PROT_R) allow |= PTE_R;
-                if (cls_byte & MM_ST_PROT_W) allow |= PTE_W;
-                if (cls_byte & MM_ST_PROT_X) allow |= PTE_X;
-                /* PTE_U has no MM_ST_PROT_* bit: the status byte's three prot
-                 * bits are R/W/X, and every 8-bit slot is already spoken for
-                 * (4 class + COW + 3 prot).  It does not need one -- the status
-                 * is only ever recorded for user ranges, since
-                 * mm_pt_provision_anon() rejects anything outside them -- so
-                 * PTE_U is invariant here and must be supplied explicitly.
-                 * arch_pte_leaf() does not add it either, and omitting it
-                 * installs a supervisor-only PTE: the mapping "succeeds", then
-                 * the next user access takes a fault on the page we just
-                 * installed.  That was bug (b). */
-                allow |= PTE_U;
+                int prot = 0;
+                if (cls_byte & MM_ST_PROT_R) prot |= 1;
+                if (cls_byte & MM_ST_PROT_W) prot |= 2;
+                if (cls_byte & MM_ST_PROT_X) prot |= 4;
+                /* Ask the architecture for the flag set rather than assembling
+                 * PTE bits here.  Every user mapping needs more than R/W/X:
+                 * riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and
+                 * an explicit NX, and the helper also encodes the W=>R
+                 * dependency.  A hand-rolled mask silently drops whichever of
+                 * those this particular architecture happens to demand -- that
+                 * is what produced the supervisor-only PTE on riscv64 (b) and
+                 * the leaf-less PTE on x86_64. */
+                pte_t allow = mm_prot_to_pte_flags(prot);
                 if (mm_pte_flags_allow_access(allow)) {
                     pfn_t np = pfa_alloc_page();
                     if (np != PFN_NONE) {
