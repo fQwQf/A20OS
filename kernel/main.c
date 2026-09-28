@@ -5,6 +5,7 @@ void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
@@ -122,6 +123,10 @@ void kernel_main(void) {
     /* The W^X policy depends on the cmdline (a20.wx=deny|strip|off), so this
      * must run after bootargs */
     mm_wx_policy_init();
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* 预标记上限同理走 cmdline（a20.anonprov=<pages>），须在 bootargs 之后 */
+    mm_pt_anon_prov_init();
+#endif
     driver_core_init();
     printf("[INIT] Driver core initialized\n");
     usb_core_init();

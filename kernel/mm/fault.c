@@ -9,6 +9,7 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "mm/vmo.h"
 #include "core/consts.h"
 #include "core/defs.h"
@@ -39,6 +40,34 @@
  * - Read() on the same file uses the same page cache, so shared mmap writes are
  *   visible to read() without an explicit sync.
  */
+/*
+ * Install one mapping through the transactional cursor.  Every fault-path PTE
+ * write goes through here, so the per-PTE status and the hardware entry are
+ * always updated in the same step and no path can update one without the
+ * other.  A return of 1 from mm_addrspace_lock means a larger-than-needed
+ * leaf already covers the address, which a leaf map must not silently ignore.
+ */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    mm_cursor_t cur;
+    int r = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur);
+    if (r != 0)
+        return r < 0 ? r : -EFAULT;
+    r = mm_cursor_map(&cur, page_va, pfn_to_phys(pfn), flags, cls);
+    mm_cursor_unlock(&cur);
+    return r;
+}
+#else
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    (void)cls;
+    return pt_map(mm->pgdir, page_va, pfn_to_phys(pfn), flags);
+}
+#endif
+
 int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
                          vfile_t *vf)
 {
@@ -81,9 +110,10 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
 
     if (vma->pte_flags & PTE_X)
         arch_flush_icache_range(page_cache_data(pcp), PAGE_SIZE);
-    int r = pt_map(mm->pgdir, page_va, pfn_to_phys(cache_pfn), vma->pte_flags);
+    int r = fault_map(mm, page_va, cache_pfn, vma->pte_flags,
+                      MM_ST_FILE_SHARED);
     if (r < 0) {
-        kerr("[SHFAULT] pt_map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
+        kerr("[SHFAULT] map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
              proc_current()->pid, (unsigned long)page_va, vma->file_fd,
              (unsigned long)index, r);
         page_cache_put(pcp);
@@ -233,11 +263,13 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   full MAP_SHARED dirty/writeback coherence.
  */
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
-                                      enum mm_fault_access access) {
+                                      enum mm_fault_access access,
+                                      int lock_held) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
     (void)access;
+    (void)lock_held;
     return -1;
 #else
     if (!t->mm || !t->mm->pgdir) return -1;
@@ -267,8 +299,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             return -1;
         }
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                       vma->pte_flags);
+        int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
+                          MM_ST_ANON_MAPPED);
         if (r < 0) {
             cg_mem_uncharge(t->cgroup, 1);
             frame_put(pfn);
@@ -313,8 +345,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             }
             memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-            int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                           mm_user_stack_pte_flags());
+            int r = fault_map(t->mm, page_va, pfn, mm_user_stack_pte_flags(),
+                              MM_ST_ANON_MAPPED);
             if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
             if (page_va < t->mm->stack_bottom)
@@ -335,8 +367,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (pfn == PFN_NONE) { cg_mem_uncharge(t->cgroup, 1); return -1; }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                       mm_user_brk_pte_flags());
+        int r = fault_map(t->mm, page_va, pfn, mm_user_brk_pte_flags(),
+                          MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
@@ -417,8 +449,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 if (vma->pte_flags & PTE_X)
                     arch_flush_icache_range(pfn_to_virt(copy), PAGE_SIZE);
                 page_cache_put(pcp);
-                int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(copy),
-                               vma->pte_flags);
+                int r = fault_map(t->mm, page_va, copy, vma->pte_flags,
+                                  MM_ST_FILE_PRIVATE);
                 if (r < 0) {
                     cg_mem_uncharge(t->cgroup, 1);
                     frame_put(copy);
@@ -446,8 +478,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 return -1;
 
 
-            if (pt_map(t->mm->pgdir, page_va, pfn_to_phys(vpfn),
-                       vma->pte_flags) < 0)
+            if (fault_map(t->mm, page_va, vpfn, vma->pte_flags,
+                          MM_ST_VMO) < 0)
                 return -1;
 
             t->mm->rss++;
@@ -502,6 +534,11 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             if (end < page_va || end > vma->end)
                 end = vma->end;
 
+            if (lock_held) {
+                vma_get(vma);
+                spin_unlock(&t->mm->lock);
+            }
+
             for (uint64_t va = page_va; va < end; va += PAGE_SIZE) {
                 pte_t *next = pt_lookup_leaf(t->mm->pgdir, va,
                                              NULL, NULL, NULL);
@@ -518,17 +555,67 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 pfns[prepared++] = candidate;
             }
 
-            for (size_t i = 0; i < prepared; i++) {
-                uint64_t va = page_va + i * PAGE_SIZE;
-                if (pt_map(t->mm->pgdir, va, pfn_to_phys(pfns[i]),
-                           vma->pte_flags) < 0)
-                    break;
-                mapped++;
+            pte_t map_flags = vma->pte_flags;
+            if (lock_held) {
+                spin_lock(&t->mm->lock);
+                pte_t *cp = pt_lookup_leaf(t->mm->pgdir, page_va,
+                                           NULL, NULL, NULL);
+                if (prepared > 0 && cp && (*cp & PTE_V)) {
+                    for (size_t i = 0; i < prepared; i++) {
+                        cg_mem_uncharge(t->cgroup, 1);
+                        frame_put(pfns[i]);
+                    }
+                    vma_put(t->mm, vma);
+                    return 0;
+                }
+                if (prepared == 0) {
+                    vma_put(t->mm, vma);
+                } else if (mm_find_vma(t->mm, page_va) != vma) {
+                    for (size_t i = 0; i < prepared; i++) {
+                        cg_mem_uncharge(t->cgroup, 1);
+                        frame_put(pfns[i]);
+                    }
+                    vma_put(t->mm, vma);
+                    return -1;
+                } else {
+                    map_flags = vma->pte_flags;
+                    size_t keep = 0;
+                    for (size_t i = 0; i < prepared; i++) {
+                        uint64_t va = page_va + (uint64_t)i * PAGE_SIZE;
+                        pte_t *p = pt_lookup_leaf(t->mm->pgdir, va,
+                                                  NULL, NULL, NULL);
+                        if (p && (*p & PTE_V)) {
+                            cg_mem_uncharge(t->cgroup, 1);
+                            frame_put(pfns[i]);
+                            continue;
+                        }
+                        pfns[keep++] = pfns[i];
+                    }
+                    prepared = keep;
+                }
+            }
+
+            /* One transaction for the whole window: a single covering-node
+             * lock and a single descent, instead of one page-table walk per
+             * page.  This is the property the single-level model exists for. */
+            mm_cursor_t wcur;
+            int lr = mm_addrspace_lock(t->mm, page_va, end, &wcur);
+            if (lr == 0) {
+                for (size_t i = 0; i < prepared; i++) {
+                    uint64_t va = page_va + i * PAGE_SIZE;
+                    if (mm_cursor_map(&wcur, va, pfn_to_phys(pfns[i]),
+                                      map_flags, MM_ST_ANON_MAPPED) < 0)
+                        break;
+                    mapped++;
+                }
+                mm_cursor_unlock(&wcur);
             }
             for (size_t i = mapped; i < prepared; i++) {
                 cg_mem_uncharge(t->cgroup, 1);
                 frame_put(pfns[i]);
             }
+            if (lock_held)
+                vma_put(t->mm, vma);
             if (mapped != 0) {
                 t->mm->rss += mapped;
                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
@@ -547,8 +634,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         }
         memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
 
-        int r = pt_map(t->mm->pgdir, page_va, pfn_to_phys(pfn),
-                        vma->pte_flags);
+        int r = fault_map(t->mm, page_va, pfn, vma->pte_flags,
+                          MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
         t->mm->rss++;
@@ -754,8 +841,10 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
             if (direct_private && executable)
                 arch_flush_icache_range(page_cache_data(window[i]),
                                         PAGE_SIZE);
-            if (pt_map(mm->pgdir, va, pfn_to_phys(candidates[i]),
-                       map_flags) < 0)
+            if (pt_map_cls(mm->pgdir, va, pfn_to_phys(candidates[i]),
+                           map_flags,
+                           shared ? MM_ST_FILE_SHARED
+                                  : MM_ST_FILE_PRIVATE) < 0)
                 break;
             mm->rss++;
             installed++;
@@ -830,7 +919,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                                enum mm_fault_access access)
 {
 #ifdef CONFIG_NOMMU
-    return handle_demand_fault_locked(t, stval, access);
+    return handle_demand_fault_locked(t, stval, access, 0);
 #else
     if (!t || !t->mm || !t->mm->pgdir)
         return -1;
@@ -844,7 +933,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
          * busy swap PTE will close the remaining duplicate-swapin race. */
         spin_unlock(&mm->lock);
-        int r = handle_demand_fault_locked(t, stval, access);
+        int r = handle_demand_fault_locked(t, stval, access, 0);
         if (r == -ENOMEM) {
             cg_mem_oom_kill(t->cgroup);
             return -1;
@@ -856,6 +945,92 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         spin_unlock(&mm->lock);
         return -1;
     }
+
+    /*
+     * MM_AS_FAULT_FROM_STATUS -- the paper's fault handler (Fig. 8) decides
+     * from per-PTE status alone: query() yields Status::PrivateAnon / Mapped /
+     * Invalid, and PrivateAnon is mapped directly using the permissions
+     * recorded at mmap.  No VMA is consulted, which is exactly what the paper
+     * credits for its advantage over Linux -- "the time Linux spends in the
+     * VMA" (§6.2).
+     *
+     * Only a range that mm_pt_provision_anon() marked as MM_ST_ANON_VIRT is
+     * served here.  Anything else -- never provisioned (too large to provision
+     * eagerly), already mapped, an intermediate node, a file/VMO mapping, a
+     * huge leaf -- reports a different status and falls through to the
+     * VMA-based path below unchanged, so no other behaviour is affected.
+     */
+    {
+        mm_cursor_t qcur;
+        int qr = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur);
+        if (qr == 0) {
+            uint8_t cls_byte = 0;
+            int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
+            /* A userfaultfd registration over this entry must win: the fault
+             * has to be parked for the handler, not satisfied here.  The mark is
+             * per entry precisely so this decision needs no VMA.  The mark is
+             * authoritative *here* and is not re-derived from the range list:
+             * satisfying an ANON_VIRT entry returns from this function, so the
+             * userfaultfd_range_present() call on the VMA path below never
+             * runs for it.  That makes unregister obliged to clear the mark
+             * only for pages no registration still covers (docs 10.59). */
+            if (!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT &&
+                !mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)) {
+                /* Round-trip the recorded prot bits back to PTE flags: they
+                 * were produced by mm_pt_prot_bits() from the same encoding,
+                 * so the access check matches the VMA path exactly. */
+                int prot = 0;
+                if (cls_byte & MM_ST_PROT_R) prot |= 1;
+                if (cls_byte & MM_ST_PROT_W) prot |= 2;
+                if (cls_byte & MM_ST_PROT_X) prot |= 4;
+                /* Ask the architecture for the flag set rather than assembling
+                 * PTE bits here.  Every user mapping needs more than R/W/X:
+                 * riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and
+                 * an explicit NX, and the helper also encodes the W=>R
+                 * dependency.  A hand-rolled mask silently drops whichever of
+                 * those this particular architecture happens to demand -- that
+                 * is what produced the supervisor-only PTE on riscv64 (b) and
+                 * the leaf-less PTE on x86_64. */
+                pte_t allow = mm_prot_to_pte_flags(prot);
+                if (mm_pte_flags_allow_access(allow)) {
+                    pfn_t np = pfa_alloc_page();
+                    if (np != PFN_NONE) {
+                        if (cg_mem_charge(t->cgroup, 1) == 0) {
+                            memset(pfn_to_virt(np), 0, PAGE_SIZE);
+                            if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
+                                              allow, MM_ST_ANON_MAPPED) == 0) {
+                                mm_cursor_unlock(&qcur);
+                                mm->rss++;
+                                a20_perf_count(A20_PERF_MM_ANON_FAULTS);
+                                a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+                                a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
+                                /* The per-task / global soft-fault counters the
+                                 * VMA paths bump alongside rss++.  A fault path
+                                 * that does not record its faults makes every
+                                 * reader of these -- and /proc's reported fault
+                                 * rate -- wrong. */
+                                __atomic_fetch_add(&t->perf_page_faults, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&t->perf_page_faults_maj, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&g_perf_sw_page_faults, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1,
+                                                   __ATOMIC_RELAXED);
+                                arch_tlb_flush_page_local(stval);
+                                spin_unlock(&mm->lock);
+                                return 0;
+                            }
+                            cg_mem_uncharge(t->cgroup, 1);
+                        }
+                        frame_put(np);
+                    }
+                }
+            }
+            mm_cursor_unlock(&qcur);
+        }
+    }
+
     vm_area_t *vma = mm_find_vma(mm, page_va);
     /*
      * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
@@ -945,7 +1120,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         }
     }
 
-    int r = handle_demand_fault_locked(t, stval, access);
+    int r = handle_demand_fault_locked(t, stval, access, 1);
     spin_unlock(&mm->lock);
     if (r == -ENOMEM) {
         cg_mem_oom_kill(t->cgroup);

@@ -6,6 +6,7 @@
 #include "mm/mm.h"
 #include "mm/vm.h"
 #include "core/lock.h"
+#include "core/perf.h"
 #include "core/consts.h"
 #include "core/klog.h"
 #include "core/types.h"
@@ -33,7 +34,12 @@ int cg_mem_charge(struct cg_node *cg, size_t nr_pages)
     if (!cg) return 0;
     cg_node_t *node = (cg_node_t *)cg;
 
-    uint64_t flags = spin_lock_irqsave(&node->lock);
+    uint64_t flags;
+    if (!spin_trylock_irqsave(&node->lock, &flags)) {
+        a20_perf_count(A20_PERF_MM_CG_LOCK_CONTENDED);
+        flags = spin_lock_irqsave(&node->lock);
+    }
+    a20_perf_count(A20_PERF_MM_CG_LOCK_ACQUIRES);
     cg_mem_state_t *m = &node->res.mem;
 
     if (m->limit != SIZE_MAX && m->rss + nr_pages > m->limit) {

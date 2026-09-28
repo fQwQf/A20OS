@@ -119,7 +119,7 @@ static void sysv_shm_unmap_attached_pages(mm_struct_t *mm, uint64_t addr, size_t
         paddr_t pa = 0;
         vaddr_t base = 0;
         size_t size = 0;
-        if (pt_unmap_leaf(mm->pgdir, addr + p * PAGE_SIZE, &pa, &base, &size, NULL) == 0 && pa)
+        if (pt_unmap_leaf(mm, addr + p * PAGE_SIZE, &pa, &base, &size, NULL) == 0 && pa)
             frame_put(phys_to_pfn(pa));
     }
 }
@@ -319,6 +319,7 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
         sysv_shm_unref_attach(shmid);
         return (uint64_t)-ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
 
     size_t mapped = 0;
     for (size_t p = 0; p < npages; p++) {
