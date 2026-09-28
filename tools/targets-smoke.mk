@@ -370,11 +370,15 @@ smoke-smp-lock-contention:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
+	lwip_total=$$(awk '/^lwip: /{print $$3; exit}' "$$log"); \
+	site_total=$$(awk '/\[lwip\]/{s+=$$NF} END{print s+0}' "$$log"); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
 	   grep -qE '^lwip: [0-9]+ [0-9]+$$' "$$log" && \
 	   grep -qE '^proc: [0-9]+ [0-9]+$$' "$$log" && \
+	   [ -n "$$lwip_total" ] && [ -n "$$site_total" ] && \
+	   [ "$$site_total" -ge $$(( lwip_total * 90 / 100 )) ] && \
 	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render); log saved to $$log"; \
+		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin attribution intact: $$site_total of $$lwip_total lwip spins attributed); log saved to $$log"; \
 		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
 	else \
 		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
