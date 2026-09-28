@@ -56,6 +56,7 @@
 #define ATA_CMD_IDENTIFY        0xECU
 #define ATA_CMD_READ_DMA_EXT    0x25U
 #define ATA_CMD_WRITE_DMA_EXT   0x35U
+#define ATA_CMD_FLUSH_CACHE_EXT 0xE7U
 
 /* Hybrid completion window: TCG completions usually land within a
  * millisecond; beyond it the submitter parks on the port wait queue
@@ -166,6 +167,8 @@ static int ahci_start_port(ahci_port_t *port) {
     return 0;
 }
 
+static int ahci_wait_complete(ahci_port_t *port, size_t bytes);
+
 static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
                        uint16_t sectors, int write, uint64_t dma, size_t bytes) {
     if (port->read_only && (write || command == ATA_CMD_WRITE_DMA_EXT))
@@ -205,11 +208,61 @@ static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
     dma_sync_for_device(port->cmd_list, 1024U);
     dma_sync_for_device(table, sizeof(*table));
     dma_sync_for_device(port->transfer, bytes);
-    port->last_is = 0;
-    port->irq_seen = 0;
-    ahci_write(port, AHCI_PXIS, 0xFFFFFFFFU);
-    ahci_write(port, AHCI_PXCI, 1U);
+    return ahci_wait_complete(port, bytes);
+}
 
+/*
+ * Issue a command that transfers no data.  FLUSH CACHE EXT is the only one
+ * A20OS sends, and it is what makes fsync() durable on AHCI: a preceding
+ * WRITE DMA EXT has only reached the drive's volatile cache, which a power
+ * cut can still discard.
+ *
+ * LBA is set to 0xFFFFFFFF with count 0, which ACS-4 defines as "flush the
+ * entire cache"; a port flush is inherently device-wide, so there is no
+ * narrower form to expose.  PRDTL is 0 because there is no data buffer, and
+ * CFLAGS bit 6 (Write) stays clear.
+ */
+static int ahci_submit_nodata(ahci_port_t *port, uint8_t command) {
+    if (port->read_only)
+        return -EROFS;
+    if (ahci_wait_ready(port) != 0)
+        return -1;
+
+    ahci_cmd_header_t *header = &port->cmd_list[0];
+    ahci_cmd_table_t *table = &port->tables[0];
+    memset(header, 0, sizeof(*header));
+    memset(table, 0, sizeof(*table));
+
+    header->flags = 5U;   /* CFL=5 dwords (command FIS), no data direction */
+    header->prdtl = 0;   /* no PRD entries: this command moves no data */
+    header->ctba = (uint32_t)port->tables_dma;
+    header->ctbau = (uint32_t)(port->tables_dma >> 32);
+
+    table->cfis[0] = 0x27U;
+    table->cfis[1] = 0x80U;
+    table->cfis[2] = command;
+    table->cfis[3] = 0x00U;                 /* features */
+    table->cfis[4] = 0xFFU;                 /* LBA low  = 0xFFFFFFFF */
+    table->cfis[5] = 0xFFU;                 /* LBA mid */
+    table->cfis[6] = 0xFFU;                 /* LBA high */
+    table->cfis[7] = 0x40U;                 /* device: LBA mode */
+    table->cfis[8] = 0xFFU;                 /* LBA low  extended */
+    table->cfis[9] = 0xFFU;                 /* LBA mid  extended */
+    table->cfis[10] = 0xFFU;                /* LBA high extended */
+    table->cfis[12] = 0x00U;                /* count low  = 0: flush all */
+    table->cfis[13] = 0x00U;                /* count high */
+
+    dma_sync_for_device(port->cmd_list, 1024U);
+    dma_sync_for_device(table, sizeof(*table));
+    return ahci_wait_complete(port, 0);
+}
+
+/*
+ * Wait for the command currently in flight to retire.  Shared by the data
+ * commands and the no-data commands (FLUSH CACHE) so both observe the same
+ * timeout, hybrid poll/park behaviour and TFES error handling.
+ */
+static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
     uint64_t start = timer_get_ticks();
     uint64_t deadline = start + MS_TO_TICKS(AHCI_TIMEOUT_MS);
     uint64_t pre_poll_until = start + US_TO_TICKS(AHCI_HYBRID_PRE_POLL_US);
@@ -223,7 +276,8 @@ static int ahci_submit(ahci_port_t *port, uint8_t command, uint64_t lba,
         }
         if ((ahci_read(port, AHCI_PXCI) & 1U) == 0) {
             port->last_is = 0;
-            dma_sync_for_cpu(port->transfer, bytes);
+            if (bytes)
+                dma_sync_for_cpu(port->transfer, bytes);
             return 0;
         }
         if (!port->irq_registered) {
@@ -297,6 +351,18 @@ static int ahci_block_read(block_dev_t *dev, uint64_t lba, void *buf, size_t cou
 
 static int ahci_block_write(block_dev_t *dev, uint64_t lba, const void *buf, size_t count) {
     return ahci_rw((ahci_port_t *)dev->priv, lba, (void *)buf, count, 1);
+}
+
+static int ahci_block_flush(block_dev_t *dev) {
+    ahci_port_t *port = (ahci_port_t *)dev->priv;
+    if (!port)
+        return -ENODEV;
+    /* Serialised against ahci_rw: FLUSH CACHE is a whole-device operation, so
+     * it must not interleave with a multi-sector write on the same port. */
+    mutex_lock(&port->lock);
+    int r = ahci_submit_nodata(port, ATA_CMD_FLUSH_CACHE_EXT);
+    mutex_unlock(&port->lock);
+    return r == 0 ? 0 : -EIO;
 }
 
 block_dev_t *ahci_get_dev(int idx) {
@@ -484,6 +550,7 @@ static int ahci_probe_common(device_t *dev, int irq, uint32_t flags,
 
     port->block.read_sector = ahci_block_read;
     port->block.write_sector = ahci_block_write;
+    port->block.flush = ahci_block_flush;
     port->block.capacity = port->capacity;
     port->block.sector_size = AHCI_SECTOR_SIZE;
     port->block.priv = port;
@@ -563,9 +630,20 @@ static uint32_t ahci_class_sector_size(device_t *dev) {
     return AHCI_SECTOR_SIZE;
 }
 
+static int ahci_class_flush(device_t *dev) {
+    ahci_port_t *port = dev ? (ahci_port_t *)dev->drv_priv : NULL;
+    if (!port)
+        return -ENODEV;
+    mutex_lock(&port->lock);
+    int r = ahci_submit_nodata(port, ATA_CMD_FLUSH_CACHE_EXT);
+    mutex_unlock(&port->lock);
+    return r == 0 ? 0 : -EIO;
+}
+
 static const block_dev_ops_t ahci_class_ops = {
     .read = ahci_class_read,
     .write = ahci_class_write,
+    .flush = ahci_class_flush,
     .capacity = ahci_class_capacity,
     .sector_size = ahci_class_sector_size,
 };
