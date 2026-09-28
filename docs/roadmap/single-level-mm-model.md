@@ -3661,3 +3661,58 @@ helper），然后**无条件**对 `table[idx]` 调用 `mm_pt_refresh_absent_pro
 
 **插桩现状**（故意保留，供修复验证复用）：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、
 `[MM-RF]`）、`fault.c`（`[MM-ST]`、`[MM-FP]`）。**修复通过后必须全部移除。**
+
+### 10.57 **修复完成并验证**：改用 `mm_pt_leaf_table()` 刷新状态
+
+**改动**（`kernel/mm/mprotect.c`，缺页分支）：把「取到 PTE 指针」换成「取到叶子表」。
+
+```c
+-  if (pte) {
+-      int idx = arch_pt_vpn(va, 0);
+-      declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
+-  }
++  pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
++  if (ltab)
++      (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0), ptef);
+```
+
+**关键点：仓库里早就有 `mm_pt_leaf_table(pgdir, addr)`**（`kernel/include/mm/pt.h:208`，
+注释写着「The table that owns the leaf slot for addr … NOT the table `pt_walk()` returns」），
+它正是**不分配任何东西**的「下探到叶子表」——`mm_pt_refresh_absent_prot()` 需要的
+`table` 参数可以直接由它给出。**所以真正的缺陷不是「缺一个 helper」，而是
+「helper 早就存在，mprotect 没用它」。** 修复因此只有几行，且不引入新锁序、不新增分配：
+`mm_pt_leaf_table()` 不进 `mm_pt_read_enter()`，与既有 `pt_lookup_leaf()` 同量级。
+
+顺带清掉了 §10.38 引入的 `if (pte)` 守卫——它当初为消除 `pte - idx` 的 UBSAN 而加，
+**方向对但结论错**，正是它把刷新挡在了门外。
+
+**验证（全部在无插桩的干净树上完成）**：
+
+| 项 | 结果 |
+|---|---|
+| x86_64 `CONFIG_ANON_PROV_DEFAULT=4096` | `mm_stress` **PASS**，0 FATAL，`mm_anon_provisioned=9280`，`mm_fault_from_status=2842` |
+| x86_64 `CONFIG_ANON_PROV_DEFAULT=0`（回归） | `mm_stress` **PASS**，0 FATAL |
+| MM-ASM 关机审计（两臂） | 全 0，含 `prot=0 safe=0 anon_virt=0` |
+| 5 架构（riscv64/x86_64/aarch64/loongarch64/ppc64le） | 0 errors |
+| riscv64 + aarch64 NOMMU | 0 errors |
+| `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` | 全 PASS |
+| 残留插桩 | 0（`pt.c` / `mprotect.c` / `fault.c` 已清空） |
+
+带插桩那轮还额外确认了修复的**判据**：`MM-DIV=0`、`declined-refresh=0`、
+`read-only installs=0`——三类分叉迹象全部归零。
+
+**两处诚实记录**：
+1. 第一次「干净树」验证其实**跑的是过期二进制**——移除插桩后 `declined` 变成未使用变量，
+   `-Werror` 让构建失败，而 `dev-build` 静默保留了旧的 `kernel.elf`，于是日志里仍有
+   `[MM-INS]`。是靠检查日志里残留插桩 + 比对 `.elf` 与源文件 mtime 才发现的。
+   **教训：`dev-build` 失败时不会自动删除旧产物，必须核对时间戳，不能只看运行结果。**
+2. 最后那次 riscv64 复跑用的是 `make ARCH=riscv64 run`（**默认构建**），
+   因此 `mm_anon_provisioned=0 / mm_fault_from_status=0`——它验证的是**关闭**臂，
+   **没有覆盖 riscv64 的状态缺页路径**。riscv64 开启臂需带 `a20.anonprov=<n>` 重跑，
+   **此项尚未复核**（修复只动 mprotect 的状态刷新，理论上不影响，但不应凭「理论上」记账）。
+
+**十次证伪的最终教训**：前九次都在问「这份只读权限是**谁写进去的**」，
+第十次才问对——「**它为什么没被更新**」。状态路径按设计**从不查 VMA**（论文卖点），
+因此真正的契约是「**mprotect 必须在同一次调用里让状态与 VMA 一致**」。
+这条契约被一句「取不到 PTE 就没有状态可刷」的近似判断破坏了，而**那句注释写得如此笃定，
+以至于十次排查里有九次都被它引到了错误的分支上**。

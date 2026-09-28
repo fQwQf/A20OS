@@ -159,23 +159,26 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * v->pte_flags below was updated anyway, and a later
                  * status-driven fault installed the stale permissions --
                  * leaving a PTE that disagreed with its own VMA. */
-                int declined = !pte;
-                if (pte) {
-                    int idx = arch_pt_vpn(va, 0);
-                    declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
-                }
-                /* TEMP (docs 10.54): full sequence of status-byte writes. */
-                kerr("[MM-RF] va=%lx ptef=%lx declined=%d pte=%d\n",
-                     (unsigned long)va, (unsigned long)ptef, declined,
-                     (int)(pte != NULL));
-                /* TEMP (docs 10.49): widening to RW while the per-PTE status
-                 * keeps its old prot is exactly the divergence that leaves a
-                 * read-only PTE under a writable VMA (docs 10.48). */
-                if ((ptef & PTE_W) && declined)
-                    kerr("[MM-DIV] widened v[%lx,%lx) to RW but status NOT "
-                         "refreshed at va=%lx (pte=%d)\n",
-                         (unsigned long)v->start, (unsigned long)v->end,
-                         (unsigned long)va, (int)(pte != NULL));
+                /* Ask for the table that owns this leaf slot, NOT for a PTE
+                 * inside it.  pt_lookup_leaf() stops at the first non-present
+                 * entry, which is very often the level-0 entry of a table
+                 * that does exist -- so its NULL said nothing about whether a
+                 * per-PTE status was waiting to be installed.  Gating the
+                 * refresh on that NULL skipped it for exactly the pages that
+                 * were about to fault from the status, leaving a stale
+                 * ANON_VIRT prot behind; a later status fault then installed
+                 * it verbatim, putting a read-only PTE under a writable VMA
+                 * and killing the first store (docs 10.39-10.56).
+                 *
+                 * If there is no table at all there is nothing to refresh
+                 * either: the table a future fault creates has its metadata
+                 * memset to zero by mm_pt_node_init(), i.e. all
+                 * MM_ST_INVALID, so the status path cannot match
+                 * MM_ST_ANON_VIRT and cannot act on a stale prot. */
+                pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+                if (ltab)
+                    (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0),
+                                                    ptef);
                 va += PAGE_SIZE;
             }
         }

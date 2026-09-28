@@ -782,12 +782,6 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
         if (pfn_valid(pfn))
             arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
     }
-    /* TEMP (docs 10.53): log EVERY install -- va, class, flags -- so the
-     * runtime tells us which path put the faulting page there, instead of
-     * guessing.  Grep the crashing stval to get that page's whole history. */
-    kerr("[MM-INS] va=%lx cls=%d flags=%lx W=%d cow=%d\n",
-         (unsigned long)addr, (int)cls, (unsigned long)flags,
-         (int)((flags & PTE_W) != 0), (int)((flags & PTE_COW) != 0));
     *pte = arch_pte_leaf(pa, flags);
     mm_pt_note_present(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
                        status_byte(cls, flags));
@@ -861,21 +855,17 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
  */
 int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
 {
-    /* TEMP (docs 10.49): 0 = refreshed, 1 = declined (no metadata, or the
-     * class is no longer ANON_VIRT so this page is not ours to re-prot).
-     * Previously every no-op also returned 0, so a caller could not tell a
-     * successful refresh from a silently skipped one. */
     if (!table)
         return -EINVAL;
     pt_meta_t *m = mm_pt_meta(table);
     if (!m)
-        return 1;
+        return 0;
     uint8_t *slot = cls_slot(m, idx);
     if (!slot)
-        return 1;
+        return 0;
     uint8_t cls = MM_ST_GET_CLASS(*slot);
     if (cls != MM_ST_ANON_VIRT)
-        return 1;
+        return 0;
     *slot = (uint8_t)((MM_ST_CLS_BYTE(cls) & (uint8_t)~MM_ST_PROT_MASK) |
                       mm_pt_prot_bits(ptef));
     return 0;
