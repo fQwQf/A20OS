@@ -550,7 +550,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         break;
     }
     case PF_LOADAVG:
-        snprintf(buf, bufsz, "0.00 0.00 0.00 1/64 1\n");
+    {
+        uint64_t a1, a5, a15;
+        unsigned running, total;
+        int max_pid;
+        proc_loadavg_snapshot(&a1, &a5, &a15, &running, &total, &max_pid);
+        /* Linux prints load in 1/100ths with two decimals, unpadded. */
+        unsigned l1 = (unsigned)((a1 * 100ULL) >> 16);
+        unsigned l5 = (unsigned)((a5 * 100ULL) >> 16);
+        unsigned l15 = (unsigned)((a15 * 100ULL) >> 16);
+        snprintf(buf, bufsz, "%u.%02u %u.%02u %u.%02u %u/%u %d\n",
+                 l1 / 100, l1 % 100, l5 / 100, l5 % 100,
+                 l15 / 100, l15 % 100, running, total, max_pid);
+        break;
+    }
         break;
     case PF_NET:
         net_format_status(buf, bufsz);
@@ -863,15 +876,26 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return 0;
     case PF_PID_IO: {
         task_t *t = proc_find_get(pid);
+        unsigned long rchar = 0, wchar = 0, syscr = 0, syscw = 0;
+        unsigned long rd_bytes = 0, wr_bytes = 0;
+        if (t) {
+            rchar = (unsigned long)__atomic_load_n(&t->io_rchar, __ATOMIC_RELAXED);
+            wchar = (unsigned long)__atomic_load_n(&t->io_wchar, __ATOMIC_RELAXED);
+            syscr = (unsigned long)__atomic_load_n(&t->io_syscr, __ATOMIC_RELAXED);
+            syscw = (unsigned long)__atomic_load_n(&t->io_syscw, __ATOMIC_RELAXED);
+            rd_bytes = (unsigned long)__atomic_load_n(&t->io_read_bytes, __ATOMIC_RELAXED);
+            wr_bytes = (unsigned long)__atomic_load_n(&t->io_write_bytes, __ATOMIC_RELAXED);
+            proc_put(t);
+        }
         snprintf(buf, bufsz,
             "rchar: %lu\n"
             "wchar: %lu\n"
-            "syscr: 0\nsyscw: 0\n"
-            "read_bytes: 0\nwrite_bytes: 0\n"
+            "syscr: %lu\n"
+            "syscw: %lu\n"
+            "read_bytes: %lu\n"
+            "write_bytes: %lu\n"
             "cancelled_write_bytes: 0\n",
-            (unsigned long)(t ? t->total_time : 0),
-            (unsigned long)(t ? t->child_stime : 0));
-        proc_put(t);
+            rchar, wchar, syscr, syscw, rd_bytes, wr_bytes);
         break;
     }
     case PF_PID_LOGINUID:

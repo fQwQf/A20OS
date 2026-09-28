@@ -95,6 +95,26 @@ task_t *proc_current(void)
 #endif
 }
 
+void proc_io_account(uint64_t rbytes, uint64_t wbytes,
+                     uint64_t read_to_device, uint64_t write_to_device)
+{
+    task_t *t = proc_current();
+    if (!t)
+        return;
+    if (rbytes) {
+        __atomic_fetch_add(&t->io_rchar, rbytes, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&t->io_syscr, 1, __ATOMIC_RELAXED);
+    }
+    if (wbytes) {
+        __atomic_fetch_add(&t->io_wchar, wbytes, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&t->io_syscw, 1, __ATOMIC_RELAXED);
+    }
+    if (read_to_device)
+        __atomic_fetch_add(&t->io_read_bytes, read_to_device, __ATOMIC_RELAXED);
+    if (write_to_device)
+        __atomic_fetch_add(&t->io_write_bytes, write_to_device, __ATOMIC_RELAXED);
+}
+
 task_t *proc_set_current(task_t *next)
 {
     unsigned cpu = cpu_current_id();
