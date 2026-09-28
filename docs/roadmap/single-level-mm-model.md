@@ -1160,3 +1160,54 @@ mmap 指标上。
 **结论三（测量纪律再次被验证）**：本轮 mmap-PF 的采样离散度高达 45%（193–281 µs），
 远超 §10.3 定的 15% 门槛。TCG + 4 线程 + 共享宿主下，**除 mmap-PF/PF 外的所有对比都
 不可分辨**。在拿到 x86_64/KVM 之前，任何小于 ~1.5× 的性能结论都不成立。
+
+### 10.9 x86_64 dev 镜像启动失败的完整根因（不是镜像问题，是 W^X 缺页 bug）
+
+此前把 x86_64 记为「dev 镜像 FAT32 启动失败，`Cannot open /bin/init: -2`」。这个描述是
+错的：`/bin/init` 并不是缺失，而是**根本没有块设备**。完整链条（实测，非推断）：
+
+```
+[INIT] WARNING: no FAT32 device for /bin          <- mount_setup.c:348
+[ERR] [DRVMOD] virtio-blk.a20drv: cannot mark module text executable
+[DRIVERMGR] /boot/drivers/virtio-blk.a20drv: module load failed (-12)
+[ERR] [DRVMOD] virtio-scsi.a20drv: ... 同上
+[ERR] [DRVMOD] ahci.a20drv:      ... 同上
+[INIT] Cannot open /bin/init: -2
+KERNEL PANIC: init: no init program found
+```
+
+即 **virtio-blk / virtio-scsi / ahci 三个块驱动全部加载失败**，所以扫不到 FAT32 设备，
+`mount_block_devices()`（`kernel/fs/mount_setup.c:310`）无法把 FAT32 挂到 `/bin`，于是
+`/bin/init` ENOENT。注意 `mdir` 显示镜像里 `init` 在**根目录**、根本没有 `/bin`
+目录——riscv64 能跑起来是因为它走的是另一条路径，两个镜像的目录结构其实一样。
+
+失败点在 `kernel/drvmod/loader.c:1471`：
+
+```c
+if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,
+                            total_size) < 0) {
+    kerr("[DRVMOD] %s: cannot mark module text executable\n", name);
+    ...
+    return -ENOMEM;      /* -12 */
+}
+```
+
+x86_64 实现（`kernel/arch/x86_64/mm/kwx.c:92`）转发到 `x86_kwx_set_pages()`
+（同文件 :64），后者对每一页调用 `x86_kwx_split_pmd(va)`，**该函数返回 NULL 即 -ENOMEM**。
+`x86_kwx_split_pmd()` 只有两条路返回 NULL：
+
+1. `x86_kwx_pd(va)` 返回 NULL——即 `boot_pdpt_hh[slot]` 不是 `PTE_V`，或**仍是 1 GiB 大页
+   (`PTE_PS`) 未降级**。函数自己的注释就写了前提「对应 1 GiB 槽位须已降级」，而降级只由
+   `arch_kernel_wx_finalize()` 对 `covers_ram` 的槽位做。
+2. `if (!(e & PTE_V)) return NULL;`——**该 2 MiB 的 PD slot 压根不存在**。注意它对
+   「slot 是 2 MiB 大页」是能处理的（会拆分），唯独对「slot 不存在」直接放弃。
+
+模块页来自 `pfa`，物理地址可能落在直映射尚未建立 PD slot 的区域，于是走到第 2 条。
+**尚未确定实际命中的是第 1 条还是第 2 条**——这需要插桩或对照 `boot_pdpt_hh` 实测，
+不能在证据不足时直接改引导页表。可能的修法方向（待验证后再动）：
+把「slot 不存在」也当作需要新建的映射（按 `arch_pt_vpn(va,2)<<30 | arch_pt_vpn(va,1)<<21`
+算出该 2 MiB 的物理基址，分配 PT 并填 512 个 R|W leaf），而不是直接失败。
+
+**影响**：这是 x86_64 上**所有**内核态驱动模块（含全部块驱动）都加载不了的前置 bug，
+与 CortenMM 改动无关，属既有问题；但它挡住了唯一能分辨性能结论的平台（TCG 采样离散度
+最高到 45%，见 §10.8），因此在修好之前 §10 的性能问题无法收口。
