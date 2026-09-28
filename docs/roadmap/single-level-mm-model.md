@@ -2809,3 +2809,69 @@ VMA 创建点 / VMA 拆分合并）**全部**属于「事后改坏」这一类�
 **riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
 `smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
 状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.44 预标记本身自洽；真正的发现是「状态权限一旦 fault 就被永久冻结」
+
+按 §10.43 的结论，穷举 `mm_pt_provision_anon()` 的三个调用点，核对传入的 `flags` 与
+该范围内 VMA 的 `pte_flags`：
+
+| 调用点 | 传入 `flags` | 同函数里写入 VMA 的值 | 是否一致 |
+|---|---|---|---|
+| `mmap.c:197` | `ptef` | `vma->pte_flags = ptef;`（`mmap.c:163`） | **一致** |
+| `elf.c:183` | `pte_flags` | `vma->pte_flags = pte_flags;`（`elf.c:170`） | **一致** |
+| `munmap.c:275` | `mm_user_brk_pte_flags()` | `vma->pte_flags = mm_user_brk_pte_flags();`（`munmap.c:270`） | **一致** |
+
+且 `mm_pt_prot_bits()` 逐位正确打包 `PTE_R/W/X`，`status_byte()` 只做
+`cls | COW | prot` 的组合，**不会丢可写位**。所以**预标记阶段在结构上不可能**造成
+「VMA 可写、状态只读」——三处都把同一个值同时写进了 VMA 与状态。§10.43 猜测的
+两个候选（调用点 `flags` 不一致 / `status_byte` 丢位）**双双排除**。
+
+**但这一轮读代码带出一个此前没被注意到的、决定性的性质**：
+
+```c
+int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef) {
+    ...
+    uint8_t cls = MM_ST_GET_CLASS(*slot);
+    if (cls != MM_ST_ANON_VIRT)
+        return 0;                       /* <-- 关键 */
+    *slot = ... mm_pt_prot_bits(ptef);
+}
+```
+
+而 §10.39 现场读回的状态是 **`cls = 2`，即 `MM_ST_ANON_MAPPED`，不是 `MM_ST_ANON_VIRT`**。
+
+也就是说：**一个预标记页一旦被 fault 过、状态类从 `ANON_VIRT` 翻成 `ANON_MAPPED`，
+它的状态权限位就再也没有任何代码路径能改写了。** 唯一会改写状态权限的函数对已 fault 的
+页直接 early-return。此后该页的权限完全由 PTE 决定，状态权限只是一份不再更新的快照。
+
+这解释了为什么前六次修复全部无效：它们都在试图修「事后改坏」的路径，而现象根本不是
+事后改坏的。结合 §10.43 的邻域证据（33 页 VMA 里只有出错那一页已映射、其余 32 页
+`pte=0`），唯一自洽的时序是：
+
+1. 某段匿名范围被预标记，`ANON_VIRT` + 当时的 VMA 权限（**此刻状态与 VMA 必然一致**）；
+2. 某次 `mprotect` 把这段 VMA 改成**只读**；此时页**尚未 fault**，`mm_pt_refresh_absent_prot`
+   生效（`cls` 还是 `ANON_VIRT`），状态跟着改成只读——**仍然一致**；
+3. 该页被 fault，状态类翻成 `ANON_MAPPED`，按当时（只读）的状态装出只读 PTE——**仍然一致**；
+4. 此后该页状态权限**被冻结**（上面那段 early-return）；
+5. 某次 `mprotect` 把 VMA 改回**可写**。页是 present，走 mprotect 的「已映射」分支，
+   应当更新 PTE……**但现场 PTE 仍是只读**。
+
+所以全部矛盾收敛到**第 5 步**：一次把已映射页所在 VMA 改成可写、却**没有**把该页 PTE
+改成可写的 `mprotect`。而 §10.38 与 §10.40 两次修 mprotect 后「计数一字未变」，说明这两次
+修改**没有改变实际执行的代码路径**（`level > 0` 从未命中、NULL 指针也从未命中），因而
+既没修好、也没掩盖——**真正的缺陷还在 mprotect 里，只是不在我改的那两处**。
+
+**下一步因此收窄到一个点、且是可穷举的**：审计 mprotect 的「已映射」分支在什么条件下
+会**只改 `v->pte_flags` 而跳过 `*pte` 的写入**。候选包括（但需逐个读码确认，不能再猜）：
+循环条件与 `va` 推进是否在某处提前 `break`/`continue`；`pt_lookup_leaf()` 返回
+`level > 0` 时的降级失败分支；以及 `mm_pte_flags_apply_prot()` 之后是否还有把 `ptef`
+重置成只读的第二处赋值。
+
+**并且**：`mm_pt_refresh_absent_prot()` 那个 `cls != MM_ST_ANON_VIRT` 的 early-return 本身
+值得单独审视——它意味着「已 fault 的预标记页」在 mprotect 下**完全依赖 PTE 正确**，
+失去了状态这份冗余。是否应当在 mprotect 的已映射分支里**同时**刷新状态权限（而非依赖
+early-return），属于设计取舍，需要在定位到第 5 步的真正缺陷之后再决定。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
