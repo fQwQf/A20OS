@@ -311,7 +311,8 @@ DRM_CAP_ASYNC_PAGE_FLIP      0x7   DRM_CAP_DRAW_MESH          7
 与 `virtio-gpu-gl-device`、两块 GPU（NVIDIA RTX 4060 + AMD Radeon 780M）。
 **能力早已具备，此前一个都没用上**：`GPU_3D=1` 之前所有 GUI 实例用的都是
 2D-only 设备（`virtio-gpu-device` / `virtio-gpu-pci`），host 从不提供
-`VIRTIO_GPU_F_VIRGL`，于是 `A20_GPU_IOCTL_VIRGL_CHECK` 必然 `-ENXIO`。
+`VIRTIO_GPU_F_VIRGL`，于是 3D ops 必然返回 `-ENXIO`、
+`VIRTGPU_PARAM_3D_FEATURES` 报 0。
 全树 `virgl=on` / `virtio-gpu-gl` 零命中。现在 `GPU_3D=1` 选择 `-gl-` 变体，
 2D 仍是默认值，因此没有任何既有调用发生变化。
 
@@ -470,8 +471,8 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 | `GBM` | ❌ 未通 | `gbm_create_device()` 返回 NULL，钉在 Mesa 的 DRI screen 创建（KMS 路径）。已排除十条假设。**对 Wayland 客户端不是阻塞项**。最有效的下一步是 guest 里 strace，不是再来一轮假设 |
 | 真 DMA-BUF | ❌ 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO **快照**进 memfd，导出后再写入不可见。A20OS **没有**跨进程 VMO 共享，也没有 mmap-offset 协议，所以真 dma-buf 是**从零做**，不是打补丁。**不要假装做了** |
 | `VIRTGPU_RESOURCE_CREATE_BLOB` | ⚠️ 定义了但**未分发** | `VIRTGPU_PARAM_RESOURCE_BLOB` 报 0，至少是自洽的；现代 Mesa 偏好 blob 路径，但缺了也能工作 |
-| 窗口化/局部 present | ❌ 不可能 | `drm_present_buffer` 仍要求**精确满屏匹配**（bpp 32、宽高完全相同） |
-| 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | ⚠️ 仍在 | 与 VIRTGPU UAPI 重复。`gpu3d_test` 第一层仍用它做廉价的传输层回归。**在命令流语义被验证后退休** |
+| 窗口化/局部 present | ✅ 本轮已实现 | `drm_present_buffer_at()` 按扫描-out 边界裁剪，只 flush 实际写入的矩形；位置取 CRTC 记录的 x/y（Linux 语义）。严格的 32bpp 与 pitch 要求保留 |
+| 私有 `A20_GPU_IOCTL_*` 3D 传输 ABI（0x4700 段） | ✅ 本轮已删除 | 与 VIRTGPU UAPI 逐条重复，且只有上游那套是 Mesa 会说的。`gpu3d_test` 的三态退出码（77=SKIP）改从 `VIRTGPU_PARAM_3D_FEATURES` 读取后得以保留——为让 SKIP 重新可达，该参数与 `CONTEXT_INIT` 一并改为如实报告已协商的 feature 位 |
 | 硬件视频解码 | ❌ 不存在，且在 QEMU 里**不可能存在** | virtio-gpu 没有编解码引擎，VA-API 不是"未实现"而是**不可达**。可行的是软件解码：ffplay 是默认处理器且稳定；mpv 在 A20OS 上因每线程状态 bug 崩溃（见 `docs/distro/mpv-luajit-crash.md`）。virgl 通了之后 `vo=gpu` 能跑，但仍是软解 |
 | `A20_RENDERER=gl`（合成器 GL 渲染器） | ❌ 未启用 | 依赖 stock Mesa attach，且合成器侧呈现链路另有 §2 里程碑 B 的问题 |
 
@@ -540,7 +541,7 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 | 3 | 命令流语义验证 + 像素回读 | 是 | 否 | "3D 可用"这句话才成立 | 中 |
 | 4 | 合成器呈现（`WLR_RENDERER`/windowed present） | 部分 | 否 | 里程碑 B | 中 |
 | 5 | 真 DMA-BUF | 是 | 否 | PRIME/跨进程零拷贝 | **大（从零）** |
-| 6 | retire `A20_GPU_IOCTL_*` 私有 3D ABI | 是 | 否 | 去掉两套 3D ABI | 小（但需先有 3） |
+| 6 | retire `A20_GPU_IOCTL_*` 私有 3D ABI | **已完成** | 否 | 去掉两套 3D ABI | — |
 | 7 | `VIRTGPU_RESOURCE_CREATE_BLOB` 分发 | 是 | 否 | 现代 Mesa 偏好路径 | 小 |
 
 第 1 项已经落地：`packages/overlay/xfce/usr/local/bin/minecraft` 现在设置
@@ -646,7 +647,6 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
     Mesa 挂载后这件事自动发生，优先级低于 9 与 10。
 12. 放开 `A20_RENDERER=gl`（依赖 9 与 10）。
 13. `VIRTGPU_RESOURCE_CREATE_BLOB` 分发（§7）。
-14. retire `A20_GPU_IOCTL_*`（依赖 11）。
 15. 真 DMA-BUF（§7）——**从零做**，单独立项。
 
 在第 9 项完成之前，"3D 可用"这句话只对**传输层与 UAPI 表面**成立；
