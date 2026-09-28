@@ -1946,8 +1946,20 @@ static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
 
     switch (p.param) {
     case VIRTGPU_PARAM_3D_FEATURES:
-    case VIRTGPU_PARAM_CONTEXT_INIT:
+    case VIRTGPU_PARAM_CONTEXT_INIT: {
+        /* Answer from what the device negotiated, not from a constant.  A
+         * client reads 3D_FEATURES before it has done anything else and
+         * decides which path to take from it, so reporting 1 on a 2D-only
+         * device sends every guest down the 3D path and turns "this display
+         * has no virgl" into a confusing CTX_CREATE failure. */
+        uint32_t f3d = 0, fctx = 0;
+        if (ops->get_features)
+            (void)ops->get_features(drm_gpu_device(), &f3d, &fctx);
+        p.value = (p.param == VIRTGPU_PARAM_3D_FEATURES) ? f3d : fctx;
+        break;
+    }
     case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
+        /* A property of this driver's capset handling, not of the device. */
         p.value = 1;
         break;
     case VIRTGPU_PARAM_RESOURCE_BLOB:
@@ -2483,16 +2495,11 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
     case DRM_IOCTL_MODE_DESTROY_DUMB:
         return drm_mode_destroy_dumb(ctx, arg);
     default:
-        /* A20 virtio-gpu 3D passthrough: forward the request to the GPU
-         * driver's gpu_dev_ops_t.ioctl.  The per-open DRM context is not
-         * involved; the GPU driver owns the virgl context/resource id
-         * space and the controlq submission. */
-        if (req >= A20_GPU_IOCTL_BASE && req < A20_GPU_IOCTL_BASE + 16) {
-            gpu_dev_ops_t *ops = drm_gpu_ops();
-            if (!ops || !ops->ioctl)
-                return -ENODEV;
-            return ops->ioctl(drm_gpu_device(), req, arg);
-        }
+        /* The A20-private 3D transport ioctls used to be forwarded to the GPU
+         * driver from here.  They are gone: every one of them is covered by
+         * the upstream VIRTGPU UAPI above, and keeping a second 3D ABI meant
+         * two paths that can drift while only the upstream one is the one Mesa
+         * ever speaks.  Unknown requests stay EINVAL. */
         return -EINVAL;
     }
 }
