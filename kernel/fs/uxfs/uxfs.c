@@ -1,13 +1,14 @@
 /*
- * uxfs.c — 用户态文件系统代理（uxfs）。
+ * uxfs.c — the user-space filesystem proxy (uxfs).
  *
- * 把 VFS vnode/vfile 操作翻译为 ufs_proto.h 线协议消息，经 Channel IPC
- * 转发给用户态文件服务（ufsd）。VFS 核心、页缓存与块层留在内核；文件系统
- * 实现运行在可崩溃、可重启的用户态进程中（docs/hybrid-kernel/06-user-fs.md）。
+ * It turns VFS vnode/vfile operations into ufs_proto.h wire messages, sent
+ * over Channel IPC to the user-space file service (ufsd).  The VFS core, page
+ * cache and block layer stay in the kernel; the filesystem runs crashable and
+ * restartable in user space (docs/hybrid-kernel/06-user-fs.md).
  *
- * 并发模型：每个挂载一把请求互斥锁，串行化"发送请求-等待应答"对；服务侧
- * 是单线程循环，乱序/陈旧应答按 req_id 丢弃。服务断链后所有在飞请求以
- * -EIO 收场，重启 ufsd 后需重新挂载。
+ * Concurrency: one request mutex per mount serialises each send/wait pair; the
+ * service is single-threaded, and stale or reordered replies are dropped by
+ * req_id; after a link drop requests end -EIO, so remount once ufsd restarts.
  */
 #include "fs/uxfs.h"
 #include "fs/ufs_proto.h"
@@ -31,7 +32,7 @@ extern block_dev_t *mount_setup_block_device(int index);
 #define UXFS_DBG 0
 
 typedef struct uxfs_sb {
-    struct a20_channel_ep *ep;   /* 服务端点；引用归属本 sb */
+    struct a20_channel_ep *ep;   /* service endpoint; ref owned by this sb */
     struct task_t         *server;
     int                    block_index;
     uint32_t               next_req_id;
@@ -47,11 +48,11 @@ typedef struct uxfs_fctx {
     uxfs_sb_t *sb;
     uint64_t   ino;
     int        is_dir;
-    size_t     off;      /* 文件偏移 / 目录 cookie（字节） */
+    size_t     off;      /* file offset / directory cookie, in bytes */
 } uxfs_fctx_t;
 
 /* ------------------------------------------------------------------ */
-/* RPC 引擎                                                            */
+/* RPC engine                                                           */
 /* ------------------------------------------------------------------ */
 
 static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
@@ -72,7 +73,7 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
 
     mutex_lock(&sb->req_lock);
 
-    /* 引用计数：send/recv 期间防止并发 handle_close 释放 ep。 */
+    /* refcount: keeps a concurrent handle_close from freeing ep mid-call */
     int64_t r = a20_channel_send(sb->ep, msg, total, NULL, 0, NULL, 0);
     kfree(msg);
     if (r < 0) {
@@ -103,7 +104,7 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         ufs_resp_hdr_t *cand = (ufs_resp_hdr_t *)rx;
         if (cand->magic != UFS_RESP_MAGIC || cand->req_id != req->req_id ||
             cand->opcode != req->opcode)
-            continue; /* 陈旧应答：丢弃并继续等待 */
+            continue; /* stale reply: drop it and keep waiting */
 
         memcpy(resp, cand, sizeof(*resp));
         uint32_t plen = resp->payload_len;
@@ -146,12 +147,12 @@ static void uxfs_req_init(uxfs_sb_t *sb, ufs_req_hdr_t *req, uint32_t opcode,
 }
 
 /* ------------------------------------------------------------------ */
-/* vnode 工厂                                                          */
+/* vnode factory                                                        */
 /* ------------------------------------------------------------------ */
 
 static vnode_ops_t g_uxfs_vnops;
 
-/* type/mode 来自服务端 GETATTR/LOOKUP 应答：out1 为 S_IF*|perm 位型 */
+/* type/mode come from the server's GETATTR/LOOKUP reply: out1 is S_IF*|perm */
 static vnode_t *uxfs_make_vnode(uxfs_sb_t *sb, uint64_t ino, int vfs_type,
                                 uint32_t mode, size_t size, vnode_t *parent)
 {
@@ -205,7 +206,7 @@ static int uxfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         if (dir->parent) {
             *out = dir->parent;
             vnode_get(dir->parent);
-            vnode_get(dir); /* 调用方会对 dir 做 vnode_put */
+            vnode_get(dir); /* the caller does vnode_put on dir */
             return 0;
         }
         *out = dir;
@@ -245,7 +246,7 @@ static int uxfs_stat(vnode_t *vn, kstat_t *st)
     st->st_nlink   = 1;
     st->st_blksize = 512;
     st->st_blocks  = (st->st_size + 511) / 512;
-    /* 刷新 vnode 缓存的尺寸，保持 open fd 读到的长度与服务端一致 */
+    /* refresh the cached size so reads on the open fd match the server */
     vn->size = (size_t)st->st_size;
     return 0;
 }
@@ -326,7 +327,7 @@ static int uxfs_rename(vnode_t *old_dir, const char *old_name,
     uxfs_sb_t *sb = p->sb;
     uint32_t new_len = (uint32_t)strlen(new_name);
 
-    (void)flags; /* RENAME_EXCHANGE 等扩展语义暂不支持 */
+    (void)flags; /* extended semantics like RENAME_EXCHANGE are unsupported */
     ufs_req_hdr_t req;
     ufs_resp_hdr_t resp;
     uxfs_req_init(sb, &req, UFS_OP_RENAME, old_dir->ino,
@@ -368,7 +369,7 @@ static int uxfs_readpage(vnode_t *vn, uint64_t index, void *data, size_t len)
                       NULL);
     if (rc != 0)
         return rc;
-    /* 文件尾页允许短读，剩余部分补零 */
+    /* the last page may read short; zero-fill the rest */
     if (resp.out0 < len)
         memset((char *)data + resp.out0, 0, (size_t)(len - resp.out0));
     return 0;
@@ -498,7 +499,7 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     static uint8_t payload[UFS_MAX_PAYLOAD];
     uint32_t plen = 0;
 
-    /* cookie 语义：已消费的目录项条数。服务端跳过 arg0 项后继续返回。 */
+    /* cookie: entries already consumed; the server skips arg0, continues */
     uxfs_req_init(fc->sb, &req, UFS_OP_READDIR, fc->ino, fc->off, count,
                   NULL, 0);
     int rc = uxfs_rpc(fc->sb, &req, NULL, NULL, &resp, payload,
@@ -506,8 +507,8 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     if (rc != 0)
         return rc;
 
-    /* 服务端紧凑目录项序列 → VFS dirent64 流（8 字节对齐），与 FAT32
-     * readdir 的输出契约一致。 */
+    /* Its compact entry sequence becomes the VFS dirent64 stream (8-byte
+     * aligned), matching the output contract of FAT32 readdir. */
     char *out = (char *)dirp;
     size_t total = 0;
     uint32_t i = 0;
@@ -530,7 +531,7 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
 
         vfs_dirent64_t *dent = (vfs_dirent64_t *)(out + total);
         dent->d_ino    = ino;
-        dent->d_off    = (int64_t)(ordinal + 1); /* 已消费条目数 = 下一 cookie */
+        dent->d_off    = (int64_t)(ordinal + 1); /* consumed = next cookie */
         dent->d_reclen = (uint16_t)reclen;
         dent->d_type   = (type == UFS_FT_DIR) ? 4 :
                          (type == UFS_FT_SYMLINK) ? 10 : 8; /* DT_* */
@@ -541,7 +542,7 @@ static int uxfs_freaddir(vfile_t *vf, void *dirp, size_t count)
     }
 
     if (total > 0)
-        fc->off = ordinal; /* 目录耗尽或调用缓冲满：推进到已消费位置 */
+        fc->off = ordinal; /* dir done or buffer full: advance to consumed */
     vf->offset = fc->off;
     return (int)total;
 }
@@ -615,14 +616,14 @@ static vnode_ops_t g_uxfs_vnops = {
 };
 
 /* ------------------------------------------------------------------ */
-/* 挂载 / 卸载 / 块 IO 所有权                                          */
+/* mount / unmount / block IO ownership                                  */
 /* ------------------------------------------------------------------ */
 
 #define UXFS_MAX_SBS 8
 static uxfs_sb_t g_uxfs_sbs[UXFS_MAX_SBS];
 
-/* 同一盘号允许多个挂载并存（各自独立的服务实例）；只匹配调用方
- * 自己的注册，其他实例的同号挂载跳过继续找。 */
+/* Several mounts of one disk number may coexist (each with its own service
+ * instance); only the caller's own registration matches, others are skipped. */
 static block_dev_t *uxfs_owned_block_dev(struct task_t *task, int block_index)
 {
     for (int i = 0; i < UXFS_MAX_SBS; i++) {
@@ -667,9 +668,9 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     mutex_init(&sb->req_lock);
 
     /*
-     * 无同步握手：fs_serve 的调用方就是服务进程自身，若在此阻塞等待
-     * INIT 应答会自我死锁。活跃性由第一个真实文件操作验证；服务死亡时
-     * channel 断链使请求以 -EIO 收场。
+     * No synchronous handshake: the caller of fs_serve is the service, so
+     * blocking here for the INIT reply would self-deadlock.  Liveness is
+     * checked by the first real file operation; on death the link drops, -EIO.
      */
     uint64_t root_ino = UFS_ROOT_INO;
 
@@ -689,7 +690,7 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     strncpy(mnt->path, path, MAX_PATH_LEN - 1);
     mnt->path[MAX_PATH_LEN - 1] = '\0';
     mnt->type  = FS_TYPE_UXFS;
-    /* bit0: 服务端声明只读后端（如 iso9660）；页缓存缓冲写据此禁用。 */
+    /* bit0: read-only backend (iso9660) declared; page-cache writes off. */
     mnt->flags = (serve_flags & 1u) ? VFS_MOUNT_RDONLY : 0;
     mnt->root  = root;
     root->mnt  = mnt;
@@ -701,7 +702,7 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
     mnt->opts[sizeof(mnt->opts) - 1] = '\0';
     root->mnt = mnt;
-    vnode_get(root); /* mount 持有持久引用（与其他 FS 一致） */
+    vnode_get(root); /* mount holds a persistent ref, like other FS do */
     vfs_dcache_invalidate_all();
     kinfo("[UXFS] mounted user filesystem at %s (block=%d)\n", path,
           block_index);
@@ -717,8 +718,8 @@ void uxfs_unmount(struct vnode *root)
         return;
     uxfs_sb_t *sb = p->sb;
     if (sb && sb->ep) {
-        /* 先单向断链让服务进程的 recv 返回错误并退出（服务自身仍持有
-         * 配对端点引用，仅靠 release 无法触达对端）；随后释放本侧引用。 */
+        /* One-way shutdown first, so the service's recv errors and it exits;
+         * release cannot reach the peer ref, so we then free our own. */
         a20_channel_ep_peer_shutdown(sb->ep);
         a20_channel_ep_release(sb->ep);
         sb->ep = NULL;
@@ -740,8 +741,8 @@ int uxfs_block_io(struct task_t *task, int block_index, int write,
 int uxfs_block_capacity(struct task_t *task, int block_index,
                         uint64_t *out_sectors)
 {
-    /* block_dev_t.capacity 的既定单位就是扇区（virtio 配置空间语义，
-     * mount_setup/class_ops 原样传递），不再做字节换算。 */
+    /* block_dev_t.capacity is already sectors (virtio config-space
+     * semantics, passed through by mount_setup/class_ops): no conversion. */
     block_dev_t *dev = uxfs_owned_block_dev(task, block_index);
     if (!dev || !out_sectors)
         return -ENODEV;

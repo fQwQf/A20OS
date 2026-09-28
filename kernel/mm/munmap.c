@@ -49,7 +49,8 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
         vaddr_t clip_start = vma->start < addr ? addr : vma->start;
         vaddr_t clip_end   = vma->end > end ? end : vma->end;
 
-        // 释放该范围内的物理页面。遇到部分覆盖的 PMD leaf 时先降级。
+        /* Release the physical pages in this range.  A partially covered PMD
+         * leaf is demoted to base pages first. */
         int shared_file_vma = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
 #ifdef CONFIG_NOMMU
         (void)shared_file_vma;

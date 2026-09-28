@@ -58,7 +58,8 @@ void *frame_alloc(void) {
     return p;
 }
 
-// 分配一个物理帧，不清零（用于调用者会立即覆写的场景）
+/* Allocate a physical frame without zeroing it, for callers that overwrite
+ * the contents immediately. */
 void *frame_alloc_nz(void) {
     pfn_t pfn = pfa_alloc_page();
     if (pfn == PFN_NONE) return NULL;
@@ -473,9 +474,10 @@ paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
     return arch_pte_addr(*pte) + (va - base);
 }
 
-// 将内核空间映射复制到新页表（内核空间共享）
-// LoongArch 的内核空间是通过 DMW 直接翻译的，完全绕过了 TLB 和多级页表机制
-// 可以置空来节省开销
+/* Copy the kernel-space mappings into the new page table; kernel space is
+ * shared.  On LoongArch the kernel space is translated directly by the DMW,
+ * bypassing the TLB and the multi-level page table walk entirely, so this can
+ * be left empty to save the copy. */
 void pt_map_kernel(pt_root_t *pgdir) {
     for (int i = ARCH_PT_USER_END; i < ARCH_PT_ENTRIES; i++) {
         if (boot_pgdir[i] & PTE_V)

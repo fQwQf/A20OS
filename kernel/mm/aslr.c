@@ -1,24 +1,29 @@
 /*
- * A20OS — 用户态地址空间布局随机化（ASLR）
+ * A20OS — user-space address space layout randomisation (ASLR)
  *
- * 在 exec 时为每个进程生成随机布局偏移，复用 core/random.c 的熵池
- * （xoshiro 状态，启动时由 timer 节拍、硬件熵源 arch_hw_entropy_sample()
- * （x86_64 的 RDRAND/RDSEED）、内核地址与帧计数混合播种；getrandom(2)
- * 与 AT_RANDOM 也来自同一熵池）。
+ * A per-process random layout offset is generated at exec time, reusing the
+ * entropy pool in core/random.c (xoshiro state, seeded at boot from a mix of
+ * timer ticks, the hardware entropy source arch_hw_entropy_sample() (RDRAND /
+ * RDSEED on x86_64), the kernel address and a frame count; getrandom(2) and
+ * AT_RANDOM draw from the same pool).
  *
- * 熵位数受现有固定用户布局约束：
- *   - 栈顶上限 USER_STACK_TOP+PAGE=0x40000000，下方 0x3F7F9000-0x3F800000
- *     是固定 vDSO/vvar（见 mm/vdso_layout.h），再往下 0x3E000000 是 TLS。
- *     栈随机化只能在 [USER_STACK_FLOOR+初始栈, 0x40000000) 这 8MB 窗口内
- *     取页偏移；为保证可用栈不小于约 4MB，64 位取 10 位熵（4MB 范围），
- *     32 位取 8 位（1MB 范围）。
- *   - mmap 回退基址从 MMAP_BASE_ADDR=0x60000000 向上增长，64 位用户空间
- *     下限 0x4000000000，取 20 位熵（4GB 窗口）；32 位取 10 位。
- *   - brk 起始偏移上限受 USER_TLS_BASE=0x3E000000 约束，按镜像末尾动态
- *     封顶，64 位最多 13 位（32MB），32 位 8 位。
+ * The number of entropy bits is bounded by the existing fixed user layout:
+ *   - the stack top is capped at USER_STACK_TOP + PAGE = 0x40000000, and just
+ *     below it 0x3F7F9000-0x3F800000 is the fixed vDSO/vvar (see
+ *     mm/vdso_layout.h), with the TLS at 0x3E000000 below that.  Stack
+ *     randomisation can therefore only pick a page offset inside the 8 MiB
+ *     window [USER_STACK_FLOOR + initial stack, 0x40000000).  To keep at least
+ *     ~4 MiB of usable stack, 64-bit takes 10 bits of entropy (a 4 MiB range)
+ *     and 32-bit takes 8 (a 1 MiB range).
+ *   - the mmap fallback base grows upward from MMAP_BASE_ADDR = 0x60000000 and
+ *     the 64-bit user space floor is 0x4000000000, so it takes 20 bits (a 4 GiB
+ *     window); 32-bit takes 10.
+ *   - the brk start offset cap is bounded by USER_TLS_BASE = 0x3E000000 and
+ *     capped dynamically against the end of the image; 64-bit takes at most 13
+ *     bits (32 MiB), 32-bit takes 8.
  *
- * fork 语义与 Linux 一致：子进程通过 *child = *parent 继承 mm 的
- * mmap_base/stack_top/start_brk 等字段，不重新随机化。
+ * fork matches Linux: the child inherits the mm fields such as mmap_base,
+ * stack_top and start_brk through *child = *parent and is not re-randomised.
  */
 
 #include "mm/vm.h"
@@ -65,7 +70,7 @@ vaddr_t mm_aslr_brk_offset(vaddr_t brk_base)
     return (vaddr_t)(random_u64() % max_pages) * PAGE_SIZE;
 }
 
-#else /* CONFIG_NOMMU: 地址即物理地址，不做随机化 */
+#else /* CONFIG_NOMMU: the address is the physical address; no randomisation */
 
 vaddr_t mm_aslr_mmap_base(void)
 {

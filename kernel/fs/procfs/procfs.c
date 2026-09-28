@@ -46,7 +46,7 @@ extern struct mount *vfs_mount_at(int index);
 typedef struct pf_entry {
     char name[32];
     pf_type_t type;
-    int pid;                // 进程 ID（仅对进程相关文件有效）
+    int pid;                // process ID (only meaningful for process-related files)
     struct pf_entry *next;
 } pf_entry_t;
 

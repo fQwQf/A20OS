@@ -1,7 +1,7 @@
 #ifdef CONFIG_BOARD_VISIONFIVE2
 
 /*
- * StarFive VisionFive 2 (星光 2) board support (SoC: JH7110).
+ * StarFive VisionFive 2 board support (SoC: JH7110).
  *
  * The VisionFive 2 boots in S-mode under OpenSBI (U-Boot SPL + OpenSBI + U-Boot
  * proper).  This board file therefore mirrors the QEMU virt RISC-V platform:

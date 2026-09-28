@@ -92,7 +92,8 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (len == 0) return (vaddr_t)-EINVAL;
     if (len > USER_VA_LIMIT) return (vaddr_t)-ENOMEM;
 
-    /* W^X：MAP_FIXED 覆盖现有 VMA 也走这里，同样受策略约束 */
+    /* W^X: a MAP_FIXED overwrite of an existing VMA also lands here and is
+     * bound by the same policy */
     prot = mm_wx_filter_prot(prot, "mmap");
     if (prot < 0) return (vaddr_t)prot;
 
@@ -193,7 +194,8 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (len > USER_VA_LIMIT)
         return (vaddr_t)-ENOMEM;
 
-    /* W^X：在引用 fd 之前过滤，避免无谓的引用计数抖动 */
+    /* W^X: filter before taking the fd reference, to avoid pointless
+     * refcount churn */
     prot = mm_wx_filter_prot(prot, "mmap_file");
     if (prot < 0)
         return (vaddr_t)prot;
@@ -322,7 +324,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (vmo_offset & (PAGE_SIZE - 1))
         return (vaddr_t)-EINVAL;
 
-    /* W^X：Native VMO 映射与 Linux mmap 走同一策略 */
+    /* W^X: a Native VMO mapping follows the same policy as Linux mmap */
     prot = mm_wx_filter_prot(prot, "mmap_vmo");
     if (prot < 0)
         return (vaddr_t)prot;
