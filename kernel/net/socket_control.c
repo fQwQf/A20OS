@@ -238,14 +238,10 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
     if (!s)
         return -ENOTSOCK;
     if (s->domain == AF_ALG && level == SOL_ALG && optname == ALG_SET_KEY) {
-        if (strcmp(s->alg_type, "aead") == 0 &&
-            strcmp(s->alg_name, "authenc(hmac(sha256),cbc(aes))") == 0 &&
-            optlen < 16)
-            return -EINVAL;
-        if ((strcmp(s->alg_type, "skcipher") == 0 || strcmp(s->alg_type, "aead") == 0) &&
-            optlen != 0 && optlen < 16)
-            return -EINVAL;
-        return 0;
+        /* No provider, so there is no key schedule to install.  Returning 0
+         * here would let a caller believe a key was accepted; see
+         * kernel/net/socket_alg.c. */
+        return -EOPNOTSUPP;
     }
     if (level == IPPROTO_IP) {
         if (optname == MCAST_JOIN_GROUP)
@@ -709,8 +705,7 @@ int net_poll_file(vfile_t *vf, short events)
     else if (s->closed || (s->shut_rd && s->shut_wr))
         revents |= POLLHUP;
     if ((events & POLLIN) &&
-        (s->rx_head || s->accept_head || s->closed || s->peer_closed || s->shut_rd ||
-         (s->domain == AF_ALG && (strcmp(s->alg_type, "hash") == 0 || s->alg_last_len > 0))))
+        (s->rx_head || s->accept_head || s->closed || s->peer_closed || s->shut_rd))
         revents |= POLLIN;
     if ((events & POLLOUT) && !s->closed && !s->shut_wr) {
         if (s->peer_closed)

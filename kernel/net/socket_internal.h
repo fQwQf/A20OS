@@ -178,8 +178,10 @@ typedef struct net_socket {
     int32_t ch_cred_pid;
     int32_t ch_cred_uid;
     int32_t ch_cred_gid;
-    uint8_t alg_last[NET_MAX_STREAM_PAYLOAD];
-    size_t alg_last_len;
+    /* AF_ALG algorithm names from bind().  No kernel crypto provider ships,
+     * so bind() always fails and these stay diagnostic-only.  Do not attach
+     * a data plane or an in-socket buffer here without a real provider —
+     * see kernel/net/socket_alg.c. */
     char alg_type[16];
     char alg_name[64];
     struct net_socket *accept_next;
