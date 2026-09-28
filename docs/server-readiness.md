@@ -220,8 +220,49 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
   **无法按时间片强制抢占**——这依赖上面那条抢占缺口。
 - 无 RT 限流（`sched_rt_runtime_us`）、无 `RLIMIT_RTPRIO`：`SCHED_FIFO`
   任务可以独占 100% CPU，无预算、无计量。
-- **`proc_lock` 仍是压倒性热点**：8 核压测 33335 次竞争 / 16191822 自旋，
-  多轮优化后仍 12–20K。根因是整个任务表只有一把全局自旋锁。
+- **`proc_lock` 是当前最大的压倒性热点**：4 核实测 2528 次竞争 / 951 万自旋，
+  8 核 33335 次 / 1619 万自旋，多轮优化后仍 12–20K。根因是整个任务表只有
+  一把全局自旋锁（`kernel/proc/proc.c:42`），`sched.c` 里有 30 处取锁点。
+  **归因标签要当心**：实测最大的一行是 `proc_sched_safe_point+0x42`，但
+  `proc_sched_safe_point()`（`sched.c:1005-1014`）只读一个 per-CPU 的
+  `need_resched`，**它自己不取 `proc_lock`**；那一行其实是内联进去的
+  `proc_yield()`——与 lwIP 那次 `net_vfile_read+0xf6` 是同一个"返回地址跳过
+  一帧"的假象。`proc_yield()`（`sched.c:1923-1934`）同样不直接取锁：它调
+  `proc_make_ready()`（状态转移）与 `sched()`（切换发布），二者才按
+  `proc.h:112` 的契约去取全局 `proc_lock`。**所以争用实际落在上下文切换/
+  状态转移路径上**，与 `proc.h:106-113` 描述的"切换发布要取 proc_lock"一致。
+  **已定位到具体成因：全局锁被跨着一段 TLB 收敛等待持有。**
+  `context_switch_locked()` 在**持有 `proc_lock` 的临界区内**调用
+  `mm_context_enter(next->mm, cpu)`（`sched.c:1790`，锁在 `sched.c:1829` 取），
+  而 `mm_context_enter()`（`mm/vm.c:76-102`）内部是一个 `for(;;)`：只要
+  `mm->tlb_cpu_generation[cpu] != mm->tlb_generation` 就反复
+  `arch_tlb_flush_asid_local()`。而 `tlb_generation` 会被
+  `mm_tlb_shootdown_page()`（`vm.c:277`）持续累加——**任何并发 PTE 修改都会
+  把它推高，让这段循环在全局自旋锁里继续转**。
+  也就是说 `proc_lock` 的持锁时间**并不短**，之前"高频短临界区"的猜测是错的，
+  这才解释了 4 核 951 万自旋的量级。
+  值得注意的是 `sched.c:1736` 的注释自己写着 *"mm_context_enter() only uses
+  atomics"*——它按设计不需要 `proc_lock` 的一致性，却仍然被罩在临界区里。
+  **但不能简单把它前移**：地址空间切换必须与 `proc_set_current()` 之间的
+  中断窗口保持一致，否则中断处理会在"新 mm + 旧 task"的错配状态下运行。
+  这属于上下文切换路径的定序设计，需要连带审阅 `sched.c:1880` 那条
+  "one lock per switch" 的注释所描述的观察窗口保证。
+  **这段循环在本平台确实会执行，不是死代码**：QEMU riscv64 启动日志实测
+  `[MM] RISC-V ASID mask=0xffff bits=16`（`riscv64/platform/asid.c:36`），
+  所以 `mm->arch_asid` 非零，`vm.c:83` 的条件成立。arch.h 的通用默认是
+  `ARCH_MM_CONTEXT_ALLOC() 0U`，但 riscv64 覆写为 `riscv64_asid_alloc()`，
+  因此该结论是平台相关的，不能想当然套到 `arch_asid == 0` 的架构上。
+  **但也不能简单前移**：`sched.c:1829` 那条调用点是本函数自己取锁，可以
+  改成"先关中断 → mm_context_enter → 再取锁发布"；可是 `sched.c:1885`
+  那条**进入时 `proc_lock` 已经被 `sched()` 更早取走了**（见 :1880 注释，
+  刻意为了"每次切换只取一次锁"）。在那里要先放锁才能做 mm 切换，而放锁之后
+  `next` 可能被别的 CPU 抢走，必须靠 `dispatching` 引用计数兜住并重新校验——
+  **这一点已核对过 `sched_runq_unpick_locked()`（`sched.c:1642`）：它的拒绝条件
+  只在 `!t->dispatching` 时成立，也就是说一个仍处于 `dispatching` 的任务
+  是允许被别的 CPU unpick 的**（随后清掉 `dispatching` 与 `owner_cpu`）——
+
+  这已经不是机械前移，而是要重新设计 `sched()` 的取锁时序。
+  因此本轮只定位，未改；它比"按对象分锁"窄得多，是更现实的下一步。
 - `pid_max` 默认 32768，**与 Linux 默认值一致，且可通过
   `/proc/sys/kernel/pid_max` 运行时调整**（`procfs.c` 的 sysctl 写路径
   已接线）。因此它不是缺陷；确有需要的部署自行调高即可。
