@@ -1048,3 +1048,38 @@ missing_meta/present/absent/prot/cow/vma 全 0，且 `pt_pages=6` 与改动前�
 **未能验证**：arm32 在本环境**改动前就无法构建**（`arm-linux-gnueabihf-gcc` 不在
 PATH），而 arm32 有自己一份 `pt_unmap`/`pt_unmap_leaf` 实现（已同步改签名并从
 `mm->pgdir` 取 pgdir），但编译未经检验。属既有环境限制，已如实标注。
+
+### 10.6 撤回 §10 的核心数据；状态缺页路径至今是死代码
+
+**先撤回一个错误结论。** §10 与 §10.5 反复引用的「`mm_fault_from_status=479`，即 1482 次
+demand fault 中 479 次（32%）完全不经 `mm_find_vma`」**是错的**。在记录该数字的**确切
+提交** `fb26bf47` 上重新测量，该计数为 **0**；同期真正增长的是 `mm_anon_faults=679`
+——即**走 VMA 的那条路径**。这条结论作废，§10 里所有依赖它的表述一并失效。
+
+**原因**（读代码可证）：`mm_cursor_query()` 对**缺失**的 PTE 直接 `return 0` 而**不写
+`*cls_out`**，于是 `cls_out` 保持调用方给的 `MM_ST_CLS_BYTE(MM_ST_INVALID)`。而 fault
+路径的判据是 `!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT`，
+`INVALID != ANON_VIRT`，因此**永不成立**。这段逻辑自 `ff75efde`（P2）起就是这样，
+也就是说论文 Fig. 8 的「按状态决策的缺页」路径**从来没有执行过一次**。
+
+尝试把它激活后，暴露出两个潜在缺陷：
+
+**(a) 文件映射被误判为匿名（本次已修）。** `pte_to_vm_flags()` 给**每一个**基于文件的
+段都打上 `VM_ANON`，所以私有 RELRO 段（`flags=0x13`、`file_fd=6`、**没有** `VM_FILE`
+位，因为 `file_fd` 是 `elf_add_vma()` 返回之后才赋值）与 `.bss` 根本无法区分。
+`fb26bf47` 的预标记条件 `(vm_flags & VM_ANON) && !(vm_flags & VM_SHARED)` 于是把 mksh 的
+RELRO 标成了 `MM_ST_ANON_VIRT`，缺页时返回**匿名零页**而不是文件内容：
+`FATAL: pid=4 signal=11 comm=mksh`，`stval=0x6a170`，`page_words` 全 0。
+
+修法：`elf_add_vma()` 增加显式 `bool anon` 形参，由调用点逐个声明——文件段装载点
+（逐页预载、`.bss` 尾段、exec 映像）传 `false`，栈/TLS/堆传 `true`。**在 `elf_add_vma()`
+内部靠 `vm_flags` 推断不可能正确**，因为此时 `file_fd` 尚未赋值。
+
+**(b) brk/堆区间仍然崩溃（未定位）。** 修掉 (a) 之后失败点前移到堆：
+`stval=0x1f20000`，落在 brk VMA `[0x1f20000,0x1f21000) flags=0x13 pte_flags=0xd7
+file_fd=-1 off=0x1000`，该页已映射但全 0。**根因未定位**，故状态路径保持不启用。
+
+**结论与当前状态**：论文核心的状态驱动缺页路径目前**不可用**，且已证明至少存在两个
+潜在缺陷；在 (b) 定位并修复之前不应启用，否则 exec 与堆会直接崩。HEAD 刻意让该路径
+保持 inert（`mm_fault_from_status` 恒为 0），全部功能门通过。性能结论不受影响：
+§10.1 那个 mmap ~1.5× 回归是**预标记在 mmap 侧就要付的代价**，与该路径是否真的执行无关。
