@@ -169,21 +169,13 @@ smoke-devtools: $(FAT32_IMG) $(KERNEL_ELF)
 		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
 		$(if $(PKG_SIGN_KEY),--keys-dir $(abspath $(PKG_KEYS_DIR)),--allow-untrusted) \
 		--output $(SMOKE_DEVTOOLS_IMG) --size-mb 768
-	@mkdir -p $(SMOKE_LOG_DIR)
-	@set -e; \
-	log="$(SMOKE_LOG_DIR)/devtools-$(ARCH).log"; \
-	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); \
-	  printf 'chroot /extra /bin/sh /devtools-smoke.sh\npoweroff\n'; } | \
-	$(TIMEOUT) 900s $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
-		-drive file=$(abspath $(SMOKE_DEVTOOLS_IMG)),if=none,format=raw,id=xdevtools \
-		-device $(QEMU_BLK_SECOND),drive=xdevtools \
-		-kernel $(KERNEL_ELF) \
-		> "$$log" 2>&1 || status=$$?; \
-	if grep -q 'DEVTOOLS_SMOKE: PASS' "$$log"; then \
-		echo "smoke-devtools: PASS; log saved to $$log"; \
-	else \
-		echo "smoke-devtools: failed (status $$status); tail of $$log:"; \
-		tail -n 80 "$$log"; \
-		exit 1; \
-	fi
+	@$(PYTHON) tools/smoke.py devtools \
+		--label "$(ARCH)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--qemu "$(QEMU)" \
+		$(addprefix --qemu-flag=,$(QEMU_FLAGS_NO_SDCARD)) \
+		--img "$(SMOKE_DEVTOOLS_IMG)" \
+		--blk-second "$(QEMU_BLK_SECOND)" \
+		--kernel "$(KERNEL_ELF)" \
+		--timeout 900s \
+		--input-delay "$(SMOKE_INPUT_DELAY)"

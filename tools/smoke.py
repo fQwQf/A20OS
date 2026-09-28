@@ -68,7 +68,7 @@ STEP35_LOCK_SPLIT = [
 STEP35_FORBID = r"PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]"
 # Positional args main() handles itself instead of looking up in CASES;
 # smoke_audit.py reads this so a wired subcommand is not read as a typo'd case.
-SUBCOMMANDS = {"step35", "arch-mmu-matrix"}
+SUBCOMMANDS = {"step35", "arch-mmu-matrix", "devtools"}
 # arch -> (board, qemu binary, base qemu flags, needs -embedded build dir)
 MATRIX_ARCHS: dict[str, tuple[str, str, list[str], bool]] = {
     "arm32": ("qemu-virt-arm32", "qemu-system-arm",
@@ -312,6 +312,37 @@ def matrix_main(a: argparse.Namespace) -> int:
     return 0
 
 
+def devtools_main(a: argparse.Namespace) -> int:
+    """Boot the devtools rootfs and look for its single PASS marker.
+
+    The verdict is the marker's presence alone: the original branched on
+    `if grep -q ...` and never consulted QEMU's exit status, so a run that still
+    printed DEVTOOLS_SMOKE: PASS counted as a pass however QEMU ended.  The
+    status is reported only on failure.
+    """
+    log = Path(a.log_dir) / f"devtools-{a.label}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    case = {
+        "log": str(log),
+        "stdin": {"kind": "pipe", "delay": a.input_delay,
+                  "lines": ["chroot /extra /bin/sh /devtools-smoke.sh", "poweroff"]},
+        "timeout": a.timeout,
+        "argv": [a.qemu, *a.qemu_flag,
+                 "-drive", f"file={Path(a.img).resolve()},if=none,"
+                           f"format=raw,id=xdevtools",
+                 "-device", f"{a.blk_second},drive=xdevtools",
+                 "-kernel", a.kernel],
+    }
+    status = run_qemu(case)
+    text = log.read_text(encoding="utf-8", errors="replace")
+    if grep_matches(bre("DEVTOOLS_SMOKE: PASS"), text):
+        print(f"smoke-devtools: PASS; log saved to {log}")
+        return 0
+    print(f"smoke-devtools: failed (status {status}); tail of {log}:")
+    print("\n".join(text.splitlines()[-80:]))
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("case")
@@ -326,12 +357,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--timeout")
     ap.add_argument("--nr-cpus", type=int)
     ap.add_argument("--input-delay", type=float, default=8.0)
+    ap.add_argument("--img")
+    ap.add_argument("--blk-second", dest="blk_second")
     ap.add_argument("--require-timeout-capacity", type=int, default=0)
     ap.add_argument("--require-smp-runqueue", type=int, default=0)
     ap.add_argument("--require-lock-split", type=int, default=0)
     a = ap.parse_args(argv)
     if a.case == "arch-mmu-matrix":
         return matrix_main(a)
+    if a.case == "devtools":
+        return devtools_main(a)
     if a.case in SUBCOMMANDS:
         missing = [n for n in ("label", "log_dir", "qemu", "kernel", "timeout")
                    if getattr(a, n) is None]
