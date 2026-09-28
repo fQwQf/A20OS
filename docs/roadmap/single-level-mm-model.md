@@ -559,3 +559,39 @@ VM_VMO → THP → anon batch → 单页 anon。把快路径**前置**到这条�
 `mm_pt_scale` 多次采样 `ideal_speedup` 落在 **1.06x–1.20x**，低于其自带的
 1.80x 判定阈值（FAIL）。这与 §8.8 的结论一致：`mm->lock` 仍在 fault 路径上
 串行化 16KiB 清零，并行度尚未兑现。**这是 P5 尚未完成的量化证据。**
+
+### 8.16 P5 第六次尝试：**就地**改造同样失败（推翻 §8.12 的建议）
+
+§8.12 判定「前置插队」是第五次失败的根因，并建议改为**就地**改造：把锁外 prepare
+放进 `handle_demand_fault_locked` 内、原 anon batch 所在的精确位置，从而完整保留
+前面 swap→栈→brk→VMA→权限→file→VMO→THP 的判定顺序，只改变「工作在锁内还是
+锁外」。**该建议已实施并同样失败**，故在此更正。
+
+实施要点：给 `handle_demand_fault_locked` 增加 `lock_held` 参数，因为三个调用点的
+锁状态不同——NOMMU 路径（不持锁）、swap 重试路径（已刻意放锁）、主路径（持锁）。
+锁外 prepare 后重新取锁，按三种结局复核：叶已有效（他人装成，返回 0）、VMA 已被
+摘链（返回 -1 重试）、逐页复核仍是缺页（丢弃被他人抢先的页后再装）。
+
+结果：`smoke-mm-stress` 与 `smoke-mm-fork-exec-race` **双双失败**，且失败签名与第五次
+**完全一致**：日志 222 行、静默停在 `[init] fork=0, calling execve mksh`，无 panic、
+无断言、无自旋锁诊断、无看门狗。已回退 `fault.c`，HEAD 恢复为已验证状态。
+
+**已排除的假设**（避免重复劳动）：
+
+* *判定链被打乱*：就地改造已排除该假设，失败依旧。
+* *THP 被抢占*：守卫已排除 `VM_HUGEPAGE`。
+* *`-EAGAIN` 后的 UAF*：已改为取引用后只返回确定值。
+* *栈增长路径被绕过*：`VM_STACK` 确由 `elf.c:578/599` 设置，故 VMA 命中即可排除。
+* *`pfa.lock` → `mm->lock` 锁序反转*：`frame.c` 中 `pfa.lock` 在调用
+  `oom_try_reclaim()` **之前**已释放（`spin_unlock` 早于 reclaim），不存在该持锁序。
+
+**尚未排除、最值得下一步追查的线索**：第五、六两次的**唯一共同点**是把
+`pfa_alloc_page()`（及其 `cg_mem_charge` / `memset`）移出 `mm->lock`。签名是
+**静默卡死而非 panic**，符合自旋锁互等而非断言失败。尚未验证的具体机制：
+`pfa_alloc_page` 的慢路径（`oom_try_reclaim` → `oom.c:100/146` 的
+`spin_lock_irqsave(&mm->lock)`）在**另一个**正在 fault 的 CPU 上与本进程的
+`mm->lock` 发生互等。下一步应先用插桩确认卡死时各 CPU 的持锁栈（而非继续猜测），
+再决定 P5 的形态。
+
+结论：**P5 仍未完成**，当前内核保持「正确但 fault 串行」的状态。以六次失败的
+共同点为线索、用持锁栈插定位，是比继续改 fault 代码更可靠的下一步。
