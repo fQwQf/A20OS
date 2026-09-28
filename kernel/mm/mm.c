@@ -1,3 +1,18 @@
+/*
+ * A20OS core MM — page-table primitives and the physical frame interface.
+ *
+ * The layer split is deliberate: this file owns the raw page-table walk
+ * (pt_create/pt_walk/pt_map/pt_unmap/pt_clone*) and the mm_struct lifecycle,
+ * while the per-architecture encoding lives behind arch_pte_* in
+ * kernel/arch/<arch>/include/page_table.h.  The VMA list is in mm/vma.c and the
+ * address-space/ASID/TLB machinery is in mm/vm.c, so the map/unmap/protect hot
+ * paths stay readable on their own.
+ *
+ * Every function here takes a pt_root_t, not an mm_struct_t, so it is usable
+ * before an mm exists (kernel bring-up) and by exec/fork on a half-built
+ * address space.  Callers that mutate page tables must hold the owning
+ * mm->lock; pt_walk() documents its own aliasing rules.
+ */
 #include "core/defs.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
@@ -81,6 +96,20 @@ static void pt_free_table(pte_t *table, int level) {
     pfa_free(pfn, level == ARCH_PT_ROOT_LEVEL ? ARCH_PT_ROOT_ORDER : 0);
 }
 
+/*
+ * Recursively free a page-table level and its children.
+ *
+ * The leaf/table discrimination is the load-bearing part: arch_pte_is_leaf()
+ * separates a mapping of data from a pointer to the next level, and freeing a
+ * leaf as if it were a table would release a live data frame.  A leaf is
+ * therefore skipped entirely -- its frame belongs to whatever the VMA backing
+ * store owns, and pt_destroy_user() relies on that.
+ *
+ * A non-leaf PTE whose child frame is invalid (misaligned, or outside the
+ * buddy-managed range) cannot be trusted, so the entry is zeroed and the
+ * subtree is abandoned rather than dereferenced.  That turns a corrupt table
+ * into a leak instead of a wild free.
+ */
 static void pt_destroy_level(pte_t *table, int level) {
     if (!table) return;
     int entries = arch_pt_level_entries(level);
@@ -107,7 +136,22 @@ void pt_destroy(pt_root_t *pgdir) {
     pt_destroy_level(pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
-// 遍历页表结构，查找或创建指定虚拟地址对应的 PTE
+/*
+ * PT_WALK_CONTRACT:
+ * - Returns an interior pointer INTO the page table, not a copy.  The caller
+ *   must keep the address space pinned (mm->lock, or an mm reference) for as
+ *   long as it holds the PTE, or a concurrent teardown can free the table.
+ * - alloc == 0 never allocates.  A missing intermediate table returns NULL, so
+ *   it is safe for a caller that holds only a read reference.
+ * - A leaf found at an intermediate level means va is covered by a huge page
+ *   larger than one level, which pt_walk cannot express; it returns NULL and
+ *   the caller must fall back to pt_lookup_leaf().  Silently returning the
+ *   huge-page PTE here would let a caller write a level-0 PTE into it.
+ * - Under CONFIG_SWAP a swap entry at an intermediate level is returned as-is
+ *   rather than treated as absent, so the caller can observe the swap PTE
+ *   instead of allocating over the mapping.
+ * - Returns NULL on allocation failure when alloc != 0.
+ */
 pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc) {
     pte_t *table = pgdir;
     for (int level = ARCH_PT_ROOT_LEVEL; level > 0; level--) {

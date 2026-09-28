@@ -454,10 +454,16 @@ void mutex_lock(mutex_t *m) {
     }
 
     for (;;) {
-        /* Recursive acquisition by the same task: offset_lock (and other
-         * kernel mutexes) can be re-entered when a filesystem read/write
-         * path (e.g. writeback, /proc rendering) touches the same vfile.
-         * Allow it by counting depth instead of self-deadlocking. */
+        /* Recursive acquisition by the same task.  This is a workaround for a
+         * layering violation, not a designed feature: a VFS path re-enters a
+         * vfile's lock through a different route (writeback, /proc rendering)
+         * than the one that took it.  The proper fix is to drop the lock before
+         * calling into the filesystem, not to make the lock reentrant -- a
+         * reentrant lock here hides the reentrancy from the locking audit in
+         * tools/gates.toml (check-mm-lock-model) and lets a future caller take
+         * the lock twice for a real reason.  Until that layering is fixed, count
+         * the depth so the reentrancy is observable and bounded rather than a
+         * self-deadlock. */
         if (__atomic_load_n(&m->locked, __ATOMIC_ACQUIRE) &&
             m->owner == cur) {
             uint64_t flags = spin_lock_irqsave(&m->lock);

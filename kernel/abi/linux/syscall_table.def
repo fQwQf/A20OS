@@ -1,3 +1,40 @@
+/*
+ * A20OS Linux syscall registry -- X-macro table, DO NOT add entries by hand
+ * without reading this first.
+ *
+ * This file is not a translation unit.  It is #included three times by
+ * syscall_table.c, each time with a different LINUX_SYSCALL macro, and it
+ * deliberately contains no #include, no typedef and no declaration of its
+ * own:
+ *
+ *   1. generating wrapper functions   -> LINUX_SYSCALL(name, r, body...)
+ *   2. a compile-time bounds check    -> _Static_assert(SYS_name < TABLE_SIZE)
+ *   3. the dispatch table initializer -> [SYS_name] = { SYS_name, "name",
+ *                                                  linux_handle_name, r }
+ *
+ * Therefore the file must stay free of anything the three passes would each
+ * have to agree on, and a syntax error here surfaces as three unrelated
+ * failures in syscall_table.c.
+ *
+ * Column 2 is `restores_context`, NOT the syscall number.  The number comes
+ * from SYS_<name>, which each architecture defines in
+ * kernel/arch/<arch>/include/syscall_nr*.h; this file never spells a number.
+ * Column 2 is 0 for every ordinary syscall and 1 for exactly three:
+ *
+ *     execve, execveat, sigreturn
+ *
+ * Those three replace the entire user context (registers AND the kernel stack
+ * they run on), so on return there is nothing left to restore registers into
+ * and the fast-return path must be disarmed.  syscall.c reads the flag as
+ * `entry->restores_context` and calls ARCH_TRAP_FAST_RETURN_DISARM(ctx) when
+ * it is set.  Marking any other entry 1 suppresses a legitimate register
+ * restore; leaving one of these three at 0 returns through a dead stack.
+ *
+ * Adding an entry: append it in the same relative order as Linux's own
+ * numbering so the table stays diffable against include/uapi/asm-generic/
+ * unistd.h.  The A20 extensions at the end are not Linux syscalls and have no
+ * uapi counterpart.
+ */
 LINUX_SYSCALL(read, 0, sys_read((int)A(0), (char *)(uintptr_t)A(1), (size_t)A(2)))
 LINUX_SYSCALL(write, 0, sys_write((int)A(0), (const char *)(uintptr_t)A(1), (size_t)A(2)))
 LINUX_SYSCALL(writev, 0, sys_writev((int)A(0), (const void *)(uintptr_t)A(1), (int)A(2)))

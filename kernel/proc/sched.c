@@ -17,8 +17,6 @@
 #include "mm/vm.h"
 #include "cg/cgroup.h"
 #include "cg/cgroup_impl.h"
-#ifdef CONFIG_ABI_NATIVE
-#endif
 
 /*
  * RT_PRI_LEVELS: exact per-priority FIFO buckets for SCHED_FIFO/SCHED_RR
