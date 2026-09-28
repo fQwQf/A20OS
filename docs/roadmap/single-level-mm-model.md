@@ -2747,3 +2747,65 @@ if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
 `smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0
 （含新增的 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
 x86_64 的排查不影响上述任何结论。
+
+### 10.43 观测本身可信（推翻 §10.42 的自疑），且定位到「页面一出生就是只读」
+
+按 §10.42 的结论，先去**验证观测**而不是继续改代码。在拒绝写缺页处临时打印：
+（a）`mm_find_vma(stval)` 现场返回的 VMA 指针与 `covers = v->start <= stval < v->end`；
+（b）以 `stval` 为中心、±2 页的**实测**叶子权限。
+
+```
+[MM-OBS] va=a473cf20 acc=1 vma=0xffff80007eb939c0 covers=1
+         v[a471c000,a473d000) vflags=13 vpte=467 present=1
+[MM-OBS]   i=-2 page va=a473a000 pte=0                     W=0
+[MM-OBS]   i=-1 page va=a473b000 pte=0                     W=0
+[MM-OBS]   i=0  page va=a473c000 pte=800000007eecb425      W=0
+[MM-OBS]   i=1  page va=a473d000 pte=0                     W=0
+[MM-OBS]   i=2  page va=a473e000 pte=0                     W=0
+```
+
+**结论一：`covers=1`，§10.42 的自疑被推翻。** dump 里的 VMA 确实覆盖 `stval`，观测可信。
+（「PTE 只读 + VMA 可写」是真的，不是打印时机或取值造成的假象。）
+
+**结论二（本次真正的新事实）：这是一个 33 页的可读可写匿名 VMA，而它整个邻域里
+*只有一个* 页是已映射的——恰好就是出错那一页，且它是只读；其余页 `pte=0`（不存在）。**
+
+由此可以**一次性结掉整条 mprotect / VMA 生命周期线索**，理由是结构性的、不再是猜测性的：
+
+* 出错页在该 VMA 内的偏移是 `0xa473c000 - 0xa471c000 = 0x20000`，即第 9 页（共 33 页），
+  **既不在边界、也不在任何 split/merge 接缝附近**——所以 §10.41/§10.42 排查的
+  `mm_split_vma_at()` / `vma_try_merge()` 在此处**根本没有生效的机会**。
+* 邻域 32 页 `pte=0`，意味着 mprotect 的逐页循环在这个范围里**无页可改**；即使执行过，
+  也不可能只把这一页留下旧权限。
+
+**所以「只读 PTE + 可写 VMA」不是事后被谁改坏的，而是这一页在被 provision 时就带着只读
+权限出生了。** 六次被证伪的假设（权限位集合 / `PTE_U` / 状态未刷新 / 跳过大 leaf /
+VMA 创建点 / VMA 拆分合并）**全部**属于「事后改坏」这一类，因此全部与本现象无关。
+
+**唯一尚未被检查过的路径是 `mm_pt_provision_anon()`（`kernel/mm/pt.c:951`）**，它在 mmap
+时把一整段匿名范围预标记为 `status_byte(MM_ST_ANON_VIRT, flags)`。缺陷只可能在这两个
+地方之一：
+
+1. **调用点传入的 `flags` 与覆盖它的 VMA 的 `pte_flags` 不一致**——例如按 `PROT_READ`
+   传参、或取了某个默认/模板值，而不是取该 VMA 真实的 `pte_flags`。
+2. **`status_byte()` 的 class/prot 打包**把可写位丢了。
+
+`mm_anon_provisioned=53`（累计）而本 VMA 有 33 页、却只落了 1 页，也与
+`mm_pt_provision_anon()` 里 `if (span / PAGE_SIZE > g_anon_prov_max) return 0;` 的
+"太大就不预标记、改走 VMA 缺页路径" 的行为一致——说明未预标记的页走 VMA 路径是好的
+（那条路径从未出问题），**只有被预标记的页会带错权限出生**。
+
+**下一步（明确且从未做过）**：把 `mm_pt_provision_anon()` 的**全部调用点**列出来，逐个核对
+传入的 `flags` 是否等于该范围内 VMA 的 `pte_flags`；并重读 `status_byte()` 的打包逻辑。
+这是一个范围极小、可穷举的检查，与前六次「结构上不可能」的排除不同。
+
+**本节诊断为临时插桩，已在记录后从 `kernel/mm/fault.c` 移除**（`git checkout`），
+不留调试打印在缺页热路径上。
+
+> 插桩过程中还暴露了一个小坑：本内核的 `kerr` 不支持 `%+d`，导致 varargs 整体错位
+> （首轮输出里 `va=fffffffe` 其实是 `i=-2`）。改成 `%d` 后数据才正确。
+> **教训：新增诊断格式串只用 `%d/%x/%lx/%p`，不要用 `+`/`-`/`0` 标志。**
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
