@@ -1772,6 +1772,10 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
     spin_unlock_irqrestore(&proc_lock, flags);
     if (prev && prev->pid != 0) {
         __atomic_fetch_add(&prev->perf_switches, 1, __ATOMIC_RELAXED);
+        if (prev->state == PROC_BLOCKED)
+            __atomic_fetch_add(&prev->perf_switches_vol, 1, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&prev->perf_switches_invol, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&g_perf_sw_context_switches, 1, __ATOMIC_RELAXED);
     }
     if (prev && prev->pid >= 4 && next->pid >= 4)
