@@ -65,6 +65,13 @@ check-manifests: check-instances check-instance-matrix check-component-registry 
 check-a20-tests:
 	@$(PYTHON) -m unittest discover --start-directory tools/tests --pattern 'test_*.py'
 	@echo "check-a20-tests: PASS"
+# DRM ioctl numbers and wire struct layouts vs the Linux UAPI.  A wrong number
+# never matches the dispatch switch, so the ioctl falls through to the default
+# arm and userspace sees EINVAL/ENOTTY -- which reads as a Mesa or libdrm bug
+# rather than as a wrong constant in a header.  Gate it so that class of
+# mistake cannot land again.  Skips where no UAPI headers are installed.
+check-drm-abi:
+	@tools/check-drm-abi.sh
 
 host-tests: $(HOST_TESTS_BIN)
 	@$(PYTHON) tools/gates.py host-tests --binaries "$(HOST_TESTS_BIN)"

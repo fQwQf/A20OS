@@ -109,6 +109,18 @@
 - **What it checks**: 目标声明在 QEMU 中运行 `arm32`、`aarch64`、`riscv64`、`riscv32` 的 MMU 与 NOMMU 组合，验证 shell 内置命令、外部程序及 `poweroff` 正常关机；它不覆盖 `armv7m` MCU NOMMU。
 - **When it fails**: 查看 `.kernel-build/smoke/<arch>[-nommu]-shell.log` 中是否缺少 `A20_MATRIX_<variant>_OK`、`A20_EXTERNAL_OK` 或 `System is going down for power-off NOW`；先修复对应架构的 bringup 或 NOMMU 路径。
 
+### DRM UAPI 一致性
+- **How to run**: `make check-drm-abi`
+- **What it checks**: 把 `kernel/include/drivers/gpu/drm.h` 里的每个 `DRM_IOCTL_*` 编号与宿主 `linux-headers` 的 `include/uapi/drm` 逐条比对，并把 `kernel/drivers/gpu/drm.c` 里的线结构体定义抽出来实测尺寸与字段偏移。编号错一个字符，switch 就永远匹配不上、落进 `default` 分支，用户态看到的是 EINVAL/ENOTTY——**看起来像 Mesa 或 libdrm 的 bug，而不是头文件里写错了一个常量**。本门禁就是为了让这类错误进不了门。宿主没装 `linux-headers` 时干净跳过，因此不会给非 Linux 构建新增失败面。
+- **When it fails**: 输出会直接给出 `ours=0x…` 与 `linux=0x…`（或 `a20os=…` 与 `linux=…`）。按差值改头文件，**不要**通过改 switch 的 case 值来"对上"——那会让内核与上游 UAPI 同时错。结构体尺寸/偏移不符时，说明本地定义与上游分叉了，以 `include/uapi/drm` 为准。
+- **已验证可失败**：把 `MODE_RMFB` 改回旧值、或从 `drm_mode_fb_cmd` 删掉一个字段，两个方向都实测退出非零。
+
+### 宿主资源与镜像卫生（启动前门禁）
+- **How to run**: 随 `tools/a20 run|debug|test` 自动执行，无需单独调用
+- **What it checks**: 两件事。（1）**资源**：实例放不进宿主时**等待**而不是直接失败——常见原因是别的构建或同机任务刚好结束，等一下自己就好了，立刻拒绝只是把重试推给人。检查可用内存、CPU 负载与磁盘余量。（2）**镜像卫生**：world 镜像无 journal，而桌面实例是带 timeout 启动、到点被杀的，所以**每次运行都会把镜像写脏**；下次启动拿到的是校验和失效、inode 孤儿化、目录项指向未使用 inode 区的文件系统。这种故障表现为 udev worker 超时被杀、cairo 建不出缩放字体、应用起不来，**全部看起来像内核坏了**。因此启动前跑 `e2fsck -fn`（只读、不修改），脏镜像直接拒绝启动。
+- **When it fails**: 资源不足时按提示等，或调大 `A20_PREFLIGHT_TIMEOUT`（秒，0 表示只报告不等）。镜像脏时按提示 `tools/a20 build <实例>` 重建——等待修不好它。
+- **逃生口**：`A20_PREFLIGHT=0` 跳过资源门禁，`A20_PREFLIGHT_SKIP_FSCK=1` 放行脏镜像（脏镜像本身是被测对象时用），`A20_PREFLIGHT_VERBOSE=1` 打印每次采样。`A20_PREFLIGHT=0` **不会**跳过镜像检查：资源与镜像是两件不同的事。
+
 ### Linux ABI smoke
 - **How to run**: `make smoke-abi-linux`
 - **What it checks**: 构建 `riscv64 ABI=linux BRINGUP=0` 的镜像，在 QEMU 中运行 `syscall_smoke` 与 `poweroff`，确认串口日志出现 `SYSCALL_SMOKE: PASS`。

@@ -353,6 +353,10 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
+        /* recv() was handed sizeof(rx_frame), so this only fires if a driver
+         * over-reports; without it an over-report reads past rx_frame below. */
+        if ((size_t)len > sizeof(st->rx_frame))
+            len = (int)sizeof(st->rx_frame);
         st->rx_packets++;
         st->rx_bytes += (uint64_t)len;
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,

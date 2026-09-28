@@ -811,6 +811,219 @@
 - 提示：非 VDSO 架构（riscv32/arm32/loongarch32）都会撞到 `arch_vdso_counter` 声明缺失。
 
 ### x86_64 桌面：lwIP IPv6 收包路径 pbuf 引用计数被破坏
+
+> **当前状态（先读这一段；下面是调查过程，含已被推翻的中间结论）**
+>
+> 1. **找到并修掉了一个真的双重释放**，位置是 **raw socket 接收回调**
+>    （`kernel/net/socket_inet.c` 的 `raw_recv`）：它先 `pbuf_free(p)`，然后
+>    **返回 0**。lwIP 把这个返回值读作"这个包已被吃掉"的标志，**非零**才表示
+>    回调接管了所有权；返回 0 等于宣称自己没动，于是调用方又释放了一次。
+>    `raw_recv` 同时注册在 AF_INET 与 AF_INET6 的 `SOCK_RAW` 上。这是 send 侧
+>    那个已修双重释放的接收侧镜像。
+> 2. **但它是否是本 panic 的触发原因，未证明。** 修掉它不等于解释了这个 panic。
+> 3. **IPv6 专属这个相关性仍未解释。** 唯一能对得上的方向是：同一条路径上
+>    引导期 IPv6 流量（RS/NS/NA/DAD、MLD）的量**远高于** IPv4，足以把一个
+>    潜伏的竞争暴露出来，而 IPv4 负载把它盖住了。**这是解释，不是证明。**
+> 4. **"真正的重复释放 vs 相邻缓冲区越界写"这对假设，已经用测量判开了**，
+>    结论与本文档此前记录的方向**相反**：见下方"已定案"小节。**成因是 pool
+>    越界写，不是重复释放。**
+> 5. ~~下一步：用 `CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 构建以抓第一个失衡。~~
+>    **已做**，并且它一次性给出了判据（下方）。该选项仍默认关闭。
+
+> **已定案（`CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1`，x86_64 + KVM 桌面回归，
+> `a96134c2` 之后）**
+>
+> 开 canary 后同一场景不再报 `pbuf_free: p->ref > 0`，而是报：
+>
+> ```
+> ========== KERNEL PANIC ==========
+> lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+> [PANIC] backtrace:
+>   [0] mem_overflow_check_raw
+>   [1] do_memp_malloc_pool_fn
+>   [2] pbuf_alloc
+>   [3] a20_lwip_process_netif_rx_tx_locked
+>   [4] ethernet_output ... [IRQ] ... idle_loop
+> ```
+>
+> 三件事因此确定：
+>
+> 1. **是 pool 越界写，不是重复释放。** 重复释放只会触发 `p->ref > 0`；
+>    canary 完好时它就该那样报。它报了 underflow，说明**在断言触发之前，
+>    某个 pool 元素前面的受限区已经被改写**。
+> 2. **是 underflow（越界写到元素之前），不是 overflow（之后）。** pool 是
+>    `struct pbuf` 的连续升址数组，所以"写到 N 号元素之前"落进的是
+>    **N-1 号元素的尾部**。即：**破坏源缓冲区写过了它的低端**，其越界末端
+>    正好落在前一个 pbuf 上。
+> 3. **发现在分配路径上。** 崩溃点是 `pbuf_alloc` 取新元素时检查到上一个
+>    元素已被污染，说明**破坏发生在这次分配之前**，与 IPv6 解析无关。
+>    IPv6 只是流量形态——它把这条路径的包量和包长分布推到了会踩中的区间。
+>
+> **首要嫌疑（机制已查清，尚未证实触发）**：`ip6_frag.c` 的 IPv6 重组助手。
+
+`IPV6_FRAG_COPYHEADER 1` 是 A20OS 在 `lwipopts.h` 里**唯一**一处偏离 lwIP 默认值
+的 IPv6 配置，其自带注释就写明「64-bit targets cannot fit lwIP's IPv6 reassembly
+helper into IP6_FRAG_HLEN」。开启后：
+
+- `IPV6_FRAG_REQROOM = sizeof(struct ip6_reass_helper) - IP6_FRAG_HLEN`
+  = **12 − 8 = 4**（64 位下 `struct pbuf *` 占 8 字节）；
+- `ip6_frag.c:415` 用 `pbuf_header_force(p, 4)` **把 payload 指针往回挪 4 字节**，
+  就地覆盖片外扩展头；
+- 而 `pbuf_add_header_impl()` 的越界检查**只对连续型 pbuf 存在**
+  （`payload < p + SIZEOF_STRUCT_PBUF`）。**非连续型 pbuf 走 `force` 分支时
+  完全不做检查**，直接 `payload - 4`；
+- 注释声称「This cannot fail since we already checked when receiving this fragment」，
+  但那个「already checked」是 `ip6_frag.c:289` 的
+  `p->len >= sizeof(struct ip6_frag_hdr)`——它只验证**片头往后放得下**，
+  **完全没有验证前面有没有 4 字节可借**。
+
+若该片落在**非连续** pbuf（例如 PBUF_POOL 链上的元素）上，这 4 字节就直接写进
+**前一个元素的 payload 尾部 / `struct memp` 空闲链表指针**——与 canary 报出的
+「underflow in pool PBUF_POOL」完全吻合（underflow 与前一个元素的 overflow 是
+同一处物理写坏，只是被哪一侧的检查先发现）。
+
+这条假设能同时解释全部四个观察：**仅 IPv6**（`ip6_frag` 是 IPv6 专属路径）、
+**写坏 pool**、**underflow 而非 overflow**（往 payload 之前写）、
+**在分配路径被发现**。
+
+**已证伪（保留记录）**：上面的 `ip6_frag` 假设经实测**不成立**。以
+`LWIP_IPV6_FRAG=0`（其余配置不变、canary 保持开启）重建并运行 xfce 桌面，
+panic 原样复现：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+[3] a20_lwip_process_netif_rx_tx_locked
+[2] pbuf_alloc
+[1] do_memp_malloc_pool_fn
+[0] mem_overflow_check_raw
+```
+
+与开启分片时的栈完全一致，因此写坏内存的**不是** IPv6 分片重组。
+附带一条观测：该次 panic 出现在**启动期**（elogind 刚起来，桌面未起），
+说明损坏在**首次网络活动**时就已经存在，而不是桌面负载才触发。
+
+**canary 语义的精确含义**（`memp.c:130` 传入 `payload = element + MEMP_SIZE`，
+即 `struct memp` 之后的 8 字节对齐偏移）：
+
+- BEFORE 保护区 = `[payload - 16, payload)`，其中 8 字节落在**前一个元素**的
+  payload 尾部，另外 8 字节是本元素的 `struct memp` 空闲链表指针；
+- 保护区在 free 时填 `0xcd`、alloc 时校验，所以 alloc 期报错意味着
+  「该元素被 free 之后，仍有代码往它的 payload 起始处回写」。
+
+**二分结果（canary 全程开启，均为真负）**：
+
+| 配置 | 结果 |
+| --- | --- |
+| `LWIP_IPV6=0` | **无 panic**，桌面正常启动并跑满 400s 超时 |
+| `LWIP_IPV6_FRAG=0` | panic 复现，栈不变 |
+| `LWIP_ND6=0` | panic 复现 |
+| `LWIP_IPV6_DHCP6=0` | panic 复现 |
+| QEMU 不挂 `-device virtio-net-pci` | **无 panic**，桌面跑满 300s 超时 |
+
+所以损坏**必须**有 IPv6 才发生（IPv6 是必要条件），但**与分片重组无关，
+也与邻居发现无关**。`LWIP_IPV6=0` 这一档同时给出了修复方向的判据：任何
+最终修法都应当能在保留 IPv6 的前提下成立，而不是关掉 IPv6 绕过。
+
+**配置二分已彻底用完**：剩下的候选无法再用编译期开关排除——
+
+| 尝试 | 结果 |
+| --- | --- |
+| `LWIP_ICMP6=0` | 编译失败：`ip6.c:780` 无条件调用 `icmp6_param_problem()` |
+| `LWIP_RAW=0` | 编译失败：`lwip_stack.c:470` 使用 `MEMP_RAW_PCB` |
+
+**当前最强嫌疑：`ip6_input:1054` 忽略了 `pbuf_add_header_force()` 的返回值。**
+
+```c
+#if LWIP_RAW
+  pbuf_add_header_force(p, hlen_tot);   /* 返回值被丢弃 */
+  raw_status = raw_input(p, inp);
+```
+
+它同时满足此前所有观察：位于 `ip6_input`（**仅 IPv6**）；对**每个** IPv6 包都会
+执行（因此「首次网络活动即损坏」，不需要桌面负载）；且在 RX 得到的
+`PBUF_POOL` pbuf 上，这次 force **必然静默失败**——pool 的 payload 紧贴
+`struct pbuf` 尾部，回退 1 字节就越过
+`payload < p + SIZEOF_STRUCT_PBUF` 这道检查，于是 force 什么都不做，
+而代码却当作成功继续执行；此时 `ip_data.current_ip_header_tot_len` 已被写成
+`hlen_tot`，`raw_input()` 拿到的是一个 payload 布局与 `hlen_tot` 不符的 pbuf。
+
+A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一区域此前
+修过一次双重释放，与「pool 元素被写坏」的症状方向一致。
+
+**进一步推论（重要）**：`raw_input()` 在没有任何匹配的 raw pcb 时会**提前返回**，
+什么都不做。也就是说，仅靠 `ip6_input` 这一行不足以致害——**必须同时存在一个
+绑定了该协议的 raw socket**。这正好把嫌疑引向 A20OS 自己的代码：
+`net_packet_rx_defer()` 会在**每个**收到的帧上喂一次 raw socket 通道，
+与「首次网络活动即损坏」的现象吻合。若该推断成立，真正的越界写发生在
+`kernel/net/socket_packet.c` 消费 raw pbuf 时按（被 force 失败弄脏的）
+IP 头去算长度的那一段，而不在 lwIP 内。
+
+因此下一步 instrument 应当**同时**覆盖两处：`ip6_input:1054` 的 force 失败分支，
+以及 `socket_packet.c` 里 raw 接收的长度计算。只看 lwIP 侧可能看不到越界写。
+
+**已证伪**：`ip6_input:1054` 这条线索经实测**不成立**。按其机制改写
+（仅在 force 成功时才执行 undo）并以 canary 重建后，panic 原样复现，
+栈帧 0~3 完全一致（仅 `[3]` 偏移因代码布局变化从 `+0x15c` 变为 `+0x16b`）：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+  [0] mem_overflow_check_raw   [1] do_memp_malloc_pool_fn
+  [2] pbuf_alloc               [3] a20_lwip_process_netif_rx_tx_locked+0x16b
+```
+
+该改动已回退——vendored lwIP 保持未打补丁状态。
+
+顺带更正上一条提交里的一个错误推论：`raw_input()` 在没有匹配 pcb 时确实会
+提前返回，但它返回的是「未吃掉」，因此 **`pbuf_remove_header` 仍会执行**。
+也就是说这个缺陷**不需要**存在活动的 raw socket 就会触发，先前「必须同时有
+raw socket」的推断是错的。
+
+**一条尚未解释的观测**：栈帧 `[4]` 是 `ethernet_output+0x13f2ae827`——
+偏移量约 5.4×10⁹，不可能是任何函数的合法偏移，说明符号化落到了最近的
+前驱符号上，即**该帧的返回地址无法解析**。若这是真实的栈损坏而非 unwinder
+的缺陷，则越界写的目标可能不止 pool，还波及到了内核栈。这与「1~8 字节溢出」
+的判断并不矛盾，但目前无法区分。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。下一步应在该处加
+instrumentation——检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
+与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
+
+尚未排除的 IPv6 专属面：
+
+- `ip6.c` 输入路径与扩展头处理（`pbuf_remove_header` / `pbuf_unchain` 链式搬移）；
+- ICMPv6 中**非 echo** 的路径（echo 应答已确认走 `PBUF_RAM`，故非 echo 类）；
+- IPv6 的 `netif` / 地址层。
+
+完全不挂 virtio-net 也不复现，说明确实必须有一条活的 RX 数据面在喂包，
+排除「与网络无关的启动期内存踩踏」。
+
+分片重组、邻居发现、DHCPv6 三条「IPv6 专属且常驻」的后台路径已全部排除，
+剩下的多半就在 **`ip6_input` 自身的扩展头解析/搬移**里。逐个再关子系统
+的收益开始下降，建议改为直接在 `ip6_input` 的扩展头循环里对
+`pbuf_remove_header` / `pbuf_unchain` 加定位 instrumentation，
+用 canary 命中时的 `p->payload` 地址反推真正的越界写点。
+
+结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
+`PBUF_POOL` payload 的尾部，落在下一个元素的头部。
+
+**顺带发现的独立缺陷**（非本 panic 的成因，尚未修）：
+`lwip_stack.c` 的 RX 循环只用 `len <= 0` 挡住了 `recv()` 的错误返回，
+**没有上界校验**；`len` 随后原样进入 `pbuf_take(p, st->rx_frame, (u16_t)len)`。
+若某个 `recv` 实现返回大于 `sizeof(rx_frame)`（1536）的长度，
+`pbuf_take` 会越过 1536 字节的 `rx_frame` 读取。当前各 `recv` 实现均未观察到
+越界返回，故尚未触发，但这是一处真实的边界缺失，应补上裁剪。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
+> 落在 PBUF_POOL 相邻元素），不给身份。下一步应从 pool 元素尺寸与
+> `PBUF_POOL_BUFSIZE`（1536）的边界关系入手，找哪个子系统按 1536 以上的
+> 步长写入 pool 附近内存——`MEMP_OVERFLOW_CHECK` 无法回答这个问题，
+> 需要在 canary 命中的那对元素上打印其地址/尺寸/相邻关系。
+>
+> **仍未被推翻的既有事实**：lwIP 除一处有板级保护的 printf 外**未打补丁**；
+> RX 接缝每帧新分配一个单元素 pool pbuf，且 virtio_net 同时夹紧 `pkt_len` 与
+> `used_len`，因此**接缝处一帧的 pbuf 不可能被双重释放**——出问题的那次释放
+> 发生在**更早的包**上。
+
 - 症状：x86_64 桌面起来后约 1 分钟**不确定性地**打死内核，报
   `lwIP assertion failed: pbuf_free: p->ref > 0`；调用链为
   `ip6_input` → `ethernet_input` → `a20_lwip_process_netif_rx_tx_locked`。
@@ -833,13 +1046,20 @@
   - `net_packet_rx_defer()` 在自旋锁下 `memcpy` 拷贝帧，不会保留共享 `rx_frame` 指针；
   - vendored lwIP 的重组路径已审：`ip6_reass_free_complete_datagram()` 与
     `ip6_reass()` 完成时的 `pbuf_cat` 链接逻辑均与上游所有权约定一致，未见缺陷。
-- **已判定：是真正的重复释放，不是内存踩坏**。在 `pbuf.c` 里临时记录已释放地址、
-  在重新分配时抹掉记录，并在断言前比对，从而把两种成因分开（`pbuf_free: p->ref > 0`
-  只能证明 `ref == 0`，单看断言无法区分）。x86_64 `NR_CPUS=4` + XFCE 镜像实测输出：
+- **曾判定为"真正的重复释放，不是内存踩坏"——这条判定不成立，见下方"更正"。**
+  当时的做法是在 `pbuf.c` 里临时记录已释放地址、重新分配时抹掉记录，并在断言前
+  比对，从而试图把两种成因分开（`pbuf_free: p->ref > 0` 只能证明 `ref == 0`，
+  单看断言无法区分）。x86_64 `NR_CPUS=4` + XFCE 镜像实测输出：
   ```
   pbufdiag: DOUBLE-FREE 0xffff80000147cba8 type=0 len=0 tot=2 next=0x0
   ```
-  即该地址**确实被释放过**，所以**相邻缓冲区越界写**这条假设可以排除。
+  该地址当时**看起来**确实被释放过。**更正**：这个判据在 memp 的空闲链表
+  语义下是无效的——空闲链表本身就是穿过已释放块的指针链，一次双重释放之后
+  同一块内存会被交给两个活着的 pbuf，于是"这块地址被释放过"对每个 pbuf 都
+  成立，`ref` 也失去意义。**所以这一段插桩没有排除"相邻缓冲区越界写"，也没有
+  证实"真正的重复释放"。当时的结论应当作废。** 当时被排除的"重复释放"候选
+  （`pbuf_remove_header` 内部释放、`ip6_input` 返回非 `ERR_OK`）仍然是有效的
+  排除——它们是逐个读实现否掉的，不依赖上述插桩。
 - 关键线索是被释放的 pbuf 形态：**`len=0` 而 `tot_len=2`**（`type=0 next=0x0`）。
   `len` 归零的来源已确认：vendored lwIP 的 `pbuf_remove_header()` **不释放任何东西**，
   它只把 `payload` 前移并原地减小 `len`/`tot_len`，因此当头部正好等于首个 pool pbuf
@@ -851,9 +1071,10 @@
   再被 `ethernet_input()` 的 `if (err != ERR_OK) pbuf_free(p);` 释放一次」。实测
   `ip6_input` 只有 5 个返回点（`ip6.c:535/541/561/581/1119`），**全部是 `ERR_OK`**，
   根本不存在 `ERR_MEM` 出口；因此 `ethernet_input` 那条错误路径对 IPv6 永不触发。
-- 目前**两条最自然的路径都被排除**，重复释放的实际双方还没找到。已确认的事实：
-  `ip6_input` 自身不返回错误；链首 pbuf 可被 `pbuf_remove_header` 吃成 `len=0/next=0x0`；
-  断言触发时 `ref==0` 且该地址确实曾被释放。IPv6 专属这一点仍是最强线索——同一条
+- 目前**两条最自然的 IPv6 内部路径都被排除**（见上），重复释放的实际双方还没找到。
+  已确认的事实：`ip6_input` 自身不返回错误；链首 pbuf 可被 `pbuf_remove_header`
+  吃成 `len=0/next=0x0`；断言触发时 `ref==0`。"该地址确实曾被释放"这一条**不再
+  可用作证据**（见上面的更正）。IPv6 专属这一点仍是最强线索——同一条
   `ethernet_input` 路径的 IPv4 分支从不触发，说明差异在 `ip6_input` 内部而非入口。
 - **已做过一次 `ip6_input` 全量打点（22 处 `pbuf_free`）的实验，结果与预期不同**：
   在 x86_64 `NR_CPUS=4` + XFCE 镜像上捕获到
@@ -872,7 +1093,11 @@
   但仅凭地址相邻**不能**下结论（pool 本来就是连续分配），仍需 `p->ref` 与写入点证据。
 - 下一步建议（未做）：把上面的 22 处打点保留，但记录项从「地址」扩展为
   `{地址, p->ref, 释放点行号}`，并且**只在断言真的会触发的那一轮**dump 序列——
-  本次实验说明不崩溃的轮次里重���信息噪声极大。复现需保持 SLAAC 可用。
+  本次实验说明不崩溃的轮次里重复信息噪声极大。复现需保持 SLAAC 可用。
+- **但这套「按地址判重」的路子整体上已经不可用**，原因见顶部第 4 条（memp 的
+  空闲链表穿过已释放块，一次双重释放之后地址判重与 `ref` 都会失真）。
+  正确方向是 `CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 抓**第一个**失衡点，而不是继续
+  在触发断言的那一轮里做模式匹配。
 
 ### x86_64 桌面：间歇性 `Failed to set CRTC`（ENOENT），显示起不来
 - 症状：wlroots legacy 后端反复报
@@ -888,8 +1113,15 @@
     该 ioctl 在这条链路上根本不被调用；把 GEM_CLOSE 改成 no-op 也不改变现象；
   - **内核与用户态 `drm_mode_crtc` ABI 不一致**：本以为内核 `struct drm_mode_crtc`
     （`set_connectors_ptr`/`count_connectors`/`mode_valid`/`mode`）与 Linux UAPI
-    不同构会导致 `fb_id` 读偏——但用户态 `user/external/mlibc/.../drm.cpp` 走的是
-    `<drm/drm.h>` 里**同一份 vendored 定义**，字段一致，不存在错位。
+    不同构会导致 `fb_id` 读偏。**原先这里给的依据是错的**：它引用
+    `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` 说是"走同一份 vendored
+    定义"，但那个文件**不在 A20OS 构建路径里**——A20OS 用
+    `tools/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，而 `sysdeps/a20`
+    不含任何 DRM 代码。真正的用户态是 **Alpine 的 libdrm**（stock apk，跑在
+    Linux syscall ABI 上），其 `drm_mode_crtc` 就是 Linux UAPI 的那一份。
+    **结论侥幸成立，但依据已更正**；现在这条 ABI 一致性由
+    `tools/check-drm-abi.sh` 门禁按结构体布局逐字段核对，见
+    [graphics/3d-graphics.md §8.1](graphics/3d-graphics.md)。
 - 影响：**这条同时卡住 XWayland 呈现验证与 x86_64 `smp>1` 挂起调查**——两者都需要
   一块真正能出画面的显示器。
 - **已定位根因（插桩实证）**：把 `drm_gem_alloc` / `drm_free_gem` / `addfb` / `setcrtc`
@@ -908,10 +1140,17 @@
   或 `GEM_CLOSE`），`drm_free_gem()` 就把那个 GEM 释放了；帧缓冲的 `fb_id` 随之悬空，
   随后 `drmModeSetCrtc` 带着这个 `fb_id` 回来，`drm_find_gem()` 自然找不到 → `-ENOENT`。
   这同时解释了「间歇性」：取决于 destroy 与 setcrtc 的先后。
-- 正确修法（**未做**）：引入真正的 framebuffer 对象（`drm_fb_t`，持有对 GEM 的
-  引用），`ADDFB/ADDFB2` 从独立 id 空间分配 `fb_id`，`RMFB` 释放该引用；GEM 只在
-  「dumb handle 已销毁 **且** framebuffer 引用已释放」时才真正回收。不能只在
-  `destroy_dumb` 上打补丁绕过，那只是把悬空推迟到下一次。
+- 正确修法（**已做**）：引入真正的 framebuffer 对象（`drm_fb_t`，持有对 GEM 的
+  引用），`ADDFB/ADDFB2` 从**独立 id 空间**分配 `fb_id`（`g_fbs[]`，
+  `DRM_MAX_FBS = 64`，`g_fb_next_id` 递增），`RMFB` 释放该引用。同批落地：
+  CRTC 现在真的保存绑定（`g_crtc`，此前 `SETCRTC` 呈现成功并返回 0 却什么都不
+  存，于是 `GETCRTC` 永远报 `fb_id 0`）；`PAGE_FLIP` 不再把 `pf.fb_id` 当 GEM
+  handle 解析（framebuffer id 与 GEM handle 来自两个独立计数器，此前只是碰巧
+  相等才工作）；`GETFB2` 从后备 GEM 应答（此前是一个清零就返回成功的 stub）。
+  `mode_valid` 在 `fb_id == 0` 时**故意保持 1**——它表示"CRTC/connector 这一对
+  已编程了一个 mode"，不是"已绑定 framebuffer"；报 0 会让 wlroots 在 backend
+  init 阶段直接放弃这个 output。
+  不能只在 `destroy_dumb` 上打补丁绕过，那只是把悬空推迟到下一次。
 - 复现要点：必须**关掉 IPv6**（`LWIP_IPV6=0` + `LWIP_ICMP6=0` 等）桌面才活得够久、
   不被 lwIP panic 打断；且 trace 要在同一轮 boot 里同时打四处，跨轮次对比会自相矛盾。
 
