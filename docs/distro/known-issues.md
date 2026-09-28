@@ -961,7 +961,30 @@ IP 头去算长度的那一段，而不在 lwIP 内。
 因此下一步 instrument 应当**同时**覆盖两处：`ip6_input:1054` 的 force 失败分支，
 以及 `socket_packet.c` 里 raw 接收的长度计算。只看 lwIP 侧可能看不到越界写。
 
-**未证实**：这是一条机制自洽、位置明确的线索，不是结论。下一步应在该处加
+**已证伪**：`ip6_input:1054` 这条线索经实测**不成立**。按其机制改写
+（仅在 force 成功时才执行 undo）并以 canary 重建后，panic 原样复现，
+栈帧 0~3 完全一致（仅 `[3]` 偏移因代码布局变化从 `+0x15c` 变为 `+0x16b`）：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+  [0] mem_overflow_check_raw   [1] do_memp_malloc_pool_fn
+  [2] pbuf_alloc               [3] a20_lwip_process_netif_rx_tx_locked+0x16b
+```
+
+该改动已回退——vendored lwIP 保持未打补丁状态。
+
+顺带更正上一条提交里的一个错误推论：`raw_input()` 在没有匹配 pcb 时确实会
+提前返回，但它返回的是「未吃掉」，因此 **`pbuf_remove_header` 仍会执行**。
+也就是说这个缺陷**不需要**存在活动的 raw socket 就会触发，先前「必须同时有
+raw socket」的推断是错的。
+
+**一条尚未解释的观测**：栈帧 `[4]` 是 `ethernet_output+0x13f2ae827`——
+偏移量约 5.4×10⁹，不可能是任何函数的合法偏移，说明符号化落到了最近的
+前驱符号上，即**该帧的返回地址无法解析**。若这是真实的栈损坏而非 unwinder
+的缺陷，则越界写的目标可能不止 pool，还波及到了内核栈。这与「1~8 字节溢出」
+的判断并不矛盾，但目前无法区分。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。下一步应在该处加
 instrumentation——检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
 与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
 
