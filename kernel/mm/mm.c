@@ -377,7 +377,9 @@ static int pt_table_empty(pte_t *table, int level) {
 }
 
 // 取消虚拟地址的映射，并回收变空的中间页表页
-int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
+int pt_unmap(mm_struct_t *mm, vaddr_t va) {
+    if (!mm) return -EINVAL;
+    pt_root_t *pgdir = mm->pgdir;
     pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
     pte_t *table = pgdir;
@@ -407,17 +409,26 @@ int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
             break;
         parent[idx_path[level + 1]] = 0;
         mm_pt_note_absent(parent, level + 1, idx_path[level + 1]);
-        mm_pt_node_fini(child);
-        frame_free(child);
+        /* RCU retire.  mm_addrspace_lock() only locks the covering node, so a
+         * concurrent cursor may still be walking this descendant unlocked;
+         * mark the subtree stale so it retries, and hand the frame to the
+         * shootdown drain (which waits for an empty read-side section)
+         * instead of freeing it here. */
+        mm_pt_mark_stale_recursive(child, level);
+        if (mm_pt_defer_free(mm, child, level) < 0) {
+            mm_pt_node_fini(child);   /* could not queue: keep old path */
+            frame_free(child);
+        }
     }
     /* The leaf frame reference is NOT dropped here: pt_unmap never owned it.
      * Callers (io_uring, signal, framebuffer) release it themselves. */
     return 0;
 }
 
-int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
+int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out) {
-    if (!pgdir) return -EINVAL;
+    if (!mm) return -EINVAL;
+    pt_root_t *pgdir = mm->pgdir;
     pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
     pte_t *table = pgdir;
@@ -457,8 +468,16 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
                     break;
                 parent[idx_path[l + 1]] = 0;
                 mm_pt_note_absent(parent, l + 1, idx_path[l + 1]);
-                mm_pt_node_fini(child);
-                frame_free(child);
+                /* RCU retire.  mm_addrspace_lock() only locks the covering node, so a
+                 * concurrent cursor may still be walking this descendant unlocked;
+                 * mark the subtree stale so it retries, and hand the frame to the
+                 * shootdown drain (which waits for an empty read-side section)
+                 * instead of freeing it here. */
+                mm_pt_mark_stale_recursive(child, l);
+                if (mm_pt_defer_free(mm, child, l) < 0) {
+                    mm_pt_node_fini(child);   /* could not queue: keep old path */
+                    frame_free(child);
+                }
             }
 
             if (pa_out) *pa_out = pa;

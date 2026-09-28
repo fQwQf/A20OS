@@ -418,7 +418,7 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
                PAGE_SIZE);
     }
 
-    if (pt_unmap_leaf(mm->pgdir, base, NULL, NULL, NULL, NULL) < 0) {
+    if (pt_unmap_leaf(mm, base, NULL, NULL, NULL, NULL) < 0) {
         for (size_t i = 0; i < PMD_PAGE_COUNT; i++)
             frame_put(pages[i]);
         return -EINVAL;

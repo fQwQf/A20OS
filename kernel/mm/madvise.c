@@ -65,7 +65,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
              * frame_put() them.  Drop the PTE and let the VMO keep the
              * canonical frame. */
             paddr_t dummy = 0;
-            if (pt_unmap_leaf(mm->pgdir, va, &dummy, &base,
+            if (pt_unmap_leaf(mm, va, &dummy, &base,
                               &leaf_size, NULL) == 0) {
                 mm_tlb_note_change(mm, base, leaf_size);
                 mm->rss = (mm->rss > leaf_size / PAGE_SIZE)
@@ -83,7 +83,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             mm_tlb_invalidate_finish(mm);
             return -ENOMEM;
         }
-        if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &leaf_size, NULL) == 0) {
+        if (pt_unmap_leaf(mm, va, &pa, &base, &leaf_size, NULL) == 0) {
             mm_tlb_note_change(mm, base, leaf_size);
             if (pa) {
                 frame_put(phys_to_pfn(pa));
