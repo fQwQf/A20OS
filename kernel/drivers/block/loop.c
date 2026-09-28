@@ -298,6 +298,19 @@ static int loop_block_write_sector(block_dev_t *block, uint64_t lba,
     return (r >= 0 && (size_t)r == bytes) ? 0 : -EIO;
 }
 
+static int loop_block_flush(block_dev_t *block) {
+    loop_block_t *lb = (loop_block_t *)block->priv;
+    /* The loop's durability is exactly its backing file's, so flush by
+     * fsync'ing that file.  Snapshot the vfile under the loop lock and drop
+     * it before entering the VFS, per the existing lock-order rule. */
+    uint64_t flags = spin_lock_irqsave(&g_loop[lb->idx].lock);
+    vfile_t *vf = g_loop[lb->idx].in_use ? g_loop[lb->idx].backing_vf : NULL;
+    spin_unlock_irqrestore(&g_loop[lb->idx].lock, flags);
+    if (!vf)
+        return -ENXIO;
+    return vfs_fsync_vfile(vf);
+}
+
 void loop_block_release(block_dev_t *bdev) {
     loop_block_t *lb = (loop_block_t *)bdev->priv;
     if (!lb)
@@ -326,6 +339,7 @@ block_dev_t *loop_block_device(int idx) {
     lb->idx = idx;
     lb->block.read_sector = loop_block_read_sector;
     lb->block.write_sector = loop_block_write_sector;
+    lb->block.flush        = loop_block_flush;
     lb->block.capacity = bsz / LOOP_SECTOR_SIZE;
     lb->block.sector_size = LOOP_SECTOR_SIZE;
     lb->block.priv = lb;

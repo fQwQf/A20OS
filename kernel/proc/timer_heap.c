@@ -582,9 +582,6 @@ void sched_scan_timers(uint64_t now)
     extern void psi_tick(void);
     psi_tick();
 
-    /* /proc/loadavg EMA sample (kernel/proc/loadavg.c). */
-    proc_loadavg_tick();
-
 #ifdef CONFIG_ABI_NATIVE
     a20_timer_tick();
     /* Periodic monitor sampling (Native ABI perf-style counters). */
