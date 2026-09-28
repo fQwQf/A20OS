@@ -172,8 +172,8 @@ def _gate_resources(inst, args, *, guest: bool = True) -> None:
     if getattr(args, "wait_timeout", None) is not None:
         policy = Policy(policy.reserve_mem_mb, policy.min_disk_mb,
                         policy.max_concurrent, args.wait_timeout)
-    preflight(inst, policy, REPO_ROOT, wait=not args.no_wait, echo=_echo,
-              guest=guest)
+    preflight(inst, policy, REPO_ROOT, wait=not getattr(args, "no_wait", False),
+              echo=_echo, guest=guest)
 
 
 def _echo(msg: str) -> None:
@@ -684,8 +684,12 @@ def main(argv: list[str] | None = None) -> int:
     add_instance_cmd("package", "build and assemble the artifact in [package]",
                      with_make_args=True)
 
-    for boot in ("run", "debug", "test"):
-        _add_resource_flags(sub.choices[boot])
+    # Every command that calls _gate_resources needs the waiting flags, not just
+    # the three that launch a guest: build, flash and package are gated too, and
+    # omitting them left them crashing on a missing attribute before doing any
+    # work at all.
+    for gated in ("build", "run", "debug", "test", "flash", "package"):
+        _add_resource_flags(sub.choices[gated])
 
     # Unknown arguments (after an optional `--`) are forwarded to make. Using
     ns, passthrough = parser.parse_known_args(argv)
