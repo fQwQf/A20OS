@@ -7,7 +7,7 @@
 #include "core/stdio.h"
 
 #define SLAB_NR_CACHES  7
-#define SLAB_MAX_OBJ   2048  // 最大对象大小，超过此大小直接使用 buddy 分配器
+#define SLAB_MAX_OBJ   2048  // Largest object size; anything larger goes straight to the buddy allocator
 #define SLAB_HDR_SIZE   64
 #define SLAB_MAGIC   0x534C4142U  // "SLAB"
 #define BIG_MAGIC    0x42494741U  // "BIGA"
@@ -19,7 +19,7 @@
 #define CONFIG_SLAB_DEBUG 0
 #endif
 
-// 不同大小的 Slab 缓存（32 字节到 2048 字节）
+// Slab caches of increasing size, from 32 to 2048 bytes
 static const size_t slab_sizes[SLAB_NR_CACHES] = {
     32, 64, 128, 256, 512, 1024, 2048
 };
@@ -30,7 +30,7 @@ typedef struct slab_page {
     uint16_t in_use;
     uint16_t total;
     void    *free_list;
-    uint64_t alloc_bits[SLAB_BITMAP_WORDS]; /* 当前已分配对象位图 */
+    uint64_t alloc_bits[SLAB_BITMAP_WORDS]; /* bitmap of currently allocated objects */
     uint8_t  cache_idx;
     uint8_t  state;          // SLAB_STATE_*
     uint8_t  _pad[2];
@@ -133,7 +133,7 @@ void slab_init(void) {
     }
 }
 
-// 为指定缓存分配一个新的 Slab 页面并初始化
+// Allocate and initialise a new Slab page for the given cache
 static slab_page_t *slab_grow(int idx) {
     slab_cache_t *c = &caches[idx];
     pfn_t pfn = pfa_alloc_page();
@@ -150,7 +150,7 @@ static slab_page_t *slab_grow(int idx) {
     sp->state     = SLAB_STATE_NONE;
     sp->magic     = SLAB_MAGIC;
 
-    // 如果对象太大导致一页放不下任何一个，则放弃分配
+    // If the object is so large that not even one fits in a page, give up
     if (sp->total == 0) {
         pfa_free_page(pfn);
         return NULL;
@@ -219,7 +219,7 @@ static __attribute__((unused)) int slab_list_contains(slab_page_t *head, slab_pa
     return 0;
 }
 
-// 验证 Slab 页面的完整性（调试用）
+// Verify the integrity of a Slab page (debug use)
 static __attribute__((unused)) void slab_validate_sp(slab_page_t *sp, const char *where, size_t obj_size) {
     int free_count = 0;
     for (void *p = sp->free_list; p; p = *(void **)p) {
@@ -457,7 +457,8 @@ void kfree(void *ptr) {
     slab_validate_sp(sp, "kfree-pre", obj_size);
 #endif
 
-    // 将对象放回空闲链表（必须在锁内，防止并发 kfree 破坏链表）
+    // Return the object to the free list.  Must be done under the lock, or a
+    // concurrent kfree can corrupt the list.
     slab_bit_clear(sp, obj_idx);
     *(void **)ptr = sp->free_list;
     sp->free_list = ptr;
@@ -467,14 +468,16 @@ void kfree(void *ptr) {
     slab_validate_sp(sp, "kfree-post", obj_size);
 #endif
 
-    // 如果页面刚从满状态转变出来（只要减去 1 后等于 total - 1，那它之前一定在 full 链表中）
+    // The page has just left the full state: if decrementing leaves
+    // in_use == total - 1, it must have been on the full list beforehand
     if (sp->in_use == sp->total - 1) {
         slab_list_remove(&c->full, sp);
         sp->state = SLAB_STATE_PARTIAL;
         slab_list_push(&c->partial, sp);
     }
 
-    // 如果页面已经完全空闲（注意这里用 if 而不是 else if，以处理 total == 1 的极端情况）
+    // The page is now completely free.  Note this is an if and not an else if,
+    // which handles the edge case of total == 1
     if (sp->in_use == 0) {
         if (sp->state == SLAB_STATE_PARTIAL) {
             slab_list_remove(&c->partial, sp);

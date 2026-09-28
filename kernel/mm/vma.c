@@ -409,8 +409,9 @@ void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
     if (!mm->pgdir) return;
     int shared_file = (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED);
     for (uint64_t va = vma->start; va < vma->end; ) {
-        /* 检查当前映射是否为跨越 VMA 边界的大页，
-         * 若是则先降级为普通页再逐个释放。 */
+        /* Check whether the current mapping is a huge page that straddles a
+         * VMA boundary; if so, demote it to base pages and release them
+         * one at a time. */
         int level = 0;
         vaddr_t base = 0;
         size_t size = 0;

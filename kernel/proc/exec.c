@@ -629,7 +629,8 @@ static int exec_install_process(task_t *t,
     new_mm->pgdir      = info->pgdir;
     new_mm->brk        = info->brk;
     new_mm->start_brk  = info->brk;
-    /* ASLR：每次 exec 重新随机化 mmap 回退基址（fork 通过 *child=*parent 继承） */
+    /* ASLR: every exec re-randomizes the mmap fallback base (fork inherits it
+     * through *child = *parent) */
     new_mm->mmap_base  = mm_aslr_mmap_base();
     new_mm->stack_top  = info->stack_top;
     new_mm->stack_bottom = info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;

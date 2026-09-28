@@ -26,7 +26,8 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;
 
-    /* W^X：把已有映射提升为 W|X 与新映射受同一策略约束 */
+    /* W^X: raising an existing mapping to W|X is bound by the same policy as
+     * a new mapping */
     prot = mm_wx_filter_prot(prot, "mprotect");
     if (prot < 0) return prot;
 

@@ -113,12 +113,14 @@ void kernel_main(void) {
 #endif
     random_init();
     printf("[INIT] Random initialized\n");
-    /* 熵池就绪后立即随机化栈金丝雀：此时引导栈上只有 kernel_main 一帧
-     * 且其永不返回，更换 guard 不会造成误报。 */
+    /* Randomise the stack canary as soon as the entropy pool is ready: the
+     * boot stack holds only the kernel_main frame at this point and it never
+     * returns, so swapping the guard cannot produce a false positive. */
     stack_protector_init();
     bootargs_init();
     printf("[INIT] Boot arguments parsed\n");
-    /* W^X 策略依赖 cmdline（a20.wx=deny|strip|off），须在 bootargs 之后 */
+    /* The W^X policy depends on the cmdline (a20.wx=deny|strip|off), so this
+     * must run after bootargs */
     mm_wx_policy_init();
     driver_core_init();
     printf("[INIT] Driver core initialized\n");

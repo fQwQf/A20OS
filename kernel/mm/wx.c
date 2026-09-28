@@ -1,15 +1,19 @@
 /*
- * A20OS — 用户态 W^X 策略
+ * A20OS — user-space W^X policy
  *
- * 任何用户 VMA 不得同时可写且可执行。所有入口（mmap/mmap_file/mmap_vmo、
- * mprotect、ELF PT_LOAD 装载）统一经过 mm_wx_filter_prot()：
- *   - deny（默认）：拒绝 W|X 组合，返回 -EACCES（类 Linux 安全模块语义）；
- *   - strip：告警并剥离可写位，映射降级为只读+可执行；
- *   - off：不干预（仅调试/兼容性兜底）。
+ * No user VMA may be both writable and executable. Every entry point
+ * (mmap/mmap_file/mmap_vmo, mprotect, ELF PT_LOAD loading) goes through
+ * mm_wx_filter_prot():
+ *   - deny (default): refuse a W|X combination and return -EACCES, following
+ *     the Linux security-module semantics;
+ *   - strip: warn and strip the writable bit, downgrading the mapping to
+ *     read-only + executable;
+ *   - off: no intervention (debug/compatibility fallback only).
  *
- * 策略通过内核 cmdline 选择：a20.wx=deny|strip|off。
- * 仓库用户态（musl 静态程序、自研 cmds、native svc）均无 RWX 需求
- * （无 dlopen/JIT），因此默认最严格的 deny。
+ * The policy is selected on the kernel cmdline: a20.wx=deny|strip|off.
+ * Nothing in this tree's user space (static musl programs, the in-tree cmds,
+ * native svc) needs RWX -- there is no dlopen and no JIT -- so the strictest
+ * policy, deny, is the default.
  */
 
 #include "mm/vm.h"
@@ -25,7 +29,7 @@
 
 static int g_wx_policy = MM_WX_DENY;
 
-/* 与 net/net_config.c 相同的 cmdline token 扫描风格 */
+/* Same cmdline token scanning style as net/net_config.c */
 static const char *wx_extract_value(const char *tok, const char *tok_end,
                                     const char *key, char *val, size_t valsz)
 {

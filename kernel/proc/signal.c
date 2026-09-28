@@ -195,7 +195,7 @@ void signal_init(signal_state_t *ss) {
     wait_queue_init(&ss->readiness_waiters);
 }
 
-// 复制信号状态（用于 fork 时继承父进程的信号处理函数）
+/* Copy the signal state, so that fork inherits the parent's handlers. */
 void signal_copy(const signal_state_t *src, signal_state_t *dst) {
     signal_init(dst);
     if (!src)
@@ -654,7 +654,7 @@ void signal_task_set_rlim_core(void *task, uint64_t soft)
     spin_unlock_irqrestore(&ss->lock, flags);
 }
 
-// 传递信号（内核线程使用）
+/* Deliver a signal.  Used by kernel threads. */
 void signal_deliver(void) {
     task_t *t = proc_current();
     if (!t || !t->signals) return;
@@ -909,7 +909,7 @@ int64_t sys_rt_sigreturn_impl(trap_context_t *ctx) {
     return 0;
 }
 
-// 设置信号处理函数（rt_sigaction 系统调用的实现）
+/* Install a signal handler; the implementation of the rt_sigaction syscall. */
 int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsetsize) {
     if (signum <= 0 || signum >= NSIG) return -EINVAL;
     if (signum == SIGKILL || signum == SIGSTOP) return -EINVAL;
@@ -945,7 +945,7 @@ int sys_sigaction_impl(int signum, const void *act, void *oldact, size_t sigsets
     return 0;
 }
 
-// 修改信号掩码（sigprocmask 系统调用的实现）
+/* Change the signal mask; the implementation of the sigprocmask syscall. */
 int sys_sigprocmask_impl(int how, const void *set, void *oldset, size_t sigsetsize) {
     if (sigsetsize != ARCH_SIGSET_SIZE) return -EINVAL;
 

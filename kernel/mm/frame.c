@@ -71,7 +71,7 @@ static pfa_cpu_page_batch_t g_pfa_cpu_batches[CONFIG_NR_CPUS];
 int __popcountdi2(unsigned long long a) {
     int count = 0;
     while (a) {
-        a &= (a - 1); // 每次清除最低位的 1
+        a &= (a - 1); // clear the lowest set bit
         count++;
     }
     return count;
@@ -377,7 +377,8 @@ void pfa_init(paddr_t kernel_end) {
     g_pfa_ranges = pfa.ranges;
     g_pfa_nr_ranges = pfa.nr_ranges;
 
-    // 分配元数据区 + 空闲帧位图（紧跟 meta 之后，同属内核保留区）
+    /* Allocate the metadata area plus the free-frame bitmap; it follows the
+     * metadata and belongs to the same kernel-reserved region. */
     size_t meta_sz = (size_t)pfa.total_frames * sizeof(frame_meta_t);
     size_t freemap_sz = ((size_t)pfa.total_frames + 7) / 8;
     paddr_t meta_pa = ROUND_UP(kernel_end, 64);
@@ -394,7 +395,8 @@ void pfa_init(paddr_t kernel_end) {
            (unsigned long)meta_sz);
     spin_init(&pfa.lock);
 
-    /* 空闲帧位图：帧在空闲链上即置位。把静默的双重归还变成即时 panic。 */
+    /* Free-frame bitmap: a bit is set while the frame is on a free list.  It
+     * turns a silent double free into an immediate panic. */
     g_pfa_freemap_bytes = freemap_sz;
     g_pfa_freemap = (uint8_t *)(meta_pa + meta_sz + PAGE_OFFSET);
     memset(g_pfa_freemap, 0, g_pfa_freemap_bytes);
@@ -659,12 +661,13 @@ void pfa_free(pfn_t pfn, int order) {
     pfa.meta[pfn].prev = PFN_NONE;
     pfa.meta[pfn].next = PFN_NONE;
 
-    /* 释放多页块时，清除子页的元数据，使 buddy merge 能正确合并。
-     * 保护性检查：
-     * - 跳过仍在使用的页面（refcount > 0），防止 buddy merge
-     *   后的清除循环覆盖独立分配的页面元数据。
-     * - 跳过已在空闲链上的页面（flags == FRAME_F_FREE），防止
-     *   清除 prev/next 链接导致空闲链损坏。 */
+    /* When a multi-page block is released, clear the per-subpage metadata so a
+     * buddy merge can still combine correctly.  Two guards:
+     * - skip pages still in use (refcount > 0), so the clear loop that follows
+     *   a merge cannot overwrite the metadata of an independently allocated
+     *   page;
+     * - skip pages already on a free list (flags == FRAME_F_FREE), so clearing
+     *   the prev/next links cannot corrupt the free list. */
     for (pfn_t i = pfn + 1; i < pfn + (1u << actual_order); i++) {
         if (i >= pfa.total_frames) break;
         if (pfa.meta[i].refcount > 0) continue;
@@ -738,8 +741,10 @@ static void pfa_audit_orphan_scan(void)
 }
 
 /*
- * 关机前审计：遍历全部空闲链，验证双向链接、位图与元数据一致性。
- * 返回发现的错误数（0 = 链表完好）。带步数上限以防损坏链成环。
+ * Pre-shutdown audit: walk every free list and check that the doubly-linked
+ * links, the bitmap and the metadata agree.  Returns the number of errors
+ * found (0 = the lists are intact).  A step bound keeps a corrupted cyclic list
+ * from hanging the audit.
  */
 int pfa_audit_lists(void)
 {
@@ -819,8 +824,9 @@ void frame_get(pfn_t pfn) {
 static void frame_put_locked(pfn_t pfn) {
     if (pfa.meta[pfn].refcount > 0 && --pfa.meta[pfn].refcount == 0) {
         frame_trace(pfn);
-        /* refcount 归零，直接在此释放（内联 pfa_free 核心逻辑），
-         * 避免先解锁再调 pfa_free 的竞态窗口 */
+        /* The refcount reached zero, so release it right here (the core of
+         * pfa_free is inlined) rather than dropping the lock and then calling
+         * pfa_free, which would open a race window. */
         int actual_order = (int)pfa.meta[pfn].order;
         if (actual_order < 0 || actual_order > MAX_ORDER) {
             return;
