@@ -1,9 +1,11 @@
 /*
  * A20OS Native ABI — Sync (0x0B00) syscall implementations.
  *
- * futex 是用户地址上的同步原语，不是内核对象，不分配 handle。
- * 语义对齐 Zircon zx_futex_wait/zx_futex_wake；实现复用内核 futex 核心
- * (abi/linux/sys_futex.c)，错误码映射到 native errno 空间。
+ * A futex is a synchronisation primitive on a user address, not a kernel
+ * object, so it is not allocated a handle.  Its semantics match Zircon's
+ * zx_futex_wait / zx_futex_wake; the implementation reuses the kernel futex
+ * core (abi/linux/sys_futex.c) and maps error codes into the native errno
+ * space.
  * Design reference: docs/native-abi/01-types.md §22
  */
 #include "core/types.h"

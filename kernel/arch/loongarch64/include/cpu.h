@@ -206,13 +206,13 @@ static inline void arch_halt(void) {
 
 static inline void arch_dcache_flush(uintptr_t addr, size_t size) {
     uintptr_t end = addr + size;
-    addr &= ~(64UL - 1); // 按照 64 字节对齐
+    addr &= ~(64UL - 1); // align down to 64 bytes
     while (addr < end) {
-        // op=0x11: 对 L1 D-Cache 执行 Hit Writeback Invalidate
+        // op=0x11: Hit Writeback Invalidate on the L1 D-Cache
         __asm__ __volatile__("cacop 0x11, %0, 0" :: "r"(addr) : "memory");
         addr += 64;
     }
-    // 确保所有的 Cache 写回操作彻底完成
+    // make sure every cache writeback has completely drained
     __asm__ __volatile__("dbar 0" ::: "memory"); 
 }
 

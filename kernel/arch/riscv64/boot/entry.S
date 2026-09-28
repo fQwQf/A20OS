@@ -341,7 +341,7 @@ _stack_bottom:
     .globl _stack_end
 _stack_end:
 
-    /* 启动时保存的 hart ID 与 DTB 指针，由 entry.S _start 写入 */
+    /* hart ID and DTB pointer saved at boot, written by entry.S _start */
     .globl __boot_hart_id
 __boot_hart_id:
     .dword 0

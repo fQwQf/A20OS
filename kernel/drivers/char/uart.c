@@ -20,7 +20,7 @@
 
 #define RX_BUF_SIZE 256
 
-// 接收缓冲区（环形缓冲区）
+// receive buffer (ring buffer)
 static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;
 static volatile uint32_t rx_tail;
@@ -143,7 +143,7 @@ void uart_putc(char c) {
     arch_uart_putc(c);
 }
 
-// 阻塞式读取一个字符（如果没有数据则让出 CPU）
+// blocking read of one character (yields the CPU if there is no data)
 int uart_getc(void) {
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&rx_lock);
@@ -214,7 +214,7 @@ int uart_getc(void) {
     }
 }
 
-// 非阻塞式尝试读取一个字符
+// non-blocking attempt to read one character
 int uart_try_getc(void) {
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     if (rx_head == rx_tail) {
