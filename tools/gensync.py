@@ -44,7 +44,16 @@ def in_place(label: str, target: str, cmd: list[str]) -> int:
 
 
 def to_temp(label: str, committed: str, out_name: str,
-            cmd: list[str], stale: str) -> int:
+            cmd: list[str], stale: str = "generated file is stale",
+            also: list[str] | None = None) -> int:
+    """Regenerate into a temp dir and diff the result against the tree.
+
+    `also` names further generator outputs that must match as well.  A
+    generator that emits more than one file needs this: comparing only the
+    first leaves the others silently unverified, which is how
+    kernel/fs/rootfs_overlay.c went unchecked while its header was verified
+    on every commit.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         # The generator writes more than one file; hand it the temp dir and
         # let it name its own outputs, then compare just the one under test.
@@ -55,15 +64,25 @@ def to_temp(label: str, committed: str, out_name: str,
             print(f"{label}: FAIL -- generator produced nothing "
                   f"(exit {r.returncode})", file=sys.stderr)
             return 1
-        target = REPO / committed
-        if filecmp.cmp(produced, target, shallow=False):
-            print(f"{label}: PASS")
-            return 0
-        print(f"{label}: {stale}", file=sys.stderr)
-        d = subprocess.run(["diff", "-u", str(target), str(produced)],
-                           check=False, capture_output=True, text=True)
-        sys.stderr.write(d.stdout)
-        return 1
+        targets = [(committed, out_name)] + [
+            (p, Path(p).name) for p in (also or [])
+        ]
+        for target_rel, produced_name in targets:
+            produced = Path(tmp) / produced_name
+            target = REPO / target_rel
+            if not produced.is_file():
+                print(f"{label}: FAIL -- generator did not emit "
+                      f"{produced_name}", file=sys.stderr)
+                return 1
+            if not filecmp.cmp(produced, target, shallow=False):
+                print(f"{label}: {stale} ({target_rel})", file=sys.stderr)
+                d = subprocess.run(
+                    ["diff", "-u", str(target), str(produced)],
+                    check=False, capture_output=True, text=True)
+                sys.stderr.write(d.stdout)
+                return 1
+        print(f"{label}: PASS")
+        return 0
 
 
 def kallsyms(a) -> int:
@@ -102,6 +121,10 @@ def main() -> int:
     ovl.add_argument("--committed", required=True)
     ovl.add_argument("--out-name", default="rootfs_overlay.h")
     ovl.add_argument("--stale", default="rootfs overlay header is out of sync with its generator")
+    ovl.add_argument("--also", nargs="*", default=[],
+                     help="further generated files that must match too, "
+                          "relative to the repo root (e.g. the .c twin of the "
+                          "header)")
     ovl.add_argument("generator", nargs=argparse.REMAINDER)
 
     idl = sub.add_parser("a20-idl", help="a20idl.py output must match the committed header")
@@ -129,7 +152,8 @@ def main() -> int:
     # REMAINDER keeps the `--` separator itself; passing it on would make
     # subprocess try to exec it as the program.
     argv = a.generator[1:] if a.generator[:1] == ["--"] else a.generator
-    return to_temp(a.label, a.committed, a.out_name, argv)
+    return to_temp(a.label, a.committed, a.out_name, argv,
+                   stale=a.stale, also=a.also)
 
 
 if __name__ == "__main__":

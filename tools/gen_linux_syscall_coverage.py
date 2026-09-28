@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+"""Re-order the per-syscall coverage table in syscall_coverage.md.
+
+This does NOT author the Notes column.  Every row must already exist in
+syscall_coverage.md; the generator's job is to make the row order match
+syscall_table.def and to fail loudly when the two disagree.  Notes are written
+by hand, because they are the only place a per-syscall compatibility judgement
+is recorded.
+
+Two properties this script deliberately has:
+
+* It fails rather than repairs.  A name in syscall_table.def with no row, or a
+  row for a name that is no longer registered, is an error -- silently dropping
+  either would let the document drift away from the table it documents.
+* It rewrites only the text between the BEGIN/END markers, so hand-written
+  prose outside the block is never touched.
+
+Usage: gen_linux_syscall_coverage.py   (no arguments; paths are fixed)
+"""
 
 import re
 from pathlib import Path
