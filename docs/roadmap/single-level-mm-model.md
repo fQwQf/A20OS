@@ -1894,3 +1894,170 @@ pfn, vma->pte_flags, MM_ST_ANON_MAPPED)` 那一段）**逐行并列 diff**，只
 
 在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert，默认配置行为与改动前完全
 一致（`mm_fault_from_status=0`，全部门通过）。
+
+### 10.27 并列 diff 的结果：找到一处记账不等价
+
+把状态路径与 VMA 匿名路径逐段并列后，找到一处**具体**的不等价（不是猜测）：
+
+VMA 路径（`fault.c` 匿名/交换各段）在映射成功后**除** `mm->rss++` 之外，还会做四项
+**每任务/全局**的缺页计数：
+
+```c
+t->mm->rss++;
+arch_tlb_flush_page_local(stval);
+__atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
+```
+
+而状态路径只做了：
+
+```c
+mm->rss++;
+a20_perf_count(A20_PERF_MM_ANON_FAULTS);
+a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
+arch_tlb_flush_page_local(stval);
+```
+
+**`t->perf_page_faults` / `perf_page_faults_maj` 与两个 `g_perf_sw_*` 完全没动。**
+这本身未必致命（它们看起来只用于统计），但它是第一处**可指认**的差异，必须先补齐——
+一个缺页路径不记缺页数，会让任何依赖该计数的判断（以及 `/proc` 上报的缺页率）失真。
+
+**另一个结构性观察（非缺陷，但记录下来）**：VMA 路径在放锁分配页之后会**重新加锁并
+重新校验**：
+
+```c
+if (prepared > 0 && cp && (*cp & PTE_V)) { /* 已被别人映射 -> 撤销 */ }
+else if (mm_find_vma(t->mm, page_va) != vma) { /* VMA 已被换掉 -> 撤销 */ }
+```
+
+并全程持有 `vma_put(t->mm, vma)` 的引用。状态路径**没有也不该有**这一套——它全程持
+`mm->lock`，不存在同样的 TOCTOU 窗口，也从不碰 VMA。这正是论文设想的好处，但代价是
+它必须自己保证每一样 VMA 路径靠 VMA 拿到的东西（权限、记账、统计）都能从状态位里补齐。
+**目前权限能补齐（`MM_ST_PROT_*` 往返），记账只补了一半，统计完全没补。**
+
+**下一步（明确且小）**：把上述四项计数补进状态路径的成功分支，然后重跑
+`a20.anonprov=4096`：
+* 仍崩 → 记账不是原因，按 §10.26 候选 2/3 继续查 `mm_cursor_map` 的 metadata 配对与
+  `return 0` 是否跳过收尾；
+* 不崩 → (b) 的原因就是漏记这四项统计（很可能某个限额/回收策略读
+  `t->perf_page_faults`，在 brk 增长密集的路径上被触发）。
+
+这一条不需要任何猜测，且是当前唯一已指认的差异，应先做。
+
+**当前安全状态**（重要）：预标记默认关闭，状态缺页路径保持 inert。默认配置下
+`mm_fault_from_status=0`、审计全 0、`pt_pages=6` 不变，
+`smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` 全通过，
+5 个架构与 3 个 NOMMU 变体构建通过。**下述所有 (b) 排查都在 `a20.anonprov=4096` 下进行，
+默认路径不受影响。**
+
+### 10.28 补齐四项缺页统计：本身是对的，但**没有**修好 (b)
+
+按 §10.27 的指认，把 VMA 路径那四项每任务/全局软缺页计数补进状态路径成功分支：
+
+```c
+__atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
+```
+
+`a20.anonprov=4096` 复跑：**仍然 FATAL**。所以 §10.26 候选 1（记账重复/缺失导致连锁出错）
+**被证伪**。
+
+但这个改动**本身是正确的、应当保留**：状态路径此前完全不记这四项，意味着任何走状态
+路径的缺页都不会出现在 `t->perf_page_faults` 与 `/proc` 上报的缺页率里——这是与 VMA
+路径的真实记账不一致，与 (b) 是否由它引起无关。保留它是因为它对，不是因为它治好了崩溃。
+
+**至此 (b) 的五条假设全部被证伪**：
+
+| 假设 | 出处 | 结果 |
+|---|---|---|
+| `nr_present` uint16 回绕 | §10.23 | 证伪（`pt_table_empty` 直接扫 PTE，不看该计数） |
+| 跨核 TLB 残留翻译 | §10.24 | 证伪（`-smp 1` 同样崩） |
+| 状态路径缺 TLB 事务 | §10.25 | 证伪（`fault_map` 结构完全相同，也不开事务） |
+| 宽限期回收 `mm_pt_retire_table()` | §10.26 | 证伪（状态路径 inert + 预标记开 = 9287 页、stress PASS） |
+| 漏记四项缺页统计 | §10.27 | 证伪（补齐后仍崩） |
+
+**仍然确定的事实**（这些是实验结果，不是推断）：
+1. mmap 预标记**单独**安全（当前代码、预标记开、状态路径 inert → stress PASS、审计全 0）。
+2. 崩溃只在状态路径**真的消费** mmap 预标记条目时出现。
+3. 崩溃点是 **brk** 地址，而复现配置里 brk 预标记**关闭**——状态路径够不到它。
+
+第 3 条是核心矛盾，也是下一步唯一该盯的东西：**状态路径在处理 mmap 区间时，破坏了 brk
+路径后续依赖的某个共享不变式。** 已排除记账与统计，剩下最可能的是页表/metadata 层面的
+共享状态——具体说，`mm_cursor_map()` 把一个 `MM_ST_ANON_VIRT` 槽位变成已映射时，
+`mm_pt_note_present()` 记的 `nr_present` 与之后 `mm_pt_note_absent()` 的清理、以及
+`mm_cursor_unmap()` 清除 stale 标记这三条路径之间是否自洽。
+
+**下一步应当做的具体实验**（仍不需猜测）：
+在 `mm_pt_provision_anon()` 与 `mm_cursor_map()` 之后各加一个廉价的「不变式断言」计数器
+——映射完成后立刻回读该槽位的 class/PTE，若出现「class 声称已映射但 PTE 无效」或
+「PTE 有效但 class 仍是 ANON_VIRT」就计数；崩溃后再打印这个计数。计数非零即证明
+metadata 与 PTE 失配，并直接指出是哪一次写入造成的。
+
+**当前安全状态**（未变）：预标记默认关闭，状态缺页路径 inert。默认配置
+`mm_fault_from_status=0`、审计全 0（含 `safe=0`）、`pt_pages=6` 不变，
+`smoke-mm-stress` / `smoke-mm-fork-exec-race` 通过，riscv64/x86_64/aarch64 构建通过。
+
+### 10.29 不变式断言：证明状态路径的映射本身是**正确**的（第六条假设被证伪）
+
+按 §10.28 的实验设计，在状态路径 `mm_cursor_map()` 成功之后立刻回读该槽位，断言
+「PTE 已置有效」且「class 已不再是 `MM_ST_ANON_VIRT`」；违例则计数
+（新增 `A20_PERF_MM_STATUS_INVARIANT_BAD`）并在**首次**违例时 `kerr` 打印（因为随后的
+崩溃会让任何计数器都读不到，所以必须当场出声）。游标的叶子表 `qcur.path[0]` 本来就在
+手上，回读是一次已缓存指针的读，代价可忽略。
+
+`a20.anonprov=4096` 实测：**违例 0 次**，而崩溃照旧。
+
+**结论：`ANON_VIRT → 已映射` 这次状态转换每次都干净落地，metadata 与 PTE 始终自洽。**
+也就是说状态缺页路径在「装映射」这件事上是正确的，(b) 不是它把页表写坏了。
+
+**至此六条假设全部证伪**：
+
+| 假设 | 结果 |
+|---|---|
+| `nr_present` uint16 回绕 | 证伪（`pt_table_empty` 不看该计数） |
+| 跨核 TLB 残留翻译 | 证伪（`-smp 1` 同样崩） |
+| 状态路径缺 TLB 事务 | 证伪（`fault_map` 结构相同，也不开事务） |
+| 宽限期回收 `mm_pt_retire_table()` | 证伪（状态路径 inert + 预标记开 = stress PASS） |
+| 漏记四项缺页统计 | 证伪（补齐后仍崩） |
+| metadata 与 PTE 失配 | 证伪（回读断言 0 违例） |
+
+**新出现的最强线索（来自崩溃转储里的寄存器，之前一直没被利用）**：
+
+```
+regs: a0=0x806000  a1=0x1000
+mm:  brk=0x808000  start_brk=0x806000
+vma= [0x807000,0x808000) flags=0x13 pte_flags=0xd7 file_fd=-1 off=0x1000
+```
+
+`a0=0x806000, a1=0x1000` 的形状与 `mmap(addr, len, ...)` 的前两个参数一致，而
+`0x806000` **正好等于 `start_brk`**。若被测程序确实在这里做了一次**定址 mmap**
+（`MAP_FIXED`），它就与 brk 区间头部重叠；此时 mmap 路径给 `[0x806000,0x807000)`
+打上了 `MM_ST_ANON_VIRT` 标记，而紧邻的 `[0x807000,0x808000)` 是 brk 的 VMA。
+
+**由此得到一个能解释全部矛盾的机制**：状态路径运行在 `mm_find_vma()` **之前**，
+只认 status。若某段 status 标记**比它描述的 VMA 活得久**（VMA 已被拆除/替换，而标记
+没被清），那么落在该地址上的后续缺页——**包括本该由 brk 逻辑处理的那些**——会被状态
+路径用**上一任映射的权限**就地满足，绕过 brk 分支的记账与语义。页表于是被合法地、
+自洽地写好了（所以断言抓不到），破坏却发生在**语义层**而非页表层。
+
+**下一步（具体、可执行）**：
+1. 找出所有「移除/替换 VMA 但不清 per-PTE status」的路径。已知 `mm_cursor_unmap()`
+   只在**逐叶子 unmap** 时清 `ANON_VIRT`；需要核查的是**整段 VMA 被拆除而叶子未被
+   逐页 unmap** 的情形：定址 `mmap(MAP_FIXED)` 覆盖旧 VMA、`mremap`、`munmap` 掉一段
+   从未 fault 过的区间（此时没有叶子可逐，但 status 标记是从 `mm_pt_provision_anon()`
+   写下的，**不是** fault 写的**——这正是漏洞所在**）。
+2. 加一个针对性断言：状态路径命中时，核对该地址当前**确实存在**一个 VMA；不存在就计数
+   并出声。这是对「status 必须与 VMA 生命周期同步」这一不变式的直接检验。
+
+第 2 条尤其关键，因为它把 §10.7 记录的那个结构性问题（状态路径在 `mm_find_vma` 之前就
+返回）从「设计缺陷」落成了一条**可机检的不变量**。
+
+**当前安全状态**（未变）：预标记默认关闭，状态缺页路径 inert；默认配置
+`mm_fault_from_status=0`、审计全 0（含 `safe=0`）、`pt_pages=6` 不变，
+`smoke-mm-stress` / `smoke-mm-fork-exec-race` 通过，riscv64/x86_64/aarch64 构建通过。
+所有 (b) 排查均在 `a20.anonprov=4096` 下进行。

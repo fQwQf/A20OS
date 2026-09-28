@@ -81,6 +81,11 @@ typedef enum a20_perf_counter {
     A20_PERF_IDLE_WAIT_ATTEMPTS,
     A20_PERF_IDLE_WAIT_ENTRIES,
     A20_PERF_IDLE_WAIT_WAKE_RETURNS,
+    /* Status-driven fault path: readback found class and PTE disagreeing
+     * (class claims mapped while the PTE is absent, or the PTE is present
+     * while the class is still MM_ST_ANON_VIRT).  Non-zero means the
+     * ANON_VIRT -> mapped transition did not land coherently. */
+    A20_PERF_MM_STATUS_INVARIANT_BAD,
     A20_PERF_COUNTER_COUNT,
 } a20_perf_counter_t;
 

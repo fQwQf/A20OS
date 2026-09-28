@@ -982,11 +982,52 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                             memset(pfn_to_virt(np), 0, PAGE_SIZE);
                             if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
                                               allow, MM_ST_ANON_MAPPED) == 0) {
+                                /* Readback invariant check (docs 10.28): the
+                                 * one write unique to this path is the
+                                 * ANON_VIRT -> mapped transition, so verify it
+                                 * actually landed before we go on.  Loud on
+                                 * the first failure, because the crash that
+                                 * follows may prevent reading any counter. */
+                                {
+                                    pte_t *chk = qcur.path[0];
+                                    uint8_t ccls = chk
+                                        ? mm_pt_peek(chk, 0,
+                                                     arch_pt_vpn(page_va, 0))
+                                        : 0;
+                                    int have_pte = chk &&
+                                        (chk[arch_pt_vpn(page_va, 0)] & PTE_V);
+                                    if (!have_pte ||
+                                        MM_ST_GET_CLASS(ccls) ==
+                                            MM_ST_ANON_VIRT) {
+                                        a20_perf_count(
+                                            A20_PERF_MM_STATUS_INVARIANT_BAD);
+                                        kerr("[MM-STATUS] invariant bad va=%lx "
+                                             "pte=%lx cls=%x have=%d\n",
+                                             (unsigned long)page_va,
+                                             (unsigned long)(chk
+                                                 ? chk[arch_pt_vpn(page_va, 0)]
+                                                 : 0),
+                                             ccls, have_pte);
+                                    }
+                                }
                                 mm_cursor_unlock(&qcur);
                                 mm->rss++;
                                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
                                 a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
                                 a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
+                                /* The per-task / global soft-fault counters the
+                                 * VMA paths bump alongside rss++.  A fault path
+                                 * that does not record its faults makes every
+                                 * reader of these -- and /proc's reported fault
+                                 * rate -- wrong. */
+                                __atomic_fetch_add(&t->perf_page_faults, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&t->perf_page_faults_maj, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&g_perf_sw_page_faults, 1,
+                                                   __ATOMIC_RELAXED);
+                                __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1,
+                                                   __ATOMIC_RELAXED);
                                 arch_tlb_flush_page_local(stval);
                                 spin_unlock(&mm->lock);
                                 return 0;
