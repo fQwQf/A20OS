@@ -6,6 +6,7 @@
 #include "mm/vmo.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -108,7 +109,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 }
             }
             paddr_t pa = 0;
-            if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, &level) == 0) {
+            if (pt_unmap_leaf(mm, va, &pa, &base, &size, &level) == 0) {
                 mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
@@ -153,6 +154,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
             if (!tail) return -ENOMEM;
             *tail = *vma;
+            refcount_set(&tail->refcount, 1);
             tail->start = clip_end;
             tail->end = vma->end;
             tail->file_offset += clip_end - vma->start;
@@ -231,7 +233,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                                   phys_to_pfn(arch_pte_addr(*pte))) < 0)
                 return mm->brk;
             paddr_t pa = 0;
-            if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
+            if (pt_unmap_leaf(mm, va, &pa, &base, &size, NULL) == 0) {
                 mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     frame_put(phys_to_pfn(pa));
@@ -256,6 +258,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             vm_area_t *vma = kcalloc_atomic(1, sizeof(*vma));
             if (!vma)
                 return mm->brk;
+            refcount_set(&vma->refcount, 1);
             vma->start = map_start;
             vma->end = map_end;
             vma->vm_flags = VM_ANON | VM_READ | VM_WRITE;
@@ -263,6 +266,10 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             vma->file_fd = -1;
             mm_insert_vma(mm, vma);
             mm->total_vm += (map_end - map_start) / PAGE_SIZE;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            (void)mm_pt_provision_anon(mm, map_start, map_end,
+                                        mm_user_brk_pte_flags());
+#endif
         }
     }
     mm->brk = newbrk;

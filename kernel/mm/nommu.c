@@ -5,13 +5,34 @@
 #include "core/types.h"
 #include "core/consts.h"
 
+/* No page tables under CONFIG_NOMMU, so there is never anything to retire or
+ * drain.  Stubs keep the API uniform: the real definitions live inside pt.c's
+ * ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU region, but callers such as
+ * mm_destroy() are not guarded. */
+void mm_pt_retire_table(struct mm_struct *mm, pte_t *table, int level)
+{
+    (void)mm; (void)table; (void)level;
+}
+
+void mm_pt_retire_drain(struct mm_struct *mm) { (void)mm; }
+
+/* Likewise: without page tables there are no per-entry safety bits to set, but
+ * mseal() and the userfaultfd register/unregister paths are not guarded and do
+ * call this. */
+int mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                         unsigned flags, int set)
+{
+    (void)mm; (void)start; (void)end; (void)flags; (void)set;
+    return 0;
+}
+
 pte_t *pt_create(void) { return (pte_t *)1; }
 void pt_destroy(pt_root_t *pgdir) { (void)pgdir; }
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
 int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
-int pt_unmap(pt_root_t *pgdir, vaddr_t va) { (void)pgdir; (void)va; return 0; }
-int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out, vaddr_t *base_out, size_t *size_out, int *level_out) {
-    (void)pgdir;
+int pt_unmap(struct mm_struct *mm, vaddr_t va) { (void)mm; (void)va; return 0; }
+int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out, vaddr_t *base_out, size_t *size_out, int *level_out) {
+    (void)mm;
     if (pa_out) *pa_out = va;
     if (base_out) *base_out = va;
     if (size_out) *size_out = PAGE_SIZE;

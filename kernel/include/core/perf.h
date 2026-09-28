@@ -53,6 +53,32 @@ typedef enum a20_perf_counter {
     A20_PERF_MM_ANON_BATCH_WINDOWS,
     A20_PERF_MM_ANON_BATCH_PAGES,
     A20_PERF_MM_COW_FAULTS,
+    /* Single-level model: page-table lock behaviour.  A cursor that finds the
+     * covering node busy is contending with a transaction on an overlapping
+     * range; the ratio of contended to total acquisitions is the direct
+     * measure of how well disjoint ranges avoid serialising. */
+    A20_PERF_MM_PT_LOCK_ACQUIRES,
+    A20_PERF_MM_PT_LOCK_CONTENDED,
+    A20_PERF_MM_PT_LOCK_WAITS,
+    A20_PERF_MM_CURSOR_OPEN,
+    A20_PERF_MM_CURSOR_STALE_RETRY,
+    /*
+     * Per-fault serialisation probes.  §8.18/§8.19 ruled out mm->lock, the
+     * cgroup charge and memset bandwidth; these measure the two locks that
+     * remain on the anonymous fault path so the real serialisation point can
+     * be identified by measurement rather than by guesswork.
+     */
+    A20_PERF_MM_CG_LOCK_ACQUIRES,
+    A20_PERF_MM_CG_LOCK_CONTENDED,
+    A20_PERF_MM_PFA_LOCK_ACQUIRES,
+    A20_PERF_MM_PFA_LOCK_CONTENDED,
+    /* MM_AS_ANON_PROVISION: leaves marked reserved-but-not-backed at mmap.
+     * The shutdown audit cannot witness this state (address spaces are gone
+     * by then), so it needs its own counter to be observable. */
+    A20_PERF_MM_ANON_PROVISIONED,
+    /* MM_AS_FAULT_FROM_STATUS: demand faults served from per-PTE status with
+     * no VMA lookup at all (paper Fig. 8). */
+    A20_PERF_MM_FAULT_FROM_STATUS,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,

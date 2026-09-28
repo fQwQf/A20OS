@@ -183,6 +183,7 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
     vm_area_t *vma = kcalloc(1, sizeof(*vma));
     if (!vma)
         goto fail;
+    refcount_set(&vma->refcount, 1);
     vma->start = va;
     vma->end = va + size;
     vma->vm_flags = vma_flags;
