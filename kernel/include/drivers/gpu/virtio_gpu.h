@@ -141,6 +141,22 @@ struct virtio_gpu_get_edid {
     uint32_t padding;
 } __attribute__((packed));
 
+struct virtio_gpu_get_display_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t padding;
+} __attribute__((packed));
+
+struct virtio_gpu_resp_display_info {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t scanout;
+    uint32_t enabled;
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} __attribute__((packed));
+
 #define VIRTIO_GPU_EDID_MAX_BYTES 1024
 
 struct virtio_gpu_resp_edid {
