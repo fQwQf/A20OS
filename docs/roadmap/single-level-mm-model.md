@@ -4104,3 +4104,82 @@ for (size_t p = 0; p < mmap_pages; p++) {
 **同时值得单独确认**：`block_cache.c:900` 那个 `return e` 分支——上游 fill 失败后是否
 也直接返回 NULL 而**根本没有尝试淘汰**。若是，则「无可回收」的诊断信息会误导：
 真正的失败原因是**回写/填充出错**，而不是「找不到可淘汰的页」。
+
+### 10.65 根因与修复：`pcache_evict_locked()` 单趟扫描，热的页被跳过后就再也不被看
+
+读了 `pcache_evict_locked()`（`kernel/fs/block_cache.c:801`），§10.64 的矛盾**有了解释**：
+
+```c
+pcache_entry_t *e = bc->page_lru_tail.prev;
+while (e != &bc->page_lru_head) {
+    if (cache_ref_read(&e->ref) == 0) {
+        if (quarantined && e->valid && e->dirty) { e = e->prev; continue; }
+        if (e->valid) {
+            ...
+            if (e->accessed) {
+                e->accessed = 0;        /* 跳过，并把 accessed 清掉 */
+                ...
+                e = e->prev;
+                continue;               /* 这一趟不淘汰它 */
+            }
+            page_lru_remove(e); ... return e;   /* 真正淘汰 */
+        }
+        ...
+    }
+    e = e->prev;
+}
+return NULL;
+```
+
+**扫描只有一趟**。一个 `valid` 且 `ref==0` 的页若 `accessed` 为真，会被**跳过并清零
+`accessed`**——它因此**只在「下一趟」才是候选**，而这一趟就直接走到头了。
+
+**于是在内存压力下恰好必然发生**：`evict-mmap` 正在逐页写满一个 `MAP_SHARED` 映射，
+**每个页都是热的（`accessed=1`）**；一轮 LRU 走完把它们的 `accessed` 全清掉，
+然后返回 `NULL`——**尽管池里有 2000 个未被引用的 valid 页**。
+这正是 §10.64 那组数据的成因：`valid=2000 dirty=1879 referenced=0` 却「无可回收」，
+而诊断代码**从来没统计 `accessed`**，所以这个自相矛盾的现象在日志里无从解释。
+
+#### 修复
+
+在 `pcache_evict_locked()` 外层加**有界重试**：只要本趟**清过** `accessed`（即确实取得了
+「让热页降温」这种进展），就再来一趟；没有这种进展才判定真的无候选并返回 `NULL`。
+上限 4 趟，用来防止一个页被持续重新访问的池在这里自旋。
+
+```c
+for (int pass = 0; pass < 4; pass++) {
+    int cleared_accessed = 0;
+    ... 原有单趟扫描，accessed 跳过处加 cleared_accessed = 1 ...
+    /* 什么都没淘汰，但我们确实让热页降温了：它们现在是候选了。 */
+    if (!cleared_accessed)
+        break;
+}
+return NULL;
+```
+
+**验证**（x86_64/KVM，`CONFIG_ANON_PROV_DEFAULT=4096`）：
+
+| 项 | 修复后 |
+|---|---|
+| `mm_stress` | **PASS**，0 FAIL，0 FATAL |
+| `[BCACHE] no evictable page` 出现次数 | **0**（修复前出现过） |
+| MM-ASM 审计 | 全 0 |
+| 5 架构构建 | 0 errors |
+
+**一处必须如实说明的限度**：我**没有**做「修复前 vs 修复后」的 `no evictable page`
+计数对照——§10.62 那个失败只在启用 UFFD 双重注册测试时出现，而该测试已被回退；
+默认测试序列里该消息是否出现、出现几次，**我没有在修复前测量过**。
+所以准确的表述是：
+**该函数里确实存在这样一个可证伪的逻辑缺陷**（单趟 + 跳过并清 `accessed`
+⇒ 可以在有大量候选时返回 `NULL`），修复消除了它，
+**并且**在本次验证中 `mm_stress` 全绿、该消息计数为 0。
+**不能据此宣称「它就是 `evict-mmap` 内容丢失的原因」**——那需要把双重注册测试重新落地、
+在**同一条件下**对照修复前后，才能成立。
+
+#### 下一步（不变，且现在更可行）
+
+`evict-mmap` 这条线**尚未被证明**与 UFFD 测试的失败同源。§10.63 的第 1 条
+（查清 `evict-mmap` 为何失败）**降级为「已定位到一个真实缺陷，但因果未闭合」**。
+优先级更高的仍是：**把 `test_uffd_double_registration()` 重新落地**，
+然后在同一条件下观察 `evict-mmap` 是否仍然失败——
+那才是能同时闭合「UFFD 过度清除已修」与「内容丢失成因」两件事的实验。
