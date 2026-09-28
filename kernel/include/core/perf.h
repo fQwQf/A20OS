@@ -30,6 +30,7 @@ typedef enum a20_perf_counter {
     A20_PERF_PCACHE_FILL_CONTENDED,
     A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS,
     A20_PERF_PCACHE_WRITEBACK_IOS,
+    A20_PERF_BLOCK_FLUSHES,
     A20_PERF_PCACHE_WRITEBACK_PAGES,
     A20_PERF_PCACHE_WRITE_UPDATES,
     A20_PERF_PCACHE_WRITE_UPDATE_PAGES,
@@ -39,6 +40,13 @@ typedef enum a20_perf_counter {
      * shootdown. Remote target CPUs are counted separately and exactly. */
     A20_PERF_MM_TLB_TRANSACTION_FLUSHES,
     A20_PERF_MM_TLB_REMOTE_CPUS,
+    /* mm_context_enter() runs inside the proc_lock critical section, so its
+     * convergence loop extends how long that global lock is held. WAITS counts
+     * enters that flushed at least once; FLUSHES - WAITS is the extra
+     * re-convergence cost under live TLB writers. */
+    A20_PERF_MM_CONTEXT_ENTERS,
+    A20_PERF_MM_TLB_CONVERGE_WAITS,
+    A20_PERF_MM_TLB_CONVERGE_FLUSHES,
     A20_PERF_MM_DEMAND_FAULTS,
     A20_PERF_MM_FILE_FAULTS,
     A20_PERF_MM_ANON_FAULTS,

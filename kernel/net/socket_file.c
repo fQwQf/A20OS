@@ -25,7 +25,7 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         return net_recvfrom_socket_meta(s, buf, count, 0, NULL, NULL, NULL);
     uint64_t start = timer_get_ticks();
     for (;;) {
-        a20_lwip_poll();
+        a20_lwip_poll_waiter();
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         uint64_t irq = spin_lock_irqsave(&g_net_lock);

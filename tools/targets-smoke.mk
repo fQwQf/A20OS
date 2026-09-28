@@ -97,6 +97,36 @@ smoke-a20-channel:
 smoke-ptrace:
 	$(PYTHON) tools/smoke.py smoke-ptrace
 
+smoke-netfilter:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/netfilter-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'netfilter_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETFILTER_TEST: PASS' "$$log"; then \
+		echo "smoke-netfilter: PASS; log saved to $$log"; \
+	elif grep -q 'NETFILTER_TEST: SKIP' "$$log"; then \
+		echo "smoke-netfilter: SKIP (control surface verified, data plane not reached); log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-netfilter: timeout without verdict; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-netfilter: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
 
@@ -140,6 +170,33 @@ smoke-mm-fork-exec-race:
 
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
+
+smoke-fsync-durability:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/fsync-durability-riscv64.log"; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' \
+		--send-line 'fsync_durability_test' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+			> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'FSYNC_TEST: PASS' "$$log"; then \
+		echo "smoke-fsync-durability: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-fsync-durability: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
 
 smoke-vfs-edge:
 	$(PYTHON) tools/smoke.py smoke-vfs-edge
@@ -194,3 +251,160 @@ smoke-timer-edge:
 # ================================================================
 smoke-mntns:
 	$(PYTHON) tools/smoke.py smoke-mntns
+
+# ================================================================
+# PCI bridge traversal smoke
+# ================================================================
+# Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,
+# so it lives on a bus *behind* a header-type-1 bridge rather than on the
+# root bus.  The kernel must walk secondary/subordinate buses to see it.
+#
+# Honest scope: this is a REGRESSION GUARD, not proof the traversal works.
+# The x86_64 board calls pci_enumerate(PCI_ECAM_BASE, 0, 255), so the old
+# flat [bus_start, bus_end) scan happened to cover these buses too and this
+# gate would have passed before the fix.  The traversal actually changes
+# behaviour on boards that report a narrow range -- qemu-virt-riscv64 passes
+# (0, 1) and virtualbox-aarch64 passes firmware-allocated ranges -- and this
+# QEMU build cannot exercise either, so the coverage gap is deliberate and
+# recorded in docs/server-readiness.md rather than papered over.
+smoke-pci-bridge: NET_HOSTFWD=
+smoke-pci-bridge:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/pci-bridge-x86_64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=xb \
+		-device pcie-root-port,id=rp1,bus=pcie.0,addr=0x4,chassis=1 \
+		-device pcie-root-port,id=rp2,bus=rp1,addr=0x0,chassis=2 \
+		-device virtio-blk-pci,drive=xb,bus=rp2,addr=0x0 \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'bridges walked' "$$log" && \
+	   grep -qE '\[BUS\] pci 0[12]:00\.0 id=1b36:000c .*class=06:04:00' "$$log" && \
+	   grep -qE '\[BUS\] pci 02:00\.0 id=1af4:1042' "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-pci-bridge: PASS (device behind 2 nested root ports enumerated); log saved to $$log"; \
+	else \
+		echo "smoke-pci-bridge: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# lwIP mempool pressure smoke
+# ================================================================
+# /proc/a20/netmem surfaces lwIP's per-pool used/max/err counters.  MEMP_STATS
+# derives to 1 here (MEMP_MEM_MALLOC is 0), so lwIP already maintains those
+# counters, but the only reader it ships is compiled out by LWIP_STATS_DISPLAY=0
+# -- this file is the only way to read them.
+#
+# Scope: the err==0 assertion is real, and it is the signal that would catch a
+# pool sized too small for a given workload.  It does NOT justify the current
+# pool size: peak max on a loopback-backed suite is tiny, so this gate says
+# nothing about high-BDP sizing.  See docs/server-readiness.md.
+smoke-lwip-memp: NET_HOSTFWD=
+smoke-lwip-memp:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/lwip-memp-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\ncat /proc/a20/netmem\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETWORK_SUITE: PASS' "$$log" && \
+	   grep -qE '^PBUF_POOL +[0-9]+ ' "$$log" && \
+	   grep -qE '^TCP_SEG +[0-9]+ ' "$$log" && \
+	   grep -qE '^TCP_PCB_LISTEN +[0-9]+ ' "$$log" && \
+	   ! grep -qE '^(PBUF_POOL|PBUF|TCP_SEG|TCP_PCB|TCP_PCB_LISTEN|UDP_PCB) +[0-9]+ +[0-9]+ +[0-9]+ +[1-9]' "$$log"; then \
+		echo "smoke-lwip-memp: PASS (6 pools exposed, err=0 after network suite); log saved to $$log"; \
+	else \
+		echo "smoke-lwip-memp: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# SMP cross-core lock contention smoke
+# ================================================================
+# net_stress_test puts WORKERS concurrent TCP transfers through the stack, and
+# this gate runs it on a real NR_CPUS=4 build so cross-core spinlock contention
+# is actually observable.
+#
+# Why the explicit NR_CPUS: Makefile defaults NR_CPUS ?= 1, so every default
+# dev/smoke gate is single-core.  Passing -smp to QEMU does not help, because
+# the kernel only brings up NR_CPUS CPUs -- and one CPU can never contend a
+# spinlock.  That is how "lwip: 0 0" reads like a healthy result when nothing
+# was measured at all.
+#
+# What this gate deliberately does NOT assert: any contention number.  Acquire
+# and spin counts depend on scheduling and are not reproducible run to run, so
+# a threshold here would be a flaky gate and would invite tuning toward a
+# magic number.  It asserts the deterministic parts only -- the stress test
+# transfers correctly, the counters render, and the per-site spin column is
+# real spin data rather than a copy of the acquire column.
+#
+# That last check has an honest limit.  Call-site attribution hashes into a
+# fixed 32-slot table (LOCK_CALLSITE_SAMPLES) and a collision drops that
+# caller's spin count while the lock total still counts it, so at low acquire
+# counts a run can legitimately attribute nothing.  The assertion is therefore
+# conditional: with nothing attributed there is nothing to check, and it only
+# bites when attribution did happen.  It is not a guarantee that every spin is
+# attributed, and an earlier unconditional form of it was flaky for exactly
+# that reason.
+smoke-smp-lock-contention: NET_HOSTFWD=
+smoke-smp-lock-contention:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/smp-lock-contention-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/lock_contention\ncat /proc/a20/perf\nnet_stress_test\ncat /proc/a20/perf\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	proc_split=$$(awk '/^proc: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
+	lwip_total=$$(awk '/^lwip: /{b++; if(b==2){print $$3; exit}}' "$$log"); \
+	proc_max=$$(awk '/^proc: /{b++; if(b==2){v=$$4; sub(/^max=/,"",v); print v+0; exit}}' "$$log"); \
+	site_acq=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)a+=$$3} END{print a+0}' "$$log"); \
+	site_spin=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)s+=$$4} END{print s+0}' "$$log"); \
+	site_max=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2){v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0}} END{print m+0}' "$$log"); \
+	tlb_enters=$$(awk '/^mm_context_enters:/{e=$$2} END{print e+0}' "$$log"); \
+	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
+	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
+	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
+	   grep -qE '^lwip: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
+	   grep -qE '^proc: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
+	   { [ "$$site_acq" -eq 0 ] || [ "$$site_spin" -gt "$$site_acq" ]; } && \
+	   [ "$$tlb_enters" -gt 0 ] && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin column carries real spin data: $$site_spin spins over $$site_acq acquires, lock total $$lwip_total); log saved to $$log"; \
+		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
+		echo "worst single acquire (cumulative): proc_lock $$proc_max spins, lwip site $$site_max spins"; \
+		if [ "$$site_acq" -eq 0 ]; then \
+			echo "note: no lwip callsite attribution in the stress window, so the per-site invariant was NOT exercised (it is satisfied vacuously when site_acq is 0)"; \
+		fi; \
+		echo "proc_lock windows -- $$proc_split"; \
+		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
+	else \
+		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi

@@ -113,6 +113,23 @@ fail:
 }
 #endif
 
+/* Count live tasks owned by @uid, for RLIMIT_NPROC.  Linux scopes that limit
+ * to the caller's real uid rather than per-process, so a fork bomb from one
+ * account is capped no matter how many processes it already has. */
+static uint32_t proc_count_tasks_for_uid(int uid)
+{
+    uint32_t n = 0;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+            continue;
+        if (t->cred.uid == uid)
+            n++;
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
+    return n;
+}
+
 static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *ctid,
                  int exit_signal, task_t **out_task)
 {
@@ -131,6 +148,13 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     if (!(flags & CLONE_VM))
         return -EINVAL;
 #endif
+
+    /* RLIMIT_NPROC, checked before the slot is taken so a rejected fork
+     * leaves no trace.  CAP_SYS_RESOURCE is exempt, matching Linux. */
+    if (parent && parent->limits.nproc &&
+        !proc_has_cap(parent, CAP_SYS_RESOURCE) &&
+        proc_count_tasks_for_uid(parent->cred.uid) >= parent->limits.nproc)
+        return -EAGAIN;
 
     task_t *t = proc_alloc_task_slot();
     if (!t)

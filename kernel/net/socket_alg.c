@@ -1,3 +1,33 @@
+/*
+ * AF_ALG — kernel crypto provider for the Linux crypto socket API.
+ *
+ * Security invariant (do not weaken this without a real provider):
+ * AF_ALG is a *trust* interface.  A caller that asks the kernel for
+ * "sha256" or "cbc(aes)" is asking for a security primitive, and it has
+ * no out-of-band way to detect a stub that returns attacker-predictable
+ * bytes.  A stub that returns success is therefore strictly worse than
+ * having no AF_ALG at all: userspace crypto libraries probe for AF_ALG
+ * and, on a positive answer, feed the result to a TLS handshake, a
+ * signature check, or a password KDF while believing it to be sound.
+ *
+ * A20OS has no kernel crypto provider, so this file deliberately
+ * advertises *no* algorithm.  bind() rejects every name with -ENOENT —
+ * the same status Linux returns for an unregistered algorithm — which
+ * correctly drives userspace to its own implementation instead of
+ * trusting fabricated output.
+ *
+ * socket(AF_ALG, SOCK_SEQPACKET) still succeeds so callers can probe
+ * cheaply; only bind() rejects, and recv()/send() refuse defensively in
+ * case a socket is ever reached through another path.
+ *
+ * To add real support, fill in alg_table[] with a provider entry per
+ * algorithm and wire its handler below.  Two rules for that work:
+ *   1. an entry stays out of the table (or keeps implemented=0) until the
+ *      primitive is real and correct — never stub it;
+ *   2. prefer letting userspace own cryptography (OpenSSL et al.) over
+ *      hand-rolling primitives in the kernel.
+ */
+
 #include "net/socket_internal.h"
 #include "core/string.h"
 
@@ -14,33 +44,68 @@ void net_alg_copy_string(char *dst, size_t dstsz,
     dst[n] = '\0';
 }
 
+/*
+ * Algorithm registry.
+ *
+ * `type`/`name` are the wire names from struct sockaddr_alg.  `accepted`
+ * is deliberately 0 for every entry: the name is *recognised* so the
+ * registry documents the intended surface, but no primitive is
+ * implemented, so bind() must reject it.  Setting `accepted` to 1 is the
+ * single switch that makes an algorithm usable, and it must only happen
+ * together with a real implementation.
+ */
+typedef struct {
+    const char *type;
+    const char *name;
+    int accepted;
+} alg_entry_t;
+
+static const alg_entry_t alg_table[] = {
+    /* hash */
+    { "hash", "md5",                         0 },
+    { "hash", "sha1",                        0 },
+    { "hash", "sha224",                      0 },
+    { "hash", "sha256",                      0 },
+    { "hash", "sha384",                      0 },
+    { "hash", "sha512",                      0 },
+    /* shash — not implemented, kept for registry completeness */
+    { "hash", "hmac(md5)",                   0 },
+    { "hash", "hmac(sha1)",                  0 },
+    { "hash", "hmac(sha224)",                0 },
+    { "hash", "hmac(sha256)",                0 },
+    { "hash", "hmac(sha384)",                0 },
+    { "hash", "hmac(sha512)",                0 },
+    /* skcipher */
+    { "skcipher", "salsa20",                 0 },
+    { "skcipher", "cbc(aes)",                0 },
+    { "skcipher", "cbc(aes-generic)",        0 },
+    { "skcipher", "ecb(aes)",                0 },
+    { "skcipher", "ctr(aes)",                0 },
+    /* aead */
+    { "aead", "rfc7539(chacha20,sha256)",    0 },
+    { "aead", "rfc7539(chacha20,poly1305)",  0 },
+    { "aead", "authenc(hmac(sha256),cbc(aes))", 0 },
+    /* rng */
+    { "rng", "stdrng",                       0 },
+};
+
+#define ALG_TABLE_LEN (sizeof(alg_table) / sizeof(alg_table[0]))
+
+/*
+ * Returns 1 only for algorithms that both are recognised *and* have a
+ * working kernel implementation.  Since nothing is implemented yet this
+ * is currently always 0, which is the point: it is the single place that
+ * decides what AF_ALG will vouch for.
+ */
 int net_alg_name_supported(const char *type, const char *name)
 {
     if (!type || !name || !type[0] || !name[0])
         return 0;
-
-    if (strcmp(type, "hash") == 0) {
-        if (strncmp(name, "hmac(hmac", 9) == 0)
-            return 0;
-        if (strncmp(name, "hmac(", 5) == 0)
-            return 1;
-        return strcmp(name, "md5") == 0 || strcmp(name, "sha1") == 0 ||
-               strcmp(name, "sha224") == 0 || strcmp(name, "sha256") == 0 ||
-               strcmp(name, "sha384") == 0 || strcmp(name, "sha512") == 0;
+    for (size_t i = 0; i < ALG_TABLE_LEN; i++) {
+        if (strcmp(alg_table[i].type, type) == 0 &&
+            strcmp(alg_table[i].name, name) == 0)
+            return alg_table[i].accepted;
     }
-    if (strcmp(type, "skcipher") == 0) {
-        return strcmp(name, "salsa20") == 0 || strcmp(name, "cbc(aes)") == 0 ||
-               strcmp(name, "cbc(aes-generic)") == 0 || strcmp(name, "ecb(aes)") == 0 ||
-               strcmp(name, "ctr(aes)") == 0;
-    }
-    if (strcmp(type, "aead") == 0) {
-        if (strcmp(name, "rfc7539(chacha20,sha256)") == 0)
-            return 0;
-        return strcmp(name, "rfc7539(chacha20,poly1305)") == 0 ||
-               strcmp(name, "authenc(hmac(sha256),cbc(aes))") == 0;
-    }
-    if (strcmp(type, "rng") == 0)
-        return strcmp(name, "stdrng") == 0;
     return 0;
 }
 
@@ -109,72 +174,25 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     return newfd;
 }
 
-static size_t alg_digest_len(const char *name)
-{
-    if (!name)
-        return 0;
-    if (strstr(name, "md5"))
-        return 16;
-    if (strstr(name, "sha1"))
-        return 20;
-    if (strstr(name, "sha224"))
-        return 28;
-    if (strstr(name, "sha256"))
-        return 32;
-    if (strstr(name, "sha384"))
-        return 48;
-    if (strstr(name, "sha512"))
-        return 64;
-    return 32;
-}
-
-static int alg_is_cbc_aes(const char *name)
-{
-    return name &&
-           (strcmp(name, "cbc(aes)") == 0 ||
-            strcmp(name, "cbc(aes-generic)") == 0);
-}
-
+/*
+ * No provider is wired, so no data operation can produce a real digest,
+ * cipher stream, or MAC.  Refuse instead of fabricating output — see the
+ * security invariant at the top of this file.
+ */
 int net_alg_socket_send(net_socket_t *s, const void *buf, size_t len)
 {
+    (void)buf;
+    (void)len;
     if (!s)
         return -ENOTSOCK;
-    size_t room = NET_MAX_STREAM_PAYLOAD - s->alg_last_len;
-    size_t n = len < room ? len : room;
-    if (n)
-        memcpy(s->alg_last + s->alg_last_len, buf, n);
-    s->alg_last_len += n;
-    return (int)len;
+    return -EOPNOTSUPP;
 }
 
 int net_alg_socket_recv(net_socket_t *s, void *buf, size_t len)
 {
+    (void)buf;
+    (void)len;
     if (!s)
         return -ENOTSOCK;
-    if (strcmp(s->alg_type, "skcipher") == 0 &&
-        alg_is_cbc_aes(s->alg_name) &&
-        (s->alg_last_len % 16) != 0)
-        return -EINVAL;
-    if (strcmp(s->alg_type, "hash") == 0) {
-        uint8_t digest[64];
-        size_t dlen = alg_digest_len(s->alg_name);
-        if (dlen > sizeof(digest))
-            dlen = sizeof(digest);
-        for (size_t i = 0; i < dlen; i++) {
-            uint8_t acc = (uint8_t)(0xa5U ^ (uint8_t)i);
-            for (size_t j = i; j < s->alg_last_len; j += dlen)
-                acc ^= s->alg_last[j] + (uint8_t)j;
-            digest[i] = acc;
-        }
-        size_t n = dlen < len ? dlen : len;
-        if (n)
-            memcpy(buf, digest, n);
-        return (int)n;
-    }
-    size_t n = s->alg_last_len;
-    if (n > len)
-        n = len;
-    if (n)
-        memcpy(buf, s->alg_last, n);
-    return (int)n;
+    return -EOPNOTSUPP;
 }

@@ -18,9 +18,9 @@
 /* Called once per timer tick. */
 void psi_tick(void);
 
-/* Render /proc/pressure/cpu "some" line. */
+/* Render one /proc/pressure/<resource> "some" line. */
 void psi_render_cpu(char *buf, size_t bufsz);
-/* Render /proc/pressure/memory and /proc/pressure/io "some" lines. */
-void psi_render_memio(char *buf, size_t bufsz);
+void psi_render_mem(char *buf, size_t bufsz);
+void psi_render_io(char *buf, size_t bufsz);
 
 #endif /* _CORE_PSI_H */

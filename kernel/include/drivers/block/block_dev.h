@@ -8,6 +8,12 @@ typedef struct block_dev {
                        size_t count);
     int (*write_sector)(struct block_dev *dev, uint64_t lba, const void *buf,
                         size_t count);
+    /* Optional: commit the device's volatile write cache to stable media.
+     * NULL means "no durability guarantee" -- fsync() then only reaches the
+     * device and a power cut can still lose the data.  Callers must not
+     * assume fsync() implies a flush; that assumption is what loses
+     * committed transactions.  Returns 0 or a negative errno. */
+    int (*flush)(struct block_dev *dev);
     uint64_t capacity;
     uint32_t sector_size;
     void *priv;

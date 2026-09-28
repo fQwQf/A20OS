@@ -38,7 +38,6 @@
 
 /* ---------- Limits ---------- */
 #ifdef CONFIG_MCU
-#define MAX_PROCS          32
 #define MAX_FILES          16
 #ifdef CONFIG_STM32_QEMU
 #define MAX_PATH_LEN       32
@@ -48,7 +47,6 @@
 #define MAX_NAME_LEN       32
 #define MAX_GROUPS         8
 #else
-#define MAX_PROCS          4096
 #define MAX_FILES          1024
 #define MAX_PATH_LEN       512
 #define MAX_NAME_LEN       256

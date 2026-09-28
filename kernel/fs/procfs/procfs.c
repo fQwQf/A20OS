@@ -6,6 +6,7 @@
  */
 
 #include "fs/procfs.h"
+#include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "core/klog.h"
 #include "core/panic.h"
@@ -337,6 +338,15 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
         child = new_entry(name, PF_SYS, 0);
         type = PF_SYS;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "cpu") == 0) {
+        child = new_entry(name, PF_PRESSURE_CPU, 0);
+        type = PF_PRESSURE_CPU;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "memory") == 0) {
+        child = new_entry(name, PF_PRESSURE_MEM, 0);
+        type = PF_PRESSURE_MEM;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "io") == 0) {
+        child = new_entry(name, PF_PRESSURE_IO, 0);
+        type = PF_PRESSURE_IO;
     } else if (dp && dp->type == PF_SYS && strcmp(name, "fs") == 0) {
         child = new_entry(name, PF_SYS_FS, 0);
         type = PF_SYS_FS;
@@ -450,6 +460,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
         child = new_entry(name, PF_A20_IOMMU, 0);
         type = PF_A20_IOMMU;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "netfilter") == 0) {
+        child = new_entry(name, PF_A20_NETFILTER, 0);
+        type = PF_A20_NETFILTER;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "netmem") == 0) {
+        child = new_entry(name, PF_A20_NETMEM, 0);
+        type = PF_A20_NETMEM;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
@@ -580,7 +596,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 type == PF_SYS_NET || type == PF_SYS_VM ||
                 type == PF_SYS_FS_INOTIFY || type == PF_NET ||
                 type == PF_A20 || type == PF_PID_FD ||
-                type == PF_PID_NS || type == PF_PID_FDINFO) ?
+                type == PF_PID_NS || type == PF_PID_FDINFO ||
+                type == PF_PRESSURE) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     if (magic_symlink)
         vn->link_flags |= VNODE_MAGICLINK;
@@ -724,6 +741,13 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (p->type == PF_PID_PAGEMAP) {
         task_t *t = proc_find_get(p->pid);
         if (!t) return -ESRCH;
+        /* Entries are page frame numbers, so an ungated pagemap exposes any
+         * process's physical map, defeating ASLR.  This node is not covered
+         * by the fd/maps gates elsewhere. */
+        if (!proc_task_may_access(proc_current(), t)) {
+            proc_put(t);
+            return -EACCES;
+        }
         if (!t->mm || !t->mm->pgdir) {
             proc_put(t);
             return 0;
@@ -771,6 +795,45 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         __atomic_store_n(&g_a20_perf_enabled, buf[0] == '1',
                          __ATOMIC_RELEASE);
         return (int)count;
+    }
+    if (p->type == PF_A20_NETFILTER) {
+        char tmp[192];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        if (strcmp(tmp, "reset") == 0) {
+            netfilter_reset();
+            return (int)count;
+        }
+        if (strcmp(tmp, "flush") == 0) {
+            netfilter_reset();
+            return (int)count;
+        }
+        if (strncmp(tmp, "add ", 4) == 0) {
+            netfilter_rule_t rule;
+            int r = netfilter_parse_rule(tmp + 4, strlen(tmp + 4), &rule);
+            if (r < 0)
+                return r;
+            int idx = netfilter_add_rule(&rule);
+            if (idx < 0)
+                return idx;
+            return (int)count;
+        }
+        if (strncmp(tmp, "del ", 4) == 0) {
+            const char *d = tmp + 4;
+            if (*d == '\0')
+                return -EINVAL;
+            unsigned idx = 0;
+            for (; *d; d++) {
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                if (idx > (NETFILTER_MAX_RULES * 2))
+                    return -ERANGE;
+                idx = idx * 10 + (unsigned)(*d - '0');
+            }
+            return netfilter_del_rule(idx) < 0 ? -EINVAL : (int)count;
+        }
+        return -EINVAL;
     }
     if (p->type == PF_PID_OOM_SCORE_ADJ) {
         char tmp[32];
@@ -1034,10 +1097,13 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
-        "driver_lifecycle", "objects", "iommu", NULL
+        "driver_lifecycle", "objects", "iommu", "netfilter", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
+    };
+    static const char *pressure_entries[] = {
+        ".", "..", "cpu", "memory", "io", NULL
     };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     if (p && (p->type == PF_PID_FD || p->type == PF_PID_FDINFO))
@@ -1051,6 +1117,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         entries = sys_entries;
     else if (p && p->type == PF_SYS_FS)
         entries = sys_fs_entries;
+    else if (p && p->type == PF_PRESSURE)
+        entries = pressure_entries;
     else if (p && p->type == PF_SYS_KERNEL)
         entries = sys_kernel_entries;
     else if (p && p->type == PF_SYS_NET)

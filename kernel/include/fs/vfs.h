@@ -366,6 +366,7 @@ int      vfs_getdents64(int fd, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
 int      vfs_sync(void);
 int      vfs_fsync(int fd);
+int      vfs_fsync_vfile(vfile_t *vf);
 int      vfs_fdatasync(int fd);
 int      vfs_poll_events(int fd, short events);
 int      vfs_poll_file(vfile_t *vf, short events);
