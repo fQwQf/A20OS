@@ -188,6 +188,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
         arch_tlb_flush();
         return -ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
     vma->start = addr;
     vma->end = addr + len;
     vma->vm_flags = VM_SHARED | VM_DONTFORK | VM_PFNMAP;
@@ -370,6 +371,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 arch_tlb_flush();
                 return -ENOMEM;
             }
+            refcount_set(&vma->refcount, 1);
             vma->start = va;
             vma->end = va + fb_size;
             vma->vm_flags = VM_READ | VM_WRITE | VM_SHARED |

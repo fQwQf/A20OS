@@ -262,6 +262,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             vm_area_t *vma = kcalloc_atomic(1, sizeof(*vma));
             if (!vma)
                 return mm->brk;
+            refcount_set(&vma->refcount, 1);
             vma->start = map_start;
             vma->end = map_end;
             vma->vm_flags = VM_ANON | VM_READ | VM_WRITE;
