@@ -1,3 +1,32 @@
+/*
+ * A20OS SysV SHM — shmget(2) / shmat(2) / shmdt(2) / shmctl(2).
+ *
+ * The shmctl(2) reply is a byte-exact replica of the struct the *caller*
+ * declared, because the caller reads it in userspace with no kernel help.  The
+ * reference is user/external/musl/arch/generic/bits/{ipc,shm}.h, which is what
+ * an unmodified musl program (git, vim, X11) compiles against:
+ *
+ *   struct ipc_perm { key_t __ipc_perm_key; uid_t uid; gid_t gid; uid_t cuid;
+ *                     gid_t cgid; mode_t mode; int __ipc_perm_seq;
+ *                     long __pad1; long __pad2; };            = 48 bytes
+ *   struct shmid_ds  { struct ipc_perm shm_perm; size_t shm_segsz;
+ *                     time_t shm_atime, shm_dtime, shm_ctime;
+ *                     pid_t shm_cpid, shm_lpid; unsigned long shm_nattch,
+ *                     __pad1, __pad2; };                      = 112 bytes
+ *
+ * NOTE: this is deliberately NOT Linux's internal `struct shmid64_ds`, which is
+ * 96 bytes because the kernel keeps a 32-byte ipc64_perm and widens it on the
+ * way out.  A20OS stores the userspace shape directly, which is both smaller
+ * and one copy_to_user instead of two.  Do not "fix" this against
+ * include/uapi/linux/shm.h -- match musl and glibc, which agree with each
+ * other on the 48-byte perm.
+ *
+ * IPC_64_BIT is load-bearing, not decoration.  musl's src/ipc/ipc.h defines
+ *   IPC_TIME64 (IPC_STAT & 0x100)   -> 0 on every 64-bit arch (IPC_STAT == 2)
+ *   IPC_CMD(c)  ((c) & ~IPC_TIME64) | IPC_64
+ * so IPC_CMD degenerates to `c | 0x100`: musl passes 0x100 on EVERY shmctl and
+ * semctl, unconditionally.  Stripping it is mandatory, not optional.
+ */
 #include "ipc/sysv_shm.h"
 
 #include "core/consts.h"
@@ -357,6 +386,37 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
         size_t segsz = g_shm[shmid].size;
         unsigned long nattch = (unsigned long)g_shm[shmid].nattach;
         spin_unlock_irqrestore(&g_shm_lock, flags);
+        /*
+         * Byte-exact replica of musl's `struct shmid_ds` (112 bytes).  Field
+         * offsets, which the anonymous members below are arranged to produce:
+         *
+         *    0  perm.k        key_t   int    4
+         *    4  perm.u        uid_t          4
+         *    8  perm.g        gid_t          4
+         *   12  perm.cu       uid_t          4
+         *   16  perm.cg       gid_t          4
+         *   20  perm.m        mode_t         4
+         *   24  perm.s        int            4   (musl __ipc_perm_seq)
+         *   28                implicit 4-byte pad to reach the long alignment
+         *   32  perm.p1       long           8   (musl __pad1)
+         *   40  perm.p2       long           8   (musl __pad2)   -> perm = 48
+         *   48  segsz         size_t         8
+         *   56  at            time_t         8   (shm_atime)
+         *   64  dt            time_t         8   (shm_dtime)
+         *   72  ct            time_t         8   (shm_ctime)
+         *   80  cpid          pid_t          4
+         *   84  lpid          pid_t          4
+         *   88  nattch        unsigned long  8
+         *   96  pad1          unsigned long  8
+         *  104  pad2          unsigned long  8
+         *
+         * The three timestamps and both pad slots are reported as 0 because
+         * this implementation does not track them; musl and glibc only read
+         * them, so leaving them zeroed is safe.  The pad slots must stay in the
+         * struct: they are part of the userspace layout, and dropping them
+         * would move nothing (they are last) but dropping perm.p1/p2 would
+         * shift segsz and corrupt the whole reply.
+         */
         struct {
             struct { int k; unsigned u,g,cu,cg; unsigned m; int s; long p1,p2; } perm;
             size_t segsz;
@@ -383,6 +443,16 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
 
     if (cmd == SHM_INFO && buf) {
         spin_unlock_irqrestore(&g_shm_lock, flags);
+        /*
+         * BUG: musl's `struct shm_info` (arch/generic/bits/shm.h) is 48 bytes --
+         *   int __used_ids; unsigned long shm_tot, shm_rss, shm_swp,
+         *   __swap_attempts, __swap_successes;
+         * i.e. 4 + 4 pad + 5*8.  The 64 bytes written below overrun the caller's
+         * buffer by 16 and clobber adjacent user stack/heap data.  The value is
+         * 60, not 48, on musl and glibc alike.  This needs a code fix; it is
+         * recorded here because the correct size is not derivable from this
+         * file and the overflow is otherwise invisible.
+         */
         char zero[64];
         memset(zero, 0, sizeof(zero));
         return copy_to_user(buf, zero, sizeof(zero)) < 0 ? -EFAULT : 0;

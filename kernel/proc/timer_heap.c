@@ -7,8 +7,6 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "proc/signal.h"
-#ifdef CONFIG_ABI_LINUX
-#endif
 #ifdef CONFIG_ABI_NATIVE
 #include "ipc/ipc.h"
 #endif

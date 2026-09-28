@@ -1,3 +1,23 @@
+/*
+ * A20OS core MM — address-space context and TLB shootdown.
+ *
+ * Scope: the CPU-side half of an address space.  mm_arch_context_init() binds
+ * an mm to this CPU, mm_context_enter/leave() switch it, and the
+ * mm_tlb_* family implements shootdown plus the hold counters that keep a page
+ * frame alive across a remote CPU that may still have it translated.
+ *
+ * The split from the rest of MM is load-bearing for readability: the raw
+ * page-table walk lives in mm/mm.c, the VMA list in mm/vma.c, and the map /
+ * unmap / protect request paths in mm/mmap.c, mm/munmap.c and mm/mprotect.c.
+ * What stays here is only the state that outlives a single syscall -- the ASID,
+ * the active_cpu bitmap, and the TLB hold queue.
+ *
+ * MM_TLB_HOLD_FRAME vs MM_TLB_HOLD_PAGE: a frame hold pins one physical page
+ * for a range of virtual addresses that share it (huge pages and the
+ * demote-then-free path); a page hold pins a page-cache page whose frame may
+ * be released and reallocated while translations linger.  They take different
+ * paths in mm_tlb_queue_hold() and must not be conflated.
+ */
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
@@ -18,9 +38,6 @@
 #include "core/klog.h"
 #include "core/perf.h"
 #include "core/smp.h"
-
-#ifdef CONFIG_NOMMU
-#endif
 
 enum {
     MM_TLB_HOLD_FRAME = 1,

@@ -1,3 +1,24 @@
+/*
+ * PID 1 for the A20OS Linux-ABI root filesystem.
+ *
+ * Runs as the init process under the Linux ABI (the same musl/bionic-shaped
+ * libc and syscall surface the rest of userland uses), so it deliberately
+ * sticks to plain POSIX: no A20-native handle API, no EventQ, no privileged
+ * kernel interface beyond reboot(2) and wait(2).  That keeps it usable against
+ * a stock Alpine rootfs, which is the compatibility claim the whole ABI layer
+ * exists to satisfy.
+ *
+ * Responsibilities, in order: mount the pseudo-filesystems the rootfs expects
+ * (/proc, /sys, /dev), start the long-lived services, then either exec a shell
+ * or sit in the wait/reap loop below.
+ *
+ * Signal handling: as PID 1 the kernel gives it no default dispositions for
+ * unhandled signals, so the handler is the only thing standing between a
+ * stray SIGTERM and an unreaped process tree.  It forwards to the recorded
+ * child PIDs and sets got_signal, which the main loop treats as a shutdown
+ * request.  kill() is async-signal-safe; the child PIDs are sig_atomic_t for
+ * the same reason.
+ */
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
