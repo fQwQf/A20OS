@@ -1083,3 +1083,37 @@ file_fd=-1 off=0x1000`，该页已映射但全 0。**根因未定位**，故状�
 潜在缺陷；在 (b) 定位并修复之前不应启用，否则 exec 与堆会直接崩。HEAD 刻意让该路径
 保持 inert（`mm_fault_from_status` 恒为 0），全部功能门通过。性能结论不受影响：
 §10.1 那个 mmap ~1.5× 回归是**预标记在 mmap 侧就要付的代价**，与该路径是否真的执行无关。
+
+### 10.7 状态路径的位置本身是设计缺陷（与 (b) 无关的独立问题）
+
+排查 (b) 时发现一个更根本的问题：状态块（`fault.c` 958–996）位于
+`vm_area_t *vma = mm_find_vma(mm, page_va);`（998 行）**之前**。也就是说一旦启用，
+它在**完全不查 VMA** 的情况下直接映射并返回，从而绕过后面所有基于 VMA 的判定：
+
+* **绕过 userfaultfd**（1007–1008）：已注册 userfaultfd 的区间本应把缺页停住交给
+  handler，状态路径却会直接给出零页，handler 永远收不到事件。
+* **绕过 VM_SHARED 判定**（1021）：共享映射的写缺页需要 COW/共享语义，不能按私有
+  匿名处理。
+* **绕过 fault-around 的安全门**（522）：那段逻辑明确要求
+  `!(vma->vm_flags & (VM_SHARED | VM_STACK | VM_FILE | VM_VMO))` 才做 4 页
+  fault-around；状态路径没有任何等价门限。
+* **与 brk 路径的前提冲突**：`fault.c:355` 的 brk 处理条件是
+  `page_va >= start_brk && page_va < ROUND_UP(brk) && !mm_find_vma(...)`——它**只**
+  处理「没有 VMA」的地址；而状态路径恰恰是「有状态标记但可能没有 VMA」的产生者。
+
+论文的设想是 per-PTE 状态**取代** VMA 作为权威来源，那要求状态本身携带全部安全信息
+（是否 userfaultfd 注册、是否共享、是否可 fault-around），并且 mmap/mprotect/munmap/
+userfaultfd 注册**每一次**都同步更新它。本实现的状态字节只有 class + prot 三位，
+不含这些信息，所以「在 `mm_find_vma` 之前无条件信任状态」是不成立的。
+
+**因此正确顺序应是**：状态路径不是放在 VMA 查找**之前**的旁路，而是要把 VMA 查找
+**替换掉**，前提是状态已扩充到足以承载上述全部判定，并且所有会改变安全语义的
+syscall 都已接入状态更新。缺一不可。当前两者都不满足，故保持 inert 是正确取舍。
+
+**下一步（按依赖顺序）**：
+1. 先定状态字节的完整语义：至少需要 shared、userfaultfd-registered、seal/fault-around
+   许可三类位，并明确谁负责写、谁负责清。
+2. 让 `mmmap` / `mprotect` / `munmap` / `madvise` / userfaultfd 注册全部接入该状态的
+   更新，且每条路径都有「状态与 VMA 不一致」的自检（挂到现有 MM-ASM auditor 上）。
+3. 只有 1、2 完成且 auditor 能证明等价后，才把状态路径移到 `mm_find_vma` 之前；
+   在此之前 (b) 的 brk 崩溃只是表象，即使修好 (b) 也会立刻撞上 userfaultfd 绕过。
