@@ -1792,3 +1792,57 @@ satp/ASID 或 TLB 状态未收尾时继续执行。
 
 **在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert**，默认配置行为与改动前
 完全一致（`mm_fault_from_status=0`，全部门通过）。
+
+### 10.25 再证伪一条：状态路径并不缺 TLB 事务（更正 §10.24 的首选假设）
+
+§10.24 把「状态路径没有参与 TLB 事务」列为第一嫌疑。**这条也是错的**，而且是
+「先下结论、后看代码」的又一次。`fault_map()` 才是 VMA 路径真正用来装映射的函数，它
+的结构与状态路径**完全一致**：
+
+```c
+static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
+                     uint8_t cls)
+{
+    mm_cursor_t cur;
+    int r = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur);
+    if (r != 0) return r < 0 ? r : -EFAULT;
+    r = mm_cursor_map(&cur, page_va, pfn_to_phys(pfn), flags, cls);
+    mm_cursor_unlock(&cur);
+    return r;
+}
+```
+
+`mm_addrspace_lock` → `mm_cursor_map` → `mm_cursor_unlock`，**没有开事务**。VMA 路径的事务
+是由更外层（系统调用层 / `handle_demand_fault` 的调用者）开的，不是 `fault_map` 开的。
+把 `fault_map` 和匿名 VMA 路径的后续记账（`rss++`、`a20_perf_count`、
+`arch_tlb_flush_page_local`）逐行对比状态路径，**看不出实质差异**。
+
+顺带说明：假如真要给状态路径开事务，还要小心 `mm_tlb_invalidate_finish()` 内部会
+`spin_lock_irqsave(&mm->lock)` 取排空链表，而缺页路径此刻**已持 `mm->lock`**——直接加
+事务会自锁。事务必须像 `mm_munmap` 那样「开事务 → 加锁干活 → 解锁 → finish」成对使用。
+这条也说明「照搬事务」不是无风险的补丁。
+
+**至此三条假设全部被证伪**（§10.23 `nr_present` 溢出、§10.24 跨核 TLB 残留、本节事务缺失），
+而唯一确定的事实仍是 §10.22/§10.24 的收窄：
+
+* mmap 预标记**单独**是安全的（`d1fb5c22` 实测：9277 页、审计全 0、stress PASS）；
+* 崩溃只在状态路径**真的消费** mmap 预标记条目时出现；
+* 且崩溃点是 **brk** 地址，而 brk 预标记在复现配置里是**关闭**的——状态路径不可能
+  直接处理它。
+
+最后这条是关键矛盾：状态路径够不到 brk，却能间接把 brk 搞坏。这说明破坏发生在
+**别处被状态路径写坏的东西**上。仍存活的候选（本轮未验证）：
+
+1. `mm_pt_retire_table()` 的宽限期回收（§10.17 新增）——它是本轮之前不存在的新写入者，
+   而 §10.24 用来证明「预标记本身安全」的那次实测（`d1fb5c22`）**早于**这个改动。
+   **这条现在应该排第一**：需要重做那个安全性验证（预标记开 + 状态路径 inert），
+   看是否仍 PASS。
+2. 状态路径在 `mm_cursor_map` 之外还改了哪些共享记账（`mm->rss`、cgroup charge），
+   是否与随后 VMA 路径的处理重复记账或漏记。
+
+**下一步应当先做 1**：在 `323664fc` 之后重跑「`a20.anonprov=4096` + 查询修复回退」，
+确认预标记在**当前**代码上单独仍然安全。这是一条能把 (b) 的嫌疑范围直接砍掉一半的实验，
+而且不需要任何新代码。
+
+在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert，默认配置行为与改动前
+完全一致（`mm_fault_from_status=0`，全部门通过）。
