@@ -98,6 +98,7 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
          * install this mm's page-table token. */
         arch_mb();
         if (mm->arch_asid && cpu < CONFIG_NR_CPUS) {
+            unsigned flushes = 0;
             for (;;) {
                 uint64_t generation = __atomic_load_n(
                     &mm->tlb_generation, __ATOMIC_ACQUIRE);
@@ -105,6 +106,7 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
                     &mm->tlb_cpu_generation[cpu], __ATOMIC_ACQUIRE);
                 if (seen == generation)
                     break;
+                flushes++;
                 arch_tlb_flush_asid_local(mm->arch_asid);
                 __atomic_store_n(&mm->tlb_cpu_generation[cpu], generation,
                                  __ATOMIC_RELEASE);
@@ -112,6 +114,11 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
                 if (__atomic_load_n(&mm->tlb_generation,
                                     __ATOMIC_ACQUIRE) == generation)
                     break;
+            }
+            a20_perf_count(A20_PERF_MM_CONTEXT_ENTERS);
+            if (flushes) {
+                a20_perf_count(A20_PERF_MM_TLB_CONVERGE_WAITS);
+                a20_perf_add(A20_PERF_MM_TLB_CONVERGE_FLUSHES, flushes);
             }
         }
     }

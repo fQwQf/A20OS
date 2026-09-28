@@ -601,7 +601,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
          * SCM_RIGHTS messages on the legacy queue.  Drain legacy first so
          * fd-carrying messages keep their delivery order. */
         for (;;) {
-            a20_lwip_poll();
+            a20_lwip_poll_waiter();
             int r = -EAGAIN;
             uint64_t irq = spin_lock_irqsave(&g_net_lock);
             if (s->rx_head) {
@@ -709,7 +709,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         }
     }
     for (;;) {
-        a20_lwip_poll();
+        a20_lwip_poll_waiter();
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         uint64_t irq = spin_lock_irqsave(&g_net_lock);
