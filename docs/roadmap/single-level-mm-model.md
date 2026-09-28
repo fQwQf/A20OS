@@ -595,3 +595,65 @@ VM_VMO → THP → anon batch → 单页 anon。把快路径**前置**到这条�
 
 结论：**P5 仍未完成**，当前内核保持「正确但 fault 串行」的状态。以六次失败的
 共同点为线索、用持锁栈插定位，是比继续改 fault 代码更可靠的下一步。
+
+### 8.17 P5 根因：VMA 引用计数初始化遗漏（**六次失败的真实原因**）
+
+§8.16 建议「插桩定位卡死时各 CPU 的持锁栈」。实际没有走到持锁栈——因为**根本不是
+锁死**。给 `mm_find_vma` 的链表回退路径加步数上界后立即定位：
+
+```
+[VMAWALK] CYCLE mm=0xffffffc0bf1d0010 addr=0x6e69746c69756000 steps=100001
+mm_find_vma: VMA list cycle
+```
+
+`addr=0x6e69746c69756000` 是 ASCII 文本而非合法地址——遍历进的是被释放后
+reused 的内存。**VMA 链表成环**。
+
+根因是 `b10b267b` 的一个真实缺陷：当时用 `grep sizeof(vm_area_t)` 找分配点，
+漏掉了 4 处用 `sizeof(*vma)` 写法的站点——`munmap.c:262`、`udriver.c:183`、
+`framebuffer.c:181` 与 `:363`。这些 VMA 的引用计数停留在 `kcalloc` 的 0。
+
+该缺陷在 `b10b267b` 中**潜伏**：没有代码调用 `vma_get/vma_put`，计数为 0 只会让
+`munmap` 少释放一次（泄漏），不会出错。P5 让 fault 路径真的
+`vma_get` → `vma_put` 后，计数走 0→1→0，VMA 在**仍挂在 `mm->mmap` 上**时被释放，
+链表指针随即悬垂。
+
+触发点 `munmap.c:262` 建的正是 `VM_ANON | VM_READ | VM_WRITE` 的 brk VMA，恰好
+落在 P5 快路径匹配的类别里；`execve` 会同时走「拆旧镜像 + 建 brk VMA + 首次
+写入」，所以每次都稳定命中。
+
+**这解释了第五、六次以及此前所有失败的共同症状。** 前面记录的那些根因
+（判定链被打乱、THP 抢占、`-EAGAIN` 后的 UAF、栈增长绕过、锁序反转）**全部不是**
+本次卡死的原因；即使它们都成立，也不足以致命。教训：
+
+* **按类型名 grep 分配点不可靠**，必须同时覆盖 `sizeof(*vma)`、`sizeof (struct …)`
+  等等价写法。已复核全部 14 处站点均已初始化。
+* 一个「只在启用新调用者后才致命」的初始化遗漏，可以伪装成并发/锁问题并骗过
+  多次尝试。**加断言/上界把静默死循环变成指名报错**，其价值高于其运行开销。
+  `mm_find_vma` 的步数上界已作为失效保护保留。
+
+### 8.18 P5 已实现且正确，但**性能假设被证伪**
+
+修掉初始化遗漏后，`smoke-mm-stress` / `smoke-mm-fork-exec-race` /
+`check-mm-lock-model` 全绿，关机审计全 0。**但 P5 没有带来任何可测量收益。**
+
+x86_64/KVM smp4、无 NIC（规避 §8.14 的 lwIP 崩溃）、3 次采样：
+
+| | 改动前基线 | P5 之后 |
+|---|---|---|
+| `ideal_speedup` | 1.06x–1.20x | **1.01x / 1.12x / 1.12x** |
+
+与基线无差异，仍远低于 1.80x 阈值。
+
+**瓶颈不在 `mm->lock`。** 锁外 prepare 之后，缺页路径仍依次经过两个**全局**
+串行点：
+
+* `cg_mem_charge()` → `spin_lock_irqsave(&node->lock)`：**per-cgroup-node** 锁，
+  同一 cgroup 内所有缺页共用；
+* `pfa_alloc_page()` → `pfa.lock`：`extern pfa_t pfa` 是**单一全局**分配器
+  （`spinlock_t lock` 保护全部可变字段），per-CPU batch 也在这把锁下 refill。
+
+摘掉 `mm->lock` 只是把串行点从地址空间锁换成这两把，4 个线程依旧互相排队。
+因此「P0–P5 兑现 fault 并行度」这一假设**不成立**；要提升 fault 并行度，必须
+先处理分配器与 cgroup 计费（例如 per-CPU 无锁分配器、批量 charge、或把 charge
+移出每页路径），而不是继续在地址空间锁上做文章。
