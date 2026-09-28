@@ -266,10 +266,15 @@ static inline uint8_t *cow_bit(pt_meta_t *m, int idx)
     return &m->cow[idx >> 3];
 }
 
-void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
+/*
+ * The body of mm_pt_note_present() with the metadata already resolved.  Kept
+ * separate so bulk callers (provisioning a whole leaf table) can hoist the
+ * mm_pt_meta() lookup out of their per-entry loop instead of paying three
+ * dependent loads -- virt_to_pfn, the frame flag check, the .pt deref -- once
+ * per page.
+ */
+static void pt_note_present_meta(pt_meta_t *m, int idx, uint8_t cls_byte)
 {
-    (void)level;
-    pt_meta_t *m = mm_pt_meta(table);
     uint8_t *slot = cls_slot(m, idx);
     if (!slot)
         return;
@@ -281,6 +286,12 @@ void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
         if (cb)
             *cb &= (uint8_t)~(1u << (idx & 7));
     }
+}
+
+void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
+{
+    (void)level;
+    pt_note_present_meta(mm_pt_meta(table), idx, cls_byte);
 }
 
 void mm_pt_note_absent(pte_t *table, int level, int idx)
@@ -794,9 +805,32 @@ int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     if (span / PAGE_SIZE > MM_ANON_PROVISION_MAX_PAGES)
         return 0;   /* too large to provision eagerly; VMA path still correct */
 
-    for (vaddr_t va = start; va < end; va += PAGE_SIZE) {
+    uint8_t byte = status_byte(MM_ST_ANON_VIRT, flags);
+    uint64_t marked = 0;
+
+    /*
+     * One cursor per leaf table, not per page.  A single-page range makes
+     * mm_addrspace_lock() descend to covering level 0, so cur->path[0] is the
+     * leaf table -- and the lock it takes IS that table's lock, so every entry
+     * in the table is already excluded from concurrent writers.  The paper
+     * likewise locks the covering PT page once for the whole range; opening a
+     * fresh cursor per page instead cost 512 full round trips for a 2 MiB
+     * mapping, and that is what made eager provisioning show up as a ~1.5x
+     * mmap regression.
+     */
+    const vaddr_t chunk_bytes = ((vaddr_t)1 << ARCH_PT_BITS) * PAGE_SIZE;
+
+    for (vaddr_t base = start & ~(chunk_bytes - 1); base < end;
+         base += chunk_bytes) {
+        vaddr_t chunk_end = base + chunk_bytes;
+        if (chunk_end <= base)
+            break;                       /* address-space wrap */
+        vaddr_t lo = base > start ? base : start;
+        vaddr_t hi = chunk_end < end ? chunk_end : end;
+
+        vaddr_t anchor = lo & ~(vaddr_t)(PAGE_SIZE - 1);
         mm_cursor_t cur;
-        int r = mm_addrspace_lock(mm, va, va + PAGE_SIZE, &cur);
+        int r = mm_addrspace_lock(mm, anchor, anchor + PAGE_SIZE, &cur);
         if (r < 0)
             return r;
         if (r > 0) {
@@ -805,12 +839,21 @@ int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             mm_cursor_unlock(&cur);
             continue;
         }
-        /* -EEXIST means a concurrent fault won the race and mapped the page,
-         * which is exactly the state provisioning was trying to reach. */
-        if (mm_cursor_mark_prot(&cur, va, MM_ST_ANON_VIRT, flags) == 0)
-            a20_perf_count(A20_PERF_MM_ANON_PROVISIONED);
+
+        pte_t *table = cur.path[0];
+        pt_meta_t *m = mm_pt_meta(table);
+        for (vaddr_t va = lo; va < hi; va += PAGE_SIZE) {
+            int idx = arch_pt_vpn(va, 0);
+            if (table[idx] & PTE_V)
+                continue;               /* a fault won the race; already mapped */
+            pt_note_present_meta(m, idx, byte);
+            marked++;
+        }
         mm_cursor_unlock(&cur);
     }
+    /* One atomic add for the whole range: a per-page counter would cost an
+     * atomic read-modify-write per page and dominate the loop. */
+    a20_perf_add(A20_PERF_MM_ANON_PROVISIONED, marked);
     return 0;
 }
 
