@@ -3578,3 +3578,86 @@ SIGSEGV: pid=6 code=14 stval=0x8dc0ff20
   运行时三行轨迹（`[MM-RF]`→`[MM-ST]`→`[MM-INS]`）逐行证实。
 * **工作树含故意保留的诊断插桩**：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、`[MM-RF]`）、
   `fault.c`（`[MM-ST]`、`[MM-FP]`）。**这些是热路径 `kerr`，修复验证通过后必须全部移除。**
+
+### 10.56 **根因确认**：`pt_lookup_leaf()` 返回 NULL 不等于「没有叶子表」
+
+读了 `pt_lookup_leaf()`（`kernel/mm/mm.c`）之后，§10.55 的疑点解开，而且**根因就此确证**：
+
+```c
+pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, ...) {
+    pte_t *table = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        pte_t *pte = &table[idx];
+        if (!(*pte & PTE_V))
+            return NULL;                 /* <-- 只是「该级条目未present」 */
+        if (arch_pte_is_leaf(*pte)) { ...; return pte; }
+        if (level == 0) return NULL;
+        table = arch_pte_to_ptr(*pte);
+    }
+```
+
+**关键：返回 NULL 的条件是「当前这一级的条目没有 `PTE_V`」，而不是「叶子表不存在」。**
+走到 level 0 时，`table` **就是那张叶子表**，只是它的 `table[idx]` 尚未被映射。
+所以完全可能出现：**叶子表存在、其元数据里该 idx 带着陈旧的 `ANON_VIRT|R`、
+而 `pt_lookup_leaf()` 却返回 NULL。** §10.55 的第 1 条（非 leaf 上层条目导致 NULL）被排除
+——被上层条目覆盖时它会正常返回那个 leaf 并给出 `level > 0`，不会返回 NULL。
+
+#### 于是 `mprotect` 里的这句注释与代码都是错的
+
+```c
+if (pte) {
+    int idx = arch_pt_vpn(va, 0);
+    declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
+}
+/* 注释原文：「The per-PTE status lives in that table's metadata, so when
+ *  there is no table there is no status to refresh.」 */
+```
+
+它把「`pt_lookup_leaf()` 返回 NULL」误读成「没有叶子表」，于是**整段跳过刷新**。
+但真实情况是「**叶子表在、条目没映射**」——这恰恰是**最需要刷新状态的那种情形**：
+条目没映射说明将来会走缺页路径，而缺页路径读的正是**这张表的元数据**里那份陈旧的
+`ANON_VIRT|R`。跳过刷新 = 把陈旧只读权限留给未来的缺页去执行。
+
+**这与 §10.54 的三行运行时轨迹完全吻合，且每一行都得到解释：**
+
+```
+[MM-RF]  va=8dc0f000 ptef=467 declined=1 pte=0
+```
+
+`pte=0` 并不是「没有叶子表」，而是「叶子表在、`table[idx]` 未映射」；
+`declined=1` 来自 `if (pte)` 为假而**根本没进刷新**；VMA 却被 `ptef=0x467` 放宽成可写。
+于是陈旧的 `ANON_VIRT|R` 留在元数据里 → 缺页时 `[MM-ST] status_prot=1` →
+`[MM-INS] flags=0x425` 装出只读页 → 压在可写 VMA 下 → 首次写无人接管 → **致命**。
+
+**结构性根因一句话**：
+> **`mprotect` 用「能否取到 PTE 指针」来代替「能否取到叶子表」来判断要不要刷新
+> per-PTE 状态；对「表在、条目未映射」这一最常见的情形，它错误地跳过了刷新，
+> 于是陈旧状态被后来的状态缺页照单执行。**
+
+§10.38 当初把 `if (pte)` 加上，是为了消除 `pte - idx` 对 NULL 做指针运算的 UBSAN；
+**方向对，但结论错**——真正该做的是「用 `mm_addrspace_lock()` 走到叶子表」，
+而不是「PTE 取不到就跳过」。这也是为什么 §10.38 修完 UBSAN 从 35 降到 2、崩溃却丝毫未变。
+
+#### 修复（方向唯一，且已完全确定）
+
+在 `mprotect` 的缺页分支里，**不要用 `pt_lookup_leaf()` 的返回值判断**，改用能走到叶子表的
+路径（例如 `mm_addrspace_lock()` + `cursor_leaf_table()`，或新增一个只下探到叶子表的
+helper），然后**无条件**对 `table[idx]` 调用 `mm_pt_refresh_absent_prot()`。
+这样：
+* 表在、条目未映射 → 刷新成功，陈旧权限被纠正（**修掉本崩溃**）；
+* 表不在 → 拿不到元数据，此时**新建**叶子表的元数据必为全 0（§10.55 的 `memset` 结论），
+  状态路径不会命中 `ANON_VIRT`，天然安全；
+* `mm_pt_refresh_absent_prot()` 内部那条 `cls != MM_ST_ANON_VIRT` 早退可以保留——
+  非 `ANON_VIRT` 的状态本来就不会被状态路径使用，**不必**在这里强行改写别人的 class。
+
+**本轮不做实施**：改动需要新增一个「下探到叶子表」的 helper 并处理与 `mm_addrspace_lock()`
+的锁序关系（`mm->lock` → 页表锁），属于需要完整上下文才能保证不引入死锁的改动。
+但根因、修复方向、以及为什么前九次全错，此刻都已确定到可以直接实施的程度。
+
+**前九次为何全错（因为都在查「状态从哪来」，没人查「状态为什么没被更新」）**：
+状态路径忠实执行状态字节，从不查 VMA——这是论文的设计。真正的契约是
+**「mprotect 必须在同一次调用里让状态与 VMA 保持一致」**，而这条契约被一个
+「用 PTE 指针的有无代替叶子表的有无」的近似判断破坏了。
+
+**插桩现状**（故意保留，供修复验证复用）：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、
+`[MM-RF]`）、`fault.c`（`[MM-ST]`、`[MM-FP]`）。**修复通过后必须全部移除。**
