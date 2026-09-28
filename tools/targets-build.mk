@@ -195,14 +195,7 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 	@echo "check-build-matrix-all: PASS"
 
 check-arch-boundary: smoke-arch-mmu-matrix
-	@! rg -n '#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__' \
-		kernel --glob '!kernel/arch/**' --glob '!kernel/platform/**' \
-		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h' \
-		--glob '!kernel/mm/vdso.c' --glob '!kernel/include/mm/vdso.h' \
-		--glob '!kernel/include/mm/vdso_blob.h' \
-		--glob '!kernel/mm/fault.c' --glob '!kernel/drvmod/framework.c'
-	@rg -q "ARCH_MMU_RUNTIME_MATRIX_CONTRACT" docs/testing-gates.md
-	@rg -q "smoke-arch-mmu-matrix" tools/targets-smoke.mk docs/OS-Design.md
+	@$(PYTHON) tools/gates.py check-arch-boundary
 	@for arch in loongarch64 x86_64 ppc64le; do \
 		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
 			echo "check-arch-boundary: unsupported NOMMU build accepted for $$arch"; \
@@ -212,29 +205,7 @@ check-arch-boundary: smoke-arch-mmu-matrix
 	@echo "check-arch-boundary: PASS"
 
 check-task-state-boundary:
-	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
-		--glob '!kernel/proc/park.c' --glob '!kernel/proc/sched.c' \
-		--glob '!kernel/proc/exit.c' --glob '!kernel/proc/task.c' \
-		-- '->state[[:space:]]*=[[:space:]]*PROC_' kernel
-	@! rg -n --pcre2 --glob '*.c' --glob '!kernel/external/**' \
-		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/current.c' \
-		--glob '!kernel/proc/task.c' --glob '!kernel/proc/park.c' \
-		-- '->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*=' kernel
-	@! rg -n 'proc_runq_(enqueue|remove)_locked[[:space:]]*\(' kernel \
-		--glob '*.c' --glob '!kernel/proc/park.c' \
-		--glob '!kernel/proc/current.c' \
-		--glob '!kernel/proc/sched.c' --glob '!kernel/proc/exit.c' \
-		--glob '!kernel/proc/task.c'
-	@! rg -n --pcre2 'task_t[[:space:]]*\*[[:space:]]*(waiter|rx_waiter)\b' \
-		kernel --glob '*.[ch]' --glob '!kernel/external/**'
-	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
-		--glob '*.[ch]' --glob '!kernel/external/**'
-	@rg -q 'A20_PARK_WAKE_PROTOCOL' kernel/include/proc/park.h
-	@rg -q 'WAIT_QUEUE_PARK_PROTOCOL' kernel/include/core/sync.h
-	@rg -q 'TASK_REFERENCE_LIFETIME' kernel/include/proc/proc.h
-	@rg -q 'proc_get\(token\.task\)' kernel/core/sync.c
-	@rg -q '_Static_assert\(offsetof\(task_t, kstack\) == 0' kernel/include/proc/proc.h
-	@rg -q '_Static_assert\(offsetof\(task_t, kstack_base\) == sizeof\(uintptr_t\)' kernel/include/proc/proc.h
+	@$(PYTHON) tools/gates.py check-task-state-boundary
 	@echo "check-task-state-boundary: PASS"
 
 check-smp-platform-boundary:
@@ -263,13 +234,9 @@ check-abi-smoke-gate:
 check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smoke-mlibc-mksh
 
 check-doc-drift:
-	@rg -q "DOC_DRIFT_KEYWORD_GATE" docs/testing-gates.md
+	@$(PYTHON) tools/gates.py check-doc-drift
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py
-	@rg -q "stub" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
-	@rg -q "partial" kernel/abi/linux/syscall_coverage.md kernel/abi/linux/compat_notes.md docs/testing-gates.md
-	@rg -q "Future" docs/testing-gates.md kernel/abi/native/sys_core.c
-	@rg -q "not yet" docs/testing-gates.md kernel/abi/native/sys_phase2.c kernel/mm/fault.c
-	@! rg -q "for simplicity" docs kernel --glob '!docs/research/**' --glob '!docs/testing-gates.md' --glob '!kernel/external/**'
+	@$(PYTHON) tools/gates.py check-doc-drift --segment 1
 	@echo "check-doc-drift: PASS"
 
 check-task-lifetime-boundary:

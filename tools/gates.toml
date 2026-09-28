@@ -947,3 +947,169 @@ files = [
     "kernel/proc/proc.c",
 ]
 
+
+
+# --- contiguous rg runs from tools/targets-build.mk previously called
+# "mixed".  Each carries every --glob exclusion, not just one: the
+# first schema dropped all but a single glob and the checks then fired
+# on exactly the files the recipe excludes.
+
+[[gate]]
+name = "check-task-state-boundary"
+make_target = "check-task-state-boundary"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 1
+[[gate.assertion]]
+segment = 0
+negate = true
+ddash = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/park.c", "!kernel/proc/sched.c", "!kernel/proc/exit.c", "!kernel/proc/task.c"]
+pattern = "->state[[:space:]]*=[[:space:]]*PROC_"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+ddash = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/sched.c", "!kernel/proc/current.c", "!kernel/proc/task.c", "!kernel/proc/park.c"]
+pattern = "->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*="
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+globs = ["*.c", "!kernel/proc/park.c", "!kernel/proc/current.c", "!kernel/proc/sched.c", "!kernel/proc/exit.c", "!kernel/proc/task.c"]
+pattern = "proc_runq_(enqueue|remove)_locked[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "task_t[[:space:]]*\\*[[:space:]]*(waiter|rx_waiter)\\b"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "\\bproc_find[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "A20_PARK_WAKE_PROTOCOL"
+files = ["kernel/include/proc/park.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "WAIT_QUEUE_PARK_PROTOCOL"
+files = ["kernel/include/core/sync.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "TASK_REFERENCE_LIFETIME"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "proc_get\\(token\\.task\\)"
+files = ["kernel/core/sync.c"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "_Static_assert\\(offsetof\\(task_t, kstack\\) == 0"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "_Static_assert\\(offsetof\\(task_t, kstack_base\\) == sizeof\\(uintptr_t\\)"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate]]
+name = "check-arch-boundary"
+make_target = "check-arch-boundary"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 1
+[[gate.assertion]]
+segment = 0
+negate = true
+globs = ["!kernel/arch/**", "!kernel/platform/**", "!kernel/external/**", "!kernel/include/core/arch.h", "!kernel/mm/vdso.c", "!kernel/include/mm/vdso.h", "!kernel/include/mm/vdso_blob.h", "!kernel/mm/fault.c", "!kernel/drvmod/framework.c"]
+pattern = "#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "ARCH_MMU_RUNTIME_MATRIX_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "smoke-arch-mmu-matrix"
+files = [
+    "tools/targets-smoke.mk",
+    "docs/OS-Design.md",
+]
+
+[[gate]]
+name = "check-doc-drift"
+make_target = "check-doc-drift"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 2
+[[gate.assertion]]
+segment = 0
+pattern = "DOC_DRIFT_KEYWORD_GATE"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+segment = 1
+pattern = "stub"
+files = [
+    "kernel/abi/linux/syscall_coverage.md",
+    "kernel/abi/linux/compat_notes.md",
+    "docs/testing-gates.md",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "partial"
+files = [
+    "kernel/abi/linux/syscall_coverage.md",
+    "kernel/abi/linux/compat_notes.md",
+    "docs/testing-gates.md",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "Future"
+files = [
+    "docs/testing-gates.md",
+    "kernel/abi/native/sys_core.c",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "not yet"
+files = [
+    "docs/testing-gates.md",
+    "kernel/abi/native/sys_phase2.c",
+    "kernel/mm/fault.c",
+]
+
+[[gate.assertion]]
+segment = 1
+negate = true
+globs = ["!docs/research/**", "!docs/testing-gates.md", "!kernel/external/**"]
+pattern = "for simplicity"
+files = [
+    "docs",
+    "kernel",
+]
+
