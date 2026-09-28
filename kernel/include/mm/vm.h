@@ -70,6 +70,20 @@ typedef struct vm_area {
 #endif
     struct vm_area *prev;
     struct vm_area *next;
+    /*
+     * MM_AS_VMA_REFCOUNT:
+     * The single-level model needs a page fault to read a VMA's fields with
+     * mm->lock released -- that is what stops one address-space lock from
+     * serialising every fault in the process.  Once the lock is gone, the VMA
+     * pointer itself is no longer protected, so the fault takes a reference
+     * and drops it when done.  The address-space list owns the reference
+     * created at allocation; unlinking drops it, and the last holder (which
+     * may be a fault running lock-free) is what defers the free.
+     */
+    refcount_t      refcount;
+    /* Deferred-free linkage.  Separate from `next` so a VMA on the deferred
+     * list is never confused with one on mm->mmap. */
+    struct vm_area *deferred_next;
 } vm_area_t;
 
 typedef struct mm_tlb_hold {
@@ -177,7 +191,15 @@ typedef struct mm_struct {
     uint16_t vma_index_count;
     uint8_t vma_index_state; /* 0=dirty, 1=valid, 2=capacity overflow */
     uint8_t _pad_vma_index;
-    vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
+    vm_area_t *deferred_vma;  /* released only after the last holder drops it */
+    /*
+     * Protects deferred_vma only.  Deliberately separate from mm->lock so a
+     * lock-free page fault can drop its VMA reference (and therefore defer a
+     * free) without taking the address-space lock it just escaped.  Held for
+     * a list push/pop only -- never across vma_release(), which can run
+     * blocking I/O.
+     */
+    spinlock_t vma_ref_lock;
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
     pt_root_t *pgdir;
     vaddr_t    brk;
@@ -210,6 +232,15 @@ void         mm_arch_context_init(mm_struct_t *mm);
 uint64_t     mm_address_space_token(const mm_struct_t *mm);
 
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr);
+/*
+ * VMA lifetime (MM_AS_VMA_REFCOUNT, see the comment block in mm/vma.c).
+ * The address-space list owns the reference created at allocation; a page
+ * fault that reads VMA fields with mm->lock released must vma_get() first and
+ * vma_put() when done.  The last holder schedules the deferred free, which
+ * never runs inline because vma_release() can block on I/O.
+ */
+void vma_get(vm_area_t *vma);
+void vma_put(mm_struct_t *mm, vm_area_t *vma);
 void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma);
 void mm_vma_flush_deferred(mm_struct_t *mm);
 vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);

@@ -515,6 +515,8 @@ mm_struct_t *mm_create(void) {
     mm->def_flags  = 0;
     spin_init(&mm->lock);
     spin_set_debug(&mm->lock, "mm", mm);
+    spin_init(&mm->vma_ref_lock);
+    spin_set_debug(&mm->vma_ref_lock, "mm_vma_ref", mm);
     mutex_init(&mm->tlb_lock);
     mm->tlb_holds = NULL;
     mm->active_cpus = 0;
@@ -556,10 +558,10 @@ void mm_destroy(mm_struct_t *mm) {
     while (vma) {
         free_vma_pages(mm, vma);
         vm_area_t *next = vma->next;
-        vma_release(vma);
-        kfree(vma);
+        vma_put(mm, vma);
         vma = next;
     }
+    mm_vma_flush_deferred(mm);
 
 #ifdef CONFIG_NOMMU
     for (int i = 0; i < mm->num_nommu_allocs; i++) {
@@ -646,6 +648,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
                 kfree(child);
                 return NULL;
             }
+            refcount_set(&node->refcount, 1);
             node->next = vma_pool;
             vma_pool = node;
             vma_capacity++;
@@ -671,6 +674,8 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     memset(child->vma_index, 0, sizeof(child->vma_index));
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
+    spin_init(&child->vma_ref_lock);
+    spin_set_debug(&child->vma_ref_lock, "mm_vma_ref", child);
     mutex_init(&child->tlb_lock);
     /*
      * MM_FORK_DEFERRED_STATE_REGRESSION_GUARD:
@@ -712,6 +717,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         vma_pool = vma_pool->next;
         vma_capacity--;
         *cv = *pv;
+        refcount_set(&cv->refcount, 1);
         cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_fork(cv) < 0) {
             vma_release_file(cv);
