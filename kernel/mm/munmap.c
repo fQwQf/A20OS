@@ -157,6 +157,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
             if (!tail) return -ENOMEM;
             *tail = *vma;
+            refcount_set(&tail->refcount, 1);
             tail->start = clip_end;
             tail->end = vma->end;
             tail->file_offset += clip_end - vma->start;
