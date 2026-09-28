@@ -74,12 +74,26 @@ AHCI（`FLUSH CACHE EXT`）。
    的自旋次数只汇总到锁级 `contended_spins`——所以归因表的 spin 列毫无信息量
    （实测 27 次 acquire 对 114 万次自旋，调用点 spin 合计只有 27）。
    现改为在进循环前先固定 slot、内层自旋排空后按 `spins - spun_before`
-   累加，修复后调用点 spin 合计与锁级总数**精确相等**（689073 = 689073）。
-   结论也随之改变：17 次 acquire 里 16 次、自旋的几乎全部
-   （689073/689073）都落在 `net_vfile_read`。
-   **也就是说争用主要来自 socket 读路径（syscall 侧），而不是收包路径。**
-   这直接改变分片方案：按 RX/TX 分片解决不了主要矛盾，优先要动的是读路径
-   持锁范围。分片本身仍是未完成项。
+   累加，修复后调用点 spin 合计与锁级总数**精确相等**（689073 = 689073，
+   另一次 381751 = 381751）。`smoke-smp-lock-contention` 现在把这条不变量
+   钉住（调用点 spin 合计须 ≥ 锁级的 90%），删掉归因即失败。
+   锁级数字（`contended_acquires`/`contended_spins`）是直接计数，可信。
+   **但"具体是哪个调用点"目前不可信，不要据此设计分片。** 表里把
+   17 次 acquire 里的 16 次、几乎全部自旋（689073/689073）标到了
+   `net_vfile_read+0xf6`，而这个归因**我没能解释**：
+   `net_vfile_read()` 并不直接调 `a20_lwip_lock()`，它摸 `g_lwip_lock`
+   的唯一路径是 extern 的 `a20_lwip_poll()`（`socket_file.c:28`），
+   函数体里那些自旋锁全是**另一把** `g_net_lock`；`net_tcp_recved()`
+   也是 `socket_inet.c` 里的非 static extern。构建**没有开 LTO**
+   （用户态与内核编译参数里都没有 `-flto`），extern 跨编译单元不可能内联，
+   因此 `spin_lock_at()` 里 `__builtin_return_address(0)` 记下的返回地址
+   应当落在 `a20_lwip_lock`/`a20_lwip_poll` 里，而不是 `net_vfile_read`。
+   我也确认过 kallsyms 表里 `a20_lwip_lock`、`a20_lwip_poll`、
+   `net_vfile_read` 都**存在**，所以不是符号缺失导致的错配。
+   **在弄清这个标签之前，不能下"争用来自读路径"这种结论**，
+   更不能据此说"按 RX/TX 分片没用"——那正是本轮一度写下的推论，现予撤回。
+   要定位热点，下一步应先查清该标签的来源（怀疑与 kallsyms 归址、
+   `spin_lock_irqsave` 的 `caller_ra` 取值口径有关）。分片本身仍未完成。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
