@@ -122,34 +122,25 @@ def derive_make_vars(inst: Instance) -> list[str]:
 
 
 def _target_vars(t: TargetCfg) -> list[str]:
-    """[target] -> TARGET_* variables.
+    """[target] -> the three TARGET_* variables make actually reads.
 
-    The makefile owns every recipe that acts on the board; these variables only
-    say which board and which console.  A reset command is emitted verbatim
-    because there is no way to parameterise "pulse this board's reset line"
-    without naming the tool, and the command is run by a20, not by make.
+    Only what a makefile consumes is derived.  This used to emit all eleven
+    TARGET_* fields, but eight of them were read by nothing at all: the console
+    session, the reset pulse, the command injection and the expect matching are
+    all driven by a20 from the dataclass, not by a recipe.  Emitting them made
+    `a20 show-vars` claim make consumed a configuration it never saw, and the
+    docs then documented that claim.
+
+    The split is therefore deliberate and narrow: make owns writing the boot
+    medium (`target-write-media`), so it gets the device and the images; the
+    serial node is passed because `target-console.mk` reports it.  Everything
+    else is a20's own business and stays a20's own business.
     """
     v: list[str] = []
     if t.serial is not None:
         v.append(f"TARGET_SERIAL={t.serial}")
-    if t.baud is not None:
-        v.append(f"TARGET_BAUD={t.baud}")
-    if t.reset is not None:
-        v.append(f"TARGET_RESET_CMD={t.reset}")
-    if t.boot_wait is not None:
-        v.append(f"TARGET_BOOT_WAIT={t.boot_wait}")
-    if t.boot_timeout is not None:
-        v.append(f"TARGET_BOOT_TIMEOUT={t.boot_timeout}")
-    if t.console_check is not None:
-        v.append(f"TARGET_CONSOLE_CHECK={','.join(t.console_check)}")
-    if t.commands is not None:
-        v.append(f"TARGET_COMMANDS={' '.join(t.commands)}")
-    if t.expect is not None:
-        v.append(f"TARGET_EXPECT={','.join(t.expect)}")
-    if t.boot_media is not None:
+    if t.boot_media:
         v.append(f"TARGET_BOOT_MEDIA={' '.join(t.boot_media)}")
     if t.media_device is not None:
         v.append(f"TARGET_MEDIA_DEVICE={t.media_device}")
-    if t.log is not None:
-        v.append(f"TARGET_CONSOLE_LOG={t.log}")
     return v
