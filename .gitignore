@@ -67,3 +67,6 @@ user/external/sbase/id
 site/_pages/
 # corpus 工具统计产物（tools/corpus/ 生成）
 docs/research/verification/corpus_stats.json
+# 临时工作树与本地评审产物（不属于源码树，不要提交）
+.worktrees/
+ccfa-review-reports/
