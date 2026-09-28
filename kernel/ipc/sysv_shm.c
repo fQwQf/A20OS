@@ -61,6 +61,19 @@ typedef struct {
     int nattach;
 } sysv_shm_t;
 
+/* Reply layout for SHM_INFO, matching musl and glibc `struct shm_info`:
+ * int __used_ids, then shm_tot/shm_rss/shm_swp/__swap_attempts/
+ * __swap_successes as unsigned long (4 + 4 pad + 5*8 = 48 on LP64).  A20OS
+ * tracks none of these counters, so the reply is all zeros, but the size
+ * still has to match: a larger reply overruns the caller's buffer, and the
+ * check below is what keeps the two layouts from drifting apart silently. */
+typedef struct {
+    int used_ids;
+    unsigned long tot, rss, swp, swap_attempts, swap_successes;
+} sysv_shminfo_t;
+
+STATIC_ASSERT(sizeof(sysv_shminfo_t) == 48, shm_info_matches_libc);
+
 static sysv_shm_t g_shm[SYSV_SHM_MAX];
 static spinlock_t g_shm_lock = SPINLOCK_INIT;
 
@@ -442,20 +455,10 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
     }
 
     if (cmd == SHM_INFO && buf) {
+        sysv_shminfo_t info;
+        memset(&info, 0, sizeof(info));
         spin_unlock_irqrestore(&g_shm_lock, flags);
-        /*
-         * BUG: musl's `struct shm_info` (arch/generic/bits/shm.h) is 48 bytes --
-         *   int __used_ids; unsigned long shm_tot, shm_rss, shm_swp,
-         *   __swap_attempts, __swap_successes;
-         * i.e. 4 + 4 pad + 5*8.  The 64 bytes written below overrun the caller's
-         * buffer by 16 and clobber adjacent user stack/heap data.  The value is
-         * 60, not 48, on musl and glibc alike.  This needs a code fix; it is
-         * recorded here because the correct size is not derivable from this
-         * file and the overflow is otherwise invisible.
-         */
-        char zero[64];
-        memset(zero, 0, sizeof(zero));
-        return copy_to_user(buf, zero, sizeof(zero)) < 0 ? -EFAULT : 0;
+        return copy_to_user(buf, &info, sizeof(info)) < 0 ? -EFAULT : 0;
     }
 
     spin_unlock_irqrestore(&g_shm_lock, flags);
