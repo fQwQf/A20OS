@@ -852,3 +852,39 @@ TCG 单核慢、计时窗口偏短，比例只能作相对参考；论文的 33x
 3. 接线 RCU monitor：PT 页延迟释放 + stale 重下降。
 4. CortenMMadv 协议：无锁遍历 + DFS 锁后代。
 5. 之后才是 per-core VA 分配器与 LATR。
+
+### 9.6 下一阶段的关键发现：`MM_ST_ANON_VIRT` 从未被写入
+
+要按论文让 fault 不查 VMA，前提是「这个虚拟页已保留、只是还没 backing」这一状态
+**存在于 per-PTE 元数据里**。核对发现：
+
+* `MM_ST_ANON_VIRT`（= 论文的 `Status::PrivateAnon`）在全树**只有一处出现**，
+  而且只是审计代码里的白名单判断（`pt.c:887`）——**没有任何地方写入它**。
+* `mmap` 路径（`mm_mmap_locked` / `mm_mmap_file_locked` / `mm_mmap_vmo_locked`）
+  **完全不写 per-PTE 状态**，只做 `mm_insert_vma()`。
+
+所以今天 per-PTE 状态里根本没有「已保留」这个概念，fault 只能靠
+`mm_find_vma()` 才知道这个地址该不该有映射。**这正是 §9.2 第 1 条无法直接实现的
+根本原因**，也是我们与论文差距的最小可操作切入点。
+
+值得注意的是审计代码早就为它准备好了位置：`mm_pt_audit_addrspace` 对「PTE 缺失」
+的叶节点允许 `MM_ST_ANON_VIRT` 与 `MM_ST_SWAPPED` 两种 class（`pt.c:885-887`），
+即设计上**本来就预期** on-demand paging 会写入 `MM_ST_ANON_VIRT`。只是这一层从未接上。
+
+因此 P6 的正确施工顺序是：
+
+1. **mmap 时按需预标记**：为匿名保留范围把 per-PTE 状态置为
+   `MM_ST_ANON_VIRT`（并带权限位）。注意不能为整个范围预分配 PT 页——那会把
+   稀疏映射变成稠密，抵消 fault-around 的收益；需要「惰性建立中间节点」或在
+   fault 时补写。这是本阶段最需要小心的取舍。
+2. **fault 改为只查 cursor 状态**：`PrivateAnon` → 分配零页并 map；
+   `Mapped` → COW / 权限；`Invalid` → SIGSEGV。整段在**一个事务**内。
+3. 之后才是 RCU monitor 与 CortenMMadv 的无锁下降。
+
+**未解决的设计问题（下一步必须先回答）**：论文没有说明它如何避免为稀疏匿名映射
+预建 PT 页。我们的 `mm_pt_note_present` 依赖 PT 页已经存在（见 `mm.c` 的 level
+下降），所以「mmap 阶段标记尚未映射的叶子」需要中间节点先存在。候选方案：
+(a) fault 时惰性建中间节点并就地标记（回退到接近现状）；
+(b) mmap 时为匿名范围预留上层节点但不建叶子表；
+(c) 引入「区间级」class 记录（类似 per-VMA 但按 PT 粒度缓存）。
+在动手前需要先定这个，否则会做出「为了不查 VMA 而把内存开销放大」的实现。
