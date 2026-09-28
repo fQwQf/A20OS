@@ -3919,3 +3919,52 @@ NOMMU 构建下不参与编译，故调用点必须同样加守卫。NOMMU 无�
 现有 `mm_stress` 是否覆盖这一场景**未确认**。因此本次验证证明的是
 **「改动没有破坏既有行为」**（各门与两个开启臂仍全绿），**不是**「过度清除已被测试证明消除」。
 补这个用例是下一轮的明确任务。
+
+### 10.62 UFFD 回归测试：写出来了、能通过，但**查出另一处既有脆弱性**，故暂缓落地
+
+§10.61 明确记下「没有针对性回归测试」是本次修复的短板。测试已写出（`syscall_ext.c` 的
+`test_uffd_double_registration()`）：同一页在两个 uffd 上各注册一次 → 注销其中一个 →
+另一线程触发读缺页 → **必须仍然被 park**（`read()` 返回 `UFFD_EVENT_PAGEFAULT`）
+→ 用存活的 uffd `UFFDIO_COPY` 解决 → 校验内容。若 unregister 仍整段清位，
+该页会被状态缺页路径就地满足，`read()` **永远不返回**（挂死），测试即失败。
+
+**测试本身通过**：两次运行都**没有**打印任何 `uffd2 ...` 失败信息，
+`pthread_join` 也正常返回，说明 park → 解决 → 内容校验这条链是通的。
+
+**但它暴露了另一处既有问题**：启用该测试后，**后续一个与 uffd 无关的测试**失败：
+
+```
+MM_STRESS: evict start
+[BCACHE] no evictable page page=5772 valid=2000 dirty=1879 referenced=0 total_refs=0 max_refs=0
+MM_STRESS: evict-mmap start
+MM_STRESS: FAIL evict-mmap-verify-mapped errno=17      <-- 17 = EEXIST
+```
+
+`evict-mmap-verify-mapped` 是对**带提示地址的 `mmap`** 断言映射成功，拿到 `EEXIST`
+即提示地址已被占用。隔离实验确认因果：
+
+| 条件 | 结果 |
+|---|---|
+| 启用新测试 | `MM_STRESS: FAIL evict-mmap-verify-mapped errno=17` |
+| `MM_SKIP_UFFD2=1`（跳过新测试） | `MM_STRESS: PASS` |
+
+**因此这不是新测试的缺陷，而是 `evict-mmap` 对地址空间布局/页缓存状态敏感**：
+新测试多创建一个线程、多做几次 `mmap`/`munmap`，就足以让 `evict-mmap` 的提示地址撞车。
+前面那句 `[BCACHE] no evictable page` 也提示回收路径在那一刻本就处于吃紧状态。
+
+**处置：不在本轮落地这个测试。** 理由是**不能让默认的 `mm_stress` 变红**——
+提交一个让既有测试失败的测试，比暂时没有这个测试更糟。`syscall_ext.c` 已回退到
+`72117795` 的状态（`git checkout`），工作树干净、构建 0 error。
+**UFFD 逐页清位这一修复本身已合入并验证**（§10.61），缺的只是这个针对性用例。
+
+**下一轮的明确任务（有先后顺序）**：
+1. 先查 `evict-mmap-verify-mapped` 为何用提示地址、以及为何会 `EEXIST`——
+   这本身就是一个**既有缺陷**（与 UFFD 无关），应当独立修掉，而不是靠新测试绕开；
+2. 再把 `test_uffd_double_registration()` 落地（可直接复用本次实现：双注册 → 注销其一 →
+   断言另一方仍收到 fault → COPY 解决 → 校验内容），并在落地时确认它与 `evict-mmap`
+   不再有布局耦合。
+
+**方法论记录**：这次「写了测试 → 测试通过 → 却发现别处坏了」的循环，
+与 §10.39–§10.56 那十次排查是同一个教训的另一个侧面：
+**一个新增的测试改变地址空间状态，就足以唤醒此前被掩盖的既有缺陷。**
+测试通过 ≠ 周边无问题；测试失败也不必然是测试自己的错。
