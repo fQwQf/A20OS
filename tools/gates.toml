@@ -1,0 +1,949 @@
+# Source-level contract assertions, extracted verbatim from the `rg` recipes
+# that used to be inline in tools/targets-gates.mk.  The extraction was
+# mechanical (shlex over the real recipes) and checked by reconstructing each
+# rg argv back out of this table and diffing it against the original, so the
+# gate set is the one that used to run -- not a retyped approximation of it.
+#
+# This file is now the single source of truth for these 97 checks.  Edit it by
+# hand from here on: a hand-typed regex is how a gate silently stops asserting
+# what its name claims, so prefer a copy-paste of a pattern already verified to
+# match, and add new checks with `negate` chosen deliberately.
+#
+# `negate = true` means the pattern must NOT appear.  `fixed = true` is rg -F.
+# A `*` in a path is expanded by the runner, not the shell, so adding a source
+# file to a directory is picked up without touching this table.  Patterns are
+# stored exactly as rg receives them, i.e. after make collapsed any `$$`.
+[[gate]]
+name = "vfs-abstraction"
+make_target = "check-vfs-abstraction"
+[[gate.assertion]]
+pattern = "VFS_OPEN_DISPATCH_CONTRACT"
+files = ["kernel/include/fs/vfs.h"]
+
+[[gate.assertion]]
+pattern = "VFS_REFCOUNT_HELPER_CONTRACT"
+files = ["kernel/include/fs/vfs.h"]
+
+[[gate.assertion]]
+pattern = "VFS_DCACHE_MOUNT_VNODE_INVARIANT"
+files = ["kernel/include/fs/vfs.h"]
+
+[[gate.assertion]]
+pattern = "vfile_ref_init"
+files = [
+    "kernel/fs/file.c",
+    "kernel/include/fs/file.h",
+    "kernel/include/fs/vfs.h",
+]
+
+[[gate.assertion]]
+pattern = "vfile_get"
+files = [
+    "kernel/fs/file.c",
+    "kernel/include/fs/file.h",
+    "kernel/include/fs/vfs.h",
+]
+
+[[gate.assertion]]
+pattern = "vfile_put_ref_only"
+files = [
+    "kernel/fs/file.c",
+    "kernel/include/fs/file.h",
+    "kernel/include/fs/vfs.h",
+]
+
+[[gate.assertion]]
+pattern = "\\.open[[:space:]]*="
+files = [
+    "kernel/fs/diskfs/ramfs.c",
+    "kernel/fs/diskfs/fat32.c",
+    "kernel/fs/diskfs/ext4.c",
+    "kernel/fs/procfs/procfs.c",
+    "kernel/fs/devfs/devfs.c",
+    "kernel/fs/cgroupfs.c",
+    "kernel/fs/sysfs.c",
+]
+
+[[gate.assertion]]
+pattern = "CGROUPFS_DOTDOT_PARENT_LOOKUP"
+files = ["kernel/fs/cgroupfs.c"]
+
+[[gate.assertion]]
+pattern = "VFS_CONCURRENCY_SMOKE_MATRIX"
+files = ["kernel/fs/vfs.c"]
+
+[[gate.assertion]]
+pattern = "VFS_STRESS: PASS"
+files = ["user/cmds/stress/vfs_stress.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "FS_TYPE_(FAT32|EXT4|RAMFS|PROCFS|DEVFS|CGROUP|SYSFS).*open|fat32_open_vnode|ext4_open_vnode|ramfs_open_vnode|procfs_open_vnode|devfs_open_vnode|cgroupfs_open_vnode|sysfs_open_vnode"
+files = ["kernel/fs/vfs.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "refcount_(set|inc|dec_and_test)\\(&[A-Za-z0-9_>\\.-]*->ref_count"
+files = [
+    "kernel/fs/diskfs/ramfs.c",
+    "kernel/fs/diskfs/fat32.c",
+    "kernel/fs/diskfs/ext4.c",
+    "kernel/fs/procfs/procfs.c",
+    "kernel/fs/devfs/devfs.c",
+    "kernel/fs/cgroupfs.c",
+    "kernel/fs/sysfs.c",
+    "kernel/fs/inotify.c",
+    "kernel/fs/memfd.c",
+    "kernel/fs/pipe.c",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "for simplicity"
+files = ["kernel/fs/cgroupfs.c"]
+
+[[gate]]
+name = "abi-boundary"
+make_target = "check-abi-boundary"
+[[gate.assertion]]
+pattern = "LINUX_ABI_BOUNDARY_CONTRACT"
+files = ["kernel/abi/linux/syscall_impl.h"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT"
+files = ["kernel/abi/linux/syscall_table.def"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_SCHED_BOUNDARY"
+files = ["kernel/abi/linux/sys_sched.c"]
+
+[[gate.assertion]]
+pattern = "smoke-sched-stress"
+files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "SCHED_STRESS: PASS"
+files = ["user/cmds/stress/sched_stress.c"]
+
+[[gate.assertion]]
+pattern = "smoke-futex-stress"
+files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "FUTEX_STRESS: PASS"
+files = ["user/cmds/stress/futex_stress.c"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_BPF_BOUNDARY"
+files = ["kernel/abi/linux/sys_bpf.c"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_NAMESPACE_BOUNDARY"
+files = ["kernel/abi/linux/sys_namespace.c"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_CAPABILITY_BOUNDARY"
+files = ["kernel/abi/linux/sys_capability.c"]
+
+[[gate.assertion]]
+pattern = "ABI_CORE_API_CONTRACT"
+files = ["kernel/include/abi/core_api.h"]
+
+[[gate.assertion]]
+pattern = "abi_core_proc_exec"
+files = [
+    "kernel/abi/linux/sys_namespace.c",
+    "kernel/include/abi/core_api.h",
+]
+
+[[gate.assertion]]
+pattern = "abi_core_proc_mmap"
+files = [
+    "kernel/abi/native/sys_phase2.c",
+    "kernel/include/abi/core_api.h",
+]
+
+[[gate.assertion]]
+pattern = "NATIVE_DEBUG_LIMITED_CONTRACT"
+files = ["kernel/abi/native/sys_phase2.c"]
+
+[[gate.assertion]]
+pattern = "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX"
+files = ["kernel/include/ipc/handle_table.h"]
+
+[[gate.assertion]]
+pattern = "NATIVE_HANDLE_CAPABILITY_TEST_CONTRACT"
+files = ["kernel/abi/native/handle_table.c"]
+
+[[gate.assertion]]
+pattern = "Debug 分区受限"
+files = ["docs/native-abi/00-overview.md"]
+
+[[gate.assertion]]
+negate = true
+pattern = "uint64_t args\\[[0-9]+\\]"
+files = ["user/liba20c/*.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "无 stub 残留|all Phase 2\\+ syscalls|Debug \\(0x0900\\) — stubs"
+files = [
+    "docs/native-abi/00-overview.md",
+    "kernel/abi/native/sys_core.c",
+    "kernel/abi/native/sys_phase2.c",
+]
+
+[[gate]]
+name = "driver-core-model"
+make_target = "check-driver-core-model"
+[[gate.assertion]]
+pattern = "DRIVER_CORE_CONCURRENCY_MODEL"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "spin_lock_irqsave\\(&g_driver_core_lock\\)"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "mutex_lock\\(&g_driver_core_ops\\)"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_PROGRESS_LIFECYCLE_SERIALIZATION"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "mutex_trylock\\(&g_driver_core_ops\\)"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "return -EEXIST"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_CORE_DYNAMIC_LIMITS"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_IRQ_TABLE_FIXED_LIMIT"
+files = ["kernel/drivers/core/driver_hwapi.c"]
+
+[[gate.assertion]]
+pattern = "irq_table_lock"
+files = ["kernel/drivers/core/driver_hwapi.c"]
+
+[[gate.assertion]]
+pattern = "irq_active"
+files = ["kernel/drivers/core/driver_hwapi.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_PROBE_FAILURE_CLEANUP"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "dev->drv = NULL"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "dev->state = DEV_STATE_UNINIT"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_ENUMERATION_FAILURE_MODEL"
+files = [
+    "kernel/drivers/bus/virtio_mmio_bus.c",
+    "kernel/drivers/bus/pci_bus.c",
+]
+
+[[gate.assertion]]
+pattern = "DRIVER_IRQ_DMA_SEMANTICS"
+files = ["kernel/drivers/core/driver_hwapi.h"]
+
+[[gate.assertion]]
+pattern = "DRIVER_SMOKE_MATRIX"
+files = ["kernel/drivers/core/driver_core.h"]
+
+[[gate.assertion]]
+pattern = "class_device_publish"
+files = [
+    "kernel/drivers/core/driver_core.c",
+    "kernel/drivers/core/driver_class.c",
+]
+
+[[gate.assertion]]
+pattern = "class_device_unpublish"
+files = [
+    "kernel/drivers/core/driver_core.c",
+    "kernel/drivers/core/driver_class.c",
+]
+
+[[gate.assertion]]
+pattern = "DEV_STATE_REMOVING"
+files = [
+    "kernel/drivers/core/driver_core.h",
+    "kernel/drivers/core/driver_core.c",
+]
+
+[[gate.assertion]]
+pattern = "platform_device_register"
+files = [
+    "kernel/drivers/bus/platform_bus.c",
+    "kernel/platform/qemu-virt-x86_64/board.c",
+]
+
+[[gate.assertion]]
+pattern = "DEV_CLASS_AUDIO"
+files = [
+    "kernel/drivers/core/driver_core.h",
+    "kernel/drvmod/examples/pc_spkr.c",
+]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pci_class_code(dev) != 0x040300"
+files = ["kernel/drvmod/examples/hda.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pci_class_code(dev) != 0x010802"
+files = ["kernel/drvmod/examples/nvme.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "if (!size && bar_lo == 0)"
+files = ["kernel/drivers/bus/pci_bus.c"]
+
+[[gate.assertion]]
+pattern = "\\.match = hda_match"
+files = ["kernel/drvmod/examples/hda.c"]
+
+[[gate.assertion]]
+pattern = "\\.match = nvme_match"
+files = ["kernel/drvmod/examples/nvme.c"]
+
+[[gate.assertion]]
+pattern = "NVME_IO_SMOKE: PASS"
+files = [
+    "kernel/drvmod/examples/nvme.c",
+    "tools/targets-steps.mk",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "CONFIG_X86_64"
+files = [
+    "kernel/drvmod/examples/hda.c",
+    "kernel/drvmod/examples/nvme.c",
+]
+
+[[gate.assertion]]
+pattern = "drv_driver_register"
+files = ["kernel/drvmod/examples/pc_spkr.c"]
+
+[[gate.assertion]]
+pattern = "virtio_blk_driver_probe"
+files = ["kernel/drivers/block/virtio_blk.c"]
+
+[[gate.assertion]]
+pattern = "virtio_net_driver_probe"
+files = ["kernel/drivers/net/virtio_net.c"]
+
+[[gate.assertion]]
+pattern = "uart_driver_probe"
+files = ["kernel/drivers/char/uart.c"]
+
+[[gate.assertion]]
+pattern = "pty_init"
+files = ["kernel/drivers/char/pty.c"]
+
+[[gate.assertion]]
+pattern = "loop_init"
+files = ["kernel/drivers/block/loop.c"]
+
+[[gate.assertion]]
+pattern = "pci_enumerate"
+files = ["kernel/drivers/bus/pci_bus.c"]
+
+[[gate.assertion]]
+pattern = "virtio_mmio_enumerate"
+files = ["kernel/drivers/bus/virtio_mmio_bus.c"]
+
+[[gate.assertion]]
+pattern = "kernel/drivers/"
+files = ["docs/drivers/README.md"]
+
+[[gate.assertion]]
+pattern = "kernel/platform/"
+files = ["docs/drivers/README.md"]
+
+[[gate.assertion]]
+pattern = "DRIVER_LIFECYCLE_TEST"
+files = [
+    "kernel/drivers/core/driver_lifecycle_test.c",
+    "kernel/drivers/core/driver_lifecycle_test.h",
+    "kernel/main.c",
+]
+
+[[gate.assertion]]
+pattern = "driver_lifecycle_test_run"
+files = [
+    "kernel/main.c",
+    "kernel/fs/procfs/procfs.c",
+    "kernel/drivers/core/driver_lifecycle_test.c",
+]
+
+[[gate.assertion]]
+pattern = "duplicate driver registration"
+files = ["kernel/drivers/core/driver_lifecycle_test.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "virtio_gpu_init\\(\\)|virtio_input_init\\(\\)"
+files = ["kernel/main.c"]
+
+[[gate.assertion]]
+pattern = "\\[VINPUT\\] driver registered in core"
+files = ["kernel/drvmod/examples/vinput.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "virtio_(blk|net)_init\\(\\)"
+files = [
+    "kernel/main.c",
+    "kernel/net/socket.c",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "arch_virtio_(gpu|input)_probe"
+files = ["kernel"]
+
+[[gate.assertion]]
+pattern = "唯一枚举所有权"
+files = ["docs/drivers/guide/core-model.md"]
+
+[[gate.assertion]]
+negate = true
+glob = "*.md"
+pattern = "kernel/driver/|kernel/drv/|kernel/board/|#include \"driver/"
+files = ["docs/drivers"]
+
+[[gate]]
+name = "external-dependency-boundary"
+make_target = "check-external-dependency-boundary"
+[[gate.assertion]]
+fixed = true
+pattern = "include $(KERNEL_DIR)/external/lwip/sources.mk"
+files = ["Makefile"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_LWIP_SOURCE_MANIFEST"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "LWIP_SRC"
+files = ["kernel/external/lwip/sources.mk"]
+
+[[gate.assertion]]
+pattern = "core/timeouts.c"
+files = ["kernel/external/lwip/sources.mk"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_LWIP_CONFIG_CONTRACT"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "NO_SYS=1"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "g_lwip_lock"
+files = [
+    "docs/external-dependencies.md",
+    "kernel/net/lwip_stack.c",
+]
+
+[[gate.assertion]]
+pattern = "a20_lwip_poll\\(\\)"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "kernel_progress_poll\\(\\)"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_QEMU_NET_DEFAULTS"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "10\\.0\\.2\\.15"
+files = [
+    "docs/external-dependencies.md",
+    "kernel/net/lwip_stack.c",
+]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_USERLAND_UPGRADE_CHECKLIST"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "check-upgrade-userland-smokes.*smoke-abi-linux.*smoke-mlibc-mksh.*smoke-mlibc-sbase"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_STATIC_LINK_REBUILD_CONTRACT"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "user/build/<arch>\\[-nommu\\]/\\.build-id"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_TLSE_WGET_LIMITS"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+pattern = "TLS 1\\.3"
+files = ["docs/external-dependencies.md"]
+
+[[gate.assertion]]
+negate = true
+pattern = "^LWIP_SRC[[:space:]]*="
+files = ["Makefile"]
+
+# --- gates extracted verbatim from tools/targets-build.mk ---
+# These needed rg_flags: the lookaround patterns require --pcre2, and the
+# patterns that span lines require -U.
+
+[[gate]]
+name = "check-build-matrix"
+make_target = "check-build-matrix"
+[[gate.assertion]]
+pattern = "BUILD_MATRIX_GATE_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate]]
+name = "check-build-matrix-all"
+make_target = "check-build-matrix-all"
+[[gate.assertion]]
+pattern = "BUILD_MATRIX_GATE_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate]]
+name = "check-abi-smoke-gate"
+make_target = "check-abi-smoke-gate"
+[[gate.assertion]]
+pattern = "ABI_SMOKE_GATE_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+pattern = "syscall_smoke"
+files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "smoke-abi-linux"
+files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "native-minimal"
+files = ["tools/targets-native.mk"]
+
+[[gate.assertion]]
+pattern = "native-test"
+files = ["tools/targets-native.mk"]
+
+[[gate.assertion]]
+pattern = "test_liba20c"
+files = [
+    "user/tests/test_liba20c.c",
+    "tools/targets-native.mk",
+]
+
+[[gate]]
+name = "check-task-lifetime-boundary"
+make_target = "check-task-lifetime-boundary"
+[[gate.assertion]]
+pattern = "STEP35_TASK_LIFETIME_DIAGNOSTICS"
+files = ["kernel/include/proc/lifetime.h"]
+
+[[gate.assertion]]
+pattern = "proc_lifetime_note_task_init"
+files = ["kernel/proc/task.c"]
+
+[[gate.assertion]]
+pattern = "proc_lifetime_note_pid_add"
+files = ["kernel/proc/pid.c"]
+
+[[gate.assertion]]
+pattern = "proc_lifetime_note_wait_to_wake"
+files = ["kernel/core/sync.c"]
+
+[[gate.assertion]]
+pattern = "proc_lifetime_note_wake_remove"
+files = ["kernel/proc/park.c"]
+
+[[gate.assertion]]
+pattern = "proc_wait_timer_count_locked"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+pattern = "proc_current_lifetime_violations_locked"
+files = ["kernel/proc/current.c"]
+
+[[gate.assertion]]
+pattern = "PF_A20_TASK_LIFETIME"
+files = ["kernel/fs/procfs/procfs.c"]
+
+[[gate.assertion]]
+pattern = "TASK_LIFETIME_OWNERSHIP_AUDIT"
+files = ["docs/archive/task-lifetime-audit.md"]
+
+[[gate.assertion]]
+negate = true
+glob = "!kernel/external/**"
+rg_flags = ["--pcre2"]
+pattern = "\\bproc_find[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate]]
+name = "check-timeout-ownership-boundary"
+make_target = "check-timeout-ownership-boundary"
+[[gate.assertion]]
+pattern = "TIMEOUT_OWNERSHIP_AUDIT"
+files = ["docs/archive/timeout-ownership-audit.md"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct wait_timer[^{]*\\{[^}]*deadline[^}]*task[^}]*wait_seq"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+pattern = "PROC_PARK_PREPARE_TIMEOUT_CAPACITY"
+files = [
+    "kernel/include/proc/park.h",
+    "kernel/proc/park.c",
+    "kernel/proc/timer_heap.c",
+]
+
+[[gate.assertion]]
+pattern = "wait_timer_duplicate_rejections"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "proc_try_wake_locked_common\\([[:space:]]*t,[[:space:]]*expired\\[i\\]\\.seq"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+pattern = "timeout_heap_violations"
+files = [
+    "kernel/include/proc/lifetime.h",
+    "kernel/proc/lifetime.c",
+]
+
+[[gate.assertion]]
+fixed = true
+pattern = "timeout-capacity+1 PASS"
+files = ["user/cmds/stress/lifetime_stress.c"]
+
+[[gate.assertion]]
+pattern = "FUTEX_STRESS: stale-timeout-isolation PASS"
+files = ["user/cmds/stress/futex_stress.c"]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["-U", "--pcre2"]
+pattern = "wait_timer_count[\\s\\S]{0,500}PROC_READY"
+files = ["kernel/proc/sched.c"]
+
+[[gate]]
+name = "check-smp-runqueue-boundary"
+make_target = "check-smp-runqueue-boundary"
+[[gate.assertion]]
+pattern = "SMP_RUNQUEUE_PREEMPT_AUDIT"
+files = ["docs/archive/smp-runqueue-audit.md"]
+
+[[gate.assertion]]
+pattern = "SMP_RUNQUEUE_PREEMPT_PROTOCOL"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+pattern = "SMP_RUNQUEUE_MIGRATION_PROTOCOL"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+pattern = "need_resched"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "first = src_cpu < dst_cpu[\\s\\S]*RUNQ_LOCK_IRQ\\(first\\)[\\s\\S]*RUNQ_LOCK_IRQ\\(second\\)"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+pattern = "proc_sched_safe_point"
+files = ["kernel/core/trap.c"]
+
+[[gate.assertion]]
+pattern = "proc_sched_tick"
+files = [
+    "kernel/arch/riscv64/trap/irqchip.c",
+    "kernel/arch/loongarch64/trap/irqchip.c",
+]
+
+[[gate.assertion]]
+pattern = "proc_sched_handle_reschedule_ipi"
+files = [
+    "kernel/arch/riscv64/trap/irqchip.c",
+    "kernel/arch/loongarch64/platform/smp.c",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "proc_yield"
+files = [
+    "kernel/arch/riscv64/trap/irqchip.c",
+    "kernel/arch/loongarch64/platform/smp.c",
+    "kernel/arch/aarch64/trap/irqchip.c",
+    "kernel/arch/x86_64/trap/irqchip.c",
+]
+
+[[gate.assertion]]
+pattern = "scheduler_violations"
+files = [
+    "kernel/include/proc/lifetime.h",
+    "kernel/proc/lifetime.c",
+]
+
+[[gate.assertion]]
+pattern = "SCHED_STRESS: smp-runqueue PASS"
+files = ["user/cmds/stress/sched_stress.c"]
+
+[[gate]]
+name = "check-process-lock-split-boundary"
+make_target = "check-process-lock-split-boundary"
+[[gate.assertion]]
+pattern = "PROCESS_LOCK_SPLIT_AUDIT"
+files = ["docs/archive/process-lock-split-audit.md"]
+
+[[gate.assertion]]
+pattern = "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "task_t \\*next = proc_runq_pick_local\\(\\);[\\s\\S]{0,2048}uint64_t flags = spin_lock_irqsave\\(&proc_lock\\)"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["-U", "--pcre2"]
+pattern = "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\\s\\S])*spin_lock_irqsave\\(&proc_lock\\)"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "proc_runq_pick_locked"
+files = [
+    "kernel/proc",
+    "kernel/include/proc",
+]
+
+[[gate.assertion]]
+pattern = "runqueue_parallel_pick_peak"
+files = [
+    "kernel/include/proc/lifetime.h",
+    "kernel/proc/lifetime.c",
+]
+
+[[gate.assertion]]
+pattern = "SCHED_STRESS: lock-split PASS"
+files = ["user/cmds/stress/sched_stress.c"]
+
+[[gate]]
+name = "check-doc-test-gates"
+make_target = "check-doc-test-gates"
+[[gate.assertion]]
+pattern = "DOCS_AS_FACT_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+pattern = "TEST_FIRST_ARCHITECTURE_MATRIX"
+files = ["docs/testing-gates.md"]
+
+[[gate]]
+name = "check-final-definition"
+make_target = "check-final-definition"
+[[gate.assertion]]
+pattern = "MM_LOCK_MODEL"
+files = ["kernel/include/mm/vm.h"]
+
+[[gate.assertion]]
+pattern = "TASK_STATE_MUTATION_CONTRACT"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+pattern = "TASK_REFERENCE_LIFETIME"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+pattern = "VFS_REFCOUNT_HELPER_CONTRACT"
+files = ["kernel/include/fs/vfs.h"]
+
+[[gate.assertion]]
+pattern = "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX"
+files = ["kernel/include/ipc/handle_table.h"]
+
+[[gate.assertion]]
+pattern = "KERNEL_PROGRESS_SERVICE_CONTRACT"
+files = ["kernel/include/core/progress.h"]
+
+[[gate.assertion]]
+pattern = "VFS_OPEN_DISPATCH_CONTRACT"
+files = ["kernel/include/fs/vfs.h"]
+
+[[gate.assertion]]
+pattern = "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT"
+files = ["kernel/abi/linux/syscall_table.def"]
+
+[[gate.assertion]]
+pattern = "NATIVE_DEBUG_LIMITED_CONTRACT"
+files = ["kernel/abi/native/sys_phase2.c"]
+
+[[gate.assertion]]
+pattern = "DRIVER_CORE_CONCURRENCY_MODEL"
+files = ["kernel/drivers/core/driver_core.c"]
+
+[[gate.assertion]]
+pattern = "EXTERNAL_USERLAND_UPGRADE_CHECKLIST"
+files = ["docs/external-dependencies.md"]
+
+[[gate]]
+name = "check-concurrency-foundation"
+make_target = "check-concurrency-foundation"
+[[gate.assertion]]
+pattern = "SCHEDULER_CONCURRENCY_PREREQS"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+pattern = "SCHEDULER_CPU_OWNERSHIP"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+pattern = "PER_CPU_CURRENT_VALIDATION"
+files = ["kernel/proc/current.c"]
+
+[[gate.assertion]]
+pattern = "TASK_STATE_MUTATION_CONTRACT"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+pattern = "A20_PARK_WAKE_PROTOCOL"
+files = ["kernel/include/proc/park.h"]
+
+[[gate.assertion]]
+pattern = "WAIT_QUEUE_PARK_PROTOCOL"
+files = ["kernel/include/core/sync.h"]
+
+[[gate]]
+name = "check-mm-lock-model"
+make_target = "check-mm-lock-model"
+[[gate.assertion]]
+pattern = "MM_LOCK_MODEL"
+files = ["kernel/include/mm/vm.h"]
+
+[[gate.assertion]]
+pattern = "MM_VMA_PTE_AUDIT"
+files = ["kernel/mm/vm.c"]
+
+[[gate.assertion]]
+pattern = "COW_FAULT_TLB_CONTRACT"
+files = ["kernel/mm/fault.c"]
+
+[[gate.assertion]]
+pattern = "DEMAND_FAULT_TLB_CONTRACT"
+files = ["kernel/mm/fault.c"]
+
+[[gate.assertion]]
+pattern = "MM_FORK_COW_REGRESSION_GUARD"
+files = ["kernel/mm/vm.c"]
+
+[[gate.assertion]]
+pattern = "MM_FORK_DEFERRED_STATE_REGRESSION_GUARD"
+files = ["kernel/mm/vm.c"]
+
+[[gate.assertion]]
+pattern = "child->deferred_vma = NULL;"
+files = ["kernel/mm/vm.c"]
+
+[[gate.assertion]]
+pattern = "MM_VMA_FORK_EXEC: PASS"
+files = ["user/cmds/stress/mm_stress.c"]
+
+[[gate.assertion]]
+pattern = "FILE_MMAP_PAGE_CACHE_CONTRACT"
+files = ["kernel/include/fs/page_cache.h"]
+
+[[gate.assertion]]
+pattern = "OOM_RECLAIM_LIFETIME_CONTRACT"
+files = ["kernel/include/mm/oom.h"]
+
+[[gate.assertion]]
+pattern = "MM_STRESS: PASS"
+files = ["user/cmds/stress/mm_stress.c"]
+
+[[gate]]
+name = "check-io-progress-model"
+make_target = "check-io-progress-model"
+[[gate.assertion]]
+pattern = "KERNEL_PROGRESS_SERVICE_CONTRACT"
+files = ["kernel/include/core/progress.h"]
+
+[[gate.assertion]]
+pattern = "IO_PROGRESS_SERVICE"
+files = ["kernel/core/progress.c"]
+
+[[gate.assertion]]
+pattern = "kernel_progress_run_bottom_halves\\(\\)"
+files = [
+    "kernel/proc/sched.c",
+    "kernel/proc/proc.c",
+]
+
+[[gate.assertion]]
+pattern = "kernel_progress_timer_tick\\(\\)"
+files = [
+    "kernel/arch/riscv64/trap/irqchip.c",
+    "kernel/arch/loongarch64/trap/irqchip.c",
+    "kernel/arch/aarch64/trap/irqchip.c",
+    "kernel/arch/x86_64/trap/irqchip.c",
+]
+
+[[gate.assertion]]
+pattern = "VIRTIO_BLK_COMPLETION_MODEL"
+files = ["kernel/drivers/block/virtio_blk.c"]
+
+[[gate.assertion]]
+pattern = "LWIP_NO_THREAD_PROGRESS_CONTRACT"
+files = ["kernel/net/lwip_stack.c"]
+
+[[gate.assertion]]
+pattern = "g_lwip_lock -> virtio-net nonblocking"
+files = ["kernel/include/core/lock.h"]
+
+[[gate.assertion]]
+negate = true
+pattern = "virtio_blk_poll_all"
+files = [
+    "kernel/proc/sched.c",
+    "kernel/proc/proc.c",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "a20_lwip_poll"
+files = [
+    "kernel/proc/sched.c",
+    "kernel/proc/proc.c",
+]
+
