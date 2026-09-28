@@ -2875,3 +2875,83 @@ early-return），属于设计取舍，需要在定位到第 5 步的真正缺�
 **riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
 `smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
 状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.45 mprotect 被证伪，并**推翻 §10.39「三向分叉」的框架本身**
+
+不再猜，改做两件事：(a) 在 mprotect 内加守卫，(b) 回头核对 §10.39 的读数是怎么来的。
+
+#### (a) 守卫：mprotect 从未把「已映射只读页」留在「可写 VMA」之下
+
+在 mprotect 的逐页循环之后、`v->pte_flags` 改写之前插入：
+
+```c
+if (ptef & PTE_W) {
+    for (q = v->start; q < v->end; q += PAGE_SIZE) {
+        pte_t *l = pt_lookup_leaf(mm->pgdir, q, NULL, NULL, NULL);
+        if (l && (*l & PTE_V) && !(*l & PTE_W)) { kerr("[MM-MP] ..."); break; }
+    }
+}
+```
+
+即「mprotect 每次把某个 VMA 变可写时，把该 VMA 的**每一个**页都扫一遍，若存在
+**已映射且只读**的页就报出来」。
+
+**结果：`[MM-MP]` 命中 0 次，而崩溃照旧发生**（`fatal=1`）。
+
+结合 §10.41（全部显式 `vma->pte_flags` 写入点排除）与 §10.42（拆分/合并排除），
+**VMA 权限一侧至此被穷尽排除**。
+
+#### (b) §10.39 的「状态与 PTE 自洽」是**同义反复**，不是证据 —— 这是本节最重要的修正
+
+§10.39 一直把现场读数当作「三向分叉」：
+`PTE 只读` / `per-PTE 状态只读` / `VMA 可写`，并据此推出「PTE 与状态一致、只有 VMA 不同」。
+
+**但 `mm_pt_query()` 在返回前会用 PTE 覆写状态里的权限位**（`kernel/mm/pt.c:1095-1099`）：
+
+```c
+uint8_t byte = mm_pt_peek(table, 0, idx);
+if (MM_ST_GET_CLASS(byte) == MM_ST_INVALID)
+    byte = MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+byte = (uint8_t)((byte & (uint8_t)~MM_ST_PROT_MASK) | mm_pt_prot_bits(pte));
+```
+
+注意最后一行：**`prot` 是从 `pte` 算出来覆盖进去的**。所以查询输出的「状态权限」在
+定义上就等于 PTE 的权限，**它永远不可能与 PTE 不一致**。
+
+于是 §10.39 的「PTE 与 per-PTE 状态自洽」根本不是一条独立证据，而是**恒真**；
+「三向分叉」这个框架从一开始就是伪的。真正存在的分叉只有一个，而且更朴素：
+
+> **该页的 PTE 是只读，而覆盖它的 VMA 是可写。**
+
+这也让 §10.41～§10.44 一连串推理的前提失效：既然没有「状态与 PTE 各自独立地一致」这回事，
+那么「状态被冻结」「provision 三处自洽」这些结论虽然各自成立，却都与本崩溃**无关**——
+它们描述的是一条根本没被触发的路径。（结论本身不错，但答的不是这个问题。）
+
+#### 由此得到的、唯一还站得住的机制
+
+mprotect 不会造成这种分叉（守卫 0 命中），VMA 侧其它写入点也全被排除。那么
+**只读的 PTE 必定早于那个可写的 VMA 存在**——即这一页的 PTE 是**更早一次映射留下的残留**，
+而后来有一个 VMA 被**建到了这个地址之上**，继承了可写权限。
+
+§10.43 的邻域观测与这个机制高度吻合：33 页的 VMA 里**只有出错那一页**已映射，
+其余 32 页 `pte=0`。若 VMA 与 PTE 是同一次建立的，不该只孤零零剩一页；
+而「一段先前映射的残留 PTE 恰好落在新 VMA 内部」正好给出这种稀疏分布。
+
+**所以排查方向要整个换掉：不再是「谁把 VMA 弄宽了」，而是「哪条路径在建立新 VMA 时，
+底下还压着一张旧的、只读的 PTE」。** 具体要查两件事：
+
+1. **VMA 拆除是否把该范围内所有 PTE 都反映射了**——`mm_pt_note_absent()` 只在
+   `kernel/mm/pt.c:819/830/836` 三处被调用，需核对 munmap/brk-收缩/`vma_release`
+   是否都走到了、以及是否有「只清 VMA 不清 PTE」或「只清一部分」的分支
+   （尤其 `mm_pt_note_absent()` 里 `if (cls != MM_ST_INVALID && m->nr_present)` 这个
+   有条件 early-return）。
+2. **VMA 新建是否会覆盖到仍存在的 PTE**——`mm_pt_provision_anon()` 在
+   `if (r > 0)`（被更大的 leaf 覆盖）时是 `continue` 跳过而不做任何处理；需确认
+   brk 扩张（`munmap.c:262-280`）与 ELF 段加载在目标地址上已有 PTE 时的行为。
+
+**本节诊断为临时插桩，已在记录后移除**（`kernel/mm/mprotect.c` 执行 `git checkout`），
+不留调试打印在 mprotect 热路径上。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
