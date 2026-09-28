@@ -95,7 +95,7 @@ void psi_render_cpu(char *buf, size_t bufsz)
                    g_psi_cpu_some_avg300, g_psi_cpu_some_total);
 }
 
-void psi_render_memio(char *buf, size_t bufsz)
+void psi_render_mem(char *buf, size_t bufsz)
 {
     /* Structurally zero, not unimplemented.  PSI "io" counts tasks stalled on
      * I/O, but every A20OS device transfer is synchronous (block_cache calls
@@ -105,4 +105,9 @@ void psi_render_memio(char *buf, size_t bufsz)
      * Revisit both if device I/O ever becomes asynchronous. */
     snprintf(buf, bufsz,
              "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+}
+
+void psi_render_io(char *buf, size_t bufsz)
+{
+    psi_render_mem(buf, bufsz);
 }

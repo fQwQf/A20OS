@@ -1062,35 +1062,25 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", MAX_FILES);
         break;
     case PF_PRESSURE:
-        /* Single flat file, not Linux's cpu|memory|io subdirectory layout.
-         * CPU PSI is measured from scheduler contention; the mem and io
-         * lines are structurally zero because all A20OS device I/O is
-         * synchronous (see kernel/core/psi.c for the full argument). */
-        if (bufsz < 128) return 0;
-        {
-            char tmp[64];
-            psi_render_cpu(tmp, sizeof(tmp));
-            size_t off = 0;
-            size_t n = strlen(tmp);
-            if (n < bufsz - 1) {
-                memcpy(buf, tmp, n);
-                off = n;
-            }
-            psi_render_memio(tmp, sizeof(tmp));
-            n = strlen(tmp);
-            if (off + n < bufsz - 1) {
-                memcpy(buf + off, tmp, n);
-                off += n;
-            }
-            psi_render_memio(tmp, sizeof(tmp));
-            n = strlen(tmp);
-            if (off + n < bufsz - 1) {
-                memcpy(buf + off, tmp, n);
-                off += n;
-            }
-            buf[off] = '\0';
+    case PF_PRESSURE_CPU:
+    case PF_PRESSURE_MEM:
+    case PF_PRESSURE_IO: {
+        /* Linux exposes /proc/pressure as a directory of cpu|memory|io
+         * files; systemd and pressure-stall tooling read those paths, so a
+         * single flat file is not substitutable.  The parent carries the
+         * cpu line so a whole-tree cat still shows something useful. */
+        if (bufsz < 64)
+            return 0;
+        char tmp[64];
+        switch (type) {
+        case PF_PRESSURE_MEM: psi_render_mem(tmp, sizeof(tmp)); break;
+        case PF_PRESSURE_IO:  psi_render_io(tmp, sizeof(tmp)); break;
+        default:              psi_render_cpu(tmp, sizeof(tmp)); break;
         }
-        break;
+        int n = snprintf(buf, bufsz, "%s", tmp);
+        return n < 0 ? 0 : n;
+    }
+
     case PF_UID_MAP:
     case PF_GID_MAP: {
         /* User namespace mapping: the single root namespace identity maps
