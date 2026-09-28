@@ -334,3 +334,50 @@ smoke-lwip-memp:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# SMP cross-core lock contention smoke
+# ================================================================
+# net_stress_test puts WORKERS concurrent TCP transfers through the stack, and
+# this gate runs it on a real NR_CPUS=4 build so cross-core spinlock contention
+# is actually observable.
+#
+# Why the explicit NR_CPUS: Makefile defaults NR_CPUS ?= 1, so every default
+# dev/smoke gate is single-core.  Passing -smp to QEMU does not help, because
+# the kernel only brings up NR_CPUS CPUs -- and one CPU can never contend a
+# spinlock.  That is how "lwip: 0 0" reads like a healthy result when nothing
+# was measured at all.
+#
+# What this gate deliberately does NOT assert: any contention number.  Acquire
+# and spin counts depend on scheduling and are not reproducible run to run, so
+# a threshold here would be a flaky gate and would invite tuning toward a
+# magic number.  It asserts the deterministic parts only -- the stress test
+# transfers correctly, and the counters render.
+smoke-smp-lock-contention: NET_HOSTFWD=
+smoke-smp-lock-contention:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/smp-lock-contention-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
+	   grep -qE '^lwip: [0-9]+ [0-9]+$$' "$$log" && \
+	   grep -qE '^proc: [0-9]+ [0-9]+$$' "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render); log saved to $$log"; \
+		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
+	else \
+		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
