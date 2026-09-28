@@ -1017,10 +1017,17 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
         driver_lo |= (1U << VIRTIO_GPU_F_VIRGL);
     if (features_lo & (1U << VIRTIO_GPU_F_EDID))
         driver_lo |= (1U << VIRTIO_GPU_F_EDID);
+    /* CONTEXT_INIT has to be *negotiated*, not merely observed.  The host only
+     * honours the context_init field of CTX_CREATE when the bit is in the
+     * driver's feature set, so reading it from the device's bits and leaving it
+     * out of ours made GETPARAM report CONTEXT_INIT=1 while every context was
+     * created the legacy way. */
+    if (features_lo & (1U << VIRTIO_GPU_F_CONTEXT_INIT))
+        driver_lo |= (1U << VIRTIO_GPU_F_CONTEXT_INIT);
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_lo);
-    inst->virgl = (features_lo & (1U << VIRTIO_GPU_F_VIRGL)) != 0;
-    inst->context_init = (features_lo & (1U << VIRTIO_GPU_F_CONTEXT_INIT)) != 0;
-    inst->has_edid = (features_lo & (1U << VIRTIO_GPU_F_EDID)) != 0;
+    inst->virgl = (driver_lo & (1U << VIRTIO_GPU_F_VIRGL)) != 0;
+    inst->context_init = (driver_lo & (1U << VIRTIO_GPU_F_CONTEXT_INIT)) != 0;
+    inst->has_edid = (driver_lo & (1U << VIRTIO_GPU_F_EDID)) != 0;
     
     vt->write32(vt, VIRTIO_MMIO_DEVICE_FEATURES_SEL, 1);
     uint32_t features_hi = vt->read32(vt, VIRTIO_MMIO_DEVICE_FEATURES);
@@ -1085,9 +1092,34 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
         }
     }
 
+    /* Ask the host for scanout 0's real geometry.  VIRTIO_GPU_CMD_GET_DISPLAY_INFO
+     * was defined here from the start but never sent, so the mode the guest
+     * advertises to the compositor was a hardcoded 1024x768 that had nothing to
+     * do with the window QEMU was actually showing.  A host that reports zero
+     * (headless, or a window smaller than the fallback) leaves the fallback in
+     * place rather than producing a zero-sized mode. */
     inst->width = 1024;
     inst->height = 768;
     inst->bpp = 32;
+    {
+        struct virtio_gpu_resp_display_info *resp =
+            kmalloc(sizeof(*resp));
+        if (resp) {
+            struct virtio_gpu_get_display_info req;
+            memset(&req, 0, sizeof(req));
+            req.hdr.type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+            req.scanout = 0;
+            memset(resp, 0, sizeof(*resp));
+            if (virtio_gpu_send_cmd(inst, &req, sizeof(req),
+                                    resp, sizeof(*resp)) == 0 &&
+                resp->hdr.type == VIRTIO_GPU_RESP_OK_DISPLAY_INFO &&
+                resp->width > 0 && resp->height > 0) {
+                inst->width = resp->width;
+                inst->height = resp->height;
+            }
+            kfree(resp);
+        }
+    }
     inst->fb_size = inst->width * inst->height * (inst->bpp / 8);
     
     // Allocate framebuffer as continuous physical memory
