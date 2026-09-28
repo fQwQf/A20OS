@@ -17,7 +17,7 @@ extern int g_sched_base_slice_ms;
  * public VFS API and must not be referenced outside kernel/fs/.
  */
 
-// procfs 文件类型枚举
+// procfs file type enumeration
 typedef enum {
     PF_ROOT,
     PF_MEMINFO,

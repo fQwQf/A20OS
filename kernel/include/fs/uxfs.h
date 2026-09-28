@@ -1,9 +1,9 @@
 /*
- * uxfs.h — 用户态文件系统代理（uxfs）的内核侧接口。
+ * uxfs.h -- kernel-side interface to the user-space filesystem proxy (uxfs).
  *
- * 设计与边界见 docs/hybrid-kernel/06-user-fs.md。ABI 层的 fs_serve /
- * fs_block_io syscall（kernel/abi/native/sys_native_fs.c）经此接口完成
- * 挂载注册与受控块 IO。
+ * Design and boundaries: docs/hybrid-kernel/06-user-fs.md.  The ABI-layer
+ * fs_serve / fs_block_io syscalls (kernel/abi/native/sys_native_fs.c) use this
+ * interface to perform mount registration and controlled block IO.
  */
 #ifndef FS_UXFS_H
 #define FS_UXFS_H
@@ -15,34 +15,43 @@ struct task_t;
 struct vnode;
 
 /*
- * uxfs_serve_mount — 把 @ep 指向的用户态文件服务挂载到 @path。
+ * uxfs_serve_mount -- mount the user-space file service at @ep onto @path.
  *
- * @path          挂载点（必须已存在且为目录）
- * @ep            服务端 channel 端点；成功后引用所有权移交 uxfs
- * @server        发起注册的服务任务（block IO 所有权校验用）
- * @block_index   服务可访问的块设备 class 序号；<0 表示无块后端
- * @serve_flags   bit0：服务端声明只读后端（如 iso9660）；置位时挂载
- *                标记 VFS_MOUNT_RDONLY，页缓存缓冲写据此禁用
+ * @path          mount point (must already exist and be a directory)
+ * @ep            server-side channel endpoint; on success ownership of the
+ *                reference transfers to uxfs
+ * @server        service task that requested the registration (used to
+ *                validate block-IO ownership)
+ * @block_index   class index of the block device the service may access;
+ *                <0 means there is no block backing
+ * @serve_flags   bit0: the server declares a read-only backing (e.g. iso9660);
+ *                when set the mount is marked VFS_MOUNT_RDONLY and page-cache
+ *                buffered writes are disabled accordingly
  *
- * 返回 0 或负 errno。挂载前会先做 UFS_OP_INIT 握手，服务不可用时报
+ * Returns 0 or a negative errno.  A UFS_OP_INIT handshake is performed before
+ * the mount; if the service is unavailable the error is
  * -EIO/-ETIMEDOUT。
  */
 int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
                      struct task_t *server, int block_index,
                      uint32_t serve_flags);
 
-/* umount 收尾：释放服务端点引用（由 vfs_umount 的 FS_TYPE 分支调用）。 */
+/* umount teardown: release the server endpoint reference (called from the
+ * FS_TYPE branch of vfs_umount). */
 void uxfs_unmount(struct vnode *root);
 
 /*
- * uxfs_block_io — 受控块 IO：仅当 @task 是当前 uxfs 服务任务时允许，
- * 避免任意进程绕过文件系统直接读写服务盘。@write 为 0 读 1 写。
- * @buf 指向内核缓冲，@lba/@count 以扇区为单位。
+ * uxfs_block_io -- controlled block IO: permitted only when @task is the
+ * uxfs service task currently registered for the mount, so that an arbitrary
+ * process cannot bypass the filesystem and read or write the service's disk
+ * directly.  @write is 0 for read and 1 for write.  @buf points at a kernel
+ * buffer; @lba and @count are in sectors.
  */
 int uxfs_block_io(struct task_t *task, int block_index, int write, uint64_t lba,
                   void *buf, uint32_t count);
 
-/* 容量查询（扇区数）：同受控语义；服务进程用于初始化块设备描述符。 */
+/* Capacity query (in sectors): subject to the same ownership check.  The
+ * service process uses it to initialise its block device descriptor. */
 int uxfs_block_capacity(struct task_t *task, int block_index,
                         uint64_t *out_sectors);
 

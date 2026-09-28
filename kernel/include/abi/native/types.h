@@ -271,7 +271,7 @@ typedef struct a20_spawn_handle {
 
 typedef struct a20_task_spawn_args {
     uint32_t       size;
-    uint32_t       version;        /* 1 = 基础布局；2 = 追加 stdio 字段 */
+    uint32_t       version;        /* 1 = base layout; 2 = adds the stdio fields */
     a20_handle_t   image;
     a20_handle_t   root_dir;
     a20_handle_t   cwd_dir;
@@ -284,32 +284,39 @@ typedef struct a20_task_spawn_args {
     uint32_t       handle_count;
     uint32_t       flags;
     a20_handle_t   out_task;
-    /* ---- version 2 追加（子进程 start_info 的标准 I/O handle） ---- */
-    a20_handle_t   stdin_handle;   /* A20_HANDLE_NULL 表示不继承 */
+    /* ---- appended in version 2: the standard I/O handles for the child's
+     * start_info ---- */
+    a20_handle_t   stdin_handle;   /* A20_HANDLE_NULL means do not inherit */
     a20_handle_t   stdout_handle;
     a20_handle_t   stderr_handle;
     uint32_t       reserved;
 } a20_task_spawn_args_t;
 
-/* v1 结构体大小（含尾部对齐填充）：即 v2 中 stdin_handle 之前的布局。 */
+/* Size of the v1 struct including trailing alignment padding, i.e. the layout
+ * this struct had up to stdin_handle in v2. */
 #define A20_TASK_SPAWN_ARGS_V1_SIZE  72
 
 /* ---- Capability-safe clone (task_clone) ----
  *
- * A20OS 没有 fork。task_clone 是能力安全的"子进程续体"原语：
- *  - 寄存器续体：子进程从调用点继续（a0 == 0 区分父子），内存按 COW 复制
- *    （这是"自我状态"的复制，不构成能力授予）。
- *  - 能力清单：子进程的 handle 表完全由 handles[] 逐项声明构建（与 task_spawn
- *    同一纪律：权限 ⊆ 父进程、可降级、无隐式继承）。子进程拿不到清单之外的
- *    任何 handle——这是与 fork（隐式复制全部能力）的根本区别。
- *  - 返回：父进程得到子进程 pid；子进程 a0 == 0。 */
-#define A20_CLONE_COW_VM   (1u << 0)   /* 子进程 COW 复制地址空间（默认） */
-#define A20_CLONE_STACK    (1u << 1)   /* 使用 stack 字段覆盖子进程 SP */
+ * A20OS has no fork.  task_clone is the capability-safe "child continuation"
+ * primitive:
+ *  - Register continuation: the child resumes at the call site (a0 == 0 tells
+ *    parent from child) and memory is copied COW.  This copies the thread's own
+ *    state; it grants no capability.
+ *  - Capability manifest: the child's handle table is built strictly from the
+ *    per-entry declarations in handles[], under the same discipline as
+ *    task_spawn: permissions are a subset of the parent's, may be reduced, and
+ *    nothing is inherited implicitly.  The child cannot obtain any handle
+ *    outside the manifest -- this is the fundamental difference from fork,
+ *    which implicitly duplicates every capability.
+ *  - Returns: the parent gets the child's pid; the child sees a0 == 0. */
+#define A20_CLONE_COW_VM   (1u << 0)   /* child gets a COW copy of the address space (default) */
+#define A20_CLONE_STACK    (1u << 1)   /* override the child's SP with the stack field */
 
 typedef struct a20_clone_handle {
-    a20_handle_t parent_handle;   /* in: 父进程持有的 handle */
-    a20_rights_t  child_rights;   /* in: 0 = 继承父进程权限，否则 ⊆ 父进程权限 */
-    a20_handle_t  child_handle;   /* out: 安装到子进程 handle 表的值 */
+    a20_handle_t parent_handle;   /* in: handle held by the parent */
+    a20_rights_t  child_rights;   /* in: 0 = inherit the parent's rights, else a subset of them */
+    a20_handle_t  child_handle;   /* out: value installed into the child's handle table */
 } a20_clone_handle_t;
 
 typedef struct a20_clone_args {
@@ -317,16 +324,16 @@ typedef struct a20_clone_args {
     uint32_t       version;        /* 1 */
     uint32_t       flags;
     uint32_t       reserved;
-    uint64_t       handles;        /* 用户指针：a20_clone_handle_t[] */
+    uint64_t       handles;        /* user pointer: a20_clone_handle_t[] */
     uint32_t       handle_count;
     uint32_t       reserved1;
-    a20_handle_t   root_dir;       /* 父进程的 root 目录 handle（写入子进程） */
-    a20_handle_t   cwd_dir;        /* 父进程的 cwd 目录 handle（写入子进程） */
-    uint64_t       stack;          /* A20_CLONE_STACK 时作为子进程 SP */
-    a20_handle_t   out_task;       /* out: 父进程收到的子任务 handle */
-    a20_handle_t   out_root;       /* out: 子进程 root 句柄（写回子进程内存） */
-    a20_handle_t   out_cwd;        /* out: 子进程 cwd 句柄 */
-    a20_handle_t   out_self;       /* out: 子进程 self task 句柄 */
+    a20_handle_t   root_dir;       /* parent's root directory handle (written into the child) */
+    a20_handle_t   cwd_dir;        /* parent's cwd directory handle (written into the child) */
+    uint64_t       stack;          /* used as the child's SP when A20_CLONE_STACK is set */
+    a20_handle_t   out_task;       /* out: child task handle returned to the parent */
+    a20_handle_t   out_root;       /* out: child's root handle (written back into child memory) */
+    a20_handle_t   out_cwd;        /* out: child's cwd handle */
+    a20_handle_t   out_self;       /* out: child's own task handle */
 } a20_clone_args_t;
 
 typedef struct a20_task_status {
@@ -621,26 +628,28 @@ typedef struct a20_fs_mount_args {
     uint32_t       flags;
 } a20_fs_mount_args_t;
 
-/* fs_serve：把调用方的一个 channel 端点注册为挂载点的用户态文件服务
- * （docs/hybrid-kernel/06-user-fs.md）。block_index < 0 表示无块后端。 */
+/* fs_serve: registers one of the caller's channel endpoints as the user-space
+ * file service for a mount point (docs/hybrid-kernel/06-user-fs.md).
+ * block_index < 0 means there is no block backing. */
 typedef struct a20_fs_serve_args {
     uint32_t       size;
     uint32_t       version;
     a20_handle_t   server_channel;  /* A20_OBJ_CHANNEL_ENDPOINT, R|W */
-    int32_t        block_index;     /* DEV_CLASS_BLOCK 序号 */
+    int32_t        block_index;     /* DEV_CLASS_BLOCK index */
     uint64_t       target;
     uint32_t       target_len;
     uint32_t       flags;
 } a20_fs_serve_args_t;
 
-/* fs_block_io：uxfs 服务任务的受控块 IO（扇区粒度，同步直通块层）。 */
+/* fs_block_io: controlled block IO for a uxfs service task, at sector
+ * granularity, passed straight through to the block layer synchronously. */
 typedef struct a20_fs_block_io_args {
     uint32_t       size;
     uint32_t       version;
     int32_t        block_index;
     uint32_t       write;           /* 0 = read, 1 = write */
     uint64_t       lba;
-    uint32_t       count;           /* 扇区数 */
+    uint32_t       count;           /* sector count */
     uint32_t       _pad;
     uint64_t       buf;
 } a20_fs_block_io_args_t;
@@ -952,39 +961,41 @@ typedef struct a20_ext_point_info {
 
 /* ---- Sync structures ---- */
 
-/* handle_poll：非阻塞就绪查询（对应 POSIX poll() 的查询语义，永不睡眠）。
- * 阻塞等待仍由 event_queue 承担；handle_poll 只回答"此刻是否就绪"。 */
+/* handle_poll: non-blocking readiness query, with the query semantics of POSIX
+ * poll() -- it never sleeps.  Blocking waits remain the job of event_queue;
+ * handle_poll only answers "is this ready right now". */
 
 typedef struct a20_handle_poll_args {
     uint32_t       size;
     uint32_t       version;
     a20_handle_t   handle;
-    uint32_t       flags;         /* 保留，必须为 0 */
-    uint64_t       event_mask;    /* 输入：关注的事件位图（1ull << A20_EVENT_*） */
-    uint64_t       out_events;    /* 输出：当前活跃的事件位图 */
+    uint32_t       flags;         /* reserved, must be 0 */
+    uint64_t       event_mask;    /* in: event bitmap of interest (1ull << A20_EVENT_*) */
+    uint64_t       out_events;    /* out: bitmap of currently active events */
 } a20_handle_poll_args_t;
 
-/* futex 是用户地址上的同步原语，不是内核对象，因此不分配 handle。
- * 语义与 Zircon zx_futex_wait/zx_futex_wake 对齐：
- * 原子地比较 *addr == expected，相等则睡眠，否则立即返回 A20_ERR_WOULD_BLOCK。 */
+/* A futex is a synchronisation primitive on a user address, not a kernel
+ * object, so it is not allocated a handle.  Its semantics match Zircon's
+ * zx_futex_wait / zx_futex_wake: atomically compare *addr against expected,
+ * sleeping on equality and otherwise returning A20_ERR_WOULD_BLOCK at once. */
 
 
 typedef struct a20_futex_wait_args {
     uint32_t       size;
     uint32_t       version;
-    uint64_t       addr;          /* 用户态 32 位 futex 字地址，必须 4 字节对齐 */
-    uint32_t       expected;      /* 期望值 */
-    uint32_t       flags;         /* 保留，必须为 0 */
-    uint64_t       timeout_ns;    /* 相对超时（纳秒），A20_TIMEOUT_INFINITE 表示无限 */
+    uint64_t       addr;          /* user-space 32-bit futex word address, must be 4-byte aligned */
+    uint32_t       expected;      /* expected value */
+    uint32_t       flags;         /* reserved, must be 0 */
+    uint64_t       timeout_ns;    /* relative timeout in ns; A20_TIMEOUT_INFINITE means forever */
 } a20_futex_wait_args_t;
 
 typedef struct a20_futex_wake_args {
     uint32_t       size;
     uint32_t       version;
-    uint64_t       addr;          /* 用户态 32 位 futex 字地址 */
-    uint32_t       count;         /* 最多唤醒的等待者数量，必须 >= 1 */
-    uint32_t       flags;         /* 保留，必须为 0 */
-    uint32_t       out_woken;     /* 输出：实际唤醒数量 */
+    uint64_t       addr;          /* user-space 32-bit futex word address */
+    uint32_t       count;         /* maximum number of waiters to wake, must be >= 1 */
+    uint32_t       flags;         /* reserved, must be 0 */
+    uint32_t       out_woken;     /* out: number actually woken */
     uint32_t       reserved;
 } a20_futex_wake_args_t;
 

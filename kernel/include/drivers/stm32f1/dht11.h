@@ -5,7 +5,7 @@
  * one-wire timing, so under CONFIG_STM32_QEMU these are safe no-ops that
  * report "no reading" — the app then falls back to synthetic input. On the
  * real board the bit-bang timing may need a small calibration (see dht11.c).
- * Reference: docs/pz/3-DHT11温湿度实验.
+ * Reference: docs/pz/3-DHT11 temperature/humidity experiment.
  */
 #ifndef _STM32F103_DHT11_H
 #define _STM32F103_DHT11_H
