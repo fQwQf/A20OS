@@ -371,10 +371,10 @@ desktop GL context，于是 `virgl_renderer_get_capset()` 失败并回
 两条路：**从源码编译 virglrenderer**，或者**换宿主/发行版**。这是环境动作，
 需要 root，不应由自动化代理擅自改动宿主机。
 
-### 5.1 解锁工具：`tools/build-virglrenderer.sh`（**尚未运行**）
+### 5.1 解锁工具：`tools/build-virglrenderer.sh`（**已运行，renderer 已升级**）
 
-新加的脚本把 virglrenderer **≥ 0.11** 装到 `tools/virgl/install`，Makefile 在
-该前缀存在时自动通过 `LD_LIBRARY_PATH` 拾取（`QEMU_LIBPATH`）。用法：
+脚本把 virglrenderer 装到 `tools/virgl/install`，Makefile 在该前缀存在时自动通过
+`LD_LIBRARY_PATH` 拾取（`QEMU_LIBPATH`）。用法：
 
 ```bash
 tools/build-virglrenderer.sh check    # 报告宿主 QEMU、两版 renderer、/dev/dri/renderD128 可访问性
@@ -382,21 +382,47 @@ tools/build-virglrenderer.sh build    # 需要 root
 tools/build-virglrenderer.sh env      # 打印要用的 LD_LIBRARY_PATH
 ```
 
-**它需要 root，以及四个当前缺失的 apt 包（`libgbm-dev`、`libdrm-dev`、
-`libudev-dev`、`python3-mako`）。因此本文件写作时它一次都没跑过。**
-任何"宿主 renderer 已升级"或"stock Mesa 已能 attach"的说法目前都是**假的**。
+**已运行（`fca72f5f`）。宿主 renderer 已从发行版的 1.1.0-2（2020）换成自建的
+1.3.0。** 实测：
 
-**唯一可证伪的判据是 guest 日志里的 capset 体积**：数 KB = 生效了；
-308 = 还在加载旧库。`check` 子命令还会报告 `/dev/dri/renderD128` 是否真的
-可访问——**一个存在但不可读的节点会产生看起来像驱动 bug 的 QEMU 失败**。
+- 产出 `libvirglrenderer.so.1.11.0` + `virgl_test_server` 于 `tools/virgl/install`；
+- 用 `LD_DEBUG=libs` 确认 **QEMU 解析到的是这份新库**，而不是系统那份 1.1.0；
+- QEMU 确实带 virgl（`virtio-gpu-gl-device` 暴露 `blob` / `hostmem` /
+  `max_hostmem` 属性，这些只在启用 virgl 时存在）；
+- 宿主两卡：`renderD128` = **AMD**（amdgpu, 1002:15BF），`renderD129` = NVIDIA
+  （10DE:28E0）。**注意与直觉相反**，`DRI_PRIME=radeonsi` 因此不是修法。
 
-细节见 [host-tools.md](host-tools.md)。顺带记下两个排查陷阱（都实际浪费过时间）：
+**但"Mesa 能 attach"仍然没有发生。** 前置条件（renderer 版本）已清除，剩下的是
+**宿主 EGL 配置**，且现在有了 QEMU 自己打印出来的错误文本——这是本文档此前缺的：
+
+| display backend | EGL vendor | QEMU 行为 | guest 拿到的 feature |
+|---|---|---|---|
+| `egl-headless`（默认） | NVIDIA | 静默启动，**不给** `VIRTIO_GPU_F_VIRGL` | 2D only |
+| `gtk` | NVIDIA | `The display backend does not have OpenGL support enabled` | 起不来 |
+| `gtk,gl=on` | NVIDIA | 正常启动 | 2D only |
+| `egl-headless` | 强制 Mesa（`__EGL_VENDOR_LIBRARY_FILENAMES=50_mesa.json`） | **`eglInitialize failed: EGL_NOT_INITIALIZED` / `render node init failed`** | 起不来 |
+
+即：**NVIDIA EGL 下 QEMU 静默降级为 2D；换成 Mesa EGL 则显式失败。** 这与本文档
+此前记录的"四种组合都失败"是同一现象，但现在有了 QEMU 的原始报错，且多出一条可用
+信息：强制 Mesa EGL 时 `eglinfo -p surfaceless` **是成功的**
+（`AMD Radeon 780M (radeonsi, phoenix, LLVM 19.1.7)`，OpenGL 4.6），
+而 `eglinfo -p gbm` 拿不到 display——**问题落在 GBM/设备平台这条路上，不在
+surfaceless**。下一步应从"QEMU 的 egl-headless 走的是哪个 platform"入手，
+而不是继续试 EGL vendor 组合。
+
+顺带记下写这个脚本时踩到的坑（都已修在脚本里，且每一个的错误信息都指向别处）：
+仓库路径是 `virgl/virglrenderer` 而非 `mesa/...`（写错时 GitLab 返回**登录页**
+而不是 404，看起来像鉴权问题）；归档是 `.tar.bz2`（喂给 `tar` 只报"not in gzip
+format"）；1.3.0 没有 `x86-asm` 选项、且 `valgrind` 是布尔（meson 把未知 `-D`
+当**硬错误**，configure 探测一分钟后才炸）；1.3.0 的 gallium 需要 `python3-yaml`；
+meson 原生安装到 `lib/<triplet>/`，猜 `lib/` 会让 `LD_LIBRARY_PATH` **静默无效**，
+症状正是"新库没生效"。
+
+细节见 [host-tools.md](host-tools.md)。另记两个排查陷阱（都实际浪费过时间）：
 
 - `LIBGL_ALWAYS_SOFTWARE=1` 与 `EGL_PLATFORM=surfaceless` **互相矛盾**，Mesa
-  直接拒绝：`Not allowed to force software rendering when API explicitly
-  selects a hardware device.`。表现为 QEMU 提前失败，像 unrelated 的新问题。
-- 权限**不是**原因（在本机）：`/dev/dri/renderD128` 是 `root:render` 且当前用户
-  不在 `render` 组，但设备带 ACL，`test -r/-w` 均为 yes，可正常访问。
+  直接拒绝。表现为 QEMU 提前失败，像 unrelated 的新问题。
+- 权限**不是**原因（在本机）：`/dev/dri/renderD128` 可读可写（带 ACL）。
   （另外：别对字符设备做 `head -c1`，会阻塞——用 `test -r/-w` 判权限。）
 
 ---
@@ -708,5 +734,10 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 重复释放"还是"两种假设不可区分"）都不成立；`CONFIG_LWIP_MEMP_OVERFLOW_CHECK` 正是
 为区分这两者而加的，它做到了。
 
-**未运行的**：`tools/build-virglrenderer.sh build`（需 root + 4 个 apt 包，见 §5.1）。
-因此**"stock Mesa `virtio_gpu_dri.so` 能挂上"至今没有任何证据**，既不支持也不反对。
+| 宿主 renderer 已升级 | `tools/build-virglrenderer.sh build` | 自建前缀，QEMU 经 `LD_LIBRARY_PATH` 加载 | `fca72f5f`（产出 1.3.0；`LD_DEBUG=libs` 确认 QEMU 解析到该库） |
+| QEMU 带 virgl 编译 | `qemu-system-riscv64 -device virtio-gpu-gl-device,help` | — | `fca72f5f`（暴露 `blob`/`hostmem`/`max_hostmem`，仅启用 virgl 时存在） |
+
+**仍未达成**：**"stock Mesa `virtio_gpu_dri.so` 能挂上"至今没有任何正面证据。**
+renderer 前置条件已清除，但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`
+（NVIDIA EGL 下静默降级为 2D；强制 Mesa EGL 则 `eglInitialize failed`）。
+完整判据表与下一步见 §5.1。
