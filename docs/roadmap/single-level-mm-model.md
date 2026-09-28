@@ -2206,3 +2206,85 @@ ELF 的方式，QEMU 不会像加载 bzImage 或 multiboot 那样把 `-append` �
 * 其他架构不受影响：riscv64 经 DTB `/chosen/bootargs` 取命令行，实测可用。
 * 网络仍能工作——平台层 `qemu-virt-x86_64/board.c` 在拿到空命令行时会回落到静态
   `a20.ip=...` 默认值，这也是这个缺陷一直没被察觉的原因。
+
+### 10.33 **(b) 根因找到并修复**：状态路径装的是**内核态** PTE，缺 `PTE_U`
+
+根因是**权限位在往返中丢了 user 属性**。
+
+`mm_pt_prot_bits()` 只把 PTE 的 R/W/X 三个位搬进状态字节，而 `status_byte()` 把它们
+放在 `MM_ST_PROT_R/W/X`（3 位）里——**状态字节里没有任何一位表示「用户态」**。
+`arch_pte_leaf()` 也不会替调用者补 `PTE_U`：
+
+```c
+static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
+    return arch_pte_from_pa(pa) | flags | PTE_V;   /* 没有 PTE_U */
+}
+```
+
+于是状态路径按状态字节重建 PTE 权限时：
+
+```c
+pte_t allow = 0;
+if (cls_byte & MM_ST_PROT_R) allow |= PTE_R;
+if (cls_byte & MM_ST_PROT_W) allow |= PTE_W;
+if (cls_byte & MM_ST_PROT_X) allow |= PTE_X;   /* allow 里永远没有 PTE_U */
+```
+
+装上去的是一页**仅内核态可访问**的映射。缺页处理「成功」返回，用户态下一次访问立刻
+在**刚装好的那一页**上取页故障。
+
+**证据链**（`a20.anonprov=4096`，状态路径可用）：
+
+1. 临时在状态路径成功分支加 trace（**注意：第一次加 trace 时脚本 assert 失败、根本没
+   编进去，我却据此得出「状态路径 0 次成功」的结论——又一次把自己的工具故障当成被测
+   系统行为。加 trace 后必须先 `grep` 确认它真的在文件里再构建**）。重做后：
+
+   ```
+   [MM-STATUS] ok va=46d000 prot=6      <- 状态路径唯一一次成功
+   FAULT-VA] stval=0x46d000             <- 崩溃地址与上面完全相同
+   ```
+
+   **装映射的地址就是随后取故障的地址**——这一条把范围压到「刚装好的那一页权限不对」。
+
+2. `prot=6`：riscv64 上 `PTE_R=1<<1=0x02`、`PTE_W=1<<2=0x04`、`PTE_X=1<<3=0x08`，
+   所以 6 = R|W，**没有 `PTE_U`（1<<4=0x10）**。（我一度把 6 误读成「缺 R 位」，那是
+   又一次把自己的算术当成结论。）
+
+3. 早先的崩溃转储独立佐证：出错页 `flags=0x7` = `PTE_V|PTE_R|PTE_W`，而同一时刻 VMA
+   期望的 `pte_flags=0xd7` 里含 `0x10`(U) 与 `0x40/0x80`。差的正是 `PTE_U`。
+
+**修法**：`PTE_U` 不需要占用状态字节的一位——状态只可能为**用户区间**记录，因为
+`mm_pt_provision_anon()` 会拒绝用户地址空间以外的范围。所以 `PTE_U` 在这里是**不变
+量**，由状态路径显式补上：
+
+```c
+allow |= PTE_U;
+```
+
+**修后实测**（riscv64，`a20.anonprov=4096`）：
+
+```
+mm_demand_faults:     3411
+mm_anon_provisioned:  9287
+mm_anon_faults:       2851
+mm_fault_from_status: 2842      <- 83% 的 demand fault 不经 VMA
+stress-pass: 1   fatals: 0
+MM-ASM: missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 safe=0 anon_virt=0
+```
+
+**这是本项目第一次，论文 Fig. 8 的「按状态决策、不查 VMA」的缺页路径真正跑起来**：
+2842 次缺页直接由 per-PTE 状态满足，不经过 `mm_find_vma()`。此前所有关于它的性能
+结论都建立在这条路径**从未执行**的前提上（§10.6 撤回的 479、§10.8/§10.14 的 14%
+与 28%），现在这个前提变了，那些数字**需要重新测量**。
+
+同时确认：§10.26/§10.29 的两条诊断断言（回读不变式、孤儿 status）已从热路径**彻底
+移除**（此前 §10.30 声称已回退，实际只回退了 `pt.c`/`perf.h`，`fault.c` 里的块一直
+还在，其中孤儿检查还会反过来调 `mm_find_vma()`，与这条路径的设计前提直接冲突——
+这本身就是一次「文档与代码不一致」的实例）。
+
+**默认行为不变**：预标记仍默认关闭，故默认配置下 `mm_fault_from_status` 恒为 0，
+与改动前完全一致；本次修复只在显式 `a20.anonprov=<pages>` 时生效。
+
+验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64 的
+NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model`
+通过，审计全 0。
