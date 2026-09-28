@@ -381,19 +381,22 @@ smoke-smp-lock-contention:
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	lwip_total=$$(awk '/^lwip: /{print $$3; exit}' "$$log"); \
-	site_acq=$$(awk '/\[lwip\]/{a+=$$(NF-1)} END{print a+0}' "$$log"); \
-	site_spin=$$(awk '/\[lwip\]/{s+=$$NF} END{print s+0}' "$$log"); \
+	proc_max=$$(awk '/^proc: /{v=$$4; sub(/^max=/,"",v); print v+0; exit}' "$$log"); \
+	site_acq=$$(awk '/\[lwip\]/{a+=$$3} END{print a+0}' "$$log"); \
+	site_spin=$$(awk '/\[lwip\]/{s+=$$4} END{print s+0}' "$$log"); \
+	site_max=$$(awk '/\[lwip\]/{v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0} END{print m+0}' "$$log"); \
 	tlb_enters=$$(awk '/^mm_context_enters:/{e=$$2} END{print e+0}' "$$log"); \
 	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
 	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
-	   grep -qE '^lwip: [0-9]+ [0-9]+$$' "$$log" && \
-	   grep -qE '^proc: [0-9]+ [0-9]+$$' "$$log" && \
+	   grep -qE '^lwip: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
+	   grep -qE '^proc: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
 	   { [ "$$site_acq" -eq 0 ] || [ "$$site_spin" -gt "$$site_acq" ]; } && \
 	   [ "$$tlb_enters" -gt 0 ] && \
 	   ! grep -qi 'panic' "$$log"; then \
 		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin column carries real spin data: $$site_spin spins over $$site_acq acquires, lock total $$lwip_total); log saved to $$log"; \
 		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
+		echo "worst single acquire: proc_lock $$proc_max spins, lwip site $$site_max spins"; \
 		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
 	else \
 		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
