@@ -65,52 +65,9 @@ smoke-riscv32:
 	tools/a20 test smoke-riscv32
 
 smoke-arch-mmu-matrix:
-	$(call smoke-gate,1G,1)
-	@set -e; \
-	for spec in arm32:0 aarch64:0 riscv64:0 riscv32:0 \
-		    arm32:1 aarch64:1 riscv64:1 riscv32:1; do \
-		status=0; \
-		arch=$${spec%%:*}; nommu=$${spec##*:}; \
-		variant="$$arch"; [ "$$nommu" = 1 ] && variant="$$variant-nommu"; \
-		case "$$arch" in \
-		arm32) board=qemu-virt-arm32 ;; \
-		aarch64) board=qemu-virt-aarch64 ;; \
-		riscv64) board=qemu-virt-riscv64 ;; \
-		riscv32) board=qemu-virt-riscv32 ;; \
-		esac; \
-		build=".kernel-build/$$arch-$$board-both-dev"; \
-		case "$$arch" in arm32|riscv32) build="$$build-embedded" ;; esac; \
-		[ "$$nommu" = 1 ] && build="$$build-nommu"; \
-		log=".kernel-build/smoke/$$variant-shell.log"; \
-		mkdir -p .kernel-build/smoke; \
-		echo "=== smoke-arch-mmu-matrix: $$variant ==="; \
-		$(MAKE) ARCH=$$arch ABI=both BRINGUP=0 NOMMU=$$nommu dev-build >/dev/null; \
-		if [ "$$nommu" = 1 ]; then \
-			echo "smoke-arch-mmu-matrix: $$variant build-only PASS (NOMMU runtime is platform-specific)"; \
-			continue; \
-		fi; \
-		case "$$arch" in \
-		arm32) qemu=qemu-system-arm; base="-machine virt -cpu cortex-a15" ;; \
-		aarch64) qemu=qemu-system-aarch64; base="-machine virt -cpu cortex-a57 -global virtio-mmio.force-legacy=false" ;; \
-		riscv64) qemu=qemu-system-riscv64; base="-machine virt -bios default -global virtio-mmio.force-legacy=false" ;; \
-		riscv32) qemu=qemu-system-riscv32; base="-machine virt -bios default -global virtio-mmio.force-legacy=false" ;; \
-		esac; \
-		{ sleep $(SMOKE_INPUT_DELAY); printf 'echo A20_MATRIX_%s_OK\n/bin/echo A20_EXTERNAL_OK\npoweroff\n' "$$variant"; } | \
-		$(TIMEOUT) $(SMOKE_TIMEOUT) $$qemu $$base -m 1G -nographic -smp 1 \
-			-drive file="$$build/fat32.img",if=none,format=raw,id=x0 \
-			-device virtio-blk-device,bus=virtio-mmio-bus.0,drive=x0 \
-			-netdev user,id=net \
-			-device virtio-net-device,bus=virtio-mmio-bus.4,netdev=net \
-			-kernel "$$build/kernel.elf" >"$$log" 2>&1 || status=$$?; \
-		if ! grep -q "A20_MATRIX_$${variant}_OK" "$$log" || \
-		   ! grep -q "A20_EXTERNAL_OK" "$$log" || \
-		   ! grep -q "System is going down for power-off NOW" "$$log"; then \
-			echo "smoke-arch-mmu-matrix: $$variant FAIL (status=$${status:-0})"; \
-			tail -n 100 "$$log"; exit 1; \
-		fi; \
-		echo "smoke-arch-mmu-matrix: $$variant PASS"; \
-	done
-
+	@$(PYTHON) tools/smoke.py arch-mmu-matrix \
+		--input-delay "$(SMOKE_INPUT_DELAY)" \
+		--timeout "$(SMOKE_TIMEOUT)"
 # Thin wrapper: the smoke definition lives in instances/smoke-ppc64le.toml.
 smoke-ppc64le:
 	tools/a20 test smoke-ppc64le
