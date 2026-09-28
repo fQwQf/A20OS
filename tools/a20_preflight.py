@@ -252,13 +252,18 @@ def gate(need: Need, *, stream=sys.stderr) -> Host:
     Returns the sample that passed so callers can log it.  No-op (returns the
     current sample) when A20_PREFLIGHT=0.
     """
-    if not _enabled():
-        return sample(need.disk_path)
-
+    # The image check runs before the resource gate and is not covered by
+    # A20_PREFLIGHT=0. Booting a filesystem the last run left dirty is never
+    # what anyone wants, and a flag named after resource pressure silently
+    # disabling a correctness check is how a corrupt rootfs ends up being
+    # investigated as a kernel bug.  A20_PREFLIGHT_SKIP_FSCK is the opt-out.
     if need.image is not None:
         dirty = check_guest_image(need.image)
         if dirty:
             raise PreflightError("\n".join(dirty))
+
+    if not _enabled():
+        return sample(need.disk_path)
 
     budget = _wait_budget()
     deadline = time.monotonic() + budget
