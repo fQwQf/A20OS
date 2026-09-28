@@ -30,6 +30,38 @@
  * arch/ARCH/include/page_table.h, so this file is architecture generic.
  */
 
+/* Eager-provisioning cap (pages; 0 = off).  Plain state with no
+ * page-table dependency, so it lives outside the pgtable guard: the
+ * /proc/a20/anonprov knob must exist on NOMMU too (where writing
+ * it returns -ENOSYS but reading it still reports the cap). */
+#ifdef CONFIG_ANON_PROV_DEFAULT
+static uint32_t g_anon_prov_max = CONFIG_ANON_PROV_DEFAULT;
+#else
+static uint32_t g_anon_prov_max;      /* off by default */
+#endif
+
+/* Runtime view of the eager-provisioning cap.  Read on every mmap, so it is
+ * published with acquire semantics against mm_pt_set_anon_prov_max()'s
+ * release store -- that ordering is what lets /proc/a20/anonprov flip the cap
+ * between benchmark iterations inside one boot (docs 10.70/10.71). */
+uint32_t mm_pt_anon_prov_max(void)
+{
+    return __atomic_load_n(&g_anon_prov_max, __ATOMIC_ACQUIRE);
+}
+
+/* Set the cap at runtime.  Only meaningful on hosted builds: under NOMMU there
+ * is no page table, so provisioning is not a thing and the knob reads back 0. */
+int mm_pt_set_anon_prov_max(uint32_t pages)
+{
+#ifdef CONFIG_NOMMU
+    (void)pages;
+    return -ENOSYS;
+#else
+    __atomic_store_n(&g_anon_prov_max, pages, __ATOMIC_RELEASE);
+    return 0;
+#endif
+}
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 /* ------------------------------------------------------------------ *
@@ -930,11 +962,7 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
  * -DCONFIG_ANON_PROV_DEFAULT=<n>; a20.anonprov=<n> overrides at boot, which is
  * how riscv64 drives the A/B.  x86_64 gets no command line at all, so its
  * experiments are built with different defaults and interleaved. */
-#ifdef CONFIG_ANON_PROV_DEFAULT
-static uint32_t g_anon_prov_max = CONFIG_ANON_PROV_DEFAULT;
-#else
-static uint32_t g_anon_prov_max;      /* off by default */
-#endif
+
 
 void mm_pt_anon_prov_init(void)
 {
@@ -981,7 +1009,7 @@ int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -EFAULT;
 
     vaddr_t span = end - start;
-    if (span / PAGE_SIZE > g_anon_prov_max)
+    if (span / PAGE_SIZE > mm_pt_anon_prov_max())
         return 0;   /* too large to provision eagerly; VMA path still correct */
 
     uint8_t byte = status_byte(MM_ST_ANON_VIRT, flags);

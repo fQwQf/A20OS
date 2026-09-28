@@ -218,6 +218,12 @@ int  mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags);
 /* Clear `flags` on the single page `va`.  Used instead of a range-wide clear
  * where a mark may be co-owned (see MM_SAFE_UFFD). */
 int  mm_pt_safe_clear_page(struct mm_struct *mm, vaddr_t va, unsigned flags);
+
+/* Eager-provisioning cap, in pages (0 disables).  Writable at runtime via
+ * /proc/a20/anonprov so a benchmark can alternate the two settings inside a
+ * single boot instead of comparing two separately booted kernels. */
+uint32_t mm_pt_anon_prov_max(void);
+int      mm_pt_set_anon_prov_max(uint32_t pages);
 int  mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags);
 int  mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags);
 int  mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
