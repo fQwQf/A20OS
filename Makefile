@@ -500,6 +500,18 @@ ARCH_CFLAGS  := $(ARCH_CFLAGS_$(ARCH))
 ARCH_LDFLAGS := $(ARCH_LDFLAGS_$(ARCH))
 ARCH_LIBS    := $(ARCH_LIBS_$(ARCH))
 QEMU         := $(QEMU_$(ARCH))
+# The virgl 3D renderer runs on the HOST: QEMU dlopen()s libvirglrenderer and
+# feeds it the guest's command stream, so which libvirglrenderer the loader
+# finds decides whether Mesa's virtio_gpu_dri.so can attach at all.  Some
+# distributions still ship only 1.1.0 (2020), whose capset is too old for a
+# current Mesa, so tools/build-virglrenderer.sh installs a new one under a
+# local prefix.  Point QEMU_LIBPATH at that prefix's lib directory, or leave
+# it empty to use the system one.  Applied as an env prefix rather than via
+# -L because -L is QEMU's *data* search path, not its shared-library path.
+QEMU_LIBPATH ?= $(if $(wildcard tools/virgl/install/lib/libvirglrenderer.so.1),$(CURDIR)/tools/virgl/install/lib)
+ifneq ($(strip $(QEMU_LIBPATH)),)
+QEMU         := env LD_LIBRARY_PATH=$(QEMU_LIBPATH):$$LD_LIBRARY_PATH $(QEMU)
+endif
 QEMU_FLAGS   := $(QEMU_FLAGS_BASE_$(ARCH)) -m $(QEMU_MEMORY) -nographic -smp $(NR_CPUS)
 # Virtualization back-end.  Non-x86_64 targets run under QEMU TCG
 # (multi-threaded once SMP).  x86_64 guests on an x86_64 host prefer KVM
