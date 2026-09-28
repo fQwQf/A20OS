@@ -39,6 +39,13 @@
 #define E1000_RAL0   0x5400U
 #define E1000_RAH0   0x5404U
 
+/* CTRL[6] SLU forces the PHY link up regardless of a cable, which the MAC
+ * needs before it will pass traffic on some parts.  RCTL[1] EN is the receiver
+ * enable, RCTL[15] BAM the broadcast accept mode, RCTL[26] SECRC the
+ * secure-error report control (the receiver's policy for frames the MAC flagged
+ * as errored).  TCTL[1] EN is the transmitter enable and TCTL[3] PSP selects
+ * the switch-media packet format, which is inert on the copper 8254x/8257x
+ * parts matched at the bottom of this file. */
 #define E1000_CTRL_SLU       (1U << 6)
 #define E1000_RCTL_EN        (1U << 1)
 #define E1000_RCTL_BAM       (1U << 15)
@@ -51,6 +58,11 @@
 #define E1000_TXD_CMD_IFCS   (1U << 1)
 #define E1000_TXD_CMD_RS     (1U << 3)
 #define E1000_TXD_STAT_DD    (1U << 0)
+/* DD in a *transmit* descriptor is software-owned: the device never sets or
+ * clears it, it only rewrites the rest of the descriptor when it retires the
+ * frame.  e1000_send() refuses any slot whose DD is clear, so every TX
+ * descriptor must be pre-armed with DD = 1 during probe; a zeroed ring
+ * otherwise reads as permanently busy and every send fails with -1. */
 
 /* Interrupt causes enabled in IMS when a line is registered: TX descriptor
  * write-back, link status change, RX overrun, and the RX timer.  ICR is
@@ -65,6 +77,14 @@
 #define E1000_RING_SIZE 64U
 #define E1000_BUF_SIZE  2048U
 
+/* The legacy (non-EXT) descriptor is a 16-byte wire format, not a C layout:
+ * receive is address[63:0] | length[15:0] | checksum[15:0] | status[7:0] |
+ * errors[7:0] | special[15:0], and the device walks the ring with a fixed
+ * 16-byte stride.  Both the packed attribute and the 16-byte ring alignment in
+ * the device struct are therefore load bearing: dropping a field or letting the
+ * compiler insert padding shifts every field the device reads.  The transmit
+ * descriptor below is the same 16 bytes with the checksum/status pair replaced
+ * by the cso/command/status/css quadruple. */
 typedef struct {
     uint64_t address;
     uint16_t length;
@@ -185,6 +205,11 @@ static int e1000_send(device_t *dev, const void *packet, size_t length)
     arch_dma_sync_for_device(&nic->tx[slot], sizeof(nic->tx[slot]));
     wmb();
 
+    /* Publishing the descriptor is the TDT write below: TDT is the next
+     * descriptor the device should transmit, so the post-increment index goes
+     * out last.  The wmb() above plus this MMIO store are what order the
+     * descriptor against the device -- see the DMA publication contract in
+     * include/drivers/dual/virtq.h. */
     nic->tx_next = (slot + 1U) % E1000_RING_SIZE;
     e1000_write(nic, E1000_TDT, nic->tx_next);
     spin_unlock_irqrestore(&nic->lock, flags);
@@ -205,6 +230,11 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
         return 0;
     }
 
+    /* DD (status[0]) says the device filled the descriptor, EOP (status[1])
+     * says it is the last descriptor of the frame, and a non-zero errors word
+     * retires the descriptor without delivering it.  A frame split across
+     * several of these 16-byte buffers is dropped here instead of being
+     * reassembled, so multi-buffer frames never reach the stack. */
     size_t length = nic->rx[slot].length;
     if (length > max_length)
         length = max_length;
@@ -218,6 +248,9 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
     nic->rx[slot].status = 0;
     nic->rx[slot].errors = 0;
     arch_dma_sync_for_device(&nic->rx[slot], sizeof(nic->rx[slot]));
+    /* RDT is the last index the device may fill, so the slot just consumed is
+     * written back verbatim.  Writing slot + 1 instead is the classic
+     * off-by-one and costs exactly one packet of stall on every ring wrap. */
     e1000_write(nic, E1000_RDT, slot);
     nic->rx_next = (slot + 1U) % E1000_RING_SIZE;
     spin_unlock_irqrestore(&nic->lock, flags);
@@ -235,6 +268,9 @@ static int e1000_probe(device_t *dev)
     if (pci_enable_and_assign_bars(dev) < 0)
         return -1;
     resource_t *bar = pci_get_bar_resource(dev, 0);
+    /* 0x6000 is the minimum window this driver accepts: the highest offset it
+     * ever programs is RAH0 at 0x5404, so a smaller BAR would leave the
+     * MAC-address read below outside the assigned mapping. */
     if (!bar || bar->end < bar->start || bar->end - bar->start + 1U < 0x6000U)
         return -1;
 
@@ -251,9 +287,18 @@ static int e1000_probe(device_t *dev)
     nic->mac[3] = (uint8_t)(ral >> 24);
     nic->mac[4] = (uint8_t)rah;
     nic->mac[5] = (uint8_t)(rah >> 8);
+    /* RAL/RAH hold the address with the first octet in the LSB: RAL[7:0] is
+     * MAC[0] and RAH[15:8] is MAC[5].  RAH[31] AV is the address-valid bit and
+     * reads 0 on a part with no EEPROM-supplied MAC, which is how an
+     * unprogrammed device is told apart from a live one. */
     if (!(rah & (1U << 31)))
         return -1;
 
+    /* IMC is write-1-to-clear against IMS, so writing all ones masks every
+     * cause; the ICR read immediately after is the acknowledge of anything the
+     * device had already latched, because ICR is read-to-clear.  SLU is forced
+     * on only after that, so a link-up transition captured in ICR cannot
+     * become a pending interrupt before the handler is registered below. */
     e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
     (void)e1000_read(nic, E1000_ICR);
     e1000_write(nic, E1000_CTRL, e1000_read(nic, E1000_CTRL) | E1000_CTRL_SLU);
@@ -261,6 +306,8 @@ static int e1000_probe(device_t *dev)
     for (uint32_t i = 0; i < E1000_RING_SIZE; i++) {
         nic->rx[i].address = va_to_pa(nic->rx_buf[i]);
         nic->tx[i].address = va_to_pa(nic->tx_buf[i]);
+        /* Pre-arm the TX DD bits while building the ring; see the DD note on
+         * E1000_TXD_STAT_DD above. */
         nic->tx[i].status = E1000_TXD_STAT_DD;
     }
     arch_dma_sync_for_device(nic->rx_buf, sizeof(nic->rx_buf));
@@ -269,6 +316,12 @@ static int e1000_probe(device_t *dev)
     arch_dma_sync_for_device(nic->tx, sizeof(nic->tx));
 
     uint64_t rx_pa = va_to_pa(nic->rx);
+    /* The ring base is a 64-bit physical address split into the low and the
+     * high 32-bit half, and RDLEN takes a *descriptor count*, not a byte count:
+     * writing sizeof(nic->rx) (16 bytes per descriptor) would size the ring 16x
+     * too large and let the device DMA past the arrays.  RDH is the first
+     * descriptor the device may fill and RDT the last one it is allowed to
+     * fill, so an empty 64-entry ring is RDH = 0, RDT = 63. */
     e1000_write(nic, E1000_RDBAL, (uint32_t)rx_pa);
     e1000_write(nic, E1000_RDBAH, (uint32_t)(rx_pa >> 32));
     e1000_write(nic, E1000_RDLEN, sizeof(nic->rx));
@@ -276,15 +329,36 @@ static int e1000_probe(device_t *dev)
     e1000_write(nic, E1000_RDT, E1000_RING_SIZE - 1U);
 
     uint64_t tx_pa = va_to_pa(nic->tx);
+    /* Same 64-bit split and same descriptor-count units on transmit.  TDH is
+     * the descriptor the device is retiring and TDT the next one it should
+     * send, so an empty ring is both 0. */
     e1000_write(nic, E1000_TDBAL, (uint32_t)tx_pa);
     e1000_write(nic, E1000_TDBAH, (uint32_t)(tx_pa >> 32));
     e1000_write(nic, E1000_TDLEN, sizeof(nic->tx));
     e1000_write(nic, E1000_TDH, 0);
     e1000_write(nic, E1000_TDT, 0);
 
+    /* TIPG is three 10-bit gap fields, low to high: IPG[9:0] = 0x0A before a
+     * new transmit, IPGR1[19:10] = 0x08 after a deferred or retried transmit,
+     * IPGR2[29:20] = 0x06 after carrier extension.  The 8254x keeps all three
+     * separately, so programming only the low field shortens the gap on retried
+     * frames and the link partner starts reporting FCS errors on frames this
+     * driver never touched. */
     e1000_write(nic, E1000_TIPG, 10U | (8U << 10) | (6U << 20));
+    /* TCTL[11:4] is IFCS, the inter-frame gap counted in 4-byte time
+     * intervals, so 0x10 << 4 programs 16 of them; it changes the gap the link
+     * partner sees and nothing else, which makes it a link-quality knob rather
+     * than a correctness bit.  TCTL[21:12] is not a field in the 8254x/8257x
+     * TCTL register set (only EN, PSP and IFCS are defined there), so the
+     * 0x40 << 12 term lands on an unassigned bit: inert on copper, but it does
+     * read back as set and will show up in any TCTL diff against a reference
+     * dump. */
     e1000_write(nic, E1000_TCTL, E1000_TCTL_EN | E1000_TCTL_PSP |
                 (0x10U << 4) | (0x40U << 12));
+    /* The receiver is enabled last, after both rings and the transmit side, so
+     * the device can never DMA into a ring this driver is still filling.  RCTL
+     * also has to be 0 before the ring base registers are programmed again on a
+     * re-probe; e1000_remove() clears it. */
     e1000_write(nic, E1000_RCTL, E1000_RCTL_EN | E1000_RCTL_BAM |
                 E1000_RCTL_SECRC);
 
@@ -302,6 +376,7 @@ static int e1000_probe(device_t *dev)
                   irq);
         }
     }
+    /* STATUS[1] is the read-only link status: 1 = link up. */
     kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
           nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",

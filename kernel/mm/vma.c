@@ -19,6 +19,29 @@
  * readable.
  */
 
+/*
+ * Decide whether two adjacent VMAs may coalesce into one.  Merging is only
+ * sound when the merged VMA would map exactly the same backing store over the
+ * same permissions, so every case below is a correctness precondition rather
+ * than a heuristic:
+ *
+ * - Adjacency: a->end == b->start.  The list is kept sorted, so this also
+ *   asserts the caller's ordering.
+ * - VM_SYSV_SHM: never merged.  SysV segments are identified by shmid in
+ *   ipc/sysv_shm.c, not by file offset, so two adjacent segments are distinct
+ *   objects that must stay separable for shmctl(IPC_RMID).
+ * - Identical vm_flags and pte_flags: the merged PTE would otherwise have to
+ *   pick one protection for the union of two different ones.
+ * - VM_FILE: the same open file description AND contiguous file offset.  The
+ *   offset check is what keeps a->end mapping a->file_offset + length; without
+ *   it a merged VMA would shift b's data.
+ * - VM_VMO: the same vmo AND contiguous vmo_offset, for the same reason.  The
+ *   second test is redundant with the vm_flags equality above but is kept
+ *   explicit because the offset is a separate field.
+ * - Anything else (anonymous, stack, guard) is always mergeable.
+ *
+ * A false negative only costs a VMA, so the checks err toward refusing.
+ */
 static int vma_can_merge(vm_area_t *a, vm_area_t *b)
 {
     if (!a || !b || a->end != b->start)
