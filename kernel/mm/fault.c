@@ -975,6 +975,17 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                 if (cls_byte & MM_ST_PROT_R) allow |= PTE_R;
                 if (cls_byte & MM_ST_PROT_W) allow |= PTE_W;
                 if (cls_byte & MM_ST_PROT_X) allow |= PTE_X;
+                /* PTE_U has no MM_ST_PROT_* bit: the status byte's three prot
+                 * bits are R/W/X, and every 8-bit slot is already spoken for
+                 * (4 class + COW + 3 prot).  It does not need one -- the status
+                 * is only ever recorded for user ranges, since
+                 * mm_pt_provision_anon() rejects anything outside them -- so
+                 * PTE_U is invariant here and must be supplied explicitly.
+                 * arch_pte_leaf() does not add it either, and omitting it
+                 * installs a supervisor-only PTE: the mapping "succeeds", then
+                 * the next user access takes a fault on the page we just
+                 * installed.  That was bug (b). */
+                allow |= PTE_U;
                 if (mm_pte_flags_allow_access(allow)) {
                     pfn_t np = pfa_alloc_page();
                     if (np != PFN_NONE) {
@@ -982,34 +993,6 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                             memset(pfn_to_virt(np), 0, PAGE_SIZE);
                             if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
                                               allow, MM_ST_ANON_MAPPED) == 0) {
-                                /* Readback invariant check (docs 10.28): the
-                                 * one write unique to this path is the
-                                 * ANON_VIRT -> mapped transition, so verify it
-                                 * actually landed before we go on.  Loud on
-                                 * the first failure, because the crash that
-                                 * follows may prevent reading any counter. */
-                                {
-                                    pte_t *chk = qcur.path[0];
-                                    uint8_t ccls = chk
-                                        ? mm_pt_peek(chk, 0,
-                                                     arch_pt_vpn(page_va, 0))
-                                        : 0;
-                                    int have_pte = chk &&
-                                        (chk[arch_pt_vpn(page_va, 0)] & PTE_V);
-                                    if (!have_pte ||
-                                        MM_ST_GET_CLASS(ccls) ==
-                                            MM_ST_ANON_VIRT) {
-                                        a20_perf_count(
-                                            A20_PERF_MM_STATUS_INVARIANT_BAD);
-                                        kerr("[MM-STATUS] invariant bad va=%lx "
-                                             "pte=%lx cls=%x have=%d\n",
-                                             (unsigned long)page_va,
-                                             (unsigned long)(chk
-                                                 ? chk[arch_pt_vpn(page_va, 0)]
-                                                 : 0),
-                                             ccls, have_pte);
-                                    }
-                                }
                                 mm_cursor_unlock(&qcur);
                                 mm->rss++;
                                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
