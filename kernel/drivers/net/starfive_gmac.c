@@ -83,6 +83,13 @@
 #define MAC_CONF_PS       (1U << 15)
 #define MAC_CONF_FES      (1U << 14)
 
+/* MAC_MII_ADDR is { GB[0], MW[1], GOC[3:2], reserved, CR[12:8], GR[20:16],
+ * PA[25:21] }: GB is the hardware busy flag, MW picks write over read, GOC is
+ * the opcode (0 = write, 1 = write post, 2 = read, 3 = read post), CR is a
+ * range selector for the MDC divider rather than a literal divisor, and PA/GR
+ * are the PHY address and register index.  The two "post" opcodes leave GB
+ * asserted until the PHY access retires, which is why every access here polls
+ * GB instead of trusting a fixed delay. */
 /* MII Address bits */
 #define MII_ADDR_GB       (1U << 0)
 #define MII_ADDR_GOC_READ (3U << 2)
@@ -108,6 +115,10 @@
 #define MTL_RXQ0_RQS_SHIFT 20
 #define MTL_RXQ0_RXQEN    (1U << 0)
 
+/* DMA_MODE[0] SWR is a self-clearing software reset: the DMA clears it once the
+ * reset has completed, and every DMA register is back at its reset value at
+ * that point.  Nothing else in the block may be programmed before that clear is
+ * observed, or the write is wiped by the reset that follows it. */
 /* DMA bits */
 #define DMA_MODE_SWR      (1U << 0)
 
@@ -210,6 +221,10 @@ static inline void gmac_write(uintptr_t base, uint32_t off, uint32_t val) {
 /* ============================================================
  * MII / PHY Access
  * ============================================================ */
+/* GB is set by hardware for the whole duration of an MDIO transfer and clears
+ * when it retires.  It has to be idle before a new access is started and is the
+ * only completion signal the "post" opcodes give, so both the pre-wait and the
+ * post-wait are mandatory.  The 10 ms ceiling is a hang guard, not a budget. */
 static int gmac_mdio_wait(uintptr_t base) {
     uint64_t start = timer_get_ticks();
     while (gmac_read(base, MAC_MII_ADDR) & MII_ADDR_GB) {
@@ -221,6 +236,8 @@ static int gmac_mdio_wait(uintptr_t base) {
 
 static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
     if (gmac_mdio_wait(base) != 0) return 0xFFFF;
+    /* GOC = 3 is read-post: the payload appears in MAC_MII_DATA and is only
+     * valid once GB clears, i.e. after the second gmac_mdio_wait() below. */
     uint32_t val = MII_ADDR_GB |
                    MII_ADDR_GOC_READ |
                    ((phy_addr << MII_ADDR_PA_SHIFT) & (0x1F << MII_ADDR_PA_SHIFT)) |
@@ -233,6 +250,9 @@ static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
 
 static void gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
     if (gmac_mdio_wait(base) != 0) return;
+    /* MII_DATA is loaded *before* MII_ADDR starts the transfer: a write-post
+     * takes its payload from the register at the moment the opcode is issued,
+     * so reversing the two stores pushes the register address out as data. */
     gmac_write(base, MAC_MII_DATA, data);
     uint32_t val = MII_ADDR_GB | MII_ADDR_MW | MII_ADDR_GOC_WRITE |
                    ((phy_addr << MII_ADDR_PA_SHIFT) & (0x1F << MII_ADDR_PA_SHIFT)) |
@@ -242,6 +262,9 @@ static void gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data
     gmac_mdio_wait(base);
 }
 
+/* Registers above 0x1f are an indirect window on this class of PHY: 0x1e latches
+ * the extended register address and 0x1f is the extended data port, so an
+ * extended read is one MDIO write plus one MDIO read, not a wider access. */
 static uint16_t gmac_phy_ext_read(uintptr_t base, int phy_addr, uint16_t reg)
 {
     gmac_mdio_write(base, phy_addr, 0x1e, reg);
@@ -269,10 +292,19 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
         paddr_t tx_buf_pa = va_to_pa((const void *)priv->tx_buf[i]);
         paddr_t rx_buf_pa = va_to_pa((const void *)priv->rx_buf[i]);
 
+        /* des0/des1 are the low and high halves of the buffer address.  A
+         * transmit descriptor starts with OWN clear -- the CPU owns it and
+         * nothing moves until OWN is set at submit time -- while FD (first) and
+         * LD (last) mark it as a complete single-descriptor frame. */
         priv->tx_desc[i].des0 = (uint32_t)tx_buf_pa;
         priv->tx_desc[i].des1 = (uint32_t)((uint64_t)tx_buf_pa >> 32);
         priv->tx_desc[i].des3 = DESC3_FD | DESC3_LD;
 
+        /* A receive descriptor is handed over the other way round: OWN set
+         * means the buffer is available for the hardware to fill, and BUF1V
+         * (buffer 1 valid) tells it to deposit the frame at the address in
+         * des0/des1 rather than into the second buffer.  The DMA clearing OWN is
+         * the only ownership notification the CPU ever gets. */
         priv->rx_desc[i].des0 = (uint32_t)rx_buf_pa;
         priv->rx_desc[i].des1 = (uint32_t)((uint64_t)rx_buf_pa >> 32);
         priv->rx_desc[i].des2 = 0;
@@ -281,6 +313,9 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
     dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
     dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
+    /* The descriptor-list base is a 64-bit *physical* address written as a
+     * low/high pair, which is why it has to go through va_to_pa() and not the
+     * kernel virtual address. */
     gmac_write(base, DMA_CH0_TXDESC_LIST_ADDR, (uint32_t)tx_desc_pa);
     gmac_write(base, DMA_CH0_TXDESC_LIST_HADDR,
                (uint32_t)((uint64_t)tx_desc_pa >> 32));
@@ -288,9 +323,15 @@ static void gmac_init_desc(uintptr_t base, starfive_gmac_priv_t *priv) {
     gmac_write(base, DMA_CH0_RXDESC_LIST_HADDR,
                (uint32_t)((uint64_t)rx_desc_pa >> 32));
 
+    /* The ring-length register holds one less than the descriptor count, so a
+     * 16-entry ring is 15: writing GMAC_DESC_NUM here leaves the last
+     * descriptor outside the ring the DMA walks. */
     gmac_write(base, DMA_CH0_TXDESC_RING_LEN, GMAC_DESC_NUM - 1);
     gmac_write(base, DMA_CH0_RXDESC_RING_LEN, GMAC_DESC_NUM - 1);
 
+    /* The tail pointer is the *physical address* of a descriptor, not its
+     * index: the DMA dereferences it, so handing it an index makes it fetch
+     * from the ring base and every descriptor after the first goes unused. */
     /* Point the ring tail at the last descriptor (EQOS ring mode). */
     gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR, (uint32_t)(rx_desc_pa +
                sizeof(dma_desc_t) * (GMAC_DESC_NUM - 1)));
@@ -389,6 +430,12 @@ int starfive_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_CONFIGURATION, 0);
 
     /* DMA system bus mode */
+    /* BLEN[3:1] is the burst-length mask the AHB master may issue and EAME[11]
+     * widens its arbitration window; both are bus hints, programmed only after
+     * the SWR reset above has been observed cleared, because a write issued
+     * while DMA_MODE_SWR is still set is erased by the reset that follows.  A
+     * wrong value here costs throughput, never a transfer, so it is never the
+     * explanation for a stalled ring. */
     gmac_write(base, DMA_SYSBUS_MODE,
                DMA_SYSBUS_MODE_EAME |
                DMA_SYSBUS_MODE_BLEN4 |
@@ -399,11 +446,22 @@ int starfive_gmac_init(uintptr_t base) {
     gmac_init_desc(base, priv);
 
     /* MTL configuration */
+    /* Written while MAC_CONFIGURATION is still 0: RE/TE are only set at the end
+     * of this function, because re-programming a queue size or enabling a queue
+     * under a running MAC leaves the DMA mid-transfer with a queue it no longer
+     * owns. */
     gmac_write(base, MTL_OPERATION_MODE, MTL_OP_MODE_DTXSTS | MTL_OP_MODE_RAA_SP);
     gmac_write(base, MTL_TXQ0_OPERATION_MODE,
                MTL_TXQ0_TXQEN | MTL_TXQ0_TSF |
                (0x2 << MTL_TXQ0_TTC_SHIFT) |
                (0x7 << MTL_TXQ0_TQS_SHIFT));
+    /* RQS at bit 20 is the receive-queue-size field: it states how many
+     * descriptors the queue may hold, and it is saturated to its all-ones
+     * encoding here so the hardware allocation can never come out smaller than
+     * the GMAC_DESC_NUM = 16 descriptor ring programmed above.  Bit 0, RXQEN,
+     * is defined in this file but is not part of this write -- a reader chasing
+     * "the receive queue never hands up a descriptor" should read this register
+     * back before looking anywhere else. */
     gmac_write(base, MTL_RXQ0_OPERATION_MODE,
                (0x1FFU << MTL_RXQ0_RQS_SHIFT));
 
@@ -412,6 +470,11 @@ int starfive_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_FLOW_CTRL, 0);
 
     /* Set MAC address */
+    /* ADDR0_HIGH[31] AE is the address-enable bit that turns the pair on for
+     * receive filtering, and the six octets are stored in reverse order --
+     * MAC[0] in ADDR0_LOW[7:0], MAC[5] in ADDR0_HIGH[15:8] -- so writing the MAC
+     * in natural order byte for byte produces a reversed address that no switch
+     * will forward to this port. */
     uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
     uint32_t low  = (priv->mac[3] << 24) | (priv->mac[2] << 16) |
                     (priv->mac[1] << 8)  | priv->mac[0];
@@ -427,10 +490,22 @@ int starfive_gmac_init(uintptr_t base) {
                MAC_CONF_RE | MAC_CONF_TE | MAC_CONF_DM | MAC_CONF_IPC);
 
     /* DMA channel 0 configuration */
+    /* The program burst length is encoded in units of 256 descriptors, so the
+     * 16 written below asks for a 16 * 256 dword burst, and PBLX8 selects the
+     * 8-beat AHB form of that burst. */
     gmac_write(base, DMA_CH0_CONTROL, DMA_CH0_CONTROL_PBLX8);
+    /* ST is transmit store-and-forward, i.e. the DMA hands the MAC a whole
+     * frame instead of dribbling it out.  OSP is the descriptor-list operation
+     * mode: set selects ring mode over chain mode, and because this driver only
+     * ever builds rings terminated by the last descriptor, OSP has to stay set
+     * or the DMA walks the array as a chain and never wraps. */
     gmac_write(base, DMA_CH0_TX_CONTROL,
                DMA_CH0_TX_CONTROL_ST | DMA_CH0_TX_CONTROL_OSP |
                (16 << DMA_CH0_TX_CONTROL_TXPBL_SHIFT));
+    /* SR is receive store-and-forward.  RBSZ[15:1] is a 15-bit count in
+     * *bytes*, hence the shift by 1: a buffer of 32768 bytes or more would
+     * overflow the field and the DMA would truncate every frame.  RXPBL is the
+     * receive burst length in the same 256-descriptor units as TXPBL. */
     gmac_write(base, DMA_CH0_RX_CONTROL,
                DMA_CH0_RX_CONTROL_SR |
                ((GMAC_BUF_SIZE << DMA_CH0_RX_CONTROL_RBSZ_SHIFT) & DMA_CH0_RX_CONTROL_RBSZ_MASK) |
@@ -458,17 +533,28 @@ int starfive_gmac_send(uintptr_t base, const void *pkt, size_t len) {
     }
 
     memcpy(priv->tx_buf[idx], pkt, len);
+    /* 60 is the Ethernet minimum frame size (64 bytes) minus the 4-byte FCS the
+     * MAC appends: a shorter frame on copper is dropped by the link partner and
+     * shows up only as a transmit with no matching receive anywhere. */
     if (len < 60) {
         memset(priv->tx_buf[idx] + len, 0, 60 - len);
         len = 60;
     }
     dma_sync_for_device(priv->tx_buf[idx], len);
 
+    /* des2 carries the frame length; des3 carries OWN, FD, LD and the same
+     * length in its low 15 bits.  The full barrier between the two stores is
+     * required: OWN is the handoff, and without it the DMA can observe the
+     * handoff before the length store is visible and transmit a zero-length
+     * frame.  OWN, FD and LD share one store, so the handoff is atomic. */
     desc->des2 = (uint32_t)len;
     __sync_synchronize();
     desc->des3 = DESC3_OWN | DESC3_FD | DESC3_LD | (uint32_t)len;
     dma_sync_for_device(desc, sizeof(*desc));
 
+    /* The value is the physical address of the next descriptor and
+     * DMA_CH0_TXDESC_TAIL_PTR is 32 bits wide, so the cast below silently
+     * truncates if a ring ever lands above 4 GiB. */
     /* Wake DMA: writing the tail pointer is a write barrier for the ring. */
     paddr_t next_desc_pa = va_to_pa((const void *)&priv->tx_desc[(idx + 1) % GMAC_DESC_NUM]);
     gmac_write(base, DMA_CH0_TXDESC_TAIL_PTR, (uint32_t)next_desc_pa);
@@ -495,6 +581,9 @@ int starfive_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
     dma_sync_for_cpu(desc, sizeof(*desc));
     dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
+    /* The length the DMA wrote back lives in the low 15 bits of des3, the same
+     * bits the transmit path programs, and the count includes the 4-byte FCS
+     * that follows the frame, so the payload is four bytes shorter. */
     uint32_t frame_len = desc->des3 & 0x7FFF;
     if (frame_len < 4) {
         desc->des3 = DESC3_OWN | DESC3_BUF1V;
@@ -513,6 +602,8 @@ int starfive_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
     desc->des3 = DESC3_OWN | DESC3_BUF1V;
     dma_sync_for_device(desc, sizeof(*desc));
 
+    /* Handing one descriptor back is done by pointing the tail at that
+     * descriptor's own address, which doubles as the re-arm for the DMA. */
     paddr_t tail_pa = va_to_pa((const void *)desc);
     gmac_write(base, DMA_CH0_RXDESC_TAIL_PTR, (uint32_t)tail_pa);
 
@@ -533,6 +624,11 @@ int starfive_gmac_poll(uintptr_t base) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
+    /* DMA_CH0_STATUS is write-1-to-clear, so the value that was read has to go
+     * back unmodified: the 1 bits are what clear, and inverting them -- the
+     * reflex from the read-to-clear registers used elsewhere in the tree --
+     * leaves every status bit latched forever.  A bit that gets set between the
+     * read and the write simply survives to the next poll. */
     uint32_t status = gmac_read(base, DMA_CH0_STATUS);
     if (status)
         gmac_write(base, DMA_CH0_STATUS, status);

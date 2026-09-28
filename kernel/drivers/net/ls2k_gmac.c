@@ -42,6 +42,14 @@
 #define MAC_ADDR0_LOW      (GMAC_MAC_BASE + 0x0044)
 #define MAC_RGMII_STATUS   (GMAC_MAC_BASE + 0x00D8)
 
+/* This controller is the older DWMAC revision, so MAC_MII_ADDR is
+ * { GB[0], MW[1], CR[5:2], reserved, GR[10:6], PA[15:11] }: GB busy, MW
+ * write-enable, CR a range selector for the MDC divider, GR the register index
+ * and PA the PHY address.  There is no GOC opcode field on this variant at all
+ * -- the newer EQOS part in kernel/drivers/net/starfive_gmac.c has one, at
+ * different bit positions for every field here -- so a read returns its payload
+ * in MAC_MII_DATA once GB clears, with no "post" form to wait for and no code
+ * shared with the other driver. */
 #define MII_ADDR_GB     (1U << 0)
 #define MII_ADDR_MW     (1U << 1)
 #define MII_ADDR_CR_SHIFT 2
@@ -81,6 +89,10 @@
 #define DMA_STATUS_AIS    (1U << 14)
 #define DMA_STATUS_NIS    (1U << 15)
 
+/* DMA_BUS_MODE[0] SWR is a self-clearing reset: the DMA clears it once the
+ * reset has completed, and every DMA register holds its reset value at that
+ * point, which is why the descriptor base addresses programmed after
+ * ls2k_gmac_dma_reset() are the ones that actually reach the hardware. */
 #define DMA_BUS_MODE_SWR  (1U << 0)
 #define DMA_CONTROL_SR    (1U << 1)
 #define DMA_CONTROL_ST    (1U << 13)
@@ -115,6 +127,10 @@ typedef struct {
 #define RX_DESC_RER (1U << 15)
 #define RX_DESC_FRAME_LEN(status) (((status) >> 16) & 0x3FFFU)
 
+/* Link is re-read at 4 Hz rather than on every poll because each check costs
+ * two MDIO transactions (the BMSR double read in ls2k_gmac_read_link) and MDIO
+ * has no completion interrupt of its own; this divider is what keeps the shared
+ * MDIO bus from becoming the reason the data path is late. */
 #define GMAC_LINK_POLL_HZ 4U
 
 #define GMAC_MAX_INSTANCES 4
@@ -185,6 +201,9 @@ static int gmac_mdio_wait(uintptr_t base) {
 
 static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
     if (gmac_mdio_wait(base) != 0) return 0xFFFF;
+    /* A read is issued by clearing MW and setting GB in one store; the payload
+     * is only valid in MAC_MII_DATA after the second gmac_mdio_wait() observes
+     * GB clear, so a stale MII_DATA is never mistaken for an answer. */
     uint32_t val = MII_ADDR_GB |
                    (phy_addr << MII_ADDR_PA_SHIFT) |
                    (reg << MII_ADDR_GR_SHIFT) |
@@ -197,6 +216,9 @@ static uint16_t gmac_mdio_read(uintptr_t base, int phy_addr, int reg) {
 static int gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data) {
     if (gmac_mdio_wait(base) != 0)
         return -1;
+    /* MII_DATA is loaded before MII_ADDR: an MW-armed transfer takes its
+     * payload from the register at the moment the opcode is issued, so the
+     * reverse order pushes the register index out as data. */
     gmac_write(base, MAC_MII_DATA, data);
     uint32_t val = MII_ADDR_GB | MII_ADDR_MW |
                    (phy_addr << MII_ADDR_PA_SHIFT) |
@@ -208,6 +230,9 @@ static int gmac_mdio_write(uintptr_t base, int phy_addr, int reg, uint16_t data)
 
 static int ls2k_gmac_read_link(uintptr_t base, int phy_addr)
 {
+    /* 0xFFFF is what a timed-out MDIO access returns, and a real PHY register
+     * can legitimately read 0xFFFF, so the explicit != 0xFFFFU test is the only
+     * thing separating "no PHY answered" from "the link bit is down". */
     /* BMSR link is latched low, so the current value is the second read. */
     (void)gmac_mdio_read(base, phy_addr, MII_BMSR);
     uint16_t bmsr = gmac_mdio_read(base, phy_addr, MII_BMSR);
@@ -225,10 +250,20 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
         paddr_t tx_buf_pa = va_to_pa((const void *)priv->tx_buf[i]);
         paddr_t rx_buf_pa = va_to_pa((const void *)priv->rx_buf[i]);
 
+        /* The first word of a transmit descriptor is the status/control word:
+         * OWN hands it to the DMA and TER is the ring-end marker, set on the
+         * *last* descriptor of the ring and on no other.  Leave the marker off
+         * and the DMA walks the array once and never comes back. */
         priv->tx_desc[i].status = i == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0;
         priv->tx_desc[i].buffer1 = (uint32_t)tx_buf_pa;
 
+        /* An RX descriptor is handed over with OWN already set: that means the
+         * buffer is available for the hardware to fill, and the DMA clearing
+         * OWN is the only completion notification the CPU ever receives. */
         priv->rx_desc[i].status = RX_DESC_OWN;
+        /* The third word of an RX descriptor carries the receive buffer size
+         * together with RX_DESC_RER, the ring-end marker, which again belongs on
+         * the last descriptor only. */
         priv->rx_desc[i].length = GMAC_BUF_SIZE |
                                   (i == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
         priv->rx_desc[i].buffer1 = (uint32_t)rx_buf_pa;
@@ -237,6 +272,10 @@ static void ls2k_gmac_init_desc(uintptr_t base, ls2k_gmac_priv_t *priv) {
     dma_sync_for_device(priv->tx_desc, sizeof(priv->tx_desc));
     dma_sync_for_device(priv->rx_desc, sizeof(priv->rx_desc));
 
+    /* 32-bit physical addresses only.  This DMA revision has no descriptor-list
+     * high-address register -- the EQOS part in starfive_gmac.c has a HADDR
+     * pair for exactly this -- so a ring placed above 4 GiB cannot be
+     * programmed at all and the casts would truncate silently. */
     gmac_write(base, DMA_TX_BASE_ADDR, (uint32_t)tx_desc_pa);
     gmac_write(base, DMA_RX_BASE_ADDR, (uint32_t)rx_desc_pa);
 
@@ -314,6 +353,10 @@ int ls2k_gmac_init(uintptr_t base) {
         return -1;
     memcpy(priv->mac, (uint8_t[]){0x00, 0x55, 0x7B, 0xB5, 0x7D, 0xF7}, 6);
 
+    /* MAC_VERSION is the IP identity: [15:8] is the user id and [7:0] the
+     * Synopsys id, so 0x0000d137 is the DWMAC 1000 core this board carries
+     * (0x37, user id 0xd1).  A window that reads 0 or all-ones is not a GMAC at
+     * all, and every offset used below is then meaningless. */
     uint32_t version = gmac_read(base, MAC_VERSION);
     kinfo("[LS2K-GMAC] MAC version 0x%08x\n", version);
     if (ls2k_gmac_dma_reset(base) != 0)
@@ -323,8 +366,14 @@ int ls2k_gmac_init(uintptr_t base) {
     gmac_write(base, MAC_CONFIGURATION, 0);
     ls2k_gmac_init_desc(base, priv);
 
+    /* Bit 0 is RA (receive all) and bit 31 is PC, the controller's separate
+     * promiscuous switch, so the address filter stops rejecting in either
+     * direction: both are set for bring-up, when a frame has to be accepted
+     * regardless of what happened to the MAC_ADDR0 pair programmed next. */
     gmac_write(base, MAC_FRAME_FILTER, 0x80000001);
     gmac_write(base, MAC_FLOW_CTRL, 0);
+    /* MAC_INTERRUPT_MASK is write-1-to-clear over the MAC interrupt-status
+     * bits, so writing all ones masks every MAC-level source. */
     gmac_write(base, MAC_INTERRUPT_MASK, 0xFFFFFFFFU);
 
     uint32_t high = (priv->mac[5] << 8) | priv->mac[4] | (1U << 31);
@@ -341,6 +390,11 @@ int ls2k_gmac_init(uintptr_t base) {
 
     /* Polling is the deliberate Phase 3 baseline. Device IRQ sources remain
      * masked in LIOINTC until the data path is validated with a cable. */
+    /* DMA_STATUS is write-1-to-clear as well, so the all-ones write erases
+     * every status bit the reset left latched.  The control word goes last and
+     * whole: SR and ST are the receive and transmit store-and-forward enables,
+     * and until that final store the DMA is not walking either ring, so it
+     * cannot touch a descriptor that is still being armed. */
     gmac_write(base, DMA_INTR_ENABLE, 0);
     gmac_write(base, DMA_STATUS, 0xFFFFFFFFU);
     gmac_write(base, DMA_CONTROL,
@@ -372,6 +426,9 @@ int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
     size_t packet_len = len;
     size_t dma_len = len;
     memcpy(priv->tx_buf[idx], pkt, dma_len);
+    /* 60 is the Ethernet minimum frame size (64 bytes) minus the 4-byte FCS the
+     * MAC appends; a shorter frame on copper is dropped by the link partner and
+     * shows up only as a transmit with no matching receive. */
     if (dma_len < 60) {
         memset(priv->tx_buf[idx] + dma_len, 0, 60 - dma_len);
         dma_len = 60;
@@ -380,10 +437,20 @@ int ls2k_gmac_send(uintptr_t base, const void *pkt, size_t len) {
 
     desc->length = (uint32_t)dma_len;
     __sync_synchronize();
+    /* FS and LS mark the descriptor as both the first and the last segment of
+     * the frame.  This driver puts one whole frame in one descriptor, so they
+     * are always set together: only one of the two makes the DMA wait for the
+     * rest of a frame that is never submitted and the descriptor never retires.
+     * IC requests the checksum that MAC_CONF_IPC enables at the MAC, and TER is
+     * repeated here only for the ring's last descriptor.  The whole handoff is
+     * one store, so the DMA cannot see a half-armed descriptor. */
     desc->status = TX_DESC_OWN | TX_DESC_IC | TX_DESC_FS | TX_DESC_LS |
                    (idx == GMAC_DESC_NUM - 1 ? TX_DESC_TER : 0);
     dma_sync_for_device(desc, sizeof(*desc));
 
+    /* This DMA revision has no tail pointer: writing the poll-demand register
+     * is what makes the DMA re-read the ring base and pick the descriptor up, so
+     * this store is also the publish step for the descriptor writes above. */
     gmac_write(base, DMA_TX_POLL_DEMAND, 1);
 
     priv->tx_busy = (idx + 1) % GMAC_DESC_NUM;
@@ -412,6 +479,9 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
 
     dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
 
+    /* ES is the error-summary bit in the status word: whatever the DMA put in
+     * the buffer is unusable, so the descriptor is re-armed and the poll keeps
+     * going instead of handing a corrupt frame up. */
     if (desc->status & RX_DESC_ES) {
         dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
         desc->length = GMAC_BUF_SIZE |
@@ -424,12 +494,19 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
         return -1;
     }
 
+    /* FRM is the frame-length field in the upper half of the status word, above
+     * the ownership and error bits, and the count includes the 4-byte FCS the
+     * DMA copied in behind the frame, so the payload is four bytes shorter. */
     uint32_t frame_len = RX_DESC_FRAME_LEN(desc->status);
     uint32_t len = frame_len >= 4 ? frame_len - 4 : 0;
     if (len > maxlen) len = maxlen;
     if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
     dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
+    /* The hand-back rewrites the whole descriptor: status (OWN) and the third
+     * word (buffer size plus the ring-end marker on the last descriptor) are
+     * re-armed together, exactly as the error path above does, so both exits
+     * leave the ring in the same armed state. */
     desc->length = GMAC_BUF_SIZE |
                    (idx == GMAC_DESC_NUM - 1 ? RX_DESC_RER : 0);
     desc->status = RX_DESC_OWN;
@@ -453,6 +530,9 @@ int ls2k_gmac_poll(uintptr_t base) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&priv->lock);
+    /* DMA_STATUS is write-1-to-clear, so the value that was read has to go back
+     * unmodified: the 1 bits are what clear, and inverting them leaves every
+     * status bit latched for the life of the driver. */
     uint32_t status = gmac_read(base, DMA_STATUS);
     if (status)
         gmac_write(base, DMA_STATUS, status);
