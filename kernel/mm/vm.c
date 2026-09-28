@@ -434,14 +434,13 @@ static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_
  *   does not perform blocking I/O.
  */
 
-// 创建一个新的内存描述符
 mm_struct_t *mm_create(void) {
     mm_struct_t *mm = kcalloc(1, sizeof(mm_struct_t));
     if (!mm) return NULL;
 
     mm->pgdir = pt_create();
     if (!mm->pgdir) { kfree(mm); return NULL; }
-    pt_map_kernel(mm->pgdir);  // 映射内核空间
+    pt_map_kernel(mm->pgdir);
 
     mm->mmap       = NULL;
     mm->brk        = 0;
@@ -470,9 +469,6 @@ mm_struct_t *mm_get(mm_struct_t *mm) {
     return mm;
 }
 
-// 释放 VMA 对应的物理页面
-
-// 销毁内存描述符及其所有资源
 void mm_destroy(mm_struct_t *mm) {
     if (!mm) return;
     if (!refcount_dec_and_test(&mm->refcount)) return;
@@ -490,7 +486,9 @@ void mm_destroy(mm_struct_t *mm) {
      * list and page table are torn down. */
     aio_context_reap_mm(mm);
 
-    // 释放所有 VMA 及其物理页面
+    /* Publish any VMA whose teardown was deferred, then walk the list and drop
+     * each VMA's own pages.  free_vma_pages() lives in mm/vma.c; the split
+     * keeps the cold teardown path out of the hot map/unmap code. */
     mm_vma_flush_deferred(mm);
     vm_area_t *vma = mm->mmap;
     while (vma) {
@@ -518,32 +516,6 @@ void mm_destroy(mm_struct_t *mm) {
     kfree(mm);
 }
 
-// 查找包含指定地址的 VMA
-
-
-
-// 创建内存映射（mmap 系统调用的实现）
-
-
-/*
- * mm_mmap_vmo — map a VMO into an address space (Native ABI page source).
- *
- * VM_VMO is a shared mapping of the VMO's canonical frames: the VMO owns the
- * frames, demand faults materialize them on first touch, and fork shares the
- * same frames rather than copy-on-writing them.  The VMA takes one VMO
- * reference, released by vma_release() on unmap/teardown.
- */
-
-
-
-
-// 取消内存映射（munmap 系统调用的实现）
-
-// 调整堆大小（brk 系统调用的实现）
-
-// 修改内存区域的保护属性（mprotect 系统调用的实现）
-
-// 创建子进程的内存空间（fork 时使用，实现写时复制）
 /* MM_FORK_COW_REGRESSION_GUARD:
  * 在修改父进程页表（设置 COW 标志）时持有 parent->lock，防止与父进程
  * 的并发页错误处理产生竞争。回归场景：父进程多线程或模拟并发 page
