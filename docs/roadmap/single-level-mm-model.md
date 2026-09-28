@@ -4333,15 +4333,37 @@ handler 永远收不到事件。这正是 `test_uffd_double_registration()` 断�
 **因此本项的状态应记为「被更高性价比的方案取代」而非「未做」**，
 真正的遗留是：**x86_64 交错 A/B 测量本身尚未执行**。
 
-#### 该测量尚未执行的确切原因（如实记录）
+#### 该测量尚未执行的确切原因（**更正 §10.69 的一处错误断言**）
 
-不是方法问题，是**基准程序没进镜像**。`user/cmds/stress/cortenmm_bench.c` 存在，
-但 `dev-build` 产出的 `x86_64-...-dev/fat32.img` 里**找不到该二进制**
-（镜像为 FAT32，`file` 报 `mkfs.fat`；镜像内 `mm_stress` 可直接运行，
-说明用户命令构建链路本身是通的，故问题在于**该基准未被纳入构建清单**，
-而非构建整体失效）。本轮上下文已尽，未能定位构建清单并把它加进去。
+**本节此前写「基准程序没进镜像」，这是错的。** `cortenmm_bench` **确实已被构建**：
 
-**下一步（明确）**：把 `cortenmm_bench` 纳入 dev 镜像的用户命令构建清单，
-然后执行 x86_64 交错 A/B：`ON,OFF,ON,OFF,…` 至少 6 轮，读 `/proc/a20/perf`
-的 mmap / mmap-PF 两项（论文 SS6.2：mmap 略慢、mmap-PF 更快），
-报告中位数与离散度；**在拿到这组数之前，不得对 x86_64 的性能下任何结论**。
+```
+$ ls user/build/x86_64/ | grep -E "mm_stress|cortenmm_bench"
+cortenmm_bench
+mm_stress
+```
+
+错误的原因很单纯：用户命令产物落在 **`user/build/$(ARCH)/`**（`Makefile:160`
+`USER_BUILD_DIR = user/build/$(USER_VARIANT)`），而我当时去 `.kernel-build/` 里找，
+那个目录只放内核与镜像，自然什么都看不到。**「`dev-build` 镜像里找不到该二进制」
+这个推论本身也是无效的**——`fat32.img` 是运行期磁盘镜像，而用户命令在构建期就装进去了，
+二者本来就不该用「文件存不存在」的方式对应起来。
+
+**所以 A/B 没有任何实现层面的阻塞，纯属我此前找错了目录。** 基准接口已确认：
+
+```
+usage: cortenmm_bench {mmap|mmap-pf|pf|unmap-virt|unmap|all} [threads]
+```
+
+论文 SS6.2 对应的正是前两项：`mmap`（应略慢）与 `mmap-pf`（应更快）。
+
+**下一步（明确，已无实现阻塞）**：直接执行 x86_64 交错 A/B。
+1. 用 `EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=4096` 与 `=0` 各构建一个 x86_64 内核并**分别留存**；
+2. 交替运行 `ON, OFF, ON, OFF, …` **至少 6 轮**（两臂必须交错，顺序跑无效——宿主是共享的）；
+3. 每轮先 `cat /proc/a20/perf` 预热计数器，再跑 `cortenmm_bench mmap` 与
+   `cortenmm_bench mmap-pf`；
+4. 报告**中位数与离散度**（不是单次值），并同时给出两平台的
+   `mm_anon_provisioned` / `mm_fault_from_status` 作为「该臂确实生效」的证据。
+
+**在拿到这组数之前，不得对 x86_64 的性能下任何结论**——包括不得声称「预标记中性」
+（riscv64 上的中性结论不能外推到 x86_64，宿主噪声量级不同）。
