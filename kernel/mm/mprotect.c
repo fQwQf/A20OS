@@ -6,6 +6,7 @@
 #include "mm/vmo.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -132,6 +133,12 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                 }
                 va = base + size;
             } else {
+                /* Reserved by mmap but never faulted: there is no PTE to
+                 * carry the new permissions, and the per-PTE status is what a
+                 * later fault will install.  Refresh it here, or mprotect is
+                 * silently ignored for this page. */
+                int idx = arch_pt_vpn(va, 0);
+                mm_pt_refresh_absent_prot(pte - idx, idx, ptef);
                 va += PAGE_SIZE;
             }
         }

@@ -64,6 +64,10 @@ typedef enum a20_perf_counter {
     A20_PERF_MM_CG_LOCK_CONTENDED,
     A20_PERF_MM_PFA_LOCK_ACQUIRES,
     A20_PERF_MM_PFA_LOCK_CONTENDED,
+    /* MM_AS_ANON_PROVISION: leaves marked reserved-but-not-backed at mmap.
+     * The shutdown audit cannot witness this state (address spaces are gone
+     * by then), so it needs its own counter to be observable. */
+    A20_PERF_MM_ANON_PROVISIONED,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,
