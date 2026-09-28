@@ -214,6 +214,8 @@ void mm_pt_mark_stale_recursive(pte_t *table, int level);
 int  mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags);
 int  mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags);
 int  mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags);
+int  mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                          unsigned flags, int set);
 
 /* Grace-period reclamation for detached PT pages; see the comment above
  * mm_pt_retire_drain().  Callable from any context -- needs neither mm->lock

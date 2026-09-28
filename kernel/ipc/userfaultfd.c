@@ -12,6 +12,7 @@
 #include "fs/vfs.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
+#include "mm/pt.h"
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "proc/park.h"
@@ -461,6 +462,14 @@ static int uffd_io_register(userfaultfd_t *uffd, void *arg)
     g_uffd_range_count++;
     spin_unlock_irqrestore(&g_uffd_lock, gflags);
 
+    /* The range is live now, so record it per entry: a fault in here must be
+     * parked for the handler rather than satisfied by fabricating a zero page.
+     * Done after the unlock (and under mm->lock) so the page-table walk is not
+     * nested inside the global range lock. */
+    spin_lock(&mm->lock);
+    mm_pt_set_safe_range(mm, (vaddr_t)start, (vaddr_t)end, MM_SAFE_UFFD, 1);
+    spin_unlock(&mm->lock);
+
     reg.ioctls = (1ULL << 0x01) | (1ULL << 0x02) |
                  (1ULL << 0x03) | (1ULL << 0x04);
     if (copy_to_user(arg, &reg, sizeof(reg)) < 0)
@@ -486,10 +495,18 @@ static int uffd_io_unregister(userfaultfd_t *uffd, void *arg)
 
     uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
     int removed = 0;
+    vaddr_t rlo = 0, rhi = 0;   /* union of the ranges actually removed */
     userfaultfd_range_t *r = uffd->ranges;
     while (r) {
         userfaultfd_range_t *next = r->next;
         if ((uint64_t)r->start < end && (uint64_t)r->end > start) {
+            if (!removed) {
+                rlo = r->start;
+                rhi = r->end;
+            } else {
+                if (r->start < rlo) rlo = r->start;
+                if (r->end > rhi)   rhi = r->end;
+            }
             userfaultfd_range_unlink(r);
             userfaultfd_drop_range(r);
             removed++;
@@ -498,8 +515,25 @@ static int uffd_io_unregister(userfaultfd_t *uffd, void *arg)
     }
     spin_unlock_irqrestore(&g_uffd_lock, flags);
 
-    if (removed)
+    if (removed) {
+        /* Drop the per-entry UFFD marks for what we just unregistered.
+         *
+         * A page can in principle still be covered by a *different* uffd
+         * registration, so this clears more than strictly necessary.
+         * userfaultfd_range_present() remains the authoritative test on the
+         * VMA fault path and is untouched, so a stale mark cannot make a fault
+         * skip its handler today.  Before the status fault path is enabled
+         * (docs 10.7/10.19) this has to be refined to clear per page while
+         * re-testing presence, otherwise an over-clear would let a still-
+         * registered page be faulted without parking. */
+        task_t *t = proc_current();
+        if (t && t->mm) {
+            spin_lock(&t->mm->lock);
+            mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
+            spin_unlock(&t->mm->lock);
+        }
         wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
+    }
     return removed ? 0 : -ENOENT;
 }
 

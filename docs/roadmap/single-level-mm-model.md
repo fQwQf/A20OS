@@ -1534,3 +1534,39 @@ userfaultfd、`VM_SHARED` 与 fault-around 的安全门。论文的设想是用 
 验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64 的
 NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model`
 通过，审计 `missing_meta/present/absent/prot/cow/vma/anon_virt` 全 0，`pt_pages=6` 不变。
+
+### 10.19 把安全位接到真正会改变安全语义的 syscall 上
+
+§10.18 只是把位加出来了。这一步把它们接到真正的写入方。
+
+新增 `mm_pt_set_safe_range(mm, start, end, flags, set)`：按 leaf 逐块遍历
+（像 madvise 那样把查表摊销掉，而不是每页查一次），`set==0` 时清除。
+
+**mseal**（`kernel/mm/mseal.c`，`mm_mseal_locked` 内，调用方已持 `mm->lock`）：
+对每个被 seal 的 VMA 交集 `[a, b)` 置 `MM_SAFE_NO_FA`。seal 存在的原因是冻结这段
+状态，而多页 fault-around 会**投机地**给邻居装帧——那正是 seal 要禁止的副作用。
+
+**userfaultfd UFFDIO_REGISTER**（`kernel/ipc/userfaultfd.c`）：在 range 真正挂上
+`uffd->ranges` **之后**、`g_uffd_lock` 释放之后，置 `MM_SAFE_UFFD`。放在成功之后而非
+校验循环里，是因为校验失败（覆盖不足 / 与既有注册重叠）时 range 并不存在，那时就标位
+等于凭空造出一个「已被注册」的页面。
+
+**userfaultfd UFFDIO_UNREGISTER**：清掉**实际移除**的那段（记录移除 range 的并集，
+而不是直接用请求范围），同样在 `g_uffd_lock` 之外、`mm->lock` 之下做页表遍历，避免
+在全局 range 锁里嵌一次页表走表。
+
+**一处必须写明的保守之处**：同一页面原则上可被**另一个** uffd 的注册覆盖，所以 unregister
+这里的清除会**清得比严格需要的多**。今天这是安全的——VMA 缺页路径上真正的权威判定是
+`userfaultfd_range_present()`，本次完全没动它，残留的位也不会让缺页跳过 handler。
+但**在状态缺页路径启用之前，这必须改成逐页复查 presence 后再清**，否则「清多了」会让
+仍被注册的页面不经停靠直接缺页成功。
+
+**当前状态**：这些位**已写入但仍无人读取**——读取方是尚未启用的状态缺页路径
+（`mm_fault_from_status` 仍恒为 0），所以行为零变化。这是纯铺垫。
+
+**尚未完成**：todo 里与本项并列的「在 MM-ASM auditor 里加 status-vs-VMA 一致性检查」
+还没做。启用状态路径之前必须有它，否则无法证明状态与 VMA 等价。
+
+验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64
+的 NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、
+`check-mm-lock-model` 通过，审计全 0，`pt_pages=6` 不变。

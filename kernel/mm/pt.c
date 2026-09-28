@@ -358,6 +358,53 @@ int mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags)
     return (*sb & (flags & MM_SAFE_MASK)) == (flags & MM_SAFE_MASK);
 }
 
+/*
+ * Set or clear per-entry safety bits over a whole virtual range.
+ *
+ * Walks leaf by leaf (amortising the page-table lookup the way madvise does)
+ * rather than looking the leaf up once per page.  `set == 0` clears.
+ *
+ * Only entries that already carry a mapping are touched: mm_pt_safe_set()
+ * refuses an MM_ST_INVALID slot, because a safety bit with no mapping behind
+ * it has no meaning and would never be cleared.  That is the right behaviour
+ * for both callers -- a page inside a sealed VMA that has not been faulted yet
+ * is still legitimately faultable (first touch is not a seal violation), so
+ * there is nothing for NO_FA to suppress, and UFFDIO_REGISTER only accepts
+ * ranges already backed by a VMA.
+ */
+int mm_pt_set_safe_range(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                         unsigned flags, int set)
+{
+    if (!mm || !mm->pgdir || end <= start || !flags)
+        return -EINVAL;
+    if (start & (PAGE_SIZE - 1) || end & (PAGE_SIZE - 1))
+        return -EINVAL;
+
+    for (vaddr_t va = start; va < end; ) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        if (!pte || !size) {
+            va += PAGE_SIZE;
+            continue;
+        }
+        pte_t *table = pte - arch_pt_vpn(va, 0);
+        vaddr_t leaf_end = base + size;
+        vaddr_t from = base < start ? start : base;
+        vaddr_t to = leaf_end < end ? leaf_end : end;
+        for (vaddr_t p = from; p < to; p += PAGE_SIZE) {
+            int idx = arch_pt_vpn(p, 0);
+            if (set)
+                mm_pt_safe_set(table, 0, idx, flags);
+            else
+                mm_pt_safe_clear(table, 0, idx, flags);
+        }
+        va = leaf_end < end ? leaf_end : end;
+    }
+    return 0;
+}
+
 uint8_t mm_pt_peek(pte_t *table, int level, int idx)
 {
     (void)level;
