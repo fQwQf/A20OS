@@ -298,6 +298,21 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef);
  * that is likely to stay sparse. */
 #define MM_ANON_PROVISION_MAX_PAGES 4096u
 
+/*
+ * Eager provisioning is OFF by default, and boots that way unless
+ * a20.anonprov=<pages> is given.  Interleaved A/B (docs 10.14) showed it costs
+ * ~14% on mmap -- 6/6 pairs, p~0.016 -- while buying nothing measurable,
+ * because the only consumer of the status marks, the status-driven fault path,
+ * has never executed (mm_fault_from_status is always 0, docs 10.6).  Paying
+ * 14% for zero benefit is a net loss, so the default is off.
+ *
+ * MM_ANON_PROVISION_MAX_PAGES is the recommended value to pass when the
+ * status fault path does become usable; the groundwork stays in place and is
+ * one boot parameter away, and this default costs no functionality.
+ */
+#define MM_ANON_PROV_KEY   "a20.anonprov"
+void mm_pt_anon_prov_init(void);
+
 int mm_pt_provision_anon(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                          pte_t flags);
 
