@@ -1,16 +1,17 @@
 /*
  * gpu3d_test: exercise the A20 virtio-gpu 3D path end to end.
  *
- * Two layers are covered, and the distinction matters:
+ * Everything here goes through the DRM_IOCTL_VIRTGPU_* UAPI -- the interface
+ * Mesa's virtio_gpu_dri.so actually speaks, and the part that decides whether
+ * stock Mesa can attach at all.  So it gets exercised for real: capability
+ * negotiation, capset retrieval, GEM allocation, a 3D resource with
+ * host-visible backing, resource info round-trip, and a command-stream submit.
  *
- *  1. The virtio-gpu 3D transport (A20_GPU_IOCTL_*).  Cheap, and the first
- *     thing to break if a QEMU config stops offering virgl.
- *
- *  2. The DRM_IOCTL_VIRTGPU_* UAPI -- the interface Mesa's virtio_gpu_dri.so
- *     actually speaks.  This is the part that decides whether stock Mesa can
- *     attach at all, so it gets exercised for real: capability negotiation,
- *     capset retrieval, GEM allocation, a 3D resource with host-visible
- *     backing, resource info round-trip, and a command-stream submit.
+ * There used to be a cheaper private transport ABI underneath this, probed
+ * first.  It is gone: every call it made is covered by the UAPI above, and
+ * only the UAPI is the one Mesa speaks.  What it did provide that mattered is
+ * kept -- the ability to tell "this device has no 3D" apart from "3D is
+ * broken", now read from VIRTGPU_PARAM_3D_FEATURES instead.
  *
  * Exit codes are meaningful and must stay that way:
  *   0   PASS  -- a virgl device was present and every step above succeeded
@@ -37,14 +38,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-#define A20_GPU_IOCTL_BASE          0x4700UL
-#define A20_GPU_IOCTL_CTX_CREATE    (A20_GPU_IOCTL_BASE + 1)
-#define A20_GPU_IOCTL_CTX_DESTROY   (A20_GPU_IOCTL_BASE + 2)
-#define A20_GPU_IOCTL_RES_CREATE_3D (A20_GPU_IOCTL_BASE + 3)
-#define A20_GPU_IOCTL_RES_UNREF     (A20_GPU_IOCTL_BASE + 4)
-#define A20_GPU_IOCTL_VIRGL_CHECK   (A20_GPU_IOCTL_BASE + 6)
 
-#define DRM_IOCTL_GEM_CREATE  0xc018640cUL
+/* A20-private: the Linux UAPI has no GEM_CREATE, so there is no upstream
+ * number to match.  tools/check-drm-abi.sh checks the real DRM_* numbers here
+ * against the installed UAPI headers. */
+#define A20_GPU_IOCTL_GEM_CREATE 0x00004710UL
 #define DRM_IOCTL_GEM_CLOSE   0x40086409UL
 #define DRM_IOCTL_VIRTGPU_GETPARAM        0xc0106443UL
 #define DRM_IOCTL_VIRTGPU_GET_CAPS        0xc0186449UL
@@ -63,12 +61,6 @@
 #define TEST_H 64
 #define TEST_BPP 4
 
-struct virtio_gpu_3d_req {
-    uint32_t ctx_id, resource_id, target, format, bind, width, height, depth;
-    uint32_t array_size, last_level, nr_samples, flags, context_init;
-    uint64_t cmdbuf, cmdlen;
-    char name[32];
-};
 
 struct drm_gem_create {
     uint32_t width, height, format, bpp, size, handle;
@@ -118,60 +110,21 @@ int main(void)
     if (fd < 0)
         return fail("open /dev/dri/card0");
 
-    struct virtio_gpu_3d_req r;
-    memset(&r, 0, sizeof(r));
-    if (ioctl(fd, A20_GPU_IOCTL_VIRGL_CHECK, &r) < 0) {
-        if (errno == ENXIO) {
-            printf("GPU3D_TEST: SKIP 2D-only device (build with GPU_3D=1 to test 3D)\n");
-            close(fd);
-            return EXIT_SKIP;
-        }
-        return fail("VIRGL_CHECK");
-    }
-    printf("GPU3D_TEST: virgl device present\n");
-
-    /* --- layer 1: raw transport --- */
-    r.ctx_id = 1;
-    r.context_init = 1;
-    memcpy(r.name, "a20-gpu3d-test", 15);
-    if (ioctl(fd, A20_GPU_IOCTL_CTX_CREATE, &r) < 0)
-        return fail("CTX_CREATE");
-    printf("GPU3D_TEST: transport ctx created\n");
-
-    memset(&r, 0, sizeof(r));
-    r.ctx_id = 1;
-    r.resource_id = 2;
-    r.target = 2;          /* GL_TEXTURE_2D */
-    r.format = 0x8058;     /* GL_RGBA8 */
-    r.bind = 0x0001;
-    r.width = 16;
-    r.height = 16;
-    r.depth = 1;
-    r.array_size = 1;
-    if (ioctl(fd, A20_GPU_IOCTL_RES_CREATE_3D, &r) < 0)
-        return fail("RES_CREATE_3D");
-    printf("GPU3D_TEST: transport resource created\n");
-
-    memset(&r, 0, sizeof(r));
-    r.ctx_id = 1;
-    r.resource_id = 2;
-    if (ioctl(fd, A20_GPU_IOCTL_RES_UNREF, &r) < 0)
-        return fail("RES_UNREF");
-    memset(&r, 0, sizeof(r));
-    r.ctx_id = 1;
-    if (ioctl(fd, A20_GPU_IOCTL_CTX_DESTROY, &r) < 0)
-        return fail("CTX_DESTROY");
-    printf("GPU3D_TEST: transport teardown clean\n");
-
-    /* --- layer 2: the VIRTGPU UAPI Mesa speaks --- */
+    /* --- the VIRTGPU UAPI Mesa speaks --- */
     struct drm_virtgpu_getparam p;
     p.param = VIRTGPU_PARAM_3D_FEATURES;
     p.value = 0;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &p) < 0)
         return fail("VIRTGPU_GETPARAM 3D_FEATURES");
+    /* SKIP rather than FAIL when the device negotiated no virgl.  The kernel
+     * answers this from the feature bits it actually agreed with the host, so
+     * 0 here means "there is no 3D path on this device" -- which is what a
+     * GPU_3D=0 instance is -- and not "3D is broken".  Collapsing the two is
+     * what made an earlier revision of this test green everywhere. */
     if (p.value != 1) {
-        printf("GPU3D_TEST: FAIL host reports no 3D features\n");
-        return EXIT_FAIL;
+        printf("GPU3D_TEST: SKIP 2D-only device (build with GPU_3D=1 to test 3D)\n");
+        close(fd);
+        return EXIT_SKIP;
     }
     printf("GPU3D_TEST: GETPARAM 3D_FEATURES=1\n");
 
@@ -217,7 +170,7 @@ int main(void)
     g.bpp = TEST_BPP * 8;
     g.size = TEST_W * TEST_H * TEST_BPP;
     g.handle = 0;
-    if (ioctl(fd, DRM_IOCTL_GEM_CREATE, &g) < 0)
+    if (ioctl(fd, A20_GPU_IOCTL_GEM_CREATE, &g) < 0)
         return fail("GEM_CREATE");
     if (g.handle == 0) {
         printf("GPU3D_TEST: FAIL GEM_CREATE returned handle 0\n");

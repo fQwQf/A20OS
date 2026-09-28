@@ -131,7 +131,7 @@ FBIO_MAP_FB 映射要求用户地址页对齐、范围不溢出 `USER_VA_LIMIT`�
 
 ### VirtIO GPU 3D (virgl)
 
-当 QEMU 以 `virtio-gpu-gl-*` 设备（带 `-display egl-headless` 等 OpenGL 后端）启动时，驱动协商 `VIRTIO_GPU_F_VIRGL`，并可通过 `A20_GPU_IOCTL_*` 把 virgl 命令流转发给 host 端 GL 上下文（`CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`）。接口、实现与用户态对接见 [3D 图形加速栈](../../graphics/3d-graphics.md)。2D-only 设备自动回退，`gpu3d_test` 会报告 `2D-only device, skipping 3D path`。
+当 QEMU 以 `virtio-gpu-gl-*` 设备（带 `-display egl-headless` 等 OpenGL 后端）启动时，驱动协商 `VIRTIO_GPU_F_VIRGL`，并可通过 `DRM_IOCTL_VIRTGPU_*` 把 virgl 命令流转发给 host 端 GL 上下文（`CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`）。接口、实现与用户态对接见 [3D 图形加速栈](../../graphics/3d-graphics.md)。2D-only 设备自动回退，`gpu3d_test` 读 `VIRTGPU_PARAM_3D_FEATURES` 发现未协商到 virgl 时以退出码 77 报告 `SKIP 2D-only device`。
 
 ## VMSVGA/SVGAv3 范例
 
