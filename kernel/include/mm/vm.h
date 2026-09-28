@@ -94,6 +94,15 @@ typedef struct mm_tlb_hold {
     uint8_t pt_level;     /* MM_TLB_HOLD_PT: order to free the PT frame at */
 } mm_tlb_hold_t;
 
+/* A page-table page that has been unlinked from the tree.  The frame stays
+ * marked FRAME_F_PT (so nothing can hand it out) until the grace period ends;
+ * only then is the metadata dropped and the frame returned to the buddy. */
+typedef struct mm_pt_retire {
+    struct mm_pt_retire *next;
+    pfn_t frame;
+    uint8_t level;          /* order to free the frame at */
+} mm_pt_retire_t;
+
 /*
  * MM_AS_MODEL — the single-level memory model.
  *
@@ -201,6 +210,13 @@ typedef struct mm_struct {
      */
     spinlock_t vma_ref_lock;
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
+    /* PT pages detached from the tree, awaiting a grace period.  Deliberately
+     * NOT the tlb_holds list: a PT page is unreachable through the page table,
+     * which is unrelated to "which addresses did this TLB transaction dirty".
+     * Coupling them would force every teardown call site to open a transaction
+     * and hold mm->lock, and several of them do neither. */
+    mm_pt_retire_t *pt_retire;
+    spinlock_t pt_retire_lock;
     pt_root_t *pgdir;
     vaddr_t    brk;
     vaddr_t    start_brk;

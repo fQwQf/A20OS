@@ -1009,6 +1009,101 @@ int mm_pt_defer_free(struct mm_struct *mm, pte_t *table, int level)
     return 0;
 }
 
+/*
+ * Grace-period reclamation for detached page-table pages.
+ *
+ * mm_addrspace_lock() brackets the entire cursor lifetime with
+ * mm_pt_read_enter()/mm_pt_read_exit() and reads each parent entry exactly
+ * once on the way down.  So once the unlink from the parent has been
+ * published, no *new* cursor can reach this page, and every cursor that
+ * already holds it is counted in mm->pt_readers.  Marking the subtree stale
+ * makes those cursors abandon the node (mm_addrspace_lock re-checks `stale`
+ * under the lock and retries); returning the *frame* only after pt_readers
+ * has been zero closes the remaining window.
+ *
+ * The frame deliberately keeps FRAME_F_PT while it waits, so the buddy cannot
+ * hand it to anyone else; the metadata is dropped at drain time, which is
+ * what makes a cached pointer read back as "no metadata" for an already
+ * detached node.
+ *
+ * This is intentionally independent of the TLB transaction.  A PT page being
+ * unreachable through the page table has nothing to do with which addresses a
+ * shootdown transaction dirtied, and coupling the two would force every
+ * teardown call site to open a transaction and hold mm->lock -- several of
+ * them (vma.c free_vma_pages, sysv_shm, vma.c's demote call) do neither.
+ */
+void mm_pt_retire_drain(mm_struct_t *mm)
+{
+    if (!mm)
+        return;
+
+    for (;;) {
+        uint64_t flags = spin_lock_irqsave(&mm->pt_retire_lock);
+        mm_pt_retire_t *list = mm->pt_retire;
+        /* Only reclaim when no cursor is inside a read-side section.  A cursor
+         * that arrives after this check cannot reach these pages: they are
+         * already unlinked. */
+        if (!list || __atomic_load_n(&mm->pt_readers, __ATOMIC_ACQUIRE)) {
+            spin_unlock_irqrestore(&mm->pt_retire_lock, flags);
+            return;
+        }
+        mm->pt_retire = NULL;
+        spin_unlock_irqrestore(&mm->pt_retire_lock, flags);
+
+        while (list) {
+            mm_pt_retire_t *next = list->next;
+            pfn_t pfn = list->frame;
+            if (pfn_valid(pfn)) {
+                pte_t *table = pfn_to_virt(pfn);
+                mm_pt_node_fini(table);
+                pfa_free(pfn, list->level == ARCH_PT_ROOT_LEVEL
+                                    ? ARCH_PT_ROOT_ORDER : 0);
+            }
+            kfree(list);
+            list = next;
+        }
+        /* Re-check: a retire that raced us is still ours to reclaim. */
+    }
+}
+
+void mm_pt_retire_table(mm_struct_t *mm, pte_t *table, int level)
+{
+    if (!table)
+        return;
+    pfn_t pfn = virt_to_pfn((const void *)table);
+    if (!pfn_valid(pfn))
+        return;
+    if (!mm) {
+        mm_pt_node_fini(table);
+        frame_free(table);
+        return;
+    }
+
+    /* Any cursor that cached this node observes `stale` and re-descends. */
+    mm_pt_mark_stale_recursive(table, level);
+
+    mm_pt_retire_t *r = kcalloc_atomic(1, sizeof(*r));
+    if (!r) {
+        /* Cannot queue.  Fall back to freeing now, which is exactly the
+         * behaviour (and the exposure) this path replaces -- a rare OOM path
+         * is not worth leaking a page-table page over. */
+        mm_pt_node_fini(table);
+        frame_free(table);
+        return;
+    }
+    r->frame = pfn;
+    r->level = (uint8_t)level;
+
+    uint64_t flags = spin_lock_irqsave(&mm->pt_retire_lock);
+    r->next = mm->pt_retire;
+    mm->pt_retire = r;
+    spin_unlock_irqrestore(&mm->pt_retire_lock, flags);
+
+    /* Reclaim straight away when nobody is traversing; otherwise the next
+     * retire, or the teardown drain, will pick it up. */
+    mm_pt_retire_drain(mm);
+}
+
 void mm_pt_mark_stale_recursive(pte_t *table, int level)
 {
     pt_meta_t *m = mm_pt_meta(table);
