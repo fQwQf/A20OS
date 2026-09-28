@@ -156,13 +156,21 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 ├── kernel/
 │   ├── abi/          # 双重 ABI 接口 (linux / native)
 │   ├── arch/         # 指令集机制 (trap, page table, context switch)
+│   ├── boot/         # 启动路径与链接脚本
 │   ├── core/         # 核心基础设施 (锁, timekeeping, panic)
 │   ├── drivers/      # 混合设备驱动抽象与实现
+│   ├── drvmod/       # 驱动包 (a20drv) 装载框架与示例
+│   ├── ext/          # 内核可编程扩展点 (KEP)
 │   ├── fs/           # 模块化 VFS 框架与各文件系统实现
+│   ├── include/      # 跨架构共享的公共头文件
 │   ├── ipc/          # 高级通道通信 (Channels, Events, SysV)
+│   ├── mcu/          # 无 MMU 的 MCU (STM32) bring-up
 │   ├── mm/           # 内存管理, Native VMO/VMAR, OOM, Page Cache
 │   ├── net/          # Socket 层与异步网络进度驱动
-│   └── proc/         # 任务调度与状态机
+│   ├── proc/         # 任务调度与状态机
+│   ├── syscall/      # syscall 分发与追踪
+│   ├── vdso/         # 各架构 vDSO 时间快路径
+│   └── external/     # vendored 第三方源码 (lwIP)，不随上游风格重排
 ├── kernel/platform/  # 板级内存、设备、IRQ、timer 与 SMP 启动
 ├── docs/             # 设计方案与技术专题说明文档
 └── Makefile          # 高度定制化跨平台构建脚本

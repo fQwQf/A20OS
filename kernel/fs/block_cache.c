@@ -249,7 +249,10 @@ static void bcache_set_page_dirty_locked(bcache_t *bc, pcache_entry_t *e,
     }
 }
 
-// 创建块缓存（分配 8192 个 512 字节的块）
+/* Pool is BCACHE_MAX_BLOCKS (1024) entries of BCACHE_BLOCK_SIZE (512) bytes,
+ * i.e. 512 KiB.  Both constants live in kernel/include/fs/block_cache.h; a
+ * previous version of this comment claimed 8192 entries, which contradicted
+ * the header. */
 bcache_t *bcache_create(block_dev_t *dev) {
     bcache_t *bc = (bcache_t *)kmalloc(sizeof(bcache_t));
     if (!bc) return NULL;
