@@ -116,9 +116,21 @@ static void *worker(void *arg)
             break;
         }
         case B_PF: {
-            /* Fault on a pre-existing shared mapping: page fault cost alone. */
+            /* Fault on a pre-existing mapping: page fault cost alone.
+             *
+             * MADV_DONTNEED drops the page table entries but keeps the VMA
+             * (mm_madvise_dontneed only validates VMAs then unmaps PTEs), so
+             * every page below faults cold while the mmap cost stays out of
+             * the measurement.  Re-touching a fixed slice instead would have
+             * measured memcpy from round 1 on -- the warm-page trap mm_pt_scale
+             * warns about, and the reason the old baseline read 0.0014s for
+             * 1T, which is ~93M pages/s and physically impossible for real
+             * faults.  The ANON_VIRT reservation survives the discard, so
+             * these faults still take the VMA-free path, as they should. */
             unsigned char *base = pick_region(id, r);
-            for (size_t off = 0; off < SLICE_MB * 1024u; off += 4096)
+            size_t len = SLICE_MB * 1024u;
+            madvise(base, len, MADV_DONTNEED);
+            for (size_t off = 0; off < len; off += 4096)
                 base[off] = (unsigned char)(off + r);
             break;
         }
@@ -128,6 +140,12 @@ static void *worker(void *arg)
             unsigned char *base = pick_region(id, r);
             size_t len = SLICE_MB * 1024u;
             size_t a = len / 4, b = a + len / 4;
+            /* Populate the hole first.  Without this the unmap frees no pages
+             * at all, so the phase measured a VMA split over an untouched
+             * range rather than the teardown of a populated one -- and the
+             * "next round still faults" claim below was simply false. */
+            for (size_t off = 0; off < len; off += 4096)
+                base[off] = (unsigned char)(off + r);
             munmap(base + a, b - a);
             /* Put it back so the next round still faults. */
             void *p = mmap(base + a, b - a, PROT_READ | PROT_WRITE,
