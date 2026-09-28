@@ -197,8 +197,15 @@ static gpu_dev_ops_t *drm_gpu_ops(void)
  * asking the GPU to transfer it to the host.  Without this bridge, SETCRTC
  * and PAGE_FLIP acknowledge the commit but the host keeps displaying the
  * untouched black primary resource.
+ *
+ * The buffer may be smaller than the scanout and may be positioned anywhere
+ * inside it; the copy is clipped to the scanout and the untouched region is
+ * left alone.  Requiring an exact full-screen match, as this used to, turned
+ * any smaller framebuffer into -EINVAL -- so a client that allocated for a
+ * mode the display later changed could not commit at all, and the failure
+ * surfaced as a compositor error rather than as a clipped blit.
  */
-static int drm_present_buffer(drm_gem_t *b)
+static int drm_present_buffer_at(drm_gem_t *b, uint32_t x, uint32_t y)
 {
     static unsigned int present_count;
     if (!b || !b->vmo)
@@ -214,18 +221,28 @@ static int drm_present_buffer(drm_gem_t *b)
     size_t fb_size = 0;
     if (ops->get_info(dev, &width, &height, &bpp) < 0 ||
         ops->get_fb(dev, &fb_phys, &fb_size) < 0 ||
-        bpp != 32 || b->width != width || b->height != height ||
-        b->pitch < width * 4 || fb_size < (size_t)height * width * 4)
+        bpp != 32 || fb_size < (size_t)height * width * 4)
         return -EINVAL;
+    if (b->width == 0 || b->height == 0 || b->pitch < b->width * 4)
+        return -EINVAL;
+    if (x >= width || y >= height)
+        return -EINVAL;   /* entirely off-screen */
+
+    uint32_t rows = height - y;
+    if (rows > b->height)
+        rows = b->height;
+    uint32_t cols = width - x;
+    if (cols > b->width)
+        cols = b->width;
 
     uint8_t *dst = (uint8_t *)pfn_to_virt(phys_to_pfn(fb_phys));
     if (!dst)
         return -EFAULT;
 
-    for (uint32_t y = 0; y < height; y++) {
-        size_t src_offset = (size_t)y * b->pitch;
-        size_t dst_offset = (size_t)y * width * 4;
-        size_t remaining = (size_t)width * 4;
+    for (uint32_t row = 0; row < rows; row++) {
+        size_t src_offset = (size_t)row * b->pitch;
+        size_t dst_offset = ((size_t)(y + row) * width + x) * 4;
+        size_t remaining = (size_t)cols * 4;
         while (remaining > 0) {
             uint32_t page_index = (uint32_t)(src_offset / PAGE_SIZE);
             size_t page_offset = src_offset & (PAGE_SIZE - 1);
@@ -245,11 +262,14 @@ static int drm_present_buffer(drm_gem_t *b)
         }
     }
 
-    int ret = ops->flush(dev, 0, 0, width, height);
+    /* Flush only the rectangle that was written.  The rest of the host's copy
+     * still holds whatever the previous present left there, which is what a
+     * partial present means. */
+    int ret = ops->flush(dev, x, y, cols, rows);
     if (present_count < 4) {
-        kinfo("[DRM] present handle=%u pages=%lu flush=%d\n",
-              b->handle, (unsigned long)((b->size + PAGE_SIZE - 1) / PAGE_SIZE),
-              ret);
+        kinfo("[DRM] present handle=%u %ux%u at %u,%u pages=%lu flush=%d\n",
+              b->handle, cols, rows, x, y,
+              (unsigned long)((b->size + PAGE_SIZE - 1) / PAGE_SIZE), ret);
         present_count++;
     }
     return ret;
@@ -1268,8 +1288,10 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
     if (!b)
         return -ENOENT;
     /* The minimal KMS implementation presents by copying into the GPU's
-     * primary scanout resource before issuing TRANSFER_TO_HOST_2D. */
-    if (drm_present_buffer(b) < 0)
+     * primary scanout resource before issuing TRANSFER_TO_HOST_2D.  The CRTC's
+     * recorded position is the right one here: Linux treats x/y as CRTC state
+     * that SETCRTC sets, so a later page flip has to keep using it. */
+    if (drm_present_buffer_at(b, c.x, c.y) < 0)
         return -EIO;
 
     g_crtc.fb_id = c.fb_id;
@@ -1479,7 +1501,9 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
         mutex_unlock(&g_vblank.lock);
     }
 
-    if (drm_present_buffer(b) < 0) {
+    /* A flip carries no position of its own; it presents at wherever the CRTC
+     * was placed, which is the CRTC's recorded x/y. */
+    if (drm_present_buffer_at(b, g_crtc.x, g_crtc.y) < 0) {
         if (wants_event) {
             mutex_lock(&g_vblank.lock);
             g_vblank.flip_pending = 0;
