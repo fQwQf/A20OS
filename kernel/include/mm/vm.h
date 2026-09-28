@@ -70,6 +70,20 @@ typedef struct vm_area {
 #endif
     struct vm_area *prev;
     struct vm_area *next;
+    /*
+     * MM_AS_VMA_REFCOUNT:
+     * The single-level model needs a page fault to read a VMA's fields with
+     * mm->lock released -- that is what stops one address-space lock from
+     * serialising every fault in the process.  Once the lock is gone, the VMA
+     * pointer itself is no longer protected, so the fault takes a reference
+     * and drops it when done.  The address-space list owns the reference
+     * created at allocation; unlinking drops it, and the last holder (which
+     * may be a fault running lock-free) is what defers the free.
+     */
+    refcount_t      refcount;
+    /* Deferred-free linkage.  Separate from `next` so a VMA on the deferred
+     * list is never confused with one on mm->mmap. */
+    struct vm_area *deferred_next;
 } vm_area_t;
 
 typedef struct mm_tlb_hold {
@@ -77,10 +91,50 @@ typedef struct mm_tlb_hold {
     pfn_t frame;
     struct page_cache_page *page;
     uint8_t kind;
+    uint8_t pt_level;     /* MM_TLB_HOLD_PT: order to free the PT frame at */
 } mm_tlb_hold_t;
 
+/* A page-table page that has been unlinked from the tree.  The frame stays
+ * marked FRAME_F_PT (so nothing can hand it out) until the grace period ends;
+ * only then is the metadata dropped and the frame returned to the buddy. */
+typedef struct mm_pt_retire {
+    struct mm_pt_retire *next;
+    pfn_t frame;
+    uint8_t level;          /* order to free the frame at */
+} mm_pt_retire_t;
+
 /*
- * mm_struct lifetime and address-space invariants:
+ * MM_AS_MODEL — the single-level memory model.
+ *
+ * MM_LOCK_MODEL below describes the two-level model this file is being
+ * migrated away from, and still governs every mutator that has not yet been
+ * converted.  The target model is specified in mm/pt.h; the short version:
+ *
+ *  - The authoritative per-virtual-page state is the per-PTE metadata array
+ *    attached to the covering page-table page (pt_meta_t.cls[]), not a VMA.
+ *    A VMA is an interval claim; the metadata is a per-page claim, and a page
+ *    fault resolves from the latter.
+ *  - All page-table programming goes through the transactional cursor
+ *    (mm_addrspace_lock / mm_cursor_{query,map,mark,unmap}), whose unit of
+ *    writer exclusion is the page-table-page lock.  Transactions over
+ *    disjoint ranges do not serialize.
+ *  - Status lives in a side array rather than in the PTE's software bits,
+ *    because riscv32/arm32 have no free software bits at their root levels
+ *    and loongarch64 aliases PTE_R/W/X onto its memory-attribute field.
+ *  - The VMA list survives as a non-authoritative interval index for the
+ *    things that are genuinely range-shaped (brk bounds, mseal, mlock
+ *    accounting, /proc maps).  It is proved derived, not assumed, by
+ *    mm_pt_audit_addrspace(), which runs over every live address space at
+ *    shutdown.
+ *
+ * Migration status: the descriptor, the per-PTE metadata, the cursor and
+ * the auditor are in place and the metadata is maintained at every page-table
+ * write in kernel/mm/mm.c.  Page faults still resolve through mm_find_vma();
+ * moving fault dispatch onto the status is the next step.  Until then the
+ * two representations are both live and the auditor is what keeps them
+ * honest, so do not treat the cursor as the only entry point yet.
+ *
+ * mm_struct_t lifetime and address-space invariants:
  * - refcount is shared by every task/thread that uses the same address space.
  *   A task_t may store mm == NULL only for kernel-only tasks or after teardown
  *   has detached it from user memory.
@@ -133,6 +187,7 @@ typedef struct mm_struct {
      */
     mutex_t tlb_lock;
     uint32_t active_cpus;    /* CPUs whose hardware context currently uses mm */
+    uint32_t pt_readers;     /* cursors currently traversing this address space */
     uint32_t arch_asid;      /* nonzero tagged user address-space id */
     uint8_t tlb_pending;     /* transaction cleared/replaced at least one PTE */
     uint8_t _pad_tlb[3];
@@ -145,8 +200,23 @@ typedef struct mm_struct {
     uint16_t vma_index_count;
     uint8_t vma_index_state; /* 0=dirty, 1=valid, 2=capacity overflow */
     uint8_t _pad_vma_index;
-    vm_area_t *deferred_vma;  /* freed after mm->lock is dropped */
+    vm_area_t *deferred_vma;  /* released only after the last holder drops it */
+    /*
+     * Protects deferred_vma only.  Deliberately separate from mm->lock so a
+     * lock-free page fault can drop its VMA reference (and therefore defer a
+     * free) without taking the address-space lock it just escaped.  Held for
+     * a list push/pop only -- never across vma_release(), which can run
+     * blocking I/O.
+     */
+    spinlock_t vma_ref_lock;
     mm_tlb_hold_t *tlb_holds; /* released only after remote TLB shootdown */
+    /* PT pages detached from the tree, awaiting a grace period.  Deliberately
+     * NOT the tlb_holds list: a PT page is unreachable through the page table,
+     * which is unrelated to "which addresses did this TLB transaction dirty".
+     * Coupling them would force every teardown call site to open a transaction
+     * and hold mm->lock, and several of them do neither. */
+    mm_pt_retire_t *pt_retire;
+    spinlock_t pt_retire_lock;
     pt_root_t *pgdir;
     vaddr_t    brk;
     vaddr_t    start_brk;
@@ -178,6 +248,15 @@ void         mm_arch_context_init(mm_struct_t *mm);
 uint64_t     mm_address_space_token(const mm_struct_t *mm);
 
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr);
+/*
+ * VMA lifetime (MM_AS_VMA_REFCOUNT, see the comment block in mm/vma.c).
+ * The address-space list owns the reference created at allocation; a page
+ * fault that reads VMA fields with mm->lock released must vma_get() first and
+ * vma_put() when done.  The last holder schedules the deferred free, which
+ * never runs inline because vma_release() can block on I/O.
+ */
+void vma_get(vm_area_t *vma);
+void vma_put(mm_struct_t *mm, vm_area_t *vma);
 void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma);
 void mm_vma_flush_deferred(mm_struct_t *mm);
 vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
@@ -265,6 +344,7 @@ void mm_tlb_invalidate_finish(mm_struct_t *mm);
 void mm_tlb_shootdown_page(mm_struct_t *mm, vaddr_t addr);
 void mm_tlb_note_change(mm_struct_t *mm, vaddr_t addr, size_t size);
 int  mm_tlb_hold_frame(mm_struct_t *mm, pfn_t pfn);
+int  mm_pt_hold_table(mm_struct_t *mm, pfn_t pfn, int level);
 int  mm_tlb_hold_page(mm_struct_t *mm, struct page_cache_page *page);
 void mm_context_enter(mm_struct_t *mm, unsigned cpu);
 void mm_context_leave(mm_struct_t *mm, unsigned cpu);

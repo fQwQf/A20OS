@@ -27,6 +27,7 @@
 #include "core/smp.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
+#include "platform.h"
 
 extern char __text_start[], __rodata_start[], __data_start[], _bss_end[];
 extern uint64_t boot_pdpt_hh[512];  /* entry.S, hung under PML4[256] */
@@ -135,19 +136,19 @@ void arch_kernel_wx_finalize(void)
     vaddr_t img_start  = (vaddr_t)(uintptr_t)__text_start;
     vaddr_t img_end    = (vaddr_t)ROUND_UP((uintptr_t)_bss_end, PAGE_SIZE);
 
-    /* Rebuild the high-half 1 GiB huge pages slot by slot: the new PD (with
-     * the PT split of the kernel image block) is built off to the side and
-     * installed with one write, so existing mappings stay valid: NX huge
-     * pages first would reset three ways (.text, TLB miss, NX handler). */
-    /* Rebuild every present 1 GiB slot, not just the first four.  The
-     * buddy allocator can hand out order-7 (2 MiB) pages anywhere in the
-     * direct map, and a host may well have usable RAM above 4 GiB (QEMU's
-     * default 8 GiB does).  A module landing in a slot that was left as a
-     * 1 GiB page cannot be split by x86_kwx_split_pmd(), so
-     * arch_kwx_module_protect() fails and *every* drvmod fails to load --
-     * which costs virtio-blk, hence the rootfs, hence the boot.  Entries
-     * that are absent or already 4 KiB-granular are skipped below. */
-    for (int slot = 0; slot < 512; slot++) {
+    /* 高半区 1 GiB 大页逐槽位重建：新 PD（连同内核映像块的 PT 拆分）先在
+     * 旁路构建完整，再用一次写入替换 PDPT 项。整个过程中现有映射始终
+     * 有效——若先装 NX 大页再拆块，TLB miss 会在 NX 的 .text 上取指
+     * 故障，trap 处理程序同样 NX，直接三连环复位。 */
+    /* Every 1 GiB slot the direct map covers must be demoted, not just the
+     * first four.  The direct map reaches X86_HIGH_RAM_MAP_END (8 GiB), and
+     * the firmware maps usable RAM above 4 GiB a whole chunk at a time, so a
+     * slot like 4 (4-5 GiB) is real RAM holding real module pages.  Leaving it
+     * as a 1 GiB huge page made x86_kwx_pd() return NULL for those addresses,
+     * so arch_kwx_module_protect() failed with -ENOMEM and *every* kernel
+     * module load failed -- including all three block drivers, which left the
+     * guest with no FAT32 device, no /bin, and a panic at PID 1. */
+    for (int slot = 0; slot < (int)(X86_HIGH_RAM_MAP_END >> 30); slot++) {
         uint64_t e = boot_pdpt_hh[slot];
         if (!(e & PTE_V) || !(e & PTE_PS))
             continue;
