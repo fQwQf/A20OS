@@ -924,6 +924,36 @@ lwIP assertion failed: detected mem underflow in pool PBUF_POOL
 也与邻居发现无关**。`LWIP_IPV6=0` 这一档同时给出了修复方向的判据：任何
 最终修法都应当能在保留 IPv6 的前提下成立，而不是关掉 IPv6 绕过。
 
+**配置二分已彻底用完**：剩下的候选无法再用编译期开关排除——
+
+| 尝试 | 结果 |
+| --- | --- |
+| `LWIP_ICMP6=0` | 编译失败：`ip6.c:780` 无条件调用 `icmp6_param_problem()` |
+| `LWIP_RAW=0` | 编译失败：`lwip_stack.c:470` 使用 `MEMP_RAW_PCB` |
+
+**当前最强嫌疑：`ip6_input:1054` 忽略了 `pbuf_add_header_force()` 的返回值。**
+
+```c
+#if LWIP_RAW
+  pbuf_add_header_force(p, hlen_tot);   /* 返回值被丢弃 */
+  raw_status = raw_input(p, inp);
+```
+
+它同时满足此前所有观察：位于 `ip6_input`（**仅 IPv6**）；对**每个** IPv6 包都会
+执行（因此「首次网络活动即损坏」，不需要桌面负载）；且在 RX 得到的
+`PBUF_POOL` pbuf 上，这次 force **必然静默失败**——pool 的 payload 紧贴
+`struct pbuf` 尾部，回退 1 字节就越过
+`payload < p + SIZEOF_STRUCT_PBUF` 这道检查，于是 force 什么都不做，
+而代码却当作成功继续执行；此时 `ip_data.current_ip_header_tot_len` 已被写成
+`hlen_tot`，`raw_input()` 拿到的是一个 payload 布局与 `hlen_tot` 不符的 pbuf。
+
+A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一区域此前
+修过一次双重释放，与「pool 元素被写坏」的症状方向一致。
+
+**未证实**：这是一条机制自洽、位置明确的线索，不是结论。下一步应在该处加
+instrumentation——检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
+与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
+
 尚未排除的 IPv6 专属面：
 
 - `ip6.c` 输入路径与扩展头处理（`pbuf_remove_header` / `pbuf_unchain` 链式搬移）；
