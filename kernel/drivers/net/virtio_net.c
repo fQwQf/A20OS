@@ -635,11 +635,17 @@ static void virtio_net_class_poll(struct device *dev) {
     spin_unlock_irqrestore(&net->lock, flags);
 }
 
+static int virtio_net_class_rx_irq_driven(struct device *dev) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    return net && net->irq_registered;
+}
+
 static net_dev_ops_t virtio_net_class_ops = {
     .send = virtio_net_class_send,
     .recv = virtio_net_class_recv,
     .mac  = virtio_net_class_mac,
     .poll = virtio_net_class_poll,
+    .rx_irq_driven = virtio_net_class_rx_irq_driven,
 };
 
 static const device_id_t virtio_net_ids[] = {
