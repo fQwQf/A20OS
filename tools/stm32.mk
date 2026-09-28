@@ -13,7 +13,7 @@ $(STM32_BT_CONFIG_HDR): FORCE
 		printf '#define STM32_BLUETOOTH_BAUD_RATE_TEXT "%s"\n' '$(STM32_BT_BAUD)'; \
 		printf '%s\n' '#endif'; \
 	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+	@$(PYTHON) tools/stamps.py adopt --tmp "$@.tmp" --target "$@"
 
 $(STM32_WIFI_CONFIG_HDR): FORCE
 	@mkdir -p $(dir $@)
@@ -24,7 +24,7 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 		printf '#define STM32_WIFI_PASSWORD "%s"\n' '$(STM32_WIFI_PASSWORD)'; \
 		printf '%s\n' '#endif'; \
 	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+	@$(PYTHON) tools/stamps.py adopt --tmp "$@.tmp" --target "$@"
 
 $(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
 $(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)
@@ -36,51 +36,26 @@ stm32f103-bringup:
 stm32f103-xuanwu:
 	tools/a20 build stm32f103-xuanwu
 check-stm32f103:
-	@! rg -n '0x400[0-9A-Fa-f]{5}|0xE000E[0-9A-Fa-f]{3}' \
-		$(KERNEL_DIR)/platform/stm32f103 --glob '*.[ch]' \
-		--glob '!board.c' --glob '!board_config.h'
-	@! rg -n 'CONFIG_ARMV7M' $(KERNEL_DIR) \
-		--glob '!kernel/arch/**' --glob '!kernel/platform/**' \
-		--glob '!kernel/external/**' --glob '!kernel/include/core/arch.h'
-	$(MAKE) stm32f103-xuanwu
-	@echo "check-stm32f103: PASS"
+	@$(PYTHON) tools/stm32.py check-config \
+		--kernel-dir "$(KERNEL_DIR)" \
+		--arch "$(ARCH)" --board "$(BOARD)" --abi "$(ABI)" \
+		--bringup "$(BRINGUP)" --build-target stm32f103-xuanwu
 
 # Thin wrapper: configuration in instances/stm32f103-xuanwu.toml.
 flash-stm32f103-xuanwu:
 	tools/a20 flash stm32f103-xuanwu
 
 flash-xuanwu-openocd:
-	@command -v openocd >/dev/null 2>&1 || { \
-		echo "openocd not found; install OpenOCD or use STM32CubeProgrammer"; \
-		exit 1; \
-	}
-	openocd -f $(STM32_OPENOCD_INTERFACE) \
-		$(if $(STM32_CMSIS_DAP_SERIAL),-c "adapter serial $(STM32_CMSIS_DAP_SERIAL)") \
-		-c "transport select $(STM32_OPENOCD_TRANSPORT)" \
-		-c "adapter speed $(STM32_OPENOCD_ADAPTER_KHZ)" \
-		-f target/stm32f1x.cfg \
-		-c "init" \
-		-c "mww 0xE000EDF0 0xA05F0003" \
-		-c "sleep 50" \
-		-c "flash probe 0" \
-		-c "flash write_image erase $(STM32_XUANWU_ELF)" \
-		-c "verify_image $(STM32_XUANWU_ELF)" \
-		-c "set boot_sp [mrw 0x08000000]" \
-		-c "set boot_pc [mrw 0x08000004]" \
-		-c "reg msp \$$boot_sp" \
-		-c "reg psp 0" \
-		-c "reg control 0" \
-		-c "reg primask 0" \
-		-c "reg basepri 0" \
-		-c "reg faultmask 0" \
-		-c "reg pc \$$boot_pc" \
-		-c "resume" \
-		-c "shutdown"
+	@$(PYTHON) tools/stm32.py openocd-flash \
+		--interface "$(STM32_OPENOCD_INTERFACE)" \
+		--serial "$(STM32_CMSIS_DAP_SERIAL)" \
+		--transport "$(STM32_OPENOCD_TRANSPORT)" \
+		--adapter-khz "$(STM32_OPENOCD_ADAPTER_KHZ)" \
+		--elf "$(STM32_XUANWU_ELF)"
 
 # Thin wrapper: configuration in instances/stm32f103-qemu.toml.
 run-stm32f103-qemu:
 	tools/a20 run stm32f103-qemu
 
 run-stm32f103-qemu-impl:
-	qemu-system-arm -machine stm32vldiscovery -nographic \
-		-kernel $(STM32_QEMU_BIN)
+	@$(PYTHON) tools/stm32.py qemu-run --kernel-bin "$(STM32_QEMU_BIN)"

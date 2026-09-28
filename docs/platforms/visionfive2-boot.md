@@ -337,3 +337,29 @@ a20.gateway=192.168.50.1 a20.dns=1.1.1.1 a20.hostname=a20os
 
 - 启动链固件、FIT、四分区 SD 镜像及 FAT32/extra userspace 已完成源码构建； 之前的板上镜像已经从 TF 卡启动并进入串口 mksh。每次修改网络驱动后仍需用 新镜像重复串口启动记录，不能拿旧镜像日志替代当前提交。
 - GMAC1 IRQ 线号 78、DTB 中的 YT8531 PHY 地址 0 和 RGMII RX 300 ps 延迟已由 随镜像构建的 VF2 DTB 核对；当前驱动采用轮询数据面。PHY link-up、DMA 收发、 `ping` 和公网 `git clone` 必须在接入网线的目标板上按本页 6.8 节逐项确认。
+
+## FIT 签名：当前工具链做不到（已核实）
+
+`a20os.itb` 目前**没有签名**，而且用 `tools/vf2/build-firmware.sh` 构建出来的那份
+`mkimage` **无法**产出签名。实测结论：
+
+- `mkimage -k <dir> -f a20os-fit.its out.itb` 返回 0，但产出的镜像与不签名时
+  **字节数完全相同**，且 `mkimage -l` 里没有任何 signature 节点。
+- 根因是 `.its` 的 image 节点没有 `hashing = "sha256"`；补上之后镜像会变大
+  （多出 hash 值），但**仍然没有 signature 节点**——即 `-k` 只加了 hash，没有签名。
+  PEM 与 DER 两种证书格式都试过，结果相同。
+
+所以这里**故意没有**加一个 `VF2_FIT_KEYS` 开关：它会打印"将签名"，而实际产出
+仍是无签名镜像——那比没有签名路径更糟，因为它会让操作者相信镜像已签名。一个
+会静默说谎的开关不叫安全特性。
+
+要真正支持签名，需要（按依赖顺序）：
+
+1. 在 `a20os-fit.its` 的每个 image 节点加 `hashing = "sha256"`；
+2. 让 `build-firmware.sh` 构建的 `mkimage` 打开主机侧签名支持（当前 U-Boot 配置
+   下 `-k` 只加 hash 不加签名）；
+3. 板上 U-Boot SPL 侧还要有对应的验签配置，否则签了也不会被检查。
+
+前两步做完之前，本文档不声称镜像具备任何真实性保证。包仓库的 apk 签名
+（RSA/SHA-256，见 docs/packaging/）是另一条独立链路，且它**不被内核在启动时验证**，
+因此与启动链无关。

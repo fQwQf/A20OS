@@ -187,7 +187,6 @@ static void build_siginfo_fault(arch_siginfo_t *si, int sig, const trap_context_
     memcpy(&si->_sifields[1], &addr, sizeof(addr));
 }
 
-// 初始化信号状态
 void signal_init(signal_state_t *ss) {
     memset(ss, 0, sizeof(*ss));
     refcount_set(&ss->refcount, 1);
@@ -409,7 +408,6 @@ int signal_task_get_pending_info(void *task, int signum, void *out,
     return ret;
 }
 
-// 向指定进程发送信号
 int signal_send(int pid, int signum) {
     return signal_send_info(pid, signum, NULL, 0);
 }

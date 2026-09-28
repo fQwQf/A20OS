@@ -7,7 +7,7 @@ exactly one place (the Makefile) and instances carry only their deltas.
 
 from __future__ import annotations
 
-from a20_instance import Instance
+from a20_instance import Instance, TargetCfg
 
 
 def _b(v: bool) -> str:
@@ -117,4 +117,39 @@ def derive_make_vars(inst: Instance) -> list[str]:
         v.append(f"STM32_OPENOCD_ADAPTER_KHZ={fl.adapter_khz}")
     if fl.serial is not None:
         v.append(f"STM32_CMSIS_DAP_SERIAL={fl.serial}")
+    v.extend(_target_vars(inst.target))
+    return v
+
+
+def _target_vars(t: TargetCfg) -> list[str]:
+    """[target] -> TARGET_* variables.
+
+    The makefile owns every recipe that acts on the board; these variables only
+    say which board and which console.  A reset command is emitted verbatim
+    because there is no way to parameterise "pulse this board's reset line"
+    without naming the tool, and the command is run by a20, not by make.
+    """
+    v: list[str] = []
+    if t.serial is not None:
+        v.append(f"TARGET_SERIAL={t.serial}")
+    if t.baud is not None:
+        v.append(f"TARGET_BAUD={t.baud}")
+    if t.reset is not None:
+        v.append(f"TARGET_RESET_CMD={t.reset}")
+    if t.boot_wait is not None:
+        v.append(f"TARGET_BOOT_WAIT={t.boot_wait}")
+    if t.boot_timeout is not None:
+        v.append(f"TARGET_BOOT_TIMEOUT={t.boot_timeout}")
+    if t.console_check is not None:
+        v.append(f"TARGET_CONSOLE_CHECK={','.join(t.console_check)}")
+    if t.commands is not None:
+        v.append(f"TARGET_COMMANDS={' '.join(t.commands)}")
+    if t.expect is not None:
+        v.append(f"TARGET_EXPECT={','.join(t.expect)}")
+    if t.boot_media is not None:
+        v.append(f"TARGET_BOOT_MEDIA={' '.join(t.boot_media)}")
+    if t.media_device is not None:
+        v.append(f"TARGET_MEDIA_DEVICE={t.media_device}")
+    if t.log is not None:
+        v.append(f"TARGET_CONSOLE_LOG={t.log}")
     return v

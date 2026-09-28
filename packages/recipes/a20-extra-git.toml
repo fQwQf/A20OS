@@ -14,7 +14,7 @@ license = "GPL-2.0-only"
 maintainer = "A20OS developers"
 origin = "a20-extra"
 archs = ["riscv64", "aarch64", "loongarch64"]
-depends = ["a20-base"]
+depends = ["a20-userland"]
 
 [[files]]
 src = "{extra_dir}/git"
