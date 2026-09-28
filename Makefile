@@ -561,6 +561,15 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
+
+# Escape hatch for experiment knobs that cannot come from the command line.
+# x86_64 is the motivating case: QEMU does not publish -append through fw_cfg
+# on the -kernel <ELF> boot path (docs 10.31/10.32), so a20.* parameters are
+# unreachable there.  Building two images with
+# EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=<n> and interleaving the runs gives
+# the same time-adjacent A/B that a runtime switch gives elsewhere.
+EXTRA_CFLAGS ?=
+CFLAGS += $(EXTRA_CFLAGS)
 # 内核栈金丝雀：__stack_chk_guard/__stack_chk_fail 由 kernel/core/stack_protector.c
 # 提供；汇编（entry/trampoline/vdso）无 canary。lwip 等 vendored 代码在
 # tools/targets-images.mk 的专属规则里显式 -fno-stack-protector，不受影响。
