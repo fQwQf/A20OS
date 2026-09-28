@@ -135,7 +135,7 @@ Native ABI 的内存对象接口围绕两个核心抽象：
 
 ### 进程调度与 SMP（`kernel/proc/`）
 
-调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个任务按权重累加虚拟运行时间（`vruntime += dt * NICE0 / weight`），runqueue 的系统虚拟时间 `vtime` 以排队中的 EEVDF 权重和推进，不包含当前运行任务。picker 在按 deadline 排序的队列中扫描并选择第一个 `vruntime <= vtime` 的任务；若没有 eligible 任务，则选择队首的最早 deadline 保证进展。该扫描最坏为 O(n)。nice/weight 控制 CPU 份额；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota 由 `kernel/proc/cg_cpu.c` 执行。
+调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个任务按权重累加虚拟运行时间（`vruntime += dt * NICE0 / weight`），runqueue 的系统虚拟时间 `vtime` 以排队中的 EEVDF 权重和推进，不包含当前运行任务。picker 沿按 deadline 排序的 treap 下降（子树以 `min_vruntime` 增广），选择第一个 `vruntime <= vtime` 的任务；若没有 eligible 任务，则回退到缓存的最早 deadline 任务保证进展。该下降最坏为 O(log n)，即树高而非队列长度。nice/weight 控制 CPU 份额；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota 由 `kernel/proc/cg_cpu.c` 执行。
 
 “任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在runqueue，也可能已经被本地 CPU 选中：
 

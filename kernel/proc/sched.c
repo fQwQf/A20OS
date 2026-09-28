@@ -199,9 +199,9 @@ static int sched_task_strictly_preempts(task_t *candidate, task_t *running)
  *
  * RT tasks stay on runqueue level 0 with their existing fixed-priority
  * FIFO/RR semantics and are never charged virtual time, so they always run
- * ahead of the EEVDF list on level 1.
+ * ahead of the EEVDF treap on level 1.
  */
-#define EEVDF_LEVEL           1     /* runqueue slot holding the EEVDF list */
+#define EEVDF_LEVEL           1     /* runqueue slot holding the EEVDF treap */
 #define EEVDF_NICE0_LOAD      1024UL
 #define EEVDF_BASE_SLICE      (TICKS_PER_SEC / 100)   /* 10 ms base slice */
 #define EEVDF_MAX_LAG         (TICKS_PER_SEC / 100)   /* max sleeper bonus */

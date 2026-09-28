@@ -91,7 +91,7 @@ proc_lock -> a20_handle_table.lock
 
 > **与算法文档的关系**：本节只讲 runqueue 的**结构、所有权与锁**。普通任务“选谁”（加权公平、资格门控、虚拟截止时间、虚拟 slice 旋钮）与 SMP 空闲窃取的**策略**细节见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
-每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 扫描按 deadline 排序的列表寻找第一个 eligible 任务，最坏 O(n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
+每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
 
 本地选择分两段：
 
