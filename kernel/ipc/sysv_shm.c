@@ -46,6 +46,7 @@
 #define IPC_SET     1
 #define IPC_STAT    2
 #define SHM_STAT_ANY 15
+#define SHM_STAT      13
 #define SHM_INFO      14
 
 #define SYSV_SHM_MAX 32
@@ -393,7 +394,7 @@ int sysv_shm_control(int shmid, int cmd, void *buf)
         return 0;
     }
 
-    if ((cmd == IPC_STAT || cmd == SHM_STAT_ANY) && buf) {
+    if ((cmd == IPC_STAT || cmd == SHM_STAT || cmd == SHM_STAT_ANY) && buf) {
         task_t *cur = proc_current();
         int pid = cur ? cur->pid : 0;
         int key = g_shm[shmid].key;
