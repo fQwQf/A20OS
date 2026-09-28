@@ -964,6 +964,31 @@ class TestCliArgumentHandling(unittest.TestCase):
             self.assertEqual(mod.main(["show-vars", "qemu-riscv64"]), 0)
         self.assertIn("ARCH=riscv64", buf.getvalue())
 
+    def test_show_reports_actions_ports_and_media_in_one_screen(self) -> None:
+        """`show` exists so the choice between 46 instances needs one command."""
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(mod.main(["show", "vf2-physical"]), 0)
+        out = buf.getvalue()
+        self.assertIn("console", out)          # the action
+        self.assertIn("/dev/ttyUSB0", out)     # where it talks to the board
+        self.assertIn("/dev/sda", out)         # where it would write media
+        self.assertIn("manifest", out)         # so the file can be opened
+
+    def test_show_does_not_claim_a_command_that_would_refuse(self) -> None:
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(mod.main(["show", "stm32f103"]), 0)
+        out = buf.getvalue()
+        # stm32f103 has no [stm32] qemu flag, so `run` must not be advertised.
+        self.assertNotIn("run", out.split("actions")[1].splitlines()[0])
+
     def test_list_reports_success_on_a_clean_tree(self) -> None:
         self.assertEqual(self.run_main(["list"]), 0)
 
@@ -1194,6 +1219,39 @@ class TestSmokeProgressAndLifecycle(unittest.TestCase):
         self.assertEqual(len(seen), 2, f"both markers should be announced, got {seen}")
         self.assertTrue(any("MARK_A" in s for s in seen))
         self.assertTrue(any("MARK_B" in s for s in seen))
+
+    def test_watch_reads_the_log_one_last_time_when_the_guest_exits(self) -> None:
+        """A marker landing between the final poll and the exit is not a failure.
+
+        The guest can write its last marker and exit inside one poll interval.
+        _watch used to return the moment poll() reported the exit, without
+        reading the log again, so that marker was never seen and a healthy boot
+        was reported as a missing one.
+        """
+        import tempfile
+        from unittest.mock import patch
+        from a20_test import _watch
+
+        class FakeProc:
+            calls = 0
+
+            def poll(self):
+                FakeProc.calls += 1
+                return None if FakeProc.calls == 1 else 0
+
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "boot.log"
+            log.write_bytes(b"early boot output\n")
+            seen = []
+
+            def land_marker(_seconds):
+                log.write_bytes(b"early boot output\nFINAL_MARKER\n")
+
+            with patch("a20_test.time.sleep", side_effect=land_marker):
+                timed_out = _watch(FakeProc(), log, ("FINAL_MARKER",), 20.0, seen.append)
+        self.assertFalse(timed_out)
+        self.assertEqual(len(seen), 1, f"expected one announcement, got {seen}")
+        self.assertIn("FINAL_MARKER", seen[0])
 
     def test_watch_reports_a_timeout_rather_than_hanging(self) -> None:
         import tempfile
