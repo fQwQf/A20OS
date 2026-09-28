@@ -52,6 +52,9 @@ AHCI（`FLUSH CACHE EXT`）。
    `g_lwip_lock` 保护全部 lwIP 核心状态，每次 raw lwIP 调用都必须持有
    （`docs/net/network-lock-contract.md`）。**多核服务器最核心的收益在这里
    直接归零**——这不是性能调优能解决的，需要重构 lwIP 集成。
+   *测量前置已就位*：该锁已注册进 `/proc/a20/lock_contention` 并开启
+   callsite 归因（`netfilter_test` 断言该条目存在），因此分片前可以先拿到
+   真实并发负载下的热点调用点，而不是凭猜测改协议。分片本身仍是未完成项。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放缺失 → BDP 硬上限约 47 KB。** `LWIP_TCP_SACK_OUT` 为 0，
