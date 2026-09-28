@@ -1,8 +1,9 @@
 """Smoke-test execution for a20: boot an instance and check expect patterns.
 
-The QEMU command line is extracted from `make -n _run_impl` (the single
-source of truth), extended with the instance's machine.extra_qemu, then run
-with a timeout while [test].commands are injected over the serial console.
+The QEMU command line is printed by the `_qemu_argv` make target (the single
+source of truth for every flag), extended with the instance's machine.extra_qemu,
+then run with a timeout while [test].commands are injected over the serial
+console.
 PASS semantics match the historical handwritten smokes: every [test].expect
 substring must appear in the log.
 """
@@ -96,14 +97,15 @@ def _reap(proc: subprocess.Popen[bytes]) -> None:
 
 
 def _qemu_cmdline(inst: Instance) -> list[str]:
+    # `_qemu_argv` is a printf recipe with no prerequisites, so running it builds
+    # nothing and its stdout is the command line itself.  `make -n` would print
+    # the printf invocation instead of its output, hence no -n here.
     out = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), "-n", *derive_make_vars(inst), "_run_impl"],
+        ["make", "-C", str(REPO_ROOT), *derive_make_vars(inst), "_qemu_argv"],
         check=False, capture_output=True, text=True,
     )
     if out.returncode != 0:
-        # Reporting stdout here would show make's dry-run plan, which is not the
-        # failure; the reason is always on stderr.
-        raise SystemExit(f"error: 'make -n _run_impl' failed for {inst.name} "
+        raise SystemExit(f"error: 'make _qemu_argv' failed for {inst.name} "
                          f"(status {out.returncode}):\n{out.stderr.strip()}")
     for line in out.stdout.splitlines():
         m = _QEMU_TOKEN.search(line)
@@ -111,7 +113,7 @@ def _qemu_cmdline(inst: Instance) -> list[str]:
             cmd = shlex.split(line[m.start(1):])
             cmd.extend(inst.machine.extra_qemu or ())
             return cmd
-    raise SystemExit(f"error: no qemu-system command found in 'make -n _run_impl' "
+    raise SystemExit(f"error: no qemu-system command found in 'make _qemu_argv' "
                      f"output for {inst.name}:\n{out.stdout}")
 
 
