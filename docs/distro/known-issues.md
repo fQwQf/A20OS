@@ -910,6 +910,35 @@ lwIP assertion failed: detected mem underflow in pool PBUF_POOL
 - 保护区在 free 时填 `0xcd`、alloc 时校验，所以 alloc 期报错意味着
   「该元素被 free 之后，仍有代码往它的 payload 起始处回写」。
 
+**二分结果（canary 全程开启，均为真负）**：
+
+| 配置 | 结果 |
+| --- | --- |
+| `LWIP_IPV6=0` | **无 panic**，桌面正常启动并跑满 400s 超时 |
+| `LWIP_IPV6_FRAG=0` | panic 复现，栈不变 |
+| `LWIP_ND6=0` | panic 复现 |
+| `LWIP_IPV6_DHCP6=0` | panic 复现 |
+| QEMU 不挂 `-device virtio-net-pci` | **无 panic**，桌面跑满 300s 超时 |
+
+所以损坏**必须**有 IPv6 才发生（IPv6 是必要条件），但**与分片重组无关，
+也与邻居发现无关**。`LWIP_IPV6=0` 这一档同时给出了修复方向的判据：任何
+最终修法都应当能在保留 IPv6 的前提下成立，而不是关掉 IPv6 绕过。
+
+尚未排除的 IPv6 专属面：
+
+- `ip6.c` 输入路径与扩展头处理（`pbuf_remove_header` / `pbuf_unchain` 链式搬移）；
+- ICMPv6 中**非 echo** 的路径（echo 应答已确认走 `PBUF_RAM`，故非 echo 类）；
+- IPv6 的 `netif` / 地址层。
+
+完全不挂 virtio-net 也不复现，说明确实必须有一条活的 RX 数据面在喂包，
+排除「与网络无关的启动期内存踩踏」。
+
+分片重组、邻居发现、DHCPv6 三条「IPv6 专属且常驻」的后台路径已全部排除，
+剩下的多半就在 **`ip6_input` 自身的扩展头解析/搬移**里。逐个再关子系统
+的收益开始下降，建议改为直接在 `ip6_input` 的扩展头循环里对
+`pbuf_remove_header` / `pbuf_unchain` 加定位 instrumentation，
+用 canary 命中时的 `p->payload` 地址反推真正的越界写点。
+
 结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
 `PBUF_POOL` payload 的尾部，落在下一个元素的头部。
 
