@@ -244,57 +244,11 @@ check-task-lifetime-boundary:
 	@echo "check-task-lifetime-boundary: PASS"
 
 check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
-	@rg -q "BLOCKING_POINT_PROTOCOL_AUDIT" docs/archive/blocking-point-audit.md
-	@rg -q "PROC_BLOCKED_ALLOCATION_WHITELIST" kernel/proc/task.c
-	@rg -q "FUTEX_WAIT_RECHECK_PROTOCOL" kernel/ipc/futex.c
-	@rg -q "proc_try_wake_locked\(t, t->wait_seq, PROC_WAKE_EVENT\)" kernel/proc/sched.c
-	@! rg -n --pcre2 '\bproc_block_until[[:space:]]*\(' kernel \
-		--glob '*.[ch]' --glob '!kernel/external/**'
-	@bad=$$(rg -n --pcre2 '(?:->|\.)state[[:space:]]*=[[:space:]]*PROC_BLOCKED' \
-		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
-		rg -v '^kernel/proc/(task|park)\.c:' || true); \
-		test -z "$$bad" || { echo "$$bad"; exit 1; }
-	@bad=$$(rg -n --pcre2 '(?:->|\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*=' \
-		kernel --glob '*.[ch]' --glob '!kernel/external/**' | \
-		rg -v '^kernel/proc/(task|sched|park)\.c:' || true); \
-		test -z "$$bad" || { echo "$$bad"; exit 1; }
-	@bad=$$(rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' kernel \
-		--glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(fork|proc|sched|cg_cpu)\.c|abi/native/sys_core\.c):' || true); \
-		test -z "$$bad" || { echo "$$bad"; exit 1; }
-	@rg -Uq 'typedef struct wait_queue_entry[^{]*\{[^}]*task[^}]*wait_seq' kernel/include/core/sync.h
-	@rg -q "wait_queue_entry_t entry" kernel/ipc/futex.c
-	@! rg -n "typedef struct futex_waiter" kernel/ipc/futex.c
-	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*task[^}]*wait_seq' kernel/proc/timer_heap.c
-	@rg -Uq 'typedef struct proc_wake_q_item[^{]*\{[^}]*task[^}]*seq' kernel/include/proc/park.h
-	@rg -q "FUTEX_STRESS: unrelated-wake-isolation PASS" user/cmds/stress/futex_stress.c
-	@rg -q "PROC_STRESS: vfork-auto-reap PASS" user/cmds/stress/proc_stress.c
+	@$(PYTHON) tools/gates.py check-blocking-point-boundary
 	@echo "check-blocking-point-boundary: PASS"
 
 check-signal-exit-boundary: smoke-proc-stress
-	@rg -q "SIGNAL_EXIT_PROTOCOL_AUDIT" docs/archive/signal-exit-audit.md
-	@rg -q "SIGNAL_STATE_LOCK_CONTRACT" kernel/include/proc/signal.h
-	@rg -q "PARK_SIGNAL_MODE_PROTOCOL" kernel/proc/park.c
-	@rg -q "SIGNAL_MASK_PARK_PROTOCOL" kernel/abi/linux/sys_signal.c
-	@rg -q "REMOTE_EXIT_SAFE_BOUNDARY" kernel/proc/exit.c
-	@rg -q "PROC_WAKE_FATAL_SIGNAL" kernel/include/proc/park.h kernel/proc/park.c
-	@rg -q "PROC_WAKE_TASK_EXIT" kernel/include/proc/park.h kernel/proc/exit.c
-	@! rg -n --pcre2 '\bproc_make_ready[[:space:]]*\(' \
-		kernel/proc/signal.c kernel/proc/exit.c
-	@! rg -n --pcre2 'reason[[:space:]]*==[[:space:]]*PROC_WAKE_SIGNAL' \
-		kernel --glob '*.c' --glob '!kernel/external/**' \
-		--glob '!kernel/proc/park.c'
-	@bad=$$(rg -n --pcre2 \
-		'(?:->|\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\b' \
-		kernel --glob '*.c' --glob '!kernel/external/**' | \
-		rg -v '^kernel/(proc/(signal|task)\.c|abi/linux/sys_signal\.c|abi/native/handle_table\.c|ipc/signalfd\.c):' || true); \
-		test -z "$$bad" || { echo "$$bad"; exit 1; }
-	@rg -Uq 'eventfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
-		kernel/ipc/eventfd.c
-	@rg -Uq 'timerfd_read[\s\S]*proc_park_prepare\(PROC_WAIT_INTERRUPTIBLE' \
-		kernel/ipc/timerfd.c
-	@rg -q "PROC_STRESS: signal-stop-exit PASS" user/cmds/stress/proc_stress.c
-	@rg -q "PROC_STRESS: signal-mask-park PASS" user/cmds/stress/proc_stress.c
+	@$(PYTHON) tools/gates.py check-signal-exit-boundary
 	@echo "check-signal-exit-boundary: PASS"
 
 check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test

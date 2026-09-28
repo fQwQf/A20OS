@@ -1113,3 +1113,164 @@ files = [
     "kernel",
 ]
 
+# --- gates whose assertions were `bad=$(rg ... | rg -v whitelist)`.
+# The verdict depends on the surviving output, not an exit code, so they
+# need post_filter rather than plain negation.
+
+[[gate]]
+name = "check-blocking-point-boundary"
+make_target = "check-blocking-point-boundary"
+[[gate.assertion]]
+pattern = "BLOCKING_POINT_PROTOCOL_AUDIT"
+files = ["docs/archive/blocking-point-audit.md"]
+
+[[gate.assertion]]
+pattern = "PROC_BLOCKED_ALLOCATION_WHITELIST"
+files = ["kernel/proc/task.c"]
+
+[[gate.assertion]]
+pattern = "FUTEX_WAIT_RECHECK_PROTOCOL"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+pattern = "proc_try_wake_locked\\(t, t->wait_seq, PROC_WAKE_EVENT\\)"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "\\bproc_block_until[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/proc/(task|park)\\.c:"
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "(?:->|\\.)state[[:space:]]*=[[:space:]]*PROC_BLOCKED"
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/proc/(task|sched|park)\\.c:"
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "(?:->|\\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*="
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/(proc/(fork|proc|sched|cg_cpu)\\.c|abi/native/sys_core\\.c):"
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**"]
+pattern = "\\bproc_make_ready[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct wait_queue_entry[^{]*\\{[^}]*task[^}]*wait_seq"
+files = ["kernel/include/core/sync.h"]
+
+[[gate.assertion]]
+pattern = "wait_queue_entry_t entry"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "typedef struct futex_waiter"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct wait_timer[^{]*\\{[^}]*task[^}]*wait_seq"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct proc_wake_q_item[^{]*\\{[^}]*task[^}]*seq"
+files = ["kernel/include/proc/park.h"]
+
+[[gate.assertion]]
+pattern = "FUTEX_STRESS: unrelated-wake-isolation PASS"
+files = ["user/cmds/stress/futex_stress.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: vfork-auto-reap PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+
+[[gate]]
+name = "check-signal-exit-boundary"
+make_target = "check-signal-exit-boundary"
+[[gate.assertion]]
+pattern = "SIGNAL_EXIT_PROTOCOL_AUDIT"
+files = ["docs/archive/signal-exit-audit.md"]
+
+[[gate.assertion]]
+pattern = "SIGNAL_STATE_LOCK_CONTRACT"
+files = ["kernel/include/proc/signal.h"]
+
+[[gate.assertion]]
+pattern = "PARK_SIGNAL_MODE_PROTOCOL"
+files = ["kernel/proc/park.c"]
+
+[[gate.assertion]]
+pattern = "SIGNAL_MASK_PARK_PROTOCOL"
+files = ["kernel/abi/linux/sys_signal.c"]
+
+[[gate.assertion]]
+pattern = "REMOTE_EXIT_SAFE_BOUNDARY"
+files = ["kernel/proc/exit.c"]
+
+[[gate.assertion]]
+pattern = "PROC_WAKE_FATAL_SIGNAL"
+files = [
+    "kernel/include/proc/park.h",
+    "kernel/proc/park.c",
+]
+
+[[gate.assertion]]
+pattern = "PROC_WAKE_TASK_EXIT"
+files = [
+    "kernel/include/proc/park.h",
+    "kernel/proc/exit.c",
+]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+pattern = "\\bproc_make_ready[[:space:]]*\\("
+files = [
+    "kernel/proc/signal.c",
+    "kernel/proc/exit.c",
+]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/park.c"]
+pattern = "reason[[:space:]]*==[[:space:]]*PROC_WAKE_SIGNAL"
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/(proc/(signal|task)\\.c|abi/linux/sys_signal\\.c|abi/native/handle_table\\.c|ipc/signalfd\\.c):"
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**"]
+pattern = "(?:->|\\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\\b"
+files = ["kernel"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "eventfd_read[\\s\\S]*proc_park_prepare\\(PROC_WAIT_INTERRUPTIBLE"
+files = ["kernel/ipc/eventfd.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "timerfd_read[\\s\\S]*proc_park_prepare\\(PROC_WAIT_INTERRUPTIBLE"
+files = ["kernel/ipc/timerfd.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: signal-stop-exit PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: signal-mask-park PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+

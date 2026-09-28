@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import glob as globlib
+import re
 import subprocess
 import sys
 import tomllib
@@ -76,6 +77,9 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     argv.append(a["pattern"])
     argv.extend(files)
 
+    if a.get("post_filter"):
+        return _run_post_filtered(a, argv)
+
     r = subprocess.run(argv, cwd=REPO, check=False, capture_output=True, text=True)
     negate = bool(a.get("negate", False))
 
@@ -97,6 +101,25 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
             return False, (f"pattern {a['pattern']!r} must not appear in "
                            f"{', '.join(files)}\n{shown.stdout}")
         return False, f"pattern {a['pattern']!r} not found in {', '.join(files)}"
+    return True, ""
+
+
+def _run_post_filtered(a: dict, argv: list[str]) -> tuple[bool, str]:
+    """`bad=$(rg ... | rg -v WHITELIST)`; require nothing to survive the filter.
+
+    These assertions cannot be expressed as an rg exit code: the whitelist drops
+    the files allowed to contain the pattern, so the verdict depends on the
+    surviving *output*, which has to be captured and filtered here.
+    """
+    r = subprocess.run(["rg", "-n", *argv[2:]], cwd=REPO, check=False,
+                       capture_output=True, text=True)
+    if r.returncode not in (0, 1):
+        return False, f"rg error: {r.stderr.strip()}"
+    keep = [ln for ln in r.stdout.splitlines()
+            if not re.search(a["post_filter"], ln)]
+    if keep:
+        return False, (f"pattern {a['pattern']!r} appears outside the allowed "
+                       f"files:\n" + "\n".join(keep[:20]))
     return True, ""
 
 
