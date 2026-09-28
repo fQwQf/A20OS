@@ -1094,6 +1094,50 @@ class TestOperatorErrorContract(unittest.TestCase):
         loader.exec_module(mod)
         return mod
 
+    def test_every_gated_command_accepts_the_resource_flags(self) -> None:
+        """build/flash/package are gated too, so they need the waiting flags.
+
+        Only run/debug/test had them, so the other three raised AttributeError
+        on `args.no_wait` and died with a traceback before doing any work --
+        `a20 flash` and `a20 package` were unusable. argparse turns an unknown
+        flag into SystemExit, so accepting these is the observable difference.
+        """
+        import contextlib
+        import io
+        mod = self.cli()
+        from a20_error import A20Error
+        for name in ("build", "run", "debug", "test", "flash", "package"):
+            for flag in ("--no-wait", "--wait-timeout"):
+                argv = [name, "no-such-instance-xyz"] + (
+                    [flag, "1"] if flag == "--wait-timeout" else [flag])
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        mod.main(argv)
+                    except A20Error:
+                        pass          # the flag parsed; the loader said no
+                    except SystemExit as e:
+                        self.fail(f"{name} rejected {flag} (usage error {e.code})")
+
+    def test_gating_tolerates_a_namespace_without_the_wait_flags(self) -> None:
+        """A missing flag must not surface as an AttributeError."""
+        import argparse
+        mod = self.cli()
+        mod._gate_resources(load_instance("qemu-riscv64"), argparse.Namespace(),
+                           guest=False)
+
+    def test_flash_and_package_report_their_own_missing_section(self) -> None:
+        import contextlib
+        import io
+        from a20_error import A20Error
+        mod = self.cli()
+        for cmd, needle in (("flash", "[flash].tool"), ("package", "[package] kind")):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(A20Error, msg=cmd) as cm:
+                    mod.main([cmd, "qemu-riscv64"])
+            self.assertIn(needle, str(cm.exception), cmd)
+
     def test_exit_codes_are_disjoint(self) -> None:
         from a20_error import EXIT_FAIL, EXIT_OK, EXIT_TIMEOUT, EXIT_TOOL, EXIT_USAGE
         codes = [EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_TOOL, EXIT_TIMEOUT]
