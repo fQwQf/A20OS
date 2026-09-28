@@ -1699,3 +1699,41 @@ flags=0x13 pte_flags=0xd7 file_fd=-1`），而 brk 预标记此时是**关闭**�
    `mm_pt_prot_bits()` 编码宽度）。
 
 在 (b) 定位之前，**预标记必须保持默认关闭**，状态缺页路径因此仍然 inert。
+
+### 10.23 一条死路：nr_present 溢出不是 (b) 的原因
+
+预标记会把 `m->nr_present` 往上推（`pt_note_present_meta()` 每个槽位 `++`），而它是
+`uint16_t`。既然 (b) 由 mmap 预标记喂出（§10.22），最自然的怀疑就是它在某个 leaf table
+上累加到 65536 之后回绕。**查证结果：不是。**
+
+`pt_table_empty()`（决定某个中间页表页能否被拆掉回收的唯一判据）**直接扫 PTE 数组**，
+根本不看 `nr_present`：
+
+```c
+static int pt_table_empty(pte_t *table, int level) {
+    for (int i = 0; i < entries; i++)
+        if ((table[i] & PTE_V) || pte_is_swap(table[i])) return 0;
+    return 1;
+}
+```
+
+`nr_present` 的全部使用点只有三处：自增、自减、fork 时整体拷贝
+（`pt_clone_level()` 里 `dst->nr_present = src->nr_present`）。**没有任何控制流依赖它**，
+所以即使回绕也只是一个显示用的计数失真，不会导致「非空页表被当成空表回收」这类损坏。
+
+**记下来是为了避免有人重复走这条路。**
+
+**目前最值得试的下一步**（按可能性排序，均未做）：
+1. **状态路径缺 TLB 事务**。状态路径映射成功后只做
+   `arch_tlb_flush_page_local(stval)`，而 VMA 路径走的是
+   `mm_tlb_invalidate_begin/finish` + `mm_tlb_note_change` 的完整事务。在
+   `-smp 2` 下，如果同一个地址空间此刻在**另一个 CPU** 上有残留翻译，本地刷新不足以
+   让它看到新映射。这与症状吻合：出错页在转储里 `flags=0x7` 可访问、内容全 0，但发起
+   访问的 CPU 手里仍是旧的（无效）翻译。可用 `-smp 1` 复跑一次来**证伪或证实**——
+   若 `-smp 1` 不崩，基本锁定这一条。
+2. `mm_pt_provision_anon()` 的 chunk 循环里 `cur.path[0]` 是否在 `lo` 跨 leaf 边界时
+   取到了错误的叶子表（`anchor` 取自 `lo`，但 `hi` 可能延伸进下一张表）。
+3. mmap 的 `ptef` 经 `status_byte()` 往返后是否与 VMA 实际权限一致（对照
+   `mm_pt_prot_bits()` 的编码宽度）。
+
+在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert。
