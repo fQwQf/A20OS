@@ -187,6 +187,22 @@ def copy_image(a) -> int:
     return 0
 
 
+def build_vf2_minimal(a) -> int:
+    """Clone the VF2 FAT32 image and drop the freshly built fastfetch into it.
+
+    The recipe copied fat32.img to a variant and then used mtools to place one
+    binary at the image root; both steps are image mutation, so they live here
+    next to the other image builders.
+    """
+    src = REPO / a.src
+    dst = REPO / a.dst
+    shutil.copy2(src, dst)
+    ff = REPO / a.payload
+    mcopy(str(dst), str(ff), "::/fastfetch")
+    print(f"img: {dst} + fastfetch at ::/fastfetch")
+    return 0
+
+
 def verify_vbox_rootfs(a) -> int:
     """Rebuild the FAT32 image if its /init is not the freshly built one.
 
@@ -544,7 +560,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
                     choices=["fat32", "ext4", "extra", "release-disk", "scratch",
-                             "sbase-rootfs", "copy", "verify-vbox"])
+                             "sbase-rootfs", "copy", "verify-vbox",
+                             "vf2-minimal"])
     for f in (
               "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "extra-img", "extra-mb", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "extra-staging-dir", "extra-dir", "extra-packages", "riscv-gcc-musl-libc", "riscv-glibc-lib-dir", "riscv-glibc-local-lib-dir", "ca-cert-bundle", "extra-dns" ):
         ap.add_argument(f"--{f}", default="")
@@ -553,7 +570,8 @@ def main() -> int:
             "release-disk": build_release_disk, "scratch": build_scratch,
             "sbase-rootfs": inject_sbase,
             "copy": copy_image,
-            "verify-vbox": verify_vbox_rootfs}[a.command](a)
+            "verify-vbox": verify_vbox_rootfs,
+            "vf2-minimal": build_vf2_minimal}[a.command](a)
 
 
 if __name__ == "__main__":
