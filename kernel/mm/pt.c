@@ -267,6 +267,13 @@ static inline uint8_t *cow_bit(pt_meta_t *m, int idx)
     return &m->cow[idx >> 3];
 }
 
+static inline uint8_t *safe_bit(pt_meta_t *m, int idx)
+{
+    if (!m || idx < 0 || idx >= MM_PT_META_ENTRIES)
+        return NULL;
+    return &m->safe[idx >> 3];
+}
+
 /*
  * The body of mm_pt_note_present() with the metadata already resolved.  Kept
  * separate so bulk callers (provisioning a whole leaf table) can hoist the
@@ -308,6 +315,94 @@ void mm_pt_note_absent(pte_t *table, int level, int idx)
     uint8_t *cb = cow_bit(m, idx);
     if (cb)
         *cb &= (uint8_t)~(1u << (idx & 7));
+    /* Safety bits describe the class that was just cleared, so they must go
+     * with it -- otherwise a reused slot would inherit a stale UFFD or
+     * NO_FA flag and the fault path would make the wrong decision. */
+    uint8_t *sb = safe_bit(m, idx);
+    if (sb)
+        *sb &= (uint8_t)~MM_SAFE_MASK;
+}
+
+int mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    pt_meta_t *m = mm_pt_meta(table);
+    uint8_t *sb = safe_bit(m, idx);
+    if (!sb)
+        return -EINVAL;
+    /* Refuse to flag a slot that carries no mapping: a safety bit on an
+     * INVALID entry has no meaning and would never be cleared. */
+    if (MM_ST_GET_CLASS(cls_slot(m, idx) ? *cls_slot(m, idx) : 0) ==
+        MM_ST_INVALID)
+        return -ENOENT;
+    *sb |= (uint8_t)(flags & MM_SAFE_MASK);
+    return 0;
+}
+
+int mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    uint8_t *sb = safe_bit(mm_pt_meta(table), idx);
+    if (!sb)
+        return -EINVAL;
+    *sb &= (uint8_t)~(flags & MM_SAFE_MASK);
+    return 0;
+}
+
+int mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    uint8_t *sb = safe_bit(mm_pt_meta(table), idx);
+    if (!sb)
+        return 0;
+    return (*sb & (flags & MM_SAFE_MASK)) == (flags & MM_SAFE_MASK);
+}
+
+/*
+ * Set or clear per-entry safety bits over a whole virtual range.
+ *
+ * Walks leaf by leaf (amortising the page-table lookup the way madvise does)
+ * rather than looking the leaf up once per page.  `set == 0` clears.
+ *
+ * Only entries that already carry a mapping are touched: mm_pt_safe_set()
+ * refuses an MM_ST_INVALID slot, because a safety bit with no mapping behind
+ * it has no meaning and would never be cleared.  That is the right behaviour
+ * for both callers -- a page inside a sealed VMA that has not been faulted yet
+ * is still legitimately faultable (first touch is not a seal violation), so
+ * there is nothing for NO_FA to suppress, and UFFDIO_REGISTER only accepts
+ * ranges already backed by a VMA.
+ */
+int mm_pt_set_safe_range(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                         unsigned flags, int set)
+{
+    if (!mm || !mm->pgdir || end <= start || !flags)
+        return -EINVAL;
+    if (start & (PAGE_SIZE - 1) || end & (PAGE_SIZE - 1))
+        return -EINVAL;
+
+    for (vaddr_t va = start; va < end; ) {
+        int level = 0;
+        vaddr_t base = 0;
+        size_t size = 0;
+        pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+        if (!pte || !size) {
+            va += PAGE_SIZE;
+            continue;
+        }
+        pte_t *table = pte - arch_pt_vpn(va, 0);
+        vaddr_t leaf_end = base + size;
+        vaddr_t from = base < start ? start : base;
+        vaddr_t to = leaf_end < end ? leaf_end : end;
+        for (vaddr_t p = from; p < to; p += PAGE_SIZE) {
+            int idx = arch_pt_vpn(p, 0);
+            if (set)
+                mm_pt_safe_set(table, 0, idx, flags);
+            else
+                mm_pt_safe_clear(table, 0, idx, flags);
+        }
+        va = leaf_end < end ? leaf_end : end;
+    }
+    return 0;
 }
 
 uint8_t mm_pt_peek(pte_t *table, int level, int idx)
@@ -937,6 +1032,20 @@ int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
     return 0;
 }
 
+/* Test a per-entry safety bit through a cursor, honouring the cursor's span.
+ * Lets a caller that already holds the covering node's lock ask "is this
+ * entry userfaultfd-registered / fault-around-suppressed" without descending
+ * a second time. */
+int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
+{
+    if (!cur || !flags || !cursor_span_ok(cur, addr))
+        return 0;
+    pte_t *table = cursor_leaf_table(cur);
+    if (!table)
+        return 0;
+    return mm_pt_safe_test(table, 0, arch_pt_vpn(addr, 0), flags);
+}
+
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
                     paddr_t *pa_out)
 {
@@ -959,7 +1068,19 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         return 1;
     }
 #endif
-    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+    if (!(pte & PTE_V)) {
+        /* An absent leaf is not "no information".  For a range that
+         * mm_pt_provision_anon() reserved at mmap time it is exactly the
+         * PrivateAnon state a status-driven fault is meant to act on, so the
+         * recorded class (and the permissions the fault will install) must be
+         * reported.  Still return 0: that means "not currently mapped", which
+         * is still true, and the caller distinguishes the two. */
+        uint8_t byte = mm_pt_peek(table, 0, idx);
+        if (cls_out && MM_ST_GET_CLASS(byte) != MM_ST_INVALID)
+            *cls_out = byte;
+        return 0;
+    }
+    if (!arch_pte_is_leaf(pte))
         return 0;
 
     /* The metadata is authoritative for the class; the PTE is authoritative
@@ -1222,6 +1343,34 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
             }
             if (!any)
                 rep->vma_mismatch++;
+        }
+
+        /* Safety-bit cross-check.  MM_SAFE_NO_FA must agree with VM_SEALED in
+         * both directions for every *mapped* page: a sealed range that a
+         * fault-around could still pull in defeats the seal, and the reverse
+         * would needlessly suppress fault-around.  This is what makes the
+         * mseal() wiring machine-checked rather than merely plausible.
+         *
+         * MM_SAFE_UFFD is deliberately NOT checked here.  UFFDIO_UNREGISTER
+         * clears the mark for the union of the ranges it removed, so a page
+         * still covered by a *different* registration loses its mark; the
+         * authoritative test is userfaultfd_range_present() on the VMA fault
+         * path.  Checking it would report mismatches by construction until
+         * that path clears per page after re-testing presence (docs 10.19). */
+        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+            int want = (v->vm_flags & VM_SEALED) ? 1 : 0;
+            for (vaddr_t va = v->start & ~(vaddr_t)(PAGE_SIZE - 1);
+                 va < v->end; va += PAGE_SIZE) {
+                pte_t *t = mm_pt_leaf_table(mm->pgdir, va);
+                if (!t)
+                    continue;
+                int idx = arch_pt_vpn(va, 0);
+                /* Unmapped entries legitimately carry no safety bit. */
+                if (MM_ST_GET_CLASS(mm_pt_peek(t, 0, idx)) == MM_ST_INVALID)
+                    continue;
+                if (mm_pt_safe_test(t, 0, idx, MM_SAFE_NO_FA) != want)
+                    rep->safe_mismatch++;
+            }
         }
     }
 
