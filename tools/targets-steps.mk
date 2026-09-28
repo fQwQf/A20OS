@@ -324,19 +324,9 @@ _release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
 
 _release_disk: $(USER_BUILD_STAMP)
-	rm -f $(DISK_OUT)
-	$(MKFS_FAT) -C -F 32 $(DISK_OUT) 131072
-	@set -e; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		mcopy -i $(DISK_OUT) "$$f" "::/$$name"; \
-	done
-	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/sh
-	mcopy -o -i $(DISK_OUT) $(USER_BUILD_DIR)/mksh ::/bash
-	-mmd -i $(DISK_OUT) ::/etc >/dev/null 2>&1
-	-mmd -i $(DISK_OUT) ::/lib >/dev/null 2>&1
-	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
-		mcopy -o -i $(DISK_OUT) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
-	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(DISK_OUT) - ::/etc/protocols
-	@printf 'external\n' | mcopy -o -i $(DISK_OUT) - ::/etc/external-root
+	@$(PYTHON) tools/img.py release-disk \
+		--disk-out "$(DISK_OUT)" \
+		--mkfs-fat "$(MKFS_FAT)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--libgcc "$(LIBGCC_S_ARCH)" \
+		--protocols "$(PROTOCOLS_LINES)"
