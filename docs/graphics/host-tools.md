@@ -90,13 +90,25 @@ tools/build-virglrenderer.sh env      # 打印要用的 LD_LIBRARY_PATH
 > 所以先跑 `check`。判断权限用 `test -r` / `test -w`，**不要对字符设备做
 > `head -c1`**（会阻塞）。
 
-### 当前状态：**尚未运行**
+### 当前状态：**已运行；renderer 已升级，但 Mesa 仍未 attach**
 
-写这份文档时该脚本一次都没跑过。它需要 root，以及四个当前缺失的 apt 包：
-**`libgbm-dev`、`libdrm-dev`、`libudev-dev`、`python3-mako`**。
+已实测（`fca72f5f`）：
 
-**因此：不得说宿主 virglrenderer 已升级，也不得说 stock Mesa 已能 attach。两者都
-未验证。**
+- 依赖 `libgbm-dev`、`libdrm-dev`、`libudev-dev`、`python3-mako`、
+  **`python3-yaml`**（1.3.0 的 gallium 会 import，漏掉它 `check` 会过、构建两分钟后才炸）
+  已装齐；
+- 脚本从源码构建出 **virglrenderer 1.3.0**（发行版那份是 2020 年的 1.1.0-2），
+  装在 `tools/virgl/install`；
+- `LD_DEBUG=libs` 确认 **QEMU 加载的确实是这份新库**。
+
+**但 stock Mesa 仍未能 attach。** QEMU 依旧不向 guest 提供
+`VIRTIO_GPU_F_VIRGL`：NVIDIA EGL 下它**静默降级为 2D**，强制 Mesa EGL 则显式报
+`eglInitialize failed: EGL_NOT_INITIALIZED` / `render node init failed`。
+强制 Mesa 时 `eglinfo -p surfaceless` 是成功的（radeonsi / OpenGL 4.6），
+而 `eglinfo -p gbm` 失败——**卡点落在 GBM/设备平台这条路上**。
+
+所以：**可以说宿主 renderer 已升级；不可以说 stock Mesa 已能 attach。**
+完整判据表见 [gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)。
 
 ### 装了之后怎么生效
 
