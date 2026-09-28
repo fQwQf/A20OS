@@ -405,6 +405,30 @@ int mm_pt_set_safe_range(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     return 0;
 }
 
+/* Clear one page's safety bits.  mm_pt_set_safe_range() clears a whole range
+ * in one pass, which is wrong for MM_SAFE_UFFD: a page can still be covered by
+ * a different uffd registration, so unregistering one range must not clear a
+ * mark another registration still owns.  Callers clear per page and re-test
+ * presence between pages (docs 10.59/10.60). */
+int mm_pt_safe_clear_page(mm_struct_t *mm, vaddr_t va, unsigned flags)
+{
+    if (!mm || !mm->pgdir || !flags)
+        return -EINVAL;
+    if (va & (PAGE_SIZE - 1))
+        return -EINVAL;
+
+    int level = 0;
+    vaddr_t base = 0;
+    size_t size = 0;
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+    if (!pte || !size)
+        return 0;               /* no leaf here: nothing is marked */
+    pte_t *table = pte - arch_pt_vpn(va, 0);
+    mm_pt_safe_clear(table, 0, arch_pt_vpn(va, 0), flags);
+    return 0;
+}
+
+
 uint8_t mm_pt_peek(pte_t *table, int level, int idx)
 {
     (void)level;

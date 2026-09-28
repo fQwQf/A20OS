@@ -3856,3 +3856,66 @@ presence）**不引入任何新的锁嵌套，不构成死锁**，可以安全�
 
 **本轮到此为止**：锁序已查清、方案已确定、但**未实施**——实施需要新增逐页复查逻辑并补
 一个「双重注册」测试用例，属于需要完整上下文才能一次做对并验证的改动，不宜在收尾阶段动手。
+
+### 10.61 UFFD 过度清除已修复：逐页清除 + 每页复查 presence
+
+按 §10.60 确认的方案 1 实施（锁序已查证为**既有**的 `mm->lock → g_uffd_lock`，不新增嵌套）。
+
+**改动一：新增 `mm_pt_safe_clear_page()`**（`kernel/mm/pt.c`，紧邻 `mm_pt_set_safe_range()`）。
+整段清位的 `mm_pt_set_safe_range()` 对 `MM_SAFE_UFFD` 不适用——一个页可能同时被**另一个**
+uffd 注册覆盖，整段清会把别人的标记一起清掉。新函数只清**一个**页：
+
+```c
+int mm_pt_safe_clear_page(struct mm_struct *mm, vaddr_t va, unsigned flags)
+{
+    ...
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+    if (!pte || !size)
+        return 0;               /* 没有叶子就没有标记 */
+    pte_t *table = pte - arch_pt_vpn(va, 0);
+    mm_pt_safe_clear(table, 0, arch_pt_vpn(va, 0), flags);
+    return 0;
+}
+```
+
+**改动二：unregister 改为逐页 + 逐页复查**（`kernel/ipc/userfaultfd.c`）：
+
+```c
++#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+ spin_lock(&t->mm->lock);
+-mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
++for (vaddr_t p = rlo; p < rhi; p += PAGE_SIZE) {
++    if (!userfaultfd_range_present(t->mm, p))
++        (void)mm_pt_safe_clear_page(t->mm, p, MM_SAFE_UFFD);
++}
+ spin_unlock(&t->mm->lock);
++#endif
+```
+
+**改动三：NOMMU 守卫**。`pt.c` 的全部安全位函数位于
+`#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)`（`pt.c:33`）之内，
+NOMMU 构建下不参与编译，故调用点必须同样加守卫。NOMMU 无页表、也就没有安全位，
+不加守卫会得到 `undefined reference to mm_pt_safe_clear_page`——**这是本次改动
+唯一一次编译失败，且是靠链接错误而非源码错误暴露的，值得记住。**
+
+**改动四：修正 `fault.c` 那句已经不成立的注释**（§10.59 第 3 条）。原文声称
+「`userfaultfd_range_present()` 是权威判定……对其它所有情况都仍会在下面的 VMA 路径上运行」——
+而 `ANON_VIRT` 的页在状态路径里**就地满足并返回**，根本走不到 `fault.c:1036`。
+现已改成如实描述：标记在此处**具有权威性**、不被重新推导，因此 unregister 有义务
+只为「无任何注册仍覆盖」的页清标记。
+
+**验证**：
+
+| 项 | 结果 |
+|---|---|
+| 5 架构（riscv64/x86_64/aarch64/loongarch64/ppc64le） | 0 errors |
+| riscv64 + aarch64 NOMMU | 0 errors |
+| x86_64 开启臂（`CONFIG_ANON_PROV_DEFAULT=4096`） | `mm_stress` **PASS**，0 FATAL，审计全 0 |
+| riscv64 开启臂（`a20.anonprov=4096`） | `mm_stress` **PASS**，0 FATAL，审计全 0 |
+| `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` | 全 PASS |
+
+**尚未证明的一点（如实记录）**：本次修复**没有针对性的回归测试**。要证明「过度清除已消除」，
+需要一个「同一页被两次注册、注销其中一次、确认另一注册仍能收到 fault」的用例；
+现有 `mm_stress` 是否覆盖这一场景**未确认**。因此本次验证证明的是
+**「改动没有破坏既有行为」**（各门与两个开启臂仍全绿），**不是**「过度清除已被测试证明消除」。
+补这个用例是下一轮的明确任务。
