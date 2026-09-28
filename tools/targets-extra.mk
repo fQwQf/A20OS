@@ -25,10 +25,12 @@ extra-user-apps: extra-fetch-sources
 # return immediately here.  Fedora's cross GCC omits it, so bootstrap the
 # target runtime from Fedora's official RISC-V repository into the project.
 prepare-riscv64-glibc-sysroot:
-	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
-		user/extra/prepare-riscv64-glibc-sysroot.sh \
-			"$(RISCV_GLIBC_LIB_DIR)" "$(RISCV_GLIBC_LOCAL_ROOT)" "$(FEDORA_RISCV_RELEASE)"; \
-	fi
+	@$(PYTHON) tools/pkg.py prepare-riscv64-sysroot \
+		--arch "$(ARCH)" \
+		--extra-packages "$(EXTRA_PACKAGES)" \
+		--lib-dir "$(RISCV_GLIBC_LIB_DIR)" \
+		--local-root "$(RISCV_GLIBC_LOCAL_ROOT)" \
+		--fedora-release "$(FEDORA_RISCV_RELEASE)"
 
 force_extra_image_stamp:
 	@:
