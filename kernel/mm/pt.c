@@ -807,7 +807,7 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
  * Default is unchanged (MM_ANON_PROVISION_MAX_PAGES).  a20.anonprov=0 disables
  * provisioning entirely, which is the other arm of the experiment.
  */
-static uint32_t g_anon_prov_max = MM_ANON_PROVISION_MAX_PAGES;
+static uint32_t g_anon_prov_max;   /* off by default; a20.anonprov=N enables */
 
 void mm_pt_anon_prov_init(void)
 {
@@ -838,8 +838,8 @@ void mm_pt_anon_prov_init(void)
             if (ok)
                 g_anon_prov_max = v;
             else
-                kwarn("[PT] bad %s value, keeping %u\n", MM_ANON_PROV_KEY,
-                      g_anon_prov_max);
+                kwarn("[PT] bad %s value, keeping %u (0 = off)\n",
+                      MM_ANON_PROV_KEY, g_anon_prov_max);
         }
         p = tok_end;
     }
