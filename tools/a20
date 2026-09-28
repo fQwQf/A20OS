@@ -58,6 +58,7 @@ from a20_instance import (
     QEMU_RUNNABLE_ARCHES,
     Instance,
     InstanceError,
+    applicable_actions,
     parse_instance,
     section_is_set,
 )
@@ -426,12 +427,15 @@ def cmd_show_vars(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_list(_args: argparse.Namespace) -> int:
+def cmd_list(args: argparse.Namespace) -> int:
     paths = sorted(INSTANCES_DIR.glob("*.toml"))
     if not paths:
         print(f"no instances found in {INSTANCES_DIR}")
         return EXIT_OK
+    want_arch = set(args.arch or ())
+    want_act = set(args.action or ())
     failed = 0
+    shown = 0
     for path in paths:
         try:
             inst = parse_instance(path)
@@ -440,10 +444,18 @@ def cmd_list(_args: argparse.Namespace) -> int:
             failed += 1
             print(f"{path.stem:<28} INVALID  {e}", file=sys.stderr)
             continue
-        mode = "gui" if inst.gui.enabled else "text"
-        status = "ok" if not errors else f"{len(errors)} error(s)"
-        print(f"{inst.name:<28} {inst.arch:<12} {mode:<5} {status:<12} {inst.description or ''}")
         failed += bool(errors)
+        acts = applicable_actions(inst)
+        if (want_arch and inst.arch not in want_arch) or (
+                want_act and not want_act <= set(acts)):
+            continue
+        shown += 1
+        status = "ok" if not errors else f"{len(errors)} error(s)"
+        print(f"{inst.name:<26} {inst.arch:<11} {','.join(acts):<30} "
+              f"{status:<11} {inst.description or ''}")
+    if not shown and (want_arch or want_act):
+        print(f"list: no instance matches arch={sorted(want_arch) or 'any'} "
+              f"action={sorted(want_act) or 'any'}", file=sys.stderr)
     if failed:
         print(f"list: {failed} instance(s) invalid", file=sys.stderr)
     return EXIT_FAIL if failed else EXIT_OK
@@ -593,7 +605,13 @@ def main(argv: list[str] | None = None) -> int:
                          help="report whether the fragment would change, without writing")
     sub.add_parser("check-flash-backends",
                    help="validate components/flash-backends.toml against the makefiles")
-    sub.add_parser("list", help="list known instances")
+    pl = sub.add_parser("list", help="list known instances")
+    pl.add_argument("--arch", nargs="*", default=(), metavar="ARCH",
+                    help="only instances built for these architectures")
+    pl.add_argument("--action", nargs="*", default=(), metavar="ACT",
+                    help="only instances that support every one of these "
+                         "actions (build run debug test flash package "
+                         "console deploy)")
     sub.add_parser("resources", help="show the host budget instance runs are gated against")
 
     for name, help_text in (("console", "attach to a board console and run its on-board check"),
