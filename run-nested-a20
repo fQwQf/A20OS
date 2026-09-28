@@ -1,4 +1,20 @@
 #!/bin/mksh
+# Boot A20OS under QEMU from a sandbox whose root is mounted at /bin.
+#
+# Every path below is absolute under /bin, and LD_LIBRARY_PATH is set to match,
+# so this script only works where the build outputs have been placed (or
+# bind-mounted) at /bin -- a container or chroot image, not a developer
+# checkout. Nothing here is configurable and nothing is taken as an argument:
+# the architecture (riscv64), the memory size (256M), the disk image and the
+# kernel are all fixed, which makes this a fixed bring-up smoke rather than a
+# general-purpose runner.
+#
+# It is not wired into any make target. The normal ways to boot are
+#   make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
+#   tools/a20 run qemu-riscv64
+# both of which build first and then derive every path. Use this only when you
+# are deliberately reproducing a boot inside such a sandbox image, e.g. to
+# check that the packaged artifacts boot on their own.
 
 export LD_LIBRARY_PATH=/bin/qemu-libs
 

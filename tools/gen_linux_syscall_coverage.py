@@ -15,10 +15,20 @@ Two properties this script deliberately has:
 * It rewrites only the text between the BEGIN/END markers, so hand-written
   prose outside the block is never touched.
 
-Usage: gen_linux_syscall_coverage.py   (no arguments; paths are fixed)
+Because it can rewrite a tracked file, it has two modes.  The default fixes
+drift in place and is what you want after adding a syscall.  --check only
+reports, and is what a gate wants: a check that repairs what it is checking
+leaves the working tree dirty, so a "pass" and a "fail" both end with an
+unexplained `git status` entry, and CI cannot tell whether the document it
+validated is the one now on disk.
+
+Usage:
+  gen_linux_syscall_coverage.py            reorder the table in place
+  gen_linux_syscall_coverage.py --check    report drift, write nothing
 """
 
 import re
+import sys
 from pathlib import Path
 
 
@@ -35,7 +45,9 @@ HEADER = "\n".join(
 )
 
 
-def main():
+def main() -> int:
+    check_only = "--check" in sys.argv[1:]
+
     table = TABLE.read_text()
     document = DOCUMENT.read_text()
     names = re.findall(r"^LINUX_SYSCALL\(([^,]+)", table, re.MULTILINE)
@@ -55,14 +67,30 @@ def main():
             details.append("missing annotations: " + ", ".join(missing))
         if extra:
             details.append("stale annotations: " + ", ".join(extra))
-        raise SystemExit("; ".join(details))
+        print("; ".join(details), file=sys.stderr)
+        return 1
 
     generated = BEGIN + "\n" + HEADER + "\n"
     generated += "\n".join(rows[name] for name in names) + "\n" + END
     updated = document[:start] + generated + document[end:]
-    if updated != document:
-        DOCUMENT.write_text(updated)
+
+    if updated == document:
+        return 0
+
+    if check_only:
+        where = DOCUMENT.relative_to(ROOT)
+        print(
+            f"{where}: out of sync with syscall_table.def; the table rows are "
+            f"in {TABLE.relative_to(ROOT)} order. Run "
+            f"`python3 tools/gen_linux_syscall_coverage.py` to reorder, or add "
+            f"the missing rows. Nothing was written.",
+            file=sys.stderr,
+        )
+        return 1
+
+    DOCUMENT.write_text(updated)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
