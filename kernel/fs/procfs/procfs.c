@@ -338,6 +338,15 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "sys") == 0) {
         child = new_entry(name, PF_SYS, 0);
         type = PF_SYS;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "cpu") == 0) {
+        child = new_entry(name, PF_PRESSURE_CPU, 0);
+        type = PF_PRESSURE_CPU;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "memory") == 0) {
+        child = new_entry(name, PF_PRESSURE_MEM, 0);
+        type = PF_PRESSURE_MEM;
+    } else if (dp && dp->type == PF_PRESSURE && strcmp(name, "io") == 0) {
+        child = new_entry(name, PF_PRESSURE_IO, 0);
+        type = PF_PRESSURE_IO;
     } else if (dp && dp->type == PF_SYS && strcmp(name, "fs") == 0) {
         child = new_entry(name, PF_SYS_FS, 0);
         type = PF_SYS_FS;
@@ -584,7 +593,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
                 type == PF_SYS_NET || type == PF_SYS_VM ||
                 type == PF_SYS_FS_INOTIFY || type == PF_NET ||
                 type == PF_A20 || type == PF_PID_FD ||
-                type == PF_PID_NS || type == PF_PID_FDINFO) ?
+                type == PF_PID_NS || type == PF_PID_FDINFO ||
+                type == PF_PRESSURE) ?
                VFS_FT_DIR : VFS_FT_REGULAR;
     if (magic_symlink)
         vn->link_flags |= VNODE_MAGICLINK;
@@ -1089,6 +1099,9 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
     };
+    static const char *pressure_entries[] = {
+        ".", "..", "cpu", "memory", "io", NULL
+    };
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
     if (p && (p->type == PF_PID_FD || p->type == PF_PID_FDINFO))
         return procfs_fd_readdir(vf, p, dirp, count);
@@ -1101,6 +1114,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         entries = sys_entries;
     else if (p && p->type == PF_SYS_FS)
         entries = sys_fs_entries;
+    else if (p && p->type == PF_PRESSURE)
+        entries = pressure_entries;
     else if (p && p->type == PF_SYS_KERNEL)
         entries = sys_kernel_entries;
     else if (p && p->type == PF_SYS_NET)
