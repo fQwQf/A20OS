@@ -13,10 +13,10 @@ import re
 from pathlib import Path
 from typing import Final, assert_never
 
+from a20_registry import RegistryError, load_flash_backends
 from a20_instance import (
     ABI_CHOICES,
     DRIVER_DEPLOYMENTS,
-    FLASH_TOOLS,
     KNOWN_ARCHES,
     NOMMU_ARCHES,
     PACKAGE_KINDS,
@@ -86,6 +86,11 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if t.timeout is not None and not _TIMEOUT_RE.fullmatch(t.timeout):
         e.append(f"test.timeout: '{t.timeout}' must match {_TIMEOUT_RE.pattern} (e.g. 45s)")
     has_test = any(x is not None for x in (t.timeout, t.input_delay, t.commands, t.expect))
+    if has_test and not t.expect:
+        # Without expect the gate can only ever pass vacuously, so require it
+        # here rather than letting `a20 test` discover it after the build.
+        e.append("test.expect: required when [test] is present (a gate with no "
+                 "expect substring can only pass vacuously)")
     for field_name, entries in (("test.commands", t.commands), ("test.expect", t.expect),
                                 ("machine.extra_qemu", m.extra_qemu),
                                 ("rootfs.drivers", r.drivers),
@@ -110,19 +115,84 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if has_test and g.enabled:
         e.append("test.*: the a20 test harness drives the serial console and "
                  "cannot combine with gui.enabled")
-    _validate_board_sections(inst, e)
+    _validate_board_sections(inst, e, repo_root)
+    _validate_target(inst, e)
     return e
 
 
-def _validate_board_sections(inst: Instance, e: list[str]) -> None:
+def _validate_target(inst: Instance, e: list[str]) -> None:
+    """Rules for [target], the physical board behind the serial cable.
+
+    The theme is that a deploy must be able to fail.  Every field that could
+    make the check vacuous -- a board with no console, commands with nothing to
+    assert -- is rejected here rather than discovered after a power cycle.
+    """
+    t = inst.target
+    if not section_is_set(t):
+        return
+    if t.serial is None:
+        e.append("target.serial: required when [target] is present; a physical target "
+                 "with no console cannot be observed or verified")
+    if t.baud is not None and t.baud <= 0:
+        e.append("target.baud: must be a positive integer")
+    if t.boot_wait is not None and t.boot_wait < 0:
+        e.append("target.boot_wait: must not be negative")
+    if t.boot_timeout is not None and not _TIMEOUT_RE.fullmatch(t.boot_timeout):
+        e.append(f"target.boot_timeout: expected e.g. '90s', got '{t.boot_timeout}'")
+    if t.commands is not None and not t.expect:
+        e.append("target.expect: required when target.commands is set; without it the "
+                 "on-board check can only pass vacuously")
+    if t.console_check is not None and not t.console_check:
+        e.append("target.console_check: present but empty")
+    if t.log is not None and Path(t.log).is_absolute():
+        e.append("target.log: must be a repository-relative path, so console logs stay "
+                 "portable between machines")
+    if t.boot_media is not None and not t.boot_media:
+        e.append("target.boot_media: present but empty")
+    if t.expect is not None and t.commands is None and t.console_check is None:
+        e.append("target.expect: nothing would be running to observe; set target.commands "
+                 "or target.console_check as well")
+
+
+def _validate_flash(inst: Instance, e: list[str], repo_root: Path) -> None:
+    """Resolve [flash].tool against the backend registry and check the board.
+
+    A board/backend mismatch is reported here, at `a20 check` time, rather than
+    left to the flash action: the build is long and the mistake is destructive,
+    so it must be caught before either.
+    """
+    if not section_is_set(inst.flash):
+        return
+    tool = inst.flash.tool
+    if tool is None:
+        e.append("flash.tool: required when [flash] is present")
+        return
+    try:
+        backends = load_flash_backends(repo_root)
+    except RegistryError as err:
+        e.append(f"flash.tool: cannot resolve backends: {err}")
+        return
+    backend = next((b for b in backends if b.name == tool), None)
+    if backend is None:
+        supported = ", ".join(sorted(b.name for b in backends)) or "(none)"
+        e.append(f"flash.tool: '{tool}' is not a registered backend; "
+                 f"see components/flash-backends.toml (registered: {supported})")
+        return
+    if inst.board not in backend.boards:
+        e.append(f"flash.tool: backend '{tool}' is not validated for board "
+                 f"'{inst.board}'; it covers {', '.join(backend.boards)}")
+        return
+    mismatch = backend.geometry_mismatch(inst.stm32.flash_kb, inst.stm32.ram_kb)
+    if mismatch:
+        e.append(f"flash.tool: backend '{tool}' is written for a different flash geometry "
+                 f"than this manifest declares ({mismatch})")
+
+
+def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> None:
     """Cross-section rules for [stm32], [flash], and [package]."""
     if section_is_set(inst.stm32) and inst.arch != "armv7m":
         e.append("stm32.*: only valid for arch = \"armv7m\"")
-    if section_is_set(inst.flash):
-        if inst.arch != "armv7m":
-            e.append("flash.*: only the armv7m/STM32 OpenOCD flow is currently supported")
-        if inst.flash.tool is not None and inst.flash.tool not in FLASH_TOOLS:
-            e.append(f"flash.tool: unsupported '{inst.flash.tool}'; supported: {', '.join(FLASH_TOOLS)}")
+    _validate_flash(inst, e, repo_root)
     p = inst.package
     if not section_is_set(p):
         return

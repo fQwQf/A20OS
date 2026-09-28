@@ -76,11 +76,48 @@ static inline void a20_shmring_copy8(void *dst, const void *src, uint32_t n)
         ((uint8_t *)dst)[i] = ((const uint8_t *)src)[i];
 }
 
-/* Block until the consumer signals ready (bounded by one futex round). */
+/* Block until the consumer signals ready.  Bounded by one futex round only --
+ * see the _timeout variant for why an unbounded wait is a trap in a test. */
 static inline void a20_shmring_wait_ready(a20_shmring_t *r)
 {
     while (__atomic_load_n(&r->ready, __ATOMIC_ACQUIRE) == 0)
         a20_futex_wait((uint32_t *)&r->ready, 0, A20_TIMEOUT_INFINITE);
+}
+
+/* Consumer exit codes.  Shared so the producer and the reporter cannot drift. */
+#define A20_SHMRING_EXIT_OK        0
+#define A20_SHMRING_EXIT_CORRUPT   1
+#define A20_SHMRING_EXIT_VM_MAP    2
+#define A20_SHMRING_EXIT_ATTACH    3
+#define A20_SHMRING_EXIT_SHORT_READ 4
+
+/* Bounded wait for ready/done.  Returns 0 once the flag is set, -1 on timeout.
+ *
+ * Why this exists: the consumer in the shmring benchmark can die *before* it
+ * signals ready -- an unmappable VMO, a bad magic word, a wrong handle slot --
+ * and on those paths it never touches the flag.  An unbounded wait then blocks
+ * the parent forever, the guest produces no further output, and the gate is
+ * killed by its QEMU timeout having printed nothing at all.  A dead consumer
+ * and a hung consumer are then indistinguishable, which is the worst possible
+ * state for a gate.  A bounded wait turns that into a reportable failure.
+ */
+static inline int a20_shmring_wait_flag(uint32_t *flag, uint64_t timeout_ns)
+{
+    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) == 0) {
+        /* Statuses come back negated, matching a20_linux_futex_wait:
+         * -A20_ERR_WOULD_BLOCK means the value already changed, so re-check. */
+        a20_status_t st = a20_futex_wait(flag, 0, timeout_ns);
+        if (st == -A20_ERR_TIMED_OUT)
+            return -1;
+        if (st != A20_OK && st != -A20_ERR_WOULD_BLOCK)
+            return -1;
+    }
+    return 0;
+}
+
+static inline int a20_shmring_wait_ready_timeout(a20_shmring_t *r, uint64_t timeout_ns)
+{
+    return a20_shmring_wait_flag((uint32_t *)&r->ready, timeout_ns);
 }
 
 static inline void a20_shmring_signal_ready(a20_shmring_t *r)
@@ -101,6 +138,11 @@ static inline void a20_shmring_wait_done(a20_shmring_t *r)
 {
     while (__atomic_load_n(&r->done, __ATOMIC_ACQUIRE) == 0)
         a20_futex_wait((uint32_t *)&r->done, 0, A20_TIMEOUT_INFINITE);
+}
+
+static inline int a20_shmring_wait_done_timeout(a20_shmring_t *r, uint64_t timeout_ns)
+{
+    return a20_shmring_wait_flag((uint32_t *)&r->done, timeout_ns);
 }
 
 /* Write the whole buffer, sleeping only while the ring is full. */

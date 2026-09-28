@@ -261,7 +261,15 @@ NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 # ================================================================
 
 comma := ,
-NET_HOSTFWD ?= hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555
+# No implicit host port forwarding.  A host port is a shared, contended
+# resource, and this default made every QEMU launch -- including the dozens of
+# serial-console smoke gates that never open an inbound connection -- claim
+# 5555, so two runs could never be in flight at once and the loser died with
+# QEMU's "could not set up host forwarding rule" instead of anything
+# diagnosable.  Forwarding is now declared per instance via [net].hostfwd, and
+# tools/a20 checks the declared ports are free before starting (waiting, like
+# the memory/CPU preflight, when they are not).
+NET_HOSTFWD ?=
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
 SMOKE_TIMEOUT_ENVELOPE ?= 60s
@@ -966,6 +974,7 @@ include tools/targets-smoke.mk
 include tools/targets-steps.mk
 include tools/targets-dev.mk
 include tools/stm32.mk
+include tools/target-console.mk
 include tools/run-targets.mk
 include tools/targets-images.mk
 include tools/targets-rootfs.mk
@@ -994,15 +1003,12 @@ docs:
 # explicitly classified before the gate passes again.
 .PHONY: check-envelope-coverage
 check-envelope-coverage:
-	@tmp="$$(mktemp)"; \
-		cp docs/research/verification/envelope_coverage.md "$$tmp"; \
-		status=0; \
-		python3 tools/gen_envelope_coverage.py || status=$$?; \
-		if [ "$$status" -eq 0 ] && cmp -s "$$tmp" docs/research/verification/envelope_coverage.md; then \
-			echo "check-envelope-coverage: PASS"; \
-		else \
-			echo "check-envelope-coverage: FAIL -- matrix drifted; review and commit"; \
-			status=1; \
-		fi; \
-		rm -f "$$tmp"; \
-		exit "$$status"
+	@$(PYTHON) tools/gensync.py envelope-coverage \
+		--file docs/research/verification/envelope_coverage.md
+
+
+# The binaries the native stamp rule requires.  make owns this list so the gate
+# and the build cannot disagree about what "built" means.  This is exactly
+# the set the shell rule tested; the Makefile defines more NATIVE_*_BIN vars
+# for other purposes and those are deliberately not part of the gate.
+NATIVE_BINS = $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_UEDUD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)

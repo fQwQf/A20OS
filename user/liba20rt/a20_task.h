@@ -17,6 +17,9 @@ static inline a20_status_t a20_task_spawn(a20_task_spawn_args_t *args)
     return a20_syscall6(A20_SYS_task_spawn, (uint64_t)args, 0, 0, 0, 0, 0);
 }
 
+/* Poll instead of block: -A20_ERR_WOULD_BLOCK when the task is still running. */
+#define A20_TASK_WAIT_NONBLOCK 0x1u
+
 static inline a20_status_t a20_task_wait(a20_handle_t task, a20_flags_t flags,
                                           a20_task_status_t *out)
 {

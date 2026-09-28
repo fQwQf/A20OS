@@ -31,8 +31,28 @@ git
 
 | world | 内容 | 网络需求 |
 |-------|------|----------|
+| `min` | a20-min + a20-drivers（**面向真机出厂**的最小用户态） | 无 |
 | `base` | a20-base + a20-drivers（纯自有，对应旧 disk.img 的内容） | 无 |
 | `devel` | base + Alpine 上游 musl/busybox/vim/git/curl 等 | 需要访问 Alpine 镜像站 |
+
+### `min` 与 `base` 怎么选
+
+`base` 把 `user/build/<arch>` 下的**全部**产物平铺进根文件系统。riscv64 实测
+201 个二进制 / 29 MiB，其中 35 个是 `*_test` / `*_stress` 回归程序——这些只在
+宿主上跑（`make smoke-*`），从不随设备出厂，但它们照样占了镜像里最大的一块。
+`min` 用 recipe 的 `include` 正向列举 26 个二进制，包 **1.38 MiB / 30 entries**
+（`base` 是 8.69 MiB / 190 entries），**-84%**；镜像 payload 3457 KiB。
+
+集合标准：能启动到 shell、能做基本文件操作、有一条可用诊断链
+（`ls`/`cat`/`ps`/`grep`/`head`/`tail`/`wc`/`date`/`uname`）、能干净开关机。
+前 6 个（`init` `mksh` `help` `ls` `cat` `ps` `echo` `sleep`）与内核内建
+initramfs 的 `RAMFS_USER_PROGRAMS` 对齐，保证"内建 initramfs 启动"和"根文件系统
+启动"下用户能敲到同样的命令。刻意不含网络工具与编译器。
+
+选择标准：**要装到设备上就用 `min`**，它才有希望放进 64 MiB NOR flash 或
+128 MiB SD 卡；只在宿主机上做开发、调试和冒烟时用 `base`，工具齐全更省事。
+需要 Alpine 生态（vim/git/桌面）时用 `devel` / `xfce`，那些 world 不基于
+`min`。取舍理由写在 `packages/recipes/a20-min.toml` 的注释里。
 
 > 完整的 XFCE 桌面发行版路径（`make distro-run`，chroot 进 Alpine
 > rootfs）仍然由 `user/rootfs/alpine/` 承载；它本身就是同一思路的先驱，

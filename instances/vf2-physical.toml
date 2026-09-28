@@ -1,0 +1,41 @@
+# VisionFive 2 物理目标：把构建、烧录、写 SD 卡与上板串口验证串成一条命令。
+#
+# 与 vf2-minimal / vf2-sdcard / vf2-extra 的区别：那几个只负责组装产物
+# （package），描述的是"板子上应该有什么"；这个实例额外声明了 [target]，
+# 描述的是"怎么跟板子说话"，因此可以用 a20 console / a20 deploy。
+#
+# 存在这个段不代表真机已验证。串口设备节点、波特率、复位命令与 console_check
+# 都是按 JH7110 / VisionFive 2 的硬件事实填的，但每一条都要在接上板子之后用
+# `tools/a20 console vf2-physical` 实测确认；本仓库的真机验收记录以
+# docs/platforms/physical-boards.md 为准。
+name = "vf2-physical"
+description = "VisionFive 2 with a physical serial target for a20 console/deploy"
+arch = "riscv64"
+board = "visionfive2"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[package]
+kind = "fit-sdcard"
+variant = "sdcard"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+# 故意不写 reset。VisionFive 2 的 U-Boot 已经在板上，没有可从宿主触发的
+# in-band 复位；真机流程是人工断电重启，因此这里靠 boot_timeout 等启动横幅。
+# reset 只在存在可编程复位线路的板子上填（例如 STM32 的 OpenOCD
+# `-c "init" -c "reset run"`，或接了 USB 集线器供电开关的板子）。
+# 注意 a20 用 shlex.split 拆成 argv 执行、不走 shell，所以 ";" 不会被当作命令
+# 分隔符——一个写错的 reset 只会以字面量参数的形式失败。
+boot_wait = 4
+boot_timeout = "120s"
+# 内核真的起来的证据：FDT 内存范围 + init 就绪。
+console_check = ["[FDT] RAM range", "System ready"]
+commands = ["cat /etc/os-release", "ps", "poweroff"]
+expect = ["A20OS", "SMC: System ready", "poweroff"]
+boot_media = ["build/vf2-firmware/a20os-sd.img"]
+media_device = "/dev/sda"

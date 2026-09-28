@@ -7,7 +7,7 @@
 # the *_impl targets below remain the execution engine shared by
 # `make run ARCH=...` and tools/a20.
 
-.PHONY: run _run_impl _debug_impl \
+.PHONY: run _run_impl _debug_impl _qemu_argv _qemu_argv_debug \
 	run-nommu-riscv64 run-nommu-loongarch64 \
 	run-nommu-aarch64 run-nommu-arm64 run-nommu-x86_64 \
 	run-nommu-arm32 run-nommu-riscv32
@@ -60,25 +60,18 @@ _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)
 	@echo "VirtualBox ARM64 text image ready: $(VBOX_AARCH64_TEXT_IMG)"
 
+# The QEMU command line: make owns every flag, and these targets only expand
+# them.  tools/qemu.py reads the result and does the running, so the launch
+# sequence (build, verify, exec) is no longer shell inside a recipe.  They must
+# stay free of prerequisites, or asking for the argv would rebuild the world.
+_qemu_argv:
+	@printf '%s\n' '$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)'
+
+_qemu_argv_debug:
+	@printf '%s\n' '$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s'
+
 _run_impl:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 kernel-only
-else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) dev-build
-endif
-	@test -s $(KERNEL_ELF) || (echo "ERROR: kernel ELF missing or empty: $(KERNEL_ELF)" ; exit 1)
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)
+	$(PYTHON) tools/qemu.py run --arch $(ARCH) --bringup $(BRINGUP)
 
 _debug_impl:
-ifeq ($(BRINGUP),1)
-	$(MAKE) ARCH=$(ARCH) BRINGUP=1 OPT="-O0 -g -DDEBUG" kernel-only
-else
-	$(MAKE) ARCH=$(ARCH) BRINGUP=$(BRINGUP) OPT="-O0 -g -DDEBUG" dev-build
-endif
-	@echo "Waiting for GDB connection on port 1234..."
-	@echo "=========================================================="
-	@echo "Please run in another terminal:"
-	@echo "  gdb-multiarch $(KERNEL_ELF)"
-	@echo "  (gdb) target remote :1234"
-	@echo "=========================================================="
-	$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF) -S -s
+	$(PYTHON) tools/qemu.py debug --arch $(ARCH) --bringup $(BRINGUP)
