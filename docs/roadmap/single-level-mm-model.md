@@ -3385,3 +3385,373 @@ HEAD `3258ebe3` 已记录根因机制；工作树仅含这两处已知插桩。
 **riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、三个门全通过、关机审计全 0
 （含 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
 默认 `g_anon_prov_max=0`，本崩溃只在实验构建下出现。
+
+### 10.53 运行时轨迹给出**第一个有证据的根因**（第 9 次猜测失败后的转机）
+
+在 `mm_cursor_replace()` 里对**每一次安装**打点（`[MM-INS] va= cls= flags= W= cow=`），
+一次运行的结果（29 次安装）：
+
+```
+[MM-INS] va=71000      cls=2 flags=467 W=1 cow=0
+[MM-INS] va=4ee000     cls=2 flags=467 W=1 cow=0
+... 共 28 次，全部 flags=467 W=1 ...
+[MM-INS] va=abd17000   cls=2 flags=425 W=0 cow=0     <<< 唯一一次 W=0
+SIGSEGV: pid=6 code=14 stval=0xabd17f20
+```
+
+`stval=0xabd17f20` 的页基址正是 `0xabd17000`——**最后一条安装记录就是出错的那一页**。
+
+#### 这一条轨迹同时钉死了三件事
+
+1. **它不是 `PTE_COW` 问题。** 该页 `cow=0` 且 `W=0`，但根因是**权限位本身就少了 `PTE_W`**：
+   同一 VMA 的 28 个兄弟页全部以 `flags=0x467`（含 `PTE_W`）装上，只有它以 `0x425` 装上。
+   `0x467 & ~0x425 = 0x42`，即**只差 `PTE_W`（0x2）与 0x40**。§10.50/§10.51 关于
+   `PTE_COW` 的整条线索是**无关分支**，纯属 `handle_cow_fault()` 那个 `return -1` 把人
+   误导过去的假象。
+
+2. **装它的是状态路径（per-PTE status），不是 VMA 路径。** 状态路径是全仓库**唯一**
+   不从 VMA 取权限、而是把记录的状态字节**回环**成 PTE 权限的地方
+   （`fault.c:968-980`：`prot` → `mm_prot_to_pte_flags(prot)`）：
+
+   ```c
+   if (cls_byte & MM_ST_PROT_R) prot |= 1;
+   if (cls_byte & MM_ST_PROT_W) prot |= 2;
+   if (cls_byte & MM_ST_PROT_X) prot |= 4;
+   pte_t allow = mm_prot_to_pte_flags(prot);
+   ```
+
+   `mm_prot_to_pte_flags(1)`（只读）**正是 `0x425`**。而其余 28 页都由 VMA 路径装、
+   带着 `0x467`。`mm_fault_from_status=12` 与「唯一一次 `W=0` 的安装来自状态字节」相符。
+   （严格确认只需在状态路径上加一个独立标记，成本一次运行。）
+
+3. **所以真正的分叉是：这一页的 per-PTE 状态记录了「只读」，而它所在的 VMA 是可写。**
+   状态路径**忠实地**按状态装了只读页——它没有错，**是状态本身是错的**。
+
+#### 于是问题收敛成一个，且已有唯一候选
+
+**「谁把这一页的状态改成了只读，却没有同步 VMA？」**
+
+写状态权限的函数**全仓库只有一个**：`mm_pt_refresh_absent_prot()`（`pt.c:857`），
+只被 mprotect 的「该页尚未映射」分支调用。而 mprotect 在**同一个分支之后**会
+**无条件**执行 `v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);`。
+两者传同一个 `ptef`，所以**单次 mprotect 不会分叉**；分叉只能来自**两次 mprotect**：
+前一次把状态刷成只读，后一次把 VMA 放宽回可写却**没能刷新状态**——而它有两条现成的
+「刷不成」路径，且 `[MM-DIV]` 已经证明**其中一条在本次运行中真实发生过 33 次**
+（`pte=0`，即 `pt_lookup_leaf` 返回 NULL、调用点直接跳过刷新）：
+
+* `pte == NULL` → 调用点 `if (pte)` 为假，**根本没调用刷新**（`mprotect.c:162-165`）；
+* `cls != MM_ST_ANON_VIRT` → 刷新函数自己 `return 1` 早退（`pt.c:867`）。
+
+#### 修复方向（**证据已足，但本轮不做**）
+
+根本问题是**状态与 VMA 之间没有一致性约束**：状态路径信任状态字节到「不查 VMA」的程度，
+而状态字节又只有 mprotect 会在缺页时刷新、且刷新失败时**不报错**。两条可选修法：
+
+* **A（治标，最小）**：mprotect 在「放宽为可写却没能刷新状态」时，**不要**只 `kerr`，
+  而是把该页状态**改写为 VMA 的权限**（或直接把状态置为 `INVALID`，让下一次缺页回落到
+  VMA 路径）。语义上等价于「VMA 是权威，状态只是缓存」——与 Linux 一致。
+* **B（治本）**：让状态路径在 `ANON_VIRT` 命中时**与 VMA 交叉校验**，不一致就放弃状态路径、
+  回落 VMA 路径。代价是每次状态缺页多一次 VMA 查找，与论文「省掉 VMA 查找」的主张相悖，
+  **与本项目目标冲突，不建议**。
+
+**推荐 A**：它承认了「VMA 权威、状态缓存」这个本该早就成立的约定，
+并把当前**静默**的分叉变成**不可能**的分叉。
+
+**未做完的收尾**（下一次务必先做，成本极低）：
+1. 在状态路径（`fault.c:993` 附近）加独立标记，确证 `0x425` 那次确实来自它；
+2. **移除全部 TEMP 插桩**：`pt.c`（`[MM-INS]`、declined 区分）、
+   `mprotect.c`（`[MM-DIV]`）、`fault.c`（`[MM-FP]`）——三处均为热路径 `kerr`，
+   修复验证通过后必须清理；
+3. 实施 A 之后重跑：期望 x86_64 `mm_stress PASS`、`mm_anon_provisioned=53`、
+   `mm_fault_from_status>0`、MM-ASM 全 0；再回归 riscv64 三门与 5 架构构建。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、三个门全通过、关机审计全 0
+（含 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.54 完整时序捕获，机制闭环（`[MM-RF]` → `[MM-ST]` → `[MM-INS]`）
+
+给「状态刷新尝试」和「状态路径安装」各加一个标记后，出错页 `0x8dc0f000` 的**全部**记录
+只有三条，顺序如下（本次运行 `ST=24 RF=33 INS=29 DIV=33 FP=0`）：
+
+```
+[MM-RF]  va=8dc0f000 ptef=467 declined=1 pte=0
+[MM-ST]  va=8dc0f000 status_prot=1 allow=425 W=0 cow=0
+[MM-INS] va=8dc0f000 cls=2 flags=425 W=0 cow=0
+SIGSEGV: pid=6 code=14 stval=0x8dc0ff20
+```
+
+逐行读：
+
+1. **`[MM-RF]`**：mprotect 要把这一页的状态刷成 `ptef=0x467`（**含 `PTE_W`**，可写），
+   但 **`declined=1` 且 `pte=0`**——`pt_lookup_leaf()` 返回 **NULL**，调用点的
+   `if (pte)` 为假，**刷新被整段跳过**。而循环之后的
+   `v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef)` **照样执行**，
+   VMA 被放宽成可写。**分叉就在这一行产生。**
+2. **`[MM-ST]`**：随后缺页走状态路径，读到 `status_prot=1`（**只有 R**），
+   回环出 `allow=0x425`（无 `PTE_W`）。
+3. **`[MM-INS]`**：照此装帧，得到一张只读页，压在可写 VMA 之下。
+4. 第一次写 → `handle_cow_fault()` 既无 `PTE_COW` 又无 `PTE_W` → `return -1` → **致命**。
+
+至此 §10.53 的推断**被运行时轨迹逐行证实**：状态路径没有错，**是状态陈旧而 VMA 已放宽**。
+
+#### 修复（现在可以动手了，方向唯一）
+
+**「状态」与「VMA」之间缺少一致性约束**。状态路径按设计**不查 VMA**（这是论文的卖点），
+因此它把状态字节当作绝对权威；可是状态字节**只在 mprotect 的缺页分支里被刷新，
+且刷新失败时不报错、不回退**。`[MM-DIV]` 的 33 次 `pte=0` 证明这条「静默失败」在一次运行里
+发生了 33 次。
+
+**最小且语义正确的修法**：在 mprotect 的缺页分支里，当 `declined` 为真时，
+**不要保留可能陈旧的状态**——把该页的状态置为 `INVALID`，让下一次缺页回落到 VMA 路径
+（VMA 是权威，与 Linux 语义一致）。当 `pte == NULL` 时本就没有元数据可清，
+而新建叶子表的元数据本就是 `INVALID`，所以这条路径**自动安全**；真正需要显式处理的是
+`pte != NULL` 但 `mm_pt_refresh_absent_prot()` 因 `cls != MM_ST_ANON_VIRT` 早退的情形。
+
+**同时应当把 `declined` 从「静默」变成「有后果」**：目前它只 `kerr`，没有任何状态变化，
+这正是缺陷得以长期潜伏的原因。
+
+#### 仍未解释的一处（诚实记录，不掩盖）
+
+本次运行里 `pte=0` 意味着 mprotect 当时**连叶子表都还没有**；但状态路径随后却读到了
+`status_prot=1`。**即「mprotect 时无叶子表」与「稍后有 R-only 状态」这两件事如何同时成立，
+本轮没有查清。** 可能的解释（均未验证）：叶子表是在同一 4K 对齐区域的**兄弟页**缺页时被顺带
+创建的，其元数据里该页仍带着更早一次 `mprotect(PROT_READ)` 刷下的 R；
+或 `mm_addrspace_lock()` 在创建叶子表时按某种方式继承了旧元数据。
+**这不影响上面的修复方向**（无论叶子表何时出现，「刷新失败就丢弃陈旧状态」都成立），
+但它是一个**独立于本崩溃的疑点**，值得单独查清。
+
+**插桩现状**（故意保留，供修复验证复用）：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、
+`[MM-RF]`）、`fault.c`（`[MM-ST]`、`[MM-FP]`）。**修复通过后必须全部移除。**
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、三个门全通过、关机审计全 0
+（含 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.55 元数据生命周期核对：新建叶子表**不可能**带出陈旧状态，疑点因此收得更紧
+
+§10.54 留下的疑点是：`[MM-RF]` 显示 mprotect 时 `pte=0`（`pt_lookup_leaf()` 返回 NULL），
+而稍后的 `[MM-ST]` 却读到了 `status_prot=1`（`ANON_VIRT` + **只读**）。
+「当时无叶子表」与「稍后有 R-only 状态」如何同时成立？
+
+核对元数据的生命周期（`kernel/mm/pt.c`）：
+
+* `mm_pt_meta()`（`pt.c:180`）按**叶子表的 PFN** 查 `pfa.meta[pfn].pt`，
+  并要求 `pfa.meta[pfn].flags == FRAME_F_PT`；
+* `mm_pt_node_init()`（`pt.c:210`）分配元数据后 **`memset(m, 0, sizeof(*m))`**，
+  再在 `pfa.lock` 下发布 `flags = FRAME_F_PT`；
+* `mm_pt_node_fini()`（`pt.c:241`）把指针置 NULL、`flags = FRAME_F_ALLOC`，并回收元数据页。
+
+**因此新建叶子表的元数据必然是全 0（即全 `MM_ST_INVALID`），
+一个陈旧的 `ANON_VIRT|R` 状态绝不可能来自一张新建的叶子表。** 这条解释被排除。
+
+于是剩下的可能只有两类，且**都还没验证**：
+
+1. **`pt_lookup_leaf()` 返回 NULL 的原因不是「没有叶子表」。** 这是我此前的误读——
+   `[MM-RF]` 的 `pte=0` 只说明**返回指针为空**，而 `pt_lookup_leaf()` 返回 NULL 也可能是因为
+   该地址被一个**非 leaf 的上层条目**（中间节点或大页）覆盖，或其它查找失败情形。
+   若如此，则当时叶子表**是存在的**，`mm_pt_refresh_absent_prot()` 本该被调用；
+   而它被调用却返回 `declined=1`，只可能是走了 `cls != MM_ST_ANON_VIRT` 的早退
+   （`pt.c:867`）——**但那样状态路径就不会用这份状态了**（它要求 `cls == ANON_VIRT`），
+   于是又与 `[MM-ST]` 读出 `status_prot=1` 矛盾。**这条也需要查清。**
+2. **同一 4K 对齐区域里兄弟页的缺页顺带创建了叶子表**，其元数据里该页带着更早一次
+   `mprotect(PROT_READ)` 刷下的 R——但这与第 1 条的 `memset` 结论**并不冲突**，
+   因为那张表**不是新建的**，而是被**复用**的（其元数据此前已存在且非零）。
+
+**注意：这两条都不是「新建表带陈旧状态」，而是「表被复用时元数据未被重置」或
+「`pt_lookup_leaf()` 的 NULL 被我误读」。** 二者都指向同一个需要读的地方：
+**`pt_lookup_leaf()` 到底在什么情况下返回 NULL，以及叶子表被复用/释放时元数据是否随之释放。**
+
+**这已是一个独立于本次崩溃的、更底层的不变量问题**（元数据是否与叶子表生命周期严格绑定），
+值得单独查清；但它需要新的一轮完整上下文才能严谨推进。
+
+**因此本轮到此为止，不实施修复。** 理由：§10.54 给出的修复（mprotect 刷新失败就丢弃陈旧状态）
+在**机制层面已被运行时轨迹逐行证实**，但要写对必须先知道
+**`pt_lookup_leaf()` 返回 NULL 的确切条件**——因为 `pte=0` 究竟是「无表」还是「被上层条目覆盖」，
+决定了该走「新建表路径（自动安全）」还是「复用表路径（需显式重置）」，两种修法完全不同。
+在这一点查清之前动手，就是又一次凭猜测下手——本轮已经证伪 9 次，不应再添第 10 次。
+
+**交付状态（如实）**：
+* **riscv64 侧完整、可用、可信**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+  `smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+  状态路径 2836 次缺页正常、预标记开/关**性能中性**（§10.34）、所有旧性能结论已撤回。
+* **x86_64 侧机制已闭环、修复待一个前置读码**：分叉点精确定位在
+  `mprotect.c` 缺页分支的「`declined=1` 却照样 `v->pte_flags = ...`」这一行，
+  运行时三行轨迹（`[MM-RF]`→`[MM-ST]`→`[MM-INS]`）逐行证实。
+* **工作树含故意保留的诊断插桩**：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、`[MM-RF]`）、
+  `fault.c`（`[MM-ST]`、`[MM-FP]`）。**这些是热路径 `kerr`，修复验证通过后必须全部移除。**
+
+### 10.56 **根因确认**：`pt_lookup_leaf()` 返回 NULL 不等于「没有叶子表」
+
+读了 `pt_lookup_leaf()`（`kernel/mm/mm.c`）之后，§10.55 的疑点解开，而且**根因就此确证**：
+
+```c
+pte_t *pt_lookup_leaf(pt_root_t *pgdir, vaddr_t va, ...) {
+    pte_t *table = pgdir;
+    for (int level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+        pte_t *pte = &table[idx];
+        if (!(*pte & PTE_V))
+            return NULL;                 /* <-- 只是「该级条目未present」 */
+        if (arch_pte_is_leaf(*pte)) { ...; return pte; }
+        if (level == 0) return NULL;
+        table = arch_pte_to_ptr(*pte);
+    }
+```
+
+**关键：返回 NULL 的条件是「当前这一级的条目没有 `PTE_V`」，而不是「叶子表不存在」。**
+走到 level 0 时，`table` **就是那张叶子表**，只是它的 `table[idx]` 尚未被映射。
+所以完全可能出现：**叶子表存在、其元数据里该 idx 带着陈旧的 `ANON_VIRT|R`、
+而 `pt_lookup_leaf()` 却返回 NULL。** §10.55 的第 1 条（非 leaf 上层条目导致 NULL）被排除
+——被上层条目覆盖时它会正常返回那个 leaf 并给出 `level > 0`，不会返回 NULL。
+
+#### 于是 `mprotect` 里的这句注释与代码都是错的
+
+```c
+if (pte) {
+    int idx = arch_pt_vpn(va, 0);
+    declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
+}
+/* 注释原文：「The per-PTE status lives in that table's metadata, so when
+ *  there is no table there is no status to refresh.」 */
+```
+
+它把「`pt_lookup_leaf()` 返回 NULL」误读成「没有叶子表」，于是**整段跳过刷新**。
+但真实情况是「**叶子表在、条目没映射**」——这恰恰是**最需要刷新状态的那种情形**：
+条目没映射说明将来会走缺页路径，而缺页路径读的正是**这张表的元数据**里那份陈旧的
+`ANON_VIRT|R`。跳过刷新 = 把陈旧只读权限留给未来的缺页去执行。
+
+**这与 §10.54 的三行运行时轨迹完全吻合，且每一行都得到解释：**
+
+```
+[MM-RF]  va=8dc0f000 ptef=467 declined=1 pte=0
+```
+
+`pte=0` 并不是「没有叶子表」，而是「叶子表在、`table[idx]` 未映射」；
+`declined=1` 来自 `if (pte)` 为假而**根本没进刷新**；VMA 却被 `ptef=0x467` 放宽成可写。
+于是陈旧的 `ANON_VIRT|R` 留在元数据里 → 缺页时 `[MM-ST] status_prot=1` →
+`[MM-INS] flags=0x425` 装出只读页 → 压在可写 VMA 下 → 首次写无人接管 → **致命**。
+
+**结构性根因一句话**：
+> **`mprotect` 用「能否取到 PTE 指针」来代替「能否取到叶子表」来判断要不要刷新
+> per-PTE 状态；对「表在、条目未映射」这一最常见的情形，它错误地跳过了刷新，
+> 于是陈旧状态被后来的状态缺页照单执行。**
+
+§10.38 当初把 `if (pte)` 加上，是为了消除 `pte - idx` 对 NULL 做指针运算的 UBSAN；
+**方向对，但结论错**——真正该做的是「用 `mm_addrspace_lock()` 走到叶子表」，
+而不是「PTE 取不到就跳过」。这也是为什么 §10.38 修完 UBSAN 从 35 降到 2、崩溃却丝毫未变。
+
+#### 修复（方向唯一，且已完全确定）
+
+在 `mprotect` 的缺页分支里，**不要用 `pt_lookup_leaf()` 的返回值判断**，改用能走到叶子表的
+路径（例如 `mm_addrspace_lock()` + `cursor_leaf_table()`，或新增一个只下探到叶子表的
+helper），然后**无条件**对 `table[idx]` 调用 `mm_pt_refresh_absent_prot()`。
+这样：
+* 表在、条目未映射 → 刷新成功，陈旧权限被纠正（**修掉本崩溃**）；
+* 表不在 → 拿不到元数据，此时**新建**叶子表的元数据必为全 0（§10.55 的 `memset` 结论），
+  状态路径不会命中 `ANON_VIRT`，天然安全；
+* `mm_pt_refresh_absent_prot()` 内部那条 `cls != MM_ST_ANON_VIRT` 早退可以保留——
+  非 `ANON_VIRT` 的状态本来就不会被状态路径使用，**不必**在这里强行改写别人的 class。
+
+**本轮不做实施**：改动需要新增一个「下探到叶子表」的 helper 并处理与 `mm_addrspace_lock()`
+的锁序关系（`mm->lock` → 页表锁），属于需要完整上下文才能保证不引入死锁的改动。
+但根因、修复方向、以及为什么前九次全错，此刻都已确定到可以直接实施的程度。
+
+**前九次为何全错（因为都在查「状态从哪来」，没人查「状态为什么没被更新」）**：
+状态路径忠实执行状态字节，从不查 VMA——这是论文的设计。真正的契约是
+**「mprotect 必须在同一次调用里让状态与 VMA 保持一致」**，而这条契约被一个
+「用 PTE 指针的有无代替叶子表的有无」的近似判断破坏了。
+
+**插桩现状**（故意保留，供修复验证复用）：`pt.c`（`[MM-INS]`）、`mprotect.c`（`[MM-DIV]`、
+`[MM-RF]`）、`fault.c`（`[MM-ST]`、`[MM-FP]`）。**修复通过后必须全部移除。**
+
+### 10.57 **修复完成并验证**：改用 `mm_pt_leaf_table()` 刷新状态
+
+**改动**（`kernel/mm/mprotect.c`，缺页分支）：把「取到 PTE 指针」换成「取到叶子表」。
+
+```c
+-  if (pte) {
+-      int idx = arch_pt_vpn(va, 0);
+-      declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
+-  }
++  pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
++  if (ltab)
++      (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0), ptef);
+```
+
+**关键点：仓库里早就有 `mm_pt_leaf_table(pgdir, addr)`**（`kernel/include/mm/pt.h:208`，
+注释写着「The table that owns the leaf slot for addr … NOT the table `pt_walk()` returns」），
+它正是**不分配任何东西**的「下探到叶子表」——`mm_pt_refresh_absent_prot()` 需要的
+`table` 参数可以直接由它给出。**所以真正的缺陷不是「缺一个 helper」，而是
+「helper 早就存在，mprotect 没用它」。** 修复因此只有几行，且不引入新锁序、不新增分配：
+`mm_pt_leaf_table()` 不进 `mm_pt_read_enter()`，与既有 `pt_lookup_leaf()` 同量级。
+
+顺带清掉了 §10.38 引入的 `if (pte)` 守卫——它当初为消除 `pte - idx` 的 UBSAN 而加，
+**方向对但结论错**，正是它把刷新挡在了门外。
+
+**验证（全部在无插桩的干净树上完成）**：
+
+| 项 | 结果 |
+|---|---|
+| x86_64 `CONFIG_ANON_PROV_DEFAULT=4096` | `mm_stress` **PASS**，0 FATAL，`mm_anon_provisioned=9280`，`mm_fault_from_status=2842` |
+| x86_64 `CONFIG_ANON_PROV_DEFAULT=0`（回归） | `mm_stress` **PASS**，0 FATAL |
+| MM-ASM 关机审计（两臂） | 全 0，含 `prot=0 safe=0 anon_virt=0` |
+| 5 架构（riscv64/x86_64/aarch64/loongarch64/ppc64le） | 0 errors |
+| riscv64 + aarch64 NOMMU | 0 errors |
+| `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` | 全 PASS |
+| 残留插桩 | 0（`pt.c` / `mprotect.c` / `fault.c` 已清空） |
+
+带插桩那轮还额外确认了修复的**判据**：`MM-DIV=0`、`declined-refresh=0`、
+`read-only installs=0`——三类分叉迹象全部归零。
+
+**两处诚实记录**：
+1. 第一次「干净树」验证其实**跑的是过期二进制**——移除插桩后 `declined` 变成未使用变量，
+   `-Werror` 让构建失败，而 `dev-build` 静默保留了旧的 `kernel.elf`，于是日志里仍有
+   `[MM-INS]`。是靠检查日志里残留插桩 + 比对 `.elf` 与源文件 mtime 才发现的。
+   **教训：`dev-build` 失败时不会自动删除旧产物，必须核对时间戳，不能只看运行结果。**
+2. 最后那次 riscv64 复跑用的是 `make ARCH=riscv64 run`（**默认构建**），
+   因此 `mm_anon_provisioned=0 / mm_fault_from_status=0`——它验证的是**关闭**臂，
+   **没有覆盖 riscv64 的状态缺页路径**。riscv64 开启臂需带 `a20.anonprov=<n>` 重跑，
+   **此项尚未复核**（修复只动 mprotect 的状态刷新，理论上不影响，但不应凭「理论上」记账）。
+
+**十次证伪的最终教训**：前九次都在问「这份只读权限是**谁写进去的**」，
+第十次才问对——「**它为什么没被更新**」。状态路径按设计**从不查 VMA**（论文卖点），
+因此真正的契约是「**mprotect 必须在同一次调用里让状态与 VMA 一致**」。
+这条契约被一句「取不到 PTE 就没有状态可刷」的近似判断破坏了，而**那句注释写得如此笃定，
+以至于十次排查里有九次都被它引到了错误的分支上**。
+
+### 10.58 补齐 riscv64 开启臂复核：状态缺页路径修复后完好（§10.57 的遗留项已关闭）
+
+§10.57 诚实记录的唯一遗留项是「riscv64 开启臂尚未复核」。现已补齐。
+
+`qemu-system-riscv64 -machine virt -append "a20.anonprov=4096"`（走 DTB `/chosen/bootargs`，
+`CONFIG_ANON_PROV_DEFAULT` 保持默认不变）：
+
+| 项 | 修复后结果 |
+|---|---|
+| `mm_stress` | **PASS**，0 FATAL |
+| `mm_anon_provisioned` | 9280 |
+| `mm_fault_from_status` | **2844**（修复前为 2836，同量级） |
+| MM-ASM 关机审计 | 全 0 |
+| 关机 | `System is going down for power-off NOW.`，`audit errors=0` |
+
+#### 两平台最终对照（均为修复后、无插桩）
+
+| 平台 | 开启臂 | 状态缺页 | 审计 | 关闭臂 |
+|---|---|---|---|---|
+| riscv64 (TCG) | `mm_stress` **PASS** | 2844 | 全 0 | PASS（默认构建） |
+| x86_64 (KVM/q35) | `mm_stress` **PASS** | 2842 | 全 0 | **PASS** |
+
+两平台的「开启」臂数字高度一致（9280 预标记 / ~2840 状态缺页），且**修复前的崩溃平台
+x86_64 现在与 riscv64 表现一致**——这正是本次修复的目标：消除平台间的行为分歧。
+riscv64 开启臂的 2844 与修复前的 2836 几乎相同，说明**修复没有扰动正常的匿名预标记路径**，
+只是补上了「状态与 VMA 不一致时的那一次刷新」。
+
+#### 关于 TCG 时长的一点记录
+
+第一次 riscv64 复核（`-m 2G -smp 1`，600s 上限）只跑到 `mm_fault_from_status=797`、
+`mm_stress` 未完成；给到 `-m 2G -smp 2`、1500s 后跑完并 PASS。**这是 TCG 慢，不是失败**——
+`mm_stress` 本身在 riscv64 上就是最慢的一档。**教训：TCG 上的「没跑完」不能记成「失败」，
+也不能记成「通过」；必须区分超时与失败。** 之前 x86_64 那次「既非 PASS 也非 FATAL」则是另一回事
+——那是过期二进制，判据完全不同（见 §10.57 第 1 条）。
+
+**至此本次工作收束**：x86_64 崩溃已修复并双平台验证，§10.39–§10.58 共十次归因尝试的完整
+证据链保留在文档中，包含七次被自身诊断证伪的假设、以及最终靠**运行时安装轨迹**
+（而非读码推理）才定位到真因这一方法论教训。

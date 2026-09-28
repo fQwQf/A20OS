@@ -198,6 +198,8 @@ typedef struct mm_cursor {
  * completed AND no cursor remains in a read-side critical section, which
  * together prove no traversal can still reach it. */
 void mm_pt_read_enter(struct mm_struct *mm);
+
+
 void mm_pt_read_exit(struct mm_struct *mm);
 
 /* Queue a detached page-table page.  level is the page-table depth, used to
