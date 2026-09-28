@@ -119,10 +119,17 @@ def _qemu_cmdline(inst: Instance) -> list[str]:
     for line in out.stdout.splitlines():
         m = _QEMU_TOKEN.search(line)
         if m:
+            # Keep a leading `env VAR=...` wrapper: the Makefile points QEMU
+            # at a locally built virglrenderer via LD_LIBRARY_PATH, and
+            # slicing from the qemu-system token would drop it, silently
+            # loading the system renderer and invalidating every 3D result.
             # machine.extra_qemu already reached the Makefile as EXTRA_QEMU and
-            # was folded into QEMU_FLAGS, so the emitted line carries it.  Do
-            # not append inst.machine.extra_qemu again -- that would double it.
-            return shlex.split(line[m.start(1):])
+            # was folded into QEMU_FLAGS, so do not append it again.
+            start = m.start(1)
+            env = line.rfind("env ", 0, start)
+            if env != -1 and "=" in line[env:start]:
+                start = env
+            return shlex.split(line[start:])
     raise ToolError(f"no qemu-system command in 'make _qemu_argv' output "
                     f"for {inst.name}",
                     hint=out.stdout.strip() or None)

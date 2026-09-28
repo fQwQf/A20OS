@@ -7,8 +7,13 @@
 # Expect SKIP rather than PASS to be a failure here -- it means GPU_3D did not
 # reach QEMU, which is exactly the regression this instance exists to catch.
 #
-# Requires host virgl support (libvirglrenderer + a GL/EGL-capable display).
-# On a headless host, set gui.display = "egl-headless".
+# Requires host virgl support.  The display matters as much as the renderer:
+# virglrenderer needs the host to give it a desktop GL context, and
+# "egl-headless" cannot on a host whose EGL device/gbm platform fails to
+# initialise -- QEMU then silently hands the guest a 2D-only device and every
+# 3D conclusion is measured against nothing.  A GLX-backed display works,
+# because GLX on this host yields a real radeonsi OpenGL 4.6 context.
+# "gtk,gl=on" needs an X display; use "gtk" (no GL) only to watch it fail.
 name = "smoke-gpu3d-riscv64"
 description = "riscv64 virtio-gpu virgl 3D transport smoke (GPU_3D device + gpu3d_test)"
 arch = "riscv64"
@@ -19,7 +24,7 @@ gpu_3d = true
 display_mode = "gui"
 
 [gui]
-display = "egl-headless"
+display = "gtk,gl=on"
 
 [test]
 commands = ["/bin/gpu3d_test", "poweroff"]
