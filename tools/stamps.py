@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -316,6 +317,30 @@ def cmd_build_flags(a) -> int:
     return 0
 
 
+def cmd_clean(a) -> int:
+    """Delete kernel object files and build trees.
+
+    Replaces the `find ... -delete` / `rm -rf` pairs that `clean` and
+    `_reset_obj` each carried, so the two no longer have to agree on what a
+    reset means.  Sub-makes (`make -C user clean`) stay in make: they are
+    recursive builds, not file surgery.
+    """
+    n = 0
+    for d in a.find_root:
+        root = REPO / d
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*.o"):
+            f.unlink()
+            n += 1
+    for d in a.rm_rf:
+        shutil.rmtree(REPO / d, ignore_errors=True)
+    for f in a.rm_f:
+        (REPO / f).unlink(missing_ok=True)
+    print(f"[CLEAN] {n} object file(s) removed")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -351,13 +376,18 @@ def main() -> int:
             s.add_argument("--user-variant", required=True)
         else:
             s.add_argument("--binaries", default="")
+    s = sub.add_parser("clean")
+    s.add_argument("--find-root", action="append", default=[])
+    s.add_argument("--rm-rf", action="append", default=[])
+    s.add_argument("--rm-f", action="append", default=[])
     s = sub.add_parser("build-flags")
     s.add_argument("--stamp", required=True)
     s.add_argument("--build-flags-sig", required=True)
     a = ap.parse_args()
     return {"user": cmd_user, "native": cmd_native,
             "extra-inputs": extra_inputs,
-            "build-flags": cmd_build_flags}[a.cmd](a)
+            "build-flags": cmd_build_flags,
+            "clean": cmd_clean}[a.cmd](a)
 
 
 if __name__ == "__main__":

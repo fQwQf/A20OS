@@ -222,8 +222,9 @@ release-la:
 	tools/a20 package release-loongarch64
 
 _reset_obj:
-	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -rf .kernel-build
+	@$(PYTHON) tools/stamps.py clean \
+		--find-root "$(KERNEL_DIR)" \
+		--rm-rf .kernel-build
 	$(MAKE) -C user clean
 
 _release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
