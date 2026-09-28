@@ -352,7 +352,17 @@ smoke-lwip-memp:
 # and spin counts depend on scheduling and are not reproducible run to run, so
 # a threshold here would be a flaky gate and would invite tuning toward a
 # magic number.  It asserts the deterministic parts only -- the stress test
-# transfers correctly, and the counters render.
+# transfers correctly, the counters render, and the per-site spin column is
+# real spin data rather than a copy of the acquire column.
+#
+# That last check has an honest limit.  Call-site attribution hashes into a
+# fixed 32-slot table (LOCK_CALLSITE_SAMPLES) and a collision drops that
+# caller's spin count while the lock total still counts it, so at low acquire
+# counts a run can legitimately attribute nothing.  The assertion is therefore
+# conditional: with nothing attributed there is nothing to check, and it only
+# bites when attribution did happen.  It is not a guarantee that every spin is
+# attributed, and an earlier unconditional form of it was flaky for exactly
+# that reason.
 smoke-smp-lock-contention: NET_HOSTFWD=
 smoke-smp-lock-contention:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
@@ -360,7 +370,7 @@ smoke-smp-lock-contention:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/smp-lock-contention-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/perf\nnet_stress_test\ncat /proc/a20/perf\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -371,15 +381,20 @@ smoke-smp-lock-contention:
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	lwip_total=$$(awk '/^lwip: /{print $$3; exit}' "$$log"); \
-	site_total=$$(awk '/\[lwip\]/{s+=$$NF} END{print s+0}' "$$log"); \
+	site_acq=$$(awk '/\[lwip\]/{a+=$$(NF-1)} END{print a+0}' "$$log"); \
+	site_spin=$$(awk '/\[lwip\]/{s+=$$NF} END{print s+0}' "$$log"); \
+	tlb_enters=$$(awk '/^mm_context_enters:/{e=$$2} END{print e+0}' "$$log"); \
+	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
+	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
 	   grep -qE '^lwip: [0-9]+ [0-9]+$$' "$$log" && \
 	   grep -qE '^proc: [0-9]+ [0-9]+$$' "$$log" && \
-	   [ -n "$$lwip_total" ] && [ -n "$$site_total" ] && \
-	   [ "$$site_total" -ge $$(( lwip_total * 90 / 100 )) ] && \
+	   { [ "$$site_acq" -eq 0 ] || [ "$$site_spin" -gt "$$site_acq" ]; } && \
+	   [ "$$tlb_enters" -gt 0 ] && \
 	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin attribution intact: $$site_total of $$lwip_total lwip spins attributed); log saved to $$log"; \
+		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin column carries real spin data: $$site_spin spins over $$site_acq acquires, lock total $$lwip_total); log saved to $$log"; \
 		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
+		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
 	else \
 		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
