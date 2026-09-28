@@ -234,14 +234,47 @@ int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
     return 0;
 }
 
-// Defer vma_release()/kfree() until mm->lock is dropped: release may run
-// block I/O (vfs_close -> page cache writeback) which must not sleep while
-// the mm lock is held.
-void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma)
+/*
+ * MM_AS_VMA_REFCOUNT -- VMA lifetime.
+ *
+ * vm_area_t carries a reference count so a page fault can read a VMA's fields
+ * with mm->lock released; that is what stops one address-space lock from
+ * serialising every fault in the process.  Ownership: the address-space list
+ * owns the reference created at allocation, unlinking drops it, and the LAST
+ * holder -- which may be a fault running with no locks at all -- is what
+ * schedules the free.
+ *
+ * vma_release() can run blocking I/O (vfs_close -> page cache writeback), so
+ * the free is never performed inline; the last holder pushes onto the deferred
+ * list under vma_ref_lock and an existing flush point drains it.  That lock is
+ * deliberately NOT mm->lock: a lock-free fault must be able to defer its free
+ * without re-acquiring the lock it just escaped, and holding mm->lock across
+ * vma_release() is what the deferred list exists to avoid.
+ */
+void vma_get(vm_area_t *vma)
+{
+    if (vma)
+        refcount_inc(&vma->refcount);
+}
+
+void vma_put(mm_struct_t *mm, vm_area_t *vma)
 {
     if (!mm || !vma) return;
-    vma->next = mm->deferred_vma;
+    if (!refcount_dec_and_test(&vma->refcount))
+        return;
+
+    uint64_t flags = spin_lock_irqsave(&mm->vma_ref_lock);
+    vma->deferred_next = mm->deferred_vma;
     mm->deferred_vma = vma;
+    spin_unlock_irqrestore(&mm->vma_ref_lock, flags);
+}
+
+// Unlink-time release: drops the address-space list's reference.  Callers
+// keep their existing shape -- they unlink under mm->lock and drop it before
+// flushing, so the observable ordering is unchanged.
+void mm_vma_defer(mm_struct_t *mm, vm_area_t *vma)
+{
+    vma_put(mm, vma);
 }
 
 void mm_vma_flush_deferred(mm_struct_t *mm)
@@ -249,20 +282,18 @@ void mm_vma_flush_deferred(mm_struct_t *mm)
     if (!mm) return;
 
     /*
-     * Writers append to deferred_vma while holding mm->lock, but callers must
-     * drop that lock before releasing the backing resources.  Detach the
-     * complete list under the same lock so two threads sharing an mm cannot
-     * both observe and free the same VMA chain.  The detached list is private
-     * to this flusher; potentially sleeping vma_release() work remains outside
-     * the spinlock.
+     * Detach the whole list under vma_ref_lock so two threads sharing an mm
+     * cannot both observe and free the same chain.  The detached list is
+     * private to this flusher; potentially sleeping vma_release() work stays
+     * outside the spinlock.
      */
-    uint64_t flags = spin_lock_irqsave(&mm->lock);
+    uint64_t flags = spin_lock_irqsave(&mm->vma_ref_lock);
     vm_area_t *v = mm->deferred_vma;
     mm->deferred_vma = NULL;
-    spin_unlock_irqrestore(&mm->lock, flags);
+    spin_unlock_irqrestore(&mm->vma_ref_lock, flags);
 
     while (v) {
-        vm_area_t *next = v->next;
+        vm_area_t *next = v->deferred_next;
         vma_release(v);
         kfree(v);
         v = next;
@@ -311,6 +342,7 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
         return -ENOMEM;
 
     *tail = *v;
+    refcount_set(&tail->refcount, 1);
     tail->start = addr;
     tail->file_offset += addr - v->start;
     int fr = vma_ref_aux(tail);
@@ -337,6 +369,7 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     if (!tail) return NULL;
 
     *tail = *vma;
+    refcount_set(&tail->refcount, 1);
     tail->start = split;
     tail->file_offset += split - vma->start;
     if (vma_ref_aux(tail) < 0) {
