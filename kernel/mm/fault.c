@@ -444,6 +444,23 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 if (vma->pte_flags & PTE_X)
                     arch_flush_icache_range(pfn_to_virt(copy), PAGE_SIZE);
                 page_cache_put(pcp);
+                /* TEMP (docs 10.52): where does PTE_W go?  The installed
+                 * PTE was 0x425 (no PTE_W, no PTE_COW) but the VMA reported
+                 * pte_flags=0x467 (with PTE_W) in an earlier run.  Print both
+                 * sides so the fix lands in the right place. */
+                {
+                    pte_t *l = pt_lookup_leaf(t->mm->pgdir, page_va, NULL,
+                                              NULL, NULL);
+                    kerr("[MM-FP] va=%lx vma_pte_flags=%lx (W=%d) "
+                         "-> fault_map flags=%lx (W=%d cow=%d) cur_pte=%lx\n",
+                         (unsigned long)page_va,
+                         (unsigned long)vma->pte_flags,
+                         (int)((vma->pte_flags & PTE_W) != 0),
+                         (unsigned long)vma->pte_flags,
+                         (int)((vma->pte_flags & PTE_W) != 0),
+                         (int)((vma->pte_flags & PTE_COW) != 0),
+                         (unsigned long)(l ? *l : 0));
+                }
                 int r = fault_map(t->mm, page_va, copy, vma->pte_flags,
                                   MM_ST_FILE_PRIVATE);
                 if (r < 0) {
