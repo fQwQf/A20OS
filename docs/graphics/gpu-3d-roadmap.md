@@ -745,3 +745,40 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 renderer 前置条件已清除，但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`
 （NVIDIA EGL 下静默降级为 2D；强制 Mesa EGL 则 `eglInitialize failed`）。
 完整判据表与下一步见 §5.1。
+
+
+## guest 实测：llvmpipe 可用，virgl attach 失败（已验证）
+
+在 xfce guest 内（virtio-gpu-gl + `gtk,gl=on`，不挂网卡以避开 pbuf panic）运行
+`eglinfo`，实测输出：
+
+```
+EGL API version: 1.5
+EGL version string: 1.5
+EGL client APIs: OpenGL OpenGL_ES
+OpenGL core profile vendor: Mesa
+OpenGL core profile renderer: llvmpipe (LLVM 21.1.2, 128 bits)
+OpenGL core profile version: 4.5 (Core Profile) Mesa 25.2.7
+```
+
+**软件 3D 通路确认可用**：OpenGL 4.5 core + GLES，llvmpipe 128-bit。
+
+**同时直接观测到 stock Mesa 正在尝试 attach virgl 并失败**——同一份日志里出现
+
+```
+[GPU] get_capset: resp=0x1205 want=0x1103 | sent ctx=1 idx=0 ver=0
+  | host idx=0 -> id=1 ver=1 size=308 (rc=0)     (ctx=1..8)
+```
+
+即 Mesa 连续新建 8 个 context 反复重试，每次都在 `GET_CAPS` 处拿到 `0x1205`
+后回落到 llvmpipe。这条此前只是推断（"Mesa 能否 attach 未证实"），现在是实测。
+
+**两个次要但有用的观测**：
+
+- guest 内**没有 X display**（`glxinfo -B` 报 `unable to open display`）。
+  guest 只有 Wayland，因此 `glxgears` / `es2_info` 默认走 GLX 会直接失败，
+  必须显式 `EGL_PLATFORM=surfaceless`（或 wayland）。这解释了为什么
+  「glxgears 跑不起来」并不代表软件渲染坏了。
+- 默认 EGL 驱动是 **ZINK**（Vulkan），在本 guest 里
+  `vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`，导致 dri2 screen
+  创建失败、回落 surfaceless。llvmpipe 仍然可用，但这是绕路而非正常路径。
