@@ -1751,6 +1751,32 @@ class TestConsoleSession(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv, ["reset-cmd;", "rm", "-rf", "/"])
 
+    def test_a_hung_reset_is_bounded(self) -> None:
+        """A reset that never returns must not inherit the session's patience.
+
+        `openocd` invoked without a probe will sit there waiting, and a console
+        session that inherits that wait hangs on hardware the operator may have
+        to power-cycle anyway -- the one case where hanging helps nobody.
+        """
+        from unittest.mock import patch
+        import subprocess
+        import a20_console
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "openocd -c 'init'"
+        """)
+        with patch("a20_console.subprocess.run") as run:
+            run.side_effect = subprocess.TimeoutExpired(cmd="openocd", timeout=60.0)
+            with self.assertRaises(ConsoleError) as cm:
+                run_console_session(FakeTransport(), i, sleep=lambda _s: None)
+        msg = str(cm.exception)
+        self.assertIn("did not finish", msg)
+        self.assertIn("openocd", msg)
+        self.assertEqual(run.call_args.kwargs["timeout"], a20_console._RESET_TIMEOUT_S)
+
     def test_duration_parsing(self) -> None:
         from a20_console import _seconds
         self.assertEqual(_seconds("90s", 0), 90.0)
@@ -1804,6 +1830,25 @@ class TestSerialTransportAgainstPty(unittest.TestCase):
         self.assertEqual(t.read(1.0), b"hello from board\n")
         t.write(b"ps\n")
         self.assertEqual(os.read(master, 100), b"ps\n")
+
+    def test_a_board_that_stops_draining_is_named_not_waited_on(self) -> None:
+        """A wedged UART must surface as an error, not as a silent hang.
+
+        The retry loop behind write() spins on BlockingIOError while the board
+        refuses to accept bytes. Without a deadline that loop is the hang: the
+        operator sees nothing at all while holding a board they cannot use.
+        """
+        from unittest.mock import patch
+        _m, dev = self.fresh()
+        t = SerialTransport(dev, 115200)
+        self.addCleanup(t.close)
+        with patch("a20_console.os.write", side_effect=BlockingIOError), \
+                patch("a20_console.time.sleep"):
+            with self.assertRaises(ConsoleError) as cm:
+                t.write(b"ps\n", timeout=0.0)
+        msg = str(cm.exception)
+        self.assertIn("not draining", msg)
+        self.assertIn(dev, msg)
 
     def test_baud_rate_is_actually_encoded(self) -> None:
         import termios
