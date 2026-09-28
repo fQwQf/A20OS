@@ -260,11 +260,13 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   full MAP_SHARED dirty/writeback coherence.
  */
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
-                                      enum mm_fault_access access) {
+                                      enum mm_fault_access access,
+                                      int lock_held) {
 #ifdef CONFIG_NOMMU
     (void)t;
     (void)stval;
     (void)access;
+    (void)lock_held;
     return -1;
 #else
     if (!t->mm || !t->mm->pgdir) return -1;
@@ -527,6 +529,11 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             if (end < page_va || end > vma->end)
                 end = vma->end;
 
+            if (lock_held) {
+                vma_get(vma);
+                spin_unlock(&t->mm->lock);
+            }
+
             for (uint64_t va = page_va; va < end; va += PAGE_SIZE) {
                 pte_t *next = pt_lookup_leaf(t->mm->pgdir, va,
                                              NULL, NULL, NULL);
@@ -543,6 +550,46 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 pfns[prepared++] = candidate;
             }
 
+            pte_t map_flags = vma->pte_flags;
+            if (lock_held) {
+                spin_lock(&t->mm->lock);
+                pte_t *cp = pt_lookup_leaf(t->mm->pgdir, page_va,
+                                           NULL, NULL, NULL);
+                if (prepared > 0 && cp && (*cp & PTE_V)) {
+                    for (size_t i = 0; i < prepared; i++) {
+                        cg_mem_uncharge(t->cgroup, 1);
+                        frame_put(pfns[i]);
+                    }
+                    vma_put(t->mm, vma);
+                    return 0;
+                }
+                if (prepared == 0) {
+                    vma_put(t->mm, vma);
+                } else if (mm_find_vma(t->mm, page_va) != vma) {
+                    for (size_t i = 0; i < prepared; i++) {
+                        cg_mem_uncharge(t->cgroup, 1);
+                        frame_put(pfns[i]);
+                    }
+                    vma_put(t->mm, vma);
+                    return -1;
+                } else {
+                    map_flags = vma->pte_flags;
+                    size_t keep = 0;
+                    for (size_t i = 0; i < prepared; i++) {
+                        uint64_t va = page_va + (uint64_t)i * PAGE_SIZE;
+                        pte_t *p = pt_lookup_leaf(t->mm->pgdir, va,
+                                                  NULL, NULL, NULL);
+                        if (p && (*p & PTE_V)) {
+                            cg_mem_uncharge(t->cgroup, 1);
+                            frame_put(pfns[i]);
+                            continue;
+                        }
+                        pfns[keep++] = pfns[i];
+                    }
+                    prepared = keep;
+                }
+            }
+
             /* One transaction for the whole window: a single covering-node
              * lock and a single descent, instead of one page-table walk per
              * page.  This is the property the single-level model exists for. */
@@ -552,7 +599,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 for (size_t i = 0; i < prepared; i++) {
                     uint64_t va = page_va + i * PAGE_SIZE;
                     if (mm_cursor_map(&wcur, va, pfn_to_phys(pfns[i]),
-                                      vma->pte_flags, MM_ST_ANON_MAPPED) < 0)
+                                      map_flags, MM_ST_ANON_MAPPED) < 0)
                         break;
                     mapped++;
                 }
@@ -562,6 +609,8 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 cg_mem_uncharge(t->cgroup, 1);
                 frame_put(pfns[i]);
             }
+            if (lock_held)
+                vma_put(t->mm, vma);
             if (mapped != 0) {
                 t->mm->rss += mapped;
                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
@@ -865,7 +914,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                                enum mm_fault_access access)
 {
 #ifdef CONFIG_NOMMU
-    return handle_demand_fault_locked(t, stval, access);
+    return handle_demand_fault_locked(t, stval, access, 0);
 #else
     if (!t || !t->mm || !t->mm->pgdir)
         return -1;
@@ -879,7 +928,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         /* Swap I/O cannot run under the IRQ-disabling mm spinlock.  A future
          * busy swap PTE will close the remaining duplicate-swapin race. */
         spin_unlock(&mm->lock);
-        int r = handle_demand_fault_locked(t, stval, access);
+        int r = handle_demand_fault_locked(t, stval, access, 0);
         if (r == -ENOMEM) {
             cg_mem_oom_kill(t->cgroup);
             return -1;
@@ -980,7 +1029,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         }
     }
 
-    int r = handle_demand_fault_locked(t, stval, access);
+    int r = handle_demand_fault_locked(t, stval, access, 1);
     spin_unlock(&mm->lock);
     if (r == -ENOMEM) {
         cg_mem_oom_kill(t->cgroup);
