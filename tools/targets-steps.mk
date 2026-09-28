@@ -230,7 +230,8 @@ _reset_obj:
 _release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \
 		EXTERNAL_ROOT=$(EXTERNAL_ROOT) _release_disk DISK_OUT=$(DISK_OUT)
-	cp $(KERNEL_ELF) $(KERNEL_OUT)
+	@$(PYTHON) tools/img.py copy \
+		--src "$(KERNEL_ELF)" --dst "$(KERNEL_OUT)"
 	@echo "  -> $(KERNEL_OUT) + $(DISK_OUT)"
 
 _release_disk: $(USER_BUILD_STAMP)
