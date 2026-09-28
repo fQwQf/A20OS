@@ -157,6 +157,7 @@ int  virtio_blk_init(void);
 /* Read/write N sectors starting at LBA on device idx */
 int  virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors);
 int  virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors);
+int  virtio_blk_flush(int idx);
 
 /* Total sector count for device idx */
 uint64_t virtio_blk_capacity(int idx);

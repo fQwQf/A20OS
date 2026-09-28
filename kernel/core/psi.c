@@ -75,26 +75,39 @@ void psi_tick(void)
     g_psi_last_tick = now;
 }
 
-static void psi_format_avg(char *buf, size_t bufsz, uint64_t avg, uint64_t total)
+static void psi_format_avg(char *buf, size_t bufsz,
+                           uint64_t avg10, uint64_t avg60, uint64_t avg300,
+                           uint64_t total)
 {
-    uint64_t whole = (avg * 100) >> PSI_FSHIFT;
-    uint64_t frac = ((avg * 10000) >> PSI_FSHIFT) % 100;
+    unsigned long long w10 = (unsigned long long)((avg10 * 100) >> PSI_FSHIFT);
+    unsigned long long w60 = (unsigned long long)((avg60 * 100) >> PSI_FSHIFT);
+    unsigned long long w300 = (unsigned long long)((avg300 * 100) >> PSI_FSHIFT);
     uint64_t total_ms = total * 1000ULL / TICKS_PER_SEC;
-    snprintf(buf, bufsz, "some avg10=%llu.%02llu avg60=0.00 avg300=0.00 total=%llu\n",
-             (unsigned long long)(whole / 100),
-             (unsigned long long)whole % 100,
+    snprintf(buf, bufsz,
+             "some avg10=%llu.%02llu avg60=%llu.%02llu avg300=%llu.%02llu total=%llu\n",
+             w10 / 100, w10 % 100, w60 / 100, w60 % 100, w300 / 100, w300 % 100,
              (unsigned long long)total_ms);
-    (void)frac;
 }
 
 void psi_render_cpu(char *buf, size_t bufsz)
 {
-    psi_format_avg(buf, bufsz, g_psi_cpu_some_avg10, g_psi_cpu_some_total);
+    psi_format_avg(buf, bufsz, g_psi_cpu_some_avg10, g_psi_cpu_some_avg60,
+                   g_psi_cpu_some_avg300, g_psi_cpu_some_total);
 }
 
-void psi_render_memio(char *buf, size_t bufsz)
+void psi_render_mem(char *buf, size_t bufsz)
 {
-    /* Memory and I/O stall sources are not instrumented, so the accounted
-     * pressure baseline is zero stalls in the same "some" line format. */
-    snprintf(buf, bufsz, "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+    /* Structurally zero, not unimplemented.  PSI "io" counts tasks stalled on
+     * I/O, but every A20OS device transfer is synchronous (block_cache calls
+     * read_sector inline; virtio-blk completes by polling), so a task doing
+     * I/O runs rather than waits.  "mem" is zero for the same reason: reclaim
+     * runs in the caller's context and there is no stall state to sample.
+     * Revisit both if device I/O ever becomes asynchronous. */
+    snprintf(buf, bufsz,
+             "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n");
+}
+
+void psi_render_io(char *buf, size_t bufsz)
+{
+    psi_render_mem(buf, bufsz);
 }

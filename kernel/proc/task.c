@@ -214,6 +214,11 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
     t->limits.stack = parent ? parent->limits.stack : USER_STACK_MAX_SIZE;
     t->limits.nofile = parent ? parent->limits.nofile : MAX_FILES;
     t->limits.memlock = parent ? parent->limits.memlock : (64 * 1024);
+    /* 0 means unlimited, so a child inherits its parent's policy rather than
+     * getting a fresh default.  RLIMIT_NPROC is per-uid, not per-task, so it
+     * is enforced at fork time against a uid-wide count. */
+    t->limits.as = parent ? parent->limits.as : 0;
+    t->limits.nproc = parent ? parent->limits.nproc : 0;
     t->mm        = NULL;
     t->first_kernel_entry = 0;
 

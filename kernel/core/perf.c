@@ -42,6 +42,7 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS] =
         "pcache_full_overwrite_skips",
     [A20_PERF_PCACHE_WRITEBACK_IOS] = "pcache_writeback_ios",
+    [A20_PERF_BLOCK_FLUSHES] = "block_flushes",
     [A20_PERF_PCACHE_WRITEBACK_PAGES] = "pcache_writeback_pages",
     [A20_PERF_PCACHE_WRITE_UPDATES] = "pcache_write_updates",
     [A20_PERF_PCACHE_WRITE_UPDATE_PAGES] =
@@ -52,6 +53,9 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_MM_TLB_TRANSACTION_FLUSHES] =
         "mm_tlb_transaction_flushes",
     [A20_PERF_MM_TLB_REMOTE_CPUS] = "mm_tlb_remote_cpus",
+    [A20_PERF_MM_CONTEXT_ENTERS] = "mm_context_enters",
+    [A20_PERF_MM_TLB_CONVERGE_WAITS] = "mm_tlb_converge_waits",
+    [A20_PERF_MM_TLB_CONVERGE_FLUSHES] = "mm_tlb_converge_flushes",
     [A20_PERF_MM_DEMAND_FAULTS] = "mm_demand_faults",
     [A20_PERF_MM_FILE_FAULTS] = "mm_file_faults",
     [A20_PERF_MM_ANON_FAULTS] = "mm_anon_faults",

@@ -287,6 +287,56 @@ check-concurrency-foundation: smoke-smp-bringup
 	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
 	@echo "check-concurrency-foundation: PASS"
 
+# Honesty policy: an unimplemented facility must report absence, never
+# fabricate output.  A stub that returns success is strictly worse than a
+# missing one, because the caller cannot tell and proceeds on a false belief.
+#
+# This gate is mostly *negative*: it asserts the specific anti-patterns that
+# were removed stay removed.  Positive marker checks elsewhere in this file
+# only prove a string exists; these prove a bug cannot come back unnoticed.
+check-honesty-policy:
+	@echo "check-honesty-policy: auditing fail-closed behaviour"
+	@if rg -q '", 1 \},' kernel/net/socket_alg.c; then \
+	  echo "  FAIL AF_ALG advertises an algorithm it cannot compute"; exit 1; fi
+	@if rg -Uq '(?s)level == SOL_SOCKET\)\s*\n\s*return 0;' kernel/net/socket_control.c; then \
+	  echo "  FAIL setsockopt still reports success for discarded SOL_SOCKET options"; exit 1; fi
+	@if rg -q 'congestion\[\] = "cubic"' kernel/net/socket_control.c; then \
+	  echo "  FAIL TCP_CONGESTION hardcodes an algorithm the stack lacks"; exit 1; fi
+	@if rg -q '0\.00 0\.00 0\.00 1/64' kernel/fs/procfs/procfs_render.c; then \
+	  echo "  FAIL /proc/loadavg is a constant again"; exit 1; fi
+	@if rg -Uq '(?s)PF_PID_IO.{0,400}total_time' kernel/fs/procfs/procfs_render.c; then \
+	  echo "  FAIL /proc/pid/io reports CPU ticks as byte counts"; exit 1; fi
+	@if rg -q 'avg60=0\.00 avg300=0\.00 total=%llu' kernel/core/psi.c; then \
+	  echo "  FAIL PSI discards its computed avg60/avg300"; exit 1; fi
+	@if rg -Uq '(?s)sys_getrusage.{0,700}total_time' kernel/abi/linux/sys_proc.c; then \
+	  echo "  FAIL getrusage still conflates utime and stime"; exit 1; fi
+	@if ! rg -Uq '(?s)PF_PID_PAGEMAP\).{0,300}proc_task_may_access' kernel/fs/procfs/procfs.c; then \
+	  echo "  FAIL /proc/pid/pagemap is not gated on task ownership"; exit 1; fi
+	@if ! rg -Uq '(?s)int64_t sys_reboot.{0,700}CAP_SYS_BOOT' kernel/abi/linux/sys_proc.c; then \
+	  echo "  FAIL sys_reboot is not gated on CAP_SYS_BOOT"; exit 1; fi
+	@if ! rg -q 'int \(\*flush\)\(struct block_dev \*dev\);' kernel/include/drivers/block/block_dev.h; then \
+	  echo "  FAIL block_dev_t lost its flush primitive"; exit 1; fi
+	@if ! rg -q 'partition\.block\.flush\s*=\s*partition_flush' kernel/fs/mount_setup.c; then \
+	  echo "  FAIL partition wrapper stopped forwarding flush"; exit 1; fi
+	@if ! rg -q 'class_block->block\.flush\s*=\s*class_block_flush' kernel/fs/mount_setup.c; then \
+	  echo "  FAIL class wrapper stopped forwarding flush"; exit 1; fi
+	@if ! rg -q 'bc->dev->flush' kernel/fs/block_cache.c; then \
+	  echo "  FAIL block cache sync no longer reaches the device flush"; exit 1; fi
+	@if ! rg -q 'VIRTIO_BLK_T_FLUSH' kernel/drivers/block/virtio_blk.c; then \
+	  echo "  FAIL virtio-blk no longer issues a flush request"; exit 1; fi
+	@if ! rg -q 'ATA_CMD_FLUSH_CACHE_EXT' kernel/drivers/block/ahci.c; then \
+	  echo "  FAIL AHCI no longer issues FLUSH CACHE"; exit 1; fi
+	@# New subsystems must stay wired, not merely present.
+	@if ! rg -q 'netfilter_input\(st->rx_frame' kernel/net/lwip_stack.c; then \
+	  echo "  FAIL netfilter input hook is not wired"; exit 1; fi
+	@if ! rg -q 'netfilter_output\(st->tx_frame' kernel/net/lwip_stack.c; then \
+	  echo "  FAIL netfilter output hook is not wired"; exit 1; fi
+	@if ! rg -q 'proc_loadavg_tick' kernel/proc/sched.c; then \
+	  echo "  FAIL load average is no longer sampled from the scheduler tick"; exit 1; fi
+	@if ! rg -q 'proc_io_account' kernel/fs/vfs/file.c; then \
+	  echo "  FAIL read/write no longer charge I/O accounting"; exit 1; fi
+	@echo "check-honesty-policy: PASS"
+
 check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
 	@$(PYTHON) tools/gates.py check-mm-lock-model
 	@echo "check-mm-lock-model: PASS"

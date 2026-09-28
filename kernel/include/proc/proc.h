@@ -63,6 +63,8 @@ typedef struct proc_limits {
     uint64_t stack;
     uint64_t nofile;
     uint64_t memlock;
+    uint64_t as;      /* RLIMIT_AS: address-space bytes, 0 = unlimited */
+    uint64_t nproc;   /* RLIMIT_NPROC: processes per uid, 0 = unlimited */
 } proc_limits_t;
 
 typedef struct proc_policy {
@@ -228,6 +230,21 @@ typedef struct task_t {
     uint64_t perf_page_faults;     /* perf_event_open PERF_COUNT_SW_PAGE_FAULTS */
     uint64_t perf_page_faults_maj; /* faults that performed backing I/O */
     uint64_t perf_switches;        /* PERF_COUNT_SW_CONTEXT_SWITCHES */
+    /* Context switches by cause, for getrusage's ru_nvcsw/ru_nivcsw.  A task
+     * that already moved itself to PROC_BLOCKED yielded voluntarily; anything
+     * else was preempted.  perf_switches is the sum of the two. */
+    uint64_t perf_switches_vol;
+    uint64_t perf_switches_invol;
+    /* /proc/<pid>/io accounting.  rchar/wchar are bytes through read/write(2);
+     * read_bytes/write_bytes are bytes actually moved to/from the block
+     * device, so cached I/O leaves them near zero.  Relaxed: these are
+     * statistics and must not order the I/O they describe. */
+    uint64_t io_rchar;
+    uint64_t io_wchar;
+    uint64_t io_syscr;
+    uint64_t io_syscw;
+    uint64_t io_read_bytes;
+    uint64_t io_write_bytes;
     uint64_t user_gs_base;         /* x86_64 ARCH_SET_GS value (kernel GS is
                                     * reserved for per-CPU data) */
     uint32_t cfs_weight;
@@ -420,6 +437,19 @@ static inline int proc_has_cap(const task_t *t, int cap)
     if (cap < 0 || cap >= 64) return 0;
     return (t->cred.cap_effective & (1ULL << cap)) != 0;
 }
+
+/* Charge the calling task for one read/write of `bytes` transferred.
+ * `to_device` selects the block-layer counter, which is only meaningful
+ * once a request actually reaches the device. */
+void proc_io_account(uint64_t rbytes, uint64_t wbytes,
+                     uint64_t read_to_device, uint64_t write_to_device);
+
+/* /proc/loadavg sampling.  Call proc_loadavg_tick() from the scheduler tick;
+ * proc_loadavg_snapshot() reports the EMAs in Q16 fixed point plus the
+ * instantaneous running/total task counts. */
+void proc_loadavg_tick(void);
+void proc_loadavg_snapshot(uint64_t *avg1, uint64_t *avg5, uint64_t *avg15,
+                           unsigned *running, unsigned *total, int *max_pid);
 
 /* ---- Process management API ---- */
 void     proc_init(void);

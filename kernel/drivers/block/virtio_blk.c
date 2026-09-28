@@ -38,6 +38,7 @@ typedef struct {
     int                done;
     int                result;
     int                write;
+    int                flush;   /* VIRTIO_BLK_T_FLUSH: no data descriptor */
     uint16_t           head;
     void              *buf;
     void              *dma_buf;
@@ -488,20 +489,21 @@ static int virtio_blk_irq_handler(int irq, void *priv) {
 
 static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
                                  uint64_t lba, void *buf, size_t sectors,
-                                 int write) {
-    size_t bytes = sectors * VIRTIO_BLK_SECTOR_SIZE;
+                                 int write, int flush) {
+    size_t bytes = flush ? 0 : sectors * VIRTIO_BLK_SECTOR_SIZE;
     virtio_transport_t *vt = &inst->vt;
     uint16_t slot = req->head;
 
-    paddr_t pa = va_to_pa(buf);
-    const pfa_range_t *range = pfa_range_for_pa(pa);
+    paddr_t pa = flush ? 0 : va_to_pa(buf);
+    const pfa_range_t *range = flush ? NULL : pfa_range_for_pa(pa);
     int direct_dma = range && bytes <= range->end - pa;
-    if (!direct_dma && bytes > VIRTIO_BLK_BOUNCE_BYTES)
+    if (!flush && !direct_dma && bytes > VIRTIO_BLK_BOUNCE_BYTES)
         return -EINVAL;
 
     req->done = 0;
     req->result = -1;
     req->write = write;
+    req->flush = flush;
     req->buf = buf;
     req->bytes = bytes;
     inst->in_flight++;
@@ -523,17 +525,54 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         a20_perf_add(A20_PERF_VIRTIO_BLK_BOUNCE_BYTES, bytes);
     }
 
-    if (write && !req->direct_dma)
+    if (write && !flush && !req->direct_dma)
         memcpy(req->dma_buf, buf, bytes);
 
-    inst->req_hdr[slot].type     = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    inst->req_hdr[slot].type     = flush ? VIRTIO_BLK_T_FLUSH
+                                         : (write ? VIRTIO_BLK_T_OUT
+                                                  : VIRTIO_BLK_T_IN);
     inst->req_hdr[slot].reserved = 0;
-    inst->req_hdr[slot].sector   = lba;
+    inst->req_hdr[slot].sector   = flush ? 0 : lba;
 
     inst->status[slot] = 0xFF;
 
     virtq_desc_t *desc  = inst->blk.desc;
     virtq_avail_t *avail = inst->blk.avail;
+
+    if (flush) {
+        /* virtio-blk 1.1 §5.2.6: a flush request carries the header and the
+         * status byte only -- no data buffer. */
+        desc[slot].addr  = inst->request_dma_addr +
+                           (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
+        desc[slot].len   = sizeof(virtio_blk_req_hdr_t);
+        desc[slot].flags = VIRTQ_DESC_F_NEXT;
+        desc[slot].next  = slot + 1;
+
+        desc[slot + 1].addr  = inst->request_dma_addr +
+                               sizeof(virtio_blk_req_hdr_t) * VIRTIO_QUEUE_SIZE +
+                               slot;
+        desc[slot + 1].len   = 1;
+        desc[slot + 1].flags = VIRTQ_DESC_F_WRITE;
+        desc[slot + 1].next  = 0;
+
+        arch_dma_sync_for_device(&inst->status[slot], 1);
+        arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t) * 2);
+
+        uint16_t fslot = avail->idx % VIRTIO_QUEUE_SIZE;
+        avail->ring[fslot] = slot;
+        arch_dma_sync_for_device(&inst->req_hdr[slot],
+                                 sizeof(inst->req_hdr[slot]));
+        arch_dma_sync_for_device(&avail->flags, sizeof(avail->flags));
+        arch_dma_sync_for_device(&avail->ring[fslot], sizeof(uint16_t));
+        wmb();
+        avail->idx++;
+        inst->blk.desc_idx++;
+        arch_dma_sync_for_device(&avail->idx, sizeof(avail->idx));
+        wmb();
+        vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
+        mb();
+        return 0;
+    }
 
     desc[slot].addr  = inst->request_dma_addr +
                        (uint64_t)slot * sizeof(virtio_blk_req_hdr_t);
@@ -590,7 +629,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
         if (req->done) {
             int ret = req->result;
-            if (ret == 0 && !req->write && !req->direct_dma)
+            if (ret == 0 && req->bytes && !req->write && !req->direct_dma)
                 memcpy(req->buf, req->dma_buf, req->bytes);
             req->in_use = 0;
             if (inst->in_flight > 0)
@@ -603,7 +642,7 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
             virtio_blk_complete_used_locked(inst, &wake_q);
             if (req->done) {
                 int ret = req->result;
-                if (ret == 0 && !req->write && !req->direct_dma)
+                if (ret == 0 && req->bytes && !req->write && !req->direct_dma)
                     memcpy(req->buf, req->dma_buf, req->bytes);
                 req->in_use = 0;
                 if (inst->in_flight > 0)
@@ -699,9 +738,11 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     }
 }
 
-static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int write) {
+static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors,
+                         int write, int flush) {
     if (idx < 0 || idx >= g_ninst) return -1;
-    if (!buf || sectors == 0 || sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS)
+    if (!flush && (!buf || sectors == 0 ||
+                   sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS))
         return -EINVAL;
     virtio_blk_inst_t *inst = &g_insts[idx];
     if (!inst->blk.valid) return -1;
@@ -717,7 +758,7 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
             req = virtio_blk_alloc_req_locked(inst, &wake_q);
             if (req) {
                 int submit_ret = virtio_blk_submit_req(
-                    inst, req, lba, buf, sectors, write);
+                    inst, req, lba, buf, sectors, write, flush);
                 if (submit_ret < 0)
                     req->in_use = 0;
                 spin_unlock_irqrestore(&inst->lock, flags);
@@ -778,7 +819,7 @@ int virtio_blk_read(int idx, uint64_t lba, void *buf, size_t sectors) {
     while (sectors) {
         size_t chunk = sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS ?
             VIRTIO_BLK_MAX_TRANSFER_SECTORS : sectors;
-        int ret = virtio_blk_rw(idx, lba, cursor, chunk, 0);
+        int ret = virtio_blk_rw(idx, lba, cursor, chunk, 0, 0);
         if (ret < 0)
             return ret;
         lba += chunk;
@@ -793,7 +834,7 @@ int virtio_blk_write(int idx, uint64_t lba, const void *buf, size_t sectors) {
     while (sectors) {
         size_t chunk = sectors > VIRTIO_BLK_MAX_TRANSFER_SECTORS ?
             VIRTIO_BLK_MAX_TRANSFER_SECTORS : sectors;
-        int ret = virtio_blk_rw(idx, lba, (void *)cursor, chunk, 1);
+        int ret = virtio_blk_rw(idx, lba, (void *)cursor, chunk, 1, 0);
         if (ret < 0)
             return ret;
         lba += chunk;
@@ -818,11 +859,23 @@ static int blk_write_sector(block_dev_t *dev, uint64_t lba, const void *buf, siz
     return virtio_blk_write(inst->slot, lba, buf, count);
 }
 
+int virtio_blk_flush(int idx) {
+    if (idx < 0 || idx >= g_ninst) return -EINVAL;
+    if (!g_insts[idx].blk.valid) return -ENODEV;
+    return virtio_blk_rw(idx, 0, NULL, 0, 0, 1);
+}
+
+static int blk_flush(block_dev_t *dev) {
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->priv;
+    return virtio_blk_flush(inst->slot);
+}
+
 block_dev_t *virtio_blk_get_dev(int idx) {
     if (idx < 0 || idx >= g_ninst) return NULL;
     if (!g_insts[idx].blk.valid) return NULL;
     g_insts[idx].blk_dev.read_sector  = blk_read_sector;
     g_insts[idx].blk_dev.write_sector = blk_write_sector;
+    g_insts[idx].blk_dev.flush        = blk_flush;
     return &g_insts[idx].blk_dev;
 }
 
@@ -931,9 +984,15 @@ static uint32_t virtio_blk_class_sector_size(struct device *dev) {
     return VIRTIO_BLK_SECTOR_SIZE;
 }
 
+static int virtio_blk_class_flush(struct device *dev) {
+    virtio_blk_inst_t *inst = (virtio_blk_inst_t *)dev->drv_priv;
+    return virtio_blk_flush(inst->slot);
+}
+
 static block_dev_ops_t virtio_blk_class_ops = {
     .read        = virtio_blk_class_read,
     .write       = virtio_blk_class_write,
+    .flush       = virtio_blk_class_flush,
     .capacity    = virtio_blk_class_capacity,
     .sector_size = virtio_blk_class_sector_size,
 };

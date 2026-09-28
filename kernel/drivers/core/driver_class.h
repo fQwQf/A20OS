@@ -84,6 +84,11 @@ typedef struct net_dev_ops {
     /* Optional carrier query. Drivers without PHY/link reporting retain the
      * historical always-up behavior. */
     int            (*link_up)(struct device *dev);
+    /* Optional: reports whether RX arrival raises an IRQ, so a waiter may skip
+     * polling when no device signalled work.  NULL means unknown, and unknown is
+     * treated as "no IRQ" so an unconverted driver keeps being drained
+     * unconditionally rather than silently losing RX. */
+    int            (*rx_irq_driven)(struct device *dev);
 } net_dev_ops_t;
 
 /* net ioctl requests */
