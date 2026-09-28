@@ -936,15 +936,34 @@ int64_t sys_getrusage(int who, void *usage) {
         who != RUSAGE_THREAD)
         return -EINVAL;
     if (!usage) return -EFAULT;
-    uint64_t u[18]; /* 144 bytes / 8 */
+    /* 64-bit struct rusage: two timevals then sixteen longs, matching the
+     * u[] slots used below.  Unfilled slots stay zero, which for
+     * ixrss/idrss/isrss/nswap/msgsnd/msgrcv is the truthful answer (no
+     * such accounting exists) rather than a missing measurement. */
+    uint64_t u[18];
     memset(u, 0, sizeof(u));
     task_t *t = proc_current();
     if (t) {
-        uint64_t ticks = t->total_time;
-        if (who == RUSAGE_CHILDREN)
-            ticks = t->child_utime + t->child_stime;
-        u[0] = ticks / 100;
-        u[1] = (ticks % 100) * 10000;
+        uint64_t uticks,sticks;
+        if (who == RUSAGE_CHILDREN) {
+            uticks = t->child_utime;
+            sticks = t->child_stime;
+        } else {
+            uticks = t->utime_ticks;
+            sticks = t->stime_ticks;
+        }
+        /* Accounting runs once per 100 Hz scheduler pass, so ticks/100 is
+         * seconds and the remainder is centiseconds -> microseconds. */
+        u[0] = uticks / 100;
+        u[1] = (uticks % 100) * 10000;
+        u[2] = sticks / 100;
+        u[3] = (sticks % 100) * 10000;
+        u[8] = __atomic_load_n(&t->perf_page_faults, __ATOMIC_RELAXED);
+        u[9] = __atomic_load_n(&t->perf_page_faults_maj, __ATOMIC_RELAXED);
+        u[11] = __atomic_load_n(&t->io_read_bytes, __ATOMIC_RELAXED);
+        u[12] = __atomic_load_n(&t->io_write_bytes, __ATOMIC_RELAXED);
+        u[16] = __atomic_load_n(&t->perf_switches_vol, __ATOMIC_RELAXED);
+        u[17] = __atomic_load_n(&t->perf_switches_invol, __ATOMIC_RELAXED);
     }
     if (copy_to_user(usage, u, 144) < 0) return -EFAULT;
     return 0;
