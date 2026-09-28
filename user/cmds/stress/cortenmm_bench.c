@@ -45,12 +45,13 @@
 #define MAX_THREADS 64
 #define POOL_MB     512
 #define SLICE_MB    2
-#define ROUNDS      256
+#define ROUNDS      256      /* default; overridable as argv[3] */
 
 /* One benchmark selected by argv[1]; both variants always run. */
 enum bench { B_MMAP, B_MMAP_PF, B_PF, B_UNMAP_VIRT, B_UNMAP, B_MAX };
 
 static int   g_threads = 4;
+static int   g_rounds  = ROUNDS;
 static int   g_bench;
 static int   g_high_contention;
 
@@ -95,7 +96,7 @@ static void *worker(void *arg)
 {
     long id = (long)arg;
 
-    for (int r = 0; r < ROUNDS; r++) {
+    for (int r = 0; r < g_rounds; r++) {
         switch (g_bench) {
         case B_MMAP: {
             /* Map without touching: measures descriptor/VMA setup only. */
@@ -189,7 +190,7 @@ static double run_once(int nt, unsigned long *ops_out)
         pthread_join(th[i], NULL);
     t1 = now_sec();
 
-    *ops_out = (unsigned long)nt * ROUNDS;
+    *ops_out = (unsigned long)nt * (unsigned long)g_rounds;
     return t1 - t0;
 }
 
@@ -197,7 +198,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr,
-                "usage: %s {mmap|mmap-pf|pf|unmap-virt|unmap|all} [threads]\n",
+                "usage: %s {mmap|mmap-pf|pf|unmap-virt|unmap|all} [threads] [rounds]\n",
                 argv[0]);
         return 2;
     }
@@ -209,6 +210,11 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[1], "unmap"))      g_bench = B_UNMAP;
     else if (!strcmp(argv[1], "all"))        g_bench = -1;
     else { fprintf(stderr, "unknown benchmark: %s\n", argv[1]); return 2; }
+
+    if (argc >= 4)
+        g_rounds = atoi(argv[3]);
+    if (g_rounds < 1)
+        g_rounds = 1;
 
     if (argc >= 3) {
         g_threads = atoi(argv[2]);
