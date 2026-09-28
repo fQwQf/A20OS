@@ -2385,3 +2385,44 @@ PTE 语义当成了通用语义**。修的时候只验证了 riscv64（唯一能
 目标，但需要设计一个跨架构的「权限往返」表示（当前 3 位的 `MM_ST_PROT_*` 在 x86_64 上
 不足以表达 NX/LEAF），属于对状态字节格式的再一次扩展——与 §10.18/§10.19 记下的「所有
 8 位都已用尽」是同一个约束。**先在 riscv64 上把跨架构权限往返设计对，再谈 x86_64 复测。**
+
+### 10.36 权限往返改为走架构接口（正确的重构，但**没有**修好 x86_64）
+
+§10.35 猜测 x86_64 仍崩是因为状态路径手搓 PTE 位、丢了 `PTE_LEAF`/`PTE_NX`。这个猜测
+**是错的**。仓库里早就有正确的接口：
+
+```c
+pte_t mm_prot_to_pte_flags(int prot) {
+    pte_t f = PTE_V | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;   /* 架构必需位 */
+    if (prot & 1) f |= PTE_R;
+    if (prot & 2) f |= (PTE_W | PTE_D);
+    if (prot & 4) f |= PTE_X;
+    if (f & PTE_W) f |= PTE_R;                                /* W 蕴含 R */
+    return f;
+}
+```
+
+状态路径原先是手搓 `PTE_R|PTE_W|PTE_X|PTE_U`，现在改成把状态里的三个 prot 位还原成
+prot 掩码后交给 `mm_prot_to_pte_flags()`。这样**任何架构的必需位（`PTE_U`、
+`PTE_LEAF`、`PTE_A`、`PTE_MAT1`、NX 语义）与 W⇒R 依赖都由架构自己负责**，调用点不再
+需要知道任何架构细节——也就是把 §10.33 那个「补 `PTE_U`」的补丁，从**架构相关的补丁**
+升格为**架构无关的正确写法**（`allow |= PTE_U;` 随之删除）。
+
+**验证**：
+
+* riscv64（`a20.anonprov=4096`）：`mm_fault_from_status=2836`、stress **PASS**、
+  零 FATAL、MM-ASM 全 0 —— 与重构前（2842）一致，**无回归**。
+* x86_64（`CONFIG_ANON_PROV_DEFAULT=4096`）：**仍然 FATAL**，且
+  `pc=0x1e2e2`、`signal=11`、`pid=6`、UBSAN 35 次，与重构前**逐字节相同**。
+
+**结论（必须写清楚）**：这次重构是**对的**（架构抽象、去掉架构相关的补丁、riscv64 无
+回归），但它**不是** x86_64 崩溃的原因。§10.35 关于 `PTE_LEAF`/`PTE_NX` 缺失的推断
+**被证伪**——崩溃地址、信号、UBSAN 计数在重构前后完全一致，说明那条路径根本没被触及。
+
+**x86_64 的崩溃仍然未定位。** 已知事实：状态路径在 x86_64 上确实跑了 12 次
+（`mm_fault_from_status=12`），随后 `mm_stress` 在 `pc=0x1e2e2` 崩溃；关机审计全 0
+（`pt_pages=9`、各 mismatch 全 0、`safe=0`），说明**元数据与 PTE 没有失配**；
+同一次运行里有 35 次 `mprotect.c:141` 的 UBSAN pointer-overflow。
+
+`pc=0x1e2e2` 在 `mm_stress` 里，落在用户态。下一步该做的是**把 `pc` 解析回源码行**，
+而不是继续猜权限位——这是本次连续三次猜权限/记账/回收都落空之后，应当改换的取证方式。
