@@ -68,6 +68,9 @@ typedef enum a20_perf_counter {
      * The shutdown audit cannot witness this state (address spaces are gone
      * by then), so it needs its own counter to be observable. */
     A20_PERF_MM_ANON_PROVISIONED,
+    /* MM_AS_FAULT_FROM_STATUS: demand faults served from per-PTE status with
+     * no VMA lookup at all (paper Fig. 8). */
+    A20_PERF_MM_FAULT_FROM_STATUS,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,
