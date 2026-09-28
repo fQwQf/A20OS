@@ -16,16 +16,19 @@ import json
 import os
 import pty
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from a20_error import A20Error, ToolError
 from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance, section_is_set  # noqa: E402
@@ -76,6 +79,38 @@ def load(tmp: Path, text: str):
 
 def derived(tmp: Path, text: str) -> dict[str, str]:
     return dict(v.split("=", 1) for v in derive_make_vars(load(tmp, text)))
+
+
+def _ctx(fn):
+    """A context manager that runs fn() on enter, for stubbing _exclusive."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        fn()
+        yield
+    return _cm()
+
+
+def _load_cli():
+    """Import tools/a20 (a script, not a module) so its functions can be called."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("a20_cli_helper", str(REPO_ROOT / "tools" / "a20"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _pump(proc, log: Path, stop) -> None:
+    """Copy a child's output into `log` so _watch can observe it growing."""
+    with log.open("wb") as sink:
+        for line in proc.stdout:
+            sink.write(line)
+            sink.flush()
+            if stop.is_set():
+                return
 
 
 class TestDeriveMakeVars(unittest.TestCase):
@@ -454,7 +489,7 @@ class TestRunFlashDispatch(unittest.TestCase):
         return run_flash(load(self.tmp, text), self.backends, [], dry_run=True)
 
     def test_mismatched_geometry_is_refused_before_any_build(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash("""
                 arch = "armv7m"
                 [stm32]
@@ -468,13 +503,13 @@ class TestRunFlashDispatch(unittest.TestCase):
         self.exec_m.assert_not_called()
 
     def test_wrong_board_is_refused_before_any_build(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash('arch = "riscv64"\nboard = "visionfive2"\n[flash]\ntool = "openocd"\n')
         self.assertIn("not validated for board", str(cm.exception))
         self.build_m.assert_not_called()
 
     def test_unregistered_backend_is_refused(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash('arch = "armv7m"\n[flash]\ntool = "nope"\n')
         self.assertIn("not a registered backend", str(cm.exception))
 
@@ -492,16 +527,18 @@ class TestRunFlashDispatch(unittest.TestCase):
         self.assertEqual(self.exec_m.call_args.args[1], "flash-xuanwu-openocd")
 
     def test_build_failure_short_circuits_before_programming(self) -> None:
-        self.build_m.return_value = 2
-        rc = self.flash("""
-            arch = "armv7m"
-            [stm32]
-            flash_kb = 512
-            ram_kb = 64
-            [flash]
-            tool = "openocd"
-        """)
-        self.assertEqual(rc, 2)
+        # A failing build raises rather than returning make's status, so a
+        # failed build can never be mistaken for a programming success.
+        self.build_m.side_effect = ToolError("make kernel-only failed", status=2)
+        with self.assertRaises(ToolError):
+            self.flash("""
+                arch = "armv7m"
+                [stm32]
+                flash_kb = 512
+                ram_kb = 64
+                [flash]
+                tool = "openocd"
+            """)
         self.exec_m.assert_not_called()
 
 
@@ -670,7 +707,7 @@ class TestResourceGate(unittest.TestCase):
     def test_no_wait_fails_instead_of_blocking(self) -> None:
         from a20_resource import preflight
         inst = load(self.tmp, 'arch = "riscv64"\n[machine]\nmemory = "64G"\n')
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             preflight(inst, self.policy, self.tmp, wait=False)
         self.assertIn("insufficient host resources", str(cm.exception))
 
@@ -746,7 +783,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
             stderr = "Makefile:42: *** missing separator.  Stop.\n"
 
         with patch("a20_test.subprocess.run", return_value=Result()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 a20_test._qemu_cmdline(inst)
         msg = str(cm.exception)
         self.assertIn("missing separator", msg)
@@ -763,9 +800,9 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
             stderr = ""
 
         with patch("a20_test.subprocess.run", return_value=Result()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 a20_test._qemu_cmdline(inst)
-        self.assertIn("no qemu-system command found", str(cm.exception))
+        self.assertIn("no qemu-system command", str(cm.exception))
 
     def test_qemu_token_survives_make_and_shell_wrappers(self) -> None:
         from a20_test import _QEMU_TOKEN
@@ -797,7 +834,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
     def test_same_instance_cannot_run_twice(self) -> None:
         from a20_test import _exclusive
         with _exclusive("unit-test-instance"):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 with _exclusive("unit-test-instance"):
                     pass
         self.assertIn("already running", str(cm.exception))
@@ -892,6 +929,8 @@ class TestCliArgumentHandling(unittest.TestCase):
             return mod.main(argv)
 
     def test_typo_is_an_error_not_a_forwarded_flag(self) -> None:
+        # argparse's own exit(2) is the usage-error convention, so this stays
+        # a SystemExit rather than an A20Error.
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["run", "qemu-riscv64", "--dry-rnu"])
         self.assertEqual(cm.exception.code, 2)
@@ -925,6 +964,31 @@ class TestCliArgumentHandling(unittest.TestCase):
             self.assertEqual(mod.main(["show-vars", "qemu-riscv64"]), 0)
         self.assertIn("ARCH=riscv64", buf.getvalue())
 
+    def test_show_reports_actions_ports_and_media_in_one_screen(self) -> None:
+        """`show` exists so the choice between 46 instances needs one command."""
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(mod.main(["show", "vf2-physical"]), 0)
+        out = buf.getvalue()
+        self.assertIn("console", out)          # the action
+        self.assertIn("/dev/ttyUSB0", out)     # where it talks to the board
+        self.assertIn("/dev/sda", out)         # where it would write media
+        self.assertIn("manifest", out)         # so the file can be opened
+
+    def test_show_does_not_claim_a_command_that_would_refuse(self) -> None:
+        import contextlib
+        import io
+        mod, _ = self.cli()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(mod.main(["show", "stm32f103"]), 0)
+        out = buf.getvalue()
+        # stm32f103 has no [stm32] qemu flag, so `run` must not be advertised.
+        self.assertNotIn("run", out.split("actions")[1].splitlines()[0])
+
     def test_list_reports_success_on_a_clean_tree(self) -> None:
         self.assertEqual(self.run_main(["list"]), 0)
 
@@ -941,6 +1005,392 @@ class TestCliArgumentHandling(unittest.TestCase):
              patch.object(mod, "validate_instance", return_value=["synthetic failure"]), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mod.main(["list"]), 1)
+
+
+class TestApplicableActions(unittest.TestCase):
+    """The `list` capability column must not promise what a command refuses."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def acts(self, text: str):
+        from a20_instance import applicable_actions
+        return applicable_actions(load(self.tmp, text))
+
+    def test_a_plain_qemu_instance_runs_but_is_not_a_smoke(self) -> None:
+        acts = self.acts("""
+            arch = "riscv64"
+            board = "qemu-virt-riscv64"
+        """)
+        self.assertEqual(acts, ("build", "run", "debug"))
+
+    def test_expect_is_what_makes_a_smoke_runnable(self) -> None:
+        base = """
+            arch = "riscv64"
+            board = "qemu-virt-riscv64"
+            [test]
+        """
+        # run_test rejects [test] without expect, so it must not advertise it.
+        self.assertNotIn("test", self.acts(base + 'timeout = "20s"\n'))
+        self.assertIn("test", self.acts(base + 'expect = ["PASS"]\n'))
+
+    def test_armv7m_needs_the_stm32_qemu_flag_to_run(self) -> None:
+        base = """
+            arch = "armv7m"
+            [stm32]
+            flash_kb = 64
+        """
+        self.assertNotIn("run", self.acts(base))
+        self.assertIn("run", self.acts(base + "qemu = true\n"))
+
+    def test_target_section_unlocks_console_and_deploy(self) -> None:
+        self.assertNotIn("console", self.acts('arch = "riscv64"\n'))
+        acts = self.acts("""
+            arch = "riscv64"
+            [target]
+            serial = "/dev/ttyUSB0"
+        """)
+        self.assertIn("console", acts)
+        self.assertIn("deploy", acts)
+
+    def test_deploy_is_withheld_when_media_has_nowhere_to_go(self) -> None:
+        """cmd_deploy refuses boot_media without media_device."""
+        acts = self.acts("""
+            arch = "riscv64"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_media = ["build/a.img"]
+        """)
+        self.assertIn("console", acts)
+        self.assertNotIn("deploy", acts)
+
+    def test_flash_and_package_follow_their_required_fields(self) -> None:
+        self.assertNotIn("flash", self.acts('arch = "riscv64"\n[flash]\n'))
+        self.assertIn("flash", self.acts(
+            'arch = "riscv64"\n[flash]\ntool = "openocd"\n'))
+        self.assertIn("package", self.acts(
+            'arch = "x86_64"\n[package]\nkind = "grub-iso"\n'))
+
+
+class TestOperatorErrorContract(unittest.TestCase):
+    """Failures are one line on stderr with a documented exit code.
+
+    Everything here used to escape as a raw Python exception: a make query the
+    Makefile rejected printed a five-frame MakeQueryError traceback, a missing
+    `make` printed FileNotFoundError, and validation failures were printed to
+    stdout, so `2>/dev/null` did not filter them and a redirected report still
+    carried the failures.
+    """
+
+    def cli(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            f"a20_errcli_{id(self)}", str(REPO_ROOT / "tools" / "a20"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    def test_every_gated_command_accepts_the_resource_flags(self) -> None:
+        """build/flash/package are gated too, so they need the waiting flags.
+
+        Only run/debug/test had them, so the other three raised AttributeError
+        on `args.no_wait` and died with a traceback before doing any work --
+        `a20 flash` and `a20 package` were unusable. argparse turns an unknown
+        flag into SystemExit, so accepting these is the observable difference.
+        """
+        import contextlib
+        import io
+        mod = self.cli()
+        from a20_error import A20Error
+        for name in ("build", "run", "debug", "test", "flash", "package"):
+            for flag in ("--no-wait", "--wait-timeout"):
+                argv = [name, "no-such-instance-xyz"] + (
+                    [flag, "1"] if flag == "--wait-timeout" else [flag])
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    try:
+                        mod.main(argv)
+                    except A20Error:
+                        pass          # the flag parsed; the loader said no
+                    except SystemExit as e:
+                        self.fail(f"{name} rejected {flag} (usage error {e.code})")
+
+    def test_gating_tolerates_a_namespace_without_the_wait_flags(self) -> None:
+        """A missing flag must not surface as an AttributeError."""
+        import argparse
+        mod = self.cli()
+        mod._gate_resources(load_instance("qemu-riscv64"), argparse.Namespace(),
+                           guest=False)
+
+    def test_flash_and_package_report_their_own_missing_section(self) -> None:
+        import contextlib
+        import io
+        from a20_error import A20Error
+        mod = self.cli()
+        for cmd, needle in (("flash", "[flash].tool"), ("package", "[package] kind")):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(A20Error, msg=cmd) as cm:
+                    mod.main([cmd, "qemu-riscv64"])
+            self.assertIn(needle, str(cm.exception), cmd)
+
+    def test_exit_codes_are_disjoint(self) -> None:
+        from a20_error import EXIT_FAIL, EXIT_OK, EXIT_TIMEOUT, EXIT_TOOL, EXIT_USAGE
+        codes = [EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_TOOL, EXIT_TIMEOUT]
+        self.assertEqual(len(set(codes)), len(codes),
+                         "exit codes must be distinguishable by a script")
+
+    def test_missing_instance_suggests_the_nearest_real_name(self) -> None:
+        mod = self.cli()
+        with self.assertRaises(A20Error) as cm:
+            mod._resolve("qemu-riscv6")
+        self.assertIn("did you mean", cm.exception.hint or "")
+        self.assertIn("qemu-riscv64", cm.exception.hint or "")
+
+    def test_missing_instance_without_a_near_miss_points_at_list(self) -> None:
+        mod = self.cli()
+        with self.assertRaises(A20Error) as cm:
+            mod._resolve("zzz-nothing-like-this")
+        self.assertIn("a20 list", cm.exception.hint or "")
+
+    def test_report_writes_to_stderr_and_includes_the_hint(self) -> None:
+        import contextlib
+        import io
+        from a20_error import EXIT_FAIL, report
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = report(A20Error("it broke", hint="try this"))
+        self.assertEqual(err.getvalue(), "error: it broke\nhint: try this\n")
+        self.assertEqual(code, EXIT_FAIL)
+
+    def test_tool_status_does_not_masquerade_as_a_usage_error(self) -> None:
+        from a20_error import EXIT_TIMEOUT, EXIT_TOOL, EXIT_USAGE, ToolError
+        # make exits 2 for a missing rule; a20 reserves 2 for its own usage errors.
+        self.assertEqual(ToolError("make dev-build failed", status=2).exit_code_for(),
+                         EXIT_TOOL)
+        self.assertNotEqual(ToolError("x", status=2).exit_code_for(), EXIT_USAGE)
+
+    def test_timeout_keeps_its_own_code(self) -> None:
+        from a20_error import EXIT_TIMEOUT, ToolError
+        self.assertEqual(ToolError("qemu timed out", status=124).exit_code_for(),
+                         EXIT_TIMEOUT)
+
+    def test_exec_make_raises_instead_of_returning_make_status(self) -> None:
+        from a20_error import ToolError
+        from a20_make import exec_make
+        with patch("a20_make.subprocess.run") as run:
+            run.return_value = SimpleNamespace(returncode=2)
+            with self.assertRaises(ToolError) as cm:
+                exec_make(load_instance("qemu-riscv64"), "dev-build", [], False)
+        self.assertEqual(cm.exception.status, 2)
+
+    def test_exec_make_reports_a_missing_make_distinctly(self) -> None:
+        from a20_error import ToolError
+        from a20_make import exec_make
+        with patch("a20_make.subprocess.run",
+                   side_effect=FileNotFoundError(2, "No such file", "make")):
+            with self.assertRaises(ToolError) as cm:
+                exec_make(load_instance("qemu-riscv64"), "dev-build", [], False)
+        self.assertIn("make", str(cm.exception))
+        self.assertIn("PATH", cm.exception.hint or "")
+
+    def test_schema_violation_is_a_clean_error_not_a_traceback(self) -> None:
+        # parse_instance is the schema boundary: an unknown key is refused there.
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "bad.toml"
+            bad.write_text('arch = "riscv64"\n[gui]\nenabled = true\n'
+                           'frame_window = 15\n', encoding="utf-8")
+            with self.assertRaises(InstanceError) as cm:
+                parse_instance(bad)
+        self.assertIn("unknown key", str(cm.exception))
+
+    def test_semantic_failures_are_not_written_to_stdout(self) -> None:
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            # smp > 1 on a board that is not verified for SMP is a semantic
+            # error, so it survives parsing and is caught by validate_instance.
+            bad = Path(td) / "bad.toml"
+            bad.write_text('arch = "riscv64"\nboard = "visionfive2"\n'
+                           '[machine]\nsmp = 8\n', encoding="utf-8")
+            inst = parse_instance(bad)
+            errors = validate_instance(inst, REPO_ROOT)
+        self.assertTrue(errors, "smp on an unverified board must be rejected")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            print("FAIL bad.toml: " + "; ".join(errors), file=sys.stderr)
+        self.assertEqual(out.getvalue(), "")
+        self.assertTrue(err.getvalue().startswith("FAIL bad.toml:"))
+
+
+class TestSmokeProgressAndLifecycle(unittest.TestCase):
+    """A smoke used to be silent for its whole timeout, then print one line.
+
+    QEMU's output only ever went to the log file, so a boot that took four
+    minutes to reach its first marker looked exactly like a hang.  These pin the
+    progress reporting and the two lifecycle defects that came with it.
+    """
+
+    def _child(self, script: str):
+        return subprocess.Popen([sys.executable, "-c", script],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def test_watch_announces_each_marker_as_it_appears(self) -> None:
+        import tempfile
+        import threading
+        from a20_test import _watch
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "boot.log"
+            proc = self._child(
+                "import time\n"
+                "print('MARK_A', flush=True)\n"
+                "time.sleep(0.5)\n"
+                "print('MARK_B', flush=True)\n"
+                "time.sleep(0.3)\n")
+            stop = threading.Event()
+            t = threading.Thread(target=_pump, args=(proc, log, stop), daemon=True)
+            t.start()
+            seen = []
+            timed_out = _watch(proc, log, ("MARK_A", "MARK_B"), 20.0, seen.append)
+            stop.set()
+            t.join(timeout=2)
+            proc.wait()
+        self.assertFalse(timed_out)
+        self.assertEqual(len(seen), 2, f"both markers should be announced, got {seen}")
+        self.assertTrue(any("MARK_A" in s for s in seen))
+        self.assertTrue(any("MARK_B" in s for s in seen))
+
+    def test_watch_reads_the_log_one_last_time_when_the_guest_exits(self) -> None:
+        """A marker landing between the final poll and the exit is not a failure.
+
+        The guest can write its last marker and exit inside one poll interval.
+        _watch used to return the moment poll() reported the exit, without
+        reading the log again, so that marker was never seen and a healthy boot
+        was reported as a missing one.
+        """
+        import tempfile
+        from unittest.mock import patch
+        from a20_test import _watch
+
+        class FakeProc:
+            calls = 0
+
+            def poll(self):
+                FakeProc.calls += 1
+                return None if FakeProc.calls == 1 else 0
+
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "boot.log"
+            log.write_bytes(b"early boot output\n")
+            seen = []
+
+            def land_marker(_seconds):
+                log.write_bytes(b"early boot output\nFINAL_MARKER\n")
+
+            with patch("a20_test.time.sleep", side_effect=land_marker):
+                timed_out = _watch(FakeProc(), log, ("FINAL_MARKER",), 20.0, seen.append)
+        self.assertFalse(timed_out)
+        self.assertEqual(len(seen), 1, f"expected one announcement, got {seen}")
+        self.assertIn("FINAL_MARKER", seen[0])
+
+    def test_watch_reports_a_timeout_rather_than_hanging(self) -> None:
+        import tempfile
+        from a20_test import _watch
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "quiet.log"
+            proc = self._child("import time\ntime.sleep(30)\n")
+            seen = []
+            timed_out = _watch(proc, log, ("NEVER",), 0.6, seen.append)
+            proc.kill()
+            proc.wait()
+        self.assertTrue(timed_out)
+        self.assertEqual(seen, [], "no marker appeared, so nothing should be announced")
+
+    def test_the_lock_is_taken_before_the_build(self) -> None:
+        """Two runs of one instance must not both build into the same BUILD_DIR.
+
+        The lock used to be taken after build_instance, so both runs did the
+        full multi-minute build and only then did the loser find out.
+        """
+        import a20_test
+        order = []
+        with patch("a20_test.build_instance",
+                   side_effect=lambda *a, **k: order.append("build")), \
+             patch("a20_test._qemu_cmdline", return_value=["true"]), \
+             patch("a20_test._exclusive",
+                   return_value=_ctx(lambda: order.append("lock"))), \
+             patch("a20_test.preflight"), \
+             patch("a20_test.SMOKE_LOG_DIR", Path(tempfile.mkdtemp())), \
+             patch("a20_test.subprocess.Popen"), \
+             patch("a20_test._watch", return_value=True), \
+             patch("a20_test._reap"):
+            a20_test.run_test(load_instance("smoke-riscv64"), [], True)
+        self.assertEqual(order[:2], ["lock", "build"],
+                         f"lock must precede the build, got {order}")
+
+    def test_the_guest_is_reaped_even_when_waiting_raises(self) -> None:
+        import a20_test
+        reaped = []
+        with patch("a20_test.build_instance"), \
+             patch("a20_test._qemu_cmdline", return_value=["true"]), \
+             patch("a20_test._exclusive", return_value=_ctx(lambda: None)), \
+             patch("a20_test.preflight"), \
+             patch("a20_test.SMOKE_LOG_DIR", Path(tempfile.mkdtemp())), \
+             patch("a20_test.subprocess.Popen") as popen, \
+             patch("a20_test._watch", side_effect=RuntimeError("boom")), \
+             patch("a20_test._reap", side_effect=lambda p: reaped.append(p)):
+            popen.return_value = SimpleNamespace(
+                poll=lambda: None, returncode=None,
+                stdin=SimpleNamespace(close=lambda: None))
+            with self.assertRaises(RuntimeError):
+                a20_test.run_test(load_instance("smoke-riscv64"), [], False)
+        self.assertEqual(len(reaped), 1,
+                         "a guest must be reaped on every exit path, not only on timeout")
+
+    def test_console_dry_run_does_not_open_the_serial_port(self) -> None:
+        mod = _load_cli()
+        args = SimpleNamespace(instance="vf2-physical", no_reset=False,
+                               no_flash=False, dry_run=True, make_args=[],
+                               wait_timeout=None, no_wait=False)
+        opened = []
+        with patch("a20_console.open_transport",
+                   side_effect=AssertionError("must not open a port on --dry-run")), \
+             patch.object(mod, "_load", return_value=load_instance("vf2-physical")):
+            import contextlib, io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = mod.cmd_console(args)
+        self.assertEqual(rc, 0)
+        self.assertIn("would open /dev/ttyUSB0", buf.getvalue())
+
+    def test_build_scope_does_not_block_on_guest_memory(self) -> None:
+        from a20_resource import HostResources, Policy, Requirement, evaluate
+        have = HostResources(
+            mem_available_mb=256, cpu_count=8, load1=0.0,
+            disk_free_mb=99_999, running_guests=0, busy_ports=())
+        need = Requirement(mem_mb=4096, cpus=1, disk_mb=1024, guests=0)
+        pol = Policy()
+        self.assertFalse(evaluate(need, have, pol, guest=True).ok,
+                         "a guest run must be refused")
+        self.assertTrue(evaluate(need, have, pol, guest=False).ok,
+                        "a build-only step must not be blocked by guest memory")
+
+    def test_every_deficit_carries_a_remedy(self) -> None:
+        from a20_resource import HostResources, Policy, Requirement, evaluate
+        have = HostResources(
+            mem_available_mb=256, cpu_count=1, load1=1.0,
+            disk_free_mb=10, running_guests=4, busy_ports=(("127.0.0.1", 2222),))
+        v = evaluate(Requirement(mem_mb=4096, cpus=8, disk_mb=8192, guests=1,
+                                 ports=(("127.0.0.1", 2222),)),
+                     have, Policy())
+        self.assertFalse(v.ok)
+        self.assertEqual(len(v.remedies), len(v.deficits),
+                         "every deficit must say what would clear it")
+        self.assertIn("A20_MAX_CONCURRENT", v.remedy())
 
 
 class TestMakeQuery(unittest.TestCase):
@@ -1178,7 +1628,15 @@ class TestTargetSection(unittest.TestCase):
             load(self.tmp, self.BASE + "jtag = true\n")
         self.assertIn("jtag", str(cm.exception))
 
-    def test_derive_maps_every_target_field(self) -> None:
+    def test_derive_emits_only_the_fields_make_consumes(self) -> None:
+        """Only the three [target] fields a makefile reads become TARGET_* vars.
+
+        The other eight are read by no recipe. The console session, the reset
+        pulse, command injection and expect matching are all driven by a20
+        straight from the dataclass, so deriving them told `a20 show-vars` that
+        make had been handed a configuration it never sees -- and the docs then
+        documented that claim as if it were true.
+        """
         got = derived(self.tmp, """
             arch = "riscv64"
             board = "visionfive2"
@@ -1195,15 +1653,30 @@ class TestTargetSection(unittest.TestCase):
             log = ".kernel-build/console/x.log"
         """)
         self.assertEqual(got["TARGET_SERIAL"], "/dev/ttyUSB0")
-        self.assertEqual(got["TARGET_BAUD"], "115200")
-        self.assertEqual(got["TARGET_RESET_CMD"], "openocd -c 'init' -c 'reset run'")
-        self.assertEqual(got["TARGET_BOOT_WAIT"], "4")
-        self.assertEqual(got["TARGET_BOOT_TIMEOUT"], "90s")
-        self.assertEqual(got["TARGET_CONSOLE_CHECK"], "System ready,A20OS")
-        self.assertEqual(got["TARGET_COMMANDS"], "ps poweroff")
-        self.assertEqual(got["TARGET_EXPECT"], "A20OS")
         self.assertEqual(got["TARGET_BOOT_MEDIA"], "build/a.img build/b.img")
-        self.assertEqual(got["TARGET_CONSOLE_LOG"], ".kernel-build/console/x.log")
+        for dead in ("TARGET_BAUD", "TARGET_RESET_CMD", "TARGET_BOOT_WAIT",
+                     "TARGET_BOOT_TIMEOUT", "TARGET_CONSOLE_CHECK",
+                     "TARGET_COMMANDS", "TARGET_EXPECT", "TARGET_CONSOLE_LOG",
+                     "TARGET_MEDIA_DEVICE"):
+            self.assertNotIn(dead, got, f"{dead} is read by no make recipe")
+
+    def test_a_reset_command_never_reaches_make(self) -> None:
+        """The reset command is a20's to run, so it must not cross into make.
+
+        This is the sharp edge of dropping the derivation: make would only ever
+        see the string, never run it, but a reset line *looks* like a command a
+        recipe might one day execute. Keeping it out of the environment means
+        the only thing that can act on it is the code that already shlex-splits
+        and runs it without a shell.
+        """
+        got = derived(self.tmp, """
+            arch = "armv7m"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "openocd -c 'reset run'"
+        """)
+        self.assertNotIn("TARGET_RESET_CMD", got)
+        self.assertFalse([k for k in got if "reset" in k.lower()])
 
     def test_absent_target_emits_no_variables(self) -> None:
         got = derived(self.tmp, 'arch = "riscv64"\n')
@@ -1447,6 +1920,32 @@ class TestConsoleSession(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv, ["reset-cmd;", "rm", "-rf", "/"])
 
+    def test_a_hung_reset_is_bounded(self) -> None:
+        """A reset that never returns must not inherit the session's patience.
+
+        `openocd` invoked without a probe will sit there waiting, and a console
+        session that inherits that wait hangs on hardware the operator may have
+        to power-cycle anyway -- the one case where hanging helps nobody.
+        """
+        from unittest.mock import patch
+        import subprocess
+        import a20_console
+        i = self.inst("""
+            arch = "riscv64"
+            board = "visionfive2"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "openocd -c 'init'"
+        """)
+        with patch("a20_console.subprocess.run") as run:
+            run.side_effect = subprocess.TimeoutExpired(cmd="openocd", timeout=60.0)
+            with self.assertRaises(ConsoleError) as cm:
+                run_console_session(FakeTransport(), i, sleep=lambda _s: None)
+        msg = str(cm.exception)
+        self.assertIn("did not finish", msg)
+        self.assertIn("openocd", msg)
+        self.assertEqual(run.call_args.kwargs["timeout"], a20_console._RESET_TIMEOUT_S)
+
     def test_duration_parsing(self) -> None:
         from a20_console import _seconds
         self.assertEqual(_seconds("90s", 0), 90.0)
@@ -1500,6 +1999,25 @@ class TestSerialTransportAgainstPty(unittest.TestCase):
         self.assertEqual(t.read(1.0), b"hello from board\n")
         t.write(b"ps\n")
         self.assertEqual(os.read(master, 100), b"ps\n")
+
+    def test_a_board_that_stops_draining_is_named_not_waited_on(self) -> None:
+        """A wedged UART must surface as an error, not as a silent hang.
+
+        The retry loop behind write() spins on BlockingIOError while the board
+        refuses to accept bytes. Without a deadline that loop is the hang: the
+        operator sees nothing at all while holding a board they cannot use.
+        """
+        from unittest.mock import patch
+        _m, dev = self.fresh()
+        t = SerialTransport(dev, 115200)
+        self.addCleanup(t.close)
+        with patch("a20_console.os.write", side_effect=BlockingIOError), \
+                patch("a20_console.time.sleep"):
+            with self.assertRaises(ConsoleError) as cm:
+                t.write(b"ps\n", timeout=0.0)
+        msg = str(cm.exception)
+        self.assertIn("not draining", msg)
+        self.assertIn(dev, msg)
 
     def test_baud_rate_is_actually_encoded(self) -> None:
         import termios
@@ -1640,7 +2158,7 @@ class TestHostPortGate(unittest.TestCase):
         port = held.getsockname()[1]
         try:
             inst = self.inst(f'["tcp::{port}-:5555"]')
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 preflight(inst, Policy(), self.tmp, wait=False)
             self.assertIn(str(port), str(cm.exception))
         finally:
