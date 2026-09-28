@@ -1,35 +1,16 @@
 
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building FAT32 image..."
-	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(FAT32_IMG) bs=1048576 count=$(FAT32_IMAGE_MB)
-	$(MKFS_FAT) -F 32 $(FAT32_IMG)
-	@set -e; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		mcopy -i $(FAT32_IMG) "$$f" "::/$$name"; \
-	done
-	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/sh
-	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/bash
-	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/lib/drivers >/dev/null 2>&1
-	@for m in $(RUNTIME_DRVMOD_MODULES); do \
-		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$m ::/lib/drivers/$$m; \
-	done
-	@for u in $(DRIVER_STORE_USER_PACKAGES); do \
-		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$u ::/lib/drivers/$$u; \
-	done
-	-mmd -i $(FAT32_IMG) ::/musl >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/musl/lib >/dev/null 2>&1
-	@[ -f user/external/musl/build-$(USER_VARIANT)/lib/libc.so ] && \
-		mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(USER_VARIANT)/lib/libc.so ::/musl/lib/libc.so || true
-	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
-		mcopy -o -i $(FAT32_IMG) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
-	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
-	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
-	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
+	@$(PYTHON) tools/img.py fat32 \
+		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
+		--user-build-dir "$(USER_BUILD_DIR)" --mkfs-fat "$(MKFS_FAT)" \
+		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
+		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
+		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \
+		--libgcc "$(LIBGCC_S_ARCH)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' \
+		--test-txt 'Hello from A20OS FAT32!\n'
 
 
 $(FS_TEST_IMG): $(FAT32_IMG)
