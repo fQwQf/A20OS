@@ -38,10 +38,8 @@
 #define DRM_IOCTL_GET_CAP          0xc010640cUL
 #define DRM_IOCTL_SET_CLIENT_CAP   0x4010640dUL
 #define DRM_IOCTL_GEM_CLOSE        0x40086409UL
-#define DRM_IOCTL_GEM_MMAP         0xc010640bUL
-#define DRM_IOCTL_GEM_CREATE       0xc018640cUL
-#define DRM_IOCTL_GEM_GET_HANDLE   0xc00c640dUL
-#define DRM_IOCTL_GEM_OPEN         0xc0186410UL
+#define DRM_IOCTL_GEM_FLINK        0xc008640aUL
+#define DRM_IOCTL_GEM_OPEN         0xc010640bUL
 #define DRM_IOCTL_PRIME_HANDLE_TO_FD 0xc00c642dUL
 #define DRM_IOCTL_PRIME_FD_TO_HANDLE 0xc00c642eUL
 #define DRM_IOCTL_MODE_GETRESOURCES    0xc04064a0UL
@@ -56,7 +54,7 @@
 #define DRM_IOCTL_MODE_GETFB            0xc01c64adUL
 #define DRM_IOCTL_MODE_ADDFB            0xc01c64aeUL
 #define DRM_IOCTL_MODE_ADDFB2           0xc06864b8UL
-#define DRM_IOCTL_MODE_RMFB             0x400464afUL
+#define DRM_IOCTL_MODE_RMFB             0xc00464afUL
 #define DRM_IOCTL_MODE_PAGE_FLIP        0xc01864b0UL
 #define DRM_IOCTL_MODE_DPMS             0xc00464b1UL
 #define DRM_IOCTL_MODE_CURSOR           0xc01c64a3UL
@@ -69,9 +67,28 @@
 #define DRM_IOCTL_MODE_OBJ_GETPROPERTIES 0xc02064b9UL
 #define DRM_IOCTL_MODE_ATOMIC           0xc03864bcUL
 
-/* DRM_IOCTL_MODE_GETFB2: the 32-bit-handle predecessor of ADDFB2.  Mesa's
- * GBM still issues it while probing, so it must not be left as a hole. */
-#define DRM_IOCTL_MODE_GETFB2           0xc04864caUL
+/* DRM_IOCTL_MODE_GETFB2: shares drm_mode_fb_cmd2 with ADDFB2 but is command
+ * 0xCE, not 0xB8.  Mesa's GBM issues it while probing, so it must not be left
+ * as a hole. */
+#define DRM_IOCTL_MODE_GETFB2           0xc06864ceUL
+
+/* ---- A20-private buffer ioctls -------------------------------------------
+ *
+ * The Linux UAPI has no GEM_CREATE, GEM_MMAP or GEM_GET_HANDLE: userspace
+ * buffer creation goes through MODE_CREATE_DUMB (or a driver-specific ioctl),
+ * and naming an existing handle for cross-process import is GEM_FLINK above.
+ * The three below therefore have no upstream number to match, and they used to
+ * sit on plausible-looking hex values that were not any Linux ioctl at all --
+ * one of which (0xc010640b) is in fact DRM_IOCTL_GEM_OPEN, so a guest calling
+ * the real GEM_OPEN was silently served by the mmap handler.
+ *
+ * They are kept because they are the only way to hand a sized, non-scanned-out
+ * buffer to the 3D path, but they now live in the private range where they
+ * cannot be confused with, or shadow, a Linux ioctl.  tools/check-drm-abi.sh
+ * checks everything outside this block against the installed UAPI headers.
+ */
+#define A20_GPU_IOCTL_GEM_CREATE       0x00004710UL
+#define A20_GPU_IOCTL_GEM_MMAP         0x00004711UL
 
 /* ---- virtio-gpu 3D UAPI (include/uapi/drm/virtgpu_drm.h) ----------------
  *

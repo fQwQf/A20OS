@@ -44,7 +44,10 @@
 #define A20_GPU_IOCTL_RES_UNREF     (A20_GPU_IOCTL_BASE + 4)
 #define A20_GPU_IOCTL_VIRGL_CHECK   (A20_GPU_IOCTL_BASE + 6)
 
-#define DRM_IOCTL_GEM_CREATE  0xc018640cUL
+/* A20-private: the Linux UAPI has no GEM_CREATE, so there is no upstream
+ * number to match.  tools/check-drm-abi.sh checks the real DRM_* numbers here
+ * against the installed UAPI headers. */
+#define A20_GPU_IOCTL_GEM_CREATE 0x00004710UL
 #define DRM_IOCTL_GEM_CLOSE   0x40086409UL
 #define DRM_IOCTL_VIRTGPU_GETPARAM        0xc0106443UL
 #define DRM_IOCTL_VIRTGPU_GET_CAPS        0xc0186449UL
@@ -217,7 +220,7 @@ int main(void)
     g.bpp = TEST_BPP * 8;
     g.size = TEST_W * TEST_H * TEST_BPP;
     g.handle = 0;
-    if (ioctl(fd, DRM_IOCTL_GEM_CREATE, &g) < 0)
+    if (ioctl(fd, A20_GPU_IOCTL_GEM_CREATE, &g) < 0)
         return fail("GEM_CREATE");
     if (g.handle == 0) {
         printf("GPU3D_TEST: FAIL GEM_CREATE returned handle 0\n");
