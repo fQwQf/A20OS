@@ -14,6 +14,8 @@
 #define RLIMIT_STACK   3
 #define RLIMIT_CORE    4
 #define RLIMIT_NOFILE  7
+#define RLIMIT_AS      9
+#define RLIMIT_NPROC   6
 #define RLIM_NLIMITS   16
 
 #define RUSAGE_SELF      0
