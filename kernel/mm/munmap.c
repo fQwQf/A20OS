@@ -108,7 +108,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 }
             }
             paddr_t pa = 0;
-            if (pt_unmap_leaf(mm, va, &pa, &base, &size, &level) == 0) {
+            if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, &level) == 0) {
                 mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     pfn_t pfn = phys_to_pfn(pa);
@@ -238,7 +238,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                                   phys_to_pfn(arch_pte_addr(*pte))) < 0)
                 return mm->brk;
             paddr_t pa = 0;
-            if (pt_unmap_leaf(mm, va, &pa, &base, &size, NULL) == 0) {
+            if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
                 mm_tlb_note_change(mm, base, size);
                 if (pa) {
                     frame_put(phys_to_pfn(pa));
