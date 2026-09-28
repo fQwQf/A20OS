@@ -162,6 +162,7 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     if (!mm) return 0;
     vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
     if (!vma) return -ENOMEM;
+    refcount_set(&vma->refcount, 1);
     vma->start     = start;
     vma->end       = end;
     vma->vm_flags  = vm_flags;

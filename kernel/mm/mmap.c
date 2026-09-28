@@ -155,6 +155,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #endif
         return (vaddr_t)-ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
     vma->start     = addr;
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
@@ -261,6 +262,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         vfs_close(file_fd);
         return (vaddr_t)-ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
@@ -366,6 +368,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma)
         return (vaddr_t)-ENOMEM;
+    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
