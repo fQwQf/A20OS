@@ -31,11 +31,14 @@ import os
 import re
 import shutil
 import socket
+import sys
 import time
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Sequence
 
+from a20_error import ResourceShortage, UsageError
 from a20_instance import Instance
 
 _MIB: Final = 1024 * 1024
@@ -97,24 +100,30 @@ def parse_memory_mb(text: str) -> int:
     return max(1, int(mb + 0.999))
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_num(name, default, cast):
+    """Read a numeric env var, complaining if it is set but unreadable.
+
+    Silently falling back made a typo look like it had taken effect: with
+    A20_MAX_CONCURRENT=many the budget was quietly the default, and the only
+    symptom was a run that blocked for a reason nobody could name.
+    """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
     try:
-        return int(raw)
+        return cast(raw)
     except ValueError:
+        print(f"a20: warning: {name}={raw!r} is not a number; using {default}",
+              file=sys.stderr)
         return default
+
+
+def _env_int(name: str, default: int) -> int:
+    return _env_num(name, default, int)
 
 
 def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
+    return _env_num(name, default, float)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,25 +264,45 @@ def requirement_for(inst: Instance, policy: Policy) -> Requirement:
 class Verdict:
     ok: bool
     deficits: tuple[str, ...]
+    remedies: tuple[str, ...] = ()
 
     def reason(self) -> str:
         return "; ".join(self.deficits)
 
+    def remedy(self) -> str:
+        return "; ".join(self.remedies)
 
-def evaluate(need: Requirement, have: HostResources, policy: Policy) -> Verdict:
+
+def evaluate(need: Requirement, have: HostResources, policy: Policy,
+             *, guest: bool = True) -> Verdict:
+    """Check a requirement against the host.
+
+    `guest=False` narrows the check to what a build-only step consumes.
+    Asking `a20 package` to wait for 1 GiB of guest memory would be wrong:
+    it never starts a guest, and refusing it because a guest is running
+    would just make the two commands interfere.
+    """
     cap = policy.max_concurrent or max(1, have.cpu_count // 4)
     d: list[str] = []
-    if have.mem_available_mb < need.mem_mb:
+    r: list[str] = []
+    if guest and have.mem_available_mb < need.mem_mb:
         d.append(f"memory: need {need.mem_mb} MiB, available {have.mem_available_mb} MiB")
-    if have.cpu_count - have.load1 < need.cpus:
+        r.append("free memory (stop a guest or a build) and retry")
+    if guest and have.cpu_count - have.load1 < need.cpus:
         d.append(f"cpu: need {need.cpus} idle, {have.cpu_count} total at load {have.load1:.1f}")
+        r.append("wait for the current load to fall below the runqueue")
     if have.disk_free_mb < need.disk_mb:
         d.append(f"disk: need {need.disk_mb} MiB, free {have.disk_free_mb} MiB")
-    if have.running_guests + need.guests > cap:
+        r.append("free disk space, or lower A20_MIN_DISK_MB")
+    if guest and have.running_guests + need.guests > cap:
         d.append(f"guest slots: {have.running_guests} running, cap {cap}")
-    for addr, port in have.busy_ports:
+        r.append("wait for a running guest to exit, or raise A20_MAX_CONCURRENT "
+                 "(the default cap is one guest per 4 CPUs)")
+    for addr, port in (have.busy_ports if guest else ()):
         d.append(f"host port: {addr}:{port} is already in use by another process")
-    return Verdict(ok=not d, deficits=tuple(d))
+        r.append(f"stop whatever holds {addr}:{port}, or give this instance a "
+                 f"different hostfwd")
+    return Verdict(ok=not d, deficits=tuple(d), remedies=tuple(r))
 
 
 def format_report(need: Requirement, have: HostResources) -> str:
@@ -284,7 +313,8 @@ def format_report(need: Requirement, have: HostResources) -> str:
 
 
 def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None = None,
-         *, wait: bool = True, echo=lambda _msg: None, label: str = "instance") -> Verdict:
+         *, wait: bool = True, echo=lambda _msg: None, label: str = "instance",
+         guest: bool = True) -> Verdict:
     """Gate one guest launch, waiting for the host if necessary.
 
     Takes a ``Requirement`` rather than an ``Instance`` so that callers which
@@ -309,28 +339,35 @@ def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None
         if verdict.ok:
             return verdict
         if not wait:
-            raise SystemExit(f"error: insufficient host resources for {label}: {verdict.reason()}")
+            raise ResourceShortage(
+                f"insufficient host resources for {label}: {verdict.reason()}")
         # Re-announce only when the *kind* of shortfall changes, so a long wait
         # does not scroll a line per poll, plus a periodic heartbeat so the
         # process does not look hung.
         kinds = tuple(d.split(":", 1)[0] for d in verdict.deficits)
         now = time.monotonic()
         if kinds != reported or now - last_emit >= _HEARTBEAT_SECONDS:
-            echo(f"a20: waiting for host resources ({need.describe()}) -- {verdict.reason()}")
+            echo(f"a20: waiting to {label} -- host resources are short")
+            echo(f"      have/want: {need.describe()}")
+            echo(f"      blocked:   {verdict.reason()}")
+            echo(f"      to proceed:{(' ' + verdict.remedy()) if verdict.remedy() else ''}")
+            echo(f"      press Ctrl-C to give up")
             reported, last_emit = kinds, now
         if deadline is not None and now >= deadline:
-            raise SystemExit(
-                f"error: gave up waiting {policy.wait_timeout_s:.0f}s for host resources "
-                f"to run {label}: {verdict.reason()}")
+            raise ResourceShortage(
+                f"gave up waiting {policy.wait_timeout_s:.0f}s to {label}: "
+                f"{verdict.reason()}",
+                hint=verdict.remedy() or None)
         time.sleep(_POLL_SECONDS)
 
 
 def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | None = None,
-              *, wait: bool = True, echo=lambda _msg: None) -> Verdict:
+              *, wait: bool = True, echo=lambda _msg: None,
+              guest: bool = True) -> Verdict:
     """Gate one instance run; see :func:`gate` for the wait semantics."""
     policy = policy or Policy.from_env()
     return gate(requirement_for(inst, policy), policy, disk_path,
-                wait=wait, echo=echo, label=inst.name)
+                wait=wait, echo=echo, label=inst.name, guest=guest)
 
 
 # --------------------------------------------------------------------------
@@ -364,7 +401,7 @@ def _parse_hostfwd(values: Sequence[str]) -> tuple[tuple[str, int], ...]:
     for v in values:
         addr, _, port = v.rpartition(":")
         if not port.isdigit():
-            raise SystemExit(f"error: --hostfwd wants addr:port, got {v!r}")
+            raise UsageError(f"--hostfwd wants addr:port, got {v!r}")
         out.append((addr or "127.0.0.1", int(port)))
     return tuple(out)
 
