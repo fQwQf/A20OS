@@ -67,6 +67,7 @@ typedef struct spinlock {
      * /proc/a20/lock_contention. */
     uint64_t contended_acquires;
     uint64_t contended_spins;
+    uint64_t contended_max_spins;
     /* Non-NULL only for locks registered for callsite sampling (see
      * lock_counters_enable_callsite()); the contended path records the
      * caller's return address so the audit can attribute contention. */
@@ -80,9 +81,21 @@ typedef struct lock_callsite_sample {
     uintptr_t ra;
     uint64_t contended;
     uint64_t spins;
+    uint64_t max_spins;
 } lock_callsite_sample_t;
 
-#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL, 0, 0, NULL }
+#define SPINLOCK_INIT { 0, NULL, 0, NULL, NULL, 0, 0, 0, NULL }
+
+/* GCC/clang expose no atomic fetch-max builtin, so a monotonic max needs a CAS
+ * loop.  Contended path only, matching the counter discipline above. */
+static inline void spin_atomic_max(uint64_t *slot, uint64_t value) {
+    uint64_t cur = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    while (cur < value) {
+        if (__atomic_compare_exchange_n(slot, &cur, value, 1,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
+}
 
 static inline void spin_init(spinlock_t *lock) {
     lock->locked = 0;
@@ -92,6 +105,7 @@ static inline void spin_init(spinlock_t *lock) {
     lock->container = NULL;
     lock->contended_acquires = 0;
     lock->contended_spins = 0;
+    lock->contended_max_spins = 0;
     lock->samples = NULL;
 }
 
@@ -114,26 +128,28 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
      * enter the critical section unlocked (two CPUs both believing they hold
      * the lock).  The counters are only touched when the lock is contended,
      * so the uncontended fast path stays a single exchange. */
+    /* Resolve the call-site slot before waiting.  The spin count is only known
+     * once the inner loop drains, and it has to land on the same slot the
+     * acquire is charged to; resolving it up front is what lets the audit show
+     * per-site spin cost instead of a column that merely repeats the acquires. */
+    lock_callsite_sample_t *site = NULL;
+    if (lock->samples) {
+        unsigned slot = (unsigned)(((waiter_ra >> 4) ^ (waiter_ra >> 20)) &
+                                   (LOCK_CALLSITE_SAMPLES - 1));
+        site = &lock->samples[slot];
+        if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra) {
+            uintptr_t expect = 0;
+            __atomic_compare_exchange_n(&site->ra, &expect, waiter_ra, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+        }
+        if (__atomic_load_n(&site->ra, __ATOMIC_RELAXED) != waiter_ra)
+            site = NULL;
+    }
     while (__atomic_exchange_n(&lock->locked, 1, __ATOMIC_ACQUIRE)) {
         __atomic_fetch_add(&lock->contended_acquires, 1, __ATOMIC_RELAXED);
-        if (lock->samples) {
-            /* Hash the caller's return address into the fixed sample table
-             * and accumulate, so the audit can attribute contention to the
-             * exact call site without any shared bookkeeping lock. */
-            uintptr_t ra = waiter_ra;
-            unsigned slot = (unsigned)((ra >> 4) ^ (ra >> 20)) &
-                            (LOCK_CALLSITE_SAMPLES - 1);
-            lock_callsite_sample_t *s = &lock->samples[slot];
-            if (__atomic_load_n(&s->ra, __ATOMIC_RELAXED) != ra) {
-                uintptr_t expect = 0;
-                __atomic_compare_exchange_n(&s->ra, &expect, ra, 0,
-                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-            }
-            if (__atomic_load_n(&s->ra, __ATOMIC_RELAXED) == ra) {
-                __atomic_fetch_add(&s->contended, 1, __ATOMIC_RELAXED);
-                __atomic_fetch_add(&s->spins, 1, __ATOMIC_RELAXED);
-            }
-        }
+        if (site)
+            __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
+        uint64_t spun_before = spins;
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
                 uint64_t elapsed = timer_get_ticks() - stall_start;
@@ -167,9 +183,16 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
             }
             arch_cpu_relax();
         }
+        if (site)
+            __atomic_fetch_add(&site->spins, spins - spun_before,
+                               __ATOMIC_RELAXED);
     }
-    if (spins)
+    if (spins) {
         __atomic_fetch_add(&lock->contended_spins, spins, __ATOMIC_RELAXED);
+        spin_atomic_max(&lock->contended_max_spins, spins);
+        if (site)
+            spin_atomic_max(&site->max_spins, spins);
+    }
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
 }

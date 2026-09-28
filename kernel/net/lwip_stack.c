@@ -1,11 +1,13 @@
 #include "net/lwip_stack.h"
 #include "net/socket_internal.h"
 #include "net/net_config.h"
+#include "net/netfilter.h"
 #include "core/timer.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/lock_counters.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
@@ -87,6 +89,7 @@ typedef struct {
     uint8_t tx_frame[1536];
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
+    uint64_t rx_filtered, tx_filtered;
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
@@ -122,6 +125,10 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
     pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
+    if (netfilter_output(st->tx_frame, p->tot_len) == NETFILTER_DROP) {
+        st->tx_filtered++;
+        return ERR_OK;
+    }
     int r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
     if (r == (int)p->tot_len) {
         st->tx_packets++;
@@ -289,6 +296,16 @@ void a20_lwip_init(void) {
     a20_net_config_init();
     spin_init(&g_lwip_lock);
     spin_set_debug(&g_lwip_lock, "lwip", NULL);
+    /* g_lwip_lock serialises the entire TCP/IP data plane, so its contention
+     * is the single most important number for deciding whether the network
+     * stack can ever scale across CPUs.  Register it (and enable per-callsite
+     * sampling) so /proc/a20/lock_contention attributes it to exact call
+     * sites.  Measuring before rewriting is deliberate: sharding a lock this
+     * central is a high-risk protocol change, and the same callsite-first
+     * method used for proc_lock is what made that rewrite's scope decidable
+     * (see docs/roadmap/perf-overhaul.md). */
+    lock_counters_register(&g_lwip_lock, "lwip");
+    lock_counters_enable_callsite(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_netifs();
     /* Add loopback after physical links.  lwIP prepends netifs to its list;
@@ -348,10 +365,24 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
-        /* ethernet_input() takes ownership of p on every path -- it frees
-         * the pbuf itself on its error paths and returns ERR_OK, so the
-         * caller must not free it again (see the "so the caller doesn't
-         * have to free it again" note in lwip ethernet.c). */
+        /*
+         * Two pbuf_free() sites bracket the n->input() call below, and they
+         * are not redundant -- ownership moves at the call:
+         *
+         *   - Before n->input(): the pbuf is still ours, so the filter's drop
+         *     path is the one place we must free it.  The packet never reaches
+         *     the IP layer, so no socket is woken and no state is built.
+         *   - After n->input(): ethernet_input() has taken ownership and frees
+         *     the pbuf itself on its error paths while still returning ERR_OK
+         *     (see the "so the caller doesn't have to free it again" note in
+         *     lwip ethernet.c), so the caller must not free again.
+         */
+        if (netfilter_input(st->rx_frame, (size_t)len) == NETFILTER_DROP) {
+            pbuf_free(p);
+            LINK_STATS_INC(link.drop);
+            st->rx_filtered++;
+            continue;
+        }
         if (n->input(p, n) != ERR_OK) {
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
@@ -416,6 +447,42 @@ void a20_lwip_poll(void) {
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();
 }
+
+/*
+ * Poll for a waiter that is only blocked on network progress (a socket read
+ * with no data queued).  The g_lwip_lock acquisition is skipped unless some
+ * device has actually signalled work, so a blocked reader stops serialising on
+ * a global lock to discover there is nothing to do.  This is the same gating
+ * virtio_net_poll_rx_all() applies on the scheduler path, and it is safe here
+ * because delivery does not run through this call: the IRQ top-half drains the
+ * device, and sched() runs the socket bottom-halves (which move bh_ring into
+ * the socket queues and wake read_waitq) before picking the next task.  TCP
+ * timers likewise advance from kernel_progress_timer_tick() on the timer IRQ.
+ *
+ * The bottom-halves are NOT gated: they take g_net_lock rather than g_lwip_lock,
+ * and the waiter needs them to drain its own deferred receive data.
+ */
+void a20_lwip_poll_waiter(void) {
+    int need_lock = a20_lwip_rx_pending_any();
+    for (int i = 0; i < A20_NET_MAX_DEVS && !need_lock; i++) {
+        const a20_lwip_netif_state_t *st = &g_netif_state[i];
+        if (!st->dev)
+            continue;
+        /* A driver that does not report IRQ-driven RX may only be making
+         * progress through polling, so it must be drained unconditionally. */
+        if (!st->ops || !st->ops->rx_irq_driven ||
+            !st->ops->rx_irq_driven(st->dev))
+            need_lock = 1;
+    }
+    if (need_lock) {
+        uint64_t flags = a20_lwip_lock();
+        a20_lwip_poll_locked();
+        a20_lwip_unlock(flags);
+    }
+    net_inet_bottom_half_process_all();
+    net_packet_bottom_half_process();
+}
+
 
 int a20_lwip_format_status(char *buf, size_t bufsz) {
     if (!buf || bufsz == 0)
@@ -574,6 +641,65 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
     a20_lwip_unlock(flags);
     return (int)off;
 }
+
+#if MEMP_STATS
+int a20_lwip_format_memp(char *buf, size_t bufsz)
+{
+    static const struct { memp_t pool; const char *name; } pools[] = {
+        { MEMP_PBUF_POOL,      "PBUF_POOL"      },
+        { MEMP_PBUF,           "PBUF"           },
+        { MEMP_TCP_SEG,        "TCP_SEG"        },
+        { MEMP_TCP_PCB,        "TCP_PCB"        },
+        { MEMP_TCP_PCB_LISTEN, "TCP_PCB_LISTEN" },
+        { MEMP_UDP_PCB,        "UDP_PCB"        },
+    };
+    size_t npools = sizeof(pools) / sizeof(pools[0]);
+    const size_t NAME_COL = 16;
+    char row[128];
+
+    if (!buf || bufsz == 0)
+        return 0;
+
+    uint64_t flags = a20_lwip_lock();
+    size_t off = 0;
+
+    a20_lwip_append(buf, bufsz, &off,
+        "pool             avail   used     max    err\n");
+
+    for (size_t i = 0; i < npools; i++) {
+        const struct memp_desc *desc = memp_pools[pools[i].pool];
+        if (!desc || !desc->stats)
+            continue;
+        /* The kernel printf has no '-' flag and ignores width for %s, so
+         * left-align the name by hand and let width pad only the numbers. */
+        size_t nlen = strlen(pools[i].name);
+        if (nlen > NAME_COL)
+            nlen = NAME_COL;
+        char name[NAME_COL + 1];
+        memcpy(name, pools[i].name, nlen);
+        memset(name + nlen, ' ', NAME_COL - nlen);
+        name[NAME_COL] = '\0';
+
+        snprintf(row, sizeof(row), "%s%6lu%7lu%8lu%6lu\n", name,
+                 (unsigned long)desc->stats->avail,
+                 (unsigned long)desc->stats->used,
+                 (unsigned long)desc->stats->max,
+                 (unsigned long)desc->stats->err);
+        a20_lwip_append(buf, bufsz, &off, row);
+    }
+
+    a20_lwip_unlock(flags);
+    return (int)off;
+}
+#else
+int a20_lwip_format_memp(char *buf, size_t bufsz)
+{
+    (void)buf;
+    (void)bufsz;
+    return 0;
+}
+#endif
+
 
 static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
 {

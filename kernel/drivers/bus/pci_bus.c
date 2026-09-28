@@ -570,92 +570,139 @@ static int pci_slot_for_bdf(int bus, int dev, int func)
     return -1;
 }
 
+/* Publish one BDF.  Returns 1 when the function is a header-type-1
+ * bridge, so the caller also walks the buses behind it. */
+static int pci_publish_bdf(int bus, int dev, int func,
+                           uint8_t (*seen)[PCI_MAX_PUBLISHED_DEVICES],
+                           int *found)
+{
+        uint32_t id = pci_ecam_read(bus, dev, func, 0);
+        uint16_t vendor = (uint16_t)(id & 0xFFFF);
+        if (vendor == 0xFFFF)
+            return 0;
+
+        /* Header type is 0x0E[23:16]; 1 is a PCI-to-PCI bridge.  Decide it
+         * before any early return: a bridge that is already registered must
+         * still be reported as one, or a rescan stops following it and the
+         * devices behind it get reaped as missing. */
+        uint32_t hdr = pci_ecam_read(bus, dev, func, 0x0E);
+        int is_bridge = ((hdr >> 16) & 0xFF) == 1;
+
+        uint16_t device_id = (uint16_t)((id >> 16) & 0xFFFF);
+        int slot = pci_slot_for_bdf(bus, dev, func);
+        if (slot < 0)
+            return is_bridge;
+        if (g_pci_in_use[slot] &&
+            (g_pci_infos[slot].vendor != vendor ||
+             g_pci_infos[slot].device != device_id)) {
+            device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
+            g_pci_in_use[slot] = 0;
+        }
+        (*seen)[slot] = 1;
+        if (g_pci_in_use[slot]) {
+            (*found)++;
+            return is_bridge;
+        }
+
+        pci_dev_info_t *info = &g_pci_infos[slot];
+        memset(info, 0, sizeof(*info));
+        info->vendor = vendor;
+        info->device = device_id;
+        info->bus    = (uint8_t)bus;
+        info->dev   = (uint8_t)dev;
+        info->func  = (uint8_t)func;
+
+        uint32_t subsystem = pci_ecam_read(bus, dev, func, 0x2C);
+        info->subvendor = (uint16_t)subsystem;
+        info->subdevice = (uint16_t)(subsystem >> 16);
+
+        uint32_t irq_line = pci_ecam_read(bus, dev, func, 0x3C);
+        info->irq = (uint8_t)(irq_line & 0xFF);
+
+        uint32_t class_rev = pci_ecam_read(bus, dev, func, 0x08);
+
+        for (int b = 0; b < 6; b++) {
+            uint32_t bar_lo = pci_ecam_read(bus, dev, func, 0x10 + b * 4);
+            int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
+            info->bar[b] = (bar_lo == 0xFFFFFFFF || bar_lo == 0) ? 0 :
+                           pci_bar_address(info, b, bar_lo, is_64);
+            info->bar_size[b] = 0;
+            info->bar_resource[b] = -1;
+        }
+
+        resource_t *res = g_pci_resources[slot];
+        memset(res, 0, sizeof(g_pci_resources[slot]));
+
+        snprintf(g_pci_names[slot], sizeof(g_pci_names[slot]),
+                 "pci-%04x:%04x-%d", vendor, device_id, slot);
+
+        device_t *pdev     = &g_pci_devs[slot];
+        memset(pdev, 0, sizeof(*pdev));
+        pdev->name          = g_pci_names[slot];
+        pdev->bus           = &pci_bus;
+        pdev->plat_data     = info;
+        pdev->res           = res;
+        pdev->res_count     = 0;
+        pdev->state         = DEV_STATE_UNINIT;
+
+        if (device_hotplug(pdev, BUS_EVENT_ADD) < 0)
+            return is_bridge;
+        g_pci_in_use[slot] = 1;
+        kinfo("[BUS] pci %02x:%02x.%x id=%04x:%04x sub=%04x:%04x class=%02x:%02x:%02x irq=%u\n",
+              bus, dev, func, vendor, device_id,
+              info->subvendor, info->subdevice,
+              (unsigned int)(class_rev >> 24),
+              (unsigned int)((class_rev >> 16) & 0xffU),
+              (unsigned int)((class_rev >> 8) & 0xffU), info->irq);
+        for (int b = 0; b < 6; b++) {
+            if (info->bar[b])
+                kinfo("[BUS]   BAR%d: phys=0x%lx\n", b,
+                      (unsigned long)info->bar[b]);
+        }
+        (*found)++;
+
+    return is_bridge;
+}
+
 static void pci_scan_current(int remove_missing)
 {
     uint8_t seen[PCI_MAX_PUBLISHED_DEVICES] = {0};
     int found = 0;
 
-    for (int bus = g_pci_data.bus_start;
-         bus < g_pci_data.bus_end && found < PCI_MAX_PUBLISHED_DEVICES; bus++) {
+    /*
+     * Walk buses from a worklist instead of the preconfigured
+     * [bus_start, bus_end) range.  A flat range cannot see anything behind a
+     * PCIe switch: on the riscv64 board the range is (0, 1), so only bus 0 is
+     * ever probed and a device behind a bridge is invisible.  Following header
+     * type 1 bridges is what real root complexes require.
+     */
+    uint8_t visited[PCI_MAX_BUS] = {0};
+    int pending[PCI_MAX_BUS];
+    int npending = 0;
+    for (int b = g_pci_data.bus_start; b < g_pci_data.bus_end; b++)
+        if (b >= 0 && b < PCI_MAX_BUS && !visited[b]) {
+            visited[b] = 1;
+            pending[npending++] = b;
+        }
+
+    while (npending > 0 && found < PCI_MAX_PUBLISHED_DEVICES) {
+        int bus = pending[--npending];
         for (int dev = 0; dev < PCI_MAX_DEV && found < PCI_MAX_PUBLISHED_DEVICES; dev++) {
             for (int func = 0; func < PCI_MAX_FUNC && found < PCI_MAX_PUBLISHED_DEVICES; func++) {
-                uint32_t id = pci_ecam_read(bus, dev, func, 0);
-                uint16_t vendor = (uint16_t)(id & 0xFFFF);
-                if (vendor == 0xFFFF)
+                if (!pci_publish_bdf(bus, dev, func, &seen, &found))
                     continue;
-
-                uint16_t device_id = (uint16_t)((id >> 16) & 0xFFFF);
-                int slot = pci_slot_for_bdf(bus, dev, func);
-                if (slot < 0)
+                /* Bridge: enqueue every bus in [secondary, subordinate]. */
+                uint32_t br = pci_ecam_read(bus, dev, func, 0x19);
+                int secondary = br & 0xFF;
+                int subordinate = (br >> 8) & 0xFF;
+                if (secondary == 0 || subordinate < secondary)
                     continue;
-                if (g_pci_in_use[slot] &&
-                    (g_pci_infos[slot].vendor != vendor ||
-                     g_pci_infos[slot].device != device_id)) {
-                    device_hotplug(&g_pci_devs[slot], BUS_EVENT_REMOVE);
-                    g_pci_in_use[slot] = 0;
+                for (int b = secondary; b <= subordinate; b++) {
+                    if (b <= 0 || b >= PCI_MAX_BUS || visited[b])
+                        continue;
+                    visited[b] = 1;
+                    pending[npending++] = b;
                 }
-                seen[slot] = 1;
-                if (g_pci_in_use[slot]) {
-                    found++;
-                    continue;
-                }
-
-                pci_dev_info_t *info = &g_pci_infos[slot];
-                memset(info, 0, sizeof(*info));
-                info->vendor = vendor;
-                info->device = device_id;
-                info->bus    = (uint8_t)bus;
-                info->dev   = (uint8_t)dev;
-                info->func  = (uint8_t)func;
-
-                uint32_t subsystem = pci_ecam_read(bus, dev, func, 0x2C);
-                info->subvendor = (uint16_t)subsystem;
-                info->subdevice = (uint16_t)(subsystem >> 16);
-
-                uint32_t irq_line = pci_ecam_read(bus, dev, func, 0x3C);
-                info->irq = (uint8_t)(irq_line & 0xFF);
-
-                uint32_t class_rev = pci_ecam_read(bus, dev, func, 0x08);
-
-                for (int b = 0; b < 6; b++) {
-                    uint32_t bar_lo = pci_ecam_read(bus, dev, func, 0x10 + b * 4);
-                    int is_64 = !(bar_lo & 1U) && ((bar_lo & 0x6U) == 0x4U);
-                    info->bar[b] = (bar_lo == 0xFFFFFFFF || bar_lo == 0) ? 0 :
-                                   pci_bar_address(info, b, bar_lo, is_64);
-                    info->bar_size[b] = 0;
-                    info->bar_resource[b] = -1;
-                }
-
-                resource_t *res = g_pci_resources[slot];
-                memset(res, 0, sizeof(g_pci_resources[slot]));
-
-                snprintf(g_pci_names[slot], sizeof(g_pci_names[slot]),
-                         "pci-%04x:%04x-%d", vendor, device_id, slot);
-
-                device_t *pdev     = &g_pci_devs[slot];
-                memset(pdev, 0, sizeof(*pdev));
-                pdev->name          = g_pci_names[slot];
-                pdev->bus           = &pci_bus;
-                pdev->plat_data     = info;
-                pdev->res           = res;
-                pdev->res_count     = 0;
-                pdev->state         = DEV_STATE_UNINIT;
-
-                if (device_hotplug(pdev, BUS_EVENT_ADD) < 0)
-                    continue;
-                g_pci_in_use[slot] = 1;
-                kinfo("[BUS] pci %02x:%02x.%x id=%04x:%04x sub=%04x:%04x class=%02x:%02x:%02x irq=%u\n",
-                      bus, dev, func, vendor, device_id,
-                      info->subvendor, info->subdevice,
-                      (unsigned int)(class_rev >> 24),
-                      (unsigned int)((class_rev >> 16) & 0xffU),
-                      (unsigned int)((class_rev >> 8) & 0xffU), info->irq);
-                for (int b = 0; b < 6; b++) {
-                    if (info->bar[b])
-                        kinfo("[BUS]   BAR%d: phys=0x%lx\n", b,
-                              (unsigned long)info->bar[b]);
-                }
-                found++;
             }
         }
     }
@@ -669,7 +716,7 @@ static void pci_scan_current(int remove_missing)
         }
     }
 
-    kinfo("[BUS] pci: found %d devices (ecam=0x%lx, bus %d-%d)\n",
+    kinfo("[BUS] pci: found %d devices (ecam=0x%lx, bus %d-%d, bridges walked)\n",
           found, (unsigned long)g_pci_data.ecam_base, g_pci_data.bus_start,
           g_pci_data.bus_end);
 }

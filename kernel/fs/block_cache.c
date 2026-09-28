@@ -6,11 +6,27 @@
 #include "core/errno.h"
 #include "core/timer.h"
 #include "core/lock_counters.h"
+#include "proc/proc.h"
 
 static bcache_t *g_bcache_list[8];
 static int g_bcache_count;
 
 #define BCACHE_SYNC_BATCH_PAGES 256
+
+/* Charge the calling task for sectors actually transferred to/from the device.
+ * Correct to attribute to proc_current(): A20OS has no flusher threads, so
+ * writeback runs in the context of whoever triggered it. */
+static void bcache_account_device_io(block_dev_t *dev, int sectors,
+                                     int is_write)
+{
+    if (!dev || sectors <= 0)
+        return;
+    uint64_t bytes = (uint64_t)sectors * dev->sector_size;
+    if (is_write)
+        proc_io_account(0, 0, 0, bytes);
+    else
+        proc_io_account(0, 0, bytes, 0);
+}
 
 /* Cooldown after a failed device write before flush is attempted again. */
 #define BCACHE_WRITE_QUARANTINE_TICKS (TICKS_PER_SEC * 30)
@@ -645,6 +661,7 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
         int write_ret = bc->dev->write_sector(
             bc->dev, lba, page_tmp,
             (size_t)batch_pages * PCACHE_PAGE_SIZE / BCACHE_BLOCK_SIZE);
+        bcache_account_device_io(bc->dev, write_ret, 1);
         if (write_ret >= 0) {
             flags = spin_lock_irqsave(&bc->lock);
             for (int page = 0; page < batch_pages; page++) {
@@ -690,6 +707,7 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
         spin_unlock_irqrestore(&bc->lock, flags);
 
         int write_ret = bc->dev->write_sector(bc->dev, lba, tmp, 1);
+        bcache_account_device_io(bc->dev, write_ret, 1);
         if (write_ret >= 0) {
             flags = spin_lock_irqsave(&bc->lock);
             if (bc->pool[i].valid && bc->pool[i].lba == lba &&
@@ -703,6 +721,20 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
         }
     }
     rw_mutex_write_unlock(&bc->writeback_lock);
+
+    /*
+     * Commit the device's volatile write cache.  The writes above returned
+     * once the data reached the device, which a device with a write cache can
+     * still lose on power failure; this is what makes fsync() mean "durable".
+     * Must follow the data and stay outside bc->lock.  A device with no flush
+     * op cannot honour fsync -- see block_dev_t.flush.
+     */
+    if (!first_error && bc->dev && bc->dev->flush) {
+        a20_perf_count(A20_PERF_BLOCK_FLUSHES);
+        int flush_ret = bc->dev->flush(bc->dev);
+        if (flush_ret < 0)
+            first_error = flush_ret;
+    }
     return first_error;
 }
 
@@ -1049,6 +1081,7 @@ int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,
         uint64_t lba = byte_off / BCACHE_BLOCK_SIZE;
         size_t sectors = len / BCACHE_BLOCK_SIZE;
         result = bc->dev->read_sector(bc->dev, lba, buf, sectors);
+        bcache_account_device_io(bc->dev, result, 0);
     } else {
         memset(buf, 0, len);
     }
