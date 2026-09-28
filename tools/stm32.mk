@@ -13,7 +13,7 @@ $(STM32_BT_CONFIG_HDR): FORCE
 		printf '#define STM32_BLUETOOTH_BAUD_RATE_TEXT "%s"\n' '$(STM32_BT_BAUD)'; \
 		printf '%s\n' '#endif'; \
 	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+	@$(PYTHON) tools/stamps.py adopt --tmp "$@.tmp" --target "$@"
 
 $(STM32_WIFI_CONFIG_HDR): FORCE
 	@mkdir -p $(dir $@)
@@ -24,7 +24,7 @@ $(STM32_WIFI_CONFIG_HDR): FORCE
 		printf '#define STM32_WIFI_PASSWORD "%s"\n' '$(STM32_WIFI_PASSWORD)'; \
 		printf '%s\n' '#endif'; \
 	} > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else mv $@.tmp $@; fi
+	@$(PYTHON) tools/stamps.py adopt --tmp "$@.tmp" --target "$@"
 
 $(BUILD_DIR)/drivers/stm32f1/bluetooth.o: $(STM32_BT_CONFIG_HDR)
 $(BUILD_DIR)/drivers/stm32f1/wifi.o: $(STM32_WIFI_CONFIG_HDR)

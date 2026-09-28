@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import os
+import filecmp
 import shutil
 import subprocess
 import sys
@@ -341,6 +342,23 @@ def cmd_clean(a) -> int:
     return 0
 
 
+def cmd_adopt(a) -> int:
+    """`cmp -s TMP TARGET && rm -f TMP || mv -f TMP TARGET`.
+
+    Shared by the generated config headers, whose *content* is still produced
+    in make but whose write-if-changed decision is not.  Byte comparison, not
+    mtime, decides -- these headers are prerequisites of the objects that
+    include them, so touching an unchanged header would force a rebuild.
+    """
+    tmp, target = REPO / a.tmp, REPO / a.target
+    if target.is_file() and tmp.is_file() and \
+            filecmp.cmp(tmp, target, shallow=False):
+        tmp.unlink()
+        return 0
+    tmp.replace(target)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -380,6 +398,9 @@ def main() -> int:
     s.add_argument("--find-root", action="append", default=[])
     s.add_argument("--rm-rf", action="append", default=[])
     s.add_argument("--rm-f", action="append", default=[])
+    s = sub.add_parser("adopt")
+    s.add_argument("--tmp", required=True)
+    s.add_argument("--target", required=True)
     s = sub.add_parser("build-flags")
     s.add_argument("--stamp", required=True)
     s.add_argument("--build-flags-sig", required=True)
@@ -387,7 +408,8 @@ def main() -> int:
     return {"user": cmd_user, "native": cmd_native,
             "extra-inputs": extra_inputs,
             "build-flags": cmd_build_flags,
-            "clean": cmd_clean}[a.cmd](a)
+            "clean": cmd_clean,
+            "adopt": cmd_adopt}[a.cmd](a)
 
 
 if __name__ == "__main__":
