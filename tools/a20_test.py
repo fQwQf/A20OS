@@ -32,10 +32,23 @@ def _qemu_cmdline(inst: Instance, make_args: list[str]) -> list[str]:
         check=False, capture_output=True, text=True,
     )
     for line in out.stdout.splitlines():
-        if line.startswith("qemu-system"):
+        # Cheap substring test first: make -n output includes recipe lines that
+        # end in a backslash continuation, and shlex.split() throws on those.
+        if "qemu-system" not in line:
+            continue
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            continue
+        # The command may be wrapped in `env VAR=... qemu-system-...`: that is
+        # how the Makefile points QEMU at a locally built virglrenderer via
+        # LD_LIBRARY_PATH.  Keep the whole thing, or the host would silently
+        # fall back to the system renderer and every 3D conclusion would be
+        # measured against the wrong library.
+        if any(tok.startswith("qemu-system") for tok in argv):
             # machine.extra_qemu is already part of the derived make variables
             # (EXTRA_QEMU), so the Makefile emitted it -- do not add it twice.
-            return shlex.split(line)
+            return argv
     raise SystemExit(f"error: no qemu-system command found in 'make -n _run_impl' output:\n{out.stdout}")
 
 
