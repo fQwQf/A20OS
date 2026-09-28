@@ -132,11 +132,32 @@ def cmd_image_world(a) -> int:
     return 0
 
 
+RUST_PKGS = {"rust", "rustc", "cargo", "rustfmt"}
+
+
+def cmd_prepare_riscv64_sysroot(a) -> int:
+    """Gate the RISC-V glibc sysroot prep on actually needing it.
+
+    The sysroot is only required when building for riscv64 *and* the extra
+    package set names a Rust toolchain; otherwise the original skipped the
+    script silently, and so does this.
+    """
+    if a.arch != "riscv64":
+        return 0
+    if not RUST_PKGS & set((a.extra_packages or "").split()):
+        return 0
+    script = Path("user/extra/prepare-riscv64-glibc-sysroot.sh")
+    r = subprocess.run([str(script), a.lib_dir, a.local_root, a.fedora_release],
+                       check=False)
+    return r.returncode
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
                     choices=["pkg-key", "pkgs-check", "pkgs", "pkg-repo",
-                             "media-overlay", "image-world"])
+                             "media-overlay", "image-world",
+                             "prepare-riscv64-sysroot"])
     # Values the Makefile owns; passed in rather than re-derived.
     for f, d in (("recipes", "space-separated recipe names"),
                  ("arch", "target arch"), ("variant", "user build variant"),
@@ -146,7 +167,11 @@ def main() -> int:
                  ("key-name", "public key name"), ("world", "world name"),
                  ("size-mb", "image size in MiB"), ("alpine", "1 or 0"),
                  ("media", "GUI_MEDIA paths"), ("media-dir", "media dir in image"),
-                 ("media-overlay", "media overlay dir")):
+                 ("media-overlay", "media overlay dir"),
+                 ("extra-packages", "space-separated extra packages"),
+                 ("lib-dir", "detected system lib dir"),
+                 ("local-root", "local sysroot root"),
+                 ("fedora-release", "fedora riscv release tag")):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     # Root detection: a leading 0 means "we are root", so usermode is off.
@@ -157,6 +182,7 @@ def main() -> int:
         "pkg-key": cmd_pkg_key, "pkgs-check": cmd_pkgs_check, "pkgs": cmd_pkgs,
         "pkg-repo": cmd_pkg_repo, "media-overlay": cmd_media_overlay,
         "image-world": cmd_image_world,
+        "prepare-riscv64-sysroot": cmd_prepare_riscv64_sysroot,
     }[a.command](a)
 
 
