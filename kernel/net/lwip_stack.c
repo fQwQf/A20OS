@@ -606,6 +606,65 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
     return (int)off;
 }
 
+#if MEMP_STATS
+int a20_lwip_format_memp(char *buf, size_t bufsz)
+{
+    static const struct { memp_t pool; const char *name; } pools[] = {
+        { MEMP_PBUF_POOL,      "PBUF_POOL"      },
+        { MEMP_PBUF,           "PBUF"           },
+        { MEMP_TCP_SEG,        "TCP_SEG"        },
+        { MEMP_TCP_PCB,        "TCP_PCB"        },
+        { MEMP_TCP_PCB_LISTEN, "TCP_PCB_LISTEN" },
+        { MEMP_UDP_PCB,        "UDP_PCB"        },
+    };
+    size_t npools = sizeof(pools) / sizeof(pools[0]);
+    const size_t NAME_COL = 16;
+    char row[128];
+
+    if (!buf || bufsz == 0)
+        return 0;
+
+    uint64_t flags = a20_lwip_lock();
+    size_t off = 0;
+
+    a20_lwip_append(buf, bufsz, &off,
+        "pool             avail   used     max    err\n");
+
+    for (size_t i = 0; i < npools; i++) {
+        const struct memp_desc *desc = memp_pools[pools[i].pool];
+        if (!desc || !desc->stats)
+            continue;
+        /* The kernel printf has no '-' flag and ignores width for %s, so
+         * left-align the name by hand and let width pad only the numbers. */
+        size_t nlen = strlen(pools[i].name);
+        if (nlen > NAME_COL)
+            nlen = NAME_COL;
+        char name[NAME_COL + 1];
+        memcpy(name, pools[i].name, nlen);
+        memset(name + nlen, ' ', NAME_COL - nlen);
+        name[NAME_COL] = '\0';
+
+        snprintf(row, sizeof(row), "%s%6lu%7lu%8lu%6lu\n", name,
+                 (unsigned long)desc->stats->avail,
+                 (unsigned long)desc->stats->used,
+                 (unsigned long)desc->stats->max,
+                 (unsigned long)desc->stats->err);
+        a20_lwip_append(buf, bufsz, &off, row);
+    }
+
+    a20_lwip_unlock(flags);
+    return (int)off;
+}
+#else
+int a20_lwip_format_memp(char *buf, size_t bufsz)
+{
+    (void)buf;
+    (void)bufsz;
+    return 0;
+}
+#endif
+
+
 static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
 {
     for (struct netif *n = netif_list; n; n = n->next) {

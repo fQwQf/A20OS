@@ -463,6 +463,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "netfilter") == 0) {
         child = new_entry(name, PF_A20_NETFILTER, 0);
         type = PF_A20_NETFILTER;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "netmem") == 0) {
+        child = new_entry(name, PF_A20_NETMEM, 0);
+        type = PF_A20_NETMEM;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;

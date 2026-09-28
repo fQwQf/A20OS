@@ -293,3 +293,44 @@ smoke-pci-bridge:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# lwIP mempool pressure smoke
+# ================================================================
+# /proc/a20/netmem surfaces lwIP's per-pool used/max/err counters.  MEMP_STATS
+# derives to 1 here (MEMP_MEM_MALLOC is 0), so lwIP already maintains those
+# counters, but the only reader it ships is compiled out by LWIP_STATS_DISPLAY=0
+# -- this file is the only way to read them.
+#
+# Scope: the err==0 assertion is real, and it is the signal that would catch a
+# pool sized too small for a given workload.  It does NOT justify the current
+# pool size: peak max on a loopback-backed suite is tiny, so this gate says
+# nothing about high-BDP sizing.  See docs/server-readiness.md.
+smoke-lwip-memp: NET_HOSTFWD=
+smoke-lwip-memp:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/lwip-memp-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'network_suite\ncat /proc/a20/netmem\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETWORK_SUITE: PASS' "$$log" && \
+	   grep -qE '^PBUF_POOL +[0-9]+ ' "$$log" && \
+	   grep -qE '^TCP_SEG +[0-9]+ ' "$$log" && \
+	   grep -qE '^TCP_PCB_LISTEN +[0-9]+ ' "$$log" && \
+	   ! grep -qE '^(PBUF_POOL|PBUF|TCP_SEG|TCP_PCB|TCP_PCB_LISTEN|UDP_PCB) +[0-9]+ +[0-9]+ +[0-9]+ +[1-9]' "$$log"; then \
+		echo "smoke-lwip-memp: PASS (6 pools exposed, err=0 after network suite); log saved to $$log"; \
+	else \
+		echo "smoke-lwip-memp: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi

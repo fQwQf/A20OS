@@ -126,6 +126,7 @@ typedef enum {
     PF_A20_OBJECTS,
     PF_A20_IOMMU,
     PF_A20_NETFILTER,
+    PF_A20_NETMEM,
     PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,
