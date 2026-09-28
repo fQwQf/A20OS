@@ -126,126 +126,18 @@ _extra-img: $(EXTRA_IMG)
 
 $(EXTRA_IMG): $(EXTRA_IMAGE_STAMP)
 	@echo "Building extra packages image..."
-	@rm -f "$(EXTRA_IMG)"
-	@rm -rf $(EXTRA_STAGING_DIR) && mkdir -p $(EXTRA_STAGING_DIR)/bin
-	@set -e; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		case "$$name" in \
-			.build-id) continue ;; \
-			*.o|*.a|*.so|*.d) continue ;; \
-		esac; \
-		cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name"; \
-	done; \
-	for f in user/build/extra/$(ARCH)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		case " $(EXTRA_PACKAGES) " in *" $$name "*) cp "$$f" "$(EXTRA_STAGING_DIR)/bin/$$name" ;; esac; \
-	done; \
-	if [ -n "$(filter lamina,$(EXTRA_PACKAGES))" ]; then \
-		for pat in 'liblaminaCore.so*' 'liblmcas.so*' 'liblmmc.so*' 'libLammpCore.so*' 'libstdc++.so*'; do \
-			for f in user/build/extra/$(ARCH)/$$pat; do \
-				[ -f "$$f" ] || continue; \
-				cp -P "$$f" "$(EXTRA_STAGING_DIR)/bin/$$(basename "$$f")"; \
-			done; \
-		done; \
-	fi
-	@set -e; \
-	if [ -n "$(filter gcc cc,$(EXTRA_PACKAGES))" ] && [ -d user/build/extra/$(ARCH)/obj/gcc-install ]; then \
-		cp -a user/build/extra/$(ARCH)/obj/gcc-install/libexec "$(EXTRA_STAGING_DIR)/libexec"; \
-		cp -a user/build/extra/$(ARCH)/obj/gcc-install/lib "$(EXTRA_STAGING_DIR)/lib"; \
-		cp -a user/build/extra/$(ARCH)/obj/gcc-install/include "$(EXTRA_STAGING_DIR)/include"; \
-		for t in user/build/extra/$(ARCH)/obj/gcc-install/bin/*; do \
-			[ -f "$$t" ] && cp "$$t" "$(EXTRA_STAGING_DIR)/bin/$$(basename $$t)"; \
-		done; \
-		mv "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/gcc-real"; \
-		printf '#!/bin/sh\nexec /extra/bin/gcc-real --sysroot=/extra -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/gcc"; \
-		mv "$(EXTRA_STAGING_DIR)/bin/cc" "$(EXTRA_STAGING_DIR)/bin/cc-real"; \
-		printf '#!/bin/sh\nexec /extra/bin/cc-real --sysroot=/extra -fno-lto -fno-use-linker-plugin "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cc"; \
-		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/gcc" "$(EXTRA_STAGING_DIR)/bin/cc"; \
-		if [ "$(ARCH)" = riscv64 ]; then \
-			MUSL_LIBC="$(RISCV_GCC_MUSL_LIBC)"; \
-			[ -f "$$MUSL_LIBC" ] || { \
-				echo "[EXTRA] missing GCC musl runtime $$MUSL_LIBC"; exit 1; \
-			}; \
-			mkdir -p "$(EXTRA_STAGING_DIR)/musl/lib"; \
-			cp "$$MUSL_LIBC" "$(EXTRA_STAGING_DIR)/musl/lib/libc.so"; \
-		fi; \
-	fi
-	@if [ "$(ARCH)" = riscv64 ] && [ -n "$(filter rust rustc cargo rustfmt,$(EXTRA_PACKAGES))" ]; then \
-		RUST=user/build/extra/$(ARCH)/obj/rust; \
-		[ -x "$$RUST/bin/rustc" ] && [ -x "$$RUST/bin/cargo" ] && \
-			[ -x "$$RUST/bin/rustfmt" ] && [ -x "$$RUST/bin/cargo-fmt" ] || \
-			{ echo "Rust installation incomplete in $$RUST"; exit 1; }; \
-		GLIBC="$(RISCV_GLIBC_LIB_DIR)"; \
-		REQUIRED_GLIBC="ld-linux-riscv64-lp64d.so.1 libc.so.6 libdl.so.2 libm.so.6 libpthread.so.0 librt.so.1 libatomic.so.1 libgcc_s.so.1"; \
-		MISSING_GLIBC=""; \
-		for f in $$REQUIRED_GLIBC; do [ -n "$$GLIBC" ] && [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
-		if [ -n "$$MISSING_GLIBC" ]; then \
-			GLIBC="$(RISCV_GLIBC_LOCAL_LIB_DIR)"; \
-			MISSING_GLIBC=""; \
-			for f in $$REQUIRED_GLIBC; do [ -f "$$GLIBC/$$f" ] || MISSING_GLIBC="$$MISSING_GLIBC $$f"; done; \
-		fi; \
-		[ -z "$$MISSING_GLIBC" ] || { \
-			echo "RISC-V glibc runtime incomplete in '$$GLIBC'; missing:$$MISSING_GLIBC"; \
-			echo "Install/provide the cross glibc runtime or set RISCV_GLIBC_LIB_DIR to a directory containing all required libraries"; \
-			exit 1; \
-		}; \
-		cp -a "$$RUST" "$(EXTRA_STAGING_DIR)/rust"; \
-		printf '#!/bin/sh\nexec /extra/rust/bin/rustc --target riscv64gc-unknown-linux-musl -C linker=/extra/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld -C relocation-model=static -C link-arg=-L/extra/rust/a20-sysroot/lib -C link-arg=-static -C link-arg=/extra/rust/a20-sysroot/lib/crt1.o -C link-arg=/extra/rust/a20-sysroot/lib/crti.o -C link-arg=/extra/rust/a20-sysroot/lib/crtn.o "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustc"; \
-		printf '#!/bin/sh\nexport RUSTC=/extra/rust/bin/rustc\nexport CARGO_BUILD_TARGET=riscv64gc-unknown-linux-musl\nexec /extra/rust/bin/cargo --config /extra/rust/config.toml "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo"; \
-		printf '#!/bin/sh\nexec /extra/rust/bin/rustfmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/rustfmt"; \
-		printf '#!/bin/sh\nexec /extra/rust/bin/cargo-fmt "$$@"\n' > "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
-		printf '[target.riscv64gc-unknown-linux-musl]\nlinker = "/extra/rust/lib/rustlib/riscv64gc-unknown-linux-gnu/bin/rust-lld"\nrustflags = ["-C", "relocation-model=static", "-C", "link-arg=-L/extra/rust/a20-sysroot/lib", "-C", "link-arg=-static", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crt1.o", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crti.o", "-C", "link-arg=/extra/rust/a20-sysroot/lib/crtn.o"]\n' > "$(EXTRA_STAGING_DIR)/rust/config.toml"; \
-		chmod 0755 "$(EXTRA_STAGING_DIR)/bin/rustc" "$(EXTRA_STAGING_DIR)/bin/cargo" \
-			"$(EXTRA_STAGING_DIR)/bin/rustfmt" "$(EXTRA_STAGING_DIR)/bin/cargo-fmt"; \
-		mkdir -p "$(EXTRA_STAGING_DIR)/glibc/lib"; \
-		for f in $$REQUIRED_GLIBC; do \
-			cp -aL "$$GLIBC/$$f" "$(EXTRA_STAGING_DIR)/glibc/lib/$$f"; \
-		done; \
-	fi
-	@VIM_RT="$(EXTRA_STAGING_DIR)/share/vim/vim92"; \
-	VIM_SRC=user/external/apps/vim/runtime; \
-	if [ -z "$(filter vim,$(EXTRA_PACKAGES))" ] || [ ! -d "$$VIM_SRC" ]; then exit 0; fi; \
-	mkdir -p "$$VIM_RT"; \
-	for f in defaults.vim filetype.vim ftoff.vim ftplugin.vim ftplugof.vim indent.vim indoff.vim; do \
-		[ -f "$$VIM_SRC/$$f" ] && cp "$$VIM_SRC/$$f" "$$VIM_RT/$$f"; \
-	done; \
-	for d in syntax indent ftplugin autoload; do \
-		mkdir -p "$$VIM_RT/$$d"; \
-		cp -a "$$VIM_SRC/$$d/." "$$VIM_RT/$$d/"; \
-	done
-	@GIT_TEMPLATE_SRC=user/external/apps/git/templates/blt; \
-	GIT_TEMPLATE_DST="$(EXTRA_STAGING_DIR)/share/git-core/templates"; \
-	if [ -n "$(filter git,$(EXTRA_PACKAGES))" ]; then \
-		if [ -d "$$GIT_TEMPLATE_SRC" ]; then \
-			mkdir -p "$$GIT_TEMPLATE_DST"; \
-			cp -a "$$GIT_TEMPLATE_SRC"/. "$$GIT_TEMPLATE_DST"/; \
-		fi; \
-		for helper in git-remote-http git-remote-https; do \
-			src="user/build/extra/$(ARCH)/$$helper"; \
-			[ -x "$$src" ] || { echo "[EXTRA] missing Git HTTPS helper $$src"; exit 1; }; \
-			cp "$$src" "$(EXTRA_STAGING_DIR)/bin/$$helper"; \
-		done; \
-		[ -n "$(CA_CERT_BUNDLE)" ] && [ -f "$(CA_CERT_BUNDLE)" ] || { \
-			echo "[EXTRA] no host CA certificate bundle found; set CA_CERT_BUNDLE"; exit 1; \
-		}; \
-		mkdir -p "$(EXTRA_STAGING_DIR)/etc/ssl/certs"; \
-		cp -L "$(CA_CERT_BUNDLE)" \
-			"$(EXTRA_STAGING_DIR)/etc/ssl/certs/ca-certificates.crt"; \
-		if [ -n "$(EXTRA_DNS)" ]; then \
-			printf 'nameserver %s\noptions timeout:2 attempts:3\n' "$(EXTRA_DNS)" \
-				> "$(EXTRA_STAGING_DIR)/etc/resolv.conf"; \
-		fi; \
-	fi
-	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(EXTRA_IMG) bs=1048576 count=$(EXTRA_IMAGE_MB) 2>/dev/null
-	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
-		-d $(EXTRA_STAGING_DIR) $(EXTRA_IMG)
-	@rm -rf $(EXTRA_STAGING_DIR)
-	@echo "Extra image: $(EXTRA_IMG) ($(EXTRA_IMAGE_MB)MB)"
-
+	@$(PYTHON) tools/img.py extra \
+		--extra-img "$(EXTRA_IMG)" --extra-mb "$(EXTRA_IMAGE_MB)" \
+		--extra-staging-dir "$(EXTRA_STAGING_DIR)" \
+		--extra-dir "user/build/extra/$(ARCH)" \
+		--extra-packages "$(EXTRA_PACKAGES)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--mkfs-ext4 "$(MKFS_EXT4)" --arch "$(ARCH)" \
+		--riscv-gcc-musl-libc "$(RISCV_GCC_MUSL_LIBC)" \
+		--riscv-glibc-lib-dir "$(RISCV_GLIBC_LIB_DIR)" \
+		--riscv-glibc-local-lib-dir "$(RISCV_GLIBC_LOCAL_LIB_DIR)" \
+		--ca-cert-bundle "$(CA_CERT_BUNDLE)" \
+		--extra-dns "$(EXTRA_DNS)"
 # Helper: QEMU flags for the extra disk (appended conditionally)
 ifeq ($(ARCH), riscv64)
 # Slot 5 is reserved for the user-space virtio-input placement and is skipped
