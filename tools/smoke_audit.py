@@ -27,6 +27,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from smoke import SUBCOMMANDS  # noqa: E402
 from smoke_cases import CASES  # noqa: E402
 
 
@@ -48,7 +49,7 @@ def main() -> int:
     # no separate existence probe needed, which also avoids reporting it twice.
     wired = set(re.findall(r"tools/smoke\.py (\S+)", r.stdout))
     missing = sorted(set(names) - wired)
-    extra = sorted(wired - set(names))
+    extra = sorted(wired - set(names) - SUBCOMMANDS)
 
     if missing or extra:
         if missing:

@@ -39,6 +39,45 @@ GATE = "tools/a20_resource.py"
 # interactive `a20 run` waits forever, so the ceiling is here instead.
 GATE_WAIT_S = os.environ.get("A20_WAIT_TIMEOUT", "900")
 
+STEP35_APPEND = ("a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 "
+                 "a20.dns=10.0.2.3 a20.hostname=a20os")
+STEP35_MARKERS = [
+    "SCHED_STRESS: PASS", "FUTEX_STRESS: PASS",
+    "FUTEX_STRESS: unrelated-wake-isolation PASS",
+    "FUTEX_STRESS: stale-timeout-isolation PASS",
+    "PROC_STRESS: PASS", "PROC_STRESS: vfork-auto-reap PASS",
+    "PROC_STRESS: signal-stop-exit PASS", "PROC_STRESS: signal-mask-park PASS",
+    "IO_EVENT_TEST: PASS", "VFS_STRESS: PASS", "SOCKET_STRESS: PASS",
+    "LIFETIME_STRESS: PASS", "lifetime_errors: 0",
+    "System is going down for power-off NOW.",
+]
+STEP35_TIMEOUT_CAPACITY = [
+    "LIFETIME_STRESS: timeout-capacity-1 PASS",
+    "LIFETIME_STRESS: timeout-capacity PASS entries=",
+    "LIFETIME_STRESS: timeout-capacity+1 PASS",
+    "LIFETIME_STRESS: timeout-capacity PASS capacity=",
+]
+STEP35_SMP_RUNQUEUE = ["SCHED_STRESS: smp-runqueue PASS",
+                       "scheduler_violations: 0"]
+STEP35_LOCK_SPLIT = [
+    "SCHED_STRESS: lock-split PASS", "runqueue_local_picks:",
+    "runqueue_lock_acquires:", "runqueue_parallel_pick_peak:",
+    "scheduler_violations: 0",
+]
+STEP35_FORBID = r"PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]"
+# Positional args main() handles itself instead of looking up in CASES;
+# smoke_audit.py reads this so a wired subcommand is not read as a typo'd case.
+SUBCOMMANDS = {"step35"}
+# Markers were matched with bare `grep -q` (POSIX BRE, where `+ ? ( ) | { }`
+# are literals) but Python re follows ERE, so `timeout-capacity+1` -- a literal
+# the log prints -- would stop matching and turn a green gate red.  Escape only
+# the divergent set; `.` `*` `[` `^` `$` agree in both dialects.
+_BRE_LITERAL = re.compile(r"([+?()|{}])")
+
+
+def bre(marker: str) -> str:
+    return _BRE_LITERAL.sub(r"\\\1", marker)
+
 
 def sh(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=REPO, check=False, **kw)
@@ -139,13 +178,91 @@ def report(name: str, case: dict, status: int) -> int:
     return 1
 
 
+def step35_fail(head: str, log: Path, evidence: list[str] | None = None) -> int:
+    print(f"{head} log={log}")
+    body = evidence if evidence is not None else log.read_text(
+        encoding="utf-8", errors="replace").splitlines()[-120:]
+    print("\n".join(body))
+    return 1
+
+
+def step35_check(case: dict, status: int) -> int:
+    log = Path(case["log"])
+    text = log.read_text(encoding="utf-8", errors="replace")
+    if status != 0:
+        return step35_fail(f"_step35_smoke: QEMU failed status={status}", log)
+    groups = [STEP35_MARKERS]
+    if case["require_timeout_capacity"]:
+        groups.append(STEP35_TIMEOUT_CAPACITY)
+    if case["require_smp_runqueue"]:
+        groups.append(STEP35_SMP_RUNQUEUE)
+    if case["require_lock_split"]:
+        groups.append(STEP35_LOCK_SPLIT)
+    for group in groups:
+        for marker in group:
+            if not grep_matches(bre(marker), text):
+                return step35_fail(f"_step35_smoke: missing '{marker}'", log)
+    n = case["nr_cpus"]
+    if n > 1 and f"[SMP] {n}/{n} configured CPUs online" not in text:
+        return step35_fail(f"_step35_smoke: not all {n} CPUs came online", log)
+    if grep_matches(STEP35_FORBID, text):
+        hit = [ln for ln in text.splitlines()
+               if grep_matches(STEP35_FORBID, ln)][:20]
+        return step35_fail("_step35_smoke: lifecycle diagnostic failure", log, hit)
+    print(f"_step35_smoke: PASS ({case['label']}); log saved to {log}")
+    return 0
+
+
+def step35_case(a: argparse.Namespace) -> dict:
+    return {
+        "log": str(Path(a.log_dir) / f"step35-{a.label}-"
+                  f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.log"),
+        "stdin": {"kind": "sendline", "expect": "# ",
+                  "lines": ["lifetime_stress", "cat /proc/a20/task_lifetime",
+                            "poweroff"]},
+        "timeout": a.timeout,
+        "argv": [a.qemu, *a.qemu_flag, "-kernel", a.kernel,
+                 "-append", STEP35_APPEND],
+        "label": a.label, "nr_cpus": a.nr_cpus,
+        "require_timeout_capacity": a.require_timeout_capacity,
+        "require_smp_runqueue": a.require_smp_runqueue,
+        "require_lock_split": a.require_lock_split,
+    }
+
+
+def step35_main(a: argparse.Namespace) -> int:
+    case = step35_case(a)
+    Path(a.log_dir).mkdir(parents=True, exist_ok=True)
+    if a.print_argv:
+        print(" ".join(qemu_argv(case)))
+        return 0
+    return step35_check(case, run_qemu(case))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("case")
     ap.add_argument("--print-argv", action="store_true",
                     help="print the QEMU argv and exit (for diffing against make)")
     ap.add_argument("--list", action="store_true", help="list case names and exit")
+    ap.add_argument("--label")
+    ap.add_argument("--log-dir")
+    ap.add_argument("--qemu")
+    ap.add_argument("--qemu-flag", action="append", default=[])
+    ap.add_argument("--kernel")
+    ap.add_argument("--timeout")
+    ap.add_argument("--nr-cpus", type=int)
+    ap.add_argument("--require-timeout-capacity", type=int, default=0)
+    ap.add_argument("--require-smp-runqueue", type=int, default=0)
+    ap.add_argument("--require-lock-split", type=int, default=0)
     a = ap.parse_args(argv)
+    if a.case in SUBCOMMANDS:
+        missing = [n for n in ("label", "log_dir", "qemu", "kernel", "timeout")
+                   if getattr(a, n) is None]
+        if missing or a.nr_cpus is None:
+            ap.error("step35 requires --label --log-dir --qemu --kernel "
+                     "--timeout --nr-cpus")
+        return step35_main(a)
     if a.list:
         print("\n".join(sorted(CASES)))
         return 0
