@@ -2546,3 +2546,67 @@ if (pte) {
 加一次性诊断，而不是继续单点猜测。
 
 **riscv64 侧不受影响**：5 架构 + 2 NOMMU 变体构建通过，三个门全通过，审计全 0。
+
+### 10.39 x86_64 崩溃定位：mprotect 只改了一个 PTE，却把整个 VMA 的权限改了
+
+按 §10.38 写的取证方式，在「PTE 已present、但访问被拒」这条分支上一次 dump
+「页表项 + VMA + per-PTE 状态」三者（诊断代码随后已移除）：
+
+```
+[MM-PERM] va=f9374f20 acc=1 pte=800000007eecb425 leaf=1 U=1 W=0
+          vstart=f9354000 vend=f9375000 vflags=13 vpte=467
+          cls=2 prot=1
+```
+
+一次就定性了。把三列并排：
+
+| 来源 | 读 | 写 |
+|---|---|---|
+| PTE（`flags=0x425`） | 有 | **无** |
+| per-PTE 状态（`cls=2`=ANON_MAPPED, `prot=1`=R） | 有 | **无** |
+| VMA（`vpte=0x467`） | 有 | **有** |
+
+**PTE 与状态彼此一致（都只读），只有 VMA 是可写的。** 所以问题不是「谁装错了这一页」，
+而是**有人把 VMA 改成可写、却没有把 PTE 一起改**。`acc=1` 是写访问，落在
+`__copy_tls` 往线程块写的那条路上，于是被正确拒绝 → SIGSEGV。
+
+**机制**（`kernel/mm/mprotect.c` 的页循环）：
+
+```c
+pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+if (pte && (*pte & PTE_V)) {
+    if (level > 0 && (base < v->start || base + size > v->end)) {
+        int dr = mm_demote_huge_page(mm, va);
+        if (dr < 0) return dr;
+        continue;
+    }
+    ... /* 只更新了 *pte 这一个条目 */
+    *pte = replacement;
+    va = base + size;          /* <-- 直接跳过整个 leaf 的其余条目 */
+}
+...
+v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);   /* 整个 VMA 一起改 */
+```
+
+循环体只修改 `pt_lookup_leaf()` 返回的**那一个** leaf 条目，随后 `va = base + size`
+一次跳过该 leaf 的**全部**条目；只要这个大 leaf 完全落在 VMA 内部（不触发降级），
+中间的条目就一个都没被改，而循环外的 `v->pte_flags` 却把**整个 VMA** 的权限改了。
+结果就是观测到的形态：VMA 可写、被跳过的那些页仍是只读。
+
+**为什么 riscv64 上不复现**：那里 `mm_stress` 的 mprotect 区间没有正好套住一个未降级的
+大 leaf（或叶子几何不同），所以每一页都走到了「更新 `*pte`」这一步。这与 §10.33 那个
+「把 riscv64 的 PTE 语义当成通用语义」是同一类错误的另一个面：**只在能跑通的那个平台
+上验证**。
+
+**修法**（未做，需一并处理大 leaf）：循环必须遍历该 leaf 内的**每一个**条目，而不是只改
+第一个。最小且安全的做法是把 `va = base + size` 改成 `va += PAGE_SIZE`（逐页处理），
+或者在 `level > 0` 且 leaf 完整落在 VMA 内时先降级再逐页。当前「不跨界就不降级」的优化
+正是漏洞来源。
+
+**状态**：这是本项目里**第四次**「只在一个架构/一条路径上验证」的教训。前三次分别是
+热页当缺页（§10.8）、脚本 bug 当内核回归（§10.15）、把 riscv64 的 PTE 语义当通用
+（§10.33/§10.36）。共同点是**用单平台、单路径的成功冒充了正确性**。
+
+**当前安全状态**：riscv64 侧不受影响（5 架构 + 2 NOMMU 变体构建通过、三个门全通过、
+审计全 0、状态路径 2836 次缺页正常）。x86_64 崩溃**仍未修**，但已定位到一处确定的
+代码缺陷，而不是一个模糊的症状。
