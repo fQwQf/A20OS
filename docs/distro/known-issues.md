@@ -811,6 +811,32 @@
 - 提示：非 VDSO 架构（riscv32/arm32/loongarch32）都会撞到 `arch_vdso_counter` 声明缺失。
 
 ### x86_64 桌面：lwIP IPv6 收包路径 pbuf 引用计数被破坏
+
+> **当前状态（先读这一段；下面是调查过程，含已被推翻的中间结论）**
+>
+> 1. **找到并修掉了一个真的双重释放**，位置是 **raw socket 接收回调**
+>    （`kernel/net/socket_inet.c` 的 `raw_recv`）：它先 `pbuf_free(p)`，然后
+>    **返回 0**。lwIP 把这个返回值读作"这个包已被吃掉"的标志，**非零**才表示
+>    回调接管了所有权；返回 0 等于宣称自己没动，于是调用方又释放了一次。
+>    `raw_recv` 同时注册在 AF_INET 与 AF_INET6 的 `SOCK_RAW` 上。这是 send 侧
+>    那个已修双重释放的接收侧镜像。
+> 2. **但它是否是本 panic 的触发原因，未证明。** 修掉它不等于解释了这个 panic。
+> 3. **IPv6 专属这个相关性仍未解释。** 唯一能对得上的方向是：同一条路径上
+>    引导期 IPv6 流量（RS/NS/NA/DAD、MLD）的量**远高于** IPv4，足以把一个
+>    潜伏的竞争暴露出来，而 IPv4 负载把它盖住了。**这是解释，不是证明。**
+> 4. **下面"真正的重复释放 vs 相邻缓冲区越界写"这对假设，从来就没有真正
+>    可区分。** 原因是 lwIP 的 memp：它的空闲链表是一条**穿过已释放块的普通
+>    指针链**，所以**一次**双重释放就会让 memp 把同一块内存交给两个活着的
+>    pbuf，此后任何 `ref` 读数都失去意义。这就是两种成因一直分不开的原因，
+>    也意味着**插桩必须找到第一个失衡点，而不是触发断言的那一个**。
+> 5. 下一步：用 `CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 构建以抓**第一个**失衡。
+>    该选项默认关闭（它给每次 pool 操作加一次比较，有成本）。
+>
+> **仍未被推翻的既有事实**：lwIP 除一处有板级保护的 printf 外**未打补丁**；
+> RX 接缝每帧新分配一个单元素 pool pbuf，且 virtio_net 同时夹紧 `pkt_len` 与
+> `used_len`，因此**接缝处一帧的 pbuf 不可能被双重释放**——出问题的那次释放
+> 发生在**更早的包**上。
+
 - 症状：x86_64 桌面起来后约 1 分钟**不确定性地**打死内核，报
   `lwIP assertion failed: pbuf_free: p->ref > 0`；调用链为
   `ip6_input` → `ethernet_input` → `a20_lwip_process_netif_rx_tx_locked`。
@@ -833,13 +859,20 @@
   - `net_packet_rx_defer()` 在自旋锁下 `memcpy` 拷贝帧，不会保留共享 `rx_frame` 指针；
   - vendored lwIP 的重组路径已审：`ip6_reass_free_complete_datagram()` 与
     `ip6_reass()` 完成时的 `pbuf_cat` 链接逻辑均与上游所有权约定一致，未见缺陷。
-- **已判定：是真正的重复释放，不是内存踩坏**。在 `pbuf.c` 里临时记录已释放地址、
-  在重新分配时抹掉记录，并在断言前比对，从而把两种成因分开（`pbuf_free: p->ref > 0`
-  只能证明 `ref == 0`，单看断言无法区分）。x86_64 `NR_CPUS=4` + XFCE 镜像实测输出：
+- **曾判定为"真正的重复释放，不是内存踩坏"——这条判定不成立，见下方"更正"。**
+  当时的做法是在 `pbuf.c` 里临时记录已释放地址、重新分配时抹掉记录，并在断言前
+  比对，从而试图把两种成因分开（`pbuf_free: p->ref > 0` 只能证明 `ref == 0`，
+  单看断言无法区分）。x86_64 `NR_CPUS=4` + XFCE 镜像实测输出：
   ```
   pbufdiag: DOUBLE-FREE 0xffff80000147cba8 type=0 len=0 tot=2 next=0x0
   ```
-  即该地址**确实被释放过**，所以**相邻缓冲区越界写**这条假设可以排除。
+  该地址当时**看起来**确实被释放过。**更正**：这个判据在 memp 的空闲链表
+  语义下是无效的——空闲链表本身就是穿过已释放块的指针链，一次双重释放之后
+  同一块内存会被交给两个活着的 pbuf，于是"这块地址被释放过"对每个 pbuf 都
+  成立，`ref` 也失去意义。**所以这一段插桩没有排除"相邻缓冲区越界写"，也没有
+  证实"真正的重复释放"。当时的结论应当作废。** 当时被排除的"重复释放"候选
+  （`pbuf_remove_header` 内部释放、`ip6_input` 返回非 `ERR_OK`）仍然是有效的
+  排除——它们是逐个读实现否掉的，不依赖上述插桩。
 - 关键线索是被释放的 pbuf 形态：**`len=0` 而 `tot_len=2`**（`type=0 next=0x0`）。
   `len` 归零的来源已确认：vendored lwIP 的 `pbuf_remove_header()` **不释放任何东西**，
   它只把 `payload` 前移并原地减小 `len`/`tot_len`，因此当头部正好等于首个 pool pbuf
@@ -851,9 +884,10 @@
   再被 `ethernet_input()` 的 `if (err != ERR_OK) pbuf_free(p);` 释放一次」。实测
   `ip6_input` 只有 5 个返回点（`ip6.c:535/541/561/581/1119`），**全部是 `ERR_OK`**，
   根本不存在 `ERR_MEM` 出口；因此 `ethernet_input` 那条错误路径对 IPv6 永不触发。
-- 目前**两条最自然的路径都被排除**，重复释放的实际双方还没找到。已确认的事实：
-  `ip6_input` 自身不返回错误；链首 pbuf 可被 `pbuf_remove_header` 吃成 `len=0/next=0x0`；
-  断言触发时 `ref==0` 且该地址确实曾被释放。IPv6 专属这一点仍是最强线索——同一条
+- 目前**两条最自然的 IPv6 内部路径都被排除**（见上），重复释放的实际双方还没找到。
+  已确认的事实：`ip6_input` 自身不返回错误；链首 pbuf 可被 `pbuf_remove_header`
+  吃成 `len=0/next=0x0`；断言触发时 `ref==0`。"该地址确实曾被释放"这一条**不再
+  可用作证据**（见上面的更正）。IPv6 专属这一点仍是最强线索——同一条
   `ethernet_input` 路径的 IPv4 分支从不触发，说明差异在 `ip6_input` 内部而非入口。
 - **已做过一次 `ip6_input` 全量打点（22 处 `pbuf_free`）的实验，结果与预期不同**：
   在 x86_64 `NR_CPUS=4` + XFCE 镜像上捕获到
@@ -872,7 +906,11 @@
   但仅凭地址相邻**不能**下结论（pool 本来就是连续分配），仍需 `p->ref` 与写入点证据。
 - 下一步建议（未做）：把上面的 22 处打点保留，但记录项从「地址」扩展为
   `{地址, p->ref, 释放点行号}`，并且**只在断言真的会触发的那一轮**dump 序列——
-  本次实验说明不崩溃的轮次里重���信息噪声极大。复现需保持 SLAAC 可用。
+  本次实验说明不崩溃的轮次里重复信息噪声极大。复现需保持 SLAAC 可用。
+- **但这套「按地址判重」的路子整体上已经不可用**，原因见顶部第 4 条（memp 的
+  空闲链表穿过已释放块，一次双重释放之后地址判重与 `ref` 都会失真）。
+  正确方向是 `CONFIG_LWIP_MEMP_OVERFLOW_CHECK=1` 抓**第一个**失衡点，而不是继续
+  在触发断言的那一轮里做模式匹配。
 
 ### x86_64 桌面：间歇性 `Failed to set CRTC`（ENOENT），显示起不来
 - 症状：wlroots legacy 后端反复报
@@ -888,8 +926,15 @@
     该 ioctl 在这条链路上根本不被调用；把 GEM_CLOSE 改成 no-op 也不改变现象；
   - **内核与用户态 `drm_mode_crtc` ABI 不一致**：本以为内核 `struct drm_mode_crtc`
     （`set_connectors_ptr`/`count_connectors`/`mode_valid`/`mode`）与 Linux UAPI
-    不同构会导致 `fb_id` 读偏——但用户态 `user/external/mlibc/.../drm.cpp` 走的是
-    `<drm/drm.h>` 里**同一份 vendored 定义**，字段一致，不存在错位。
+    不同构会导致 `fb_id` 读偏。**原先这里给的依据是错的**：它引用
+    `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` 说是"走同一份 vendored
+    定义"，但那个文件**不在 A20OS 构建路径里**——A20OS 用
+    `tools/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，而 `sysdeps/a20`
+    不含任何 DRM 代码。真正的用户态是 **Alpine 的 libdrm**（stock apk，跑在
+    Linux syscall ABI 上），其 `drm_mode_crtc` 就是 Linux UAPI 的那一份。
+    **结论侥幸成立，但依据已更正**；现在这条 ABI 一致性由
+    `tools/check-drm-abi.sh` 门禁按结构体布局逐字段核对，见
+    [graphics/3d-graphics.md §8.1](graphics/3d-graphics.md)。
 - 影响：**这条同时卡住 XWayland 呈现验证与 x86_64 `smp>1` 挂起调查**——两者都需要
   一块真正能出画面的显示器。
 - **已定位根因（插桩实证）**：把 `drm_gem_alloc` / `drm_free_gem` / `addfb` / `setcrtc`
@@ -908,10 +953,17 @@
   或 `GEM_CLOSE`），`drm_free_gem()` 就把那个 GEM 释放了；帧缓冲的 `fb_id` 随之悬空，
   随后 `drmModeSetCrtc` 带着这个 `fb_id` 回来，`drm_find_gem()` 自然找不到 → `-ENOENT`。
   这同时解释了「间歇性」：取决于 destroy 与 setcrtc 的先后。
-- 正确修法（**未做**）：引入真正的 framebuffer 对象（`drm_fb_t`，持有对 GEM 的
-  引用），`ADDFB/ADDFB2` 从独立 id 空间分配 `fb_id`，`RMFB` 释放该引用；GEM 只在
-  「dumb handle 已销毁 **且** framebuffer 引用已释放」时才真正回收。不能只在
-  `destroy_dumb` 上打补丁绕过，那只是把悬空推迟到下一次。
+- 正确修法（**已做**）：引入真正的 framebuffer 对象（`drm_fb_t`，持有对 GEM 的
+  引用），`ADDFB/ADDFB2` 从**独立 id 空间**分配 `fb_id`（`g_fbs[]`，
+  `DRM_MAX_FBS = 64`，`g_fb_next_id` 递增），`RMFB` 释放该引用。同批落地：
+  CRTC 现在真的保存绑定（`g_crtc`，此前 `SETCRTC` 呈现成功并返回 0 却什么都不
+  存，于是 `GETCRTC` 永远报 `fb_id 0`）；`PAGE_FLIP` 不再把 `pf.fb_id` 当 GEM
+  handle 解析（framebuffer id 与 GEM handle 来自两个独立计数器，此前只是碰巧
+  相等才工作）；`GETFB2` 从后备 GEM 应答（此前是一个清零就返回成功的 stub）。
+  `mode_valid` 在 `fb_id == 0` 时**故意保持 1**——它表示"CRTC/connector 这一对
+  已编程了一个 mode"，不是"已绑定 framebuffer"；报 0 会让 wlroots 在 backend
+  init 阶段直接放弃这个 output。
+  不能只在 `destroy_dumb` 上打补丁绕过，那只是把悬空推迟到下一次。
 - 复现要点：必须**关掉 IPv6**（`LWIP_IPV6=0` + `LWIP_ICMP6=0` 等）桌面才活得够久、
   不被 lwIP panic 打断；且 trace 要在同一轮 boot 里同时打四处，跨轮次对比会自相矛盾。
 

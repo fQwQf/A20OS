@@ -46,7 +46,9 @@
 - [drivers/guide/pci-and-virtio.md](drivers/guide/pci-and-virtio.md)：PCI 与 VirtIO 设备的接入方法
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
 - [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu 3D 图形加速栈的原理、内核接口与当前状态清单
-- [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂载的路线图（VIRTGPU UAPI、QEMU 3D 开关、测试矩阵、非目标）
+- [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂上、把像素送上屏的路线图（VIRTGPU UAPI、ABI 门禁、排序论证、非目标）
+- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套——`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_preflight.py`（启动前资源门禁）
+- [graphics/real-hardware-gpu.md](graphics/real-hardware-gpu.md)：真机 GPU 的现实边界：scanout（2–4 周）与 3D 加速（不可行）是两件事，附实测驱动规模与逐 SoC 结论
 - [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：**已完全退役**（描述已删除的 `user/wayland/` 栈），仅供追溯
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
 

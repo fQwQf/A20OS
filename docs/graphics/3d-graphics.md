@@ -25,14 +25,16 @@
 | virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
 | virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
-| **3D 传输通路端到端** | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。见 [gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md) |
+| **3D 传输通路端到端** | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。见 [gpu-3d-roadmap.md §8.1](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
-| 命令流提交 | ⚠️ **往返已验证，语义未验证** | `EXECBUFFER accepted a 16 byte stream` 只证明命令流送到 host 并拿到应答；内核不解析命令流，因此**不证明渲染了任何东西**（[gpu-3d-roadmap.md §4.3](gpu-3d-roadmap.md)） |
-| 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号由内核 `virtgpu_drm.h` 推导并按 `_IOWR` 编码校验过，**未与 legacy `DRM_IOCTL_VIRGL_*` 混淆**（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
-| `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**。根因是宿主 `libvirglrenderer1 1.1.0` 太老（capset 仅 308 字节；现代 virgl 是数 KB），建不出 Mesa 25.2 需要的离屏 desktop GL context。四种 display×EGL 组合均失败，见 [gpu-3d-roadmap.md §4.2](gpu-3d-roadmap.md)。非内核缺陷 |
-| stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用（[gpu-3d-roadmap.md §8](gpu-3d-roadmap.md)） |
-| DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_CREATE`/`OPEN`/`MMAP`/`GET_HANDLE`，`GEM_CLOSE` 真正释放，`MODE_GETFB2`；dumb buffer 复用同一分配器 |
-| 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见 |
+| 命令流提交 | ⚠️ **往返已验证，语义未验证** | `EXECBUFFER accepted a 16 byte stream` 只证明命令流送到 host 并拿到应答；内核不解析命令流，因此**不证明渲染了任何东西**（[gpu-3d-roadmap.md §7](gpu-3d-roadmap.md)） |
+| 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），**未与 legacy `DRM_IOCTL_VIRGL_*` 混淆**（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
+| `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**。根因是宿主 `libvirglrenderer1 1.1.0` 太老（capset 仅 308 字节；现代 virgl 是数 KB），建不出 Mesa 25.2 需要的离屏 desktop GL context。四种 display×EGL 组合均失败，见 [gpu-3d-roadmap.md §5](gpu-3d-roadmap.md)。非内核缺陷 |
+| stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。**宿主 renderer 升级工具已落地但尚未运行**（需要 root + 四个缺失 apt 包），因此这条不得当作已解决（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
+| guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。**即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住**（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
+| DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。**`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念**，见 §8.1 |
+| KMS 对象模型 | ✅ **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
+| 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见。A20OS 无跨进程 VMO 共享、无 mmap-offset 协议，所以这是从零做而不是打补丁 |
 | 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
 | Mesa/virgl 用户态客户端 | ❌ 未挂载验证 | UAPI 已就绪；A20OS 不自建 DRI 驱动，由 stock Mesa 提供（见上一行） |
 
@@ -182,7 +184,7 @@ drvmod 模块以 `-fPIC` 编译，`gpu_ioctl` 若用 `switch` 分发会生成 PI
 `user/cmds/core/gpu3d_test.c` 是验证内核 3D 链路的独立工具，ioctl 号与结构在文件内自包含（不依赖内核头）。它需要 **virgl-capable** 设备（`GPU_3D=1`）：
 
 ```sh
-# 推荐走门禁（见 gpu-3d-roadmap.md §5）
+# 推荐走门禁（见 gpu-3d-roadmap.md §8）
 tools/a20 test smoke-gpu3d-riscv64
 # 实测期望输出：
 #   [GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1
@@ -208,7 +210,7 @@ tools/a20 test smoke-gpu3d-riscv64
 
 还要注意 PASS 那行的自我限定：**它没有提交命令流，资源也没有 backing**，
 所以它证明的是*传输可达性*，不是"渲染成功"。命令流与 backing 见
-[gpu-3d-roadmap.md §4.3–4.4](gpu-3d-roadmap.md)。
+[gpu-3d-roadmap.md §7、§12](gpu-3d-roadmap.md)。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 
@@ -267,7 +269,14 @@ boot 日志应出现：
 | `kernel/drivers/gpu/virtio_gpu.c` | 驱动：feature 协商、capset、3D 命令封装、`gpu_ioctl` 分发 |
 | `kernel/drivers/gpu/drm.c` | DRM `/dev/dri/card0`：KMS + A20 3D 透传 |
 | `kernel/drvmod/framework.c` | drvmod 导出表（含 `copy_from_user/to_user`） |
-| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测 |
+| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-riscv64`） |
+| `user/cmds/core/egl_test.c` | **不参与构建**（被 `user/Makefile` 从 `LOCAL_CMD_SRCS` filter 掉），死代码 |
+| `tools/check-drm-abi.sh` | DRM UAPI 门禁：ioctl 号 + 结构体布局对 Linux UAPI 双向可证伪（§8.1） |
+| `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer ≥ 0.11 构建（**需要 root，尚未运行**） |
+| `tools/a20_preflight.py` | 启动前宿主资源门禁（RAM/负载/磁盘） |
+| `docs/graphics/gpu-3d-roadmap.md` | 路线图与排序论证 |
+| `docs/graphics/real-hardware-gpu.md` | 真机 GPU 的现实边界（scanout vs 3D 加速） |
+| `docs/graphics/host-tools.md` | 上面三个宿主工具的用法 |
 | `user/Makefile` | `gpu3d_test` 编译规则 |
 | `docs/drivers/classes/display.md` | Display 类总文档（2D + 3D 综述） |
 
@@ -293,8 +302,25 @@ boot 日志应出现：
 
 | 缺口 | 为什么需要 | 现状 |
 |---|---|---|
-| `DRM_IOCTL_GEM_CREATE` / `GEM_MMAP`（+ `GEM_FLINK`/`GEM_OPEN`） | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | 未实现（只有 `MODE_CREATE_DUMB`/`MAP_DUMB`，那是给 scanout 的线性缓冲） |
-| render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | **已加**：devfs 现在暴露 `renderD128`（226,128），打开它的 DRM 上下文标记为 render-only（`SET_MASTER` 返回 `-EACCES`，KMS ioctl 本就需要 master）。实测加上后 EGL 能在 Wayland 平台初始化（`EGL driver name: swrast`，且带 `EGL_EXT_image_dma_buf_import`） |
+| 可渲染缓冲的分配 | Mesa/GBM 用它分配「可渲染」缓冲并 mmap 到用户态；没有它 `gbm_bo_create(GBM_BO_USE_RENDERING)` 直接失败 | **Linux UAPI 里没有 `GEM_CREATE`/`GEM_MMAP`**：用户态分配缓冲走 `MODE_CREATE_DUMB`，本分支已实现。命名 handle 用 `GEM_FLINK`（真 UAPI ioctl，8 字节），导入用 `GEM_OPEN`（真 UAPI ioctl）。见 §8.1 |
+| render node `/dev/dri/renderD128` | 没有 DRM master 的普通程序要打开 GPU 只能靠 render node；`EGL_PLATFORM=surfaceless` 也要它 | **已实现**：devfs 暴露 `renderD128`（226,128），打开它的 DRM 上下文标记为 render-only（`SET_MASTER` 返回 `-EACCES`，KMS ioctl 本就需要 master）。实测加上后 EGL 能在 Wayland 平台初始化（`EGL driver name: swrast`，且带 `EGL_EXT_image_dma_buf_import`） |
+| `MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | **已实现并对齐 UAPI**（ioctl 号 `0xc06864ce`，此前是错的 `0xc04864ca`，`drmModeGetFB2` 恒 `EINVAL`；见 §8.1）。内核从后备 GEM 应答，不是一个清零 stub |
+| plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **已实现**（`adeffcb9`）：plane 现在带 `type`(id=2) + `IN_FORMATS`(id=3) 两个属性，IN_FORMATS 指向一个 56B `drm_format_modifier_blob`（header 24B / formats@24 / modifier@32，ARGB8888+XRGB8888、LINEAR）。boot 验证：桌面正常起来（page-flip 正常、xfsettingsd/xfdesktop 都在、**不再** `Failed to create DRM backend`）。注意 wlroots 只在用 GL 渲染器时才**懒读**这个 blob——`WLR_RENDERER=pixman` 下根本不取它，所以本改动对当前桌面零影响。blob 是否被 wlroots/Mesa 正确解析，要等 GL 渲染器链路打通后才能端到端验证。 |
+
+**本仓库没有 vendored 的 Mesa/libdrm/EGL/GBM/wlroots/labwc/Xwayland/XFCE 源码。**
+上面说的"用户态"是 stock Alpine apk world（`packages/world/xfce.world`），
+跑在 Linux syscall ABI（`kernel/abi/linux/syscall_table.def`）之上，经 Linux
+ioctl syscall 访问 `/dev/dri`。两个常见的"用户态 DRM 定义"引用**都不成立**：
+
+- `user/external/mlibc/sysdeps/managarm/generic/drm.cpp` **不在构建路径里**。
+  A20OS 用 `tools/targets-mlibc.mk` 配置 mlibc 的 `sysdeps/a20`，其中没有任何
+  DRM 代码。
+- `user/cmds/core/egl_test.c` 被 `user/Makefile` 从 `LOCAL_CMD_SRCS` 里 filter
+  掉，**不参与构建，是死代码**。不要把它读成"A20OS 有 EGL 自测能力"。
+
+唯一真正的用户态 DRM 定义来源是 Alpine 那份 libdrm 及其安装的
+`<drm/*.h>` UAPI 头——这正是 §8.1 的门禁所比对的基准。
+
 | plane **IN_FORMATS** blob | Mesa 的 DRM 平台用它构造 EGL config 列表；wlroots 也用它取 plane 的格式集 | **已实现**（`adeffcb9`）：plane 现在带 `type`(id=2) + `IN_FORMATS`(id=3) 两个属性，IN_FORMATS 指向一个 56B `drm_format_modifier_blob`（header 24B / formats@24 / modifier@32，ARGB8888+XRGB8888、LINEAR）。boot 验证：桌面正常起来（page-flip 正常、xfsettingsd/xfdesktop 都在、**不再** `Failed to create DRM backend`）。注意 wlroots 只在用 GL 渲染器时才**懒读**这个 blob——`WLR_RENDERER=pixman` 下根本不取它，所以本改动对当前桌面零影响。blob 是否被 wlroots/Mesa 正确解析，要等 GL 渲染器链路打通后才能端到端验证。 |
 
 **IN_FORMATS 四次尝试的二分结论**（关键：触发器不是 blob，而是「plane 报了多于一个属性」）：
@@ -321,7 +347,7 @@ boot 日志应出现：
 - 全流程里 wlroots 唯一未实现的 ioctl 是 `DRM_IOCTL_MODE_CREATE_LEASE`（`0xc6`），它自己会 `falling back to plain open`，非致命。
 - 下一步建议：写个用户态小程序 `drmModeGetPropertyBlob(IN_FORMATS)` + `drmModeGetPlane`，把内核返回的字节与 wlroots/Mesa 的解析逐字段对齐；或先只让 **dumb allocator** 的格式来源自洽（GETPLANE 与 IN_FORMATS 完全一致、并确认 modifier 解析出 XRGB8888+LINEAR），再往上试 GBM。
 | 真正的 dma-buf（PRIME） | 客户端把渲染结果当 `wl_buffer` 交给合成器（`zwp_linux_dmabuf_v1`）；dumb buffer 导不出 dma-buf | `DRM_IOCTL_PRIME_HANDLE_TO_FD` 现在是**把缓冲内容 memcpy 进 memfd** 再返回该 fd（`drm_prime_handle_to_fd`），不是可共享的 dma-buf |
-| `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | 只有 `MODE_GETFB` |
+| `DRM_IOCTL_MODE_GETFB2` | Mesa/合成器导入 framebuffer（XWayland/DRI3 等） | **已实现**（ioctl 号与内核结构体均已对齐 UAPI，见 §8.1）。此前 ioctl 号错误，`drmModeGetFB2` 恒返回 `EINVAL`；再此前它是一个清零 stub |
 
 实测（guest 内 `eglinfo`）：
 
@@ -346,14 +372,25 @@ libEGL warning: egl: failed to create dri2 screen
 
 ### 让 Minecraft 跑起来的顺序
 
+> **本小节已被 §9.11 与 §9.22 推翻并取代，保留原文作为调查过程记录。**
+> 下面这份"顺序"假定卡点在 `GEM_CREATE`/`GEM_MMAP`/render node/`GETFB2`
+> 那条 DRM 链上——这四项**现已全部落地**（见 §8.1），而 Minecraft 依然没有
+> 停在它们上。真正的卡点是**呈现**：XWayland 的窗口不被呈现。现行做法是绕过
+> 它（让 GLFW 选 Wayland 后端），而不是修它。
+
 1. 内核补 `GEM_CREATE`/`GEM_MMAP`（把现有 vmo 暴露成 GEM 对象）+ render node
-   + `MODE_GETFB2`；
+   + `MODE_GETFB2`；  ← **已完成，但清单本身是错的**：`GEM_CREATE`/`GEM_MMAP`
+   不是 Linux UAPI 概念，Linux 用 `MODE_CREATE_DUMB` 分配缓冲（见 §8.1）
 2. 把 PRIME 做成真 dma-buf（或至少让 `kms_swrast` 的 dumb buffer 能被合成器
-   直接采样）；
- 3. 放开 `WLR_RENDERER`，让 wlroots 用 GL 渲染器（llvmpipe 软件渲染先跑通）；
- 4. 再考虑 virgl：host 开 `virtio-gpu-gl-pci`，guest 用 `virtio_gpu_dri.so`；
- 5. 注意 **LWJGL 只提供 x86_64/aarch64 native**，riscv64 实例跑不了 Minecraft
-    （Java 本身可以）。
+   直接采样）；  ← 未完成，且真 dma-buf 在 A20OS 上是**从零做**（无跨进程 VMO
+   共享、无 mmap-offset 协议）
+3. 放开 `WLR_RENDERER`，让 wlroots 用 GL 渲染器（llvmpipe 软件渲染先跑通）；  ← 仍待做
+4. 再考虑 virgl：host 开 `virtio-gpu-gl-pci`，guest 用 `virtio_gpu_dri.so`；  ← 被宿主 renderer 版本挡住
+5. 注意 **LWJGL 只提供 x86_64/aarch64 native**，riscv64 实例跑不了 Minecraft
+     （Java 本身可以）。
+
+现行顺序见 [gpu-3d-roadmap.md §9](gpu-3d-roadmap.md) 与
+[gpu-3d-roadmap.md §9.1](gpu-3d-roadmap.md)（Wayland 绕过）。
 
 ### GBM/EGL 的实测定位（本轮）与一条可能更短的路
 
@@ -391,6 +428,58 @@ libEGL warning: egl: failed to create dri2 screen
   **注意**：这会动到现有 `/sys/class/drm/*` 布局，而 wlroots/libinput 现在依赖它——改之前必须先跑桌面回归，
   别把已经能用的桌面弄坏；而且这只是 GL 链的第一环，后面还有 kms_swrast 建 screen、EGL、真 dma-buf PRIME、
   MODE_GETFB2、以及放开 `WLR_RENDERER`。
+
+### 8.1 本轮查出的 UAPI ABI 缺陷：错的 ioctl 常量是隐形的
+
+**这一节是本文档里最可迁移的内容。** 此前文档把这些缺陷的症状当成 Mesa 或
+libdrm 的问题来推理；它们全部是 A20OS 侧的常量与结构体错误。
+
+`kernel/include/drivers/gpu/drm.h` 把 ioctl 号写成**字面十六进制**（它们落在
+switch 里，不走宏）。于是一个写错的常量**不会报错**：驱动的 switch 匹配不上，
+ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指向 Mesa，
+病灶是一个头文件里的一个字符。** 本仓库的这些号**肉眼核对过**，而肉眼核对
+一次都没有发现它们漂移。
+
+| 项 | A20OS 原值 | Linux UAPI | 后果 |
+|---|---|---|---|
+| `MODE_GETFB2` | `0xc04864ca` | `0xc06864ce` | size 字段与命令号**都**错，`drmModeGetFB2` 恒返回 `EINVAL` |
+| `MODE_RMFB` | `_IOW` | `_IOWR` | `drmModeRmFB` 永不匹配 |
+| `GEM_OPEN` | `0xc0186410` | `0xc010640b` | 永不匹配 |
+| `struct drm_gem_open` | handle 在 offset 8 | handle 在 4、size 在 8 | 每次 `GEM_OPEN` 都从错误字段读 handle |
+| "GEM_GET_HANDLE" | 12 字节结构 | Linux 的 `GEM_FLINK` 是 8 字节 | 结构体大小与 UAPI 不符 |
+| `GEM_MMAP` | `0xc010640b` | **这是 Linux 的 `GEM_OPEN`** | 命名空间撞车：guest 调真 `GEM_OPEN` 被 mmap handler 应答 |
+
+最后一条最严重，因为它**不是笔误而是命名空间撞车**。成因是：
+
+> Linux UAPI 里**根本没有** `GEM_CREATE`、`GEM_MMAP`、`GEM_GET_HANDLE`。
+> 用户态分配缓冲走 `MODE_CREATE_DUMB`；给导入用的 handle 起名走 `GEM_FLINK`。
+> 所以那三个 A20OS 号**没有上游对应物可对齐**，而 A20OS 当时正是"照 Linux 的
+> 样子"猜的号——于是一个私有号落到了真 `GEM_OPEN` 的位置上。
+
+现状：这三个里 `GEM_FLINK` 已作为真 ioctl 实现；仍保留的两个是 **A20 私有**，
+落在 `0x4710` / `0x4711`，不与任何 Linux 号冲突。内核侧实测共 **49 个 DRM
+ioctl**（7 device/auth、5 GEM、2 PRIME、25 KMS、10 VIRTGPU）加一个 16 槽的
+A20 私有号段。
+
+**同时更正一条旧文档的错误结论**：本文件早期版本与旧路线图称 `MODE_GETFB2`
+"已加"，因此"不是空洞"。它是空洞——ioctl 号错了，从来没被命中过。
+
+**门禁**：`tools/check-drm-abi.sh`（用法见
+[host-tools.md](host-tools.md)）。它做两件事，缺一不可：
+
+1. 把 `drm.h` 里的 `DRM_IOCTL_*` 名字抓出来，针对本机
+   `/usr/src/linux-headers-*/include/uapi/drm` **编译探针**打印上游值再逐条比对。
+   **不问编译器就等于重新实现一遍 `_IOWR()`**，而结构体大小正是这里的关键。
+2. 从 `drm.c` 里把结构体定义 **lift 出来**编译并量 `sizeof` / `offsetof`。
+   **正确的 ioctl 号配错误的布局照样静默破坏数据**：libdrm 按 UAPI 说的偏移写
+   字段，驱动按自己那份结构体读，两边都"成功"。
+
+实测：48 个号与 Linux UAPI 一致，1 个无上游对应（`MODE_DPMS`，上游同样没有
+定义）。**两个方向都实测会失败**——扰动 `MODE_RMFB`、从 `drm_mode_fb_cmd`
+删掉一个字段，都会被抓出来。漂移 exit 1，通过 exit 0，没装 Linux 头文件时
+干净地 skip。
+
+---
 
 ## 9. libdrm 设备识别所需的 sysfs 形态（反汇编实证，可直接照做）
 
@@ -1208,3 +1297,22 @@ MC 恰好是 X11 客户端（见 9.21：LWJGL 带的 GLFW 是 X11 构建），�
   `natives/`（libglfw/libopenal/liblwjgl/libjemalloc/... 齐全）、`classpath.txt`。
 - 结合 9.13 的结论（**GBM 不是阻塞项**、Wayland 路径上真实 GL 渲染已跑通），Minecraft 现在的**真正
   卡点**是上面那条「停点」与 glibc-native 类问题，**不是** GEM/dma-buf 那条链。
+
+> **本节的第 1 个方向已被后续工作取代（见 [gpu-3d-roadmap.md §9.1](gpu-3d-roadmap.md)）。**
+> 当时写"给它一个 Wayland 构建的 GLFW（LWJGL 现带的是 X11 版）"是不准确的：
+> 镜像里的 LWJGL 是 **3.3.3**（不是 3.3.6），捆绑的 **GLFW 3.4.0 两个后端都编
+> 进去**，Minecraft 也从不调 `glfwInitHint(GLFW_PLATFORM, ...)`；**没有
+> `GLFW_PLATFORM` 这个环境变量**（3.4.0 与当前 GLFW 都没有，它只是 init hint，
+> 该字符串在镜像那份 `libglfw.so` 中不存在）。
+> 在 hint 留在 `ANY_PLATFORM` 时**环境是唯一杠杆**：`XDG_SESSION_TYPE=wayland`
+> 加 `WAYLAND_DISPLAY` 会在任何探测之前被采纳，否则只要 `DISPLAY` 有值就落到
+> X11。`packages/overlay/xfce/usr/local/bin/minecraft` 现在设置这两个变量，并在
+> 缺少时**大声拒绝启动**（否则 GLFW 会静默退回坏路径）。
+>
+> **XWayland 呈现 bug 本身没有修，是被绕过的。** 上面这条"修 XWayland"的方向
+> 仍然成立、仍然值得做，因为它能根治所有 X11 应用。
+>
+> 另外，本节"Wayland 原生 GL 客户端窗口正常"这条对照现在可以加强：已确认
+> **Wayland 后端不绑定 `zwp_linux_dmabuf_v1`、也不绑定 `wl_drm`**，所以 llvmpipe
+> 走 `wl_shm` 就够；假 connector 1024x768 对 Minecraft 默认的 854x480 也不是
+> 阻塞（GLFW 只拒绝非正尺寸）。
