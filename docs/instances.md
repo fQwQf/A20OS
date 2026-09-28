@@ -11,9 +11,12 @@ A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明�
 ## 快速上手
 
 ```bash
-tools/a20 list                            # 列出所有实例（名称、架构、形态、状态）
+tools/a20 list                            # 列出所有实例（名称、架构、可用动作、状态）
+tools/a20 list --arch riscv64 armv7m      # 只看这些架构
+tools/a20 list --action test              # 只看能跑冒烟的实例
+tools/a20 show vf2-physical                # 这个实例支持什么、要多少资源、会碰什么
 tools/a20 run qemu-riscv64                # 构建并在 QEMU 启动（文本模式）
-tools/a20 run qemu-x86_64-gui             # GUI 实例（virtio-gpu + 声卡）
+tools/a20 run xfce-x86_64                 # 图形桌面实例（apk world，含 virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
 tools/a20 test smoke-riscv64              # 跑一个冒烟测试实例
 tools/a20 flash stm32f103-xuanwu          # 构建固件并经 OpenOCD 烧录开发板
@@ -46,6 +49,9 @@ arch = "riscv64"             # 必填
 完整示例：
 
 ```toml
+# 下面这份清单把**所有**字段集中在一处便于查阅，但一份实例不可能同时用上全部：
+# 被注释掉的行属于互斥组合，另起一份实例即可启用，详见本节末尾的"互斥组合"。
+# 直接复制整段可以通过 `a20 check`。
 name = "qemu-riscv64-gui"
 description = "RISC-V 64 GUI desktop in QEMU with virtio-gpu"
 arch = "riscv64"
@@ -80,7 +86,6 @@ enabled = false              # true = virtio-gpu GUI 启动
 display = "gtk"              # QEMU -display
 audio_driver = "pa"          # QEMU audiodev 后端
 audio_device = "hda"         # hda | virtio
-frame_window = 15            # GUI 冒烟首帧窗口（秒，尚未实现）
 
 [net]
 # 宿主端口转发。不写这一段 = 完全不转发（默认值，见下）
@@ -88,12 +93,11 @@ hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]
 
 [rootfs]
 size_mb = 128                # FAT32 根盘大小
-gui_size_mb = 512            # GUI 根盘大小
 ext4_size_mb = 128
 extra_size_mb = 2048
-world = "base"               # packages/world/<name>.world 必须存在；设置后走 apk 镜像流程
-world_size_mb = 4096         # world 镜像大小（→ PKG_SIZE_MB）
-alpine = true                # world 组装是否引入 Alpine 上游仓库（→ PKG_ALPINE）
+# world = "base"               # packages/world/<name>.world 必须存在；设置后走 apk 镜像流程
+# world_size_mb = 4096         # world 镜像大小（→ PKG_SIZE_MB）
+# alpine = true                # world 组装是否引入 Alpine 上游仓库（→ PKG_ALPINE）
 extra_packages = ["vim", "git", "gcc"]
 drivers = ["virtio-net", "hda"]   # 运行时驱动子集，见下文"组件注册表"
 
@@ -103,27 +107,27 @@ input_delay = 8              # 注入命令前等待秒数，默认 8
 commands = ["syscall_smoke", "poweroff"]  # 启动后经串口注入的命令
 expect = ["SYSCALL_SMOKE: PASS"]          # 日志中必须全部出现的子串
 
-[stm32]                      # 仅 arch = "armv7m"：STM32 板级变体
-flash_kb = 512               # → STM32_FLASH_KB
-ram_kb = 64                  # → STM32_RAM_KB
-xuanwu = true                # 普中玄武板（STM32F103ZET6）
-qemu = true                  # 面向 QEMU stm32vldiscovery 的构建（a20 run 可用）
-bt_name = "KasaneTeto"       # 蓝牙参数（格式约束由 Makefile 校验）
-bt_pin = "2233"
-bt_baud = 38400
-wifi_ssid = "..."            # 可选；留空表示不内置 Wi-Fi 配置
-wifi_password = "..."
+# [stm32]                      # 仅 arch = "armv7m"：STM32 板级变体
+# flash_kb = 512               # → STM32_FLASH_KB
+# ram_kb = 64                  # → STM32_RAM_KB
+# xuanwu = true                # 普中玄武板（STM32F103ZET6）
+# qemu = true                  # 面向 QEMU stm32vldiscovery 的构建（a20 run 可用）
+# bt_name = "KasaneTeto"       # 蓝牙参数（格式约束由 Makefile 校验）
+# bt_pin = "2233"
+# bt_baud = 38400
+# wifi_ssid = "..."            # 可选；留空表示不内置 Wi-Fi 配置
+# wifi_password = "..."
 
-[flash]                      # a20 flash：烧录开发板；tool 必须是已注册后端（见下）
-tool = "openocd"              # components/flash-backends.toml 里的后端名
-interface = "interface/cmsis-dap.cfg"
-transport = "swd"
-adapter_khz = 1000
-serial = ""                  # 可选：CMSIS-DAP 探针序列号（多探针时区分）
+# [flash]                      # a20 flash：烧录开发板；tool 必须是已注册后端（见下）
+# tool = "openocd"              # components/flash-backends.toml 里的后端名
+# interface = "interface/cmsis-dap.cfg"
+# transport = "swd"
+# adapter_khz = 1000
+# serial = ""                  # 可选：CMSIS-DAP 探针序列号（多探针时区分）
 
 [package]                    # a20 package：构建后组装发布产物
 kind = "release"             # grub-iso | uefi-image | fit-sdcard | release
-variant = "..."              # uefi-image: default|text|gui；fit-sdcard: minimal|sdcard|extra
+# variant = "..."              # uefi-image: default|text；fit-sdcard: minimal|sdcard|extra（kind = release 时无意义）
 kernel_out = "kernel-rv"     # 仅 release：产物文件名（缺省按架构惯例）
 disk_out = "disk.img"        # 仅 release
 
@@ -162,9 +166,20 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
-| `target.*` | `TARGET_SERIAL` / `TARGET_BAUD` / `TARGET_RESET_CMD` / `TARGET_BOOT_WAIT` / `TARGET_BOOT_TIMEOUT` / `TARGET_CONSOLE_CHECK` / `TARGET_COMMANDS` / `TARGET_EXPECT` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` / `TARGET_CONSOLE_LOG` |
+| `target.serial` / `boot_media` / `media_device` | `TARGET_SERIAL` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` |
 
-`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。`machine.gpu_3d` → `GPU_3D`，`machine.display_mode` → `DISPLAY_MODE`，`machine.extra_qemu` → `EXTRA_QEMU`（后三者由 Makefile 消费，`EXTRA_QEMU` 并入 `QEMU_FLAGS`，因此 a20 侧不再重复追加）。`target.*` 两侧都用：`TARGET_*` 变量给 make 配方，字段本身给 a20 的控制台状态机。
+`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
+
+`[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）也**不**导出成 make 变量：它们是 a20 自己按 dataclass 驱动的——串口会话、复位脉冲、命令注入和expect 匹配都不经过任何 recipe。这里曾经导出全部 11 个 `TARGET_*`，其中 8 个没有任何 recipe 读取，于是 `a20 show-vars` 会声称 make 拿到了它其实从未见过的配置。少导出无人消费的变量，比多导出更诚实。
+
+`list` 的"可用动作"列不是分类标签，而是**逐条镜像**对应命令里已经存在的拒绝条件
+（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：
+`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在
+`boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令
+就要在这里补上它的条件——这正是这一列的用途。
+
+`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的
+实例）。想看某个动作的全部目标，优先用它，而不是在 46 行里用眼睛找。
 
 ### 各动作的适用条件
 
@@ -185,8 +200,62 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 - `smp > 1` 只允许在已验证的 QEMU virt 平台（riscv64/aarch64/loongarch64/x86_64），否则必须显式 `allow_unverified_smp = true`。
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
-- `nommu`、`ramfs_user`、`driver_deployment` 都有架构白名单，写错会在编译前被拒绝。
+- `nommu`、`ramfs_user` 有架构白名单；`driver_deployment` 是取值枚举（`generic` | `embedded`），写错都会在编译前被拒绝。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
+
+### 互斥组合
+
+上面的完整示例为了查阅方便把字段都摆在一起，但一份实例不会同时用上全部。以下
+组合互斥，校验会在编译前拒绝，所以示例里对应的行是注释掉的：
+
+| 组合 | 原因 |
+| --- | --- |
+| `rootfs.world` ↔ `[test]` | world 镜像走 `run-world` 启动（init chroot 进去），`a20 test` 这条路径不驱动它 |
+| `gui.enabled` ↔ `kernel.bringup` | bringup 只编译内核，没有根文件系统可显示 |
+| `[test]` ↔ `gui.enabled` | 冒烟判定读串口日志，GUI 实例没有可断言的串口会话 |
+| `[stm32]` ↔ 非 `armv7m` 架构 | STM32 段只对 `arch = "armv7m"` 有意义 |
+| `[flash]` ↔ 非 STM32 板 | `tool = "openocd"` 这个后端只覆盖 `stm32f103` 系列板 |
+| `package.variant` ↔ `package.kind = "release"` | release 按架构约定命名产物，没有 variant 概念 |
+
+### `a20 show`：选命令之前先看这一屏
+
+`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"
+——在 46 个实例里挑一个时先问的就是这三个问题：
+
+```text
+$ tools/a20 show vf2-physical
+vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 console/deploy
+  actions     build, run, debug, package, console, deploy
+  board       visionfive2
+  needs       mem 2048 MiB, 1 vCPU, disk 2048 MiB
+  host ports  none (nothing to connect to)
+  console     /dev/ttyUSB0 at 115200 baud
+  boot media  build/vf2-firmware/a20os-sd.img -> /dev/sda
+  expects     A20OS, SMC: System ready, poweroff
+  manifest    .../instances/vf2-physical.toml
+```
+
+`needs` 走的是启动前门控用的同一个 `requirement_for`，所以这里看到的数字就是
+真跑起来时被检查的数字；`actions` 与 `list` 的能力列同源。`boot media` 指向
+`(unset!)` 表示 manifest 写了 `boot_media` 却没给 `media_device`，`deploy` 会被拒绝。
+
+### 退出码
+
+脚本和 CI 会按退出码分支，所以它是契约而不是实现细节：
+
+| 码 | 含义 |
+| --- | --- |
+| 0 | 成功 |
+| 1 | a20 拒绝执行，或实例没通过自己声明的检查 |
+| 2 | 命令行用法错误 |
+| 3 | 被委派的工具失败（make / QEMU / OpenOCD / 辅助脚本） |
+| 124 | 超时 |
+
+被委派工具的退出码**不会**原样透传：make 对"目标不存在"返回 2，若原样透传，
+它就与 a20 自己的用法错误撞在一起，无法区分。
+
+诊断信息一律走 stderr，报告本身走 stdout。于是 `a20 check > 清单.txt` 拿到的是
+通过清单，失败在 `2>错误.txt`，CI 里可以分开处理。
 
 ## 物理目标与上板验证（`[target]`）
 
@@ -225,6 +294,86 @@ pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍
 - `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，
   正是 「产物账本」一节 要消灭的那类东西。
 - 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
+
+## 边角但必要的开关
+
+这些开关平时用不上，但缺了会卡住某类具体场景，所以集中列在这里。
+
+### `--dry-run`：什么都不碰
+
+`run` / `debug` / `test` / `console` / `deploy` / `flash` / `package` 都接受
+`--dry-run`。它的含义是**一个字节都不写出去**：不构建、不启动 QEMU、不开串口、
+不烧录、不写启动介质，只打印将要执行的命令。
+
+```bash
+tools/a20 console vf2-physical --dry-run   # 只打印，不会往在线板子注入命令
+```
+
+这一点对 `console` / `deploy` 尤其重要：它们默认会**真的**往串口那头的板子写
+命令。所以这两个命令的 `--dry-run` 必须在任何字节离开进程之前就返回。
+
+### 资源等待的开关
+
+```bash
+tools/a20 run qemu-riscv64 --no-wait              # 资源不足立刻失败（CI 用）
+tools/a20 run qemu-riscv64 --wait-timeout 120     # 最多等 120 秒
+```
+
+`--no-wait` 适合 CI：排队等资源会让 job 挂到超时，而 CI 想要的恰恰是"立刻说
+清楚缺什么，然后失败"。
+
+### 上板：分开"烧"和"复位"
+
+```bash
+tools/a20 deploy vf2-physical --no-flash   # 不烧 flash，只写介质 + 上板验证
+tools/a20 console vf2-physical --no-reset  # 不复位，直接接当前已启动的板子
+```
+
+`--no-flash` 让你在只改了根文件系统、没动内核时省掉一次烧录。`--no-reset` 让你
+在已经手动起好的板子上做验证，不去碰别人的启动状态。
+
+### `a20 check --require-arch`
+
+默认校验 `instances/` 下的全部实例。改动只影响部分架构时，用它缩小范围：
+
+```bash
+tools/a20 check --require-arch riscv64 aarch64
+```
+
+### `a20 regen-drivers`
+
+`components/drivers.toml` 是驱动注册表的手工来源，`components/drivers.mk` 是它的
+生成物。改了 TOML 必须重新生成，否则 `make check-component-registry` 报 stale。
+
+```bash
+tools/a20 regen-drivers --dry-run   # 只说会不会改，不写
+tools/a20 regen-drivers             # 写
+```
+
+### 同一实例不会被并发跑两遍
+
+`a20 test` 对每个实例持有 `.kernel-build/smoke/<name>.lock`（`flock`）。锁在
+**构建之前**获取，因为两个进程各自把完整内核编译一遍写进同一个 `BUILD_DIR`，
+输的那一方会在几分钟后才发现自己输——而它已经把构建产物搅乱了。
+
+获取锁失败时报 `InstanceBusy`（退出码 1）并指出锁在哪，而不是静默排队等一个
+自己不知道存在的进程。
+
+### 诊断输出只给尾部
+
+会话失败时打印日志的**最后 80 行**而不是全文。一次 `console` 的日志轻易上万行，
+而有用信息通常在末尾：panic、assert、启动失败原因都在那里。
+
+### 谁拥有 QEMU 命令行
+
+**make 拥有每一个 flag。** `$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)` 在 make
+里展开，`tools/qemu.py` 读到这个结果并负责执行（build → verify → exec），
+`a20 run` / `debug` 走的是同一条路。所以启动顺序里不再有 shell 配方，
+而命令行只有一个来源。
+
+`_qemu_argv` 只负责打印这个结果，**因此必须没有前置依赖**：一旦它带上依赖，
+"取一下命令行"就会先把整个世界重新构建一遍。查询命令行要用 `make _qemu_argv`，
+不要加 `-n`——加了会打印出 `printf` 本身，而不是它输出的命令行。
 
 ## 产物账本（`a20 ledger`）
 
@@ -324,6 +473,29 @@ wait timeout     : forever
 - **可用内存必须取 `MemAvailable`，不能取 `free`。** `free` 不算可回收的 page cache，所以在一台其实很空闲的机器上它常常只有几百 MiB（本机就是 365 MiB，而 `MemAvailable` 是 25 GiB）。用 `free` 的门禁会永远等下去。
 - **空闲的 vCPU 不出现在 load average 里。** 所以 load 单独无法判断"另一个 guest 是否已经占住了这台机器想要的 CPU"，并发数因此单独统计（扫 `/proc` 数 `qemu-system-*`，不用 pgrep）。
 
+### 不足时等待，而不是失败
+
+资源不足默认**等待到释放**，不是报错退出。这是有意的选择：一个把 8 个
+guest 排着队跑 CI 的工程师，遇到"第 9 个暂时没内存"时想要的不是一条红字，
+而是"等第 7 个跑完"。默认等待上限因此是 `0`（无限）。
+
+等待期间必须能回答三个问题，所以每次播报都带齐：
+
+- 缺什么（哪一项资源不足）
+- 为什么不足（当前的实测值 vs 需要值）
+- 怎么解除（可执行的 remedy，例如关掉哪个进程、释放哪个实例）
+
+```text
+a20: waiting to run qemu-riscv64 -- host resources are short
+      have/want: mem 10000000 MiB, 1 vCPU, disk 0 MiB
+      blocked:   memory: need 10000000 MiB, available 12859 MiB
+      to proceed: free memory (stop a guest or a build) and retry
+      press Ctrl-C to give up
+```
+
+只在**缺项集合**变化时播报新增项，另有 30 秒心跳，因此一次等待十分钟不会
+刷出六百行。解除后立刻继续，不要求重新敲命令。
+
 `--no-wait` 改为立即失败，`--wait-timeout SEC` 限定等待时长。预算可用环境变量覆盖，CI 机器余量不同不必改代码：
 
 | 变量 | 默认 | 含义 |
@@ -337,7 +509,7 @@ wait timeout     : forever
 
 ## 冒烟测试实例
 
-带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 的流程：构建（bringup → `kernel-only`，否则 `dev-build`）→ 从 `make -n _run_impl` 提取该实例的精确 QEMU 命令行（单一事实来源，不复制 Makefile 逻辑）→ 启动（`machine.extra_qemu` 已并入 `EXTRA_QEMU` 参与该命令行的生成），等待 `input_delay` 秒后经串口注入 `commands` → 在 `timeout` 内等待退出或超时杀掉。
+带 `[test]` 段的实例就是一个冒烟测试。`a20 test` 的流程：构建（bringup → `kernel-only`，否则 `dev-build`）→ 用 `make _qemu_argv` 拿到该实例的精确 QEMU 命令行（该目标无前置依赖，只打印不构建，所以这里不能加 `-n`：加了会打印出 printf 本身而不是它输出的命令行）（单一事实来源，不复制 Makefile 逻辑）→ 启动（`machine.extra_qemu` 已并入 `EXTRA_QEMU` 参与该命令行的生成），等待 `input_delay` 秒后经串口注入 `commands` → 在 `timeout` 内等待退出或超时杀掉。
 
 判定规则与旧的手写冒烟一致：**日志中 `expect` 的全部子串都出现即 PASS**（超时杀掉但日志已齐也算 PASS）；否则 FAIL 并打印日志末尾 80 行。日志保存在 `.kernel-build/smoke/<实例名>.log`。
 
@@ -364,7 +536,7 @@ description = "virtio network device"
 
 实例用 `[rootfs].drivers` 按名字选择进入 `/lib/drivers` 的运行时驱动子集；a20 在编译前校验：名字必须存在、必须支持实例架构、不能是该架构的 early 驱动（early 驱动始终嵌入内核镜像，无需也不能再选）。选定后通过 `DRIVER_SELECTION` 传给 make；不写该字段则按 `tools/driver-modules.mk` 的默认全集打包。
 
-`make check-component-registry`（= `tools/a20 check-registry`）会做两层校验：注册表自身（重名、未知架构、early ⊆ arches、源文件存在），以及与 Makefile 的 `DRVMOD_MODULES`/`EARLY_DRVMOD_MODULES` 按架构逐一比对——两边任何一边漂移都会 FAIL。
+`make check-component-registry`（= `tools/a20 check-registry`）校验两件事：注册表自身（重名、未知架构、early ⊆ arches、early 必须配 generic 部署、源文件存在），以及生成物 `components/drivers.mk` 是否与 `components/drivers.toml` 一致。改完 TOML 要跑 `tools/a20 regen-drivers`（`make regen-driver-fragment`）重新生成，否则这一门禁会报 stale。
 
 ## 烧录后端注册表（components/flash-backends.toml）
 
@@ -392,7 +564,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 | 目标 | 作用 |
 |---|---|
-| `make check-manifests` | 下面三个门禁的聚合入口（CI 的 `manifest-gates` job 调它） |
+| `make check-manifests` | 下面四个门禁的聚合入口（CI 的 `toolchain-gates` job 调它） |
 | `make check-instances` | 校验 `instances/` 全部实例（schema + 语义 + 驱动选择） |
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
