@@ -134,44 +134,35 @@ UBD_SCRATCH_IMG := $(BUILD_DIR)/ubd-scratch.img
 UBD_SCRATCH_BIG := $(BUILD_DIR)/ubd-big.bin
 
 $(UBD_SCRATCH_BIG): FORCE
-	@rm -f $@; \
-	dd if=/dev/zero of=$@ bs=1M count=4 2>/dev/null
-
+	@$(PYTHON) tools/img.py scratch --scratch-kind zeros \
+		--scratch-out "$@" --scratch-mb 4 \
+		--mkfs-fat "$(MKFS_FAT)"
 $(UBD_SCRATCH_IMG): $(UBD_SCRATCH_BIG)
-	@rm -f $@; \
-	dd if=/dev/zero of=$@ bs=1M count=64 2>/dev/null; \
-	$(MKFS_FAT) -F 32 $@; \
-	printf 'A20OS-UBD-MARKER' | dd of=$@ bs=1 seek=4096 conv=notrunc 2>/dev/null; \
-	mcopy -o -i $@ $(UBD_SCRATCH_BIG) ::/big.bin
-
+	@$(PYTHON) tools/img.py scratch --scratch-kind fat-marker \
+		--scratch-out "$@" --scratch-mb 64 \
+		--mkfs-fat "$(MKFS_FAT)" --payload "$(UBD_SCRATCH_BIG)"
 UFS_SCRATCH_IMG := $(BUILD_DIR)/ufs-scratch.img
 
 $(UFS_SCRATCH_IMG): FORCE
-	@rm -f $@; \
-	dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null; \
-	$(MKFS_FAT) -F 32 $@; \
-	printf 'hello-uxfs\n' | mcopy -o -i $@ - ::/hello.txt
-
+	@$(PYTHON) tools/img.py scratch --scratch-kind fat-hello \
+		--scratch-out "$@" --scratch-mb 32 \
+		--mkfs-fat "$(MKFS_FAT)"
 UFS_EXT4_IMG := $(BUILD_DIR)/ufs-ext4.img
 UFS_ISO_IMG  := $(BUILD_DIR)/ufs-iso.img
 UFS_NTFS_IMG := $(BUILD_DIR)/ufs-ntfs.img
 
 $(UFS_EXT4_IMG): FORCE
-	@rm -rf $(BUILD_DIR)/ufs-ext4-staging; mkdir -p $(BUILD_DIR)/ufs-ext4-staging
-	@printf 'hello ext4 user-space\n' > $(BUILD_DIR)/ufs-ext4-staging/hello.txt
-	@rm -f $@; dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
-	mke2fs -q -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index \
-		-d $(BUILD_DIR)/ufs-ext4-staging $@
-	@rm -rf $(BUILD_DIR)/ufs-ext4-staging
-
+	@$(PYTHON) tools/img.py scratch --scratch-kind ext4 \
+		--scratch-out "$@" --scratch-mb 32 \
+		--mkfs-fat "$(MKFS_FAT)"
 $(UFS_ISO_IMG): tools/mkisofs_test.c
 	$(HOST_CC) $(HOST_CFLAGS) $< -o $(BUILD_DIR)/a20-mkisofs-gen
 	$(BUILD_DIR)/a20-mkisofs-gen $@
 
 $(UFS_NTFS_IMG): FORCE
-	@rm -f $@; dd if=/dev/zero of=$@ bs=1M count=32 2>/dev/null
-	mkfs.ntfs -F -Q -L A20NTFS $@ >/dev/null 2>&1
-
+	@$(PYTHON) tools/img.py scratch --scratch-kind ntfs \
+		--scratch-out "$@" --scratch-mb 32 \
+		--mkfs-fat "$(MKFS_FAT)"
 # smoke-native-fs-all：ufsd 全部四种文件系统后端的端到端门禁。
 # 盘位（避开 bus.3/bus.5 的用户驱动预留）：bus.2=fat(1) bus.4=ext4(2)
 # bus.6=iso9660(3) bus.7=ntfs(4)；主存储在 bus.0。
