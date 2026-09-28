@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 from a20_derive import derive_make_vars
-from a20_error import InstanceBusy, ToolError
+from a20_error import EXIT_FAIL, EXIT_OK, InstanceBusy, ToolError
 from a20_instance import Instance
 from a20_make import REPO_ROOT, build_instance
 from a20_resource import Policy, preflight
@@ -32,6 +32,7 @@ SMOKE_LOG_DIR = REPO_ROOT / ".kernel-build" / "smoke"
 DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_INPUT_DELAY_S = 8
 _TERM_GRACE_S = 5.0
+_PROGRESS_HEARTBEAT_S = 15.0
 
 # `make -n` prints the recipe verbatim, but a recursive make prefixes its own
 # "make[N]: " chatter, and the binary may appear after an env prefix.  Anchor on
@@ -150,29 +151,87 @@ def _parse_timeout(text: str | None) -> float:
     return float(m.group(1))
 
 
-def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
-    """Build, boot, inject [test].commands, and grep the log for [test].expect."""
-    if not inst.test.expect:
-        raise SystemExit(f"error: {inst.source}: [test].expect is required for 'a20 test'")
-    build_instance(inst, list(make_args), dry_run)
-    qemu_cmd = _qemu_cmdline(inst)
-    if dry_run:
-        print(shlex.join(qemu_cmd))
-        return 0
+def _progress_read(log: Path, offset: int) -> tuple[str, int]:
+    """Read whatever QEMU has appended to the log since `offset`."""
+    try:
+        with log.open("r", errors="replace") as fh:
+            fh.seek(offset)
+            chunk = fh.read()
+            return chunk, offset + len(chunk)
+    except OSError:
+        return "", offset
 
+
+def _watch(proc: subprocess.Popen[bytes], log: Path, expected: tuple[str, ...],
+           timeout: float, echo, poll: float = 0.25) -> bool:
+    """Wait for the guest, reporting progress.  Returns True if it timed out.
+
+    QEMU's output only ever went to the log file, so a boot that takes four
+    minutes to reach its first marker produced four minutes of a completely
+    silent terminal followed by one PASS or FAIL line.  That is indistinguishable
+    from a hang, and it is the single worst thing about running a smoke.
+
+    So each expected marker is announced the moment it appears, and while
+    nothing has appeared yet a heartbeat says how long this has been going and
+    how much of the log has been written.  Both are cheap: this only reads the
+    log the guest is already writing.
+    """
+    start = time.monotonic()
+    last_beat = start
+    seen: set[str] = set()
+    offset = 0
+    text_so_far = ""
+    while True:
+        rc = proc.poll()
+        now = time.monotonic()
+        if rc is not None:
+            return False
+        if now - start >= timeout:
+            return True
+        chunk, offset = _progress_read(log, offset)
+        if chunk:
+            text_so_far += chunk
+            for pat in expected:
+                if pat not in seen and pat in text_so_far:
+                    seen.add(pat)
+                    echo(f"  [{now - start:5.1f}s] seen: {pat}")
+        if now - last_beat >= _PROGRESS_HEARTBEAT_S:
+            echo(f"  [{now - start:5.1f}s] waiting: {len(seen)}/{len(expected)} "
+                 f"markers, {offset} bytes of guest output so far")
+            last_beat = now
+        time.sleep(poll)
+
+
+def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
+    """Build, boot, inject [test].commands, and check [test].expect."""
+    from a20_error import A20Error
+    if not inst.test.expect:
+        raise A20Error(f"{inst.source}: [test].expect is required for 'a20 test'")
+    expected = tuple(inst.test.expect or ())
     delay = float(inst.test.input_delay) if inst.test.input_delay is not None else DEFAULT_INPUT_DELAY_S
     timeout = _parse_timeout(inst.test.timeout)
     log = SMOKE_LOG_DIR / f"{inst.name}.log"
 
-    # Re-check here, not only before the build.  The first gate can be minutes
-    # and a full kernel build old by the time QEMU starts, and the scarce
-    # resources -- the host ports in particular -- can be taken in between.
-    # This one is the authoritative one; the earlier gate exists to fail fast
-    # rather than to grant permission.
-    preflight(inst, Policy.from_env(), REPO_ROOT, wait=True,
-              echo=lambda m: print(m, flush=True), guest=True)
-
+    # The lock covers the build, not just the run.  It used to be taken after
+    # build_instance, so two runs of one instance -- `make -j`, or two CI jobs
+    # on one runner -- both did the full multi-minute build writing into the
+    # same BUILD_DIR, and only then did the loser discover it was a loser.  The
+    # lock exists to stop exactly that, so it has to be taken first.
     with _exclusive(inst.name):
+        build_instance(inst, list(make_args), dry_run)
+        qemu_cmd = _qemu_cmdline(inst)
+        if dry_run:
+            print(shlex.join(qemu_cmd))
+            return EXIT_OK
+
+        # Re-check here, not only before the build.  The gate above runs before a
+        # build that can take minutes, and the scarce resources -- the host
+        # ports in particular -- can be taken in between.  This is the
+        # authoritative one; the earlier gate exists to fail fast, not to grant
+        # permission.
+        preflight(inst, Policy.from_env(), REPO_ROOT, wait=True,
+                  echo=lambda m: print(m, flush=True), guest=True)
+
         with log.open("wb") as logf:
             proc = subprocess.Popen(
                 qemu_cmd, stdin=subprocess.PIPE, stdout=logf,
@@ -181,25 +240,38 @@ def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
             )
             feeder = threading.Thread(target=_feed_commands, args=(proc, inst, delay), daemon=True)
             feeder.start()
-            timed_out = True
             try:
-                proc.wait(timeout=timeout)
-                timed_out = False
-            except subprocess.TimeoutExpired:
-                _reap(proc)
-            except KeyboardInterrupt:
-                _reap(proc)
-                raise
+                timed_out = _watch(proc, log, expected, timeout,
+                                   echo=lambda m: print(m, flush=True))
             finally:
+                # Reap on *every* exit path.  It used to run only on timeout and
+                # Ctrl-C, so any other exception left QEMU alive holding its
+                # hostfwd ports and its 1-4 GiB -- and because the process was
+                # started in a new session, a SIGKILL of a20 could not reach it
+                # either, while the kernel released the flock immediately.  The
+                # instance then looked free to the next run, which lost the port
+                # race against a guest nobody was tracking any more.
+                if proc.poll() is None:
+                    _reap(proc)
                 with contextlib.suppress(Exception):
                     feeder.join(timeout=1.0)
         text = log.read_text(errors="replace")
 
-    missing = [p for p in inst.test.expect or () if p not in text]
+    missing = [p for p in expected if p not in text]
     if not missing:
         print(f"{inst.name}: PASS; log saved to {log}")
-        return 0
-    outcome = "timeout" if timed_out else f"exited with status {proc.returncode}"
-    print(f"{inst.name}: FAIL ({outcome}); missing patterns: {missing}; tail of {log}:")
+        return EXIT_OK
+    # "exited with status 0" reads as a contradiction next to FAIL: a guest that
+    # powers off cleanly has every right to exit 0, and that is the normal path.
+    # The guest's exit status is secondary to whether the markers appeared.
+    if timed_out:
+        why = f"the guest did not finish within {_parse_timeout(inst.test.timeout):g}s"
+    else:
+        why = f"the guest exited with status {proc.returncode}"
+    print(f"{inst.name}: FAIL -- {len(missing)} of {len(expected)} expected "
+          f"marker(s) never appeared ({why})")
+    for pat in missing:
+        print(f"  missing: {pat}")
+    print(f"  transcript: {log} (last 80 lines below)")
     print("\n".join(text.splitlines()[-80:]))
-    return 1
+    return EXIT_FAIL
