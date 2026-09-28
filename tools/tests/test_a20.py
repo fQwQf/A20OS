@@ -1459,7 +1459,15 @@ class TestTargetSection(unittest.TestCase):
             load(self.tmp, self.BASE + "jtag = true\n")
         self.assertIn("jtag", str(cm.exception))
 
-    def test_derive_maps_every_target_field(self) -> None:
+    def test_derive_emits_only_the_fields_make_consumes(self) -> None:
+        """Only the three [target] fields a makefile reads become TARGET_* vars.
+
+        The other eight are read by no recipe. The console session, the reset
+        pulse, command injection and expect matching are all driven by a20
+        straight from the dataclass, so deriving them told `a20 show-vars` that
+        make had been handed a configuration it never sees -- and the docs then
+        documented that claim as if it were true.
+        """
         got = derived(self.tmp, """
             arch = "riscv64"
             board = "visionfive2"
@@ -1476,15 +1484,30 @@ class TestTargetSection(unittest.TestCase):
             log = ".kernel-build/console/x.log"
         """)
         self.assertEqual(got["TARGET_SERIAL"], "/dev/ttyUSB0")
-        self.assertEqual(got["TARGET_BAUD"], "115200")
-        self.assertEqual(got["TARGET_RESET_CMD"], "openocd -c 'init' -c 'reset run'")
-        self.assertEqual(got["TARGET_BOOT_WAIT"], "4")
-        self.assertEqual(got["TARGET_BOOT_TIMEOUT"], "90s")
-        self.assertEqual(got["TARGET_CONSOLE_CHECK"], "System ready,A20OS")
-        self.assertEqual(got["TARGET_COMMANDS"], "ps poweroff")
-        self.assertEqual(got["TARGET_EXPECT"], "A20OS")
         self.assertEqual(got["TARGET_BOOT_MEDIA"], "build/a.img build/b.img")
-        self.assertEqual(got["TARGET_CONSOLE_LOG"], ".kernel-build/console/x.log")
+        for dead in ("TARGET_BAUD", "TARGET_RESET_CMD", "TARGET_BOOT_WAIT",
+                     "TARGET_BOOT_TIMEOUT", "TARGET_CONSOLE_CHECK",
+                     "TARGET_COMMANDS", "TARGET_EXPECT", "TARGET_CONSOLE_LOG",
+                     "TARGET_MEDIA_DEVICE"):
+            self.assertNotIn(dead, got, f"{dead} is read by no make recipe")
+
+    def test_a_reset_command_never_reaches_make(self) -> None:
+        """The reset command is a20's to run, so it must not cross into make.
+
+        This is the sharp edge of dropping the derivation: make would only ever
+        see the string, never run it, but a reset line *looks* like a command a
+        recipe might one day execute. Keeping it out of the environment means
+        the only thing that can act on it is the code that already shlex-splits
+        and runs it without a shell.
+        """
+        got = derived(self.tmp, """
+            arch = "armv7m"
+            [target]
+            serial = "/dev/ttyUSB0"
+            reset = "openocd -c 'reset run'"
+        """)
+        self.assertNotIn("TARGET_RESET_CMD", got)
+        self.assertFalse([k for k in got if "reset" in k.lower()])
 
     def test_absent_target_emits_no_variables(self) -> None:
         got = derived(self.tmp, 'arch = "riscv64"\n')

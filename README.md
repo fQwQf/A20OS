@@ -79,7 +79,7 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 run
 ```bash
 tools/a20 list                     # 列出所有预定义实例
 tools/a20 run qemu-riscv64         # 等价于 make ARCH=riscv64 run
-tools/a20 run qemu-x86_64-gui      # GUI 实例
+tools/a20 run xfce-x86_64          # 图形桌面实例
 tools/a20 debug qemu-riscv64       # GDB 调试实例
 tools/a20 test smoke-riscv64       # 冒烟测试实例
 ```
