@@ -370,7 +370,7 @@ smoke-smp-lock-contention:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/smp-lock-contention-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/perf\nnet_stress_test\ncat /proc/a20/perf\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'cat /proc/a20/lock_contention\ncat /proc/a20/perf\nnet_stress_test\ncat /proc/a20/perf\ncat /proc/a20/lock_contention\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -380,11 +380,12 @@ smoke-smp-lock-contention:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
-	lwip_total=$$(awk '/^lwip: /{print $$3; exit}' "$$log"); \
-	proc_max=$$(awk '/^proc: /{v=$$4; sub(/^max=/,"",v); print v+0; exit}' "$$log"); \
-	site_acq=$$(awk '/\[lwip\]/{a+=$$3} END{print a+0}' "$$log"); \
-	site_spin=$$(awk '/\[lwip\]/{s+=$$4} END{print s+0}' "$$log"); \
-	site_max=$$(awk '/\[lwip\]/{v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0} END{print m+0}' "$$log"); \
+	proc_split=$$(awk '/^proc: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
+	lwip_total=$$(awk '/^lwip: /{b++; if(b==2){print $$3; exit}}' "$$log"); \
+	proc_max=$$(awk '/^proc: /{b++; if(b==2){v=$$4; sub(/^max=/,"",v); print v+0; exit}}' "$$log"); \
+	site_acq=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)a+=$$3} END{print a+0}' "$$log"); \
+	site_spin=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)s+=$$4} END{print s+0}' "$$log"); \
+	site_max=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2){v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0}} END{print m+0}' "$$log"); \
 	tlb_enters=$$(awk '/^mm_context_enters:/{e=$$2} END{print e+0}' "$$log"); \
 	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
 	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
@@ -396,7 +397,11 @@ smoke-smp-lock-contention:
 	   ! grep -qi 'panic' "$$log"; then \
 		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin column carries real spin data: $$site_spin spins over $$site_acq acquires, lock total $$lwip_total); log saved to $$log"; \
 		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
-		echo "worst single acquire: proc_lock $$proc_max spins, lwip site $$site_max spins"; \
+		echo "worst single acquire (cumulative): proc_lock $$proc_max spins, lwip site $$site_max spins"; \
+		if [ "$$site_acq" -eq 0 ]; then \
+			echo "note: no lwip callsite attribution in the stress window, so the per-site invariant was NOT exercised (it is satisfied vacuously when site_acq is 0)"; \
+		fi; \
+		echo "proc_lock windows -- $$proc_split"; \
 		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
 	else \
 		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
