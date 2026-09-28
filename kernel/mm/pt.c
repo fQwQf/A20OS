@@ -855,17 +855,21 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
  */
 int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
 {
+    /* TEMP (docs 10.49): 0 = refreshed, 1 = declined (no metadata, or the
+     * class is no longer ANON_VIRT so this page is not ours to re-prot).
+     * Previously every no-op also returned 0, so a caller could not tell a
+     * successful refresh from a silently skipped one. */
     if (!table)
         return -EINVAL;
     pt_meta_t *m = mm_pt_meta(table);
     if (!m)
-        return 0;
+        return 1;
     uint8_t *slot = cls_slot(m, idx);
     if (!slot)
-        return 0;
+        return 1;
     uint8_t cls = MM_ST_GET_CLASS(*slot);
     if (cls != MM_ST_ANON_VIRT)
-        return 0;
+        return 1;
     *slot = (uint8_t)((MM_ST_CLS_BYTE(cls) & (uint8_t)~MM_ST_PROT_MASK) |
                       mm_pt_prot_bits(ptef));
     return 0;

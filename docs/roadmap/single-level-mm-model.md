@@ -3158,3 +3158,77 @@ if (cls != MM_ST_ANON_VIRT) return 0;
 
 **默认构建不受影响**：`g_anon_prov_max = 0`，本崩溃只在
 `EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=<n>` 的实验构建下出现。
+
+### 10.49 命中：`vma_file=/bin/mm_stress` 说明这**根本不是**匿名页，COW 才是主线
+
+§10.48 定下的实验（把 `mm_pt_refresh_absent_prot()` 的「没刷成」与「刷成了」区分开，
+返回 1 表示 declined；mprotect 在「放宽到 RW 却 declined」时报 `[MM-DIV]`）**命中了**：
+
+```
+[MM-DIV] widened v[158d51000,158d72000) to RW but status NOT refreshed
+         at va=158d51000 (pte=0)          ... 共 33 次，每页一次
+SIGSEGV: pid=6 code=14 sepc=0x1e2e2 stval=0x158d71f20 abi=0
+[ERR]   vma_file=/bin/mm_stress
+FATAL: pid=6 signal=11 pc=0x1e2e2 comm=mm_stress path=/bin/mm_stress
+```
+
+**相关性是确凿的，不是巧合**：
+
+* `stval=0x158d71f20` 落在 `v[0x158d51000,0x158d72000)` 内，偏移 `0x20f20`，
+  即第 32 页（共 33 页）——**正是该 VMA 的最后一页**，与最后一条 `[MM-DIV]`
+  （`va=158d71000`）对应；
+* `[MM-DIV]` **恰好 33 次**，每个地址一次，`pte=0` 即**当时连叶子表都还不存在**；
+* `code=14` → x86_64 错误码 `0xE` = **present + write + user**，即「该页已映射、可写访问」；
+* **`vma_file=/bin/mm_stress`**——这段 VMA 是**可执行文件自己的文件映射**，不是堆、不是 brk。
+
+#### 这推翻了前八次排查赖以成立的前提
+
+对 **file-backed private** 的 VMA，mprotect **故意**把 PTE 留成只读并置 `PTE_COW`
+（`mprotect.c:120-133`）：
+
+```c
+if ((ptef & PTE_W) && (v->vm_flags & VM_FILE) && !(v->vm_flags & VM_SHARED)) {
+    ...
+    /* Keep the canonical cache page read-only.  The first
+     * store will copy it in handle_cow_fault(). */
+    flags &= ~(uint64_t)(PTE_W | PTE_D);
+    flags |= PTE_COW;
+}
+```
+
+也就是说：**「可写 VMA 之下压着一张只读 PTE」在这种 VMA 上是设计上的正确状态**，
+等第一次写时由 `handle_cow_fault()` 收尾。
+
+于是 §10.45(a) 那个守卫——「mprotect 放宽到 RW 后，VMA 里若存在已映射只读页就报警」——
+**量的是错的东西**：对文件私有 COW 段，这种情况本来就该发生，守卫理应静默。
+把它的静默读成「mprotect 无关」，是把**符合设计的行为误判成了缺陷**。§10.47、
+§10.48 建立在该结论上的推理也随之失效。
+
+另外，§10.39 读到的 `cls=2 (MM_ST_ANON_MAPPED)` 同样是假象：`mm_pt_query()` 在
+`MM_ST_GET_CLASS(byte) == MM_ST_INVALID` 时会**凭空合成** `MM_ST_ANON_MAPPED`
+（`pt.c:1097`），所以一个**没有状态记录的文件页**读回来就是 `ANON_MAPPED`。
+「这是匿名页」这个判断，从一开始就是查询函数伪造出来的。
+
+#### 真正的问题因此变成一句话
+
+> **写故障落在了文件私有 COW 段的最后一页上，而 `handle_cow_fault()` 没有接手，
+> 直接变成了致命 SIGSEGV。**
+
+这与前面八次假设**完全不同类**：不是「权限被谁改坏」，而是**COW 收尾路径没被走到**。
+
+而 `[MM-DIV]` 给出的 `pte=0` 正是关键线索：**mprotect 走这一段时，这些页连叶子表都还没有**，
+所以 mprotect 的「已映射」分支（含上面那段置 `PTE_COW` 的代码）**一次都没执行**。
+这些页后来是由**缺页路径**装上去的。**因此真正的缺陷极可能是：
+`PTE_COW` 只在 mprotect 的已映射分支里被设置，而由缺页路径首次装帧的文件私有页
+没有带上 COW 标记**——于是它的第一次写永远等不到 `handle_cow_fault()`，直接致命。
+
+**下一步（明确、单点、可验证）**：读 `handle_cow_fault()` 的触发条件，确认它靠什么识别
+「这是一次需要 COW 的写故障」（是查 `PTE_COW` 位，还是查 VMA 的 `VM_FILE && !VM_SHARED`），
+再检查**缺页安装**文件私有页的那条路径有没有置 `PTE_COW`。若缺，就补上——这既是最小修复，
+也正好解释了为什么前八次全错：它们都在查「只读 PTE 从哪来」，而答案是「**它本来就该
+是只读的**，错的是它永远等不到 COW 收尾」。
+
+**本节诊断为临时插桩，结论确定后应移除**（`kernel/mm/pt.c` 与 `kernel/mm/mprotect.c`）。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、三个门全通过、关机审计全 0
+（含 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
