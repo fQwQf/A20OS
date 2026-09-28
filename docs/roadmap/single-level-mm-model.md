@@ -432,24 +432,62 @@ fork 有两处状态继承必须重置，否则子进程会用着带父锁状态
 审计 `pt_pages=10 entries=2560 missing_meta=0` 且 present/absent/prot/cow/vma 全 0，
 无 panic、无看门狗中止。
 
-### 8.10 P5 的死锁机制已定位到具体指令（比 §8.7 的第 4 项更精确）
+### 8.10 更正：§8.9 之后对 P5 死锁机制的错误定位（已推翻）
 
-§8.7 记录了"摘锁后持页表锁的 CPU 妨碍远端 TLB IPI"，但当时未定位到确切成因。现已
-逐层核实，机制如下：
+本节先前一版把 §8.7 第 4 项的死锁定位为「MCS 页表锁在持有 IRQ 关闭的
+`mm->lock` 时取得，等待者继承中断关闭状态、无法接收 TLB IPI」。**该定位是错的**，
+现予更正，以免后续工作建立在错误根因上。
 
-* `mcs_lock()`（`mm/pt.c:90`）自身**不关中断**——自旋体只是
-  `while (!me->locked) arch_cpu_relax();`。
-* 但 MCS 锁是在**持有 `mm->lock`（IRQ-关闭自旋锁）时**获取的，因此等待者**继承
-  了中断关闭状态**，无法接收 IPI。
-* 发起方 `x86_64_smp_remote_tlb_flush()`（`x86_64/platform/smp.c:221`）发送 IPI
-  后，若自己中断是关的会**临时打开本地中断**再等 ack，5 秒超时即
-  `panic("x86_64 remote TLB shootdown timed out")`。
-* 目标方 `x86_64_ipi_tlb_flush_handler()` **不取任何锁**，只需 IPI 被投递。
+错误原因：把 `spin_lock(&mm->lock)` 当成了关中断自旋锁。实际实现里
+`spin_lock` → `spin_lock_at`（`core/lock.h`）**不碰中断状态**——函数体内唯一的
+`arch_irqs_enabled()` 出现在死锁诊断的 backtrace 打印里。只有
+`spin_lock_irqsave` 才调用 `arch_local_irq_disable()`。因此 fault 路径
+（`spin_lock(&mm->lock)`）持锁期间中断仍然是开的，**能够**接收并响应 TLB IPI，
+不构成 IPI 投递阻塞。
 
-即死锁环：CPU A 持 `mm->lock` 及若干 MCS 页表锁并派发 shootdown；CPU B 自旋在
-A 持有的页表锁上、中断关闭、收不到 IPI；A 等到 5 秒超时 panic。
+已在当前分支核实的两条事实：
 
-**关键推论：摘掉 `mm->lock` 本身并不能解决问题。** 只要"持有页表锁时会阻塞 IPI
-投递"这一条件还在，换一把锁去持有并无区别——真正的决策点是 MCS 页表锁的自旋
-能否在中断打开的情况下进行。这把 P5 的实现从"挪走一把锁"变成"必须重定义页表写者
-互斥的中断语义"，因此需要一次显式设计决策而非局部改动（§8.7 结论的加强版）。
+* **shootdown 已经在 `mm->lock` 之外发起。** 例如 `mprotect.c:154-158` 与
+  `fault.c` 的 COW 路径都是 `mm_tlb_invalidate_begin` → `spin_lock_irqsave` →
+  改写 → `spin_unlock_irqrestore` → `mm_tlb_invalidate_finish`，即派发 IPI 时
+  `mm->lock` 已释放。所以「持 `mm->lock` 派发 shootdown」这一环在本分支不存在。
+* **MCS 页表锁确实存在**（`kernel/mm/pt.c`，约 31KB，含 `mcs_lock`/`mcs_unlock`/
+  cursor），且确实在 fault 路径持有 `mm->lock` 期间取得——但如上，持有者中断是
+  开的，仍可响应 IPI，故不构成 §8.9 所述的阻塞环。
+
+**残留的真实风险**（与 §8.7 第 4 项那次 panic 仍可能相关，但机制不同）：任何
+`spin_lock_irqsave(&mm->lock)` 的写者临界区（`mmap`/`munmap`/`mprotect` 等）都
+关中断。若 TLB IPI 恰好落在该窗口，目标 CPU 无法 ack，发起方 5 秒后 panic。
+在 KVM 下该窗口可被宿主调度任意拉长，看起来就像 hang——这与已修复的 MCS 看门狗
+「幽灵死锁」属同一类（那次修复只覆盖 MCS 自旋，不覆盖 `spin_lock_irqsave` 窗口）。
+
+**对 §8.7 结论的修正**：「必须同时重建 TLB 事务边界」这一条**不再成立为硬前提**。
+先前把它列为硬前提，是因为误以为 fault 路径持锁期间关中断。实际不关中断，
+IPI 投递不被阻塞，因此 P5 摘 `mm->lock` 并不会**因此**制造新的 TLB-IPI 死锁。
+P5 仍须满足的硬性要求收敛为：装 PTE 的互斥单元（cursor/MCS 锁）不得跨越
+`mm_tlb_invalidate_finish`／`mm_tlb_shootdown_page` 的派发与等待。
+
+§8.7 第 4 项那次 panic 的确切根因仍未定案——需要当时的 diff 才能确认，不能靠重构
+推理断定。如实记录为未决。
+
+### 8.11 异步 generation 方案在 x86_64 上不可用（已核实）
+
+评估「不阻塞等 ack、只递增 generation 让各 CPU 惰性 flush」这一备选方案时，
+核实到一条决定性事实：
+
+`ARCH_MM_CONTEXT_ALLOC` **只有 riscv64 覆盖**（`arch/riscv64/include/arch.h:16`
+→ `riscv64_asid_alloc()`），其余架构走 `core/arch.h:82` 的默认 `0U`。已确认
+`kernel/arch/x86_64/` 下没有任何地方把 `arch_asid` 置为非零，故 x86_64 上恒为 0。
+
+而 `mm_context_enter` 里的惰性 generation 校正循环被 `if (mm->arch_asid && ...)`
+整个门控。**x86_64 上该循环从不执行**：`tlb_cpu_generation[cpu]` 只在发起方完成
+同步 shootdown 之后被写入（`vm.c` 内 flush 收尾处），从不用于修复。
+
+后果：x86_64 上没有惰性兜底。若把 shootdown 改成不阻塞，发起方写入
+`tlb_cpu_generation[cpu] = generation` 就是一句**假话**（记录某 CPU 已丢弃某代，
+而它并未 flush），且没有读者去纠正，陈旧翻译**永久化**——`munmap` 后同址
+`re-mmap` 会把旧映射的数据交给新映射；更糟的是延迟回收会在 shootdown 尚未真正
+完成时释放数据帧，而远端 CPU 仍可能经由该帧翻译。
+
+因此：**x86_64 必须保留同步阻塞 shootdown**，异步 generation 方案仅在有 ASID 的
+riscv64 上才谈得上安全。基准与死锁复现都在 x86_64，故该方案出局。
