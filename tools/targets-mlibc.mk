@@ -139,9 +139,10 @@ mlibc-sbase: $(MLIBC_SBASE_BINS)
 # Copy the sbase-on-mlibc tools into the FAT32 rootfs.  Used by the smoke
 # target below and useful on its own after a dev-build.
 mlibc-sbase-rootfs: mlibc-sbase
-	$(foreach t,$(MLIBC_SBASE_TOOLS),\
-		mcopy -o -i $(FAT32_IMG) $(NATIVE_BUILD_DIR)/mlibc-$(t) ::/mlibc-$(t);)
-	mcopy -o -i $(FAT32_IMG) user/tests/test_mlibc_sbase.sh ::/test-mlibc-sbase.sh
+	@$(PYTHON) tools/img.py sbase-rootfs \
+		--fat32-img "$(FAT32_IMG)" \
+		--native-build-dir "$(NATIVE_BUILD_DIR)" \
+		--tools "$(MLIBC_SBASE_TOOLS)"
 
 smoke-mlibc-sbase:
 	$(PYTHON) tools/smoke.py smoke-mlibc-sbase
