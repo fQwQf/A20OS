@@ -67,6 +67,27 @@ def to_temp(label: str, committed: str, out_name: str,
         return 1
 
 
+def kallsyms(a) -> int:
+    """Run gen_kallsyms.py, falling back to an empty stub if it cannot run.
+
+    Both branches succeeded, so this never fails the build: the recipe it
+    replaces was an if/else that always exited 0.  Only the generator's exit
+    status was consulted -- the original never checked that the output file
+    existed on the success path, so neither does this.
+    """
+    out = REPO / a.out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run([sys.executable, a.generator, a.elf, str(out)],
+                       cwd=REPO, check=False)
+    if r.returncode == 0:
+        # Print the path as given; the recipe echoed `$@`, not the resolved path.
+        print(f"  KALLSYMS {a.out}")
+    else:
+        print("  KALLSYMS skipped (configured Python unavailable)")
+        out.write_text("/* empty */\n")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -83,10 +104,17 @@ def main() -> int:
     ovl.add_argument("--out-name", default="rootfs_overlay.h")
     ovl.add_argument("generator", nargs=argparse.REMAINDER)
 
+    kal = sub.add_parser("kallsyms", help="gen_kallsyms.py, stub on failure")
+    kal.add_argument("--generator", default="tools/gen_kallsyms.py")
+    kal.add_argument("--elf", required=True)
+    kal.add_argument("--out", required=True)
+
     a = ap.parse_args()
     if a.cmd == "envelope-coverage":
         return in_place(a.label, a.file,
                         [sys.executable, "tools/gen_envelope_coverage.py"])
+    if a.cmd == "kallsyms":
+        return kallsyms(a)
     # REMAINDER keeps the `--` separator itself; passing it on would make
     # subprocess try to exec it as the program.
     argv = a.generator[1:] if a.generator[:1] == ["--"] else a.generator

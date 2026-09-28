@@ -97,13 +97,8 @@ $(KERNEL_NOSYMS_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
 
 $(KALLSYMS_SRC): $(KERNEL_NOSYMS_ELF) tools/gen_kallsyms.py
-	@mkdir -p $(dir $@)
-	@if $(PYTHON) tools/gen_kallsyms.py $< $@; then \
-	    echo "  KALLSYMS $@"; \
-	else \
-	    echo "  KALLSYMS skipped (configured Python unavailable)"; \
-	    echo '/* empty */' > $@; \
-	fi
+	@$(PYTHON) tools/gensync.py kallsyms \
+		--elf "$<" --out "$@"
 
 $(KALLSYMS_OBJ): $(KALLSYMS_SRC)
 	@mkdir -p $(dir $@)
