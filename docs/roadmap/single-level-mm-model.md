@@ -1598,3 +1598,58 @@ seal 区间，所以 `safe=0` 是**跑过之后**的一致性结果，不是「�
 验证：5 个架构与 3 个 NOMMU 变体构建通过；`smoke-mm-stress`、
 `smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过，审计全 0（含新增的 `safe=0`），
 `pt_pages=6` 不变。
+
+### 10.21 状态缺页路径：查询修复 + UFFD 门控（默认仍然关闭）
+
+两处改动，**默认配置下是 no-op**：
+
+1. `mm_cursor_query()` 对**缺失**叶子不再直接返回而把 `cls_out` 留在 `INVALID`——它现在
+   报告元数据里记下的 class。这正是 §10.6 判定「路径从未执行」的那一行。
+2. fault.c 状态路径加 `MM_SAFE_UFFD` 门：该项若被 userfaultfd 注册，**必须**回落到
+   VMA 路径停靠给 handler，不能就地满足。辅助接口 `mm_cursor_safe_test()` 让调用方在
+   已持有覆盖节点锁的情况下问「这一项是不是被注册了」，不必再下降一次。
+
+**为什么现在可以安全地打开这条路径**（对照 §10.7 列的三条绕过）：
+
+* *绕过 userfaultfd* → 已由 `MM_SAFE_UFFD` 挡住，且该位会写到「已预留未缺页」的项上
+  （class 是 `ANON_VIRT` 而非 `INVALID`，所以 `mm_pt_safe_set()` 不会拒）。
+* *绕过 `VM_SHARED`* → 天然不成立：状态路径只接受 class `ANON_VIRT`，而共享映射的
+  class 是 `MM_ST_ANON_SHARED` / `MM_ST_FILE_SHARED`，永远不是 `ANON_VIRT`。
+* *绕过 fault-around* → 天然不成立：状态路径一次只映射一页，根本不做 fault-around。
+
+**默认关闭的原因正是预标记默认关闭**：没有 `ANON_VIRT` 项，状态路径就永远不会命中。
+实测 `a20.anonprov=0`（默认）：`mm_anon_provisioned=0`、`mm_fault_from_status=0`、
+`mm_anon_faults=672`、`mm_demand_faults=1484`，mm_stress PASS，**无 FATAL**。
+
+**打开时确实会崩——(b) 依然存在**。`a20.anonprov=4096`：
+
+```
+mm_demand_faults      1484
+mm_anon_faults         672
+mm_fault_from_status      0     <- 关闭时
+a20.anonprov=4096:  FATAL, mm_stress 未通过
+```
+
+崩溃签名（`a20.anonprov=4096`，稳定复现）：
+
+```
+[FAULT-VA] stval=0x807000
+  leaf: base=0x807000 pa=0xffde4000 pfn=523748 flags=0x7 refs=1
+  page_words: 00000000 00000000 00000000 00000000
+  va_words:   全 0
+  mm: brk=0x808000 start_brk=0x806000 stack=[0x3ff3d000,0x3ff5d000)
+  vma=[0x807000,0x808000) flags=0x13 pte_flags=0xd7 file_fd=-1 off=0x1000
+  regs: a0=0x806000 a1=0x1000   status=0x200004020
+```
+
+**尚未解释的疑点**：出错的页在转储里是**已映射且 `flags=0x7`（RWX）**，内容全 0，但
+CPU 仍在它上面 fault（`status` 低位指向取指/访问类异常）。「PTE 看起来可访问却仍 fault」
+本身是矛盾的，所以要么转储读到的 PTE 不是 fault 当时的状态，要么存在另一条使该映射
+无效的路径。**根因未定位**，需要继续查；在定位之前不得把预标记默认打开。
+
+另注：brk VMA 上的 `off=0x1000` 对匿名堆来说没有意义（brk 段的 `vm_pgoff` 应当为 0），
+也是一个待解释的异常。
+
+验证：riscv64 / x86_64 / aarch64 构建通过；`smoke-mm-stress`、
+`smoke-mm-fork-exec-race` 通过，审计全 0（含 `safe=0`），`pt_pages=6` 不变；
+默认配置下 `mm_fault_from_status` 为 0，行为与改动前完全一致。

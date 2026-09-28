@@ -1032,6 +1032,20 @@ int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
     return 0;
 }
 
+/* Test a per-entry safety bit through a cursor, honouring the cursor's span.
+ * Lets a caller that already holds the covering node's lock ask "is this
+ * entry userfaultfd-registered / fault-around-suppressed" without descending
+ * a second time. */
+int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
+{
+    if (!cur || !flags || !cursor_span_ok(cur, addr))
+        return 0;
+    pte_t *table = cursor_leaf_table(cur);
+    if (!table)
+        return 0;
+    return mm_pt_safe_test(table, 0, arch_pt_vpn(addr, 0), flags);
+}
+
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
                     paddr_t *pa_out)
 {
@@ -1054,7 +1068,19 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         return 1;
     }
 #endif
-    if (!(pte & PTE_V) || !arch_pte_is_leaf(pte))
+    if (!(pte & PTE_V)) {
+        /* An absent leaf is not "no information".  For a range that
+         * mm_pt_provision_anon() reserved at mmap time it is exactly the
+         * PrivateAnon state a status-driven fault is meant to act on, so the
+         * recorded class (and the permissions the fault will install) must be
+         * reported.  Still return 0: that means "not currently mapped", which
+         * is still true, and the caller distinguishes the two. */
+        uint8_t byte = mm_pt_peek(table, 0, idx);
+        if (cls_out && MM_ST_GET_CLASS(byte) != MM_ST_INVALID)
+            *cls_out = byte;
+        return 0;
+    }
+    if (!arch_pte_is_leaf(pte))
         return 0;
 
     /* The metadata is authoritative for the class; the PTE is authoritative
