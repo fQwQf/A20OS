@@ -23,7 +23,7 @@ A20OS 同时面向三类场景，对调度器有相互冲突的要求：
 普通任务 `t` 每运行 `dt` 个 tick，按权重累加虚拟运行时间：
 
 ```text
-vruntime += dt * NICE0_LOAD / weight
+vruntime += dt * EEVDF_NICE0_LOAD / weight
 ```
 
 `weight` 来自 nice（`sched_prio_to_weight[]`，低 nice 权重高）。权重高的任务 vruntime 增长慢，因此"理应"获得更多 CPU。这修复了旧调度器里nice/weight 纯装饰的问题。
@@ -33,7 +33,7 @@ vruntime += dt * NICE0_LOAD / weight
 每个 CPU 的 runqueue 维护系统虚拟时间 `vtime`。当前实现的分母是仍排队的 EEVDF 任务权重和，不包含正在运行的当前任务：
 
 ```text
-vtime += dt * NICE0_LOAD / queued_eevdf_weight
+vtime += dt * EEVDF_NICE0_LOAD / queued_eevdf_weight
 ```
 
 只有当队列里仍有 EEVDF 任务时 `vtime` 才推进。任务 `t` 满足以下条件时属于优先候选（eligible）：
@@ -49,20 +49,20 @@ vruntime <= vtime
 每个任务有虚拟截止时间：
 
 ```text
-vslice = base_slice * NICE0_LOAD / weight
+vslice = base_slice * EEVDF_NICE0_LOAD / weight
 deadline = vruntime + vslice
 ```
 
-**选择规则：队列已按 deadline 升序排列，picker 从头扫描并选择第一个 eligible 任务；若没有 eligible 任务，则以队首的最早 deadline 保证进展。** `vslice` 较小会形成更早 deadline，而资格门控和按权 vruntime 共同约束长期份额。
+**选择规则：EEVDF 类按虚拟截止时间组织成随机化二叉搜索树（treap），`picker` 从根开始下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务；若没有 eligible 任务，则回退到 `eevdf_first`（最早 deadline）以保证进展。** `vslice` 较小会形成更早 deadline，而资格门控和按权 vruntime 共同约束长期份额。
 
 ### 2.4 调度类层次
 
 | 类 | 队列 | 语义 |
 | --- | --- | --- |
 | RT（`SCHED_FIFO`/`SCHED_RR`） | 级 0 | 固定优先级 1..99，不记账 vruntime，永远先于 EEVDF 类 |
-| EEVDF（`SCHED_NORMAL`/`BATCH`/`IDLE`） | 级 1 | 按"最早资格虚拟截止时间"排序的链表 |
+| EEVDF（`SCHED_NORMAL`/`BATCH`/`IDLE`） | 级 1 | 按"最早资格虚拟截止时间"排序的 treap |
 
-runqueue bitmap 只选择非空的级 0 或级 1；级 0 内部再线性扫描，选择数值更高的 RT priority。因级 0 总在级 1 前处理，RT 恒优先于 EEVDF。
+级 0 内部是每优先级一条 FIFO 链表加一张 `rt_bitmap`，取最高非空优先级为 O(1)（位扫描），不再全队列线性扫描。因级 0 总在级 1 前处理，RT 恒优先于 EEVDF。
 
 ## 3. 记账与切换
 
@@ -76,22 +76,30 @@ runqueue bitmap 只选择非空的级 0 或级 1；级 0 内部再线性扫描�
 
 ## 4. 数据结构和锁
 
-每个 CPU 一个 `proc_runq_t`，EEVDF 类是一个**按 deadline 升序**的双向链表：
+每个 CPU 一个 `proc_runq_t`，EEVDF 类是一棵按 deadline 排序的随机化二叉搜索树（treap），每个节点增广 `min_vruntime`：
 
 ```c
 typedef struct proc_runq {
     spinlock_t lock;
-    task_t *head[SCHED_LEVELS];   /* 级 0 = RT，级 1 = EEVDF */
-    task_t *tail[SCHED_LEVELS];
-    uint32_t bitmap;
+    /* 级 0：RT，每优先级一条 FIFO + 位图 */
+    struct { task_t *head; task_t *tail; } rt_q[RT_PRI_LEVELS];
+    uint32_t rt_bitmap[RT_BITMAP_WORDS];
+    /* 级 1：EEVDF treap，按最早虚拟截止时间排序 */
+    eevdf_node_t *eevdf_root;
+    task_t *eevdf_first;       /* 缓存的最早 deadline 任务 */
+    task_t *eevdf_last;        /* 缓存的最晚 deadline 任务（窃取目标）*/
     unsigned nr_running;
-    uint64_t eevdf_vtime;         /* 系统虚拟时间 */
-    uint64_t eevdf_weight;        /* 排队中的 EEVDF 任务权重和 */
+    uint64_t eevdf_vtime;      /* 系统虚拟时间 */
+    uint64_t eevdf_weight;     /* 排队中的 EEVDF 任务权重和 */
     ...
 } proc_runq_t;
 ```
 
-插入 O(n)（按 deadline）；队首 eligible 时选择为 O(1)，否则 picker 线性扫描，最坏 O(n)。无 eligible 时也要先扫描完整列表，随后复用队首作为 fallback。选中后 `on_rq -> dispatching -> on_cpu`所有权交接与旧实现一致（见 process-scheduler.md §1.2），本地 picker 仍只持本 CPU 的 runqueue 锁，迁移仍按 CPU 编号升序加锁。
+节点本身是内嵌在 `task_t` 里的侵入式 `eevdf_node_t`（`left/right/parent/min_vruntime/heap_prio`，见 `kernel/include/proc/proc.h`）。
+
+复杂度：插入与删除 O(log n)（treap 平衡 + 旋转后重算增广）；选择 O(log n)，因为 `eevdf_pick_eligible_locked()` 只下降进入 `min_vruntime <= vtime` 的子树，代价是树高而非队列长度；级 0 取最高优先级为 O(1)。无 eligible 任务时下降到底直接返回空，调用方回退到缓存的 `eevdf_first`，这一步是 O(1)。选中后 `on_rq -> dispatching -> on_cpu` 所有权交接与旧实现一致（见 process-scheduler.md §1.2），本地 picker 仍只持本 CPU 的 runqueue 锁，迁移仍按 CPU 编号升序加锁。
+
+> 早期实现是按 deadline 排序的双向链表，插入 O(n)、选择最坏 O(n)。`3d830fba` 将其换成上述 treap；本页此前未同步，已在本次修订中更正。
 
 ## 5. SMP 负载均衡：空闲窃取
 
@@ -149,6 +157,7 @@ echo 50 > /proc/a20/sched_base_slice # 更大的虚拟 deadline slice
 ## 10. 相关源码
 
 - `kernel/proc/sched.c`：EEVDF 记账、资格、选择、窃取、RT 类；
-- `kernel/proc/proc_internal.h`：nice→weight 表、EEVDF 常量；
+- `kernel/proc/proc_internal.h`：nice→weight 表（`sched_prio_to_weight[]`）；
+- `kernel/proc/sched.c`：`EEVDF_NICE0_LOAD`、`EEVDF_MAX_LAG` 等 EEVDF 常量；
 - `kernel/include/proc/proc.h`：`task_t` 的 vruntime/deadline 字段；
 - `kernel/fs/procfs/procfs.c`、`procfs_render.c`：时间片旋钮的可读写文件。
