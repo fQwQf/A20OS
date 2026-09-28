@@ -14,42 +14,24 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 
 
 $(FS_TEST_IMG): $(FAT32_IMG)
-	cp $(FAT32_IMG) $(FS_TEST_IMG)
+	@$(PYTHON) tools/img.py copy --src "$(FAT32_IMG)" --dst "$(FS_TEST_IMG)"
 
 .PHONY: ext4_img_only ext4_img
 
 ext4_img_only: $(EXT4_IMG)
 
-# Recursive gates can overlap builds that share BUILD_DIR.  Keep staging private
-# to each invocation and publish the image atomically while holding one lock.
 $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
-	@set -e; \
-	echo "Building ext4 image..."; \
-	mkdir -p "$(BUILD_DIR)"; \
-	lock="$(EXT4_IMG).lock"; \
-	exec 9>"$$lock"; \
-	flock 9; \
-	staging=$$(mktemp -d "$(EXT4_STAGING_DIR).XXXXXX"); \
-	tmp="$(EXT4_IMG).tmp.$$$$"; \
-	trap 'rm -rf -- "$$staging"; rm -f -- "$$tmp"' EXIT HUP INT TERM; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		cp "$$f" "$$staging/$$(basename "$$f")"; \
-	done; \
-	cp "$(USER_BUILD_DIR)/mksh" "$$staging/sh"; \
-	cp "$(USER_BUILD_DIR)/mksh" "$$staging/bash"; \
-	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > "$$staging/test.txt"; \
-	mkdir -p "$$staging/etc"; \
-	printf '%s\n' $(PROTOCOLS_LINES) > "$$staging/etc/protocols"; \
-	printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > "$$staging/etc/os-release"; \
-	dd if=/dev/zero of="$$tmp" bs=1048576 count=$(EXT4_IMAGE_MB); \
-	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d "$$staging" "$$tmp"; \
-	mv -f "$$tmp" "$(EXT4_IMG)"; \
-	rm -rf -- "$$staging"; \
-	trap - EXIT HUP INT TERM
+	@echo "Building ext4 image..."
+	@$(PYTHON) tools/img.py ext4 \
+		--ext4-img "$(EXT4_IMG)" --ext4-mb "$(EXT4_IMAGE_MB)" \
+		--ext4-staging-dir "$(EXT4_STAGING_DIR)" \
+		--mkfs-ext4 "$(MKFS_EXT4)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
 
 ext4_img: $(USER_BUILD_STAMP) ext4_img_only
-	cp $(EXT4_IMG) $(FS_TEST_IMG)
+	@$(PYTHON) tools/img.py copy --src "$(EXT4_IMG)" --dst "$(FS_TEST_IMG)"
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -85,19 +67,12 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot
 # otherwise make's timestamp graph can leave a bootable but stale userspace in
 # place after interrupted or manually-invoked sub-builds.
 $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER_BUILD_STAMP)
-	@set -e; \
-	tmp=$$(mktemp); \
-	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
-	cmp -s "$$tmp" "$(USER_BUILD_DIR)/init" || { \
-		echo "[VBOX] stale /init detected; rebuilding root filesystem"; \
-		rm -f $(FAT32_IMG); \
-		$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) \
-			NOMMU=$(NOMMU) OPT="$(OPT)" $(FAT32_IMG); \
-		mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
-		cmp -s "$$tmp" "$(USER_BUILD_DIR)/init"; \
-	}; \
-	touch $@
+	@$(PYTHON) tools/img.py verify-vbox \
+		--fat32-img "$(FAT32_IMG)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--stamp "$@" \
+		--arch "$(ARCH)" --board "$(BOARD)" --abi "$(ABI)" \
+		--bringup "$(BRINGUP)" --nommu "$(NOMMU)" --opt="$(OPT)"
 
 $(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/mk_uefi_fat_image.sh
 	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
