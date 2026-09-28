@@ -12,20 +12,25 @@
 /*
  * SysV message queues.
  *
- * Linux msgid64_ds wire layout (riscv64/loongarch64 shared):
- *   struct msqid64_ds {
- *     struct ipc_perm msq_perm;   // 48 bytes (64-bit perm layout)
- *     unsigned long msq_stime;    // 8
- *     unsigned long msq_rtime;    // 8
- *     unsigned long msq_ctime;    // 8
- *     unsigned long msg_cbytes;   // 8
- *     unsigned long msg_qnum;     // 8
- *     unsigned long msg_qbytes;   // 8
- *     unsigned long msg_lspid;    // 4 (+4 pad)
- *     unsigned long msg_lrpid;    // 4
- *   }                                  => 96 bytes total
- * The 64-bit ipc_perm layout is: key(4) uid(4) gid(4) cuid(4) cgid(4) mode(4)
- * seq(4) __pad1(4) __unused1(8) __unused2(8) = 48 bytes.
+ * Reply layout for IPC_STAT/MSG_STAT, matching musl and glibc `struct
+ * msqid_ds` on LP64 (48 + 8*6 + 4 + 4 + 8*2 = 120 bytes):
+ *   struct ipc_perm msg_perm;    // 48  key(4) uid(4) gid(4) cuid(4) cgid(4)
+ *                               //     mode(4) seq(4) pad(4) unused1(8) unused2(8)
+ *   time_t msg_stime;            // 48
+ *   time_t msg_rtime;            // 56
+ *   time_t msg_ctime;            // 64
+ *   unsigned long msg_cbytes;    // 72
+ *   msgqnum_t msg_qnum;          // 80  int in musl, so 4 bytes of pad follow
+ *   msglen_t msg_qbytes;         // 88
+ *   pid_t msg_lspid;             // 96
+ *   pid_t msg_lrpid;             // 100
+ *   unsigned long __unused[2];   // 104
+ *                              => 120 bytes total
+ *
+ * The trailing msg_lspid/msg_lrpid/__unused belong to the userspace layout and
+ * have to be written, or at minimum explicitly zeroed: a short reply does not
+ * fail, it just leaves those fields holding whatever the caller's buffer
+ * already contained, so the bug is invisible from the kernel side.
  */
 
 #define IPC_CREAT   01000
@@ -59,6 +64,22 @@ typedef struct {
     unsigned long unused1;
     unsigned long unused2;
 } sysv_ipc_perm64_t;
+
+/* Userspace-visible reply for IPC_STAT/MSG_STAT.  qnum is held in an
+ * 8-byte slot rather than an int so that the struct matches musl's
+ * int-plus-4-bytes-of-padding at offset 80 without depending on how the
+ * compiler happens to pad it. */
+typedef struct {
+    sysv_ipc_perm64_t msg_perm;
+    long stime, rtime, ctime;
+    unsigned long cbytes;
+    unsigned long qnum;
+    unsigned long qbytes;
+    int lspid, lrpid;
+    unsigned long unused[2];
+} sysv_msqid_ds_t;
+
+STATIC_ASSERT(sizeof(sysv_msqid_ds_t) == 120, msqid_ds_matches_libc);
 
 /* Kernel-side message node. */
 typedef struct sysv_msg_node {
@@ -362,6 +383,13 @@ long sysv_msg_recv(int msqid, void *msgp, size_t msgsz, int64_t msgtyp,
 
 int sysv_msg_control(int msqid, int cmd, void *arg)
 {
+    /* shmctl and semctl both strip this.  musl's IPC_CMD() leaves the bit
+     * clear on every 64-bit target here (its wrappers pass cmd straight
+     * through, which the built libc confirms), so this is currently a no-op --
+     * it is here so all three ctl paths agree and so a 32-bit target with
+     * 64-bit time_t cannot reach the default: arm and return -EINVAL. */
+    cmd &= ~IPC_64_BIT;
+
     uint64_t flags = spin_lock_irqsave(&g_msg_lock);
     sysv_msg_queue_t *q = msg_valid_locked(msqid) ? &g_msg[msqid] : NULL;
     if (!q) {
@@ -386,23 +414,23 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
     case IPC_STAT:
     case MSG_STAT:
     case MSG_STAT_ANY: {
-        /* 96-byte msqid64_ds layout. */
-        char ds[96];
-        memset(ds, 0, sizeof(ds));
-        sysv_ipc_perm64_t *perm = (sysv_ipc_perm64_t *)ds;
-        *perm = q->perm;
-        ((unsigned long *)(ds + 48))[0] = q->stime;
-        ((unsigned long *)(ds + 56))[0] = q->rtime;
-        ((unsigned long *)(ds + 64))[0] = q->ctime;
-        ((unsigned long *)(ds + 72))[0] = q->cbytes;
-        ((unsigned long *)(ds + 80))[0] = q->qnum;
-        ((unsigned long *)(ds + 88))[0] = q->qbytes;
+        sysv_msqid_ds_t ds;
+        memset(&ds, 0, sizeof(ds));
+        ds.msg_perm = q->perm;
+        ds.stime = q->stime;
+        ds.rtime = q->rtime;
+        ds.ctime = q->ctime;
+        ds.cbytes = q->cbytes;
+        ds.qnum = q->qnum;
+        ds.qbytes = q->qbytes;
+        ds.lspid = q->lspid;
+        ds.lrpid = q->lrpid;
         if (cmd != IPC_STAT) {
             /* MSG_STAT returns the id; the caller passes the seq in arg. */
             r = msqid;
         }
         spin_unlock_irqrestore(&g_msg_lock, flags);
-        if (arg && copy_to_user(arg, ds, sizeof(ds)) < 0)
+        if (arg && copy_to_user(arg, &ds, sizeof(ds)) < 0)
             return -EFAULT;
         return r;
     }
@@ -411,9 +439,9 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
             spin_unlock_irqrestore(&g_msg_lock, flags);
             return -EINVAL;
         }
-        char ds[96];
+        sysv_msqid_ds_t ds;
         spin_unlock_irqrestore(&g_msg_lock, flags);
-        if (copy_from_user(ds, arg, sizeof(ds)) < 0)
+        if (copy_from_user(&ds, arg, sizeof(ds)) < 0)
             return -EFAULT;
         flags = spin_lock_irqsave(&g_msg_lock);
         q = msg_valid_locked(msqid) ? &g_msg[msqid] : NULL;
@@ -421,10 +449,9 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
             spin_unlock_irqrestore(&g_msg_lock, flags);
             return -EINVAL;
         }
-        sysv_ipc_perm64_t *perm = (sysv_ipc_perm64_t *)ds;
-        q->perm.uid = perm->uid;
-        q->perm.gid = perm->gid;
-        q->perm.mode = perm->mode;
+        q->perm.uid = ds.msg_perm.uid;
+        q->perm.gid = ds.msg_perm.gid;
+        q->perm.mode = ds.msg_perm.mode;
         q->ctime = timer_get_ticks();
         break;
     }
