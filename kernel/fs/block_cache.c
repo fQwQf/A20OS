@@ -800,6 +800,17 @@ static int pcache_flush_run(bcache_t *bc, pcache_entry_t *first)
 
 static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
     int quarantined = bcache_write_quarantined(bc);
+    /* A single pass can come up empty even with a pool full of unreferenced
+     * valid pages: a valid entry whose `accessed` bit is set is skipped, and
+     * the skip *clears* that bit, so the page only becomes a candidate on a
+     * later pass.  Under memory pressure every mapped page is hot, so one
+     * pass walks the whole LRU clearing `accessed` and then returns NULL --
+     * exactly the "valid=2000 referenced=0 yet no evictable page" report in
+     * docs 10.64, whose diagnostic never counted `accessed`.  Retry while we
+     * are still making that kind of progress; the bound stops a pool whose
+     * pages are continuously re-accessed from spinning here. */
+    for (int pass = 0; pass < 4; pass++) {
+        int cleared_accessed = 0;
     pcache_entry_t *e = bc->page_lru_tail.prev;
     while (e != &bc->page_lru_head) {
         if (cache_ref_read(&e->ref) == 0) {
@@ -815,6 +826,7 @@ static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
                     !(quarantined && e->dirty)) {
                     if (e->accessed) {
                         e->accessed = 0;
+                        cleared_accessed = 1;
                         pcache_bucket_unlock_irqrestore(bc, e->page_no, bf);
                         e = e->prev;
                         continue;
@@ -834,6 +846,11 @@ static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
             return e;
         }
         e = e->prev;
+    }
+        /* Nothing evicted, but we did demote hot pages: they are
+         * candidates now, so another pass can succeed. */
+        if (!cleared_accessed)
+            break;
     }
     return NULL;
 }
