@@ -3017,3 +3017,71 @@ leaf 覆盖时是 `if (r > 0) { mm_cursor_unlock(&cur); continue; }`——**只�
 **riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
 `smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
 状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.47 根因定位：`mm_pt_provision_anon()` 遇到已存在的 PTE 时直接跳过
+
+读完 §10.46 留下的那条唯一未读路径后，**崩溃的根因找到了**（`kernel/mm/pt.c:1000-1005`）：
+
+```c
+for (vaddr_t va = lo; va < hi; va += PAGE_SIZE) {
+    int idx = arch_pt_vpn(va, 0);
+    if (table[idx] & PTE_V)
+        continue;               /* a fault won the race; already mapped */
+    pt_note_present_meta(m, idx, byte);
+    marked++;
+}
+```
+
+**这个 `continue` 在真正的并发竞争下是无害的**（同一段 VMA 刚被 fault 装帧，VMA 与 PTE
+本来就该一致），**但在「目标地址上已经存在一张更早的、属于别的映射的 PTE」时是有害的**：
+
+* 旧的那张**只读** PTE 被原样留下（`continue` 之前没有任何改写）；
+* 旧的状态字节也被原样留下（`pt_note_present_meta()` 根本没被调用）；
+* 而**新建的 VMA** 已经带着自己的 `pte_flags`（可写）插进了 `mm`——三个调用点
+  （`mmap.c:197` / `elf.c:183` / `munmap.c:275`）都是在 `mm_insert_vma()` **之后**才调
+  预标记的，所以 VMA 是这段地址上**更新的、更权威**的那一份声明。
+
+于是结果就是**一张只读的残留 PTE 压在可写的 VMA 之下**——正是 §10.45 认定的唯一真实
+分叉，也正是 §10.43 邻域观测的形状：**33 页 VMA 里只有出错那一页已映射，其余 32 页
+`pte=0`**（新 VMA 是全新的，本来该一片空白；那孤零零的一页就是残留）。
+
+同一函数里 `if (r > 0)`（被更大的 leaf 覆盖）分支也是 `mm_cursor_unlock(&cur); continue;`
+——同样只解锁跳过、不做任何处理，属同一族的漏处理。
+
+**七次猜测全部落空、而这一条一次命中，根因就在于前七次都在猜「谁把权限改坏了」，但
+真相是「**没有人改权限，是一张旧 PTE 从头到尾没被让位**」。** 两者在现象上完全一样
+（PTE 只读 / VMA 可写），但在代码上分别属于「写」和「漏写」两族——前七次全在查写，
+自然全查不到。这也解释了 §10.45(a) 的守卫为什么 0 命中：mprotect 确实没留下
+「已映射只读页」，因为那张只读页**根本不是 mprotect 留下的**。
+
+#### 修法（尚未实施，需要先定一个语义问题）
+
+直觉修法是「遇到已存在的 leaf 且权限与新 VMA 不一致时，把 PTE 的权限位改写成新 VMA 的
+`flags` 并做 TLB 失效」。**但这里有一个不能靠直觉决定的安全问题**：若那张残留 PTE 是
+**文件映射**（file-backed），保留它的 frame 会把文件内容泄漏进本应匿名的区域——而这正是
+`elf.c` 里 `anon` 参数的注释所警告过的同一类问题：
+
+> *Provisioning such a range made the fault path hand out anonymous zero pages instead of
+> file content and killed exec with SIGSEGV, so the call site decides.*
+
+所以三个语义选项，风险差别很大，**不应由排查过程单方面决定**：
+
+| 选项 | 做法 | 风险 |
+|---|---|---|
+| **A. 改权限** | 保留 frame，只把 PTE 权限位与状态改写为新 VMA 的 `flags` | 最小改动；但若残留 PTE 是文件映射，会把文件内容暴露给匿名写者——**安全问题，不可默认采用** |
+| **B. 先回收再建 VMA** | 在新建 VMA 之前，先把该地址范围上仍存在的 PTE 全部反映射（`mm_cursor_unmap` 已可用） | 语义最干净（残留映射理应消失）；改动面最大，涉及 mmap/brk/ELF 三个创建点 |
+| **C. 检测并拒绝** | 发现权限不一致就返回失败，让 mmap/brk/ELF 报错而不是静默继承 | 最安全、绝不引入信息泄漏；但会让某些原本「能跑」的映射开始失败 |
+
+**推荐 B**：它修的是「VMA 生命周期与页表不同步」这个真正的病根，而不是掩盖症状；且
+`mm_cursor_unmap()` 已经能正确清除 PTE 与状态（含预标记未 fault 的分支），可复用。
+但 B 会改变 mmap/brk/ELF 的行为，需确认「在这些创建点之前，该地址范围上存在 PTE」本身
+是否就属非法状态——若属非法，正确做法可能反而是 C。
+
+**排查到此结束**：根因已定位到具体的三行代码与它所处的语义问题。实施哪种修法需要先回答
+「目标地址上已有 PTE 时，正确的行为是什么」，这个问题不该在连续七次猜错之后、由一次
+仓促的收尾来决定。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。默认 `g_anon_prov_max=0`，
+该路径在默认构建下不激活。
