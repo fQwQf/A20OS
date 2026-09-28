@@ -1057,6 +1057,17 @@ files = [
     "docs/OS-Design.md",
 ]
 
+
+# These three architectures must REFUSE a NOMMU build.  make rejects them in
+# its variable-validation stage, so this needs no cross toolchain.
+[[gate.assertion]]
+build_must_fail = { arch = "loongarch64", target = "kernel-only" }
+
+[[gate.assertion]]
+build_must_fail = { arch = "x86_64", target = "kernel-only" }
+
+[[gate.assertion]]
+build_must_fail = { arch = "ppc64le", target = "kernel-only" }
 [[gate]]
 name = "check-doc-drift"
 make_target = "check-doc-drift"

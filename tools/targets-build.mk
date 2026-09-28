@@ -197,12 +197,6 @@ check-build-matrix-all: check-kernel-build-all check-user-build-all
 
 check-arch-boundary: smoke-arch-mmu-matrix
 	@$(PYTHON) tools/gates.py check-arch-boundary
-	@for arch in loongarch64 x86_64 ppc64le; do \
-		if $(MAKE) -s ARCH=$$arch NOMMU=1 kernel-only >/dev/null 2>&1; then \
-			echo "check-arch-boundary: unsupported NOMMU build accepted for $$arch"; \
-			exit 1; \
-		fi; \
-	done
 	@echo "check-arch-boundary: PASS"
 
 check-task-state-boundary:

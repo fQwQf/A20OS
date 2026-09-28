@@ -54,6 +54,23 @@ def expand(files: list[str]) -> list[str]:
     return out
 
 
+def _run_build_must_fail(a: dict) -> tuple[bool, str]:
+    """Assert that `make ARCH=<arch> NOMMU=1 <target>` is REJECTED.
+
+    The polarity is inverted on purpose: these architectures must refuse a
+    NOMMU build, so a zero exit status is the failure.  make rejects them in its
+    variable-validation stage (Makefile:115), before invoking a compiler, so no
+    cross toolchain is needed to run this.
+    """
+    spec = a["build_must_fail"]
+    r = subprocess.run(["make", "-s", f"ARCH={spec['arch']}", "NOMMU=1",
+                        spec["target"]], cwd=REPO, check=False,
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return False, (f"unsupported NOMMU build accepted for {spec['arch']}")
+    return True, ""
+
+
 def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     """Return (ok, detail).  detail is empty when ok.
 
@@ -65,6 +82,8 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     """
     if a.get("exists"):
         return _run_exists(a)
+    if a.get("build_must_fail"):
+        return _run_build_must_fail(a)
 
     argv = ["rg", "-q", *a.get("rg_flags", ())]
     if a.get("fixed"):
