@@ -7,6 +7,7 @@
 
 #include "fs/procfs.h"
 #include "fs/procfs_internal.h"
+#include "mm/pt.h"
 #include "core/klog.h"
 #include "core/panic.h"
 #include "core/perf.h"
@@ -112,6 +113,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "pidmap") == 0) return PF_SYS_KERNEL_PIDMAP;
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
+    if (strcmp(name, "anonprov") == 0) return PF_A20_ANONPROV;
     if (strcmp(name, "sched_base_slice") == 0) return PF_A20_SCHED_BASE_SLICE;
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
@@ -456,6 +458,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
         child = new_entry(name, PF_A20_IOMMU, 0);
         type = PF_A20_IOMMU;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "anonprov") == 0) {
+        child = new_entry(name, PF_A20_ANONPROV, 0);
+        type = PF_A20_ANONPROV;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
@@ -818,6 +823,17 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
                     : linux_kernel_set_domainname(buf, n);
         return r < 0 ? r : (int)count;
     }
+    if (p->type == PF_A20_ANONPROV) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        int value = atoi(tmp);
+        if (value < 0 || value > 65536)
+            return -EINVAL;
+        int r = mm_pt_set_anon_prov_max((uint32_t)value);
+        return r < 0 ? r : (int)count;
+    }
     if (p->type == PF_A20_SCHED_BASE_SLICE) {
         char tmp[32];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -1046,7 +1062,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
-        "driver_lifecycle", "objects", "iommu", NULL
+        "anonprov", "driver_lifecycle", "objects", "iommu", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
