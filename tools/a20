@@ -309,11 +309,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         build_instance(inst, list(args.make_args), args.dry_run)
     if inst.target.boot_media:
         if args.dry_run:
-            print(f"would write {list(inst.target.boot_media)} to {inst.target.media_device}")
+            print(f"would write {' '.join(inst.target.boot_media)} "
+                  f"to {inst.target.media_device}")
         else:
-            rc = exec_make(inst, "target-write-media", [], args.dry_run)
-            if rc != 0:
-                return rc
+            # exec_make raises on failure, so there is no status to check. The
+            # `rc = ...; if rc != 0` that used to be here bound None, compared
+            # unequal to 0, and returned None -- an accidental exit code 0 that
+            # hid the fact this goal was the one call site dropping make args.
+            exec_make(inst, "target-write-media", list(args.make_args), args.dry_run)
     return cmd_console(args)
 
 
