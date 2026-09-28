@@ -18,13 +18,12 @@
 #define UART_POLL_INTERVAL_TICKS (TICKS_PER_SEC / 20)
 #endif
 
-// 接收缓冲区大小
 #define RX_BUF_SIZE 256
 
 // 接收缓冲区（环形缓冲区）
 static volatile char rx_buffer[RX_BUF_SIZE];
-static volatile uint32_t rx_head;  // 缓冲区头指针
-static volatile uint32_t rx_tail;  // 缓冲区尾指针
+static volatile uint32_t rx_head;
+static volatile uint32_t rx_tail;
 /* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid.
  * Ctrl-C path holds rx_lock while calling proc_find_get()/proc_kill().
  * All other paths must not acquire additional locks while holding rx_lock. */
@@ -109,7 +108,6 @@ static void uart_rx_push(char c) {
         return;
     }
 
-    /* LOCK_ORDER: acquire rx_lock to push a character into the RX ring. */
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
     uint64_t flags = spin_lock_irqsave(&rx_lock);
@@ -130,20 +128,17 @@ void uart_receive_char(char c) {
 
 static int uart_irq_wrapper(int irq, void *priv);
 
-// 初始化 UART 设备
 void uart_init(void) {
     rx_head = 0;
     rx_tail = 0;
     tty_foreground_pgid = 0;
-    /* LOCK_ORDER: initialize rx_lock before any UART paths run. */
     spin_init(&rx_lock);
     wait_queue_init(&rx_waiters);
     arch_uart_init();
-    uart_flush();  // 等待发送完成
+    uart_flush();
     request_irq(UART0_IRQ, uart_irq_wrapper, 0, NULL);
 }
 
-// 发送一个字符
 void uart_putc(char c) {
     arch_uart_putc(c);
 }
@@ -151,7 +146,6 @@ void uart_putc(char c) {
 // 阻塞式读取一个字符（如果没有数据则让出 CPU）
 int uart_getc(void) {
     for (;;) {
-        /* LOCK_ORDER: acquire rx_lock to consume a buffered character. */
         uint64_t flags = spin_lock_irqsave(&rx_lock);
         if (rx_head != rx_tail) {
             char c = rx_buffer[rx_tail];
@@ -222,7 +216,6 @@ int uart_getc(void) {
 
 // 非阻塞式尝试读取一个字符
 int uart_try_getc(void) {
-    /* LOCK_ORDER: acquire rx_lock for non-blocking character read. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     if (rx_head == rx_tail) {
         spin_unlock_irqrestore(&rx_lock, flags);
@@ -238,14 +231,12 @@ int uart_try_getc(void) {
     return (int)(unsigned char)c;
 }
 
-// 检查是否有输入数据
 int uart_has_input(void) {
 #ifdef CONFIG_BOARD_VISIONFIVE2
     int polled = arch_uart_poll_getc();
     if (polled >= 0)
         uart_rx_push((char)polled);
 #endif
-    /* LOCK_ORDER: acquire rx_lock to test RX ring non-empty. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int has = rx_head != rx_tail;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -256,18 +247,15 @@ wait_queue_t *uart_read_wait_queue(void) {
     return &rx_waiters;
 }
 
-// 发送字符串
 void uart_puts(const char *s) {
     while (*s) uart_putc(*s++);
 }
 
-// 等待发送完成
 void uart_flush(void) {
     arch_uart_flush();
 }
 
 int uart_get_foreground_pgid(void) {
-    /* LOCK_ORDER: acquire rx_lock to read tty_foreground_pgid. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int pgid = tty_foreground_pgid;
     spin_unlock_irqrestore(&rx_lock, flags);
@@ -277,13 +265,11 @@ int uart_get_foreground_pgid(void) {
 void uart_set_foreground_pgid(int pgid) {
     if (pgid <= 0)
         return;
-    /* LOCK_ORDER: acquire rx_lock to update tty_foreground_pgid. */
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     tty_foreground_pgid = pgid;
     spin_unlock_irqrestore(&rx_lock, flags);
 }
 
-// UART 中断处理函数
 void uart_handle_irq(void) {
     int c;
     /* LOCK_ORDER: IRQ handler pushes characters under rx_lock;

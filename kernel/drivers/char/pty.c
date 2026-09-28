@@ -112,11 +112,9 @@ static void pty_fill_default_termios(pty_termios_t *tio) {
 }
 
 void pty_init(void) {
-    /* LOCK_ORDER: initialize the allocation lock before any pty_alloc() call. */
     spin_init(&g_pty_alloc_lock);
     for (int i = 0; i < MAX_PTYS; i++) {
         memset(&g_ptys[i], 0, sizeof(g_ptys[i]));
-        /* LOCK_ORDER: initialize each per-pair lock at boot. */
         spin_init(&g_ptys[i].lock);
     }
 }
@@ -377,8 +375,6 @@ int pty_master_read(int idx, char *buf, size_t count, int nonblock) {
 
 int pty_master_write(int idx, const char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
-    /* LOCK_ORDER: acquire per-pair lock to feed input through the line
-     * discipline (canonical cooking or raw ring) plus echo. */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (!g_ptys[idx].in_use) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -493,8 +489,6 @@ int pty_slave_poll(int idx, short events) {
 
 int pty_slave_write(int idx, const char *buf, size_t count) {
     if (idx < 0 || idx >= MAX_PTYS) return -EIO;
-    /* LOCK_ORDER: acquire per-pair lock to write into slave-to-master ring
-     * (applying OPOST/ONLCR output processing). */
     uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
     if (!g_ptys[idx].in_use) {
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -566,7 +560,6 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSPTLCK) {
         int lock;
         if (copy_from_user(&lock, arg, sizeof(lock)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update locked flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].locked = lock;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -579,7 +572,6 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     }
     if (req == TIOCGWINSZ) {
         uint16_t ws[4];
-        /* LOCK_ORDER: acquire per-pair lock to read window size (master side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         ws[0] = g_ptys[idx].ws_row;
         ws[1] = g_ptys[idx].ws_col;
@@ -592,7 +584,6 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSWINSZ) {
         uint16_t ws[4];
         if (copy_from_user(ws, arg, sizeof(ws)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update window size (master side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].ws_row = ws[0];
         g_ptys[idx].ws_col = ws[1];
@@ -602,7 +593,6 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
     if (req == FIONBIO) {
         int nb;
         if (copy_from_user(&nb, arg, sizeof(nb)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update master nonblock flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].master_nonblock = nb;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -615,7 +605,6 @@ int pty_master_ioctl(int idx, unsigned long req, void *arg) {
          * fail pty setup with ENOTTY ("Failed to open PTY: Not a tty"). */
         int on;
         if (copy_from_user(&on, arg, sizeof(on)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update packet mode flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].packet_mode = !!on;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);
@@ -660,7 +649,6 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     }
     if (req == TIOCGWINSZ) {
         uint16_t ws[4];
-        /* LOCK_ORDER: acquire per-pair lock to read window size (slave side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         ws[0] = g_ptys[idx].ws_row;
         ws[1] = g_ptys[idx].ws_col;
@@ -673,7 +661,6 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     if (req == TIOCSWINSZ) {
         uint16_t ws[4];
         if (copy_from_user(ws, arg, sizeof(ws)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update window size (slave side). */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].ws_row = ws[0];
         g_ptys[idx].ws_col = ws[1];
@@ -749,7 +736,6 @@ int pty_slave_ioctl(int idx, unsigned long req, void *arg) {
     if (req == FIONBIO) {
         int nb;
         if (copy_from_user(&nb, arg, sizeof(nb)) < 0) return -EFAULT;
-        /* LOCK_ORDER: acquire per-pair lock to update slave nonblock flag. */
         uint64_t flags = spin_lock_irqsave(&g_ptys[idx].lock);
         g_ptys[idx].slave_nonblock = nb;
         spin_unlock_irqrestore(&g_ptys[idx].lock, flags);

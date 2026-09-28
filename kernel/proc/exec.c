@@ -172,7 +172,6 @@ static int exec_copy_args(char *const *src, char **out, int *out_count,
     while (count < MAX_ARG_STRINGS) {
         char *ptr;
         if (copy_from_user(&ptr, &src[count], sizeof(char *)) < 0) {
-            /* cleanup */
             for (int i = 0; i < count; i++) { kfree(out[i]); out[i] = NULL; }
             return -EFAULT;
         }
@@ -322,14 +321,12 @@ static int exec_try_script(int fd, exec_bprm_t *bprm)
 
     buf[n] = '\0';
 
-    /* Skip "#!" */
     char *cp = buf + 2;
     while (*cp == ' ' || *cp == '\t')
         ++cp;
     if (*cp == '\0' || *cp == '\n' || *cp == '\r')
         return -ENOEXEC;
 
-    /* Extract interpreter path */
     char *start = cp;
     while (*cp && *cp != '\n' && *cp != '\r' && *cp != ' ' && *cp != '\t')
         ++cp;
