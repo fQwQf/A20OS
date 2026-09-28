@@ -181,7 +181,7 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         }
 
         if (!dontunmap &&
-            pt_unmap_leaf(mm->pgdir, src_va, NULL, NULL, NULL, NULL) == 0)
+            pt_unmap_leaf(mm, src_va, NULL, NULL, NULL, NULL) == 0)
             mm_tlb_note_change(mm, base, leaf_size);
         if (pcp) {
             if (!dontunmap)

@@ -12,9 +12,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* Deliberately does NOT print errno.  Most call sites are assertions or
+ * `ret < 0` checks whose failure has nothing to do with errno, so printing
+ * whatever errno happened to be left behind produced actively misleading
+ * output: a data-mismatch failure once reported "errno=17 (EEXIST)" and sent
+ * the investigation after a nonexistent address collision (docs 10.62-10.63).
+ * A site that genuinely needs the errno should pass it explicitly rather than
+ * relying on the ambient value. */
 static int fail(const char *what)
 {
-    printf("MM_STRESS: FAIL %s errno=%d\n", what, errno);
+    printf("MM_STRESS: FAIL %s\n", what);
     return 1;
 }
 

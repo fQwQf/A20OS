@@ -6,6 +6,7 @@
 #include "mm/vmo.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -153,6 +154,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #endif
         return (vaddr_t)-ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
     vma->start     = addr;
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
@@ -175,6 +177,23 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
+
+    /*
+     * CortenMM on-demand paging (paper SS4.3): record the reservation per PTE
+     * so a later fault on this range can be served from per-PTE status alone,
+     * with its permissions, instead of re-deriving them from the VMA.  The
+     * paper pays page-table pages up front here, which is why its mmap is
+     * slightly slower than Linux's while mmap-PF is faster (SS6.2).
+     *
+     * Provisioning is best effort: a range too large to provision eagerly just
+     * keeps the VMA-based fault path, which remains correct.  It runs under
+     * mm->lock, so the order mm->lock -> page-table lock is the same one the
+     * fault path already uses.
+     */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    if ((vmf & VM_ANON) && !(vmf & VM_SHARED))
+        (void)mm_pt_provision_anon(mm, addr, addr + len, ptef);
+#endif
 
     return addr;
 }
@@ -260,6 +279,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         vfs_close(file_fd);
         return (vaddr_t)-ENOMEM;
     }
+    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
@@ -365,6 +385,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma)
         return (vaddr_t)-ENOMEM;
+    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;

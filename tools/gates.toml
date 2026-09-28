@@ -892,6 +892,23 @@ files = ["kernel/include/mm/oom.h"]
 pattern = "MM_STRESS: PASS"
 files = ["user/cmds/stress/mm_stress.c"]
 
+# CortenMM per-PTE descriptor gates.  These came in with the cortenmm branch,
+# which predates the gates.toml consolidation, so they were inline `rg -q`
+# lines in targets-build.mk.  Main's consolidation only carried over the
+# assertions that already existed at the merge base, so re-adding them here
+# keeps the coverage instead of silently dropping it (docs 10.76).
+[[gate.assertion]]
+pattern = "MM_AS_CURSOR_ONLY_ENTRY"
+files = ["kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+pattern = "mm_pt_audit_all"
+files = ["kernel/abi/linux/sys_proc.c"]
+
+[[gate.assertion]]
+pattern = "mm_pt_note_present|mm_pt_note_absent"
+files = ["kernel/mm/mm.c"]
+
 [[gate]]
 name = "check-io-progress-model"
 make_target = "check-io-progress-model"

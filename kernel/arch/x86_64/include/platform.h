@@ -10,6 +10,13 @@
 #define PAGE_OFFSET        0xFFFF800000000000UL
 #define USER_VA_LIMIT      0x0000800000000000UL
 
+/* End of the physical range the firmware maps into the direct map.  The boot
+ * map stops at 4 GiB, so anything usable above that is mapped a whole 1 GiB
+ * chunk at a time (see firmware.c).  Shared with mm/kwx.c, which has to
+ * demote every 1 GiB slot the direct map actually covers -- see
+ * arch_kernel_wx_finalize(). */
+#define X86_HIGH_RAM_MAP_END  0x200000000ULL
+
 /* RAM ranges are discovered at boot from the multiboot memory map (see
  * arch/x86_64/platform/firmware.c).  The old inline here returned a hardcoded
  * [0, PHYS_MEMORY_END) that ignored -m and capped the kernel at 1 GiB. */
