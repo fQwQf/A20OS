@@ -165,9 +165,11 @@ typedef struct task_t {
      */
     uintptr_t kstack;
     void    *kstack_base;
-    /* trap.S（riscv64）的内核态 sp 守卫在寄存器帧保存之前运行，不能破坏
-     * 任何活寄存器；暂存槽放在任务结构体里，经 tp（内核态恒为当前
-     * task_t，见 switch.S）寻址。守卫以固定偏移访问这些槽。 */
+    /* The kernel-mode sp guard in trap.S (riscv64) runs before the register
+     * frame is saved and must not clobber any live register, so its scratch
+     * slots live in the task struct and are addressed through tp, which in
+     * kernel mode always holds the current task_t (see switch.S).  The guard
+     * reaches them at fixed offsets. */
     uintptr_t trap_guard_scratch[7];
     refcount_t refs;
     int      destroy_started;
