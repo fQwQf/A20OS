@@ -395,6 +395,8 @@ void proc_init(void) {
     idle->limits.stack = USER_STACK_MAX_SIZE;
     idle->limits.nofile = MAX_FILES;
     idle->limits.memlock = 64 * 1024;
+    idle->limits.as = 0;
+    idle->limits.nproc = 0;
     idle->cpus_allowed = CONFIG_NR_CPUS >= 32
                          ? ~0U : (1U << CONFIG_NR_CPUS) - 1U;
     proc_set_name(idle, "idle");
@@ -756,6 +758,19 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
 
     size_t map_len = ROUND_UP(len, PAGE_SIZE);
     if (map_len == 0) return (vaddr_t)-EINVAL;
+
+    /* RLIMIT_AS caps the address space, so a single process cannot exhaust
+     * memory that other tenants need.  Checked here, before mm->lock, so the
+     * rejection path takes no lock; total_vm only grows, so a stale read can
+     * only under-count and let a later mapping slip through, never over-count
+     * and reject a mapping that would have fit. */
+    uint64_t as_limit = t->limits.as;
+    if (as_limit) {
+        uint64_t vm_now = t->mm->total_vm;
+        uint64_t vm_add = map_len / PAGE_SIZE;
+        if (vm_now + vm_add > as_limit / PAGE_SIZE)
+            return (vaddr_t)-ENOMEM;
+    }
 
     mm_tlb_invalidate_begin(t->mm);
     uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);

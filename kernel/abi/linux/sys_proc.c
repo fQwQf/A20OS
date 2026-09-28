@@ -868,47 +868,105 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
     return -EINVAL;
 }
 
-int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
-    (void)pid;
-    if (resource < 0 || resource >= RLIM_NLIMITS)
-        return -EINVAL;
-    if (old_rlim) {
-        uint64_t r[2] = {0};
-        task_t *t = proc_current();
-        switch (resource) {
-            case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-            case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
-            case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
-            default: r[0] = 0; r[1] = (uint64_t)-1; break;
-        }
-        if (copy_to_user(old_rlim, r, sizeof(r)) < 0) return -EFAULT;
+/*
+ * Report a task's limit.  An unenforced resource reports RLIM_INFINITY, which
+ * is the truthful answer: no limit applies.  It is not a claim that a limit
+ * exists and happens to be large.
+ */
+static int rlimit_get(task_t *t, int resource, uint64_t pair[2])
+{
+    uint64_t v = 0;
+    switch (resource) {
+    case RLIMIT_STACK: v = t ? t->limits.stack : USER_STACK_MAX_SIZE; break;
+    case RLIMIT_CORE:  v = signal_task_rlim_core(t); break;
+    case RLIMIT_NOFILE: v = t ? t->limits.nofile : MAX_FILES; break;
+    case RLIMIT_AS:    v = t ? t->limits.as : 0; break;
+    case RLIMIT_NPROC: v = t ? t->limits.nproc : 0; break;
+    default: return -ENOSYS;
     }
-    if (new_rlim) {
-        uint64_t r[2];
-        if (copy_from_user(r, new_rlim, sizeof(r)) < 0) return -EFAULT;
-        task_t *t = proc_current();
-        if (!t) return -ESRCH;
-        switch (resource) {
-            case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-            case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
-            case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
-            default: break;
-        }
+    set_uniform_rlimit(pair, v);
+    return 0;
+}
+
+/*
+ * Install a limit.  A resource with no enforcement returns -EINVAL rather than
+ * a silent success: a caller that sets RLIMIT_AS and is told "ok" will believe
+ * the address space is capped when nothing caps it.
+ */
+static int rlimit_set(task_t *t, int resource, uint64_t cur, uint64_t max)
+{
+    if (!t)
+        return -ESRCH;
+    switch (resource) {
+    case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(cur, max); break;
+    case RLIMIT_CORE:  signal_task_set_rlim_core(t, cur); break;
+    case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(cur, max); break;
+    case RLIMIT_AS:    t->limits.as = cur; break;
+    case RLIMIT_NPROC: t->limits.nproc = cur; break;
+    default: return -EINVAL;
     }
     return 0;
+}
+
+int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
+    if (resource < 0 || resource >= RLIM_NLIMITS)
+        return -EINVAL;
+    if (!new_rlim && !old_rlim)
+        return 0;
+
+    /* Previously the pid argument was discarded outright, so a supervisor
+     * could only ever inspect or change its own limits. */
+    task_t *self = proc_current();
+    if (!self)
+        return -ESRCH;
+    task_t *t = self;
+    if (pid != 0) {
+        t = proc_find_get(pid);
+        if (!t)
+            return -ESRCH;
+    }
+
+    int ret = 0;
+    if (old_rlim) {
+        uint64_t r[2] = { 0, 0 };
+        int gr = rlimit_get(t, resource, r);
+        if (gr < 0) {
+            /* Nothing enforces this resource, so there is no value to report.
+             * RLIM_INFINITY is the truth; ENOSYS would be a lie about which
+             * resources exist. */
+            r[0] = 0;
+            r[1] = (uint64_t)-1;
+        }
+        if (copy_to_user(old_rlim, r, sizeof(r)) < 0)
+            ret = -EFAULT;
+    }
+    if (ret == 0 && new_rlim) {
+        /* Changing another task's limits is a privilege operation. */
+        if (t != self && !proc_has_cap(self, CAP_SYS_RESOURCE) &&
+            t->cred.uid != self->cred.uid) {
+            ret = -EPERM;
+        } else {
+            uint64_t r[2];
+            if (copy_from_user(r, new_rlim, sizeof(r)) < 0)
+                ret = -EFAULT;
+            else
+                ret = rlimit_set(t, resource, r[0], r[1]);
+        }
+    }
+    if (t != self)
+        proc_put(t);
+    return ret;
 }
 
 int64_t sys_getrlimit(int resource, void *rlim) {
     if (resource < 0 || resource >= RLIM_NLIMITS)
         return -EINVAL;
     if (!rlim) return -EFAULT;
-    uint64_t r[2] = {0};
     task_t *t = proc_current();
-    switch (resource) {
-        case RLIMIT_STACK: set_uniform_rlimit(r, t ? t->limits.stack : USER_STACK_MAX_SIZE); break;
-        case RLIMIT_CORE: set_uniform_rlimit(r, signal_task_rlim_core(t)); break;
-        case RLIMIT_NOFILE: set_uniform_rlimit(r, t ? t->limits.nofile : MAX_FILES); break;
-        default: r[0] = 0; r[1] = (uint64_t)-1; break;
+    uint64_t r[2] = { 0, 0 };
+    if (rlimit_get(t, resource, r) < 0) {
+        r[0] = 0;
+        r[1] = (uint64_t)-1;
     }
     if (copy_to_user(rlim, r, sizeof(r)) < 0) return -EFAULT;
     return 0;
@@ -922,13 +980,7 @@ int64_t sys_setrlimit(int resource, void *rlim) {
     if (copy_from_user(r, rlim, sizeof(r)) < 0) return -EFAULT;
     task_t *t = proc_current();
     if (!t) return -ESRCH;
-    switch (resource) {
-        case RLIMIT_STACK: t->limits.stack = clamp_stack_rlimit(r[0], r[1]); break;
-        case RLIMIT_CORE: signal_task_set_rlim_core(t, r[0]); break;
-        case RLIMIT_NOFILE: t->limits.nofile = clamp_nofile_rlimit(r[0], r[1]); break;
-        default: break;
-    }
-    return 0;
+    return rlimit_set(t, resource, r[0], r[1]);
 }
 
 int64_t sys_getrusage(int who, void *usage) {

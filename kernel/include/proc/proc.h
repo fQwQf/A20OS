@@ -63,6 +63,8 @@ typedef struct proc_limits {
     uint64_t stack;
     uint64_t nofile;
     uint64_t memlock;
+    uint64_t as;      /* RLIMIT_AS: address-space bytes, 0 = unlimited */
+    uint64_t nproc;   /* RLIMIT_NPROC: processes per uid, 0 = unlimited */
 } proc_limits_t;
 
 typedef struct proc_policy {
