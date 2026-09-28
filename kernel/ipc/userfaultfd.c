@@ -518,19 +518,28 @@ static int uffd_io_unregister(userfaultfd_t *uffd, void *arg)
     if (removed) {
         /* Drop the per-entry UFFD marks for what we just unregistered.
          *
-         * A page can in principle still be covered by a *different* uffd
-         * registration, so this clears more than strictly necessary.
-         * userfaultfd_range_present() remains the authoritative test on the
-         * VMA fault path and is untouched, so a stale mark cannot make a fault
-         * skip its handler today.  Before the status fault path is enabled
-         * (docs 10.7/10.19) this has to be refined to clear per page while
-         * re-testing presence, otherwise an over-clear would let a still-
-         * registered page be faulted without parking. */
+         * Cleared PER PAGE, re-testing presence each time.  A page can still
+         * be covered by a *different* uffd registration, and the status
+         * fault path trusts this mark rather than re-deriving it from the
+         * range list, so a range-wide clear would let a still-registered page
+         * be satisfied without ever being parked for its handler.  That was
+         * harmless only while the status path was inert; it is live now
+         * (docs 10.59/10.60).
+         *
+         * userfaultfd_range_present() walks the range list and takes
+         * g_uffd_lock.  fault.c already calls it while holding mm->lock, so
+         * mm->lock -> g_uffd_lock is the established order and this adds no
+         * new nesting. */
         task_t *t = proc_current();
         if (t && t->mm) {
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
             spin_lock(&t->mm->lock);
-            mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
+            for (vaddr_t p = rlo; p < rhi; p += PAGE_SIZE) {
+                if (!userfaultfd_range_present(t->mm, p))
+                    (void)mm_pt_safe_clear_page(t->mm, p, MM_SAFE_UFFD);
+            }
             spin_unlock(&t->mm->lock);
+#endif
         }
         wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
     }
