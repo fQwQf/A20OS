@@ -947,3 +947,371 @@ files = [
     "kernel/proc/proc.c",
 ]
 
+
+
+# --- contiguous rg runs from tools/targets-build.mk previously called
+# "mixed".  Each carries every --glob exclusion, not just one: the
+# first schema dropped all but a single glob and the checks then fired
+# on exactly the files the recipe excludes.
+
+[[gate]]
+name = "check-task-state-boundary"
+make_target = "check-task-state-boundary"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 1
+[[gate.assertion]]
+segment = 0
+negate = true
+ddash = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/park.c", "!kernel/proc/sched.c", "!kernel/proc/exit.c", "!kernel/proc/task.c"]
+pattern = "->state[[:space:]]*=[[:space:]]*PROC_"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+ddash = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/sched.c", "!kernel/proc/current.c", "!kernel/proc/task.c", "!kernel/proc/park.c"]
+pattern = "->(on_rq|dispatching|on_cpu|owner_cpu|rq_next|rq_prev)[[:space:]]*="
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+globs = ["*.c", "!kernel/proc/park.c", "!kernel/proc/current.c", "!kernel/proc/sched.c", "!kernel/proc/exit.c", "!kernel/proc/task.c"]
+pattern = "proc_runq_(enqueue|remove)_locked[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "task_t[[:space:]]*\\*[[:space:]]*(waiter|rx_waiter)\\b"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "\\bproc_find[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "A20_PARK_WAKE_PROTOCOL"
+files = ["kernel/include/proc/park.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "WAIT_QUEUE_PARK_PROTOCOL"
+files = ["kernel/include/core/sync.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "TASK_REFERENCE_LIFETIME"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "proc_get\\(token\\.task\\)"
+files = ["kernel/core/sync.c"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "_Static_assert\\(offsetof\\(task_t, kstack\\) == 0"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "_Static_assert\\(offsetof\\(task_t, kstack_base\\) == sizeof\\(uintptr_t\\)"
+files = ["kernel/include/proc/proc.h"]
+
+[[gate]]
+name = "check-arch-boundary"
+make_target = "check-arch-boundary"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 1
+[[gate.assertion]]
+segment = 0
+negate = true
+globs = ["!kernel/arch/**", "!kernel/platform/**", "!kernel/external/**", "!kernel/include/core/arch.h", "!kernel/mm/vdso.c", "!kernel/include/mm/vdso.h", "!kernel/include/mm/vdso_blob.h", "!kernel/mm/fault.c", "!kernel/drvmod/framework.c"]
+pattern = "#if(n?def)?[[:space:]]+(CONFIG_|__)(AARCH64|ARM|RISCV|LOONG|X86|PPC)|CONFIG_ARM32|CONFIG_AARCH64|__aarch64__|__arm__"
+files = ["kernel"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "ARCH_MMU_RUNTIME_MATRIX_CONTRACT"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+segment = 0
+pattern = "smoke-arch-mmu-matrix"
+files = [
+    "tools/targets-smoke.mk",
+    "docs/OS-Design.md",
+]
+
+[[gate]]
+name = "check-doc-drift"
+make_target = "check-doc-drift"
+# Split around a non-assertion step (codegen); make calls one segment
+# per run so the original ordering is preserved.
+segments = 2
+[[gate.assertion]]
+segment = 0
+pattern = "DOC_DRIFT_KEYWORD_GATE"
+files = ["docs/testing-gates.md"]
+
+[[gate.assertion]]
+segment = 1
+pattern = "stub"
+files = [
+    "kernel/abi/linux/syscall_coverage.md",
+    "kernel/abi/linux/compat_notes.md",
+    "docs/testing-gates.md",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "partial"
+files = [
+    "kernel/abi/linux/syscall_coverage.md",
+    "kernel/abi/linux/compat_notes.md",
+    "docs/testing-gates.md",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "Future"
+files = [
+    "docs/testing-gates.md",
+    "kernel/abi/native/sys_core.c",
+]
+
+[[gate.assertion]]
+segment = 1
+pattern = "not yet"
+files = [
+    "docs/testing-gates.md",
+    "kernel/abi/native/sys_phase2.c",
+    "kernel/mm/fault.c",
+]
+
+[[gate.assertion]]
+segment = 1
+negate = true
+globs = ["!docs/research/**", "!docs/testing-gates.md", "!kernel/external/**"]
+pattern = "for simplicity"
+files = [
+    "docs",
+    "kernel",
+]
+
+# --- gates whose assertions were `bad=$(rg ... | rg -v whitelist)`.
+# The verdict depends on the surviving output, not an exit code, so they
+# need post_filter rather than plain negation.
+
+[[gate]]
+name = "check-blocking-point-boundary"
+make_target = "check-blocking-point-boundary"
+[[gate.assertion]]
+pattern = "BLOCKING_POINT_PROTOCOL_AUDIT"
+files = ["docs/archive/blocking-point-audit.md"]
+
+[[gate.assertion]]
+pattern = "PROC_BLOCKED_ALLOCATION_WHITELIST"
+files = ["kernel/proc/task.c"]
+
+[[gate.assertion]]
+pattern = "FUTEX_WAIT_RECHECK_PROTOCOL"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+pattern = "proc_try_wake_locked\\(t, t->wait_seq, PROC_WAKE_EVENT\\)"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "\\bproc_block_until[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/proc/(task|park)\\.c:"
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "(?:->|\\.)state[[:space:]]*=[[:space:]]*PROC_BLOCKED"
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/proc/(task|sched|park)\\.c:"
+rg_flags = ["--pcre2"]
+globs = ["*.[ch]", "!kernel/external/**"]
+pattern = "(?:->|\\.)(?:on_rq|cpu_id|rq_next|rq_prev)[[:space:]]*="
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/(proc/(fork|proc|sched|cg_cpu)\\.c|abi/native/sys_core\\.c):"
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**"]
+pattern = "\\bproc_make_ready[[:space:]]*\\("
+files = ["kernel"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct wait_queue_entry[^{]*\\{[^}]*task[^}]*wait_seq"
+files = ["kernel/include/core/sync.h"]
+
+[[gate.assertion]]
+pattern = "wait_queue_entry_t entry"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+negate = true
+pattern = "typedef struct futex_waiter"
+files = ["kernel/ipc/futex.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct wait_timer[^{]*\\{[^}]*task[^}]*wait_seq"
+files = ["kernel/proc/timer_heap.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "typedef struct proc_wake_q_item[^{]*\\{[^}]*task[^}]*seq"
+files = ["kernel/include/proc/park.h"]
+
+[[gate.assertion]]
+pattern = "FUTEX_STRESS: unrelated-wake-isolation PASS"
+files = ["user/cmds/stress/futex_stress.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: vfork-auto-reap PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+
+[[gate]]
+name = "check-signal-exit-boundary"
+make_target = "check-signal-exit-boundary"
+[[gate.assertion]]
+pattern = "SIGNAL_EXIT_PROTOCOL_AUDIT"
+files = ["docs/archive/signal-exit-audit.md"]
+
+[[gate.assertion]]
+pattern = "SIGNAL_STATE_LOCK_CONTRACT"
+files = ["kernel/include/proc/signal.h"]
+
+[[gate.assertion]]
+pattern = "PARK_SIGNAL_MODE_PROTOCOL"
+files = ["kernel/proc/park.c"]
+
+[[gate.assertion]]
+pattern = "SIGNAL_MASK_PARK_PROTOCOL"
+files = ["kernel/abi/linux/sys_signal.c"]
+
+[[gate.assertion]]
+pattern = "REMOTE_EXIT_SAFE_BOUNDARY"
+files = ["kernel/proc/exit.c"]
+
+[[gate.assertion]]
+pattern = "PROC_WAKE_FATAL_SIGNAL"
+files = [
+    "kernel/include/proc/park.h",
+    "kernel/proc/park.c",
+]
+
+[[gate.assertion]]
+pattern = "PROC_WAKE_TASK_EXIT"
+files = [
+    "kernel/include/proc/park.h",
+    "kernel/proc/exit.c",
+]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+pattern = "\\bproc_make_ready[[:space:]]*\\("
+files = [
+    "kernel/proc/signal.c",
+    "kernel/proc/exit.c",
+]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**", "!kernel/proc/park.c"]
+pattern = "reason[[:space:]]*==[[:space:]]*PROC_WAKE_SIGNAL"
+files = ["kernel"]
+
+[[gate.assertion]]
+post_filter = "^kernel/(proc/(signal|task)\\.c|abi/linux/sys_signal\\.c|abi/native/handle_table\\.c|ipc/signalfd\\.c):"
+rg_flags = ["--pcre2"]
+globs = ["*.c", "!kernel/external/**"]
+pattern = "(?:->|\\.)(?:sig_blocked|thread_pending|sigsuspend_old_blocked|sigsuspend_active|sigwait_mask|sigwait_active)\\b|(?:ss|signal_state)->(?:pending|pending_has_info|pending_info|actions)\\b"
+files = ["kernel"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "eventfd_read[\\s\\S]*proc_park_prepare\\(PROC_WAIT_INTERRUPTIBLE"
+files = ["kernel/ipc/eventfd.c"]
+
+[[gate.assertion]]
+rg_flags = ["-U"]
+pattern = "timerfd_read[\\s\\S]*proc_park_prepare\\(PROC_WAIT_INTERRUPTIBLE"
+files = ["kernel/ipc/timerfd.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: signal-stop-exit PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+
+[[gate.assertion]]
+pattern = "PROC_STRESS: signal-mask-park PASS"
+files = ["user/cmds/stress/proc_stress.c"]
+
+
+[[gate]]
+name = "smp-platform-boundary"
+make_target = "check-smp-platform-boundary"
+
+[[gate.assertion]]
+pattern = 'typedef struct smp_platform_ops'
+files = ['kernel/include/core/smp.h']
+
+[[gate.assertion]]
+pattern = 'const smp_platform_ops_t \*smp'
+files = ['kernel/drivers/core/driver_core.h']
+
+[[gate.assertion]]
+exists = ['kernel/arch/riscv64/platform/smp.c', 'kernel/arch/aarch64/platform/smp.c', 'kernel/arch/x86_64/platform/smp.c', 'kernel/arch/loongarch64/platform/smp.c']
+
+[[gate.assertion]]
+pattern = 'CONFIG_BOARD|firmware_cpu_on|sbi_hart_start|firmware_acpi_apic_ids|IOCSR_MBUF'
+negate = true
+files = ['kernel/arch/riscv64/platform/smp.c', 'kernel/arch/aarch64/platform/smp.c', 'kernel/arch/x86_64/platform/smp.c', 'kernel/arch/loongarch64/platform/smp.c']
+
+[[gate.assertion]]
+pattern = 'void smp_(init|boot_secondaries|send_reschedule|secondary_init)\('
+negate = true
+files = ['kernel/arch']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-riscv64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-aarch64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-loongarch64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-x86_64/board.c']
