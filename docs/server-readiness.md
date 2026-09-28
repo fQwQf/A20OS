@@ -152,9 +152,14 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 
 ## 七、真机与虚拟化
 
-- **PCI 不遍历 bridge**：`pci_scan_current()` 线性扫预配置 bus 范围，从不读
-  header type 1 的 secondary/subordinate bus 寄存器。riscv64 上范围是
-  `(0,1)`——**只有 bus 0**。挂在 PCIe switch 后面的设备根本看不见。
+- **PCI bridge 遍历已实现（覆盖有限）**：`pci_scan_current()` 现改为 worklist
+  遍历，读 header type 1 的 secondary/subordinate bus 寄存器并递归跟进，
+  带 `visited[]` 防环。修复前 riscv64 的 `(0,1)` 范围只看得到 bus 0。
+  **但自动化证据只有回归守护**：`smoke-pci-bridge` 在 x86_64 上跑，而
+  x86_64 板级传入 `0,255`、loongarch64 传入 `0,127`，旧线性扫描本就能覆盖
+  这些 bus，所以该门禁在修复前后同样通过——它锁住的是不回归，不是修复本身。
+  真正体现价值的是 riscv64 `(0,1)` 与 virtualbox-aarch64（固件分配范围），
+  本 QEMU 构建无法驱动这两条路径（riscv64 virt 无 PCIe controller）。
 - **无 MSI/MSI-X** → 只有 INTx。
 - **INTx 路由硬编码 QEMU q35**：`x86_64/trap/irqchip.c:251-274` 只认
   host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
@@ -180,7 +185,7 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 窗口缩放 | 消除 47KB BDP 硬上限，跨地域链路的必要条件 |
-| P1 | PCI bridge 遍历 + MSI-X + ACPI `_PRT` | 真机服务器的准入条件 |
+| P1 | MSI-X + ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |

@@ -251,3 +251,45 @@ smoke-timer-edge:
 # ================================================================
 smoke-mntns:
 	$(PYTHON) tools/smoke.py smoke-mntns
+
+# ================================================================
+# PCI bridge traversal smoke
+# ================================================================
+# Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,
+# so it lives on a bus *behind* a header-type-1 bridge rather than on the
+# root bus.  The kernel must walk secondary/subordinate buses to see it.
+#
+# Honest scope: this is a REGRESSION GUARD, not proof the traversal works.
+# The x86_64 board calls pci_enumerate(PCI_ECAM_BASE, 0, 255), so the old
+# flat [bus_start, bus_end) scan happened to cover these buses too and this
+# gate would have passed before the fix.  The traversal actually changes
+# behaviour on boards that report a narrow range -- qemu-virt-riscv64 passes
+# (0, 1) and virtualbox-aarch64 passes firmware-allocated ranges -- and this
+# QEMU build cannot exercise either, so the coverage gap is deliberate and
+# recorded in docs/server-readiness.md rather than papered over.
+smoke-pci-bridge: NET_HOSTFWD=
+smoke-pci-bridge:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/pci-bridge-x86_64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=xb \
+		-device pcie-root-port,id=rp1,bus=pcie.0,addr=0x4,chassis=1 \
+		-device pcie-root-port,id=rp2,bus=rp1,addr=0x0,chassis=2 \
+		-device virtio-blk-pci,drive=xb,bus=rp2,addr=0x0 \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'bridges walked' "$$log" && \
+	   grep -qE '\[BUS\] pci 0[12]:00\.0 id=1b36:000c .*class=06:04:00' "$$log" && \
+	   grep -qE '\[BUS\] pci 02:00\.0 id=1af4:1042' "$$log" && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-pci-bridge: PASS (device behind 2 nested root ports enumerated); log saved to $$log"; \
+	else \
+		echo "smoke-pci-bridge: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
