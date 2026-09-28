@@ -858,8 +858,28 @@
     `<drm/drm.h>` 里**同一份 vendored 定义**，字段一致，不存在错位。
 - 影响：**这条同时卡住 XWayland 呈现验证与 x86_64 `smp>1` 挂起调查**——两者都需要
   一块真正能出画面的显示器。
-- 下一步：需要在前台（wlroots legacy 后端）侧抓 `drmModeSetCrtc` 实际传入的 `fb_id`
-  与 `drmModeAddFB2` 返回的 `fb_id` 做比对，判断二者是否真的不一致。
+- **已定位根因（插桩实证）**：把 `drm_gem_alloc` / `drm_free_gem` / `addfb` / `setcrtc`
+  四处放在一起打点，并**关掉 IPv6 以排除 lwIP panic 干扰**（这样桌面才活得久到能出
+  trace），x86_64 `NR_CPUS=4` 跑出来的序列是决定性的：
+  ```
+  [GP] alloc h1
+  [GP] free h1
+  [GP] setcrtc fb_id=1 MISS live=0
+  [GP] setcrtc fb_id=2 MISS live=0
+  ```
+  也就是**帧缓冲的后备 GEM 在帧缓冲仍在使用时就已被释放**。原因在实现里：
+  `drm_mode_addfb/addfb2` 直接把 `fb.fb_id = b->handle` —— **帧缓冲 ID 就是 GEM
+  handle 的别名**，内核里没有独立的 framebuffer 对象，也没有任何引用计数。于是
+  wlroots 建完 `drmModeAddFB2` 后按 Linux 语义销毁 dumb buffer（`MODE_DESTROY_DUMB`
+  或 `GEM_CLOSE`），`drm_free_gem()` 就把那个 GEM 释放了；帧缓冲的 `fb_id` 随之悬空，
+  随后 `drmModeSetCrtc` 带着这个 `fb_id` 回来，`drm_find_gem()` 自然找不到 → `-ENOENT`。
+  这同时解释了「间歇性」：取决于 destroy 与 setcrtc 的先后。
+- 正确修法（**未做**）：引入真正的 framebuffer 对象（`drm_fb_t`，持有对 GEM 的
+  引用），`ADDFB/ADDFB2` 从独立 id 空间分配 `fb_id`，`RMFB` 释放该引用；GEM 只在
+  「dumb handle 已销毁 **且** framebuffer 引用已释放」时才真正回收。不能只在
+  `destroy_dumb` 上打补丁绕过，那只是把悬空推迟到下一次。
+- 复现要点：必须**关掉 IPv6**（`LWIP_IPV6=0` + `LWIP_ICMP6=0` 等）桌面才活得够久、
+  不被 lwIP panic 打断；且 trace 要在同一轮 boot 里同时打四处，跨轮次对比会自相矛盾。
 
 ## 三、测试环境注意事项
 
