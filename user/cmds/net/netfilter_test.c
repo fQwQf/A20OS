@@ -193,6 +193,29 @@ int main(void)
     if (pkt_after > pkt_before)
         CHK(drop_after == drop_before, "transmit still observed, still accept");
 
+    /*
+     * 7. the network data-plane lock must be measurable.
+     *
+     * g_lwip_lock serialises the whole TCP/IP data plane, so whether it
+     * contends is the number that decides if the network stack can ever
+     * scale across CPUs.  It is registered for contention accounting, which
+     * is the prerequisite for any decision about sharding it -- a lock this
+     * central is too risky to rewrite before the hot call sites are known.
+     *
+     * Asserting the entry exists matters more than asserting it is nonzero:
+     * a single-CPU instance legitimately sees no contention, but the entry
+     * must still be listed, or the accounting is silently not wired up.
+     */
+    char locks[8192] = {0};
+    int lfd = open("/proc/a20/lock_contention", O_RDONLY);
+    CHK(lfd >= 0, "open /proc/a20/lock_contention");
+    ssize_t ln = read(lfd, locks, sizeof(locks) - 1);
+    close(lfd);
+    CHK(ln > 0, "read /proc/a20/lock_contention");
+    locks[ln] = '\0';
+    CHK(strstr(locks, "lwip:") != NULL,
+        "g_lwip_lock is registered for contention accounting");
+
     printf("NETFILTER_TEST: PASS dropped=%llu out_packets=%llu\n",
            out_drop1 - out_drop0, out_pkt1 - out_pkt0);
     return 0;
