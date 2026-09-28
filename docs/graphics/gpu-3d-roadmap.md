@@ -782,3 +782,46 @@ OpenGL core profile version: 4.5 (Core Profile) Mesa 25.2.7
 - 默认 EGL 驱动是 **ZINK**（Vulkan），在本 guest 里
   `vkCreateInstance failed (VK_ERROR_INCOMPATIBLE_DRIVER)`，导致 dri2 screen
   创建失败、回落 surfaceless。llvmpipe 仍然可用，但这是绕路而非正常路径。
+
+
+## 更正：compositor 其实是正常的（此前结论是我的测量事故）
+
+上一条提交曾断言「guest 内没有可用的显示服务器」，**该结论错误**，现更正。
+
+起因是我为了塞诊断而修改 `/sbin/init` 时用了 `t[:i] + new` 的写法，
+**把 init 脚本截断了**：canonical 版本有 90 行，末尾是
+
+```
+exec runuser -l root -c /usr/lib/a20/start-xfce4-session
+```
+
+这行 `exec` 就是整个会话交接。被截断后 dbus/elogind/seatd/udevd 与会话交接
+全部消失，于是观察到「没有 wayland socket、`labwc` 出现 0 次」——那是我自己
+改坏的产物，不是 A20OS 的缺陷。
+
+恢复 canonical init（`packages/overlay/xfce/sbin/init`，90 行）后实测：
+
+```
+Y1_SOCK   dbus-1  dconf  wayland-0  wayland-0.lock
+Y2_WD     /run/user/0/wayland-0
+Y3_PROC   62 /extra/usr/bin/labwc
+```
+
+**labwc 正常启动，Wayland socket 存在。**
+
+### 当前真实状态
+
+| 能力 | 状态 |
+| --- | --- |
+| labwc compositor + Wayland socket | **正常，已实测** |
+| llvmpipe GL 4.5 / GLES 上下文（`EGL_PLATFORM=surfaceless`） | **可用，已实测** |
+| Wayland 上的 EGL/GLES 应用（`es2_info`） | **仍失败**（`Hangup`）——未解决 |
+| `glxgears` / `glxinfo` | **仍失败**：guest 内无 X server / Xwayland 未起，GLX 无从建立 |
+
+因此「3D 游戏可跑」目前**依然不成立**，但原因已收窄：不是没有显示服务器，
+而是 (1) Wayland EGL 路径上 `es2_info` 直接 `Hangup`，
+(2) 没有 X server 供 GLX 使用。下一步应查 `es2_info` 在
+`WAYLAND_DISPLAY=wayland-0` 下崩溃的原因。
+
+> 教训：给 guest 脚本打补丁时用 `t[:i] + new` 替换会静默截断文件。
+> 之后所有此类注入都必须校验行数（canonical = 90 行）并只做插入。
