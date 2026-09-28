@@ -134,12 +134,33 @@ def run_host_tests(binaries: list[str]) -> int:
     return 0
 
 
+def run_whitespace(label: str) -> int:
+    """`git diff --check`: fail on whitespace errors in the working diff.
+
+    The six check-proc-step*-local targets each ran this after their source
+    assertions, so it is a real gate rather than build noise.
+    """
+    r = subprocess.run(["git", "diff", "--check"], cwd=REPO, check=False,
+                       capture_output=True, text=True)
+    if r.returncode != 0 or r.stdout.strip():
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        print(f"{label}: whitespace errors in the working diff", file=sys.stderr)
+        return 1
+    print(f"{label}: PASS")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("gate", help="gate name from tools/gates.toml, or 'host-tests'")
+    ap.add_argument("gate",
+                    help="gate name from tools/gates.toml, 'host-tests' or "
+                         "'whitespace'")
     ap.add_argument("--list", action="store_true", help="list gate names and exit")
     ap.add_argument("--binaries", default="",
                     help="space-separated host test binaries (host-tests only)")
+    ap.add_argument("--label", default="whitespace",
+                    help="label for the PASS line (whitespace only)")
     a = ap.parse_args()
 
     if a.gate == "host-tests":
@@ -147,6 +168,8 @@ def main() -> int:
         if not binaries:
             raise SystemExit("error: host-tests needs --binaries")
         return run_host_tests(binaries)
+    if a.gate == "whitespace":
+        return run_whitespace(a.label)
 
     gates = load_gates()
     if a.list:

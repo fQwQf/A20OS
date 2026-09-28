@@ -224,27 +224,21 @@ check-proc-step35-local: check-task-state-boundary \
 	check-concurrency-foundation check-task-lifetime-boundary \
 	step35-rv-debug-1c step35-la-debug-1c \
 	step35-rv-release-8c step35-la-release-8c
-	@git diff --check
-	@echo "check-proc-step35-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step35-local
 check-proc-step6-local: check-task-state-boundary \
 	check-concurrency-foundation check-task-lifetime-boundary \
 	check-blocking-point-boundary check-signal-exit-boundary \
 	check-timeout-ownership-boundary \
 	step6-rv-debug-1c step6-la-debug-1c \
 	step6-rv-release-8c step6-la-release-8c
-	@git diff --check
-	@echo "check-proc-step6-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step6-local
 check-proc-step7-local: check-task-state-boundary \
 	check-concurrency-foundation check-task-lifetime-boundary \
 	check-blocking-point-boundary check-signal-exit-boundary \
 	check-timeout-ownership-boundary check-smp-runqueue-boundary \
 	step7-rv-debug-1c step7-la-debug-1c \
 	step7-rv-release-8c step7-la-release-8c
-	@git diff --check
-	@echo "check-proc-step7-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step7-local
 check-proc-step8-local: check-task-state-boundary \
 	check-concurrency-foundation check-task-lifetime-boundary \
 	check-blocking-point-boundary check-signal-exit-boundary \
@@ -252,9 +246,7 @@ check-proc-step8-local: check-task-state-boundary \
 	check-process-lock-split-boundary \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c
-	@git diff --check
-	@echo "check-proc-step8-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step8-local
 check-proc-step35: check-proc-step35-local
 	@echo "check-proc-step35: PASS"
 
@@ -268,16 +260,12 @@ check-proc-step8: check-proc-step8-local
 	@echo "check-proc-step8: PASS"
 
 check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
-	@git diff --check
-	@echo "check-proc-step4-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step4-local
 check-proc-step4: check-proc-step4-local
 	@echo "check-proc-step4: PASS"
 
 check-proc-step5-local: check-signal-exit-boundary check-proc-step4-local
-	@git diff --check
-	@echo "check-proc-step5-local: PASS"
-
+	@$(PYTHON) tools/gates.py whitespace --label check-proc-step5-local
 check-proc-step5: check-proc-step5-local
 	@echo "check-proc-step5: PASS"
 
