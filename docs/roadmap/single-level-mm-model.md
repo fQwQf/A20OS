@@ -1737,3 +1737,58 @@ static int pt_table_empty(pte_t *table, int level) {
    `mm_pt_prot_bits()` 的编码宽度）。
 
 在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert。
+
+### 10.24 证伪 TLB 假设，并把搜索空间砍半
+
+§10.23 列的第一条假设是「状态路径只做 `arch_tlb_flush_page_local()`、没走完整 TLB 事务，
+`-smp 2` 下另一 CPU 可能持有残留翻译」。**用 `-smp 1` 复跑证伪**：
+
+| 配置 | `a20.anonprov=4096` |
+|---|---|
+| `-smp 2` | FATAL |
+| `-smp 1` | FATAL（同样崩） |
+
+单 CPU 下不存在「另一 CPU 持有残留翻译」这回事，所以这条**不成立**：(b) 与并发 TLB
+一致性无关，是个单线程下就能触发的逻辑错误。
+
+**由此得到一个比之前更有价值的收窄。** 对照 `d1fb5c22`（预标记默认关闭、状态路径仍
+inert 的那次提交）当时的实测：`a20.anonprov=4096` 下 `mm_anon_provisioned=9277`、
+关机审计全 0、`mm_stress` **PASS**。也就是说——
+
+> **mmap 预标记本身是安全的**。崩溃只在状态路径**真的去消费**这些预标记条目时才出现。
+
+这把嫌疑从「预标记写坏了状态」收缩到「状态路径消费 mmap 预标记条目的那段逻辑」，
+也就是 `fault.c` 里这一段：
+
+```c
+pfn_t np = pfa_alloc_page();
+if (np != PFN_NONE) {
+    if (cg_mem_charge(t->cgroup, 1) == 0) {
+        memset(pfn_to_virt(np), 0, PAGE_SIZE);
+        if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np), allow,
+                          MM_ST_ANON_MAPPED) == 0) { ... return 0; }
+        cg_mem_uncharge(t->cgroup, 1);
+    }
+    frame_put(np);
+}
+```
+
+与 VMA 路径逐项对照，**最可疑的差异**是：状态路径**没有参与 TLB 事务**——既没有
+`mm_tlb_invalidate_begin/finish`，也没有 `mm_tlb_note_change()`。VMA 路径经
+`fault_map()` 完成映射，会在事务内登记地址变化并在结束时统一 shootdown。状态路径只在
+成功分支调一次本地刷新就 `return 0`，**绕过了 `mm_tlb_invalidate_finish()`**。
+
+单 CPU 下这依然可能出错：事务不只服务于跨核 shootdown，它还承担「本事务内所有改动在
+返回用户态前必须对当前 CPU 生效」这一职责。`mm_tlb_invalidate_finish()` 结尾会做
+`arch_tlb_flush()` / generation 推进；直接 `return 0` 可能让**当前** CPU 在
+satp/ASID 或 TLB 状态未收尾时继续执行。
+
+**下一步（具体、可执行）**：把状态路径的映射纳入 TLB 事务——进入前
+`mm_tlb_invalidate_begin(mm)`，成功与失败的所有出口都
+`mm_tlb_invalidate_finish(mm)`，并用 `mm_tlb_note_change(mm, page_va, PAGE_SIZE)`
+替代裸的 `arch_tlb_flush_page_local()`。做完直接用 `-smp 1` 复跑：
+崩→假设成立，可继续收窄；不崩→该假设也被证伪，换查 `mm_cursor_map` 与
+`fault_map` 在「安装并记账」上的其他差异（例如 `mm->rss` 与 cgroup 记账是否重复）。
+
+**在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert**，默认配置行为与改动前
+完全一致（`mm_fault_from_status=0`，全部门通过）。
