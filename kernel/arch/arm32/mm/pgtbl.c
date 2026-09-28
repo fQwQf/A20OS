@@ -324,9 +324,7 @@ static int pt_table_empty(pte_t *table, int entries) {
     return 1;
 }
 
-int pt_unmap(mm_struct_t *mm, vaddr_t va) {
-    if (!mm) return -EINVAL;
-    pt_root_t *pgdir = mm->pgdir;
+int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
     int idx1;
     pte_t pte;
     pte_t *l2;
@@ -360,10 +358,8 @@ int pt_unmap(mm_struct_t *mm, vaddr_t va) {
     return 0;
 }
 
-int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
+int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out) {
-    if (!mm) return -EINVAL;
-    pt_root_t *pgdir = mm->pgdir;
     int idx1;
     pte_t pte;
     pte_t *l2;
