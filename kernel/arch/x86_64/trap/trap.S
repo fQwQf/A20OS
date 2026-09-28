@@ -87,7 +87,7 @@ isr_common:
     rdmsr
     shlq  $32, %rdx
     orq   %rdx, %rax
-    movq  %rax, 184(%rsp)       /* ctx->padding[1] */
+    movq  %rax, 184(%rsp)       /* ctx->user_fs_base */
 
     /* Switch FS base to the kernel canary stub for the duration of kernel
      * execution.  The compiler emits TLS-style stack-protector reads
@@ -112,7 +112,7 @@ isr_common:
     testq $3, %rax
     jz    3f
     leaq  272(%rsp), %rax
-    movq  %rax, 176(%rsp)       /* ctx->padding[0] */
+    movq  %rax, 176(%rsp)       /* ctx->kernel_stack_top */
 3:
 
     /* A kernel IRQ may interrupt the now-preemptible syscall handler.  Save
@@ -443,7 +443,7 @@ __return_to_user:
      */
 
     /* Keep TSS.rsp0 pointed at this task's kernel stack top. */
-    movq  176(%rsp), %rdi       /* ctx->padding[0] */
+    movq  176(%rsp), %rdi       /* ctx->kernel_stack_top */
     testq %rdi, %rdi
     jz    1f
     call  x86_64_set_tss_rsp0

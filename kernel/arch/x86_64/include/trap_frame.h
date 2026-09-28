@@ -16,9 +16,10 @@ typedef struct {
     uint64_t r8,  r9,  r10, r11;
     uint64_t r12, r13, r14, r15;
     uint64_t rip, rflags, cs, ss;
-    uint64_t kernel_tp;
-    uint64_t kscratch0;
-    uint64_t padding[2];          /* 176: kernel top, 184: tp */
+    uint64_t kernel_tp;           /* 160: MSR_KERNEL_GS_BASE, read via RDMSR   */
+    uint64_t kscratch0;           /* 168: CR2 for #PF, else reused for ptrace   */
+    uint64_t kernel_stack_top;    /* 176: outer kernel RSP for CPL3 -> CPL0    */
+    uint64_t user_fs_base;        /* 184: MSR_FS_BASE, the user TLS base        */
     uint64_t saved_kstack;        /* 192: original task->kstack (saved ctx ptr) */
     uint64_t reserved;            /* 200: pad to 16 bytes */
 } __attribute__((aligned(16))) trap_context_t;
@@ -104,7 +105,7 @@ extern void idt_flush(uint64_t idtr_ptr);
 #define TRAP_CTX_SP(ctx)           ((ctx)->rsp)
 #define TRAP_CTX_RA(ctx)           ((ctx)->rbp)  /* use rbp for backtrace */
 #define TRAP_CTX_FP(ctx)           ((ctx)->rbp)
-#define TRAP_CTX_TP(ctx)           ((ctx)->padding[1])
+#define TRAP_CTX_TP(ctx)           ((ctx)->user_fs_base)
 
 #define TRAP_CTX_SET_RET(ctx, v)   do { (ctx)->rax = (uint64_t)(v); } while(0)
 #define TRAP_CTX_SET_ARG0(ctx, v)  do { (ctx)->rdi = (uint64_t)(v); } while(0)
@@ -211,7 +212,7 @@ static inline void arch_trap_ctx_set_user_entry(trap_context_t *ctx,
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {
-    ctx->padding[0] = ksp;
+    ctx->kernel_stack_top = ksp;
     if (ctx->cs == 0)
         ctx->cs = 0x1B;
     if (ctx->ss == 0)
@@ -219,7 +220,7 @@ static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t 
 }
 
 static inline uint64_t arch_trap_ctx_get_kernel_stack(const trap_context_t *ctx, uint64_t fallback) {
-    return ctx->padding[0] ? ctx->padding[0] : fallback;
+    return ctx->kernel_stack_top ? ctx->kernel_stack_top : fallback;
 }
 
 static inline void arch_advance_syscall_epc(trap_context_t *ctx) {

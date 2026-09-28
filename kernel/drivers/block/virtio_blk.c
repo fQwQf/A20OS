@@ -362,6 +362,12 @@ static void virtio_blk_complete_used_locked(virtio_blk_inst_t *inst,
                 arch_dma_sync_for_cpu(req->direct_dma ? req->buf
                                                        : req->dma_buf,
                                       req->bytes);
+            /* virtio-blk appends a 1-byte status to the device-writable buffer
+             * and counts it in the descriptor length, so a read completion must
+             * report bytes+1 and a write completion exactly 1.  VIRTIO_BLK_S_OK
+             * is 0, so a descriptor the device never wrote keeps the 0xFF
+             * sentinel set at submit time and is rejected here rather than
+             * being mistaken for success. */
             uint32_t expected_len = req->write ? 1U : (uint32_t)req->bytes + 1U;
             req->result =
                 (inst->status[head] == VIRTIO_BLK_S_OK &&
@@ -548,6 +554,10 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
     desc[slot + 2].flags = VIRTQ_DESC_F_WRITE;
     desc[slot + 2].next  = 0;
 
+    /* Clean each buffer before it is published, then clean the ring slot,
+     * then bump idx behind a wmb().  virtio_net.c publishes first and cleans
+     * after; both are correct.  See the DMA publication contract in
+     * kernel/include/drivers/dual/virtq.h before reordering either sequence. */
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = slot;
     arch_dma_sync_for_device(io_buf, bytes);

@@ -6,6 +6,26 @@
  * the placement that owns the device may call virtq_init (see
  * 04-dual-placement.md ownership rules).  All rings live inside one DMA
  * page (num <= 8), matching the drv_dma user-placement contiguity limit.
+ *
+ * DMA publication contract (read before touching a submit path):
+ *
+ *   arch_dma_sync_for_device() is a cache clean to the point of coherency,
+ *   NOT a memory barrier.  It is a no-op on coherent architectures
+ *   (x86_64, riscv64, ppc64le) and a clean+full-barrier on the cached ones
+ *   (aarch64: dc civac + dsb sy; loongarch64: arch_dcache_flush).
+ *
+ *   Because a clean targets a cache line rather than a point in the store
+ *   stream, it is order-insensitive with respect to the CPU-side store:
+ *   cleaning avail->ring[n] before or after the store yields the same device
+ *   view.  That is why the three in-tree drivers legitimately differ in
+ *   placement -- virtio_blk cleans before publishing, virtio_net cleans
+ *   after, virtio_gpu cleans the whole avail ring once.  None of those
+ *   orderings is a bug; do not "harmonise" them by copying one around.
+ *
+ *   What actually orders the descriptor against the device is the explicit
+ *   wmb() before the notify/kick write, plus the MMIO write itself.  Omit
+ *   either and the coherent no-op architectures are still correct; omit them
+ *   on aarch64/loongarch64 and the device can read a stale ring slot.
  */
 #ifndef _DRIVERS_DUAL_VIRTQ_H
 #define _DRIVERS_DUAL_VIRTQ_H
