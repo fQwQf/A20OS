@@ -7,6 +7,7 @@
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/lock.h"
+#include "core/lock_counters.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
@@ -295,6 +296,16 @@ void a20_lwip_init(void) {
     a20_net_config_init();
     spin_init(&g_lwip_lock);
     spin_set_debug(&g_lwip_lock, "lwip", NULL);
+    /* g_lwip_lock serialises the entire TCP/IP data plane, so its contention
+     * is the single most important number for deciding whether the network
+     * stack can ever scale across CPUs.  Register it (and enable per-callsite
+     * sampling) so /proc/a20/lock_contention attributes it to exact call
+     * sites.  Measuring before rewriting is deliberate: sharding a lock this
+     * central is a high-risk protocol change, and the same callsite-first
+     * method used for proc_lock is what made that rewrite's scope decidable
+     * (see docs/roadmap/perf-overhaul.md). */
+    lock_counters_register(&g_lwip_lock, "lwip");
+    lock_counters_enable_callsite(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_netifs();
     /* Add loopback after physical links.  lwIP prepends netifs to its list;
