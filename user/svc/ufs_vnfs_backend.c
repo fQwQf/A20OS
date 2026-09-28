@@ -1,13 +1,16 @@
 /*
- * ufs_vnfs_backend.c — vnode 型文件系统的通用用户态适配器。
+ * ufs_vnfs_backend.c — a generic user-space adapter for vnode-type
+ * filesystems.
  *
- * 承载经 fscompat 兼容环境原样编译的内核 diskfs 实现（ext4 / ntfs /
- * iso9660）。内核侧以 ino 寻址，本适配器维护 ino→vnode* 映射；所有
- * 文件操作经由各 FS 自身的 vnode_ops/vfile_ops 表执行，块 IO 经共享的
- * fs_block_io 受控通道进入内核块层。
+ * Carries the kernel diskfs implementations (ext4 / ntfs / iso9660) compiled
+ * as-is under the fscompat environment. The kernel side addresses by ino, so
+ * this adapter maintains an ino-to-vnode map; all file operations run through
+ * each FS's own vnode_ops/vfile_ops tables, and block IO enters the kernel
+ * block layer through the shared gated fs_block_io channel.
  *
- * 服务进程重启后映射表清空：崩溃恢复契约要求重新挂载（新 ino 空间），
- * 与 ubd_recover 的语义一致。
+ * The map is cleared when the service process restarts: the crash-recovery
+ * contract requires a re-mount (a new ino space), consistent with the
+ * semantics of ubd_recover.
  */
 #include <stdint.h>
 #include "ufs_backends.h"
@@ -77,7 +80,8 @@ static uint8_t ft_of(const vnode_t *vn)
     }
 }
 
-/* ---- 块设备描述符：把受控 IO 通道装配成 bcache 需要的形状 ---- */
+/* ---- block device descriptor: assemble the gated IO channel into the
+ * shape bcache needs ---- */
 
 static int dev_read_sector(struct block_dev *dev, uint64_t lba, void *buf,
                            size_t count)
@@ -115,8 +119,10 @@ int vnfs_mount_generic(const char *fstype)
         g_root = isofs_mount(g_bc);
         g_readonly = 1;
     } else     if (strcmp(fstype, "ntfs") == 0) {
-        /* 内核 ntfs 写路径已由 smoke-native-fs-all 的在库端到端测试覆盖
-         * （创建/写读/目录/删除/崩溃重启持久化），开放读写语义。 */
+        /* The kernel ntfs write path is already covered by the in-tree
+         * end-to-end tests in smoke-native-fs-all (create/write-read/directory/
+         * delete/crash restart persistence), so read-write semantics are
+         * opened up. */
         g_root = ntfs_mount(g_bc);
         g_readonly = 0;
     } else {
@@ -126,9 +132,11 @@ int vnfs_mount_generic(const char *fstype)
         return -U_EINVAL;
 
     /*
-     * 防御性规范：任何文件系统的根必须是目录。部分宿主 mkfs 变体的
-     * 根记录标志位与内核解析存在出入（内核 ntfs 此前无在库挂载方），
-     * 在适配层归一，不改动共享源码。
+     * Defensive normalization: the root of any filesystem must be a
+     * directory. Some host mkfs variants disagree with the kernel parser
+     * about the root record flags (the kernel ntfs previously had no in-tree
+     * mounter); normalize in the adapter layer without modifying the shared
+     * sources.
      */
     if (g_root->type != VFS_FT_DIR) {
         g_root->type = VFS_FT_DIR;
@@ -141,7 +149,7 @@ int vnfs_mount_generic(const char *fstype)
     return 0;
 }
 
-/* ---- 协议操作 ---- */
+/* ---- protocol operations ---- */
 
 static void put_fail(ufs_resp_hdr_t *r, int err)
 {
@@ -240,7 +248,7 @@ static int64_t vn_readdir(uint64_t dir_ino, uint64_t skip,
                               : (uint16_t)(sizeof(vfs_dirent64_t));
         }
         if (n < (int)sizeof(stream))
-            break; /* 本批已尽 */
+            break; /* this batch is exhausted */
         if (used + 10 + 32 > cap)
             break;
     }
@@ -290,7 +298,7 @@ static int64_t vn_mkdir(uint64_t dir_ino, const char *name,
         put_fail(r, rc);
         return rc;
     }
-    /* 注册新目录以便后续寻址 */
+    /* Register the new directory so it can be addressed later */
     vnode_t *created = NULL;
     if (dir->ops->lookup && dir->ops->lookup(dir, name, &created) == 0 &&
         created) {
@@ -306,7 +314,7 @@ static int64_t vn_unlink(uint64_t dir_ino, const char *name)
     if (!dir || !dir->ops || !dir->ops->unlink)
         return g_readonly ? -U_EROFS : -U_ENOSYS;
 
-    /* 先解析目标以便失效映射 */
+    /* Resolve the target first so the mapping can be invalidated */
     vnode_t *victim = NULL;
     if (dir->ops->lookup)
         dir->ops->lookup(dir, name, &victim);
@@ -316,7 +324,7 @@ static int64_t vn_unlink(uint64_t dir_ino, const char *name)
         if (rc == 0)
             vn_map_drop(victim->ino);
         else
-            vnode_put(victim); /* lookup 引用 */
+            vnode_put(victim); /* lookup reference */
     }
     return rc;
 }
@@ -382,8 +390,9 @@ static int64_t vn_read(uint64_t ino, uint64_t off, uint32_t count,
     if (count > cap)
         count = cap;
 
-    /* 经 lseek 同步后端私有游标（如 ntfs 的 fc->file_off）：
-     * 仅设 vf->offset 时，页粒度 RPC 的非零偏移会被忽略。 */
+    /* Sync the backend-private cursor via lseek (e.g. ntfs's
+     * fc->file_off): when only vf->offset is set, non-zero offsets in
+     * page-granular RPCs are ignored. */
     if (vf->ops && vf->ops->lseek)
         vf->ops->lseek(vf, (long)off, 0);
     else

@@ -1,10 +1,13 @@
 /*
- * fscompat/bcache_user.c — block_cache API 的用户态实现。
+ * fscompat/bcache_user.c — the user-space implementation of the block_cache
+ * API.
  *
- * 契约与 kernel/fs/block_cache.c 一致：字节粒度读写、按 512B 扇区行缓存、
- * 写穿透（每次 write_bytes 直达块设备并刷新缓存副本，sync 即无操作）。
- * 宿主单线程，无需内核版的桶锁/LRU/写回队列；容量取小池即可满足
- * 元数据 + 顺序数据访问。
+ * The contract matches kernel/fs/block_cache.c: byte-granular reads and
+ * writes, caching in 512B sector lines, write-through (every write_bytes
+ * goes straight to the block device and refreshes the cached copy, so sync
+ * is a no-op). The host is single-threaded, so the kernel version's bucket
+ * locks, LRU and writeback queue are unnecessary; a small pool suffices for
+ * metadata plus sequential data access.
  */
 #include <stdint.h>
 #include "core/types.h"
@@ -27,8 +30,9 @@ struct bcache_compat_state {
     uint32_t     clock;
 };
 
-/* 真实 bcache_t 由内核头定义且体积庞大；宿主只传递句柄，
- * 内部状态经 side-table 关联。 */
+/* The real bcache_t is defined by the kernel header and is large; the host
+ * only passes the handle around and correlates internal state through a
+ * side table. */
 #define UBC_MAX_INSTANCES 8
 static struct bcache_compat_state g_states[UBC_MAX_INSTANCES];
 static bcache_t g_handles[UBC_MAX_INSTANCES];
@@ -68,7 +72,8 @@ static ubc_line_t *line_for(struct bcache_compat_state *st, uint64_t lba)
     uint32_t idx = (uint32_t)(lba % UBC_LINES);
     ubc_line_t *ln = &st->lines[idx];
     if (ln->valid && ln->lba != lba) {
-        /* 直接映射冲突：逐出。写穿透语义下脏副本不存在。 */
+        /* Direct-mapped conflict: evict.  Under write-through semantics no
+         * dirty copy exists. */
         ln->valid = 0;
     }
     if (!ln->valid) {
@@ -133,7 +138,8 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf,
         ubc_line_t *ln = line_for(st, lba);
         if (!ln) {
             if (!(off == 0 && chunk == 512))
-                return -1; /* 部分扇区写需要既有内容，读失败即失败 */
+                return -1; /* a partial-sector write needs the existing
+                               * content, so a read failure is a failure */
             memset(sect, 0, sizeof(sect));
         } else {
             memcpy(sect, ln->data, 512);
@@ -156,7 +162,7 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf,
 int bcache_sync_checked(bcache_t *bc)
 {
     (void)bc;
-    return 0; /* 写穿透：无待刷脏数据 */
+    return 0; /* write-through: no dirty data pending flush */
 }
 
 void bcache_sync(bcache_t *bc)

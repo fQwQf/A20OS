@@ -1,8 +1,9 @@
 /*
- * fscompat/proc/proc.h — 用户态 FS 宿主的最小任务上下文。
+ * fscompat/proc/proc.h — the minimal task context of the user-space FS host.
  *
- * 磁盘文件系统源码仅使用 proc_current() 与 task_t 的 uid/gid/pid 字段
- * （权限判定路径）；单用户服务进程中固定为 root。
+ * The disk filesystem sources only use proc_current() and the uid/gid/pid
+ * fields of task_t (the permission-decision path); these are fixed to root in
+ * the single-user service process.
  */
 #ifndef _PROC_H
 #define _PROC_H

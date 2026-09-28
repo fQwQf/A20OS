@@ -1,8 +1,9 @@
 /*
- * ufs_fat_backend.c — ufsd 的 FAT32 后端（fat32lite 路径模型）。
+ * ufs_fat_backend.c — the FAT32 backend of ufsd (fat32lite path model).
  *
- * fat32lite 以路径为键、协议以 ino 为句柄，本文件维护 ino↔path 映射表。
- * 块 IO 经 io_read/io_write（fs_block_io 受控通道）注入 fat32lite_io_t。
+ * fat32lite is keyed by path while the protocol uses ino as a handle, so
+ * this file maintains an ino-to-path map. Block IO is injected into
+ * fat32lite_io_t via io_read/io_write (the gated fs_block_io channel).
  */
 #include <stdint.h>
 #include "ufs_backends.h"
@@ -93,14 +94,15 @@ static void path_join(char *dst, const fat_node_t *dir, const char *name,
     dst[dlen] = '/';
     uint32_t nl = name_len;
     if (nl > 32)
-        nl = 32; /* 8.3 名上限远小于此 */
+        nl = 32; /* the 8.3 name limit is far smaller than this */
     a20_memcpy(dst + dlen + 1, name, nl);
     dst[dlen + 1 + nl] = '\0';
 }
 
 static uint32_t mode_for(int is_dir)
 {
-    /* S_IFDIR|0755 / S_IFREG|0755，与内核 vfs.h 位型一致 */
+    /* S_IFDIR|0755 / S_IFREG|0755, matching the bit patterns in the
+     * kernel's vfs.h */
     return is_dir ? (0040000u | 0755u) : (0100000u | 0755u);
 }
 
@@ -154,7 +156,8 @@ static int64_t fat_getattr(uint64_t ino, ufs_resp_hdr_t *r)
     fat_node_t *n = node_by_ino(ino);
     if (!n)
         return -U_ENOENT;
-    /* 根目录不走 fat32lite 路径解析（其对 "/" 返回 EINVAL） */
+    /* The root directory does not go through fat32lite path resolution
+     * (it returns EINVAL for "/") */
     if (n->ino == UFS_ROOT_INO) {
         r->out0 = 0;
         r->out1 = (uint64_t)mode_for(1) << 32;
@@ -299,7 +302,8 @@ static int64_t fat_rmdir(uint64_t dir_ino, const char *name)
 {
     (void)dir_ino;
     (void)name;
-    return -U_ENOSYS; /* fat32lite 未提供目录删除；v1 边界 */
+    return -U_ENOSYS; /* fat32lite provides no directory removal; a v1
+                   * boundary */
 }
 
 static int64_t fat_truncate(uint64_t ino, uint64_t size)
@@ -308,7 +312,7 @@ static int64_t fat_truncate(uint64_t ino, uint64_t size)
     if (!n)
         return -U_ENOENT;
     if (size != 0)
-        return -U_ENOSYS; /* 仅支持截断为空 */
+        return -U_ENOSYS; /* only truncation to empty is supported */
 
     fat32lite_file_t f;
     if (fat32lite_create(&g_fs, n->path, &f) != FAT32LITE_OK)
@@ -363,7 +367,8 @@ static int64_t fat_write(uint64_t ino, uint64_t off, const uint8_t *data,
         r->status = -U_EIO;
         return r->status;
     }
-    /* 同 fat32lite_append 的约定：既有文件以可写语义续用 */
+    /* Per the fat32lite_append convention: an existing file is reused with
+     * writable semantics */
     f.writable = 1;
     if (off > f.size) {
         fat32lite_close(&f);
@@ -390,18 +395,18 @@ static int64_t fat_rename(uint64_t old_dir, const char *old_name,
     (void)new_dir;
     (void)new_name;
     (void)r;
-    return -U_ENOSYS; /* fat32lite 无重命名原语 */
+    return -U_ENOSYS; /* fat32lite has no rename primitive */
 }
 
 static int64_t fat_sync(void)
 {
-    /* 直写后端无需冲刷 */
+    /* A direct-write backend needs no flush */
     return 0;
 }
 
 static void fat_statfs(ufs_resp_hdr_t *r)
 {
-    /* fat32lite 不维护空闲计数；零值即可 */
+    /* fat32lite does not track free counts; zeros suffice */
     (void)r;
 }
 

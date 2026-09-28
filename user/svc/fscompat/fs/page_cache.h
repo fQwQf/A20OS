@@ -1,6 +1,7 @@
 /*
- * fscompat/fs/page_cache.h — 用户态 FS 宿主的页缓存桩。
- * ext4 关闭路径调用 page_cache_discard_unlinked；宿主无内核页缓存，为 no-op。
+ * fscompat/fs/page_cache.h — a page cache stub for the user-space FS host.
+ * The ext4 close path calls page_cache_discard_unlinked; the host has no
+ * kernel page cache, so it is a no-op.
  */
 #ifndef _FS_PAGE_CACHE_H
 #define _FS_PAGE_CACHE_H
