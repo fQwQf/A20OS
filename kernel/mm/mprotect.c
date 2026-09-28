@@ -164,6 +164,10 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     int idx = arch_pt_vpn(va, 0);
                     declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
                 }
+                /* TEMP (docs 10.54): full sequence of status-byte writes. */
+                kerr("[MM-RF] va=%lx ptef=%lx declined=%d pte=%d\n",
+                     (unsigned long)va, (unsigned long)ptef, declined,
+                     (int)(pte != NULL));
                 /* TEMP (docs 10.49): widening to RW while the per-PTE status
                  * keeps its old prot is exactly the divergence that leaves a
                  * read-only PTE under a writable VMA (docs 10.48). */

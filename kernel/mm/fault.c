@@ -1006,6 +1006,11 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                     if (np != PFN_NONE) {
                         if (cg_mem_charge(t->cgroup, 1) == 0) {
                             memset(pfn_to_virt(np), 0, PAGE_SIZE);
+                            kerr("[MM-ST] va=%lx status_prot=%d allow=%lx "
+                                 "W=%d cow=%d\n", (unsigned long)page_va,
+                                 prot, (unsigned long)allow,
+                                 (int)((allow & PTE_W) != 0),
+                                 (int)((allow & PTE_COW) != 0));
                             if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
                                               allow, MM_ST_ANON_MAPPED) == 0) {
                                 mm_cursor_unlock(&qcur);
