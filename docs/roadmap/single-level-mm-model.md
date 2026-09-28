@@ -1952,3 +1952,52 @@ else if (mm_find_vma(t->mm, page_va) != vma) { /* VMA 已被换掉 -> 撤销 */ 
 `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` 全通过，
 5 个架构与 3 个 NOMMU 变体构建通过。**下述所有 (b) 排查都在 `a20.anonprov=4096` 下进行，
 默认路径不受影响。**
+
+### 10.28 补齐四项缺页统计：本身是对的，但**没有**修好 (b)
+
+按 §10.27 的指认，把 VMA 路径那四项每任务/全局软缺页计数补进状态路径成功分支：
+
+```c
+__atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+__atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
+```
+
+`a20.anonprov=4096` 复跑：**仍然 FATAL**。所以 §10.26 候选 1（记账重复/缺失导致连锁出错）
+**被证伪**。
+
+但这个改动**本身是正确的、应当保留**：状态路径此前完全不记这四项，意味着任何走状态
+路径的缺页都不会出现在 `t->perf_page_faults` 与 `/proc` 上报的缺页率里——这是与 VMA
+路径的真实记账不一致，与 (b) 是否由它引起无关。保留它是因为它对，不是因为它治好了崩溃。
+
+**至此 (b) 的五条假设全部被证伪**：
+
+| 假设 | 出处 | 结果 |
+|---|---|---|
+| `nr_present` uint16 回绕 | §10.23 | 证伪（`pt_table_empty` 直接扫 PTE，不看该计数） |
+| 跨核 TLB 残留翻译 | §10.24 | 证伪（`-smp 1` 同样崩） |
+| 状态路径缺 TLB 事务 | §10.25 | 证伪（`fault_map` 结构完全相同，也不开事务） |
+| 宽限期回收 `mm_pt_retire_table()` | §10.26 | 证伪（状态路径 inert + 预标记开 = 9287 页、stress PASS） |
+| 漏记四项缺页统计 | §10.27 | 证伪（补齐后仍崩） |
+
+**仍然确定的事实**（这些是实验结果，不是推断）：
+1. mmap 预标记**单独**安全（当前代码、预标记开、状态路径 inert → stress PASS、审计全 0）。
+2. 崩溃只在状态路径**真的消费** mmap 预标记条目时出现。
+3. 崩溃点是 **brk** 地址，而复现配置里 brk 预标记**关闭**——状态路径够不到它。
+
+第 3 条是核心矛盾，也是下一步唯一该盯的东西：**状态路径在处理 mmap 区间时，破坏了 brk
+路径后续依赖的某个共享不变式。** 已排除记账与统计，剩下最可能的是页表/metadata 层面的
+共享状态——具体说，`mm_cursor_map()` 把一个 `MM_ST_ANON_VIRT` 槽位变成已映射时，
+`mm_pt_note_present()` 记的 `nr_present` 与之后 `mm_pt_note_absent()` 的清理、以及
+`mm_cursor_unmap()` 清除 stale 标记这三条路径之间是否自洽。
+
+**下一步应当做的具体实验**（仍不需猜测）：
+在 `mm_pt_provision_anon()` 与 `mm_cursor_map()` 之后各加一个廉价的「不变式断言」计数器
+——映射完成后立刻回读该槽位的 class/PTE，若出现「class 声称已映射但 PTE 无效」或
+「PTE 有效但 class 仍是 ANON_VIRT」就计数；崩溃后再打印这个计数。计数非零即证明
+metadata 与 PTE 失配，并直接指出是哪一次写入造成的。
+
+**当前安全状态**（未变）：预标记默认关闭，状态缺页路径 inert。默认配置
+`mm_fault_from_status=0`、审计全 0（含 `safe=0`）、`pt_pages=6` 不变，
+`smoke-mm-stress` / `smoke-mm-fork-exec-race` 通过，riscv64/x86_64/aarch64 构建通过。
