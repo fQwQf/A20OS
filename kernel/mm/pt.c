@@ -4,6 +4,7 @@
 #include "core/cpu.h"
 #include "core/perf.h"
 #include "core/string.h"
+#include "core/bootargs.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/mm.h"
@@ -793,6 +794,57 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
  * page -- paid once at mmap, and skipped entirely for ranges above
  * MM_ANON_PROVISION_MAX_PAGES, which keep the VMA-based fault path.
  */
+/*
+ * Benchmark-only override for the eager-provisioning cap.
+ *
+ * MM_ANON_PROVISION_MAX_PAGES is a compile-time constant, so an ON/OFF A/B used
+ * to need a full rebuild per arm.  On a shared host the load drifts *between*
+ * arms, which is larger than the effect being measured (docs 10.12), so the
+ * arms have to be interleaved -- and interleaving is impossible if switching
+ * requires a rebuild.  a20.anonprov=<pages> makes it switchable at boot so one
+ * build can run ON,OFF,ON,OFF,... against an identical kernel.
+ *
+ * Default is unchanged (MM_ANON_PROVISION_MAX_PAGES).  a20.anonprov=0 disables
+ * provisioning entirely, which is the other arm of the experiment.
+ */
+static uint32_t g_anon_prov_max;   /* off by default; a20.anonprov=N enables */
+
+void mm_pt_anon_prov_init(void)
+{
+    const char *cmdline = bootargs_get();
+    if (!cmdline)
+        return;
+
+    const size_t klen = sizeof(MM_ANON_PROV_KEY) - 1;
+    const char *p = cmdline;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        const char *tok_end = p;
+        while (*tok_end && *tok_end != ' ' && *tok_end != '\t')
+            tok_end++;
+
+        if ((size_t)(tok_end - p) > klen && !strncmp(p, MM_ANON_PROV_KEY, klen) &&
+            p[klen] == '=') {
+            uint32_t v = 0;
+            const char *q = p + klen + 1;
+            int ok = (q < tok_end);
+            for (; q < tok_end; q++) {
+                if (*q < '0' || *q > '9') { ok = 0; break; }
+                v = v * 10 + (uint32_t)(*q - '0');
+            }
+            if (ok)
+                g_anon_prov_max = v;
+            else
+                kwarn("[PT] bad %s value, keeping %u (0 = off)\n",
+                      MM_ANON_PROV_KEY, g_anon_prov_max);
+        }
+        p = tok_end;
+    }
+}
+
 int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                          pte_t flags)
 {
@@ -802,7 +854,7 @@ int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -EFAULT;
 
     vaddr_t span = end - start;
-    if (span / PAGE_SIZE > MM_ANON_PROVISION_MAX_PAGES)
+    if (span / PAGE_SIZE > g_anon_prov_max)
         return 0;   /* too large to provision eagerly; VMA path still correct */
 
     uint8_t byte = status_byte(MM_ST_ANON_VIRT, flags);
