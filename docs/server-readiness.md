@@ -67,6 +67,13 @@ AHCI（`FLUSH CACHE EXT`）。
    的收益。要真正吃满跨地域 BDP，还需要更大的接收缓冲与 AIO/零拷贝收包。
    **注意：本环境无法给出吞吐实测**——loopback RTT 近 0，窗口限制根本不
    生效，因此这里只能声称"协议上限已解除"，**不能声称任何带宽数字**。
+   **池压力现已可观测**：`/proc/a20/netmem` 暴露 lwIP 各池的
+   used/max/err（`MEMP_STATS` 因 `MEMP_MEM_MALLOC=0` 派生为 1，计数器本来
+   就在维护，但 lwIP 自带的唯一读取入口被 `LWIP_STATS_DISPLAY=0` 编译掉了，
+   这是 A20OS 侧新写的读取路径）。其中 `err` 正是"池不够大"的信号，
+   `smoke-lwip-memp` 断言跑完网络套件后 `err` 仍为 0。
+   但 loopback 下 `max` 峰值极低，**这份数据不足以论证当前池容量合理**——
+   要定容量需要真实高 RTT/大流量负载。
 4. 无 SACK、无 ECN、无 SYN cookie、无 `MSG_ZEROCOPY`。
 5. 多队列/RSS/RPS/XPS/XDP 全部缺失；virtio-net 只有一对硬编码队列
    （RX=0/TX=1），无 MSI-X，无任何卸载（CSUM/TSO/GSO/GRO）。
