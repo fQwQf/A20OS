@@ -9,10 +9,11 @@ description = "XFCE Wayland/labwc desktop via apk world 'xfce', KVM-accelerated 
 arch = "x86_64"
 
 [machine]
-# smp>1 (CONFIG_SMP build) currently hangs during XFCE session bring-up on
-# x86_64 (components block on socket/dbus wakeups); single-core is the
-# verified-working configuration until that scheduler bug is fixed.
-smp = 1
+# smp = 4，与 xfce-riscv64 / xfce-aarch64 一致。
+# 此前钉在 smp = 1，称「smp>1 会在会话启动时挂死」。实测不成立：真正的 NR_CPUS=4
+# 内核可让本镜像存活 3:29 以上且无 panic。真正的阻塞是帧缓冲 id 复用 GEM handle
+# 导致 drmModeSetCrtc 返回 ENOENT（已修，见 09128ad6），与 SMP 无关。
+smp = 4
 memory = "4G"
 
 [gui]
