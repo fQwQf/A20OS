@@ -833,12 +833,46 @@
   - `net_packet_rx_defer()` 在自旋锁下 `memcpy` 拷贝帧，不会保留共享 `rx_frame` 指针；
   - vendored lwIP 的重组路径已审：`ip6_reass_free_complete_datagram()` 与
     `ip6_reass()` 完成时的 `pbuf_cat` 链接逻辑均与上游所有权约定一致，未见缺陷。
-- 下一步：保持 SLAAC 可用以便复现，在 `ip6_input` 入口打印 `p->ref` 与报文类别
-  （MLD / ICMPv6 echo / 邻居通告）定位触发包；同时检查 pbuf pool 是否存在
-  **相邻缓冲区越界写**——pool 是连续 `struct pbuf` 数组，一次越界即可把邻居的
-  `ref` 写坏，从外部看与双重释放完全一样。**注意**：`pbuf_free: p->ref > 0` 断言失败
-  只能说明 `ref == 0`，无法区分「同一地址被释放两次」与「被邻居越界写坏」，
-  两种情况需要上述日志才能区分。
+- **已判定：是真正的重复释放，不是内存踩坏**。在 `pbuf.c` 里临时记录已释放地址、
+  在重新分配时抹掉记录，并在断言前比对，从而把两种成因分开（`pbuf_free: p->ref > 0`
+  只能证明 `ref == 0`，单看断言无法区分）。x86_64 `NR_CPUS=4` + XFCE 镜像实测输出：
+  ```
+  pbufdiag: DOUBLE-FREE 0xffff80000147cba8 type=0 len=0 tot=2 next=0x0
+  ```
+  即该地址**确实被释放过**，所以**相邻缓冲区越界写**这条假设可以排除。
+- 关键线索是被释放的 pbuf 形态：**`len=0` 而 `tot_len=2`**（`type=0 next=0x0`）。
+  `len` 归零的来源已确认：vendored lwIP 的 `pbuf_remove_header()` **不释放任何东西**，
+  它只把 `payload` 前移并原地减小 `len`/`tot_len`，因此当头部正好等于首个 pool pbuf
+  的长度时就会留下 `len=0`、`next=0x0`、而剩余字节挂在 `tot_len` 里的形态。
+- **已排除的猜测（不要重查）**：「`pbuf_remove_header` 内部释放了 pbuf，导致上层再
+  释放一次」——读实现即可否掉，它只做指针/长度算术。而且该函数**只处理链首**
+  （不遍历 `p->next`），所以链首被吃空后仍有一条 `tot_len=2` 的尾巴，形态自洽。
+- **第二个猜测也已排除（不要重查）**：怀疑是「`ip6_input` 释放 `p` 后返回非 `ERR_OK`，
+  再被 `ethernet_input()` 的 `if (err != ERR_OK) pbuf_free(p);` 释放一次」。实测
+  `ip6_input` 只有 5 个返回点（`ip6.c:535/541/561/581/1119`），**全部是 `ERR_OK`**，
+  根本不存在 `ERR_MEM` 出口；因此 `ethernet_input` 那条错误路径对 IPv6 永不触发。
+- 目前**两条最自然的路径都被排除**，重复释放的实际双方还没找到。已确认的事实：
+  `ip6_input` 自身不返回错误；链首 pbuf 可被 `pbuf_remove_header` 吃成 `len=0/next=0x0`；
+  断言触发时 `ref==0` 且该地址确实曾被释放。IPv6 专属这一点仍是最强线索——同一条
+  `ethernet_input` 路径的 IPv4 分支从不触发，说明差异在 `ip6_input` 内部而非入口。
+- **已做过一次 `ip6_input` 全量打点（22 处 `pbuf_free`）的实验，结果与预期不同**：
+  在 x86_64 `NR_CPUS=4` + XFCE 镜像上捕获到
+  ```
+  ip6diag: REPEAT-FREE 0xffff80000139aa00 already in recent frees
+  ip6diag:   ==> 0xffff80000139aa00
+  ip6diag:       0xffff80000139aa70
+  ```
+  但**同一轮 `pbuf_free: p->ref > 0` 断言并没有触发（0 次）**。也就是说这次捕获到的
+  「重复释放」**不是本 bug**：该 pbuf 当时 `ref` 仍 > 0（很可能是被 `pbuf_ref` 过、
+  有两个所有者），两次 `pbuf_free` 本身合法。
+  **教训：判重必须同时打印 `p->ref`**，只看地址重复会把正常引用计数误判成缺陷——
+  任何后续检测都不要漏掉这一点，否则会得出假结论。
+- 另一个观察：两个地址相差 `0x70 = 112` 字节，正好等于 `struct pbuf` 的大小，
+  即它们是 pbuf pool 里**相邻的两个元素**。这与「越界写踩到邻居」的形态吻合，
+  但仅凭地址相邻**不能**下结论（pool 本来就是连续分配），仍需 `p->ref` 与写入点证据。
+- 下一步建议（未做）：把上面的 22 处打点保留，但记录项从「地址」扩展为
+  `{地址, p->ref, 释放点行号}`，并且**只在断言真的会触发的那一轮**dump 序列——
+  本次实验说明不崩溃的轮次里重���信息噪声极大。复现需保持 SLAAC 可用。
 
 ### x86_64 桌面：间歇性 `Failed to set CRTC`（ENOENT），显示起不来
 - 症状：wlroots legacy 后端反复报
