@@ -177,6 +177,12 @@ vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr) {
      * linked-list behavior instead of allocating while mm->lock is held. */
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
         steps++;
+        if (steps > 100000u) {
+            kerr("[VMAWALK] CYCLE pid? mm=%p addr=0x%lx steps=%u head=%p\n",
+                 (void *)mm, (unsigned long)addr, (unsigned)steps,
+                 (void *)mm->mmap);
+            panic("mm_find_vma: VMA list cycle");
+        }
         if (addr < v->end && addr >= v->start) {
             a20_perf_add(A20_PERF_VMA_LOOKUP_STEPS, steps);
             return v;
