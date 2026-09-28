@@ -131,7 +131,26 @@ typedef struct pt_meta {
     uint8_t           stale;        /* detached from parent; subtree poisoned */
     uint8_t           cls[MM_PT_META_ENTRIES];
     uint8_t           cow[(MM_PT_META_ENTRIES + 7) / 8];
+    /* Safety semantics that the status byte has no room for: all 8 bits are
+     * allocated (4 class + COW + 3 prot) and shared-ness already lives in the
+     * class field, so these ride alongside `cow` as a bitmap rather than
+     * widening cls[] to 16 bits per entry. */
+    uint8_t           safe[(MM_PT_META_ENTRIES + 7) / 8];
 } pt_meta_t;
+
+/*
+ * Per-entry safety bits.  These exist so the per-PTE status can become the
+ * authority that replaces the VMA in the fault path (docs 10.7): without them
+ * a status-driven fault would bypass userfaultfd and fault-around's safety
+ * gate, because the status byte cannot express either.
+ */
+/* A userfaultfd range covers this entry: a fault here must be parked for the
+ * handler, never satisfied by fabricating a zero page. */
+#define MM_SAFE_UFFD     (1u << 0)
+/* Multi-page fault-around must not cover this entry (sealed VMA, or a class
+ * where speculative allocation would change semantics). */
+#define MM_SAFE_NO_FA    (1u << 1)
+#define MM_SAFE_MASK     (MM_SAFE_UFFD | MM_SAFE_NO_FA)
 
 struct mm_struct;
 
@@ -188,6 +207,13 @@ int  mm_pt_defer_free(struct mm_struct *mm, pte_t *table, int level);
 
 /* Mark a detached subtree stale so a cursor that acquires it retries. */
 void mm_pt_mark_stale_recursive(pte_t *table, int level);
+
+/* Per-entry safety bits (see MM_SAFE_* above).  Set/clear/test one bit at a
+ * time; every mutation of a slot must go through these so the bits cannot
+ * outlive the class they describe. */
+int  mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags);
+int  mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags);
+int  mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags);
 
 /* Grace-period reclamation for detached PT pages; see the comment above
  * mm_pt_retire_drain().  Callable from any context -- needs neither mm->lock

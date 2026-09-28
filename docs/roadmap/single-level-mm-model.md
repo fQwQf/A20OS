@@ -1498,3 +1498,39 @@ riscv64 / aarch64 / x86_64 的 NOMMU 全部构建通过；`smoke-mm-stress`、
 **未能验证**：arm32 在本环境**改动前就无法构建**（`arm-linux-gnueabihf-gcc` 不在
 PATH），其自有的一份 `pt_unmap` / `pt_unmap_leaf` 已同步改签名并从 `mm->pgdir` 取
 pgdir，但编译未经检验。
+
+### 10.18 给 per-PTE 状态补上安全语义位（状态路径的前置条件之一）
+
+§10.7 记录了状态路径的位置缺陷：它在 `mm_find_vma` **之前**返回，因而绕过
+userfaultfd、`VM_SHARED` 与 fault-around 的安全门。论文的设想是用 per-PTE 状态
+**取代** VMA 成为权威来源，前提是状态本身能表达这些判定——而原来的状态字节做不到：
+8 位全部分配完毕（4 位 class + COW + 3 位 prot），且**共享性其实已经编码在 class 里**
+（`MM_ST_ANON_SHARED` / `MM_ST_FILE_SHARED`），所以并不是「没有地方放」，而是
+「剩下的两项判定确实放不下」。
+
+本次为此新增两项，并按既有 `cow[]` 的写法做成**并行位图**而不是把 `cls[]` 扩成
+16 位/项（后者会把每项元数据翻倍）：
+
+* `MM_SAFE_UFFD`——该项被 userfaultfd 区间覆盖。缺页必须停住交给 handler，
+  **绝不能**直接造零页满足。
+* `MM_SAFE_NO_FA`——该项不得被多页 fault-around 覆盖（VMA 已被 seal，或该 class 下
+  投机分配会改变语义）。
+
+`pt_meta_t` 新增 `safe[(MM_PT_META_ENTRIES + 7) / 8]`；`mm_pt_node_init()` 本来就
+`memset` 整个结构，故新位图天然归零。
+
+**一个必须做对的细节**：`mm_pt_note_absent()` 原本只清 cow 位。若不同步清 `safe`，
+被复用的槽位会**继承**上一条映射的 UFFD/NO_FA 标志，状态路径据此做出错误判定。所以
+清槽位时一并 `&= ~MM_SAFE_MASK`。同理 `mm_pt_safe_set()` 拒绝在 class 为
+`MM_ST_INVALID` 的槽位上置位——无映射的槽位上的安全位没有意义，也永远不会被清掉。
+
+提供 `mm_pt_safe_set/clear/test()` 三个粒度为「一位」的接口，使任何改动槽位的代码
+都必须经由它们，从而保证这些位不会活得比它所描述的 class 更久。
+
+**当前状态**：这些位**已就位但尚未被任何代码写入**——真正的赋值方是 §10.7 依赖链里的
+「mmap/mprotect/munmap/madvise + userfaultfd 注册全部接入状态更新」那一步。因此状态
+缺页路径仍保持 inert（`mm_fault_from_status` 仍恒为 0），行为零变化。
+
+验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64 的
+NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model`
+通过，审计 `missing_meta/present/absent/prot/cow/vma/anon_virt` 全 0，`pt_pages=6` 不变。

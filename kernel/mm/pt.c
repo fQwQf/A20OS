@@ -267,6 +267,13 @@ static inline uint8_t *cow_bit(pt_meta_t *m, int idx)
     return &m->cow[idx >> 3];
 }
 
+static inline uint8_t *safe_bit(pt_meta_t *m, int idx)
+{
+    if (!m || idx < 0 || idx >= MM_PT_META_ENTRIES)
+        return NULL;
+    return &m->safe[idx >> 3];
+}
+
 /*
  * The body of mm_pt_note_present() with the metadata already resolved.  Kept
  * separate so bulk callers (provisioning a whole leaf table) can hoist the
@@ -308,6 +315,47 @@ void mm_pt_note_absent(pte_t *table, int level, int idx)
     uint8_t *cb = cow_bit(m, idx);
     if (cb)
         *cb &= (uint8_t)~(1u << (idx & 7));
+    /* Safety bits describe the class that was just cleared, so they must go
+     * with it -- otherwise a reused slot would inherit a stale UFFD or
+     * NO_FA flag and the fault path would make the wrong decision. */
+    uint8_t *sb = safe_bit(m, idx);
+    if (sb)
+        *sb &= (uint8_t)~MM_SAFE_MASK;
+}
+
+int mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    pt_meta_t *m = mm_pt_meta(table);
+    uint8_t *sb = safe_bit(m, idx);
+    if (!sb)
+        return -EINVAL;
+    /* Refuse to flag a slot that carries no mapping: a safety bit on an
+     * INVALID entry has no meaning and would never be cleared. */
+    if (MM_ST_GET_CLASS(cls_slot(m, idx) ? *cls_slot(m, idx) : 0) ==
+        MM_ST_INVALID)
+        return -ENOENT;
+    *sb |= (uint8_t)(flags & MM_SAFE_MASK);
+    return 0;
+}
+
+int mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    uint8_t *sb = safe_bit(mm_pt_meta(table), idx);
+    if (!sb)
+        return -EINVAL;
+    *sb &= (uint8_t)~(flags & MM_SAFE_MASK);
+    return 0;
+}
+
+int mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags)
+{
+    (void)level;
+    uint8_t *sb = safe_bit(mm_pt_meta(table), idx);
+    if (!sb)
+        return 0;
+    return (*sb & (flags & MM_SAFE_MASK)) == (flags & MM_SAFE_MASK);
 }
 
 uint8_t mm_pt_peek(pte_t *table, int level, int idx)
