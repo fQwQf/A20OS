@@ -1,3 +1,34 @@
+# Process-milestone verification targets.
+#
+# The check-proc-stepN targets are cumulative gate sets, not separate tests.
+# Each step re-runs everything the previous step required and adds one more
+# contract, so a step only passes if all the earlier ones still hold:
+#
+#   step35          the baseline boot smoke (tools/smoke.py step35): the guest
+#                   must reach userspace, and its log must contain the
+#                   STEP35_* markers while containing none of STEP35_FORBID.
+#   step4           adds check-blocking-point-boundary
+#   step5           adds check-signal-exit-boundary
+#   step6           a flat set of five contracts, without stepping on step5
+#   step7           adds check-smp-runqueue-boundary
+#   step8           adds check-process-lock-split-boundary
+#
+# The -local variants are the real work; the bare names are thin aliases that
+# just echo PASS, so `make check-proc-step8` reads as one command.
+#
+# Every step runs a four-way build matrix, two architectures times two
+# profiles, because these contracts are exactly the ones a single
+# configuration can pass by accident:
+#
+#   <arch>-debug-1c     NR_CPUS=1, -O0 -g -DDEBUG, 1G
+#   <arch>-release-8c   NR_CPUS=8, -O3,            8G
+#
+# The 1/8-core split is the point: a single-core debug build will not expose
+# the SMP runqueue and lock-split bugs that steps 7 and 8 exist to catch. The
+# REQUIRE_* variables passed to the smoke assert that a newly required
+# capability actually appeared in the boot log, so a step cannot pass by
+# simply not exercising the feature.
+#
 .PHONY: check-task-lifetime-boundary check-blocking-point-boundary \
 	check-signal-exit-boundary check-timeout-ownership-boundary \
 	check-smp-runqueue-boundary check-process-lock-split-boundary \
