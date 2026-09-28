@@ -138,6 +138,14 @@ typedef struct gpu_dev_ops {
                           uint32_t version, void *buf, size_t len);
     int     (*capset_info)(struct device *dev, uint32_t index,
                            uint32_t *id, uint32_t *max_version, uint32_t *max_size);
+    /* Report what the device actually negotiated.  out_3d is non-zero only when
+     * VIRTIO_GPU_F_VIRGL was agreed, out_context_init only when
+     * VIRTIO_GPU_F_CONTEXT_INIT was.  The DRM layer has to answer
+     * VIRTGPU_PARAM_3D_FEATURES before a client has done anything, so a
+     * hardcoded 1 would send every 2D-only guest down the 3D path and report a
+     * capability that was never negotiated. */
+    int     (*get_features)(struct device *dev, uint32_t *out_3d,
+                            uint32_t *out_context_init);
     int     (*resource_attach_backing)(struct device *dev, uint32_t resource_id,
                                        const struct virtio_gpu_mem_entry *entries,
                                        uint32_t nr_entries);
