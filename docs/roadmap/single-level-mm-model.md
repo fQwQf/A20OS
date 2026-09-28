@@ -2112,3 +2112,48 @@ vma= [0x807000,0x808000) flags=0x13 pte_flags=0xd7 file_fd=-1 off=0x1000
 `mm_fault_from_status=0`、审计全 0（含 `safe=0`）、`pt_pages=6` 不变、
 `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` 全通过、
 5 个架构与 3 个 NOMMU 变体构建通过。**状态缺页路径在 (b) 定位之前保持 inert。**
+
+### 10.31 x86_64 命令行到不了内核：fw_cfg selector 是硬编码的
+
+`a20.wx=` 在 x86_64 上被静默忽略（默认 `deny` 仍生效，所以是「无法放宽 W^X」的功能缺口，
+不是安全漏洞），本次新增的 `a20.anonprov=` 同样到不了。根因已定位到具体常量。
+
+`kernel/arch/x86_64/platform/firmware.c:175-179`：
+
+```c
+#define FW_CFG_SELECTOR_PORT 0x510
+#define FW_CFG_DATA_PORT     0x511
+#define FW_CFG_SIGNATURE     0x0000
+#define FW_CFG_CMDLINE_SIZE  0x0014      /* <-- 硬编码 */
+#define FW_CFG_CMDLINE_DATA  0x0015      /* <-- 硬编码 */
+```
+
+`firmware_bootargs()` 读 `0x0000` 拿到 `0x51454d55`（"QEMU"）——**这说明 fw_cfg 机制本身
+是通的**；随后读 `0x0014` 拿到 0，于是 `cmdline_size=0`、`cmdline=''`。
+
+**原因**：QEMU 的 fw_cfg **文件 selector 是动态分配的**，由目录枚举顺序决定。`0x0000`
+的签名是唯一固定的那个；`opt/cmdline` 落在哪个 selector，取决于 QEMU 注册 `etc/`、
+`opt/` 等目录与各文件的顺序，**没有任何保证是 0x14/0x15**。把动态 selector 写死，
+读到的就是一个不存在的条目（或别的文件），长度自然是 0。
+
+**正确修法**（本次**未做**，原因见下）：按 fw_cfg 目录格式从 selector `0x0001` 开始枚举，
+逐级找到 `opt` 目录再找到其下的 `cmdline`，用条目里的 select value 定位后读取：
+
+* selector `0x0001` 处先读一个 0 字节，表示顶层目录结束；
+* 每个条目为 `[len+1 字节][名字含结尾 NUL][1 字节 select value][4 字节 value][4 字节 size]`
+  （多字节字段均为大端）；
+* 目录条目的 `value` 是其内容的基 selector，文件条目的实际 selector 由基址加 select
+  value 得到。
+
+**为什么本次不做**：这是一段**引导期**代码，跑在 fw_cfg 之上、且我刚把 x86_64 引导修好
+（§10.10）。在没有充分上下文验证的前提下写一个不完整的目录枚举器，风险是**把刚修好的
+x86_64 引导再次弄坏**，而它的收益只是让一个默认安全的策略可配置。留待专门一轮来做，
+并且必须配「有/无 `-append` 两种情况下都能启动」的门。
+
+**影响范围**（明确）：
+* x86_64：`a20.wx=` 恒为默认 `deny`（安全，仅不可放宽）；`a20.anonprov=` 无效，故
+  x86_64 上无法做交错 A/B（§10.13 的实验只能在 riscv64 上做）。
+* 其他架构不受影响：riscv64 经 DTB `/chosen/bootargs` 取命令行，实测可用；aarch64 /
+  ppc64le / loongarch32 / riscv32 经 FDT 同理。
+* 平台层 `qemu-virt-x86_64/board.c` 在 fw_cfg 为空时会回落到静态 `a20.ip=...` 默认值，
+  所以网络配置仍能工作，这也是该缺陷此前没被察觉的原因。
