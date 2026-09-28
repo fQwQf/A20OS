@@ -67,6 +67,7 @@ check-rootfs-overlay-generator:
 	@$(PYTHON) tools/gensync.py rootfs-overlay \
 		--committed "$(ROOTFS_OVERLAY_HDR)" \
 		--out-name rootfs_overlay.h \
+		--also $(ROOTFS_OVERLAY_SRC) \
 		-- $(PYTHON) tools/gen_rootfs_overlay.py \
 			--out-c @TMP@/rootfs_overlay.c \
 			--out-h @TMP@/rootfs_overlay.h \
