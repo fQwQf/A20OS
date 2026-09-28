@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+devnull = subprocess.DEVNULL
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from smoke_cases import CASES  # noqa: E402
@@ -67,7 +68,21 @@ STEP35_LOCK_SPLIT = [
 STEP35_FORBID = r"PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]"
 # Positional args main() handles itself instead of looking up in CASES;
 # smoke_audit.py reads this so a wired subcommand is not read as a typo'd case.
-SUBCOMMANDS = {"step35"}
+SUBCOMMANDS = {"step35", "arch-mmu-matrix"}
+# arch -> (board, qemu binary, base qemu flags, needs -embedded build dir)
+MATRIX_ARCHS: dict[str, tuple[str, str, list[str], bool]] = {
+    "arm32": ("qemu-virt-arm32", "qemu-system-arm",
+              ["-machine", "virt", "-cpu", "cortex-a15"], True),
+    "aarch64": ("qemu-virt-aarch64", "qemu-system-aarch64",
+                ["-machine", "virt", "-cpu", "cortex-a57",
+                 "-global", "virtio-mmio.force-legacy=false"], False),
+    "riscv64": ("qemu-virt-riscv64", "qemu-system-riscv64",
+                ["-machine", "virt", "-bios", "default",
+                 "-global", "virtio-mmio.force-legacy=false"], False),
+    "riscv32": ("qemu-virt-riscv32", "qemu-system-riscv32",
+                ["-machine", "virt", "-bios", "default",
+                 "-global", "virtio-mmio.force-legacy=false"], True),
+}
 # Markers were matched with bare `grep -q` (POSIX BRE, where `+ ? ( ) | { }`
 # are literals) but Python re follows ERE, so `timeout-capacity+1` -- a literal
 # the log prints -- would stop matching and turn a green gate red.  Escape only
@@ -100,7 +115,9 @@ def run_build(case: dict) -> None:
     b = case.get("build")
     if not b:
         return
-    if sh(["make", *b["vars"], b["target"]]).returncode != 0:
+    sink = devnull if case.get("quiet") else None
+    r = sh(["make", *b["vars"], b["target"]], stdout=sink, stderr=sink)
+    if r.returncode != 0:
         raise SystemExit(f"build failed: make {' '.join(b['vars'])} {b['target']}")
 
 
@@ -239,6 +256,62 @@ def step35_main(a: argparse.Namespace) -> int:
     return step35_check(case, run_qemu(case))
 
 
+def matrix_case(a: argparse.Namespace, arch: str, nommu: int) -> dict:
+    board, qemu, base, embedded = MATRIX_ARCHS[arch]
+    variant = f"{arch}-nommu" if nommu else arch
+    build = f".kernel-build/{arch}-{board}-both-dev"
+    if embedded:
+        build += "-embedded"
+    if nommu:
+        build += "-nommu"
+    return {
+        "log": f".kernel-build/smoke/{variant}-shell.log",
+        "stdin": {"kind": "pipe", "delay": a.input_delay,
+                  "lines": [f"echo A20_MATRIX_{variant}_OK",
+                            "/bin/echo A20_EXTERNAL_OK", "poweroff"]},
+        "timeout": a.timeout,
+        "argv": [qemu, *base, "-m", "1G", "-nographic", "-smp", "1",
+                 "-drive", f"file={build}/fat32.img,if=none,format=raw,id=x0",
+                 "-device", "virtio-blk-device,bus=virtio-mmio-bus.0,drive=x0",
+                 "-netdev", "user,id=net",
+                 "-device", "virtio-net-device,bus=virtio-mmio-bus.4,netdev=net",
+                 "-kernel", f"{build}/kernel.elf"],
+    }
+
+
+def matrix_main(a: argparse.Namespace) -> int:
+    """One QEMU boot per arch, twice: with MMU and build-only without it.
+
+    NOMMU variants stop after the build -- their runtime is platform-specific,
+    so the original never launched QEMU for them.
+    """
+    Path(".kernel-build/smoke").mkdir(parents=True, exist_ok=True)
+    for arch in MATRIX_ARCHS:
+        for nommu in (0, 1):
+            variant = f"{arch}-nommu" if nommu else arch
+            print(f"=== smoke-arch-mmu-matrix: {variant} ===")
+            run_build({"build": {"vars": [f"ARCH={arch}", "ABI=both",
+                                          "BRINGUP=0", f"NOMMU={nommu}"],
+                                 "target": "dev-build"}, "quiet": True})
+            if nommu:
+                print(f"smoke-arch-mmu-matrix: {variant} build-only PASS "
+                      "(NOMMU runtime is platform-specific)")
+                continue
+            case = matrix_case(a, arch, nommu)
+            status = run_qemu(case)
+            log = Path(case["log"])
+            text = log.read_text(encoding="utf-8", errors="replace")
+            want = [f"A20_MATRIX_{variant}_OK", "A20_EXTERNAL_OK",
+                    "System is going down for power-off NOW"]
+            if any(not grep_matches(bre(m), text) for m in want):
+                print(f"smoke-arch-mmu-matrix: {variant} FAIL "
+                      f"(status={status or 0})")
+                print("\n".join(text.splitlines()[-100:]))
+                return 1
+            print(f"smoke-arch-mmu-matrix: {variant} PASS")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("case")
@@ -252,10 +325,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--kernel")
     ap.add_argument("--timeout")
     ap.add_argument("--nr-cpus", type=int)
+    ap.add_argument("--input-delay", type=float, default=8.0)
     ap.add_argument("--require-timeout-capacity", type=int, default=0)
     ap.add_argument("--require-smp-runqueue", type=int, default=0)
     ap.add_argument("--require-lock-split", type=int, default=0)
     a = ap.parse_args(argv)
+    if a.case == "arch-mmu-matrix":
+        return matrix_main(a)
     if a.case in SUBCOMMANDS:
         missing = [n for n in ("label", "log_dir", "qemu", "kernel", "timeout")
                    if getattr(a, n) is None]
