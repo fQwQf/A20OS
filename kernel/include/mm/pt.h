@@ -233,6 +233,7 @@ typedef struct mm_pt_audit_report {
     uint64_t prot_mismatch;  /* permission bits disagree with the PTE */
     uint64_t cow_mismatch;   /* COW bit disagrees with PTE_COW */
     uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
+    uint64_t safe_mismatch;  /* MM_SAFE_NO_FA disagrees with VM_SEALED */
     /* Not an error: how many leaves carry MM_AS_ANON_VIRT, i.e. are reserved
      * but not yet backed.  This is the on-demand paging state the paper
      * relies on, so it is counted to make it observable rather than inferred
@@ -243,7 +244,8 @@ typedef struct mm_pt_audit_report {
 static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 {
     return r->missing_meta + r->present_mismatch + r->absent_mismatch +
-           r->prot_mismatch + r->cow_mismatch + r->vma_mismatch;
+           r->prot_mismatch + r->cow_mismatch + r->vma_mismatch +
+           r->safe_mismatch;
 }
 
 

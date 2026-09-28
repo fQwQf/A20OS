@@ -1570,3 +1570,31 @@ NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`chec
 验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64
 的 NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、
 `check-mm-lock-model` 通过，审计全 0，`pt_pages=6` 不变。
+
+### 10.20 auditor：把 seal ↔ MM_SAFE_NO_FA 变成机器可检的不变量
+
+§10.19 接好了 mseal → `MM_SAFE_NO_FA`，但「看起来对」不算证据。`mm_pt_audit()` 里原本已有
+VMA 交叉检查（`vma_mismatch`：每个 VMA 至少要有一页被元数据认识），现在按同样的做法再加
+一条**双向**不变量：
+
+对每个 VMA 的每一页，若该页**已映射**（class 不是 `MM_ST_INVALID`），则
+`MM_SAFE_NO_FA` 必须与 `VM_SEALED` 一致——seal 住的区间若仍能被 fault-around 拉进来，
+seal 就失效了；反过来标了却没 seal，则是无谓地关掉了 fault-around。任何一边漏更新，
+都会在关机审计里变成 `safe=N`，而不是等到某次投机分配悄悄改了被冻结的状态。
+
+新计数项 `safe_mismatch` 已并入 `mm_pt_audit_errors()`，所以它**会让审计失败**，
+不是只打印一个数字。审计行现在多一个 `safe=` 字段：
+`missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 safe=0 anon_virt=0`。
+
+**`MM_SAFE_UFFD` 故意不查**：UFFDIO_UNREGISTER 清的是「实际移除的 range 的并集」，
+一个仍被**另一个** uffd 注册覆盖的页面会丢掉标记，于是「UFFD 位 ⟺ 被注册」今天根本不是
+不变量，拿它做检查必然报假错。权威判定始终是 VMA 缺页路径上的
+`userfaultfd_range_present()`（本次未动）。等状态缺页路径真要启用、且 unregister 改成
+逐页复查 presence 之后再清（§10.19 已标注），才把 UFFD 位纳入审计。
+
+**这条检查不是空跑**：`mm_stress.c` 里有 23 处 mseal 调用，`smoke-mm-stress` 真的会
+seal 区间，所以 `safe=0` 是**跑过之后**的一致性结果，不是「没有 seal 所以没得查」。
+
+验证：5 个架构与 3 个 NOMMU 变体构建通过；`smoke-mm-stress`、
+`smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过，审计全 0（含新增的 `safe=0`），
+`pt_pages=6` 不变。

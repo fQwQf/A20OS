@@ -1318,6 +1318,34 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
             if (!any)
                 rep->vma_mismatch++;
         }
+
+        /* Safety-bit cross-check.  MM_SAFE_NO_FA must agree with VM_SEALED in
+         * both directions for every *mapped* page: a sealed range that a
+         * fault-around could still pull in defeats the seal, and the reverse
+         * would needlessly suppress fault-around.  This is what makes the
+         * mseal() wiring machine-checked rather than merely plausible.
+         *
+         * MM_SAFE_UFFD is deliberately NOT checked here.  UFFDIO_UNREGISTER
+         * clears the mark for the union of the ranges it removed, so a page
+         * still covered by a *different* registration loses its mark; the
+         * authoritative test is userfaultfd_range_present() on the VMA fault
+         * path.  Checking it would report mismatches by construction until
+         * that path clears per page after re-testing presence (docs 10.19). */
+        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+            int want = (v->vm_flags & VM_SEALED) ? 1 : 0;
+            for (vaddr_t va = v->start & ~(vaddr_t)(PAGE_SIZE - 1);
+                 va < v->end; va += PAGE_SIZE) {
+                pte_t *t = mm_pt_leaf_table(mm->pgdir, va);
+                if (!t)
+                    continue;
+                int idx = arch_pt_vpn(va, 0);
+                /* Unmapped entries legitimately carry no safety bit. */
+                if (MM_ST_GET_CLASS(mm_pt_peek(t, 0, idx)) == MM_ST_INVALID)
+                    continue;
+                if (mm_pt_safe_test(t, 0, idx, MM_SAFE_NO_FA) != want)
+                    rep->safe_mismatch++;
+            }
+        }
     }
 
     return mm_pt_audit_errors(rep) ? -EFAULT : 0;
