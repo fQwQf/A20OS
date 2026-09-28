@@ -42,6 +42,16 @@ typedef _Bool bool;
 #define SIZE_MAX ((size_t)-1)
 #endif
 
+/* Compile-time assertion.  The kernel is built as -std=gnu99, so C11
+ * _Static_assert is not available; declaring an extern array whose size is
+ * negative when the condition is false makes the compiler reject the build
+ * instead.  `extern` rather than a bare typedef on purpose: a file-scope
+ * typedef would be unused-but-legal, while a negative bound is always an
+ * error, and `extern` keeps the check from being warned about when it passes.
+ */
+#define STATIC_ASSERT(cond, tag) \
+    extern char static_assert_##tag[(cond) ? 1 : -1]
+
 /* Process states */
 typedef enum {
     PROC_UNUSED = 0,
