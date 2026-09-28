@@ -28,9 +28,11 @@
 #else
 #define KERNEL_STACK_SIZE        (64 * 1024)
 #endif
-/* 初始栈页数：从16增加到32（128KB），防止 execve 时参数/环境变量过大导致栈溢出。
- * thp01 等LTP测试有较大的环境变量，16页(64KB)不够用，会导致 elf_setup_stack
- * 写到未映射的地址，引发页表中的脏数据被当作物理地址使用而崩溃。 */
+/* Initial stack pages, raised from 16 to 32 (128 KiB), to stop execve from
+ * overflowing the stack when argv/envp are large.  LTP tests such as thp01 pass
+ * big environments; 16 pages (64 KiB) is not enough, and running out makes
+ * elf_setup_stack write to an unmapped address, after which stale page-table
+ * entries get used as physical addresses and the kernel crashes. */
 #define USER_STACK_INITIAL_PAGES 32
 #define USER_STACK_MAX_SIZE      (8 * 1024 * 1024UL)
 
@@ -75,8 +77,9 @@
 #define USER_TLS_BASE     0x3E000000UL
 #define INTERP_BASE_ADDR  0x40000000UL
 
-/* 用户栈增长/随机化的下界：vDSO/vvar 固定在 0x3F7F9000-0x3F800000
- * （见 mm/vdso_layout.h），栈 VMA 与栈增长不得越过此地板。 */
+/* Lower bound for user stack growth and randomisation: the vDSO/vvar area is
+ * pinned at 0x3F7F9000-0x3F800000 (see mm/vdso_layout.h), and neither the stack
+ * VMA nor stack growth may cross this floor. */
 #define USER_STACK_FLOOR  0x3F800000UL
 
 #define PIPE_BUF_SIZE 4096
