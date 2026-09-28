@@ -52,6 +52,18 @@ static int partition_write_sector(block_dev_t *block, uint64_t lba, const void *
     return part->parent->write_sector(part->parent, part->first_lba + lba, buf, count);
 }
 
+/* A flush is device-wide, not range-scoped, so a partition forwards it to the
+ * whole-disk parent unchanged.  Omitting it here would silently strip the
+ * durability guarantee from every filesystem mount, since all of them sit on
+ * a partition. */
+static int partition_flush(block_dev_t *block)
+{
+    partition_block_dev_t *part = (partition_block_dev_t *)block->priv;
+    if (!part || !part->parent || !part->parent->flush)
+        return -EOPNOTSUPP;
+    return part->parent->flush(part->parent);
+}
+
 typedef struct class_block_dev {
     block_dev_t block;
     device_t *dev;
@@ -74,6 +86,14 @@ static int class_block_write_sector(block_dev_t *block, uint64_t lba, const void
         class_block->ops->write(class_block->dev, lba, buf, count) : -1;
 }
 
+static int class_block_flush(block_dev_t *block)
+{
+    class_block_dev_t *class_block = (class_block_dev_t *)block->priv;
+    if (!class_block || !class_block->ops || !class_block->ops->flush)
+        return -EOPNOTSUPP;
+    return class_block->ops->flush(class_block->dev);
+}
+
 block_dev_t *mount_setup_block_device(int index)
 {
     static class_block_dev_t class_blocks[16];
@@ -88,6 +108,7 @@ block_dev_t *mount_setup_block_device(int index)
     class_block->ops = ops;
     class_block->block.read_sector = class_block_read_sector;
     class_block->block.write_sector = class_block_write_sector;
+    class_block->block.flush        = class_block_flush;
     class_block->block.capacity = ops->capacity(dev);
     class_block->block.sector_size = ops->sector_size(dev);
     class_block->block.priv = class_block;
@@ -195,6 +216,7 @@ static block_dev_t *first_mbr_linux_partition(block_dev_t *parent,
         partition.read_only = 1;
         partition.block.read_sector = partition_read_sector;
         partition.block.write_sector = partition_write_sector;
+        partition.block.flush        = partition_flush;
         partition.block.capacity = count;
         partition.block.sector_size = parent->sector_size;
         partition.block.priv = &partition;

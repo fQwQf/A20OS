@@ -141,6 +141,33 @@ smoke-mm-fork-exec-race:
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 
+smoke-fsync-durability:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/fsync-durability-riscv64.log"; \
+	status=0; \
+	$(TIMEOUT) --expect '# ' \
+		--send-line 'fsync_durability_test' --send-line 'poweroff' \
+		$(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img,if=none,format=raw,id=x1 \
+		-device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+			-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+			> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'FSYNC_TEST: PASS' "$$log"; then \
+		echo "smoke-fsync-durability: PASS; log saved to $$log"; \
+	else \
+		echo "smoke-fsync-durability: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-vfs-edge:
 	$(PYTHON) tools/smoke.py smoke-vfs-edge
 

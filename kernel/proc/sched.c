@@ -929,6 +929,10 @@ void proc_sched_tick(int from_user)
         return;
     uint64_t now = timer_get_ticks();
     proc_sched_expire_wait_timers(now);
+    /* Load average must be sampled at the fixed tick rate: its EMAs decay
+     * per window, so an opportunistic sample (as sched_scan_timers is)
+     * would silently skew the 1/5/15-minute figures. */
+    proc_loadavg_tick();
     /* Signal timers (SIGALRM alarms, POSIX compat timers) must fire on
      * deadline even when every task is asleep and no sched() pass runs. */
     if (proc_sched_timers_due(now))
