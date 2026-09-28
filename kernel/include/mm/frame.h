@@ -86,8 +86,9 @@ void   frame_put_many(const pfn_t *pfns, size_t count);
 size_t pfa_free_count(void);
 void   pfa_get_huge_stats(pfa_huge_stats_t *stats);
 
-// 内核使用恒等映射
-// 虚拟地址 (VA)，物理地址 (PA)和页帧号 (PFN) 的辅助函数
+// The kernel runs under an identity map.
+// Helpers converting between virtual address (VA), physical address (PA) and
+// page frame number (PFN).
 
 static inline const pfa_range_t *pfa_range_for_pfn(pfn_t pfn) {
     for (size_t i = 0; i < pfa.nr_ranges; i++) {
@@ -135,7 +136,8 @@ static inline pfn_t virt_to_pfn(const void *va) {
     return phys_to_pfn(pa);
 }
 
-/* 关机前审计：遍历全部 buddy 空闲链验证一致性，返回错误数。 */
+/* Pre-shutdown audit: walk every buddy free list, verify consistency and
+ * return the number of errors found. */
 int pfa_audit_lists(void);
 
 /* Post-mortem: dump the last buddy push/remove operations (corruption). */
