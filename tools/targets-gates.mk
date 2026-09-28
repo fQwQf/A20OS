@@ -20,6 +20,14 @@ check-instance-matrix:
 check-component-registry:
 	@tools/a20 check-registry
 
+# DRM ioctl numbers and wire struct layouts vs the Linux UAPI.  A wrong number
+# never matches the dispatch switch, so the ioctl falls through to the default
+# arm and userspace sees EINVAL/ENOTTY -- which reads as a Mesa or libdrm bug
+# rather than as a wrong constant in a header.  Gate it so that class of
+# mistake cannot land again.  Skips where no UAPI headers are installed.
+check-drm-abi:
+	@tools/check-drm-abi.sh
+
 host-tests: $(HOST_TESTS_BIN)
 	@for t in $(HOST_TESTS_BIN); do \
 		echo "== $$t =="; \
