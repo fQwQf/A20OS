@@ -46,6 +46,16 @@ static int parse_kv_u64(const char *text, const char *key, unsigned long long *o
     return -1;
 }
 
+/* procfs content keeps its trailing newline; left in place it lands inside a
+ * later printf and splits the PASS line across lines, which makes the gate's
+ * grep fragile. */
+static void chomp(char *s)
+{
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+        s[--n] = '\0';
+}
+
 static int read_small(const char *path, char *buf, size_t bufsz)
 {
     int fd = open(path, O_RDONLY);
@@ -175,17 +185,30 @@ int main(void)
         "loadavg matches Linux format");
     CHK(tot >= 1, "loadavg reports a real total task count");
 
-    /* /proc/pressure must emit all three averages, which the kernel used to
-     * compute and then print as a hardcoded 0.00.  A20OS exposes a single
-     * flat /proc/pressure file rather than Linux's cpu|memory|io
-     * subdirectories; the values are what this checks. */
+    /* /proc/pressure must expose Linux's cpu|memory|io files, because
+     * systemd and pressure-stall tooling read those paths; a single flat
+     * file is not substitutable.  Each must carry all three averages --
+     * the kernel used to compute avg60/avg300 and then print a hardcoded
+     * 0.00. */
+    static const char *psi_paths[3] = {
+        "/proc/pressure/cpu", "/proc/pressure/memory", "/proc/pressure/io"
+    };
     char psi[256] = {0};
-    CHK(read_small("/proc/pressure", psi, sizeof(psi)) > 0,
-        "read /proc/pressure");
-    CHK(strstr(psi, "avg10=") && strstr(psi, "avg60=") && strstr(psi, "avg300="),
-        "psi line carries avg10/avg60/avg300");
-    CHK(strchr(psi, '\n') != NULL, "psi carries cpu plus mem/io lines");
+    for (int i = 0; i < 3; i++) {
+        char line[128] = {0};
+        CHK(read_small(psi_paths[i], line, sizeof(line)) > 0,
+            "read a /proc/pressure resource file");
+        CHK(strstr(line, "some ") == line,
+            "psi line starts with 'some'");
+        CHK(strstr(line, "avg10=") && strstr(line, "avg60=") &&
+                strstr(line, "avg300=") && strstr(line, "total="),
+            "psi line carries avg10/avg60/avg300/total");
+        if (i == 0)
+            snprintf(psi, sizeof(psi), "%s", line);
+    }
 
-    printf("FSYNC_TEST: PASS loadavg=\"%s\" psi=\"%s\"\n", la, psi);
+    chomp(la);
+    chomp(psi);
+    printf("FSYNC_TEST: PASS loadavg=\"%s\" psi_cpu=\"%s\"\n", la, psi);
     return 0;
 }
