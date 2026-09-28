@@ -642,6 +642,12 @@ endif
 ifneq ($(strip $(WAIT_TIMER_HEAP_MAX)),)
 CFLAGS += -DCONFIG_WAIT_TIMER_HEAP_MAX=$(WAIT_TIMER_HEAP_MAX)
 endif
+# pbuf pool canary.  Off by default because it costs a comparison per pool
+# operation; turn it on when a pbuf refcount or ownership bug is being hunted,
+# since without it the pool has no way to notice a block being handed out twice.
+ifeq ($(filter 1,$(CONFIG_LWIP_MEMP_OVERFLOW_CHECK)),1)
+CFLAGS += -DCONFIG_LWIP_MEMP_OVERFLOW_CHECK=1
+endif
 ifneq ($(NR_CPUS),1)
 CFLAGS += -DCONFIG_SMP
 endif

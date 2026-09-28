@@ -44,6 +44,20 @@
 
 #define MEM_ALIGNMENT                   8
 #define MEM_SIZE                        (512 * 1024)
+/* MEMP_OVERFLOW_CHECK makes memp_malloc/memp_free assert when a pool element is
+ * handed out twice or freed while still referenced.  It costs a comparison per
+ * pool operation, so it stays off by default and is enabled with
+ * CONFIG_LWIP_MEMP_OVERFLOW_CHECK when a pbuf-accounting bug is being hunted.
+ * Without it the pbuf pool has no canary at all, and memp's free list is a
+ * plain pointer chain threaded through the freed blocks -- so a single double
+ * free silently hands the same block to two live pbufs and every later refcount
+ * reading is meaningless.  That is why an ownership bug here can stay invisible
+ * for a whole session and then surface as an unrelated-looking assert. */
+#ifdef CONFIG_LWIP_MEMP_OVERFLOW_CHECK
+#define MEMP_OVERFLOW_CHECK            1
+#else
+#define MEMP_OVERFLOW_CHECK            0
+#endif
 #define MEMP_NUM_PBUF                   256
 #define MEMP_NUM_RAW_PCB                16
 #define MEMP_NUM_UDP_PCB                32
