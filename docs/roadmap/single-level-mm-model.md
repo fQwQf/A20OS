@@ -403,3 +403,53 @@ CPU 必须能退出临界区去响应 TLB IPI）。摘掉 `mm->lock` 就必须**
 ±9%，且噪声最大的恰是"本应不受影响"的对照相位。今后任何性能主张都必须在
 **x86_64/KVM** 上、对照与实验各取**多次采样**、并**同时报告一个改动无法影响的
 对照相位**来确立噪声地板，否则结论不可信。
+
+### 8.9 VMA 引用计数已落地（`b10b267b`）
+
+P6 的前提是 fault 能在无 `mm->lock` 下读取 VMA 字段。锁一放开，`vm_area_t`
+指针本身就不再受保护——`mm_find_vma()` 返回后 `munmap` 可以摘链并释放。因此先
+落地 VMA 生命周期机制（**这是 P6 的前提，本身不是 P6**）。
+
+所有权规则：地址空间链表持有分配时创建的那一份引用；摘链即释放它；最后一个持有
+者——可能就是一把锁都没有的 fault——负责安排释放。延迟释放列表换用独立的
+`vma_ref_lock` 而非继续借用 `mm->lock`：否则一个刚逃离 `mm->lock` 的 fault 要
+放下引用就必须重新获取它刚释放的锁，fast path 白做。该锁只保护链表 push/pop，
+绝不跨 `vma_release()`（后者经 `vfs_close` 触发回写，可睡眠）。另加
+`deferred_next`，避免与 `mm->mmap` 的 `next` 混用。
+
+fork 有两处状态继承必须重置，否则子进程会用着带父锁状态的锁、或与父 VMA 共享
+同一份引用计数：`*child = *parent` 复制了 `vma_ref_lock` 状态；克隆 VMA 的
+`*cv = *pv` 继承了父 VMA 的引用计数。
+
+不变式：**任何进入过 `mm->mmap` 的 VMA 都不再被直接 `kfree`**，只经 `vma_put`
+摘链。剩余的直接 `kfree` 全部位于"发布前失败回滚"路径（引用计数为 1、从未对其他
+线程可见），包括 `elf_discard_vmas` 的半成品镜像回滚。10 个分配点全部初始化引用
+计数（4 个结构体复制点必须重置为自己的 1，而非继承源 VMA 的值）。
+
+验证：riscv64/aarch64/x86_64/loongarch64/ppc64le + riscv64/aarch64 NOMMU 全部
+`-Werror` 通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model`
+通过；x86_64/KVM smp4 跑 `mm_stress` 全绿（含 `vma-deferred-race` 子项），关机
+审计 `pt_pages=10 entries=2560 missing_meta=0` 且 present/absent/prot/cow/vma 全 0，
+无 panic、无看门狗中止。
+
+### 8.10 P5 的死锁机制已定位到具体指令（比 §8.7 的第 4 项更精确）
+
+§8.7 记录了"摘锁后持页表锁的 CPU 妨碍远端 TLB IPI"，但当时未定位到确切成因。现已
+逐层核实，机制如下：
+
+* `mcs_lock()`（`mm/pt.c:90`）自身**不关中断**——自旋体只是
+  `while (!me->locked) arch_cpu_relax();`。
+* 但 MCS 锁是在**持有 `mm->lock`（IRQ-关闭自旋锁）时**获取的，因此等待者**继承
+  了中断关闭状态**，无法接收 IPI。
+* 发起方 `x86_64_smp_remote_tlb_flush()`（`x86_64/platform/smp.c:221`）发送 IPI
+  后，若自己中断是关的会**临时打开本地中断**再等 ack，5 秒超时即
+  `panic("x86_64 remote TLB shootdown timed out")`。
+* 目标方 `x86_64_ipi_tlb_flush_handler()` **不取任何锁**，只需 IPI 被投递。
+
+即死锁环：CPU A 持 `mm->lock` 及若干 MCS 页表锁并派发 shootdown；CPU B 自旋在
+A 持有的页表锁上、中断关闭、收不到 IPI；A 等到 5 秒超时 panic。
+
+**关键推论：摘掉 `mm->lock` 本身并不能解决问题。** 只要"持有页表锁时会阻塞 IPI
+投递"这一条件还在，换一把锁去持有并无区别——真正的决策点是 MCS 页表锁的自旋
+能否在中断打开的情况下进行。这把 P5 的实现从"挪走一把锁"变成"必须重定义页表写者
+互斥的中断语义"，因此需要一次显式设计决策而非局部改动（§8.7 结论的加强版）。
