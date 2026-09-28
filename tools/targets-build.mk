@@ -209,18 +209,7 @@ check-task-state-boundary:
 	@echo "check-task-state-boundary: PASS"
 
 check-smp-platform-boundary:
-	@rg -q "typedef struct smp_platform_ops" kernel/include/core/smp.h
-	@rg -q "const smp_platform_ops_t \*smp" kernel/drivers/core/driver_core.h
-	@files="kernel/arch/riscv64/platform/smp.c kernel/arch/aarch64/platform/smp.c kernel/arch/x86_64/platform/smp.c kernel/arch/loongarch64/platform/smp.c"; \
-		test -r kernel/arch/riscv64/platform/smp.c && \
-		test -r kernel/arch/aarch64/platform/smp.c && \
-		test -r kernel/arch/x86_64/platform/smp.c && \
-		test -r kernel/arch/loongarch64/platform/smp.c && \
-		if rg -n "CONFIG_BOARD|firmware_cpu_on|sbi_hart_start|firmware_acpi_apic_ids|IOCSR_MBUF" $$files; then exit 1; fi
-	@! rg -n "void smp_(init|boot_secondaries|send_reschedule|secondary_init)\\(" kernel/arch
-	@for board in qemu-virt-riscv64 qemu-virt-aarch64 qemu-virt-loongarch64 qemu-virt-x86_64; do \
-		rg -q "\\.smp[[:space:]]*=" "kernel/platform/$$board/board.c" || exit 1; \
-	done
+	@$(PYTHON) tools/gates.py smp-platform-boundary
 	@echo "check-smp-platform-boundary: PASS"
 
 check-abi-smoke-gate:

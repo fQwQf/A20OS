@@ -1274,3 +1274,44 @@ files = ["user/cmds/stress/proc_stress.c"]
 pattern = "PROC_STRESS: signal-mask-park PASS"
 files = ["user/cmds/stress/proc_stress.c"]
 
+
+[[gate]]
+name = "smp-platform-boundary"
+make_target = "check-smp-platform-boundary"
+
+[[gate.assertion]]
+pattern = 'typedef struct smp_platform_ops'
+files = ['kernel/include/core/smp.h']
+
+[[gate.assertion]]
+pattern = 'const smp_platform_ops_t \*smp'
+files = ['kernel/drivers/core/driver_core.h']
+
+[[gate.assertion]]
+exists = ['kernel/arch/riscv64/platform/smp.c', 'kernel/arch/aarch64/platform/smp.c', 'kernel/arch/x86_64/platform/smp.c', 'kernel/arch/loongarch64/platform/smp.c']
+
+[[gate.assertion]]
+pattern = 'CONFIG_BOARD|firmware_cpu_on|sbi_hart_start|firmware_acpi_apic_ids|IOCSR_MBUF'
+negate = true
+files = ['kernel/arch/riscv64/platform/smp.c', 'kernel/arch/aarch64/platform/smp.c', 'kernel/arch/x86_64/platform/smp.c', 'kernel/arch/loongarch64/platform/smp.c']
+
+[[gate.assertion]]
+pattern = 'void smp_(init|boot_secondaries|send_reschedule|secondary_init)\('
+negate = true
+files = ['kernel/arch']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-riscv64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-aarch64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-loongarch64/board.c']
+
+[[gate.assertion]]
+pattern = '\.smp[[:space:]]*='
+files = ['kernel/platform/qemu-virt-x86_64/board.c']

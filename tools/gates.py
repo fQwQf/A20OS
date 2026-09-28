@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import glob as globlib
+import os
 import re
 import subprocess
 import sys
@@ -62,6 +63,9 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     required by the patterns that span lines, since without it rg matches
     per-line and can never match at all.
     """
+    if a.get("exists"):
+        return _run_exists(a)
+
     argv = ["rg", "-q", *a.get("rg_flags", ())]
     if a.get("fixed"):
         argv.append("-F")
@@ -104,6 +108,19 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     return True, ""
 
 
+def _run_exists(a: dict) -> tuple[bool, str]:
+    """`test -r <file> && ...`: every listed path must be a readable file.
+
+    Kept as a table entry rather than left in the recipe so the gate can stay a
+    single delegation: the original interleaves these existence guards between
+    rg assertions, and moving only the rg lines would reorder the checks.
+    """
+    missing = [f for f in a["exists"] if not os.access(REPO / f, os.R_OK)]
+    if missing:
+        return False, "missing required file(s): " + ", ".join(missing)
+    return True, ""
+
+
 def _run_post_filtered(a: dict, argv: list[str]) -> tuple[bool, str]:
     """`bad=$(rg ... | rg -v WHITELIST)`; require nothing to survive the filter.
 
@@ -136,14 +153,15 @@ def run_gate(name: str, gate: dict, segment: int | None = None) -> int:
             raise SystemExit(f"error: segment {segment} out of range (0..{nseg - 1})")
         items = [a for a in items if a.get("segment", 0) == segment]
     for a in items:
-        key = tuple(a["files"])
-        if key not in files_cache:
+        # `exists` assertions name their paths in `exists`, never `files`.
+        key = tuple(a.get("files", ()))
+        if key and key not in files_cache:
             try:
                 files_cache[key] = expand(a["files"])
             except SystemExit as exc:
                 failures.append(str(exc))
                 files_cache[key] = []
-        ok, detail = run_one(a, files_cache[key])
+        ok, detail = run_one(a, files_cache.get(key, []))
         if not ok:
             failures.append(detail)
 
