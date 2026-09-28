@@ -1846,3 +1846,51 @@ static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
 
 在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert，默认配置行为与改动前
 完全一致（`mm_fault_from_status=0`，全部门通过）。
+
+### 10.26 预标记本身仍然安全 —— 宽限期回收被排除，嫌疑收进状态路径内部
+
+§10.25 指出：用来证明「mmap 预标记单独是安全」的那次实测（`d1fb5c22`）**早于** §10.17
+新增的 `mm_pt_retire_table()` 宽限期回收，所以那条证据已经过期，必须在当前代码上重做。
+做法不需要任何新代码：把 §10.21 的查询修复临时改回失效（状态路径再次 inert），保留
+`a20.anonprov=4096` 打开预标记。
+
+实测（riscv64，`a20.anonprov=4096`）：
+
+```
+mm_anon_provisioned: 9287
+mm_fault_from_status: 0        <- 状态路径确认 inert
+mm_anon_faults:        672
+mm_demand_faults:     1484
+stress-pass: 1   fatals: 0    <- 通过
+```
+
+**结论：`mm_pt_retire_table()` 与宽限期回收被排除。** 在包含 §10.17 那套回收机制、以及
+§10.18/§10.19 的安全位与 mseal/uffd 接线的当前代码上，mmap 预标记单独运行仍然安全：
+预标记了近 9300 页，审计干净，`mm_stress` 通过，零 FATAL。
+
+于是嫌疑范围被压到最后一层：**崩溃只由状态路径消费 mmap 预标记条目这段逻辑本身引起**，
+与预标记写入、与回收、与安全位都无关。
+
+**但核心矛盾仍未解释**：复现配置里 brk 预标记是**关闭**的，状态路径够不到 brk 地址，
+崩溃却落在 brk 上（`stval=0x807000`，`vma=[0x807000,0x808000) flags=0x13 pte_flags=0xd7
+file_fd=-1`）。「够不到的代码把目标搞坏了」只能有一个解释：**状态路径在处理某个 mmap
+区间时，破坏了 brk 路径后续依赖的某个共享不变式**。按可能性排序（本轮均未验证）：
+
+1. **记账重复**。状态路径成功后 `mm->rss++`、并各自计了
+   `A20_PERF_MM_ANON_FAULTS` / `MM_DEMAND_FAULTS`。而 brk 区间随后若走 VMA 路径再被
+   处理一次，`rss` 或 cgroup 记账就会与实际帧数脱节；一旦有别处以 `rss`/`total_vm`
+   为条件做判断，就会连锁出错。**先查这一条**：`mm_pte_flags_allow_access()` 之后
+   是否漏了 VMA 路径会做、而状态路径没做的某个记账或检查。
+2. `mm_cursor_map()` 在 class 已是 `MM_ST_ANON_VIRT` 的槽位上安装时，metadata 的
+   `present/absent` 记账与 `mm_pt_note_absent()` 的清理是否自洽（`nr_present` 只是显示用
+   计数，§10.23 已排除它参与控制流，但**配对关系**仍可能有错）。
+3. 状态路径的 `return 0` 是否跳过了缺页函数尾部某些必须执行的收尾（`mm->rss` 之外的，
+   例如 vma 引用、rss 记账的 vma 归属、或 fault-around 相关的统计）。
+
+验证手段：把 §10.21 状态路径与 VMA 匿名路径（`fault.c` 中 `fault_map(t->mm, page_va,
+pfn, vma->pte_flags, MM_ST_ANON_MAPPED)` 那一段）**逐行并列 diff**，只保留必要差异。
+这两段在结构上应当等价（§10.25 已确认 `fault_map` 本身没有额外事务），任何不等价之处
+就是嫌疑点。这是不需要猜测的一步。
+
+在 (b) 定位之前，预标记保持默认关闭，状态缺页路径保持 inert，默认配置行为与改动前完全
+一致（`mm_fault_from_status=0`，全部门通过）。
