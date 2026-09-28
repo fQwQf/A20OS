@@ -1,5 +1,6 @@
 #include "mm/frame.h"
 #include "core/lock.h"
+#include "core/perf.h"
 #include "core/panic.h"
 #include "core/string.h"
 #include "core/stdio.h"
@@ -544,7 +545,12 @@ pfn_t pfa_alloc_flags(int order, int can_reclaim) {
                 return result;
             }
 
-            spin_lock(&pfa.lock);
+            uint64_t plock_flags;
+            if (!spin_trylock_irqsave(&pfa.lock, &plock_flags)) {
+                a20_perf_count(A20_PERF_MM_PFA_LOCK_CONTENDED);
+                spin_lock(&pfa.lock);
+            }
+            a20_perf_count(A20_PERF_MM_PFA_LOCK_ACQUIRES);
             pfn_t result = pfa_alloc_from_buddy(0);
             if (result != PFN_NONE) {
                 while (batch->count < PFA_CPU_BATCH_PAGES - 1) {

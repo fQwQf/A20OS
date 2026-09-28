@@ -54,6 +54,16 @@ typedef enum a20_perf_counter {
     A20_PERF_MM_PT_LOCK_WAITS,
     A20_PERF_MM_CURSOR_OPEN,
     A20_PERF_MM_CURSOR_STALE_RETRY,
+    /*
+     * Per-fault serialisation probes.  §8.18/§8.19 ruled out mm->lock, the
+     * cgroup charge and memset bandwidth; these measure the two locks that
+     * remain on the anonymous fault path so the real serialisation point can
+     * be identified by measurement rather than by guesswork.
+     */
+    A20_PERF_MM_CG_LOCK_ACQUIRES,
+    A20_PERF_MM_CG_LOCK_CONTENDED,
+    A20_PERF_MM_PFA_LOCK_ACQUIRES,
+    A20_PERF_MM_PFA_LOCK_CONTENDED,
     A20_PERF_VIRTIO_BLK_POLLS,
     A20_PERF_VIRTIO_BLK_ACTIVE_POLLS,
     A20_PERF_VIRTIO_BLK_USED_CHECKS,
