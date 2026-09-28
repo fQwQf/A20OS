@@ -35,6 +35,7 @@
  */
 
 #define DRM_MAX_GEMS 64
+#define DRM_MAX_FBS 64
 #define DRM_MAX_GEM_NAMES 64
 #define DRM_EVENT_FLIP_COMPLETE 0x02
 #define DRM_CTX_EVENT_MAX 16
@@ -59,7 +60,18 @@ typedef struct drm_gem {
     uint64_t size;
     int is_virgl;        /* a host-side virgl resource mirrors this object */
     uint32_t virgl_res_id;
+    int fb_refs;         /* live framebuffers referencing this GEM */
+    int dumb_live;       /* userspace still holds the dumb-buffer handle */
 } drm_gem_t;
+
+/* A framebuffer is its own object, not an alias of the GEM handle.  Linux lets
+ * userspace destroy the dumb buffer right after ADDFB2, so the fb must keep the
+ * backing storage alive independently. */
+typedef struct drm_fb {
+    int used;
+    uint32_t fb_id;
+    uint32_t gem_handle;
+} drm_fb_t;
 
 typedef struct drm_context {
     uint32_t magic;
@@ -124,6 +136,8 @@ static int g_gem_count;
 
 /* Handles are unique device-wide, not per-fd, to match the global store. */
 static uint32_t g_gem_next_handle = 1;
+static drm_fb_t g_fbs[DRM_MAX_FBS];
+static uint32_t g_fb_next_id = 1;
 
 /* Host virgl resource ids, allocated device-wide for the same reason. */
 static uint32_t g_virtgpu_next_res = 1;
@@ -639,9 +653,8 @@ static drm_gem_t *drm_find_gem(drm_context_t *ctx, uint32_t handle)
     return NULL;
 }
 
-static void drm_free_gem(drm_context_t *ctx, drm_gem_t *b)
+static void drm_gem_reclaim(drm_gem_t *b)
 {
-    (void)ctx;
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].handle == b->handle) {
             g_gem_names[i] = g_gem_names[--g_gem_name_count];
@@ -652,6 +665,53 @@ static void drm_free_gem(drm_context_t *ctx, drm_gem_t *b)
         vmo_release(b->vmo);
     memset(b, 0, sizeof(*b));
     b->used = 0;
+}
+
+/* Userspace dropping the dumb-buffer handle does not free storage that a live
+ * framebuffer still displays; the VMO is reclaimed by drm_fb_release(). */
+static void drm_free_gem(drm_context_t *ctx, drm_gem_t *b)
+{
+    (void)ctx;
+    b->dumb_live = 0;
+    if (b->fb_refs > 0)
+        return;
+    drm_gem_reclaim(b);
+}
+
+static drm_fb_t *drm_find_fb(uint32_t fb_id)
+{
+    for (int i = 0; i < DRM_MAX_FBS; i++)
+        if (g_fbs[i].used && g_fbs[i].fb_id == fb_id)
+            return &g_fbs[i];
+    return NULL;
+}
+
+static drm_fb_t *drm_fb_alloc(uint32_t gem_handle)
+{
+    for (int i = 0; i < DRM_MAX_FBS; i++) {
+        if (g_fbs[i].used)
+            continue;
+        g_fbs[i].used = 1;
+        g_fbs[i].fb_id = g_fb_next_id++;
+        g_fbs[i].gem_handle = gem_handle;
+        return &g_fbs[i];
+    }
+    return NULL;
+}
+
+static void drm_fb_release(uint32_t fb_id)
+{
+    drm_fb_t *f = drm_find_fb(fb_id);
+    if (!f)
+        return;
+    uint32_t h = f->gem_handle;
+    memset(f, 0, sizeof(*f));
+    drm_gem_t *b = drm_find_gem(NULL, h);
+    if (!b)
+        return;
+    b->fb_refs--;
+    if (b->fb_refs == 0 && !b->dumb_live)
+        drm_gem_reclaim(b);
 }
 
 /*
@@ -686,6 +746,7 @@ static drm_gem_t *drm_gem_alloc(uint32_t width, uint32_t height,
         g->usage = usage;
         g->vmo = vmo;
         g->size = size;
+        g->dumb_live = 1;
         if (i + 1 > g_gem_count)
             g_gem_count = i + 1;
         return g;
@@ -1047,18 +1108,18 @@ static int drm_mode_getresources(drm_context_t *ctx, void *arg)
     }
 
     int nfbs = 0;
-    for (int i = 0; i < g_gem_count; i++)
-        if (g_gems[i].used)
+    for (int i = 0; i < DRM_MAX_FBS; i++)
+        if (g_fbs[i].used)
             nfbs++;
 
-    uint32_t fbs[DRM_MAX_GEMS];
+    uint32_t fbs[DRM_MAX_FBS];
     uint32_t crtcs[1] = { DRM_CRTC_ID };
     uint32_t conns[1] = { DRM_CONN_ID };
     uint32_t encs[1] = { DRM_ENC_ID };
     int fi = 0;
-    for (int i = 0; i < g_gem_count; i++)
-        if (g_gems[i].used)
-            fbs[fi++] = g_gems[i].handle;
+    for (int i = 0; i < DRM_MAX_FBS; i++)
+        if (g_fbs[i].used)
+            fbs[fi++] = g_fbs[i].fb_id;
 
     res.count_fbs = (uint32_t)nfbs;
     res.count_crtcs = 1;
@@ -1112,7 +1173,10 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
     if (c.fb_id != 0) {
-        drm_gem_t *b = drm_find_gem(ctx, c.fb_id);
+        drm_fb_t *f = drm_find_fb(c.fb_id);
+        if (!f)
+            return -ENOENT;
+        drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
         if (!b)
             return -ENOENT;
         /* The minimal KMS implementation presents by copying into the GPU's
@@ -1223,7 +1287,10 @@ static int drm_mode_getfb(drm_context_t *ctx, void *arg)
     struct drm_mode_fb_cmd fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, fb.fb_id);
+    drm_fb_t *f = drm_find_fb(fb.fb_id);
+    if (!f)
+        return -ENOENT;
+    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
     if (!b)
         return -ENOENT;
     fb.width = b->width;
@@ -1243,7 +1310,11 @@ static int drm_mode_addfb(drm_context_t *ctx, void *arg)
     drm_gem_t *b = drm_find_gem(ctx, fb.handle);
     if (!b)
         return -ENOENT;
-    fb.fb_id = b->handle;
+    drm_fb_t *f = drm_fb_alloc(b->handle);
+    if (!f)
+        return -ENOMEM;
+    b->fb_refs++;
+    fb.fb_id = f->fb_id;
     fb.pitch = b->pitch;
     fb.bpp = b->bpp;
     fb.depth = 24;
@@ -1260,7 +1331,11 @@ static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
     drm_gem_t *b = drm_find_gem(ctx, fb.handles[0]);
     if (!b)
         return -ENOENT;
-    fb.fb_id = b->handle;
+    drm_fb_t *f = drm_fb_alloc(b->handle);
+    if (!f)
+        return -ENOMEM;
+    b->fb_refs++;
+    fb.fb_id = f->fb_id;
     fb.pitches[0] = b->pitch;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
@@ -1271,8 +1346,7 @@ static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
     uint32_t fb_id = 0;
     if (copy_from_user(&fb_id, arg, sizeof(fb_id)) < 0)
         return -EFAULT;
-    /* Keep the dumb buffer alive (the handle still owns it); just drop the
-     * framebuffer id association, which is the same id here. */
+    drm_fb_release(fb_id);
     return 0;
 }
 
