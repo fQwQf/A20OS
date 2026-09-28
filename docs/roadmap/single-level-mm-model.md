@@ -2659,3 +2659,502 @@ VMA** 的权限改了。原来的降级条件只在「大 leaf 跨越 VMA 边界
 **当前安全状态**：riscv64 侧功能与性能结论完全不受影响——5 架构 + 2 NOMMU 变体构建通过、
 三个门全通过、审计全 0、状态路径 2836 次缺页正常、预标记开/关均为性能中性（§10.34）。
 所有 x86_64 排查均在 `EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=4096` 下进行。
+
+### 10.41 排查 x86_64 崩溃：已排除的「谁把 VMA 改成可写」候选
+
+现场事实（§10.39，一次三路 dump，全程只触发 1 次）：
+
+```
+PTE      flags=0x425          有读，无写
+per-PTE  cls=2 prot=1         有读，无写     ← 与 PTE 一致
+VMA      vpte=0x467           有读，有写     ← 只有它不同
+```
+
+所以**做这个差异的只可能是「把 VMA 改成可写、却没同步 PTE 与状态」的那一方**。
+把 `vma->pte_flags` 的全部写入点列出来逐一排除：
+
+| 写入点 | 是否可能 | 理由 |
+|---|---|---|
+| `mprotect.c:68` | **排除** | 位于 `#ifdef CONFIG_NOMMU` 内；NOMMU 无页表，只改 VMA 是正确的。有页表时该分支根本不编译。 |
+| `mprotect.c:169` | **排除** | 前面有逐页循环会改 PTE；§10.38/§10.40 两次修完，崩溃与计数一字未变。 |
+| `mmap.c:163`、`elf.c:170`、`munmap.c:270`、`sysv_shm.c:298`、`framebuffer.c:198/379`、`io_uring.c:146` | **排除** | 全是 **VMA 创建**点：新建 VMA 时对应叶子尚不存在，之后的第一页要么走 VMA 缺页路径按 VMA 装帧，要么走状态路径按状态装帧。没有任何一条能在「PTE 与状态都已是只读」之后再把 VMA 变可写。 |
+
+**由此可以确定地收窄**：既不是 mprotect（两个分支都排除），也不是任何 VMA 创建点。
+剩下的可能只有两类，且都**不是**「谁改了 VMA」：
+
+1. **VMA 被拆分/合并后 `pte_flags` 取值错误**——`mm_split_vma_at()` 与
+   `vma_try_merge()`（mprotect 末尾会调用）会新建或合并 VMA。若合并时从相邻 VMA 抄了
+   `pte_flags`，而相邻那段其实是只读的，就可能造出「本段 RW、叶子 R」的组合。
+2. **页被换成了另一个 VMA 覆盖的范围**——即该地址后来落进了另一个（可写的）VMA，而
+   页表项仍是先前那段留下的只读映射。dump 里 `vstart/vend` 与 `va` 的相对位置值得再核对
+   一次：`va` 距 `vstart` 是 `0x20f20`，距 `vend` 是 `0x20e0`，**两端都不近**，说明
+   `va` 落在这个 VMA 的内部而非边界，这一点与「跨界拆分出错」相容。
+
+**下一步若继续，应当查的是拆分/合并路径，而不是再改 PTE 权限**：
+在 `mm_split_vma_at()` 与 `vma_try_merge()` 里打印新 VMA 的 `[start,end)` 与继承来的
+`pte_flags`，并检查它们是否与该范围内现存叶子的实际权限一致。这是一条此前从未看过的
+路径——前四次排查全部集中在「PTE 怎么被写」与「状态怎么被写」，而现场证据表明两者
+都是自洽的。
+
+**当前安全状态**：riscv64 侧完全不受影响（5 架构 + 2 NOMMU 变体构建通过、三个门全通过、
+审计全 0、状态路径 2836 次缺页正常、预标记开/关性能中性）。x86_64 崩溃仍未修，但排查
+已从「猜权限位」推进到「VMA 生命周期」，且排除掉了全部显式写入点。
+
+### 10.42 VMA 拆分/合并路径也排除：x86_64 排查到此为止
+
+接着 §10.41 排除全部显式写入点之后，把 VMA 生命周期路径也看了一遍：
+
+**`mm_split_vma_at()`**（`kernel/mm/vma.c`）用 `*tail = *v` 整体复制父 VMA，再改
+`start` 与 `file_offset`。`pte_flags` 是被**原样继承**的，所以拆分本身不可能造出
+「一段 RW、一段 R」——两半拿到的是同一份权限。**排除。**
+
+**`vma_try_merge()` → `vma_can_merge()`** 有一道显式守卫：
+
+```c
+if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
+    return 0;
+```
+
+即 `pte_flags` 不同的两个相邻 VMA **拒绝合并**，所以合并也不会把只读段的权限"抹"成
+可写。**排除。**
+
+至此，与 VMA 权限有关的**全部**路径都已排查：
+
+| 路径 | 结论 |
+|---|---|
+| `mprotect.c:68` | 排除（`#ifdef CONFIG_NOMMU` 内，有页表时不编译） |
+| `mprotect.c:169` 的逐页循环 | 排除（两次修复后崩溃与计数一字未变） |
+| `mprotect` 跳过大 leaf 其余条目 | 排除（修复后计数一字未变） |
+| `mmap/elf/munmap/sysv_shm/framebuffer/io_uring` 的 VMA 创建点 | 排除（创建时叶子尚不存在） |
+| `mm_split_vma_at()` | 排除（`*tail = *v` 原样继承 `pte_flags`） |
+| `vma_try_merge()` | 排除（`pte_flags` 不同即拒绝合并） |
+| per-PTE 状态的写入（provision / refresh / status 路径安装） | 排除（回读断言 0 违例；状态与 PTE 现场自洽） |
+
+**结论：x86_64 上的「只读 PTE + 可写 VMA」这个组合，其来源不在上述任何一处。**
+四次猜测、四次证伪，且现场证据（PTE 与 per-PTE 状态自洽、只有 VMA 单独不同）始终指向
+"VMA 侧"，但把 VMA 侧所有写入路径都排除之后，仍然解释不了。**这说明现场 dump 里的
+那个 VMA 可能根本不是当前 fault 所属的 VMA**——即 dump 打印 VMA 的时机或取值有问题，
+而不是权限真的分叉了。若真如此，之前基于"PTE/VMA 分叉"的三次推理（§10.37/§10.39/§10.40
+的因果链）从一开始就是建立在**一个错误的观测**之上。
+
+**这是我第一次开始怀疑观测本身，而不是继续怀疑被观测的对象。** 下一步应当做的不是再改
+代码，而是**先验证这个观测是否可信**：在 dump 里把「fault 时的 VMA」与
+「`mm_find_vma(stval)` 现场返回的 VMA」同时打印（应当是同一个指针），并把该范围内
+每一个已映射叶子的实际权限全部列出。若二者一致且权限真的分叉，则说明存在本文档未
+记录的第三条写入路径；若不一致，则观测本身是错的，上面三次因果推理需全部作废。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0
+（含新增的 `safe=0`）、状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+x86_64 的排查不影响上述任何结论。
+
+### 10.43 观测本身可信（推翻 §10.42 的自疑），且定位到「页面一出生就是只读」
+
+按 §10.42 的结论，先去**验证观测**而不是继续改代码。在拒绝写缺页处临时打印：
+（a）`mm_find_vma(stval)` 现场返回的 VMA 指针与 `covers = v->start <= stval < v->end`；
+（b）以 `stval` 为中心、±2 页的**实测**叶子权限。
+
+```
+[MM-OBS] va=a473cf20 acc=1 vma=0xffff80007eb939c0 covers=1
+         v[a471c000,a473d000) vflags=13 vpte=467 present=1
+[MM-OBS]   i=-2 page va=a473a000 pte=0                     W=0
+[MM-OBS]   i=-1 page va=a473b000 pte=0                     W=0
+[MM-OBS]   i=0  page va=a473c000 pte=800000007eecb425      W=0
+[MM-OBS]   i=1  page va=a473d000 pte=0                     W=0
+[MM-OBS]   i=2  page va=a473e000 pte=0                     W=0
+```
+
+**结论一：`covers=1`，§10.42 的自疑被推翻。** dump 里的 VMA 确实覆盖 `stval`，观测可信。
+（「PTE 只读 + VMA 可写」是真的，不是打印时机或取值造成的假象。）
+
+**结论二（本次真正的新事实）：这是一个 33 页的可读可写匿名 VMA，而它整个邻域里
+*只有一个* 页是已映射的——恰好就是出错那一页，且它是只读；其余页 `pte=0`（不存在）。**
+
+由此可以**一次性结掉整条 mprotect / VMA 生命周期线索**，理由是结构性的、不再是猜测性的：
+
+* 出错页在该 VMA 内的偏移是 `0xa473c000 - 0xa471c000 = 0x20000`，即第 9 页（共 33 页），
+  **既不在边界、也不在任何 split/merge 接缝附近**——所以 §10.41/§10.42 排查的
+  `mm_split_vma_at()` / `vma_try_merge()` 在此处**根本没有生效的机会**。
+* 邻域 32 页 `pte=0`，意味着 mprotect 的逐页循环在这个范围里**无页可改**；即使执行过，
+  也不可能只把这一页留下旧权限。
+
+**所以「只读 PTE + 可写 VMA」不是事后被谁改坏的，而是这一页在被 provision 时就带着只读
+权限出生了。** 六次被证伪的假设（权限位集合 / `PTE_U` / 状态未刷新 / 跳过大 leaf /
+VMA 创建点 / VMA 拆分合并）**全部**属于「事后改坏」这一类，因此全部与本现象无关。
+
+**唯一尚未被检查过的路径是 `mm_pt_provision_anon()`（`kernel/mm/pt.c:951`）**，它在 mmap
+时把一整段匿名范围预标记为 `status_byte(MM_ST_ANON_VIRT, flags)`。缺陷只可能在这两个
+地方之一：
+
+1. **调用点传入的 `flags` 与覆盖它的 VMA 的 `pte_flags` 不一致**——例如按 `PROT_READ`
+   传参、或取了某个默认/模板值，而不是取该 VMA 真实的 `pte_flags`。
+2. **`status_byte()` 的 class/prot 打包**把可写位丢了。
+
+`mm_anon_provisioned=53`（累计）而本 VMA 有 33 页、却只落了 1 页，也与
+`mm_pt_provision_anon()` 里 `if (span / PAGE_SIZE > g_anon_prov_max) return 0;` 的
+"太大就不预标记、改走 VMA 缺页路径" 的行为一致——说明未预标记的页走 VMA 路径是好的
+（那条路径从未出问题），**只有被预标记的页会带错权限出生**。
+
+**下一步（明确且从未做过）**：把 `mm_pt_provision_anon()` 的**全部调用点**列出来，逐个核对
+传入的 `flags` 是否等于该范围内 VMA 的 `pte_flags`；并重读 `status_byte()` 的打包逻辑。
+这是一个范围极小、可穷举的检查，与前六次「结构上不可能」的排除不同。
+
+**本节诊断为临时插桩，已在记录后从 `kernel/mm/fault.c` 移除**（`git checkout`），
+不留调试打印在缺页热路径上。
+
+> 插桩过程中还暴露了一个小坑：本内核的 `kerr` 不支持 `%+d`，导致 varargs 整体错位
+> （首轮输出里 `va=fffffffe` 其实是 `i=-2`）。改成 `%d` 后数据才正确。
+> **教训：新增诊断格式串只用 `%d/%x/%lx/%p`，不要用 `+`/`-`/`0` 标志。**
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.44 预标记本身自洽；真正的发现是「状态权限一旦 fault 就被永久冻结」
+
+按 §10.43 的结论，穷举 `mm_pt_provision_anon()` 的三个调用点，核对传入的 `flags` 与
+该范围内 VMA 的 `pte_flags`：
+
+| 调用点 | 传入 `flags` | 同函数里写入 VMA 的值 | 是否一致 |
+|---|---|---|---|
+| `mmap.c:197` | `ptef` | `vma->pte_flags = ptef;`（`mmap.c:163`） | **一致** |
+| `elf.c:183` | `pte_flags` | `vma->pte_flags = pte_flags;`（`elf.c:170`） | **一致** |
+| `munmap.c:275` | `mm_user_brk_pte_flags()` | `vma->pte_flags = mm_user_brk_pte_flags();`（`munmap.c:270`） | **一致** |
+
+且 `mm_pt_prot_bits()` 逐位正确打包 `PTE_R/W/X`，`status_byte()` 只做
+`cls | COW | prot` 的组合，**不会丢可写位**。所以**预标记阶段在结构上不可能**造成
+「VMA 可写、状态只读」——三处都把同一个值同时写进了 VMA 与状态。§10.43 猜测的
+两个候选（调用点 `flags` 不一致 / `status_byte` 丢位）**双双排除**。
+
+**但这一轮读代码带出一个此前没被注意到的、决定性的性质**：
+
+```c
+int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef) {
+    ...
+    uint8_t cls = MM_ST_GET_CLASS(*slot);
+    if (cls != MM_ST_ANON_VIRT)
+        return 0;                       /* <-- 关键 */
+    *slot = ... mm_pt_prot_bits(ptef);
+}
+```
+
+而 §10.39 现场读回的状态是 **`cls = 2`，即 `MM_ST_ANON_MAPPED`，不是 `MM_ST_ANON_VIRT`**。
+
+也就是说：**一个预标记页一旦被 fault 过、状态类从 `ANON_VIRT` 翻成 `ANON_MAPPED`，
+它的状态权限位就再也没有任何代码路径能改写了。** 唯一会改写状态权限的函数对已 fault 的
+页直接 early-return。此后该页的权限完全由 PTE 决定，状态权限只是一份不再更新的快照。
+
+这解释了为什么前六次修复全部无效：它们都在试图修「事后改坏」的路径，而现象根本不是
+事后改坏的。结合 §10.43 的邻域证据（33 页 VMA 里只有出错那一页已映射、其余 32 页
+`pte=0`），唯一自洽的时序是：
+
+1. 某段匿名范围被预标记，`ANON_VIRT` + 当时的 VMA 权限（**此刻状态与 VMA 必然一致**）；
+2. 某次 `mprotect` 把这段 VMA 改成**只读**；此时页**尚未 fault**，`mm_pt_refresh_absent_prot`
+   生效（`cls` 还是 `ANON_VIRT`），状态跟着改成只读——**仍然一致**；
+3. 该页被 fault，状态类翻成 `ANON_MAPPED`，按当时（只读）的状态装出只读 PTE——**仍然一致**；
+4. 此后该页状态权限**被冻结**（上面那段 early-return）；
+5. 某次 `mprotect` 把 VMA 改回**可写**。页是 present，走 mprotect 的「已映射」分支，
+   应当更新 PTE……**但现场 PTE 仍是只读**。
+
+所以全部矛盾收敛到**第 5 步**：一次把已映射页所在 VMA 改成可写、却**没有**把该页 PTE
+改成可写的 `mprotect`。而 §10.38 与 §10.40 两次修 mprotect 后「计数一字未变」，说明这两次
+修改**没有改变实际执行的代码路径**（`level > 0` 从未命中、NULL 指针也从未命中），因而
+既没修好、也没掩盖——**真正的缺陷还在 mprotect 里，只是不在我改的那两处**。
+
+**下一步因此收窄到一个点、且是可穷举的**：审计 mprotect 的「已映射」分支在什么条件下
+会**只改 `v->pte_flags` 而跳过 `*pte` 的写入**。候选包括（但需逐个读码确认，不能再猜）：
+循环条件与 `va` 推进是否在某处提前 `break`/`continue`；`pt_lookup_leaf()` 返回
+`level > 0` 时的降级失败分支；以及 `mm_pte_flags_apply_prot()` 之后是否还有把 `ptef`
+重置成只读的第二处赋值。
+
+**并且**：`mm_pt_refresh_absent_prot()` 那个 `cls != MM_ST_ANON_VIRT` 的 early-return 本身
+值得单独审视——它意味着「已 fault 的预标记页」在 mprotect 下**完全依赖 PTE 正确**，
+失去了状态这份冗余。是否应当在 mprotect 的已映射分支里**同时**刷新状态权限（而非依赖
+early-return），属于设计取舍，需要在定位到第 5 步的真正缺陷之后再决定。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.45 mprotect 被证伪，并**推翻 §10.39「三向分叉」的框架本身**
+
+不再猜，改做两件事：(a) 在 mprotect 内加守卫，(b) 回头核对 §10.39 的读数是怎么来的。
+
+#### (a) 守卫：mprotect 从未把「已映射只读页」留在「可写 VMA」之下
+
+在 mprotect 的逐页循环之后、`v->pte_flags` 改写之前插入：
+
+```c
+if (ptef & PTE_W) {
+    for (q = v->start; q < v->end; q += PAGE_SIZE) {
+        pte_t *l = pt_lookup_leaf(mm->pgdir, q, NULL, NULL, NULL);
+        if (l && (*l & PTE_V) && !(*l & PTE_W)) { kerr("[MM-MP] ..."); break; }
+    }
+}
+```
+
+即「mprotect 每次把某个 VMA 变可写时，把该 VMA 的**每一个**页都扫一遍，若存在
+**已映射且只读**的页就报出来」。
+
+**结果：`[MM-MP]` 命中 0 次，而崩溃照旧发生**（`fatal=1`）。
+
+结合 §10.41（全部显式 `vma->pte_flags` 写入点排除）与 §10.42（拆分/合并排除），
+**VMA 权限一侧至此被穷尽排除**。
+
+#### (b) §10.39 的「状态与 PTE 自洽」是**同义反复**，不是证据 —— 这是本节最重要的修正
+
+§10.39 一直把现场读数当作「三向分叉」：
+`PTE 只读` / `per-PTE 状态只读` / `VMA 可写`，并据此推出「PTE 与状态一致、只有 VMA 不同」。
+
+**但 `mm_pt_query()` 在返回前会用 PTE 覆写状态里的权限位**（`kernel/mm/pt.c:1095-1099`）：
+
+```c
+uint8_t byte = mm_pt_peek(table, 0, idx);
+if (MM_ST_GET_CLASS(byte) == MM_ST_INVALID)
+    byte = MM_ST_CLS_BYTE(MM_ST_ANON_MAPPED);
+byte = (uint8_t)((byte & (uint8_t)~MM_ST_PROT_MASK) | mm_pt_prot_bits(pte));
+```
+
+注意最后一行：**`prot` 是从 `pte` 算出来覆盖进去的**。所以查询输出的「状态权限」在
+定义上就等于 PTE 的权限，**它永远不可能与 PTE 不一致**。
+
+于是 §10.39 的「PTE 与 per-PTE 状态自洽」根本不是一条独立证据，而是**恒真**；
+「三向分叉」这个框架从一开始就是伪的。真正存在的分叉只有一个，而且更朴素：
+
+> **该页的 PTE 是只读，而覆盖它的 VMA 是可写。**
+
+这也让 §10.41～§10.44 一连串推理的前提失效：既然没有「状态与 PTE 各自独立地一致」这回事，
+那么「状态被冻结」「provision 三处自洽」这些结论虽然各自成立，却都与本崩溃**无关**——
+它们描述的是一条根本没被触发的路径。（结论本身不错，但答的不是这个问题。）
+
+#### 由此得到的、唯一还站得住的机制
+
+mprotect 不会造成这种分叉（守卫 0 命中），VMA 侧其它写入点也全被排除。那么
+**只读的 PTE 必定早于那个可写的 VMA 存在**——即这一页的 PTE 是**更早一次映射留下的残留**，
+而后来有一个 VMA 被**建到了这个地址之上**，继承了可写权限。
+
+§10.43 的邻域观测与这个机制高度吻合：33 页的 VMA 里**只有出错那一页**已映射，
+其余 32 页 `pte=0`。若 VMA 与 PTE 是同一次建立的，不该只孤零零剩一页；
+而「一段先前映射的残留 PTE 恰好落在新 VMA 内部」正好给出这种稀疏分布。
+
+**所以排查方向要整个换掉：不再是「谁把 VMA 弄宽了」，而是「哪条路径在建立新 VMA 时，
+底下还压着一张旧的、只读的 PTE」。** 具体要查两件事：
+
+1. **VMA 拆除是否把该范围内所有 PTE 都反映射了**——`mm_pt_note_absent()` 只在
+   `kernel/mm/pt.c:819/830/836` 三处被调用，需核对 munmap/brk-收缩/`vma_release`
+   是否都走到了、以及是否有「只清 VMA 不清 PTE」或「只清一部分」的分支
+   （尤其 `mm_pt_note_absent()` 里 `if (cls != MM_ST_INVALID && m->nr_present)` 这个
+   有条件 early-return）。
+2. **VMA 新建是否会覆盖到仍存在的 PTE**——`mm_pt_provision_anon()` 在
+   `if (r > 0)`（被更大的 leaf 覆盖）时是 `continue` 跳过而不做任何处理；需确认
+   brk 扩张（`munmap.c:262-280`）与 ELF 段加载在目标地址上已有 PTE 时的行为。
+
+**本节诊断为临时插桩，已在记录后移除**（`kernel/mm/mprotect.c` 执行 `git checkout`），
+不留调试打印在 mprotect 热路径上。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.46 拆除路径核对通过，x86_64 排查暂停于「新建 VMA 压着旧 PTE」
+
+按 §10.45 定下的方向，核对「旧 PTE 是否会残留」这条线的**拆除侧**两端：
+
+**`mm_pt_note_absent()`（`pt.c:305-324`）——正确。** 置 `*slot = 0`（回到 `MM_ST_INVALID`）、
+按条件递减 `m->nr_present`、清 COW 位，并且**显式清安全位**：
+
+```c
+/* Safety bits describe the class that was just cleared, so they must go
+ * with it -- otherwise a reused slot would inherit a stale UFFD or
+ * NO_FA flag and the fault path would make the wrong decision. */
+uint8_t *sb = safe_bit(m, idx);
+if (sb) *sb &= (uint8_t)~MM_SAFE_MASK;
+```
+
+`if (cls != MM_ST_INVALID && m->nr_present)` 这个有条件递减**不是**漏清的 bug：
+它只在槽位本来就持有 class 且计数非零时递减，避免下溢。**排除。**
+
+**`mm_cursor_unmap()`（`pt.c:805-840`）——正确。** 三条分支都把 PTE 与状态一并清掉，
+且专门覆盖了「预标记但从未 fault」的页：
+
+```c
+if (!(*pte & PTE_V) || !arch_pte_is_leaf(pte)) {
+    if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
+        mm_pt_note_absent(table, 0, idx);
+    return 0;
+}
+```
+
+**排除。**
+
+所以「拆除时漏清 PTE / 漏清状态」这一族假设**在拆除侧已被排除**。§10.45 提出的第二条
+（**新建** VMA 时底下压着旧 PTE）里，`mm_pt_provision_anon()` 的三个调用点已确认都把
+同一个 `flags` 同时写进 VMA 与状态（§10.44），而 `mm_pt_provision_anon()` 自身在被更大
+leaf 覆盖时是 `if (r > 0) { mm_cursor_unlock(&cur); continue; }`——**只解锁跳过，不做处理**，
+这正是尚未读过的**第三条路径**。
+
+**排查到此暂停，理由是已经连续七次猜错、且前六次的推理框架（§10.39）事后被证明是错的
+（见 §10.45(b)）。** 在没有新证据来源的情况下继续试第八个假设，重复前七次的错误；
+应当先把「新建 VMA 压着旧 PTE」这条**尚未读过的代码路径**（`mm_pt_provision_anon()` 的
+`r > 0` 分支，以及 mmap/brk/ELF 三个 VMA 创建点在目标地址已有 PTE 时的处理）真正读完，
+再决定是修代码还是继续查。
+
+**这七次被证伪的假设，及其被证伪的方式，都有记录价值**：
+
+| # | 假设 | 证伪方式 |
+|---|---|---|
+| 1 | 权限位集合不对（缺 `PTE_LEAF`/`PTE_NX`） | 重构前后崩溃逐字节相同（§10.36） |
+| 2 | `PTE_U` 缺失 | riscv64 修好后完全正常（§10.33） |
+| 3 | 状态未刷新导致装出旧权限（NULL 指针运算） | 修掉后 UBSAN 35→2，崩溃不变（§10.38） |
+| 4 | mprotect 跳过大 leaf 其余条目 | 修掉后计数一字未变（§10.40） |
+| 5 | VMA 创建点 / 拆分 / 合并造成分叉 | 枚举全部写入点后逐一排除（§10.41/§10.42） |
+| 6 | mprotect 把已映射只读页留在可写 VMA 下 | **运行时守卫 0 命中**（§10.45a） |
+| 7 | 观察到的「状态与 PTE 自洽」是独立证据 | **同义反复**：`mm_pt_query()` 用 PTE 覆写状态权限（§10.45b） |
+
+其中 **#7 推翻了前六次推理的共同前提**，是最重要的一条：真正存在的分叉只有一个——
+**该页 PTE 只读、覆盖它的 VMA 可写**——所有关于「per-PTE 状态」的分析都是无关分支。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。
+
+### 10.47 根因定位：`mm_pt_provision_anon()` 遇到已存在的 PTE 时直接跳过
+
+读完 §10.46 留下的那条唯一未读路径后，**崩溃的根因找到了**（`kernel/mm/pt.c:1000-1005`）：
+
+```c
+for (vaddr_t va = lo; va < hi; va += PAGE_SIZE) {
+    int idx = arch_pt_vpn(va, 0);
+    if (table[idx] & PTE_V)
+        continue;               /* a fault won the race; already mapped */
+    pt_note_present_meta(m, idx, byte);
+    marked++;
+}
+```
+
+**这个 `continue` 在真正的并发竞争下是无害的**（同一段 VMA 刚被 fault 装帧，VMA 与 PTE
+本来就该一致），**但在「目标地址上已经存在一张更早的、属于别的映射的 PTE」时是有害的**：
+
+* 旧的那张**只读** PTE 被原样留下（`continue` 之前没有任何改写）；
+* 旧的状态字节也被原样留下（`pt_note_present_meta()` 根本没被调用）；
+* 而**新建的 VMA** 已经带着自己的 `pte_flags`（可写）插进了 `mm`——三个调用点
+  （`mmap.c:197` / `elf.c:183` / `munmap.c:275`）都是在 `mm_insert_vma()` **之后**才调
+  预标记的，所以 VMA 是这段地址上**更新的、更权威**的那一份声明。
+
+于是结果就是**一张只读的残留 PTE 压在可写的 VMA 之下**——正是 §10.45 认定的唯一真实
+分叉，也正是 §10.43 邻域观测的形状：**33 页 VMA 里只有出错那一页已映射，其余 32 页
+`pte=0`**（新 VMA 是全新的，本来该一片空白；那孤零零的一页就是残留）。
+
+同一函数里 `if (r > 0)`（被更大的 leaf 覆盖）分支也是 `mm_cursor_unlock(&cur); continue;`
+——同样只解锁跳过、不做任何处理，属同一族的漏处理。
+
+**七次猜测全部落空、而这一条一次命中，根因就在于前七次都在猜「谁把权限改坏了」，但
+真相是「**没有人改权限，是一张旧 PTE 从头到尾没被让位**」。** 两者在现象上完全一样
+（PTE 只读 / VMA 可写），但在代码上分别属于「写」和「漏写」两族——前七次全在查写，
+自然全查不到。这也解释了 §10.45(a) 的守卫为什么 0 命中：mprotect 确实没留下
+「已映射只读页」，因为那张只读页**根本不是 mprotect 留下的**。
+
+#### 修法（尚未实施，需要先定一个语义问题）
+
+直觉修法是「遇到已存在的 leaf 且权限与新 VMA 不一致时，把 PTE 的权限位改写成新 VMA 的
+`flags` 并做 TLB 失效」。**但这里有一个不能靠直觉决定的安全问题**：若那张残留 PTE 是
+**文件映射**（file-backed），保留它的 frame 会把文件内容泄漏进本应匿名的区域——而这正是
+`elf.c` 里 `anon` 参数的注释所警告过的同一类问题：
+
+> *Provisioning such a range made the fault path hand out anonymous zero pages instead of
+> file content and killed exec with SIGSEGV, so the call site decides.*
+
+所以三个语义选项，风险差别很大，**不应由排查过程单方面决定**：
+
+| 选项 | 做法 | 风险 |
+|---|---|---|
+| **A. 改权限** | 保留 frame，只把 PTE 权限位与状态改写为新 VMA 的 `flags` | 最小改动；但若残留 PTE 是文件映射，会把文件内容暴露给匿名写者——**安全问题，不可默认采用** |
+| **B. 先回收再建 VMA** | 在新建 VMA 之前，先把该地址范围上仍存在的 PTE 全部反映射（`mm_cursor_unmap` 已可用） | 语义最干净（残留映射理应消失）；改动面最大，涉及 mmap/brk/ELF 三个创建点 |
+| **C. 检测并拒绝** | 发现权限不一致就返回失败，让 mmap/brk/ELF 报错而不是静默继承 | 最安全、绝不引入信息泄漏；但会让某些原本「能跑」的映射开始失败 |
+
+**推荐 B**：它修的是「VMA 生命周期与页表不同步」这个真正的病根，而不是掩盖症状；且
+`mm_cursor_unmap()` 已经能正确清除 PTE 与状态（含预标记未 fault 的分支），可复用。
+但 B 会改变 mmap/brk/ELF 的行为，需确认「在这些创建点之前，该地址范围上存在 PTE」本身
+是否就属非法状态——若属非法，正确做法可能反而是 C。
+
+**排查到此结束**：根因已定位到具体的三行代码与它所处的语义问题。实施哪种修法需要先回答
+「目标地址上已有 PTE 时，正确的行为是什么」，这个问题不该在连续七次猜错之后、由一次
+仓促的收尾来决定。
+
+**riscv64 侧完全不受影响**：5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` /
+`smoke-mm-fork-exec-race` / `check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、
+状态路径 2836 次缺页正常、预标记开/关性能中性（§10.34）。默认 `g_anon_prov_max=0`，
+该路径在默认构建下不激活。
+
+### 10.48 §10.47 的根因**被自己的诊断证伪**（第 8 次），排查收束
+
+按 §10.47 的判断加装诊断：在 `mm_pt_provision_anon()` 的逐页循环里，凡因
+`table[idx] & PTE_V` 而跳过、**且该 PTE 的权限与本次要记录的 `flags` 不一致**时，打印
+`[MM-PROV]`。
+
+**结果：命中 0 次，而崩溃照旧（`fatal=1`）。** §10.47 被证伪。
+
+这条零命中**本身是有信息量的**，它排除了一整族可能：预标记阶段从来没见过
+「一张已存在、且权限与新 VMA 冲突的 PTE」。结合 §10.43 的邻域观测（33 页 VMA 里
+**只有出错那一页已映射**，其余 32 页 `pte=0`），可以推出：
+
+> **出错的那一页，是在预标记**之后**才变成"已映射"的——也就是被某次缺页装上去的。**
+
+而 §10.45(a) 已经证明 mprotect 不会把「已映射只读页」留在「可写 VMA」之下。
+于是矛盾进一步收紧到**缺页安装**这一步。
+
+#### 缺页安装这一步读码的结论
+
+状态路径（`kernel/mm/fault.c:960-993`）**完全不查 VMA**，权限只从记录的状态字节还原：
+
+```c
+if (cls_byte & MM_ST_PROT_R) prot |= 1;
+if (cls_byte & MM_ST_PROT_W) prot |= 2;
+if (cls_byte & MM_ST_PROT_X) prot |= 4;
+pte_t allow = mm_prot_to_pte_flags(prot);
+...
+mm_cursor_map(&qcur, page_va, pfn_to_phys(np), allow, MM_ST_ANON_MAPPED);
+```
+
+这正是论文的设计（SS6.2「省掉 Linux 花在 VMA 上的时间」），也意味着
+**只要该页的状态字节是「只读」，缺页就一定会装出只读的 PTE，不管 VMA 说什么。**
+而 §10.45(b) 已证明「状态与 PTE 一致」是同义反复，所以现在唯一待解的问题只有一个：
+
+> **谁把该页的状态权限改成了「只读」，却没有同步把 VMA 改回只读？**
+
+写状态权限的函数**全仓库只有一个**：`mm_pt_refresh_absent_prot()`（`pt.c:857`），
+它只被 mprotect 的「该页尚未映射」分支调用，且带一道早退：
+
+```c
+if (cls != MM_ST_ANON_VIRT) return 0;
+```
+
+**而 mprotect 的同一个分支会无条件执行 `v->pte_flags = mm_pte_flags_apply_prot(...)`。**
+这两行在同一次调用里、传的是同一个 `ptef`，因此**单次 mprotect 内部不可能分叉**——
+分叉只可能来自**两次不同的 mprotect**：前一次把状态刷成只读，后一次把 VMA 放宽回可写
+却因为上面那道早退（或 `pte == NULL`，`pt.c` 注释所述「没有叶子表就没有状态可刷」）
+而**没有刷状态**。
+
+这是本次排查得到的**唯一一条尚未被实验排除、且在代码里确有对应早退的机制**。
+但要把它钉死为根因，还需要一次专门的实验（记录该页的状态字节在 VMA 放宽前后的值），
+而这已经超出本轮排查的合理成本。
+
+#### 收束
+
+**连续 8 次猜测全部被各自的诊断证伪。** 其中 §10.45(b) 推翻了前 6 次的共同前提、
+§10.47 推翻了第 7 次，代价是这些结论虽然各自正确，却都在描述**没有被触发**的路径。
+
+**停止继续猜。** 理由已经充分：每一次「读码 → 提出假设 → 加诊断 → 证伪」都真实推进了
+认知（尤其 §10.45b、§10.47、§10.48 三条排除了大片区域），但也证明**这个崩溃无法靠
+读码猜出来**——它的机制发生在一次具体的运行期事件序列里，必须被**记录**而不是被**推理**。
+下一步唯一合理的做法是：在 `mm_pt_refresh_absent_prot()` 与 mprotect 的 VMA 改写处，
+把「该页的状态字节 / VMA 权限 / 事件」按时间序**打进环形缓冲**，复现后离线读序列，
+一次性看清 VMA 与状态是在哪两个事件之间分叉的。这是**观测**问题，不是**推理**问题。
+
+**当前可交付状态（riscv64 侧，完整且可信）**：
+5 架构 + 2 NOMMU 变体构建通过、`smoke-mm-stress` / `smoke-mm-fork-exec-race` /
+`check-mm-lock-model` 三个门全通过、关机审计全 0（含 `safe=0`）、状态路径 2836 次缺页
+正常、预标记开/关**性能中性**（§10.34）。所有旧性能结论已撤回，文档中无残留错误数字。
+
+**默认构建不受影响**：`g_anon_prov_max = 0`，本崩溃只在
+`EXTRA_CFLAGS=-DCONFIG_ANON_PROV_DEFAULT=<n>` 的实验构建下出现。
