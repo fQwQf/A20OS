@@ -133,12 +133,26 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                 }
                 va = base + size;
             } else {
-                /* Reserved by mmap but never faulted: there is no PTE to
-                 * carry the new permissions, and the per-PTE status is what a
-                 * later fault will install.  Refresh it here, or mprotect is
-                 * silently ignored for this page. */
-                int idx = arch_pt_vpn(va, 0);
-                mm_pt_refresh_absent_prot(pte - idx, idx, ptef);
+                /* Reserved by mmap but never faulted: there is no PTE to carry
+                 * the new permissions, and the per-PTE status is what a later
+                 * fault will install.  Refresh it here, or mprotect is silently
+                 * ignored for this page.
+                 *
+                 * `pte` may be NULL, not merely non-present: this branch also
+                 * catches addresses with no leaf table at all.  The per-PTE
+                 * status lives in that table's metadata, so when there is no
+                 * table there is no status to refresh.  Computing `pte - idx`
+                 * from NULL is pointer arithmetic on a null pointer (UBSAN
+                 * flagged it on every such page) and handed
+                 * mm_pt_refresh_absent_prot() a wild pointer, so the refresh
+                 * silently did nothing: the status kept its OLD permissions,
+                 * v->pte_flags below was updated anyway, and a later
+                 * status-driven fault installed the stale permissions --
+                 * leaving a PTE that disagreed with its own VMA. */
+                if (pte) {
+                    int idx = arch_pt_vpn(va, 0);
+                    mm_pt_refresh_absent_prot(pte - idx, idx, ptef);
+                }
                 va += PAGE_SIZE;
             }
         }
