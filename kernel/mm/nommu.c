@@ -16,6 +16,16 @@ void mm_pt_retire_table(struct mm_struct *mm, pte_t *table, int level)
 
 void mm_pt_retire_drain(struct mm_struct *mm) { (void)mm; }
 
+/* Likewise: without page tables there are no per-entry safety bits to set, but
+ * mseal() and the userfaultfd register/unregister paths are not guarded and do
+ * call this. */
+int mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                         unsigned flags, int set)
+{
+    (void)mm; (void)start; (void)end; (void)flags; (void)set;
+    return 0;
+}
+
 pte_t *pt_create(void) { return (pte_t *)1; }
 void pt_destroy(pt_root_t *pgdir) { (void)pgdir; }
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }

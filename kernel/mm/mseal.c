@@ -1,4 +1,5 @@
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
 #include "proc/proc.h"
@@ -116,6 +117,15 @@ int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
         if (v->start >= end || v->end <= addr)
             continue;
         v->vm_flags |= VM_SEALED;
+        /* A sealed range must not be pulled into a multi-page fault-around:
+         * speculatively installing frames for neighbours would change state
+         * the seal exists to freeze.  Record it per entry so a status-driven
+         * fault can honour the seal without re-deriving it from the VMA. */
+        vaddr_t a = (vaddr_t)v->start > addr ? (vaddr_t)v->start : addr;
+        vaddr_t b = (vaddr_t)v->end < end ? (vaddr_t)v->end : end;
+        mm_pt_set_safe_range(mm, a & ~(vaddr_t)(PAGE_SIZE - 1),
+                             (b + PAGE_SIZE - 1) & ~(vaddr_t)(PAGE_SIZE - 1),
+                             MM_SAFE_NO_FA, 1);
     }
     return 0;
 }

@@ -1498,3 +1498,158 @@ riscv64 / aarch64 / x86_64 的 NOMMU 全部构建通过；`smoke-mm-stress`、
 **未能验证**：arm32 在本环境**改动前就无法构建**（`arm-linux-gnueabihf-gcc` 不在
 PATH），其自有的一份 `pt_unmap` / `pt_unmap_leaf` 已同步改签名并从 `mm->pgdir` 取
 pgdir，但编译未经检验。
+
+### 10.18 给 per-PTE 状态补上安全语义位（状态路径的前置条件之一）
+
+§10.7 记录了状态路径的位置缺陷：它在 `mm_find_vma` **之前**返回，因而绕过
+userfaultfd、`VM_SHARED` 与 fault-around 的安全门。论文的设想是用 per-PTE 状态
+**取代** VMA 成为权威来源，前提是状态本身能表达这些判定——而原来的状态字节做不到：
+8 位全部分配完毕（4 位 class + COW + 3 位 prot），且**共享性其实已经编码在 class 里**
+（`MM_ST_ANON_SHARED` / `MM_ST_FILE_SHARED`），所以并不是「没有地方放」，而是
+「剩下的两项判定确实放不下」。
+
+本次为此新增两项，并按既有 `cow[]` 的写法做成**并行位图**而不是把 `cls[]` 扩成
+16 位/项（后者会把每项元数据翻倍）：
+
+* `MM_SAFE_UFFD`——该项被 userfaultfd 区间覆盖。缺页必须停住交给 handler，
+  **绝不能**直接造零页满足。
+* `MM_SAFE_NO_FA`——该项不得被多页 fault-around 覆盖（VMA 已被 seal，或该 class 下
+  投机分配会改变语义）。
+
+`pt_meta_t` 新增 `safe[(MM_PT_META_ENTRIES + 7) / 8]`；`mm_pt_node_init()` 本来就
+`memset` 整个结构，故新位图天然归零。
+
+**一个必须做对的细节**：`mm_pt_note_absent()` 原本只清 cow 位。若不同步清 `safe`，
+被复用的槽位会**继承**上一条映射的 UFFD/NO_FA 标志，状态路径据此做出错误判定。所以
+清槽位时一并 `&= ~MM_SAFE_MASK`。同理 `mm_pt_safe_set()` 拒绝在 class 为
+`MM_ST_INVALID` 的槽位上置位——无映射的槽位上的安全位没有意义，也永远不会被清掉。
+
+提供 `mm_pt_safe_set/clear/test()` 三个粒度为「一位」的接口，使任何改动槽位的代码
+都必须经由它们，从而保证这些位不会活得比它所描述的 class 更久。
+
+**当前状态**：这些位**已就位但尚未被任何代码写入**——真正的赋值方是 §10.7 依赖链里的
+「mmap/mprotect/munmap/madvise + userfaultfd 注册全部接入状态更新」那一步。因此状态
+缺页路径仍保持 inert（`mm_fault_from_status` 仍恒为 0），行为零变化。
+
+验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64 的
+NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model`
+通过，审计 `missing_meta/present/absent/prot/cow/vma/anon_virt` 全 0，`pt_pages=6` 不变。
+
+### 10.19 把安全位接到真正会改变安全语义的 syscall 上
+
+§10.18 只是把位加出来了。这一步把它们接到真正的写入方。
+
+新增 `mm_pt_set_safe_range(mm, start, end, flags, set)`：按 leaf 逐块遍历
+（像 madvise 那样把查表摊销掉，而不是每页查一次），`set==0` 时清除。
+
+**mseal**（`kernel/mm/mseal.c`，`mm_mseal_locked` 内，调用方已持 `mm->lock`）：
+对每个被 seal 的 VMA 交集 `[a, b)` 置 `MM_SAFE_NO_FA`。seal 存在的原因是冻结这段
+状态，而多页 fault-around 会**投机地**给邻居装帧——那正是 seal 要禁止的副作用。
+
+**userfaultfd UFFDIO_REGISTER**（`kernel/ipc/userfaultfd.c`）：在 range 真正挂上
+`uffd->ranges` **之后**、`g_uffd_lock` 释放之后，置 `MM_SAFE_UFFD`。放在成功之后而非
+校验循环里，是因为校验失败（覆盖不足 / 与既有注册重叠）时 range 并不存在，那时就标位
+等于凭空造出一个「已被注册」的页面。
+
+**userfaultfd UFFDIO_UNREGISTER**：清掉**实际移除**的那段（记录移除 range 的并集，
+而不是直接用请求范围），同样在 `g_uffd_lock` 之外、`mm->lock` 之下做页表遍历，避免
+在全局 range 锁里嵌一次页表走表。
+
+**一处必须写明的保守之处**：同一页面原则上可被**另一个** uffd 的注册覆盖，所以 unregister
+这里的清除会**清得比严格需要的多**。今天这是安全的——VMA 缺页路径上真正的权威判定是
+`userfaultfd_range_present()`，本次完全没动它，残留的位也不会让缺页跳过 handler。
+但**在状态缺页路径启用之前，这必须改成逐页复查 presence 后再清**，否则「清多了」会让
+仍被注册的页面不经停靠直接缺页成功。
+
+**当前状态**：这些位**已写入但仍无人读取**——读取方是尚未启用的状态缺页路径
+（`mm_fault_from_status` 仍恒为 0），所以行为零变化。这是纯铺垫。
+
+**尚未完成**：todo 里与本项并列的「在 MM-ASM auditor 里加 status-vs-VMA 一致性检查」
+还没做。启用状态路径之前必须有它，否则无法证明状态与 VMA 等价。
+
+验证：riscv64 / x86_64 / aarch64 / loongarch64 / ppc64le 与 riscv64 / aarch64 / x86_64
+的 NOMMU 全部构建通过；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、
+`check-mm-lock-model` 通过，审计全 0，`pt_pages=6` 不变。
+
+### 10.20 auditor：把 seal ↔ MM_SAFE_NO_FA 变成机器可检的不变量
+
+§10.19 接好了 mseal → `MM_SAFE_NO_FA`，但「看起来对」不算证据。`mm_pt_audit()` 里原本已有
+VMA 交叉检查（`vma_mismatch`：每个 VMA 至少要有一页被元数据认识），现在按同样的做法再加
+一条**双向**不变量：
+
+对每个 VMA 的每一页，若该页**已映射**（class 不是 `MM_ST_INVALID`），则
+`MM_SAFE_NO_FA` 必须与 `VM_SEALED` 一致——seal 住的区间若仍能被 fault-around 拉进来，
+seal 就失效了；反过来标了却没 seal，则是无谓地关掉了 fault-around。任何一边漏更新，
+都会在关机审计里变成 `safe=N`，而不是等到某次投机分配悄悄改了被冻结的状态。
+
+新计数项 `safe_mismatch` 已并入 `mm_pt_audit_errors()`，所以它**会让审计失败**，
+不是只打印一个数字。审计行现在多一个 `safe=` 字段：
+`missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 safe=0 anon_virt=0`。
+
+**`MM_SAFE_UFFD` 故意不查**：UFFDIO_UNREGISTER 清的是「实际移除的 range 的并集」，
+一个仍被**另一个** uffd 注册覆盖的页面会丢掉标记，于是「UFFD 位 ⟺ 被注册」今天根本不是
+不变量，拿它做检查必然报假错。权威判定始终是 VMA 缺页路径上的
+`userfaultfd_range_present()`（本次未动）。等状态缺页路径真要启用、且 unregister 改成
+逐页复查 presence 之后再清（§10.19 已标注），才把 UFFD 位纳入审计。
+
+**这条检查不是空跑**：`mm_stress.c` 里有 23 处 mseal 调用，`smoke-mm-stress` 真的会
+seal 区间，所以 `safe=0` 是**跑过之后**的一致性结果，不是「没有 seal 所以没得查」。
+
+验证：5 个架构与 3 个 NOMMU 变体构建通过；`smoke-mm-stress`、
+`smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过，审计全 0（含新增的 `safe=0`），
+`pt_pages=6` 不变。
+
+### 10.21 状态缺页路径：查询修复 + UFFD 门控（默认仍然关闭）
+
+两处改动，**默认配置下是 no-op**：
+
+1. `mm_cursor_query()` 对**缺失**叶子不再直接返回而把 `cls_out` 留在 `INVALID`——它现在
+   报告元数据里记下的 class。这正是 §10.6 判定「路径从未执行」的那一行。
+2. fault.c 状态路径加 `MM_SAFE_UFFD` 门：该项若被 userfaultfd 注册，**必须**回落到
+   VMA 路径停靠给 handler，不能就地满足。辅助接口 `mm_cursor_safe_test()` 让调用方在
+   已持有覆盖节点锁的情况下问「这一项是不是被注册了」，不必再下降一次。
+
+**为什么现在可以安全地打开这条路径**（对照 §10.7 列的三条绕过）：
+
+* *绕过 userfaultfd* → 已由 `MM_SAFE_UFFD` 挡住，且该位会写到「已预留未缺页」的项上
+  （class 是 `ANON_VIRT` 而非 `INVALID`，所以 `mm_pt_safe_set()` 不会拒）。
+* *绕过 `VM_SHARED`* → 天然不成立：状态路径只接受 class `ANON_VIRT`，而共享映射的
+  class 是 `MM_ST_ANON_SHARED` / `MM_ST_FILE_SHARED`，永远不是 `ANON_VIRT`。
+* *绕过 fault-around* → 天然不成立：状态路径一次只映射一页，根本不做 fault-around。
+
+**默认关闭的原因正是预标记默认关闭**：没有 `ANON_VIRT` 项，状态路径就永远不会命中。
+实测 `a20.anonprov=0`（默认）：`mm_anon_provisioned=0`、`mm_fault_from_status=0`、
+`mm_anon_faults=672`、`mm_demand_faults=1484`，mm_stress PASS，**无 FATAL**。
+
+**打开时确实会崩——(b) 依然存在**。`a20.anonprov=4096`：
+
+```
+mm_demand_faults      1484
+mm_anon_faults         672
+mm_fault_from_status      0     <- 关闭时
+a20.anonprov=4096:  FATAL, mm_stress 未通过
+```
+
+崩溃签名（`a20.anonprov=4096`，稳定复现）：
+
+```
+[FAULT-VA] stval=0x807000
+  leaf: base=0x807000 pa=0xffde4000 pfn=523748 flags=0x7 refs=1
+  page_words: 00000000 00000000 00000000 00000000
+  va_words:   全 0
+  mm: brk=0x808000 start_brk=0x806000 stack=[0x3ff3d000,0x3ff5d000)
+  vma=[0x807000,0x808000) flags=0x13 pte_flags=0xd7 file_fd=-1 off=0x1000
+  regs: a0=0x806000 a1=0x1000   status=0x200004020
+```
+
+**尚未解释的疑点**：出错的页在转储里是**已映射且 `flags=0x7`（RWX）**，内容全 0，但
+CPU 仍在它上面 fault（`status` 低位指向取指/访问类异常）。「PTE 看起来可访问却仍 fault」
+本身是矛盾的，所以要么转储读到的 PTE 不是 fault 当时的状态，要么存在另一条使该映射
+无效的路径。**根因未定位**，需要继续查；在定位之前不得把预标记默认打开。
+
+另注：brk VMA 上的 `off=0x1000` 对匿名堆来说没有意义（brk 段的 `vm_pgoff` 应当为 0），
+也是一个待解释的异常。
+
+验证：riscv64 / x86_64 / aarch64 构建通过；`smoke-mm-stress`、
+`smoke-mm-fork-exec-race` 通过，审计全 0（含 `safe=0`），`pt_pages=6` 不变；
+默认配置下 `mm_fault_from_status` 为 0，行为与改动前完全一致。
