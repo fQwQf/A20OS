@@ -15,10 +15,13 @@ documents: a second copy of a Makefile formula rots silently.
 from __future__ import annotations
 
 import argparse
+import fcntl
+import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -121,20 +124,112 @@ def build_fat32(a) -> int:
 def build_ext4(a) -> int:
     img = REPO / a.ext4_img
     img.parent.mkdir(parents=True, exist_ok=True)
-    must(["dd", f"if=/dev/zero", f"of={img}", "bs=1048576", f"count={a.ext4_mb}"])
-    must(["mkfs.ext4", "-q", "-F", str(img)])
+    staging_parent = REPO / a.ext4_staging_dir
+    staging_parent.parent.mkdir(parents=True, exist_ok=True)
+
+    # Recursive gates can overlap builds that share BUILD_DIR.  The original
+    # held an flock across staging, mkfs and the publish, and published with a
+    # rename so a reader never sees a half-written image.
+    lock = open(str(img) + ".lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    staging = Path(tempfile.mkdtemp(dir=staging_parent.parent,
+                                     prefix=staging_parent.name + "."))
+    fd, tmp_name = tempfile.mkstemp(dir=img.parent, prefix=img.name + ".tmp.")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        user_build = Path(a.user_build_dir)
+        # Same shell-glob semantics as the FAT32 rule: no dotfiles, files only.
+        for f in sorted(user_build.iterdir()):
+            if f.is_file() and not f.name.startswith("."):
+                shutil.copy2(f, staging / f.name)
+        for alias in ("sh", "bash"):
+            shutil.copy2(user_build / "mksh", staging / alias)
+
+        (staging / "test.txt").write_text(
+            "Hello from ext4!\nThis file is on the ext4 filesystem.\n")
+        etc = staging / "etc"
+        etc.mkdir()
+        (etc / "protocols").write_text("\n".join(shlex.split(a.protocols)) + "\n")
+        (etc / "os-release").write_text(unescape(a.os_release))
+
+        must(["dd", "if=/dev/zero", f"of={tmp}", "bs=1048576", f"count={a.ext4_mb}"])
+        # The `^` binds to has_journal only; the rest are enables.  Passed
+        # through verbatim because the on-disk feature set is what the guest
+        # boots against.
+        must([a.mkfs_ext4, "-F",
+              "-O", "^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
+              "-d", str(staging), str(tmp)])
+        os.replace(tmp, img)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        tmp.unlink(missing_ok=True)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+    print(f"img: ext4 image written: {img}")
+    return 0
+
+
+def copy_image(a) -> int:
+    src, dst = REPO / a.src, REPO / a.dst
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    print(f"img: copied {src} -> {dst}")
+    return 0
+
+
+def verify_vbox_rootfs(a) -> int:
+    """Rebuild the FAT32 image if its /init is not the freshly built one.
+
+    The user build stamp is refreshed by a recipe, so a binary can become newer
+    than an already-created FAT image within one checkout and make's timestamp
+    graph would leave a bootable but stale userspace behind.  Comparing /init
+    byte-for-byte catches that.
+    """
+    img = REPO / a.fat32_img
+    expect = Path(a.user_build_dir) / "init"
+    probe = REPO / ".kernel-build" / ".vbox-init-probe"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+
+    def staged_init_matches() -> bool:
+        probe.unlink(missing_ok=True)
+        if run(["mcopy", "-i", str(img), "::/init", str(probe)]).returncode != 0:
+            return False
+        return probe.read_bytes() == expect.read_bytes()
+
+    if not staged_init_matches():
+        print("[VBOX] stale /init detected; rebuilding root filesystem")
+        img.unlink(missing_ok=True)
+        b = subprocess.run(
+            ["make", f"ARCH={a.arch}", f"BOARD={a.board}", f"ABI={a.abi}",
+             f"BRINGUP={a.bringup}", f"NOMMU={a.nommu}", f"OPT={a.opt}",
+             a.fat32_img], cwd=REPO, check=False)
+        if b.returncode != 0:
+            return b.returncode
+        if not staged_init_matches():
+            print("[VBOX] /init still stale after rebuild", file=sys.stderr)
+            return 1
+    probe.unlink(missing_ok=True)
+
+    stamp = REPO / a.stamp
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.touch()
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("command", choices=["fat32", "ext4"])
-    for f in ("fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "user-build-dir",
-              "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc",
-              "protocols", "os-release", "test-txt"):
+    ap.add_argument("command", choices=["fat32", "ext4", "copy", "verify-vbox"])
+    for f in ("fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir",
+              "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod",
+              "driver-store", "libc", "libgcc", "protocols", "os-release",
+              "test-txt", "src", "dst", "arch", "board", "abi", "bringup",
+              "nommu", "opt", "stamp"):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
-    return {"fat32": build_fat32, "ext4": build_ext4}[a.command](a)
+    return {"fat32": build_fat32, "ext4": build_ext4, "copy": copy_image,
+            "verify-vbox": verify_vbox_rootfs}[a.command](a)
 
 
 if __name__ == "__main__":
