@@ -11,7 +11,9 @@ A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明�
 ## 快速上手
 
 ```bash
-tools/a20 list                            # 列出所有实例（名称、架构、形态、状态）
+tools/a20 list                            # 列出所有实例（名称、架构、可用动作、状态）
+tools/a20 list --arch riscv64 armv7m      # 只看这些架构
+tools/a20 list --action test              # 只看能跑冒烟的实例
 tools/a20 run qemu-riscv64                # 构建并在 QEMU 启动（文本模式）
 tools/a20 run xfce-x86_64                 # 图形桌面实例（apk world，含 virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
@@ -168,6 +170,15 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 `gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
 `[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）也**不**导出成 make 变量：它们是 a20 自己按 dataclass 驱动的——串口会话、复位脉冲、命令注入和expect 匹配都不经过任何 recipe。这里曾经导出全部 11 个 `TARGET_*`，其中 8 个没有任何 recipe 读取，于是 `a20 show-vars` 会声称 make 拿到了它其实从未见过的配置。少导出无人消费的变量，比多导出更诚实。
+
+`list` 的"可用动作"列不是分类标签，而是**逐条镜像**对应命令里已经存在的拒绝条件
+（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：
+`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在
+`boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令
+就要在这里补上它的条件——这正是这一列的用途。
+
+`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的
+实例）。想看某个动作的全部目标，优先用它，而不是在 46 行里用眼睛找。
 
 ### 各动作的适用条件
 
