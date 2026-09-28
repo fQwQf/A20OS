@@ -334,11 +334,8 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
         pci_common_write32(cb, PCOMMON_QUEUE_DEV_HI, val);
         break;
     case VIRTIO_MMIO_QUEUE_NOTIFY: {
-        // 1. 先切换到目标队列
         pci_common_write16(cb, PCOMMON_QUEUE_SEL, (uint16_t)val); 
-        // 2. 再读取该队列对应的 notify_off
         uint16_t notify_off = pci_common_read16(cb, PCOMMON_QUEUE_NOTIFY_OFF);
-        // 3. 计算地址并 Kick
         uintptr_t addr = vd->notify_base + notify_off * vd->notify_off_multiplier;
         *(volatile uint16_t *)addr = (uint16_t)val;
         break;

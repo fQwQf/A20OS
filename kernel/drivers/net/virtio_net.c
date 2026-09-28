@@ -264,7 +264,6 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&net->lock);
-    /* LOCK_ORDER: net->lock held while seeding RX descriptors. */
     virtio_net_seed_rx_locked(net);
     spin_unlock_irqrestore(&net->lock, flags);
 
@@ -335,7 +334,6 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     uint64_t deadline = timer_get_ticks() + VIRTIO_NET_TX_TIMEOUT_TICKS;
 
     for (;;) {
-        /* LOCK_ORDER: net->lock held to reserve a TX slot. */
         uint64_t flags = spin_lock_irqsave(&net->lock);
         virtio_net_complete_tx_locked(net);
         slot = virtio_net_tx_free_locked(net);
@@ -360,7 +358,6 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     memset(buf, 0, VIRTIO_NET_HDR_SIZE);
     memcpy(buf + VIRTIO_NET_HDR_SIZE, packet, len);
 
-    /* LOCK_ORDER: net->lock held to submit a TX descriptor. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->txq;
     virtq_desc_t *desc = queue_desc(net, q);
@@ -391,7 +388,6 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     }
 
     for (;;) {
-        /* LOCK_ORDER: net->lock held to poll TX completion. */
         flags = spin_lock_irqsave(&net->lock);
         virtio_net_complete_tx_locked(net);
         int done = !net->tx_busy[slot];
@@ -419,7 +415,6 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
         return -1;
 
     virtio_net_inst_t *net = &g_net[idx];
-    /* LOCK_ORDER: net->lock held to drain RX used ring. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->rxq;
     virtq_used_t *used = queue_used(net, q);
@@ -466,7 +461,6 @@ void virtio_net_poll_all(void) {
     for (int i = 0; i < g_nnet; i++) {
         if (!g_net[i].valid)
             continue;
-        /* LOCK_ORDER: net->lock held to poll instance TX completions. */
         uint64_t flags = spin_lock_irqsave(&g_net[i].lock);
         virtio_net_complete_tx_locked(&g_net[i]);
         spin_unlock_irqrestore(&g_net[i].lock, flags);
@@ -636,7 +630,6 @@ static const uint8_t *virtio_net_class_mac(struct device *dev) {
 
 static void virtio_net_class_poll(struct device *dev) {
     virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
-    /* LOCK_ORDER: net->lock held for class-level TX poll. */
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_complete_tx_locked(net);
     spin_unlock_irqrestore(&net->lock, flags);

@@ -42,12 +42,10 @@ extern size_t  frame_free_count(void);
 extern int     vfs_mount_count(void);
 extern struct mount *vfs_mount_at(int index);
 
-// procfs 文件类型枚举
 
-// procfs 目录项结构
 typedef struct pf_entry {
-    char name[32];           // 文件名
-    pf_type_t type;         // 文件类型
+    char name[32];
+    pf_type_t type;
     int pid;                // 进程 ID（仅对进程相关文件有效）
     struct pf_entry *next;
 } pf_entry_t;
@@ -57,7 +55,6 @@ int g_sched_base_slice_ms = 10;
 int g_procfs_lease_break_time = 45;
 
 
-// 创建一个新的目录项
 static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
     pf_entry_t *e = (pf_entry_t *)kmalloc(sizeof(*e));
     if (!e) return NULL;
@@ -68,7 +65,6 @@ static pf_entry_t *new_entry(const char *name, pf_type_t type, int pid) {
     return e;
 }
 
-// 判断字符串是否为纯数字（进程 ID）
 static int is_pid_str(const char *s) {
     if (!s || !*s) return 0;
     while (*s) { if (*s < '0' || *s > '9') return 0; s++; }
@@ -92,7 +88,6 @@ static int parse_fd_name(const char *name, int *fd)
 }
 
 
-// 根据名称解析文件类型（如果需要同时解析出 pid）
 static pf_type_t name_to_type(const char *name, int *out_pid) {
     *out_pid = 0;
     if (strcmp(name, "meminfo") == 0) return PF_MEMINFO;
@@ -326,7 +321,6 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
     return p;
 }
 
-// procfs 的 lookup 操作（查找目录项）
 static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     if (!name || !*name) return -ENOENT;
 
@@ -624,7 +618,6 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     return 0;
 }
 
-// procfs 的 stat 操作（获取文件状态）
 static int procfs_stat(vnode_t *vn, kstat_t *st) {
     memset(st, 0, sizeof(*st));
     st->st_ino = vn->ino;
@@ -708,7 +701,6 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
     return (int)len;
 }
 
-// procfs 的 release 操作（释放 vnode）
 static void procfs_release(vnode_t *vn) {
     if (vn->fs_data) kfree(vn->fs_data);
     if (vn->ino) kfree((void *)(uintptr_t)vn->ino);
@@ -718,7 +710,6 @@ static void procfs_release(vnode_t *vn) {
 
 static vfile_t *procfs_open_vnode(vnode_t *vn, int flags);
 
-// procfs vnode 操作表
 static vnode_ops_t g_procfs_vnode_ops = {
     .lookup  = procfs_lookup,
     .readlink = procfs_readlink,
@@ -727,7 +718,6 @@ static vnode_ops_t g_procfs_vnode_ops = {
     .release = procfs_release,
 };
 
-// procfs 的 read 操作（读取文件内容）
 static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
@@ -922,7 +912,6 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     return -EINVAL;
 }
 
-// procfs 的 lseek 操作（设置文件偏移）
 static long procfs_flseek(vfile_t *vf, long offset, int whence) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
@@ -1004,7 +993,6 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
     return (int)total;
 }
 
-// procfs 的 readdir 操作（读取目录项）
 static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *root_entries[] = {
         ".", "..", "meminfo", "stat", "version", "uptime", "cmdline",
@@ -1146,7 +1134,6 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     return (int)total;
 }
 
-// procfs 的 close 操作（关闭文件）
 static int procfs_fclose(vfile_t *vf) {
     if (vf && vf->priv) {
         procfs_priv_t *p = (procfs_priv_t *)vf->priv;
@@ -1159,7 +1146,6 @@ static int procfs_fclose(vfile_t *vf) {
     return 0;
 }
 
-// procfs vfile 操作表
 static vfile_ops_t g_procfs_fops = {
     .read    = procfs_fread,
     .write   = procfs_fwrite,
@@ -1214,7 +1200,6 @@ mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid)
     return ns;
 }
 
-// 挂载 procfs 文件系统
 vnode_t *procfs_mount(void) {
     vnode_t *root = (vnode_t *)kmalloc(sizeof(vnode_t));
     if (!root) return NULL;
@@ -1231,7 +1216,6 @@ vnode_t *procfs_mount(void) {
     return root;
 }
 
-// 打开 procfs vnode
 static vfile_t *procfs_open_vnode(vnode_t *vn, int flags) {
     vfile_t *vf = vfile_alloc();
     if (!vf) return NULL;
