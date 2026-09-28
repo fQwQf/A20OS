@@ -6,6 +6,7 @@
  */
 
 #include "fs/procfs.h"
+#include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "core/klog.h"
 #include "core/panic.h"
@@ -450,6 +451,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
         child = new_entry(name, PF_A20_IOMMU, 0);
         type = PF_A20_IOMMU;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "netfilter") == 0) {
+        child = new_entry(name, PF_A20_NETFILTER, 0);
+        type = PF_A20_NETFILTER;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
@@ -779,6 +783,45 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
                          __ATOMIC_RELEASE);
         return (int)count;
     }
+    if (p->type == PF_A20_NETFILTER) {
+        char tmp[192];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        if (strcmp(tmp, "reset") == 0) {
+            netfilter_reset();
+            return (int)count;
+        }
+        if (strcmp(tmp, "flush") == 0) {
+            netfilter_reset();
+            return (int)count;
+        }
+        if (strncmp(tmp, "add ", 4) == 0) {
+            netfilter_rule_t rule;
+            int r = netfilter_parse_rule(tmp + 4, strlen(tmp + 4), &rule);
+            if (r < 0)
+                return r;
+            int idx = netfilter_add_rule(&rule);
+            if (idx < 0)
+                return idx;
+            return (int)count;
+        }
+        if (strncmp(tmp, "del ", 4) == 0) {
+            const char *d = tmp + 4;
+            if (*d == '\0')
+                return -EINVAL;
+            unsigned idx = 0;
+            for (; *d; d++) {
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                if (idx > (NETFILTER_MAX_RULES * 2))
+                    return -ERANGE;
+                idx = idx * 10 + (unsigned)(*d - '0');
+            }
+            return netfilter_del_rule(idx) < 0 ? -EINVAL : (int)count;
+        }
+        return -EINVAL;
+    }
     if (p->type == PF_PID_OOM_SCORE_ADJ) {
         char tmp[32];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -1041,7 +1084,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     };
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
-        "driver_lifecycle", "objects", "iommu", NULL
+        "driver_lifecycle", "objects", "iommu", "netfilter", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL

@@ -1,4 +1,5 @@
 #include "fs/procfs.h"
+#include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "fs/vfs/mntns.h"
 #include "core/bootargs.h"
@@ -661,6 +662,9 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)a20_perf_format(buf, bufsz);
     case PF_A20_LOCK_CONTENTION:
         return (int)lock_counters_format(buf, bufsz);
+    case PF_A20_NETFILTER:
+        netfilter_format(buf, bufsz);
+        return (int)strlen(buf);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
