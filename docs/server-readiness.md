@@ -74,12 +74,33 @@ AHCI（`FLUSH CACHE EXT`）。
    的自旋次数只汇总到锁级 `contended_spins`——所以归因表的 spin 列毫无信息量
    （实测 27 次 acquire 对 114 万次自旋，调用点 spin 合计只有 27）。
    现改为在进循环前先固定 slot、内层自旋排空后按 `spins - spun_before`
-   累加，修复后调用点 spin 合计与锁级总数**精确相等**（689073 = 689073）。
-   结论也随之改变：17 次 acquire 里 16 次、自旋的几乎全部
-   （689073/689073）都落在 `net_vfile_read`。
-   **也就是说争用主要来自 socket 读路径（syscall 侧），而不是收包路径。**
-   这直接改变分片方案：按 RX/TX 分片解决不了主要矛盾，优先要动的是读路径
-   持锁范围。分片本身仍是未完成项。
+   累加，修复后调用点 spin 合计与锁级总数**精确相等**（689073 = 689073，
+   另一次 381751 = 381751）。`smoke-smp-lock-contention` 现在把这条不变量
+   钉住（调用点 spin 合计须 ≥ 锁级的 90%），删掉归因即失败。
+   锁级数字（`contended_acquires`/`contended_spins`）是直接计数，可信。
+   **归因标签已查清（`3133c97d` 的撤回是错的，这里纠正回来）。**
+   `net_vfile_read+0xf6` = 0x2068，正是 `socket_file.o` 里
+   `call a20_lwip_poll`（0x2064）**之后的那条指令**，也就是一个返回地址。
+   `lwip_stack.o` 里 `a20_lwip_poll` 调的是 `spin_lock_at.constprop.0`
+   ——存在 `.constprop` 克隆说明 `caller_ra` 被常量折叠了：
+   `a20_lwip_lock` 与 `a20_lwip_poll` 同在 `lwip_stack.c`，GCC 在该编译
+   单元内可自由内联，`spin_lock_irqsave` 里的 `__builtin_return_address(0)`
+   于是被折成常量 0x2068。所以标签是**可信的**，指向读路径进入 poll 的
+   那个调用点。（之前怀疑"extern 跨单元不能内联"是错的：跨单元确实不能，
+   但这两个函数本就在同一单元。）
+
+   **但要点比"热点在读路径"更精确，必须分两半看：**
+   - **谁在发起争用（acquire 侧）**：socket 读路径。`net_vfile_read()`
+     在 `for(;;)` 里反复调 `a20_lwip_poll()`（`socket_file.c:28`），
+     数据没到就 park、醒来再 poll，是高频 acquire 方。
+   - **别人在为什么而自旋（hold 侧）**：`a20_lwip_poll_locked()` 在同一把
+     锁里做 `sys_check_timeouts()`、逐设备 `poll()`、以及
+     `a20_lwip_process_netif_rx_tx_locked()` 的**无界 `for(;;)` 收包排空**。
+     自旋时间消耗在这段排空工作上，属于收包路径。
+   所以原表述"争用来自读路径而非收包路径"把 acquire 方和 hold 方混为一谈，
+   已撤回。**真正的结构问题是：一个阻塞读会高频触发 whole-stack poll，
+   而 poll 在全局锁内跨越无界收包排空**——读路径与收包路径被同一把锁串在
+   一起，且排空长度无上界。分片本身仍未完成。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
