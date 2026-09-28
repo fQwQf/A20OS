@@ -1414,3 +1414,41 @@ riscv64/TCG + `taskset -c 12-15`）。因为每对的 ON 与 OFF 在时间上紧
 一行 `Could not open ...`。当时那个 `stress-pass: 0` 看起来像内核回归，其实是**我的测试
 脚本 bug**。这与 §10.8 那次「误把热页当缺页」是同一类错误：把工具链/脚本故障当成被测
 系统的结论。**在把一次失败归因于被测代码之前，先确认测试装置本身是对的。**
+
+### 10.16 PT 页 UAF：拆表点逐个审计（修复的前置条件）
+
+UAF 本身：`pt_unmap()` / `pt_unmap_leaf()` 的拆表循环用
+`mm_pt_node_fini(child); frame_free(child);` **同步释放** PT 页，而
+`mm_addrspace_lock()` 只锁覆盖节点、**后代是无锁遍历的**——另一 CPU 上正沿该后代下降的
+cursor 可能在帧被 buddy 回收后继续读它。`mm_pt_defer_free()` /
+`mm_pt_mark_stale_recursive()` 没有任何调用者，`vm.c` 排空循环等的是一条永远不会被
+填充的链表。
+
+修复必须接上生产端（拆表时先标记 stale 再交给排空），但前提是**每个拆表点都在
+`mm->lock` + TLB 事务内**，否则 `mm_pt_hold_table()` 会无锁改写 `mm->tlb_holds`，
+且没有事务就永远没人排空。逐点审计结果：
+
+| 拆表点 | 所在函数 | `mm->lock` | TLB 事务 | 结论 |
+|---|---|---|---|---|
+| `munmap.c:111` | `mm_munmap_locked` | 是（`mm_munmap` 287） | 是（287/291） | **安全** |
+| `munmap.c:241` | `mm_brk_locked` | 是（`mm_brk` 299） | 是（298/302） | **安全** |
+| `madvise.c:68/86` | `mm_madvise_dontneed` | 是（55） | 是（54/99） | **安全** |
+| `mprotect.c:103` | `mm_mprotect_locked` | 是（162） | 是（161/165） | **安全** |
+| `vm.c:421` | `mm_demote_huge_page` | 视调用者 | 视调用者 | **混合，见下** |
+| `vma.c:466` | `free_vma_pages` | 否 | 是（`vm.c:545`） | 缺 `mm->lock` |
+| `vma.c:442` | `mm_demote_huge_page` 的调用点 | 否 | 否 | **不安全** |
+| `sysv_shm.c:80` | `sysv_shm_unmap_attached_pages` | 否 | 否 | **不安全** |
+| `mremap.c:184` | `mm_move_mapping_pages` | — | — | `__attribute__((unused))` 死代码 |
+
+**关键的非显然结论**：`mm_demote_huge_page()` 自身**不能**被当作安全点——它的调用者
+安全性不一致（`munmap.c:90/232`、`mprotect.c:103` 安全，而 `vma.c:442` 既不持锁也不在
+事务内）。所以不能只在 `mm_demote_huge_page()` 内部加 `mm_pt_defer_free()`，否则从
+`vma.c:442` 进来时依旧是无锁改链表。要么把 `vma.c:442` 的调用者补齐锁与事务，要么让
+拆表本身**不依赖** TLB 事务（例如独立的、由 `mm->lock` 保护的回收队列 + 在
+`mm_tlb_invalidate_finish()` 之外也能排空的路径）。
+
+**建议方向**：优先后者。理由是 TLB 事务的语义是「本事务内我改了哪些地址，需要
+shootdown」，而 PT 页回收的语义是「这个节点已不可达，等读侧退出再释放」，两者本来
+不该耦合。把它塞进 TLB 事务导致**每个拆表调用点都必须开事务**，这是不必要的耦合，也是
+本次修复差点不安全的根因。独立队列只需 `mm->lock` 保护链表 + 一个可在任意上下文
+调用��排空点。
