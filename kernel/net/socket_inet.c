@@ -335,8 +335,13 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
 
     net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
     if (!e) {
+        /* The ring is full, so the payload is dropped -- but this callback has
+         * already taken ownership by freeing, and lwIP reads a non-zero return
+         * as "I ate it" and leaves the pbuf alone.  Returning 0 here while
+         * freeing made the caller free the same pbuf a second time, which is
+         * the mirror image of the send-side double free fixed earlier. */
         pbuf_free(p);
-        return 0;
+        return 1;
     }
 
     net_lwip_ip_to_sockaddr(addr, 0, e->addr, &e->addrlen);
