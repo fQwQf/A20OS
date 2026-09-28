@@ -199,6 +199,11 @@ typedef struct mm_pt_audit_report {
     uint64_t prot_mismatch;  /* permission bits disagree with the PTE */
     uint64_t cow_mismatch;   /* COW bit disagrees with PTE_COW */
     uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
+    /* Not an error: how many leaves carry MM_AS_ANON_VIRT, i.e. are reserved
+     * but not yet backed.  This is the on-demand paging state the paper
+     * relies on, so it is counted to make it observable rather than inferred
+     * from the absence of mismatches. */
+    uint64_t anon_virt;
 } mm_pt_audit_report_t;
 
 static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
@@ -272,6 +277,28 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
+int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
+                        pte_t flags);
+
+/*
+ * Eagerly provision an anonymous range: build the page-table path and mark
+ * every leaf MM_ST_ANON_VIRT with its permissions, so a later fault on the
+ * range can be served from per-PTE status alone instead of re-deriving the
+ * mapping from a VMA.  This mirrors the paper's on-demand paging (SS4.3).
+ *
+ * Returns 0, or a negative errno.  A range already covered (e.g. by a
+ * MAP_FIXED mapping over live pages) is left alone, and a mapping whose
+ * permissions changed since provisioning is re-marked, so this stays correct
+ * across mprotect.
+ */
+/* Eager per-PTE reservation for anonymous ranges, up to this many pages.
+ * Larger mappings keep the VMA-based fault path: provisioning them would
+ * cost one page-table descent per page, which is a poor trade for a range
+ * that is likely to stay sparse. */
+#define MM_ANON_PROVISION_MAX_PAGES 4096u
+
+int mm_pt_provision_anon(struct mm_struct *mm, vaddr_t start, vaddr_t end,
+                         pte_t flags);
 
 /* Walk an address space and prove metadata == page tables (and, when
  * check_vma is set, == VMA coverage).  Returns 0 when the address space is

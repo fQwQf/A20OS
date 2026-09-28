@@ -714,8 +714,15 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
         return 1;
     }
 #endif
-    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
+    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
+        /* A range provisioned by mm_pt_provision_anon() but never faulted has
+         * no PTE, only a status mark.  Drop it here: leaving it behind would
+         * let a later fault in the munmapped range read a stale "reserved"
+         * status and silently map a page instead of failing. */
+        if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
+            mm_pt_note_absent(table, 0, idx);
         return 0;
+    }
 
     pte_t old = *pte;
     *pte = 0;
@@ -726,6 +733,74 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
 
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
 {
+    return mm_cursor_mark_prot(cur, addr, cls, 0);
+}
+
+/*
+ * MM_AS_ANON_PROVISION -- eagerly mark an anonymous range as reserved.
+ *
+ * Mirrors the paper's on-demand paging (SS4.3): mmap records, per PTE, that
+ * the range is "virtually allocated" and what its permissions are, so the
+ * later fault can map a backing frame from that status alone instead of
+ * re-deriving the mapping from a VMA.  The paper pays for the page-table
+ * pages up front here, which is why its mmap is slightly slower than Linux's
+ * while mmap-PF is faster (SS6.2).
+ *
+ * Each page is marked under its own cursor: mm_cursor_mark_prot() reads the
+ * leaf table from cur->path[0], which the descent in mm_addrspace_lock()
+ * only fills when the covering level is 0, so a wider lock range would leave
+ * that slot stale.  Provisioning one leaf table's worth at a time is not
+ * possible without widening that contract, so the cost is one descent per
+ * page -- paid once at mmap, and skipped entirely for ranges above
+ * MM_ANON_PROVISION_MAX_PAGES, which keep the VMA-based fault path.
+ */
+int mm_pt_provision_anon(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                         pte_t flags)
+{
+    if (!mm || !mm->pgdir || end <= start)
+        return -EINVAL;
+    if (!mm_pt_range_is_user(start, end))
+        return -EFAULT;
+
+    vaddr_t span = end - start;
+    if (span / PAGE_SIZE > MM_ANON_PROVISION_MAX_PAGES)
+        return 0;   /* too large to provision eagerly; VMA path still correct */
+
+    for (vaddr_t va = start; va < end; va += PAGE_SIZE) {
+        mm_cursor_t cur;
+        int r = mm_addrspace_lock(mm, va, va + PAGE_SIZE, &cur);
+        if (r < 0)
+            return r;
+        if (r > 0) {
+            /* A larger leaf already covers this address.  Leave it: the
+             * status belongs to that mapping, not to this reservation. */
+            mm_cursor_unlock(&cur);
+            continue;
+        }
+        /* -EEXIST means a concurrent fault won the race and mapped the page,
+         * which is exactly the state provisioning was trying to reach. */
+        if (mm_cursor_mark_prot(&cur, va, MM_ST_ANON_VIRT, flags) == 0)
+            a20_perf_count(A20_PERF_MM_ANON_PROVISIONED);
+        mm_cursor_unlock(&cur);
+    }
+    return 0;
+}
+
+/*
+ * MM_AS_ANON_PROVISION: mark an unmapped leaf as reserved-but-not-backed,
+ * recording the permissions the fault will later need.
+ *
+ * The paper stores exactly this in the per-PTE metadata at mmap time
+ * (on-demand paging, §4.3): the range is marked "virtually allocated" with
+ * its access permissions, and the fault handler then maps the backing frame
+ * using the permissions from the metadata rather than re-deriving them from
+ * a VMA.  This is also why the paper's mmap is slower than Linux's -- it
+ * allocates and initialises page table pages up front (§6.2) -- while mmap-PF
+ * is faster, because the fault stops touching VMA state entirely.
+ */
+int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
+                        pte_t flags)
+{
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
     if (cls >= MM_ST_CLASS_MAX)
@@ -735,7 +810,7 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
     int idx = arch_pt_vpn(addr, 0);
     if (table[idx] & PTE_V)
         return -EEXIST;
-    mm_pt_note_present(table, 0, idx, MM_ST_CLS_BYTE(cls));
+    mm_pt_note_present(table, 0, idx, status_byte(cls, flags));
     return 0;
 }
 
@@ -887,6 +962,8 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
             if (cls != MM_ST_INVALID && cls != MM_ST_ANON_VIRT &&
                 cls != MM_ST_SWAPPED)
                 rep->absent_mismatch++;
+            else if (cls == MM_ST_ANON_VIRT)
+                rep->anon_virt++;
             if (cow)
                 rep->cow_mismatch++;
         }
