@@ -64,14 +64,10 @@ regen-rootfs-overlay: tools/gen_rootfs_overlay.py $(ROOTFS_OVERLAY_FILES)
 # These generated files are checked in so archive builds do not depend on Python.
 # Regenerate them explicitly: checkout mtimes are not a reliable dependency order.
 check-rootfs-overlay-generator:
-	@tmp_dir="$$(mktemp -d)"; \
-	trap 'rm -rf "$$tmp_dir"' EXIT; \
-	$(PYTHON) tools/gen_rootfs_overlay.py \
-		--out-c "$$tmp_dir/rootfs_overlay.c" \
-		--out-h "$$tmp_dir/rootfs_overlay.h" \
-		--root $(ROOTFS_OVERLAY_DIR); \
-	if ! cmp -s "$$tmp_dir/rootfs_overlay.h" $(ROOTFS_OVERLAY_HDR); then \
-		echo "rootfs overlay header is out of sync with its generator" >&2; \
-		diff -u $(ROOTFS_OVERLAY_HDR) "$$tmp_dir/rootfs_overlay.h"; \
-		exit 1; \
-	fi
+	@$(PYTHON) tools/gensync.py rootfs-overlay \
+		--committed "$(ROOTFS_OVERLAY_HDR)" \
+		--out-name rootfs_overlay.h \
+		-- $(PYTHON) tools/gen_rootfs_overlay.py \
+			--out-c @TMP@/rootfs_overlay.c \
+			--out-h @TMP@/rootfs_overlay.h \
+			--root $(ROOTFS_OVERLAY_DIR)
