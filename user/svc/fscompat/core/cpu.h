@@ -1,4 +1,4 @@
-/* fscompat/core/cpu.h — 隔离 defs.h 对 per-cpu 内核设施的引用。 */
+/* fscompat/core/cpu.h — shields defs.h from referencing per-cpu kernel facilities. */
 #ifndef _CPU_H
 #define _CPU_H
 

@@ -5,7 +5,7 @@
  * Each partition pins one externally observable contract:
  *   ralg — handle rights algebra (dup shrink-only, type mask, transfer ∩)
  *   bp   — channel backpressure/close semantics
- *   evqc — event queue semantics (timeout分级, duplicate-watch update, cancel)
+ *   evqc — event queue semantics (timeout levels, duplicate-watch update, cancel)
  *   vmol — VMO lifecycle (lazy materialize, mapping outlives handle, reclaim)
  */
 #include "liba20rt/a20_sdk.h"

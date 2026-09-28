@@ -9,14 +9,18 @@
 #include <unistd.h>
 
 /*
- * W^X + ASLR 最小验证：
- *   1. mmap(PROT_READ|PROT_WRITE|PROT_EXEC) 必须被拒绝（默认 deny 策略，
- *      errno=EACCES）；mprotect 把 RW 提升为 RWX 同样必须被拒绝；
- *      合法的 RW/RX 操作不受影响。
- *   2. fork+exec 自身，通过继承的管道读回子进程 exec 后的栈地址，
- *      与父进程栈地址比较——两次 exec 同一程序的栈地址必须不同。
- *      页内偏移由调用链决定且两侧相同，因此地址不同等价于栈页不同；
- *      相同则以 1/1024 的概率偶然发生，重试两轮以消除偶发误判。
+ * Minimal W^X + ASLR validation:
+ *   1. mmap(PROT_READ|PROT_WRITE|PROT_EXEC) must be rejected (default deny
+ *      policy, errno=EACCES); mprotect promoting RW to RWX must likewise be
+ *      rejected; legitimate RW/RX operations are unaffected.
+ *   2. fork+exec ourselves, read back the child's post-exec stack address
+ *      through the inherited pipe, and compare it against the parent's stack
+ *      address -- the stack addresses of two execs of the same program must
+ *      differ. The in-page offset is determined by the call chain and is
+ *      identical on both sides, so differing addresses are equivalent to
+ *      differing stack pages; identical addresses occur by chance with
+ *      probability 1/1024, so retry for two rounds to eliminate a spurious
+ *      verdict.
  */
 
 static int fail(const char *what)
@@ -31,7 +35,8 @@ static uintptr_t stack_addr(void)
     return (uintptr_t)&marker;
 }
 
-/* 首次匿名 mmap 的落点由 per-process mmap_base 决定，可用来观察 mmap ASLR */
+/* The landing spot of the first anonymous mmap is decided by the
+ * per-process mmap_base, so it can be used to observe mmap ASLR */
 static uintptr_t mmap_addr(void)
 {
     void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -83,7 +88,8 @@ static int child_stack_addr(uintptr_t *out, uintptr_t *out_map)
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "child") == 0) {
-        /* 子进程阶段：把本次 exec 的栈地址与首次 mmap 落点写回继承的管道 fd */
+        /* Child phase: write this exec's stack address and first mmap landing
+         * spot back to the inherited pipe fd */
         if (argc != 3)
             _exit(2);
         int fd = atoi(argv[2]);
@@ -115,7 +121,7 @@ int main(int argc, char **argv)
     if (errno != EACCES)
         return fail("mprotect-rwx-errno");
 
-    /* 合法权限变更不受影响：RW -> R */
+    /* Legitimate permission changes are unaffected: RW -> R */
     if (mprotect(p, 4096, PROT_READ) != 0)
         return fail("mprotect-r");
     if (munmap(p, 4096) != 0)

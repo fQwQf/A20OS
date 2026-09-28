@@ -53,10 +53,13 @@ static uint64_t now_ms(void)
     return t / 1000000ULL;
 }
 
-/* ---- 托管设备序号的板级配置（roadmap：清单不再固化 block_index）----
- * 块设备枚举随平台而异（QEMU virt / VF2 / LS2K1000）。与 net 的 a20.*
- * 键同一哲学：只认命令行/运行时配置，不做编译期板级表。svcmgr 从
- * /proc/cmdline 读 a20.ufsd_blk=<n>，缺省回落 QEMU 开发布局的 1。 */
+/* ---- Board-level configuration of the supervised device index (roadmap:
+ * the manifest no longer hardcodes block_index) ----
+ * Block device enumeration varies by platform (QEMU virt / VF2 / LS2K1000).
+ * Same philosophy as net's a20.* keys: only command-line/runtime
+ * configuration is honored, no compile-time per-board table. svcmgr reads
+ * a20.ufsd_blk=<n> from /proc/cmdline, falling back to the 1 of the QEMU
+ * development layout. */
 static char     g_ufsd_args[32];
 static unsigned g_ufsd_blk = 1;
 static int      g_ufsd_blk_from_cmdline;
@@ -137,7 +140,8 @@ typedef enum svc_state {
 typedef struct {
     const char  *name;
     const char  *path;
-    const char  *args;           /* 空格分隔的 argv；NULL 表示无参数 */
+    const char  *args;           /* space-separated argv; NULL means no
+                                 * arguments */
     uint32_t     ep_slot;
     uint8_t      ping_kind;      /* 0 = SVCMGR_REQ_ECHO, 1 = RTCD_REQ_TIME */
     uint8_t      state;
@@ -191,8 +195,9 @@ static a20_status_t spawn_one(svc_entry_t *se)
         return st;
     }
 
-    /* 服务端点 + 健康探测端点：两条独立通道，监管流量与客户端 RPC
-     * 不共享任何队列（见 a20_services_idl.h A20_SVC_PING_SLOT 注释）。 */
+    /* Server endpoint + health probe endpoint: two independent channels;
+     * supervision traffic and client RPCs share no queue at all (see the
+     * A20_SVC_PING_SLOT comment in a20_services_idl.h). */
     a20_spawn_handle_t sh[2];
     sh[0].handle = pair.endpoints[1];
     sh[0].rights = A20_RIGHT_READ | A20_RIGHT_WRITE;
@@ -213,9 +218,11 @@ static a20_status_t spawn_one(svc_entry_t *se)
     ta.envp = 0;
     ta.envc = 0;
 
-    /* argv：清单 args 字段按空格切分为指针数组（内核经 copy_arg_vector
-     * 从本进程地址空间取字符串）。 */
-    /* argv[0] 惯例为程序名；清单 args 提供其余参数 */
+    /* argv: the manifest args field is split on spaces into a pointer array
+     * (the kernel takes the strings from this process's address space via
+     * copy_arg_vector). */
+    /* By convention argv[0] is the program name; the manifest args supply
+     * the rest */
     static char args_buf[128];
     static char *args_vec[9];
     uint32_t nargs = 0;
@@ -239,7 +246,7 @@ static a20_status_t spawn_one(svc_entry_t *se)
             tok = sp;
         }
     }
-    args_vec[nargs] = NULL; /* copy_arg_vector 以空指针结尾 */
+    args_vec[nargs] = NULL; /* copy_arg_vector expects a NULL terminator */
     ta.argv = (uint64_t)(uintptr_t)args_vec;
     ta.argc = nargs;
     ta.handles = (uint64_t)(uintptr_t)sh;
@@ -455,7 +462,8 @@ int main(int argc, char **argv, char **envp)
     g_svcs[2].path = "/bin/ufsd-rv";
     g_nsvcs = 3;
 
-    /* 板级配置化的托管序号：命令行覆盖缺省，日志记录解析结果。 */
+    /* Board-configured supervised index: the command line overrides the
+     * default, and the resolved value is logged. */
     ufsd_blk_config_load();
     g_svcs[2].args = g_ufsd_args;
     put_str("SVC_MGR: ufsd blk=");
@@ -504,8 +512,9 @@ int main(int argc, char **argv, char **envp)
             a20_event_cancel(eq, se->task);
             a20_hdl_close(se->task);
             if (ev.data0 == 0) {
-                /* 干净退出（如按需服务发现目标设备不存在）：视为正常
-                 * 完成，不消耗重启预算。 */
+                /* Clean exit (e.g. an on-demand service discovers no such
+                 * device): treat as normal completion, do not consume the
+                 * restart budget. */
                 se->state = SVC_DEAD;
                 put_str("SVC_MGR: service completed name=");
                 put_str(se->name);

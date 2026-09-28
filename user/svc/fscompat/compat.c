@@ -1,17 +1,21 @@
 /*
- * fscompat/compat.c — 内核磁盘文件系统源码的用户态运行环境实现。
+ * fscompat/compat.c — the user-space runtime implementation for kernel disk
+ * filesystem sources.
  *
- * 与 user/svc/fscompat/ 的遮蔽头配合，使 kernel/fs/diskfs/ 的 ext4/isofs/
- * ntfs 源码原样编译进用户态 FS 宿主（ufsd）。本文件提供这些源码引用的
- * 内核设施等价物：
- *   - 字符串/内存例程与 printf 格式化（经日志汇输出）
- *   - kmalloc 家族 → malloc
- *   - copy_from_user/copy_to_user → 同地址空间恒等拷贝
- *   - vnode/vfile 引用计数助手（释放语义与内核一致：归零调 release op）
- *   - panic/klog_write、proc_current、page_cache 桩
+ * Works together with the shadowing headers in user/svc/fscompat/ so that the
+ * ext4/isofs/ntfs sources in kernel/fs/diskfs/ compile as-is into the
+ * user-space FS host (ufsd). This file supplies the kernel-facility
+ * equivalents that those sources reference:
+ *   - string/memory routines and printf formatting (emitted via the log sink)
+ *   - kmalloc family -> malloc
+ *   - copy_from_user/copy_to_user -> identity copies in the same address space
+ *   - vnode/vfile reference count helpers (release semantics match the kernel:
+ *     call the release op at zero)
+ *   - panic/klog_write, proc_current, page_cache stubs
  */
 #include <stdint.h>
-/* 遮蔽头优先：本文件自身的内核式包含全部解析到 fscompat 版本。 */
+/* Shadowing headers take priority: this file's own kernel-style includes all
+ * resolve to the fscompat versions. */
 #include "core/types.h"
 #include "core/sync.h"
 #include "core/klog.h"
@@ -24,7 +28,8 @@
 #include "fs/file.h"
 
 /* ------------------------------------------------------------------ */
-/* 堆与字符串（-nostdlib 环境自持；分配器复用 liba20rt）                 */
+/* Heap and strings (self-hosted in the -nostdlib environment; the allocator
+ * reuses liba20rt) */
 /* ------------------------------------------------------------------ */
 
 extern void *a20_malloc(uint64_t size);
@@ -46,7 +51,7 @@ void *realloc(void *ptr, size_t size)
     return a20_realloc(ptr, size);
 }
 
-/* memcpy/memset/memmove 由 liba20rt/a20_compiler_rt.c 提供 */
+/* memcpy/memset/memmove are provided by liba20rt/a20_compiler_rt.c */
 
 int memcmp(const void *a, const void *b, size_t n)
 {
@@ -133,7 +138,7 @@ char *strrchr(const char *s, int c)
 }
 
 /* ------------------------------------------------------------------ */
-/* 日志汇：宿主把内核式日志导入自身通道                                 */
+/* Log sink: the host routes kernel-style logs into its own channel */
 /* ------------------------------------------------------------------ */
 
 void (*fscompat_log_sink)(const char *line);
@@ -168,7 +173,7 @@ void panic(const char *fmt, ...)
 }
 
 /* ------------------------------------------------------------------ */
-/* printf 家族                                                         */
+/* printf family */
 /* ------------------------------------------------------------------ */
 
 static char *fmt_out(char *p, char *end, const char *s, size_t n)
@@ -195,7 +200,7 @@ static char *fmt_num(char *p, char *end, uint64_t v, int base, int neg,
         tmp[i++] = '-';
     while (i < width && p < end)
         tmp[i++] = pad;
-    /* 逆序写入 */
+    /* written in reverse order */
     while (i-- && p < end)
         *p++ = tmp[i];
     return p;
@@ -334,7 +339,7 @@ int puts(const char *s)
 }
 
 /* ------------------------------------------------------------------ */
-/* 内存与用户拷贝                                                       */
+/* Memory and user copies */
 /* ------------------------------------------------------------------ */
 
 void *kmalloc(size_t size)
@@ -378,7 +383,7 @@ long copy_to_user(void *dst, const void *src, size_t n)
 }
 
 /* ------------------------------------------------------------------ */
-/* 任务上下文                                                           */
+/* Task context */
 /* ------------------------------------------------------------------ */
 
 static task_t g_fscompat_task = {
@@ -393,7 +398,7 @@ task_t *proc_current(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* vnode / vfile 引用计数（释放契约与内核一致）                          */
+/* vnode / vfile reference counts (release contract matches the kernel) */
 /* ------------------------------------------------------------------ */
 
 void vnode_ref_init(vnode_t *vn, int refs)
@@ -449,7 +454,7 @@ void page_cache_discard_unlinked(vnode_t *vn)
 }
 
 /* ------------------------------------------------------------------ */
-/* 内核设施的宿主等价物（链接期补齐）                                    */
+/* Host equivalents of kernel facilities (filled in at link time) */
 /* ------------------------------------------------------------------ */
 
 int vnode_ref_read(vnode_t *vn)
@@ -464,7 +469,8 @@ void vfile_free(vfile_t *vf)
 
 void timekeeping_get_realtime(uint64_t ts[2])
 {
-    /* 宿主无 RTC 读取通道；时间戳对 FS 元数据正确性不敏感，固定纪元 */
+    /* The host has no RTC read channel; timestamps are not critical to FS
+     * metadata correctness, so the epoch is fixed */
     ts[0] = 0; /* seconds */
     ts[1] = 0; /* nanoseconds */
 }
@@ -482,6 +488,7 @@ void vfs_drop_time_meta_mount(mount_t *mnt)
 
 uint32_t g_a20_perf_enabled;
 
-/* perf 计数器在宿主中为空实现；仅提供链接所需存储 */
+/* perf counters are a no-op in the host; only the storage needed for linking
+ * is provided */
 #include "core/perf.h"
 a20_perf_cpu_counters_t g_a20_perf_percpu[A20_PERF_MAX_CPUS];

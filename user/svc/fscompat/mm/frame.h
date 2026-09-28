@@ -1,6 +1,7 @@
 /*
- * fscompat/mm/frame.h — 用户态 FS 宿主的物理帧分配桩。
- * ext4 源码包含此头但宿主中不存在内核帧分配器；无符号被引用。
+ * fscompat/mm/frame.h — a physical frame allocation stub for the user-space FS
+ * host.  ext4 includes this header, but the kernel frame allocator does not
+ * exist in the host; no symbol is referenced.
  */
 #ifndef _FRAME_COMPAT_H
 #define _FRAME_COMPAT_H
