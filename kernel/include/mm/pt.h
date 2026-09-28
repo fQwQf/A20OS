@@ -298,6 +298,11 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef);
  * that is likely to stay sparse. */
 #define MM_ANON_PROVISION_MAX_PAGES 4096u
 
+/* Boot-time override for the cap above, so the ON/OFF experiment can interleave
+ * arms on one build.  Default stays MM_ANON_PROVISION_MAX_PAGES; 0 disables. */
+#define MM_ANON_PROV_KEY   "a20.anonprov"
+void mm_pt_anon_prov_init(void);
+
 int mm_pt_provision_anon(struct mm_struct *mm, vaddr_t start, vaddr_t end,
                          pte_t flags);
 

@@ -1323,3 +1323,34 @@ CPU 绑定（`taskset` 固定到独占核）、显著更多采样、并确认采
 
 至此关于预标记开/关的性能问题**仍然没有答案**，且这是测量方法问题而非实现问题。
 在拿到交错数据之前，不要再据这些数字改动设计（包括「保留还是关闭预标记」）。
+
+### 10.13 预标记上限改为可运行时切换（交错采样的前提）
+
+`MM_ANON_PROVISION_MAX_PAGES` 原先是编译期常量，导致 ON/OFF 两臂必须各自重新构建一次。
+在共享宿主上这本身就会引入漂移（§10.12），而交错采样（ON,OFF,ON,OFF,…）是让漂移对两臂
+对称的唯一办法——只要切换需要重新构建，交错就无从谈起。
+
+故新增 boot 参数 **`a20.anonprov=<pages>`**，扫描方式沿用 `mm/wx.c` 处理 `a20.wx=` 的
+既有风格（`kernel/mm/pt.c` 的 `mm_pt_anon_prov_init()`，由 `main.c` 在 `bootargs_init()`
+之后调用，与 `mm_wx_policy_init()` 相邻）。默认值仍是 `MM_ANON_PROVISION_MAX_PAGES`，
+`a20.anonprov=0` 关闭预标记。
+
+**已验证**（riscv64，`-append "a20.anonprov=N"` 经 DTB `/chosen/bootargs` 进入内核）：
+
+| 参数 | `mm_anon_provisioned` | 关机审计 |
+|---|---|---|
+| `a20.anonprov=4096` | 9277 | 全 0 |
+| `a20.anonprov=0` | **0** | 全 0 |
+
+两臂均无参数解析告警，MM-ASM 审计 `missing_meta/present/absent/prot/cow/vma/anon_virt`
+全 0；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过；
+riscv64/x86_64/aarch64 与 riscv64/aarch64 NOMMU 构建通过。
+
+**x86_64 上该参数目前无效，且这是既有的独立缺口**：`arch_bootargs_get()` 在 x86_64 由
+`kernel/platform/qemu-virt-x86_64/board.c` 实现，读的是 QEMU **fw_cfg** 的
+`opt/cmdline`。实测无论用 `-append` 还是
+`-fw_cfg name=opt/cmdline,string=...`，内核都只看到
+`[FW_CFG] cmdline_size=0`、`cmdline=''`，即命令行根本没进内核。后果是 **`a20.wx=`
+在 x86_64 上也被静默忽略**，而 W^X 是安全相关策略——这比本次新增的参数严重得多，
+应单独修（需要弄清 fw_cfg 的 cmdline 文件为何在该启动路径下未被填充）。
+在此之前，x86_64 上的交错 A/B 仍不可行；riscv64 上可行。
