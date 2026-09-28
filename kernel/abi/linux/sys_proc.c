@@ -753,6 +753,15 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
     const uint64_t LINUX_REBOOT_CMD_KEXEC = 0x45584543UL;
     const uint64_t LINUX_REBOOT_CMD = 0x424F4F54UL;
 
+    /* The magic values are public ABI constants, not a secret, so they
+     * authorise nothing.  Gate the whole call on CAP_SYS_BOOT, as the kexec
+     * entry points in sys_missing.c do. */
+    task_t *t = proc_current();
+    if (!t)
+        return -ESRCH;
+    if (!proc_has_cap(t, CAP_SYS_BOOT) && t->cred.euid != 0)
+        return -EPERM;
+
     if (magic1 == LINUX_REBOOT_CMD ||
         (magic1 == LINUX_REBOOT_MAGIC1 &&
          (magic2 == LINUX_REBOOT_MAGIC2 || magic2 == LINUX_REBOOT_MAGIC2A ||
