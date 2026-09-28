@@ -859,7 +859,40 @@
 >    元素已被污染，说明**破坏发生在这次分配之前**，与 IPv6 解析无关。
 >    IPv6 只是流量形态——它把这条路径的包量和包长分布推到了会踩中的区间。
 >
-> **仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
+> **首要嫌疑（机制已查清，尚未证实触发）**：`ip6_frag.c` 的 IPv6 重组助手。
+
+`IPV6_FRAG_COPYHEADER 1` 是 A20OS 在 `lwipopts.h` 里**唯一**一处偏离 lwIP 默认值
+的 IPv6 配置，其自带注释就写明「64-bit targets cannot fit lwIP's IPv6 reassembly
+helper into IP6_FRAG_HLEN」。开启后：
+
+- `IPV6_FRAG_REQROOM = sizeof(struct ip6_reass_helper) - IP6_FRAG_HLEN`
+  = **12 − 8 = 4**（64 位下 `struct pbuf *` 占 8 字节）；
+- `ip6_frag.c:415` 用 `pbuf_header_force(p, 4)` **把 payload 指针往回挪 4 字节**，
+  就地覆盖片外扩展头；
+- 而 `pbuf_add_header_impl()` 的越界检查**只对连续型 pbuf 存在**
+  （`payload < p + SIZEOF_STRUCT_PBUF`）。**非连续型 pbuf 走 `force` 分支时
+  完全不做检查**，直接 `payload - 4`；
+- 注释声称「This cannot fail since we already checked when receiving this fragment」，
+  但那个「already checked」是 `ip6_frag.c:289` 的
+  `p->len >= sizeof(struct ip6_frag_hdr)`——它只验证**片头往后放得下**，
+  **完全没有验证前面有没有 4 字节可借**。
+
+若该片落在**非连续** pbuf（例如 PBUF_POOL 链上的元素）上，这 4 字节就直接写进
+**前一个元素的 payload 尾部 / `struct memp` 空闲链表指针**——与 canary 报出的
+「underflow in pool PBUF_POOL」完全吻合（underflow 与前一个元素的 overflow 是
+同一处物理写坏，只是被哪一侧的检查先发现）。
+
+这条假设能同时解释全部四个观察：**仅 IPv6**（`ip6_frag` 是 IPv6 专属路径）、
+**写坏 pool**、**underflow 而非 overflow**（往 payload 之前写）、
+**在分配路径被发现**。
+
+**待确认**：QEMU 的 user-mode 网络默认不转发 IPv6 分片，因此 guest 是否真的
+收到过分片需要实测（可考虑本机主动构造分片，或临时在 guest 内 ping 一个
+会触发 PMTU/分片的路径）。若确认，则修法是二选一——把 `IPV6_FRAG_COPYHEADER`
+改回 0（需先解决其 64 位断言），或给 `force` 路径补上与连续型分支等价的
+边界检查。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
 > 落在 PBUF_POOL 相邻元素），不给身份。下一步应从 pool 元素尺寸与
 > `PBUF_POOL_BUFSIZE`（1536）的边界关系入手，找哪个子系统按 1536 以上的
 > 步长写入 pool 附近内存——`MEMP_OVERFLOW_CHECK` 无法回答这个问题，
