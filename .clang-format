@@ -1,0 +1,57 @@
+# A20OS C style.
+#
+# This file records the style the tree already follows; it is a reference, not
+# a gate.  Measured over the 798 A20OS-original kernel sources at the time of
+# writing: 0 lines start with a tab, indentation is 4 spaces, 98.4% of code
+# lines fit in 80 columns (p90 = 64), braces are K&R, and pointers are written
+# `type *name`.  Nothing runs clang-format in CI, so this file exists to stop
+# the style from drifting further -- not to reformat what is already there.
+#
+# Deliberately NOT set, because the tree does not use them:
+#   - Doxygen comment markers: the project uses plain /* */ blocks and a named
+#     `<THING>_CONTRACT:` convention instead (see docs/CONTRIBUTING.md).
+#   - Include sorting: the include order in each file is meaningful in places
+#     (arch headers before generic ones); `SortIncludes` is left off so a
+#     future run cannot silently reorder them.
+#
+# .S files are excluded via a separate override in .editorconfig, because the
+# gas-preprocessor assembles them and column alignment there is hand-tuned.
+
+BasedOnStyle: LLVM
+Language: Cpp
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+IndentCaseLabels: true
+ContinuationIndentWidth: 4
+
+ColumnLimit: 80
+AlignTrailingComments: true
+ReflowComments: false
+
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+IndentPPDirectives: None
+PPIndentWidth: 0
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SortIncludes: false
+AlignAfterOpenBracket: Align
+AlignOperands: Align
+BinPackArguments: true
+BinPackParameters: true
+
+# The kernel builds with -Wall -Wextra -Werror, so anything clang-format might
+# "fix" by rewriting a macro is a hazard rather than a help.
+DisableFormat: false

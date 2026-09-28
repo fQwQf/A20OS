@@ -1,0 +1,66 @@
+# A20OS editor and whitespace conventions.
+#
+# The C style itself lives in .clang-format.  This file covers what an editor
+# should do regardless of language, and it deliberately exempts the assembly
+# sources: the gas-preprocessor files under kernel/arch/*/  and kernel/boot/
+# carry hand-tuned column alignment and tab-sensitive column numbers that a
+# whitespace-trimming editor would silently break.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{c,h}]
+indent_size = 4
+
+[*.{py,sh}]
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.mk]
+indent_style = tab
+
+# ld scripts are column-sensitive by convention.
+[*.ld]
+indent_style = space
+indent_size = 2
+
+# --- assembly: hands off -------------------------------------------------
+# .S goes through the C preprocessor, so it may contain #include and
+# #if.  Never reindent or reflow it.
+[*.{s,S}]
+indent_style = tab
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+[*.mk]
+trim_trailing_whitespace = true
+
+# --- vendored and generated trees are not ours to reformat ----------------
+[user/external/**]
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+[kernel/external/**]
+trim_trailing_whitespace = false
+insert_final_newline = false
+
+# Generated and checked-in build output.
+[kernel/fs/rootfs_overlay.c]
+trim_trailing_whitespace = false
+
+[*.hex]
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+[*.patch]
+indent_style = space
+trim_trailing_whitespace = false
