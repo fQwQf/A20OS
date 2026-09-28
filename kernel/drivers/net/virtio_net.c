@@ -154,6 +154,11 @@ static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, uint16_t slot) {
     desc[slot].flags = VIRTQ_DESC_F_WRITE;
     desc[slot].next = 0;
 
+    /* Publish first, then clean.  See the DMA publication contract in
+     * kernel/include/drivers/dual/virtq.h: arch_dma_sync_for_device() cleans a
+     * cache line rather than ordering the store stream, so cleaning after the
+     * store gives the device the same view as virtio_blk's clean-before.
+     * virtio_net.c and virtio_blk.c differ in placement on purpose. */
     uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
     avail->ring[avail_slot] = slot;
     wmb();

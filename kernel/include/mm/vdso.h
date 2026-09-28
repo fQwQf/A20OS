@@ -8,14 +8,30 @@
  * clock_gettime/gettimeofday from user space, reading the same time CSR
  * the kernel timekeeping uses, with a seqlock-protected realtime base.
  *
- * Currently implemented for riscv64; other architectures fall back to the
- * syscall path for time queries (correct, just slower).
+ * The code page is per-architecture (kernel/vdso/<arch>/vdso.S) and is
+ * assembled for aarch64, loongarch64, ppc64le, riscv64 and x86_64; every
+ * other architecture takes the syscall path (correct, just slower).
  */
 #ifndef _MM_VDSO_H
 #define _MM_VDSO_H
 
 #include "core/arch.h"
 #include "mm/vdso_layout.h"
+
+/*
+ * getcpu is a documented fast-path stub, not a working fast path.
+ *
+ * __vdso_getcpu() in every kernel/vdso/<arch>/vdso.S stores 0 into *cpu and
+ * *node and returns 0.  It is NOT reading a shared page, so it cannot report
+ * the real CPU: the running CPU id lives in per-CPU kernel state that user
+ * space has no mapping to.
+ *
+ * The getcpu syscall (kernel/abi/linux/sys_sched.c) does return the true
+ * cpu_current_id().  A program that resolves getcpu through the vDSO
+ * therefore observes CPU 0 on an SMP guest, and the same program observes the
+ * real CPU if it falls back to the syscall.  Keep this in sync with
+ * docs/abi coverage notes if the fast path ever becomes real.
+ */
 
 /* Shared data page layout; offsets must match vdso.S. */
 typedef struct a20_vvar {

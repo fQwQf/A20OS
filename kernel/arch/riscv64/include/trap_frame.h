@@ -188,10 +188,17 @@ static inline void arch_ptrace_set_step(trap_context_t *ctx) {
     (void)ctx;
 }
 
-/* Export the trap context into the generic register file.  The Linux ABI
- * user_regs_struct for riscv64 is pc + 31 GPRs; expose x[1..31] in regs[0..]
- * with pc in regs[] in the same order as the ABI wrapper expects.  We place
- * x[0] in regs[0] and pc in the pc field; the ABI wrapper reorders. */
+/* Export into the generic register file, which stores GPRs in *architectural*
+ * order (see proc_debug_regs_t.regs): regs[0..31] mirrors x[0..31] verbatim.
+ * x[0] is hardwired zero on RISC-V, so keeping it costs one unused slot but
+ * makes the mapping a straight copy that import can invert.
+ *
+ * orig_syscall needs its own field: the syscall path consumes a0 (x[10]) for
+ * the return value, so the entry number only survives in a7 (x[17]).
+ *
+ * This is NOT the Linux user_regs_struct layout.  The ABI reordering
+ * (pc + regs[1..31], dropping x[0]) happens in linux_arch_regs_export(),
+ * kernel/arch/riscv64/platform/arch_hooks.c. */
 static inline void arch_ptrace_export_regs(const trap_context_t *ctx,
                                            proc_debug_regs_t *out) {
     for (int i = 0; i < 32; i++)

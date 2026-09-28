@@ -124,7 +124,12 @@ __vdso_gettimeofday:
     li      3, 0
     blr
 
-/* int __vdso_getcpu(unsigned *r3, unsigned *r4, void *r5) */
+/* int __vdso_getcpu(unsigned *r3, unsigned *r4, void *r5)
+ *
+ * Documented stub: always reports CPU 0 / node 0.  The running CPU id is
+ * per-CPU kernel state with no user mapping, so there is nothing to read
+ * here.  The getcpu syscall returns the true cpu_current_id().
+ * See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:
