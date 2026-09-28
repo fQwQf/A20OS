@@ -1,6 +1,7 @@
 #include "net/lwip_stack.h"
 #include "net/socket_internal.h"
 #include "net/net_config.h"
+#include "net/netfilter.h"
 #include "core/timer.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -87,6 +88,7 @@ typedef struct {
     uint8_t tx_frame[1536];
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
+    uint64_t rx_filtered, tx_filtered;
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
@@ -122,6 +124,10 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
     pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
+    if (netfilter_output(st->tx_frame, p->tot_len) == NETFILTER_DROP) {
+        st->tx_filtered++;
+        return ERR_OK;
+    }
     int r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
     if (r == (int)p->tot_len) {
         st->tx_packets++;
@@ -348,10 +354,24 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
-        /* ethernet_input() takes ownership of p on every path -- it frees
-         * the pbuf itself on its error paths and returns ERR_OK, so the
-         * caller must not free it again (see the "so the caller doesn't
-         * have to free it again" note in lwip ethernet.c). */
+        /*
+         * Two pbuf_free() sites bracket the n->input() call below, and they
+         * are not redundant -- ownership moves at the call:
+         *
+         *   - Before n->input(): the pbuf is still ours, so the filter's drop
+         *     path is the one place we must free it.  The packet never reaches
+         *     the IP layer, so no socket is woken and no state is built.
+         *   - After n->input(): ethernet_input() has taken ownership and frees
+         *     the pbuf itself on its error paths while still returning ERR_OK
+         *     (see the "so the caller doesn't have to free it again" note in
+         *     lwip ethernet.c), so the caller must not free again.
+         */
+        if (netfilter_input(st->rx_frame, (size_t)len) == NETFILTER_DROP) {
+            pbuf_free(p);
+            LINK_STATS_INC(link.drop);
+            st->rx_filtered++;
+            continue;
+        }
         if (n->input(p, n) != ERR_OK) {
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
