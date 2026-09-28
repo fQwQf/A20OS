@@ -724,6 +724,13 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     if (p->type == PF_PID_PAGEMAP) {
         task_t *t = proc_find_get(p->pid);
         if (!t) return -ESRCH;
+        /* Entries are page frame numbers, so an ungated pagemap exposes any
+         * process's physical map, defeating ASLR.  This node is not covered
+         * by the fd/maps gates elsewhere. */
+        if (!proc_task_may_access(proc_current(), t)) {
+            proc_put(t);
+            return -EACCES;
+        }
         if (!t->mm || !t->mm->pgdir) {
             proc_put(t);
             return 0;
