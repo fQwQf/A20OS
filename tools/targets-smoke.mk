@@ -25,12 +25,12 @@ smoke-riscv64:
 	tools/a20 test smoke-riscv64
 
 check-a20-idl: user/svc/a20_services_idl.h
-	@tmp="$$(mktemp)"; \
-	trap 'rm -f "$$tmp"' EXIT; \
-	$(A20_IDL_PYTHON) tools/a20idl.py user/svc/a20_services.idl "$$tmp"; \
-	cmp -s "$$tmp" user/svc/a20_services_idl.h || { \
-		echo "check-a20-idl: generated header is stale"; exit 1; }; \
-	echo "check-a20-idl: PASS"
+	@$(PYTHON) tools/gensync.py a20-idl \
+		--idl user/svc/a20_services.idl \
+		--committed user/svc/a20_services_idl.h \
+		--out-name a20_services_idl.h \
+		-- $(A20_IDL_PYTHON) tools/a20idl.py user/svc/a20_services.idl \
+		@TMP@/a20_services_idl.h
 
 # Thin wrapper: the smoke definition lives in instances/smoke-iommu-discovery.toml.
 smoke-iommu-discovery:
