@@ -3755,3 +3755,167 @@ riscv64 开启臂的 2844 与修复前的 2836 几乎相同，说明**修复没�
 **至此本次工作收束**：x86_64 崩溃已修复并双平台验证，§10.39–§10.58 共十次归因尝试的完整
 证据链保留在文档中，包含七次被自身诊断证伪的假设、以及最终靠**运行时安装轨迹**
 （而非读码推理）才定位到真因这一方法论教训。
+
+### 10.59 UFFD「过度清除」的前置条件**已满足**——上锁前必须先修
+
+§10.19 当初把 UFFD 过度清除标为「状态缺页路径启用**之前**必须先解决」。现在状态缺页路径已经
+修好并双平台验证（§10.57/§10.58），**那个前置条件已经到达**。
+
+#### 缺陷的确切形状
+
+`kernel/ipc/userfaultfd.c:517-532`（unregister）在合并并 unlink 了本次要注销的所有 range 之后，
+对**合并后的整段** `[rlo, rhi)` 无条件清标记：
+
+```c
+/* A page can in principle still be covered by a *different* uffd
+ * registration, so this clears more than strictly necessary.
+ * ... Before the status fault path is enabled (docs 10.7/10.19) this
+ * has to be refined to clear per page while re-testing presence,
+ * otherwise an over-clear would let a still-registered page be faulted
+ * without parking. */
+spin_lock(&t->mm->lock);
+mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
+spin_unlock(&t->mm->lock);
+```
+
+**注释里那句「`userfaultfd_range_present()` 是权威判定，标记陈旧不会让缺页跳过 handler」，
+现在对 `ANON_VIRT` 页已经不成立了**：
+
+* 状态缺页路径 `kernel/mm/fault.c:970` 用的是**位**：
+  `!mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)`；
+* 权威的 `userfaultfd_range_present()` 在 **`fault.c:1036`**，即 **VMA 路径**上；
+* 而 `ANON_VIRT` 的页在 `fault.c:970` 就被**就地满足并返回**，**根本走不到 1036**。
+
+`fault.c:967` 那句注释（「the authoritative userfaultfd_range_present() check still runs on
+the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类**恰恰是假的**——
+注释是随状态路径一起写的，写的时候没有意识到这条路径会**短路**掉权威检查。
+
+**后果**：若同一页同时被两次注册覆盖，注销其中一次会把 `MM_SAFE_UFFD` 清掉，
+此后该页的缺页**不会** parked 给仍存活的 handler，而会被状态路径直接满足——
+即 §10.19 预言的「仍被注册的页被缺页而不 park」。
+
+#### 缓解（必须说清楚，避免夸大严重性）
+
+**默认构建不受影响**：实测默认 riscv64 构建 `mm_anon_provisioned: 0`（§10.58），
+即预标记默认关闭，状态缺页路径**不启用**，UFFD 仍由 `fault.c:1036` 的权威检查把关。
+该缺口目前**仅存在于** `a20.anonprov=<n>` / `CONFIG_ANON_PROV_DEFAULT=<n>` 的实验构建里。
+（`MM_ANON_PROVISION_MAX_PAGES = 4096` 与 `CONFIG_ANON_PROV_DEFAULT` 是两个东西：
+前者是上限常量，后者才是默认开关，实测默认为 0。）
+
+#### 因此「把预标记默认打开」的前置条件清单
+
+1. **修 UFFD 过度清除**：逐页清除并在清之前重新判定 presence。难点是锁序——
+   unregister 现在是「放掉 `g_uffd_lock` → 取 `mm->lock`」，若在 `mm->lock` 内再取
+   `g_uffd_lock` 做 presence 复查，就形成 `mm->lock → g_uffd_lock` 的新嵌套；
+   需先确认全仓库没有「持 `g_uffd_lock` 再取 `mm->lock`」的路径，否则会造出环路。
+   **这一步本轮未做，锁序未验证，不应凭猜测下手。**
+2. 或者：让状态路径在 `ANON_VIRT` 命中时**也**调用 `userfaultfd_range_present()`
+   （它查的是 range 链表，不是 VMA，比 VMA 遍历便宜得多），代价是每次状态缺页多一次
+   加锁查询——比方案 1 简单，但确实侵蚀论文「缺页不查任何表」的主张。
+3. 顺手修正 `fault.c:967` 那句**已经不成立**的注释。
+
+**当前状态**：默认构建安全（预标记关闭），UFFD 语义正确。**在 1 或 2 完成之前，
+不要把预标记默认打开。**
+
+### 10.60 UFFD 修复的锁序障碍**已排除**（§10.59 的方案 1 现可实施）
+
+§10.59 留下的唯一疑问是锁序：在 `mm->lock` 内再取 `g_uffd_lock` 做逐页 presence 复查，
+会不会与某处「持 `g_uffd_lock` 再取 `mm->lock」形成环路。**已查证：不会。**
+
+**证据一：`userfaultfd.c` 里没有任何路径在持有 `g_uffd_lock` 时去取 `mm->lock`。**
+逐个核对 `g_uffd_lock` 的临界区（128-136、146-155、163-171、439-463、496-516、574-587、
+681-690），其中**没有一处**包含 `spin_lock(&mm->lock)`；`mm->lock` 的取用点（209、212、
+241、244、421、428、435）全部位于 `g_uffd_lock` 临界区**之外**。
+unregister 更是明确地**先放掉** `g_uffd_lock`（第 516 行）**再取** `mm->lock`（约 530 行），
+两者从不嵌套。
+
+**证据二：`mm->lock → g_uffd_lock` 这个顺序**早已在本代码库里实际使用**——
+`kernel/mm/fault.c:1036` 在**仍然持有 `mm->lock`** 的情况下调用
+`userfaultfd_range_present()`，紧接着的下一行才是 `spin_unlock(&mm->lock);`：
+
+```c
+if (vma &&
+    (vma->vm_flags & (VM_ANON | VM_FILE | VM_VMO | VM_SHARED)) == VM_ANON &&
+    userfaultfd_range_present(mm, page_va)) {
+    spin_unlock(&mm->lock);
+    ...
+```
+
+**结论**：`mm->lock → g_uffd_lock` 是**既有且在用**的顺序，而反向嵌套全仓库不存在。
+因此 §10.59 的**方案 1**（在 `mm->lock` 内逐页清除 `MM_SAFE_UFFD`、每页清除前重新判定
+presence）**不引入任何新的锁嵌套，不构成死锁**，可以安全实施。
+
+**实施要点（供下一轮直接落地）**：
+1. `mm_pt_set_safe_range()` 增加一个「清 UFFD 标记前先复查 presence」的钩子，或在
+   `userfaultfd.c` 里改成**逐页**处理而非整段一次性清除；
+2. presence 复查复用既有的 `userfaultfd_range_present(mm, page_va)`（它查 range 链表，
+   已在 `fault.c:1036` 于 `mm->lock` 内被调用，安全）；
+3. 顺带修正 `fault.c:967` 那句**对 `ANON_VIRT` 已不成立**的注释（§10.59 第 3 条）；
+4. 验证：需覆盖「**同一页被两次注册**」的场景——现有 `mm_stress` 未必包含，
+   应补一个针对性用例，否则改完也无法证明过度清除已消除。
+
+**本轮到此为止**：锁序已查清、方案已确定、但**未实施**——实施需要新增逐页复查逻辑并补
+一个「双重注册」测试用例，属于需要完整上下文才能一次做对并验证的改动，不宜在收尾阶段动手。
+
+### 10.61 UFFD 过度清除已修复：逐页清除 + 每页复查 presence
+
+按 §10.60 确认的方案 1 实施（锁序已查证为**既有**的 `mm->lock → g_uffd_lock`，不新增嵌套）。
+
+**改动一：新增 `mm_pt_safe_clear_page()`**（`kernel/mm/pt.c`，紧邻 `mm_pt_set_safe_range()`）。
+整段清位的 `mm_pt_set_safe_range()` 对 `MM_SAFE_UFFD` 不适用——一个页可能同时被**另一个**
+uffd 注册覆盖，整段清会把别人的标记一起清掉。新函数只清**一个**页：
+
+```c
+int mm_pt_safe_clear_page(struct mm_struct *mm, vaddr_t va, unsigned flags)
+{
+    ...
+    pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
+    if (!pte || !size)
+        return 0;               /* 没有叶子就没有标记 */
+    pte_t *table = pte - arch_pt_vpn(va, 0);
+    mm_pt_safe_clear(table, 0, arch_pt_vpn(va, 0), flags);
+    return 0;
+}
+```
+
+**改动二：unregister 改为逐页 + 逐页复查**（`kernel/ipc/userfaultfd.c`）：
+
+```c
++#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+ spin_lock(&t->mm->lock);
+-mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
++for (vaddr_t p = rlo; p < rhi; p += PAGE_SIZE) {
++    if (!userfaultfd_range_present(t->mm, p))
++        (void)mm_pt_safe_clear_page(t->mm, p, MM_SAFE_UFFD);
++}
+ spin_unlock(&t->mm->lock);
++#endif
+```
+
+**改动三：NOMMU 守卫**。`pt.c` 的全部安全位函数位于
+`#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)`（`pt.c:33`）之内，
+NOMMU 构建下不参与编译，故调用点必须同样加守卫。NOMMU 无页表、也就没有安全位，
+不加守卫会得到 `undefined reference to mm_pt_safe_clear_page`——**这是本次改动
+唯一一次编译失败，且是靠链接错误而非源码错误暴露的，值得记住。**
+
+**改动四：修正 `fault.c` 那句已经不成立的注释**（§10.59 第 3 条）。原文声称
+「`userfaultfd_range_present()` 是权威判定……对其它所有情况都仍会在下面的 VMA 路径上运行」——
+而 `ANON_VIRT` 的页在状态路径里**就地满足并返回**，根本走不到 `fault.c:1036`。
+现已改成如实描述：标记在此处**具有权威性**、不被重新推导，因此 unregister 有义务
+只为「无任何注册仍覆盖」的页清标记。
+
+**验证**：
+
+| 项 | 结果 |
+|---|---|
+| 5 架构（riscv64/x86_64/aarch64/loongarch64/ppc64le） | 0 errors |
+| riscv64 + aarch64 NOMMU | 0 errors |
+| x86_64 开启臂（`CONFIG_ANON_PROV_DEFAULT=4096`） | `mm_stress` **PASS**，0 FATAL，审计全 0 |
+| riscv64 开启臂（`a20.anonprov=4096`） | `mm_stress` **PASS**，0 FATAL，审计全 0 |
+| `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `check-mm-lock-model` | 全 PASS |
+
+**尚未证明的一点（如实记录）**：本次修复**没有针对性的回归测试**。要证明「过度清除已消除」，
+需要一个「同一页被两次注册、注销其中一次、确认另一注册仍能收到 fault」的用例；
+现有 `mm_stress` 是否覆盖这一场景**未确认**。因此本次验证证明的是
+**「改动没有破坏既有行为」**（各门与两个开启臂仍全绿），**不是**「过度清除已被测试证明消除」。
+补这个用例是下一轮的明确任务。

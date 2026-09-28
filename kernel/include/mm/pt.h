@@ -215,6 +215,9 @@ void mm_pt_mark_stale_recursive(pte_t *table, int level);
  * outlive the class they describe. */
 int  mm_pt_safe_set(pte_t *table, int level, int idx, unsigned flags);
 int  mm_pt_safe_clear(pte_t *table, int level, int idx, unsigned flags);
+/* Clear `flags` on the single page `va`.  Used instead of a range-wide clear
+ * where a mark may be co-owned (see MM_SAFE_UFFD). */
+int  mm_pt_safe_clear_page(struct mm_struct *mm, vaddr_t va, unsigned flags);
 int  mm_pt_safe_test(pte_t *table, int level, int idx, unsigned flags);
 int  mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags);
 int  mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
