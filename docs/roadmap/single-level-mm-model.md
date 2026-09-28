@@ -491,3 +491,71 @@ P5 仍须满足的硬性要求收敛为：装 PTE 的互斥单元（cursor/MCS �
 
 因此：**x86_64 必须保留同步阻塞 shootdown**，异步 generation 方案仅在有 ASID 的
 riscv64 上才谈得上安全。基准与死锁复现都在 x86_64，故该方案出局。
+
+### 8.12 P5 第五次尝试：把 prepare 移出锁，**已回退**（附结构性教训）
+
+在 §8.10 更正根因之后重做 P5，采用「锁外 prepare、锁内 commit 并复核」：
+匿名写 fault-around 路径在锁外做 4 次 `pfa_alloc_page` + 4 次 `cg_mem_charge` +
+4 次 4KiB `memset`（16KiB 清零，占单次 fault 成本的大头），再取回 `mm->lock`
+复核后用 cursor 一次事务装入。这正是 VMA 引用计数（§8.9）所解锁的用法。
+
+实现过程中自查出并修掉两个真实缺陷（均由本轮引入）：
+
+1. **UAF**：在 `vma_put()` 之后返回 `-EAGAIN`，调用方会继续 fall through 并在
+   **没有引用**的情况下解引用 `vma`。exec 期间 VMA 频繁拆建，命中该窗口即损坏。
+   改为：取引用之后的任何结局都必须是确定值（0 / -1 / -ENOMEM），`-EAGAIN` 只允许
+   在 `vma_get()` 之前返回。
+2. **抢占 THP**：快路径插在 `handle_demand_fault_access` 顶部，早于
+   `handle_demand_fault_locked` 里的 THP 判定，于是 4KiB 单页会抢在 2MiB
+   透明大页之前。改为在守卫里排除 `VM_HUGEPAGE`。
+
+修掉这两个之后**仍然失败**：`smoke-mm-stress` 在 `execve mksh` 之后静默卡死
+（无 panic、无自旋锁诊断、无看门狗）。插桩显示快路径本身被进入 4 次且每次都以
+`mapped=1` 正常返回，卡死发生在其**之后**。回退 `fault.c` 后同一门立即 PASS，
+故为本轮改动所致，非既有 flake（判定方式：stash/unstash 对照）。
+
+**结构性教训（比这个 bug 本身更重要）**：`handle_demand_fault_locked` 是一条
+**有序**的判定链——swap PTE → 栈增长 → brk → VMA 命中 → 权限 → VM_FILE →
+VM_VMO → THP → anon batch → 单页 anon。把快路径**前置**到这条链之前，等于改变
+了这些判定的优先级；每排除掉一个（VM_STACK、VM_HUGEPAGE……）就暴露下一个尚未
+建模的交互。这与 §8.7 四次失败是同一类问题的第五次化身：**在一条既有判定链上
+"提前插队"比"就地改造"危险得多。**
+
+若继续 P5，正确的做法是**就地**改造：把锁外 prepare 放进
+`handle_demand_fault_locked` 内、**原 anon batch 所在的精确位置**，从而完全保留
+其前面的全部判定顺序，只改变"工作发生在锁内还是锁外"；这需要先把该函数按
+判定分段、逐段调整锁的粒度，而不是在前置位置加一个早返回。**本轮未完成该改造。**
+
+### 8.13 P4 接线状态核实：`mm_pt_defer_free` 是死代码
+
+核实结果（此前文档表述不够精确）：
+
+* **叶数据帧的延迟释放已接线**：`mm_tlb_hold_frame` 在 `munmap.c:105/236`、
+  `madvise.c:81`、`oom.c:135`、`vm.c:402` 均有真实调用。
+* **页表帧的延迟释放未接线**：`mm_pt_defer_free`（`pt.c:797`）已实现，内部正确
+  调用 `mm_pt_hold_table` 并置 `stale`，但**全树没有任何调用者**——是死代码。
+
+即：当前只有数据帧受 P4 保护，页表帧仍是同步释放。这在**现有**设计下是安全的
+（`mm->lock` 事务 + 同步 shootdown 完成后才释放），但它是 P5 摘锁的硬前提。
+接线它本身不产生性能收益，却会在现有锁模型下引入页表帧生命周期风险，因此
+**刻意推迟到与 P5 同批落地**，而不是单独提交。
+
+### 8.14 验收环境发现的两个无关既有缺陷
+
+* **lwIP IPv6 接收路径断言崩溃**：`pbuf_free: p->ref > 0`，backtrace 为
+  `ip6_input → ethernet_input → a20_lwip_process_netif_rx_tx_locked`，发生在
+  启动阶段、`MM_PT_SCALE` 尚未运行。x86_64/KVM 上 4/5 次运行命中，**去掉
+  `-netdev` 后 0 次**——由 virtio-net 设备触发。与本次改造无因果关系
+  （无任何 VMA 路径通往 lwIP pbuf 引用计数），但会污染后续 KVM 采样：
+  **mm_* 类基准应在无 NIC 的配置下运行。**
+* **`mm_pt_scale` 自报计数与内核实时值不一致**：测试自身读到的
+  `pt_lock_acquires=0 / cursors=3`，而同一次运行中 `cat /proc/a20/perf` 的实时值
+  为 `mm_pt_lock_acquires: 23 / mm_cursor_open: 11`。计数器本身工作正常
+  （名字在 `core/perf.c` 注册无误、无编译期开关），故差异出在测试的读取时机或
+  解析上，**其计数器输出目前不可作为归因依据**；应以 `/proc/a20/perf` 实时值为准。
+
+### 8.15 当前基线（无 NIC，x86_64/KVM smp4）
+
+`mm_pt_scale` 多次采样 `ideal_speedup` 落在 **1.06x–1.20x**，低于其自带的
+1.80x 判定阈值（FAIL）。这与 §8.8 的结论一致：`mm->lock` 仍在 fault 路径上
+串行化 16KiB 清零，并行度尚未兑现。**这是 P5 尚未完成的量化证据。**
