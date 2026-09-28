@@ -97,6 +97,36 @@ smoke-a20-channel:
 smoke-ptrace:
 	$(PYTHON) tools/smoke.py smoke-ptrace
 
+smoke-netfilter:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/netfilter-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'netfilter_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'NETFILTER_TEST: PASS' "$$log"; then \
+		echo "smoke-netfilter: PASS; log saved to $$log"; \
+	elif grep -q 'NETFILTER_TEST: SKIP' "$$log"; then \
+		echo "smoke-netfilter: SKIP (control surface verified, data plane not reached); log saved to $$log"; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-netfilter: timeout without verdict; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-netfilter: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
 
