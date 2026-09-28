@@ -135,9 +135,10 @@ vf2-sdcard: _vf2_check_firmware _vf2_build_base $(VF2_SDCARD_EXTRA_PREREQ)
 
 # Minimal bootable card: FAT32 rootfs carries the extra fastfetch binary.
 vf2-minimal: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
-	@cp $(VF2_BUILD_DIR)/fat32.img $(VF2_BUILD_DIR)/fat32-ff.img
-	@mcopy -o -i $(VF2_BUILD_DIR)/fat32-ff.img \
-		$(VF2_USER_BUILD_DIR)/fastfetch ::/fastfetch
+	@$(PYTHON) tools/img.py vf2-minimal \
+		--src "$(VF2_BUILD_DIR)/fat32.img" \
+		--dst "$(VF2_BUILD_DIR)/fat32-ff.img" \
+		--payload "$(VF2_USER_BUILD_DIR)/fastfetch"
 	tools/vf2/make-boot-image.sh \
 		$(VF2_BUILD_DIR)/kernel.bin \
 		$(VF2_BUILD_DIR)/fat32-ff.img
