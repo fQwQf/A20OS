@@ -130,96 +130,17 @@ step8-la-release-8c:
 		STEP35_LABEL=step8-loongarch64-release-8c _step35_smoke
 
 _step35_smoke: dev-build
-	@mkdir -p $(STEP35_LOG_DIR)
-	@set -e; \
-	stamp=$$(date -u +%Y%m%dT%H%M%SZ); \
-	log="$(STEP35_LOG_DIR)/step35-$(STEP35_LABEL)-$$stamp.log"; \
-	status=0; \
-	$(TIMEOUT) --expect '# ' \
-		--send-line 'lifetime_stress' \
-		--send-line 'cat /proc/a20/task_lifetime' \
-		--send-line 'poweroff' \
-		$(STEP35_TIMEOUT) $(QEMU) $(QEMU_FLAGS_NO_SDCARD) \
-		-kernel $(KERNEL_ELF) \
-		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
-		> "$$log" 2>&1 || status=$$?; \
-	if [ "$$status" -ne 0 ]; then \
-		echo "_step35_smoke: QEMU failed status=$$status log=$$log"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi; \
-	for marker in \
-		'SCHED_STRESS: PASS' \
-		'FUTEX_STRESS: PASS' \
-		'FUTEX_STRESS: unrelated-wake-isolation PASS' \
-		'FUTEX_STRESS: stale-timeout-isolation PASS' \
-		'PROC_STRESS: PASS' \
-		'PROC_STRESS: vfork-auto-reap PASS' \
-		'PROC_STRESS: signal-stop-exit PASS' \
-		'PROC_STRESS: signal-mask-park PASS' \
-		'IO_EVENT_TEST: PASS' \
-		'VFS_STRESS: PASS' \
-		'SOCKET_STRESS: PASS' \
-		'LIFETIME_STRESS: PASS' \
-		'lifetime_errors: 0' \
-		'System is going down for power-off NOW.'; do \
-		if ! grep -q "$$marker" "$$log"; then \
-			echo "_step35_smoke: missing '$$marker' log=$$log"; \
-			tail -n 120 "$$log"; \
-			exit 1; \
-		fi; \
-	done; \
-	if [ "$(REQUIRE_TIMEOUT_CAPACITY)" = "1" ]; then \
-		for marker in \
-			'LIFETIME_STRESS: timeout-capacity-1 PASS' \
-			'LIFETIME_STRESS: timeout-capacity PASS entries=' \
-			'LIFETIME_STRESS: timeout-capacity+1 PASS' \
-			'LIFETIME_STRESS: timeout-capacity PASS capacity='; do \
-			if ! grep -q "$$marker" "$$log"; then \
-				echo "_step35_smoke: missing '$$marker' log=$$log"; \
-				tail -n 120 "$$log"; \
-				exit 1; \
-			fi; \
-		done; \
-	fi; \
-	if [ "$(REQUIRE_SMP_RUNQUEUE)" = "1" ]; then \
-		for marker in \
-			'SCHED_STRESS: smp-runqueue PASS' \
-			'scheduler_violations: 0'; do \
-			if ! grep -q "$$marker" "$$log"; then \
-				echo "_step35_smoke: missing '$$marker' log=$$log"; \
-				tail -n 120 "$$log"; \
-				exit 1; \
-			fi; \
-		done; \
-	fi; \
-	if [ "$(REQUIRE_LOCK_SPLIT)" = "1" ]; then \
-		for marker in \
-			'SCHED_STRESS: lock-split PASS' \
-			'runqueue_local_picks:' \
-			'runqueue_lock_acquires:' \
-			'runqueue_parallel_pick_peak:' \
-			'scheduler_violations: 0'; do \
-			if ! grep -q "$$marker" "$$log"; then \
-				echo "_step35_smoke: missing '$$marker' log=$$log"; \
-				tail -n 120 "$$log"; \
-				exit 1; \
-			fi; \
-		done; \
-	fi; \
-	if [ "$(NR_CPUS)" -gt 1 ] && \
-	   ! grep -Fq '[SMP] $(NR_CPUS)/$(NR_CPUS) configured CPUs online' "$$log"; then \
-		echo "_step35_smoke: not all $(NR_CPUS) CPUs came online log=$$log"; \
-		tail -n 120 "$$log"; \
-		exit 1; \
-	fi; \
-	if grep -Eq 'PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]' "$$log"; then \
-		echo "_step35_smoke: lifecycle diagnostic failure log=$$log"; \
-		grep -E 'PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]' "$$log" | head -n 20; \
-		exit 1; \
-	fi; \
-	echo "_step35_smoke: PASS ($(STEP35_LABEL)); log saved to $$log"
-
+	@$(PYTHON) tools/smoke.py step35 \
+		--label "$(STEP35_LABEL)" \
+		--log-dir "$(STEP35_LOG_DIR)" \
+		--qemu "$(QEMU)" \
+		$(addprefix --qemu-flag=,$(QEMU_FLAGS_NO_SDCARD)) \
+		--kernel "$(KERNEL_ELF)" \
+		--timeout "$(STEP35_TIMEOUT)" \
+		--nr-cpus "$(NR_CPUS)" \
+		--require-timeout-capacity "$(REQUIRE_TIMEOUT_CAPACITY)" \
+		--require-smp-runqueue "$(REQUIRE_SMP_RUNQUEUE)" \
+		--require-lock-split "$(REQUIRE_LOCK_SPLIT)"
 check-proc-step35-local: check-task-state-boundary \
 	check-concurrency-foundation check-task-lifetime-boundary \
 	step35-rv-debug-1c step35-la-debug-1c \
