@@ -22,10 +22,12 @@ import time
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from a20_error import A20Error, ToolError
 from a20_board import FLASH_TARGET_REACHABLE, run_flash  # noqa: E402
 from a20_derive import derive_make_vars  # noqa: E402
 from a20_instance import InstanceError, parse_instance, section_is_set  # noqa: E402
@@ -454,7 +456,7 @@ class TestRunFlashDispatch(unittest.TestCase):
         return run_flash(load(self.tmp, text), self.backends, [], dry_run=True)
 
     def test_mismatched_geometry_is_refused_before_any_build(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash("""
                 arch = "armv7m"
                 [stm32]
@@ -468,13 +470,13 @@ class TestRunFlashDispatch(unittest.TestCase):
         self.exec_m.assert_not_called()
 
     def test_wrong_board_is_refused_before_any_build(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash('arch = "riscv64"\nboard = "visionfive2"\n[flash]\ntool = "openocd"\n')
         self.assertIn("not validated for board", str(cm.exception))
         self.build_m.assert_not_called()
 
     def test_unregistered_backend_is_refused(self) -> None:
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             self.flash('arch = "armv7m"\n[flash]\ntool = "nope"\n')
         self.assertIn("not a registered backend", str(cm.exception))
 
@@ -492,16 +494,18 @@ class TestRunFlashDispatch(unittest.TestCase):
         self.assertEqual(self.exec_m.call_args.args[1], "flash-xuanwu-openocd")
 
     def test_build_failure_short_circuits_before_programming(self) -> None:
-        self.build_m.return_value = 2
-        rc = self.flash("""
-            arch = "armv7m"
-            [stm32]
-            flash_kb = 512
-            ram_kb = 64
-            [flash]
-            tool = "openocd"
-        """)
-        self.assertEqual(rc, 2)
+        # A failing build raises rather than returning make's status, so a
+        # failed build can never be mistaken for a programming success.
+        self.build_m.side_effect = ToolError("make kernel-only failed", status=2)
+        with self.assertRaises(ToolError):
+            self.flash("""
+                arch = "armv7m"
+                [stm32]
+                flash_kb = 512
+                ram_kb = 64
+                [flash]
+                tool = "openocd"
+            """)
         self.exec_m.assert_not_called()
 
 
@@ -670,7 +674,7 @@ class TestResourceGate(unittest.TestCase):
     def test_no_wait_fails_instead_of_blocking(self) -> None:
         from a20_resource import preflight
         inst = load(self.tmp, 'arch = "riscv64"\n[machine]\nmemory = "64G"\n')
-        with self.assertRaises(SystemExit) as cm:
+        with self.assertRaises(A20Error) as cm:
             preflight(inst, self.policy, self.tmp, wait=False)
         self.assertIn("insufficient host resources", str(cm.exception))
 
@@ -746,7 +750,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
             stderr = "Makefile:42: *** missing separator.  Stop.\n"
 
         with patch("a20_test.subprocess.run", return_value=Result()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 a20_test._qemu_cmdline(inst)
         msg = str(cm.exception)
         self.assertIn("missing separator", msg)
@@ -763,9 +767,9 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
             stderr = ""
 
         with patch("a20_test.subprocess.run", return_value=Result()):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 a20_test._qemu_cmdline(inst)
-        self.assertIn("no qemu-system command found", str(cm.exception))
+        self.assertIn("no qemu-system command", str(cm.exception))
 
     def test_qemu_token_survives_make_and_shell_wrappers(self) -> None:
         from a20_test import _QEMU_TOKEN
@@ -797,7 +801,7 @@ class TestSmokeHarnessRobustness(unittest.TestCase):
     def test_same_instance_cannot_run_twice(self) -> None:
         from a20_test import _exclusive
         with _exclusive("unit-test-instance"):
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 with _exclusive("unit-test-instance"):
                     pass
         self.assertIn("already running", str(cm.exception))
@@ -892,6 +896,8 @@ class TestCliArgumentHandling(unittest.TestCase):
             return mod.main(argv)
 
     def test_typo_is_an_error_not_a_forwarded_flag(self) -> None:
+        # argparse's own exit(2) is the usage-error convention, so this stays
+        # a SystemExit rather than an A20Error.
         with self.assertRaises(SystemExit) as cm:
             self.run_main(["run", "qemu-riscv64", "--dry-rnu"])
         self.assertEqual(cm.exception.code, 2)
@@ -941,6 +947,115 @@ class TestCliArgumentHandling(unittest.TestCase):
              patch.object(mod, "validate_instance", return_value=["synthetic failure"]), \
              contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mod.main(["list"]), 1)
+
+
+class TestOperatorErrorContract(unittest.TestCase):
+    """Failures are one line on stderr with a documented exit code.
+
+    Everything here used to escape as a raw Python exception: a make query the
+    Makefile rejected printed a five-frame MakeQueryError traceback, a missing
+    `make` printed FileNotFoundError, and validation failures were printed to
+    stdout, so `2>/dev/null` did not filter them and a redirected report still
+    carried the failures.
+    """
+
+    def cli(self):
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader(
+            f"a20_errcli_{id(self)}", str(REPO_ROOT / "tools" / "a20"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    def test_exit_codes_are_disjoint(self) -> None:
+        from a20_error import EXIT_FAIL, EXIT_OK, EXIT_TIMEOUT, EXIT_TOOL, EXIT_USAGE
+        codes = [EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_TOOL, EXIT_TIMEOUT]
+        self.assertEqual(len(set(codes)), len(codes),
+                         "exit codes must be distinguishable by a script")
+
+    def test_missing_instance_suggests_the_nearest_real_name(self) -> None:
+        mod = self.cli()
+        with self.assertRaises(A20Error) as cm:
+            mod._resolve("qemu-riscv6")
+        self.assertIn("did you mean", cm.exception.hint or "")
+        self.assertIn("qemu-riscv64", cm.exception.hint or "")
+
+    def test_missing_instance_without_a_near_miss_points_at_list(self) -> None:
+        mod = self.cli()
+        with self.assertRaises(A20Error) as cm:
+            mod._resolve("zzz-nothing-like-this")
+        self.assertIn("a20 list", cm.exception.hint or "")
+
+    def test_report_writes_to_stderr_and_includes_the_hint(self) -> None:
+        import contextlib
+        import io
+        from a20_error import EXIT_FAIL, report
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = report(A20Error("it broke", hint="try this"))
+        self.assertEqual(err.getvalue(), "error: it broke\nhint: try this\n")
+        self.assertEqual(code, EXIT_FAIL)
+
+    def test_tool_status_does_not_masquerade_as_a_usage_error(self) -> None:
+        from a20_error import EXIT_TIMEOUT, EXIT_TOOL, EXIT_USAGE, ToolError
+        # make exits 2 for a missing rule; a20 reserves 2 for its own usage errors.
+        self.assertEqual(ToolError("make dev-build failed", status=2).exit_code_for(),
+                         EXIT_TOOL)
+        self.assertNotEqual(ToolError("x", status=2).exit_code_for(), EXIT_USAGE)
+
+    def test_timeout_keeps_its_own_code(self) -> None:
+        from a20_error import EXIT_TIMEOUT, ToolError
+        self.assertEqual(ToolError("qemu timed out", status=124).exit_code_for(),
+                         EXIT_TIMEOUT)
+
+    def test_exec_make_raises_instead_of_returning_make_status(self) -> None:
+        from a20_error import ToolError
+        from a20_make import exec_make
+        with patch("a20_make.subprocess.run") as run:
+            run.return_value = SimpleNamespace(returncode=2)
+            with self.assertRaises(ToolError) as cm:
+                exec_make(load_instance("qemu-riscv64"), "dev-build", [], False)
+        self.assertEqual(cm.exception.status, 2)
+
+    def test_exec_make_reports_a_missing_make_distinctly(self) -> None:
+        from a20_error import ToolError
+        from a20_make import exec_make
+        with patch("a20_make.subprocess.run",
+                   side_effect=FileNotFoundError(2, "No such file", "make")):
+            with self.assertRaises(ToolError) as cm:
+                exec_make(load_instance("qemu-riscv64"), "dev-build", [], False)
+        self.assertIn("make", str(cm.exception))
+        self.assertIn("PATH", cm.exception.hint or "")
+
+    def test_schema_violation_is_a_clean_error_not_a_traceback(self) -> None:
+        # parse_instance is the schema boundary: an unknown key is refused there.
+        with tempfile.TemporaryDirectory() as td:
+            bad = Path(td) / "bad.toml"
+            bad.write_text('arch = "riscv64"\n[gui]\nenabled = true\n'
+                           'frame_window = 15\n', encoding="utf-8")
+            with self.assertRaises(InstanceError) as cm:
+                parse_instance(bad)
+        self.assertIn("unknown key", str(cm.exception))
+
+    def test_semantic_failures_are_not_written_to_stdout(self) -> None:
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            # smp > 1 on a board that is not verified for SMP is a semantic
+            # error, so it survives parsing and is caught by validate_instance.
+            bad = Path(td) / "bad.toml"
+            bad.write_text('arch = "riscv64"\nboard = "visionfive2"\n'
+                           '[machine]\nsmp = 8\n', encoding="utf-8")
+            inst = parse_instance(bad)
+            errors = validate_instance(inst, REPO_ROOT)
+        self.assertTrue(errors, "smp on an unverified board must be rejected")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            print("FAIL bad.toml: " + "; ".join(errors), file=sys.stderr)
+        self.assertEqual(out.getvalue(), "")
+        self.assertTrue(err.getvalue().startswith("FAIL bad.toml:"))
 
 
 class TestMakeQuery(unittest.TestCase):
@@ -1640,7 +1755,7 @@ class TestHostPortGate(unittest.TestCase):
         port = held.getsockname()[1]
         try:
             inst = self.inst(f'["tcp::{port}-:5555"]')
-            with self.assertRaises(SystemExit) as cm:
+            with self.assertRaises(A20Error) as cm:
                 preflight(inst, Policy(), self.tmp, wait=False)
             self.assertIn(str(port), str(cm.exception))
         finally:

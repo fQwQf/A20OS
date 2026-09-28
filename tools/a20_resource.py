@@ -32,6 +32,8 @@ import re
 import shutil
 import socket
 import time
+
+from a20_error import ResourceShortage, UsageError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Sequence
@@ -309,7 +311,8 @@ def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None
         if verdict.ok:
             return verdict
         if not wait:
-            raise SystemExit(f"error: insufficient host resources for {label}: {verdict.reason()}")
+            raise ResourceShortage(
+                f"insufficient host resources for {label}: {verdict.reason()}")
         # Re-announce only when the *kind* of shortfall changes, so a long wait
         # does not scroll a line per poll, plus a periodic heartbeat so the
         # process does not look hung.
@@ -319,8 +322,8 @@ def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None
             echo(f"a20: waiting for host resources ({need.describe()}) -- {verdict.reason()}")
             reported, last_emit = kinds, now
         if deadline is not None and now >= deadline:
-            raise SystemExit(
-                f"error: gave up waiting {policy.wait_timeout_s:.0f}s for host resources "
+            raise ResourceShortage(
+                f"gave up waiting {policy.wait_timeout_s:.0f}s for host resources "
                 f"to run {label}: {verdict.reason()}")
         time.sleep(_POLL_SECONDS)
 
@@ -364,7 +367,7 @@ def _parse_hostfwd(values: Sequence[str]) -> tuple[tuple[str, int], ...]:
     for v in values:
         addr, _, port = v.rpartition(":")
         if not port.isdigit():
-            raise SystemExit(f"error: --hostfwd wants addr:port, got {v!r}")
+            raise UsageError(f"--hostfwd wants addr:port, got {v!r}")
         out.append((addr or "127.0.0.1", int(port)))
     return tuple(out)
 
