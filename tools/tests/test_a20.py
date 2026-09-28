@@ -16,6 +16,7 @@ import json
 import os
 import pty
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -78,6 +79,38 @@ def load(tmp: Path, text: str):
 
 def derived(tmp: Path, text: str) -> dict[str, str]:
     return dict(v.split("=", 1) for v in derive_make_vars(load(tmp, text)))
+
+
+def _ctx(fn):
+    """A context manager that runs fn() on enter, for stubbing _exclusive."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        fn()
+        yield
+    return _cm()
+
+
+def _load_cli():
+    """Import tools/a20 (a script, not a module) so its functions can be called."""
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader("a20_cli_helper", str(REPO_ROOT / "tools" / "a20"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def _pump(proc, log: Path, stop) -> None:
+    """Copy a child's output into `log` so _watch can observe it growing."""
+    with log.open("wb") as sink:
+        for line in proc.stdout:
+            sink.write(line)
+            sink.flush()
+            if stop.is_set():
+                return
 
 
 class TestDeriveMakeVars(unittest.TestCase):
@@ -1056,6 +1089,139 @@ class TestOperatorErrorContract(unittest.TestCase):
             print("FAIL bad.toml: " + "; ".join(errors), file=sys.stderr)
         self.assertEqual(out.getvalue(), "")
         self.assertTrue(err.getvalue().startswith("FAIL bad.toml:"))
+
+
+class TestSmokeProgressAndLifecycle(unittest.TestCase):
+    """A smoke used to be silent for its whole timeout, then print one line.
+
+    QEMU's output only ever went to the log file, so a boot that took four
+    minutes to reach its first marker looked exactly like a hang.  These pin the
+    progress reporting and the two lifecycle defects that came with it.
+    """
+
+    def _child(self, script: str):
+        return subprocess.Popen([sys.executable, "-c", script],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def test_watch_announces_each_marker_as_it_appears(self) -> None:
+        import tempfile
+        import threading
+        from a20_test import _watch
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "boot.log"
+            proc = self._child(
+                "import time\n"
+                "print('MARK_A', flush=True)\n"
+                "time.sleep(0.5)\n"
+                "print('MARK_B', flush=True)\n"
+                "time.sleep(0.3)\n")
+            stop = threading.Event()
+            t = threading.Thread(target=_pump, args=(proc, log, stop), daemon=True)
+            t.start()
+            seen = []
+            timed_out = _watch(proc, log, ("MARK_A", "MARK_B"), 20.0, seen.append)
+            stop.set()
+            t.join(timeout=2)
+            proc.wait()
+        self.assertFalse(timed_out)
+        self.assertEqual(len(seen), 2, f"both markers should be announced, got {seen}")
+        self.assertTrue(any("MARK_A" in s for s in seen))
+        self.assertTrue(any("MARK_B" in s for s in seen))
+
+    def test_watch_reports_a_timeout_rather_than_hanging(self) -> None:
+        import tempfile
+        from a20_test import _watch
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "quiet.log"
+            proc = self._child("import time\ntime.sleep(30)\n")
+            seen = []
+            timed_out = _watch(proc, log, ("NEVER",), 0.6, seen.append)
+            proc.kill()
+            proc.wait()
+        self.assertTrue(timed_out)
+        self.assertEqual(seen, [], "no marker appeared, so nothing should be announced")
+
+    def test_the_lock_is_taken_before_the_build(self) -> None:
+        """Two runs of one instance must not both build into the same BUILD_DIR.
+
+        The lock used to be taken after build_instance, so both runs did the
+        full multi-minute build and only then did the loser find out.
+        """
+        import a20_test
+        order = []
+        with patch("a20_test.build_instance",
+                   side_effect=lambda *a, **k: order.append("build")), \
+             patch("a20_test._qemu_cmdline", return_value=["true"]), \
+             patch("a20_test._exclusive",
+                   return_value=_ctx(lambda: order.append("lock"))), \
+             patch("a20_test.preflight"), \
+             patch("a20_test.SMOKE_LOG_DIR", Path(tempfile.mkdtemp())), \
+             patch("a20_test.subprocess.Popen"), \
+             patch("a20_test._watch", return_value=True), \
+             patch("a20_test._reap"):
+            a20_test.run_test(load_instance("smoke-riscv64"), [], True)
+        self.assertEqual(order[:2], ["lock", "build"],
+                         f"lock must precede the build, got {order}")
+
+    def test_the_guest_is_reaped_even_when_waiting_raises(self) -> None:
+        import a20_test
+        reaped = []
+        with patch("a20_test.build_instance"), \
+             patch("a20_test._qemu_cmdline", return_value=["true"]), \
+             patch("a20_test._exclusive", return_value=_ctx(lambda: None)), \
+             patch("a20_test.preflight"), \
+             patch("a20_test.SMOKE_LOG_DIR", Path(tempfile.mkdtemp())), \
+             patch("a20_test.subprocess.Popen") as popen, \
+             patch("a20_test._watch", side_effect=RuntimeError("boom")), \
+             patch("a20_test._reap", side_effect=lambda p: reaped.append(p)):
+            popen.return_value = SimpleNamespace(
+                poll=lambda: None, returncode=None,
+                stdin=SimpleNamespace(close=lambda: None))
+            with self.assertRaises(RuntimeError):
+                a20_test.run_test(load_instance("smoke-riscv64"), [], False)
+        self.assertEqual(len(reaped), 1,
+                         "a guest must be reaped on every exit path, not only on timeout")
+
+    def test_console_dry_run_does_not_open_the_serial_port(self) -> None:
+        mod = _load_cli()
+        args = SimpleNamespace(instance="vf2-physical", no_reset=False,
+                               no_flash=False, dry_run=True, make_args=[],
+                               wait_timeout=None, no_wait=False)
+        opened = []
+        with patch("a20_console.open_transport",
+                   side_effect=AssertionError("must not open a port on --dry-run")), \
+             patch.object(mod, "_load", return_value=load_instance("vf2-physical")):
+            import contextlib, io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = mod.cmd_console(args)
+        self.assertEqual(rc, 0)
+        self.assertIn("would open /dev/ttyUSB0", buf.getvalue())
+
+    def test_build_scope_does_not_block_on_guest_memory(self) -> None:
+        from a20_resource import HostResources, Policy, Requirement, evaluate
+        have = HostResources(
+            mem_available_mb=256, cpu_count=8, load1=0.0,
+            disk_free_mb=99_999, running_guests=0, busy_ports=())
+        need = Requirement(mem_mb=4096, cpus=1, disk_mb=1024, guests=0)
+        pol = Policy()
+        self.assertFalse(evaluate(need, have, pol, guest=True).ok,
+                         "a guest run must be refused")
+        self.assertTrue(evaluate(need, have, pol, guest=False).ok,
+                        "a build-only step must not be blocked by guest memory")
+
+    def test_every_deficit_carries_a_remedy(self) -> None:
+        from a20_resource import HostResources, Policy, Requirement, evaluate
+        have = HostResources(
+            mem_available_mb=256, cpu_count=1, load1=1.0,
+            disk_free_mb=10, running_guests=4, busy_ports=(("127.0.0.1", 2222),))
+        v = evaluate(Requirement(mem_mb=4096, cpus=8, disk_mb=8192, guests=1,
+                                 ports=(("127.0.0.1", 2222),)),
+                     have, Policy())
+        self.assertFalse(v.ok)
+        self.assertEqual(len(v.remedies), len(v.deficits),
+                         "every deficit must say what would clear it")
+        self.assertIn("A20_MAX_CONCURRENT", v.remedy())
 
 
 class TestMakeQuery(unittest.TestCase):

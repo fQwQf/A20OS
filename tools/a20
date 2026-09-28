@@ -108,8 +108,11 @@ def _resolve(arg: str) -> Path:
         return candidate
     # A near-miss is almost always a typo or a half-remembered name; there are
     # dozens of instances, so guessing beats making the user go and list them.
-    close = difflib.get_close_matches(arg, _known_names(), n=3, cutoff=0.6)
-    hint = f"did you mean: {', '.join(close)}?" if close else f"run 'a20 list' to see them"
+    # 0.75 rather than something looser: at 0.6 a name that is not an instance
+    # at all (`smoke-poll-edge` is a make target) came back with a confident,
+    # wrong suggestion, which is worse than no suggestion.
+    close = difflib.get_close_matches(arg, _known_names(), n=3, cutoff=0.75)
+    hint = f"did you mean: {', '.join(close)}?" if close else "run 'a20 list' to see them"
     raise A20Error(f"no such instance '{arg}' (tried {arg} and {candidate})", hint=hint)
 
 
