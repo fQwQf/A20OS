@@ -144,10 +144,11 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -rf .kernel-build
-	rm -f kernel.elf kernel.bin fat32.img ext4.img
-	rm -f kernel-rv kernel-la disk.img disk-la.img
+	@$(PYTHON) tools/stamps.py clean \
+		--find-root "$(KERNEL_DIR)" \
+		--rm-rf .kernel-build \
+		$(foreach f,kernel.elf kernel.bin fat32.img ext4.img \
+			kernel-rv kernel-la disk.img disk-la.img,--rm-f $(f))
 	$(MAKE) -C user clean
 	$(MAKE) -f user/extra.mk clean 2>/dev/null || true
 
