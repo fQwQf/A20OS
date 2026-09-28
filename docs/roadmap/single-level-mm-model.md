@@ -3968,3 +3968,77 @@ MM_STRESS: FAIL evict-mmap-verify-mapped errno=17      <-- 17 = EEXIST
 与 §10.39–§10.56 那十次排查是同一个教训的另一个侧面：
 **一个新增的测试改变地址空间状态，就足以唤醒此前被掩盖的既有缺陷。**
 测试通过 ≠ 周边无问题；测试失败也不必然是测试自己的错。
+
+### 10.63 **更正 §10.62 的误判**：`evict-mmap-verify-mapped` 不是地址冲突，是**内容丢失**
+
+§10.62 把 `MM_STRESS: FAIL evict-mmap-verify-mapped errno=17` 读成「带提示地址的 `mmap`
+返回 `EEXIST`」，据此把下一轮任务定为「查提示地址撞车」。**这个读法是错的。**
+
+`user/cmds/stress/mm_stress.c:15` 的 `fail()` 只接收一个字符串，并**打印环境里遗留的 `errno`**：
+
+```c
+static int fail(const char *what)
+{
+    printf("MM_STRESS: FAIL %s errno=%d\n", what, errno);
+    return 1;
+}
+```
+
+而这一处调用是 `return fail("evict-mmap-verify-mapped");`（`mm_stress.c:1416`），
+**没有传 errno**——所以那个 `errno=17 (EEXIST)` 是**早前某次无关系统调用留下的残留值**，
+与失败原因**毫无关系**。§10.62 建立在它之上的因果链（「提示地址被占用」）**作废**。
+
+#### 真正的失败性质
+
+`mm_stress.c:1404-1416` 那段循环是**逐页内容校验**：
+
+```c
+for (size_t p = 0; p < mmap_pages; p++) {
+    const char *page = mem + p * 4096;
+    ...
+    for (size_t i = 0; i < 4096; i++) {
+        if (page[i] != (char)((page_idx * 7 + i) % 251)) {
+            ...
+            return fail("evict-mmap-verify-mapped");
+        }
+    }
+}
+```
+
+即：往文件映射里逐页写入一个可预测图案 → `fsync(fd_b)` → 再**通过映射读回**逐字节比对。
+**比对不符 = 映射里的内容与刚写进去的不一致，也就是内容丢失/被写坏。**
+
+这比 §10.62 说的「地址撞车」**严重得多**：它不是「映射建不起来」，
+而是「**已经写好的数据读回来变了**」——在有内存压力、有回收参与的情况下发生。
+而且紧邻其前的那条消息正指向回收侧：
+
+```
+[BCACHE] no evictable page page=5772 valid=2000 dirty=1879 referenced=0 total_refs=0 max_refs=0
+```
+
+**`valid=2000`、`dirty=1879`，却「无页可回收」**——即在明显应当有可回收页的时刻，
+回收路径报出找不到候选。随后映射内容就出现不一致。
+
+#### 目前确定与未确定的
+
+**确定**：
+* 失败是**数据不一致**，不是系统调用失败；`errno` 字段在此**无诊断价值**；
+* 失败发生在「文件映射 + 内存压力 + 回收」这一组合下；
+* 回收侧此前刚报出「无页可回收」。
+
+**未确定（本轮未查）**：
+* 该映射的确切 `mmap` 标志（`MAP_SHARED` 还是 `MAP_PRIVATE`、有无 `MAP_NORESERVE`）——
+  §10.62 的 grep 没抓到 `mmap` 调用本身；
+* 内容究竟丢在**脏页回写**、**回收/回写（reclaim）**、还是**重新映射（remap）**哪一环；
+* 那个 `no evictable page` 判定本身是否就是错的（例如 `referenced=0 total_refs=0`
+  是否意味着引用计数统计在丢页路径上没被维护）。
+
+**下一轮任务据此更正为**（**取代** §10.62 的第 1 条）：
+1. 读 `evict-mmap` 测试的 `mmap` 调用，确认映射类型；
+2. 顺着 `[BCACHE] no evictable page` 的判定条件往回查：为什么 `valid=2000` 却判定无可回收；
+3. 再把 §10.62 第 2 条（落地 UFFD 双重注册测试）接在其后。
+
+**这一条也说明 `fail()` 的设计有问题**：它无条件打印 `errno`，于是**大量与 errno 无关的
+断言失败都会带上一段误导性的 errno 文本**——本次就差点因此把排查方向带偏（先信了 `EEXIST`
+整整一节）。要么让它区分「系统调用失败」与「断言失败」，要么在断言类失败时不打印 errno。
+这本身是个应当单独修的小缺陷。
