@@ -782,6 +782,12 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
         if (pfn_valid(pfn))
             arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
     }
+    /* TEMP (docs 10.53): log EVERY install -- va, class, flags -- so the
+     * runtime tells us which path put the faulting page there, instead of
+     * guessing.  Grep the crashing stval to get that page's whole history. */
+    kerr("[MM-INS] va=%lx cls=%d flags=%lx W=%d cow=%d\n",
+         (unsigned long)addr, (int)cls, (unsigned long)flags,
+         (int)((flags & PTE_W) != 0), (int)((flags & PTE_COW) != 0));
     *pte = arch_pte_leaf(pa, flags);
     mm_pt_note_present(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
                        status_byte(cls, flags));
