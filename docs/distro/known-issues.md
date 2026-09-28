@@ -886,11 +886,39 @@ helper into IP6_FRAG_HLEN」。开启后：
 **写坏 pool**、**underflow 而非 overflow**（往 payload 之前写）、
 **在分配路径被发现**。
 
-**待确认**：QEMU 的 user-mode 网络默认不转发 IPv6 分片，因此 guest 是否真的
-收到过分片需要实测（可考虑本机主动构造分片，或临时在 guest 内 ping 一个
-会触发 PMTU/分片的路径）。若确认，则修法是二选一——把 `IPV6_FRAG_COPYHEADER`
-改回 0（需先解决其 64 位断言），或给 `force` 路径补上与连续型分支等价的
-边界检查。
+**已证伪（保留记录）**：上面的 `ip6_frag` 假设经实测**不成立**。以
+`LWIP_IPV6_FRAG=0`（其余配置不变、canary 保持开启）重建并运行 xfce 桌面，
+panic 原样复现：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+[3] a20_lwip_process_netif_rx_tx_locked
+[2] pbuf_alloc
+[1] do_memp_malloc_pool_fn
+[0] mem_overflow_check_raw
+```
+
+与开启分片时的栈完全一致，因此写坏内存的**不是** IPv6 分片重组。
+附带一条观测：该次 panic 出现在**启动期**（elogind 刚起来，桌面未起），
+说明损坏在**首次网络活动**时就已经存在，而不是桌面负载才触发。
+
+**canary 语义的精确含义**（`memp.c:130` 传入 `payload = element + MEMP_SIZE`，
+即 `struct memp` 之后的 8 字节对齐偏移）：
+
+- BEFORE 保护区 = `[payload - 16, payload)`，其中 8 字节落在**前一个元素**的
+  payload 尾部，另外 8 字节是本元素的 `struct memp` 空闲链表指针；
+- 保护区在 free 时填 `0xcd`、alloc 时校验，所以 alloc 期报错意味着
+  「该元素被 free 之后，仍有代码往它的 payload 起始处回写」。
+
+结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
+`PBUF_POOL` payload 的尾部，落在下一个元素的头部。
+
+**顺带发现的独立缺陷**（非本 panic 的成因，尚未修）：
+`lwip_stack.c` 的 RX 循环只用 `len <= 0` 挡住了 `recv()` 的错误返回，
+**没有上界校验**；`len` 随后原样进入 `pbuf_take(p, st->rx_frame, (u16_t)len)`。
+若某个 `recv` 实现返回大于 `sizeof(rx_frame)`（1536）的长度，
+`pbuf_take` 会越过 1536 字节的 `rx_frame` 读取。当前各 `recv` 实现均未观察到
+越界返回，故尚未触发，但这是一处真实的边界缺失，应补上裁剪。
 
 **仍未定案**：到底是哪一个缓冲区越界写了。canary 只给出方向（低端越界、
 > 落在 PBUF_POOL 相邻元素），不给身份。下一步应从 pool 元素尺寸与
