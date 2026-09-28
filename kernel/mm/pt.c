@@ -737,6 +737,34 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
 }
 
 /*
+ * Refresh the permissions recorded for a leaf that mm_pt_provision_anon()
+ * reserved but that has never been faulted, so it has no PTE yet.
+ *
+ * mprotect() only rewrites permissions through the PTE, which for such a page
+ * does not exist -- without this the status would keep the permissions the
+ * range was created with and a later fault would install those instead of the
+ * ones mprotect was asked for.  A present leaf needs nothing: its effective
+ * permissions live in the PTE, which mprotect already updated.
+ */
+int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
+{
+    if (!table)
+        return -EINVAL;
+    pt_meta_t *m = mm_pt_meta(table);
+    if (!m)
+        return 0;
+    uint8_t *slot = cls_slot(m, idx);
+    if (!slot)
+        return 0;
+    uint8_t cls = MM_ST_GET_CLASS(*slot);
+    if (cls != MM_ST_ANON_VIRT)
+        return 0;
+    *slot = (uint8_t)((MM_ST_CLS_BYTE(cls) & (uint8_t)~MM_ST_PROT_MASK) |
+                      mm_pt_prot_bits(ptef));
+    return 0;
+}
+
+/*
  * MM_AS_ANON_PROVISION -- eagerly mark an anonymous range as reserved.
  *
  * Mirrors the paper's on-demand paging (SS4.3): mmap records, per PTE, that

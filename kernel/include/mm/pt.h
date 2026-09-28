@@ -279,6 +279,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
 int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
                         pte_t flags);
+int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef);
 
 /*
  * Eagerly provision an anonymous range: build the page-table path and mark
