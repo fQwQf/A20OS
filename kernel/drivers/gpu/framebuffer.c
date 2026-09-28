@@ -171,7 +171,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (r < 0) {
         while (mapped > 0) {
             mapped -= PAGE_SIZE;
-            pt_unmap(mm, addr + mapped);
+            pt_unmap(mm->pgdir, addr + mapped);
         }
         spin_unlock(&mm->lock);
         arch_tlb_flush();
@@ -182,7 +182,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (!vma) {
         while (mapped > 0) {
             mapped -= PAGE_SIZE;
-            pt_unmap(mm, addr + mapped);
+            pt_unmap(mm->pgdir, addr + mapped);
         }
         spin_unlock(&mm->lock);
         arch_tlb_flush();
@@ -354,7 +354,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             if (r < 0) {
                 while (mapped > 0) {
                     mapped -= PAGE_SIZE;
-                    pt_unmap(curr->mm, va + mapped);
+                    pt_unmap(curr->mm->pgdir, va + mapped);
                 }
                 spin_unlock(&curr->mm->lock);
                 arch_tlb_flush();
@@ -365,7 +365,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             if (!vma) {
                 while (mapped > 0) {
                     mapped -= PAGE_SIZE;
-                    pt_unmap(curr->mm, va + mapped);
+                    pt_unmap(curr->mm->pgdir, va + mapped);
                 }
                 spin_unlock(&curr->mm->lock);
                 arch_tlb_flush();
