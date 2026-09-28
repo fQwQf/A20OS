@@ -721,6 +721,20 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
         }
     }
     rw_mutex_write_unlock(&bc->writeback_lock);
+
+    /*
+     * Commit the device's volatile write cache.  The writes above returned
+     * once the data reached the device, which a device with a write cache can
+     * still lose on power failure; this is what makes fsync() mean "durable".
+     * Must follow the data and stay outside bc->lock.  A device with no flush
+     * op cannot honour fsync -- see block_dev_t.flush.
+     */
+    if (!first_error && bc->dev && bc->dev->flush) {
+        a20_perf_count(A20_PERF_BLOCK_FLUSHES);
+        int flush_ret = bc->dev->flush(bc->dev);
+        if (flush_ret < 0)
+            first_error = flush_ret;
+    }
     return first_error;
 }
 

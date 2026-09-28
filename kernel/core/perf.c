@@ -42,6 +42,7 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_PCACHE_FULL_OVERWRITE_SKIPS] =
         "pcache_full_overwrite_skips",
     [A20_PERF_PCACHE_WRITEBACK_IOS] = "pcache_writeback_ios",
+    [A20_PERF_BLOCK_FLUSHES] = "block_flushes",
     [A20_PERF_PCACHE_WRITEBACK_PAGES] = "pcache_writeback_pages",
     [A20_PERF_PCACHE_WRITE_UPDATES] = "pcache_write_updates",
     [A20_PERF_PCACHE_WRITE_UPDATE_PAGES] =

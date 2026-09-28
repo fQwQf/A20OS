@@ -1058,9 +1058,10 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "%d\n", MAX_FILES);
         break;
     case PF_PRESSURE:
-        /* /proc/pressure: real CPU PSI from scheduler contention (psi.c);
-         * memory and I/O stall sources are not instrumented, so those lines
-         * report the accounted zero-stall baseline in the same "some" format. */
+        /* Single flat file, not Linux's cpu|memory|io subdirectory layout.
+         * CPU PSI is measured from scheduler contention; the mem and io
+         * lines are structurally zero because all A20OS device I/O is
+         * synchronous (see kernel/core/psi.c for the full argument). */
         if (bufsz < 128) return 0;
         {
             char tmp[64];

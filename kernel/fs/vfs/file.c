@@ -290,19 +290,16 @@ int vfs_sync(void)
     return 0;
 }
 
-int vfs_fsync(int fd)
+int vfs_fsync_vfile(vfile_t *vf)
 {
-    vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf)
         return -EBADF;
     int r = 0;
     if (vf->vnode) {
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
-        if (pc_r < 0) {
-            vfs_put_file_ref(fd, vf);
+        if (pc_r < 0)
             return pc_r;
-        }
         /* A filesystem-provided sync scopes the block-cache flush to this
          * vnode's own data and allocation metadata instead of flushing the
          * whole mount (which makes one fsync pay for every concurrent
@@ -314,6 +311,15 @@ int vfs_fsync(int fd)
             r = bcache_sync_checked((bcache_t *)vf->vnode->mnt->fs_data);
         }
     }
+    return r;
+}
+
+int vfs_fsync(int fd)
+{
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf)
+        return -EBADF;
+    int r = vfs_fsync_vfile(vf);
     vfs_put_file_ref(fd, vf);
     return r;
 }
