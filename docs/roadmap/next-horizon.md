@@ -1,18 +1,26 @@
 # 下一阶段生态纵深评估（2026-09 记录）
 
-本文记录四个大型方向的现状、成本评估与建议切入点。均为多日级工程，
-本次改进周期未实现，此处给出事实基础与路径，供后续迭代使用。
+本文记录大型方向的现状、成本评估与建议切入点。多数为多日级工程；条目
+自身标注了「已落地」的部分给出实现事实与验证入口，其余给出成本与路径，
+供后续迭代使用。
 
-## 1. netfilter / 防火墙
+## 1. netfilter / 防火墙（第一切片已落地）
 
-- 现状：内核网络栈为 lwIP（kernel/net/lwip_stack.c 全局锁串行化），
-  无 netfilter/conntrack 任何痕迹（kernel/net 零匹配）。
-- 成本评估：框架级特性。最小可用切片是在 `a20_lwip_poll` 数据面的
-  ip4_input/ip4_output 进出点挂 hook 链（参考 `socket_alg.c` 的
-  AF_ALG 注册模式），先交付"规则表 + 丢弃/放行 + /proc/a20/netfilter
-  计数器"的可观察骨架，再谈 NAT/conntrack。估计 3-5 天。
-- 前置：无硬阻塞；hook 点须遵守 docs/net/network-lock-contract.md 的
-  deferred bottom-half 规则。
+- 现状：已实现可用的 IPv4 包过滤（`kernel/net/netfilter.c`）。hook 挂在
+  `a20_lwip_process_netif_rx_tx_locked`（进）与 `a20_lwip_linkoutput`（出），
+  即 `next-horizon.md` 当初评估的两个数据面点位。规则表 32 条，按方向、
+  协议、源/目的地址、源/目的端口匹配，每条独立可通配；accept/drop 判决；
+  每规则与全局计数器。
+- 控制面：`/proc/a20/netfilter`。读为策略+计数器+规则表，写接受
+  `add <rule>` / `del <n>` / `reset`。格式非法的规则被拒绝而非静默接受，
+  避免一次拼写错误悄悄放宽或收紧策略。
+- 启动时无规则、默认策略 accept，因此**未配置的机器行为与引入前完全一致**，
+  不会让既有部署回归。
+- 验证：`make smoke-netfilter`（`user/cmds/net/netfilter_test.c`）。除控制面
+  外，断言匹配 drop 规则的 UDP 发送**确实**让 `out_dropped` 增长——实测
+  `dropped=3 out_packets=3`，证明 hook 在真实数据面执行而非空过。
+- 仍缺：conntrack 与 NAT。二者需要跨包状态，是独立的一层，不在第一切片内。
+  在此之前，本过滤器只能做无状态丢弃，**不能**做端口转发或地址转换。
 
 ## 2. 树内动态链接 libc
 
@@ -32,6 +40,10 @@
 - 成本评估：journal 写入是正确性敏感工程（崩溃一致性），建议先做
   xattr 落盘（ext4 的 EA 块/inode 内联，1-2 天，可测试性好），
   journal 写入单独立项（一周级，需要断电/崩溃注入测试基础设施）。
+- 前置已就位：块层现在有真实的设备 flush（见
+  [../security/hardening.md](../security/hardening.md) 的「存储持久性」），
+  因此崩溃注入测试有了一个可断言的落点；此前 `fsync()` 连设备都到不了，
+  断电测试无从判断成败。
 - ACL 依赖 xattr 先行。
 
 ## 4. 电源管理
