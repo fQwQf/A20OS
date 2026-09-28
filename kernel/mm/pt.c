@@ -902,7 +902,15 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
  * Default is unchanged (MM_ANON_PROVISION_MAX_PAGES).  a20.anonprov=0 disables
  * provisioning entirely, which is the other arm of the experiment.
  */
-static uint32_t g_anon_prov_max;   /* off by default; a20.anonprov=N enables */
+/* Default cap.  Off unless a build asks for it via
+ * -DCONFIG_ANON_PROV_DEFAULT=<n>; a20.anonprov=<n> overrides at boot, which is
+ * how riscv64 drives the A/B.  x86_64 gets no command line at all, so its
+ * experiments are built with different defaults and interleaved. */
+#ifdef CONFIG_ANON_PROV_DEFAULT
+static uint32_t g_anon_prov_max = CONFIG_ANON_PROV_DEFAULT;
+#else
+static uint32_t g_anon_prov_max;      /* off by default */
+#endif
 
 void mm_pt_anon_prov_init(void)
 {
