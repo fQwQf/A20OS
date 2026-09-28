@@ -953,3 +953,10 @@ docs:
 check-envelope-coverage:
 	@$(PYTHON) tools/gensync.py envelope-coverage \
 		--file docs/research/verification/envelope_coverage.md
+
+
+# The binaries the native stamp rule requires.  make owns this list so the gate
+# and the build cannot disagree about what "built" means.  This is exactly
+# the set the shell rule tested; the Makefile defines more NATIVE_*_BIN vars
+# for other purposes and those are deliberately not part of the gate.
+NATIVE_BINS = $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_UEDUD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
