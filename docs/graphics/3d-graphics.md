@@ -32,7 +32,7 @@
 | 命令流提交 | ⚠️ **往返已验证，语义未验证** | `EXECBUFFER accepted a 16 byte stream` 只证明命令流送到 host 并拿到应答；内核不解析命令流，因此**不证明渲染了任何东西**（[gpu-3d-roadmap.md §7](gpu-3d-roadmap.md)） |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），**未与 legacy `DRM_IOCTL_VIRGL_*` 混淆**（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
 | `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**。根因是宿主 `libvirglrenderer1 1.1.0` 太老（capset 仅 308 字节；现代 virgl 是数 KB），建不出 Mesa 25.2 需要的离屏 desktop GL context。四种 display×EGL 组合均失败，见 [gpu-3d-roadmap.md §5](gpu-3d-roadmap.md)。非内核缺陷 |
-| stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。**宿主 renderer 升级工具已落地但尚未运行**（需要 root + 四个缺失 apt 包），因此这条不得当作已解决（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
+| stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。**宿主 renderer 已从 1.1.0-2 换成自建的 1.3.0**（`tools/build-virglrenderer.sh`，`fca72f5f`），但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`：NVIDIA EGL 下静默降级为 2D，强制 Mesa EGL 则 `eglInitialize failed`。因此这条**仍未解决**，且卡点已收窄到宿主 EGL/GBM 平台选择（见 gpu-3d-roadmap.md §5.1）（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
 | guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。**即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住**（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
 | DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。**`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念**，见 §8.1 |
 | KMS 对象模型 | ✅ **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
@@ -268,7 +268,7 @@ boot 日志应出现：
 | `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-riscv64`） |
 | `user/cmds/core/egl_test.c` | **不参与构建**（被 `user/Makefile` 从 `LOCAL_CMD_SRCS` filter 掉），死代码 |
 | `tools/check-drm-abi.sh` | DRM UAPI 门禁：ioctl 号 + 结构体布局对 Linux UAPI 双向可证伪（§8.1） |
-| `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer ≥ 0.11 构建（**需要 root，尚未运行**） |
+| `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer 构建（**已运行**，装出 1.3.0；Mesa 仍因宿主 EGL 未 attach） |
 | `tools/a20_preflight.py` | 启动前宿主资源门禁（RAM/负载/磁盘） |
 | `docs/graphics/gpu-3d-roadmap.md` | 路线图与排序论证 |
 | `docs/graphics/real-hardware-gpu.md` | 真机 GPU 的现实边界（scanout vs 3D 加速） |
