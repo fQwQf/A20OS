@@ -697,6 +697,11 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 | UAPI 门禁可失败 | 改坏 `MODE_RMFB` / 从 `drm_mode_fb_cmd` 删一个字段 | — | 两个方向实测均退出非零 |
 | 新镜像干净 | `e2fsck -fn build/images/xfce-x86_64.img` | 刚构建 | 5 个 pass 全过 |
 | 脏镜像被拒绝启动 | 破坏组描述符表后 `tools/a20 run xfce-x86_64` | — | `ed4bf66f`（拒绝并列出错误；`A20_PREFLIGHT_SKIP_FSCK=1` 可放行） |
+| 镜像检查不被资源开关关掉 | `A20_PREFLIGHT=0 tools/a20 run xfce-x86_64`（脏镜像） | — | `ef26f1d6`（仍拒绝）；`A20_PREFLIGHT=0 A20_PREFLIGHT_SKIP_FSCK=1` 放行 |
+| 局部 present 可用 | 随 gpu3d 门禁与桌面回归覆盖 | `drm_present_buffer_at()` 裁剪到扫描-out | `0cac968c`（门禁 PASS） |
+| 私有 3D ABI 已删除且门禁仍可失败 | `tools/a20 test smoke-gpu3d-riscv64` / 同上 `GPU_3D=0` | `ARCH=riscv64` | `62b6b17f`（正向退出 0；反向退出 1，日志为 `virtio-gpu 2D only (no VIRGL feature)` + `SKIP`） |
+| drvmod 模块变体仍可编译 | `make ARCH=riscv64 BOARD=qemu-virt-riscv64 kernel-only DRIVER_DEPLOYMENT=generic` | 通用 profile | `62b6b17f` |
+| `strace` 可解析进 world | `tools/a20 build xfce-x86_64` | `xfce.world`，Alpine v3.23 | `7164a94d`（安装 `strace 6.17-r0`，包数 519 → 522） |
 
 **未运行的**：`tools/build-virglrenderer.sh build`（需 root + 4 个 apt 包，见 §5.1）。
 因此**"stock Mesa `virtio_gpu_dri.so` 能挂上"至今没有任何证据**，既不支持也不反对。
