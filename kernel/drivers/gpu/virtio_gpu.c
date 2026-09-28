@@ -123,13 +123,11 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     inst->desc[slot].flags = VIRTQ_DESC_F_NEXT;
     inst->desc[slot].next  = resp_slot;
     
-    // Descriptor for response (device-write)
     inst->desc[resp_slot].addr  = va_to_pa(inst->command_resp);
     inst->desc[resp_slot].len   = (uint32_t)resp_len;
     inst->desc[resp_slot].flags = VIRTQ_DESC_F_WRITE;
     inst->desc[resp_slot].next  = 0;
     
-    // Flush descriptors to device
     arch_dma_sync_for_device(&inst->desc[slot], sizeof(virtq_desc_t));
     arch_dma_sync_for_device(&inst->desc[resp_slot], sizeof(virtq_desc_t));
     arch_dma_sync_for_device(inst->command_req, req_len);
@@ -142,14 +140,12 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     arch_dma_sync_for_cpu(&inst->used, sizeof(inst->used));
     uint16_t used_before = ((volatile virtq_used_t *)&inst->used)->idx;
 
-    // Put request descriptor into avail ring
     uint16_t avail_slot = inst->avail.idx % VIRTIO_GPU_QUEUE_SIZE;
     inst->avail.ring[avail_slot] = slot;
     wmb();
     inst->avail.idx++;
     wmb();
     
-    // Sync avail ring updates to device
     arch_dma_sync_for_device(&inst->avail, sizeof(inst->avail));
     
     // Notify device (queue 0 = controlq)
@@ -217,7 +213,6 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
         return -1;
     }
     
-    // Consume the used entry
     uint16_t ring_idx = (uint16_t)(used_before % VIRTIO_GPU_QUEUE_SIZE);
     arch_dma_sync_for_cpu(inst->command_resp, resp_len);
     if (used->ring[ring_idx].id != slot) {
@@ -1104,7 +1099,6 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
     memset(pfn_to_virt(fb_pfn), 0, (size_t)PAGE_SIZE << order);
     arch_dma_sync_for_device(pfn_to_virt(fb_pfn), inst->fb_size);
     
-    // CREATE_2D
     struct virtio_gpu_resource_create_2d create ALIGNED(64);
     memset(&create, 0, sizeof(create));
     create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
@@ -1119,7 +1113,6 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
         resp.type != VIRTIO_GPU_RESP_OK_NODATA)
         goto fail;
     
-    // ATTACH_BACKING
     struct {
         struct virtio_gpu_resource_attach_backing req;
         struct virtio_gpu_mem_entry entry;
@@ -1136,7 +1129,6 @@ static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *tr
         resp.type != VIRTIO_GPU_RESP_OK_NODATA)
         goto fail;
     
-    // SET_SCANOUT
     struct virtio_gpu_set_scanout scanout ALIGNED(64);
     memset(&scanout, 0, sizeof(scanout));
     scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;

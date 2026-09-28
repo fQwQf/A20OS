@@ -398,7 +398,6 @@ static void virtio_blk_poll_inst(virtio_blk_inst_t *inst) {
     a20_perf_count(A20_PERF_VIRTIO_BLK_ACTIVE_POLLS);
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
-    /* LOCK_ORDER: acquire inst->lock (innermost) for completion polling. */
     uint64_t flags = spin_lock_irqsave(&inst->lock);
     if (inst->in_flight > 0)
         virtio_blk_complete_used_locked(inst, &wake_q);
@@ -587,7 +586,6 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         uint64_t flags = spin_lock_irqsave(&inst->lock);
-        /* LOCK_ORDER: inst->lock held while checking request completion. */
         if (inst->blk.valid)
             virtio_blk_complete_used_locked(inst, &wake_q);
         if (req->done) {
@@ -715,7 +713,6 @@ static int virtio_blk_rw(int idx, uint64_t lba, void *buf, size_t sectors, int w
         while (!req) {
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
-            /* LOCK_ORDER: acquire inst->lock (innermost) to allocate/submit a request. */
             uint64_t flags = spin_lock_irqsave(&inst->lock);
             req = virtio_blk_alloc_req_locked(inst, &wake_q);
             if (req) {
