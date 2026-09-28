@@ -308,68 +308,72 @@ DRM_CAP_ASYNC_PAGE_FLIP      0x7   DRM_CAP_DRAW_MESH          7
 **这不是 A20OS 的 bug，但会让人误判成 bug，因此必须记下来。**
 
 宿主（本机实测）：QEMU 10.0.13、`/dev/kvm` 存在、同时提供 `virtio-gpu-gl-pci`
-与 `virtio-gpu-gl-device`、两块 GPU（NVIDIA RTX 4060 + AMD Radeon 780M）。
-**能力早已具备，此前一个都没用上**：`GPU_3D=1` 之前所有 GUI 实例用的都是
-2D-only 设备（`virtio-gpu-device` / `virtio-gpu-pci`），host 从不提供
-`VIRTIO_GPU_F_VIRGL`，于是 3D ops 必然返回 `-ENXIO`、
-`VIRTGPU_PARAM_3D_FEATURES` 报 0。
-全树 `virgl=on` / `virtio-gpu-gl` 零命中。现在 `GPU_3D=1` 选择 `-gl-` 变体，
-2D 仍是默认值，因此没有任何既有调用发生变化。
+与 `virtio-gpu-gl-device`、两块 GPU（`renderD128` = **AMD** Radeon 780M，
+`renderD129` = NVIDIA RTX 4060）。**virglrenderer 已自建为 1.3.0**（见 §5.1）。
 
 ```bash
 make ARCH=riscv64 GPU_3D=1 QEMU_MEMORY=2G run-world-gui
 make ARCH=x86_64  GPU_3D=1 QEMU_MEMORY=4G run-world-gui
 ```
 
-`GET_CAPS` 在本机会失败：
+### 5.0 这里有两层独立的问题，不要混为一谈
+
+**第一层（已解决）：QEMU 根本不给 guest `VIRTIO_GPU_F_VIRGL`。**
+
+根因是 **display backend，不是 renderer 版本**。QEMU 的 `egl-headless` display 会
+在 render node 上初始化 EGL，而**本机这条 GBM/设备平台路径是坏的**：
+
+```
+qemu: egl: eglInitialize failed: EGL_NOT_INITIALIZED
+qemu: egl: render node init failed
+```
+
+（对照：同一时刻 `eglinfo -p surfaceless` **是成功的**，给出
+`AMD Radeon 780M (radeonsi, phoenix, LLVM 19.1.7)` / OpenGL 4.6；只有
+`eglinfo -p gbm` 拿不到 display。所以坏的**不是** EGL 整体，是 GBM/设备平台。）
+
+QEMU 对这个失败**不报错**，而是**静默交给 guest 一个 2D-only 设备**——这正是本项目
+此前多轮"3D 跑不起来"却看不出原因的地方。改用 **GLX 后端**即可绕开，因为本机
+GLX 工作正常（`glxinfo -B` → `AMD Radeon 780M (radeonsi, ...)`，OpenGL 4.6，
+direct rendering Yes）：
+
+| display | 现象 |
+|---|---|
+| `egl-headless`（本项目此前默认） | QEMU 静默降级 → guest `2D only (no VIRGL feature)` |
+| `gtk` | `The display backend does not have OpenGL support enabled`，设备起不来 |
+| **`gtk,gl=on`** | ✅ guest 报 `virtio-gpu 3D (virgl)`，`VIRTGPU_PARAM_3D_FEATURES=1` |
+
+`instances/smoke-gpu3d-riscv64.toml` 已改用 `gtk,gl=on`。**代价：门禁因此需要
+一个 X display**（`gtk,gl=on` 要 X），这对 CI 是真实成本，已写在实例注释里。
+
+**第二层（未解决）：`GET_CAPS` 仍回 `0x1205`。**
 
 ```
 [GPU] get_capset: resp=0x1205 want=0x1103 | sent ctx=1 idx=0 ver=1
                     | host idx=0 -> id=1 ver=1 size=308 (rc=0)
 ```
 
-`0x1205` = `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`。注意**我们发的参数与 host
-自己 advertise 的完全一致**（idx=0 → id=1 ver=1 size=308），所以这不是请求
-错误，而是 host 在 `virgl_renderer_get_capset()` 内部失败——它需要一个
-**离屏 desktop GL context**。
+`0x1205` = `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER`，且**我们发的参数与 host 自己
+advertise 的完全一致**，所以不是请求错，而是 host 在 `virgl_renderer_get_capset()`
+内部失败——它需要一个**离屏 desktop GL context**。**换成 1.3.0 之后仍然如此**，
+所以这不是 renderer 版本问题。
 
-display backend × EGL vendor 四种组合全试过，结论一致：
+### 5.0.1 更正一个被当成判据的假信号：`capset size=308`
 
-| display | EGL vendor | QEMU 表现 | `GET_CAPS` |
-|---|---|---|---|
-| `egl-headless` | 默认（NVIDIA） | 正常启动，`GETPARAM` 全对 | ❌ `0x1205` |
-| `gtk` | 默认（NVIDIA） | ❌ `The display backend does not have OpenGL support enabled` | 走不到 |
-| `gtk,gl=on` | 默认（NVIDIA） | 正常启动，GL 设备挂上 | ❌ `0x1205` |
-| `gtk,gl=on` | 强制 Mesa（`50_mesa.json`） | 正常启动 | ❌ `0x1205` |
+此前文档把 `size=308` 当作"renderer 是 2020 老版本"的**决定性线索**（理由是
+"现代 capset 是数 KB"）。**这个判据是错的**，现已实测推翻：
 
-**关键判据是第三行**：`-display gtk,gl=on` 已经给 display backend 开上了 GL，
-QEMU 也确实把 `-device virtio-gpu-gl-device` 挂上了，但 `GET_CAPS` 依然
-`0x1205`。所以"EGL vendor 选到 NVIDIA"只是**表层现象**，不是根因。
+- 换成自建的 **1.3.0** 之后，guest 读到的**仍然是** `capset[0] id=1 ver=1 size=308`。
 
-真正的根因指向 **virglrenderer 本身太老**：
+即 capset **1**（VIRGL）本身就只有 308 字节，与 renderer 新旧无关。真正能证明
+"新库是否生效"的判据是**加载了哪个文件**，不是 capset 大小：
 
-```
-libvirglrenderer1:amd64 1.1.0-2        # Debian 13，2020 年的版本
-[GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308
+```bash
+LD_DEBUG=libs qemu-system-riscv64 ... 2>&1 | grep "trying file=.*libvirglrenderer"
+# 期望： trying file=<repo>/tools/virgl/install/lib/x86_64-linux-gnu/libvirglrenderer.so.1
 ```
 
-`size=308` 是决定性线索：现代 virgl 的 capset 是**数 KB** 量级（里面要描述
-shader 能力、格式表、参数上限等），308 字节只能是极老的 renderer。1.1.0
-既没有现代 Mesa（25.2）所依赖的 virgl 协议演进，也建不出它需要的离屏
-desktop GL context，于是 `virgl_renderer_get_capset()` 失败并回
-`ERR_INVALID_PARAMETER`。
-
-**结论**：本机 virglrenderer 1.1.0 太老，无法为 Mesa 25.2 提供可用的 3D 通路。
-下列验证在本机**无法进行**，且**与 A20OS 内核无关**：
-
-- `GET_CAPS`（故 `gpu3d_test` 记为 NOTE/SKIP 而非 FAIL——它反映宿主能力）
-- stock Mesa `virtio_gpu_dri.so` 实际挂载
-- `GBM` / `A20_RENDERER=gl`
-- 像素回读（需要 host 真的执行渲染）
-
-**本机 apt 源里没有更新的版本**（Debian trixie 只有 1.1.0-2）。所以在本机只有
-两条路：**从源码编译 virglrenderer**，或者**换宿主/发行版**。这是环境动作，
-需要 root，不应由自动化代理擅自改动宿主机。
+这条实测通过（`522e8d9d`）。**下一次有人看到 308 不要再去重建 renderer。**
 
 ### 5.1 解锁工具：`tools/build-virglrenderer.sh`（**已运行，renderer 已升级**）
 
