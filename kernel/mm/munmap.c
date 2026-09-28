@@ -6,6 +6,7 @@
 #include "mm/vmo.h"
 #include "mm/fault.h"
 #include "mm/swap.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -270,6 +271,10 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             vma->file_fd = -1;
             mm_insert_vma(mm, vma);
             mm->total_vm += (map_end - map_start) / PAGE_SIZE;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            (void)mm_pt_provision_anon(mm, map_start, map_end,
+                                        mm_user_brk_pte_flags());
+#endif
         }
     }
     mm->brk = newbrk;

@@ -23,6 +23,7 @@
 #include "core/random.h"
 #include "proc/signal.h"
 #include "mm/frame.h"
+#include "mm/pt.h"
 #include "drivers/driver_descriptor.h"
 #ifdef CONFIG_ABI_NATIVE
 #include "ipc/start_info.h"
@@ -171,6 +172,13 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_insert_vma(mm, vma);
     mm->total_vm += (end - start) / PAGE_SIZE;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* Anonymous segments (.bss, and anon-mapped ELF parts) take the same
+     * on-demand path as mmap, so their leaves must be reserved here too --
+     * otherwise their first-touch faults would still need the VMA. */
+    if ((vm_flags & VM_ANON) && !(vm_flags & VM_SHARED))
+        (void)mm_pt_provision_anon(mm, start, end, pte_flags);
+#endif
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_vma_flush_deferred(mm);
     return 0;
