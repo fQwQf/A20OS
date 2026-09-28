@@ -420,22 +420,60 @@ def build_extra(a) -> int:
     return 0
 
 
+def build_release_disk(a) -> int:
+    """The release disk.img: a bare FAT32 root, no /lib/drivers or /musl tree.
+
+    Deliberately simpler than the dev FAT32 image -- this is the published
+    artifact, and the recipe never filtered *.o/*.so here, only the shell glob
+    hid dotfiles.  Both facts are load-bearing, so neither is "cleaned up".
+    """
+    img = REPO / a.disk_out
+    img.parent.mkdir(parents=True, exist_ok=True)
+    img.unlink(missing_ok=True)
+    must([a.mkfs_fat, "-C", "-F", "32", str(img), "131072"])
+
+    user_build = Path(a.user_build_dir)
+    for f in sorted(user_build.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        mcopy(str(img), str(f), f"::/{f.name}", overwrite=False)
+    for alias in ("sh", "bash"):
+        mcopy(str(img), str(user_build / "mksh"), f"::/{alias}")
+
+    mdir(str(img), "::/etc")
+    mdir(str(img), "::/lib")
+    if a.libgcc:
+        p = Path(a.libgcc)
+        if p.is_file():
+            mcopy(str(img), str(p), "::/lib/libgcc_s.so.1")
+    for text, dest in (("\n".join(shlex.split(a.protocols)) + "\n",
+                        "::/etc/protocols"),
+                       ("external\n", "::/etc/external-root")):
+        r = subprocess.run(["mcopy", "-o", "-i", str(img), "-", dest],
+                           cwd=REPO, input=text, text=True, check=False)
+        if r.returncode != 0:
+            raise SystemExit(r.returncode)
+    print(f"img: release disk written: {img}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
-                    choices=["fat32", "ext4", "extra", "copy", "verify-vbox"])
+                    choices=["fat32", "ext4", "extra", "release-disk", "copy",
+                             "verify-vbox"])
     for f in ("fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir",
               "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod",
               "driver-store", "libc", "libgcc", "protocols", "os-release",
               "test-txt", "src", "dst", "arch", "board", "abi", "bringup",
-              "nommu", "opt", "stamp", "extra-img", "extra-mb",
+              "nommu", "opt", "stamp", "extra-img", "extra-mb", "disk-out",
               "extra-staging-dir", "extra-dir", "extra-packages",
               "riscv-gcc-musl-libc", "riscv-glibc-lib-dir",
               "riscv-glibc-local-lib-dir", "ca-cert-bundle", "extra-dns"):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4, "extra": build_extra,
-            "copy": copy_image,
+            "release-disk": build_release_disk, "copy": copy_image,
             "verify-vbox": verify_vbox_rootfs}[a.command](a)
 
 
