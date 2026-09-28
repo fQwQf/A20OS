@@ -187,11 +187,11 @@ check-user-build: $(DEFAULT_USER_CHECK_TARGETS)
 check-user-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
 
 check-build-matrix: check-kernel-build check-user-build
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@$(PYTHON) tools/gates.py check-build-matrix
 	@echo "check-build-matrix: PASS"
 
 check-build-matrix-all: check-kernel-build-all check-user-build-all
-	@rg -q "BUILD_MATRIX_GATE_CONTRACT" docs/testing-gates.md
+	@$(PYTHON) tools/gates.py check-build-matrix-all
 	@echo "check-build-matrix-all: PASS"
 
 check-arch-boundary: smoke-arch-mmu-matrix
@@ -253,12 +253,7 @@ check-smp-platform-boundary:
 	@echo "check-smp-platform-boundary: PASS"
 
 check-abi-smoke-gate:
-	@rg -q "ABI_SMOKE_GATE_CONTRACT" docs/testing-gates.md
-	@rg -q "syscall_smoke" tools/targets-smoke.mk
-	@rg -q "smoke-abi-linux" tools/targets-smoke.mk
-	@rg -q "native-minimal" tools/targets-native.mk
-	@rg -q "native-test" tools/targets-native.mk
-	@rg -q "test_liba20c" user/tests/test_liba20c.c tools/targets-native.mk
+	@$(PYTHON) tools/gates.py check-abi-smoke-gate
 	@echo "check-abi-smoke-gate: PASS"
 
 # EXTERNAL_USERLAND_UPGRADE_CHECKLIST: run every gate group that must pass
@@ -278,17 +273,7 @@ check-doc-drift:
 	@echo "check-doc-drift: PASS"
 
 check-task-lifetime-boundary:
-	@rg -q "STEP35_TASK_LIFETIME_DIAGNOSTICS" kernel/include/proc/lifetime.h
-	@rg -q "proc_lifetime_note_task_init" kernel/proc/task.c
-	@rg -q "proc_lifetime_note_pid_add" kernel/proc/pid.c
-	@rg -q "proc_lifetime_note_wait_to_wake" kernel/core/sync.c
-	@rg -q "proc_lifetime_note_wake_remove" kernel/proc/park.c
-	@rg -q "proc_wait_timer_count_locked" kernel/proc/timer_heap.c
-	@rg -q "proc_current_lifetime_violations_locked" kernel/proc/current.c
-	@rg -q "PF_A20_TASK_LIFETIME" kernel/fs/procfs/procfs.c
-	@rg -q "TASK_LIFETIME_OWNERSHIP_AUDIT" docs/archive/task-lifetime-audit.md
-	@! rg -n --pcre2 '\bproc_find[[:space:]]*\(' kernel \
-		--glob '*.[ch]' --glob '!kernel/external/**'
+	@$(PYTHON) tools/gates.py check-task-lifetime-boundary
 	@echo "check-task-lifetime-boundary: PASS"
 
 check-blocking-point-boundary: smoke-proc-stress smoke-futex-stress
@@ -346,81 +331,23 @@ check-signal-exit-boundary: smoke-proc-stress
 	@echo "check-signal-exit-boundary: PASS"
 
 check-timeout-ownership-boundary: smoke-futex-stress smoke-timeout-test
-	@rg -q "TIMEOUT_OWNERSHIP_AUDIT" docs/archive/timeout-ownership-audit.md
-	@rg -Uq 'typedef struct wait_timer[^{]*\{[^}]*deadline[^}]*task[^}]*wait_seq' \
-		kernel/proc/timer_heap.c
-	@rg -q "PROC_PARK_PREPARE_TIMEOUT_CAPACITY" \
-		kernel/include/proc/park.h kernel/proc/park.c kernel/proc/timer_heap.c
-	@rg -q "wait_timer_duplicate_rejections" kernel/proc/timer_heap.c
-	@rg -Uq 'proc_try_wake_locked_common\([[:space:]]*t,[[:space:]]*expired\[i\]\.seq' \
-		kernel/proc/timer_heap.c
-	@rg -q "timeout_heap_violations" \
-		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -Fq "timeout-capacity+1 PASS" user/cmds/stress/lifetime_stress.c
-	@rg -q "FUTEX_STRESS: stale-timeout-isolation PASS" \
-		user/cmds/stress/futex_stress.c
-	@! rg -U --pcre2 \
-		'wait_timer_count[\s\S]{0,500}PROC_READY' kernel/proc/sched.c
+	@$(PYTHON) tools/gates.py check-timeout-ownership-boundary
 	@echo "check-timeout-ownership-boundary: PASS"
 
 check-smp-runqueue-boundary: smoke-sched-stress
-	@rg -q "SMP_RUNQUEUE_PREEMPT_AUDIT" \
-		docs/archive/smp-runqueue-audit.md
-	@rg -q "SMP_RUNQUEUE_PREEMPT_PROTOCOL" kernel/include/proc/proc.h
-	@rg -q "SMP_RUNQUEUE_MIGRATION_PROTOCOL" kernel/proc/sched.c
-	@rg -q "need_resched" kernel/proc/sched.c
-	@rg -Uq 'first = src_cpu < dst_cpu[\s\S]*RUNQ_LOCK_IRQ\(first\)[\s\S]*RUNQ_LOCK_IRQ\(second\)' \
-		kernel/proc/sched.c
-	@rg -q "proc_sched_safe_point" kernel/core/trap.c
-	@rg -q "proc_sched_tick" \
-		kernel/arch/riscv64/trap/irqchip.c \
-		kernel/arch/loongarch64/trap/irqchip.c
-	@rg -q "proc_sched_handle_reschedule_ipi" \
-		kernel/arch/riscv64/trap/irqchip.c \
-		kernel/arch/loongarch64/platform/smp.c
-	@! rg -n 'proc_yield' \
-		kernel/arch/riscv64/trap/irqchip.c \
-		kernel/arch/loongarch64/platform/smp.c \
-		kernel/arch/aarch64/trap/irqchip.c \
-		kernel/arch/x86_64/trap/irqchip.c
-	@rg -q "scheduler_violations" \
-		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -q "SCHED_STRESS: smp-runqueue PASS" user/cmds/stress/sched_stress.c
+	@$(PYTHON) tools/gates.py check-smp-runqueue-boundary
 	@echo "check-smp-runqueue-boundary: PASS"
 
 check-process-lock-split-boundary: smoke-sched-stress
-	@rg -q "PROCESS_LOCK_SPLIT_AUDIT" \
-		docs/archive/process-lock-split-audit.md
-	@rg -q "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN" kernel/proc/sched.c
-	@rg -Uq \
-		'task_t \*next = proc_runq_pick_local\(\);[\s\S]{0,2048}uint64_t flags = spin_lock_irqsave\(&proc_lock\)' \
-		kernel/proc/sched.c
-	@! rg -U --pcre2 \
-		'SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\s\S])*spin_lock_irqsave\(&proc_lock\)' \
-		kernel/proc/sched.c
-	@! rg -n 'proc_runq_pick_locked' kernel/proc kernel/include/proc
-	@rg -q "runqueue_parallel_pick_peak" \
-		kernel/include/proc/lifetime.h kernel/proc/lifetime.c
-	@rg -q "SCHED_STRESS: lock-split PASS" user/cmds/stress/sched_stress.c
+	@$(PYTHON) tools/gates.py check-process-lock-split-boundary
 	@echo "check-process-lock-split-boundary: PASS"
 
 check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
-	@rg -q "DOCS_AS_FACT_CONTRACT" docs/testing-gates.md
-	@rg -q "TEST_FIRST_ARCHITECTURE_MATRIX" docs/testing-gates.md
+	@$(PYTHON) tools/gates.py check-doc-test-gates
 	@echo "check-doc-test-gates: PASS"
 
 check-final-definition: check-doc-test-gates
-	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
-	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
-	@rg -q "TASK_REFERENCE_LIFETIME" kernel/include/proc/proc.h
-	@rg -q "VFS_REFCOUNT_HELPER_CONTRACT" kernel/include/fs/vfs.h
-	@rg -q "NATIVE_HANDLE_CAPABILITY_CONSISTENCY_MATRIX" kernel/include/ipc/handle_table.h
-	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
-	@rg -q "VFS_OPEN_DISPATCH_CONTRACT" kernel/include/fs/vfs.h
-	@rg -q "LINUX_ABI_PLACEHOLDER_RESOLUTION_CONTRACT" kernel/abi/linux/syscall_table.def
-	@rg -q "NATIVE_DEBUG_LIMITED_CONTRACT" kernel/abi/native/sys_phase2.c
-	@rg -q "DRIVER_CORE_CONCURRENCY_MODEL" kernel/drivers/core/driver_core.c
-	@rg -q "EXTERNAL_USERLAND_UPGRADE_CHECKLIST" docs/external-dependencies.md
+	@$(PYTHON) tools/gates.py check-final-definition
 	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
 
 check-riscv64-user:
@@ -451,37 +378,14 @@ check-release-build:
 	$(MAKE) all
 
 check-concurrency-foundation: smoke-smp-bringup
-	@rg -q "SCHEDULER_CONCURRENCY_PREREQS" kernel/proc/sched.c
-	@rg -q "SCHEDULER_CPU_OWNERSHIP" kernel/proc/sched.c
-	@rg -q "PER_CPU_CURRENT_VALIDATION" kernel/proc/current.c
-	@rg -q "TASK_STATE_MUTATION_CONTRACT" kernel/include/proc/proc.h
-	@rg -q "A20_PARK_WAKE_PROTOCOL" kernel/include/proc/park.h
-	@rg -q "WAIT_QUEUE_PARK_PROTOCOL" kernel/include/core/sync.h
+	@$(PYTHON) tools/gates.py check-concurrency-foundation
 	@$(MAKE) ARCH=$(ARCH) NR_CPUS=2 ALLOW_UNVERIFIED_SMP=1 BRINGUP=1 kernel-only >/dev/null
 	@echo "check-concurrency-foundation: PASS"
 
 check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
-	@rg -q "MM_LOCK_MODEL" kernel/include/mm/vm.h
-	@rg -q "MM_VMA_PTE_AUDIT" kernel/mm/vm.c
-	@rg -q "COW_FAULT_TLB_CONTRACT" kernel/mm/fault.c
-	@rg -q "DEMAND_FAULT_TLB_CONTRACT" kernel/mm/fault.c
-	@rg -q "MM_FORK_COW_REGRESSION_GUARD" kernel/mm/vm.c
-	@rg -q "MM_FORK_DEFERRED_STATE_REGRESSION_GUARD" kernel/mm/vm.c
-	@rg -q "child->deferred_vma = NULL;" kernel/mm/vm.c
-	@rg -q "MM_VMA_FORK_EXEC: PASS" user/cmds/stress/mm_stress.c
-	@rg -q "FILE_MMAP_PAGE_CACHE_CONTRACT" kernel/include/fs/page_cache.h
-	@rg -q "OOM_RECLAIM_LIFETIME_CONTRACT" kernel/include/mm/oom.h
-	@rg -q "MM_STRESS: PASS" user/cmds/stress/mm_stress.c
+	@$(PYTHON) tools/gates.py check-mm-lock-model
 	@echo "check-mm-lock-model: PASS"
 
 check-io-progress-model:
-	@rg -q "KERNEL_PROGRESS_SERVICE_CONTRACT" kernel/include/core/progress.h
-	@rg -q "IO_PROGRESS_SERVICE" kernel/core/progress.c
-	@rg -q "kernel_progress_run_bottom_halves\(\)" kernel/proc/sched.c kernel/proc/proc.c
-	@rg -q "kernel_progress_timer_tick\(\)" kernel/arch/riscv64/trap/irqchip.c kernel/arch/loongarch64/trap/irqchip.c kernel/arch/aarch64/trap/irqchip.c kernel/arch/x86_64/trap/irqchip.c
-	@rg -q "VIRTIO_BLK_COMPLETION_MODEL" kernel/drivers/block/virtio_blk.c
-	@rg -q "LWIP_NO_THREAD_PROGRESS_CONTRACT" kernel/net/lwip_stack.c
-	@rg -q "g_lwip_lock -> virtio-net nonblocking" kernel/include/core/lock.h
-	@! rg -q "virtio_blk_poll_all" kernel/proc/sched.c kernel/proc/proc.c
-	@! rg -q "a20_lwip_poll" kernel/proc/sched.c kernel/proc/proc.c
+	@$(PYTHON) tools/gates.py check-io-progress-model
 	@echo "check-io-progress-model: PASS"
