@@ -1653,3 +1653,49 @@ CPU 仍在它上面 fault（`status` 低位指向取指/访问类异常）。「
 验证：riscv64 / x86_64 / aarch64 构建通过；`smoke-mm-stress`、
 `smoke-mm-fork-exec-race` 通过，审计全 0（含 `safe=0`），`pt_pages=6` 不变；
 默认配置下 `mm_fault_from_status` 为 0，行为与改动前完全一致。
+
+### 10.22 定位 (b)：二分法，结论是 **mmap 预标记**那条路径
+
+崩溃只在「预标记开 + 状态路径可用」时出现，且 `a20.anonprov=0`（默认）时完全不崩
+（`mm_fault_from_status=0`、stress PASS、无 FATAL）。所以把范围收窄到：三个预标记调用点
+里哪一个在喂出坏状态。
+
+**先记一次我自己的方法错误**：前三次二分每次只关掉**一个**调用点、另两个仍然开着，
+所以那三次「关掉 brk 仍崩 / 关掉 ELF 仍崩 / 关掉 mmap 仍崩」**全都无效**——它们只说明
+「单独关掉某一个不足以消除崩溃」，不能推出「那个是无辜的」。我在这三次之后才发现自己
+每次都把前一个改动 `git checkout` 还原了，等于每次都在测「关掉一个、留着两个」。
+这与 §10.8「把热页当缺页」、§10.15「把脚本 bug 当内核回归」是同一类错误：**在把结论
+归因到某个组件之前，先确认实验装置真的只变了那一个变量。**
+
+**正确的二分**（关掉 ELF + brk、只留 mmap，`a20.anonprov=4096`）：
+
+| 配置 | 结果 |
+|---|---|
+| 三个全开 | FATAL |
+| 关 brk（ELF+mmap 仍开） | FATAL（无效实验） |
+| 关 ELF（brk+mmap 仍开） | FATAL（无效实验） |
+| 关 mmap（ELF+brk 仍开） | FATAL（无效实验） |
+| **只留 mmap（ELF+brk 关）** | **FATAL ← 复现** |
+| 三个全关 / 默认 `anonprov=0` | 无 FATAL |
+
+结论：**(b) 由 mmap 路径的预标记喂出**，与 ELF 段、栈/TLS、brk 无关。这也说明它不是
+「某个 VMA 分类错了」那类问题——那正是 ELF 的教训（§10.17）——而是 mmap 这条
+`mm_pt_provision_anon(mm, addr, addr + len, ptef)` 调用本身有问题。
+
+**尚未解释**：崩溃点仍落在 **brk** 地址上（`stval=0x807000`，`vma=[0x807000,0x808000)
+flags=0x13 pte_flags=0xd7 file_fd=-1`），而 brk 预标记此时是**关闭**的——状态路径不可能
+直接处理它。所以 mmap 预标记是通过**别的途径**间接破坏的（页表被写坏、某个帧被提前回收、
+或统计/引用计数失衡），而不是在 brk 上命中。这条线索指向
+`mm_pt_provision_anon()` 内部：它按 leaf table 为单位 `mm_addrspace_lock()` 后
+`mm_pt_note_present()` 逐项写状态，**与 §10.17 新加的 `mm_pt_retire_table()` / 宽限期回收
+、以及 `mm_pt_note_absent()` 里新增的清 safe 位都是同一批元数据写者**。
+
+**下一步应当做的具体检查**（未做，根因未定位）：
+1. 在 `mm_pt_provision_anon()` 里对 `[lo,hi)` 逐 leaf 校验 `table[idx]` 确实为 0，
+   遇到非 0 就计数上报——预标记**只应**写未被映射的槽位。
+2. 崩溃后 dump 出错页的 PT 页 `pfa.meta[pfn].pt` 是否已 `NULL`/`FRAME_F_PT` 被清，
+   以区分「页被提前回收」与「页表被写坏」。
+3. 确认 mmap 的 `ptef` 经 `status_byte()` 往返后与 VMA 实际权限一致（对照 §10.14 之外的
+   `mm_pt_prot_bits()` 编码宽度）。
+
+在 (b) 定位之前，**预标记必须保持默认关闭**，状态缺页路径因此仍然 inert。
