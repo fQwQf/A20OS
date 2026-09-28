@@ -78,22 +78,29 @@ AHCI（`FLUSH CACHE EXT`）。
    另一次 381751 = 381751）。`smoke-smp-lock-contention` 现在把这条不变量
    钉住（调用点 spin 合计须 ≥ 锁级的 90%），删掉归因即失败。
    锁级数字（`contended_acquires`/`contended_spins`）是直接计数，可信。
-   **但"具体是哪个调用点"目前不可信，不要据此设计分片。** 表里把
-   17 次 acquire 里的 16 次、几乎全部自旋（689073/689073）标到了
-   `net_vfile_read+0xf6`，而这个归因**我没能解释**：
-   `net_vfile_read()` 并不直接调 `a20_lwip_lock()`，它摸 `g_lwip_lock`
-   的唯一路径是 extern 的 `a20_lwip_poll()`（`socket_file.c:28`），
-   函数体里那些自旋锁全是**另一把** `g_net_lock`；`net_tcp_recved()`
-   也是 `socket_inet.c` 里的非 static extern。构建**没有开 LTO**
-   （用户态与内核编译参数里都没有 `-flto`），extern 跨编译单元不可能内联，
-   因此 `spin_lock_at()` 里 `__builtin_return_address(0)` 记下的返回地址
-   应当落在 `a20_lwip_lock`/`a20_lwip_poll` 里，而不是 `net_vfile_read`。
-   我也确认过 kallsyms 表里 `a20_lwip_lock`、`a20_lwip_poll`、
-   `net_vfile_read` 都**存在**，所以不是符号缺失导致的错配。
-   **在弄清这个标签之前，不能下"争用来自读路径"这种结论**，
-   更不能据此说"按 RX/TX 分片没用"——那正是本轮一度写下的推论，现予撤回。
-   要定位热点，下一步应先查清该标签的来源（怀疑与 kallsyms 归址、
-   `spin_lock_irqsave` 的 `caller_ra` 取值口径有关）。分片本身仍未完成。
+   **归因标签已查清（`3133c97d` 的撤回是错的，这里纠正回来）。**
+   `net_vfile_read+0xf6` = 0x2068，正是 `socket_file.o` 里
+   `call a20_lwip_poll`（0x2064）**之后的那条指令**，也就是一个返回地址。
+   `lwip_stack.o` 里 `a20_lwip_poll` 调的是 `spin_lock_at.constprop.0`
+   ——存在 `.constprop` 克隆说明 `caller_ra` 被常量折叠了：
+   `a20_lwip_lock` 与 `a20_lwip_poll` 同在 `lwip_stack.c`，GCC 在该编译
+   单元内可自由内联，`spin_lock_irqsave` 里的 `__builtin_return_address(0)`
+   于是被折成常量 0x2068。所以标签是**可信的**，指向读路径进入 poll 的
+   那个调用点。（之前怀疑"extern 跨单元不能内联"是错的：跨单元确实不能，
+   但这两个函数本就在同一单元。）
+
+   **但要点比"热点在读路径"更精确，必须分两半看：**
+   - **谁在发起争用（acquire 侧）**：socket 读路径。`net_vfile_read()`
+     在 `for(;;)` 里反复调 `a20_lwip_poll()`（`socket_file.c:28`），
+     数据没到就 park、醒来再 poll，是高频 acquire 方。
+   - **别人在为什么而自旋（hold 侧）**：`a20_lwip_poll_locked()` 在同一把
+     锁里做 `sys_check_timeouts()`、逐设备 `poll()`、以及
+     `a20_lwip_process_netif_rx_tx_locked()` 的**无界 `for(;;)` 收包排空**。
+     自旋时间消耗在这段排空工作上，属于收包路径。
+   所以原表述"争用来自读路径而非收包路径"把 acquire 方和 hold 方混为一谈，
+   已撤回。**真正的结构问题是：一个阻塞读会高频触发 whole-stack poll，
+   而 poll 在全局锁内跨越无界收包排空**——读路径与收包路径被同一把锁串在
+   一起，且排空长度无上界。分片本身仍未完成。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
