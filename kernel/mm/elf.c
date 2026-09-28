@@ -159,7 +159,7 @@ static uint64_t pte_to_vm_flags(pte_t pte_flags) {
 #endif
 
 static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
-                       uint64_t vm_flags, pte_t pte_flags) {
+                       uint64_t vm_flags, pte_t pte_flags, bool anon) {
     if (!mm) return 0;
     vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
     if (!vma) return -ENOMEM;
@@ -173,11 +173,16 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     mm_insert_vma(mm, vma);
     mm->total_vm += (end - start) / PAGE_SIZE;
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-    /* Anonymous segments (.bss, and anon-mapped ELF parts) take the same
-     * on-demand path as mmap, so their leaves must be reserved here too --
-     * otherwise their first-touch faults would still need the VMA. */
-    if ((vm_flags & VM_ANON) && !(vm_flags & VM_SHARED))
+    /* `anon` cannot be inferred from vm_flags: pte_to_vm_flags() stamps
+     * VM_ANON onto *every* file-backed segment, so a private RELRO segment
+     * arrives looking exactly like .bss (VM_ANON set, no VM_FILE bit -- its
+     * file_fd is only assigned after this returns).  Provisioning such a
+     * range made the fault path hand out anonymous zero pages instead of
+     * file content and killed exec with SIGSEGV, so the call site decides. */
+    if (anon && !(vm_flags & VM_SHARED))
         (void)mm_pt_provision_anon(mm, start, end, pte_flags);
+#else
+    (void)anon;
 #endif
     spin_unlock_irqrestore(&mm->lock, flags);
     mm_vma_flush_deferred(mm);
@@ -413,7 +418,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
         if (flags & PTE_X)
             arch_flush_icache_range(frame, PAGE_SIZE);
         r = elf_add_vma(mm, page, page + PAGE_SIZE,
-                        pte_to_vm_flags(flags), flags);
+                        pte_to_vm_flags(flags), flags, false);
         if (r < 0)
             return r;
         mm->rss++;
@@ -425,7 +430,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
     anon_start = ROUND_UP(anon_start, PAGE_SIZE);
     if (anon_start < end)
         return elf_add_vma(mm, anon_start, end,
-                           pte_to_vm_flags(flags), flags);
+                           pte_to_vm_flags(flags), flags, false);
     return 0;
 }
 #endif
@@ -557,7 +562,7 @@ static int map_segment(mm_struct_t *mm, pt_root_t *pgdir,
             arch_flush_icache_range(frame, PAGE_SIZE);
     }
     /* The exec image is not active on any CPU until exec_install_process(). */
-    return elf_add_vma(mm, start, end, pte_to_vm_flags(flags), flags);
+    return elf_add_vma(mm, start, end, pte_to_vm_flags(flags), flags, false);
 #endif
 }
 
@@ -584,7 +589,7 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
     *stack_top_out = stack_top;
     return elf_add_vma(mm, stack_bottom, stack_top,
                        VM_ANON | VM_READ | VM_WRITE | VM_STACK,
-                       mm_user_stack_pte_flags());
+                       mm_user_stack_pte_flags(), true);
 #else
     /* ASLR：栈顶在 [USER_STACK_FLOOR+初始栈, USER_STACK_TOP+PAGE) 窗口内
      * 向下随机偏移（页对齐）。窗口下界之外是固定 vDSO/vvar 与 TLS 区。 */
@@ -605,7 +610,7 @@ static int map_stack(mm_struct_t *mm, pt_root_t *pgdir, vaddr_t *stack_top_out) 
     *stack_top_out = stack_top;
     return elf_add_vma(mm, stack_bottom, stack_top,
                        VM_ANON | VM_READ | VM_WRITE | VM_STACK,
-                       mm_user_stack_pte_flags());
+                       mm_user_stack_pte_flags(), true);
 #endif
 }
 
@@ -678,7 +683,7 @@ static int setup_tls(mm_struct_t *mm, pt_root_t *pgdir,
     *tls_tp_out = tcb_va;
     return elf_add_vma(mm, tls_va,
                        tls_va + total_pages * PAGE_SIZE,
-                       VM_ANON | VM_READ | VM_WRITE, pte_flags);
+                       VM_ANON | VM_READ | VM_WRITE, pte_flags, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -808,7 +813,7 @@ static int elf_load_interp_from_fd(mm_struct_t *mm, pt_root_t *pgdir,
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
-        elf_add_vma(mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags());
+        elf_add_vma(mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
     }
 #endif
 
@@ -907,7 +912,7 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags());
+        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
     }
 #endif
 
@@ -1042,7 +1047,7 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags());
+        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
     }
 #endif
 
@@ -1219,7 +1224,7 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
-        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags());
+        elf_add_vma(&mm, base, max_va, VM_ANON | VM_READ | VM_WRITE | VM_EXEC, mm_user_brk_pte_flags(), true);
     }
 #endif
 
