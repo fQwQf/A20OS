@@ -24,9 +24,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 # A QEMU guest is not a memory hog in the steady state -- it only commits what
 # it touches -- but a desktop image under a KVM host will happily take most of
@@ -78,6 +80,7 @@ class Need:
     memory_bytes: int
     vcpus: int
     disk_path: str
+    image: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +191,61 @@ def _wait_budget() -> float:
         return DEFAULT_WAIT_SECONDS
 
 
+def check_guest_image(path: Path) -> list[str]:
+    """Report ext4 errors in a guest rootfs image that is about to be booted.
+
+    The guest images are created without a journal, so a run that does not shut
+    down cleanly -- which is the normal case, since these are booted with a
+    timeout and killed -- leaves on-disk metadata dirty.  The next boot then
+    starts from a filesystem with invalid group descriptor and inode checksums,
+    an orphaned inode list, and directory entries pointing into the unused
+    inode area.
+
+    That failure presents as the kernel being broken: udev workers time out and
+    get killed, cairo fails to create scaled fonts, and applications refuse to
+    start.  None of those are kernel bugs, and chasing them as such wastes a
+    lot of time, so the launch is refused instead.
+
+    Read-only and non-destructive: -f -n answers "what is wrong" without
+    touching the image.  Only the output is inspected, because e2fsck's exit
+    status alone does not distinguish a clean filesystem from one it merely
+    could not fully check.
+    """
+    if os.environ.get("A20_PREFLIGHT_SKIP_FSCK", "0").strip().lower() in {"1", "yes", "on"}:
+        return []
+    if not path.exists():
+        return []
+    if shutil.which("e2fsck") is None:
+        return []
+    proc = subprocess.run(
+        ["e2fsck", "-fn", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return []
+    interesting = [
+        line.strip()
+        for line in (proc.stdout + proc.stderr).splitlines()
+        if any(
+            marker in line
+            for marker in ("checksum", "orphaned", "unused inode", "cleared", "Fix?", "UNEXPECTED")
+        )
+    ]
+    if not interesting:
+        return []
+    return [
+        f"guest image {path.name} has filesystem errors:",
+        *(f"  {line}" for line in interesting[:4]),
+        "  it was left dirty by a previous run: these images have no journal and the"
+        " guest is normally killed at timeout rather than shut down.",
+        "  rebuild it with 'tools/a20 build <instance>' before booting"
+        " (or A20_PREFLIGHT_SKIP_FSCK=1 to boot it anyway)",
+    ]
+
+
+
 def gate(need: Need, *, stream=sys.stderr) -> Host:
     """Block until the host can host `need`, or raise PreflightError.
 
@@ -196,6 +254,11 @@ def gate(need: Need, *, stream=sys.stderr) -> Host:
     """
     if not _enabled():
         return sample(need.disk_path)
+
+    if need.image is not None:
+        dirty = check_guest_image(need.image)
+        if dirty:
+            raise PreflightError("\n".join(dirty))
 
     budget = _wait_budget()
     deadline = time.monotonic() + budget
