@@ -44,7 +44,7 @@ def in_place(label: str, target: str, cmd: list[str]) -> int:
 
 
 def to_temp(label: str, committed: str, out_name: str,
-            cmd: list[str]) -> int:
+            cmd: list[str], stale: str) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         # The generator writes more than one file; hand it the temp dir and
         # let it name its own outputs, then compare just the one under test.
@@ -59,8 +59,7 @@ def to_temp(label: str, committed: str, out_name: str,
         if filecmp.cmp(produced, target, shallow=False):
             print(f"{label}: PASS")
             return 0
-        print(f"{label}: rootfs overlay header is out of sync with its generator",
-              file=sys.stderr)
+        print(f"{label}: {stale}", file=sys.stderr)
         d = subprocess.run(["diff", "-u", str(target), str(produced)],
                            check=False, capture_output=True, text=True)
         sys.stderr.write(d.stdout)
@@ -102,7 +101,16 @@ def main() -> int:
     ovl.add_argument("--label", default="check-rootfs-overlay-generator")
     ovl.add_argument("--committed", required=True)
     ovl.add_argument("--out-name", default="rootfs_overlay.h")
+    ovl.add_argument("--stale", default="rootfs overlay header is out of sync with its generator")
     ovl.add_argument("generator", nargs=argparse.REMAINDER)
+
+    idl = sub.add_parser("a20-idl", help="a20idl.py output must match the committed header")
+    idl.add_argument("--label", default="check-a20-idl")
+    idl.add_argument("--idl", required=True)
+    idl.add_argument("--committed", required=True)
+    idl.add_argument("--out-name", required=True)
+    idl.add_argument("--stale", default="generated header is stale")
+    idl.add_argument("generator", nargs=argparse.REMAINDER)
 
     kal = sub.add_parser("kallsyms", help="gen_kallsyms.py, stub on failure")
     kal.add_argument("--generator", default="tools/gen_kallsyms.py")
@@ -113,6 +121,9 @@ def main() -> int:
     if a.cmd == "envelope-coverage":
         return in_place(a.label, a.file,
                         [sys.executable, "tools/gen_envelope_coverage.py"])
+    if a.cmd == "a20-idl":
+        argv = a.generator[1:] if a.generator[:1] == ["--"] else a.generator
+        return to_temp(a.label, a.committed, a.out_name, argv, a.stale)
     if a.cmd == "kallsyms":
         return kallsyms(a)
     # REMAINDER keeps the `--` separator itself; passing it on would make
