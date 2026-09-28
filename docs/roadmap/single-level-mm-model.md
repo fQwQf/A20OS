@@ -1323,3 +1323,94 @@ CPU 绑定（`taskset` 固定到独占核）、显著更多采样、并确认采
 
 至此关于预标记开/关的性能问题**仍然没有答案**，且这是测量方法问题而非实现问题。
 在拿到交错数据之前，不要再据这些数字改动设计（包括「保留还是关闭预标记」）。
+
+### 10.13 预标记上限改为可运行时切换（交错采样的前提）
+
+`MM_ANON_PROVISION_MAX_PAGES` 原先是编译期常量，导致 ON/OFF 两臂必须各自重新构建一次。
+在共享宿主上这本身就会引入漂移（§10.12），而交错采样（ON,OFF,ON,OFF,…）是让漂移对两臂
+对称的唯一办法——只要切换需要重新构建，交错就无从谈起。
+
+故新增 boot 参数 **`a20.anonprov=<pages>`**，扫描方式沿用 `mm/wx.c` 处理 `a20.wx=` 的
+既有风格（`kernel/mm/pt.c` 的 `mm_pt_anon_prov_init()`，由 `main.c` 在 `bootargs_init()`
+之后调用，与 `mm_wx_policy_init()` 相邻）。默认值仍是 `MM_ANON_PROVISION_MAX_PAGES`，
+`a20.anonprov=0` 关闭预标记。
+
+**已验证**（riscv64，`-append "a20.anonprov=N"` 经 DTB `/chosen/bootargs` 进入内核）：
+
+| 参数 | `mm_anon_provisioned` | 关机审计 |
+|---|---|---|
+| `a20.anonprov=4096` | 9277 | 全 0 |
+| `a20.anonprov=0` | **0** | 全 0 |
+
+两臂均无参数解析告警，MM-ASM 审计 `missing_meta/present/absent/prot/cow/vma/anon_virt`
+全 0；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`check-mm-lock-model` 通过；
+riscv64/x86_64/aarch64 与 riscv64/aarch64 NOMMU 构建通过。
+
+**x86_64 上该参数目前无效，且这是既有的独立缺口**：`arch_bootargs_get()` 在 x86_64 由
+`kernel/platform/qemu-virt-x86_64/board.c` 实现，读的是 QEMU **fw_cfg** 的
+`opt/cmdline`。实测无论用 `-append` 还是
+`-fw_cfg name=opt/cmdline,string=...`，内核都只看到
+`[FW_CFG] cmdline_size=0`、`cmdline=''`，即命令行根本没进内核。后果是 **`a20.wx=`
+在 x86_64 上也被静默忽略**，而 W^X 是安全相关策略——这比本次新增的参数严重得多，
+应单独修（需要弄清 fw_cfg 的 cmdline 文件为何在该启动路径下未被填充）。
+在此之前，x86_64 上的交错 A/B 仍不可行；riscv64 上可行。
+
+### 10.14 交错 A/B 的结果：预标记让 mmap 慢约 14%，且买不到任何东西
+
+用 §10.13 的运行时开关做**交错**采样（单次构建，6 对交替 ON,OFF,ON,OFF,…，
+riscv64/TCG + `taskset -c 12-15`）。因为每对的 ON 与 OFF 在时间上紧邻，逐对比值
+可以抵消 §10.12 那个「臂间漂移」：
+
+| 基准 | 逐对 OFF/ON 中位 | OFF 更快出现在 | 判定 |
+|---|---|---|---|
+| **mmap low** | **0.863** | **6/6 对** | **有效应：预标记使 mmap 慢约 14%** |
+| **mmap high** | **0.867** | **5/6 对** | 有效应：约 13% |
+| PF low | 0.922 | 4/6 对 | 无显著效应 |
+| PF high | 0.97 | — | 无效应 |
+| mmap-PF low / high | 1.09 / 0.94 | — | 无效应 |
+| unmap low / high | 0.993 / 1.01 | — | 无效应 |
+| unmap-virt low / high | 1.00 / 0.98 | — | 无效应 |
+
+10 项里 8 项落在 0.90–1.11（无效应），只有 mmap 两项明确落在带外，且 mmap low 是
+**6/6 对同向**（符号检验 p≈0.016）。这是本项目里第一份方法学可信的性能结论。
+
+**据此撤回三条此前结论**：
+
+1. §10.1「mmap 慢 1.5×」——**量级错了**。真实成本约 14%，不是 150%。
+2. §10.8「预标记让 PF 快 28%」——**不存在**。PF 逐对比值 0.92/0.97，方向不一致，
+   属噪声；当时那个 28% 是顺序 A/B 的臂间漂移造出来的。
+3. §10.8「关掉预标记 mmap 没变快（无效应）」——**也错了**。当时被噪声完全掩盖；
+   交错之后效应清晰可见。
+
+**净结论（这是决策依据）**：预标记当前让 mmap 慢约 14%，而**它服务的消费者
+（按状态缺页路径）仍是死代码**（§10.6，`mm_fault_from_status` 恒为 0）。也就是��
+**付出 14% 的 mmap 成本，换来零收益**——因为唯一能消费这些状态标记的 fault 路径从未
+执行过（§10.7 还说明即便修好查询，它的位置也绕过了 userfaultfd/共享/fault-around）。
+
+因此在修好状态路径之前，**预标记应当关闭**（默认 `a20.anonprov=0`），这是一个可以
+立刻回收 14% mmap 性能、且不损失任何现有功能的改动。它与 §10.7 记录的依赖顺序不冲突：
+预标记是那套设计的地基，但地基单独存在时是净负担。
+
+### 10.15 把预标记默认改为关闭，回收 14% mmap
+
+按 §10.14 的结论落地：预标记现在**默认关闭**，只有显式给出 `a20.anonprov=<pages>`
+才会启用（`g_anon_prov_max` 初值改为 0）。
+
+这一步不丢任何东西——地基（`mm_pt_provision_anon()` 及其在 mmap / ELF 匿名段 / brk
+三处的接线）全部保留在树里，开销只是那一个 boot 参数。改的只是**默认值**。
+
+**验证**（riscv64）：
+
+| 启动参数 | `mm_anon_provisioned` | MM-ASM 审计 | `mm_stress` |
+|---|---|---|---|
+| 无（默认） | **0** | 全 0 | PASS |
+| `a20.anonprov=4096` | 9277 | 全 0 | PASS |
+
+两臂均无参数解析告警；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、
+`check-mm-lock-model` 通过；riscv64 / x86_64 / aarch64 与 riscv64 NOMMU 构建通过。
+
+**一个过程教训**：第一次验证 opt-in 时我把 `-append` 的值放在未加引号的 shell 变量里，
+且带一个前导空格，QEMU 于是把 `a20.anonprov=4096` 当成磁盘镜像路径而直接退出，日志只有
+一行 `Could not open ...`。当时那个 `stress-pass: 0` 看起来像内核回归，其实是**我的测试
+脚本 bug**。这与 §10.8 那次「误把热页当缺页」是同一类错误：把工具链/脚本故障当成被测
+系统的结论。**在把一次失败归因于被测代码之前，先确认测试装置本身是对的。**
