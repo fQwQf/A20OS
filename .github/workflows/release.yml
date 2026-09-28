@@ -3,7 +3,10 @@
 # 一次性准备（仓库管理员）：
 #   Settings → Secrets → Actions → 新建 A20_REPO_SIGNING_KEY，
 #   内容为发布私钥 PEM（openssl genrsa 4096 生成；公钥随包仓库发布，见下）。
-#   未配置 secret 时流程仍可运行，但产物不签名并打印警告。
+#   未配置 secret 时默认**失败**。确实需要发布未签名产物（例如首次搭建仓库
+#   管理员的试跑）时，显式设置 ALLOW_UNSIGNED_RELEASE=1 才允许——因为 secret
+#   名字打错同样会走到"未配置"分支，静默发一个未签名的 release 比构建失败
+#   危险得多。
 #
 # TODO(publishing): 包仓库暂未发布到 Pages——原先的部署既与 pages.yml 抢同一个
 #   站点，又把 build/repo 拷进 site/ 源目录且从不执行 site/build.sh；见 docs/packaging/repository.md。
@@ -75,12 +78,18 @@ jobs:
               -out build/keys/a20os-release.rsa.pub 2>/dev/null
             echo "PKG_SIGN_KEY=build/keys/a20os-release.rsa" >> "$GITHUB_ENV"
             echo "PKG_KEY_NAME=a20os-release.rsa.pub" >> "$GITHUB_ENV"
-          else
-            echo "::warning::A20_REPO_SIGNING_KEY not set; packages and index will be UNSIGNED"
+          elif [ "${ALLOW_UNSIGNED_RELEASE:-}" = "1" ]; then
+            echo "::warning::ALLOW_UNSIGNED_RELEASE=1 -- artifacts will be UNSIGNED"
             echo "PKG_SIGN_KEY=" >> "$GITHUB_ENV"
+          else
+            echo "::error::A20_REPO_SIGNING_KEY is not set. Configure the repository"
+            echo "::error::secret, or set ALLOW_UNSIGNED_RELEASE=1 to publish unsigned"
+            echo "::error::artifacts deliberately. Refusing to publish unsigned."
+            exit 1
           fi
         env:
           A20_REPO_SIGNING_KEY: ${{ secrets.A20_REPO_SIGNING_KEY }}
+          ALLOW_UNSIGNED_RELEASE: ${{ vars.ALLOW_UNSIGNED_RELEASE }}
 
       - name: ccache
         uses: actions/cache@v4

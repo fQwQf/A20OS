@@ -2,10 +2,12 @@
 #
 # This file is the single source of truth for which loadable drivers exist,
 # which architectures each supports, and which ones are embedded into the
-# kernel root ramfs (early DriverStore, owning the boot disk).  `make
-# check-component-registry` cross-checks it against the build lists in
-# tools/driver-modules.mk; instances select runtime drivers by name through
-# [rootfs].drivers (see docs/instances.md).
+# kernel root ramfs (early DriverStore, owning the boot disk).  The per-arch
+# build lists the Makefile uses are generated from this file into
+# components/drivers.mk (`make regen-driver-fragment`); `make
+# check-component-registry` fails if that generated copy is stale.  Instances
+# select runtime drivers by name through [rootfs].drivers (see
+# docs/instances.md).
 
 [[driver]]
 name = "rtc"

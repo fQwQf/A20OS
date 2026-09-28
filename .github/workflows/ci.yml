@@ -21,6 +21,23 @@ jobs:
       - id: resolve
         run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
+  # 工具链层门禁：a20 工具本身与其数据。宿主侧纯 Python 且与架构无关，所以
+  # 不进容器、不做矩阵，排在所有重量级 job 之前。刻意不拉 submodule——这些
+  # 门禁只读 instances/、components/、tools/、Makefile 与 kernel/drvmod 的
+  # 源文件路径，不碰 user/external 与 kernel/external。
+  toolchain-gates:
+    name: toolchain-gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate instances, arch matrix and component registries
+        run: make check-manifests
+
+      - name: Unit tests for the a20 toolchain
+        run: make check-a20-tests
+
   build:
     name: build-${{ matrix.arch }}
     needs: buildenv-image

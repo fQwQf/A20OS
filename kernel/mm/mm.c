@@ -23,20 +23,18 @@ static inline size_t pt_level_size(int level) {
     return PAGE_SIZE << (ARCH_PT_BITS * level);
 }
 
-// 内存管理初始化函数
 void mm_init(void) {
     extern char _bss_end[];
     printf("[MM] mm_init begin\n");
-    pfa_init(va_to_pa(_bss_end)); // Buddy 物理页分配器
+    pfa_init(va_to_pa(_bss_end));
     printf("[MM] pfa_init done\n");
-    slab_init(); // Slab 对象分配器
+    slab_init();
     printf("[MM] slab_init done\n");
     printf("[MM] Buddy+Slab: %d frames, %d free (%d MB)\n",
            (int)pfa.total_frames, (int)pfa.free_frames,
            (int)(pfa.free_frames * PAGE_SIZE / 1024 / 1024));
 }
 
-// 分配一个物理帧并清零
 void *frame_alloc(void) {
     pfn_t pfn = pfa_alloc_page();
     if (pfn == PFN_NONE) return NULL;
@@ -52,7 +50,6 @@ void *frame_alloc_nz(void) {
     return pfn_to_virt(pfn);
 }
 
-// 释放一个物理帧
 void frame_free(void *addr) {
     if (!addr) return;
     pfn_t pfn = virt_to_pfn(addr);
@@ -60,14 +57,12 @@ void frame_free(void *addr) {
         pfa_free_page(pfn);
 }
 
-// 查询空闲物理帧数量
 size_t frame_free_count(void) {
     return pfa_free_count();
 }
 
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
-// 创建一个新的页表
 pte_t *pt_create(void) {
     pfn_t pfn = pfa_alloc(ARCH_PT_ROOT_ORDER);
     if (pfn == PFN_NONE)
@@ -108,7 +103,6 @@ static void pt_destroy_level(pte_t *table, int level) {
     pt_free_table(table, level);
 }
 
-// 递归销毁页表及其子页表
 void pt_destroy(pt_root_t *pgdir) {
     pt_destroy_level(pgdir, ARCH_PT_ROOT_LEVEL);
 }
@@ -254,7 +248,6 @@ int mm_debug_pte_value(pt_root_t *pgdir, vaddr_t va, uintptr_t *slot_out,
     return pte != NULL;
 }
 
-// 建立虚拟地址到物理地址的映射
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     pte_t *pte = pt_walk(pgdir, va, 1);
     if (!pte) return -ENOMEM;
@@ -339,7 +332,6 @@ static int pt_table_empty(pte_t *table, int level) {
     return 1;
 }
 
-// 取消虚拟地址的映射，并回收变空的中间页表页
 int pt_unmap(pt_root_t *pgdir, vaddr_t va) {
     pte_t *path[ARCH_PT_ROOT_LEVEL + 1];
     int idx_path[ARCH_PT_ROOT_LEVEL + 1];
@@ -429,7 +421,6 @@ int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
     return -EINVAL;
 }
 
-// 将虚拟地址转换为物理地址
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va) {
     vaddr_t base = 0;
     size_t size = 0;
@@ -448,7 +439,6 @@ void pt_map_kernel(pt_root_t *pgdir) {
     }
 }
 
-// 批量映射一段连续的虚拟地址范围
 int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t flags) {
     size = ROUND_UP(size, PAGE_SIZE);
     for (size_t off = 0; off < size; off += PAGE_SIZE) {
@@ -458,7 +448,6 @@ int pt_map_range(pt_root_t *pgdir, vaddr_t va, paddr_t pa, size_t size, pte_t fl
     return 0;
 }
 
-// 递归克隆指定层级的页表项
 static pte_t *pt_clone_level(pte_t *src, int level) {
     pte_t *dst = level == ARCH_PT_ROOT_LEVEL ?
         pt_create() : (pte_t *)frame_alloc();
@@ -496,13 +485,11 @@ static pte_t *pt_clone_level(pte_t *src, int level) {
     return dst;
 }
 
-// 克隆整个页表（从根节点开始）
 pte_t *pt_clone(pt_root_t *src_pgdir) {
     if (!src_pgdir) return NULL;
     return pt_clone_level(src_pgdir, ARCH_PT_ROOT_LEVEL);
 }
 
-// 递归销毁用户空间的页表项（不释放内核共享部分）
 static void pt_destroy_user_recursive(pte_t *table, int level) {
     if (!table) return;
     /* Only user half (0..255) lives at root; kernel half is shared
@@ -543,7 +530,6 @@ static void pt_destroy_user_recursive(pte_t *table, int level) {
     }
 }
 
-// 销毁用户空间页表
 void pt_destroy_user(pt_root_t *pgdir) {
     if (!pgdir) return;
     pt_destroy_user_recursive(pgdir, ARCH_PT_ROOT_LEVEL);
@@ -664,7 +650,6 @@ int user_buffer_segment(const void *user, size_t len, int write,
     return 0;
 }
 
-// 从用户空间拷贝数据到内核空间
 long copy_from_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
@@ -683,7 +668,6 @@ long copy_from_user(void *dst, const void *src, size_t n) {
     return (long)copied;
 }
 
-// 从内核空间拷贝数据到用户空间
 long copy_to_user(void *dst, const void *src, size_t n) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;
@@ -702,7 +686,6 @@ long copy_to_user(void *dst, const void *src, size_t n) {
     return (long)copied;
 }
 
-// 从用户空间拷贝字符串到内核空间
 long user_strncpy(char *dst, const char *src, size_t max) {
     task_t *t = proc_current();
     if (!t || !t->mm) return -EFAULT;

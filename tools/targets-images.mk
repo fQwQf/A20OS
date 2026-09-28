@@ -1,74 +1,37 @@
 
 $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building FAT32 image..."
-	@mkdir -p $(BUILD_DIR)
-	dd if=/dev/zero of=$(FAT32_IMG) bs=1048576 count=$(FAT32_IMAGE_MB)
-	$(MKFS_FAT) -F 32 $(FAT32_IMG)
-	@set -e; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		name=$$(basename "$$f"); \
-		mcopy -i $(FAT32_IMG) "$$f" "::/$$name"; \
-	done
-	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/sh
-	mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/mksh ::/bash
-	-mmd -i $(FAT32_IMG) ::/etc >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/lib >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/lib/drivers >/dev/null 2>&1
-	@for m in $(RUNTIME_DRVMOD_MODULES); do \
-		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$m ::/lib/drivers/$$m; \
-	done
-	@for u in $(DRIVER_STORE_USER_PACKAGES); do \
-		mcopy -o -i $(FAT32_IMG) $(USER_BUILD_DIR)/$$u ::/lib/drivers/$$u; \
-	done
-	-mmd -i $(FAT32_IMG) ::/musl >/dev/null 2>&1
-	-mmd -i $(FAT32_IMG) ::/musl/lib >/dev/null 2>&1
-	@[ -f user/external/musl/build-$(USER_VARIANT)/lib/libc.so ] && \
-		mcopy -o -i $(FAT32_IMG) user/external/musl/build-$(USER_VARIANT)/lib/libc.so ::/musl/lib/libc.so || true
-	@[ -n "$(LIBGCC_S_ARCH)" ] && [ -f "$(LIBGCC_S_ARCH)" ] && \
-		mcopy -o -i $(FAT32_IMG) "$(LIBGCC_S_ARCH)" ::/lib/libgcc_s.so.1 || true
-	@printf '%s\n' $(PROTOCOLS_LINES) | mcopy -o -i $(FAT32_IMG) - ::/etc/protocols
-	@printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' | mcopy -o -i $(FAT32_IMG) - ::/etc/os-release
-	@printf 'Hello from A20OS FAT32!\n' | mcopy -i $(FAT32_IMG) - ::/test.txt
+	@$(PYTHON) tools/img.py fat32 \
+		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
+		--user-build-dir "$(USER_BUILD_DIR)" --mkfs-fat "$(MKFS_FAT)" \
+		--runtime-drvmod "$(RUNTIME_DRVMOD_MODULES)" \
+		--driver-store "$(DRIVER_STORE_USER_PACKAGES)" \
+		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \
+		--libgcc "$(LIBGCC_S_ARCH)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' \
+		--test-txt 'Hello from A20OS FAT32!\n'
 
 
 $(FS_TEST_IMG): $(FAT32_IMG)
-	cp $(FAT32_IMG) $(FS_TEST_IMG)
+	@$(PYTHON) tools/img.py copy --src "$(FAT32_IMG)" --dst "$(FS_TEST_IMG)"
 
 .PHONY: ext4_img_only ext4_img
 
 ext4_img_only: $(EXT4_IMG)
 
-# Recursive gates can overlap builds that share BUILD_DIR.  Keep staging private
-# to each invocation and publish the image atomically while holding one lock.
 $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
-	@set -e; \
-	echo "Building ext4 image..."; \
-	mkdir -p "$(BUILD_DIR)"; \
-	lock="$(EXT4_IMG).lock"; \
-	exec 9>"$$lock"; \
-	flock 9; \
-	staging=$$(mktemp -d "$(EXT4_STAGING_DIR).XXXXXX"); \
-	tmp="$(EXT4_IMG).tmp.$$$$"; \
-	trap 'rm -rf -- "$$staging"; rm -f -- "$$tmp"' EXIT HUP INT TERM; \
-	for f in $(USER_BUILD_DIR)/*; do \
-		[ -f "$$f" ] || continue; \
-		cp "$$f" "$$staging/$$(basename "$$f")"; \
-	done; \
-	cp "$(USER_BUILD_DIR)/mksh" "$$staging/sh"; \
-	cp "$(USER_BUILD_DIR)/mksh" "$$staging/bash"; \
-	printf 'Hello from ext4!\nThis file is on the ext4 filesystem.\n' > "$$staging/test.txt"; \
-	mkdir -p "$$staging/etc"; \
-	printf '%s\n' $(PROTOCOLS_LINES) > "$$staging/etc/protocols"; \
-	printf 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' > "$$staging/etc/os-release"; \
-	dd if=/dev/zero of="$$tmp" bs=1048576 count=$(EXT4_IMAGE_MB); \
-	$(MKFS_EXT4) -F -O ^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index -d "$$staging" "$$tmp"; \
-	mv -f "$$tmp" "$(EXT4_IMG)"; \
-	rm -rf -- "$$staging"; \
-	trap - EXIT HUP INT TERM
+	@echo "Building ext4 image..."
+	@$(PYTHON) tools/img.py ext4 \
+		--ext4-img "$(EXT4_IMG)" --ext4-mb "$(EXT4_IMAGE_MB)" \
+		--ext4-staging-dir "$(EXT4_STAGING_DIR)" \
+		--mkfs-ext4 "$(MKFS_EXT4)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
 
 ext4_img: $(USER_BUILD_STAMP) ext4_img_only
-	cp $(EXT4_IMG) $(FS_TEST_IMG)
+	@$(PYTHON) tools/img.py copy --src "$(EXT4_IMG)" --dst "$(FS_TEST_IMG)"
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -104,19 +67,12 @@ $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot
 # otherwise make's timestamp graph can leave a bootable but stale userspace in
 # place after interrupted or manually-invoked sub-builds.
 $(BUILD_DIR)/.vbox-rootfs-verified: force_vbox_rootfs_verify $(FAT32_IMG) $(USER_BUILD_STAMP)
-	@set -e; \
-	tmp=$$(mktemp); \
-	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
-	cmp -s "$$tmp" "$(USER_BUILD_DIR)/init" || { \
-		echo "[VBOX] stale /init detected; rebuilding root filesystem"; \
-		rm -f $(FAT32_IMG); \
-		$(MAKE) ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) \
-			NOMMU=$(NOMMU) OPT="$(OPT)" $(FAT32_IMG); \
-		mcopy -i $(FAT32_IMG) ::/init "$$tmp"; \
-		cmp -s "$$tmp" "$(USER_BUILD_DIR)/init"; \
-	}; \
-	touch $@
+	@$(PYTHON) tools/img.py verify-vbox \
+		--fat32-img "$(FAT32_IMG)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--stamp "$@" \
+		--arch "$(ARCH)" --board "$(BOARD)" --abi "$(ABI)" \
+		--bringup "$(BRINGUP)" --nommu "$(NOMMU)" --opt="$(OPT)"
 
 $(VBOX_AARCH64_IMG): $(VBOX_AARCH64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified tools/mk_uefi_fat_image.sh
 	tools/mk_uefi_fat_image.sh $(VBOX_AARCH64_EFI) $@ $(FAT32_IMG)
@@ -141,13 +97,8 @@ $(KERNEL_NOSYMS_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	$(CC) $(LDFLAGS) $(KERNEL_OBJ) $(ASM_OBJ) $(ARCH_LIBS) -o $@
 
 $(KALLSYMS_SRC): $(KERNEL_NOSYMS_ELF) tools/gen_kallsyms.py
-	@mkdir -p $(dir $@)
-	@if $(PYTHON) tools/gen_kallsyms.py $< $@; then \
-	    echo "  KALLSYMS $@"; \
-	else \
-	    echo "  KALLSYMS skipped (configured Python unavailable)"; \
-	    echo '/* empty */' > $@; \
-	fi
+	@$(PYTHON) tools/gensync.py kallsyms \
+		--elf "$<" --out "$@"
 
 $(KALLSYMS_OBJ): $(KALLSYMS_SRC)
 	@mkdir -p $(dir $@)
@@ -168,13 +119,9 @@ BUILD_FLAGS_SIG := $(CC) $(CFLAGS) $(LDFLAGS)
 BUILD_FLAGS_STAMP := $(BUILD_DIR)/.build-flags
 
 $(BUILD_FLAGS_STAMP): FORCE
-	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(BUILD_FLAGS_SIG)' > $@.tmp
-	@if test -f "$@" && cmp -s "$@" "$@.tmp"; then \
-		rm -f "$@.tmp"; \
-	else \
-		mv -f "$@.tmp" "$@"; \
-	fi
+	@$(PYTHON) tools/stamps.py build-flags \
+		--stamp "$@" \
+		--build-flags-sig '$(BUILD_FLAGS_SIG)'
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
@@ -192,10 +139,11 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	find $(KERNEL_DIR) -name '*.o' -delete
-	rm -rf .kernel-build
-	rm -f kernel.elf kernel.bin fat32.img ext4.img
-	rm -f kernel-rv kernel-la disk.img disk-la.img
+	@$(PYTHON) tools/stamps.py clean \
+		--find-root "$(KERNEL_DIR)" \
+		--rm-rf .kernel-build \
+		$(foreach f,kernel.elf kernel.bin fat32.img ext4.img \
+			kernel-rv kernel-la disk.img disk-la.img,--rm-f $(f))
 	$(MAKE) -C user clean
 	$(MAKE) -f user/extra.mk clean 2>/dev/null || true
 
