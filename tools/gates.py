@@ -53,8 +53,15 @@ def expand(files: list[str]) -> list[str]:
 
 
 def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
-    """Return (ok, detail).  detail is empty when ok."""
-    argv = ["rg", "-q"]
+    """Return (ok, detail).  detail is empty when ok.
+
+    `rg_flags` carries the flags the original recipe needed.  Two of them are
+    load-bearing rather than cosmetic: `--pcre2` is required by the lookaround
+    patterns (rg's default Rust-regex engine cannot compile them), and `-U` is
+    required by the patterns that span lines, since without it rg matches
+    per-line and can never match at all.
+    """
+    argv = ["rg", "-q", *a.get("rg_flags", ())]
     if a.get("fixed"):
         argv.append("-F")
     argv.append(a["pattern"])
@@ -72,14 +79,13 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
     if matched == negate:
         # Positive + no match, or negated + match: the assertion is violated.
         if negate:
-            verb = "must not appear in"
-        else:
-            verb = "not found in"
-        if negate:
-            shown = subprocess.run(["rg", "-n"] + argv[1:] + (["-g", a["glob"]] if a.get("glob") else []),
-                                   cwd=REPO, check=False, capture_output=True, text=True)
-            return False, f"pattern {a['pattern']!r} {verb} {', '.join(files)}\n{shown.stdout}"
-        return False, f"pattern {a['pattern']!r} {verb} {', '.join(files)}"
+            shown = subprocess.run(
+                ["rg", "-n", *a.get("rg_flags", ()), a["pattern"], *files]
+                + (["-g", a["glob"]] if a.get("glob") else []),
+                cwd=REPO, check=False, capture_output=True, text=True)
+            return False, (f"pattern {a['pattern']!r} must not appear in "
+                           f"{', '.join(files)}\n{shown.stdout}")
+        return False, f"pattern {a['pattern']!r} not found in {', '.join(files)}"
     return True, ""
 
 
