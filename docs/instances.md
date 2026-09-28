@@ -204,6 +204,20 @@ description = "virtio network device"
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
 
+## 宿主侧门禁（不启动 guest）
+
+这几条不是 make 目标，但同样是"不能失败的检查不构成验证"这条规则的执行者。
+用法与边界见 [graphics/host-tools.md](graphics/host-tools.md)。
+
+| 脚本 | 作用 | 需要 root |
+|---|---|---|
+| `tools/check-drm-abi.sh` | 每个 DRM ioctl 号与结构体布局对 Linux UAPI 逐条比对，漂移时 exit 1 | 否 |
+| `tools/build-virglrenderer.sh check` | 报告宿主 QEMU、两版 virglrenderer、`/dev/dri/renderD128` 是否真的可访问 | 否 |
+| `tools/build-virglrenderer.sh build` | 构建宿主 virglrenderer ≥ 0.11 到 `tools/virgl/install`（Makefile 自动拾取） | **是** |
+| `tools/a20_preflight.py` | 不直接调用：`tools/a20 run/debug/test` 在启动前采样宿主 RAM/负载/磁盘，放不下就**等待**（`A20_PREFLIGHT=0` 跳过）。`tools/a20 check` 会校验它与 Makefile 默认值的副本未漂移 | 否 |
+
+`build/package/flash` 不启动 guest，因此不受 preflight 约束。
+
 ## apk world 镜像实例（用包管理组装用户态）
 
 `[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见
