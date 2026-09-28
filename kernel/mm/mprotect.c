@@ -159,10 +159,19 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * v->pte_flags below was updated anyway, and a later
                  * status-driven fault installed the stale permissions --
                  * leaving a PTE that disagreed with its own VMA. */
+                int declined = !pte;
                 if (pte) {
                     int idx = arch_pt_vpn(va, 0);
-                    mm_pt_refresh_absent_prot(pte - idx, idx, ptef);
+                    declined = mm_pt_refresh_absent_prot(pte - idx, idx, ptef) != 0;
                 }
+                /* TEMP (docs 10.49): widening to RW while the per-PTE status
+                 * keeps its old prot is exactly the divergence that leaves a
+                 * read-only PTE under a writable VMA (docs 10.48). */
+                if ((ptef & PTE_W) && declined)
+                    kerr("[MM-DIV] widened v[%lx,%lx) to RW but status NOT "
+                         "refreshed at va=%lx (pte=%d)\n",
+                         (unsigned long)v->start, (unsigned long)v->end,
+                         (unsigned long)va, (int)(pte != NULL));
                 va += PAGE_SIZE;
             }
         }
