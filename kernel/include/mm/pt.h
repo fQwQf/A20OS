@@ -189,6 +189,12 @@ int  mm_pt_defer_free(struct mm_struct *mm, pte_t *table, int level);
 /* Mark a detached subtree stale so a cursor that acquires it retries. */
 void mm_pt_mark_stale_recursive(pte_t *table, int level);
 
+/* Grace-period reclamation for detached PT pages; see the comment above
+ * mm_pt_retire_drain().  Callable from any context -- needs neither mm->lock
+ * nor a TLB transaction. */
+void mm_pt_retire_table(struct mm_struct *mm, pte_t *table, int level);
+void mm_pt_retire_drain(struct mm_struct *mm);
+
 /* ---- invariant auditing ---- */
 typedef struct mm_pt_audit_report {
     uint64_t pt_pages;

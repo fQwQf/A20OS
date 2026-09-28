@@ -463,7 +463,7 @@ void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
         paddr_t pa = 0;
         base = 0;
         size = 0;
-        if (pt_unmap_leaf(mm->pgdir, va, &pa, &base, &size, NULL) == 0) {
+        if (pt_unmap_leaf(mm, va, &pa, &base, &size, NULL) == 0) {
             if (pa) {
                 pfn_t pfn = phys_to_pfn(pa);
                 if (mapped_page) {
