@@ -84,6 +84,8 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
         return _run_exists(a)
     if a.get("build_must_fail"):
         return _run_build_must_fail(a)
+    if a.get("doc_refs"):
+        return _run_doc_refs(a)
 
     argv = ["rg", "-q", *a.get("rg_flags", ())]
     if a.get("fixed"):
@@ -137,6 +139,76 @@ def _run_exists(a: dict) -> tuple[bool, str]:
     missing = [f for f in a["exists"] if not os.access(REPO / f, os.R_OK)]
     if missing:
         return False, "missing required file(s): " + ", ".join(missing)
+    return True, ""
+
+
+# A doc may legitimately name a source file that does not exist: it was
+# deleted, it is planned, it is a build-generated path, or the sentence is
+# telling the reader to create it.  The docs already say so in Chinese at the
+# point of reference, so the gate reads that rather than requiring a second
+# hand-maintained list, which would rot.
+_REF = re.compile(
+    r"`((?:kernel|user|tools|packages|instances|components)/"
+    r"[A-Za-z0-9_./-]+\.(?:c|h|S|ld|mk|py|toml|md))(?::(\d+))?`")
+# Per-line: this reference is flagged as historical or hypothetical.
+_REF_MARKERS = ("已删除", "已退役", "已移除", "已迁移", "移除", "删除", "退役",
+                "不存在", "已取代", "曾用", "原内建", "规划", "尚未", "planned",
+                "retired", "deleted", "will be", "为例，新建", "举例",
+                "请新建", "自行创建")
+# Document-level: the whole page is an archive, so every ref in it is exempt.
+_DOC_MARKERS = ("已完全退役", "不是当前", "已归档", "历史")
+
+
+def _run_doc_refs(a: dict) -> tuple[bool, str]:
+    """Every source path a doc cites must still exist, or be marked exempt.
+
+    Keyword-presence assertions cannot see this class of drift: a renamed file,
+    a moved function and a stale complexity claim all leave the prose intact.
+    A keyword gate stays green through exactly the changes it exists to catch.
+
+    Scoped to fully-qualified paths only.  A bare `park.c` in prose is
+    shorthand, not a link, and there are hundreds of those; requiring them to
+    resolve would bury the signal.  Line numbers are checked against the real
+    file length, so a ref cannot outlive the code it points into.
+
+    A reference that does not resolve is only a failure when nothing marks it
+    as historical.  That keeps the gate self-maintaining: the annotation is
+    already what a careful author writes, and this makes it load-bearing.
+    """
+    roots = a.get("doc_roots", ["docs"])
+    skip = [f"{r}/" for r in a.get("doc_skip", ["docs/archive"])]
+    broken: list[str] = []
+    total = 0
+    for root in roots:
+        base = REPO / root
+        for path in sorted(base.rglob("*.md")):
+            rel = str(path.relative_to(REPO))
+            if any(rel.startswith(s) for s in skip):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            doc_exempt = any(m in "\n".join(lines[:14]) for m in _DOC_MARKERS)
+            for lineno, line in enumerate(lines, 1):
+                for m in _REF.finditer(line):
+                    total += 1
+                    ref, cited = m.group(1), m.group(2)
+                    target = REPO / ref
+                    if target.exists():
+                        if cited:
+                            n = len(target.read_text(
+                                encoding="utf-8", errors="replace").splitlines())
+                            if int(cited) > n:
+                                broken.append(
+                                    f"{rel}:{lineno}: {ref}:{cited} but the "
+                                    f"file has {n} lines")
+                        continue
+                    if doc_exempt or any(k in line for k in _REF_MARKERS):
+                        continue
+                    broken.append(f"{rel}:{lineno}: {ref} does not exist "
+                                  f"and is not marked as historical")
+    if broken:
+        return False, (f"{len(broken)}/{total} cited source paths do not "
+                       f"resolve:\n" + "\n".join(broken[:20]))
     return True, ""
 
 

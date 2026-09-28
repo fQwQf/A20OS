@@ -219,7 +219,7 @@ check-upgrade-userland-smokes: smoke-abi-linux smoke-mlibc smoke-mlibc-sbase smo
 
 check-doc-drift:
 	@$(PYTHON) tools/gates.py check-doc-drift
-	@$(PYTHON) tools/gen_linux_syscall_coverage.py
+	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
 	@$(PYTHON) tools/gates.py check-doc-drift --segment 1
 	@echo "check-doc-drift: PASS"
 

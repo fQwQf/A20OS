@@ -82,7 +82,7 @@ check-vfs-abstraction: smoke-vfs-stress
 	@$(PYTHON) tools/gates.py vfs-abstraction
 
 check-abi-boundary:
-	@$(PYTHON) tools/gen_linux_syscall_coverage.py
+	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
 	@$(PYTHON) tools/gates.py abi-boundary
 
 check-driver-core-model: smoke-driver-lifecycle

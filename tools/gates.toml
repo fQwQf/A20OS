@@ -1124,6 +1124,15 @@ files = [
     "kernel",
 ]
 
+# The assertions above only prove that certain words are present.  They cannot
+# see a renamed file or a moved function, which is the drift that actually
+# happens: the eevdf page described a doubly linked list for 34 days after the
+# code became a treap, and every keyword assertion stayed green throughout.
+# This one resolves the source paths the docs actually cite.
+[[gate.assertion]]
+segment = 1
+doc_refs = { doc_roots = ["docs"], doc_skip = ["docs/archive"] }
+
 # --- gates whose assertions were `bad=$(rg ... | rg -v whitelist)`.
 # The verdict depends on the surviving output, not an exit code, so they
 # need post_filter rather than plain negation.
