@@ -5,7 +5,7 @@
  * single global sdio_priv_t instance (g_sdio); a private spinlock serializes
  * concurrent command/data paths so the block layer can issue parallel I/O
  * safely.  IRQ-driven completion is not implemented; keep the poll path and
- * document any change in docs/drivers/lock-order.md.
+ * document any change in docs/drivers/guide/lock-order.md.
  */
 #include "drivers/block/dw_sdio.h"
 #include "drivers/bus/platform_bus.h"
