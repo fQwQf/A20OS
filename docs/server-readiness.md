@@ -87,7 +87,17 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 
 1. **8 个 namespace 只有 mount 是真的**，其余 7 个由 `unshare()` 显式返回
    `-EINVAL`。这一点做得诚实（`sys_namespace.c:4-7` 明确写了边界）。
-2. **`pivot_root` 返回 `-EPERM`**，因此即使有容器运行时也无法换根。
+2. **`pivot_root` 返回 `-EPERM`，且这不是顺手能补上的空洞。** 它的语义
+   建立在真实 mount 树之上：把 `new_root` 变成树根、把旧根挂到 `put_old`
+   之下，调用方才能用 `umount2(put_old, MNT_DETACH)` 真正摘掉旧根。但当前
+   `proc_fs_context_t` 只有 `root_path` / `cwd` 两个**路径字符串**
+   （`kernel/include/proc/proc.h:22-26`），`vfs_move_mount()` 也只是
+   `strncpy` 改写挂载点的路径前缀（`kernel/fs/vfs/mount.c:84-97`），
+   根本没有 `mnt_parent` 链。字符串模型里不存在"把旧根挂到新根之下"这个
+   操作——强写就只能做成一个改 `root_path` 字符串的假动作：调用返回 0，
+   旧根却并没有被隔离，`MNT_DETACH` 无从谈起。因此这里刻意保持
+   fail-closed，而不是提供一个只会骗过容器运行时的 `-EPERM` 替身。
+   **真正的前置件是先把 root/cwd 从路径字符串换成真实的 mount 引用。**
 3. 无 userns、无 `nsproxy`、无完整 capabilities。
 4. **无容器运行时**（lxc/runc/nspawn/crun/podman 均无），`packages/world/`
    里没有 server world。
@@ -188,7 +198,7 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
 | P0 | lwIP 全局锁分片 | 决定多核网络收益能否兑现，其余网络工作都在它之下 |
-| P0 | PID ns + userns + `pivot_root` | 多租户的前置件，缺一不可 |
+| P0 | PID ns + userns + `pivot_root` | 多租户前置件；`pivot_root` 需先把 root/cwd 从路径字符串改为真实 mount 引用 |
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
