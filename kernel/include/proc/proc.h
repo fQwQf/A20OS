@@ -228,6 +228,11 @@ typedef struct task_t {
     uint64_t perf_page_faults;     /* perf_event_open PERF_COUNT_SW_PAGE_FAULTS */
     uint64_t perf_page_faults_maj; /* faults that performed backing I/O */
     uint64_t perf_switches;        /* PERF_COUNT_SW_CONTEXT_SWITCHES */
+    /* Context switches by cause, for getrusage's ru_nvcsw/ru_nivcsw.  A task
+     * that already moved itself to PROC_BLOCKED yielded voluntarily; anything
+     * else was preempted.  perf_switches is the sum of the two. */
+    uint64_t perf_switches_vol;
+    uint64_t perf_switches_invol;
     /* /proc/<pid>/io accounting.  rchar/wchar are bytes through read/write(2);
      * read_bytes/write_bytes are bytes actually moved to/from the block
      * device, so cached I/O leaves them near zero.  Relaxed: these are
