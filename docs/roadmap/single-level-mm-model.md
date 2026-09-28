@@ -1009,3 +1009,42 @@ x86 镜像启动故障。
 
 采样纪律（按 §10.3 的教训固定下来）：每个配置至少 3 次采样，先看中位数与离散度，
 离散度内（<15%）的比较一律不作为结论。
+
+### 10.5 接线 RCU 的生产端：修掉一个真实的 use-after-free
+
+核对后发现此前的判断需要更正一半。**读侧其实早就接好了**：`mm_addrspace_lock()` 在下降
+前 `mm_pt_read_enter(mm)` 并置 `cur->in_read_side`，`mm_cursor_unlock()` 退出，另有 8 条
+错误返回路径各自配对退出。`vm.c` 里 `mm_tlb_invalidate_finish()` 的排空循环也在等
+`mm->pt_readers` 归零，并已经会释放 `MM_TLB_HOLD_PT`。
+
+真正缺的是**生产端**，后果是一个真实的 use-after-free：
+
+* `mm_pt_defer_free()` 与 `mm_pt_mark_stale_recursive()` 都**没有任何调用者**。
+* 于是 `pt_unmap()` / `pt_unmap_leaf()` 的拆表循环一直走的是
+  `mm_pt_node_fini(child); frame_free(child);`——**同步释放**。
+* 但 `mm_addrspace_lock()` 只锁覆盖节点，**后代节点是无锁遍历的**。所以另一个 CPU 上
+  正沿着 `child` 下降的 cursor，可能在该帧被 buddy 回收后继续读它。
+* 排空循环等的是一个永远不会被填充的链表，所谓宽限期实际上保护不了任何东西。
+
+修法就是接上生产端：拆表时先 `mm_pt_mark_stale_recursive()`（让缓存了该节点的
+cursor 观察到 `stale` 并重下降，这本来就是 `mm_addrspace_lock()` 里那个
+`attempt < 8` 重试循环要处理的情形），再 `mm_pt_defer_free()` 把帧交给 shootdown
+排空；只有入队失败（ENOMEM）才退回原来的同步释放，避免漏帧。
+
+为此把 `pt_unmap()` / `pt_unmap_leaf()` 的首参从 `pgdir` 改成 `mm`——排空队列挂在
+`mm->tlb_holds` 上，没有 `mm` 无法入队。所有调用点本来就已经持有 `mm`（它们原先正是
+用 `mm->pgdir` 取的 pgdir），故为机械改动；`signal.c` 里传的是 `t->pgdir`（`t` 是
+task），改为 `t->mm`。`mm.h` 补 `struct mm_struct;` 前向声明，NOMMU stub 同步改签名。
+
+安全性前提已核对：munmap/mremap/madvise 的拆表点都在 `mm_tlb_invalidate_begin()` …
+`mm_tlb_invalidate_finish()` 事务内（`mm_munmap` 在 287 行开、291 行关，中间调用
+`mm_munmap_locked`），所以入队的帧一定会被排空，不会残留。
+
+验证：riscv64 / aarch64 / loongarch64 / ppc64le / x86_64 与 riscv64/aarch64 的 NOMMU
+构建通过；smoke-mm-stress、smoke-mm-fork-exec-race、check-mm-lock-model 通过，关机审计
+missing_meta/present/absent/prot/cow/vma 全 0，且 `pt_pages=6` 与改动前一致——若帧入队
+后未被排空，这个计数会升高，这是排空确实生效的证据。
+
+**未能验证**：arm32 在本环境**改动前就无法构建**（`arm-linux-gnueabihf-gcc` 不在
+PATH），而 arm32 有自己一份 `pt_unmap`/`pt_unmap_leaf` 实现（已同步改签名并从
+`mm->pgdir` 取 pgdir），但编译未经检验。属既有环境限制，已如实标注。

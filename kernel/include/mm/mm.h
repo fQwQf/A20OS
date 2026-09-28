@@ -7,6 +7,9 @@
 #include "mm/slab.h"
 #include "sys/usercopy.h"
 
+/* Defined in mm/vm.h; only ever handled as a pointer here. */
+struct mm_struct;
+
 /* Physical frame allocator */
 void mm_init(void);
 void *frame_alloc(void);
@@ -33,8 +36,8 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
 int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
-int pt_unmap(pt_root_t *pgdir, vaddr_t va);
-int pt_unmap_leaf(pt_root_t *pgdir, vaddr_t va, paddr_t *pa_out,
+int pt_unmap(struct mm_struct *mm, vaddr_t va);
+int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out);
 paddr_t pt_translate(pt_root_t *pgdir, vaddr_t va);
 pte_t *pt_walk(pt_root_t *pgdir, vaddr_t va, int alloc);
