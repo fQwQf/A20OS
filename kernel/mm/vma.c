@@ -142,7 +142,6 @@ static void mm_vma_index_rebuild(mm_struct_t *mm, size_t *steps)
     mm->vma_index_state = 1;
 }
 
-// 查找包含指定地址的 VMA
 vm_area_t *mm_find_vma(mm_struct_t *mm, vaddr_t addr) {
     size_t steps = 0;
     a20_perf_count(A20_PERF_VMA_LOOKUPS);
@@ -211,7 +210,6 @@ page_cache_page_t *mm_file_cache_mapping_get(vm_area_t *vma, vaddr_t va,
     return NULL;
 }
 
-// 在虚拟地址空间中查找一个足够大的空隙
 vaddr_t mm_find_gap(mm_struct_t *mm, vaddr_t hint, size_t len) {
     vaddr_t prev_end = hint;
     for (vm_area_t *v = mm->mmap; v; v = v->next) {
@@ -269,7 +267,6 @@ void mm_vma_flush_deferred(mm_struct_t *mm)
     }
 }
 
-// 插入一个 VMA 到链表中，并尝试合并相邻的相同权限区域
 void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     mm_vma_index_invalidate(mm);
     vm_area_t **pp = &mm->mmap;
@@ -283,7 +280,6 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
     if (*pp) (*pp)->prev = newv;
     *pp = newv;
 
-    // 尝试与后一个 VMA 合并
     if (vma_can_merge(newv, newv->next)) {
         vm_area_t *nxt = newv->next;
         newv->end = nxt->end;
@@ -291,7 +287,6 @@ void mm_insert_vma(mm_struct_t *mm, vm_area_t *newv) {
         if (nxt->next) nxt->next->prev = newv;
         mm_vma_defer(mm, nxt);
     }
-    // 尝试与前一个 VMA 合并
     if (vma_can_merge(newv->prev, newv)) {
         vm_area_t *prv = newv->prev;
         prv->end = newv->end;
@@ -376,7 +371,6 @@ vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma) {
     return vma;
 }
 
-// 释放 VMA 对应的物理页面
 void free_vma_pages(mm_struct_t *mm, vm_area_t *vma)
 {
 #ifdef CONFIG_NOMMU

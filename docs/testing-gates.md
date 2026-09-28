@@ -35,9 +35,18 @@
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
+`HOST_RESOURCE_GATE_CONTRACT`：任何会启动 guest 的门禁都必须先做宿主资源预检。QEMU 申请到宿主机给不出的内存时不会返回非零退出码，而是宿主 OOM killer 挑一个进程杀掉，被杀的通常不是正在被调试的那个对象——所以"启动失败"在这里不是一个可观测的错误路径。预检由 `tools/a20_resource.py` 单一实现：经 `tools/a20` 的实例路径和经 `tools/targets-smoke.mk` 的 `smoke-gate` 宏（35 个直接起 `qemu-system-*` 的目标）调用的是同一个 `gate()` 与同一套 `A20_*` 环境策略，两者不得各自实现等待逻辑。门禁参数必须与该目标 `qemu` 命令行里的 `-m`/`-smp` 一致，否则预检在保护另一件事。等待策略有意分两种：`tools/a20 run/debug/test` 的 `A20_WAIT_TIMEOUT` 默认 `0`（一直等，因为交互式跑实例时"等资源释放"正是期望行为）；`smoke-*` 门禁的可覆盖默认是 `900s` 有界等待，因为 CI 在宿主机磁盘真的满时必须失败而不是挂死。可用性取 `/proc/meminfo` 的 `MemAvailable` 而非 `free`（后者不含可回收 page cache，会让门禁永远阻塞），并发 guest 数单独统计（空闲 vCPU 不进 loadavg，只看 load 无法判断是否已有 guest 占着 CPU）。
+
 `make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke；阻塞点、信号/退出、timeout、SMP runqueue 与本地 pick 五个边界门禁分别依赖 `smoke-proc-stress`、`smoke-futex-stress` 和 `smoke-sched-stress`（在 QEMU 中 grep 运行时日志，而非源码标记），可能运行较长时间。
 
 ## 运行手册
+
+### 宿主资源预检
+- **How to run**: 无独立入口，随门禁自动执行。手动预检一个即将发起的启动：
+  `python3 tools/a20_resource.py -m 1G -c 1 [--hostfwd 127.0.0.1:5555] [--no-wait]`
+  查看策略与当前余量用 `tools/a20 resources`（不带参数，输出门禁所依据的宿主预算）。
+- **What it checks**: 内存（`MemAvailable`）、空闲 vCPU、磁盘余量、并发 guest 数、以及本次启动会绑定的宿主端口。任一不足则按策略等待或退出。
+- **When it fails**: 门禁卡在 `a20: waiting for host resources (mem ... MiB, ... vCPU, ...)` 而不是启动失败，是预期行为——先释放资源，或调 `A20_RESERVE_MEM_MB` / `A20_MAX_CONCURRENT` / `A20_MIN_DISK_MB`。`--no-wait` 下会以非零退出码立即失败，用于确认某个需求是否真的能满足。CI 上若持续超时，检查的是宿主而非被测系统。
 
 ### 并发基础
 - **How to run**: `make check-concurrency-foundation`
@@ -161,6 +170,12 @@
 - **How to run**: `make smoke-native-fs-all`（四后端端到端）；`make smoke-native-ufs`（仅 FAT 后端回归）。
 - **What it checks**: `smoke-native-fs-all` 在 QEMU 中挂四块 scratch 盘（bus.2/4/6/7），由 `/bin/ufs_all_test` 逐后端拉起 `/bin/ufsd-rv` 并执行 POSIX 序列：FAT 预置读回+写读+删除；ext4 预置读回+8 KiB 图案写读+rename+删除；iso9660 小写名嵌套读取；ntfs 只读语义（create 必须失败）。内核侧 uxfs 代理把 vnode ops 经 Channel 转发给服务，块 IO 走受控 fs_block_io。见 [hybrid-kernel/06-user-fs.md](hybrid-kernel/06-user-fs.md)。
 - **When it fails**: 查看 `.kernel-build/smoke/native-fs-all-riscv64.log` 中各 `UXFS_*` 标记与 `[fs]` 前缀的 FS 内部日志；确认镜像目标（`ufs-scratch.img`/`ufs-ext4.img`/`ufs-iso.img`/`ufs-ntfs.img`)已生成且盘位未占用 bus.3/bus.5（用户驱动预留）。
+
+### SIOCGIFCONF 与 per-interface getter（Linux ABI sockets 区域）
+- **How to run**: `make smoke-net-iface`（同时被 `smoke-network-suite` 覆盖，因为 `net_iface_test` 已列入 `network_suite` 的用例表）
+- **What it checks**: `user/cmds/net/net_iface_test.c` 二十项。SIOCGIFCONF 的空 `ifc_buf` 尺寸查询（必须是整条目数，估算值会让调用方反复扩容）、按 `struct ifreq` 步长填充、行数与查询值一致、接口名 NUL 终止、每行是 `AF_INET` sockaddr、不足一个条目的缓冲返回 0 且不写入、单条目缓冲不溢出且只返回整条目、非 IPv4 族请求返回空列表、负 `ifc_len` 返回 EINVAL；再用枚举出的名字回灌 SIOCGIFADDR / SIOCGIFFLAGS，并确认未知接口名被拒。
+- **为什么必须有它**: getifaddrs()、ifconfig 与 busybox `ip` 全部建立在 SIOCGIFCONF 上，而 per-interface getter 在没有枚举手段之前不可达。SIOCGIFCONF 此前是"派发但未实现"（-ENOTTY），该区域没有任何运行门禁，因此下面两个真实缺陷是写这个门禁时才暴露的。
+- **When it fails**: 查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行；对照 `kernel/net/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
 
 ### poll / timer 边界语义（Linux ABI poll 与 timer 区域）
 - **How to run**: `make smoke-poll-edge`、`make smoke-timer-edge`

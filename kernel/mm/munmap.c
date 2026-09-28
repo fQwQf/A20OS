@@ -138,22 +138,17 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             mm->locked_vm = (mm->locked_vm >= locked_sz) ? mm->locked_vm - locked_sz : 0;
         }
 
-        // 根据取消映射的范围，对 VMA 进行删除或拆分
         if (addr <= vma->start && end >= vma->end) {
-            // 完全删除 VMA
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
             mm_vma_defer(mm, vma);
         } else if (addr <= vma->start) {
-            // 从开头部分删除
             vma->file_offset += clip_end - vma->start;
             vma->start = clip_end;
         } else if (end >= vma->end) {
-            // 从结尾部分删除
             vma->end = clip_start;
         } else {
-            // 从中间删除，需要拆分成两个 VMA
             vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
             if (!tail) return -ENOMEM;
             *tail = *vma;
@@ -211,7 +206,6 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             if (v->vm_flags & VM_SEALED)
                 return mm->brk;
         }
-        // 缩小堆，释放多余的物理页面
         for (uint64_t va = new_brk_page; va < old_brk_page; ) {
             int level = 0;
             vaddr_t base = 0;

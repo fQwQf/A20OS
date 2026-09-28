@@ -166,7 +166,6 @@ static const pfa_range_t *find_range_by_pa(paddr_t pa) {
     return NULL;
 }
 
-// Buddy System 各阶的空闲块的入队和出队
 static void fl_push(pfn_t pfn, int order) {
     frame_meta_t *m = meta_of(pfn);
     if (m->prev != PFN_NONE || m->next != PFN_NONE) {
@@ -353,7 +352,6 @@ _Static_assert(__builtin_offsetof(pfa_range_t, start_pfn) == 16,
                "trap.S reads pfa_range_t.start_pfn at offset 16");
 #endif
 
-// Buddy 分配器初始化函数，将物理内存划分为可用页框并构建空闲链表
 void pfa_init(paddr_t kernel_end) {
     pfa.nr_ranges = arch_ram_range_count();
     if (pfa.nr_ranges == 0 || pfa.nr_ranges > PFA_MAX_RANGES)
@@ -406,7 +404,6 @@ void pfa_init(paddr_t kernel_end) {
         pfa.free_lists[i].count = 0;
     }
 
-    // 标记内核已占用页并构建各 RAM 段自己的空闲链表
     paddr_t used_end_pa = ROUND_UP(meta_pa + meta_sz + freemap_sz, PAGE_SIZE);
     for (size_t r = 0; r < pfa.nr_ranges; r++) {
         const pfa_range_t *range = &pfa.ranges[r];
@@ -429,7 +426,6 @@ void pfa_init(paddr_t kernel_end) {
 
         pfn_t start = (pfn_t)ROUND_UP((uint64_t)(range->start_pfn + used_frames), 1u << MAX_ORDER);
 
-        // 处理对齐产生的碎片
         for (pfn_t i = range->start_pfn + used_frames; i < start && i < range->end_pfn; i++) {
             meta[i].flags = FRAME_F_FREE;
             meta[i].refcount = 0;
@@ -440,7 +436,6 @@ void pfa_init(paddr_t kernel_end) {
             pfa.free_frames++;
         }
 
-        // 剩余内存以大块形式放入链表
         pfn_t remain = (range->end_pfn > start) ? range->end_pfn - start : 0;
         for (int o = MAX_ORDER; o >= 0 && remain > 0; o--) {
             pfn_t sz = 1u << o;
@@ -631,7 +626,6 @@ void pfa_free(pfn_t pfn, int order) {
         return;
     }
 
-    // 试图向上合并
     while (actual_order < MAX_ORDER) {
         pfn_t buddy = pfn ^ (1u << actual_order);
         if (buddy >= pfa.total_frames) break;
@@ -686,7 +680,6 @@ void pfa_free(pfn_t pfn, int order) {
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
-// 简化接口
 pfn_t pfa_alloc_page(void) { return pfa_alloc(0); }
 void  pfa_free_page(pfn_t pfn) { pfa_free(pfn, 0); }
 
@@ -796,7 +789,6 @@ int pfa_audit_lists(void)
     return errors;
 }
 
-// 引用计数 +1
 void frame_get(pfn_t pfn) {
     if (!pfn_valid(pfn)) return;
     uint64_t flags = spin_lock_irqsave(&pfa.lock);
@@ -898,7 +890,6 @@ void frame_put_many(const pfn_t *pfns, size_t count) {
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
-// 查询空闲页数量
 size_t pfa_free_count(void) { return pfa.free_frames; }
 
 void pfa_get_huge_stats(pfa_huge_stats_t *stats) {

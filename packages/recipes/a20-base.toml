@@ -14,6 +14,10 @@ url = "https://github.com/fQwQf/A20OS"
 license = "Apache-2.0"
 maintainer = "A20OS developers"
 archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
+# 虚拟包：任何实现了"根文件系统里有可用用户态"这一点的包都 provide 它。
+# a20-drivers 依赖 a20-userland 而不是 a20-base，这样 min/base 两种
+# 用户态都能满足它——之前硬依赖 a20-base 会把 a20-min 顶回冲突。
+provides = ["a20-userland"]
 
 # 用户态二进制（init、mksh、coreutils 风格命令、native 服务、测试程序）。
 # 排除驱动包（归 a20-drivers）、编译中间产物，以及构建目录里的 sh

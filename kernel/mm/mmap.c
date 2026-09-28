@@ -110,7 +110,6 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         flags |= MAP_FIXED;
     }
 
-    // 处理 MAP_FIXED 标志
     if ((flags & MAP_FIXED) && addr != 0) {
         int mr = mm_munmap_locked(mm, addr, len);
         if (mr < 0)
@@ -138,7 +137,6 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         if (!nommu_raw) return (vaddr_t)-ENOMEM;
     }
 #else
-    // 查找合适的虚拟地址
     if (addr == 0)
         addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
@@ -147,7 +145,6 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         return (vaddr_t)-ENOMEM;
 #endif
 
-    // 创建新的 VMA
     vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
     if (!vma) {
 #ifdef CONFIG_NOMMU

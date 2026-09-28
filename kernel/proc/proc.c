@@ -411,7 +411,6 @@ void proc_init(void) {
     if (idle->signals) signal_init((signal_state_t *)idle->signals);
 #endif
 
-    // 分配内核栈
     void *idle_stack = ARCH_IDLE_STACK(arch_idle_context, 0);
     if (!idle_stack) panic("proc_init: no memory for idle stack");
     ARCH_IDLE_STACK_INIT(idle_stack);
@@ -423,7 +422,6 @@ void proc_init(void) {
     ctx->tp   = (uintptr_t)idle;
     arch_task_context_set_initial_sp(ctx, NULL, stack_top);
 
-    // 创建并映射内核页表
     pt_root_t *kpdir = pt_create();
     if (!kpdir) panic("proc_init: pt_create failed");
     pt_map_kernel(kpdir);
@@ -482,7 +480,6 @@ pt_root_t *proc_kernel_pgdir_shared(void) { return kernel_pgdir_shared; }
 
 /* ---- Base task allocation ---- */
 
-// 分配一个空闲的任务槽
 task_t *proc_alloc_task_slot(void) {
     task_t *t = proc_task_alloc_storage();
     if (!t)
@@ -543,7 +540,6 @@ int proc_alloc(void (*entry)(void)) {
 }
 
 /* Allocate a user-mode task with given entry point and stack */
-// 分配一个用户态任务
 int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
                           vm_area_t *mmap, vaddr_t brk,
                           vaddr_t stack_top, size_t total_vm,
@@ -800,7 +796,6 @@ int proc_munmap(vaddr_t addr, size_t len) {
     return ret;
 }
 
-// 打印所有进程信息
 void proc_dump(void) {
     printf("  PID  PPID  STATE  PRI  NAME\n");
     uint64_t flags = spin_lock_irqsave(&proc_lock);

@@ -6,7 +6,7 @@ A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明�
 
 - **未写的字段不落任何变量**，直接落回 Makefile 默认值。策略只有一个出处（Makefile），实例只携带自己的增量。
 - **校验前置**：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
-- **声明即门禁**：`make check-instances`、`check-instance-matrix`、`check-component-registry` 在 CI 中保证实例、架构矩阵、驱动注册表与构建系统永不漂移。
+- **声明即门禁**：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
 
 ## 快速上手
 
@@ -17,14 +17,20 @@ tools/a20 run qemu-x86_64-gui             # GUI 实例（virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
 tools/a20 test smoke-riscv64              # 跑一个冒烟测试实例
 tools/a20 flash stm32f103-xuanwu          # 构建固件并经 OpenOCD 烧录开发板
+tools/a20 console vf2-physical           # 接开发板串口，按 [target] 做上板检查
+tools/a20 deploy  vf2-physical           # 烧录 + 写启动介质 + 上板验证，一条命令走完
 tools/a20 package vbox-iso-x86_64         # 构建并组装发布产物（ISO/UEFI 镜像/SD 卡/发布件）
+tools/a20 resources                     # 查看实例运行所依据的宿主资源预算
 tools/a20 build qemu-riscv64 -- -j8       # 只构建；`--` 后参数透传给 make
 tools/a20 show-vars qemu-riscv64-smp4     # 查看实例推导出的 make 变量
 tools/a20 check                           # 校验全部实例（CI 门禁同款）
 tools/a20 check-registry                  # 校验驱动组件注册表并与 Makefile 交叉比对
+tools/a20 check-flash-backends            # 校验烧录后端注册表并与 makefile 交叉比对
 ```
 
 实例参数既可以是 `instances/` 下的名字（`qemu-riscv64`），也可以是任意 TOML 文件路径。`--dry-run` 打印将执行的 make/QEMU 命令而不执行。
+
+`run` / `debug` / `test` 在启动 guest 前会做宿主资源预检，不足则**等待**而不是硬启动——见下文。
 
 需要 Python ≥ 3.11（只用标准库，无第三方依赖）。
 
@@ -77,7 +83,8 @@ audio_device = "hda"         # hda | virtio
 frame_window = 15            # GUI 冒烟首帧窗口（秒，尚未实现）
 
 [net]
-hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]  # 空列表 = 不做端口转发
+# 宿主端口转发。不写这一段 = 完全不转发（默认值，见下）
+hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]
 
 [rootfs]
 size_mb = 128                # FAT32 根盘大小
@@ -107,8 +114,8 @@ bt_baud = 38400
 wifi_ssid = "..."            # 可选；留空表示不内置 Wi-Fi 配置
 wifi_password = "..."
 
-[flash]                      # a20 flash：烧录开发板（当前支持 openocd/STM32）
-tool = "openocd"
+[flash]                      # a20 flash：烧录开发板；tool 必须是已注册后端（见下）
+tool = "openocd"              # components/flash-backends.toml 里的后端名
 interface = "interface/cmsis-dap.cfg"
 transport = "swd"
 adapter_khz = 1000
@@ -119,6 +126,19 @@ kind = "release"             # grub-iso | uefi-image | fit-sdcard | release
 variant = "..."              # uefi-image: default|text|gui；fit-sdcard: minimal|sdcard|extra
 kernel_out = "kernel-rv"     # 仅 release：产物文件名（缺省按架构惯例）
 disk_out = "disk.img"        # 仅 release
+
+[target]                    # a20 console / a20 deploy：串口那头的物理板
+serial = "/dev/ttyUSB0"      # 必填；控制台设备节点
+baud = 115200
+reset = "openocd -f interface/cmsis-dap.cfg -c 'init' -c 'reset run'"  # 复位命令（shlex 拆成 argv，不走 shell）
+boot_wait = 4               # 复位后等待注入命令的秒数
+boot_timeout = "90s"        # 等 console_check / expect 的上限
+console_check = ["[FDT] RAM range", "System ready"]   # 内核真的起来了的证据
+commands = ["cat /etc/os-release", "poweroff"]        # 注入命令
+expect = ["A20OS", "poweroff"]                        # 必须出现的子串
+boot_media = ["build/vf2-firmware/a20os-sd.img"]     # 要写进板子的镜像
+media_device = "/dev/sda"     # 写到哪里；不写就不写启动介质
+log = ".kernel-build/console/board.log"   # 仓库相对路径
 ```
 
 ### 字段到 make 变量的映射
@@ -142,8 +162,9 @@ disk_out = "disk.img"        # 仅 release
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
 | `flash.interface` / `transport` / `adapter_khz` / `serial` | `STM32_OPENOCD_INTERFACE` / `STM32_OPENOCD_TRANSPORT` / `STM32_OPENOCD_ADAPTER_KHZ` / `STM32_CMSIS_DAP_SERIAL` |
+| `target.*` | `TARGET_SERIAL` / `TARGET_BAUD` / `TARGET_RESET_CMD` / `TARGET_BOOT_WAIT` / `TARGET_BOOT_TIMEOUT` / `TARGET_CONSOLE_CHECK` / `TARGET_COMMANDS` / `TARGET_EXPECT` / `TARGET_BOOT_MEDIA` / `TARGET_MEDIA_DEVICE` / `TARGET_CONSOLE_LOG` |
 
-`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。`machine.extra_qemu` → `EXTRA_QEMU`，`machine.gpu_3d` → `GPU_3D`，`machine.display_mode` → `DISPLAY_MODE`（均由 Makefile 消费）。
+`gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量。`machine.gpu_3d` → `GPU_3D`，`machine.display_mode` → `DISPLAY_MODE`，`machine.extra_qemu` → `EXTRA_QEMU`（后三者由 Makefile 消费，`EXTRA_QEMU` 并入 `QEMU_FLAGS`，因此 a20 侧不再重复追加）。`target.*` 两侧都用：`TARGET_*` 变量给 make 配方，字段本身给 a20 的控制台状态机。
 
 ### 各动作的适用条件
 
@@ -153,7 +174,9 @@ disk_out = "disk.img"        # 仅 release
 | `run` | 有通用 QEMU 路径的架构；armv7m 需 `[stm32] qemu = true`（走 stm32vldiscovery）；`rootfs.world` 实例走 `run-world`/`run-world-gui`（world 镜像作第二块盘，distro 模式） |
 | `debug` | 通用 QEMU 架构；`-O0 -g` + GDB stub |
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
-| `flash` | 需要 `[flash]` 段；当前为 armv7m/STM32 OpenOCD 流程（先构建再烧录） |
+| `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
+| `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
+| `deploy` | 需要 `[target]`；有 `[flash]` 则先烧录，`boot_media` + `media_device` 则先写启动介质，最后同 `console` 验证 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里——实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
@@ -164,6 +187,153 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
 - `nommu`、`ramfs_user`、`driver_deployment` 都有架构白名单，写错会在编译前被拒绝。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
+
+## 物理目标与上板验证（`[target]`）
+
+其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口
+线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。
+这个段存在，就意味着这是一个物理目标——所以没有 `kind` 字段可以跟它自相矛盾。
+
+```bash
+tools/a20 console vf2-physical    # 只接串口做上板检查
+tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
+```
+
+`deploy` 的每一步都对应一个既有机制，而不是新写一套：烧录走
+「烧录后端注册表」一节，写启动介质走 make
+的 `target-write-media`，最后一步与 `console` 完全相同。
+
+`console` 的执行顺序是：复位（可选）→ 等 `console_check` → 等 `boot_wait` →
+注入 `commands` → 等 `expect`。**每一处等待都有上限**：板子没起来、或者起来了
+但不回话，会在一个具名的阶段上结束，而不是把终端挂住。
+
+### 为什么没有 pyserial
+
+串口是用标准库的 `termios`/`fcntl`/`select` 说的。`tools/a20` 的 PEP 723 头声明
+`dependencies = []`，docs 也承诺只用标准库——为了设置六个标志位而引入
+pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍。
+
+波特率编码交给平台自己：Linux 上 `B115200` 是 `0o10002`，BSD 上编号又不一样，
+`termios` 模块里已经带着正确的常量，所以这里不再手写一张表。
+
+### 安全边界
+
+- `reset` 用 `shlex.split` 拆成 argv 后执行，**不走 shell**——清单因此无法把管道
+  或 `;`  smuggle 进来（`reset-cmd; rm -rf /` 会被当成一个字面量参数名）。
+- `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。
+  写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
+- `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，
+  正是 「产物账本」一节 要消灭的那类东西。
+- 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
+
+## 产物账本（`a20 ledger`）
+
+`tools/a20 ledger <instance>` 报告这个实例**实际**产出了什么：build 目录、源码版本
+（head + 分支 + dirty）、实例解析出的 make 变量，以及每个产物的 size 与 sha256。
+
+```text
+$ tools/a20 ledger qemu-riscv64
+instance : qemu-riscv64
+arch     : riscv64   board: qemu-virt-riscv64   abi: both
+build    : .kernel-build/riscv64-qemu-virt-riscv64-both-dev
+git      : 47192790cb81 on embedded/instance-manager
+
+role                   size  sha256                                                           path
+kernel-elf          4.0 MiB  9c52b54a0b45bbe0ef58d71def3315be1e598e8c315900e8e08113600ae393e9  .kernel-build/.../kernel.elf
+rootfs-fat32      128.0 MiB  c14b40170fc1a9dceaafafd84fa10b5c8dac1011e8f1b412d1f9f37cc162b127  .kernel-build/.../fat32.img
+
+not built yet:
+  .kernel-build/.../extra.img
+```
+
+三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进
+平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**——正是绝对路径让
+旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
+
+它取代的是 `docs/platforms/physical-boards.md` 里手抄的那种记录：镜像大小和
+SHA-256 从终端里抄出来、标上日期、旁边写着某个贡献者家目录的绝对路径。那些数字
+无法校验，改了一个字节也没人会发现；重新生成一份账本比重新敲一遍便宜，而手抄的
+数字在长期维护下必然失真。
+
+产物路径向 make 查询而不是在 Python 里重算 `BUILD_DIR`——那个名字把 ARCH、BOARD、
+ABI、BRINGUP、NOMMU、SMP 数、驱动部署等十几个开关都编码了进去。
+
+## 宿主端口转发
+
+**默认不做任何端口转发。** 宿主端口是一种会被争用的共享资源，而此前
+`NET_HOSTFWD` 默认 `hostfwd=tcp/udp::5555-:5555`，于是**每一次** QEMU 启动都会
+占用宿主 5555——包括那几十个只用串口、从不接受入站连接的冒烟门禁。结果是任何
+时刻只能跑一个实例，落败的那个以 QEMU 的一句 "could not set up host forwarding
+rule" 收场，指向端口而不是指向真正的争用。
+
+现在转发由实例显式声明：
+
+```toml
+[net]
+hostfwd = ["tcp::5555-:5555"]   # 固定端口
+hostfwd = ["tcp::0-:8080"]     # 端口 0 = 由系统分配
+hostfwd = []                    # 显式不要转发（等价于不写）
+```
+
+`a20 run` / `debug` / `test` 在启动前会打印本实例占用的端口，所以"连哪个端口"
+是实例的属性、看得见的，而不是靠猜。
+
+### 为什么默认不是随机端口
+
+QEMU 确实接受 `hostfwd=tcp::0-...` 并正常启动，但它**不会在任何输出里报告自己
+拿到了哪个端口**。随机端口因此意味着"你无从知道该连哪里"，除非 a20 额外拉一条
+QMP 控制通道去查询——为一个更差的可用性付出真实的复杂度。固定端口可写进文档、
+可被脚本引用、每次都一样。
+
+多实例并行的正确做法是**声明不同的端口**（可被 review），而不是让端口变成不可
+复现的随机数。
+
+### 端口也是一项会被等待的资源
+
+声明的端口在启动前会被实际 bind 一次探测（不是读 `/proc`，因为 QEMU 自己也不设
+`SO_REUSEADDR`，只有真的 bind 才知道能不能成）。端口被占用时，行为与内存/CPU
+一致：**等待到释放**，而不是失败。`--no-wait` 仍然可以立即失败。
+
+```bash
+tools/a20 ports                    # 谁占了哪些端口、现在空不空、跨实例是否冲突
+tools/a20 ports qemu-riscv64       # 只看一个
+tools/a20 run qemu-riscv64         # 启动前打印本实例的端口
+```
+
+`a20 ports` 会把跨实例的端口冲突作为提示列出（不判失败：如果你从不让它们同时跑，
+共用一个端口是完全合理的选择），并给出改用端口 0 的建议。
+
+## 宿主资源预检
+
+`run` / `debug` / `test` 是 a20 唯一几种失败方式不是非零退出码、而是"把宿主机搞死"的动作：QEMU 在可用内存不足时申请 4 GiB，结果由 OOM killer 决定谁死，而被杀的通常不是你在调试的那个进程。所以这三个动作在启动 guest 前先做预检，**资源不足时等待到释放**，而不是硬上。
+
+`tools/a20 resources` 打印当前预算：
+
+```text
+memory available : 25672 MiB (+1024 MiB reserved per run)
+cpu              : 16 online, load 5.3
+guest slots      : 4 free of 4 (0 running)
+disk free        : 42944 MiB (floor 2048 MiB per run)
+wait timeout     : forever
+```
+
+需求从实例自身字段推导：guest 内存取 `machine.memory`（缺省 1G，与 Makefile 的 `QEMU_MEMORY` 一致），vCPU 取 `machine.smp`，磁盘取 `[rootfs]` 声明的各镜像大小之和。
+
+两个测量点容易做错，代码里都标了原因：
+
+- **可用内存必须取 `MemAvailable`，不能取 `free`。** `free` 不算可回收的 page cache，所以在一台其实很空闲的机器上它常常只有几百 MiB（本机就是 365 MiB，而 `MemAvailable` 是 25 GiB）。用 `free` 的门禁会永远等下去。
+- **空闲的 vCPU 不出现在 load average 里。** 所以 load 单独无法判断"另一个 guest 是否已经占住了这台机器想要的 CPU"，并发数因此单独统计（扫 `/proc` 数 `qemu-system-*`，不用 pgrep）。
+
+`--no-wait` 改为立即失败，`--wait-timeout SEC` 限定等待时长。预算可用环境变量覆盖，CI 机器余量不同不必改代码：
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `A20_RESERVE_MEM_MB` | 1024 | 每次运行额外预留（覆盖构建本身与宿主自身） |
+| `A20_MAX_CONCURRENT` | CPU 数 / 4 | 同时允许的 guest 数 |
+| `A20_WAIT_TIMEOUT` | 0（无限） | 等待上限秒数 |
+| `A20_MIN_DISK_MB` | 2048 | 磁盘需求的下限 |
+
+等待期间只在**缺项种类**变化时播报，另有 30 秒心跳，因此长时间等待不会每 5 秒刷一行。
 
 ## 冒烟测试实例
 
@@ -196,13 +366,38 @@ description = "virtio network device"
 
 `make check-component-registry`（= `tools/a20 check-registry`）会做两层校验：注册表自身（重名、未知架构、early ⊆ arches、源文件存在），以及与 Makefile 的 `DRVMOD_MODULES`/`EARLY_DRVMOD_MODULES` 按架构逐一比对——两边任何一边漂移都会 FAIL。
 
+## 烧录后端注册表（components/flash-backends.toml）
+
+`a20 flash` 用哪个烧录器由这里决定，而不是写在 Python 里：
+
+```toml
+[[backend]]
+name = "openocd"
+description = "OpenOCD over CMSIS-DAP/SWD with STM32F1x target scripts"
+boards = ["stm32f103"]      # 允许的 board
+flash_kb = 512              # 该配方所针对的 flash 几何
+ram_kb = 64
+make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python 里
+```
+
+`boards` + `flash_kb`/`ram_kb` 是**安全契约，不是说明文档**：实例的 board 或 flash 几何落在允许范围外时，`a20 check` 就直接拒绝，编译根本不会开始。用错几何去擦除不是编译错误那种可回退的失误——一段 512 KiB 的擦除脚本打到 64 KiB 的片子上，会从片子末尾跑出去。
+
+几何必须进 key，因为一个 `board` 名会承载多种 flash 尺寸：`board = "stm32f103"` 既指 64 KiB 的 C8，也指 512 KiB 的 ZET6（"xuanwu"）变体，由 `[stm32].xuanwu` 区分。只按 board 判断会让 64 KiB 的实例和 512 KiB 的实例走同一道门，而这正是这个注册表要防的那个 bug。
+
+新增烧录方式只需两步，Python 不用改：加一条 `[[backend]]`，再写对应的 make 目标。
+
+`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里——两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
+
 ## CI 门禁
 
 | 目标 | 作用 |
 |---|---|
+| `make check-manifests` | 下面三个门禁的聚合入口（CI 的 `manifest-gates` job 调它） |
 | `make check-instances` | 校验 `instances/` 全部实例（schema + 语义 + 驱动选择） |
 | `make check-instance-matrix` | 校验每个 `SUPPORTED_HOSTED_ARCHES` 成员至少有一个有效实例，矩阵与实例目录不漂移 |
 | `make check-component-registry` | 校验驱动注册表并与 Makefile 构建清单交叉比对 |
+| `make check-flash-backend-registry` | 校验烧录后端注册表，并交叉比对每个 `make_target` 在 makefile 中存在、且 a20 确实能派发到它 |
+| `make check-a20-tests` | a20 工具自身的单元测试（stdlib unittest，见 `tools/tests/test_a20.py`） |
 
 ## apk world 镜像实例（用包管理组装用户态）
 

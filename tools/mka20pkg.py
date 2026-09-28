@@ -161,11 +161,21 @@ def resolve_files(recipe: Recipe, ph: Placeholders) -> list[FileEntry]:
         recursive = "**" in src
         matches = [m for m in sorted(glob.glob(src, recursive=recursive))]
         excludes = rule.get("exclude", [])
-        if excludes:
+        includes = rule.get("include", [])
+        if excludes or includes:
             import fnmatch
-            matches = [m for m in matches
-                       if not any(fnmatch.fnmatch(Path(m).name, pat)
-                                  for pat in excludes)]
+            if excludes:
+                matches = [m for m in matches
+                           if not any(fnmatch.fnmatch(Path(m).name, pat)
+                                      for pat in excludes)]
+            # `include` is the positive form of `exclude`: it selects by the same
+            # basename patterns, so a minimal profile is a short list of names
+            # rather than a fragile "exclude everything that looks like a test".
+            # Applied after `exclude`, so the two compose.
+            if includes:
+                matches = [m for m in matches
+                           if any(fnmatch.fnmatch(Path(m).name, pat)
+                                  for pat in includes)]
         optional = bool(rule.get("optional", False))
         if not matches:
             if optional:
