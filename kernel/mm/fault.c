@@ -961,7 +961,13 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         if (qr == 0) {
             uint8_t cls_byte = 0;
             int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
-            if (!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT) {
+            /* A userfaultfd registration over this entry must win: the fault
+             * has to be parked for the handler, not satisfied here.  The mark is
+             * per entry precisely so this decision needs no VMA, and the
+             * authoritative userfaultfd_range_present() check still runs on the
+             * VMA path below for every other case. */
+            if (!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT &&
+                !mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)) {
                 /* Round-trip the recorded prot bits back to PTE flags: they
                  * were produced by mm_pt_prot_bits() from the same encoding,
                  * so the access check matches the VMA path exactly. */
