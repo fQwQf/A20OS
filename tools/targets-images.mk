@@ -124,13 +124,9 @@ BUILD_FLAGS_SIG := $(CC) $(CFLAGS) $(LDFLAGS)
 BUILD_FLAGS_STAMP := $(BUILD_DIR)/.build-flags
 
 $(BUILD_FLAGS_STAMP): FORCE
-	@mkdir -p $(dir $@)
-	@printf '%s\n' '$(BUILD_FLAGS_SIG)' > $@.tmp
-	@if test -f "$@" && cmp -s "$@" "$@.tmp"; then \
-		rm -f "$@.tmp"; \
-	else \
-		mv -f "$@.tmp" "$@"; \
-	fi
+	@$(PYTHON) tools/stamps.py build-flags \
+		--stamp "$@" \
+		--build-flags-sig '$(BUILD_FLAGS_SIG)'
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)

@@ -295,6 +295,27 @@ def extra_inputs(a) -> int:
     return 0
 
 
+def cmd_build_flags(a) -> int:
+    """Rewrite the build-flags stamp only when the signature actually changed.
+
+    The stamp is an order-only-ish dependency of every object file, so its mtime
+    is load-bearing: touching it on an unchanged signature would force a full
+    kernel rebuild on every invocation.  The shell version compared the freshly
+    written temp file against the live stamp and discarded the temp on a match;
+    byte comparison, not mtime, decided.
+    """
+    stamp = REPO / a.stamp
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    body = a.build_flags_sig + "\n"
+    tmp = stamp.with_name(stamp.name + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    if stamp.is_file() and stamp.read_text(encoding="utf-8") == body:
+        tmp.unlink()
+        return 0
+    tmp.replace(stamp)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -330,9 +351,13 @@ def main() -> int:
             s.add_argument("--user-variant", required=True)
         else:
             s.add_argument("--binaries", default="")
+    s = sub.add_parser("build-flags")
+    s.add_argument("--stamp", required=True)
+    s.add_argument("--build-flags-sig", required=True)
     a = ap.parse_args()
     return {"user": cmd_user, "native": cmd_native,
-            "extra-inputs": extra_inputs}[a.cmd](a)
+            "extra-inputs": extra_inputs,
+            "build-flags": cmd_build_flags}[a.cmd](a)
 
 
 if __name__ == "__main__":
