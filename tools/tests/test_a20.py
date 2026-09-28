@@ -982,6 +982,73 @@ class TestCliArgumentHandling(unittest.TestCase):
             self.assertEqual(mod.main(["list"]), 1)
 
 
+class TestApplicableActions(unittest.TestCase):
+    """The `list` capability column must not promise what a command refuses."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def acts(self, text: str):
+        from a20_instance import applicable_actions
+        return applicable_actions(load(self.tmp, text))
+
+    def test_a_plain_qemu_instance_runs_but_is_not_a_smoke(self) -> None:
+        acts = self.acts("""
+            arch = "riscv64"
+            board = "qemu-virt-riscv64"
+        """)
+        self.assertEqual(acts, ("build", "run", "debug"))
+
+    def test_expect_is_what_makes_a_smoke_runnable(self) -> None:
+        base = """
+            arch = "riscv64"
+            board = "qemu-virt-riscv64"
+            [test]
+        """
+        # run_test rejects [test] without expect, so it must not advertise it.
+        self.assertNotIn("test", self.acts(base + 'timeout = "20s"\n'))
+        self.assertIn("test", self.acts(base + 'expect = ["PASS"]\n'))
+
+    def test_armv7m_needs_the_stm32_qemu_flag_to_run(self) -> None:
+        base = """
+            arch = "armv7m"
+            [stm32]
+            flash_kb = 64
+        """
+        self.assertNotIn("run", self.acts(base))
+        self.assertIn("run", self.acts(base + "qemu = true\n"))
+
+    def test_target_section_unlocks_console_and_deploy(self) -> None:
+        self.assertNotIn("console", self.acts('arch = "riscv64"\n'))
+        acts = self.acts("""
+            arch = "riscv64"
+            [target]
+            serial = "/dev/ttyUSB0"
+        """)
+        self.assertIn("console", acts)
+        self.assertIn("deploy", acts)
+
+    def test_deploy_is_withheld_when_media_has_nowhere_to_go(self) -> None:
+        """cmd_deploy refuses boot_media without media_device."""
+        acts = self.acts("""
+            arch = "riscv64"
+            [target]
+            serial = "/dev/ttyUSB0"
+            boot_media = ["build/a.img"]
+        """)
+        self.assertIn("console", acts)
+        self.assertNotIn("deploy", acts)
+
+    def test_flash_and_package_follow_their_required_fields(self) -> None:
+        self.assertNotIn("flash", self.acts('arch = "riscv64"\n[flash]\n'))
+        self.assertIn("flash", self.acts(
+            'arch = "riscv64"\n[flash]\ntool = "openocd"\n'))
+        self.assertIn("package", self.acts(
+            'arch = "x86_64"\n[package]\nkind = "grub-iso"\n'))
+
+
 class TestOperatorErrorContract(unittest.TestCase):
     """Failures are one line on stderr with a documented exit code.
 
