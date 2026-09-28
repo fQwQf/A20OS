@@ -99,7 +99,17 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
             size_t size = 0;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &size);
             if (pte && (*pte & PTE_V)) {
-                if (level > 0 && (base < v->start || base + size > v->end)) {
+                /* Demote any large leaf, not just one that straddles a VMA
+                 * edge.  The loop body below rewrites exactly one leaf entry
+                 * and then advances `va = base + size`, i.e. it skips the
+                 * rest of the leaf.  That is only sound once `size` is a
+                 * single page, so a level>0 leaf must be split first even when
+                 * it sits entirely inside this VMA.  Skipping the demotion
+                 * left every entry after the first at its old permissions
+                 * while v->pte_flags below was rewritten for the whole VMA --
+                 * which is how a read-only PTE ended up under a writable VMA
+                 * and took a write fault (docs 10.39). */
+                if (level > 0) {
                     int dr = mm_demote_huge_page(mm, va);
                     if (dr < 0) return dr;
                     continue;
