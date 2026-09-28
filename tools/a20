@@ -108,11 +108,19 @@ def _gate_qemu(inst: Instance, action: str) -> None:
     memory = m.memory
     if memory is None:
         memory = a20_preflight.DEFAULT_MEMORY_GUI if (inst.gui.enabled or inst.rootfs.world) else a20_preflight.DEFAULT_MEMORY
+    # A world image lives at build/images/<world>-<arch>.img; check it before
+    # boot, because a dirty one presents as a kernel bug rather than as a
+    # filesystem problem.  Its absence is not an error here: cmd_run builds
+    # the image itself, so on a first run there is nothing to check yet.
+    image = None
+    if inst.rootfs.world is not None:
+        image = REPO_ROOT / "build" / "images" / f"{inst.rootfs.world}-{inst.arch}.img"
     need = a20_preflight.Need(
         label=f"{inst.name} ({action})",
         memory_bytes=a20_preflight.parse_size(memory),
         vcpus=m.smp or a20_preflight.DEFAULT_VCPUS,
         disk_path=str(REPO_ROOT),
+        image=image,
     )
     try:
         a20_preflight.gate(need)
