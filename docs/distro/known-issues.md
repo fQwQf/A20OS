@@ -910,6 +910,99 @@ lwIP assertion failed: detected mem underflow in pool PBUF_POOL
 - 保护区在 free 时填 `0xcd`、alloc 时校验，所以 alloc 期报错意味着
   「该元素被 free 之后，仍有代码往它的 payload 起始处回写」。
 
+**二分结果（canary 全程开启，均为真负）**：
+
+| 配置 | 结果 |
+| --- | --- |
+| `LWIP_IPV6=0` | **无 panic**，桌面正常启动并跑满 400s 超时 |
+| `LWIP_IPV6_FRAG=0` | panic 复现，栈不变 |
+| `LWIP_ND6=0` | panic 复现 |
+| `LWIP_IPV6_DHCP6=0` | panic 复现 |
+| QEMU 不挂 `-device virtio-net-pci` | **无 panic**，桌面跑满 300s 超时 |
+
+所以损坏**必须**有 IPv6 才发生（IPv6 是必要条件），但**与分片重组无关，
+也与邻居发现无关**。`LWIP_IPV6=0` 这一档同时给出了修复方向的判据：任何
+最终修法都应当能在保留 IPv6 的前提下成立，而不是关掉 IPv6 绕过。
+
+**配置二分已彻底用完**：剩下的候选无法再用编译期开关排除——
+
+| 尝试 | 结果 |
+| --- | --- |
+| `LWIP_ICMP6=0` | 编译失败：`ip6.c:780` 无条件调用 `icmp6_param_problem()` |
+| `LWIP_RAW=0` | 编译失败：`lwip_stack.c:470` 使用 `MEMP_RAW_PCB` |
+
+**当前最强嫌疑：`ip6_input:1054` 忽略了 `pbuf_add_header_force()` 的返回值。**
+
+```c
+#if LWIP_RAW
+  pbuf_add_header_force(p, hlen_tot);   /* 返回值被丢弃 */
+  raw_status = raw_input(p, inp);
+```
+
+它同时满足此前所有观察：位于 `ip6_input`（**仅 IPv6**）；对**每个** IPv6 包都会
+执行（因此「首次网络活动即损坏」，不需要桌面负载）；且在 RX 得到的
+`PBUF_POOL` pbuf 上，这次 force **必然静默失败**——pool 的 payload 紧贴
+`struct pbuf` 尾部，回退 1 字节就越过
+`payload < p + SIZEOF_STRUCT_PBUF` 这道检查，于是 force 什么都不做，
+而代码却当作成功继续执行；此时 `ip_data.current_ip_header_tot_len` 已被写成
+`hlen_tot`，`raw_input()` 拿到的是一个 payload 布局与 `hlen_tot` 不符的 pbuf。
+
+A20OS 侧确实存在 raw socket（`kernel/net/socket_packet.c`），且同一区域此前
+修过一次双重释放，与「pool 元素被写坏」的症状方向一致。
+
+**进一步推论（重要）**：`raw_input()` 在没有任何匹配的 raw pcb 时会**提前返回**，
+什么都不做。也就是说，仅靠 `ip6_input` 这一行不足以致害——**必须同时存在一个
+绑定了该协议的 raw socket**。这正好把嫌疑引向 A20OS 自己的代码：
+`net_packet_rx_defer()` 会在**每个**收到的帧上喂一次 raw socket 通道，
+与「首次网络活动即损坏」的现象吻合。若该推断成立，真正的越界写发生在
+`kernel/net/socket_packet.c` 消费 raw pbuf 时按（被 force 失败弄脏的）
+IP 头去算长度的那一段，而不在 lwIP 内。
+
+因此下一步 instrument 应当**同时**覆盖两处：`ip6_input:1054` 的 force 失败分支，
+以及 `socket_packet.c` 里 raw 接收的长度计算。只看 lwIP 侧可能看不到越界写。
+
+**已证伪**：`ip6_input:1054` 这条线索经实测**不成立**。按其机制改写
+（仅在 force 成功时才执行 undo）并以 canary 重建后，panic 原样复现，
+栈帧 0~3 完全一致（仅 `[3]` 偏移因代码布局变化从 `+0x15c` 变为 `+0x16b`）：
+
+```
+lwIP assertion failed: detected mem underflow in pool PBUF_POOL
+  [0] mem_overflow_check_raw   [1] do_memp_malloc_pool_fn
+  [2] pbuf_alloc               [3] a20_lwip_process_netif_rx_tx_locked+0x16b
+```
+
+该改动已回退——vendored lwIP 保持未打补丁状态。
+
+顺带更正上一条提交里的一个错误推论：`raw_input()` 在没有匹配 pcb 时确实会
+提前返回，但它返回的是「未吃掉」，因此 **`pbuf_remove_header` 仍会执行**。
+也就是说这个缺陷**不需要**存在活动的 raw socket 就会触发，先前「必须同时有
+raw socket」的推断是错的。
+
+**一条尚未解释的观测**：栈帧 `[4]` 是 `ethernet_output+0x13f2ae827`——
+偏移量约 5.4×10⁹，不可能是任何函数的合法偏移，说明符号化落到了最近的
+前驱符号上，即**该帧的返回地址无法解析**。若这是真实的栈损坏而非 unwinder
+的缺陷，则越界写的目标可能不止 pool，还波及到了内核栈。这与「1~8 字节溢出」
+的判断并不矛盾，但目前无法区分。
+
+**仍未定案**：到底是哪一个缓冲区越界写了。下一步应在该处加
+instrumentation——检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
+与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
+
+尚未排除的 IPv6 专属面：
+
+- `ip6.c` 输入路径与扩展头处理（`pbuf_remove_header` / `pbuf_unchain` 链式搬移）；
+- ICMPv6 中**非 echo** 的路径（echo 应答已确认走 `PBUF_RAM`，故非 echo 类）；
+- IPv6 的 `netif` / 地址层。
+
+完全不挂 virtio-net 也不复现，说明确实必须有一条活的 RX 数据面在喂包，
+排除「与网络无关的启动期内存踩踏」。
+
+分片重组、邻居发现、DHCPv6 三条「IPv6 专属且常驻」的后台路径已全部排除，
+剩下的多半就在 **`ip6_input` 自身的扩展头解析/搬移**里。逐个再关子系统
+的收益开始下降，建议改为直接在 `ip6_input` 的扩展头循环里对
+`pbuf_remove_header` / `pbuf_unchain` 加定位 instrumentation，
+用 canary 命中时的 `p->payload` 地址反推真正的越界写点。
+
 结论不变但更精确：存在一处 **1~8 字节的溢出**，写穿某个 1536 字节
 `PBUF_POOL` payload 的尾部，落在下一个元素的头部。
 
