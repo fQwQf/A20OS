@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from a20_derive import derive_make_vars
+from a20_error import InstanceBusy, ToolError
 from a20_instance import Instance
 from a20_make import REPO_ROOT, build_instance
 
@@ -37,9 +38,6 @@ _TERM_GRACE_S = 5.0
 _QEMU_TOKEN = re.compile(r"(?:^|\s)((?:\S*/)?qemu-system-[A-Za-z0-9_.-]+)\s")
 _TIMEOUT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)s\s*$")
 
-
-class InstanceBusy(SystemExit):
-    """Another run of this instance already holds the log."""
 
 
 @contextlib.contextmanager
@@ -62,9 +60,10 @@ def _exclusive(instance_name: str):
             if e.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
             owner = os.read(fd, 64).decode(errors="replace").strip() or "another run"
-            raise SystemExit(
-                f"error: instance '{instance_name}' is already running ({owner}); "
-                f"wait for it or remove {lock_path} if you are sure it is stale") from None
+            raise InstanceBusy(
+                f"instance '{instance_name}' is already running ({owner})",
+                hint=f"wait for it to finish, or remove {lock_path} if you "
+                     f"are sure that run is gone") from None
         os.ftruncate(fd, 0)
         os.write(fd, f"pid {os.getpid()}\n".encode())
         yield
@@ -99,13 +98,22 @@ def _qemu_cmdline(inst: Instance) -> list[str]:
     # `_qemu_argv` is a printf recipe with no prerequisites, so running it builds
     # nothing and its stdout is the command line itself.  `make -n` would print
     # the printf invocation instead of its output, hence no -n here.
-    out = subprocess.run(
-        ["make", "-C", str(REPO_ROOT), *derive_make_vars(inst), "_qemu_argv"],
-        check=False, capture_output=True, text=True,
-    )
+    try:
+        out = subprocess.run(
+            ["make", "-C", str(REPO_ROOT), *derive_make_vars(inst), "_qemu_argv"],
+            check=False, capture_output=True, text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ToolError("`make` is not on PATH",
+                        hint="a20 builds through make; install GNU make or fix PATH",
+                        status=127) from exc
     if out.returncode != 0:
-        raise SystemExit(f"error: 'make _qemu_argv' failed for {inst.name} "
-                         f"(status {out.returncode}):\n{out.stderr.strip()}")
+        # make's own diagnosis is the useful part; keep it in the message.
+        detail = out.stderr.strip() or out.stdout.strip()
+        raise ToolError(f"make _qemu_argv failed for {inst.name} "
+                        f"(status {out.returncode})"
+                        + (f"\n{detail}" if detail else ""),
+                        status=out.returncode)
     for line in out.stdout.splitlines():
         m = _QEMU_TOKEN.search(line)
         if m:
@@ -113,8 +121,9 @@ def _qemu_cmdline(inst: Instance) -> list[str]:
             # was folded into QEMU_FLAGS, so the emitted line carries it.  Do
             # not append inst.machine.extra_qemu again -- that would double it.
             return shlex.split(line[m.start(1):])
-    raise SystemExit(f"error: no qemu-system command found in 'make _qemu_argv' "
-                     f"output for {inst.name}:\n{out.stdout}")
+    raise ToolError(f"no qemu-system command in 'make _qemu_argv' output "
+                    f"for {inst.name}",
+                    hint=out.stdout.strip() or None)
 
 
 def _feed_commands(proc: subprocess.Popen[bytes], inst: Instance, delay: float) -> None:
@@ -144,9 +153,7 @@ def run_test(inst: Instance, make_args: list[str], dry_run: bool) -> int:
     """Build, boot, inject [test].commands, and grep the log for [test].expect."""
     if not inst.test.expect:
         raise SystemExit(f"error: {inst.source}: [test].expect is required for 'a20 test'")
-    build_rc = build_instance(inst, list(make_args), dry_run)
-    if build_rc != 0:
-        return build_rc
+    build_instance(inst, list(make_args), dry_run)
     qemu_cmd = _qemu_cmdline(inst)
     if dry_run:
         print(shlex.join(qemu_cmd))
