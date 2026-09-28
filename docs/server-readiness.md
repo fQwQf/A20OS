@@ -52,9 +52,19 @@ AHCI（`FLUSH CACHE EXT`）。
    `g_lwip_lock` 保护全部 lwIP 核心状态，每次 raw lwIP 调用都必须持有
    （`docs/net/network-lock-contract.md`）。**多核服务器最核心的收益在这里
    直接归零**——这不是性能调优能解决的，需要重构 lwIP 集成。
-   *测量前置已就位*：该锁已注册进 `/proc/a20/lock_contention` 并开启
-   callsite 归因（`netfilter_test` 断言该条目存在），因此分片前可以先拿到
-   真实并发负载下的热点调用点，而不是凭猜测改协议。分片本身仍是未完成项。
+   *测量前置已就位，但还没有并发负载去用它*：该锁已注册进
+   `/proc/a20/lock_contention` 并开启 callsite 归因（`netfilter_test` 断言
+   该条目存在）。实测 `-smp 4` 跑完 `smoke-network-suite` 后
+   **`lwip: 0 0`**（acquires/spins 皆 0），而且 `vfile_table`、`page_cache`、
+   `dcache`、`block_cache`、`runq`、`proc` 同样全 0。
+   **这个 0 不能解读为"锁没问题"，而是"负载不对"**：`smoke-network-suite`
+   是功能套件，子测试逐个 fork+wait 串行跑（dns/tcp_loopback/tcp_edge/
+   udp_loopback/icmp_loopback/unix/alg/timeout），根本不产生并行网络流量，
+   因此它在结构上就无法回答分片是否有收益。
+   **结论：分片的取舍目前缺乏证据支撑。** 要做这个决定，前置件是先有一个
+   真正的并发网络压力负载（多路并发 TCP 传输）来打出真实 contention 分布，
+   再看归因指向哪些调用点。现在贸然分片就是在没有热点数据的情况下改并发
+   协议，风险与收益完全不对等。分片本身仍是未完成项。
 2. **无连接跟踪与 NAT。** 因此不能做端口转发、地址转换，也无法实现
    有状态的防火墙规则。
 3. **窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。** lwIP 2.2 自带
