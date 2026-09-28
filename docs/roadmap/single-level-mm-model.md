@@ -3755,3 +3755,64 @@ riscv64 开启臂的 2844 与修复前的 2836 几乎相同，说明**修复没�
 **至此本次工作收束**：x86_64 崩溃已修复并双平台验证，§10.39–§10.58 共十次归因尝试的完整
 证据链保留在文档中，包含七次被自身诊断证伪的假设、以及最终靠**运行时安装轨迹**
 （而非读码推理）才定位到真因这一方法论教训。
+
+### 10.59 UFFD「过度清除」的前置条件**已满足**——上锁前必须先修
+
+§10.19 当初把 UFFD 过度清除标为「状态缺页路径启用**之前**必须先解决」。现在状态缺页路径已经
+修好并双平台验证（§10.57/§10.58），**那个前置条件已经到达**。
+
+#### 缺陷的确切形状
+
+`kernel/ipc/userfaultfd.c:517-532`（unregister）在合并并 unlink 了本次要注销的所有 range 之后，
+对**合并后的整段** `[rlo, rhi)` 无条件清标记：
+
+```c
+/* A page can in principle still be covered by a *different* uffd
+ * registration, so this clears more than strictly necessary.
+ * ... Before the status fault path is enabled (docs 10.7/10.19) this
+ * has to be refined to clear per page while re-testing presence,
+ * otherwise an over-clear would let a still-registered page be faulted
+ * without parking. */
+spin_lock(&t->mm->lock);
+mm_pt_set_safe_range(t->mm, rlo, rhi, MM_SAFE_UFFD, 0);
+spin_unlock(&t->mm->lock);
+```
+
+**注释里那句「`userfaultfd_range_present()` 是权威判定，标记陈旧不会让缺页跳过 handler」，
+现在对 `ANON_VIRT` 页已经不成立了**：
+
+* 状态缺页路径 `kernel/mm/fault.c:970` 用的是**位**：
+  `!mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)`；
+* 权威的 `userfaultfd_range_present()` 在 **`fault.c:1036`**，即 **VMA 路径**上；
+* 而 `ANON_VIRT` 的页在 `fault.c:970` 就被**就地满足并返回**，**根本走不到 1036**。
+
+`fault.c:967` 那句注释（「the authoritative userfaultfd_range_present() check still runs on
+the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类**恰恰是假的**——
+注释是随状态路径一起写的，写的时候没有意识到这条路径会**短路**掉权威检查。
+
+**后果**：若同一页同时被两次注册覆盖，注销其中一次会把 `MM_SAFE_UFFD` 清掉，
+此后该页的缺页**不会** parked 给仍存活的 handler，而会被状态路径直接满足——
+即 §10.19 预言的「仍被注册的页被缺页而不 park」。
+
+#### 缓解（必须说清楚，避免夸大严重性）
+
+**默认构建不受影响**：实测默认 riscv64 构建 `mm_anon_provisioned: 0`（§10.58），
+即预标记默认关闭，状态缺页路径**不启用**，UFFD 仍由 `fault.c:1036` 的权威检查把关。
+该缺口目前**仅存在于** `a20.anonprov=<n>` / `CONFIG_ANON_PROV_DEFAULT=<n>` 的实验构建里。
+（`MM_ANON_PROVISION_MAX_PAGES = 4096` 与 `CONFIG_ANON_PROV_DEFAULT` 是两个东西：
+前者是上限常量，后者才是默认开关，实测默认为 0。）
+
+#### 因此「把预标记默认打开」的前置条件清单
+
+1. **修 UFFD 过度清除**：逐页清除并在清之前重新判定 presence。难点是锁序——
+   unregister 现在是「放掉 `g_uffd_lock` → 取 `mm->lock`」，若在 `mm->lock` 内再取
+   `g_uffd_lock` 做 presence 复查，就形成 `mm->lock → g_uffd_lock` 的新嵌套；
+   需先确认全仓库没有「持 `g_uffd_lock` 再取 `mm->lock`」的路径，否则会造出环路。
+   **这一步本轮未做，锁序未验证，不应凭猜测下手。**
+2. 或者：让状态路径在 `ANON_VIRT` 命中时**也**调用 `userfaultfd_range_present()`
+   （它查的是 range 链表，不是 VMA，比 VMA 遍历便宜得多），代价是每次状态缺页多一次
+   加锁查询——比方案 1 简单，但确实侵蚀论文「缺页不查任何表」的主张。
+3. 顺手修正 `fault.c:967` 那句**已经不成立**的注释。
+
+**当前状态**：默认构建安全（预标记关闭），UFFD 语义正确。**在 1 或 2 完成之前，
+不要把预标记默认打开。**
