@@ -16,6 +16,9 @@
 #define TCPDIAG_GETSOCK         18
 
 #define UEVENT_GROUP           1
+/* An uevent datagram is "ACTION@DEVPATH"; the emitter's own buffer is 256 B, so
+ * anything longer cannot name a device this kernel publishes. */
+#define UEVENT_MSG_MAX         256
 
 #define TCP_ESTABLISHED         1
 #define TCP_CLOSE               7
@@ -308,11 +311,28 @@ void netlink_uevent_emit(const char *action, const char *subsystem,
     spin_unlock_irqrestore(&g_net_lock, irq);
 }
 
+/* The verbs the kobject uevent layer accepts (kernel/ksysfs.c
+ * uevent_trigger).  Anything else is a caller bug and is refused, because
+ * inventing a valid-looking action would publish a false device event. */
+static int uevent_action_known(const char *action, size_t n)
+{
+    static const char *const known[] = {
+        "add", "remove", "delete", "change", "move",
+        "bind", "unbind", "online", "offline", "rename",
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strlen(known[i]) == n && memcmp(known[i], action, n) == 0)
+            return 1;
+    return 0;
+}
+
 /*
- * Handle send() on a KOBJECT_UEVENT socket.  udevadm trigger asks the kernel
- * to re-emit the current device set; the udevd startup "bind" notification is
- * accepted without action.  The trigger payload's contents are ignored and we
- * simply replay every published class device as an add uevent.
+ * Handle send() on a KOBJECT_UEVENT socket.  The datagram is the sysfs uevent
+ * write format: "ACTION@DEVPATH" (or a bare "ACTION"), exactly what
+ * uevent_trigger() parses.  The action is delivered as the caller wrote it and
+ * DEVPATH selects one device; a bare action replays the whole published set,
+ * which is what udevadm trigger does.  Returns the byte count only when the
+ * event really was emitted.
  */
 int net_netlink_uevent_send(net_socket_t *requester, const void *buf,
                             size_t len, const void *addr, size_t addrlen)
@@ -320,33 +340,72 @@ int net_netlink_uevent_send(net_socket_t *requester, const void *buf,
     if (!requester || requester->domain != AF_NETLINK ||
         requester->protocol != NETLINK_KOBJECT_UEVENT)
         return -EPROTONOSUPPORT;
-    (void)buf;
     (void)addr;
     (void)addrlen;
-    class_device_emit_uevents("add");
-    return (int)len;
+    if (!buf || len == 0 || len > UEVENT_MSG_MAX)
+        return -EINVAL;
+
+    char msg[UEVENT_MSG_MAX + 1];
+    memcpy(msg, buf, len);
+    msg[len] = '\0';               /* a datagram carries no terminator */
+
+    char *at = strchr(msg, '@');
+    size_t action_len = at ? (size_t)(at - msg) : strlen(msg);
+    if (action_len == 0 || !uevent_action_known(msg, action_len))
+        return -EINVAL;
+    msg[action_len] = '\0';
+    const char *action = msg;
+    const char *devpath = at ? at + 1 : NULL;
+
+    if (!devpath) {
+        class_device_emit_uevents(action);
+        return (int)len;
+    }
+
+    /* Our own emitter writes DEVPATH as /class/<subsystem>/<name>, and the
+     * class registry is keyed by that <name>. */
+    const char *slash = strrchr(devpath, '/');
+    const char *name = slash ? slash + 1 : devpath;
+    if (!*name)
+        return -EINVAL;
+    class_device_t *cdev = class_device_get_by_name(name);
+    if (!cdev)
+        return -ENOENT;
+    const char *subsystem = class_device_subsystem(cdev->class_type);
+    if (subsystem)
+        netlink_uevent_emit(action, subsystem, cdev->name, cdev->devt);
+    int rc = subsystem ? 0 : -EINVAL;
+    class_device_put(cdev);
+    return rc < 0 ? rc : (int)len;
 }
 
 /* ------------------------------------------------------------------ */
 /* NETLINK_ROUTE (ip / ifconfig / NetworkManager)                       */
 /* ------------------------------------------------------------------ */
 
+#define RTM_NEWLINK      16
 #define RTM_GETLINK      18
+#define RTM_NEWADDR      20
+#define RTM_DELADDR      21
 #define RTM_GETADDR      22
 #define RTM_GETROUTE     26
 
 #define IFLA_ADDRESS     1
 #define IFLA_IFNAME      3
 #define IFLA_MTU         4
+#define IFLA_OPERSTATE   5
 
 #define IFA_ADDRESS      1
 #define IFA_LOCAL        2
 #define IFA_LABEL        3
+#define IFA_BROADCAST    5
 
 #define RTA_GATEWAY      3
 #define RTA_OIF          4
 
 #define NLMSG_ALIGNTO    4
+#define NLM_F_REPLACE    0x100   /* RTM_NEWADDR may reconfigure a netif that
+                                  * already holds a different address */
 #define NLRT_IF_FLAGS_UP 0x1
 #define NLRT_IF_FLAGS_LOOPBACK 0x8
 #define NLRT_IF_FLAGS_RUNNING  0x40
@@ -354,6 +413,7 @@ int net_netlink_uevent_send(net_socket_t *requester, const void *buf,
 #define NLRT_SCOPE_UNIVERSE 0
 #define NLRT_MAX_LINKS   8
 #define NLRT_MSG_MAX     256
+#define NLRT_MIN_MTU     68      /* RFC 791 link minimum */
 
 typedef struct {
     uint8_t  ifi_family;
@@ -406,6 +466,25 @@ static void nlrt_copy_ip4(uint8_t out[4], const ip4_addr_t *a)
     out[1] = ip4_addr2(a);
     out[2] = ip4_addr3(a);
     out[3] = ip4_addr4(a);
+}
+
+/*
+ * ifa_prefixlen is the count of leading one bits in the netmask.  Deriving it
+ * that way matters: a `mask[0] ? 24 : 0` shortcut publishes a /8 interface as
+ * /24, and `ip addr show` then repeats the fiction.  A mask with a hole in it
+ * is not a netmask at all; nothing here can produce one, so the leading-one
+ * count is reported rather than a plausible-looking guess.
+ */
+static uint8_t nlrt_mask_prefixlen(const uint8_t mask[4])
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < 4; i++)
+        for (int bit = 7; bit >= 0; bit--) {
+            if (!(mask[i] & (1u << bit)))
+                return (uint8_t)n;
+            n++;
+        }
+    return 32;
 }
 
 /*
@@ -479,6 +558,198 @@ static void nlrt_fill_hdr(netlink_msghdr_t *nlh, uint16_t type, uint32_t total,
     nlh->nlmsg_pid = pid;
 }
 
+/* Bounded rtattr walker over a user-supplied attribute block.  The payload is
+ * only ever bounded by the validated nlmsg_len, and a length that does not fit
+ * the remaining block is a parse error, not a reason to stop early. */
+typedef struct {
+    const uint8_t *base;
+    size_t len;
+    size_t off;
+    int bad;
+} nlrt_attr_iter_t;
+
+static const rtattr_t *nlrt_attr_next(nlrt_attr_iter_t *it)
+{
+    if (it->bad || it->off >= it->len)
+        return NULL;
+    size_t avail = it->len - it->off;
+    if (avail < sizeof(rtattr_t)) {
+        it->bad = 1;
+        return NULL;
+    }
+    const rtattr_t *a = (const rtattr_t *)(it->base + it->off);
+    size_t alen = a->rta_len;
+    size_t padded = (alen + (NLMSG_ALIGNTO - 1)) & ~(size_t)(NLMSG_ALIGNTO - 1);
+    if (alen < sizeof(rtattr_t) || alen > avail || padded > avail) {
+        it->bad = 1;
+        return NULL;
+    }
+    it->off += padded;
+    return a;
+}
+
+/* Fetch a fixed-size attribute payload, or -EINVAL if this attribute is not
+ * exactly that many bytes. */
+static int nlrt_attr_get(const rtattr_t *a, size_t want, void *out)
+{
+    if (a->rta_len != sizeof(rtattr_t) + want)
+        return -EINVAL;
+    memcpy(out, (const uint8_t *)a + sizeof(rtattr_t), want);
+    return 0;
+}
+
+/*
+ * RTM_NEWLINK: ifi_change/ifi_flags carry the admin state (the kernel's own
+ * rule is `if (ifi_change & IFF_UP) want = ifi_flags & IFF_UP`), IFLA_MTU the
+ * link MTU.  Everything is validated before anything is applied, and the
+ * helpers are ordered so the only failure after the first is an unknown
+ * ifindex -- which the first helper called already reports.
+ */
+static int nlrt_apply_newlink(const ifinfomsg_t *ifi, const uint8_t *attrs,
+                              size_t alen)
+{
+    if (ifi->ifi_index <= 0)
+        return -EINVAL;
+    unsigned ifindex = (unsigned)ifi->ifi_index;
+    /* IFF_UP is the only flag a netif here can be told about.  Honouring the
+     * rest silently would answer success for a change that never happened. */
+    if (ifi->ifi_change & ~(uint32_t)NLRT_IF_FLAGS_UP)
+        return -EOPNOTSUPP;
+
+    int have_mtu = 0;
+    uint32_t mtu = 0;
+    int want_up = 0;
+    nlrt_attr_iter_t it = { attrs, alen, 0, 0 };
+    const rtattr_t *a;
+    while ((a = nlrt_attr_next(&it))) {
+        if (a->rta_type == IFLA_MTU) {
+            int r = nlrt_attr_get(a, sizeof(mtu), &mtu);
+            if (r < 0)
+                return r;
+            have_mtu = 1;
+        } else if (a->rta_type == IFLA_OPERSTATE) {
+            /* Carrier belongs to the driver: a20_lwip_sync_link_state()
+             * re-derives it on every poll, so a user-written operstate would
+             * be reverted on the next tick.  Refuse instead of reporting a
+             * change that cannot stick. */
+            return -EOPNOTSUPP;
+        }
+        /* IFLA_IFNAME / IFLA_ADDRESS identify the link; there is exactly one
+         * netif per index here, so neither is a change. */
+    }
+    if (it.bad)
+        return -EINVAL;
+    if (have_mtu && (mtu < NLRT_MIN_MTU || mtu > 0xffff))
+        return -EINVAL;
+    if (ifi->ifi_change & (uint32_t)NLRT_IF_FLAGS_UP)
+        want_up = (ifi->ifi_flags & (uint32_t)NLRT_IF_FLAGS_UP) ? 1 : 0;
+
+    int rc = 0;
+    if (have_mtu) {
+        rc = a20_lwip_if_set_mtu(ifindex, (uint16_t)mtu);
+        if (rc < 0)
+            return rc;
+    }
+    if (ifi->ifi_change & (uint32_t)NLRT_IF_FLAGS_UP)
+        rc = a20_lwip_if_set_flags(ifindex,
+                                    want_up ? NLRT_IF_FLAGS_UP : 0,
+                                    NLRT_IF_FLAGS_UP);
+    return rc;
+}
+
+static int nlrt_ip4_isany(const uint8_t a[4])
+{
+    return a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0;
+}
+
+/*
+ * RTM_NEWADDR / RTM_DELADDR.  The address is IFA_LOCAL, falling back to
+ * IFA_ADDRESS; the netmask comes from ifa_prefixlen because this message
+ * carries no mask attribute.  A NULL gw leaves the gateway alone: RTM_NEWADDR
+ * has no way to spell one.
+ */
+static int nlrt_apply_addr(uint16_t type, uint16_t flags,
+                           const ifaddrmsg_t *ifa,
+                           const uint8_t *attrs, size_t alen)
+{
+    if (ifa->ifa_family != AF_INET)
+        return -EAFNOSUPPORT;      /* no IPv6 address write path */
+    if (ifa->ifa_index == 0)
+        return -EINVAL;
+    if (ifa->ifa_prefixlen > 32)
+        return -EINVAL;
+    unsigned ifindex = ifa->ifa_index;
+
+    uint8_t address[4], local[4];
+    int have_address = 0, have_local = 0;
+    nlrt_attr_iter_t it = { attrs, alen, 0, 0 };
+    const rtattr_t *a;
+    while ((a = nlrt_attr_next(&it))) {
+        if (a->rta_type == IFA_ADDRESS) {
+            int r = nlrt_attr_get(a, sizeof(address), address);
+            if (r < 0)
+                return r;
+            have_address = 1;
+        } else if (a->rta_type == IFA_LOCAL) {
+            int r = nlrt_attr_get(a, sizeof(local), local);
+            if (r < 0)
+                return r;
+            have_local = 1;
+        }
+    }
+    if (it.bad)
+        return -EINVAL;
+
+    if (have_local && have_address && memcmp(local, address, 4) != 0) {
+        /* A distinct IFA_LOCAL is how a secondary address is spelled (it is the
+         * point-to-point form: IFA_ADDRESS is then the peer).  lwIP has one
+         * IPv4 slot per netif and no secondary-address API, so applying this
+         * would overwrite the primary while answering success. */
+        return -EOPNOTSUPP;
+    }
+    const uint8_t *want;
+    if (have_local)
+        want = local;
+    else if (have_address)
+        want = address;
+    else
+        return -EINVAL;
+
+    uint8_t cur[4], cur_mask[4], cur_gw[4];
+    int rc = a20_lwip_if_get_addr(ifindex, cur, cur_mask, cur_gw);
+    if (rc < 0)
+        return rc;                  /* unknown ifindex, reported before any write */
+
+    if (type == RTM_DELADDR) {
+        /* Confirm the address is the one configured before clearing the slot,
+         * so a stale delete cannot remove a configuration the caller never
+         * named. */
+        if (nlrt_ip4_isany(cur) || memcmp(cur, want, 4) != 0)
+            return -EADDRNOTAVAIL;
+        const uint8_t none[4] = { 0, 0, 0, 0 };
+        return a20_lwip_if_set_addr(ifindex, none, NULL, NULL);
+    }
+
+    /* RTM_NEWADDR.  One IPv4 slot per netif, so a netif already holding a
+     * *different* address can only be reconfigured by an explicit
+     * NLM_F_REPLACE (ip addr replace), never silently overwritten by a plain
+     * add.  The read and the write are separate lock acquisitions because the
+     * lock contract forbids holding g_lwip_lock and g_net_lock together, and
+     * this stack has no rtnl_lock equivalent; two config requests racing on
+     * one interface are therefore last-writer-wins. */
+    if (!nlrt_ip4_isany(cur) && memcmp(cur, want, 4) != 0 &&
+        !(flags & NLM_F_REPLACE))
+        return -EOPNOTSUPP;
+
+    uint8_t mask[4] = { 0, 0, 0, 0 };
+    for (unsigned i = 0; i < ifa->ifa_prefixlen; i++)
+        mask[i / 8] |= (uint8_t)(0x80u >> (i % 8));
+    /* IFA_BROADCAST / IFA_LABEL are accepted and unused: this stack derives the
+     * broadcast address from the netmask, and an interface has exactly one
+     * address, so there is no second label to move. */
+    return a20_lwip_if_set_addr(ifindex, want, mask, NULL);
+}
+
 int net_netlink_route_request(net_socket_t *requester, const void *buf,
                               size_t len, const void *addr, size_t addrlen)
 {
@@ -497,9 +768,10 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
     size_t payload = len - sizeof(netlink_msghdr_t);
     uint16_t type = req->nlmsg_type;
     size_t want;
-    if (type == RTM_GETLINK)
+    if (type == RTM_GETLINK || type == RTM_NEWLINK)
         want = sizeof(ifinfomsg_t);
-    else if (type == RTM_GETADDR)
+    else if (type == RTM_GETADDR || type == RTM_NEWADDR ||
+             type == RTM_DELADDR)
         want = sizeof(ifaddrmsg_t);
     else if (type == RTM_GETROUTE)
         want = sizeof(rtmsg_t);
@@ -508,6 +780,23 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
     if (req->nlmsg_len < sizeof(netlink_msghdr_t) + want ||
         req->nlmsg_len > len || payload < want)
         return -EINVAL;
+
+    /* Write requests run before any reply is built and hold no lock: the lwIP
+     * helpers take g_lwip_lock themselves, and the lock contract forbids
+     * holding it together with g_net_lock (taken only further down). */
+    if (type == RTM_NEWLINK || type == RTM_NEWADDR || type == RTM_DELADDR) {
+        /* Only a single-message write is honoured; a multipart request would
+         * carry further nlmsghdrs this path does not walk. */
+        if (req->nlmsg_flags & NLM_F_MULTI)
+            return -EINVAL;
+        const uint8_t *body = (const uint8_t *)buf + sizeof(*req);
+        size_t blen = (size_t)req->nlmsg_len - sizeof(*req) - want;
+        if (type == RTM_NEWLINK)
+            return nlrt_apply_newlink((const ifinfomsg_t *)body, body + want,
+                                      blen);
+        return nlrt_apply_addr(type, req->nlmsg_flags,
+                               (const ifaddrmsg_t *)body, body + want, blen);
+    }
 
     nlrt_link_t links[NLRT_MAX_LINKS];
     int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
@@ -544,7 +833,7 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
             ifaddrmsg_t *ifa = (ifaddrmsg_t *)(msg.b + off);
             memset(ifa, 0, sizeof(*ifa));
             ifa->ifa_family = AF_INET;
-            ifa->ifa_prefixlen = (uint8_t)(e->mask[0] ? 24 : 0);
+            ifa->ifa_prefixlen = nlrt_mask_prefixlen(e->mask);
             ifa->ifa_scope = e->loopback ? 254 : NLRT_SCOPE_UNIVERSE;
             ifa->ifa_index = e->index;
             off += sizeof(*ifa);

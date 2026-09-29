@@ -30,4 +30,16 @@ int  a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8]);
 int  a20_lwip_if_up(unsigned ifindex);
 int  a20_lwip_if_default_index(void);
 
+/* Netif reconfiguration for the netlink write path.  Each takes g_lwip_lock
+ * itself; callers must not already hold it.  A NULL mask or gw leaves that
+ * field unchanged.  With LWIP_NETIF_API=0 only the primary IPv4 address is
+ * reachable, so a non-primary IFA_LOCAL is refused with -EOPNOTSUPP rather
+ * than silently overwriting the primary. */
+int  a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
+                          const uint8_t mask[4], const uint8_t gw[4]);
+int  a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
+                          uint8_t gw[4]);
+int  a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu);
+int  a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask);
+
 #endif /* _NET_LWIP_STACK_H */
