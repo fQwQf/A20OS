@@ -4,11 +4,21 @@
 #include "core/string.h"
 #include "net/lwip_stack.h"
 #include "lwip/tcp.h"
+#include "lwip/igmp.h"
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
 
 #ifndef SHUT_RD
 #define SHUT_RD   0
 #define SHUT_WR   1
 #define SHUT_RDWR 2
+#endif
+
+/* Linux errno 100.  kernel/include/core/errno.h stops at EADDRNOTAVAIL (99)
+ * and resumes at ENETUNREACH (101), so the value a caller reads back for
+ * "interface is down" is spelled out here; core/errno.h needs the same line. */
+#ifndef ENETDOWN
+#define ENETDOWN 100
 #endif
 
 static uint64_t timeval_to_ticks(const void *optval, size_t optlen)
@@ -30,6 +40,140 @@ static int net_copyout_int(void *optval, size_t *optlen, int val)
     memcpy(optval, &val, sizeof(val));
     *optlen = sizeof(val);
     return 0;
+}
+
+/* Linux UABI, the value MCAST_JOIN_GROUP / MCAST_LEAVE_GROUP carry across the
+ * syscall boundary:
+ *
+ *   struct ip_mreqn { __be32 imr_multiaddr; __be32 imr_address; int imr_ifindex; }
+ *
+ * All three members are exactly 4 bytes, so the layout is frozen.  There is no
+ * family member: Linux derives it from the socket, which is why an AF_INET6
+ * socket asking at IPPROTO_IP is refused below instead of being joined.  This
+ * belongs next to net_sockaddr_in_t in kernel/include/net/socket.h, which is
+ * owned by the integrator; until then it is declared here so the wire layout
+ * has exactly one definition in the tree. */
+typedef struct net_ip_mreqn {
+    uint32_t imr_multiaddr;   /* group address, network byte order */
+    uint32_t imr_address;     /* local interface address, network order */
+    int32_t  imr_ifindex;     /* interface index; 0 selects the default netif */
+} net_ip_mreqn_t;
+
+/*
+ * Linux UABI wire values for the two multicast options.  kernel/include/net/
+ * socket.h spells them 10 and 11, but those are the BSD IP_PMTUDISC /
+ * IP_RECVERR numbers: Linux puts IP_MULTICAST_TTL at 33 and IP_MULTICAST_LOOP
+ * at 34, which is what user/external/musl/include/netinet/in.h:209-210 hands
+ * to unmodified musl programs.  Dispatching on the header's values would
+ * refuse every such call, so the wire numbers are spelled out here and the
+ * header needs the same correction.  MCAST_JOIN_GROUP (42) and
+ * MCAST_LEAVE_GROUP (45) in that header are already right.
+ */
+#define A20_IP_MULTICAST_TTL_WIRE  33
+#define A20_IP_MULTICAST_LOOP_WIRE 34
+
+/*
+ * Read one of the small integer IPPROTO_IP options, in either byte order.
+ * Linux stores IP_TTL, IP_TOS and IP_MULTICAST_* in network byte order, so a
+ * caller following the ABI literally passes htonl(v) -- and on every
+ * little-endian target this kernel builds, a plain host-order v is the byte
+ * swap of that.  Accepting both encodings is deliberate: rejecting the
+ * readable 64 would break the common case, and rejecting htonl(64) would
+ * break the network-aware one.  A value that is out of range in both orders is
+ * still refused, so this widens the accepted set without accepting junk.
+ * Returns the value, or a negative errno.
+ */
+static int net_ipopt_byte(const void *optval, size_t optlen, int lo, int hi)
+{
+    if (!optval || optlen < sizeof(int))
+        return -EINVAL;
+    int val;
+    memcpy(&val, optval, sizeof(val));
+    if (val < 0 || val > 0xff) {
+        uint32_t raw = (uint32_t)val;
+        val = (int)(((raw & 0xff000000u) >> 24) | ((raw & 0x00ff0000u) >> 8) |
+                    ((raw & 0x0000ff00u) << 8) | ((raw & 0x000000ffu) << 24));
+    }
+    return (val >= lo && val <= hi) ? val : -EINVAL;
+}
+
+/*
+ * Resolve the interface a multicast membership change names.  Linux prefers
+ * imr_ifindex and falls back to imr_address; both zero means "whatever the
+ * default route uses".  A selector that matches nothing returns NULL so the
+ * caller fails, instead of joining on an interface the caller never named.
+ * Must be called with g_lwip_lock held: netif_list is lwIP state.
+ */
+static struct netif *net_ip_group_netif(const net_ip_mreqn_t *mreq)
+{
+    if (mreq->imr_ifindex > 0) {
+        for (struct netif *n = netif_list; n; n = n->next)
+            if ((int32_t)netif_get_index(n) == mreq->imr_ifindex)
+                return n;
+        return NULL;
+    }
+    if (mreq->imr_address) {
+        for (struct netif *n = netif_list; n; n = n->next)
+            if (n->state && netif_ip4_addr(n)->addr == mreq->imr_address)
+                return n;
+        return NULL;
+    }
+    return netif_default;
+}
+
+/*
+ * MCAST_JOIN_GROUP / MCAST_LEAVE_GROUP.  The membership is host-wide IGMP
+ * state rather than socket state -- that is what the Linux ABI means by it --
+ * so nothing is stored on net_socket_t and the socket's implicit membership
+ * from bind()/connect() is deliberately left alone.
+ */
+static int net_ip_group_membership(net_socket_t *s, const net_ip_mreqn_t *mreq,
+                                   int join)
+{
+    if (s->domain != AF_INET)
+        return -EAFNOSUPPORT;
+    ip4_addr_t group;
+    group.addr = mreq->imr_multiaddr;
+    if (!ip4_addr_ismulticast(&group))
+        return -EINVAL;
+
+    /* g_lwip_lock alone: the netif list and the IGMP group table are lwIP
+     * state, and the two kernel locks must never be held together (see
+     * docs/net/network-lock-contract.md).  Nothing here allocates. */
+    uint64_t flags = a20_lwip_lock();
+    struct netif *nif = net_ip_group_netif(mreq);
+    if (!nif) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    if (!netif_is_up(nif)) {
+        /* igmp_joingroup() would still create the group and emit a report from
+         * an interface with no carrier, i.e. a membership nobody can use. */
+        a20_lwip_unlock(flags);
+        return -ENETDOWN;
+    }
+    if (ip4_addr_isany(netif_ip4_addr(nif))) {
+        /* An interface with no IPv4 address cannot source the report, and
+         * igmp_joingroup() reads 0.0.0.0 as "join on every interface". */
+        a20_lwip_unlock(flags);
+        return -EADDRNOTAVAIL;
+    }
+    if (!(nif->flags & NETIF_FLAG_IGMP)) {
+        /* No multicast filter on the driver, so the group could never be
+         * delivered.  Say so instead of joining and reporting success. */
+        a20_lwip_unlock(flags);
+        return -EOPNOTSUPP;
+    }
+    err_t e = join ? igmp_joingroup(netif_ip4_addr(nif), &group)
+                   : igmp_leavegroup(netif_ip4_addr(nif), &group);
+    a20_lwip_unlock(flags);
+    if (e == ERR_OK)
+        return 0;
+    if (e == ERR_MEM)
+        return -ENOMEM;
+    /* lwIP returns ERR_VAL for the all-systems group in both directions, and
+     * for a leave of a group this host never joined. */
+    return join ? -EINVAL : -ENOENT;
 }
 
 int net_listen(int gfd, int backlog)
@@ -244,13 +388,65 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
         return -EOPNOTSUPP;
     }
     if (level == IPPROTO_IP) {
-        if (optname == MCAST_JOIN_GROUP)
-            return optlen ? 0 : -EINVAL;
-        if (optname == MCAST_LEAVE_GROUP)
-            return -EADDRNOTAVAIL;
-        /* Reject the unimplemented remainder (IP_TTL, IP_TOS, IP_OPTIONS,
-         * IP_TRANSPARENT, ...).  Policy: a setsockopt a caller cannot honour
-         * must fail, never silently succeed. */
+        if (optname == MCAST_JOIN_GROUP || optname == MCAST_LEAVE_GROUP ||
+            optname == IP_ADD_MEMBERSHIP || optname == IP_DROP_MEMBERSHIP) {
+            if (!optval || optlen < sizeof(net_ip_mreqn_t))
+                return -EINVAL;
+            net_ip_mreqn_t mreq;
+            memcpy(&mreq, optval, sizeof(mreq));
+            return net_ip_group_membership(s, &mreq,
+                                          optname == MCAST_JOIN_GROUP ||
+                                          optname == IP_ADD_MEMBERSHIP);
+        }
+        if (optname == A20_IP_MULTICAST_TTL_WIRE ||
+            optname == A20_IP_MULTICAST_LOOP_WIRE) {
+            /* Both only mean something for a pcb that can emit a multicast
+             * datagram, and a stream socket never has one, so storing the
+             * value would be a silent no-op. */
+            if (s->type == SOCK_STREAM)
+                return -EINVAL;
+        }
+        if (optname == A20_IP_MULTICAST_TTL_WIRE) {
+            int val = net_ipopt_byte(optval, optlen, 0, 0xff);
+            if (val < 0)
+                return val;
+            s->mc_ttl = (uint8_t)val;
+            net_inet_ip_opts_apply(s);
+            return 0;
+        }
+        if (optname == A20_IP_MULTICAST_LOOP_WIRE) {
+            int val = net_ipopt_byte(optval, optlen, 0, 1);
+            if (val < 0)
+                return val;
+            s->mc_loop = (uint8_t)val;
+            net_inet_ip_opts_apply(s);
+            return 0;
+        }
+        if (optname == IP_TTL) {
+            int val = net_ipopt_byte(optval, optlen, 1, 0xff);
+            if (val < 0)
+                return val;
+            s->ip_ttl = (uint8_t)val;
+            s->ip_ttl_set = 1;
+            net_inet_ip_opts_apply(s);
+            return 0;
+        }
+        if (optname == IP_TOS) {
+            int val = net_ipopt_byte(optval, optlen, 0, 0xff);
+            if (val < 0)
+                return val;
+            s->ip_tos = (uint8_t)val;
+            s->ip_tos_set = 1;
+            net_inet_ip_opts_apply(s);
+            return 0;
+        }
+        /* IP_OPTIONS is the interesting refusal: honouring it needs a
+         * per-packet option buffer and lwIP's raw/udp/tcp output takes none
+         * (raw_sendto_if, udp_sendto_if_src, tcp_output), so the options
+         * could only be written to the IP header by a second send path.
+         * IP_HDRINCL, IP_TRANSPARENT and the rest are likewise unimplemented.
+         * Policy: a setsockopt a caller cannot honour must fail, never
+         * silently succeed. */
         return -EOPNOTSUPP;
     }
     if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && optname == IPV6_CHECKSUM) {
@@ -511,6 +707,22 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
             return 0;
         }
         val = 0;
+    }
+    else if (level == IPPROTO_IP) {
+        /* Report the effective value, not the stored field: a caller that never
+         * set an option must see the TTL/TOS its packets actually carry. */
+        uint8_t ttl, tos, mc_ttl;
+        net_inet_ip_effective(s, &ttl, &tos, &mc_ttl);
+        switch (optname) {
+        case IP_TTL:                  val = ttl; break;
+        case IP_TOS:                  val = tos; break;
+        case A20_IP_MULTICAST_TTL_WIRE:  val = mc_ttl; break;
+        case A20_IP_MULTICAST_LOOP_WIRE: val = s->mc_loop; break;
+        /* -EOPNOTSUPP rather than -ENOPROTOOPT: the option exists in the Linux
+         * ABI, this kernel just cannot honour it (IP_OPTIONS needs a
+         * per-packet option buffer lwIP's output path has no room for). */
+        default: return -EOPNOTSUPP;
+        }
     }
     else if (level == IPPROTO_TCP) {
         if (s->type != SOCK_STREAM)
