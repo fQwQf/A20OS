@@ -40,6 +40,18 @@
 #define SYS_linkat 37
 #endif
 
+#ifndef SYS_ioctl
+#define SYS_ioctl 29
+#endif
+
+/* FS_IOC_GETFLAGS/SETFLAGS are _IOR/_IOW('f', 1|2, long), so the encoded value
+ * embeds sizeof(long); derive it rather than hardcoding the LP64 form. */
+#define VFS_FS_IOC_GETFLAGS \
+    ((2UL << 30) | (sizeof(long) << 16) | (('f') << 8) | 1)
+#define VFS_FS_IOC_SETFLAGS \
+    ((1UL << 30) | (sizeof(long) << 16) | (('f') << 8) | 2)
+#define EXT4_EXTENTS_FL 0x00080000
+
 #ifndef SYS_fchmod
 #define SYS_fchmod 91
 #endif
@@ -448,6 +460,40 @@ static int ext4_hardlink_truncate(const char *mp)
     return 0;
 }
 
+/* FS_IOC_GETFLAGS must report the file's real ext4 i_flags with the
+ * ext4-internal EXT4_EXTENTS_FL bit masked out, and FS_IOC_SETFLAGS must be
+ * refused: A20OS enforces no FS_* mutation in the write path, so accepting
+ * the bits would promise behaviour that does not exist. */
+static int ext4_fs_ioc_flags(const char *dir)
+{
+    char path[160];
+    snprintf(path, sizeof(path), "%s/fs_ioc_flags.txt", dir);
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0644);
+    if (fd < 0)
+        return fail("fsioc-open");
+
+    int rc = 0;
+    long flags = -1;
+    if (syscall(SYS_ioctl, fd, VFS_FS_IOC_GETFLAGS, &flags) != 0) {
+        rc = fail("fsioc-getflags");
+    } else if (flags & EXT4_EXTENTS_FL) {
+        printf("VFS_STRESS: FAIL fsioc-extents-leak flags=0x%lx\n", flags);
+        rc = 1;
+    } else {
+        errno = 0;
+        long want = flags | 0x10 /* FS_IMMUTABLE_FL */;
+        if (syscall(SYS_ioctl, fd, VFS_FS_IOC_SETFLAGS, &want) == 0) {
+            printf("VFS_STRESS: FAIL fsioc-setflags-accepted\n");
+            rc = 1;
+        } else if (errno != EOPNOTSUPP) {
+            rc = fail("fsioc-setflags-errno");
+        }
+    }
+    close(fd);
+    unlink(path);
+    return rc;
+}
+
 static int ext4_open_unlink(void)
 {
     mkdir("/tmp/e4m", 0755);
@@ -466,6 +512,8 @@ static int ext4_open_unlink(void)
     if (open_unlink_persist("/tmp/e4m") != 0)
         rc = 1;
     else if (ext4_hardlink_truncate("/tmp/e4m") != 0)
+        rc = 1;
+    else if (ext4_fs_ioc_flags("/tmp/e4m") != 0)
         rc = 1;
     if (syscall(SYS_umount2, "/tmp/e4m", 0) < 0 && rc == 0)
         rc = fail("ext4-umount");
