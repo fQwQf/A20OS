@@ -18,12 +18,25 @@ struct sockaddr_alg {
     uint8_t  salg_name[64];
 };
 
+/* Exit-code contract, honoured by network_suite.c (test_case_t.absent_code):
+ *   0  passed
+ *   1  the capability exists but misbehaved
+ *   77 SKIP: not configured in this run (environment), not an absence
+ *   78 ABSENT: AF_ALG has no usable algorithm.  A20OS deliberately ships an
+ *      alg_table whose every entry has accepted=0, so bind() answers -ENOENT
+ *      forever unless a real kernel crypto provider lands (kernel/net/
+ *      socket_alg.c states the rule: never stub an algorithm).  Reporting that
+ *      as a plain skip let the permanent absence hide inside a green suite.
+ */
+#define ALG_TEST_ABSENT 78
+
 int main(void) {
     int fd = socket(AF_ALG, SOCK_SEQPACKET, 0);
     if (fd < 0) {
         if (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT) {
-            printf("ALG_TEST: SKIP\n");
-            return 77;
+            printf("ALG_TEST: ABSENT AF_ALG family not implemented "
+                   "(errno=%d)\n", errno);
+            return ALG_TEST_ABSENT;
         }
         perror("socket AF_ALG");
         printf("ALG_TEST: FAIL\n");
@@ -36,10 +49,11 @@ int main(void) {
     };
 
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        if (errno == EAFNOSUPPORT || errno == ENOENT) {
+        if (errno == EAFNOSUPPORT || errno == ENOENT || errno == EOPNOTSUPP) {
             close(fd);
-            printf("ALG_TEST: SKIP\n");
-            return 77;
+            printf("ALG_TEST: ABSENT no AF_ALG algorithm registered "
+                   "(errno=%d)\n", errno);
+            return ALG_TEST_ABSENT;
         }
         perror("bind AF_ALG");
         close(fd);
