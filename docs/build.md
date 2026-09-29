@@ -60,7 +60,6 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 
 - 默认 `OPT=-O3`，对应发布构建。
 - 调试构建使用 `make debug-<arch>`，它会强制 `OPT="-O0 -g -DDEBUG"` 并启动 QEMU 的 GDB 服务器。
-- `MODE` 目前不参与 CFLAGS 或用户态优化选择；不要用 `MODE=debug`/`MODE=release` 表达优化意图。
 
 ## 常用变量
 
