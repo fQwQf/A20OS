@@ -12,6 +12,9 @@
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/timekeeping.h"
+#include "core/ioctl.h"
+#include "core/errno.h"
+#include "sys/usercopy.h"
 #include "proc/proc.h"
 
 /* ext4 file I/O: per-open context, read/write/lseek/readdir. */
@@ -536,11 +539,45 @@ vfile_t *ext4_open_vnode(vnode_t *vn, int flags) {
 }
 
 
+/*
+ * FS_IOC_GETFLAGS reports the inode's real on-disk i_flags.  SETFLAGS is
+ * refused: A20OS enforces none of the FS_* mutation semantics in the write
+ * path, so storing the bits would promise behaviour the kernel does not
+ * implement.  This matches how fileattr.c reports the syscall form.
+ */
+static int ext4_ioctl(vfile_t *vf, unsigned long req, void *arg)
+{
+    ext4_fctx_t *fc = (ext4_fctx_t *)vf->priv;
+    if (!fc)
+        return -ENOTTY;
+
+    if (req == FS_IOC_GETFLAGS_LP64 || req == FS_IOC_GETFLAGS_ILP32) {
+        uint32_t flags;
+        if (fc->inode_valid) {
+            flags = fc->inode.i_flags;
+        } else {
+            ext4_inode_t ino;
+            if (ext4_read_inode(fc->sb, fc->inode_num, &ino) < 0)
+                return -EIO;
+            flags = ino.i_flags;
+        }
+        /* EXT4_EXTENTS_FL is ext4-internal bookkeeping, not a Linux FS_* flag,
+         * so it must not leak out through the ABI word. */
+        flags &= ~EXT4_EXTENTS_FL;
+        long v = (long)flags;
+        return copy_to_user(arg, &v, sizeof(v)) < 0 ? -EFAULT : 0;
+    }
+    if (req == FS_IOC_SETFLAGS_LP64 || req == FS_IOC_SETFLAGS_ILP32)
+        return -EOPNOTSUPP;
+    return -ENOTTY;
+}
+
+
 vfile_ops_t g_ext4_fops = {
     .read    = ext4_fread,
     .write   = ext4_fwrite,
     .lseek   = ext4_flseek,
     .readdir = ext4_freaddir,
-    .ioctl   = NULL,
+    .ioctl   = ext4_ioctl,
     .close   = ext4_fclose,
 };
