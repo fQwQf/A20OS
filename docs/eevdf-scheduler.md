@@ -1,6 +1,6 @@
 # EEVDF 调度器设计
 
-本文描述 `kernel/proc/sched.c` 当前实现的 EEVDF（Earliest Eligible Virtual Deadline First，最早资格虚拟截止时间优先）调度核心，及其在 SMP 负载均衡、资格门控、虚拟 slice 旋钮方面的扩展。与 [进程、调度与阻塞协议](process-scheduler.md) 互补：后者讲任务状态、CPU 所有权与锁协议，本文讲公平/延迟的**选择策略**。
+`kernel/proc/sched.c` 里跑的是 EEVDF（Earliest Eligible Virtual Deadline First，最早资格虚拟截止时间优先）调度核心，本文讲它本身以及 SMP 负载均衡、资格门控、虚拟 slice 旋钮这些扩展。它与 [进程、调度与阻塞协议](process-scheduler.md) 互补：后者是任务状态、CPU 所有权与锁协议，这里是公平/延迟的**选择策略**。
 
 ## 1. 背景与目标
 
@@ -14,7 +14,7 @@ A20OS 同时面向三类场景，对调度器有相互冲突的要求：
 
 旧实现是 8 级 MLFQ + aging 计时器：公平性靠"等得久就升到级 0"来近似，nice/weight 并不真正参与排序，SMP 只有唤醒时放置、没有空闲窃取，8 核下容易出现负载失衡。
 
-调研了 Linux CFS/EEVDF、MuQSS（桌面 EEVDF 变体）、WALT（移动端负载跟踪）以及 Liu & Layland 的 RT 理论后，选择 **EEVDF 作为统一核心**：它用一套模型同时给出按权公平（HPC 吞吐）与短时间片低延迟（桌面交互），且不需要CFS 那套脆弱的交互启发式。Linux 6.6+ 主线和独立发展的 MuQSS 都收敛到EEVDF，说明该算法在通用负载上经过充分验证。
+调研了 Linux CFS/EEVDF、MuQSS（桌面 EEVDF 变体）、WALT（移动端负载跟踪）以及 Liu & Layland 的 RT 理论后，选择 **EEVDF 作为统一核心**：它用一套模型同时给出按权公平（HPC 吞吐）与短时间片低延迟（桌面交互），且不需要 CFS 那套脆弱的交互启发式。Linux 6.6+ 主线和独立发展的 MuQSS 都收敛到 EEVDF，说明该算法在通用负载上经过充分验证。
 
 ## 2. 核心模型
 
@@ -26,7 +26,7 @@ A20OS 同时面向三类场景，对调度器有相互冲突的要求：
 vruntime += dt * EEVDF_NICE0_LOAD / weight
 ```
 
-`weight` 来自 nice（`sched_prio_to_weight[]`，低 nice 权重高）。权重高的任务 vruntime 增长慢，因此"理应"获得更多 CPU。这修复了旧调度器里nice/weight 纯装饰的问题。
+`weight` 来自 nice（`sched_prio_to_weight[]`，低 nice 权重高）。权重高的任务 vruntime 增长慢，因此"理应"获得更多 CPU。这修复了旧调度器里 nice/weight 纯装饰的问题。
 
 ### 2.2 系统虚拟时间与资格
 
@@ -53,7 +53,7 @@ vslice = base_slice * EEVDF_NICE0_LOAD / weight
 deadline = vruntime + vslice
 ```
 
-**选择规则：EEVDF 类按虚拟截止时间组织成随机化二叉搜索树（treap），`picker` 从根开始下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务；若没有 eligible 任务，则回退到 `eevdf_first`（最早 deadline）以保证进展。** `vslice` 较小会形成更早 deadline，而资格门控和按权 vruntime 共同约束长期份额。
+选择规则：EEVDF 类按虚拟截止时间组织成随机化二叉搜索树（treap），`picker` 从根开始下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务；若没有 eligible 任务，则回退到 `eevdf_first`（最早 deadline）以保证进展。`vslice` 较小会形成更早 deadline，而资格门控和按权 vruntime 共同约束长期份额。
 
 ### 2.4 调度类层次
 
@@ -72,7 +72,7 @@ deadline = vruntime + vslice
 - `proc_yield()`：主动让出前记账；
 - `context_switch()`：切出旧任务时记账。
 
-所有记账共用 `task->eevdf_last_account` 时间戳，避免重复计数。任务跨睡眠**保留** `vruntime`（sleeper bonus）：刚唤醒的任务 vruntime 落后、deadline早，天然获得交互优先级；但 bonus 在入队时被钳制到 `EEVDF_MAX_LAG`（默认 10ms），防止长睡后 CPU-burn 的任务长时间独占。
+所有记账共用 `task->eevdf_last_account` 时间戳，避免重复计数。任务跨睡眠**保留** `vruntime`（sleeper bonus）：刚唤醒的任务 vruntime 落后、deadline 早，天然获得交互优先级；但 bonus 在入队时被钳制到 `EEVDF_MAX_LAG`（默认 10ms），防止长睡后 CPU-burn 的任务长时间独占。
 
 ## 4. 数据结构和锁
 
@@ -103,7 +103,7 @@ typedef struct proc_runq {
 
 ## 5. SMP 负载均衡：空闲窃取
 
-唤醒路径只在唤醒时把任务放到最闲 CPU。新增**空闲窃取**：本地 CPU 的runqueue 为空时，用非阻塞 `spin_trylock_irqsave` 尝试其他 CPU 的 runqueue，把任务拉到本地执行，避免"某核满载、其他核空闲"的持续失衡。
+唤醒路径只在唤醒时把任务放到最闲 CPU。新增**空闲窃取**：本地 CPU 的 runqueue 为空时，用非阻塞 `spin_trylock_irqsave` 尝试其他 CPU 的 runqueue，把任务拉到本地执行，避免"某核满载、其他核空闲"的持续失衡。
 
 窃取规则刻意保守：
 
@@ -138,13 +138,13 @@ echo 50 > /proc/a20/sched_base_slice # 更大的虚拟 deadline slice
 
 ## 8. 历史验证快照
 
-以下结果来自 EEVDF 引入期的历史验收记录，用于说明算法设计动机；它们不是当前提交的测试结果，引用前需在当前提交上重新运行。
+以下结果是 EEVDF 引入期的历史验收记录，只用来说明算法设计动机。它们不是当前提交的测试结果，引用前需在当前提交上重新运行。
 
-- **nice 历史观察**：旧记录声称同窗内 `nice -20` 相对 `nice 19` 获得约 100000 倍 CPU；当前权重表两端是 43020/88（约 489 倍），且本页没有绑定该数字的原始日志，因此不能把 100000 倍继续表述为理论比例或 HEAD 验证结果。
-- **负载均衡**：8 个忙任务分布在全部 8 核（busy_cores=8），此前堆在一核。
-- **8 核压力**：`sched_stress` 的 `smp-runqueue` 与 `lock-split` 全 PASS， 空闲窃取以 `runqueue_migrations` 计数正常触发。
-- **全量门禁**：历史记录包含双架构构建与启动、5 架构构建、`check-doc-test-gates` 聚合目标以及 procfs/sched/futex/proc/mm/vfs 压力测试。`check-doc-test-gates` 不只是文档检查；其依赖包含构建和 QEMU runtime smoke，范围较广且可能耗时较长。
-- **虚拟 slice 旋钮**：历史样本在 2 ms/50 ms 值下保持稳定；该结果不表示实际 tick 抢占周期随之变化。
+- nice 历史观察：旧记录声称同窗内 `nice -20` 相对 `nice 19` 获得约 100000 倍 CPU；当前权重表两端是 43020/88（约 489 倍），且本页没有绑定该数字的原始日志，因此不能把 100000 倍继续表述为理论比例或 HEAD 验证结果。
+- 负载均衡：8 个忙任务分布在全部 8 核（busy_cores=8），此前堆在一核。
+- 8 核压力：`sched_stress` 的 `smp-runqueue` 与 `lock-split` 全 PASS，空闲窃取以 `runqueue_migrations` 计数正常触发。
+- 全量门禁：历史记录包含双架构构建与启动、5 架构构建、`check-doc-test-gates` 聚合目标以及 procfs/sched/futex/proc/mm/vfs 压力测试。`check-doc-test-gates` 不只是文档检查；其依赖包含构建和 QEMU runtime smoke，范围较广且可能耗时较长。
+- 虚拟 slice 旋钮：历史样本在 2 ms/50 ms 值下保持稳定；该结果不表示实际 tick 抢占周期随之变化。
 
 ## 9. 已知限制与后续工作
 

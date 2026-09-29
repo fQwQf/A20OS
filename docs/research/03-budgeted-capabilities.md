@@ -1,6 +1,6 @@
 # 预算能力（Budgeted Capabilities）——C1 机制贡献
 
-> **本文是研究主轴的第一根支柱（机制）**：把"授权"从二元权限推广为**多维预算**。核心洞察：**预算可部署，权限不可部署**——二元权限要求代码重写（rewrite mandate），而量化、可耗竭的预算可以在部署时注入。这与 C2（能力信封 05，系统贡献）一起，把能力系统从"重写命令"变成"部署选项"。 **范围说明**：本文的"时间/次数"维度即旧版时态能力；本文将其推广为**类型 × 权限 × 时间 × 次数 × 传播**的同构预算格。定理沿用旧编号体系（3.1-3.3、7.1）。所有证明为纸笔论证，机器检验计划见 08。
+> 研究主轴的第一根支柱是机制：把"授权"从二元权限推广为多维预算。核心洞察是预算可部署而权限不可部署，二元权限要求代码重写（rewrite mandate），量化、可耗竭的预算可以在部署时注入。这与 C2（能力信封 05，系统贡献）一起，把能力系统从"重写命令"变成"部署选项"。范围说明：本文的"时间/次数"维度即旧版时态能力，本文将其推广为类型 × 权限 × 时间 × 次数 × 传播的同构预算格，定理沿用旧编号体系（3.1-3.3、7.1）。所有证明为纸笔论证，机器检验计划见 08。
 
 ---
 
@@ -8,17 +8,17 @@
 
 ### 1.1 传统 capability 的两个死结
 
-**死结一（重写命令）**：capability 是二元权限（能/不能），获得它要求代码显式请求、显式传递、显式管理 → 系统必须重写。这是 seL4（全重写）、Zircon（生态从零）从未被采纳的根源。
+死结一（重写命令）：capability 是二元权限（能/不能），获得它要求代码显式请求、显式传递、显式管理，系统必须重写。这是 seL4（全重写）、Zircon（生态从零）从未被采纳的根源。
 
-**死结二（授予即永久）**：权限一旦授予永久有效，直到显式撤销。供应链组件共享宿主进程全部权限，且**没有时间/数量边界**（Log4Shell 2021、SolarWinds 2020、XZ 2024 的共同模式）。
+死结二（授予即永久）：权限一旦授予永久有效，直到显式撤销。供应链组件共享宿主进程全部权限，且没有时间/数量边界（Log4Shell 2021、SolarWinds 2020、XZ 2024 的共同模式）。
 
 ### 1.2 关键观察：安全界早已普遍接受"临时凭证"
 
-OAuth token、JWT、X.509 证书都有有效期——**凭证是量化的、会过期的**。但它们是**用户态协议**：内核不参与执行，进程被攻破后可以自己延长（自签 token），也没有与能力模型结合。
+OAuth token、JWT、X.509 证书都有有效期，凭证是量化的、会过期的。但它们是用户态协议：内核不参与执行，进程被攻破后可以自己延长（自签 token），也没有与能力模型结合。
 
 ### 1.3 我们的推广：authority 是多维预算
 
-> **权限是"能否"，预算是"多少、多久、多少次、能碰到哪类"**。把授权建模为多维预算向量，能力纪律就可以被**注入**（部署时），而不是**写入**（构建时）。
+> 权限是"能否"，预算是"多少、多久、多少次、能碰到哪类"。把授权建模为多维预算向量，能力纪律就可以被注入（部署时），而不是写入（构建时）。
 
 $$\rho_{eff}(h,t) = \bigwedge_{\dim \in \{type, rights, time, ops, propagation\}} \rho_{dim}(h,t)$$
 
@@ -26,11 +26,11 @@ $$\rho_{eff}(h,t) = \bigwedge_{\dim \in \{type, rights, time, ops, propagation\}
 
 | 维度 | 预算内容 | 对应机制 |
 |------|---------|---------|
-| **类型** | 可接触的资源类 | typed channel / 信封 allowed_types |
-| **权限** | rights 子集上限 | handle_dup 降权 |
-| **时间** | `expiry_tick` | 时态能力 |
-| **次数** | `remaining_ops` | 操作预算 |
-| **传播** | 可向外委托的类型/预算 | 委托链耗散 + 类型化通道 |
+| 类型 | 可接触的资源类 | typed channel / 信封 allowed_types |
+| 权限 | rights 子集上限 | handle_dup 降权 |
+| 时间 | `expiry_tick` | 时态能力 |
+| 次数 | `remaining_ops` | 操作预算 |
+| 传播 | 可向外委托的类型/预算 | 委托链耗散 + 类型化通道 |
 
 ---
 
@@ -58,19 +58,19 @@ typedef struct a20_handle_entry {
 
 $$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP \lor t < expiry) \land (\neg OP \lor remaining > 0) \land \tau(h) \in \text{allowed}(h) \\ \emptyset & \text{otherwise} \end{cases}$$
 
-**O(1) 判定**：各维都是固定字段的位运算/比较，不查历史。这是"预算可支撑 syscall 频率"的系统学关键。
+O(1) 判定：各维都是固定字段的位运算/比较，不查历史。这是"预算可支撑 syscall 频率"的系统学关键。
 
 ### 2.3 用户态入口
 
-- `handle_control(SET_TEMPORAL/GET_TEMPORAL/SET_LABEL)`：**仅可增强约束**（添加 flag、提前 expiry、减少 ops、提升 label）——不可刷新由接口保证。
-- 复制/传递路径（dup/replace/spawn/transfer/vm_share）**自动继承**预算并耗散。
+- `handle_control(SET_TEMPORAL/GET_TEMPORAL/SET_LABEL)`：仅可增强约束（添加 flag、提前 expiry、减少 ops、提升 label），不可刷新由接口保证。
+- 复制/传递路径（dup/replace/spawn/transfer/vm_share）自动继承预算并耗散。
 - deadline-driven sweeper 周期扫描，`AUTO_CLOSE` 过期即回收。
 
 ### 2.4 委托链耗散（O(1) 策略执行）
 
-预算在传播中只减不增：`expiry' ≤ expiry`、`ops' ≤ remaining`、`allowed_types' ⊆ allowed_types`。在**源头**设置一次 `expiry = T`，委托链任意长度的终端过期时刻都不晚于 $T$。
+预算在传播中只减不增：`expiry' ≤ expiry`、`ops' ≤ remaining`、`allowed_types' ⊆ allowed_types`。在源头设置一次 `expiry = T`，委托链任意长度的终端过期时刻都不晚于 $T$。
 
-> **O(1) 安全策略执行**：策略在源头设置一次，之后所有判定 O(1)，无需逐级策略检查。与 05 的信封结合，这变成"部署时设置一次，运行时零策略查询"。
+> O(1) 安全策略执行：策略在源头设置一次，之后所有判定 O(1)，无需逐级策略检查。与 05 的信封结合，这变成"部署时设置一次，运行时零策略查询"。
 
 ---
 
@@ -84,7 +84,7 @@ $$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP \lor t < expir
 
 $$\frac{HT_p(h) = (o, \rho) \quad R \in \rho_{eff}(h, t)}{\langle op_p(h, \ldots), \sigma(t) \rangle \longrightarrow \ldots}$$
 
-**handle_dup 预算扩展**（权限、时间、次数、类型四重子集约束）：
+handle_dup 预算扩展（权限、时间、次数、类型四重子集约束）：
 
 $$\frac{HT_p(h_s) = (o, \rho) \quad \rho_{eff}(h_s, t) \neq \emptyset \quad \rho_{req} \subseteq \rho \quad \text{DUP} \in \rho_{eff}(h_s, t) \quad expiry' \leq expiry(h_s) \quad ops' \leq remaining(h_s) \quad allowed' \subseteq allowed(h_s)}{\langle dup_p(h_s, \rho_{req}), \sigma(t) \rangle \longrightarrow \langle ok(h_d), \sigma(t)[HT_p(h_d) \mapsto (o, \rho_{req}, \ldots)] \rangle}$$
 
@@ -116,7 +116,7 @@ $$AS(U) \subseteq \bigcup_{h_i \in H_U} Types(\tau_i) \times [0, e_i] \times [0,
 
 ## 4. 与基础不变量 $\mathcal{I}$ 的关系
 
-预算字段不改变 I1（权限合法）、I3（引用计数）、I4（对象活性）、I5（类型安全）——它们只收紧 lookup 阶段的有效权限。$\rho_{eff} \subseteq \rho$ 恒成立，故既有保持论证在预算模型下继续成立。**这是"预算可无侵入叠加在既有 capability 模型上"的形式化依据，也是 05 信封调解器能复用 Native 机制的原因。**
+预算字段不改变 I1（权限合法）、I3（引用计数）、I4（对象活性）、I5（类型安全），它们只收紧 lookup 阶段的有效权限。$\rho_{eff} \subseteq \rho$ 恒成立，故既有保持论证在预算模型下继续成立。这是"预算可无侵入叠加在既有 capability 模型上"的形式化依据，也是 05 信封调解器能复用 Native 机制的原因。
 
 ---
 
@@ -126,13 +126,13 @@ $$AS(U) \subseteq \bigcup_{h_i \in H_U} Types(\tau_i) \times [0, e_i] \times [0,
 - [x] `user/tests/test_native_handle.c` 覆盖 op-count 衰减、expiry AUTO_CLOSE。
 - [ ] 类型维度进入预算格（typed channel 是类型维度的传播约束，04）。
 - [ ] 数据预算（`data_budget`）未实现（预留字段）。
-- [ ] 与 05 信封的接线是**新的核心工作量**。
+- [ ] 与 05 信封的接线是新的核心工作量。
 
 ---
 
 ## 6. 风险
 
-1. **新颖性**：leasing（Gray & Cheriton'89）、SPKI 有效期、OAuth scope+expiry 必须逐篇核对（09 §2.2）；我们可辩护的增量是：**内核强制 + 多维预算格 + 单调衰减/不可刷新形式化 + 双 ABI 部署载体**。
-2. **效用**：预算模型必须用真实场景（包安装/插件）证明价值，而不是纸上推演（10 E2）。
-3. **开销**：+16 bytes + 判定分支 + sweeper 必须量化（10 E1）。若不可接受，"O(1) 判定"卖点不成立。
-4. **tick 单调性**：多核时钟一致性需在 08 机器检验中覆盖。
+1. 新颖性：leasing（Gray & Cheriton'89）、SPKI 有效期、OAuth scope+expiry 必须逐篇核对（09 §2.2）；可辩护的增量是内核强制 + 多维预算格 + 单调衰减/不可刷新形式化 + 双 ABI 部署载体。
+2. 效用：预算模型必须用真实场景（包安装/插件）证明价值，而不是纸上推演（10 E2）。
+3. 开销：+16 bytes + 判定分支 + sweeper 必须量化（10 E1）。若不可接受，"O(1) 判定"卖点不成立。
+4. tick 单调性：多核时钟一致性需在 08 机器检验中覆盖。

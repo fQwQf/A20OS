@@ -1,6 +1,6 @@
 # 混合内核演进方向
 
-本文档说明 A20OS 混合内核与主流混合内核（Fuchsia / macOS XNU 等）对齐的**结构性能力差距**、候选设计方向与已做出的设计决策。内容已按 2026-08 源码核对；“目标能力”不是当前完成声明。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
+内容已按 2026-08 源码核对。当前形态见 [00-design.md](00-design.md)，机制细节见 [01-mechanisms.md](01-mechanisms.md)。
 
 ## 目标能力
 
@@ -26,7 +26,7 @@
 - 捐赠时间计入被调者（EEVDF 记账正确）；SMP 下仅同核捐赠，跨核退化为 priority-preempt；
 - 防死锁/防优先级反转：捐赠链深度上限、链上节点不可再发起阻塞调用、高优先级抢占时整体让出。
 
-**当前状态**：出站半程直接切换已实现；**捐赠仅限 UP**（SMP 需要跨核唤醒簿记，见 STATUS 边界）。回半程直接切换与 SMP 捐赠是后续工作。
+出站半程直接切换已实现；**捐赠仅限 UP**（SMP 需要跨核唤醒簿记，见 STATUS 边界）。回半程直接切换与 SMP 捐赠是后续工作。
 
 ### 2. 服务发现与重绑定
 
@@ -38,7 +38,7 @@
 - 重绑定协议：客户端缓存端点，调用返回 `CANCELED` 时自动重新查询；
 - 健康探针：注册表/监管者周期 ping，超时判定僵死 → 强杀 → 重启。
 
-**当前状态**：注册表（syscall `0x0A03`）与按名解析、崩溃重绑已实现。监管健康探测走独立的 ping 通道对（`A20_SVC_PING_SLOT`），svcmgr 不读取 client_ep，ping/pong 与客户端 RPC 回复不再共享队列。已知限制：注册表仍分发服务**同一个**客户端点，多客户端并发 RPC 会共享请求队列（回复可能错配）；主流做法是注册表/服务为每个客户端建新端点对并代理转发。
+注册表（syscall `0x0A03`）与按名解析、崩溃重绑已实现。监管健康探测走独立的 ping 通道对（`A20_SVC_PING_SLOT`），svcmgr 不读取 client_ep，ping/pong 与客户端 RPC 回复不再共享队列。已知限制：注册表仍分发服务同一个客户端点，多客户端并发 RPC 会共享请求队列（回复可能错配）；主流做法是注册表/服务为每个客户端建新端点对并代理转发。
 
 ### 3. 资源硬隔离
 
@@ -50,7 +50,7 @@
 - 泄漏审计：全局对象计数（`/proc/a20/objects`），崩溃/重启循环前后计数差必须为 0；
 - DMA 授权模型：用户驱动不允许提供任意物理地址，DMA 缓冲只能来自内核分配的 VMO（pin + 内核翻译 virtqueue 描述符物理地址）。
 
-**当前状态**：七项实时对象计数审计 + 句柄硬配额（4096）已实现；按服务分级的配额与 CPU 份额是后续工作。
+七项实时对象计数审计 + 句柄硬配额（4096）已实现；按服务分级的配额与 CPU 份额是后续工作。
 
 ### 4. 真实吞吐设备外迁
 
@@ -59,16 +59,16 @@ virtio-blk 是"主流水平"的试金石：一个真实吞吐设备驱动运行�
 设计要点（复用已有机制）：
 
 - MMIO 白名单授权 + virtqueue 描述符放在内核分配的共享 VMO（DMA 契约）+ IRQ→EventQ；
-- **内核块代理**（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动——页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
+- 内核块代理（性能关键决策）：devfs 与页缓存留在内核，块请求经共享环转发给用户驱动。页缓存命中时零 IPC，未命中才进驱动；这与 Fuchsia 块层等主流设计一致；
 - 崩溃恢复：驱动死亡时内核代理把在飞请求标记失败并唤醒等待者，svcmgr 重启驱动后重挂载。
 
-**当前状态**：virtio-blk 用户态驱动（udisk）已实现——页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字为历史样本，引用前需重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见"已做出的设计决策"。
+virtio-blk 用户态驱动（udisk）已实现：页缓存/文件系统留在内核，块请求经一页共享环转发，virtio DMA 直写内核页缓存物理地址（数据字节不穿过环或 channel）；驱动死亡 → 在飞请求 `-EIO` → 原地重挂载已实现。历史 TCG 样本中冷读约 1 MiB/s、热读为百 MiB/s 级；这些数字为历史样本，引用前需重测。**注意**：主存储 virtio-blk 数据面仍保留内核态（`kernel/drivers/block/virtio_blk.c`，polling 完成模型），udisk 面向 scratch 盘，两者并存；详见“已做出的设计决策”。
 
 ### 5. 双架构与真实测量
 
 loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybrid smoke 的系统化运行矩阵；性能结论应来自明确标注提交和环境的有效样本。
 
-**当前状态**：RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆盖所有 Native/hybrid smoke，也不外推为当前结果。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
+RISC-V64/LoongArch64 整体发布流程曾完成（历史记录），但不覆盖所有 Native/hybrid smoke，也不外推为当前结果。当前多个 Native、mlibc、dual-placement smoke 仍硬编码 RISC-V64；loongarch64 vDSO 仍未实现。性能数据全部来自 QEMU TCG。
 
 ## 已做出的设计决策
 
@@ -91,17 +91,17 @@ loongarch64 仍需要 vDSO 移植（`rdtime.d`/stable counter）和 Native/hybri
 | 服务监管 / 按名发现 | 用户态 svcmgr + 注册表（崩溃重启、健康探针） | 用户态 appmgr/组件框架 | 内核/混合（SCM、服务控制管理器为用户态） | 无原生等价物 | Zircon 风格能力，超出 XNU/Linux 常规 |
 | 低速设备驱动（RTC/input） | 用户态 rtcd/uinputd（MMIO 授权 + IRQ→EventQ） | 用户态 driver host | 内核 | 内核（部分 FUSE/CUSE 化） | 较主流桌面更接近微内核 |
 
-结论：当前形态落在**主流混合内核谱系（XNU/NT 型）的工程保守面上，同时具备 Zircon 式的可崩溃服务层与能力化扩展通道**，与定位一致。
+结论：当前形态落在主流混合内核谱系（XNU/NT 型）的工程保守面上，同时具备 Zircon 式的可崩溃服务层与能力化扩展通道，与定位一致。
 
 按"业界主流混合内核而非完全微内核"的定位复核，原列三项差距重新定性：
 
-1. **主存储块数据面与 TCP/IP 留内核 —— 定位一致的最终形态，非待办**。XNU/NT/Linux 同样将其置于内核态；外迁属微内核方向。性能数据（时间片捐赠 SMP 化后的有效样本）仍值得积累，但只影响调优，不影响架构结论；
-2. **内核侧文件系统副本 —— 定位一致的最终形态，非待办**。主流混合内核普遍自带内核 FS 驱动（NT 的 fastfat/cdfs、XNU 的 HFS+）。ext4/isofs/ntfs 与用户态共享同一份源码（fscompat 编译），无实现漂移；唯一双实现是 FAT（内核完整版 vs fat32lite），已在 06-user-fs 标注。引导期 `/bin` 挂载依赖内核副本是客观约束，也是主流做法；
-3. **ufsd 纳入 svcmgr 清单托管 —— 已完成**。清单支持 argv，ufsd 接入 echo 健康探针，缺盘时干净退出（exit 0 不计重启预算）；SIGKILL→umount2→重启→数据持久的恢复契约在 `smoke-native-fs-all` 的 UXFS_RESTART 段实测通过。
+1. 主存储块数据面与 TCP/IP 留内核，**定位一致的最终形态，非待办**。XNU/NT/Linux 同样将其置于内核态；外迁属微内核方向。性能数据（时间片捐赠 SMP 化后的有效样本）仍值得积累，但只影响调优，不影响架构结论；
+2. 内核侧文件系统副本，定位一致的最终形态，非待办。主流混合内核普遍自带内核 FS 驱动（NT 的 fastfat/cdfs、XNU 的 HFS+）。ext4/isofs/ntfs 与用户态共享同一份源码（fscompat 编译），无实现漂移；唯一双实现是 FAT（内核完整版 vs fat32lite），已在 06-user-fs 标注。引导期 `/bin` 挂载依赖内核副本是客观约束，也是主流做法；
+3. ufsd 纳入 svcmgr 清单托管，**已完成**。清单支持 argv，ufsd 接入 echo 健康探针，缺盘时干净退出（exit 0 不计重启预算）；SIGKILL→umount2→重启→数据持久的恢复契约在 `smoke-native-fs-all` 的 UXFS_RESTART 段实测通过。
 
-## 诚实边界
+## 能力边界与不承诺项
 
-- **网络协议栈**保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
-- **loongarch64**：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
-- **性能数据**全部来自 QEMU TCG 模拟器，真实硬件基准待测；
-- **IOMMU/DMA 安全**：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖"内核分配 + pin + 物理地址上报"的信任模型。
+- 网络协议栈保持内核态（lwIP，源码 `kernel/external/lwip`）；用户态 netd 外迁尝试已放弃（recv 数据面未通且进程未被拉起），TCP/IP 按主流设计留在内核；
+- loongarch64：有整体平台运行的历史证据，但 Native/hybrid 专项运行覆盖明显少于 RISC-V64，当前结论需逐项复验；
+- 性能数据全部来自 QEMU TCG 模拟器，真实硬件基准待测；
+- IOMMU/DMA 安全：RISC-V 侧在 QEMU `riscv-iommu-pci` 上完成动态 per-device domain（claim/map/unmap/release）+ fault queue 消费（fail-closed 阻断 + `/proc/a20/iommu` 计数器）+ `drv_dma` 接线，edu/uedud 样板端到端验证授权内 DMA 成功、窗口外 fault 被硬件拒绝并消费（`smoke-iommu-udriver-isolation`，2026-09-24 PASS）。边界：fault 拉取式消费、单 domain 实例、virtio-mmio 设备未接入；其他架构仍依赖“内核分配 + pin + 物理地址上报”的信任模型。

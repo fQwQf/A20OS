@@ -1,8 +1,8 @@
 # 驱动实现符合性与限制
 
-> 不要这样做：不要恢复已清理的双初始化入口；不要扩大本页记录的已知边界却不同时更新说明和文档；不要把“符合”当成“所有平台所有配置都成立”。
+> 不要恢复已清理的双初始化入口；不要扩大已知边界却不同时更新说明和文档；不要把“符合”当成“所有平台所有配置都成立”。
 
-本页记录当前源码事实和可依赖的运行边界。审查覆盖 driver core、公共总线、STM32F103、VirtualBox ARM64/x86_64 及其设备驱动。
+审查覆盖 driver core、公共总线、STM32F103、VirtualBox ARM64/x86_64 及其设备驱动。
 
 ## 如何阅读矩阵
 
@@ -108,9 +108,9 @@ QEMU RISC-V64 board 已提供 ECAM、PCI MMIO BAR 窗口和实际 HDA PCM DMA；
 
 ## 历史基线观察（不代表当前回归状态）
 
-以下两个问题曾在驱动部署重构**之前**的已提交基线（`3bfe64b`）上复现。这里仅保留归因记录；它们未在 2026-08 核实时重新验证，因此不得据此声称当前源码仍失败或已经修复：
+以下两个问题曾在驱动部署重构之前的已提交基线（`3bfe64b`）上复现。它们未在 2026-08 核实时重新验证，因此不得据此声称当前源码仍失败或已经修复：
 
-- **x86_64 用户态 pid=3 崩溃**：generic x86_64 启动可挂载 `/bin`、驱动全部绑定，但 mksh（pid 3）启动期在 `free_vma_pages → frame_put` 触发 `KERNEL PAGE FAULT`（`BADV=0x7fffff9xxxxx`，确定性复现），随后锁自旋。在 `3bfe64b` 干净基线（无任何驱动部署改动）上用同一 fat32 镜像复现相同故障类（`pid=3` + `0x7fffff9xxxxx`），证明为既有 mm/exec 问题；驱动重构只是让 x86 首次能到达用户态而暴露它。修复方向在 mm/vma 释放路径，不在驱动层。
-- **riscv64 `mm_stress` 在 evict 子测试挂起**：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。
+- x86_64 用户态 pid=3 崩溃：generic x86_64 启动可挂载 `/bin`、驱动全部绑定，但 mksh（pid 3）启动期在 `free_vma_pages → frame_put` 触发 `KERNEL PAGE FAULT`（`BADV=0x7fffff9xxxxx`，确定性复现），随后锁自旋。在 `3bfe64b` 干净基线（无任何驱动部署改动）上用同一 fat32 镜像复现相同故障类（`pid=3` + `0x7fffff9xxxxx`），证明为既有 mm/exec 问题；驱动重构只是让 x86 首次能到达用户态而暴露它。修复方向在 mm/vma 释放路径，不在驱动层。
+- riscv64 `mm_stress` 在 evict 子测试挂起：`smoke-mm-stress` 停在 `MM_STRESS: evict start`（9 MiB 文件写回/读回压力，45 s watchdog 超时）。同一 fat32 镜像 + `3bfe64b` 干净基线内核复现相同挂起；`2026-08-06` 的 `mm_stress` 日志为 PASS，回归在 `3bfe64b` 及其之前的已提交改动之间，与驱动部署改动无关。
 
 两者均为页缓存/写回或 exec 释放路径的既有缺陷，独立于 generic/embedded 驱动部署重构。修复时不得把这两个现象当作驱动部署的回归证据。

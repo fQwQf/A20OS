@@ -1,6 +1,6 @@
 # A20OS Native ABI：类型与结构体定义
 
-> 本文档记录 A20OS Native ABI 的用户可见类型和结构体。内容已按 2026-08 的内核头与 `user/liba20rt/a20_types.h` 核对；带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
+> 内容已按 2026-08 的内核头与 `user/liba20rt/a20_types.h` 核对。带有“保留布局”或“目标语义”的结构不等于当前 syscall 已消费全部字段。权限语义见 [security.md](06-security.md)，Handle 生命周期见 [handle.md](03-handle.md)。
 
 ---
 
@@ -504,7 +504,7 @@ Timer 是 handle，可被 event queue watch，不需要复制 POSIX timer id + s
 
 ### a20_transfer_args_t — 零拷贝传输
 
-统一 splice / sendfile / copy_file_range / tee 语义。通过 `flags` 区分传输模式。
+splice / sendfile / copy_file_range / tee 共用一套语义，传输模式由 `flags` 区分。
 
 ```c
 /* 传输标志 */
@@ -523,10 +523,7 @@ typedef struct a20_transfer_args {
 } a20_transfer_args_t;
 ```
 
-设计说明：
-- `source_offset`/`dest_offset` 为 `A20_OFFSET_CURRENT`（`UINT64_MAX`）时使用当前位置。
-- 权限检查：`source` 需要 `READ | TRANSFER`，`dest` 需要 `WRITE | TRANSFER`。
-- 当前支持 `flags == 0`（consume，推进源偏移）和 `A20_TRANSFER_PEEK`（tee，不推进源偏移）；其余保留标志位必须为零。
+`source_offset`/`dest_offset` 为 `A20_OFFSET_CURRENT`（`UINT64_MAX`）时使用当前位置。权限检查上，`source` 需要 `READ | TRANSFER`，`dest` 需要 `WRITE | TRANSFER`。目前只支持 `flags == 0`（consume，推进源偏移）和 `A20_TRANSFER_PEEK`（tee，不推进源偏移）两种模式；其余保留标志位必须为零。
 
 ---
 
@@ -534,7 +531,7 @@ typedef struct a20_transfer_args {
 
 ### a20_set_meta_args_t — 文件元数据修改
 
-统一 chmod / chown / utimes 语义。通过 flags 指定要修改的字段。
+chmod / chown / utimes 也共用一套语义，要修改哪些字段由 flags 指定。
 
 ```c
 /* 元数据修改标志 */
@@ -562,11 +559,7 @@ typedef struct a20_set_meta_args {
 } a20_set_meta_args_t;
 ```
 
-设计说明：
-- Linux 的 `fchmod`/`fchmodat`/`fchown`/`fchownat`/`utimensat`/`ftruncate`/`fallocate` 是 7+ 个独立 syscall。
-- A20 统一为 `handle_set_meta`，一次调用可同时修改多个字段，减少 syscall 次数。
-- 只修改 flags 指定的字段，未指定的字段不受影响。
-- 对于路径版本（`fchmodat` 等），调用者先 `path_open` 获得 handle 再调用 `handle_set_meta`。
+Linux 把 `fchmod`/`fchmodat`/`fchown`/`fchownat`/`utimensat`/`ftruncate`/`fallocate` 拆成 7+ 个独立 syscall，A20 收成一个 `handle_set_meta`：一次调用可同时修改多个字段，减少 syscall 次数，只动 flags 指定的字段，未指定的字段不受影响。路径版本（`fchmodat` 等）需要调用者先 `path_open` 拿到 handle，再调用 `handle_set_meta`。
 
 ---
 
@@ -613,7 +606,7 @@ typedef struct a20_xattr_list_args {
 
 ### a20_sched_args_t — 调度参数
 
-统一 priority / policy / affinity / scheduler 等参数。
+priority / policy / affinity / scheduler 等调度参数集中在一处。
 
 ```c
 /* 调度策略 */
@@ -643,16 +636,13 @@ typedef struct a20_sched_args {
 } a20_sched_args_t;
 ```
 
-设计说明：
-- Linux 的 `sched_setparam`/`sched_getparam`/`sched_setscheduler`/`sched_getscheduler`/`sched_setaffinity`/`sched_getaffinity`/`setpriority`/`getpriority`/`sched_setattr`/`sched_getattr` 是 10 个独立 syscall。
-- A20 统一为 `task_set_sched`/`task_get_sched` 两个 syscall，通过 flags 组合指定要操作的调度参数。
-- `task_get_sched` 使用同一个 args struct，内核填充请求的字段。
+Linux 的 `sched_setparam`/`sched_getparam`/`sched_setscheduler`/`sched_getscheduler`/`sched_setaffinity`/`sched_getaffinity`/`setpriority`/`getpriority`/`sched_setattr`/`sched_getattr` 是 10 个独立 syscall，A20 收成 `task_set_sched` 与 `task_get_sched` 两个 syscall，通过 flags 组合指定要操作的调度参数。`task_get_sched` 复用同一个 args struct，由内核填充请求的字段。
 
 ---
 
 ## 15. Resource Limits 结构体
 
-> **当前调用契约**：`task_get_limits(task, out)` / `task_set_limits(task, in)` 使用 `abi/native/resource.h` 中的聚合 `a20_resource_limits_t`（handles/channels/threads/memory 四个上限）。下述 `a20_rlimit_args_t` 是按 POSIX resource 编号细分的保留布局，当前 syscall 入口尚未使用它。
+> `task_get_limits(task, out)` / `task_set_limits(task, in)` 使用 `abi/native/resource.h` 中的聚合 `a20_resource_limits_t`（handles/channels/threads/memory 四个上限）。下述 `a20_rlimit_args_t` 是按 POSIX resource 编号细分的保留布局，当前 syscall 入口尚未使用它。
 
 ### a20_rlimit_args_t — 资源限制
 
@@ -787,7 +777,7 @@ typedef struct a20_path_readlink_args {
 
 ### a20_path_resolve_args_t — 路径解析
 
-统一 `faccessat` / `readlinkat` 检查类操作。
+与 `faccessat` / `readlinkat` 对应的检查类操作集中到路径解析。
 
 ```c
 /* 解析标志 */
@@ -938,11 +928,7 @@ typedef struct a20_security_context {
 } a20_security_context_t;
 ```
 
-设计说明：
-- `security_get_context` 查询当前完整的身份和权限状态。
-- `security_set_context` 只修改 `flags` 指定的字段（类似 `setuid`/`setgid`/`setgroups` 的统一接口）。
-- 修改 uid/gid 需要对应的 POSIX capability 或 A20 rights。
-- A20 原生字段（effective_rights, namespace_mask）是只读的，由内核根据 handle 权限和 namespace 推导；`label` 只能上调。
+`security_get_context` 查询当前完整的身份和权限状态，`security_set_context` 只修改 `flags` 指定的字段，作用类似 `setuid`/`setgid`/`setgroups` 的统一接口。修改 uid/gid 需要对应的 POSIX capability 或 A20 rights。A20 原生字段（effective_rights, namespace_mask）是只读的，由内核根据 handle 权限和 namespace 推导；`label` 只能上调。
 
 ---
 
@@ -950,7 +936,7 @@ typedef struct a20_security_context {
 
 ### a20_system_info_t — 系统信息
 
-统一 uname / sysinfo 语义。
+uname / sysinfo 的返回值合并到同一个结构体。
 
 ```c
 typedef struct a20_system_info {
@@ -1021,11 +1007,7 @@ typedef struct a20_event_watch_fs_args {
 } a20_event_watch_fs_args_t;
 ```
 
-设计说明：
-- Linux 的 `inotify_init`/`inotify_add_watch`/`inotify_rm_watch` 是独立于 epoll 的子系统。
-- A20 将文件系统事件**统一纳入现有 event_queue 框架**：`event_watch_fs` 向已有事件队列注册文件系统关注。
-- 目标实现要求变更事件通过 `event_wait` 返回 `a20_pending_event_t`。当前实现仅把 `dir` 注册为普通 watch 目标，尚未实现路径过滤与 VFS 事件源，因此本结构体目前是最小占位契约。
-- 取消关注使用 `event_cancel(queue, dir)`；当前没有独立 `out_watch` handle。
+Linux 的 `inotify_init`/`inotify_add_watch`/`inotify_rm_watch` 是独立于 epoll 的子系统；A20 把文件系统事件**统一纳入现有 event_queue 框架**，`event_watch_fs` 向已有事件队列注册文件系统关注。目标实现要求变更事件通过 `event_wait` 返回 `a20_pending_event_t`。当前实现仅把 `dir` 注册为普通 watch 目标，路径过滤与 VFS 事件源尚未实现，所以本结构体目前是最小占位契约。取消关注用 `event_cancel(queue, dir)`，当前没有独立 `out_watch` handle。
 
 ---
 
@@ -1033,11 +1015,7 @@ typedef struct a20_event_watch_fs_args {
 
 futex 是**用户地址上的同步原语，不是内核对象**，因此不分配 handle、不携带 rights。这与 Zircon `zx_futex_wait`/`zx_futex_wake` 的定位一致：快速路径是纯用户态原子操作，只有竞争路径才进入内核睡眠。
 
-设计说明：
-- 早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适。Sync 分区因此回归地址型 futex。
-- 快速路径（无竞争）与 Linux futex 一样快：纯用户态 CAS。
-- 慢路径通过 `futex_wait`/`futex_wake` 进入内核，复用内核 futex 等待表。
-- 跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效：等待键同时匹配虚拟地址与物理页。
+早期草案（startup.md §4.4.4）曾考虑用 event_queue 承担互斥等待，但 event_queue 缺少"投递事件到队列"的用户语义，且每个竞争锁都需要一个内核 handle，成本与语义都不合适，Sync 分区因此回归地址型 futex。快速路径（无竞争）与 Linux futex 一样快，纯用户态 CAS；慢路径通过 `futex_wait`/`futex_wake` 进入内核，复用内核 futex 等待表。跨进程共享内存（`vm_share` 导出的 VMO）上的 futex 字同样有效，等待键同时匹配虚拟地址与物理页。
 
 ```c
 #define A20_TIMEOUT_INFINITE  ((uint64_t)-1)  /* futex_wait 无限等待 */

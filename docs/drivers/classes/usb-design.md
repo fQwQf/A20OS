@@ -1,12 +1,12 @@
 # A20OS USB 子系统设计
 
-> 状态：已实现（HID + Mass Storage + xHCI）。本设计文档同时保留最初的架构决策和明确标注的未来计划；当前共享实现为 `kernel/drivers/usb/`（`core/usb_core.c`、`host/xhci.c`、`class/usb_hid.c`、`class/usb_storage.c`）。generic 在 `tools/driver-modules.mk` 实际列出的 x86_64/aarch64/loongarch64 上通过 `xhci.a20drv`、`usb-hid.a20drv`、`usb-storage.a20drv` 部署；embedded 静态链接这些共享源码。
+> 状态：已实现（HID + Mass Storage + xHCI）。当前共享实现为 `kernel/drivers/usb/`（`core/usb_core.c`、`host/xhci.c`、`class/usb_hid.c`、`class/usb_storage.c`）。generic 在 `tools/driver-modules.mk` 实际列出的 x86_64/aarch64/loongarch64 上通过 `xhci.a20drv`、`usb-hid.a20drv`、`usb-storage.a20drv` 部署；embedded 静态链接这些共享源码。
 
 ## 1. 背景与目标
 
-A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11**boot protocol** 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。该文件已随通用 USB 子系统落地而移除，HID 事件面迁入 `kernel/drivers/usb/class/usb_hid.c`（经 `/dev/event0` mux `kernel/drivers/input/input_mux.c` 与 virtio-input 等输入源聚合）。
+A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（1165 行）：硬编码绑定 Intel 8086:1e31 XHCI 控制器，只解析 HID 1.11 boot protocol 键盘/鼠标，轮询工作，单控制器单实例（静态 `g_xhci`）。它没有 USB 设备树、没有 URB 抽象、不支持存储设备、不支持热插拔。该文件已随通用 USB 子系统落地而移除，HID 事件面迁入 `kernel/drivers/usb/class/usb_hid.c`（经 `/dev/event0` mux `kernel/drivers/input/input_mux.c` 与 virtio-input 等输入源聚合）。
 
-目标：引入一个**通用 USB 子系统**，使任意 USB 宿主控制器上的 HID 与Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
+目标是引入一个通用 USB 子系统，使任意 USB 宿主控制器上的 HID 与 Mass Storage 设备通过统一模型工作，并接入现有输入/块设备类接口。
 
 ## 2. 现状评估（A20OS 已有基础）
 
@@ -17,14 +17,14 @@ A20OS 最初的 USB 驱动是窄用途的 `kernel/drivers/input/xhci_hid.c`（11
 | PCI 枚举 | `kernel/drivers/bus/pci_bus.c` | 宿主控制器可作为 PCI 设备绑定 |
 | 输入类接口 | `input_dev_ops_t`（read/ioctl/poll）+ `DEV_CLASS_INPUT` | HID 接入点，已存在 |
 | 块类接口 | `block_dev_ops_t`（read/write/flush/capacity/sector_size）+ `DEV_CLASS_BLOCK` | MSC 接入点，已存在 |
-| XHCI 底层 | 历史 `xhci_hid.c`（已移除） | MMIO、TRB/事件环、输入/输出上下文、命令与控制传输、端口枚举、轮询——重构为 `kernel/drivers/usb/host/xhci.c` 的 `usb_hcd_t` |
+| XHCI 底层 | 历史 `xhci_hid.c`（已移除） | MMIO、TRB/事件环、输入/输出上下文、命令与控制传输、端口枚举、轮询；重构为 `kernel/drivers/usb/host/xhci.c` 的 `usb_hcd_t` |
 | 内核线程 | `init_kthread` 等 | 可承载枚举/轮询工作 |
 
-**历史结论**：落地通用 USB 时，既有驱动模型和输入/块类接口可复用，当时需要新增以下三部分；它们现在都已经实现：
+落地通用 USB 时，既有驱动模型和输入/块类接口可复用，当时需要新增的三部分现在都已实现：
 
-1. **USB 核心子系统**（URB 抽象 + 设备/接口/端点模型 + 枚举流程）；
-2. **HCD（宿主控制器驱动）抽象**（把 `xhci_hid.c` 的控制器逻辑重构为与协议解析解耦的可复用 HCD，暴露 URB 提交 + 根集线器端口管理）；
-3. **动态设备生命周期**（端口变化检测 → 枚举 → 总线热插拔发布 → 类驱动绑定，以及移除路径）。
+1. USB 核心子系统：URB 抽象 + 设备/接口/端点模型 + 枚举流程；
+2. HCD（宿主控制器驱动）抽象：把 `xhci_hid.c` 的控制器逻辑重构为与协议解析解耦的可复用 HCD，暴露 URB 提交 + 根集线器端口管理；
+3. 动态设备生命周期：端口变化检测 → 枚举 → 总线热插拔发布 → 类驱动绑定，以及移除路径。
 
 ## 3. 总体架构
 
@@ -131,10 +131,7 @@ typedef struct usb_hcd {
 
 ### 6.1 usb-hid（DEV_CLASS_INPUT）
 
-- 匹配 class=3（HID）的 interface。
-- **当前限制**：只支持 boot protocol 键盘/鼠标。
-- **未来计划**：增加完整 HID report descriptor 解析。
-- 产出 `input_dev_ops_t`，事件经 input class 聚合到 `/dev/event0`。
+匹配 class=3（HID）的 interface，产出 `input_dev_ops_t`，事件经 input class 聚合到 `/dev/event0`。当前只支持 boot protocol 键盘/鼠标；完整 HID report descriptor 解析仍在计划中。
 
 ### 6.2 usb-storage / BOT（DEV_CLASS_BLOCK）
 
@@ -145,14 +142,13 @@ typedef struct usb_hcd {
 
 ### 6.3 集线器
 
-- **当前限制**：仅根集线器（HCD 内置），无外部 hub 级联。
-- **未来计划**：增加通用 hub 驱动（class=9）和递归枚举；这不是当前已实现能力。
+当前仅根集线器（HCD 内置），无外部 hub 级联。通用 hub 驱动（class=9）和递归枚举是计划项，不是当前已实现能力。
 
 ## 7. 线程 / 并发模型
 
 - 当前没有 per-controller 内核线程。`kernel_progress_poll()` 调用按 250 ms 节流的 `usb_core_poll()`，后者扫描 HCD 端口并推进枚举/移除；input read/poll 还会推进 HID 事件。
 - URB 完成处理在 HCD 轮询上下文。
-- **未来计划**：若改为 controller worker 或 IRQ completion，必须补 controller/endpoint 并发状态机和锁契约；不得沿用旧草案中尚未实现的锁序。
+- 若改为 controller worker 或 IRQ completion，必须补 controller/endpoint 并发状态机和锁契约；不得沿用旧草案中尚未实现的锁序。
 
 ## 8. 内存 / DMA 模型
 
@@ -179,31 +175,34 @@ typedef struct usb_hcd {
 
 ## 11. 历史里程碑与未来计划
 
-**Phase 1（历史计划，已实现）——XHCI HCD 重构 + USB 核心 + HID boot**
+Phase 1（历史计划，已实现）：XHCI HCD 重构 + USB 核心 + HID boot。
+
 - 抽取 `xhci_hid.c` 控制器逻辑为 `usb/host/xhci.c`（usb_hcd_t）。
 - 新建 `usb/core/`：URB、usb_device/interface/endpoint、枚举、`usb` 总线、控制传输封装。
 - 新建 `usb/class/usb_hid.c`：boot 键盘/鼠标 → `input_dev_ops_t`。
 - QEMU `usb-kbd/usb-tablet` 通过；现有 xhci_hid 行为不回归。
 - 预计：~2500–3500 行（重构 + 新增）。
 
-> **现状**：Phase 1 与 Phase 2 已实现——`kernel/drivers/usb/host/xhci.c`、`kernel/drivers/usb/core/usb_core.c`、`kernel/drivers/usb/class/usb_hid.c`、`kernel/drivers/usb/class/usb_storage.c` 均已落地，`xhci_hid.c` 已删除；drvmod 侧 `xhci.c`/`usb_hid.c`/`usb_storage.c` 以模块形式提供（`smoke-usb-x86_64`）。
+> 现状：Phase 1 与 Phase 2 已实现。`kernel/drivers/usb/host/xhci.c`、`kernel/drivers/usb/core/usb_core.c`、`kernel/drivers/usb/class/usb_hid.c`、`kernel/drivers/usb/class/usb_storage.c` 均已落地，`xhci_hid.c` 已删除；drvmod 侧 `xhci.c`/`usb_hid.c`/`usb_storage.c` 以模块形式提供（`smoke-usb-x86_64`）。
 
-**Phase 2（历史计划，已实现）——BOT 存储**
+Phase 2（历史计划，已实现）：BOT 存储。
+
 - `usb/class/usb_storage.c`：BOT + SCSI 子集 → `block_dev_ops_t`。
 - QEMU `usb-storage` 可挂载文件系统。
 - 预计：~1200–1800 行。
 
-**Phase 3（未来计划，未实现）——hub 与其它 HCD**
+Phase 3（未来计划，未实现）：hub 与其它 HCD。
+
 - 通用 hub 驱动（递归枚举）。
 - EHCI/UHCI/OHCI（净室，参考规范）。可选。
 
 ## 12. 风险
 
-- **xHCI 规范复杂**：槽/端点上下文、TRB 状态机；从 xhci_hid 重构时必须保持传输语义不变，否则键盘立即失效。重构后跑 `smoke-*` 兜底。
-- **热插拔竞态**：设备移除与 URB 提交并发 → URB 队列与 class_device 生命周期需严格配对（沿用 class_device `online` 标记）。
-- **当前锁缺口**：xHCI controller lock 未实际获取；HID completion 可由全局 poll 或其他 xHCI wait 在未持有 HID lock 时调用；USB storage 又跨同步 bulk wait 持有 spinlock。详见[锁顺序契约](../guide/lock-order.md)。这些是现状限制，不是未来并发设计。
-- **硬件覆盖有限**：当前按 PCI xHCI class `0x0c0330` 匹配，并在 QEMU/VirtualBox 模拟控制器上验证；真实控制器的固件、IOMMU、cache coherency 和错误恢复仍需单独验证。
-- **BOT 错误恢复**：xHCI 的同步 transfer wait 有有界超时，storage 失败后会发送 class reset，但没有完整的 endpoint halt 清理、REQUEST SENSE 或重试状态机。
+- xHCI 规范复杂：槽/端点上下文与 TRB 状态机。从 xhci_hid 重构时必须保持传输语义不变，否则键盘立即失效；重构后跑 `smoke-*` 兜底。
+- 热插拔竞态：设备移除与 URB 提交并发时，URB 队列与 class_device 生命周期需严格配对（沿用 class_device `online` 标记）。
+- 当前锁缺口：xHCI controller lock 未实际获取；HID completion 可由全局 poll 或其他 xHCI wait 在未持有 HID lock 时调用；USB storage 又跨同步 bulk wait 持有 spinlock。详见[锁顺序契约](../guide/lock-order.md)。这些是现状限制，不是未来并发设计。
+- 硬件覆盖有限：当前按 PCI xHCI class `0x0c0330` 匹配，并在 QEMU/VirtualBox 模拟控制器上验证；真实控制器的固件、IOMMU、cache coherency 和错误恢复仍需单独验证。
+- BOT 错误恢复尚不完整：xHCI 的同步 transfer wait 有有界超时，storage 失败后会发送 class reset，但没有完整的 endpoint halt 清理、REQUEST SENSE 或重试状态机。
 
 ## 13. 与"设计原则"的一致性
 

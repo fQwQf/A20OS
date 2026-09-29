@@ -1,6 +1,6 @@
 # PCI 与 VirtIO 驱动开发
 
-本章讲 A20OS 的 PCI/PCIe 枚举、BAR 资源和 modern VirtIO transport。VirtualBox ARM64、VirtualBox x86_64 以及多种 QEMU/物理平台共享这些基础设施。平台相关运行细节见 [VirtualBox 驱动栈](../../platforms/virtualbox.md)、[VirtualBox ARM64 运行手册](../../platforms/virtualbox-aarch64.md) 和 [VirtualBox x86_64 运行手册](../../platforms/virtualbox-x86_64.md)。
+A20OS 的 PCI/PCIe 枚举、BAR 资源和 modern VirtIO transport 由 VirtualBox ARM64、VirtualBox x86_64 以及多种 QEMU/物理平台共享。平台相关运行细节见 [VirtualBox 驱动栈](../../platforms/virtualbox.md)、[VirtualBox ARM64 运行手册](../../platforms/virtualbox-aarch64.md) 和 [VirtualBox x86_64 运行手册](../../platforms/virtualbox-x86_64.md)。
 
 ## PCI 发现路径
 
@@ -235,4 +235,4 @@ PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()
 
 没有 probe 日志时先找 `[BUS] pci ... id=vendor:device`；没有设备说明 ECAM/固件问题。有设备但未绑定，检查 ID 表和 `.driver_init`。BAR setup 失败检查 BAR size/地址窗口。`incomplete capabilities` 是 VirtualBox 控制器模式或 capability 解析问题。feature rejected 是驱动写了设备不接受的位。queue timeout 时同时检查 DMA 地址是否为物理地址、cache sync、descriptor writable 顺序、queue notify offset 和设备 status。
 
-不要这样做：在 ID 表里只写 `vendor = 0x1af4, device = 0x1000` 这种宽泛 class ID 就指望所有 VirtIO 设备都能匹配。subsystem 字段必须显式填 ANY，否则匹配语义会错；更不要把不支持的 feature 位写进 `DRIVER_FEATURES` 里协商。
+ID 表里只写 `vendor = 0x1af4, device = 0x1000` 这种宽泛 class ID，匹配语义会错，也无法覆盖所有 VirtIO 设备：subsystem 字段必须显式填 ANY。同样不要把不支持的 feature 位写进 `DRIVER_FEATURES` 里协商。
