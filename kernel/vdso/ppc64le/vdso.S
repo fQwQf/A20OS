@@ -126,19 +126,24 @@ __vdso_gettimeofday:
 
 /* int __vdso_getcpu(unsigned *r3, unsigned *r4, void *r5)
  *
- * Documented stub: always reports CPU 0 / node 0.  The running CPU id is
- * per-CPU kernel state with no user mapping, so there is nothing to read
- * here.  The getcpu syscall returns the true cpu_current_id().
- * See kernel/include/mm/vdso.h. */
+ * Refuses with -ENOSYS rather than reporting a CPU.  -ENOSYS is the one
+ * value musl's wrapper understands as "not available": src/sched/
+ * sched_getcpu.c turns any other non-zero result into a hard error, but
+ * falls through to the getcpu syscall on -ENOSYS, and that syscall returns
+ * the true cpu_current_id() (kernel/abi/linux/sys_sched.c).  So the caller
+ * gets the truth, and the fast path costs one wasted trap instead of a lie.
+ *
+ * Nothing readable here holds the id.  The pSeries port is single-CPU by
+ * design — reading PIR from the supervisor traps, so arch_current_cpu_id()
+ * returns 0 unconditionally (kernel/arch/ppc64le/include/cpu.h) — and
+ * hardwiring that 0 into the vDSO would assert "CPU 0" on a guest that grew
+ * a second CPU.  r2 is the user TLS pointer and r13 the read-only TOC
+ * pointer; neither is a per-CPU base, and the global vvar page
+ * (kernel/mm/vdso.c) is shared by every CPU.  *r3 and *r4 are left
+ * untouched: a plausible wrong CPU 0 is worse than no answer at all
+ * (docs/security/hardening.md).  See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:
-    li      6, 0
-    cmpdi   3, 0
-    beq     1f
-    stw     6, 0(3)
-1:  cmpdi   4, 0
-    beq     2f
-    stw     6, 0(4)
-2:  li      3, 0
+    li      3, -38
     blr
