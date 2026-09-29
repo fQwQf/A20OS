@@ -54,6 +54,17 @@
 #define FIONCLEX      0x5450
 #define TIOCGICOUNT   0x545D
 
+/* FS_IOC_GETFLAGS/SETFLAGS are _IOR/_IOW('f', 1|2, long), so the encoded
+ * value embeds the target's sizeof(long) -- hence an LP64 and an ILP32 form,
+ * matched the way TIOCGPGRP/PPC64_TIOCGPGRP already are.  GET reports the real
+ * on-disk ext4 i_flags; SET is refused because no FS_* mutation is enforced
+ * in the write path, and accepting a flag the kernel would not honour is a
+ * false promise. */
+#define FS_IOC_GETFLAGS_LP64  0x80086601UL
+#define FS_IOC_SETFLAGS_LP64  0x40086602UL
+#define FS_IOC_GETFLAGS_ILP32 0x80046601UL
+#define FS_IOC_SETFLAGS_ILP32 0x40046602UL
+
 #define PPC64_TCGETS       0x402C7413UL
 #define PPC64_TCSETS       0x802C7414UL
 #define PPC64_TCSETSW      0x802C7415UL
