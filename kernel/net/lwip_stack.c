@@ -574,6 +574,14 @@ static void a20_lwip_ifname(char *out, size_t outsz, const struct netif *nif)
     snprintf(out, outsz, "%c%c%u", nif->name[0], nif->name[1], nif->num);
 }
 
+static void a20_lwip_copy_ip4(uint8_t out[4], const ip4_addr_t *a)
+{
+    out[0] = ip4_addr1(a);
+    out[1] = ip4_addr2(a);
+    out[2] = ip4_addr3(a);
+    out[3] = ip4_addr4(a);
+}
+
 /* /proc/net/route prints addresses as host-order hex. */
 static uint32_t a20_ip4_host(const ip4_addr_t *a)
 {
@@ -646,7 +654,12 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
     return (int)off;
 }
 
-#if MEMP_STATS
+/* MEMP_STATS is pinned to 1 in lwip_port/lwipopts.h, so desc->stats is read
+ * unguarded: with the counters off this stops being a build error.  The
+ * #else arm that used to sit here was unreachable -- opt.h already derived
+ * MEMP_STATS to 1 -- so it was a stub that no configuration could ever reach,
+ * which is worse than no stub at all: it looked like the pool report was
+ * conditional on something. */
 int a20_lwip_format_memp(char *buf, size_t bufsz)
 {
     static const struct { memp_t pool; const char *name; } pools[] = {
@@ -667,8 +680,11 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
     uint64_t flags = a20_lwip_lock();
     size_t off = 0;
 
+    /* The column is lwIP's `avail`, which memp_init_pool() sets to the pool
+     * size and no path ever decrements -- it is capacity, not live
+     * availability, so it is not labelled `avail`. */
     a20_lwip_append(buf, bufsz, &off,
-        "pool             avail   used     max    err\n");
+        "pool             size    used     max    err\n");
 
     for (size_t i = 0; i < npools; i++) {
         const struct memp_desc *desc = memp_pools[pools[i].pool];
@@ -695,14 +711,6 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
     a20_lwip_unlock(flags);
     return (int)off;
 }
-#else
-int a20_lwip_format_memp(char *buf, size_t bufsz)
-{
-    (void)buf;
-    (void)bufsz;
-    return 0;
-}
-#endif
 
 
 static struct netif *a20_lwip_netif_by_index(unsigned ifindex)
@@ -748,6 +756,110 @@ int a20_lwip_if_default_index(void)
     int idx = netif_default ? (int)netif_get_index(netif_default) : -ENODEV;
     a20_lwip_unlock(flags);
     return idx;
+}
+
+/* IFF_UP, the single netif flag user space may drive.  The netlink layer uses
+ * the same bit value (see NLRT_IF_FLAGS_UP in kernel/net/socket_netlink.c);
+ * carrier is not settable because a20_lwip_sync_link_state() re-derives it
+ * from the driver on every poll. */
+#define A20_LWIP_IF_F_UP 0x1u
+
+/* These resolve through a20_lwip_netif_by_index(), which matches on device
+ * state, so the loopback netif (registered without one) is reported as -ENODEV
+ * rather than being reconfigured out from under ARP/loopback. */
+
+/* The single IPv4 slot lwIP keeps per netif (netif.ip_addr).  LWIP_NETIF_API=0
+ * means there is no netif_add_ip4_addr(), so a second address is not
+ * representable -- but what to do about one is a netlink question, not an lwIP
+ * one, so the policy lives with the request that carries it
+ * (nlrt_apply_addr(), which sees IFA_LOCAL/IFA_ADDRESS and NLM_F_REPLACE).
+ * An all-zero addr clears the slot and takes the netmask and gateway with it:
+ * lwIP derives subnet membership from the (addr, netmask) pair, so keeping the
+ * netmask would advertise a prefix for an interface that has no address. */
+int a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
+                         const uint8_t mask[4], const uint8_t gw[4])
+{
+    if (!addr)
+        return -EINVAL;
+    ip4_addr_t want;
+    IP4_ADDR(&want, addr[0], addr[1], addr[2], addr[3]);
+
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    netif_set_ipaddr(n, &want);
+    if (ip4_addr_isany_val(want)) {
+        ip4_addr_t zero;
+        ip4_addr_set_zero(&zero);
+        netif_set_netmask(n, &zero);
+        netif_set_gw(n, &zero);
+    } else if (mask) {
+        ip4_addr_t m;
+        IP4_ADDR(&m, mask[0], mask[1], mask[2], mask[3]);
+        netif_set_netmask(n, &m);
+    } else if (gw) {
+        ip4_addr_t g;
+        IP4_ADDR(&g, gw[0], gw[1], gw[2], gw[3]);
+        netif_set_gw(n, &g);
+    }
+    a20_lwip_unlock(flags);
+    return 0;
+}
+
+int a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
+                         uint8_t gw[4])
+{
+    if (!addr || !mask || !gw)
+        return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    a20_lwip_copy_ip4(addr, netif_ip4_addr(n));
+    a20_lwip_copy_ip4(mask, netif_ip4_netmask(n));
+    a20_lwip_copy_ip4(gw, netif_ip4_gw(n));
+    a20_lwip_unlock(flags);
+    return 0;
+}
+
+int a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu)
+{
+    if (mtu < 68)                  /* RFC 791 minimum link MTU */
+        return -EINVAL;
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    n->mtu = mtu;
+    a20_lwip_unlock(flags);
+    return 0;
+}
+
+int a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask)
+{
+    if (!mask)
+        return -EINVAL;
+    if (mask & ~(unsigned)A20_LWIP_IF_F_UP)
+        return -EOPNOTSUPP;
+    uint64_t lf = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(lf);
+        return -ENODEV;
+    }
+    if (flags & A20_LWIP_IF_F_UP)
+        netif_set_up(n);
+    else
+        netif_set_down(n);
+    a20_lwip_unlock(lf);
+    return 0;
 }
 
 int a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len)
