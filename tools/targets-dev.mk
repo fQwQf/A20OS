@@ -2,8 +2,8 @@
 # Development build (for `make run-riscv64` / `make run-loongarch64`)
 # ----------------------------------------------------------------
 
-dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG)
-	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG)"
+dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG) $(ISOFS_IMG)
+	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG), $(ISOFS_IMG)"
 
 user_apps: $(USER_BUILD_STAMP)
 
