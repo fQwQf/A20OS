@@ -40,6 +40,7 @@ struct vfile;
 #define MSG_PEEK       0x0002
 #define MSG_TRUNC      0x0020
 #define MSG_DONTWAIT   0x0040
+#define MSG_WAITALL    0x0100
 #define MSG_CTRUNC     0x0008
 #define MSG_NOSIGNAL   0x4000
 #define MSG_WAITFORONE 0x10000
@@ -126,8 +127,21 @@ struct vfile;
 #define IPV6_RECVERR        25
 #define IPV6_ROUTER_ALERT   22
 
+/* IPPROTO_IP options this stack actually honours.  Anything not listed here
+ * is refused by setsockopt/getsockopt rather than silently accepted. */
+#define IP_TOS                   1
+#define IP_TTL                   2
+#define IP_MULTICAST_TTL         10
+#define IP_MULTICAST_LOOP        11
+
 #define MCAST_JOIN_GROUP  42
 #define MCAST_LEAVE_GROUP 45
+
+/* Linux routes both spellings of multicast membership to one handler, and
+ * musl programs reach for the IP_* names, so refusing 35/36 while accepting
+ * 42/45 would break every caller that uses the common spelling. */
+#define IP_ADD_MEMBERSHIP  35
+#define IP_DROP_MEMBERSHIP 36
 
 #define ALG_SET_KEY  1
 

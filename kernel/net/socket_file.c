@@ -555,7 +555,11 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
                ? -EFAULT : 0;
     }
     case A20_SIOCGIFINDEX: {
-        int idx = (int)netif_name_to_index(nif->name);
+        /* Not netif_name_to_index(): netif->name is a two-character
+         * abbreviation, not a NUL-terminated name, so that lookup compared
+         * against garbage and every interface answered 0.  This is also the
+         * numbering the netlink path and a20_lwip_netif_by_index() use. */
+        int idx = (int)netif_get_index(nif);
         return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &idx, sizeof(idx)) < 0
                ? -EFAULT : 0;
     }
