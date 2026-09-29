@@ -879,7 +879,7 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
         if (a1 == SECCOMP_MODE_STRICT)
             return seccomp_set_strict(t);
         if (a1 == SECCOMP_MODE_FILTER)
-            return seccomp_install_filter(t, (const void *)a2);
+            return seccomp_install_filter(t, (const void *)(uintptr_t)a2);
         return -EINVAL;
     }
     if (op == PR_GET_SECCOMP) {

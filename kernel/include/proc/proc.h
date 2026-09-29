@@ -70,6 +70,8 @@ typedef struct proc_limits {
 typedef struct proc_policy {
     int oom_score_adj;
     int thp_disabled;
+    int mempolicy_mode;
+    uint64_t mempolicy_nmask;
 } proc_policy_t;
 
 typedef struct proc_ns_context {

@@ -243,7 +243,7 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
 int64_t sys_a20_vm_create_vmar(const a20_syscall_args_t *args)
 {
     a20_vm_create_vmar_args_t *uargs =
-        (a20_vm_create_vmar_args_t *)A20_ARG(0);
+        (a20_vm_create_vmar_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
 
     a20_vm_create_vmar_args_t kargs;

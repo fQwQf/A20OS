@@ -75,15 +75,70 @@ static wait_queue_t g_futex_buckets[FUTEX_BUCKETS] = {
  * Hash on the virtual address only, not the mm pointer: fork-inherited
  * MAP_SHARED mappings keep the same virtual address in parent and child, so
  * cross-process shared futexes land in the same bucket (the pkey match in
- * futex_wake_match then disambiguates within the bucket).  Shared mappings
- * at different virtual addresses in two processes are a documented
- * limitation (same as a virtual-address futex key).
+ * futex_wake_match then disambiguates within the bucket).
+ *
+ * The virtual address alone is NOT a sufficient bucket key, though, because
+ * task_spawn() gives the child a fresh, independently ASLR-randomised mm
+ * rather than an inherited address layout.  A MAP_SHARED futex word is then
+ * the same physical page under two different virtual addresses, so parent
+ * and child hash to two different buckets and a home-bucket-only search
+ * can never observe the peer.  futex_collect_below() closes that hole by
+ * sweeping the remaining buckets on a miss whenever the caller supplied a
+ * physical key; the match predicate is unchanged, so a hit through the
+ * sweep is exactly the match the same predicate would have produced had the
+ * waiter landed in the home bucket.
  */
 static unsigned futex_bucket_index(uintptr_t vkey)
 {
     uint64_t h = (uint64_t)vkey * 0xC2B2AE3D27D4EB4FULL;
     h ^= h >> 33;
     return (unsigned)(h & (FUTEX_BUCKETS - 1));
+}
+
+/*
+ * Collect up to @limit matching waiters for a futex keyed at @vkey, sweeping
+ * every bucket rather than only the one @vkey hashes to.
+ *
+ * @pkey is the physical key the caller derived, or 0 for a PRIVATE futex.
+ * A PRIVATE futex is keyed on (mm, vaddr) alone and both peers necessarily
+ * agree on the virtual address, so pkey == 0 correctly short-circuits to the
+ * home bucket and costs PRIVATE futexes (cargo's jobserver, libc locks)
+ * nothing.  A SHARED futex pays one extra pass over the other buckets, and
+ * only on the path that would otherwise have reported "nobody is waiting"
+ * and silently dropped the wake.
+ *
+ * Each bucket is locked and released one at a time, so this cannot deadlock
+ * against wait_queue_requeue_matching(), which takes two bucket locks in
+ * address order.
+ */
+static unsigned futex_collect_below(unsigned home, uintptr_t pkey,
+                                     wait_queue_match_fn match, void *arg,
+                                     unsigned limit, proc_wake_reason_t reason,
+                                     proc_wake_q_t *wake_q, bool *complete)
+{
+    bool drained = true;
+    unsigned got = wait_queue_collect_matching(&g_futex_buckets[home], match,
+                                               arg, limit, reason, wake_q,
+                                               &drained);
+    if (got != 0 || pkey == 0) {
+        if (complete)
+            *complete = drained;
+        return got;
+    }
+
+    for (unsigned i = 0; i < FUTEX_BUCKETS && got < limit; i++) {
+        if (i == home)
+            continue;
+        bool bucket_drained = true;
+        got += wait_queue_collect_matching(&g_futex_buckets[i], match, arg,
+                                           limit - got, reason, wake_q,
+                                           &bucket_drained);
+        if (!bucket_drained)
+            drained = false;
+    }
+    if (complete)
+        *complete = drained;
+    return got;
 }
 
 int futex_timeout_ticks(void *timeout, int absolute, int realtime,
@@ -335,7 +390,7 @@ int futex_wake(int *uaddr, int nr, uint32_t bitset, int private)
      */
     uintptr_t pkey = private ? 0 : futex_phys_key(uaddr);
     mm_struct_t *mm = cur ? cur->mm : NULL;
-    wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+    unsigned home = futex_bucket_index(vkey);
     futex_wake_arg_t arg = { mm, vkey, pkey, bitset };
 
     int woke = 0;
@@ -345,9 +400,9 @@ int futex_wake(int *uaddr, int nr, uint32_t bitset, int private)
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         bool complete = false;
-        unsigned got = wait_queue_collect_matching(q, futex_wake_match, &arg,
-                                                   want, PROC_WAKE_EVENT,
-                                                   &wake_q, &complete);
+        unsigned got = futex_collect_below(home, pkey, futex_wake_match, &arg,
+                                           want, PROC_WAKE_EVENT, &wake_q,
+                                           &complete);
         if (got == 0)
             break;
         (void)proc_wake_q_flush(&wake_q);
@@ -394,16 +449,20 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
         if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        unsigned got = wait_queue_collect_matching(q1, futex_wake_match, &arg1,
-                                                   want, PROC_WAKE_EVENT,
-                                                   &wake_q, NULL);
+        unsigned got = futex_collect_below(b1, pkey1, futex_wake_match, &arg1,
+                                           want, PROC_WAKE_EVENT, &wake_q, NULL);
         if (got == 0)
             break;
         (void)proc_wake_q_flush(&wake_q);
         done += (int)got;
     }
 
-    /* Requeue phase: remaining bucket1 matches move to bucket2. */
+    /*
+     * Requeue phase: remaining bucket1 matches move to bucket2.  The sweep
+     * feeds one source bucket per call because
+     * wait_queue_requeue_matching() locks its two queues in address order;
+     * holding more than two at once would break that discipline.
+     */
     int moved = 0;
     if (requeue_nr > 0) {
         futex_wake_arg_t argr = { mm, vkey1, pkey1, FUTEX_BITSET_MATCH_ANY };
@@ -413,6 +472,16 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
                                                  (unsigned)requeue_nr,
                                                  futex_requeue_rekey,
                                                  &rarg);
+        for (unsigned i = 0; i < FUTEX_BUCKETS &&
+                            moved < requeue_nr && pkey1 != 0; i++) {
+            if (i == b1)
+                continue;
+            moved += (int)wait_queue_requeue_matching(&g_futex_buckets[i], q2,
+                                                      futex_wake_match, &argr,
+                                                      (unsigned)(requeue_nr - moved),
+                                                      futex_requeue_rekey,
+                                                      &rarg);
+        }
     }
     return done + moved;
 }
@@ -474,8 +543,8 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     uintptr_t pkey1 = private ? 0 : futex_phys_key(uaddr);
     uintptr_t vkey2 = (uintptr_t)uaddr2;
     uintptr_t pkey2 = private ? 0 : futex_phys_key(uaddr2);
-    wait_queue_t *q1 = &g_futex_buckets[futex_bucket_index(vkey1)];
-    wait_queue_t *q2 = &g_futex_buckets[futex_bucket_index(vkey2)];
+    unsigned b1 = futex_bucket_index(vkey1);
+    unsigned b2 = futex_bucket_index(vkey2);
 
     int woke = 0;
     futex_wake_arg_t arg1 = { mm, vkey1, pkey1, FUTEX_BITSET_MATCH_ANY };
@@ -484,9 +553,8 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
         if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        unsigned got = wait_queue_collect_matching(q1, futex_wake_match, &arg1,
-                                                   want, PROC_WAKE_EVENT,
-                                                   &wake_q, NULL);
+        unsigned got = futex_collect_below(b1, pkey1, futex_wake_match, &arg1,
+                                           want, PROC_WAKE_EVENT, &wake_q, NULL);
         if (got == 0)
             break;
         (void)proc_wake_q_flush(&wake_q);
@@ -501,10 +569,9 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
             if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
-            unsigned got = wait_queue_collect_matching(q2, futex_wake_match,
-                                                       &arg2, want,
-                                                       PROC_WAKE_EVENT,
-                                                       &wake_q, NULL);
+            unsigned got = futex_collect_below(b2, pkey2, futex_wake_match,
+                                               &arg2, want, PROC_WAKE_EVENT,
+                                               &wake_q, NULL);
             if (got == 0)
                 break;
             (void)proc_wake_q_flush(&wake_q);
