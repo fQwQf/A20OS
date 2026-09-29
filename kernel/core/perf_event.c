@@ -293,8 +293,11 @@ static int perf_event_ioctl(vfile_t *vf, unsigned long req, void *arg)
         return 0;
     }
     case PERF_EVENT_IOC_SET_OUTPUT:
-        /* No mmap ring buffer; the output fd is accepted and ignored. */
-        return 0;
+        /* Redirecting samples into another perf event's ring needs the mmap
+         * ring buffer this implementation does not have; there is no buffer
+         * to hand the output to, so the redirect is refused instead of being
+         * accepted and dropped. */
+        return -EOPNOTSUPP;
     case PERF_EVENT_IOC_ID: {
         if (!arg)
             return -EFAULT;

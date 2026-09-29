@@ -121,17 +121,26 @@ __vdso_gettimeofday:
 
 /* int __vdso_getcpu(unsigned *a0, unsigned *a1, void *a2)
  *
- * Documented stub: always reports CPU 0 / node 0.  The running CPU id is
- * per-CPU kernel state with no user mapping, so there is nothing to read
- * here.  The getcpu syscall returns the true cpu_current_id().
+ * Refuses with -ENOSYS rather than reporting a CPU.  -ENOSYS is the one
+ * value musl's wrapper understands as "not available": src/sched/
+ * sched_getcpu.c turns any other non-zero result into a hard error, but
+ * falls through to the getcpu syscall on -ENOSYS, and that syscall returns
+ * the true cpu_current_id() (kernel/abi/linux/sys_sched.c).  So the caller
+ * gets the truth, and the fast path costs one wasted trap instead of a lie.
+ *
+ * The CPUID CSR (0x20) the kernel reads is not a usable substitute: its low
+ * word is a packed descriptor (PRMD/REFGPL/UAL/RI/CC, with CPUNUM at bits
+ * 23:10), not the dense logical id, and cpu_current_id() clamps anything at
+ * or above NR_CPUS back to 0 (kernel/include/core/cpu.h).  A raw read would
+ * hand callers a number the syscall never returns, which is a second kind of
+ * wrong answer.  The global vvar page (kernel/mm/vdso.c) is shared by every
+ * CPU, and A20OS keeps no per-CPU area pointer, so there is nothing else to
+ * read.  *a0 and *a1 are left untouched: a plausible wrong CPU 0 is worse
+ * than no answer at all (docs/security/hardening.md).
  * See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:
-    beqz   $a0, 1f
-    st.w   $zero, $a0, 0
-1:  beqz   $a1, 2f
-    st.w   $zero, $a1, 0
-2:  or     $a0, $zero, $zero
+    li.w   $a0, -38
     jr     $ra
     .size  __vdso_getcpu, .-__vdso_getcpu
