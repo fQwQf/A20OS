@@ -68,7 +68,17 @@ typedef struct {
 /* Userspace-visible reply for IPC_STAT/MSG_STAT.  qnum is held in an
  * 8-byte slot rather than an int so that the struct matches musl's
  * int-plus-4-bytes-of-padding at offset 80 without depending on how the
- * compiler happens to pad it. */
+ * compiler happens to pad it.
+ *
+ * The size check is LP64-only, and deliberately so.  On ILP32 this struct
+ * does not describe the native ABI: it carries the IPC64 perm (with 4-byte
+ * unsigned long fields) and native-width long timestamps, which works out to
+ * 80 bytes.  musl's ILP32 struct msqid_ds is 112 bytes, because it uses a
+ * native-width struct ipc_perm (36 bytes, with two 4-byte long pads) and a
+ * 64-bit time_t (_Int64) even on riscv32.  The two layouts disagree, so an
+ * ILP32 MSG_STAT must not be answered with this struct: the reply would be
+ * read at the wrong offsets.  The STAT handlers report -EOPNOTSUPP there
+ * instead, which is the honest answer for an ABI that is not implemented. */
 typedef struct {
     sysv_ipc_perm64_t msg_perm;
     long stime, rtime, ctime;
@@ -79,7 +89,10 @@ typedef struct {
     unsigned long unused[2];
 } sysv_msqid_ds_t;
 
+#ifdef CONFIG_64BIT
 STATIC_ASSERT(sizeof(sysv_msqid_ds_t) == 120, msqid_ds_matches_libc);
+#define SYSV_MSQID_DS_SUPPORTED 1
+#endif
 
 /* Kernel-side message node. */
 typedef struct sysv_msg_node {
@@ -414,6 +427,7 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
     case IPC_STAT:
     case MSG_STAT:
     case MSG_STAT_ANY: {
+#ifdef SYSV_MSQID_DS_SUPPORTED
         sysv_msqid_ds_t ds;
         memset(&ds, 0, sizeof(ds));
         ds.msg_perm = q->perm;
@@ -433,8 +447,14 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
         if (arg && copy_to_user(arg, &ds, sizeof(ds)) < 0)
             return -EFAULT;
         return r;
+#else
+        (void)arg;
+        spin_unlock_irqrestore(&g_msg_lock, flags);
+        return -EOPNOTSUPP;
+#endif
     }
     case IPC_SET: {
+#ifdef SYSV_MSQID_DS_SUPPORTED
         if (!arg) {
             spin_unlock_irqrestore(&g_msg_lock, flags);
             return -EINVAL;
@@ -454,6 +474,11 @@ int sysv_msg_control(int msqid, int cmd, void *arg)
         q->perm.mode = ds.msg_perm.mode;
         q->ctime = timer_get_ticks();
         break;
+#else
+        (void)arg;
+        spin_unlock_irqrestore(&g_msg_lock, flags);
+        return -EOPNOTSUPP;
+#endif
     }
     default:
         r = -EINVAL;

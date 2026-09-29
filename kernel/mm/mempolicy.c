@@ -30,8 +30,14 @@
 #define MPOL_MF_MOVE    2
 #define MPOL_MF_MOVE_ALL 4
 
-/* Max nodes in the task policy field. */
-#define MAX_POLICY_NODES 8
+/* A20OS exposes exactly one NUMA node, so a mask naming any other node can
+ * never be honoured.  Rejecting it is what keeps a set/get round trip honest:
+ * accepting node 1 and reporting success would promise placement A20OS cannot
+ * perform. */
+static uint64_t mempolicy_valid_nodes(void)
+{
+    return 1u; /* node 0 */
+}
 
 int mempolicy_set(struct task_t *t, int mode, uint64_t nmask)
 {
@@ -43,9 +49,12 @@ int mempolicy_set(struct task_t *t, int mode, uint64_t nmask)
      * mask.  Node 0 is always valid. */
     if ((mode == MPOL_BIND || mode == MPOL_INTERLEAVE) && nmask == 0)
         return -EINVAL;
-    t->policy.thp_disabled = 0; /* reuse the policy field for the mode */
-    t->policy.oom_score_adj = mode;
-    (void)nmask;
+    if (nmask & ~mempolicy_valid_nodes())
+        return -EINVAL;
+    t->policy.mempolicy_mode = mode;
+    t->policy.mempolicy_nmask = (mode == MPOL_BIND || mode == MPOL_INTERLEAVE)
+                                    ? nmask
+                                    : 0;
     return 0;
 }
 
@@ -59,6 +68,8 @@ int mempolicy_mbind(struct task_t *t, uint64_t addr, size_t len, int mode,
         return -EINVAL;
     if ((mode == MPOL_BIND || mode == MPOL_INTERLEAVE) && nmask == 0)
         return -EINVAL;
+    if (nmask & ~mempolicy_valid_nodes())
+        return -EINVAL;
     if (addr == 0 || len == 0)
         return -EINVAL;
     if ((addr & (PAGE_SIZE - 1)) || (len & (PAGE_SIZE - 1)))
@@ -69,6 +80,10 @@ int mempolicy_mbind(struct task_t *t, uint64_t addr, size_t len, int mode,
         if (end < addr || end > USER_VA_LIMIT)
             return -EINVAL;
     }
+    t->policy.mempolicy_mode = mode;
+    t->policy.mempolicy_nmask = (mode == MPOL_BIND || mode == MPOL_INTERLEAVE)
+                                    ? nmask
+                                    : 0;
     return 0;
 }
 
@@ -76,5 +91,12 @@ int mempolicy_get_mode(struct task_t *t)
 {
     if (!t)
         return -ESRCH;
-    return t->policy.oom_score_adj;
+    return t->policy.mempolicy_mode;
+}
+
+uint64_t mempolicy_get_nmask(struct task_t *t)
+{
+    if (!t)
+        return 0;
+    return t->policy.mempolicy_nmask;
 }

@@ -833,13 +833,13 @@ int64_t sys_a20_path_readlink_at(const a20_syscall_args_t *args)
 
 int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
 {
-    a20_fs_serve_args_t *uargs = (a20_fs_serve_args_t *)A20_ARG(0);
+    a20_fs_serve_args_t *uargs = (a20_fs_serve_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_fs_serve_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
 
     char ktgt[MAX_PATH_LEN];
-    if (copy_path_from_user(ktgt, (const char *)kargs.target,
+    if (copy_path_from_user(ktgt, (const char *)(uintptr_t)kargs.target,
                             kargs.target_len) < 0)
         return -A20_ERR_FAULT;
     char full_tgt[MAX_PATH_LEN];
@@ -871,7 +871,7 @@ int64_t sys_a20_fs_serve(const a20_syscall_args_t *args)
 
 int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
 {
-    a20_fs_block_io_args_t *uargs = (a20_fs_block_io_args_t *)A20_ARG(0);
+    a20_fs_block_io_args_t *uargs = (a20_fs_block_io_args_t *)(uintptr_t)A20_ARG(0);
     if (!uargs) return -A20_ERR_FAULT;
     a20_fs_block_io_args_t kargs;
     A20_VALIDATE_AND_COPY(uargs, kargs);
@@ -889,7 +889,7 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
         if (qrc < 0)
             return -A20_ERR_IO;
         uint64_t out = sectors;
-        if (copy_to_user((void *)kargs.buf, &out, sizeof(out)) < 0)
+        if (copy_to_user((void *)(uintptr_t)kargs.buf, &out, sizeof(out)) < 0)
             return -A20_ERR_FAULT;
         return A20_OK;
     }
@@ -907,7 +907,7 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     if (!kbuf) return -A20_ERR_NO_MEMORY;
 
     if (kargs.write &&
-        copy_from_user(kbuf, (const void *)kargs.buf, bytes) < 0) {
+        copy_from_user(kbuf, (const void *)(uintptr_t)kargs.buf, bytes) < 0) {
         kfree(kbuf);
         return -A20_ERR_FAULT;
     }
@@ -923,7 +923,7 @@ int64_t sys_a20_fs_block_io(const a20_syscall_args_t *args)
     }
 
     if (!kargs.write &&
-        copy_to_user((void *)kargs.buf, kbuf, bytes) < 0) {
+        copy_to_user((void *)(uintptr_t)kargs.buf, kbuf, bytes) < 0) {
         kfree(kbuf);
         return -A20_ERR_FAULT;
     }

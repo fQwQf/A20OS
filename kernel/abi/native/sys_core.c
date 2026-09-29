@@ -959,7 +959,7 @@ int64_t sys_a20_task_wait(const a20_syscall_args_t *args)
 {
     a20_handle_t task_h = (a20_handle_t)A20_ARG(0);
     a20_flags_t flags = (a20_flags_t)A20_ARG(1);
-    a20_task_status_t *out = (a20_task_status_t *)A20_ARG(2);
+    a20_task_status_t *out = (a20_task_status_t *)(uintptr_t)A20_ARG(2);
     if (flags & ~A20_TASK_WAIT_NONBLOCK)
         return -A20_ERR_INVALID_ARGUMENT;
 

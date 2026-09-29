@@ -128,7 +128,7 @@ void syscall_trace_enter(task_t *t, const linux_syscall_entry_t *entry,
     if ((entry->nr == SYS_openat || entry->nr == SYS_readlinkat ||
          entry->nr == SYS_statx || entry->nr == SYS_fstatat) &&
         args->arg[1])
-        user_strncpy(path, (const char *)args->arg[1],
+        user_strncpy(path, (const char *)(uintptr_t)args->arg[1],
                      sizeof(path) - 1);
     if (path[0])
         printf("[TRACE] %d(%s) %s(%llx \"%s\")\n", t->pid, t->name,

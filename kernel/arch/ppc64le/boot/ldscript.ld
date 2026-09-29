@@ -17,17 +17,20 @@ SECTIONS
     . = VIRT_BASE;
 
     .text : AT(ADDR(.text) - LOAD_DELTA) {
+        __text_start = .;
         *(.text.entry)
         *(.text .text.*)
     } :text
 
     . = ALIGN(4096);
     .rodata : AT(ADDR(.rodata) - LOAD_DELTA) {
+        __rodata_start = .;
         *(.rodata .rodata.*)
     } :rodata
 
     . = ALIGN(4096);
     .data : AT(ADDR(.data) - LOAD_DELTA) {
+        __data_start = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
     } :data
