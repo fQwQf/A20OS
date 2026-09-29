@@ -64,6 +64,12 @@ int64_t sys_perf_event_open(const void *attr, int pid, int cpu,
 {
     if (!attr)
         return -EFAULT;
+    /* PERF_FLAG_FD_OUTPUT routes samples into another event's mmap ring
+     * buffer, which this implementation has none of, so it is reported as
+     * unsupported rather than folded into the unknown-flag -EINVAL (or, worse,
+     * accepted and dropped). */
+    if (flags & PERF_FLAG_FD_OUTPUT)
+        return -EOPNOTSUPP;
     if (flags & ~(PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_CLOEXEC))
         return -EINVAL;
     if (group_fd >= 0)

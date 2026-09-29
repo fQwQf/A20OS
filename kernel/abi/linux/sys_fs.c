@@ -786,12 +786,48 @@ int64_t sys_fdatasync(int fd) {
     return vfs_fdatasync((int)gfd);
 }
 
+/* uapi/linux/fs.h sync_file_range() flags. */
+#define LINUX_SYNC_FILE_RANGE_WAIT_BEFORE 1U
+#define LINUX_SYNC_FILE_RANGE_WRITE        2U
+#define LINUX_SYNC_FILE_RANGE_WAIT_AFTER   4U
+#define LINUX_SYNC_FILE_RANGE_KNOWN                                     \
+    (LINUX_SYNC_FILE_RANGE_WAIT_BEFORE |                               \
+     LINUX_SYNC_FILE_RANGE_WRITE |                                     \
+     LINUX_SYNC_FILE_RANGE_WAIT_AFTER)
+
 int64_t sys_sync_file_range(int fd, long offset, long nbytes, unsigned flags) {
-    (void)offset;
-    (void)nbytes;
-    (void)flags;
+    /* Flags are validated rather than accepted-and-dropped: an unknown bit is
+     * -EINVAL, and the three Linux values are all accepted because A20OS's
+     * single writeback primitive is a synchronous whole-file flush, which
+     * already implies the WRITE/WAIT_AFTER ordering a caller could ask for.
+     * WAIT_BEFORE alone (schedule writeback, do not write) has no such
+     * stronger guarantee and is rejected rather than quietly upgraded. */
+    if (flags & ~LINUX_SYNC_FILE_RANGE_KNOWN)
+        return -EINVAL;
+    if (flags == LINUX_SYNC_FILE_RANGE_WAIT_BEFORE)
+        return -EOPNOTSUPP;
+    if (offset < 0 || nbytes < 0)
+        return -EINVAL;
+
     int64_t gfd = fdtable_get_current(fd);
-    if (gfd < 0) return -EBADF;
+    if (gfd < 0) return gfd;
+
+    /* Range semantics: the requested window must lie inside the file.  A
+     * zero-length request is legal and, having nothing to write back, needs no
+     * flush. */
+    kstat_t st;
+    int serr = vfs_fstat((int)gfd, &st);
+    if (serr < 0) return serr;
+    if (nbytes == 0)
+        return 0;
+    if ((uint64_t)offset > st.st_size ||
+        (uint64_t)nbytes > st.st_size - (uint64_t)offset)
+        return -EINVAL;
+
+    /* The VFS exposes no range-scoped writeback, so the flush is issued for
+     * the whole file: it is a strictly stronger guarantee than the caller
+     * asked for, not a weaker one, and is reported here so the approximation
+     * is not mistaken for true per-range writeback. */
     return vfs_fsync((int)gfd);
 }
 

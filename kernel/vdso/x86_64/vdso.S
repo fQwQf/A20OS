@@ -126,18 +126,35 @@ __vdso_gettimeofday:
 
 /* int __vdso_getcpu(unsigned *cpu, unsigned *node, void *cache)
  *
- * Documented stub: always reports CPU 0 / node 0.  The running CPU id is
- * per-CPU kernel state with no user mapping, so there is nothing to read
- * here.  The getcpu syscall returns the true cpu_current_id().
- * See kernel/include/mm/vdso.h. */
+ * Refuses with -ENOSYS rather than reporting a CPU.  -ENOSYS is the one
+ * value musl's wrapper understands as "not available": src/sched/
+ * sched_getcpu.c turns any other non-zero result into a hard error, but
+ * falls through to the getcpu syscall on -ENOSYS, and that syscall returns
+ * the true cpu_current_id() (kernel/abi/linux/sys_sched.c).  So the caller
+ * gets the truth, and the fast path costs one wasted trap instead of a lie.
+ *
+ * TSC_AUX is the register route Linux uses here, and it is unusable because
+ * A20OS never programs it: nothing in the tree writes MSR IA32_TSC_AUX
+ * (0xC0000103) — the only wrmsr sites are EFER plus the FS/GS base MSRs — no
+ * CPUID leaf 0xB topology enumeration runs, and the clock path below uses
+ * plain rdtsc.  So RDTSCP's TSC_AUX would hand back the firmware/reset
+ * value (0 under QEMU) and bits 31:12 would decode as CPU 0 on every CPU: a
+ * fabricated answer, not a measured one.  MSR_GS_BASE holds
+ * the kernel task pointer and is not a per-CPU base, and the user GS value
+ * from arch_prctl(ARCH_SET_GS) is only stored in task_t, never loaded into
+ * the MSR (kernel/arch/x86_64/abi/sys_arch_prctl.c).  The global vvar page
+ * (kernel/mm/vdso.c) is shared by every CPU and A20OS keeps no per-CPU area
+ * pointer, so *cpu and *node are left untouched.
+ *
+ * What would make this a real fast path, none of it reachable from here: the
+ * kernel must write IA32_TSC_AUX = (node << 12) | logical_cpu on each CPU,
+ * and the vDSO must then confirm RDTSCP support via CPUID leaf 0x80000001
+ * EDX[27] and bound the decoded id against a CPU count published in the vvar
+ * page before shifting EDX right 12.  Until the kernel half exists,
+ * reporting "does not exist" is the honest answer
+ * (docs/security/hardening.md).  See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,@function
 __vdso_getcpu:
-    test    %rdi, %rdi
-    jz      1f
-    movl    $0, 0(%rdi)
-1:  test    %rsi, %rsi
-    jz      2f
-    movl    $0, 0(%rsi)
-2:  xor     %eax, %eax
+    mov     $-38, %eax
     ret

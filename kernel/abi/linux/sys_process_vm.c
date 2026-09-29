@@ -186,14 +186,22 @@ int64_t sys_process_madvise(int pid, const void *iov, unsigned long iovcnt,
 
 int64_t sys_process_mrelease(int pidfd, unsigned flags)
 {
-    (void)flags;
+    if (flags != 0)
+        return -EINVAL;
     if (pidfd < 0)
         return -EINVAL;
-    /* The target is identified by a pidfd; resolve it and, if it is a zombie
-     * whose memory is being released, drain the mm.  A20OS reclaims mm on
-     * exit automatically, so this is a no-op success for a valid pidfd. */
-    int64_t gfd = fdtable_get_current(pidfd);
-    if (gfd < 0)
-        return -EBADF;
-    return 0;
+    /* Validate that the descriptor really is a pidfd before reporting the
+     * capability as absent, so a wrong fd is still diagnosed as -EBADF. */
+    int64_t pid = linux_pidfd_pid(pidfd);
+    if (pid < 0)
+        return pid;
+
+    /* process_mrelease(2) releases the memory of a zombie whose mm the pidfd
+     * is keeping alive.  A20OS has no such state to release: a pidfd here
+     * stores a bare pid and holds no task reference (see
+     * kernel/abi/linux/sys_pidfd.c), task_t has no detached mm, and the
+     * address space is already reclaimed when the task exits.  There is
+     * therefore nothing to detach, and reporting success would promise a
+     * memory release that never happened. */
+    return -ENOSYS;
 }

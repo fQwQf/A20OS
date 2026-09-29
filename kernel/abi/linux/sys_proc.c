@@ -408,7 +408,13 @@ int64_t sys_personality(unsigned int persona) {
 }
 
 int64_t sys_vhangup(void) {
-    return 0;
+    /* vhangup(2) revokes the caller's controlling terminal.  A20OS has no
+     * tty layer at all: there is no session leader, no controlling-terminal
+     * pointer in task_t, and no tty driver to hang up, so there is no state
+     * to revoke.  Reporting success would tell a caller its terminal was
+     * revoked when it was not — the fail-closed policy requires reporting
+     * "does not exist" instead. */
+    return -ENOSYS;
 }
 
 int64_t sys_unshare(int flags) {
