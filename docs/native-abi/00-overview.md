@@ -1,6 +1,6 @@
 # A20 Native ABI 设计
 
-本文概述 A20OS Native ABI。A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。详细规范见各子文档。本文已按 2026-08 源码核对；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
+A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整体架构决策，请阅读 [OS-Design.md](../OS-Design.md)。本页覆盖设计定位与 syscall 编号分区，详细规范见各子文档。内容按 2026-08 源码核对；源码状态不等于已完成运行时验收，Native smoke 需在当前提交上逐项复验。
 
 ## 设计定位
 
@@ -14,7 +14,7 @@ kernel/abi/native/   A20OS native ABI（142 个登记入口，部分功能仍有
 user/external/mlibc/sysdeps/a20/  活跃的 Native 完整 libc 移植（当前仅 riscv64 构建/运行入口）
 ```
 
-Debug 分区（0x0900）实现完整的停止/恢复/观察语义：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写，底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。 （历史阶段标记：Debug 分区受限实现——NATIVE_DEBUG_LIMITED_CONTRACT—— 已于 sys_native_debug.c 落地后结束。）
+Debug 分区（0x0900）的停止/恢复/观察语义已经完整：`debug_attach/traceme/detach/ resume`、`debug_wait/event` 停止报告（含退出事件）、`debug_read/write` 地址空间访问、寄存器读写。底层复用 ABI 无关的内核调试接口 `proc_debug_*` （`kernel/proc/debug.c`），与 Linux ABI 的 ptrace(2) 共享同一状态机。 （历史阶段标记：Debug 分区受限实现——NATIVE_DEBUG_LIMITED_CONTRACT—— 已于 sys_native_debug.c 落地后结束。）
 
 ## 核心原则
 
@@ -26,7 +26,7 @@ Native ABI 不区分 Linux 风格的 fd、pid、tid、timerid、shmid 等编号�
 typedef uint32_t a20_handle_t;
 ```
 
-**为什么采用 handle？**
+为什么采用 handle？
 
 > 我看 Windows NT 搞得不错，内核对象极大丰富，各类资源的调用差异基本消灭，面向对象，安全权能机制也受重视，如果再加上开源，Windows NT 就是我们理想中的操作系统内核。  ——fQwQf
 
@@ -268,13 +268,9 @@ Native ABI 不应该：
 
 ## Syscall 完整性
 
-Native ABI 当前登记 142 个 syscall，而 Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。关键统一机制包括：
+Native ABI 当前登记 142 个 syscall，Linux ABI 表登记 366 个。这个数字只说明接口表规模，不能推出 Native ABI 已语义等价覆盖全部 Linux syscall。统一机制承担了其中的合并工作：`handle_set_meta` 一次调用修改 chmod/chown/utimes/truncate 等元数据；`handle_transfer` 统一 splice/sendfile/copy_file_range/tee 风格接口，当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝；`task_set_sched`/`task_get_sched` 统一 sched/priority/nice/affinity；`security_get_context`/`security_set_context` 统一 uid/gid/cap。
 
-- `handle_set_meta`：一次调用修改 chmod/chown/utimes/truncate 等元数据。
-- `handle_transfer`：统一 splice/sendfile/copy_file_range/tee 风格接口；当前实现使用 4 KiB 内核缓冲拷贝，不是零拷贝。
-- `task_set_sched`/`task_get_sched`：统一 sched/priority/nice/affinity。
-- `event_queue`：为 channel/timer/task 等对象提供统一等待模型；file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
-- `security_get_context`/`security_set_context`：统一 uid/gid/cap。
+`event_queue` 为 channel/timer/task 等对象提供统一等待模型，但 file/socket readiness 与 `event_watch_fs` 事件源尚未完整接入，不能视为已覆盖 epoll/signalfd/inotify 全语义。
 
 完整分类对比、未覆盖 Linux 功能（由兼容层模拟）以及形式化讨论，见 [OS-Design.md](../OS-Design.md) §4 与 `docs/research/05-capability-envelopes.md`。
 
@@ -282,15 +278,8 @@ Native ABI 当前登记 142 个 syscall，而 Linux ABI 表登记 366 个。这�
 
 已完成的阶段：
 
-- Phase 0：`liba20rt` 最小运行时（syscall 发射宏、142 个 syscall 编号、多架构 crt0、hello world 测试）。
-- Phase 1：`liba20c` 最小 C 库（malloc、fd↔handle 映射、FILE*、errno、基础 POSIX open/read/write/close 包装）。
-- Phase 2：内核侧 142 个 syscall 扩展（task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等）。
-- mlibc Phase 1-2：`sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
+Phase 0 交付了 `liba20rt` 最小运行时，含 syscall 发射宏、142 个 syscall 编号、多架构 crt0 和 hello world 测试。Phase 1 的 `liba20c` 最小 C 库覆盖 malloc、fd↔handle 映射、FILE*、errno，以及基础 POSIX open/read/write/close 包装。Phase 2 把内核侧 syscall 扩展到 142 个，落到 task_spawn、thread_create、timer、channel、socket、VMO/VMAR 等入口。mlibc Phase 1-2 打通 `sysdeps/a20` 静态 libc、线程、pipe/poll/socketpair、`posix_spawn` 等 RISC-V64 路径。
 
-剩余工作：
-
-- 将现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵；当前许多 smoke 仍固定为 RISC-V64。
-- 按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序。
-- 完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建（工作量边界见 [08-runtime-status.md](08-runtime-status.md) §8a）。
+剩余工作集中在三处：把现有 16 个 `test_native_*.c`、`test_liba20c.c` 与 mlibc smoke 组织为明确的多架构运行矩阵，当前许多 smoke 仍固定为 RISC-V64；按需实现 `A20_SPAWN_FORK_SELF` 与事件驱动信号模拟，以支持需要 fork 的复杂 POSIX 程序；完成并验证现有 Native `PT_INTERP` 栈封装与 mlibc rtld/共享库构建，工作量边界见 [08-runtime-status.md](08-runtime-status.md) §8a。
 
 详细运行时状态与后续路线图见 [08-runtime-status.md](08-runtime-status.md)。

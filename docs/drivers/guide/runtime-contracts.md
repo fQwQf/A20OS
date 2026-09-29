@@ -1,6 +1,6 @@
 # 驱动运行时契约
 
-本文列出所有使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守的规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
+使用 MMIO、IRQ、DMA、并发或等待的驱动必须遵守下列规则。公共 API 在 `kernel/drivers/core/driver_hwapi.h`；驱动包含该头，不直接包含架构私有寄存器头。
 
 ## MMIO
 
@@ -45,7 +45,7 @@ void dma_sync_for_cpu(void *vaddr, size_t size);
 
 静态 ring/buffer 使用 `va_to_pa()` 生成 DMA 地址，并必须在各架构线性映射范围内。不得把栈上对象交给异步 DMA；同步命令也只有在确认完成后才能离开栈帧。设备超时后可能仍持有 buffer，必须先复位/停止设备，再复用或释放。
 
-> 注意不要把栈上变量或临时结构传给 DMA，即使你认为命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
+> 不要把栈上变量或临时结构传给 DMA，即使命令会很快完成。设备超时后仍可能访问该内存，而栈帧早已释放。超时后也不要立即复用同一块 buffer，先停止或复位设备。
 
 ## IRQ API
 

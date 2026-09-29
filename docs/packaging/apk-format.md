@@ -3,7 +3,7 @@
 最后核实：2026-08-27（依据 apk-tools v3.0.7 源码：src/extract_v2.c、
 src/tar.c、src/trust.c、src/crypto_openssl.c）。
 
-`mka20pkg.py` 产出的包遵循 apk v2 格式。本文件记录格式的关键约束——
+`mka20pkg.py` 产出的包遵循 apk v2 格式。本文件记录格式的关键约束，
 它们都是从 apk 源码逐行核对出来的"隐性规则"，改打包器前请先读这里。
 
 ## 总体结构：gzip 分段流
@@ -26,7 +26,7 @@ tar 惯例以两个 512 字节零块表示归档结束，但 apk 的 tar 解析�
 
 因此：签名段与控制段的 tar **必须剥掉尾部零块**（abuild-tar 同样不写
 结束标记）；数据段保留结束标记，解析器正常收尾。Python 的 tarfile 默认
-会写结束标记并把归档填充到 10240 字节——mka20pkg 的
+会写结束标记并把归档填充到 10240 字节，mka20pkg 的
 `strip_tar_trailer()` 负责剥除。
 
 ### 规则 2：.PKGINFO 必须带 datahash（apk ≥ 2.14，含 3.x）
@@ -39,8 +39,8 @@ apk 3 在 `apk_pkg_read`（add/index 的共同路径）里要求身份哈希存�
 
 ### 规则 3：包签名 = 对控制段 gzip 流的 RSA 签名
 
-- 签名者：`openssl dgst -sha256 -sign key.pem`，输入是**控制段的原始
-  gzip 字节**（不是解压后的 tar，也不含数据段）；
+- 签名者：`openssl dgst -sha256 -sign key.pem`，输入是**控制段的原始 gzip 字节**
+  （不是解压后的 tar，也不含数据段）；
 - 签名条目名编码算法：`.SIGN.RSA256.<name>` = SHA-256，
   `.SIGN.RSA.<name>` = SHA-1（历史方案）。`<name>` 必须等于公钥在
   信任目录里的**文件名**（如 `a20os-release.rsa.pub`）；
@@ -54,7 +54,7 @@ apk 安装时逐文件校验。GNU tar 能读但会警告 "unknown keyword"，�
 
 ### 规则 5：公钥必须是 SPKI 格式
 
-`apk_pkey_load` 用 OpenSSL 的 `PEM_read_bio_PUBKEY`——接受
+`apk_pkey_load` 用 OpenSSL 的 `PEM_read_bio_PUBKEY`，接受
 `-----BEGIN PUBLIC KEY-----`（SPKI），**不接受** PKCS#1 的
 `-----BEGIN RSA PUBLIC KEY-----`。生成方式：
 
@@ -77,7 +77,7 @@ apk 内部会 chdir 到目标 root，相对路径的 keys-dir 会静默找不到
 
 `apk index` 产出未签名索引；签名（abuild-sign 的做法）：
 
-1. `openssl dgst -sha256 -sign key APKINDEX.tar.gz` —— 对**整个索引文件**
+1. `openssl dgst -sha256 -sign key APKINDEX.tar.gz`，对**整个索引文件**
    签名；
 2. 把签名包进一个无结束标记的 tar，gzip 成流；
 3. **前置**到 APKINDEX.tar.gz 之前（`cat sig.gz APKINDEX.tar.gz`）。

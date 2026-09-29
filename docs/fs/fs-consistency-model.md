@@ -1,6 +1,6 @@
 # A20OS 文件系统一致性模型
 
-本文档记录 A20OS P1 中各后端的能力、一致性和 Linux ABI 行为矩阵。内容已按 2026-08 的 `kernel/fs/` 与 VFS wrapper 做源码核对；“支持”表示当前代码路径存在，不等于每个后端、架构和崩溃场景都已有运行时测试。当前提交没有匹配的完整干净双架构平台复验。
+“支持”表示当前代码路径存在，**不等于每个后端、架构和崩溃场景都已有运行时测试**。矩阵内容已按 2026-08 的 `kernel/fs/` 与 VFS wrapper 做过源码核对；当前提交没有匹配的完整干净双架构平台复验。
 
 ## 1. 范围
 
@@ -27,11 +27,11 @@
 
 | 列 | 含义 |
 |--------|---------|
-| **Op** | VFS vnode 操作或高层 syscall 行为 |
-| **Support** | 只描述当前代码路径，不编码测试结论；具体取值见下表 |
-| **Errno** | 不支持或错误路径返回的 errno（来自代码，不是意图） |
-| **Ordering / Atomicity** | 当前代码实际提供的保证 |
-| **Linux ABI gap** | 测试必须编码的 Linux 差异 |
+| Op | VFS vnode 操作或高层 syscall 行为 |
+| Support | 只描述当前代码路径，不编码测试结论；具体取值见下表 |
+| Errno | 不支持或错误路径返回的 errno（来自代码，不是意图） |
+| Ordering / Atomicity | 当前代码实际提供的保证 |
+| Linux ABI gap | 测试必须编码的 Linux 差异 |
 
 | Support 值 | 含义 |
 |---|---|
@@ -67,14 +67,14 @@ FAT32 从 virtio-blk block cache 挂载。superblock 由 `fat32_sb_t.lock` 保�
 | fsync | partial | — | `vfs_fsync` 同步共享脏映射、vnode page cache 和 mount block cache（`kernel/fs/vfs/file.c`），但 FAT32 没有显式 inode log。 |
 | xattr | partial | — | 无 FAT32 后端 hook；reg/dir 的值由全局 `(mnt, ino)` RAM 表提供，unmount/reboot 后丢失。 |
 
-**FAT32 顺序保证**
+FAT32 的顺序保证：
 
 - 整个文件系统由 `sb->lock` 串行化（`fat32.c`）。
 - 目录项更新和 FAT 更新之间不是原子的。unlink 先把目录项标记为删除，再立即释放 cluster chain，或在 vnode 仍被引用时把释放推迟到最后一个引用消失；如果在目录项删除后、chain 释放前崩溃，已不可达的 cluster 可能泄漏。
 - 文件大小只在 close 时写回目录项（`fat32_fclose`，`fat32_file.c`）。close 前断电会丢失 size。
 - block cache 是 write-back；`vfs_fsync` 和 unmount（`fat32_unmount`，`fat32.c`）会调用 `bcache_sync`。
 
-**FAT32 ABI 缺口**
+FAT32 相对 Linux ABI 的缺口：
 
 - 没有 hard link 或 symbolic link（rename 已实现）。
 - 文件 ownership/mode 是易失的（只存在 RAM）。
@@ -107,17 +107,17 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 | fsync | partial | — | 同步共享脏映射与 vnode page cache，再定点刷出该文件的数据、inode 和相关分配元数据；超出定点收集范围时回退为整个 mount 的 block-cache sync。运行时 mutation 不写 JBD2 journal，因此没有 ext4 ordered/journal 保证。 |
 | xattr | partial | — | 无 ext4 xattr 后端 hook；reg/dir/lnk 的值只进入全局 RAM 表。 |
 
-**ext4 顺序保证**
+顺序保证（ext4）：
 
 - inode/block allocation 由 `alloc_lock` 保护，namespace mutation 由 `metadata_lock` 串行；运行时没有 journal transaction 或 ordered writeback。
 - 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些运行时更新不受 journal transaction 保护，断电原子性不等同 Linux ext4。
 - `vfs_fsync` 会先同步共享脏映射和 vnode page cache；ext4 的 `sync_vnode` 随后用 `bcache_sync_scoped` 刷出文件数据、inode table、bitmap、group descriptor 和 superblock 页，深层 extent 或定点数组不足时回退为整个 mount sync（`kernel/fs/vfs/file.c`、`kernel/fs/diskfs/ext4_sync.c`）。
 
-**ext4 ABI 缺口**
+ext4 相对 Linux ABI 的缺口：
 
 - 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c`）。
 - hard link 已实现；`st_nlink` 来自 `i_links_count`（unlink 递减，link 递增）。
-- 挂载时对带 journal 的镜像执行 **JBD2 recovery**（`EXT4_FEATURE_INCOMPAT_RECOVER` 已在 `unsupported_incompat` 中显式排除，`ext4_journal_recover` 在挂载时运行），recovery 失败则 fail closed 拒绝挂载。
+- 挂载时对带 journal 的镜像执行 JBD2 recovery（`EXT4_FEATURE_INCOMPAT_RECOVER` 已在 `unsupported_incompat` 中显式排除，`ext4_journal_recover` 在挂载时运行），recovery 失败则 fail closed 拒绝挂载。
 - 没有 xattr。
 - mount 时做 fail-closed feature 检查：不支持的 incompat 特性（meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 
@@ -142,14 +142,14 @@ NTFS 从 block cache 挂载，直接解析 MFT（master file table）记录，�
 | readdir | Y | — | `ntfs_freaddir`。从 `$I30` 索引枚举。 |
 | ioctl | N | `-ENOTTY` | 无 `.ioctl` op。 |
 
-**NTFS 顺序保证**
+NTFS 的顺序保证：
 
 - 所有 mutation 在 `ntfs_lock` 下串行化。
 - rename 在改写 `$FILE_NAME` 后、插入新索引项前，若失败会恢复旧索引项，避免名字丢失。
 - 无 `$LogFile`/`$MFTMirr` 处理；崩溃一致性不保证。
 - 压缩/加密属性被拒绝（`ntfs.c`）；`$ATTRIBUTE_LIST`（跨 record 属性）不支持。
 
-**NTFS ABI 缺口**
+NTFS 相对 Linux ABI 的缺口：
 
 - 没有 hard link、symbolic link 或 rename 之外的名字操作。
 - 索引插入只支持 root 或既有 allocation block 内追加，索引满时返回 `-ENOSPC`（无 B-tree split）。
@@ -170,13 +170,13 @@ ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16
 | readdir | Y | — | `isofs_freaddir`。返回 `DT_DIR`/`DT_REG`；multi-extent 名字只由最终未置 continuation flag 的记录暴露。 |
 | ioctl | N | `-ENOTTY` | 无 `.ioctl` op。 |
 
-**ISO9660 顺序保证**
+ISO9660 的顺序保证：
 
 - 目录记录可跨块边界（`isofs_read_dirent` 处理跨块组装）。
 - multi-extent walker 跳过所有设置 `0x80` continuation flag 的记录，并把最后一个未设置该 flag 的记录当作普通文件条目。因此当前实际暴露的是最终 extent，而不是首 extent；前面的 extent 不可见，也没有聚合读取，不能描述为“读首 extent 后返回垃圾”。
 - 名字总是转成小写（ISO 原为大写 8.3 风格）；`;1` 版本号被剥离。
 
-**ISO9660 ABI 缺口**
+ISO9660 相对 Linux ABI 的缺口：
 
 - 没有 Rock Ridge（长名字、symlink、POSIX 权限）。
 - 没有 Joliet（补充卷描述符未解析）。
@@ -185,6 +185,7 @@ ISO9660 是只读 CD-ROM 文件系统，从 block cache 挂载。在逻辑块 16
 ### 3.5 ramfs（`kernel/fs/diskfs/ramfs.c`）
 
 ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount 的后端。它使用单个全局 inode table，每个目录有固定的 `RAMFS_MAX_INODES`（4096）和 `RAMFS_MAX_DIR_ENTRIES`（256）上限。
+
 | Op | Support | Errno | 说明 / 代码引用 |
 |----|---------|-------|------------------------|
 | lookup | Y | — | `ramfs_vnode_lookup`（`ramfs.c`）。 |
@@ -206,13 +207,13 @@ ramfs 是 root filesystem，也是 `/dev/shm` 和显式 `tmpfs`/`ramfs` mount �
 | fsync | Y（no-op） | — | `vfs_fsync` 同步 block cache；ramfs 没有 block cache，因此实际为 no-op。 |
 | xattr | partial | — | 存储在全局 RAM 表（`kernel/fs/xattr.c`），重启后丢失。 |
 
-**ramfs 顺序保证**
+顺序保证（ramfs）：
 
 - namespace/inode metadata 由全局 `g_ramfs_meta_lock` 串行，regular-file 内容由每 inode 的 `data_lock` 保护；这不是“隐式单线程、无 per-inode lock”模型。
 - `ramfs_vnode_link` 正确递增 `nlink`（`ramfs.c`）。
 - `ramfs_vnode_unlink` 递减 `nlink`，并在 `nlink == 0 && ref_count <= 1` 时释放 inode（`ramfs.c`）。
 
-**ramfs ABI 缺口**
+ramfs 相对 Linux ABI 的缺口：
 
 - 每目录 entry 上限为 256（`ramfs.c`）。
 - 总 inode 上限为 4096（`ramfs.c`）。
@@ -238,11 +239,9 @@ devfs 是合成设备树。`g_nodes` 提供编译期静态节点；驱动核心�
 | read/write/ioctl | Y | — | per-kind `vfile_ops_t` 表。 |
 | readdir | Y | — | `devfs_dir_readdir`。 |
 
-**devfs 顺序保证**
+devfs 的顺序保证：内建 `g_nodes` 是静态表；char/block/audio class device 会通过 `class_device_get_nth/get_by_name` 动态枚举和引用，节点释放时归还 class-device 引用。不能把整个 devfs 描述为 init 后静态不变，也不能把该动态节点机制外推到 net/input/display。
 
-- 内建 `g_nodes` 是静态表；char/block/audio class device 会通过 `class_device_get_nth/get_by_name` 动态枚举和引用，节点释放时归还 class-device 引用。不能把整个 devfs 描述为 init 后静态不变，也不能把该动态节点机制外推到 net/input/display。
-
-**devfs ABI 缺口**
+devfs 的 ABI 缺口：
 
 - 不能创建、删除或 rename 设备节点。
 - 不支持 `chmod`/`chown`。
@@ -264,12 +263,12 @@ procfs 是完全合成的文件系统。entry 在 `lookup` 和 `open` 时生成�
 | readdir | Y | — | `procfs_freaddir`（`kernel/fs/procfs/procfs.c`）。 |
 | chmod/chown | N | `-EPERM` | 无后端 hook。 |
 
-**procfs 顺序保证**
+procfs 的顺序保证：
 
 - 内容在 `open` 时生成并缓存在 `procfs_priv_t` 中；并发 process 状态变化不会在 open 后反映出来。
 - 可写 tunable 的同步策略不统一：`pid_max` 经 `proc_set_pid_max` 更新，`oom_score_adj` 和 `pipe-max-size` 则直接更新对应字段或全局值。
 
-**procfs ABI 缺口**
+procfs 相对 Linux ABI 的缺口：
 
 - 许多 `/proc/<pid>` 文件只是占位符，返回空内容或静态内容。
 - `/proc/self/exe` 和 `/proc/<pid>/exe`/`cwd` 在 `vfs_readlinkat` 中作为特殊情况处理（`kernel/fs/vfs.c`），不是真正的 symlink。
@@ -288,12 +287,12 @@ sysfs 是合成树。除 `/sys/block/loopN/{dev,size,uevent}` 与 `/sys/class/dr
 | write | N | `-EINVAL` | 未注册 `.write`。 |
 | chmod/chown | N | `-EPERM` | 无后端 hook。 |
 
-**sysfs 顺序保证**
+sysfs 的顺序保证：
 
 - 内容在 lookup/open/readdir 时由静态视图和动态 class-device registry 合成；动态节点持有 class-device 引用。
 - sysfs 本身不提供用户 mutation op，但底层 class registry 可随驱动 bind/remove 改变。
 
-**sysfs ABI 缺口**
+sysfs 相对 Linux ABI 的缺口：
 
 - 视图仍远小于 Linux sysfs；动态 class 只提供设备名与 `dev` 等最小属性，不是完整 kobject/uevent 层级。
 - 没有 writable attribute，也没有 uevent write。
@@ -311,14 +310,14 @@ pipe 不是挂载文件系统。它创建一对共享 `pipe_buf_t` 环形缓冲�
 | set_size | Y | — | `pipe_set_size`（`kernel/fs/pipe.c`），在 `vfs_fcntl` 中受 `CAP_SYS_RESOURCE` 限制。 |
 | lseek | N | `-ESPIPE` | 无 `.lseek` op；`vfs_lseek` 返回 `-ESPIPE`。 |
 
-**pipe 顺序保证**
+pipe 的顺序保证：
 
 - `PIPE_BUF_SIZE`（4096）字节或更少的写入相互之间是原子的（`kernel/fs/pipe.c`）；复制整个 chunk 时持有 spinlock。
 - 大于 `PIPE_BUF_SIZE` 的写入会被拆分，可能与其他 writer 交错。
 - `read`/`write` 在 wait queue 上阻塞，并通过 `pipe_wake_readers`/`pipe_wake_writers` 唤醒所有对应 waiter（`kernel/fs/pipe.c`）。
 - 关闭最后一个 reader 会唤醒 writer；后续或已阻塞的 write 检测到该状态后向当前 task 发送 `SIGPIPE` 并返回 `-EPIPE`（`kernel/fs/pipe.c`）。
 
-**pipe ABI 缺口**
+pipe 的 ABI 缺口：
 
 - 内核 `PIPE_BUF_SIZE` 定义于 `kernel/include/core/consts.h`，值为 4096，与 Linux ABI 的 `PIPE_BUF` 预期一致。
 - `F_SETPIPE_SZ` 对非特权 task 的容量限制硬编码为 1 MiB（`kernel/fs/vfs.c`）。
@@ -332,13 +331,9 @@ anonfd 是把匿名 vfile 安装到当前 fd table 的 helper。它不是文件�
 | install | Y | — | `anonfd_install_vfile`（`kernel/fs/anonfd.c`）。 |
 | close | Y | — | 通过 `anonfd_free_priv_close` 释放 `vf->priv`（`kernel/fs/anonfd.c`）。 |
 
-**anonfd 顺序保证**
+anonfd 的顺序保证：install 和 close 相对于调用 task 的 `fdtable` 是单线程的。
 
-- install 和 close 相对于调用 task 的 `fdtable` 是单线程的。
-
-**anonfd ABI 缺口**
-
-- 按设计没有缺口；它是内部 helper，不是 Linux ABI 表面。
+anonfd 的 ABI 缺口：按设计没有缺口；它是内部 helper，不是 Linux ABI 表面。
 
 ## 4. VFS 横切行为
 

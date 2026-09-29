@@ -1,23 +1,23 @@
 # 混合内核改造计划：以 Native ABI 为本体的架构演进
 
-本文档记录 A20OS 混合内核的**改造方向与实施路线**，并把历史阶段证据与当前源码状态分开（最后核实：2026-08）；运行结论需在当前提交上复验。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，本文档回答的问题是： **沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。**
+最后核实：2026-08。与描述当前形态的 [00-design.md](00-design.md)、与主流对齐分析的 [02-mainstream-plan.md](02-mainstream-plan.md) 不同，这里回答的问题是：沿着已确立的研发定位，架构应该往哪里改、按什么顺序改、每一步如何验收。
 
 ## 定位前提
 
 改造基于三个明确前提（取代此前隐含的"Linux 兼容优先"假设）：
 
-1. **Native ABI 是架构探索的本体**，不是旁路。channel/EventQ/句柄/VMO 这组 原语的表达力、正确性和性能是研究对象本身；
-2. **短期不追求生产级稳定**，但追求"可论证的正确"：每个原语有显式契约， 契约有测试，测试可复现；
-3. **多设备通用性是核心约束**：设备形态（嵌入式到桌面）和设备种类的多样性， 决定了驱动与服务的边界必须是正式设计，而非部署时的临时决定。
+1. Native ABI 是架构探索的本体，不是旁路。channel/EventQ/句柄/VMO 这组原语的表达力、正确性和性能是研究对象本身；
+2. 短期不追求生产级稳定，但追求“可论证的正确”：每个原语有显式契约，契约有测试，测试可复现；
+3. 多设备通用性是核心约束：设备形态（嵌入式到桌面）和设备种类的多样性，决定了驱动与服务的边界必须是正式设计，而非部署时的临时决定。
 
-推论：Linux ABI 降级为运行在混合内核之上的**兼容人格层**。它同时承担 "Native ABI 表达力验证器"的角色——若能仅用 Native 原语完整支撑 Linux 语义（VMO→mmap、channel→pipe/socket、EventQ→epoll、句柄→fd），则 Native ABI 的完备性得到自证。当前 Linux ABI 直通内核主路径是务实的过渡形态，长期方向参照 Fuchsia starnix：兼容层是 Native 底座上的一个负载。
+推论：Linux ABI 降级为运行在混合内核之上的**兼容人格层**。它同时承担“Native ABI 表达力验证器”的角色；若能仅用 Native 原语完整支撑 Linux 语义（VMO→mmap、channel→pipe/socket、EventQ→epoll、句柄→fd），则 Native ABI 的完备性得到自证。当前 Linux ABI 直通内核主路径是务实的过渡形态，长期方向参照 Fuchsia starnix：兼容层是 Native 底座上的一个负载。
 
 ## 边界划分原则
 
 混合内核的边界不是折中，而是由两条判据推导出的**正式设计**：
 
-1. **数据面/控制面分离**：高频、延迟敏感的数据面留在内核；低频的策略、 管理、控制面可外迁。性能损失几乎都来自数据面跨越边界，控制面跨边界的 开销可忽略。这与 [00-design.md](00-design.md) 的 "10k 次/秒" 经验规则 一致，但把它从"规则"升级为"平面划分"：同一子系统的数据面与控制面可以 分置两侧（例：块层数据面在内核、驱动生命周期控制在用户态）。
-2. **隔离价值**：不可信、第三方、硬件多样性强、崩溃频率高的组件外迁。 此判据服务于多设备通用性，与性能判据相互独立；两条判据冲突时， 由"可移动边界"机制（见下）化解，而不是固定牺牲一方。
+1. **数据面/控制面分离**：高频、延迟敏感的数据面留在内核；低频的策略、管理、控制面可外迁。性能损失几乎都来自数据面跨越边界，控制面跨边界的开销可忽略。这与 [00-design.md](00-design.md) 的“10k 次/秒”经验规则一致，但把它从“规则”升级为“平面划分”：同一子系统的数据面与控制面可以分置两侧（例：块层数据面在内核、驱动生命周期控制在用户态）。
+2. **隔离价值**：不可信、第三方、硬件多样性强、崩溃频率高的组件外迁。此判据服务于多设备通用性，与性能判据相互独立；两条判据冲突时，由“可移动边界”机制（见下）化解，而不是固定牺牲一方。
 
 ### 组件放置表（目标形态）
 
@@ -36,19 +36,19 @@
 
 ## 可移动边界：同一源码，双态部署
 
-改造的核心机制创新点：**驱动只写一份，按部署决策编译为内核模块或用户态驱动进程**。可信且性能关键的设备部署在内核态；同一驱动换到不可信或多样性设备上则部署在用户态。边界由此成为**部署选择而非设计分叉**——这比 NT/XNU 的固定边界更适合研究型内核，也是"混合"二字在 A20OS 的实质内容。
+改造的核心机制创新点：**驱动只写一份**，按部署决策编译为内核模块或用户态驱动进程。可信且性能关键的设备部署在内核态；同一驱动换到不可信或多样性设备上则部署在用户态。边界由此成为**部署选择而非设计分叉**，这比 NT/XNU 的固定边界更适合研究型内核，也是“混合”二字在 A20OS 的实质内容。
 
 成立条件（缺一则退化为现状的装饰性混合）：
 
-- **统一驱动接口抽象**：驱动面向的 MMIO/IRQ/DMA 接口在内核态与用户态 语义一致（现有 udriver 框架的 MMIO 白名单 + IRQ→EventQ + DMA VMO 契约是雏形，需要推广为驱动编写的唯一接口）；
-- **零拷贝兜底**：channel 支持 VMO 引用传递 + 共享环形缓冲，批量投递 摊销陷入成本。没有这条，外迁即死；
-- **双态语义一致且可测**：同一驱动两种部署下行为一致，这本身构成 A20OS 的测试资产（同一契约测试套件分别在两种部署下运行）。
+- 统一驱动接口抽象：驱动面向的 MMIO/IRQ/DMA 接口在内核态与用户态语义一致（现有 udriver 框架的 MMIO 白名单 + IRQ→EventQ + DMA VMO 契约是雏形，需要推广为驱动编写的唯一接口）；
+- 零拷贝兜底：channel 支持 VMO 引用传递 + 共享环形缓冲，批量投递摊销陷入成本。没有这条，外迁即死；
+- 双态语义一致且可测：同一驱动两种部署下行为一致，这本身构成 A20OS 的测试资产（同一契约测试套件分别在两种部署下运行）。
 
 ## 必须避免的陷阱
 
-- **数据面不得跨边界两次**。"内核 VFS → 用户态 FS → 内核块驱动"式 回旋路径是微内核经典的性能坟场；要么整段在内核（主存储），要么 整段外迁（次要 FS 自带缓存、直接块访问）；
+- **数据面不得跨边界两次**。“内核 VFS → 用户态 FS → 内核块驱动”式回旋路径是微内核经典的性能坟场；要么整段在内核（主存储），要么整段外迁（次要 FS 自带缓存、直接块访问）；
 - **外迁不得以关闭 SMP、降级并发或预触页为代价**换取通过；
-- **双态部署不得引入语义分叉**：接口抽象层不得出现"仅内核态可用"的 隐式能力，否则用户态部署就是假的。
+- **双态部署不得引入语义分叉**：接口抽象层不得出现“仅内核态可用”的隐式能力，否则用户态部署就是假的。
 
 ## 分阶段路线
 
@@ -58,31 +58,31 @@
 
 Native ABI 成为研究本体的前提是其语义**显式、可测、防退化**。
 
-范围：句柄 rights 代数（dup 只收缩、类型合法掩码收敛、channel 传递交集 `ρ_recv = ρ_send ∩ ρ_transfer`）、channel 背压与关闭语义（满→WOULD_BLOCK/ 阻塞唤醒、peer 关闭→CANCELED、FIFO 序）、EventQ 语义（重复 watch=更新、超时分级、ring 满丢弃但保唤醒）、VMO 生命周期（句柄关闭后映射存活、懒物化、对象计数回归基线）。
+范围：句柄 rights 代数（dup 只收缩、类型合法掩码收敛、channel 传递交集 `ρ_recv = ρ_send ∩ ρ_transfer`）、channel 背压与关闭语义（满→WOULD_BLOCK/阻塞唤醒、peer 关闭→CANCELED、FIFO 序）、EventQ 语义（重复 watch=更新、超时分级、ring 满丢弃但保唤醒）、VMO 生命周期（句柄关闭后映射存活、懒物化、对象计数回归基线）。
 
 验收标准：`user/tests/test_native_contract.c` 全分区通过，`make smoke-native-contract` 在 riscv64 通过；loongarch64 构建通过（运行时验证受镜像条件限制时须记录）。契约文档同步更新到 [../native-abi/](../native-abi/)。
 
-**历史状态（2026-08-06）**：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT（历史记录，当前状态需复验）。
+历史状态（2026-08-06）：四分区（ralg/bp/evqc/vmol）曾在 riscv64 通过，loongarch64 构建通过；阶段副产品修复了 `CHANNEL_ENDPOINT`/`EVENT_QUEUE` 类型掩码缺 STAT（历史记录，当前状态需复验）。
 
 ### 阶段二：Native ABI SMP 正确性收口
 
-`native-shmring` 在 SMP=2/8 下约 30% 概率的内存破坏（见 [STATUS.md](STATUS.md) 已知边界）从"低优先级"升级为**阻塞项**： Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着后续一切结论无效。
+`native-shmring` 在 SMP=2/8 下约 30% 概率的内存破坏（见 [STATUS.md](STATUS.md) 已知边界）从“低优先级”升级为**阻塞项**：Native ABI 是研究本体时，其核心数据面在 SMP 下不可靠意味着后续一切结论无效。
 
-范围：共享 VMO + channel 批量句柄/大块传输在 SMP 下的页表/帧引用交互（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、 `[LOCK-STALL]`）。
+范围：共享 VMO + channel 批量句柄/大块传输在 SMP 下的页表/帧引用交互（诊断挂载点：`frame_trace_dump_pfn`、`[VMO-PAGE]`、`[PFA DIRTY-SPLIT]`、`[LOCK-STALL]`）。
 
-验收：`smoke-native-shmring` 在 SMP=2/8 下连续 20 轮零失败； 诊断挂载点不报告脏帧回填；Linux ABI 同负载压力无退化。
+验收：`smoke-native-shmring` 在 SMP=2/8 下连续 20 轮零失败；诊断挂载点不报告脏帧回填；Linux ABI 同负载压力无退化。
 
-**历史状态（2026-08-06）**：指定分支上 SMP=2/8 各连续 20 轮曾零失败零挂起（M5 修复 `98a1260`/`1af0d02`）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames`。这些结果是历史防退化证据，不是当前提交的重跑结果。
+历史状态（2026-08-06）：指定分支上 SMP=2/8 各连续 20 轮曾零失败零挂起（M5 修复 `98a1260`/`1af0d02`）；`[VMO-PAGE]` 串口诊断降级为 `vmo_dirty_frames`。这些结果是历史防退化证据，不是当前提交的重跑结果。
 
 ### 阶段三：驱动双态部署框架 + DMA 真隔离
 
-- 将 udriver 接口（MMIO 授权、IRQ→EventQ、DMA VMO 契约）推广为驱动 唯一编写接口；选一个现有内核驱动（候选：goldfish RTC 之外的第二 样板，如 virtio-input）做第一份"同源码双态部署"；
-- 引入 IOMMU（QEMU virt 平台的 RISC-V IOMMU / 相应架构等价物）替换 "内核分配 + pin + 信任上报"模型，DMA 映射由 IOMMU 页表强制；
+- 将 udriver 接口（MMIO 授权、IRQ→EventQ、DMA VMO 契约）推广为驱动唯一编写接口；选一个现有内核驱动（候选：goldfish RTC 之外的第二样板，如 virtio-input）做第一份“同源码双态部署”；
+- 引入 IOMMU（QEMU virt 平台的 RISC-V IOMMU / 相应架构等价物）替换“内核分配 + pin + 信任上报”模型，DMA 映射由 IOMMU 页表强制；
 - 驱动崩溃恢复从 ubd 个案推广为框架能力（在飞请求失败传导 + 重挂载）。
 
-验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试； 无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
+验收：同一份驱动源码以内核态和用户态两种部署通过同一套功能契约测试；无 IOMMU 授权窗口的 DMA 访问被硬件拒绝（可观测的 fault 事件）。
 
-**当前源码状态**：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。`drv_env.h` 有 USER/DRVMOD/KERNEL 三后端，但活跃样板使用 USER 与 DRVMOD；virtio-input 的只读内核 probe 与用户驱动共享协议头，完整内核驱动仍是另一套实现；goldfish RTC 内核模块仍复制寄存器常量。DMA ops、连续 DMA heap和所有权 claim/release 已存在。RISC-V IOMMU 侧已完成 DDT/CQ/FQ bring-up、per-device 翻译 domain 的动态 claim/map/unmap/release（SV39 二级页表，fail-closed）、fault queue 消费（匹配 devid 的 fault record 计数并上报 owner，触发即阻断设备上下文并关闭 bus mastering）以及用户态 DMA 接线（udriver claim 时建 domain，`drv_dma` 的 VMO 翻译走 IOVA）；`/proc/a20/iommu` 暴露 domain/map/fault 计数器。端到端样板是 edu PCI 设备 + `user/svc/uedud.c`（授权窗口内 DMA 成功、窗口外产生并消费 fault、release 后重新 claim 恢复），门禁为 `smoke-iommu-udriver-isolation` 与 `smoke-iommu-discovery`。仍缺：同一完整驱动源码双态部署的契约测试（DRVMOD 完整驱动仍独立实现）、fault 消费的中断驱动化（当前由 `a20_device_get_info` 拉取 FQ）、多设备并发 domain（当前单实例 `g_user_domain`）。因此阶段三的"完整同源双态"验收仍未完成，"未授权 DMA 被设备实际拒绝"子项已在 QEMU riscv-iommu-pci 上达成。
+当前源码状态：框架骨架落地，见 [04-dual-placement.md](04-dual-placement.md)。`drv_env.h` 有 USER/DRVMOD/KERNEL 三后端，但活跃样板使用 USER 与 DRVMOD；virtio-input 的只读内核 probe 与用户驱动共享协议头，完整内核驱动仍是另一套实现；goldfish RTC 内核模块仍复制寄存器常量。DMA ops、连续 DMA heap 和所有权 claim/release 已存在。RISC-V IOMMU 侧已完成 DDT/CQ/FQ bring-up、per-device 翻译 domain 的动态 claim/map/unmap/release（SV39 二级页表，fail-closed）、fault queue 消费（匹配 devid 的 fault record 计数并上报 owner，触发即阻断设备上下文并关闭 bus mastering）以及用户态 DMA 接线（udriver claim 时建 domain，`drv_dma` 的 VMO 翻译走 IOVA）；`/proc/a20/iommu` 暴露 domain/map/fault 计数器。端到端样板是 edu PCI 设备 + `user/svc/uedud.c`（授权窗口内 DMA 成功、窗口外产生并消费 fault、release 后重新 claim 恢复），门禁为 `smoke-iommu-udriver-isolation` 与 `smoke-iommu-discovery`。仍缺：同一完整驱动源码双态部署的契约测试（DRVMOD 完整驱动仍独立实现）、fault 消费的中断驱动化（当前由 `a20_device_get_info` 拉取 FQ）、多设备并发 domain（当前单实例 `g_user_domain`）。因此阶段三的"完整同源双态"验收仍未完成，"未授权 DMA 被设备实际拒绝"子项已在 QEMU riscv-iommu-pci 上达成。
 
 ### 阶段四：服务接口 IDL 化
 
@@ -90,19 +90,19 @@ Native ABI 成为研究本体的前提是其语义**显式、可测、防退化*
 
 验收：svcmgr/registry/健康探针协议由 IDL 生成；新旧协议互操作期有版本协商；手写 proto 头退出活跃树。
 
-**当前源码状态**：`a20_services.idl`、`tools/a20idl.py` 和 ignored 的构建生成头已接入；服务绑定槽位（svc/ping/shmring/chand/rtcd/ubd）与 shmring 几何常量也已进入 IDL 并随生成头分发。四个手写 wrapper（`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h`、`shmring_proto.h`）已退出活跃树，native 服务二进制直接依赖生成头。剩余动态版本协商扩展（当前为单版本常量）。
+当前源码状态：`a20_services.idl`、`tools/a20idl.py` 和 ignored 的构建生成头已接入；服务绑定槽位（svc/ping/shmring/chand/rtcd/ubd）与 shmring 几何常量也已进入 IDL 并随生成头分发。四个手写 wrapper（`rtcd_proto.h`、`svc_proto.h`、`ubd_proto.h`、`shmring_proto.h`）已退出活跃树，native 服务二进制直接依赖生成头。剩余动态版本协商扩展（当前为单版本常量）。
 
 ### 阶段五：Linux 人格层重建（starnix 式）
 
-在 Native 原语上重建 Linux ABI 的关键子集（fd 表→句柄表、mmap→VMO/ VMAR、pipe/AF_UNIX→channel、epoll→EventQ、futex→原生 futex），与现有直通内核实现并存，跑同一测例做语义 diff 与性能对照。
+在 Native 原语上重建 Linux ABI 的关键子集（fd 表→句柄表、mmap→VMO/VMAR、pipe/AF_UNIX→channel、epoll→EventQ、futex→原生 futex），与现有直通内核实现并存，跑同一测例做语义 diff 与性能对照。
 
-验收：选定测例集（Linux 功能测例为自然候选）在两种实现下同通过； 性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
+验收：选定测例集（Linux 功能测例为自然候选）在两种实现下同通过；性能数据记录中位数与异常值；差异清单公开为维护中的兼容性文档。
 
-**状态**：人格层已完成两阶段实现——`a20_personality.h`（channel-backed pipe）与 `a20_linux.h`（fd 表/mmap/pipe/socketpair/futex/epoll facade）。 **字节流与 level 语义已完成**：跨消息拼接读取、部分读、pending 数据保持就绪直到耗尽；`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 跑同一序列，`smoke-native-personality` 要求两个实现输出完全一致的 PIPE_REF 行——native 与 Linux ABI 语义对照通过。剩余：fd 表 byte- stream 语义的完整覆盖、epoll level 触发通用化与更大测例集的语义 diff/性能对照，不把直通实现冒充为人格层。
+状态：人格层已完成两阶段实现，`a20_personality.h`（channel-backed pipe）与 `a20_linux.h`（fd 表/mmap/pipe/socketpair/futex/epoll facade）。**字节流与 level 语义已完成**：跨消息拼接读取、部分读、pending 数据保持就绪直到耗尽；`user/cmds/core/pipe_ref.c` 用真实 Linux pipe(2) 跑同一序列，`smoke-native-personality` 要求两个实现输出完全一致的 PIPE_REF 行，native 与 Linux ABI 语义对照通过。剩余：fd 表 byte-stream 语义的完整覆盖、epoll level 触发通用化与更大测例集的语义 diff/性能对照，不把直通实现冒充为人格层。
 
 ## 验证纪律
 
 - 每阶段的验收必须来自仓库内可复现的 make 目标，不接受手工结论；
 - 性能结论标注中位数与异常值，注明 TCG/真实硬件来源；
-- 任何阶段不得为了让测试通过而修改测试本身、预触页、固定睡眠或 关闭 SMP；
-- 本文档随实施更新：每完成一个阶段，更新对应验收状态与 [STATUS.md](STATUS.md) 的能力清单。
+- 任何阶段不得为了让测试通过而修改测试本身、预触页、固定睡眠或关闭 SMP；
+- 实施推进时同步更新各阶段验收状态与 [STATUS.md](STATUS.md) 的能力清单。

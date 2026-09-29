@@ -1,6 +1,6 @@
 # A20OS VFS 边界语义设计
 
-本文档记录 A20OS 在 P1 Wave 1 收紧 VFS Linux 边界语义时的设计决策，并区分当前实现与未完成项。本文已按 2026-08 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；运行结论需在当前提交上复验，历史平台记录不能外推。
+P1 Wave 1 收紧了 VFS 的 Linux 边界语义，下面按领域记录当时的决策，并区分当前实现与未完成项。内容已按 2026-08 的 `kernel/fs/`、`kernel/abi/linux/` 和 `user/cmds/stress/vfs_edge.c` 做源码核对；运行结论需在当前提交上复验，历史平台记录不能外推。
 
 > **实现状态**：核心路径已有实现，但不是完整 Linux 兼容。`RESOLVE_NO_MAGICLINKS` 已在 resolver 中执行检查（`/proc/<pid>/fd/N` 类 jump link 拒绝穿越，返回 `-ELOOP`），`RESOLVE_CACHED` 通过 dentry cache 命中检查实现（未命中返回 `-EAGAIN`），A20OS 自定义 `RESOLVE_NO_TRAILING_SYMLINKS` 已移除、不再与 Linux 的 bit 分配冲突，`renameat2` 能力取决于具体后端。`smoke-vfs-edge` 当前只在 RISC-V64、1 vCPU 上运行，覆盖选定场景，不是全 flag、全后端或双架构证明。
 
@@ -17,13 +17,13 @@
 - Mount-point `..` crossing：正确逃出 mount root
 - `chroot`：让 path resolution 遵守 `task->fs.root_path`
 
-本文覆盖当前边界实现及其遗留差距；不覆盖运行时文件系统初始化移除或 page-cache/mmap coherence。
+这里覆盖当前边界实现及其遗留差距；不覆盖运行时文件系统初始化移除或 page-cache/mmap coherence。
 
 ## 2. openat2：当前 resolve 子集
 
 ### 2.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `flags` 和 `mode`，但忽略 `resolve` 和 syscall 的 `size` 参数，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。**现已实现**：`size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝，全部六个 `RESOLVE_*` flag（含 `NO_MAGICLINKS`）经 `vfs_openat2` 在 resolver 中生效（`kernel/abi/linux/sys_proc.c`、`kernel/fs/vfs.c`、`kernel/fs/vfs/path_resolution.c`）。
+`kernel/abi/linux/sys_proc.c` 的 `sys_openat2` 曾从用户 `struct open_how` 复制 `flags` 和 `mode`，但忽略 `resolve` 和 syscall 的 `size` 参数，随后调用 `sys_openat`，因此 `RESOLVE_*` flag 没有任何效果。现已实现：`size` 被校验、未知 `resolve` bit 以 `-EINVAL` 拒绝，全部六个 `RESOLVE_*` flag（含 `NO_MAGICLINKS`）经 `vfs_openat2` 在 resolver 中生效（`kernel/abi/linux/sys_proc.c`、`kernel/fs/vfs.c`、`kernel/fs/vfs/path_resolution.c`）。
 
 ### 2.2 决策
 
@@ -59,7 +59,7 @@
 
 ### 3.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_path.c` 的 `sys_renameat2` 曾用 `-EINVAL` 拒绝任何非零 `flags`。**现已实现**：`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE` 被接受并经 `vfs_rename_flags` 分发到后端，`RENAME_WHITEOUT` 仍以 `-EINVAL` 拒绝。普通 same-path rename 由后端作为 no-op 成功；VFS 没有 same-path `-EINVAL` guard。
+`kernel/abi/linux/sys_path.c` 的 `sys_renameat2` 曾用 `-EINVAL` 拒绝任何非零 `flags`。现已实现：`RENAME_NOREPLACE` 与 `RENAME_EXCHANGE` 被接受并经 `vfs_rename_flags` 分发到后端，`RENAME_WHITEOUT` 仍以 `-EINVAL` 拒绝。普通 same-path rename 由后端作为 no-op 成功；VFS 没有 same-path `-EINVAL` guard。
 
 ### 3.2 决策
 
@@ -158,7 +158,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 ### 7.1 当前状态（设计时）
 
-`vnode_lookup_path` 曾把 `symlink_depth` 上限硬编码为 8（`kernel/fs/vfs/path_resolution.c`）。**现已实现**：使用 `MAX_SYMLINKS`（40，`kernel/include/fs/vfs.h`），深度超过时以 `-ELOOP` 失败。
+`vnode_lookup_path` 曾把 `symlink_depth` 上限硬编码为 8（`kernel/fs/vfs/path_resolution.c`）。现已实现：使用 `MAX_SYMLINKS`（40，`kernel/include/fs/vfs.h`），深度超过时以 `-ELOOP` 失败。
 
 ### 7.2 决策
 
@@ -174,7 +174,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 ### 8.1 当前状态（设计时）
 
-`vnode_lookup_path` 通过跟随 `vnode->parent` 处理 `..`。此前 mount root 的 `vnode->parent` 要么指回自身，要么指向被挂载文件系统内部的 parent，因此 `..` 无法逃出 mount。**现已实现**：在 mount root 处解析 `..` 时切换到 mount point 的父目录（mount crossing），`RESOLVE_NO_XDEV` 阻止这种跨越。
+`vnode_lookup_path` 通过跟随 `vnode->parent` 处理 `..`。此前 mount root 的 `vnode->parent` 要么指回自身，要么指向被挂载文件系统内部的 parent，因此 `..` 无法逃出 mount。现已实现：在 mount root 处解析 `..` 时切换到 mount point 的父目录（mount crossing），`RESOLVE_NO_XDEV` 阻止这种跨越。
 
 ### 8.2 决策
 
@@ -195,7 +195,7 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 
 ### 9.1 当前状态（设计时）
 
-`kernel/abi/linux/sys_namespace.c` 的 `sys_chroot` 曾校验目标为目录、检查 `CAP_SYS_CHROOT`、把路径存入 `cur->fs.root_path` 并重置 cwd，但 resolver 不读取 `root_path`。**现已实现**：`vfs_path_normalize_absolute_with_root` 在路径解析中约束 `root_path`（`kernel/fs/vfs/path_resolution.c`），chrooted 进程的绝对路径与 `..` 都无法逃出 chroot。
+`kernel/abi/linux/sys_namespace.c` 的 `sys_chroot` 曾校验目标为目录、检查 `CAP_SYS_CHROOT`、把路径存入 `cur->fs.root_path` 并重置 cwd，但 resolver 不读取 `root_path`。现已实现：`vfs_path_normalize_absolute_with_root` 在路径解析中约束 `root_path`（`kernel/fs/vfs/path_resolution.c`），chrooted 进程的绝对路径与 `..` 都无法逃出 chroot。
 
 ### 9.2 决策
 

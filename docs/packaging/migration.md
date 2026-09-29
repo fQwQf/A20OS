@@ -29,7 +29,7 @@
 1. **CI 先行**：启用 buildenv → ci.yml。不改任何开发者习惯，立刻获得
    四架构 PR 门禁与 artifact。
 2. **打包并行运行**：日常使用 `make pkgs / pkg-repo / image-world`，
-   与旧 `disk.img` 并存验证一段时间（两者内容应等价——a20-base 就是
+   与旧 `disk.img` 并存验证一段时间（两者内容应等价，a20-base 就是
    按旧镜像内容对齐的）。
 3. **extra 包 recipe 化**：新的移植软件直接写 recipe，不再往
    `extra.mk` 的 case 列表里加；存量 vim/git 已有 recipe，gcc/rust/
@@ -41,12 +41,12 @@
    逻辑）；在此之前两者并存。
 5. **淘汰 objcopy-进内核**：当 base.world 镜像在所有日常流程中稳定
    替代 disk.img 后，再考虑移除 RAMFS_USER blob 路径（注意保留
-   EARLY_DRVMOD——那是根盘驱动的引导路径，不是同一回事）。
+   EARLY_DRVMOD，那是根盘驱动的引导路径，不是同一回事）。
 
 ## 兼容性承诺
 
 - 旧 make 目标不删不改，直到对应能力在新体系有等价物且经过验证；
 - 包内布局对齐旧镜像（`a20-base` 平铺根目录、`/lib/drivers`、
   `/musl/lib/libc.so`、extra 包 `/extra/...`），init 与脚本无需改动；
-- 若发现新旧产物不一致，以旧路径行为为准并提 issue——对齐是
+- 若发现新旧产物不一致，以旧路径行为为准并提 issue，对齐是
   新体系的责任。

@@ -1,15 +1,15 @@
 # 物理开发板移植：VisionFive 2 与 LS2K1000
 
-本文记录两块物理开发板的板级事实、驱动 bring-up 细节和已知边界，作为 `kernel/platform/visionfive2/` 与 `kernel/platform/ls2k1000/` 的配套说明。 硬件细节参考了 [RocketOS (MIT)](../ACKNOWLEDGMENTS.md) 的 StarFive 与 loongson-2K bring-up 驱动；凡未在真机复现的结论都明确标注"未核实"。
+两块物理开发板的板级事实、驱动 bring-up 细节和已知边界，覆盖 `kernel/platform/visionfive2/` 与 `kernel/platform/ls2k1000/`。硬件细节参考了 [RocketOS (MIT)](../ACKNOWLEDGMENTS.md) 的 StarFive 与 loongson-2K bring-up 驱动；未在真机复现的结论均标注"未核实"。
 
-与 QEMU virt 的区别：物理板和 QEMU virt 使用不同的地址与中断布局。VisionFive 2 的启动链、存储挂载和 GMAC1 网络驱动已经完成源码级构建验证；在接入网线前不要把 PHY link-up、DMA 收发或公网访问写成真机验收结论。LS2K1000 的存储与网络数据面 仍按各自章节的边界执行。
+与 QEMU virt 的区别：物理板和 QEMU virt 使用不同的地址与中断布局。VisionFive 2 的启动链、存储挂载和 GMAC1 网络驱动已经完成源码级构建验证；在接入网线前不要把 PHY link-up、DMA 收发或公网访问写成真机验收结论。LS2K1000 的存储与网络数据面仍按各自章节的边界执行。
 
 ## 共同原则
 
-- `kernel/arch/<arch>/` 不含板级地址。物理内存与 MMIO 布局由 board 通过 `board_config_t` 声明，架构层的内存发现（`riscv64_memory_init` / `loongarch64_memory_init`）读取 `board_config.ram_base/ram_end` 作为 可用物理窗口，再用固件 DTB 的 `memory` 节点在该窗口内收窄。
-- 无 DTB 时回退到 board 窗口：riscv64 见 `kernel/arch/riscv64/platform/fdt.c`， loongarch64 见 `kernel/arch/loongarch64/platform/fdt.c`。
-- 架构的软中断（IPI）TLB shootdown 处理器提供**弱默认实现**，只有需要 generation 确认的板才提供强符号：riscv64 的 `rv64_ipi_tlb_flush_handler`、 loongarch64 的 `loongarch64_ipi_tlb_flush_handler`。这让不启用 SMP 的板 （如 LS2K1000）不与任何板符号硬链接。
-- 驱动不得读取 `CONFIG_BOARD_*`，不得硬编码板级地址/IRQ（见 [移植指南](porting-guide.md)）。SoC 时钟门控这类板级事实放 board， 设备协议驱动只做寄存器级操作。
+- `kernel/arch/<arch>/` 不含板级地址。物理内存与 MMIO 布局由 board 通过 `board_config_t` 声明，架构层的内存发现（`riscv64_memory_init` / `loongarch64_memory_init`）读取 `board_config.ram_base/ram_end` 作为可用物理窗口，再用固件 DTB 的 `memory` 节点在该窗口内收窄。
+- 无 DTB 时回退到 board 窗口：riscv64 见 `kernel/arch/riscv64/platform/fdt.c`，loongarch64 见 `kernel/arch/loongarch64/platform/fdt.c`。
+- 架构的软中断（IPI）TLB shootdown 处理器提供**弱默认实现**，只有需要 generation 确认的板才提供强符号：riscv64 的 `rv64_ipi_tlb_flush_handler`、loongarch64 的 `loongarch64_ipi_tlb_flush_handler`。这让不启用 SMP 的板（如 LS2K1000）不与任何板符号硬链接。
+- 驱动不得读取 `CONFIG_BOARD_*`，不得硬编码板级地址/IRQ（见 [移植指南](porting-guide.md)）。SoC 时钟门控这类板级事实放 board，设备协议驱动只做寄存器级操作。
 
 ## StarFive VisionFive 2（JH7110）
 
@@ -40,20 +40,20 @@ GMAC 上电时被时钟门控并处于复位态，必须先使能再访问寄存
 | GMAC1_CLK_GTXC | 0x1AC | 置 bit31 使能 |
 | SYS_CRG_RESET2 | 0x300 | 清 bit2(AXI)/bit3(AHB) 去复位 |
 
-偏移取自 RocketOS `eth_dev.rs` 与 StarFive JH7110 文档，未在真机复现时按 上表核对。
+偏移取自 RocketOS `eth_dev.rs` 与 StarFive JH7110 文档，未在真机复现时按上表核对。
 
 ### 中断
 
-PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前 hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB 确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。 DW-SDIO 当前不提供 IRQ 资源，纯轮询。
+PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前 hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB 确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。DW-SDIO 当前不提供 IRQ 资源，纯轮询。
 
 ### 驱动状态与边界
 
-- `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len； RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化 send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
+- `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len；RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化 send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
 - PHY：扫描 MDIO 0..31 定位（VF2 板载 Motorcomm YT8531），复位 + 自协商。
 - DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁，命令/数据路径同步轮询。
 - 已知边界：数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。
-- 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确）， `timer_set_interval` 与全部 tick↔时间换算随之按板校准。
-- 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号 （`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级 `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash 烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
+- 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确），`timer_set_interval` 与全部 tick↔时间换算随之按板校准。
+- 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号（`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级 `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash 烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
 
 ## Loongson LS2K1000（龙芯 2K1000）
 
@@ -77,7 +77,7 @@ PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏�
 
 U-Boot 驻留区从物理 `0x0cbf4c30` 附近开始，显示缓冲等固件保留区也位于低端第一 bank 的高地址。A20OS 因此加载到物理 `0x02000000`，且分配器只接管 `0x00200000..0x0b000000`。板级链接脚本对 `_end <= 0x900000000b000000` 作硬性断言；固件 DTB 即使描述完整 1 GiB，也会与该窗口求交，不能把保留区重新交给分配器。
 
-启动代码安装与 U-Boot 一致的 DMW：VSEG 8 为 uncached (`0x800000000000000f`)，VSEG 9 为 cached (`0x900000000000001f`)。PGDL/PGDH 写入页表的物理地址，RAM 指针则使用 VSEG 9 的 cached 别名。板载 DTB 从 SPI 的 `dtb` 分区临时读到 `0x900000000a000000`；实测 DTB 没有可用的 `memory` 节点时，内核回退到上述安全窗口。
+启动代码安装与 U-Boot 一致的 DMW：VSEG 8 为 uncached（`0x800000000000000f`），VSEG 9 为 cached（`0x900000000000001f`）。PGDL/PGDH 写入页表的物理地址，RAM 指针则使用 VSEG 9 的 cached 别名。板载 DTB 从 SPI 的 `dtb` 分区临时读到 `0x900000000a000000`；实测 DTB 没有可用的 `memory` 节点时，内核回退到上述安全窗口。
 
 ### 中断控制器（未完成项）
 
@@ -110,7 +110,7 @@ U-Boot 驻留区从物理 `0x0cbf4c30` 附近开始，显示缓冲等固件保�
 
 ### 恢复与 RAM-only 启动
 
-真机恢复包位于板载 Linux 的 `/root/a20-recovery-<日期>/`，包含六个 MTD 分区、运行时 DTB、布局与系统信息及 `SHA256SUMS`。开始试启动前先在原 Linux 中执行 `sha256sum -c /root/a20-recovery-<日期>/SHA256SUMS`——校验文件随包分发，**不要**在这里记它的哈希值，记下来的数字一定会和下一次重新打包对不上。
+真机恢复包位于板载 Linux 的 `/root/a20-recovery-<日期>/`，包含六个 MTD 分区、运行时 DTB、布局与系统信息及 `SHA256SUMS`。开始试启动前先在原 Linux 中执行 `sha256sum -c /root/a20-recovery-<日期>/SHA256SUMS`。校验文件随包分发，**不要**在这里记它的哈希值：记下来的数字一定会和下一次重新打包对不上。
 
 恢复包必须另存一份到板子之外（另一块盘、另一台机器或版本控制附件）。只放在同一块系统盘上覆盖不了磁盘故障场景，而这个包存在的全部意义就是那种场景。
 
@@ -127,35 +127,19 @@ go 0x9000000002000000
 A20OS 挂起后用物理复位恢复，U-Boot 的默认 `bootcmd` 仍从 `/boot/uImage` 启动原 Linux。不要在 A20OS 仍运行时尝试跳回 U-Boot。
 
 该固件的倒计时为零秒，人工在看到 `Autoboot` 后再输入已经太晚。`tools/ls2k1000-uboot-stop.runscript` 会在识别到 `Press c to enter u-boot console` 后覆盖 USB 扫描窗口发送固件菜单键；它只负责截停，不包含 Flash 写入或环境保存命令。
+
 ### 板级约束（真机踩出来的，不可由代码推断）
 
 这几条是硬件/SoC 的事实，不是实现选择，改动相关代码时必须继续满足：
 
-- **LA264 会对未对齐的宽访存触发异常。** 因此 LoongArch64 内核统一用
-  `-mstrict-align`，且 PFA 的 `frame_meta_t` 数组元素显式保持 8 字节对齐。
-  推论：vendor 分区里既有的用户程序**不能**当作 A20OS 兼容程序直接跑——
-  从 `/extra/bin` 执行 vendor 的 `mkdir`、`chmod` 都会在 LA264 上触发
-  `ALE code=9`；本轮验证过的外部程序（Vim、Git）都是用 `-mstrict-align`
-  重新构建的。
-- **中断开放顺序**：首次 timer IRQ 前保持 `CRMD.IE=0`，在 `proc_init()` 与
-  `net_init()` 完成后重装 one-shot timer，再开放中断。公共异常入口使用
-  非向量模式，并且只分派 `ECFG.LIE` 实际启用的 pending 位。
-- **UART 是轮询的，突发输入会丢字符。** 115200 波特率下原来的 50 ms 轮询
-  休眠会丢批量输入；改成 1 ms 轮询周期后，实测一次性写入多条命令仍会丢
-  （收到的 `cat /etc/os-release` 变成 `sat /etc/os-relee`）。因此 1 ms 只能
-  作为低速诊断回退，**不能**当作可靠的 UART 接收方案，也不替代设备 IRQ。
-  在 LioIntc/PCH-PIC 路径可用前，测试命令需限速发送。
-- **恢复动作有禁区**：禁止 `saveenv`、`sf write`、`sf erase`，禁止覆盖
-  `/boot/uImage`。A20OS 挂起后只能物理复位；U-Boot 默认 `bootcmd` 仍从
-  `/boot/uImage` 启动原 Linux。A20OS 仍在运行时不要尝试跳回 U-Boot。
-  该固件倒计时为零秒，人工在看到 `Autoboot` 后再输入已经太晚；
-  `tools/ls2k1000-uboot-stop.runscript` 负责截停（覆盖 USB 扫描窗口发送
-  固件菜单键），但它不包含 Flash 写入或环境保存命令。
+- LA264 会对未对齐的宽访存触发异常。因此 LoongArch64 内核统一用 `-mstrict-align`，且 PFA 的 `frame_meta_t` 数组元素显式保持 8 字节对齐。推论：vendor 分区里既有的用户程序**不能**当作 A20OS 兼容程序直接跑，从 `/extra/bin` 执行 vendor 的 `mkdir`、`chmod` 都会在 LA264 上触发 `ALE code=9`；本轮验证过的外部程序（Vim、Git）都是用 `-mstrict-align` 重新构建的。
+- 中断开放顺序上，首次 timer IRQ 前保持 `CRMD.IE=0`，在 `proc_init()` 与 `net_init()` 完成后重装 one-shot timer，再开放中断。公共异常入口使用非向量模式，并且只分派 `ECFG.LIE` 实际启用的 pending 位。
+- UART 仍是轮询的，突发输入会丢字符。115200 波特率下原来的 50 ms 轮询休眠会丢批量输入；改成 1 ms 轮询周期后，实测一次性写入多条命令仍会丢（收到的 `cat /etc/os-release` 变成 `sat /etc/os-relee`）。因此 1 ms 只能作为低速诊断回退，**不能**当作可靠的 UART 接收方案，也不替代设备 IRQ。在 LioIntc/PCH-PIC 路径可用前，测试命令需限速发送。
+- 恢复动作有禁区。禁止 `saveenv`、`sf write`、`sf erase`，禁止覆盖 `/boot/uImage`。A20OS 挂起后只能物理复位；U-Boot 默认 `bootcmd` 仍从 `/boot/uImage` 启动原 Linux。A20OS 仍在运行时不要尝试跳回 U-Boot。该固件倒计时为零秒，人工在看到 `Autoboot` 后再输入已经太晚；`tools/ls2k1000-uboot-stop.runscript` 负责截停（覆盖 USB 扫描窗口发送固件菜单键），但它不包含 Flash 写入或环境保存命令。
 
 ### 真机验收状态
 
-下面的表是**验收结论**，不是变更日志。逐个候选镜像的字节数与 SHA-256 由
-`tools/a20 ledger` 现算，不在这里手抄——手抄的数字改一个字节也不会有人发现。
+下面的表是**验收结论**，不是变更日志。逐个候选镜像的字节数与 SHA-256 由 `tools/a20 ledger` 现算，不在这里手抄：手抄的数字改一个字节也不会有人发现。
 
 | 能力 | 状态 | 证据入口 |
 | --- | --- | --- |
@@ -170,9 +154,7 @@ A20OS 挂起后用物理复位恢复，U-Boot 的默认 `bootcmd` 仍从 `/boot/
 | AHCI/SATA 只读路径（IDENTIFY、MBR、ext4 只读挂载、`EROFS` 写栅栏） | 已验证（`SSTS=0x123`、`TFD=0x50`、62,533,296 sectors） | `storage_read_test` 输出 `SAMPLE PASS` |
 | SATA 写入 | **不支持** | `STORAGE_READ_ONLY=1`，AHCI/EXT4/MBR 层均拒绝写 |
 
-恢复验收（物理复位后沿未修改的 U-Boot 默认路径校验 `/boot/uImage` 并返回
-vendor Linux root 提示符）在上述每一轮真机测试后都做过，是这些结论可以信赖
-的前提。
+恢复验收（物理复位后沿未修改的 U-Boot 默认路径校验 `/boot/uImage` 并返回 vendor Linux root 提示符）在上述每一轮真机测试后都做过，是这些结论可以信赖的前提。
 
 > 恢复包的字节级事实（大小、SHA-256）随发布物变化，用
 > `sha256sum -c SHA256SUMS` 对你手上那份归档校验，不要引用本文档里的数字。
@@ -204,7 +186,7 @@ make vf2-firmware
 make vf2-image
 ```
 
-CI 目标：`check-visionfive2-build`、`check-ls2k1000-build` （见 `tools/targets-build.mk`），保证两块板随仓库始终可构建。
+CI 目标：`check-visionfive2-build`、`check-ls2k1000-build`（见 `tools/targets-build.mk`），保证两块板随仓库始终可构建。
 
 ## 真机验收清单
 
@@ -212,7 +194,4 @@ CI 目标：`check-visionfive2-build`、`check-ls2k1000-build` （见 `tools/tar
 2. 打印 `[FDT] RAM range ...` 或 board 窗口回退，核对实际内存。
 3. `[StarFive-GMAC]/[LS2K-GMAC] PHY link up`；`ping`/`sockets` 数据面。
 4. VF2：`NR_CPUS=2` secondary online、reschedule/TLB IPI。
-5. 记录结论而不是字节：把**能力级的已验证/未验证状态**回填到本文的验收表与
-   `docs/drivers/meta/implementation-status.md`；镜像的字节数、SHA-256、build 目录
-   由 `tools/a20 ledger <instance>` 现算，启动日志由 `tools/a20 console` 落盘。
-   不要把哈希和日期抄进文档——抄进去的数字没人会再去核对。
+5. 记录结论而不是字节：把**能力级的已验证/未验证状态**回填到本文的验收表与 `docs/drivers/meta/implementation-status.md`；镜像的字节数、SHA-256、build 目录由 `tools/a20 ledger <instance>` 现算，启动日志由 `tools/a20 console` 落盘。不要把哈希和日期抄进文档：抄进去的数字没人会再去核对。

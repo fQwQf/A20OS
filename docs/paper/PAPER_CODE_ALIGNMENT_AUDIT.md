@@ -3,15 +3,15 @@
 审计日期：2026-09-04  
 审计提交：`ca6a26581f010c35ecf6273559b968bffe8274b0`（`main`）  
 论文：`docs/paper/main.tex`  
-结论：**部分对齐，但当前版本不宜按论文现有措辞宣称“完整、双 ABI、可复现地验证”。** 核心 Linux ABI 原型、主要自测场景和 canonical replay 可以运行；论文最重要的完整性、传递安全、实验归因及形式化对应关系仍有阻断级缺口。
+结论：部分对齐，但当前版本不宜按论文现有措辞宣称“完整、双 ABI、可复现地验证”。核心 Linux ABI 原型、主要自测场景和 canonical replay 可以运行；论文最重要的完整性、传递安全、实验归因及形式化对应关系仍有阻断级缺口。
 
 ## 1. 审计口径与验证结果
 
 本审计逐项对照论文中的设计、实现、评估、形式化验证和可复现性主张，检查对应源码、生成器、测试验收条件与仓库内证据。严重级别定义如下：
 
-- **阻断**：直接否定论文核心主张，或使实验结论不能由当前仓库证据支持；投稿前应修复实现或降级论文措辞。
-- **高**：不会否定整个原型，但会明显改变安全边界、实验解释或可复现性。
-- **中**：数字、接口或文档漂移，以及较窄但真实的实现缺口。
+- 阻断：直接否定论文核心主张，或使实验结论不能由当前仓库证据支持；投稿前应修复实现或降级论文措辞。
+- 高：不会否定整个原型，但会明显改变安全边界、实验解释或可复现性。
+- 中：数字、接口或文档漂移，以及较窄但真实的实现缺口。
 
 本次实际运行：
 
@@ -49,80 +49,80 @@ ENVELOPE_CORPUS: benign completed 20/20, unstable=0, fidelity-bad=0
 
 ### B-01：论文的“双 ABI 统一强制”未实现
 
-- **论文主张**：所有资源获取不论来自 Linux ABI 或 Native ABI，均通过共同 mediator；信封透明适用于任一 ABI（`main.tex:31-35, 93-99, 241-257, 831-834`）。
-- **代码证据**：`env_mediate_*` 调用集中在 `kernel/abi/linux/` 和少量由 Linux 路径触达的 core 文件；`kernel/abi/native/` 中没有 envelope mediation 调用。控制面本身也是 Linux ABI syscall 902--906。
-- **影响**：Native ABI 进程即使持有 `task->envelope`，其 handle/channel/resource 操作也不会执行论文所述预算和权利检查。“dual-ABI enforcement”与当前实现不符。
-- **建议**：要么把论文范围明确收窄为“dual-ABI OS 上的 Linux-ABI envelope”，要么把 mediation 下沉至两套 ABI 必经的对象层并增加 Native ABI 测试矩阵。
+- 论文主张：所有资源获取不论来自 Linux ABI 或 Native ABI，均通过共同 mediator；信封透明适用于任一 ABI（`main.tex:31-35, 93-99, 241-257, 831-834`）。
+- 代码证据：`env_mediate_*` 调用集中在 `kernel/abi/linux/` 和少量由 Linux 路径触达的 core 文件；`kernel/abi/native/` 中没有 envelope mediation 调用。控制面本身也是 Linux ABI syscall 902--906。
+- 影响：Native ABI 进程即使持有 `task->envelope`，其 handle/channel/resource 操作也不会执行论文所述预算和权利检查。“dual-ABI enforcement”与当前实现不符。
+- 建议：要么把论文范围明确收窄为“dual-ABI OS 上的 Linux-ABI envelope”，要么把 mediation 下沉至两套 ABI 必经的对象层并增加 Native ABI 测试矩阵。
 
 ### B-02：“每个资源获取/使用路径均被调解”与仓库自己的矩阵冲突
 
-- **论文主张**：mediator 截获 every acquisition/consumption；A1--A10 枚举每条新 authority 路径并映射到实际 hook（`main.tex:97-99, 252-257, 281-306`）。
-- **代码证据**：当前生成矩阵为 366 项，其中仅 30 项标记为已调解，另有 **36 项 PLANNED-W2**。其中包括 `socketpair`、file-backed `mmap`、`shmget`、epoll/inotify、POSIX/SysV IPC、mount、ptrace 等（`envelope_coverage.md:5-14`；`gen_envelope_coverage.py:62-83`）。
-- **具体逃逸**：`sys_socketpair()` 创建并安装两个 socket fd，全程没有 `env_mediate_acquire`（`kernel/abi/linux/sys_net.c:49-71`）；A4 `mmap` 仍被矩阵标为 PLANNED。
-- **影响**：当前实现是“若干选定 choke points 的原型”，不是论文表述的完整 mediator。允许 SOCKET 之外的 policy 仍可通过未调解 `socketpair` 获得 socket authority。
-- **建议**：投稿前将 PLANNED 清零或全部 fail-closed；否则把完整性主张、标题/摘要和威胁模型同步收窄为已实现 syscall 集合。
+- 论文主张：mediator 截获 every acquisition/consumption；A1--A10 枚举每条新 authority 路径并映射到实际 hook（`main.tex:97-99, 252-257, 281-306`）。
+- 代码证据：当前生成矩阵为 366 项，其中仅 30 项标记为已调解，另有 36 项 PLANNED-W2。其中包括 `socketpair`、file-backed `mmap`、`shmget`、epoll/inotify、POSIX/SysV IPC、mount、ptrace 等（`envelope_coverage.md:5-14`；`gen_envelope_coverage.py:62-83`）。
+- 具体逃逸：`sys_socketpair()` 创建并安装两个 socket fd，全程没有 `env_mediate_acquire`（`kernel/abi/linux/sys_net.c:49-71`）；A4 `mmap` 仍被矩阵标为 PLANNED。
+- 影响：当前实现是“若干选定 choke points 的原型”，不是论文表述的完整 mediator。允许 SOCKET 之外的 policy 仍可通过未调解 `socketpair` 获得 socket authority。
+- 建议：投稿前将 PLANNED 清零或全部 fail-closed；否则把完整性主张、标题/摘要和威胁模型同步收窄为已实现 syscall 集合。
 
 ### B-03：两个 A20 Linux ABI authority 获取 syscall 被错误标为 NA
 
-- **论文主张**：366 个登记 syscall 全部针对资源 authority 被显式分类，防止静默缺口（`main.tex:106-108, 311-316, 386-390`）。
-- **代码证据**：syscall 900 `a20_channel_pair` 创建两个 channel endpoint fd，901 `a20_registry_client` 返回 registry endpoint fd，但二者没有 envelope acquisition hook（`kernel/abi/linux/sys_a20_bridge.c:20-76`）。生成矩阵却将二者标记为 `NA`（`envelope_coverage.md:365-366`）。
-- **影响**：这是当前矩阵已经漏掉的真实 authority-granting 路径，直接反例于“显式分类杜绝静默缺口”。
-- **建议**：将 900/901 定义为 ACQUIRE 并 mediation；在修复前至少 PLANNED/fail-closed，不能标为 NA。
+- 论文主张：366 个登记 syscall 全部针对资源 authority 被显式分类，防止静默缺口（`main.tex:106-108, 311-316, 386-390`）。
+- 代码证据：syscall 900 `a20_channel_pair` 创建两个 channel endpoint fd，901 `a20_registry_client` 返回 registry endpoint fd，但二者没有 envelope acquisition hook（`kernel/abi/linux/sys_a20_bridge.c:20-76`）。生成矩阵却将二者标记为 `NA`（`envelope_coverage.md:365-366`）。
+- 影响：这是当前矩阵已经漏掉的真实 authority-granting 路径，直接反例于“显式分类杜绝静默缺口”。
+- 建议：将 900/901 定义为 ACQUIRE 并 mediation；在修复前至少 PLANNED/fail-closed，不能标为 NA。
 
 ### B-04：覆盖 drift gate 不保证显式分类，而且当前生成器已不幂等
 
-- **论文主张**：新增 syscall 若未显式分类，构建门禁必失败（`main.tex:311-316, 386-390`）。
-- **默认 NA 问题**：`classify()` 对不在任何手工集合中的 syscall 无条件返回 `NA`（`tools/gen_envelope_coverage.py:97-108`）。新增 syscall 重新生成并提交后即可通过，无需任何显式判断或理由；B-03 正是实际后果。
-- **当前生成失败**：`parse_numbers()` 从 `kernel/include/abi/linux/syscall_nr.h` 搜索 `#define SYS_*`（`gen_envelope_coverage.py:27,89-95`），但该文件现在只 include `core/syscall_nr.h`。以项目指定的 `a20os` conda 环境重新生成时，366 行 syscall number 全部变空并大面积重排，与已提交矩阵产生 366 行替换。
-- **门禁局限**：Make target 只“重新生成 + git diff”（`Makefile:918-928`），并不验证分类的正确性、hook 存在性或 PLANNED=0。
-- **影响**：机械完备性是论文核心贡献之一，但当前既有逻辑漏洞，也在 HEAD 上发生工具漂移。
-- **建议**：建立显式 `NA` allowlist（每项带理由），未知项直接报错；解析唯一 syscall 元数据源；把分类与 hook declaration/测试映射交叉验证；CI 强制 PLANNED 或高风险 NA 审批。
+- 论文主张：新增 syscall 若未显式分类，构建门禁必失败（`main.tex:311-316, 386-390`）。
+- 默认 NA 问题：`classify()` 对不在任何手工集合中的 syscall 无条件返回 `NA`（`tools/gen_envelope_coverage.py:97-108`）。新增 syscall 重新生成并提交后即可通过，无需任何显式判断或理由；B-03 正是实际后果。
+- 当前生成失败：`parse_numbers()` 从 `kernel/include/abi/linux/syscall_nr.h` 搜索 `#define SYS_*`（`gen_envelope_coverage.py:27,89-95`），但该文件现在只 include `core/syscall_nr.h`。以项目指定的 `a20os` conda 环境重新生成时，366 行 syscall number 全部变空并大面积重排，与已提交矩阵产生 366 行替换。
+- 门禁局限：Make target 只“重新生成 + git diff”（`Makefile:918-928`），并不验证分类的正确性、hook 存在性或 PLANNED=0。
+- 影响：机械完备性是论文核心贡献之一，但当前既有逻辑漏洞，也在 HEAD 上发生工具漂移。
+- 建议：建立显式 `NA` allowlist（每项带理由），未知项直接报错；解析唯一 syscall 元数据源；把分类与 hook declaration/测试映射交叉验证；CI 强制 PLANNED 或高风险 NA 审批。
 
 ### B-05：descriptor transfer 并未实现论文与 Lean 所证明的权利来源约束
 
-- **论文主张**：transfer grant 为 `request ∩ receiver-cap`，不得超出 request/source；Lean 进一步声称执行 delegated right 需要 delegator grant 与 receiver cap 同时成立（`main.tex:336-349, 650-668`）。
-- **代码证据**：`env_mediate_acquire_gfd(int gfd)` 没有 request/source-rights 参数。它为 FILE 硬编码 `READ|WRITE|STAT|SEEK`，socket 再加 `CONNECT|ACCEPT`，最终只计算 `want & receiver-cap`（`kernel/ipc/envelope.c:209-247`）。
-- **模型偏差**：TLA+ 同样把 `WantTransfer` 固定成全 R/W（`Envelope.tla:42,85-96`）；Lean 的 `xferGrant(req, cap)` 和 delegation theorem 对抽象 `req/delegator-rights` 成立，但 C 路径没有实现这些输入（`BudgetLattice.lean:81-114,175-205`）。
-- **影响**：C 实现只能证明“不超过 receiver cap”，不能证明“不超过 sender shadow/request”。论文的 no-fabrication、delegation-chain 和 transfer-clamping 叙述没有代码对应点。
-- **建议**：传递源 shadow rights/请求掩码并计算 `source ∩ request ∩ cap`；增加“只读 source 经 SCM/pidfd 传入后 write 必须失败”等反例测试；随后再保留现有 Lean 结论。
+- 论文主张：transfer grant 为 `request ∩ receiver-cap`，不得超出 request/source；Lean 进一步声称执行 delegated right 需要 delegator grant 与 receiver cap 同时成立（`main.tex:336-349, 650-668`）。
+- 代码证据：`env_mediate_acquire_gfd(int gfd)` 没有 request/source-rights 参数。它为 FILE 硬编码 `READ|WRITE|STAT|SEEK`，socket 再加 `CONNECT|ACCEPT`，最终只计算 `want & receiver-cap`（`kernel/ipc/envelope.c:209-247`）。
+- 模型偏差：TLA+ 同样把 `WantTransfer` 固定成全 R/W（`Envelope.tla:42,85-96`）；Lean 的 `xferGrant(req, cap)` 和 delegation theorem 对抽象 `req/delegator-rights` 成立，但 C 路径没有实现这些输入（`BudgetLattice.lean:81-114,175-205`）。
+- 影响：C 实现只能证明“不超过 receiver cap”，不能证明“不超过 sender shadow/request”。论文的 no-fabrication、delegation-chain 和 transfer-clamping 叙述没有代码对应点。
+- 建议：传递源 shadow rights/请求掩码并计算 `source ∩ request ∩ cap`；增加“只读 source 经 SCM/pidfd 传入后 write 必须失败”等反例测试；随后再保留现有 Lean 结论。
 
 ### B-06：create-fork-enter-exec 模式允许 inherited fd 绕过 type 与 rights
 
-- **论文主张**：类型、方向和预算政策透明包裹 unmodified binary；每次 authority 使用由 shadow rights 检查（`main.tex:26-35, 320-334, 360-366`）。
-- **代码证据**：进入 envelope 前继承的 fd 没有 shadow。`env_mediate_use_dir()` 对此类 fd 明确“stay allowed but budget-accounted”，且不执行 direction 检查（`kernel/ipc/envelope.c:329-354`；头文件也注明 exempt，`kernel/include/ipc/envelope.h:128-140`）。
-- **影响**：supervisor 未关闭的 inherited socket 可在“no SOCKET” envelope 内继续使用；继承的可写文件可绕过 class/right acquisition checks。这与论文推荐的 create-fork-enter-exec 部署模式直接相交。
-- **建议**：`enter()` 时枚举并导入/裁剪现有 fd，或默认关闭/拒绝 grandfathered authority；若保留兼容模式，必须作为显式 policy flag 与论文限制披露。
+- 论文主张：类型、方向和预算政策透明包裹 unmodified binary；每次 authority 使用由 shadow rights 检查（`main.tex:26-35, 320-334, 360-366`）。
+- 代码证据：进入 envelope 前继承的 fd 没有 shadow。`env_mediate_use_dir()` 对此类 fd 明确“stay allowed but budget-accounted”，且不执行 direction 检查（`kernel/ipc/envelope.c:329-354`；头文件也注明 exempt，`kernel/include/ipc/envelope.h:128-140`）。
+- 影响：supervisor 未关闭的 inherited socket 可在“no SOCKET” envelope 内继续使用；继承的可写文件可绕过 class/right acquisition checks。这与论文推荐的 create-fork-enter-exec 部署模式直接相交。
+- 建议：`enter()` 时枚举并导入/裁剪现有 fd，或默认关闭/拒绝 grandfathered authority；若保留兼容模式，必须作为显式 policy flag 与论文限制披露。
 
 ### B-07：论文列出的 STAT/SEEK/CONNECT/ACCEPT 权利并未按操作强制
 
-- **论文主张**：per-class ceiling 包含 read、write、stat、seek、connect、accept（`main.tex:80-86, 318-334`）。
-- **文件权利**：use mediator 只有 R/W/无方向三态；`lseek` 直接调用 VFS，无 envelope hook（`kernel/abi/linux/sys_fs.c:625-638`），覆盖矩阵也把 `lseek`、`fstatat`、`fstat`、`statx` 标为 NA（`envelope_coverage.md:80,97-98,295`）。STAT/SEEK 只在 acquisition 时被全量要求，不能形成运行时 operation ceiling。
-- **socket 权利**：`socket()` 固定请求 CONNECT|ACCEPT|R|W|STAT（`sys_net.c:29-46`），因此 connect-only 或 accept-only cap 连 socket 都无法创建；`bind/connect/listen` 仅调用无方向的 `env_mediate_use(...,0)`，从不检查 CONNECT/ACCEPT（`sys_net.c:74-107`）。accepted fd 又固定请求所有 socket rights（`sys_net.c:125-138`）。
-- **影响**：论文展示的细粒度 rights lattice 在 C 中实质上主要只有 FILE/SOCKET 的 R/W use 检查和 acquisition-time all-or-nothing cap。
-- **建议**：为每类控制操作传入明确 required-right；新 socket/accept 的 shadow 从请求、listener 与 cap 派生，而非固定全 rights。
+- 论文主张：per-class ceiling 包含 read、write、stat、seek、connect、accept（`main.tex:80-86, 318-334`）。
+- 文件权利：use mediator 只有 R/W/无方向三态；`lseek` 直接调用 VFS，无 envelope hook（`kernel/abi/linux/sys_fs.c:625-638`），覆盖矩阵也把 `lseek`、`fstatat`、`fstat`、`statx` 标为 NA（`envelope_coverage.md:80,97-98,295`）。STAT/SEEK 只在 acquisition 时被全量要求，不能形成运行时 operation ceiling。
+- socket 权利：`socket()` 固定请求 CONNECT|ACCEPT|R|W|STAT（`sys_net.c:29-46`），因此 connect-only 或 accept-only cap 连 socket 都无法创建；`bind/connect/listen` 仅调用无方向的 `env_mediate_use(...,0)`，从不检查 CONNECT/ACCEPT（`sys_net.c:74-107`）。accepted fd 又固定请求所有 socket rights（`sys_net.c:125-138`）。
+- 影响：论文展示的细粒度 rights lattice 在 C 中实质上主要只有 FILE/SOCKET 的 R/W use 检查和 acquisition-time all-or-nothing cap。
+- 建议：为每类控制操作传入明确 required-right；新 socket/accept 的 shadow 从请求、listener 与 cap 派生，而非固定全 rights。
 
 ### B-08：io_uring 的“FAILCLOSED/统一调解”分类不成立
 
-- **论文主张**：A9 fixed-file fail-closed，A10 execution-point charge；覆盖矩阵把 `io_uring_setup` 和 `io_uring_register` 都计入 FAILCLOSED（`main.tex:380-390`；`envelope_coverage.md:319-321`）。
-- **代码证据**：`sys_io_uring_setup()` 在 envelope 下仍创建并返回 ring fd，未走 acquisition mediation（`kernel/abi/linux/sys_io_uring.c:47-75`），因此不能把整个 syscall 计为 fail-closed。`io_uring_register` 只拒绝 `IORING_REGISTER_FILES`；`IORING_REGISTER_EVENTFD` 仍允许注册（`kernel/fs/io_uring.c:431-471`）。完成通知更直接调用 `vfs_write_file()`，没有 envelope use charge/right check（`io_uring.c:413-425`）。
-- **影响**：已调解项计数被高估，并存在 eventfd consumption 绕过。
-- **建议**：ring fd acquisition 正常分类/调解；eventfd registration 按 authority transfer 处理，通知写入也在 execution point 计费；矩阵按 opcode 而非整个 syscall 粗分类。
+- 论文主张：A9 fixed-file fail-closed，A10 execution-point charge；覆盖矩阵把 `io_uring_setup` 和 `io_uring_register` 都计入 FAILCLOSED（`main.tex:380-390`；`envelope_coverage.md:319-321`）。
+- 代码证据：`sys_io_uring_setup()` 在 envelope 下仍创建并返回 ring fd，未走 acquisition mediation（`kernel/abi/linux/sys_io_uring.c:47-75`），因此不能把整个 syscall 计为 fail-closed。`io_uring_register` 只拒绝 `IORING_REGISTER_FILES`；`IORING_REGISTER_EVENTFD` 仍允许注册（`kernel/fs/io_uring.c:431-471`）。完成通知更直接调用 `vfs_write_file()`，没有 envelope use charge/right check（`io_uring.c:413-425`）。
+- 影响：已调解项计数被高估，并存在 eventfd consumption 绕过。
+- 建议：ring fd acquisition 正常分类/调解；eventfd registration 按 authority transfer 处理，通知写入也在 execution point 计费；矩阵按 opcode 而非整个 syscall 粗分类。
 
 ### B-09：pilot 摘要结论与测试预期相反，Landlock 基线还存在生命周期错误
 
-- **论文冲突**：摘要称 envelope 同时完成 benign install 并“blocks all four tested attack classes”（`main.tex:36-42`），正文表和代码却明确规定 A3 path escape 在 envelope 下成功（`main.tex:468-481`；`envelope_pilot.c:304-308`）。本次实测也得到 `A3-escape/envelope PASS (rc=0)`，其中 `rc=0` 就是逃逸成功。
-- **Landlock 基线风险**：pilot 在 `landlock_restrict_self()` 后立即 `close(rs)`（`envelope_pilot.c:78-102`）。内核把该对象地址写入 `task->landlock_rulesets`（`kernel/ipc/landlock.c:147-166`），但 fd close callback 即使识别到活动 ruleset，仍无条件 `kfree(rs)`（`landlock.c:51-63`）；后续 enforcement 读取该悬空指针（`landlock.c:190-198`）。
-- **影响**：摘要的四类阻断是事实错误；20-cell Landlock 比较是在潜在 use-after-free 上运行，当前 PASS 不能建立基线有效性。该实现也是 A20OS 的 Landlock subset，而不是 commodity Linux Landlock，论文应明确。
-- **建议**：摘要改为“阻断 3/4，A3 需与 Landlock 组合”；修复 ruleset ownership/refcount 后重跑完整矩阵并保存原始结果。
+- 论文冲突：摘要称 envelope 同时完成 benign install 并“blocks all four tested attack classes”（`main.tex:36-42`），正文表和代码却明确规定 A3 path escape 在 envelope 下成功（`main.tex:468-481`；`envelope_pilot.c:304-308`）。本次实测也得到 `A3-escape/envelope PASS (rc=0)`，其中 `rc=0` 就是逃逸成功。
+- Landlock 基线风险：pilot 在 `landlock_restrict_self()` 后立即 `close(rs)`（`envelope_pilot.c:78-102`）。内核把该对象地址写入 `task->landlock_rulesets`（`kernel/ipc/landlock.c:147-166`），但 fd close callback 即使识别到活动 ruleset，仍无条件 `kfree(rs)`（`landlock.c:51-63`）；后续 enforcement 读取该悬空指针（`landlock.c:190-198`）。
+- 影响：摘要的四类阻断是事实错误；20-cell Landlock 比较是在潜在 use-after-free 上运行，当前 PASS 不能建立基线有效性。该实现也是 A20OS 的 Landlock subset，而不是 commodity Linux Landlock，论文应明确。
+- 建议：摘要改为“阻断 3/4，A3 需与 Landlock 组合”；修复 ruleset ownership/refcount 后重跑完整矩阵并保存原始结果。
 
 ### B-10：66 个恶意包 exact-execution 的关键结论无法由仓库复现或审核
 
-- **论文主张**：seeded random 100 包、66 个运行、25 个触网、ENV 全部在 socket 阻断、NONE 触达 live C2，且无 benign denial（`main.tex:43-48, 494-520`）。
-- **仓库缺失**：没有提交 sample manifest、随机种子/抽样脚本、样本 hash、逐样本退出状态、原始串口日志、mediator counter 汇总、pcap/listener 记录或结果 JSON/CSV；也没有 exact-execution CI/Make gate。仓库内无法从数据重新得到 66/25/live-C2 这些数值。
-- **runner 丢证据**：`run_all.sh` 每个样本覆盖 `/tmp/o_none` 与 `/tmp/o_env`，最终只保留最后一个样本；它 grep errno 字符串，但 `ENVWRAP-STATS deny_type=...` 不含这些字符串，因此论文所称的 counter attribution 没有被 runner 输出或汇总（`tools/corpus/gen_exec_corpus.py:114-140`；`user/cmds/core/envwrap.c:80-97`）。
-- **版本未固定**：`packages/world/pynode.world` 只列 `python3`、`nodejs`、`npm`，没有锁定论文中的 Node.js 24.18.1 / CPython 3.12.14（`pynode.world:11-20`）。
-- **影响**：当前仓库只能支持“存在 exact runner 原型”，不能独立支持论文的 66/25/live-C2 实证结论。
-- **建议**：提交不含恶意 payload 的可公开 manifest（ID/hash/生态/entry/结果）、固定 seed 与抽样脚本、锁定镜像 digest/package versions、逐样本结构化输出、counter/pcap 摘要及一键 gate。
+- 论文主张：seeded random 100 包、66 个运行、25 个触网、ENV 全部在 socket 阻断、NONE 触达 live C2，且无 benign denial（`main.tex:43-48, 494-520`）。
+- 仓库缺失：没有提交 sample manifest、随机种子/抽样脚本、样本 hash、逐样本退出状态、原始串口日志、mediator counter 汇总、pcap/listener 记录或结果 JSON/CSV；也没有 exact-execution CI/Make gate。仓库内无法从数据重新得到 66/25/live-C2 这些数值。
+- runner 丢证据：`run_all.sh` 每个样本覆盖 `/tmp/o_none` 与 `/tmp/o_env`，最终只保留最后一个样本；它 grep errno 字符串，但 `ENVWRAP-STATS deny_type=...` 不含这些字符串，因此论文所称的 counter attribution 没有被 runner 输出或汇总（`tools/corpus/gen_exec_corpus.py:114-140`；`user/cmds/core/envwrap.c:80-97`）。
+- 版本未固定：`packages/world/pynode.world` 只列 `python3`、`nodejs`、`npm`，没有锁定论文中的 Node.js 24.18.1 / CPython 3.12.14（`pynode.world:11-20`）。
+- 影响：当前仓库只能支持“存在 exact runner 原型”，不能独立支持论文的 66/25/live-C2 实证结论。
+- 建议：提交不含恶意 payload 的可公开 manifest（ID/hash/生态/entry/结果）、固定 seed 与抽样脚本、锁定镜像 digest/package versions、逐样本结构化输出、counter/pcap 摘要及一键 gate。
 
 ## 4. 高优先级不对齐
 
@@ -203,13 +203,13 @@ Lean 定义 `scmRecvCharge(s,r)=min(s,r)` 并证明不超过双方（`BudgetLatt
 
 ## 7. 建议修复顺序
 
-1. **先修论文真实性**：立即改摘要的“all four”、删除/补齐 wget、统一 syscall/coverage/形式化行数，并把范围改为 Linux ABI + 当前 hook 集合。
-2. **修安全语义**：堵住 `socketpair`、900/901、io_uring eventfd 等 acquisition/use 漏洞；处理 inherited fd；补齐 STAT/SEEK/CONNECT/ACCEPT。
-3. **修 transfer/refinement**：把 source/request rights 与 sender budget 真正接入 C，再用反例测试连接 Lean/TLA+ 与实现。
-4. **修基线和生命周期**：Landlock ruleset refcount、envelope registry owner ref、超过 32 tasks 的 revoke/expiry。
-5. **修机械门禁**：未知 syscall 默认失败、显式 NA 清单、解析 core syscall number source、PLANNED policy、hook/test 交叉检查。
-6. **重做可复现实验包**：exact execution 生成结构化结果和公开 manifest；benchmark 修正 workload 并做多次统计；将论文表格由 artifact 自动生成。
-7. **最后重跑并固化证据**：四个 QEMU gates、exact corpus、TLC、Lean；提交版本、命令、raw/summary logs 与环境 digest。
+1. 先修论文真实性：立即改摘要的“all four”、删除/补齐 wget、统一 syscall/coverage/形式化行数，并把范围改为 Linux ABI + 当前 hook 集合。
+2. 修安全语义：堵住 `socketpair`、900/901、io_uring eventfd 等 acquisition/use 漏洞；处理 inherited fd；补齐 STAT/SEEK/CONNECT/ACCEPT。
+3. 修 transfer/refinement：把 source/request rights 与 sender budget 真正接入 C，再用反例测试连接 Lean/TLA+ 与实现。
+4. 修基线和生命周期：Landlock ruleset refcount、envelope registry owner ref、超过 32 tasks 的 revoke/expiry。
+5. 修机械门禁：未知 syscall 默认失败、显式 NA 清单、解析 core syscall number source、PLANNED policy、hook/test 交叉检查。
+6. 重做可复现实验包：exact execution 生成结构化结果和公开 manifest；benchmark 修正 workload 并做多次统计；将论文表格由 artifact 自动生成。
+7. 最后重跑并固化证据：四个 QEMU gates、exact corpus、TLC、Lean；提交版本、命令、raw/summary logs 与环境 digest。
 
 ## 8. 最终判断
 
@@ -217,7 +217,7 @@ Lean 定义 `scmRecvCharge(s,r)=min(s,r)` 并证明不超过双方（`BudgetLatt
 
 > A20OS 实现了一个面向 Linux ABI 的 capability-envelope 原型；它在若干已接入的文件、socket、IPC 与 io_uring 操作上执行 type/RW/op/data/time 检查，并在仓库自带的 smoke、pilot 和 canonical replay 场景中展示了预期行为。
 
-当前仓库**不足以支持**以下论文现有强结论：
+当前仓库不足以支持以下论文现有强结论：
 
 - 两套 ABI 的所有资源路径均由同一 envelope mediator 完整覆盖；
 - 366 syscall 的机械 drift gate 已杜绝静默 authority 缺口；
@@ -227,4 +227,4 @@ Lean 定义 `scmRecvCharge(s,r)=min(s,r)` 并证明不超过双方（`BudgetLatt
 - 论文中的性能数值是由当前 benchmark 稳定、正确地测得；
 - 现有形式化结论已经与 C 实现建立足够的对应关系。
 
-因此整体对齐程度应定性为：**核心原型对齐，核心论文论证链未对齐。**
+因此整体对齐程度应定性为：**核心原型对齐，核心论文论证链未对齐**。

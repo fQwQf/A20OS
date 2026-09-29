@@ -38,15 +38,15 @@ make pkg-repo ARCH=riscv64
         公钥目录：Alpine 官方公钥（自动获取）+ A20OS 发布公钥（随发布产物提供）
 ```
 
-- **包签名**：`mka20pkg.py --sign-key` 在包内写入
-  `.SIGN.RSA256.<key-name>` 段；`--key-name` 必须与公钥文件名一致
-  （apk 按签名条目里的名字在 keys 目录里找公钥）；
-- **索引签名**：`mka20repo.sh --sign-key` 自动完成；
-- **公钥格式**：SPKI（`-----BEGIN PUBLIC KEY-----`，
-  `openssl rsa -in key -pubout` 的输出，**不是** PKCS#1 的
-  "BEGIN RSA PUBLIC KEY"）；
-- **Alpine 公钥**：mkrootfs 首次需要时从镜像站下载 `alpine-keys` 包
-  提取（这是一次信任引导；之后缓存复用）。
+签名有四处需要配齐：
+
+- 包签名由 `mka20pkg.py --sign-key` 在包内写入 `.SIGN.RSA256.<key-name>` 段，
+  `--key-name` 必须与公钥文件名一致（apk 按签名条目里的名字在 keys 目录里找公钥）；
+- 索引签名由 `mka20repo.sh --sign-key` 自动完成；
+- 公钥格式是 SPKI（`-----BEGIN PUBLIC KEY-----`，即 `openssl rsa -in key -pubout` 的
+  输出），**不是** PKCS#1 的 "BEGIN RSA PUBLIC KEY"；
+- Alpine 公钥由 mkrootfs 在首次需要时从镜像站下载 `alpine-keys` 包提取
+  （这是一次信任引导；之后缓存复用）。
 
 ## 密钥管理
 

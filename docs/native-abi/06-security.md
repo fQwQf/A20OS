@@ -1,6 +1,6 @@
 # A20OS Native ABI：安全模型设计
 
-> 本文档定义 Native ABI 的 capability 安全模型，包括 14 个权限位的代数结构、handle transfer 语义、安全标签格和权限降级不变式。内容已按 2026-08 源码核对；数学段落中标为“目标性质”的内容不等同于仓库已有机器验证或全路径信息流证明。
+> 14 个权限位的代数结构、handle transfer 语义、安全标签格和权限降级不变式按 2026-08 源码核对。数学段落中标为“目标性质”的内容不等同于仓库已有机器验证或全路径信息流证明。
 
 ---
 
@@ -51,37 +51,23 @@ $$\mathcal{R}ights = 2^{\{R, W, X, Stat, Seek, Dup, Transfer, Map, Wait, Connect
 
 ### 2.1 格结构
 
-权限集合 $(\mathcal{R}ights, \subseteq)$ 构成偏序集。对任意两个权限集合 $\rho_1, \rho_2$：
+权限集合 $(\mathcal{R}ights, \subseteq)$ 构成偏序集。对任意两个权限集合 $\rho_1, \rho_2$，交集 $\rho_1 \cap \rho_2$ 是两者都允许的操作，并集 $\rho_1 \cup \rho_2$ 是至少一方允许的操作。
 
-- **交集** $\rho_1 \cap \rho_2$：两者都允许的操作
-- **并集** $\rho_1 \cup \rho_2$：至少一方允许的操作
-
-$(\mathcal{R}ights, \subseteq, \cap, \cup)$ 构成**有限格**（finite lattice）：
-- 顶元素 $\top = \{R, W, X, Stat, Seek, Dup, Transfer, Map, Wait, Connect, Accept, Control, Admin, Signal\}$
-- 底元素 $\bot = \emptyset$
+$(\mathcal{R}ights, \subseteq, \cap, \cup)$ 构成**有限格**（finite lattice），顶元素 $\top = \{R, W, X, Stat, Seek, Dup, Transfer, Map, Wait, Connect, Accept, Control, Admin, Signal\}$，底元素 $\bot = \emptyset$。
 
 ### 2.2 降级单调性
 
-**定理（权限单调递减）**：对于任何操作序列 $\sigma_0 \to \sigma_1 \to \cdots \to \sigma_n$，任意 handle 的权限满足：
+定理（权限单调递减）：对于任何操作序列 $\sigma_0 \to \sigma_1 \to \cdots \to \sigma_n$，任意 handle 的权限满足：
 
 $$\forall i.\ \rho_i(handle) \subseteq \rho_{i-1}(handle)$$
 
-证明要点：
-- `handle_dup`：$\rho_{new} \subseteq \rho_{old}$（子集要求）
-- `handle_transfer`：$\rho_{recv} = \rho_{send} \cap \rho_{transfer} \subseteq \rho_{send}$
-- `handle_replace`：$\rho_{new} \subseteq \rho_{old}$
-- 不存在任何操作使权限增加。
+证明依赖三条操作约束：`handle_dup` 要求 $\rho_{new} \subseteq \rho_{old}$（子集要求），`handle_transfer` 给出 $\rho_{recv} = \rho_{send} \cap \rho_{transfer} \subseteq \rho_{send}$，`handle_replace` 要求 $\rho_{new} \subseteq \rho_{old}$。不存在任何操作使权限增加。
 
 ### 2.3 Confused Deputy 不可行性
 
 **目标性质**：handle 不可伪造和 rights 单调收缩能减少 confused-deputy 攻击面，但不能一般性证明 confused deputy 不可行；服务若错误地代表低权限调用者使用自己的高权限 handle，仍可能成为 deputy。
 
-handle 层能保证 A 无法：
-1. 增加 B handle 的权限（降级单调性）
-2. 伪造指向 R 的 handle（handle 是进程本地编号，无法跨进程伪造）
-3. 通过 transfer 获得超过 B 显式传递上限的 rights。
-
-服务协议仍必须认证请求方并按最小权限选择操作；handle 代数本身不验证 B 的授权决策。
+handle 层能保证 A 无法增加 B handle 的权限（降级单调性），无法伪造指向 R 的 handle（handle 是进程本地编号，无法跨进程伪造），也无法通过 transfer 获得超过 B 显式传递上限的 rights。服务协议仍必须认证请求方并按最小权限选择操作；handle 代数本身不验证 B 的授权决策。
 
 ---
 
@@ -129,10 +115,7 @@ handle 层能保证 A 无法：
 
 ### 3.3 完备性论证
 
-每种权限控制至少一个操作，且每个操作至少需要一个权限。14 种权限和 14 种对象类型构成**最小充分集**：
-
-- **最小性**：移除任何一种权限会使某种合法操作无法独立授权
-- **充分性**：14 种权限足以表达 POSIX 子集的全部资源操作需求
+每种权限控制至少一个操作，且每个操作至少需要一个权限。14 种权限和 14 种对象类型构成最小充分集：移除任何一种权限都会使某种合法操作无法独立授权，而 14 种权限已足以表达 POSIX 子集的全部资源操作需求。
 
 ---
 
@@ -153,17 +136,9 @@ $$\rho_{recv} = \rho_{send} \cap \rho_{transfer}$$
 
 ### 4.2 共享语义 vs 移动语义
 
-A20OS 选择**共享语义**：
+A20OS 选择共享语义。`channel_send(handle)` 后发送方仍持有原 handle，对象的引用计数相应增加（refcount_inc），接收方获得的是指向同一对象的独立 handle。
 
-- `channel_send(handle)` 后，发送方仍持有原 handle
-- 对象的引用计数增加（refcount_inc）
-- 接收方获得独立的 handle，指向同一对象
-
-为什么不选移动语义（send 后原 handle 失效）？
-
-1. **组合性**：共享语义允许一个 handle 同时传递给多个接收方（一对多分发）
-2. **错误恢复**：如果 transfer 失败（接收方 HT 满），发送方不需要重新获取 handle
-3. **审计性**：发送方在 send 后仍可查询 handle 状态
+不选移动语义（send 后原 handle 失效）有三个理由：共享语义允许一个 handle 同时传递给多个接收方，形成一对多分发；transfer 失败（接收方 HT 满）时发送方不需要重新获取 handle；发送方在 send 后仍可查询 handle 状态，便于审计。
 
 ### 4.3 Spawn 中的 Handle 传递
 
@@ -198,17 +173,17 @@ $$\mathcal{L} = \{L, M, H\}, \quad L \sqsubseteq M \sqsubseteq H$$
 
 ### 5.2 标签传播规则
 
-每个对象携带安全标签 $\ell \in \mathcal{L}$。Handle 操作遵循 Bell-LaPadula 规则：
+每个对象携带安全标签 $\ell \in \mathcal{L}$。Handle 操作遵循 Bell-LaPadula 规则，三条规则及其内核检查点如下。
 
-**简单安全性（No Read Up）**：$$read(p, o) \implies \ell(p) \geq \ell(o)$$
+简单安全性（No Read Up）：$$read(p, o) \implies \ell(p) \geq \ell(o)$$
 
-> **内核执行**：`handle_read`、`channel_recv` 在 `a20_handle_lookup_internal` 之后检查 `ht->security_label >= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。
+> `handle_read`、`channel_recv` 在 `a20_handle_lookup_internal` 之后检查 `ht->security_label >= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。
 
-**星属性（No Write Down）**：$$write(p, o) \implies \ell(p) \leq \ell(o)$$
+星属性（No Write Down）：$$write(p, o) \implies \ell(p) \leq \ell(o)$$
 
-> **内核执行**：`handle_write`、`channel_send`、`handle_transfer` 检查 `ht->security_label <= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。`vm_share` 在共享 VMO 给目标 task 时检查目标标签不低于 VMO 标签。
+> `handle_write`、`channel_send`、`handle_transfer` 检查 `ht->security_label <= entry.security_label`。违反时返回 `A20_ERR_ACCESS`。`vm_share` 在共享 VMO 给目标 task 时检查目标标签不低于 VMO 标签。
 
-**Transfer 规则**：$$transfer(p_1 \to p_2, o) \implies \ell(p_1) \leq \ell(p_2) \text{ 或 } \ell(o) = L$$
+Transfer 规则：$$transfer(p_1 \to p_2, o) \implies \ell(p_1) \leq \ell(p_2) \text{ 或 } \ell(o) = L$$
 
 ### 5.3 $\mathcal{L}$-Noninterference
 
@@ -224,12 +199,7 @@ $$\sigma_0 \stackrel{L}{=} \sigma_0' \implies \forall \pi.\ exec(\sigma_0, \pi) 
 
 ### 6.1 动机
 
-传统能力系统一旦授予权限，权限就永久有效直到显式撤销。但在以下场景中，这种"永不过期"的能力是不够的：
-
-- **供应链安全**：第三方库只需在请求处理期间的网络访问权限
-- **最小权限委托**：子任务完成后应自动失去所有权限
-- **沙箱逃逸防护**：即使能力被意外泄露，过期后自动失效
-- **资源预算**：限制某个组件的总 I/O 操作次数
+传统能力系统一旦授予权限，权限就永久有效直到显式撤销。在若干场景下这种"永不过期"的能力是不够的：第三方库只需在请求处理期间的网络访问权限（供应链安全）；子任务完成后应自动失去所有权限（最小权限委托）；即使能力被意外泄露也能在过期后自动失效（沙箱逃逸防护）；以及限制某个组件的总 I/O 操作次数（资源预算）。
 
 现有内核能力系统（Zircon、seL4）都没有内核级的时间受限委托。OAuth/X.509 有过期机制但那是用户态构造。
 
@@ -239,7 +209,7 @@ Handle 的有效权限 $\rho_{eff}$ 是声明权限 $\rho$ 的时态投影：
 
 $$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } expiry(h) = 0 \text{ or } t < expiry(h) \text{, and } remaining(h) \neq 0 \\ \emptyset & \text{otherwise} \end{cases}$$
 
-**解释**：
+各条件对应的有效权限与含义：
 
 | 条件 | $\rho_{eff}$ | 含义 |
 |------|-------------|------|
@@ -249,29 +219,25 @@ $$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } expiry(h) = 0 \text{ or 
 | `remaining_ops > 0`（OP_COUNT 模式） | $\rho$（每次操作后递减） | 操作次数未耗尽 |
 | `remaining_ops == 0`（OP_COUNT 模式） | $\emptyset$ | 操作次数耗尽 |
 
-**注意**：`remaining_ops == 0` 且 `OP_COUNT` **未设置**时表示"无限次"（不是"已耗尽"）。只有 `OP_COUNT` flag 被设置后，`remaining_ops == 0` 才表示"已耗尽"。
+`remaining_ops == 0` 且 `OP_COUNT` 未设置时表示"无限次"，不是"已耗尽"。只有 `OP_COUNT` flag 被设置后，`remaining_ops == 0` 才表示"已耗尽"。
 
 ### 6.3 时态单调性
 
-**定理（时态权限单调递减）** 对任意 handle $h$，其有效权限随时间单调不增：
+定理（时态权限单调递减）对任意 handle $h$，其有效权限随时间单调不增：
 
 $$\forall t_1, t_2.\ t_2 > t_1 \implies \rho_{eff}(h, t_2) \subseteq \rho_{eff}(h, t_1)$$
 
-证明要点：
-1. **时间衰减**：当 $t$ 跨过 $expiry(h)$ 时，$\rho_{eff}$ 从 $\rho$ 变为 $\emptyset$。$\emptyset \subseteq \rho$。
-2. **操作计数衰减**：每次操作后 $remaining\_ops$ 递减。当从 1 变为 0 时，$\rho_{eff}$ 从 $\rho$ 变为 $\emptyset$。
-3. **显式降级**（handle_dup、handle_replace）：$\rho_{new} \subseteq \rho_{old}$。
-4. **没有任何操作能增加** $\rho_{eff}$：expiry 不能延长，remaining_ops 只减不增。
+证明有四步。时间衰减指 $t$ 跨过 $expiry(h)$ 时 $\rho_{eff}$ 从 $\rho$ 变为 $\emptyset$，而 $\emptyset \subseteq \rho$。操作计数衰减指每次操作后 $remaining\_ops$ 递减，从 1 变为 0 时 $\rho_{eff}$ 同样从 $\rho$ 变为 $\emptyset$。显式降级（handle_dup、handle_replace）给出 $\rho_{new} \subseteq \rho_{old}$。最后，没有任何操作能增加 $\rho_{eff}$：expiry 不能延长，remaining_ops 只减不增。
 
-此定理**严格包含**原定理 2.2（权限单调递减）：原定理是 $t_2 = t_1$ 时的特殊情况（只考虑显式操作，不考虑时间衰减）。
+此定理严格包含原定理 2.2（权限单调递减）：原定理是 $t_2 = t_1$ 时的特殊情况（只考虑显式操作，不考虑时间衰减）。
 
 ### 6.4 时态不可刷新性
 
-**定理（不可刷新）** 持有 handle $h$（$\rho_{eff}(h, t) \neq \emptyset$）的进程 $p$ 无法创建一个有效权限严格包含 $\rho_{eff}(h, t)$ 或过期时间晚于 $h$ 的新 handle $h'$。
+定理（不可刷新）持有 handle $h$（$\rho_{eff}(h, t) \neq \emptyset$）的进程 $p$ 无法创建一个有效权限严格包含 $\rho_{eff}(h, t)$ 或过期时间晚于 $h$ 的新 handle $h'$。
 
 证明要点：`handle_dup` 的时态约束要求 `expiry' ≤ expiry(h)` 和 `ops' ≤ remaining_ops(h)`。因此 $\rho_{eff}(h', t') \subseteq \rho_{eff}(h, t')$。
 
-> **内核执行**：`handle_control(SET_TEMPORAL)` 是用户态入口，只允许添加 flag、提前 expiry、减少 remaining_ops；违反不可刷新性返回 `A20_ERR_ACCESS`。`handle_dup`、`handle_replace`、spawn handle 转移、`vm_share` 和 channel handle 传递均继承源 handle 的 `expiry_tick`、`remaining_ops`、`temporal_flags` 和 `security_label`。`a20_handle_lookup_internal()` 每次查找时计算 `a20_effective_rights()` 并在 OP_COUNT 模式下递减预算。`GET_TEMPORAL` 用于查询当前参数，`SET_LABEL` 只能上调标签。
+> `handle_control(SET_TEMPORAL)` 是用户态入口，只允许添加 flag、提前 expiry、减少 remaining_ops；违反不可刷新性返回 `A20_ERR_ACCESS`。`handle_dup`、`handle_replace`、spawn handle 转移、`vm_share` 和 channel handle 传递均继承源 handle 的 `expiry_tick`、`remaining_ops`、`temporal_flags` 和 `security_label`。`a20_handle_lookup_internal()` 每次查找时计算 `a20_effective_rights()` 并在 OP_COUNT 模式下递减预算。`GET_TEMPORAL` 用于查询当前参数，`SET_LABEL` 只能上调标签。
 
 ### 6.5 过期行为
 
@@ -349,7 +315,7 @@ int64_t debug_map_memory(a20_handle_t dbg, uint64_t addr, uint64_t len, uint32_t
 
 调试能力通过 handle rights 控制。只有持有 task 的 `ADMIN` 权限的进程才能附加调试器（`debug_attach` 在 `proc_debug_attach` 中还会复核 uid/capability，纵深防御）。`A20_OBJ_DEBUG` 的合法权限为 READ | WRITE | WAIT | SIGNAL | STAT | DUP | TRANSFER | CONTROL | ADMIN，持有者可自行用 `handle_replace` 收窄；`spawn`/`thread_create` 返回的 task handle 自带 ADMIN（创建者对创建对象拥有管理权）。
 
-> **实现范围（NATIVE_DEBUG_CONTRACT）**：Debug 分区为完整实现，与 Linux ABI 的 ptrace(2) 共享同一内核状态机（`kernel/proc/debug.c` 的 `proc_debug_*`）。 停止/恢复、寄存器与地址空间访问、exec/exit 事件、syscall 边界停止均可用。 已知边界：无硬件单步（riscv64，与 Linux 一致）、无 TRACEFORK/CLONE 事件、 无 seccomp 集成；`debug_traceme` 与 `debug_attach` 互斥（同 Linux）。
+> Debug 分区为完整实现，与 Linux ABI 的 ptrace(2) 共享同一内核状态机（`kernel/proc/debug.c` 的 `proc_debug_*`）。 停止/恢复、寄存器与地址空间访问、exec/exit 事件、syscall 边界停止均可用。 已知边界：无硬件单步（riscv64，与 Linux 一致）、无 TRACEFORK/CLONE 事件、 无 seccomp 集成；`debug_traceme` 与 `debug_attach` 互斥（同 Linux）。契约名为 NATIVE_DEBUG_CONTRACT。
 
 ### 8.2 Handle 查询审计
 

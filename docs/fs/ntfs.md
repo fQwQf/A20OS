@@ -1,6 +1,6 @@
 # NTFS 文件系统
 
-A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs*.c`）。实现依据 NTFS 磁盘格式规范独立编写。本文已按 2026-08 源码核对；能力表表示代码路径存在，不代表当前提交已有专用双架构 NTFS 运行时复验。
+A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs*.c`）。实现依据 NTFS 磁盘格式规范独立编写。内容已按 2026-08 源码核对；能力表表示代码路径存在，不代表当前提交已有专用双架构 NTFS 运行时复验。
 
 ## 支持范围
 
@@ -18,10 +18,10 @@ A20OS 内置 NTFS 读/写文件系统（`kernel/fs/diskfs/ntfs*.c`）。实现�
 
 ## 设计要点
 
-- **帧/页面所有权**：文件数据通过 `vnode->ops->readpage/writepage` 接入核心 page cache，与其它块文件系统（fat32/ext4）走同一路径；文件 VMA 使用 page-cache frame，不创建 Native VMO。
-- **簇分配器**：`$Bitmap`（MFT 记录 6）首适应分配/释放，写入后回写位图。
-- **USA fixup**：MFT 记录与 INDX 块读写均做更新序列数组修复。
-- **run list**：解析支持稀疏 run；写入时按相对 LCN 增量编码。
+- 帧/页面所有权：文件数据通过 `vnode->ops->readpage/writepage` 接入核心 page cache，与其它块文件系统（fat32/ext4）走同一路径；文件 VMA 使用 page-cache frame，不创建 Native VMO。
+- 簇分配器：`$Bitmap`（MFT 记录 6）首适应分配/释放，写入后回写位图。
+- USA fixup：MFT 记录与 INDX 块读写均做更新序列数组修复。
+- run list：解析支持稀疏 run；写入时按相对 LCN 增量编码。
 
 ## 挂载
 

@@ -1,6 +1,6 @@
 # Display 与 Framebuffer 驱动
 
-A20OS 的 display 类（`DEV_CLASS_DISPLAY`，`gpu_dev_ops_t`）包含两层：**2D 扫描输出与 framebuffer**（本文件主题），以及 **virtio-gpu 3D (virgl) 透传**（[3D 图形加速栈](../../graphics/3d-graphics.md)）。2D 层只承诺扫描输出；3D 层通过 virtio-gpu 的 `SUBMIT_3D` 把 virgl 命令流转发到 host 端 GL 上下文。
+A20OS 的 display 类（`DEV_CLASS_DISPLAY`，`gpu_dev_ops_t`）包含两层：2D 扫描输出与 framebuffer（本文件主题），以及 virtio-gpu 3D (virgl) 透传（[3D 图形加速栈](../../graphics/3d-graphics.md)）。2D 层只承诺扫描输出；3D 层通过 virtio-gpu 的 `SUBMIT_3D` 把 virgl 命令流转发到 host 端 GL 上下文。
 
 ## 驱动接入
 
@@ -13,7 +13,7 @@ if (gpu_device_register(dev) < 0)
 
 第一个成功注册的 display 成为 `/dev/fb0` 默认设备。remove 必须先停刷新/scanout，再 `gpu_device_unregister(dev)`。当前 default registry 不会自动选择第二个设备接替；这是热拔插限制，不应在新驱动里再建私有全局 getter。
 
-典型生命周期：
+典型的注册、probe、使用与 remove 顺序：
 
 ```c
 /* 1. 注册驱动 */
@@ -148,4 +148,4 @@ SVGAv3 先启动 device command context，再设置模式；flush 提交 `SVGA3_
 - flush 序列必须符合设备 cache/doorbell 协议。
 - 显存映射属性不能与内核已有别名冲突。
 
-注意：不要把整个 PCI BAR 或整段 VRAM 当成 framebuffer 长度返回。`get_fb` 的长度必须只覆盖可见 scanout，否则用户态会映射到未定义或受保护的设备内存。
+不要把整个 PCI BAR 或整段 VRAM 当成 framebuffer 长度返回。`get_fb` 的长度必须只覆盖可见 scanout，否则用户态会映射到未定义或受保护的设备内存。

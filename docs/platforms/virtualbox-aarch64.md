@@ -1,12 +1,12 @@
 # VirtualBox ARM64 运行与验收手册
 
-> **时效说明**（最后核实：2026-08）：下表保留早期 VirtualBox ARM64 实机观察；源码仍提供对应 loader、board 和驱动路径。状态中的"已验证/已跑通"只属于该历史快照；对当前 HEAD 的结论必须按本页重新采集连续证据。
+> 最后核实：2026-08。下表保留早期 VirtualBox ARM64 实机观察；源码仍提供对应 loader、board 和驱动路径。状态中的"已验证/已跑通"只属于该历史快照；对当前 HEAD 的结论必须按本页重新采集连续证据。
 
 > `vbox-*-image-aarch64` wrapper 不设置 `DRIVER_DEPLOYMENT`，因此默认 `generic` 镜像不包含 E1000 或 VMSVGA 驱动模块。下面的网络和 GUI 流程要求从命令行传入 `DRIVER_DEPLOYMENT=embedded`；递归 Make 会传播该命令行变量。这样只会把驱动编入镜像，不代表已通过 VirtualBox 验收。
 
-> 不要这样做：不要只以“出现桌面”或“shell 启动”作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
+> 只以"出现桌面"或"shell 启动"不能作为驱动验收证据。必须保留从 `[BUS] pci` 到类消费者 mount、lwIP、framebuffer、input 的连续日志。
 
-这份手册说明如何在 VirtualBox ARM64 上制作镜像、配置虚拟机并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
+在 VirtualBox ARM64 上制作镜像、配置虚拟机，并收集从 ACPI/PCI 到类消费者的完整证据。通用驱动接口和平台规范见 [VirtualBox 驱动栈](virtualbox.md)，驱动开发流程见 [构建、测试与提交](../drivers/meta/testing-and-submission.md)。
 
 ## 源码状态与验证边界
 
@@ -79,7 +79,7 @@ $vdi = "C:\Users\super\Downloads\a20os-vbox-aarch64-20260717.vdi"
   $raw $vdi --format VDI
 ```
 
-> 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。不要对当前已经挂载到 VM 的 VDI 再次转换，也不要让 VirtualBox 继续保留旧的 medium UUID。
+> 注意：每次生成新镜像后都要用新的输出文件名执行 `convertfromraw`。已挂载到 VM 的 VDI 不再转换，旧的 medium UUID 也不要留着。
 
 构建还会生成 `a20os-vbox-aarch64.img.sha256` 并在 ESP 中写入 `A20OS.MANIFEST`。如果镜像是当前构建的，串口日志中的 `[INIT] image` 行和 `file-entry` 必须与刚构建的 `/init` 匹配；出现旧构建的 entry 说明 VM 还挂在一个 stale VDI 上。
 

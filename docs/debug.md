@@ -1,6 +1,6 @@
 # 调试 A20OS
 
-本文档介绍如何调试 A20OS。调试信息主要来自串口输出、QEMU 日志和 GDB。
+A20OS 的调试信息主要来自串口输出、QEMU 日志和 GDB。
 
 ## QEMU + GDB 源码级调试
 
@@ -55,9 +55,7 @@ A20OS 使用 UART 输出启动日志。panic 实现在 `kernel/core/panic.c` 中
 
 ### 1. `make run-*` 提示 `mkfs.fat` 或 `mcopy` 找不到
 
-**原因**：构建文件系统镜像需要 `dosfstools` / `mtools` / `e2fsprogs`。
-
-**解决**：
+构建文件系统镜像需要 `dosfstools` / `mtools` / `e2fsprogs`，装上即可：
 
 ```bash
 sudo apt install dosfstools mtools e2fsprogs
@@ -65,9 +63,7 @@ sudo apt install dosfstools mtools e2fsprogs
 
 ### 2. 未验证平台设置 `NR_CPUS=2` 后构建失败
 
-**原因**：Makefile 只允许 RISC-V64、AArch64、LoongArch64 和 x86_64 的同名 QEMU virt 板直接使用多核；其他平台默认拒绝未经验证的 SMP 产物。
-
-**解决**：
+Makefile 只允许 RISC-V64、AArch64、LoongArch64 和 x86_64 的同名 QEMU virt 板直接使用多核；其他平台默认拒绝未经验证的 SMP 产物。
 
 ```bash
 # 已验证的 RISC-V64 QEMU SMP 不需要额外开关
@@ -80,27 +76,23 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le NR_CPUS=2 \
 
 ### 3. QEMU 启动后没有串口输出
 
-**原因**：RISC-V 等目标需要 `-bios default` 和 `-global virtio-mmio.force-legacy=false`；手动拼写命令容易遗漏。
-
-**解决**：始终使用 `make run-*` 或 `make debug-*`，不要手写 QEMU 参数。
+RISC-V 等目标需要 `-bios default` 和 `-global virtio-mmio.force-legacy=false`，手动拼写命令容易遗漏。始终使用 `make run-*` 或 `make debug-*`，不要手写 QEMU 参数。
 
 ### 4. STM32 自动运行或烧录入口失败
 
-**当前已知原因**：`run-stm32f103-qemu` 和 `flash-stm32f103-xuanwu` 仍引用加入 `BOARD` 前的旧产物目录，与实际 `BUILD_DIR` 不一致。安装 QEMU/OpenOCD 或重新连接 CMSIS-DAP 不能修复这个 launcher 问题。
+`run-stm32f103-qemu` 和 `flash-stm32f103-xuanwu` 仍引用加入 `BOARD` 前的旧产物目录，与实际 `BUILD_DIR` 不一致。安装 QEMU/OpenOCD 或重新连接 CMSIS-DAP 不能修复这个 launcher 问题。
 
-**处理**：先只使用 `make stm32f103-bringup` 或 `make stm32f103-xuanwu` 构建固件，并按 [STM32F103 移植说明](platforms/stm32f103-port.md) 核对实际产物。修复 Makefile recipe 前，不要把自动运行或烧录目标作为通过证据。
+先只使用 `make stm32f103-bringup` 或 `make stm32f103-xuanwu` 构建固件，并按 [STM32F103 移植说明](platforms/stm32f103-port.md) 核对实际产物。修复 Makefile recipe 前，不要把自动运行或烧录目标作为通过证据。
 
 ### 5. 用户态编译失败
 
-**原因**：`user/external/` 子模块未初始化。
-
-**解决**：
+`user/external/` 子模块未初始化：
 
 ```bash
 git submodule update --init --recursive
 ```
 
-##  注意
+## 注意
 
 - `debug-*` 目标默认使用 `BRINGUP=0`；如只需要内核，请指定 `make ARCH=riscv64 BRINGUP=1 debug-riscv64`。
 - 发布构建使用 `-O3`，可能内联或优化变量，导致 GDB 中变量值与源码不一致。
@@ -109,13 +101,13 @@ git submodule update --init --recursive
 
 ## 内核调试接口（proc_debug_*）
 
-`kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）： `proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
+`kernel/proc/debug.c` 提供与 ABI 无关的内核调试接口（观察者-被观察者模型）：`proc_debug_traceme/attach/detach/resume/singlestep/kill`、寄存器文件读写、地址空间 PEEK/POKE、siginfo 快照、PT_DEBUG_EVENT_EXEC/EXIT 事件停止，以及 syscall 边界停止（`proc_debug_syscall_entry/exit`）。
 
 Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_ptrace.c`），请求号与 `struct user_regs_struct` 的转换全部在 ABI 层完成；内核内部层不依赖任何 Linux 常量。Native ABI 的调试对象也映射到同一接口面，见下文。
 
 停止语义（对应 task 状态机）：
-- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`， `proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
-- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时 折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
+- 被观察任务在信号投递边界进入 ptrace 停止（`proc_sched_stop_for_debug`，`proc/sched.c` 持有状态转换），观察者可用不带 `WUNTRACED` 的 `wait4` 报告；
+- 停止期间寄存器快照在 `ptrace_saved_ctx`，`PTRACE_SETREGS` 等修改在恢复时折回陷阱上下文；syscall 入口停止在恢复时由架构层回卷 EPC 重新执行；
 - `PTRACE_CONT` 带信号恢复时通过一次性 `ptrace_deliver_sig` 标记避免二次停止。
 
 已实现（Linux ABI）：TRACEME/ATTACH/SEIZE/INTERRUPT/DETACH/CONT/SYSCALL/SINGLESTEP(x86_64)、 GETREGS/SETREGS/GETFPREGS/SETFPREGS/GETREGSET(NT_PRSTATUS, NT_FPREGSET)、 PEEKDATA/POKEDATA/PEEKUSER/POKEUSER、GETSIGINFO/SETSIGINFO、SETOPTIONS (TRACESYSGOOD/TRACEEXEC/TRACEEXIT/EXITKILL)、GETEVENTMSG、KILL。
@@ -124,7 +116,7 @@ Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_pt
 
 ## kallsyms 符号化回溯
 
-内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`， `tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），两遍的 `.text` 地址一致，表项精确。
+内核构建采用两遍链接：第一遍产出 `kernel-nosyms.elf`，`tools/gen_kallsyms.py`（纯 stdlib ELF 解析）提取 `.text` 范围内的符号生成紧凑符号表（`kernel/core/kallsyms.c`，`core/kallsyms.h` 声明 API），第二遍把符号表对象重新链接进最终镜像。由于符号表落在 `.rodata`（在 `.text` 之后），两遍的 `.text` 地址一致，表项精确。
 
 `kallsyms_print()` 把地址解析为 `name+0xN`，已接入 `kernel/core/trap.c` 的内核 oops 回溯输出。python3 不可用时符号表为空，`kernel/core/kallsyms.c` 的 weak 定义保证内核仍可链接，回溯退化为裸地址。
 
@@ -134,13 +126,13 @@ Linux ABI 的 `ptrace(2)` 是这些接口的薄包装（`kernel/abi/linux/sys_pt
 
 ## Native ABI 调试接口（Debug 0x0900）
 
-Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机， syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在 `user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
+Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态机，syscall 包装在 `kernel/abi/native/sys_native_debug.c`，用户态 SDK 封装在 `user/liba20rt/a20_debug.h`。与 Linux ABI 的差异：
 
 - 会话是 handle（可收窄权限、随进程消亡自动释放），不是 pid；
 - `debug_wait` 同时报告停止事件与**退出事件**（目标变 zombie 时报告 EXIT 事件，消息为退出码），无需 TRACEEXIT 选项；
-- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式 与内核 `PT_DEBUG_RESUME_*` 对应；
+- 无信号注入（native 无信号概念）；`debug_resume` 的 CONT/SYSCALL 模式与内核 `PT_DEBUG_RESUME_*` 对应；
 - `debug_traceme` 与 `debug_attach` 互斥（同 Linux）；
-- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器 应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
+- native 线程共享信号状态：进程级 SIGSTOP 会停住整个进程，因此调试器应 attach 独立进程（`test_native_debug.c` 用 spawn 的子进程验证）。
 
 权限（[Native ABI 安全模型](native-abi/06-security.md) §8.1）：READ/WRITE/WAIT/SIGNAL/CONTROL/ADMIN 对应各 debug 操作；spawn/thread_create 的 task handle 自带 ADMIN。
 
@@ -148,6 +140,6 @@ Native ABI 通过 `A20_OBJ_DEBUG` 会话对象暴露同样的内核调试状态�
 
 ## UBSan（未定义行为检测）
 
-开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。 任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。 `BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和发布构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
+开发构建（BRINGUP=0）默认启用 `-fsanitize=undefined` （`-fno-sanitize=alignment,bounds-strict`），运行时在 `kernel/core/ubsan.c`。任何未定义行为（移位越界、有符号溢出、数组越界等）在启动日志输出 `UBSAN: <kind> at file:line` 后继续运行，便于 smoke 测试暴露隐性 bug。`BRINGUP=1` 默认通过 `CONFIG_UBSAN=0` 关闭；`BRINGUP=0` 的 dev 和发布构建默认启用，除非调用方显式覆盖 `CONFIG_UBSAN=0`。
 
 启动时 `ubsan_selftest()` 输出两行 `UBSAN_SELFTEST: start / PASS`，是**预期的自检**（故意触发一次 handler 验证报告链路，报告文本在自检期间被抑制），不是真实错误；只有当日志出现 `UBSAN: <kind> at ...` 才是真正的未定义行为告警。

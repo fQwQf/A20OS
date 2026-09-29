@@ -1,6 +1,6 @@
 # A20OS 平台移植指南
 
-本文描述当前平台接口和验收方法。目标是让已有架构上的新开发板主要通过 `kernel/platform/<board>/` 接入，不把板级地址、CPU 拓扑或启动协议写回 `kernel/arch/`。
+已有架构上的新开发板主要通过 `kernel/platform/<board>/` 接入，板级地址、CPU 拓扑和启动协议都不写回 `kernel/arch/`。
 
 ## 代码边界
 
