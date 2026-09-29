@@ -18,13 +18,24 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <net/if.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
+
+/* Exit-code contract with tools/targets-smoke.mk:smoke-netfilter.
+ *   0   passed
+ *   1   failed (control surface or counters misbehaved)
+ *   77  SKIP   -- the environment could not exercise the data plane
+ *   78  ABSENT -- the capability is not implemented; the recipe treats this
+ *                and any non-PASS marker as a gate failure, deliberately.
+ */
+#define ABSENT_CODE 78
 
 #define CHK(cond, msg)                                                        \
     do {                                                                       \
@@ -82,6 +93,39 @@ static unsigned long long nf_stat(const char *text, const char *key)
             p++;
     }
     return 0;
+}
+
+/* Returns 0 and fills name[] when the host has an interface other than
+ * loopback, -1 otherwise.  Used only to tell "this QEMU run attached no NIC"
+ * apart from "a NIC is there and the hook never ran". */
+static int find_nonloopback_nic(char *name, size_t sz)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return -1;
+    char buf[4096];
+    struct ifconf ifc;
+    memset(&ifc, 0, sizeof(ifc));
+    ifc.ifc_len = (int)sizeof(buf);
+    ifc.ifc_buf = buf;
+    int rc = -1;
+    if (ioctl(fd, SIOCGIFCONF, &ifc) == 0) {
+        for (size_t off = 0; off + sizeof(struct ifreq) <= (size_t)ifc.ifc_len;
+             off += sizeof(struct ifreq)) {
+            const struct ifreq *row = (const struct ifreq *)(buf + off);
+            char row_name[IFNAMSIZ + 1] = {0};
+            memcpy(row_name, row->ifr_name, IFNAMSIZ);
+            if (row_name[0] == '\0')
+                continue;
+            if (strcmp(row_name, "lo") == 0)
+                continue;
+            snprintf(name, sz, "%s", row_name);
+            rc = 0;
+            break;
+        }
+    }
+    close(fd);
+    return rc;
 }
 
 static void udp_send_once(void)
@@ -166,12 +210,30 @@ int main(void)
     unsigned long long out_pkt1 = nf_stat(buf, "out_packets");
     unsigned long long out_drop1 = nf_stat(buf, "out_dropped");
     if (out_drop1 == out_drop0) {
-        printf("NETFILTER_TEST: SKIP no traffic reached the netfilter "
-               "transmit hook (out_packets %llu -> %llu); device path not "
-               "exercised by this instance\n",
-               out_pkt0, out_pkt1);
+        /* Two very different situations produce "no drop", and collapsing them
+         * into one SKIP is what let a green gate stand in for an unproven data
+         * plane:
+         *   - no non-loopback interface exists: this QEMU invocation attached
+         *     no NIC, so nothing could be transmitted.  Environment, not a
+         *     kernel capability claim -- SKIP, loudly named as such.
+         *   - an interface does exist and out_packets did not move either: the
+         *     transmit hook was never called, i.e. netfilter_output() is not
+         *     wired into a20_lwip_linkoutput().  That is an ABSENT capability.
+         *     ABSENT_CODE makes the smoke-netfilter recipe exit non-zero. */
+        char nic[IFNAMSIZ];
+        int have_nic = find_nonloopback_nic(nic, sizeof(nic)) == 0;
         nf_write("reset");
-        return 77;
+        if (!have_nic) {
+            printf("NETFILTER_TEST: SKIP no non-loopback interface in this "
+                   "instance (out_packets %llu -> %llu, out_dropped %llu -> "
+                   "%llu); data plane not reachable, capability NOT verified\n",
+                   out_pkt0, out_pkt1, out_drop0, out_drop1);
+            return 77;
+        }
+        printf("NETFILTER_TEST: ABSENT transmit hook never ran: interface %s "
+               "exists but out_packets %llu -> %llu and out_dropped %llu -> %llu\n",
+               nic, out_pkt0, out_pkt1, out_drop0, out_drop1);
+        return ABSENT_CODE;
     }
     CHK(out_drop1 > out_drop0, "dropped packets counted");
     CHK(out_pkt1 > out_pkt0, "transmit hook observed the packets");
