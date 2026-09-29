@@ -58,6 +58,11 @@ static uint64_t now_ns(void)
     return t;
 }
 
+/* Which stage of spawn_child rejected the child: 1 = a20_path_open on the
+ * image, 2 = a20_task_spawn.  Printed on failure so a spawn failure names its
+ * cause instead of only reporting a non-OK status. */
+static uint32_t g_spawn_fail_stage;
+
 static int64_t spawn_child(const char *path, a20_handle_t pass_h,
                            uint32_t pass_slot, a20_rights_t pass_rights,
                            a20_handle_t *out_task)
@@ -73,9 +78,11 @@ static int64_t spawn_child(const char *path, a20_handle_t pass_h,
     while (((const char *)(uintptr_t)oa.path)[oa.path_len]) oa.path_len++;
     oa.mode = 0;
     oa.out_handle = A20_HANDLE_NULL;
+    g_spawn_fail_stage = 1;
     a20_status_t st = a20_path_open(&oa);
     if (st != A20_OK)
         return st;
+    g_spawn_fail_stage = 2;
 
     a20_spawn_handle_t sh;
     sh.handle = pass_h;
@@ -105,8 +112,13 @@ static int64_t spawn_child(const char *path, a20_handle_t pass_h,
 
     st = a20_syscall6(A20_SYS_task_spawn, (uint64_t)(uintptr_t)&ta, 0, 0, 0, 0, 0);
     a20_hdl_close(oa.out_handle);
+    /* task_spawn returns the child's task handle, and reports failure as a
+     * negative status; normalise success to A20_OK so callers can test either
+     * way, matching the spawn helper in test_native_debug.c. */
+    if (st < 0)
+        return st;
     *out_task = ta.out_task;
-    return st;
+    return A20_OK;
 }
 
 static int wait_child_ok(a20_handle_t task)
@@ -207,9 +219,18 @@ int main(int argc, char **argv, char **envp)
         return fail(5, "channel_create failed");
 
     a20_handle_t chan_task;
-    if (spawn_child("/bin/chand-rv", pair.endpoints[1], A20_CHAND_EP_SLOT,
-                    A20_RIGHT_READ | A20_RIGHT_WRITE, &chan_task) != A20_OK)
+    int64_t chand_rc = spawn_child("/bin/chand-rv", pair.endpoints[1],
+                                   A20_CHAND_EP_SLOT,
+                                   A20_RIGHT_READ | A20_RIGHT_WRITE,
+                                   &chan_task);
+    if (chand_rc != A20_OK) {
+        put_str("NATIVE_SHMRING: chand spawn rc=");
+        put_u64((uint64_t)chand_rc);
+        put_str(" stage=");
+        put_u64(g_spawn_fail_stage);
+        put("\n", 1);
         return fail(6, "chand spawn failed");
+    }
     a20_hdl_close(pair.endpoints[1]);
 
     uint8_t hdr[4] = {

@@ -102,23 +102,21 @@ int kexec_load_segments(uint64_t entry, uint64_t nr_segments,
     if (!usegments || nr_segments == 0 || nr_segments > KEXEC_MAX_SEGMENTS)
         return -EINVAL;
 
-    /* struct kexec_segment { void* buf; size_t bufsz; void* mem; size_t
-     * memsz; } on LP64 = 4 x 8 bytes. */
     kexec_segment_staged_t staged[KEXEC_MAX_SEGMENTS];
     memset(staged, 0, sizeof(staged));
 
     int rc = 0;
     for (uint64_t i = 0; i < nr_segments && rc == 0; i++) {
-        uint64_t wire[4];
-        if (copy_from_user(wire, (const char *)usegments + i * 4 * 8,
+        kexec_segment_t wire;
+        if (copy_from_user(&wire, (const char *)usegments + i * sizeof(wire),
                            sizeof(wire)) < 0) {
             rc = -EFAULT;
             break;
         }
-        const void *ubuf = (const void *)wire[0];
-        uint64_t bufsz = wire[1];
-        uint64_t mem = wire[2];
-        uint64_t memsz = wire[3];
+        const void *ubuf = wire.buf;
+        uint64_t bufsz = wire.bufsz;
+        uint64_t mem = (uint64_t)(uintptr_t)wire.mem;
+        uint64_t memsz = wire.memsz;
 
         if (bufsz > memsz)
             return -EINVAL;

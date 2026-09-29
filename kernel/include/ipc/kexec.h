@@ -5,6 +5,16 @@
 
 /* kexec_load/kexec_file_load image staging (kernel/ipc/kexec.c). */
 
+/* Wire layout of the user-supplied struct kexec_segment.  Field widths are
+ * the target's own, so an ILP32 guest sends 4-byte pointers and sizes; a
+ * fixed 8-byte stride would misread every field there. */
+typedef struct {
+    const void *buf;
+    size_t      bufsz;
+    const void *mem;
+    size_t      memsz;
+} kexec_segment_t;
+
 typedef struct {
     uint64_t bufsz;
     uint64_t memsz;

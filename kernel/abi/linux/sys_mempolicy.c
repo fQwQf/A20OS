@@ -64,7 +64,7 @@ int64_t sys_get_mempolicy(int *policy, unsigned long *nmask,
                 return -EFAULT;
         }
         if (nmask) {
-            uint64_t bits = 1; /* node 0 */
+            uint64_t bits = mempolicy_get_nmask(t);
             if (copy_to_user(nmask, &bits, sizeof(bits)) < 0)
                 return -EFAULT;
         }

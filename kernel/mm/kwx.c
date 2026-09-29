@@ -12,6 +12,18 @@
  *
  * An architecture that has not finished the split keeps the empty default:
  * the direct map stays executable and module loading needs no cooperation.
+ *
+ * loongarch64 is NOT such an unfinished case and must not be ported by
+ * copying an existing implementation.  Its kernel space is translated by the
+ * LoongArch DMW (CSR_DMW0/1), a direct map window that bypasses the TLB and
+ * the multi-level page-table walk entirely, and it stays active in paging mode
+ * (kernel/arch/loongarch64/boot/entry.S, and the note above pt_map_kernel()).
+ * boot_pgdir is therefore empty by design, so arch_kernel_wx_finalize() has no
+ * mapping to re-tag: text/data permissions for the kernel image are not
+ * expressible through page tables on this architecture.  Giving loongarch64 a
+ * real split would mean dropping DMW for kernel space and routing it through
+ * an explicit page-table window, which is a board/architecture decision rather
+ * than a kernel code change.
  */
 
 #include "core/types.h"

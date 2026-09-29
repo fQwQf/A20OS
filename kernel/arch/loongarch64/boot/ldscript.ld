@@ -12,17 +12,20 @@ SECTIONS {
     . = 0x80000000;
 
     .text : {
+        __text_start = .;
         *(.text.entry)
         *(.text .text.*)
     } :text
 
     . = ALIGN(4096);
     .rodata : {
+        __rodata_start = .;
         *(.rodata .rodata.*)
     } :rodata
 
     . = ALIGN(4096);
     .data : {
+        __data_start = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
     } :data
