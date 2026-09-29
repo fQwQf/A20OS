@@ -108,7 +108,7 @@ make run-stm32f103-qemu
 ```
 
 *高级编译选项：*
-* `OPT="-O3"` / `OPT="-O0 -g -DDEBUG"`：控制内核优化与调试选项；`MODE` 不控制当前编译参数
+* `OPT="-O3"` / `OPT="-O0 -g -DDEBUG"`：控制内核优化与调试选项
 * `NR_CPUS=N`：配置 CPU 数；已验证 QEMU SMP 子集可直接使用，其他板必须为明确的 bring-up 实验设置 `ALLOW_UNVERIFIED_SMP=1`
 
 ### 3. 编译缓存 (可选)
