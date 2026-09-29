@@ -31,7 +31,77 @@ DEFAULT_USER_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-
 DEFAULT_NATIVE_TEST_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-test-$(n))
 DEFAULT_NATIVE_HANDLE_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-handle-test-$(n))
 DEFAULT_NATIVE_LIBC_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-libc-$(n))
+
+# ================================================================
+# CI kernel build matrix
+# ================================================================
+# .github/workflows/ci.yml resolves its per-arch kernel build matrix from
+# `make -s print-ci-kernel-arches` instead of hardcoding an arch list in YAML.
+# That is the point: a hand-maintained YAML list is a second source of truth
+# that can silently fall behind SUPPORTED_HOSTED_ARCHES, which is exactly how
+# arm32, riscv32 and ppc64le went unbuilt in CI while the local gate covered
+# them.  print-ci-kernel-arches also rejects any member that is not a hosted
+# arch, so a typo here fails loudly instead of spawning a job that cannot
+# build.
+#
+# This is deliberately a strict subset of SUPPORTED_HOSTED_ARCHES, and the one
+# remaining omission is recorded here rather than dropped silently:
+#
+#   loongarch32 LA32R has no distro cross-toolchain to install: Debian ships
+#               no loongarch32 gcc, and the project builds a from-source
+#               cloudspurs binutils/gcc la32 fork instead
+#               (docs/platforms/loongarch32.md).  tools/ci/Dockerfile cannot
+#               apt-get something that does not exist upstream, so CI cannot
+#               build it without vendoring a toolchain build.  It is also not
+#               a hosted arch, so it is out of SUPPORTED_HOSTED_ARCHES by
+#               construction and check-kernel-build-all's separate
+#               check-loongarch32-bringup stays local-only.
+#
+# arm32 used to be omitted here for exactly one reason, and that reason is now
+# fixed rather than waived.  Makefile:866-869 below deliberately withholds
+# ARCH_HAS_PGTABLE_OPS from arm32, which supplies its own short-descriptor
+# page-table backend (kernel/arch/arm32/mm/pgtbl.c), so kernel/include/mm/pt.h
+# never declares the transactional cursor there.  Two fault-path sites in
+# kernel/mm/fault.c nevertheless called mm_addrspace_lock()/mm_cursor_map()/
+# mm_cursor_query()/mm_cursor_unlock() outside any guard, which made
+# check-arm32-bringup fail to compile with four implicit-declaration errors --
+# and because nothing built arm32 in CI, nobody saw it.  Both sites now go
+# through arch hooks in fault.c instead of the cursor directly: the
+# fault-around window maps through fault_map_window(), which is one transaction
+# where a cursor exists and a per-page pt_map() loop where one does not, so
+# arm32 keeps the whole optimisation minus the single descent; and the
+# status-driven fault path is compiled out where the per-PTE status sidecar
+# does not exist, reported as absent (see
+# FAULT_FROM_STATUS_ABSENT_WITHOUT_PGTABLE_OPS in fault.c) rather than declared
+# against a backend that cannot implement it.  The guard in pt.h was NOT
+# widened: a declared cursor with no implementation behind it is a fabricated
+# capability, which fails silently instead of loudly.
+#
+# Every member below must have its cross toolchain installed by
+# tools/ci/Dockerfile; riscv32 uses the rv32 multilib of
+# gcc-riscv64-unknown-elf rather than a riscv32-specific package, which
+# Makefile:329-341 detects via RISCV_ELF_RV32_MULTIDIR.
+CI_KERNEL_ARCHES ?= riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le
 endif
+
+empty :=
+space := $(empty) $(empty)
+# subst's argument list is split on literal commas, so the one that separates
+# JSON array elements has to hide inside a variable reference.
+comma := ,
+
+# Machine-readable form of CI_KERNEL_ARCHES, consumed by ci.yml's resolver job
+# (strategy.matrix needs the list before any step of the matrix job can run,
+# hence a separate job rather than a step inside it).
+.PHONY: print-ci-kernel-arches
+print-ci-kernel-arches:
+	@for a in $(CI_KERNEL_ARCHES); do \
+		case ' $(SUPPORTED_HOSTED_ARCHES) ' in \
+			*" $$a "*) ;; \
+			*) echo "error: CI_KERNEL_ARCHES member '$$a' is not in SUPPORTED_HOSTED_ARCHES ($(SUPPORTED_HOSTED_ARCHES))" >&2; exit 1 ;; \
+		esac; \
+	done; \
+	printf 'arches=["%s"]\n' '$(subst $(space),"$(comma)",$(CI_KERNEL_ARCHES))'
 
 # ================================================================
 # Build configuration
@@ -39,7 +109,6 @@ endif
 
 ARCH ?= riscv64
 ABI ?= both
-MODE ?= release
 BRINGUP ?= 0
 RAMFS_USER ?= 0
 OPT ?= -O3
@@ -56,6 +125,24 @@ PROFILE ?= full
 # BUILD_VARIANT component because BUILD_FLAGS_STAMP in tools/targets-images.mk
 # keys on $(CFLAGS), which gains -DCONFIG_SWAP when this flips.
 CONFIG_SWAP ?= y
+
+# Synthetic driver lifecycle test and the HDA/NVMe in-probe smoke builds.
+# All three default to off and are enabled with the on-value their existing
+# callers already pass (tools/smoke_cases.py and docs/drivers/meta/
+# testing-and-submission.md use `=y`), so the BUILD_VARIANT components below
+# and the gate invocations keep working unchanged.
+CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
+CONFIG_HDA_SMOKE_TEST ?= 0
+CONFIG_NVME_SMOKE_TEST ?= 0
+
+# Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in
+# the loadable driver packages.  Those macros are consumed *only* by
+# kernel/drvmod/examples/{hda,nvme}.c, which tools/driver-modules.mk compiles
+# with its own DRVMOD_CFLAGS; the built-in HDA/NVMe drivers they were migrated
+# from are gone, so the kernel CFLAGS never carried them.  The per-driver
+# CONFIG_* names above now only pick the BUILD_VARIANT component that keeps the
+# smoke builds in their own artifact directory.
+DRVMOD_SMOKE ?= 0
 
 # STM32-specific configuration. These values are inert for other boards.
 STM32_OPENOCD_INTERFACE ?= interface/cmsis-dap.cfg
@@ -671,6 +758,7 @@ endif
 # pbuf pool canary.  Off by default because it costs a comparison per pool
 # operation; turn it on when a pbuf refcount or ownership bug is being hunted,
 # since without it the pool has no way to notice a block being handed out twice.
+CONFIG_LWIP_MEMP_OVERFLOW_CHECK ?= 0
 ifeq ($(filter 1,$(CONFIG_LWIP_MEMP_OVERFLOW_CHECK)),1)
 CFLAGS += -DCONFIG_LWIP_MEMP_OVERFLOW_CHECK=1
 endif
@@ -809,13 +897,11 @@ ifeq ($(CONFIG_DRIVER_LIFECYCLE_TEST),y)
 CFLAGS += -DCONFIG_DRIVER_LIFECYCLE_TEST
 endif
 
-ifeq ($(CONFIG_HDA_SMOKE_TEST),y)
-CFLAGS += -DCONFIG_HDA_SMOKE_TEST
-endif
-
-ifeq ($(CONFIG_NVME_SMOKE_TEST),y)
-CFLAGS += -DCONFIG_NVME_SMOKE_TEST
-endif
+# CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST deliberately add nothing to
+# the kernel CFLAGS: the built-in HDA/NVMe drivers were migrated into the
+# loadable packages, so these macros are reached only through DRVMOD_SMOKE in
+# tools/driver-modules.mk.  The names survive here solely for the BUILD_VARIANT
+# components that isolate the smoke artifacts.
 
 ifeq ($(CONFIG_SWAP),y)
 CFLAGS += -DCONFIG_SWAP

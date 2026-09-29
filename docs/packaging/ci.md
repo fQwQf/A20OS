@@ -7,7 +7,7 @@
 | 文件 | 触发 | 职责 |
 |------|------|------|
 | `buildenv.yml` | `tools/ci/**` 变更 / 手动 | 构建构建容器镜像，推 `ghcr.io/<owner小写>/a20os-buildenv` |
-| `ci.yml` | PR / push main / 手动 | 四架构矩阵构建 → 打包建库 → 组 base 镜像；独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
+| `ci.yml` | PR / push main / 手动 | 宿主侧源码契约门禁（快速）→ 逐架构内核 bring-up 构建矩阵 → 四架构打包建库 + 组 base 镜像 → 独立 smoke job 跑 riscv64 全套 QEMU 冒烟 → 上传 artifact |
 | `release.yml` | tag `v*` / 手动 | 全架构发布构建 + base/devel 镜像 → 发布密钥签名 → GitHub Release（附件 = 各架构镜像） |
 
 镜像名小写：ghcr 镜像名必须全小写，而 `github.repository_owner` 可能含大写
@@ -58,6 +58,28 @@ CI 用 `actions/cache` 缓存 `build/cache/ccache`（按架构分 key，
 ```
 buildenv-image（几秒）：把 owner 小写化，产出容器镜像名供其余 job 引用
 
+toolchain-gates（裸 runner，不进容器，~20 s + 装 linux-headers）：
+  全部是宿主侧、与架构无关、无需交叉工具链、无需 QEMU 的门禁，刻意不拉
+  submodule（vendored 的 kernel/external/lwip 是 tracked tree，其余只读
+  instances/、components/、tools/、Makefile、docs/ 和 kernel/ 的一方源文件）
+    → make check-manifests
+    → make check-a20-tests
+    → make check-honesty-policy      # ~25 条 fail-closed 反回归断言
+    → make check-smoke-cases
+    → make host-tests
+    → make check-drm-abi             # 需要宿主 linux-headers；跳过即判失败
+    → make check-task-lifetime-boundary / check-smp-platform-boundary
+      check-io-progress-model / check-external-dependency-boundary
+    → make check-abi-boundary / check-envelope-coverage
+
+ci-kernel-arches（几秒）：make -s print-ci-kernel-arches，把 CI 的内核构建
+  矩阵从 Makefile 的 CI_KERNEL_ARCHES 解析成 JSON 输出。矩阵列表不写在 YAML
+  里——手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES 之后悄悄落后。
+
+kernel-build-<arch> ×6 并行（容器，无 submodule）：
+    → make check-<arch>-bringup       # = make ARCH=<arch> BRINGUP=1 kernel-only
+    → upload-artifact（kernel.elf）    # 架构专属构建断裂没有日志很难定位
+
 build-<arch> ×4 并行：
   checkout（核心构建的第三方源码全部 vendored；actions/checkout 仍带 submodules: recursive 作为防御）
     → git safe.directory（容器内 root 跑 git 的常规处理）
@@ -80,6 +102,32 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
     → make smoke-devtools       # 上游 Alpine gcc 在 guest 内编译+运行
     → 失败也上传 .kernel-build/smoke/ 日志 artifact（smoke-riscv64-logs）
 ```
+
+## CI 的内核构建矩阵
+
+`SUPPORTED_HOSTED_ARCHES` 是七架构的单一真源，但 CI 只构建其中六个
+（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 riscv32 ppc64le`，
+由 `make print-ci-kernel-arches` 解析给 `strategy.matrix`）。两个架构被显式
+排除，理由写在 `Makefile` 的 `CI_KERNEL_ARCHES` 注释里，不是静默丢弃：
+
+| 架构 | 排除原因 |
+|------|----------|
+| `arm32` | 工具链在镜像里（`gcc-arm-linux-gnueabihf`），但 `kernel/mm/fault.c` 使用了 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口，而 `kernel/include/mm/pt.h` 只在 `ARCH_HAS_PGTABLE_OPS` 下声明它们，`Makefile` 又刻意不给 arm32 这个宏（它有自己的短描述符页表后端 `kernel/arch/arm32/mm/pgtbl.c`）。`check-arm32-bringup` 当前编译不过。修复属于内核代码，所以在修好之前把 arm32 放进 CI 只会让 CI 一直红着。 |
+| `loongarch32` | LA32R 没有发行版交叉工具链可装：Debian 不提供 loongarch32 gcc，项目是从源码构建 cloudspurs 的 binutils/gcc la32 分支（[platforms/loongarch32.md](../platforms/loongarch32.md)）。`tools/ci/Dockerfile` 无法 apt-get 一个上游不存在的包。它同时也不是 hosted 架构，因此不在 `SUPPORTED_HOSTED_ARCHES` 里，`check-kernel-build-all` 中单独的 `check-loongarch32-bringup` 仍只在本机跑。 |
+
+`kernel-build` 与 `build` 分开不是重复：`build` 要产出发布打包产物
+（apk 仓库 + world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前
+构建不过（`user/cmds/stress/poll_edge.c` 在 riscv32 上引用了 musl 未声明的
+`SYS_pselect6` / `SYS_ppoll`）；`kernel-build` 是纯内核 bring-up 门禁，与
+`check-kernel-build-all` 迭代的是同一个 `check-<arch>-bringup` 目标。
+
+`make check-doc-test-gates` 目前**不在** CI 里，原因有两条，都不是"忘了"：
+它不是快速的纯文档检查——17 个子门禁里有 11 个各自拉起 QEMU guest，按
+[testing-gates.md](../testing-gates.md) 的说明属于长时间聚合；而且它当前
+在树上是红的（`check-task-state-boundary`、`check-abi-smoke-gate`、
+`check-doc-drift` 三项失败）。`check-final-definition` 的 11 条断言已被
+`check-doc-test-gates` 完全覆盖，所以 CI 只跑后者，不重复跑同一批 QEMU
+smoke。
 
 `smoke-devtools` 是唯一需要外网的 CI 步骤（从 Alpine 镜像站拉包；本地有
 `build/cache/apk` 缓存）。它是 trap.S 内核栈守卫修复的回归门禁。
