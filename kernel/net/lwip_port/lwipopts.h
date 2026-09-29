@@ -42,6 +42,17 @@
 #define LWIP_STATS_DISPLAY              0
 #define LWIP_DEBUG                      0
 
+/* Pinned on, not left to opt.h's derivation (MEMP_STATS == (MEMP_MEM_MALLOC ==
+ * 0), which is 1 today).  That derivation is an accident: flipping
+ * MEMP_MEM_MALLOC silently turns the counters off, and since
+ * a20_lwip_format_memp() reads desc->stats unguarded, that becomes a compile
+ * error rather than an empty /proc/a20/netmem.  Cost, already paid by this
+ * config and unchanged by pinning: 10 bytes of .bss per declared pool plus a
+ * used++/max and a used-- on every memp_malloc/memp_free, on the pbuf hot
+ * path.  Accepted deliberately -- pool exhaustion is otherwise unobservable,
+ * and smoke-lwip-memp asserts the resulting `err` counter stays 0. */
+#define MEMP_STATS                      1
+
 #define MEM_ALIGNMENT                   8
 #define MEM_SIZE                        (512 * 1024)
 /* MEMP_OVERFLOW_CHECK makes memp_malloc/memp_free assert when a pool element is
