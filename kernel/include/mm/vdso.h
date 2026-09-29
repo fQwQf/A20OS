@@ -19,18 +19,34 @@
 #include "mm/vdso_layout.h"
 
 /*
- * getcpu is a documented fast-path stub, not a working fast path.
+ * getcpu refuses rather than guesses.
  *
- * __vdso_getcpu() in every kernel/vdso/<arch>/vdso.S stores 0 into *cpu and
- * *node and returns 0.  It is NOT reading a shared page, so it cannot report
- * the real CPU: the running CPU id lives in per-CPU kernel state that user
- * space has no mapping to.
+ * __vdso_getcpu() in every kernel/vdso/<arch>/vdso.S returns -ENOSYS without
+ * writing *cpu or *node.  -ENOSYS is the only refusal musl's wrapper knows:
+ * src/sched/sched_getcpu.c treats any other non-zero result as a hard error,
+ * but falls through to the getcpu syscall on -ENOSYS, and that syscall
+ * (kernel/abi/linux/sys_sched.c) returns the true cpu_current_id().  The
+ * caller therefore still gets the truth, via a trap it would have taken
+ * anyway.
  *
- * The getcpu syscall (kernel/abi/linux/sys_sched.c) does return the true
- * cpu_current_id().  A program that resolves getcpu through the vDSO
- * therefore observes CPU 0 on an SMP guest, and the same program observes the
- * real CPU if it falls back to the syscall.  Keep this in sync with
- * docs/abi coverage notes if the fast path ever becomes real.
+ * A real fast path is not reachable from the vvar page as it exists today.
+ * The kernel installs exactly one global vvar page (kernel/mm/vdso.c),
+ * shared by every CPU and every task, so it cannot carry a per-CPU value;
+ * A20OS keeps no per-CPU area pointer — per-CPU state is a plain array
+ * indexed by the id (kernel/proc/current.c, kernel/proc/sched.c); and no
+ * user-mode instruction on any of the five vDSO architectures yields a CPU
+ * id, because each kernel backend reads a kernel-only register or field.
+ * Each site documents the register its architecture actually uses.
+ *
+ * Storing 0 here, as this used to do, was the one unacceptable answer: it
+ * reported a plausible, wrong CPU 0 on an SMP guest, where reporting "does
+ * not exist" is honest (docs/security/hardening.md).
+ *
+ * Making it real needs a kernel-side export, not more assembly: a per-CPU
+ * vvar page plus a way for user space to find the current one (a per-task
+ * pointer in the thread area, the way Linux carries current_vdso), or on
+ * x86_64 the per-CPU IA32_TSC_AUX MSR the kernel must program.  Keep this in
+ * sync with docs/abi coverage notes if that ever happens.
  */
 
 /* Shared data page layout; offsets must match vdso.S. */

@@ -12,7 +12,7 @@ Every registered entry is implemented; no syscall is a fixed `-ENOSYS` placehold
 
 ## Current Summary
 
-`syscall_table.def` currently registers 361 dispatch entries, including two A20OS extensions and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler; the only `-ENOSYS` returns are the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86). Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
+`syscall_table.def` currently registers 366 dispatch entries, including seven A20OS extensions (`a20_channel_pair`/`a20_registry_client`/`a20_envelope_create`/`a20_envelope_enter`/`a20_envelope_revoke`/`a20_envelope_stats`/`a20_envelope_audit`) and five x86_64-only legacy entries on spare slots (`time`/`pause`/`utime`/`utimes`/`get_thread_area`). Registration is dispatch coverage, not a claim of semantic Linux completeness. Every registered entry has a real handler, and no entry is a fixed `-ENOSYS` placeholder. `-ENOSYS` is returned in two kinds of situation: the arch/version-correct Linux semantics for removed or architecture-specific syscalls (`nfsservctl` removed in Linux 4.19, `map_shadow_stack` is x86 CET, RISC-V-only syscalls on other arches, `arch_prctl` on non-x86), and a small number of entries whose capability A20OS genuinely lacks and therefore refuses to fake — `vhangup` (no tty layer, so there is no controlling terminal to revoke) and `process_mrelease` (a pidfd holds no task reference, so there is no detached mm to release). Each of the latter says so in its own row; they are honest refusals, not dispatch gaps. Registered non-placeholder calls may still support only a subset of Linux commands, flags, object types, or concurrency semantics.
 
 | Area | Level | Smoke gates (last known status) | Notes |
 | --- | --- | --- | --- |
@@ -326,13 +326,13 @@ strength of a boilerplate note.
 | `getgroups` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `setgroups` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `umask` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `syslog` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `syslog` | system | `partial` | `smoke-abi-linux` | real klog-ring backing: READ_ALL/READ_CLEAR/CLEAR/SIZE_BUFFER/CONSOLE_LEVEL/CONSOLE_OFF honoured; CLEAR_BOOT reports -EOPNOTSUPP (the ring keeps no boot boundary), OPEN/CLOSE and SIZE_UNCLEARED report -EINVAL; no per-uid ring ownership, so Linux's -EPERM for a non-owner read does not exist |
 | `getrandom` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `futex` | futex | `full` | `smoke-proc-stress`, `smoke-futex-stress` | WAIT/WAKE/BITSET/REQUEUE/CMP_REQUEUE/WAKE_OP plus bounded LOCK_PI/UNLOCK_PI/TRYLOCK_PI/WAIT_REQUEUE_PI/CMP_REQUEUE_PI; PI waiters donate EEVDF weight to the owner (single-level; chained pi_state walk out of scope); OWNER_DIED reacquire preserves the flag per Linux |
 | `futex_time64` | futex | `full` | `smoke-abi-linux` | 32-bit time64 alias of futex |
 | `membarrier` | system | `full` | `smoke-syscall-ext` | full command set (QUERY/GLOBAL/GLOBAL_EXPEDITED/REGISTER_*/PRIVATE_EXPEDITED/SYNC_CORE/RSEQ) with per-mm registration and a real cross-CPU barrier via reschedule IPI |
 | `getcpu` | scheduler | `partial` | `smoke-proc-stress` | reports the current logical CPU and a single NUMA node; cache argument is ignored |
-| `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `sync_file_range` | fd I/O | `partial` | `smoke-vfs-stress` | offset/nbytes range-checked against the inode size and unknown flag bits rejected with -EINVAL; WAIT_BEFORE alone reports -EOPNOTSUPP; the flush is whole-file because the VFS exposes no range-scoped writeback, which is a stronger guarantee than requested rather than a narrower one |
 | `getsid` | credentials | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
 | `rt_sigpending` | signals | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sethostname` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
@@ -343,7 +343,7 @@ strength of a boilerplate note.
 | `munlockall` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `mincore` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `personality` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
-| `vhangup` | system | `partial` | `smoke-abi-linux` | implemented subset; Linux edge semantics remain documented gaps |
+| `vhangup` | system | `partial` | `smoke-abi-linux` | reports -ENOSYS: NOT implemented. A20OS has no tty layer, so a task records no controlling terminal or session to revoke; returning success would be a fabricated capability |
 | `unshare` | namespaces | `partial` | `smoke-mntns` | CLONE_NEWNS creates a real mount namespace; other CLONE_NEW* and non-namespace unshare flags refuse with -EINVAL |
 | `setns` | namespaces | `partial` | `smoke-mntns` | joins mount namespaces via /proc/<pid>/ns/mnt fds (CAP_SYS_ADMIN/root/same-uid); non-mnt targets refuse with -EINVAL |
 | `pivot_root` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
@@ -373,7 +373,7 @@ strength of a boilerplate note.
 | `delete_module` | modules | `partial` | `smoke-syscall-ext` | unloads a drvmod module by name; pinned (driver-registered) modules return -EBUSY |
 | `finit_module` | modules | `partial` | `smoke-syscall-ext` | loads a drvmod module from an already-open fd; requires CAP_SYS_MODULE |
 | `userfaultfd` | memory | `partial` | `smoke-syscall-ext` | MISSING-mode anonymous ranges; UFFDIO_API/REGISTER/UNREGISTER/COPY/ZEROPAGE/WAKE; no fork/shmem/WP modes |
-| `perf_event_open` | perf | `partial` | `smoke-syscall-ext` | PERF_TYPE_SOFTWARE events (CPU/TASK clock, page faults, context switches); read(2)+ENABLE/DISABLE/RESET/PERIOD/ID; no PMU or mmap ring |
+| `perf_event_open` | perf | `partial` | `smoke-syscall-ext` | PERF_TYPE_SOFTWARE events (CPU/TASK clock, page faults, context switches); read(2)+ENABLE/DISABLE/RESET/PERIOD/ID; no PMU or hardware events, no mmap ring; PERF_FLAG_FD_OUTPUT and the SET_OUTPUT ioctl report -EOPNOTSUPP rather than accepting an output fd and discarding it |
 | `arch_prctl` | arch | `partial` | `smoke-proc-stress` | x86_64 ARCH_SET/GET_FS/GS and GET_CPUID; non-x86 fallback -EOPNOTSUPP (arch-correct) |
 | `restart_syscall` | system | `partial` | `smoke-syscall-ext` | replays the dispatcher-saved interrupted syscall (nr+args restart block); -ENOSYS with nothing pending; nanosleep-style argument rewriting not modeled |
 | `kcmp` | process | `partial` | `smoke-syscall-ext` | Linux-exact type enum incl. KCMP_EPOLL_TFD over open-file identity; both targets gated by CAP_SYS_PTRACE or ptrace access |
@@ -388,7 +388,7 @@ strength of a boilerplate note.
 | `process_vm_readv` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_vm_writev` | process | `partial` | `smoke-syscall-ext` | cross-process copy via kernel/mm/process_vm.c with capability checks |
 | `process_madvise` | process | `partial` | `smoke-syscall-ext` | applies madvise hints to a target process's ranges |
-| `process_mrelease` | process | `partial` | `smoke-syscall-ext` | pidfd-targeted memory release; mm reaps automatically on exit |
+| `process_mrelease` | process | `partial` | `smoke-syscall-ext` | reports -ENOSYS: NOT implemented. A pidfd here stores a bare pid and holds no task reference, so there is no detached mm to release — the mm is already reaped at exit. A wrong descriptor is still diagnosed (-EBADF) before the -ENOSYS |
 | `futex_waitv` | futex | `full` | `smoke-proc-stress` | waits on an array of futexes; per-entry bitset flags supported |
 | `futex_requeue` | futex | `full` | `smoke-proc-stress` | standalone FUTEX_REQUEUE-equivalent syscall |
 | `set_mempolicy` | memory | `partial` | `smoke-mm-stress` | single-NUMA-node policy storage; no physical NUMA migration |

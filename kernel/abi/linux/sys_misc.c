@@ -101,9 +101,88 @@ int64_t sys_umask(int newmask) {
     return old;
 }
 
+/* syslog(2) actions, uapi/linux/klog.h.  Only the values A20OS can honour
+ * against its klog ring are listed; SYSLOG_ACTION_OPEN/CLOSE (the historic
+ * console switch) and SYSLOG_ACTION_SIZE_UNCLEARED have no counterpart. */
+#define LINUX_SYSLOG_ACTION_SIZE_BUFFER   2
+#define LINUX_SYSLOG_ACTION_CLEAR         3
+#define LINUX_SYSLOG_ACTION_READ_ALL      4
+#define LINUX_SYSLOG_ACTION_READ_CLEAR    5
+#define LINUX_SYSLOG_ACTION_CLEAR_BOOT    6
+#define LINUX_SYSLOG_ACTION_CONSOLE_LEVEL 8
+#define LINUX_SYSLOG_ACTION_CONSOLE_OFF   9
+
+/*
+ * syslog(2) over the kernel klog ring (kernel/core/klog.c).  The ring is the
+ * same buffer /dev/kmsg serves, so SYSLOG_ACTION_READ_ALL returns the buffered
+ * messages from offset 0 each call and returns 0 once drained — Linux's
+ * contract for a non-blocking ring read.
+ *
+ * Boundary: A20OS keeps no per-uid ownership on the ring, so the
+ * read/is-this-my-kernel-buffer distinction Linux makes with -EPERM does not
+ * exist here; every process reads the same messages.  There is no separate
+ * console vs. ring severity split, so the CONSOLE_* actions only move the
+ * single global klog_level.
+ */
+static int64_t syslog_read_ring(char *buf, int len, int clear_after)
+{
+    /* klog_read() fills a kernel buffer, so the payload is staged and handed
+     * over in bounded chunks through copy_to_user(). */
+    char tmp[256];
+    size_t pos = 0;
+    int64_t total = 0;
+    while ((size_t)total < (size_t)len) {
+        size_t want = (size_t)len - (size_t)total;
+        if (want > sizeof(tmp)) want = sizeof(tmp);
+        size_t cur = pos;
+        int n = klog_read(tmp, want, &cur);
+        if (n <= 0)
+            break;
+        if (copy_to_user(buf + total, tmp, (size_t)n) < 0)
+            return -EFAULT;
+        pos = cur;
+        total += n;
+    }
+    if (clear_after)
+        klog_clear();
+    return total;
+}
+
 int64_t sys_syslog(int type, char *buf, int len) {
-    (void)type; (void)buf; (void)len;
-    return 0;
+    switch (type) {
+    case LINUX_SYSLOG_ACTION_SIZE_BUFFER:
+        /* Linux returns the buffer capacity, not the bytes currently held. */
+        return (int64_t)KLOG_BUF_SIZE;
+    case LINUX_SYSLOG_ACTION_CLEAR:
+        klog_clear();
+        return 0;
+    case LINUX_SYSLOG_ACTION_READ_ALL:
+    case LINUX_SYSLOG_ACTION_READ_CLEAR:
+        if (len < 0) return -EINVAL;
+        if (len == 0) return 0;
+        if (!buf) return -EFAULT;
+        return syslog_read_ring(buf, len,
+                                type == LINUX_SYSLOG_ACTION_READ_CLEAR);
+    case LINUX_SYSLOG_ACTION_CONSOLE_OFF:
+        /* klog_level is a lower bound: nothing is emitted at all once it
+         * sits above KLOG_ERR. */
+        klog_level = KLOG_ERR + 1;
+        return 0;
+    case LINUX_SYSLOG_ACTION_CONSOLE_LEVEL: {
+        /* A20OS's klog_level is inverted with respect to Linux's
+         * console_loglevel (higher klog_level = quieter), so the Linux level
+         * is mirrored.  Only the KLOG_* severities the ring actually uses are
+         * accepted; wider values are refused rather than silently clamped. */
+        if (len < 0 || len > KLOG_ERR) return -EINVAL;
+        klog_level = KLOG_ERR - len;
+        return 0;
+    }
+    case LINUX_SYSLOG_ACTION_CLEAR_BOOT:
+        /* The ring has no boot-time boundary to preserve. */
+        return -EOPNOTSUPP;
+    default:
+        return -EINVAL;
+    }
 }
 
 /* ============================================================

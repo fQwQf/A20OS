@@ -32,13 +32,28 @@
 /*
  * MAP_SHARED_FILE_CACHE_CONTRACT:
  * - Shared file mappings use the canonical page-cache page as the backing frame.
+ *   Both shared file-fault entry points do this: handle_file_fault() installs
+ *   page_cache_pfn() directly (the `shared` candidate branch), and
+ *   mm_shared_file_fault() below maps cache_pfn from page_cache_get().  The
+ *   dispatch that selects between the private and shared file paths is the
+ *   VM_FILE/VM_SHARED test in handle_demand_fault_access() plus the mirror in
+ *   handle_demand_fault_locked().
  * - page_cache_get() pins the page; the pin is released by page_cache_put() when
- *   the mapping is unmapped, moved, or torn down.
+ *   the mapping is unmapped, moved, or torn down.  handle_file_fault() transfers
+ *   the pin to the mapping by clearing its window[] slot.
  * - The page-cache page therefore owns writeback: user writes through the mapped
  *   PTE update page-cache data directly; fsync/msync mark the page dirty via
  *   PTE_D scanning and then write it back through vnode->ops->writepage.
+ *   The scan is mm_sync_shared_dirty_for_vnode() in mm/mmap.c, reached from
+ *   vfs_fsync_vfile() and sys_msync() (and from the read path, so a stale
+ *   !uptodate refill cannot overwrite newer mmap data); the writeback is
+ *   page_cache_writeback_vnode() falling through to vnode->ops->writepage.
  * - Read() on the same file uses the same page cache, so shared mmap writes are
  *   visible to read() without an explicit sync.
+ * - Boundary: this contract covers MAP_SHARED *file* mappings only.  It says
+ *   nothing about anonymous MAP_SHARED (no VM_FILE, no page-cache identity) or
+ *   about MAP_PRIVATE, whose COW conversion is specified at
+ *   handle_cow_fault_locked() below.
  */
 /*
  * Install one mapping through the transactional cursor.  Every fault-path PTE
@@ -67,6 +82,70 @@ static int fault_map(mm_struct_t *mm, vaddr_t page_va, pfn_t pfn, pte_t flags,
     return pt_map(mm->pgdir, page_va, pfn_to_phys(pfn), flags);
 }
 #endif
+
+/*
+ * Install a whole fault-around window [start, start + n*PAGE_SIZE), capped at
+ * `end`.  Same shape as fault_map() and the same reason for existing: the
+ * cursor API is not available to every architecture, so the two variants live
+ * side by side here instead of the caller reaching for mm_addrspace_lock()
+ * directly.  Only the number of page-table descents differs between them -- a
+ * cursor build takes one covering-node lock and one descent for the range, a
+ * non-cursor build walks once per page through that architecture's own pt_map().
+ * The mappings, the status byte, rss and the perf counters are the same either
+ * way, so an architecture without a transactional backend loses the
+ * single-descent optimisation and nothing else.
+ *
+ * Returns the number of pages installed, or a negative errno if the range
+ * could not be locked at all.  A short count is reported rather than assumed,
+ * because the caller releases the frames of the pages this did not install and
+ * must not release one it did.
+ *
+ * This is the arm32 case in particular: kernel/arch/arm32/mm/pgtbl.c supplies a
+ * short-descriptor backend with no cursor and no per-PTE status sidecar, and
+ * Makefile:866-869 withholds ARCH_HAS_PGTABLE_OPS from it, so
+ * kernel/include/mm/pt.h never declares mm_addrspace_lock() there.  Calling it
+ * from the fault path is what broke check-arm32-bringup; this hook is the
+ * supported way in instead.
+ */
+#if !defined(CONFIG_NOMMU)
+#if defined(ARCH_HAS_PGTABLE_OPS)
+static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                            const pfn_t *pfns, size_t n, pte_t flags)
+{
+    mm_cursor_t cur;
+    int r = mm_addrspace_lock(mm, start, end, &cur);
+    if (r != 0)
+        return r < 0 ? r : -EFAULT;
+    int mapped = 0;
+    for (size_t i = 0; i < n; i++) {
+        vaddr_t va = start + (vaddr_t)i * PAGE_SIZE;
+        if (va >= end)
+            break;
+        if (mm_cursor_map(&cur, va, pfn_to_phys(pfns[i]), flags,
+                          MM_ST_ANON_MAPPED) < 0)
+            break;
+        mapped++;
+    }
+    mm_cursor_unlock(&cur);
+    return mapped;
+}
+#else
+static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                            const pfn_t *pfns, size_t n, pte_t flags)
+{
+    int mapped = 0;
+    for (size_t i = 0; i < n; i++) {
+        vaddr_t va = start + (vaddr_t)i * PAGE_SIZE;
+        if (va >= end)
+            break;
+        if (pt_map(mm->pgdir, va, pfn_to_phys(pfns[i]), flags) < 0)
+            break;
+        mapped++;
+    }
+    return mapped;
+}
+#endif /* ARCH_HAS_PGTABLE_OPS */
+#endif /* !CONFIG_NOMMU */
 
 int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
                          vfile_t *vf)
@@ -172,6 +251,16 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
             leaf_size == PAGE_SIZE
                 ? mm_file_cache_mapping_get(vma, leaf_base, old_pfn)
                 : NULL;
+        /* The VM_SHARED test is NOT a denial of MAP_SHARED page-cache
+         * coherence.  It only gates the private-leaf COW copy below: a
+         * read-only MAP_PRIVATE fault-around leaf maps the canonical cache
+         * frame (see direct_private in handle_file_fault()), so this store
+         * must break that aliasing by cloning.  A MAP_SHARED leaf is writable
+         * in place by contract and must not be cloned.  Shared leaves skip the
+         * cache-page branch entirely and fall through to the refcount path
+         * below, which leaves an rc>1 frame shared and makes rc==1 writable
+         * without copying -- both correct for MAP_SHARED, because the frame
+         * belongs to the page cache and its writes are the file's data. */
         if (cache_page && !(vma->vm_flags & VM_SHARED)) {
             new_pfn = pfa_alloc_page();
             if (new_pfn == PFN_NONE) {
@@ -258,9 +347,16 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  * DEMAND_FAULT_TLB_CONTRACT:
  * - Stack/brk/anonymous/file/VMO/huge-page demand faults install a PTE, update
  *   rss/accounting, then flush the faulting page before returning.
- * - File-backed private faults copy from page cache; shared faults currently
- *   read through the file into a private frame and therefore do not yet provide
- *   full MAP_SHARED dirty/writeback coherence.
+ * - MAP_SHARED file faults do NOT take a private copy: they install the
+ *   canonical page-cache frame itself and inherit MAP_SHARED_FILE_CACHE_CONTRACT
+ *   above (dirty-bit harvest in mm_sync_shared_dirty_for_vnode() plus
+ *   page_cache_writeback_vnode()).  Only MAP_PRIVATE file faults copy out of the
+ *   page cache, and a read-only MAP_PRIVATE fault-around leaf may additionally
+ *   map the cache frame under the COW conditions described at handle_cow_fault().
+ * - Anonymous MAP_SHARED is a different thing and is NOT covered by that
+ *   contract: with VM_FILE clear it takes the plain MM_ST_ANON_MAPPED zero-page
+ *   path below, so its pages carry no page-cache identity and no writeback
+ *   route.  Inter-process shared memory is served by the VM_VMO path instead.
  */
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
@@ -597,19 +693,15 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
             /* One transaction for the whole window: a single covering-node
              * lock and a single descent, instead of one page-table walk per
-             * page.  This is the property the single-level model exists for. */
-            mm_cursor_t wcur;
-            int lr = mm_addrspace_lock(t->mm, page_va, end, &wcur);
-            if (lr == 0) {
-                for (size_t i = 0; i < prepared; i++) {
-                    uint64_t va = page_va + i * PAGE_SIZE;
-                    if (mm_cursor_map(&wcur, va, pfn_to_phys(pfns[i]),
-                                      map_flags, MM_ST_ANON_MAPPED) < 0)
-                        break;
-                    mapped++;
-                }
-                mm_cursor_unlock(&wcur);
-            }
+             * page.  This is the property the single-level model exists for.
+             * fault_map_window() keeps that where a cursor exists and falls
+             * back to a per-page pt_map() where one does not; the window
+             * itself, and everything the caller does with the count, is
+             * identical. */
+            int wmap = fault_map_window(t->mm, page_va, end, pfns, prepared,
+                                        map_flags);
+            if (wmap > 0)
+                mapped = (size_t)wmap;
             for (size_t i = mapped; i < prepared; i++) {
                 cg_mem_uncharge(t->cgroup, 1);
                 frame_put(pfns[i]);
@@ -959,7 +1051,43 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
      * eagerly), already mapped, an intermediate node, a file/VMO mapping, a
      * huge leaf -- reports a different status and falls through to the
      * VMA-based path below unchanged, so no other behaviour is affected.
+     *
+     * FAULT_FROM_STATUS_ABSENT_WITHOUT_PGTABLE_OPS: this path needs the per-PTE
+     * status sidecar, and that sidecar does not exist on every architecture, so
+     * the whole block is compiled out when it is absent.  The capability is
+     * reported as ABSENT there, not faked and not silently skipped:
+     *   - arm32 is the case today.  Makefile:866-869 withholds
+     *     ARCH_HAS_PGTABLE_OPS from it because it supplies its own
+     *     short-descriptor backend (kernel/arch/arm32/mm/pgtbl.c), which is a
+     *     plain pt_map()/pt_walk() walker: no mm_cursor_query(), and no
+     *     metadata block to read a Status out of.  The status byte lives in the
+     *     software metadata that mm_pt_node_init() allocates and
+     *     mm_pt_note_present() maintains -- both in pt.c's guarded region -- so
+     *     a short-descriptor PTE carries no class at all.  Provisioning
+     *     (kernel/mm/mmap.c:193) is guarded the same way, so no arm32 leaf can
+     *     ever be marked MM_ST_ANON_VIRT and the condition below is
+     *     unsatisfiable by construction, not by accident.
+     *   - What arm32 gets instead is the VMA-based path further down, which is
+     *     the same path every other architecture takes for a non-provisioned
+     *     range and which is correct on its own.  No correctness is lost.
+     *   - What a reader can observe: /proc/a20/perf reports
+     *     mm_fault_from_status and mm_anon_provisioned as 0 on such a build,
+     *     which is the truth (the path does not exist, so it never runs) and
+     *     the same value the default configuration already reports for
+     *     eager provisioning being off (see the note on MM_ANON_PROV_DEFAULT
+     *     in kernel/include/mm/pt.h).  Writing /proc/a20/anonprov on such a
+     *     build returns -ENOSYS rather than accepting a cap nothing reads
+     *     (mm_pt_set_anon_prov_max()), so the knob cannot look live when it is
+     *     not.
+     *   - What this is NOT allowed to become: widening the ARCH_HAS_PGTABLE_OPS
+     *     guard in kernel/include/mm/pt.h so the declarations appear on an
+     *     architecture with no transactional backend behind them.  A declared
+     *     cursor that nothing implements is a fabricated capability, which is
+     *     worse than a build break because it fails silently.  arm32 gets a
+     *     real cursor path -- the per-PTE metadata threaded through its
+     *     walker -- when someone implements it; until then it is absent.
      */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
     {
         mm_cursor_t qcur;
         int qr = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur);
@@ -1030,6 +1158,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             mm_cursor_unlock(&qcur);
         }
     }
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
     vm_area_t *vma = mm_find_vma(mm, page_va);
     /*
