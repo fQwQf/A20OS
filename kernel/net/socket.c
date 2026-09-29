@@ -485,7 +485,13 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
 
 /* This stack has no out-of-band data path, so MSG_OOB cannot be honoured.
  * Rejecting it is the honest answer; ignoring the flag would quietly hand
- * back ordinary in-band bytes as if they were the urgent one. */
+ * back ordinary in-band bytes as if they were the urgent one.
+ *
+ * MSG_NOSIGNAL needs no case: the socket data plane has no SIGPIPE source at
+ * all (the only generator is kernel/fs/pipe.c, for real pipes), so a write to a
+ * dead peer already reports EPIPE without raising a signal, flag or no flag.
+ * MSG_PEEK, MSG_TRUNC and MSG_WAITALL are honoured in
+ * net_recvfrom_socket_meta(). */
 static int net_msg_flags_check(int flags)
 {
     return (flags & MSG_OOB) ? -EOPNOTSUPP : 0;
@@ -596,6 +602,30 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         return net_alg_socket_recv(s, buf, len);
     int dontwait = (flags & MSG_DONTWAIT) != 0;
     uint64_t start = timer_get_ticks();
+    if ((flags & MSG_WAITALL) && s->type == SOCK_STREAM && len > 0) {
+        /* MSG_WAITALL: keep reading until len bytes have arrived, or until the
+         * read is cut short by EOF, the receive timeout, or a signal.  A single
+         * pass below already coalesces everything queued up to len, so this loop
+         * only iterates when the queue runs dry mid-buffer, which is the one
+         * case the flag adds.  WAITALL is stripped from the inner call so the
+         * recursion stays one level deep, and the caller's SO_RCVTIMEO is
+         * honoured against this outer start rather than restarting per read. */
+        int inner = flags & ~MSG_WAITALL;
+        size_t got = 0;
+        while (got < len) {
+            if (net_socket_wait_expired(s, start, 0))
+                return (int)got;
+            int n = net_recvfrom_socket_meta(s, (char *)buf + got, len - got,
+                                             inner, got ? NULL : addr,
+                                             got ? NULL : addrlen, meta);
+            if (n < 0)
+                return got ? (int)got : n;
+            if (n == 0)
+                return (int)got;
+            got += (size_t)n;
+        }
+        return (int)got;
+    }
     if (s->ch_ep) {
         /* Channel-backed path: plain data lives on the internal channel,
          * SCM_RIGHTS messages on the legacy queue.  Drain legacy first so
@@ -747,7 +777,10 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                 s->type != SOCK_STREAM && datagram_len > (size_t)r)
                 r = (int)datagram_len;
         }
-        if (r > 0 && s->type == SOCK_STREAM) {
+        /* Stream coalescing: drain further queued messages into the same
+         * buffer.  A peek must not consume anything, so it stops at the head
+         * even when more is queued -- a peek is a read without a dequeue. */
+        if (r > 0 && s->type == SOCK_STREAM && !(flags & MSG_PEEK)) {
             size_t total = (size_t)r;
             while (total < len && s->rx_head) {
                 int nr = net_dequeue_msg_locked_meta(s, (char *)buf + total, len - total, NULL, NULL, meta);
@@ -760,6 +793,12 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
+            /* Accounting is deliberately outside g_net_lock: net_tcp_recved()
+             * takes g_lwip_lock, and the two must never nest.  A peeked stream
+             * message is charged too -- the bytes are in the receive queue
+             * either way, and never charging them would stall the window once
+             * the queue filled.  The cost is that repeated peeks of the same
+             * head keep re-charging it. */
             int recved = (r > 0 && s->type == SOCK_STREAM) ? r : 0;
             if (r > 0 && s->rx_count < rx_count_before)
                 (void)wait_queue_collect_one(
