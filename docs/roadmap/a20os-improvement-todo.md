@@ -1,17 +1,17 @@
 # A20OS 改进 TODO
 
-本文档只记录**尚未完成**的工程瓶颈与剩余工作（最后核实：2026-09）。条目在落地
-时即从本文删除，不再保留已完成的 checkbox；实现细节与验证入口留在源码注释、
-提交历史和事实文档（[../testing-gates.md](../testing-gates.md)、
+只记录**尚未完成**的工程瓶颈与剩余工作（最后核实：2026-09）。条目在落地时即从本文
+删除，不保留已完成的 checkbox；实现细节与验证入口留在源码注释、提交历史和事实文档
+（[../testing-gates.md](../testing-gates.md)、
 [../security/hardening.md](../security/hardening.md)、
-[../../kernel/abi/linux/syscall_coverage.md](../../kernel/abi/linux/syscall_coverage.md)）中，
+[../../kernel/abi/linux/syscall_coverage.md](../../kernel/abi/linux/syscall_coverage.md)），
 下一个量级的方向评估见 [next-horizon.md](next-horizon.md)。
 
-面向服务器部署的**当前能力边界与阻塞项排序**见
+面向服务器部署的当前能力边界与阻塞项排序见
 [../server-readiness.md](../server-readiness.md)。
 
-checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；文中带日期的验证记录均为
-历史记录，引用规则见文末"验证环境说明"。
+checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；带日期的验证记录如何引用
+见文末"验证环境说明"。
 
 ## P0：混合内核改造（Native ABI 本体化）
 
@@ -28,10 +28,10 @@ IDL 化）已落地，已从本文删除。
     TR_RESPONSE PPN 未左移 10 位，探测同时接受规范与 legacy 编码（上游 master 已修，
     升级后可删兼容分支）。
   - 仍缺：
-    - 同源双态契约测试——完整 DRVMOD 驱动（goldfish RTC、ubd 等）仍是独立实现，
+    - 同源双态契约测试。完整 DRVMOD 驱动（goldfish RTC、ubd 等）仍是独立实现，
       不是同一份源码的两种部署；
-    - fault 消费的中断驱动化——当前由 `a20_device_get_info` 拉取 FQ，未接 MSI/WSI；
-    - 多设备并发 domain——当前单实例 `g_user_domain`；
+    - fault 消费的中断驱动化。当前由 `a20_device_get_info` 拉取 FQ，未接 MSI/WSI；
+    - 多设备并发 domain。当前单实例 `g_user_domain`；
     - 非 PCI 设备（virtio-mmio）的 domain 绑定。
   - 完成条件：同一完整驱动源码双态部署通过同一契约测试；用户驱动 DMA 动态绑定
     per-device IOMMU domain，未授权访问产生并消费 fault。
@@ -49,15 +49,15 @@ IDL 化）已落地，已从本文删除。
   - 现状：tokenized Park/Wake、task 引用与异步所有权收口、timeout heap 所有权、
     SMP runqueue 迁移与持久抢占、本地 pick 锁拆分、EEVDF 替换 MLFQ 均已落地，已从
     本文删除。riscv64 `-smp 8 -accel tcg,thread=multi`（`mm_stress` 后）实测
-    `proc_lock` 仍是压倒性热点：**33335 次竞争 / 16191822 自旋**；page cache、
+    `proc_lock` 仍是压倒性热点：33335 次竞争 / 16191822 自旋；page cache、
     dcache、block cache、vfile_table 的分桶锁已把各自竞争归零。切换路径的两次获取
     已合并，`proc_wait4` 的 child 全局扫描已改为 per-task children/线程组链表。
   - 剩余工作：callsite 归因显示 `proc_lock` 竞争高度集中在**互斥量 park/wake 协议**
     （`proc_park_prepare/commit/finish` 与 `proc_try_wake` 各自单独持 `proc_lock`）
     与**每次上下文切换的发布路径**（`sched()` 内联进 `idle_loop` 的
     `spin_lock(&proc_lock)`）。消除它需要把 tokenized Park/Wake 状态机从单一全局锁
-    改为按等待对象（wait queue / mutex / futex）分锁——这是
-    [../eevdf-scheduler.md](../eevdf-scheduler.md) 与既往性能审计明确警告的
+    改为按等待对象（wait queue / mutex / futex）分锁。
+    [../eevdf-scheduler.md](../eevdf-scheduler.md) 与既往性能审计明确警告过这一点：
     "无完整并行编译负载验证前不做的高风险核心协议重写"，需要先有正式基准复测。
   - 测量与 callsite 归因工具：见 [perf-overhaul.md](perf-overhaul.md) §3。
 
@@ -74,7 +74,7 @@ IDL 化）已落地，已从本文删除。
     file advice/copy helpers、SysV/POSIX shm and memfd、fanotify、Linux AIO、
     driver modules、cross-process memory、mempolicy/NUMA、new mount API、io_uring。
     namespaces 区域已具备真实 mount namespace 对象模型（`CLONE_NEWNS`、`setns`、
-    `/proc/<pid>/ns/mnt`），其余 ns 类型诚实返回 `-EINVAL`，但仍无 userns 与完整
+    `/proc/<pid>/ns/mnt`），其余 ns 类型如实返回 `-EINVAL`，但仍无 userns 与完整
     capabilities，故保持 `partial`。
   - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
 
@@ -86,28 +86,28 @@ IDL 化）已落地，已从本文删除。
     `-EBUSY`，`/proc/swaps` 渲染正确。`make smoke-swap` 覆盖 loop 绑定 → mkswap →
     swapon → `sysinfo` totalswap 与 `/proc/swaps` 断言 → 重复 swapon EBUSY → 触访
     匿名内存 → swapoff 归零。
-  - 仍缺：门禁不驱动真实换出——OOM reclaim 每次最多换出 `MAX_SWAP_RECLAIM`=8 页且
+  - 仍缺：门禁不驱动真实换出。OOM reclaim 每次最多换出 `MAX_SWAP_RECLAIM`=8 页且
     受 2s 冷却限制，1 GiB QEMU 冒烟无法现实触发；`swap_read_page`/缺页读回路径只有
     编译覆盖。
   - 完成条件：低内存实例（或可注入的换出阈值）下门禁真实触发一次换出-读回，并校验
     换出前后的数据一致性。
-- [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留，非 2026-09 改进周期引入**）
+- [ ] 修复 `make smoke-native-shmring` 挂起（**先前遗留**，非 2026-09 改进周期引入）
   - [x] 门禁不再挂起：消费者自报失败、父进程等待有界（20s）、退出码单一真源
         （`A20_SHMRING_EXIT_*`）。60s 零输出挂起 → 29s 带明确原因的失败。
-  - [x] 根因已定位（2026-09-28）：**跨进程 futex 唤醒丢失，不是 spawn/调度/park 问题。**
+  - [x] 根因已定位（2026-09-28）：**跨进程 futex 唤醒丢失，不是 spawn/调度/park 问题**
   - 机制：`futex_bucket_index()` 只用**唤醒方的虚拟地址**选桶
     （kernel/ipc/futex.c:338 + :82-87），而 `task_spawn` 给子进程的是**全新且独立
     ASLR 随机化**的 mm（kernel/proc/proc.c:596-601，mmap_base = 0x60000000 +
-    rand(20bit)·0x1000，kernel/mm/aslr.c:45-48）。于是父子把**同一物理页**映射到
+    rand(20bit)·0x1000，kernel/mm/aslr.c:45-48）。于是父子把同一物理页映射到
     不同虚拟地址 → 不同桶 → 子进程的 `futex_wake(&r->ready)` 扫的是空桶，唤醒真的丢了，
-    父进程睡满整个超时。物理键 pkey 只作为**桶内匹配谓词**，从不参与选桶。
+    父进程睡满整个超时。物理键 pkey 只作为桶内匹配谓词，从不参与选桶。
   - 这恰好违反 kernel/ipc/futex.c:74-79 自己写下的设计假设："fork 继承的 MAP_SHARED
     映射在父子中保持同一虚拟地址"。该假设对 `fork()` 成立，对 `task_spawn` 不成立。
   - 证据：消费者**确实运行了**（在 main 入口加一行 announce 即可见 `SHMRINGD: entered
     main`），3/3 复现，耗时与 20s 超时精确吻合。
   - **修的时候注意这个坑**：不能直接把桶键换成 pkey。Linux ABI 侧 wake 会传
     `private`（kernel/abi/linux/sys_futex.c:30-32，private 时 pkey 置 0），而
-    **wait 侧根本没有把 private 传下来**（同文件 :60 的 `futex_wait_ticks(...)` 没有该
+    wait 侧根本没有把 private 传下来（同文件 :60 的 `futex_wait_ticks(...)` 没有该
     参数，:25 算出的 private 只用于 WAKE/REQUEUE）。所以 wait 侧永远持有物理 pkey、
     wake 侧 private 时却是 0：若无条件按 pkey 选桶，**musl/libc 大量使用的进程内私有
     futex 会全部丢失唤醒**。正确改法需要把 private 一路打通到 `futex_wait_ticks`
@@ -125,7 +125,7 @@ IDL 化）已落地，已从本文删除。
 - [ ] 为 driver/device/bus registry 的容量耗尽补运行测试
   - 现状：`kernel/drivers/core/driver_core.c` 的 registry 已从初始容量起在锁保护下
     `krealloc` 扩容，扩容失败记录 capacity-exhausted 错误并返回失败，不再静默丢失
-    注册项——源码已满足动态扩容与结构化失败要求，但全仓库没有专用的 exhaustion
+    注册项。源码已满足动态扩容与结构化失败要求，但全仓库没有专用的 exhaustion
     运行测试。
   - 完成条件：注入分配失败后断言注册项未静默丢失，且错误可从 `/proc` 或日志结构化
     读出。
@@ -154,9 +154,9 @@ IDL 化）已落地，已从本文删除。
 
 ## 验证环境说明
 
-- 文档不再固化某一台 host 的工具缺失状态。工具链和 QEMU 可用性由对应 build/smoke
-  目标在运行时报告。
-- 本文按 2026-09 源码核对。文中的验证记录均为历史记录：PASS 只表示它在标注的日期
+- 工具链和 QEMU 可用性由对应 build/smoke 目标在运行时报告，本文不固化某一台 host
+  的工具缺失状态。
+- 本文按 2026-09 源码核对。文中的验证记录均为历史记录，PASS 只表示它在标注的日期
   与配置下通过，引用为当前结论前必须在当前提交上重新运行。
 - Proc/Sched 的当前累计静态门禁是 `make check-doc-test-gates`；双架构 debug/release、
   1 核/8 核运行矩阵是 `make check-proc-step8-local`。

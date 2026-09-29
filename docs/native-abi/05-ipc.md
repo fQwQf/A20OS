@@ -1,15 +1,12 @@
 # A20OS Native ABI：IPC 与事件子系统设计
 
-> 本文档定义 Native ABI 的进程间通信机制，包括 Channel（消息通道）和 Event Queue（事件队列）的设计、数据结构、协议和实现架构，已按 2026-08 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
+> Channel（消息通道）和 Event Queue（事件队列）的数据结构、协议与实现架构按 2026-08 的 `kernel/ipc/a20_channel.c`、`a20_event.c` 与 Native syscall wrapper 核对。
 
 ---
 
 ## 1. 设计概览
 
-Native ABI 提供两个互补的 IPC 原语：
-
-- **Channel**：同步/异步消息传递，支持 handle 传递。用于 RPC、请求-响应、数据流。
-- **Event Queue**：目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合。当前已接入 channel、timer、task 退出和用户态驱动 IRQ；file/socket/pipe readiness 与 signal 事件生产者尚未接入，因此现在不能称为 epoll/signalfd 的完整替代。
+Native ABI 提供两个互补的 IPC 原语。Channel 是同步/异步消息传递，支持 handle 传递，用于 RPC、请求-响应和数据流。Event Queue 的目标是成为统一事件等待机制并替代 epoll/signalfd/timerfd 的组合；当前已接入 channel、timer、task 退出和用户态驱动 IRQ，但 file/socket/pipe readiness 与 signal 事件生产者尚未接入，因此现在不能称为 epoll/signalfd 的完整替代。
 
 两者都基于 handle：创建后返回 handle，操作通过 handle 进行，权限通过 rights 控制。
 
@@ -19,7 +16,7 @@ Native ABI 提供两个互补的 IPC 原语：
 
 ### 2.1 模型
 
-Channel 是**双向端对端**的消息管道。创建时产生两个 endpoint handle，分别给通信双方。
+Channel 是一条双向端对端的消息管道。创建时产生两个 endpoint handle，分别给通信双方。
 
 ```text
 进程 A                          进程 B
@@ -97,18 +94,11 @@ typedef struct a20_channel_type {
 
 `a20_channel_type_t` 是由版本化 `a20_channel_create_args_t` 指针引用的固定子结构，目前以 `version` 开头而不单独携带 `size`；创建入口只接受 version 0/1，并将整份已知布局复制到内核。后续若需要追加字段，应先新增 version 并在 create 入口显式按版本复制，不能直接扩大 version 1 的读取长度。
 
-**类型强制执行**：
-- `send_handle_types`：`channel_send` 时，每个被传输的 handle 的对象类型必须在此 bitmask 中
-- `recv_handle_types`：`channel_recv` 时，从消息中取出的 handle 的对象类型必须在此 bitmask 中
-- `max_data_size` / `max_handles`：创建时将 0 或超出全局上限的值归一化为 64KB / 8，send 时强制检查
-- 类型检查失败返回 `A20_ERR_TYPE_MISMATCH`
+类型约束在 send/recv 两侧分别强制执行。`send_handle_types` 要求 `channel_send` 时每个被传输的 handle 的对象类型都在此 bitmask 中；`recv_handle_types` 要求 `channel_recv` 时从消息中取出的 handle 的对象类型在此 bitmask 中。`max_data_size` / `max_handles` 在创建时把 0 或超出全局上限的值归一化为 64KB / 8，send 时强制检查。类型检查失败返回 `A20_ERR_TYPE_MISMATCH`。
 
-> **内核执行**：`a20_channel_send()` 调用 `ch_check_send_types()` 检查 `send_handle_types` bitmask；`a20_channel_recv()` 在取出消息后调用 `ch_check_recv_types()` 检查 `recv_handle_types` bitmask。两者均在 `kernel/ipc/a20_channel.c` 中实现。
+> `a20_channel_send()` 调用 `ch_check_send_types()` 检查 `send_handle_types` bitmask；`a20_channel_recv()` 在取出消息后调用 `ch_check_recv_types()` 检查 `recv_handle_types` bitmask。两者均在 `kernel/ipc/a20_channel.c` 中实现。
 
-**设计意图**：类型化通道使得内核能够强制执行 IPC 通信的结构约束，而不是仅依赖用户态协议（如 FIDL）。这提供了：
-- 被攻破的进程无法向 channel 发送错误类型的 handle
-- 系统管理员可以静态分析哪些进程对之间可以传输哪些类型的资源
-- 形式化证明可以建立在通道类型之上（定理 2.1-2.3，见 `docs/research/04-typed-channels.md`）
+这套约束的设计目的是让内核强制执行 IPC 通信的结构约定，而不是只依赖用户态协议（如 FIDL）。被攻破的进程因此无法向 channel 发送错误类型的 handle，系统管理员可以静态分析哪些进程对之间可以传输哪些类型的资源，形式化证明也可以建立在通道类型之上（定理 2.1-2.3，见 `docs/research/04-typed-channels.md`）。
 
 ### 2.4 Channel 创建
 
@@ -125,14 +115,7 @@ typedef struct a20_channel_create_args {
 int64_t channel_create(a20_channel_create_args_t *args);
 ```
 
-创建过程：
-1. 分配两个 `a20_channel_ep_t`，互相指向对方（peer）
-2. 如果 `type != NULL`，将类型签名分别复制到两个 endpoint 的内嵌存储（避免共享生命周期问题）
-3. 在调用者的 handle table 中分配两个 handle
-4. 每个 handle 获得 READ | WRITE | STAT | DUP | TRANSFER 权限
-5. 返回两个 endpoint handle
-
-**向后兼容**：`type == NULL` 时行为与无类型约束的 channel 完全一致。
+创建过程先分配两个 `a20_channel_ep_t` 并让它们互指（peer）。若 `type != NULL`，类型签名分别复制到两个 endpoint 的内嵌存储，以避免共享生命周期问题。接着在调用者的 handle table 中分配两个 handle，各获得 READ | WRITE | STAT | DUP | TRANSFER 权限，然后返回两个 endpoint handle。`type == NULL` 时行为与无类型约束的 channel 完全一致，保持向后兼容。
 
 > **实现状态：已接入。** `sys_a20_channel_create` 已读取 `args.type`，不再硬编码 `NULL`；SDK 提供 `a20_channel_create_typed()`。
 
@@ -142,7 +125,7 @@ int64_t channel_create(a20_channel_create_args_t *args);
 int64_t channel_send(a20_msg_send_args_t *args);
 ```
 
-**两阶段锁分离设计**：发送方和接收方的 handle table 不同时加锁。
+两阶段锁分离：发送方和接收方的 handle table 不同时加锁。
 
 ```text
 阶段 1：预验证（锁发送方 HT）
@@ -160,10 +143,7 @@ int64_t channel_send(a20_msg_send_args_t *args);
 2.5 解锁 peer
 ```
 
-**错误处理**：
-- 阶段 1 失败：所有 refcount_inc 回滚（refcount_dec），返回错误
-- 阶段 2 队列满：返回 `WOULD_BLOCK`（非阻塞）或阻塞等待空间（阻塞模式）
-- 对端已关闭：返回 `CANCELED`，释放消息和 handle 引用
+错误处理分三种情况。阶段 1 失败时所有 refcount_inc 回滚（refcount_dec）并返回错误；阶段 2 队列满时非阻塞返回 `WOULD_BLOCK`，阻塞模式则等待空间；对端已关闭返回 `CANCELED`，同时释放消息和 handle 引用。
 
 默认模式为阻塞；`a20_msg_send_args_t.flags` 设置 `A20_MSG_NONBLOCK` 时，队列满立即返回 `WOULD_BLOCK`。阻塞实现使用 tokenized Park/Wake，并以 wait-queue key 区分等待消息的接收者与等待空间的发送者。
 
@@ -194,7 +174,7 @@ int64_t channel_recv(a20_msg_recv_args_t *args);
 NO_SPACE：接收方 handle table 满 → 预留失败 → recv 返回 NO_SPACE，消息保持排队
 ```
 
-**实现决策（已落地）**：不使用部分投递。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。不存在 PARTIAL/ROLLED_BACK 中间态。
+部分投递被明确排除。`reserve-many → dequeue → commit` 保证接收方 HT 空间不足时整个 recv 返回 `NO_SPACE`，消息留在队列中；commit 对已预留槽位不再失败。不存在 PARTIAL/ROLLED_BACK 中间态。
 
 ### 2.7 Handle Transfer 语义
 
@@ -206,7 +186,7 @@ $$\rho_{recv} = \rho_{send} \cap \rho_{transfer}$$
 - $\rho_{transfer}$：发送方在 send 调用中指定的权限（未指定则为 $\rho_{send}$）
 - $\rho_{recv}$：接收方获得的权限
 
-**共享语义**（不是移动语义）：发送方在 send 后仍持有原 handle。对象的引用计数增加。这避免了"send 后 handle 消失"的惊讶行为。
+这是共享语义，不是移动语义：发送方在 send 后仍持有原 handle，对象的引用计数增加，从而避免了“send 后 handle 消失”的惊讶行为。
 
 消息同时携带源 handle 的时态约束和安全标签。接收方安装时原样继承，不能将过期时间、操作预算或标签重置为更宽松值（06-security.md §6.4）。
 
@@ -361,7 +341,7 @@ void a20_event_notify(void *target_object, uint16_t target_type,
 }
 ```
 
-**优化**：全局 hash table `object_watches: void* → [a20_watch_entry*]`，使得事件产生时 O(1) 找到所有相关的 event queue。
+全局 hash table `object_watches: void* → [a20_watch_entry*]` 让事件产生时能以 O(1) 找到所有相关的 event queue。
 
 ### 3.6 FIFO 顺序保证
 
@@ -411,7 +391,7 @@ void a20_eventq_destroy(a20_eventq_t *eq) {
 }
 ```
 
-**延迟清理**：`eventq_destroy` 在 HT lock 释放后执行。安全因为 refcount = 0 后无其他线程持有 eq 的 handle。
+`eventq_destroy` 在 HT lock 释放后执行，这一点是安全的：refcount = 0 后没有其他线程持有 eq 的 handle。
 
 ### 4.3 被监控对象销毁
 

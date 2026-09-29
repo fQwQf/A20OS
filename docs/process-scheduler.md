@@ -1,6 +1,6 @@
 # 进程、调度与阻塞协议
 
-本文描述当前 `kernel/proc/` 实现，而不是早期设计草案。任务状态、CPU所有权、Park/Wake token、timeout、信号和引用计数必须作为一个整体理解；只观察 `task_t.state` 无法判断任务是否仍在运行队列、已被某个 CPU 选中，或正在旧内核栈上完成切换。
+以下是当前 `kernel/proc/` 的实现，不是早期设计草案。任务状态、CPU 所有权、Park/Wake token、timeout、信号和引用计数必须作为一个整体理解；只观察 `task_t.state` 无法判断任务是否仍在运行队列、已被某个 CPU 选中，或正在旧内核栈上完成切换。
 
 源码中的权威契约位于：
 
@@ -8,7 +8,7 @@
 - `kernel/include/proc/park.h`：Park/Wake token、等待模式和唤醒原因；
 - `kernel/include/core/sync.h`：wait queue 的 link/collect/flush 协议；
 - `kernel/include/proc/signal.h`：共享信号状态及锁；
-- `kernel/proc/sched.c`：per-CPU runqueue、EEVDF 记账/资格/选择、空闲窃取、 持久抢占请求和 RT 类；
+- `kernel/proc/sched.c`：per-CPU runqueue、EEVDF 记账/资格/选择、空闲窃取、持久抢占请求和 RT 类；
 - `kernel/proc/timer_heap.c`：wait-timer 截止时间最小堆与定时扫描；
 - `kernel/proc/current.c`：current slot 与切换完成；
 - `kernel/proc/lifetime.c`：运行时不变量和统计。
@@ -89,7 +89,7 @@ proc_lock -> a20_handle_table.lock
 
 ## 3. Per-CPU runqueue 与迁移
 
-> **与算法文档的关系**：本节只讲 runqueue 的**结构、所有权与锁**。普通任务“选谁”（加权公平、资格门控、虚拟截止时间、虚拟 slice 旋钮）与 SMP 空闲窃取的**策略**细节见 [EEVDF 调度器设计](eevdf-scheduler.md)。
+> 与算法文档的关系：本节只讲 runqueue 的**结构、所有权与锁**。普通任务“选谁”（加权公平、资格门控、虚拟截止时间、虚拟 slice 旋钮）与 SMP 空闲窃取的**策略**细节见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
 每个 CPU 有独立 runqueue。队列包含 8 个调度级别：级 0 用于实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99），级 1 用于普通任务的 **EEVDF（最早资格虚拟截止时间优先）** 列表，其余级别保留未用。EEVDF 的 `vtime` 分母是排队中的 EEVDF 权重，不包含当前运行任务；picker 沿按 deadline 排序的 treap 下降，用子树的 `min_vruntime` 增广剪掉整棵不合格子树，选择第一个 eligible 任务，最坏 O(log n)。完整选择策略见 [EEVDF 调度器设计](eevdf-scheduler.md)。有效 affinity 是 task mask、online CPU mask 和 cgroup cpuset 的交集。
 
@@ -98,7 +98,7 @@ proc_lock -> a20_handle_table.lock
 1. `proc_runq_pick_local()` 只持有本 CPU 的 runqueue 锁，选择任务并原子地 转为 `dispatching`；本地队列为空时，它还会在持有本地锁的情况下尝试从 其他 CPU 的非阻塞窃取（只窃 EEVDF 任务、远端 `nr_running >= 2`、且本地 CPU 在被窃任务的允许掩码内）；
 2. `sched()` 释放 runqueue 锁后获取 `proc_lock`，复核 current/next， 必要时 unpick，随后发布 context switch。
 
-迁移一个已排队任务时，同时获取源、目标 runqueue 锁，锁顺序固定为 CPU编号升序。任务在受锁保护的短暂区间内先从源队列摘除、更新 `cpu_id`，再进入目标队列；runqueue 持有的引用贯穿整个迁移，不发生释放后重取。
+迁移一个已排队任务时，同时获取源、目标 runqueue 锁，锁顺序固定为 CPU 编号升序。任务在受锁保护的短暂区间内先从源队列摘除、更新 `cpu_id`，再进入目标队列；runqueue 持有的引用贯穿整个迁移，不发生释放后重取。
 
 ## 4. 持久抢占请求与 IPI
 
@@ -165,7 +165,7 @@ Park deadline 使用全局最小堆。每个活动项持有一个 task 引用，
 
 ## 8. 信号、STOPPED 与远程退出
 
-共享 `signal_state` 保护 action、process pending、siginfo；同一对象下各 task的 blocked mask、thread pending、`sigsuspend` 和 `sigtimedwait` 交接也受这把锁保护。需要同时持锁时顺序为：
+共享 `signal_state` 保护 action、process pending、siginfo；同一对象下各 task 的 blocked mask、thread pending、`sigsuspend` 和 `sigtimedwait` 交接也受这把锁保护。需要同时持锁时顺序为：
 
 ```text
 proc_lock -> signal_state.lock
@@ -218,7 +218,7 @@ make check-proc-step8
 
 ## 12. 与 EEVDF 调度器设计文档的分工
 
-- 本文（`process-scheduler.md`）描述**协议**：`task_t` 的三个状态维度、 `on_rq -> dispatching -> on_cpu -> unowned` 所有权链、锁顺序、Park/Wake token、timeout heap 所有权、信号与退出、引用生命周期。它回答"任务如何 安全地进入、离开和交接 CPU"。
+- 本文（`process-scheduler.md`）描述**协议**：`task_t` 的三个状态维度、`on_rq -> dispatching -> on_cpu -> unowned` 所有权链、锁顺序、Park/Wake token、timeout heap 所有权、信号与退出、引用生命周期。它回答"任务如何 安全地进入、离开和交接 CPU"。
 - [EEVDF 调度器设计](eevdf-scheduler.md) 描述**策略**：普通任务如何被选择（加权 vruntime、系统虚拟时间资格门控及 fallback、虚拟截止时间）、slice 旋钮、SMP 空闲窃取。它回答“CPU 空闲时该跑谁”。
 
-两者在 §3 处衔接：本节说明 runqueue 的数据结构与锁；算法文档说明其中的EEVDF 列表如何排序和挑选。修改任何一边都应保持另一边的契约不变。
+两者在 §3 处衔接：本节给出 runqueue 的数据结构与锁，算法文档给出其中的 EEVDF 列表如何排序和挑选。修改任何一边都应保持另一边的契约不变。

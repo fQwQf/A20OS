@@ -1,6 +1,6 @@
 # 混合内核核心机制参考
 
-本文档以描述性方式说明 A20OS 混合内核各核心机制的语义、契约与代码位置，已按 2026-08 源码核对。存在 make 目标只表示可复现入口存在，不表示当前提交已运行通过；完整平台证据边界见 [STATUS.md](STATUS.md)。
+内容已按 2026-08 源码核对；平台证据边界见 [STATUS.md](STATUS.md)。
 
 ## IPC：`channel_call` 融合 RPC
 
@@ -32,13 +32,13 @@
 
 `user/svc/svcmgr.c` 是系统监管者（`svcman.c` 是最小自愈演示，见 [00-design.md](00-design.md) 的命名说明）：
 
-- **清单与依赖**：声明式清单（服务名、路径、可选 `args` 参数串、依赖顺序）拉起服务；`args` 按空格切分为 argv（`argv[0]`=程序名，向量以空指针结尾）传给 `task_spawn`；
-- **端点传递**：`task_spawn` v2 的 `target_slot` 把服务端点安装到子进程固定槽位（服务以编译期常量命名自己的端点），无需全局注册表；
-- **崩溃检测**：EventQ watch 服务 TASK handle 的 `A20_EVENT_EXITED`，`ev.data0` 即退出码；
-- **健康探针**：周期性 ping（默认 2s 周期、1.5s 超时），超时强杀；ping/pong 走独立于客户端点的专用通道（spawn 时安装于 `A20_SVC_PING_SLOT`），监管流量与客户端 RPC 回复队列隔离，通道随服务重启重新注册；
-- **退出语义**：`exit_code != 0` 视为崩溃进入重启策略；`exit_code == 0` 视为按需服务的正常完成（如目标设备不存在的 ufsd），不计入重启预算；
-- **重启策略**：指数退避重启，flap 预算（5 次/30s）防止崩溃风暴；重启 = 新建 channel 对 + 重新 spawn + 重新 watch，旧端点随对端关闭退役；
-- **重绑**：注册表按名解析返回当前端点；服务死亡后查找返回 `NOT_FOUND`，重启后客户端自动重绑。
+- 清单与依赖：声明式清单（服务名、路径、可选 `args` 参数串、依赖顺序）拉起服务；`args` 按空格切分为 argv（`argv[0]`=程序名，向量以空指针结尾）传给 `task_spawn`；
+- 端点传递：`task_spawn` v2 的 `target_slot` 把服务端点安装到子进程固定槽位（服务以编译期常量命名自己的端点），无需全局注册表；
+- 崩溃检测：EventQ watch 服务 TASK handle 的 `A20_EVENT_EXITED`，`ev.data0` 即退出码；
+- 健康探针：周期性 ping（默认 2s 周期、1.5s 超时），超时强杀；ping/pong 走独立于客户端点的专用通道（spawn 时安装于 `A20_SVC_PING_SLOT`），监管流量与客户端 RPC 回复队列隔离，通道随服务重启重新注册；
+- 退出语义：`exit_code != 0` 视为崩溃进入重启策略；`exit_code == 0` 视为按需服务的正常完成（如目标设备不存在的 ufsd），不计入重启预算；
+- 重启策略：指数退避重启，flap 预算（5 次/30s）防止崩溃风暴；重启 = 新建 channel 对 + 重新 spawn + 重新 watch，旧端点随对端关闭退役；
+- 重绑：注册表按名解析返回当前端点；服务死亡后查找返回 `NOT_FOUND`，重启后客户端自动重绑。
 
 ## 服务注册表
 
@@ -67,20 +67,20 @@
 
 `kernel/drivers/core/udriver.c` + syscall `0x0C00–0x0C09`（处理在 `kernel/abi/native/sys_native_device.c`）：
 
-- **MMIO 授权**：`device_map_mmio` 只允许映射白名单内的设备物理窗口（窗口表按板静态注册），任务无法映射任意内存或其他设备；`user_owned` 窗口在映射前强制当前任务先 `device_claim`；
-- **所有权仲裁**：`device_claim/release`（`0x0C07/0x0C08`）按窗口记录 owner pid，同一设备只有一个用户 owner；`udriver_task_cleanup` 在任务退出时自动释放 claim 与 IRQ 绑定，监管者重启的新驱动不会撞上旧注册；
-- **IRQ 交付**：`device_irq_listen` 把物理 IRQ 绑定到 EventQ——内核先屏蔽该线（电平中断防风暴），再投递 `A20_EVENT_SIGNALED`；驱动处理完调用 `device_irq_ack` 重新武装（VFIO/UIO 电平协议）；
-- **生命周期**：`device_irq_unlisten` 与任务退出清理（`udriver_task_cleanup`）在 EXITED 事件发出之前释放 IRQ 注册，保证监管者重启的新驱动不会撞上旧注册；
-- **DMA 模型**：用户驱动不允许提供任意物理地址；DMA 缓冲只能来自内核分配的 VMO（`vm_create_object` + pin），物理连续性由内核作为契约保证，virtqueue 描述符物理地址由内核翻译后交给驱动。`device_vmo_phys`（`0x0C04`）只对已物化页返回物理地址（peek 语义，未触页报 pa=0），驱动必须先物化再翻译；`device_alloc_dma`（`0x0C09`）提供预物化的连续 DMA heap（上限 64 页，帧清零）；
-- **块设备代理**（udisk）：内核块代理 + 16 槽共享环 + 门铃通道（`device_block_attach/complete`，`0x0C05/0x0C06`），零拷贝数据（`data_pa` 直写页缓存）；驱动死亡时在飞请求以 `-EIO` 失败并唤醒等待者，实例存活，重挂载恢复。
+- MMIO 授权：`device_map_mmio` 只允许映射白名单内的设备物理窗口（窗口表按板静态注册），任务无法映射任意内存或其他设备；`user_owned` 窗口在映射前强制当前任务先 `device_claim`；
+- 所有权仲裁：`device_claim/release`（`0x0C07/0x0C08`）按窗口记录 owner pid，同一设备只有一个用户 owner；`udriver_task_cleanup` 在任务退出时自动释放 claim 与 IRQ 绑定，监管者重启的新驱动不会撞上旧注册；
+- IRQ 交付：`device_irq_listen` 把物理 IRQ 绑定到 EventQ：内核先屏蔽该线（电平中断防风暴），再投递 `A20_EVENT_SIGNALED`；驱动处理完调用 `device_irq_ack` 重新武装（VFIO/UIO 电平协议）；
+- 生命周期：`device_irq_unlisten` 与任务退出清理（`udriver_task_cleanup`）在 EXITED 事件发出之前释放 IRQ 注册，保证监管者重启的新驱动不会撞上旧注册；
+- DMA 模型：用户驱动不允许提供任意物理地址；DMA 缓冲只能来自内核分配的 VMO（`vm_create_object` + pin），物理连续性由内核作为契约保证，virtqueue 描述符物理地址由内核翻译后交给驱动。`device_vmo_phys`（`0x0C04`）只对已物化页返回物理地址（peek 语义，未触页报 pa=0），驱动必须先物化再翻译；`device_alloc_dma`（`0x0C09`）提供预物化的连续 DMA heap（上限 64 页，帧清零）；
+- 块设备代理（udisk）：内核块代理 + 16 槽共享环 + 门铃通道（`device_block_attach/complete`，`0x0C05/0x0C06`），零拷贝数据（`data_pa` 直写页缓存）；驱动死亡时在飞请求以 `-EIO` 失败并唤醒等待者，实例存活，重挂载恢复。
 
 ## 统一驱动框架与 drvmod
 
-- **DriverStore**：`/boot/drivers`（early，不含用户服务）与 `/bin/lib/drivers`（runtime，含用户服务包）两个普通目录，由 `kernel/drivers/core/driver_manager.c` 扫描 `.a20drv` 描述段；
-- **描述段**：`.a20drv` 段（`A20_DRIVER_DESCRIPTOR_MAGIC "A20D"`，版本 2）声明 `placement`（内核模块 / 用户服务）、设备类型、稳定驱动名、匹配表与标志；`SUPERVISED` 标志的用户包生命周期归 svcmgr，管理器只记录；
-- **统一 `driver_t`**：`driver_core.c` 的模块模型——`match/probe/remove` + class 设备发布；`read_only_probe` 允许内核探针绑定 user-owned 设备（一个设备只有一个 owner，破坏性初始化归用户壳）；
-- **class 设备**：char/block/net/input/display/audio 统一注册（major 240/8/0/13/29/116），命名 `char0`/`disk0`/`event0` 等；`input_mux.c` 提供传输无关的 `/dev/event0` evdev 服务；
-- **drvmod 装载**：`kernel/drvmod/loader.c` 把内核态驱动模块（ET_REL）装入内核直接映射，解析重定位、生成 aarch64/riscv64 veneer 与 loongarch64 GOT，`DriverEntry()` 返回 0 后 pin 该模块；~80 个导出符号（MMIO/IRQ/DMA/park/wake/pfa/PCI/lwIP 桥）是模块唯一 API 面。
+- DriverStore：`/boot/drivers`（early，不含用户服务）与 `/bin/lib/drivers`（runtime，含用户服务包）两个普通目录，由 `kernel/drivers/core/driver_manager.c` 扫描 `.a20drv` 描述段；
+- 描述段：`.a20drv` 段（`A20_DRIVER_DESCRIPTOR_MAGIC "A20D"`，版本 2）声明 `placement`（内核模块 / 用户服务）、设备类型、稳定驱动名、匹配表与标志；`SUPERVISED` 标志的用户包生命周期归 svcmgr，管理器只记录；
+- 统一 `driver_t`：`driver_core.c` 的模块模型：`match/probe/remove` + class 设备发布；`read_only_probe` 允许内核探针绑定 user-owned 设备（一个设备只有一个 owner，破坏性初始化归用户壳）；
+- class 设备：char/block/net/input/display/audio 统一注册（major 240/8/0/13/29/116），命名 `char0`/`disk0`/`event0` 等；`input_mux.c` 提供传输无关的 `/dev/event0` evdev 服务；
+- drvmod 装载：`kernel/drvmod/loader.c` 把内核态驱动模块（ET_REL）装入内核直接映射，解析重定位、生成 aarch64/riscv64 veneer 与 loongarch64 GOT，`DriverEntry()` 返回 0 后 pin 该模块；~80 个导出符号（MMIO/IRQ/DMA/park/wake/pfa/PCI/lwIP 桥）是模块唯一 API 面。
 
 ## vDSO
 
@@ -102,24 +102,24 @@
 
 ## 对象统计与配额
 
-- **计数器**（`kernel/include/ipc/objstats.h`）：全局原子计数 `handles / channel_eps / eventqs / vmos / vmo_pages / irq_bindings / vfiles`（七项实时对象计数），覆盖安装/移除/销毁全部路径，只读暴露在 `/proc/a20/objects`；另有累计计数 `vmo_dirty_frames`（buddy 复用未清零帧的合法信号，永不下降，不属于泄漏基线）；
-- **句柄配额**：每任务 native 句柄硬上限 4096（`A20_HT_DEFAULT_QUOTA`），三个安装入口统一以 `NO_SPACE` 拒绝超额；
+- 计数器（`kernel/include/ipc/objstats.h`）：全局原子计数 `handles / channel_eps / eventqs / vmos / vmo_pages / irq_bindings / vfiles`（七项实时对象计数），覆盖安装/移除/销毁全部路径，只读暴露在 `/proc/a20/objects`；另有累计计数 `vmo_dirty_frames`（buddy 复用未清零帧的合法信号，永不下降，不属于泄漏基线）；
+- 句柄配额：每任务 native 句柄硬上限 4096（`A20_HT_DEFAULT_QUOTA`），三个安装入口统一以 `NO_SPACE` 拒绝超额；
 - 崩溃/重启循环后七项实时计数器必须回归基线（泄漏审计）。
 
 ## 用户态文件系统协议（uxfs ↔ ufsd）
 
 内核 `kernel/fs/uxfs/` 把挂载类型 `"uxfs"` 的 vnode/vfile 操作翻译为线协议消息，经 Channel 往返于用户态宿主 `user/svc/ufsd.c`（协议帧格式见 `kernel/include/fs/ufs_proto.h`）：
 
-- **帧**：请求头（magic/version/opcode/req_id/ino/arg0/arg1/name_len/payload_len）+ name + payload 连续布局；应答头带 status 与 out0..out2。线上 name/payload 不含 NUL，接收侧按长度终止化。
-- **匹配**：服务以 `req_id` 回显应答，陈旧/乱序帧丢弃；单挂载同一时刻只有一个在飞请求（代理侧互斥）。
-- **ino 语义由后端自持**：fat 用 ino↔path 表，vnode 型后端（ext4/iso9660/ntfs）维护 ino→vnode* 映射；服务重启即映射清空，恢复契约要求重新挂载。
-- **生命周期**：注册（`fs_serve`）异步完成——调用方就是服务自身，同步握手会自我死锁；umount 经 `a20_channel_ep_peer_shutdown` 单向置对端 peer_closed 并唤醒，服务 recv 出错退出，不留僵尸。
-- **监管集成**：ufsd 在固定槽位端点上按 magic 解复用应答 `SVCMGR_REQ_ECHO` 探针；目标块设备缺失时卸载并以 exit 0 干净退出。
+- 帧：请求头（magic/version/opcode/req_id/ino/arg0/arg1/name_len/payload_len）+ name + payload 连续布局；应答头带 status 与 out0..out2。线上 name/payload 不含 NUL，接收侧按长度终止化。
+- 匹配：服务以 `req_id` 回显应答，陈旧/乱序帧丢弃；单挂载同一时刻只有一个在飞请求（代理侧互斥）。
+- ino 语义由后端自持：fat 用 ino↔path 表，vnode 型后端（ext4/iso9660/ntfs）维护 ino→vnode* 映射；服务重启即映射清空，恢复契约要求重新挂载。
+- 生命周期：注册（`fs_serve`）是异步完成的，调用方就是服务自身，同步握手会自我死锁；umount 经 `a20_channel_ep_peer_shutdown` 单向置对端 peer_closed 并唤醒，服务 recv 出错退出，不留僵尸。
+- 监管集成：ufsd 在固定槽位端点上按 magic 解复用应答 `SVCMGR_REQ_ECHO` 探针；目标块设备缺失时卸载并以 exit 0 干净退出。
 
 ## Linux ABI 共享的机制
 
-- **唤醒快路径**：pipe/AF_UNIX/futex/channel 的 wake 统一汇入 `wait_queue_wake_*` → `proc_wake_q_flush` → `proc_try_wake_locked_common`，priority-preempt 分支对两个 ABI 自动生效；
-- **AF_UNIX 桥接**：socketpair/connect/accept 数据面建立在内部 channel 上（SCM_RIGHTS 走 stream 合并且回退句柄传递）；
-- **channel fd 表面**：`kernel/ipc/channel_fd.c` 把 `a20_channel_ep_t` 包装为 vfile——`read()/write()` 各自映射一条 channel 消息（SOCK_SEQPACKET 语义），对端关闭 `read()` 返回 0（EOF）；`sys_a20_channel_pair`（Linux nr 900）与 `sys_a20_registry_client`（nr 901）让 Linux 程序直接使用 Native 的 channel/注册表机制（`smoke-a20-channel`）；
-- **fd 化等待对象**：`eventfd`/`signalfd`/`timerfd`（`kernel/ipc/`）与 SysV `semget/semctl/semtimedop/semop`、`shmget/shmctl/shmat/shmdt` 都是 ABI 无关的 vfile/对象后端，Linux syscall 只是其上的薄翻译（见 `kernel/abi/linux/sys_eventfd_timerfd.c` 等）；
-- **vfile 对象审计**：fdtable 与 fd-backed handle 共享同一 `vfiles` 计数（`a20_eventq_on_vfile_destroy` 在 fd 拆除时清理以 fd 为 key 的 watch）。
+- 唤醒快路径：pipe/AF_UNIX/futex/channel 的 wake 统一汇入 `wait_queue_wake_*` → `proc_wake_q_flush` → `proc_try_wake_locked_common`，priority-preempt 分支对两个 ABI 自动生效；
+- AF_UNIX 桥接：socketpair/connect/accept 数据面建立在内部 channel 上（SCM_RIGHTS 走 stream 合并且回退句柄传递）；
+- channel fd 表面：`kernel/ipc/channel_fd.c` 把 `a20_channel_ep_t` 包装为 vfile，`read()/write()` 各自映射一条 channel 消息（SOCK_SEQPACKET 语义），对端关闭 `read()` 返回 0（EOF）；`sys_a20_channel_pair`（Linux nr 900）与 `sys_a20_registry_client`（nr 901）让 Linux 程序直接使用 Native 的 channel/注册表机制（`smoke-a20-channel`）；
+- fd 化等待对象：`eventfd`/`signalfd`/`timerfd`（`kernel/ipc/`）与 SysV `semget/semctl/semtimedop/semop`、`shmget/shmctl/shmat/shmdt` 都是 ABI 无关的 vfile/对象后端，Linux syscall 只是其上的薄翻译（见 `kernel/abi/linux/sys_eventfd_timerfd.c` 等）；
+- vfile 对象审计：fdtable 与 fd-backed handle 共享同一 `vfiles` 计数（`a20_eventq_on_vfile_destroy` 在 fd 拆除时清理以 fd 为 key 的 watch）。

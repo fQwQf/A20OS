@@ -31,7 +31,7 @@ typedef struct block_dev_ops {
 
 参考实现：`virtio_blk.c`（并发 VirtIO）、`virtio_scsi.c`（VirtualBox ARM）、`ahci.c`（VirtualBox x86_64）。
 
-典型生命周期：
+典型的注册、probe、I/O 与 remove 顺序：
 
 ```c
 /* 1. 注册：启动段把驱动挂到总线 */
@@ -79,7 +79,7 @@ static int my_blk_remove(device_t *dev){
 }
 ```
 
-注意：不要把 `0` 当成“部分成功”。文件系统会把 `0` 理解为整次 I/O 完成，静默短 I/O 会直接破坏文件系统一致性。
+静默短 I/O 会直接破坏文件系统一致性：不要把 `0` 当成“部分成功”，文件系统会把 `0` 理解为整次 I/O 完成。
 
 ## Network：`DEV_CLASS_NET`
 
@@ -104,7 +104,7 @@ typedef struct net_dev_ops {
 
 参考实现：`virtio_net.c`、`e1000.c`。
 
-典型生命周期：
+生命周期骨架：
 
 ```c
 /* 1. 注册 */
@@ -163,7 +163,7 @@ static int my_net_remove(device_t *dev){
 }
 ```
 
-不要这样做：在 `poll` 里分配 mbuf 或尝试获取可能睡眠的锁。`poll` 运行在 lwIP 锁下，一旦睡眠或重入 lwIP 会造成死锁。
+`poll` 里分配 mbuf 或获取可能睡眠的锁都会死锁：`poll` 运行在 lwIP 锁下，一旦睡眠或重入 lwIP 就会锁死。
 
 ## Character：`DEV_CLASS_CHAR`
 
@@ -180,7 +180,7 @@ typedef struct char_dev_ops {
 
 char class 会按发布顺序自动生成 `/dev/charN`，通用适配器转发 read/write/ioctl。当前没有让驱动自选节点名或安装私有 vnode 的注册 API；稳定的命名、权限或专用 ABI 仍应在通用 class/devfs 层设计，不能在具体驱动里直接拼 VFS vnode。详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
-典型生命周期：
+char 类的对应骨架：
 
 ```c
 /* 1. 注册 */
@@ -223,7 +223,7 @@ static int my_uart_remove(device_t *dev){
 }
 ```
 
-注意：不要从 UART 驱动里直接实现 `termios` 或行编辑。这些属于 tty 层；把行规塞进硬件驱动会让新板子无法复用同一套 UART 代码。
+`termios` 与行编辑属于 tty 层，不放进 UART 驱动；把行规塞进硬件驱动会让新板子无法复用同一套 UART 代码。
 
 ## Input：`DEV_CLASS_INPUT`
 
@@ -255,7 +255,7 @@ struct input_event {
 
 参考实现：`vinput.a20drv`（drvmod 模块）和 USB HID 共享实现 `kernel/drivers/usb/class/usb_hid.c`（generic 包为 `usb-hid.a20drv`）。PS/2 是 x86 板级控制器服务（drvmod 模块 `ps2.a20drv`），不属于可复用 input class；新驱动必须使用本类接口。
 
-典型生命周期：
+input 类的对应骨架：
 
 ```c
 /* 1. 注册 */
@@ -321,7 +321,7 @@ static int my_hid_remove(device_t *dev){
 }
 ```
 
-不要这样做：当 ring 满时直接覆盖旧事件。这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
+ring 满时不能直接覆盖旧事件，这会让用户态看到乱序按键；应该记录丢弃计数，并通过 ioctl 或状态位暴露 overflow。
 
 `/dev/event0` 是 transport-independent evdev mux（`kernel/drivers/input/input_mux.c`），消费所有 input class 设备并提供 EVIOCG* ioctl 面与等待语义；驱动模块 `vinput.a20drv`（`kernel/drvmod/examples/vinput.c`）是完整参考实现，ISR 入队后经 `input_mux_wake()` 唤醒 mux。详见 [输入子系统](../classes/input.md)。
 
@@ -339,7 +339,7 @@ typedef struct gpu_dev_ops {
 
 Display 驱动成功 probe 后调用 `gpu_device_register(dev)`；remove 前调用 `gpu_device_unregister(dev)`。首个成功注册的设备拥有 `/dev/fb0`。操作与映射规则详见 [Display/Framebuffer](../classes/display.md)。
 
-典型生命周期：
+display 类的对应骨架：
 
 ```c
 /* 1. 注册 */
@@ -404,7 +404,7 @@ static int my_gpu_remove(device_t *dev){
 }
 ```
 
-注意：注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
+注册 display 是 probe 的最后一个步骤。在它之前失败，用户不会看到半成品设备；在它之后失败，必须先 `gpu_device_unregister` 再释放资源，否则 `/dev/fb0` 可能指向已释放内存。
 
 ## Audio：`DEV_CLASS_AUDIO`
 

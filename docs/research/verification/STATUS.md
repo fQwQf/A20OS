@@ -47,7 +47,7 @@ Gate: `make smoke-envelope`
 
 ### 1.3 Pilot Experiment (`user/cmds/core/envelope_pilot.c`, QEMU verified)
 
-Five scenarios × four defense arms = **20 cells**, all matching expected
+Five scenarios × four defense arms = 20 cells, all matching expected
 outcomes (docs/research/10-evaluation.md §4.1).
 
 Key finding quantified: LL-permissive admits all attacks; LL-strict
@@ -65,7 +65,7 @@ Additional real-binary cells:
 Gate: `make smoke-envelope-pilot`
 
 E8 盘点备注：预构建 extra.img（256 MB ext4，176 个静态 musl 二进制，
-含 mksh 与 coreutils 全套）**不含 git/vim**——staging 目录从未填充，
+含 mksh 与 coreutils 全套）**不含 git/vim**：staging 目录从未填充，
 包获取在本环境被网络限制阻塞。真实负载深化因此以多进程 shell 管道
 （G4）推进，而非重型工具接入。
 
@@ -139,12 +139,12 @@ Reproduce: `lean BudgetLattice.lean` (Lean v4.33.1 core, no Mathlib)
 ### 2.3 Coverage Matrix (`envelope_coverage.md`, mechanically checked)
 
 366 syscall table entries classified:
-- **ACQUIRE**: 10 (openat/socket/pipe2/memfd/eventfd/timerfd/signalfd/shmat/accept4/accept)
-- **TRANSFER**: 3 (sendmsg/recvmsg SCM_RIGHTS 分支/pidfd_getfd)
-- **USE**: 15 (fs read 家族 6 + io_uring exec + socket bind/connect/listen + 数据面 sendto/recvfrom/sendmmsg/recvmmsg/recvmmsg_time64)
-- **FAILCLOSED**: 2 (io_uring_setup/io_uring_register)
-- **PLANNED-W2**: 36 (enumerated, tracked)
-- **NA**: 300 (no resource authority)
+- ACQUIRE: 10 (openat/socket/pipe2/memfd/eventfd/timerfd/signalfd/shmat/accept4/accept)
+- TRANSFER: 3 (sendmsg/recvmsg SCM_RIGHTS 分支/pidfd_getfd)
+- USE: 15 (fs read 家族 6 + io_uring exec + socket bind/connect/listen + 数据面 sendto/recvfrom/sendmmsg/recvmmsg/recvmmsg_time64)
+- FAILCLOSED: 2 (io_uring_setup/io_uring_register)
+- PLANNED-W2: 36 (enumerated, tracked)
+- NA: 300 (no resource authority)
 
 Gate: `make check-envelope-coverage`
 

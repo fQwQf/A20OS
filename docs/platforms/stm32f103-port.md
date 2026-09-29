@@ -1,8 +1,8 @@
 # STM32F103 移植与运行手册
 
-> **源码说明、硬件快照与计划混合页**（最后核实：2026-08）：构建变量、目录和已接入的驱动 API 已与源码核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，不是当前提交的重新验收结果；"下一步"明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。QEMU 和 OpenOCD launcher 已使用当前产物路径，但仍须在具备对应软件与硬件的环境中分别验证。
+> 最后核实：2026-08。构建变量、目录和已接入的驱动 API 已与源码核对；Xuanwu 外设、电气故障和板上行为来自较早硬件调试记录，**不是**当前提交的重新验收结果；"下一步"明确是计划能力。`make check-stm32f103` 只执行架构边界静态检查并构建 Xuanwu 固件，不运行 QEMU 或物理板测试。QEMU 和 OpenOCD launcher 已使用当前产物路径，但仍须在具备对应软件与硬件的环境中分别验证。
 
-> 不要这样做：不要把板级常量或引脚定义藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
+> 板级常量或引脚定义不要藏进可复用的 `kernel/drivers/stm32f1/` 驱动里。可复用驱动应通过 board config 或 platform data 获取资源；引脚和时钟这些事实属于 `kernel/platform/stm32f103/`。
 
 STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS 的架构和 board 边界：
 
@@ -68,7 +68,7 @@ PB5 分配给 Xuanwu 板的 ULN2003 电机输入，由 TIM3_CH2 通过 partial r
 
 ## TF 卡与 SDIO
 
-板载 TF 卡座使用 STM32 SDIO 引脚 `PC8-PC12` 和 `PD2`。驱动支持 SDSC 和 SDHC/SDXC 卡、1-bit fallback 和 4-bit 传输、单扇区读写、通用 `block_dev_t` 接口、FAT32 boot sector 检测和卷标报告。ready 状态每 2 秒检查一次；卡缺失或移除后，每 5 秒自动调用 recovery probe，因此重新插入无需串口命令。MCU profile 不在进程可见命名空间里暴露这张卡。小型 board adapter 可以挂载 FAT32lite 用于校准和内核侧访问，同时 SDIO 驱动也发布通用 `block_dev_t` 接口。
+板载 TF 卡座使用 STM32 SDIO 引脚 `PC8-PC12` 和 `PD2`。驱动支持 SDSC 和 SDHC/SDXC 卡，带 1-bit fallback 和 4-bit 传输。读写是单扇区粒度，接口用通用 `block_dev_t`，另含 FAT32 boot sector 检测和卷标报告。ready 状态每 2 秒检查一次；卡缺失或移除后，每 5 秒自动调用 recovery probe，因此重新插入无需串口命令。MCU profile 不在进程可见命名空间里暴露这张卡。小型 board adapter 可以挂载 FAT32lite 用于校准和内核侧访问，同时 SDIO 驱动也发布通用 `block_dev_t` 接口。
 
 ## 触摸与按键
 
@@ -109,8 +109,8 @@ LCD 背光控制驱动板文档里标为高电平有效的 `LCD_BL` 信号，接
 - 内部 SRAM 容量从实时 DBGMCU 设备标识符和工厂 Flash density 推导；未知设备会显式使用链接布局 fallback，而不是假装测到了硅片容量。
 - 固件 Flash 使用来自最终链接的 load-image 边界。
 - 内部 RAM 使用结合静态 data/BSS 范围、实时 allocator 元数据和分配、以及从复位时填充模式测得的栈高水位。
-- 外部 SRAM 容量通过逐次探测地址线边界直到第一个镜像地址，然后在该区间内用保存/恢复模式校验，来确定。
-- 外部 SRAM 的 live allocator 使用只有 probe 成功后才单独显示。
+- 外部 SRAM 容量通过逐次探测地址线边界直到第一个镜像地址，再在该区间内用保存/恢复模式校验来确定。
+- 外部 SRAM 的 live allocator 使用情况，只有 probe 成功后才单独显示。
 
 板载 1 MiB 异步 SRAM 位于 FSMC Bank1 NOR/SRAM3 的 `0x68000000`。可通过 `stm32_extsram_alloc()` 和 `stm32_extsram_free()` 分配，用于未来 framebuffer、cache 或文件系统 working set，而不消耗内部 64 KiB SRAM。`kmalloc()` 在内部堆无法满足分配时也会自动使用外部 SRAM，但内部 SRAM 仍是首选。
 

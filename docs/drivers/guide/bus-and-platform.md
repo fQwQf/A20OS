@@ -1,6 +1,6 @@
 # 总线、平台与硬件资源
 
-本文说明硬件如何变成 `device_t`。先确定设备挂在已有总线上，还是固定在某块板上。已有 PCI/VirtIO 设备直接使用公共枚举器；只有新硬件拓扑才需要写平台或总线代码。涉及 MMIO/IRQ/DMA 的运行时规则见 [运行时契约](runtime-contracts.md)，锁规则见 [锁顺序](lock-order.md)，PCI 与 VirtIO 细节见 [PCI 与 VirtIO](pci-and-virtio.md)。
+硬件如何变成 `device_t`：先确定设备挂在已有总线上，还是固定在某块板上。已有 PCI/VirtIO 设备直接使用公共枚举器；只有新硬件拓扑才需要写平台或总线代码。涉及 MMIO/IRQ/DMA 的运行时规则见 [运行时契约](runtime-contracts.md)，锁规则见 [锁顺序](lock-order.md)，PCI 与 VirtIO 细节见 [PCI 与 VirtIO](pci-and-virtio.md)。
 
 ## 分层边界
 
@@ -88,4 +88,4 @@ STM32F103 的 SDIO 是持久块设备，已使用 `DEV_CLASS_BLOCK`。显示、�
 6. 先构建 `kernel-only`，再验证串口日志中的 driver core、总线和设备绑定。
 7. 最后才接用户镜像、网络和 GUI，避免把文件系统/桌面问题误判为平台驱动问题。
 
-> 注意不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../../platforms/virtualbox.md)。
+> 不要把板的寄存器地址、GIC 编号或引脚号直接写进可复用驱动。不要在 IRQ handler 或持有自旋锁时调用 `udelay/mdelay`。不要给 MMIO 地址无条件加 `PAGE_OFFSET`，也不要把 MMIO BAR 当成普通 RAM 传给 `va_to_pa()`。可复用驱动只消费 `resource_t` 和 `plat_data`；VirtualBox 相关内容见 [VirtualBox](../../platforms/virtualbox.md)。

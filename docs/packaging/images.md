@@ -4,7 +4,7 @@
 
 ## world 文件：镜像即清单
 
-一个 world 文件定义一张镜像的内容——每行一个 apk 包名：
+一个 world 文件定义一张镜像的内容，每行一个 apk 包名：
 
 ```
 # packages/world/devel.world
@@ -38,7 +38,7 @@ git
 ### `min` 与 `base` 怎么选
 
 `base` 把 `user/build/<arch>` 下的**全部**产物平铺进根文件系统。riscv64 实测
-201 个二进制 / 29 MiB，其中 35 个是 `*_test` / `*_stress` 回归程序——这些只在
+201 个二进制 / 29 MiB，其中 35 个是 `*_test` / `*_stress` 回归程序。这些只在
 宿主上跑（`make smoke-*`），从不随设备出厂，但它们照样占了镜像里最大的一块。
 `min` 用 recipe 的 `include` 正向列举 26 个二进制，包 **1.38 MiB / 30 entries**
 （`base` 是 8.69 MiB / 190 entries），**-84%**；镜像 payload 3457 KiB。
@@ -123,7 +123,7 @@ make run-world   ARCH=riscv64 PKG_WORLD=base   # 组镜像并直接在 QEMU 启�
 
 `run-world` 把 world 镜像挂为第二块盘（内核枚举为 ext4 → 挂载到 `/extra`；
 若镜像内含 `/etc/a20-distro` 标记与 `/sbin/init`，则由 init 自动 chroot
-接管进入 distro 模式——guest 直接落在 world rootfs 里，无需手动 chroot），
+接管进入 distro 模式，guest 直接落在 world rootfs 里，无需手动 chroot），
 根盘仍是常规 FAT32 开发镜像（→ `/bin`）。
 
 组镜像时若存在 `packages/overlay/<world 名>/` 目录，`image-world` 会自动
@@ -152,7 +152,7 @@ debugfs -R "cat /etc/os-release" build/images/base-riscv64.img
 make run-world ARCH=riscv64 PKG_WORLD=base
 ```
 
-它复用根 Makefile 的 QEMU 配置（不要手抄 QEMU 参数——各平台的
+它复用根 Makefile 的 QEMU 配置（不要手抄 QEMU 参数，各平台的
 `-bios default`、virtio 总线槽位等易错细节都在 `Makefile`/`tools/run-targets.mk`
 里维护），把 world 镜像作为第二块盘启动。镜像是不含分区表的 raw ext4，
 也可以手工挂到任何现有 `run-*`/`distro-run` 命令的第二盘位。

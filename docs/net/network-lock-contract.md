@@ -1,6 +1,6 @@
 # 网络锁契约
 
-本文档定义 A20OS 内核网络路径的锁规则。它适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
+本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
 ## 范围与目标
 
@@ -43,7 +43,7 @@ lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 pe
 
 ## 锁安全的 Socket 入口点
 
-以下小节描述每类 socket 操作要求的锁纪律。实现必须匹配这些规则。
+以下小节按操作类型给出锁纪律。实现必须匹配这些规则。
 
 ### Socket 创建与销毁
 

@@ -2,7 +2,7 @@
 
 A20OS 是一款混合内核操作系统。当前 hosted 构建矩阵包含 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`，另有独立的 `armv7m` MCU profile；内核同时提供 Linux 兼容 musl 程序运行环境和 Native ABI。
 
-本文档面向新贡献者，用于快速理解项目整体结构。完整的 Native ABI 规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
+完整的 Native ABI 规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
 ---
 
@@ -26,9 +26,9 @@ A20OS 在运行空间上更像宏内核：
 
 同时，它在逻辑抽象上吸收微内核思想：
 
-* Native ABI 资源通过带 **rights 位** 的 **handle** 引用。
-* Native ABI 进程间通信使用 **Channel**，并用 **EventQ** 等待已接入的对象事件。
-* Native ABI 内存接口使用 **VMO**（物理后备对象）和 **VMAR**（虚拟映射），让共享与权限检查变得显式。
+* Native ABI 资源通过带 rights 位的 handle 引用。
+* Native ABI 进程间通信使用 Channel，并用 EventQ 等待已接入的对象事件。
+* Native ABI 内存接口使用 VMO（物理后备对象）和 VMAR（虚拟映射），让共享与权限检查变得显式。
 
 为什么这样组合？内核内部路径因为函数调用而保持快速，而 Native 用户可见对象仍受 capability 检查约束。这样兼顾了宏内核的性能和微内核的对象纪律。
 
@@ -55,33 +55,21 @@ A20OS 在运行空间上更像宏内核：
 
 具体落地：
 
-- 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件 位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`）， 不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分 现在只是再导出（shim）。
-- Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、 input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h` 再导出——内部代码只 include `core/`。
-- 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水 （`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分， 有权感知 ABI。
+- 内部 IPC 子系统（对象模型、Channel、EventQ、句柄表、启动信息）的头文件位于 `kernel/include/ipc/`（`ipc.h`、`handle_table.h`、`start_info.h`），不包含任何 `abi/` 内容；`kernel/include/abi/native/*` 里曾属于内部的部分现在只是再导出（shim）。
+- Linux ABI 的线格式常量（errno、fcntl、mman、poll、signal、stat、ioctl、input）定义在 `kernel/include/core/*.h`，`kernel/include/abi/linux/*.h` 再导出；内部代码只 include `core/`。
+- 例外：syscall 分派（`kernel/syscall/syscall.c`）与 arch 胶水（`kernel/arch/*/abi/`、`syscall_hook.h`）本身是 ABI 边界的一部分，有权感知 ABI。
 
 这一原则的收益：内部实现（尤其 IPC/MM/调度）保持 ABI 无关，任何 ABI（包括 Linux ABI）都能直接包装内部机制而受益，无需复制实现。
 
 ### 具体示例
 
-**打开文件**
+打开文件：Linux ABI 用 `openat(dirfd, "foo.txt", O_RDONLY)` 返回整数 fd；Native ABI 用 `path_open(parent_dir_handle, "foo.txt", A20_OPEN_READ, ...)` 返回带 READ 权限的 `a20_handle_t`。
 
-* Linux ABI：`openat(dirfd, "foo.txt", O_RDONLY)` 返回整数 fd。
-* Native ABI：`path_open(parent_dir_handle, "foo.txt", A20_OPEN_READ, ...)` 返回带 READ 权限的 `a20_handle_t`。
+创建进程分两步或一步。Linux ABI 先 `fork()`，再 `execve("/bin/sh", argv, envp)`；Native ABI 一次 `task_spawn(&args)`，参数结构体中指定可执行文件、能力和初始 handle。
 
-**创建进程**
+等待 I/O 时，Linux ABI 用 `epoll_create` + `epoll_ctl` + `epoll_wait`。Native ABI 的 `event_queue_create` + `event_watch` + `event_wait` 可统一等待已接入的 Channel、task、timer 和用户态驱动 IRQ 事件；file/socket/pipe readiness 与 signal 尚未接入。
 
-* Linux ABI：先 `fork()`，再 `execve("/bin/sh", argv, envp)`。
-* Native ABI：一次 `task_spawn(&args)`，参数结构体中指定可执行文件、能力和初始 handle。
-
-**等待 I/O**
-
-* Linux ABI：`epoll_create` + `epoll_ctl` + `epoll_wait`。
-* Native ABI：`event_queue_create` + `event_watch` + `event_wait` 可统一等待已接入的 Channel、task、timer 和用户态驱动 IRQ 事件；file/socket/pipe readiness 与 signal 尚未接入。
-
-**内存映射**
-
-* Linux ABI：`mmap(addr, len, prot, flags, fd, off)`。
-* Native ABI：先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它挂到指定 VMAR，并附带 rights 集合。
+内存映射方面，Linux ABI 用 `mmap(addr, len, prot, flags, fd, off)`。Native ABI 先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它挂到指定 VMAR，并附带 rights 集合。
 
 Native ABI 的完整规范见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
@@ -91,14 +79,14 @@ Native ABI 的完整规范见 [docs/native-abi/00-overview.md](native-abi/00-ove
 
 A20OS 的七个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-M 使用独立 MCU profile：
 
-* **RISC-V 64**：QEMU `qemu-virt-riscv64` 和 StarFive VisionFive 2 开发板
-* **ARM64**：QEMU `qemu-virt-aarch64`
-* **x86_64**：QEMU `qemu-virt-x86_64`
-* **LoongArch 64**：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
-* **PPC64LE**：QEMU `qemu-virt-ppc64le`（pSeries 固件）
-* **ARM32**：QEMU `qemu-virt-arm32`
-* **RISC-V 32**：QEMU `qemu-virt-riscv32`
-* **ARMv7-M**：STM32F103 MCU profile（Cortex-M3、NOMMU，不属于 hosted 用户态矩阵）
+* RISC-V 64：QEMU `qemu-virt-riscv64` 和 StarFive VisionFive 2 开发板
+* ARM64：QEMU `qemu-virt-aarch64`
+* x86_64：QEMU `qemu-virt-x86_64`
+* LoongArch 64：QEMU `qemu-virt-loongarch64` 和龙芯 LS2K1000 开发板
+* PPC64LE：QEMU `qemu-virt-ppc64le`（pSeries 固件）
+* ARM32：QEMU `qemu-virt-arm32`
+* RISC-V 32：QEMU `qemu-virt-riscv32`
+* ARMv7-M：STM32F103 MCU profile（Cortex-M3、NOMMU，不属于 hosted 用户态矩阵）
 
 构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。PPC64LE 当前按 QEMU pSeries 单核边界记录。
 
@@ -137,13 +125,13 @@ Native ABI 的内存对象接口围绕两个核心抽象：
 
 调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个任务按权重累加虚拟运行时间（`vruntime += dt * EEVDF_NICE0_LOAD / weight`），runqueue 的系统虚拟时间 `vtime` 以排队中的 EEVDF 权重和推进，不包含当前运行任务。picker 沿按 deadline 排序的 treap 下降（子树以 `min_vruntime` 增广），选择第一个 `vruntime <= vtime` 的任务；若没有 eligible 任务，则回退到缓存的最早 deadline 任务保证进展。该下降最坏为 O(log n)，即树高而非队列长度。nice/weight 控制 CPU 份额；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota 由 `kernel/proc/cg_cpu.c` 执行。
 
-“任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在runqueue，也可能已经被本地 CPU 选中：
+“任务状态”和“CPU 所有权”是两个不同维度。`PROC_READY` 任务可能仍在 runqueue，也可能已经被本地 CPU 选中：
 
 ```text
 on_rq -> dispatching -> on_cpu -> unowned
 ```
 
-本地 picker 只持有本 CPU 的 runqueue 锁，原子完成`on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU编号升序。
+本地 picker 只持有本 CPU 的 runqueue 锁，原子完成 `on_rq -> dispatching`；释放队列锁后，调度器才获取 `proc_lock` 发布context switch。本地队列为空时，picker 会非阻塞地尝试从其他 CPU 窃取 EEVDF 任务（远端有富余、尊重 affinity），使空闲核吸收突发负载，避免 8 核失衡。旧任务的 `on_cpu` 跨底层切换保持有效，直到新任务在自己的内核栈上完成 switch cleanup。迁移同时获取源、目标 runqueue 锁，固定按 CPU编号升序。
 
 远程入队通过 per-CPU 持久 `need_resched` 请求抢占。IPI 只通知目标 CPU，不会在任意中断上下文直接切换；请求在 trap/syscall/timer 返回或显式调度安全点消费。
 
@@ -167,9 +155,9 @@ driver registry/IRQ locks -> device-private locks
 g_lwip_lock -> g_net_lock
 ```
 
-核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用VFS、内存分配或调度路径。
+核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后 flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用 VFS、内存分配或调度路径。
 
-Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序使用 `event_wait` 替代。
+Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wake、requeue 和私有/共享键。Futex waiter 同样保存 task 引用和 `wait_seq`，wait 入队前在 `mm->lock -> futex lock` 下做不缺页的用户值二次检查。Native 程序使用 `event_wait` 替代。
 
 完整状态机、所有权表和验证入口见 [进程、调度与阻塞协议](process-scheduler.md)；公平/延迟选择策略、资格门控、空闲窃取和虚拟 slice 旋钮见 [EEVDF 调度器设计](eevdf-scheduler.md)。
 
@@ -203,7 +191,7 @@ Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wak
 
 Linux ABI 兼容层实现了高复杂度的边界语义，包括 `openat2` 解析标志、`renameat2` 的 `RENAME_NOREPLACE`/`RENAME_EXCHANGE`、`statx` mask，以及 `faccessat2`/`fchmodat2` 的 flag 校验。
 
-四条主线架构（riscv64、aarch64、loongarch64、x86_64）的 Linux syscall 编号覆盖均达 Linux 水平：riscv64/aarch64 覆盖 asm-generic 全表；loongarch64 补齐私有 `file_getattr(468)`/`file_setattr(469)`；x86_64 的映射表（`kernel/arch/x86_64/include/syscall_nr_x86_64.h`）扩展至 463 槽，包含 `io_uring`/`landlock`/`pidfd`/`mseal` 等现代 syscall。编号覆盖不等于语义完整——兼容层按 `partial` 保守记录（见 `kernel/abi/linux/syscall_coverage.md`），仅在支持的 flag/对象范围内主张 Linux 语义。
+四条主线架构（riscv64、aarch64、loongarch64、x86_64）的 Linux syscall 编号覆盖均达 Linux 水平：riscv64/aarch64 覆盖 asm-generic 全表；loongarch64 补齐私有 `file_getattr(468)`/`file_setattr(469)`；x86_64 的映射表（`kernel/arch/x86_64/include/syscall_nr_x86_64.h`）扩展至 463 槽，包含 `io_uring`/`landlock`/`pidfd`/`mseal` 等现代 syscall。编号覆盖不等于语义完整：兼容层按 `partial` 保守记录（见 `kernel/abi/linux/syscall_coverage.md`），仅在支持的 flag/对象范围内主张 Linux 语义。
 
 ### 网络栈（`kernel/net/`）
 
@@ -225,9 +213,9 @@ virtio-net 驱动位于 `kernel/drivers/net/virtio_net.c`，每个实例持有 `
 
 驱动模型分为三层：
 
-* **零开销 MMIO**：板级地址通过宏常量内联，`kernel/drivers/core/driver_hwapi.h` 中的 `readl`/`writel` 编译为单条 load/store。
-* **统一 hwapi**：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
-* **类 ops vtable**：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
+* 零开销 MMIO：板级地址通过宏常量内联，`kernel/drivers/core/driver_hwapi.h` 中的 `readl`/`writel` 编译为单条 load/store。
+* 统一 hwapi：抽象 `request_irq`、`dma_alloc`、`clock_get_cycles` 等跨架构接口。
+* 类 ops vtable：`block_dev_ops_t`、`net_dev_ops_t`、`char_dev_ops_t` 提供一次间接调用。
 
 静态链接的驱动通过 `DRIVER_REGISTER` 放入 `.driver_init` 链接器段；每次构建选中的 board 则直接在 `kernel/platform/<board>/board.c` 定义唯一 `current_board`。普通 hosted 开发构建默认使用 `DRIVER_DEPLOYMENT=generic`：驱动核心、总线和聚合服务内置，可发现设备驱动由 `kernel/drvmod/examples/` 生成 `.a20drv` 并从 Early/Runtime DriverStore 加载。`DRIVER_DEPLOYMENT=embedded`（包括发布版 `make all`、ARMv7-M 和 PPC64LE 默认）把完整驱动集静态链接进内核。详见 [驱动部署 profile](drivers/guide/deployment-profiles.md)。简化启动顺序为：
 
@@ -252,40 +240,34 @@ Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights 
 
 ## 设计速查
 
-**哪些代码运行在内核空间？**  网络栈（lwIP/TCP 数据面）、VFS 核心与页缓存、内存管理、调度器和关键设备路径在同一个特权地址空间内运行；文件系统实现具备内核/用户态双态放置（用户态经 uxfs+ufsd，见 hybrid-kernel/06-user-fs.md）；驱动支持 `.a20drv` 内核模块和 Native 用户态服务两种部署形态。
+哪些代码运行在内核空间？网络栈（lwIP/TCP 数据面）、VFS 核心与页缓存、内存管理、调度器和关键设备路径在同一个特权地址空间内运行；文件系统实现具备内核/用户态双态放置（用户态经 uxfs+ufsd，见 hybrid-kernel/06-user-fs.md）；驱动支持 `.a20drv` 内核模块和 Native 用户态服务两种部署形态。Native 用户空间能看到什么隔离？Native ABI 对象通过带 rights 的 handle 访问，内核在每次操作时校验 handle 及其权限；其显式内存对象通过 VMO/VMAR 共享或映射。Linux ABI 使用 fd、进程和 POSIX 兼容接口，不应描述为全部由 handle 暴露。
 
-**Native 用户空间能看到什么隔离？**  Native ABI 对象通过带 rights 的 handle 访问，内核在每次操作时校验 handle 及其权限；其显式内存对象通过 VMO/VMAR 共享或映射。Linux ABI 使用 fd、进程和 POSIX 兼容接口，不应描述为全部由 handle 暴露。
+什么时候用 Linux ABI？需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。什么时候用 Native ABI？编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
 
-**什么时候用 Linux ABI？**  需要直接运行现有 musl 程序（git、vim、fastfetch、mksh）而不重新编译时。
+两套 ABI 各有多少系统调用？Linux ABI 366 个，Native ABI 142 个（均为 `syscall_table.def` 当前登记数）。
 
-**什么时候用 Native ABI？**  编写面向 A20OS 的新程序，需要更小、基于 capability 的接口时。
+支持哪些构建目标？七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
 
-**两套 ABI 各有多少系统调用？**  Linux ABI：366 个；Native ABI：142 个（均为 `syscall_table.def` 当前登记数）。
+SMP 并发如何保证安全？通过文档化的锁顺序、per-CPU 运行队列、显式 `on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
 
-**支持哪些构建目标？**  七个 hosted 架构：RISC-V64、LoongArch64、AArch64、x86_64、ARM32、RISC-V32、PPC64LE；另有 ARMv7-M STM32 MCU profile。物理板源码包括 VisionFive 2 和 LS2K1000。构建支持不自动等于 SMP 或完整运行验证。
+Native ABI 内存共享怎么工作？先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。Native IPC 如何处理通知？进程间通知通过 Channel 消息，已接入事件通过 EventQ 等待，子进程终止通过 `task_wait`。Linux POSIX 信号由 `kernel/proc/signal.c` 及 Linux signal syscall 路径直接管理，不建立在 EventQ 上。
 
-**SMP 并发如何保证安全？**  通过文档化的锁顺序、per-CPU 运行队列、显式`on_rq/dispatching/on_cpu` 所有权、带序号 Park/Wake、异步 task 引用和持久抢占请求。`make check-concurrency-foundation` 检查基础契约；`make check-proc-step8-local` 执行双架构 1 核/8 核累计压力矩阵。
+网络如何配置？通过 `a20.*` bootargs 或 DHCP 填充运行时配置；部分 QEMU/VirtualBox board 当前会提供 NAT 静态 bootargs。`/proc/net/config` 是只读状态面，不是通用写配置接口。
 
-**Native ABI 内存共享怎么工作？**  先用 `vm_create_object` 创建 VMO，再用 `vm_map` 把它映射到一个或多个 VMAR。最终生效的保护位是请求保护、handle rights 和 VMAR 标志三者的交集。
+如何为特定板子构建运行？`make ARCH=<arch> BOARD=<board> run`。用 `make check-build-matrix-all` 显式构建七个 hosted 架构的内核和用户态；`make all` 只构建 RISC-V64/LoongArch64 发布产物。
 
-**Native IPC 如何处理通知？**  进程间通知通过 Channel 消息，已接入事件通过 EventQ 等待，子进程终止通过 `task_wait`。Linux POSIX 信号由 `kernel/proc/signal.c` 及 Linux signal syscall 路径直接管理，不建立在 EventQ 上。
-
-**网络如何配置？**  通过 `a20.*` bootargs 或 DHCP 填充运行时配置；部分 QEMU/VirtualBox board 当前会提供 NAT 静态 bootargs。`/proc/net/config` 是只读状态面，不是通用写配置接口。
-
-**如何为特定板子构建运行？**  `make ARCH=<arch> BOARD=<board> run`。用 `make check-build-matrix-all` 显式构建七个 hosted 架构的内核和用户态；`make all` 只构建 RISC-V64/LoongArch64 发布产物。
-
-**Native ABI 完整规范在哪里？**  [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
+Native ABI 完整规范在哪里？见 [docs/native-abi/00-overview.md](native-abi/00-overview.md)。
 
 ---
 
 ## 接下来看什么
 
-* **Native ABI 完整规范**：[docs/native-abi/00-overview.md](native-abi/00-overview.md)
-* **进程、调度与阻塞协议**：[docs/process-scheduler.md](process-scheduler.md)
-* **驱动锁顺序**：[drivers/guide/lock-order.md](drivers/guide/lock-order.md)
-* **构建与运行**：[README.md](../README.md)
-* **当前问题与路线图**：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
-* **源码布局**：
+* Native ABI 完整规范：[docs/native-abi/00-overview.md](native-abi/00-overview.md)
+* 进程、调度与阻塞协议：[docs/process-scheduler.md](process-scheduler.md)
+* 驱动锁顺序：[drivers/guide/lock-order.md](drivers/guide/lock-order.md)
+* 构建与运行：[README.md](../README.md)
+* 当前问题与路线图：[docs/roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)
+* 源码布局：
   * `kernel/abi/`：两套 ABI
   * `kernel/arch/` 和 `kernel/platform/`：HAL 与板级初始化
   * `kernel/mm/`：VMO/VMAR、页缓存、COW、OOM

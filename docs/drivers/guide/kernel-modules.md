@@ -15,7 +15,7 @@ A20OS 现在同时支持三种驱动路径：
 所有可加载驱动文件（内核模块与用户态驱动）都必须使用 `.a20drv` 后缀，并带有只读 ELF `.a20drv` 段。该段的 `a20_driver_descriptor_t` 由 `kernel/include/drivers/driver_descriptor.h` 定义，是**唯一的驱动元数据来源**（没有 `.a20inf` 等旁车清单），包含：
 
 - `magic` 与 `version`：描述符格式身份；
-- `placement`：`kernel-module` 或 `user-service` —— 强边界，不是可互换模式；
+- `placement`：`kernel-module` 或 `user-service`，强边界，不是可互换模式；
 - `type`：RTC、BLOCK、INPUT、AUDIO、SECURITY、NET、DISPLAY 或 USB；
 - `name`：稳定的驱动名；
 - `abi` 与 `resource_mask`：驱动接口版本与资源需求（MMIO/IRQ/IOPORT/DMA）；
@@ -24,7 +24,7 @@ A20OS 现在同时支持三种驱动路径：
 
 后缀不决定权限域：ELF 类型与 `placement` 共同决定加载器。内核 `drvmod_load()` 只接受 ELF64 `ET_REL` 且 `placement=kernel-module` 的文件；普通 ELF 执行加载器在执行以 `.a20drv` 结尾的文件时只接受 `placement=user-service` 的描述符。因此内核模块不能作为用户程序执行，用户态驱动也不能被映射进内核 direct-map。当前普通 ELF 校验器只接受 RTC、BLOCK、INPUT、AUDIO、SECURITY 五种 user-service type；描述符枚举中的 NET、DISPLAY、USB 可供内核模块使用，但用户服务在扩展 `elf_validate_user_driver()` 前会被拒绝。
 
-**统一驱动管理器**（`kernel/drivers/core/driver_manager.c`）是可选驱动发现与激活的唯一权威。`driver_manager_init()` 在启动期（`init_kthread`）：
+统一驱动管理器（`kernel/drivers/core/driver_manager.c`）是可选驱动发现与激活的唯一权威。`driver_manager_init()` 在启动期（`init_kthread`）：
 
 1. 注册模块/用户服务绑定的板级设备（goldfish-rtc、ps2、tpm、virtio-input-slot5 等）为统一 `platform_device_t`；
 2. 扫描 DriverStore `/bin/lib/drivers` 下所有 `.a20drv`，读取描述符；
@@ -99,7 +99,7 @@ LoongArch64 注意：工具链对局部地址引用使用 `pcalau12i + addi.d`�
 
 1. 内核注册硬件设备资源：板级/驱动管理器把模块绑定的设备注册为统一 `platform_device_t`（或由 PCI/VirtIO 总线枚举得到 `device_t`）。
 2. `drvmod_load()` 读取并验证 ELF 与 `.a20drv` 描述符（文件级、section 级、symbol/strtab、relocation 偏移全量边界检查），建立 shadow 布局。
-3. 读缓冲与 shadow 均从 **frame 池**（`pfa_alloc`）分配，而非 kmalloc：kmalloc slab 与模块页在同一 buddy 上取页，重叠时 `kfree` 会把模块自己的页还给分配器，后续 DMA/其他模块分配会覆盖已加载模块的 GOT/rodata（loongarch64 实测踩过）。分配连续物理页，以最终运行地址（direct-map 窗口）计算重定位，在 shadow 上修补，校验 `DriverEntry` 位于 `.text`。
+3. 读缓冲与 shadow 均从 frame 池（`pfa_alloc`）分配，而非 kmalloc：kmalloc slab 与模块页在同一 buddy 上取页，重叠时 `kfree` 会把模块自己的页还给分配器，后续 DMA/其他模块分配会覆盖已加载模块的 GOT/rodata（loongarch64 实测踩过）。分配连续物理页，以最终运行地址（direct-map 窗口）计算重定位，在 shadow 上修补，校验 `DriverEntry` 位于 `.text`。
 4. 复制到 direct-map，执行 `fence.i`/ICache 同步。
 5. `drvmod_init_all()` 调用每个模块的 `DriverEntry`；模块经 `drv_driver_register` 把统一 `driver_t` 注册进驱动核心。
 6. 驱动核心按既有 `device_t` 匹配路径绑定：`driver_register` 同步重探未绑定设备或后续设备注册触发 probe。没有第二套匹配表。
@@ -119,7 +119,7 @@ LoongArch64 注意：工具链对局部地址引用使用 `pcalau12i + addi.d`�
 
 ## DriverStore 与安装
 
-镜像中的 DriverStore 位于 FAT32 的 `/lib/drivers`，由于开发镜像把 FAT32 挂载到 A20OS 的 `/bin`，运行时路径是 `/bin/lib/drivers`。**内核模块和用户态驱动包都放在这里**，由统一驱动管理器在启动时按描述符发现与激活。`drvctl` 提供暂存管理：
+镜像中的 DriverStore 位于 FAT32 的 `/lib/drivers`，由于开发镜像把 FAT32 挂载到 A20OS 的 `/bin`，运行时路径是 `/bin/lib/drivers`。内核模块和用户态驱动包都放在这里，由统一驱动管理器在启动时按描述符发现与激活。`drvctl` 提供暂存管理：
 
 ```text
 drvctl install MODULE NAME
@@ -127,7 +127,7 @@ drvctl remove NAME
 drvctl list
 ```
 
-`drvctl install` 校验包内 `.a20drv` 描述符（唯一的元数据，**没有 `.a20inf` manifest**），把包复制为 `/bin/lib/drivers/NAME.a20drv`，并打印其 placement 与 type；`drvctl list` 从每个包的描述符读出 `placement/type/match`。暂存后由统一驱动管理器在下次启动激活；签名验证和运行时 unload 是下一阶段工作，不能把暂存成功误报为已经运行。
+`drvctl install` 校验包内 `.a20drv` 描述符（唯一的元数据，没有 `.a20inf` manifest），把包复制为 `/bin/lib/drivers/NAME.a20drv`，并打印其 placement 与 type；`drvctl list` 从每个包的描述符读出 `placement/type/match`。暂存后由统一驱动管理器在下次启动激活；签名验证和运行时 unload 是下一阶段工作，不能把暂存成功误报为已经运行。
 
 ## 示例与验证
 
@@ -185,13 +185,13 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 | USB storage | `kernel/drivers/usb/class/usb_storage.c`（generic 不再内建）| `kernel/drvmod/examples/usb_storage.c` | x86_64/aarch64/loongarch64 | 已迁移；riscv64 generic 清单当前未列出 |
 | StarFive/LS2K GMAC | embedded 静态 | 无（板级 platform 驱动）| 板级 | 通过 `platform_bus` + `hardware_id` 绑定，不再无总线通配匹配 |
 
-**当前迁移账本（启动顺序约束）**：只有真正的设备驱动进入 `.a20drv` 迁移表。`loop`、`udisk`、`pty`、`uart`、`framebuffer`/`gpu_core`、`audio_core`、`input_mux` 和 `usb_core` 是内核服务或 class 聚合层，继续静态链接，不应标为 “不可迁移设备驱动”。
+当前迁移账本受启动顺序约束：只有真正的设备驱动进入 `.a20drv` 迁移表。`loop`、`udisk`、`pty`、`uart`、`framebuffer`/`gpu_core`、`audio_core`、`input_mux` 和 `usb_core` 是内核服务或 class 聚合层，继续静态链接，不应标为 “不可迁移设备驱动”。
 
 generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Early DriverStore 按架构生成：x86_64 包含 PC speaker、virtio-blk、virtio-scsi、AHCI；riscv64/aarch64/loongarch64 包含 RTC、virtio-blk、virtio-scsi，riscv64 另含 DW SDIO。其余被该架构 `DRVMOD_MODULES` 列出的包进入 Runtime DriverStore（`/bin/lib/drivers`）。VF2 与 LS2K1000 的 GMAC 虽通过 `platform_bus` + `hardware_id` 注册绑定，但当前没有 generic `.a20drv` 包，只能由 embedded 静态账本部署。总线无关设备没有通配匹配：无总线设备只有在驱动显式 `match()` 接受时才绑定，UART 串口服务即通过名称匹配发布 char 设备，不再抢占任意板级设备。
 
-**框架 API 现状**：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
+框架 API 现状：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
 
-**其余设备包**：`tools/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
+其余设备包：`tools/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
 
 迁移顺序（每步都必须有等价回归证据）：
 

@@ -1,10 +1,10 @@
 # 双态部署驱动框架（dual-placement drivers）
 
-本文档定义“同一源码、双态部署”驱动框架的设计与当前骨架状态，已按 2026-08 的共享头、drvmod 样板与用户服务核对。当前代码尚未满足“完整驱动同一源码双态运行”的阶段验收；下文明确区分环境后端、共享协议 probe 和完整驱动。
+“同一源码、双态部署”驱动框架目前只有骨架：当前代码尚未满足“完整驱动同一源码双态运行”的阶段验收。已按 2026-08 的共享头、drvmod 样板与用户服务核对。
 
 ## 问题
 
-混合内核的边界若要成为"部署选择而非设计分叉"，驱动必须只写一份，按设备可信度与性能需求决定部署在内核态还是用户态。此前的状态是两种驱动各写各的：内核驱动直接用内核 API，用户驱动（rtcd/ubd）直接用 liba20rt，同一设备两种部署需要两份实现——这正是主流混合内核（NT UMDF、XNU DriverKit）也没能完全解决的分叉。
+混合内核的边界若要成为“部署选择而非设计分叉”，驱动必须只写一份，按设备可信度与性能需求决定部署在内核态还是用户态。此前的状态是两种驱动各写各的：内核驱动直接用内核 API，用户驱动（rtcd/ubd）直接用 liba20rt，同一设备两种部署需要两份实现。这正是主流混合内核（NT UMDF、XNU DriverKit）也没能完全解决的分叉。
 
 ## 设计
 
@@ -47,16 +47,16 @@
 - 用户壳 `user/svc/rtcd.c`：产物为 `rtcd-<arch>.a20drv`，已重构到共享协议层；`make smoke-native-rtcd` 是 RISC-V64 验证入口，本次未运行；
 - 用户壳 `user/svc/ubd.c`：产物为 `ubd-<arch>.a20drv`，作为 virtio-blk 用户态驱动运行；
 - 用户壳 `user/svc/uinputd.c`：产物为 `uinputd-<arch>.a20drv`，是可初始化设备、建立 virtqueue 并处理 IRQ 的功能驱动，不只是 probe；
-- **共享协议 probe**：`make smoke-dual-input` 的设计是在 slot 5 上由 DRVMOD 只读 probe 与 USER 驱动通过 `drivers/dual/virtio_input.h` 读出相同身份；这是配置读取一致性，不是完整双态驱动功能一致性；
-- **功能态用户驱动入口**：uinputd 实现设备全权初始化、drv_dma 事件 virtqueue 和 IRQ→EventQ；`smoke-dual-input` 会经 QEMU monitor `sendkey` 注入按键并要求解码 `EV_KEY/KEY_A/press`，但本次未重跑；
-- **DMA 契约修正**：`vmo_phys` 非物化（peek 语义，未触页报 pa=0），drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），该契约已写入 drv_env.h 注释——否则驱动会把物理页 0 交给设备；
-- **构建依赖**：native 构建 stamp 的依赖清单包含 `user/svc` 与共享头目录（svc/共享头修改会触发镜像内二进制重建）；
+- 共享协议 probe：`make smoke-dual-input` 的设计是在 slot 5 上由 DRVMOD 只读 probe 与 USER 驱动通过 `drivers/dual/virtio_input.h` 读出相同身份；这是配置读取一致性，不是完整双态驱动功能一致性；
+- 功能态用户驱动入口：uinputd 实现设备全权初始化、drv_dma 事件 virtqueue 和 IRQ→EventQ；`smoke-dual-input` 会经 QEMU monitor `sendkey` 注入按键并要求解码 `EV_KEY/KEY_A/press`，但本次未重跑；
+- DMA 契约修正：`vmo_phys` 非物化（peek 语义，未触页报 pa=0），drv_dma 用户后端必须先物化再翻译（memset 触页同时提供清零保证），该契约已写入 drv_env.h 注释，否则驱动会把物理页 0 交给设备；
+- 构建依赖：native 构建 stamp 的依赖清单包含 `user/svc` 与共享头目录（svc/共享头修改会触发镜像内二进制重建）；
 - 构建配方支持 riscv64/loongarch64 内核和相应 Native 用户壳；构建结果需在当前提交复验。rtcd/uinputd 以 `-Ikernel/include` 引入共享头。
 
 ## 明确的非目标与后续
 
 - 内核壳接入 timekeeping/alarm 子系统是后续工作；接入前必须先解决设备所有权（udriver 窗口当前默认 user-owned，见 `udriver_mmio_user_owned`），所有权仲裁本身是框架的一部分。约定：白名单 `user_owned=1` 的设备内核侧只做只读 probe，破坏性初始化与 virtqueue 归用户壳独占；动态 `device_claim/release` 已实现，`smoke-dual-input` 源码会用两次启动检查自动释放，但本次未运行；user-owned 窗口的 MMIO 映射现在强制要求当前任务先 claim，rtcd/ubd/uinputd 已迁移；
 - IRQ ops 暂不进 drv_env（线程模型差异是本质的，见上）；
-- **IOMMU 动态隔离**：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，devid 0 静态 SV39 domain 的 TR_REQ 映射/拒绝探测之上，已实现 per-device domain 的动态 claim/map/unmap/release、fault queue 消费（归属 owner、fail-closed 阻断）与 `/proc/a20/iommu` 计数器；`drv_dma` 对 edu PCI 样板的 VMO 翻译已接到 domain（`user/svc/uedud.c` 端到端验证授权内 DMA 成功、窗口外 fault、release 后恢复），门禁 `smoke-iommu-udriver-isolation`（2026-09-24 PASS）。后续：fault 消费中断化、多设备并发 domain、virtio-mmio 设备接入；
+- IOMMU 动态隔离：`riscv_iommu.c` 配置 DDT(1LVL)/CQ/FQ，devid 0 静态 SV39 domain 的 TR_REQ 映射/拒绝探测之上，已实现 per-device domain 的动态 claim/map/unmap/release、fault queue 消费（归属 owner、fail-closed 阻断）与 `/proc/a20/iommu` 计数器；`drv_dma` 对 edu PCI 样板的 VMO 翻译已接到 domain（`user/svc/uedud.c` 端到端验证授权内 DMA 成功、窗口外 fault、release 后恢复），门禁 `smoke-iommu-udriver-isolation`（2026-09-24 PASS）。后续：fault 消费中断化、多设备并发 domain、virtio-mmio 设备接入；
 - virtio-input 事件面有 USER uinputd 路径和独立 DRVMOD 完整驱动路径；尚缺同一设备、同一完整协议源码、同一契约套件的双态 A/B；
 - virtio-blk 保持内核数据面 + ubd 用户态 scratch 的现状，不作为双态候选（数据面跨边界两次的陷阱，见 03-refactor-plan）。
