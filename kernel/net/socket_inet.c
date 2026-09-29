@@ -954,6 +954,75 @@ int net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
     return 0;
 }
 
+/*
+ * Mirror the socket's IPPROTO_IP options into the pcb.  lwIP takes TTL, TOS
+ * and the multicast hop count from the pcb at output time
+ * (udp.c:udp_sendto_if_src, raw.c:raw_sendto_if, tcp_out.c:tcp_output), not
+ * from a global, so the per-socket values have to land there.  An unset TTL
+ * still resolves to the Linux default (IPDEFTTL) rather than lwIP's 255, so
+ * what getsockopt reports is what goes on the wire.
+ *
+ * Must be called with g_lwip_lock held: it touches pcb state only, and it must
+ * never allocate (see docs/net/network-lock-contract.md).
+ */
+#define NET_IP_TTL_DEFAULT 64
+
+/* The values a packet from this socket would actually carry.  getsockopt has
+ * to report these rather than the stored fields, because "never set" and "set
+ * to 0" are different requests and only the effective value is observable on
+ * the wire.  Both callers read the fields without g_net_lock, matching the
+ * per-socket option stores in socket_control.c; the values are single bytes,
+ * so a concurrent setsockopt can only change the value read, never tear it. */
+void net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
+                           uint8_t *mc_ttl)
+{
+    if (ttl)
+        *ttl = s->ip_ttl_set ? s->ip_ttl : NET_IP_TTL_DEFAULT;
+    if (tos)
+        *tos = s->ip_tos_set ? s->ip_tos : 0;
+    /* mc_ttl is a hop count where 0 means 1; the IP header field must be >= 1. */
+    if (mc_ttl)
+        *mc_ttl = s->mc_ttl ? s->mc_ttl : 1;
+}
+
+static void net_inet_ip_opts_apply_locked(net_socket_t *s)
+{
+    uint8_t ttl, tos, mc_ttl;
+    net_inet_ip_effective(s, &ttl, &tos, &mc_ttl);
+    if (s->udp) {
+        s->udp->ttl = ttl;
+        s->udp->tos = tos;
+        udp_set_multicast_ttl(s->udp, mc_ttl);
+        if (s->mc_loop)
+            udp_set_flags(s->udp, UDP_FLAGS_MULTICAST_LOOP);
+        else
+            udp_clear_flags(s->udp, UDP_FLAGS_MULTICAST_LOOP);
+    }
+    if (s->raw) {
+        s->raw->ttl = ttl;
+        s->raw->tos = tos;
+        raw_set_multicast_ttl(s->raw, mc_ttl);
+        if (s->mc_loop)
+            raw_set_flags(s->raw, RAW_FLAGS_MULTICAST_LOOP);
+        else
+            raw_clear_flags(s->raw, RAW_FLAGS_MULTICAST_LOOP);
+    }
+    if (s->tcp) {
+        s->tcp->ttl = ttl;
+        s->tcp->tos = tos;
+    }
+}
+
+/* Lock-taking wrapper for the setsockopt path. */
+void net_inet_ip_opts_apply(net_socket_t *s)
+{
+    if (!s)
+        return;
+    uint64_t flags = a20_lwip_lock();
+    net_inet_ip_opts_apply_locked(s);
+    a20_lwip_unlock(flags);
+}
+
 static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
                              int flags, const void *addr, size_t addrlen)
 {
@@ -1030,6 +1099,7 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
         }
     }
     uint64_t lwip_flags = a20_lwip_lock();
+    net_inet_ip_opts_apply_locked(s);
     if (addr) {
         e = udp_sendto(s->udp, p, &ip, port);
     } else if (s->connected) {
@@ -1063,6 +1133,7 @@ static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
         }
     }
     uint64_t lwip_flags = a20_lwip_lock();
+    net_inet_ip_opts_apply_locked(s);
     if (addr) {
         e = raw_sendto(s->raw, p, &ip);
     } else if (s->connected) {
@@ -1111,6 +1182,7 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
             a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
         }
+        net_inet_ip_opts_apply_locked(s);
         if (room == 0) {
             a20_lwip_unlock(lwip_flags);
             if (sent || s->nonblock)

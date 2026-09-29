@@ -5,6 +5,7 @@
 #include "ipc/ipc.h"
 #include "drivers/char/uart.h"
 #include "fs/pipe.h"
+#include "net/socket_internal.h"
 #include "fs/readiness.h"
 #include "fs/vfs/file.h"
 #include "fs/devfs.h"
@@ -720,8 +721,26 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
     }
     if (req == TIOCSPTLCK || req == TIOCSCTTY)
         return 0;
-    if (req == FIONBIO || req == PPC64_FIONBIO)
-        return 0;
+    if (req == FIONBIO || req == PPC64_FIONBIO) {
+        /* A socket blocks in the net data path, so "non-blocking" has to be
+         * real here.  Go through the same two steps as fcntl(F_SETFL): the
+         * vfile flag for the generic layers, then net_socket_t.nonblock for
+         * the socket data path.  Non-socket vfiles keep the historical
+         * no-op. */
+        if (!net_socket_from_file((int)gfd))
+            return 0;
+        int nonblock = 0;
+        if (copy_from_user(&nonblock, arg, sizeof(nonblock)) < 0)
+            return -EFAULT;
+        int64_t cur = vfs_fcntl((int)gfd, F_GETFL, 0);
+        if (cur < 0)
+            return cur;
+        int flags = ((int)cur & ~O_NONBLOCK) | (nonblock ? O_NONBLOCK : 0);
+        int64_t r = vfs_fcntl((int)gfd, F_SETFL, (long)flags);
+        if (r < 0)
+            return r;
+        return net_set_nonblock((int)gfd, nonblock);
+    }
     if (req == FIONREAD || req == PPC64_FIONREAD) {
         vfile_t *vf = vfs_get_file_ref((int)gfd);
         if (!vf)
@@ -734,7 +753,19 @@ int64_t sys_ioctl_gfd(int64_t gfd, unsigned long req, void *arg)
             return copy_to_user(arg, &available, sizeof(available)) < 0 ?
                 -EFAULT : 0;
         }
+        int is_socket = net_is_socket_vfile(vf);
         vfs_put_file_ref((int)gfd, vf);
+        if (is_socket) {
+            net_socket_t *s = net_socket_from_file((int)gfd);
+            if (!s)
+                return -EBADF;
+            size_t bytes = 0;
+            int avail = net_socket_rx_available(s, &bytes);
+            if (avail < 0)
+                return avail;
+            int n = (bytes > (size_t)INT_MAX) ? INT_MAX : (int)bytes;
+            return copy_to_user(arg, &n, sizeof(n)) < 0 ? -EFAULT : 0;
+        }
     }
     return vfs_ioctl(gfd, req, arg);
 }

@@ -20,6 +20,8 @@ static const test_case_t tests[] = {
     { "alg_test",          "alg_test",                 1 },
     { "timeout_test",      "timeout_test",             0 },
     { "net_iface_test",    "net_iface_test",           0 },
+    { "netopt_test",       "netopt_test",              0 },
+    { "netlink_test",      "netlink_test",             0 },
 };
 
 static int run_test(const test_case_t *t) {

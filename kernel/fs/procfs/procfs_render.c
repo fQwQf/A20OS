@@ -28,6 +28,7 @@
 #include "core/stdio.h"
 #include "core/version.h"
 #include "net/socket.h"
+#include "net/socket_internal.h"
 #include "net/net_config.h"
 #include "net/lwip_stack.h"
 #include "drivers/core/riscv_iommu.h"
@@ -384,6 +385,162 @@ int generate_pid_maps_alloc(int pid, int smaps, char **buf_out,
     return 0;
 }
 
+/*
+ * /proc/net/{tcp,udp,unix} rows.
+ *
+ * net_socket_table_walk() hands each socket over while holding g_net_lock, so
+ * a row is built in a fixed local buffer and copied out with a running offset
+ * instead of formatted straight into the destination; once the destination is
+ * full the walk keeps running but every visitor bails before formatting.
+ */
+#define PROCFS_NET_ROW_MAX  256
+#define PROCFS_NET_ADDR_MAX 40
+
+typedef struct {
+    char   *buf;
+    size_t  bufsz;
+    size_t  off;
+    int     datagram;   /* /proc/net/udp: a datagram socket has no TCP state */
+    char    row[PROCFS_NET_ROW_MAX];
+} procfs_net_rows_t;
+
+/* Linux prints a /proc/net address as the raw network-order 32-bit word, so
+ * 127.0.0.1 reads 0100007F, while the port is printed in host order -- a
+ * sockaddr keeps sin_port in network order, hence the swap.  AF_INET6 takes
+ * the tcp6 layout of four 32-bit words, which is also how an IPv4-mapped
+ * address renders (0000000000000000FFFF0000<IPv4>). */
+static uint32_t procfs_net_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void procfs_net_addr(char *out, size_t outsz, const uint8_t *addr,
+                            size_t addrlen, int domain)
+{
+    uint16_t sport = 0;
+    if (net_sockaddr_port(addr, addrlen, &sport) < 0)
+        sport = 0;
+
+    if (domain == AF_INET6 && addrlen >= sizeof(net_sockaddr_in6_t)) {
+        const uint8_t *a = ((const net_sockaddr_in6_t *)addr)->sin6_addr;
+        snprintf(out, outsz, "%08X%08X%08X%08X:%04X",
+                 procfs_net_le32(a), procfs_net_le32(a + 4),
+                 procfs_net_le32(a + 8), procfs_net_le32(a + 12),
+                 (unsigned)net_ntohs(sport));
+        return;
+    }
+    /* An unbound socket has no address yet; the column reads as the wildcard,
+     * which is what Linux shows for a socket that has not been bound. */
+    uint32_t v4 = 0;
+    if (addrlen >= sizeof(net_sockaddr_in_t) &&
+        *(const uint16_t *)addr == AF_INET)
+        v4 = ((const net_sockaddr_in_t *)addr)->sin_addr;
+    snprintf(out, outsz, "%08X:%04X", v4, (unsigned)net_ntohs(sport));
+}
+
+/* Linux TCP state numbers, derived only from flags the socket layer maintains
+ * itself.  The lwIP pcb's own state machine lives under g_lwip_lock, which a
+ * table walk must never take, so the FIN_WAIT / TIME_WAIT / CLOSING half of
+ * the state space is not observable here and is left unmapped rather than
+ * guessed.  `syn_sent` is false for AF_UNIX, which has no handshake. */
+#define PROCFS_TCP_ESTABLISHED 0x01
+#define PROCFS_TCP_SYN_SENT    0x02
+#define PROCFS_TCP_CLOSE       0x07
+#define PROCFS_TCP_CLOSE_WAIT  0x08
+#define PROCFS_TCP_LISTEN      0x0A
+
+static unsigned procfs_net_state(const net_socket_t *s, int syn_sent)
+{
+    if (s->listening)
+        return PROCFS_TCP_LISTEN;
+    if (syn_sent && s->tcp_connecting)
+        return PROCFS_TCP_SYN_SENT;
+    if (s->connected)
+        return s->peer_closed ? PROCFS_TCP_CLOSE_WAIT
+                              : PROCFS_TCP_ESTABLISHED;
+    /* Bound but neither listening nor connecting is exactly Linux's CLOSE. */
+    return PROCFS_TCP_CLOSE;
+}
+
+/* Unread bytes in the receive queue -- the same accounting FIONREAD reports.
+ * Recomputed here because net_socket_rx_available() takes g_net_lock itself
+ * and this walk already holds it. */
+static unsigned procfs_net_rx_queued(const net_socket_t *s)
+{
+    size_t total = 0;
+    for (const net_msg_t *m = s->rx_head; m; m = m->next)
+        total += (s->type == SOCK_STREAM) ? (m->len - m->off) : m->len;
+    return (unsigned)total;
+}
+
+/*
+ * One /proc/net/tcp or /proc/net/udp row:
+ *   "%4d: %s %s %02X %08X:%08X %02X:%08X %08X %d %ld %d\n"
+ *   sl, local_address:port, rem_address:port, st, tx_queue:rx_queue,
+ *   tr:tm->when, retrnsmt, uid, timeout, inode.
+ *
+ * Real: the two endpoint addresses, the state derived from the socket flags,
+ * the unread receive-queue bytes, and SO_RCVTIMEO.
+ *
+ * Emitted as 0 because the data does not exist, not because it is zero:
+ *   tx_queue   unsent bytes (write_seq - snd_una) live in the lwIP pcb, and
+ *              reading them would mean taking g_lwip_lock inside this
+ *              g_net_lock section, which the lock contract forbids.  For an
+ *              unsent/idle socket Linux prints 00000000 here too.
+ *   tr, retrnsmt
+ *              retransmit timer and count: same lock problem.  00:00000000 and
+ *              00000000 are exactly Linux's output for an inactive timer.
+ *   uid        net_socket_t.owner_uid is only recorded by the AF_UNIX bind
+ *              path, so an inet socket carries no owner.  This 0 means
+ *              "unrecorded", NOT root -- do not read it as an euid.
+ *   inode      A20OS net_socket_t has no socket inode, and the procfs
+ *              namespace entry is not reachable from a g_net_lock section.
+ */
+static void procfs_net_inet_row(net_socket_t *s, void *arg)
+{
+    procfs_net_rows_t *r = arg;
+    if (r->off + 1 >= r->bufsz)
+        return;
+
+    char local[PROCFS_NET_ADDR_MAX], peer[PROCFS_NET_ADDR_MAX];
+    procfs_net_addr(local, sizeof(local), s->local, s->local_len, s->domain);
+    procfs_net_addr(peer, sizeof(peer), s->peer_addr, s->peer_len, s->domain);
+    unsigned st = r->datagram ? PROCFS_TCP_CLOSE
+                              : procfs_net_state(s, 1);
+    snprintf(r->row, sizeof(r->row),
+             "%4d: %s %s %02X %08X:%08X %02X:%08X %08X %d %ld %d\n",
+             s->reg_idx, local, peer, st,
+             0u, procfs_net_rx_queued(s),
+             0u, 0u, 0u,
+             s->owner_uid, (long)s->recv_timeout_ticks, 0);
+    appendf(r->buf, r->bufsz, &r->off, "%s", r->row);
+}
+
+/*
+ * One /proc/net/unix row.  Num is the socket netns cookie, RefCount a
+ * per-socket refcount and Flags the vfile's open flags in Linux; A20OS has
+ * none of the three reachable from a net_socket_t under g_net_lock (a vfile
+ * reference cannot be taken here), so they read 0 rather than a guess.  The
+ * path is s->local's sun_path, which net_unix_sockaddr_prepare() stores
+ * absolute and NUL-terminated; a socketpair has no path and shows none.
+ */
+static void procfs_net_unix_row(net_socket_t *s, void *arg)
+{
+    procfs_net_rows_t *r = arg;
+    if (r->off + 1 >= r->bufsz)
+        return;
+
+    const char *path = "";
+    if (s->local_len > sizeof(uint16_t) && s->local[sizeof(uint16_t)] != '\0')
+        path = (const char *)s->local + sizeof(uint16_t);
+    snprintf(r->row, sizeof(r->row),
+             "%08X%08X: %08X %08X %08X %04X %02X %d %s\n",
+             0u, 0u, 0u, 0u, 0u,
+             (unsigned)s->type, procfs_net_state(s, 0), 0, path);
+    appendf(r->buf, r->bufsz, &r->off, "%s", r->row);
+}
+
 int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     buf[0] = '\0';
     switch (type) {
@@ -574,14 +731,27 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         net_format_status(buf, bufsz);
         break;
     case PF_NET_TCP:
-    case PF_NET_UDP:
+    case PF_NET_UDP: {
         snprintf(buf, bufsz,
                  "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        procfs_net_rows_t rows = {
+            .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
+            .datagram = (type == PF_NET_UDP),
+        };
+        (void)net_socket_table_walk(rows.datagram ? NET_TABLE_UDP
+                                                  : NET_TABLE_TCP,
+                                    procfs_net_inet_row, &rows);
         break;
-    case PF_NET_UNIX:
+    }
+    case PF_NET_UNIX: {
         snprintf(buf, bufsz,
                  "Num       RefCount Protocol Flags    Type St Inode Path\n");
+        procfs_net_rows_t rows = {
+            .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
+        };
+        (void)net_socket_table_walk(NET_TABLE_UNIX, procfs_net_unix_row, &rows);
         break;
+    }
     case PF_NET_CONFIG:
         a20_net_config_format(buf, bufsz);
         break;

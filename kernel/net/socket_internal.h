@@ -149,6 +149,14 @@ typedef struct net_socket {
     int keep_idle;
     int keep_intvl;
     int keep_cnt;
+    /* Per-socket IPPROTO_IP options.  The *_set flags separate "caller asked
+     * for 0" from "never asked": TTL 0 and TOS 0 are both legal. */
+    uint8_t ip_ttl;
+    uint8_t ip_tos;
+    uint8_t ip_ttl_set;
+    uint8_t ip_tos_set;
+    uint8_t mc_ttl;   /* hop count, not a TTL byte; 0 means 1, as Linux does */
+    uint8_t mc_loop;
     uint64_t recv_timeout_ticks;
     uint64_t send_timeout_ticks;
     int ipv6_checksum_offset;
@@ -255,6 +263,24 @@ int      net_register_socket_locked(net_socket_t *s);
 void     net_unregister_socket_locked(net_socket_t *s);
 int      net_socket_is_valid_locked(net_socket_t *s);
 
+/* Socket table enumeration for /proc/net/{tcp,udp,unix} (socket_table.c).
+ * Callers hold g_net_lock and the callback receives each socket still under
+ * that lock, so it must not block, allocate, or take g_lwip_lock. */
+typedef enum {
+    NET_TABLE_TCP = 0,
+    NET_TABLE_UDP,
+    NET_TABLE_UNIX,
+} net_table_kind_t;
+
+typedef void (*net_table_visit_fn)(net_socket_t *s, void *arg);
+int      net_socket_table_walk(net_table_kind_t kind,
+                               net_table_visit_fn fn, void *arg);
+
+/* Total bytes currently readable, for ioctl(FIONREAD) on a socket.  Holds only
+ * g_net_lock.  Returns -ENOTSOCK for a non-socket and -EOPNOTSUPP for a socket
+ * whose readability cannot be expressed as a byte count (AF_PACKET). */
+int      net_socket_rx_available(net_socket_t *s, size_t *out);
+
 int      net_enqueue_msg_locked(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
 int      net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
@@ -349,6 +375,13 @@ int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
                          int flags, const void *addr, size_t addrlen);
 void     net_inet_accept_child_ready(net_socket_t *s);
+/* Push the socket's IPPROTO_IP options into its pcb, and report the values its
+ * packets actually carry when the caller never set them.  Shared rather than
+ * forward-declared locally: defined in socket_inet.c, called from
+ * socket_control.c. */
+void     net_inet_ip_opts_apply(net_socket_t *s);
+void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
+                               uint8_t *mc_ttl);
 
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);
