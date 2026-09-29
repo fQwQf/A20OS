@@ -64,16 +64,22 @@ typedef struct {
 
 /* Reply layout for SHM_INFO, matching musl and glibc `struct shm_info`:
  * int __used_ids, then shm_tot/shm_rss/shm_swp/__swap_attempts/
- * __swap_successes as unsigned long (4 + 4 pad + 5*8 = 48 on LP64).  A20OS
- * tracks none of these counters, so the reply is all zeros, but the size
- * still has to match: a larger reply overruns the caller's buffer, and the
- * check below is what keeps the two layouts from drifting apart silently. */
+ * __swap_successes as unsigned long.  A20OS tracks none of these counters,
+ * so the reply is all zeros, but the size still has to match: a larger reply
+ * overruns the caller's buffer, and the check below is what keeps the two
+ * layouts from drifting apart silently.  The field widths above are the
+ * target's own, so the expected total is 48 on LP64 (4 + 4 pad + 5*8) and 24
+ * on ILP32 (4 + 5*4, no padding needed). */
 typedef struct {
     int used_ids;
     unsigned long tot, rss, swp, swap_attempts, swap_successes;
 } sysv_shminfo_t;
 
+#ifdef CONFIG_64BIT
 STATIC_ASSERT(sizeof(sysv_shminfo_t) == 48, shm_info_matches_libc);
+#else
+STATIC_ASSERT(sizeof(sysv_shminfo_t) == 24, shm_info_matches_libc);
+#endif
 
 static sysv_shm_t g_shm[SYSV_SHM_MAX];
 static spinlock_t g_shm_lock = SPINLOCK_INIT;

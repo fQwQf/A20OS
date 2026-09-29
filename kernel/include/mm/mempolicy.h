@@ -19,11 +19,14 @@ struct task_t;
 int mempolicy_set(struct task_t *t, int mode, uint64_t nmask);
 
 /* mbind(2): apply a policy to a memory range.  The range is validated and
- * the policy stored per-task; no physical NUMA action occurs. */
+ * the policy stored per-task; no physical NUMA action occurs.  Returns 0, or
+ * -EINVAL when the mask names a node A20OS does not have. */
 int mempolicy_mbind(struct task_t *t, uint64_t addr, size_t len, int mode,
                     uint64_t nmask, unsigned flags);
 
-/* get_mempolicy(2) support: returns the current default mode. */
+/* get_mempolicy(2) support: the current mode and the node mask recorded by
+ * the last successful set_mempolicy/mbind. */
 int mempolicy_get_mode(struct task_t *t);
+uint64_t mempolicy_get_nmask(struct task_t *t);
 
 #endif /* _MM_MEMPOLICY_H */

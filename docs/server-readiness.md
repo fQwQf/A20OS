@@ -452,11 +452,15 @@ cgroup v1/v2 是真的，且**在热路径上强制**：`cg_mem_charge()` 在缺
 按「改动小、风险低、避免真实事故」排序：
 
 1. 补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。
-2. 把 `/proc/pressure` 改为 Linux 的 `cpu`/`memory`/`io` 子目录布局——
-   systemd 等工具按目录读，当前单文件布局不兼容。
-3. 崩溃注入测试基础设施（QEMU 可用 `-device qemu-x-test` 或直接 kill -9 +
+2. 崩溃注入测试基础设施（QEMU 可用 `-device qemu-x-test` 或直接 kill -9 +
    重放镜像比对），这是 ext4 journal 改造的前提。
-4. 删除 `MAX_PROCS` 死常量（纯清理，无行为变化）。
-5. 引入真机基准入口；当前所有性能结论都来自 TCG 模拟器。
+3. 引入真机基准入口；当前所有性能结论都来自 TCG 模拟器。
 
-其中第 2 项是纯兼容性修复，第 4 项是一行常量，二者都不需要设计决策。
+以下两项曾在本清单里，现已完成，不再是待办：
+
+- `/proc/pressure` 曾是单文件布局，systemd 按 `cpu`/`memory`/`io` 目录读会
+  失败。该布局已改为目录，见 `kernel/fs/procfs/procfs.c` 的
+  `pressure_entries` 与 `procfs_render.c` 的 `PF_PRESSURE_*` 分支。
+  `mem`/`io` 渲染为结构性的零（设备 I/O 全部同步，没有可采样的 stall 状态，
+  见 `kernel/core/psi.c` 的说明），不是伪造的数字。
+- `MAX_PROCS` 死常量已删除，全树无残留引用。
