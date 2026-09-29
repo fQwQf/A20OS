@@ -14,7 +14,7 @@ From a clean boot (`/tmp/opencode/net1.log`):
 
 Guest side: `/etc/resolv.conf` is `nameserver 10.0.2.3`; `udhcpc`, `wget` and `nc` are present.
 
-So the interface, address, gateway and DNS are all in place.  Networking is not "missing" --
+So the interface, address, gateway and DNS are all in place.  Networking is not "missing":
 it fails as soon as a packet moves.
 
 ## The bug: first traffic panics
@@ -48,10 +48,10 @@ Output:
 (`etharp_input` -> `ethernet_input`), reached from the receive path
 (`a20_lwip_process_netif_rx_tx_locked`), i.e. from the virtio-net IRQ.
 
-Two things to note:
+Two things matter here:
 
   * the panic happens on the **first** connection attempt, so before this nothing could ever
-    work -- every higher-level symptom (including Minecraft's `UnknownHostException`) sits on
+    work; every higher-level symptom (including Minecraft's `UnknownHostException`) sits on
     top of it;
   * the backtrace is not entirely trustworthy (`ethernet_output+0x13f200867` is nonsense), so
     the frame order below `etharp_input` should be confirmed rather than assumed.
@@ -64,7 +64,7 @@ frees it (that is exactly what `etharp_input` does with pbufs it does not keep).
 hand-off in `a20_lwip_process_netif_rx_tx_locked` and the virtio-net driver's receive path, and
 check whether the pbuf is freed by both the driver side and lwIP.
 
-Also worth fixing while in here: the guest has no working way to inspect the interface --
+Also worth fixing while in here: the guest has no working way to inspect the interface.
 `ip addr show` fails with `socket(AF_NETLINK,3,0): Protocol not supported` and
 `ifconfig` fails with `ioctl 0x8912 failed: No such device`.  Neither is the cause of the
 panic, but both make network debugging in the guest much harder than it needs to be.
@@ -87,7 +87,7 @@ The receive loop is `a20_lwip_process_netif_rx_tx_locked` (`kernel/net/lwip_stac
     }
 
 `n->input` is `ethernet_input` (registered at line 234).  Line 339 looks like a double free, but
-it follows lwIP's **documented** contract -- upstream's own `ethernetif_input()` is written
+it follows lwIP's **documented** contract: upstream's own `ethernetif_input()` is written
 exactly this way: `input()` returns `ERR_OK` when it consumed the pbuf, and the caller frees it
 when it did not.
 
@@ -95,7 +95,7 @@ That contract is only sound if `ethernet_input` never consumes the pbuf before r
 error.  It propagates its inner error on some paths (the IPv4 path returns what `ip4_input`
 returned), and `ip4_input` can free or queue the pbuf *before* returning a non-OK error.  If that
 happens, line 339 frees an already-freed pbuf: the pool pbuf lands with `ref == 0`, is handed out
-again, and a later `pbuf_free` -- e.g. `etharp_input`'s own -- trips `p->ref > 0`.
+again, and a later `pbuf_free`, for example `etharp_input`'s own, trips `p->ref > 0`.
 
 Two candidate ownership models, and the fix differs:
 
@@ -116,14 +116,14 @@ Do **not** guess between them.  **Resolved -- and it is neither.**  Reading the 
       return ERR_OK;
 
 `n->input(p, n) != ERR_OK` is therefore **never true** in this loop, so line 339 is dead code,
-not a double free.  (Worth stating plainly: the "obvious" fix of deleting that `pbuf_free` would
-have changed nothing at all, which is why guessing here was worth refusing.)
+not a double free.  Worth stating plainly: the "obvious" fix of deleting that `pbuf_free` would
+have changed nothing at all, which is why guessing here was worth refusing.
 
 ## FIXED (12b3df6a)
 
 lwIP is upstream, so the ownership error had to be ours.  It was: `kernel/net/socket_inet.c`
 freed the pbuf **after** handing it to lwIP, and lwIP's send calls take ownership and free it
-themselves --
+themselves:
 
     e = udp_sendto(s->udp, p, &ip, port);   /* udp.c frees p: 371/407/425/428/440 */
     e = raw_sendto(s->raw, p, &ip);         /* raw.c frees p: 75/113 */
@@ -140,11 +140,11 @@ Verified in a clean boot:
     Connecting to 10.0.2.2 (10.0.2.2:80)
     wget: can't connect to remote host (10.0.2.2): Connection refused
 
-`Connection refused` is the right answer -- 10.0.2.2 is the QEMU gateway with nothing listening
-on :80 -- and it means ARP resolution, the TCP SYN and the RST all worked.  Previously the same
+`Connection refused` is the right answer: 10.0.2.2 is the QEMU gateway with nothing listening
+on :80.  That means ARP resolution, the TCP SYN and the RST all worked.  Previously the same
 command panicked at the ARP stage.  `nc -u` to the resolver also returns 0.
 
-Worth noting: this bug was only reachable after the page-cache fix (36c14858) removed the
+This bug was only reachable after the page-cache fix (36c14858) removed the
 first-run corruption that had been masking it.
 
 ## Correction: the fix removed one source, the assertion is still reachable
@@ -160,9 +160,9 @@ The probes were never reached (`udp_rx=0`, `bh_consume=0` in the whole log), so 
 caused the panic.  It came back on its own, and that boot died at the ARP stage again
 (`qemu rc=0`, "attempting firmware poweroff") before the DNS test could run.
 
-**So the earlier "fixed and verified" wording was too strong.**  What `12b3df6a` did is real and
-worth keeping -- it removed a *deterministic* double free (the extra `pbuf_free` after
-`udp_sendto`/`raw_sendto`, which fired on every UDP/raw send) -- but the assertion is still
+The earlier "fixed and verified" wording was too strong.  What `12b3df6a` did is real and
+worth keeping: it removed a *deterministic* double free (the extra `pbuf_free` after
+`udp_sendto`/`raw_sendto`, which fired on every UDP/raw send), but the assertion is still
 reachable, so there is a **second, racy source** of pbuf double free.  Three clean boots were
 luck, not proof; the honest statement is "reduced, not eliminated".
 
@@ -173,10 +173,9 @@ failure fits them better than the deterministic TX bug did.  `virtio_net_recv` s
 ring itself under `net->lock`, so the suspect is not the descriptor hand-off but the lwIP/pbuf
 side reached from two contexts.
 
-Next: instrument the panic site to capture the pbuf's `ref`/`next`/`tot_len` **and the caller
-that already freed it**, then run the ARP-triggering test repeatedly, since a single clean run
+Next: instrument the panic site to capture the pbuf's `ref`/`next`/`tot_len` and the caller
+that already freed it, then run the ARP-triggering test repeatedly, since a single clean run
 proves nothing here.
-
 
 Rebuilt from the reverted tree and re-ran the same test:
 
@@ -191,19 +190,18 @@ That leaves two candidates for the DNS reply, in the order worth testing:
 
   1. **Readiness notification.**  musl's resolver sends the query and then waits with `poll`
      (or a timed `recvfrom`).  If `poll` on a UDP socket never reports readable when a datagram
-     is queued, the resolver times out and reports `bad address` -- and TCP would still appear to
+     is queued, the resolver times out and reports `bad address`, and TCP would still appear to
      work because wget's connect is a blocking call that does not depend on `poll`.  This is
      worth reading in the socket poll path before anything else, since it is cheap and fits the
      TCP-works/UDP-fails asymmetry.
-  2. **The bottom-half path**, which the failed experiment above did not settle either way --
+  2. **The bottom-half path**, which the failed experiment above did not settle either way:
      the change disturbed receive handling, so it did not isolate the BH.  If this is the cause,
      it needs instrumentation (log in `net_inet_bottom_half_process_all()` and at the reader)
      rather than another call-site edit.
 
 Do not re-apply the `a20_lwip_poll()` change at that call site: it is measured to break ARP.
 
-
-The asymmetry that looked like the answer: `a20_lwip_poll()` runs the socket bottom-halves --
+The asymmetry that looked like the answer: `a20_lwip_poll()` runs the socket bottom-halves:
 
     void a20_lwip_poll(void) {
         uint64_t flags = a20_lwip_lock();
@@ -213,14 +211,14 @@ The asymmetry that looked like the answer: `a20_lwip_poll()` runs the socket bot
         net_packet_bottom_half_process();
     }
 
--- while `virtio_net_poll_rx_all()`, which the progress poller drives (`progress.c:43-44`),
+`virtio_net_poll_rx_all()`, which the progress poller drives (`progress.c:43-44`),
 called `a20_lwip_poll_locked()` directly and never ran them.  So an RX-queued datagram sat in
 `bh_ring` with nobody to enqueue it or wake the reader, which would explain a DNS reply never
 reaching the application.
 
 Changed `virtio_net_poll_rx_all()` to call `a20_lwip_poll()` instead, rebuilt and re-ran.
 
-Result: **DNS still failed (`bad address 'example.com'`), and the raw-IP case got worse** --
+Result: **DNS still failed** (`bad address 'example.com'`), and the raw-IP case got worse:
 
     before: wget: can't connect to remote host (10.0.2.2): Connection refused
     after:  wget: can't connect to remote host (10.0.2.2): Network unreachable
@@ -239,14 +237,13 @@ site.  Two things worth doing before the next attempt:
      socket reader whether the DNS datagram reaches `bh_ring` and whether a reader is woken,
      which separates "BH never runs" from "BH runs but the message is lost".
 
-
     === NETTEST hostname dns:
     wget: bad address 'example.com'
     rc=1
 
 `/etc/resolv.conf` is readable (`nameserver 10.0.2.3`) and UDP traffic to that port reports no
 error, so the query leaves but the answer is not reaching the application.  Next: check that a
-UDP reply is queued to the socket that sent the query -- i.e. the socket-layer receive path for
+UDP reply is queued to the socket that sent the query, i.e. the socket-layer receive path for
 UDP (`socket_inet.c` receive/bind handling) rather than lwIP itself, since TCP receive works.
 This is what still blocks Minecraft's authentication.
 
@@ -286,28 +283,28 @@ device and then drains the target netif with the same `a20_lwip_process_netif_rx
 to consume the same device's receive work.
 
 `g_lwip_lock` is a spinlock used via `spin_lock_irqsave` (lines 304/309), so on this single-CPU
-image the IRQ cannot interleave *inside* the poll path -- which is exactly why the race does not
+image the IRQ cannot interleave *inside* the poll path, which is exactly why the race does not
 have to be simultaneous: what matters is whether the device is polled (and its frames delivered)
 **twice for the same packet**, in either order, before the pbuf is handed to lwIP once too many.
 
 Next step: read `st->ops->poll()` for virtio-net and confirm whether it also delivers received
 frames into lwIP (it is called on every device by the IRQ path).  If it does, then the following
 drainer re-delivers frames already consumed, and the fix is to make the IRQ path touch only its
-own device -- not to change any pbuf handling.
+own device, not to change any pbuf handling.
 
 ## Why the damage must be earlier than the packet
 
-The assertion fires inside `etharp_input`'s **own** final `pbuf_free(p)`, which means `p->ref`
-was **already 0** when the packet reached `etharp_input` -- the pbuf was freed while still in
+The assertion fires inside `etharp_input`'s own final `pbuf_free(p)`, which means `p->ref`
+was **already 0** when the packet reached `etharp_input`: the pbuf was freed while still in
 use, before that point in the same packet's processing.  Nothing in the loop between
 `pbuf_alloc` (which sets `ref = 1`) and `ethernet_input` decrements a reference, so the
 corruption is earlier than this packet:
 
-  * the pbuf pool's free list is already damaged -- an earlier double free put the same pbuf on
+  * the pbuf pool's free list is already damaged: an earlier double free put the same pbuf on
     it twice, so `pbuf_alloc` hands out a frame another owner still holds; or
   * the RX path is entered from two contexts at once and both process the same pbuf.  Note the
     panic ran in IRQ context (`arch_handle_irq` -> `driver_irq_dispatch`) on `pid=0 idle`, and
-    `a20_lwip_process_netif_rx_tx_locked` has **two** call sites (lines 369 and 387) -- if one of
+    `a20_lwip_process_netif_rx_tx_locked` has **two** call sites (lines 369 and 387); if one of
     them is a poller and the other the IRQ, the "locked" contract is what needs checking first.
 
 Next step, in this order:

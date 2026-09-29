@@ -1,6 +1,6 @@
 # A20OS Native ABI：错误码与返回约定
 
-> 本文档定义 A20OS Native ABI 的错误码、返回值约定和错误处理策略，已按 2026-08 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
+> 错误码、返回值约定和错误处理策略按 2026-08 的 `errno.h`、handle-table quota 与活跃 mlibc 映射核对。
 
 ---
 
@@ -110,9 +110,9 @@ Native ABI 的错误码不要求等于 Linux errno。兼容层可以在 libc 或
 
 ### 4.1 原子性保证
 
-对声明为原子的管理操作，返回错误后应保持可重试且不留下半安装对象；这是一项目标契约，不能泛化到所有 I/O syscall。
+对声明为原子的管理操作，返回错误后应保持可重试且不留下半安装对象。这是目标契约，不泛化到所有 I/O syscall。
 
-I/O、批量操作以及 `A20_ERR_INTERRUPTED`/`A20_ERR_TIMED_OUT` 可能部分完成，应通过 `out_count` 等输出字段判断；各 syscall 的具体提交点以对应子系统文档和实现为准。
+I/O、批量操作以及 `A20_ERR_INTERRUPTED`/`A20_ERR_TIMED_OUT` 可能部分完成，应通过 `out_count` 等输出字段判断。各 syscall 的具体提交点以对应子系统文档和实现为准。
 
 ### 4.2 与 POSIX errno 的映射
 
@@ -146,4 +146,4 @@ A20_ERR_RANGE         →  ERANGE
 
 ### 4.3 扩展规则
 
-新错误码只能追加。已定义的错误码语义不能改变。如果现有错误码的语义过于宽泛，应定义新错误码并在 `abi_minor` 中标记新增。
+新错误码只能追加，已定义错误码的语义不能改变。现有语义过于宽泛时，应定义新错误码并在 `abi_minor` 中标记新增。

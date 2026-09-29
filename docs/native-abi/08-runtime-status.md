@@ -1,6 +1,6 @@
 # A20OS Native ABI 运行时状态
 
-本文档记录 A20OS Native ABI 当前用户态运行时的真实状态、已知偏差和后续路线图（最后核实：2026-08）。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。它是对 [00-overview.md](00-overview.md) 中实现状态的补充。
+最后核实：2026-08。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。本页是对 [00-overview.md](00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
 
@@ -64,17 +64,17 @@ int64_t r = a20_vm_alloc(&args);
 
 `user/external/mlibc` 以 vendor 方式引入 [managarm/mlibc](https://github.com/managarm/mlibc)，新增 `sysdeps/a20/` 移植层（约 1800 行），严格遵守 native ABI 设计取舍：fd↔handle 映射在 libc 内完成；进程创建经 `task_clone`（能力安全续体，见 §5d）；信号为**检查点式模拟**（`sigaction` 记录 handler，`kill` 经 `task_kill` 记录并在阻塞等待返回时于显式检查点投递，见 §5c）；同步原语走 native futex；线程经 `thread_create` + TCB 蹦床；静态链接（`user/mlibc/a20-mlibc.ld` 提供 init_array 边界、PT_TLS phdr 与 `PT_A20_START_INFO` 标记）。
 
-**已扩展（2026-08）**：`fork()`/`execve()` 已基于 `task_clone` + native `A20_SYS_execve` 实现（不再 ENOSYS）；新增 `GetPgid`/`Sigsuspend`/`Ioctl`/`GetPgid` 等 sysdep 与 `sys/ioctl.h`/`paths.h` 头；`Sysdeps<Fork>` 用能力清单（当前 fd 表的 handle 集合）构建子进程 handle 表，子进程重建 fd 表并重缓存 root/cwd/self，并经 `A20_SYS_task_adopt`（0x0216）把 fd 0/1/2/root/cwd/self 声明给内核；**native→native exec 保留 handle 表**（`A20_SYS_execve` 0x0214 在 dispatch 侧跳过 SET_RET 保护 a0=start_info），使 fork+exec 保留调用方的 stdio。**mksh 已移植到 Native ABI**（`make mlibc-mksh` / `smoke-mlibc-mksh`）：内建命令与顺序外部命令（fork+exec+waitpid+SIGCHLD 检查点投递）完整可用；管道作业等待（`a|b`）已不再挂起（waitpid 任意子进程扫描 + SIGCHLD 检查点投递修复），管道数据流已修复（见 §5a-2）。
+2026-08 的扩展：`fork()`/`execve()` 已基于 `task_clone` + native `A20_SYS_execve` 实现（不再 ENOSYS）；新增 `GetPgid`/`Sigsuspend`/`Ioctl`/`GetPgid` 等 sysdep 与 `sys/ioctl.h`/`paths.h` 头；`Sysdeps<Fork>` 用能力清单（当前 fd 表的 handle 集合）构建子进程 handle 表，子进程重建 fd 表并重缓存 root/cwd/self，并经 `A20_SYS_task_adopt`（0x0216）把 fd 0/1/2/root/cwd/self 声明给内核；**native→native exec 保留 handle 表**（`A20_SYS_execve` 0x0214 在 dispatch 侧跳过 SET_RET 保护 a0=start_info），使 fork+exec 保留调用方的 stdio。**mksh 已移植到 Native ABI**（`make mlibc-mksh` / `smoke-mlibc-mksh`）：内建命令与顺序外部命令（fork+exec+waitpid+SIGCHLD 检查点投递）完整可用；管道作业等待（`a|b`）已不再挂起（waitpid 任意子进程扫描 + SIGCHLD 检查点投递修复），管道数据流已修复（见 §5a-2）。
 
-**类型化控制（A20 对 ioctl 的回答，已彻底移除 ioctl shim）**：`handle_control` 的全部数据 op 使用版本化结构体——`GET_WINSIZE`/`SET_WINSIZE`（`a20_winsize_args_t`）、`TCFLUSH`（`a20_ctl_int_args_t`）、`SET_FLAGS`（`a20_ctl_flags_args_t`，替代 `fcntl(F_SETFL)`/`FIONBIO`）。**内核 Native ABI 不再有通用 ioctl**（`A20_SYS_ioctl` 0x0215 已删除；`handle_control` 的 ioctl/fcntl 垫片 op 0/1 已删除）。mlibc 的 POSIX `ioctl()` 是翻译层：`TIOCGWINSZ`→`GET_WINSIZE`、`TIOCSWINSZ`→`SET_WINSIZE`、`TCFLSH`→`TCFLUSH`、`FIONBIO`→`SET_FLAGS`，未知请求返回 `ENOTTY`；`tcgetwinsize`/`tcsetwinsize`/`tcflush` 直接走类型化 op。文件锁/owner 元数据（`fcntl` F_GETLK 等）在 Native 上返回 `ENOTSUP`。设计见 `docs/native-abi/03-handle.md §2.7`。
+类型化控制（A20 对 ioctl 的回答，已彻底移除 ioctl shim）：`handle_control` 的全部数据 op 使用版本化结构体，`GET_WINSIZE`/`SET_WINSIZE`（`a20_winsize_args_t`）、`TCFLUSH`（`a20_ctl_int_args_t`）、`SET_FLAGS`（`a20_ctl_flags_args_t`，替代 `fcntl(F_SETFL)`/`FIONBIO`）。**内核 Native ABI 不再有通用 ioctl**（`A20_SYS_ioctl` 0x0215 已删除；`handle_control` 的 ioctl/fcntl 垫片 op 0/1 已删除）。mlibc 的 POSIX `ioctl()` 是翻译层：`TIOCGWINSZ`→`GET_WINSIZE`、`TIOCSWINSZ`→`SET_WINSIZE`、`TCFLSH`→`TCFLUSH`、`FIONBIO`→`SET_FLAGS`，未知请求返回 `ENOTTY`；`tcgetwinsize`/`tcsetwinsize`/`tcflush` 直接走类型化 op。文件锁/owner 元数据（`fcntl` F_GETLK 等）在 Native 上返回 `ENOTSUP`。设计见 `docs/native-abi/03-handle.md §2.7`。
 
 Phase 2 新增：
 
-- **posix_spawn / waitpid**：直接走 `task_spawn`（参数 v2 追加 stdio 继承字段，ABI 追加式演进），不经过 fork/exec；waitpid 由 libc 侧 pid↔task handle 注册表支撑，WNOHANG 经 `handle_poll` 的 `A20_EVENT_EXITED`。
-- **pipe**：`sys_pipe` 由 channel 承载，libc 读端做数据报到字节流的缓冲；写端对端关闭映射 EPIPE，读端映射 EOF。
-- **poll**：新增 native `handle_poll`（0x010C）非阻塞就绪查询（复用 `vfs_poll_events`），`sys_poll` 用电平轮询 + 睡眠退避（就绪唤醒粒度 10ms）。
-- **socket**：socket/bind/connect/listen/accept/socketpair/sendmsg/recvmsg/shutdown/getname 全部接入 net_* 封装。
-- **内核配套**：`path_open` 对常规文件授予 EXEC right；`task_spawn` 向子进程 start_info 安装 root/cwd/stdio；`handle_poll` 支持 vfile 系（vfs_poll_events）、channel（消息计数）、task/thread（ZOMBIE）。
+- posix_spawn / waitpid：直接走 `task_spawn`（参数 v2 追加 stdio 继承字段，ABI 追加式演进），不经过 fork/exec；waitpid 由 libc 侧 pid↔task handle 注册表支撑，WNOHANG 经 `handle_poll` 的 `A20_EVENT_EXITED`。
+- pipe：`sys_pipe` 由 channel 承载，libc 读端做数据报到字节流的缓冲；写端对端关闭映射 EPIPE，读端映射 EOF。
+- poll：新增 native `handle_poll`（0x010C）非阻塞就绪查询（复用 `vfs_poll_events`），`sys_poll` 用电平轮询 + 睡眠退避（就绪唤醒粒度 10ms）。
+- socket：socket/bind/connect/listen/accept/socketpair/sendmsg/recvmsg/shutdown/getname 全部接入 net_* 封装。
+- 内核配套：`path_open` 对常规文件授予 EXEC right；`task_spawn` 向子进程 start_info 安装 root/cwd/stdio；`handle_poll` 支持 vfile 系（vfs_poll_events）、channel（消息计数）、task/thread（ZOMBIE）。
 
 构建与验证：`make mlibc-sysroot`（meson+ninja 构建静态 libc.a），`make smoke-mlibc`（QEMU 冒烟：stdio/malloc/文件 I/O/4 线程 mutex/pipe/poll/socketpair/posix_spawn+waitpid，测试程序 `user/tests/test_mlibc_hello.c` + `test_mlibc_child.c`）。
 
@@ -94,8 +94,8 @@ mksh `a|b` 与 `$(...)` 捕获现已完整可用（回归门禁：`smoke-mlibc-m
 
 A20OS 没有 fork。`task_clone` 是能力安全的"子进程续体"原语：
 
-- **寄存器续体**：子进程从调用点继续（a0 == 0 区分父子），地址空间按 COW 复制——这是"自我状态"的复制，不构成能力授予。
-- **能力清单**：子进程的 handle 表完全由 `handles[]`（`a20_clone_handle_t`：parent_handle / child_rights ⊆ 父进程 / child_handle 回写）逐项声明构建，与 `task_spawn` 同一纪律。子进程拿不到清单之外的任何 handle——这是与 fork（隐式复制全部能力）的根本区别。
+- 寄存器续体：子进程从调用点继续（a0 == 0 区分父子），地址空间按 COW 复制。这是"自我状态"的复制，不构成能力授予。
+- 能力清单：子进程的 handle 表完全由 `handles[]`（`a20_clone_handle_t`：parent_handle / child_rights ⊆ 父进程 / child_handle 回写）逐项声明构建，与 `task_spawn` 同一纪律。子进程拿不到清单之外的任何 handle，这与 fork（隐式复制全部能力）有根本区别。
 - 父进程得到子 pid + 子任务 handle；内核把 root/cwd/self 与清单句柄写回**子进程**内存（COW 快照），mlibc 据此重建 fd 表并重缓存。
 - 配套 `A20_SYS_execve`（0x0214，原地替换镜像，复用 `proc_exec`；dispatch 侧跳过 SET_RET 以免覆盖 a0=start_info）。终端控制走类型化 `handle_control`（§5a 类型化控制，无通用 ioctl）。
 
@@ -119,23 +119,34 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 6. 空转机制接入与缺失实现补齐（已完成）
 
-- **Typed channel**：`channel_create` 此前硬编码 `NULL` 类型签名，检查函数不可达。现创建路径复制用户类型签名到两个端点，send 强制 `send_handle_types`/`max_data_size`/`max_handles`，recv 强制 `recv_handle_types`。
-- **时态能力入口**：此前所有 install 路径时态字段恒为 0、无设置入口，sweeper 无调用者。现 `handle_control(op=SET_TEMPORAL/GET_TEMPORAL/SET_LABEL)` 提供入口，语义为仅可增强（non-refreshability）；sweeper 以 `sched_note_timer_deadline` 驱动按约 100ms 节奏运行，AUTO_CLOSE 真正释放对象。
-- **阻塞语义**：channel send/recv 与 event_wait 此前一律返回 `WOULD_BLOCK`。现默认阻塞（tokenized Park/Wake），`A20_MSG_NONBLOCK` 或 `timeout_ns=0` 退回非阻塞；`event_wait` 支持超时（`A20_TIMEOUT_INFINITE` 无限）与最多 64 个事件批量返回。
-- **级联释放**：`handle_close` 此前只关闭 vfile 类对象，channel/eventq/VMO/timer/namespace 全部泄漏且对端永远收不到 `peer_closed`。现按类型统一释放，并在对象销毁时清理 event watch（`a20_eventq_on_object_destroy` 已接线到 channel、event queue、VMO、timer、namespace、task 与 vfile fd 键）。
-- **channel recv 原子性**：实现 reserve/abort/commit 槽位预留，接收方 HT 满时返回 `NO_SPACE`、消息留队，符合 05-ipc.md §2.6 的"不做部分投递"决策。接收 handle 继承发送方的时态约束与安全标签（此前被清零）。
-- **vm_map source**：`vm_map` 此前忽略 `source` 恒创建匿名 VMO。现支持 `MEMORY` handle 直接共享映射（`prot_eff = prot_req ∩ prot_handle`）和 `FILE`/`DEVICE` 的按需分页映射（demand-paged，经核心 page cache，见下文 §7）。
-- **事件常量**：`A20_EVENT_*` 事件位定义补齐（01-types.md），timer → `EXPIRED`、task 退出 → `EXITED`、channel → `MESSAGE_READY`/`PEER_CLOSED`/`CLOSED`。task/timer 的事件键统一为 handle entry 的 object 值（pid/slot+1），修复 watch 永不触发的问题。
-- **timer 对象**：handle entry object 由 slot 改为 slot+1（slot 0 此前是 NULL 指针、handle 不可用）；timer 槽改为引用计数，`closing` 标记阻断 slot ABA，set/cancel/tick 均在 `g_a20_timers_lock` 下读写，tick 触发时持临时引用完成 notify。
-- **对象并发访问**：新增 `a20_handle_lookup_ref_internal()`，在 HT 锁内同步取得对象引用；channel/event/VMO/vfile/socket/namespace 等长期访问路径均已切换，close/sweeper 不再能在 syscall 持有裸指针期间释放对象。
-- **用户指针边界**：channel send/recv、native net sendmsg/recvmsg、xattr、`handle_close_many`、`vm_remap` 与 debug memory map 均改为内核 bounce buffer + `copy_from_user`/`copy_to_user`，不再将用户指针交给核心子系统直接解引用。
-- **task_spawn 发布协议**：`proc_alloc_user_image(..., defer_ready=1)` 支持延迟就绪；子任务的 `abi_mode`、handle table、start info 栈和 trap SP 全部初始化完成后，父任务才调用 `proc_make_ready()`。
-- **channel 并发关闭**：端点最终释放在 `g_ch_lock` 下同时持有濒死端点锁；阻塞发送在等待期间持有 peer 引用，修复对端 close 与 enqueue/wait queue 并发导致的 UAF。
-- **ELF 映像清理/栈页**：新增 `elf_load_info_discard()` 回收 spawn 失败路径的 VMA/pgdir/NOMMU 映像；初始用户栈页与栈增长页在映射前清零，避免跨进程页内容泄漏。
+空转路径已经接上，缺失的实现也补齐了。逐项是：
+
+- Typed channel：`channel_create` 此前硬编码 `NULL` 类型签名，检查函数不可达。现创建路径复制用户类型签名到两个端点，send 强制 `send_handle_types`/`max_data_size`/`max_handles`，recv 强制 `recv_handle_types`。
+- 时态能力入口：此前所有 install 路径时态字段恒为 0、无设置入口，sweeper 无调用者。现 `handle_control(op=SET_TEMPORAL/GET_TEMPORAL/SET_LABEL)` 提供入口，语义为仅可增强（non-refreshability）；sweeper 以 `sched_note_timer_deadline` 驱动按约 100ms 节奏运行，AUTO_CLOSE 真正释放对象。
+- 阻塞语义：channel send/recv 与 event_wait 此前一律返回 `WOULD_BLOCK`。现默认阻塞（tokenized Park/Wake），`A20_MSG_NONBLOCK` 或 `timeout_ns=0` 退回非阻塞；`event_wait` 支持超时（`A20_TIMEOUT_INFINITE` 无限）与最多 64 个事件批量返回。
+- 级联释放：`handle_close` 此前只关闭 vfile 类对象，channel/eventq/VMO/timer/namespace 全部泄漏且对端永远收不到 `peer_closed`。现按类型统一释放，并在对象销毁时清理 event watch（`a20_eventq_on_object_destroy` 已接线到 channel、event queue、VMO、timer、namespace、task 与 vfile fd 键）。
+- channel recv 原子性：实现 reserve/abort/commit 槽位预留，接收方 HT 满时返回 `NO_SPACE`、消息留队，符合 05-ipc.md §2.6 的"不做部分投递"决策。接收 handle 继承发送方的时态约束与安全标签（此前被清零）。
+- vm_map source：`vm_map` 此前忽略 `source` 恒创建匿名 VMO。现支持 `MEMORY` handle 直接共享映射（`prot_eff = prot_req ∩ prot_handle`）和 `FILE`/`DEVICE` 的按需分页映射（demand-paged，经核心 page cache，见下文 §7）。
+- 事件常量：`A20_EVENT_*` 事件位定义补齐（01-types.md），timer → `EXPIRED`、task 退出 → `EXITED`、channel → `MESSAGE_READY`/`PEER_CLOSED`/`CLOSED`。task/timer 的事件键统一为 handle entry 的 object 值（pid/slot+1），修复 watch 永不触发的问题。
+- timer 对象：handle entry object 由 slot 改为 slot+1（slot 0 此前是 NULL 指针、handle 不可用）；timer 槽改为引用计数，`closing` 标记阻断 slot ABA，set/cancel/tick 均在 `g_a20_timers_lock` 下读写，tick 触发时持临时引用完成 notify。
+- 对象并发访问：新增 `a20_handle_lookup_ref_internal()`，在 HT 锁内同步取得对象引用；channel/event/VMO/vfile/socket/namespace 等长期访问路径均已切换，close/sweeper 不再能在 syscall 持有裸指针期间释放对象。
+- 用户指针边界：channel send/recv、native net sendmsg/recvmsg、xattr、`handle_close_many`、`vm_remap` 与 debug memory map 均改为内核 bounce buffer + `copy_from_user`/`copy_to_user`，不再将用户指针交给核心子系统直接解引用。
+- task_spawn 发布协议：`proc_alloc_user_image(..., defer_ready=1)` 支持延迟就绪；子任务的 `abi_mode`、handle table、start info 栈和 trap SP 全部初始化完成后，父任务才调用 `proc_make_ready()`。
+- channel 并发关闭：端点最终释放在 `g_ch_lock` 下同时持有濒死端点锁；阻塞发送在等待期间持有 peer 引用，修复对端 close 与 enqueue/wait queue 并发导致的 UAF。
+- ELF 映像清理/栈页：新增 `elf_load_info_discard()` 回收 spawn 失败路径的 VMA/pgdir/NOMMU 映像；初始用户栈页与栈增长页在映射前清零，避免跨进程页内容泄漏。
 
 ### 7. 仍存在的差距（未实现）
 
-> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](09-native-abi-deepening.md)）已收口： - **file/socket/pipe 事件源接线**：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。 - **event_watch_fs 深化**：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。 - **Pager**（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。 - **monitor**（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。 - **task_mem_read/write**（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。 - **vm_share_region**（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
+> 2026-08 更新：VMO 已迁入核心 MM 层（`kernel/mm/vmo.c`、`kernel/include/mm/vmo.h`），VMAR 改为核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`），因此核心 fault 路径不再依赖任何 ABI 头文件，两套 ABI 也不互相包装依赖。
+>
+> 2026-08（Native ABI 增添与深化，见 [09-native-abi-deepening.md](09-native-abi-deepening.md)）已收口：
+>
+> - file/socket/pipe 事件源接线：socket 收包→READABLE、发送缓冲释放/connect 完成→WRITABLE、connect→CONNECTION、accept 就绪→ACCEPT_READY、对端关闭→ERROR/CLOSED（`net_event_notify`，`kernel/net/`）；pipe 写→读端 READABLE、读→写端 WRITABLE（`kernel/fs/pipe.c`）。
+> - event_watch_fs 深化：vnode-keyed FS 事件（CREATE/DELETE/MODIFY/RENAME）经 EventQ 投递，`event` 的 `fs_name` 字段携带变更名（`a20_fs_notify`，VFS create/unlink/rename/write/link/symlink 路径接线，`vnode_put` 清理 watch）。
+> - Pager（`0x0D00`）：PAGED VMO + pager channel 页供给；缺页经 channel 消息请求、`pager_supply_pages` 回填并唤醒（`kernel/ipc/a20_pager.c`、`kernel/mm/vmo.c`）。
+> - monitor（`0x0D10`）：perf 式软件事件计数对象（task CPU/缺页/切换、系统级缺页/切换），可周期经 EventQ 上报（`kernel/ipc/a20_monitor.c`）。
+> - task_mem_read/write（`0x0211/0x0212`）：TASK handle + READ/WRITE right 的跨进程内存访问（复用 `process_vm_*`）。
+> - vm_share_region（`0x030A`）：地址区间反查导出 MEMORY handle；`vm_protect` 按 VMA 创建时 cap（`vmar_cap`）收紧；`vm_flush(CLEAN)` 范围写回。
 
 - file/socket/pipe 事件源已接线（见上），但事件为边沿触发，`handle_poll` 仍是电平快照。
 - `event_watch_fs` 的路径前缀过滤（`path` 字段）未实现，仅目录级 watch。
@@ -166,9 +177,9 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 ### 已批准设计、待排期的深水区（2026-08 评审通过）
 
-- ~~**VMAR 子树化**~~ **已落地（2026-08）**：`vmar_t` 保留区间树 + `A20_SYS_vm_create_vmar(0x030a)` + `vm_map` E-APPEND 路由字段；天花板经 `vmar_cap` 印章在 protect 路径持续生效（04-memory §3.1）。回归：test_native_mm 第 6 分区（重叠拒绝/上限拒绝/定点映射/cap 印章）。
-- ~~**信号 EventQ 化**~~ **已落地（2026-08）**：`signal_queue_task` 在既有 checkpoint 挂钩旁同步推送 `A20_EVENT_SIGNALED` 事件（signo 走 `data0`，复用现有 pending_event 载荷字段、无需结构演进），TASK/THREAD 两类 watch 皆通知；`a20_task_watch_signals` 包装器就绪，回归见 test_native_deepen 分区 8。mlibc 阻塞路径继续走 checkpoint（futex INTERRUPTED），EventQ 面向监督者/sigwait 式消费推送；CPU 密集循环的完全异步派发仍为文档化限制。
-- ~~**动态链接联调**~~ **内核侧已落地（2026-08）**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
+- ~~VMAR 子树化~~ **已落地（2026-08）**：`vmar_t` 保留区间树 + `A20_SYS_vm_create_vmar(0x030a)` + `vm_map` E-APPEND 路由字段；天花板经 `vmar_cap` 印章在 protect 路径持续生效（04-memory §3.1）。回归：test_native_mm 第 6 分区（重叠拒绝/上限拒绝/定点映射/cap 印章）。
+- ~~信号 EventQ 化~~ **已落地（2026-08）**：`signal_queue_task` 在既有 checkpoint 挂钩旁同步推送 `A20_EVENT_SIGNALED` 事件（signo 走 `data0`，复用现有 pending_event 载荷字段、无需结构演进），TASK/THREAD 两类 watch 皆通知；`a20_task_watch_signals` 包装器就绪，回归见 test_native_deepen 分区 8。mlibc 阻塞路径继续走 checkpoint（futex INTERRUPTED），EventQ 面向监督者/sigwait 式消费推送；CPU 密集循环的完全异步派发仍为文档化限制。
+- ~~动态链接联调~~ **内核侧已落地（2026-08）**：PT_INTERP 检出/解释器加载/入口切换/conventional auxv 端到端验证通过（`smoke-native-dynlink` fakeld 探针）；`vm_map` FILE 源 demand-paging 验证通过（test_native_mm 分区 7）。联调中修复两处内核缺陷：AT_PHDR 计算基准与首 LOAD 头部半页文件背书。剩余：mlibc rtld 共享库制品与应用级联调（§8a 估列）。
 
 ## 与用户决策的对应关系
 

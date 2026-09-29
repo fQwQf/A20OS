@@ -4,7 +4,7 @@ A20OS 当前唯一的 XFCE Wayland 桌面路径就是本目录描述的 **distro
 
 （历史上还有一条 from-source 路径：`user/wayland/` 下自研编译的 wlroots/labwc/xfce 组件，dbus/elogind/seatd/eudev 等服务层用 stub 替代。该路径与 LVGL 原生桌面已退役，归档在分支 `archive/legacy-desktop`，见 `docs/graphics/xfce-wayland-adaptation.md`。）
 
-distro 路径的价值，在于它没有"改自研组件绕过去"的自由度——内核要么把行为做到位，要么桌面起不来。为此在 内核侧补齐了一批 Linux 行为（netlink uevent、`PR_SET_PDEATHSIG`、`/sys/dev/char`、DRM 能力位、唯一 KMS 对象 ID 等），这些内容单独写在 `kernel-requirements.md`。
+distro 路径的价值，在于它没有"改自研组件绕过去"的自由度。内核要么把行为做到位，要么桌面起不来。为此在内核侧补齐了一批 Linux 行为（netlink uevent、`PR_SET_PDEATHSIG`、`/sys/dev/char`、DRM 能力位、唯一 KMS 对象 ID 等），这些内容单独写在 `kernel-requirements.md`。
 
 ## 快速开始
 
@@ -18,7 +18,7 @@ make distro-run ARCH=x86_64 QEMU_GUI_DISPLAY=none   # 无显示器环境
 make rootfs-alpine ARCH=riscv64
 ```
 
-`make distro-run` 做三件事：`dev-build` 编内核、`rootfs-alpine` 出发行版镜像、 最后用 `QEMU_GUI_DISPLAY` 指定的显示后端启动。磁盘布局是 `dev0=fat32.img` （A20OS 自研用户态）+ `dev1=rootfs.img`（发行版），内核从 fat32 引导， 发行版 rootfs 挂到 `/extra`。
+`make distro-run` 做三件事：`dev-build` 编内核、`rootfs-alpine` 出发行版镜像、最后用 `QEMU_GUI_DISPLAY` 指定的显示后端启动。磁盘布局是 `dev0=fat32.img`（A20OS 自研用户态）+ `dev1=rootfs.img`（发行版），内核从 fat32 引导，发行版 rootfs 挂到 `/extra`。
 
 ### 用实例放视频（`run-gui-*` + `GUI_MEDIA`）
 
@@ -37,10 +37,7 @@ make run-gui-riscv64 GUI_MEDIA=~/Videos/demo.mp4       # 其他架构同理
 启动），只构建镜像用 `make ARCH=<arch> image-world PKG_WORLD=xfce
 GUI_MEDIA=...`。
 
-镜像内自带的播放器：**ffplay**（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、
-**parole**（GStreamer 后端）、**mpv**（命令行）。注意 **mpv 目前约 1/10 次崩溃**——它每个内建 Lua 脚本跑在自己的
-线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [known-issues.md](known-issues.md)）；用 ffplay 或重试即可。
-命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
+镜像内自带的播放器有 ffplay（推荐；ffmpeg 的软件解码，实测 guest 内 15/15 次播放/解码全过、0 崩溃）、parole（GStreamer 后端）、mpv（命令行）。**mpv 目前约 1/10 次崩溃**：它每个内建 Lua 脚本跑在自己的线程里，而 A20OS 的 x86_64 每线程状态有 bug（详见 [known-issues.md](known-issues.md)）；用 ffplay 或重试即可。命令行播放：`ffplay /usr/share/a20-media/demo.mp4`（`Super+Enter` 开终端），或在 Thunar 里双击。
 
 ### 桌面里的 JVM 与图形栈
 
@@ -50,7 +47,7 @@ GUI_MEDIA=...`。
 - **图形 API**：world 装了 Mesa（`mesa`/`mesa-dri-gallium`/`mesa-gl`/
   `mesa-gles`/`mesa-egl`/`mesa-gbm` + `mesa-utils`/`mesa-demos`）与
   `virglrenderer`，镜像里有 `swrast`/`kms_swrast`/`virtio_gpu`/`zink` DRI
-  驱动和 `libGL/libEGL/libgbm`。但 **GL 客户端目前出不了图**：内核的 DRM
+  驱动和 `libGL/libEGL/libgbm`。**GL 客户端目前出不了图**：内核的 DRM
   是 dumb-buffer KMS，缺 GEM 对象分配与 render node，PRIME 也只是 memfd
   拷贝。细节与 Minecraft 的前置条件见
   [../graphics/3d-graphics.md](../graphics/3d-graphics.md) 第 8 节。
@@ -59,5 +56,5 @@ GUI_MEDIA=...`。
 
 - [`build.md`](build.md)：rootfs 是怎么构建出来的，以及构建环境里踩过的坑。
 - [`boot.md`](boot.md)：从 A20OS init 到 XFCE 桌面的一整条启动链路。
-- [`kernel-requirements.md`](kernel-requirements.md)：发行版对内核提出了哪些 要求、内核分别在哪里满足。
-- [`known-issues.md`](known-issues.md)：已解决的问题（输入、读路径自死锁）的 根因与修法，以及遗留的 dbus 偶发超时怎么排查。
+- [`kernel-requirements.md`](kernel-requirements.md)：发行版对内核提出了哪些要求、内核分别在哪里满足。
+- [`known-issues.md`](known-issues.md)：已解决的问题（输入、读路径自死锁）的根因与修法，以及遗留的 dbus 偶发超时怎么排查。

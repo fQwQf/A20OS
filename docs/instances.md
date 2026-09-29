@@ -1,12 +1,12 @@
 # 实例化构建与运行（instances/ 与 tools/a20）
 
-A20OS 的构建、运行与冒烟测试配置统一由 **实例清单** 声明：`instances/` 目录下的每个 TOML 文件描述一个完整的、可构建、可运行、可测试的系统实例（架构、板卡、ABI、内核选项、机器配置、根文件系统、网络、GUI、测试期望）。`tools/a20` 读取实例、做完整校验、推导出对应的 Makefile 变量，再调用 make 执行——**Makefile 仍是唯一的构建引擎**，实例层只负责"配置声明 + 变量推导"，两者通过 `make -n` 输出的 QEMU 命令行保持一致。
+A20OS 的构建、运行与冒烟测试配置统一由实例清单声明：`instances/` 目录下的每个 TOML 文件描述一个完整的、可构建、可运行、可测试的系统实例（架构、板卡、ABI、内核选项、机器配置、根文件系统、网络、GUI、测试期望）。`tools/a20` 读取实例、做完整校验、推导出对应的 Makefile 变量，再调用 make 执行。Makefile 仍是唯一的构建引擎，实例层只负责"配置声明 + 变量推导"，两者通过 `make -n` 输出的 QEMU 命令行保持一致。
 
 设计要点：
 
-- **未写的字段不落任何变量**，直接落回 Makefile 默认值。策略只有一个出处（Makefile），实例只携带自己的增量。
-- **校验前置**：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
-- **声明即门禁**：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
+- 未写的字段不落任何变量，直接落回 Makefile 默认值。策略只有一个出处（Makefile），实例只携带自己的增量。
+- 校验前置：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
+- 声明即门禁：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
 
 ## 快速上手
 
@@ -33,7 +33,7 @@ tools/a20 check-flash-backends            # 校验烧录后端注册表并与 ma
 
 实例参数既可以是 `instances/` 下的名字（`qemu-riscv64`），也可以是任意 TOML 文件路径。`--dry-run` 打印将执行的 make/QEMU 命令而不执行。
 
-`run` / `debug` / `test` 在启动 guest 前会做宿主资源预检，不足则**等待**而不是硬启动——见下文。
+`run` / `debug` / `test` 在启动 guest 前会做宿主资源预检，不足则**等待**而不是硬启动，见下文。
 
 需要 Python ≥ 3.11（只用标准库，无第三方依赖）。
 
@@ -170,16 +170,11 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 
 `gui.enabled`、`test.commands`、`test.expect`、`flash.tool`、`package.*` 由 a20 自己消费，不产生 make 变量；`machine.gpu_3d` → `GPU_3D`、`machine.display_mode` → `DISPLAY_MODE`、`machine.extra_qemu` → `EXTRA_QEMU`。
 
-`[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）也**不**导出成 make 变量：它们是 a20 自己按 dataclass 驱动的——串口会话、复位脉冲、命令注入和expect 匹配都不经过任何 recipe。这里曾经导出全部 11 个 `TARGET_*`，其中 8 个没有任何 recipe 读取，于是 `a20 show-vars` 会声称 make 拿到了它其实从未见过的配置。少导出无人消费的变量，比多导出更诚实。
+`[target]` 的其余字段（`baud`、`reset`、`boot_wait`、`boot_timeout`、`console_check`、`commands`、`expect`、`log`）也**不**导出成 make 变量：它们是 a20 自己按 dataclass 驱动的，串口会话、复位脉冲、命令注入和 expect 匹配都不经过任何 recipe。这里曾经导出全部 11 个 `TARGET_*`，其中 8 个没有任何 recipe 读取，于是 `a20 show-vars` 会声称 make 拿到了它其实从未见过的配置。少导出无人消费的变量，比多导出更可靠。
 
-`list` 的"可用动作"列不是分类标签，而是**逐条镜像**对应命令里已经存在的拒绝条件
-（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：
-`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在
-`boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令
-就要在这里补上它的条件——这正是这一列的用途。
+`list` 的"可用动作"列不是分类标签，而是逐条镜像对应命令里已经存在的拒绝条件（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在 `boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令就要在这里补上它的条件，这正是这一列的用途。
 
-`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的
-实例）。想看某个动作的全部目标，优先用它，而不是在 46 行里用眼睛找。
+`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的实例）。想看某个动作的全部目标，优先用它，而不是在 46 行里用眼睛找。
 
 ### 各动作的适用条件
 
@@ -194,7 +189,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `deploy` | 需要 `[target]`；有 `[flash]` 则先烧录，`boot_media` + `media_device` 则先写启动介质，最后同 `console` 验证 |
 | `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
 
-VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里——实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
+VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
 ### 校验规则（选摘）
 
@@ -205,8 +200,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 ### 互斥组合
 
-上面的完整示例为了查阅方便把字段都摆在一起，但一份实例不会同时用上全部。以下
-组合互斥，校验会在编译前拒绝，所以示例里对应的行是注释掉的：
+上面的完整示例为了查阅方便把字段都摆在一起，但一份实例不会同时用上全部。以下组合互斥，校验会在编译前拒绝，所以示例里对应的行是注释掉的：
 
 | 组合 | 原因 |
 | --- | --- |
@@ -219,8 +213,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 ### `a20 show`：选命令之前先看这一屏
 
-`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"
-——在 46 个实例里挑一个时先问的就是这三个问题：
+`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"。在 46 个实例里挑一个时先问的就是这三个问题：
 
 ```text
 $ tools/a20 show vf2-physical
@@ -235,9 +228,7 @@ vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 cons
   manifest    .../instances/vf2-physical.toml
 ```
 
-`needs` 走的是启动前门控用的同一个 `requirement_for`，所以这里看到的数字就是
-真跑起来时被检查的数字；`actions` 与 `list` 的能力列同源。`boot media` 指向
-`(unset!)` 表示 manifest 写了 `boot_media` 却没给 `media_device`，`deploy` 会被拒绝。
+`needs` 走的是启动前门控用的同一个 `requirement_for`，所以这里看到的数字就是真跑起来时被检查的数字；`actions` 与 `list` 的能力列同源。`boot media` 指向 `(unset!)` 表示 manifest 写了 `boot_media` 却没给 `media_device`，`deploy` 会被拒绝。
 
 ### 退出码
 
@@ -251,66 +242,49 @@ vf2-physical  [riscv64]  VisionFive 2 with a physical serial target for a20 cons
 | 3 | 被委派的工具失败（make / QEMU / OpenOCD / 辅助脚本） |
 | 124 | 超时 |
 
-被委派工具的退出码**不会**原样透传：make 对"目标不存在"返回 2，若原样透传，
-它就与 a20 自己的用法错误撞在一起，无法区分。
+被委派工具的退出码**不会**原样透传：make 对"目标不存在"返回 2，若原样透传，它就与 a20 自己的用法错误撞在一起，无法区分。
 
-诊断信息一律走 stderr，报告本身走 stdout。于是 `a20 check > 清单.txt` 拿到的是
-通过清单，失败在 `2>错误.txt`，CI 里可以分开处理。
+诊断信息一律走 stderr，报告本身走 stdout。于是 `a20 check > 清单.txt` 拿到的是通过清单，失败在 `2>错误.txt`，CI 里可以分开处理。
 
 ## 物理目标与上板验证（`[target]`）
 
-其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口
-线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。
-这个段存在，就意味着这是一个物理目标——所以没有 `kind` 字段可以跟它自相矛盾。
+其余所有段描述的要么是构建，要么是 QEMU 里的 guest。`[target]` 描述的是串口线那头那块板：控制台在哪、怎么让它重启、它的启动日志必须出现什么才算真的起来。这个段存在，就意味着这是一个物理目标；所以没有 `kind` 字段可以跟它自相矛盾。
 
 ```bash
 tools/a20 console vf2-physical    # 只接串口做上板检查
 tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 ```
 
-`deploy` 的每一步都对应一个既有机制，而不是新写一套：烧录走
-「烧录后端注册表」一节，写启动介质走 make
-的 `target-write-media`，最后一步与 `console` 完全相同。
+`deploy` 的每一步都对应一个既有机制，而不是新写一套：烧录走「烧录后端注册表」一节，写启动介质走 make 的 `target-write-media`，最后一步与 `console` 完全相同。
 
-`console` 的执行顺序是：复位（可选）→ 等 `console_check` → 等 `boot_wait` →
-注入 `commands` → 等 `expect`。**每一处等待都有上限**：板子没起来、或者起来了
-但不回话，会在一个具名的阶段上结束，而不是把终端挂住。
+`console` 的执行顺序是：复位（可选）→ 等 `console_check` → 等 `boot_wait` → 注入 `commands` → 等 `expect`。**每一处等待都有上限**：板子没起来、或者起来了但不回话，会在一个具名的阶段上结束，而不是把终端挂住。
 
 ### 为什么没有 pyserial
 
-串口是用标准库的 `termios`/`fcntl`/`select` 说的。`tools/a20` 的 PEP 723 头声明
-`dependencies = []`，docs 也承诺只用标准库——为了设置六个标志位而引入
-pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍。
+串口是用标准库的 `termios`/`fcntl`/`select` 说的。`tools/a20` 的 PEP 723 头声明 `dependencies = []`，docs 也承诺只用标准库。为了设置六个标志位而引入 pyserial，对一个每个贡献者都会运行的工具来说是错误的取舍。
 
-波特率编码交给平台自己：Linux 上 `B115200` 是 `0o10002`，BSD 上编号又不一样，
-`termios` 模块里已经带着正确的常量，所以这里不再手写一张表。
+波特率编码交给平台自己：Linux 上 `B115200` 是 `0o10002`，BSD 上编号又不一样，`termios` 模块里已经带着正确的常量，所以这里不再手写一张表。
 
 ### 安全边界
 
-- `reset` 用 `shlex.split` 拆成 argv 后执行，**不走 shell**——清单因此无法把管道
-  或 `;`  smuggle 进来（`reset-cmd; rm -rf /` 会被当成一个字面量参数名）。
-- `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。
-  写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
-- `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，
-  正是 「产物账本」一节 要消灭的那类东西。
+- `reset` 用 `shlex.split` 拆成 argv 后执行，**不走 shell**：清单因此无法把管道或 `;` smuggle 进来（`reset-cmd; rm -rf /` 会被当成一个字面量参数名）。
+- `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
+- `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，正是「产物账本」一节要消灭的那类东西。
 - 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
 
 ## 边角但必要的开关
 
-这些开关平时用不上，但缺了会卡住某类具体场景，所以集中列在这里。
+这些开关平时用不上，但缺了会卡住某类具体场景。
 
 ### `--dry-run`：什么都不碰
 
-`run` / `debug` / `test` / `console` / `deploy` / `flash` / `package` 都接受
-`--dry-run`。它的含义是**一个字节都不写出去**：不构建、不启动 QEMU、不开串口、
-不烧录、不写启动介质，只打印将要执行的命令。
+`run` / `debug` / `test` / `console` / `deploy` / `flash` / `package` 都接受 `--dry-run`。它的含义是**一个字节都不写出去**：不构建、不启动 QEMU、不开串口、不烧录、不写启动介质，只打印将要执行的命令。
 
 ```bash
 tools/a20 console vf2-physical --dry-run   # 只打印，不会往在线板子注入命令
 ```
 
-这一点对 `console` / `deploy` 尤其重要：它们默认会**真的**往串口那头的板子写
-命令。所以这两个命令的 `--dry-run` 必须在任何字节离开进程之前就返回。
+这一点对 `console` / `deploy` 尤其重要：它们默认会**真的**往串口那头的板子写命令。所以这两个命令的 `--dry-run` 必须在任何字节离开进程之前就返回。
 
 ### 资源等待的开关
 
@@ -319,8 +293,7 @@ tools/a20 run qemu-riscv64 --no-wait              # 资源不足立刻失败（C
 tools/a20 run qemu-riscv64 --wait-timeout 120     # 最多等 120 秒
 ```
 
-`--no-wait` 适合 CI：排队等资源会让 job 挂到超时，而 CI 想要的恰恰是"立刻说
-清楚缺什么，然后失败"。
+`--no-wait` 适合 CI：排队等资源会让 job 挂到超时，而 CI 想要的恰恰是"立刻说清楚缺什么，然后失败"。
 
 ### 上板：分开"烧"和"复位"
 
@@ -329,8 +302,7 @@ tools/a20 deploy vf2-physical --no-flash   # 不烧 flash，只写介质 + 上�
 tools/a20 console vf2-physical --no-reset  # 不复位，直接接当前已启动的板子
 ```
 
-`--no-flash` 让你在只改了根文件系统、没动内核时省掉一次烧录。`--no-reset` 让你
-在已经手动起好的板子上做验证，不去碰别人的启动状态。
+`--no-flash` 让你在只改了根文件系统、没动内核时省掉一次烧录。`--no-reset` 让你在已经手动起好的板子上做验证，不去碰别人的启动状态。
 
 ### `a20 check --require-arch`
 
@@ -342,8 +314,7 @@ tools/a20 check --require-arch riscv64 aarch64
 
 ### `a20 regen-drivers`
 
-`components/drivers.toml` 是驱动注册表的手工来源，`components/drivers.mk` 是它的
-生成物。改了 TOML 必须重新生成，否则 `make check-component-registry` 报 stale。
+`components/drivers.toml` 是驱动注册表的手工来源，`components/drivers.mk` 是它的生成物。改了 TOML 必须重新生成，否则 `make check-component-registry` 报 stale。
 
 ```bash
 tools/a20 regen-drivers --dry-run   # 只说会不会改，不写
@@ -352,33 +323,23 @@ tools/a20 regen-drivers             # 写
 
 ### 同一实例不会被并发跑两遍
 
-`a20 test` 对每个实例持有 `.kernel-build/smoke/<name>.lock`（`flock`）。锁在
-**构建之前**获取，因为两个进程各自把完整内核编译一遍写进同一个 `BUILD_DIR`，
-输的那一方会在几分钟后才发现自己输——而它已经把构建产物搅乱了。
+`a20 test` 对每个实例持有 `.kernel-build/smoke/<name>.lock`（`flock`）。锁在**构建之前**获取，因为两个进程各自把完整内核编译一遍写进同一个 `BUILD_DIR`，输的那一方会在几分钟后才发现自己输，而它已经把构建产物搅乱了。
 
-获取锁失败时报 `InstanceBusy`（退出码 1）并指出锁在哪，而不是静默排队等一个
-自己不知道存在的进程。
+获取锁失败时报 `InstanceBusy`（退出码 1）并指出锁在哪，而不是静默排队等一个自己不知道存在的进程。
 
 ### 诊断输出只给尾部
 
-会话失败时打印日志的**最后 80 行**而不是全文。一次 `console` 的日志轻易上万行，
-而有用信息通常在末尾：panic、assert、启动失败原因都在那里。
+会话失败时打印日志的**最后 80 行**而不是全文。一次 `console` 的日志轻易上万行，而有用信息通常在末尾：panic、assert、启动失败原因都在那里。
 
 ### 谁拥有 QEMU 命令行
 
-**make 拥有每一个 flag。** `$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)` 在 make
-里展开，`tools/qemu.py` 读到这个结果并负责执行（build → verify → exec），
-`a20 run` / `debug` 走的是同一条路。所以启动顺序里不再有 shell 配方，
-而命令行只有一个来源。
+make 拥有每一个 flag。`$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_ELF)` 在 make 里展开，`tools/qemu.py` 读到这个结果并负责执行（build → verify → exec），`a20 run` / `debug` 走的是同一条路。所以启动顺序里不再有 shell 配方，而命令行只有一个来源。
 
-`_qemu_argv` 只负责打印这个结果，**因此必须没有前置依赖**：一旦它带上依赖，
-"取一下命令行"就会先把整个世界重新构建一遍。查询命令行要用 `make _qemu_argv`，
-不要加 `-n`——加了会打印出 `printf` 本身，而不是它输出的命令行。
+`_qemu_argv` 只负责打印这个结果，**因此必须没有前置依赖**：一旦它带上依赖，"取一下命令行"就会先把整个世界重新构建一遍。查询命令行要用 `make _qemu_argv`，不要加 `-n`。加了会打印出 `printf` 本身，而不是它输出的命令行。
 
 ## 产物账本（`a20 ledger`）
 
-`tools/a20 ledger <instance>` 报告这个实例**实际**产出了什么：build 目录、源码版本
-（head + 分支 + dirty）、实例解析出的 make 变量，以及每个产物的 size 与 sha256。
+`tools/a20 ledger <instance>` 报告这个实例**实际**产出了什么：build 目录、源码版本（head + 分支 + dirty）、实例解析出的 make 变量，以及每个产物的 size 与 sha256。
 
 ```text
 $ tools/a20 ledger qemu-riscv64
@@ -395,25 +356,15 @@ not built yet:
   .kernel-build/.../extra.img
 ```
 
-三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进
-平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**——正是绝对路径让
-旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
+三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**：正是绝对路径让旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
 
-它取代的是 `docs/platforms/physical-boards.md` 里手抄的那种记录：镜像大小和
-SHA-256 从终端里抄出来、标上日期、旁边写着某个贡献者家目录的绝对路径。那些数字
-无法校验，改了一个字节也没人会发现；重新生成一份账本比重新敲一遍便宜，而手抄的
-数字在长期维护下必然失真。
+它取代的是 `docs/platforms/physical-boards.md` 里手抄的那种记录：镜像大小和 SHA-256 从终端里抄出来、标上日期、旁边写着某个贡献者家目录的绝对路径。那些数字无法校验，改了一个字节也没人会发现；重新生成一份账本比重新敲一遍便宜，而手抄的数字在长期维护下必然失真。
 
-产物路径向 make 查询而不是在 Python 里重算 `BUILD_DIR`——那个名字把 ARCH、BOARD、
-ABI、BRINGUP、NOMMU、SMP 数、驱动部署等十几个开关都编码了进去。
+产物路径向 make 查询而不是在 Python 里重算 `BUILD_DIR`：那个名字把 ARCH、BOARD、ABI、BRINGUP、NOMMU、SMP 数、驱动部署等十几个开关都编码了进去。
 
 ## 宿主端口转发
 
-**默认不做任何端口转发。** 宿主端口是一种会被争用的共享资源，而此前
-`NET_HOSTFWD` 默认 `hostfwd=tcp/udp::5555-:5555`，于是**每一次** QEMU 启动都会
-占用宿主 5555——包括那几十个只用串口、从不接受入站连接的冒烟门禁。结果是任何
-时刻只能跑一个实例，落败的那个以 QEMU 的一句 "could not set up host forwarding
-rule" 收场，指向端口而不是指向真正的争用。
+默认不做任何端口转发。宿主端口是一种会被争用的共享资源，而此前 `NET_HOSTFWD` 默认 `hostfwd=tcp/udp::5555-:5555`，于是**每一次** QEMU 启动都会占用宿主 5555，包括那几十个只用串口、从不接受入站连接的冒烟门禁。结果是任何时刻只能跑一个实例，落败的那个以 QEMU 的一句 "could not set up host forwarding rule" 收场，指向端口而不是指向真正的争用。
 
 现在转发由实例显式声明：
 
@@ -424,24 +375,17 @@ hostfwd = ["tcp::0-:8080"]     # 端口 0 = 由系统分配
 hostfwd = []                    # 显式不要转发（等价于不写）
 ```
 
-`a20 run` / `debug` / `test` 在启动前会打印本实例占用的端口，所以"连哪个端口"
-是实例的属性、看得见的，而不是靠猜。
+`a20 run` / `debug` / `test` 在启动前会打印本实例占用的端口，所以"连哪个端口"是实例的属性、看得见的，而不是靠猜。
 
 ### 为什么默认不是随机端口
 
-QEMU 确实接受 `hostfwd=tcp::0-...` 并正常启动，但它**不会在任何输出里报告自己
-拿到了哪个端口**。随机端口因此意味着"你无从知道该连哪里"，除非 a20 额外拉一条
-QMP 控制通道去查询——为一个更差的可用性付出真实的复杂度。固定端口可写进文档、
-可被脚本引用、每次都一样。
+QEMU 确实接受 `hostfwd=tcp::0-...` 并正常启动，但它**不会在任何输出里报告自己拿到了哪个端口**。随机端口因此意味着"你无从知道该连哪里"，除非 a20 额外拉一条 QMP 控制通道去查询，而那意味着为一个更差的可用性付出真实的复杂度。固定端口可写进文档、可被脚本引用、每次都一样。
 
-多实例并行的正确做法是**声明不同的端口**（可被 review），而不是让端口变成不可
-复现的随机数。
+多实例并行的正确做法是**声明不同的端口**（可被 review），而不是让端口变成不可复现的随机数。
 
 ### 端口也是一项会被等待的资源
 
-声明的端口在启动前会被实际 bind 一次探测（不是读 `/proc`，因为 QEMU 自己也不设
-`SO_REUSEADDR`，只有真的 bind 才知道能不能成）。端口被占用时，行为与内存/CPU
-一致：**等待到释放**，而不是失败。`--no-wait` 仍然可以立即失败。
+声明的端口在启动前会被实际 bind 一次探测（不是读 `/proc`，因为 QEMU 自己也不设 `SO_REUSEADDR`，只有真的 bind 才知道能不能成）。端口被占用时，行为与内存/CPU 一致：**等待到释放**，而不是失败。`--no-wait` 仍然可以立即失败。
 
 ```bash
 tools/a20 ports                    # 谁占了哪些端口、现在空不空、跨实例是否冲突
@@ -449,8 +393,7 @@ tools/a20 ports qemu-riscv64       # 只看一个
 tools/a20 run qemu-riscv64         # 启动前打印本实例的端口
 ```
 
-`a20 ports` 会把跨实例的端口冲突作为提示列出（不判失败：如果你从不让它们同时跑，
-共用一个端口是完全合理的选择），并给出改用端口 0 的建议。
+`a20 ports` 会把跨实例的端口冲突作为提示列出（不判失败：如果你从不让它们同时跑，共用一个端口是完全合理的选择），并给出改用端口 0 的建议。
 
 ## 宿主资源预检
 
@@ -470,14 +413,12 @@ wait timeout     : forever
 
 两个测量点容易做错，代码里都标了原因：
 
-- **可用内存必须取 `MemAvailable`，不能取 `free`。** `free` 不算可回收的 page cache，所以在一台其实很空闲的机器上它常常只有几百 MiB（本机就是 365 MiB，而 `MemAvailable` 是 25 GiB）。用 `free` 的门禁会永远等下去。
-- **空闲的 vCPU 不出现在 load average 里。** 所以 load 单独无法判断"另一个 guest 是否已经占住了这台机器想要的 CPU"，并发数因此单独统计（扫 `/proc` 数 `qemu-system-*`，不用 pgrep）。
+- 可用内存必须取 `MemAvailable`，不能取 `free`。`free` 不算可回收的 page cache，所以在一台其实很空闲的机器上它常常只有几百 MiB（本机就是 365 MiB，而 `MemAvailable` 是 25 GiB）。用 `free` 的门禁会永远等下去。
+- 空闲的 vCPU 不出现在 load average 里。所以 load 单独无法判断"另一个 guest 是否已经占住了这台机器想要的 CPU"，并发数因此单独统计（扫 `/proc` 数 `qemu-system-*`，不用 pgrep）。
 
 ### 不足时等待，而不是失败
 
-资源不足默认**等待到释放**，不是报错退出。这是有意的选择：一个把 8 个
-guest 排着队跑 CI 的工程师，遇到"第 9 个暂时没内存"时想要的不是一条红字，
-而是"等第 7 个跑完"。默认等待上限因此是 `0`（无限）。
+资源不足默认**等待到释放**，不是报错退出。这是有意的选择：一个把 8 个 guest 排着队跑 CI 的工程师，遇到"第 9 个暂时没内存"时想要的不是一条红字，而是"等第 7 个跑完"。默认等待上限因此是 `0`（无限）。
 
 等待期间必须能回答三个问题，所以每次播报都带齐：
 
@@ -493,8 +434,7 @@ a20: waiting to run qemu-riscv64 -- host resources are short
       press Ctrl-C to give up
 ```
 
-只在**缺项集合**变化时播报新增项，另有 30 秒心跳，因此一次等待十分钟不会
-刷出六百行。解除后立刻继续，不要求重新敲命令。
+只在**缺项集合**变化时播报新增项，另有 30 秒心跳，因此一次等待十分钟不会刷出六百行。解除后立刻继续，不要求重新敲命令。
 
 `--no-wait` 改为立即失败，`--wait-timeout SEC` 限定等待时长。预算可用环境变量覆盖，CI 机器余量不同不必改代码：
 
@@ -505,7 +445,7 @@ a20: waiting to run qemu-riscv64 -- host resources are short
 | `A20_WAIT_TIMEOUT` | 0（无限） | 等待上限秒数 |
 | `A20_MIN_DISK_MB` | 2048 | 磁盘需求的下限 |
 
-等待期间只在**缺项种类**变化时播报，另有 30 秒心跳，因此长时间等待不会每 5 秒刷一行。
+等待期间只在缺项种类变化时播报，另有 30 秒心跳，因此长时间等待不会每 5 秒刷一行。
 
 ## 冒烟测试实例
 
@@ -552,13 +492,13 @@ ram_kb = 64
 make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python 里
 ```
 
-`boards` + `flash_kb`/`ram_kb` 是**安全契约，不是说明文档**：实例的 board 或 flash 几何落在允许范围外时，`a20 check` 就直接拒绝，编译根本不会开始。用错几何去擦除不是编译错误那种可回退的失误——一段 512 KiB 的擦除脚本打到 64 KiB 的片子上，会从片子末尾跑出去。
+`boards` + `flash_kb`/`ram_kb` 是**安全契约，不是说明文档**：实例的 board 或 flash 几何落在允许范围外时，`a20 check` 就直接拒绝，编译根本不会开始。用错几何去擦除不是编译错误那种可回退的失误。一段 512 KiB 的擦除脚本打到 64 KiB 的片子上，会从片子末尾跑出去。
 
 几何必须进 key，因为一个 `board` 名会承载多种 flash 尺寸：`board = "stm32f103"` 既指 64 KiB 的 C8，也指 512 KiB 的 ZET6（"xuanwu"）变体，由 `[stm32].xuanwu` 区分。只按 board 判断会让 64 KiB 的实例和 512 KiB 的实例走同一道门，而这正是这个注册表要防的那个 bug。
 
 新增烧录方式只需两步，Python 不用改：加一条 `[[backend]]`，再写对应的 make 目标。
 
-`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里——两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
+`make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里；两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
 
 ## CI 门禁
 
@@ -573,8 +513,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 ## 宿主侧门禁（不启动 guest）
 
-这几条不是 make 目标，但同样是"不能失败的检查不构成验证"这条规则的执行者。
-用法与边界见 [graphics/host-tools.md](graphics/host-tools.md)。
+这几条不是 make 目标，但同样是"不能失败的检查不构成验证"这条规则的执行者。用法与边界见 [graphics/host-tools.md](graphics/host-tools.md)。
 
 | 脚本 | 作用 | 需要 root |
 |---|---|---|
@@ -587,11 +526,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 ## apk world 镜像实例（用包管理组装用户态）
 
-`[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见
-[packaging/overview.md](packaging/overview.md)）：`build` 等价于
-`make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于
-`run-world` / `run-world-gui`——world 镜像作为第二块盘挂载，含
-`/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
+`[rootfs].world` 设置后，实例的构建与启动切换到 apk 流程（详见 [packaging/overview.md](packaging/overview.md)）：`build` 等价于 `make image-world`（打包 → 建本地仓库 → 按 world 清单组镜像），`run` 等价于 `run-world` / `run-world-gui`，world 镜像作为第二块盘挂载，含 `/usr/lib/a20/init` 标记的镜像会被 init chroot 接管（distro 模式）。
 
 例如用 apk 安装完整 XFCE 桌面的实例（`instances/xfce-riscv64.toml`）：
 
@@ -610,11 +545,7 @@ world = "xfce"        # packages/world/xfce.world：labwc + xfce4-* + 字体 + �
 world_size_mb = 4096
 ```
 
-`tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从
-Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false`
-可做纯本地仓库组合。x86_64 变体 `xfce-x86_64` 使用同一个 `xfce` world
-（Wayland/labwc），并在带 `/dev/kvm` 的宿主机上自动启用 KVM 加速。
-注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted 架构。
+`tools/a20 run xfce-riscv64` 一条命令完成组镜像与 GUI 启动。首次组装需从 Alpine 镜像站拉取上游包（之后走 `build/cache/apk` 缓存）；`alpine = false` 可做纯本地仓库组合。x86_64 变体 `xfce-x86_64` 使用同一个 `xfce` world（Wayland/labwc），并在带 `/dev/kvm` 的宿主机上自动启用 KVM 加速。注意 `world` 与 `bringup`、`[test]` 互斥，且仅支持 hosted 架构。
 
 ## 与旧 make 目标的对照
 

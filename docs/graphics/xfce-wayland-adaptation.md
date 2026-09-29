@@ -20,7 +20,7 @@
 
 ## 背景
 
-XFCE 4.20 Wayland 桌面（labwc/wlroots 合成器 + xfce4-panel/xfdesktop）的适配过程中， 曾以修改 submodule 源码（wlroots、labwc、gtk-layer-shell、libxfce4windowing、xfdesktop 等） 的方式绕过内核缺陷。本文档记录的适配工作遵循三条原则：
+XFCE 4.20 Wayland 桌面（labwc/wlroots 合成器 + xfce4-panel/xfdesktop）的适配过程中，曾以修改 submodule 源码（wlroots、labwc、gtk-layer-shell、libxfce4windowing、xfdesktop 等）的方式绕过内核缺陷。适配工作遵循三条原则：
 
 1. 通过强化操作系统自身（内核 + OS 侧用户态源码）消除这些缺陷；
 2. 撤销所有 submodule 源码修改，保持 submodule checkout 纯净；
@@ -91,15 +91,15 @@ libseat/seatd 只接受 `/dev/input/event*` 作为输入设备，原系统只有
 
 ## 未完成 / 已知问题
 
-1. **xfdesktop 崩溃（用户态，非内核）** xfdesktop 启动约 40s 后在 `glib` 的 `g_datalist_id_dup_data` （gbitlock futex 等待）处以空指针崩溃（sepc 偏移 0x268e6， stval=0x10）。调用链为 `xfw_screen_get(gdk_screen_get_default())`， `gdk_screen_get_default()` 返回 NULL。根因在用户态 （GTK3 Wayland 下默认 GdkScreen 未就绪或 xfdesktop 调用时序）， 与内核无关，未在本次改动中处理。建议后续在 xfdesktop 侧加 gdk_screen 空指针防护或调整初始化时序。
+1. xfdesktop 崩溃（用户态，非内核）。xfdesktop 启动约 40s 后在 `glib` 的 `g_datalist_id_dup_data`（gbitlock futex 等待）处以空指针崩溃（sepc 偏移 0x268e6，stval=0x10）。调用链为 `xfw_screen_get(gdk_screen_get_default())`，`gdk_screen_get_default()` 返回 NULL。根因在用户态（GTK3 Wayland 下默认 GdkScreen 未就绪或 xfdesktop 调用时序），与内核无关，未在本次改动中处理。建议后续在 xfdesktop 侧加 gdk_screen 空指针防护或调整初始化时序。
 
-2. **xfce4-panel-wrapper 路径错误（镜像配置）** panel 报 `Failed to spawn the xfce4-panel-wrapper: /home/fqwqf/A20OS/user/build/wayland/riscv64/sysroot/lib/...`—— 构建期绝对路径被写入了镜像配置，属于 install-image 打包问题， 需在安装脚本中改为镜像内相对路径。
+2. xfce4-panel-wrapper 路径错误（镜像配置）。panel 报 `Failed to spawn the xfce4-panel-wrapper: /home/fqwqf/A20OS/user/build/wayland/riscv64/sysroot/lib/...`：构建期绝对路径被写入了镜像配置，属于 install-image 打包问题，需在安装脚本中改为镜像内相对路径。
 
-3. **smoke 测试时间窗** `smoke_qemu_gui.py` 的 "non-blank framebuffer scanout" 阶段固定 15s； 在纯软件渲染 + 模拟 RISC-V 上 15s 通常不够 XFCE 完整起桌面， riscv64 上建议加大该窗口或改用 `--settle` 手动长测。 另外宿主 CPU 被并行任务占用时整个测试会显著变慢。
+3. smoke 测试时间窗。`smoke_qemu_gui.py` 的 "non-blank framebuffer scanout" 阶段固定 15s；在纯软件渲染 + 模拟 RISC-V 上 15s 通常不够 XFCE 完整起桌面，riscv64 上建议加大该窗口或改用 `--settle` 手动长测。另外宿主 CPU 被并行任务占用时整个测试会显著变慢。
 
-4. **vblank 事件节奏** 当前 flip 完成事件在 ioctl 内同步完成（与 virtio-gpu 同步命令模型一致）。 曾试验 60Hz 虚拟 vblank 节奏投递，在慢速模拟环境下观察到不稳定， 故保留同步投递（FIFO/序号/时间戳/EBUSY 语义均已具备）。 后续若要在真机/快速环境下获得精确 vsync 节奏，可将 `drm_mode_pageflip` 中的投递点改为按 `next_vblank_tick` 延迟。
+4. vblank 事件节奏。当前 flip 完成事件在 ioctl 内同步完成（与 virtio-gpu 同步命令模型一致）。曾试验 60Hz 虚拟 vblank 节奏投递，在慢速模拟环境下观察到不稳定，故保留同步投递（FIFO/序号/时间戳/EBUSY 语义均已具备）。后续若要在真机/快速环境下获得精确 vsync 节奏，可将 `drm_mode_pageflip` 中的投递点改为按 `next_vblank_tick` 延迟。
 
-5. **labwc CONFIGURE_TIMEOUT_MS** 恢复为上游 100ms。模拟环境慢速客户端可能超时（超时行为本身安全， 仅按当前几何继续）。若出现窗口定位抖动，可再评估。
+5. labwc CONFIGURE_TIMEOUT_MS 恢复为上游 100ms。模拟环境慢速客户端可能超时（超时行为本身安全，仅按当前几何继续）。若出现窗口定位抖动，可再评估。
 
 ## 如何验证
 
@@ -120,7 +120,7 @@ git submodule foreach 'git status --short | wc -l'
 
 ## 发行版 rootfs 运行（`make distro-run`）
 
-> **发行版路径的完整文档见 [`docs/distro/`](../distro/README.md)**（构建 / 启动 / 内核依赖 / 已知问题）。本节保留历史简况与 DRM 修复细节。
+> 发行版路径的完整文档见 [`docs/distro/`](../distro/README.md)（构建 / 启动 / 内核依赖 / 已知问题）；下面的 DRM 修复细节是历史记录。
 
 单条命令构建内核 + 用 `apk.static` 拉取 Alpine 发行版（含 dbus/elogind/polkit/seatd/eudev + XFCE4 + mesa）为 ext4 根镜像，再以 GUI 显示启动 QEMU。A20OS init 检测到 `/extra/etc/a20-distro` 标记后 `chroot("/extra")` 并 `exec /sbin/init`，由发行版自身的 stage-2 init 编排服务与 XFCE Wayland 会话，内核只提供 Linux ABI + /dev + /proc + /sys。
 
@@ -141,9 +141,9 @@ make distro-run ARCH=x86_64 QEMU_GUI_DISPLAY=none
 
 ### 发行版路径修复的两个内核 DRM bug（`kernel/drivers/gpu/drm.c`）
 
-1. **`drm_mode_get_plane` 结构体越界**：此前给该结构加了 3 个非 UAPI 字段（`possible_crtcs_mask`/`possible_clones_mask`/`type`），`copy_to_user` 按 44 字节写回，溢出 libdrm 栈上 32 字节的 `struct drm_mode_get_plane`，踩掉栈 canary，labwc 启动即在 `drmModeGetPlane` 触发 `__stack_chk_fail`（musl `a_crash`，空写 SIGSEGV）。已改回标准 32 字节 UAPI 结构，plane 的 type 改由属性暴露。
-2. **KMS 对象 ID 冲突**：plane/crtc/connector/encoder 此前都用 id=1。wlroots 的 `get_drm_prop` 用 `DRM_MODE_OBJECT_ANY` 按 ID 反查对象属性，ID 冲突导致它查 plane 时拿到 connector 的 EDID，找不到 plane 的 `type`/`IN_FORMATS`，于是 `Failed to create DRM backend`。已为四类对象分配唯一 ID（connector=1/encoder=2/crtc=3/plane=4），`OBJ_GETPROPERTIES` 改为按唯一 ID 解析（同时兼容 ANY 与具体类型查询），并新增 plane 的 `type=PRIMARY` 属性。
+1. `drm_mode_get_plane` 结构体越界：此前给该结构加了 3 个非 UAPI 字段（`possible_crtcs_mask`/`possible_clones_mask`/`type`），`copy_to_user` 按 44 字节写回，溢出 libdrm 栈上 32 字节的 `struct drm_mode_get_plane`，踩掉栈 canary，labwc 启动即在 `drmModeGetPlane` 触发 `__stack_chk_fail`（musl `a_crash`，空写 SIGSEGV）。已改回标准 32 字节 UAPI 结构，plane 的 type 改由属性暴露。
+2. KMS 对象 ID 冲突：plane/crtc/connector/encoder 此前都用 id=1。wlroots 的 `get_drm_prop` 用 `DRM_MODE_OBJECT_ANY` 按 ID 反查对象属性，ID 冲突导致它查 plane 时拿到 connector 的 EDID，找不到 plane 的 `type`/`IN_FORMATS`，于是 `Failed to create DRM backend`。已为四类对象分配唯一 ID（connector=1/encoder=2/crtc=3/plane=4），`OBJ_GETPROPERTIES` 改为按唯一 ID 解析（同时兼容 ANY 与具体类型查询），并新增 plane 的 `type=PRIMARY` 属性。
 
 修复后发行版路径实测（riscv64 QEMU）：合成器不再崩溃，DRM 后端创建成功，`Virtual-1` modeset 1024x768，`WAYLAND_DISPLAY=wayland-0` 起来，labwc autostart 拉起 XFCE 会话（Xfconf/xfsettingsd 激活，窗口 `wlr_surface` 陆续映射）。输入已打通：eudev 把 `ID_INPUT_*` 写进数据库，libinput 枚举到 event0/event1 并配置成键盘鼠标。
 
-发行版路径的**已知问题与排查笔记**（含已解决的输入 ABI 缺口与读路径自死锁的 根因、遗留的 dbus 偶发超时、测试环境注意点）统一维护在 [`docs/distro/known-issues.md`](../distro/known-issues.md)，本文档不再重复。
+发行版路径的已知问题与排查笔记（含已解决的输入 ABI 缺口与读路径自死锁的根因、遗留的 dbus 偶发超时、测试环境注意点）统一维护在 [`docs/distro/known-issues.md`](../distro/known-issues.md)。

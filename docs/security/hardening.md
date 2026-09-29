@@ -1,17 +1,16 @@
 # A20OS 安全加固状态
 
-本文记录内核安全/硬化特性的当前状态、验证入口与已评估但暂缓的项。
 最后核实：2026-09（当前工作树）。验证记录均为历史记录，引用为当前
 结论前须在当期提交上重新运行。
 
 ## 诚实性原则（fail-closed）
 
-> **未实现的能力必须报告「不存在」，绝不能伪造输出。**
+> 未实现的能力**必须报告「不存在」，绝不能伪造输出**。
 
 这是 A20OS 对安全相关接口的第一原则。理由不是洁癖，而是失效模式的不对称：
 
 一个**缺失**的能力，调用方会得到错误并走降级路径。
-一个**返回成功的桩**，调用方无从察觉，会带着错误信念继续执行——
+一个**返回成功的桩**，调用方无从察觉，会带着错误信念继续执行；
 而且往往正是它最脆弱的地方在相信内核。
 
 本轮修复的每一处都属于后者，且都属于「看起来实现了、实际没有」：
@@ -19,7 +18,7 @@
 | 接口 | 修复前的行为 | 现在 |
 |---|---|---|
 | `AF_ALG` sha256 | `0xa5^i` 异或折叠的伪摘要 | `bind()` 返回 `-ENOENT` |
-| `AF_ALG` cbc(aes) | **明文原样返回**（恒等函数） | 同上；无 provider 时不产生任何数据 |
+| `AF_ALG` cbc(aes) | 明文原样返回（恒等函数） | 同上；无 provider 时不产生任何数据 |
 | `setsockopt(SO_BINDTODEVICE)` | 返回 0，选项被丢弃 | 返回 `-EOPNOTSUPP` |
 | `getsockopt(TCP_CONGESTION)` | 报 `cubic`，实际只有 lwIP Reno | 报 `reno` |
 | `getsockopt(TCP_INFO)` | 写 1 字节状态、其余清零 | 返回 `-EOPNOTSUPP` |
@@ -27,13 +26,13 @@
 | `/proc/<pid>/io` | `rchar` 打印 CPU ticks | 真实 I/O 计数 |
 | `/proc/loadavg` | 常量 `0.00 0.00 0.00 1/64 1` | 真实 1/5/15 分钟 EMA |
 | `/proc/pressure` | 算出 avg60/300 后打印 `0.00` | 三档均值均真实输出 |
-| `reboot()` | **无任何权限检查** | 要求 `CAP_SYS_BOOT` |
+| `reboot()` | 无任何权限检查 | 要求 `CAP_SYS_BOOT` |
 | `prlimit64(pid, ...)` | 丢弃 `pid`，只能操作自己 | 支持跨进程，受权限约束 |
 | `setrlimit(未实现项)` | 返回 0 | 返回 `-EINVAL` |
 
-`make check-honesty-policy` 以**否定断言**锁定上述性质：它检查这些反模式
+`make check-honesty-policy` 以否定断言锁定上述性质：它检查这些反模式
 不会重新出现，而不只是检查某个标记字符串存在。该门禁本身经过「故意引入
-回归」的验证——改回旧行为后它会报错并非零退出。
+回归」的验证。改回旧行为后它会报错并非零退出。
 
 一条推论适用于所有枚举型接口：未被显式处理的取值应各自返回
 `-EOPNOTSUPP`/`-EINVAL`，**不要落进统一的 `return 0` 兜底**。否则下一个
@@ -45,12 +44,12 @@
 | 特性 | 实现 | 验证 |
 |---|---|---|
 | 用户指针校验 | `kernel/mm/mm.c` 的 `copy_from_user`/`copy_to_user` 统一入口：范围检查（`user_range_ok`，防回绕）+ 逐页 PTE_V/PTE_U/可写校验 + COW 折断；无 KERNEL_DS/set_fs 模式 | 全部 syscall 路径强制经过 |
-| 监督模式访问防护 | x86_64 `x86_64_enable_smep_smap()`（CPUID leaf 7 门控 CR4.SMEP/SMAP，`trap_init` 每 CPU 调用）；aarch64 `aarch64_enable_pan()`（ID_AA64MMFR1_EL1.PAN 门控 SCTLR_EL1.PAN）；riscv64 用户 trap 入口显式 `csrc` 清除 SUM 位（保持 SUM=0，不只是"从未置位"）。内核不直接解引用用户 VA——Linux ABI 与 Native ABI 的用户指针访问统一经 `copy_from/to_user` 的直映射拷贝辅助（Native net 的 bind/connect/accept/getname 原先把裸用户指针交给核心层解引用，已改为内核缓冲暂存 + copy 进出），故无需 stac/clac 窗口 | `smoke-x86_64`/`smoke-aarch64`（默认 CPU 空操作路径）；`-cpu max` 完整引导到 mksh 无 fault（防护实际生效路径）；`smoke-riscv64`/`smoke-abi-linux` 验证 riscv64 无隐藏直接解引用 |
+| 监督模式访问防护 | x86_64 `x86_64_enable_smep_smap()`（CPUID leaf 7 门控 CR4.SMEP/SMAP，`trap_init` 每 CPU 调用）；aarch64 `aarch64_enable_pan()`（ID_AA64MMFR1_EL1.PAN 门控 SCTLR_EL1.PAN）；riscv64 用户 trap 入口显式 `csrc` 清除 SUM 位（保持 SUM=0，不只是"从未置位"）。内核不直接解引用用户 VA。Linux ABI 与 Native ABI 的用户指针访问统一经 `copy_from/to_user` 的直映射拷贝辅助（Native net 的 bind/connect/accept/getname 原先把裸用户指针交给核心层解引用，已改为内核缓冲暂存 + copy 进出），故无需 stac/clac 窗口 | `smoke-x86_64`/`smoke-aarch64`（默认 CPU 空操作路径）；`-cpu max` 完整引导到 mksh 无 fault（防护实际生效路径）；`smoke-riscv64`/`smoke-abi-linux` 验证 riscv64 无隐藏直接解引用 |
 | 用户态 W^X | `kernel/mm/wx.c` 单一策略 `mm_wx_filter_prot()`，mmap/mprotect/ELF 装载全路径过滤；默认 deny（-EACCES），cmdline `a20.wx=strip|off` 可降级 | `user/cmds/stress/wx_aslr_test.c`（RWX 拒绝）；全量 195 个静态 musl 二进制扫描零 RWX PT_LOAD |
 | 内核自身 W^X（KXAN） | `kernel/arch/{riscv64,x86_64,aarch64}/mm/kwx.c`：`arch_kernel_wx_finalize()` 在 `mm_init()` 后把引导大页旁路重建为 text=ROX/rodata=RO/data=RW+NX、直映射 NX；drvmod 模块 text=RX（`arch_kwx_module_protect`）；aarch64 置回 SCTLR_EL1.WXN | 启动自检（`mm_query_leaf` 四点断言，失败 panic）+ `[KXAN]` 日志行；smoke-riscv64/abi-linux/x86_64/aarch64 + smoke-smp-bringup（2 核）全 PASS。边界见 `docs/security/kernel-wx.md` |
 | ASLR | `kernel/mm/aslr.c`：栈顶向下页对齐偏移（64 位 10 位熵，受 vdso_layout 约束）、mmap 基址 per-process 随机（64 位 20 位熵）、brk 起始随机偏移；PIE 基址原有 11 位熵。fork 继承布局（Linux 语义） | `wx_aslr_test`：两次 exec 栈/mmap 地址不同；`cat /proc/self/maps` 两次运行 `[stack]` 区间不同 |
 | 内核栈 canary | `kernel/core/stack_protector.c`：`__stack_chk_guard`（熵池就绪后随机化）+ `__stack_chk_fail`；`-fstack-protector-strong` 默认开（`CONFIG_STACK_PROTECTOR`） | 全架构零警告构建；smoke 无 stack smashing |
-| seccomp | `kernel/ipc/seccomp.c`：cBPF verifier + STRICT/FILTER 模式 + fork 继承，挂在 syscall 主路径。**树内无任何服务安装 filter**——机制可用，但默认未施加 | `smoke-syscall-ext` |
+| seccomp | `kernel/ipc/seccomp.c`：cBPF verifier + STRICT/FILTER 模式 + fork 继承，挂在 syscall 主路径。树内无任何服务安装 filter，机制可用但默认未施加 | `smoke-syscall-ext` |
 | capabilities | 16 个 caps 子集（`kernel/include/proc/proc.h`），capset EPERM 矩阵在 `kernel/proc/cred.c`。缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG | syscall 覆盖表 |
 | `/proc/<pid>/pagemap` 访问门 | 逐条 PFN 记录曾对任意 uid 可读（`procfs_fread` 中唯一漏掉 `proc_task_may_access` 的 per-pid 读取器），可击穿用户态 ASLR 并暴露内核直映射布局 | 已加归属检查，跨 uid 读返回 `-EACCES` |
 | 权限门：reboot/poweroff | `sys_reboot` 的每个出口都会终止机器，而 magic 是公开 ABI 常量而非密钥 | 要求 `CAP_SYS_BOOT` 或 `euid==0`，与 `sys_missing.c` 的 kexec 入口同一约定 |
@@ -62,7 +61,7 @@
 ## 存储持久性
 
 `fsync()` 此前只保证「数据到达设备」，而设备的易失写缓存仍会在断电时丢失
-内容——即向调用方承诺了它无法兑现的持久性。对服务器上的数据库而言这是
+内容：即向调用方承诺了它无法兑现的持久性。对服务器上的数据库而言这是
 第一红线：被告知已提交的事务可能在断电后消失。
 
 现状：
@@ -79,7 +78,7 @@
   新增包装层时必须转发全部能力。
 
 验证入口：`make smoke-fsync-durability`。该门禁断言 `block_flushes` 计数器
-**确实增长**，而非仅检查 `fsync()` 返回 0——后者在修复前同样返回 0，所以
+确实增长，而非仅检查 `fsync()` 返回 0。后者在修复前同样返回 0，所以
 只检查返回值等于什么都没验证。
 
 未覆盖：AHCI 路径仅完成编译验证（`ahci.c` 位于 `CONFIG_AHCI` 之后，树内
@@ -92,7 +91,7 @@
 
 内核链接地址固定（如 riscv64 `VIRT_BASE = 0xFFFFFFC080200000`）。
 真 KASLR 的障碍不是代码重定位（`-mcmodel=medany` 的文本基本可搬），
-而是**直映射偏移 `PAGE_OFFSET` 是编译期常量并在全内核内联使用**
+而是直映射偏移 `PAGE_OFFSET` 是编译期常量并在全内核内联使用
 （所有 `pa + PAGE_OFFSET` 形式的直映射访问、外设 MMIO 基址、页表
 遍历宏）。可行路线：先把 PAGE_OFFSET 变成 per-boot 运行时变量
 （所有引用点收编为 `phys_to_virt()` 类访问器），再在入口汇编按熵源

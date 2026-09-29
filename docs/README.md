@@ -8,12 +8,12 @@
 
 ## 文档范围与权威性
 
-- **当前事实文档**：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
-- **设计与规划文档**：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
-- **研究笔记**：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
-- **历史档案**：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
-- **第三方材料**：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
-- **冲突时的顺序**：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与当前提交匹配的运行日志，最后才是叙述性文档。
+- 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
+- 设计与规划文档：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
+- 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
+- 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
+- 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
+- 冲突时的顺序：HEAD 源码和头文件优先，其次是根 `Makefile` 与 `tools/*.mk`/测试脚本，再其次是与当前提交匹配的运行日志，最后才是叙述性文档。
 
 ## 文档时效性约定
 
@@ -23,7 +23,7 @@
 - 单篇文档头部的"最后核实"日期表示内容在该时点与源码核对过；日期久远不等于内容失效。
 - 运行类结论（PASS、耗时、性能数字）只在附上产生它的命令、配置和提交时有效。引用任何测试结论前，按 [testing-gates.md](testing-gates.md) 的入口在当前提交上重新运行；历史运行记录见 [archive/](archive/)。
 
-如果你刚接触项目，不知道自己该看什么，下面几条路径应该能帮到你。
+刚接触项目的话，下面几条路径可能用得上。
 
 ## 快速开始（给新贡献者）
 
@@ -33,7 +33,7 @@
 - [instances.md](instances.md)：实例化构建/运行/冒烟声明（`instances/*.toml` 与 `tools/a20`）与组件注册表
 - [process-scheduler.md](process-scheduler.md)：当前进程状态、CPU 所有权、Park/Wake、timeout、信号与 SMP 调度协议
 - [testing-gates.md](testing-gates.md)：本地 smoke 测试与门禁检查
-- [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及**代码与注释规范**（语言、格式、何时该写注释、锁序与 ABI 注释约定）
+- [CONTRIBUTING.md](CONTRIBUTING.md)：贡献流程，以及代码与注释规范（语言、格式、何时该写注释、锁序与 ABI 注释约定）
 - [drivers/guide/getting-started.md](drivers/guide/getting-started.md)：从第一个驱动开始理解内核接入方式
 - [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)：当前公认需要改进的地方和切入方向
 - [server-readiness.md](server-readiness.md)：把系统当服务器用之前，先读这篇（它直说了还差什么）
@@ -49,7 +49,7 @@
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
 - [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu 3D 图形加速栈的原理、内核接口与当前状态清单
 - [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂上、把像素送上屏的路线图（VIRTGPU UAPI、ABI 门禁、排序论证、非目标）
-- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套——`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_preflight.py`（启动前资源门禁）
+- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_preflight.py`（启动前资源门禁）
 - [graphics/real-hardware-gpu.md](graphics/real-hardware-gpu.md)：真机 GPU 的现实边界：scanout（2–4 周）与 3D 加速（不可行）是两件事，附实测驱动规模与逐 SoC 结论
 - [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：**已完全退役**（描述已删除的 `user/wayland/` 栈），仅供追溯
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
@@ -110,4 +110,4 @@
 
 ---
 
-这些文档既包含当前接口说明，也包含研究设计与历史记录。引用能力或测试结论时，请先按上面的范围和时效性约定判断其性质。
+这些文档既包含当前接口说明，也包含研究设计与历史记录。引用能力或测试结论时，先按上面的范围和时效性约定判断其性质。

@@ -1,7 +1,6 @@
 # 内核自身 W^X（KXAN：内核映像段权限分离）
 
-用户态 W^X（`kernel/mm/wx.c`）解决的是进程地址空间；本文档描述内核**自身**映像
-与直映射的权限收口。目标是引导完成后：
+用户态 W^X（`kernel/mm/wx.c`）解决的是进程地址空间。内核**自身**映像与直映射的权限收口是另一回事，目标是引导完成后：
 
 - 内核 `.text` 只读可执行（ROX），`.rodata` 只读不可执行（RO+NX），
   `.data`/`.bss` 读写不可执行（RW+NX）；
@@ -22,8 +21,8 @@
    占用的 2 MiB 块再拆为 4 KiB 页并按段打权限；非 RAM 叶项（MMIO）只去 X。
    中间级表经 `pt_map_kernel()` 复制的根项被所有进程页表**共享**，之后的
    修改（如模块打标）对所有地址空间同时生效。
-3. **旁路构建 + 原子切换**：新页表先全部建好，再用一次写入替换活动页表
-   中的大页项，最后全局 TLB flush。禁止"先装 NX 大页再拆块"——那会让
+3. 旁路构建 + 原子切换：新页表先全部建好，再用一次写入替换活动页表
+   中的大页项，最后全局 TLB flush。禁止"先装 NX 大页再拆块"：那会让
    CPU 只能靠 TLB 残存项续命，任何 TLB miss 都在 NX 的 .text 上取指故障，
    而 trap vector 同样 NX，直接三连环卡死（riscv64 SMP=2 实测）。
 4. 自检：`mm_query_leaf()` 直接查询 text/rodata/data/映像外 RAM 四处
@@ -83,7 +82,7 @@ GOT 留在 data 区。打标后做本核 TLB flush，并在板级支持时做远
 - `trap.S` 的 isr_common 与 syscall_entry_saved 在保存用户 FS base 后
   切换 FS base 到内核 stub，`__return_to_user` 在 iretq 前恢复原值
   （内核态代码永远读内核 canary，不再触碰可能尚未 demand-page 的用户
-  TLS 页——否则页错误处理程序自身递归）。
+   TLS 页；否则页错误处理程序自身递归）。
 
 残余边界：新 exec 任务首帧 fs_base=0，用户态 musl 用全局 canary 不读
 %fs:0x28，无影响；aarch64 若编译器同样发 TLS canary（tpidr_el0+0x28），
@@ -91,25 +90,30 @@ GOT 留在 data 区。打标后做本核 TLB flush，并在板级支持时做远
 
 ## 已知边界
 
-- **aarch64 无远程 TLB shootdown**：qemu-virt-aarch64 板未接
-  `remote_tlb_flush` op。模块打标只做本核 `tlbi vmalle1`；理论上从核可能
-  持有覆盖模块页的 2 MiB NX block 旧翻译，在该核上首次执行模块代码时会
-  误报指令 abort。实际触发需要模块在 SMP 运行后加载且在非加载核上执行，
-  目前未发现触发；要收口需为 aarch64 接 IPI shootdown（参照
-  `rv64_smp_remote_tlb_flush`）。
-- **VirtualBox aarch64 板**：引导映射布局不同（RAM 在 PA 0x08000000，
-  `boot_l1[1]` 已是 L2 表），本机制未覆盖；`entry.S` 从核路径在
-  `CONFIG_BOARD_VIRTUALBOX_AARCH64` 下保持清除 WXN。可行方案是按同一
-  模式拆 `boot_l1[0]` 的 1 GiB normal block，但无法在本环境验证，未交付。
-- **aarch64 NOMMU**：身份映射即全部，无高半区可分；保持现状。
-- **loongarch64**：内核空间经 DMW 直译窗口，完全绕过多级页表（见
-  `pt_map_kernel` 注释），没有可按段打权限的页表层级；要做需要改用页表
-  映射内核映像窗口（大改启动路径），本次未动。
-- **ppc64le**：radix MMU 平台代码在
-  `kernel/arch/ppc64le/platform/radix_mmu.c`，smoke 无覆盖、无 QEMU 验证
-  路径，未动；机制上可仿照 x86_64 拆 radix 大页。
-- **arm32 / riscv32 / loongarch32 / armv7m**：32 位或 MCU 平台，内核映像
-  映射机制各异（arm32 有 `mm/pgtbl.c`），无 smoke 验证路径，未动。
+aarch64 无远程 TLB shootdown：qemu-virt-aarch64 板未接
+`remote_tlb_flush` op。模块打标只做本核 `tlbi vmalle1`；理论上从核可能
+持有覆盖模块页的 2 MiB NX block 旧翻译，在该核上首次执行模块代码时会
+误报指令 abort。实际触发需要模块在 SMP 运行后加载且在非加载核上执行，
+目前未发现触发；要收口需为 aarch64 接 IPI shootdown（参照
+`rv64_smp_remote_tlb_flush`）。
+
+VirtualBox aarch64 板的引导映射布局不同（RAM 在 PA 0x08000000，
+`boot_l1[1]` 已是 L2 表），本机制未覆盖；`entry.S` 从核路径在
+`CONFIG_BOARD_VIRTUALBOX_AARCH64` 下保持清除 WXN。可行方案是按同一
+模式拆 `boot_l1[0]` 的 1 GiB normal block，但无法在本环境验证，未交付。
+
+aarch64 NOMMU 的身份映射即全部，无高半区可分，保持现状。
+
+loongarch64 的内核空间经 DMW 直译窗口，完全绕过多级页表（见
+`pt_map_kernel` 注释），没有可按段打权限的页表层级；要做需要改用页表
+映射内核映像窗口（大改启动路径），本次未动。
+
+ppc64le 的 radix MMU 平台代码在
+`kernel/arch/ppc64le/platform/radix_mmu.c`，smoke 无覆盖、无 QEMU 验证
+路径，未动；机制上可仿照 x86_64 拆 radix 大页。
+
+arm32 / riscv32 / loongarch32 / armv7m 属 32 位或 MCU 平台，内核映像
+映射机制各异（arm32 有 `mm/pgtbl.c`），无 smoke 验证路径，未动。
 
 ## 验证
 

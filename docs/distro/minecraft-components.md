@@ -1,13 +1,13 @@
 # Minecraft 1.21.11 — per-component readiness
 
-This document audits every component Minecraft needs on A20OS, one at a time, from
-the image contents rather than from GUI runs.  It exists because watching the live
-desktop turned out to be a poor instrument: a window that never appears cannot tell
-you *which* of a dozen libraries is wrong, and several earlier conclusions in
+Every component Minecraft needs on A20OS is audited here one at a time, from the
+image contents rather than from GUI runs.  Watching the live desktop turned out to
+be a poor instrument for this: a window that never appears cannot tell you *which*
+of a dozen libraries is wrong, and several earlier conclusions in
 `docs/graphics/3d-graphics.md` were drawn from evidence that could not support them
 (see "Method note" below).
 
-Everything here is reproducible from the image with `debugfs`, `readelf` and the
+Everything is reproducible from the image with `debugfs`, `readelf` and the
 `dlopen` log the LD_PRELOAD shim already produced.
 
 ## The root finding: musl JVM, glibc natives
@@ -20,8 +20,8 @@ Everything here is reproducible from the image with `debugfs`, `readelf` and the
 
 So every native is a foreign ABI in this process.  gcompat resolves *symbol names*,
 which is enough for C, but glibc symbol **versioning is ignored by musl's loader**
-and gcompat cannot reproduce glibc's C++ runtime interaction.  That distinction is
-the whole story of this file:
+and gcompat cannot reproduce glibc's C++ runtime interaction.  That distinction
+drives everything below:
 
 * C natives (liblwjgl, liblwjgl_opengl, libglfw, liblwjgl_stb, libfreetype,
   liblwjgl_tinyfd, libjemalloc) — load and run under gcompat.
@@ -35,7 +35,7 @@ the whole story of this file:
     loaded:      liblwjgl.so  liblwjgl_opengl.so  libglfw.so  liblwjgl_stb.so  libopenal.so
     never loaded: libjemalloc.so  libjtracy-jni-linux.so  liblwjgl_tinyfd.so
 
-That leaves **exactly one C++ native on the critical path: `libopenal.so`**.
+That leaves **exactly one C++ native on the critical path**, `libopenal.so`.
 `libjtracy` is gated off in a production client, `libjemalloc` is bypassed by the
 launcher, and the rest are C.
 
@@ -66,20 +66,20 @@ launcher, and the rest are C.
 contains a musl build of the same library**: `/usr/lib/libopenal.so.1`
 (openal-soft 1.24.3, NEEDED `libc.musl-x86_64.so.1` + `libstdc++.so.6` musl).
 
-LWJGL's OpenAL support is pure dynamic binding — there is no `liblwjgl_openal.so`
-in `natives/`, only the OpenAL library itself — so
+LWJGL's OpenAL support is pure dynamic binding: there is no `liblwjgl_openal.so`
+in `natives/`, only the OpenAL library itself.  So
 `-Dorg.lwjgl.openal.libname=...` can point at the musl build directly:
 
     -Dorg.lwjgl.openal.libname=/usr/lib/libopenal.so.1
 
 That removes the glibc C++ library from the process.  Measured effect: MC no longer
 dies.  The run that used to abort with a native C++ throw now gets past it and
-reports a Java-level failure instead —
+reports a Java-level failure instead:
 
     [Render thread/ERROR]: Error starting SoundSystem. Turning off sounds & music
     java.lang.IllegalStateException: Failed to open OpenAL device
 
-— after which MC keeps going (resource manager reload, unifont, title-screen
+After which MC keeps going (resource manager reload, unifont, title-screen
 requests) with **zero** native aborts.  Sound is off; the process is alive.
 
 ### Audio: OpenAL is fine, the kernel PCM does not open through ALSA
@@ -104,7 +104,7 @@ backend, because the library NEEDs only
 `libstdc++.so.6 libgcc_s.so.1 libc.musl-x86_64.so.1`.  That was wrong: this
 openal-soft **dlopens its backends**.  It imports `dlopen`/`dlsym` and carries
 `AlsaBackendFactory`/`PulseBackendFactory`/`JackBackendFactory`/`NullBackendFactory`
-plus `libasound.so.2`, `libpulse.so.0`, `libjack.so.0` as open targets — which is
+plus `libasound.so.2`, `libpulse.so.0`, `libjack.so.0` as open targets, which is
 exactly why none of them shows up as NEEDED.
 
 So the single failing step is `snd_pcm_open("default")`.  Two things about it:
@@ -123,7 +123,7 @@ Two files therefore ship to remove the noise and give applications a device:
   plugin chain (which otherwise fails with
   `ALSA lib pulse.c:242:(pulse_connect) PulseAudio: Unable to connect`).
 * `/etc/openal/alsoft.conf` selects the null backend, so applications get a real
-  device — the "No Output" one — and their audio subsystems initialise quietly
+  device (the "No Output" one) and their audio subsystems initialise quietly
   instead of failing.  Switch `drivers` to `alsa` once the PCM opens.
 
 Verified in a guest run with the configuration installed:
@@ -191,6 +191,7 @@ Fixing this is kernel work, in this order: put `snd_pcm_hw_params`, `snd_pcm_inf
 HW_REFINE (report the supported format/rate/channel/period masks and intervals — the
 same negotiation `alsa_pcm_hw_params` already performs for the set path), INFO and
 PVERSION, then switch `/etc/openal/alsoft.conf` from `drivers = null` to `alsa`.
+
 #### The ABI fix landed, and it was not the whole blocker
 
 The layouts and ioctls above have since been corrected in `alsa.c` (commit
@@ -207,7 +208,7 @@ Booting that kernel and asking OpenAL Soft for an ALSA device still fails the sa
     [ALSOFT] (WW) Failed to open playback device: Could not open ALSA device "default"
 
 So the wrong ABI was one defect rather than the whole cause, and the remaining one is
-*below* the ioctl layer — the open does not get far enough to be explained by a
+*below* the ioctl layer: the open does not get far enough to be explained by a
 rejected request alone, which points at the devfs open path
 (`DEVFS_ALSA_PCM` -> `alsa_pcm_create_vfile()`, which fails the whole `open()` if it
 returns NULL) or at how the audio device itself is registered.
@@ -221,13 +222,13 @@ number in the `default:` branch of the PCM and control dispatch (and a line in t
 open path) so one run shows exactly which call fails.  Two other things to settle at the
 same time: the QEMU instance passes **no audio device** (`hda`/`virtio-snd` driver
 modules exist in `user/build/x86_64/*.a20drv` but nothing binds without a device), while
-`pc-spkr` is linked into the kernel and may be the only audio device present — so the
+`pc-spkr` is linked into the kernel and may be the only audio device present, so the
 capabilities that device advertises decide whether a PCM can open at all.
 
 #### Root cause: the ALSA layer bound the tone-only PC speaker
 
-Settled statically.  Only one audio device registers in this configuration — the
-in-kernel PC speaker — and what it advertises is
+Settled statically.  Only one audio device registers in this configuration, the
+in-kernel PC speaker, and what it advertises is
 
     .flags = A20_AUDIO_CAP_TONE
 
@@ -236,8 +237,8 @@ with no `A20_AUDIO_CAP_PCM`.  The two drivers that do advertise PCM are modules
 instance does not pass.
 
 `alsa_audio_get()` made that worse by taking the first audio class device
-unconditionally — `class_device_get_by_type(DEV_CLASS_AUDIO, 0)`, which is the PC
-speaker — so every PCM path returned `-EOPNOTSUPP`, HW_REFINE among them.  libasound
+unconditionally, `class_device_get_by_type(DEV_CLASS_AUDIO, 0)`, which is the PC
+speaker, so every PCM path returned `-EOPNOTSUPP`, HW_REFINE among them.  libasound
 calls HW_REFINE from `snd_pcm_open()` through `snd_pcm_hw_params_any()`, so the open
 failed right there.  That is the whole "Could not open ALSA device" story, and it means
 the wrong ABI and the wrong device were two separate defects stacked on each other.
@@ -248,7 +249,7 @@ tone-only system now reports `-ENODEV` for PCM instead of pretending.
 
 Real audio needs an audio device in the VM, and that half is now verified: with
 `-device intel-hda -device hda-duplex` on the command line and `hda.a20drv` staged in a
-path the driver manager scans (`/bin/lib/drivers`, or `/boot/drivers` — the stock image
+path the driver manager scans (`/bin/lib/drivers`, or `/boot/drivers`; the stock image
 also carries it in `/lib/drivers`), the kernel binds it:
 
     [DRIVER] registered driver 'hda' (class=6)
@@ -260,7 +261,7 @@ is exactly the case the selection fix above exists for.  `instances/xfce-x86_64.
 now carries the audio device.
 
 Whether ALSA can then open the PCM is answered: yes, and deterministically.  A
-freestanding probe (`open()` plus the raw ioctls — no libasound and no Minecraft, so the
+freestanding probe (`open()` plus the raw ioctls: no libasound and no Minecraft, so the
 intermittent startup stall cannot interfere) walks the whole open path against
 `/dev/snd/pcmC0D0p`, and every call returns 0:
 
@@ -275,10 +276,8 @@ this check had all stalled before sound init, which is why the raw probe replace
 
 `/etc/openal/alsoft.conf` still says `drivers = null`: that is the configuration MC is
 verified to start its sound engine on, and the one-line switch to `alsa` is now backed by
-the probe above — worth doing together with a run that reaches sound init and prints
+the probe above. Worth doing together with a run that reaches sound init and prints
 `OpenAL initialized on device ...`.
-
-
 
 ### Measured results in the guest
 
@@ -296,14 +295,13 @@ the probe above — worth doing together with a run that reaches sound init and 
 | an in-guest Java harness | must mirror the launcher's flags (`-XX:+UnlockDiagnosticVMOptions -XX:-ImplicitNullChecks`), as MC does |
 | `python3` + ctypes | segfaulted once (null deref inside `libpython3.12.so.1.0`, `stval=0x0`) — a new instance of the still-unexplained crash class, not a MC component |
 
-
 ### Long-term options for the glibc-native problem
 
-1. **Build the LWJGL natives for musl** (correct for a musl distro; LWJGL ships only
+1. Build the LWJGL natives for musl (correct for a musl distro; LWJGL ships only
    glibc Linux natives).  Largest effort, no gcompat in the loop.
-2. **Ship a real glibc runtime and a glibc JDK**, running MC outside musl entirely.
+2. Ship a real glibc runtime and a glibc JDK, running MC outside musl entirely.
    Largest image, removes the bridge rather than shimming it.
-3. **Substitute musl system libraries** wherever LWJGL allows a `libname` override
+3. Substitute musl system libraries wherever LWJGL allows a `libname` override
    (OpenAL today; GLFW and FreeType are candidates if the glibc builds misbehave).
    Smallest change, keeps gcompat for LWJGL's own C JNI objects only.
 
@@ -323,5 +321,5 @@ distinction and should be read with this correction in mind.
 
 Window presentation (an X11 client creating and mapping a window that is never
 composited) is **not** addressed here.  It is a graphics-runtime question and it is
-independent of the component audit above: MC's GL path currently completes with no
+independent of the components above: MC's GL path currently completes with no
 X window created, so the two problems are separate.

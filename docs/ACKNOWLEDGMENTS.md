@@ -1,10 +1,10 @@
 # ACKNOWLEDGMENTS
 
-A20OS 使用并参考了许多开源项目与公开标准。本文档集中记录已知的集成、参考和待核实来源；它不对未完成的代码来源审计作“全部自主”或“未复制代码”的保证。
+A20OS 使用并参考了许多开源项目与公开标准。这里集中记录已知的集成、参考和待核实来源；它不对未完成的代码来源审计作“全部自主”或“未复制代码”的保证。
 
-- **直接集成 / 构建的第三方项目**（`user/external/`、`kernel/external/`）：包括普通 tracked tree 和 gitlink submodule，两者必须按各自许可证处理；
-- **实现参考与待核实来源**：源码注释记录了部分移植/开发参考，但“参考”一词本身不能证明是否复制、改写或派生；
-- **公开标准与规范**：某些格式/协议由标准强制，任何实现都必须遵循。
+- 直接集成 / 构建的第三方项目（`user/external/`、`kernel/external/`）：包括普通 tracked tree 和 gitlink submodule，两者必须按各自许可证处理；
+- 实现参考与待核实来源：源码注释记录了部分移植/开发参考，但“参考”一词本身不能证明是否复制、改写或派生；
+- 公开标准与规范：某些格式/协议由标准强制，任何实现都必须遵循。
 
 许可证以普通 tracked tree 中的许可证文本或 gitlink 精确 revision 中的许可证为准；本列表供快速查阅，不替代这些原文。
 
@@ -69,7 +69,7 @@ RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kern
 
 ## 4. 研究对照系统（analysis objects）
 
-`docs/research/` 系列文档在论证 A20OS 的设计时，将以下系统作为**对比/分析对象**——它们不是 A20OS 的代码或设计来源，而是用于评估 A20OS 特性（时态能力、混合信任边界、内核层 session type、ABI 版本化、委托模式等）的学术基线。
+`docs/research/` 系列文档在论证 A20OS 的设计时，将以下系统作为**对比/分析对象**：它们不是 A20OS 的代码或设计来源，而是用于评估 A20OS 特性（时态能力、混合信任边界、内核层 session type、ABI 版本化、委托模式等）的学术基线。
 
 | 系统 | 对照内容 |
 |------|----------|
@@ -89,18 +89,18 @@ RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kern
 
 以下格式/协议主要受公开标准约束，因此单列为规范来源。列在本节不能替代具体源码的 provenance 审计，也不自动解决派生作品判断：
 
-- **ISO 9660**（CD-ROM 文件系统）— ECMA-119 / ISO 9660
-- **USB Bulk-Only Transport (BOT)** — USB Implementers Forum, Mass Storage Class Bulk-Only Transport spec
-- **SCSI 命令集**（READ(10)/WRITE(10)/READ CAPACITY(10)/INQUIRY）— SCSI Primary / Block Commands (SPC/SBC)
-- **TPM 2.0 / TIS / CRB** — Trusted Computing Group (TCG) PC Client Platform TPM Profile
-- **Linux ABI / 系统调用约定** — 兼容层照搬 Linux 用户态 ABI 的编号与语义
-- **POSIX** — 用户态 API 语义遵循 POSIX
+- ISO 9660（CD-ROM 文件系统）— ECMA-119 / ISO 9660
+- USB Bulk-Only Transport (BOT) — USB Implementers Forum, Mass Storage Class Bulk-Only Transport spec
+- SCSI 命令集（READ(10)/WRITE(10)/READ CAPACITY(10)/INQUIRY）— SCSI Primary / Block Commands (SPC/SBC)
+- TPM 2.0 / TIS / CRB — Trusted Computing Group (TCG) PC Client Platform TPM Profile
+- Linux ABI / 系统调用约定 — 兼容层照搬 Linux 用户态 ABI 的编号与语义
+- POSIX — 用户态 API 语义遵循 POSIX
 
 ---
 
 ## 6. 我们致谢的开源社区与平台
 
-- **OSDev Wiki**——无数 OS 开发者的公共知识库。
+- OSDev Wiki：无数 OS 开发者的公共知识库。
 - 所有上述第三方项目的维护者与贡献者。
 
 ---

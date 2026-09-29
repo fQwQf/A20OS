@@ -1,6 +1,6 @@
 # A20OS Native ABI：用户态启动协议
 
-> 本文档定义 Native ABI 程序的启动协议、初始 handle 分配和 native libc 分层设计。第 1、7、8 节描述当前协议（2026-08 核实）；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
+> 第 1、7、8 节描述当前协议（2026-08 核实）；第 2-3 节中的结构与代码片段混合了当前接口和说明性伪代码；第 4-6 节是早期 Native-musl 历史方案。活跃完整 libc 路线是 `user/external/mlibc/sysdeps/a20/`。
 
 ---
 
@@ -43,11 +43,11 @@ typedef struct a20_start_info {
 
 ### 1.2 启动参数设计意图
 
-- **handle 而非 fd**：不依赖固定的 fd 0/1/2 特殊语义。Native libc 可以把 `stdin/stdout/stderr` 映射成自己的 fd 表，但内核不假设这一点。
-- **self_task**：进程可以通过此 handle 查询自身状态、注册退出事件等。需要 `A20_RIGHT_WAIT` 权限。
-- **default_event_queue**：字段已保留，但普通 exec/startup 当前可为 `A20_HANDLE_NULL`，调用方必须处理缺省并自行创建。
-- **main_thread**：当前早期 startup 路径可能与 `self_task` 使用同一 handle，而 spawn/exec 路径也可能留空；不能假设总是独立 `A20_OBJ_THREAD`。
-- **service_registry**：注册表可用时安装客户端 channel endpoint，否则为 NULL。
+- handle 而非 fd：不依赖固定的 fd 0/1/2 特殊语义。Native libc 可以把 `stdin/stdout/stderr` 映射成自己的 fd 表，但内核不假设这一点。
+- self_task：进程可以通过此 handle 查询自身状态、注册退出事件等。需要 `A20_RIGHT_WAIT` 权限。
+- default_event_queue：字段已保留，但普通 exec/startup 当前可为 `A20_HANDLE_NULL`，调用方必须处理缺省并自行创建。
+- main_thread：当前早期 startup 路径可能与 `self_task` 使用同一 handle，而 spawn/exec 路径也可能留空；不能假设总是独立 `A20_OBJ_THREAD`。
+- service_registry：注册表可用时安装客户端 channel endpoint，否则为 NULL。
 
 ### 1.3 启动流程
 
@@ -93,7 +93,7 @@ typedef struct a20_start_info {
 历史 Native-musl bridge -> user/archive/（不参与构建）
 ```
 
-**当前实现路径**：
+当前实现路径：
 
 | 路径 | 适用场景 | 工作量 | POSIX 兼容性 | 状态 |
 |------|---------|--------|-------------|------|
@@ -110,7 +110,7 @@ typedef struct a20_start_info {
 - `a20_start(argc, argv)` — crt0 启动代码
 - `a20_handle_write_simple(h, buf, len)` — 不需要 iovec 的简化写
 
-**设计约束**：liba20rt 不依赖任何堆分配。所有操作在栈上完成。
+设计约束上，liba20rt 不依赖任何堆分配，所有操作在栈上完成。
 
 #### 2.2.1 crt0 启动代码（aarch64）
 
@@ -212,7 +212,7 @@ fork()                → 不支持（返回 ENOSYS）
 execve(path, ...)     → 不支持（返回 ENOSYS）
 ```
 
-**明确不支持**的 POSIX 操作（Phase 2 可通过 musl 移植逐步支持）：
+POSIX 中明确不支持的操作（Phase 2 可通过 musl 移植逐步支持）：
 
 - `fork()` — spawn 模型是 native ABI 的进程创建方式
 - `execve()` — task_spawn 替代
@@ -335,12 +335,12 @@ int open(const char *path, int flags, ...) {
 
 `a20_handle_t` 和 `int fd` 都是 `uint32_t`，理论上可以省掉映射表。但实际不行：
 
-1. **musl 内部假设 fd 0/1/2 是 stdio**。很多地方硬编码 `fd < 3` 的检查。handle 值不保证从 0 开始。
-2. **fd 的连续性假设**。POSIX 保证 `dup()` 返回最小可用 fd，`select()` 遍历 `0..nfds-1`。handle 分配是 bitmap 扫描，不一定连续。
-3. **close-on-exec 语义**。fd 有 `FD_CLOEXEC` 标志，handle 没有。映射表是放 fd 级别属性的自然位置。
-4. **POSIX 约定 `open` 返回最小可用 fd**。handle 分配不保证这个。
+1. musl 内部假设 fd 0/1/2 是 stdio，很多地方硬编码 `fd < 3` 的检查，而 handle 值不保证从 0 开始。
+2. fd 的连续性假设：POSIX 保证 `dup()` 返回最小可用 fd，`select()` 遍历 `0..nfds-1`，而 handle 分配是 bitmap 扫描，不一定连续。
+3. close-on-exec 语义：fd 有 `FD_CLOEXEC` 标志，handle 没有，映射表是放 fd 级别属性的自然位置。
+4. POSIX 约定 `open` 返回最小可用 fd，handle 分配不保证这个。
 
-所以：**映射表是必要的，不能省掉**。
+所以**映射表是必要的，不能省掉**。
 
 ---
 
@@ -389,7 +389,7 @@ musl/
 └── tools/                    ← 构建工具
 ```
 
-**关键发现**：musl 的 `src/fd/open.c` 调用 `__sys_openat`，后者展开为 `__syscall(SYS_openat, ...)`。`SYS_openat` 是 Linux syscall 编号。替换为 `a20_path_open` 就是替换一个宏。
+关键发现是：musl 的 `src/fd/open.c` 调用 `__sys_openat`，后者展开为 `__syscall(SYS_openat, ...)`。`SYS_openat` 是 Linux syscall 编号，替换为 `a20_path_open` 就是替换一个宏。
 
 ### 4.3 移植的代码改动清单
 
@@ -573,7 +573,7 @@ void __a20_start(const struct a20_start_info *si){
 
 这是最大的语义鸿沟。musl 内部不直接调 `fork`，但用户程序大量使用。
 
-**阶段 1：不支持 fork，只支持 posix_spawn**
+阶段 1：不支持 fork，只支持 posix_spawn
 
 ```c
 /* src/process/a20_fork.c */
@@ -633,7 +633,7 @@ int posix_spawn(pid_t *pid, const char *path,
 }
 ```
 
-**阶段 2（可选）：fork 模拟**
+阶段 2（可选）：fork 模拟
 
 ```c
 /* src/process/a20_fork_emul.c — 高级 fork 模拟 */
@@ -667,7 +667,7 @@ musl 内部使用信号做以下事情：
 - `SIGCHLD`：子进程退出通知
 - 用户注册的信号处理器（`sigaction`）
 
-**桥接策略：信号桩 + 事件模拟**
+桥接策略：信号桩 + 事件模拟
 
 ```c
 /* src/signal/a20_signal.c */
@@ -708,7 +708,7 @@ void __pthread_cancel_handler(struct __pthread *t) {
 }
 ```
 
-**关键决策**：A20 不实现"信号中断任意执行点"的 POSIX 语义。信号只在显式检查点（`event_wait` 返回时、`pthread_testcancel` 时）被处理。这是有意为之——异步信号中断是 POSIX 最严重的设计缺陷之一，A20 不应复制它。
+**关键决策**：A20 不实现"信号中断任意执行点"的 POSIX 语义，信号只在显式检查点（`event_wait` 返回时、`pthread_testcancel` 时）被处理。这是有意为之。异步信号中断是 POSIX 最严重的设计缺陷之一，A20 不应复制它。
 
 #### 6.4.3 pthread → A20 thread
 
@@ -787,7 +787,7 @@ int pthread_join(pthread_t t, void **res) {
 
 以下 event_queue mutex 是历史草案。当前 Native ABI 已有 `futex_wait/futex_wake`（0x0B00），活跃 mlibc 线程同步使用 Native futex，不采用该方案。
 
-**方案：基于 event_queue 的等待机制**
+方案：基于 event_queue 的等待机制
 
 ```c
 /* src/thread/a20_mutex.c */
@@ -865,7 +865,7 @@ int pthread_mutex_unlock(pthread_mutex_t *pm) {
 }
 ```
 
-**性能说明**：快速路径（无竞争）是纯用户态原子操作，和 Linux futex 一样快。慢路径走 event_queue syscall，比 futex 多一次间接，但语义更清晰。event_queue 的通知机制避免了 futex 的内核-用户态 hash table 开销。
+性能上，快速路径（无竞争）是纯用户态原子操作，和 Linux futex 一样快。慢路径走 event_queue syscall，比 futex 多一次间接，但语义更清晰；event_queue 的通知机制避免了 futex 的内核-用户态 hash table 开销。
 
 ### 4.5 工作量估算
 
@@ -881,9 +881,9 @@ int pthread_mutex_unlock(pthread_mutex_t *pm) {
 | 信号桩 | ~300 行 | 中 | — |
 | fork 桩 + posix_spawn | ~200 行 | 中 | task_spawn |
 | 错误码映射 | ~100 行 | 低 | — |
-| **总计** | **~3020 行** | — | — |
+| 总计 | ~3020 行 | — | — |
 
-**不动的代码**：musl 的 `string/`、`stdlib/`、`stdio/`（底层替换后）、`math/`、`regex/`、`locale/` 等共 ~45K 行——完全复用。
+不动的代码是 musl 的 `string/`、`stdlib/`、`stdio/`（底层替换后）、`math/`、`regex/`、`locale/` 等，共 ~45K 行，完全复用。
 
 ---
 
@@ -897,9 +897,9 @@ aarch64-unknown-a20elf
 
 因为 A20 和 Linux 在 aarch64 上共享相同的指令集和 ABI（AAPCS64），不需要新的 LLVM/GCC backend。只需要：
 
-1. **新的 target triple**（区分 A20 ELF 和 Linux ELF）
-2. **新的 sysroot**（A20 头文件 + musl-a20 + crt0.o + linker script）
-3. **gcc/clang spec 文件**（覆盖默认链接行为）
+1. 新的 target triple（区分 A20 ELF 和 Linux ELF）
+2. 新的 sysroot（A20 头文件 + musl-a20 + crt0.o + linker script）
+3. gcc/clang spec 文件（覆盖默认链接行为）
 
 ### 5.2 交叉编译流程
 
@@ -973,7 +973,7 @@ PHDRS {
 
 ### Phase 0：liba20rt 最小运行时（1-2 周）
 
-**目标**：能让一个极简程序在 A20 Native ABI 上打印并退出。
+目标：能让一个极简程序在 A20 Native ABI 上打印并退出。
 
 ```c
 /* test_hello.c — Phase 0 测试程序 */
@@ -1000,7 +1000,7 @@ void _start(const a20_start_info_t *si) {
 
 ### Phase 1：liba20c 最小 C 库（2-4 周）
 
-**目标**：能用标准 C 写程序。
+目标：能用标准 C 写程序。
 
 ```c
 /* test_stdio.c — Phase 1 测试程序 */
@@ -1027,7 +1027,7 @@ int main(int argc, char *argv[]) {
 
 ### Phase 2：旧 musl bridge（历史，代码已归档）
 
-**目标**：能让 busybox 或 dropbear 等真实程序运行。
+目标：能让 busybox 或 dropbear 等真实程序运行。
 
 工作项（全部位于 `user/archive/`，不参与当前构建；详见 [08-runtime-status.md](08-runtime-status.md) §3）：
 - [x] `arch/a20/` 全套（atomic.h, reloc.h, config.a20, syscall.h）
@@ -1042,7 +1042,7 @@ int main(int argc, char *argv[]) {
 
 ### Phase 3：POSIX 完整兼容（按需）
 
-**目标**：能运行 Python/Ruby 等需要完整 POSIX 的程序。
+目标：能运行 Python/Ruby 等需要完整 POSIX 的程序。
 
 工作项：
 - [ ] fork 模拟（COW + state transfer，需要内核 A20_SPAWN_FORK_SELF）

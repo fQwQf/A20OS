@@ -1,6 +1,6 @@
 # A20OS Native ABI：Handle 子系统设计
 
-> 本文档定义 Handle 的 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 2026-08 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
+> Handle 子系统覆盖 14 种对象类型、生命周期状态机、handle table 数据结构和操作语义，已按 2026-08 的 `kernel/include/ipc/handle_table.h`、`handle_table.c` 与 `a20_object.c` 核对。权限模型见 [security.md](06-security.md)，类型定义见 [types.md](01-types.md)。
 
 ---
 
@@ -49,9 +49,9 @@ typedef enum a20_object_type {
 
 ### 1.2 设计原则
 
-- **复用优先**：file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
-- **独立对象独立分配**：channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体。
-- **handle entry 的 object 字段是 `void *`**：既可持对象指针，也可编码 global fd、pid、timer slot 或 KEP id；必须始终结合 `type` 解释。
+- file、directory、device、pipe、socket 都以 global fd 间接引用 `vfile_t`，避免为每种文件相关对象创建独立 handle backing。
+- channel、event queue、timer 等 VFS 无法表达的对象使用独立结构体，独立分配。
+- **handle entry 的 object 字段是 `void *`**，既可持对象指针，也可编码 global fd、pid、timer slot 或 KEP id，必须始终结合 `type` 解释。
 
 ---
 
@@ -98,16 +98,13 @@ typedef struct a20_handle_table {
 
 ### 2.2 Bitmap 约定
 
-- **bit = 1** 表示槽位已占用（used）
-- **bit = 0** 表示槽位空闲（free）
-
-分配时 `|= (1ULL << bit)` 标记为已占用；释放时 `&= ~(1ULL << bit)` 标记为空闲。
+bit = 1 表示槽位已占用（used），bit = 0 表示槽位空闲（free）。分配时 `|= (1ULL << bit)` 标记为已占用；释放时 `&= ~(1ULL << bit)` 标记为空闲。
 
 ### 2.3 设计决策
 
-**动态数组 vs 红黑树**：A20OS 的 handle 编号是连续 `uint32_t`。动态数组提供 O(1) 的 lookup 和 close，而树的 lookup 是 O(log n)。当前 64 位布局中 `a20_handle_entry_t` 为 48 bytes（含 16-byte 时态字段与标签/状态），在 65536 个 handle 上限下条目数组约占 3 MB，另有 bitmap 与表结构开销；实际占用应纳入 05 的评估。
+handle 编号是连续 `uint32_t`，所以存储选动态数组而不是红黑树：动态数组提供 O(1) 的 lookup 和 close，树的 lookup 是 O(log n)。当前 64 位布局中 `a20_handle_entry_t` 为 48 bytes（含 16-byte 时态字段与标签/状态），在 65536 个 handle 上限下条目数组约占 3 MB，另有 bitmap 与表结构开销；实际占用应纳入 05 的评估。
 
-**Free bitmap 的作用**：Free slot 查找在纯数组上是 O(n)。Bitmap 将其优化为 O(n/64) 的 word 级扫描，配合 `free_hint` 记录上次释放的位置，实际接近 O(1)。
+free bitmap 解决的是另一头的问题。Free slot 查找在纯数组上是 O(n)，bitmap 将其优化为 O(n/64) 的 word 级扫描，配合 `free_hint` 记录上次释放的位置，实际接近 O(1)。
 
 ### 2.4 关键操作
 
@@ -168,7 +165,7 @@ static inline a20_rights_t a20_effective_rights(const a20_handle_entry_t *e) {
 
 ### 2.6 时态能力（Temporal Capabilities）
 
-A20OS 的 handle 条目支持**时态约束**——权限可以在时间或操作次数上受限。
+A20OS 的 handle 条目支持**时态约束**，权限可以在时间或操作次数上受限。
 
 #### 2.6.1 有效权限 $\rho_{eff}$
 
@@ -180,10 +177,7 @@ $$\rho_{eff}(h, t) = \begin{cases} \rho(h) & \text{if } (\neg EXP(h) \lor expiry
 
 #### 2.6.2 handle_dup 的时态约束
 
-`handle_dup` 创建的新 handle 的时态参数**不宽松于**源 handle：
-
-- `expiry' ≤ expiry(source)`：新 handle 的过期时刻不能晚于源
-- `remaining_ops' ≤ remaining_ops(source)`：新 handle 的操作次数不能多于源
+`handle_dup` 创建的新 handle 的时态参数**不宽松于**源 handle：`expiry' ≤ expiry(source)`，新 handle 的过期时刻不能晚于源；`remaining_ops' ≤ remaining_ops(source)`，新 handle 的操作次数不能多于源。
 
 这保证了**时态不可刷新性**：持有者无法通过 dup 延长自己的能力生命周期。
 
@@ -198,7 +192,7 @@ Handle 过期后有两种行为模式：
 
 #### 2.6.4 Sweeper 机制
 
-所有活跃的 handle table 在内核中注册于一个全局注册表。Sweeper 以 **deadline 驱动**的方式周期运行（节奏约 `A20_SWEEP_INTERVAL_TICKS` = 100ms）：`SET_TEMPORAL` 在设置约束时登记下一个扫描 deadline，每次扫描后续期下一个 deadline（`sched_note_timer_deadline`），扫描在 `sched()` 上下文执行，不依赖任何 per-task alarm，也不会向任务投递信号。
+所有活跃的 handle table 在内核中注册于一个全局注册表。Sweeper 由 **deadline 驱动**，周期运行（节奏约 `A20_SWEEP_INTERVAL_TICKS` = 100ms）：`SET_TEMPORAL` 在设置约束时登记下一个扫描 deadline，每次扫描后续期下一个 deadline（`sched_note_timer_deadline`），扫描在 `sched()` 上下文执行，不依赖任何 per-task alarm，也不会向任务投递信号。
 
 每个扫描周期内 sweeper 遍历全部 handle table：
 
@@ -221,20 +215,20 @@ Sweeper 与正常操作的竞争通过同一把 `ht->lock` 串行化，保证过
 
 用户态 ABI 中 `expiry_ns` 以 `CLOCK_MONOTONIC` 纳秒表示（0 = 无过期）；内核条目内部以 tick 存储。`remaining_ops` 仅在 `A20_TEMPORAL_OP_COUNT` 置位时有意义，此时 **0 表示已耗尽**（$ho_{eff} = \emptyset$）；flag 未置位时该字段被忽略（即"无限"由 flag 缺省表达，而非特殊值 0）。
 
-Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle 的时态参数与安全标签——任何路径都不能刷新约束（§6.4 不可刷新性的完整实现）。
+Channel 传递、dup、replace、spawn 转移、`vm_share` 都继承源 handle 的时态参数与安全标签，任何路径都不能刷新约束（§6.4 不可刷新性的完整实现）。
 
 ### 2.7 类型化控制（A20 对 ioctl 的回答）
 
-ioctl 的三大缺陷是：**无类型**（`void*` 第三参数）、**opaque 命令码**（magic number、命名空间混乱、文档不全）、**无能力纪律**（不要求任何句柄权限）。它成为一切"标准接口说不清"操作的逃逸出口（GPU、终端、杂项设备）。
+ioctl 的三大缺陷是无类型（`void*` 第三参数）、opaque 命令码（magic number、命名空间混乱、文档不全）、无能力纪律（不要求任何句柄权限）。它成为一切"标准接口说不清"操作的逃逸出口（GPU、终端、杂项设备）。
 
-**A20 的 Native ABI 没有通用 ioctl。** 所有控制操作经 `handle_control(handle, op, args_versioned_struct_ptr)`，且满足：
+A20 的 Native ABI **没有通用 ioctl**。所有控制操作经 `handle_control(handle, op, args_versioned_struct_ptr)`，且满足：
 
-1. **类型化**：每个（对象类型, op）有固定、文档化的参数结构体，不可能是任意指针。
-2. **版本化**：参数结构体携带 `{size, version}`，遵循 E-APPEND / E-DEPRECATE / E-RESERVED 演进规则（`docs/native-abi/01-types.md §2`）——新内核可扩展结构体而不破坏旧调用方。**所有携带数据的 op 都用版本化结构体**（无裸 `arg0/arg1` 传数据）。
-3. **能力门控**：`handle_control` 要求 handle 的 `Control` right（`docs/native-abi/06-security.md` 权限表）。
-4. **命名空间清晰**：op 按对象类型解释；终端操作（6-8）只对 file/device 有效，`SET_TEMPORAL`/`SET_LABEL` 对任意 handle 有效，`SET_FLAGS` 对 file/device/socket 有效。
+1. 类型化：每个（对象类型, op）有固定、文档化的参数结构体，不可能是任意指针。
+2. 版本化：参数结构体携带 `{size, version}`，遵循 E-APPEND / E-DEPRECATE / E-RESERVED 演进规则（`docs/native-abi/01-types.md §2`），新内核可扩展结构体而不破坏旧调用方。**所有携带数据的 op 都用版本化结构体**，没有裸 `arg0/arg1` 传数据。
+3. 能力门控：`handle_control` 要求 handle 的 `Control` right（`docs/native-abi/06-security.md` 权限表）。
+4. 命名空间清晰：op 按对象类型解释；终端操作（6-8）只对 file/device 有效，`SET_TEMPORAL`/`SET_LABEL` 对任意 handle 有效，`SET_FLAGS` 对 file/device/socket 有效。
 
-**控制操作表**：
+控制操作表如下：
 
 | op | 名称 | 参数结构体 | 语义 |
 |---|---|---|---|
@@ -247,9 +241,9 @@ ioctl 的三大缺陷是：**无类型**（`void*` 第三参数）、**opaque �
 | 8 | `TCFLUSH` | `a20_ctl_int_args_t*`（queue） | 清空终端输入/输出队列（替代 `TCFLSH`） |
 | 9 | `SET_FLAGS` | `a20_ctl_flags_args_t*` | 修改 open-file 标志（`O_NONBLOCK` 等，替代 `fcntl(F_SETFL)` / `FIONBIO`） |
 
-**例：终端几何**。`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。`tcflush`、`tcsetwinsize` 同理走 `TCFLUSH`/`SET_WINSIZE`。
+以终端几何为例：`tcgetwinsize` 在 Native 上走 `handle_control(h, A20_HANDLE_CTRL_GET_WINSIZE, &a20_winsize_args_t)`（版本化结构体返回 row/col/xpixel/ypixel），而不是 ioctl `TIOCGWINSZ`。`tcflush`、`tcsetwinsize` 同理走 `TCFLUSH`/`SET_WINSIZE`。
 
-> **POSIX 兼容定位**：mlibc 的 `ioctl()` 是**翻译层**——把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件锁/owner 元数据（`fcntl` F_GETLK 等）当前在 Native 上返回 `ENOTSUP`（暂无类型化等价物，作为明确不支持记录）。这回答了研究文档 01 §2.4 对 ioctl 的批判——A20 用类型化控制替代它，而不是复刻它。
+> POSIX 兼容定位：mlibc 的 `ioctl()` 只是一个翻译层，把 `TIOCGWINSZ`/`TIOCSWINSZ`/`TCFLSH`/`FIONBIO` 翻译成上面的类型化 op，未知请求返回 `ENOTTY`。内核 Native ABI **不再暴露**通用 ioctl syscall（`A20_SYS_ioctl` 已移除，历史版本 0x0215）；Linux ABI 的 `sys_ioctl` 只服务 musl 兼容层。文件锁/owner 元数据（`fcntl` F_GETLK 等）当前在 Native 上返回 `ENOTSUP`（暂无类型化等价物，作为明确不支持记录）。研究文档 01 §2.4 批评的正是 ioctl；A20 的回答是用类型化控制替代它，而不是复刻它。
 
 ---
 
@@ -344,7 +338,7 @@ int64_t handle_close(a20_handle_t handle);
 4. 释放 HT lock
 5. `refcount_dec`：如果最后引用，调用 `object_destroy`（可能触发级联）
 
-**原子性**：entry 清空在 HT lock 内完成。object_destroy 在锁外执行（refcount = 0 后无其他线程可访问对象）。
+原子性方面，entry 清空在 HT lock 内完成。object_destroy 在锁外执行（refcount = 0 后无其他线程可访问对象）。
 
 ### 4.2 handle_dup
 
@@ -356,7 +350,7 @@ int64_t handle_dup(a20_handle_dup_args_t *args);
 2. 验证 `rights_mask ⊆ source.rights`（权限子集检查）
 3. 分配新槽位（ht_alloc_slot）
 4. 写入新 entry（同一 object, 请求的 rights）
-5. **时态约束**：`new.expiry_tick ≤ source.expiry_tick`，`new.remaining_ops ≤ source.remaining_ops`
+5. 时态约束：`new.expiry_tick ≤ source.expiry_tick`，`new.remaining_ops ≤ source.remaining_ops`
 6. `refcount_inc(object)`（原子增加）
 
 ### 4.3 handle_replace
@@ -381,7 +375,7 @@ int64_t handle_query(a20_handle_t handle, a20_handle_info_t *out);
 
 只读操作。返回对象类型、状态、权限和调试 hint。需要 `STAT` 权限。
 
-**类型合法权限掩码与 STAT（2026-08 修订）**：`handle_query` 依赖 STAT，因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT （EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c` 的 `ralg` 分区固化（`make smoke-native-contract`）。
+类型合法权限掩码与 STAT 的关系在 2026-08 修订过一次。`handle_query` 依赖 STAT，因此所有"用户可观察自身属性"的对象类型的类型合法掩码（`a20_type_rights[]`）都必须包含 STAT。此前 `CHANNEL_ENDPOINT` 与 `EVENT_QUEUE` 的掩码缺少 STAT （EVENT_QUEUE 安装时请求了 STAT 但被掩码静默剥离），导致端点/队列句柄无法 query。已修复：两类掩码均含 STAT，channel 端点创建时安装`READ|WRITE|STAT|DUP|TRANSFER`。该一致性由 `user/tests/test_native_contract.c` 的 `ralg` 分区固化（`make smoke-native-contract`）。
 
 ---
 
@@ -490,7 +484,7 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0404 | `path_create` | `int64_t path_create(a20_path_create_args_t *args)` | 创建节点 |
 | 0x0405 | `path_unlink` | `int64_t path_unlink(const char *path, uint32_t path_len)` | 删除节点（当前按 cwd 解析相对路径） |
 | 0x0406 | `path_rename` | `int64_t path_rename(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 重命名 |
-| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 类型化对象控制（见 §2.7，**无通用 ioctl**）：op 2/3 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，§2.6）；op 4 `SET_LABEL`（arg0 = `a20_ctl_int_args_t*`，仅可上调）；op 5 `CHDIR`（handle 即目录）；op 6/7 `GET_WINSIZE`/`SET_WINSIZE`（arg0 = `a20_winsize_args_t*`）；op 8 `TCFLUSH`（arg0 = `a20_ctl_int_args_t*`）；op 9 `SET_FLAGS`（arg0 = `a20_ctl_flags_args_t*`）。所有携带数据的 op 用版本化结构体 |
+| 0x0407 | `handle_control` | `int64_t handle_control(a20_handle_t h, uint32_t op, uint64_t arg0, uint64_t arg1)` | 类型化对象控制（见 §2.7，无通用 ioctl）：op 2/3 `SET_TEMPORAL`/`GET_TEMPORAL`（arg0 = `a20_handle_temporal_args_t*`，§2.6）；op 4 `SET_LABEL`（arg0 = `a20_ctl_int_args_t*`，仅可上调）；op 5 `CHDIR`（handle 即目录）；op 6/7 `GET_WINSIZE`/`SET_WINSIZE`（arg0 = `a20_winsize_args_t*`）；op 8 `TCFLUSH`（arg0 = `a20_ctl_int_args_t*`）；op 9 `SET_FLAGS`（arg0 = `a20_ctl_flags_args_t*`）。所有携带数据的 op 用版本化结构体 |
 | 0x0408 | `path_readdir` | `int64_t path_readdir(a20_handle_t dir, a20_dirent_t *entries, uint32_t buf_len)` | 目录列举（`buf_len` 为字节数） |
 | 0x0409 | `path_link` | `int64_t path_link(const char *old_path, uint32_t old_len, const char *new_path, uint32_t new_len)` | 创建硬链接 |
 | 0x040A | `path_symlink` | `int64_t path_symlink(const char *target, uint32_t target_len, const char *linkpath, uint32_t linkpath_len)` | 创建符号链接 |
@@ -619,4 +613,4 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0E03 | `ext_prog_release` | `int64_t ext_prog_release(a20_handle_t prog)` | 分离并释放 |
 | 0x0E04 | `ext_point_info` | `int64_t ext_point_info(uint32_t point, a20_ext_point_info_t *out)` | 查询扩展点信息 |
 
-**总计：136 个 syscall（`syscall_table.def` 当前登记数）。**
+总计：136 个 syscall（`syscall_table.def` 当前登记数）。

@@ -1,16 +1,16 @@
 # A20OS 混合内核：设计参考
 
-本文档描述 A20OS 混合内核的**当前设计形态**：为什么采用混合架构、内核与用户态服务的职责如何划分、以及各核心机制的语义与契约。内容已按 2026-08 源码核对；运行结论需在当前提交上复验，历史平台记录不能代替各 Native/驱动 smoke。机制细节与演进方向分别见 [01-mechanisms.md](01-mechanisms.md) 与 [02-mainstream-plan.md](02-mainstream-plan.md)。
+内容已按 2026-08 源码核对。机制细节见 [01-mechanisms.md](01-mechanisms.md)，演进方向见 [02-mainstream-plan.md](02-mainstream-plan.md)。
 
 ## 设计定位
 
-A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 366 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 142 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态，把可崩溃、可重启的用户态服务作为系统组成部分**。
+A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_table.def` 登记 366 个 syscall，运行 musl 程序，是当前主用户态运行时）与 `abi/native`（`kernel/abi/native/syscall_table.def` 登记 142 个 syscall，面向能力、句柄与事件的新接口）。混合内核是这两套接口共享的执行底座：**把性能关键路径留在内核态**，可崩溃、可重启的用户态服务作为系统组成部分。
 
 划分依据是一条判定规则：
 
 > 经验启发：高频或延迟敏感路径优先留在内核；崩溃频繁、协议解析类工作优先迁到用户态服务。历史文档使用过“10k 次/秒、10µs”阈值，但当前没有通用实测证明它适用于所有设备，不能把它当作硬边界。
 
-按此规则，调度器、MM/缺页、VFS 核心、dentry/inode/页缓存、TCP 数据面**保留在内核**；服务监管、设备驱动（低速）、注册/命名等作为**用户态服务**运行。
+按此规则，调度器、MM/缺页、VFS 核心、dentry/inode/页缓存、TCP 数据面保留在内核；服务监管、设备驱动（低速）、注册/命名等作为用户态服务运行。
 
 ## 架构形态
 
@@ -32,9 +32,9 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 └────────────────────────────────────────────────────┘
 ```
 
-- **用户态服务层**：以 Native ABI 编写的服务进程，通过 Channel/EventQ 与内核及其他服务通信。服务崩溃由 svcmgr 检测并重启，资源由内核按对象模型回收。
-- **混合内核层**：`kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按自包含内部层组织，ABI 层原则上只把用户 syscall 线格式翻译成内部 API。当前 `kernel/drivers/core/driver_manager.c` 是明确例外：它直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，尚待改为 core-owned 类型/API。
-- **兼容层**：Linux ABI 与 vDSO，让未修改的 musl 程序直接受益于内核机制（唤醒快路径、时间读取等）。
+- 用户态服务层：以 Native ABI 编写的服务进程，通过 Channel/EventQ 与内核及其他服务通信。服务崩溃由 svcmgr 检测并重启，资源由内核按对象模型回收。
+- 混合内核层：`kernel/ipc`、`kernel/mm`、`kernel/proc` 与 `kernel/include/core` 按自包含内部层组织，ABI 层原则上只把用户 syscall 线格式翻译成内部 API。当前 `kernel/drivers/core/driver_manager.c` 是明确例外：它直接包含 Native ABI 的类型和 rights 头来安装服务启动句柄，尚待改为 core-owned 类型/API。
+- 兼容层：Linux ABI 与 vDSO，让未修改的 musl 程序直接受益于内核机制（唤醒快路径、时间读取等）。
 
 ## 核心机制总览
 
@@ -75,8 +75,8 @@ A20OS 同时提供两套用户接口：`abi/linux`（`kernel/abi/linux/syscall_t
 
 ### 性能与隔离的边界可论证
 
-- **留内核**：调度、MM、VFS、页缓存、TCP 数据面——高频、延迟敏感、崩溃后果严重。
-- **迁用户态**：服务监管、设备驱动（低速）、协议/注册类——崩溃频繁、可重启、性能非关键。
+- **留内核**：调度、MM、VFS、页缓存、TCP 数据面；高频、延迟敏感、崩溃后果严重。
+- **迁用户态**：服务监管、设备驱动（低速）、协议/注册类；崩溃频繁、可重启、性能非关键。
 - **主存储数据面不外迁**：历史 TCG 样本显示块/网驱动的 I/O 路径由多次上下文切换 + 数据拷贝构成，在当时调度成本下外迁明显劣化，故主存储 virtio-blk 数据面保留内核态；scratch 设备（udisk）仍可外迁演示（详见 [02-mainstream-plan.md](02-mainstream-plan.md) 的决策记录）。该数据为历史 TCG 样本，未在最近核对时重测。
 
 ## 已建成的子系统
@@ -123,4 +123,4 @@ vDSO（`clock_gettime`/`gettimeofday`/`getcpu`，与内核 timekeeping 位级一
 
 ### 用户态文件系统服务（uxfs + ufsd）
 
-文件系统实现同样可以迁出内核：内核侧 `uxfs`（`kernel/fs/uxfs/`，fstype `"uxfs"`）把 vnode 操作翻译为 ufs 协议消息经 Channel 转发，用户态宿主 `ufsd` 按参数承载多个后端——fat（fat32lite 同源编译）、ext4/iso9660/ntfs（内核 diskfs 源码经 fscompat 环境原样编译；iso/ntfs 只读）。块 IO 经受控的 `fs_serve`/`fs_block_io` syscall 进入内核块层——只有注册挂载的服务任务可以访问其声明的块设备（含容量查询）。ufsd 由 svcmgr 清单托管（argv 传参、echo 健康探针、缺盘干净退出）；服务崩溃后在飞请求以 `-EIO` 收场，SIGKILL→umount→重启→数据持久的恢复契约由 `smoke-native-fs-all` 的 UXFS_RESTART 段实测。设计与边界见 [06-user-fs.md](06-user-fs.md)。
+文件系统实现同样可以迁出内核：内核侧 `uxfs`（`kernel/fs/uxfs/`，fstype `"uxfs"`）把 vnode 操作翻译为 ufs 协议消息经 Channel 转发，用户态宿主 `ufsd` 按参数承载多个后端：fat（fat32lite 同源编译）、ext4/iso9660/ntfs（内核 diskfs 源码经 fscompat 环境原样编译；iso/ntfs 只读）。块 IO 经受控的 `fs_serve`/`fs_block_io` syscall 进入内核块层；只有注册挂载的服务任务可以访问其声明的块设备（含容量查询）。ufsd 由 svcmgr 清单托管（argv 传参、echo 健康探针、缺盘干净退出）；服务崩溃后在飞请求以 `-EIO` 收场，SIGKILL→umount→重启→数据持久的恢复契约由 `smoke-native-fs-all` 的 UXFS_RESTART 段实测。设计与边界见 [06-user-fs.md](06-user-fs.md)。

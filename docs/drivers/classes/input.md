@@ -1,6 +1,6 @@
 # 输入子系统
 
-A20OS 的输入路径分成三层：**设备驱动**（drvmod 模块，发布 input class 设备）、**mux 服务**（内核侧 `/dev/event0` 的 devfs 服务）、**用户接口**（EVIOCG* ioctl 面 + `struct input_event` 读取）。
+A20OS 的输入路径分成三层：设备驱动（drvmod 模块，发布 input class 设备）、mux 服务（内核侧 `/dev/event0` 的 devfs 服务）、用户接口（EVIOCG* ioctl 面 + `struct input_event` 读取）。
 
 ## 架构
 

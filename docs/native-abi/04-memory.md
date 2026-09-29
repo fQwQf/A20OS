@@ -1,16 +1,14 @@
 # A20OS Native ABI：内存子系统设计
 
-> 本文档记录 Native ABI 当前内存实现及目标抽象，已按 2026-08 的 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c` 和 `abi/native/vmar.c` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
+> 内容按 2026-08 的 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c` 和 `abi/native/vmar.c` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
 
 ---
 
 ## 1. 内存模型概述
 
-Native ABI 在核心 VMA 之上增加可传递的 VMO 抽象，但当前尚未把所有映射统一为 VMO：
+Native ABI 在核心 VMA 之上增加可传递的 VMO 抽象，但当前尚未把所有映射统一为 VMO。
 
-- **VMO (Virtual Memory Object)**：可由 MEMORY handle 引用的物理页容器，独立于地址空间；`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。
-- **VMAR (Virtual Memory Address Region)**：当前是 Native syscall 对核心 `vm_area_t`/`mm_mmap_*` 的称呼和薄包装，不存在独立 VMAR handle 或层级树。VMO 通过 `vm_map` 建立 `VM_VMO` VMA。
-- **普通 VMA**：`vm_alloc` 建立普通匿名 VMA，FILE/DEVICE source 建立 `VM_FILE` VMA；二者都不是 MEMORY-handle-backed VMO。
+VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory Address Region) 当前只是 Native syscall 对核心 `vm_area_t`/`mm_mmap_*` 的称呼和薄包装，不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` VMA。除此之外还有普通 VMA：`vm_alloc` 建立普通匿名 VMA，FILE/DEVICE source 建立 `VM_FILE` VMA，二者都不是 MEMORY-handle-backed VMO。
 
 ```text
 进程地址空间 (VMAR)
@@ -73,22 +71,11 @@ typedef struct a20_vmo {
 
 ### 2.3 VMO 操作
 
-- **创建**：`vm_create_object` 或 `vm_map(source=NULL)` 创建匿名 VMO；`vm_alloc` 当前直接调用核心匿名 `proc_mmap`，不返回也不创建可分享的 VMO handle
-- **映射**：`vm_map` 将 VMO 映射到进程地址空间
-- **共享**：`vm_share` 只把已有 MEMORY handle 安装到当前或目标 Native task；不按地址区间导出
-- **调整大小**：核心有 `vmo_resize()`，但当前没有 `handle_control(VMO_RESIZE)` 用户入口
-- **读取/写入**：当前 `handle_read`/`handle_write` 只走 vfile/global-fd 路径，不支持 MEMORY handle；VMO 内容需先映射
+创建走 `vm_create_object` 或 `vm_map(source=NULL)`，产出匿名 VMO；`vm_alloc` 当前直接调用核心匿名 `proc_mmap`，既不返回也不创建可分享的 VMO handle。映射由 `vm_map` 把 VMO 装到进程地址空间。共享的 `vm_share` 只把已有 MEMORY handle 安装到当前或目标 Native task，不按地址区间导出。调整大小方面，核心有 `vmo_resize()`，但当前没有 `handle_control(VMO_RESIZE)` 用户入口。读取/写入当前不支持 MEMORY handle：`handle_read`/`handle_write` 只走 vfile/global-fd 路径，VMO 内容需先映射。
 
 ### 2.4 VMO 四元组
 
-VMO 的核心属性可以形式化为四元组：
-
-概念上可关注 `(pages, size, type, physical layout)`；当前 `struct vmo` 没有独立 `phys_contiguous` 字段：
-
-- `pages`：物理页面数组（按需分配）
-- `size`：逻辑大小
-- `type`：ANONYMOUS / PHYSICAL / PAGED
-- physical layout：由实际 `pages[]` 决定；`device_alloc_dma` 的匿名 VMO 可连续，不能只按 `type` 推断
+VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical layout)`。当前 `struct vmo` 没有独立 `phys_contiguous` 字段，四个分量分别是：`pages` 是按需分配的物理页面数组，`size` 是逻辑大小，`type` 取 ANONYMOUS / PHYSICAL / PAGED，physical layout 由实际 `pages[]` 决定——`device_alloc_dma` 的匿名 VMO 可以连续，不能只按 `type` 推断。
 
 ---
 
@@ -96,14 +83,7 @@ VMO 的核心属性可以形式化为四元组：
 
 ### 3.1 定义
 
-**层级 VMAR（2026-08 落地）**：核心对象 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）
-维护保留区间树——子节点区间必须落在父节点内且与兄弟不相交；能力天花板
-（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射会把天花板写入 VMA 的
-`vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall：
-`A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布
-`A20_OBJ_VMAR` 句柄；`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由
-（含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚）。关闭句柄仅减引用：子节点
-持有父引用，树随最后一个引用消亡。
+层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入 VMA 的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
 
 Native VMAR 操作的地址空间语义仍直接作用于核心 `vm_area_t`，与后端相关的字段可简化为：
 
@@ -158,10 +138,7 @@ int64_t vm_alloc(a20_vm_alloc_args_t *args);
 2. 调用 `proc_mmap(..., MAP_ANONYMOUS, -1, 0)` 建立普通匿名 VMA
 3. 返回映射地址；不会返回 VMO handle
 
-错误条件：
-- `NO_MEMORY`：核心匿名 mmap 失败
-- `INVALID_ARGUMENT`：版本化结构校验失败或 `length == 0`
-- `FAULT`：参数结构不可访问，或结果复制回用户态失败
+错误条件有三类。`NO_MEMORY` 表示核心匿名 mmap 失败；`INVALID_ARGUMENT` 表示版本化结构校验失败或 `length == 0`；`FAULT` 表示参数结构不可访问，或结果复制回用户态失败。
 
 当前 syscall 不单独校验未知 `prot` 位，地址空间无空洞等核心 mmap 失败也统一映射为 `NO_MEMORY`，不会返回 `NO_SPACE`。
 
@@ -179,9 +156,9 @@ int64_t vm_map(a20_vm_map_args_t *args);
 5. 计算 READ/WRITE 的 `prot_eff` 与 handle rights 交集；当前 EXEC 位直接透传，没有检查 source handle 的 `A20_RIGHT_EXEC`
 6. MEMORY source 创建 `VM_VMO` VMA并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有 VMA并持 fd 引用
 
-**与 POSIX mmap 的关键区别**：非匿名映射的 source 是 handle。READ/WRITE rights 会收紧对应保护位；EXEC rights 当前未在该路径强制，属于实现与目标 rights 模型之间的已知缺口。
+与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE rights 会收紧对应保护位；EXEC rights 当前未在该路径强制，属于实现与目标 rights 模型之间的已知缺口。
 
-**实现分层（2026-08 更新）**：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
+实现分层（2026-08 更新）：VMO 位于核心 MM（`kernel/mm/vmo.c`、`mm/vmo.h`），VMAR 是核心 `mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装（`kernel/abi/native/vmar.c`）。VMO 帧由 VMO 自持，映射按需调页，fork 共享同一批帧。
 
 ### 4.3 vm_unmap — 解除映射
 
@@ -214,12 +191,7 @@ int64_t vm_share(a20_handle_t vmo, a20_handle_t target_task,
                  a20_rights_t rights);
 ```
 
-当前 syscall 形式为 `vm_share(vmo_handle, target_task, rights)`：
-1. source 必须是 `A20_OBJ_MEMORY`，需要 `READ | TRANSFER` right
-2. `target_task == A20_HANDLE_NULL` 时安装到当前进程 HT；否则 task handle 需要 `CONTROL`，内核找到目标进程 HT 并安装
-3. 接收权限为 `rights ∩ source.rights`，空集返回 `ACCESS`
-4. 新 handle 继承源 VMO handle 的 expiry、remaining_ops、temporal flags 与安全标签，并增加 VMO 引用
-5. 对目标进程执行 Bell-LaPadula No Read Up 检查
+当前 syscall 形式为 `vm_share(vmo_handle, target_task, rights)`：source 必须是 `A20_OBJ_MEMORY` 并需要 `READ | TRANSFER` right。`target_task == A20_HANDLE_NULL` 时安装到当前进程 HT，否则 task handle 需要 `CONTROL`，内核找到目标进程 HT 再安装。接收权限是 `rights ∩ source.rights`，空集返回 `ACCESS`。新 handle 继承源 VMO handle 的 expiry、remaining_ops、temporal flags 与安全标签，并增加 VMO 引用；安装后还要对目标进程执行 Bell-LaPadula No Read Up 检查。
 
 接收方通过返回的目标 HT handle 编号调用 `vm_map`。当前仍未提供“按地址区间反查 VMO 并导出”的 `a20_vm_share_args_t` 形式；用户应先使用 `vm_create_object` 创建 VMO，再映射和分享。
 
@@ -250,7 +222,7 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 [读写 addr_A]       ← canonical VMO frames → [读写 addr_B]
 ```
 
-权限传递：`vm_share` 的 `rights` 参数限制接收方 handle 权限。只有 READ 时，首次 `vm_map` 的 WRITE 会被清除；但当前 `vm_protect` 不重新检查原 handle rights，仍可能把该 VMA 放宽为可写，这是尚未收口的权限缺口。
+权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。但当前 `vm_protect` 不重新检查原 handle rights，仍可能把该 VMA 放宽为可写，这是尚未收口的权限缺口。
 
 ---
 

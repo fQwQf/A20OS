@@ -1,12 +1,12 @@
 # 构建与运行指南
 
-本文档列出 A20OS 最常用的构建和运行命令。所有命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](OS-Design.md)。
+A20OS 最常用的构建和运行命令都在项目根目录执行。更详细的架构设计说明见 [OS-Design.md](OS-Design.md)。
 
-> **实例化入口**：构建/运行/冒烟配置也可以用 `instances/` 下的 TOML 实例文件声明，
-> 通过 `tools/a20 run|build|debug|test <实例>` 驱动——逐架构的 `run-*`/`debug-*`/`smoke-*`
+> 构建/运行/冒烟配置也可以用 `instances/` 下的 TOML 实例文件声明，
+> 通过 `tools/a20 run|build|debug|test <实例>` 驱动；逐架构的 `run-*`/`debug-*`/`smoke-*`
 > make 目标已是它的薄包装。字段参考、组件注册表与门禁说明见 [instances.md](instances.md)。
 
-> **包与镜像**：把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见
+> 把构建产物打成 apk 包、按清单组合镜像、发布到仓库的体系见
 > [packaging/overview.md](packaging/overview.md)；CI 容器（可复现构建环境）见
 > [packaging/ci.md](packaging/ci.md)。
 
@@ -27,8 +27,8 @@ sudo apt-get install -y \
 
 注意两点：
 
-- **LoongArch64**：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
-- **Python**：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）；lamina 等 extra 包需要 CMake >= 3.29（`pip install cmake==3.29.6`）。
+- LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
+- Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）；lamina 等 extra 包需要 CMake >= 3.29（`pip install cmake==3.29.6`）。
 
 ## 最常用的构建与运行命令
 
@@ -54,7 +54,7 @@ sudo apt-get install -y \
 | `make check-user-build` | 编译主机默认集合的 hosted 用户态（Linux 为七架构，macOS 为 RISC-V64） | 常规提交前检查 |
 | `make check-build-matrix-all` | 显式编译七个 hosted 架构的内核 bring-up 和用户态 | 完整跨架构构建检查 |
 
-STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录 仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可 只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
+STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
 
 ## 发布与调试模式
 
@@ -94,7 +94,7 @@ audioplay music.wav
 
 WAV 输入必须是 48 kHz、双声道、S16_LE PCM；原始 PCM 使用 `audioplay --raw file.pcm`。播放器通过 `GET_CAPS` 自动寻找 PCM 设备，不假定具体驱动或动态编号。PCM 客户端可使用 `A20_AUDIO_IOCTL_DRAIN` 等待已提交音频播放完毕，关闭设备时也会自动 drain。宿主使用 PipeWire 而不提供 PulseAudio 兼容服务时，可执行 `make run-world-gui PKG_WORLD=xfce QEMU_GUI_AUDIO_DRIVER=pipewire`。
 
-##  注意
+## 注意
 
 - `BRINGUP=1` 不生成文件系统镜像；`BRINGUP=0` 才会触发用户态和磁盘构建。
 - 默认 `NR_CPUS=1`。RISC-V 64、AArch64、LoongArch64 和 x86_64 的 QEMU virt 平台已验证 SMP，可直接设置 `NR_CPUS>1`；PPC64LE 当前仅验证 QEMU pSeries 单核路径。其他架构或板卡仍会被构建系统拒绝，除非显式设置 `ALLOW_UNVERIFIED_SMP=1`。
