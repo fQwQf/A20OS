@@ -72,10 +72,76 @@
 #define SYS_faccessat 48
 #endif
 
+/* Three outcomes, never two.
+ *
+ *   passed   the subtest ran and the capability behaved.
+ *   absent   the capability is NOT IMPLEMENTED.  Returning 0 from here used to
+ *            make the gate green while proving nothing, which is worse than
+ *            having no gate: it manufactures confidence in a feature that may
+ *            not exist.  Absent is counted, printed with the errno that gave it
+ *            away, and turns the whole run red.
+ *   skipped  the capability exists but THIS RUN cannot exercise it (a drive
+ *            not attached to this QEMU invocation, no privilege, no mount
+ *            point).  That is environmental noise, not a regression, so it does
+ *            not redden the gate -- but it is counted and named in the summary
+ *            so it can never be swallowed.
+ */
+static int g_absent;
+static int g_skipped;
+
 static int fail(const char *what)
 {
     printf("VFS_STRESS: FAIL %s errno=%d\n", what, errno);
     return 1;
+}
+
+static int absent(const char *what, int err)
+{
+    printf("VFS_STRESS: ABSENT %s (not implemented, errno=%d)\n", what, err);
+    g_absent++;
+    return 0;
+}
+
+static int skip_env(const char *what, int err)
+{
+    printf("VFS_STRESS: SKIP %s (not exercised in this run, errno=%d)\n",
+           what, err);
+    g_skipped++;
+    return 0;
+}
+
+/* mount(2) errno triage, shared by every mount site below.
+ *
+ * absent  ENOSYS  the syscall or filesystem entry point does not exist --
+ *                commenting out the implementation produces exactly this.
+ *         EINVAL  vfs_mount() answers -EINVAL only for an unknown fstype
+ *                (mount_ops.c: the final fallthrough and the "Unknown
+ *                fstype" return), i.e. the filesystem was not registered.
+ *         EOPNOTSUPP  the entry exists but refuses this medium outright.
+ * skip    ENODEV  mount_setup_block_device() found no such drive: a block
+ *                device that this particular QEMU run did not attach.
+ *         ENOENT  the mount point itself is not there (or /dev/vdX is absent).
+ *         EPERM   privilege denied for this process: an environment fact.
+ *         EBUSY   something else already owns the mount point.
+ * fail    everything else (EIO, ENOMEM, ...) is a real misbehaviour.
+ */
+static int mount_errno_is_absent(int err)
+{
+    return err == ENOSYS || err == EINVAL || err == EOPNOTSUPP;
+}
+
+static int mount_errno_is_env(int err)
+{
+    return err == ENODEV || err == ENOENT || err == EPERM || err == EBUSY;
+}
+
+static int mount_triage(const char *what, int err)
+{
+    if (mount_errno_is_absent(err))
+        return absent(what, err);
+    if (mount_errno_is_env(err))
+        return skip_env(what, err);
+    return fail(what);
 }
 
 static int file_dup_close_range(void)
@@ -170,10 +236,9 @@ static int mount_umount_boundary(void)
         rmdir("/tmp/vfs_mount");
         return 0;
     }
-    if (errno != ENOSYS && errno != EPERM && errno != EINVAL && errno != ENOENT)
-        return fail("mount-boundary");
+    int rc = mount_triage("mount-boundary (ramfs)", errno);
     rmdir("/tmp/vfs_mount");
-    return 0;
+    return rc;
 }
 
 /* open_unlink_persist: POSIX allows unlinking a file that is still open;
@@ -500,13 +565,9 @@ static int ext4_open_unlink(void)
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vdb", "/tmp/e4m", "ext4", 0, "");
     if (r < 0) {
-        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
-            errno == ENOSYS || errno == EPERM) {
-            printf("VFS_STRESS: skip ext4 (mount errno=%d)\n", errno);
-            rmdir("/tmp/e4m");
-            return 0;
-        }
-        return fail("ext4-mount");
+        int rc = mount_triage("ext4-mount", errno);
+        rmdir("/tmp/e4m");
+        return rc;
     }
     int rc = 0;
     if (open_unlink_persist("/tmp/e4m") != 0)
@@ -587,13 +648,9 @@ static int fat32_open_unlink(void)
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vda", "/tmp/fatm", "fat32", 0, "");
     if (r < 0) {
-        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
-            errno == ENOSYS || errno == EPERM) {
-            printf("VFS_STRESS: skip fat32 (mount errno=%d)\n", errno);
-            rmdir("/tmp/fatm");
-            return 0;
-        }
-        return fail("fat32-mount");
+        int rc = mount_triage("fat32-mount", errno);
+        rmdir("/tmp/fatm");
+        return rc;
     }
     int rc = 0;
     if (open_unlink_persist("/tmp/fatm") != 0)
@@ -1135,12 +1192,18 @@ static int chmod_chown_boundary(void)
         return fail("chmod-mode");
     }
 
+    /* fchown to (0,0): EPERM is the honest answer for a non-root process
+     * (this run is not privileged), so it stays a reported skip.  ENOSYS is the
+     * kernel saying "I did not implement this" and must redden the gate. */
     errno = 0;
     if (syscall(SYS_fchown, fd, 0, 0) < 0) {
-        if (errno != EPERM && errno != ENOSYS) {
-            close(fd);
-            return fail("fchown-errno");
-        }
+        int err = errno;
+        close(fd);
+        if (err == ENOSYS)
+            return absent("fchown", err);
+        if (err == EPERM)
+            return skip_env("fchown", err);
+        return fail("fchown-errno");
     }
 
     close(fd);
@@ -1199,11 +1262,10 @@ static int statx_boundary(void)
     long r = syscall(SYS_statx, AT_FDCWD, path, 0,
                      STATX_TYPE | STATX_SIZE | STATX_MODE, &sx);
     if (r < 0) {
-        if (errno == ENOSYS) {
-            unlink(path);
-            return 0;
-        }
+        int err = errno;
         unlink(path);
+        if (err == ENOSYS)
+            return absent("statx", err);
         return fail("statx");
     }
     if (!(sx.stx_mask & STATX_SIZE) || sx.stx_size != 5) {
@@ -1250,9 +1312,11 @@ static int chroot_boundary(void)
     if (pid == 0) {
         errno = 0;
         if (syscall(SYS_chroot, dir) < 0) {
-            if (errno == EPERM || errno == ENOSYS)
-                _exit(0);
-            _exit(1);
+            /* ENOSYS = not implemented -> the gate must go red.  EPERM = this
+             * process lacks CAP_SYS_CHROOT, an environment fact -> report it as
+             * a skip through a dedicated exit code rather than a bare 0, so the
+             * parent can count it instead of treating it as a pass. */
+            _exit(errno == ENOSYS ? 90 : (errno == EPERM ? 91 : 1));
         }
         fd = open("/inside.txt", O_RDONLY);
         if (fd < 0)
@@ -1323,6 +1387,13 @@ static int chroot_boundary(void)
         unlink(path);
         rmdir(dir);
         return fail("chroot-wait");
+    }
+    if (WIFEXITED(status) && (WEXITSTATUS(status) == 90 ||
+                              WEXITSTATUS(status) == 91)) {
+        unlink(path);
+        rmdir(dir);
+        return WEXITSTATUS(status) == 90 ? absent("chroot", ENOSYS)
+                                         : skip_env("chroot", EPERM);
     }
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         printf("VFS_STRESS: chroot child status=%d\n",
@@ -1409,13 +1480,9 @@ static int isofs_read(void)
     errno = 0;
     long r = syscall(SYS_mount, "/dev/vdc", "/tmp/isom", "iso9660", 0, "");
     if (r < 0) {
-        if (errno == ENODEV || errno == ENOENT || errno == EINVAL ||
-            errno == ENOSYS || errno == EPERM || errno == EBUSY) {
-            printf("VFS_STRESS: skip isofs (mount errno=%d)\n", errno);
-            rmdir("/tmp/isom");
-            return 0;
-        }
-        return fail("isofs-mount");
+        int rc = mount_triage("isofs-mount", errno);
+        rmdir("/tmp/isom");
+        return rc;
     }
 
     int rc = 0;
@@ -1503,6 +1570,17 @@ int main(void)
         return 1;
     if (symlink_relative_target() != 0)
         return 1;
+    printf("VFS_STRESS: coverage absent=%d skipped=%d\n", g_absent, g_skipped);
+    /* An absent capability prints no PASS marker at all, so the gate's
+     * expect-pattern ("VFS_STRESS: PASS") goes missing and the gate fails.
+     * This is the whole point: a commented-out kernel implementation must turn
+     * smoke-vfs-stress red instead of quietly costing it coverage. */
+    if (g_absent) {
+        printf("VFS_STRESS: FAIL absent-capability count=%d "
+               "(capability not implemented; no PASS marker emitted)\n",
+               g_absent);
+        return 1;
+    }
     printf("VFS_STRESS: PASS\n");
     return 0;
 }
