@@ -28,11 +28,17 @@ display = "gtk,gl=on"
 
 [test]
 commands = ["/bin/gpu3d_test", "poweroff"]
+# The last two markers are the point of the gate: a command stream the host
+# accepted, and the pixels that stream was supposed to produce.  Requiring
+# "PASS" alone is what let the placeholder-stream revision of gpu3d_test report
+# success while nothing was ever rendered.
 expect = [
   "GPU3D_TEST: GETPARAM 3D_FEATURES=1",
   "GPU3D_TEST: GETPARAM capset mask=",
   "GPU3D_TEST: 3D resource",
   "GPU3D_TEST: RESOURCE_INFO round-trip ok",
+  "GPU3D_TEST: EXECBUFFER accepted a",
+  "GPU3D_TEST: pixel readback ok",
   "GPU3D_TEST: PASS",
 ]
 input_delay = 60

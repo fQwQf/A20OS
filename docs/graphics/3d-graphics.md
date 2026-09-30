@@ -14,11 +14,14 @@
 `GPU3D_TEST: PASS` 作为验收输出。这两条都**不成立**，已按实测更正：
 
 - 曾经的 `gpu3d_test` 只创建 context 与一个空的 16×16 纹理就销毁，
-  `A20_GPU_IOCTL_SUBMIT_3D` 定义了却从未被调用——**一个命令流都没提交过**
+  `A20_GPU_IOCTL_SUBMIT_3D` 定义了却从未被调用，**一个命令流都没提交过**
   （该私有 ioctl 已随 §2.2 一起删除；同一条通路现在由
   `DRM_IOCTL_VIRTGPU_EXECBUFFER` 承担，并被门禁实际调用）；
 - 更严重的是它在 2D-only 设备上打印 `skipping 3D path` 后 `return 0`，
   于是**任何配置下这个测试都是绿的**，绿灯不携带任何信息。
+- 第三轮把 16 字节全零占位流换成真实的 `VIRGL_CCMD_CLEAR` + 像素回读后，
+  同一个占位流曾让门禁报出 `PASS (rendering still unproven)`：
+  **"host 接受了字节"被当成了"渲染成功"**。现在这条不匹配会让门禁红。
 
 按能力逐条核对当前状态：
 
@@ -29,7 +32,7 @@
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
 | **3D 传输通路端到端** | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。**前提是 display 用 GLX 后端**（`gtk,gl=on`）——`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
-| 命令流提交 | ⚠️ **往返已验证，语义未验证** | `EXECBUFFER accepted a 16 byte stream` 只证明命令流送到 host 并拿到应答；内核不解析命令流，因此**不证明渲染了任何东西**（[gpu-3d-roadmap.md §7](gpu-3d-roadmap.md)） |
+| 命令流提交 | ⚠️ **编码已实测，像素未验证** | `gpu3d_test` 现在提交一条真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），host 回 OK：`EXECBUFFER accepted a 76 byte clear stream`。但本机 host renderer 建不出离屏 GL context，vrend 的 context 出生即 `in_error`，**4096/4096 像素仍是哨兵值**，所以 CLEAR 是否真的落到页面上仍未证明（[gpu-3d-roadmap.md §7](gpu-3d-roadmap.md)） |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），**未与 legacy `DRM_IOCTL_VIRGL_*` 混淆**（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
 | `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且**我们发的参数与 host advertise 的完全一致**。**换自建 virglrenderer 1.3.0 后仍然如此**，所以不是版本问题：virglrenderer 自建的离屏 GL context 仍建不出来。非内核缺陷。**`capset size=308` 不是「renderer 老」的判据**——1.3.0 读出来也是 308（capset 1 本就小），见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md) |
 | stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。**宿主 renderer 已从 1.1.0-2 换成自建的 1.3.0**（`tools/build-virglrenderer.sh`，`fca72f5f`），但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`：NVIDIA EGL 下静默降级为 2D，强制 Mesa EGL 则 `eglInitialize failed`。因此这条**仍未解决**，且卡点已收窄到宿主 EGL/GBM 平台选择（见 gpu-3d-roadmap.md §5.1）（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
