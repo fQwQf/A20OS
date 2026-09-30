@@ -138,9 +138,17 @@ typedef struct gpu_dev_ops {
     /* 3D (virgl) transport.  These take kernel-built arguments, not user
      * pointers, so they cannot go through ioctl()'s copy_from_user path.
      * capset_buf/len fetch the host capability blob; attach_backing hands
-     * the host physical pages backing a 3D resource. */
+     * the host physical pages backing a 3D resource.
+     *
+     * get_capset writes at most len bytes into buf and stores the count it
+     * actually produced in *out_len.  The count is not a courtesy: callers
+     * copy the blob straight to userspace, and a driver that fills less than
+     * the buffer it was handed leaves the remainder as whatever the allocator
+     * returned.  A capset can also legitimately be smaller than the caller's
+     * buffer, so the caller cannot assume len bytes are valid either. */
     int     (*get_capset)(struct device *dev, uint32_t ctx_id, uint32_t index,
-                          uint32_t version, void *buf, size_t len);
+                          uint32_t version, void *buf, size_t len,
+                          size_t *out_len);
     int     (*capset_info)(struct device *dev, uint32_t index,
                            uint32_t *id, uint32_t *max_version, uint32_t *max_size);
     /* Report what the device actually negotiated.  out_3d is non-zero only when

@@ -143,6 +143,15 @@
 
 #define VIRTGPU_WAIT_NOWAIT 1
 
+/* Keys in the ctx_set_params array that DRM_IOCTL_VIRTGPU_CONTEXT_INIT
+ * carries.  Mesa uses CAPSET_ID/CAPSET_VERSION to choose between the capset 1
+ * and capset 2 command protocols, so discarding these is what makes a client
+ * fall back to the one protocol it guessed. */
+#define VIRGLPARAM_CTX_ID         0
+#define VIRGLPARAM_CTX_RESET      1
+#define VIRGLPARAM_CAPSET_ID      2
+#define VIRGLPARAM_CAPSET_VERSION 3
+
 /* Capability ids for DRM_IOCTL_GET_CAP.  These are libdrm's legacy
  * DRM_CAP_* numbering, which is *not* the same order as the newer
  * DRM_CAP_* in include/uapi/drm/drm.h -- verified against
