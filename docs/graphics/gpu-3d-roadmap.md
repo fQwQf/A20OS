@@ -248,6 +248,36 @@ id 固定。3 个 property、2 个 blob。GEM 对象上限 64，framebuffer 上�
   永远广告一个硬编码的 1024x768，与宿主窗口无关；现在去查询，零值/无头回报
   时才回落到旧值。
 
+#### 本轮（`feat/graphics-3d-completion`）追加
+
+- **capset 路径有一个内核堆泄露，且顺带截断一切超过 4 KiB 的 capset。**
+  `virtio_gpu.c` 的 `virtio_gpu_get_capset()` 曾用固定 4096 字节的栈缓冲做
+  DMA 接收，并 `if (rsz > sizeof(resp)) rsz = sizeof(resp);` **静默夹断**；
+  真正拷进调用者缓冲的只有 `rsz - sizeof(hdr)` 字节。但 `drm.c` 的
+  `drm_virtgpu_get_caps()` 允许用户态要 1 MiB，用 **`kmalloc`（不清零）**
+  分配，然后 **`copy_to_user(c.addr, blob, c.size)` 把整个请求长度拷出去**。
+  两者相乘就是：用户态传 `c.size = 1 MiB` 能读回约 1 MiB **未初始化的内核
+  堆**。已改为——先问 `GET_CAPSET_INFO` 拿到 host 真实的 capset 大小，据此
+  决定传输长度（不再有夹断，也不再有写进 4 KiB 的常量）；`get_capset` 增加
+  `out_len` 回报实际写出的字节数；`drm.c` 改用 **`kcalloc`**，且只 `copy_to_user`
+  那 `out_len` 个字节，并把真实大小写回 `c.size`。
+  顺带：`drm.c` 那一层的上限 1 MiB 现在也有驱动侧
+  `VIRTIO_GPU_MAX_CAPSET_BYTES` 兜底，坏的 host 回答不能把一次能力查询变成
+  无上限 `kmalloc`。
+- **`CONTEXT_INIT` 此前把参数丢掉了。** `ctx_set_params` 是 `num_params` 个
+  条目的**数组**，旧代码只读了一个 `struct drm_virtgpu_context_set_param`
+  然后 `(void)p` 丢掉。于是 Mesa 选 capset 2 却拿到 capset 1 的协议，且**没有
+  任何报错**。现在按 `num_params` 读整个数组，认下
+  `VIRGLPARAM_CAPSET_ID` / `VIRGLPARAM_CAPSET_VERSION`。
+  另外 host 是按 **index** 寻址 capset 而 `CONTEXT_INIT` 给的是 **id**
+  （index 0 是 capset 1，index 1 是 capset 2），所以 `GET_CAPS` 现在用
+  `GET_CAPSET_INFO` 表把 id 反解回 index；直接假设 `index == id` 会安静地
+  返回一个与请求不同的协议。
+- **`MODE_GETGAMMA` 此前 `return 0` 而完全不写出参。** `drm_crtc_gamma` 是
+  出参，不写就等于把用户栈上残留的内容交给调用方（wlroots 会读它）。现在回
+  一个平坦 ramp。（顺带 `-Werror` 抓到我自己先写成 `0x10000`——gamma 是 16 位，
+  正确值是 `0xffff`。）
+
 ### 4.3 VIRTGPU 传输层已可双向验证
 
 `tools/a20 test smoke-gpu3d-riscv64` 的实测输出：
@@ -497,7 +527,7 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 |---|---|---|
 | stock Mesa `virtio_gpu_dri.so` 实际 attach | ❌ **未验证** | VIRTGPU UAPI 已就绪，但宿主 renderer 太老（§5）。不得暗示已验证 |
 | 命令流**语义** | ❌ **未验证** | `EXECBUFFER` 往返只证明字节到了 host，**不证明渲染了任何东西**。内核按设计不解析命令流。**没有像素回读** |
-| 像素回读比对 | ❌ 未实现 | 需要逐字段核对 virglrenderer 的 `virgl_hw.h`（命令类型号、`struct virgl_cmd_header`、各命令结构体布局）。**不要凭记忆写**——写错只会得到静默失败或 host 崩溃，guest 侧无从判断 |
+| 像素回读比对 | ⚠️ **回读已实现；本机无法判定** | 编码与回读都已落地（§7.1）。`gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR` 并 mmap 该 GEM 逐像素比对两轮颜色。**但本机 host renderer 建不出离屏 GL context**，vrend 的 context 出生即 `in_error`，两轮都是 4096/4096 未变，因此"CLEAR 是否生效"在本机既不能证实也不能证伪 |
 | `GBM` | ❌ 未通 | `gbm_create_device()` 返回 NULL，钉在 Mesa 的 DRI screen 创建（KMS 路径）。已排除十条假设。**对 Wayland 客户端不是阻塞项**。最有效的下一步是 guest 里 strace，不是再来一轮假设 |
 | 真 DMA-BUF | ❌ 未实现 | `PRIME_HANDLE_TO_FD` 仍只是把 VMO **快照**进 memfd，导出后再写入不可见。**但基座是现成的**，比"从零做"的说法轻：memfd 持有一个 `pfn_t *pages` 物理页数组，mmap 直接把这些 PFN 映射进 VMA，所以它本身已经是可跨进程共享的物理内存对象。真正缺的是**一个由 GEM 的 VMO 支撑的 fd**——DRM 自己的 mmap 是把 handle 编进 offset 后直接 `mm_mmap_vmo`，PRIME 需要的是一个 mmap op 映射 VMO 的新 vfile 类型，外加 fd 生命周期与引用计数接线。跨文件改动，涉及 `fs/vfs` 与 `mm`，仍然单独立项。**不要假装做了** |
 | `VIRTGPU_RESOURCE_CREATE_BLOB` | ✅ **报 0 是正确答案，不是缺口** | 见下方专条 |
@@ -532,6 +562,83 @@ ioctl 落到 `default` 分支，用户态看到 `EINVAL`/`ENOTTY`。**症状指�
 可用还需要 vhost-user / vhost-kernel 的共享 `memory-backend-file`。收益是 virgl 下
 OpenGL 4.6，以及解锁 Venus/Vulkan。**这是一条需要单独决策的宿主配置改动，不是内核补一个
 分发分支的事**，因此本轮不做。
+
+### 7.2 命令流编码与像素回读：本轮落地，且证明了一件事
+
+上一轮把"像素回读比对"列为未实现，并附警告"不要凭记忆写"。本轮照做了，
+**没有凭记忆**：用 `apt-get source virglrenderer` 取到 **1.1.0** 源码，
+这正是本机 QEMU 实际加载的 `libvirglrenderer1 1.1.0-2`，因此取到的是**将要
+解析这些字节的那份代码本身**，而不是某个版本的文档。
+
+从该源码逐字段抄出的事实（`src/virgl_protocol.h` + `src/vrend_decode.c` +
+它自带的 `src/gallium/include/pipe/p_defines.h`）：
+
+| 事实 | 出处 |
+|---|---|
+| `VIRGL_CMD0(cmd, obj, len) = cmd \| (obj<<8) \| (len<<16)`，len 单位是 dword | `virgl_protocol.h:143` |
+| host 遍历方式是 `len = *buf >> 16; cmd = *buf & 0xff; offset += len + 1` | `vrend_decode.c:2066-2070` |
+| 字段下标**相对命令头**，因为 host 从头 dword 里读 object type（`obj_type = (header >> 8) & 0xff`） | `vrend_decode.c:838` |
+| `VIRGL_CCMD_CLEAR = 7`（隐式枚举，从 `NOP=0` 数起） | `virgl_protocol.h:65-73` |
+| `VIRGL_OBJECT_SURFACE = 8` | `virgl_protocol.h:54` |
+| `VIRGL_OBJ_SURFACE_SIZE = 5`，`VIRGL_OBJ_CLEAR_SIZE = 8`，`SET_FRAMEBUFFER_STATE_SIZE(n) = n+2` | `virgl_protocol.h:290,355,248` |
+| `PIPE_CLEAR_COLOR0 = 1<<2 = 0x4` | `p_defines.h:217` |
+| CLEAR 的颜色是 **4 个 float** 的位模式（`memcpy(colorf, color->f, ...)`），不是 uint32 | `vrend_renderer.c:4849` |
+
+⚠️ 凭记忆一定会错的两处，正是上面最后两条：头里还有一个**容易整个忘掉的
+object type 字段**（8 位），长度是 **16 位 dword** 而不是我记忆里的 24 位；
+颜色是 float 位模式，写成 `0x00ff00ff` 这种 uint32 会被 `glClearColor` 读成
+NaN。
+
+`gpu3d_test` 现在提交的三条命令（合计 76 字节）：
+
+```
+CREATE_OBJECT(SURFACE)  len=5  handle=1 res=<res> format=B8G8R8A8_UNORM level=0 layers=0
+SET_FRAMEBUFFER_STATE   len=3  nr_cbufs=1 zsurf=0 cbuf0=1
+CLEAR                   len=8  buffers=0x4  rgba(4 float) depth(double,2 dword) stencil
+```
+
+**实测结果（本机，`GPU_3D=1`）**：
+
+```
+GPU3D_TEST: EXECBUFFER accepted a 76 byte clear stream
+GPU3D_TEST: SKIP host cannot render (no capset), so the pixel mismatch (4096/4096)
+            is not attributable to the command stream
+```
+
+即：**编码被 host 接受（命令没被拒），但像素一个都没变。** 原因在 host 侧，
+链条已查到源码：`GET_CAPS` 回 `0x1205`（`ERR_INVALID_PARAMETER`）说明
+`virgl_renderer_write_caps` 失败，也就是离屏 GL context 根本没建起来；
+于是资源没有 `gl_id`，`vrend_decode_create_surface_common` 的
+`if (!res || !res->gl_id)` 命中 → `vrend_report_context_error` →
+`ctx->in_error` 被置位 → 其后 `vrend_clear` 第一行就 `if (ctx->in_error) return;`
+**整条流被丢弃**。
+
+这解释了"host 收下了字节却什么都没画"，也说明这一项卡在宿主而非内核。
+
+#### 门禁因此变成三态
+
+正因为"像素不匹配"有两种完全不同的成因（宿主没 renderer / 我们的编码或
+内存通路错了），退出码被拆开：
+
+| 码 | 条件 | 含义 |
+|---|---|---|
+| 0 | capset 正常 + 像素逐个匹配 | 真的渲染了 |
+| 77 | 无 virgl，**或** host 拿不出 capset | 无结论可下，是环境 |
+| 1 | virgl 在、host 能渲染，但流被拒或像素不对 | 是我们的 bug |
+
+否则只会把一个**假绿**换成一个**假红**：在坏 host 上把环境问题报成 FAIL，
+红灯同样不携带信息。`instances/smoke-gpu3d-riscv64.toml` 的 `expect[]`
+也已加上 `EXECBUFFER accepted a` 与 `pixel readback ok` 两条，
+不再只靠 `PASS` 一个标记。
+
+#### 顺带修掉的两个真 bug
+
+写这个测试时发现旧测试里两个一直没人注意的错误：
+
+1. `rc.format = 0x8058` —— 这是 DRM fourcc 段的垃圾值，而 QEMU 用它去
+   **索引** virgl 格式表。已改为 `VIRGL_FORMAT_B8G8R8A8_UNORM (1)`。
+2. `rc.bind = 0x0001`（`VIRGL_BIND_DEPTH_STENCIL`）—— 一个颜色 clear
+   需要颜色附件。已改为 `VIRGL_BIND_RENDER_TARGET (0x2)`。
 
 ## 8. 验证门禁：必须能失败
 
@@ -698,8 +805,11 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
    **本机可做，不受 A20OS 侧任何限制影响。**
 10. **合成器呈现**（里程碑 B，`WLR_RENDERER` / 窗口化 present）。**本机可做**，
     解锁所有 GL 客户端，比继续啃 GPU 性价比高。
-11. 命令流语义验证 + 像素回读（§7）——需要逐字段核对 virgl 的 `virgl_hw.h`；
-    Mesa 挂载后这件事自动发生，优先级低于 9 与 10。
+11. ✅ 命令流语义验证 + 像素回读（§7.2）——**编码与回读已落地**（真实
+    `VIRGL_CCMD_CLEAR` + mmap 逐像素比对），且已证明"host 收下字节"不等于
+    "渲染成功"。**剩下的判定卡在宿主**：本机 renderer 建不出离屏 GL
+    context，vrend 的 context 出生即 `in_error`，像素一个都不变。要把这一项
+    从"无法判定"推到"已验证"，先修宿主（§5.1 / `tools/build-virglrenderer.sh`）。
 12. 放开 `A20_RENDERER=gl`（依赖 9 与 10）。
 15. 真 DMA-BUF（§7）——基座（memfd 的物理页数组）现成，缺的是 VMO 支撑的 fd，
     单独立项。
@@ -745,6 +855,25 @@ x86_64 挂起）。这让唯一快的环境失去多核，**建议单独立项�
 renderer 前置条件已清除，但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`
 （NVIDIA EGL 下静默降级为 2D；强制 Mesa EGL 则 `eglInitialize failed`）。
 完整判据表与下一步见 §5.1。
+
+### 本轮（`feat/graphics-3d-completion`）的验证记录
+
+宿主：`libvirglrenderer1 1.1.0-2`（发行版包），`DISPLAY=:0`，X11 + DRI 可用，
+QEMU 带 virgl 编译。工作目录：`.worktrees/graphics-3d`。
+
+| 结论 | 命令 | 结果 |
+|---|---|---|
+| 3D 门禁**不再假绿** | `tools/a20 test smoke-gpu3d-riscv64` | **FAIL（预期）**。真实 CLEAR 流被 host 接受，但 4096/4096 像素未变 → SKIP；`expect[]` 现在要求 `pixel readback ok`，因此红。旧占位流在这里报的是 PASS |
+| 反向用例仍能失败 | 同上 + `gpu_3d = false` 的实例副本 | FAIL（exit 1）：`virtio-gpu 2D only (no VIRGL feature)` → `SKIP 2D-only device` → 7/7 标记缺失 |
+| 编码被 host 接受 | 同上，guest 日志 | `EXECBUFFER accepted a 76 byte clear stream` |
+| 无内核回归 | `tools/a20 test smoke-riscv64` / `smoke-abi-linux` | 均 PASS（`SYSCALL_SMOKE: PASS`） |
+| DRM UAPI 门禁未回归 | `make check-drm-abi` | 48 个 ioctl 号匹配、6 个结构体布局匹配 |
+| 四架构可编译 | `make ARCH={riscv64,x86_64,loongarch64,aarch64} kernel-only` | 四个主线架构均 OK |
+| drvmod 变体可编译 | `... DRIVER_DEPLOYMENT=generic` | OK |
+| capset 泄露已修 | 代码审阅 + `check-drm-abi` | 见 §4.2 新增条目 |
+
+**本轮没有拿到的东西**（不要在别处声称）：像素一致性在本机**无法判定**，
+因为 host renderer 建不出离屏 GL context（§7.2 有源码级因果链）。
 
 
 ## guest 实测：llvmpipe 可用，virgl attach 失败（已验证）

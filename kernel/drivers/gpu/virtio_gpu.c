@@ -382,43 +382,63 @@ static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst, uint32_t index,
  *
  * hdr.ctx_id must name a live context: the host answers
  * VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER (0x1205) when it is 0, which is what
- * a zeroed request struct would otherwise send. */
+ * a zeroed request struct would otherwise send.
+ *
+ * *out_len is the number of bytes actually written, which may be below bufsz
+ * because the host, not the caller, decides how big a capset is.  It cannot
+ * be left implicit: callers copy the blob straight to userspace, and the
+ * previous fixed 4 KiB staging buffer reported success after filling only its
+ * own 4 KiB, so a 1 MiB caller buffer was copied out with a megabyte of
+ * untouched heap behind the capset. */
 static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                  uint32_t index, uint32_t version,
-                                 void *buf, size_t bufsz)
+                                 void *buf, size_t bufsz, size_t *out_len)
 {
+    if (!buf || bufsz == 0)
+        return -EINVAL;
+
+    /* Size the transfer from the host's own answer; a constant baked in here
+     * is what truncated every capset over 4 KiB. */
+    uint32_t info_id = 0, info_ver = 0, info_size = 0;
+    int info_rc = virtio_gpu_get_capset_info(inst, index, &info_id, &info_ver,
+                                             &info_size);
+    size_t want = bufsz;
+    if (info_rc == 0 && info_size > 0 && info_size < want)
+        want = info_size;
+    if (want > VIRTIO_GPU_MAX_CAPSET_BYTES)
+        want = VIRTIO_GPU_MAX_CAPSET_BYTES;
+
     struct virtio_gpu_get_capset req ALIGNED(64);
-    uint8_t resp[sizeof(struct virtio_gpu_ctrl_hdr) + 4096] ALIGNED(64);
     memset(&req, 0, sizeof(req));
     req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
     req.hdr.ctx_id = ctx_id;
     req.capset_index = index;
     req.capset_version = version;
-    size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + bufsz;
-    if (rsz > sizeof(resp))
-        rsz = sizeof(resp);
-    /* The capset blob follows the response header; use a larger response
-     * buffer than the fixed command slot can hold. */
+
+    size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + want;
+    uint8_t *resp = kmalloc(rsz);
+    if (!resp)
+        return -ENOMEM;
+
     int rc = virtio_gpu_send_cmd_big(inst, &req, sizeof(req), resp, rsz);
     if (rc < 0) {
         kinfo("[GPU] get_capset: send_cmd_big failed rc=%d\n", rc);
+        kfree(resp);
         return rc;
     }
-    struct virtio_gpu_resp_capset *cr = (struct virtio_gpu_resp_capset *)resp;
-    if (cr->hdr.type != VIRTIO_GPU_RESP_OK_CAPSET) {
-        uint32_t info_id = 0, info_ver = 0, info_size = 0;
-        int info_rc = virtio_gpu_get_capset_info(inst, index, &info_id,
-                                                 &info_ver, &info_size);
+    struct virtio_gpu_ctrl_hdr *hdr = (struct virtio_gpu_ctrl_hdr *)resp;
+    if (hdr->type != VIRTIO_GPU_RESP_OK_CAPSET) {
         kinfo("[GPU] get_capset: resp=0x%x want=0x%x | sent ctx=%u idx=%u ver=%u"
               " | host idx=%u -> id=%u ver=%u size=%u (rc=%d)\n",
-              cr->hdr.type, VIRTIO_GPU_RESP_OK_CAPSET, ctx_id, index, version,
+              hdr->type, VIRTIO_GPU_RESP_OK_CAPSET, ctx_id, index, version,
               index, info_id, info_ver, info_size, info_rc);
+        kfree(resp);
         return -1;
     }
-    size_t copy = rsz - sizeof(struct virtio_gpu_ctrl_hdr);
-    if (copy > bufsz)
-        copy = bufsz;
-    memcpy(buf, resp + sizeof(struct virtio_gpu_ctrl_hdr), copy);
+    memcpy(buf, resp + sizeof(struct virtio_gpu_ctrl_hdr), want);
+    kfree(resp);
+    if (out_len)
+        *out_len = want;
     return 0;
 }
 
@@ -860,12 +880,13 @@ static int gpu_get_features(struct device *dev, uint32_t *out_3d,
 }
 
 static int gpu_get_capset(struct device *dev, uint32_t ctx_id, uint32_t index,
-                          uint32_t version, void *buf, size_t len)
+                          uint32_t version, void *buf, size_t len,
+                          size_t *out_len)
 {
     virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
         return -ENODEV;
-    return virtio_gpu_get_capset(inst, ctx_id, index, version, buf, len);
+    return virtio_gpu_get_capset(inst, ctx_id, index, version, buf, len, out_len);
 }
 
 static int gpu_resource_attach_backing(struct device *dev, uint32_t resource_id,
