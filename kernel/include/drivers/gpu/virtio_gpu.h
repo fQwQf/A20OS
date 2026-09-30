@@ -287,6 +287,12 @@ struct device *virtio_gpu_get_dev(void);
  * structural one. */
 #define VIRTIO_GPU_3D_MAX_CMD_BYTES (16u * 1024u * 1024u)
 
+/* Ceiling on a single capset blob.  Capsets are a few kilobytes today, but
+ * the host owns this number and DRM_IOCTL_VIRTGPU_GET_CAPS already admits
+ * 1 MiB from userspace; this bounds the driver's own staging allocation so a
+ * bad host answer cannot turn a capability query into an unbounded kmalloc. */
+#define VIRTIO_GPU_MAX_CAPSET_BYTES (1u * 1024u * 1024u)
+
 
 /* A20 3D passthrough request payload.  The submit path points cmdbuf at
  * user memory holding a virgl command stream. */
