@@ -1154,6 +1154,47 @@ raw socket」的推断是错的。
 instrumentation，检查 force 的返回值，在失败分支打印 `p->payload` 实际地址
 与 `hlen_tot`，直接确认 `raw_input` 是否被喂了错位的 pbuf。
 
+### 本轮（`feat/graphics-3d-completion`）新证据：篡改规模被实测推翻，且拿到一个可用的规避
+
+**1. 重组假设两半都已排除。** 上文只验证过 `LWIP_IPV6_FRAG=0`（**发送**方向
+分片）。本轮补测 `LWIP_IPV6_REASS=0`（**接收**方向重组），panic 依旧；`ip6_frag.c`
+的重组助手这条线不再是候选，写坏内存的是别的 IPv6 路径。
+
+**2. 篡改规模比上文推断的大得多，而且写进去的是指针。** 临时给 `mem.c` 的
+`mem_overflow_check_raw()` 加了转储（已回退），实测越界写入的内容是：
+
+```
+guard[16]  = e07d40000080ffff 48b42f010080ffff
+           = 0xffff800000407de0  0xffff8000012fb448   ← 两个内核虚拟地址
+pbuf[0..15] = 0600000000000000 98d281000080ffff
+```
+
+两处修正上文：
+
+- 写坏的**不止 1~8 字节**：整个 16 字节 guard 区**全被覆盖**，首个被查出的偏移是
+  `-16`，即紧邻元素那一端的最后一个字节。
+- 覆盖进去的是**两个相邻的内核虚拟地址**，不是零散包数据。这排除了「拷贝多了
+  几个字节」这一类解释，指向**某个含指针字段的结构体被写在偏移错误的位置**，
+  或某个 pbuf 的 `payload` 指针算错后经它写入。
+
+**3. 排除项。** `memcpy`（`core/string.c`）只会前进且严格写 `n` 字节，无法写到
+目标之前；`pbuf_add_header_impl()` 对 `PBUF_POOL`（该类型带
+`PBUF_TYPE_FLAG_STRUCT_DATA_CONTIGUOUS`，payload 紧贴 `struct pbuf`）的越界检查是
+**有效**的，不是先前推测的「空检查」。
+
+**4. 可用的规避（已实测；是规避，不是修复）。** `LWIP_IPV6=0` 时，带
+`virtio-net-pci` 的 xfce-x86_64 桌面**连续运行 9 分钟无 panic**，IPv4 正常
+（`netif en2 ... ip=10.0.2.15 gw=10.0.2.2`），帧持续 present，桌面可用。代价是
+**整个 IPv6 协议栈关闭**（无链路本地地址、无 RA/RS、无 MLD/DHCPv6）。这是产品
+取舍，**本轮未擅自提交**，留待决策。
+
+**5. 下一步为什么需要新工具。** 本轮每次桌面启动约 4 分钟，且 panic 处栈回溯不可信
+（帧 `[4]`、帧 `[8]`~`[11]` 符号落在 `ethernet_output` 上但偏移是 `0x7f9xxxxx`
+量级的垃圾值），靠增加启动次数做二分已不可行。要定位那个写坏内存的指针，需要
+**确定性的用户态复现器**（guest 内构造 IPv6 报文直接打 `ip6_input`），或在
+`MEMP_PBUF_POOL` 上加硬件 watchpoint——本内核目前**没有** watchpoint 设施
+（`x86_64` 只实现了 ptrace 的 regset，`trap.S` 未处理 `#DB`）。
+
 尚未排除的 IPv6 专属面：
 
 - `ip6.c` 输入路径与扩展头处理（`pbuf_remove_header` / `pbuf_unchain` 链式搬移）；

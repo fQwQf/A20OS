@@ -83,6 +83,11 @@ typedef struct drm_context {
      * and the resource-create/execbuffer ioctls take no context argument. */
     uint32_t virtgpu_ctx_id;
     int virtgpu_ctx_created;
+    /* Capset this open selected through CONTEXT_INIT, resolved back to a
+     * capset index for GET_CAPS.  0 means "unset": the host's first capset
+     * is used, which is the pre-CONTEXT_INIT behaviour. */
+    uint32_t virtgpu_capset_id;
+    uint32_t virtgpu_capset_version;
     /* FIFO of completed DRM events (fixed 32-byte drm_event_vblank records)
      * destined for this open file.  Linux never overwrites a queued event,
      * so neither do we: wlroots matches page-flip completions to pending
@@ -378,6 +383,12 @@ struct drm_mode_crtc {
     uint32_t gamma_size;
     uint32_t mode_valid;
     struct drm_mode_modeinfo mode;
+};
+
+struct drm_crtc_gamma {
+    uint16_t red;
+    uint16_t green;
+    uint16_t blue;
 };
 
 struct drm_mode_get_encoder {
@@ -1565,9 +1576,16 @@ static int drm_mode_cursor2(drm_context_t *ctx, void *arg)
 
 static int drm_mode_getgamma(drm_context_t *ctx, void *arg)
 {
-    (void)arg;
     (void)ctx;
-    return 0;
+    /* There is no gamma ramp in the model, but the caller's struct is an
+     * out-parameter: returning success without writing it hands back
+     * whatever was already on the user's stack.  Report a flat ramp. */
+    struct drm_crtc_gamma g;
+    memset(&g, 0, sizeof(g));
+    g.red = 0xffff;
+    g.green = 0xffff;
+    g.blue = 0xffff;
+    return copy_to_user(arg, &g, sizeof(g)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_getproperty(drm_context_t *ctx, void *arg)
@@ -1990,6 +2008,30 @@ static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
     return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
 }
 
+/* The host addresses capsets by index, but CONTEXT_INIT names one by id, and
+ * the two are not interchangeable (index 0 is capset 1, index 1 is capset 2).
+ * Resolving through the host's own GET_CAPSET_INFO table is what makes the
+ * client's choice mean something; assuming index == id would silently hand
+ * back a different protocol than the one that was asked for. */
+static uint32_t drm_virtgpu_capset_index(drm_context_t *ctx)
+{
+    if (!ctx->virtgpu_capset_id)
+        return 0;
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops || !ops->capset_info)
+        return 0;
+    for (uint32_t idx = 0; idx < 16; idx++) {
+        uint32_t id = 0, ver = 0, size = 0;
+        if (ops->capset_info(drm_gpu_device(), idx, &id, &ver, &size) < 0)
+            break;
+        if (id == ctx->virtgpu_capset_id)
+            return idx;
+    }
+    kinfo("[GPU] virtgpu: capset id %u not advertised by the host\n",
+          ctx->virtgpu_capset_id);
+    return 0;
+}
+
 static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
 {
     struct drm_virtgpu_get_caps c;
@@ -2008,19 +2050,31 @@ static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
     if (!ops || !ops->get_capset)
         return -ENODEV;
 
-    uint8_t *blob = kmalloc(c.size);
+    /* kcalloc, not kmalloc: the driver fills only the bytes the host actually
+     * returned, and copy_to_user must not hand the caller whatever a fresh
+     * heap block happened to contain past the end of the capset. */
+    uint8_t *blob = kcalloc(1, c.size);
     if (!blob)
         return -ENOMEM;
-    int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, 0,
-                             c.cap_set_ver, blob, c.size);
+    size_t got = 0;
+    uint32_t index = drm_virtgpu_capset_index(ctx);
+    int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, index,
+                             c.cap_set_ver, blob, c.size, &got);
     if (rc < 0) {
         kfree(blob);
         return rc;
     }
-    if (copy_to_user((void *)(uintptr_t)c.addr, blob, c.size) < 0)
+    if (got > c.size)
+        got = c.size;
+    /* Report the size the host really produced, so a caller that guessed too
+     * big can tell that the tail of its buffer is padding and not capset. */
+    c.size = (uint32_t)got;
+    if (copy_to_user((void *)(uintptr_t)c.addr, blob, got) < 0)
         rc = -EFAULT;
     kfree(blob);
-    return rc;
+    if (rc < 0)
+        return rc;
+    return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
 }
 
 /* Publish a GEM object's pages to the host as a 3D resource's backing.  Pages
@@ -2243,15 +2297,31 @@ static int drm_virtgpu_context_init(drm_context_t *ctx, void *arg)
     if (cid < 0)
         return cid;
 
-    /* Only the capset selection is meaningful here; the context already
-     * exists, so accept the parameters and ignore the rest. */
     if (ci.num_params == 0 || ci.ctx_set_params == 0)
         return 0;
-    struct drm_virtgpu_context_set_param p;
-    if (copy_from_user(&p, (const void *)(uintptr_t)ci.ctx_set_params,
-                       sizeof(p)) < 0)
+    if (ci.num_params > 64)
+        return -EINVAL;
+
+    /* ctx_set_params is an array of num_params entries, not one entry: the
+     * previous code read a single struct and dropped it, so a client that
+     * asked for capset 2 got capset 1's protocol back with no indication. */
+    struct drm_virtgpu_context_set_param *params =
+        kmalloc(ci.num_params * sizeof(*params));
+    if (!params)
+        return -ENOMEM;
+    int rc = copy_from_user(params, (const void *)(uintptr_t)ci.ctx_set_params,
+                            ci.num_params * sizeof(*params));
+    if (rc < 0) {
+        kfree(params);
         return -EFAULT;
-    (void)p;
+    }
+    for (uint32_t i = 0; i < ci.num_params; i++) {
+        if (params[i].param == VIRGLPARAM_CAPSET_ID)
+            ctx->virtgpu_capset_id = (uint32_t)params[i].value;
+        else if (params[i].param == VIRGLPARAM_CAPSET_VERSION)
+            ctx->virtgpu_capset_version = (uint32_t)params[i].value;
+    }
+    kfree(params);
     return 0;
 }
 
