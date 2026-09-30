@@ -115,8 +115,21 @@ smoke-netfilter:
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'NETFILTER_TEST: PASS' "$$log"; then \
 		echo "smoke-netfilter: PASS; log saved to $$log"; \
+	elif grep -q 'NETFILTER_TEST: ABSENT' "$$log"; then \
+		echo "smoke-netfilter: FAIL -- netfilter transmit hook absent (netfilter_output()"; \
+		echo "  is not called from a20_lwip_linkoutput()). Evidence:"; \
+		grep -E 'NETFILTER_TEST' "$$log" | tail -n 5; \
+		echo "  log saved to $$log"; \
+		exit 1; \
 	elif grep -q 'NETFILTER_TEST: SKIP' "$$log"; then \
-		echo "smoke-netfilter: SKIP (control surface verified, data plane not reached); log saved to $$log"; \
+		echo "smoke-netfilter: FAIL -- netfilter data plane NOT proven. The control"; \
+		echo "  surface worked but out_dropped never moved. This used to exit 0 and"; \
+		echo "  report SKIP as a pass, which manufactured confidence in a filter"; \
+		echo "  whose data path may not exist at all. A SKIP is not proof, so it"; \
+		echo "  cannot be green. Evidence:"; \
+		grep -E 'NETFILTER_TEST|out_packets|out_dropped' "$$log" | tail -n 20; \
+		echo "  log saved to $$log"; \
+		exit 1; \
 	elif [ "$$status" -eq 124 ]; then \
 		echo "smoke-netfilter: timeout without verdict; tail of $$log:"; \
 		tail -n 80 "$$log"; \

@@ -109,6 +109,24 @@ static int fail(const char *what)
     return 1;
 }
 
+static int g_absent;
+static int g_skipped;
+
+static int absent(const char *what, int err)
+{
+    printf("SCHED_STRESS: ABSENT %s (not implemented, errno=%d)\n", what, err);
+    g_absent++;
+    return 0;
+}
+
+static int skip_env(const char *what, int err)
+{
+    printf("SCHED_STRESS: SKIP %s (not exercised in this run, errno=%d)\n",
+           what, err);
+    g_skipped++;
+    return 0;
+}
+
 static int read_sched_diag(sched_diag_t *diag)
 {
     memset(diag, 0, sizeof(*diag));
@@ -599,8 +617,22 @@ static int cgroup_cpuset_affinity(void)
     mkdir("/tmp/sched_cg", 0755);
     long mounted = syscall(SYS_mount, "none", "/tmp/sched_cg", "cgroup", 0, "cpuset");
     if (mounted < 0) {
-        if (errno == ENOSYS || errno == ENOENT || errno == EINVAL || errno == EPERM)
-            return 0;
+        int err = errno;
+        /* ENOSYS is mount(2) itself missing -> cgroupfs is unproven, fail.
+         * ENOENT: the mount point is not there in this run (a tmpfs fact, and
+         * the same errno vfs_mount uses for an unresolvable target).
+         * EINVAL: vfs_mount only answers -EINVAL for an unknown fstype, i.e.
+         *   the cgroup branch was removed from vfs_mount() -- absent.
+         * EPERM: privilege, environment.
+         * Split rationale: the capability is "does cgroup cpuset affinity
+         * constrain a task", and nothing short of a working mount can prove it,
+         * so every one of these errnos costs the gate real coverage.  EINVAL and
+         * ENOSYS are a missing implementation and go red; ENOENT/EPERM describe
+         * this invocation and are counted as reported skips instead. */
+        if (err == ENOSYS || err == EINVAL)
+            return absent("cgroup-mount", err);
+        if (err == ENOENT || err == EPERM)
+            return skip_env("cgroup-mount", err);
         return fail("cgroup-mount");
     }
 
@@ -646,6 +678,13 @@ int main(void)
         return 1;
     if (cgroup_cpuset_affinity() != 0)
         return 1;
+    printf("SCHED_STRESS: coverage absent=%d skipped=%d\n", g_absent, g_skipped);
+    if (g_absent) {
+        printf("SCHED_STRESS: FAIL absent-capability count=%d "
+               "(capability not implemented; no PASS marker emitted)\n",
+               g_absent);
+        return 1;
+    }
     printf("SCHED_STRESS: PASS\n");
     return 0;
 }

@@ -125,16 +125,25 @@ __vdso_gettimeofday:
 
 /* int __vdso_getcpu(unsigned *x0, unsigned *x1, void *x2)
  *
- * Documented stub: always reports CPU 0 / node 0.  The running CPU id is
- * per-CPU kernel state with no user mapping, so there is nothing to read
- * here.  The getcpu syscall returns the true cpu_current_id().
+ * Refuses with -ENOSYS rather than reporting a CPU.  -ENOSYS is the one
+ * value musl's wrapper understands as "not available": src/sched/
+ * sched_getcpu.c turns any other non-zero result into a hard error, but
+ * falls through to the getcpu syscall on -ENOSYS, and that syscall returns
+ * the true cpu_current_id() (kernel/abi/linux/sys_sched.c).  So the caller
+ * gets the truth, and the fast path costs one wasted trap instead of a lie.
+ *
+ * Nothing readable from EL0 holds the id.  The kernel takes it from
+ * MPIDR_EL1[7:0] (kernel/arch/aarch64/include/cpu.h) and MPIDR_EL1 is not
+ * accessible at EL0; the register this vDSO *can* read, TPIDR_EL0, is the
+ * user TLS pointer, not a per-CPU base.  A20OS keeps no per-CPU area
+ * pointer for it to index either — per-CPU state is a plain array indexed by
+ * the id — and the vvar page the vDSO may read is one global page shared by
+ * every CPU (kernel/mm/vdso.c), which cannot hold a per-CPU value.  *x0 and
+ * *x1 are therefore left untouched: a plausible wrong CPU 0 is worse than no
+ * answer at all (docs/security/hardening.md).
  * See kernel/include/mm/vdso.h. */
     .globl __vdso_getcpu
     .type  __vdso_getcpu,%function
 __vdso_getcpu:
-    cbz     x0, 1f
-    str     wzr, [x0, #0]
-1:  cbz     x1, 2f
-    str     wzr, [x1, #0]
-2:  mov     w0, #0
+    mov     w0, #-38
     ret

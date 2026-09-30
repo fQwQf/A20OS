@@ -49,11 +49,18 @@ uint32_t mm_pt_anon_prov_max(void)
     return __atomic_load_n(&g_anon_prov_max, __ATOMIC_ACQUIRE);
 }
 
-/* Set the cap at runtime.  Only meaningful on hosted builds: under NOMMU there
- * is no page table, so provisioning is not a thing and the knob reads back 0. */
+/* Set the cap at runtime.  Only meaningful on a build that has the per-PTE
+ * status sidecar: under NOMMU there is no page table, and on an architecture
+ * whose page-table backend predates the sidecar (arm32's short-descriptor
+ * walker) there is no status byte to mark MM_ST_ANON_VIRT in and no
+ * mm_pt_provision_anon() to read the cap at all.  In both cases the capability
+ * does not exist, so the write is refused with -ENOSYS instead of being
+ * accepted and silently ignored -- a knob that accepts a value nothing reads
+ * is a fabricated capability (docs/security/hardening.md).  The read side stays
+ * available everywhere and reports 0, which is the truth: provisioning off. */
 int mm_pt_set_anon_prov_max(uint32_t pages)
 {
-#ifdef CONFIG_NOMMU
+#if defined(CONFIG_NOMMU) || !defined(ARCH_HAS_PGTABLE_OPS)
     (void)pages;
     return -ENOSYS;
 #else
