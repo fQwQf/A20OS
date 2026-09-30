@@ -80,6 +80,10 @@ $(MLIBC_MKSH_BIN): $(MLIBC_MKSH_OBJS) $(MLIBC_SYSROOT)/lib/libc.a user/mlibc/a20
 
 mlibc-hello-rv: $(MLIBC_HELLO_BIN) $(MLIBC_CHILD_BIN) $(MLIBC_FORK_BIN) $(MLIBC_SIGCHLD_BIN) $(MLIBC_MKSH_BIN)
 
+# Declared .PHONY; the shell was previously only reachable as a prerequisite of
+# mlibc-hello-rv, which left `make mlibc-mksh` with no rule.
+mlibc-mksh: $(MLIBC_MKSH_BIN)
+
 # ------------------------------------------------------------------
 # sbase coreutils on mlibc (native ABI)
 #

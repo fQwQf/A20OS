@@ -251,9 +251,37 @@ check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary c
 	@$(PYTHON) tools/gates.py check-doc-test-gates
 	@echo "check-doc-test-gates: PASS"
 
+# Not a distinct gate, and deliberately so.
+#
+# Every one of the 11 assertions in tools/gates.toml's check-final-definition
+# entry is already asserted by a gate check-doc-test-gates runs: MM_LOCK_MODEL
+# by check-mm-lock-model, TASK_STATE_MUTATION_CONTRACT by
+# check-concurrency-foundation, TASK_REFERENCE_LIFETIME by
+# check-task-state-boundary, VFS_REFCOUNT_HELPER_CONTRACT and
+# VFS_OPEN_DISPATCH_CONTRACT by check-vfs-abstraction, the three
+# NATIVE_*/LINUX_ABI_* markers by check-abi-boundary,
+# KERNEL_PROGRESS_SERVICE_CONTRACT by check-io-progress-model,
+# DRIVER_CORE_CONCURRENCY_MODEL by check-driver-core-model and
+# EXTERNAL_USERLAND_UPGRADE_CHECKLIST by
+# check-external-dependency-boundary.  So the target adds no coverage, and CI
+# runs it through its strict superset check-doc-test-gates only: a second CI job
+# would replay the same nine QEMU smokes to re-check eleven markers that the
+# first job already checked.
+#
+# The rule stays because it is load-bearing twice over, neither of which is
+# visible from this recipe: Makefile's SMP_VALIDATION_GOALS lists it, so naming
+# this target is one of three ways to tell the NR_CPUS guard that an
+# unverified NR_CPUS>1 build is deliberate; and tools/gates.toml owns the
+# assertion list, which this surface may not edit.
+#
+# The previous PASS line read "SMP smoke tracked separately by TODO section 10".
+# That was false: SMP *is* covered here, through check-concurrency-foundation,
+# which runs smoke-smp-bringup and builds a 2-CPU configuration.  The line was
+# also the only thing the target added over its prerequisite, so it was the one
+# part of this target that misdescribed it.
 check-final-definition: check-doc-test-gates
 	@$(PYTHON) tools/gates.py check-final-definition
-	@echo "check-final-definition: PASS (SMP smoke tracked separately by TODO section 10)"
+	@echo "check-final-definition: PASS (SMP covered via check-concurrency-foundation; every assertion here is already asserted by a gate check-doc-test-gates runs)"
 
 check-riscv64-user:
 	$(MAKE) -C user ARCH=riscv64 OPT="$(USER_OPT)"
