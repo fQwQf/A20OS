@@ -266,6 +266,13 @@ static const board_config_t ls2k1000 = {
     .poweroff          = ls2k_poweroff,
     .reboot            = ls2k_reboot,
     .enumerate_devices = ls2k_enumerate_devices,
+#ifdef CONFIG_COOPERATIVE_BOOT
+    /* The cooperative recovery profile exists because this board's firmware
+     * hands over with the timer unable to preempt, so a sleeping idle task would
+     * never be woken.  idle_loop() reads this instead of testing the board
+     * name.  The normal profile leaves it 0 and sleeps as usual. */
+    .idle_cannot_sleep = 1,
+#endif
 };
 
 const board_config_t *const current_board = &ls2k1000;
