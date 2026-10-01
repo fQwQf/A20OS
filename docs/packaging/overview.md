@@ -87,9 +87,13 @@ make ARCH=riscv64 image-world PKG_WORLD=base
 
 ## 与旧路径的关系
 
-**旧路径完全保留、继续可用**：`make run`、`make distro-run`、
-`user/rootfs/alpine/build.sh`、`user/extra.mk` 均未改动。新体系是叠加层，
+**旧路径基本保留、继续可用**：`make run`、`make distro-run`、
+`user/rootfs/alpine/build.sh` 均未改动。新体系是叠加层，
 详见 [migration.md](migration.md) 的对照表与迁移路线。
+
+唯一的例外是源码构建的 extra 路径：`user/extra.mk` 已删除，移植软件改由
+world 清单从 Alpine 上游解析（见 [images.md](images.md)）。`/extra` 分区本身
+仍在，由 apk world 镜像填充。
 
 ## 文档地图
 

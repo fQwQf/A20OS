@@ -3,9 +3,17 @@
 ## 源码存储形态
 
 - `kernel/external/lwip` 与 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree。
-- `.gitmodules` 登记其余外部项目的路径和 URL，超级项目的 gitlink 条目固定具体 commit；许可证必须对该精确 commit 核验。
-- `user/external/rust` 和 `user/external/riscv64-glibc-sysroot` 的本地内容未被仓库跟踪（2026-08 核实时），不能作为仓库已携带源码或许可证的证据。
-- 基础 `user/Makefile` 和 `user/extra.mk` 都存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
+- `.gitmodules` 目前只登记 `user/external/apps/fastfetch` 一项；超级项目的 gitlink 条目固定具体 commit；许可证必须对该精确 commit 核验。
+- fastfetch 是唯一仍从源码编译进根文件系统的独立第三方程序：它被链接进 FAT32 根，而该根在任何 Alpine world 挂载之前就要启动。
+- 基础 `user/Makefile` 存在静态 musl 链接；分发分析不能把用户程序一概描述为与 musl 分离。
+
+## 已退役的源码自建用户态路径
+
+`user/external/{apps/{git,vim},libs/zlib,toolchain/{binutils,musl-cross-make},gcc,rust,toolchain/Lamina1}` 与 `user/extra.mk` 已删除：这些程序现由 `packages/world/*.world` 清单经 `apk` 从 Alpine 上游仓库解析。`tools/targets-extra.mk` 保留了 `extra-img`、`run-<arch>-extra`、`vf2-extra` 等入口作为**会报错的弃置桩**，每个都给出替代命令；这是刻意的——让旧命令失败时直接告诉正确做法，而不是让它报 "no rule to make target"。
+
+`tools/img.py extra`、`tools/stamps.py extra-inputs` 与 `tools/pkg.py prepare-riscv64-sysroot` 已随之删除。真板仍需要一块可写 ext4（挂 `/extra`），该分区现在由 world 镜像填充：`mkrootfs.py` 输出的无分区表 raw ext4 可直接替换原 `extra.img`，`make vf2-sdcard` 即走此路径（`VF2_WORLD` 选 world，默认 `devel`）。
+
+被删除的 glibc sysroot 引导（`prepare-riscv64-glibc-sysroot.sh`）曾为源码构建的 glibc 动态链接程序提供运行库；Alpine 包自带各自 loader，因此不再需要。
 
 ## lwIP
 

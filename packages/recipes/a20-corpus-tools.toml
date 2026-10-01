@@ -1,0 +1,32 @@
+# a20-corpus-tools — 需要直接调 mount(2) 的板级小工具
+#
+# 为什么单独成包：busybox mount(8) 不可用。它在挂载前先 stat 设备节点，
+# 而 A20OS 的块设备寻址方式使那一步拿不到可用的设备信息，所以 stage-2
+# init 必须用一个直接发 mount(2) 的 A20OS 原生程序。user/cmds/core/a20mount.c
+# 就是为此存在的。
+#
+# 为什么不能像 pynode 的语料盘那样"塞一个预编译 ELF 进 overlay"：overlay 里
+# 提交的 ELF 是固定架构的，mkrootfs.py 会校验 overlay 内 ELF 的 e_machine，
+# 于是 pynode world 在任何非 riscv64 目标上都会直接失败。走 apk 包则由
+# {build_dir} 按目标架构产出，天然可移植。
+#
+# 构建前提：`make ARCH=<arch> dev-build`（或任何产出 user/build/<variant> 的目标）。
+
+[package]
+name = "a20-corpus-tools"
+version = "0.1.0"
+release = 0
+description = "A20OS board helper that issues mount(2) directly, for busybox mount-less environments"
+url = "https://github.com/fQwQf/A20OS"
+license = "Apache-2.0"
+maintainer = "A20OS developers"
+archs = ["riscv64", "aarch64", "x86_64", "loongarch64", "riscv32", "arm32", "ppc64le"]
+
+# 刻意不 depends = ["a20-userland"]。唯一用它的是 pynode world，而那个 world
+# 是纯 Alpine 用户态，不装任何 a20-* 包，虚拟依赖会永远无法满足。a20mount 是
+# 静态链接的单文件程序，不依赖 A20OS 用户态的其余部分。
+
+[[files]]
+src = "{build_dir}/a20mount"
+dest = "/usr/local/bin/a20mount"
+mode = "0755"
