@@ -1,0 +1,21 @@
+# 服务器最小形态实例（apk world 'server'，distro 模式）：Alpine 上游包
+# dropbear（SSH）/ chrony（NTP）/ busybox syslogd+crond 由 mkrootfs 组进
+# build/images/server-riscv64.img。首次组装需要从 Alpine 镜像站拉取上游包。
+# 声明层就绪；端到端组装与 SSH 登录验证是待办（见 world/server.world 头注）。
+#
+#   tools/a20 build server-riscv64   # 组镜像
+#   tools/a20 run server-riscv64     # 组镜像并启动；host:2222 -> guest:22
+name = "server-riscv64"
+description = "Minimal server image via apk world 'server' (dropbear SSH, chrony, busybox syslogd/crond)"
+arch = "riscv64"
+
+[machine]
+memory = "1G"
+smp = 2
+
+[net]
+hostfwd = ["tcp::2222-:22"]
+
+[rootfs]
+world = "server"
+world_size_mb = 512
