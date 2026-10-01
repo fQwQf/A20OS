@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import re
 import sys
 from pathlib import Path
 from typing import assert_never
@@ -488,6 +489,86 @@ def cmd_show_vars(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_boards(args: argparse.Namespace) -> int:
+    """List the boards in the tree, not the instances that mention them.
+
+    A board is a directory under kernel/platform/ holding a board.c that defines
+    current_board.  There was no way to ask this question before: `a20 list`
+    shows instances, so a board without an instance -- which is every board
+    until somebody writes one -- was invisible, and picking a porting target
+    means starting from that list.
+    """
+    plat = REPO_ROOT / "kernel" / "platform"
+    dirs = sorted(d for d in plat.iterdir() if d.is_dir()) if plat.is_dir() else []
+    if args.arch:
+        dirs = [d for d in dirs if _board_arch(d) == args.arch]
+    if not dirs:
+        print(f"boards: none found{(' for arch=' + args.arch) if args.arch else ''}",
+              file=sys.stderr)
+        return EXIT_OK
+    print(f"{'board':<24} {'arch':<12} {'smp':<5} {'ldscript':<9} description")
+    for d in dirs:
+        src = d / "board.c"
+        if not src.is_file():
+            print(f"{d.name:<24} {'-':<12} {'-':<5} {'-':<9} "
+                  f"platform files only -- no board.c, not a buildable board")
+            continue
+        text = src.read_text(errors="replace")
+        arch = _board_arch(d) or "?"
+        smp = "yes" if re.search(r"\.smp\s*=\s*&", text) else "no"
+        lds = "yes" if (d / "ldscript.ld").is_file() else "no"
+        print(f"{d.name:<24} {arch:<12} {smp:<5} {lds:<9} {_board_summary(text)}")
+    print(f"\n{len(dirs)} board(s).  Board facts live in "
+          f"kernel/platform/<board>/board.c and its <board>_platform.h;\n"
+          f"a new arch additionally needs a CONFIG_BOARD_* block in "
+          f"kernel/arch/<arch>/include/platform.h.")
+    return EXIT_OK
+
+
+def _board_arch(d: Path) -> str | None:
+    """Which architecture claims this board.
+
+    Read from the arch headers rather than a table: a board belongs to an
+    architecture when kernel/arch/<arch>/include/platform.h has a block for its
+    CONFIG_BOARD_ token, and to nothing when none does.  That is the same fact
+    the build uses, so the answer cannot drift from what compiles.  Instances
+    are the fallback for boards that predate the override mechanism and are
+    still guarded only by their own CONFIG_<ARCH>.
+    """
+    src = d / "board.c"
+    if not src.is_file():
+        return None
+    m = re.search(r"CONFIG_BOARD_([A-Z0-9_]+)", src.read_text(errors="replace"))
+    if m:
+        token = "CONFIG_BOARD_" + m.group(1)
+        arch_root = REPO_ROOT / "kernel" / "arch"
+        if arch_root.is_dir():
+            for arch_dir in sorted(p for p in arch_root.iterdir() if p.is_dir()):
+                plat = arch_dir / "include" / "platform.h"
+                if plat.is_file() and token in plat.read_text(errors="replace"):
+                    return arch_dir.name
+    # Boards that predate the CONFIG_BOARD_ override are guarded only by their
+    # own CONFIG_<ARCH>, so the instances are the only place the pairing lives.
+    for toml in sorted(INSTANCES_DIR.glob("*.toml")):
+        try:
+            inst = parse_instance(toml)
+        except InstanceError:
+            continue
+        if inst.board == d.name:
+            return inst.arch
+    return None
+
+
+def _board_summary(text: str) -> str:
+    """First line of the board file's header comment.
+
+    Only the head of the file is considered: further down, board.c holds
+    implementation commentary that has nothing to do with what the board is.
+    """
+    m = re.search(r"/\*\s*\n\s*\*?\s*(.{4,110}?)\s*\n", text[:1200])
+    return m.group(1).strip() if m else ""
+
+
 def cmd_list(args: argparse.Namespace) -> int:
     paths = sorted(INSTANCES_DIR.glob("*.toml"))
     if not paths:
@@ -680,6 +761,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="only instances that support every one of these "
                          "actions (build run debug test flash package "
                          "console deploy)")
+    p_brd = sub.add_parser("boards", help="list the boards in the tree")
+    p_brd.add_argument("--arch", metavar="ARCH",
+                       help="only boards for this architecture")
+    p_brd.set_defaults(func=cmd_boards)
     sub.add_parser("resources", help="show the host budget instance runs are gated against")
 
     for name, help_text in (("console", "attach to a board console and run its on-board check"),
@@ -755,6 +840,8 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_check_flash_backends(ns)
         case "list":
             return cmd_list(ns)
+        case "boards":
+            return cmd_boards(ns)
         case "resources":
             return cmd_resources(ns)
         case "console":

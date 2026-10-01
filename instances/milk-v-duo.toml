@@ -1,0 +1,35 @@
+# Milk-V Duo (SophGo CV1800B) bring-up.
+#
+# Stage-1 instance, same shape as licheerv-nano: no [package] section, because
+# there is no storage driver for the DWCMSH controller yet.  See
+# docs/platforms/milk-v-duo.md.
+#
+# This board has 64 MiB of RAM -- U-Boot reports "DRAM: 63.3 MiB" -- which is
+# the whole reason it is the second target rather than the first.  ramfs_user
+# puts the userland in RAM instead of on a filesystem, and swap is off because
+# there is nowhere to put a page.  Do not try image-world on this board: a full
+# apk world does not fit in 64 MiB.  If you want the same SoC with room to
+# breathe, the LicheeRV Nano is 256 MiB for the same money.
+name = "milk-v-duo"
+description = "Milk-V Duo (CV1800B, 64 MiB) riscv64 bring-up, RAMFS userland, no swap"
+arch = "riscv64"
+board = "milk-v-duo"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+ramfs_user = true
+swap = false
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 3
+boot_timeout = "120s"
+# On 64 MiB the RAM window is the first thing to get wrong: a board header that
+# claimed more would make the allocator walk off the end of real RAM.  The FDT
+# line has to agree with the 64 MiB window in milk_v_duo_platform.h.
+console_check = ["[FDT]", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]

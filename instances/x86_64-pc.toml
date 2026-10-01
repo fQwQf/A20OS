@@ -1,0 +1,43 @@
+# Generic PC-compatible machine: refurbished thin clients, N100/J4125 mini PCs,
+# office boxes.  ARCH=x86_64 BOARD=x86_64-pc.
+#
+# grub-iso is the right packaging here even though GRUB is not on the board:
+# tools/mk_grub_iso.sh builds a rescue ISO whose grub.cfg uses `multiboot
+# /boot/kernel.elf`, and GRUB2's multiboot v1 module works whether it was
+# started by BIOS or by UEFI boot services.  That matters because most 2025
+# thin clients are UEFI-only with no CSM option, and A20OS has no x86_64 UEFI
+# stub -- kernel/boot/uefi/ holds an aarch64 loader only.  Writing that ISO to
+# a USB stick and booting it is the whole deployment path; see
+# docs/platforms/x86_64-pc.md.
+#
+# Like the other physical instances, [target] describes how to talk to the
+# machine, not that anyone has.  Most thin clients have no RS-232 connector --
+# the HP t630 has none at all -- so expect to solder a USB-TTL adapter onto the
+# internal header before console_check can pass.  serial is left at the common
+# USB-TTL node on purpose: fill in the real one.
+name = "x86_64-pc"
+description = "Generic PC-compatible machine (thin client / mini PC) x86_64 bring-up over a GRUB rescue ISO"
+arch = "x86_64"
+board = "x86_64-pc"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[package]
+kind = "grub-iso"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+# A desktop class machine reboots on its own; the 8254 keyboard controller reset
+# in firmware_reboot() is the only reset path A20OS has for x86_64.
+boot_wait = 5
+boot_timeout = "180s"
+# Both bootargs probes appearing is the regression guard for the multiboot
+# cmdline path: on a real machine fw_cfg is absent and only the multiboot line
+# can carry a20.* settings.
+console_check = ["[BOOTARGS] multiboot cmdline", "[FDT]", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]

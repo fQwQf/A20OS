@@ -27,7 +27,7 @@ QEMU_RUNNABLE_ARCHES: Final = (
 )
 NOMMU_ARCHES: Final = ("riscv64", "riscv32", "aarch64", "arm32", "armv7m")
 SMP_VERIFIED_QEMU_ARCHES: Final = ("riscv64", "aarch64", "loongarch64", "x86_64")
-RAMFS_USER_ARCHES: Final = ("loongarch64",)
+RAMFS_USER_ARCHES: Final = ("loongarch64", "riscv64")
 ABI_CHOICES: Final = ("linux", "native", "both")
 DRIVER_DEPLOYMENTS: Final = ("generic", "embedded")
 PROFILES: Final = ("full", "benchmark", "mcu")
