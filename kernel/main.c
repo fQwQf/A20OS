@@ -3,6 +3,7 @@
 #include "drivers/char/uart.h"
 void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
+#include "mm/oom.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
 #include "mm/pt.h"
@@ -202,6 +203,8 @@ void kernel_main(void) {
     int ret = proc_alloc(init_kthread);
     if (ret < 0)
         panic("Failed to create init_kthread");
+    if (proc_alloc(oom_kswapd_thread) < 0)
+        kerr("[KSWAPD] failed to spawn background reclaimer\n");
 #endif
 
     printf("[INIT] System ready\n\n");
