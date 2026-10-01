@@ -511,6 +511,15 @@ QEMU_GPU := $(if $(QEMU_GPU_$(ARCH)),$(QEMU_GPU_$(ARCH)),$(QEMU_GPU_DEFAULT))
 QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
 QEMU_BLK_SECOND_loongarch64 := virtio-blk-pci
 QEMU_BLK_SECOND_x86_64      := virtio-blk-pci
+# aarch64 was missing here, so an instance declaring [rootfs].world -- which is
+# every xfce-*-style Alpine desktop, xfce-aarch64 included -- expanded to an
+# empty device and emitted "-device ,drive=xworld".
+#
+# The second disk goes on a second virtio-mmio bus, not on PCI: the board's
+# enumerate_devices only calls virtio_mmio_enumerate and never initialises the
+# PCI host, so a virtio-blk-pci here would satisfy QEMU and still be invisible to
+# the kernel.  The primary disk takes bus.0, which is why riscv64 does this too.
+QEMU_BLK_SECOND_aarch64     := virtio-blk-device,bus=virtio-mmio-bus.1
 
 QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_loongarch64 := virtio-net-pci
