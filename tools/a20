@@ -68,6 +68,9 @@ from a20_manifest import collect as collect_manifest
 from a20_manifest import render_json, render_markdown, render_table, write as write_ledger
 from a20_make import REPO_ROOT, MakeQueryError, build_instance, exec_make
 from a20_resource import (
+    DEFAULT_MEMORY,
+    DEFAULT_MEMORY_GUI,
+    DEFAULT_VCPUS,
     HostResources,
     Policy,
     gate_qemu,

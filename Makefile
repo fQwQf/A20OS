@@ -531,8 +531,16 @@ QEMU_GUI_DEVICES_arm32 := -device virtio-keyboard-device,bus=virtio-mmio-bus.5 \
                           -device $(QEMU_GPU)
 # x86_64 input comes from the PS/2 controller (QEMU's default keyboard/mouse
 # injection target); the ps2 drvmod publishes its ring to /dev/event0.
+# The keyboard and mouse are not optional decoration here.  wlroots' multi
+# backend tries libinput first and aborts the whole session when it finds no
+# input devices -- it does not fall through to DRM -- so a GUI instance without
+# them never reaches a display at all.  start-xfce4-session does not set
+# WLR_LIBINPUT_NO_DEVICES because the desktop is meant to be usable, which means
+# the devices have to actually be attached.
 QEMU_GUI_DEVICES_x86_64 := -vga none \
-                           -device $(QEMU_GPU)
+                           -device $(QEMU_GPU) \
+                           -device virtio-keyboard-pci \
+                           -device virtio-mouse-pci
 QEMU_GUI_DEVICES_loongarch64 := -vga none \
                                   -device $(QEMU_GPU) \
                                   -device virtio-keyboard-pci \
