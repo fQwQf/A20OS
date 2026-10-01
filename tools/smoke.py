@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import re
 import subprocess
 import sys
@@ -71,7 +72,7 @@ STEP35_LOCK_SPLIT = [
 STEP35_FORBID = r"PANIC|sched invariant|reference underflow|use-after-free|\[LOCK\]"
 # Positional args main() handles itself instead of looking up in CASES;
 # smoke_audit.py reads this so a wired subcommand is not read as a typo'd case.
-SUBCOMMANDS = {"step35", "arch-mmu-matrix", "devtools"}
+SUBCOMMANDS = {"step35", "arch-mmu-matrix", "devtools", "mesa-attach"}
 # arch -> (board, qemu binary, base qemu flags, needs -embedded build dir)
 MATRIX_ARCHS: dict[str, tuple[str, str, list[str], bool]] = {
     "arm32": ("qemu-virt-arm32", "qemu-system-arm",
@@ -136,6 +137,22 @@ def qemu_argv(case: dict) -> list[str]:
     argv.append(case["timeout"])
     argv += case["argv"]
     return argv
+
+
+def split_command(cmd: str) -> list[str]:
+    """Split a make variable into argv.
+
+    The Makefile builds QEMU as `env LD_LIBRARY_PATH=... qemu-system-<arch>`
+    whenever a locally built virglrenderer is present (Makefile QEMU_VIRGL_LIB),
+    so --qemu is a command line, not a program name. Handing that to Popen as one
+    argv element makes it look for a binary literally named
+    "env LD_LIBRARY_PATH=... qemu-system-x86_64" and fail with FileNotFoundError
+    that names the whole string.
+
+    shlex rather than str.split: the paths in it may contain spaces, and the
+    quotes have to survive. Harmless when QEMU is a bare program name.
+    """
+    return shlex.split(cmd)
 
 
 def run_qemu(case: dict) -> int:
@@ -349,7 +366,7 @@ def devtools_main(a: argparse.Namespace) -> int:
         "stdin": {"kind": "pipe", "delay": a.input_delay,
                   "lines": ["chroot /extra /bin/sh /devtools-smoke.sh", "poweroff"]},
         "timeout": a.timeout,
-        "argv": [a.qemu, *a.qemu_flag,
+        "argv": [*split_command(a.qemu), *a.qemu_flag,
                  "-drive", f"file={Path(a.img).resolve()},if=none,"
                            f"format=raw,id=xdevtools",
                  "-device", f"{a.blk_second},drive=xdevtools",
@@ -363,6 +380,56 @@ def devtools_main(a: argparse.Namespace) -> int:
     print(f"smoke-devtools: failed (status {status}); tail of {log}:")
     print("\n".join(text.splitlines()[-80:]))
     return 1
+
+
+def mesa_attach_main(a: argparse.Namespace) -> int:
+    """Boot a Mesa-only rootfs and record what stock Mesa does with our DRM node.
+
+    Deliberately reports rather than asserts. The question -- does libEGL/libgbm
+    bind virtio_gpu_dri.so -- was open, and the honest state of knowledge is a set
+    of observations, not a verdict. Requiring success here would turn "Mesa does
+    not attach" into a red gate that says nothing beyond what the log already
+    says, and would be indistinguishable from an infrastructure failure. So the
+    gate passes when the probe ran to completion, and the transcript carries the
+    evidence either way; promoting it to pass/fail on the renderer string is the
+    next step, to be taken once attach either works or has a located cause.
+
+    The marker required is the probe's own "end", which it only prints after both
+    eglinfo runs. A probe that dies early therefore fails here, so this does
+    still catch "the Mesa image no longer boots", which is a real regression.
+    """
+    log = Path(a.log_dir) / f"mesa-attach-{a.label}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    case = {
+        "log": str(log),
+        "stdin": {"kind": "pipe", "delay": a.input_delay,
+                  "lines": ["chroot /extra /bin/sh /mesa-probe.sh", "poweroff"]},
+        "timeout": a.timeout,
+        "argv": [*split_command(a.qemu), *a.qemu_flag,
+                 "-drive", f"file={Path(a.img).resolve()},if=none,"
+                           f"format=raw,id=xmesa",
+                 "-device", f"{a.blk_second},drive=xmesa",
+                 "-kernel", a.kernel],
+    }
+    status = run_qemu(case)
+    text = log.read_text(encoding="utf-8", errors="replace")
+
+    print(f"smoke-mesa-attach: transcript of Mesa's behaviour "
+          f"(log saved to {log})")
+    for line in text.splitlines():
+        if "MESA_PROBE:" in line:
+            print("  " + line.split("MESA_PROBE:", 1)[1].rstrip())
+
+    if not grep_matches(bre("MESA_PROBE: end"), text):
+        print("smoke-mesa-attach: FAIL the probe did not run to completion "
+              f"(status {status})")
+        return 1
+    # Surface the one fact that decides the question, without judging it.
+    attached = grep_matches(bre("OpenGL renderer string:.*virgl"), text)
+    print("smoke-mesa-attach: virtio_gpu_dri attached: "
+          f"{'yes' if attached else 'no (see renderer line above)'}")
+    print("smoke-mesa-attach: PASS")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -389,6 +456,8 @@ def main(argv: list[str] | None = None) -> int:
         return matrix_main(a)
     if a.case == "devtools":
         return devtools_main(a)
+    if a.case == "mesa-attach":
+        return mesa_attach_main(a)
     if a.case in SUBCOMMANDS:
         missing = [n for n in ("label", "log_dir", "qemu", "kernel", "timeout")
                    if getattr(a, n) is None]
