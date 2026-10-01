@@ -1,0 +1,41 @@
+#!/bin/sh
+# A20OS stage-2 init for the server world.  The kernel already mounted
+# devtmpfs/proc/sysfs under /extra before the chroot, so /dev /proc /sys
+# are live here.  Starts the minimum server daemons (all busybox/dropbear/
+# chrony from Alpine upstream) and then opens a root console shell —
+# deliberately minimal until A20OS grows an authenticated login path
+# (no getty/PAM yet, see docs/server-readiness.md §五).
+
+export HOME=/root
+export SHELL=/bin/sh
+export TERM=vt100
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mkdir -p /run /tmp /var/log /var/empty /etc/dropbear /var/lib/chrony 2>/dev/null || true
+mkdir -p /dev/pts 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /run 2>/dev/null || true
+
+# Kernel timestamps start at the build constant and there is no RTC driver
+# yet (docs/server-readiness.md §七); chrony -q steps the clock once from
+# the configured NTP source so logs/ certificates get sane times.  Failure
+# (no network / no server reachable) must not block boot.
+chronyd -f -q 2>/dev/null &
+sleep 2
+
+# Kernel log to a file so post-mortem does not depend on the serial console.
+syslogd -O /var/log/messages 2>/dev/null || true
+
+# First boot generates dropbear host keys; subsequent boots reuse them.
+if [ ! -f /etc/dropbear/dropbear_rsa_host_key ]; then
+    dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
+fi
+# SSH on 22; the qemu-riscv64-server instance forwards host port 2222.
+dropbear -p 22 2>/dev/null || echo "[server-init] dropbear failed to start"
+
+# Periodic jobs (busybox crond uses /etc/crontabs/root).
+mkdir -p /etc/crontabs 2>/dev/null || true
+echo '*/10 * * * * chronyd -q' > /etc/crontabs/root 2>/dev/null || true
+crond 2>/dev/null || true
+
+exec /bin/sh -l

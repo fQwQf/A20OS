@@ -1,0 +1,21 @@
+# server profile —— 服务器最小形态（纯 Alpine 上游包）
+#
+# 配套 packages/overlay/server/（a20-distro 标记 + stage-2 init），
+# 启动后由 init 自动 chroot 接管（与 pynode / devtools world 同一模式）。
+# 用途：给 docs/server-readiness.md 记录的"服务器段无落地物"一个最小的
+# 声明式起点：远程接入（dropbear SSH）、时间同步（chrony）、日志与定时
+# 任务（busybox syslogd/crond）。
+#
+#   tools/a20 run server-riscv64
+#
+# 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
+# 缓存。**验证状态**：world/overlay 是声明式定义；在本分支上没有执行过
+# image-world 组装或 guest 内运行验证（需要 Alpine 镜像源可达），组装与
+# SSH 登录的端到端验证仍是待办，见 docs/server-readiness.md §八。
+
+musl
+busybox
+busybox-suid
+ca-certificates
+dropbear
+chrony

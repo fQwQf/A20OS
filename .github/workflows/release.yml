@@ -120,12 +120,43 @@ jobs:
             build/keys/*.rsa.pub
           if-no-files-found: error
 
+  # 发布前门禁：构建产物在 guest 里跑一遍核心冒烟（Linux ABI syscall 语义
+  # 与 VFS/fd 压力），任何失败都阻止 Release 创建。此前 release.yml 从
+  # 构建、签名到发布没有任何测试步骤——发布即承诺，却无人验证承诺。
+  smoke:
+    name: release-smoke-riscv64
+    needs: buildenv-image
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ needs.buildenv-image.outputs.image }}
+      options: --privileged
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Trust workspace ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: build/cache/ccache
+          key: ccache-release-smoke-${{ github.sha }}
+          restore-keys: ccache-release-smoke-
+      - name: Run riscv64 guest smoke gates
+        run: |
+          make smoke-abi-linux
+          make smoke-vfs-stress
+          make smoke-mm-stress
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
+
   # 只创建 GitHub Release。刻意不挂 github-pages environment：该 environment
   # 只允许 main 分支，而带 environment 的 job 会在任何 step 之前被拒绝，
   # 于是 tag 触发的 Release 永远建不出来。
   release:
     name: release
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
