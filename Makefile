@@ -655,8 +655,8 @@ endif
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
-# Extra-package runs need extra.img to be the ext4 filesystem mounted at /extra,
-# so snapshot the flags before an optional second disk is appended.
+# Snapshot the flags before an optional second disk is appended, so the
+# world-image targets can add theirs without inheriting an strays' disk.
 QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)

@@ -341,6 +341,20 @@ class TestValidateInstance(unittest.TestCase):
     def test_stm32_section_is_armv7m_only(self) -> None:
         self.assertTrue(self.check('arch = "riscv64"\n[stm32]\nflash_kb = 64\n'))
 
+    def test_retired_fit_sdcard_variant_is_rejected(self) -> None:
+        """`extra` resolved to `make vf2-extra`, now a deprecation stub.
+
+        Accepting it would let `a20 package` pass validation and only fail
+        later inside make, which is the worse failure mode.
+        """
+        errors = self.check('arch = "riscv64"\nboard = "visionfive2"\n'
+                            'abi = "both"\n[package]\nkind = "fit-sdcard"\n'
+                            'variant = "extra"\n')
+        self.assertTrue(any("package.variant" in e for e in errors), errors)
+        self.assertEqual(self.check('arch = "riscv64"\nboard = "visionfive2"\n'
+                                    'abi = "both"\n[package]\nkind = "fit-sdcard"\n'
+                                    'variant = "sdcard"\n'), [])
+
 
 class TestFlashBackendSafety(unittest.TestCase):
     """The board/geometry allowlist guards a destructive erase, so it gets the
@@ -1548,7 +1562,7 @@ def _vars_for(instance_name: str) -> dict[str, str]:
     from a20_make import query_make
     return query_make(load_instance(instance_name),
                       ("BUILD_DIR", "KERNEL_ELF", "KERNEL_BIN", "FAT32_IMG",
-                       "EXT4_IMG", "EXTRA_IMG", "PKG_IMAGE_DIR", "PKG_ARCH"))
+                       "EXT4_IMG", "PKG_IMAGE_DIR", "PKG_ARCH"))
 
 
 def _manifest():

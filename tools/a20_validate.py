@@ -36,7 +36,12 @@ _HOSTFWD_RE: Final = re.compile(r"(tcp|udp)::[0-9]*-[0-9]*:[0-9]+")
 _TIMEOUT_RE: Final = re.compile(r"[0-9]+s")
 
 _UEFI_VARIANTS: Final = ("default", "text")
-_FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard", "extra")
+# "extra" was a fourth variant that resolved to `make vf2-extra`, which built
+# the source-built extra.img.  That card differed from "sdcard" only by that
+# disk, so with the disk gone the variant went too; vf2-sdcard now fills that
+# partition from an apk world (VF2_WORLD).  Reject it here rather than letting
+# a20 package pass validation and then fail inside make.
+_FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard")
 
 
 def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
