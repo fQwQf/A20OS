@@ -258,6 +258,26 @@ int arch_resolve_interp_fallback(const char *exec_path, const char *interp_path,
                                  char *resolved, size_t resolved_size);
 
 /*
+ * Optional architecture register dumps, for bring-up on a board whose firmware
+ * hands control over in a state nobody has characterised yet.  Both are called
+ * with interrupts off and before generic code starts printing, so an
+ * implementation may read CSRs freely.  Printing is left to the implementation
+ * because only the architecture knows what its registers are called.
+ *
+ * An architecture opts in by defining ARCH_HAS_BOOT_TRACE_DUMPS in its
+ * arch/<arch>/include/arch.h and providing the two functions.  Everyone else
+ * gets the no-op inline below, which is why most architectures print no
+ * register line at all rather than an empty one.
+ */
+#ifdef ARCH_HAS_BOOT_TRACE_DUMPS
+void arch_panic_dump(void);
+void arch_debug_dump_user_state(void);
+#else
+static inline void arch_panic_dump(void) { }
+static inline void arch_debug_dump_user_state(void) { }
+#endif
+
+/*
  * Optional hardware entropy source.  Returns 1 and writes a fresh 64-bit
  * hardware random value to *out on success, or 0 if the platform has no
  * usable hardware RNG.  The core RNG mixes this into the software PRNG state;
