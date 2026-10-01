@@ -854,6 +854,14 @@ static void drm_gem_unpin(drm_gem_t *b)
     if (!b)
         return;
     drm_lock();
+    /* Saturating: a stray extra unpin would otherwise drive pins to -1, after
+     * which pins == 0 is never true again and the buffer is never reclaimed --
+     * a silent permanent leak of the VMO and the host resource. Turning that
+     * mistake into a no-op costs one comparison. */
+    if (b->pins <= 0) {
+        drm_unlock();
+        return;
+    }
     b->pins--;
     if (b->pins == 0 && b->fb_refs == 0 && !b->dumb_live)
         drm_gem_detach_locked(b, &s);
@@ -990,7 +998,7 @@ static int drm_gem_name_bind_locked(uint32_t name, uint32_t handle)
     return 0;
 }
 
-static int drm_gem_name_lookup(uint32_t name, uint32_t *handle)
+static int drm_gem_name_lookup_locked(uint32_t name, uint32_t *handle)
 {
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].name == name) {
@@ -2044,15 +2052,15 @@ static int drm_gem_open(drm_context_t *ctx, void *arg)
     struct drm_gem_open o;
     if (copy_from_user(&o, arg, sizeof(o)) < 0)
         return -EFAULT;
-    uint32_t handle = 0;
-    int rc = drm_gem_name_lookup(o.name, &handle);
-    if (rc < 0)
-        return rc;
     drm_lock();
-    drm_gem_t *g = drm_find_gem_locked(handle);
+    uint32_t handle = 0;
+    int rc = drm_gem_name_lookup_locked(o.name, &handle);
+    drm_gem_t *g = rc == 0 ? drm_find_gem_locked(handle) : NULL;
     if (g)
         o.size = g->size;
     drm_unlock();
+    if (rc < 0)
+        return rc;
     if (!g)
         return -ENOENT;
     o.handle = handle;
@@ -2175,21 +2183,28 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
     struct drm_prime_handle p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    drm_lock();
-    drm_gem_t *b = drm_find_gem_locked(p.handle);
-    uint64_t bsize = b ? b->size : 0;
-    struct vmo *bvmo = b ? b->vmo : NULL;
-    drm_unlock();
+    /* Pinned, not merely read under the lock: the GEM store is device-global,
+     * so a DESTROY_DUMB or GEM_CLOSE on any fd can reach drm_free_gem() while
+     * this loop walks the pages, see pins == 0 and drop the VMO. Reading
+     * page_count out of a freed vmo, and taking its spinlock, is a use-after-free
+     * whose visible effect is another allocation's frames landing in an fd we
+     * hand to a different process. */
+    drm_gem_t *b = drm_gem_pin(p.handle);
     if (!b)
         return -ENOENT;
+    uint64_t bsize = b->size;
+    struct vmo *bvmo = b->vmo;
 
     int mfd = memfd_create_file(p.flags & 0x2U ? O_CLOEXEC : 0);
-    if (mfd < 0)
+    if (mfd < 0) {
+        drm_gem_unpin(b);
         return mfd;
+    }
 
     void *snap = kmalloc(bsize);
     if (!snap) {
         vfs_close(mfd);
+        drm_gem_unpin(b);
         return -ENOMEM;
     }
     for (uint32_t i = 0; i < (bsize + PAGE_SIZE - 1) / PAGE_SIZE; i++) {
@@ -2207,12 +2222,14 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
     kfree(snap);
     if (r < 0) {
         vfs_close(mfd);
+        drm_gem_unpin(b);
         return r;
     }
 
     uint64_t id = drm_fd_identity(mfd);
     if (!id) {
         vfs_close(mfd);
+        drm_gem_unpin(b);
         return -EIO;
     }
 
@@ -2220,24 +2237,30 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
      * full.  Liveness is resolved with the lock dropped, then the sweep only
      * touches entries whose (fd, identity) still matches what was probed, so a
      * concurrent re-export cannot be mistaken for a dead one. */
-    int probe[DRM_PRIME_MAX][2];
+    uint64_t probe[DRM_PRIME_MAX][2];
     int nprobe = 0;
     drm_lock();
     for (int i = 0; i < g_prime_count && i < DRM_PRIME_MAX; i++) {
-        probe[nprobe][0] = g_prime[i].fd;
+        probe[nprobe][0] = (uint64_t)g_prime[i].fd;
         probe[nprobe][1] = 0;
         nprobe++;
     }
     drm_unlock();
     for (int i = 0; i < nprobe; i++)
-        probe[i][1] = (int)drm_fd_identity(probe[i][0]);
+        probe[i][1] = drm_fd_identity((int)probe[i][0]);
 
     drm_lock();
     for (int i = 0; i < nprobe; ) {
-        int dead = 0;
+        /* An entry is dead only when *no* probe line still agrees with it.
+         * Matching on the fd alone and taking the first hit would evict a live
+         * entry whenever two entries share an fd number -- which happens as soon
+         * as a closed memfd's number is reused -- because the two lines for that
+         * number are resolved separately and can report different identities. */
+        int dead = 1;
         for (int j = 0; j < nprobe; j++) {
-            if (probe[j][0] == g_prime[i].fd) {
-                dead = (uint64_t)probe[j][1] != g_prime[i].identity;
+            if (probe[j][0] == (uint64_t)g_prime[i].fd &&
+                probe[j][1] == g_prime[i].identity) {
+                dead = 0;
                 break;
             }
         }
@@ -2265,6 +2288,7 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
     /* An fd that is not in the table can never be imported, so failing here is
      * the only honest outcome; returning it anyway would surface much later as
      * an unexplained ENOENT from PRIME_FD_TO_HANDLE. */
+    drm_gem_unpin(b);
     if (slot < 0) {
         vfs_close(mfd);
         return -EMFILE;
@@ -2289,14 +2313,20 @@ static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
     int found = 0;
     drm_lock();
     for (int i = 0; i < g_prime_count; i++) {
-        if (g_prime[i].identity == id) {
+        if (g_prime[i].identity != id)
+            continue;
+        /* The export can outlive its buffer. Importing a handle whose GEM is
+         * gone hands the caller a number that drm_gem_alloc_locked() will hand
+         * to a different buffer, and that number is mmap-able through
+         * drm_linux_mmap() -- so the importer would read a buffer the fd never
+         * designated. */
+        if (drm_find_gem_locked(g_prime[i].handle))
             handle = g_prime[i].handle;
-            found = 1;
-            break;
-        }
+        found = 1;
+        break;
     }
     drm_unlock();
-    if (!found)
+    if (!found || !handle)
         return -ENOENT;
     p.handle = handle;
     return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
@@ -2460,15 +2490,27 @@ static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
  * into them, and an unmaterialised page has no frame to write to. */
 static int drm_gem_attach_backing(drm_gem_t *g)
 {
-    if (!g->vmo || g->size == 0)
+    /* The pin makes the VMO and size stable, but virgl_res_id is rewritten by a
+     * concurrent RESOURCE_CREATE on the same buffer. Reading it unlocked would
+     * let this attach name the resource the other thread just unreffed, and the
+     * backing_attached = 1 set at the end would then claim the *new* resource is
+     * backed when it is not -- so the host renders into nothing, silently. */
+    drm_lock();
+    uint32_t res_id = g->is_virgl ? g->virgl_res_id : 0;
+    int already = g->backing_attached;
+    uint64_t gsize = g->size;
+    struct vmo *gvmo = g->vmo;
+    drm_unlock();
+    if (already)
+        return 0;
+    if (!gvmo || gsize == 0 || !res_id)
         return -EINVAL;
-    uint32_t res_id = g->virgl_res_id;
 
     gpu_dev_ops_t *ops = drm_gpu_ops();
     if (!ops || !ops->resource_attach_backing)
         return -ENODEV;
 
-    uint32_t npages = (uint32_t)((g->size + PAGE_SIZE - 1) / PAGE_SIZE);
+    uint32_t npages = (uint32_t)((gsize + PAGE_SIZE - 1) / PAGE_SIZE);
     if (npages == 0 || npages > 65536)
         return -EINVAL;
 
@@ -2484,12 +2526,12 @@ static int drm_gem_attach_backing(drm_gem_t *g)
     int rc = 0;
     for (uint32_t i = 0; i < npages; i++) {
         pfn_t pfn = PFN_NONE;
-        if (vmo_get_page_charged(g->vmo, i, NULL, &pfn) < 0) {
+        if (vmo_get_page_charged(gvmo, i, NULL, &pfn) < 0) {
             rc = -ENOMEM;
             break;
         }
         uint64_t off = (uint64_t)i * PAGE_SIZE;
-        uint64_t len = g->size - off;
+        uint64_t len = gsize - off;
         if (len > PAGE_SIZE)
             len = PAGE_SIZE;
         entries[i].addr = (uint64_t)pfn_to_phys(pfn);
@@ -2502,7 +2544,11 @@ static int drm_gem_attach_backing(drm_gem_t *g)
     kfree(entries);
     if (rc == 0) {
         drm_lock();
-        g->backing_attached = 1;
+        /* Only claim it backed if the buffer is still the same resource. */
+        if (g->is_virgl && g->virgl_res_id == res_id)
+            g->backing_attached = 1;
+        else
+            rc = -EIO;
         drm_unlock();
     }
     return rc;
@@ -2562,30 +2608,39 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
         if (ops->resource_unref)
             ops->resource_unref(drm_gpu_device(), res_id);
         drm_lock();
-        g->is_virgl = 0;
-        g->virgl_res_id = 0;
+        /* Id-guarded like the copy_to_user rollback below: a concurrent
+         * RESOURCE_CREATE may have installed a newer resource, and clearing
+         * that one would both hide it from EXECBUFFER and leak it on the host. */
+        if (g->virgl_res_id == res_id) {
+            g->is_virgl = 0;
+            g->virgl_res_id = 0;
+            g->backing_attached = 0;
+        }
         drm_unlock();
         drm_gem_unpin(g);
         return rc;
     }
 
-    drm_gem_unpin(g);
     r.res_handle = res_id;
     if (copy_to_user(arg, &r, sizeof(r)) < 0) {
-        /* The resource exists on the host and the caller never learns its id,
-         * so nothing will ever unref it. Release it here instead. */
-        if (ops->resource_unref)
-            ops->resource_unref(drm_gpu_device(), res_id);
+        /* The resource exists on the host and the caller never learns its id, so
+         * nothing will ever unref it -- release it here instead. The id is
+         * cleared under the lock *before* the unref, and while this call still
+         * holds its pin, so a concurrent reclaim cannot reach the same id
+         * through drm_gem_drop_storage() and unref it a second time. */
         drm_lock();
-        drm_gem_t *b = drm_find_gem_locked(r.bo_handle);
-        if (b && b->virgl_res_id == res_id) {
-            b->is_virgl = 0;
-            b->virgl_res_id = 0;
-            b->backing_attached = 0;
+        if (g->virgl_res_id == res_id) {
+            g->is_virgl = 0;
+            g->virgl_res_id = 0;
+            g->backing_attached = 0;
         }
         drm_unlock();
+        if (ops->resource_unref)
+            ops->resource_unref(drm_gpu_device(), res_id);
+        drm_gem_unpin(g);
         return -EFAULT;
     }
+    drm_gem_unpin(g);
     return 0;
 }
 
