@@ -107,7 +107,10 @@ uint32_t plic_claim(void) {
 }
 
 void plic_complete(uint32_t irq) {
-    (void)irq;
+    /* On a RISC-V PLIC, reading SCLAIM gates the source off; writing the id back
+     * is what lets it pend again.  That write-back is the completion, and it is
+     * what kernel/arch/riscv64/trap/irqchip.c performs inline today. */
+    *plic_at(PLIC_OFF_SCLAIM(plic_hart())) = irq;
 }
 
 uint32_t plic_pending(void) {
