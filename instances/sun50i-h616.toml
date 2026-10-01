@@ -1,0 +1,29 @@
+# Allwinner H616/H618 (Orange Pi Zero 2 / Zero 3 / Zero 2W) bring-up.
+#
+# The cleanest boot chain in the tree: the SPL is built from U-Boot source and
+# BL31 is TF-A's mainline sun50i_h616 platform, so nothing in the chain is a
+# vendor blob the build cannot reproduce.  That is the opposite of Rockchip
+# (rkbin DDR blob) and Amlogic (signed FIP).
+#
+# No [package] section: the SD controller is Allwinner's own sunxi-mmc, not a
+# DesignWare part, so there is no storage path to put an image on.  See
+# docs/platforms/sun50i-h616.md.
+name = "sun50i-h616"
+description = "Allwinner H616/H618 (Orange Pi Zero 2 / Zero 3 / Zero 2W) aarch64 bring-up, blob-free boot chain"
+arch = "aarch64"
+board = "sun50i-h616"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 4
+boot_timeout = "120s"
+# The Zero 2/Zero 3 route the debug header UART to pins 8/9 (uart0); the
+# Zero 2W uses a different header.  Fill in the real device node.
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
