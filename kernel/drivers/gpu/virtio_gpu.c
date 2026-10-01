@@ -603,6 +603,17 @@ static int virtio_gpu_resource_create_3d(virtio_gpu_inst_t *inst,
 static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                 const void *cmdbuf, size_t len);
 static int virtio_gpu_resource_unref(virtio_gpu_inst_t *inst, uint32_t resource_id);
+static int virtio_gpu_ctx_attach_resource(virtio_gpu_inst_t *inst, uint32_t ctx_id,
+                                          uint32_t resource_id);
+
+/* VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D: pull a rendered region back into the
+ * guest's own pages.
+ *
+ * The host renders into its own GL object, so a submit alone leaves the guest's
+ * buffer holding whatever it held before.  Reading it directly is not a race and
+ * not a coherency problem -- the bytes were never written.  The mem entries are
+ * mandatory here: this command is what tells the host which guest frames to
+ * deposit into, so a copy without them has no destination. */
 
 /* ---- virtio-gpu 3D command wrappers (virgl passthrough) ---------------- */
 
@@ -682,7 +693,32 @@ static int virtio_gpu_resource_create_3d(virtio_gpu_inst_t *inst,
     return 0;
 }
 
-/* VIRTIO_GPU_CMD_SUBMIT_3D: forward a virgl command stream blob. */
+/* VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE: make a resource reachable from a context.
+ *
+ * RESOURCE_CREATE_3D only allocates the host-side object.  virglrenderer looks a
+ * resource up by walking the context's own list, so until this command is sent
+ * every command naming that resource fails as an illegal resource -- and the
+ * failure is silent from the guest's side, because the host still answers
+ * SUBMIT_3D with OK. */
+static int virtio_gpu_ctx_attach_resource(virtio_gpu_inst_t *inst, uint32_t ctx_id,
+                                          uint32_t resource_id)
+{
+    if (!inst->virgl)
+        return -ENXIO;
+    struct virtio_gpu_ctx_resource req ALIGNED(64);
+    struct virtio_gpu_ctrl_hdr resp ALIGNED(64);
+    memset(&req, 0, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE;
+    req.hdr.ctx_id = ctx_id;
+    req.resource_id = resource_id;
+    req.padding = 0;
+    memset(&resp, 0, sizeof(resp));
+    int dbg_rc = virtio_gpu_send_cmd(inst, &req, sizeof(req), &resp, sizeof(resp));
+    if (dbg_rc < 0 || resp.type != VIRTIO_GPU_RESP_OK_NODATA)
+        return -EIO;
+    return 0;
+}
+
 static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                 const void *cmdbuf, size_t len)
 {
@@ -1061,7 +1097,31 @@ static int gpu_submit_3d(struct device *dev, uint32_t ctx_id,
     return virtio_gpu_submit_3d(inst, ctx_id, cmdbuf, len);
 }
 
-static const gpu_dev_ops_t gpu_ops = {
+static int gpu_ctx_attach_resource(struct device *dev, uint32_t ctx_id,
+                                   uint32_t resource_id)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_ctx_attach_resource(inst, ctx_id, resource_id);
+}
+
+static int gpu_transfer_from_host_3d(struct device *dev, uint32_t ctx_id,
+                                     uint32_t resource_id,
+                                     const struct virtio_gpu_box *box,
+                                     uint32_t level, uint32_t stride,
+                                     uint32_t layer_stride, uint64_t offset,
+                                     const struct virtio_gpu_mem_entry *entries,
+                                     uint32_t nr_entries)
+{
+    virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
+    if (!inst)
+        return -ENODEV;
+    return virtio_gpu_transfer_from_host_3d(inst, ctx_id, resource_id, box, level,
+                                            stride, layer_stride, offset, entries,
+                                            nr_entries);
+}
+
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
     .flush    = gpu_flush,
@@ -1074,6 +1134,8 @@ static const gpu_dev_ops_t gpu_ops = {
     .ctx_destroy = gpu_ctx_destroy,
     .resource_create_3d = gpu_res_create_3d,
     .resource_unref = gpu_res_unref,
+    .ctx_attach_resource = gpu_ctx_attach_resource,
+    .transfer_from_host_3d = gpu_transfer_from_host_3d,
     .submit_3d = gpu_submit_3d,
 };
 

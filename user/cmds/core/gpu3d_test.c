@@ -75,6 +75,11 @@
 #define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE 0xc0386444UL
 #define DRM_IOCTL_VIRTGPU_RESOURCE_INFO   0xc0106445UL
 #define DRM_IOCTL_VIRTGPU_EXECBUFFER      0xc0406442UL
+/* A20-private: the Linux VIRTGPU UAPI has no transfer ioctl, because its
+ * clients read rendered results through the resource's own mapping once the
+ * host has copied them there.  tools/check-drm-abi.sh checks the DRM_* numbers
+ * above against the installed UAPI headers. */
+#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST 0xc02c6446UL
 
 #define VIRTGPU_PARAM_3D_FEATURES          1
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs 7
@@ -154,6 +159,16 @@ struct drm_virtgpu_execbuffer {
     int32_t fence_fd;
     uint32_t ring_idx, syncobj_stride, num_in_syncobjs, num_out_syncobjs;
     uint64_t in_syncobjs, out_syncobjs;
+};
+
+struct drm_virtgpu_box {
+    uint32_t x, y, z, w, h, d;
+};
+
+struct drm_virtgpu_3d_transfer {
+    uint32_t bo_handle;
+    struct drm_virtgpu_box box;
+    uint32_t level, offset, stride, layer_stride;
 };
 
 /* The guest's own handle for the surface object the stream creates.  Any
@@ -347,13 +362,18 @@ int main(void)
         pix[i] = 0xdeadbeef;
 
     /* Two colours, not one: if only the first pass were being checked, a
-     * buffer that merely happened to hold the expected value would pass. */
+     * buffer that merely happened to hold the expected value would pass.
+     *
+     * B8G8R8A8_UNORM is stored B,G,R,A by ascending address, so a little-endian
+     * uint32 read of a red pixel is 0xFFFF0000 and of a blue one 0xFF0000FF.
+     * These two were previously swapped, which reported a correct render as a
+     * total mismatch. */
     static const struct {
         float r, g, b, a;
-        uint32_t expect;   /* BGRA8, little-endian: B,G,R,A by address */
+        uint32_t expect;
     } passes[] = {
-        { 1.0f, 0.0f, 0.0f, 1.0f, 0xff0000ffu },
-        { 0.0f, 0.0f, 1.0f, 1.0f, 0xffff0000u },
+        { 1.0f, 0.0f, 0.0f, 1.0f, 0xffff0000u },
+        { 0.0f, 0.0f, 1.0f, 1.0f, 0xff0000ffu },
     };
 
     for (unsigned i = 0; i < sizeof(passes) / sizeof(passes[0]); i++) {
@@ -378,6 +398,26 @@ int main(void)
             return EXIT_FAIL;
         }
         printf("GPU3D_TEST: EXECBUFFER accepted a %u byte clear stream\n", len);
+
+        /* Pull the result into this buffer before reading it.  The host renders
+         * into its own copy of the resource, so the page still holds the
+         * sentinel no matter how well the submit went -- an earlier revision
+         * read it directly and reported that as a rendering failure. */
+        struct drm_virtgpu_3d_transfer tr;
+        memset(&tr, 0, sizeof(tr));
+        tr.bo_handle = g.handle;
+        tr.box.x = 0;
+        tr.box.y = 0;
+        tr.box.z = 0;
+        tr.box.w = TEST_W;
+        tr.box.h = TEST_H;
+        tr.box.d = 1;
+        tr.level = 0;
+        tr.offset = 0;
+        tr.stride = TEST_W * TEST_BPP;
+        tr.layer_stride = 0;
+        if (ioctl(fd, DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST, &tr) < 0)
+            return fail("VIRTGPU_TRANSFER_FROM_HOST");
 
         uint32_t bad = 0;
         for (uint32_t p = 0; p < TEST_SIZE / 4; p++)
