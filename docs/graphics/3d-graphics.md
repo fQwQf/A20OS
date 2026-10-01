@@ -746,6 +746,45 @@ libEGL warning: egl: failed to create dri2 screen
   别把已经能用的桌面弄坏。而且这只是 GL 链的第一环，后面还有 kms_swrast 建 screen、EGL、真 dma-buf PRIME、
   MODE_GETFB2、以及放开 `WLR_RENDERER`。
 
+### 8.0 本轮：sysfs 那条路走了一半是死路，`llvmpipe` 回退正在承重
+
+本轮把 §8 上面那条猜测（"补一个 sysfs 入口就能让 Mesa attach"）实际做了一遍，**结论是它
+单独做会把已经能用的桌面弄坏**，所以已回退。记在这里是因为失败方式比结论更值得留档。
+
+**做法**：给 `/sys/class/drm/card0/` 加一个 `driver` 符号链接（指向实际绑定的驱动），
+外加 `uevent`。依据是 libdrm 的 `drmGetDevice2()` 用它来判定驱动名，而我们的
+`/sys/class/drm/card0/device/` 下**只有** `modalias`（`kernel/fs/sysfs.c` 的
+`SF_DRM_CARD_DEVICE` readdir 只列 `modalias`）。
+
+**实测结果**：
+
+- 改之前：`eglinfo -p gbm` 失败，但**默认 `eglinfo -B` 成功**，`llvmpipe (LLVM 21.1.2)`；
+  桌面的 `A20_RENDERER=pixman`/swrast 路径正常。
+- 改之后：`eglinfo -p gbm` 仍失败，而且**默认 `eglinfo -B` 也开始失败**，
+  报 `libEGL warning: DRI2: failed to create screen`。
+
+也就是说：补上 `driver` 之后 libdrm 终于认出了设备，于是 Mesa 去加载
+`virtio_gpu_dri.so`，而**那条驱动建 screen 仍然失败**——只是失败点从"找不到设备"
+提前到了"驱动初始化失败"，并且**丢掉了 llvmpipe 回退**。
+
+**结论与它推翻的假设**：
+
+1. `driver` 链接是**必要但不充分**。它只让 libdrm 前进一步，`virtio_gpu_dri.so`
+   真正需要的还有别的（下一环是 screen 创建，也就是 `kms_swrast` 那一侧）。
+2. **当前"EGL 能用"这件事，是靠 libdrm 找不到设备、从而 Mesa 回退到
+   surfaceless/llvmpipe 撑着的。** 这是一条此前完全没被记录、且**正在承重**的
+   隐式依赖：任何让 libdrm"成功"识别本设备的改动，都会先拆掉这条回退，
+   在驱动真正能用之前把桌面弄坏。
+3. 因此 §8 上写的修法顺序必须反过来：**先把 `virtio_gpu_dri.so` 需要的内核侧
+   能力补齐，再补 sysfs 入口**；先补 sysfs 只会得到一个更早、更响的失败。
+
+本轮落地的是 `tools/virgl-probe` 之外的另一件东西：`make smoke-mesa-attach`
+门禁（`packages/world/mesa-probe.world` + `tools/tests/mesa-probe-overlay/`），
+它在一个**不带 `/etc/a20-distro` 标记**的最小 world 里跑 stock Mesa，
+逐级打印 libdrm 的枚举路径。它现在只做记录、不做判定（见该脚本头部），
+因为"Mesa 能不能 attach"本身还是开放问题；门禁的价值是让下一次回答这个问题时
+不必再从一次 boot 开始。
+
 ### 8.1 本轮查出的 UAPI ABI 缺陷：错的 ioctl 常量是隐形的
 
 这一节是全文最可迁移的内容。此前文档把这些缺陷的症状当成 Mesa 或
