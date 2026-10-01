@@ -132,6 +132,51 @@ size_t firmware_acpi_apic_ids(uint32_t *ids, size_t capacity,
     return found_bsp ? count : 0;
 }
 
+/*
+ * MCFG: the PCI Express memory-mapped configuration space allocation.  The
+ * base address is a firmware fact and it is not 0xB0000000 on real hardware --
+ * that address is QEMU q35's MMCONFIG.  A 2011-onward chipset normally places
+ * ECAM at 0xE0000000, and the only reliable way to learn it is this table, so
+ * real-hardware boards must read it before pci_enumerate().
+ *
+ * Layout (ACPI 6.x, all offsets from the table header):
+ *   60 SegmentNumber, 61 StartBusNumber, 62 EndBusNumber,
+ *   72 Configuration Space Base Address (QWORD), 80 its segment (QWORD).
+ */
+#define ACPI_MCFG_OFF_SEGMENT       60u
+#define ACPI_MCFG_OFF_START_BUS     61u
+#define ACPI_MCFG_OFF_END_BUS       62u
+#define ACPI_MCFG_OFF_BASE_ADDRESS  72u
+#define ACPI_MCFG_BASE_SEGMENT      0u
+
+uintptr_t firmware_acpi_mcfg_base(void) {
+    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
+    if (!mcfg || mcfg->length < ACPI_MCFG_OFF_BASE_ADDRESS + 8)
+        return 0;
+    const uint8_t *body = (const uint8_t *)mcfg;
+    /* Only segment 0 is mapped by the boot page tables; a non-zero segment
+     * would need a real mapping rather than PAGE_OFFSET arithmetic. */
+    if (body[ACPI_MCFG_OFF_SEGMENT] != ACPI_MCFG_BASE_SEGMENT)
+        return 0;
+    uint64_t base = *(const uint64_t *)(body + ACPI_MCFG_OFF_BASE_ADDRESS);
+    /* ECAM is a 256 MiB-aligned, 256 MiB-long window by definition. */
+    if (!base || (base & 0x0fffffffULL) || base > 0xffffffffULL)
+        return 0;
+    return (uintptr_t)base;
+}
+
+int firmware_acpi_mcfg_bus_range(uint8_t *start_bus, uint8_t *end_bus) {
+    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
+    if (!mcfg || mcfg->length < ACPI_MCFG_OFF_END_BUS + 1)
+        return -1;
+    const uint8_t *body = (const uint8_t *)mcfg;
+    if (!start_bus || !end_bus)
+        return -1;
+    *start_bus = body[ACPI_MCFG_OFF_START_BUS];
+    *end_bus   = body[ACPI_MCFG_OFF_END_BUS];
+    return 0;
+}
+
 uintptr_t firmware_acpi_hpet_address(void) {
     const acpi_sdt_t *hpet = acpi_find_table("HPET");
     if (!hpet || hpet->length < sizeof(*hpet) + 20)
@@ -189,12 +234,59 @@ static uint32_t fw_cfg_read32(void) {
     return value;
 }
 
-static char g_fw_cfg_cmdline[256];
+static char g_bootargs[256];
+
+struct x86_mb_info {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+};
+
+/* Defined further down with the rest of the multiboot state. */
+extern __attribute__((section(".data"))) volatile uint32_t g_mb_magic;
+extern __attribute__((section(".data"))) volatile uint32_t g_mb_info;
+
+/* Multiboot v1 passes the kernel command line as a physical address in the
+ * info block (offset 16).  This is the only source of bootargs on real
+ * hardware: GRUB hands the string over in the multiboot info whether it was
+ * loaded by BIOS or by UEFI boot services, whereas fw_cfg is a QEMU device that
+ * simply does not exist on a physical machine.  Reading only fw_cfg left every
+ * a20.* knob unreachable on real x86_64. */
+static const char *multiboot_cmdline(void) {
+    if (g_mb_magic != 0x2BADB002u || !g_mb_info)
+        return NULL;
+    const struct x86_mb_info *mi = (const void *)(uintptr_t)g_mb_info;
+    if (!mi->cmdline)
+        return NULL;
+    return (const char *)(PAGE_OFFSET + (uintptr_t)mi->cmdline);
+}
 
 const char *firmware_bootargs(void) {
-    static int ready;
-    if (!ready) {
-        ready = 1;
+    static int mb_probed;
+    if (!mb_probed) {
+        mb_probed = 1;
+        const char *mb = multiboot_cmdline();
+        if (mb) {
+            size_t i = 0;
+            for (; i + 1 < sizeof(g_bootargs) && mb[i]; i++)
+                g_bootargs[i] = mb[i];
+            g_bootargs[i] = '\0';
+            printf("[BOOTARGS] multiboot cmdline='%s'\n", g_bootargs);
+        }
+    }
+    if (g_bootargs[0])
+        return g_bootargs;
+
+    static int fw_probed;
+    if (!fw_probed) {
+        fw_probed = 1;
         outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
         uint32_t sig = fw_cfg_read32();
         printf("[FW_CFG] signature=0x%08x\n", sig);
@@ -202,18 +294,18 @@ const char *firmware_bootargs(void) {
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_SIZE);
             uint32_t len = fw_cfg_read32();
             printf("[FW_CFG] cmdline_size=%u\n", len);
-            if (len > sizeof(g_fw_cfg_cmdline) - 1)
-                len = sizeof(g_fw_cfg_cmdline) - 1;
+            if (len > sizeof(g_bootargs) - 1)
+                len = sizeof(g_bootargs) - 1;
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_DATA);
             for (uint32_t i = 0; i < len; i++)
-                g_fw_cfg_cmdline[i] = (char)fw_cfg_read8();
-            g_fw_cfg_cmdline[len] = '\0';
-            printf("[FW_CFG] cmdline='%s'\n", g_fw_cfg_cmdline);
+                g_bootargs[i] = (char)fw_cfg_read8();
+            g_bootargs[len] = '\0';
+            printf("[FW_CFG] cmdline='%s'\n", g_bootargs);
         } else {
             printf("[FW_CFG] no QEMU fw_cfg, using fallback bootargs\n");
         }
     }
-    return g_fw_cfg_cmdline;
+    return g_bootargs;
 }
 
 void firmware_reboot(void) {
@@ -274,19 +366,6 @@ static void x86_high_ram_map_flush(void)
         "movq %%rax, %%cr3\n\t"
         ::: "rax", "memory");
 }
-
-struct x86_mb_info {
-    uint32_t flags;
-    uint32_t mem_lower;
-    uint32_t mem_upper;
-    uint32_t boot_device;
-    uint32_t cmdline;
-    uint32_t mods_count;
-    uint32_t mods_addr;
-    uint32_t syms[4];
-    uint32_t mmap_length;
-    uint32_t mmap_addr;
-};
 
 struct x86_mb_mmap_entry {
     uint32_t size;
