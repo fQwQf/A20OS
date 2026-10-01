@@ -569,33 +569,111 @@ pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr)
     return table;
 }
 
-/* Index the cached path down to the leaf slot for addr, allocating any
- * missing intermediate node.  Caller holds the cursor, so the cached path
- * cannot be unlinked underneath it. */
+/* Index the cached path down to the leaf slot for addr, allocating any missing
+ * intermediate node, and return with the LEAF TABLE's own lock held.  The
+ * caller must pair that with cursor_leaf_unlock() once it has finished reading
+ * or writing the slot.
+ *
+ * Why the leaf is locked here rather than only at mm_addrspace_lock() time: the
+ * cursor's covering-node lock does not exclude a peer whose covering node is an
+ * ancestor or a descendant of ours.  A wide cursor (covering level 2) and a
+ * single-page cursor (covering level 0) inside it would otherwise hold disjoint
+ * locks while writing the same leaf PTE and the same pt_meta_t.cls[] byte.
+ * Locking the leaf per operation closes that, because every write targets
+ * exactly one leaf entry.  It has to be per operation rather than per
+ * transaction: a wide cursor visits many leaves and the per-CPU held[] stack has
+ * only PT_MCS_POOL_SLOTS entries.
+ *
+ * Caller holds the cursor, so mm->pt_readers keeps an already-cached page from
+ * being recycled under the descent; `stale` is what tells us we lost a race with
+ * a detach, in which case we drop everything and report failure so the caller
+ * re-descends. */
 static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
 {
+    /* This walk must START at guard_level: mm_addrspace_lock's descent fills
+     * path[ROOT-1] .. path[guard_level] and nothing below, so starting at
+     * guard_level - 1 would dereference an uninitialised pointer.  That mistake
+     * hung the huge-page path, where wide cursors are routine, and it presented
+     * as a smoke-mm-stress timeout with no self-deadlock report.
+     *
+     * At l == guard_level the cursor already holds that node's lock for its
+     * whole lifetime, so taking it again is a non-reentrant self-deadlock -- the
+     * per-CPU detector only notices after 2^26 spins.  Every level strictly
+     * below is a different node and does need its own lock, which is what
+     * excludes a peer writing the same leaf through a higher covering node. */
     for (int l = cur->guard_level; l > 0; l--) {
         pte_t *table = cur->path[l];
         int idx = arch_pt_vpn(addr, l);
+        /* The parent's lock covers both the entry read and the install: the
+         * metadata write below is a read-modify-write on the parent's
+         * nr_present/cls[], so reading the entry outside the lock would race
+         * a peer installing the same child. */
+        pt_meta_t *pm = (l == cur->guard_level) ? NULL : mm_pt_meta(table);
+        if (pm)
+            mcs_lock(pm);
         pte_t e = table[idx];
         if (!(e & PTE_V)) {
-            if (!create)
+            if (!create) {
+                if (pm)
+                    mcs_unlock(pm);
                 return NULL;
+            }
+            if (pm && pm->stale) {
+                mcs_unlock(pm);
+                return NULL;
+            }
             pte_t *next = (pte_t *)frame_alloc();
-            if (!next)
+            if (!next) {
+                if (pm)
+                    mcs_unlock(pm);
                 return NULL;
+            }
             mm_pt_node_init(next, l - 1);
             table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
             mm_pt_note_present(table, l, idx,
                                MM_ST_CLS_BYTE(MM_ST_PT_NODE));
+            if (pm)
+                mcs_unlock(pm);
             cur->path[l - 1] = next;
             continue;
         }
-        if (arch_pte_is_leaf(e))
+        if (arch_pte_is_leaf(e)) {
+            if (pm)
+                mcs_unlock(pm);
             return NULL;      /* huge leaf covers more than one page */
+        }
         cur->path[l - 1] = arch_pte_to_ptr(e);
+        if (pm)
+            mcs_unlock(pm);
     }
-    return &cur->path[0][arch_pt_vpn(addr, 0)];
+
+    /* When guard_level == 0 the covering node IS the leaf table and the cursor
+     * already holds its lock, so there is nothing left to take. */
+    if (cur->guard_level == 0)
+        return &cur->path[0][arch_pt_vpn(addr, 0)];
+
+    pte_t *leaf = cur->path[0];
+    pt_meta_t *lm = mm_pt_meta(leaf);
+    if (!lm)
+        return NULL;
+    mcs_lock(lm);
+    if (lm->stale) {
+        mcs_unlock(lm);
+        return NULL;          /* detached underneath us; caller re-descends */
+    }
+    cur->leaf_meta = lm;
+    return &leaf[arch_pt_vpn(addr, 0)];
+}
+
+/* Release the leaf lock taken by the matching cursor_leaf_slot().  Every
+ * failure return of that function leaves the lock already released, so calling
+ * this unconditionally after a non-NULL result is correct and idempotent. */
+static void cursor_leaf_unlock(mm_cursor_t *cur)
+{
+    if (cur->leaf_meta) {
+        mcs_unlock(cur->leaf_meta);
+        cur->leaf_meta = NULL;
+    }
 }
 
 static inline pte_t *cursor_leaf_table(const mm_cursor_t *cur)
@@ -620,6 +698,7 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
 
     cur->mm = NULL;
     cur->locked = 0;
+    cur->leaf_meta = NULL;
     cur->start = start;
     cur->end = end;
     cur->guard_level = level;
@@ -745,14 +824,18 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -EAGAIN;      /* racing a subtree detach; caller retries */
     }
 
-    /* P3: the covering node's lock IS the unit of writer exclusion.  A
-     * cursor only ever mutates the cached path below the covering node, and
-     * every other cursor that could touch that path must first acquire this
-     * same node, so it is sufficient and it is the finest granularity that
-     * keeps disjoint ranges parallel.  Locking the whole subtree (the paper's
-     * ADV step) belongs with the lockless-traverse + RCU design in P4; done
-     * here it would both serialise unrelated ranges and risk double-locking
-     * an aliased node. */
+    /* The covering node's lock is range-level mutual exclusion, and it is NOT
+     * sufficient on its own.  It used to be documented here as the unit of
+     * writer exclusion -- on the reasoning that "every other cursor that could
+     * touch that path must first acquire this same node" -- and that is false:
+     * a peer whose covering node is an ancestor or a descendant holds a
+     * different lock.  A wide cursor (covering level 2) and a single-page
+     * cursor (covering level 0) inside it would hold disjoint locks while
+     * writing the same leaf PTE and the same pt_meta_t.cls[] byte.  That is why
+     * cursor_leaf_slot() takes the leaf's own lock per operation; see the
+     * locking contract in mm/pt.h.  Two cursors conflict exactly when they
+     * touch the same leaf table, which is what preserves the paper's semantics:
+     * disjoint ranges run in parallel, overlapping ranges serialise. */
     cur->mm = mm;
     cur->locked = 1;
     a20_perf_count(A20_PERF_MM_CURSOR_OPEN);
@@ -763,6 +846,10 @@ void mm_cursor_unlock(mm_cursor_t *cur)
 {
     if (!cur || !cur->locked || !cur->mm)
         return;
+    /* A leaked per-operation leaf lock would otherwise stay held for the rest
+     * of the cursor's life; the unwind below cannot pop it because it is not
+     * tracked in the per-CPU held[] stack. */
+    cursor_leaf_unlock(cur);
     /* Release every lock taken since the cursor opened, in reverse.  The
      * per-CPU held[] stack is the record; the cursor only remembers the
      * depth it started at, so a DFS of any width unwinds correctly. */
@@ -851,6 +938,7 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 
     if (had_old && old_pa_out)
         *old_pa_out = old_pa;
+    cursor_leaf_unlock(cur);
     return 0;
 }
 
@@ -871,9 +959,14 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
 
+    /* Descend for THIS address.  cursor_leaf_table() on its own returns whatever
+     * path[0] a previous operation left behind, which is the right leaf table
+     * only while the whole cursor range sits inside one. */
+    pte_t *pte = cursor_leaf_slot(cur, addr, 0);
+    if (!pte)
+        return 0;               /* no leaf table on this path: nothing mapped */
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
-    pte_t *pte = &table[idx];
 
 #ifdef CONFIG_SWAP
     if (pte_is_swap(*pte)) {
@@ -881,6 +974,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
         *pte = 0;
         mm_pt_note_absent(table, 0, idx);
         swap_free(entry);
+        cursor_leaf_unlock(cur);
         return 1;
     }
 #endif
@@ -891,6 +985,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
          * status and silently map a page instead of failing. */
         if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
             mm_pt_note_absent(table, 0, idx);
+        cursor_leaf_unlock(cur);
         return 0;
     }
 
@@ -898,6 +993,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
     *pte = 0;
     mm_pt_note_absent(table, 0, idx);
     frame_put(phys_to_pfn(arch_pte_addr(old)));
+    cursor_leaf_unlock(cur);
     return 1;
 }
 
@@ -1091,11 +1187,18 @@ int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
     if (cls >= MM_ST_CLASS_MAX)
         return -EINVAL;
 
+    /* create=1: marking a reserved-but-unfaulted page is exactly the case
+     * where the leaf table may not exist yet. */
+    if (!cursor_leaf_slot(cur, addr, 1))
+        return -ENOMEM;
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
-    if (table[idx] & PTE_V)
+    if (table[idx] & PTE_V) {
+        cursor_leaf_unlock(cur);
         return -EEXIST;
+    }
     mm_pt_note_present(table, 0, idx, status_byte(cls, flags));
+    cursor_leaf_unlock(cur);
     return 0;
 }
 
@@ -1107,10 +1210,12 @@ int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
 {
     if (!cur || !flags || !cursor_span_ok(cur, addr))
         return 0;
-    pte_t *table = cursor_leaf_table(cur);
-    if (!table)
+    if (!cursor_leaf_slot(cur, addr, 0))
         return 0;
-    return mm_pt_safe_test(table, 0, arch_pt_vpn(addr, 0), flags);
+    int r = mm_pt_safe_test(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
+                            flags);
+    cursor_leaf_unlock(cur);
+    return r;
 }
 
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
@@ -1123,6 +1228,10 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
 
+    /* Descend for THIS address; see mm_cursor_unmap(). */
+    pte_t *slot = cursor_leaf_slot(cur, addr, 0);
+    if (!slot)
+        return 0;               /* no leaf table here, or a larger leaf covers it */
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
     pte_t pte = table[idx];
@@ -1132,6 +1241,7 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         if (cls_out)
             *cls_out = MM_ST_CLS_BYTE(MM_ST_SWAPPED) |
                        mm_pt_prot_bits(arch_pte_flags(pte));
+        cursor_leaf_unlock(cur);
         return 1;
     }
 #endif
@@ -1145,10 +1255,13 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         uint8_t byte = mm_pt_peek(table, 0, idx);
         if (cls_out && MM_ST_GET_CLASS(byte) != MM_ST_INVALID)
             *cls_out = byte;
+        cursor_leaf_unlock(cur);
         return 0;
     }
-    if (!arch_pte_is_leaf(pte))
+    if (!arch_pte_is_leaf(pte)) {
+        cursor_leaf_unlock(cur);
         return 0;
+    }
 
     /* The metadata is authoritative for the class; the PTE is authoritative
      * for the frame and for the effective permission bits. */
@@ -1162,6 +1275,7 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         *cls_out = byte;
     if (pa_out)
         *pa_out = arch_pte_addr(pte) + (addr & (PAGE_SIZE - 1));
+    cursor_leaf_unlock(cur);
     return 1;
 }
 
