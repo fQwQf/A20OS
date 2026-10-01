@@ -161,12 +161,12 @@ int uart_getc(void) {
             continue;
         }
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-        /* The board's UART IRQ route and timer trap are not available yet.
-         * Keep the foreground shell runnable and poll the 16550 directly. */
-        cpu_relax();
-        continue;
-#endif
+        if (current_board && current_board->uart_rx_is_polled) {
+            /* This board's UART IRQ route and timer trap are not available.
+             * Keep the foreground shell runnable and poll the 16550 directly. */
+            cpu_relax();
+            continue;
+        }
 
         task_t *cur = proc_current();
         if (!cur) {
@@ -219,11 +219,9 @@ int uart_try_getc(void) {
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     if (rx_head == rx_tail) {
         spin_unlock_irqrestore(&rx_lock, flags);
-#ifdef CONFIG_BOARD_VISIONFIVE2
-        return arch_uart_poll_getc();
-#else
+        if (current_board && current_board->uart_rx_is_polled)
+            return arch_uart_poll_getc();
         return -1;
-#endif
     }
     char c = rx_buffer[rx_tail];
     rx_tail = (rx_tail + 1) % RX_BUF_SIZE;
@@ -232,11 +230,11 @@ int uart_try_getc(void) {
 }
 
 int uart_has_input(void) {
-#ifdef CONFIG_BOARD_VISIONFIVE2
-    int polled = arch_uart_poll_getc();
-    if (polled >= 0)
-        uart_rx_push((char)polled);
-#endif
+    if (current_board && current_board->uart_rx_is_polled) {
+        int polled = arch_uart_poll_getc();
+        if (polled >= 0)
+            uart_rx_push((char)polled);
+    }
     uint64_t flags = spin_lock_irqsave(&rx_lock);
     int has = rx_head != rx_tail;
     spin_unlock_irqrestore(&rx_lock, flags);
