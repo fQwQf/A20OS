@@ -162,13 +162,28 @@ struct mm_struct;
  * pt_walk() it replaces, and -- once mm->lock no longer serialises mutators
  * in P5 -- a re-descent could observe a path that a concurrent unmap has
  * already unlinked.  Caching is what makes the cursor a single-descent
- * primitive, and it is why the lock must cover the whole subtree (P3).
+ * primitive.
  *
- * P3: the cursor also holds a lock on EVERY descendant of the covering node
- * (preorder DFS), and releases them in exactly reverse order.  Two cursors
- * conflict iff their ranges' covering nodes are equal or ancestor/descendant,
- * which is precisely the paper's concurrency semantics: disjoint ranges run
- * in parallel, overlapping ranges serialise.
+ * Locking, precisely (this used to claim a preorder DFS over the whole
+ * subtree, which the code never did):
+ * - The cursor holds the COVERING node's lock for its whole lifetime.  That
+ *   alone does NOT exclude a peer whose covering node is an ancestor or
+ *   descendant: a wide cursor (covering level 2) and a single-page cursor
+ *   (covering level 0) inside it would hold disjoint locks while writing the
+ *   same leaf PTE and the same pt_meta_t.cls[] byte.
+ * - Every leaf the cursor actually touches is therefore locked individually
+ *   and released at the end of that one operation (cursor_leaf_slot /
+ *   cursor_leaf_unlock).  Since every write targets a single leaf entry, that
+ *   is what makes two cursors conflict exactly when they touch the same leaf.
+ * - A wide cursor visits many leaves and cannot hold them all at once -- the
+ *   per-CPU held[] stack has PT_MCS_POOL_SLOTS entries -- hence per-operation
+ *   rather than per-transaction acquisition.
+ * - Intermediate nodes are installed under the parent's lock and released
+ *   immediately.  A single aligned PTE store publishes the new child, so a
+ *   concurrent reader sees either "absent" or a valid child, never a torn one.
+ *   The read-side bracket (mm->pt_readers) keeps an already-cached page from
+ *   being recycled underneath the descent; `stale` makes a cursor that lost a
+ *   race abandon the node and re-descend.
  */
 #define MM_CURSOR_PATH_MAX (ARCH_PT_ROOT_LEVEL + 1)
 
@@ -184,6 +199,10 @@ typedef struct mm_cursor {
      * without the cursor having to store one entry per locked node. */
     int               lock_base_depth;
     int               in_read_side;   /* holds mm->pt_readers */
+    /* Leaf table locked by the in-flight cursor operation, released by
+     * cursor_leaf_unlock().  Not part of the unwind: exactly one is held at a
+     * time, for the duration of a single map/unmap/mark/query. */
+    struct pt_meta   *leaf_meta;
 } mm_cursor_t;
 
 /* The report is plain data so NOMMU builds can still reference the type and
