@@ -56,6 +56,16 @@ vbox-text-image-aarch64: ; tools/a20 package vbox-aarch64-text
 _vbox_iso_x86_64_impl: dev-build
 	tools/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
 
+# The same ISO at a path an instance can name in [target].boot_media.  The
+# VirtualBox one lives under the per-build directory, whose name carries the arch,
+# board and variant, so it cannot be written by a manifest that has to commit to
+# one path.  This is the whole deployment route for a thin client: dd this to a
+# USB stick and boot it.
+pc-rescue-iso: dev-build
+	@mkdir -p build/x86_64-pc
+	tools/mk_grub_iso.sh $(KERNEL_ELF) build/x86_64-pc/a20os-rescue.iso
+	@echo "rescue ISO ready: build/x86_64-pc/a20os-rescue.iso"
+
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.
 # The load address is read back out of the ELF by the script, so a board that
