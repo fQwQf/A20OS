@@ -1,0 +1,50 @@
+# virgl 3D transport smoke on x86_64: the same pixel readback gate that
+# riscv64 carries, pinned on a second architecture.
+#
+# This exists because one architecture is not coverage. The 3D path is a chain
+# of host-specific steps -- QEMU's display backend, virglrenderer, the virtio
+# control queue, the guest's DMA mapping -- and every one of them can differ per
+# guest architecture even though the code under test is identical. A property
+# that has only ever been measured on one architecture is a property of that
+# architecture until it is measured on another.
+#
+# What differs from riscv64 and is therefore worth asserting separately:
+#
+#   - the page table and DMA path (x86_64 PT roots, its own arch_dma_sync_*),
+#     which is what makes the renderer's write-back visible to the guest at all;
+#   - word size and struct layout is the same 64-bit, but the cross-architecture
+#     MemEntry/descriptor descriptors still get re-derived rather than assumed.
+#
+# Requires host virgl support and a display that can initialise EGL; see the
+# riscv64 instance for the full host-side requirements, and run it through
+# tools/with-virgl-display.sh on a host with both a proprietary and an open GPU
+# driver.
+name = "smoke-gpu3d-x86_64"
+description = "x86_64 virtio-gpu virgl 3D transport smoke (GPU_3D device + gpu3d_test)"
+arch = "x86_64"
+abi = "linux"
+
+[machine]
+gpu_3d = true
+display_mode = "gui"
+
+[gui]
+display = "egl-headless,gl=on"
+
+[test]
+commands = ["/bin/gpu3d_test", "poweroff"]
+# Same markers as the riscv64 gate, for the same reason: requiring "PASS" alone
+# is what let the placeholder-stream revision report success while nothing was
+# rendered. "pixel readback ok" is the marker that can only appear if the host
+# actually executed the stream and the guest read the pixels back.
+expect = [
+  "GPU3D_TEST: GETPARAM 3D_FEATURES=1",
+  "GPU3D_TEST: GETPARAM capset mask=",
+  "GPU3D_TEST: 3D resource",
+  "GPU3D_TEST: RESOURCE_INFO round-trip ok",
+  "GPU3D_TEST: EXECBUFFER accepted a",
+  "GPU3D_TEST: pixel readback ok",
+  "GPU3D_TEST: PASS",
+]
+input_delay = 60
+timeout = "300s"

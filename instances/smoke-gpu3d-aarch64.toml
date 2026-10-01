@@ -1,0 +1,45 @@
+# virgl 3D transport smoke on aarch64: the third architecture carrying the same
+# pixel readback gate.
+#
+# aarch64 is worth having separately rather than as "another ARM box" because it
+# exercises a genuinely different DMA/cache story from both riscv64 and x86_64:
+# it is the only one of the three where the page table walk and the
+# arch_dma_sync_for_cpu implementation differ structurally from x86_64's, so a
+# bug that only shows up when the renderer's write-back needs an explicit cache
+# maintenance pass would pass on the other two.
+#
+# It is also the architecture the desktop and the Alpine images are most often
+# deployed on, so a 3D regression here is the one most likely to be reported by a
+# user rather than found by a gate.
+#
+# Host-side requirements are identical to the riscv64 gate; run it through
+# tools/with-virgl-display.sh on a host with both a proprietary and an open GPU
+# driver.
+name = "smoke-gpu3d-aarch64"
+description = "aarch64 virtio-gpu virgl 3D transport smoke (GPU_3D device + gpu3d_test)"
+arch = "aarch64"
+abi = "linux"
+
+[machine]
+gpu_3d = true
+display_mode = "gui"
+
+[gui]
+display = "egl-headless,gl=on"
+
+[test]
+commands = ["/bin/gpu3d_test", "poweroff"]
+# Identical markers to the other two 3D gates on purpose. If a marker has to
+# differ per architecture, that difference is itself the finding and belongs in
+# this list with a reason next to it -- not quietly dropped.
+expect = [
+  "GPU3D_TEST: GETPARAM 3D_FEATURES=1",
+  "GPU3D_TEST: GETPARAM capset mask=",
+  "GPU3D_TEST: 3D resource",
+  "GPU3D_TEST: RESOURCE_INFO round-trip ok",
+  "GPU3D_TEST: EXECBUFFER accepted a",
+  "GPU3D_TEST: pixel readback ok",
+  "GPU3D_TEST: PASS",
+]
+input_delay = 60
+timeout = "300s"
