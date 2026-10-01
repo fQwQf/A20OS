@@ -908,7 +908,11 @@ files = ["kernel/mm/mm.c"]
 # descendant holds a different lock, and the descent takes no lock at all on
 # already-populated intermediates, so a wide cursor and a single-page cursor
 # inside it would write the same leaf with no mutual exclusion.  It never fired
-# because no code path creates a cursor with guard_level > 0.
+# because the wide/narrow cursor overlap is reachable after all: fault-around
+# opens a 4-page (anon) or 16-page (file) window, and pt_covering_level() aligns
+# the start rather than requiring it to be the span's first page, so those
+# windows land on covering level 1 while a single-page fault lands on level 0 --
+# both writing the same leaf table.  Only mm->lock keeps them apart today.
 #
 # A per-operation leaf lock was implemented and reverted once: its first
 # version started the descent at guard_level - 1, which reads a path[] entry
@@ -936,6 +940,33 @@ negate = true
 fixed = true
 pattern = "holds a lock on EVERY descendant of the covering node"
 files = ["kernel/mm/pt.c", "kernel/include/mm/pt.h"]
+
+# MM_AS_CURSOR_ONLY_ENTRY rule 1 says every user-PTE access happens inside a
+# cursor, and pt_unmap_leaf()/pt_unmap() both break it -- they are bare walks
+# held safe only by mm->lock.  Those two functions are named in a bypass list
+# inside the invariant itself; this asserts the list is still there and still
+# names them, so deleting the list (or emptying it while the code still
+# bypasses) fails instead of passing quietly.  Phase 3 empties it for real.
+#
+# min_count, not a bare presence check: the tag occurs twice by design (once in
+# the prose that explains the list, once as the list header), and a presence
+# check cannot see one of the two being deleted.  Verified by deleting each in
+# turn and watching this fail.
+[[gate.assertion]]
+fixed = true
+pattern = "MM_AS_CURSOR_ONLY_ENTRY_BYPASSES"
+min_count = 2
+files = ["kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pt_unmap_leaf"
+files = ["kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pt_unmap"
+files = ["kernel/include/mm/pt.h"]
 
 # cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it
 # takes the leaf table's own MCS lock and parks it for cursor_leaf_unlock().

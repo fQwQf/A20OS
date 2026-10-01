@@ -4688,3 +4688,295 @@ for (;;) {
 （写者在 `mm->lock` 下、OOM 读者在 `proc_lock` 下，两者互不排斥），
 只是**目前恰好因为「所有写者都持 `mm->lock`」而没有变成真 bug**。
 顺序依然不变：**先 (d)+`rss` 原子化，再把状态路径移出 `mm->lock`，最后才谈性能。**
+
+## 11. 逐条更正前述结论（2026-10-02，`feat/mm-single-level`）
+
+本节更正 §8.13、§9.2、§10.74、§10.75 与 `kernel/mm/pt.c` 注释中的若干结论。
+这些结论不是"过时"，而是**错的**：它们都指向一个已经坏掉、但被外层
+`mm->lock` 掩盖着的实现。更正过程本身也是记录，因为错的结论已经误导过
+一次外部协议评审。
+
+### 11.1 `mm_pt_defer_free` 零调用者 ≠ 退役链没接（更正 §8.13、§9.2 第 4 条）
+
+前述反复把「`mm_pt_defer_free` 零调用者」当作 P4 未接线的证据。这是找错了函数。
+
+`mm_pt_defer_free`（`pt.c`）是一个**被取代的半成品**：它调
+`mm_pt_hold_table()` 后只做 `mm_pt_node_fini()`，**并不释放帧**。真正在用的是
+`mm_pt_retire_table()`，而它**早已接线**：
+
+| 站点 | 状态 |
+|---|---|
+| `pt_unmap_leaf` → `mm_pt_retire_table` | 已接线 |
+| `pt_unmap` → `mm_pt_retire_table` | 已接线 |
+| 全部 unmap 路径（`free_vma_pages` / `munmap`×2 / `madvise`×2 / `mremap` / `sysv_shm` / `sys_mm` / demote） | 全部经由上述两个原语 |
+| `mm_pt_retire_table` 内部立即 drain | 已有 |
+| `mm_destroy` 在 `pt_destroy_user` 之前 drain | 已有，顺序正确 |
+| NOMMU 桩 | 已有 |
+
+仍然直接 `free` 的只有 `pt_destroy_level` 与 `pt_destroy_user_recursive`，即
+**整张页表的拆卸**（elf 加载失败路径、`mm_destroy`、`exec` 的 `old_pgdir`
+兜底分支）。那里表已不可达、`pt_readers == 0`，直接 free 才是对的。
+
+结论：**P4 的退役路径本来就已接线**，§8.13/§9.2 的"这条链完全没接"应删除。
+真正需要补的只是 drain 的触发频率（见 §11.6）。
+
+### 11.2 「缺页仍以 `mm_find_vma()` 为决策入口」不准确（更正 §9.2 第 1 条、§10.74）
+
+§10.74 写「论文最核心的那条主张（「缺页不碰 VMA 锁」）**目前并未实现**」，
+并把原因归结为状态路径仍以 VMA 为决策入口。前半句在后半句面前是错的。
+
+状态缺页路径存在且**不查任何 VMA**：它在 cursor 内 `mm_cursor_query()` 拿到
+`MM_ST_ANON_VIRT` 与 mmap 时记录的权限位后就直接 `mm_cursor_map()`，整段在一个
+cursor 事务内。剩下的差距**只有一条**：这段代码仍然嵌在 `mm->lock` 之下
+（`fault.c` 在状态路径之前取全局锁、之后释放，cursor 嵌套在中间）。
+即「不查 VMA」已达成，「缺页不碰全局锁」未达成——两件事被合并成了一句。
+
+另外 §10.74 引用的行号（800 取锁 / 1119 释放）也已过期。
+
+### 11.3 「覆盖节点一把锁就够」是错的（更正 §9.2 第 3 条与 `pt.c` 注释）
+
+`pt.c` 的 `mm_addrspace_lock()` 里曾写：
+
+> P3: the covering node's lock IS the unit of writer exclusion ... every other
+> cursor that could touch that path must first acquire this same node, so it is
+> sufficient
+
+**这句话是错的**，而且它就是一次外部协议评审给出错误结论的唯一起点——评审据此
+判定"实现 ADV 的后代 DFS 只会是性能倒退，建议不做"。逐条核对代码：
+
+* 下降循环对**已存在的中间节点不取任何锁**（`pt.c:651-655` 直接 `continue`）。
+  `mcs_lock` 只出现在"分配缺失中间节点"分支里，并在同一轮迭代立刻释放。
+* `mm_cursor_replace()` 写的是**叶子 PTE**（`cursor_leaf_slot()` +
+  `mm_pt_note_present(..., 0, ...)`），而它手里只有覆盖节点那一把锁。
+* `mm_pt_note_present()` → `pt_note_present_meta()` **完全无锁**，且对
+  `nr_present` 与 `*slot` 是普通读-改-写。
+
+于是：**宽范围 cursor（覆盖节点在 level≥1）与其内部的单页 cursor（覆盖节点在
+level 0）握的是不同的锁，却会写同一个叶子 PTE 与同一个 `pt_meta_t.cls[]` 字节。**
+没有任何互斥。
+
+`pt.h` 里"the cursor also holds a lock on EVERY descendant（preorder DFS）"
+同样从未成立。两处断言现已改写为真实描述。
+
+之所以一直没炸，**只有一个**原因：
+
+**所有 cursor 调用点都嵌在 `mm->lock` 里面**（fault / mprotect / munmap / mremap
+全部如此），全局锁把一切都串行化了。
+
+### 11.3.1 更正本节先前的一处错误结论（2026-10-02，第三次修订）
+
+本节先前写过「当前没有任何代码路径会创建 `guard_level > 0` 的 cursor，所以缺陷 A
+不可达」，并据此推出「摘掉 `mm->lock` 不会激活这个竞争，真正激活它的是引入宽事务」。
+**这两句都是错的**，错在只查了 `mm_pt_provision_anon()` 就下结论，漏掉了
+fault-around。
+
+`pt_covering_level()`（`pt.c`）判断覆盖层时用的是**对齐后的起点**：
+
+```c
+vaddr_t base = start & ~(span - 1);
+if (base + span >= end)
+    return level;
+```
+
+它**不要求 `start` 是该跨度的第一页**。于是一个 4 页的窗口，
+`base = start`（页对齐），level 0 判 `start + 4096 >= start + 16384` 不成立，
+直接落到 level 1：
+
+| 路径 | 窗口 | 覆盖层 |
+|---|---|---|
+| 单页缺页 | 1 页 | **0** |
+| 匿名 fault-around（`fault.c:624`，`ANON_FAULT_AROUND_PAGES = 4`） | 4 页 | **1** |
+| 文件 fault-around（`PAGE_CACHE_FAULT_AROUND_PAGES = 16`） | 16 页 | **1** |
+
+所以**宽 cursor 是常规路径，不是假想**。宽（level 1）与窄（level 0）写同一张
+叶子表，是每次匿名/文件 fault-around 都在发生的事。
+
+由此得到三条被上面那两句错误前提带偏的结论，全部更正：
+
+1. **缺陷 A 是可达的、而非潜伏的。** 它现在只被 `mm->lock` 挡着。
+2. **摘掉 `mm->lock`（Phase 3）正是会激活它的那个动作。** 这跟我先前写的
+   「Phase 3 不会激活它」正好相反。
+3. **依赖关系被我写反了。** 正确的顺序是：按操作的叶锁（本次已落地，§11.6）
+   → Phase 3 摘 `mm->lock`。上层节点统一状态标记（§11.7 第 3 项）与 Phase 3
+   **没有先后依赖**，它是独立的性能改动，不是安全前置。
+
+外部评审和我自己当时都在错的地方停住了：我用「预标记按叶子表分块」这一个
+调用点去论证「没有宽事务」，而 fault-around 就在隔壁。教训要改成：
+
+> 判断一个锁粒度缺陷是否「活的」，**要把所有会开 cursor 的路径列一遍**，
+> 不是只查最显眼的那一个；而且「不可达」和「被一把更粗的锁挡住」是两种
+> 完全不同的状态，后者一旦撤掉那把锁就会变成前者。
+
+
+### 11.4 cursor 的四个入口读的是陈旧 `path[0]`（新发现，已修）
+
+`cursor_leaf_table()` 就是 `return cur->path[0]`，而下降循环只缓存到
+`path[guard_level]`。`mm_cursor_replace()` 会先调 `cursor_leaf_slot(cur, addr, 1)`
+按地址重新下降，所以是对的；但另外四个入口直接用了 `path[0]`：
+
+`mm_cursor_query` / `mm_cursor_unmap` / `mm_cursor_mark_prot` / `mm_cursor_safe_test`
+
+对**跨叶子表的范围**，这些函数读/写的是上一次操作遗留的叶子表。今天没出事纯属
+两个巧合：唯一活的 `query` 调用是单页 fault（`guard_level == 0`，`path[0]` 恰好
+正确），`unmap` 则没有任何外部调用者。但 `mm_cursor_mark_prot` 是
+`mm_pt_provision_anon` 走的路径，预标记一个跨表范围就会写错表。现已全部改为按
+地址下降。
+
+### 11.5 §10.75 的站点清单过期（更正 §10.75）
+
+§10.75 说 `->rss` 共 52 处、跨 10 个文件。实际是 **53 处、跨 19 个文件**，
+其中 **9 处是 cgroup 的同名字段**（`cg_mem_t.rss`，`cg_mem.c` 6 处 +
+`fs/cgroupfs.c` 3 处）——那是另一个结构，动了会破坏内存限制，不在范围内。
+真正需要改写的是 **42 处**。
+
+§10.75 漏掉的文件：`abi/native/sys_native_task.c`（2 处读）、
+`abi/linux/sys_mm.c:291`（**夹取式读-改-写，且在 ABI 层**）、
+`fs/procfs/procfs_render.c`（3 处读）、`proc/exit.c`（2 处读）、
+`proc/fork.c`（1 处读）、`ipc/userfaultfd.c`（2 处）、
+`drivers/gpu/framebuffer.c`（2 处）。
+
+`proc/exit.c` 还有一处两次读 `mm->rss`（先判 `> 0` 再 uncharge），两次原子读可能
+不同导致电荷错，已改为读一次存局部。
+
+### 11.6 已完成的工作（`feat/mm-single-level`）
+
+* **§10.74/§10.75 的第 1 步：`mm->rss` 原子化。** 42 处 / 19 文件 / 4 类。
+  字段改名 `rss_atomic` 强制编译器枚举站点；夹取减法是 CAS 循环，不用
+  `fetch_sub` 再夹取（那会引入原本不存在的下溢窗口，而下溢会让 OOM 选错牺牲者）。
+* **缺陷 A：按地址的叶锁。** `cursor_leaf_slot()` 现在在下降时对每个父节点
+  锁-改-解锁（安装中间节点 + 父节点元数据读-改-写），并对叶子表**按操作**加锁、
+  存在 cursor 里，由 `cursor_leaf_unlock()` 在该次操作结束时释放。
+  之所以是"按操作"而非"按事务"：宽 cursor 会访问上千个叶子表，
+  `PT_MCS_POOL_SLOTS` 只有 1024 槽，按事务持有会 panic。
+  判据：所有写入都落在单个叶子项上，因此按地址取叶锁即足以互斥。
+* **缺陷 C：四个入口改为按地址下降。**
+* **`check-mm-pt-lock-order` 门禁。** 8 条断言，负向 + 计数。
+  已验证它在**修复前**的代码上 FAIL 6/8、在修复后 PASS —— 一个不能被 bug 弄红的
+  门禁没有价值。已有的 `check-mm-lock-model` 全是"这个 token 存在吗"型断言，
+  而缺陷 A 里那些 token **全都存在**，所以它不可能拦住这类问题。
+
+### 11.7 仍未做的事
+
+已完成的（`feat/mm-single-level`，4 个 commit）：`mm->rss` 原子化、按操作的叶锁、
+`check-mm-pt-lock-order`(9 断言)、`smoke-mm-pt-race`(SMP=8 PASS)、本节这些更正。
+
+剩下三项，**彼此没有依赖关系**（§11.3.1 更正了先前写反的顺序）：
+
+1. **先把 `pt_unmap_leaf()` 改成走 cursor**，再从状态缺页路径摘掉 `mm->lock`。
+   顺序是硬的，下面解释了为什么。
+
+   `MM_AS_CURSOR_ONLY_ENTRY` 第 1 条写着「每一次用户 PTE 的读写都发生在
+   `mm_cursor_t` 内」，但 `mm.c` 的 `pt_unmap_leaf()` 是一次**裸遍历**：
+   `sed -n '457,515p' kernel/mm/mm.c | grep -cE 'mm_addrspace_lock|mcs_lock|mm_cursor'`
+   得到 **0**。它直接 `*pte = 0`，再调用同样无锁的 `mm_pt_note_absent()`
+   （`nr_present`/`cls[]` 的普通读-改-写）。所有调用方
+   （`free_vma_pages` / `munmap` / `madvise` / `mremap` / `sysv_shm` /
+   `sys_mm` / demote）都只靠 `mm->lock` 保护。
+
+   **今天这靠 `mm->lock` 兜住了**：缺页和 munmap 都在同一把全局锁里串行。
+   一旦把状态缺页路径移出 `mm->lock`，两条路就会并发写同一张叶子表——
+   一条持叶锁（cursor），一条完全不持锁。
+
+   实测印证（2026-10-02）：按 §11.7 的原配方拆完快段/慢段后，编译干净
+   （`-Werror -UBSan`，riscv64 smp8），两项前提检查也都通过（慢段经
+   `fault_map()` 走 cursor；`cg_mem_charge` 自带 `node->lock`），但
+   `smoke-mm-pt-race` 超时（status 124），日志 319 行，**无 panic、无
+   `MCS DEADLOCK`**。这不像死锁，像数据损坏导致的反复缺页——所以先查不变量
+   是否被违反，而不是先查锁序。（我最初的假设是 cursor 与 `mm->lock` 的 ABBA，
+   但快段根本不取 `mm->lock`，那个假设不成立。）
+
+   注意 `smoke-mm-stress` **不能**用来复现：它不传 `a20.anonprov`，
+   预标记关闭 ⇒ 快段永远直接 decline ⇒ 新代码根本不执行，门禁会假绿。
+   能复现的只有带 `a20.anonprov=4096` 的 `smoke-mm-pt-race`。
+
+   #### 第 1 项的两种改法，以及为什么不能选便宜的那个
+
+   试过"给 `pt_unmap_leaf()` / `pt_unmap()` 的每个写点套一层 per-node MCS 锁
+   （照抄 `cursor_leaf_slot()` 的形状）"，**结论是不行**，所以没有落：
+
+   * per-node 锁只让**单个 PTE 字写 + 该节点元数据的读-改-写**原子化。函数里
+     的写序列是「清叶子 → 向上逐层 `pt_table_empty(child)` 判断 → 清
+     `parent[idx_path[l+1]]`」，其中 `pt_table_empty()` 的判断与清父项之间
+     并不互斥。若并发缺页在这两步之间重新填入 `child`，就会清掉一张**非空**
+     表，造成丢失映射。这个竞争今天就存在（靠 `mm->lock` 兜住），per-node 锁
+     并不消除它。
+   * 顺带一个锁序问题：per-node 锁会按 `level` 递增去锁**祖先**，而
+     `cursor_leaf_slot()` 是按 level 递减锁**后代**。只要每次都 lock/mutate/unlock
+     不嵌套就不会 ABBA，但一旦为了原子性而嵌套，就是反向持锁。
+
+   唯一能真正关闭的形状：**在 `[base, base+size)` 上开一个 cursor**，让覆盖节点
+   的锁贯穿整个写序列——这与 cursor 的纪律一致，也让事务真正原子。代价是要新增一个
+   原语，不能直接换成 `mm_cursor_unmap()`，因为两者契约不同：
+
+   | | `pt_unmap_leaf()` | `mm_cursor_unmap()` |
+   |---|---|---|
+   | 报告 `base` / `size` / `level` | 是（大页返回整块） | 否 |
+   | 大页叶子 | 处理并按整块回收 | `cursor_leaf_slot(create=0)` 直接返回 NULL |
+   | 帧引用 | **不**释放，调用方自己 `frame_put` | 自己 `frame_put` |
+
+   所以第 1 项要做的是一个新函数（例如「detach range」语义：返回被摘下的 pa，
+   不释放引用，大页返回 base/size/level），而不是改一行调用点。做完之后
+   `MM_AS_CURSOR_ONLY_ENTRY_BYPASSES` 列表才真正能清空。
+
+   #### 锁序约束：向上回收不能嵌套在覆盖节点锁里（已核对代码）
+
+   上一段说「在 `[base, base+size)` 上开一个 cursor，让覆盖节点的锁贯穿整个写
+   序列」——**这句不完整，会导致 ABBA**。两条循环的方向相反：
+
+   ```
+   pt.c:604    for (int l = cur->guard_level; l > 0; l--)        高 → 低
+   mm.c:493    for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++)   低 → 高
+   ```
+
+   `cursor_leaf_slot()` 从覆盖节点**向下**逐层加锁；而 `pt_unmap_leaf()` 的向上回收
+   要**向上**去取 `path[l+1]` 的锁。若两者嵌套——一个 guard_level 等于 `parent`
+   的 cursor 先持 `parent` 再下降到 `child`，而 unmap 先持 `child`（覆盖节点）再上去
+   取 `parent`——就是标准的 ABBA。
+
+   所以原语必须拆成两段，**不能靠一个 cursor 覆盖整段**：
+
+   1. **清叶子**：在 `[base, base+size)` 上开 cursor（覆盖节点恰好就是持有该 PTE 的
+      那张表：单页时是 level 0 的叶子表，大页时 `pt_covering_level` 返回大页 PTE
+      所在的层），在 `cursor_leaf_slot` 的纪律下清 PTE + `mm_pt_note_absent`。
+      释放 cursor。
+   2. **向上回收**：对每一层**单独**开一个事务，在**该 `parent` 自己的锁**下做
+      test-and-clear（`pt_table_empty(child)` 与清 `parent[idx]` 必须在同一临界区，
+      否则就是前面说的丢失映射），然后 `mm_pt_retire_table()`。
+
+   第 2 段逐层独立事务意味着 unmap **不再整体原子**——这与它今天在 `mm->lock` 下的
+   整体原子性不同。但 `munmap` 本身就是逐页循环（`mm.c` 的调用方都是按
+   `base + size` 推进），逐层独立不会引入新的可见中间态：每一层要么在这一轮被摘掉，
+   要么因为 `child` 非空而 `break`，而 `break` 之后的层本来就不会动。
+
+2. **从状态缺页路径摘掉 `mm->lock`**（§10.74 的真正剩余项）。这是迁移的真正目标。
+   做法：把 `handle_demand_fault_access()` 拆成两段。快段只拿 cursor，不拿
+   `mm->lock`：`mm_addrspace_lock()` → `mm_cursor_query()` → 若
+   `MM_ST_ANON_VIRT` 且非 UFFD 则分配/清零/装入 → `mm_cursor_unlock()` →
+   `mm_rss_add()` 与各 perf 计数器（Phase 0 已把它们变成原子的）→ 返回 0。
+   慢段原样保留，在 `mm->lock` 之下走 VMA 路径。
+
+   **一个曾经看起来是阻塞点、实际不是的问题**：拆成两段之后，慢段开头那个
+   "PTE 已存在就返回 -1" 的检查会在快段与 `spin_lock(&mm->lock)` 之间变得可达
+   ——另一个线程可能刚好把同一页映射好了。这不需要新处理：`core/trap.c:373`
+   在 `handle_demand_fault_access()` 返回非 0 时，本来就会落到
+   `handle_present_page_fault()`，而那里的注释（377-381）写明的正是
+   "another thread completes the same mapping between our first present-PTE
+   check and a failed/redundant demand-fault attempt"。这条重试路径已经存在。
+
+   仍需注意：`pfa_alloc_page()` 目前是在 cursor（一个自旋锁）之下调用的
+   （`fault.c:1124`），这是既有做法；把这段移出 `mm->lock` 之后，它就成了
+   页表锁下的唯一分配点，是否会睡眠要单独复核。
+
+2. **上层节点统一状态标记**（论文 §3.3 的
+   "using upper-level PT pages to represent large memory regions with identical
+   status"），替代逐页预标记。**这是性能改动，不是安全前置**——当前预标记按叶子表
+   分块，每 2 MiB 一次 cursor，代价可接受。
+   顺带更正一次被否掉的方案：把区间状态记在**叶子表**上是不成立的——叶子表必须先
+   存在，1 GiB 稀疏映射仍要 4096 个叶子表（16 MiB 页表），并没有解决稀疏性问题。
+   真正要注意的是：**宽事务会经过 §11.3.1 说的 fault-around 那条路**，所以这项改动
+   同样依赖已落地的叶锁。
+3. **drain 的触发频率**：`mm_pt_retire_drain()` 只在 retire 时立即调用，若
+   `pt_readers > 0` 就返回，退役列表在持续多核缺页下可能堆积。当前每次 retire 都会
+   尝试，最终会在某个 `pt_readers == 0` 的时刻排空，所以不是硬泄漏，但需要实测
+   增长曲线。
+

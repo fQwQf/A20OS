@@ -32,6 +32,20 @@
  *     return to userspace.  pt_walk()/pt_lookup_leaf() remain as
  *     non-authoritative helpers for teardown, auditing and /proc reporting,
  *     where no mutation follows.
+ *
+ *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES names the functions that break rule 1
+ *     today, with the lock that is actually holding them safe.  The list is
+ *     not decoration: removing mm->lock from a fault path without emptying it
+ *     turns each entry from "serialised by mm->lock" into a concurrent
+ *     unlocked RMW against cursor-locked faults on the same leaf.  That is not
+ *     hypothetical -- it is what the Phase 3 attempt hit (see
+ *     docs/roadmap/single-level-mm-model.md 11.7 item 1).  A new bypass has to
+ *     be added here, which is what makes it a decision rather than an oversight;
+ *     check-mm-pt-lock-order asserts the list still matches the code.
+ *
+ *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES
+ *       pt_unmap_leaf   mm.c    bare walk; callers hold mm->lock only
+ *       pt_unmap        mm.c    bare walk; callers hold mm->lock only
  *  2. Every page-table WRITE allocates intermediate page-table pages only
  *     through the cursor, and every such allocation installs a metadata
  *     block (pt_meta_t) so the covering node always has a lock.
