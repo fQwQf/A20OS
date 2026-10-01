@@ -59,7 +59,13 @@ typedef struct mnt_namespace {
     uint64_t    ino;        /* immutable id reported as mnt:[ino] */
     refcount_t  refs;
     int         nmounts;
-    mount_t     mounts[MNTNS_MAX_MOUNTS];
+    /* Heap-allocated mount_t objects behind stable pointers.  The previous
+     * inline array shifted entries on umount, silently repointing every
+     * vnode->mnt / dcache / quota reference at the wrong mount.  Removed
+     * entries are parked on dead_mounts (objects stay allocated — holders
+     * may outlive the umount) and freed only when the namespace dies. */
+    mount_t    *mounts[MNTNS_MAX_MOUNTS];
+    mount_t    *dead_mounts;             /* intrusive mount_t.dead_next list */
     struct mnt_namespace *next;  /* registry link (g_mntns_lock) */
 } mnt_namespace_t;
 

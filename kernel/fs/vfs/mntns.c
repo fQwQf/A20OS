@@ -81,14 +81,23 @@ static mnt_namespace_t *mntns_alloc(void)
  * the fs alive rather than risking a use-after-free. */
 static void mntns_copy_mounts(mnt_namespace_t *dst, mnt_namespace_t *src)
 {
-    dst->nmounts = src->nmounts;
-    memcpy(dst->mounts, src->mounts, sizeof(mount_t) * (size_t)src->nmounts);
     for (int i = 0; i < src->nmounts; i++) {
-        src->mounts[i].ns_users++;
-        src->mounts[i].flags |= VFS_MOUNT_NS_SHARED;
-        dst->mounts[i].ns_users = 0;  /* copy: detach-only, never destroys */
-        dst->mounts[i].flags |= VFS_MOUNT_NS_SHARED;
+        mount_t *mnt = (mount_t *)kmalloc(sizeof(*mnt));
+        if (!mnt) {
+            /* Near-OOM: keep the partially copied table rather than failing
+             * the whole namespace; the copy simply sees fewer mounts. */
+            dst->nmounts = i;
+            return;
+        }
+        *mnt = *src->mounts[i];
+        mnt->dead_next = NULL;
+        src->mounts[i]->ns_users++;
+        src->mounts[i]->flags |= VFS_MOUNT_NS_SHARED;
+        mnt->ns_users = 0;  /* copy: detach-only, never destroys */
+        mnt->flags |= VFS_MOUNT_NS_SHARED;
+        dst->mounts[i] = mnt;
     }
+    dst->nmounts = src->nmounts;
 }
 
 int mntns_unshare(task_t *t)
@@ -176,6 +185,14 @@ void mntns_put(mnt_namespace_t *ns)
     /* Release this namespace's holds on its mounts before freeing the table,
      * so a shared filesystem still gets its teardown from the last holder. */
     vfs_mount_namespace_teardown(ns);
+    for (int i = 0; i < ns->nmounts; i++)
+        kfree(ns->mounts[i]);
+    mount_t *dead = ns->dead_mounts;
+    while (dead) {
+        mount_t *next = dead->dead_next;
+        kfree(dead);
+        dead = next;
+    }
     kfree(ns);
 }
 
