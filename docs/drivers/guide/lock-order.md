@@ -196,8 +196,10 @@ wlroots backend 与 renderD128 上的 GBM client 会并发访问它们。
   走到 file close op，而 `file_close_prepare()` 是在持有 `g_file_lock` 的
   情况下调用它的。所以 fd→对象、对象→fd 的解析都在锁外完成，锁内只比较
   解析出来的 `vfile.identity` 数值。
-- `g_drm_store.lock` 与 `g_vblank.lock` **不得同时持有**。`drm_close()` 是
-  唯一需要两把锁的路径，它先释放 `g_vblank.lock` 再取 `g_drm_store.lock`。
+- `g_drm_store.lock` 与 `g_vblank.lock` **不得同时持有**。`drm_close()` 目前
+  只取 `g_vblank.lock`：它在锁下清掉可能指向本 context 的 pending flip，然后
+  释放锁，再做 host 侧的 `ctx_destroy`。这条规则在它**将来**需要清理表项时才
+  变成硬约束——那时必须先放掉 `g_vblank.lock` 再取 `g_drm_store.lock`。
 - `g_vblank.lock`（既有）保护单槽 pending flip 与 per-file 事件 FIFO。
 
 ### VirtIO-GPU transport
