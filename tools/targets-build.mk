@@ -255,7 +255,7 @@ check-process-lock-split-boundary: smoke-sched-stress
 	@$(PYTHON) tools/gates.py check-process-lock-split-boundary
 	@echo "check-process-lock-split-boundary: PASS"
 
-check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
+check-doc-test-gates: check-concurrency-foundation check-smp-platform-boundary check-task-state-boundary check-task-lifetime-boundary check-blocking-point-boundary check-signal-exit-boundary check-timeout-ownership-boundary check-smp-runqueue-boundary check-process-lock-split-boundary check-mm-lock-model check-io-progress-model check-vfs-abstraction check-abi-boundary check-driver-core-model check-drm-store-locking check-drm-abi check-external-dependency-boundary check-abi-smoke-gate check-doc-drift
 	@$(PYTHON) tools/gates.py check-doc-test-gates
 	@echo "check-doc-test-gates: PASS"
 

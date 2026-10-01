@@ -62,7 +62,7 @@ check-a20-tests:
 # arm and userspace sees EINVAL/ENOTTY -- which reads as a Mesa or libdrm bug
 # rather than as a wrong constant in a header.  Gate it so that class of
 # mistake cannot land again.  Skips where no UAPI headers are installed.
-.PHONY: check-drm-abi
+.PHONY: check-drm-abi check-drm-store-locking
 check-drm-abi:
 	@tools/check-drm-abi.sh
 
@@ -87,6 +87,9 @@ check-abi-boundary:
 
 check-driver-core-model: smoke-driver-lifecycle
 	@$(PYTHON) tools/gates.py driver-core-model
+
+check-drm-store-locking:
+	@$(PYTHON) tools/gates.py drm-store-locking
 
 check-external-dependency-boundary:
 	@$(PYTHON) tools/gates.py external-dependency-boundary
