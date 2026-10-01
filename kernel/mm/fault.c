@@ -199,7 +199,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
         return -1;
     }
 
-    mm->rss++;
+    mm_rss_add(mm, 1);
     arch_tlb_flush_page_local(page_va);
     return 0;
 }
@@ -405,7 +405,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         swap_free(entry);
         cg_mem_swap_uncharge(t, 1);
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         arch_tlb_flush_page_local(stval);
         __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
@@ -447,7 +447,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
             if (page_va < t->mm->stack_bottom)
                 t->mm->stack_bottom = page_va;
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -467,7 +467,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         a20_perf_count(A20_PERF_MM_ANON_FAULTS);
         arch_tlb_flush_page_local(stval);
         return 0;
@@ -554,7 +554,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 }
             }
 
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -578,7 +578,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_VMO) < 0)
                 return -1;
 
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -600,7 +600,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                     int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
                                          vma->pte_flags);
                     if (hr == 0) {
-                        t->mm->rss += PMD_PAGE_COUNT;
+                        mm_rss_add(t->mm, PMD_PAGE_COUNT);
                         arch_tlb_flush_page_local(stval);
                         return 0;
                     }
@@ -709,7 +709,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             if (lock_held)
                 vma_put(t->mm, vma);
             if (mapped != 0) {
-                t->mm->rss += mapped;
+                mm_rss_add(t->mm, mapped);
                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
                 a20_perf_count(A20_PERF_MM_ANON_BATCH_WINDOWS);
                 a20_perf_add(A20_PERF_MM_ANON_BATCH_PAGES, mapped);
@@ -730,7 +730,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         arch_tlb_flush_page_local(stval);
         return 0;
     }
@@ -938,7 +938,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
                            shared ? MM_ST_FILE_SHARED
                                   : MM_ST_FILE_PRIVATE) < 0)
                 break;
-            mm->rss++;
+            mm_rss_add(mm, 1);
             installed++;
             candidates[i] = PFN_NONE;
             charged[i] = 0;
@@ -1128,7 +1128,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
                             if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
                                               allow, MM_ST_ANON_MAPPED) == 0) {
                                 mm_cursor_unlock(&qcur);
-                                mm->rss++;
+                                mm_rss_add(mm, 1);
                                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
                                 a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
                                 a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
