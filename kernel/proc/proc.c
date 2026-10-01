@@ -15,6 +15,7 @@
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "mm/elf.h"
+#include "drivers/core/driver_core.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
 #include "mm/mm.h"
@@ -273,35 +274,32 @@ void proc_sleep_until(uint64_t wake_time) {
 
 // The idle process's main loop, which runs when the system has no tasks
 void idle_loop(void) {
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+    /* One query replaces four CONFIG_BOARD_LS2K1000 tests.  A board whose timer
+     * cannot preempt needs the idle path to spin with interrupts enabled; every
+     * other board sleeps. */
+    const int spin_idle = current_board ? current_board->idle_cannot_sleep : 0;
     int first_schedule = 1;
-#endif
 #if CONFIG_DEBUG_SCHED_STATE
     uint64_t last_activity = timer_get_ticks();
     uint64_t last_warn = 0;
 #endif
     while (1) {
-#if !(defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT))
-        arch_local_irq_enable();
-#endif
+        if (!spin_idle)
+            arch_local_irq_enable();
         /* sched() drains bottom halves before selecting a task.  Calling the
          * same hook here doubled per-device progress callbacks on every idle
          * pass without opening an additional completion opportunity. */
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-        if (first_schedule)
-            kinfo("[SCHED] cooperative first schedule\n");
-#endif
+        if (spin_idle && first_schedule)
+            kinfo("[SCHED] spinning idle path, first schedule\n");
         sched();
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-        if (first_schedule) {
-            kinfo("[SCHED] cooperative first schedule returned\n");
+        if (spin_idle && first_schedule) {
+            kinfo("[SCHED] spinning idle path, first schedule returned\n");
             first_schedule = 0;
         }
-#endif
 #if ARCH_HAS_SAFE_IDLE_WAIT
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-        cpu_relax();
-#else
+        if (spin_idle) {
+            cpu_relax();
+        } else {
         arch_local_irq_disable();
         a20_perf_count(A20_PERF_IDLE_WAIT_ATTEMPTS);
         if (proc_sched_idle_prepare()) {
@@ -310,7 +308,7 @@ void idle_loop(void) {
             a20_perf_count(A20_PERF_IDLE_WAIT_WAKE_RETURNS);
         }
         arch_local_irq_enable();
-#endif
+        }
 #else
         cpu_relax();
 #endif
