@@ -14,6 +14,7 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/gpu/gpu_core.h"
 #include "fs/anonfd.h"
+#include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/memfd.h"
 #include "fs/readiness.h"
@@ -204,15 +205,24 @@ static struct {
 } g_prime[DRM_PRIME_MAX];
 static int g_prime_count;
 
-/* Identity currently occupying @fd, or 0 when the slot is empty.  Caller holds
- * no store lock. */
+/* Identity of the file @fd names in the *calling task's* fd table, or 0 when
+ * there is none.  Caller holds no store lock.
+ *
+ * The task table is the right one and the global g_files[] table is not:
+ * memfd_create_file() returns a task-table descriptor (memfd_set_contents()
+ * resolves it with fdtable_get_current()), so asking vfs_get_file_ref() about
+ * that number looks in a different namespace and always comes back empty --
+ * which turned every PRIME export into -EIO.  vfile.identity is a monotonic
+ * per-open id assigned in vfile_alloc(), so it is unique across both namespaces
+ * and an fd received over SCM_RIGHTS resolves to the same value. */
 static uint64_t drm_fd_identity(int fd)
 {
-    vfile_t *vf = vfs_get_file_ref(fd);
+    int gfd = -1;
+    vfile_t *vf = fdtable_get_current_file_ref(fd, &gfd);
     if (!vf)
         return 0;
     uint64_t id = vf->identity;
-    vfs_put_file_ref(fd, vf);
+    vfs_put_file_ref(gfd, vf);
     return id;
 }
 
