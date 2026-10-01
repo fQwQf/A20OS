@@ -65,9 +65,11 @@ typedef struct {
 #define ARCH_UCONTEXT_PAD_FIELDS uint64_t uc_pad;
 #define ARCH_SIGFRAME_EXTRA_FIELDS uint64_t arch_extra;
 
-#define TRAP_CONTEXT_SIZE  (106 * 8)
+/* sizeof(trap_context_t) is pinned at 140*8 by the _Static_assert above and
+ * by PPC64_TRAP_CONTEXT_SIZE in trap/trap.S; these macros must track it. */
+#define TRAP_CONTEXT_SIZE  (140 * 8)
 #define TASK_CONTEXT_SIZE  (24 * 8)
-#define KTRAP_CONTEXT_SIZE (106 * 8)
+#define KTRAP_CONTEXT_SIZE (140 * 8)
 #define ARCH_SYSCALL_TRACE_MIN_PID 3
 /*
  * The pseries low-vector bridge currently has one per-CPU scratch frame.

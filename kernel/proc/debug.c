@@ -768,8 +768,13 @@ void proc_debug_tracer_exiting(task_t *tracer)
         proc_put(t);
     }
 
-    for (int i = 0; i < kill_count; i++)
-        (void)proc_force_exit(proc_find_get(kill_pids[i]), -SIGKILL);
+    for (int i = 0; i < kill_count; i++) {
+        task_t *t = proc_find_get(kill_pids[i]);
+        if (t) {
+            (void)proc_force_exit(t, -SIGKILL);
+            proc_put(t);
+        }
+    }
     for (int i = 0; i < resume_count; i++) {
         task_t *t = proc_find_get(resume_pids[i]);
         if (t) {

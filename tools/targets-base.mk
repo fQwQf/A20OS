@@ -10,15 +10,15 @@
 		check-arch-boundary check-task-state-boundary \
 		check-riscv64-bringup check-loongarch64-bringup check-aarch64-bringup check-x86_64-bringup check-arm32-bringup check-riscv32-bringup check-ppc64le-bringup \
 		check-riscv64-user check-loongarch64-user check-aarch64-user check-x86_64-user check-arm32-user check-riscv32-user check-ppc64le-user \
-		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-network-suite-aarch64 smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-mm-fork-exec-race smoke-oom-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-futex-stress-aarch64 smoke-socket-stress smoke-driver-lifecycle smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability 		smoke-native-handle smoke-native-libc smoke-native-futex smoke-native-deepen smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress smoke-syscall-ext \
+		smoke-riscv64 smoke-loongarch64 smoke-aarch64 smoke-x86_64 smoke-arm32 smoke-riscv32 smoke-ppc64le smoke-abi-linux smoke-a20-channel smoke-ptrace smoke-network-suite smoke-network-suite-aarch64 smoke-proc-a20 smoke-proc-stress smoke-procfs-stress smoke-mm-stress smoke-mm-fork-exec-race smoke-oom-stress smoke-vfs-stress smoke-vfs-edge smoke-sched-stress smoke-futex-stress smoke-futex-stress-aarch64 smoke-socket-stress smoke-driver-lifecycle smoke-drvmod smoke-drvmod-riscv64 smoke-drvmod-x86_64 smoke-drvmod-aarch64 smoke-drvmod-loongarch64 smoke-hda smoke-audio-userspace smoke-virtio-sound smoke-pci-portability smoke-unix-ch smoke-bpf smoke-wx-aslr 		smoke-native-handle smoke-native-libc smoke-native-futex smoke-native-deepen smoke-io-event smoke-signalfd-stress smoke-evdev-stress smoke-scm-stress smoke-syscall-ext \
 		smoke-arch-mmu-matrix \
 		FORCE regen-rootfs-overlay check-rootfs-overlay-generator \
-		user_apps fs_img kernel-only dev-build \
+		kernel-only dev-build \
 		extra-img _extra-img extra-user-apps prepare-riscv64-glibc-sysroot force_extra_image_stamp run-riscv64-extra run-loongarch64-extra run-arm64-extra run-x86_64-extra run-arm32-extra run-riscv32-extra run-ppc64le-extra \
-		native-test-arch native-handle-test-arch native-libc-arch native-programs \
-	native-futex-arch native-futex-rv smoke-native-futex native-debug-test-arch native-debug-test-rv smoke-native-debug native-ext-test-arch native-ext-test-rv smoke-native-ext mlibc-sysroot mlibc-hello-rv mlibc-sbase mlibc-mksh smoke-mlibc smoke-mlibc-sbase smoke-mlibc-fork smoke-mlibc-mksh \
-		native-ipc-arch native-ipc-rv native-ipc-la smoke-native-ipc \
-		native-contract-arch native-contract-rv native-contract-la smoke-native-contract \
+		native-handle-test-arch native-libc-arch native-programs \
+		native-futex-arch smoke-native-futex native-debug-test-arch smoke-native-debug native-ext-test-arch smoke-native-ext mlibc-sysroot mlibc-hello-rv mlibc-sbase mlibc-mksh smoke-mlibc smoke-mlibc-sbase smoke-mlibc-fork smoke-mlibc-mksh \
+		native-ipc-arch native-ipc-la smoke-native-ipc \
+		native-contract-arch native-contract-la smoke-native-contract \
 		native-uinputd-arch native-uinputd-rv smoke-dual-input \
 		native-uedud-arch native-uedud-rv smoke-iommu-udriver-isolation \
 		native-personality-arch native-personality-rv smoke-native-personality \
@@ -33,8 +33,6 @@
 		native-ubd-arch native-ubd-rv smoke-native-ubd \
 		native-ufsd-arch native-ufsd-rv smoke-native-ufs smoke-native-fs-all \
 		smoke-clock-vdso \
-		native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le native-test native-test-all \
-		native-minimal-rv native-minimal-la native-minimal \
 		native-handle-test-rv native-handle-test-la native-handle-test-aarch64 native-handle-test-x86_64 native-handle-test-arm32 native-handle-test-rv32 native-handle-test-ppc64le native-handle-test native-handle-test-all \
 		native-libc-rv native-libc-la native-libc-aarch64 native-libc-x86_64 native-libc-arm32 native-libc-rv32 native-libc-ppc64le native-libc native-libc-all \
 		native-futex-rv native-futex-la native-futex-aarch64 native-futex-x86_64 native-futex-arm32 native-futex-rv32 native-futex-ppc64le native-futex-all \

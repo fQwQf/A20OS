@@ -55,8 +55,6 @@ ifeq ($(DRIVER_DEPLOYMENT),generic)
 ifeq ($(ARCH),x86_64)
 EARLY_DRIVER_BFD := elf64-x86-64 -B i386:x86-64
 else ifneq ($(filter $(ARCH),riscv64 aarch64 loongarch64),)
-ifeq ($(ARCH),riscv64)
-endif
 EARLY_DRIVER_BFD_riscv64 := elf64-littleriscv -B riscv:rv64
 EARLY_DRIVER_BFD_aarch64 := elf64-littleaarch64 -B aarch64
 EARLY_DRIVER_BFD_loongarch64 := elf64-loongarch -B loongarch

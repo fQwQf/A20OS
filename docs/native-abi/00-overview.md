@@ -4,6 +4,7 @@ A20OS 的混合内核动机、双 ABI 与 Linux 兼容层的关系，以及整�
 
 ## 设计定位
 
+> 注：`user/archive/` 已于 2026-10 从仓库删除，下文与表格中的 archive 相关内容均为历史记录。
 `abi/linux` 承担 Linux 用户态兼容职责，`abi/native` 面向原生用户态设计，不复制 POSIX 或 Linux syscall 编号。当前系统主用户态仍是 Linux ABI 上的 musl；Native ABI 在内核侧登记 142 个 syscall 入口（其中部分语义明确受限），活跃用户态组件包括 `liba20rt`、最小库 `liba20c`，以及完整 libc 路线 `user/external/mlibc/sysdeps/a20/`。旧 Native-musl bridge 已归档到 `user/archive/`，不参与构建。
 
 长期布局：

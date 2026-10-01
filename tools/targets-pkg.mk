@@ -84,6 +84,11 @@ pkgs-check:
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
+# 链式语义（与 docs/packaging/overview.md 一致，也是 CI 的调用方式）：
+#   pkg-key 生成签名密钥 → pkgs 打包（需先有内核与用户态构建产物）→
+#   pkg-repo 建 repo → image-world 组镜像。重构进 pkg.py 时这些边曾被丢掉，
+#   导致干净树上 `make pkg-repo` 复制空目录并让 mka20repo.sh 直接失败。
+pkgs: $(USER_BUILD_STAMP) $(KERNEL_ELF) $(if $(PKG_SIGN_KEY),pkg-key,)
 pkgs:
 	$(PYTHON) tools/pkg.py pkgs  \
 	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
@@ -92,7 +97,7 @@ pkgs:
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
-pkg-repo:
+pkg-repo: pkgs
 	$(PYTHON) tools/pkg.py pkg-repo  \
 	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
 	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \
@@ -110,7 +115,7 @@ pkg-media-overlay:
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
 	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
-image-world:
+image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 	$(PYTHON) tools/pkg.py image-world --media "$(GUI_MEDIA)" --media-dir "$(GUI_MEDIA_DIR)" --media-overlay "$(GUI_MEDIA_OVERLAY)" \
 	--recipes "$(PKG_RECIPES)" --arch "$(PKG_ARCH)" --variant "$(PKG_VARIANT)" \
 	--build-dir "$(BUILD_DIR)" --out-dir "$(PKG_OUT_DIR)" \

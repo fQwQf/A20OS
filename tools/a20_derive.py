@@ -122,23 +122,21 @@ def derive_make_vars(inst: Instance) -> list[str]:
 
 
 def _target_vars(t: TargetCfg) -> list[str]:
-    """[target] -> the three TARGET_* variables make actually reads.
+    """[target] -> the two TARGET_* variables make actually reads.
 
     Only what a makefile consumes is derived.  This used to emit all eleven
-    TARGET_* fields, but eight of them were read by nothing at all: the console
+    TARGET_* fields, but nine of them were read by nothing at all: the console
     session, the reset pulse, the command injection and the expect matching are
-    all driven by a20 from the dataclass, not by a recipe.  Emitting them made
-    `a20 show-vars` claim make consumed a configuration it never saw, and the
-    docs then documented that claim.
+    all driven by a20 from the dataclass, not by a recipe, and TARGET_SERIAL
+    was defined in target-console.mk but read by no recipe either.  Emitting
+    them made `a20 show-vars` claim make consumed a configuration it never
+    saw, and the docs then documented that claim.
 
     The split is therefore deliberate and narrow: make owns writing the boot
-    medium (`target-write-media`), so it gets the device and the images; the
-    serial node is passed because `target-console.mk` reports it.  Everything
-    else is a20's own business and stays a20's own business.
+    medium (`target-write-media`), so it gets the device and the images.
+    Everything else is a20's own business and stays a20's own business.
     """
     v: list[str] = []
-    if t.serial is not None:
-        v.append(f"TARGET_SERIAL={t.serial}")
     if t.boot_media:
         v.append(f"TARGET_BOOT_MEDIA={' '.join(t.boot_media)}")
     if t.media_device is not None:

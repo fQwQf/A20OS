@@ -99,7 +99,10 @@ static inline uint64_t arch_make_addr_space_token(void *pgdir) {
 }
 
 #define ARCH_PTE_PPN_MASK  0xFFFFF000UL
-#define arch_pte_flags(pte) ((uint32_t)(pte) & ARCH_PTE_PPN_MASK)
+/* Flag bits are the complement of the PPN field, exactly like la64: the
+ * generic pt.c rebuilds leaves from arch_pte_flags(), so returning the PPN
+ * bits here silently stripped permission/PLV bits on every leaf rewrite. */
+#define arch_pte_flags(pte) ((uint32_t)(pte) & (uint32_t)~ARCH_PTE_PPN_MASK)
 
 static inline uint64_t arch_pte_leaf(paddr_t pa, uint64_t flags) {
     return arch_pte_from_pa(pa) |

@@ -75,67 +75,6 @@ NATIVE_LIBC_SRC  := \
     user/liba20c/environ.c \
     user/liba20c/a20_errno.c
 
-define NATIVE_TEST_RECIPE
-@mkdir -p $(dir $(4))
-$(1) -ffreestanding -nostdlib -static \
-    $(2) \
-    -Iuser -Iuser/liba20rt \
-    -T$(NATIVE_LD) \
-	    $(3) \
-	    $(NATIVE_SDK_SRC) \
-	    $(NATIVE_COMPILER_RT_SRC) \
-	    $(NATIVE_ARCH_SRC) \
-	    user/tests/test_native_hello.c \
-	    $(NATIVE_LIBS) \
-	    -o $(4)
-endef
-
-define NATIVE_MINIMAL_RECIPE
-@mkdir -p $(dir $(4))
-$(1) -ffreestanding -nostdlib -static \
-    $(2) \
-    -Iuser -Iuser/liba20rt \
-    -T$(NATIVE_LD) \
-    $(3) \
-    user/tests/test_native_minimal.c \
-    -o $(4)
-endef
-
-$(NATIVE_HELLO_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_hello.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
-	$(call NATIVE_TEST_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
-
-native-test-arch: $(NATIVE_HELLO_BIN)
-
-native-test-rv:
-	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-test-arch
-native-test-la:
-	$(MAKE) ARCH=loongarch64 NOMMU=$(NOMMU) native-test-arch
-native-test-aarch64:
-	$(MAKE) ARCH=aarch64 NOMMU=$(NOMMU) native-test-arch
-native-test-x86_64:
-	$(MAKE) ARCH=x86_64 NOMMU=$(NOMMU) native-test-arch
-native-test-arm32:
-	$(MAKE) ARCH=arm32 NOMMU=$(NOMMU) native-test-arch
-native-test-rv32:
-	$(MAKE) ARCH=riscv32 NOMMU=$(NOMMU) native-test-arch
-native-test-ppc64le:
-	$(MAKE) ARCH=ppc64le NOMMU=$(NOMMU) native-test-arch
-
-native-test: $(DEFAULT_NATIVE_TEST_TARGETS)
-
-native-test-all: native-test-rv native-test-la native-test-aarch64 native-test-x86_64 native-test-arm32 native-test-rv32 native-test-ppc64le
-
-native-minimal-rv:
-	$(call NATIVE_MINIMAL_RECIPE,$(RISCV_ELF_PREFIX)gcc,-march=rv64gc -mabi=lp64d -mcmodel=medany,$(NATIVE_CRT0_RV),user/build/riscv64/native-minimal-rv)
-	@file user/build/riscv64/native-minimal-rv
-
-native-minimal-la:
-	$(call NATIVE_MINIMAL_RECIPE,loongarch64-linux-gnu-gcc,-march=loongarch64 -mabi=lp64d -mcmodel=normal -fno-pic,$(NATIVE_CRT0_LA),user/build/loongarch64/native-minimal-la)
-	@file user/build/loongarch64/native-minimal-la
-
-native-minimal: native-minimal-rv native-minimal-la
-
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \

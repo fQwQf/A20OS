@@ -520,7 +520,7 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 | `tools/check-drm-abi.sh` | 每个 DRM ioctl 号与结构体布局对 Linux UAPI 逐条比对，漂移时 exit 1 | 否 |
 | `tools/build-virglrenderer.sh check` | 报告宿主 QEMU、两版 virglrenderer、`/dev/dri/renderD128` 是否真的可访问 | 否 |
 | `tools/build-virglrenderer.sh build` | 构建宿主 virglrenderer ≥ 0.11 到 `tools/virgl/install`（Makefile 自动拾取） | **是** |
-| `tools/a20_preflight.py` | 不直接调用：`tools/a20 run/debug/test` 在启动前采样宿主 RAM/负载/磁盘，放不下就**等待**（`A20_PREFLIGHT=0` 跳过）。`tools/a20 check` 会校验它与 Makefile 默认值的副本未漂移 | 否 |
+| `tools/a20_resource.py` | 不直接调用：`tools/a20 run/debug/test` 在启动前采样宿主 RAM/负载/磁盘，放不下就**等待**（`A20_PREFLIGHT=0` 跳过）。`tools/a20 check` 会校验它与 Makefile 默认值的副本未漂移。原 `a20_preflight.py` 已合并进本文件 | 否 |
 
 `build/package/flash` 不启动 guest，因此不受 preflight 约束。
 
