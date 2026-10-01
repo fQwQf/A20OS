@@ -1011,9 +1011,15 @@ endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
 RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
+RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
 ifeq ($(RAMFS_USER),1)
-ifneq ($(ARCH),loongarch64)
-$(error RAMFS_USER=1 is currently supported only for ARCH=loongarch64)
+# Gate on the objcopy entry rather than on an arch list, so adding an
+# architecture is one table line instead of two places that can disagree.  The
+# previous check was an explicit $(error) naming loongarch64, which meant a
+# small-memory board on any other architecture had no way to run a RAMFS
+# userland at all -- the Milk-V Duo's 64 MiB is the case that needs it.
+ifeq ($(RAMFS_USER_OBJCOPY_$(ARCH)),)
+$(error RAMFS_USER=1 has no objcopy recipe for ARCH=$(ARCH); add RAMFS_USER_OBJCOPY_$(ARCH) near line 1013)
 endif
 KERNEL_OBJ += $(RAMFS_USER_BLOBS)
 endif

@@ -1,0 +1,39 @@
+# Sipeed LicheeRV Nano (SophGo SG2002) bring-up.
+#
+# Stage-1 instance: no [package] section, because this board has no storage
+# driver yet.  Its SD controller is a DesignWare CMSH and A20OS only has the
+# older DesignWare SDIO/MMC driver, so there is nothing to put on a card yet --
+# the image has to be handed to the boot chain by hand or over UART.  See
+# docs/platforms/licheerv-nano.md.
+#
+# The [target] section does not mean the board has been verified.  The serial
+# node, baud and console_check are filled from the board's documented facts and
+# every one of them has to be confirmed against real hardware with
+# `tools/a20 console licheerv-nano` before this instance means anything.  The
+# repository's real-hardware acceptance record is in the board's doc.
+name = "licheerv-nano"
+description = "Sipeed LicheeRV Nano (SG2002, 256 MiB) riscv64 bring-up with a serial target"
+arch = "riscv64"
+board = "licheerv-nano"
+abi = "linux"
+
+[kernel]
+bringup = true
+# The console UART's clock and reset are released by the vendor FSBL that
+# OpenSBI runs on, not by this kernel, so the generic driver-deployment profile
+# is fine here; nothing to statically embed until the DWCMSH driver lands.
+driver_deployment = "embedded"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+# No reset: the SG2002 boot ROM has no host-triggerable reset line, so recovery
+# is a physical power cycle.  boot_timeout covers the FSBL -> OpenSBI handover.
+boot_wait = 3
+boot_timeout = "120s"
+# The kernel's own evidence that it reached userspace, plus the FDT line that
+# proves the device tree was actually handed over rather than falling back to
+# the board RAM window.
+console_check = ["[FDT]", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
