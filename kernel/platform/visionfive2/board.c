@@ -273,6 +273,13 @@ static const board_config_t visionfive2 = {
     .poweroff          = vf2_poweroff,
     .reboot            = vf2_reboot,
     .enumerate_devices = vf2_enumerate_devices,
+    /* JH7110 firmware hands over without reliably granting U-mode access to the
+     * time CSR, and this board's console UART has no wired interrupt.  Both are
+     * boot-handoff facts about the board rather than properties of RISC-V, so
+     * the vDSO and console code read them from here instead of testing
+     * CONFIG_BOARD_VISIONFIVE2 for itself. */
+    .vdso_user_timer_unreliable = 1,
+    .uart_rx_is_polled         = 1,
 };
 
 const board_config_t *const current_board = &visionfive2;

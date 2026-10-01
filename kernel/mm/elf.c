@@ -354,7 +354,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
          * fault cannot recover the faulting EA and demand paging never maps the
          * page.  Map executable file pages eagerly to avoid code-fetch faults.
          */
-#if defined(CONFIG_PPC64LE)
+#if ARCH_INSN_FAULT_UNRECOVERABLE
         if (flags & PTE_X) {
             for (vaddr_t page = start; page < file_map_end; page += PAGE_SIZE) {
                 pte_t *pte = pt_lookup_leaf(pgdir, page, NULL, NULL, NULL);
