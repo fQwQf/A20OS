@@ -165,15 +165,24 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
 **还没有做到的，以及已知的下一步**（按当前证据排序，不猜）：
 
 1. `gpu3d_test` 的像素回读仍然 4096/4096 全错，首像素还是哨兵 `0xdeadbeef`。
-   已排除：命令流常量（对着 `virgl_protocol.h` 逐个核过 CREATE_OBJECT=1、
-   SET_FRAMEBUFFER_STATE=5、CLEAR=7、OBJECT_SURFACE=8、`VIRGL_OBJ_CLEAR_SIZE=8`、
-   `PIPE_CLEAR_COLOR0=0x4` 全对）、宿主 context 是否存在
-   （`RESOURCE_CREATE_3D` 返回 OK_NODATA，而 QEMU 该路径在 context 为 NULL 时会置
-   error，所以 context 在）、`CTX_CREATE` 的 capset（`context_init=1` 掩成
-   capset id 1 = VIRGL，是合法值）。**剩下的头号嫌疑是 cache 一致性**：host 通过
-   DMA 直接写 guest RAM，guest 侧若已有 cached 映射就读到旧值。这需要 guest 侧
-   对该资源做 cache 失效（对应 Linux 的 `virtio_gpu_flush_resource` 一类动作），
-   我们目前没有这条路径。
+   **这一条已经定位到具体机制了，见 `tools/virgl-probe/`（提交 `a8dbf7cf`）。**
+   在 kernel 里 submit 之后立刻用同一帧读回该页：资源是活的（`virgl=1`）、
+   backing 已 attach、页已 materialize，读到的仍然是哨兵。所以
+   - **不是传输问题**：字节确实送到了，host 只是没写；
+   - **不是 cache 一致性**（此前的主要怀疑）：kernel 直读 pfn 也看不到变化；
+   - 把同样的 virglrenderer 调用搬出 QEMU 在宿主进程内跑，**不需要 guest 和 QEMU
+     就复现出一模一样的失败**（`submit_cmd` 返回 22 = EINVAL，页未被触碰）；
+   - 根因机制找到了：vrend 在第一条坏命令上把 `ctx->in_error` 置位，之后
+     每一条命令都**静默 no-op**（`vrend_renderer.c` 在 context 切换路径上检查
+     `ctx->in_error`）。所以流里任何一处长度不对，都会让整帧变成空操作，而
+     所有 virtio 响应仍然是 OK —— 这正是"guest 说 PASS、像素不变"的形状。
+   - 顺带更正两处此前被猜错的常量：`PIPE_TEXTURE_2D` 是 **2** 不是 1
+     （`enum pipe_texture_target` 第一个成员是 `PIPE_BUFFER`）；而
+     `SET_FRAMEBUFFER_STATE` 的长度必须是 `2 + nr_cbufs`，单色缓冲即 3。
+     测试里这两处本来就是对的，猜错的是新写的探针。
+   - 仍未定位的是**流里到底哪一条命令的长度不对**：vrend 后续解码把
+     `dst_handle` 读成了 329729这种垃圾值，这正是流错位的样子。有了探针，
+     从"每次一个 boot"变成"每次几秒"。
 2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
    崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
    `virtio_gpu_dri.so` 都在镜像里，所以不是缺件；是 Mesa 侧与本驱动 UAPI 的交互
