@@ -63,6 +63,10 @@ typedef struct drm_gem {
     uint32_t virgl_res_id;
     int fb_refs;         /* live framebuffers referencing this GEM */
     int dumb_live;       /* userspace still holds the dumb-buffer handle */
+    /* In-flight users, not owners.  Unlike fb_refs/dumb_live this never keeps
+     * a buffer alive past its last owner; it only stops the storage being torn
+     * down underneath a caller that must drop the store lock mid-operation. */
+    int pins;
 } drm_gem_t;
 
 /* A framebuffer is its own object, not an alias of the GEM handle.  Linux lets
@@ -177,11 +181,85 @@ static int g_gem_name_count;
 
 /* PRIME fd <-> GEM handle mapping.  The dumb allocator exports a buffer
  * through one DRM open and the backend imports it through another, so the
- * mapping must be global, not per-context. */
+ * mapping must be global, not per-context.
+ *
+ * An entry is keyed on the exported file's identity, never on the fd number
+ * alone.  The kernel recycles an fd as soon as userspace closes it, so a
+ * number-keyed table hands out the old GEM handle for whatever unrelated file
+ * now occupies that slot -- and GEM handles are mmap-able through
+ * drm_linux_mmap(), which turns a stale entry into a way to read a buffer this
+ * process never owned.  vfile.identity is a monotonic per-open id, so it
+ * distinguishes "the same file" from "the same number".
+ *
+ * No VFS call may be made while g_drm.lock is held: vfs_get_file_ref() can
+ * reach a file close op, and that runs under g_file_lock.  Resolution therefore
+ * happens with the store lock dropped and only the resulting numbers are
+ * compared under it. */
 #define DRM_PRIME_MAX 64
-static int g_prime_fd[DRM_PRIME_MAX];
-static uint32_t g_prime_handle[DRM_PRIME_MAX];
+static struct {
+    int fd;
+    uint64_t identity;
+    uint32_t handle;
+} g_prime[DRM_PRIME_MAX];
 static int g_prime_count;
+
+/* Identity currently occupying @fd, or 0 when the slot is empty.  Caller holds
+ * no store lock. */
+static uint64_t drm_fd_identity(int fd)
+{
+    vfile_t *vf = vfs_get_file_ref(fd);
+    if (!vf)
+        return 0;
+    uint64_t id = vf->identity;
+    vfs_put_file_ref(fd, vf);
+    return id;
+}
+
+/*
+ * Lock for every device-global table above.
+ *
+ * These tables are shared by design -- a buffer created through one open has to
+ * be visible to another, which is why the GEM store is device-wide rather than
+ * per-fd -- but until this lock existed they were searched, mutated and torn
+ * down with no mutual exclusion whatsoever.  Two ioctls running on different
+ * CPUs could therefore hand out the same handle, drop an entry from a table
+ * while another CPU was walking it, or free a VMO that a third ioctl was still
+ * reading.  The desktop drives this from two processes at once by construction:
+ * the wlroots allocator creates buffers on one fd and the backend consumes them
+ * on another.
+ *
+ * Scope rule, because it is what decides what may be called while it is held:
+ * this lock protects the tables and nothing else.  Anything that can sleep,
+ * allocate, enter the VFS, or issue a virtio command is done after dropping it,
+ * with the object pinned across the gap so the storage cannot vanish underneath
+ * the caller.  That is why teardown is split in two -- drm_gem_detach_locked()
+ * takes the object out of the tables under the lock, drm_gem_drop_storage()
+ * releases the VMO and the host resource after it.
+ *
+ * g_drm.lock is a device-private lock and is therefore the innermost one.  It
+ * must never be held together with g_vblank.lock: the close path needs both, and
+ * taking them in one order here and the other in drm_close() is a deadlock.
+ * drm_close() drops g_vblank.lock before acquiring this one.
+ */
+static struct {
+    mutex_t lock;
+    int initialized;
+} g_drm_store;
+
+static void drm_store_lock(void)
+{
+    if (__sync_bool_compare_and_swap(&g_drm_store.initialized, 0, 1)) {
+        mutex_init(&g_drm_store.lock);
+        __sync_synchronize();
+        g_drm_store.initialized = 2;
+        return;
+    }
+    while (*(volatile int *)&g_drm_store.initialized != 2)
+        ;
+}
+
+#define drm_lock()   drm_store_lock(), mutex_lock(&g_drm_store.lock)
+#define drm_unlock() mutex_unlock(&g_drm_store.lock)
 
 static struct device *drm_gpu_device(void)
 {
@@ -691,55 +769,114 @@ struct drm_mode_atomic {
     uint64_t user_data;
 };
 
-/* ---- helpers ---- */
+/* ---- helpers ----
+ *
+ * Everything below the "locked" suffix requires g_drm.lock; the pinned variants
+ * take it themselves.  No function here returns a pointer into g_gems[]/
+ * g_fbs[] unless the caller is documented to be holding the lock or a pin.
+ */
 
-static drm_gem_t *drm_find_gem(drm_context_t *ctx, uint32_t handle)
+static drm_gem_t *drm_find_gem_locked(uint32_t handle)
 {
-    (void)ctx;
     for (int i = 0; i < g_gem_count; i++)
         if (g_gems[i].used && g_gems[i].handle == handle)
             return &g_gems[i];
     return NULL;
 }
 
-static void drm_gem_reclaim(drm_gem_t *b)
+/* Pin a GEM so its storage survives the caller dropping the lock.  Returns NULL
+ * when the handle is unknown; every non-NULL return must be given back with
+ * drm_gem_unpin(), which may be the call that finally frees the object. */
+static drm_gem_t *drm_gem_pin(uint32_t handle)
 {
+    drm_gem_t *b = NULL;
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(handle);
+    if (g) {
+        g->pins++;
+        b = g;
+    }
+    drm_unlock();
+    return b;
+}
+
+/* The storage a detached GEM still owns: releasing it can allocate, enter the
+ * MM layer and talk to the host, so it happens with the store lock dropped. */
+typedef struct {
+    struct vmo *vmo;
+    uint32_t virgl_res_id;
+} drm_gem_storage_t;
+
+static void drm_gem_drop_storage(drm_gem_storage_t *s)
+{
+    if (!s->vmo && !s->virgl_res_id)
+        return;
     /* A 3D resource is still mapped by the host after userspace drops its
      * handle: the host writes rendered results straight into these frames.
      * Releasing the VMO first would hand those frames back to the allocator
      * while the host can still write to them, so drop the resource first and
      * only then free the pages. */
-    if (b->is_virgl && b->virgl_res_id) {
+    if (s->virgl_res_id) {
         gpu_dev_ops_t *ops = drm_gpu_ops();
         if (ops && ops->resource_unref)
-            ops->resource_unref(drm_gpu_device(), b->virgl_res_id);
-        b->is_virgl = 0;
-        b->virgl_res_id = 0;
+            ops->resource_unref(drm_gpu_device(), s->virgl_res_id);
+        s->virgl_res_id = 0;
     }
+    if (s->vmo) {
+        vmo_release(s->vmo);
+        s->vmo = NULL;
+    }
+}
+
+/* Take the GEM out of the tables and hand its storage back to the caller.
+ * Requires the lock and that no pin is outstanding. */
+static void drm_gem_detach_locked(drm_gem_t *b, drm_gem_storage_t *out)
+{
+    out->vmo = b->vmo;
+    out->virgl_res_id = b->is_virgl ? b->virgl_res_id : 0;
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].handle == b->handle) {
             g_gem_names[i] = g_gem_names[--g_gem_name_count];
             break;
         }
     }
-    if (b->vmo)
-        vmo_release(b->vmo);
     memset(b, 0, sizeof(*b));
     b->used = 0;
 }
 
-/* Userspace dropping the dumb-buffer handle does not free storage that a live
- * framebuffer still displays; the VMO is reclaimed by drm_fb_release(). */
-static void drm_free_gem(drm_context_t *ctx, drm_gem_t *b)
+/* Drop a pin and, if the object has no owner left either, reclaim it.  Safe to
+ * call from any context: it takes the lock only around the table work and
+ * releases the storage after dropping it. */
+static void drm_gem_unpin(drm_gem_t *b)
 {
-    (void)ctx;
-    b->dumb_live = 0;
-    if (b->fb_refs > 0)
+    drm_gem_storage_t s = { 0 };
+    if (!b)
         return;
-    drm_gem_reclaim(b);
+    drm_lock();
+    b->pins--;
+    if (b->pins == 0 && b->fb_refs == 0 && !b->dumb_live)
+        drm_gem_detach_locked(b, &s);
+    drm_unlock();
+    drm_gem_drop_storage(&s);
 }
 
-static drm_fb_t *drm_find_fb(uint32_t fb_id)
+/* Userspace dropping the dumb-buffer handle does not free storage that a live
+ * framebuffer still displays; the VMO is reclaimed by drm_fb_release(). */
+static void drm_free_gem(uint32_t handle)
+{
+    drm_gem_storage_t s = { 0 };
+    drm_lock();
+    drm_gem_t *b = drm_find_gem_locked(handle);
+    if (b) {
+        b->dumb_live = 0;
+        if (b->fb_refs == 0 && b->pins == 0)
+            drm_gem_detach_locked(b, &s);
+    }
+    drm_unlock();
+    drm_gem_drop_storage(&s);
+}
+
+static drm_fb_t *drm_find_fb_locked(uint32_t fb_id)
 {
     for (int i = 0; i < DRM_MAX_FBS; i++)
         if (g_fbs[i].used && g_fbs[i].fb_id == fb_id)
@@ -747,7 +884,7 @@ static drm_fb_t *drm_find_fb(uint32_t fb_id)
     return NULL;
 }
 
-static drm_fb_t *drm_fb_alloc(uint32_t gem_handle)
+static drm_fb_t *drm_fb_alloc_locked(uint32_t gem_handle)
 {
     for (int i = 0; i < DRM_MAX_FBS; i++) {
         if (g_fbs[i].used)
@@ -762,17 +899,23 @@ static drm_fb_t *drm_fb_alloc(uint32_t gem_handle)
 
 static void drm_fb_release(uint32_t fb_id)
 {
-    drm_fb_t *f = drm_find_fb(fb_id);
-    if (!f)
+    drm_gem_storage_t s = { 0 };
+    drm_lock();
+    drm_fb_t *f = drm_find_fb_locked(fb_id);
+    if (!f) {
+        drm_unlock();
         return;
+    }
     uint32_t h = f->gem_handle;
     memset(f, 0, sizeof(*f));
-    drm_gem_t *b = drm_find_gem(NULL, h);
-    if (!b)
-        return;
-    b->fb_refs--;
-    if (b->fb_refs == 0 && !b->dumb_live)
-        drm_gem_reclaim(b);
+    drm_gem_t *b = drm_find_gem_locked(h);
+    if (b && b->fb_refs > 0) {
+        b->fb_refs--;
+        if (b->fb_refs == 0 && !b->dumb_live && b->pins == 0)
+            drm_gem_detach_locked(b, &s);
+    }
+    drm_unlock();
+    drm_gem_drop_storage(&s);
 }
 
 /*
@@ -780,10 +923,10 @@ static void drm_fb_release(uint32_t fb_id)
  * dumb-buffer paths funnel through here so there is exactly one place that
  * hands out handles and VMOs.
  */
-static drm_gem_t *drm_gem_alloc(uint32_t width, uint32_t height,
-                                uint32_t pitch, uint32_t bpp,
-                                uint32_t format, uint32_t usage,
-                                uint64_t size)
+static drm_gem_t *drm_gem_alloc_locked(uint32_t width, uint32_t height,
+                                       uint32_t pitch, uint32_t bpp,
+                                       uint32_t format, uint32_t usage,
+                                       uint64_t size)
 {
     if (size == 0)
         return NULL;
@@ -796,9 +939,11 @@ static drm_gem_t *drm_gem_alloc(uint32_t width, uint32_t height,
         drm_gem_t *g = &g_gems[i];
         memset(g, 0, sizeof(*g));
         g->used = 1;
-        g->handle = g_gem_next_handle++;
-        if (g->handle == 0)
-            g->handle = g_gem_next_handle++;
+        uint32_t h;
+        do {
+            h = g_gem_next_handle++;
+        } while (h == 0 || drm_find_gem_locked(h));
+        g->handle = h;
         g->width = width;
         g->height = height;
         g->pitch = pitch;
@@ -815,7 +960,7 @@ static drm_gem_t *drm_gem_alloc(uint32_t width, uint32_t height,
     return NULL;
 }
 
-static void drm_gem_name_bind(uint32_t name, uint32_t handle)
+static void drm_gem_name_bind_locked(uint32_t name, uint32_t handle)
 {
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].name == name) {
@@ -995,25 +1140,38 @@ static void drm_edid_synthesize(uint8_t *e, uint32_t w, uint32_t h)
 
 static const uint8_t *drm_edid_get(void)
 {
+    /* The block is written exactly once and never mutated afterwards, so once
+     * the ready flag is set under the store lock the returned pointer stays
+     * valid with the lock dropped.  The fetch itself talks to the device and
+     * would take that driver's lock, so it happens before taking ours. */
+    drm_lock();
+    int ready = g_edid_ready;
+    drm_unlock();
+    if (ready)
+        return g_edid;
+
+    uint8_t built[128];
+    int done = 0;
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (ops && ops->get_edid) {
+        int n = ops->get_edid(drm_gpu_device(), built, sizeof(built));
+        if (n >= 128 && drm_edid_valid(built))
+            done = 1;
+    }
+    if (!done) {
+        uint32_t w = 1024, h = 768, bpp = 32;
+        if (ops && ops->get_info)
+            (void)ops->get_info(drm_gpu_device(), &w, &h, &bpp);
+        drm_edid_synthesize(built, w, h);
+    }
+
+    drm_lock();
     if (!g_edid_ready) {
-        int done = 0;
-        gpu_dev_ops_t *ops = drm_gpu_ops();
-        if (ops && ops->get_edid) {
-            uint8_t buf[128];
-            int n = ops->get_edid(drm_gpu_device(), buf, sizeof(buf));
-            if (n >= 128 && drm_edid_valid(buf)) {
-                memcpy(g_edid, buf, sizeof(g_edid));
-                done = 1;
-            }
-        }
-        if (!done) {
-            uint32_t w = 1024, h = 768, bpp = 32;
-            if (ops && ops->get_info)
-                (void)ops->get_info(drm_gpu_device(), &w, &h, &bpp);
-            drm_edid_synthesize(g_edid, w, h);
-        }
+        memcpy(g_edid, built, sizeof(g_edid));
+        __sync_synchronize();
         g_edid_ready = 1;
     }
+    drm_unlock();
     return g_edid;
 }
 
@@ -1185,19 +1343,16 @@ static int drm_mode_getresources(drm_context_t *ctx, void *arg)
         (void)ops->get_info(dev, &w, &h, &bpp);
     }
 
-    int nfbs = 0;
-    for (int i = 0; i < DRM_MAX_FBS; i++)
-        if (g_fbs[i].used)
-            nfbs++;
-
     uint32_t fbs[DRM_MAX_FBS];
     uint32_t crtcs[1] = { DRM_CRTC_ID };
     uint32_t conns[1] = { DRM_CONN_ID };
     uint32_t encs[1] = { DRM_ENC_ID };
-    int fi = 0;
+    int nfbs = 0;
+    drm_lock();
     for (int i = 0; i < DRM_MAX_FBS; i++)
         if (g_fbs[i].used)
-            fbs[fi++] = g_fbs[i].fb_id;
+            fbs[nfbs++] = g_fbs[i].fb_id;
+    drm_unlock();
 
     res.count_fbs = (uint32_t)nfbs;
     res.count_crtcs = 1;
@@ -1238,11 +1393,22 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
         struct device *dev = drm_gpu_device();
         (void)ops->get_info(dev, &w, &h, &bpp);
     }
+    uint32_t bound_fb, cx, cy, nconn_state;
+    uint32_t conn_ids[1] = { 0 };
+    drm_lock();
+    bound_fb = g_crtc.fb_id;
+    cx = g_crtc.x;
+    cy = g_crtc.y;
+    nconn_state = g_crtc.count_connectors;
+    if (nconn_state)
+        conn_ids[0] = g_crtc.connector_ids[0];
+    drm_unlock();
+
     c.crtc_id = DRM_CRTC_ID;
     c.gamma_size = 0;
-    c.fb_id = g_crtc.fb_id;
-    c.x = g_crtc.x;
-    c.y = g_crtc.y;
+    c.fb_id = bound_fb;
+    c.x = cx;
+    c.y = cy;
     /* mode_valid means "the CRTC/connector pair has a programmed mode", not
      * "a framebuffer is bound".  The connector is permanently connected here
      * and its mode comes from the device, so this stays 1 even with fb_id 0;
@@ -1253,10 +1419,9 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
     /* Linux has GETCRTC write the CRTC's current connector list back through
      * set_connectors_ptr; libdrm reads count_connectors to size the buffer
      * and the list itself to learn the routing. */
-    c.count_connectors = g_crtc.count_connectors;
+    c.count_connectors = nconn_state;
     if (c.count_connectors && c.set_connectors_ptr &&
-        copy_to_user((void *)(uintptr_t)c.set_connectors_ptr,
-                     g_crtc.connector_ids,
+        copy_to_user((void *)(uintptr_t)c.set_connectors_ptr, conn_ids,
                      (size_t)c.count_connectors * sizeof(uint32_t)) < 0)
         return -EFAULT;
     return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
@@ -1264,6 +1429,7 @@ static int drm_mode_getcrtc(drm_context_t *ctx, void *arg)
 
 static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_crtc c;
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
@@ -1284,32 +1450,48 @@ static int drm_mode_setcrtc(drm_context_t *ctx, void *arg)
     if (c.fb_id == 0) {
         /* fb_id 0 is how Linux detaches the plane, so this is a real state
          * change rather than a no-op. */
+        drm_lock();
         g_crtc.fb_id = 0;
         g_crtc.x = 0;
         g_crtc.y = 0;
         g_crtc.count_connectors = nconns;
         g_crtc.connector_ids[0] = DRM_CONN_ID;
+        drm_unlock();
         return 0;
     }
 
-    drm_fb_t *f = drm_find_fb(c.fb_id);
+    uint32_t gem_handle;
+    drm_lock();
+    drm_fb_t *f = drm_find_fb_locked(c.fb_id);
+    if (f)
+        gem_handle = f->gem_handle;
+    else
+        gem_handle = 0;
+    drm_unlock();
     if (!f)
         return -ENOENT;
-    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
+
+    /* Present with the lock dropped -- it copies a whole framebuffer and talks
+     * to the device -- so the GEM is pinned for the duration. */
+    drm_gem_t *b = drm_gem_pin(gem_handle);
     if (!b)
         return -ENOENT;
     /* The minimal KMS implementation presents by copying into the GPU's
      * primary scanout resource before issuing TRANSFER_TO_HOST_2D.  The CRTC's
      * recorded position is the right one here: Linux treats x/y as CRTC state
      * that SETCRTC sets, so a later page flip has to keep using it. */
-    if (drm_present_buffer_at(b, c.x, c.y) < 0)
+    int rc = drm_present_buffer_at(b, c.x, c.y);
+    drm_gem_unpin(b);
+    if (rc < 0)
         return -EIO;
 
+    drm_lock();
     g_crtc.fb_id = c.fb_id;
     g_crtc.x = c.x;
     g_crtc.y = c.y;
     g_crtc.count_connectors = nconns;
     g_crtc.connector_ids[0] = DRM_CONN_ID;
+    drm_unlock();
     return 0;
 }
 
@@ -1385,8 +1567,12 @@ static int drm_mode_getplane(drm_context_t *ctx, void *arg)
     /* The primary plane is bound exactly when the CRTC has a framebuffer, and
      * it reports that same fb.  Linux clients read this to learn whether their
      * buffer is the one on screen. */
-    p.crtc_id = g_crtc.fb_id ? DRM_CRTC_ID : 0;
-    p.fb_id = g_crtc.fb_id;
+    uint32_t bound_fb;
+    drm_lock();
+    bound_fb = g_crtc.fb_id;
+    drm_unlock();
+    p.crtc_id = bound_fb ? DRM_CRTC_ID : 0;
+    p.fb_id = bound_fb;
     p.possible_crtcs = 1;
     p.gamma_size = 0;
     p.count_format_types = 1;
@@ -1413,59 +1599,76 @@ static int drm_mode_getplaneres(drm_context_t *ctx, void *arg)
 
 static int drm_mode_getfb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_fb_cmd fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
-    drm_fb_t *f = drm_find_fb(fb.fb_id);
-    if (!f)
-        return -ENOENT;
-    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
+    drm_lock();
+    drm_fb_t *f = drm_find_fb_locked(fb.fb_id);
+    drm_gem_t *b = f ? drm_find_gem_locked(f->gem_handle) : NULL;
+    if (b) {
+        fb.width = b->width;
+        fb.height = b->height;
+        fb.pitch = b->pitch;
+        fb.bpp = b->bpp;
+        fb.handle = b->handle;
+    }
+    drm_unlock();
     if (!b)
         return -ENOENT;
-    fb.width = b->width;
-    fb.height = b->height;
-    fb.pitch = b->pitch;
-    fb.bpp = b->bpp;
     fb.depth = 24;
-    fb.handle = b->handle;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_addfb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_fb_cmd fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, fb.handle);
-    if (!b)
+    drm_lock();
+    drm_gem_t *b = drm_find_gem_locked(fb.handle);
+    if (!b) {
+        drm_unlock();
         return -ENOENT;
-    drm_fb_t *f = drm_fb_alloc(b->handle);
+    }
+    drm_fb_t *f = drm_fb_alloc_locked(b->handle);
+    if (f) {
+        b->fb_refs++;
+        fb.fb_id = f->fb_id;
+        fb.pitch = b->pitch;
+        fb.bpp = b->bpp;
+    }
+    drm_unlock();
     if (!f)
         return -ENOMEM;
-    b->fb_refs++;
-    fb.fb_id = f->fb_id;
-    fb.pitch = b->pitch;
-    fb.bpp = b->bpp;
     fb.depth = 24;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_fb_cmd2 fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
     if (fb.handles[0] == 0)
         return -EINVAL;
-    drm_gem_t *b = drm_find_gem(ctx, fb.handles[0]);
-    if (!b)
+    drm_lock();
+    drm_gem_t *b = drm_find_gem_locked(fb.handles[0]);
+    if (!b) {
+        drm_unlock();
         return -ENOENT;
-    drm_fb_t *f = drm_fb_alloc(b->handle);
+    }
+    drm_fb_t *f = drm_fb_alloc_locked(b->handle);
+    if (f) {
+        b->fb_refs++;
+        fb.fb_id = f->fb_id;
+        fb.pitches[0] = b->pitch;
+    }
+    drm_unlock();
     if (!f)
         return -ENOMEM;
-    b->fb_refs++;
-    fb.fb_id = f->fb_id;
-    fb.pitches[0] = b->pitch;
     return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
 }
 
@@ -1488,11 +1691,14 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
      * allocated independently and only coincide while both counters are at the
      * same value, so resolving it as a handle works until it silently presents
      * the wrong buffer.  Go through the framebuffer like SETCRTC does. */
-    drm_fb_t *f = drm_find_fb(pf.fb_id);
+    uint32_t gem_handle, px, py;
+    drm_lock();
+    drm_fb_t *f = drm_find_fb_locked(pf.fb_id);
+    gem_handle = f ? f->gem_handle : 0;
+    px = g_crtc.x;
+    py = g_crtc.y;
+    drm_unlock();
     if (!f)
-        return -ENOENT;
-    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
-    if (!b)
         return -ENOENT;
 
     drm_vblank_init_once();
@@ -1512,9 +1718,21 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
         mutex_unlock(&g_vblank.lock);
     }
 
+    drm_gem_t *b = drm_gem_pin(gem_handle);
+    if (!b) {
+        if (wants_event) {
+            mutex_lock(&g_vblank.lock);
+            g_vblank.flip_pending = 0;
+            g_vblank.flip_ctx = NULL;
+            mutex_unlock(&g_vblank.lock);
+        }
+        return -ENOENT;
+    }
     /* A flip carries no position of its own; it presents at wherever the CRTC
      * was placed, which is the CRTC's recorded x/y. */
-    if (drm_present_buffer_at(b, g_crtc.x, g_crtc.y) < 0) {
+    int rc = drm_present_buffer_at(b, px, py);
+    drm_gem_unpin(b);
+    if (rc < 0) {
         if (wants_event) {
             mutex_lock(&g_vblank.lock);
             g_vblank.flip_pending = 0;
@@ -1527,7 +1745,9 @@ static int drm_mode_pageflip(drm_context_t *ctx, void *arg)
     /* A flip changes which buffer is on screen, so the binding moves with it.
      * Without this the primary plane would keep reporting whatever SETCRTC last
      * bound while the scanout shows a different buffer. */
+    drm_lock();
     g_crtc.fb_id = pf.fb_id;
+    drm_unlock();
 
     if (wants_event) {
         /* Deliver the completion synchronously, exactly as the hardware
@@ -1722,42 +1942,55 @@ static int drm_gem_create(drm_context_t *ctx, void *arg)
     if (c.size == 0)
         return -EINVAL;
 
-    drm_gem_t *g = drm_gem_alloc(c.width, c.height, 0, c.bpp, c.format,
-                                0, c.size);
+    drm_lock();
+    drm_gem_t *g = drm_gem_alloc_locked(c.width, c.height, 0, c.bpp, c.format,
+                                        0, c.size);
+    if (g)
+        c.handle = g->handle;
+    drm_unlock();
     if (!g)
         return -ENOMEM;
-    c.handle = g->handle;
     return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_gem_mmap_ioctl(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_gem_mmap m;
     if (copy_from_user(&m, arg, sizeof(m)) < 0)
         return -EFAULT;
-    drm_gem_t *g = drm_find_gem(ctx, m.handle);
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(m.handle);
+    if (g)
+        m.offset = (uint64_t)g->handle * PAGE_SIZE;
+    drm_unlock();
     if (!g)
         return -ENOENT;
     /* Same encoding as MAP_DUMB, so drm_linux_mmap() serves both. */
-    m.offset = (uint64_t)g->handle * PAGE_SIZE;
     return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_gem_flink(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_gem_flink h;
     if (copy_from_user(&h, arg, sizeof(h)) < 0)
         return -EFAULT;
-    drm_gem_t *g = drm_find_gem(ctx, h.handle);
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(h.handle);
+    if (g) {
+        drm_gem_name_bind_locked(h.name, g->handle);
+        h.handle = g->handle;
+    }
+    drm_unlock();
     if (!g)
         return -ENOENT;
-    drm_gem_name_bind(h.name, g->handle);
-    h.handle = g->handle;
     return copy_to_user(arg, &h, sizeof(h)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_gem_open(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_gem_open o;
     if (copy_from_user(&o, arg, sizeof(o)) < 0)
         return -EFAULT;
@@ -1765,35 +1998,41 @@ static int drm_gem_open(drm_context_t *ctx, void *arg)
     int rc = drm_gem_name_lookup(o.name, &handle);
     if (rc < 0)
         return rc;
-    drm_gem_t *g = drm_find_gem(ctx, handle);
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(handle);
+    if (g)
+        o.size = g->size;
+    drm_unlock();
     if (!g)
         return -ENOENT;
     o.handle = handle;
-    o.size = g->size;
     return copy_to_user(arg, &o, sizeof(o)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_getfb2(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_fb_cmd2 fb;
     if (copy_from_user(&fb, arg, sizeof(fb)) < 0)
         return -EFAULT;
     /* This used to zero the struct and report success, which made every lookup
      * of a real framebuffer look like a lookup of framebuffer 0 with no
      * geometry.  Answer it from the backing GEM like GETFB does. */
-    drm_fb_t *f = drm_find_fb(fb.fb_id);
-    if (!f)
-        return -ENOENT;
-    drm_gem_t *b = drm_find_gem(ctx, f->gem_handle);
+    drm_lock();
+    drm_fb_t *f = drm_find_fb_locked(fb.fb_id);
+    drm_gem_t *b = f ? drm_find_gem_locked(f->gem_handle) : NULL;
+    memset(&fb, 0, sizeof(fb));
+    if (b) {
+        fb.fb_id = f->fb_id;
+        fb.width = b->width;
+        fb.height = b->height;
+        fb.pixel_format = b->format;
+        fb.pitches[0] = b->pitch;
+        fb.handles[0] = b->handle;
+    }
+    drm_unlock();
     if (!b)
         return -ENOENT;
-    memset(&fb, 0, sizeof(fb));
-    fb.fb_id = f->fb_id;
-    fb.width = b->width;
-    fb.height = b->height;
-    fb.pixel_format = b->format;
-    fb.pitches[0] = b->pitch;
-    fb.handles[0] = b->handle;
     /* One GEM object, linear layout, no modifier.  ADDFB2 does not accept a
      * modifier today, so reporting one here would be a lie; leave it 0. */
     fb.modifier[0] = 0;
@@ -1814,12 +2053,15 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
     uint32_t pitch = ((d.width * d.bpp + 7) / 8 + 63) & ~63u;
     uint64_t size = (uint64_t)pitch * d.height;
 
-    drm_gem_t *b = drm_gem_alloc(d.width, d.height, pitch, d.bpp, 0,
-                                DRM_BO_USE_LINEAR, size);
+    drm_lock();
+    drm_gem_t *b = drm_gem_alloc_locked(d.width, d.height, pitch, d.bpp, 0,
+                                        DRM_BO_USE_LINEAR, size);
+    if (b)
+        d.handle = b->handle;
+    drm_unlock();
     if (!b)
         return -ENOMEM;
 
-    d.handle = b->handle;
     d.pitch = pitch;
     d.size = size;
     return copy_to_user(arg, &d, sizeof(d)) < 0 ? -EFAULT : 0;
@@ -1827,50 +2069,65 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
 
 static int drm_mode_map_dumb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_map_dumb m;
     if (copy_from_user(&m, arg, sizeof(m)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, m.handle);
+    drm_lock();
+    drm_gem_t *b = drm_find_gem_locked(m.handle);
+    if (b)
+        m.offset = (uint64_t)b->handle * PAGE_SIZE;
+    drm_unlock();
     if (!b)
         return -ENOENT;
     /* The Linux DRM ABI uses the fake offset handed back here as the
      * argument of a later mmap(fd, ...) call.  Return a page-aligned fake
      * offset derived from the handle; drm_linux_mmap() maps the buffer VMO
      * when the process calls mmap on /dev/dri/card0 with that offset. */
-    m.offset = (uint64_t)b->handle * PAGE_SIZE;
     return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_mode_destroy_dumb(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_mode_destroy_dumb d;
     if (copy_from_user(&d, arg, sizeof(d)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, d.handle);
-    if (!b)
+    drm_lock();
+    int found = drm_find_gem_locked(d.handle) != NULL;
+    drm_unlock();
+    if (!found)
         return -ENOENT;
-    drm_free_gem(ctx, b);
+    drm_free_gem(d.handle);
     return 0;
 }
 
 static int drm_gem_close(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_gem_close c;
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, c.handle);
-    if (!b)
+    drm_lock();
+    int found = drm_find_gem_locked(c.handle) != NULL;
+    drm_unlock();
+    if (!found)
         return -ENOENT;
-    drm_free_gem(ctx, b);
+    drm_free_gem(c.handle);
     return 0;
 }
 
 static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_prime_handle p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
-    drm_gem_t *b = drm_find_gem(ctx, p.handle);
+    drm_lock();
+    drm_gem_t *b = drm_find_gem_locked(p.handle);
+    uint64_t bsize = b ? b->size : 0;
+    struct vmo *bvmo = b ? b->vmo : NULL;
+    drm_unlock();
     if (!b)
         return -ENOENT;
 
@@ -1878,33 +2135,87 @@ static int drm_prime_handle_to_fd(drm_context_t *ctx, void *arg)
     if (mfd < 0)
         return mfd;
 
-    void *snap = kmalloc(b->size);
+    void *snap = kmalloc(bsize);
     if (!snap) {
         vfs_close(mfd);
         return -ENOMEM;
     }
-    for (uint32_t i = 0; i < (b->size + PAGE_SIZE - 1) / PAGE_SIZE; i++) {
+    for (uint32_t i = 0; i < (bsize + PAGE_SIZE - 1) / PAGE_SIZE; i++) {
         pfn_t pfn;
         uint64_t dst = (uint64_t)i * PAGE_SIZE;
         size_t n = PAGE_SIZE;
-        if (dst + n > b->size)
-            n = b->size - dst;
-        if (vmo_get_page_charged(b->vmo, i, NULL, &pfn) == 0)
+        if (dst + n > bsize)
+            n = bsize - dst;
+        if (vmo_get_page_charged(bvmo, i, NULL, &pfn) == 0)
             memcpy((uint8_t *)snap + dst, pfn_to_virt(pfn), n);
         else
             memset((uint8_t *)snap + dst, 0, n);
     }
-    int r = memfd_set_contents(mfd, snap, b->size);
+    int r = memfd_set_contents(mfd, snap, bsize);
     kfree(snap);
     if (r < 0) {
         vfs_close(mfd);
         return r;
     }
 
-    if (g_prime_count < DRM_PRIME_MAX) {
-        g_prime_fd[g_prime_count] = mfd;
-        g_prime_handle[g_prime_count] = b->handle;
-        g_prime_count++;
+    uint64_t id = drm_fd_identity(mfd);
+    if (!id) {
+        vfs_close(mfd);
+        return -EIO;
+    }
+
+    /* Evict exports the user no longer holds before deciding the table is
+     * full.  Liveness is resolved with the lock dropped, then the sweep only
+     * touches entries whose (fd, identity) still matches what was probed, so a
+     * concurrent re-export cannot be mistaken for a dead one. */
+    int probe[DRM_PRIME_MAX][2];
+    int nprobe = 0;
+    drm_lock();
+    for (int i = 0; i < g_prime_count && i < DRM_PRIME_MAX; i++) {
+        probe[nprobe][0] = g_prime[i].fd;
+        probe[nprobe][1] = 0;
+        nprobe++;
+    }
+    drm_unlock();
+    for (int i = 0; i < nprobe; i++)
+        probe[i][1] = (int)drm_fd_identity(probe[i][0]);
+
+    drm_lock();
+    for (int i = 0; i < nprobe; ) {
+        int dead = 0;
+        for (int j = 0; j < nprobe; j++) {
+            if (probe[j][0] == g_prime[i].fd) {
+                dead = (uint64_t)probe[j][1] != g_prime[i].identity;
+                break;
+            }
+        }
+        if (dead) {
+            g_prime[i] = g_prime[--g_prime_count];
+            continue;
+        }
+        i++;
+    }
+    int slot = -1;
+    for (int i = 0; i < g_prime_count; i++)
+        if (g_prime[i].fd == mfd && g_prime[i].identity == id) {
+            slot = i;
+            break;
+        }
+    if (slot < 0 && g_prime_count < DRM_PRIME_MAX)
+        slot = g_prime_count++;
+    if (slot >= 0) {
+        g_prime[slot].fd = mfd;
+        g_prime[slot].identity = id;
+        g_prime[slot].handle = p.handle;
+    }
+    drm_unlock();
+
+    /* An fd that is not in the table can never be imported, so failing here is
+     * the only honest outcome; returning it anyway would surface much later as
+     * an unexplained ENOENT from PRIME_FD_TO_HANDLE. */
+    if (slot < 0) {
+        vfs_close(mfd);
+        return -EMFILE;
     }
 
     p.fd = mfd;
@@ -1917,13 +2228,26 @@ static int drm_prime_fd_to_handle(drm_context_t *ctx, void *arg)
     struct drm_prime_handle p;
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
+
+    uint64_t id = drm_fd_identity(p.fd);
+    if (!id)
+        return -EBADF;
+
+    uint32_t handle = 0;
+    int found = 0;
+    drm_lock();
     for (int i = 0; i < g_prime_count; i++) {
-        if (g_prime_fd[i] == p.fd) {
-            p.handle = g_prime_handle[i];
-            return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+        if (g_prime[i].identity == id) {
+            handle = g_prime[i].handle;
+            found = 1;
+            break;
         }
     }
-    return -ENOENT;
+    drm_unlock();
+    if (!found)
+        return -ENOENT;
+    p.handle = handle;
+    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
 }
 
 /* ---- virtio-gpu 3D (DRM_IOCTL_VIRTGPU_*) ------------------------------- */
@@ -1940,9 +2264,11 @@ static int drm_virtgpu_ensure_ctx(drm_context_t *ctx)
     if (!ops || !ops->ctx_create || !ops->ctx_destroy)
         return -ENODEV;
 
+    drm_lock();
     uint32_t id = g_virtgpu_next_res++;
     if (id == 0)
         id = g_virtgpu_next_res++;
+    drm_unlock();
     int rc = ops->ctx_create(drm_gpu_device(), id, 1, "a20-drm", 7);
     if (rc < 0)
         return rc;
@@ -2084,6 +2410,7 @@ static int drm_gem_attach_backing(drm_gem_t *g)
 {
     if (!g->vmo || g->size == 0)
         return -EINVAL;
+    uint32_t res_id = g->virgl_res_id;
 
     gpu_dev_ops_t *ops = drm_gpu_ops();
     if (!ops || !ops->resource_attach_backing)
@@ -2097,31 +2424,35 @@ static int drm_gem_attach_backing(drm_gem_t *g)
     if (!entries)
         return -ENOMEM;
 
-    uint32_t n = 0;
+    /* The host places entry n at offset n * PAGE_SIZE, so an entry list with a
+     * hole in it maps the wrong frames: if page 3 of 8 cannot be materialised
+     * and the survivors are compacted, entry 3 becomes page 4's frame and the
+     * renderer draws into a buffer it was never given, with no error anywhere.
+     * A partial set is therefore a failure, not something to publish. */
+    int rc = 0;
     for (uint32_t i = 0; i < npages; i++) {
         pfn_t pfn = PFN_NONE;
-        if (vmo_get_page_charged(g->vmo, i, NULL, &pfn) < 0)
-            continue;
+        if (vmo_get_page_charged(g->vmo, i, NULL, &pfn) < 0) {
+            rc = -ENOMEM;
+            break;
+        }
         uint64_t off = (uint64_t)i * PAGE_SIZE;
         uint64_t len = g->size - off;
         if (len > PAGE_SIZE)
             len = PAGE_SIZE;
-        entries[n].addr = (uint64_t)pfn_to_phys(pfn);
-        entries[n].length = (uint32_t)len;
-        entries[n].padding = 0;
-        n++;
+        entries[i].addr = (uint64_t)pfn_to_phys(pfn);
+        entries[i].length = (uint32_t)len;
+        entries[i].padding = 0;
     }
-
-    int rc = 0;
-    if (n == 0) {
-        rc = -ENOMEM;
-    } else {
-        rc = ops->resource_attach_backing(drm_gpu_device(), g->virgl_res_id,
-                                          entries, n);
-        if (rc == 0)
-            g->backing_attached = 1;
-    }
+    if (rc == 0)
+        rc = ops->resource_attach_backing(drm_gpu_device(), res_id, entries,
+                                          npages);
     kfree(entries);
+    if (rc == 0) {
+        drm_lock();
+        g->backing_attached = 1;
+        drm_unlock();
+    }
     return rc;
 }
 
@@ -2137,51 +2468,76 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
     if (cid < 0)
         return cid;
 
-    drm_gem_t *g = drm_find_gem(ctx, r.bo_handle);
+    drm_gem_t *g = drm_gem_pin(r.bo_handle);
     if (!g)
         return -ENOENT;
 
     gpu_dev_ops_t *ops = drm_gpu_ops();
-    if (!ops || !ops->resource_create_3d)
+    if (!ops || !ops->resource_create_3d) {
+        drm_gem_unpin(g);
         return -ENODEV;
+    }
 
+    drm_lock();
     uint32_t res_id = g_virtgpu_next_res++;
     if (res_id == 0)
         res_id = g_virtgpu_next_res++;
+    drm_unlock();
 
     int rc = ops->resource_create_3d(drm_gpu_device(), (uint32_t)cid, res_id,
                                      r.target, r.format, r.bind, r.width,
                                      r.height, r.depth, r.array_size,
                                      r.last_level, r.nr_samples, r.flags);
-    if (rc < 0)
+    if (rc < 0) {
+        drm_gem_unpin(g);
         return rc;
+    }
 
+    /* Promoting a buffer that is already a resource replaces the old one, so
+     * the previous host resource has to be released here -- overwriting
+     * virgl_res_id alone leaks it on the host for the life of the guest. */
+    drm_lock();
+    uint32_t old_res = g->is_virgl ? g->virgl_res_id : 0;
     g->virgl_res_id = res_id;
     g->is_virgl = 1;
+    g->backing_attached = 0;
+    drm_unlock();
+    if (old_res && old_res != res_id && ops->resource_unref)
+        ops->resource_unref(drm_gpu_device(), old_res);
 
     rc = drm_gem_attach_backing(g);
     if (rc < 0) {
         if (ops->resource_unref)
             ops->resource_unref(drm_gpu_device(), res_id);
+        drm_lock();
         g->is_virgl = 0;
         g->virgl_res_id = 0;
+        drm_unlock();
+        drm_gem_unpin(g);
         return rc;
     }
 
+    drm_gem_unpin(g);
     r.res_handle = res_id;
     return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
 }
 
 static int drm_virtgpu_resource_info(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_virtgpu_resource_info i;
     if (copy_from_user(&i, arg, sizeof(i)) < 0)
         return -EFAULT;
-    drm_gem_t *g = drm_find_gem(ctx, i.bo_handle);
-    if (!g || !g->is_virgl)
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(i.bo_handle);
+    int found = g && g->is_virgl;
+    if (found) {
+        i.res_handle = g->virgl_res_id;
+        i.size = (uint32_t)g->size;
+    }
+    drm_unlock();
+    if (!found)
         return -ENOENT;
-    i.res_handle = g->virgl_res_id;
-    i.size = (uint32_t)g->size;
     i.blob_mem = 0;
     return copy_to_user(arg, &i, sizeof(i)) < 0 ? -EFAULT : 0;
 }
@@ -2225,17 +2581,25 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
             return -EFAULT;
         }
         for (uint32_t i = 0; i < e.num_bo_handles; i++) {
-            drm_gem_t *g = drm_find_gem(ctx, handles[i]);
-            if (!g || !g->is_virgl) {
+            drm_gem_t *g = drm_gem_pin(handles[i]);
+            if (!g) {
                 kfree(handles);
                 return -ENOENT;
             }
-            if (!g->backing_attached) {
-                rc = drm_gem_attach_backing(g);
-                if (rc < 0) {
-                    kfree(handles);
-                    return rc;
-                }
+            drm_lock();
+            int usable = g->is_virgl;
+            int attached = g->backing_attached;
+            drm_unlock();
+            if (!usable) {
+                drm_gem_unpin(g);
+                kfree(handles);
+                return -ENOENT;
+            }
+            rc = attached ? 0 : drm_gem_attach_backing(g);
+            drm_gem_unpin(g);
+            if (rc < 0) {
+                kfree(handles);
+                return rc;
             }
         }
         kfree(handles);
@@ -2269,21 +2633,26 @@ static int drm_virtgpu_wait(drm_context_t *ctx, void *arg)
      * anything outstanding to block on.  Validating the handle still matters:
      * a blind success turns a caller that is waiting on the wrong resource
      * into a race that only shows up as corrupted pixels much later. */
-    drm_gem_t *g = drm_find_gem(ctx, w.handle);
-    if (!g || !g->is_virgl)
-        return -ENOENT;
-    return 0;
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(w.handle);
+    int found = g && g->is_virgl;
+    drm_unlock();
+    return found ? 0 : -ENOENT;
 }
 
 static int drm_virtgpu_map(drm_context_t *ctx, void *arg)
 {
+    (void)ctx;
     struct drm_virtgpu_map m;
     if (copy_from_user(&m, arg, sizeof(m)) < 0)
         return -EFAULT;
-    drm_gem_t *g = drm_find_gem(ctx, m.handle);
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(m.handle);
+    if (g)
+        m.offset = (uint64_t)g->handle * PAGE_SIZE;
+    drm_unlock();
     if (!g)
         return -ENOENT;
-    m.offset = (uint64_t)g->handle * PAGE_SIZE;
     return copy_to_user(arg, &m, sizeof(m)) < 0 ? -EFAULT : 0;
 }
 
@@ -2327,11 +2696,15 @@ static int drm_virtgpu_context_init(drm_context_t *ctx, void *arg)
 
 static int drm_virtgpu_transfer(drm_context_t *ctx, void *arg, int to_host)
 {
+    (void)ctx;
     struct drm_virtgpu_3d_transfer t;
     if (copy_from_user(&t, arg, sizeof(t)) < 0)
         return -EFAULT;
-    drm_gem_t *g = drm_find_gem(ctx, t.bo_handle);
-    if (!g || !g->is_virgl)
+    drm_lock();
+    drm_gem_t *g = drm_find_gem_locked(t.bo_handle);
+    int found = g && g->is_virgl;
+    drm_unlock();
+    if (!found)
         return -ENOENT;
 
     /* Transfers are driven by the host as part of rendering; with a
@@ -2453,6 +2826,18 @@ static int drm_close(vfile_t *vf)
             g_vblank.flip_ctx = NULL;
         }
         mutex_unlock(&g_vblank.lock);
+
+        /* Releasing g_vblank.lock first is deliberate: g_drm.lock is documented
+         * as never held together with it, and this is the one path that needs
+         * both.  g_vblank.flip_ctx can no longer name this context here, so no
+         * queued event can be delivered into freed storage. */
+        uint32_t cid = ctx->virtgpu_ctx_created ? ctx->virtgpu_ctx_id : 0;
+        ctx->virtgpu_ctx_created = 0;
+        if (cid) {
+            gpu_dev_ops_t *ops = drm_gpu_ops();
+            if (ops && ops->ctx_destroy)
+                ops->ctx_destroy(drm_gpu_device(), cid);
+        }
         kfree(ctx);
         vf->priv = NULL;
     }
@@ -2636,24 +3021,25 @@ int64_t drm_linux_mmap(vfile_t *vf, uint64_t addr, size_t len, int prot,
     if (!ctx)
         return -EBADF;
 
-    drm_gem_t *b = drm_find_gem(ctx, (uint32_t)(off / PAGE_SIZE));
+    drm_gem_t *b = drm_gem_pin((uint32_t)(off / PAGE_SIZE));
     if (!b)
         return -ENOENT;
 
     task_t *t = proc_current();
-    if (!t || !t->mm)
+    if (!t || !t->mm) {
+        drm_gem_unpin(b);
         return -EFAULT;
+    }
 
     size_t map_len = ROUND_UP(len, PAGE_SIZE);
-    if (map_len == 0) {
-        return -EINVAL;
-    }
-    if (map_len > b->size) {
+    if (map_len == 0 || map_len > b->size) {
+        drm_gem_unpin(b);
         return -EINVAL;
     }
 
     uint64_t map_addr = mm_mmap_vmo(t->mm, addr, map_len, prot, flags,
                                     b->vmo, 0);
+    drm_gem_unpin(b);
     if (map_addr == 0 || mm_addr_is_error((vaddr_t)map_addr)) {
         return -ENOMEM;
     }
