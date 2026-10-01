@@ -706,6 +706,8 @@ static driver_t starfive_gmac_driver = {
     .name       = "starfive-gmac",
     .id_table   = starfive_gmac_ids,
     .bus        = &platform_bus,
+    /* jh7110.dtsi: gmac0/gmac1 "starfive,jh7110-dwmac" */
+    .of_compatible = "starfive,jh7110-dwmac",
     .probe      = starfive_gmac_driver_probe,
     .remove     = starfive_gmac_driver_remove,
     .class_ops  = &starfive_gmac_net_ops,
