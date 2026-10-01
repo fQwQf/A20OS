@@ -224,6 +224,13 @@ static void vf2_reboot(void) {
 }
 
 static void vf2_enumerate_devices(void) {
+    /* The firmware's tree already names the SDIO and GMAC with the base, size and
+     * IRQ each actually has, so read it from there.  The table below stays as the
+     * fallback: this is the board's only storage path, and no VF2 has been
+     * powered to learn whether the firmware always passes a tree. */
+    if (riscv64_fdt_enumerate_platform_devices() > 0)
+        return;
+
     extern int platform_device_register(platform_device_t *pdev);
     static platform_device_t sdio_dev;
     static resource_t sdio_res[1];

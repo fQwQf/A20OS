@@ -32,6 +32,9 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 void riscv64_memory_init(void);
 int riscv64_fdt_has_isa_extension(const char *extension);
 uint64_t riscv64_fdt_timebase_freq(void);
+/* Returns how many platform devices the tree yielded, so a board can tell an
+ * absent tree from a tree that simply describes nothing it has a driver for. */
+int riscv64_fdt_enumerate_platform_devices(void);
 
 #if !(defined(CONFIG_BOARD_LICHEERV_NANO) || defined(CONFIG_BOARD_MILK_V_DUO))
 /* MMIO base addresses.  The SophGo boards supply their own UART0_BASE,
