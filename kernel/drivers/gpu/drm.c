@@ -2416,28 +2416,38 @@ static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
     return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
 }
 
-/* The host addresses capsets by index, but CONTEXT_INIT names one by id, and
- * the two are not interchangeable (index 0 is capset 1, index 1 is capset 2).
- * Resolving through the host's own GET_CAPSET_INFO table is what makes the
- * client's choice mean something; assuming index == id would silently hand
- * back a different protocol than the one that was asked for. */
-static uint32_t drm_virtgpu_capset_index(drm_context_t *ctx)
+/* Which capset GET_CAPS should ask for.
+ *
+ * GET_CAPS is addressed by capset *id*; only GET_CAPSET_INFO is indexed.  The
+ * id is not the index: id 1 (VIRGL) is index 0, id 2 (VIRGL2) is index 1, and
+ * the ids are sparse -- Venus is 4 and DRM is 6.  Sending the index where the
+ * id belongs asks the host for a capset that does not exist, which comes back as
+ * VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER and was previously misread as "this host
+ * cannot build a GL context".
+ *
+ * A client that never called CONTEXT_INIT gets capset 1, which is the GL 1.x/2.x
+ * protocol every virgl implementation has and the one Linux defaults to.  A
+ * client that did name one is honoured only if the host advertises it, so a
+ * stale id degrades to the default instead of failing the attach. */
+static uint32_t drm_virtgpu_capset_id(drm_context_t *ctx)
 {
-    if (!ctx->virtgpu_capset_id)
-        return 0;
+    uint32_t want = ctx->virtgpu_capset_id;
+    if (!want)
+        return VIRTIO_GPU_CAPSET_VIRGL;
+
     gpu_dev_ops_t *ops = drm_gpu_ops();
     if (!ops || !ops->capset_info)
-        return 0;
+        return VIRTIO_GPU_CAPSET_VIRGL;
     for (uint32_t idx = 0; idx < 16; idx++) {
         uint32_t id = 0, ver = 0, size = 0;
         if (ops->capset_info(drm_gpu_device(), idx, &id, &ver, &size) < 0)
             break;
-        if (id == ctx->virtgpu_capset_id)
-            return idx;
+        if (id == want)
+            return want;
     }
-    kinfo("[GPU] virtgpu: capset id %u not advertised by the host\n",
-          ctx->virtgpu_capset_id);
-    return 0;
+    kinfo("[GPU] virtgpu: capset id %u not advertised by the host, using %u\n",
+          want, VIRTIO_GPU_CAPSET_VIRGL);
+    return VIRTIO_GPU_CAPSET_VIRGL;
 }
 
 static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
@@ -2465,8 +2475,8 @@ static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
     if (!blob)
         return -ENOMEM;
     size_t got = 0;
-    uint32_t index = drm_virtgpu_capset_index(ctx);
-    int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, index,
+    uint32_t capset = drm_virtgpu_capset_id(ctx);
+    int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, capset,
                              c.cap_set_ver, blob, c.size, &got);
     if (rc < 0) {
         kfree(blob);
