@@ -779,11 +779,18 @@ ifeq ($(ARCH),x86_64)
 CFLAGS += -DCONFIG_IOPORT -DCONFIG_AHCI \
           -DCONFIG_PCI_MMIO_BASE_LEGACY
 endif
+# Boards whose SoC has no PCIe root complex must leave the MMIO-allocation
+# window undefined, not defined-as-zero: pci_bus.c would otherwise map physical
+# address 0 as a device window.  The SophGo SG2000/CV1800B boards are the
+# first RISC-V targets in the tree without PCIe.
+A20OS_NO_PCIE_BOARDS := licheerv-nano milk-v-duo
+ifeq ($(filter $(BOARD),$(A20OS_NO_PCIE_BOARDS)),)
 ifneq ($(filter x86_64 loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_ALLOC
 endif
 ifneq ($(filter loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
+endif
 endif
 ifeq ($(ARCH),aarch64)
 CFLAGS += -DCONFIG_TRAP_ESR_DIAG

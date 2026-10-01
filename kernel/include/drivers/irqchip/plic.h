@@ -18,6 +18,11 @@
  * board_config_t::irqchip to &plic_irqchip_ops.
  */
 
+/* 32-bit words in one hart's enable block; each covers 32 interrupts, so
+ * interrupt N is bit N%32 of word N/32.  Exposed because the arch trap path
+ * programs the same register. */
+#define PLIC_ENABLE_WORDS 32U
+
 /* Returns the hardware hart id of the calling hart.  Supplied by the board
  * because riscv64 exposes arch_cpu_hart_id() while riscv32 does not. */
 typedef uint64_t (*plic_hart_id_fn)(void);
