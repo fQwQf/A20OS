@@ -171,6 +171,12 @@ smoke-mm-fork-exec-race:
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 
+smoke-vfs-stress-smp2:
+	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp2
+
+smoke-vfs-stress-smp8:
+	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp8
+
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
