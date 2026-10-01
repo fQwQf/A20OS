@@ -715,8 +715,37 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
         if (deadline && clock_get_ticks() >= deadline)
             break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current())
-            proc_yield();
+        /* Parked on inst->waiters rather than spinning: a virgl submit that
+         * takes longer than one 20 ms chunk would otherwise keep a vCPU busy
+         * while holding command_lock, starving the host backend thread that
+         * has to consume this very descriptor.  Bounded chunks keep a lost
+         * completion interrupt from parking forever. */
+        if ((spins & 0xffffU) == 0 && proc_current()) {
+            if (inst->irq_registered && deadline) {
+                uint64_t now = clock_get_ticks();
+                if (now < deadline) {
+                    uint64_t chunk = now + MS_TO_TICKS(20);
+                    if (chunk > deadline) chunk = deadline;
+                    proc_wait_token_t token =
+                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+                    wait_queue_entry_t entry = {0};
+                    wait_queue_link(&inst->waiters, &entry, token, 0);
+                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+                    if (used->idx != used_before) {
+                        wait_queue_unlink(&inst->waiters, &entry);
+                        (void)proc_park_cancel(token);
+                        proc_park_finish(token);
+                        completed = 1;
+                        break;
+                    }
+                    (void)proc_park_commit(token);
+                    wait_queue_unlink(&inst->waiters, &entry);
+                    proc_park_finish(token);
+                }
+            } else {
+                proc_yield();
+            }
+        }
     }
     if (!completed) {
         mutex_unlock(&inst->command_lock);
@@ -775,16 +804,28 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
 
     size_t body = sizeof(struct virtio_gpu_resource_attach_backing) +
                   (size_t)nr_entries * sizeof(struct virtio_gpu_mem_entry);
+
+    /* command_lock has to cover every access to the shared big_req staging
+     * buffer, not only the descriptor/avail work below.  big_req is a single
+     * buffer for the whole instance and virtio_gpu_send_cmd_big() and
+     * virtio_gpu_submit_3d() grow, free and refill it under this same lock;
+     * ATTACH_BACKING arrives once per DRM_IOCTL_VIRTGPU_EXECBUFFER buffer, so
+     * two clients reach this point concurrently.  Growing and filling the body
+     * before the lock let a second caller kfree() the buffer underneath the
+     * first caller's memcpy, and let two mem_entry tables land in one request
+     * body that a single descriptor then advertises to the device. */
+    mutex_lock(&inst->command_lock);
     if (body > inst->big_req_cap) {
         uint8_t *nb = kmalloc(body);
-        if (!nb)
-            return -ENOMEM;
+        if (!nb) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
         if (inst->big_req)
             kfree(inst->big_req);
         inst->big_req = nb;
         inst->big_req_cap = body;
     }
 
+    /* Body filled after the resize so the s0 descriptor below never advertises
+     * the pointer kfree() just dropped. */
     struct virtio_gpu_resource_attach_backing *hdr =
         (struct virtio_gpu_resource_attach_backing *)inst->big_req;
     memset(hdr, 0, sizeof(*hdr));
@@ -795,7 +836,6 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
            (size_t)nr_entries * sizeof(*entries));
     arch_dma_sync_for_device(inst->big_req, body);
 
-    mutex_lock(&inst->command_lock);
     if (inst->big_resp_cap < sizeof(struct virtio_gpu_ctrl_hdr)) {
         uint8_t *nb = kmalloc(sizeof(struct virtio_gpu_ctrl_hdr));
         if (!nb) { mutex_unlock(&inst->command_lock); return -ENOMEM; }
@@ -831,14 +871,47 @@ static int virtio_gpu_resource_attach_backing(virtio_gpu_inst_t *inst,
     mb();
 
     volatile virtq_used_t *used = &inst->used;
+    uint64_t start = clock_get_ticks();
+    uint64_t frequency = clock_ticks_per_sec();
+    uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
     int completed = 0;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) { completed = 1; break; }
+        /* Same one-second bound the other completion loops use: an absent
+         * deadline let a device that never returns this entry spin the full
+         * 100M iterations with command_lock held, blocking every later
+         * command outright instead of failing the call. */
+        if (deadline && clock_get_ticks() >= deadline)
+            break;
         arch_cpu_relax();
-        if ((spins & 0xffffU) == 0 && proc_current())
-            proc_yield();
+        if ((spins & 0xffffU) == 0 && proc_current()) {
+            if (inst->irq_registered && deadline) {
+                uint64_t now = clock_get_ticks();
+                if (now < deadline) {
+                    uint64_t chunk = now + MS_TO_TICKS(20);
+                    if (chunk > deadline) chunk = deadline;
+                    proc_wait_token_t token =
+                        proc_park_prepare(PROC_WAIT_UNINTERRUPTIBLE, chunk);
+                    wait_queue_entry_t entry = {0};
+                    wait_queue_link(&inst->waiters, &entry, token, 0);
+                    arch_dma_sync_for_cpu((void *)used, sizeof(*used));
+                    if (used->idx != used_before) {
+                        wait_queue_unlink(&inst->waiters, &entry);
+                        (void)proc_park_cancel(token);
+                        proc_park_finish(token);
+                        completed = 1;
+                        break;
+                    }
+                    (void)proc_park_commit(token);
+                    wait_queue_unlink(&inst->waiters, &entry);
+                    proc_park_finish(token);
+                }
+            } else {
+                proc_yield();
+            }
+        }
     }
     if (!completed) {
         mutex_unlock(&inst->command_lock);
