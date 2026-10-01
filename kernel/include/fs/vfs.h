@@ -213,6 +213,13 @@ typedef struct vnode {
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
     struct page_cache_page *cache_dirty_tail;
+    /* Serializes buffered writes against each other so size/offset updates
+     * and page-cache insertion stay consistent for one file.  Per-vnode on
+     * purpose: the previous fixed array of 64 hash-bucket mutexes made any
+     * two hash-colliding unrelated files block each other.  Lifetime is the
+     * vnode itself — an in-progress writer holds a vnode reference through
+     * its open vfile, so the lock cannot be freed under a waiter. */
+    mutex_t         write_lock;
     /* Number of live MAP_SHARED file VMAs backing this vnode.  The VFS read
      * and fsync paths use this to skip the global dirty-bit harvest scan
      * entirely when the vnode has no shared file mappings.  Updated with
