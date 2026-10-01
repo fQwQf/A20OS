@@ -1,6 +1,7 @@
 #include "mm/slab.h"
 #include "mm/frame.h"
 #include "mm/oom.h"
+#include "core/cpu.h"
 #include "core/lock.h"
 #include "core/string.h"
 #include "core/panic.h"
@@ -75,6 +76,28 @@ typedef struct {
 } slab_cache_t;
 
 static slab_cache_t caches[SLAB_NR_CACHES];
+
+/* Per-CPU object arrays, mirroring the frame allocator's CPU page batch:
+ * a hit satisfies kmalloc/kfree with only local IRQ exclusion, and the
+ * cache lock is taken once per refill/drain instead of once per object.
+ * Hoarding is bounded: SLAB_CPU_ARRAY_CAP objects per (cache, cpu). */
+#define SLAB_CPU_ARRAY_CAP 16
+#define SLAB_CPU_REFILL    8
+typedef struct {
+    void    *objs[SLAB_CPU_ARRAY_CAP];
+    uint16_t count;
+    uint16_t _pad;
+} __attribute__((aligned(64))) slab_cpu_array_t;
+
+static slab_cpu_array_t g_slab_cpu[SLAB_NR_CACHES][CONFIG_NR_CPUS];
+
+static inline slab_cpu_array_t *slab_cpu_array(int idx)
+{
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        cpu = 0;
+    return &g_slab_cpu[idx][cpu];
+}
 
 static int slab_popcount64(uint64_t bits) {
     return __builtin_popcountll(bits);
@@ -248,34 +271,10 @@ static __attribute__((unused)) void slab_validate_sp(slab_page_t *sp, const char
     }
 }
 
-void *kmalloc_flags(size_t size, int can_reclaim) {
-    if (size == 0) return NULL;
-
-    if (size >= SLAB_MAX_OBJ) {
-        int order = 0;
-        size_t need = ROUND_UP(size + sizeof(big_alloc_hdr_t) + 8, PAGE_SIZE);
-        while ((1u << order) * PAGE_SIZE < need) order++;
-        if (order > MAX_ORDER) return NULL;
-        pfn_t pfn = pfa_alloc_flags(order, can_reclaim);
-        if (pfn == PFN_NONE)
-            return NULL;
-        big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)pfn_to_virt(pfn);
-        hdr->magic = BIG_MAGIC;
-        hdr->order = (uint16_t)order;
-        hdr->_pad  = 0;
-        hdr->reserved = 0;
-        uint64_t *canary = (uint64_t *)((uint8_t *)(hdr + 1) +
-                                        ((size_t)1 << order) * PAGE_SIZE -
-                                        sizeof(big_alloc_hdr_t) - 8);
-        *canary = BIG_CANARY;
-        return (void *)(hdr + 1);
-    }
-
-    int idx = 0;
-    while (idx < SLAB_NR_CACHES - 1 && slab_sizes[idx] < size) idx++;
-
+/* Allocate one object from the cache's partial/space lists.  Caller holds
+ * c->lock.  Returns NULL only when a new slab page cannot be grown. */
+static void *slab_alloc_obj_locked(int idx) {
     slab_cache_t *c = &caches[idx];
-    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
     slab_page_t *sp = c->partial;
 
     /* Self-heal stale partial list entries that are already full. */
@@ -289,12 +288,8 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
         sp = slab_spare_pop(c);
         if (!sp) {
             sp = slab_grow(idx);
-            if (!sp) {
-                spin_unlock_irqrestore(&c->lock, irq_flags);
-                if (can_reclaim)
-                    oom_try_reclaim();
+            if (!sp)
                 return NULL;
-            }
         }
         sp->state = SLAB_STATE_PARTIAL;
         slab_list_push(&c->partial, sp);
@@ -343,7 +338,150 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
         slab_list_push(&c->full, sp);
     }
 
+    return obj;
+}
+
+/* Free one object back to its slab.  Caller holds the cache lock named by
+ * the slab's own cache_idx (validated here).  Carries the same corruption
+ * diagnostics as the historic kfree body. */
+static void slab_free_obj_locked(void *ptr, uintptr_t caller_ra) {
+    slab_page_t *sp = (slab_page_t *)((uintptr_t)ptr & ~(PAGE_SIZE - 1));
+    uintptr_t offset = (uintptr_t)ptr - (uintptr_t)sp;
+    int idx = sp->cache_idx;
+    slab_cache_t *c = &caches[idx];
+
+    if (!slab_page_valid(sp) || sp->cache_idx != idx) {
+        uint8_t actual_idx = sp->cache_idx;
+        printf("[SLAB BUG] kfree(%p): stale slab page sp=%p cache_idx=%u expected=%d ra=0x%lx\n",
+               ptr, (void *)sp, actual_idx, idx, (unsigned long)caller_ra);
+        panic("kfree: stale slab page");
+    }
+    if (offset < SLAB_HDR_SIZE) {
+        uint8_t cache_idx = sp->cache_idx;
+        printf("[SLAB BUG] kfree(%p): pointer points into slab header sp=%p offset=%lu cache_idx=%u ra=0x%lx\n",
+               ptr, (void *)sp, (unsigned long)offset, cache_idx,
+               (unsigned long)caller_ra);
+        panic("kfree: pointer inside slab header");
+    }
+
+    /* sanity check: ptr must be aligned to obj_size and within the page */
+    size_t obj_size = slab_sizes[idx];
+    if ((offset - SLAB_HDR_SIZE) % obj_size != 0 || offset >= PAGE_SIZE) {
+        uint8_t cache_idx = sp->cache_idx;
+        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%lu ra=0x%lx\n",
+               ptr, (unsigned long)offset, (void *)sp, cache_idx,
+               (unsigned long)obj_size, (unsigned long)caller_ra);
+        panic("kfree: corrupted slab pointer");
+    }
+    uint16_t obj_idx = (uint16_t)((offset - SLAB_HDR_SIZE) / obj_size);
+    if (!slab_bit_test(sp, obj_idx)) {
+        uint8_t cache_idx = sp->cache_idx;
+        uint8_t state = sp->state;
+        printf("[SLAB BUG] kfree(%p): object not allocated sp=%p cache_idx=%u obj_idx=%u state=%u ra=0x%lx\n",
+               ptr, (void *)sp, cache_idx, (unsigned)obj_idx,
+               (unsigned)state, (unsigned long)caller_ra);
+        panic("kfree: stale or double free");
+    }
+
+#if CONFIG_SLAB_DEBUG
+    slab_validate_sp(sp, "kfree-pre", obj_size);
+#endif
+
+    // Return the object to the free list.  Must be done under the lock, or a
+    // concurrent kfree can corrupt the list.
+    slab_bit_clear(sp, obj_idx);
+    *(void **)ptr = sp->free_list;
+    sp->free_list = ptr;
+    sp->in_use--;
+
+#if CONFIG_SLAB_DEBUG
+    slab_validate_sp(sp, "kfree-post", obj_size);
+#endif
+
+    // The page has just left the full state: if decrementing leaves
+    // in_use == total - 1, it must have been on the full list beforehand
+    if (sp->in_use == sp->total - 1) {
+        slab_list_remove(&c->full, sp);
+        sp->state = SLAB_STATE_PARTIAL;
+        slab_list_push(&c->partial, sp);
+    }
+
+    // The page is now completely free.  Note this is an if and not an else if,
+    // which handles the edge case of total == 1
+    if (sp->in_use == 0) {
+        if (sp->state == SLAB_STATE_PARTIAL) {
+            slab_list_remove(&c->partial, sp);
+        } else if (sp->state == SLAB_STATE_FULL) {
+            slab_list_remove(&c->full, sp);
+        }
+        if (c->spare_count < SLAB_SPARE_CAP) {
+            slab_spare_push(c, sp);
+        } else {
+            slab_page_release(sp);
+        }
+    }
+}
+
+void *kmalloc_flags(size_t size, int can_reclaim) {
+    if (size == 0) return NULL;
+
+    if (size >= SLAB_MAX_OBJ) {
+        int order = 0;
+        size_t need = ROUND_UP(size + sizeof(big_alloc_hdr_t) + 8, PAGE_SIZE);
+        while ((1u << order) * PAGE_SIZE < need) order++;
+        if (order > MAX_ORDER) return NULL;
+        pfn_t pfn = pfa_alloc_flags(order, can_reclaim);
+        if (pfn == PFN_NONE)
+            return NULL;
+        big_alloc_hdr_t *hdr = (big_alloc_hdr_t *)pfn_to_virt(pfn);
+        hdr->magic = BIG_MAGIC;
+        hdr->order = (uint16_t)order;
+        hdr->_pad  = 0;
+        hdr->reserved = 0;
+        uint64_t *canary = (uint64_t *)((uint8_t *)(hdr + 1) +
+                                        ((size_t)1 << order) * PAGE_SIZE -
+                                        sizeof(big_alloc_hdr_t) - 8);
+        *canary = BIG_CANARY;
+        return (void *)(hdr + 1);
+    }
+
+    int idx = 0;
+    while (idx < SLAB_NR_CACHES - 1 && slab_sizes[idx] < size) idx++;
+
+    /* CPU-array fast path: identical discipline to the frame allocator's
+     * order-0 batch — local IRQ exclusion protects the array against a
+     * re-entrant interrupt handler and against migration mid-pop. */
+    slab_cpu_array_t *arr = slab_cpu_array(idx);
+    uint64_t irq_gate = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    if (arr->count) {
+        void *obj = arr->objs[--arr->count];
+        if (irq_gate)
+            arch_local_irq_enable();
+        return obj;
+    }
+    if (irq_gate)
+        arch_local_irq_enable();
+
+    slab_cache_t *c = &caches[idx];
+    uint64_t irq_flags = spin_lock_irqsave(&c->lock);
+    void *obj = slab_alloc_obj_locked(idx);
+    if (obj) {
+        /* Refill the local array while the lock is already held, so the
+         * next SLAB_CPU_REFILL-1 allocations skip it entirely. */
+        while (arr->count < SLAB_CPU_REFILL) {
+            void *extra = slab_alloc_obj_locked(idx);
+            if (!extra)
+                break;
+            arr->objs[arr->count++] = extra;
+        }
+    }
     spin_unlock_irqrestore(&c->lock, irq_flags);
+
+    if (!obj && can_reclaim) {
+        oom_try_reclaim();
+        return kmalloc_flags(size, 0);
+    }
     return obj;
 }
 
@@ -352,7 +490,6 @@ void kfree(void *ptr) {
     uint64_t caller_ra = arch_read_ra();
 
     slab_page_t *sp = (slab_page_t *)((uintptr_t)ptr & ~(PAGE_SIZE - 1));
-    uintptr_t offset = (uintptr_t)ptr - (uintptr_t)sp;
 
     big_alloc_hdr_t *bhdr = (big_alloc_hdr_t *)ptr - 1;
     if (bhdr->magic == BIG_MAGIC && bhdr->order <= MAX_ORDER) {
@@ -403,93 +540,25 @@ void kfree(void *ptr) {
     }
 
     int idx = sp->cache_idx;
+    slab_cpu_array_t *arr = slab_cpu_array(idx);
+    uint64_t irq_gate = arch_irqs_enabled() ? 1 : 0;
+    arch_local_irq_disable();
+    if (arr->count < SLAB_CPU_ARRAY_CAP) {
+        arr->objs[arr->count++] = ptr;
+        if (irq_gate)
+            arch_local_irq_enable();
+        return;
+    }
+    if (irq_gate)
+        arch_local_irq_enable();
+
+    /* Array full: drain half back to their slabs under the lock, then park
+     * this object in the array. */
     slab_cache_t *c = &caches[idx];
     uint64_t irq_flags = spin_lock_irqsave(&c->lock);
-
-    /*
-     * Every check that participates in the free-list/bitmap state machine must
-     * happen under the cache lock.  In particular, checking alloc_bits before
-     * taking the lock lets two CPUs freeing the same object both observe the
-     * bit set.  They then insert the object twice (normally as a self-loop),
-     * and the corruption is only detected by a later kmalloc().
-     *
-     * Revalidate the page as well: the initial validation above is needed to
-     * select the cache lock, but a stale duplicate free can race the final
-     * release of an otherwise empty slab.
-     */
-    if (!slab_page_valid(sp) || sp->cache_idx != idx) {
-        uint8_t actual_idx = sp->cache_idx;
-        spin_unlock_irqrestore(&c->lock, irq_flags);
-        printf("[SLAB BUG] kfree(%p): stale slab page sp=%p cache_idx=%u expected=%d ra=0x%lx\n",
-               ptr, (void *)sp, actual_idx, idx, (unsigned long)caller_ra);
-        panic("kfree: stale slab page");
-    }
-    if (offset < SLAB_HDR_SIZE) {
-        uint8_t cache_idx = sp->cache_idx;
-        spin_unlock_irqrestore(&c->lock, irq_flags);
-        printf("[SLAB BUG] kfree(%p): pointer points into slab header sp=%p offset=%lu cache_idx=%u ra=0x%lx\n",
-               ptr, (void *)sp, (unsigned long)offset, cache_idx, (unsigned long)caller_ra);
-        panic("kfree: pointer inside slab header");
-    }
-
-    /* sanity check: ptr must be aligned to obj_size and within the page */
-    size_t obj_size = slab_sizes[idx];
-    if ((offset - SLAB_HDR_SIZE) % obj_size != 0 || offset >= PAGE_SIZE) {
-        uint8_t cache_idx = sp->cache_idx;
-        spin_unlock_irqrestore(&c->lock, irq_flags);
-        printf("[SLAB BUG] kfree(%p) bad offset=%lu sp=%p cache_idx=%u obj_size=%lu ra=0x%lx\n",
-               ptr, (unsigned long)offset, (void *)sp, cache_idx,
-               (unsigned long)obj_size, (unsigned long)caller_ra);
-        panic("kfree: corrupted slab pointer");
-    }
-    uint16_t obj_idx = (uint16_t)((offset - SLAB_HDR_SIZE) / obj_size);
-    if (!slab_bit_test(sp, obj_idx)) {
-        uint8_t cache_idx = sp->cache_idx;
-        uint8_t state = sp->state;
-        spin_unlock_irqrestore(&c->lock, irq_flags);
-        printf("[SLAB BUG] kfree(%p): object not allocated sp=%p cache_idx=%u obj_idx=%u state=%u ra=0x%lx\n",
-               ptr, (void *)sp, cache_idx, (unsigned)obj_idx,
-               (unsigned)state, (unsigned long)caller_ra);
-        panic("kfree: stale or double free");
-    }
-
-#if CONFIG_SLAB_DEBUG
-    slab_validate_sp(sp, "kfree-pre", obj_size);
-#endif
-
-    // Return the object to the free list.  Must be done under the lock, or a
-    // concurrent kfree can corrupt the list.
-    slab_bit_clear(sp, obj_idx);
-    *(void **)ptr = sp->free_list;
-    sp->free_list = ptr;
-    sp->in_use--;
-
-#if CONFIG_SLAB_DEBUG
-    slab_validate_sp(sp, "kfree-post", obj_size);
-#endif
-
-    // The page has just left the full state: if decrementing leaves
-    // in_use == total - 1, it must have been on the full list beforehand
-    if (sp->in_use == sp->total - 1) {
-        slab_list_remove(&c->full, sp);
-        sp->state = SLAB_STATE_PARTIAL;
-        slab_list_push(&c->partial, sp);
-    }
-
-    // The page is now completely free.  Note this is an if and not an else if,
-    // which handles the edge case of total == 1
-    if (sp->in_use == 0) {
-        if (sp->state == SLAB_STATE_PARTIAL) {
-            slab_list_remove(&c->partial, sp);
-        } else if (sp->state == SLAB_STATE_FULL) {
-            slab_list_remove(&c->full, sp);
-        }
-        if (c->spare_count < SLAB_SPARE_CAP) {
-            slab_spare_push(c, sp);
-        } else {
-            slab_page_release(sp);
-        }
-    }
+    for (uint16_t i = 0; i < SLAB_CPU_ARRAY_CAP / 2; i++)
+        slab_free_obj_locked(arr->objs[--arr->count], caller_ra);
+    arr->objs[arr->count++] = ptr;
     spin_unlock_irqrestore(&c->lock, irq_flags);
 }
 
