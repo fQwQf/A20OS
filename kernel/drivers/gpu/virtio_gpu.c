@@ -391,19 +391,40 @@ static int virtio_gpu_get_capset_info(virtio_gpu_inst_t *inst, uint32_t index,
  * own 4 KiB, so a 1 MiB caller buffer was copied out with a megabyte of
  * untouched heap behind the capset. */
 static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t ctx_id,
-                                 uint32_t index, uint32_t version,
+                                 uint32_t capset_id, uint32_t version,
                                  void *buf, size_t bufsz, size_t *out_len)
 {
     if (!buf || bufsz == 0)
         return -EINVAL;
 
-    /* Size the transfer from the host's own answer; a constant baked in here
-     * is what truncated every capset over 4 KiB. */
-    uint32_t info_id = 0, info_ver = 0, info_size = 0;
-    int info_rc = virtio_gpu_get_capset_info(inst, index, &info_id, &info_ver,
-                                             &info_size);
+    /* GET_CAPSET_INFO is indexed while GET_CAPSET is not, so the id has to be
+     * looked up in the info table before it can be sent -- both to learn how big
+     * the blob is (a constant here is what truncated every capset over 4 KiB)
+     * and to reject an id the host does not advertise, which otherwise comes
+     * back as 0x1205 and reads like a renderer that cannot make a context. */
+    uint32_t info_ver = 0, info_size = 0;
+    int info_rc = -1;
+    for (uint32_t idx = 0; idx < 16; idx++) {
+        uint32_t id = 0, ver = 0, sz = 0;
+        if (virtio_gpu_get_capset_info(inst, idx, &id, &ver, &sz) < 0)
+            break;
+        if (id == capset_id) {
+            info_ver = ver;
+            info_size = sz;
+            info_rc = 0;
+            break;
+        }
+    }
+    if (info_rc < 0)
+        return -ENOENT;
+
+    /* The host fills the version actually asked for, and rejects one it does
+     * not have.  A client that says 0 means "whatever you have". */
+    if (version == 0 || version > info_ver)
+        version = info_ver;
+
     size_t want = bufsz;
-    if (info_rc == 0 && info_size > 0 && info_size < want)
+    if (info_size > 0 && info_size < want)
         want = info_size;
     if (want > VIRTIO_GPU_MAX_CAPSET_BYTES)
         want = VIRTIO_GPU_MAX_CAPSET_BYTES;
@@ -412,7 +433,7 @@ static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     memset(&req, 0, sizeof(req));
     req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
     req.hdr.ctx_id = ctx_id;
-    req.capset_index = index;
+    req.capset_id = capset_id;
     req.capset_version = version;
 
     size_t rsz = sizeof(struct virtio_gpu_ctrl_hdr) + want;
@@ -428,10 +449,10 @@ static int virtio_gpu_get_capset(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     }
     struct virtio_gpu_ctrl_hdr *hdr = (struct virtio_gpu_ctrl_hdr *)resp;
     if (hdr->type != VIRTIO_GPU_RESP_OK_CAPSET) {
-        kinfo("[GPU] get_capset: resp=0x%x want=0x%x | sent ctx=%u idx=%u ver=%u"
-              " | host idx=%u -> id=%u ver=%u size=%u (rc=%d)\n",
-              hdr->type, VIRTIO_GPU_RESP_OK_CAPSET, ctx_id, index, version,
-              index, info_id, info_ver, info_size, info_rc);
+        kinfo("[GPU] get_capset: resp=0x%x want=0x%x | sent ctx=%u capset_id=%u"
+              " ver=%u | host id=%u max_ver=%u size=%u\n",
+              hdr->type, VIRTIO_GPU_RESP_OK_CAPSET, ctx_id, capset_id, version,
+              capset_id, info_ver, info_size);
         kfree(resp);
         return -1;
     }
