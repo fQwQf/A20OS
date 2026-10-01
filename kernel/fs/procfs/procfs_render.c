@@ -820,14 +820,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "last_victim_score: %d\n"
             "free_pages_at_kill: %lu\n"
             "free_pages_now: %lu\n"
-            "in_progress: %d\n",
+            "in_progress: %d\n"
+            "kswapd_passes: %lu\n"
+            "kswapd_pages_freed: %lu\n"
+            "kswapd_last_pass_tick: %lu\n",
             os.kills,
             os.last_kill_tick,
             os.last_victim_pid,
             os.last_victim_score,
             os.free_pages_at_kill,
             os.free_pages_now,
-            os.in_progress);
+            os.in_progress,
+            os.kswapd_passes,
+            os.kswapd_pages_freed,
+            os.kswapd_last_pass_tick);
         break;
     }
     case PF_A20_TASK_LIFETIME:

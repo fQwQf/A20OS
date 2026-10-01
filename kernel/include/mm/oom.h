@@ -17,9 +17,19 @@ typedef struct {
     unsigned long free_pages_at_kill;
     unsigned long free_pages_now;
     int in_progress;
+    /* kswapd background reclaim (hosted builds) */
+    unsigned long kswapd_passes;
+    unsigned long kswapd_pages_freed;
+    unsigned long kswapd_last_pass_tick;
 } oom_stats_t;
 
 void oom_get_stats(oom_stats_t *out);
 int oom_try_reclaim(void);
+/* Paced swap-only reclaim for the background reclaimer (no OOM kill, no
+ * cooldown); returns pages reclaimed. */
+int oom_swap_reclaim_pages(int target_pages);
+/* Kernel-thread entry for the background reclaimer; main.c spawns it with
+ * proc_alloc() after the MM is up. */
+void oom_kswapd_thread(void);
 
 #endif
