@@ -1301,18 +1301,8 @@ static int drm_get_cap(drm_context_t *ctx, void *arg)
                * the IMPORT and EXPORT caps are set. */
         c.value = 3; /* DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT */
         break;
-    case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC
-               *
-               * The vblank event carries a real CLOCK_MONOTONIC stamp
-               * (timekeeping_get_monotonic in drm_vblank_deliver_due_locked),
-               * but this cap also names DRM_IOCTL_MODE_GETTIME, and there is no
-               * such ioctl here. Advertising it anyway overstates the surface:
-               * a client that believes it can ask the CRTC for time gets an
-               * error from the default arm instead. Zeroing it costs nothing --
-               * nothing consumes the cap to *gain* a path -- and the event
-               * timestamp remains, which is the part clients actually use for
-               * frame pacing. */
-        c.value = 0;
+    case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC */
+        c.value = 1;
         break;
     case 0x7: /* DRM_CAP_ASYNC_PAGE_FLIP */
         c.value = 0;
