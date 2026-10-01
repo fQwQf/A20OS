@@ -168,6 +168,12 @@ smoke-swap:
 smoke-mm-fork-exec-race:
 	$(PYTHON) tools/smoke.py smoke-mm-fork-exec-race
 
+# Page-table cursor race/audit gate.  Boots with a20.anonprov so wide cursors
+# actually get created; see the case comment in smoke_cases.py for what a PASS
+# does and does not prove.
+smoke-mm-pt-race:
+	$(PYTHON) tools/smoke.py smoke-mm-pt-race
+
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 

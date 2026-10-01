@@ -901,6 +901,103 @@ files = ["kernel/abi/linux/sys_proc.c"]
 pattern = "mm_pt_note_present|mm_pt_note_absent"
 files = ["kernel/mm/mm.c"]
 
+# Page-table lock discipline (mm single-level migration).
+#
+# A covering-node-only cursor lock was once documented as "the unit of writer
+# exclusion".  That claim was false: a peer whose covering node is an ancestor or
+# descendant holds a different lock, and the descent takes no lock at all on
+# already-populated intermediates, so a wide cursor and a single-page cursor
+# inside it would write the same leaf with no mutual exclusion.  It never fired
+# because no code path creates a cursor with guard_level > 0.
+#
+# A per-operation leaf lock was implemented and reverted once: its first
+# version started the descent at guard_level - 1, which reads a path[] entry
+# mm_addrspace_lock never populates, and hung the huge-page path so that
+# smoke-mm-stress timed out with no self-deadlock report.  It reads as an
+# unremarkable off-by-one, which is exactly why it needs a gate.
+#
+# So these assertions pin the two things that must not drift: the leaf lock
+# exists and is parked in the cursor, and every cursor entry point descends for
+# the address it was handed rather than trusting a stale path[0].
+[[gate]]
+name = "check-mm-pt-lock-order"
+make_target = "check-mm-pt-lock-order"
+
+# The two claims that were false, in either file.  Both comments now carry the
+# correction inline; this stops the wrong wording coming back.
+[[gate.assertion]]
+negate = true
+fixed = true
+pattern = "covering node's lock IS the unit of writer exclusion"
+files = ["kernel/mm/pt.c", "kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+negate = true
+fixed = true
+pattern = "holds a lock on EVERY descendant of the covering node"
+files = ["kernel/mm/pt.c", "kernel/include/mm/pt.h"]
+
+# cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it
+# takes the leaf table's own MCS lock and parks it for cursor_leaf_unlock().
+[[gate.assertion]]
+fixed = true
+pattern = "mcs_lock(lm)"
+files = ["kernel/mm/pt.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "cur->leaf_meta = lm"
+files = ["kernel/mm/pt.c"]
+
+# Counted, not presence-checked: a lock taken but not released on some path is a
+# hang, and a presence check cannot see one missing unlock among the others.
+[[gate.assertion]]
+fixed = true
+pattern = "cursor_leaf_unlock(cur)"
+min_count = 12
+files = ["kernel/mm/pt.c"]
+
+# 5 = mm_cursor_replace / unmap / mark_prot / safe_test / query.  Fewer means a
+# caller is back to reading path[0] left over from another address.
+[[gate.assertion]]
+fixed = true
+pattern = "cursor_leaf_slot(cur, addr"
+min_count = 5
+files = ["kernel/mm/pt.c"]
+
+# The descent walk must start AT guard_level: mm_addrspace_lock populates
+# path[ROOT-1]..path[guard_level] and nothing below, so a `guard_level - 1`
+# start dereferences an uninitialised pointer.  grep cannot see that, but it can
+# see the loop bound, and the bound is the thing that was wrong once already.
+[[gate.assertion]]
+fixed = true
+pattern = "for (int l = cur->guard_level; l > 0; l--)"
+files = ["kernel/mm/pt.c"]
+
+# ...and it must not re-lock the covering node the cursor already holds.
+[[gate.assertion]]
+fixed = true
+pattern = "(l == cur->guard_level) ? NULL : mm_pt_meta(table)"
+files = ["kernel/mm/pt.c"]
+
+# RSS accounting is atomic and does not depend on mm->lock.  A bare `mm->rss`
+# is what that phase removed; `\b` keeps this from matching `mm->rss_atomic`.
+# The cgroup counter of the same name (cg_mem_t.rss, spelled `m->rss`) is a
+# different field with its own locking and is deliberately not covered.
+[[gate.assertion]]
+negate = true
+pattern = "mm->rss\\b"
+files = [
+    "kernel/mm/*.c",
+    "kernel/proc/*.c",
+    "kernel/abi/linux/*.c",
+    "kernel/abi/native/*.c",
+    "kernel/fs/procfs/*.c",
+    "kernel/ipc/*.c",
+    "kernel/drivers/gpu/*.c",
+]
+
+
 [[gate]]
 name = "check-io-progress-model"
 make_target = "check-io-progress-model"
