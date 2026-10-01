@@ -261,6 +261,19 @@ typedef struct board_config {
 
     /* bus enumeration: board calls device_register() for each device */
     void                 (*enumerate_devices)(void);
+
+    /*
+     * Set when the board's timer interrupt cannot preempt, so idle_loop() must
+     * spin with interrupts left enabled rather than sleep on arch_idle_wait().
+     * The LS2K1000 cooperative recovery profile is the case: its firmware hands
+     * over in a state where the timer never delivers, so nothing would ever wake
+     * a sleeping idle task.
+     *
+     * Polarity matters -- every other field here is a pointer, so a
+     * static initializer leaves this at 0, and 0 has to mean "the timer works"
+     * or every board that does not mention it would silently stop sleeping.
+     */
+    int                  idle_cannot_sleep;
 } board_config_t;
 
 /* Global board config — defined in kernel/board/<board>/board.c */
