@@ -753,6 +753,13 @@ endif
 ifeq ($(BOARD),ls2k1000)
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_ELF_EAGER_LOAD
+# Register dumps at the first task switch and on panic.  This used to be keyed on
+# CONFIG_BOARD_LS2K1000 inside kernel/core/panic.c and kernel/proc/task.c, which
+# put a board name in architecture-neutral files; the flag is opt-in here
+# instead, and the CSRs themselves moved to
+# kernel/arch/loongarch64/platform/debug.c behind arch_panic_dump() and
+# arch_debug_dump_user_state().
+CFLAGS += -DCONFIG_DEBUG_BOOT_TRACE
 ifneq ($(NR_CPUS),1)
 $(error COOPERATIVE_BOOT=1 is the single-core recovery profile and cannot be combined with NR_CPUS=$(NR_CPUS))
 endif
