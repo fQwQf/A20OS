@@ -30,7 +30,7 @@
 | virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
 | virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
-| 3D 传输通路端到端 | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
+| 3D 传输通路端到端 | ✅ **本轮已在三种架构上双向验证** | `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。三条门禁的像素回读都得到同一组颜色值，所以"渲染器产出与 guest 架构无关"这一点现在也是被测的，而不只被假设。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
 | 命令流提交 | ✅ **本轮已验证到像素** | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并**回读像素**：两遍颜色都中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。此前"编码正确但像素未验证"的状态是三个缺陷叠加的结果——SUBMIT_3D 命令头多带一个 mem_entry 导致命令体被宿主按固定 32 字节偏移截断、从未下发 `CTX_ATTACH_RESOURCE`、`TRANSFER_FROM_HOST` 是空实现；见 §0.5 |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
@@ -263,7 +263,7 @@ SUBMIT_3D 依然回 OK——传输层确实成功了，渲染器静默丢弃而�
 - 探针里 `PIPE_TEXTURE_2D` 应为 **2**（`enum pipe_texture_target` 第一个成员是
   `PIPE_BUFFER`），这一条上一轮已更正。
 
-**门禁，而且实测会红。** 判据是 `smoke-gpu3d-riscv64` 要求出现
+**门禁，而且实测会红。** 判据是 `smoke-gpu3d-riscv64`（以及本轮新增的 x86_64/aarch64 两道）要求出现
 `pixel readback ok` 与 `PASS`。把那个 mem_entry 放回去（并临时关掉
 `_Static_assert` 以便让**运行期**门禁去抓），门禁立刻转红，且复现的正是历史上的
 那个签名：`FAIL pass 0: 4096/4096 pixels wrong, first pixel is 0xdeadbeef`。
@@ -501,16 +501,19 @@ drvmod 模块以 `-fPIC` 编译，`gpu_ioctl` 若用 `switch` 分发会生成 PI
 `user/cmds/core/gpu3d_test.c` 是验证内核 3D 链路的独立工具，ioctl 号与结构在文件内自包含（不依赖内核头）。它需要 virgl-capable 设备（`GPU_3D=1`）：
 
 ```sh
-# 推荐走门禁（见 gpu-3d-roadmap.md §8）
+# 推荐走门禁（见 gpu-3d-roadmap.md §8）。三种架构各一道，都要求像素回读：
 tools/a20 test smoke-gpu3d-riscv64
-# 实测期望输出：
+tools/a20 test smoke-gpu3d-x86_64
+tools/a20 test smoke-gpu3d-aarch64
+# 实测期望输出（三条门禁一致）：
 #   [GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1
-#   GPU3D_TEST: virgl available
-#   GPU3D_TEST: context 1 created
-#   GPU3D_TEST: 3D resource 2 created (16x16 RGBA8)
-#   GPU3D_TEST: resource 2 released
-#   GPU3D_TEST: context destroyed
-#   GPU3D_TEST: PASS (transport only -- no command stream submitted, rendering unverified)
+#   GPU3D_TEST: GETPARAM 3D_FEATURES=1
+#   GPU3D_TEST: GET_CAPS returned a 308 byte capset
+#   GPU3D_TEST: 3D resource 2 created with host backing
+#   GPU3D_TEST: EXECBUFFER accepted a 76 byte clear stream
+#   GPU3D_TEST: pixel readback ok (0xffff0000 across 4096 pixels)
+#   GPU3D_TEST: pixel readback ok (0xff0000ff across 4096 pixels)
+#   GPU3D_TEST: PASS (UAPI works and the host rendered the colours asked for)
 ```
 
 退出码是三态，且必须保持三态：
@@ -525,9 +528,13 @@ tools/a20 test smoke-gpu3d-riscv64
 `return 0`，于是该测试在任何配置下都是绿的，绿灯不携带任何信息，这正是
 §0 那两条失真结论的来源。SKIP 故意不等于 PASS。
 
-PASS 那行有自我限定：**它没有提交命令流，资源也没有 backing**，
-所以它证明的是*传输可达性*，不是"渲染成功"。命令流与 backing 见
-[gpu-3d-roadmap.md §7、§12](gpu-3d-roadmap.md)。
+PASS 那行现在是**有像素证据**的：两遍颜色都由 host 渲染出来、再经
+`TRANSFER_FROM_HOST_3D` 回到 guest 逐像素比对过（红 `0xffff0000`、蓝 `0xff0000ff`）。
+此前这一行带自我限定、只证明*传输可达性*，那个时代已经结束——根因见 §0.5。
+
+但**这仍然是手写命令流的证据，不是 Mesa 的**。`gpu3d_test` 自己发
+`DRM_IOCTL_VIRTGPU_*`，所以它不经过 DRI 驱动；stock Mesa 能否用上这条通路是另一个
+命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#80-本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 
@@ -586,7 +593,7 @@ boot 日志应出现：
 | `kernel/drivers/gpu/virtio_gpu.c` | 驱动：feature 协商、capset、3D 命令封装、`gpu_ioctl` 分发 |
 | `kernel/drivers/gpu/drm.c` | DRM `/dev/dri/card0`：KMS + A20 3D 透传 |
 | `kernel/drvmod/framework.c` | drvmod 导出表（含 `copy_from_user/to_user`） |
-| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-riscv64`） |
+| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`，三条都要求像素回读） |
 | `user/cmds/core/egl_test.c` | 已删除（曾被 `user/Makefile` 从 `LOCAL_CMD_SRCS` filter 掉） |
 | `tools/check-drm-abi.sh` | DRM UAPI 门禁：ioctl 号 + 结构体布局对 Linux UAPI 双向可证伪（§8.1） |
 | `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer 构建（已运行，装出 1.3.0；Mesa 仍因宿主 EGL 未 attach） |
