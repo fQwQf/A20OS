@@ -63,15 +63,35 @@ typedef struct {
     size_t             big_req_cap;
     uint8_t           *big_resp;
     size_t             big_resp_cap;
-    /* SUBMIT_3D command header staging (DMA-safe, instance-owned). */
-    struct {
-        struct virtio_gpu_cmd_submit hdr;
-        struct virtio_gpu_mem_entry entry;
-    } submit_hdr ALIGNED(64);
+    /* SUBMIT_3D command header staging (DMA-safe, instance-owned).
+     *
+     * This must be exactly struct virtio_gpu_cmd_submit and nothing more.  The
+     * host copies the command with iov_to_buf(sg, n, sizeof(struct
+     * virtio_gpu_cmd_submit), buf, size), so it skips a hardcoded 32 bytes of
+     * this descriptor and reads the stream from whatever follows.  Appending a
+     * mem_entry here -- as this once did -- does not just add a field: it makes
+     * the descriptor longer than the offset the host skips, so the host reads
+     * the padding as the first dwords of the command and submits a stream
+     * truncated by the same amount.  Nothing reports it: SUBMIT_3D answers OK
+     * because the transport worked, and the renderer rejects the garbage in
+     * silence. */
+    struct virtio_gpu_cmd_submit submit_hdr ALIGNED(64);
     struct virtio_gpu_ctrl_hdr submit_resp ALIGNED(64);
 } virtio_gpu_inst_t;
 
 static virtio_gpu_inst_t g_gpu_inst;
+
+/* The host copies a SUBMIT_3D payload from a fixed offset into the request
+ * scatter-gather list, so the header descriptor has to be exactly the spec
+ * structure and no larger.  Assert it rather than trust the comment: growing
+ * this type is a one-line change that would otherwise ship a silently truncated
+ * command stream to every guest, with the host still answering OK. */
+_Static_assert(sizeof(struct virtio_gpu_cmd_submit) == 32,
+               "host skips sizeof(virtio_gpu_cmd_submit) bytes before the command");
+_Static_assert(sizeof(((virtio_gpu_inst_t *)0)->submit_hdr) == 32,
+               "submit_hdr must be the bare cmd_submit; a trailing field shifts the payload");
+
+
 static driver_t virtio_gpu_driver;
 
 static void virtio_gpu_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
@@ -686,16 +706,16 @@ static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
     arch_dma_sync_for_device(inst->big_req, len);
 
     memset(&inst->submit_hdr, 0, sizeof(inst->submit_hdr));
-    inst->submit_hdr.hdr.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    inst->submit_hdr.hdr.hdr.ctx_id = ctx_id;
-    inst->submit_hdr.hdr.size = (uint32_t)len;
-    inst->submit_hdr.entry.addr = va_to_pa(inst->big_req);
-    inst->submit_hdr.entry.length = (uint32_t)len;
+    inst->submit_hdr.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    inst->submit_hdr.hdr.ctx_id = ctx_id;
+    inst->submit_hdr.size = (uint32_t)len;
     arch_dma_sync_for_device(&inst->submit_hdr, sizeof(inst->submit_hdr));
     memset(&inst->submit_resp, 0, sizeof(inst->submit_resp));
 
-    /* Build a three-descriptor chain: hdr+entry (write->read), blob (read),
-     * response (write). */
+    /* Three-descriptor chain: header (read), command blob (read), response
+     * (write).  The host skips sizeof(struct virtio_gpu_cmd_submit) bytes into
+     * this chain before reading the command, so the header descriptor must be
+     * exactly that structure -- see the submit_hdr declaration. */
     uint16_t s0 = 0, s1 = 1, s2 = 2;
     inst->desc[s0].addr  = va_to_pa(&inst->submit_hdr);
     inst->desc[s0].len   = sizeof(inst->submit_hdr);
