@@ -131,6 +131,29 @@ vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第�
 
 失败时查看 `.kernel-build/smoke/<arch>[-nommu]-shell.log` 中是否缺少 `A20_MATRIX_<variant>_OK`、`A20_EXTERNAL_OK` 或 `System is going down for power-off NOW`，先修复对应架构的 bringup 或 NOMMU 路径。
 
+### DRM 对象存储的锁契约
+
+`make check-drm-store-locking` 断言 `kernel/drivers/gpu/drm.c` 与
+`kernel/drivers/gpu/virtio_gpu.c` 里那些**错了不会编译报错、只会静默地产生数据竞争**
+的东西——`g_drm_store.lock` 的存在与初始化、锁内摘表 / 锁外释放资源的
+两段式 teardown（`drm_gem_detach_locked` / `drm_gem_drop_storage`）、
+`drm_gem_pin()` / `drm_gem_unpin()` 的配对、`inst->command_lock` 的存在，以及
+buffer 尺寸上限。同时断言 `docs/drivers/guide/lock-order.md` 里对应条目也在，
+免得代码与契约各自漂移。
+
+为什么需要计数断言（`min_count`）：只断言"锁这个符号出现过"是不够的。
+把某个 handler 里的 `drm_lock()` 删掉，符号仍然在别处出现，门禁照样全绿——
+它会安静地放过自己存在的目的。本门禁因此对 `drm_lock()` / `drm_unlock()`
+的**出现次数**设下限（`gates.py` 的 `min_count`）。实测：删掉 15 对
+lock/unlock，计数降到 26，断言转红；删掉 lock-order.md 里的契约条目，两条
+文档断言转红；恢复后 13/13。
+
+它做不到的事，`tools/gates.toml` 里也写明了：抓不到**单个 handler 里单独一处**
+漏锁。源码正则门禁看不到控制流。计数下限的作用是拦住"整体去掉锁"，单个
+handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
+
+本门禁由 `check-doc-test-gates` 聚合，因此进 CI。
+
 ### DRM UAPI 一致性
 
 `make check-drm-abi` 把 `kernel/include/drivers/gpu/drm.h` 里的每个 `DRM_IOCTL_*` 编号与宿主 `linux-headers` 的 `include/uapi/drm` 逐条比对，并把 `kernel/drivers/gpu/drm.c` 里的线结构体定义抽出来实测尺寸与字段偏移。编号错一个字符，switch 就永远匹配不上、落进 `default` 分支，用户态看到的是 EINVAL/ENOTTY，看起来像 Mesa 或 libdrm 的 bug，而不是头文件里写错了一个常量。本门禁就是为了让这类错误进不了门。宿主没装 `linux-headers` 时干净跳过，因此不会给非 Linux 构建新增失败面。
