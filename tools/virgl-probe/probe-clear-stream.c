@@ -51,7 +51,9 @@
 #define VIRGL_CCMD_CLEAR                  7
 #define VIRGL_OBJECT_SURFACE             8
 
-#define VIRGL_FORMAT_B8G8R8A8_UNORM 2
+/* enum virgl_formats (virgl_hw.h).  B8G8R8A8_UNORM is entry 1; entry 2 is
+ * B8G8R8X8_UNORM, which an earlier revision of this probe passed. */
+#define VIRGL_FORMAT_B8G8R8A8_UNORM 1
 #define PIPE_CLEAR_COLOR0            0x4
 
 #define VIRGL_TARGET_TEXTURE_2D_ARRAY 0   /* VIRGL_TEXTURE_TARGET_2D */
@@ -60,6 +62,23 @@
                             ((uint32_t)(len) << 16))
 
 #define SENTINEL 0xdeadbeefu
+
+#define TEST_W 64
+#define TEST_H 64
+#define TEST_PIXELS (TEST_W * TEST_H)
+
+/* virgl_logv() is a no-op unless a consumer registers a sink, and QEMU never
+ * does -- that is the entire reason vrend says nothing while it rejects a
+ * command.  Registering one here is what makes the failing command nameable. */
+static void probe_log(enum virgl_log_level_flags level, const char *msg, void *ud)
+{
+    static const char *const tag[] = { "debug", "info", "warning", "error" };
+    (void)ud;
+    printf("vrend[%s]: %s", tag[level < 4 ? level : 3], msg);
+    if (!msg || msg[0] == '\0' || msg[strlen(msg) - 1] != '\n')
+        putchar('\n');
+    fflush(stdout);
+}
 
 static uint32_t g_stream[32];
 static uint32_t g_page[4096];
@@ -187,6 +206,7 @@ int main(void)
     printf("probe: EGL %d.%d config ok\n", maj, min);
 
     printf("probe: renderer init\n");
+    virgl_set_log_callback(probe_log, NULL, NULL);
     if (virgl_renderer_init((void *)&g_cbs, 0, &g_cbs) != 0) {
         printf("RESULT: FAIL renderer_init\n");
         return 1;
@@ -208,12 +228,24 @@ int main(void)
         return 1;
     }
 
+    /* Kept to mirror QEMU, which brings its own context up before touching
+     * resources.  Measured as *not* load-bearing: dropping this call still
+     * renders, so gl_id is populated without it.  It was originally added
+     * chasing "Illegal resource", which ctx_attach_resource below actually
+     * fixes. */
+    rc = g_cbs.make_current(NULL, 0, (virgl_renderer_gl_context)(intptr_t)1);
+    printf("probe: make_current -> %d\n", rc);
+    if (rc != 0) {
+        printf("RESULT: FAIL make_current\n");
+        return 1;
+    }
+
     struct virgl_renderer_resource_create_args a;
     memset(&a, 0, sizeof(a));
     a.handle = res_id;
     a.target = 2; /* PIPE_TEXTURE_2D (PIPE_BUFFER is 0) */
     a.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
-    a.bind = VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_RENDER_TARGET;
+    a.bind = VIRGL_BIND_RENDER_TARGET; /* guest parity */
     a.width = 64;
     a.height = 64;
     a.depth = 1;
@@ -239,6 +271,12 @@ int main(void)
         return 1;
     }
 
+    /* A resource is only reachable from a context once it is on that context's
+     * list; res_lookup() walks ctx->vrend_resources, not a global table.  This
+     * is what the guest's execbuffer bo_handles are supposed to achieve. */
+    virgl_renderer_ctx_attach_resource((int)ctx_id, (int)res_id);
+    printf("probe: ctx_attach_resource(%u, %u)\n", ctx_id, res_id);
+
     uint32_t ndw = build_clear_stream(res_id);
     printf("probe: submit_cmd(%u dwords, %u bytes)\n", ndw, ndw * 4);
     rc = virgl_renderer_submit_cmd(g_stream, (int)ctx_id, (int)ndw);
@@ -248,10 +286,25 @@ int main(void)
 
     printf("probe: page0[0] = 0x%08x (want 0xff0000ff-ish, i.e. r=1.0 b=0.0 a=1.0)\n",
            g_page[0]);
-    if (g_page[0] == SENTINEL) {
+
+    /* Reading the iov directly only proves anything if vrend wrote back into
+     * it.  A transfer read is the path the protocol actually defines, so it
+     * separates "the clear never ran" from "the clear ran and stayed in the
+     * GL texture". */
+    static uint32_t g_readback[TEST_PIXELS];
+    struct iovec riov = { .iov_base = g_readback, .iov_len = sizeof(g_readback) };
+    struct virgl_box box = { 0, 0, 0, TEST_W, TEST_H, 1 };
+    rc = virgl_renderer_transfer_read_iov(res_id, ctx_id, 0,
+                                          TEST_W * 4, 0, &box, 0, &riov, 1);
+    printf("probe: transfer_read_iov -> %d\n", rc);
+    printf("probe: readback[0] = 0x%08x  (sentinel was 0x%08x)\n", g_readback[0], SENTINEL);
+
+    if (g_page[0] == SENTINEL && g_readback[0] == SENTINEL) {
         printf("RESULT: FAIL untouched -- host did not render into the backing\n");
         return 1;
     }
+    if (g_page[0] == SENTINEL)
+        printf("RESULT: NOTE clear is real but did not land in the attached iov\n");
     printf("RESULT: PASS host rendered into the attached backing\n");
     return 0;
 }
