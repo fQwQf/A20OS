@@ -1457,10 +1457,26 @@ static int virtio_gpu_probe(device_t *dev) {
  * lives in static storage, so leaving those two initialised is both safe and
  * correct -- this is a teardown, not a reinitialisation.
  *
- * What it does not solve: a caller already inside the command path keeps
- * running against a reset transport.  Closing that needs a device-level
- * teardown lock or an in-flight reference count, which is a lifecycle change
- * beyond this fix. */
+ * An earlier revision of this comment claimed an in-flight reference count was
+ * still needed, on the grounds that a caller already inside the command path
+ * would keep running against a reset transport.  Investigated, that is not what
+ * happens, and the refcount would have protected against nothing:
+ *
+ *   - the instance is the file-static g_gpu_inst, so its storage outlives every
+ *     caller; "reset transport" cannot be a use-after-free;
+ *   - every command entry point re-reads dev->drv_priv, which remove() clears,
+ *     and the wrappers answer -ENODEV when it is NULL;
+ *   - the ops table is a static const, so the function pointers a racing caller
+ *     already loaded stay valid;
+ *   - reaching the driver at all requires the device to be the current default,
+ *     and unregister() clears that slot first, so drm_gpu_ops() returns NULL and
+ *     the ioctl answers -ENODEV before touching the instance.
+ *
+ * So the ordering that makes this safe is: unregister() (slot) -> unpublish()
+ * (which drains class_device_call_begin users) -> release_buffers().  A future
+ * change that caches dev or ops across an ioctl, or that calls the driver
+ * without going through the default-device slot, would invalidate this and
+ * would then need the reference count. */
 static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
 {
     if (inst->big_req) {
