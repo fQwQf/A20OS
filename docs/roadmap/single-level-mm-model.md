@@ -225,7 +225,7 @@ smp4 QEMU 实测。
 | P2 fault 走 cursor | ✅ | 缓存下降路径；6 个构建 + `mm_stress`(smp1/smp4) + `mm-fork-exec-race`(smp8) + `smoke-abi-linux` + `check-mm-lock-model` 全 PASS |
 | P3 页表页锁为互斥单元 | ✅ | covering-node MCS；修掉 depth 双减自死锁 |
 | P4 延迟回收机制 | ✅ | 读侧计数 + `tlb_holds`  graveyard + stale；已就位待 P5 接线 |
-| 度量基准 | ✅ | `user/cmds/stress/mm_pt_scale.c`，把并行主张变成可证伪验收门 |
+| 度量基准 | ✅ | `user/cmds/stress/mm_pt_scale.c`（已删除，git 历史可考），把并行主张变成可证伪验收门 |
 
 期间修掉两个真实缺陷：fault-around 曾把 PFN 当物理地址传给 `mm_cursor_map`
 （装入无效物理地址，表现为访问故障而非缺页，C 无法发现类型不匹配）；MCS
@@ -239,7 +239,7 @@ smp4 QEMU 实测。
 > 与环境串行，而 riscv64 guest 跑在 x86_64 host 上只有 TCG、跨架构无可用的
 > 多线程 TCG，vCPU 本身即被串行化。
 
-新增环境探针 `user/cmds/stress/cpu_scale.c`：纯整数计算、不碰内存、不碰任何
+新增环境探针 `user/cmds/stress/cpu_scale.c`（已删除）：纯整数计算、不碰内存、不碰任何
 内核锁。它给出该环境能否呈现并行性的上界：
 
 | 配置 | cpu_scale（纯计算上限） | mm_pt_scale（真实 demand fault） |
@@ -262,7 +262,7 @@ smp4 QEMU 实测。
 
 ### 8.2b 成本归因：并行度到底损失在哪（mm_fault_cost，x86_64/KVM smp4）
 
-新增 `user/cmds/stress/mm_fault_cost.c`：同一线程数、同一共享地址空间、同一不相交
+新增 `user/cmds/stress/mm_fault_cost.c`（该文件已删除）：同一线程数、同一共享地址空间、同一不相交
 区间，把三���成本分开单独测。
 
 | 相位 | 隔离的是什么 | 1T | 2T | scale |
@@ -819,7 +819,7 @@ CortenMM 的关键**，这个判断是对的。逐条核对论文原文（§3.3/
 ### 9.3 测量能力是当前的硬约束（已补上）
 
 在此之前无法判断任何改动，因为 `mm_pt_scale` 只覆盖论文五个微基准里的 PF 一个。
-已新增 `user/cmds/stress/cortenmm_bench.c`，实现论文 §6.2 的五个基准
+曾新增 `user/cmds/stress/cortenmm_bench.c`（已删除），实现论文 §6.2 的五个基准
 （mmap / mmap-PF / PF / unmap-virt / unmap），每个都有 low-contention 与
 high-contention 两个变体，并遵循 §8.20 的计数预热要求。
 
@@ -975,7 +975,7 @@ per-PTE 状态写好；而状态存在 PT 页元数据里，参考实现把它�
 
 ### 10.4 基准修正后：缺页成本首次可信，以及一个仍然存在的空洞
 
-修正两处（`user/cmds/stress/cortenmm_bench.c`）：
+修正两处（`user/cmds/stress/cortenmm_bench.c`，已删除）：
 
 * B_PF 改用 `MADV_DONTNEED` 再触碰。`mm_madvise_dontneed()` 只校验 VMA 覆盖
   范围、然后丢掉 PTE，VMA 本身保留，所以每轮都拿到「VMA 在、PTE 全空」的状态；

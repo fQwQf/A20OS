@@ -6,7 +6,7 @@
 |---|---|---|---|
 | [`tools/check-drm-abi.sh`](../../tools/check-drm-abi.sh) | DRM ioctl 号 + 结构体布局对 Linux UAPI 的门禁 | 否 | 宿主 |
 | [`tools/build-virglrenderer.sh`](../../tools/build-virglrenderer.sh) | 构建宿主 virglrenderer ≥ 0.11 | 是 | 宿主 |
-| [`tools/a20_preflight.py`](../../tools/a20_preflight.py) | `tools/a20 run/debug/test` 启动前的宿主资源门禁 | 否 | 宿主 |
+| [`tools/a20_resource.py`](../../tools/a20_resource.py)（`gate_qemu`） | `tools/a20 run/debug/test` 启动前的宿主资源门禁（a20_preflight.py 已合并至此） | 否 | 宿主 |
 
 ---
 
@@ -137,7 +137,7 @@ make ARCH=riscv64 GPU_3D=1 QEMU_MEMORY=2G run-world-gui
 
 ---
 
-## 3. `tools/a20_preflight.py` — 启动前的宿主资源门禁
+## 3. 宿主资源预检（`tools/a20_resource.py` 的 `gate_qemu`；原 `a20_preflight.py`，已合并）
 
 ### 为什么需要它
 

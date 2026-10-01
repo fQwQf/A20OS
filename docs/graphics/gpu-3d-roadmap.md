@@ -192,7 +192,7 @@ guest 里的 GL/GLES 客户端已经在 llvmpipe 上拿到 GLES 3.2 并持续渲
   `sysdeps/a20` 不含任何 DRM 代码。任何把它当"用户态 DRM 定义来源"的引用
   都是无效的（例如 `docs/distro/known-issues.md` 曾用它来否证 ABI 不一致假设；
   结论侥幸成立，因为真正的用户态是 Alpine 的 libdrm，但依据是错的，已更正）。
-- `user/cmds/core/egl_test.c` 被 `user/Makefile` 从
+- `user/cmds/core/egl_test.c`（已删除）曾被 `user/Makefile` 从
   `LOCAL_CMD_SRCS` 里 filter 掉，**不参与构建，是死代码**。不要把它读成
   "A20OS 有 EGL 自测能力"。
 
@@ -767,7 +767,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，建议单独立项排�
 性能判断都不可信。
 
 另：宿主资源不足时 `tools/a20 run|debug|test` 现在会等待而不是失败
-（`tools/a20_preflight.py`，见 [host-tools.md](host-tools.md)）。
+（`tools/a20_resource.py` 的 QEMU 预检段，原 a20_preflight.py，见 [host-tools.md](host-tools.md)）。
 
 ---
 
@@ -799,7 +799,7 @@ x86_64 挂起）。这让唯一快的环境失去多核，建议单独立项排�
 6. lwIP raw RX 路径双重释放修复（`kernel/net/socket_inet.c`，见
    [../distro/known-issues.md](../distro/known-issues.md)）
 7. Minecraft 切到 Wayland 后端（§9.1）
-8. `tools/build-virglrenderer.sh` 与 `tools/a20_preflight.py` 落地（§5.1 / §10）
+8. `tools/build-virglrenderer.sh` 与宿主资源预检落地（§5.1 / §10；预检现居 `tools/a20_resource.py`）
 
 **接下来，按 §9 的顺序**：
 

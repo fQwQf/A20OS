@@ -102,6 +102,13 @@ int  signal_send_thread_user(int tid, int signum);
 int signal_task_get_pending_info(void *task, int signum, void *out,
                                  size_t size);
 
+/* Whether `signum` is still pending (undelivered) for @task, scoped to the
+ * per-thread queue when @thread_scoped is nonzero and to the shared process
+ * queue otherwise.  Caller must hold a task reference for @task.  Exists so
+ * POSIX-timer overrun accounting can ask without touching signal-state
+ * internals from outside this file (signal-exit boundary contract). */
+int signal_signo_pending_scoped(void *task, int signum, int thread_scoped);
+
 int  signal_task_has_unblocked(void *task);
 int  signal_task_has_fatal(void *task);
 int  signal_task_should_restart(void *task);

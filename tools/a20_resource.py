@@ -335,7 +335,7 @@ def gate(need: Requirement, policy: Policy | None = None, disk_path: Path | None
 
     while True:
         have = HostResources.snapshot(root, need.ports)
-        verdict = evaluate(need, have, policy)
+        verdict = evaluate(need, have, policy, guest=guest)
         if verdict.ok:
             return verdict
         if not wait:
@@ -368,6 +368,131 @@ def preflight(inst: Instance, policy: Policy | None = None, disk_path: Path | No
     policy = policy or Policy.from_env()
     return gate(requirement_for(inst, policy), policy, disk_path,
                 wait=wait, echo=echo, label=inst.name, guest=guest)
+
+
+# --------------------------------------------------------------------------
+# QEMU-launch preflight (consolidated from tools/a20_preflight.py, deleted).
+#
+# Same semantics the old module had, now on this module's single wait loop:
+#   * guest image health (e2fsck -fn) is checked first and is not covered by
+#     A20_PREFLIGHT=0 -- booting a rootfs the last run left dirty is never
+#     what anyone wants;
+#   * memory is required with headroom (1.5x declared + 1 GiB reserve) and
+#     disk with an 8 GiB floor;
+#   * A20_PREFLIGHT=0 skips the wait, A20_PREFLIGHT_TIMEOUT bounds it
+#     (default 900s; CI passes a bounded A20_WAIT_TIMEOUT instead).
+# --------------------------------------------------------------------------
+MEMORY_HEADROOM_RATIO = 1.5
+MEMORY_RESERVE_BYTES = 1 << 30  # 1 GiB
+QEMU_DISK_MIN_MB = 8 << 10      # 8 GiB
+QEMU_WAIT_DEFAULT_S = 900.0
+
+# Mirrors of the Makefile defaults, so the gate sizes an instance that sets
+# nothing the same way the launcher will.  self_check() keeps these honest.
+DEFAULT_MEMORY = "1G"      # Makefile QEMU_MEMORY ?= 1G
+DEFAULT_MEMORY_GUI = "4G"  # tools/targets-pkg.mk QEMU_MEMORY_GUI ?= 4G
+DEFAULT_VCPUS = 1          # Makefile NR_CPUS ?= 1
+
+_SIZE_SUFFIXES = {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+
+
+def parse_size(text: str) -> int:
+    """Parse a QEMU size string like "4G", "512M" or a bare byte count."""
+    s = text.strip()
+    if not s:
+        raise ValueError("empty size")
+    suffix = s[-1].upper()
+    if suffix in _SIZE_SUFFIXES:
+        return int(float(s[:-1]) * _SIZE_SUFFIXES[suffix])
+    return int(s)
+
+
+def self_check(makefile_text: str, pkg_mk_text: str) -> list[str]:
+    """Report drift between the mirrored Makefile defaults and this module.
+
+    Duplicated constants rot silently: bump QEMU_MEMORY_GUI in the Makefile and
+    the gate keeps admitting instances the launcher cannot actually satisfy.
+    `tools/a20 check` calls this so the drift fails a gate instead of turning
+    into a mysterious OOM later.
+    """
+    import re
+    problems: list[str] = []
+    targets = (
+        (makefile_text, r"^QEMU_MEMORY\s*\?=\s*(\S+)", DEFAULT_MEMORY, "Makefile"),
+        (makefile_text, r"^NR_CPUS\s*\?=\s*(\d+)", str(DEFAULT_VCPUS), "Makefile"),
+        (pkg_mk_text, r"^QEMU_MEMORY_GUI\s*\?=\s*(\S+)", DEFAULT_MEMORY_GUI, "targets-pkg.mk"),
+    )
+    for text, pattern, expected, where in targets:
+        found = re.search(pattern, text, re.MULTILINE)
+        if found is None:
+            problems.append(f"{where}: no assignment matching {pattern}")
+        elif found.group(1) != expected:
+            problems.append(
+                f"{where}: default is {found.group(1)} but a20_resource mirrors "
+                f"{expected} -- update both"
+            )
+    return problems
+
+
+def check_guest_image(path: Path) -> list[str]:
+    """Report ext4 errors in a guest rootfs image that is about to be booted.
+
+    The guest images are created without a journal, so a run that does not shut
+    down cleanly -- which is the normal case, since these are booted with a
+    timeout and killed -- leaves on-disk metadata dirty.  The failure then
+    presents as the kernel being broken (udev timeouts, fonts, apps refusing to
+    start), so the launch is refused instead.  Read-only: e2fsck -fn.
+    """
+    import shutil
+    import subprocess
+    if os.environ.get("A20_PREFLIGHT_SKIP_FSCK", "0").strip().lower() in {"1", "yes", "on"}:
+        return []
+    if not path.exists() or shutil.which("e2fsck") is None:
+        return []
+    proc = subprocess.run(["e2fsck", "-fn", str(path)],
+                          capture_output=True, text=True, check=False)
+    if proc.returncode == 0:
+        return []
+    interesting = [
+        line.strip()
+        for line in (proc.stdout + proc.stderr).splitlines()
+        if any(marker in line for marker in
+               ("checksum", "orphaned", "unused inode", "cleared", "Fix?", "UNEXPECTED"))
+    ]
+    if not interesting:
+        return []
+    return [
+        f"guest image {path.name} has filesystem errors:",
+        *(f"  {line}" for line in interesting[:4]),
+        "  it was left dirty by a previous run: these images have no journal and the"
+        " guest is normally killed at timeout rather than shut down.",
+        "  rebuild it with 'tools/a20 build <instance>' before booting"
+        " (or A20_PREFLIGHT_SKIP_FSCK=1 to boot it anyway)",
+    ]
+
+
+def gate_qemu(*, memory: str, vcpus: int, disk_path: str, image: Path | None,
+              label: str, echo=lambda _msg: None) -> None:
+    """Preflight one QEMU launch; raises ResourceShortage when it must not run."""
+    if image is not None:
+        dirty = check_guest_image(image)
+        if dirty:
+            raise ResourceShortage("\n".join(dirty))
+    if os.environ.get("A20_PREFLIGHT", "1").strip().lower() in {"0", "no", "off"}:
+        return
+    raw = os.environ.get("A20_PREFLIGHT_TIMEOUT")
+    if raw is None:
+        budget = QEMU_WAIT_DEFAULT_S
+    else:
+        try:
+            budget = max(0.0, float(raw))
+        except ValueError:
+            budget = QEMU_WAIT_DEFAULT_S
+    policy = Policy(wait_timeout_s=budget)
+    mem_mb = (int(parse_size(memory) * MEMORY_HEADROOM_RATIO) >> 20) \
+        + MEMORY_RESERVE_BYTES // (1 << 20)
+    need = Requirement(mem_mb=mem_mb, cpus=vcpus, disk_mb=QEMU_DISK_MIN_MB)
+    gate(need, policy, Path(disk_path), wait=True, echo=echo, label=label)
 
 
 # --------------------------------------------------------------------------

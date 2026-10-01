@@ -9,6 +9,8 @@
 #include <errno.h>
 #include "fdtable.h"
 #include "../liba20rt/a20_syscall.h"
+#include "../liba20rt/a20_fs.h"
+#define A20_LIBC_OWNS_HOOKS
 #include "../liba20rt/crt0_a20.h"
 
 struct _IO_FILE {
@@ -69,6 +71,10 @@ void __stdio_init(uint32_t h_stdin, uint32_t h_stdout, uint32_t h_stderr)
 
 void __liba20c_init(void)
 {
+    static int inited;
+    if (inited)
+        return;
+    inited = 1;
     __fd_table_init();
     a20_start_info_t *si = a20_get_start_info();
     if (si) {
@@ -76,6 +82,13 @@ void __liba20c_init(void)
     } else {
         __stdio_init(A20_HANDLE_NULL, A20_HANDLE_NULL, A20_HANDLE_NULL);
     }
+}
+
+/* Strong override for crt0_a20.h's weak hook: every program linked with
+ * liba20c gets stdio/fdtable startup before main() runs. */
+void __a20_libc_init(void)
+{
+    __liba20c_init();
 }
 
 static int _write_all(FILE *f, const char *ptr, size_t len)
@@ -181,21 +194,34 @@ int setvbuf(FILE *stream, char *buf, int mode, size_t size)
     return 0;
 }
 
+extern int __normalize_path(const char *path, char *out, size_t out_size);
+
 FILE *fopen(const char *path, const char *mode)
 {
     uint32_t rights = 0;
-    if (mode[0] == 'r') rights = 1;
-    else if (mode[0] == 'w') rights = 2 | 1;
-    else if (mode[0] == 'a') rights = 2 | 1;
+    uint32_t oflags = 0;
+    if (mode[0] == 'r') {
+        rights = 1;
+    } else if (mode[0] == 'w') {
+        rights = 2 | 1;
+        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_TRUNC;
+    } else if (mode[0] == 'a') {
+        rights = 2 | 1;
+        oflags = A20_PATH_OPEN_CREATE | A20_PATH_OPEN_APPEND;
+    }
+
+    char full[1024];
+    if (__normalize_path(path, full, sizeof(full)) < 0)
+        return NULL;
 
     a20_path_open_args_t args;
     args.size       = sizeof(args);
     args.version    = 1;
     args.dir        = A20_HANDLE_NULL;
-    args.flags      = 0;
+    args.flags      = oflags;
     args.rights     = rights;
-    args.path       = (uint64_t)(uintptr_t)path;
-    args.path_len   = (uint32_t)strlen(path);
+    args.path       = (uint64_t)(uintptr_t)full;
+    args.path_len   = (uint32_t)strlen(full);
     args.mode       = 0644;
     args.out_handle = A20_HANDLE_NULL;
 

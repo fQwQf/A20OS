@@ -119,7 +119,7 @@ ENVELOPE_CORPUS: benign completed 20/20, unstable=0, fidelity-bad=0
 
 - 论文主张：seeded random 100 包、66 个运行、25 个触网、ENV 全部在 socket 阻断、NONE 触达 live C2，且无 benign denial（`main.tex:43-48, 494-520`）。
 - 仓库缺失：没有提交 sample manifest、随机种子/抽样脚本、样本 hash、逐样本退出状态、原始串口日志、mediator counter 汇总、pcap/listener 记录或结果 JSON/CSV；也没有 exact-execution CI/Make gate。仓库内无法从数据重新得到 66/25/live-C2 这些数值。
-- runner 丢证据：`run_all.sh` 每个样本覆盖 `/tmp/o_none` 与 `/tmp/o_env`，最终只保留最后一个样本；它 grep errno 字符串，但 `ENVWRAP-STATS deny_type=...` 不含这些字符串，因此论文所称的 counter attribution 没有被 runner 输出或汇总（`tools/corpus/gen_exec_corpus.py:114-140`；`user/cmds/core/envwrap.c:80-97`）。
+- runner 丢证据：`run_all.sh` 每个样本覆盖 `/tmp/o_none` 与 `/tmp/o_env`，最终只保留最后一个样本；它 grep errno 字符串，但 `ENVWRAP-STATS deny_type=...` 不含这些字符串，因此论文所称的 counter attribution 没有被 runner 输出或汇总（`tools/corpus/gen_exec_corpus.py:114-140`；`user/cmds/core/envwrap.c:80-97`（该文件已删除））。
 - 版本未固定：`packages/world/pynode.world` 只列 `python3`、`nodejs`、`npm`，没有锁定论文中的 Node.js 24.18.1 / CPython 3.12.14（`pynode.world:11-20`）。
 - 影响：当前仓库只能支持“存在 exact runner 原型”，不能独立支持论文的 66/25/live-C2 实证结论。
 - 建议：提交不含恶意 payload 的可公开 manifest（ID/hash/生态/entry/结果）、固定 seed 与抽样脚本、锁定镜像 digest/package versions、逐样本结构化输出、counter/pcap 摘要及一键 gate。

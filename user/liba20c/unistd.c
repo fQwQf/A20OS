@@ -96,7 +96,7 @@ static void __resolve_path(const char *path, char *out, size_t out_size)
     }
 }
 
-static int __normalize_path(const char *path, char *out, size_t out_size)
+int __normalize_path(const char *path, char *out, size_t out_size)
 {
     char tmp[PATH_MAX + 1];
     __resolve_path(path, tmp, sizeof(tmp));

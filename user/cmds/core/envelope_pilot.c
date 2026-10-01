@@ -21,9 +21,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "envelope_abi.h"
 
-#define SYS_a20_envelope_create     902
-#define SYS_a20_envelope_enter      903
 #define SYS_landlock_create_ruleset 444
 #define SYS_landlock_add_rule       445
 #define SYS_landlock_restrict_self  446
@@ -33,16 +32,7 @@
 #define LL_FS_READ_FILE  (1ull << 2)
 #define LL_FS_READ_DIR   (1ull << 3)
 
-/* Must match kernel struct a20_env_policy (kernel/include/ipc/envelope.h). */
-struct env_policy {
-    unsigned int allowed_types;
-    unsigned long long rights_by_class[32];
-    unsigned long long time_budget_ns;
-    unsigned long long op_budget;
-    unsigned long long data_budget;
-    unsigned int propagation_types;
-    unsigned int flags;
-};
+
 
 /* Must match kernel landlock_attr_path_beneath_t (kernel/ipc/landlock.c). */
 struct ll_attr_pb {

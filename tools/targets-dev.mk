@@ -5,10 +5,6 @@
 dev-build: $(KERNEL_BIN) $(USER_BUILD_STAMP) $(FS_TEST_IMG) $(EXT4_IMG) $(ISOFS_IMG)
 	@echo "Dev build complete: $(KERNEL_BIN), $(FAT32_IMG), $(EXT4_IMG), $(ISOFS_IMG)"
 
-user_apps: $(USER_BUILD_STAMP)
-
-.PHONY: user_apps
-
 .PHONY: force_user_build force_vbox_rootfs_verify
 force_user_build:
 	@:
@@ -34,4 +30,3 @@ $(NATIVE_BUILD_STAMP): $(USER_BUILD_STAMP) force_native_build
 		--arch "$(ARCH)" --nommu "$(NOMMU)" --opt="$(OPT)" \
 		--binaries "$(NATIVE_BINS)" \
 		--roots "user/liba20rt user/liba20c user/tests user/svc user/svc/fscompat kernel/fs/diskfs kernel/include/drivers/dual"
-fs_img: $(FS_TEST_IMG)

@@ -380,8 +380,7 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
   - (a) `LD_PRELOAD` 垫片：覆写 `__cxa_throw` / `_ZSt20__throw_system_errori`，把返回地址（调用方）
     与 `%edi`（errno）直接写到 stderr。关键是让它不依赖任何 libc（只用原始 `syscall` 指令），
     这样宿主 `gcc -shared -fPIC -nostdlib` 就能编出可用的 .so，绕开「没有 musl 交叉工具链」这个障碍。
-  - (b) 客体侧探针命令：仓库已有先例和现成的构建路径（`user/cmds/core/fdprobe.c`、`mmprobe.c`、
-    `race_probe.c`，产物在 `user/build/x86_64/`），照它加一个专门触发/观测这个 throw 的命令即可。
+  - (b) 客体侧探针命令：仓库曾有先例（`user/cmds/core/fdprobe.c`、`race_probe.c` 已删除，可从 git 历史找回；`mmprobe.c` 仍在），照它加一个专门触发/观测这个 throw 的命令即可。
 
   (a) 已经做出来了，而且确实能装进客体：一个 freestanding 的 `LD_PRELOAD` 垫片，只导出
   `_ZSt20__throw_system_errori` 与 `__cxa_throw`，两者都先把一行
