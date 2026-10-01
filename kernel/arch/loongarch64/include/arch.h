@@ -27,4 +27,14 @@ static inline uintptr_t loongarch64_elf_hwcap(void)
 
 #define ARCH_ELF_HWCAP() loongarch64_elf_hwcap()
 
+
+/* This architecture can dump its own CSRs at panic and at the first switch
+ * back to user; see kernel/arch/loongarch64/platform/debug.c.  Gated on the
+ * same flag that compiles that file, so a build without bring-up tracing gets
+ * the no-op inline from core/arch.h rather than a declared-but-undefined
+ * function. */
+#ifdef CONFIG_DEBUG_BOOT_TRACE
+#define ARCH_HAS_BOOT_TRACE_DUMPS 1
+#endif
+
 #endif
