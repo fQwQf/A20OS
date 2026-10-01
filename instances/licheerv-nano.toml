@@ -37,3 +37,25 @@ boot_timeout = "120s"
 console_check = ["[FDT]", "System ready"]
 commands = ["cat /etc/os-release", "poweroff"]
 expect = ["A20OS", "poweroff"]
+
+[package]
+# No block driver on this board yet, so there is no medium to write and
+# fit-sdcard/grub-iso do not apply.  The artifact is the kernel plus the
+# boot-chain commands to load it; `a20 deploy` builds it and prints the
+# commands below.
+kind = "kernel-bundle"
+
+[handoff]
+method = "tftp"
+commands = [
+    "tftp ${loadaddr} kernel.bin",
+    "booti ${loadaddr} - ${loadaddr}",
+]
+note = """Unverified: no SG2002 board has been powered under A20OS, so this sequence is
+taken from what mainline U-Boot has configs/licheerv_nano_defconfig provides, not from a run.  The load address is
+deliberately absent here -- `a20 package` reads it out of the ELF and writes it
+into uboot.cmd, because a board ldscript may relocate the image.
+
+# U-Boot needs to know where the host is before tftp works:
+#   setenv serverip <host-ip>; setenv ipaddr <board-ip>
+"""
