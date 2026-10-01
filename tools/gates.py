@@ -107,9 +107,43 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
 
     r = subprocess.run(argv, cwd=REPO, check=False, capture_output=True, text=True)
     negate = bool(a.get("negate", False))
+    min_count = a.get("min_count")
 
     if r.returncode == RC_ERROR:
         return False, f"rg error: {r.stderr.strip()}"
+
+    if min_count is not None and not negate:
+        # A bare `pattern` presence check cannot see a *removed* call site: the
+        # name still appears somewhere else in the file, so the gate stays green
+        # through exactly the change it exists to catch. Counting matches is the
+        # only way a presence assertion can notice one fewer lock.
+        want = int(min_count)
+        count_argv = ["rg", "-c", *a.get("rg_flags", ())]
+        if a.get("fixed"):
+            count_argv.append("-F")
+        for g in a.get("globs", [a["glob"]] if a.get("glob") else []):
+            count_argv += ["--glob", g]
+        if a.get("ddash"):
+            count_argv.append("--")
+        count_argv.append(a["pattern"])
+        count_argv.extend(files)
+        c = subprocess.run(count_argv, cwd=REPO, check=False,
+                           capture_output=True, text=True)
+        if c.returncode == RC_ERROR:
+            return False, f"rg error: {c.stderr.strip()}"
+        total = 0
+        for line in c.stdout.splitlines():
+            # `rg -c` prints a bare count for a single file and `file:count` for
+            # several, so both forms have to be accepted or the total silently
+            # reads as zero and the assertion can never be satisfied.
+            head, sep, tail = line.rpartition(":")
+            n = tail if sep and head else line
+            if n.strip().isdigit():
+                total += int(n)
+        if total < want:
+            return False, (f"pattern {a['pattern']!r} matched {total} time(s) in "
+                           f"{', '.join(files)}, need at least {want}")
+        return True, ""
 
     matched = r.returncode == RC_MATCH
     if matched == negate:

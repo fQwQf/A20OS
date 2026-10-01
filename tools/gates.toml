@@ -1344,3 +1344,86 @@ files = ['kernel/platform/qemu-virt-loongarch64/board.c']
 [[gate.assertion]]
 pattern = '\.smp[[:space:]]*='
 files = ['kernel/platform/qemu-virt-x86_64/board.c']
+
+# The DRM object store is device-global by design, so two processes drive it at
+# once (the wlroots allocator creates buffers on one fd, the backend consumes
+# them on another).  These assertions pin the lock that makes that safe, plus the
+# split that keeps it out of the VFS and MM paths.  The matching prose is
+# docs/drivers/guide/lock-order.md, asserted below so code and contract cannot
+# drift apart silently.
+[[gate]]
+name = "drm-store-locking"
+make_target = "check-drm-store-locking"
+
+[[gate.assertion]]
+pattern = "g_drm_store\\.lock"
+files = ["kernel/drivers/gpu/drm.c"]
+
+[[gate.assertion]]
+pattern = "mutex_init\\(&g_drm_store\\.lock\\)"
+files = ["kernel/drivers/gpu/drm.c"]
+
+# detach-under-lock / free-after-unlock is the whole point: releasing the VMO and
+# the host resource allocates, enters the MM layer and talks to the device, none
+# of which may happen with the store lock held.
+[[gate.assertion]]
+pattern = "drm_gem_detach_locked"
+files = ["kernel/drivers/gpu/drm.c"]
+
+[[gate.assertion]]
+pattern = "drm_gem_drop_storage"
+files = ["kernel/drivers/gpu/drm.c"]
+
+# A pin exists so a long operation can run with the lock dropped without the
+# storage being torn down underneath it; every pin needs its matching unpin.
+[[gate.assertion]]
+pattern = "drm_gem_pin\\("
+files = ["kernel/drivers/gpu/drm.c"]
+
+[[gate.assertion]]
+pattern = "drm_gem_unpin\\("
+files = ["kernel/drivers/gpu/drm.c"]
+
+# Counts, not just presence: a plain presence assertion stays green when the
+# locking is stripped out of the handlers, because the name still occurs
+# elsewhere in the file. Verified by deleting lock/unlock pairs -- these are the
+# assertions that go red. The threshold sits well below the real count so an
+# ordinary refactor does not trip it.
+#
+# What this cannot do: catch ONE deleted call site in one handler. A source
+# pattern gate has no view of control flow. The thresholds are here to catch
+# wholesale removal; per-handler discipline stays the SMP smoke tests' job, and
+# lock-order.md carries the rule.
+[[gate.assertion]]
+pattern = "drm_lock\\(\\);"
+min_count = 30
+files = ["kernel/drivers/gpu/drm.c"]
+
+[[gate.assertion]]
+pattern = "drm_unlock\\(\\);"
+min_count = 30
+files = ["kernel/drivers/gpu/drm.c"]
+
+# virtio_gpu.c shares one big_req buffer across all four submit paths; filling it
+# outside inst->command_lock is a use-after-free, not a style question.
+[[gate.assertion]]
+pattern = "mutex_lock\\(&inst->command_lock\\)"
+files = ["kernel/drivers/gpu/virtio_gpu.c"]
+
+# The buffer cap is what stops one ioctl asking for a multi-gigabyte VMO.
+[[gate.assertion]]
+pattern = "DRM_MAX_BUFFER_BYTES"
+files = ["kernel/drivers/gpu/drm.c", "kernel/include/drivers/gpu/drm_geom.h"]
+
+[[gate.assertion]]
+pattern = "drm_dumb_layout"
+files = ["kernel/drivers/gpu/drm.c", "tools/tests/drm_geom_test.c"]
+
+# The documented contract, so the code cannot lose its prose.
+[[gate.assertion]]
+pattern = "g_drm_store\\.lock"
+files = ["docs/drivers/guide/lock-order.md"]
+
+[[gate.assertion]]
+pattern = "inst->command_lock"
+files = ["docs/drivers/guide/lock-order.md"]
