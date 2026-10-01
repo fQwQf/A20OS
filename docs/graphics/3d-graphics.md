@@ -32,9 +32,9 @@
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
 | 3D 传输通路端到端 | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
-| 命令流提交 | ⚠️ **编码已实测，像素未验证** | `gpu3d_test` 现在提交一条真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），host 回 OK：`EXECBUFFER accepted a 76 byte clear stream`。但本机 host renderer 建不出离屏 GL context，vrend 的 context 出生即 `in_error`，4096/4096 像素仍是哨兵值，所以 CLEAR 是否真的落到页面上仍未证明（[gpu-3d-roadmap.md §7](gpu-3d-roadmap.md)） |
+| 命令流提交 | ✅ **本轮已验证到像素** | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并**回读像素**：两遍颜色都中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。此前"编码正确但像素未验证"的状态是三个缺陷叠加的结果——SUBMIT_3D 命令头多带一个 mem_entry 导致命令体被宿主按固定 32 字节偏移截断、从未下发 `CTX_ATTACH_RESOURCE`、`TRANSFER_FROM_HOST` 是空实现；见 §0.5 |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
-| `GET_CAPS` 在本机可用 | ❌ 宿主限制 | host 回 `ERR_INVALID_PARAMETER`，且我们发的参数与 host advertise 的完全一致。换自建 virglrenderer 1.3.0 后仍然如此，所以不是版本问题：virglrenderer 自建的离屏 GL context 仍建不出来。非内核缺陷。**`capset size=308` 不是「renderer 老」的判据**：1.3.0 读出来也是 308（capset 1 本就小），见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md) |
+| `GET_CAPS` 在本机可用 | ✅ **本轮已实测可用** | guest 日志 `GET_CAPS returned a 308 byte capset`。此前记为"宿主限制"是错的：那次失败是**我们**把 capset *index* 当 *id* 发了（提交 `68b54d32`），修掉后同一台宿主正常返回。**`capset size=308` 也不是「renderer 老」的判据**：GET_CAPSET_INFO 按索引查，index 0 就是 capset 1，而 capset 1 本就小（见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md)） |
 | stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。宿主 renderer 已从 1.1.0-2 换成自建的 1.3.0（`tools/build-virglrenderer.sh`，`fca72f5f`），但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`：NVIDIA EGL 下静默降级为 2D，强制 Mesa EGL 则 `eglInitialize failed`。因此这条仍未解决，且卡点已收窄到宿主 EGL/GBM 平台选择（见 gpu-3d-roadmap.md §5.1）（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
 | guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
 | DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念，见 §8.1 |
@@ -118,10 +118,13 @@ buffer，没有依赖旧行为的东西。
 把旧算术放回 `drm_dumb_layout()` 测试退出 134；删掉 15 对 lock/unlock 计数转红。
 
 **本轮没做的事，明确记下。**`virtio_gpu_remove()` 与 `init_transport` 的
-`fail:` 路径直接 `memset` 整个 instance（含 `command_lock` 与 waiters）而不持锁，
-会把别人阻塞其中的 mutex 和已挂链的 waiter 一起清掉；它需要的是设备级
-teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，单独立项。
-`gpu_device_unregister()` 也仍然直接清空槽位、不在存活设备里重新选举。
+`fail:` 路径原先直接 `memset` 整个 instance（含 `command_lock` 与 waiters）而不持锁，
+会把别人阻塞其中的 mutex 和已挂链的 waiter 一起清掉。**本轮已把这两处换成
+`virtio_gpu_release_buffers()`**：释放堆缓冲、清零标量状态，但**不再碰
+`command_lock` 与 waiters**（instance 在静态存储里，保留已初始化的锁本身就是对的）。
+**仍未解决的是**：已经进入命令路径的调用者会继续跑在已被 reset 的 transport 上；
+这需要设备级 teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，仍单独立项。
+`gpu_device_unregister()` 也仍然只是清空槽位、不在存活设备里重新选举。
 
 ### 本轮（`feat/graphics-hardening`，续）：宿主阻塞解除后的实测结论
 
@@ -164,25 +167,7 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
 
 **还没有做到的，以及已知的下一步**（按当前证据排序，不猜）：
 
-1. `gpu3d_test` 的像素回读仍然 4096/4096 全错，首像素还是哨兵 `0xdeadbeef`。
-   **这一条已经定位到具体机制了，见 `tools/virgl-probe/`（提交 `a8dbf7cf`）。**
-   在 kernel 里 submit 之后立刻用同一帧读回该页：资源是活的（`virgl=1`）、
-   backing 已 attach、页已 materialize，读到的仍然是哨兵。所以
-   - **不是传输问题**：字节确实送到了，host 只是没写；
-   - **不是 cache 一致性**（此前的主要怀疑）：kernel 直读 pfn 也看不到变化；
-   - 把同样的 virglrenderer 调用搬出 QEMU 在宿主进程内跑，**不需要 guest 和 QEMU
-     就复现出一模一样的失败**（`submit_cmd` 返回 22 = EINVAL，页未被触碰）；
-   - 根因机制找到了：vrend 在第一条坏命令上把 `ctx->in_error` 置位，之后
-     每一条命令都**静默 no-op**（`vrend_renderer.c` 在 context 切换路径上检查
-     `ctx->in_error`）。所以流里任何一处长度不对，都会让整帧变成空操作，而
-     所有 virtio 响应仍然是 OK —— 这正是"guest 说 PASS、像素不变"的形状。
-   - 顺带更正两处此前被猜错的常量：`PIPE_TEXTURE_2D` 是 **2** 不是 1
-     （`enum pipe_texture_target` 第一个成员是 `PIPE_BUFFER`）；而
-     `SET_FRAMEBUFFER_STATE` 的长度必须是 `2 + nr_cbufs`，单色缓冲即 3。
-     测试里这两处本来就是对的，猜错的是新写的探针。
-   - 仍未定位的是**流里到底哪一条命令的长度不对**：vrend 后续解码把
-     `dst_handle` 读成了 329729这种垃圾值，这正是流错位的样子。有了探针，
-     从"每次一个 boot"变成"每次几秒"。
+1. ~~`gpu3d_test` 的像素回读 4096/4096 全错~~ **已解决，见下面一节。**
 2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
    崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
    `virtio_gpu_dri.so` 都在镜像里，所以不是缺件；是 Mesa 侧与本驱动 UAPI 的交互
@@ -197,6 +182,76 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
 A20OS 不自研着色器编译器，也不自研 DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，
 SPIR-V→host GPU 由 virglrenderer 完成；A20OS 要做的是把中间的运输层补齐
 （GEM 对象模型 + 上游 virgl UAPI），让 stock Mesa 能挂上来。这是后续所有工作的出发点。
+
+---
+
+## 0.5 本轮（`feat/graphics-hardening`，续）：像素回读通了，根因不是命令长度
+
+上面那条"`gpu3d_test` 像素回读全错、首像素是哨兵"现在**通过了**：
+`tools/a20 test smoke-gpu3d-riscv64` 报 `pixel readback ok (0xffff0000 across
+4096 pixels)` 与 `pixel readback ok (0xff0000ff across 4096 pixels)`，两遍颜色都中。
+
+**此前"流里有一条命令长度不对"的结论是错的，且被测量排除。** 逐条核对
+virglrenderer 1.3.0 的 `virgl_protocol.h` 与 `vrend_decode.c`，三条命令的长度
+全都本来就对：`VIRGL_OBJ_SURFACE_SIZE` 5、`SET_FRAMEBUFFER_STATE` 要求
+`2 + nr_cbufs` 即 3、`VIRGL_OBJ_CLEAR_SIZE` 8。日志里那个被当成"流错位证据"的
+`329729`（0x00050801）其实是**中断路径回头上报的下一个 dword**，不是解码读错的
+字段——它只是"这条命令被拒了"的后果，不是原因。
+
+真正的原因是三个，其中第一个是主因：
+
+**一、SUBMIT_3D 的命令头多带了一个 mem_entry，整条流因此被截断。** 这是主因。
+宿主取命令体的代码是
+`iov_to_buf(cmd->elem.out_sg, n, sizeof(struct virtio_gpu_cmd_submit), buf, cs.size)`
+（QEMU `hw/display/virtio-gpu-virgl.c`，`virgl_cmd_submit_3d`）——它**跳过固定的
+32 字节**再读命令体。而我们的 `submit_hdr` 曾经是
+`{ struct virtio_gpu_cmd_submit hdr; struct virtio_gpu_mem_entry entry; } ALIGNED(64)`，
+描述符长度 64。于是宿主跳 32 字节后，先把 `entry` 与对齐填充当成命令体的开头，
+再只拿到 76 字节里剩下的 44 字节。**送进渲染器的一直是一段垃圾。** 而
+SUBMIT_3D 依然回 OK——传输层确实成功了，渲染器静默丢弃而已，所以整条路径上
+没有任何一处会报错。现在 `submit_hdr` 就是裸的 `virtio_gpu_cmd_submit`（32 字节），
+并加了两条 `_Static_assert` 把这个线格式约束钉在编译期。
+
+**二、从来没告诉过宿主"这个 resource 属于这个 context"。**
+`VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE`（0x0202）在 UAPI 头里定义着，但驱动一次
+也没发过。virglrenderer 的资源查找走的是 **context 自己的** 表
+（`ctx->res_hash` / `vrend_renderer_ctx_res_lookup`），不是全局表，所以
+`CREATE_OBJECT(SURFACE)` 引用的 resource 在 context 看来是"非法资源"。这一条被
+探针直接证明：不调 `virgl_renderer_ctx_attach_resource` 就会得到
+`Illegal resource 2` + `submit_cmd -> 22`，调了就是 `-> 0`。现在 EXECBUFFER 会为每个
+`bo_handle` 补发这条命令。注意 SUBMIT_3D 的响应里**不携带** vrend 的解码状态，
+所以这类失败天生对 guest 不可见。
+
+**三、`TRANSFER_FROM_HOST` 之前是一个"校验后返回成功"的空实现。** 它的注释写
+"同步完成的 submit 让 backing 已经是 coherent 的"，这句话是错的：宿主渲染进的是
+它自己那份拷贝，**guest 的页从头到尾没人写**。所以这不是一致性bug，是那批字节
+根本没被写过。现在这条 ioctl 真的下发 `VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D`，
+并在返回前对覆盖到的页做一次 cache invalidate。
+
+顺带修掉两处此前一直错的常量/期望值：
+- `VIRGL_FORMAT_B8G8R8A8_UNORM` 是 **1**（2 是 `B8G8R8X8_UNORM`）。写错的是新写的
+  探针，`gpu3d_test` 本来是对的。
+- `gpu3d_test` 的两个期望像素值**是互换的**。B8G8R8A8 按地址升序存 B,G,R,A，
+  所以红色的小端 u32 是 `0xffff0000`、蓝色是 `0xff0000ff`；原来写反了，即使渲染
+  正确也会报 4096/4096 全错。
+- 探针里 `PIPE_TEXTURE_2D` 应为 **2**（`enum pipe_texture_target` 第一个成员是
+  `PIPE_BUFFER`），这一条上一轮已更正。
+
+**门禁，而且实测会红。** 判据是 `smoke-gpu3d-riscv64` 要求出现
+`pixel readback ok` 与 `PASS`。把那个 mem_entry 放回去（并临时关掉
+`_Static_assert` 以便让**运行期**门禁去抓），门禁立刻转红，且复现的正是历史上的
+那个签名：`FAIL pass 0: 4096/4096 pixels wrong, first pixel is 0xdeadbeef`。
+`_Static_assert` 则把同一个错误挡在编译期。
+
+**探针本身也修好了。** 它此前把 format 传成 2、没有 `make_current`、也没有
+`ctx_attach_resource`，因此它"复现"的失败有一部分是它自己造出来的。现在它注册了
+`virgl_set_log_callback`（QEMU 从不注册，所以 vrend 在 QEMU 里一声不吭），并按
+QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,0,0)` 都不是
+必需的，`ctx_attach_resource` 才是。
+
+**仍未解决**：Mesa 侧的 `eglinfo` 段错误，以及"Mesa 到底挂上没有"缺一张直接证据
+（见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+
 
 ---
 
