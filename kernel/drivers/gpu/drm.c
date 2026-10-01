@@ -909,6 +909,16 @@ static void drm_fb_release(uint32_t fb_id)
     }
     uint32_t h = f->gem_handle;
     memset(f, 0, sizeof(*f));
+    /* A framebuffer can be destroyed while it is still the one bound to the
+     * CRTC. Linux lets that happen, and the CRTC binding has to follow the
+     * object rather than outlive it -- otherwise GETCRTC and GETPLANE keep
+     * reporting an fb_id that GETFB now answers -ENOENT for, and a client
+     * cannot tell a live binding from a freed one. */
+    if (g_crtc.fb_id == fb_id) {
+        g_crtc.fb_id = 0;
+        g_crtc.x = 0;
+        g_crtc.y = 0;
+    }
     drm_gem_t *b = drm_find_gem_locked(h);
     if (b && b->fb_refs > 0) {
         b->fb_refs--;
@@ -964,19 +974,20 @@ static drm_gem_t *drm_gem_alloc_locked(uint32_t width, uint32_t height,
     return NULL;
 }
 
-static void drm_gem_name_bind_locked(uint32_t name, uint32_t handle)
+static int drm_gem_name_bind_locked(uint32_t name, uint32_t handle)
 {
     for (int i = 0; i < g_gem_name_count; i++) {
         if (g_gem_names[i].name == name) {
             g_gem_names[i].handle = handle;
-            return;
+            return 0;
         }
     }
     if (g_gem_name_count >= DRM_MAX_GEM_NAMES)
-        return;
+        return -1;
     g_gem_names[g_gem_name_count].name = name;
     g_gem_names[g_gem_name_count].handle = handle;
     g_gem_name_count++;
+    return 0;
 }
 
 static int drm_gem_name_lookup(uint32_t name, uint32_t *handle)
@@ -1227,11 +1238,17 @@ static int drm_set_client_cap(drm_context_t *ctx, void *arg)
     if (copy_from_user(&cap, arg, sizeof(cap)) < 0)
         return -EFAULT;
     /* DRM_CLIENT_CAP_STEREO_3D=1, DRM_CLIENT_CAP_UNIVERSAL_PLANES=2,
-     * DRM_CLIENT_CAP_ATOMIC=3.  The single-plane KMS model is exposed both
-     * through the legacy interface and as a universal PRIMARY plane, so the
-     * caps are accepted (like Linux, which stores them and changes the
-     * object-query behaviour). */
-    if (cap.capability == 2 || cap.capability == 3)
+     * DRM_CLIENT_CAP_ATOMIC=3.  Only UNIVERSAL_PLANES is honoured: the
+     * single-plane model really is a universal PRIMARY plane, so libdrm's
+     * atomic path agrees with what this driver reports.
+     *
+     * ATOMIC is refused rather than accepted-and-then-failed. MODE_ATOMIC
+     * rejects every non-TEST_ONLY commit with -EINVAL, so advertising the cap
+     * told libdrm to take the atomic path and then handed it nothing but
+     * errors; the desktop only avoided a fallback storm because the session
+     * sets WLR_DRM_NO_ATOMIC=1. Refusing at SET_CLIENT_CAP fails early and
+     * visibly, which is what lets the client pick the legacy path itself. */
+    if (cap.capability == 2)
         return 0;
     return -EINVAL;
 }
@@ -1647,7 +1664,14 @@ static int drm_mode_addfb(drm_context_t *ctx, void *arg)
     if (!f)
         return -ENOMEM;
     fb.depth = 24;
-    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &fb, sizeof(fb)) < 0) {
+        /* The slot is already allocated and referenced. Handing back -EFAULT
+         * without releasing it leaks one framebuffer for the life of the guest,
+         * and the caller never learns the id it would have needed to clean up. */
+        drm_fb_release(fb.fb_id);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
@@ -1673,7 +1697,11 @@ static int drm_mode_addfb2(drm_context_t *ctx, void *arg)
     drm_unlock();
     if (!f)
         return -ENOMEM;
-    return copy_to_user(arg, &fb, sizeof(fb)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &fb, sizeof(fb)) < 0) {
+        drm_fb_release(fb.fb_id);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_mode_rmfb(drm_context_t *ctx, void *arg)
@@ -1867,10 +1895,22 @@ static int drm_mode_getpropblob(drm_context_t *ctx, void *arg)
     } else {
         return -ENOENT;
     }
-    if (b.data && b.length >= len &&
-        copy_to_user((void *)(uintptr_t)b.data, data, len) < 0)
+    /* length is the caller's buffer size on the way in and the blob's real size
+     * on the way out. Reporting success without copying -- which is what a short
+     * or absent b.data used to do here -- hands the caller its own uninitialised
+     * stack as an EDID, so a corrupt monitor is reported where an error belongs.
+     * Linux answers -ENOSPC with the required length, letting the caller size
+     * its buffer and retry. */
+    if (!b.data)
         return -EFAULT;
+    uint32_t cap = b.length;
     b.length = len;
+    if (cap < len) {
+        (void)copy_to_user(arg, &b, sizeof(b));
+        return -ENOSPC;
+    }
+    if (copy_to_user((void *)(uintptr_t)b.data, data, len) < 0)
+        return -EFAULT;
     return copy_to_user(arg, &b, sizeof(b)) < 0 ? -EFAULT : 0;
 }
 
@@ -1982,13 +2022,19 @@ static int drm_gem_flink(drm_context_t *ctx, void *arg)
         return -EFAULT;
     drm_lock();
     drm_gem_t *g = drm_find_gem_locked(h.handle);
-    if (g) {
-        drm_gem_name_bind_locked(h.name, g->handle);
-        h.handle = g->handle;
+    if (!g) {
+        drm_unlock();
+        return -ENOENT;
+    }
+    h.handle = g->handle;
+    /* A full table used to be swallowed, so the export returned success and the
+     * name was simply never bound -- the failure then surfaced much later as a
+     * GEM_OPEN -ENOENT with nothing to connect it to. */
+    if (drm_gem_name_bind_locked(h.name, g->handle) < 0) {
+        drm_unlock();
+        return -ENOSPC;
     }
     drm_unlock();
-    if (!g)
-        return -ENOENT;
     return copy_to_user(arg, &h, sizeof(h)) < 0 ? -EFAULT : 0;
 }
 
@@ -2525,7 +2571,22 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
 
     drm_gem_unpin(g);
     r.res_handle = res_id;
-    return copy_to_user(arg, &r, sizeof(r)) < 0 ? -EFAULT : 0;
+    if (copy_to_user(arg, &r, sizeof(r)) < 0) {
+        /* The resource exists on the host and the caller never learns its id,
+         * so nothing will ever unref it. Release it here instead. */
+        if (ops->resource_unref)
+            ops->resource_unref(drm_gpu_device(), res_id);
+        drm_lock();
+        drm_gem_t *b = drm_find_gem_locked(r.bo_handle);
+        if (b && b->virgl_res_id == res_id) {
+            b->is_virgl = 0;
+            b->virgl_res_id = 0;
+            b->backing_attached = 0;
+        }
+        drm_unlock();
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int drm_virtgpu_resource_info(drm_context_t *ctx, void *arg)
@@ -2850,11 +2911,57 @@ static int drm_close(vfile_t *vf)
     return 0;
 }
 
+/* KMS is a property of the primary node. /dev/dri/renderD128 exists so a
+ * rendering-only client can reach the GEM and VIRTGPU ioctls without owning the
+ * display, and Linux rejects every MODE_* and master request there. This driver
+ * only refused SET_MASTER, so a GBM or EGL process on the render node could
+ * call MODE_SETCRTC and take the screen out from under the compositor. The
+ * master flag itself was never consulted by any KMS handler, so it was never
+ * protection either. */
+static int drm_ioctl_needs_primary_node(unsigned long req)
+{
+    switch (req) {
+    case DRM_IOCTL_AUTH_MAGIC:
+    case DRM_IOCTL_SET_MASTER:
+    case DRM_IOCTL_DROP_MASTER:
+    case DRM_IOCTL_MODE_GETRESOURCES:
+    case DRM_IOCTL_MODE_GETCRTC:
+    case DRM_IOCTL_MODE_SETCRTC:
+    case DRM_IOCTL_MODE_GETCONNECTOR:
+    case DRM_IOCTL_MODE_GETENCODER:
+    case DRM_IOCTL_MODE_GETPLANE:
+    case DRM_IOCTL_MODE_GETPLANERESOURCES:
+    case DRM_IOCTL_MODE_GETFB:
+    case DRM_IOCTL_MODE_GETFB2:
+    case DRM_IOCTL_MODE_ADDFB:
+    case DRM_IOCTL_MODE_ADDFB2:
+    case DRM_IOCTL_MODE_RMFB:
+    case DRM_IOCTL_MODE_PAGE_FLIP:
+    case DRM_IOCTL_MODE_DPMS:
+    case DRM_IOCTL_MODE_CURSOR:
+    case DRM_IOCTL_MODE_CURSOR2:
+    case DRM_IOCTL_MODE_GETGAMMA:
+    case DRM_IOCTL_MODE_GETPROPERTY:
+    case DRM_IOCTL_MODE_GETPROPBLOB:
+    case DRM_IOCTL_MODE_SETPROPERTY:
+    case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
+    case DRM_IOCTL_MODE_ATOMIC:
+    case DRM_IOCTL_MODE_CREATE_DUMB:
+    case DRM_IOCTL_MODE_MAP_DUMB:
+    case DRM_IOCTL_MODE_DESTROY_DUMB:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
 {
     drm_context_t *ctx = vf ? vf->priv : NULL;
     if (!ctx)
         return -EBADF;
+    if (ctx->render_only && drm_ioctl_needs_primary_node(req))
+        return -EACCES;
 
     switch (req) {
     case DRM_IOCTL_VERSION:
