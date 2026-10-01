@@ -188,6 +188,10 @@ typedef struct task_t {
     struct files_struct *files;
     proc_fs_context_t fs;
     int      vfs_open_errno;   /* specific error from the last failed vnode open */
+    int      lookup_errno;     /* error from the last failed path resolution
+                                (was the global g_lookup_errno, which made
+                                concurrent lookups overwrite each other's
+                                failure reason) */
     struct task_t *parent;
     /* Parent-children membership, kept in lockstep with ->parent under
      * proc_lock so wait4/reparent walk O(children) instead of the global

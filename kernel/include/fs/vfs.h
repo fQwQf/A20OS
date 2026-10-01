@@ -354,7 +354,10 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                                    char *resolved_out,
                                    size_t resolved_out_sz,
                                    int *lookup_err);
- extern int g_lookup_errno;
+/* Error from the last failed path resolution on this task (per-task slot;
+ * the boot path with no current task falls back to a static). */
+int  vfs_lookup_errno(void);
+void vfs_set_lookup_errno(int err);
 
 /* Resolve a "/proc/<pid|self>/fd/<n>" path to the target task and fd. */
 int vfs_proc_fd_target(const char *path, struct task_t **task_out, int *fd_out);
