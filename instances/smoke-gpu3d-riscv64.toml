@@ -7,13 +7,18 @@
 # Expect SKIP rather than PASS to be a failure here -- it means GPU_3D did not
 # reach QEMU, which is exactly the regression this instance exists to catch.
 #
-# Requires host virgl support.  The display matters as much as the renderer:
-# virglrenderer needs the host to give it a desktop GL context, and
-# "egl-headless" cannot on a host whose EGL device/gbm platform fails to
-# initialise -- QEMU then silently hands the guest a 2D-only device and every
-# 3D conclusion is measured against nothing.  A GLX-backed display works,
-# because GLX on this host yields a real radeonsi OpenGL 4.6 context.
-# "gtk,gl=on" needs an X display; use "gtk" (no GL) only to watch it fail.
+# Requires host virgl support, and the display matters as much as the renderer:
+# virglrenderer needs the host to hand it a GL context, and a display that cannot
+# initialise EGL makes QEMU hand the guest a 2D-only device -- so every 3D
+# conclusion would be measured against nothing.
+#
+# "egl-headless,gl=on" is the headless-capable form and needs no X.  It does not
+# work out of the box on a host with both a proprietary and an open GPU driver:
+# glvnd enumerates every /dev/dri node, the proprietary one fails eglInitialize
+# under Mesa, and QEMU stops at that first failure instead of falling through to
+# the nodes that work.  tools/with-virgl-display.sh hides the nodes that do not
+# initialise and picks one that does; run the gate through it on such a host.
+# "gtk,gl=on" still works where an X display exists.
 name = "smoke-gpu3d-riscv64"
 description = "riscv64 virtio-gpu virgl 3D transport smoke (GPU_3D device + gpu3d_test)"
 arch = "riscv64"
@@ -24,7 +29,7 @@ gpu_3d = true
 display_mode = "gui"
 
 [gui]
-display = "gtk,gl=on"
+display = "egl-headless,gl=on"
 
 [test]
 commands = ["/bin/gpu3d_test", "poweroff"]
