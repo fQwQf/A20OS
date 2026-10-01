@@ -16,7 +16,29 @@ static vfile_t *g_files[GFILE_MAX];
 static uint32_t g_file_slot_refs[GFILE_MAX];
 static uint64_t g_file_mask[GFILE_WORDS];
 static int g_file_next = 3;
-static spinlock_t g_file_lock = SPINLOCK_INIT;
+
+/* The table was guarded by one global spinlock, which serialized every
+ * get/ref/close of every fd across all CPUs behind the same lock — the fd
+ * hot path (read/write/close resolve their fd here on every syscall).  The
+ * per-slot state now lives under one of VFILE_BUCKET_COUNT bucket locks
+ * picked by a multiplicative hash of the gfd, so unrelated fds proceed in
+ * parallel; the free bitmap and the allocation cursor get their own lock.
+ *
+ * Lock order: bucket lock -> g_file_alloc_lock (only file_close_prepare's
+ * note-free nests them).  No path takes a bucket lock while holding the
+ * alloc lock: allocators reserve the slot under the alloc lock, release it,
+ * then install under the bucket lock — a reserved-but-uninstalled slot is
+ * unreachable because its gfd is only published after installation. */
+#define VFILE_BUCKET_BITS 7
+#define VFILE_BUCKET_COUNT (1u << VFILE_BUCKET_BITS)
+static spinlock_t g_file_bucket_locks[VFILE_BUCKET_COUNT];
+static spinlock_t g_file_alloc_lock = SPINLOCK_INIT;
+
+static inline spinlock_t *file_bucket_lock(int fd)
+{
+    uint32_t h = (uint32_t)fd * 2654435761u;
+    return &g_file_bucket_locks[h >> (32 - VFILE_BUCKET_BITS)];
+}
 static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
 static size_t g_vfile_live;
 static uint64_t g_vfile_next_identity;
@@ -77,8 +99,12 @@ static void file_note_free(int fd)
 
 void file_table_init(void)
 {
-    spin_init(&g_file_lock);
-    lock_counters_register(&g_file_lock, "vfile_table");
+    for (uint32_t i = 0; i < VFILE_BUCKET_COUNT; i++) {
+        spin_init(&g_file_bucket_locks[i]);
+        lock_counters_register(&g_file_bucket_locks[i], "vfile_bucket");
+    }
+    spin_init(&g_file_alloc_lock);
+    lock_counters_register(&g_file_alloc_lock, "vfile_alloc");
     obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), 256);
     memset(g_files, 0, sizeof(g_files));
     memset(g_file_slot_refs, 0, sizeof(g_file_slot_refs));
@@ -91,10 +117,10 @@ void file_table_init(void)
 size_t file_open_fd_count(void)
 {
     size_t count = 0;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    uint64_t flags = spin_lock_irqsave(&g_file_alloc_lock);
     for (int word = 0; word < GFILE_WORDS; word++)
         count += (size_t)__builtin_popcountll(g_file_mask[word]);
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(&g_file_alloc_lock, flags);
     return count;
 }
 
@@ -161,40 +187,50 @@ int file_install_at(int fd, vfile_t *vf)
 {
     if (fd < 0 || fd >= GFILE_MAX || !vf)
         return -EBADF;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    spinlock_t *bucket = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(bucket);
     if (g_files[fd]) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
+        spin_unlock_irqrestore(bucket, flags);
         return -EBUSY;
     }
     g_files[fd] = vf;
     g_file_slot_refs[fd] = 1;
+    spin_unlock_irqrestore(bucket, flags);
+    uint64_t alloc_flags = spin_lock_irqsave(&g_file_alloc_lock);
     file_note_alloc(fd);
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(&g_file_alloc_lock, alloc_flags);
     return fd;
 }
 
 int vfs_alloc_fd(vfile_t *vf)
 {
     if (!vf) return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    uint64_t alloc_flags = spin_lock_irqsave(&g_file_alloc_lock);
     int gfd = file_find_free_from(g_file_next);
     if (gfd < 0)
         gfd = file_find_free_from(3);
-    if (gfd >= 0) {
-        g_files[gfd] = vf;
-        g_file_slot_refs[gfd] = 1;
+    if (gfd >= 0)
         file_note_alloc(gfd);
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(&g_file_alloc_lock, alloc_flags);
+    if (gfd < 0)
+        return -EMFILE;
+    /* The reserved gfd is not published anywhere until the install below
+     * completes, so no reader can observe the in-between state. */
+    spinlock_t *bucket = file_bucket_lock(gfd);
+    uint64_t flags = spin_lock_irqsave(bucket);
+    g_files[gfd] = vf;
+    g_file_slot_refs[gfd] = 1;
+    spin_unlock_irqrestore(bucket, flags);
     return gfd;
 }
 
 vfile_t *vfs_get_file(int fd)
 {
     if (fd < 0 || fd >= GFILE_MAX) return NULL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    spinlock_t *bucket = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(bucket);
     vfile_t *vf = g_files[fd];
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(bucket, flags);
     return vf;
 }
 
@@ -202,11 +238,12 @@ vfile_t *vfs_get_file_ref(int fd)
 {
     if (fd < 0 || fd >= GFILE_MAX)
         return NULL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    spinlock_t *bucket = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(bucket);
     vfile_t *vf = g_files[fd];
     if (vf)
         vfile_get(vf);
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(bucket, flags);
     return vf;
 }
 
@@ -214,13 +251,14 @@ int vfs_ref_fd(int fd)
 {
     if (fd < 0 || fd >= GFILE_MAX)
         return -EBADF;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    spinlock_t *bucket = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(bucket);
     if (!g_files[fd] || g_file_slot_refs[fd] == ~(uint32_t)0) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
+        spin_unlock_irqrestore(bucket, flags);
         return -EBADF;
     }
     g_file_slot_refs[fd]++;
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(bucket, flags);
     return 0;
 }
 
@@ -229,21 +267,24 @@ int file_close_prepare(int fd, vfile_t **closed)
     if (closed) *closed = NULL;
     if (fd < 0 || fd >= GFILE_MAX) return -EBADF;
 
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
+    spinlock_t *bucket = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(bucket);
     vfile_t *vf = g_files[fd];
     if (!vf) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
+        spin_unlock_irqrestore(bucket, flags);
         return -EBADF;
     }
 
     if (--g_file_slot_refs[fd] == 0) {
         a20_eventq_on_vfile_destroy(fd);
         g_files[fd] = NULL;
+        uint64_t alloc_flags = spin_lock_irqsave(&g_file_alloc_lock);
         file_note_free(fd);
+        spin_unlock_irqrestore(&g_file_alloc_lock, alloc_flags);
         if (vfile_put_ref_only(vf) && closed)
             *closed = vf;
     }
-    spin_unlock_irqrestore(&g_file_lock, flags);
+    spin_unlock_irqrestore(bucket, flags);
     return 0;
 }
 
@@ -264,22 +305,37 @@ int file_put_ref_prepare(int fd, vfile_t *vf, vfile_t **closed)
 int vfs_dupfd(int fd, int minfd)
 {
     if (minfd < 0) minfd = 0;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    if (fd < 0 || fd >= GFILE_MAX || !g_files[fd]) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
+    if (fd < 0 || fd >= GFILE_MAX)
+        return -EBADF;
+    uint64_t alloc_flags = spin_lock_irqsave(&g_file_alloc_lock);
+    int newfd = file_find_free_from(minfd);
+    if (newfd >= 0)
+        file_note_alloc(newfd);
+    spin_unlock_irqrestore(&g_file_alloc_lock, alloc_flags);
+    if (newfd < 0)
+        return -EMFILE;
+
+    /* Bucket(old) first to pin the vfile with a reference, then install into
+     * the reserved newfd's bucket; no two bucket locks are ever held. */
+    spinlock_t *src = file_bucket_lock(fd);
+    uint64_t flags = spin_lock_irqsave(src);
+    vfile_t *vf = g_files[fd];
+    if (vf)
+        vfile_get(vf);
+    spin_unlock_irqrestore(src, flags);
+    if (!vf) {
+        uint64_t f = spin_lock_irqsave(&g_file_alloc_lock);
+        file_note_free(newfd);
+        spin_unlock_irqrestore(&g_file_alloc_lock, f);
         return -EBADF;
     }
-    int newfd = file_find_free_from(minfd);
-    if (newfd >= 0) {
-        g_files[newfd] = g_files[fd];
-        g_file_slot_refs[newfd] = 1;
-        vfile_get(g_files[newfd]);
-        file_note_alloc(newfd);
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return newfd;
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return -EMFILE;
+
+    spinlock_t *dst = file_bucket_lock(newfd);
+    flags = spin_lock_irqsave(dst);
+    g_files[newfd] = vf;
+    g_file_slot_refs[newfd] = 1;
+    spin_unlock_irqrestore(dst, flags);
+    return newfd;
 }
 
 int vfs_dup(int fd)
@@ -292,20 +348,35 @@ int vfs_dup3(int oldfd, int newfd, int flags)
     (void)flags;
     if (newfd >= GFILE_MAX || newfd < 0) return -EBADF;
     if (oldfd == newfd) return -EINVAL;
+    if (oldfd < 0 || oldfd >= GFILE_MAX) return -EBADF;
 
-    uint64_t irqflags = spin_lock_irqsave(&g_file_lock);
-    if (oldfd < 0 || oldfd >= GFILE_MAX || !g_files[oldfd]) {
-        spin_unlock_irqrestore(&g_file_lock, irqflags);
+    /* Pin the source vfile under its bucket, then take the destination
+     * bucket; the vfile reference keeps the source alive even if oldfd is
+     * closed concurrently, which POSIX leaves either way. */
+    spinlock_t *src = file_bucket_lock(oldfd);
+    uint64_t irqflags = spin_lock_irqsave(src);
+    vfile_t *vf = g_files[oldfd];
+    if (vf)
+        vfile_get(vf);
+    spin_unlock_irqrestore(src, irqflags);
+    if (!vf)
         return -EBADF;
-    }
+
+    spinlock_t *dst = file_bucket_lock(newfd);
+    irqflags = spin_lock_irqsave(dst);
     if (g_files[newfd]) {
-        spin_unlock_irqrestore(&g_file_lock, irqflags);
+        spin_unlock_irqrestore(dst, irqflags);
+        /* vfs_put_file, not a bare put: oldfd may have been closed
+         * concurrently, making this the last reference, and the finalizer
+         * must then run. */
+        vfs_put_file(vf);
         return -EBUSY;
     }
-    g_files[newfd] = g_files[oldfd];
+    g_files[newfd] = vf;
     g_file_slot_refs[newfd] = 1;
-    vfile_get(g_files[newfd]);
+    spin_unlock_irqrestore(dst, irqflags);
+    uint64_t alloc_flags = spin_lock_irqsave(&g_file_alloc_lock);
     file_note_alloc(newfd);
-    spin_unlock_irqrestore(&g_file_lock, irqflags);
+    spin_unlock_irqrestore(&g_file_alloc_lock, alloc_flags);
     return newfd;
 }
