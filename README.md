@@ -33,7 +33,7 @@
 **高性能、高兼容性的混合内核操作系统**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20LoongArch32%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
-[![Boards](https://img.shields.io/badge/Boards-17-in--tree-blue.svg)](#)
+[![Boards](https://img.shields.io/badge/Boards-18-in--tree-blue.svg)](#)
 
 </div>
 
@@ -63,6 +63,7 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 * **廉价 SBC / 瘦客户机**（均为 build-verified，尚未上板验证）：
   * [Sipeed LicheeRV Nano](docs/platforms/licheerv-nano.md)（SophGo SG2002，riscv64，256 MiB，约 USD 9–14）
   * [Milk-V Duo](docs/platforms/milk-v-duo.md)（SophGo CV1800B，riscv64，64 MiB，约 USD 10–13）
+  * [Allwinner H616/H618](docs/platforms/sun50i-h616.md)（Orange Pi Zero 2 / Zero 3 / Zero 2W，aarch64，约 USD 18–35，**启动链零 blob**）
   * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
   * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
@@ -118,6 +119,7 @@ make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 # 廉价 SBC / 瘦客户机（build-verified，尚未上板验证）
 make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only
 make ARCH=riscv64 BOARD=milk-v-duo    NOMMU=1 RAMFS_USER=1 SWAP=0 BRINGUP=1 kernel-only
+make ARCH=aarch64 BOARD=sun50i-h616    ABI=linux BRINGUP=1 kernel-only
 make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
 make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only
 
