@@ -62,6 +62,12 @@ typedef struct drm_gem {
     uint64_t size;
     int is_virgl;        /* a host-side virgl resource mirrors this object */
     int backing_attached;/* host already has this object's physical pages */
+    /* Which host context this resource was published to, 0 for none.  Tracked
+     * per context rather than as a flag because one buffer is routinely used
+     * from two opens -- wlroots allocates on one fd and draws on another -- and
+     * each open owns a separate virgl context, so attaching to one says
+     * nothing about the other. */
+    uint32_t ctx_attached_for;
     uint32_t virgl_res_id;
     int fb_refs;         /* live framebuffers referencing this GEM */
     int dumb_live;       /* userspace still holds the dumb-buffer handle */
@@ -2619,6 +2625,9 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
     g->virgl_res_id = res_id;
     g->is_virgl = 1;
     g->backing_attached = 0;
+    /* The new resource is a different host object, so the old one's context
+     * attachment does not carry over to it. */
+    g->ctx_attached_for = 0;
     drm_unlock();
     if (old_res && old_res != res_id && ops->resource_unref)
         ops->resource_unref(drm_gpu_device(), old_res);
@@ -2653,6 +2662,7 @@ static int drm_virtgpu_resource_create(drm_context_t *ctx, void *arg)
             g->is_virgl = 0;
             g->virgl_res_id = 0;
             g->backing_attached = 0;
+            g->ctx_attached_for = 0;
         }
         drm_unlock();
         if (ops->resource_unref)
@@ -2709,7 +2719,13 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
      * became a 3D resource without that step -- and any handle Mesa adds to a
      * later frame -- would reach the host with no memory mapped, so the host
      * renders into nothing.  The command stream names bo_handles, not resource
-     * ids, so the kernel is the only place that can resolve them. */
+     * ids, so the kernel is the only place that can resolve them.
+     *
+     * Backing is not sufficient.  virglrenderer resolves a resource through the
+     * context's own list, so a resource whose pages the host has but which the
+     * context has never been told about is rejected as an illegal resource --
+     * and SUBMIT_3D still answers OK, which is what made this look like a
+     * dropped command stream rather than a missing command. */
     if (e.num_bo_handles) {
         if (!e.bo_handles || e.num_bo_handles > 4096)
             return -EINVAL;
@@ -2731,6 +2747,8 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
             drm_lock();
             int usable = g->is_virgl;
             int attached = g->backing_attached;
+            uint32_t res_id = g->virgl_res_id;
+            uint32_t attached_for = g->ctx_attached_for;
             drm_unlock();
             if (!usable) {
                 drm_gem_unpin(g);
@@ -2738,6 +2756,19 @@ static int drm_virtgpu_execbuffer(drm_context_t *ctx, void *arg)
                 return -ENOENT;
             }
             rc = attached ? 0 : drm_gem_attach_backing(g);
+            if (rc == 0 && attached_for != (uint32_t)cid && ops->ctx_attach_resource) {
+                rc = ops->ctx_attach_resource(drm_gpu_device(), (uint32_t)cid,
+                                               res_id);
+                if (rc == 0) {
+                    drm_lock();
+                    /* Id-guarded: a concurrent RESOURCE_CREATE may have replaced
+                     * the resource while we were off the lock, and crediting the
+                     * attachment to the new id would skip the command for it. */
+                    if (g->virgl_res_id == res_id)
+                        g->ctx_attached_for = (uint32_t)cid;
+                    drm_unlock();
+                }
+            }
             drm_gem_unpin(g);
             if (rc < 0) {
                 kfree(handles);
@@ -2838,22 +2869,127 @@ static int drm_virtgpu_context_init(drm_context_t *ctx, void *arg)
 
 static int drm_virtgpu_transfer(drm_context_t *ctx, void *arg, int to_host)
 {
-    (void)ctx;
     struct drm_virtgpu_3d_transfer t;
     if (copy_from_user(&t, arg, sizeof(t)) < 0)
         return -EFAULT;
-    drm_lock();
-    drm_gem_t *g = drm_find_gem_locked(t.bo_handle);
-    int found = g && g->is_virgl;
-    drm_unlock();
-    if (!found)
+
+    gpu_dev_ops_t *ops = drm_gpu_ops();
+    if (!ops)
+        return -ENODEV;
+
+    /* Only the from-host direction moves rendered pixels into guest memory.
+     * The to-host direction is the mirror image and is not reachable from the
+     * VIRTGPU UAPI, so it stays a validated no-op rather than an EINVAL hole. */
+    if (to_host)
+        return 0;
+    if (!ops->transfer_from_host_3d)
+        return -ENODEV;
+
+    int cid = drm_virtgpu_ensure_ctx(ctx);
+    if (cid < 0)
+        return cid;
+
+    drm_gem_t *g = drm_gem_pin(t.bo_handle);
+    if (!g)
         return -ENOENT;
 
-    /* Transfers are driven by the host as part of rendering; with a
-     * synchronously-completing submit the backing is already coherent.  Keep
-     * the ioctl as a validated no-op rather than an EINVAL hole. */
-    (void)to_host;
-    return 0;
+    drm_lock();
+    int usable = g->is_virgl;
+    int attached = g->backing_attached;
+    uint32_t res_id = g->virgl_res_id;
+    uint32_t bpp = g->bpp ? g->bpp : 32;
+    uint64_t gsize = g->size;
+    struct vmo *gvmo = g->vmo;
+    drm_unlock();
+
+    if (!usable || !gvmo || gsize == 0 || !res_id) {
+        drm_gem_unpin(g);
+        return -EINVAL;
+    }
+    if (!attached) {
+        int rc = drm_gem_attach_backing(g);
+        if (rc < 0) {
+            drm_gem_unpin(g);
+            return rc;
+        }
+    }
+
+    /* Byte span the host will write: one row of `w` pixels, then the stride
+     * for each further row.  A region that does not fit is refused rather than
+     * clamped, because a clamped transfer would leave part of the caller's
+     * buffer unwritten and still report success. */
+    if (t.box.w == 0 || t.box.h == 0 || t.box.d == 0 ||
+        t.box.w > UINT32_MAX / (bpp / 8)) {
+        drm_gem_unpin(g);
+        return -EINVAL;
+    }
+    uint64_t row = (uint64_t)t.box.w * (bpp / 8);
+    uint64_t need = row + (uint64_t)(t.box.h - 1) * t.stride;
+    if (t.stride < row || need > gsize) {
+        drm_gem_unpin(g);
+        return -EINVAL;
+    }
+
+    uint32_t npages = (uint32_t)((need + PAGE_SIZE - 1) / PAGE_SIZE);
+    if (npages == 0 || npages > 65536) {
+        drm_gem_unpin(g);
+        return -EINVAL;
+    }
+
+    struct virtio_gpu_mem_entry *entries = kmalloc(npages * sizeof(*entries));
+    if (!entries) {
+        drm_gem_unpin(g);
+        return -ENOMEM;
+    }
+
+    int rc = 0;
+    for (uint32_t i = 0; i < npages; i++) {
+        pfn_t pfn = PFN_NONE;
+        if (vmo_get_page_charged(gvmo, i, NULL, &pfn) < 0) {
+            rc = -ENOMEM;
+            break;
+        }
+        uint64_t off = (uint64_t)i * PAGE_SIZE;
+        uint64_t len = need - off;
+        if (len > PAGE_SIZE)
+            len = PAGE_SIZE;
+        entries[i].addr = (uint64_t)pfn_to_phys(pfn);
+        entries[i].length = (uint32_t)len;
+        entries[i].padding = 0;
+    }
+
+    struct virtio_gpu_box box;
+    memset(&box, 0, sizeof(box));
+    box.x = t.box.x;
+    box.y = t.box.y;
+    box.z = t.box.z;
+    box.w = t.box.w;
+    box.h = t.box.h;
+    box.d = t.box.d;
+
+    if (rc == 0) {
+        rc = ops->transfer_from_host_3d(drm_gpu_device(), (uint32_t)cid, res_id,
+                                        &box, t.level, t.stride, t.layer_stride,
+                                        t.offset, entries, npages);
+        /* The host deposited through the guest frames, so any cached copy of
+         * them is stale.  The pages are already materialised, so this only
+         * walks the range again -- it must happen before the caller reads. */
+        for (uint32_t i = 0; rc == 0 && i < npages; i++) {
+            pfn_t p = vmo_peek_page(gvmo, i);
+            if (p == PFN_NONE)
+                continue;
+            uint64_t off = (uint64_t)i * PAGE_SIZE;
+            uint64_t len = need - off;
+            if (len > PAGE_SIZE)
+                len = PAGE_SIZE;
+            void *va = pfn_to_virt(p);
+            if (va)
+                arch_dma_sync_for_cpu(va, (size_t)len);
+        }
+    }
+    kfree(entries);
+    drm_gem_unpin(g);
+    return rc;
 }
 
 /* ---- vfile backend ---- */

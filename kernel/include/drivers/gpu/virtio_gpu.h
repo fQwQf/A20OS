@@ -253,6 +253,21 @@ struct virtio_gpu_transfer_to_host_3d {
     uint32_t layer_stride;
 } __attribute__((packed));
 
+/* Byte-identical to virtio_gpu_transfer_to_host_3d; the spec spells out both
+ * directions separately and only the command code tells them apart.  This is
+ * the one that makes a rendered resource readable by the guest: without it the
+ * host keeps the result in its own GL object, and reading the guest's page
+ * returns whatever was there before the submit. */
+struct virtio_gpu_transfer_from_host_3d {
+    struct virtio_gpu_ctrl_hdr hdr;
+    struct virtio_gpu_box box;
+    uint64_t offset;
+    uint32_t resource_id;
+    uint32_t level;
+    uint32_t stride;
+    uint32_t layer_stride;
+} __attribute__((packed));
+
 #define VIRTIO_GPU_BLOB_MEM_GUEST  0x0001
 #define VIRTIO_GPU_BLOB_MEM_HOST3D 0x0002
 #define VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST 0x0003
