@@ -181,9 +181,17 @@ struct virtio_gpu_resp_capset_info {
     uint32_t padding;
 } __attribute__((packed));
 
+/* capset_id is an *id*, not an index into GET_CAPSET_INFO's list.  The two are
+ * easy to confuse because GET_CAPSET_INFO takes an index while GET_CAPSET takes
+ * an id, and mixing them fails in a way that looks like a broken host: QEMU
+ * hands this field straight to virgl_renderer_get_cap_set(), whose default arm
+ * reports a zero-length capset for an unknown id, and QEMU turns that into
+ * VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER (0x1205).  Index 0 is capset id 1, so
+ * sending the index answers a question nobody asked.  The wire layout is a pair
+ * of little-endian u32 either way, so this rename is documentation, not ABI. */
 struct virtio_gpu_get_capset {
     struct virtio_gpu_ctrl_hdr hdr;
-    uint32_t capset_index;
+    uint32_t capset_id;
     uint32_t capset_version;
 } __attribute__((packed));
 
