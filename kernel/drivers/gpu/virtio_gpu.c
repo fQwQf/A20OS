@@ -92,8 +92,6 @@ _Static_assert(sizeof(((virtio_gpu_inst_t *)0)->submit_hdr) == 32,
                "submit_hdr must be the bare cmd_submit; a trailing field shifts the payload");
 
 
-static driver_t virtio_gpu_driver;
-
 static void virtio_gpu_mmio_write32(virtio_transport_t *t, uint32_t off, uint32_t val) {
     writel(val, (volatile void *)((uintptr_t)t->priv + off));
 }
@@ -614,6 +612,50 @@ static int virtio_gpu_ctx_attach_resource(virtio_gpu_inst_t *inst, uint32_t ctx_
  * not a coherency problem -- the bytes were never written.  The mem entries are
  * mandatory here: this command is what tells the host which guest frames to
  * deposit into, so a copy without them has no destination. */
+static int virtio_gpu_transfer_from_host_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
+                                            uint32_t resource_id,
+                                            const struct virtio_gpu_box *box,
+                                            uint32_t level, uint32_t stride,
+                                            uint32_t layer_stride, uint64_t offset,
+                                            const struct virtio_gpu_mem_entry *entries,
+                                            uint32_t nr_entries)
+{
+    if (!inst->virgl)
+        return -ENXIO;
+    if (!box || !entries || nr_entries == 0)
+        return -EINVAL;
+
+    /* The trailing entry list makes the request variable-length, which is what
+     * the big sender is for; a fixed descriptor would advertise a body shorter
+     * than the one the device is about to parse. */
+    size_t body = sizeof(struct virtio_gpu_transfer_from_host_3d) +
+                  (size_t)nr_entries * sizeof(struct virtio_gpu_mem_entry);
+    uint8_t *req = kmalloc(body);
+    if (!req)
+        return -ENOMEM;
+
+    struct virtio_gpu_transfer_from_host_3d *hdr =
+        (struct virtio_gpu_transfer_from_host_3d *)req;
+    memset(hdr, 0, sizeof(*hdr));
+    hdr->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+    hdr->hdr.ctx_id = ctx_id;
+    hdr->box = *box;
+    hdr->offset = offset;
+    hdr->resource_id = resource_id;
+    hdr->level = level;
+    hdr->stride = stride;
+    hdr->layer_stride = layer_stride;
+    memcpy(req + sizeof(*hdr), entries,
+           (size_t)nr_entries * sizeof(*entries));
+
+    struct virtio_gpu_ctrl_hdr resp;
+    memset(&resp, 0, sizeof(resp));
+    int rc = virtio_gpu_send_cmd_big(inst, req, body, &resp, sizeof(resp));
+    kfree(req);
+    if (rc < 0)
+        return rc;
+    return resp.type == VIRTIO_GPU_RESP_OK_NODATA ? 0 : -EIO;
+}
 
 /* ---- virtio-gpu 3D command wrappers (virgl passthrough) ---------------- */
 
@@ -719,6 +761,7 @@ static int virtio_gpu_ctx_attach_resource(virtio_gpu_inst_t *inst, uint32_t ctx_
     return 0;
 }
 
+/* VIRTIO_GPU_CMD_SUBMIT_3D: forward a virgl command stream blob. */
 static int virtio_gpu_submit_3d(virtio_gpu_inst_t *inst, uint32_t ctx_id,
                                 const void *cmdbuf, size_t len)
 {
@@ -1122,6 +1165,7 @@ static int gpu_transfer_from_host_3d(struct device *dev, uint32_t ctx_id,
                                             nr_entries);
 }
 
+static const gpu_dev_ops_t gpu_ops = {
     .get_info = gpu_get_info,
     .get_fb   = gpu_get_fb,
     .flush    = gpu_flush,
@@ -1138,6 +1182,8 @@ static int gpu_transfer_from_host_3d(struct device *dev, uint32_t ctx_id,
     .transfer_from_host_3d = gpu_transfer_from_host_3d,
     .submit_3d = gpu_submit_3d,
 };
+
+static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst);
 
 static int virtio_gpu_init_transport(device_t *dev, const virtio_transport_t *transport) {
     virtio_gpu_inst_t *inst = &g_gpu_inst;
@@ -1368,12 +1414,11 @@ fail:
     vt->write32(vt, VIRTIO_MMIO_STATUS,
                 vt->read32(vt, VIRTIO_MMIO_STATUS) | VIRTIO_STATUS_FAILED);
     if (inst->irq_registered) {
-        inst->irq_registered = 0;
         free_irq((uint32_t)vt->irq, inst);
     }
     if (fb_pfn != PFN_NONE)
         pfa_free(fb_pfn, order);
-    memset(inst, 0, sizeof(*inst));
+    virtio_gpu_release_buffers(inst);
     return -1;
 }
 
@@ -1402,6 +1447,44 @@ static int virtio_gpu_probe(device_t *dev) {
     return virtio_gpu_init_transport(dev, &vt);
 }
 
+/* Release what init_transport allocated, without touching the parts of the
+ * instance that other CPUs can be inside.
+ *
+ * This deliberately does not memset the instance.  command_lock is a mutex that
+ * a concurrent transfer or submit may be blocked inside, and waiters is a queue
+ * with entries already linked onto it; zeroing either destroys a lock a thread
+ * is parked on and a wait chain it is waiting to be woken from.  The instance
+ * lives in static storage, so leaving those two initialised is both safe and
+ * correct -- this is a teardown, not a reinitialisation.
+ *
+ * What it does not solve: a caller already inside the command path keeps
+ * running against a reset transport.  Closing that needs a device-level
+ * teardown lock or an in-flight reference count, which is a lifecycle change
+ * beyond this fix. */
+static void virtio_gpu_release_buffers(virtio_gpu_inst_t *inst)
+{
+    if (inst->big_req) {
+        kfree(inst->big_req);
+        inst->big_req = NULL;
+        inst->big_req_cap = 0;
+    }
+    if (inst->big_resp) {
+        kfree(inst->big_resp);
+        inst->big_resp = NULL;
+        inst->big_resp_cap = 0;
+    }
+    inst->virgl = 0;
+    inst->context_init = 0;
+    inst->width = 0;
+    inst->height = 0;
+    inst->bpp = 0;
+    inst->fb_phys = 0;
+    inst->fb_size = 0;
+    inst->fb_order = 0;
+    inst->irq_registered = 0;
+    inst->last_used = 0;
+}
+
 static int virtio_gpu_remove(device_t *dev) {
     virtio_gpu_inst_t *inst = dev ? dev->drv_priv : NULL;
     if (!inst)
@@ -1416,7 +1499,7 @@ static int virtio_gpu_remove(device_t *dev) {
     if (inst->fb_phys)
         pfa_free(phys_to_pfn(inst->fb_phys), inst->fb_order);
     dev->drv_priv = NULL;
-    memset(inst, 0, sizeof(*inst));
+    virtio_gpu_release_buffers(inst);
     return 0;
 }
 
