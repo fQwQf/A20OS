@@ -373,8 +373,12 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
   以为存在 4096 的进程上限，应删除。
 - **`RLIMIT_AS` / `RLIMIT_NPROC` 本轮已实现并强制**（此前完全缺失，
   单进程可耗尽宿主机内存）。
-- 所有 `smoke-*` 门禁硬编码 `-smp 1`（`perf-overhaul.md:127` 明确警告），
-  **单核通过不证明 SMP 正确性**。对一个服务器 OS 的 CI 这是结构性缺陷。
+- **单核门禁不再一统天下（2026-10 起）**：此前所有 `smoke-*` 门禁硬编码
+  `-smp 1`，单核通过不证明 SMP 正确性。现在 vfs-stress 工作负载有了
+  `smoke-vfs-stress-smp2`（NR_CPUS=2，已接入 CI smoke job）与
+  `smoke-vfs-stress-smp8`（NR_CPUS=8，本地资源门禁 `-c 8`）两个真多核
+  变体（与既有的 `smoke-mm-fork-exec-race` 同形），其余门禁仍是单核——
+  把整套门禁矩阵 NR_CPUS 化仍是待办。
 - 全部性能数据来自 QEMU TCG 模拟器，无真机基准。
 
 ## 五、可观测性
@@ -436,6 +440,39 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 - 好的一面：RISC-V IOMMU 是 755 行真实现（fail-closed）；x86_64 TSC 校准
   完整（CPUID 0x15/0x16 + PIT + invariant-TSC）；idle 路径是真实架构停机
   （`sti;hlt` / `wfi`）而非忙等。
+
+## 七点五、2026-10 内核核心收敛（feat/kernel-core-scalability 分支）
+
+以下条目已在本分支落地（各提交含完整论证与验证入口；运行门禁于当前提交
+复验：`smoke-vfs-stress`、`smoke-abi-linux`、`smoke-mm-stress`、
+`smoke-vfs-stress-smp2`、`smoke-vfs-stress-smp8` 均 PASS）：
+
+- **vfile 全局表锁分片**（`kernel/fs/file.c`）：fd 解析热路径原来在
+  `g_file_lock` 单锁下串行（server-readiness 早期版本未把它计入热点排行，
+  是观测盲区——单核门禁下它永远显示 0）。现按 gfd 哈希分 128 桶锁 +
+  独立分配锁；全部桶锁登记进 `/proc/a20/lock_contention`
+  （LOCK_COUNTERS_MAX 64→192），可测而非假设干净。
+- **per-vnode 缓冲写锁**（`vnode_t.write_lock`）：替代 64 桶全局写互斥，
+  两个哈希冲突的无关文件不再互相阻塞。
+- **mount 表稳定指针**：umount 搬移内联数组导致 `vnode->mnt` 指向错误
+  mount 的正确性 bug 已修（堆分配 + 命名空间墓园）；注意 §三 的
+  `pivot_root` 前置件（root/cwd 路径字符串 → mount 引用）仍是独立待办，
+  本修复只消除了指针失真，没有引入 mount 树。
+- **EventQ 反向索引 256 桶分锁**、**路径查找 errno per-task 化**
+  （`vfs_lookup_errno()`）、**slab per-CPU 对象数组**、**timekeeping 读
+  路径 seqlock 化**。
+- **kswapd 式后台回收**（`oom_kswapd_thread`，`/proc/a20/oom` 暴露
+  `kswapd_*` 计数）：回收不再全部同步发生在分配最坏路径。
+- **发布流水线接入 guest 门禁**：release.yml 新增 smoke job，Release 创建
+  以 `smoke-abi-linux`/`smoke-vfs-stress`/`smoke-mm-stress` 通过为前提。
+- **server world 声明层**：`packages/world/server.world`（dropbear/chrony/
+  busybox syslogd+crond）+ overlay init + `server-riscv64` 实例；
+  声明过 `check-instances` 门禁，端到端组装与 SSH 登录验证未做（见 world
+  头注），不声称可用。
+
+仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
+分支在做）、`proc_lock` 超长持有成因、ext4 可写 journal、namespaces 三件套、
+conntrack/NAT、MSI-X/ACPI `_PRT`、多线程匿名内存偶发写坏（known-issues）。
 
 ## 八、阻塞项排序
 

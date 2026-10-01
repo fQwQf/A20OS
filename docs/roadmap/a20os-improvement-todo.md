@@ -135,6 +135,27 @@ IDL 化）已落地，已从本文删除。
   - 完成条件：与 `smoke-futex-stress-aarch64`、`smoke-network-suite-aarch64` 同形，
     至少覆盖 aarch64。
 
+## P1：内核核心锁收敛的后续（2026-10 feat/kernel-core-scalability 分支）
+
+已落地：EventQ 反向索引 256 桶分锁、per-vnode 缓冲写锁、mount 表稳定
+堆指针（umount 搬移指错 `vnode->mnt` 的正确性 bug）、vfile 表 128 桶分锁
+（原 `g_file_lock` 单锁）、路径查找 errno per-task、slab per-CPU 对象数组、
+timekeeping 读路径 seqlock、kswapd 式后台回收（`/proc/a20/oom` 的
+`kswapd_*`）。设计文档锁序表与 [../server-readiness.md](../server-readiness.md)
+§七点五已同步。实测（4 核 `smoke-smp-lock-contention`，net_stress 负载）：
+`vfile_bucket` 全部桶合计 2 次争用 / 0 自旋，`proc: 4498 次 / 973 万自旋`
+仍是压倒性热点。
+
+- [ ] fd 路径的最终形态仍是 per-process 直接存 `vfile_t*`（消掉 gfd 间接层
+      与 `files->lock -> 桶锁` 链）。本次以分桶锁达到同数量级的去串行化，
+      全量改造涉及 25+ 文件（epoll/readiness/eventq/file-locks 都拿 gfd 当
+      全局标识），需要先给 readiness 的 GLOBAL_FD 语义找到替代。
+- [ ] 锁竞争复测缺 vfs 形态负载：`smoke-smp-lock-contention` 目前只跑
+      net_stress；分桶写锁、per-vnode 写锁、mount 表在多核文件负载下的
+      竞争数字没有门禁形态（需要并发 open/write/unmount 的 smp 变体）。
+- [ ] 其余 smoke 门禁仍是 NR_CPUS=1（vfs-stress 已有 smp2/smp8 变体，
+      见 [../server-readiness.md](../server-readiness.md) §四）。
+
 ## P2：仓库卫生与依赖边界
 
 - [ ] 跨架构 `-Werror` 复核
