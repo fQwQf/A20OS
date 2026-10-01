@@ -1,0 +1,29 @@
+# mesa-probe —— CI 门禁用：只含 Mesa 的最小 world，不启动桌面。
+#
+# 配合 `make smoke-mesa-attach`：镜像挂为 /extra，guest 内 chroot 执行
+# tools/tests/mesa-probe-overlay/mesa-probe.sh。
+#
+# 守护的问题：3D 门禁（smoke-gpu3d-*）只证明**传输层**通了——gpu3d_test 自己说
+# DRM_IOCTL_VIRTGPU_*，自己回读像素。而真正决定桌面能否用上 3D 的客户端是
+# libEGL/libgbm 加载 virtio_gpu_dri.so，那是另一条路径、另一组期待（sysfs 枚举、
+# GET_CAP、DRI device 创建）。"3D 能用"与"真实客户端能用"是两个命题。
+#
+# 为什么不用 xfce.world：那份 world 的 overlay 带 /etc/a20-distro 标记，内核会
+# chroot 进去并 exec 桌面会话（overlay/xfce/sbin/init 最后 exec labwc），于是串口
+# 上没有任何 shell 读 stdin，注入的命令无处可去。这里刻意**不**带该标记，镜像只
+# 作为 /extra 挂载，由门禁像 smoke-devtools 那样手动 chroot。
+#
+# 为什么单独列 world 而不是复用 xfce.world 的包列表：xfce.world 混着 labwc、
+# xfce4、字体、浏览器等几百个包，门禁只需要 Mesa，而每次拉包都是分钟级成本与
+# 网络依赖。列表与 xfce.world 保持同步的责任见 tools/tests/mesa-probe-overlay/
+# mesa-probe.sh 的注释。
+
+busybox
+musl
+mesa
+mesa-dri-gallium
+mesa-gl
+mesa-gles
+mesa-egl
+mesa-gbm
+mesa-utils
