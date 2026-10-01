@@ -1698,9 +1698,13 @@ static void print_material_balance(const Game *g)
     printf(" (\033[33m%+.2f pawns\033[0m)\r\n\r\n", balance / 100.0);
 }
 
+/* Build the piece/from/to part of a move's notation, adding the file or rank
+ * hint when another same-type piece could also reach the destination.  Called
+ * before make_move, so g is still the position the move is played from. */
 static void record_move(Game *g, const Move *m)
 {
-    int pt = PIECE_TYPE(m->piece);
+    int type = PIECE_TYPE(m->piece);
+    int to = m->to;
     char *dest;
     int idx = 0;
     char cols[] = "abcdefgh";
@@ -1710,22 +1714,40 @@ static void record_move(Game *g, const Move *m)
         return;
     dest = g->move_notation[g->notation_count];
 
-    if (m->castle == 1) { dest[idx++] = 'O'; dest[idx++] = '-'; dest[idx++] = 'O'; }
-    else if (m->castle == 2) {
+    if (m->castle == 1) {
         dest[idx++] = 'O'; dest[idx++] = '-'; dest[idx++] = 'O';
-        dest[idx++] = '-'; dest[idx++] = 'O';
-    }
-    else {
-        if (pt != PAWN) {
-            dest[idx++] = (pt == KNIGHT) ? 'N' : (pt == BISHOP) ? 'B' :
-                          (pt == ROOK) ? 'R' : (pt == QUEEN) ? 'Q' : 'K';
+    } else if (m->castle == 2) {
+        dest[idx++] = 'O'; dest[idx++] = '-'; dest[idx++] = 'O'; dest[idx++] = '-'; dest[idx++] = 'O';
+    } else {
+        int capture = !IS_EMPTY(m->captured) || m->en_passant;
+        if (type != PAWN) {
+            dest[idx++] = (type == KNIGHT) ? 'N' : (type == BISHOP) ? 'B' :
+                          (type == ROOK) ? 'R' : (type == QUEEN) ? 'Q' : 'K';
+
+            /* Disambiguate only when moving pieces are not pawns and no capture
+             * file is already shown. */
+            if (!capture) {
+                int rivals = 0, same_file = 0;
+                for (int sq = 0; sq < 64; sq++) {
+                    if (sq == m->from || g->board[sq] != (type | PIECE_COLOR(m->piece)))
+                        continue;
+                    if (!piece_reaches(g, sq, to))
+                        continue;
+                    rivals++;
+                    if (COL(sq) == COL(m->from))
+                        same_file = 1;
+                }
+                if (rivals > 0)
+                    dest[idx++] = same_file ? '0' + (8 - ROW(m->from)) : cols[COL(m->from)];
+            }
         }
-        if (!IS_EMPTY(m->captured) || m->en_passant) {
-            if (pt == PAWN) dest[idx++] = cols[COL(m->from)];
+        if (capture) {
+            if (type == PAWN)
+                dest[idx++] = cols[COL(m->from)];
             dest[idx++] = 'x';
         }
-        dest[idx++] = cols[COL(m->to)];
-        dest[idx++] = '0' + (8 - ROW(m->to));
+        dest[idx++] = cols[COL(to)];
+        dest[idx++] = '0' + (8 - ROW(to));
         if (m->promoted != EMPTY) {
             dest[idx++] = '=';
             dest[idx++] = (m->promoted == QUEEN) ? 'Q' : (m->promoted == ROOK) ? 'R' :
@@ -1736,54 +1758,26 @@ static void record_move(Game *g, const Move *m)
     g->notation_count++;
 }
 
+/* Append '+', '#' or nothing after make_move has applied the move. */
+static void note_check_suffix(Game *g)
+{
+    if (g->notation_count <= 0)
+        return;
+    if (!in_check(g, g->side))
+        return;
+
+    char *note = g->move_notation[g->notation_count - 1];
+    int len = strlen(note);
+    if (len >= 7)
+        return;
+    Move replies[MAX_MOVES];
+    note[len] = gen_legal(g, replies) == 0 ? '#' : '+';
+    note[len + 1] = '\0';
+}
+
 /* ======================================================================
  * PGN export
  * ====================================================================== */
-
-/* Natural move text for move `i` (a half-move).  Check/mate needs the position
- * after the move; disambiguation needs every square a same-type piece could
- * have reached the destination from. */
-static void san_append(const Game *g, int i, char *out)
-{
-    const char *note = g->move_notation[i];
-    int side = PIECE_COLOR(g->history[i].piece);
-    int type = PIECE_TYPE(g->history[i].piece);
-    int to = g->history[i].to;
-    int len = 0;
-
-    while (note[len] && len < 6) {
-        out[len] = note[len];
-        len++;
-    }
-
-    if (in_check(g, g->side)) {
-        Move replies[MAX_MOVES];
-        out[len++] = gen_legal(g, replies) == 0 ? '#' : '+';
-    }
-    out[len] = '\0';
-
-    /* Long algebraic already includes from-file for pawns and captures. */
-    if (type == PAWN || strchr(note, 'x'))
-        return;
-
-    /* Count same-type pieces that could also move to `to`. */
-    int rivals = 0, same_file = 0;
-    for (int sq = 0; sq < 64; sq++) {
-        if (sq == g->history[i].from || g->board[sq] != (type | side))
-            continue;
-        if (!piece_reaches(g, sq, to))
-            continue;
-        rivals++;
-        if (COL(sq) == COL(g->history[i].from))
-            same_file = 1;
-    }
-    if (rivals == 0)
-        return;
-
-    char hint = same_file ? '0' + (8 - ROW(g->history[i].from)) : 'a' + COL(g->history[i].from);
-    memmove(out + 2, out + 1, len - 1);
-    out[1] = hint;
-}
 
 static int export_pgn(const Game *g, const char *path)
 {
@@ -1801,11 +1795,9 @@ static int export_pgn(const Game *g, const char *path)
 
     int line = 0;
     for (int i = 0; i < g->notation_count; i++) {
-        char san[12];
-        san_append(g, i, san);
         if (i % 2 == 0)
             line += fprintf(f, "%d. ", i / 2 + 1);
-        line += fprintf(f, "%s ", san);
+        line += fprintf(f, "%s ", g->move_notation[i]);
         if (line >= 76) {
             fprintf(f, "\r\n");
             line = 0;
