@@ -305,6 +305,10 @@ typedef struct mount {
      * namespace-private mount.  The filesystem teardown runs only when the
      * last namespace drops it; VFS_MOUNT_NS_SHARED marks the shared case. */
     int             ns_users;
+    /* Graveyard link: after umount the object stays allocated (vnode->mnt,
+     * dcache and quota caches may still point at it) until its namespace is
+     * torn down. */
+    struct mount   *dead_next;
 } mount_t;
 
 #define VFS_MOUNT_RDONLY 0x1

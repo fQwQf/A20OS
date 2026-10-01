@@ -382,7 +382,7 @@ void vfs_mount_fs_teardown(mount_t *mnt) {
 void vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
     if (!ns) return;
     for (int i = 0; i < ns->nmounts; i++) {
-        mount_t *mnt = &ns->mounts[i];
+        mount_t *mnt = ns->mounts[i];
         if (mnt->ns_users > 0) vfs_mount_fs_teardown(mnt);
     }
 }

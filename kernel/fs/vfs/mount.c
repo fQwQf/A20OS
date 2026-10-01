@@ -1,6 +1,7 @@
 #include "fs/vfs/mount.h"
 #include "fs/vfs/mntns.h"
 #include "core/string.h"
+#include "mm/slab.h"
 
 /*
  * The mount table lives inside the caller's mount namespace
@@ -24,7 +25,7 @@ mount_t *vfs_mount_at(int index)
     mnt_namespace_t *ns = mntns_current();
     if (index < 0 || index >= ns->nmounts)
         return NULL;
-    return &ns->mounts[index];
+    return ns->mounts[index];
 }
 
 mount_t *vfs_mount_alloc(void)
@@ -32,8 +33,11 @@ mount_t *vfs_mount_alloc(void)
     mnt_namespace_t *ns = mntns_current();
     if (ns->nmounts >= MNTNS_MAX_MOUNTS)
         return NULL;
-    mount_t *mnt = &ns->mounts[ns->nmounts++];
+    mount_t *mnt = (mount_t *)kmalloc(sizeof(*mnt));
+    if (!mnt)
+        return NULL;
     memset(mnt, 0, sizeof(*mnt));
+    ns->mounts[ns->nmounts++] = mnt;
     return mnt;
 }
 
@@ -44,16 +48,24 @@ void vfs_mount_remove(mount_t *mnt)
     mnt_namespace_t *ns = mntns_current();
     int idx = -1;
     for (int i = 0; i < ns->nmounts; i++) {
-        if (&ns->mounts[i] == mnt) {
+        if (ns->mounts[i] == mnt) {
             idx = i;
             break;
         }
     }
     if (idx < 0)
         return;
+    /* Detach without freeing: the table previously compacted an inline array
+     * here, which repointed every vnode->mnt, dcache, quota and xattr
+     * reference at the mount that shifted into the slot.  The heap object is
+     * parked on the namespace graveyard instead and freed when the namespace
+     * dies, so stale holders read a frozen, coherent mount instead of
+     * someone else's. */
+    mnt->dead_next = ns->dead_mounts;
+    ns->dead_mounts = mnt;
     for (int i = idx; i < ns->nmounts - 1; i++)
         ns->mounts[i] = ns->mounts[i + 1];
-    memset(&ns->mounts[ns->nmounts - 1], 0, sizeof(ns->mounts[ns->nmounts - 1]));
+    ns->mounts[ns->nmounts - 1] = NULL;
     ns->nmounts--;
 }
 
@@ -63,8 +75,8 @@ mount_t *vfs_find_mount(const char *path)
     mount_t *best = NULL;
     size_t best_len = 0;
     for (int i = 0; i < ns->nmounts; i++) {
-        size_t len = strlen(ns->mounts[i].path);
-        if (strncmp(path, ns->mounts[i].path, len) == 0 &&
+        size_t len = strlen(ns->mounts[i]->path);
+        if (strncmp(path, ns->mounts[i]->path, len) == 0 &&
             (len == 1 || path[len] == '\0' || path[len] == '/') &&
             (len > best_len
 #ifdef CONFIG_EXTERNAL_ROOT
@@ -74,7 +86,7 @@ mount_t *vfs_find_mount(const char *path)
              || (len == 1 && best_len == 1)
 #endif
             )) {
-            best = &ns->mounts[i];
+            best = ns->mounts[i];
             best_len = len;
         }
     }
