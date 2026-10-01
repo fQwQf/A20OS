@@ -15,6 +15,7 @@
 struct device;
 struct audio_dev_ops;
 struct virtio_gpu_mem_entry;
+struct virtio_gpu_box;
 
 #define CLASS_DEVICE_NAME_MAX 32
 
@@ -171,6 +172,25 @@ typedef struct gpu_dev_ops {
                                   uint32_t depth, uint32_t array_size,
                                   uint32_t last_level, uint32_t nr_samples, uint32_t flags);
     int     (*resource_unref)(struct device *dev, uint32_t resource_id);
+    /* Publish a resource to a context.  This is not implied by resource
+     * creation: virglrenderer keeps its resources on a per-context list, and a
+     * command stream that names a resource the context has never seen is
+     * rejected as an illegal resource while the host still reports the submit
+     * as successful.  Every 3D resource a context will reference must pass
+     * through here first. */
+    int     (*ctx_attach_resource)(struct device *dev, uint32_t ctx_id,
+                                   uint32_t resource_id);
+    /* Pull a rendered region of a 3D resource back into guest memory.  This is
+     * the only way a guest observes the result of a submit: the host renders
+     * into its own copy, so a guest that reads its own pages without asking for
+     * a transfer reads pre-render contents no matter what the renderer did. */
+    int     (*transfer_from_host_3d)(struct device *dev, uint32_t ctx_id,
+                                     uint32_t resource_id,
+                                     const struct virtio_gpu_box *box,
+                                     uint32_t level, uint32_t stride,
+                                     uint32_t layer_stride, uint64_t offset,
+                                     const struct virtio_gpu_mem_entry *entries,
+                                     uint32_t nr_entries);
     int     (*submit_3d)(struct device *dev, uint32_t ctx_id,
                          const void *cmdbuf, size_t len);
 } gpu_dev_ops_t;
