@@ -123,6 +123,68 @@ buffer，没有依赖旧行为的东西。
 teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，单独立项。
 `gpu_device_unregister()` 也仍然直接清空槽位、不在存活设备里重新选举。
 
+### 本轮（`feat/graphics-hardening`，续）：宿主阻塞解除后的实测结论
+
+前面把 GET_CAPS 归因于"宿主 renderer 建不出离屏 GL context"。**这个结论是错的。**
+在一台裸机宿主（AMD + NVIDIA 双 GPU、无 X、无头显）上实测，宿主完全能给出
+OpenGL 4.6 context；错的是我们自己把 capset **index** 当成 capset **id** 发给了
+GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
+`GET_CAPS returned a 308 byte capset`，此前是 0x1205。
+
+顺带更正一条本文档 §0 里的判断：`capset size=308` 既不能证明 renderer 老，也不能
+证明 renderer 新。GET_CAPSET_INFO 按**索引**查，index 0 就是 capset 1，而 capset 1
+本来就是小的那一个（几千字节的是 capset 2）。`tools/build-virglrenderer.sh` 里用
+`STALE_CAPSET_BYTES=1024` 判断新旧量的是 capset 1，这个判据不成立。
+
+宿主侧要拿到 context，需要三件事同时成立，缺一件都是**静默降级成 2D-only**：
+
+1. EGL vendor 必须是 Mesa。双 GPU 宿主上 glvnd 默认选私有驱动，而它的 EGL 没有
+   virgl 能用的 device/surfaceless 平台。
+2. 必须把私有 GPU 的 `/dev/dri` 节点藏起来。Mesa 会枚举**所有** DRM 节点，私有 GPU
+   的节点在 Mesa 下 `eglInitialize` 失败（`gbm device using incorrect/incompatible
+   backend`），而 QEMU **不会**跳过它继续试后面的节点。
+3. `egl-headless` 必须显式带 `gl=on`，否则 QEMU 直接拒绝创建设备。
+
+这三条由 `tools/with-virgl-display.sh` 封好（用非特权 user+mount namespace，
+不需要 root）。在这台宿主上用它跑 `tools/a20 test smoke-gpu3d-riscv64`，可以稳定
+走到 `GET_CAPS returned a 308 byte capset`。
+
+**XFCE GUI 实例（xfce-x86_64）实测**：会话能起来，`labwc` 认到
+`Found config * for output Virtual-1`，并通过我们的 DRM/KMS 路径反复呈现
+（`[DRM] present handle=N 1024x768`）。过程中修掉三处：
+
+- `QEMU_GUI_DEVICES_x86_64` 没有键盘鼠标。wlroots 的 multi backend 先试 libinput，
+  找不到输入设备就**放弃整个 session**（不会退回 DRM），而
+  `start-xfce4-session` 不设 `WLR_LIBINPUT_NO_DEVICES`。
+- `tools/a20 test` 对任何没写 `[machine]. memory` 的实例都 `NameError`
+  （`d52c8ccb` 把三个常量挪进 `a20_resource.py` 却没加进 import）。
+- PRIME 导出返回 fd 号所在namespace搞错，`-EIO`，wlroots 的
+  `render/allocator/drm_dumb.c` 因此 "Failed to allocate buffer"。这是
+  `e8149cad` 引入的回归，由 guest 日志逮到。
+
+**还没有做到的，以及已知的下一步**（按当前证据排序，不猜）：
+
+1. `gpu3d_test` 的像素回读仍然 4096/4096 全错，首像素还是哨兵 `0xdeadbeef`。
+   已排除：命令流常量（对着 `virgl_protocol.h` 逐个核过 CREATE_OBJECT=1、
+   SET_FRAMEBUFFER_STATE=5、CLEAR=7、OBJECT_SURFACE=8、`VIRGL_OBJ_CLEAR_SIZE=8`、
+   `PIPE_CLEAR_COLOR0=0x4` 全对）、宿主 context 是否存在
+   （`RESOURCE_CREATE_3D` 返回 OK_NODATA，而 QEMU 该路径在 context 为 NULL 时会置
+   error，所以 context 在）、`CTX_CREATE` 的 capset（`context_init=1` 掩成
+   capset id 1 = VIRGL，是合法值）。**剩下的头号嫌疑是 cache 一致性**：host 通过
+   DMA 直接写 guest RAM，guest 侧若已有 cached 映射就读到旧值。这需要 guest 侧
+   对该资源做 cache 失效（对应 Linux 的 `virtio_gpu_flush_resource` 一类动作），
+   我们目前没有这条路径。
+2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
+   崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
+   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件；是 Mesa 侧与本驱动 UAPI 的交互
+   还需要继续查。
+3. 因此**还不能说"Mesa 已经挂上 virtio_gpu_dri"**。已有的是强旁证：强制
+   `A20_RENDERER=gl`（wlroots 在 renderer 创建失败时是直接放弃而非退回）后 session
+   仍然起来并呈现，且此前失败日志里的 `render/allocator/drm_dumb.c` +
+   `render/swapchain.c` 正是 wlroots GL renderer 的代码路径。但这是推断，不是直接
+   观测——`MESA_DEBUG=1` 没有输出，`egl-headless` 又不支持 `screendump`
+   （它按设计就没有 display surface），所以还没有一张桌面截图作为直接证据。
+
 A20OS 不自研着色器编译器，也不自研 DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，
 SPIR-V→host GPU 由 virglrenderer 完成；A20OS 要做的是把中间的运输层补齐
 （GEM 对象模型 + 上游 virgl UAPI），让 stock Mesa 能挂上来。这是后续所有工作的出发点。
