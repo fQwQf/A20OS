@@ -1,0 +1,28 @@
+# Rockchip RK3328 (Rock64, NanoPi R2S) bring-up.
+#
+# Stage-1 instance, like the SophGo ones: no [package] section, because the
+# board's eMMC controller and Ethernet MAC are declared in rk3328_platform.h
+# but not driven yet.  There is nothing to put on a disk.
+#
+# This board has no blob-free boot path in the way the Allwinner parts do: the
+# SPL's DDR training binary comes from rkbin.  BL31 is TF-A's rk3328 platform,
+# which is open source, so that half is fine.
+name = "rk3328"
+description = "Rockchip RK3328 (Rock64 / NanoPi R2S) aarch64 bring-up with a serial target"
+arch = "aarch64"
+board = "rk3328"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 1500000
+# No reset line: recovery is a power cycle.  boot_timeout covers
+# SPL -> TF-A -> U-Boot -> kernel.
+boot_wait = 4
+boot_timeout = "120s"
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]

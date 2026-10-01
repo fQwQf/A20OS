@@ -3,6 +3,13 @@
 #include "platform.h"
 #include "core/stdio.h"
 
+/* virtio-mmio probing only makes sense on a board that publishes a VIRTIO_BASE
+ * window.  The RK3328 has no such transport and its board header leaves the
+ * constant undefined.  The probe symbols still have to exist -- the
+ * driver-module export table names them unconditionally -- so the no-transport
+ * case at the bottom reports "absent" instead of reading a made-up address. */
+#ifdef VIRTIO_BASE
+
 static uint32_t mmio_read(virtio_transport_t *t, uint32_t off) {
     return *(volatile uint32_t *)((uintptr_t)t->priv + off);
 }
@@ -44,3 +51,17 @@ int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
 int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
     return arch_virtio_probe_type(1, index, vt);
 }
+
+#else /* !VIRTIO_BASE */
+
+int arch_virtio_blk_probe(int index, virtio_transport_t *vt) {
+    (void)index; (void)vt;
+    return -1;
+}
+
+int arch_virtio_net_probe(int index, virtio_transport_t *vt) {
+    (void)index; (void)vt;
+    return -1;
+}
+
+#endif /* VIRTIO_BASE */

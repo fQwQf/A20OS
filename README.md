@@ -33,6 +33,7 @@
 **高性能、高兼容性的混合内核操作系统**
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](#) [![Architecture](https://img.shields.io/badge/Arch-RISC--V%20%7C%20ARM64%20%7C%20x86__64%20%7C%20LoongArch64%20%7C%20LoongArch32%20%7C%20PPC64LE%20%7C%20ARMv7-orange.svg)](#)
+[![Boards](https://img.shields.io/badge/Boards-17-in--tree-blue.svg)](#)
 
 </div>
 
@@ -54,11 +55,28 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 > 逐项兼容等级详见 [kernel/abi/linux/syscall_coverage.md](kernel/abi/linux/syscall_coverage.md)。
 
 ## 支持的硬件平台
-A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支持和维护以下目标：
-* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）
+A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支持和维护以下目标。
+用 `tools/a20 boards` 可以列出树里全部板子及其架构、SMP 与链接脚本情况。
+
+* **虚拟机环境 (QEMU)**：`qemu-virt-riscv64`, `qemu-virt-aarch64`, `qemu-virt-x86_64`, `qemu-virt-loongarch64`、`qemu-virt-ppc64le`（pSeries）、`virtualbox-aarch64`
 * **物理开发板**：星光 2 (StarFive VisionFive 2)、龙芯 (Loongson LS2K1000)
+* **廉价 SBC / 瘦客户机**（均为 build-verified，尚未上板验证）：
+  * [Sipeed LicheeRV Nano](docs/platforms/licheerv-nano.md)（SophGo SG2002，riscv64，256 MiB，约 USD 9–14）
+  * [Milk-V Duo](docs/platforms/milk-v-duo.md)（SophGo CV1800B，riscv64，64 MiB，约 USD 10–13）
+  * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
+  * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
 * **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向 NaiLoong Core LA32R SoC（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
+
+### 关于 NOMMU
+
+`NOMMU_SUPPORTED_ARCHES = riscv64 riscv32 aarch64 arm32 armv7m`，无分页路径在这些架构上是真实存在的代码路径（mm/proc/ipc/abi 共 173 处），不是仅能启动的 stub。小内存板（如 Milk-V Duo 的 64 MiB）应当走 NOMMU：
+
+```sh
+make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 SWAP=0 BRINGUP=1 kernel-only
+```
+
+`tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口。
 
 ## 构建与运行
 
@@ -96,6 +114,12 @@ make ARCH=ppc64le BOARD=qemu-virt-ppc64le run
 # LoongArch32 (LA32R) 内核 bring-up（NaiLoong Core，需 LA32R 工具链，
 # 无 QEMU 目标；验证走 cemu 模拟器，见 docs/platforms/loongarch32.md）
 make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
+
+# 廉价 SBC / 瘦客户机（build-verified，尚未上板验证）
+make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only
+make ARCH=riscv64 BOARD=milk-v-duo    NOMMU=1 RAMFS_USER=1 SWAP=0 BRINGUP=1 kernel-only
+make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
+make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only
 
 # STM32F103 64 KiB Flash / 20 KiB SRAM 固件
 make stm32f103-bringup
