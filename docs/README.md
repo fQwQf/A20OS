@@ -59,6 +59,7 @@
 - [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
 - [platforms/licheerv-nano.md](platforms/licheerv-nano.md)、[platforms/milk-v-duo.md](platforms/milk-v-duo.md)、[platforms/rk3328.md](platforms/rk3328.md)、[platforms/sun50i-h616.md](platforms/sun50i-h616.md)、[platforms/x86_64-pc.md](platforms/x86_64-pc.md)：廉价 SBC / 瘦客户机目标（build-verified，尚未上板验证）
 - `tools/a20 boards`：列出树里全部板子及其架构、SMP、链接脚本情况
+- [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
 - [platforms/loongarch32.md](platforms/loongarch32.md)：LoongArch32（LA32R / NaiLoong Core）移植与验证
