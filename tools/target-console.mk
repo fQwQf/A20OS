@@ -4,7 +4,6 @@
 # that tools/a20 derives from its [target] section; the recipes that act on the
 # board live here, so adding a board or a programmer never means editing Python.
 
-TARGET_SERIAL ?=
 TARGET_MEDIA_DEVICE ?=
 TARGET_BOOT_MEDIA ?=
 

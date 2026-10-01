@@ -90,6 +90,12 @@ jobs:
           make check-abi-boundary
           make check-envelope-coverage
 
+      - name: 'Source contracts: task-state boundary, ABI smoke contract, doc drift'
+        run: |
+          make check-task-state-boundary
+          make check-abi-smoke-gate
+          make check-doc-drift
+
   # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
   # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
   # 之后悄悄落后——arm32、riscv32、ppc64le 长期没进 CI 就是这么来的。

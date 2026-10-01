@@ -1,11 +1,11 @@
-"""Smoke/gate case table -- GENERATED, do not edit by hand.
+"""Smoke/gate case table -- source of truth for tools/smoke.py.
 
-Produced by tools/smoke_extract.py and verified against make's own expansion
-by tools/smoke_verify_extract.py: every argv, log path, timeout, pass pattern,
-forbidden pattern and timeout flag matched exactly at the time of generation.
-
-The extraction source is pinned in smoke_extract.py (SOURCE_REV) because these
-recipes have been replaced in the .mk files; regenerate from there.
+Originally migrated from the pre-migration inline make recipes (every argv, log
+path, timeout, pass pattern, forbidden pattern and timeout flag was verified
+against make's own expansion at migration time).  The pinned-revision extractor
+that generated it is gone; edit this table directly and keep it in sync with
+the .mk files it replaced -- tools/smoke_audit.py (check-smoke-cases) fails when
+a case and a make target disagree.
 
 Semantics worth knowing when editing a case:
   expect      every pattern must match the log (grep -q, i.e. a regex)
@@ -33,17 +33,18 @@ CASES: dict[str, dict] = {
     },
     'smoke-audio-userspace': {
         'gate': {'mem': '1G', 'cpus': '1'},
-        'pre': ['rm -f user/build/x86_64/hda.a20drv'],
+        'pre': ['rm -f user/build/x86_64/hda.a20drv', 'rm -f /tmp/a20-smoke-audio.wav'],
         'build': {'vars': ['ARCH=x86_64', 'BOARD=qemu-virt-x86_64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/audio-userspace-x86_64.log',
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/audioplay --tone 440 --duration 5000', 'poweroff']},
         'timeout': '20s',
         'qemu': 'qemu-system-x86_64',
-        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-audiodev', 'driver=wav,id=audio0,path=$wav', '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=audio0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf'],
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-audiodev', 'driver=wav,id=audio0,path=/tmp/a20-smoke-audio.wav', '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=audio0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf'],
         'expect': ['audioplay: 440 Hz for 5000 ms -> /dev/audio', 'audioplay: playback complete', '\\[HDA\\] playback starts=1 underruns=0', 'System is going down for power-off NOW'],
         'forbid': ['audioplay: playback failed'],
+        'post': ['python3 tools/check_wav_pcm.py --min-frames 8000 /tmp/a20-smoke-audio.wav'],
         'timeout_msg': False,
-        'pass_msg': 'smoke-audio-userspace: PASS; log=$log wav=$wav',
+        'pass_msg': 'smoke-audio-userspace: PASS; log=$log wav=/tmp/a20-smoke-audio.wav',
     },
     'smoke-clock-vdso': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -302,6 +303,7 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mlibc-riscv64.log',
+        'post-build': ['make mlibc-rootfs'],
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/mlibc-hello-rv', '/bin/mlibc-pipeexec-rv', '/bin/mlibc-pipeexec-rv', 'poweroff']},
         'timeout': '40s',
         'qemu': 'qemu-system-riscv64',
@@ -316,6 +318,7 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mlibc-fork-riscv64.log',
+        'post-build': ['make mlibc-rootfs'],
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/mlibc-fork-rv', 'poweroff']},
         'timeout': '40s',
         'qemu': 'qemu-system-riscv64',
@@ -330,6 +333,7 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mlibc-mksh-riscv64.log',
+        'post-build': ['make mlibc-rootfs'],
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/mlibc-mksh /bin/test-mlibc-mksh.sh', 'poweroff']},
         'timeout': '60s',
         'qemu': 'qemu-system-riscv64',
@@ -344,6 +348,7 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mlibc-sbase-riscv64.log',
+        'post-build': ['make mlibc-sbase-rootfs'],
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/test-mlibc-sbase.sh', 'poweroff']},
         'timeout': '60s',
         'qemu': 'qemu-system-riscv64',
@@ -761,13 +766,14 @@ CASES: dict[str, dict] = {
     },
     'smoke-pci-portability': {
         'gate': {'mem': '1G', 'cpus': '1'},
-        'pre': ['rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv'],
+        'pre': ['rm -f user/build/loongarch64/hda.a20drv user/build/loongarch64/nvme.a20drv',
+                'mkdir -p .kernel-build && rm -f .kernel-build/nvme-scratch.img && truncate -s 64M .kernel-build/nvme-scratch.img'],
         'build': {'vars': ['ARCH=loongarch64', 'BOARD=qemu-virt-loongarch64', 'ABI=both', 'BRINGUP=0', 'CONFIG_HDA_SMOKE_TEST=y', 'DRVMOD_SMOKE=1'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/pci-portability-loongarch64.log',
         'stdin': None,
         'timeout': '20s',
         'qemu': 'qemu-system-loongarch64',
-        'argv': ['qemu-system-loongarch64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-audiodev', 'driver=none,id=audio0', '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=audio0', '-drive', 'file=$image,if=none,format=raw,id=nvme0', '-device', 'nvme,drive=nvme0,serial=A20NVME', '-drive', 'file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/kernel.elf'],
+        'argv': ['qemu-system-loongarch64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-audiodev', 'driver=none,id=audio0', '-device', 'intel-hda', '-device', 'hda-duplex,audiodev=audio0', '-drive', 'file=.kernel-build/nvme-scratch.img,if=none,format=raw,id=nvme0', '-device', 'nvme,drive=nvme0,serial=A20NVME', '-drive', 'file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev-hda-smoke/kernel.elf'],
         'expect': ['HDA_STREAM_SMOKE: PASS', 'NVME_CAP_SMOKE: PASS', 'NVME_IO_SMOKE: PASS', '\\[NVME\\] driver registered in core: 0'],
         'forbid': [],
         'timeout_msg': False,
@@ -1027,16 +1033,59 @@ CASES: dict[str, dict] = {
     },
     'smoke-virtio-sound': {
         'gate': {'mem': '1G', 'cpus': '1'},
-        'pre': [],
+        'pre': ['rm -f /tmp/a20-smoke-audio.wav'],
         'build': {'vars': ['ARCH=x86_64', 'BOARD=qemu-virt-x86_64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/virtio-sound-x86_64.log',
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/audioplay --tone 440 --duration 5000', 'poweroff']},
         'timeout': '20s',
         'qemu': 'qemu-system-x86_64',
-        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-audiodev', 'driver=wav,id=audio0,path=$wav', '-device', 'virtio-sound-pci,audiodev=audio0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf'],
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-snapshot', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-audiodev', 'driver=wav,id=audio0,path=/tmp/a20-smoke-audio.wav', '-device', 'virtio-sound-pci,audiodev=audio0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-linux-dev/kernel.elf'],
         'expect': ['audioplay: 440 Hz for 5000 ms -> /dev/audio', 'audioplay: playback complete', 'System is going down for power-off NOW'],
         'forbid': ['audioplay: playback failed'],
+        'post': ['python3 tools/check_wav_pcm.py --min-frames 8000 /tmp/a20-smoke-audio.wav'],
         'timeout_msg': False,
-        'pass_msg': 'smoke-virtio-sound: PASS; log=$log wav=$wav',
+        'pass_msg': 'smoke-virtio-sound: PASS; log=$log wav=/tmp/a20-smoke-audio.wav',
+    },
+    'smoke-unix-ch': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/unix-ch-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/unix_ch_test', 'poweroff']},
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['UNIX_CH: PASS', 'System is going down for power-off NOW'],
+        'forbid': [],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-unix-ch: PASS; log saved to $log',
+    },
+    'smoke-bpf': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/bpf-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/bpf_smoke', 'poweroff']},
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['BPF_SMOKE: PASS', 'System is going down for power-off NOW'],
+        'forbid': [],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-bpf: PASS; log saved to $log',
+    },
+    'smoke-wx-aslr': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/wx-aslr-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/wx_aslr_test', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        'expect': ['WX_ASLR: PASS', 'System is going down for power-off NOW'],
+        'forbid': [],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-wx-aslr: PASS; log saved to $log',
     },
 }

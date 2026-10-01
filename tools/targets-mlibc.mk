@@ -151,6 +151,14 @@ mlibc-sbase-rootfs: mlibc-sbase
 smoke-mlibc-sbase:
 	$(PYTHON) tools/smoke.py smoke-mlibc-sbase
 
+# Build the mlibc payload and inject it into the dev FAT32 image.  The image
+# is composed during dev-build -- long before mlibc exists -- so the mlibc
+# smoke cases inject afterwards (see img.py mlibc-rootfs).
+.PHONY: mlibc-rootfs
+mlibc-rootfs: mlibc-hello-rv mlibc-mksh
+	@$(PYTHON) tools/img.py mlibc-rootfs --fat32-img "$(FAT32_IMG)" \
+		--native-build-dir "$(NATIVE_BUILD_DIR)" --tag "$(NATIVE_TAG)"
+
 smoke-mlibc:
 	$(PYTHON) tools/smoke.py smoke-mlibc
 

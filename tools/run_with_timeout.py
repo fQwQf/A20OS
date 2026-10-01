@@ -18,7 +18,11 @@ def parse_duration(value):
 
 def main():
     args = sys.argv[1:]
+    # --foreground keeps the child in this process group so Ctrl-C reaches it
+    # directly; the default detaches into its own session for timeout killpg.
+    foreground = False
     if args and args[0] == "--foreground":
+        foreground = True
         args.pop(0)
 
     expected = []
@@ -49,7 +53,7 @@ def main():
         return 2
 
     if not expected and not send_lines:
-        process = subprocess.Popen(args, start_new_session=True)
+        process = subprocess.Popen(args, start_new_session=not foreground)
         try:
             return process.wait(timeout=duration)
         except subprocess.TimeoutExpired:
@@ -70,7 +74,7 @@ def main():
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        start_new_session=not foreground,
         bufsize=0,
     )
     selector = selectors.DefaultSelector()

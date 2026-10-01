@@ -1629,9 +1629,9 @@ class TestTargetSection(unittest.TestCase):
         self.assertIn("jtag", str(cm.exception))
 
     def test_derive_emits_only_the_fields_make_consumes(self) -> None:
-        """Only the three [target] fields a makefile reads become TARGET_* vars.
+        """Only the two [target] fields a makefile reads become TARGET_* vars.
 
-        The other eight are read by no recipe. The console session, the reset
+        The other nine are read by no recipe. The console session, the reset
         pulse, command injection and expect matching are all driven by a20
         straight from the dataclass, so deriving them told `a20 show-vars` that
         make had been handed a configuration it never sees -- and the docs then
@@ -1652,11 +1652,11 @@ class TestTargetSection(unittest.TestCase):
             boot_media = ["build/a.img", "build/b.img"]
             log = ".kernel-build/console/x.log"
         """)
-        self.assertEqual(got["TARGET_SERIAL"], "/dev/ttyUSB0")
         self.assertEqual(got["TARGET_BOOT_MEDIA"], "build/a.img build/b.img")
-        for dead in ("TARGET_BAUD", "TARGET_RESET_CMD", "TARGET_BOOT_WAIT",
-                     "TARGET_BOOT_TIMEOUT", "TARGET_CONSOLE_CHECK",
-                     "TARGET_COMMANDS", "TARGET_EXPECT", "TARGET_CONSOLE_LOG",
+        for dead in ("TARGET_SERIAL", "TARGET_BAUD", "TARGET_RESET_CMD",
+                     "TARGET_BOOT_WAIT", "TARGET_BOOT_TIMEOUT",
+                     "TARGET_CONSOLE_CHECK", "TARGET_COMMANDS",
+                     "TARGET_EXPECT", "TARGET_CONSOLE_LOG",
                      "TARGET_MEDIA_DEVICE"):
             self.assertNotIn(dead, got, f"{dead} is read by no make recipe")
 
@@ -1683,13 +1683,15 @@ class TestTargetSection(unittest.TestCase):
         self.assertFalse([k for k in got if k.startswith("TARGET_")])
 
     def test_partial_target_only_emits_what_is_set(self) -> None:
+        """serial alone is a20's own business: no recipe reads it, so no
+        TARGET_* variable is derived from it."""
         got = derived(self.tmp, """
             arch = "riscv64"
             board = "visionfive2"
             [target]
             serial = "/dev/ttyUSB0"
         """)
-        self.assertEqual([k for k in got if k.startswith("TARGET_")], ["TARGET_SERIAL"])
+        self.assertFalse([k for k in got if k.startswith("TARGET_")])
 
 
 class FakeTransport:

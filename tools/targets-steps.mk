@@ -46,7 +46,7 @@
 	step7-rv-release-8c step7-la-release-8c \
 	step8-rv-debug-1c step8-la-debug-1c \
 	step8-rv-release-8c step8-la-release-8c _step35_smoke
-.PHONY: _reset_obj _release_build _release_disk smoke-usb-x86_64
+.PHONY: _release_build _release_disk smoke-usb-x86_64
 
 step35-rv-debug-1c:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=1 \
@@ -211,16 +211,6 @@ check-proc-step7: check-proc-step7-local
 check-proc-step8: check-proc-step8-local
 	@echo "check-proc-step8: PASS"
 
-check-proc-step4-local: check-blocking-point-boundary check-proc-step35-local
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step4-local
-check-proc-step4: check-proc-step4-local
-	@echo "check-proc-step4: PASS"
-
-check-proc-step5-local: check-signal-exit-boundary check-proc-step4-local
-	@$(PYTHON) tools/gates.py whitespace --label check-proc-step5-local
-check-proc-step5: check-proc-step5-local
-	@echo "check-proc-step5: PASS"
-
 smoke-socket-stress:
 	$(PYTHON) tools/smoke.py smoke-socket-stress
 
@@ -245,18 +235,21 @@ smoke-pci-portability:
 smoke-native-handle:
 	$(PYTHON) tools/smoke.py smoke-native-handle
 
+smoke-unix-ch:
+	$(PYTHON) tools/smoke.py smoke-unix-ch
+
+smoke-bpf:
+	$(PYTHON) tools/smoke.py smoke-bpf
+
+smoke-wx-aslr:
+	$(PYTHON) tools/smoke.py smoke-wx-aslr
+
 # Thin wrappers: release configurations live in instances/release-*.toml.
 release-rv:
 	tools/a20 package release-riscv64
 
 release-la:
 	tools/a20 package release-loongarch64
-
-_reset_obj:
-	@$(PYTHON) tools/stamps.py clean \
-		--find-root "$(KERNEL_DIR)" \
-		--rm-rf .kernel-build
-	$(MAKE) -C user clean
 
 _release_build: $(KERNEL_ELF) $(USER_BUILD_STAMP)
 	$(MAKE) ARCH=$(ARCH) ABI=$(ABI) PROFILE=$(PROFILE) NR_CPUS=$(NR_CPUS) \

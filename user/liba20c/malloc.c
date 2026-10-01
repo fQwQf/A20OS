@@ -13,37 +13,51 @@ struct malloc_block {
     struct malloc_block *next;
 };
 
+/* Bump allocator over independently mapped segments: a plain growing arena
+ * cannot work over vm_alloc, which may place a second mapping anywhere (the
+ * first implementation kept the old arena_base while extending arena_size,
+ * so every allocation past the first 256 KiB landed in unmapped VA). */
+struct arena_seg {
+    struct arena_seg *next;
+    uint64_t          size;   /* usable bytes after the header */
+    uint64_t          pos;    /* bump offset */
+};
+
+#define ARENA_HDR   ((sizeof(struct arena_seg) + 15u) & ~(uint64_t)15u)
+#define ARENA_CHUNK (256u * 1024u)
+
+static struct arena_seg *arena_head = NULL;
 static struct malloc_block *free_list = NULL;
-static void *arena_base = NULL;
-static uint64_t arena_pos = 0;
-static uint64_t arena_size = 0;
 
 static void *arena_alloc(uint64_t size)
 {
     size = (size + 15) & ~(uint64_t)15;
-    if (arena_pos + size > arena_size) {
-        uint64_t chunk = size > (256 * 1024) ? size : (256 * 1024);
-        uint64_t req_size = arena_size + chunk;
-        a20_vm_alloc_args_t args;
-        args.size      = sizeof(args);
-        args.version   = 1;
-        args.addr_hint = 0;
-        args.length    = req_size;
-        args.prot      = A20_PROT_READ | A20_PROT_WRITE;
-        args.flags     = 0;
-        args.out_addr  = 0;
-        int64_t r = a20_syscall6(A20_SYS_vm_alloc, (uint64_t)&args, 0, 0, 0, 0, 0);
-        if (r < 0) return NULL;
-        if (arena_base == NULL) {
-            arena_base = (void *)args.out_addr;
-            arena_size = req_size;
-        } else {
-            arena_size = req_size;
+    for (struct arena_seg *s = arena_head; s; s = s->next) {
+        if (s->pos + size <= s->size) {
+            void *p = (char *)s + ARENA_HDR + s->pos;
+            s->pos += size;
+            return p;
         }
     }
-    void *p = (char *)arena_base + arena_pos;
-    arena_pos += size;
-    return p;
+
+    uint64_t chunk = size > ARENA_CHUNK ? size + ARENA_HDR : ARENA_CHUNK;
+    a20_vm_alloc_args_t args;
+    args.size      = sizeof(args);
+    args.version   = 1;
+    args.addr_hint = 0;
+    args.length    = chunk;
+    args.prot      = A20_PROT_READ | A20_PROT_WRITE;
+    args.flags     = 0;
+    args.out_addr  = 0;
+    int64_t r = a20_syscall6(A20_SYS_vm_alloc, (uint64_t)&args, 0, 0, 0, 0, 0);
+    if (r < 0) return NULL;
+
+    struct arena_seg *s = (struct arena_seg *)args.out_addr;
+    s->next = arena_head;
+    s->size = chunk - ARENA_HDR;
+    s->pos  = size;
+    arena_head = s;
+    return (char *)s + ARENA_HDR;
 }
 
 void *malloc(size_t size)
@@ -81,6 +95,7 @@ void free(void *ptr)
 
 void *calloc(size_t nmemb, size_t size)
 {
+    if (nmemb == 0 || size == 0) return NULL;
     size_t total = nmemb * size;
     if (total / nmemb != size) return NULL;
     void *p = malloc(total);

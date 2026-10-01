@@ -556,19 +556,37 @@ def inject_sbase(a) -> int:
     return 0
 
 
+def inject_mlibc(a) -> int:
+    """Copy the mlibc test/mksh binaries into the existing FAT32 rootfs.
+
+    Same in-place contract as inject_sbase: the dev image is composed before
+    mlibc is built (meson is far too heavy to hang off every dev-build), so the
+    mlibc smoke cases inject after the build instead.
+    """
+    img = REPO / a.fat32_img
+    native = REPO / a.native_build_dir
+    for name in ("mlibc-hello", "mlibc-child", "mlibc-fork",
+                 "mlibc-sigchld", "mlibc-pipeexec", "mlibc-mksh"):
+        mcopy(str(img), str(native / f"{name}-{a.tag}"), f"::/bin/{name}-{a.tag}")
+    mcopy(str(img), "user/tests/test_mlibc_mksh.sh", "::/bin/test-mlibc-mksh.sh")
+    print(f"img: mlibc binaries injected into {img}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
                     choices=["fat32", "ext4", "extra", "release-disk", "scratch",
-                             "sbase-rootfs", "copy", "verify-vbox",
+                             "sbase-rootfs", "mlibc-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
     for f in (
-              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "extra-img", "extra-mb", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "extra-staging-dir", "extra-dir", "extra-packages", "riscv-gcc-musl-libc", "riscv-glibc-lib-dir", "riscv-glibc-local-lib-dir", "ca-cert-bundle", "extra-dns" ):
+              "fat32-img", "fat32-mb", "ext4-img", "ext4-mb", "ext4-staging-dir", "mkfs-ext4", "user-build-dir", "mkfs-fat", "runtime-drvmod", "driver-store", "libc", "libgcc", "protocols", "os-release", "test-txt", "src", "dst", "arch", "board", "abi", "bringup", "nommu", "opt", "stamp", "extra-img", "extra-mb", "disk-out", "scratch-out", "scratch-mb", "scratch-kind", "payload", "native-build-dir", "tools", "extra-staging-dir", "extra-dir", "extra-packages", "riscv-gcc-musl-libc", "riscv-glibc-lib-dir", "riscv-glibc-local-lib-dir", "ca-cert-bundle", "extra-dns", "tag" ):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4, "extra": build_extra,
             "release-disk": build_release_disk, "scratch": build_scratch,
             "sbase-rootfs": inject_sbase,
+            "mlibc-rootfs": inject_mlibc,
             "copy": copy_image,
             "verify-vbox": verify_vbox_rootfs,
             "vf2-minimal": build_vf2_minimal}[a.command](a)

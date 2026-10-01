@@ -81,7 +81,14 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         return -EIO;
     }
 
-    static uint8_t rx[A20_CH_MAX_DATA];
+    /* Per-call receive buffer.  A shared static here would race across
+     * mounts: req_lock serializes one mount's RPC, but concurrent RPCs on
+     * different mounts would tear each other's replies. */
+    uint8_t *rx = (uint8_t *)kmalloc(A20_CH_MAX_DATA);
+    if (!rx) {
+        mutex_unlock(&sb->req_lock);
+        return -ENOMEM;
+    }
     for (;;) {
         uint32_t in_len = sizeof(rx);
         a20_ch_handle_info_t hinfos[1];
@@ -120,6 +127,7 @@ static int uxfs_rpc(uxfs_sb_t *sb, const ufs_req_hdr_t *req,
         break;
     }
 
+    kfree(rx);
     mutex_unlock(&sb->req_lock);
 #if UXFS_DBG
     if (r < 0)

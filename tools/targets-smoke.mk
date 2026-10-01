@@ -1,24 +1,11 @@
-# 冒烟门禁的资源预检。
-#
-# 下面绝大多数 smoke-* 目标直接起 qemu-system-*，绕过了 tools/a20，因此没有实例
-# TOML 可供门禁，也就完全没有资源检查。这恰恰是 tools/a20_resource.py 存在的理由：
-# QEMU 申请到宿主机给不出的内存时，不会得到一个非零退出码，而是宿主 OOM killer
-# 挑一个进程杀掉——被杀的那个通常不是你在调试的东西。所以这里复用同一套 A20_*
-# 策略，在起 QEMU 之前等一次。
-#
-# 参数必须与该目标 qemu 命令行里的 -m/-smp 一致；否则门禁在保护另一件事，比没有
-# 门禁更糟。默认值取自脚本里逐个目标的实际取值（全部 -m 1G）。
-#
-# 与 `tools/a20 run` 的区别：a20 的 A20_WAIT_TIMEOUT 默认 0（一直等），因为交互式
-# 跑实例时"等资源释放"正是期望行为；CI 门禁不能永远等下去（宿主机磁盘真的满了
-# 时会挂死而不是失败），所以这里给一个可覆盖的有界默认 900s。
-# 例外：tools/stm32.mk 的 run-stm32f103-qemu 不走这个门禁。它的 machine 是
-# stm32vldiscovery，内存是芯片固定的 20 KiB SRAM，没有 -m/-smp 可读；填一个
-# "看起来合理"的数字等于凭空发明一个事实，而且 MCU 仿真也根本不具备把宿主机
-# 撑爆的能力——门禁在这里保护不了任何东西，只会在读代码时误导人。
-define smoke-gate
-A20_WAIT_TIMEOUT=$${A20_WAIT_TIMEOUT:-900} $(PYTHON) tools/a20_resource.py -m $(1) -c $(2)
-endef
+# Most smoke-* targets here are thin wrappers over `tools/a20 test
+# instances/*.toml` or `tools/smoke.py <case>`; both of those gate host
+# resources through tools/a20_resource.py before booting QEMU, so a full host
+# never turns into an OOM-kill lottery.  (A20_WAIT_TIMEOUT defaults to waiting
+# forever there; CI passes a bounded value.)  tools/stm32.mk's
+# run-stm32f103-qemu is the deliberate exception: the stm32vldiscovery machine
+# has fixed 20 KiB of SRAM and no -m/-smp to read, so there is nothing for a
+# host-side gate to protect.
 
 # Thin wrapper: the smoke definition lives in instances/smoke-riscv64.toml.
 smoke-riscv64:

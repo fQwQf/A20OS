@@ -16,10 +16,6 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 $(FS_TEST_IMG): $(FAT32_IMG)
 	@$(PYTHON) tools/img.py copy --src "$(FAT32_IMG)" --dst "$(FS_TEST_IMG)"
 
-.PHONY: ext4_img_only ext4_img
-
-ext4_img_only: $(EXT4_IMG)
-
 $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 	@echo "Building ext4 image..."
 	@$(PYTHON) tools/img.py ext4 \
@@ -29,9 +25,6 @@ $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 		--user-build-dir "$(USER_BUILD_DIR)" \
 		--protocols "$(PROTOCOLS_LINES)" \
 		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
-
-ext4_img: $(USER_BUILD_STAMP) ext4_img_only
-	@$(PYTHON) tools/img.py copy --src "$(EXT4_IMG)" --dst "$(FS_TEST_IMG)"
 
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@

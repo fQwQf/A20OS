@@ -202,14 +202,8 @@ static int posix_timer_signal_pending(posix_timer_t *tmr)
                                                   : tmr->owner_pid);
     if (!t)
         return 0;
-    int pending = 0;
-    signal_state_t *ss = t->signals;
-    if (ss) {
-        uint64_t flags = spin_lock_irqsave(&ss->lock);
-        uint64_t mask = tmr->target_tid > 0 ? t->thread_pending : ss->pending;
-        pending = (mask & signal_mask_bit(tmr->signo)) != 0;
-        spin_unlock_irqrestore(&ss->lock, flags);
-    }
+    int pending = signal_signo_pending_scoped(t, tmr->signo,
+                                              tmr->target_tid > 0);
     proc_put(t);
     return pending;
 }
