@@ -1384,6 +1384,19 @@ files = ["kernel/drivers/gpu/drm.c"]
 pattern = "drm_gem_unpin\\("
 files = ["kernel/drivers/gpu/drm.c"]
 
+# The PRIME export walks a pinned GEM's pages with the lock dropped. A snapshot
+# of the VMO under the lock without a pin is a use-after-free reachable from any
+# fd, so the export must pin rather than merely read.
+[[gate.assertion]]
+pattern = "drm_gem_pin\\(p\\.handle\\)"
+files = ["kernel/drivers/gpu/drm.c"]
+
+# The GEM name table is documented as store-lock protected; the helper that walks
+# it has to carry the _locked suffix or the contract is a lie.
+[[gate.assertion]]
+pattern = "drm_gem_name_lookup_locked"
+files = ["kernel/drivers/gpu/drm.c"]
+
 # Counts, not just presence: a plain presence assertion stays green when the
 # locking is stripped out of the handlers, because the name still occurs
 # elsewhere in the file. Verified by deleting lock/unlock pairs -- these are the
