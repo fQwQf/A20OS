@@ -8,7 +8,9 @@
 /* Fixed registry of the locks the performance audit cares about.  Registration
  * stores the lock pointer and a name; the per-lock counters in spinlock_t
  * accumulate in place, so reads are cheap and race-free at u64 precision. */
-#define LOCK_COUNTERS_MAX 64
+/* Sized to hold every per-bucket vfile-table lock (128) plus the rest of
+ * the registered set, so partial visibility never fakes a clean lock. */
+#define LOCK_COUNTERS_MAX 192
 
 typedef struct {
     spinlock_t *lock;
