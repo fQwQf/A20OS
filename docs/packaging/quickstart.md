@@ -37,14 +37,20 @@ make ARCH=riscv64 image-world PKG_WORLD=base PKG_ALPINE=0
 | 手工组装（更细控制） | `tools/mkrootfs.py --arch riscv64 --world packages/world/base.world --repo build/repo --keys-dir build/keys --no-alpine` |
 | 检查包内容 | `tar -tzf build/packages/riscv64/a20-base-*.apk`（或用 `apk.static` 解包） |
 
-## 打包 extra 软件（vim/git 等从源码移植的）
+## 加一个用户软件（vim/git 等）
 
-extra 包的构建仍走旧流程（`user/extra.mk`），新体系负责把产物变成包：
+绝大多数用户软件不需要写 recipe：Alpine 上游已经有 apk 包，在 world 清单里
+加一行包名即可。`user/extra.mk` 与源码构建的 extra 路径已删除，
+`extra-user-apps` / `extra-img` / `run-*-extra` 只会报错并告诉你替代命令。
 
 ```bash
-make ARCH=riscv64 extra-user-apps EXTRA_PACKAGES=vim     # 旧流程构建
-make ARCH=riscv64 pkgs PKG_RECIPES=a20-extra-vim         # 新流程打包
+$EDITOR packages/world/devel.world     # 追加一行，例如 vim / git / gcc
+make ARCH=riscv64 image-world PKG_WORLD=devel    # 重新组镜像
+make ARCH=riscv64 run-world  PKG_WORLD=devel    # 组镜像并在 QEMU 验证
 ```
+
+仍然从源码构建的用户程序只有两个：新增的 `user/cmds/` 程序，和必须进 FAT32
+根的 fastfetch。详见 [distro/source-software-porting.md](../distro/source-software-porting.md)。
 
 ## 在容器里构建（与 CI 完全相同的环境）
 

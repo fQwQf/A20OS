@@ -62,7 +62,8 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
         case "fit-sdcard":
             # VF2 image assembly (firmware check, extra partition variants)
             # is orchestrated by the vf2-* make targets; the instance carries
-            # the validated board/arch identity.
+            # the validated board/arch identity.  a20_validate rejects any
+            # variant that is not one of these targets.
             exec_make(inst, f"vf2-{inst.package.variant}", list(make_args), dry_run)
         case "release":
             default_kernel, default_disk = RELEASE_ARCH_ARTIFACTS[inst.arch]

@@ -29,7 +29,7 @@ from a20_make import REPO_ROOT, query_make
 
 _CHUNK: Final = 1 << 20
 _MAKE_VARS: Final = ("BUILD_DIR", "KERNEL_ELF", "KERNEL_BIN", "FAT32_IMG",
-                     "EXT4_IMG", "EXTRA_IMG", "PKG_IMAGE_DIR", "PKG_ARCH")
+                     "EXT4_IMG", "PKG_IMAGE_DIR", "PKG_ARCH")
 
 # Firmware and boot-chain blobs live outside BUILD_DIR because they are built
 # by their own targets (make vf2-firmware) and consumed by the image targets.
@@ -107,8 +107,6 @@ def _candidates(inst: Instance, vars_: dict[str, str]) -> list[tuple[str, str]]:
     if inst.kernel.bringup is not True and inst.arch != "armv7m":
         out += [("rootfs-fat32", vars_["FAT32_IMG"]),
                 ("rootfs-ext4", vars_["EXT4_IMG"])]
-        if vars_["EXTRA_IMG"]:
-            out.append(("extra-ext4", vars_["EXTRA_IMG"]))
     if inst.rootfs.world:
         out.append((f"world-{inst.rootfs.world}",
                     f"{vars_['PKG_IMAGE_DIR']}/{inst.rootfs.world}-{vars_['PKG_ARCH']}.img"))

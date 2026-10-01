@@ -138,7 +138,6 @@ clean:
 		$(foreach f,kernel.elf kernel.bin fat32.img ext4.img \
 			kernel-rv kernel-la disk.img disk-la.img,--rm-f $(f))
 	$(MAKE) -C user clean
-	$(MAKE) -f user/extra.mk clean 2>/dev/null || true
 
 -include $(DEP_FILES)
 

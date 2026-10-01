@@ -173,7 +173,7 @@ jobs:
   #
   # 不拉 submodule：bring-up 构建只编译 vendored 源（kernel/external/lwip
   # 是 tracked tree），本矩阵里的每个架构都已在无 submodule 的 checkout 上
-  # 实测通过；拉 7 个 submodule（git/vim/gcc/binutils…）只会把时间花在
+  # 实测通过；唯一的 gitlink 是 fastfetch，拉它只会把时间花在
   # 与这个门禁无关的下载上。
   kernel-build:
     name: kernel-build-${{ matrix.arch }}

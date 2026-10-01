@@ -2,6 +2,12 @@
 #
 # 每行一个包名（apk 语法，可用 name=version 钉版本），# 开头为注释。
 # 对应旧的 disk.img（FAT32）内容：init + 全部用户态程序 + 运行时驱动。
+#
+# 注意：本 world 没有配套的 packages/overlay/base/，因此镜像里不会有
+# /etc/a20-distro 标记。把本镜像挂到 /extra 后 init **不会** chroot 进去 ——
+# 这是正确的：这里的内容就是 A20OS 自己的用户态，而它已经作为 FAT32 根
+# （挂载点 /bin）存在了。需要真正 chroot 进 Alpine 用户态时，用带 overlay
+# 的 world（devel / xfce / pynode / devtools）。
 
 a20-base
 a20-drivers

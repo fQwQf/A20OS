@@ -36,7 +36,12 @@ _HOSTFWD_RE: Final = re.compile(r"(tcp|udp)::[0-9]*-[0-9]*:[0-9]+")
 _TIMEOUT_RE: Final = re.compile(r"[0-9]+s")
 
 _UEFI_VARIANTS: Final = ("default", "text")
-_FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard", "extra")
+# "extra" was a fourth variant that resolved to `make vf2-extra`, which built
+# the source-built extra.img.  That card differed from "sdcard" only by that
+# disk, so with the disk gone the variant went too; vf2-sdcard now fills that
+# partition from an apk world (VF2_WORLD).  Reject it here rather than letting
+# a20 package pass validation and then fail inside make.
+_FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard")
 
 
 def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
@@ -76,7 +81,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         if inst.arch not in QEMU_RUNNABLE_ARCHES:
             e.append(f"gui.enabled: no QEMU GUI path for {inst.arch}")
     for size_name, size in (("size_mb", r.size_mb),
-                            ("ext4_size_mb", r.ext4_size_mb), ("extra_size_mb", r.extra_size_mb)):
+                            ("ext4_size_mb", r.ext4_size_mb),
+                            ("world_size_mb", r.world_size_mb)):
         if size is not None and size < 1:
             e.append(f"rootfs.{size_name}: must be >= 1")
     if n.hostfwd is not None:
@@ -93,8 +99,7 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
                  "expect substring can only pass vacuously)")
     for field_name, entries in (("test.commands", t.commands), ("test.expect", t.expect),
                                 ("machine.extra_qemu", m.extra_qemu),
-                                ("rootfs.drivers", r.drivers),
-                                ("rootfs.extra_packages", r.extra_packages)):
+                                ("rootfs.drivers", r.drivers)):
         if entries is not None and any(not s for s in entries):
             e.append(f"{field_name}: entries must be non-empty strings")
     if r.world is not None and not (repo_root / "packages" / "world" / f"{r.world}.world").is_file():

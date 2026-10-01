@@ -8,6 +8,12 @@
 #
 # 需要 a20-drivers（init 挂载根文件系统前要加载块设备/文件系统驱动，
 # 缺了会停在 mount 阶段）。
+#
+# 与 base.world 一样没有配套 overlay，因此镜像不含 /etc/a20-distro：挂到
+# /extra 后 init 不会 chroot。这里的内容就是 A20OS 自己的最小用户态，已经
+# 作为 FAT32 根（挂载点 /bin）存在，chroot 进它在语义上也是多余的。需要真正
+# chroot 进 Alpine 用户态时，用带 overlay 的 world（devel / xfce / pynode /
+# devtools）。
 
 a20-min
 a20-drivers

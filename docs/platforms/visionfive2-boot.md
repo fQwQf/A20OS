@@ -26,7 +26,9 @@ JH7110 BootROM
 
 ## 零、快速上手：一条命令出 SD 卡镜像
 
-不想从源码构建整套 extra 工具链（gcc/git/vim）时，用下面的目标。它们和 `make run-riscv64` 一样构建常规 MMU 内核 + FAT32 用户态，跳过 extra 源码/编译（`vf2-extra` 除外），共用已生成的固件 `build/vf2-firmware/`，产物统一为 `build/vf2-firmware/a20os-sd.img`。上电后串口进入 mksh `#` 提示符，FAT32 用户态挂载到 `/bin`。镜像按稀疏文件生成，只占实际使用空间的磁盘。
+下面三个目标共用已生成的固件 `build/vf2-firmware/`，产物统一为 `build/vf2-firmware/a20os-sd.img`。上电后串口进入 mksh `#` 提示符，FAT32 用户态挂载到 `/bin`。镜像按稀疏文件生成，只占实际使用空间的磁盘。
+
+`/extra` 分区里装什么由 `VF2_WORLD` 选定的 apk world 决定（默认 `devel`）。软件来自 Alpine 上游仓库，**不再从源码构建**——`make vf2-extra` 已删除，只留下会报错并给出替代命令的弃置桩。
 
 ```sh
 # 前置：固件只需在 build/vf2-firmware/ 里准备过一次
@@ -35,29 +37,30 @@ make vf2-firmware
 # 无 extra、最小可启动卡：必要组件 + fastfetch（fastfetch 位于 /bin，无 /extra）
 make vf2-minimal
 
-# 带 sdcard-rv.img 的卡：仓库根目录现成的 ext4 extra 镜像挂载到 /extra
-# （前置：根目录有 sdcard-rv.img，与 QEMU run-riscv64 用同一份）
+# 带 /extra 分区的卡：按 VF2_WORLD 组一个 apk world 镜像挂到 /extra
+# （默认 devel；仓库根目录若已有 sdcard-rv.img 则优先用它）
 make vf2-sdcard
-
-# 完整 extra 工具链卡：从源码构建 vim/git/gcc(以及可选 rust/lamina) 挂载到 /extra
-# （前置：extra 源码已在，见下方 vf2-extra-sources）
-make vf2-extra
 ```
 
 可选覆盖：
 
 ```sh
-# vf2-sdcard 换用其他 ext4 镜像（空值=只出根文件系统卡）
-make vf2-sdcard VF2_EXTRA_IMAGE=/path/to/extra.img
+# 换 world：devtools 带 gcc/musl-dev/fastfetch，xfce 是完整桌面
+make vf2-sdcard VF2_WORLD=devtools
+make vf2-sdcard VF2_WORLD=xfce
 
-# vf2-extra 选择/追加 extra 包（默认 "vim git gcc"，可加 rust）
-make vf2-extra EXTRA_PACKAGES='vim git gcc rust' EXTRA_IMAGE_MB=2048
+# 换用自己准备好的 ext4 分区镜像，不再组 world
+make vf2-sdcard VF2_EXTRA_IMAGE=/path/to/sdcard-rv.img
 
 # 退回已在真机验证的 NOMMU bring-up 内核（无法运行依赖 fork/mmap 的程序）
 make vf2-sdcard VF2_MMU=0   # 三个目标都支持 VF2_MMU=0
 ```
 
-完整 extra 工具链镜像需要 extra 源码（`make vf2-extra-sources` 或 `vf2-extra` 自动拉取 git 子模块）；构建 gcc 会引导 musl-cross-make，耗时较长，属正常现象。
+`vf2-sdcard` 组 world 镜像时需要访问 Alpine 镜像源（之后走 `build/cache/apk` 缓存）；world 清单见 [images.md](../packaging/images.md)，典型内容是 `devel` = musl busybox vim git curl ca-certificates less。`vf2-image` 额外把 NOMMU 内核、FAT32 根与 fastfetch 一起打进同一张卡：
+
+```sh
+make vf2-image VF2_WORLD=devel
+```
 
 ## 一、构建（全部从源码）
 
@@ -67,16 +70,18 @@ make vf2-sdcard VF2_MMU=0   # 三个目标都支持 VF2_MMU=0
 make vf2-firmware
 
 # 2. 内核 + 额外用户态 + 打包:生成 FIT、FAT32 根文件系统和 extra ext4 分区
+#    extra ext4 分区里是 VF2_WORLD 指定的 apk world 镜像(默认 devel)
 make vf2-image
+make vf2-image VF2_WORLD=xfce      # 换成完整桌面
 
-# 只准备 extra 所需源码（GitHub 默认走 SSH；没有 SSH key 时加
-# VF2_GIT_TRANSPORT=https）。GCC 源码从 musl-cross-make 的校验下载规则取得。
+# 只准备仍需 vendored 的源码,即 fastfetch 一个 gitlink
+# (GitHub 默认走 SSH;没有 SSH key 时加 VF2_GIT_TRANSPORT=https)
 make vf2-extra-sources
-
-# extra/gcc 默认复用 musl-cross-make/output 中已经安装的工具链；也可以
-# 显式指定另一套兼容的 RISC-V musl 工具链根目录：
-MUSL_CROSS_ROOT=/path/to/riscv64-linux-musl-cross make vf2-image
 ```
+
+`/extra` 里的 gcc、git、vim 等现在都是 Alpine 上游 apk 包,由 world 清单解析,
+不再自举 musl-cross-make 交叉工具链;`MUSL_CROSS_ROOT` 随之删除。宿主侧要编译
+目标程序时用发行版自己的 RISC-V 交叉工具链(见 [build.md](../build.md))。
 
 产物（`build/vf2-firmware/`，不入库）：
 
@@ -169,7 +174,9 @@ git submodule sync --recursive
 git submodule status --recursive
 ```
 
-extra 软件的 gitlink 没有物化时，使用仓库脚本（默认 GitHub SSH）：
+fastfetch 的 gitlink 没有物化时，使用仓库脚本（默认 GitHub SSH）。它是树里
+唯一保留的 vendored 用户程序，因为 fastfetch 要在任何 Alpine world 可用之前
+就出现在 FAT32 根里：
 
 ```sh
 make vf2-extra-sources
@@ -201,12 +208,10 @@ make -j"$NPROC" -C user ARCH=riscv64 NOMMU=1 \
 
 ```sh
 NPROC=$(getconf _NPROCESSORS_ONLN)
-make -j"$NPROC" vf2-image \
-  EXTRA_PACKAGES='vim git gcc' \
-  EXTRA_IMAGE_MB=2048
+make -j"$NPROC" vf2-image VF2_WORLD=devtools
 ```
 
-`vf2-image` 会重新生成 NOMMU 内核、FAT32 根文件系统、extra ext4 分区和 FIT。`EXTRA_IMAGE_MB` 必须大于实际 staging 内容；GCC/Git/Vim 的完整组合建议至少 2048 MiB，只有少量工具时才在命令行覆盖成更小的值。主机磁盘需要同时容纳 staging 目录和镜像，空间不足时先删除可重建的 `build/vf2-firmware/a20os-sd.img`、`.kernel-build/*/extra.img`，不要删除 `user/external` 源码。
+`vf2-image` 会重新生成 NOMMU 内核、FAT32 根文件系统、extra ext4 分区和 FIT；extra 分区里是 `VF2_WORLD` 选定的 world 镜像（`devel` 给 vim/git/curl/less，`devtools` 再加 gcc/musl-dev/fastfetch）。分区大小由 world 清单实际解析出的内容决定，不再有 `EXTRA_IMAGE_MB` 需要手工估算；体积不够时改 `PKG_SIZE_MB`。主机磁盘需要同时容纳 world 镜像和最终镜像，空间不足时先删除可重建的 `build/images/*.img`、`build/vf2-firmware/a20os-sd.img`，不要删除 `user/external` 里 fastfetch 的源码。
 
 构建结束后检查产物和 FIT 地址：
 
@@ -272,26 +277,24 @@ git rev-parse HEAD
 
 ### 6.6 失败后的最小化回归
 
-当完整 extra 组合启动失败时，用最小镜像区分内核问题和用户态问题：
+当完整 extra 组合启动失败时，用最小镜像区分内核问题和用户态问题——先出不带
+`/extra` 分区的最小卡，或换一个只含 `devel` 的 world：
 
 ```sh
-make -j"$NPROC" vf2-image EXTRA_PACKAGES='' EXTRA_IMAGE_MB=256
+make -j"$NPROC" vf2-minimal
+make -j"$NPROC" vf2-image VF2_WORLD=devel
 ```
 
-最小镜像能进入 `#`，再逐项增加 `git`、`vim`、`gcc`。Rust 是可选的大型工具链，确认磁盘空间和 glibc 运行库后再显式加入：
-
-```sh
-make -j"$NPROC" vf2-image \
-  EXTRA_PACKAGES='vim git gcc rust' EXTRA_IMAGE_MB=2048
-```
-每次增加后在 shell 中运行对应命令，并确认：
+最小镜像能进入 `#`，再逐级换成更重的 world：`devel`（vim/git/curl/less）
+→ `devtools`（gcc/musl-dev/fastfetch）→ `xfce`（完整桌面）。每一级都在 shell
+里运行对应命令，并确认：
 
 ```sh
 mount
-ls -l /extra/bin
-/extra/bin/git --version
-/extra/bin/vim --version
-/extra/bin/gcc --version
+ls -l /extra/usr/bin
+/extra/usr/bin/git --version
+/extra/usr/bin/vim --version
+/extra/usr/bin/gcc --version
 /bin/fastfetch
 ```
 

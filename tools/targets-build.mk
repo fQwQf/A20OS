@@ -30,15 +30,29 @@ check-visionfive2-build:
 # vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;
 # vf2-image wraps the kernel and FAT32 userspace as a direct-boot FIT
 # (BootROM -> SPL -> OpenSBI -> A20OS) plus a raw SD-card image.
-.PHONY: vf2-firmware vf2-extra-sources vf2-image
+.PHONY: vf2-firmware vf2-extra-sources vf2-image vf2-world-image
 VF2_IMAGE_BUILD_DIR := .kernel-build/riscv64-visionfive2-linux-dev-embedded-nommu
+# The board's /extra partition is filled by an apk world image rather than by
+# compiling software out of user/external/.  mkrootfs.py already emits a
+# partitionless raw ext4, which is exactly what make-boot-image.sh expects for
+# that slot, and the kernel mounts it the same way.  PKG_ALPINE stays on because
+# the whole point is to get the upstream packages.  PKG_IMAGE_DIR is set in
+# tools/targets-pkg.mk, which is included later; recursive expansion defers the
+# lookup until the recipe runs.
+VF2_WORLD ?= devel
+VF2_WORLD_IMAGE = $(PKG_IMAGE_DIR)/$(VF2_WORLD)-riscv64.img
 vf2-firmware:
 	tools/vf2/build-firmware.sh
 
+# Only fastfetch remains a gitlink: it is the one program compiled into the
+# FAT32 root, which no Alpine world replaces.
 vf2-extra-sources:
 	tools/vf2/fetch-extra-sources.sh
 
-vf2-image: vf2-extra-sources
+vf2-world-image:
+	$(MAKE) ARCH=riscv64 PKG_WORLD=$(VF2_WORLD) PKG_ALPINE=1 image-world
+
+vf2-image: vf2-extra-sources vf2-world-image
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
 		DRIVER_DEPLOYMENT=embedded \
 		KERNEL_WERROR=0 \
@@ -48,38 +62,36 @@ vf2-image: vf2-extra-sources
 		$(MAKE) -C user ARCH=riscv64 NOMMU=1 OPT="-O3" PROFILE=full \
 			BUILD_DIR=build/riscv64-nommu fastfetch; \
 	fi
-	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=linux BRINGUP=0 NOMMU=1 \
-		DRIVER_DEPLOYMENT=embedded \
-		KERNEL_WERROR=0 \
-		LDSCRIPT=kernel/platform/visionfive2/ldscript-nommu.ld \
-		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" extra-img
 	tools/vf2/make-boot-image.sh \
 		$(VF2_IMAGE_BUILD_DIR)/kernel.bin \
 		$(VF2_IMAGE_BUILD_DIR)/fat32.img \
-		$(VF2_IMAGE_BUILD_DIR)/extra.img
+		$(VF2_WORLD_IMAGE)
 
-# VisionFive 2 SD-card images (three quick-start variants, development profile).
+# VisionFive 2 SD-card images (two quick-start variants, development profile).
 #
-#   `make vf2-sdcard`   kernel + FAT32 userspace + repo's sdcard-rv.img as the
+#   `make vf2-sdcard`   kernel + FAT32 userspace + an apk world image as the
 #                       extra ext4 partition (mounted at /extra).
 #   `make vf2-minimal`  kernel + FAT32 userspace (+ fastfetch), NO extra
 #                       partition: the smallest bootable card.
-#   `make vf2-extra`    kernel + FAT32 userspace + full extra.img built from
-#                       sources (vim / git / gcc / rust ... -> /extra).
 #
-# All three use the regular MMU dev kernel + userspace, the same profile as
+# `make vf2-extra` is gone: it existed only to differ by carrying a
+# source-built extra.img, and that build path has been replaced by worlds.
+# See the deprecation stub in tools/targets-extra.mk.
+#
+# Both use the regular MMU dev kernel + userspace, the same profile as
 # `make run-riscv64`.  Build with VF2_MMU=0 to swap in the validated NOMMU
-# bring-up kernel instead.  No extra-package sources or builds are involved in
-# vf2-sdcard / vf2-minimal; vf2-extra needs `make vf2-extra-sources` and the
-# EXTRA_PACKAGES build (see tools/targets-extra.mk).
+# bring-up kernel instead.  Neither involves any vendored source build;
+# fastfetch is the only gitlink and vf2-minimal is the only variant that
+# needs it.
 #
 # Prerequisites:
 #   * build/vf2-firmware/ has been produced once by `make vf2-firmware`
-#   * vf2-sdcard: sdcard-rv.img in the repo root (override VF2_EXTRA_IMAGE=)
-#   * vf2-extra:  EXTRA_PACKAGES (default "vim git gcc") sources available
+#   * vf2-sdcard: the world image needs the Alpine mirror (VF2_WORLD selects
+#     it, default 'devel').  Drop an sdcard-rv.img in the repo root, or set
+#     VF2_EXTRA_IMAGE=, to use a prebuilt partition instead.
 #
 # Output: build/vf2-firmware/a20os-sd.img (each invocation rewrites it).
-.PHONY: vf2-sdcard vf2-minimal vf2-extra \
+.PHONY: vf2-sdcard vf2-minimal \
 	_vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 VF2_MMU ?= 1
 ifeq ($(VF2_MMU),1)
@@ -100,10 +112,13 @@ VF2_USER_BUILD_DIR  := user/build/riscv64-nommu
 # the validated VF2 build already relaxes -Werror for the same reason.
 VF2_KERNEL_WERROR   := KERNEL_WERROR=0
 endif
-# Prefer a user-supplied legacy image; otherwise build the normal extra image
-# so `make vf2-sdcard` is useful in a fresh checkout.
-VF2_EXTRA_IMAGE ?= $(or $(wildcard sdcard-rv.img),$(EXTRA_IMG))
-VF2_SDCARD_EXTRA_PREREQ := $(if $(filter file,$(origin VF2_EXTRA_IMAGE)),extra-img)
+# Prefer a caller-supplied partition image (a prebuilt sdcard-rv.img dropped in
+# the repo root, or an explicit VF2_EXTRA_IMAGE=).  Otherwise assemble the apk
+# world for the slot.  A command-line VF2_EXTRA_IMAGE means the caller brought
+# their own image, so the world must not be built -- note that $(origin) is
+# "file" for the ?= below and only "command line" when the user passed one.
+VF2_EXTRA_IMAGE ?= $(or $(wildcard sdcard-rv.img),$(VF2_WORLD_IMAGE))
+VF2_SDCARD_EXTRA_PREREQ := $(if $(filter command line,$(origin VF2_EXTRA_IMAGE)),,vf2-world-image)
 
 _vf2_check_firmware:
 	@test -f build/vf2-firmware/u-boot-spl.bin.normal.out || \
@@ -143,17 +158,10 @@ vf2-minimal: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
 		$(VF2_BUILD_DIR)/kernel.bin \
 		$(VF2_BUILD_DIR)/fat32-ff.img
 
-# Full card: build the extra-package ext4 image (vim/git/gcc/... plus the
-# user tools and fastfetch already staged in $(VF2_USER_BUILD_DIR)).
-vf2-extra: _vf2_check_firmware _vf2_build_base _vf2_build_fastfetch
-	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(VF2_ABI) BRINGUP=0 \
-		NOMMU=$(VF2_NOMMU) DRIVER_DEPLOYMENT=embedded \
-		$(VF2_LDSCRIPT) \
-		EXTRA_PACKAGES="$(EXTRA_PACKAGES)" EXTRA_IMAGE_MB=$(EXTRA_IMAGE_MB) extra-img
-	tools/vf2/make-boot-image.sh \
-		$(VF2_BUILD_DIR)/kernel.bin \
-		$(VF2_BUILD_DIR)/fat32.img \
-		$(VF2_BUILD_DIR)/extra.img
+# `vf2-extra` used to live here.  It is now a deprecation stub in
+# tools/targets-extra.mk: the full card was defined by its source-built
+# extra.img, and vf2-sdcard fills that slot with an apk world instead
+# (VF2_WORLD, default 'devel').
 
 check-ls2k1000-build:
 	$(MAKE) ARCH=loongarch64 BOARD=ls2k1000 ABI=$(ABI) BRINGUP=1 kernel-only

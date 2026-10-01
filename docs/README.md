@@ -67,7 +67,7 @@
 
 - [packaging/overview.md](packaging/overview.md)：包管理与镜像分发体系（apk 打包、world 组装、仓库签名、CI/CD）
 - [distro/README.md](distro/README.md)：Alpine rootfs 发行版路径（A20OS 作内核、原生发行版作用户态）
-- [distro/source-software-porting.md](distro/source-software-porting.md)：从源码适配新软件、接入 extra 镜像与运行时验证
+- [distro/source-software-porting.md](distro/source-software-porting.md)：把新软件接进 A20OS（Alpine 上游包写进 world 清单；仍需从源码构建的只有 `user/cmds/` 与 fastfetch）与运行时验证
 - [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：已退役的 XFCE Wayland 适配记录（仅供追溯，勿据此判断现状）
 
 ## Native ABI 与子系统细节

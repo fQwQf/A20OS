@@ -18,3 +18,7 @@ py3-pip
 py3-setuptools
 nodejs
 npm
+
+# A20OS 自有小工具：busybox mount(8) 在 A20OS 上不可用（它挂载前先 stat
+# 设备节点，而块设备寻址方式不同），语料盘需要直接发 mount(2) 的原生程序。
+a20-corpus-tools
