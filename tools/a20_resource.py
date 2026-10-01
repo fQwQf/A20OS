@@ -250,8 +250,8 @@ def requirement_for(inst: Instance, policy: Policy) -> Requirement:
     mem_mb = parse_memory_mb(inst.machine.memory) if inst.machine.memory else 1024
     cpus = inst.machine.smp if inst.machine.smp is not None else 1
     r = inst.rootfs
-    disk_mb = sum(v for v in (r.size_mb, r.ext4_size_mb, r.extra_size_mb,
-                              r.world_size_mb) if v is not None)
+    disk_mb = sum(v for v in (r.size_mb, r.ext4_size_mb, r.world_size_mb)
+                  if v is not None)
     return Requirement(
         mem_mb=mem_mb + policy.reserve_mem_mb,
         cpus=max(1, cpus),

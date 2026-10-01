@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The extra image needs these gitlinks in addition to the base user tree.
+# fastfetch is the last gitlink in the tree.  It is the one user program still
+# compiled from vendored source, because it is linked into the FAT32 root that
+# boots before any Alpine world is mounted; every other program the extra disk
+# used to carry (vim, git, zlib, gcc, binutils, musl-cross-make, curl, rust,
+# Lamina1) now comes from an apk world instead -- see tools/targets-extra.mk
+# for the retired targets and docs/packaging/images.md for the world list.
+#
+# GitHub uses SSH by default; set VF2_GIT_TRANSPORT=https on hosts without a
+# configured SSH key.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
@@ -11,27 +19,9 @@ else
     GIT_ARGS=()
 fi
 
-for path in \
-	user/external/apps/fastfetch \
-	user/external/apps/git \
-	user/external/apps/vim \
-	user/external/gcc \
-	user/external/libs/zlib; do
-    update_args=(--init)
-    # Vim's pinned object is old enough that a shallow clone may not contain it.
-    [ "$path" = user/external/apps/vim ] || update_args+=(--depth 1)
-    if git "${GIT_ARGS[@]}" submodule update "${update_args[@]}" -- "$path"; then
-        continue
-    fi
-    # The pinned Vim gitlink predates a history rewrite on the upstream
-    # mirror.  Keep the build usable by checking out the current upstream
-    # tree when that exact object is no longer advertised.
-    if [ "$path" = user/external/apps/vim ]; then
-        git -C "$path" "${GIT_ARGS[@]}" fetch --depth 1 origin master
-        git -C "$path" checkout -B a20os-build FETCH_HEAD
-    else
-        exit 1
-    fi
-done
+path=user/external/apps/fastfetch
+if ! git "${GIT_ARGS[@]}" submodule update --init --depth 1 -- "$path"; then
+    exit 1
+fi
 
-printf '%s\n' "[VF2] extra sources ready: git vim fastfetch gcc"
+printf '%s\n' "[VF2] gitlink ready: fastfetch"

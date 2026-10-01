@@ -23,19 +23,14 @@ A20OS 使用并参考了许多开源项目与公开标准。这里集中记录�
 | [sbase](https://core.suckless.org/sbase/) | 基础工具（`ls`、`cat` 等） | MIT | `user/external/sbase` |
 | [TLSe](https://github.com/eduardsui/tlse) | wget 的 TLS 实现 | BSD-2-Clause OR Unlicense | `user/external/tlse` |
 | [fastfetch](https://github.com/fastfetch-cli/fastfetch) | 系统信息工具 | MIT | `user/external/apps/fastfetch` |
-| [vim](https://github.com/vim/vim) | 编辑器 | Vim License | `user/external/apps/vim` |
-| [git](https://github.com/git/git) | 版本控制 | GPL-2.0-only；部分文件使用 GPLv2 兼容的其他许可证 | `user/external/apps/git` |
-| [binutils](https://www.gnu.org/software/binutils/) | 二进制工具 | GPL-3.0-or-later / LGPL-3.0-or-later 等，按组件文件核验 | `user/external/toolchain/binutils` |
-| [Rust 工具链](https://www.rust-lang.org/) | Rust 用户态编译 | 由实际取得的工具链分发确定 | `user/external/rust`（2026-08 核实时仓库未跟踪该工具链内容） |
-| [musl-cross-make](https://github.com/richfelker/musl-cross-make) | 交叉编译工具链构建 | MIT | `user/external/toolchain/musl-cross-make` |
-| [Lamina1](https://github.com/Lamina-dev/Lamina1) | 数学 DSL 语言工具链（编译器 + 寄存器 VM） | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` |
-| [zlib](https://github.com/madler/zlib) | 压缩库 | Zlib | `user/external/libs/zlib` |
 
-> 说明：`git`、`vim`、`binutils` 等项目以独立用户态程序的形式构建，作为 Linux ABI 兼容性的验证负载；它们不参与内核核心的构建。
+上表是**仍由本仓库从源码编译**的全部第三方项目。Alpine 上游包（`vim`、`git`、`gcc`、`busybox`、`curl`、XFCE/Wayland/Mesa 栈、`python3`、`nodejs` 等）由 `apk` 在组装 world 镜像时从 Alpine 官方仓库拉取，适用**各包自身**的许可证，不是本仓库的消费对象，故不列在上表；其边界见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) §5 与 [packaging/overview.md](./packaging/overview.md)。
+
+已删除的 vendored 项目（`vim`、`git`、`zlib`、`binutils`、`musl-cross-make`、GCC、Rust 工具链、Lamina1）曾用于自举 riscv64-musl 交叉工具链、把 Git/Vim 静态链接进 `extra.img`，以及承载 lamina 的 glibc 动态依赖；对应能力现由 world 清单从 Alpine 上游解析。
 
 mksh 不能归并为单一 MirBSD 许可证：多数源文件携带 MirBSD/MirOS 条款，`strlcpy.c` 使用 ISC 条款，`mbsdcc.h` 与 `mbsdint.h` 标注 `CC0 OR The MirOS Licence`，`expr.c` 还嵌入 Unicode 数据 notice。分发时必须保留并按实际文件集合核验这些逐文件 notice。
 
-截至 2026-08 核对时，`kernel/external/lwip` 以及 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree，不是 submodule。`binutils`、`fastfetch`、`git`、`musl-cross-make`、`vim` 和 `zlib` 在 `.gitmodules` 注册，并由超级项目的 gitlink 条目固定 commit。许可证结论必须针对普通树中跟踪的许可证文本，或针对 gitlink 的精确 commit 核验，不能把整个 `user/external/` 一概称为 submodule。
+截至 2026-10 核对时，`kernel/external/lwip` 以及 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree，不是 submodule。`fastfetch` 是 `.gitmodules` 中**唯一**登记的 gitlink。许可证结论必须针对普通树中跟踪的许可证文本，或针对该 gitlink 的精确 commit 核验，不能把整个 `user/external/` 一概称为 submodule。
 
 ---
 

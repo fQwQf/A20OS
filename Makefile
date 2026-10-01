@@ -253,25 +253,12 @@ STM32_BT_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_bluetooth_config.h
 STM32_WIFI_CONFIG_HDR = $(BUILD_DIR)/generated/stm32_wifi_config.h
 FAT32_IMAGE_MB ?= 128
 EXT4_IMAGE_MB ?= 128
-# The complete RISC-V extra set (Rust + native GCC + Git/Vim) needs more than
-# the historical 1 GiB image.  Keep two GiB as the usable default while still
-# allowing smaller package selections to override it on the command line.
-EXTRA_IMAGE_MB ?= 2048
-CA_CERT_BUNDLE ?= $(firstword $(wildcard /etc/ssl/certs/ca-certificates.crt /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/cert.pem))
-EXTRA_IMG = $(BUILD_DIR)/extra.img
-EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
-EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
-EXTRA_PACKAGES ?= vim git gcc
+# User software now comes from Alpine apk packages assembled by a world
+# manifest (see packages/world/), not from source trees under user/external/.
+# The extra *partition* survives only where a board needs a writable /extra,
+# and an apk world image fills it -- see VF2_WORLD in tools/targets-build.mk.
+# RISCV_GNU_CC stays: the vDSO is built with it, not with an extra package.
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
-RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
-RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
-                              $(RISCV_GLIBC_SYSROOT)/lib64 \
-                              /usr/riscv64-linux-gnu/lib
-RISCV_GLIBC_LIB_DIR ?= $(patsubst %/ld-linux-riscv64-lp64d.so.1,%,$(firstword \
-                         $(wildcard $(addsuffix /ld-linux-riscv64-lp64d.so.1,$(RISCV_GLIBC_LIB_CANDIDATES)))))
-RISCV_GLIBC_LOCAL_ROOT ?= user/external/riscv64-glibc-sysroot
-RISCV_GLIBC_LOCAL_LIB_DIR = $(RISCV_GLIBC_LOCAL_ROOT)/lib
-FEDORA_RISCV_RELEASE ?=
 USER_BUILD_ID = $(ARCH):$(NOMMU):$(USER_OPT):$(PROFILE)
 # $(wildcard) drops uninitialized git submodules (fastfetch).  The
 # build must not fail when a tarball export or a non-recursive clone
@@ -668,8 +655,8 @@ endif
 ifneq ($(BRINGUP),1)
 QEMU_FLAGS += -drive file=$(FAT32_IMG),if=none,format=raw,id=x0 -device $(QEMU_BLK),drive=x0
 QEMU_FLAGS += $(NETDEV_USER) -device $(QEMU_NET),netdev=net
-# Extra-package runs need extra.img to be the ext4 filesystem mounted at /extra,
-# so snapshot the flags before an optional second disk is appended.
+# Snapshot the flags before an optional second disk is appended, so the
+# world-image targets can add theirs without inheriting an strays' disk.
 QEMU_FLAGS_NO_SDCARD := $(QEMU_FLAGS)
 ifeq ($(ARCH),riscv64)
 ifneq ($(wildcard sdcard-rv.img),)
