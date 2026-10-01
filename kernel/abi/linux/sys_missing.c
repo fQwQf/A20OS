@@ -5,7 +5,6 @@
 #include "core/mman.h"
 #include "core/stdio.h"
 #include "core/string.h"
-#include "fs/dcookie.h"
 #include "fs/fdtable.h"
 #include "fs/file.h"
 #include "fs/memfd.h"
@@ -26,7 +25,7 @@
 /*
  * Linux syscalls that were last to land in the ABI: each entry here now
  * carries real semantics (restart-block replay, exact kcmp mapping with
- * epoll membership, windowed cachestat, dcookie registry, quota core,
+ * epoll membership, windowed cachestat, quota core,
  * remap_file_pages rebinding, owner-scoped memfd_secret, live rseq
  * publication, cBPF seccomp, staged kexec images and CET shadow-stack
  * allocation) delegating to their kernel subsystems.
@@ -236,23 +235,13 @@ int64_t sys_cachestat(int fd, const void *cstat_range, void *cstat,
 
 int64_t sys_lookup_dcookie(uint64_t cookie, char *buf, size_t len)
 {
-    if (!buf)
-        return -EFAULT;
-
-    char *path = NULL;
-    int idx = dcookie_resolve(cookie, &path);
-    if (idx < 0)
-        return -EINVAL;
-
-    size_t total = strlen(path) + 1;
-    int64_t r;
-    if (len < total) {
-        r = (int64_t)total;   /* buffer too small: report required size */
-    } else {
-        r = copy_to_user(buf, path, total) < 0 ? -EFAULT : (int64_t)total;
-    }
-    dcookie_release(idx);
-    return r;
+    (void)cookie;
+    (void)buf;
+    (void)len;
+    /* The dcookie registry was removed as producer-less: nothing in the tree
+     * ever registered a cookie, so lookup could only ever fail.  Keep the
+     * syscall slot answering -EINVAL for ABI completeness. */
+    return -EINVAL;
 }
 
 int64_t sys_quotactl(int cmd, const char *special, int id, void *addr)

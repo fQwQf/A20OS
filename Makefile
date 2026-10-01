@@ -12,7 +12,6 @@ HOST_OS ?= $(shell uname -s 2>/dev/null)
 ifeq ($(HOST_OS),Darwin)
 DEFAULT_KERNEL_CHECK_TARGETS := check-riscv64-bringup check-stm32f103
 DEFAULT_USER_CHECK_TARGETS := check-riscv64-user
-DEFAULT_NATIVE_TEST_TARGETS := native-test-rv
 DEFAULT_NATIVE_HANDLE_TARGETS := native-handle-test-rv
 DEFAULT_NATIVE_LIBC_TARGETS := native-libc-rv
 else
@@ -28,7 +27,6 @@ NATIVE_ARCH_LIST = $(foreach a,$(SUPPORTED_HOSTED_ARCHES),$(call NATIVE_ARCH_NAM
 
 DEFAULT_KERNEL_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup)
 DEFAULT_USER_CHECK_TARGETS := $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-user)
-DEFAULT_NATIVE_TEST_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-test-$(n))
 DEFAULT_NATIVE_HANDLE_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-handle-test-$(n))
 DEFAULT_NATIVE_LIBC_TARGETS := $(foreach n,$(NATIVE_ARCH_LIST),native-libc-$(n))
 
@@ -264,9 +262,6 @@ EXTRA_IMG = $(BUILD_DIR)/extra.img
 EXTRA_STAGING_DIR = $(BUILD_DIR)/extra-staging
 EXTRA_IMAGE_STAMP = $(BUILD_DIR)/.extra-image-id
 EXTRA_PACKAGES ?= vim git gcc
-MUSL_CROSS_ROOT ?= $(firstword $(foreach root,\
-                        user/external/toolchain/musl-cross-make/output,\
-                        $(if $(wildcard $(root)/bin/riscv64-linux-musl-gcc),$(root))))
 RISCV_GNU_CC ?= riscv64-linux-gnu-gcc
 RISCV_GLIBC_SYSROOT ?= $(shell $(RISCV_GNU_CC) -print-sysroot 2>/dev/null)
 RISCV_GLIBC_LIB_CANDIDATES := $(RISCV_GLIBC_SYSROOT)/lib \
@@ -295,7 +290,6 @@ NATIVE_TAG_riscv32     := rv32
 NATIVE_TAG_ppc64le     := ppc64le
 NATIVE_TAG             := $(NATIVE_TAG_$(ARCH))
 NATIVE_BUILD_DIR       := $(USER_BUILD_DIR)
-NATIVE_HELLO_BIN       := $(NATIVE_BUILD_DIR)/native-hello-$(NATIVE_TAG)
 NATIVE_HANDLE_BIN      := $(NATIVE_BUILD_DIR)/native-handle-$(NATIVE_TAG)
 NATIVE_LIBC_BIN        := $(NATIVE_BUILD_DIR)/native-libc-$(NATIVE_TAG)
 NATIVE_FUTEX_BIN       := $(NATIVE_BUILD_DIR)/native-futex-$(NATIVE_TAG)
@@ -325,11 +319,10 @@ NATIVE_UEDUD_BIN       := $(NATIVE_BUILD_DIR)/uedud-$(NATIVE_TAG).a20drv
 NATIVE_PERSONALITY_BIN := $(NATIVE_BUILD_DIR)/native-personality-$(NATIVE_TAG)
 NATIVE_LINUX_BIN       := $(NATIVE_BUILD_DIR)/native-linux-$(NATIVE_TAG)
 NATIVE_CHESS_BIN       := $(NATIVE_BUILD_DIR)/native-chess-$(NATIVE_TAG)
-NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
+NATIVE_OUTPUTS         := $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_DEEPEN_BIN) \
                           $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) \
                           $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) \
-                          $(NATIVE_FAKELD_BIN) $(NATIVE_DYNPROBE_BIN) \
                           $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN) \
                           $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) \
                           $(NATIVE_CHAND_BIN) $(NATIVE_RTCD_BIN) \
@@ -341,6 +334,10 @@ NATIVE_OUTPUTS         := $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) \
                           $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) \
                           $(NATIVE_DEBUG_BIN) $(NATIVE_EXT_BIN) \
                           $(NATIVE_CHESS_BIN)
+# fakeld/dynprobe are the rv64 dynamic-linking bring-up probes (08-runtime-status
+# §8a): fake_ld.c's _start_dyn entry asm is rv64-only, so building them for any
+# other ARCH breaks the whole native-program graph. Keep them rv64-only.
+NATIVE_OUTPUTS += $(if $(filter riscv64,$(ARCH)),$(NATIVE_FAKELD_BIN) $(NATIVE_DYNPROBE_BIN))
 NATIVE_BUILD_STAMP     := $(NATIVE_BUILD_DIR)/.native-build-id
 
 # ================================================================
@@ -359,33 +356,15 @@ comma := ,
 NET_HOSTFWD ?=
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
-SMOKE_TIMEOUT_ENVELOPE ?= 60s
-SMOKE_TIMEOUT_ENVELOPE_PILOT ?= 120s
-SMOKE_TIMEOUT_ENVELOPE_BENCH ?= 180s
-SMOKE_TIMEOUT_ENVELOPE_CORPUS ?= 300s
 # TCG boot can take longer than two seconds after a full image rebuild.  Wait
 # until the interactive mksh has had time to print its prompt before injecting
 # smoke commands; PASS markers and clean poweroff still decide the result.
 SMOKE_INPUT_DELAY ?= 8
-# mm_stress drives ~8 MiB of ramfs page-cache eviction plus fork/mremap/huge
-# page coverage under TCG; it is the heaviest smoke and needs a longer budget.
-SMOKE_TIMEOUT_MM_ST ?= 45s
 # A 4-core TCG run plus net_stress_test's 4 concurrent x 4 MiB transfers is
 # much slower than the single-core defaults, so it needs its own budget.
 SMOKE_TIMEOUT_SMP ?= 180s
-# oom_stress exhausts a 32 MiB cgroup limit page by page under TCG; the fault
-# storm plus boot time needs more than the default window.
-SMOKE_TIMEOUT_OOM ?= 60s
-# swap_test formats and enables a loop-backed swap device, then touches anon
-# memory; 16 MiB of ramfs backing writes plus boot fits well under this.
-SMOKE_TIMEOUT_SWAP ?= 45s
-SMOKE_TIMEOUT_MM_FORK_EXEC ?= 120s
-# smoke-native-deepen runs several blocking waits (FS event + socket event) plus
-# a user-space pager round trip under TCG; it needs more than the 20s default.
-SMOKE_TIMEOUT_DEEPEN ?= 60s
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
-STEP35_INPUT_DELAY ?= 8
 STEP35_LOG_DIR ?= .kernel-build/smoke/step35
 WAIT_TIMER_HEAP_MAX ?=
 REQUIRE_TIMEOUT_CAPACITY ?= 0
@@ -1133,4 +1112,6 @@ check-envelope-coverage:
 # and the build cannot disagree about what "built" means.  This is exactly
 # the set the shell rule tested; the Makefile defines more NATIVE_*_BIN vars
 # for other purposes and those are deliberately not part of the gate.
-NATIVE_BINS = $(NATIVE_HELLO_BIN) $(NATIVE_HANDLE_BIN) $(NATIVE_LIBC_BIN) $(NATIVE_FUTEX_BIN) $(NATIVE_MM_BIN) $(NATIVE_SIGNAL_BIN) $(NATIVE_IPC_BIN) $(NATIVE_CONTRACT_BIN) $(NATIVE_SVCMAN_BIN) $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN) $(NATIVE_ECHOD_BIN) $(NATIVE_REGISTRY_BIN) $(NATIVE_SVCMGR_BIN) $(NATIVE_ISOLATION_BIN) $(NATIVE_UBDD_BIN) $(NATIVE_UINPUTD_BIN) $(NATIVE_UEDUD_BIN) $(NATIVE_PERSONALITY_BIN) $(NATIVE_LINUX_BIN) $(NATIVE_RTCD_BIN) $(NATIVE_RTCDD_BIN)
+# The stamp existence check must cover exactly what native-programs builds,
+# otherwise binaries can go missing from the image while the stamp still passes.
+NATIVE_BINS := $(NATIVE_OUTPUTS)

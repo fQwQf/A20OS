@@ -33,7 +33,6 @@ import sys
 from pathlib import Path
 from typing import assert_never
 
-import a20_preflight
 from a20_board import run_flash, run_package
 from a20_error import (
     A20Error,
@@ -71,7 +70,9 @@ from a20_make import REPO_ROOT, MakeQueryError, build_instance, exec_make
 from a20_resource import (
     HostResources,
     Policy,
+    gate_qemu,
     preflight,
+    self_check,
 )
 from a20_registry import (
     DriverComponent,
@@ -176,11 +177,11 @@ def _gate_resources(inst, args, *, guest: bool = True) -> None:
     preflight(inst, policy, REPO_ROOT, wait=not getattr(args, "no_wait", False),
               echo=_echo, guest=guest)
 def _gate_qemu(inst: Instance, action: str) -> None:
-    """Block until the host can host this instance; see tools/a20_preflight.py."""
+    """Block until the host can host this instance; see tools/a20_resource.gate_qemu."""
     m = inst.machine
     memory = m.memory
     if memory is None:
-        memory = a20_preflight.DEFAULT_MEMORY_GUI if (inst.gui.enabled or inst.rootfs.world) else a20_preflight.DEFAULT_MEMORY
+        memory = DEFAULT_MEMORY_GUI if (inst.gui.enabled or inst.rootfs.world) else DEFAULT_MEMORY
     # A world image lives at build/images/<world>-<arch>.img; check it before
     # boot, because a dirty one presents as a kernel bug rather than as a
     # filesystem problem.  Its absence is not an error here: cmd_run builds
@@ -188,21 +189,9 @@ def _gate_qemu(inst: Instance, action: str) -> None:
     image = None
     if inst.rootfs.world is not None:
         image = REPO_ROOT / "build" / "images" / f"{inst.rootfs.world}-{inst.arch}.img"
-    need = a20_preflight.Need(
-        label=f"{inst.name} ({action})",
-        memory_bytes=a20_preflight.parse_size(memory),
-        vcpus=m.smp or a20_preflight.DEFAULT_VCPUS,
-        disk_path=str(REPO_ROOT),
-        image=image,
-    )
-    try:
-        a20_preflight.gate(need)
-    except a20_preflight.PreflightError as exc:
-        raise SystemExit(f"error: {exc}") from exc
-
-
-def cmd_build(args: argparse.Namespace) -> int:
-    return build_instance(_load(args.instance), list(args.make_args), args.dry_run)
+    gate_qemu(memory=memory, vcpus=m.smp or DEFAULT_VCPUS,
+              disk_path=str(REPO_ROOT), image=image,
+              label=f"{inst.name} ({action})", echo=_echo)
 
 
 def _echo(msg: str) -> None:
@@ -261,7 +250,6 @@ def cmd_debug(args: argparse.Namespace) -> None:
     _check_runnable(inst, "debug")
     _gate_resources(inst, args)
     _echo(_port_note(inst))
-    exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
     _gate_qemu(inst, "debug")
     return exec_make(inst, "_debug_impl", list(args.make_args), args.dry_run)
 
@@ -559,12 +547,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"FAIL matrix: no valid instance covers required arch '{arch}'",
                   file=sys.stderr)
             failed += 1
-    drift = a20_preflight.self_check(
+    drift = self_check(
         (REPO_ROOT / "Makefile").read_text(encoding="utf-8"),
         (REPO_ROOT / "tools" / "targets-pkg.mk").read_text(encoding="utf-8"),
     )
     for line in drift:
-        print(f"FAIL a20_preflight: {line}")
+        print(f"FAIL a20_resource: {line}")
     failed += len(drift)
     if failed:
         print(f"check: {failed} failure(s) across {len(paths)} instance(s)",

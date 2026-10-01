@@ -215,11 +215,11 @@ static inline uint64_t eevdf_weight(task_t *t)
     return boost > base ? boost : base;
 }
 
-void proc_sched_pi_boost(task_t *owner, task_t *waiter)
+void proc_sched_pi_boost(task_t *owner, task_t *pi_waiter)
 {
-    if (!owner || !waiter)
+    if (!owner || !pi_waiter)
         return;
-    uint32_t w = waiter->cfs_weight;
+    uint32_t w = pi_waiter->cfs_weight;
     if (!w)
         w = EEVDF_NICE0_LOAD;
     uint32_t old = __atomic_load_n(&owner->pi_boost_weight, __ATOMIC_RELAXED);

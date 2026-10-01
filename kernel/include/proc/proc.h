@@ -467,7 +467,7 @@ void     proc_sleep_until(uint64_t wake_time);
  */
 void     proc_sched_handle_reschedule_ipi(void);
 void     proc_sched_tick(int from_user);
-void     proc_sched_pi_boost(task_t *owner, task_t *waiter);
+void     proc_sched_pi_boost(task_t *owner, task_t *pi_waiter);
 void     proc_sched_pi_unboost(task_t *owner);
 uint64_t proc_runq_load_sum(void);
 void     proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,

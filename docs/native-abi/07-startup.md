@@ -90,6 +90,7 @@ typedef struct a20_start_info {
 ```
 应用 -> mlibc sysdeps/a20 -> Native syscall
 小型程序 -> liba20c -> liba20rt -> Native syscall
+> 注：`user/archive/` 已于 2026-10 从仓库删除，本节涉及 archive 的工作项成为历史记录。
 历史 Native-musl bridge -> user/archive/（不参与构建）
 ```
 

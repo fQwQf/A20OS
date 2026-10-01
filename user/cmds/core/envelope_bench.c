@@ -18,20 +18,9 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "envelope_abi.h"
 
-#define SYS_a20_envelope_create 902
-#define SYS_a20_envelope_enter  903
 
-/* Must match kernel struct a20_env_policy. */
-struct env_policy {
-    unsigned int allowed_types;
-    unsigned long long rights_by_class[32];
-    unsigned long long time_budget_ns;
-    unsigned long long op_budget;
-    unsigned long long data_budget;
-    unsigned int propagation_types;
-    unsigned int flags;
-};
 
 #define OBJ_FILE 3
 #define OBJ_SOCKET 5

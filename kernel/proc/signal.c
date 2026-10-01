@@ -408,6 +408,19 @@ int signal_task_get_pending_info(void *task, int signum, void *out,
     return ret;
 }
 
+int signal_signo_pending_scoped(void *task, int signum, int thread_scoped)
+{
+    task_t *t = (task_t *)task;
+    if (!t || !t->signals || signum < 1 || signum >= NSIG)
+        return 0;
+    signal_state_t *ss = (signal_state_t *)t->signals;
+    uint64_t flags = spin_lock_irqsave(&ss->lock);
+    uint64_t mask = thread_scoped ? t->thread_pending : ss->pending;
+    int pending = (mask & signal_mask_bit(signum)) != 0;
+    spin_unlock_irqrestore(&ss->lock, flags);
+    return pending;
+}
+
 int signal_send(int pid, int signum) {
     return signal_send_info(pid, signum, NULL, 0);
 }

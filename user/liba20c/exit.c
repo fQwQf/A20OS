@@ -5,6 +5,8 @@
 #include "../liba20rt/a20_task.h"
 #include <stdlib.h>
 
+extern void __a20_exit_run_hooks(void);
+
 static void (*atexit_handlers[ATEXIT_MAX])(void);
 static int atexit_count = 0;
 
@@ -24,9 +26,16 @@ static void call_atexit_handlers(void)
 
 void exit(int code)
 {
-    call_atexit_handlers();
+    __a20_exit_run_hooks();
     a20_task_exit(code);
     for (;;) {}
+}
+
+/* Strong override for crt0_a20.h's weak hook: atexit handlers run when main()
+ * returns, not only on an explicit exit().  _exit() bypasses them by design. */
+void __a20_exit_run_hooks(void)
+{
+    call_atexit_handlers();
 }
 
 void _exit(int code)

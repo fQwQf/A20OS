@@ -12,7 +12,10 @@ Order of operations per case mirrors what the make recipe did:
      smoke-test define)
   3. recursive build
   4. QEMU under tools/run_with_timeout.py, log to file
-  5. every pass pattern must appear in the log, else dump the tail and fail
+  5. post commands (optional; e.g. tools/check_wav_pcm.py re-asserts the PCM
+     content of an audio run's wav output -- a check the host can make but the
+     guest log cannot)
+  6. every pass pattern must appear in the log, else dump the tail and fail
 
 `--print-argv` exists so the invocation can be diffed against make; it is what
 makes a future edit to this file falsifiable.
@@ -154,6 +157,25 @@ def run_qemu(case: dict) -> int:
                 pass
             return proc.wait()
         return sh(argv, stdout=fh, stderr=subprocess.STDOUT).returncode
+
+
+def run_post_build(case: dict) -> int:
+    """Post-build, pre-QEMU commands (e.g. injecting mlibc binaries into the
+    FAT32 image the build step just composed)."""
+    for cmd in case.get("post-build") or []:
+        if sh(["bash", "-c", cmd]).returncode != 0:
+            print(f"post-build command failed: {cmd}")
+            return 1
+    return 0
+
+
+def run_post(case: dict) -> int:
+    """Post-run host-side checks; a nonzero exit fails the case outright."""
+    for cmd in case.get("post") or []:
+        if sh(["bash", "-c", cmd]).returncode != 0:
+            print(f"post-run check failed: {cmd}")
+            return 1
+    return 0
 
 
 def grep_matches(pattern: str, text: str) -> bool:
@@ -386,7 +408,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     run_gate(case)
     run_build(case)
+    if run_post_build(case):
+        return 1
     status = run_qemu(case)
+    if run_post(case):
+        return 1
     return report(a.case, case, status)
 
 

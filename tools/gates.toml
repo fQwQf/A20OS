@@ -538,19 +538,11 @@ files = ["docs/testing-gates.md"]
 
 [[gate.assertion]]
 pattern = "syscall_smoke"
-files = ["tools/targets-smoke.mk"]
+files = ["tools/smoke_cases.py"]
 
 [[gate.assertion]]
 pattern = "smoke-abi-linux"
 files = ["tools/targets-smoke.mk"]
-
-[[gate.assertion]]
-pattern = "native-minimal"
-files = ["tools/targets-native.mk"]
-
-[[gate.assertion]]
-pattern = "native-test"
-files = ["tools/targets-native.mk"]
 
 [[gate.assertion]]
 pattern = "test_liba20c"

@@ -7,7 +7,7 @@ HOST_TESTS_SRC := $(wildcard tools/tests/*.c)
 HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
-        check-component-registry regen-driver-fragment regen-smoke-cases \
+        check-component-registry regen-driver-fragment \
         check-smoke-cases \
         check-flash-backend-registry check-manifests \
         check-a20-tests
@@ -31,14 +31,6 @@ check-component-registry:
 # calls tools/smoke.py must name a case that exists.  One make spawn.
 check-smoke-cases:
 	@$(PYTHON) tools/smoke_audit.py
-
-# tools/smoke_cases.py is generated from the pinned pre-migration sources and
-# then checked against make's own expansion.  Both steps run here so the table
-# can never be regenerated without that proof.
-regen-smoke-cases:
-	@$(PYTHON) tools/smoke_extract.py /tmp/a20-smoke-cases.json
-	@$(PYTHON) tools/smoke_verify_extract.py /tmp/a20-smoke-cases.json
-	@$(PYTHON) tools/smoke_gen_cases.py /tmp/a20-smoke-cases.json tools/smoke_cases.py
 
 regen-driver-fragment:
 	@tools/a20 regen-drivers
@@ -70,6 +62,7 @@ check-a20-tests:
 # arm and userspace sees EINVAL/ENOTTY -- which reads as a Mesa or libdrm bug
 # rather than as a wrong constant in a header.  Gate it so that class of
 # mistake cannot land again.  Skips where no UAPI headers are installed.
+.PHONY: check-drm-abi
 check-drm-abi:
 	@tools/check-drm-abi.sh
 
