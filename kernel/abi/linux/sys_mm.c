@@ -288,7 +288,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                         frame_put(phys_to_pfn(pa));
                     }
                     size_t pages = size / PAGE_SIZE;
-                    t->mm->rss = (t->mm->rss > pages) ? t->mm->rss - pages : 0;
+                    mm_rss_sub_clamped(t->mm, pages);
                 }
                 va = base + size;
             } else {

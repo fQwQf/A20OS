@@ -907,7 +907,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
          * flags minflt cminflt majflt cmajflt utime stime cutime cstime
          * priority nice num_threads itrealvalue starttime vsize rss */
         size_t vsize = t->mm ? t->mm->total_vm * PAGE_SIZE : 0;
-        long rss_pages = t->mm ? (long)t->mm->rss : 0;
+        long rss_pages = (long)mm_rss_get(t->mm);
         snprintf(buf, bufsz,
             "%d (%s) %c %d %d %d 0 0 0 0 0 0 0 %lu %lu %ld %ld %d %d %d 0 %lu %lu %ld\n",
             t->pid, t->name, procfs_task_state_char(t),
@@ -941,7 +941,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         size_t vmlck_kb = 0;
         size_t vmdata_kb = 0;
         if (t->mm) {
-            rss_kb = t->mm->rss * PAGE_SIZE / 1024;
+            rss_kb = mm_rss_get(t->mm) * PAGE_SIZE / 1024;
             vmlck_kb = t->mm->locked_vm / 1024;
             vm_area_t *vma = t->mm->mmap;
             while (vma) {
@@ -989,7 +989,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_PID_STATM: {
         task_t *t = proc_find_get(pid);
         size_t total = t && t->mm ? t->mm->total_vm : 0;
-        size_t rss = t && t->mm ? t->mm->rss : 0;
+        size_t rss = t ? mm_rss_get(t->mm) : 0;
         snprintf(buf, bufsz, "%lu %lu 0 0 0 0 0\n",
                  (unsigned long)total, (unsigned long)rss);
         proc_put(t);

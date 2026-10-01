@@ -658,7 +658,7 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
             ret = -EAGAIN;
             break;
         }
-        mm->rss++;
+        mm_rss_add(mm, 1);
         spin_unlock(&mm->lock);
         arch_tlb_flush_page_local(dst);
         c.copy += (int64_t)PAGE_SIZE;
@@ -754,7 +754,7 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
             ret = -EAGAIN;
             break;
         }
-        mm->rss++;
+        mm_rss_add(mm, 1);
         spin_unlock(&mm->lock);
         arch_tlb_flush_page_local(dst);
         z.zeropage += (int64_t)PAGE_SIZE;
