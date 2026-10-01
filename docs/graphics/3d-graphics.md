@@ -127,8 +127,24 @@ buffer，没有依赖旧行为的东西。
 会把别人阻塞其中的 mutex 和已挂链的 waiter 一起清掉。**本轮已把这两处换成
 `virtio_gpu_release_buffers()`**：释放堆缓冲、清零标量状态，但**不再碰
 `command_lock` 与 waiters**（instance 在静态存储里，保留已初始化的锁本身就是对的）。
-**仍未解决的是**：已经进入命令路径的调用者会继续跑在已被 reset 的 transport 上；
-这需要设备级 teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，仍单独立项。
+
+
+**曾经记为未解决、现已查清并撤回的一条**：上面这个 helper 的注释曾写"仍在命令
+路径里的调用者会继续跑在已 reset 的 transport 上，因此需要设备级 teardown 锁或
+in-flight 引用计数"。**这条判断是错的**，查证后撤回，理由是它要防的那件事不会发生：
+
+- instance 是文件静态的 `g_gpu_inst`，其存储寿命长于任何调用者，所以"跑在已
+  reset 的 transport 上"不构成 use-after-free；
+- 每个命令入口都重新读 `dev->drv_priv`，而 `remove()` 会把它清空，wrapper 在
+  NULL 时回 `-ENODEV`；
+- ops 表是 `static const`，竞态调用者已经取到的函数指针始终有效；
+- 能走到驱动的前提是该设备是当前默认设备，而 `gpu_device_unregister()` 先清空
+  槽位，于是 `drm_gpu_ops()` 返回 NULL，ioctl 在碰到 instance 之前就回 `-ENODEV`。
+
+真正让这个顺序安全的是：`unregister()`（清槽位）→ `unpublish()`（排空
+`class_device_call_begin` 使用者）→ `release_buffers()`。**若将来有改动在一次
+ioctl 期间缓存 `dev` 或 `ops`，或绕过默认设备槽位直接调驱动，这个结论就失效，
+那时才真的需要引用计数。**
 `gpu_device_unregister()` 的"清空槽位后不重选"本轮也修掉了，见 [§0.6](#06-本轮合并前阻塞项已解除设备重选已修)。
 
 ### 本轮（`feat/graphics-hardening`，续）：宿主阻塞解除后的实测结论
