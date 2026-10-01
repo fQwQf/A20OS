@@ -20,6 +20,8 @@
 | VirtIO-SCSI | `kernel/drivers/block/virtio_scsi.c` | sleepable `dev->lock` mutex |
 | E1000 | `kernel/drivers/net/e1000.c` | `nic->lock` |
 | VMSVGA/SVGAv3 | `kernel/drivers/gpu/vmsvga.c` | `svga->lock` |
+| DRM/KMS/virtio-gpu 3D | `kernel/drivers/gpu/drm.c` | `g_drm_store.lock`；`g_vblank.lock` |
+| VirtIO-GPU transport | `kernel/drivers/gpu/virtio_gpu.c` | `inst->command_lock`（另有 `gpu_core.c` 的 `g_gpu_lock`，spinlock） |
 | VirtIO input | `kernel/drvmod/examples/vinput.c (inst->lock 在模块内)` | `inst->lock` |
 | xHCI | `kernel/drivers/usb/host/xhci.c`（generic 模块 `xhci.a20drv`） | `xhci->lock` 已初始化但当前未获取；不是已生效的同步保证 |
 | USB HID | `kernel/drivers/usb/class/usb_hid.c` | 每接口 `h->lock`；completion 路径当前未一致获取 |
@@ -169,6 +171,50 @@ IRQ 驱动的完成路径必须复用同一锁并在此记录顺序。数据面�
 ### VMSVGA/SVGAv3
 
 `vmsvga_device_t.lock`（`svga->lock`）保护 command buffer header、command submission 和 update 序列，没有局部顺序。`flush` 在锁内提交并轮询短 command completion；不得在此锁下执行 framebuffer 映射、VFS 或用户 copy。
+
+### DRM/KMS/virtio-gpu 3D
+
+`g_drm_store.lock`（`drm.c`）保护全部 device-global 状态：GEM 表
+`g_gems[]`、framebuffer 表 `g_fbs[]`、CRTC 绑定 `g_crtc`、GEM name 表、
+PRIME 表、virgl 资源/上下文 id 计数器，以及 EDID 的一次性缓存。这些表按
+设计是设备全局的——一个 open 建立的 buffer 必须对另一个 open 可见——所以
+wlroots backend 与 renderD128 上的 GBM client 会并发访问它们。
+
+局部顺序：
+
+- `g_drm_store.lock` 是设备私有锁，永远是最内层锁。
+- **锁只保护表，不保护任何可能阻塞的调用。**凡是需要睡眠、分配、进入 VFS
+  或下发 virtio 命令的操作（`drm_present_buffer_at()`、present 用的
+  `ops->flush()`、`vmo_release()`、`ops->resource_unref()`、`memfd_*`、
+  `vfs_*`）都在释放锁之后执行。
+- 因此拆函数的 teardown 是两段的：`drm_gem_detach_locked()` 在锁内把对象
+  移出表，`drm_gem_drop_storage()` 在锁外释放 VMO 与 host resource。
+- 跨锁的长操作由 **pin** 兜底：`drm_gem_pin()` 使 `pins++`，让对象在调用者
+  放下锁期间不被回收，`drm_gem_unpin()` 归还。`pins` 不是 owner 计数：
+  它不会让 buffer 活过最后一个持有者，只保证操作中途不被拆掉。
+- **不得在 `g_drm_store.lock` 内调用 VFS。**`vfs_get_file_ref()` 可以一路
+  走到 file close op，而 `file_close_prepare()` 是在持有 `g_file_lock` 的
+  情况下调用它的。所以 fd→对象、对象→fd 的解析都在锁外完成，锁内只比较
+  解析出来的 `vfile.identity` 数值。
+- `g_drm_store.lock` 与 `g_vblank.lock` **不得同时持有**。`drm_close()` 是
+  唯一需要两把锁的路径，它先释放 `g_vblank.lock` 再取 `g_drm_store.lock`。
+- `g_vblank.lock`（既有）保护单槽 pending flip 与 per-file 事件 FIFO。
+
+### VirtIO-GPU transport
+
+`inst->command_lock`（`virtio_gpu.c`）保护共享请求/响应暂存区
+（`big_req`/`big_resp`）、descriptor 表、avail/used ring 索引。四个提交
+循环都必须在它之下运行。
+
+关键规则：`inst->big_req` 是**每实例一块**共享缓冲，四条路径都会增长、
+`kfree` 并重填它。因此 ATTACH_BACKING 与 SUBMIT_3D 的请求体必须在锁内
+构建，descriptor 里 `va_to_pa(inst->big_req)` 也必须在（可能的）重新分配
+之后计算，否则拿到的是刚被释放的指针。DRM 侧一次 EXECBUFFER 会为每个
+buffer 各调一次 ATTACH_BACKING，所以这条路径天然并发。
+
+局部顺序：`inst->command_lock` 是最内层锁。它之下不得调用 VFS、MM 或任何
+会睡眠的路径；completion 轮询在锁内 park（`inst->waiters` + Park/Wake），
+wake queue 的 flush 在释放锁之后。
 
 ### VirtIO input
 
