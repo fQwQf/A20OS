@@ -25,6 +25,10 @@ boot_wait = 4
 boot_timeout = "120s"
 # The Zero 2/Zero 3 route the debug header UART to pins 8/9 (uart0); the
 # Zero 2W uses a different header.  Fill in the real device node.
+# No [FDT] line on aarch64: only riscv64 and loongarch parse a device tree,
+# and the aarch64 port has no DT-based RAM narrowing.  System ready is
+# printed by kernel/main.c and is the strongest evidence available here.
+console_check = ["System ready"]
 commands = ["cat /etc/os-release", "poweroff"]
 expect = ["A20OS", "poweroff"]
 
