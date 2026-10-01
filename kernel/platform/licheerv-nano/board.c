@@ -82,6 +82,11 @@ static void lrn_reboot(void) {
  * driver targets.  Both need real drivers, not device table entries, so this
  * stage stops at RAM + console + PLIC + timer. */
 static void lrn_enumerate_devices(void) {
+    /* No block driver on this board yet, so this walks the firmware's device tree
+     * to report what is there and unbound.  That turns the boot log into the
+     * work list: without it the only symptom is a later "no FAT32 device for
+     * /bin" naming neither the controller nor the compatible string to bind. */
+    riscv64_fdt_enumerate_platform_devices();
 }
 
 static const board_config_t licheerv_nano = {

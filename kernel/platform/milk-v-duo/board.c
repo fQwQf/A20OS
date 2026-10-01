@@ -79,6 +79,11 @@ static void mvd_reboot(void) {
  * exist yet.  The Milk-V Duo's Ethernet PHY also needs an external transformer
  * and RJ45, which the board does not populate. */
 static void mvd_enumerate_devices(void) {
+    /* No block driver on this board yet, so this walks the firmware's device tree
+     * to report what is there and unbound.  That turns the boot log into the
+     * work list: without it the only symptom is a later "no FAT32 device for
+     * /bin" naming neither the controller nor the compatible string to bind. */
+    riscv64_fdt_enumerate_platform_devices();
 }
 
 static const board_config_t milk_v_duo = {

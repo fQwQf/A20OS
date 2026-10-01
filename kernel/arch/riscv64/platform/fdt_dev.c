@@ -69,11 +69,16 @@ static uint32_t dt_read32(const void *p)
 #define DT_DEFAULT_ADDRESS_CELLS 2
 #define DT_DEFAULT_SIZE_CELLS     2
 
-static uint64_t dt_cells_to_u64(const uint32_t *cells, uint32_t n)
+/* FDT cells are big-endian, so every one has to go through dt_read32().  Reading
+ * them as native uint32_t compiles and works on a big-endian host while handing
+ * drivers byte-swapped addresses on a little-endian one: 0x00 0x10100000 came
+ * out as 0x1010, and rtc@101000 looked correct only because its bytes are
+ * symmetric. */
+static uint64_t dt_cells_to_u64(const uint8_t *cells, uint32_t n)
 {
     uint64_t v = 0;
     for (uint32_t i = 0; i < n; i++)
-        v = (v << 32) | cells[i];
+        v = (v << 32) | dt_read32(cells + i * 4);
     return v;
 }
 
@@ -152,6 +157,44 @@ static int dt_slot_emit(const char *node_name, uint32_t name_len,
     return 0;
 }
 
+/* A board whose driver for a device does not exist yet boots with that device
+ * silently missing, and the only symptom is a later "no FAT32 device for /bin"
+ * that names neither the controller nor the compatible string. Naming the node
+ * turns that into a to-do list: the person who writes the driver is told which
+ * IP core to bind and at which address, instead of re-reading the upstream DTS
+ * to find out what they were already looking at.
+ *
+ * Capped because a real device tree describes far more than this kernel claims
+ * -- the CLINT and PLIC on the JH7110 are two examples among dozens -- and a
+ * board's boot log is not the place for a full inventory. */
+#define DT_UNBOUND_REPORT_MAX 8
+
+static void dt_report_unbound(const char *node_name, const char *compatible,
+                              uint32_t len, uint64_t mmio_base)
+{
+    static int reported;
+
+    if (mmio_base == 0 || reported >= DT_UNBOUND_REPORT_MAX)
+        return;
+    reported++;
+    if (reported == DT_UNBOUND_REPORT_MAX)
+        kinfo("[DT] further unbound devices not reported\n");
+
+    /* compatible is a NUL-separated list; report the first, which is the most
+     * specific and therefore the one a driver should bind. */
+    /* The kernel printf has width but no precision, so %.*s is not available --
+     * and worse, an unsupported spec desynchronises the varargs that follow it.
+     * Copy the first entry out instead and print it as an ordinary string. */
+    char first[49];
+    uint32_t n = 0;
+    while (n < len && compatible[n] && n < sizeof(first) - 1)
+        n++;
+    memcpy(first, compatible, n);
+    first[n] = '\0';
+    kinfo("[DT] %s (0x%lx): no driver claims \"%s\"\n", node_name,
+          (unsigned long)mmio_base, first);
+}
+
 int riscv64_fdt_enumerate_platform_devices(void)
 {
     const uint8_t *base = (const uint8_t *)(uintptr_t)__boot_dtb_ptr;
@@ -220,11 +263,15 @@ int riscv64_fdt_enumerate_platform_devices(void)
 
         if (token == FDT_END_NODE) {
             uint32_t vendor = 0, device = 0;
-            if (depth >= 2 && !disabled && compatible_len &&
-                dt_claim_compatible(compatible, compatible_len,
-                                    &vendor, &device))
-                dt_slot_emit(node_name, strlen(node_name), mmio_base, mmio_size,
-                             irq, has_irq, vendor, device);
+            if (depth >= 2 && !disabled && compatible_len) {
+                if (dt_claim_compatible(compatible, compatible_len,
+                                        &vendor, &device))
+                    dt_slot_emit(node_name, strlen(node_name), mmio_base,
+                                 mmio_size, irq, has_irq, vendor, device);
+                else
+                    dt_report_unbound(node_name, compatible, compatible_len,
+                                      mmio_base);
+            }
             depth--;
             continue;
         }
@@ -266,18 +313,18 @@ int riscv64_fdt_enumerate_platform_devices(void)
             uint32_t cells = len / 4;
             uint32_t need = addr_cells + size_cells;
             if (cells >= need) {
-                const uint32_t *raw = (const uint32_t *)value;
+                const uint8_t *raw = (const uint8_t *)value;
                 mmio_base = dt_cells_to_u64(raw, addr_cells);
-                mmio_size = dt_cells_to_u64(raw + addr_cells, size_cells);
+                mmio_size = dt_cells_to_u64(raw + addr_cells * 4, size_cells);
             }
         } else if (strcmp(pname, "interrupts") == 0 && !has_irq) {
             /* One cell is an SPI interrupt, two are a PPI pair; the driver wants
              * the single number either way. */
-            const uint32_t *raw = (const uint32_t *)value;
+            const uint8_t *raw = (const uint8_t *)value;
             if (len >= 8)
-                irq = raw[1];
+                irq = dt_read32(raw + 4);
             else if (len >= 4)
-                irq = raw[0];
+                irq = dt_read32(raw);
             if (len >= 4)
                 has_irq = 1;
         }
