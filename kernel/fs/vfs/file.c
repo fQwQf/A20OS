@@ -11,17 +11,6 @@
 #include "ipc/ipc.h"
 #include "mm/vm.h"
 
-#define VFS_WRITE_LOCK_COUNT 64U
-static mutex_t g_vfs_write_locks[VFS_WRITE_LOCK_COUNT] = {
-    [0 ... VFS_WRITE_LOCK_COUNT - 1] = MUTEX_INIT,
-};
-
-static mutex_t *vfs_write_lock_for(vnode_t *vn)
-{
-    uintptr_t key = (uintptr_t)vn >> 4;
-    return &g_vfs_write_locks[key & (VFS_WRITE_LOCK_COUNT - 1)];
-}
-
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
     return pipe_vfile_is(vf);
@@ -133,8 +122,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     }
     if (vf->ops && vf->ops->write) {
         mutex_t *write_lock =
-            use_page_cache && !(vf->flags & O_DIRECT)
-                ? vfs_write_lock_for(vf->vnode) : NULL;
+            use_page_cache && !(vf->flags & O_DIRECT) && vf->vnode
+                ? &vf->vnode->write_lock : NULL;
         if (write_lock)
             mutex_lock(write_lock);
         if ((vf->flags & O_APPEND) && vf->vnode)

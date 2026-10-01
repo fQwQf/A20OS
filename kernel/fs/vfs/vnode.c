@@ -11,6 +11,7 @@ void vnode_ref_init(vnode_t *vn, int refs)
         return;
     vn->cache_pages = NULL;
     vn->cache_dirty_pages = NULL;
+    mutex_init(&vn->write_lock);
     refcount_set(&vn->ref_count, refs);
     if (refs > 0)
         __atomic_fetch_add(&g_vnode_live, 1, __ATOMIC_RELAXED);
