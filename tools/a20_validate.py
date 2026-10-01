@@ -42,6 +42,10 @@ _UEFI_VARIANTS: Final = ("default", "text")
 # partition from an apk world (VF2_WORLD).  Reject it here rather than letting
 # a20 package pass validation and then fail inside make.
 _FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard")
+# "vbox" is the VirtualBox ISO, which is never written to a device.
+# "rescue-usb" is the same ISO at a stable path a physical PC can boot
+# from a USB stick, which is the only deployment route a thin client has.
+_GRUB_ISO_VARIANTS: Final = ("vbox", "rescue-usb")
 
 
 def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
@@ -211,6 +215,9 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
         case "grub-iso":
             if inst.arch != "x86_64":
                 e.append("package.kind grub-iso: requires arch = \"x86_64\"")
+            if (p.variant or "vbox") not in _GRUB_ISO_VARIANTS:
+                e.append(f"package.variant: unsupported '{p.variant}' for grub-iso; "
+                         f"supported: {', '.join(_GRUB_ISO_VARIANTS)}")
         case "uefi-image":
             if inst.board != "virtualbox-aarch64":
                 e.append("package.kind uefi-image: requires board = \"virtualbox-aarch64\"")

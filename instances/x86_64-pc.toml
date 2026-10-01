@@ -27,6 +27,10 @@ driver_deployment = "embedded"
 
 [package]
 kind = "grub-iso"
+# The rescue ISO at a stable path, so [target].boot_media below can name it and
+# `a20 deploy` can write it to a USB stick.  "vbox" would leave it under the
+# per-build directory, which no manifest can point at.
+variant = "rescue-usb"
 
 [target]
 serial = "/dev/ttyUSB0"
@@ -41,3 +45,9 @@ boot_timeout = "180s"
 console_check = ["[BOOTARGS] multiboot cmdline", "[FDT]", "System ready"]
 commands = ["cat /etc/os-release", "poweroff"]
 expect = ["A20OS", "poweroff"]
+# A machine with a disk boots from media, so this instance has the one path the
+# storage-less SBC ports do not.  Replace /dev/sdX with the USB stick: media.py
+# refuses to write a mounted device and refuses one whose name does not match the
+# image it was given, which is what stops a mistyped device from being overwritten.
+boot_media = ["build/x86_64-pc/a20os-rescue.iso"]
+media_device = "/dev/sdX"
