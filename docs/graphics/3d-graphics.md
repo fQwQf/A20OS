@@ -39,9 +39,89 @@
 | guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
 | DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念，见 §8.1 |
 | KMS 对象模型 | ✅ **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
-| 真 dma-buf（PRIME） | ❌ 未实现 | 当前是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见。A20OS 无跨进程 VMO 共享、无 mmap-offset 协议，所以这是从零做而不是打补丁 |
+| 真 dma-buf（PRIME） | ❌ 未实现 | 仍然是把 VMO 快照 memcpy 进 memfd，导出后再写入不可见。A20OS 无跨进程 VMO 共享、无 mmap-offset 协议，所以这是从零做而不是打补丁。**本轮修掉的是导出/导入本身的正确性**：映射表原先按 fd *编号* 记录且从不删除，用户态一 close，内核就把该编号复用给别的文件，于是 `PRIME_FD_TO_HANDLE` 会把旧 GEM handle 发给一个不相干的 fd——而 handle 是能经 `drm_linux_mmap()` mmap 的。现在按 `vfile.identity`（单调递增的 per-open id）记录，用户已关闭的条目会被回收，写不进表的 fd 不再发出去。真正共享内存仍然没有 |
 | 合成器 GL 渲染器 | ❌ 未启用 | `A20_RENDERER` 默认 `pixman`（会话脚本不再硬编码，但默认值不变） |
 | Mesa/virgl 用户态客户端 | ❌ 未挂载验证 | UAPI 已就绪；A20OS 不自建 DRI 驱动，由 stock Mesa 提供（见上一行） |
+
+### 本轮（`feat/graphics-hardening`）：存储层的正确性，而不是新能力
+
+上一轮把 3D 通路打通之后，留在树里的问题已经不是"还差什么功能"，而是
+"已经声称做到的事情里，哪些是真的"。逐条核对源码后修掉的都是这一类，
+判据仍然是"能不能指向一个会失败的门禁"。
+
+**一处此前完全不存在的锁。**GEM 表、framebuffer 表、CRTC 绑定、GEM name 表、
+PRIME 表、virgl id 计数器、EDID 缓存——全部是 device-global，且按设计就是
+全局的（一个 open 建的 buffer 必须对另一个 open 可见），而**此前没有任何互斥**，
+只有 vblank 那个槽加了锁。这不是理论竞态：桌面天生两个进程并发驱动它
+（wlroots allocator 在一个 fd 上建 buffer，backend 在另一个 fd 上用）。
+两个 ioctl 可以发出同一个 handle、在另一个 CPU 遍历时删掉表项，或者把第三个
+ioctl 正在读的 VMO 释放掉。现在有 `g_drm_store.lock`，但它**只保护表**：凡是
+可能睡眠、分配、进 VFS 或下发 virtio 命令的操作都在放下锁之后做，跨越这段的
+对象由 pin 兜底，所以 teardown 拆成两段（锁内 `drm_gem_detach_locked()`、
+锁外 `drm_gem_drop_storage()`）。契约记在
+[lock-order.md](../drivers/guide/lock-order.md#drmkmsvirtio-gpu-3d)。
+
+**一处 use-after-free，在 3D 传输层。**`virtio_gpu_resource_attach_backing()`
+在**完全没有持锁**的情况下 resize / `kfree` / `memset` / `memcpy` 共享的
+`inst->big_req`，之后才去拿 `inst->command_lock`。而同一块 buffer 也被
+`send_cmd_big` 与 `submit_3d` 在同一把锁下增长和重填；DRM 每次 EXECBUFFER
+都会为每个 buffer 调一次 ATTACH_BACKING。两个客户端就会互相把对方的请求体
+写坏，其中一个还会 `kfree` 掉另一个正在写的内存。
+
+**一处静默画错。**`RESOURCE_ATTACH_BACKING` 的 page 列表原先是"跳过分不到的、
+把剩下的压紧"。宿主按 `entries[n]` 放在 `n * PAGE_SIZE`，所以 8 页里第 3 页
+失败时，entry 3 变成第 4 页的物理帧，渲染器画进一个从未拿到过的 buffer，
+而整条路径报的是成功。现在部分页集直接算失败。
+
+**host 侧资源泄漏两处。**同一个 buffer 被二次提升为 3D resource 时，
+`virgl_res_id` 被直接覆盖，旧 resource 永远不 unref；`drm_close()` 一边要求
+`ops->ctx_destroy` 存在、一边从不调用它，于是每个碰过 3D 的 `renderD128`
+open 都在 host 上漏一个 context，直到 guest 结束。
+
+**尺寸算术。**CREATE_DUMB 的 pitch 是 `((width * bpp + 7) / 8 + 63) & ~63u`，
+`width * bpp` 是 32 位乘法。实测旧算法下 `65536 x 65536 x 32` 得到
+`size = 17179869184`（16 GiB），CREATE_DUMB 照单全收，PRIME 导出再
+`kmalloc(b->size)` 快照一份——两个 ioctl 向内核要 16 GiB VMO 加 16 GiB 堆。
+算术已移到 `kernel/include/drivers/gpu/drm_geom.h` 的 `drm_dumb_layout()`，
+全 64 位，并以 `DRM_MAX_BUFFER_BYTES` 封顶；这个上限不是凑的 256 MiB，
+它正好等于 3D 传输层本来就会拒绝的上限（`attach_backing` 超过 65536 页即拒），
+于是 VMO 与导出快照共用同一个界。
+
+**五处"声称做到但没做到"。**`GETPROPBLOB` 在 `b.data` 为空或偏短时**不拷贝却
+返回成功**，把调用方未初始化的栈当 EDID 交出去（应 `-ENOSPC` 并回填所需长度）；
+`SET_CLIENT_CAP` 接受 `DRM_CLIENT_CAP_ATOMIC` 而 `MODE_ATOMIC` 对一切非
+TEST_ONLY 提交返回 `-EINVAL`——桌面只是靠会话里 `WLR_DRM_NO_ATOMIC=1` 才没炸；
+`GEM_FLINK` 名字表满时吞掉失败仍返回成功；`ADDFB`/`ADDFB2`/`RESOURCE_CREATE`
+在 copy-out 之前就占了表项或 host 资源，copy 失败即永久泄漏（RESOURCE_CREATE
+还会留下一个谁也不知道 id 的 virgl resource）；`RMFB` 把仍绑在 CRTC 上的
+framebuffer 销毁掉，`GETCRTC`/`GETPLANE` 于是继续报告一个 `GETFB` 已经
+`-ENOENT` 的 fb_id。
+
+**一处越权。**render node 此前只拒绝 `SET_MASTER`，其余 KMS ioctl 从
+`/dev/dri/renderD128` 一律可达，于是 GBM/EGL 进程可以 `MODE_SETCRTC` 把屏幕
+抢过去；而 `is_master` 从未被任何 KMS handler 查询过，所以 master 标志本身
+也从来不是保护。[3d-graphics.md §6](3d-graphics.md) 早就写着 render-only
+"KMS ioctl 本就需要 master"——现在它真的如此。**注意这是本轮唯一一处会影响
+既有桌面的行为改动**，上线前需要跑一次 `GPU_3D=0` 的 xfce smoke。Linux 同样
+在 render node 上拒绝 `CREATE_DUMB`，所以 GBM 本来就用 primary node 建 dumb
+buffer，没有依赖旧行为的东西。
+
+**一处会静默掐死整条 3D 路。**`gpu_device_register()` 是 first-wins，而
+`vmsvga` 的 ops 表 3D 部分全是 NULL。若它先 probe，所有 `DRM_IOCTL_VIRTGPU_*`
+返回 `-ENODEV`，而 `DRM_CAP_PRIME`/`GETPARAM` 照旧声称有能力，日志里没有一行
+说 DRM 到底绑了谁。现在按"3D 可用者优先、且同级不互相顶替"选择，两条路径都打日志。
+
+**门禁。**`tools/tests/drm_geom_test.c` 直接驱动 `drm_dumb_layout()`（由既有
+`make host-tests` 的通配自动纳入）；`make check-drm-store-locking` 断言锁契约，
+并对 `drm_lock()`/`drm_unlock()` 的出现次数设下限——只断言"符号出现过"在删掉
+某处锁之后仍然全绿，那样的门禁会放过自己存在的目的。两道门禁都实测过会失败：
+把旧算术放回 `drm_dumb_layout()` 测试退出 134；删掉 15 对 lock/unlock 计数转红。
+
+**本轮没做的事，明确记下。**`virtio_gpu_remove()` 与 `init_transport` 的
+`fail:` 路径直接 `memset` 整个 instance（含 `command_lock` 与 waiters）而不持锁，
+会把别人阻塞其中的 mutex 和已挂链的 waiter 一起清掉；它需要的是设备级
+teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，单独立项。
+`gpu_device_unregister()` 也仍然直接清空槽位、不在存活设备里重新选举。
 
 A20OS 不自研着色器编译器，也不自研 DRI 驱动。GLSL→SPIR-V 由 Mesa 完成，
 SPIR-V→host GPU 由 virglrenderer 完成；A20OS 要做的是把中间的运输层补齐
