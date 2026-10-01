@@ -191,8 +191,15 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
 1. ~~`gpu3d_test` 的像素回读 4096/4096 全错~~ **已解决，见下面一节。**
 2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
    崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
-   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件；是 Mesa 侧与本驱动 UAPI 的交互
-   还需要继续查。
+   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件。**本轮查过并排除了"ioctl 缺口"
+   这条主要猜测**：驱动定义的 48 个 ioctl 里有 47 个真的被分发，唯一没分发的
+   `VIRTGPU_RESOURCE_CREATE_BLOB` 早就通过 `VIRTGPU_PARAM_RESOURCE_BLOB = 0`
+   声明为不可用，所以 Mesa 不会去调它；`GET_CAP` 广告的三个能力
+   （`DUMB_BUFFER`/`PRIME`/时间戳）对应的 ioctl 也都在。而落到 `default:`
+   的 ioctl 返回的是错误，不是 NULL 函数指针，因此这条路径产生不了 `ra=0x400`。
+   顺带修掉一处确实过头的广告：`DRM_CAP_TIMESTAMP_MONOTONIC` 原为 1，但驱动
+   并没有 `DRM_IOCTL_MODE_GETTIME`（vblank 事件里的单调时间戳是真的），已改为 0。
+   **仍未定位**，见 §0.7。
 3. 因此**还不能说"Mesa 已经挂上 virtio_gpu_dri"**。已有的是强旁证：强制
    `A20_RENDERER=gl`（wlroots 在 renderer 创建失败时是直接放弃而非退回）后 session
    仍然起来并呈现，且此前失败日志里的 `render/allocator/drm_dumb.c` +
@@ -270,8 +277,50 @@ SUBMIT_3D 依然回 OK——传输层确实成功了，渲染器静默丢弃而�
 QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,0,0)` 都不是
 必需的，`ctx_attach_resource` 才是。
 
-**仍未解决**：Mesa 侧的 `eglinfo` 段错误，以及"Mesa 到底挂上没有"缺一张直接证据
-（见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+**仍未解决**：Mesa 侧的 `eglinfo` 段错误（见 §0.7），以及"Mesa 到底挂上没有"缺一张
+直接证据（见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+
+---
+
+## 0.7 `eglinfo` 段错误：排除了主要猜测，缩小了范围
+
+这一条挂了很久，本轮做的是**把它从"猜测"变成"已排除"**，而不是假装定位了。
+
+**症状**：guest 里跑 `eglinfo` 段错误，`ra=0x400`，解引用未映射的 `0x87613f40`。
+
+**先说方法论上的一个坑**：`ra=0x400` 非常像 Mesa/llvmpipe 调了一个 NULL 函数指针
+（`NULL + 某个小偏移`），所以最自然的猜测是"Mesa 问了一个我们没实现的 ioctl，
+拿到成功但什么都没填的结构体，之后解引用 NULL"。这个猜测很合理，**但实测不成立**：
+
+- 驱动定义的 48 个 ioctl 里，**47 个真的进了 `drm_ioctl` 的 switch**。唯一没进的是
+  `VIRTGPU_RESOURCE_CREATE_BLOB`，而 `VIRTGPU_PARAM_RESOURCE_BLOB` 明确返回 0，
+  Mesa 因此不会去调它。这是设计上的自洽，不是漏洞。
+- `DRM_IOCTL_GET_CAP` 广告了 3 个能力，逐个核对下来都名副其实：
+  `DUMB_BUFFER` → `CREATE_DUMB`/`MAP_DUMB`/`DESTROY_DUMB` 都在；
+  `PRIME`（IMPORT|EXPORT=3）→ 两个方向的 ioctl 都在；
+  `TIMESTAMP_MONOTONIC` → vblank 事件确实填了 `timekeeping_get_monotonic`。
+- 落到 `default:` 的 ioctl 返回 `-ENOTTY` 一类的**错误**，不是 NULL 函数指针。
+  所以"未实现 → 成功但结构体没填 → NULL 解引用"这条链在当前 dispatch 上断掉了。
+
+**顺带修掉一处真的过头广告**（唯一一个因此改变的结论）：
+`DRM_CAP_TIMESTAMP_MONOTONIC` 原报 1，但这个 cap 同时指两件事——vblank 事件的时间戳
+（真的）和 `DRM_IOCTL_MODE_GETTIME`（**本驱动没有这个 ioctl**）。客户端读了它就可能
+去问 CRTC 要时间，然后撞上 `default:`。已改为 0。代价为零：客户端读这个 cap 只是为了
+决定"我可以假设什么"，而事件时间戳（真正用于帧调步的那一半）不受影响。
+
+**因此把范围收窄到了哪里**：既然不是 ioctl 表的缺口，也不是 capability 撒谎，那么
+`ra=0x400` 更可能出现在 **Mesa 读 `/dev/dri/card0` 之后枚举设备节点的阶段**——
+本文件后面 §5.1 已记录过同类形状的问题（`eglInitialize` 成功、
+`DRI2: failed to create gbm device`，而内核侧没有任何 ioctl 报错），那次是 **GBM
+平台选择**。两条症状是否同源尚未证实。
+
+**明确说不知道的部分**：
+- 崩溃的具体指令地址没有在 guest 内复现过（没有带符号的 core dump 或
+  `MESA_DEBUG=1` 输出），所以"Mesa 的哪一行"仍是未知的；
+- 镜像里 Mesa 的具体版本与它 `eglInitialize` 时的设备枚举顺序未确认；
+- 因此**没有**在这里断言根因。要往下走，最小的一步是让 guest 在 `eglinfo`
+  崩溃时留下带符号的回溯（`ulimit -c` + core dump，或 `MESA_DEBUG=1`），
+  这需要能进 guest 交互 shell，本轮不具备。
 
 ---
 
