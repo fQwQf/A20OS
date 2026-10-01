@@ -2,21 +2,3 @@
 	path = user/external/apps/fastfetch
 	url = https://github.com/fQwQf/fastfetch.git
 	branch = dev
-[submodule "user/external/git"]
-	path = user/external/apps/git
-	url = https://github.com/git/git.git
-[submodule "user/external/musl-cross-make"]
-	path = user/external/toolchain/musl-cross-make
-	url = https://github.com/richfelker/musl-cross-make.git
-[submodule "user/external/vim"]
-	path = user/external/apps/vim
-	url = https://github.com/vim/vim.git
-[submodule "user/external/zlib"]
-	path = user/external/libs/zlib
-	url = https://github.com/madler/zlib.git
-[submodule "user/external/binutils"]
-	path = user/external/toolchain/binutils
-	url = https://github.com/RTEMS/sourceware-mirror-binutils-gdb.git
-[submodule "user/external/gcc"]
-	path = user/external/gcc
-	url = https://github.com/gcc-mirror/gcc.git

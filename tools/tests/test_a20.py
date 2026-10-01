@@ -229,11 +229,14 @@ class TestDeriveMakeVars(unittest.TestCase):
             [rootfs]
             size_mb = 256
             ext4_size_mb = 64
-            extra_size_mb = 512
         """)
         self.assertEqual(got["FAT32_IMAGE_MB"], "256")
         self.assertEqual(got["EXT4_IMAGE_MB"], "64")
-        self.assertEqual(got["EXTRA_IMAGE_MB"], "512")
+        # rootfs.extra_size_mb and rootfs.extra_packages are gone with the
+        # source-built extra disk; the second ext4 slot is an apk world image
+        # sized by rootfs.world_size_mb (PKG_SIZE_MB).
+        self.assertNotIn("EXTRA_IMAGE_MB", got)
+        self.assertNotIn("EXTRA_PACKAGES", got)
 
     def test_a20_consumed_fields_emit_no_variables(self) -> None:
         """gui.enabled, test.commands/expect are a20's own, not make's.

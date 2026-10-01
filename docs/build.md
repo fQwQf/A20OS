@@ -28,7 +28,7 @@ sudo apt-get install -y \
 注意两点：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
-- Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）；lamina 等 extra 包需要 CMake >= 3.29（`pip install cmake==3.29.6`）。
+- Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）。
 
 ## 最常用的构建与运行命令
 

@@ -76,7 +76,8 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
         if inst.arch not in QEMU_RUNNABLE_ARCHES:
             e.append(f"gui.enabled: no QEMU GUI path for {inst.arch}")
     for size_name, size in (("size_mb", r.size_mb),
-                            ("ext4_size_mb", r.ext4_size_mb), ("extra_size_mb", r.extra_size_mb)):
+                            ("ext4_size_mb", r.ext4_size_mb),
+                            ("world_size_mb", r.world_size_mb)):
         if size is not None and size < 1:
             e.append(f"rootfs.{size_name}: must be >= 1")
     if n.hostfwd is not None:
@@ -93,8 +94,7 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
                  "expect substring can only pass vacuously)")
     for field_name, entries in (("test.commands", t.commands), ("test.expect", t.expect),
                                 ("machine.extra_qemu", m.extra_qemu),
-                                ("rootfs.drivers", r.drivers),
-                                ("rootfs.extra_packages", r.extra_packages)):
+                                ("rootfs.drivers", r.drivers)):
         if entries is not None and any(not s for s in entries):
             e.append(f"{field_name}: entries must be non-empty strings")
     if r.world is not None and not (repo_root / "packages" / "world" / f"{r.world}.world").is_file():

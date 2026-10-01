@@ -94,11 +94,9 @@ hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]
 [rootfs]
 size_mb = 128                # FAT32 根盘大小
 ext4_size_mb = 128
-extra_size_mb = 2048
 # world = "base"               # packages/world/<name>.world 必须存在；设置后走 apk 镜像流程
-# world_size_mb = 4096         # world 镜像大小（→ PKG_SIZE_MB）
+# world_size_mb = 4096         # world 镜像大小（→ PKG_SIZE_MB），第二个 ext4 槽只能用它定尺寸
 # alpine = true                # world 组装是否引入 Alpine 上游仓库（→ PKG_ALPINE）
-extra_packages = ["vim", "git", "gcc"]
 drivers = ["virtio-net", "hda"]   # 运行时驱动子集，见下文"组件注册表"
 
 [test]                       # 冒烟测试实例（a20 test）
@@ -127,7 +125,7 @@ expect = ["SYSCALL_SMOKE: PASS"]          # 日志中必须全部出现的子串
 
 [package]                    # a20 package：构建后组装发布产物
 kind = "release"             # grub-iso | uefi-image | fit-sdcard | release
-# variant = "..."              # uefi-image: default|text；fit-sdcard: minimal|sdcard|extra（kind = release 时无意义）
+# variant = "..."              # uefi-image: default|text；fit-sdcard: minimal|sdcard（kind = release 时无意义）
 kernel_out = "kernel-rv"     # 仅 release：产物文件名（缺省按架构惯例）
 disk_out = "disk.img"        # 仅 release
 
@@ -159,9 +157,8 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `machine.smp` / `memory` / `allow_unverified_smp` | `NR_CPUS` / `QEMU_MEMORY` / `ALLOW_UNVERIFIED_SMP` |
 | `gui.display` / `audio_driver` / `audio_device` | `QEMU_GUI_DISPLAY` / `QEMU_GUI_AUDIO_DRIVER` / `QEMU_GUI_AUDIO_DEVICE` |
 | `net.hostfwd` | `NET_HOSTFWD`（逗号连接） |
-| `rootfs.size_mb` / `ext4_size_mb` / `extra_size_mb` | `FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` / `EXTRA_IMAGE_MB` |
+| `rootfs.size_mb` / `ext4_size_mb` | `FAT32_IMAGE_MB` / `EXT4_IMAGE_MB` |
 | `rootfs.world` / `world_size_mb` / `alpine` | `PKG_WORLD` / `PKG_SIZE_MB` / `PKG_ALPINE` |
-| `rootfs.extra_packages` | `EXTRA_PACKAGES` |
 | `rootfs.drivers` | `DRIVER_SELECTION`（自动补 `.a20drv` 后缀） |
 | `test.timeout` / `input_delay` | `SMOKE_TIMEOUT` / `SMOKE_INPUT_DELAY` |
 | `stm32.*` | `STM32_FLASH_KB` / `STM32_RAM_KB` / `STM32_XUANWU` / `STM32_QEMU` / `STM32_BT_*` / `STM32_WIFI_*` |
@@ -174,7 +171,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 
 `list` 的"可用动作"列不是分类标签，而是逐条镜像对应命令里已经存在的拒绝条件（`a20_instance.applicable_actions`）。所以它不会承诺一个随后被拒绝的动作：`stm32f103` 只有 `build`，因为它的 `[stm32] qemu` 没设；`deploy` 在 `boot_media` 缺 `media_device` 时不出现，因为 `cmd_deploy` 会拒绝。加一个命令就要在这里补上它的条件，这正是这一列的用途。
 
-`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的实例）。想看某个动作的全部目标，优先用它，而不是在 46 行里用眼睛找。
+`--action` 可以给多个，此时取交集（`--action console deploy` = 同时支持两者的实例）。想看某个动作的全部目标，优先用它，而不是在 45 行里用眼睛找。
 
 ### 各动作的适用条件
 
@@ -187,7 +184,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
 | `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
 | `deploy` | 需要 `[target]`；有 `[flash]` 则先烧录，`boot_media` + `media_device` 则先写启动介质，最后同 `console` 验证 |
-| `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard/extra）、`release`（riscv64/loongarch64） |
+| `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
@@ -213,7 +210,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 ### `a20 show`：选命令之前先看这一屏
 
-`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"。在 46 个实例里挑一个时先问的就是这三个问题：
+`show-vars` 回答"make 会看到什么"；`show` 回答"我能不能跑、要花多少、会碰到什么"。在 45 个实例里挑一个时先问的就是这三个问题：
 
 ```text
 $ tools/a20 show vf2-physical
@@ -351,9 +348,19 @@ git      : 47192790cb81 on embedded/instance-manager
 role                   size  sha256                                                           path
 kernel-elf          4.0 MiB  9c52b54a0b45bbe0ef58d71def3315be1e598e8c315900e8e08113600ae393e9  .kernel-build/.../kernel.elf
 rootfs-fat32      128.0 MiB  c14b40170fc1a9dceaafafd84fa10b5c8dac1011e8f1b412d1f9f37cc162b127  .kernel-build/.../fat32.img
+rootfs-ext4       128.0 MiB  2c0c24e196957a8c682026c7cd4eb5f2324efb483b57407c5216c044bc8e32a9  .kernel-build/.../ext4.img
+```
+
+带 world 的实例多报一行 world 镜像，未构建的产物照样显式列出：
+
+```text
+$ tools/a20 ledger xfce-riscv64
+role                   size  sha256                                                           path
+world-xfce          4.0 GiB  a7beeb021edc4fcced047a515751aec27f0e20c6adc45f7e25f07817ee0d1f63  build/images/xfce-riscv64.img
 
 not built yet:
-  .kernel-build/.../extra.img
+  .kernel-build/.../kernel.elf
+  .kernel-build/.../fat32.img
 ```
 
 三种格式：`--format table`（人读，默认）、`json`（机器读）、`markdown`（可直接贴进平台文档的表格块）；`--out FILE` 写文件。**路径一律仓库相对**：正是绝对路径让旧的板级验收记录不可移植。未构建的产物显式列出，退出码非 0，不假装齐全。
@@ -563,7 +570,7 @@ world_size_mb = 4096
 | `make flash-stm32f103-xuanwu` | `tools/a20 flash stm32f103-xuanwu` |
 | `make vbox-iso-x86_64` | `tools/a20 package vbox-iso-x86_64` |
 | `make vbox-image-aarch64` / `vbox-text-image-aarch64` | `tools/a20 package vbox-aarch64` / `vbox-aarch64-text` |
-| `make vf2-minimal` / `vf2-sdcard` / `vf2-extra` | `tools/a20 package vf2-minimal` / `vf2-sdcard` / `vf2-extra` |
+| `make vf2-minimal` / `vf2-sdcard` | `tools/a20 package vf2-minimal` / `vf2-sdcard` |
 | `make release-rv` / `release-la` | `tools/a20 package release-riscv64` / `release-loongarch64` |
 
 注意：薄包装**不转发**命令行变量覆盖（如 `make run-riscv64 QEMU_MEMORY=2G`）。需要临时覆盖时，要么改实例文件，要么用通用的 `make ARCH=... run`（该变量驱动入口仍然保留）。

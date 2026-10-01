@@ -112,7 +112,8 @@ make 集成（`tools/targets-pkg.mk`）会自动传入正确的 `--arch/--varian
 
 ## 新增一个包的流程
 
-1. 先让东西能被**构建**出来（user/Makefile 或 extra.mk，照旧）；
+1. 先让东西能被**构建**出来（`user/Makefile`；注意只有本仓库自己的组件需要
+   这一步，Alpine 上游包不需要 recipe，见 [images.md](images.md)）；
 2. 新建 `packages/recipes/<name>.toml`：写元数据 + `[[files]]` 规则；
 3. `make pkgs-check PKG_RECIPES=<name>` 校验；
 4. `make pkgs PKG_RECIPES=<name>` 打包，`tar -tzf` 检查内容；
@@ -128,9 +129,12 @@ make 集成（`tools/targets-pkg.mk`）会自动传入正确的 `--arch/--varian
 ## 常见问题
 
 **recipe 报错 "src pattern matched nothing"**：产物还没构建。
-a20-base/a20-drivers 需要 `make dev-build`；a20-kernel 需要内核构建；
-a20-extra-* 需要 `make extra-user-apps EXTRA_PACKAGES=...`。想让规则
-"有就装没有就算"，加 `optional = true`。
+a20-base/a20-drivers 需要 `make dev-build`；a20-kernel 需要内核构建。
+想让规则"有就装没有就算"，加 `optional = true`。
+
+**想加一个 Alpine 上游已有的包**：不要写 recipe，往 `packages/world/*.world`
+里加一行包名即可（见 [images.md](images.md)）。已删除的 `a20-extra-*` recipe
+就是这条路的反面教材：它们把已经上游化的东西又包了一层。
 
 **想排除某个文件**：`exclude` 按文件名匹配（不含路径），如
 `exclude = ["sh", "*.o"]`。

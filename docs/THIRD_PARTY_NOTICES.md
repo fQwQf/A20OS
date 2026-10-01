@@ -4,11 +4,11 @@
 
 ## 1. 分发边界声明
 
-A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`、`extra.img`、ISO、独立可执行文件和共享库一旦提供给第三方，就是需要按其实际内容审查的二进制/资源分发物。因此：
+A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`、world 镜像（`build/images/*.img`）、ISO、独立可执行文件和共享库一旦提供给第三方，就是需要按其实际内容审查的二进制/资源分发物。因此：
 
 - `kernel/external/lwip` 和 `user/external/{musl,mlibc,mksh-cvs2git,sbase,tlse}` 是普通 tracked tree；不能称为 submodule。
-- `.gitmodules` 登记外部项目的路径和 URL，超级项目的 gitlink 条目才固定具体 commit。超级项目只跟踪 gitlink，不等于把每个 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
-- `user/external/rust` 与 `user/external/riscv64-glibc-sysroot` 的本地内容未被仓库跟踪（2026-08 核实时）；若把由它们产生或取得的文件装入镜像，必须另行保留来源、版本和许可证材料。
+- `.gitmodules` 目前只登记 `user/external/apps/fastfetch` 一项；超级项目的 gitlink 条目才固定具体 commit。超级项目只跟踪 gitlink，不等于把该 submodule 的许可证全文作为普通文件跟踪；发布前必须在精确 commit 中核验许可证和 notices。
+- 用户态的第三方程序不再由本仓库编译。原先 vendored 的 `apps/{git,vim}`、`libs/zlib`、`toolchain/{binutils,musl-cross-make}`、`gcc`、`external/rust` 与 `external/toolchain/Lamina1` 已全部删除，改由 world 清单从 Alpine 上游仓库解析（见 [packaging/overview.md](./packaging/overview.md)）。因此 world 镜像的分发边界由 **Alpine 上游包自身的许可证**决定，不由本仓库的源码树决定。
 - 是否需要随附源码、书面 offer、notice、重链接材料或其他内容，取决于实际组件、链接方式和分发形式，不能由“源码可在工作区找到”一概替代。
 
 ## 2. 内核与自研代码
@@ -26,6 +26,8 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 
 ## 4. 用户态构建依赖
 
+这些是**从源码编译进 `fat32.img` 根文件系统**的组件。world 镜像里的用户态不在此列。
+
 | 组件 | 许可证 | 位置 |
 |------|--------|------|
 | musl | MIT | `user/external/musl` |
@@ -33,24 +35,22 @@ A20OS 仓库不能预先限定下游只分发源码。`fat32.img`、`ext4.img`�
 | mksh | 逐文件混合：MirBSD/MirOS 条款；`strlcpy.c` 为 ISC；`mbsdcc.h`/`mbsdint.h` 为 CC0 OR MirOS；`expr.c` 含 Unicode notice | `user/external/mksh-cvs2git` |
 | sbase | MIT | `user/external/sbase` |
 | TLSe | BSD-2-Clause OR Unlicense | `user/external/tlse` |
-| fastfetch | MIT | `user/external/apps/fastfetch` |
-| zlib | Zlib | `user/external/libs/zlib` |
-| musl-cross-make | MIT | `user/external/toolchain/musl-cross-make` |
-| Rust 工具链 | 必须按实际取得的分发核验 | `user/external/rust`（2026-08 核实时仓库未跟踪内容） |
+| fastfetch | MIT | `user/external/apps/fastfetch`（唯一的 gitlink） |
 
 ## 5. 用户态程序、静态链接与镜像
 
-基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。`user/extra.mk` 同样设置 `-static`，Vim、Git 及其辅助库也链接 musl CRT/`libc.a`。不能声称这些独立程序“不与 musl 静态链接”。
+基础 `user/Makefile` 使用 `-static`（NOMMU 使用 `-static-pie`）并直接链接 musl CRT 与 `libc.a`；init、mksh、sbase 命令、wget/TLSe 和本地命令等因此包含静态 musl 链接。不能声称这些独立程序“不与 musl 静态链接”。
 
-| 组件 | 许可证 | 位置 | 备注 |
-|------|--------|------|------|
-| git | GPL-2.0-only | `user/external/apps/git` | 独立可执行文件 |
-| vim | Vim License | `user/external/apps/vim` | 独立可执行文件 |
-| GCC | 应按实际取得源码的许可证与 GCC Runtime Library Exception 核验 | `user/external/gcc`（2026-08 核实时仓库未跟踪该目录） | `user/extra.mk` 仅在 `configure` 存在时启用可选工具链构建 |
-| binutils | GPL-3.0 / LGPL-3.0 | `user/external/toolchain/binutils` | 独立工具链 |
-| lamina (Lamina1) | 根目录暂无 LICENSE 文本，按实际取得源码核验；子模块 LMCAS/LAMMP 为 LGPL-2.1，dyncall 为逐文件 BSD 风格 | `user/external/toolchain/Lamina1` | 独立可执行文件 + 4 个共享库（laminaCore/lmcas/lmmc/LammpCore，含版本化 SONAME 文件）与 libstdc++.so.6，动态链接 glibc（运行库与 rust 包共用） |
+由源码编译的独立第三方可执行文件只余 fastfetch 一项，且它被并入 FAT32 根而非独立镜像槽。以往 `user/extra.mk` 产出的 git、Vim、GCC、binutils、Rust 与 lamina 已全部删除：GCC/binutils 曾用于自举 riscv64-musl 交叉工具链，Git 曾静态链接源码构建的 zlib 与 curl+mbedtls，lamina 依赖宿主 glibc C++ 工具链动态加载 `laminaCore`。这些能力改由 world 清单从 Alpine 上游解析。
 
-> 分发 `fat32.img`、`extra.img` 或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖和 gitlink revision，再准备相应许可证、notice 与源码提供材料。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
+**world 镜像的分发边界**：`build/images/<world>-<arch>.img` 由 `tools/mkrootfs.py` 用 `apk` 从两类来源组装 —— 本仓库的 `a20-*` 包，以及 Alpine 上游仓库的包。因此：
+
+| 组件类别 | 许可证 | 位置 |
+|------|--------|------|
+| `a20-base` / `a20-min` / `a20-drivers` / `a20-kernel` | 根目录 `LICENSE` 为 Apache-2.0 | `packages/recipes/*.toml`，由本仓库构建产物打包 |
+| Alpine 上游包（`devel` 含 vim/git/busybox/curl/less；`devtools` 另含 gcc；`xfce` 含整个 XFCE/Wayland/Mesa 栈；`pynode` 含 python3/nodejs） | **各包自身许可证，含 GPL-2.0-only（vim、git、busybox）与 GPL-3.0（gcc、mesa）** | Alpine 官方仓库，经 `apk` 签名校验后拉取 |
+
+> 分发 `fat32.img`、world 镜像或单个二进制前，应从镜像清单反推其中的精确程序、静态/动态依赖、Alpine 包版本和 gitlink revision，再准备相应许可证、notice 与源码提供材料。Alpine 上游包适用其各自的源码提供义务，`apk` 的包元数据（`.PKGINFO`）应随镜像一并留存。不能假定所有来源都是 submodule，也不能假定只提供超级项目 URL 已满足各组件义务。
 
 ## 6. 设计参考与对照系统
 
