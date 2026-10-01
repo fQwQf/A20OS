@@ -270,8 +270,13 @@ static const board_config_t ls2k1000 = {
     /* The cooperative recovery profile exists because this board's firmware
      * hands over with the timer unable to preempt, so a sleeping idle task would
      * never be woken.  idle_loop() reads this instead of testing the board
-     * name.  The normal profile leaves it 0 and sleeps as usual. */
+     * name.  The normal profile leaves it 0 and sleeps as usual.
+     *
+     * The same profile has no working UART IRQ route, so the console driver
+     * polls the 16550 directly.  Both flags are read by name from the code that
+     * needs them rather than tested for this board. */
     .idle_cannot_sleep = 1,
+    .uart_rx_is_polled = 1,
 #endif
 };
 

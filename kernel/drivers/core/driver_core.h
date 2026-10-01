@@ -274,6 +274,26 @@ typedef struct board_config {
      * or every board that does not mention it would silently stop sleeping.
      */
     int                  idle_cannot_sleep;
+
+    /*
+     * Both of these are firmware facts about the board's boot handoff, not
+     * properties of the instruction set, so they live here rather than in an
+     * ARCH_HAS_* macro.  The StarFive VisionFive 2 is the case in tree: its
+     * firmware does not grant U-mode access to the RISC-V time CSR on every
+     * boot hart, and its console UART has no wired interrupt.
+     *
+     * Like idle_cannot_sleep, 0 must be the normal case so that a board which
+     * does not mention them gets the working behaviour.
+     */
+
+    /* Set when U-mode cannot reliably read the arch's time counter, so the vDSO
+     * must not advertise it.  libc would otherwise retry the faulting rdtime
+     * forever instead of falling back to the syscall path. */
+    int                  vdso_user_timer_unreliable;
+
+    /* Set when the console UART delivers no interrupt, so receive has to be
+     * driven by polling. */
+    int                  uart_rx_is_polled;
 } board_config_t;
 
 /* Global board config — defined in kernel/board/<board>/board.c */
