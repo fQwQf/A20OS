@@ -1,4 +1,5 @@
 #include "drivers/gpu/drm.h"
+#include "drivers/gpu/drm_geom.h"
 #include "drivers/gpu/virtio_gpu.h"
 
 #include "core/errno.h"
@@ -928,7 +929,10 @@ static drm_gem_t *drm_gem_alloc_locked(uint32_t width, uint32_t height,
                                        uint32_t format, uint32_t usage,
                                        uint64_t size)
 {
-    if (size == 0)
+    /* One bound for every buffer object, so PRIME export's kmalloc(b->size) and
+     * the VMO itself cannot both be talked into a multi-gigabyte allocation by a
+     * single ioctl. */
+    if (size == 0 || size > DRM_MAX_BUFFER_BYTES)
         return NULL;
     for (int i = 0; i < DRM_MAX_GEMS; i++) {
         if (g_gems[i].used)
@@ -1939,7 +1943,7 @@ static int drm_gem_create(drm_context_t *ctx, void *arg)
     struct drm_gem_create c;
     if (copy_from_user(&c, arg, sizeof(c)) < 0)
         return -EFAULT;
-    if (c.size == 0)
+    if (c.size == 0 || c.size > DRM_MAX_BUFFER_BYTES)
         return -EINVAL;
 
     drm_lock();
@@ -2050,8 +2054,10 @@ static int drm_mode_create_dumb(drm_context_t *ctx, void *arg)
     if (d.flags != 0)
         return -EINVAL;
 
-    uint32_t pitch = ((d.width * d.bpp + 7) / 8 + 63) & ~63u;
-    uint64_t size = (uint64_t)pitch * d.height;
+    uint32_t pitch = 0;
+    uint64_t size = 0;
+    if (drm_dumb_layout(d.width, d.height, d.bpp, &pitch, &size) < 0)
+        return -EINVAL;
 
     drm_lock();
     drm_gem_t *b = drm_gem_alloc_locked(d.width, d.height, pitch, d.bpp, 0,
