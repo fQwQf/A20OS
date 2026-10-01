@@ -55,6 +55,14 @@ vbox-text-image-aarch64: ; tools/a20 package vbox-aarch64-text
 
 _vbox_iso_x86_64_impl: dev-build
 	tools/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
+
+# A board with no block driver has no medium to write, so its artifact is the
+# kernel plus the commands that hand it to the boot chain already on the board.
+# The load address is read back out of the ELF by the script, so a board that
+# relocates its image needs no entry here.
+kernel-bundle: dev-build
+	READELF="$(READELF)" tools/mk_kernel_bundle.sh \
+		$(KERNEL_ELF) $(KERNEL_BIN) $(BUILD_DIR)/handoff $(BOARD)
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
 _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)

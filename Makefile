@@ -648,6 +648,11 @@ CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
 OBJCOPY := $(CROSS_PREFIX)objcopy
 endif
 
+# The handoff bundle reads the kernel's load address out of the ELF program
+# headers rather than repeating a per-board address, so it needs a readelf that
+# understands this architecture's objects.
+READELF := $(CROSS_PREFIX)readelf
+
 ifeq ($(CC),)
 $(error Unsupported ARCH '$(ARCH)')
 endif
