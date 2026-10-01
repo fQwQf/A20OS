@@ -15,7 +15,6 @@
 #include "core/consts.h"
 #include "core/klog.h"
 
-extern int g_lookup_errno;
 
 /* ============================================================
  * VFS path resolution → vnode
@@ -176,7 +175,7 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                     vnode_put(cur);
                     cur = vnode_lookup_path(parent_mnt->root, parent_rel);
                     if (!cur) {
-                        *lookup_err = g_lookup_errno ? g_lookup_errno : -ENOENT;
+                        *lookup_err = vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
                         return NULL;
                     }
                     depth = count_path_components(parent_rel);
@@ -348,7 +347,7 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
 /* Resolve an absolute path within a vnode tree */
 vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
     if (!root) return NULL;
-    g_lookup_errno = 0;
+    vfs_set_lookup_errno(0);
 
     vnode_t *cur = root;
     vnode_get(cur);
@@ -408,17 +407,17 @@ vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
         } else {
             if (strlen(p) >= MAX_NAME_LEN) {
                 vnode_put(cur);
-                g_lookup_errno = -ENAMETOOLONG;
+                vfs_set_lookup_errno(-ENAMETOOLONG);
                 return NULL;
             }
             if (cur->type != VFS_FT_DIR || !cur->ops || !cur->ops->lookup) {
                 vnode_put(cur);
-                g_lookup_errno = -ENOTDIR;
+                vfs_set_lookup_errno(-ENOTDIR);
                 return NULL;
             }
             if (vfs_vnode_permission(cur, X_OK) < 0) {
                 vnode_put(cur);
-                g_lookup_errno = -EACCES;
+                vfs_set_lookup_errno(-EACCES);
                 return NULL;
             }
             vnode_t *next = vfs_dcache_lookup(cur, p);
@@ -426,7 +425,7 @@ vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
                 int r = cur->ops->lookup(cur, p, &next);
                 if (r < 0 || !next) {
                     vnode_put(cur);
-                    g_lookup_errno = r < 0 ? r : -ENOENT;
+                    vfs_set_lookup_errno(r < 0 ? r : -ENOENT);
                     return NULL;
                 }
                 vfs_dcache_insert(cur, p, next);
@@ -438,7 +437,7 @@ vnode_t *vnode_lookup_path(vnode_t *root, const char *path) {
                 if (++symlink_depth > MAX_SYMLINKS) {
                     vnode_put(parent);
                     vnode_put(cur);
-                    g_lookup_errno = -ELOOP;
+                    vfs_set_lookup_errno(-ELOOP);
                     return NULL;
                 }
                 if (!cur->ops || !cur->ops->readlink) {

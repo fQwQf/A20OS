@@ -445,7 +445,7 @@ int64_t sys_statfs(const char *path, void *buf) {
     int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
     if (pr < 0) return pr;
     vnode_t *vn = vfs_resolve(full);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     kstatfs_t st;
     int r = vfs_statfs(vn, &st);
     vnode_put(vn);

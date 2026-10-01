@@ -60,10 +60,26 @@ vnode_t *vfs_resolve_no_follow_final(const char *path);
 
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd);
 
-int g_lookup_errno;
+/* Per-task lookup error (vfs_lookup_errno/vfs_set_lookup_errno).  Only the
+ * pre-task boot path resolves through the static fallback. */
+static int g_lookup_errno_boot;
+
+int vfs_lookup_errno(void)
+{
+    task_t *t = proc_current();
+    return t ? t->lookup_errno : g_lookup_errno_boot;
+}
+
+void vfs_set_lookup_errno(int err)
+{
+    task_t *t = proc_current();
+    if (t)
+        t->lookup_errno = err;
+    else
+        g_lookup_errno_boot = err;
+}
 
 /* Path resolution moved to fs/vfs/path_resolution.c */
-extern int g_lookup_errno;
 
 /* ============================================================
  * VFS open / close
@@ -325,8 +341,8 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
     vnode_t *vn = vnode_lookup_path(mnt->root, rel);
     if (!vn) {
-        if (g_lookup_errno && !(flags & O_CREAT))
-            return g_lookup_errno;
+        if (vfs_lookup_errno() && !(flags & O_CREAT))
+            return vfs_lookup_errno();
         if (!(flags & O_CREAT)) { kdebug("[VFS] open '%s' (rel='%s'): not found, no O_CREAT\n", resolved, rel); return -ENOENT; }
         if (mnt->flags & 1) return -EROFS;
         if (!mnt->root || !mnt->root->ops || !mnt->root->ops->create) { kdebug("[VFS] open '%s': root has no create ops\n", resolved); return -ENOSYS; }
@@ -340,7 +356,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
 
         vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
         if (!parent) {
-            return g_lookup_errno ? g_lookup_errno : -ENOENT;
+            return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
         }
         if (parent->type != VFS_FT_DIR) {
             vnode_put(parent);
@@ -534,7 +550,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                                                 vfs_strip_mount_prefix(parent_path, mnt));
             if (!parent || parent->type != VFS_FT_DIR) {
                 vnode_put(parent);
-                return g_lookup_errno ? g_lookup_errno : -ENOENT;
+                return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
             }
             if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
                 vnode_put(parent);
@@ -688,7 +704,7 @@ int vfs_mkdir(const char *path, int mode) {
         return sr;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -748,7 +764,7 @@ int vfs_unlink(const char *path) {
         return sr;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -855,7 +871,7 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (!old_dir || !new_dir) {
         vnode_put(old_dir);
         vnode_put(new_dir);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     }
     if (old_dir->type != VFS_FT_DIR || new_dir->type != VFS_FT_DIR) {
         vnode_put(old_dir);
@@ -953,7 +969,7 @@ int vfs_rmdir(const char *path) {
     if (!mnt || !mnt->root) return -ENOENT;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, vfs_strip_mount_prefix(parent_path, mnt));
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -1183,7 +1199,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
     vnode_t *parent = vnode_lookup_path(mnt->root, rel);
     if (!parent)
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -1231,7 +1247,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
 int vfs_link(const char *oldpath, const char *newpath) {
     if (!oldpath || !newpath) return -EINVAL;
     vnode_t *target = vfs_resolve(oldpath);
-    if (!target) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!target) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (target->type == VFS_FT_DIR) {
         vnode_put(target);
         return -EPERM;
@@ -1263,7 +1279,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     if (!parent || parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         vnode_put(target);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     }
     if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
         vnode_put(parent);
@@ -1346,7 +1362,7 @@ int vfs_chdir(const char *path) {
         return -EACCES;
 
     vnode_t *vn = vfs_resolve(canon);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (vn->type != VFS_FT_DIR) { vnode_put(vn); return -ENOTDIR; }
     if (vfs_vnode_permission(vn, X_OK) < 0) { vnode_put(vn); return -EACCES; }
     vnode_put(vn);

@@ -62,7 +62,7 @@ int vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint) {
     if (proc_fd_match)
         return proc_fd_result;
     vnode_t *vn = vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (sync_hint == AT_STATX_FORCE_SYNC) {
         page_cache_writeback_vnode(vn, NULL, NULL);
     }
@@ -95,7 +95,7 @@ int vfs_stat(const char *path, kstat_t *st) {
     if (proc_fd_match)
         return proc_fd_result;
     vnode_t *vn = vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     int r = vfs_vnode_stat(vn, st);
     vnode_put(vn);
     return r;
@@ -168,7 +168,7 @@ int vfs_faccessat2(int dirfd, const char *path, int mode, int flags) {
     if ((mode & W_OK) && path_mnt && (path_mnt->flags & 1))
         return -EROFS;
     vnode_t *vn = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_resolve_no_follow_final(path) : vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     kstat_t st;
     int r = vfs_vnode_stat(vn, &st);
     if (r == 0) {
@@ -229,7 +229,7 @@ int vfs_chmodat(int dirfd, const char *path, int mode, int flags) {
         return -ENOENT;
     }
     vn = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_resolve_no_follow_final(path) : vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     int r = vfs_chmod_vnode(vn, mode);
     vnode_put(vn);
     return r;
@@ -272,7 +272,7 @@ int vfs_chownat(int dirfd, const char *path, int uid, int gid, int flags) {
     if ((flags & AT_EMPTY_PATH) && (!path || path[0] == '\0'))
         return -ENOENT;
     vnode_t *vn = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_resolve_no_follow_final(path) : vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     int r = vfs_chown_vnode(vn, uid, gid);
     vnode_put(vn);
     return r;
@@ -290,7 +290,7 @@ int vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flag
     if (!path) return -EFAULT;
     if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)) return -EINVAL;
     vnode_t *vn = (flags & AT_SYMLINK_NOFOLLOW) ? vfs_resolve_no_follow_final(path) : vfs_resolve(path);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (vfs_vnode_permission(vn, W_OK) < 0 && !vfs_current_owns(vn)) {
         vnode_put(vn);
         return -EACCES;
