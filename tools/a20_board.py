@@ -59,6 +59,12 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             target = {"default": "_vbox_image_aarch64_impl",
                       "text": "_vbox_text_image_aarch64_impl"}[variant]
             exec_make(inst, target, list(make_args), dry_run)
+        case "kernel-bundle":
+            # A board with no block driver: the artifact is the kernel plus the
+            # boot-chain commands to load it.  mk_kernel_bundle.sh takes the
+            # load address from the ELF, so nothing about the board is restated
+            # here or in the manifest.
+            exec_make(inst, "kernel-bundle", list(make_args), dry_run)
         case "fit-sdcard":
             # VF2 image assembly (firmware check, extra partition variants)
             # is orchestrated by the vf2-* make targets; the instance carries

@@ -332,6 +332,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
     elif section_is_set(inst.flash):
         pass
+    elif inst.handoff and inst.handoff.commands and inst.package.kind:
+        # A handoff board's artifact is the bundle, not a kernel sitting in the
+        # build directory, so package it rather than stopping at build.
+        run_package(inst, list(args.make_args), args.dry_run)
     elif not args.dry_run:
         build_instance(inst, list(args.make_args), args.dry_run)
     if inst.target.boot_media:
@@ -344,7 +348,32 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # unequal to 0, and returned None -- an accidental exit code 0 that
             # hid the fact this goal was the one call site dropping make args.
             exec_make(inst, "target-write-media", list(args.make_args), args.dry_run)
+    if inst.handoff and inst.handoff.commands:
+        _handoff_report(inst, args)
     return cmd_console(args)
+
+
+def _handoff_report(inst, args: argparse.Namespace) -> None:
+    """Say what to type at the boot chain, because a20 will not type it.
+
+    A board with no block driver has no medium to write, so the last mile is a
+    person interrupting U-Boot and loading the kernel.  Driving that from here
+    would mean feeding the boot chain over a serial line this code does not own,
+    so the boundary is deliberate: package the artifact, print the commands, and
+    let the console check below judge the result.  Printing them from the
+    manifest is the point -- the commands on the board are then the commands in
+    the repository.
+    """
+    h = inst.handoff
+    print(f"\n{h.method or 'handoff'} for {inst.board}: "
+          f"transfer the bundle, then run these at the boot chain.\n")
+    if h.server:
+        print(f"  server {h.server}")
+    for line in h.commands:
+        print(f"  {line}")
+    if h.note:
+        print(f"\n{h.note}")
+    print()
 
 
 def _port_note(inst) -> str:

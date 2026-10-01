@@ -229,6 +229,12 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
                 e.append(f"package.kind release: supported arches: {', '.join(RELEASE_ARCH_ARTIFACTS)}")
             if p.variant is not None:
                 e.append("package.variant: not used for release")
+        case "kernel-bundle":
+            # This kind exists for boards with no writable medium, so boot_media
+            # alongside it would leave nothing to write the bundle to.
+            if inst.target.boot_media:
+                e.append("package.kind kernel-bundle: not used with "
+                         "target.boot_media; this kind exists for boards with no medium")
         case unreachable:
             assert_never(unreachable)
     if p.kind != "release" and (p.kernel_out is not None or p.disk_out is not None):
