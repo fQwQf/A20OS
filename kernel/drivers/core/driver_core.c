@@ -416,6 +416,40 @@ device_t *device_find_by_class(uint32_t class_type, int index) {
     return NULL;
 }
 
+int driver_lookup_compatible(const char *compatible,
+                             uint32_t *vendor, uint32_t *device)
+{
+    if (!compatible || !compatible[0])
+        return -EINVAL;
+
+    const driver_t *owner = NULL;
+    int claimants = 0;
+
+    for (int i = 0; i < g_driver_count; i++) {
+        const driver_t *drv = g_drivers[i];
+        if (!drv->of_compatible || !drv->id_table)
+            continue;
+        if (strcmp(drv->of_compatible, compatible) != 0)
+            continue;
+        claimants++;
+        if (!owner)
+            owner = drv;
+    }
+
+    if (!owner)
+        return -ENODEV;
+
+    if (claimants > 1)
+        kwarn("[DT] \"%s\" claimed by %d drivers, binding %s\n",
+              compatible, claimants, owner->name);
+
+    if (vendor)
+        *vendor = owner->id_table[0].vendor;
+    if (device)
+        *device = owner->id_table[0].device;
+    return 0;
+}
+
 void driver_probe_all(void) {
     int probed = 0;
     for (int i = 0; i < g_device_count; i++) {

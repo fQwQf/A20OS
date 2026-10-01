@@ -117,6 +117,12 @@ typedef struct driver {
     const device_id_t  *id_table;  /* NULL-terminated array */
     struct bus_type    *bus;       /* bus this driver lives on */
 
+    /* Optional device-tree compatible string this driver claims, e.g.
+     * "starfive,jh7110-mmc".  With it set, the driver binds to the node carrying
+     * that compatible at the addresses the firmware described, instead of every
+     * board file hand-copying an MMIO base.  NULL when not device-tree described. */
+    const char         *of_compatible;
+
     /* Optional protocol-level narrowing after the bus ID match.  It must not
      * access device registers or allocate resources. */
     int  (*match)(device_t *dev);
@@ -202,6 +208,13 @@ device_t *device_find_by_class(uint32_t class_type, int index);
 /* probe all unbound devices against registered drivers */
 void driver_probe_all(void);
 void driver_progress_class(uint32_t class_type);
+
+/* Find the platform-bus driver claiming a device-tree compatible string and
+ * report the first id_table entry it would bind as.  Returns 0 and leaves the
+ * outputs untouched when no driver claims it, so a caller walking a device tree
+ * can skip nodes nothing supports instead of inventing an identity for them. */
+int  driver_lookup_compatible(const char *compatible,
+                              uint32_t *vendor, uint32_t *device);
 
 /* ------------------------------------------------------------------ */
 /*  Unified driver manager                                             */
