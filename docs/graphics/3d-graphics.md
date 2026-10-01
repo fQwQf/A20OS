@@ -106,6 +106,11 @@ framebuffer 销毁掉，`GETCRTC`/`GETPLANE` 于是继续报告一个 `GETFB` �
 在 render node 上拒绝 `CREATE_DUMB`，所以 GBM 本来就用 primary node 建 dumb
 buffer，没有依赖旧行为的东西。
 
+> **该 smoke 已跑，结果见 §0.6**：2D-only（`virtio-gpu 2D only (no VIRGL
+> feature)`）实例 xfce-x86_64 正常起来并反复呈现（`[DRM] present handle=N
+> 1024x768`），labwc 认出 `Found config * for output Virtual-1`，全程没有一行
+> master/render-node 错误。这条阻塞解除。
+
 **一处会静默掐死整条 3D 路。**`gpu_device_register()` 是 first-wins，而
 `vmsvga` 的 ops 表 3D 部分全是 NULL。若它先 probe，所有 `DRM_IOCTL_VIRTGPU_*`
 返回 `-ENODEV`，而 `DRM_CAP_PRIME`/`GETPARAM` 照旧声称有能力，日志里没有一行
@@ -124,7 +129,7 @@ buffer，没有依赖旧行为的东西。
 `command_lock` 与 waiters**（instance 在静态存储里，保留已初始化的锁本身就是对的）。
 **仍未解决的是**：已经进入命令路径的调用者会继续跑在已被 reset 的 transport 上；
 这需要设备级 teardown 锁或 in-flight 引用计数，属于初始化生命周期改动，仍单独立项。
-`gpu_device_unregister()` 也仍然只是清空槽位、不在存活设备里重新选举。
+`gpu_device_unregister()` 的"清空槽位后不重选"本轮也修掉了，见 [§0.6](#06-本轮合并前阻塞项已解除设备重选已修)。
 
 ### 本轮（`feat/graphics-hardening`，续）：宿主阻塞解除后的实测结论
 
@@ -251,6 +256,45 @@ QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,
 
 **仍未解决**：Mesa 侧的 `eglinfo` 段错误，以及"Mesa 到底挂上没有"缺一张直接证据
 （见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+
+---
+
+## 0.6 本轮：合并前阻塞项已解除，设备重选已修
+
+**上一轮留下的唯一合并前阻塞项，本轮实测解除。** §0 那条"render node 越权"
+是本分支里唯一一处会影响既有桌面的行为改动，文档要求上线前跑一次 `GPU_3D=0`
+的 xfce smoke。这条要求此前一直没跑，所以它一直是"待验证"而不是"已验证"。
+
+实测（`tools/a20 run xfce-x86_64`，该实例不设 `gpu_3d`，因此正是 2D-only 配置）：
+
+- guest 日志 `[GPU] virtio-gpu 2D only (no VIRGL feature)`——确认走的是 2D 路径；
+- `[DRM] present handle=1/2 1024x768` 反复出现，`pages=768 flush=0`；
+- labwc 认到输出：`[main.c:282] Found config * for output Virtual-1`；
+- XFCE 会话组件起来了（`xfsettingsd`、`xfdesktop`、缩略图服务经 D-Bus 激活）；
+- **全程没有一行 master / render-node 错误**。
+
+结论：把 KMS ioctl 收进 master 之后，2D 桌面照样工作。Linux 同样在 render node
+上拒绝 `CREATE_DUMB`，而 GBM 本来就用 primary node 建 dumb buffer，所以没有
+依赖旧行为的东西——这一点从实测得到确认，不再只是推理。
+
+（附带一条：这个实例的镜像上一次运行留下了 ext4 校验和错误，preflight 拒绝启动
+并要求先 rebuild。这是 `a20` 门禁在正常工作，不是缺陷。）
+
+**另一处静默失效已修。** `gpu_device_unregister()` 原先只是把 `g_default_gpu`
+清空就结束。若退位的设备走了而另一块显示设备还在线上，DRM 就此没有后端，
+此后每个 ioctl 都回 `-ENODEV`，直到某次重探触发——而这个现象和"驱动坏了"
+无法区分。现在它会遍历在线显示设备、用与 `gpu_device_register()` 相同的
+晋级规则把槽位填回。两个容易写错的点：
+
+- 扫描**不能**停在第一个候选。索引靠前的 2D-only 设备否则会赢过索引靠后的
+  3D 设备，于是重选会把一个可用的 3D 绑定静默降级。只有拿到 3D 候选才停。
+- 它**不抢占**扫描期间被并发填上的槽位：此时落地的 `register()` 已经做过选择。
+
+选择规则本身抽到 `kernel/include/drivers/gpu/gpu_select.h`（两个布尔谓词），
+`gpu_core.c` 调用它，因此被测的就是在跑的逻辑而不是一份拷贝。
+`tools/tests/gpu_select_test.c` 由既有的 `tools/tests/*.c` 通配纳入
+`make host-tests`，无需新增构建接线。门禁**实测会红**：把扫描改回"永不改进"、
+拒绝填空槽、或让后探测者无论能力都获胜，三种改法分别退出 134。
 
 
 ---
