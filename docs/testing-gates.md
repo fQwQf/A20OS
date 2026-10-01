@@ -24,6 +24,8 @@
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 | 上游包运行（Alpine gcc 经 chroot 编译+运行） | `make smoke-devtools`（需网络拉取上游包，守护 trap.S sp 守卫修复） |
+| 3D 通路像素回读（三种架构） | `tools/a20 test smoke-gpu3d-riscv64` / `-x86_64` / `-aarch64`（需 host virgl + `tools/with-virgl-display.sh`；见 [graphics/3d-graphics.md](graphics/3d-graphics.md)） |
+| stock Mesa/virgl attach 观测 | `make smoke-mesa-attach`（需 host virgl；**只记录不断言**，因为 Mesa 能否 attach 仍是开放问题，见 [graphics/3d-graphics.md §8.0](graphics/3d-graphics.md)） |
 
 `BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong LA32R，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
 
