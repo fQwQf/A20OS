@@ -1301,7 +1301,21 @@ static int drm_get_cap(drm_context_t *ctx, void *arg)
                * the IMPORT and EXPORT caps are set. */
         c.value = 3; /* DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT */
         break;
-    case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC */
+    case 0x6: /* DRM_CAP_TIMESTAMP_MONOTONIC
+               *
+               * Kept at 1, and it is load-bearing rather than decorative: wlroots
+               * treats it as a requirement and abandons the whole DRM backend
+               * without it ("DRM_CAP_TIMESTAMP_MONOTONIC unsupported" then
+               * "Failed to create DRM backend"), so zeroing this takes down the
+               * desktop rather than degrading it.
+               *
+               * It is honest for the path that exists. The vblank event carries a
+               * real CLOCK_MONOTONIC stamp (timekeeping_get_monotonic in
+               * drm_vblank_deliver_due_locked), and the cap's other half --
+               * DRM_IOCTL_MODE_GETTIME -- is not implemented here. Reporting the
+               * capability anyway is the lesser error, because a client that
+               * GETTIMEs gets an error from the default arm, while a client that
+               * believes it cannot have a compositor will not start at all. */
         c.value = 1;
         break;
     case 0x7: /* DRM_CAP_ASYNC_PAGE_FLIP */

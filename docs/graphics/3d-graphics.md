@@ -197,8 +197,6 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
    声明为不可用，所以 Mesa 不会去调它；`GET_CAP` 广告的三个能力
    （`DUMB_BUFFER`/`PRIME`/时间戳）对应的 ioctl 也都在。而落到 `default:`
    的 ioctl 返回的是错误，不是 NULL 函数指针，因此这条路径产生不了 `ra=0x400`。
-   顺带修掉一处确实过头的广告：`DRM_CAP_TIMESTAMP_MONOTONIC` 原为 1，但驱动
-   并没有 `DRM_IOCTL_MODE_GETTIME`（vblank 事件里的单调时间戳是真的），已改为 0。
    **仍未定位**，见 §0.7。
 3. 因此**还不能说"Mesa 已经挂上 virtio_gpu_dri"**。已有的是强旁证：强制
    `A20_RENDERER=gl`（wlroots 在 renderer 创建失败时是直接放弃而非退回）后 session
@@ -302,11 +300,17 @@ QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,
 - 落到 `default:` 的 ioctl 返回 `-ENOTTY` 一类的**错误**，不是 NULL 函数指针。
   所以"未实现 → 成功但结构体没填 → NULL 解引用"这条链在当前 dispatch 上断掉了。
 
-**顺带修掉一处真的过头广告**（唯一一个因此改变的结论）：
-`DRM_CAP_TIMESTAMP_MONOTONIC` 原报 1，但这个 cap 同时指两件事——vblank 事件的时间戳
-（真的）和 `DRM_IOCTL_MODE_GETTIME`（**本驱动没有这个 ioctl**）。客户端读了它就可能
-去问 CRTC 要时间，然后撞上 `default:`。已改为 0。代价为零：客户端读这个 cap 只是为了
-决定"我可以假设什么"，而事件时间戳（真正用于帧调步的那一半）不受影响。
+**顺带一度改错、已回退一处**：`DRM_CAP_TIMESTAMP_MONOTONIC` 报的是 1，而本驱动
+并没有 `DRM_IOCTL_MODE_GETTIME`（vblank 事件里的单调时间戳是真的）。本轮据此把它
+改成 0，**结果桌面直接起不来**：wlroots 把这个 cap 当**硬要求**，拿不到就放弃整个
+DRM backend（`[backend/drm/drm.c:84] DRM_CAP_TIMESTAMP_MONOTONIC unsupported`
+→ `Failed to create DRM backend` → `Could not successfully create backend on any
+GPU` → `unable to create backend`）。已回退为 1。
+
+这个 cap 因此是**承重**的，不能按"只报了没实现的能力"来理解：为了让一个真去
+`GETTIME` 的客户端拿到错误而把它清零，代价是所有客户端都起不来。**两害相权，
+保留 1 是对的**，代码注释已记下这个理由，避免下一轮再"纠正"一次。这条也说明
+§0.6 那次桌面 smoke 有多必要：纯看源码，这个改动像是无害的收紧。
 
 **因此把范围收窄到了哪里**：既然不是 ioctl 表的缺口，也不是 capability 撒谎，那么
 `ra=0x400` 更可能出现在 **Mesa 读 `/dev/dri/card0` 之后枚举设备节点的阶段**——
