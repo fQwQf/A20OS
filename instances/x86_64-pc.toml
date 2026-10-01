@@ -42,7 +42,12 @@ boot_timeout = "180s"
 # Both bootargs probes appearing is the regression guard for the multiboot
 # cmdline path: on a real machine fw_cfg is absent and only the multiboot line
 # can carry a20.* settings.
-console_check = ["[BOOTARGS] multiboot cmdline", "[FDT]", "System ready"]
+# No [FDT] here: only riscv64 and loongarch parse a device tree, and this
+# board has no use for one -- it is legacy BIOS/UEFI firmware, not a DT
+# platform.  The multiboot cmdline line is the regression guard that
+# matters, because on a real machine fw_cfg is absent and only the
+# multiboot line can carry a20.* settings.
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready"]
 commands = ["cat /etc/os-release", "poweroff"]
 expect = ["A20OS", "poweroff"]
 # A machine with a disk boots from media, so this instance has the one path the

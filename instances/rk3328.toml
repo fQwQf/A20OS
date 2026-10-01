@@ -24,6 +24,10 @@ baud = 1500000
 # SPL -> TF-A -> U-Boot -> kernel.
 boot_wait = 4
 boot_timeout = "120s"
+# No [FDT] line on aarch64: only riscv64 and loongarch parse a device tree,
+# and the aarch64 port has no DT-based RAM narrowing.  System ready is
+# printed by kernel/main.c and is the strongest evidence available here.
+console_check = ["System ready"]
 commands = ["cat /etc/os-release", "poweroff"]
 expect = ["A20OS", "poweroff"]
 

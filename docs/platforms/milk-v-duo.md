@@ -43,11 +43,10 @@ On 64 MiB:
   architectures without a swap PTE encoding, and riscv64 does have one, so
   pass `SWAP=0` explicitly.
 - A full `image-world` rootfs will not build or will not mount. Do not try
-  `make image-world` on this board.
+  `tools/a20 package milk-v-duo -- PKG_WORLD=base` on this board.
 
 ```sh
-make ARCH=riscv64 BOARD=milk-v-duo ABI=linux BRINGUP=1 RAMFS_USER=1 SWAP=0 \
-     kernel-only
+tools/a20 package milk-v-duo -- RAMFS_USER=1 SWAP=0
 ```
 
 If the goal is "cheapest board that boots A20OS", buy the LicheeRV Nano: same
@@ -70,6 +69,221 @@ sees is the upstream one.
 `CONFIG_SYS_LOAD_ADDR=0x80080000` and `CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x82300000`
 in that defconfig describe U-Boot's own scratch addresses, not the kernel load
 address. **The kernel load address on this board is unverified** — see below.
+
+## Deploying
+
+`tools/a20` is the deployment tool. There is no make command here, and that is
+deliberate: this board has no block driver, so there is no card to write and
+nothing for `dd` to put an image on. The artifact is the kernel plus the
+commands that hand it to the boot chain already on the board.
+
+### What you get
+
+```sh
+tools/a20 package milk-v-duo
+```
+
+writes `build/milk-v-duo/handoff/`: `kernel.bin`, `uboot.cmd` (the exact lines to
+run at the U-Boot prompt), and a `README.md` carrying the same instructions with
+the artifact.
+
+The load address is **not** written in this document or in the instance. `a20
+package` reads it out of the first `PT_LOAD` header of the kernel it just built,
+so a board whose linker script relocates the image cannot end up with a stale
+address here.
+
+No device tree is shipped, on purpose. U-Boot passes its own board DTB in `a1`,
+and that DTB is what `riscv64_memory_init()` and the platform device tree walker
+read. A second copy shipped from the kernel tree would be a second thing to keep
+in sync with the firmware, and nothing would notice when it drifted.
+
+### Verifying
+
+`tools/a20 deploy milk-v-duo` builds, packages, prints the handoff commands, then
+attaches the console to check the result. To watch an already-running board:
+
+```sh
+tools/a20 console milk-v-duo
+
+### Getting it onto the board
+
+1. Boot the board's own way: vendor FSBL, then OpenSBI, then U-Boot. Keep the
+   FSBL on the card — the card is the only way back.
+2. Interrupt U-Boot's autoboot.
+3. Tell U-Boot where the host is, then load the kernel:
+
+   ```text
+   setenv serverip <your-host-ip>
+   setenv ipaddr <board-ip>
+   tftp <loadaddr> kernel.bin
+   ```
+
+   Load `kernel.bin` from `build/milk-v-duo/handoff/`. Substitute the address
+   `uboot.cmd` prints for `<loadaddr>`. Transfer it however your host reaches the
+   board — TFTP as above, or a USB stick and `fatload usb 0:1 <loadaddr> kernel.bin`.
+4. Start the kernel:
+
+   ```text
+   booti <loadaddr> - <loadaddr>
+   ```
+
+   The `-` is the device tree pointer. Leaving it empty is correct: U-Boot passes
+   its own board DTB in `a1` itself.
+
+The console is `/dev/ttyUSB0` at 115200. Override the node if your adapter enumerates
+differently — `ls /dev/ttyUSB*` before plugging in and after.
+
+A boot counts only if these lines appear:
+
+| Line | What it proves |
+|---|---|
+|
+ 
+`
+[
+F
+D
+T
+]
+ 
+R
+A
+M
+ 
+r
+a
+n
+g
+e
+ 
+.
+.
+.
+`
+ 
+|
+ 
+t
+h
+e
+ 
+f
+i
+r
+m
+w
+a
+r
+e
+ 
+h
+a
+n
+d
+e
+d
+ 
+o
+v
+e
+r
+ 
+t
+h
+e
+ 
+d
+e
+v
+i
+c
+e
+ 
+t
+r
+e
+e
+ 
+|
+
+
+|
+ 
+`
+S
+y
+s
+t
+e
+m
+ 
+r
+e
+a
+d
+y
+`
+ 
+|
+ 
+t
+h
+e
+ 
+k
+e
+r
+n
+e
+l
+ 
+r
+e
+a
+c
+h
+e
+d
+ 
+u
+s
+e
+r
+s
+p
+a
+c
+e
+ 
+|
+
+`console_check` in the instance waits for exactly these, so `a20 console`
+distinguishes a boot from a hang. It then runs `cat /etc/os-release` and
+`poweroff`, and checks for `A20OS` and `poweroff`.
+
+### The RAM budget dominates everything here
+
+64 MiB is the whole design constraint, and it is why the bring-up path is what it
+is. Read [The RAM budget is the whole story](#the-ram-budget-is-the-whole-story)
+before choosing between the MMU and NOMMU builds, and prefer:
+
+```sh
+tools/a20 package milk-v-duo -- NOMMU=1 RAMFS_USER=1 SWAP=0
+```
+
+A NOMMU build cannot run `mksh` or anything else needing `fork`/`mmap`, so on this
+board the in-console checks are the practical ceiling, not a starting point for
+further use.
+
+### If it does not boot
+
+1. **Nothing on the console.** Wrong UART or pinmux; the FSBL releases the UART
+   clock, so silence usually means the FSBL did not run.
+2. **U-Boot banner, then silence.** The load address — the most likely failure on
+   this board. See the next section.
+3. **`[FDT] memory node unavailable`.** U-Boot did not pass `a1`.
+4. **RAM range wrong.** U-Boot's DTB disagrees with the board; that is a firmware
+   problem, not a kernel one.
 
 ## Unverified: the kernel load address
 

@@ -75,23 +75,136 @@ the ns16550 UART and the **Synopsys DesignWare MSHC** driver enabled. That is
 worth knowing: it confirms both the console and the SD controller are on IP
 A20OS already speaks.
 
-## Building
+## Deploying
+
+`tools/a20` is the deployment tool. There is no make command in this section,
+and that is deliberate: the board has no block driver, so there is no card to
+write and nothing for `dd` to put an image on. The artifact is the kernel plus
+the commands that hand it to the boot chain already on the board.
+
+### What you get
 
 ```sh
-make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only
+tools/a20 package licheerv-nano
 ```
 
-NOMMU also builds, for a tighter footprint:
+writes `build/licheerv-nano/handoff/`:
+
+| File | What it is |
+|---|---|
+| `kernel.bin` | the raw kernel, to be loaded at the address in `uboot.cmd` |
+| `uboot.cmd` | the exact lines to run at the U-Boot prompt |
+| `README.md` | the same instructions, shipped with the artifact |
+
+The load address is **not** written in this document or in the instance. `a20
+package` reads it out of the first `PT_LOAD` header of the kernel it just built,
+so a board whose linker script relocates the image cannot end up with a stale
+address here. For this board it resolves to `0x80200000`, which is the riscv64
+`PHYS_BASE`.
+
+No device tree is shipped, on purpose. See [Why no DTB](#why-no-dtb) below.
+
+### Getting it onto the board
+
+1. Boot the board's own way: vendor FSBL, then OpenSBI, then U-Boot. The FSBL
+   and the `fip.bin` packaging come from the SophGo tool; keep the FSBL on the
+   card, because the card is the only way back.
+2. Interrupt U-Boot's autoboot.
+3. Tell U-Boot where the host is, then load the kernel:
+
+   ```text
+   setenv serverip <your-host-ip>
+   setenv ipaddr <board-ip>
+   tftp 0x80200000 kernel.bin
+   ```
+
+   Load `kernel.bin` from `build/licheerv-nano/handoff/`. Transfer it however
+   your host reaches the board — TFTP as above, or a USB stick and
+   `fatload usb 0:1 0x80200000 kernel.bin`.
+4. Start the kernel:
+
+   ```text
+   booti 0x80200000 - 0x80200000
+   ```
+
+   The `-` is the device tree pointer. Leaving it empty is correct: U-Boot passes
+   its own board DTB in `a1` itself.
+
+### Verifying
+
+`tools/a20 deploy licheerv-nano` does the build and packaging, prints the
+handoff commands, and then attaches the console to check the result. To just
+watch an already-running board:
 
 ```sh
-make ARCH=riscv64 BOARD=licheerv-nano NOMMU=1 BRINGUP=1 kernel-only
+tools/a20 console licheerv-nano
 ```
 
-riscv64 is in `NOMMU_SUPPORTED_ARCHES` and `kernel/platform/visionfive2/`
-already ships an `ldscript-nommu.ld` as the worked example. Note that the
-VisionFive 2 linker script relocates the image to `0x40200000` for its own DRAM
-window; this board's DRAM is at `0x80000000`, so the arch default load address
-stands and no NOMMU-specific script is needed.
+The console is `/dev/ttyUSB0` at 115200 8N1. Override the node if your adapter
+enumerates differently — `ls /dev/ttyUSB*` before plugging in and after.
+
+A boot counts only if **both** of these appear:
+
+| Line | What it proves |
+|---|---|
+| `[FDT] RAM range ...` | the firmware handed over the device tree |
+| `System ready` | the kernel reached userspace |
+
+`console_check` in the instance waits for exactly these two, so `a20 console`
+distinguishes a boot from a hang. If you see the RAM-window fallback message
+instead of a range, U-Boot did not pass `a1` and the load is wrong — not the
+kernel.
+
+Then it runs `cat /etc/os-release` and `poweroff`, and checks for `A20OS` and
+`poweroff`.
+
+### NOMMU
+
+riscv64 is in `NOMMU_SUPPORTED_ARCHES`, and a tighter footprint is one override
+away:
+
+```sh
+tools/a20 package licheerv-nano -- NOMMU=1
+```
+
+The VisionFive 2 linker script relocates its image to `0x40200000` for its own
+DRAM window; this board's DRAM is at `0x80000000`, so the arch default stands
+and no NOMMU-specific script is needed. Note that NOMMU cannot run `mksh` or
+anything else that needs `fork`/`mmap`, so the in-console checks above are the
+ceiling on a NOMMU build.
+
+### Why no DTB
+
+Every board in this family boots through the vendor FSBL and U-Boot, and U-Boot
+passes its own board DTB in `a1`. That DTB is the authoritative description of
+the board, and it is what `riscv64_memory_init()` reads for RAM and what the
+platform device tree walker reads for devices. Shipping a second copy from the
+kernel tree would be a second thing that has to be kept in sync with the
+firmware, and nothing in the tree would notice when it drifted.
+
+The consequence is real and worth stating: if your U-Boot was built without a
+DTB, or passes a DTB that describes a different RAM window, the kernel will fall
+back to the board's compiled-in window and the `[FDT] RAM range` line will not
+appear.
+
+### If it does not boot
+
+Work down this list; it is ordered by what actually fails first.
+
+1. **Nothing at all on the console.** Wrong UART or wrong pinmux. UART0 is
+   `0x04140000` on the GPIO header; the FSBL is what releases its clock, so a
+   silent console usually means the FSBL did not run, not that the kernel is
+   wrong.
+2. **U-Boot banner, then silence.** The load address. Compare what `uboot.cmd`
+   says against `bdinfo` on your board.
+3. **`[FDT] memory node unavailable`.** U-Boot did not pass `a1`. Check that
+   your U-Boot was built with `CONFIG_OF_BOARD` or that you did not point `booti`
+   at a DTB you truncated.
+4. **RAM range is wrong.** U-Boot's DTB disagrees with the board. That is a
+   firmware problem; `riscv64_memory_init()` is faithfully reporting what it was
+   handed.
+5. **Hangs after `System ready`.** You are past bring-up. That is no longer this
+   document's subject; see `porting-guide.md`.
 
 ## What this port does and does not do
 
@@ -116,11 +229,11 @@ Does not, and each needs real driver work rather than a device table entry:
 
 ## Before claiming hardware verification
 
-1. `make ARCH=riscv64 BOARD=licheerv-nano BRINGUP=1 kernel-only` produces
-   `kernel.bin`.
-2. Pack it into the `fip.bin` with the vendor tool, or load `kernel.bin`
-   through U-Boot once the FSBL is up.
-3. Confirm `[INIT] System ready` on UART0 at 115200 8N1, GPIO header.
+1. `tools/a20 package licheerv-nano` produces
+   `build/licheerv-nano/handoff/kernel.bin`.
+2. Load it through U-Boot once the FSBL is up, as [Deploying](#deploying)
+   describes.
+3. Confirm `System ready` on UART0 at 115200 8N1, GPIO header.
 4. Confirm the DTB reached the kernel — `riscv64_memory_init()` prints
    `[FDT] RAM range ...`; a silent fallback to the board window means U-Boot
    did not pass `a1`.
