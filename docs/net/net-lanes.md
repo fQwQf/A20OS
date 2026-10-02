@@ -276,6 +276,182 @@ zero-window probe、ooseq、TIME_WAIT、RTT 每一处经过时间差计算的地
 
 尚未落地：per-lane 入口与它的调用者、TIME_WAIT 的分片、per-lane pbuf 池。
 
+## 阻塞：多 lane + 真实 LISTEN pcb 在引导期就会 panic
+
+在写阶段 C 的门禁时撞到的，**先于**任何阶段 C 的改动存在，必须先解决，否则 C 与 D
+都是在会 panic 的地基上做。
+
+复现（4 lane、4 CPU、`a20.tcpmode=lwip`）：
+
+```
+make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
+# 以 a20.tcpmode=lwip 启动，无需运行任何测试程序
+```
+
+结果是在 **idle 任务、CPU 0、引导期间**就 KERNEL PAGE FAULT → PANIC，
+`pcbs:` 显示 `tcp_listen=1`（telnetd 的通配 bind 已经建出真实 lwIP LISTEN pcb）。
+经 TCP 路径触发时栈为 `ethernet_output → tcp_pcb_remove`，`BADV=0x100000000000038`，
+即链表指针已被破坏，不是空指针。
+
+已确认的三件事：
+
+1. **不是阶段 C 引入的。** 把 `tcp.c` 整个回退到本轮计时器工作之前（`048f30e6`），
+   panic 依旧复现（7 处 fault 行）。所以它与 per-lane 计数器、per-CPU 分派都无关。
+2. **只在有真实 lwIP LISTEN pcb 时出现。** `smoke-net-lanes-n1` 同样是 4 lane +
+   4 CPU，但走默认 `fast` 档、不存在真实 lwIP LISTEN pcb，一直是绿的。
+3. 因此触发条件是**多 lane 分桶与真实监听 pcb 的交互**，而不是多 lane 本身。
+
+**复现不稳定。** 收窄结果：
+
+| lane | CPU | 真实 LISTEN pcb | 结果 |
+|------|-----|----------------|------|
+| 4 | 4 | 有 | **panic**（门禁里） |
+| 4 | 4 | 有 | 正常（单独重跑，同样是 `cat /proc/net/status` + 4 CPU） |
+| 4 | 1 | 有 | 正常 |
+
+所以触发条件是**多 lane + 多 CPU + 真实 LISTEN pcb**，而症状是**间歇性**的：
+同一组参数重跑不复现。已知故障上下文有两种——`tcp_accept_test` 任务，以及
+`idle`（pid=0）——后者说明它可以在没有任何测试程序参与的情况下发生。
+
+这把结论从"某处的确定性越界"推向"并发竞态"：如果哨兵桶真的每次都越界，4 CPU 重跑
+不可能是干净的。因此下面这条只是**待查线索**，不再是头号嫌疑；且一个纯粹的越界读也
+解释不了"链表头被破坏"——那更像并发改链表。
+
+定位方向随之改变：确定性越界可以用断言和静态检查抓，竞态不行；需要的是并发压力
+（例如反复建连/关闭跨 lane 连接）、锁审计，或能放大竞态的检测手段。
+
+已排除的一个候选：socket 与 PCB 的 lane 概念在**通配 bind** 上不一致。telnetd 绑
+`INADDR_ANY`，此时
+
+- `net_socket_lane_of_addr()`（`kernel/net/socket_inet.c:213`）返回
+  `net_lane_of(0, 2323)`，落在某个**真实 lane** 0..N-1；
+- 而 `NET_PCB_LANE_OF_PCB()`（`lwip/priv/pcb_lane.h`）对 `local_ip` 为 any 的 pcb
+  返回**哨兵桶** `NET_PCB_LANE_ANY`（= `CONFIG_NET_LANES`，即 N）。
+
+也就是"socket 说 lane 2、PCB 在桶 4"。但它**不是**当前 panic 的原因：
+`net_socket_t::lane` 目前只被写、从不被读——`grep` 全树只有 `socket.c:30` 与
+`socket.c:386` 两处赋值，没有任何 dispatch、锁选择或桶索引用它。阶段 A 只留了字段，
+阶段 D 才会消费它。
+
+留在这里是因为它会在阶段 D 变成真 bug：一旦按 socket 的 lane 选处理 lane，
+通配 bind 的 listener 就会被派到**不拥有它 pcb 的那个 lane**，而哨兵桶里的 pcb 又不
+被任何 lane 的计时器遍历。修法是让两者对 any 的处理一致——要么 socket 侧也返回哨兵值，
+要么哨兵桶只用于查找、而 owning lane 仍然有明确定义。这属于阶段 D 的前置条件。
+
+再排除一个：哨兵桶本身没有被越界。`tcp_bound_pcbs` / `tcp_listen_pcbs` /
+`tcp_active_pcbs` / `tcp_tw_pcbs` / `tcp_timer[]` / `tcp_timer_ctr[]` 全部声明为
+`[NET_PCB_LANE_BUCKETS]`（= N+1），而不是 `[CONFIG_NET_LANES]`；`tcp_pcb_lists[]`
+按状态索引后再按 lane 索引，元素类型是 `struct tcp_pcb **`，与这些数组匹配。
+`tcp_listen_pcbs` 的三处使用（`tcp.c:890,2475,2648`）也都以
+`NET_PCB_LANE_BUCKETS` 为界。所以"`CONFIG_NET_LANES` 大小数组被 `NET_PCB_LANE_ANY`
+索引"这个猜测是错的。
+
+**为什么没有任何断言拦住它：`LWIP_ASSERT_CORE_LOCKED()` 是空的。**
+`kernel/external/lwip/src/include/lwip/opt.h:227` 把它定义成空宏，于是 `tcp.c` 与
+`tcp_in.c` 里那几十处 `LWIP_ASSERT_CORE_LOCKED()`（`tcp_close` / `tcp_abort` /
+`tcp_bind` / `tcp_new` / `tcp_input` …）**全部是空操作**。本仓库的锁契约
+（[network-lock-contract.md](network-lock-contract.md)）在运行时**没有任何强制手段**，
+只是一份文档。
+
+这不是 bug 本身，但是它为什么能一直不被发现的原因：任何一条在**没有持
+`g_lwip_lock`** 的情况下走到 `tcp_pcb_remove()` / `tcp_listen_closed()` 的路径，
+都会安静地破坏 lane 链表——`LWIP_ASSERT` 只在断言条件里查链表一致性，而链表一致性
+本身正是被破坏的东西，`tcp_pcbs_sane()` 只能在你还能安全遍历时才有用。
+
+因此下一步的方向比"找错索引"更具体了：**审计所有进入 `tcp_pcb_remove()` /
+`tcp_listen_closed()` 的路径，确认每一条都持 `g_lwip_lock`**，尤其是 RST 生成
+（`ethernet_output` 侧）与 netif 地址变更（会调 `tcp_listen_pcb_rebucket`，跨 lane
+搬动 LISTEN pcb）。这两条是当前唯一还没被排除的、且与"需要多 CPU + 需要真实
+LISTEN pcb"两个条件都对得上的路径。
+
+**已完成的锁审计（结论是"没找到漏锁"，这对下一步是负面但有用的结果）。**
+沿 `tcp_pcb_remove()` / `tcp_listen_closed()` 的调用方逐条查了 `g_lwip_lock`：
+
+- `kernel/net/socket_inet.c` 的 accept 落底路径（`net_inet_accept_stage_drain`）在每一次
+  `tcp_abort()`、`net_inet_tcp_apply_options()`、子 socket 拆除周围**都**取了
+  `a20_lwip_lock()`；整个树里没有一处裸调 `tcp_abort`。
+- RST 生成侧：`tcp_abort()` 的调用点（`tcp_in.c:479,644`）本身带
+  `LWIP_ASSERT_CORE_LOCKED()`，虽然断言是空的，但取锁由上层
+  `a20_lwip_process_netif_rx_tx_locked()` 保证。
+- netif 地址变更侧：`a20_lwip_if_set_addr()` 在 `netif_set_ipaddr()` **之前**就取了锁
+  （`kernel/net/lwip_stack.c:969`），所以会触发 `tcp_listen_pcb_rebucket()` 的跨 lane
+  搬动是在锁内的。
+- `lwip_tcp_accept_cb()` 生产者用 release fence + acquire load 配对，是正确的 SPSC
+  无锁 ring；`net_inet_bottom_half_process_all()` 只持 `g_net_lock` 但它不碰 lwIP core。
+
+**运行时证据（已验证）：锁契约在运行时是成立的。**
+临时把 `LWIP_ASSERT_CORE_LOCKED()` 接到 `g_lwip_lock` 的真实持有状态上（记录持有者
+CPU，而不是布尔量——布尔量在"别的 CPU 持有"时会误判为通过），违规只计数不 panic，
+并记录前 8 个不同的违规返回地址。在 `NET_LANES=4` + `a20.tcpmode=lwip` 下：
+
+```
+lwip_lock: violations=23 sites=8
+lwip_lock_site0: ffffffc08041e81a -> netif_init
+lwip_lock_site1: ffffffc08041df64 -> netif_add
+lwip_lock_site2: ffffffc08041e842 -> netif_init
+lwip_lock_site3: ffffffc080412a62 -> lwip_init
+lwip_lock_site4: ffffffc08036a526 -> a20_lwip_init
+lwip_lock_site5: ffffffc08036a560 -> a20_lwip_init
+lwip_lock_site6: ffffffc0803681d0 -> a20_lwip_loopif_init_cb
+lwip_lock_site7: ffffffc08041feb4 -> netif_add_ip6_address
+```
+
+**8 个全部是一次性初始化路径**（lwIP 引导 + A20OS 的 netif 注册回调），发生在锁语义
+成立之前。也就是说 23 次违规全部是"引导期本来就不持锁"，**没有一次出现在收包、
+accept、计时器或 PCB 增删路径上**。
+
+两个推论，以及**这条证据的边界**：
+
+1. panic 在这里是错的选法：这些初始化调用会让**每一个**配置在启动时就死掉。
+2. 运行时**所有带断言的入口**都持锁。`tcp_close`、`tcp_bind`、`tcp_new`、
+   `tcp_input` 等断言点无一违规。
+
+**但这不足以证伪"某处忘了取 `g_lwip_lock`"**——我先前写得过强，已更正。原因是探针
+只能看见**存在断言**的函数：`tcp.c` 里 45 个函数没有 `LWIP_ASSERT_CORE_LOCKED()`，
+其中就包括 **`tcp_abort()`（`tcp.c:650`）**——而 RST/abort 正是
+`tcp_pcb_remove` 崩溃的路径。也就是说，探针对最可疑的那条路径是**盲的**，它的 0 违规
+对它不构成任何证据。
+
+这个盲点是可以补的，而且成本很低：给这些入口补上断言（或者统一在一个 wrapper 里
+断言），再跑一次同样的探针，盲区就变成覆盖区。目前 `tcp_abort` 的调用方逐个查过
+（`socket_inet.c:575`、`tcp_in.c:527,1000`、`altcp_tcp.c:310`）都在 `g_lwip_lock`
+下，所以它**可能**仍是安全的——但那是读代码得出的，不是探针测出来的，两者不能混为一谈。
+
+另：`tcp_kill_state` / `tcp_kill_prio` / `tcp_kill_timewait` 会遍历所有 lane，是与
+崩溃形态最像的函数，但 `tcp_kill` 在本树没有任何调用方，这三个是死代码，可以排除。
+
+因此下一步仍然是两件事：把断言补到无断言的入口上重跑探针（把盲区变成覆盖），以及查
+"哪些字段在一把锁下写、在另一把锁下读"——accept staging 是唯一同时需要真实 LISTEN
+pcb 且跨越两个锁域的路径。
+
+那段探针代码没有保留：它当时让 `smoke-net-accept` 变红，我据此以为是自己写错了而回滚；
+实际原因是 `/tmp` 这个 tmpfs 被 QEMU trace 填满、编译器写不出临时汇编文件，与代码无关
+（清掉 trace 后同一提交 `smoke-net-accept` 恢复 PASS）。探针本身已验证可用
+（`-Werror` 下构建通过并给出上述数据），若要继续这条线，按上面两点重新接一次即可。
+
+所以"某处忘了取 `g_lwip_lock`"这个假设，在上述几条最相关的路径上**都不成立**。
+剩下的可能性要么在我没有审到的路径上，要么就不是漏锁，而是**锁内逻辑本身**（例如
+`tcp_listen_closed()` 遍历全部 lane 改 `->listener` 时，与另一 CPU 上正在进行的
+accept 落底之间的时序），这类问题静态审计看不出来。
+
+这改变了下一步的性质：继续人工审计的收益已经很低，应该先把断言打开、用运行时证据
+把范围压下来。
+
+一个便宜且值得先做的前置动作：把 `LWIP_ASSERT_CORE_LOCKED()` 在本配置下接到
+`g_lwip_lock` 的实际持有状态上（若 `g_lwip_lock` 有 owner 字段或可测试），让契约
+先变成可执行的。之后所有 lane 相关改动才有回归护栏。
+
+尚未定位。曾经的嫌疑是通配 bind 用的哨兵桶：`NET_PCB_LANE_ANY` 定义为
+`CONFIG_NET_LANES`（即"最后一个真实 lane 之后"），`NET_PCB_LANE_BUCKETS` 才把它
+算进去。若某处用 `CONFIG_NET_LANES` 大小的数组去索引一个 lane 为
+`NET_PCB_LANE_ANY` 的 pcb，就是越界一个元素的越界——与观测到的"链表指针被破坏"
+一致。但这只是推测，**没有验证**，不能当作结论。
+
+下一步应当是：先用 `NET_LANES=2` 与 `NR_CPUS=1` 把触发面收窄（是多 lane 才炸，
+还是多 lane + 多 CPU 才炸），再在 `tcp_pcb_remove` / `ethernet_output` 上定位。
+在此之前阶段 C 的 per-lane 计时器分片可以保留（它本身已验证正确且受
+`sys_check_timeouts()` 的间隔门控），但**不要**再去动分派。
+
 ## 阶段 D：收包引导
 
 单 NIC ring 的**排空**天然串行（一把锁、一个 ring），但**协议栈处理**并不，而后者才是
