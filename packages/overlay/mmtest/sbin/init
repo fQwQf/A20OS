@@ -5,7 +5,11 @@
 
 export HOME=/root
 export SHELL=/bin/sh
-export TERM=vt100
+# dumb, not vt100: with a real terminal type the shell emits ESC[6n (cursor
+# position report) on startup and then blocks forever waiting for a reply that
+# a serial console never sends.  The gate drives the guest over stdin/stdout,
+# so there is no terminal to answer it.
+export TERM=dumb
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 mkdir -p /run /tmp

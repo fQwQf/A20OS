@@ -10,9 +10,10 @@
 
 /*
  * Minimal W^X + ASLR validation:
- *   1. mmap(PROT_READ|PROT_WRITE|PROT_EXEC) must be rejected (default deny
- *      policy, errno=EACCES); mprotect promoting RW to RWX must likewise be
- *      rejected; legitimate RW/RX operations are unaffected.
+ *   1. Under the deny policy (a20.wx=deny on the cmdline, NOT the default any
+ *      more) mmap(PROT_READ|PROT_WRITE|PROT_EXEC) must be rejected with
+ *      errno=EACCES; mprotect promoting RW to RWX must likewise be rejected;
+ *      legitimate RW/RX operations are unaffected.
  *   2. fork+exec ourselves, read back the child's post-exec stack address
  *      through the inherited pipe, and compare it against the parent's stack
  *      address -- the stack addresses of two execs of the same program must

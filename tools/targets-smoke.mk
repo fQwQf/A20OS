@@ -174,6 +174,20 @@ smoke-mm-fork-exec-race:
 smoke-mm-pt-race:
 	$(PYTHON) tools/smoke.py smoke-mm-pt-race
 
+# Real-software gate: boots the mmtest distro world and runs git, vim, gcc,
+# python and nodejs inside it, then requires the shutdown-time [MM-ASM] audit
+# to report page tables and per-PTE metadata in agreement.
+#
+# This is deliberately NOT folded into check-mm-lock-model, whose smoke cases
+# only exercise kernel-written syscalls on kernel-allocated pages.  The two
+# verdicts this gate needs (real programs pass; the two representations never
+# diverged while they ran) are both properties a syscall-level smoke test is
+# blind to by construction.  It is slow -- a full image build plus a ~3 min
+# boot -- so it is its own target rather than part of the default check set;
+# see docs/testing-gates.md for why that trade is deliberate.
+smoke-mm-software:
+	$(PYTHON) tools/mmtest_gate.py
+
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 

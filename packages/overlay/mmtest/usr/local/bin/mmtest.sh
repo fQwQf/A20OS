@@ -221,12 +221,19 @@ node -e 'const m=new Map(); for(let i=0;i<50000;i++) m.set("k"+i,{v:i}); console
 grep -q "nodemap 50000" node3.out || fail "node map output"
 note "node done"
 
-# ---- 6. 汇总：内核审计行必须全 0 ---------------------------------------
-# mm_pt_audit_all() 在 shutdown 路径上跑；这里只把阶段结果汇总。
+# ---- 6. 汇总，然后自己关机 ---------------------------------------------
+# 关机放在脚本里而不是靠宿主再喂一条 poweroff：审计行
+# （[MM-ASM] ... missing_meta/present/absent/prot/cow/vma）只在 shutdown 路径
+# 上打印，脚本不主动关机的话宿主拿不到它，于是"审计全 0"这道门会静默失效。
+# 留几秒把 stdout 冲出去。
 if [ $fails -eq 0 ]; then
     echo "MMTEST: ALL STAGES PASS"
     echo "MMTEST_RESULT: PASS"
 else
     echo "MMTEST_RESULT: FAIL ($fails)"
 fi
+sync
+sleep 2
+poweroff -f
+sleep 30
 exit $fails

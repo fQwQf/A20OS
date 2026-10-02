@@ -4,16 +4,26 @@
  * No user VMA may be both writable and executable. Every entry point
  * (mmap/mmap_file/mmap_vmo, mprotect, ELF PT_LOAD loading) goes through
  * mm_wx_filter_prot():
- *   - deny (default): refuse a W|X combination and return -EACCES, following
- *     the Linux security-module semantics;
+ *   - off (default): no intervention, which is what a stock Linux kernel
+ *     does -- both mmap and mprotect honour PROT_WRITE|PROT_EXEC, and W^X is a
+ *     hardening *option* rather than a mandate;
  *   - strip: warn and strip the writable bit, downgrading the mapping to
  *     read-only + executable;
- *   - off: no intervention (debug/compatibility fallback only).
+ *   - deny: refuse a W|X combination and return -EACCES, following the Linux
+ *     security-module semantics.
  *
- * The policy is selected on the kernel cmdline: a20.wx=deny|strip|off.
- * Nothing in this tree's user space (static musl programs, the in-tree cmds,
- * native svc) needs RWX -- there is no dlopen and no JIT -- so the strictest
- * policy, deny, is the default.
+ * The policy is selected on the kernel cmdline: a20.wx=off|strip|deny.
+ *
+ * The default used to be deny, justified here by the claim that "nothing in
+ * this tree's user space needs RWX -- there is no dlopen and no JIT".
+ * nodejs falsified that claim in one line: V8 mprotects its code pages W|X
+ * and then *writes* to them, so strip does not rescue it either -- the run
+ * segfaults on the first store instead of trapping at the mprotect.  A kernel
+ * that stops V8 at startup does not have a stricter policy, it cannot run a
+ * JIT, and the premise behind the default was wrong rather than the policy.
+ *
+ * This is a statement about W^X, not about the memory model: node's failure
+ * under deny reproduces identically on the pre-migration code.
  */
 
 #include "mm/vm.h"
@@ -27,7 +37,9 @@
 #define MM_WX_STRIP  1
 #define MM_WX_DENY   2
 
-static int g_wx_policy = MM_WX_DENY;
+/* Vanilla-Linux semantics: honour what the mapping asks for, and let an image
+ * that wants the guarantee opt into deny or strip on the cmdline. */
+static int g_wx_policy = MM_WX_OFF;
 
 /* Same cmdline token scanning style as net/net_config.c */
 static const char *wx_extract_value(const char *tok, const char *tok_end,
@@ -71,7 +83,7 @@ void mm_wx_policy_init(void)
             else if (strcmp(val, "deny") == 0)
                 g_wx_policy = MM_WX_DENY;
             else
-                kwarn("[WX] 未知 a20.wx='%s'，保持默认 deny\n", val);
+                kwarn("[WX] 未知 a20.wx='%s'，保持默认 off\n", val);
         }
 
         p = tok_end;

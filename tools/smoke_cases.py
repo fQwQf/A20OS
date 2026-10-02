@@ -1141,7 +1141,13 @@ CASES: dict[str, dict] = {
         'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/wx_aslr_test', 'poweroff']},
         'timeout': '30s',
         'qemu': 'qemu-system-riscv64',
-        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf'],
+        # a20.wx=deny explicitly, because this case tests the *deny policy*,
+        # not the default.  The default became `off` (stock-Linux semantics)
+        # once nodejs showed that a JIT writes into the pages it asks to be
+        # executable -- see kernel/mm/wx.c.  Hardening stays available and
+        # still needs a test, so the test opts into it rather than assuming
+        # it is what a boot gives you.
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.wx=deny'],
         'expect': ['WX_ASLR: PASS', 'System is going down for power-off NOW'],
         'forbid': [],
         'timeout_msg': True,

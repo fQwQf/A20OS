@@ -204,6 +204,42 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     return 0;
 }
 
+/*
+ * After a COW break has rewritten the PTE, bring the per-PTE status back in
+ * step.  Every exit below clears PTE_COW and (usually) adds PTE_W, and all of
+ * them used to leave the status describing the pre-fault page -- which is how
+ * mm_pt_audit_all() ended up with a nonzero prot/cow mismatch, and how a
+ * status-driven fault would re-install read-only over a page the process had
+ * just been given write access to.
+ *
+ * `vma` is the mapping the fault was attributed to and is already resolved by
+ * the caller; the class it implies is the backing, which COW does not change.
+ */
+static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
+                            const vm_area_t *vma)
+{
+    pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
+    if (!tab)
+        return;
+    int idx = arch_pt_vpn(va, 0);
+
+    /* Prefer the class the status already records; fall back to the VMA only
+     * when there is none (a page whose status predates this path). */
+    uint8_t cls = MM_ST_GET_CLASS(mm_pt_peek(tab, 0, idx));
+    if (cls == MM_ST_INVALID || cls == MM_ST_PT_NODE) {
+        if (!vma)
+            return;
+        if (vma->vm_flags & VM_VMO)
+            cls = MM_ST_VMO;
+        else if (vma->vm_flags & VM_FILE)
+            cls = (vma->vm_flags & VM_SHARED) ? MM_ST_FILE_SHARED
+                                              : MM_ST_FILE_PRIVATE;
+        else
+            cls = MM_ST_ANON_MAPPED;
+    }
+    (void)mm_pt_sync_status(tab, 0, idx, cls);
+}
+
 static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                    pfn_t *old_pfn_out,
                                    page_cache_page_t **old_page_out) {
@@ -269,6 +305,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
             }
             memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            cow_sync_status(t->mm, leaf_base, vma);
             arch_tlb_flush_page_local(stval);
             if (old_page_out)
                 *old_page_out = cache_page;
@@ -307,6 +344,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
              * the PTE first means the page is released only after nothing
              * references it any more. */
             *pte = arch_pte_leaf(pfn_to_phys(new_pfn), flags);
+            cow_sync_status(t->mm, leaf_base, vma);
             arch_tlb_flush_page_local(stval);
 
             /* Release only after the wrapper has completed the remote TLB
@@ -317,6 +355,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
             return 0;
         } else {
             *pte = arch_pte_leaf(old_pa, flags);
+            cow_sync_status(t->mm, leaf_base, vma);
             spin_unlock_irqrestore(&pfa.lock, pfa_flags);
             arch_tlb_flush_page_local(stval);
             return 0;
@@ -329,6 +368,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                   PTE_G | PTE_A | PTE_MAT1 |
                                   PTE_LEAF | PTE_COW)) | PTE_D;
         *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
+        cow_sync_status(t->mm, leaf_base, mm_find_vma(t->mm, leaf_base));
         arch_tlb_flush_page_local(stval);
         return 0;
     }

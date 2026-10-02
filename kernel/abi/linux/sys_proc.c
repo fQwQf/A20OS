@@ -813,6 +813,12 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)rep.vmai_mismatch,
                   (unsigned long)rep.safe_mismatch,
                   (unsigned long)rep.anon_virt);
+            if (rep.vma_mismatch)
+                kinfo("[MM-ASM]   first vma_mismatch  va=0x%lx\n",
+                      (unsigned long)rep.vma_bad_va);
+            if (rep.vmai_mismatch)
+                kinfo("[MM-ASM]   first vmai_mismatch va=0x%lx\n",
+                      (unsigned long)rep.vmai_bad_va);
         }
 #endif
         firmware_shutdown();
