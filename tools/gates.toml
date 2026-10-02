@@ -968,6 +968,25 @@ fixed = true
 pattern = "pt_unmap"
 files = ["kernel/include/mm/pt.h"]
 
+# The bypass above stopped being "held safe only by mm->lock": pt_unmap_leaf()
+# and pt_unmap() now take the lock of the PT page they write, the same page
+# cursor_leaf_slot() locks, which is the exclusion rule 3 actually asks for.
+# They stay listed because they are still not cursors, so the list is what keeps
+# them honest -- and these two assertions are what keep them honest about the
+# lock.  Anchored on the call form, not the bare name, so the prose reference in
+# mm.c's comment does not satisfy them.
+[[gate.assertion]]
+fixed = true
+pattern = "mm_pt_node_lock(path"
+min_count = 3
+files = ["kernel/mm/mm.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "mm_pt_node_lock(parent)"
+min_count = 2
+files = ["kernel/mm/mm.c"]
+
 # cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it
 # takes the leaf table's own MCS lock and parks it for cursor_leaf_unlock().
 [[gate.assertion]]

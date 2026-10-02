@@ -232,6 +232,30 @@ void mm_pt_meta_set_stale(pt_meta_t *m, int stale)
         __atomic_store_n(&m->stale, stale ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
+/* Take/release the lock of the PT node reached by `table`, for callers that
+ * descend to their own node instead of going through a cursor -- mcs_lock() is
+ * file-local, so pt_unmap_leaf()/pt_unmap() in mm.c cannot reach it directly.
+ *
+ * Same node, and same reason, as cursor_leaf_slot(): a write touches one leaf
+ * entry plus that node's own nr_present/cls[] read-modify-write.  A node with no
+ * metadata has no lock, same as there.
+ *
+ * One at a time: cursor_leaf_slot() takes these in descending level order, so
+ * nesting one here would invert against it. */
+void mm_pt_node_lock(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (pm)
+        mcs_lock(pm);
+}
+
+void mm_pt_node_unlock(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (pm)
+        mcs_unlock(pm);
+}
+
 static int pt_meta_order(size_t bytes)
 {
     int order = 0;

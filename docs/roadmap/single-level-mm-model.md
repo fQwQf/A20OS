@@ -4862,8 +4862,9 @@ if (base + span >= end)
 
 剩下三项，**彼此没有依赖关系**（§11.3.1 更正了先前写反的顺序）：
 
-1. **先把 `pt_unmap_leaf()` 改成走 cursor**，再从状态缺页路径摘掉 `mm->lock`。
-   顺序是硬的，下面解释了为什么。
+1. **~~先把 `pt_unmap_leaf()` 改成走 cursor~~ —— 已以另一种形状落地**（见本节
+   下方「第 1 项已落地」）。顺序依然是硬的：`mm->lock` 摘掉之前，unmap 侧必须先有
+   按节点互斥，否则两条路会并发写同一张叶子表。
 
    `MM_AS_CURSOR_ONLY_ENTRY` 第 1 条写着「每一次用户 PTE 的读写都发生在
    `mm_cursor_t` 内」，但 `mm.c` 的 `pt_unmap_leaf()` 是一次**裸遍历**：
@@ -4889,64 +4890,50 @@ if (base + span >= end)
    预标记关闭 ⇒ 快段永远直接 decline ⇒ 新代码根本不执行，门禁会假绿。
    能复现的只有带 `a20.anonprov=4096` 的 `smoke-mm-pt-race`。
 
-   #### 第 1 项的两种改法，以及为什么不能选便宜的那个
+   #### 第 1 项已落地：按节点锁住每次写，而不是换成 detach 原语
 
-   试过"给 `pt_unmap_leaf()` / `pt_unmap()` 的每个写点套一层 per-node MCS 锁
-   （照抄 `cursor_leaf_slot()` 的形状）"，**结论是不行**，所以没有落：
+   先更正本文档上一版的两处判断。原文说「唯一能真正关闭的形状是在
+   `[base, base+size)` 上开一个 cursor」，又说「per-node 锁不行」。**两句话都要改。**
 
-   * per-node 锁只让**单个 PTE 字写 + 该节点元数据的读-改-写**原子化。函数里
-     的写序列是「清叶子 → 向上逐层 `pt_table_empty(child)` 判断 → 清
-     `parent[idx_path[l+1]]`」，其中 `pt_table_empty()` 的判断与清父项之间
-     并不互斥。若并发缺页在这两步之间重新填入 `child`，就会清掉一张**非空**
-     表，造成丢失映射。这个竞争今天就存在（靠 `mm->lock` 兜住），per-node 锁
-     并不消除它。
-   * 顺带一个锁序问题：per-node 锁会按 `level` 递增去锁**祖先**，而
-     `cursor_leaf_slot()` 是按 level 递减锁**后代**。只要每次都 lock/mutate/unlock
-     不嵌套就不会 ABBA，但一旦为了原子性而嵌套，就是反向持锁。
+   实际落地的是 per-node 锁——所以「per-node 锁不行」这句话是错的。但它错在
+   **理由**：per-node 锁确实不能让整个写序列变成一个事务（那仍然不成立，见下），
+   可是**不需要**。真正要的是每个写点各自原子，而这正是 per-node 锁提供的。
 
-   唯一能真正关闭的形状：**在 `[base, base+size)` 上开一个 cursor**，让覆盖节点
-   的锁贯穿整个写序列——这与 cursor 的纪律一致，也让事务真正原子。代价是要新增一个
-   原语，不能直接换成 `mm_cursor_unmap()`，因为两者契约不同：
+   改动（`mm_pt_node_lock()` / `mm_pt_node_unlock()`，`mcs_lock()` 是 pt.c 文件内
+   静态的，所以包装加在 pt.c）：**5 个写点全部包住**——`pt_unmap()` 的叶子清、
+   `pt_unmap_leaf()` 的 swap 清与大页清，以及两者向上回收的每一层。
 
-   | | `pt_unmap_leaf()` | `mm_cursor_unmap()` |
-   |---|---|---|
-   | 报告 `base` / `size` / `level` | 是（大页返回整块） | 否 |
-   | 大页叶子 | 处理并按整块回收 | `cursor_leaf_slot(create=0)` 直接返回 NULL |
-   | 帧引用 | **不**释放，调用方自己 `frame_put` | 自己 `frame_put` |
+   * **锁 `parent` 而不是 `child`**，且 `pt_table_empty(child)` 与清
+     `parent[idx]` 必须在**同一临界区**。前者是因为节点锁按 level 递减取得
+     （规则 3；`pt.c` 的 `for (int l = cur->guard_level; l > 0; l--)`），把 child
+     压在 parent 之下就是反向持锁。后者是因为这两行看起来是独立语句，但若
+     判断与清父项之间有并发缺页重新填入 `child`，就会清掉一张非空表 → 丢失映射。
+   * **校验移进锁内**。原来在锁外判 `!(*pte & PTE_V)`，在 `mm->lock` 下这是冗余的；
+     一旦缺页路径不再取 `mm->lock`，锁外的判断就只是一个可能已经过期的状态的判断。
+   * **不嵌套**。每次 lock → 改 → unlock，所以向上回收虽然方向与 cursor 相反
+     （`mm.c` 的 `for (l = level; l < ARCH_PT_ROOT_LEVEL; l++)` 是低 → 高），也不会
+     ABBA。这正是上一版坚持「不能靠一个 cursor 覆盖整段」的原因：覆盖节点锁 +
+     向上取父锁 = 反向持锁。
 
-   所以第 1 项要做的是一个新函数（例如「detach range」语义：返回被摘下的 pa，
-   不释放引用，大页返回 base/size/level），而不是改一行调用点。做完之后
-   `MM_AS_CURSOR_ONLY_ENTRY_BYPASSES` 列表才真正能清空。
+   为什么无锁下降本身不需要额外保护：`mm_pt_retire_table()` 会
+   `mm_pt_mark_stale_recursive()`，并把真正的 `frame_free()` 推迟到
+   `mm->pt_readers == 0`。所以已经缓存了该节点的 cursor 会看到 `stale` 而重下降，
+   不会写进被摘掉的子树。
 
-   #### 锁序约束：向上回收不能嵌套在覆盖节点锁里（已核对代码）
+   **仍未做的，因此 bypass 列表保留**（条目已改写成"无 cursor，但每次写都在
+   `mm_pt_node_lock` 内"）：这两个函数仍然不是 cursor，仍然没有**区间级原子性**。
+   把它们宣布为合规会是假话。它们现在有的是规则 3 要求的按节点互斥，而这正是
+   Phase 3 快段需要的。`check-mm-pt-lock-order` 加了两条断言，锚定**调用形式**
+   （`mm_pt_node_lock(path` / `mm_pt_node_lock(parent)`）而非裸函数名——否则
+   `mm.c` 注释里的散文引用就能满足它们——并钉住全部 5 个写点；删掉
+   `pt_unmap()` 的叶子锁括号会让门禁 14 断言掉到 13。
 
-   上一段说「在 `[base, base+size)` 上开一个 cursor，让覆盖节点的锁贯穿整个写
-   序列」——**这句不完整，会导致 ABBA**。两条循环的方向相反：
-
-   ```
-   pt.c:604    for (int l = cur->guard_level; l > 0; l--)        高 → 低
-   mm.c:493    for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++)   低 → 高
-   ```
-
-   `cursor_leaf_slot()` 从覆盖节点**向下**逐层加锁；而 `pt_unmap_leaf()` 的向上回收
-   要**向上**去取 `path[l+1]` 的锁。若两者嵌套——一个 guard_level 等于 `parent`
-   的 cursor 先持 `parent` 再下降到 `child`，而 unmap 先持 `child`（覆盖节点）再上去
-   取 `parent`——就是标准的 ABBA。
-
-   所以原语必须拆成两段，**不能靠一个 cursor 覆盖整段**：
-
-   1. **清叶子**：在 `[base, base+size)` 上开 cursor（覆盖节点恰好就是持有该 PTE 的
-      那张表：单页时是 level 0 的叶子表，大页时 `pt_covering_level` 返回大页 PTE
-      所在的层），在 `cursor_leaf_slot` 的纪律下清 PTE + `mm_pt_note_absent`。
-      释放 cursor。
-   2. **向上回收**：对每一层**单独**开一个事务，在**该 `parent` 自己的锁**下做
-      test-and-clear（`pt_table_empty(child)` 与清 `parent[idx]` 必须在同一临界区，
-      否则就是前面说的丢失映射），然后 `mm_pt_retire_table()`。
-
-   第 2 段逐层独立事务意味着 unmap **不再整体原子**——这与它今天在 `mm->lock` 下的
-   整体原子性不同。但 `munmap` 本身就是逐页循环（`mm.c` 的调用方都是按
-   `base + size` 推进），逐层独立不会引入新的可见中间态：每一层要么在这一轮被摘掉，
-   要么因为 `child` 非空而 `break`，而 `break` 之后的层本来就不会动。
+   验证：`check-mm-lock-model` 14/14、`check-mm-pt-lock-order` 14/14（负向测试过）、
+   riscv64/x86_64/aarch64 SMP=4 构建，以及 QEMU SMP=8 下
+   `smoke-mm-fork-exec-race`（重度 exercise unmap）、带 `a20.anonprov=4096` 且
+   `--wide-cursor-only` 的 `smoke-mm-pt-race`（预标记快段）、`smoke-mm-stress`、
+   `smoke-abi-linux`——全 PASS，`MM-ASM` 审计全 0，四份日志均无
+   `MCS DEADLOCK`、无 panic。
 
 2. **从状态缺页路径摘掉 `mm->lock`**（§10.74 的真正剩余项）。这是迁移的真正目标。
    做法：把 `handle_demand_fault_access()` 拆成两段。快段只拿 cursor，不拿
