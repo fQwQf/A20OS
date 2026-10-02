@@ -54,6 +54,7 @@ struct open_how {
 #define FS_TYPE_NTFS     8
 #define FS_TYPE_ISOFS    9
 #define FS_TYPE_UXFS    10
+#define FS_TYPE_LITTLEFS 11
 
 /* ---- Forward declarations ---- */
 struct vnode;
@@ -184,6 +185,9 @@ typedef struct vfile_ops {
     int     (*poll)(struct vfile *vf, short events);
     size_t  (*poll_sources)(struct vfile *vf, short events,
                             struct readiness_source *sources, size_t max);
+    /* Per-open-file durability commit (littlefs syncs files, not inodes).
+     * NULL falls back to the vnode/mount flush in vfs_fsync_vfile. */
+    int     (*sync)(struct vfile *vf);
     int     (*close)(struct vfile *vf);
 } vfile_ops_t;
 
@@ -442,6 +446,11 @@ int      vfs_getcwd(char *buf, size_t size);
 /* Mount */
 int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data);
 int      vfs_mount_bc(const char *path, const char *fstype, struct bcache *bc);
+/* littlefs (power-loss resilient embedded FS, kernel/external/littlefs) */
+struct bcache;
+vnode_t *littlefs_mount(struct bcache *bc);
+void     littlefs_unmount(vnode_t *root);
+
 int      vfs_mount_bc_flags(const char *path, const char *fstype,
                             struct bcache *bc, int flags);
 int      vfs_umount(const char *path);

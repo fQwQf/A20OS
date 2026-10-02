@@ -43,7 +43,10 @@ static int vfs_file_uses_page_cache(vnode_t *vn)
          mnt->type == FS_TYPE_PROCFS ||
          mnt->type == FS_TYPE_CGROUP ||
          mnt->type == FS_TYPE_DEVFS ||
-         mnt->type == FS_TYPE_SYSFS))
+         mnt->type == FS_TYPE_SYSFS ||
+         /* littlefs does direct vfile I/O through lfs_file (its own
+          * metadata pairs + buffering); no readpage/writepage hooks. */
+         mnt->type == FS_TYPE_LITTLEFS))
         return 0;
     return 1;
 }
@@ -304,6 +307,13 @@ int vfs_fsync_vfile(vfile_t *vf)
     if (!vf)
         return -EBADF;
     int r = 0;
+    /* Filesystems that commit per open file (littlefs) sync here, before
+     * the generic device flush below. */
+    if (vf->ops && vf->ops->sync) {
+        r = vf->ops->sync(vf);
+        if (r < 0)
+            return r;
+    }
     if (vf->vnode) {
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);
