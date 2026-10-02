@@ -400,6 +400,26 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mmprobe: PASS; log saved to $log',
     },
+    # SMP-only reproducer for the multi-threaded corruption report.  Every
+    # earlier gate that shares an mm_struct ran on a single CPU, where the
+    # fault-around window can never lose its VMA to a sibling thread, so the
+    # defect was invisible to the whole matrix.  cpus=4 plus CONFIG_SLAB_DEBUG=1
+    # is the combination that fails without the fix: the slab check is what
+    # turns a stray write into a panic here instead of a wrong answer later.
+    'smoke-mtcorrupt': {
+        'gate': {'mem': '1G', 'cpus': '4'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=4', 'CONFIG_SLAB_DEBUG=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mtcorrupt-riscv64-smp4.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['mtcorrupt_test', 'poweroff']},
+        'timeout': '180s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '4', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/ext4.img,if=none,format=raw,id=x1', '-device', 'virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/isofs.img,if=none,format=raw,id=x2', '-device', 'virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/kernel.elf'],
+        'expect': ['MTCORRUPT: PASS'],
+        'forbid': ['SIGSEGV', 'SLAB DEBUG', 'FATAL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mtcorrupt: PASS; log saved to $log',
+    },
     'smoke-mntns': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
