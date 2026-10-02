@@ -27,6 +27,7 @@ extern void virtio_net_dev_stats(struct device *dev,
 #include "lwip/memp.h"
 #include "lwip/udp.h"
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/raw.h"
 #include "lwip/dns.h"
 #include "lwip/dhcp.h"
@@ -649,6 +650,13 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         (unsigned)lwip_stats.link.drop,
         (unsigned)lwip_stats.link.chkerr,
         (unsigned)lwip_stats.link.memerr);
+    /* TCP timer firings.  tcp_ticks advances exactly once per tcp_tmr() call, so
+     * at TCP_TMR_INTERVAL it directly witnesses how often the TCP timer ran.
+     * Reported because the cadence is an invariant a caller can break with no
+     * compile error: driving the timer work from a faster path makes
+     * retransmission timers expire early and tears down live connections. */
+    u32_t tmr_fired = tcp_ticks;
+
     a20_lwip_unlock(flags);
     if (n < 0)
         return 0;
@@ -688,6 +696,8 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         a20_lwip_append(buf, bufsz, &off, num);
     }
     a20_lwip_append(buf, bufsz, &off, "\n");
+    snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
+    a20_lwip_append(buf, bufsz, &off, cell);
     return (int)off;
 }
 
