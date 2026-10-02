@@ -12,9 +12,16 @@ void a20_lwip_attach_netifs(void);
 void a20_lwip_poll(void);
 void a20_lwip_poll_waiter(void);
 void a20_lwip_poll_locked(void);
+/* Split so a caller that only advances timers does not drag the receive drain
+ * into its critical section.  Both require g_lwip_lock held. */
+void a20_lwip_poll_timers_locked(void);
+void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
+int  a20_lwip_lock_is_held(void);
+void a20_lwip_note_lock_violation(void *site);
+unsigned a20_lwip_lock_violations(void);
 int  a20_lwip_format_status(char *buf, size_t bufsz);
 int  a20_lwip_format_route(char *buf, size_t bufsz);
 int  a20_lwip_format_net_dev(char *buf, size_t bufsz);
