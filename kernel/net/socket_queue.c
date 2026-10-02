@@ -1,10 +1,12 @@
 #include "net/socket_internal.h"
 #include "fs/file.h"
 #include "mm/objcache.h"
+#include "mm/slab.h"
 #include "core/string.h"
 #include "core/timer.h"
 #include "proc/proc.h"
 #include "core/stdio.h"
+#include "lwip/pbuf.h"
 
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 
@@ -36,6 +38,7 @@ void net_msg_free(net_msg_t *m)
     for (int i = 0; i < m->scm_nfiles; i++)
         vfs_put_file(m->scm_files[i]);
     m->scm_nfiles = 0;
+    kfree(m->overflow);
     obj_cache_free(&g_net_msg_cache, m);
 }
 
@@ -47,23 +50,35 @@ void net_scm_drop_files(vfile_t **files, int nfiles)
         vfs_put_file(files[i]);
 }
 
-int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
+/* Returns the message's payload base, or NULL if the length is out of range or
+ * the overflow allocation fails.  obj_cache_alloc_zero already zeroes the
+ * object, so the inline buffer needs no further clearing. */
+static uint8_t *net_msg_alloc_payload(net_msg_t **out, size_t len)
+{
+    if (len > NET_MAX_PAYLOAD)
+        return NULL;
+    net_msg_t *m = net_msg_alloc();
+    if (!m)
+        return NULL;
+    if (len > NET_MSG_INLINE_PAYLOAD) {
+        m->overflow = kmalloc(len);
+        if (!m->overflow) {
+            net_msg_free(m);
+            return NULL;
+        }
+    }
+    m->len = len;
+    m->off = 0;
+    *out = m;
+    return net_msg_payload(m);
+}
+
+/* Shared tail of every enqueue: address, ancillary metadata, sender
+ * credentials, then the append onto the receive queue. */
+static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
                                 const void *addr, size_t addrlen,
                                 const net_bh_event_t *meta)
 {
-    if (!dst || dst->closed)
-        return -ENOTCONN;
-    if (len > NET_MAX_PAYLOAD)
-        return -EMSGSIZE;
-    if (dst->rx_count >= NET_MAX_QUEUE)
-        return -EAGAIN;
-    net_msg_t *m = net_msg_alloc();
-    if (!m)
-        return -EAGAIN;
-    memset(m, 0, sizeof(*m));
-    memcpy(m->data, buf, len);
-    m->len = len;
-    m->off = 0;
     if (addr && addrlen) {
         if (addrlen > NET_SOCKADDR_MAX)
             addrlen = NET_SOCKADDR_MAX;
@@ -86,6 +101,52 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
         dst->rx_head = m;
     dst->rx_tail = m;
     dst->rx_count++;
+}
+
+int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
+                                const void *addr, size_t addrlen,
+                                const net_bh_event_t *meta)
+{
+    if (!dst || dst->closed)
+        return -ENOTCONN;
+    if (len > NET_MAX_PAYLOAD)
+        return -EMSGSIZE;
+    if (dst->rx_count >= NET_MAX_QUEUE)
+        return -EAGAIN;
+    net_msg_t *m = NULL;
+    uint8_t *payload = net_msg_alloc_payload(&m, len);
+    if (!payload)
+        return -EAGAIN;
+    memcpy(payload, buf, len);
+    net_msg_link_locked(dst, m, addr, addrlen, meta);
+    return (int)len;
+}
+
+/* Enqueue straight out of a pbuf, for a bottom-half event too large to stage
+ * inline.  The pbuf stays owned by the ring (see net_bh_ring_t.owned); this
+ * only borrows it for the duration of the copy. */
+int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
+                                uint32_t off, size_t len,
+                                const void *addr, size_t addrlen,
+                                const net_bh_event_t *meta)
+{
+    if (!dst || dst->closed)
+        return -ENOTCONN;
+    if (!p || len > NET_MAX_PAYLOAD)
+        return -EMSGSIZE;
+    if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
+        return -EMSGSIZE;
+    if (dst->rx_count >= NET_MAX_QUEUE)
+        return -EAGAIN;
+    net_msg_t *m = NULL;
+    uint8_t *payload = net_msg_alloc_payload(&m, len);
+    if (!payload)
+        return -EAGAIN;
+    if (pbuf_copy_partial(p, payload, (u16_t)len, (u16_t)off) != ERR_OK) {
+        net_msg_free(m);
+        return -EAGAIN;
+    }
+    net_msg_link_locked(dst, m, addr, addrlen, meta);
     return (int)len;
 }
 
@@ -248,7 +309,7 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
     }
     size_t avail = m->len - m->off;
     size_t n = avail < len ? avail : len;
-    memcpy(buf, m->data + m->off, n);
+    memcpy(buf, net_msg_payload(m) + m->off, n);
     if (addr && addrlen && *addrlen > 0) {
         size_t alen = m->addrlen < *addrlen ? m->addrlen : *addrlen;
         memcpy(addr, m->addr, alen);

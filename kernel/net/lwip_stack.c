@@ -680,11 +680,22 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
     uint64_t flags = a20_lwip_lock();
     size_t off = 0;
 
-    /* The column is lwIP's `avail`, which memp_init_pool() sets to the pool
-     * size and no path ever decrements -- it is capacity, not live
-     * availability, so it is not labelled `avail`. */
+    /*
+     * `elem` is lwIP's desc->size, the bytes one element occupies.
+     *
+     * It deliberately does not report a per-pool capacity.  memp's `avail`
+     * used to serve that role and read desc->num, but desc->num only exists in
+     * the statically reserved pool layout: with MEMP_MEM_MALLOC=1 memp_init_pool()
+     * is an empty stub and `avail` is never written, so printing it yielded a
+     * column of silent zeros.  Under MEMP_MEM_MALLOC the pools draw from the
+     * lwIP heap instead, so the honest bound is MEM_SIZE rather than a per-pool
+     * element count, and the per-pool exhaustion signal is `err`.
+     *
+     * used, max and err are maintained unconditionally by memp_malloc_pool()
+     * and memp_free_pool(), so they stay meaningful in either mode.
+     */
     a20_lwip_append(buf, bufsz, &off,
-        "pool             size    used     max    err\n");
+        "pool             elem    used     max    err\n");
 
     for (size_t i = 0; i < npools; i++) {
         const struct memp_desc *desc = memp_pools[pools[i].pool];
@@ -701,7 +712,7 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         name[NAME_COL] = '\0';
 
         snprintf(row, sizeof(row), "%s%6lu%7lu%8lu%6lu\n", name,
-                 (unsigned long)desc->stats->avail,
+                 (unsigned long)desc->size,
                  (unsigned long)desc->stats->used,
                  (unsigned long)desc->stats->max,
                  (unsigned long)desc->stats->err);
