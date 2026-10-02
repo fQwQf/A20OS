@@ -447,7 +447,53 @@ accept 落底之间的时序），这类问题静态审计看不出来。
 `NET_PCB_LANE_ANY` 的 pcb，就是越界一个元素的越界——与观测到的"链表指针被破坏"
 一致。但这只是推测，**没有验证**，不能当作结论。
 
-### 下一步：不要再读代码，要放大窗口
+### 真正的落点：loopback 收包路径上的 pbuf 生命周期
+
+放大器实验（`CONFIG_NET_RACE_DELAY_US=200` + 真实 TCP 流量）复现了 fault，并且**第一次
+拿到了一条完整可信的回溯**——之前那条 `ethernet_output+0x664` 是按偏移猜的符号，不可信；
+这条每帧都能对上：
+
+```
+[0] tcp_input   [1] ip4_input   [2] ip_input   [3] netif_poll
+[4] a20_lwip_poll_timers_locked          [5] kernel_progress_timer_tick
+```
+
+也就是说，崩溃发生在 **timer tick 排空 loopback → ip_input → tcp_input** 这条链上，
+上下文是 idle（pid=0）。寄存器里 `stval=0x3071c710010000af`、`a2=0x14`，而
+`0x3071` 同时出现在 `a2` 和坏地址里——形状像**从报文数据里算出来的 pbuf 链指针**，
+即 pbuf 的 payload/链指针已被破坏，而不是普通空指针解引用。
+
+这把搜索方向彻底改掉了，也解释了放大器为什么没用：**我把它加错了地方**。
+accept staging（`net_inet_accept_stage_drain`）不是窗口。真正的窗口是 pbuf 的所有权，
+它跨两个锁域：
+
+- 排空侧：`netif_poll()` 由 timer tick 在 CPU 0 上、持 `g_lwip_lock` 释放
+  `netif->loop_first` 的 pbuf；
+- 消费侧：socket bottom half 在 `g_net_lock` 下搬运 payload，**不持** `g_lwip_lock`。
+
+两者之间没有任何东西保证 pbuf 在被消费完之前不被排空侧回收。也就是说，多 lane +多 CPU
+只是把"另一个 CPU 同时在动"的概率提高了，破坏的其实是一个与 lane 无关的既有 pbuf 所有权
+缺口。
+
+已排除的两个候选（读代码确认，不是推测）：
+
+- **inline staging 溢出**：`bh_stage_payload()` 的 inline 分支被
+  `len <= NET_BH_INLINE_PAYLOAD` 挡住，而 `e->data` 是定长
+  `uint8_t data[NET_BH_INLINE_PAYLOAD]`；溢出分支先 `pbuf_ref()` 存进
+  `owned[slot]`，调用方随后才 `pbuf_free(p)`。引用与边界都是对的。
+- **排空侧自身**：`netif_poll()` 在 `g_lwip_lock` 下**同步**消费
+  `loop_first`，把 pbuf 直接交给 `ip_input`，排空与协议栈处理之间不存在窗口。
+
+所以破坏发生在 pbuf **进入 `loop_first` 之前**：发送路径
+（`tcp_output` → `ip_output` → `netif_loop_output`）构造出来的链本身就已经是坏的。
+下一步应看 `netif_loop_output()` 的 pbuf 构造与 `pbuf_take` 之后的链形状，
+以及 PBUF_POOL 元素在被 `tcp_segs_free` 复用后是否仍可能残留在某条链上。
+
+下一步应当是审 `netif_poll()`（loop_first 排空）到 bottom-half payload 消费之间的 pbuf
+生命周期：谁持有引用、谁负责 `pbuf_free`、以及两条路径之间是否缺少一次引用计数或所有权
+移交。放大器应该加在**排空侧的 pbuf 释放点与消费侧的读取之间**，不是加在 accept staging。
+
+### 下一步（保留：不要只读代码，要放大窗口）
 
 触发面已经收窄过了（4 lane + 多 CPU + 真实 LISTEN pcb 才炸，间歇性），静态审计
 也已连续七次落空。**继续读代码不会找到它**——要找的是一个跨 CPU 的时序窗口，
