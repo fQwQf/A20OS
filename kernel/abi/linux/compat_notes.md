@@ -56,7 +56,7 @@
 
 ## 文件化接口（/proc、/dev、ioctl）
 
-- `/proc` 新增：`boot_id`、`cap_last_cap`、`nr_open`、`pressure`、`uid_map`/`gid_map`/`setgroups`、`sysvipc`（汇总 msg/sem/shm 计数）、`/proc/sys/kernel/hostname` 与 `domainname`（可读可写，与 sethostname/setdomainname 共享存储）。
+- `/proc` 新增：`boot_id`、`cap_last_cap`、`nr_open`、`pressure`、`uid_map`/`gid_map`/`setgroups`（三者绑定到该 task 所属的 user namespace，由父命名空间写入；见 `kernel/proc/userns.c`）、`sysvipc`（汇总 msg/sem/shm 计数）、`/proc/sys/kernel/hostname` 与 `domainname`（可读可写，与 sethostname/setdomainname 共享存储）。
 - `/dev` 新增：`/dev/full`（读零写 ENOSPC）、`/dev/kmsg`（写追加内核日志环、读回日志；经 `klog_write_raw`/`klog_read`）。
 - tty/pty ioctl 补齐：`TIOCGPGRP`/`TIOCSPGRP`（前台进程组）、`TCFLSH`（刷输入/输出/双向）、`TIOCOUTQ`（输出队列字节数）、`TIOCSTI`（注入单字节输入）、`FIONREAD`/`TIOCINQ`（可读字节数）——pty master 与 slave 端均已支持。
 - 补充 `core/ioctl.h` 标准 tty ioctl 常量全集（TCSBRK/TCXONC/TIOCEXCL/TIOCM*/TIOCPKT/TIOCGETD 等）供后续驱动与用户态使用。

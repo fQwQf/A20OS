@@ -267,6 +267,18 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         return pidns_r;
     }
 
+    /* User namespace last of the three, because it is the one that can fail
+     * for a reason the parent could not have predicted (a new namespace is
+     * one allocation more than a shared one).  Until it is placed the child is
+     * in the parent's namespace, which is the correct rollback state. */
+    int userns_r = userns_fork(t, parent, flags);
+    if (userns_r < 0) {
+        pidns_release_task(t);
+        mntns_release_task(t);
+        proc_destroy_task(t);
+        return userns_r;
+    }
+
     /* Capability envelopes are inherited (shared root budget, refcounted);
      * see kernel/abi/linux/envelope.c and docs/research/05. */
     env_inherit_task(t, parent);
