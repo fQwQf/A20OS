@@ -68,6 +68,12 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # UEFI -- most current machines are UEFI-only and there is no x86_64
             # EFI stub in the tree, so GRUB is the only path that covers them.
             exec_make(inst, "pc-rescue-disk", list(make_args), dry_run)
+        case "uefi-disk":
+            # ESP holds BOOTX64.EFI instead of GRUB.  GRUB 2.12 does not fill
+            # the multiboot ACPI tags, so a multiboot kernel booted by GRUB under
+            # UEFI never gets the RSDP and cannot find MCFG; our loader reads it
+            # from the firmware configuration table instead.
+            exec_make(inst, "_x86_64_uefi_disk_impl", list(make_args), dry_run)
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",

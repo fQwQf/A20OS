@@ -5,6 +5,7 @@ set -eu
 efi_image=${1:-}
 output=${2:-}
 rootfs_image=${3:-}
+efi_name=${4:-BOOTAA64.EFI}
 
 if [ -z "$efi_image" ] || [ -z "$output" ] || [ -z "$rootfs_image" ]; then
     echo "Usage: $0 <BOOTAA64.EFI> <output.img> <rootfs-fat32.img>" >&2
@@ -51,7 +52,7 @@ drive b: file="$output" offset=$esp_offset
 EOF
 MTOOLSRC="$tmp_mtoolsrc" mcopy -s 'a:/*' b:/
 MTOOLSRC="$tmp_mtoolsrc" mmd b:/EFI b:/EFI/BOOT
-MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" b:/EFI/BOOT/BOOTAA64.EFI
+MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" "b:/EFI/BOOT/$efi_name"
 manifest=$(mktemp)
 trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
 {
