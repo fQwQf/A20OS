@@ -292,6 +292,29 @@ accepted" 失败——那正是任何用户借 `unshare -U` 拿到宿主 root �
 把 `map_from_global()` 改回按 `lower` 查找，门禁会以 "uid after installing
 its own map is 65534" 失败。
 
+### USB hub（class 9 与下行总线）
+
+`make smoke-usb-hub-x86_64` 在 q35 上挂 `qemu-xhci` + `usb-hub` + 键盘 + 鼠标，
+断言 hub 作为 class-9 设备被枚举、`[USB-HUB] hub 0409:55aa: downstream ports=N
+status_bytes=... ss=...`（hub 描述符按它真正的请求码 bmRequestType=0xA0 取回，
+位图长度由 bNbrPorts 推出）、状态变更中断端点经父控制器配好并 arm、下行总线以
+N 个端口注册进 `usb_core`，且根端口上的 HID 设备不受影响。
+
+**为什么 hub 描述符用 0xA0 而不是标准 GET_DESCRIPTOR**：hub 描述符是类请求，
+不是标准请求。用 `USB_TYPE_STANDARD` 去问，任何真 hub 都会 stall。门禁对此可证伪：
+把 `usb_hub_probe()` 里那次 `usb_control_msg()` 改回
+`USB_TYPE_STANDARD | USB_RECIP_DEVICE` 且 `wValue = USB_DT_HUB << 8`，
+`smoke-usb-hub-x86_64` 会以 `[USB-HUB] hub descriptor read failed: -110` 失败。
+把 `HUB_STATUS_BYTES()` 的 `+1`（hub 自身状态那一个字节）去掉，门禁会以缺失
+`status_bytes=3` 失败。
+
+**门禁覆盖不到的部分**：QEMU 9 起 `usb-hub` 不再创建下行 bus
+（`-device usb-kbd,bus=hub0.0` 报 "Bus 'hub0.0' not found"），QEMU 也无法实现
+hub 的端口复位（`SET_FEATURE(PORT_RESET)` 无响应），所以没有任何设备能被放到
+hub 后面，它的端口位图还会在最后两个端口上报幻影连接。因此本门禁证明的是
+"hub 被正确识别、描述符被正确解析、下行总线被正确注册"，**不**证明"hub 后面的
+设备被枚举"。后者只能靠真机验证。
+
 ### 致命信号 core dump
 
 `make smoke-coredump` 让 `coredump_test.c` 的子进程 SIGSEGV，断言 core 文件的 ELF64/LSB magic、`e_type == ET_CORE`、program header 布局、每个 PT_LOAD 的 `filesz <= memsz`、存在 PT_NOTE 且含 prstatus/prpsinfo/fpregset 三类 note；再验证 `core_pattern` 读写往返、子进程 wait status 的 core 位，以及 `RLIMIT_CORE=0` 时不产生文件。
