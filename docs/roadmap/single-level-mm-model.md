@@ -131,11 +131,21 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 | P2 | 让 fault 路径经由 cursor 写 PTE（仍在 `mm->lock` 之下） | 所有 PTE 写入只有一条代码路径 | 上述三个 smoke + `smoke-vfs-stress` |
 | P3 | covering node 之上 DFS 预序锁全部后代；逆序释放 | 每次 cursor 都按预序加锁、逆序解锁 | 新 `check-mm-pt-lock-order`（释放序断言 + 计数器）；`smoke-mm-stress` @ `NR_CPUS=4` |
 | P4 | `core/rcu.c`；`stale` + 重试；`pt_unmap` / `pt_unmap_leaf` / `pt_destroy_*` 中的 `frame_free(child)` 改为延迟释放 | 任何遍历都到不了的页表页不会被回收 | 新 `smoke-mm-pt-race`：N 线程大范围 unmap 同时 N 线程 fault |
-| P5 | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`；新增"两线程不相交区间测临界区重叠"测试；`smoke-sched-stress`、`smoke-mm-stress` @ `NR_CPUS=4+` |
+| P5 ✅ | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
 | P6 | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
 | P7 | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
 | P8 | 双向一致性检查器（P1 审计器覆盖反方向）；`MM_LOCK_MODEL` → `MM_AS_MODEL`；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
 | P9 | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
+
+> **编号更正（2026-10-02）**：本表的 P 编号是权威的。会话里曾用"Phase 3 / Phase 4"
+> 这套临时说法，其中 **"Phase 3" 实为 P5**，而 **"Phase 4（上层统一状态预标记）"
+> 在本计划里并不存在**——真实 P4 是延迟回收（`mm_pt_retire_table` + `stale` +
+> `pt_readers`），早已落地。看到会话记录里的 "Phase N" 时一律按本表换算。
+>
+> P5 落地时顺带修掉了 MCS 节点锁的两个致命 bug（交接从未实现：等待者从不挂链、
+> 解锁方从共享字段回读自己的节点），此前因 `mm->lock` 串行化而从未被执行。形式化
+> 模型见 `docs/research/verification/LeafLock.tla`，两个 bug 作为 mutant 均被模型
+> 捕获。
 
 **P1 是整个计划里性价比最高的一步，且不可能搞坏启动**：它是影子状态、可机器验证，
 而且会找出你不知道自己有的 bug。
@@ -5326,6 +5336,58 @@ if (base + span >= end)
 
    **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 23 commit
    的 checkpoint、门禁全绿。这一节记录的是**实测结论**（TLB 推断被推翻、症状是
+
+   #### 结局：根因是 MCS 锁的交接从未实现，Phase 3 已落地并验证
+
+   上面每一轮"没有落地"都是当时的事实，但结论已经变了。**根因不是 TLB、不是
+   `arch_cpu_relax()`、也不是任何调用方漏解锁**——是 `mcs_lock()`/`mcs_unlock()`
+   的交接**根本没有实现**，两个独立的致命 bug：
+
+   1. **等待者从未被挂进队列。** `mcs_lock()` 拿到 `tail` 之后没有把自己的节点
+      写进前驱的 `->next`，所以解锁方读到的 `me->next` 恒为 `0`，永远走 CAS
+      分支——而此时 `m->lock` 已经被 `exchange` 换成了**等待者**，CAS 必然失败。
+      锁永远不释放，等待者永远不被唤醒。**一次争用就把节点永久卡死。**
+   2. **解锁方读错了自己的节点。** `mcs_unlock()` 用共享字段 `m->node` 回读
+      "自己"的节点，但**每个**获取者都会覆写它。持锁者若身后有等待者，读回的就是
+      那个等待者，于是它清掉锁却把交接给了空气。
+
+   两条都符合最初的观测：两个 CPU 各自自旋在**不同**节点上、8 个 CPU 中**没有
+   任何 CPU 完成过获取**、持有者 PC 解析到 `mm_addrspace_lock`（`exchange` 所在
+   处）、自旋次数越过 `2^31`、而 `[MCS DEADLOCK` 不响——这是对的，等待者并不是
+   自死锁，它是在等一个协议根本产生不了的交接。
+
+   修法：等待者发布 `pred->next = me`；`mcs_unlock()` 的 CAS 失败分支改为等待后继
+   链接出现并交接；解锁方从自己的 per-CPU 池取节点
+   （`pool->nodes[pool->depth - 1]`，与 `mcs_lock()` 压入的槽位一致），
+   `m->node` 随之废弃。
+
+   **为什么它一直没被发现**：`mm->lock` 把整个缺页串行化，节点锁几乎从不争用，
+   这条路径从未被执行。摘掉 `mm->lock` 让争用变成常态——**不是它导致了 bug，是它
+   让 bug 变得可达**。这与今天另外两个 bug 形状完全一致（睡眠压在自旋锁下、
+   `mm->lock` 下回收）：**都要等上层串行化被移除才暴露。**
+
+   **Phase 3 现已落地**：`mm_fault_from_status()` 在 `spin_lock(&mm->lock)` **之前**
+   运行，快段只持 cursor。它不查 VMA（这正是论文 Fig. 8 的 handler，也是不需要
+   `mm->lock` 的原因）；数据页用 `pfa_alloc_flags(0, 0)` 不可回收分配，耗尽时
+   decline 交给 VMA 路径。
+
+   验证（28 commit 的 checkpoint）：`check-mm-lock-model` 14/14、
+   `check-mm-pt-lock-order` 17/17、riscv64/x86_64/aarch64 SMP=4 构建、SMP=8 下
+   `smoke-mm-pt-race`（`a20.anonprov=4096`，复现争用的那个用例）/
+   `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `smoke-abi-linux` 全 PASS，
+   guest 日志里 LOCK-STALL / MCS DEADLOCK / panic **全为 0**。
+
+   且**非空跑**：同一次运行报出 `mm_anon_provisioned: 9464`、
+   `mm_fault_from_status: 778`，即无锁快段真实服务了 778 次匿名缺页，而该 smoke
+   断言这个计数器非零。
+
+   **教训（这一天最贵的一条）**：前两轮我都在**猜**机制（TLB shootdown、
+   `arch_cpu_relax()` 饿死软中断、调用方漏解锁），三轮都改了"看起来对"的代码。
+   真正的做法是**把状态打出来**：先打等待者与每 CPU 的持有栈，再打获取点 PC，
+   最后才定到"队列从未被链接"。而我两次把**测量装置的产物**当成了系统事实
+   （`[LOCK-STALL]` 被我 grep 成 `MCS DEADLOCK`；perf 计数器休眠导致的 0 被我
+   读成"快段是死代码"）。**在门上写清楚"什么在测、什么没在测"，比多改三处代码
+   更值钱。**
    level-0 节点锁被永久持有）和**下一步该测什么**。
 
    **下一轮该先做的**：让节点锁的自旋可被抢占，或者让 `arch_cpu_relax()` 真正让出
