@@ -237,8 +237,9 @@ int main(void)
 
     /* --- the VIRTGPU UAPI Mesa speaks --- */
     struct drm_virtgpu_getparam p;
+    uint64_t v3d = 0;
     p.param = VIRTGPU_PARAM_3D_FEATURES;
-    p.value = 0;
+    p.value = (uint64_t)(uintptr_t)&v3d;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &p) < 0)
         return fail("VIRTGPU_GETPARAM 3D_FEATURES");
     /* SKIP rather than FAIL when the device negotiated no virgl.  The kernel
@@ -246,23 +247,24 @@ int main(void)
      * 0 here means "there is no 3D path on this device" -- which is what a
      * GPU_3D=0 instance is -- and not "3D is broken".  Collapsing the two is
      * what made an earlier revision of this test green everywhere. */
-    if (p.value != 1) {
+    if (v3d != 1) {
         printf("GPU3D_TEST: SKIP 2D-only device (build with GPU_3D=1 to test 3D)\n");
         close(fd);
         return EXIT_SKIP;
     }
     printf("GPU3D_TEST: GETPARAM 3D_FEATURES=1\n");
 
+    uint64_t vcap = 0;
     p.param = VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs;
-    p.value = 0;
+    p.value = (uint64_t)(uintptr_t)&vcap;
     if (ioctl(fd, DRM_IOCTL_VIRTGPU_GETPARAM, &p) < 0)
         return fail("VIRTGPU_GETPARAM CAPSET_IDs");
-    if (!(p.value & (1ULL << 1))) {
+    if (!(vcap & (1ULL << 1))) {
         printf("GPU3D_TEST: FAIL host does not advertise the virgl capset\n");
         return EXIT_FAIL;
     }
     printf("GPU3D_TEST: GETPARAM capset mask=0x%llx (virgl present)\n",
-           (unsigned long long)p.value);
+           (unsigned long long)vcap);
 
     /* Capset retrieval doubles as the host's "can you actually render?"
      * probe.  virglrenderer builds its capsets out of the offscreen GL

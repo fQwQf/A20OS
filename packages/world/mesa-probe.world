@@ -26,4 +26,5 @@ mesa-gl
 mesa-gles
 mesa-egl
 mesa-gbm
+virglrenderer
 mesa-utils

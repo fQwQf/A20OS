@@ -1223,9 +1223,9 @@ static int drm_version(drm_context_t *ctx, void *arg)
     if (copy_from_user(&v, arg, sizeof(v)) < 0)
         return -EFAULT;
 
-    const char *name = "a20drm";
+    const char *name = "virtio_gpu";
     const char *date = "20260810";
-    const char *desc = "A20OS minimal DRM";
+    const char *desc = "A20OS virtio-gpu (virgl 3D)";
     size_t name_len = strlen(name);
     size_t date_len = strlen(date);
     size_t desc_len = strlen(desc);
@@ -1240,8 +1240,14 @@ static int drm_version(drm_context_t *ctx, void *arg)
         copy_to_user(v.desc, desc, desc_len) < 0)
         return -EFAULT;
 
-    v.version_major = 1;
-    v.version_minor = 0;
+    /* Deliberately 0, not the 1 a plain DRM driver reports. Mesa's virgl winsys
+     * calls virgl_drm_get_version(), which answers -EINVAL for any
+     * version_major != 0; the winsys then returns NULL before creating a
+     * context and the loader silently falls back to software rendering.
+     * Measured: with major=1 no VIRTGPU_CONTEXT_INIT is ever issued, with
+     * major=0 it is and the renderer becomes virgl. */
+    v.version_major = 0;
+    v.version_minor = 1;
     v.version_patchlevel = 0;
     v.name_len = name_len;
     v.date_len = date_len;
@@ -2396,6 +2402,16 @@ static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
     if (copy_from_user(&p, arg, sizeof(p)) < 0)
         return -EFAULT;
 
+    /* p.value is a userspace *pointer*, not an in/out scalar. libdrm's
+     * drmVirtgpuGetParam passes &value and reads its own local afterwards, so
+     * a kernel that just stores the number into the struct leaves the client
+     * with 0 for every param. virtio_gpu_drm_winsys_create() then reads
+     * param_3d_features as 0 and gives up before creating a context, which is
+     * why Mesa abandoned the device with every ioctl returning success. */
+    uint64_t *out = (uint64_t *)(uintptr_t)p.value;
+    if (!out)
+        return -EFAULT;
+
     gpu_dev_ops_t *ops = drm_gpu_ops();
     if (!ops)
         return -ENODEV;
@@ -2443,7 +2459,7 @@ static int drm_virtgpu_getparam(drm_context_t *ctx, void *arg)
         p.value = 0;
         break;
     }
-    return copy_to_user(arg, &p, sizeof(p)) < 0 ? -EFAULT : 0;
+    return copy_to_user(out, &p.value, sizeof(p.value)) < 0 ? -EFAULT : 0;
 }
 
 /* Which capset GET_CAPS should ask for.
@@ -2488,6 +2504,29 @@ static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
     if (c.size == 0 || c.size > 1024 * 1024)
         return -EINVAL;
 
+    /* Capset 6 describes this driver, not the renderer, so the kernel answers
+     * it and the host is never asked. Getting this wrong is invisible from the
+     * outside: the ioctl still returns success, just with the wrong capset
+     * under it, and the client rejects the driver with no error of its own. */
+    if (c.cap_set_id == VIRTIO_GPU_CAPSET_DRM) {
+        struct virtio_gpu_drm_caps drm_caps;
+        memset(&drm_caps, 0, sizeof(drm_caps));
+        /* caps_set names the *renderer* capsets a client may use. It is not a
+         * bitfield of request ids: capset 6 is the id this query arrives under,
+         * and setting bit 6 here tells the client "no renderer available",
+         * which is why an earlier revision of this made Mesa decline the driver
+         * even though every virgl capset was available. Linux reports the
+         * virgl capsets here, and a client reads bit 1/2 to decide. */
+        drm_caps.caps_set = (1ULL << VIRTIO_GPU_CAPSET_VIRGL) |
+                            (1ULL << VIRTIO_GPU_CAPSET_VIRGL2);
+        drm_caps.max_version = 1;
+        size_t n = c.size < sizeof(drm_caps) ? c.size : sizeof(drm_caps);
+        if (copy_to_user((void *)(uintptr_t)c.addr, &drm_caps, n) < 0)
+            return -EFAULT;
+        c.size = (uint32_t)n;
+        return copy_to_user(arg, &c, sizeof(c)) < 0 ? -EFAULT : 0;
+    }
+
     /* The host rejects GET_CAPSET with ERR_INVALID_PARAMETER unless the
      * request names a live context, so create this open's context first. */
     int cid = drm_virtgpu_ensure_ctx(ctx);
@@ -2505,7 +2544,8 @@ static int drm_virtgpu_get_caps(drm_context_t *ctx, void *arg)
     if (!blob)
         return -ENOMEM;
     size_t got = 0;
-    uint32_t capset = drm_virtgpu_capset_id(ctx);
+    uint32_t capset = c.cap_set_id ? c.cap_set_id
+                                   : drm_virtgpu_capset_id(ctx);
     int rc = ops->get_capset(drm_gpu_device(), (uint32_t)cid, capset,
                              c.cap_set_ver, blob, c.size, &got);
     if (rc < 0) {
