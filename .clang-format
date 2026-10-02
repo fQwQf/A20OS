@@ -1,11 +1,23 @@
 # A20OS C style.
 #
-# This file records the style the tree already follows; it is a reference, not
-# a gate.  Measured over the 798 A20OS-original kernel sources at the time of
-# writing: 0 lines start with a tab, indentation is 4 spaces, 98.4% of code
-# lines fit in 80 columns (p90 = 64), braces are K&R, and pointers are written
-# `type *name`.  Nothing runs clang-format in CI, so this file exists to stop
-# the style from drifting further -- not to reformat what is already there.
+# This file records the style the tree mostly follows.  Measured over the 798
+# A20OS-original kernel sources at the time of writing: 0 lines start with a
+# tab, indentation is 4 spaces, 98.4% of code lines fit in 80 columns
+# (p90 = 64), braces are K&R, and pointers are written `type *name`.
+#
+# It is enforced, but as a ratchet rather than as an assertion that the tree is
+# clean.  `make check-format` runs clang-format over the first-party .c/.h
+# files (kernel/ and user/, minus the vendored and generated trees) and fails
+# only on a file that is *not* already listed in
+# tools/clang-format-baseline.txt.  That file currently grandfathers 843 of
+# the 995 in-scope sources, so the honest statement is not "the tree conforms"
+# -- it does not -- but "the tree does not get worse from here".  Most of the
+# gap is one key: `BreakBeforeBraces: Attach` below, where the tree puts a
+# function's opening brace on its own line.  Do not reformat existing code to
+# satisfy this file; fix the file's keys if the tree's actual style is the one
+# worth keeping, which is the cheaper direction.
+#
+# See docs/CONTRIBUTING.md 4.2.
 #
 # Deliberately NOT set, because the tree does not use them:
 #   - Doxygen comment markers: the project uses plain /* */ blocks and a named

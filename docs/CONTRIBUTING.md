@@ -59,7 +59,19 @@ make check-concurrency-foundation # 并发
 
 ### 4.2 格式
 
-`.clang-format` 记录了本仓库既有的 C 风格：4 空格缩进（不使用 tab）、K&R 花括号、指针写作 `type *name`、80 列上限。它是**参考而非门禁**：CI 不运行 `clang-format`，不要为了让它满意而重排既有代码。`.editorconfig` 补充了编辑器层面的换行与缩进约定，并对 `*.s`/`*.S` 和 vendored 目录关闭自动改写（汇编的列对齐与预处理指令不能被重新排版）。
+`.clang-format` 记录了本仓库的 C 风格：4 空格缩进（不使用 tab）、K&R 花括号、指针写作 `type *name`、80 列上限。它由 `make check-format` 强制执行，但方式是**棘轮（ratchet）而不是"整棵树干净"的断言**。
+
+具体语义：门禁只扫描第一方 `.c`/`.h`（`kernel/` 与 `user/` 下的源码与头文件），并且**排除** `kernel/external/`、`user/external/`、`user/build/`、`build/`、`.kernel-build/`、`docs/` 以及生成文件 `kernel/fs/rootfs_overlay.c`——vendored 树不是本项目可以重排的东西，量也大到会淹没门禁本身。门禁报告哪些文件不符合 `.clang-format`，但**从不修改任何源文件**。
+
+不合规的文件里，有一份是**历史存量**：`tools/clang-format-baseline.txt` 记录了门禁落地时就已经不符合的 843 个文件（共 995 个在扫描范围内）。门禁只对**不在**这份名单里的不合规文件失败。因此它保证的是"风格不再继续劣化"，而不是"现有代码已符合本文件"——后者并不成立，最大的一处差距是 `BreakBeforeBraces: Attach` 与树里把函数左花括号单独放一行的实际写法。
+
+如果你要缩小这份名单：改好文件，让它合规，然后用 `make format-baseline` 重写名单并把 diff 一起提交。名单只应缩小，不应扩大——扩大它等于放弃门禁，而这个 diff 本身就是"放弃了什么"的记录。名单里已经合规的条目会以 `note:` 提示，可以随时清掉。
+
+门禁对缺失的工具是**显式跳过**而非静默通过，也非硬失败：没装 `clang-format` 时它打印 `SKIP` 并说明如何安装（`apt-get install clang-format`，或 `make check-format CLANG_FORMAT=/path/to/clang-format`）后以 0 退出。之所以不硬失败，是因为一个贡献者本地没有这个工具，不应该被一个他无法修复的红构建挡住；但静默通过同样不可接受——那等于门禁不存在。
+
+注意 `check-format` **不在** `make check` 里。`make check` 复刻的是 CI 的 `toolchain-gates` job，而 CI runner 并不安装 `clang-format`；把它折进去会让 `make check` 变成一个 CI 无法复现的东西。请显式运行它。
+
+`.editorconfig` 补充了编辑器层面的换行与缩进约定，并对 `*.s`/`*.S` 和 vendored 目录关闭自动改写（汇编的列对齐与预处理指令不能被重新排版）。
 
 ### 4.3 什么值得写注释
 
