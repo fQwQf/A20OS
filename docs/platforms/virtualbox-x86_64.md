@@ -10,7 +10,8 @@
 
 | 功能 | VirtualBox 设备 | A20OS 实现 | 当前限制 |
 |---|---|---|---|
-| 启动 | BIOS + GRUB Multiboot | `make vbox-iso-x86_64` | ISO 启动，非 ARM UEFI 镜像 |
+| 启动（可用） | BIOS + GRUB Multiboot | 实例 `vbox-iso-x86_64` | ISO 介质；SeaBIOS 发布 RSDP，内核可达用户态 |
+| 启动（统一形态，未达用户态） | UEFI + GRUB | 实例 `vbox-x86_64` | 原始 GPT 磁盘；停在 `System ready`，缺 x86_64 EFI loader，详见[直接启动磁盘镜像](#直接启动磁盘镜像) |
 | 显示 | VMSVGA `15ad:0405` | `kernel/drivers/gpu/vmsvga.c`、`vmsvga.a20drv`、`/dev/fb0` | 固定 1024x768x32，2D framebuffer |
 | 磁盘 | Intel AHCI `8086:2922/2829` | `kernel/drivers/block/ahci.c`、`ahci.a20drv` | 首个可用 port、LBA48、512B sector、单 slot |
 | 网络 | E1000 82540EM `8086:100e` | `kernel/drivers/net/e1000.c`、`e1000.a20drv` + lwIP | 静态单实例、轮询 ring |
@@ -20,7 +21,7 @@
 
 普通 x86_64 开发/VirtualBox 镜像默认使用 generic driver deployment，因此设备驱动由 `.a20drv` 包注册；底层协议源码仍位于 `kernel/drivers/`。E1000 使用 `DEV_CLASS_NET` 且不创建 `/dev` 节点。input class 会出现在动态 sysfs class 视图中，同时保留 `/dev/event0` 聚合兼容节点。
 
-## 构建 ISO
+## 构建介质
 
 Debian/Ubuntu 安装依赖：
 
@@ -28,19 +29,41 @@ Debian/Ubuntu 安装依赖：
 sudo apt-get install gcc binutils grub-common grub-pc-bin xorriso mtools
 ```
 
-构建：
+两种介质都通过 `tools/a20` 构建，不要直接调用 make 目标：
 
 ```sh
-make vbox-iso-x86_64
+tools/a20 package vbox-iso-x86_64   # BIOS ISO，当前唯一可达用户态的路径
+tools/a20 package vbox-x86_64       # UEFI 直接启动磁盘（见下节，尚未达用户态）
 ```
 
-该目标会递归用 `ARCH=x86_64 ABI=both BRINGUP=0` 执行完整 `dev-build`，再由 `tools/mk_grub_iso.sh` 生成：
+产物路径不要写死，用实例自己报告：
+
+```sh
+tools/a20 ledger vbox-iso-x86_64    # 产物路径、大小与 sha256
+tools/a20 show vbox-x86_64          # 该实例需要的介质与设备字段
+```
+
+`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败；`xorriso` 缺失同样只影响 ISO 路径，磁盘路径由 `tools/mk_grub_disk_image.sh` 生成，不依赖 xorriso。
+
+## 直接启动磁盘镜像
+
+`vbox-x86_64` 产出 512 MiB 原始 GPT 磁盘，只有一个 FAT32 EFI System Partition，其中含 GRUB、kernel 与 FAT32 root。这是与 aarch64 VirtualBox 镜像一致的形态：给运维的是一个直接挂载的磁盘，而不是需要先挂载的光介质。
+
+**当前状态：它启动内核，然后停住。** 实测而非推断——在 OVMF 下镜像能给出正确的 992 MiB RAM map 并打印 `System ready`，随后 `init: no init program found`。原因是 UEFI 把 RSDP 放在 configuration table 里，GRUB 不填 multiboot ACPI tag，而 `kernel/boot/uefi/` 没有 x86_64 loader 去接收它。没有 RSDP 就没有 MCFG，PCI 于是回落到一个硬编码 ECAM 窗口，那里既没有设备也没有块驱动。启动日志会明说，不会静默失败：
 
 ```text
-.kernel-build/x86_64-qemu-virt-x86_64-both-dev/a20os-x86_64.iso
+[PCI] no MCFG (UEFI), using the q35 default 0x... -- UEFI without an x86_64 stub cannot work
 ```
 
-如果路径因自定义构建变量变化，以 Make 输出的 `BUILD_DIR` 为准。`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败。
+因此今天要验收驱动，请用 `vbox-iso-x86_64`：它走 BIOS，SeaBIOS 会在内核已经扫描的区域内发布 RSDP。`vbox-x86_64` 是两个架构被要求共享的**统一形态**，等 x86_64 EFI loader 存在后即为可用路径——那是一个 loader，不是驱动，是尚未完成的工作。
+
+部署到真实磁盘时必须显式指定设备，`media_device` 不会默认填 `/dev/sda`：
+
+```sh
+tools/a20 deploy vbox-x86_64        # 按提示确认目标设备
+```
+
+`tools/a20` 会拒绝写入已挂载设备，也会拒绝文件名与镜像不匹配的设备，这正是防止误写 `/dev/sda` 的那道闸。
 
 ## 创建虚拟机
 
