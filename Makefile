@@ -222,6 +222,86 @@ endif
 .DELETE_ON_ERROR:
 
 # ================================================================
+# `make help`
+# ================================================================
+# There are well over a thousand targets here, almost all of them generated per
+# instance/arch/smoke combination.  Printing them is how a newcomer gets a wall
+# of noise instead of an answer, so `make help` lists the handful of entry
+# points that actually get typed, grouped by what you are trying to do.  The
+# full set stays discoverable with `make -qp | grep '::'`, a deliberate opt-in.
+#
+# Placed next to .DEFAULT_GOAL, right where a newcomer's eye goes first, and
+# every value it interpolates is either defined above (ARCH, BOARD, ABI,
+# BRINGUP, NR_CPUS) or is a recursively-expanded variable defined by the
+# includes further down (CHECK_FAST_GATES).  Help text that quotes a hand-typed
+# copy of the arch list or the gate tier goes stale silently; this cannot.
+#
+# The fast-tier gate list is broken into fixed-size chunks so it stays readable
+# in a terminal, and each chunk is guarded by $(if $(wordlist ...)) so an absent
+# chunk contributes no argument (and therefore no blank line) to printf.  The
+# four chunks below cover 16 gate names; the tier has 15, so a gate added past
+# that needs a fifth chunk here rather than silently going unlisted.
+help-gate-chunk = $(if $(wordlist $(1),$(2),$(CHECK_FAST_GATES)),'     $(wordlist $(1),$(2),$(CHECK_FAST_GATES))')
+
+.PHONY: help
+help:
+	@printf '%s\n' \
+	  'A20OS -- hybrid kernel.  Usage: make <target> [VAR=VALUE ...]' \
+	  '' \
+	  "Now building: ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) NR_CPUS=$(NR_CPUS)" \
+	  '' \
+	  '  Day-to-day development' \
+	  '    make run                       build ARCH=$$ARCH and boot it in QEMU' \
+	  '    make run-riscv64               ... same, for a named arch (also -loongarch64,' \
+	  '                                   -aarch64/-arm64, -x86_64, -arm32, -riscv32, -ppc64le)' \
+	  '    make debug-riscv64             boot paused with a GDB server on :1234' \
+	  '    make dev-build                 kernel + userspace + test images, no QEMU' \
+	  '    make kernel-only               just the kernel, for ARCH/BOARD' \
+	  '    make clean                     remove build output for the current variant' \
+	  '' \
+	  '  Gates -- fast and host-only (no QEMU, no cross toolchain)' \
+	  '    make check                     the whole fast tier; equals CI toolchain-gates' \
+	  '    make check-format              clang-format drift gate over first-party sources' \
+	  '' \
+	  "  What 'make check' runs ($(words $(CHECK_FAST_GATES)) gates):" \
+	  $(call help-gate-chunk,1,4) \
+	  $(call help-gate-chunk,5,8) \
+	  $(call help-gate-chunk,9,12) \
+	  $(call help-gate-chunk,13,16) \
+	  '' \
+	  '    make check-manifests           instances/ components/ Makefile agree' \
+	  '    make host-tests                host-gcc unit tests for kernel format/helper logic' \
+	  '    make check-doc-test-gates      every documented source-contract gate (11 need QEMU)' \
+	  '' \
+	  '  Gates -- need a cross toolchain and/or QEMU' \
+	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
+	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
+	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
+	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
+	  '    make check-concurrency-foundation  SMP lock-model contract, builds a 2-CPU config' \
+	  '' \
+	  '  Release (what a bare `make` does)' \
+	  '    make                           dual-arch release: kernel-rv kernel-la disk*.img' \
+	  '    make image-world               package -> repository -> bootable image' \
+	  '    make docs                      build standard-reference.pdf from docs/' \
+	  '' \
+	  '  Instance tooling (the declarative layer the targets above wrap)' \
+	  '    tools/a20 list                 every predefined instance' \
+	  '    tools/a20 run <instance>       build and boot an instance' \
+	  '    tools/a20 debug <instance>     boot an instance with a GDB server' \
+	  '    tools/a20 test <instance>      run an instance smoke' \
+	  '    tools/a20 check                validate instances/, arch matrix, registries' \
+	  '    docs/instances.md              instance fields and the component registry' \
+	  '' \
+	  '  Boards and MCU' \
+	  '    make BRINGUP=1 run-<arch>      kernel-only bring-up variant' \
+	  '    make vf2-sdcard                VisionFive 2 SD card' \
+	  '    make stm32f103-bringup         STM32F103 firmware (64 KiB flash)' \
+	  '' \
+	  'Docs: docs/build.md (build), docs/testing-gates.md (gates),' \
+	  '      docs/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
+
+# ================================================================
 # Build paths and userspace artifacts
 # ================================================================
 
