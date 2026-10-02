@@ -34,6 +34,17 @@
 #define CONFIG_NET_PROFILE_SERVER 3
 #endif
 
+/* Lock-contract checking.  Off by default: LWIP_ASSERT_CORE_LOCKED() expands to
+ * a call and a branch at roughly fifty lwIP entry points, some of them on the
+ * timer and receive paths, and that cost has not been measured.  Turn it on
+ * (OPT="-DCONFIG_NET_LOCK_ASSERT=1") when investigating a lock-discipline
+ * question -- it reports the owning CPU and a violation count per boot on
+ * /proc/net/status as "lwip_lock: owner=<cpu> violations=<n>", and the one-shot
+ * init-path violations it finds there are expected, not a defect. */
+#ifndef CONFIG_NET_LOCK_ASSERT
+#define CONFIG_NET_LOCK_ASSERT 0
+#endif
+
 #if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
 
 /*
