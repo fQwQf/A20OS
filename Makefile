@@ -694,6 +694,10 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
+         -I$(KERNEL_DIR)/external/littlefs \
+         -I$(KERNEL_DIR)/external/littlefs/compat \
+         -DLFS_MALLOC=lfs_kmalloc -DLFS_FREE=lfs_kfree \
+         -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -DLFS_NO_ASSERT -DLFS_NO_TRACE \
          -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
@@ -965,7 +969,8 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
-             $(LWIP_SRC)
+             $(LWIP_SRC) \
+             $(LFS_SRC)
 
 ifeq ($(NOMMU),1)
 KERNEL_SRC += $(KERNEL_DIR)/mm/nommu.c
@@ -983,14 +988,17 @@ ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
+include $(KERNEL_DIR)/external/littlefs/sources.mk
 endif
 
 include tools/driver-modules.mk
 
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
-KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/%,$(KERNEL_SRC))) \
-              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
+LFS_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/littlefs/%.c,$(KERNEL_SRC))
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
+              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
+              $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
 # Optional self-contained userspace for physical-board bring-up.  Each static
