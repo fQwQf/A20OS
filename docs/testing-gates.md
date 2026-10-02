@@ -264,9 +264,33 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 
 ### mount namespace（unshare/setns CLONE_NEWNS）
 
-`make smoke-mntns` 用 `mntns_test.c` 覆盖 init 命名空间 ino 非零、`/proc/self/ns/{pid,net}` 渲染、fork 共享挂载命名空间、`unshare(CLONE_NEWNEWPID|NEWNET|NEWUSER)` 如实返回 EINVAL（不假成功）、`unshare(CLONE_NEWNS)` 生成不同 ino 且其挂载对父进程不可见、setns 经 `/proc/<pid>/ns/mnt` fd 加入（目标先退出仍可加入）、非 mnt 目标 EINVAL。
+`make smoke-mntns` 用 `mntns_test.c` 覆盖 init 命名空间 ino 非零、`/proc/self/ns/{pid,net}` 渲染、fork 共享挂载命名空间、`unshare(CLONE_NEWPID)` 生成不同 pid 命名空间、`unshare(CLONE_NEWNET)` 如实返回 EINVAL（不假成功；`CLONE_NEWUSER` 已实现，见下一节）、`unshare(CLONE_NEWNS)` 生成不同 ino 且其挂载对父进程不可见、setns 经 `/proc/<pid>/ns/mnt` fd 加入（目标先退出仍可加入）、非 mnt 目标 EINVAL。
 
 失败时查看 `.kernel-build/smoke/mntns-riscv64.log` 中首个 `MNTNS_TEST: FAIL` 行（含行号与 errno），对照 `kernel/fs/vfs/mntns.c`、`kernel/abi/linux/sys_namespace.c` 与 `kernel/fs/procfs/procfs.c` 的 ns 渲染。
+
+### user namespace（unshare/setns CLONE_NEWUSER）
+
+`make smoke-userns` 用 `userns_test.c` 覆盖：初始命名空间 ino 非零且
+`/proc/<pid>/ns/user` 渲染、`unshare(CLONE_NEWUSER)` 产生不同 ino、
+未写映射时进程看到 `USERNS_OVERFLOW_UID`（65534）而非宿主 uid、fork 与线程
+继承调用者的命名空间而只有 `clone(CLONE_NEWUSER)` 才新建、父命名空间写
+`/proc/<pid>/uid_map` 后翻译立即生效、畸形与越界映射（两字段行、负数、
+跑到 id 空间末尾、零长度、重叠）各自以 EINVAL 拒绝且不留残迹、
+合法分段可追加、`setgroups` 是单向开关（`deny` 无特权且可重复，
+`deny` 之后的 `allow` 即使满权限也 EPERM，畸形关键字 EINVAL）、以及
+rootless 全链路：uid 1000 自行建命名空间、写入"映射自己的 id"这一条
+唯一无特权路径后成为命名空间内的 0，而任何更宽的映射都是 EPERM、
+并且无法 `setns` 回初始命名空间。
+
+失败时查看 `.kernel-build/smoke/userns-riscv64.log` 中首个
+`USERNS_TEST: FAIL` 行（含行号与 errno），对照 `kernel/proc/userns.c`、
+`kernel/fs/procfs/procfs.c` 的映射写入分支与 `userns_capable()`。
+
+门禁可证伪：把 `userns_capable()` 改成"沿 parent 链向下查找、命中即授予"，
+`smoke-userns` 会以 "an unprivileged second extent mapping a foreign id was
+accepted" 失败——那正是任何用户借 `unshare -U` 拿到宿主 root 的路径。
+把 `map_from_global()` 改回按 `lower` 查找，门禁会以 "uid after installing
+its own map is 65534" 失败。
 
 ### 致命信号 core dump
 

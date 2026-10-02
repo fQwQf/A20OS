@@ -38,9 +38,11 @@ struct task_t;
 
 /* Linux-compatible init-namespace inos for the ns types A20OS does not
  * implement as objects; they render as system-wide singletons and are
- * refused by unshare(2)/setns(2).  Shared by /proc/<pid>/ns and listns(2). */
-#define MNTNS_INIT_INO_PID     4026531836ULL
-#define MNTNS_INIT_INO_USER    4026531837ULL
+ * refused by unshare(2)/setns(2).  Shared by /proc/<pid>/ns and listns(2).
+ * PID and user namespaces are NOT here: both are real objects with per-task
+ * membership, so their initial inos live with their own modules
+ * (PIDNS_INIT_INO in proc/pidns.h, USERNS_INIT_INO in proc/userns.h) and a
+ * caller that has unshared reports its own, not these constants. */
 #define MNTNS_INIT_INO_UTS     4026531838ULL
 #define MNTNS_INIT_INO_IPC     4026531839ULL
 #define MNTNS_INIT_INO_NET     4026531841ULL

@@ -9,6 +9,7 @@
 #include "core/sync.h"
 #include "proc/park.h"
 #include "proc/pidns.h"
+#include "proc/userns.h"
 #include <signal_abi.h>
 
 struct signal_state;
@@ -379,6 +380,13 @@ typedef struct task_t {
      * fork/unshare/setns and released by mntns_release_task() from the
      * per-task teardown in fdtable_close_all(). */
     struct mnt_namespace *mnt_ns;
+    /* User namespace membership (kernel/proc/userns.c).  Credentials in
+     * proc_cred_t are stored as GLOBAL ids and translated through this
+     * namespace's uid_map/gid_map at the syscall and procfs boundary; NULL
+     * means the initial namespace, which maps ids to themselves.  Same
+     * ownership rule as mnt_ns: one reference, released by
+     * userns_release_task() from fdtable_close_all(). */
+    struct user_namespace *user_ns;
     proc_ns_context_t ns_ctx;
 
     /* PID namespace membership (kernel/proc/pidns.c).  pid_ns is the

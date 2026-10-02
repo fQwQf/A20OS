@@ -70,7 +70,15 @@ int64_t sys_getgroups(int size, int *list) {
     if (size == 0) return n;
     if (!list) return -EFAULT;
     if (size < n) return -EINVAL;
-    if (n > 0 && copy_to_user(list, t->cred.groups, (size_t)n * sizeof(int)) < 0)
+    if (n <= 0) return n;
+    /* Supplementary gids are global ids and leave through the namespace map,
+     * like every other id.  A group the namespace cannot represent is
+     * reported as the overflow gid rather than as the host's numbering. */
+    user_namespace_t *ns = userns_task_own(t);
+    int out[MAX_GROUPS];
+    for (int i = 0; i < n; i++)
+        out[i] = userns_from_kgid(ns, t->cred.groups[i]);
+    if (copy_to_user(list, out, (size_t)n * sizeof(int)) < 0)
         return -EFAULT;
     return n;
 }
@@ -78,17 +86,28 @@ int64_t sys_getgroups(int size, int *list) {
 int64_t sys_setgroups(size_t size, const int *list) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
+    user_namespace_t *ns = userns_task_own(t);
+    uint64_t f = spin_lock_irqsave(&ns->lock);
+    int setgroups_allowed = ns->setgroups_allowed;
+    spin_unlock_irqrestore(&ns->lock, f);
+    /* Linux's setgroups gate: a creator that wrote "deny" to
+     * /proc/<pid>/setgroups has disowned group authority for good, and
+     * setgroups(2) is refused from then on. */
+    if (!setgroups_allowed) return -EPERM;
     if (!proc_has_cap(t, CAP_SETGID)) return -EPERM;
     if (size > MAX_GROUPS) return -EINVAL;
     if (size && !list) return -EFAULT;
     int tmp[MAX_GROUPS];
     if (size && copy_from_user(tmp, list, size * sizeof(int)) < 0)
         return -EFAULT;
+    int kg[MAX_GROUPS];
     for (size_t i = 0; i < size; i++) {
         if (tmp[i] < 0) return -EINVAL;
+        kg[i] = userns_to_kgid(ns, tmp[i]);
+        if (kg[i] < 0) return -EINVAL;
     }
     for (size_t i = 0; i < size; i++)
-        t->cred.groups[i] = tmp[i];
+        t->cred.groups[i] = kg[i];
     t->cred.ngroups = (int)size;
     return 0;
 }

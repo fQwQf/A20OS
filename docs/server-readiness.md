@@ -190,8 +190,10 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 
 ### 仍缺
 
-1. **8 个 namespace 只有 mount 是真的**，其余 7 个由 `unshare()` 显式返回
-   `-EINVAL`。这一点是干净的（`sys_namespace.c:4-7` 明确写了边界）。
+1. **8 个 namespace 已有 3 个是真的**：mount、PID（`smoke-pidns`）与
+   user（`smoke-userns`）。其余 5 个（net、cgroup、time、uts、ipc）
+   仍由 `unshare()` 显式返回 `-EINVAL`，这一点是干净的
+   （`sys_namespace.c:4-7` 明确写了边界）。
 2. ~~`pivot_root` 返回 `-EPERM`~~ —— **已补齐**。前置件确实就是先把
    root/cwd 从路径字符串换成真实引用：现在 `mount_t` 带 `mnt_parent` /
    `mnt_mp` / `mnt_child` 真实挂载树，`proc_fs_context_t` 带
@@ -204,7 +206,11 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
    （`MS_SHARED` / `MS_PRIVATE` / `MS_SLAVE`），所以 mount 传播语义对
    容器编排仍然不完整——`pivot_root` 本身可用，但"pivot 之后再让子 mount
    传播出去"这条链路还没有。
-3. 无 userns、无 `nsproxy`、无完整 capabilities。
+3. **userns 已补齐**（`kernel/proc/userns.c`：`uid_map` / `gid_map` /
+   `setgroups`、全局↔命名空间 id 翻译、`setns` / `listns`、
+   `/proc/<pid>/ns/user`、按命名空间作用域化的能力判定）。
+   剩下的缺口是无 `nsproxy`（`setns()` 一次只能切一种命名空间），
+   以及 capabilities 仍是 15 个子集。
 4. 无容器运行时（lxc/runc/nspawn/crun/podman 均无），`packages/world/`
    里没有 server world。
 5. cgroup 缺 `pids` / `io` / `freeze` 控制器；`cpu.shares` 存了但调度器
@@ -212,8 +218,10 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 6. **全局 OOM killer 的评分只看 `oom_score_adj`，不看 RSS**，因此不会可靠地
    选中最大占用者（cgroup 局部路径倒是用了 RSS）。
 
-结论：**当前形态无法承载多租户**。PID ns + userns + `pivot_root` 是绕不过
-去的三件套。
+结论：**当前形态仍无法承载多租户**。PID ns + userns + `pivot_root` 三件套
+现已齐备，剩下的门槛是另外几项：没有容器运行时、没有 `nsproxy`、
+capabilities 只有 15 个子集、mount 共享子树传播未实现，以及上面第 6 条的
+OOM 评分。
 
 ## 四、进程与调度
 
@@ -472,15 +480,16 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
   头注），不声称可用。
 
 仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
-分支在做）、`proc_lock` 超长持有成因、ext4 可写 journal、namespaces 三件套、
-conntrack/NAT、MSI-X/ACPI `_PRT`、多线程匿名内存偶发写坏（known-issues）。
+分支在做）、`proc_lock` 超长持有成因、ext4 可写 journal、
+其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
+conntrack/NAT、MSI-X/ACPI `_PRT`。
 
 ## 八、阻塞项排序
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
 | P0 | lwIP 全局锁分片 | spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。持锁方一侧的时间仍缺（需 riscv64 rdcycle 封装），分锁方案待该数据再定 |
-| P0 | PID ns + userns + `pivot_root` | 多租户前置件；`pivot_root` 需先把 root/cwd 从路径字符串改为真实 mount 引用 |
+| ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |

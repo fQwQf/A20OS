@@ -138,13 +138,12 @@ int main(void)
 
     /* 3. Honest errors for the namespace types that are still not
      *    implemented.  PID namespaces ARE implemented and covered by
-     *    pidns_test, so they are not in this list. */
+     *    pidns_test, so they are not in this list.  User namespaces are
+     *    implemented too (userns_test), so unshare(CLONE_NEWUSER) succeeds
+     *    and is exercised there rather than refused here. */
     errno = 0;
     CHECK(xunshare(CLONE_NEWNET) == -1 && errno == EINVAL,
           "unshare(CLONE_NEWNET) must fail with EINVAL");
-    errno = 0;
-    CHECK(xunshare(CLONE_NEWUSER) == -1 && errno == EINVAL,
-          "unshare(CLONE_NEWUSER) must fail with EINVAL");
     errno = 0;
     CHECK(xunshare(CLONE_NEWIPC) == -1 && errno == EINVAL,
           "unshare(CLONE_NEWIPC) must fail with EINVAL");

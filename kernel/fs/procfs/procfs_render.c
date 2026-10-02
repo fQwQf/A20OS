@@ -1121,10 +1121,16 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         snprintf(buf, bufsz, "uts:[%llu]\n",
                  (unsigned long long)MNTNS_INIT_INO_UTS);
         break;
-    case PF_PID_NS_USER:
+    case PF_PID_NS_USER: {
+        /* Real user namespaces: report the target task's namespace ino, so a
+         * container and the host are distinguishable by reading
+         * /proc/<pid>/ns/user. */
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "user:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_USER);
+                 (unsigned long long)userns_task_ino(t));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_IPC:
         snprintf(buf, bufsz, "ipc:[%llu]\n",
                  (unsigned long long)MNTNS_INIT_INO_IPC);
@@ -1295,17 +1301,47 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
 
     case PF_UID_MAP:
     case PF_GID_MAP: {
-        /* User namespace mapping: the single root namespace identity maps
-         * 1:1.  Format: "<inside> <outside> <length>\n". */
-        task_t *t = proc_current();
-        int id = 0;
-        snprintf(buf, bufsz, "%10d %10d 4294967295\n", id, id);
-        (void)t;
+        /* Real mapping content, "<inside> <outside> <length>" per extent.
+         * The initial namespace is the single identity extent, so this reads
+         * exactly as before for a system with no user namespaces, and a
+         * container shows the mapping its creator actually installed.
+         *
+         * pid <= 0 means the entry came from /proc/ rather than /proc/<pid>/:
+         * Linux makes /proc/uid_map the caller's own file, so resolve it
+         * against the reading task instead of against process 0. */
+        task_t *t = (pid > 0) ? proc_find_get(pid) : proc_current();
+        if (!t) return 0;
+        user_namespace_t *ns = userns_task_own(t);
+        uint64_t f = spin_lock_irqsave(&ns->lock);
+        int is_gid = (type == PF_GID_MAP);
+        const uid_gid_extent_t *map = is_gid ? ns->gid_map : ns->uid_map;
+        int n = is_gid ? ns->gid_map_extents : ns->uid_map_extents;
+        int off = 0;
+        buf[0] = '\0';
+        for (int i = 0; i < n && off < (int)bufsz - 1; i++) {
+            int w = snprintf(buf + off, bufsz - (size_t)off,
+                             "%10u %10u %10u\n",
+                             (unsigned)map[i].lower,
+                             (unsigned)map[i].parent_lower,
+                             (unsigned)map[i].count);
+            if (w < 0) break;
+            off += w;
+        }
+        spin_unlock_irqrestore(&ns->lock, f);
+        if (pid > 0) proc_put(t);
+        return off;
+    }
+    case PF_SETGROUPS: {
+        task_t *t = (pid > 0) ? proc_find_get(pid) : proc_current();
+        if (!t) return 0;
+        user_namespace_t *ns = userns_task_own(t);
+        uint64_t f = spin_lock_irqsave(&ns->lock);
+        int allowed = ns->setgroups_allowed;
+        spin_unlock_irqrestore(&ns->lock, f);
+        if (pid > 0) proc_put(t);
+        snprintf(buf, bufsz, allowed ? "allow\n" : "deny\n");
         break;
     }
-    case PF_SETGROUPS:
-        snprintf(buf, bufsz, "allow\n");
-        break;
     case PF_SYSVIPC: {
         /* /proc/sysvipc/{msg,sem,shm} directory is represented as a summary
          * of live SysV objects.  We report counts via the IPC layers. */
