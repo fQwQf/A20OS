@@ -1246,8 +1246,21 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
     size_t sent = 0;
     uint64_t start = timer_get_ticks();
     while (sent < len) {
-        a20_lwip_poll();
+        /*
+         * One acquisition per iteration.  a20_lwip_poll_locked() is the
+         * progress half of a20_lwip_poll() and is what the UDP and RAW send
+         * paths already run inside their own critical section; calling the
+         * wrapper here took and released g_lwip_lock twice per iteration and
+         * ran the whole-stack pass twice.  A 4 MiB write iterates about 64
+         * times against a 64 KiB send buffer, so that was 128 full-stack
+         * passes where 64 suffice.
+         *
+         * The bottom halves deliberately do not run per iteration: they take
+         * g_net_lock, which is never held together with g_lwip_lock.  One
+         * drain after the loop covers the same ground.
+         */
         uint64_t lwip_flags = a20_lwip_lock();
+        a20_lwip_poll_locked();
         int tcp_alive = s->tcp && !s->closed && s->connected;
         u16_t room = tcp_alive ? tcp_sndbuf(s->tcp) : 0;
         if (!tcp_alive) {
@@ -1324,7 +1337,11 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
         a20_lwip_unlock(lwip_flags);
         sent += n;
     }
-    a20_lwip_poll();
+    /* Outside g_lwip_lock, for the same reason the loop does not run them.
+     * The error returns above skip this, which is safe because sched() runs
+     * both bottom-halves before picking the next task. */
+    net_inet_bottom_half_process_all();
+    net_packet_bottom_half_process();
     return (int)sent;
 }
 
