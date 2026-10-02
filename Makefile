@@ -133,6 +133,16 @@ CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
 CONFIG_HDA_SMOKE_TEST ?= 0
 CONFIG_NVME_SMOKE_TEST ?= 0
 
+# Slab integrity checking.  At 0 the allocator trusts its free lists; at 1
+# every kmalloc/kfree walks the page's free list and panics on a node that is
+# out of bounds, misaligned, cyclic, or inconsistent with the page's
+# accounting.  It costs O(free objects) per allocation, so it is a debugging
+# build (its own BUILD_VARIANT component) rather than a default -- but it is
+# the only detector that can see a slab page being scribbled on while it is
+# still live, which is the shape of the multi-threaded corruption reports in
+# docs/distro/known-issues.md.
+CONFIG_SLAB_DEBUG ?= 0
+
 # Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in
 # the loadable driver packages.  Those macros are consumed *only* by
 # kernel/drvmod/examples/{hda,nvme}.c, which tools/driver-modules.mk compiles
@@ -231,7 +241,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -703,7 +713,8 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
-         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
+         -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
