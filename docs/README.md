@@ -87,7 +87,8 @@
 - [native-abi/05-ipc.md](native-abi/05-ipc.md)：Channel 与 Event Queue 机制
 - [fs/vfs-edge-semantics.md](fs/vfs-edge-semantics.md)：VFS 边界语义
 - [net/network-lock-contract.md](net/network-lock-contract.md)：网络栈锁契约
-- [net/network-config-design.md](net/network-config-design.md)：网络配置设计
+- [net/network-config-design.md](net/network-config-design.md)：网络配置设计（`a20.*` 键、`a20.tcpmode` 两档模式、运行时控制面）
+- [net/net-lanes.md](net/net-lanes.md)：网络 lane 设计与阶段顺序（阶段 A/B 已落地；含缓冲改造被锁契约挡住的原因）
 
 ### Linux ABI 兼容层
 

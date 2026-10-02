@@ -24,6 +24,7 @@
 
 #include "net/netfilter.h"
 #include "core/lock.h"
+#include "core/seqlock.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/errno.h"
@@ -37,22 +38,16 @@ static unsigned g_rule_count;
  * serialised against each other; this exists for the lock-free readers on the
  * packet path, which run under a different lock entirely.
  */
-static unsigned g_rule_seq;
-
-/* Bounded so a pathological writer cannot make the packet path spin.  Falling
- * through to the default accept is the same answer an unconfigured filter
- * gives, so exhausting the budget degrades to fail-open rather than fail-closed
- * on a packet that a concurrent rule edit was in the middle of. */
-#define NETFILTER_READ_ATTEMPTS 4
+static seqlock_t g_rule_seq = SEQLOCK_INIT;
 
 static void netfilter_rules_begin(void)
 {
-    __atomic_add_fetch(&g_rule_seq, 1, __ATOMIC_ACQ_REL);
+    seqlock_write_begin(&g_rule_seq);
 }
 
 static void netfilter_rules_end(void)
 {
-    __atomic_add_fetch(&g_rule_seq, 1, __ATOMIC_RELEASE);
+    seqlock_write_end(&g_rule_seq);
 }
 
 static netfilter_stats_t g_stats;
@@ -392,9 +387,9 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
      */
     int hit = -1;
     netfilter_action_t action = NETFILTER_ACCEPT;
-    for (unsigned attempt = 0; attempt < NETFILTER_READ_ATTEMPTS; attempt++) {
-        unsigned seq0 = __atomic_load_n(&g_rule_seq, __ATOMIC_ACQUIRE);
-        if (seq0 & 1u)
+    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
+        unsigned seq0 = seqlock_read_begin(&g_rule_seq);
+        if (seq0 == 0u)
             continue;               /* writer inside the table; wait for it */
         unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
         int found = -1;
@@ -417,8 +412,7 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
             found_action = (netfilter_action_t)r->action;
             break;
         }
-        unsigned seq1 = __atomic_load_n(&g_rule_seq, __ATOMIC_ACQUIRE);
-        if (seq1 != seq0)
+        if (seqlock_read_retry(&g_rule_seq, seq0))
             continue;               /* moved under us; rescan */
         hit = found;
         action = found_action;

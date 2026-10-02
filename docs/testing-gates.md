@@ -233,6 +233,53 @@ vendored code（`kernel/external/**`、`user/external/**`）一律不纳入第�
 
 失败时查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行，对照 `kernel/net/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
 
+### TCP accept 路径与 listener 存在性（Linux ABI sockets 区域）
+
+`make smoke-net-accept` 覆盖 accept 路径在**两种 TCP 模式**下的一致性，这是
+`a20.tcpmode` 分档必须成立的可观测契约。`fast` 档由 socket 层配对两个 socket 来匹配
+listener；`lwip` 档把已绑定的 PCB 转成真正的 lwIP LISTEN pcb，由协议栈完成握手。
+两档是**两套独立实现**，必须给出相同的可观测结果，所以门禁把 `tcp_accept_test`
+在两档各跑一次。
+
+`tcp_accept_test` 只断言"握手完成且 `accept()` 返回可用 fd"，**故意不覆盖数据传输**：
+两者可分离，而红门禁必须指向真正坏掉的那一处。所有阻塞步骤都用 `SO_RCVTIMEO` 兜住，
+因为 `connect()` 的内核超时是 10 s，会超出任何门禁的合理预算。
+
+承重的断言是 `tcp_listen > 0`。它是本条缺陷的回归护栏：在补上 LISTEN pcb 之前它是稳态
+0，入站 SYN 被回 RST。已验证该断言可失败——同一内核以 `a20.tcpmode=fast` 启动时
+`tcp_listen=0`、门禁转红，以 `a20.tcpmode=lwip` 启动时为 1。模式经**内核命令行**选择
+而非 `/proc/net/config` 写入口，因为服务器第一个 listener 通常由用户态开机创建，shell
+写入口来不及生效。
+
+三个按零断言的计数器是不变量而非统计量：`net_accept_drop`、`net_bh_overflow`、
+`net_alloc_fail` 任一非零，都表示 accept 或收包路径丢弃了它已经接受的数据，这在任何量级
+下都是缺陷。accept 计数只记录不断言，因为一次运行里 accept 多少次取决于客户端重试时序。
+
+它必须存在：修复之前 `tcp_listen()` 全树从未被调用，`/proc/net/status` 的 `tcp_listen=0`
+是常态，协议栈没有任何对外服务能力（SLIRP hostfwd 实测返回"连接被对方重置"），而当时
+**没有任何门禁跑网络区域**，所以这个状态可以一直不被发现。
+
+失败时查看 `.kernel-build/smoke/net-accept-riscv64.log`，对照
+`kernel/net/socket_control.c` 的 `net_listen()`（两档分派）与
+`kernel/net/socket_inet.c` 的 `net_inet_tcp_listen()` / `lwip_tcp_accept_cb()` /
+`net_inet_accept_stage_drain()`。门禁会在失败时打印 `passes` 与四个计数器值。
+
+### network_suite 的判定语义：declared-absent
+
+`network_suite` 的子测试退出码契约里新增了一个判定：**declared-absent**（`may_skip`
+是"本次运行的环境没有覆盖该能力"，属于**运行**的事实；`known_absent` 是"项目已决定
+不做该能力"，属于**树**的事实，门禁本该把它钉住）。
+
+AF_ALG 是后者的典型：它刻意不提供任何算法（见 `kernel/net/socket_alg.c`），`bind()` 必然
+失败，`alg_test` 如实返回 78（ABSENT）。此前套件把 ABSENT 一律当失败，于是
+`smoke-network-suite` 在 `main` 上就已经是红的——网络栈无论怎么改都不可能让它变绿，
+一个永远红的门禁等于没有门禁。改为：`known_absent` 的 ABSENT 结果是**被断言的状态**，
+按名字报告并单独计数，不计入退出码。
+
+fail-closed 在两个方向都保留：未声明 `known_absent` 的测试一旦 ABSENT 仍然让套件失败；
+已声明的测试若开始通过（能力落地了），报告 `PRESENT(expected-absent)` 并提示删除
+过期声明，而不是静默腐烂。
+
 ### poll / timer 边界语义（Linux ABI poll 与 timer 区域）
 
 `make smoke-poll-edge`、`make smoke-timer-edge` 覆盖两组边界语义。`poll_edge.c` 十二组：poll 超时边界与 POLLNVAL/HUP/ERR、select 语义与结果集剪枝、ppoll 超时与 sigsetsize/负时间 EINVAL、epoll 参数校验、嵌套 epoll 的 ELOOP 环路拒绝、dup 共享 interest list、ET/LT、EPOLLONESHOT、HUP+数据、epoll_pwait2 亚毫秒向上取整、eventfd 计数/信号量/溢出边沿。`timer_edge.c` 十二组：timer_create 的 clockid 与 sigev 校验、settime/gettime 剩余时间、TIMER_ABSTIME、overrun 计数、delete 后不再投递、timerfd 基础语义、TFD_TIMER_CANCEL_ON_SET、itimer REAL/VIRTUAL/PROF 实际投递、clock_nanosleep 相对与 ABSTIME、EINTR + remaining。这两组是把覆盖表 poll/timer 区域提升到 `full` 的依据（`nanosleep` 的 restart 语义仍是记录在案的 partial）。

@@ -1,6 +1,6 @@
 # A20OS 服务器就绪度评估
 
-最后核实：2026-09（`server-hardening` 分支）。下文按服务器部署视角列出 A20OS 的
+最后核实：2026-10（`feat/net-lanes`）。下文按服务器部署视角列出 A20OS 的
 当前能力边界、已知的结构性限制，以及按严重度排序的阻塞项；每条都给出文件位置，
 便于自行复核。
 
@@ -9,15 +9,23 @@
 ## 一句话结论
 
 A20OS 已经是一个认真的内核，但**当前形态是「QEMU 上的桌面/研究内核」**，
-不是「服务器内核」。差距不在功能数量，而在三个结构性问题：网络数据面
-被单一全局锁串行化、容器隔离的前置件（PID/userns/pivot_root）缺失、
-真机 PCIe 可用性受硬编码 QEMU 假设限制。
+不是「服务器内核」。差距不在功能数量，而在四个结构性问题：入站 TCP 此前完全
+不通、网络数据面被单一全局锁串行化、容器隔离的前置件（PID/userns/pivot_root）
+缺失、真机 PCIe 可用性受硬编码 QEMU 假设限制。
 
-网络这一项最近有实质进展：收包路径的**内存模型**已经被认定为比全局锁更根本的
-瓶颈并修掉了（见第二节第 0 条），此前把归因指向读路径是错的。当前剩下的最大
-单项是 `g_net_lock` 分片，其次才是 `g_lwip_lock` 本身。需要强调的是：所有性能
-数字都来自 QEMU TCG，`lwip` 自旋计数在该环境下噪声极大（同一负载四次运行跨越
-0 到 920024），因此本文件不再以自旋数量作为任何结论的依据。
+第一条是本轮最大发现，且**已修**：`net_listen()` 此前丢弃已绑定的 PCB，
+`tcp_listen()` 全树从未被调用，所以 listener 从来不存在于 lwIP 里，入站 SYN
+一律被回 RST——协议栈没有任何对外服务能力。现在 `net_listen()` 按 `a20.tcpmode`
+分两档，`lwip` 档会把绑定 PCB 转成真正的 LISTEN pcb；端到端实测（SLIRP
+hostfwd 指向 guest telnetd）从"连接被对方重置"变为拿到可用 shell。**默认仍是
+`fast` 档、行为不变**，服务器需显式选 `a20.tcpmode=lwip`。详见第二节。
+
+网络这一项另有实质进展：收包路径的**内存模型**已经被认定为比全局锁更根本的
+瓶颈并修掉了（见第二节），此前把归因指向读路径是错的——真正的解释是
+`net_stress_test` 根本不经过 TCP 路径（见第二节"从没有测过 TCP"一条）。
+当前剩下的最大单项是 `g_net_lock` 分片，其次才是 `g_lwip_lock` 本身。需要强调
+的是：所有性能数字都来自 QEMU TCG，`lwip` 自旋计数在该环境下噪声极大（同一负载
+四次运行跨越 0 到 920024），因此本文件不再以自旋数量作为任何结论的依据。
 
 在下面的阻塞项收敛之前，把数据库或不受信任的工作负载放上去是不安全的。
 
@@ -429,7 +437,7 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |
-| P0 | `proc_lock` 超长持有的成因未定 | **只证伪了一半**。已证伪"被抢占"（成立）：全树 69 处 `proc_lock` 获取全部走 `spin_lock_irqsave`，无一处关中断之外；持锁临界区内无任何 `sched()`/`proc_yield()`。所以持有者确实在长时间执行。但**"成因类别已确定"这个说法不成立，本条已撤回**：先前据"持锁临界区里做全系统遍历"推出的 4 处候选，经核对在实测负载下基本不会执行：`net_stress_test` 的 `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；`proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，而门禁只 cat `/proc/a20/perf` 与 `lock_contention`。更关键的是计数器自启动起累计、没有 reset 入口，所以那个 905K–136 万自旋的单次极值可能发生在引导期而非压力期。结论：成因仍未定位，且现有门禁的观测窗口本身有缺陷，需先给计数器加 reset 以便把引导期与压力期分开 |
+| P0 | `proc_lock` 超长持有的成因未定 | **只证伪了一半**。已证伪"被抢占"（成立）：全树 69 处 `proc_lock` 获取全部走 `spin_lock_irqsave`，无一处关中断之外；持锁临界区内无任何 `sched()`/`proc_yield()`。所以持有者确实在长时间执行。但**"成因类别已确定"这个说法不成立，本条已撤回**：先前据"持锁临界区里做全系统遍历"推出的 4 处候选，经核对在实测负载下基本不会执行：`net_stress_test` 的 `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；`proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，而门禁只 cat `/proc/a20/perf` 与 `lock_contention`。更关键的是计数器自启动起累计、没有 reset 入口，所以那个 905K–136 万自旋的单次极值可能发生在引导期而非压力期。结论：成因仍未定位。**观测窗口缺陷已修**：`/proc/a20/{perf,lock_contention}` 现有 `reset` 写入口（`feat/net-lanes`），门禁可前后各读一次求差；`lock_counters_reset()` 连 `contended_max_spins` 一起清零，因为 reset 之后要回答的是"本窗口内的最大值" |
 | P2 | virtio-fs/DAX | 共享存储 |
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |
