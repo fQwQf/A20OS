@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 
 #include "abi/linux/syscall_entry.h"
+#include "core/arch.h"
 #include "core/mman.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -519,7 +520,7 @@ int64_t sys_nfsservctl(int cmd, const void *arg, void *res)
  * x86_64; every other architecture keeps Linux's arch-correct -ENOSYS. */
 int64_t sys_map_shadow_stack(uint64_t addr_hint, uint64_t size, unsigned flags)
 {
-#ifndef CONFIG_X86_64
+#if !ARCH_HAS_SHADOW_STACK
     (void)addr_hint;
     (void)size;
     (void)flags;

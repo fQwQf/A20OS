@@ -166,6 +166,11 @@ static inline int arch_pt_level_entries(int level)
 # define ARCH_HAS_SAFE_IDLE_WAIT 0
 #endif
 
+/* CET shadow stack (map_shadow_stack(2)).  Only x86_64 advertises it. */
+#ifndef ARCH_HAS_SHADOW_STACK
+# define ARCH_HAS_SHADOW_STACK 0
+#endif
+
 #ifndef ARCH_IDLE_CONTEXT_STATIC
 # define ARCH_IDLE_CONTEXT_STATIC(name, count)
 # define ARCH_IDLE_STACK(contexts, cpu) kmalloc(KERNEL_STACK_SIZE)
