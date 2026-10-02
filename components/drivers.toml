@@ -134,3 +134,9 @@ name = "usb-storage"
 source = "kernel/drvmod/examples/usb_storage.c"
 arches = ["x86_64", "aarch64", "loongarch64"]
 description = "USB mass-storage class driver"
+
+[[driver]]
+name = "usb-hub"
+source = "kernel/drvmod/examples/usb_hub.c"
+arches = ["x86_64", "aarch64", "loongarch64"]
+description = "USB hub class driver"
