@@ -372,6 +372,63 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-fork-exec-race: PASS; log saved to $log',
     },
+    # Page-table cursor race gate.
+    #
+    # anonprov=4096 is load-bearing, not decoration: mm_pt_provision_anon() is
+    # the only source of a cursor whose covering level is > 0, and it is off by
+    # default.  Drop the -append and no wide cursor is ever created, so the
+    # wide-vs-narrow leaf collision never occurs and this gate silently stops
+    # testing anything.  SMP=8 lets those cursors be in flight on several CPUs.
+    #
+    # A PASS is NOT evidence that the cursor leaf lock is race-free.  Both
+    # mm_pt_provision_anon() and the fault path still hold mm->lock, so they
+    # serialise and cannot collide yet; this is a hang/crash/audit-drift gate
+    # until the fault path leaves mm->lock, and only then a race gate.  The
+    # covering-node-only design satisfied every presence-style gate while being
+    # wrong for exactly this reason.
+    #
+    # The MM-ASM line, not MM_STRESS: PASS, is the evidence: it is the
+    # bidirectional audit of per-PTE status against the hardware page tables
+    # over every live address space, and all-zero means the two representations
+    # never diverged.
+    'smoke-mm-pt-race': {
+        'gate': {'mem': '1G', 'cpus': '8'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=8'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-pt-race-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  # The leading perf read is what ARMS collection, not a
+                  # measurement: a20_perf_format() sets g_a20_perf_enabled and
+                  # only then snapshots, so counters read dormant read 0 no
+                  # matter what the workload did.  Reading once after the
+                  # workload therefore reports zeros for everything -- which is
+                  # exactly how this case came to look like dead code.
+                  'lines': ['cat /proc/a20/perf', 'mm_stress --wide-cursor-only',
+                            'cat /proc/a20/anonprov', 'cat /proc/a20/perf',
+                            'poweroff']},
+        'timeout': '240s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '8', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf', '-append', 'a20.anonprov=4096'],
+        'expect': [
+            # --wide-cursor-only exits after this phase, so MM_STRESS: PASS is
+            # not printed and must not be expected here.
+            'MM_WIDE_CURSOR: PASS',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 safe=0',
+            # Non-vacuity for the status fast path, asserted rather than assumed.
+            # This gate is the only thing standing between "green" and "the fast
+            # path never ran": the workload exits without printing fault counters,
+            # and without anonprov a provisioned range is never consumed, so the
+            # phase this item is about would be dead code and still pass.  Same
+            # trap that made smoke-mm-stress pass while testing nothing.
+            r'mm_fault_from_status: [1-9]',
+        ],
+        # The per-CPU pool overflow and the self-deadlock detector in
+        # mcs_lock() both announce themselves; either firing means the cursor
+        # lock discipline is unbalanced.
+        'forbid': ['MCS DEADLOCK', 'already_holding', 'page-table lock nesting exceeded'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-pt-race: PASS; log saved to $log',
+    },
     'smoke-mm-stress': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

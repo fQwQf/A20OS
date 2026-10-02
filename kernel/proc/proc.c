@@ -600,7 +600,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         mm->stack_top   = stack_top ? stack_top : sp;
         mm->stack_bottom = mm->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
         mm->total_vm    = total_vm;
-        mm->rss         = 0;
+        mm_rss_set(mm, 0);
         spin_init(&mm->lock);
         spin_set_debug(&mm->lock, "mm", mm);
         mutex_init(&mm->tlb_lock);

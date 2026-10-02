@@ -377,7 +377,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
                 }
                 if (flags & PTE_X)
                     arch_flush_icache_range(frame, PAGE_SIZE);
-                mm->rss++;
+                mm_rss_add(mm, 1);
             }
         }
 #endif
@@ -424,7 +424,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
                         pte_to_vm_flags(flags), flags, false);
         if (r < 0)
             return r;
-        mm->rss++;
+        mm_rss_add(mm, 1);
         anon_start = page + PAGE_SIZE;
     } else {
         anon_start = file_end;

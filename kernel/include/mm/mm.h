@@ -14,6 +14,7 @@ struct mm_struct;
 void mm_init(void);
 void *frame_alloc(void);
 void *frame_alloc_nz(void);
+void *frame_alloc_nr(void);
 void frame_free(void *addr);
 size_t frame_free_count(void);
 

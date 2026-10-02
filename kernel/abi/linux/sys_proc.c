@@ -802,7 +802,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
             mm_pt_audit_all(&rep);
             kinfo("[MM-ASM] pt_pages=%lu entries=%lu missing_meta=%lu "
                   "present=%lu absent=%lu prot=%lu cow=%lu vma=%lu "
-                  "safe=%lu anon_virt=%lu\n",
+                  "vmai=%lu safe=%lu anon_virt=%lu\n",
                   (unsigned long)rep.pt_pages, (unsigned long)rep.entries,
                   (unsigned long)rep.missing_meta,
                   (unsigned long)rep.present_mismatch,
@@ -810,6 +810,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)rep.prot_mismatch,
                   (unsigned long)rep.cow_mismatch,
                   (unsigned long)rep.vma_mismatch,
+                  (unsigned long)rep.vmai_mismatch,
                   (unsigned long)rep.safe_mismatch,
                   (unsigned long)rep.anon_virt);
         }
