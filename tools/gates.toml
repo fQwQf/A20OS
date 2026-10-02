@@ -1022,6 +1022,35 @@ fixed = true
 pattern = "pfa_alloc_flags(0, 0)"
 files = ["kernel/mm/mm.c"]
 
+# The MCS handoff, pinned in all three parts.  This path did not run at all until
+# Phase 3: mm->lock serialised whole faults, so the node locks were never
+# contended and two independent fatal bugs sat there unnoticed -- the waiter was
+# never linked into the queue, and the unlocker recovered its own node from a
+# shared field that every acquirer overwrote.  Either one wedges the node
+# permanently on first contention, with no MCS DEADLOCK report, because the
+# waiter is not self-deadlocked -- it waits for a handoff the protocol cannot
+# produce.  A regression here is invisible in review and in the pre-Phase-3
+# workload, so it is pinned mechanically instead.
+#
+# 1. the waiter publishes itself to its predecessor
+[[gate.assertion]]
+fixed = true
+pattern = "((pt_mcs_node_t *)tail)->next"
+files = ["kernel/mm/pt.c"]
+
+# 2. the unlocker takes its OWN node from its per-CPU pool, never the shared
+#    m->node that every acquirer overwrites
+[[gate.assertion]]
+fixed = true
+pattern = "me = &pool->nodes[pool->depth - 1]"
+files = ["kernel/mm/pt.c"]
+
+# 3. losing the unlock CAS hands off to the successor instead of dropping it
+[[gate.assertion]]
+fixed = true
+pattern = "while (__atomic_load_n(&me->next, __ATOMIC_ACQUIRE) == 0)"
+files = ["kernel/mm/pt.c"]
+
 # Intent anchor: the reason the child-node allocator is the non-reclaiming one
 # is stated at the call site, not just implied by the function name.
 [[gate.assertion]]
