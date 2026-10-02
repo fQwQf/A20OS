@@ -242,6 +242,40 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:185`）这个代际标志，�
 `sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES` 的 `_Static_assert` 已经覆盖
 ring size 与 inline payload，所以再加聚合断言是同义反复。
 
+### 阶段 C 的实际代价：三个计时器全局量不是同一个性质
+
+把计时器按 lane 切开的直觉做法是"每个 lane 一份 `tcp_timer` / `tcp_timer_ctr` /
+`tcp_ticks`"。审计之后这个做法不成立，因为这三个量的耦合程度不同，而且**其中一个根本
+不是计时器私有的**：
+
+- `tcp_timer`（快慢交替的奇偶计数）与 `tcp_timer_ctr`（本轮去重）确实只被 timer 读，
+  只在 `tcp_fasttmr` / `tcp_slowtmr` 里出现（`tcp.c:241,1250,1256,1547,1549`），
+  按 lane 切开是自洽的。
+- `tcp_ticks` **不是**。它是整个协议栈的共享时基，而且在**收包与发包路径**上被写入：
+  `pcb->tmr = tcp_ticks`（`tcp_in.c:805,885`）、`pcb->rttest = tcp_ticks`
+  （`tcp_out.c:1543`）。读它的地方包括 keepalive、zero-window probe、persist、
+  ooseq 超时、TIME_WAIT 的 MSL（`2 * TCP_MSL / TCP_SLOW_INTERVAL`）以及 RTT 估算。
+
+所以按 lane 切 `tcp_ticks` 不是"把计时器分片"，而是**换掉时基**。它只有在
+"盖时间戳"和"读时间戳"永远取同一个 lane 的计数器时才正确：盖戳发生在收包路径，而
+收包路径正是用同一个哈希找到 pcb 的，lane 天然一致——所以这条路走得通。但代价是要动
+`tcp.c`、`tcp_in.c`、`tcp_out.c`、`tcp_priv.h` 四个文件，改到 RTO、keepalive、
+zero-window probe、ooseq、TIME_WAIT、RTT 每一处经过时间差计算的地方。任何一处
+漏改的后果不是编译错误，而是**算错经过时间**：多余的 RTO、过早的 TIME_WAIT 回收、
+失联的 keepalive、被污染的 RTT 估计。
+
+结论：`tcp_timer` 与 `tcp_timer_ctr` 可以按 lane 切（它们自洽），`tcp_ticks` 应当
+**保持全局**——它本来就是墙钟量，与 lane 无关，切开只会引入算错的窗口。这也是为什么
+当前实现选择"共享计数器 + 切分遍历"：遍历是每包的主要开销，而计数器不是。
+
+已落地部分（`2b3a8b22`）：`tcp_fasttmr` / `tcp_slowtmr` 已拆成单 bucket 遍历函数，
+外层保留原来的 lane 循环与"回到 lane 0 重来"的语义，因此行为完全未变，`smoke-net-lanes-n1`
+（1 lane 与 4 lane 跑 `net_stress_test` 要求逐字节相同的结论）通过。per-lane 入口
+刻意**还没有**导出——先把无调用者的 API 摆在那里是投机式泛用，等第一个真实调用者
+一起落地。
+
+尚未落地：per-lane 入口与它的调用者、TIME_WAIT 的分片、per-lane pbuf 池。
+
 ## 阶段 D：收包引导
 
 单 NIC ring 的**排空**天然串行（一把锁、一个 ring），但**协议栈处理**并不，而后者才是

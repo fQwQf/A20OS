@@ -186,9 +186,16 @@ struct tcp_pcb **const tcp_pcb_lists[] = {(struct tcp_pcb **)tcp_listen_pcbs, tc
 
 u8_t tcp_active_pcbs_changed;
 
-/** Timer counter to handle calling slow-timer from tcp_tmr() */
-static u8_t tcp_timer;
-static u8_t tcp_timer_ctr;
+/** Timer counters, one pair per lane.
+ *
+ * These two are per-lane because nothing outside the timer reads them, and
+ * because each lane walks only its own bucket: a pcb is compared against, and
+ * stamped with, the counter of the lane that owns it, so the dedup stays exact
+ * even though every lane advances independently.  tcp_ticks below is NOT in
+ * this set -- it is the stack's wall clock and is written from the packet
+ * paths; see docs/net/net-lanes.md. */
+static u8_t tcp_timer[NET_PCB_LANE_BUCKETS];
+static u8_t tcp_timer_ctr[NET_PCB_LANE_BUCKETS];
 static u16_t tcp_new_port(void);
 
 static err_t tcp_close_shutdown_fin(struct tcp_pcb *pcb);
@@ -238,7 +245,7 @@ tcp_tmr(void)
   /* Call tcp_fasttmr() every 250 ms */
   tcp_fasttmr();
 
-  if (++tcp_timer & 1) {
+  if (++tcp_timer[0] & 1) {
     /* Call tcp_slowtmr() every 500 ms, i.e., every other timer
        tcp_tmr() is called. */
     tcp_slowtmr();
@@ -1222,26 +1229,21 @@ tcp_connect(struct tcp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port,
  *
  * Automatically called from tcp_tmr().
  */
-void
-tcp_slowtmr(void)
+/** Walk one lane bucket of the active pcbs for the current tick.
+ *
+ * The changed-list case is reported rather than restarted with a goto for the
+ * same reason as tcp_fasttmr_bucket(): a caller owning one lane restarts only
+ * its own bucket, while tcp_slowtmr() restarts from lane 0 as it always has.
+ */
+static u8_t
+tcp_slowtmr_active_bucket(int lane)
 {
   struct tcp_pcb *pcb, *prev;
   tcpwnd_size_t eff_wnd;
   u8_t pcb_remove;      /* flag if a PCB should be removed */
   u8_t pcb_reset;       /* flag if a RST should be sent when removing */
-  err_t err;
-  int lane;
+  err_t err = ERR_OK;
 
-  err = ERR_OK;
-
-  ++tcp_ticks;
-  ++tcp_timer_ctr;
-
-tcp_slowtmr_start:
-  /* Steps through all of the active PCBs, one lane bucket at a time.  The
-     restart label is in front of the lane loop, so a callback that changed the
-     lists makes the next round start from lane 0 again. */
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
   prev = NULL;
   pcb = tcp_active_pcbs[lane];
   if (pcb == NULL) {
@@ -1252,13 +1254,13 @@ tcp_slowtmr_start:
     LWIP_ASSERT("tcp_slowtmr: active pcb->state != CLOSED", pcb->state != CLOSED);
     LWIP_ASSERT("tcp_slowtmr: active pcb->state != LISTEN", pcb->state != LISTEN);
     LWIP_ASSERT("tcp_slowtmr: active pcb->state != TIME-WAIT", pcb->state != TIME_WAIT);
-    if (pcb->last_timer == tcp_timer_ctr) {
+    if (pcb->last_timer == tcp_timer_ctr[lane]) {
       /* skip this pcb, we have already processed it */
       prev = pcb;
       pcb = pcb->next;
       continue;
     }
-    pcb->last_timer = tcp_timer_ctr;
+    pcb->last_timer = tcp_timer_ctr[lane];
 
     pcb_remove = 0;
     pcb_reset = 0;
@@ -1446,7 +1448,7 @@ tcp_slowtmr_start:
       tcp_active_pcbs_changed = 0;
       TCP_EVENT_ERR(last_state, err_fn, err_arg, ERR_ABRT);
       if (tcp_active_pcbs_changed) {
-        goto tcp_slowtmr_start;
+        return 1;
       }
     } else {
       /* get the 'next' element now and work with 'prev' below (in case of abort) */
@@ -1461,7 +1463,7 @@ tcp_slowtmr_start:
         tcp_active_pcbs_changed = 0;
         TCP_EVENT_POLL(prev, err);
         if (tcp_active_pcbs_changed) {
-          goto tcp_slowtmr_start;
+          return 1;
         }
         /* if err == ERR_ABRT, 'prev' is already deallocated */
         if (err == ERR_OK) {
@@ -1470,6 +1472,24 @@ tcp_slowtmr_start:
       }
     }
   }
+  return 0;
+}
+
+void
+tcp_slowtmr(void)
+{
+  struct tcp_pcb *pcb, *prev;
+  u8_t pcb_remove;      /* flag if a PCB should be removed */
+  int lane;
+
+  ++tcp_ticks;
+
+tcp_slowtmr_start:
+  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+    ++tcp_timer_ctr[lane];
+    if (tcp_slowtmr_active_bucket(lane)) {
+      goto tcp_slowtmr_start;
+    }
   }
 
 
@@ -1516,22 +1536,24 @@ tcp_slowtmr_start:
  *
  * Automatically called from tcp_tmr().
  */
-void
-tcp_fasttmr(void)
+/** Walk one lane bucket of the active pcbs for the current tick.
+ *
+ * The changed-list case is reported rather than restarted with a goto because
+ * the callers want different restart scopes: tcp_fasttmr() restarts from lane 0
+ * as it always has, a caller owning one lane restarts only its own bucket.
+ * Folding the goto back in here would force the latter to re-walk buckets it
+ * does not own. */
+static u8_t
+tcp_fasttmr_bucket(int lane)
 {
   struct tcp_pcb *pcb;
-  int lane;
 
-  ++tcp_timer_ctr;
-
-tcp_fasttmr_start:
-  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
   pcb = tcp_active_pcbs[lane];
 
   while (pcb != NULL) {
-    if (pcb->last_timer != tcp_timer_ctr) {
+    if (pcb->last_timer != tcp_timer_ctr[lane]) {
       struct tcp_pcb *next;
-      pcb->last_timer = tcp_timer_ctr;
+      pcb->last_timer = tcp_timer_ctr[lane];
       /* send delayed ACKs */
       if (pcb->flags & TF_ACK_DELAY) {
         LWIP_DEBUGF(TCP_DEBUG, ("tcp_fasttmr: delayed ACK\n"));
@@ -1553,8 +1575,7 @@ tcp_fasttmr_start:
         tcp_active_pcbs_changed = 0;
         tcp_process_refused_data(pcb);
         if (tcp_active_pcbs_changed) {
-          /* application callback has changed the pcb list: restart the loop */
-          goto tcp_fasttmr_start;
+          return 1;
         }
       }
       pcb = next;
@@ -1562,6 +1583,21 @@ tcp_fasttmr_start:
       pcb = pcb->next;
     }
   }
+  return 0;
+}
+
+void
+tcp_fasttmr(void)
+{
+  int lane;
+
+tcp_fasttmr_start:
+  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+    ++tcp_timer_ctr[lane];
+    if (tcp_fasttmr_bucket(lane)) {
+      /* application callback has changed the pcb list: restart the loop */
+      goto tcp_fasttmr_start;
+    }
   }
 }
 
@@ -1965,7 +2001,12 @@ tcp_alloc(u8_t prio)
     pcb->rtime = -1;
     pcb->cwnd = 1;
     pcb->tmr = tcp_ticks;
-    pcb->last_timer = tcp_timer_ctr;
+    /* Deliberately not stamped with a lane counter: tcp_alloc() runs before
+       tcp_bind() has derived ->lane from local_ip/local_port, so there is no
+       lane to stamp.  A fresh pcb must not look already-processed to whichever
+       lane later adopts it, and the lane walkers only skip on an exact match
+       against their own counter -- so leaving it unequal to every counter is
+       both necessary and sufficient. */
 
     /* RFC 5681 recommends setting ssthresh arbitrarily high and gives an example
     of using the largest advertised receive window.  We've seen complications with
