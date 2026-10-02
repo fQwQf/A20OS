@@ -83,6 +83,15 @@
 
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
 
+关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**元数据与硬件页表是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：
+
+- `missing_meta` / `present` / `absent` / `prot` / `cow` —— 正向：逐条比对"元数据是否与该 PTE 一致"。
+- `vma` —— 正向：每个 VMA 是否至少有一页被元数据认识。
+- `vmai` —— **反向（P8）**：凡是元数据声称有东西的页（Mapped / COW / 已预留未缺页），是否都有 VMA 覆盖。`MM_ST_INVALID` 豁免，因为空洞不是遗漏。正向检查只从 VMA 出发，所以没有这一项时"有状态但无 VMA"的页是不可见的；这也是"VMA 列表是纯派生"这条不变式唯一能漏的地方。
+- `safe` —— `MM_SAFE_NO_FA` 与 `VM_SEALED` 的一致性。
+
+字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race`。
+
 ### I/O 进展
 
 `make check-io-progress-model` 检查 `KERNEL_PROGRESS_SERVICE_CONTRACT`、progress bottom-half 调用点、`LWIP_NO_THREAD_PROGRESS_CONTRACT`、virtio-net 非阻塞路径；禁止在 `kernel/proc/sched.c` 或 `kernel/proc/proc.c` 中直接调用 `virtio_blk_poll_all` 或 `a20_lwip_poll`。
