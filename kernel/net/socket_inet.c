@@ -3,6 +3,7 @@
 #include "proc/proc.h"
 #include "proc/signal.h"
 #include "core/klog.h"
+#include "core/perf.h"
 #include "core/string.h"
 #include "core/timer.h"
 
@@ -302,6 +303,7 @@ static net_bh_event_t *bh_ring_consume(net_bh_ring_t *r)
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_RELAXED);
     if (head == tail)
         return NULL;
+    a20_perf_count(A20_PERF_NET_BH_EVENTS);
     return &r->events[bh_ring_mask(tail)];
 }
 
@@ -432,6 +434,7 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
          * as "I ate it" and leaves the pbuf alone.  Returning 0 here while
          * freeing made the caller free the same pbuf a second time, which is
          * the mirror image of the send-side double free fixed earlier. */
+        a20_perf_count(A20_PERF_NET_BH_OVERFLOW);
         pbuf_free(p);
         return 1;
     }
@@ -685,6 +688,7 @@ void net_inet_bottom_half_process_all(void)
      * racing after this check simply stays pending for the next switch. */
     if (!__atomic_load_n(&g_net_bh_pending_count, __ATOMIC_ACQUIRE))
         return;
+    a20_perf_count(A20_PERF_NET_BH_RUNS);
     for (int i = 0; i < NET_MAX_SOCKETS; i++) {
         if (!__atomic_load_n(&g_net_bh_pending[i], __ATOMIC_ACQUIRE))
             continue;

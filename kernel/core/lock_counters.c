@@ -3,6 +3,7 @@
 #include "core/sync.h"
 #include "core/stdio.h"
 #include "core/kallsyms.h"
+#include "core/string.h"
 #include "mm/slab.h"
 
 /* Fixed registry of the locks the performance audit cares about.  Registration
@@ -134,4 +135,37 @@ size_t lock_counters_format(char *buf, size_t bufsz)
     }
     spin_unlock_irqrestore(&g_lock_counters_lock, flags);
     return off;
+}
+
+/*
+ * Zero every registered lock's counters, keeping the registrations themselves.
+ *
+ * The counters are cumulative since boot with no way to narrow the window, so a
+ * stress spike cannot be told apart from boot-time traffic.  docs/server-readiness.md
+ * records a wrong conclusion drawn from exactly that: an extreme per-acquire
+ * spin count was first attributed to the stress window and had to be retracted
+ * after the boot window was measured separately.  A gate can work around this by
+ * reading the file before and after and subtracting, which is why the existing
+ * gates do that rather than asserting a magnitude; but only the stress program
+ * can subtract, so a reset entry point is what lets one process own the window.
+ *
+ * contended_max_spins is cleared too even though it is a high-water mark: after
+ * a reset, "max over this window" is the useful question, and a stale boot-time
+ * maximum would make every later window look as bad as the worst boot window.
+ */
+void lock_counters_reset(void)
+{
+    uint64_t flags = spin_lock_irqsave(&g_lock_counters_lock);
+    for (int i = 0; i < g_lock_counter_count; i++) {
+        spinlock_t *lock = g_lock_counters[i].lock;
+        __atomic_store_n(&lock->contended_acquires, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&lock->contended_spins, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&lock->contended_max_spins, 0, __ATOMIC_RELAXED);
+        lock_callsite_sample_t *samples =
+            __atomic_load_n(&lock->samples, __ATOMIC_ACQUIRE);
+        if (samples)
+            memset(samples, 0, sizeof(lock_callsite_sample_t) *
+                                LOCK_CALLSITE_SAMPLES);
+    }
+    spin_unlock_irqrestore(&g_lock_counters_lock, flags);
 }
