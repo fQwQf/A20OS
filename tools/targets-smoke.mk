@@ -174,6 +174,9 @@ smoke-vfs-stress:
 smoke-lfs:
 	$(PYTHON) tools/smoke.py smoke-lfs
 
+smoke-pivot-root:
+	$(PYTHON) tools/smoke.py smoke-pivot-root
+
 smoke-vfs-stress-smp2:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp2
 

@@ -354,6 +354,9 @@ void fdtable_close_all(task_t *task)
      * (exit and final task destruction); mntns_release_task() NULLs the
      * field, so the double call is safe. */
     mntns_release_task(task);
+    /* Release the per-process root/cwd references.  Idempotent, so the
+     * exec and exit paths that both reach this hook are safe. */
+    vfs_task_fs_pins_release(task);
     if (!task->files)
         return;
     uint64_t flags = spin_lock_irqsave(&proc_lock);

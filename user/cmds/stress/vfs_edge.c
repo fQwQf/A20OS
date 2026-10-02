@@ -981,8 +981,9 @@ static int umount_edge_cases(void)
     errno = 0;
     r = syscall(SYS_umount2, mp, 0);
     if (r == 0) {
-        /* A20OS keeps cwd as a path string, not a vnode pin: umount under
-         * an active cwd succeeds (documented divergence from Linux EBUSY). */
+        /* The process pins the directory its cwd names, so unmounting the
+         * filesystem it is standing in is refused.  If a build ever lets the
+         * umount through anyway, the follow-up checks still have to hold. */
         if (chdir("/") < 0)
             return fail("umount-chdir-out");
         errno = 0;

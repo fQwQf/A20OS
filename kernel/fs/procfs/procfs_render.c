@@ -1,4 +1,5 @@
 #include "fs/procfs.h"
+#include "fs/vfs/mount.h"
 #include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
@@ -1132,9 +1133,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             const char *fstype = m->fstype[0] ? m->fstype : "unknown";
             const char *dev = m->dev[0] ? m->dev : "none";
             const char *opts = m->opts[0] ? m->opts : "rw";
+            /* Real mount ids and the real parent, straight from the mount
+             * tree.  A mount pivot_root cut loose reports parent 0 and no
+             * root, which is how mountinfo spells "unreachable". */
+            char root_field[MAX_PATH_LEN];
+            if (m->flags & VFS_MOUNT_DETACHED)
+                strncpy(root_field, "none", sizeof(root_field) - 1);
+            else
+                strncpy(root_field, "/", sizeof(root_field) - 1);
+            root_field[sizeof(root_field) - 1] = '\0';
             int n = snprintf(buf + pos, bufsz - pos,
-                "%d %d 0:%d / %s %s - %s %s %s\n",
-                i + 1, i + 1, i + 1, m->path, opts, fstype, dev, opts);
+                "%u %u 0:%u %s %s %s - %s %s %s\n",
+                (unsigned)m->mnt_id, vfs_mount_parent_id(m),
+                (unsigned)m->mnt_id, root_field, m->path, opts,
+                fstype, dev, opts);
             if (n < 0 || (size_t)n >= bufsz - pos) break;
             pos += n;
         }

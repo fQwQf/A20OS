@@ -192,17 +192,18 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 
 1. **8 个 namespace 只有 mount 是真的**，其余 7 个由 `unshare()` 显式返回
    `-EINVAL`。这一点是干净的（`sys_namespace.c:4-7` 明确写了边界）。
-2. `pivot_root` 返回 `-EPERM`，且这不是顺手能补上的空洞。它的语义
-   建立在真实 mount 树之上：把 `new_root` 变成树根、把旧根挂到 `put_old`
-   之下，调用方才能用 `umount2(put_old, MNT_DETACH)` 真正摘掉旧根。但当前
-   `proc_fs_context_t` 只有 `root_path` / `cwd` 两个路径字符串
-   （`kernel/include/proc/proc.h:22-26`），`vfs_move_mount()` 也只是
-   `strncpy` 改写挂载点的路径前缀（`kernel/fs/vfs/mount.c:84-97`），
-   根本没有 `mnt_parent` 链。字符串模型里不存在"把旧根挂到新根之下"这个
-   操作，强写就只能做成一个改 `root_path` 字符串的假动作：调用返回 0，
-   旧根却并没有被隔离，`MNT_DETACH` 无从谈起。因此这里刻意保持
-   fail-closed，而不是提供一个只会骗过容器运行时的 `-EPERM` 替身。
-   真正的前置件是先把 root/cwd 从路径字符串换成真实的 mount 引用。
+2. ~~`pivot_root` 返回 `-EPERM`~~ —— **已补齐**。前置件确实就是先把
+   root/cwd 从路径字符串换成真实引用：现在 `mount_t` 带 `mnt_parent` /
+   `mnt_mp` / `mnt_child` 真实挂载树，`proc_fs_context_t` 带
+   `root_mnt` / `root_vn` / `cwd_vn` 三个引用，`pivot_root` 按 Linux 顺序
+   校验后把旧 root 的 mount 摘出命名空间并标记 `VFS_MOUNT_DETACHED`——
+   旧根此后不可按路径访问，只有 pivot 前打开的 fd 还能读到。
+   `umount2` 的 `MNT_FORCE` / `MNT_DETACH` 也真正转发，busy 判定基于
+   mount 上的引用计数。详见 `docs/fs/vfs-edge-semantics.md` §9.4，
+   门禁 `smoke-pivot-root`。**仍未覆盖**的是共享子树传播
+   （`MS_SHARED` / `MS_PRIVATE` / `MS_SLAVE`），所以 mount 传播语义对
+   容器编排仍然不完整——`pivot_root` 本身可用，但"pivot 之后再让子 mount
+   传播出去"这条链路还没有。
 3. 无 userns、无 `nsproxy`、无完整 capabilities。
 4. 无容器运行时（lxc/runc/nspawn/crun/podman 均无），`packages/world/`
    里没有 server world。

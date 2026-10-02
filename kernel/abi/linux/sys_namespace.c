@@ -44,13 +44,25 @@ int64_t sys_chroot(const char *path)
     /* Check search (execute) permission on the target directory */
     if (vfs_faccessat2(AT_FDCWD, full, X_OK, 0) < 0) return -EACCES;
     if (!proc_has_cap(cur, CAP_SYS_CHROOT)) return -EPERM;
-    strncpy(cur->fs.root_path, full, MAX_PATH_LEN - 1);
-    cur->fs.root_path[MAX_PATH_LEN - 1] = '\0';
-    size_t len = strlen(cur->fs.root_path);
-    while (len > 1 && cur->fs.root_path[len - 1] == '/')
-        cur->fs.root_path[--len] = '\0';
-    cur->fs.cwd[0] = '/';
-    cur->fs.cwd[1] = '\0';
+
+    /* Take the root as objects, not as a string: the directory the process
+     * will be confined to and the mount that backs it.  vfs_task_root_set()
+     * owns both references and resets the cwd to the new root, which is
+     * what Linux does. */
+    vnode_t *vn = vfs_resolve(full);
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
+    char root[MAX_PATH_LEN];
+    strncpy(root, full, sizeof(root) - 1);
+    root[sizeof(root) - 1] = '\0';
+    size_t len = strlen(root);
+    while (len > 1 && root[len - 1] == '/')
+        root[--len] = '\0';
+    vfs_task_root_set(cur, vn->mnt, vn, root);
+    vnode_put(vn);
+    /* The native-ABI shadow follows the Linux root so setns-style namespace
+     * handles describe the same tree. */
+    strncpy(cur->ns_ctx.fs_root, root, MAX_PATH_LEN - 1);
+    cur->ns_ctx.fs_root[MAX_PATH_LEN - 1] = '\0';
     return 0;
 }
 
