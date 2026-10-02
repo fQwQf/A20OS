@@ -183,8 +183,9 @@ static void proc_release_exiting_mm(task_t *t)
     if (t->trap_ctx)
         TRAP_CTX_KScratch0(t->trap_ctx) = kernel_as;
 
-    if (t->cgroup && mm->rss > 0)
-        cg_mem_uncharge(t->cgroup, mm->rss);
+    size_t mm_rss = mm_rss_get(mm);
+    if (t->cgroup && mm_rss > 0)
+        cg_mem_uncharge(t->cgroup, mm_rss);
 
     if (t->cgroup && mm->pgdir) {
         size_t swapped = 0;
