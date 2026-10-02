@@ -251,10 +251,14 @@ tcp_input(struct pbuf *p, struct netif *inp)
      for an active connection. */
   prev = NULL;
 
-  /* An established pcb is bucketed by hash(local_ip, local_port), and for an
-     inbound segment those are the destination address and the source port, so
-     one bucket holds every pcb this segment could belong to. */
-  pcb_lane = NET_PCB_LANE_OF(ip_current_dest_addr(), tcphdr->src);
+  /* A pcb is bucketed by hash(local_ip, local_port).  An inbound segment is
+     always addressed to the pcb's local endpoint, so its destination address
+     and destination port ARE local_ip and local_port -- for every state, not
+     just ESTABLISHED.  Hashing the source port instead therefore looked in a
+     bucket chosen by the peer's ephemeral port, so a pcb was found only when
+     that random port collided with its own bucket: about 1 in NET_LANES.
+     One lane hid it completely, since every bucket is 0. */
+  pcb_lane = NET_PCB_LANE_OF(ip_current_dest_addr(), tcphdr->dest);
   listen_lane = pcb_lane;
 
   for (pcb = tcp_active_pcbs[pcb_lane]; pcb != NULL; pcb = pcb->next) {

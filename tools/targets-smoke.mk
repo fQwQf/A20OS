@@ -658,3 +658,57 @@ smoke-net-accept:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# Real LISTEN pcb create/close at NET_LANES>1.
+#
+# smoke-net-accept runs tcp_accept_test twice at NET_LANES=1, and
+# smoke-net-lanes drives net_stress_test, which never opens a LISTEN pcb.
+# So nothing gated the path where a listener is registered into a hashed lane
+# bucket, matched by an inbound segment, and torn down -- the path that hid two
+# bugs:
+#
+#   16304db8  tcp_pcb_remove() callers pre-indexed by lane while TCP_RMV()
+#             indexed again, so a removal walked bucket 2L, out of bounds for
+#             the wildcard lane.  Lane 0 self-cancels, so NET_LANES=1 is blind.
+#   f7f3d670  tcp_input() hashed the segment's source port to pick a pcb's
+#             bucket, so a listener matched only when the peer's random
+#             ephemeral port collided with it: about 1 in NET_LANES.
+#
+# Both are silent at NET_LANES=1.  This runs one connection per lane on a
+# 4-lane build with CONFIG_NET_PCB_SANE=1, so a misfiled or mis-spliced pcb
+# fails as an assertion at the point of the mistake rather than as a fault far
+# downstream -- or, for the lookup bug, as a plain missed connection.
+smoke-net-tcp-lanes: NET_HOSTFWD=
+smoke-net-tcp-lanes:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1" dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-tcp-lanes-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); \
+	  for p in 12401 12402 12403 12404 12405 12406 12407 12408; do echo "tcp_accept_test $$p"; sleep 1; done; \
+	  echo 'cat /proc/net/status'; \
+	  echo poweroff; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 || status=$$?; \
+	passes=$$(grep -c 'TCP_ACCEPT_TEST: PASS' "$$log" || true); \
+	lanes_line=$$(awk '/^lanes: count=4 /{line=$$0} END{print line}' "$$log"); \
+	if [ "$$passes" -eq 8 ] && \
+	   [ -n "$$lanes_line" ] && \
+	   ! grep -q 'tcp_pcbs_sane' "$$log" && \
+	   ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-tcp-lanes: PASS (8 real LISTEN pcbs created, matched and closed, one per lane; PCB list checker compiled in and silent); log saved to $$log"; \
+		echo "  $$lanes_line"; \
+	else \
+		echo "smoke-net-tcp-lanes: failed with status $$status (passes=$$passes of 8; list-checker hits=$$(grep -c 'tcp_pcbs_sane' "$$log" || true))"; \
+		grep -E 'TCP_ACCEPT_TEST: FAIL' "$$log" || echo "  (no per-port FAIL line; see log tail)"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
