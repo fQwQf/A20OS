@@ -147,11 +147,25 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
         return -EACCES;
     }
     /* Install into THIS task's table; the install consumes the lookup
-     * reference.  Envelope mediation keyed by the (foreign) fd number made
-     * no sense cross-task and is skipped here; the capability checks above
-     * are the authority. */
+     * reference. */
     int r = fdtable_install_vfile(self, target_file, (int)flags);
     proc_put(target);
+    if (r < 0)
+        return r;
+    /* A7 acquire side: the stolen descriptor is a fresh authority entering
+     * this task, so the receiver's envelope decides whether it may be used
+     * (docs/research/05 §2.5.1).  Mediation keys on the NEW fd number, which
+     * is a current-task gfd exactly like on the SCM_RIGHTS receive path -- the
+     * foreign fd number it came from never needs to be meaningful.  A denied
+     * fd is closed rather than left installed, so a denial cannot be
+     * side-stepped by using the number afterwards. */
+    if (env_active(self)) {
+        int mr = env_mediate_acquire_gfd(r);
+        if (mr) {
+            fdtable_close_current(r);
+            return mr;
+        }
+    }
     return r;
 }
 
