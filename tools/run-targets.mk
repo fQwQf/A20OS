@@ -66,6 +66,20 @@ pc-rescue-iso: dev-build
 	tools/mk_grub_iso.sh $(KERNEL_ELF) build/x86_64-pc/a20os-rescue.iso
 	@echo "rescue ISO ready: build/x86_64-pc/a20os-rescue.iso"
 
+# The same content as the ISO, on a real GPT disk, so a VM or a machine boots it
+# as a hard disk instead of as optical media.  This is the shape the aarch64
+# VirtualBox image already has, so both architectures hand an operator one disk
+# to attach rather than one thing that has to be mounted first.
+#
+# UEFI rather than BIOS, for the reason docs/platforms/x86_64-pc.md gives: most
+# current machines are UEFI-only with no CSM, and kernel/boot/uefi/ has an
+# aarch64 loader with no x86_64 one, so GRUB is the only path covering them.
+pc-rescue-disk: dev-build
+	@mkdir -p build/x86_64-pc
+	tools/mk_grub_disk_image.sh \
+		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(FAT32_IMG)
+	@echo "rescue disk ready: build/x86_64-pc/a20os-rescue-disk.img"
+
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.
 # The load address is read back out of the ELF by the script, so a board that

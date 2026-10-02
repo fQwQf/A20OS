@@ -1,0 +1,55 @@
+# VirtualBox x86_64：可直接启动的磁盘镜像（不是 ISO）。
+#
+# Replaces the optical-media shape: the artifact is a raw GPT disk with one FAT32
+# EFI System Partition holding GRUB, the kernel and the FAT32 root.  That is the
+# same form the aarch64 VirtualBox image already produces, so both architectures
+# hand an operator one disk to attach rather than something to mount first.
+#
+# Boots via UEFI, which is what makes the form match aarch64: most current
+# machines are UEFI-only with no CSM option.
+#
+# It boots the kernel and stops there.  Measured, not assumed: under OVMF this
+# image reaches "[INIT] System ready" with a correct 992 MiB RAM map and then
+# panics with "init: no init program found", because UEFI keeps the RSDP in its
+# configuration table, GRUB does not fill the multiboot ACPI tag, and
+# kernel/boot/uefi/ has no x86_64 loader to receive it.  With no RSDP there is no
+# MCFG, so PCI falls back to a hardcoded ECAM window that holds no devices and no
+# block driver binds.  The boot log says so rather than failing quietly:
+#
+#   [PCI] no MCFG (UEFI), using the q35 default 0x... -- UEFI without an x86_64
+#   stub cannot work
+#
+# So today vbox-iso-x86_64 is the instance that reaches userspace: it goes
+# through BIOS, where SeaBIOS publishes the RSDP in a region the kernel already
+# scans.  This instance is the unified *form* the two architectures were asked to
+# share, and it becomes the working one the moment an x86_64 EFI stub exists --
+# which is a loader, not a driver, and is the outstanding work.
+name = "vbox-x86_64"
+description = "VirtualBox x86_64 directly bootable UEFI disk image"
+arch = "x86_64"
+board = "qemu-virt-x86_64"
+abi = "both"
+
+[package]
+kind = "grub-disk"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 5
+boot_timeout = "180s"
+# Both probes are the regression guard.  [RAM] usable means the memory map was
+# parsed, which is also the step that feeds the PFA; [BOOTARGS] multiboot means
+# the cmdline path ran, and on a real firmware fw_cfg is absent so only the
+# multiboot line can carry a20.* settings.
+#
+# There is deliberately no [FDT] line: only riscv64 and loongarch parse a device
+# tree, and this is legacy firmware with no DT to parse.
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
+# Replace /dev/sdX with the target file.  media.py refuses to write a mounted
+# device and refuses one whose name does not match the image, which is what keeps
+# a mistyped /dev/sda from being overwritten.
+boot_media = ["build/x86_64-pc/a20os-rescue-disk.img"]
+media_device = "/dev/sdX"
