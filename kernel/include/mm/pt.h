@@ -34,18 +34,26 @@
  *     where no mutation follows.
  *
  *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES names the functions that break rule 1
- *     today, with the lock that is actually holding them safe.  The list is
- *     not decoration: removing mm->lock from a fault path without emptying it
- *     turns each entry from "serialised by mm->lock" into a concurrent
- *     unlocked RMW against cursor-locked faults on the same leaf.  That is not
- *     hypothetical -- it is what the Phase 3 attempt hit (see
- *     docs/roadmap/single-level-mm-model.md 11.7 item 1).  A new bypass has to
- *     be added here, which is what makes it a decision rather than an oversight;
- *     check-mm-pt-lock-order asserts the list still matches the code.
+ *     today, with what is actually holding them safe.  The list is not
+ *     decoration: removing mm->lock from a fault path without accounting for it
+ *     turns each entry into a concurrent unlocked RMW against cursor-locked
+ *     faults on the same leaf.  That is not hypothetical -- it is what the
+ *     Phase 3 attempt hit (see docs/roadmap/single-level-mm-model.md 11.7
+ *     item 1).  A new bypass has to be added here, which is what makes it a
+ *     decision rather than an oversight; check-mm-pt-lock-order asserts the list
+ *     still matches the code.
  *
  *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES
- *       pt_unmap_leaf   mm.c    bare walk; callers hold mm->lock only
- *       pt_unmap        mm.c    bare walk; callers hold mm->lock only
+ *       pt_unmap_leaf   mm.c   no cursor; every mutation under mm_pt_node_lock
+ *       pt_unmap        mm.c   no cursor; every mutation under mm_pt_node_lock
+ *
+ *     These two do not satisfy rule 1 as written -- they are not cursors and
+ *     hold no range-wide atomicity, which is why they stay listed instead of
+ *     being quietly declared compliant.  What they do guarantee is the part
+ *     rule 3 asks for: every write takes the lock of the PT page being written,
+ *     the same page cursor_leaf_slot() locks, so a fault and an unmap of one
+ *     address exclude each other.  The gate checks each listed function still
+ *     brackets its writes with that lock, so dropping it fails the build.
  *  2. Every page-table WRITE allocates intermediate page-table pages only
  *     through the cursor, and every such allocation installs a metadata
  *     block (pt_meta_t) so the covering node always has a lock.
@@ -301,6 +309,8 @@ pt_meta_t *mm_pt_meta(pte_t *table);
 static inline int mm_pt_meta_level(const pt_meta_t *m) { return m->level; }
 static inline int mm_pt_meta_stale(const pt_meta_t *m)  { return m->stale; }
 void mm_pt_meta_set_stale(pt_meta_t *m, int stale);
+void mm_pt_node_lock(pte_t *table);
+void mm_pt_node_unlock(pte_t *table);
 
 /* The table that owns the leaf slot for addr, i.e. the parent of the leaf.
  * This is the table whose metadata array describes that virtual page -- NOT

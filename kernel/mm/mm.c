@@ -435,18 +435,30 @@ int pt_unmap(mm_struct_t *mm, vaddr_t va) {
 
     int leaf_idx = arch_pt_vpn(va, 0);
     pte_t *pte = &table[leaf_idx];
-    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte))
+    mm_pt_node_lock(path[0]);
+    if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
+        mm_pt_node_unlock(path[0]);
         return -EINVAL;
+    }
     *pte = 0;
     mm_pt_note_absent(path[0], 0, leaf_idx);
+    mm_pt_node_unlock(path[0]);
 
     for (int level = 0; level < ARCH_PT_ROOT_LEVEL; level++) {
         pte_t *child = path[level];
         pte_t *parent = path[level + 1];
-        if (!pt_table_empty(child, level))
+        /* The emptiness test and the parent clear share this critical section:
+         * a peer that had already descended past parent could otherwise slip an
+         * entry into child between the two and lose it.  parent, not child --
+         * see mm_pt_node_lock() on the ordering. */
+        mm_pt_node_lock(parent);
+        if (!pt_table_empty(child, level)) {
+            mm_pt_node_unlock(parent);
             break;
+        }
         parent[idx_path[level + 1]] = 0;
         mm_pt_note_absent(parent, level + 1, idx_path[level + 1]);
+        mm_pt_node_unlock(parent);
         mm_pt_retire_table(mm, child, level);
     }
     /* The leaf frame reference is NOT dropped here: pt_unmap never owned it.
@@ -471,9 +483,15 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
         if (pte_is_swap(*pte)) {
             if (level != 0)
                 return -EINVAL;
+            mm_pt_node_lock(path[level]);
+            if (!pte_is_swap(*pte)) {
+                mm_pt_node_unlock(path[level]);
+                return -EINVAL;
+            }
             swap_free(pte_to_swp_entry(*pte));
             *pte = 0;
             mm_pt_note_absent(path[level], level, idx_path[level]);
+            mm_pt_node_unlock(path[level]);
             if (pa_out) *pa_out = 0;
             if (base_out) *base_out = va & ~(vaddr_t)(PAGE_SIZE - 1);
             if (size_out) *size_out = PAGE_SIZE;
@@ -486,17 +504,29 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
         if (arch_pte_is_leaf(*pte)) {
             size_t sz = pt_level_size(level);
             vaddr_t base = va & ~(vaddr_t)(sz - 1);
-            paddr_t pa = arch_pte_addr(*pte);
+            paddr_t pa;
+            mm_pt_node_lock(path[level]);
+            if (!(*pte & PTE_V) || !arch_pte_is_leaf(*pte)) {
+                mm_pt_node_unlock(path[level]);
+                return -EINVAL;
+            }
+            pa = arch_pte_addr(*pte);
             *pte = 0;
             mm_pt_note_absent(path[level], level, idx_path[level]);
+            mm_pt_node_unlock(path[level]);
 
             for (int l = level; l < ARCH_PT_ROOT_LEVEL; l++) {
                 pte_t *child = path[l];
                 pte_t *parent = path[l + 1];
-                if (!pt_table_empty(child, l))
+                /* Test and clear in one critical section -- see pt_unmap(). */
+                mm_pt_node_lock(parent);
+                if (!pt_table_empty(child, l)) {
+                    mm_pt_node_unlock(parent);
                     break;
+                }
                 parent[idx_path[l + 1]] = 0;
                 mm_pt_note_absent(parent, l + 1, idx_path[l + 1]);
+                mm_pt_node_unlock(parent);
                 mm_pt_retire_table(mm, child, l);
             }
 
