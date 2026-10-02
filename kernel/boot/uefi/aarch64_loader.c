@@ -298,7 +298,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st)
                 "mov x2, %2\n\t"
                 "br %1"
                 :: "r"(acpi_rsdp), "r"((uintptr_t)address), "r"(cmdline)
-                : "x1", "memory");
+                : "x0", "x1", "x2", "memory");
             __builtin_unreachable();
         }
     }
