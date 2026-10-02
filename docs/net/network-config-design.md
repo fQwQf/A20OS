@@ -101,6 +101,11 @@ tcpmode=fast
 `/proc/net/config` 是现成的控制面；但**开机第一个 listener 通常由用户态创建，
 shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip` 命令行键。
 
+**运行时切换的已知限制**（实测，可复现）：命令行选定 `lwip` 时回环 TCP 传输
+（`tcp_loopback_test`）通过；先用默认 `fast` 跑一次、再用写入口切到 `lwip`，
+则 listener 建立与 `accept()` 仍正常（`smoke-net-accept` 覆盖），但**数据传输
+不完成**。原因尚未定位。因此写入口只应视为调试/实验便利，**部署一律用命令行键**。
+
 **未来计划**：可以增加 `sys_net_get_config`/`sys_net_set_config` 来支持地址的原子更新。
 当前没有这些 syscall，地址类字段仍不能作为运行时设置入口。
 
