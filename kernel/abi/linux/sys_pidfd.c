@@ -87,7 +87,7 @@ int64_t sys_pidfd_open(int pid, unsigned flags)
     if (pid <= 0)
         return -EINVAL;
 
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
@@ -123,7 +123,7 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
         return -EINVAL;
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
@@ -177,7 +177,7 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
     vfs_put_file_ref(gfd, vf);
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {

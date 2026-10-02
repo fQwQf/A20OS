@@ -73,8 +73,8 @@ static int64_t kcmp_order(uintptr_t a, uintptr_t b)
 int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
                  unsigned long idx2)
 {
-    task_t *t1 = proc_find_get(pid1);
-    task_t *t2 = proc_find_get(pid2);
+    task_t *t1 = proc_find_get_user(pid1);
+    task_t *t2 = proc_find_get_user(pid2);
     if (!t1 || !t2) {
         if (t1) proc_put(t1);
         if (t2) proc_put(t2);
