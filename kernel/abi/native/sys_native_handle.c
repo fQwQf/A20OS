@@ -220,21 +220,17 @@ int64_t sys_a20_handle_set_meta(const a20_syscall_args_t *args)
     }
 
 
-    int gfd = (int)(uintptr_t)entry.object;
+    vfile_t *vf = (vfile_t *)entry.object;
 
     if (flags & A20_SET_META_MODE) {
-        vfile_t *vf = vfs_get_file_ref(gfd);
         if (vf && vf->vnode)
             vf->vnode->mode = (vf->vnode->mode & ~07777u) | ((uint32_t)val0 & 07777u);
-        if (vf) vfs_put_file_ref(gfd, vf);
     }
     if (flags & A20_SET_META_OWNER) {
-        vfile_t *vf = vfs_get_file_ref(gfd);
         if (vf && vf->vnode) {
             vf->vnode->uid = (uint32_t)val0;
             vf->vnode->gid = (uint32_t)val1;
         }
-        if (vf) vfs_put_file_ref(gfd, vf);
     }
     if (flags & (A20_SET_META_ATIME | A20_SET_META_MTIME | A20_SET_META_CTIME |
                  A20_SET_META_TRUNCATE | A20_SET_META_ALLOCATE)) {
@@ -291,9 +287,8 @@ static int64_t xattr_common(a20_handle_t h, const char *name, void *buf,
         goto out_entry;
     }
 
-    vfile_t *vf = vfs_get_file_ref((int)(uintptr_t)entry.object);
+    vfile_t *vf = (vfile_t *)entry.object;
     if (!vf || !vf->vnode) {
-        if (vf) vfs_put_file_ref((int)(uintptr_t)entry.object, vf);
         r = -A20_ERR_BAD_HANDLE;
         goto out_entry;
     }
@@ -320,7 +315,6 @@ static int64_t xattr_common(a20_handle_t h, const char *name, void *buf,
         r = -A20_ERR_INVALID_ARGUMENT;
         break;
     }
-    vfs_put_file_ref((int)(uintptr_t)entry.object, vf);
     a20_object_release(entry.object, entry.type);
 
     if (r >= 0 && op == 1 && buf && size > 0 && r > 0 &&
@@ -406,8 +400,8 @@ int64_t sys_a20_handle_poll(const a20_syscall_args_t *args)
     case A20_OBJ_PIPE_ENDPOINT:
     case A20_OBJ_DEVICE:
     case A20_OBJ_SOCKET: {
-        int gfd = (int)(uintptr_t)entry.object;
-        int rev = vfs_poll_events(gfd, POLLIN | POLLOUT);
+        vfile_t *vf = (vfile_t *)entry.object;
+        int rev = vfs_poll_file(vf, POLLIN | POLLOUT);
         if (rev < 0) {
             a20_object_release(entry.object, entry.type);
             return -A20_ERR_IO;

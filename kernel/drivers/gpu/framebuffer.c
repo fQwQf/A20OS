@@ -196,7 +196,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if (prot & PROT_WRITE) vma->vm_flags |= VM_WRITE;
     if (prot & PROT_EXEC) vma->vm_flags |= VM_EXEC;
     vma->pte_flags = ptef;
-    vma->file_fd = -1;
+    vma->file = NULL;
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
     mm->rss += len / PAGE_SIZE;
@@ -377,7 +377,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             vma->vm_flags = VM_READ | VM_WRITE | VM_SHARED |
                             VM_DONTFORK | VM_PFNMAP;
             vma->pte_flags = flags;
-            vma->file_fd = -1;
+            vma->file = NULL;
             mm_insert_vma(curr->mm, vma);
             curr->mm->total_vm += fb_size / PAGE_SIZE;
             curr->mm->rss += fb_size / PAGE_SIZE;

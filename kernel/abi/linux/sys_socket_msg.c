@@ -667,7 +667,8 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                         meta.scm_files[i] = NULL;
                         if (!vf)
                             continue;
-                        int g2 = vfs_alloc_fd(vf);
+                        int g2 = fdtable_install_current_vfile(
+                            vf, (flags & MSG_CMSG_CLOEXEC) ? O_CLOEXEC : 0);
                         if (g2 < 0) {
                             vfs_put_file(vf);
                             ctrunc = 1;
@@ -680,19 +681,12 @@ int64_t sys_recvmsg(int fd, void *msg, int flags)
                         if (env_active(proc_current())) {
                             int mr = env_mediate_acquire_gfd(g2);
                             if (mr) {
-                                vfs_close(g2);
+                                fdtable_close_current(g2);
                                 ctrunc = 1;
                                 continue;
                             }
                         }
-                        int u2 = fdtable_install_current(
-                            g2, (flags & MSG_CMSG_CLOEXEC) ? O_CLOEXEC : 0);
-                        if (u2 < 0) {
-                            vfs_close(g2);
-                            ctrunc = 1;
-                            continue;
-                        }
-                        fdout[delivered++] = u2;
+                        fdout[delivered++] = g2;
                     }
                     if (delivered > 0) {
                         cmsg->cmsg_level = SOL_SOCKET;

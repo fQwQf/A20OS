@@ -4,6 +4,7 @@
 #include "core/types.h"
 
 struct vfile;
+struct net_socket;
 
 #define AF_UNSPEC  0
 #define AF_UNIX    1
@@ -203,7 +204,24 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
 int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen);
 int net_shutdown(int gfd, int how);
 int net_set_nonblock(int gfd, int nonblock);
+int net_set_nonblock_vfile(struct vfile *vf, int nonblock);
 int net_poll_events(int gfd, short events);
 int net_is_socket_vfile(struct vfile *vf);
+struct net_socket *net_socket_from_vfile(struct vfile *vf);
+/* Socket-object variants for callers holding the socket directly (native
+ * file handles); the fd-level wrappers resolve through the task fd table. */
+int net_bind_sock(struct net_socket *s, const void *addr, size_t addrlen);
+int net_connect_sock(struct net_socket *s, const void *addr, size_t addrlen);
+int net_listen_sock(struct net_socket *s, int backlog);
+int net_accept_sock(struct net_socket *s, void *addr, size_t *addrlen, int flags);
+int net_getsockname_sock(struct net_socket *s, void *addr, size_t *addrlen);
+int net_getpeername_sock(struct net_socket *s, void *addr, size_t *addrlen);
+int net_setsockopt_sock(struct net_socket *s, int level, int optname,
+                        const void *optval, size_t optlen);
+int net_getsockopt_sock(struct net_socket *s, int level, int optname,
+                        void *optval, size_t *optlen);
+int net_shutdown_sock(struct net_socket *s, int how);
+int net_sendto_sock(struct net_socket *s, const void *buf, size_t len, int flags,
+                    const void *addr, size_t addrlen);
 
 #endif /* _NET_SOCKET_H */

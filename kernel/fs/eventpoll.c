@@ -62,14 +62,13 @@ static int epoll_poll(vfile_t *vf, short events)
         struct eventpoll_event ev = ep->items[i].ev;
         spin_unlock_irqrestore(&ep->lock, flags);
 
-        int gfd = -1;
-        vfile_t *target = fdtable_get_current_file_ref(fd, &gfd);
+        vfile_t *target = fdtable_get_current_file_ref(fd);
         if (!target)
             continue;
         short requested = epoll_events_to_poll(ev.events);
         int ready = target->identity == identity ?
                     vfs_poll_file(target, requested) : 0;
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         if (ready > 0 &&
             poll_events_to_epoll((short)ready, ev.events))
             return POLLIN;
@@ -102,8 +101,7 @@ static size_t epoll_poll_sources(vfile_t *vf, short events,
         struct eventpoll_event ev = ep->items[i].ev;
         spin_unlock_irqrestore(&ep->lock, flags);
 
-        int gfd = -1;
-        vfile_t *target = fdtable_get_current_file_ref(fd, &gfd);
+        vfile_t *target = fdtable_get_current_file_ref(fd);
         if (!target)
             continue;
         bool pollable = target->identity == identity && target->ops &&
@@ -114,7 +112,7 @@ static size_t epoll_poll_sources(vfile_t *vf, short events,
                 target, epoll_events_to_poll(ev.events),
                 count < max ? sources + count : NULL,
                 count < max ? max - count : 0);
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         if (!pollable || count + n > max)
             return 0;
         count += n;
@@ -142,14 +140,11 @@ int epoll_slot_contains_file(struct task_t *owner, struct vfile *epoll_vf,
         spin_unlock_irqrestore(&ep->lock, flags);
         if (!registered)
             continue;
-        int gfd = fdtable_get(owner, fd);
-        if (gfd < 0)
-            continue;
-        vfile_t *vf = vfs_get_file_ref(gfd);
+        vfile_t *vf = fdtable_get_file_ref(owner, fd, NULL);
         if (!vf)
             continue;
         int match = vf->identity == file_identity;
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         if (match)
             return 1;
     }
@@ -166,34 +161,30 @@ static int vfile_is_epoll(vfile_t *vf)
  * vfile so the caller can safely use ep for an extended period.
  * Caller must call epoll_put_ref() when done.
  */
-static epoll_t *epoll_get_ref(int epfd, int *out_gfd, vfile_t **out_vf)
+static epoll_t *epoll_get_ref(int epfd, vfile_t **out_vf)
 {
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_current_file_ref(epfd, &gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(epfd);
     if (!vf) return NULL;
     if (!vfile_is_epoll(vf)) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return NULL;
     }
-    *out_gfd = gfd;
     *out_vf = vf;
     return (epoll_t *)vf->priv;
 }
 
-static void epoll_put_ref(int gfd, vfile_t *vf)
+static void epoll_put_ref(vfile_t *vf)
 {
     if (vf)
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
 }
 
 static int check_epfd(int epfd)
 {
-    int64_t gfd = fdtable_get_current(epfd);
-    if (gfd < 0) return -EBADF;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(epfd);
     if (!vf) return -EBADF;
     int is_ep = vfile_is_epoll(vf);
-    vfs_put_file_ref((int)gfd, vf);
+    vfs_put_file(vf);
     return is_ep ? 0 : -EINVAL;
 }
 
@@ -204,9 +195,8 @@ static int epoll_check_cycle(int root_fd, int target_fd, int depth)
     if (root_fd == target_fd)
         return -ELOOP;
 
-    int target_gfd = -1;
     vfile_t *target_vf = NULL;
-    epoll_t *target_ep = epoll_get_ref(target_fd, &target_gfd, &target_vf);
+    epoll_t *target_ep = epoll_get_ref(target_fd, &target_vf);
     if (!target_ep)
         return 0;
 
@@ -218,25 +208,23 @@ static int epoll_check_cycle(int root_fd, int target_fd, int depth)
         if (!registered)
             continue;
         if (watched_fd == root_fd) {
-            epoll_put_ref(target_gfd, target_vf);
+            epoll_put_ref(target_vf);
             return -ELOOP;
         }
 
-        int64_t gfd = fdtable_get_current(watched_fd);
-        if (gfd < 0) continue;
-        vfile_t *vf = vfs_get_file_ref((int)gfd);
+        vfile_t *vf = fdtable_get_current_file_ref(watched_fd);
         if (!vf) continue;
         int is_ep = vfile_is_epoll(vf);
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         if (!is_ep) continue;
 
         int r = epoll_check_cycle(root_fd, watched_fd, depth + 1);
         if (r < 0) {
-            epoll_put_ref(target_gfd, target_vf);
+            epoll_put_ref(target_vf);
             return r;
         }
     }
-    epoll_put_ref(target_gfd, target_vf);
+    epoll_put_ref(target_vf);
     return 0;
 }
 
@@ -328,13 +316,13 @@ int eventpoll_create(int flags)
     vf->priv = ep;
     vf->ops = &g_epoll_ops;
 
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int fd = fdtable_install_current_vfile(vf, flags);
+    if (fd < 0) {
         kfree(ep);
         vfile_free(vf);
-        return -EMFILE;
+        return fd;
     }
-    return fdtable_install_current(gfd, flags);
+    return fd;
 }
 
 int eventpoll_ctl(int epfd, int op, int fd, uint32_t events, uint64_t data)
@@ -342,22 +330,20 @@ int eventpoll_ctl(int epfd, int op, int fd, uint32_t events, uint64_t data)
     int err = check_epfd(epfd);
     if (err < 0) return err;
 
-    int ep_gfd = -1;
     vfile_t *ep_vf = NULL;
-    epoll_t *ep = epoll_get_ref(epfd, &ep_gfd, &ep_vf);
+    epoll_t *ep = epoll_get_ref(epfd, &ep_vf);
     if (!ep) return -EBADF;
-#define EPOLL_CTL_RETURN(v) do { epoll_put_ref(ep_gfd, ep_vf); return (v); } while (0)
+#define EPOLL_CTL_RETURN(v) do { epoll_put_ref(ep_vf); return (v); } while (0)
 
     if (epfd == fd) EPOLL_CTL_RETURN(-EINVAL);
 
-    int target_gfd = -1;
-    vfile_t *target_vf = fdtable_get_current_file_ref(fd, &target_gfd);
+    vfile_t *target_vf = fdtable_get_current_file_ref(fd);
     if (!target_vf) EPOLL_CTL_RETURN(-EBADF);
     uint64_t target_identity = target_vf->identity;
 #undef EPOLL_CTL_RETURN
 #define EPOLL_CTL_RETURN(v) do { \
-    vfs_put_file_ref(target_gfd, target_vf); \
-    epoll_put_ref(ep_gfd, ep_vf); \
+    vfs_put_file(target_vf); \
+    epoll_put_ref(ep_vf); \
     return (v); \
 } while (0)
 
@@ -449,12 +435,11 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
                    int maxevents, int timeout_ms,
                    const void *sigmask, size_t sigsetsize)
 {
-    int ep_gfd = -1;
     vfile_t *ep_vf = NULL;
-    epoll_t *ep = epoll_get_ref(epfd, &ep_gfd, &ep_vf);
+    epoll_t *ep = epoll_get_ref(epfd, &ep_vf);
     if (!ep) return -EBADF;
     if (!out_events || maxevents <= 0 || maxevents > EPOLL_MAX_FDS) {
-        epoll_put_ref(ep_gfd, ep_vf);
+        epoll_put_ref(ep_vf);
         return -EINVAL;
     }
 
@@ -464,23 +449,23 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
     uint64_t saved_blocked = 0;
     if (sigmask) {
         if (sigsetsize != ARCH_SIGSET_SIZE) {
-            epoll_put_ref(ep_gfd, ep_vf);
+            epoll_put_ref(ep_vf);
             return -EINVAL;
         }
         if (!t || !t->signals) {
-            epoll_put_ref(ep_gfd, ep_vf);
+            epoll_put_ref(ep_vf);
             return -EINVAL;
         }
         arch_sigset_t user_mask;
         if (copy_from_user(&user_mask, sigmask, sizeof(user_mask)) < 0) {
-            epoll_put_ref(ep_gfd, ep_vf);
+            epoll_put_ref(ep_vf);
             return -EFAULT;
         }
         saved_ss = (signal_state_t *)t->signals;
         int mask_ret = signal_task_set_temporary_mask(
             t, arch_user_sigset_to_kernel(&user_mask), &saved_blocked);
         if (mask_ret < 0) {
-            epoll_put_ref(ep_gfd, ep_vf);
+            epoll_put_ref(ep_vf);
             return mask_ret;
         }
     }
@@ -532,7 +517,7 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
                 kfree(snapshots);
                 if (sigmask && saved_ss)
                     signal_task_restore_mask(t, saved_blocked);
-                epoll_put_ref(ep_gfd, ep_vf);
+                epoll_put_ref(ep_vf);
                 return -ENOMEM;
             }
             kfree(interests);
@@ -651,6 +636,6 @@ int eventpoll_wait(int epfd, struct eventpoll_event *out_events,
 
     kfree(interests);
     kfree(snapshots);
-    epoll_put_ref(ep_gfd, ep_vf);
+    epoll_put_ref(ep_vf);
     return total_ready;
 }

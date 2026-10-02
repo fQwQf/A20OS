@@ -205,7 +205,8 @@ typedef struct net_socket {
     int pkt_bound;
     int in_registry;
     int reg_idx;
-    int gfd;                       /* global fd carrying this socket vfile */
+    int gfd;                       /* creating task's fd carrying this socket */
+    struct vfile *vf;              /* the socket's vfile (EventQ identity) */
     net_bh_ring_t bh_ring;
     volatile int bh_connected;
     volatile int bh_closed;
