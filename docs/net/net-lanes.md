@@ -657,6 +657,157 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 `hash(dst_ip, src_port)` 也不是 `hash(dst_ip, dst_port)`。而且改前的 4/8 也未必是
 "按 src_port 撞对的运气"，因为 1/8 与 4/8 在 8 个样本内都可能是噪声。
 
+### 更正一则不存在的构建缺陷（infra bug 是假的）
+
+过程中曾记下"用户态构建目录 `user/build/riscv64/obj/*` 会在构建中途消失"
+（`tlse.d`、`sbase/libutil.a`、`libutf.a`、`fastfetch/gen`），并当成一条待修的
+构建缺陷。**这是误判，已作废。**
+
+证伪实验：手动 `rm -rf user/build/riscv64/obj/tlse user/build/riscv64/obj/fastfetch/gen`
+之后直接 `dev-build`，结果是 `BUILD=0`，两个目录都被构建重新创建。
+
+也就是说 Makefile 里的 `@mkdir -p $(dir $@)` / `| build_dir` 顺序依赖是正确的，
+目录本就会自建。当时之所以"消失"，是因为同时有另一个进程在反复 `git stash` /
+`git stash pop`（`stash@{0}`、`stash@{1}` 都是 "WIP on main: f7f3d670"），
+构建目录被并发动作删除，与构建规则无关。
+
+**代价**：这个假象让第一次 `16304db8` 的证伪变成假阳性——门禁红了，但红在
+缺 `tlse.d` 上，而不是红在缺陷上。教训是"门禁变红"必须同时确认失败原因。
+
+### 阶段 C 剩余项的可行性评估：per-lane pbuf pool **不是局部改动**
+
+先量了规模，免得按"小改动"排期：
+
+- `memp.c` 里 `memp_pools[MEMP_MAX]` 是 25 个 `struct memp_desc *` 的静态表，
+  `memp.c` 目前**完全不认识lane**（`grep -c lane memp.c` = 0）。
+- `MEMP_MEM_MALLOC=1`（`lwipopts.h:68` -> `NET_PROFILE_MEMP_MEM_MALLOC`），
+  每个 pool 底层是 `mem_malloc`，不是静态数组。
+
+关键障碍：**lwIP 的分配器 API 没有 lane 这一维**。`memp_malloc(MEMP_PBUF)` 只收 pool id，
+`do_memp_malloc_pool(desc)` 也没有 lane 参数。要做 per-lane pool 只有两条路：
+
+1. 给每个分配点传 lane —— 要改遍全栈的分配调用，侵入极大；
+2. 让 memp 自己按"当前 lane"索引 pool 数组 —— 但**当前 lane 从哪来是个坑**。
+
+第2 条正是本次已经踩过两次的坑：lane 有两套来源。socket 层用绑定地址/端口
+（`NET_PCB_LANE_OF_PCB`，权威值，`socket_inet.c:212`的`net_socket_lane_of_addr()`），
+而 `socket.c:30` 那个 `s->lane = net_lane_of_cpu(cpu_current_id())` 注释明写
+"Provisional only"。若 memp 用 `cpu_current_id() % CONFIG_NET_LANES` 选池，
+就会**重新引入"CPU 派生 lane"与"地址派生 lane"两套语义**——那正是
+`16304db8` / `f7f3d670` 两类 bug 的根源。
+
+所以做per-lane pbuf pool 之前必须先定：pool 选择依据是地址派生 lane（则需要一个
+在 lwIP 分配点可得的 lane 上下文，例如由 A20OS 侧在进入 lwIP 前设置一个
+"当前 lane"），还是接受 CPU 派生（则与 PCB 分桶不一致，必须写清代价）。
+**这个前提没定之前不建议动 memp。**
+
+### 门禁现状：`smoke-net-accept` 本身是 flaky 的（与本次修复无关）
+
+在最终干净树上复跑 `smoke-net-accept` 三次：
+
+| 轮次 | 门禁 | guest 内 PASS 行数 |
+|---|---|---|
+| 1 | exit 2 | 1/2 |
+| 2 | exit 2 | 1/2 |
+| 3 | exit 0 | 2/2 |
+
+失败形态固定是：boot-time `tcpmode=lwip` 那次 **PASS**，随后
+`echo tcpmode fast > /proc/net/config` 的那次 **FAIL**（`client=-1 server_status=256`）。
+
+即失败发生在**运行时切换 tcpmode** 这条路径上，而不是 lwIP lane 路径上：
+
+- fast 模式由 socket 层直接配对两个 socket，不建 lwIP pcb，因此
+  `f7f3d670`（`tcp_in.c` 的 `pcb_lane`）与 `16304db8`（`tcp_pcb_remove` 调用方）
+  都不在这条路径上；
+- 这与已记录的既有限制一致：tcpmode 需要 boot 参数，运行时 `/proc/net/config`
+  切换后 listener 能建起来但数据通路不工作。
+
+**所以不能把整套门禁报成全绿。** 准确说法是：
+`smoke-net-lanes`、`smoke-net-lanes-n1`、新增的 `smoke-net-tcp-lanes` 稳定通过；
+`smoke-net-accept` 因运行时切 tcpmode 的既有问题而 flaky（约 2/3 失败），
+该问题独立于 lane 工作，且本次未修。
+
+### 残留 flake：已定量，且**不是** lane 0 相关（假设已被证伪）
+
+在稳定树上（并发写者已消失）用 `smoke-net-tcp-lanes` 的同一配置反复跑：
+
+| 采样 | 结果 |
+|---|---|
+| 混合 8 端口 × 10 轮 = 80 次 | 79 通过 / 1 失败（`12405`）|
+| 仅 lane 0 的 3 个端口（12404/12405/12407）× 10 轮 = 30 次 | **30/30 全通过** |
+| 早前若干轮 | 另见 `12404` 失败 1 次 |
+
+即总失败率约 **2%**，且**不是按 lane 分布**：
+
+- 观察到 2 次失败（12404、12405）恰好都落在 lane 0，看着像 lane 0 有问题；
+- 但专门只跑 lane 0 的三个端口时30/30 全过，反而比混合跑更干净；
+- 同为lane 0 的 `12407` 从未失败过。
+
+所以"lane 0 有问题"这个假设**被证伪**，不能按 lane 去查。
+
+同时排除：
+
+- 不是 `16304db8`（双重索引）—— 已被证伪验证：放回去会 `passes=0/8` + `list-checker hits=3` + panic；
+- 不是 `f7f3d670`（源端口哈希）—— 放回去会 `passes=2/8`，量级远高于 2%；
+- 不是链表损坏 —— `tcp_pcbs_sane` 全程 0 命中；
+- 不是内存破坏 —— 无 panic / page fault；
+- 不是并发写者干扰 —— 在干净树上同样复现。
+
+形态固定为 `client=-1 server_status=256`，即 `server()` 返回负值、客户端在 4s 预算内
+`connect()` 未完成。
+
+**已确认的相关事实**（继续查下去时从这里起步）：
+
+- 回环队列 `netif->loop_first` 的排空点是 `kernel_progress_timer_tick()` ->
+  `a20_lwip_poll_timers_locked()`，它遍历 `netif_list` 对 `loop_first != NULL` 的
+  netif 调 `netif_poll()`（`lwip_stack.c:574`）。
+- **该排空只在 CPU 0 上发生**：`kernel_progress_timer_tick()` 开头就是
+  `if (cpu_current_id() != 0) return;`（`progress.c:47`）。理由是 NO_SYS 下
+  lwIP 只有一把全局 core lock，让每个空闲 CPU 都去轮询会变成锁护航。
+- `LWIP_LOOPBACK_MAX_PBUFS` 在 `opt.h:1800` 默认为 `0`，而 `netif.c` 里限流判断
+  写在 `#if LWIP_LOOPBACK_MAX_PBUFS` 内（1154-1166），所以**当前没有队列上限**。
+  （`opt.h` 的注释写 "0 = disabled" 有误导：真正被编译掉的是限流，不是整个回环队列；
+  `loop_first` 仍在使用。）
+
+所以"每 tick 最多排空 N 个 pbuf 导致 SYN 饿死"这条假设**不成立**，可以排除。
+"tick 会不会饿死"这条也可以排除：`kernel_progress_timer_tick()` 每次都会把定时器重装为
+`proc_next_timer_interval(now)`，其下限是 `SCHED_TICK_INTERVAL = TICKS_PER_SEC/100`
+即 **10ms**（`timer_heap.c:204`，更小的 `SCHED_MIN_TIMER_INTERVAL` 只用于已到期场景）。
+10ms 远小于客户端 4s 预算，所以"tick 来不及排空 SYN"不成立。
+
+至此这条 flake 已排除：lane 相关、链表损坏、内存破坏、队列上限、tick 频率，
+以及本次修复的两个 bug（各自放回后的失败特征都远大于 2%）。
+
+补一组样本：`NR_CPUS=1` + `NET_LANES=4` 连跑 5 轮 40 次全过（0 失败）。看起来像
+"多 CPU 才会出现"，但**这组数据不构成证据**：若真实失败率就是 1.25%，连过 40 次的概率
+约 0.6也就是说六成的可能性本来就会看到 0 失败。要区分"单 CPU 免疫"和"单 CPU 也一样，
+只是没抽到"，单 CPU 侧至少要 150+ 次无失败才有说服力。别把这条当结论。
+
+**尚未定位的是**：在 tick 与队列都正常的前提下，`connect()` 偶发不完成。
+形态是 `server()` 返回负值 + 客户端 4s 内未连通，且无任何内存异常。
+剩下的可疑面在 lwIP 之外——例如 `connect()` 的重试路径与 accept staging 之间的
+时序，或 4 CPU 下任务被调度到非 0 号 CPU 时、由谁来触发排空。**未定位，不写成结论。**
+
+### 阶段 C 范围更正：TIME-WAIT 分桶**已经**做完了
+
+原计划里"TIME-WAIT per-lane 分片"这一项是**过时前提**，不用再做。实测：
+
+- `tcp_tw_pcbs` 已经是 `struct tcp_pcb *tcp_tw_pcbs[NET_PCB_LANE_BUCKETS]`
+  （`tcp_priv.h:339`、`tcp.c:178`），即每 lane 一个链表头；
+- `tcp_slowtmr()` 已经是按 lane 遍历 `tcp_tw_pcbs[lane]`（`tcp.c:1505`）；
+- TIME-WAIT pcb 在建链前就打好 lane 戳：`npcb->lane = NET_PCB_LANE_OF_PCB(npcb)`
+  （`tcp_in.c:739`），而 `tcp_input.c:1052/1070/1080` 三处 `state = TIME_WAIT`
+  都在这之后，因此进桶依据与桶数组下标一致。
+
+**所以阶段 C 剩下的只有 per-lane pbuf pool**：目前 `MEMP_NUM_PBUF` 由
+`NET_PROFILE_PBUF_POOL_SIZE / 2` 决定（`lwipopts.h:92`），是**单一全局池**，
+`memp.c` / `pbuf.c` 里没有任何按 lane 切分的池。
+
+顺带记录一个容易重复踩的坑：本文件此前把 `pcb_lane` 的桶来源写成"入站段的目的端口
+在 `listen_lane` 上、源端口在 `pcb_lane` 上"，于是得出"两个 lane 要分别改"的结论。
+实际只有**一个**表达式，`tcp_in.c:261` 同时决定 active / TIME-WAIT / LISTEN 三处查找；
+只改 `listen_lane` 会把失败推迟到子 pcb 查找，表现为 4/8 -> 1/8 变差。
+
 ### 两个修复都已被门禁证伪验证（`88ba28a9`）
 
 `smoke-net-tcp-lanes` 在 4 lane + `CONFIG_NET_PCB_SANE=1` 下跑 8 个端口（每 lane 一个
