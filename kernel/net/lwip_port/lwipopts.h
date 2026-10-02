@@ -193,11 +193,15 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
 #define PPPOS_SUPPORT                   0
 #define PPPOL2TP_SUPPORT                0
 
+#if CONFIG_NET_LOCK_ASSERT
 int  a20_lwip_lock_is_held(void);
 void a20_lwip_note_lock_violation(void *site);
 #define LWIP_ASSERT_CORE_LOCKED() \
     do { if (!a20_lwip_lock_is_held()) \
              a20_lwip_note_lock_violation(__builtin_return_address(0)); } while (0)
+#else
+#define LWIP_ASSERT_CORE_LOCKED()
+#endif
 
 #define LWIP_RAND()                     ((u32_t)random_u64())
 
