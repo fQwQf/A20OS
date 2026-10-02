@@ -55,7 +55,37 @@ static const acpi_rsdp_t *acpi_find_rsdp_range(uintptr_t start, uintptr_t end) {
     return NULL;
 }
 
+/*
+ * An RSDP handed over by the boot path, as a physical address.
+ *
+ * The two searches below only work under BIOS: the EBDA does not exist under
+ * UEFI, and 0xE0000-0x100000 is firmware ROM that OVMF does not publish an RSDP
+ * into.  With neither available, acpi_find_table() returned NULL for everything,
+ * which is why MCFG was never found, why PCI fell back to a hardcoded ECAM base,
+ * and why enumeration then read all-zero vendor IDs and published 129 devices that
+ * matched no driver.  The whole chain failed at the first step and the symptom
+ * only appeared much later as "no init program found".
+ *
+ * A UEFI loader can always be asked for the RSDP -- it is in the firmware's
+ * configuration table -- so it passes the physical address here.  Zero means the
+ * boot path had none to give, which is what BIOS firmware leaves and why the
+ * scans below are still needed.
+ */
+static uintptr_t g_firmware_rsdp_pa;
+
+void firmware_set_rsdp_pa(uintptr_t pa)
+{
+    g_firmware_rsdp_pa = pa;
+}
+
 static const acpi_rsdp_t *acpi_find_rsdp(void) {
+    if (g_firmware_rsdp_pa) {
+        const acpi_rsdp_t *rsdp =
+            (const void *)(PAGE_OFFSET + g_firmware_rsdp_pa);
+        if (memcmp(rsdp->signature, "RSD PTR ", 8) == 0)
+            return rsdp;
+    }
+
     uint16_t ebda_segment = *(volatile uint16_t *)(PAGE_OFFSET + 0x40e);
     uintptr_t ebda = (uintptr_t)ebda_segment << 4;
     const acpi_rsdp_t *rsdp = NULL;
@@ -151,6 +181,20 @@ size_t firmware_acpi_apic_ids(uint32_t *ids, size_t capacity,
 #define ACPI_MCFG_OFF_BASE_ADDRESS  72u
 #define ACPI_MCFG_BASE_SEGMENT      0u
 
+/*
+ * "BIOS" or "UEFI", from whether the legacy RSDP search can see anything.
+ *
+ * The distinction decides whether a missing MCFG is normal or fatal, and the
+ * caller cannot tell the two apart on its own: under SeaBIOS there is no MCFG
+ * table at all and the q35 ECAM address is correct, while under OVMF an absent
+ * MCFG means the RSDP was never found and the fallback window is empty.  This is
+ * the same check acpi_find_rsdp() makes, exposed rather than repeated.
+ */
+const char *firmware_bios_or_uefi(void)
+{
+    return acpi_find_rsdp() ? "BIOS" : "UEFI";
+}
+
 uintptr_t firmware_acpi_mcfg_base(void) {
     const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
     if (!mcfg || mcfg->length < ACPI_MCFG_OFF_BASE_ADDRESS + 8)
@@ -238,6 +282,8 @@ static uint32_t fw_cfg_read32(void) {
 
 static char g_bootargs[256];
 
+#define MULTIBOOT_TAG_ACPI_OLD 14u
+
 struct x86_mb_info {
     uint32_t flags;
     uint32_t mem_lower;
@@ -274,6 +320,9 @@ const char *firmware_bootargs(void) {
     static int mb_probed;
     if (!mb_probed) {
         mb_probed = 1;
+        /* Do this before anything asks about ACPI: the RSDP is what makes MCFG,
+         * MADT and the rest reachable, and on UEFI there is nowhere else to look
+         * for it. */
         const char *mb = multiboot_cmdline();
         if (mb) {
             size_t i = 0;
