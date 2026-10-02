@@ -552,33 +552,103 @@ ffffffc080559640:  beqz  a5,...
 4. 该指令紧邻 `__ubsan_handle_pointer_overflow`（源码里就是 `ptr + 48` 的溢出检查），
    说明这里本来就有一个"指针 + 48"的运算，UBSan 在它之前。
 
-结合第 3 点，最值得先验证的假设是**类型混淆**：某处把一个 16 位量（或两个 16 位量
-打包在一起）读成了一个 64 位指针。`0x3071` = 12401 = 端口号，已经证明寄存器里确实
-混着合法解析出的报文字段，所以"结构体被按错误偏移/类型解释"比"内存被踩坏"更符合
-两次 dump 的共同特征。
+### 崩溃语句已定位：LISTEN pcb 链损坏（哨兵桶）
 
-还没查的（下一步从这里继续）：摘链之后 `ip_input` → `tcp_input` 拿到的是一条结构
-良性、但 `payload`/`next` 内容已损坏的链。要看的是 `netif_process_pbuf()` 与
-`ip4_input()` 在交接时对 pbuf 做了什么，以及 `tcp_input()` 里第一个解引用链节点的
-位置反推 `0x3071c710010000af` 是哪个字段。
+内核没带行表，`addr2line` 给不出语句，但 **UBSan 的消息描述符里带着文件名和行号**。
+faulting PC 前面那条 `__ubsan_handle_pointer_overflow` 用的描述符在
+`0xffffffc0807b7258`，解出来是：
 
-已排除的两个候选（读代码确认，不是推测）：
+- filename 指针 `0xffffffc0805f3678` → **`lwip/src/core/tcp_in.c`**
+- line `0x154` = **340**，column `0x12` = **18**
 
-- **inline staging 溢出**：`bh_stage_payload()` 的 inline 分支被
-  `len <= NET_BH_INLINE_PAYLOAD` 挡住，而 `e->data` 是定长
-  `uint8_t data[NET_BH_INLINE_PAYLOAD]`；溢出分支先 `pbuf_ref()` 存进
-  `owned[slot]`，调用方随后才 `pbuf_free(p)`。引用与边界都是对的。
-- **排空侧自身**：`netif_poll()` 在 `g_lwip_lock` 下**同步**消费
-  `loop_first`，把 pbuf 直接交给 `ip_input`，排空与协议栈处理之间不存在窗口。
+`.rodata` 里紧挨着的下一个字符串正是 `tcp_input: invalid pbuf`。而 340 行落在：
 
-所以破坏发生在 pbuf **进入 `loop_first` 之前**：发送路径
-（`tcp_output` → `ip_output` → `netif_loop_output`）构造出来的链本身就已经是坏的。
-下一步应看 `netif_loop_output()` 的 pbuf 构造与 `pbuf_take` 之后的链形状，
-以及 PBUF_POOL 元素在被 `tcp_segs_free` 复用后是否仍可能残留在某条链上。
+```c
+for (lpcb = tcp_listen_pcbs[search_lane].listen_pcbs; lpcb != NULL; lpcb = lpcb->next) {
+    if ((lpcb->netif_idx != NETIF_NO_INDEX) &&          /* <-- 340 */
+```
 
-下一步应当是审 `netif_poll()`（loop_first 排空）到 bottom-half payload 消费之间的 pbuf
-生命周期：谁持有引用、谁负责 `pbuf_free`、以及两条路径之间是否缺少一次引用计数或所有权
-移交。放大器应该加在**排空侧的 pbuf 释放点与消费侧的读取之间**，不是加在 accept staging。
+`struct tcp_pcb_listen` 的 `netif_idx` 正好落在偏移 48，与 `lbu a5,48(a5)` 和
+`a5 = 0x...7f → +0x30 = 0x...af` 完全对上。
+
+**所以 `a5` 里的坏指针就是 `lpcb` 本身**——不是 payload、不是 next 字段被踩，
+而是**遍历 LISTEN pcb 链表时 `lpcb` 已经是垃圾**。也就是说
+`tcp_listen_pcbs[search_lane].listen_pcbs` 这条链被破坏了。
+
+这条链恰好是 `pcb_lane.h` 自己警告过的地方：
+
+> "A wildcard pcb lives in the sentinel bucket *only*: it must never be linked
+> into two lists, because the second insertion would overwrite its ->next and
+> silently corrupt both lists."
+
+telnetd 绑 `INADDR_ANY`，它的 LISTEN pcb 就在**哨兵桶**里；`search_lane` 的第二轮
+（`NET_PCB_LANE_ANY`）遍历的就是这一桶。一个 LISTEN pcb 若被插入两次，`->next` 指向
+另一条链，遍历其中一条就会走到不属于自己的节点，最终 `lpcb` 变成垃圾——与观测到的
+**低 16 位跨运行恒定、高 48 位每次不同**（说明它不是随机内存，而是"从链表结构里
+取出来的偏移量"）也吻合。
+
+### 根因已确认：`tcp_pcb_remove()` 的 lane 被索引了两次
+
+上面这条"哨兵桶重复链接"的假设是**错的**，`pcb_lane.h` 那段警告是红鲱鱼；
+最后那段类型混淆推断也已撤回。真正的原因是纯地址算术错误：
+
+`TCP_RMV(pcbs, npcb)` 会**自己**按 lane 索引：`(pcbs)[(npcb)->lane]`。
+所以 `TCP_REG`/`TCP_RMV` 的所有调用方都必须传**桶数组基址**
+（`tcp_bound_pcbs`、`tcp_active_pcbs`、`tcp_tw_pcbs`、`TCP_LISTEN_PCBS`）。
+
+但 `tcp_pcb_remove()` 有 5 个调用方**预先按 lane 取了地址**再传进来：
+
+```c
+tcp_pcb_remove(&tcp_active_pcbs[pcb->lane], pcb);
+tcp_pcb_remove(&TCP_LISTEN_PCBS[pcb->lane], pcb);
+tcp_pcb_remove(&tcp_tw_pcbs[pcb->lane], pcb);
+```
+
+而 `tcp_pcb_remove()` 把参数原样交给 `TCP_RMV()`，于是 lane 被算了两次。
+lane `L` 的 pcb 实际被摘/插到桶 `2L`：
+
+| lane | 实际落到 | |
+|---|---|---|
+| 0 | 桶 0 | **纯属巧合**正确 |
+| 1 | 桶 2 | 错桶 |
+| 2 | 桶 4 | 错桶 |
+| 3 | 桶 6 | **越界**（数组只有 `NET_PCB_LANE_BUCKETS` = 5）|
+| 4 | 桶 8 | **越界**；lane 4 正是通配桶 |
+
+于是 pcb 被从**别的**桶上摘链——在通配桶上甚至直接写坏桶外内存——
+splice 会在本该离开的链上留下野 `->next`，同时把活指针塞进一条它从未加入过的链。
+这正是 `tcp_in.c:340` 遍历 LISTEN 链时 `lpcb` 变成垃圾的原因，
+`netif_idx` 在偏移 48，与 `lbu a5,48(a5)` 吻合。
+
+**为什么锁探针抓不到**：这跟锁无关，是纯粹的指针运算错误，探针当然显示 0 违规。
+
+**为什么之前所有门禁都是绿的**：lane 0 自相抵消，所以 `NET_LANES=1` 永远看不到；
+而 smoke 里那唯一一个 LISTEN pcb 从不走被算错桶的摘除路径。只有
+"NET_LANES>1 + 真实 LISTEN pcb 被增删"才会触发。
+
+**修复**：调用方改回传基址数组，与其余 `TCP_REG`/`TCP_RMV` 调用方一致（`16304db8`）。
+
+**验证**：`CONFIG_NET_LANES=4` + `NR_CPUS=4` + `a20.tcpmode=lwip` + 真实 TCP
+listener，修复前 4 次运行 `faults=7`；修复后 `faults=0`，在开/关
+`CONFIG_NET_PCB_SANE` 两种构建下各复测，均无 panic / page fault / 断言。
+单 lane 回归 `smoke-net-accept`、`smoke-net-lanes-n1`、`smoke-network-suite` 全绿。
+
+**但"不再崩溃"不等于"通过"。** `tcp_accept_test` 仍然时通时不通，这一项尚未修好：
+端口扫描（同一配置，连续 8 个端口）结果为
+
+```
+12401 FAIL   12402 PASS   12403 FAIL   12404 PASS
+12405 PASS   12406 FAIL   12407 PASS   12408 FAIL
+```
+
+4/8 通过，且**与 lane 无关**（若按 `(local_ip, local_port)` 分桶，规律应是周期性
+而非这种无序分布）。失败形态固定为 `client=-1 server_status=256`，即
+`server()` 返回负值、客户端在 4s 预算内 connect 失败，**不伴随任何内存破坏**
+（`faults=0`）。
+
+> 更正：`16304db8` 的提交信息曾写 "PASS 0 -> 3/4"，那是误读——那轮同时跑了
+> 12401 和 12402 两个用例，`grep -c` 数的是 PASS **行数**，而 12401 当时就已经
+> 在失败了。崩溃数 7 -> 0 是实测的，"测试通过"不是。
 
 ### 下一步（保留：不要只读代码，要放大窗口）
 

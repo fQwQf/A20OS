@@ -476,7 +476,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
            application that the connection is dead before we
            deallocate the PCB. */
         TCP_EVENT_ERR(pcb->state, pcb->errf, pcb->callback_arg, ERR_RST);
-        tcp_pcb_remove(&tcp_active_pcbs[pcb->lane], pcb);
+        tcp_pcb_remove(tcp_active_pcbs, pcb);
         tcp_free(pcb);
       } else {
         err = ERR_OK;
@@ -641,7 +641,7 @@ tcp_input_delayed_close(struct tcp_pcb *pcb)
           ensure the application doesn't continue using the PCB. */
       TCP_EVENT_ERR(pcb->state, pcb->errf, pcb->callback_arg, ERR_CLSD);
     }
-    tcp_pcb_remove(&tcp_active_pcbs[pcb->lane], pcb);
+    tcp_pcb_remove(tcp_active_pcbs, pcb);
     tcp_free(pcb);
     return 1;
   }

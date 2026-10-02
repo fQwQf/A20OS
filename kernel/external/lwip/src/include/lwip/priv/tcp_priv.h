@@ -464,7 +464,7 @@ tcp_pcbs_any(struct tcp_pcb * const *pcbs)
 
 #define TCP_PCB_REMOVE_ACTIVE(pcb)                 \
   do {                                             \
-    tcp_pcb_remove(&tcp_active_pcbs[(pcb)->lane], pcb); \
+    tcp_pcb_remove(tcp_active_pcbs, pcb); \
     tcp_active_pcbs_changed = 1;                   \
   } while (0)
 

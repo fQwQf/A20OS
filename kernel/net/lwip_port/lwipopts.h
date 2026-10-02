@@ -193,6 +193,14 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
 #define PPPOS_SUPPORT                   0
 #define PPPOL2TP_SUPPORT                0
 
+/* Compile in the PCB list sanity checker.  tcp_priv.h stubs tcp_pcbs_sane() to a
+   constant 1 unless one of the TCP_DEBUG* switches is set, and TCP_DEBUG_PCB_LISTS
+   is what selects the checking form of TCP_REG/TCP_RMV, so define it here rather
+   than enabling the noisy debug switches. */
+#if CONFIG_NET_PCB_SANE
+#define TCP_DEBUG_PCB_LISTS 1
+#endif
+
 #if CONFIG_NET_LOCK_ASSERT
 int  a20_lwip_lock_is_held(void);
 void a20_lwip_note_lock_violation(void *site);
