@@ -18,6 +18,7 @@
 #include "core/panic.h"
 #include "core/klog.h"
 #include "core/string.h"
+#include "core/errno.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
 #include "ipc/userfaultfd.h"
@@ -358,6 +359,34 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   path below, so its pages carry no page-cache identity and no writeback
  *   route.  Inter-process shared memory is served by the VM_VMO path instead.
  */
+/*
+ * MM_FAULT_RETRY -- the fault-around window could not be installed because the
+ * VMA that authorised it is no longer the object covering the address, and it
+ * is not an error.
+ *
+ * The window deliberately drops mm->lock to allocate its frames, and while it
+ * is unlocked a sibling thread sharing this mm can reshape the VMA list at that
+ * address.  The commonest case is benign and happens constantly: mm_insert_vma()
+ * coalesces two adjacent anonymous VMAs and keeps the NEW object, deferring the
+ * old one, so a mapping nobody touched changes identity underneath the fault.
+ * The address is still mapped, still writable, and still backed by an
+ * equivalent VMA -- vma_can_merge() only merges equal vm_flags and pte_flags.
+ *
+ * Returning failure here turned that into SIGSEGV on a valid address, which is
+ * how a four-thread process died on a store into memory it owned.  The window
+ * gives its frames back and asks the caller to start over against whatever VMA
+ * is current, which costs one more lookup and turns the race into a no-op.
+ */
+#define MM_FAULT_RETRY (-EAGAIN)
+
+/* A window can only lose its VMA to a list mutation, and each retry resolves a
+ * fresh one, so the bound is generous enough for a heavy mmap/munmap workload
+ * and still finite: without it a pathological merger could spin here. */
+#define MM_FAULT_RETRY_MAX 8
+
+static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
+                                       enum mm_fault_access access);
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -667,9 +696,27 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                         frame_put(pfns[i]);
                     }
                     vma_put(t->mm, vma);
-                    return -1;
+                    return MM_FAULT_RETRY;
                 } else {
                     map_flags = vma->pte_flags;
+                    /* The window was sized from the VMA as it looked before
+                     * the lock was dropped.  A concurrent munmap or a
+                     * concurrent mprotect split can have shortened that same
+                     * VMA since -- both lower vma->end in place rather than
+                     * replacing the object -- so the span prepared above may
+                     * now reach past the mapping.  Installing those pages
+                     * anyway leaves present, zero-filled PTEs sitting in what
+                     * is now a hole: the fault reports success, no thread ever
+                     * wrote that memory, and the next mmap over the same
+                     * address inherits the PTEs as if the application had
+                     * faulted them in itself.  That is silent corruption, and
+                     * it is the failure mode this window was suspected of
+                     * causing, so the span is re-clamped here, under the lock,
+                     * to the VMA's current end; the frames prepared beyond it
+                     * are released by the short count fault_map_window()
+                     * reports back. */
+                    if (end > vma->end)
+                        end = vma->end;
                     size_t keep = 0;
                     for (size_t i = 0; i < prepared; i++) {
                         uint64_t va = page_va + (uint64_t)i * PAGE_SIZE;
@@ -1009,6 +1056,23 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
 #ifdef CONFIG_NOMMU
     return handle_demand_fault_locked(t, stval, access, 0);
 #else
+    /* MM_FAULT_RETRY is a benign VMA-identity change under the fault-around
+     * window, so the entry point owns the retry rather than letting each
+     * handler roll its own.  Re-entering re-resolves the VMA under the lock,
+     * which is exactly the step the window could not do while unlocked. */
+    for (int attempt = 0; attempt < MM_FAULT_RETRY_MAX; attempt++) {
+        int r = handle_demand_fault_attempt(t, stval, access);
+        if (r != MM_FAULT_RETRY)
+            return r;
+    }
+    return -1;
+#endif
+}
+
+#ifndef CONFIG_NOMMU
+static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
+                                       enum mm_fault_access access)
+{
     if (!t || !t->mm || !t->mm->pgdir)
         return -1;
 
@@ -1257,8 +1321,9 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     }
     return r;
-#endif
 }
+
+#endif /* !CONFIG_NOMMU */
 
 int handle_present_page_fault(task_t *t, uint64_t stval,
                               enum mm_fault_access access)
