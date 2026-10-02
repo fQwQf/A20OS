@@ -987,29 +987,46 @@ pattern = "mm_pt_node_lock(parent)"
 min_count = 2
 files = ["kernel/mm/mm.c"]
 
-# cursor_leaf_slot() and mm_addrspace_lock() must both allocate the child PT
-# node before taking the node MCS lock, because frame_alloc() can reach
-# oom_try_reclaim() -- swap-out and a forced process kill -- and a MCS lock is a
-# spinlock.  mm_addrspace_lock() is the one that matters most: it is the entry
-# point every cursor operation goes through, so this is on every fault.
+# cursor_leaf_slot() and mm_addrspace_lock() must both allocate the child PT node
+# with frame_alloc_nr(), never the reclaiming frame_alloc().  The reclaiming
+# allocator reaches oom_try_reclaim() -- swap-out and a forced process kill --
+# and both of these run while a spinlock is held: a node MCS lock on the fault
+# path, and mm->lock on the mm_mmap() -> mm_pt_provision_anon() path, where
+# mm->lock is a spin_lock_irqsave, so reclaiming there is a sleep with
+# interrupts off.  That path is a confirmed lockup, not a hazard: see
+# docs/roadmap/single-level-mm-model.md 11.7.
+#
+# mm_addrspace_lock() is the one that matters most -- it is the entry point every
+# cursor operation goes through.
+#
 # gates.py has no "must not appear between these two markers" form, only
-# fixed/min_count, so this pins that both hoisted allocations are still there
-# rather than proving the absence structurally.  A stronger check needs the gate
-# language extended.
+# fixed/min_count, so this pins that both call sites are still there rather than
+# proving the absence structurally.  A stronger check needs the gate language
+# extended.
 #
 # The 12 leading spaces are load-bearing: without them this also matches
-# "pte_t *next = (pte_t *)frame_alloc();" and min_count = 2 can no longer tell the
-# two sites apart, which is how a negative test deleted one of them and still
-# went green.  min_count = 2 so removing either site fails.
+# "pte_t *next = (pte_t *)frame_alloc_nr();", so min_count = 2 can no longer tell
+# the two sites apart, which is how an earlier negative test deleted one of them
+# and still went green.  min_count = 2 so removing either site fails.
 [[gate.assertion]]
 fixed = true
-pattern = "            next = (pte_t *)frame_alloc();"
+pattern = "            next = (pte_t *)frame_alloc_nr();"
 min_count = 2
 files = ["kernel/mm/pt.c"]
 
+# Pins that frame_alloc_nr() is actually the non-reclaiming allocator.  Without
+# this, renaming a function to _nr and leaving pfa_alloc_page() inside it would
+# satisfy every assertion above while reclaiming under the spinlock again.
 [[gate.assertion]]
 fixed = true
-pattern = "Allocate the child node BEFORE taking the lock"
+pattern = "pfa_alloc_flags(0, 0)"
+files = ["kernel/mm/mm.c"]
+
+# Intent anchor: the reason the child-node allocator is the non-reclaiming one
+# is stated at the call site, not just implied by the function name.
+[[gate.assertion]]
+fixed = true
+pattern = "frame_alloc_nr(), which cannot reach"
 files = ["kernel/mm/pt.c"]
 
 # cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it

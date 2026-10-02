@@ -628,16 +628,16 @@ static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
     for (int l = cur->guard_level; l > 0; l--) {
         pte_t *table = cur->path[l];
         int idx = arch_pt_vpn(addr, l);
-        /* Allocate the child node BEFORE taking the lock.  frame_alloc() can
-         * reach oom_try_reclaim(), which swaps out pages and force-kills a
-         * process -- and a node MCS lock is a spinlock, so reclaiming under it
-         * was a sleep in a spinlock on the fault path.  The pre-check only
-         * decides whether allocating is worth attempting; the authoritative
-         * state is the re-read of table[idx] under the lock below, and every
-         * path that finds the speculative page unnecessary frees it. */
+        /* Allocate the child node with frame_alloc_nr(), which cannot reach
+         * oom_try_reclaim() -- so it is safe to call while holding a node MCS
+         * lock, and hoisting it above the lock keeps the allocation out of the
+         * critical section as well.  The pre-check only decides whether
+         * allocating is worth attempting; the authoritative state is the
+         * re-read of table[idx] under the lock below, and every path that
+         * finds the speculative page unnecessary frees it. */
         pte_t *next = NULL;
         if (create && !(table[idx] & PTE_V)) {
-            next = (pte_t *)frame_alloc();
+            next = (pte_t *)frame_alloc_nr();
             if (!next)
                 return NULL;
         }
@@ -780,13 +780,16 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                 return 1;
             }
 
-            /* Hoisted for the same reason as cursor_leaf_slot(): frame_alloc()
-             * can reach oom_try_reclaim(), and pm below is a spinlock.  The
-             * unlocked e read at the top of this loop body is only the
-             * heuristic; the re-read under the lock is authoritative. */
+            /* Hoisted for the same reason as cursor_leaf_slot(), and
+             * non-reclaiming for the same reason -- which matters most HERE:
+             * mm_mmap() reaches this function while holding mm->lock, and that
+             * lock is a spin_lock_irqsave, so a reclaiming allocation on this
+             * path is a sleep with interrupts off.  The unlocked e read at the
+             * top of this loop body is only the heuristic; the re-read under
+             * the lock is authoritative. */
             pte_t *next = NULL;
             if (!(e & PTE_V)) {
-                next = (pte_t *)frame_alloc();
+                next = (pte_t *)frame_alloc_nr();
                 if (!next) {
                     mm_pt_read_exit(mm);
                     cur->in_read_side = 0;
