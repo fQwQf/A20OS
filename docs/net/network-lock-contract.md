@@ -2,6 +2,18 @@
 
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
+> **更正：本文件此前多处写"两个锁从不同时持有"，这是错的。**
+> `net_inet_bottom_half_process_all()` 在 `kernel/net/socket_inet.c:871` 取
+> `g_net_lock`，并在该临界区内调用 accept 落底；而
+> `net_inet_accept_stage_drain()` 在同文件 `607`/`616`/`640` 取 `a20_lwip_lock()`
+> ——所以 **accept 路径上 `g_net_lock` 与 `g_lwip_lock` 是同时持有的**，顺序是
+> net → lwip。
+>
+> 目前没有反向路径（没有"先 g_lwip_lock 再 g_net_lock"），因此还没有 ABBA 环路。
+> 但阶段 D 要按 lane 排空收包、必然触碰 socket 状态，那就会引入反向顺序并与这条
+> 死锁。**把 net → lwip 当作固定顺序**，新增任何跨锁路径前先确认方向。
+> 本文其余"从不同时持有"的表述按此条理解。
+
 最后核实：与 `feat/net-lanes` 分支的代码一致（收包载荷拆分 + poll 分段 + loopif 排空 + listener 分档）。
 
 ## 范围与目标
