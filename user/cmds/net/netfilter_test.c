@@ -117,7 +117,13 @@ static int find_nonloopback_nic(char *name, size_t sz)
             memcpy(row_name, row->ifr_name, IFNAMSIZ);
             if (row_name[0] == '\0')
                 continue;
-            if (strcmp(row_name, "lo") == 0)
+            /* Prefix, not an exact match: lwIP assigns the loopback netif a
+             * number from the same counter as the hardware ones, so it is
+             * "lo1" here, not "lo".  Comparing against "lo" exactly made this
+             * report the loopback as a NIC, which turned "this QEMU run has no
+             * network interface" from a SKIP into a FAIL that blamed the
+             * transmit hook for never running. */
+            if (strncmp(row_name, "lo", 2) == 0)
                 continue;
             snprintf(name, sz, "%s", row_name);
             rc = 0;

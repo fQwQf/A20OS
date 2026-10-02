@@ -432,6 +432,13 @@ const struct drv_export drv_export_table[] = {
     { "a20_lwip_lock",                 (void *)a20_lwip_lock },
     { "a20_lwip_unlock",               (void *)a20_lwip_unlock },
     { "a20_lwip_poll_locked",          (void *)a20_lwip_poll_locked },
+    /* The poll phases are separate entry points, and the loadable virtio-net
+     * module calls the receive one directly so it can pass a packet budget.
+     * Omitting them here does not fail at build time: the module loads as a
+     * relocation against an unexported name and drvmod_load() rejects it with
+     * -EINVAL at run time, which presents as "no network interface". */
+    { "a20_lwip_poll_timers_locked",   (void *)a20_lwip_poll_timers_locked },
+    { "a20_lwip_poll_rx_locked",       (void *)a20_lwip_poll_rx_locked },
     { "a20_lwip_process_netif_irq_locked", (void *)a20_lwip_process_netif_irq_locked },
     { "a20_lwip_rx_pending_any",       (void *)a20_lwip_rx_pending_any },
     { "a20_lwip_signal_rx_pending",    (void *)a20_lwip_signal_rx_pending },

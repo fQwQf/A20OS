@@ -7,11 +7,10 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/usb/usb.h"
-#include "lwip/timeouts.h"
 
 /* virtio-net is optional in generic and is supplied by a .a20drv package.
  * The progress service must not create a link-time dependency on it. */
-extern void virtio_net_poll_rx_all(void) __attribute__((weak));
+extern void virtio_net_poll_rx_all_bounded(unsigned budget) __attribute__((weak));
 
 /*
  * IO_PROGRESS_SERVICE (event-driven model):
@@ -40,8 +39,8 @@ void kernel_progress_poll(kernel_progress_reason_t reason)
      * owns compatibility RX polling; device IRQs still make progress on the
      * CPU that receives them.
      */
-    if (cpu_current_id() == 0 && virtio_net_poll_rx_all)
-        virtio_net_poll_rx_all();
+    if (cpu_current_id() == 0 && virtio_net_poll_rx_all_bounded)
+        virtio_net_poll_rx_all_bounded(0);
 }
 
 void kernel_progress_timer_tick(void)
@@ -50,8 +49,7 @@ void kernel_progress_timer_tick(void)
     if (cpu_current_id() != 0)
         return;
     uint64_t flags = a20_lwip_lock();
-    sys_check_timeouts();
-    a20_net_config_sync_from_lwip();
+    a20_lwip_poll_timers_locked();
     a20_lwip_unlock(flags);
     /*
      * Periodic event-driven safety net: on IRQ-capable platforms the virtio
@@ -61,8 +59,8 @@ void kernel_progress_timer_tick(void)
      * cannot stall even if a device IRQ is ever lost, while keeping the
      * per-context-switch scheduler hot path free of the lock.
      */
-    if (virtio_net_poll_rx_all)
-        virtio_net_poll_rx_all();
+    if (virtio_net_poll_rx_all_bounded)
+        virtio_net_poll_rx_all_bounded(CONFIG_NET_RX_IRQ_BUDGET);
 }
 
 void kernel_progress_run_bottom_halves(void)

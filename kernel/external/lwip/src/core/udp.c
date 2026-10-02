@@ -63,6 +63,8 @@
 #include "lwip/snmp.h"
 #include "lwip/dhcp.h"
 
+#include "lwip/priv/pcb_lane.h"
+
 #include <string.h>
 
 #ifndef UDP_LOCAL_PORT_RANGE_START
@@ -78,7 +80,56 @@ static u16_t udp_port = UDP_LOCAL_PORT_RANGE_START;
 
 /* The list of UDP PCBs */
 /* exported in udp.h (was static) */
-struct udp_pcb *udp_pcbs;
+struct udp_pcb *udp_pcbs[NET_PCB_LANE_BUCKETS];
+
+/** Link pcb into the head its lane field names. */
+static void
+udp_pcb_reg(struct udp_pcb *pcb)
+{
+  pcb->next = udp_pcbs[pcb->lane];
+  udp_pcbs[pcb->lane] = pcb;
+}
+
+/** Unlink pcb from the head its lane field names, which is where the caller
+ * must still find it -- reading a bucket by a re-derived lane would look in the
+ * wrong place. */
+static void
+udp_pcb_unreg(struct udp_pcb *pcb)
+{
+  if (udp_pcbs[pcb->lane] == pcb) {
+    udp_pcbs[pcb->lane] = pcb->next;
+  } else {
+    struct udp_pcb *pcb2;
+    for (pcb2 = udp_pcbs[pcb->lane]; pcb2 != NULL; pcb2 = pcb2->next) {
+      if (pcb2->next == pcb) {
+        pcb2->next = pcb->next;
+        break;
+      }
+    }
+  }
+  pcb->next = NULL;
+}
+
+/** Re-file pcb under the bucket its current local address and port hash to,
+ * when that is not where it is linked.  For a pcb whose local_ip has just been
+ * rewritten: local_ip no longer says which bucket holds it, only ->lane does.
+ * A pcb whose bucket is unchanged keeps its place in the list. */
+static void
+udp_pcb_rebucket(struct udp_pcb *pcb)
+{
+#if CONFIG_NET_LANES > 1
+  u8_t lane = NET_PCB_LANE_OF_PCB(pcb);
+  if (lane != pcb->lane) {
+    udp_pcb_unreg(pcb);
+    pcb->lane = lane;
+    udp_pcb_reg(pcb);
+  }
+#else /* CONFIG_NET_LANES == 1 */
+  /* Every bucket is index 0 and a pcb's lane is always 0, so there is no other
+     bucket to move it to. */
+  LWIP_UNUSED_ARG(pcb);
+#endif /* CONFIG_NET_LANES > 1 */
+}
 
 /**
  * Initialize this module.
@@ -101,18 +152,21 @@ udp_new_port(void)
 {
   u16_t n = 0;
   struct udp_pcb *pcb;
+  int lane;
 
 again:
   if (udp_port++ == UDP_LOCAL_PORT_RANGE_END) {
     udp_port = UDP_LOCAL_PORT_RANGE_START;
   }
   /* Check all PCBs. */
-  for (pcb = udp_pcbs; pcb != NULL; pcb = pcb->next) {
-    if (pcb->local_port == udp_port) {
-      if (++n > (UDP_LOCAL_PORT_RANGE_END - UDP_LOCAL_PORT_RANGE_START)) {
-        return 0;
+  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+    for (pcb = udp_pcbs[lane]; pcb != NULL; pcb = pcb->next) {
+      if (pcb->local_port == udp_port) {
+        if (++n > (UDP_LOCAL_PORT_RANGE_END - UDP_LOCAL_PORT_RANGE_START)) {
+          return 0;
+        }
+        goto again;
       }
-      goto again;
     }
   }
   return udp_port;
@@ -199,6 +253,9 @@ udp_input(struct pbuf *p, struct netif *inp)
   u16_t src, dest;
   u8_t broadcast;
   u8_t for_us = 0;
+  u8_t search_lane[NET_PCB_LANE_BUCKETS];
+  int search_buckets;
+  int lane;
 
   LWIP_UNUSED_ARG(inp);
 
@@ -246,11 +303,34 @@ udp_input(struct pbuf *p, struct netif *inp)
   pcb = NULL;
   prev = NULL;
   uncon_pcb = NULL;
+  /* Buckets to search, most specific first.  A datagram for a concrete
+     destination can only be delivered by a pcb bound to that same address,
+     which is bucketed by hash(destination address, destination port), or by a
+     catch-all pcb, which is in the sentinel bucket because no hash of the any
+     address can equal the hash of a concrete one.  A broadcast datagram is
+     additionally delivered to every pcb in the receiving subnet, and a subnet
+     pcb's bucket does not follow from the destination address at all, so that
+     one case has to visit every bucket. */
+  if (broadcast) {
+    search_buckets = NET_PCB_LANE_BUCKETS;
+    for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+      search_lane[lane] = (u8_t)lane;
+    }
+  } else {
+    search_buckets = NET_PCB_LANE_SEARCH_BUCKETS;
+    search_lane[0] = NET_PCB_LANE_OF(ip_current_dest_addr(), dest);
+#if NET_PCB_LANE_ANY_PROBE
+    search_lane[1] = (u8_t)NET_PCB_LANE_ANY;
+#endif /* NET_PCB_LANE_ANY_PROBE */
+  }
   /* Iterate through the UDP pcb list for a matching pcb.
    * 'Perfect match' pcbs (connected to the remote port & ip address) are
    * preferred. If no perfect match is found, the first unconnected pcb that
    * matches the local port and ip address gets the datagram. */
-  for (pcb = udp_pcbs; pcb != NULL; pcb = pcb->next) {
+  for (lane = 0; lane < search_buckets; lane++) {
+    const u8_t bucket = search_lane[lane];
+    prev = NULL;
+    for (pcb = udp_pcbs[bucket]; pcb != NULL; pcb = pcb->next) {
     /* print the PCB local and remote address */
     LWIP_DEBUGF(UDP_DEBUG, ("pcb ("));
     ip_addr_debug_print_val(UDP_DEBUG, pcb->local_ip);
@@ -291,11 +371,11 @@ udp_input(struct pbuf *p, struct netif *inp)
            ip_addr_eq(&pcb->remote_ip, ip_current_src_addr()))) {
         /* the first fully matching PCB */
         if (prev != NULL) {
-          /* move the pcb to the front of udp_pcbs so that is
+          /* move the pcb to the front of its bucket so that is
              found faster next time */
           prev->next = pcb->next;
-          pcb->next = udp_pcbs;
-          udp_pcbs = pcb;
+          pcb->next = udp_pcbs[bucket];
+          udp_pcbs[bucket] = pcb;
         } else {
           UDP_STATS_INC(udp.cachehit);
         }
@@ -304,6 +384,13 @@ udp_input(struct pbuf *p, struct netif *inp)
     }
 
     prev = pcb;
+    }
+  /* A fully matching pcb ends the search.  Otherwise try the next bucket, and
+     a catch-all pcb found in the sentinel bucket only wins if the hashed
+     bucket produced nothing, which keeps a specific address preferred. */
+  if (pcb != NULL) {
+    break;
+  }
   }
   /* no fully matching pcb found? then look for an unconnected pcb */
   if (pcb == NULL) {
@@ -380,17 +467,19 @@ udp_input(struct pbuf *p, struct netif *inp)
         /* pass broadcast- or multicast packets to all multicast pcbs
            if SOF_REUSEADDR is set on the first match */
         struct udp_pcb *mpcb;
-        for (mpcb = udp_pcbs; mpcb != NULL; mpcb = mpcb->next) {
-          if (mpcb != pcb) {
-            /* compare PCB local addr+port to UDP destination addr+port */
-            if ((mpcb->local_port == dest) &&
-                (udp_input_local_match(mpcb, inp, broadcast) != 0)) {
-              /* pass a copy of the packet to all local matches */
-              if (mpcb->recv != NULL) {
-                struct pbuf *q;
-                q = pbuf_clone(PBUF_RAW, PBUF_POOL, p);
-                if (q != NULL) {
-                  mpcb->recv(mpcb->recv_arg, mpcb, q, ip_current_src_addr(), src);
+        for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+          for (mpcb = udp_pcbs[lane]; mpcb != NULL; mpcb = mpcb->next) {
+            if (mpcb != pcb) {
+              /* compare PCB local addr+port to UDP destination addr+port */
+              if ((mpcb->local_port == dest) &&
+                  (udp_input_local_match(mpcb, inp, broadcast) != 0)) {
+                /* pass a copy of the packet to all local matches */
+                if (mpcb->recv != NULL) {
+                  struct pbuf *q;
+                  q = pbuf_clone(PBUF_RAW, PBUF_POOL, p);
+                  if (q != NULL) {
+                    mpcb->recv(mpcb->recv_arg, mpcb, q, ip_current_src_addr(), src);
+                  }
                 }
               }
             }
@@ -933,6 +1022,7 @@ udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
 {
   struct udp_pcb *ipcb;
   u8_t rebind;
+  int l;
 #if LWIP_IPV6 && LWIP_IPV6_SCOPES
   ip_addr_t zoned_ipaddr;
 #endif /* LWIP_IPV6 && LWIP_IPV6_SCOPES */
@@ -956,10 +1046,15 @@ udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
 
   rebind = 0;
   /* Check for double bind and rebind of the same pcb */
-  for (ipcb = udp_pcbs; ipcb != NULL; ipcb = ipcb->next) {
-    /* is this UDP PCB already on active list? */
-    if (pcb == ipcb) {
-      rebind = 1;
+  for (l = 0; l < CONFIG_NET_LANES; l++) {
+    for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
+      /* is this UDP PCB already on active list? */
+      if (pcb == ipcb) {
+        rebind = 1;
+        break;
+      }
+    }
+    if (rebind) {
       break;
     }
   }
@@ -985,45 +1080,50 @@ udp_bind(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
       return ERR_USE;
     }
   } else {
-    for (ipcb = udp_pcbs; ipcb != NULL; ipcb = ipcb->next) {
-      if (pcb != ipcb) {
-        /* By default, we don't allow to bind to a port that any other udp
-           PCB is already bound to, unless *all* PCBs with that port have the
-           REUSEADDR flag set. */
+    for (l = 0; l < CONFIG_NET_LANES; l++) {
+      for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
+        if (pcb != ipcb) {
+          /* By default, we don't allow to bind to a port that any other udp
+             PCB is already bound to, unless *all* PCBs with that port have the
+             REUSEADDR flag set. */
 #if SO_REUSE
-        if (!ip_get_option(pcb, SOF_REUSEADDR) ||
-            !ip_get_option(ipcb, SOF_REUSEADDR))
+          if (!ip_get_option(pcb, SOF_REUSEADDR) ||
+              !ip_get_option(ipcb, SOF_REUSEADDR))
 #endif /* SO_REUSE */
-        {
-          /* port matches that of PCB in list and REUSEADDR not set -> reject */
-          if ((ipcb->local_port == port) &&
-              (((IP_GET_TYPE(&ipcb->local_ip) == IP_GET_TYPE(ipaddr)) &&
-              /* IP address matches or any IP used? */
-              (ip_addr_eq(&ipcb->local_ip, ipaddr) ||
-              ip_addr_isany(ipaddr) ||
-              ip_addr_isany(&ipcb->local_ip))) ||
-              (IP_GET_TYPE(&ipcb->local_ip) == IPADDR_TYPE_ANY) ||
-              (IP_GET_TYPE(ipaddr) == IPADDR_TYPE_ANY))) {
-            /* other PCB already binds to this local IP and port */
-            LWIP_DEBUGF(UDP_DEBUG,
-                        ("udp_bind: local port %"U16_F" already bound by another pcb\n", port));
-            return ERR_USE;
+          {
+            /* port matches that of PCB in list and REUSEADDR not set -> reject */
+            if ((ipcb->local_port == port) &&
+                (((IP_GET_TYPE(&ipcb->local_ip) == IP_GET_TYPE(ipaddr)) &&
+                /* IP address matches or any IP used? */
+                (ip_addr_eq(&ipcb->local_ip, ipaddr) ||
+                ip_addr_isany(ipaddr) ||
+                ip_addr_isany(&ipcb->local_ip))) ||
+                (IP_GET_TYPE(&ipcb->local_ip) == IPADDR_TYPE_ANY) ||
+                (IP_GET_TYPE(ipaddr) == IPADDR_TYPE_ANY))) {
+              /* other PCB already binds to this local IP and port */
+              LWIP_DEBUGF(UDP_DEBUG,
+                          ("udp_bind: local port %"U16_F" already bound by another pcb\n", port));
+              return ERR_USE;
+            }
           }
         }
       }
     }
   }
 
+  /* Unlink before the local address is overwritten, while ->lane still says
+     which bucket the pcb is in. */
+  if (rebind) {
+    udp_pcb_unreg(pcb);
+  }
   ip_addr_set_ipaddr(&pcb->local_ip, ipaddr);
 
   pcb->local_port = port;
+  /* Both local address and port are final now, so the bucket is derivable. */
+  pcb->lane = NET_PCB_LANE_OF_PCB(pcb);
   mib2_udp_bind(pcb);
-  /* pcb not active yet? */
-  if (rebind == 0) {
-    /* place the PCB on the active list if not already there */
-    pcb->next = udp_pcbs;
-    udp_pcbs = pcb;
-  }
+  /* place the PCB on the list if not already there */
+  udp_pcb_reg(pcb);
   LWIP_DEBUGF(UDP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, ("udp_bind: bound to "));
   ip_addr_debug_print_val(UDP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, pcb->local_ip);
   LWIP_DEBUGF(UDP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, (", port %"U16_F")\n", pcb->local_port));
@@ -1107,15 +1207,17 @@ udp_connect(struct udp_pcb *pcb, const ip_addr_t *ipaddr, u16_t port)
   LWIP_DEBUGF(UDP_DEBUG | LWIP_DBG_TRACE | LWIP_DBG_STATE, (", port %"U16_F")\n", pcb->remote_port));
 
   /* Insert UDP PCB into the list of active UDP PCBs. */
-  for (ipcb = udp_pcbs; ipcb != NULL; ipcb = ipcb->next) {
-    if (pcb == ipcb) {
-      /* already on the list, just return */
-      return ERR_OK;
+  for (int l = 0; l < CONFIG_NET_LANES; l++) {
+    for (ipcb = udp_pcbs[l]; ipcb != NULL; ipcb = ipcb->next) {
+      if (pcb == ipcb) {
+        /* already on the list, just return */
+        return ERR_OK;
+      }
     }
   }
-  /* PCB not yet on the list, add PCB now */
-  pcb->next = udp_pcbs;
-  udp_pcbs = pcb;
+  /* PCB not yet on the list, add PCB now.  udp_bind() above, if it ran, has
+     already put it in the bucket its final local address and port hash to. */
+  udp_pcb_reg(pcb);
   return ERR_OK;
 }
 
@@ -1182,28 +1284,12 @@ udp_recv(struct udp_pcb *pcb, udp_recv_fn recv, void *recv_arg)
 void
 udp_remove(struct udp_pcb *pcb)
 {
-  struct udp_pcb *pcb2;
-
   LWIP_ASSERT_CORE_LOCKED();
 
   LWIP_ERROR("udp_remove: invalid pcb", pcb != NULL, return);
 
   mib2_udp_unbind(pcb);
-  /* pcb to be removed is first in list? */
-  if (udp_pcbs == pcb) {
-    /* make list start at 2nd pcb */
-    udp_pcbs = udp_pcbs->next;
-    /* pcb not 1st in list */
-  } else {
-    for (pcb2 = udp_pcbs; pcb2 != NULL; pcb2 = pcb2->next) {
-      /* find pcb in udp_pcbs list */
-      if (pcb2->next != NULL && pcb2->next == pcb) {
-        /* remove pcb from list */
-        pcb2->next = pcb->next;
-        break;
-      }
-    }
-  }
+  udp_pcb_unreg(pcb);
   memp_free(MEMP_UDP_PCB, pcb);
 }
 
@@ -1285,14 +1371,24 @@ udp_new_ip_type(u8_t type)
 void udp_netif_ip_addr_changed(const ip_addr_t *old_addr, const ip_addr_t *new_addr)
 {
   struct udp_pcb *upcb;
+  int lane;
 
   if (!ip_addr_isany(old_addr) && !ip_addr_isany(new_addr)) {
-    for (upcb = udp_pcbs; upcb != NULL; upcb = upcb->next) {
-      /* PCB bound to current local interface address? */
-      if (ip_addr_eq(&upcb->local_ip, old_addr)) {
-        /* The PCB is bound to the old ipaddr and
-         * is set to bound to the new one instead */
-        ip_addr_copy(upcb->local_ip, *new_addr);
+    for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+      for (upcb = udp_pcbs[lane]; upcb != NULL; ) {
+        /* Take the successor first: re-filing the pcb re-links it, possibly
+           into a bucket this loop is not walking. */
+        struct udp_pcb *next = upcb->next;
+        /* PCB bound to current local interface address? */
+        if (ip_addr_eq(&upcb->local_ip, old_addr)) {
+          /* The PCB is bound to the old ipaddr and
+           * is set to bound to the new one instead */
+          ip_addr_copy(upcb->local_ip, *new_addr);
+          /* The bucket follows local_ip, so move the pcb to the one the new
+           * address hashes to or inbound datagrams for it stop matching. */
+          udp_pcb_rebucket(upcb);
+        }
+        upcb = next;
       }
     }
   }

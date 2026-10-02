@@ -380,8 +380,9 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     virtio_net_kick(net, VIRTIO_NET_QUEUE_TX);
     spin_unlock_irqrestore(&net->lock, flags);
 
-    /* nonblock mode: submit, then return without waiting for completion; the
-     * TX completion IRQ clears tx_busy in virtio_net_poll_all(). */
+    /* nonblock mode: submit, then return without waiting for completion.
+     * virtio_net_complete_tx_locked() clears tx_busy, and reaches it either
+     * from the TX completion interrupt or from the device class poll hook. */
     if (nonblock) {
         net->tx_packets++;
         return (int)len;
@@ -457,16 +458,6 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
     return ret;
 }
 
-void virtio_net_poll_all(void) {
-    for (int i = 0; i < g_nnet; i++) {
-        if (!g_net[i].valid)
-            continue;
-        uint64_t flags = spin_lock_irqsave(&g_net[i].lock);
-        virtio_net_complete_tx_locked(&g_net[i]);
-        spin_unlock_irqrestore(&g_net[i].lock, flags);
-    }
-}
-
 /*
  * virtio_net_poll_rx_all:
  * Fallback RX progress path for transports that cannot raise a device IRQ
@@ -481,7 +472,7 @@ void virtio_net_poll_all(void) {
  *   kernel_progress_poll() must keep draining unconditionally or its RX would
  *   never progress.
  */
-void virtio_net_poll_rx_all(void) {
+void virtio_net_poll_rx_all_bounded(unsigned budget) {
     int poll_only = 0;
     for (int i = 0; i < g_nnet; i++) {
         if (g_net[i].valid && !g_net[i].irq_registered) {
@@ -493,8 +484,12 @@ void virtio_net_poll_rx_all(void) {
         return;
 
     uint64_t flags = a20_lwip_lock();
-    a20_lwip_poll_locked();
+    a20_lwip_poll_rx_locked(budget);
     a20_lwip_unlock(flags);
+}
+
+void virtio_net_poll_rx_all(void) {
+    virtio_net_poll_rx_all_bounded(0);
 }
 
 /*
@@ -638,6 +633,25 @@ static void virtio_net_class_poll(struct device *dev) {
 static int virtio_net_class_rx_irq_driven(struct device *dev) {
     virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
     return net && net->irq_registered;
+}
+
+/* Published to the stack as a weak symbol rather than through net_dev_ops_t.
+ * These four counters were already maintained here but were unreachable from
+ * anywhere, so a drop could not be attributed to the device or to lwIP. */
+void virtio_net_dev_stats(struct device *dev, net_dev_stats_t *out) {
+    if (!out)
+        return;
+    out->rx_packets = out->rx_drops = 0;
+    out->tx_packets = out->tx_drops = 0;
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    if (!net)
+        return;
+    uint64_t flags = spin_lock_irqsave(&net->lock);
+    out->rx_packets = net->rx_packets;
+    out->rx_drops   = net->rx_drops;
+    out->tx_packets = net->tx_packets;
+    out->tx_drops   = net->tx_drops;
+    spin_unlock_irqrestore(&net->lock, flags);
 }
 
 static net_dev_ops_t virtio_net_class_ops = {

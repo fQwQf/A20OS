@@ -6,23 +6,49 @@
  * Evaluation is a linear scan over a small fixed table of already-parsed
  * rules, which is bounded and allocation-free.
  *
- * The table is mutated only through netfilter_add_rule/del_rule/reset.  Those
- * take netfilter_lock; the hooks do not, and instead tolerate a torn rule
- * read by never mutating a live slot in place -- add/remove publish by
- * bumping a generation counter that the hooks sample once.  With
- * NETFILTER_MAX_RULES at 32 a caller that only appends may still observe a
- * partially written rule, so single-writer assumption is documented at the
- * API rather than papered over with a lock the hook path cannot take.
+ * The table is mutated only through netfilter_add_rule/del_rule/reset, which
+ * take g_netfilter_lock.  The hooks cannot take that lock -- it is a different
+ * lock from the one they already hold, so acquiring it here would both add
+ * per-packet serialisation and constrain the lock order -- and they used to
+ * read the table with no protection at all.  That was a live race, not a
+ * theoretical one: del_rule() shifts the whole array down while a reader walks
+ * it, and in add_rule() the store to g_rules[n] is not ordered against the
+ * g_rule_count++ that publishes it, so a reader could act on a slot it believes
+ * is live but has not been written yet.
+ *
+ * g_rule_seq is the generation counter, and it is what makes those safe.
+ * Writers bracket their mutation with an odd then even value; readers sample
+ * it around the scan and retry when it moved or was odd.  Readers stay
+ * wait-free, which taking a lock under the global lwIP lock would not be.
  */
 
 #include "net/netfilter.h"
 #include "core/lock.h"
+#include "core/seqlock.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/errno.h"
 
 static netfilter_rule_t g_rules[NETFILTER_MAX_RULES];
 static unsigned g_rule_count;
+
+/*
+ * Seqlock over the rule table.  Even means the table is stable, odd means a
+ * writer is inside it.  Writers hold g_netfilter_lock, so they are already
+ * serialised against each other; this exists for the lock-free readers on the
+ * packet path, which run under a different lock entirely.
+ */
+static seqlock_t g_rule_seq = SEQLOCK_INIT;
+
+static void netfilter_rules_begin(void)
+{
+    seqlock_write_begin(&g_rule_seq);
+}
+
+static void netfilter_rules_end(void)
+{
+    seqlock_write_end(&g_rule_seq);
+}
 
 static netfilter_stats_t g_stats;
 
@@ -210,7 +236,9 @@ int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out)
 
 int netfilter_rule_count(void)
 {
-    return (int)g_rule_count;
+    /* Acquire: this is a lock-free reader, so it must not observe a
+     * g_rule_count that has been published ahead of the slot it describes. */
+    return (int)__atomic_load_n(&g_rule_count, __ATOMIC_ACQUIRE);
 }
 
 int netfilter_add_rule(const netfilter_rule_t *rule)
@@ -222,8 +250,10 @@ int netfilter_add_rule(const netfilter_rule_t *rule)
         spin_unlock_irqrestore(&g_netfilter_lock, flags);
         return -ENOSPC;
     }
+    netfilter_rules_begin();
     g_rules[g_rule_count] = *rule;
     g_rule_count++;
+    netfilter_rules_end();
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
     return (int)(g_rule_count - 1);
 }
@@ -235,10 +265,12 @@ int netfilter_del_rule(unsigned index)
         spin_unlock_irqrestore(&g_netfilter_lock, flags);
         return -EINVAL;
     }
+    netfilter_rules_begin();
     for (unsigned i = index; i + 1 < g_rule_count; i++)
         g_rules[i] = g_rules[i + 1];
     g_rule_count--;
     memset(&g_rules[g_rule_count], 0, sizeof(g_rules[0]));
+    netfilter_rules_end();
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
     return 0;
 }
@@ -246,8 +278,10 @@ int netfilter_del_rule(unsigned index)
 void netfilter_reset(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_netfilter_lock);
+    netfilter_rules_begin();
     memset(g_rules, 0, sizeof(g_rules));
     g_rule_count = 0;
+    netfilter_rules_end();
     spin_unlock_irqrestore(&g_netfilter_lock, flags);
 }
 
@@ -339,39 +373,67 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
     else
         __atomic_fetch_add(&g_stats.out_packets, 1, __ATOMIC_RELAXED);
 
-    for (unsigned i = 0; i < g_rule_count; i++) {
-        netfilter_rule_t *r = &g_rules[i];
-        if (r->dir != dir)
-            continue;
-        if (r->proto != NETFILTER_PROTO_ANY && r->proto != proto)
-            continue;
-        if (r->src_addr != NETFILTER_NO_ADDR && r->src_addr != src)
-            continue;
-        if (r->dst_addr != NETFILTER_NO_ADDR && r->dst_addr != dst)
-            continue;
-        if (r->src_port != NETFILTER_NO_PORT && r->src_port != sport)
-            continue;
-        if (r->dst_port != NETFILTER_NO_PORT && r->dst_port != dport)
-            continue;
-
-        __atomic_fetch_add(&r->matched, 1, __ATOMIC_RELAXED);
-        __atomic_fetch_add(&r->bytes, len, __ATOMIC_RELAXED);
-        if (dir == NETFILTER_DIR_IN) {
-            if (r->action == NETFILTER_DROP)
-                __atomic_fetch_add(&g_stats.in_dropped, 1, __ATOMIC_RELAXED);
-            else
-                __atomic_fetch_add(&g_stats.in_accepted, 1, __ATOMIC_RELAXED);
-        } else {
-            if (r->action == NETFILTER_DROP)
-                __atomic_fetch_add(&g_stats.out_dropped, 1, __ATOMIC_RELAXED);
-            else
-                __atomic_fetch_add(&g_stats.out_accepted, 1, __ATOMIC_RELAXED);
+    /*
+     * Scan under the seqlock.  The table can be mutated concurrently by
+     * netfilter_add_rule/del_rule/reset under g_netfilter_lock, which is not
+     * the lock this path holds, so the scan is bracketed by a generation
+     * sample and retried if it moved.  A retry leaves `hit` unset, which
+     * yields the same default-accept answer an unconfigured filter gives.
+     *
+     * The matched rule's own counters are bumped inside the bracket.  Bumping
+     * them after it would risk charging a packet to whichever rule slid into
+     * that index; on a retry they are simply not charged, which understates a
+     * counter rather than misattributing it.
+     */
+    int hit = -1;
+    netfilter_action_t action = NETFILTER_ACCEPT;
+    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
+        unsigned seq0 = seqlock_read_begin(&g_rule_seq);
+        if (seq0 == 0u)
+            continue;               /* writer inside the table; wait for it */
+        unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
+        int found = -1;
+        netfilter_action_t found_action = NETFILTER_ACCEPT;
+        for (unsigned i = 0; i < n; i++) {
+            netfilter_rule_t *r = &g_rules[i];
+            if (r->dir != dir)
+                continue;
+            if (r->proto != NETFILTER_PROTO_ANY && r->proto != proto)
+                continue;
+            if (r->src_addr != NETFILTER_NO_ADDR && r->src_addr != src)
+                continue;
+            if (r->dst_addr != NETFILTER_NO_ADDR && r->dst_addr != dst)
+                continue;
+            if (r->src_port != NETFILTER_NO_PORT && r->src_port != sport)
+                continue;
+            if (r->dst_port != NETFILTER_NO_PORT && r->dst_port != dport)
+                continue;
+            found = (int)i;
+            found_action = (netfilter_action_t)r->action;
+            break;
         }
-        return (netfilter_action_t)r->action;
+        if (seqlock_read_retry(&g_rule_seq, seq0))
+            continue;               /* moved under us; rescan */
+        hit = found;
+        action = found_action;
+        if (hit >= 0) {
+            netfilter_rule_t *r = &g_rules[hit];
+            __atomic_fetch_add(&r->matched, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&r->bytes, len, __ATOMIC_RELAXED);
+        }
+        break;
     }
 
-    /* No rule matched: default policy is accept, so an unconfigured or
-     * non-matching system behaves exactly as it did before this existed. */
+    /* No rule matched, the table never settled, or no rule applies: default
+     * policy is accept, so an unconfigured or non-matching system behaves
+     * exactly as it did before this existed. */
+    if (hit >= 0 && action == NETFILTER_DROP) {
+        if (dir == NETFILTER_DIR_IN)
+            __atomic_fetch_add(&g_stats.in_dropped, 1, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&g_stats.out_dropped, 1, __ATOMIC_RELAXED);
+        return NETFILTER_DROP;
+    }
     if (dir == NETFILTER_DIR_IN)
         __atomic_fetch_add(&g_stats.in_accepted, 1, __ATOMIC_RELAXED);
     else
