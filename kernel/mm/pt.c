@@ -149,7 +149,6 @@ static void mcs_lock(pt_meta_t *m)
 
     me->next = 0;
     me->locked = 1;
-    m->node = (uintptr_t)me;
 
     uintptr_t tail = __atomic_exchange_n(&m->lock, (uintptr_t)me,
                                          __ATOMIC_ACQ_REL);
@@ -158,6 +157,14 @@ static void mcs_lock(pt_meta_t *m)
         a20_perf_count(A20_PERF_MM_PT_LOCK_CONTENDED);
         a20_perf_count(A20_PERF_MM_PT_LOCK_WAITS);
         __atomic_store_n(&me->locked, 0, __ATOMIC_RELEASE);
+        /* Link behind the predecessor, or the queue never exists.  Without this
+         * the unlocker finds me->next == 0 and takes the compare-exchange
+         * branch -- but m->lock was already moved to THIS waiter by the
+         * exchange above, so that CAS always fails, the lock is never released,
+         * and this waiter is never handed the lock.  One contended acquisition
+         * wedges the node permanently. */
+        __atomic_store_n(&((pt_mcs_node_t *)tail)->next, (uintptr_t)me,
+                         __ATOMIC_RELEASE);
         uint32_t spins = 0;
         while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
             arch_cpu_relax();
@@ -186,9 +193,14 @@ static void mcs_lock(pt_meta_t *m)
 
 static void mcs_unlock(pt_meta_t *m)
 {
-    pt_mcs_node_t *me = (pt_mcs_node_t *)m->node;
+    pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
+    /* Our own node, NOT m->node.  Every acquirer overwrote that shared field
+     * with its own pointer, so a holder reading it back got the newest waiter
+     * instead of itself -- it then cleared the lock and handed off to nobody,
+     * and that waiter span forever.  mcs_lock pushed exactly one slot and
+     * depth is decremented only below, so our node is the top of our stack. */
+    pt_mcs_node_t *me = &pool->nodes[pool->depth - 1];
 
-    m->node = 0;
     pt_mcs_node_t *next =
         (pt_mcs_node_t *)__atomic_load_n(&me->next, __ATOMIC_ACQUIRE);
     if (next) {
@@ -197,15 +209,24 @@ static void mcs_unlock(pt_meta_t *m)
         /* We are the tail.  A compare-exchange rather than a store, so a
          * concurrent enqueue that already read the tail cannot be lost. */
         uintptr_t self = (uintptr_t)me;
-        __atomic_compare_exchange_n(&m->lock, &self, 0, 0,
-                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        if (!__atomic_compare_exchange_n(&m->lock, &self, 0, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            /* Lost the race: a successor swapped itself in after we read
+             * me->next but before we cleared m->lock.  It is now blocked writing
+             * our ->next, so wait for that link to appear and hand off.  Without
+             * this wait the successor waits forever on a lock nobody releases. */
+            while (__atomic_load_n(&me->next, __ATOMIC_ACQUIRE) == 0)
+                arch_cpu_relax();
+            next = (pt_mcs_node_t *)__atomic_load_n(&me->next, __ATOMIC_ACQUIRE);
+            __atomic_store_n(&next->locked, 1, __ATOMIC_RELEASE);
+        }
     }
     /* Every acquisition pushed exactly one slot in mcs_lock, so every release
      * pops exactly one here.  This is the ONLY place the depth is
      * decremented: the descent loop's inline lock/unlock pairs and the
      * cursor's unwind loop both rely on it, and pre-decrementing in a caller
      * as well is a double decrement that corrupts the stack discipline. */
-    g_pt_mcs_pool[pt_cpu()].depth--;
+    pool->depth--;
 }
 
 /* ------------------------------------------------------------------ *
