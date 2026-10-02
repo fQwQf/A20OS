@@ -1515,7 +1515,8 @@ void mm_pt_mark_stale_recursive(pte_t *table, int level)
  * sanctioned consumer of a raw page-table walk outside teardown.
  */
 static uint64_t audit_table(pte_t *table, int level, int is_root,
-                            mm_pt_audit_report_t *rep)
+                            mm_pt_audit_report_t *rep, mm_struct_t *mm,
+                            vaddr_t base, int check_vma)
 {
     pt_meta_t *m = mm_pt_meta(table);
     rep->pt_pages++;
@@ -1527,6 +1528,8 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
     int entries = arch_pt_level_entries(level);
     for (int i = 0; i < entries; i++) {
         pte_t pte = table[i];
+        vaddr_t va = base + (vaddr_t)i *
+                               ((vaddr_t)PAGE_SIZE << (ARCH_PT_BITS * level));
         uint8_t byte = m->cls[i];
         uint8_t cls = MM_ST_GET_CLASS(byte);
         int cow = (m->cow[i >> 3] & (1u << (i & 7))) ? 1 : 0;
@@ -1549,7 +1552,10 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
         if (is_node) {
             if (cls != MM_ST_PT_NODE)
                 rep->present_mismatch++;
-            audit_table(arch_pte_to_ptr(pte), level - 1, 0, rep);
+            /* Accumulate this level's offset: the child table covers
+             * [va, va + span) -- passing base unchanged would report the
+             * child's entries at the wrong address. */
+            audit_table(arch_pte_to_ptr(pte), level - 1, 0, rep, mm, va, check_vma);
             continue;
         }
 
@@ -1573,8 +1579,29 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                 rep->cow_mismatch++;
         }
 
-        if (level == 0)
+        if (level == 0) {
             rep->entries++;
+            /* MM_AS_MODEL reverse direction (P8).  The loop above asks, per
+             * VMA, "does the status know about this range?".  This asks the
+             * converse for every individual leaf: if the status claims
+             * anything at all -- Mapped, COW, or reserved-but-unbacked
+             * MM_AS_ANON_VIRT -- then some VMA must account for the address.
+             *
+             * Without it a page can be mapped with no VMA covering it and the
+             * forward check still passes, because the forward check only ever
+             * starts from a VMA.  That is precisely what "the VMA list is
+             * purely derived" has to exclude, so the invariant is stated as
+             * its own counter rather than folded into vma_mismatch: a reader
+             * must be able to tell which direction broke.
+             *
+             * MM_ST_INVALID means the status claims nothing, which is exactly
+             * the case where no VMA is required -- a hole is not an omission. */
+            if (cls != MM_ST_INVALID && check_vma) {
+                vm_area_t *v = mm_find_vma(mm, va);
+                if (!v || va < v->start || va >= v->end)
+                    rep->vmai_mismatch++;
+            }
+        }
     }
     return 0;
 }
@@ -1589,7 +1616,7 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
     if (!mm || !mm->pgdir)
         return -EINVAL;
 
-    audit_table(mm->pgdir, ARCH_PT_ROOT_LEVEL, 1, rep);
+    audit_table(mm->pgdir, ARCH_PT_ROOT_LEVEL, 1, rep, mm, 0, check_vma);
 
     /* VMA cross-check.  A VMA asserts an interval is mapped; the metadata
      * asserts per page.  Different granularities, so the consistency rule is

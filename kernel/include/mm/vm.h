@@ -158,6 +158,15 @@ typedef struct mm_pt_retire {
  *   mutations: mm_mmap/mm_mmap_file, mm_munmap, mm_mprotect, mm_mremap,
  *   mm_brk shrink, mm_fork COW setup, demand fault installs, COW fault installs,
  *   huge-page demotion, exec replacement, and exit teardown.
+ * - ONE exception to the clause above, and it is narrow: the status fast path
+ *   (mm_fault_from_status(), P5) installs a PTE for a pre-provisioned anonymous
+ *   entry WITHOUT mm->lock, holding only the cursor.  It is the only PTE-write
+ *   path in the tree that does not take mm->lock, which is the point of it: it
+ *   consults no VMA, so there is nothing there for the lock to protect.  Every
+ *   other fault install -- COW, file, and any anon range not pre-provisioned --
+ *   still runs under mm->lock via the VMA path.  The exclusion it depends on is
+ *   per-address exclusion against unmap (mm_pt_node_lock in pt_unmap_leaf /
+ *   pt_unmap), not the absence of mm->lock.
  * - Read-only VMA walks may run without mm->lock only when the caller owns the
  *   task/mm exclusively or when the walk cannot race with mmap writers. Shared
  *   address-space readers need either mm->lock, a pinned VMA/page-cache object,
