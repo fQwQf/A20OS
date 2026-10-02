@@ -628,7 +628,7 @@ smoke-net-accept:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-accept-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf '\ncat /proc/net/status\ncat /proc/a20/perf\ntcp_accept_test\necho tcpmode fast > /proc/net/config\ntcp_accept_test\ncat /proc/a20/perf\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '\ncat /proc/net/status\ncat /proc/a20/perf\ntcp_accept_test 12346\necho tcpmode fast > /proc/net/config\ntcp_accept_test 12347\ncat /proc/a20/perf\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
