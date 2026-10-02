@@ -35,7 +35,7 @@
 
 `SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/platform/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
 
-`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-minimal`、`native-test` 和 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
+`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-handle-test` 与 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
@@ -240,7 +240,7 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 
 ### Native ABI 测试
 
-`make native-minimal`、`make native-test` 和 `make native-libc` 只构建对应原生程序，其中 `native-minimal` 与 `native-test` 检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
+`make native-handle-test` 与 `make native-libc` 只构建对应原生程序，检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 
 失败时检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误，确认 `native-handle-rv` 已生成并放入 fat32 镜像，并查看 `.kernel-build/smoke/native-handle-riscv64.log`。
 
