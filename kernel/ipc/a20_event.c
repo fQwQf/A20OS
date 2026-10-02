@@ -348,7 +348,8 @@ int64_t a20_eventq_wait(a20_eventq_t *eq, a20_pending_event_t *out,
             if (!mask || !a20_object_is_vfile_backed(watch->target_type))
                 continue;
             interests[count] = (readiness_interest_t){
-                .fd = (int)(uintptr_t)watch->target_object,
+                .fd = -1,
+                .vfile = (struct vfile *)watch->target_object,
                 .events = evq_mask_to_poll(mask),
                 .flags = READINESS_F_GLOBAL_FD,
                 .cookie = count,

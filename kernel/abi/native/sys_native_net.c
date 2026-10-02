@@ -22,6 +22,8 @@
 #include "fs/fdtable.h"
 #include "fs/xattr.h"
 #include "net/socket.h"
+#include "net/socket_internal.h"
+#include "fs/fdtable.h"
 #include "sys/usercopy.h"
 
 #include "abi/native/types.h"
@@ -62,6 +64,13 @@ extern int copy_path_from_user(char *dst, const char *uptr, uint32_t len);
 extern void resolve_path(const char *in, char *out);
 extern int64_t sys_a20_path_open(const a20_syscall_args_t *args);
 
+/* The handle's object is the socket vfile itself; the sock-level net_*
+ * variants take the socket directly, so no fd is involved. */
+static net_socket_t *native_sock_of(const a20_handle_entry_t *entry)
+{
+    return net_socket_from_vfile((vfile_t *)entry->object);
+}
+
 static int64_t a20_native_net_result(int64_t r)
 {
     if (r >= 0) return r;
@@ -98,10 +107,14 @@ int64_t sys_a20_net_socket(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) { vfs_close(gfd); return -A20_ERR_BAD_HANDLE; }
 
+    /* The handle owns its own vfile reference, independent of the fd. */
+    vfile_t *vf = fdtable_get_current_file_ref(gfd);
+    if (!vf) { vfs_close(gfd); return -A20_ERR_BAD_HANDLE; }
+
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd, A20_OBJ_SOCKET, rights);
-    if (h < 0) vfs_close(gfd);
+    int64_t h = a20_handle_install(ht, vf, A20_OBJ_SOCKET, rights);
+    if (h < 0) { vfs_put_file(vf); vfs_close(gfd); }
     return h;
 }
 
@@ -155,7 +168,7 @@ int64_t sys_a20_net_bind(const a20_syscall_args_t *args)
                                                A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    r = net_bind((int)(uintptr_t)entry.object, kaddr, addrlen);
+    r = net_bind_sock(native_sock_of(&entry), kaddr, addrlen);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 
@@ -179,7 +192,7 @@ int64_t sys_a20_net_connect(const a20_syscall_args_t *args)
                                                A20_RIGHT_WRITE, &entry);
     if (r < 0) return r;
 
-    r = net_connect((int)(uintptr_t)entry.object, kaddr, addrlen);
+    r = net_connect_sock(native_sock_of(&entry), kaddr, addrlen);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 
@@ -206,16 +219,19 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
                                                A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    int new_gfd = net_accept((int)(uintptr_t)entry.object,
-                             (addr && addrlen) ? kaddr : NULL,
-                             (addr && addrlen) ? &klen : NULL, 0);
+    int new_gfd = net_accept_sock(native_sock_of(&entry),
+                                  (addr && addrlen) ? kaddr : NULL,
+                                  (addr && addrlen) ? &klen : NULL, 0);
     a20_object_release(entry.object, entry.type);
     if (new_gfd < 0) return a20_native_net_result(new_gfd);
+
+    vfile_t *new_vf = fdtable_get_current_file_ref(new_gfd);
 
     if (addr && addrlen) {
         if (native_net_addr_out(addr, kaddr, klen) < 0 ||
             native_net_addrlen_out(addrlen, klen) < 0) {
-            a20_object_release((void *)(uintptr_t)new_gfd, A20_OBJ_SOCKET);
+            vfs_put_file(new_vf);
+            fdtable_close_current(new_gfd);
             return a20_native_net_result(-EFAULT);
         }
     }
@@ -223,8 +239,15 @@ int64_t sys_a20_net_accept(const a20_syscall_args_t *args)
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
-    int64_t nh = a20_handle_install(ht, (void *)(uintptr_t)new_gfd, A20_OBJ_SOCKET, rights);
-    if (nh < 0) vfs_close(new_gfd);
+    if (!new_vf) {
+        fdtable_close_current(new_gfd);
+        return -A20_ERR_BAD_HANDLE;
+    }
+    int64_t nh = a20_handle_install(ht, new_vf, A20_OBJ_SOCKET, rights);
+    if (nh < 0) {
+        vfs_put_file(new_vf);
+        fdtable_close_current(new_gfd);
+    }
     return nh;
 }
 
@@ -242,7 +265,7 @@ int64_t sys_a20_net_listen(const a20_syscall_args_t *args)
                                                A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    r = net_listen((int)(uintptr_t)entry.object, backlog);
+    r = net_listen_sock(native_sock_of(&entry), backlog);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 
@@ -276,7 +299,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
         }
     }
 
-    int gfd = (int)(uintptr_t)entry.object;
+    net_socket_t *sock = native_sock_of(&entry);
     uint64_t total_sent = 0;
     char kbuf[512];
 
@@ -295,7 +318,7 @@ int64_t sys_a20_net_sendmsg(const a20_syscall_args_t *args)
                 r = -A20_ERR_FAULT;
                 goto out_entry;
             }
-            int64_t n = net_sendto(gfd, kbuf, chunk, (int)kargs.flags,
+            int64_t n = net_sendto_sock(sock, kbuf, chunk, (int)kargs.flags,
                                    kaddrlen ? kaddr : NULL, kaddrlen);
             if (n < 0) {
                 r = (total_sent > 0) ? (int64_t)total_sent : a20_native_net_result(n);
@@ -336,7 +359,7 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
                                                A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    int gfd = (int)(uintptr_t)entry.object;
+    net_socket_t *sock = native_sock_of(&entry);
     uint64_t total_recv = 0;
     char kbuf[512];
     uint8_t kaddr[NET_SOCKADDR_MAX];
@@ -354,9 +377,10 @@ int64_t sys_a20_net_recvmsg(const a20_syscall_args_t *args)
         while (done < v.len) {
             size_t chunk = v.len - done;
             if (chunk > sizeof(kbuf)) chunk = sizeof(kbuf);
-            int64_t n = net_recvfrom(gfd, kbuf, chunk, (int)kargs.flags,
+            int64_t n = net_recvfrom_socket_meta(sock, kbuf, chunk, (int)kargs.flags,
                                      kargs.addr ? kaddr : NULL,
-                                     kargs.addr ? &kaddrlen : NULL);
+                                     kargs.addr ? &kaddrlen : NULL,
+                                     NULL);
             if (n < 0) {
                 r = (total_recv > 0) ? (int64_t)total_recv : a20_native_net_result(n);
                 goto out_entry;
@@ -409,13 +433,26 @@ int64_t sys_a20_net_socketpair(const a20_syscall_args_t *args)
 
     a20_rights_t rights = A20_RIGHT_READ | A20_RIGHT_WRITE | A20_RIGHT_STAT |
                           A20_RIGHT_DUP | A20_RIGHT_TRANSFER | A20_RIGHT_CONTROL;
-    int64_t h0 = a20_handle_install(ht, (void *)(uintptr_t)gfds[0], A20_OBJ_SOCKET, rights);
-    int64_t h1 = a20_handle_install(ht, (void *)(uintptr_t)gfds[1], A20_OBJ_SOCKET, rights);
+    vfile_t *vf0 = fdtable_get_current_file_ref(gfds[0]);
+    vfile_t *vf1 = fdtable_get_current_file_ref(gfds[1]);
+    if (!vf0 || !vf1) {
+        if (vf0) vfs_put_file(vf0);
+        if (vf1) vfs_put_file(vf1);
+        vfs_close(gfds[0]);
+        vfs_close(gfds[1]);
+        return -A20_ERR_BAD_HANDLE;
+    }
+    int64_t h0 = a20_handle_install(ht, vf0, A20_OBJ_SOCKET, rights);
+    int64_t h1 = a20_handle_install(ht, vf1, A20_OBJ_SOCKET, rights);
     if (h0 < 0 || h1 < 0) {
+        /* a removed handle's release path drops its vfile reference via
+         * a20_object_release; a never-installed reference is dropped here. */
         if (h0 >= 0) a20_handle_remove(ht, (a20_handle_t)h0);
-        else vfs_close(gfds[0]);
+        else vfs_put_file(vf0);
         if (h1 >= 0) a20_handle_remove(ht, (a20_handle_t)h1);
-        else vfs_close(gfds[1]);
+        else vfs_put_file(vf1);
+        vfs_close(gfds[0]);
+        vfs_close(gfds[1]);
         return (h0 < 0) ? h0 : h1;
     }
 
@@ -453,11 +490,11 @@ int64_t sys_a20_net_getname(const a20_syscall_args_t *args)
     if (r < 0) return r;
 
     if (peer)
-        r = net_getpeername((int)(uintptr_t)entry.object,
+        r = net_getpeername_sock(native_sock_of(&entry),
                             (addr && addrlen) ? kaddr : NULL,
                             (addr && addrlen) ? &klen : NULL);
     else
-        r = net_getsockname((int)(uintptr_t)entry.object,
+        r = net_getsockname_sock(native_sock_of(&entry),
                             (addr && addrlen) ? kaddr : NULL,
                             (addr && addrlen) ? &klen : NULL);
     a20_object_release(entry.object, entry.type);
@@ -485,7 +522,7 @@ int64_t sys_a20_net_shutdown(const a20_syscall_args_t *args)
                                                A20_RIGHT_CONTROL, &entry);
     if (r < 0) return r;
 
-    r = net_shutdown((int)(uintptr_t)entry.object, how);
+    r = net_shutdown_sock(native_sock_of(&entry), how);
     a20_object_release(entry.object, entry.type);
     return a20_native_net_result(r);
 

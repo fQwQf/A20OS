@@ -163,7 +163,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     page_cache_page_t *pcp = page_cache_get(vf->vnode, index, 1);
     if (!pcp) {
         kerr("[SHFAULT] cache_get failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index);
         return -1;
     }
@@ -171,7 +171,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     if (!page_cache_is_uptodate(pcp)) {
         if (page_cache_fill_vfile_page(vf, pcp) < 0) {
             kerr("[SHFAULT] fill failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-                 proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+                 proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
                  (unsigned long)index);
             page_cache_put(pcp);
             return -1;
@@ -181,7 +181,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     pfn_t cache_pfn = page_cache_pfn(pcp);
     if (!pfn_valid(cache_pfn)) {
         kerr("[SHFAULT] bad pfn pid=%d va=0x%lx fd=%d idx=%lu pfn=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index, (unsigned long)cache_pfn);
         page_cache_put(pcp);
         return -1;
@@ -193,7 +193,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
                       MM_ST_FILE_SHARED);
     if (r < 0) {
         kerr("[SHFAULT] map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index, r);
         page_cache_put(pcp);
         return -1;
@@ -479,51 +479,46 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
-        if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
-            vfile_t *vf = vfs_get_file_ref(vma->file_fd);
-            if (!vf) {
-                kerr("[MFAULT] file_fd dead pid=%d va=0x%lx fd=%d flags=0x%lx\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd,
-                     (unsigned long)vma->vm_flags);
-                return -1;
-            }
+        if ((vma->vm_flags & VM_FILE) && vma->file) {
+            vfile_t *vf = vma->file;
+            vfile_get(vf);
             if (!vf->vnode) {
-                kerr("[MFAULT] no vnode pid=%d va=0x%lx fd=%d\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd);
-                vfs_put_file_ref(vma->file_fd, vf);
+                kerr("[MFAULT] no vnode pid=%d va=0x%lx file=%p\n",
+                     t->pid, (unsigned long)page_va, (void *)vf);
+                vfs_put_file(vf);
                 return -1;
             }
 
             uint64_t file_pos = vma->file_offset + (page_va - vma->start);
             if (file_pos >= vf->vnode->size) {
                 kerr("[MFAULT] oob pid=%d va=0x%lx fd=%d pos=%lu size=%llu\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd,
+                     t->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
                      (unsigned long)file_pos,
                      (unsigned long long)vf->vnode->size);
                 signal_send(t->pid, SIGBUS);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                 return -1;
             }
 
             if (vma->vm_flags & VM_SHARED) {
                 int r = mm_shared_file_fault(t->mm, vma, page_va, vf);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                 return r;
             } else {
                 page_cache_page_t *pcp = page_cache_get(vf->vnode,
                                                          file_pos / PAGE_SIZE, 1);
                 if (!pcp) {
-                    vfs_put_file_ref(vma->file_fd, vf);
+                    vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                     return -1;
                 }
                 if (!page_cache_is_uptodate(pcp)) {
                     if (page_cache_fill_vfile_page(vf, pcp) < 0) {
                         page_cache_put(pcp);
-                        vfs_put_file_ref(vma->file_fd, vf);
+                        vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                         return -1;
                     }
                 }
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
 
                 pfn_t cache_pfn = page_cache_pfn(pcp);
                 if (!pfn_valid(cache_pfn)) {
@@ -752,20 +747,20 @@ static uint64_t fault_file_size(vnode_t *vn)
     return vn ? vn->size : 0;
 }
 
-static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
+static int handle_file_fault(task_t *t, uint64_t page_va,
                              uint64_t file_pos, uint64_t vma_end,
                              int shared, int fault_around, int executable,
                              vfile_t *vf)
 {
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
     if (!vf->vnode->ops || !vf->vnode->ops->readpage) {
-        kerr("[HFF] no readpage pid=%d fd=%d shared=%d\n",
-             t->pid, file_fd, shared);
-        vfs_put_file_ref(file_fd, vf);
+        kerr("[HFF] no readpage pid=%d file=%lu shared=%d\n",
+             t->pid, (unsigned long)vf->identity, shared);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -774,8 +769,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     window[0] = page_cache_get(vf->vnode, file_pos / PAGE_SIZE, 1);
     if (!window[0]) {
         kerr("[HFF] cache_get NULL pid=%d fd=%d pos=%lu shared=%d\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared);
-        vfs_put_file_ref(file_fd, vf);
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -819,17 +814,17 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     }
     if (fill_r < 0) {
         kerr("[HFF] fill fail pid=%d fd=%d pos=%lu shared=%d\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared);
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -884,11 +879,11 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
 
     if (candidate_count == 0) {
         kerr("[HFF] no candidate pid=%d fd=%d pos=%lu shared=%d window=%lu\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared,
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared,
              (unsigned long)window_count);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         cg_mem_oom_kill(t->cgroup);
         return -1;
     }
@@ -896,18 +891,19 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     mm_struct_t *mm = t->mm;
     spin_lock(&mm->lock);
     vm_area_t *vma = mm_find_vma(mm, page_va);
-    vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) &&
-                          vma->file_fd >= 0
-        ? vfs_get_file_ref(vma->file_fd) : NULL;
+    vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) && vma->file
+        ? vma->file : NULL;
+    if (current_vf)
+        vfile_get(current_vf);
     int mapping_valid = vma && current_vf && current_vf->vnode == vf->vnode &&
         (vma->vm_flags & VM_FILE) &&
         mm_pte_flags_allow_access(vma->pte_flags) &&
         !!(vma->pte_flags & PTE_X) == !!executable &&
         !!(vma->vm_flags & VM_SHARED) == !!shared &&
-        vma->file_fd == file_fd &&
+        vma->file == vf &&
         vma->file_offset + (page_va - vma->start) == file_pos;
     if (current_vf)
-        vfs_put_file_ref(vma->file_fd, current_vf);
+        vfs_put_file(current_vf);
 
     int result = -1;
     size_t installed = 0;
@@ -964,7 +960,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         if (window[i])
             page_cache_put(window[i]);
     }
-    vfs_put_file_ref(file_fd, vf);
+    vfs_put_file(vf);
     return result;
 }
 #endif
@@ -1177,12 +1173,11 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             return -1;
         return handle_demand_fault_access(t, stval, access);
     }
-    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file) {
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
             spin_unlock(&mm->lock);
             return -1;
         }
-        int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
         /* Writable private mappings stay on the single-page COW path.  A
          * read-only private mapping, including executable text, can share the
@@ -1203,14 +1198,15 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
 #endif
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
-        vfile_t *vf = vfs_get_file_ref(file_fd);
+        vfile_t *vf = vma->file;
+        vfile_get(vf);
         spin_unlock(&mm->lock);
         if (!vf || !vf->vnode) {
             if (vf)
-                vfs_put_file_ref(file_fd, vf);
+                vfs_put_file(vf);
             return -1;
         }
-        int r = handle_file_fault(t, page_va, file_fd, file_pos, vma_end,
+        int r = handle_file_fault(t, page_va, file_pos, vma_end,
                                   shared, fault_around, executable, vf);
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);

@@ -345,7 +345,7 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
     vma->end = addr + shm_size;
     vma->vm_flags = vm_flags;
     vma->pte_flags = flags;
-    vma->file_fd = -1;
+    vma->file = NULL;
     vma->sysv_shmid = shmid;
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
     mm_insert_vma(t->mm, vma);

@@ -172,14 +172,13 @@ static int vfs_proc_fd_open(const char *path, int flags)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_file_ref(task, fd, &gfd, NULL);
+    vfile_t *vf = fdtable_get_file_ref(task, fd, NULL);
     if (!vf) {
         proc_put(task);
         return -ENOENT;
     }
     if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         proc_put(task);
         return -EEXIST;
     }
@@ -190,7 +189,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
         vnode_get(vn);
     strncpy(target_path, vf->path, sizeof(target_path) - 1);
     target_path[sizeof(target_path) - 1] = '\0';
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     proc_put(task);
     if (!vn)
         return -ENXIO;
@@ -240,8 +239,8 @@ static int vfs_proc_fd_open(const char *path, int flags)
     }
     strncpy(opened->path, target_path, MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
-    int opened_gfd = vfs_alloc_fd(opened);
-    if (opened_gfd < 0) {
+    int opened_fd = fdtable_install_current_vfile(opened, 0);
+    if (opened_fd < 0) {
         vnode_t *opened_vn = opened->vnode;
         if (opened->ops && opened->ops->close)
             opened->ops->close(opened);
@@ -251,7 +250,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
         return -EMFILE;
     }
     vnode_put(vn);
-    return opened_gfd;
+    return opened_fd;
 }
 
 int vfs_open_vnode(struct vnode *vn, int flags)
@@ -267,8 +266,8 @@ int vfs_open_vnode(struct vnode *vn, int flags)
     }
     strncpy(opened->path, "handle", MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
-    int gfd = vfs_alloc_fd(opened);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(opened, 0);
+    if (ofd < 0) {
         vnode_t *ovn = opened->vnode;
         if (opened->ops && opened->ops->close)
             opened->ops->close(opened);
@@ -278,7 +277,7 @@ int vfs_open_vnode(struct vnode *vn, int flags)
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
 int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
@@ -433,15 +432,15 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(vf, flags & O_CLOEXEC);
+    if (ofd < 0) {
         vnode_put(vn);
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         vfile_free(vf);
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
 int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
@@ -453,25 +452,23 @@ int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
         out[outsz - 1] = '\0';
         return 0;
     }
-    int64_t gfd = fdtable_get_current(dirfd);
-    if (gfd < 0) return (int)gfd;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(dirfd);
     if (!vf) return -EBADF;
     if (!vf->vnode || vf->vnode->type != VFS_FT_DIR) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -ENOTDIR;
     }
     if (!vf->path[0]) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     if (strlen(vf->path) >= outsz) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -ENAMETOOLONG;
     }
     strncpy(out, vf->path, outsz - 1);
     out[outsz - 1] = '\0';
-    vfs_put_file_ref((int)gfd, vf);
+    vfs_put_file(vf);
     return 0;
 }
 
@@ -628,49 +625,39 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(vf, flags & O_CLOEXEC);
+    if (ofd < 0) {
         vnode_put(vn);
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         vfile_free(vf);
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
-static void vfs_release_file_final(int fd, vfile_t *vf)
+/* Runs when the last reference to an open file goes away: fire EventQ
+ * destroy hooks (watches key on the vfile pointer), release file locks,
+ * run the close op, free the vfile, drop the vnode. */
+void vfs_finalize_closed_vfile(vfile_t *vf)
 {
     if (!vf)
         return;
     vnode_t *vn = vf->vnode;
-    vfs_release_open_file_locks(vf, fd);
+    a20_eventq_on_vfile_destroy(vf);
+    vfs_release_open_file_locks(vf, 0);
     if (vf->ops && vf->ops->close)
         vf->ops->close(vf);
     vfile_free(vf);
     vnode_put(vn);
-    ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
-}
-
-void vfs_put_file_ref(int fd, vfile_t *vf)
-{
-    vfile_t *closed = NULL;
-    if (file_put_ref_prepare(fd, vf, &closed) == 0)
-        vfs_release_file_final(fd, closed);
-}
-
-void vfs_put_file(vfile_t *vf)
-{
-    vfile_t *closed = NULL;
-    if (file_put_ref_prepare(-1, vf, &closed) == 0)
-        vfs_release_file_final(-1, closed);
+    ktrace_vfs("[VFS] close: file=%p identity=%lu done\n",
+               (void *)vf, (unsigned long)vf->identity);
 }
 
 int vfs_close(int fd) {
-    vfile_t *vf = NULL;
-    int r = file_close_prepare(fd, &vf);
-    if (r < 0) return r;
-    vfs_release_file_final(fd, vf);
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
+    if (!vf) return -EBADF;
+    vfs_put_file(vf);
     return 0;
 }
 
@@ -1135,9 +1122,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             proc_put(proc_fd_task);
             return -EACCES;
         }
-        int gfd = -1;
-        vfile_t *vf = fdtable_get_file_ref(proc_fd_task, proc_fd, &gfd,
-                                           NULL);
+        vfile_t *vf = fdtable_get_file_ref(proc_fd_task, proc_fd, NULL);
         if (!vf) {
             proc_put(proc_fd_task);
             return -ENOENT;
@@ -1149,7 +1134,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
                                           sizeof(visible_fd))
                 : NULL;
         int r = target ? vfs_readlink_copy_target(target, buf, sz) : -ENOENT;
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         proc_put(proc_fd_task);
         return r;
     }
@@ -1490,11 +1475,9 @@ void vfs_release_process_locks(int pid) {
     fs_locks_release_process(pid);
 }
 
-void vfs_release_process_file_locks(int fd, int pid) {
-    vfile_t *vf = vfs_get_file_ref(fd);
+void vfs_release_process_file_locks(vfile_t *vf, int pid) {
     if (!vf) return;
     fs_locks_release_process_file(vf, pid);
-    vfs_put_file_ref(fd, vf);
 }
 
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd __attribute__((unused))) {
@@ -1512,9 +1495,26 @@ int vfs_flock(int fd, int operation) {
 int vfs_fcntl(int fd, int cmd, long arg) {
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf) return -EBADF;
+    int r;
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+        r = fdtable_dup_current(fd, (int)arg,
+                                cmd == F_DUPFD_CLOEXEC ? O_CLOEXEC : 0);
+        vfs_put_file(vf);
+        return r;
+    }
+    r = vfs_fcntl_vfile(vf, cmd, arg);
+    vfs_put_file(vf);
+    return r;
+}
+
+/* fcntl on an already-resolved vfile (native ABI file handles).  The caller
+ * owns @vf's reference.  F_DUPFD/F_DUPFD_CLOEXEC need an fd to duplicate and
+ * are only reachable through the fd-level vfs_fcntl(). */
+int vfs_fcntl_vfile(vfile_t *vf, int cmd, long arg) {
+    if (!vf) return -EBADF;
     task_t *t = proc_current();
     int owner = t ? t->pid : 0;
-#define VFS_FCNTL_RETURN(expr) do { int _vfs_fcntl_r = (expr); vfs_put_file_ref(fd, vf); return _vfs_fcntl_r; } while (0)
+#define VFS_FCNTL_RETURN(expr) do { int _vfs_fcntl_r = (expr); return _vfs_fcntl_r; } while (0)
 
     if (cmd == F_GETFL)
         VFS_FCNTL_RETURN(vf->flags);
@@ -1523,10 +1523,8 @@ int vfs_fcntl(int fd, int cmd, long arg) {
         vf->flags = accmode | ((int)arg & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC));
         VFS_FCNTL_RETURN(0);
     }
-    if (cmd == F_DUPFD)
-        VFS_FCNTL_RETURN(vfs_dupfd(fd, (int)arg));
-    if (cmd == F_DUPFD_CLOEXEC)
-        VFS_FCNTL_RETURN(vfs_dupfd(fd, (int)arg));
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)
+        VFS_FCNTL_RETURN(-EINVAL);
     if (cmd == F_GETFD || cmd == F_SETFD)
         VFS_FCNTL_RETURN(0);
 
@@ -1687,10 +1685,9 @@ void vfs_init(void) {
         }
     }
 
-    /* Install std streams at global fds 0,1,2 */
-    file_install_at(STDIN_FILENO, devfs_create_stdio(STDIN_FILENO));
-    file_install_at(STDOUT_FILENO, devfs_create_stdio(STDOUT_FILENO));
-    file_install_at(STDERR_FILENO, devfs_create_stdio(STDERR_FILENO));
+    /* std streams: no global table any more.  Boot-context fd operations
+     * lazily wire stdio into the pinned boot table on first use (fs/fdtable.c
+     * fdtable_boot()), and every task gets its own via fdtable_init_stdio(). */
 
     vfs_mkdir("/tmp", 0755);
     int overlay_err = ramfs_populate_overlay();

@@ -537,7 +537,11 @@ int      proc_exec(const char *path, char *const argv[], char *const envp[]);
 
 /* mmap/brk helpers */
 vaddr_t  proc_brk(vaddr_t newbrk);
+struct vfile;
 vaddr_t  proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off);
+/* Variant for callers already holding a vfile reference (consumed). */
+vaddr_t  proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
+                         struct vfile *file, long off);
 int      proc_munmap(vaddr_t addr, size_t len);
 
 /* Clone (fork-like) */

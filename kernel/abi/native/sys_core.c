@@ -315,8 +315,8 @@ int64_t sys_a20_handle_seek(const a20_syscall_args_t *args)
         return -A20_ERR_FAULT;
     }
 
-    int gfd = (int)(uintptr_t)entry.object;
-    long new_off = vfs_lseek(gfd, (long)cur_offset, (int)whence);
+    long new_off = vfs_lseek_vfile((vfile_t *)entry.object,
+                                   (long)cur_offset, (int)whence);
     if (new_off < 0) {
         a20_object_release(entry.object, entry.type);
         /* Non-seekable objects (console, pipe, socket) report a distinct
@@ -471,8 +471,7 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
                                                &img_entry);
     if (r < 0) return r;
 
-    int img_fd = (int)(uintptr_t)img_entry.object;
-    vfile_t *img_vf = vfs_get_file_ref(img_fd);
+    vfile_t *img_vf = (vfile_t *)img_entry.object;
     if (!img_vf) {
         a20_object_release(img_entry.object, img_entry.type);
         return -A20_ERR_BAD_HANDLE;
@@ -480,11 +479,20 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
 
     char path_buf[MAX_PATH_LEN];
     strncpy(path_buf, img_vf->path, MAX_PATH_LEN);
-    vfs_put_file_ref(img_fd, img_vf);
+
+    /* The ELF loader reads through an fd; publish the image vfile in this
+     * task's table for the duration of the load.  The install consumes the
+     * lookup reference. */
+    int img_fd = fdtable_install_current_vfile(img_vf, 0);
+    if (img_fd < 0) {
+        a20_object_release(img_entry.object, img_entry.type);
+        return -A20_ERR_BAD_HANDLE;
+    }
 
     elf_load_info_t info;
     memset(&info, 0, sizeof(info));
     r = elf_load(img_fd, path_buf, &info);
+    fdtable_close_current(img_fd);
     a20_object_release(img_entry.object, img_entry.type);
 
     if (r < 0) return -A20_ERR_IO;
@@ -604,13 +612,11 @@ int64_t sys_a20_task_spawn(const a20_syscall_args_t *args)
         a20_handle_lookup_ref_internal(ht, cwd_source, A20_OBJ_DIRECTORY,
                                        A20_RIGHT_READ | A20_RIGHT_STAT,
                                        &root_entry) == A20_OK) {
-        int cwd_gfd = (int)(uintptr_t)root_entry.object;
-        vfile_t *cwd_vf = vfs_get_file_ref(cwd_gfd);
+        vfile_t *cwd_vf = (vfile_t *)root_entry.object;
         if (cwd_vf && cwd_vf->path[0]) {
             strncpy(new_task->fs.cwd, cwd_vf->path, MAX_PATH_LEN - 1);
             new_task->fs.cwd[MAX_PATH_LEN - 1] = '\0';
         }
-        if (cwd_vf) vfs_put_file_ref(cwd_gfd, cwd_vf);
         a20_object_release(root_entry.object, root_entry.type);
     }
 
@@ -1049,15 +1055,15 @@ int64_t a20_dir_handle_to_dirfd(a20_handle_t dir_h, a20_rights_t required_rights
     if (r < 0)
         return r;
 
-    int gfd = (int)(uintptr_t)entry.object;
-    int lfd = fdtable_install_current(gfd, 0);
-    if (lfd < 0)
+    vfile_t *vf = (vfile_t *)entry.object;
+    int lfd = fdtable_install_current_vfile(vf, 0);
+    /* On success the install consumes the lookup reference; on failure the
+     * lookup reference is released here. */
+    if (lfd < 0) {
+        a20_object_release(vf, A20_OBJ_DIRECTORY);
         return -A20_ERR_BAD_HANDLE;
-
-    /* fdtable_install_current() consumes the lookup reference on both
-     * success and failure (its failure path closes the gfd). */
+    }
     *out_dirfd = lfd;
-
     return 0;
 }
 
@@ -1067,13 +1073,18 @@ int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
 {
     if (gfd < 0) return -A20_ERR_NOT_FOUND;
 
+    /* @gfd is the calling task's fd; the handle takes over the reference
+     * resolved here (the fd slot itself is not closed — the caller keeps
+     * its own fd).  The vfile outlives both. */
+    vfile_t *vf = fdtable_get_current_file_ref(gfd);
+    if (!vf)
+        return -A20_ERR_BAD_HANDLE;
+
     uint16_t obj_type = obj_type_hint;
     if (obj_type == A20_OBJ_INVALID) {
         obj_type = A20_OBJ_FILE;
-        vfile_t *vf = vfs_get_file_ref(gfd);
-        if (vf && vf->vnode && vf->vnode->type == VFS_FT_DIR)
+        if (vf->vnode && vf->vnode->type == VFS_FT_DIR)
             obj_type = A20_OBJ_DIRECTORY;
-        if (vf) vfs_put_file_ref(gfd, vf);
     }
 
     a20_rights_t rights = requested_rights;
@@ -1081,13 +1092,13 @@ int64_t a20_install_gfd_handle(int gfd, uint16_t obj_type_hint,
     task_t *cur = proc_current();
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) {
-        vfs_close(gfd);
+        vfs_put_file(vf);
         return -A20_ERR_BAD_HANDLE;
     }
 
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd, obj_type, rights);
+    int64_t h = a20_handle_install(ht, vf, obj_type, rights);
     if (h < 0) {
-        vfs_close(gfd);
+        vfs_put_file(vf);
         return h;
     }
 
@@ -1191,13 +1202,11 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
         a20_object_release(entry.object, entry.type);
         return -A20_ERR_ACCESS;
     }
-    int gfd = (int)(uintptr_t)entry.object;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = (vfile_t *)entry.object;
     if (!vf) {
         a20_object_release(entry.object, entry.type);
         return -A20_ERR_BAD_HANDLE;
     }
-
 
     /* Read iov buffers */
     uint64_t total_read = 0;
@@ -1234,8 +1243,6 @@ int64_t sys_a20_handle_read(const a20_syscall_args_t *args)
         }
     }
 read_done:
-
-    vfs_put_file_ref(gfd, vf);
     a20_object_release(entry.object, entry.type);
 
     kargs.out_count = total_read;
@@ -1268,12 +1275,7 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
         return -A20_ERR_ACCESS;
     }
 
-    int gfd = (int)(uintptr_t)entry.object;
-    vfile_t *vf = vfs_get_file_ref(gfd);
-    if (!vf) {
-        a20_object_release(entry.object, entry.type);
-        return -A20_ERR_BAD_HANDLE;
-    }
+    vfile_t *vf = (vfile_t *)entry.object;
 
 
     uint64_t total_written = 0;
@@ -1310,8 +1312,6 @@ int64_t sys_a20_handle_write(const a20_syscall_args_t *args)
         }
     }
 write_done:
-
-    vfs_put_file_ref(gfd, vf);
     a20_object_release(entry.object, entry.type);
 
     kargs.out_count = total_written;
@@ -1338,9 +1338,8 @@ int64_t sys_a20_handle_stat(const a20_syscall_args_t *args)
     /* For vfile-backed handles, use vfs_fstat */
     if (entry.type == A20_OBJ_FILE || entry.type == A20_OBJ_DIRECTORY ||
         entry.type == A20_OBJ_PIPE_ENDPOINT || entry.type == A20_OBJ_DEVICE) {
-        int gfd = (int)(uintptr_t)entry.object;
         kstat_t ks;
-        int sr = vfs_fstat(gfd, &ks);
+        int sr = vfs_vfile_stat((vfile_t *)entry.object, &ks);
         a20_object_release(entry.object, entry.type);
         if (sr < 0) return -A20_ERR_IO;
 

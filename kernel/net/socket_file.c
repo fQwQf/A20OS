@@ -5,6 +5,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/readiness.h"
 #include "mm/slab.h"
 #include "sys/usercopy.h"
@@ -638,6 +639,11 @@ int net_is_socket_vfile(struct vfile *vf)
     return vf && vf->ops == &g_net_ops && vf->priv;
 }
 
+net_socket_t *net_socket_from_vfile(vfile_t *vf) {
+    return (vf && net_is_socket_vfile(vf) && vf->priv) ?
+           (net_socket_t *)vf->priv : NULL;
+}
+
 net_socket_t *net_socket_from_file(int gfd) {
     vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
@@ -657,13 +663,16 @@ int net_socket_install_file(net_socket_t *s, int flags) {
     vf->ops = &g_net_ops;
     vf->priv = s;
 
-    int gfd = vfs_alloc_fd(vf);
+    int gfd = fdtable_install_current_vfile(vf, flags);
     if (gfd < 0) {
         net_socket_close_file(vf);
         vfile_free(vf);
         return gfd;
     }
+    /* s->gfd now carries the socket's owning task fd; the socket's EventQ
+     * identity is the vfile pointer itself. */
     s->gfd = gfd;
+    s->vf = vf;
     return gfd;
 }
 
@@ -676,8 +685,8 @@ int net_socket_install_file(net_socket_t *s, int flags) {
 void net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
                       uint64_t data1)
 {
-    if (!s || s->gfd < 0)
+    if (!s || !s->vf)
         return;
-    a20_event_notify((void *)(uintptr_t)s->gfd, A20_OBJ_SOCKET, event,
+    a20_event_notify(s->vf, A20_OBJ_SOCKET, event,
                      data0, data1);
 }

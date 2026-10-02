@@ -317,7 +317,8 @@ typedef struct a20_monitor {
 int  a20_object_is_vfile_backed(uint16_t type);
 void a20_object_ref(void *object, uint16_t type);
 void a20_object_release(void *object, uint16_t type);
-void a20_eventq_on_vfile_destroy(int fd);
+struct vfile;
+void a20_eventq_on_vfile_destroy(struct vfile *vf);
 
 /* ---- Channel API ---- */
 

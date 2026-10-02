@@ -134,24 +134,15 @@ void fs_locks_release_process_file(vfile_t *vf, int pid) {
     (void)pid;
 }
 
-/* From kernel/fs/vfs/path_resolution.c: file reference lookup / release. */
+/* From kernel/fs/file.c: file reference lookup / release. */
 vfile_t *vfs_get_file_ref(int fd) { (void)fd; return NULL; }
 void vfs_put_file_ref(int fd, vfile_t *vf) { (void)fd; (void)vf; }
+void vfs_put_file(vfile_t *vf) { (void)vf; }
 
 /* From kernel/fs/vfs/vnode.c: vnode reference drop. */
 void vnode_put(vnode_t *vp) { (void)vp; }
 
-/* From kernel/fs/file.c: generic file close helpers. */
-int file_close_prepare(int fd, vfile_t **closed) {
-    (void)fd;
-    if (closed)
-        *closed = NULL;
-    return 0;
-}
 void vfile_free(vfile_t *vf) { (void)vf; }
-
-/* From kernel/fs/vfs.c: fd reference counting used by fdtable. */
-int vfs_ref_fd(int fd) { (void)fd; return 0; }
 
 /* 64-bit atomic helpers required by Cortex-M3 (no native 8-byte atomics). */
 uint64_t __atomic_load_8(const volatile void *ptr, int memorder) {

@@ -122,9 +122,7 @@ int64_t sys_open_tree(int dirfd, const char *path, unsigned flags)
         return -ENOENT;
     int gfd = fscontext_open_tree_fd(vn);
     vnode_put(vn);
-    if (gfd < 0)
-        return gfd;
-    return fdtable_install_current(gfd, O_PATH);
+    return gfd; /* fscontext_open_tree_fd() already installed O_PATH */
 }
 
 int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,

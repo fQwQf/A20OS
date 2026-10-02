@@ -21,7 +21,6 @@
 
 typedef struct readiness_slot {
     vfile_t *file;
-    int gfd;
     uint64_t identity;
     readiness_source_t sources[READINESS_MAX_FILE_SOURCES];
     uint64_t source_generations[READINESS_MAX_FILE_SOURCES];
@@ -146,11 +145,11 @@ static int readiness_scan(readiness_interest_t *items,
         item->revents = 0;
         if (max_ready && (size_t)ready >= max_ready)
             continue;
-        if (item->fd < 0)
+        if (item->fd < 0 && !(item->flags & READINESS_F_GLOBAL_FD))
             continue;
         if (!slot->file ||
             (!(item->flags & READINESS_F_GLOBAL_FD) &&
-             !fdtable_current_matches_file(item->fd, slot->gfd,
+             !fdtable_current_matches_file(item->fd, slot->file,
                                            slot->identity)) ||
             (item->expected_identity &&
              item->expected_identity != slot->identity)) {
@@ -216,14 +215,16 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
         readiness_interest_t *item = &items[i];
         readiness_slot_t *slot = &slots[i];
         item->revents = 0;
-        if (item->fd < 0)
+        if (item->fd < 0 && !(item->flags & READINESS_F_GLOBAL_FD))
             continue;
         if (item->flags & READINESS_F_GLOBAL_FD) {
-            slot->gfd = item->fd;
-            slot->file = vfs_get_file_ref(item->fd);
+            /* Native watches hand us the vfile pointer directly. */
+            slot->file = item->vfile;
+            if (slot->file)
+                vfile_get(slot->file);
         } else {
             has_local = true;
-            slot->file = fdtable_get_current_file_ref(item->fd, &slot->gfd);
+            slot->file = fdtable_get_current_file_ref(item->fd);
         }
         if (!slot->file)
             continue;
@@ -322,7 +323,7 @@ out:
     LS2K_READY_MARK('6');
     for (size_t i = 0; i < count; i++)
         if (slots[i].file)
-            vfs_put_file_ref(slots[i].gfd, slots[i].file);
+            vfs_put_file(slots[i].file);
     kfree(links);
     kfree(slots);
     return ready;

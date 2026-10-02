@@ -270,16 +270,13 @@ static int snapshot_pid_maps(int pid, int smaps,
                 strncpy(rec->name, "[stack]", sizeof(rec->name) - 1);
             } else if (v->start >= mm->start_brk && v->start < mm->brk) {
                 strncpy(rec->name, "[heap]", sizeof(rec->name) - 1);
-            } else if (v->file_fd >= 0) {
-                vfile_t *vf = vfs_get_file_ref(v->file_fd);
-                if (vf) {
-                    if (vf->path[0])
-                        strncpy(rec->name, vf->path,
-                                sizeof(rec->name) - 1);
-                    if (vf->vnode)
-                        rec->ino = (unsigned long)vf->vnode->ino;
-                    vfs_put_file_ref(v->file_fd, vf);
-                }
+            } else if (v->file) {
+                vfile_t *vf = v->file;
+                if (vf->path[0])
+                    strncpy(rec->name, vf->path,
+                            sizeof(rec->name) - 1);
+                if (vf->vnode)
+                    rec->ino = (unsigned long)vf->vnode->ino;
             }
         }
         spin_unlock_irqrestore(&mm->lock, flags);
@@ -1436,9 +1433,8 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
     int cloexec = 0;
-    vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, &cloexec);
+    vfile_t *target = fdtable_get_file_ref(task, fd, &cloexec);
     proc_put(task);
     if (!target)
         return -ENOENT;
@@ -1454,6 +1450,6 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
     int len = snprintf(buf, bufsz,
                        "pos:\t%lu\nflags:\t0%o\nino:\t%lu\n",
                        (unsigned long)pos, open_flags, ino);
-    vfs_put_file_ref(gfd, target);
+    vfs_put_file(target);
     return len < 0 ? 0 : len;
 }

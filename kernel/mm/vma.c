@@ -51,7 +51,7 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
     if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
         return 0;
     if ((a->vm_flags | b->vm_flags) & VM_FILE) {
-        if (a->file_fd != b->file_fd)
+        if (a->file != b->file)
             return 0;
         return a->file_offset + (a->end - a->start) == b->file_offset;
     }
@@ -67,15 +67,15 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
 
 void vma_release_file(vm_area_t *vma)
 {
-    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file) {
         if (vma->file_vnode) {
             if (vma->vm_flags & VM_SHARED)
                 vnode_shared_map_dec(vma->file_vnode);
             vnode_put(vma->file_vnode);
             vma->file_vnode = NULL;
         }
-        vfs_close(vma->file_fd);
-        vma->file_fd = -1;
+        vfs_put_file(vma->file);
+        vma->file = NULL;
     }
 }
 
@@ -98,14 +98,16 @@ void vma_release(vm_area_t *vma)
 
 int vma_ref_file(vm_area_t *vma)
 {
-    if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
+    if (!vma || !(vma->vm_flags & VM_FILE) || !vma->file)
         return 0;
     if (vma->file_vnode) {
         vnode_get(vma->file_vnode);
         if (vma->vm_flags & VM_SHARED)
             vnode_shared_map_inc(vma->file_vnode);
     }
-    return vfs_ref_fd(vma->file_fd);
+    /* The forked/copied VMA owns its own vfile reference. */
+    vfile_get(vma->file);
+    return 0;
 }
 
 int vma_ref_fork(vm_area_t *vma)

@@ -8,6 +8,7 @@
 #include "mm/swap.h"
 #include "mm/pt.h"
 #include "fs/vfs.h"
+#include "fs/fdtable.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
 #include "proc/proc.h"
@@ -160,7 +161,7 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->vm_flags  = vmf;
     vma->pte_flags = ptef;
     vma->vmar_cap  = (uint32_t)mm_pte_flags_to_prot(ptef);
-    vma->file_fd   = -1;
+    vma->file      = NULL;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
 #endif
@@ -199,11 +200,15 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 }
 
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
-                              int prot, int flags, int file_fd,
+                              int prot, int flags, struct vfile *file,
                               uint64_t file_offset)
 {
-    if (file_fd < 0 || (file_offset & (PAGE_SIZE - 1)))
+    /* @file arrives referenced; on success the VMA owns that reference, on
+     * failure this function releases it. */
+    if (!file || (file_offset & (PAGE_SIZE - 1))) {
+        vfs_put_file(file);
         return (vaddr_t)-EINVAL;
+    }
     if ((flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) && (addr & (PAGE_SIZE - 1)))
         return (vaddr_t)-EINVAL;
 
@@ -219,13 +224,9 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot < 0)
         return (vaddr_t)prot;
 
-    int rr = vfs_ref_fd(file_fd);
-    if (rr < 0)
-        return (vaddr_t)rr;
-
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
         if (mm_range_overlaps(mm, addr, len, NULL)) {
-            vfs_close(file_fd);
+            vfs_put_file(file);
             return (vaddr_t)-EEXIST;
         }
         flags |= MAP_FIXED;
@@ -250,7 +251,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (addr == 0) {
         nommu_raw = nommu_alloc_aligned(len, &addr);
         if (!nommu_raw) {
-            vfs_close(file_fd);
+            vfs_put_file(file);
             return (vaddr_t)-ENOMEM;
         }
     }
@@ -259,7 +260,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
 
     if (addr == 0 || addr + len < addr || addr + len > USER_VA_LIMIT) {
-        vfs_close(file_fd);
+        vfs_put_file(file);
         return (vaddr_t)-ENOMEM;
     }
 #endif
@@ -276,7 +277,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
 #endif
-        vfs_close(file_fd);
+        vfs_put_file(file);
         return (vaddr_t)-ENOMEM;
     }
     refcount_set(&vma->refcount, 1);
@@ -285,7 +286,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
     vma->vmar_cap    = (uint32_t)prot;
-    vma->file_fd     = file_fd;
+    vma->file        = file;   /* VMA takes over the caller's reference */
     vma->file_offset = file_offset;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
@@ -294,13 +295,10 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     /* Every file VMA retains its vnode.  MAP_SHARED needs it for dirty-page
      * writeback; read-only MAP_PRIVATE additionally uses it to distinguish a
      * direct page-cache leaf from an anonymous COW leaf during teardown. */
-    vfile_t *vf = vfs_get_file_ref(file_fd);
-    if (vf && vf->vnode) {
-        vnode_get(vf->vnode);
-        vma->file_vnode = vf->vnode;
+    if (file->vnode) {
+        vnode_get(file->vnode);
+        vma->file_vnode = file->vnode;
     }
-    if (vf)
-        vfs_put_file_ref(file_fd, vf);
 
     if (mm->def_flags & VM_LOCKED) {
         task_t *cur = proc_current();
@@ -310,7 +308,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                 vma->file_vnode = NULL;
             }
             kfree(vma);
-            vfs_close(file_fd);
+            vfs_put_file(file);
             return (vaddr_t)-ENOMEM;
         }
         vma->vm_flags |= VM_LOCKED;
@@ -391,7 +389,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
     vma->vmar_cap    = (uint32_t)prot;   /* Native VMAR capability at creation */
-    vma->file_fd     = -1;
+    vma->file        = NULL;
     vma->vmo         = vmo;
     vma->vmo_offset  = vmo_offset;
     vmo_ref(vmo);
@@ -416,9 +414,14 @@ vaddr_t mm_mmap_file(mm_struct_t *mm, vaddr_t addr, size_t len,
                      int prot, int flags, int file_fd, uint64_t file_offset)
 {
     if (!mm) return (vaddr_t)-EINVAL;
+    /* Resolve the caller's fd to a referenced vfile; mm_mmap_file_locked
+     * takes over that reference (success) or drops it (failure). */
+    vfile_t *file = fdtable_get_current_file_ref(file_fd);
+    if (!file)
+        return (vaddr_t)-EBADF;
     mm_tlb_invalidate_begin(mm);
     uint64_t flags_l = spin_lock_irqsave(&mm->lock);
-    vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file_fd,
+    vaddr_t r = mm_mmap_file_locked(mm, addr, len, prot, flags, file,
                                     file_offset);
     spin_unlock_irqrestore(&mm->lock, flags_l);
     mm_tlb_invalidate_finish(mm);

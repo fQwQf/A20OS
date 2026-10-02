@@ -53,13 +53,15 @@ struct page_cache_page;
 #define NOMMU_ALLOC_TLS    2
 #endif
 
+struct vfile;
+
 typedef struct vm_area {
     vaddr_t         start;
     vaddr_t         end;
     uint64_t        vm_flags;
     pte_t           pte_flags;
     uint32_t        vmar_cap;       /* Native VMAR capability (PROT bits) at creation */
-    int             file_fd;
+    struct vfile   *file;   /* file-backed VMA owns one vfile reference */
     int             sysv_shmid;
     uint64_t        file_offset;
     struct vmo     *vmo;
@@ -300,7 +302,7 @@ static inline int mm_addr_error(vaddr_t addr)
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                        int prot, int flags);
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
-                            int prot, int flags, int file_fd,
+                            int prot, int flags, struct vfile *file,
                             uint64_t file_offset);
 vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot, int flags, struct vmo *vmo,

@@ -5,6 +5,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/page_cache.h"
 #include "mm/mm.h"
 
@@ -131,7 +132,7 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->ref_underflows = counter_read(&g_ref_underflows);
     stats->duplicate_destroy = counter_read(&g_duplicate_destroy);
     stats->bad_final_put = counter_read(&g_bad_final_put);
-    stats->open_fds = file_open_fd_count();
+    stats->open_fds = fdtable_open_fd_count();
     stats->vfile_objects = vfile_live_count();
     stats->vnode_objects = vnode_live_count();
     stats->free_frames = frame_free_count();

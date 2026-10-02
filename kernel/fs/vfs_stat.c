@@ -19,7 +19,7 @@
  * size and timestamps.  Path resolution and fd lifecycle stay in fs/vfs.c.
  */
 
-static int vfs_vfile_stat(vfile_t *vf, kstat_t *st)
+int vfs_vfile_stat(vfile_t *vf, kstat_t *st)
 {
     if (vf->vnode)
         return vfs_vnode_stat(vf->vnode, st);
@@ -46,13 +46,12 @@ static int vfs_proc_fd_stat(const char *path, kstat_t *st, int *matched)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_file_ref(task, fd, &gfd, NULL);
+    vfile_t *vf = fdtable_get_file_ref(task, fd, NULL);
     proc_put(task);
     if (!vf)
         return -ENOENT;
     int r = vfs_vfile_stat(vf, st);
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     return r;
 }
 

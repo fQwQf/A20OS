@@ -213,6 +213,10 @@ int64_t sys_a20_path_create(const a20_syscall_args_t *args)
                                         (kargs.type == 1) ? A20_OBJ_DIRECTORY
                                                           : A20_OBJ_FILE,
                                         rights, &h);
+    /* The installed handle owns its own vfile reference, so the helper's
+     * task fd is no longer needed here (it was leaked in the old alias
+     * model until process exit). */
+    fdtable_close_current(gfd);
     if (rc < 0) return rc;
 
     kargs.out_handle = h;
@@ -276,11 +280,11 @@ int64_t sys_a20_path_readdir(const a20_syscall_args_t *args)
                                                A20_RIGHT_READ, &entry);
     if (r < 0) return r;
 
-    int gfd = (int)(uintptr_t)entry.object;
+    vfile_t *vf = (vfile_t *)entry.object;
 
     char kbuf[4096];
     if (len > sizeof(kbuf)) len = sizeof(kbuf);
-    int64_t n = vfs_getdents64(gfd, kbuf, len);
+    int64_t n = vfs_getdents64_vfile(vf, kbuf, len);
     a20_object_release(entry.object, entry.type);
     if (n < 0) return -A20_ERR_IO;
 
@@ -403,12 +407,9 @@ int64_t sys_a20_fs_stat(const a20_syscall_args_t *args)
     switch (entry.type) {
     case A20_OBJ_FILE:
     case A20_OBJ_DIRECTORY: {
-        int gfd = (int)(uintptr_t)entry.object;
-        vfile_t *vf = vfs_get_file_ref(gfd);
+        vfile_t *vf = (vfile_t *)entry.object;
         if (vf && vf->vnode)
             fs.block_size = 4096;
-        if (vf)
-            vfs_put_file_ref(gfd, vf);
         break;
     }
     case A20_OBJ_MEMORY: {
@@ -533,10 +534,8 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             goto out_entry;
         }
 
-        int gfd = (int)(uintptr_t)entry.object;
-        vfile_t *vf = vfs_get_file_ref(gfd);
+        vfile_t *vf = (vfile_t *)entry.object;
         if (!vf || !vf->path[0]) {
-            if (vf) vfs_put_file_ref(gfd, vf);
             r = -A20_ERR_BAD_HANDLE;
             goto out_entry;
         }
@@ -544,7 +543,6 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
         char path[MAX_PATH_LEN];
         strncpy(path, vf->path, sizeof(path) - 1);
         path[sizeof(path) - 1] = '\0';
-        vfs_put_file_ref(gfd, vf);
 
         int chdir_ret = vfs_chdir(path);
         if (chdir_ret == 0)
@@ -583,7 +581,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_INVALID_ARGUMENT;
             goto out_entry;
         }
-        int gfd = (int)(uintptr_t)entry.object;
+        vfile_t *vf = (vfile_t *)entry.object;
         struct { uint16_t r, c, x, y; } ws;
         if (op == A20_HANDLE_CTRL_GET_WINSIZE) {
             a20_winsize_args_t w;
@@ -592,7 +590,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             w.version = 1;
             w.ws_row = 24;
             w.ws_col = 80;
-            if (vfs_ioctl(gfd, 0x5413 /* TIOCGWINSZ */, &ws) == 0) {
+            if (vfs_ioctl_vfile(vf, 0x5413 /* TIOCGWINSZ */, &ws) == 0) {
                 w.ws_row = ws.r;
                 w.ws_col = ws.c;
                 w.ws_xpixel = ws.x;
@@ -608,7 +606,7 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_FAULT;
             goto out_entry;
         }
-        r = a20_native_vfs_result(vfs_ioctl(gfd, 0x5414 /* TIOCSWINSZ */, &ws));
+        r = a20_native_vfs_result(vfs_ioctl_vfile(vf, 0x5414 /* TIOCSWINSZ */, &ws));
         goto out_entry;
     }
 
@@ -629,8 +627,9 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_FAULT;
             goto out_entry;
         }
-        int gfd = (int)(uintptr_t)entry.object;
-        r = a20_native_vfs_result(vfs_ioctl(gfd, 0x540B /* TCFLSH */, &ci.value));
+        r = a20_native_vfs_result(vfs_ioctl_vfile((vfile_t *)entry.object,
+                                                  0x540B /* TCFLSH */,
+                                                  &ci.value));
         goto out_entry;
     }
 
@@ -654,13 +653,13 @@ int64_t sys_a20_handle_control(const a20_syscall_args_t *args)
             r = -A20_ERR_FAULT;
             goto out_entry;
         }
-        int gfd = (int)(uintptr_t)entry.object;
+        vfile_t *vf = (vfile_t *)entry.object;
         if (entry.type == A20_OBJ_SOCKET) {
-            int nonblock = (cf.flags & O_NONBLOCK) != 0;
-            r = a20_native_vfs_result(net_set_nonblock(gfd, nonblock));
+            r = a20_native_vfs_result(
+                net_set_nonblock_vfile(vf, (cf.flags & O_NONBLOCK) != 0));
             goto out_entry;
         }
-        r = a20_native_vfs_result(vfs_fcntl(gfd, F_SETFL, (long)cf.flags));
+        r = a20_native_vfs_result(vfs_fcntl_vfile(vf, F_SETFL, (long)cf.flags));
         goto out_entry;
     }
 

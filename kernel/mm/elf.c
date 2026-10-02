@@ -169,7 +169,7 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
     vma->end       = end;
     vma->vm_flags  = vm_flags;
     vma->pte_flags = pte_flags;
-    vma->file_fd   = -1;
+    vma->file      = NULL;
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     mm_insert_vma(mm, vma);
     mm->total_vm += (end - start) / PAGE_SIZE;
@@ -195,13 +195,13 @@ static void elf_discard_vmas(mm_struct_t *mm)
     vm_area_t *vma = mm->mmap;
     while (vma) {
         vm_area_t *next = vma->next;
-        if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+        if ((vma->vm_flags & VM_FILE) && vma->file) {
             if (vma->file_vnode) {
                 if (vma->vm_flags & VM_SHARED)
                     vnode_shared_map_dec(vma->file_vnode);
                 vnode_put(vma->file_vnode);
             }
-            vfs_close(vma->file_fd);
+            vfs_put_file(vma->file);
         }
         kfree(vma);
         vma = next;

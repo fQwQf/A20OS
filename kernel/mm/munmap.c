@@ -263,7 +263,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
             vma->end = map_end;
             vma->vm_flags = VM_ANON | VM_READ | VM_WRITE;
             vma->pte_flags = mm_user_brk_pte_flags();
-            vma->file_fd = -1;
+            vma->file = NULL;
             mm_insert_vma(mm, vma);
             mm->total_vm += (map_end - map_start) / PAGE_SIZE;
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
