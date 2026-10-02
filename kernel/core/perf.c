@@ -95,6 +95,9 @@ static const char *const g_a20_perf_names[A20_PERF_COUNTER_COUNT] = {
     [A20_PERF_NET_BH_EVENTS] = "net_bh_events",
     [A20_PERF_NET_BH_OVERFLOW] = "net_bh_overflow",
     [A20_PERF_NET_ALLOC_FAIL] = "net_alloc_fail",
+    [A20_PERF_NET_ACCEPT_STAGED] = "net_accept_staged",
+    [A20_PERF_NET_ACCEPT_QUEUED] = "net_accept_queued",
+    [A20_PERF_NET_ACCEPT_DROP] = "net_accept_drop",
 };
 
 void a20_perf_reset(void)

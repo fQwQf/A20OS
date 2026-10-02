@@ -46,6 +46,67 @@ AHCI（`FLUSH CACHE EXT`）。
 
 ## 二、网络
 
+### 入站 TCP 曾被 RST：listener 从来不在 lwIP 里（本轮已修）
+
+`net_listen()` 只做 `s->local_tcp = 1` + `net_tcp_drop_pcb()`，而 `tcp_listen()`
+**全树从未被调用**（已 grep 确认）。因此 `/proc/net/status` 的 `tcp_listen=0` 是常态，
+入站 SYN 找不到 listener 被回 RST。**只存在于 socket 层的 listener 只能被同一内核内
+走同样快捷路径的进程连接**，等于协议栈没有任何对外服务能力。
+
+端到端实测（改动前）：SLIRP `hostfwd` 指向 guest `telnetd:2323`，宿主机连接返回
+**"connection reset by peer"**。
+
+已修：`net_listen()` 增加 `tcpmode` 两档。`fast`（默认，行为不变）与 `lwip`
+（`tcp_listen_with_backlog()` + `tcp_accept` 回调，端口真正在协议栈上 listen）。
+默认仍是 `fast`，因为既有 accept 测试是照它写的，且原注释记录了它存在的理由
+（LTP 的 localhost accept 测试重依赖 close-after-accept）。改动后同一 hostfwd 实测
+**拿到 guest telnetd 的 `A20OS remote shell` 提示符**。
+
+选择方式有 `a20.tcpmode=lwip` 内核命令行与 `/proc/net/config` 写入口两处：服务器的
+第一个 listener 通常由用户态开机创建，shell 写入口来不及生效。
+
+**遗留缺口**：`tcpmode=lwip` 下的**回环** TCP 传输仍过不了 `tcp_loopback_test`
+（握手完成、`tcp_recv_cb` 收到 18 B，但传输不结束）。不影响上面的入站用例。
+
+### `net_stress_test` 从来没有测过 TCP —— 历史性能归因需重读
+
+本地 TCP connect 走 `net_inet_send_tcp()` 的 `local_tcp` 短路：取 `g_net_lock` 直接
+把数据入队到 peer 的 socket 队列，**不分配 pbuf、不进 lwIP 状态机、不触发 recv 回调**。
+
+实测（4 核，16 MiB）：`net_rx_packets` / `net_tx_packets` / `net_bh_runs` /
+`net_bh_events` **全部恰好为 0**，`net_lock_acquires` 仅 51。
+
+所以凡是把 `lwip` 锁竞争归因于"net_stress_test N 路并发 × TCP"的地方，测的其实是
+socket 队列。这也解释了为什么"去掉读路径轮询后 spin 没降"：流量根本不在 lwIP 路径上。
+要评价 TCP 数据面，必须用走真实 netif 的负载或 `tcpmode=lwip`。
+
+### RX-pending 门控曾饿死 loopif（本轮已修）
+
+`netif_poll()` 是 `netif->loop_first` 的唯一排空点，而**没有任何路径无条件调用它**：
+`kernel_progress_poll()` 与读者路径都是"按需"到达 `a20_lwip_poll_*`，而 park 在
+`connect()` 的任务两个选择都不做。回环流量不产生设备 RX，于是门控只按设备提示关闭时，
+SYN 永远躺在队列里直到 connect 超时。已把 loopif 排空移到 timer tick（唯一无条件运行的
+progress 驱动），并让提示认 `loop_first`。假阳性只多一次锁获取，假阴性是挂死。
+
+### 网络面现在有了可用的测量口径
+
+`/proc/a20/perf` 此前约 75 个计数器**零个网络相关**，网络唯一信号是
+`/proc/a20/lock_contention` 里一个没有分母的锁计数。已补 11 个（收发包/字节、
+`g_lwip_lock` 获取、poll 次数与被门控跳过的次数、bottom-half 次数与事件数，以及
+`net_bh_overflow` / `net_alloc_fail` 两个**正确性**计数器——非零即表示收包路径丢了自己
+已接受的数据），另加 accept 路径的 staged/queued/drop。
+
+`/proc/a20/{perf,lock_contention}` 增加 `reset` 写入口。此前计数器自启动累计、没有 reset，
+压力期与引导期无法分离——这正是 `server-readiness.md` 曾经把"单次 acquire 极值"误归给
+压力期、后来撤回的那个观测窗口缺陷。`lock_counters_reset()` 连
+`contended_max_spins` 一起清零：reset 之后要回答的是"本窗口内的最大值"，留着引导期的
+旧极值会让之后每个窗口都看起来和最差引导期一样坏。
+
+**仍缺**：吞吐与延迟仍无法在本环境给出可信数字。loopback 绕过驱动路径，
+`/proc/net/dev` 在 `lo` 上读 0；`rdcycle` 在 QEMU TCG 下跨 vCPU 不单调，
+已产出过 `holdmax≈32s` 这种对微秒级临界区不可能的数值。绝对带宽只能上真机
+（VisionFive 2 / LS2K1000，GMAC 已在树里）。
+
 ### 嵌入式档在 20 KiB SRAM 下放不下 —— 已用实测数字确认
 
 数字来自实测结构体尺寸（探针编译单元 + `/proc/a20/netmem` 交叉验证，两者对六个池完全

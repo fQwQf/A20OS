@@ -79,7 +79,26 @@ static volatile unsigned g_lwip_rx_pending;
 
 int a20_lwip_rx_pending_any(void)
 {
-    return __atomic_load_n(&g_lwip_rx_pending, __ATOMIC_ACQUIRE) != 0;
+    if (__atomic_load_n(&g_lwip_rx_pending, __ATOMIC_ACQUIRE) != 0)
+        return 1;
+    /*
+     * A queued loopback packet is work in exactly the sense the hint means, and
+     * leaving it out starves the loopif.  netif_loop_output() only enqueues onto
+     * netif->loop_first; netif_poll() is the sole drain, and netif_poll() is
+     * only reached from the a20_lwip_poll_* family, which this gate otherwise
+     * skips.  A loopback TCP transfer raises no device RX, so with the gate
+     * closed on the device hint alone the SYN sits in loop_first forever and the
+     * connecting task parks until its timeout.  Reading loop_first here is safe
+     * without g_lwip_lock: it is a NULL check on a pointer the producer publishes
+     * under SYS_ARCH_PROTECT, and a false positive only costs one extra
+     * acquisition, which is what the gate is trying to avoid but cannot do by
+     * lying about pending work.
+     */
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->loop_first != NULL)
+            return 1;
+    }
+    return 0;
 }
 
 void a20_lwip_signal_rx_pending(void)
@@ -484,6 +503,23 @@ void a20_lwip_poll_timers_locked(void)
         return;
     sys_check_timeouts();
     a20_net_config_sync_from_lwip();
+    /*
+     * Drain queued loopback packets here, and not only from a20_lwip_poll().
+     * netif_poll() is the sole drain for netif->loop_first, and this tick is
+     * the only progress driver that runs regardless of what any task or device
+     * is doing -- kernel_progress_poll() and the reader path both reach it by
+     * choice, and neither choice is made when a task is parked in connect()
+     * waiting for a handshake that only a loopback packet can complete.  Without
+     * this the SYN sits in loop_first until the connect timeout expires.
+     *
+     * Guarded on loop_first so an idle system does no work here beyond the
+     * pointer walk, and bounded by LWIP_LOOPBACK_MAX_PBUFS on how much can be
+     * released per tick.
+     */
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->loop_first != NULL)
+            netif_poll(n);
+    }
 }
 
 /* Device completions plus the receive drain.  `budget` of 0 means no cap. */
