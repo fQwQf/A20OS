@@ -640,7 +640,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                     size_t avail = head->len - head->off;
                     size_t n = avail < len ? avail : len;
                     if (n)
-                        memcpy(buf, head->data + head->off, n);
+                        memcpy(buf, net_msg_payload(head) + head->off, n);
                     r = (int)n;
                 } else {
                     r = net_dequeue_msg_locked_meta(s, buf, len, addr,
@@ -752,7 +752,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
             size_t avail = head->len - head->off;
             size_t n = avail < len ? avail : len;
             if (n)
-                memcpy(buf, head->data + head->off, n);
+                memcpy(buf, net_msg_payload(head) + head->off, n);
             if (addr && addrlen && *addrlen > 0) {
                 size_t alen = head->addrlen < *addrlen
                                   ? head->addrlen : *addrlen;

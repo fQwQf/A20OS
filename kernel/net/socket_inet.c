@@ -224,16 +224,36 @@ static uint32_t bh_ring_mask(uint32_t idx)
     return idx & (NET_BH_RING_SIZE - 1);
 }
 
-static net_bh_event_t *bh_ring_prepare(net_bh_ring_t *r)
+/*
+ * Hand out the next slot, or return -1 when the ring is full.  A slot only
+ * comes back into circulation once the consumer has advanced `tail` past it,
+ * so any spill reference recorded against it is dead by this point and is
+ * released here -- the only place a staged pbuf is freed.  Doing it in the
+ * producer keeps memp inside g_lwip_lock, which is the only context where it
+ * is currently safe to touch (memp has no internal locking).
+ *
+ * The slot index is returned so the caller can record a spill reference
+ * against it; the event pointer alone would not identify the slot.
+ */
+static int bh_ring_prepare(net_bh_ring_t *r, net_bh_event_t **out)
 {
     uint32_t head = __atomic_load_n(&r->head, __ATOMIC_RELAXED);
     uint32_t tail = __atomic_load_n(&r->tail, __ATOMIC_ACQUIRE);
     if ((head - tail) >= NET_BH_RING_SIZE)
-        return NULL;
-    net_bh_event_t *e = &r->events[bh_ring_mask(head)];
-    memset(e, 0, sizeof(*e));
+        return -1;
+    uint32_t idx = bh_ring_mask(head);
+    if (r->owned[idx]) {
+        pbuf_free(r->owned[idx]);
+        r->owned[idx] = NULL;
+    }
+    net_bh_event_t *e = &r->events[idx];
+    /* Header only.  The inline payload is about to be overwritten up to
+     * e->len and is never read past that, so clearing it here would only add
+     * back the per-packet memset this split exists to remove. */
+    memset(e, 0, __builtin_offsetof(net_bh_event_t, data));
     e->type = NET_BH_RECV;
-    return e;
+    *out = e;
+    return (int)idx;
 }
 
 static void bh_ring_commit(net_bh_ring_t *r)
@@ -256,6 +276,43 @@ static void bh_ring_consume_commit(net_bh_ring_t *r)
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
     __atomic_fetch_add(&r->tail, 1, __ATOMIC_RELEASE);
 }
+
+/*
+ * Stage `len` bytes of `p` starting at `off` into the event `e` occupies in
+ * slot `slot`.  Anything that fits inline is copied; anything larger is held by
+ * reference, so an oversized datagram costs a refcount bump rather than a
+ * NET_MAX_PAYLOAD-sized staging buffer.
+ *
+ * A TCP segment always takes the copy arm: TCP_MSS cannot exceed the inline
+ * size, asserted below.  Only a datagram socket can reach the spill arm.
+ */
+static void bh_stage_payload(net_bh_ring_t *r, int slot, net_bh_event_t *e,
+                             struct pbuf *p, uint32_t off, size_t len)
+{
+    if (len <= NET_BH_INLINE_PAYLOAD) {
+        pbuf_copy_partial(p, e->data, (u16_t)len, (u16_t)off);
+        e->spill = NULL;
+        e->spill_off = 0;
+        e->len = len;
+        return;
+    }
+    pbuf_ref(p);
+    r->owned[slot] = p;
+    e->spill = p;
+    e->spill_off = off;
+    e->len = len;
+}
+
+/*
+ * lwIP carves the Ethernet, IP and TCP headers out of the head pbuf's payload
+ * area, so a segment that exactly fills a PBUF_POOL element has no room for
+ * them; and a segment larger than the inline staging buffer would push every
+ * TCP receive onto the spill path for no benefit.
+ */
+_Static_assert(NET_BH_INLINE_PAYLOAD >= TCP_MSS,
+               "inline bottom-half staging must cover a full TCP segment");
+_Static_assert(NET_BH_INLINE_PAYLOAD < NET_MAX_PAYLOAD,
+               "inline staging only makes sense as an optimisation");
 
 /*
  * Schedule the per-socket bottom-half.  Called from lwIP callback context
@@ -282,8 +339,9 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     if (!s || !p)
         return;
 
-    net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
-    if (!e) {
+    net_bh_event_t *e;
+    int slot = bh_ring_prepare(&s->bh_ring, &e);
+    if (slot < 0) {
         pbuf_free(p);
         return;
     }
@@ -304,8 +362,7 @@ static void lwip_udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
-    pbuf_copy_partial(p, e->data, (u16_t)len, 0);
-    e->len = len;
+    bh_stage_payload(&s->bh_ring, slot, e, p, 0, len);
 
     bh_ring_commit(&s->bh_ring);
     net_inet_bh_schedule(s);
@@ -333,8 +390,9 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
         }
     }
 
-    net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
-    if (!e) {
+    net_bh_event_t *e;
+    int slot = bh_ring_prepare(&s->bh_ring, &e);
+    if (slot < 0) {
         /* The ring is full, so the payload is dropped -- but this callback has
          * already taken ownership by freeing, and lwIP reads a non-zero return
          * as "I ate it" and leaves the pbuf alone.  Returning 0 here while
@@ -360,8 +418,7 @@ static u8_t lwip_raw_recv_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p,
     size_t len = p->tot_len;
     if (len > NET_MAX_PAYLOAD)
         len = NET_MAX_PAYLOAD;
-    pbuf_copy_partial(p, e->data, (u16_t)len, 0);
-    e->len = len;
+    bh_stage_payload(&s->bh_ring, slot, e, p, 0, len);
 
     bh_ring_commit(&s->bh_ring);
     net_inet_bh_schedule(s);
@@ -398,16 +455,16 @@ static err_t lwip_tcp_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
 
     size_t off = 0;
     while (off < p->tot_len) {
-        net_bh_event_t *e = bh_ring_prepare(&s->bh_ring);
-        if (!e) {
+        net_bh_event_t *e;
+        int slot = bh_ring_prepare(&s->bh_ring, &e);
+        if (slot < 0) {
             pbuf_free(p);
             return ERR_MEM;
         }
         size_t n = p->tot_len - off;
-        if (n > NET_MAX_PAYLOAD)
-            n = NET_MAX_PAYLOAD;
-        pbuf_copy_partial(p, e->data, (u16_t)n, (u16_t)off);
-        e->len = n;
+        if (n > NET_BH_INLINE_PAYLOAD)
+            n = NET_BH_INLINE_PAYLOAD;
+        bh_stage_payload(&s->bh_ring, slot, e, p, (uint32_t)off, n);
         bh_ring_commit(&s->bh_ring);
         off += n;
     }
@@ -536,9 +593,15 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
         if (!e)
             break;
         if (!s->closed) {
-            int queued = net_enqueue_msg_locked_meta(
-                s, e->data, e->len,
-                e->addrlen ? e->addr : NULL, e->addrlen, e);
+            int queued;
+            if (e->spill)
+                queued = net_enqueue_msg_locked_pbuf(
+                    s, e->spill, e->spill_off, e->len,
+                    e->addrlen ? e->addr : NULL, e->addrlen, e);
+            else
+                queued = net_enqueue_msg_locked_meta(
+                    s, e->data, e->len,
+                    e->addrlen ? e->addr : NULL, e->addrlen, e);
             if (queued >= 0) {
                 net_event_notify(s, A20_EVENT_READABLE, 0, 0);
                 if (wake_q->count >= PROC_WAKE_Q_CAPACITY)
@@ -697,6 +760,15 @@ void net_inet_socket_destroy(net_socket_t *s)
         tcp_sent(s->tcp, NULL);
         tcp_abort(s->tcp);
         s->tcp = NULL;
+    }
+    /* Release any spill reference the ring still holds.  This runs under
+     * g_lwip_lock, which is the only context where memp may be touched, and it
+     * has to happen here because the ring dies with the socket. */
+    for (int i = 0; i < NET_BH_RING_SIZE; i++) {
+        if (s->bh_ring.owned[i]) {
+            pbuf_free(s->bh_ring.owned[i]);
+            s->bh_ring.owned[i] = NULL;
+        }
     }
     a20_lwip_unlock(flags);
 }
