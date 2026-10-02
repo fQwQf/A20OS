@@ -35,6 +35,11 @@ extern void virtio_net_dev_stats(struct device *dev,
 #include "netif/ethernet.h"
 #include "netif/etharp.h"
 
+/* Defined far below, next to the other /proc row formatters.  Declared here
+ * because a20_lwip_format_status() appends its lane line with it. */
+static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
+                            const char *row);
+
 /*
  * LWIP_NO_THREAD_PROGRESS_CONTRACT:
  * - NO_SYS lwIP progress consists of sys_check_timeouts(), virtio-net TX
@@ -603,11 +608,47 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         return 0;
     if ((size_t)n >= bufsz)
         return (int)bufsz - 1;
-    return n;
+
+    /*
+     * Lane occupancy, appended after g_lwip_lock is dropped: sockets live under
+     * g_net_lock, and the two are never held together.  A gateway / netconf
+     * line, not a hot counter -- this exists so that "did the lanes actually
+     * spread the connections" is answerable without attaching a debugger, which
+     * is the question every later stage depends on.
+     */
+    unsigned lanes[CONFIG_NET_LANES];
+    unsigned total = 0;
+    memset(lanes, 0, sizeof(lanes));
+    uint64_t nflags = spin_lock_irqsave(&g_net_lock);
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        net_socket_t *s = g_sockets[i];
+        if (!s || !net_socket_is_valid_locked(s))
+            continue;
+        unsigned l = s->lane;
+        if (l < CONFIG_NET_LANES)
+            lanes[l]++;
+        total++;
+    }
+    spin_unlock_irqrestore(&g_net_lock, nflags);
+
+    size_t off = (size_t)n;
+    char cell[128];
+    snprintf(cell, sizeof(cell),
+             "\nlanes: count=%u sockets=%u occupancy:", CONFIG_NET_LANES, total);
+    a20_lwip_append(buf, bufsz, &off, cell);
+    for (unsigned i = 0; i < CONFIG_NET_LANES; i++) {
+        char num[16];
+        snprintf(num, sizeof(num), " %u", lanes[i]);
+        a20_lwip_append(buf, bufsz, &off, num);
+    }
+    a20_lwip_append(buf, bufsz, &off, "\n");
+    return (int)off;
 }
 
 /* core/printf.c has no '-' flag, so rows are assembled in a local buffer and
  * appended by hand rather than with a single wide snprintf. */
+static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
+                            const char *row);
 static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
                             const char *row)
 {

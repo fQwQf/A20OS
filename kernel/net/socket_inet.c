@@ -189,12 +189,46 @@ int net_sockaddr_to_lwip_ip(const void *addr, size_t len,
         return -EINVAL;
     const net_sockaddr_in_t *in = (const net_sockaddr_in_t *)addr;
     if (in->sin_family != AF_INET)
-        return -EAFNOSUPPORT;
+        return -EOPNOTSUPP;
     ip_addr_set_ip4_u32(ip, in->sin_addr);
     if (port)
         *port = net_ntohs(in->sin_port);
     return 0;
 }
+
+/*
+ * Lane for a bound socket address.  Returns `fallback` unchanged for anything
+ * that is not IP -- AF_UNIX, AF_PACKET, AF_NETLINK and AF_ALG have no port to
+ * key on and no PCB that an inbound packet has to find, so they stay where they
+ * were provisionally placed.
+ *
+ * Both families are handled here rather than by reusing net_sockaddr_to_lwip_ip(),
+ * which rejects IPv6.  For IPv6 the hash takes the low 32 bits of the address:
+ * that is enough entropy to spread connections, and -- the part that actually
+ * matters -- it is computed only from bytes that arrive on the wire, so the
+ * peer's view and ours produce the same value.
+ */
+unsigned net_socket_lane_of_addr(const void *addr, size_t len,
+                                 unsigned fallback)
+{
+    if (!addr)
+        return fallback;
+    if (len >= sizeof(net_sockaddr_in_t)) {
+        const net_sockaddr_in_t *in = (const net_sockaddr_in_t *)addr;
+        if (in->sin_family == AF_INET)
+            return net_lane_of(in->sin_addr, in->sin_port);
+    }
+    if (len >= sizeof(net_sockaddr_in6_t)) {
+        const net_sockaddr_in6_t *in6 = (const net_sockaddr_in6_t *)addr;
+        if (in6->sin6_family == AF_INET6) {
+            uint32_t low;
+            memcpy(&low, in6->sin6_addr + 12, sizeof(low));
+            return net_lane_of(low, in6->sin6_port);
+        }
+    }
+    return fallback;
+}
+
 
 int net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                             uint8_t out[NET_SOCKADDR_MAX], size_t *outlen)

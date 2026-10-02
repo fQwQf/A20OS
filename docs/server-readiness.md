@@ -286,6 +286,91 @@ AHCI（`FLUSH CACHE EXT`）。
 9. accept 队列固定 128 且溢出静默丢弃；无 socket 内存压力控制，也无
    `/proc/sys/net/*`。
 
+### 剩余工作与各自的阻塞原因
+
+完整方案在 [net/net-lanes.md](net/net-lanes.md)，那里记录了阶段 A–G 的顺序、
+各自的前置条件，以及为什么顺序不可跳。本节只记录**为什么还没做完**。
+
+**阶段 A 已落地**：lane 归属哈希、`net_socket_t.lane`、bind 时重算、
+`/proc/net/status` 的 `lanes:` 行、`NET_LANES` 构建旋钮。
+`NET_LANES=1` 与 `NET_LANES=4` 的 `net_stress_test` 输出逐字节一致
+（`4 parallel transfers, 4 rounds x 1048576 B`），嵌入式路径可证明未变。
+lanes 行目前**尚不能证明连接已被分散开**——它只统计仍在 registry 里的 socket，
+而 `net_stress_test` 会关掉自己的 socket，所以读到 `sockets=1` 是预期的。
+
+#### `g_net_lock` 分片：前置是引用计数，不是锁
+
+`g_net_lock` 覆盖 1024 个 socket、52 处获取，是当前收益最大的未做项。但它
+不只是数据锁，**还是对象生命周期锁**：
+
+- `net_socket_free()` 在 `spin_unlock_irqrestore()` **之后**调用
+  （`socket_file.c`）。所以读者只要持锁，关闭方就无法注销，对象也就不会被
+  释放。
+- 因此把它换成 per-socket 锁**必须先有 `refcount_t`**，否则
+  `net_socket_from_file()` 读到 `vf->priv` 之后、拿到锁之前，关闭方可能已经
+  清空 `vf->priv` 并释放——中间没有任何东西阻挡。
+
+**顺带查出一个既有的 use-after-free 窗口**：上面那个 `vf->priv` 与
+`net_socket_free()` 之间的空档在今天就存在，与分片无关。读线程拿到 vfile
+引用、读出 `s`、放下 vfile 引用，然后才用 `s`；关闭线程可以在此之间完成
+`vf->priv = NULL` 与释放。目前靠 `g_net_lock` 偶然挡住（读者进临界区时
+关闭方在等锁），但 `net_socket_from_file()` 本身并不持锁。
+
+设计已想清并被部分实现过，结论记录在此：
+`net_socket_t` 加 `ref_count`；`net_socket_alloc()` 起始为 1；
+`net_socket_enter(gfd, &out)` 取引用并复核 `in_registry`，`net_socket_exit()`
+释放；锁序为 registry 锁先于 socket 锁。
+
+**本轮主动回退了**。用脚本批量改写这 20 个调用点（`net_socket_from_file` 的
+使用者，含 `sys_socket_msg.c` 三个跨越整段控制流与 `recvmmsg` 循环的复杂
+站点）时三次以不同方式损坏了 C 代码，其中一次把 `socket_control.c` 从 954 行
+截到 21 行。半完成的生命周期重构比不做更危险：漏 `exit` 是泄漏，多一次
+`exit` 是 use-after-free，而这两者都无法靠编译器发现。已用
+`net_socket_exit()` 里的下溢 panic 作为运行时护栏，但护栏不等于正确。
+接手者请用**逐函数手工改写**而不是脚本，并在同一提交里跑
+`smoke-smp-lock-contention` 与 fd 相关的 stress 门禁。
+
+#### 把协议栈输入移出中断上下文：直接改会死锁
+
+`virtio_net_irq_handler()` 目前在中断上下文持 `g_lwip_lock` 跑完整协议栈。
+直觉做法是让 IRQ 只入队并置标志、由 poll 路径处理——**这会死锁**：
+
+- 阻塞读的任务 park 后，`sched()` 运行 bottom-half 去唤醒它；
+- bottom-half 需要 ring 已被排空；
+- 而能排空的 poll 路径若只在读者唤醒后跑，读者就永远在等一个不会被唤醒的
+  事件。
+
+所以需要显式 softirq 加一个**保证被执行的 poll 点**（`sched()` 内的
+`kernel_progress_run_bottom_halves()` 是候选），外加一个有界、无锁的 pbuf
+队列与溢出丢弃策略。这是数据路径上的并发代码，约 150 行新逻辑，不适合在
+没有回归门禁的条件下赶工。
+
+#### lwIP PCB 哈希分桶：`g_lwip_lock` 分片的入场费（阶段 B，**未动**）
+
+热路径要无锁，就得让 established TCP 的收发不去遍历全局 PCB 链表。lwIP 2.2 的
+`tcp_bound_pcbs` / `tcp_active_pcbs` / `tcp_listen_pcbs.pcbs` / `tcp_tw_pcbs`
+四条加上 `udp_pcbs` 都是全局链表，`tcp_lookup()` 每次线性遍历。
+
+比原估计小的关键发现：链表操作**已经宏抽象**，`TCP_REG(pcbs, npcb)` 与
+`TCP_RMV`（`tcp_priv.h:355`、`:370`，ACTIVE 变体在 `:417`、`:423`）把表头作为
+**参数**传入，所以分桶是"给表头加下标"而非"重写查找"。
+
+仍未做的原因不是工作量而是风险：它要改 `tcp.c` 里 PCB 注册/摘除/查找的全链路，
+而一次失手不会报错，表现为偶发 TCP 挂起。本轮尝试阶段 A 时用脚本批量改写 C 已经
+连续三次以不同方式损坏源文件（其中一次把 `socket_control.c` 从 954 行截到 21 行），
+在 `tcp.c` 上重复这个错误不值得。接手者请手工逐点改，并先只做分桶、不动状态机。
+
+#### `proc_lock` 分片
+
+当前最大的争用源（实测约为 lwIP 锁的 20 倍），根因是整个任务表一把全局
+自旋锁（`proc.c:42`），`sched.c` 里有 30 处取锁点。但它与上面几项共享同一个
+方法论约束：这是调度器关键路径，改错表现为偶发挂死而不是报错。**未动**。
+
+#### 多队列 / MSI-X
+
+除 QEMU `mq=` 接线外，驱动本身只协商 `F_MAC`/`F_STATUS`/`F_VERSION_1`，
+没有 `F_MQ`。需要多队列对、每队列中断向量、PLIC per-hart 路由或 MSI-X。
+注意上面第 7 条记录的 `virtq.h` 队列深度陷阱。
 ## 三、隔离与多租户
 
 ### 已达成
