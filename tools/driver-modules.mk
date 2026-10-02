@@ -81,6 +81,10 @@ $(USER_BUILD_DIR)/rtc.a20drv: $(DRVMOD_DIR)/goldfish_rtc.c kernel/include/drvmod
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+$(USER_BUILD_DIR)/abi-probe.a20drv: $(DRVMOD_DIR)/abi_probe.c kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
 $(USER_BUILD_DIR)/pc-spkr.a20drv: $(DRVMOD_DIR)/pc_spkr.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@

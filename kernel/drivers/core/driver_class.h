@@ -81,7 +81,10 @@ typedef struct block_dev_ops {
  * Deliberately not a function pointer in net_dev_ops_t: that vtable is shared
  * with loadable .a20drv modules, so appending a field makes the kernel read
  * one field past the end of any module built against an older header, and then
- * call it.  A weak symbol is absent instead of wrong.
+ * call it.  Appended fields therefore require bumping A20_DRIVER_ABI, which
+ * drvmod_load() now rejects on (a20_driver_descriptor_sane()), so a stale
+ * module fails to load instead of being misread.  A weak symbol is a separate
+ * mechanism and remains absent rather than wrong.
  *
  * Known limit: a weak symbol only resolves when the driver is linked into the
  * kernel, which today means the embedded profile (virtio_net.c is in

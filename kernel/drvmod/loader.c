@@ -1007,11 +1007,25 @@ int drvmod_load(int fd, const char *name)
         }
     }
 
-    if (!descriptor || descriptor->magic != A20_DRIVER_DESCRIPTOR_MAGIC ||
-        descriptor->version != A20_DRIVER_DESCRIPTOR_VERSION ||
+    /* ABI is reported apart from the rest so the two failures stay
+     * distinguishable: a magic/version failure means the file is not a driver
+     * package or is corrupt, an ABI failure means it is a driver package built
+     * for a different kernel and has to be rebuilt.  Without the check the
+     * kernel reads vtable fields past the end of a module built against an
+     * older net_dev_ops_t and calls them. */
+    if (descriptor && descriptor->abi != A20_DRIVER_ABI &&
+        descriptor->magic == A20_DRIVER_DESCRIPTOR_MAGIC) {
+        kerr("[DRVMOD] %s: driver ABI %u, kernel expects %u -- rebuild the "
+             "module against this kernel\n",
+             name, descriptor->abi, A20_DRIVER_ABI);
+        drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
+        return -ENOEXEC;
+    }
+
+    if (!descriptor || !a20_driver_descriptor_sane(descriptor) ||
         descriptor->placement != A20_DRIVER_PLACEMENT_KERNEL_MODULE ||
         descriptor->type < A20_DRIVER_TYPE_RTC ||
-        descriptor->type > A20_DRIVER_TYPE_USB || !descriptor->name[0]) {
+        descriptor->type > A20_DRIVER_TYPE_USB) {
         kerr("[DRVMOD] %s: missing or invalid kernel driver descriptor\n", name);
         drvmod_free_pages(buf_pfn, DRV_MOD_BUF_ORDER);
         return -ENOEXEC;
