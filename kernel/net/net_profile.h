@@ -202,4 +202,28 @@
 #define CONFIG_NET_RACE_DELAY_US 0
 #endif
 
+/*
+ * PCB list sanity checker.  When enabled, TCP_REG/TCP_RMV take their checking
+ * form and every insertion and removal ends in tcp_pcbs_sane(), which walks all
+ * four per-lane PCB lists and asserts the bucket invariants: a pcb sits in the
+ * head its lane names, catch-all pcbs live in the sentinel bucket only, and
+ * list membership agrees with pcb->state.
+ *
+ * This is what should have caught the double-indexed removal fixed in 16304db8,
+ * where tcp_pcb_remove() callers pre-subscripted by lane and TCP_RMV() then
+ * subscripted again, walking bucket 2L -- out of bounds for the wildcard lane.
+ * It did not catch it because TCP_DEBUG_PCB_LISTS, TCP_DEBUG, TCP_INPUT_DEBUG
+ * and TCP_OUTPUT_DEBUG were all off, so tcp_pcbs_sane() was a constant 1 and
+ * every one of those asserts compiled to nothing.
+ *
+ * Off by default because it is O(live pcbs) per insertion and removal, which
+ * makes connection churn quadratic -- unaffordable for the high-concurrency
+ * server path this lane work exists to serve.  Turn it on
+ * (OPT="-DCONFIG_NET_PCB_SANE=1") in the multi-lane gate, where a deterministic
+ * list-corruption failure is worth more than throughput.
+ */
+#ifndef CONFIG_NET_PCB_SANE
+#define CONFIG_NET_PCB_SANE 0
+#endif
+
 #endif /* _NET_PROFILE_H */

@@ -407,7 +407,7 @@ tcp_close_shutdown(struct tcp_pcb *pcb, u8_t rst_on_unacked_data)
       break;
     case LISTEN:
       tcp_listen_closed(pcb);
-      tcp_pcb_remove(&TCP_LISTEN_PCBS[pcb->lane], pcb);
+      tcp_pcb_remove(TCP_LISTEN_PCBS, pcb);
       tcp_free_listen(pcb);
       break;
     case SYN_SENT:
@@ -595,7 +595,7 @@ tcp_abandon(struct tcp_pcb *pcb, int reset)
      are in an active state, call the receive function associated with
      the PCB with a NULL argument, and send an RST to the remote end. */
   if (pcb->state == TIME_WAIT) {
-    tcp_pcb_remove(&tcp_tw_pcbs[pcb->lane], pcb);
+    tcp_pcb_remove(tcp_tw_pcbs, pcb);
     tcp_free(pcb);
   } else {
     int send_rst = 0;
