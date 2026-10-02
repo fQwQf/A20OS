@@ -7,6 +7,7 @@
 
 #include "fs/procfs.h"
 #include "net/netfilter.h"
+#include "net/net_config.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "core/klog.h"
@@ -823,6 +824,12 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             return -EINVAL;
         __atomic_store_n(&g_a20_perf_enabled, buf[0] == '1',
                          __ATOMIC_RELEASE);
+        return (int)count;
+    }
+    if (p->type == PF_NET_CONFIG) {
+        int r = a20_net_config_write(buf, count);
+        if (r < 0)
+            return r;
         return (int)count;
     }
     if (p->type == PF_A20_LOCK_CONTENTION) {

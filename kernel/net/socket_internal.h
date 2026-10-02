@@ -97,6 +97,33 @@ typedef struct net_bh_ring {
     uint32_t tail;
 } net_bh_ring_t;
 
+/*
+ * Accepted-pcb staging for a real lwIP listening socket.
+ *
+ * lwIP hands a completed handshake to tcp_accept() with g_lwip_lock already
+ * held and the new pcb in ESTABLISHED.  The bookkeeping that has to follow --
+ * allocating a net_socket_t, installing its callbacks, registering it, pushing
+ * it on the listener's accept queue and waking accept_waitq -- needs
+ * g_net_lock and the allocator, and docs/net/network-lock-contract.md forbids
+ * both inside an lwIP callback.  So the callback only parks the pcb here and
+ * the bottom half finishes the job, which is the same split the receive path
+ * already uses.
+ *
+ * Bounded and lock-free in the shape of net_bh_ring_t: the producer runs with
+ * local interrupts off under g_lwip_lock and publishes head with a release
+ * fence, the consumer runs later under g_net_lock.  `dropped` is a correctness
+ * counter, not a statistic -- a non-zero value means a completed handshake was
+ * discarded, and the pcb has to be aborted rather than leaked.
+ */
+#define NET_ACCEPT_STAGE_SIZE 8
+
+typedef struct net_accept_stage {
+    struct tcp_pcb *pcbs[NET_ACCEPT_STAGE_SIZE];
+    uint32_t head;
+    uint32_t tail;
+    volatile int dropped;
+} net_accept_stage_t;
+
 typedef struct net_msg {
     struct net_msg *next;
     size_t len;
@@ -264,6 +291,7 @@ typedef struct net_socket {
     struct net_socket *accept_head;
     struct net_socket *accept_tail;
     int accept_count;
+    net_accept_stage_t accept_stage;
     /* AF_PACKET: bound L2 filter.  pkt_protocol is host order. */
     int pkt_ifindex;
     uint16_t pkt_protocol;
@@ -465,6 +493,10 @@ int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
                          int flags, const void *addr, size_t addrlen);
 void     net_inet_accept_child_ready(net_socket_t *s);
+/* Convert a bound AF_INET socket into a real lwIP LISTEN pcb so the port is
+ * reachable from off-box.  No-op concept for AF_INET6, which still has no
+ * LISTEN pcb path.  Takes g_lwip_lock internally. */
+int      net_inet_tcp_listen(net_socket_t *s, int backlog);
 /* Push the socket's IPPROTO_IP options into its pcb, and report the values its
  * packets actually carry when the caller never set them.  Shared rather than
  * forward-declared locally: defined in socket_inet.c, called from
@@ -480,8 +512,6 @@ void     net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
                           uint64_t data1);
 int      net_socket_close_file(vfile_t *vf);
 
-#endif /* _NET_SOCKET_INTERNAL_H */
-
 void net_tcp_recved(net_socket_t *s, size_t len);
 
 /* Internal IPC bridge (AF_UNIX socketpair): plain data flows through the
@@ -490,3 +520,5 @@ void net_tcp_recved(net_socket_t *s, size_t len);
 int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
 int unix_ch_peek(net_socket_t *s, void *buf, size_t len);
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);
+
+#endif /* _NET_SOCKET_INTERNAL_H */

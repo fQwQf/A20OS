@@ -29,4 +29,30 @@ int a20_net_config_format(char *buf, size_t bufsz);
  * hold g_lwip_lock (via a20_lwip_lock()). */
 void a20_net_config_sync_from_lwip(void);
 
+/*
+ * Which path a TCP connection to a local address takes.
+ *
+ * "fast" pairs the two sockets and hands payloads straight to the peer's
+ * queue, skipping the lwIP state machine.  "lwip" refuses the shortcut and
+ * drives the connection through tcp_connect() and the loopback netif, so the
+ * real protocol path runs.
+ *
+ * The switch exists because the two paths are not interchangeable for
+ * measurement.  A load generator on the fast path never allocates a pbuf and
+ * never reaches the TCP input path, so it cannot measure the data path it
+ * appears to exercise -- measured, a 16 MiB run over "fast" moves the pbuf,
+ * bottom-half and driver counters by exactly zero.  Both modes stay reachable
+ * at runtime so one build can A/B them and so a gate can assert they deliver
+ * identical bytes.
+ */
+typedef enum a20_tcp_path {
+    A20_TCP_PATH_FAST = 0,
+    A20_TCP_PATH_LWIP = 1,
+} a20_tcp_path_t;
+
+extern a20_tcp_path_t g_a20_tcp_path;
+
+/* Apply a "tcpmode fast|lwip" command.  Returns 0 or a negative errno. */
+int a20_net_config_write(const char *buf, size_t count);
+
 #endif /* _NET_NET_CONFIG_H */
