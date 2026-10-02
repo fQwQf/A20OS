@@ -641,10 +641,75 @@ listener，修复前 4 次运行 `faults=7`；修复后 `faults=0`，在开/关
 12405 PASS   12406 FAIL   12407 PASS   12408 FAIL
 ```
 
-4/8 通过，且**与 lane 无关**（若按 `(local_ip, local_port)` 分桶，规律应是周期性
-而非这种无序分布）。失败形态固定为 `client=-1 server_status=256`，即
-`server()` 返回负值、客户端在 4s 预算内 connect 失败，**不伴随任何内存破坏**
-（`faults=0`）。
+4/8 通过，失败分布**无序**（按 `(local_ip, local_port)` 分桶的话，若成因是"某条
+lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是）。失败形态固定为
+`client=-1 server_status=256`，即 `server()` 返回负值、客户端在 4s 预算内 connect
+失败，**不伴随任何内存破坏**（`faults=0`）。
+
+**已排除的假设（别重走）**：`tcp_input()` 里 `listen_lane = pcb_lane`，而 `pcb_lane`
+是按 `NET_PCB_LANE_OF(dst_addr, tcphdr->src)` 算的——用的是**源端口**；但 LISTEN pcb
+在 `tcp_bind()` 里是按自己的 `local_port`（即入站段的**目的端口**）入桶的。看起来
+应该改成 `tcphdr->dest`。**实测是错的**：改完之后 8 个端口只过 1 个（改前 4/8），
+所以已回滚。
+
+这条推理错在哪：它假设 LISTEN pcb 落在 `hash(dst_ip, dst_port)`。实测说明**不是**这样
+——改用 `dest` 后命中率不升反降，说明 listener 实际所在的桶既不是
+`hash(dst_ip, src_port)` 也不是 `hash(dst_ip, dst_port)`。而且改前的 4/8 也未必是
+"按 src_port 撞对的运气"，因为 1/8 与 4/8 在 8 个样本内都可能是噪声。
+
+### 根因机制已定位（修复尚未找到）
+
+在 `tcp_listen_with_pcbs()` 里打印 `lpcb->lane` 与 `NET_PCB_LANE_OF_PCB(lpcb)`，
+`NET_LANES=4` 实测：
+
+```
+[DIAG] listen: port=2323  lane=4 hashed=3 any=4 buckets=2   <- telnetd，通配绑定 → 哨兵桶
+[DIAG] listen: port=12401 lane=2 hashed=2 any=4 buckets=2
+[DIAG] listen: port=12402 lane=1 hashed=1 any=4 buckets=2
+[DIAG] listen: port=12403 lane=2 hashed=2 any=4 buckets=2
+[DIAG] listen: port=12404 lane=0 hashed=0 any=4 buckets=2
+[DIAG] listen: port=12405 lane=0 hashed=0 any=4 buckets=2
+[DIAG] listen: port=12406 lane=3 hashed=3 any=4 buckets=2
+[DIAG] listen: port=12407 lane=0 hashed=0 any=4 buckets=2
+[DIAG] listen: port=12408 lane=3 hashed=3 any=4 buckets=2
+```
+
+两条事实合起来就是根因：
+
+1. `lpcb->lane` 恒等于按 `(local_ip, local_port)` 算出的 `hashed`，listener **确实**
+   落在自己端口对应的哈希桶里（telnetd 因为绑 `0.0.0.0` 正确落在哨兵桶 4）。
+2. `NET_PCB_LANE_SEARCH_BUCKETS == 2`，所以 `tcp_input()` 的 LISTEN 查找**只搜两个桶**：
+   `listen_lane` 和哨兵桶。而 `listen_lane = pcb_lane =
+   NET_PCB_LANE_OF(dst_addr, tcphdr->src)` —— 用的是**客户端随机临时源端口**。
+
+也就是说，**入站 SYN 能否命中 listener，取决于客户端随机源端口恰好哈希到同一个桶**，
+约 `1/NET_LANES`。这与实测通过率一致（4/8、1/8 等，量级就是随机碰撞），
+也解释了为什么 12404/12405/12407 同在 lane 0 却结果不同——它们的差别只可能来自
+那次连接的临时源端口。`NET_LANES=1` 时所有桶都是 0，永不碰撞，故 8/8。
+
+**仍未解决**：把 `listen_lane` 改成用 `tcphdr->dest`（目的端口，语义上才是对的）
+实测反而更差（4/8 → 1/8），说明 `ip_current_dest_addr()` 在回环路径上算出的哈希
+与 listener 的 `local_ip`(=127.0.0.1) **不一致**。这是第二个、尚未定位的问题。
+
+下一步应先确认回环段进入 `tcp_input()` 时 `ip_current_dest_addr()` 到底是什么
+（是否 127.0.0.1，还是被 loopif 改写成了别的地址），因为 `net_pcb_lane_ip()`
+一旦对两者取值不同，上面那个"改成 dest 就够了"的修复才不会成立。
+下一步先**确认 listener 到底在哪个桶**（在 `tcp_listen()` 处把
+`lpcb->lane` 与 `NET_PCB_LANE_OF_PCB(lpcb)` 打印出来），再谈改法。现在这条路径上
+还有一个未解释的事实：`NET_PCB_LANE_SEARCH_BUCKETS` 搜两个桶（`listen_lane` 与哨兵桶），
+若 listener 在哨兵桶就该 8/8，若在哈希桶就该由 `listen_lane` 命中——两者都和实测矛盾。
+
+**已定位到多 lane 路径**（同一条 sweep，仅改 `NET_LANES`）：
+
+| `NET_LANES` | 12401..12408 | 通过 |
+|---|---|---|
+| 1 | 全部 PASS | 8/8 |
+| 4 | F P F P P F P F | 4/8 |
+
+`NR_CPUS` 固定为 4。所以这不是回环 TCP 或 `tcpmode=lwip` 本身的毛病——单 lane 全过；
+**只有 lane 数 > 1 时才出现，且不是按桶周期分布**。指向多 lane 特有的状态
+（per-lane 定时器/轮转、per-CPU 分发、跨 lane 的 loopback 收发），下一步应沿
+"同一连接在多 lane 下走了不同代码路径"去查，而不是继续查 LISTEN 链表。
 
 > 更正：`16304db8` 的提交信息曾写 "PASS 0 -> 3/4"，那是误读——那轮同时跑了
 > 12401 和 12402 两个用例，`grep -c` 数的是 PASS **行数**，而 12401 当时就已经
