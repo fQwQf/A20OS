@@ -219,6 +219,7 @@ void
 tcp_free(struct tcp_pcb *pcb)
 {
   LWIP_ASSERT("tcp_free: LISTEN", pcb->state != LISTEN);
+  LWIP_ASSERT_CORE_LOCKED();
 #if LWIP_TCP_PCB_NUM_EXT_ARGS
   tcp_ext_arg_invoke_callbacks_destroyed(pcb->ext_args);
 #endif
@@ -230,6 +231,7 @@ static void
 tcp_free_listen(struct tcp_pcb *pcb)
 {
   LWIP_ASSERT("tcp_free_listen: !LISTEN", pcb->state != LISTEN);
+  LWIP_ASSERT_CORE_LOCKED();
 #if LWIP_TCP_PCB_NUM_EXT_ARGS
   tcp_ext_arg_invoke_callbacks_destroyed(pcb->ext_args);
 #endif
@@ -242,6 +244,7 @@ tcp_free_listen(struct tcp_pcb *pcb)
 void
 tcp_tmr(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   /* Call tcp_fasttmr() every 250 ms */
   tcp_fasttmr();
 
@@ -277,6 +280,7 @@ tcp_remove_listener(struct tcp_pcb *list, struct tcp_pcb_listen *lpcb)
 static void
 tcp_listen_closed(struct tcp_pcb *pcb)
 {
+  LWIP_ASSERT_CORE_LOCKED();
 #if LWIP_CALLBACK_API || TCP_LISTEN_BACKLOG
   size_t i;
   int lane;
@@ -649,6 +653,7 @@ tcp_abandon(struct tcp_pcb *pcb, int reset)
 void
 tcp_abort(struct tcp_pcb *pcb)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   tcp_abandon(pcb, 1);
 }
 
@@ -956,6 +961,7 @@ done:
 u32_t
 tcp_update_rcv_ann_wnd(struct tcp_pcb *pcb)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   u32_t new_right_edge;
 
   LWIP_ASSERT("tcp_update_rcv_ann_wnd: invalid pcb", pcb != NULL);
@@ -1605,6 +1611,7 @@ tcp_fasttmr_start:
 void
 tcp_txnow(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb;
   int lane;
 
@@ -1788,6 +1795,7 @@ tcp_recv_null(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 static void
 tcp_kill_prio(u8_t prio)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
   u8_t mprio;
@@ -1837,6 +1845,7 @@ tcp_kill_prio(u8_t prio)
 static void
 tcp_kill_state(enum tcp_state state)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
   int lane;
@@ -1872,6 +1881,7 @@ tcp_kill_state(enum tcp_state state)
 static void
 tcp_kill_timewait(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb, *inactive;
   u32_t inactivity;
   int lane;
@@ -1902,6 +1912,7 @@ tcp_kill_timewait(void)
 static void
 tcp_handle_closepend(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   struct tcp_pcb *pcb;
   int lane;
 
@@ -2236,6 +2247,7 @@ tcp_pcb_purge(struct tcp_pcb *pcb)
 {
   LWIP_ERROR("tcp_pcb_purge: invalid pcb", pcb != NULL, return);
 
+  LWIP_ASSERT_CORE_LOCKED();
   if (pcb->state != CLOSED &&
       pcb->state != TIME_WAIT &&
       pcb->state != LISTEN) {
@@ -2287,6 +2299,7 @@ tcp_pcb_remove(struct tcp_pcb **pcblist, struct tcp_pcb *pcb)
   LWIP_ASSERT("tcp_pcb_remove: invalid pcb", pcb != NULL);
   LWIP_ASSERT("tcp_pcb_remove: invalid pcblist", pcblist != NULL);
 
+  LWIP_ASSERT_CORE_LOCKED();
   TCP_RMV(pcblist, pcb);
 
   tcp_pcb_purge(pcb);

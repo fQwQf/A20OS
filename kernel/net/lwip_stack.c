@@ -20,6 +20,7 @@
 extern void virtio_net_dev_stats(struct device *dev,
                                  net_dev_stats_t *out) __attribute__((weak));
 
+#include "core/cpu.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/timeouts.h"
@@ -60,11 +61,29 @@ static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
  *   acquire g_net_lock.
  * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
  *   runs the socket deferred bottom-half (net_inet_bottom_half_process_all)
- *   under g_net_lock only.  This is the only generic path that may transition
- *   from g_lwip_lock to g_net_lock, and the two locks are never held together.
+ *   under g_net_lock only.
+ *
+ * That comment used to add "the two locks are never held together", and the
+ * lane work reasoned from it.  It is false.  net_inet_bottom_half_process_all()
+ * takes g_net_lock (socket_inet.c:871) and calls the accept drain inside that
+ * region, and net_inet_accept_stage_drain() takes a20_lwip_lock() at
+ * socket_inet.c:607,616,640 -- so g_net_lock and g_lwip_lock ARE held together,
+ * in that order, on the accept path.
+ *
+ * Order matters and is currently only one-way: nothing takes g_lwip_lock and
+ * then g_net_lock, so there is no ABBA cycle today.  Any future path that does
+ * -- which stage D wants, since draining a receive ring per lane wants to touch
+ * socket state -- deadlocks against this one.  Treat net->lwip as the fixed
+ * order.  See docs/net/network-lock-contract.md.
  */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
+#define A20_LWIP_LOCK_UNOWNED 0xffffffffu
+#define A20_LWIP_LOCK_SITES 8
+static volatile unsigned g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
+static unsigned g_lwip_lock_violations;
+static void *g_lwip_lock_sites[A20_LWIP_LOCK_SITES];
+static unsigned g_lwip_lock_nsites;
 #define A20_NET_MAX_DEVS 4
 
 /*
@@ -372,13 +391,40 @@ void a20_lwip_attach_netifs(void)
 
 uint64_t a20_lwip_lock(void)
 {
+    uint64_t flags = spin_lock_irqsave(&g_lwip_lock);
     a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
-    return spin_lock_irqsave(&g_lwip_lock);
+    g_lwip_lock_owner = cpu_current_id();
+    return flags;
 }
 
 void a20_lwip_unlock(uint64_t flags)
 {
+    g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
     spin_unlock_irqrestore(&g_lwip_lock, flags);
+}
+
+int a20_lwip_lock_is_held(void)
+{
+    return g_lwip_lock_owner == cpu_current_id();
+}
+
+void a20_lwip_note_lock_violation(void *site)
+{
+    __atomic_fetch_add(&g_lwip_lock_violations, 1, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < A20_LWIP_LOCK_SITES; i++) {
+        if (__atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED) == site)
+            return;
+        if (__atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED) == NULL) {
+            __atomic_store_n(&g_lwip_lock_sites[i], site, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_lwip_lock_nsites, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
+unsigned a20_lwip_lock_violations(void)
+{
+    return __atomic_load_n(&g_lwip_lock_violations, __ATOMIC_RELAXED);
 }
 
 /*
@@ -665,7 +711,9 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
 
     /*
      * Lane occupancy, appended after g_lwip_lock is dropped: sockets live under
-     * g_net_lock, and the two are never held together.  A gateway / netconf
+     * g_net_lock.  The drop above is what keeps the order one-way -- the accept
+     * path nests net -> lwip, so anything that nests the other way round would
+     * deadlock against it.  A gateway / netconf
      * line, not a hot counter -- this exists so that "did the lanes actually
      * spread the connections" is answerable without attaching a debugger, which
      * is the question every later stage depends on.
@@ -698,6 +746,17 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     a20_lwip_append(buf, bufsz, &off, "\n");
     snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
     a20_lwip_append(buf, bufsz, &off, cell);
+    snprintf(cell, sizeof(cell), "\nlwip_lock: owner=%u violations=%u sites=%u\n",
+             g_lwip_lock_owner, a20_lwip_lock_violations(), g_lwip_lock_nsites);
+    a20_lwip_append(buf, bufsz, &off, cell);
+    for (unsigned i = 0; i < A20_LWIP_LOCK_SITES; i++) {
+        void *site = __atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED);
+        if (!site)
+            break;
+        snprintf(cell, sizeof(cell), "lwip_lock_site%u: %lx\n", i,
+                 (unsigned long)(uintptr_t)site);
+        a20_lwip_append(buf, bufsz, &off, cell);
+    }
     return (int)off;
 }
 
