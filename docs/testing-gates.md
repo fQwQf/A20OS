@@ -16,6 +16,7 @@
 | SMP runqueue、迁移与抢占 | `make check-smp-runqueue-boundary` |
 | 本地 pick 锁拆分 | `make check-process-lock-split-boundary` |
 | MM/VMA/页表 | `make check-mm-lock-model` |
+| 内存模型跑真实软件 | `make smoke-mm-software`（在 mmtest world 里跑 git/vim/gcc/python/nodejs，并要求关机审计全 0；见下文「MM/VMA/页表」的说明） |
 | I/O 进展 | `make check-io-progress-model` |
 | VFS 抽象 | `make check-vfs-abstraction` |
 | ABI 边界 | `make check-abi-boundary` |
@@ -86,11 +87,41 @@
 关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**元数据与硬件页表是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：
 
 - `missing_meta` / `present` / `absent` / `prot` / `cow` —— 正向：逐条比对"元数据是否与该 PTE 一致"。
-- `vma` —— 正向：每个 VMA 是否至少有一页被元数据认识。
+- `vma` —— 正向：一个 VMA 若已经有驻留的 PTE 叶，那些页是否至少有一页被元数据认识。**注意判据不是"每个 VMA 都至少有一页被认识"**：VMA 是映射的授权、元数据是状态，一个刚 mmap 出来没人碰过的区间两者对不上完全合法（按需调页正是模型赖以成立的东西）。用弱判据会在普通程序上开火，而会误报的门禁最后只会被关掉。
 - `vmai` —— **反向（P8）**：凡是元数据声称有东西的页（Mapped / COW / 已预留未缺页），是否都有 VMA 覆盖。`MM_ST_INVALID` 豁免，因为空洞不是遗漏。正向检查只从 VMA 出发，所以没有这一项时"有状态但无 VMA"的页是不可见的；这也是"VMA 列表是纯派生"这条不变式唯一能漏的地方。
 - `safe` —— `MM_SAFE_NO_FA` 与 `VM_SEALED` 的一致性。
 
-字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race`。
+计数失配时审计器另外打印**第一个出错地址**（`[MM-ASM]   first vma_mismatch  va=…`）。只有计数不给出地址，等于没说该读哪个 mutator。
+
+字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race` 或 `smoke-mm-software`。
+
+#### `make smoke-mm-software`：真实软件门禁
+
+上面这些 smoke 跑的都是**内核自己写的系统调用、用内核自己分配的页**。它们测不到真实程序踩的形状：编译器 mmap 一大块 arena、JIT mprotect 代码页、git 建大索引再 remap、解释器 fork 五千个对象。
+
+`smoke-mm-software`（`tools/mmtest_gate.py`）起 `packages/world/mmtest.world` 的镜像，在里面跑 **git / vim / gcc / python / nodejs**，逐个**验证内容**而不是验证退出码（`git clone` 一个空仓库也是退出 0）。
+
+需要**两个**判定同时成立：
+
+1. `MMTEST_RESULT: PASS` —— 五个都跑完并核对通过。
+2. 关机时的 `[MM-ASM]` 审计行全 0。
+
+只有 1 会漏掉"软件跑完了但两个映射表示已经漂移"；只有 2，一个只 `memset` 的空跑也能过。
+
+审计行**只在关机路径上打印**，所以客端脚本自己 `poweroff -f`。这一点不是形式主义：早期版本没有它，宿主超时杀掉客端，审计从未执行，而门禁因为"没看到错误输出"判成了通过。**一道看不见自己不变量的门禁不算通过**——`tools/mmtest_gate.py` 因此把"没有 `[MM-ASM]` 行"直接判 FAIL，而不是跳过。
+
+它有自己的 target、没有折进 `check-mm-lock-model`，因为它慢（一次完整镜像构建 + 约 3 分钟启动），不适合进默认 check 集合。这个取舍是有意的：慢的门禁容易被 CI 超时砍掉，而被砍掉之后剩下的门禁**全都测不到这一类缺陷**。
+
+当前状态（riscv64，`feat/mm-complete`）：
+
+```
+MMTEST: ALL STAGES PASS
+MMTEST_RESULT: PASS
+[MM-ASM] pt_pages=10 entries=3584 missing_meta=0 present=0 absent=0 prot=0 cow=0
+         vma=0 vmai=0 safe=0 anon_virt=0
+```
+
+详见 [roadmap/single-level-mm-model.md §12](roadmap/single-level-mm-model.md)。
 
 ### I/O 进展
 

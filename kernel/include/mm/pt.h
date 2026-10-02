@@ -322,6 +322,12 @@ typedef struct mm_pt_audit_report {
      * relies on, so it is counted to make it observable rather than inferred
      * from the absence of mismatches. */
     uint64_t anon_virt;
+    /* First offending address per counter.  A bare count says "some VMA is
+     * inconsistent"; an address says which mutator to read.  The audit runs
+     * only on the shutdown path and on the gate's explicit request, so the
+     * extra words cost nothing that matters. */
+    vaddr_t vma_bad_va;
+    vaddr_t vmai_bad_va;
 } mm_pt_audit_report_t;
 
 static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
@@ -365,6 +371,11 @@ void mm_pt_node_fini(pte_t *table);
  * the two representations without going through a cursor. */
 void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte);
 void mm_pt_note_absent(pte_t *table, int level, int idx);
+/* Re-derive protection and the COW bit from a PTE a non-cursor writer just
+ * rewrote, keeping the class the caller already knows.  Every direct-PTE
+ * writer outside pt.c (mprotect, cow, madvise, demote) must call this after
+ * its store, or the status silently keeps describing the old page. */
+int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls);
 uint8_t mm_pt_peek(pte_t *table, int level, int idx);
 int mm_pt_cow(pte_t *table, int level, int idx);
 void mm_pt_set_cow(pte_t *table, int level, int idx, int on);
@@ -401,7 +412,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
 int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
                         pte_t flags);
-int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef);
+int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef);
 
 /*
  * Eagerly provision an anonymous range: build the page-table path and mark

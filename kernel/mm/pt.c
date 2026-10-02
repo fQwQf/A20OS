@@ -386,6 +386,57 @@ void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte)
     pt_note_present_meta(mm_pt_meta(table), idx, cls_byte);
 }
 
+/*
+ * Re-derive the per-PTE status from a PTE that a caller has just rewritten.
+ *
+ * Several writers legitimately bypass the cursor -- they hold mm->lock, which
+ * is still the mutual-exclusion mechanism for everything except the status fast
+ * path -- and each of them used to leave the status describing the page as it
+ * was BEFORE the rewrite.  A stale byte is not merely untidy: mm_pt_audit_all()
+ * reports it as a present/absent/prot/cow mismatch, and once fault dispatch
+ * reads the status it installs permissions that disagree with what mprotect or
+ * fork asked for.
+ *
+ * The class comes from the caller because it is not recoverable from the PTE:
+ * PTE_R/W/X say what is permitted, not whether the backing is anonymous,
+ * file-private or shared, and that distinction is exactly what the status is
+ * for.  Protection and the COW bit are derived from the PTE, which is where
+ * those facts now live.
+ *
+ * Returns 0 when the status was refreshed, or a negative errno on a bad class.
+ * A table with no metadata (NOMMU, or a page-table page allocated before the
+ * model landed) is not an error: there is nothing there to keep in sync.
+ */
+int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls)
+{
+    (void)level;
+    if (cls >= MM_ST_CLASS_MAX)
+        return -EINVAL;
+    pt_meta_t *m = mm_pt_meta(table);
+    if (!m)
+        return 0;
+    uint8_t *slot = cls_slot(m, idx);
+    if (!slot)
+        return 0;
+
+    /* Never resurrect an entry that is not a mapping.  A PT_NODE slot
+     * describes a child page-table page rather than a mapping, and INVALID has
+     * nothing to describe; writing either would put nr_present and the auditor
+     * at odds with the page table. */
+    uint8_t cur = MM_ST_GET_CLASS(*slot);
+    if (cur == MM_ST_INVALID || cur == MM_ST_PT_NODE)
+        return 0;
+
+    pte_t pte = table[idx];
+    uint8_t byte = (uint8_t)(MM_ST_CLS_BYTE(cls) |
+                             (pte & PTE_COW ? MM_ST_COW_BIT : 0) |
+                             mm_pt_prot_bits(pte));
+    /* pt_note_present_meta() drops the cow[] bit whenever the byte carries no
+     * COW bit, which keeps the bitmap and the byte in step. */
+    pt_note_present_meta(m, idx, byte);
+    return 0;
+}
+
 void mm_pt_note_absent(pte_t *table, int level, int idx)
 {
     (void)level;
@@ -1088,16 +1139,25 @@ int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls)
 }
 
 /*
- * Refresh the permissions recorded for a leaf that mm_pt_provision_anon()
- * reserved but that has never been faulted, so it has no PTE yet.
+ * Refresh the permissions recorded in the per-PTE status for one leaf.
  *
- * mprotect() only rewrites permissions through the PTE, which for such a page
- * does not exist -- without this the status would keep the permissions the
- * range was created with and a later fault would install those instead of the
- * ones mprotect was asked for.  A present leaf needs nothing: its effective
- * permissions live in the PTE, which mprotect already updated.
+ * mprotect() rewrites permissions through the PTE.  For a page that was
+ * reserved but never faulted there is no PTE, so the status would keep the
+ * permissions the range was created with and a later fault would install
+ * those instead of the ones mprotect was asked for.
+ *
+ * A PRESENT page needs this too, which this function used to get wrong.  The
+ * old comment claimed "its effective permissions live in the PTE, which
+ * mprotect already updated" -- true of the MMU, but the status byte is the
+ * authority the auditor checks and that a status-driven fault reads, so
+ * leaving it stale makes the two representations disagree.  mm_pt_audit_all()
+ * measured exactly that on a real workload: `prot=5` after vim and gcc had
+ * both run mprotect.  Silently, because nothing consumed the counter.
+ *
+ * So the rule is uniform: whatever the PTE ends up carrying, the status must
+ * carry too.  mprotect calls this for every leaf it rewrites, present or not.
  */
-int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
+int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef)
 {
     if (!table)
         return -EINVAL;
@@ -1108,9 +1168,11 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef)
     if (!slot)
         return 0;
     uint8_t cls = MM_ST_GET_CLASS(*slot);
-    if (cls != MM_ST_ANON_VIRT)
+    /* Only classes that describe a mapping the caller may re-protect.  A
+     * PT_NODE slot is not a mapping, and INVALID has nothing to describe. */
+    if (cls == MM_ST_INVALID || cls == MM_ST_PT_NODE)
         return 0;
-    *slot = (uint8_t)((MM_ST_CLS_BYTE(cls) & (uint8_t)~MM_ST_PROT_MASK) |
+    *slot = (uint8_t)((*slot & (uint8_t)~MM_ST_PROT_MASK) |
                       mm_pt_prot_bits(ptef));
     return 0;
 }
@@ -1514,6 +1576,46 @@ void mm_pt_mark_stale_recursive(pte_t *table, int level)
  * metadata independently and reports every disagreement.  It is the only
  * sanctioned consumer of a raw page-table walk outside teardown.
  */
+
+/* The status byte covering `addr`, at whichever level actually holds the
+ * leaf.  mm_pt_leaf_table() stops at the leaf's own table, which for a
+ * megapage VMA is a level above it -- and there is no level-0 metadata to
+ * read, so asking only level 0 makes every THP-backed VMA look like the
+ * status forgot about it.  That is a false positive in the auditor, not a
+ * defect in the mutator, and a gate that cries wolf gets switched off.
+ *
+ * Returns MM_ST_INVALID both for a genuinely unknown address and for an
+ * unmapped one; the callers here all ask "does the status claim this
+ * address?", for which the two are the same answer. */
+static uint8_t audit_status_at(pt_root_t *pgdir, vaddr_t addr)
+{
+    pte_t *table = pgdir;
+    for (int l = ARCH_PT_ROOT_LEVEL; l > 0; l--) {
+        pte_t e = table[arch_pt_vpn(addr, l)];
+        if (!(e & PTE_V) || arch_pte_is_leaf(e))
+            return MM_ST_GET_CLASS(mm_pt_peek(table, l, arch_pt_vpn(addr, l)));
+        table = arch_pte_to_ptr(e);
+    }
+    return MM_ST_GET_CLASS(mm_pt_peek(table, 0, arch_pt_vpn(addr, 0)));
+}
+
+/* Does the hardware map a leaf at `addr`?  Counterpart to audit_status_at():
+ * the pair (status, PTE) has to be read together to tell "the status forgot a
+ * page that is really mapped" apart from "this address is a hole". */
+static int audit_pte_present(pt_root_t *pgdir, vaddr_t addr)
+{
+    pte_t *table = pgdir;
+    for (int l = ARCH_PT_ROOT_LEVEL; l > 0; l--) {
+        pte_t e = table[arch_pt_vpn(addr, l)];
+        if (!(e & PTE_V))
+            return 0;
+        if (arch_pte_is_leaf(e))
+            return 1;
+        table = arch_pte_to_ptr(e);
+    }
+    pte_t e = table[arch_pt_vpn(addr, 0)];
+    return (e & PTE_V) && arch_pte_is_leaf(e);
+}
 static uint64_t audit_table(pte_t *table, int level, int is_root,
                             mm_pt_audit_report_t *rep, mm_struct_t *mm,
                             vaddr_t base, int check_vma)
@@ -1598,8 +1700,11 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
              * the case where no VMA is required -- a hole is not an omission. */
             if (cls != MM_ST_INVALID && check_vma) {
                 vm_area_t *v = mm_find_vma(mm, va);
-                if (!v || va < v->start || va >= v->end)
+                if (!v || va < v->start || va >= v->end) {
+                    if (!rep->vmai_mismatch)
+                        rep->vmai_bad_va = va;
                     rep->vmai_mismatch++;
+                }
             }
         }
     }
@@ -1625,17 +1730,38 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
      * and forgets the other shows up here first. */
     if (check_vma) {
         for (vm_area_t *v = mm->mmap; v; v = v->next) {
-            int any = 0;
+            /* The rule is "a VMA with resident pages must have the status
+             * know about at least one of them", NOT "a VMA must have a page
+             * the status knows about".
+             *
+             * The second, weaker-sounding form is what this check used to
+             * assert, and it is wrong: a VMA is an *authorisation* to map,
+             * while the status is *state*.  A freshly mmap'd region that the
+             * process never touched has a VMA and no metadata for any of its
+             * pages, which is completely legal -- on-demand paging is the
+             * mechanism the whole model is built on.  Asserting otherwise
+             * made the auditor fire on ordinary programs, which is how a gate
+             * earns the right to be ignored.
+             *
+             * Requiring agreement only when the hardware already maps
+             * something is the decidable version: an empty VMA is fine, and a
+             * VMA holding present PTE leaves whose status is Invalid is
+             * exactly the "mutator wrote one representation and forgot the
+             * other" case this counter exists for. */
+            int any_known = 0;
+            int any_resident = 0;
             for (vaddr_t va = v->start & ~(vaddr_t)(PAGE_SIZE - 1);
-                 va < v->end && !any; va += PAGE_SIZE) {
-                pte_t *t = mm_pt_leaf_table(mm->pgdir, va);
-                if (t && MM_ST_GET_CLASS(mm_pt_peek(t, 0,
-                                                    arch_pt_vpn(va, 0)))
-                            != MM_ST_INVALID)
-                    any = 1;
+                 va < v->end && !any_known; va += PAGE_SIZE) {
+                if (audit_status_at(mm->pgdir, va) != MM_ST_INVALID)
+                    any_known = 1;
+                else if (!any_resident && audit_pte_present(mm->pgdir, va))
+                    any_resident = 1;
             }
-            if (!any)
+            if (any_resident && !any_known) {
+                if (!rep->vma_mismatch)
+                    rep->vma_bad_va = v->start;
                 rep->vma_mismatch++;
+            }
         }
 
         /* Safety-bit cross-check.  MM_SAFE_NO_FA must agree with VM_SEALED in

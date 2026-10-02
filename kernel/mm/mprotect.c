@@ -142,6 +142,20 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     *pte = replacement;
                     mm_tlb_note_change(mm, base, size);
                 }
+                /* The status byte is what a later status-driven fault
+                 * installs and what mm_pt_audit_all() compares, so it has to
+                 * follow the PTE here as well -- not only on the
+                 * never-faulted branch below.  Leaving it stale is what
+                 * produced prot_mismatch=5 on a real workload.
+                 *
+                 * Take the table from mm_pt_leaf_table() rather than deriving
+                 * it as `pte - vpn`: that is pointer arithmetic on a pointer
+                 * whose provenance is a lookup, and the same trap is
+                 * documented on the absent branch below. */
+                pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+                if (ltab)
+                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
+                                                  flags);
                 va = base + size;
             } else {
                 /* Reserved by mmap but never faulted: there is no PTE to carry
@@ -155,7 +169,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * table there is no status to refresh.  Computing `pte - idx`
                  * from NULL is pointer arithmetic on a null pointer (UBSAN
                  * flagged it on every such page) and handed
-                 * mm_pt_refresh_absent_prot() a wild pointer, so the refresh
+                 * mm_pt_refresh_leaf_prot() a wild pointer, so the refresh
                  * silently did nothing: the status kept its OLD permissions,
                  * v->pte_flags below was updated anyway, and a later
                  * status-driven fault installed the stale permissions --
@@ -178,7 +192,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * MM_ST_ANON_VIRT and cannot act on a stale prot. */
                 pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
                 if (ltab)
-                    (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0),
+                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
                                                     ptef);
                 va += PAGE_SIZE;
             }

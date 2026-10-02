@@ -5095,8 +5095,18 @@ if (base + span >= end)
    按节点互斥，否则两条路会并发写同一张叶子表。
 
    `MM_AS_CURSOR_ONLY_ENTRY` 第 1 条写着「每一次用户 PTE 的读写都发生在
-   `mm_cursor_t` 内」，但 `mm.c` 的 `pt_unmap_leaf()` 是一次**裸遍历**：
-   `sed -n '457,515p' kernel/mm/mm.c | grep -cE 'mm_addrspace_lock|mcs_lock|mm_cursor'`
+   `mm_cursor_t` 内」，而 `mm.c` 的 `pt_unmap_leaf()` 不是 cursor。
+
+   > **本段已过期（2026-10-03，`feat/mm-complete` 更正）。** 下面这段把它描述成
+   > "裸遍历、完全无锁"是不成立的：`pt_unmap_leaf()` 现在在下降的每一级对自己要
+   > 写的那张页表页取节点锁（`mm.c:506` 的 `mm_pt_node_lock(path[level])`，以及
+   > 拆分路径的 `:528`），锁序由 `check-mm-pt-lock-order` 门禁断言。它仍然不是
+   > cursor，仍然只靠 `mm->lock` 之外的那把节点锁互斥，这一条仍然成立。
+   > 原文那句"得到 **0**"是在改动之前跑的，改动之后同一命令返回非零。
+   > 保留原文是为了不假装当时没有量过：**在门上写清楚"什么时候量的"，比只留结论
+   > 更值钱**（同一天的教训，见本节末尾）。
+
+   原文：`sed -n '457,515p' kernel/mm/mm.c | grep -cE 'mm_addrspace_lock|mcs_lock|mm_cursor'`
    得到 **0**。它直接 `*pte = 0`，再调用同样无锁的 `mm_pt_note_absent()`
    （`nr_present`/`cls[]` 的普通读-改-写）。所有调用方
    （`free_vma_pages` / `munmap` / `madvise` / `mremap` / `sysv_shm` /
@@ -5618,3 +5628,121 @@ if (base + span >= end)
    尝试，最终会在某个 `pt_readers == 0` 的时刻排空，所以不是硬泄漏，但需要实测
    增长曲线。
 
+
+---
+
+## 12. 真实软件门禁（2026-10-03，`feat/mm-complete`）
+
+前面 §8–§11 的全部结论都是在 smoke 门禁上得到的。这不是错的，但它是**有偏的**：
+`smoke-mm-stress`、`smoke-mm-pt-race`、`smoke-mm-fork-exec-race` 跑的都是内核自己
+写的系统调用、用的都是内核自己分配的页。它们测不到真实程序踩的那几种形状——
+编译器 mmap 一大块 arena、JIT mprotect 代码页、git 建 3 GiB 索引再 remap、
+解释器 fork 五千个对象。
+
+本节记录一次真实软件运行的结果，以及它推翻的三条此前的判断。
+
+### 12.1 门禁本身
+
+`packages/world/mmtest.world` + `packages/overlay/mmtest/`，
+`make smoke-mm-software`（`tools/mmtest_gate.py`）。
+
+五个真实软件，逐个**验证内容**而不是验证退出码——`git clone` 一个空仓库也是退出 0：
+
+| 工具 | 判据 |
+| --- | --- |
+| git | 60 个小文件 + 30 个二进制 blob，commit → clone 到另一目录，逐文件 `cmp` |
+| vim | 插入、替换、编辑一个 4000 行文件，核对行数与内容 |
+| gcc | 多文件编译、`-O2`、`-static`、15 次 re-exec；外加 `forker.c` 40 轮 fork，父子写同一份继承的 64 KiB 并互相核对隔离 |
+| python | 300 轮分配/释放、4 MiB bytearray、stdlib import、ctypes |
+| nodejs | 版本、200×20000 数组分配、50000 条目 Map |
+
+**两个判定，缺一不可：**
+
+1. `MMTEST_RESULT: PASS` —— 五个都跑完并核对通过。
+2. 关机时的 `[MM-ASM]` 审计行全 0 —— 页表与逐页元数据在每一个存活地址空间上一致。
+
+只有 (1) 会漏掉"软件跑完了但两个映射表示已经漂移"；只有 (2) 一个只 `memset` 的
+空跑也能过。
+
+审计行**只在关机路径上打印**，所以客端脚本自己 `poweroff -f`。第一版没有这一步，
+宿主超时杀掉客端，审计从未跑过，而门禁因为"没有报错输出"判成了通过——**一道
+看不见自己不变量的门禁不算通过**。
+
+### 12.2 结果
+
+```
+MMTEST: ALL STAGES PASS
+MMTEST_RESULT: PASS
+[MM-ASM] pt_pages=10 entries=3584 missing_meta=0 present=0 absent=0 prot=0 cow=0
+         vma=0 vmai=0 safe=0 anon_virt=0
+```
+
+### 12.3 真实软件推翻的三条判断
+
+**(1) `mprotect` 不更新 present 页的 status —— 真缺陷。**
+
+基线审计报 `prot=5 vma=1`。根因：`mm_pt_refresh_absent_prot()` 的注释写着"present
+的叶子不需要处理，它的有效权限在 PTE 里，mprotect 已经改过了"——**对 MMU 是对的，
+对 status 是错的**，而审计器比对的是 status。
+
+修法不是把注释改对，是把语义改对：重命名 `mm_pt_refresh_leaf_prot()`，让它刷新
+任何已映射的 class，并在 present 分支也调用它。这条只有跑真实程序才暴露得出来：
+kernel 自写的 smoke 不会去 mprotect 一个已经 fault 进去的页再核对元数据。
+
+**(2) `cow.c` / `fault.c` 写 `PTE_COW` 时从不更新 status —— 潜伏缺陷。**
+
+`cow.c` 里 `mm_pt_note_present` / `mm_pt_sync_status` 出现 **0** 次，而它一直在改
+`PTE_COW`。今天它还没变成 bug 只是因为 fault 分派还在读 `mm_find_vma`；**等 P6 把
+分派改判 status 的那一天，这三处就会立刻变成错页**。新增
+`mm_pt_sync_status()`：从刚写完的 PTE 重新推导 prot 与 COW，但**保留调用方给的
+class**——class 无法从 PTE 恢复，R/W/X 说的是"允许什么"而不是"由什么支撑"。
+
+**(3) W^X 默认 `deny` 让 nodejs 起不来 —— 但这不是内存模型的缺陷。**
+
+```
+[WARN] [WX] mprotect: pid=286 请求 W|X 映射，拒绝 (-EACCES)
+SIGTRAP: pid=286 sepc=0xb3433a
+FATAL: pid=286 signal=5 pc=0xb3433a comm=MainThread path=/extra/usr/bin/node
+```
+
+`kernel/mm/wx.c` 把 `deny` 设成默认，理由写在文件头："本树的用户态不需要 RWX ——
+没有 dlopen，也没有 JIT"。**nodejs 用一行就否掉了这句话**：V8 把代码页
+mprotect 成 W|X，然后**往里写**。所以 `strip` 也救不了——实测从 mprotect 处 trap
+变成首次写入时 segfault。
+
+一个启动不了 V8 的内核不是"策略更严"，是"跑不了 JIT"。错的是前提，不是策略，
+所以默认改回 stock Linux 的语义（尊重 `PROT_WRITE|PROT_EXEC`，加固改成
+`a20.wx=` 上的选项）。
+
+**这条与内存模型无关**：它在迁移前的代码上同样复现。不要把它记成迁移的成绩，
+也不要把它记成迁移的锅。
+
+### 12.4 审计器自己的两条误报
+
+首轮跑出 `vma=1`，追下去发现两条规则是错的，**都不是模型的缺陷**：
+
+* **"每个 VMA 至少有一页元数据知道"是错的。** VMA 是映射的**授权**，status 是
+  **状态**。一个刚 mmap 出来没人碰过的区间，VMA 存在而元数据一个字都没有，这完全
+  合法——按需调页正是整个模型赖以成立的东西。这条规则会在普通程序上开火，
+  **而会误报的门禁最后只会被关掉**。改成：只在硬件确实映射了东西的时候要求一致，
+  空的 VMA 合法。
+* **审计只在 level 0 读 status。** 大页支撑的 VMA 在 level 0 压根没有元数据，
+  于是"看起来被忘了"。顺带把审计计数器加上第一个出错地址——只有计数不给出地址，
+  等于没说该读哪个 mutator。
+
+### 12.5 仍未做（不因为上面的 PASS 而改变）
+
+* **P6：fault 分派改判 status。** `fault.c` 仍以 `mm_find_vma()` 为决策入口
+  （9 处）。这正是 §11.2 更正过的说法，且 §12.3(2) 说的 COW 缺陷正是在等这一天。
+* **删除 VMA。** **必须排在 P6 之后。** 删在前面会直接打断缺页路径，而 P6 又依赖
+  VMA 里的 `file_vnode` / `file_offset` / `start` / `end`。根因是 status 字节
+  容量：4 bit class + 1 bit COW + 3 bit prot 已经占满，装不下 vnode/fd/offset，
+  也就装不下一个 44 位的 swap 条目。
+* **需要补上的数据结构**：按 PT 页**懒分配**的段引用表
+  （`{vnode/vmo, base_va, offset, flags}`，引用计数），配一个逐页的段号。
+  之所以"懒分配"是关键：只有真正含 file/VMO 映射的 PT 页付这个钱，纯匿名负载
+  一分钱不付；而 3 GiB 的文件映射只对应一个段被上千张 PT 页共享，而不是 78 万个
+  VMA。论文没有给出这个格式——**P6/P7 被记为 blocked，原因就在这里。**
+
+所以本节的 PASS 是**回归地板**，不是 P6 的完成。§6 的"明确不承诺"第 1 条仍然成立：
+**VMA 抽象没有删除。**

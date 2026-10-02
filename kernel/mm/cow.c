@@ -1,6 +1,7 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
+#include "mm/pt.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "fs/page_cache.h"
@@ -29,6 +30,39 @@ static uint64_t mm_cow_flags(uint64_t pte) {
         flags |= PTE_COW;
     }
     return flags;
+}
+
+/*
+ * The status class a page already has, so a caller that rewrites the PTE can
+ * hand the class back to mm_pt_sync_status() instead of guessing.
+ *
+ * The class describes the BACKING (anonymous / file-private / file-shared /
+ * VMO), which fork does not change -- it changes sharing, and that is the COW
+ * bit, not the class.  So the honest answer is whatever the status already
+ * says.  If the status is empty there is nothing to sync against and the
+ * caller skips the update, which is why this can fall back to a VMA lookup
+ * only to recover a class for pages whose status was never written.
+ */
+static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
+{
+    pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
+    if (tab) {
+        uint8_t cur = mm_pt_peek(tab, 0, arch_pt_vpn(va, 0));
+        uint8_t cls = MM_ST_GET_CLASS(cur);
+        if (cls != MM_ST_INVALID && cls != MM_ST_PT_NODE)
+            return cls;
+    }
+    /* No status to preserve.  Recover the backing from the VMA so a page that
+     * predates the cursor still gets a coherent class rather than a guess. */
+    vm_area_t *v = mm_find_vma(mm, va);
+    if (!v)
+        return MM_ST_ANON_MAPPED;
+    if (v->vm_flags & VM_VMO)
+        return MM_ST_VMO;
+    if (v->vm_flags & VM_FILE)
+        return (v->vm_flags & VM_SHARED) ? MM_ST_FILE_SHARED
+                                         : MM_ST_FILE_PRIVATE;
+    return MM_ST_ANON_MAPPED;
 }
 
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
@@ -79,6 +113,14 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
     if (!shared && (*src & (PTE_W | PTE_COW))) {
         *src = arch_pte_leaf(pa, flags);
         mm_tlb_note_change(parent, base, size);
+        /* The parent's PTE just lost W and gained COW; the status has to
+         * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
+         * status-driven fault would keep installing the parent's old
+         * write permission over a page the child now shares. */
+        pte_t *stab = mm_pt_leaf_table(parent->pgdir, base);
+        if (stab)
+            (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(base, 0),
+                                    mm_fork_page_class(parent, base));
     }
     mm_rss_add(child, size / PAGE_SIZE);
     return 0;
@@ -157,6 +199,16 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     if (!shared && (*src_pte & (PTE_W | PTE_COW))) {
         *src_pte = arch_pte_leaf(pa, flags);
         mm_tlb_note_change(parent, va, leaf_size);
+        /* See mm_fork_clone_page(): the parent's status must follow the PTE
+         * it just rewrote.  Only level-0 leaves have a per-PTE status slot;
+         * a large leaf is one entry covering many virtual pages and the
+         * auditor checks it as a whole. */
+        if (level == 0) {
+            pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
+            if (stab)
+                (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(va, 0),
+                                        mm_fork_page_class(parent, va));
+        }
     }
     mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);
     return 0;
