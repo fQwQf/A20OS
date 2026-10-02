@@ -29,7 +29,13 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
     steps:
       - id: resolve
-        run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
+          else
+            OWNER="${{ github.repository_owner }}"
+          fi
+          echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
   build:
     name: release-${{ matrix.arch }}
