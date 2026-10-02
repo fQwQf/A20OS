@@ -424,6 +424,7 @@ smoke-smp-lock-contention:
 	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
 	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
+	   ! grep -q 'tcp_pcbs_sane' "$$log" && \
 	   grep -qE '^lwip: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
 	   grep -qE '^proc: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
 	   { [ "$$lwip_total" -eq 0 ] || [ "$$site_spin" -ge $$((lwip_total * 9 / 10)) ]; } && \
@@ -474,7 +475,7 @@ smoke-smp-lock-contention:
 # with the network perfectly healthy.
 smoke-net-lanes: NET_HOSTFWD=
 smoke-net-lanes:
-	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1" dev-build
 	@mkdir -p $(SMOKE_LOG_DIR)
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-lanes-riscv64.log"; \
