@@ -5103,6 +5103,236 @@ if (base + span >= end)
    它的一部分，所以快段退化成死代码时这个门禁会**红**。这条断言现在是有意义的，
    不再是我之前以为的那种装饰。
 
+   #### 第三次尝试：旧死锁消失，失败点前移到 TLB shootdown 并发
+
+   两个前提都修好之后（unmap 侧节点锁、`frame_alloc_nr()` 消除 `mm->lock` 下的
+   回收），第三次把 `mm_fault_from_status()` 提到 `spin_lock(&mm->lock)` 之前。
+   编译干净，`smoke-mm-pt-race`：
+
+   * **不再有 `[LOCK-STALL]`**（计数 0）——前两轮的 `mm->lock` 死锁确实修掉了；
+   * 但换了一个新的 panic：
+
+   ```
+   [RV64 TLB] timeout self=0 target=1 expected=15 request=15 ack=14 online=0xff
+   ========== KERNEL PANIC ==========
+   RISC-V remote TLB shootdown timed out
+   [PANIC] caller=rv64_smp_remote_tlb_flush+0x40e
+   ```
+
+   `expected=15` 而 `ack=14`：应答主了一个没回来。这**讲得通**，而且正是摘掉
+   `mm->lock` 之后下一个该暴露的东西——远程 TLB shootdown 的 ack 记账此前一直
+   被 `mm->lock` 隐式串行化（缺页持锁 ⇒ 同一 mm 的 shootdown 不并发），现在快段
+   不取 `mm->lock`，多个 CPU 可以并发发起 shootdown，**记账互相覆盖**，于是出现
+   `ack` 永久缺失。快段自己只做 `arch_tlb_flush_page_local()`，问题是它与别的 CPU
+   的远程 shootdown 之间的并发。
+
+   所以失败点从「`mm->lock` 死锁」前移到「TLB shootdown 需要自己的串行化」，后者
+   是更局部、更好修的问题——但要正确加固 shootdown 协议（谁持有 pending 表、如何
+   合并并发请求、超时如何重试）不是一处改动，需要单独一轮，且必须实测。
+
+   **本轮没有落地这个改动**：`fault.c` 已恢复到 20 commit 的 checkpoint，工作树
+   干净、门禁全绿。留下的成果是失败点的推进本身，加上这一条：Phase 3 的第三道
+   门槛是 TLB shootdown 的并发安全，而不是页表锁。
+
+   #### 第三次失败的机制：`arch_cpu_relax()` 是裸 `nop`，输不起软中断
+
+   `expected=15 request=15 ack=14` 说明**没有竞争请求者**——15 号请求是我们自己
+   发的、也是最后一条，所以目标 CPU 单纯**没 servicing 我们的 IPI**。而
+   `rv64_smp_remote_tlb_flush()` 的等待循环注释写得很明确：
+
+   ```
+    * Wait with interrupts enabled: the targets must service the soft IRQ
+    * (sfence + ack).  If we are inside a trap with IRQs off, they may be
+    * waiting on us for their own flush; enabling interrupts here lets us
+    * service those IPIs and breaks the ABBA cycle.
+   ```
+
+   目标要 ack 就必须能接收软中断。那么谁接收不了？看 `mcs_lock()` 的自旋：
+
+   ```c
+   while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
+       arch_cpu_relax();
+   ```
+
+   而 riscv64 的 `arch_cpu_relax()` 是（`kernel/arch/riscv64/include/cpu.h:21`）：
+
+   ```c
+   static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
+   ```
+
+   **裸 `nop`，不重开中断、不让出流水线。** `mcs_lock()` 上方的注释把
+   「preemption disabled」当成了「可以无限自旋」，但**不被抢占 ≠ 可以饿死别人**。
+
+   > **注意：以下因果链是推断，不是已证实的结论。** 我**没有**证明目标 CPU 当时
+   > 正在 MCS 自旋里——panic 只记录了请求方的 PC。需要实测（打印目标 CPU 在超时
+   > 时刻的 PC，或让 `mcs_lock` 自旋循环在超时时 dump 自己的 backtrace）才能定论。
+   > 不要再把它当结论往下推。
+
+   **已核对的事实**（这些是读代码得到的，可信）：
+
+   * 陷阱入口 `trap.S:107` 的 `csrc sstatus, t1` 清 SIE，所以缺页跑在**中断关闭**
+     的上下文里；
+   * `arch_cpu_relax()` 在 riscv64 是裸 `nop`（`cpu.h:21`）；
+   * `rv64_ipi_tlb_flush_handler()`（`board.c:168`）**不取任何锁**，只做
+     `sfence.vma` + ack ——所以目标 CPU 若能接到软中断，它 ack 时不需要拿页表锁；
+   * `rv64_smp_remote_tlb_flush()` 的等待循环注释明确要求「targets must service
+     the soft IRQ」，且它自己在等之前会重开中断；
+   * `expected=15 request=15` 说明**没有第二个请求者**竞争该代次。
+
+   **已排除的假设**：`pt.c` 里**完全没有** TLB flush 调用；`mm_tlb_invalidate_finish()`
+   只在 `munmap.c` / `madvise.c` / `oom.c` 被调用。所以「远程 shootdown 在持有节点锁
+   时发出」这条**不成立**——排除了它其实是那个经典 ABBA 的可能。
+
+   剩下的待验证假设：目标 CPU 因某种原因没能接收软中断，而 `nop` 自旋 starve
+   IPI 是最合理的候选。但**这是候选，不是结论**。
+
+   为什么以前不出问题：缺页整体被 `mm->lock` 串行化，其余 CPU 阻塞在
+   `spin_lock(&mm->lock)`（IRQ 保持开启）上，能响应 IPI。快段摘掉 `mm->lock`
+   之后，大量 CPU 同时争 MCS 节点锁——**这条路径第一次被大量走到**（"被大量走到"
+   是有依据的；"因此目标饿死在 nop 里"仍是推断）。
+
+   所以这是同一个主题的第三次出现：**这一整天的三次修复都是"某条自旋路径饿死了
+   别的进展"**——睡眠压在自旋锁下、`mm->lock` 下回收、现在 `nop` 自旋饿死软中断。
+   每一次都要等到移除上层串行化才暴露。
+
+   #### 实测推翻了上面那个 TLB 推断：真症状是 level-0 节点锁被永久持有
+
+   在 `mcs_lock()` 的自旋循环里加计数（每超过 `2^26` 打一次 `[MCS SPIN]`），重跑
+   同一配方（Phase 3 改动 + SMP=8 + `a20.anonprov=4096`）：
+
+   ```
+   [MCS SPIN] cpu=1 node=0xffffffc0bf75b000 level=0 total=2013265920
+   [MCS SPIN] cpu=4 node=0xffffffc0bf75b000 level=0 total=2147483648
+   RV64 TLB 超时次数： 0
+   MCS SPIN 次数：     2493
+   ```
+
+   **两个关键事实**：
+
+   1. `[RV64 TLB]` **一次都没触发**（上一轮那个 panic 在这次带计数的复现里根本没
+      出现）。所以「目标 CPU 饿死软中断 → ack 不了 → 5 秒超时」这条链**不成立**，
+      上一小节的推断是错的。
+   2. CPU 1 和 CPU 4 卡在**同一张** level-0 节点表
+      （`0xffffffc0bf75b000`）上，`total` 单调涨到 **2^31 ≈ 21 亿次**，而且
+      `[MCS DEADLOCK]`（自死锁检测）**没有**触发。
+
+   也就是说：**这不是饿死，是那把 level-0 节点锁的持有者再也没释放**。持锁者不
+   在推进（否则等待者会拿到锁），等待者却在推进（`total` 在涨）。两个 CPU 对同一张
+   叶子表互斥竞争，其中一方永远不放。
+
+   已排除的读法：
+
+   * **不是 `mm_addrspace_lock()` 漏解锁**。逐条核对了它的返回路径：每次
+     `continue` 前都 `mcs_unlock`，两处 `return 1` 之前也都不持锁（第 54 行的
+     `return 1` 在本轮还没取任何锁）。
+   * **不是"远程 shootdown 在持节点锁时发出"**。`pt.c` 里完全没有 TLB flush 调用，
+     `mm_tlb_invalidate_finish()` 只在 `munmap.c`/`madvise.c`/`oom.c` 被调用。
+
+   剩下的候选（本轮**未**验证，不要当结论）：
+
+   * 某条路径取了 level-0 节点锁但没有配对释放——注意 `pt_unmap()` 的向上回收会
+     逐层取 `parent`，而 `mm_addrspace_lock()` 对 4 KiB 区间取的 guard 锁**正是**
+     level-0 那张表；`--wide-cursor-only` 负载里有并发 unmapper，所以这两条路径是
+     并发跑的。
+   * 两个不同 guard_level 的 cursor 之间的跨节点锁序环（ABBA）。自死锁检测只看
+     "本 CPU 是否已持有该节点"，**看不到跨 CPU 的环**，所以它不会响。
+
+   #### 定位持有者：level-0 节点锁被 acquired 但从未 `mm_cursor_unlock`
+
+   在 `[MCS SPIN]` 首次触发时把**每个 CPU 的 MCS 持有栈**（`pool->depth` +
+   `pool->held[]`）打出来，同一配方复现：
+
+   ```
+   [MCS OWN] waiter=2 node=0xffffffc0bf75b000 want_depth=1
+   [MCS OWN]   cpu2 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN]   cpu4 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN] waiter=4 node=0xffffffc0bf75b000 want_depth=1
+   [MCS OWN]   cpu2 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN]   cpu4 depth=1 holds: 0xffffffc0bf75b000
+   ```
+
+   > **本节的读法已被下一节的实测推翻，保留原文是为了记录我错在哪。**
+   >
+   > `held[]` 确实只在 `mm_cursor_unlock()` 的 unwind 循环里弹出，但关键在于
+   > **它在进入自旋之前就被写了**。所以**正在等待的 CPU 也会显示成"持有"它正在
+   > 等的那个节点**——`want_depth=1` 不是"入队信息"，而是**同一个自旋者自己**。
+   > 因此 `cpu4 depth=1 holds: X` 只能说明 cpu4 在等 X，**不能**说明它已完成获取。
+   > 下一节拿到 PC 之后重读同一份数据，结论不同。
+
+   **尚未确定的是持有者卡在哪。** 已知它在临界区内（`depth==1`，没有嵌套取第二把
+   锁），但"在临界区内"和"永不返回临界区"是两件事。剩下的可能：
+
+   * 在临界区内又阻塞/自旋在别的东西上（但那会让 `depth` 或持有栈出现第二项——
+     没出现，所以更像是**单点卡死**）；
+   * 在临界区内进入了一个不会返回的循环；
+   * 被 QEMU 调度出去（KVM 抢走），表现为持有者不推进。
+
+   **下一轮该测的是持有者的 PC**，不是再猜：在 `mcs_lock()` 的进入点把
+   `owner_pc[节点] = 返回地址` 记下来，`[MCS SPIN]` 触发时连同等待者一起打印，
+   再用 `addr2line` 解析。这一步直接给出"是谁、哪一行、持锁没放"。
+   拿到 PC 之前，上面三条都只是候选。
+
+   #### 持有者 PC：指向 `mm_addrspace_lock`，并推翻上一节的读法
+
+   记录获取点 PC（`__builtin_return_address(0)`），自旋首次超阈值时把每 CPU 的
+   （节点, PC）对打出：
+
+   ```
+   [MCS OWN] waiter=0 node=0xffffffc0bf6b3000 want_depth=1
+   [MCS OWN]   cpu0 depth=1 [0xffffffc0bf6b3000 pc=ffffffc08023f580]
+   [MCS OWN]   cpu3 depth=1 [0xffffffc0bf6b1000 pc=ffffffc08023f580]
+   [MCS OWN] waiter=3 node=0xffffffc0bf6b1000 want_depth=1
+   ```
+
+   `addr2line`：**两个 PC 都是 `mm_addrspace_lock`**（`kernel/mm/pt.c`）。
+
+   带上 PC 重读这份数据，得到与上一节**不同**的结论：
+
+   * cpu0 自旋在 `b3000`，cpu3 自旋在 `b1000`——**两个不同节点**；
+   * 8 个 CPU 全被枚举，只有这两个 `depth > 0` ⇒ **没有任何 CPU 完成过对这两个
+     节点的获取**；
+   * 但两个节点都非空（否则 `mcs_lock` 里 `tail == 0` 直接拿到，不会自旋），
+     且都没人交出去。
+
+   所以准确说法是：**这两个 level-0 节点的 MCS 队列非空，但队列里没有活的持有者**，
+   即 `mcs_unlock()` 从未把交接做完。上一节"cpu4 取到了却没走完
+   `mm_cursor_unlock`"是错的——这是今天第二次把测量结果当成系统状态。
+
+   已核对排除：本次涉及的三个候选点都正确配对解锁——
+   `mm_addrspace_lock()` 的**每一条**返回路径（含 stale `-EAGAIN`、两条
+   `-ENOMEM`、两条 `return 1`），以及 Phase 3 的 `mm_fault_from_status()` 的 5 个
+   `goto decline` 与成功路径，全部调用 `mm_cursor_unlock()`。
+   **泄漏点不在这两处，且尚未定位。**
+
+   剩下的可能（**未**验证，不要当结论）：
+
+   * `mcs_unlock()` 的交接写错了内存序，唤醒没能传递到下一个 waiter；
+   * 某个调用方在**未持锁**状态下调用了 `mm_cursor_unlock()`，把别人的节点弹出
+     自己的 unwind 栈。
+
+   **下一轮该测 `mcs_unlock()` 本身**：交接前后打印 `m->lock`、`me->node`、
+   `me->locked` 三个值，并给每个节点加 enqueue/dequeue 计数，直接看交接有没有发生。
+   在那之前不要相信任何关于持有者的推断。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 25 commit
+   的 checkpoint、门禁全绿。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 24 commit
+   的 checkpoint、门禁全绿。
+
+   **下一轮第一步应该是定位持有者，而不是继续猜**：在 level-0 节点锁的获取/释放
+   两端各加一个 per-CPU 的 owner+depth 记录，在 `[MCS SPIN]` 触发时把等待者与
+   `owner[节点]` 一起打出来。这一步就能把上面两个候选分开。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 23 commit
+   的 checkpoint、门禁全绿。这一节记录的是**实测结论**（TLB 推断被推翻、症状是
+   level-0 节点锁被永久持有）和**下一步该测什么**。
+
+   **下一轮该先做的**：让节点锁的自旋可被抢占，或者让 `arch_cpu_relax()` 真正让出
+   （riscv64 上 `wfi`，或循环里检查待处理 IPI）。**没落地**——两者都改动面不小
+   （`arch_cpu_relax()` 是全局 spin helper，替换它要重测所有锁路径），需要单独
+   一轮实测，不能顺手改。
+
 3. **drain 的触发频率**：`mm_pt_retire_drain()` 只在 retire 时立即调用，若
    `pt_readers > 0` 就返回，退役列表在持续多核缺页下可能堆积。当前每次 retire 都会
    尝试，最终会在某个 `pt_readers == 0` 的时刻排空，所以不是硬泄漏，但需要实测
