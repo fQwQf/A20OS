@@ -4,6 +4,8 @@
 #include "abi/linux/fcntl.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mntns.h"
+#include "fs/vfs/mount.h"
+#include "fs/vfs/stat_perm.h"
 #include "ipc/kexec.h"
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
@@ -502,10 +504,159 @@ int64_t sys_setns(int fd, int nstype) {
     return r;
 }
 
+/* Resolve a caller-supplied directory path to the vnode it names, with the
+ * vnode reference the caller has to release. */
+static vnode_t *pivot_resolve_dir(task_t *cur, const char *user_path,
+                                  char *global_out, size_t global_sz,
+                                  int *err_out) {
+    char kpath[MAX_PATH_LEN];
+    long copied = user_strncpy(kpath, user_path, MAX_PATH_LEN);
+    if (copied < 0) { *err_out = -EFAULT; return NULL; }
+    if (kpath[0] == '\0') { *err_out = -ENOENT; return NULL; }
+    if (strlen(global_sz ? global_out : kpath) >= global_sz) {
+        *err_out = -ENAMETOOLONG;
+        return NULL;
+    }
+    int pr = syscall_path_at(AT_FDCWD, kpath, global_out, global_sz);
+    if (pr < 0) { *err_out = pr; return NULL; }
+    vnode_t *vn = vfs_resolve(global_out);
+    if (!vn) {
+        *err_out = vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
+        return NULL;
+    }
+    if (vn->type != VFS_FT_DIR) {
+        vnode_put(vn);
+        *err_out = -ENOTDIR;
+        return NULL;
+    }
+    if (vfs_vnode_permission(vn, X_OK) < 0) {
+        vnode_put(vn);
+        *err_out = -EACCES;
+        return NULL;
+    }
+    (void)cur;
+    return vn;
+}
+
+/*
+ * pivot_root(2), for real.
+ *
+ * The operation is only meaningful once a process root is a (mount, vnode)
+ * pair, which is what this branch introduced: the caller moves its root to
+ * another directory and the old root's mount is cut out of the namespace,
+ * after which no path resolves into it and only an already-open descriptor
+ * can still reach it.
+ *
+ * Checks, in the order Linux applies them:
+ *   1. CAP_SYS_ADMIN;
+ *   2. new_root is a directory (and is not the current root);
+ *   3. put_old is a directory, lies under the *current* root, and lies under
+ *      the *new* root -- that last condition is what stops a process from
+ *      using pivot_root to smuggle a reference to a path the new root would
+ *      otherwise hide;
+ *   4. the new root's mount is not the current root's mount and not below
+ *      it, i.e. the pivot may not widen the mount reach;
+ * then: detach the old root mount, re-root the process, and move its cwd to
+ * put_old's parent directory (Linux semantics -- the process must not be
+ * left standing in the old root).
+ */
 int64_t sys_pivot_root(const char *new_root, const char *put_old) {
-    (void)new_root;
-    (void)put_old;
-    return -EPERM;
+    if (!new_root || !put_old) return -EFAULT;
+    task_t *cur = proc_current();
+    if (!cur) return -ESRCH;
+    if (!proc_has_cap(cur, CAP_SYS_ADMIN)) return -EPERM;
+
+    char nr_path[MAX_PATH_LEN];
+    char po_path[MAX_PATH_LEN];
+    int err = 0;
+    vnode_t *nr = pivot_resolve_dir(cur, new_root, nr_path, sizeof(nr_path), &err);
+    if (!nr) return err;
+
+    mount_t *old_root_mnt = vfs_task_root_mount(cur);
+    vnode_t *old_root_vn = cur->fs.root_vn;
+
+    if (old_root_vn && nr == old_root_vn) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+    if (!nr->mnt) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+    /* Pivoting into the mount you are already rooted in changes nothing, so
+     * Linux refuses it.  A *child* of the current root's mount is exactly
+     * the normal container pattern (mount a rootfs at /newroot, pivot into
+     * it) and stays legal. */
+    if (old_root_mnt && nr->mnt == old_root_mnt) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+
+    vnode_t *po = pivot_resolve_dir(cur, put_old, po_path, sizeof(po_path), &err);
+    if (!po) { vnode_put(nr); return err; }
+
+    /* put_old must be under the new root.  Both are already normalized
+     * global paths, so this is a boundary-correct prefix test. */
+    size_t nr_len = strlen(nr_path);
+    while (nr_len > 1 && nr_path[nr_len - 1] == '/')
+        nr_path[--nr_len] = '\0';
+    if (strcmp(nr_path, po_path) == 0) {
+        /* put_old may not be the new root itself. */
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+    if (strncmp(po_path, nr_path, nr_len) != 0 ||
+        (po_path[nr_len] != '/' && po_path[nr_len] != '\0')) {
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+    /* ... and it must live in the new root's mount. */
+    if (po->mnt != nr->mnt) {
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+
+    /* put_old's parent becomes the new cwd. */
+    char parent[MAX_PATH_LEN];
+    strncpy(parent, po_path, sizeof(parent) - 1);
+    parent[sizeof(parent) - 1] = '\0';
+    size_t plen = strlen(parent);
+    while (plen > 1 && parent[plen - 1] == '/')
+        parent[--plen] = '\0';
+    char *slash = strrchr(parent, '/');
+    if (slash == parent)
+        parent[1] = '\0';
+    else if (slash)
+        *slash = '\0';
+    vnode_t *cwd_vn = vfs_resolve(parent);
+    if (!cwd_vn || cwd_vn->type != VFS_FT_DIR) {
+        if (cwd_vn) vnode_put(cwd_vn);
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+
+    /* Cut the old root out of the namespace first: from here on nothing can
+     * reach it by path.  The mount object stays listed in mountinfo, flagged
+     * detached, so an open descriptor into it keeps working. */
+    if (old_root_mnt && old_root_mnt != nr->mnt)
+        vfs_mount_detach_root(old_root_mnt);
+
+    /* Re-root.  The strings follow the objects: root_path is the global
+     * spelling of the new root, cwd is its root-relative spelling. */
+    vfs_task_root_set(cur, nr->mnt, nr, nr_path);
+    const char *root = cur->fs.root_path;
+    const char *visible = parent;
+    if (strlen(visible) >= strlen(root) &&
+        strncmp(visible, root, strlen(root)) == 0)
+        visible += strlen(root);
+    if (visible[0] == '\0')
+        visible = "/";
+    vfs_task_cwd_set(cur, cwd_vn, visible);
+
+    vnode_put(cwd_vn);
+    vnode_put(po);
+    vnode_put(nr);
+    return 0;
 }
 
 struct clone3_args {

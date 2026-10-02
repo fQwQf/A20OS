@@ -111,6 +111,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
             strncpy(mnt->opts, cg_opts, sizeof(mnt->opts) - 1);
         }
         mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -171,6 +172,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
         mnt->fstype[sizeof(mnt->fstype) - 1] = '\0';
         strncpy(mnt->opts, "rw", sizeof(mnt->opts) - 1);
         mnt->opts[sizeof(mnt->opts) - 1] = '\0';
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -198,6 +200,7 @@ int vfs_mount(const char *dev, const char *path, const char *fstype, int flags, 
             return -ENOMEM;
         }
         mnt->root->mnt = mnt;
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -245,6 +248,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         vnode_get(root);  /* mount holds a persistent reference */
 
         kdebug("[VFS] Mounted FAT32 at %s\n", path);
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -275,6 +279,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         vnode_get(root);  /* mount holds a persistent reference */
 
         kdebug("[VFS] Mounted NTFS at %s\n", path);
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -305,6 +310,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         vnode_get(root);  /* mount holds a persistent reference */
 
         kdebug("[VFS] Mounted ext4 at %s\n", path);
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -335,6 +341,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         vnode_get(root);  /* mount holds a persistent reference */
 
         kdebug("[VFS] Mounted littlefs at %s\n", path);
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -364,6 +371,7 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         vnode_get(root);  /* mount holds a persistent reference */
 
         kdebug("[VFS] Mounted iso9660 at %s\n", path);
+        vfs_mount_link_tree(mnt);
         vfs_dcache_invalidate_all();
         return 0;
     }
@@ -418,6 +426,81 @@ void vfs_mount_namespace_teardown(mnt_namespace_t *ns) {
         mount_t *mnt = ns->mounts[i];
         if (mnt->ns_users > 0) vfs_mount_fs_teardown(mnt);
     }
+}
+
+/*
+ * Why a mount cannot be unmounted right now.  A20OS tracks process roots as
+ * mount references (mount_t::root_users) and mounts as real tree nodes, so
+ * the three Linux busy reasons become direct questions instead of guesses:
+ *
+ *   - somebody's root:  root_users > 1 (the extra reference is the process)
+ *   - a submount below: mnt_child != NULL
+ *   - the path is not a mount point at all
+ *
+ * @flags carries the Linux MNT_* bits; MNT_DETACH waives all three, which is
+ * what pivot_root(2) and lazy-unmount callers want.
+ */
+static int vfs_mount_busy_reason(mount_t *mnt)
+{
+    if (vfs_mount_root_users(mnt) > 1)
+        return -EBUSY;                    /* a process is rooted here */
+    if (vfs_mount_first_child(mnt))
+        return -EBUSY;                    /* something is mounted below it */
+    if (vfs_mount_cwd_users(mnt) > 0)
+        return -EBUSY;                    /* a process is standing in it */
+    /* The namespace root itself is never unmountable: everything else hangs
+     * off it.  Linux reports EINVAL here. */
+    if (!mnt->mnt_parent && strcmp(mnt->path, "/") == 0)
+        return -EINVAL;
+    return 0;
+}
+
+int vfs_umount_flags(const char *path, int flags) {
+    if (!path) return -EINVAL;
+    char norm_path[MAX_PATH_LEN];
+    strncpy(norm_path, path, MAX_PATH_LEN - 1);
+    norm_path[MAX_PATH_LEN - 1] = '\0';
+
+    size_t len = strlen(norm_path);
+    while (len > 1 && norm_path[len - 1] == '/') {
+        norm_path[len - 1] = '\0';
+        len--;
+    }
+
+    /* Detached mounts are not reachable by path any more, but umount(2) must
+     * still be able to name them so pivot_root's old root can be collected. */
+    for (int i = 0; i < vfs_mount_count(); i++) {
+        mount_t *mnt = vfs_mount_at(i);
+        if (!mnt) continue;
+
+        char mnt_norm[MAX_PATH_LEN];
+        strncpy(mnt_norm, mnt->path, MAX_PATH_LEN - 1);
+        mnt_norm[MAX_PATH_LEN - 1] = '\0';
+        size_t mnt_len = strlen(mnt_norm);
+        while (mnt_len > 1 && mnt_norm[mnt_len - 1] == '/') {
+            mnt_norm[mnt_len - 1] = '\0';
+            mnt_len--;
+        }
+
+        if (strcmp(mnt_norm, norm_path) != 0)
+            continue;
+
+        if (!(flags & VFS_UMOUNT_DETACH)) {
+            int busy = vfs_mount_busy_reason(mnt);
+            if (busy < 0)
+                return busy;
+        }
+        if (mnt->mnt_child) {
+            for (mount_t *c = mnt->mnt_child; c; c = c->mnt_sibling)
+                vfs_mount_detach_root(c);
+        }
+        vfs_dcache_invalidate_all();
+        vfs_drop_time_meta_mount(mnt);
+        vfs_mount_fs_teardown(mnt);
+        vfs_mount_remove(mnt);
+        return 0;
+    }
+    return -EINVAL;
 }
 
 int vfs_umount(const char *path) {
