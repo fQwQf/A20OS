@@ -19,6 +19,7 @@
 #include "fs/ext4.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mntns.h"
+#include "proc/pidns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/coredump.h"
@@ -143,6 +144,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
     if (strcmp(name, "ns") == 0) return PF_PID_NS;
     if (strcmp(name, "pid") == 0) return PF_PID_NS_PID;
+    if (strcmp(name, "pid_for_children") == 0) return PF_PID_NS_PID_FOR_CHILDREN;
     if (strcmp(name, "uts") == 0) return PF_PID_NS_UTS;
     if (strcmp(name, "user") == 0) return PF_PID_NS_USER;
     if (strcmp(name, "ipc") == 0) return PF_PID_NS_IPC;
@@ -310,13 +312,24 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         }
         p->content_len = (size_t)len;
     }
-    if (type == PF_PID_NS_MNT) {
-        /* Pin the target's mount namespace for setns(2); released from
+    if (type == PF_PID_NS_MNT || type == PF_PID_NS_PID ||
+        type == PF_PID_NS_PID_FOR_CHILDREN) {
+        /* Pin the target's namespace for setns(2); released from
          * procfs_fclose().  Done last so the failure paths above have no
-         * reference to drop. */
+         * reference to drop.  ns_ref is void* so one field serves both
+         * namespace kinds -- procfs_ns_file_*_get() is what tells them
+         * apart, and it checks the pf_type stored alongside. */
         task_t *target = proc_find_get(real_pid);
         if (target) {
-            p->ns_ref = mntns_task_get(target);
+            if (type == PF_PID_NS_MNT)
+                p->ns_ref = mntns_task_get(target);
+            else if (type == PF_PID_NS_PID)
+                p->ns_ref = pidns_task_get(target);
+            else {
+                pid_namespace_t *fc = (pid_namespace_t *)__atomic_load_n(
+                    &target->pid_ns_for_children, __ATOMIC_ACQUIRE);
+                p->ns_ref = pidns_get(fc);
+            }
             p->ns_owner_uid = target->cred.uid;
             proc_put(target);
         }
@@ -523,6 +536,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_PID_NS) {
         if (strcmp(name, "pid") == 0)
             type = PF_PID_NS_PID;
+        else if (strcmp(name, "pid_for_children") == 0)
+            type = PF_PID_NS_PID_FOR_CHILDREN;
         else if (strcmp(name, "uts") == 0)
             type = PF_PID_NS_UTS;
         else if (strcmp(name, "user") == 0)
@@ -543,11 +558,17 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         child = new_entry(name, PF_ROOT, -1);
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
                is_pid_str(name)) {
-        task_t *task = proc_find_get(pid);
+        /* `name` is a path component, so it is an id in the *reader's*
+         * namespace.  Resolve it there, then store the resolved task's
+         * global id: every pf_entry consumer downstream (render, fd
+         * symlinks, ns pinning) looks tasks up by the global id, and the
+         * entry was already namespace-checked here. */
+        task_t *task = proc_find_get_user(pid);
         if (!task)
             return -ENOENT;
+        int global_pid = task->pid;
         proc_put(task);
-        child = new_entry(name, PF_ROOT, pid);
+        child = new_entry(name, PF_ROOT, global_pid);
     } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
                strcmp(name, "cmdline") == 0) {
         child = new_entry(name, PF_PID_CMDLINE, dp->pid);
@@ -1161,18 +1182,29 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
                 name = root_entries[idx];
             } else {
                 int pid_idx = idx - static_count;
+                /* Only tasks visible from the reader's own pid namespace are
+                 * listed, and each is listed under the id that reader would
+                 * use to address it.  Listing global ids here would both
+                 * expose the host's numbering to a container and make the
+                 * directory entries unusable: /proc/<listed-id> has to
+                 * resolve to the same task, which means it has to be the
+                 * namespace-local one. */
                 uint64_t flags = spin_lock_irqsave(&proc_lock);
+                pid_namespace_t *ns = pidns_current();
                 int cur_idx = 0;
-                task_t *t;
-                for (t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-                    if (t->state == PROC_UNUSED || t->pid <= 0)
+                task_t *t = NULL;
+                for (task_t *it = proc_first_task_locked(); it;
+                     it = proc_next_task_locked(it)) {
+                    if (it->state == PROC_UNUSED || it->pid <= 0)
                         continue;
-                    if (cur_idx == pid_idx)
-                        break;
+                    if (!pidns_visible(ns, it))
+                        continue;
+                    if (cur_idx == pid_idx) { t = it; break; }
                     cur_idx++;
                 }
                 if (t) {
-                    snprintf(pidbuf, sizeof(pidbuf), "%d", t->pid);
+                    int shown = task_pid_nr_ns(t, ns);
+                    snprintf(pidbuf, sizeof(pidbuf), "%d", shown);
                     name = pidbuf;
                 }
                 spin_unlock_irqrestore(&proc_lock, flags);
@@ -1218,8 +1250,18 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 static int procfs_fclose(vfile_t *vf) {
     if (vf && vf->priv) {
         procfs_priv_t *p = (procfs_priv_t *)vf->priv;
-        if (p->ns_ref)
-            mntns_put((mnt_namespace_t *)p->ns_ref);
+        /* ns_ref holds EITHER a mnt_namespace or a pid_namespace, so the
+         * release has to match the kind.  Dispatching on the kind is not
+         * optional: each module has its own statically pinned "initial"
+         * namespace, and its put() treats that pointer as "nothing to free".
+         * Handing a mount namespace to pidns_put() would fail that test and
+         * free a static object. */
+        if (p->ns_ref) {
+            if (p->type == PF_PID_NS_MNT)
+                mntns_put((mnt_namespace_t *)p->ns_ref);
+            else
+                pidns_put((pid_namespace_t *)p->ns_ref);
+        }
         kfree(p->content);
         kfree(p);
         vf->priv = NULL;
@@ -1253,7 +1295,8 @@ int procfs_ns_file_kind(const vfile_t *vf)
         return -1;
     switch (((const procfs_priv_t *)vf->priv)->type) {
     case PF_PID_NS_MNT:    return PROCNS_MNT;
-    case PF_PID_NS_PID:    return PROCNS_PID;
+    case PF_PID_NS_PID:
+    case PF_PID_NS_PID_FOR_CHILDREN: return PROCNS_PID;
     case PF_PID_NS_UTS:    return PROCNS_UTS;
     case PF_PID_NS_USER:   return PROCNS_USER;
     case PF_PID_NS_IPC:    return PROCNS_IPC;
@@ -1267,6 +1310,22 @@ int procfs_ns_file_kind(const vfile_t *vf)
  * mount namespace with an extra reference (caller mntns_put()s it) and the
  * namespace owner's uid recorded at open time.  Returns NULL when the
  * namespace could not be pinned (target already gone at open). */
+pid_namespace_t *procfs_ns_file_pidns_get(const vfile_t *vf, int *out_owner_uid)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv)
+        return NULL;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if ((p->type != PF_PID_NS_PID && p->type != PF_PID_NS_PID_FOR_CHILDREN) ||
+        !p->ns_ref)
+        return NULL;
+    pid_namespace_t *ns = (pid_namespace_t *)p->ns_ref;
+    if (ns != pidns_init_ns())
+        refcount_inc(&ns->refs);
+    if (out_owner_uid)
+        *out_owner_uid = p->ns_owner_uid;
+    return ns;
+}
+
 mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid)
 {
     if (!vfs_is_procfs_vfile(vf) || !vf->priv)

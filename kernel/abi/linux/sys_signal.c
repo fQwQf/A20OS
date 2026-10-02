@@ -13,7 +13,7 @@ int64_t sys_kill(int pid, int sig) {
     if (sig < 0 || sig >= NSIG) return -EINVAL;
     if (sig == 0) {
         if (pid > 0) {
-            task_t *target = proc_find_get(pid);
+            task_t *target = proc_find_get_user(pid);
             if (!target)
                 return -ESRCH;
             proc_put(target);
@@ -22,7 +22,7 @@ int64_t sys_kill(int pid, int sig) {
     }
     if (pid > 0) {
         task_t *self = proc_current();
-        task_t *target = proc_find_get(pid);
+        task_t *target = proc_find_get_user(pid);
         if (!target) return -ESRCH;
         int perm = signal_send_permission(self, target);
         proc_put(target);
@@ -43,7 +43,7 @@ int64_t sys_kill(int pid, int sig) {
     int count = 0;
     int max_pid = proc_pid_max();
     for (int p = 1; p <= max_pid; p++) {
-        task_t *target = proc_find_get(p);
+        task_t *target = proc_find_get_user(p);
         if (!target)
             continue;
         if (target->pid > 1 && target->pgdir) {
@@ -58,7 +58,7 @@ int64_t sys_kill(int pid, int sig) {
 
 int64_t sys_tgkill(int tgid, int tid, int sig) {
     task_t *self = proc_current();
-    task_t *target = proc_find_get(tid);
+    task_t *target = proc_find_get_user(tid);
     if (!target) return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
         proc_put(target);
@@ -78,7 +78,7 @@ int64_t sys_tgkill(int tgid, int tid, int sig) {
 
 int64_t sys_tkill(int tid, int sig) {
     task_t *self = proc_current();
-    task_t *target = proc_find_get(tid);
+    task_t *target = proc_find_get_user(tid);
     if (!target) return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
         proc_put(target);
@@ -95,7 +95,7 @@ int64_t sys_rt_sigqueueinfo(int tgid, int sig, void *uinfo) {
     if (sig <= 0 || sig >= NSIG) return -EINVAL;
     if (!uinfo) return -EFAULT;
     task_t *self = proc_current();
-    task_t *target = proc_find_get(tgid);
+    task_t *target = proc_find_get_user(tgid);
     if (!target) return -ESRCH;
     int perm = signal_send_permission(self, target);
     proc_put(target);
@@ -326,7 +326,7 @@ int64_t sys_rt_tgsigqueueinfo(int tgid, int tid, int sig, void *uinfo)
     if (!uinfo)
         return -EFAULT;
     task_t *self = proc_current();
-    task_t *target = proc_find_get(tid);
+    task_t *target = proc_find_get_user(tid);
     if (!target)
         return -ESRCH;
     if (target->tgid != tgid) {

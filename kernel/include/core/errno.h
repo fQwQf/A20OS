@@ -71,6 +71,7 @@
 #define ETIME        62
 #define EOVERFLOW    75
 #define ESTALE       116
+#define EUSERSRCH     85
 #define ECANCELED    125
 #define ERESTARTNOINTR 513
 

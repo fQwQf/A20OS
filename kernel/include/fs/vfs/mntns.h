@@ -3,6 +3,7 @@
 
 #include "fs/vfs.h"
 #include "core/refcount.h"
+#include "proc/nsclone.h"
 
 struct task_t;
 
@@ -34,16 +35,6 @@ struct task_t;
 #define MNTNS_MAX_MOUNTS   64
 #define MNTNS_INIT_INO     4026531840ULL  /* Linux-compatible init mnt ns ino */
 
-/* CLONE_NEW* namespace flag values (Linux uapi).  Declared here so both the
- * clone/unshare/setns implementation and listns(2) classify ns types from
- * one source. */
-#define LINUX_CLONE_NEWNS      0x00020000ULL
-#define LINUX_CLONE_NEWCGROUP  0x02000000ULL
-#define LINUX_CLONE_NEWUTS     0x04000000ULL
-#define LINUX_CLONE_NEWIPC     0x08000000ULL
-#define LINUX_CLONE_NEWUSER    0x10000000ULL
-#define LINUX_CLONE_NEWPID     0x20000000ULL
-#define LINUX_CLONE_NEWNET     0x40000000ULL
 
 /* Linux-compatible init-namespace inos for the ns types A20OS does not
  * implement as objects; they render as system-wide singletons and are

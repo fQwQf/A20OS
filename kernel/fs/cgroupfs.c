@@ -731,8 +731,19 @@ static int cg_fwrite(vfile_t *vf, const char *buf, size_t count)
                 if (p->node->pids[i] == pid) { dup = 1; break; }
             }
             if (!dup) {
-                p->node->pids[p->node->pid_count++] = pid;
-                cg_attach_task(p->node, pid);
+                /* The id came from a user writing to tasks.procs, so it is in
+                 * the writer's namespace.  Resolve it there and record the
+                 * task's GLOBAL pid: everything that reads node->pids back
+                 * later (cgroup.kill, proc, kernel-internal paths) works in
+                 * global ids, and the caller-relative lookup would not resolve
+                 * for a process that had since left that namespace. */
+                task_t *t = proc_find_get_user(pid);
+                if (!t)
+                    return -ESRCH;
+                int global_pid = t->pid;
+                proc_put(t);
+                p->node->pids[p->node->pid_count++] = global_pid;
+                cg_attach_task(p->node, global_pid);
             }
         }
     }

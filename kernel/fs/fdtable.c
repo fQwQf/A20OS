@@ -354,6 +354,10 @@ void fdtable_close_all(task_t *task)
      * (exit and final task destruction); mntns_release_task() NULLs the
      * field, so the double call is safe. */
     mntns_release_task(task);
+    /* Same hook for the pid namespace: the task's ids in every container it
+     * is a member of must come back as soon as the task is gone, or a long
+     * running container would leak ids until PIDNS_CHILD_MAX. */
+    pidns_release_task(task);
     /* Release the per-process root/cwd references.  Idempotent, so the
      * exec and exit paths that both reach this hook are safe. */
     vfs_task_fs_pins_release(task);

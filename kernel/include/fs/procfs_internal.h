@@ -55,6 +55,7 @@ typedef enum {
     PF_PID_SESSIONID,
     PF_PID_NS,
     PF_PID_NS_PID,
+    PF_PID_NS_PID_FOR_CHILDREN,
     PF_PID_NS_UTS,
     PF_PID_NS_USER,
     PF_PID_NS_IPC,

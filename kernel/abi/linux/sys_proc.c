@@ -83,16 +83,16 @@ __attribute__((weak)) int64_t sys_pause(void) {
     (LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES | \
      LINUX_CLONE_SIGHAND | LINUX_CLONE_PIDFD | LINUX_CLONE_PTRACE | \
      LINUX_CLONE_VFORK | LINUX_CLONE_PARENT | LINUX_CLONE_THREAD | \
-     LINUX_CLONE_NEWNS | \
+     LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID | \
      LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
      LINUX_CLONE_PARENT_SETTID | LINUX_CLONE_CHILD_CLEARTID | \
      LINUX_CLONE_CHILD_SETTID | LINUX_CLONE_IO | 0xFFULL)
 
-/* Namespace types other than mount namespaces are not implemented; both
- * clone and clone3 refuse them instead of silently ignoring the flag. */
+/* Namespace types other than mount and pid namespaces are not implemented;
+ * both clone and clone3 refuse them instead of silently ignoring the flag. */
 #define LINUX_CLONE_UNSUPPORTED_NS_FLAGS \
     (LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS | LINUX_CLONE_NEWIPC | \
-     LINUX_CLONE_NEWUSER | LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET)
+     LINUX_CLONE_NEWUSER | LINUX_CLONE_NEWNET)
 
 /* CLONE_NEWNS requires privilege in the caller (Linux: CAP_SYS_ADMIN in the
  * current user namespace; simplified here to CAP_SYS_ADMIN or root). */
@@ -134,19 +134,46 @@ int64_t sys_exit_group(int code) {
     return 0;
 }
 
+/*
+ * PID_TRANSLATION_CONTRACT:
+ * getpid()/gettid()/getppid() report ids in task_active_pid_ns(), i.e. the
+ * namespace the caller's CHILDREN join -- task_t::pid_ns_for_children.  Inside
+ * a pid namespace that makes the numbers start at 1, which is the whole point:
+ * a container's init is pid 1 and its first child is pid 2.
+ *
+ * getpid() reports the thread-group id and gettid() the task id, so a
+ * multithreaded process inside a container shows N threads sharing one
+ * container-local group id, as in Linux.  Both go through the same level
+ * table on task_t, so t->tgid (a global id) must never be returned directly.
+ *
+ * The consequence that trips callers up, and is correct: unshare(CLONE_NEWPID)
+ * does not change getpid() until the NEXT fork, because the task stays a
+ * member of its old namespace and only parks a new one for its children.
+ */
 int64_t sys_getpid(void) {
     task_t *t = proc_current();
-    return t ? (t->tgid ? t->tgid : t->pid) : 0;
+    if (!t) return 0;
+    /* The THREAD GROUP's id, not this thread's -- which is why a
+     * multithreaded process inside a container has every thread reporting the
+     * same getpid() while gettid() differs.  task_t::tgid is a GLOBAL id and
+     * would leak the host numbering straight through the namespace. */
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    return task_pid_nr_ns(leader, pidns_current());
 }
 
 int64_t sys_getppid(void) {
     task_t *t = proc_current();
-    return t ? t->ppid : 0;
+    if (!t) return 0;
+    /* Linux reports real_parent here so a ptraced child's getppid() does not
+     * leak its tracer; the visible id is whatever the parent's namespace
+     * makes it, and 0 when the parent is outside the caller's namespace. */
+    return task_ppid_nr_ns(t, pidns_current());
 }
 
 int64_t sys_gettid(void) {
     task_t *t = proc_current();
-    return t ? t->pid : 0;
+    if (!t) return 0;
+    return task_pid_nr_ns(t, pidns_current());
 }
 
 int64_t sys_set_tid_address(int *tidptr) {
@@ -178,7 +205,7 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
     if (pid == 0) {
         t = proc_get(proc_current());
     } else {
-        t = proc_find_get(pid);
+        t = proc_find_get_user(pid);
         if (!t) return -ESRCH;
         task_t *cur = proc_current();
         if (cur && t->cred.uid != cur->cred.uid &&
@@ -299,7 +326,7 @@ int64_t sys_setfsgid(int gid) {
 
 int64_t sys_getpgid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!t) return -ESRCH;
     int pgid = t->pgid;
     proc_put(t);
@@ -308,7 +335,7 @@ int64_t sys_getpgid(int pid) {
 
 int64_t sys_setpgid(int pid, int pgid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!self || !t) {
         proc_put(t);
         return -ESRCH;
@@ -342,7 +369,7 @@ int64_t sys_setsid(void) {
 
 int64_t sys_getsid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!t) return -ESRCH;
     int sid = t->sid;
     proc_put(t);
@@ -420,8 +447,8 @@ int64_t sys_vhangup(void) {
 }
 
 int64_t sys_unshare(int flags) {
-    /* Honest namespace semantics: CLONE_NEWNS creates a real mount
-     * namespace; every other namespace type is refused with -EINVAL
+    /* Real namespace semantics: CLONE_NEWNS and CLONE_NEWPID create real
+     * namespaces; every other namespace type is refused with -EINVAL
      * (Linux's error for unsupported types) instead of faking success.
      * The non-namespace unshare flags (CLONE_FS/FILES/SIGHAND/VM/THREAD/
      * SYSVSEM) are likewise not implemented and refuse honestly. */
@@ -435,19 +462,46 @@ int64_t sys_unshare(int flags) {
         return -EINVAL;
     if (flags & (int)(LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS |
                       LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWUSER |
-                      LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET))
+                      LINUX_CLONE_NEWNET))
         return -EINVAL;
     if (flags & (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
                       LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
                       LINUX_CLONE_SYSVSEM))
         return -EINVAL;
-    if (flags & (int)LINUX_CLONE_NEWNS) {
+    /* Linux refuses CLONE_THREAD|CLONE_NEWPID: a thread's whole reason for
+     * existing is to share the group, and a namespace whose init thread is
+     * not in that group cannot be exited. */
+    if ((flags & (int)(LINUX_CLONE_NEWPID | LINUX_CLONE_THREAD)) ==
+        (int)(LINUX_CLONE_NEWPID | LINUX_CLONE_THREAD))
+        return -EINVAL;
+
+    if (flags & (int)(LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID)) {
         task_t *t = proc_current();
         if (!t)
             return -ESRCH;
         if (!proc_has_cap(t, CAP_SYS_ADMIN) && t->cred.euid != 0)
             return -EPERM;
-        return mntns_unshare(t);
+    }
+    task_t *t = proc_current();
+    mnt_namespace_t *old_mnt = NULL;
+    if (flags & (int)LINUX_CLONE_NEWNS) {
+        old_mnt = mntns_task_get(t);
+        int r = mntns_unshare(t);
+        if (r < 0) {
+            mntns_put(old_mnt);
+            return r;
+        }
+    }
+    if (flags & (int)LINUX_CLONE_NEWPID) {
+        int r = pidns_unshare(t);
+        if (r < 0) {
+            /* Roll the mount namespace back so a multi-flag unshare is not
+             * left half applied. */
+            if (flags & (int)LINUX_CLONE_NEWNS) {
+                mntns_join(t, old_mnt);  /* consumes old_mnt */
+            }
+            return r;
+        }
     }
     return 0;
 }
@@ -476,30 +530,51 @@ int64_t sys_setns(int fd, int nstype) {
         vfs_put_file(vf);
         return -EINVAL;
     }
-    /* Only mount namespaces can be joined; the other namespace types are
+    /* Mount and pid namespaces can be joined; the other namespace types are
      * system-wide singletons and setns is honestly refused. */
-    if (kind != PROCNS_MNT) {
-        vfs_put_file(vf);
-        return -EINVAL;
-    }
-    int owner_uid = -1;
-    mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid);
-    if (!ns) {
+    if (kind != PROCNS_MNT && kind != PROCNS_PID) {
         vfs_put_file(vf);
         return -EINVAL;
     }
     task_t *cur = proc_current();
-    /* Permission model (documented simplification of Linux's
-     * CAP_SYS_ADMIN-in-target-user-ns rule, which needs user namespaces):
-     * the caller must hold CAP_SYS_ADMIN, run as root, or share the
-     * namespace owner's uid recorded when the fd was opened. */
+    int owner_uid = -1;
+    int r;
+    if (kind == PROCNS_MNT) {
+        mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid);
+        if (!ns) {
+            vfs_put_file(vf);
+            return -EINVAL;
+        }
+        /* Permission model (documented simplification of Linux's
+         * CAP_SYS_ADMIN-in-target-user-ns rule, which needs user
+         * namespaces): the caller must hold CAP_SYS_ADMIN, run as root, or
+         * share the namespace owner's uid recorded when the fd was opened. */
+        if (!cur || (!proc_has_cap(cur, CAP_SYS_ADMIN) && cur->cred.euid != 0 &&
+                     cur->cred.euid != owner_uid)) {
+            mntns_put(ns);
+            vfs_put_file(vf);
+            return -EPERM;
+        }
+        r = mntns_join(cur, ns);  /* consumes the reference */
+        vfs_put_file(vf);
+        return r;
+    }
+
+    pid_namespace_t *pns = procfs_ns_file_pidns_get(vf, &owner_uid);
+    if (!pns) {
+        vfs_put_file(vf);
+        return -EINVAL;
+    }
     if (!cur || (!proc_has_cap(cur, CAP_SYS_ADMIN) && cur->cred.euid != 0 &&
                  cur->cred.euid != owner_uid)) {
-        mntns_put(ns);
+        pidns_put(pns);
         vfs_put_file(vf);
         return -EPERM;
     }
-    int r = mntns_join(cur, ns);  /* consumes the reference */
+    /* pidns_join() takes its own reference and releases the caller's, so the
+     * reference from procfs_ns_file_pidns_get() is dropped here. */
+    r = pidns_join(cur, pns);
+    pidns_put(pns);
     vfs_put_file(vf);
     return r;
 }
@@ -708,6 +783,15 @@ int64_t sys_clone3(void *cl_args, size_t size) {
         if (perm < 0)
             return perm;
     }
+    if (args.flags & LINUX_CLONE_NEWPID) {
+        /* Linux: CLONE_THREAD|CLONE_NEWPID is EINVAL -- a thread that does
+         * not lead its group cannot host a namespace's pid 1. */
+        if (args.flags & LINUX_CLONE_THREAD)
+            return -EINVAL;
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
     if (!!args.stack != !!args.stack_size)
         return -EINVAL;
     if (args.flags & LINUX_CLONE_PIDFD) {
@@ -789,6 +873,16 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
     if ((flags & LINUX_CLONE_FS) && (flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
     if (flags & LINUX_CLONE_NEWNS) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
+    if (flags & (int)LINUX_CLONE_NEWPID) {
+        /* Linux: CLONE_THREAD|CLONE_NEWPID is EINVAL -- a thread that does not
+         * lead its group cannot host a namespace's pid 1.  Checked here as
+         * well as in clone3 so both entry points agree. */
+        if (flags & LINUX_CLONE_THREAD)
+            return -EINVAL;
         int perm = linux_clone_newns_perm_check();
         if (perm < 0)
             return perm;
@@ -1096,7 +1190,7 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         return -ESRCH;
     task_t *t = self;
     if (pid != 0) {
-        t = proc_find_get(pid);
+        t = proc_find_get_user(pid);
         if (!t)
             return -ESRCH;
     }
