@@ -24,7 +24,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Resolve lowercase image repo (ghcr requires lowercase)
-        run: echo "IMAGE_REPO=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv" >> "$GITHUB_ENV"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
+          else
+            OWNER="${{ github.repository_owner }}"
+          fi
+          echo "IMAGE_REPO=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@v3
 
