@@ -45,7 +45,8 @@ struct efi_boot_services {
     void *install_protocol_interface;
     void *reinstall_protocol_interface;
     void *uninstall_protocol_interface;
-    void *handle_protocol;
+    efi_status_t (*handle_protocol)(efi_handle_t, const struct efi_guid *,
+                                    void **);
     void *reserved;
     void *register_protocol_notify;
     void *locate_handle;
@@ -148,6 +149,70 @@ static int guid_equal(const struct efi_guid *a, const struct efi_guid *b)
     return 1;
 }
 
+/* EFI_LOADED_IMAGE_PROTOCOL, whose LoadOptions is the standard way firmware
+ * passes a kernel command line to an EFI application.  Every other A20OS board
+ * can be told what to do at boot; this one could not, because the loader threw
+ * LoadOptions away and virtualbox-aarch64 answered with a compiled-in string.
+ * That is what stopped a root= from ever reaching this platform, and a root= is
+ * what a second Alpine disk needs. */
+struct efi_loaded_image {
+    uint32_t revision;
+    void *parent_handle;
+    void *system_table;
+    void *device_handle;
+    void *file_path;
+    void *reserved;
+    uint32_t load_options_size;
+    void *load_options;
+};
+
+static const struct efi_guid loaded_image_protocol_guid = {
+    { 0x5B, 0x1B, 0x31, 0xA1, 0x95, 0x62, 0x11, 0xD2,
+      0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
+};
+
+/* Copy the firmware's UTF-16 LoadOptions into a NUL-terminated ASCII buffer the
+ * kernel can read directly.  Returns 0 when there is nothing to copy, which is
+ * normal: firmware that loads an image without options sets LoadOptionsSize to
+ * 0 rather than failing. */
+#define A20_EFI_CMDLINE_MAX 256
+
+static efi_physical_address_t collect_load_options(
+    struct efi_system_table *st, efi_handle_t image)
+{
+    struct efi_boot_services *bs;
+    struct efi_loaded_image *li = 0;
+
+    if (!st || !image)
+        return 0;
+    bs = st->boot_services;
+    if (!bs ||
+        EFI_ERROR(bs->handle_protocol(image, &loaded_image_protocol_guid,
+                                     (void **)&li)))
+        return 0;
+    if (!li || !li->load_options || li->load_options_size == 0)
+        return 0;
+
+    /* The size is in bytes of UTF-16, and the string is not NUL-terminated. */
+    size_t chars = li->load_options_size / sizeof(efi_char16_t);
+    if (chars >= A20_EFI_CMDLINE_MAX)
+        chars = A20_EFI_CMDLINE_MAX - 1;
+
+    efi_physical_address_t addr = 0;
+    if (EFI_ERROR(bs->allocate_pages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA,
+                                     1, &addr)))
+        return 0;
+
+    const efi_char16_t *in = (const efi_char16_t *)li->load_options;
+    uint8_t *out = (uint8_t *)(uintptr_t)addr;
+    for (size_t i = 0; i < chars; i++) {
+        efi_char16_t c = in[i];
+        out[i] = (c < 0x80) ? (uint8_t)c : '?';
+    }
+    out[chars] = '\0';
+    return addr;
+}
+
 static uintptr_t find_acpi_rsdp(struct efi_system_table *st)
 {
     if (!st || !st->configuration_table)
@@ -177,6 +242,7 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st)
     uint32_t desc_version;
     efi_status_t status;
     uintptr_t acpi_rsdp = find_acpi_rsdp(st);
+    efi_physical_address_t cmdline = collect_load_options(st, image);
 
     print(st, loading);
     status = bs->allocate_pages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA,
@@ -210,8 +276,11 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st)
                 "isb\n\t"
                 /* Preserve the UEFI ACPI pointer for the kernel. */
                 "mov x0, %0\n\t"
+                /* x2 carries the LoadOptions cmdline, or 0 when the firmware
+                 * supplied none.  entry.S parks it in aarch64_boot_cmdline. */
+                "mov x2, %2\n\t"
                 "br %1"
-                :: "r"(acpi_rsdp), "r"((uintptr_t)address)
+                :: "r"(acpi_rsdp), "r"((uintptr_t)address), "r"(cmdline)
                 : "x1", "memory");
             __builtin_unreachable();
         }
