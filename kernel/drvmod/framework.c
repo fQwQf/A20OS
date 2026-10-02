@@ -423,9 +423,11 @@ const struct drv_export drv_export_table[] = {
     /* user copy helpers (virtio-gpu 3D ioctl passthrough) */
     { "copy_from_user",        (void *)copy_from_user },
     { "copy_to_user",          (void *)copy_to_user },
-    /* USB core bridge (xhci / usb-hid / usb-storage) */
+    /* USB core bridge (xhci / usb-hid / usb-hub / usb-storage) */
     { "usb_core_register_hcd",   (void *)usb_core_register_hcd },
     { "usb_core_unregister_hcd", (void *)usb_core_unregister_hcd },
+    { "usb_core_alloc_address",  (void *)usb_core_alloc_address },
+    { "usb_core_free_address",   (void *)usb_core_free_address },
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
     /* in-kernel lwIP bridge (virtio-net) */

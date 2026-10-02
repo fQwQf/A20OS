@@ -1051,6 +1051,47 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-x86_64: PASS; log saved to $log',
     },
+    # A USB hub on the xHCI root bus.  The hub is a genuine class-9 device,
+    # so this proves the class driver binds, reads the hub descriptor with
+    # the class request code it really uses (0xA0, not the standard
+    # GET_DESCRIPTOR that every hub stalls), derives the port bitmap size
+    # from bNbrPorts, arms the status-change interrupt endpoint through the
+    # parent controller and publishes a second bus for the core to scan.
+    #
+    # Scope: QEMU's `usb-hub` has no downstream bus (QEMU 9 dropped it, and
+    # `-device usb-kbd,bus=hub0.0` now fails), so nothing can be hung behind
+    # it, and its port bitmap reports the last two phantom ports as
+    # connected — an off-by-two that the reset then fails to clear.  So the
+    # forbid list below pins down what must NOT fail: no root port of the
+    # xHCI controller, and no hub-internal step.  The two phantom downstream
+    # ports are expected to fail here and say nothing about the driver.
+    'smoke-usb-hub-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/usb-hub-x86_64.log',
+        'stdin': None,
+        'timeout': '25s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-device', 'qemu-xhci,id=xhci', '-device', 'usb-hub,id=hub0,bus=xhci.0', '-device', 'usb-kbd', '-device', 'usb-mouse', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': [
+            '\\[USB\\] device 0409:55aa port=\\d+ speed=\\d+',
+            "\\[USB-HUB\\] hub 0409:55aa: downstream ports=10 status_bytes=3 ss=0",
+            '\\[USB-HUB\\] status-change endpoint 81 armed: mps=\\d+ interval=\\d+',
+            '\\[USB-HUB\\] downstream bus live: 10 ports behind 0409:55aa',
+            '\\[USB-HID\\] keyboard ready',
+            '\\[USB-HID\\] mouse ready',
+        ],
+        'forbid': [
+            '\\[USB\\] port [1-8] enumeration failed',
+            '\\[XHCI\\].*failed',
+            '\\[USB-HUB\\].*failed',
+            '\\[USB-HUB\\] no interrupt IN endpoint',
+            '\\[USB-HUB\\] malformed hub descriptor',
+        ],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-usb-hub-x86_64: PASS; log saved to $log',
+    },
     'smoke-vfs-edge': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

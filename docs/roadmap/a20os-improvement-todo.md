@@ -147,6 +147,22 @@ timekeeping 读路径 seqlock、kswapd 式后台回收（`/proc/a20/oom` 的
 `vfile_bucket` 全部桶合计 2 次争用 / 0 自旋，`proc: 4498 次 / 973 万自旋`
 仍是压倒性热点。
 
+已落地（USB）：class-9 hub 驱动（`kernel/drivers/usb/class/usb_hub.c`）。hub 的
+下行端口被发布成第二条 `usb_hcd_t`，因此 hub 后面的设备走的是和根端口完全相同的
+枚举代码，hub 再套 hub 只是嵌套。hub 不拥有控制器——下行设备的端点上下文在根控制
+器里，所以所有数据通路都转发给父 HCD 并携带父 HCD 发出的 token；只有总线地址归
+hub 所有，因此 hub 后设备的地址来自 core 的全局地址池。`usb_hcd_ops_t::init_slot()`
+随之变成 `alloc_slot()`，返回一个 `usb_slot_t`（控制器 token / USB 地址 / 物理
+端口三者分离），xHCI 的 `Address Device` 也据此能填 slot context 的 Hub 字段。
+
+- [ ] hub 后置设备的真机验证。QEMU 的 `usb-hub` 自 QEMU 9 起不再创建下行 bus，
+      且不实现端口复位，任何设备都放不到它后面；门禁只能证明 hub 被正确识别、
+      描述符被正确解析（hub 描述符必须用类请求 0xA0 取，标准 GET_DESCRIPTOR 会
+      被 stall）、下行总线被正确注册。见
+      [../testing-gates.md](../testing-gates.md) "USB hub"。
+- [ ] USB 拔线路径缺门禁。`usb_disconnect_port()` 已按端口调用 `abort_slot()`，
+      hub 会同时归还总线地址；但"拔出设备后端点与 urb 的释放"没有运行门禁。
+
 - [ ] fd 路径的最终形态仍是 per-process 直接存 `vfile_t*`（消掉 gfd 间接层
       与 `files->lock -> 桶锁` 链）。本次以分桶锁达到同数量级的去串行化，
       全量改造涉及 25+ 文件（epoll/readiness/eventq/file-locks 都拿 gfd 当

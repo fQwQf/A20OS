@@ -304,6 +304,16 @@ smoke-userns:
 	$(PYTHON) tools/smoke.py smoke-userns
 
 # ================================================================
+# USB hub smoke
+# ================================================================
+# The keyboard and mouse hang off a hub nested behind the xHCI root hub, so
+# nothing is reachable by the flat "enumerate the controller's own ports" walk:
+# the hub itself has to be enumerated, its class driver has to expose a second
+# tier of ports, and the devices behind it have to come up through that tier.
+smoke-usb-hub-x86_64:
+	$(PYTHON) tools/smoke.py smoke-usb-hub-x86_64
+
+# ================================================================
 # PCI bridge traversal smoke
 # ================================================================
 # Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,
