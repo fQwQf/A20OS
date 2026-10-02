@@ -628,6 +628,19 @@ static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
     for (int l = cur->guard_level; l > 0; l--) {
         pte_t *table = cur->path[l];
         int idx = arch_pt_vpn(addr, l);
+        /* Allocate the child node BEFORE taking the lock.  frame_alloc() can
+         * reach oom_try_reclaim(), which swaps out pages and force-kills a
+         * process -- and a node MCS lock is a spinlock, so reclaiming under it
+         * was a sleep in a spinlock on the fault path.  The pre-check only
+         * decides whether allocating is worth attempting; the authoritative
+         * state is the re-read of table[idx] under the lock below, and every
+         * path that finds the speculative page unnecessary frees it. */
+        pte_t *next = NULL;
+        if (create && !(table[idx] & PTE_V)) {
+            next = (pte_t *)frame_alloc();
+            if (!next)
+                return NULL;
+        }
         /* The parent's lock covers both the entry read and the install: the
          * metadata write below is a read-modify-write on the parent's
          * nr_present/cls[], so reading the entry outside the lock would race
@@ -638,15 +651,18 @@ static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
         pte_t e = table[idx];
         if (!(e & PTE_V)) {
             if (!create) {
+                if (next)
+                    frame_free(next);
                 if (pm)
                     mcs_unlock(pm);
                 return NULL;
             }
             if (pm && pm->stale) {
+                if (next)
+                    frame_free(next);
                 mcs_unlock(pm);
                 return NULL;
             }
-            pte_t *next = (pte_t *)frame_alloc();
             if (!next) {
                 if (pm)
                     mcs_unlock(pm);
@@ -764,14 +780,32 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                 return 1;
             }
 
+            /* Hoisted for the same reason as cursor_leaf_slot(): frame_alloc()
+             * can reach oom_try_reclaim(), and pm below is a spinlock.  The
+             * unlocked e read at the top of this loop body is only the
+             * heuristic; the re-read under the lock is authoritative. */
+            pte_t *next = NULL;
+            if (!(e & PTE_V)) {
+                next = (pte_t *)frame_alloc();
+                if (!next) {
+                    mm_pt_read_exit(mm);
+                    cur->in_read_side = 0;
+                    return -ENOMEM;
+                }
+            }
+
             pt_meta_t *pm = mm_pt_meta(table);
             if (!pm && mm_pt_node_init(table, l) < 0) {
+                if (next)
+                    frame_free(next);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return -ENOMEM;
             }
             pm = mm_pt_meta(table);
             if (!pm) {
+                if (next)
+                    frame_free(next);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return -ENOMEM;
@@ -788,19 +822,22 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             /* Re-read under the lock: another cursor may have created it. */
             e = table[idx];
             if ((e & PTE_V) && !arch_pte_is_leaf(e)) {
+                if (next)
+                    frame_free(next);
                 mcs_unlock(pm);
                 table = arch_pte_to_ptr(e);
                 cur->path[l - 1] = table;
                 continue;
             }
             if ((e & PTE_V) && arch_pte_is_leaf(e)) {
+                if (next)
+                    frame_free(next);
                 mcs_unlock(pm);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return 1;
             }
 
-            pte_t *next = (pte_t *)frame_alloc();
             if (!next) {
                 mcs_unlock(pm);
                 mm_pt_read_exit(mm);

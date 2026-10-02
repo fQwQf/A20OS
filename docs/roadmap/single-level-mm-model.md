@@ -4962,6 +4962,110 @@ if (base + span >= end)
    存在，1 GiB 稀疏映射仍要 4096 个叶子表（16 MiB 页表），并没有解决稀疏性问题。
    真正要注意的是：**宽事务会经过 §11.3.1 说的 fault-around 那条路**，所以这项改动
    同样依赖已落地的叶锁。
+
+   #### 第二次尝试：仍然超时，而这次有 `[LOCK-STALL]` 证据（更正我自己的错误结论）
+
+   把 `mm_fault_from_status()` 提到 `spin_lock(&mm->lock)` **之前**（快段只持
+   cursor，页分配改用 `pfa_alloc_flags(0, 0)` 不可回收，否则会在 cursor 自旋锁下
+   经 `oom_try_reclaim()` 睡觉），riscv64 SMP=4 编译干净，`smoke-mm-pt-race`
+   **仍然 status 124 超时**。
+
+   但这次日志里有硬证据，而**我上一轮的结论是错的**：
+
+   ```
+   [LOCK-STALL] cpu=3 lock=0xffffffc0bf7a0010 name=mm waiter=11 owner=12
+               owner_ra=0xffffffc0803f626e waiter_ra=0xffffffc080212d4a
+               spins=93653565440 elapsed_ms=235071
+   ```
+
+   上一轮我写的是「无 panic、无 `MCS DEADLOCK`，不像死锁，像数据损坏」。**错在
+   grep 了错的 token**：锁停滞检测器确实存在且一直在打印，事件名是
+   `[LOCK-STALL]` 而不是 `MCS DEADLOCK`。我据一次 grep 失误否掉了「这就是死锁」
+   这一整类假设，然后顺着「数据损坏」去找不变量，方向从一开始就错了。
+
+   解析两个返回地址（`addr2line` 对 `.kernel-build/.../kernel.elf`）：
+
+   | 地址 | 符号 | 含义 |
+   |---|---|---|
+   | `owner_ra=…0803f626e` | **`sys_mmap`** | CPU 12 持有 `mm->lock` 且 235 秒不释放 |
+   | `waiter_ra=…080212d4a` | **`trap_handler`** | CPU 2/3 在缺页路径上等 `mm->lock` |
+
+   所以这是 `mm->lock` 上的**真实锁死**，不是数据损坏：`name=mm`，一个持有者
+   停在 `sys_mmap`，两个等待者停在缺页入口。
+
+   **机制（已按代码结构确认，不再是假设）**：
+
+   ```
+   sys_mmap            sys_mm.c:95      proc_mmap(...)
+     -> mm_mmap        mmap.c:404       spin_lock_irqsave(&mm->lock)   <-- _irqsave
+       -> mm_mmap_locked  mmap.c:88
+         -> mm_pt_provision_anon  mmap.c:195
+           -> mm_addrspace_lock    -> frame_alloc()
+             -> pfa_alloc_flags(0, can_reclaim=1)
+               -> oom_try_reclaim() -> proc_force_exit(victim)
+                 -> 受害者 VMA 拆解 -> 拿 mm->lock
+   ```
+
+   即：**`mm->lock` 是关中断的自旋锁，却跨越了一次可睡眠的回收**——睡眠发生在
+   IRQ 关闭的自旋锁里。若受害者是自己的 mm，就是持 `mm->lock` 自杀。这与观测
+   完全吻合：持有者 PC 落在 `sys_mmap`，等待者 PC 落在 `trap_handler`，锁名 `mm`。
+
+   我先前两次 grep 都没找到这条链，是因为我在 `mm_mmap_locked`（88-195）**内部**
+   找 `spin_lock(&mm->lock)`，而锁是由**调用者** `mm_mmap`（404）持有的；
+   `mmap.c:190` 的注释本身就写着「It runs under mm->lock, so the order
+   mm->lock -> page-table lock」。看注释比 grep 快。
+
+   **为什么以前不炸，摘锁后才炸**：这是既存缺陷，但要两个条件同时成立。
+   `mm_pt_provision_anon` 只在预标记开启时走到那条分配（所以只有带
+   `a20.anonprov` 的 `smoke-mm-pt-race` 受影响，`smoke-mm-stress` 不受影响）。
+   而在摘掉快段的 `mm->lock` **之前**，缺页线程会先阻塞在 `mm->lock` 上，根本
+   进不了 `mm_addrspace_lock`，于是与 provisioning 串行化、窗口关闭。摘掉之后
+   缺页不再取 `mm->lock`，就能与一个正在 `mm->lock` 下回收的 provisioning
+   并发进入同一条分配路径——**快段摘锁本身没有制造这个 bug，但它是把窗口打开
+   的那个改动。**
+
+   **下一轮该先做的（不是再改快段）**：任何 `mm->lock` 持有者都不应走可回收
+   分配。快段已经改成 `pfa_alloc_flags(0, 0)`，缺的是 provisioning 那一侧——
+   要么让 `mm_pt_provision_anon` 用不可回收分配并在耗尽时回退，要么把 PT 页
+   分配提到 `mm_mmap` 取 `mm->lock` **之前**。
+
+   **一个让方案唯一化的关键事实（读注释读出来的）**：`mm_pt_provision_anon()`
+   在 `mmap.c:195` 是以 `(void)` 调用的，返回值被丢弃，而且它上面 188-189 行的
+   注释写明「Provisioning is best effort: a range too large to provision eagerly
+   just keeps the VMA-based fault path, which remains correct」。
+
+   也就是说 **provisioning 分配失败是一个已经被支持的结局**，不是新行为。所以把
+   PT 页分配改成不可回收（`pfa_alloc_flags(0, 0)`）在 provisioning 这一侧是
+   **零风险**的：耗尽时预标记不发生，缺页照旧走 VMA 路径。
+
+   这把选项从「多种」收敛到一个：把 `mm_addrspace_lock()` 与
+   `cursor_leaf_slot()` 里那两处仍可回收的 PT 页分配改成不可回收。剩下的语义
+   影响只有一处需要盯——其它 cursor 使用者（`mm_cursor_fault` /
+   `mm_cursor_map`）在内存压力下会从「先回收再成功」变成「返回 -ENOMEM」。
+   这是把回收移出自旋锁的必然代价，且 -ENOMEM 会沿现有的缺页失败/OOM 路径走，
+   不影响正确性；但它**必须实测**，不能推断——`smoke-mm-pt-race` 恰好带
+   `a20.anonprov` 且压力足够大，是唯一会真正走到耗尽分支的用例。
+
+   注意这同时补上了快段的一个遗留洞：快段的**数据页**已经是不可回收分配，但它
+   经 `mm_cursor_map` → `cursor_leaf_slot` 分配的 **PT 页**仍然是可回收的，
+   也就是在 cursor 自旋锁下回收。之前只修了一半。
+
+   **这解释了这三轮为什么都白改**：第 1 轮我怪 cursor 不变量、第 2 轮我怪 ABBA
+   锁序、第 3 轮（本次）我怪 unmap 侧节点锁 + 睡眠分配——三次都改了真的东西
+   （都留下了、都验证过），但都不是这个死锁的成因。共同点是我从没打开过
+   `[LOCK-STALL]`，而它一直就在日志里。
+
+   **推论（下一轮该先做的）**：`mm->lock` 的任何持有者都不应走可回收分配。
+   快段已经这么改了（`pfa_alloc_flags(0, 0)`，失败就 decline 交给 VMA 路径），
+   但 `mm_pt_provision_anon()` 那一侧还没有——而它才是这次日志里持有者的路径。
+   先把这一侧也改成不可回收，再重试摘锁。
+
+   **尚未验证**：预标记快段在 `smoke-mm-pt-race` 里是否真的非空跑过。本轮
+   guest 日志中**没有任何 perf 计数行**（`mm_fault_from_status` 与 `perf` 都 grep
+   不到），所以不能拿"门禁绿"当作快段被执行过的证据——这正是本项目已经栽过一次
+   的坑（`smoke-mm-stress` 不传 `a20.anonprov` 导致假绿）。重试前必须先让
+   `/proc/a20/perf` 的 `mm_fault_from_status` 在该 smoke 里可见且非零。
+
 3. **drain 的触发频率**：`mm_pt_retire_drain()` 只在 retire 时立即调用，若
    `pt_readers > 0` 就返回，退役列表在持续多核缺页下可能堆积。当前每次 retire 都会
    尝试，最终会在某个 `pt_readers == 0` 的时刻排空，所以不是硬泄漏，但需要实测

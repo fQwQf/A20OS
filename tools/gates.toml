@@ -987,6 +987,31 @@ pattern = "mm_pt_node_lock(parent)"
 min_count = 2
 files = ["kernel/mm/mm.c"]
 
+# cursor_leaf_slot() and mm_addrspace_lock() must both allocate the child PT
+# node before taking the node MCS lock, because frame_alloc() can reach
+# oom_try_reclaim() -- swap-out and a forced process kill -- and a MCS lock is a
+# spinlock.  mm_addrspace_lock() is the one that matters most: it is the entry
+# point every cursor operation goes through, so this is on every fault.
+# gates.py has no "must not appear between these two markers" form, only
+# fixed/min_count, so this pins that both hoisted allocations are still there
+# rather than proving the absence structurally.  A stronger check needs the gate
+# language extended.
+#
+# The 12 leading spaces are load-bearing: without them this also matches
+# "pte_t *next = (pte_t *)frame_alloc();" and min_count = 2 can no longer tell the
+# two sites apart, which is how a negative test deleted one of them and still
+# went green.  min_count = 2 so removing either site fails.
+[[gate.assertion]]
+fixed = true
+pattern = "            next = (pte_t *)frame_alloc();"
+min_count = 2
+files = ["kernel/mm/pt.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "Allocate the child node BEFORE taking the lock"
+files = ["kernel/mm/pt.c"]
+
 # cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it
 # takes the leaf table's own MCS lock and parks it for cursor_leaf_unlock().
 [[gate.assertion]]
