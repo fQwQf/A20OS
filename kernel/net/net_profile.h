@@ -188,4 +188,18 @@
 #define CONFIG_NET_LANES 1
 #endif
 
+/*
+ * Diagnostic amplifier for the multi-lane boot fault.  When non-zero, spins for
+ * this many microseconds inside the accept drain, between dequeuing a staged pcb
+ * and taking g_lwip_lock.  That gap is the only point on the accept path that
+ * spans both lock domains, so widening it should turn the intermittent 4-lane
+ * fault into a deterministic one and reveal which side corrupts the list.
+ *
+ * A measuring tool, not a fix: leave it at 0 in any real build and remove it
+ * once the fault is reproducible.  See docs/net/net-lanes.md.
+ */
+#ifndef CONFIG_NET_RACE_DELAY_US
+#define CONFIG_NET_RACE_DELAY_US 0
+#endif
+
 #endif /* _NET_PROFILE_H */
