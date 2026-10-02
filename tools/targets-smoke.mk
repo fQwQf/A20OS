@@ -171,6 +171,9 @@ smoke-mm-fork-exec-race:
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 
+smoke-lfs:
+	$(PYTHON) tools/smoke.py smoke-lfs
+
 smoke-vfs-stress-smp2:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp2
 

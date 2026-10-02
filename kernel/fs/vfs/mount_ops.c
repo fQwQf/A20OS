@@ -16,6 +16,7 @@
 #include "fs/locks.h"
 #include "fs/fat32.h"
 #include "fs/ext4.h"
+#include "fs/lfs_vfs.h"
 #include "fs/ntfs.h"
 #include "fs/isofs.h"
 #include "fs/ramfs.h"
@@ -308,6 +309,36 @@ int vfs_mount_bc_flags(const char *path, const char *fstype, bcache_t *bc,
         return 0;
     }
 
+    if (strcmp(fstype, "littlefs") == 0) {
+        if (!bc) { kdebug("[VFS] No bcache for littlefs mount\n"); return -ENODEV; }
+
+        mount_t *mnt = vfs_mount_alloc();
+        if (!mnt) return -ENOMEM;
+        vnode_t *root = littlefs_mount(bc);
+        if (!root) {
+            vfs_mount_remove(mnt);
+            return -EIO;
+        }
+
+        strncpy(mnt->path, path, MAX_PATH_LEN - 1);
+        mnt->path[MAX_PATH_LEN - 1] = '\0';
+        mnt->type  = FS_TYPE_LITTLEFS;
+        strncpy(mnt->dev, "/dev/vda", sizeof(mnt->dev) - 1);
+        strncpy(mnt->fstype, "littlefs", sizeof(mnt->fstype) - 1);
+        strncpy(mnt->opts, (flags & VFS_MOUNT_RDONLY) ? "ro,relatime" :
+                "rw,relatime", sizeof(mnt->opts) - 1);
+        mnt->flags = flags;
+        mnt->root  = root;
+        mnt->fs_data = bc;
+
+        root->mnt = mnt;
+        vnode_get(root);  /* mount holds a persistent reference */
+
+        kdebug("[VFS] Mounted littlefs at %s\n", path);
+        vfs_dcache_invalidate_all();
+        return 0;
+    }
+
     if (strcmp(fstype, "isofs") == 0 || strcmp(fstype, "iso9660") == 0) {
         if (!bc) { kdebug("[VFS] No bcache for isofs mount\n"); return -ENODEV; }
 
@@ -372,6 +403,8 @@ void vfs_mount_fs_teardown(mount_t *mnt) {
     } else if (mnt->type == FS_TYPE_UXFS) {
         extern void uxfs_unmount(struct vnode *root);
         uxfs_unmount(root);
+    } else if (mnt->type == FS_TYPE_LITTLEFS) {
+        littlefs_unmount(root);
     }
 }
 
