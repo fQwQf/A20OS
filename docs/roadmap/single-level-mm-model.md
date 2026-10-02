@@ -134,8 +134,53 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 | P5 ✅ | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
 | P6 | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
 | P7 | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
-| P8 | 双向一致性检查器（P1 审计器覆盖反方向）；`MM_LOCK_MODEL` → `MM_AS_MODEL`；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
+| P8 | 双向一致性检查器（P1 审计器覆盖反方向）；**`MM_LOCK_MODEL` 拆分**（见下注，**不是**改名）；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
 | P9 | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
+
+> **P8 指令更正（2026-10-02）**：本行原写 `MM_LOCK_MODEL` → `MM_AS_MODEL`
+> **改名**。照做会**破坏文档语义**，已核对代码后撤销：
+>
+> * `vm.h` 现在**同时**带两个名字且含义不同——`MM_AS_MODEL`（107 行，单级模型，
+>   即目标）与 `MM_LOCK_MODEL`（156 行，过渡期两层契约）；
+> * 109 行原文写着 `MM_LOCK_MODEL`「still governs every mutator that has not yet
+>   been converted」——它是**活的**契约，不是待清理的旧名；
+> * 改名会把目标模型与过渡期契约**合并成同一个名字**，读者再也无法区分
+>   「已迁移」与「仍受 `mm->lock` 约束」；
+> * `check-mm-lock-model` 与 `check-final-definition` 两条门禁都**断言**
+>   `MM_LOCK_MODEL` 字面量存在于 `vm.h`，改名会静默地废掉这两条门禁的语义。
+>
+> P5 落地后的真实边界（已核对）：`fault.c` 仍有 5 处 `spin_lock(&mm->lock)`，
+> **状态快段是唯一不再取它的 PTE 写路径**；COW / file / VMA 路径的 install 仍取。
+> 所以 `MM_LOCK_MODEL` 156 行那条「demand fault installs 必须持 `mm->lock`」现在
+> **只对非状态路径成立**，需要的是加一条例外说明，而不是把整节改名或删除。
+>
+> P8 剩下的实际工作因此是：①为状态快段在 `MM_LOCK_MODEL` 里补一条明确例外；
+> ②补双向一致性检查器；③同提交更新门禁与 `docs/testing-gates.md`。
+
+> **①已完成**：`vm.h` 的 `MM_LOCK_MODEL` 已补上状态快段的明确例外（并写明它依赖的是
+> `mm_pt_node_lock` 的按地址互斥，而不是"没有 `mm->lock`"）。`MM_LOCK_MODEL` 字面量
+> 保留——`check-mm-lock-model` 与 `check-final-definition` 两条门禁都断言它存在于该文件。
+>
+> **②的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:1517）只走**一个
+> 方向**：自 PTE 树下降，逐条比对"元数据是否与该 PTE 一致"（class / prot / cow）。反向
+> ——"元数据声称的每一页，PTE 是否同意"——**不存在**。
+>
+> 这个缺口在本代码库里不是理论问题：`audit_table()` **只下降有效的 PTE 条目**，所以
+> 父项已被清掉的 PT 页**根本不会被访问**。而那正是 `pt_unmap_leaf()` +
+> `mm_pt_retire_table()` 每天在做的事（清 `parent[idx]`、标 `stale`、延迟释放）。于是
+> "一个已脱树的 PT 页，其元数据仍声称若干页 present"这一类缺陷，对现有审计器**完全
+> 不可见**——它只会报告 0。
+>
+> 落地它需要注意（留给下一轮，不要当成一行改动）：
+>
+> * 新增遍历方向必须走**元数据侧**（存活的 `FRAME_F_PT` 帧），而不是再走一次 PTE 树，
+>   否则方向不会变；
+> * **退役列表上的帧必须豁免**：`mm_pt_retire_table()` 刚标 `stale` 而尚未 free 的帧，
+>   其元数据与 PTE 不一致是**设计如此**，不是缺陷；
+> * 需要新的 report 字段（现有 `mm_pt_audit_report_t` 只有单向的
+>   `present/absent/prot/cow` mismatch），并接进 `MM-ASM` 关机审计行；
+> * 门禁要跟着改：`MM-ASM` 的正则目前逐字段断言全 0，新增字段必须同样被断言，否则
+>   新检查又是一个"绿但没在测"的口子——这正是本项目已经栽过两次的坑。
 
 > **编号更正（2026-10-02）**：本表的 P 编号是权威的。会话里曾用"Phase 3 / Phase 4"
 > 这套临时说法，其中 **"Phase 3" 实为 P5**，而 **"Phase 4（上层统一状态预标记）"
