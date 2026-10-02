@@ -408,25 +408,31 @@ smoke-smp-lock-contention:
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
 	proc_split=$$(awk '/^proc: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
-	lwip_total=$$(awk '/^lwip: /{b++; if(b==2){print $$3; exit}}' "$$log"); \
+	lwip_total=$$(awk '/^lwip: /{b++; if(b==2){t=$$3}} END{print t+0}' "$$log"); \
+	lwip_stress_spins=$$(awk '/^lwip: /{b++; if(b==1){bs=$$3} if(b==2){d=$$3-bs}} END{print d+0}' "$$log"); \
 	proc_max=$$(awk '/^proc: /{b++; if(b==2){v=$$4; sub(/^max=/,"",v); print v+0; exit}}' "$$log"); \
-	site_acq=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)a+=$$3} END{print a+0}' "$$log"); \
-	site_spin=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2)s+=$$4} END{print s+0}' "$$log"); \
-	site_max=$$(awk '/^proc: /{b++; next} /\[lwip\]/{if(b>=2){v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0}} END{print m+0}' "$$log"); \
+	site_acq=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2)a+=$$3} END{print a+0}' "$$log"); \
+	site_spin=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2)s+=$$4} END{print s+0}' "$$log"); \
+	site_max=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2){v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0}} END{print m+0}' "$$log"); \
 	tlb_enters=$$(awk '/^mm_context_enters:/{e=$$2} END{print e+0}' "$$log"); \
 	tlb_waits=$$(awk '/^mm_tlb_converge_waits:/{w=$$2} END{print w+0}' "$$log"); \
 	tlb_flushes=$$(awk '/^mm_tlb_converge_flushes:/{f=$$2} END{print f+0}' "$$log"); \
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
 	   grep -qE '^lwip: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
 	   grep -qE '^proc: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
-	   { [ "$$site_acq" -eq 0 ] || [ "$$site_spin" -gt "$$site_acq" ]; } && \
+	   { [ "$$lwip_total" -eq 0 ] || [ "$$site_spin" -ge $$((lwip_total * 9 / 10)) ]; } && \
 	   [ "$$tlb_enters" -gt 0 ] && \
 	   ! grep -qi 'panic' "$$log"; then \
-		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, spin column carries real spin data: $$site_spin spins over $$site_acq acquires, lock total $$lwip_total); log saved to $$log"; \
+		echo "smoke-smp-lock-contention: PASS (4-core run; stress ok, counters render, attribution accounts for $$site_spin of $$lwip_total lock-level spins across $$site_acq sampled acquires); log saved to $$log"; \
+		echo "lwip stress-window: $$lwip_stress_spins spins over the run. Recorded, NOT asserted:" \
+		     "arch_cpu_relax() iterations have no fixed conversion to wall time under TCG, and repeated" \
+		     "4-core runs of this workload have spanned 0 to ~920000, so any magnitude threshold here" \
+		     "would be flaky. The structural reductions are asserted in the kernel build instead (see the" \
+		     "net_socket_t and TCP_MSG size _Static_asserts); this number is here so drift stays visible."; \
 		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
 		echo "worst single acquire (cumulative): proc_lock $$proc_max spins, lwip site $$site_max spins"; \
-		if [ "$$site_acq" -eq 0 ]; then \
-			echo "note: no lwip callsite attribution in the stress window, so the per-site invariant was NOT exercised (it is satisfied vacuously when site_acq is 0)"; \
+		if [ "$$lwip_total" -eq 0 ]; then \
+			echo "note: no lwip contention in this window, so the attribution invariant was satisfied vacuously rather than exercised"; \
 		fi; \
 		echo "proc_lock windows -- $$proc_split"; \
 		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \

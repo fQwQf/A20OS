@@ -635,6 +635,25 @@ static int virtio_net_class_rx_irq_driven(struct device *dev) {
     return net && net->irq_registered;
 }
 
+/* Published to the stack as a weak symbol rather than through net_dev_ops_t.
+ * These four counters were already maintained here but were unreachable from
+ * anywhere, so a drop could not be attributed to the device or to lwIP. */
+void virtio_net_dev_stats(struct device *dev, net_dev_stats_t *out) {
+    if (!out)
+        return;
+    out->rx_packets = out->rx_drops = 0;
+    out->tx_packets = out->tx_drops = 0;
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    if (!net)
+        return;
+    uint64_t flags = spin_lock_irqsave(&net->lock);
+    out->rx_packets = net->rx_packets;
+    out->rx_drops   = net->rx_drops;
+    out->tx_packets = net->tx_packets;
+    out->tx_drops   = net->tx_drops;
+    spin_unlock_irqrestore(&net->lock, flags);
+}
+
 static net_dev_ops_t virtio_net_class_ops = {
     .send = virtio_net_class_send,
     .recv = virtio_net_class_recv,

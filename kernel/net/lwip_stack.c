@@ -11,6 +11,14 @@
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
+/* Optional driver facility, resolved weakly for the same reason
+ * core/progress.c resolves virtio_net_poll_rx_all_bounded weakly: virtio-net
+ * may be absent or supplied as a loadable .a20drv, and the stack must build and
+ * run either way.  Checked for non-NULL before use, so an absent driver leaves
+ * the counters out rather than reporting zeros that look like a quiet link. */
+extern void virtio_net_dev_stats(struct device *dev,
+                                 net_dev_stats_t *out) __attribute__((weak));
+
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/timeouts.h"
@@ -699,6 +707,23 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
                  st ? st->tx_bytes : 0ULL, st ? st->tx_packets : 0ULL,
                  st ? st->tx_errors : 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL);
         a20_lwip_append(buf, bufsz, &off, row);
+
+        /* Driver-level counts, when the driver publishes them.  A separate line
+         * rather than extra columns because these count what the device moved
+         * while the block above counts what lwIP was handed, and the two
+         * diverging is how a loss between the ring and the protocol stack gets
+         * localized.  The symbol is weak: it is absent, not zero, when the
+         * driver is not loaded. */
+        if (virtio_net_dev_stats && st && st->dev) {
+            net_dev_stats_t ds;
+            memset(&ds, 0, sizeof(ds));
+            virtio_net_dev_stats(st->dev, &ds);
+            snprintf(row, sizeof(row),
+                     "%s-drv: rx %llu pkts %llu drops, tx %llu pkts %llu drops\n",
+                     name, ds.rx_packets, ds.rx_drops,
+                     ds.tx_packets, ds.tx_drops);
+            a20_lwip_append(buf, bufsz, &off, row);
+        }
     }
     a20_lwip_unlock(flags);
     return (int)off;

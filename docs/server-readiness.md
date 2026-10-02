@@ -13,6 +13,12 @@ A20OS 已经是一个认真的内核，但**当前形态是「QEMU 上的桌面/
 被单一全局锁串行化、容器隔离的前置件（PID/userns/pivot_root）缺失、
 真机 PCIe 可用性受硬编码 QEMU 假设限制。
 
+网络这一项最近有实质进展：收包路径的**内存模型**已经被认定为比全局锁更根本的
+瓶颈并修掉了（见第二节第 0 条），此前把归因指向读路径是错的。当前剩下的最大
+单项是 `g_net_lock` 分片，其次才是 `g_lwip_lock` 本身。需要强调的是：所有性能
+数字都来自 QEMU TCG，`lwip` 自旋计数在该环境下噪声极大（同一负载四次运行跨越
+0 到 920024），因此本文件不再以自旋数量作为任何结论的依据。
+
 在下面的阻塞项收敛之前，把数据库或不受信任的工作负载放上去是不安全的。
 
 ## 一、存储持久性
@@ -47,6 +53,46 @@ AHCI（`FLUSH CACHE EXT`）。
 验证：`make smoke-netfilter`。
 
 ### 结构性限制（按严重度）
+
+0. **收包路径的内存模型本身就使服务器不可行，且它才是锁争用的主因。**
+   这一条排在最前，因为它比全局锁更根本，而此前的排序把它完全漏掉了。
+   当时 `net_bh_event_t` 与 `net_msg_t` 各自内嵌 `data[NET_MAX_PAYLOAD]`
+   （65535 字节），于是：
+
+   - `sizeof(net_socket_t)` 约 **1.05 MiB**，其中 16 项 ring 占 1.0 MiB。
+     socket obj_cache 留活 128 个对象，最坏**滞留约 134 MiB**。
+   - `sizeof(net_msg_t)` 约 65.8 KiB，**超过 `SLAB_MAX_OBJ`**，于是
+     `mm/slab.c` 对每条消息走 buddy 并按页取整：一条 100 字节的 datagram
+     实际消耗 17 页 = 68 KiB。`NET_MAX_QUEUE` 是 128，单 socket 排队载荷
+     上限约 8.5 MiB。
+   - 每个 1460 字节的 TCP 段付出约 **136 KiB memset + 三次拷贝**，其中绝大部分
+     在 `g_lwip_lock` 内完成：`bh_ring_prepare()` 先 memset 整个 65535 字节事件
+     （`socket_inet.c`），再由 callback 拷入段内容；bottom-half 侧还有一次
+     冗余的整对象 memset（`obj_cache_alloc_zero` 已经清零）。
+
+   **这解释了下面第 1 条里那个 `max=472365` 的来源，也解释了为什么削掉读路径
+   轮询之后自旋量根本没降**（1.15M -> 1.28M）：持锁时长从来不在读路径上，而在
+   这些 memset 里。此前把归因指向读路径是错的。
+
+   已修（`feat/net-lanes`）：两级暂存改为小内联缓冲 + 溢出慢路径。实测尺寸：
+
+   | 结构 | 修前 | 修后 | 降幅 |
+   |------|------|------|------|
+   | `net_bh_event_t` | 65752 B | 1808 B | 36x |
+   | `net_msg_t` | ~65850 B | 1368 B | 48x |
+   | `net_socket_t` | ~1053000 B | 30032 B | 35x |
+
+   `net_msg_t` 落到 `mm/slab.c` 最大 slab class（2048）以内，不再走 buddy 取整；
+   obj_cache 留活上限从约 134 MiB 降到约 3.8 MiB；锁内 memset 从 65535 B 降到
+   约 200 B。datagram 超过内联尺寸时改为在 ring 里持有一个 pbuf 引用而不是拷贝，
+   引用由 ring 槽位绕回时在 `g_lwip_lock` 下释放——因为 memp 没有任何内部加锁，
+   消费者所在的上下文不能安全 `pbuf_free()`。
+
+   这些尺寸现在由 `_Static_assert` 和 `NET_PROFILE_SOCKET_MAX_BYTES` 钉住，
+   而不是靠文档约定。
+
+   **仍未解决**：接收缓冲本身。`PBUF_POOL_SIZE` 256 x 1536 = 384 KiB 仍是天花板，
+   见第 3 条。
 
 1. **整个 TCP/IP 数据面被一把全局自旋锁串行化**。
    `g_lwip_lock` 保护全部 lwIP 核心状态，每次 raw lwIP 调用都必须持有
@@ -150,6 +196,32 @@ AHCI（`FLUSH CACHE EXT`）。
    真正剩下的是要么把每包在锁内的工作量降下来，要么分片这把锁，两者都远大于
    本次改动，需要各自的门禁。
 
+   **本轮（`feat/net-lanes`）做的是前者，以及把 poll 分段。** 三处改动：
+   收包载荷两级内联化（第 0 条）、`a20_lwip_poll_locked()` 拆成 timers 段与
+   带包数预算的收包段、三条 socket 发送路径每迭代只取一次锁（TCP 此前用
+   `a20_lwip_poll()` 开头，等于每迭代取放两次并多跑一轮 whole-stack pass）。
+
+   **关于这些改动的效果，必须把话说准，不能重复本文件上面犯过的同类错误。**
+   结构调整本身是确定的、可在编译期断言的：每 socket 1.05 MiB → 30 KiB，
+   锁内每包 memset 65535 B → 200 B，发送循环每迭代 2 次全局获取 → 1 次，
+   定时器中断 2 次全局获取 → 1 次 + 有界排空。
+
+   但**争用计数本身在 QEMU TCG 下噪声极大，不能作为结论**。同一
+   `NR_CPUS=4` + `net_stress_test` 负载的 4 次独立运行，stress 窗口的 `lwip`
+   自旋数分别落在 0 / 52776 / 189334 / 920024。`arch_cpu_relax()` 的迭代次数与
+   墙上时间没有固定换算（本文件上面已经因为 `rdcycle` 在 TCG 下不可信而撤回过一次
+   时长结论），所以任何以 spin 数量为阈值的门禁都是 flaky 的。
+
+   因此：`smoke-smp-lock-contention` 现在**记录**该数值而不做幅度断言，门槛只保留
+   确定性的部分——per-callsite 自旋合计与锁级总数吻合，以及压力测试本身通过。
+   曾经短暂加入过一个 400000 的 spin 上限，已在同一次运行里撤掉（它会在
+   920024 那轮误报）。
+
+   上面第一次改动后曾写下"833397 -> 528039 -> 94232，累计 -88%"这样的表述。
+   **按本条提供的方差，该表述不成立，予以撤回**：那些是不同运行的单次读数，区间
+   互相重叠，不能构成趋势。可以确定的是结构性改动本身，以及 `lwip` 在 acquire
+   次数上从 27 降到个位数。
+
    顺带修掉一个真实的记账漏洞：`lock_counters.c` 过去会丢弃 `ra == 0` 的采样
    （如中断上下文无可恢复返回地址），导致 per-site spin 之和与锁级
    `contended_spins` 对不上；现在按 `?` 计入，门禁不变量恢复成立。
@@ -172,12 +244,46 @@ AHCI（`FLUSH CACHE EXT`）。
    `smoke-lwip-memp` 断言跑完网络套件后 `err` 仍为 0。
    但 loopback 下 `max` 峰值极低，**这份数据不足以论证当前池容量合理**：
    要定容量需要真实高 RTT/大流量负载。
-4. 无 SACK、无 ECN、无 SYN cookie、无 `MSG_ZEROCOPY`。
-5. 多队列/RSS/RPS/XPS/XDP 全部缺失；virtio-net 只有一对硬编码队列
+4. **本轮顺手查出并已修的实现缺陷**（都不是性能问题，但此前无人记录）：
+
+   - `a20_lwip_register_netifs()` 在注册循环里逐个调 `netif_set_default()`，
+     所以多网卡时**最后枚举到的设备覆盖前面的**，而不是第一个。已改为仅在
+     `netif_default` 为空时设置。
+   - `virtio_net_poll_all()` 全树无调用者，是死代码；而
+     `docs/drivers/guide/lock-order.md` 仍把它列为活的入口点。函数与文档引用
+     一起删除。
+   - `lwip_stack.c` 里"loopback 后注册所以硬件在 netif_list 前面"的注释是
+     **反的**：lwIP 的 `netif_add` 是前插，loopback 实际在链表头。功能上无影响
+     （轮询遍历整表、IRQ 路径按 `st->idx` 匹配），但注释会误导后续修改。
+   - `MEMP_MEM_MALLOC` 此前留空，被 `opt.h` 派生为 0，于是所有池都是 `.bss`
+     静态数组而 `MEM_SIZE` 完全没用上。同时这也让 `/proc/a20/netmem` 的 `size`
+     列变成**整列静默零值**（`memp_init_pool()` 在该模式下是空桩，唯一写
+     `avail` 的代码在 `#if !MEMP_MEM_MALLOC` 里）。现在该列报 `desc->size`，
+     并注明 per-pool 容量在 heap 模式下不存在，真实上界是 `MEM_SIZE`。
+   - `MEMP_NUM_SYS_TIMEOUT`（32）小于 `MEMP_NUM_TCP_PCB`（64），而三个 TCP
+     keepalive 宏全开，每个 established PCB 占一个 `sys_timeo`。池耗尽后
+     `tcp_pcb_alloc()` 返回 NULL，表现为 `accept()` 失败。现在是
+     `_Static_assert`。
+
+5. **门禁 `smoke-lwip-memp` 与 `smoke-network-suite` 在当前 HEAD 上不可通过，
+   与网络改动无关。** `alg_test` 在没有内核 crypto provider 时主动退出 78
+   (ABSENT)，而 `network_suite` 刻意把 absent 判为 FAIL（其注释写明目的是让
+   "被注释掉的内核实现"无法混进绿色门禁）。由于 `socket_alg.c` 明确不提供
+   provider，`NETWORK_SUITE: PASS` 因此不可达。这是有意的 fail-closed 设计，
+   不是回归——**但需要有人决定**：AF_ALG 的缺失是文档化的设计意图而非被注释掉的
+   实现，按 `network_suite` 自己的分类定义更接近 SKIP 而非 ABSENT。改之前，
+   任何依赖这两个门禁的网络验证都必须绕过它（例如直接断言 `/proc/a20/netmem`
+   的输出）。
+
+6. 无 SACK、无 ECN、无 SYN cookie、无 `MSG_ZEROCOPY`。
+7. 多队列/RSS/RPS/XPS/XDP 全部缺失；virtio-net 只有一对硬编码队列
    （RX=0/TX=1），无 MSI-X，无任何卸载（CSUM/TSO/GSO/GRO）。
-6. `SO_BINDTODEVICE`、`IP_TRANSPARENT`、`TCP_CORK`、`TCP_USER_TIMEOUT`
-   等返回 `-EOPNOTSUPP`（本轮修复：此前它们返回成功并被静默丢弃）。
-7. accept 队列固定 128 且溢出静默丢弃；无 socket 内存压力控制，也无
+   深度 32 来自 `virtio_blk.h` 的 `VIRTIO_QUEUE_SIZE`；注意 virtio-net 用的
+   是那里的 `ring[32]` 结构而**不是** `drivers/dual/virtq.h`（那个只有 8 深
+   且 `virtq_init` 拒绝 `num > 8`），谁"顺手统一"过去会把队列深度静默降到 8。
+8. `SO_BINDTODEVICE`、`IP_TRANSPARENT`、`TCP_CORK`、`TCP_USER_TIMEOUT`
+   等返回 `-EOPNOTSUPP`（此前它们返回成功并被静默丢弃）。
+9. accept 队列固定 128 且溢出静默丢弃；无 socket 内存压力控制，也无
    `/proc/sys/net/*`。
 
 ## 三、隔离与多租户
@@ -441,7 +547,9 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| P0 | lwIP 全局锁分片 | spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。持锁方一侧的时间仍缺（需 riscv64 rdcycle 封装），分锁方案待该数据再定 |
+| P0 | 收包内存模型 | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
+| P0 | `g_net_lock` 分片 | **当前收益最大的未做项**。它同样是一把覆盖 1024 个 socket 的全局锁，52 处获取。改成 per-socket 锁 + 引用计数保护的 registry 是纯局部改动，不触碰 lwIP 核心 |
+| P0 | lwIP 全局锁分片 | 持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；分片方案不应再等这个数。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历，这需要先给 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 做按端口哈希分桶 |
 | P0 | PID ns + userns + `pivot_root` | 多租户前置件；`pivot_root` 需先把 root/cwd 从路径字符串改为真实 mount 引用 |
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
