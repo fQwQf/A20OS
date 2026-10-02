@@ -179,18 +179,37 @@ PCI transport 当前使用轮询；在 ACPI interrupt controller 解析完成前
 
 没有目标设备时，还要验证驱动不会误绑定。
 
-## 历史上验证过的开发路径
+## 在 QEMU AAVMF 上验证 loader
 
-loader 可以独立在 QEMU AAVMF 上测试。在 QEMU RAM 地址构建 QEMU board：
+loader 不依赖真实板子即可在 QEMU AAVMF 上验证。关键在于 loader 的装载地址必须等于该 board 链接时的 `PHYS_BASE`：qemu-virt-aarch64 链在 `0x40080000`，而 AAVMF 的 RAM 从 `0x40000000` 起。若 loader 按 VirtualBox 的 `0x08080000` 去 `AllocatePages`，AAVMF 根本没有那块内存，直接 `UEFI load failed`。这个地址现在由 `VBOX_AARCH64_LOAD_ADDRESS` 从 board 的 `ldscript.ld` 读出，不再需要手工指定：
 
 ```bash
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 kernel-only
-make ARCH=aarch64 BOARD=qemu-virt-aarch64 BRINGUP=1 \
-    VBOX_AARCH64_LOAD_ADDRESS=0x40080000ULL \
-    .kernel-build/aarch64-qemu-virt-aarch64-both-bringup/a20os-vbox-aarch64.img
+make ARCH=aarch64 BOARD=qemu-virt-aarch64 ABI=both BRINGUP=0 kernel-only \
+    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/BOOTAA64.EFI
+sh tools/mk_uefi_fat_image.sh \
+    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/BOOTAA64.EFI /tmp/a64.img \
+    .kernel-build/aarch64-qemu-virt-aarch64-both-dev/fat32.img BOOTAA64.EFI
+qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 1024 -nographic \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/AAVMF/AAVMF_CODE.fd \
+    -drive if=pflash,format=raw,file=AAVMF_VARS.fd \
+    -drive file=/tmp/a64.img,format=raw,if=none,id=hd0 \
+    -device virtio-blk-device,bus=virtio-mmio-bus.0,drive=hd0 \
+    -serial mon:stdio
 ```
 
-该测试在 AAVMF 下已达到 `System ready (bringup, no userspace)`。
+实测（不是推断）到达用户态，根文件系统已挂载：
+
+```text
+[BUS] virtio-mmio: found 1 devices (base=0x800a000000 irq_base=16)
+[VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
+[INIT] Block device -> /bin (fat32)
+[INIT] System ready
+Welcome to A20OS!
+```
+
+注意 `bus=virtio-mmio-bus.0` 不能省。省略它时设备不会落在 mmio 总线上，内核的 `virtio-mmio: found 0 devices` 会让人误以为是内核问题。
+
+这条路径验证的是 loader 与内核入口，与 VirtualBox ARM 无关；VirtualBox ARM 上是否真的能启动仍未验证，本机没有 `VBoxManage`。
 
 ## 新增 VirtualBox ARM64 设备
 
