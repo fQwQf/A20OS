@@ -1,6 +1,26 @@
-# 下一阶段生态纵深评估（2026-09 记录）
+# 下一阶段生态纵深评估（2026-09 记录，2026-10 修订网络部分）
 
 多数为多日级工程。标注「已落地」的部分给出实现事实与验证入口，其余给出成本与路径。
+
+## 0. 网络：入站 TCP 与可测量性（2026-10 修订）
+
+本节晚于原始记录，插在最前面，因为它改变了下面所有网络相关条目的前提。
+
+- **入站 TCP 此前完全不通，本轮已修**。`net_listen()` 丢弃已绑定 PCB，`tcp_listen()`
+  全树从未被调用，`/proc/net/status` 的 `tcp_listen=0` 是常态，入站 SYN 一律被回 RST。
+  现在按 `a20.tcpmode` 分两档：`lwip` 档把绑定 PCB 转成真正的 LISTEN pcb 并装
+  `tcp_accept` 回调；**默认仍是 `fast` 档、行为不变**。端到端实测（SLIRP hostfwd
+  指向 guest telnetd）从"连接被对方重置"变为拿到可用 shell。
+- **测量面此前不足以评价任何网络改动**。`/proc/a20/perf` 有约 75 个计数器却零个网络
+  相关，唯一信号是 `lock_contention` 里一个没有分母的锁计数。现有 11 个网络计数器
+  （收发包/字节、锁获取、poll 次数与被门控跳过次数、bottom-half 次数与事件数，以及
+  `net_bh_overflow`/`net_alloc_fail` 两个正确性计数器）与 accept 路径计数；`perf` 与
+  `lock_contention` 均新增 `reset` 写入口，使门禁可以只拥有自己的测量窗口。
+- **一条被实测推翻的既有结论**：`net_stress_test` 从来不经过 TCP 路径（本地 connect
+  走 socket 层短路直接入队到 peer 队列），16 MiB / 4 核下 pbuf、bottom-half 与驱动
+  计数器全部恰好为 0。凡是把 lwIP 锁竞争归因于它的结论测的是 socket 队列。评价数据面
+  必须用走真实 netif 的负载。
+- 详细事实见 [../server-readiness.md](../server-readiness.md) 第二节。
 
 ## 1. netfilter / 防火墙（第一切片已落地）
 

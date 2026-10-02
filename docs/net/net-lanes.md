@@ -213,6 +213,35 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:185`）这个代际标志，�
 替代遍历"在上游被认可。顺带一提：`kernel/net/netfilter.c` 的文件头曾**声称**有同款
 机制而代码里没有，已在另一提交中补上。
 
+## 缓冲改造的前提：callback 里不能分配
+
+`net_bh_ring` 目前把 `net_bh_event_t` **按值内嵌**，所以每 socket 的 staging 成本是
+`O(NET_BH_RING_SIZE × INLINE_PAYLOAD)`，DEFAULT/SERVER 档约 28 KiB/socket。把 `events[]`
+换成指针、按需从 slab 分配，是降低这个成本的自然做法——**但它与本仓库自己的锁契约
+直接冲突**。
+
+`bh_ring_prepare()` 由 lwIP callback 调用，运行在 `g_lwip_lock` 下；而
+[network-lock-contract.md](../net/network-lock-contract.md) 明确规定"持有 `g_lwip_lock`
+时不得调用 `kmalloc()`、`kfree()`、`net_msg_alloc()` 或任何 slab allocator 函数"。
+按需分配事件正是要在 callback 里调 slab。
+
+三条出路，各有代价，**都需要先做决定**：
+
+1. **放开契约**：允许 callback 走一条无锁的 per-CPU magazine 快路径。`obj_cache_t`
+   不能用——它 miss 路径会 `spin_unlock` 后调普通 `kmalloc()`（`objcache.c:40-41`），
+   不是硬 IRQ 安全。需要新写一个，并为其单独设门禁。
+2. **预分配池**：init 时按 lane/CPU 预填 `net_bh_event_t`（范式见 `mm/pt.c` 的
+   `pt_mcs_pool_t`，注释明确"锁路径禁用抢占所以绝不能调分配器"）。代价是这批内存变成
+   与 socket 数量无关的静态占用——只是把同一个问题从 socket 挪到池。
+3. **在 bottom-half 分配**：producer 不分配，改为投递一个"有数据"的标记，由
+   bottom-half（`g_net_lock` 下，契约允许分配）建事件。但 `bh_ring_prepare` 此刻就要
+   一个 `net_bh_event_t*` 交给 lwIP 填 payload，所以这条路要求把 payload 暂存改到
+   别处（pbuf spill 已经是这个形状），等于重做接收路径。
+
+在三者之一落地之前，per-socket staging 成本只能靠 profile 压小，不能靠结构消除。
+`sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES` 的 `_Static_assert` 已经覆盖
+ring size 与 inline payload，所以再加聚合断言是同义反复。
+
 ## 阶段 D：收包引导
 
 单 NIC ring 的**排空**天然串行（一把锁、一个 ring），但**协议栈处理**并不，而后者才是
