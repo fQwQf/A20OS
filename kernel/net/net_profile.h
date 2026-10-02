@@ -157,6 +157,16 @@
 #endif
 
 /*
+ * How many packets the timer-interrupt safety-net drain may process in one
+ * g_lwip_lock acquisition.  The device IRQ is the primary receive path; this
+ * drain only exists so RX cannot stall if an interrupt is ever lost, so it is
+ * kept short enough that it cannot dominate the critical section it runs in.
+ */
+#ifndef CONFIG_NET_RX_IRQ_BUDGET
+#define CONFIG_NET_RX_IRQ_BUDGET 4
+#endif
+
+/*
  * Lane count.  One lane per CPU is the target shape: each lane owns a receive
  * queue, its own pbuf magazine and its own timeout wheel, and a socket's PCB
  * stays on one lane for its whole lifetime.  Until the lane plumbing lands
