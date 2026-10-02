@@ -291,6 +291,9 @@ smoke-timer-edge:
 smoke-mntns:
 	$(PYTHON) tools/smoke.py smoke-mntns
 
+smoke-mtcorrupt:
+	$(PYTHON) tools/smoke.py smoke-mtcorrupt
+
 # ================================================================
 # PCI bridge traversal smoke
 # ================================================================
