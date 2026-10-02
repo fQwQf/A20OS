@@ -124,8 +124,7 @@ static int elf_validate_user_driver(int fd, const Elf64_Ehdr *eh)
             vfs_pread(fd, (char *)&desc, sizeof(desc), sh->sh_offset) !=
                 (int)sizeof(desc))
             return -ENOEXEC;
-        return desc.magic == A20_DRIVER_DESCRIPTOR_MAGIC &&
-               desc.version == A20_DRIVER_DESCRIPTOR_VERSION &&
+        return a20_driver_descriptor_sane(&desc) &&
                desc.placement == A20_DRIVER_PLACEMENT_USER_SERVICE &&
                desc.type >= A20_DRIVER_TYPE_RTC &&
                desc.type <= A20_DRIVER_TYPE_SECURITY && desc.name[0] ?

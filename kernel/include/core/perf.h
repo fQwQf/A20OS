@@ -89,6 +89,36 @@ typedef enum a20_perf_counter {
     A20_PERF_IDLE_WAIT_ATTEMPTS,
     A20_PERF_IDLE_WAIT_ENTRIES,
     A20_PERF_IDLE_WAIT_WAKE_RETURNS,
+    /*
+     * Network data-path counters.  The whole TCP/IP data plane runs under one
+     * global spinlock, so the two numbers that decide whether a server build can
+     * use more than one core are how often that lock is taken and how much work
+     * happens per acquisition.  LOCK_ACQUIRES over POLL_CALLS is the traffic
+     * ratio; POLL_SKIPPED proves the RX-pending gate is actually short-circuiting
+     * readers instead of letting them poll to discover there is nothing to do.
+     * BH_OVERFLOW and ALLOC_FAIL are correctness signals, not performance: a
+     * non-zero value means the receive path dropped data it had accepted.
+     */
+    A20_PERF_NET_RX_PACKETS,
+    A20_PERF_NET_RX_BYTES,
+    A20_PERF_NET_TX_PACKETS,
+    A20_PERF_NET_TX_BYTES,
+    A20_PERF_NET_LOCK_ACQUIRES,
+    A20_PERF_NET_POLL_CALLS,
+    A20_PERF_NET_POLL_SKIPPED,
+    A20_PERF_NET_BH_RUNS,
+    A20_PERF_NET_BH_EVENTS,
+    A20_PERF_NET_BH_OVERFLOW,
+    A20_PERF_NET_ALLOC_FAIL,
+    /* Accept-path accounting for real lwIP listening sockets.  STAGED counts
+     * completed handshakes the callback parked, QUEUED counts the ones the
+     * bottom half turned into a child socket, and DROP counts a handshake the
+     * stack destroyed rather than delivered -- a non-zero value is a refused
+     * connection, so the two must be read together to tell a healthy listener
+     * from one that is dropping arrivals. */
+    A20_PERF_NET_ACCEPT_STAGED,
+    A20_PERF_NET_ACCEPT_QUEUED,
+    A20_PERF_NET_ACCEPT_DROP,
     A20_PERF_COUNTER_COUNT,
 } a20_perf_counter_t;
 
@@ -125,5 +155,6 @@ static inline void a20_perf_count(a20_perf_counter_t counter)
 }
 
 size_t a20_perf_format(char *buf, size_t bufsz);
+void a20_perf_reset(void);
 
 #endif /* _CORE_PERF_H */

@@ -128,14 +128,17 @@ void
 pbuf_free_ooseq(void)
 {
   struct tcp_pcb *pcb;
+  int lane;
   SYS_ARCH_SET(pbuf_free_ooseq_pending, 0);
 
-  for (pcb = tcp_active_pcbs; NULL != pcb; pcb = pcb->next) {
-    if (pcb->ooseq != NULL) {
-      /** Free the ooseq pbufs of one PCB only */
-      LWIP_DEBUGF(PBUF_DEBUG | LWIP_DBG_TRACE, ("pbuf_free_ooseq: freeing out-of-sequence pbufs\n"));
-      tcp_free_ooseq(pcb);
-      return;
+  for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
+    for (pcb = tcp_active_pcbs[lane]; NULL != pcb; pcb = pcb->next) {
+      if (pcb->ooseq != NULL) {
+        /** Free the ooseq pbufs of one PCB only */
+        LWIP_DEBUGF(PBUF_DEBUG | LWIP_DBG_TRACE, ("pbuf_free_ooseq: freeing out-of-sequence pbufs\n"));
+        tcp_free_ooseq(pcb);
+        return;
+      }
     }
   }
 }

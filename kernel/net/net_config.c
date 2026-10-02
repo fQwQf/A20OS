@@ -123,6 +123,21 @@ void a20_net_config_init(void)
             g_a20_net_config.hostname[sizeof(g_a20_net_config.hostname) - 1] = '\0';
         }
 
+        /*
+         * Selects the TCP mode before any socket exists.  This has to be a
+         * command-line key rather than only a /proc/net/config write, because
+         * the first listener a server opens is usually opened by userspace at
+         * boot -- a write from a shell cannot run before that, and until the
+         * listener holds a real LISTEN pcb an inbound connection is answered
+         * with RST.
+         */
+        if (extract_key_value(p, tok_end, "a20.tcpmode", val, sizeof(val))) {
+            if (strcmp(val, "lwip") == 0)
+                g_a20_tcp_path = A20_TCP_PATH_LWIP;
+            else
+                g_a20_tcp_path = A20_TCP_PATH_FAST;
+        }
+
         p = tok_end;
     }
 
@@ -207,7 +222,34 @@ int a20_net_config_format(char *buf, size_t bufsz)
                  g_a20_net_config.hostname[0] ? g_a20_net_config.hostname : "(none)");
     if (n > 0) off += (size_t)n;
 
+    n = snprintf(buf + off, bufsz - off, "tcpmode=%s\n",
+                 g_a20_tcp_path == A20_TCP_PATH_LWIP ? "lwip" : "fast");
+    if (n > 0) off += (size_t)n;
+
     if (off >= bufsz)
         off = bufsz - 1;
     return (int)off;
+}
+
+a20_tcp_path_t g_a20_tcp_path = A20_TCP_PATH_FAST;
+
+int a20_net_config_write(const char *buf, size_t count)
+{
+    char tmp[32];
+    size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+    memcpy(tmp, buf, n);
+    tmp[n] = '\0';
+    while (n > 0 && (tmp[n - 1] == '\n' || tmp[n - 1] == '\r' ||
+                     tmp[n - 1] == ' ' || tmp[n - 1] == '\t'))
+        tmp[--n] = '\0';
+
+    if (strcmp(tmp, "tcpmode fast") == 0) {
+        g_a20_tcp_path = A20_TCP_PATH_FAST;
+        return 0;
+    }
+    if (strcmp(tmp, "tcpmode lwip") == 0) {
+        g_a20_tcp_path = A20_TCP_PATH_LWIP;
+        return 0;
+    }
+    return -EINVAL;
 }

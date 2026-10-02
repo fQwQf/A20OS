@@ -10,6 +10,7 @@
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/consts.h"
+#include "core/cpu.h"
 #include "core/lock.h"
 #include "core/timer.h"
 #include "drivers/net/virtio_net.h"
@@ -24,6 +25,9 @@ net_socket_t *net_socket_alloc(void) {
     if (s) {
         s->ipv6_checksum_offset = -1;
         s->reg_idx = -1;
+        /* Provisional only: the authoritative lane comes from the bound address
+         * and port, which net_inet_bind_pcb() recomputes. */
+        s->lane = net_lane_of_cpu(cpu_current_id());
         wait_queue_init(&s->accept_waitq);
         wait_queue_init(&s->read_waitq);
         wait_queue_init(&s->write_waitq);
@@ -375,6 +379,11 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
     memcpy(s->local, bind_addr, bind_len);
     s->local_len = bind_len;
     s->bound = 1;
+    /* Authoritative lane: derived from the address and port the socket is now
+     * bound to, which is the pair an inbound packet reproduces.  Set inside the
+     * same critical section that publishes s->local so no reader can see one
+     * without the other. */
+    s->lane = net_socket_lane_of_addr(bind_addr, bind_len, s->lane);
     spin_unlock_irqrestore(&g_net_lock, flags);
     return net_inet_bind_pcb(s, bind_addr, addrlen);
 }
@@ -640,7 +649,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                     size_t avail = head->len - head->off;
                     size_t n = avail < len ? avail : len;
                     if (n)
-                        memcpy(buf, head->data + head->off, n);
+                        memcpy(buf, net_msg_payload(head) + head->off, n);
                     r = (int)n;
                 } else {
                     r = net_dequeue_msg_locked_meta(s, buf, len, addr,
@@ -752,7 +761,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
             size_t avail = head->len - head->off;
             size_t n = avail < len ? avail : len;
             if (n)
-                memcpy(buf, head->data + head->off, n);
+                memcpy(buf, net_msg_payload(head) + head->off, n);
             if (addr && addrlen && *addrlen > 0) {
                 size_t alen = head->addrlen < *addrlen
                                   ? head->addrlen : *addrlen;
