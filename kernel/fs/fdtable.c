@@ -3,6 +3,7 @@
 #include "fs/file.h"
 #include "fs/devfs.h"
 #include "fs/vfs/mntns.h"
+#include "ipc/envelope.h"
 #include "proc/proc_internal.h"
 #include "core/consts.h"
 #include "core/panic.h"
@@ -133,6 +134,7 @@ static void fdtable_files_put(files_struct_t *files)
             to_close[close_count++] = files->fd[fd];
             files->fd[fd] = NULL;
             files->cloexec[fd] = 0;
+            env_kind_unregister(fd);
         }
         files->open_mask[word] = 0;
     }
@@ -396,6 +398,9 @@ void fdtable_close_on_exec(task_t *task)
                 files->fd[fd] = NULL;
                 files->cloexec[fd] = 0;
                 fdtable_note_free(files, fd);
+                /* Slot is free for reuse; a class entry left behind would be
+                 * read by env_kind_of() for whatever lands here next. */
+                env_kind_unregister(fd);
             }
         }
     }
@@ -544,6 +549,11 @@ int fdtable_close(task_t *task, int fd)
     files->cloexec[fd] = 0;
     fdtable_note_free(files, fd);
     spin_unlock_irqrestore(&files->lock, flags);
+    /* Drop the envelope class registry entry for this slot before it can be
+     * handed to a new descriptor.  env_kind_of() keys on the fd NUMBER, so a
+     * byte left behind would classify the next occupant of this slot as the
+     * descriptor that just left. */
+    env_kind_unregister(fd);
     wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     ktrace_fd("[FD] close: pid=%d lfd=%d\n", task->pid, fd);
     vfs_release_process_file_locks(vf, task->pid);
@@ -635,6 +645,9 @@ int fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags)
     spin_unlock_irqrestore(&files->lock, lock_flags);
     wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
     if (old_new_vf) {
+        /* dup2 onto an occupied slot: the displaced descriptor's class entry
+         * is stale the moment the slot changes hands. */
+        env_kind_unregister(newfd);
         vfs_release_process_file_locks(old_new_vf, task->pid);
         fdtable_slot_put(old_new_vf);
     }
