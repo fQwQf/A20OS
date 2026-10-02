@@ -8,6 +8,7 @@
 #include "core/refcount.h"
 #include "core/sync.h"
 #include "proc/park.h"
+#include "proc/pidns.h"
 #include <signal_abi.h>
 
 struct signal_state;
@@ -379,6 +380,21 @@ typedef struct task_t {
      * per-task teardown in fdtable_close_all(). */
     struct mnt_namespace *mnt_ns;
     proc_ns_context_t ns_ctx;
+
+    /* PID namespace membership (kernel/proc/pidns.c).  pid_ns is the
+     * namespace this task is a member of -- its deepest one -- and is what
+     * its own ids are reported in; pid_ns_for_children is the namespace a
+     * fork() places the next child in.  The two differ exactly between
+     * unshare(CLONE_NEWPID) and the next fork.  Each non-NULL pointer owns
+     * one pid_namespace reference; NULL means the initial namespace, which is
+     * statically pinned. */
+    struct pid_namespace *pid_ns;
+    struct pid_namespace *pid_ns_for_children;
+    /* One id per namespace LEVEL the task is visible in.  Level 0 is the
+     * initial namespace and is task_t::pid itself; entries 1..pid_ns_level
+     * are the container-local ids. */
+    int          ns_pid[PID_MAX_LEVELS];
+    int          pid_ns_level;
 
     /* Kernel keyring subsystem (kernel/ipc/keyring.c).  Owning reference to a
      * keyring object, shared with children at fork and released at teardown. */

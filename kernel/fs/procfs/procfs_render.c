@@ -4,6 +4,7 @@
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "fs/vfs/mntns.h"
+#include "proc/pidns.h"
 #include "core/bootargs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
@@ -1091,11 +1092,31 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_PID:
-        /* Singleton namespaces: static identifiers (init-namespace inos). */
+    case PF_PID_NS_PID: {
+        /* Real pid namespaces: report the target task's own namespace.  A
+         * task that is not visible from the reader's namespace renders as
+         * the initial id, which is what the reader would have seen anyway
+         * rather than leaking the container's identity. */
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "pid:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_PID);
+                 (unsigned long long)(t ? pidns_task_ino(t) : PIDNS_INIT_INO));
+        proc_put(t);
         break;
+    }
+    case PF_PID_NS_PID_FOR_CHILDREN: {
+        /* The namespace this task's NEXT child joins, which is what
+         * unshare(CLONE_NEWPID) changes and /proc/<pid>/ns/pid does not. */
+        task_t *t = proc_find_get(pid);
+        uint64_t ino = PIDNS_INIT_INO;
+        if (t) {
+            pid_namespace_t *ns = (pid_namespace_t *)__atomic_load_n(
+                &t->pid_ns_for_children, __ATOMIC_ACQUIRE);
+            ino = ns ? ns->ino : PIDNS_INIT_INO;
+        }
+        snprintf(buf, bufsz, "pid:[%llu]\n", (unsigned long long)ino);
+        proc_put(t);
+        break;
+    }
     case PF_PID_NS_UTS:
         snprintf(buf, bufsz, "uts:[%llu]\n",
                  (unsigned long long)MNTNS_INIT_INO_UTS);

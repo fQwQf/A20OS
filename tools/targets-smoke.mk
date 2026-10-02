@@ -294,6 +294,9 @@ smoke-mntns:
 smoke-mtcorrupt:
 	$(PYTHON) tools/smoke.py smoke-mtcorrupt
 
+smoke-pidns:
+	$(PYTHON) tools/smoke.py smoke-pidns
+
 # ================================================================
 # PCI bridge traversal smoke
 # ================================================================

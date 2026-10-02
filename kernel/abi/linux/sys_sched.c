@@ -10,7 +10,7 @@
 static task_t *sched_task_for_pid(int pid)
 {
     if (pid == 0) return proc_get(proc_current());
-    return proc_find_get(pid);
+    return proc_find_get_user(pid);
 }
 
 static size_t sched_cpu_mask_bytes(void)

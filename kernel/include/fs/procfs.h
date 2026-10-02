@@ -16,6 +16,8 @@ vnode_t *procfs_mount(void);
 #define PROCNS_CGROUP 7
 
 int  procfs_ns_file_kind(const vfile_t *vf);
+struct pid_namespace *procfs_ns_file_pidns_get(const vfile_t *vf,
+                                              int *out_owner_uid);
 struct mnt_namespace *procfs_ns_file_mntns_get(const vfile_t *vf,
                                                int *out_owner_uid);
 
