@@ -80,7 +80,7 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 - 绝不跨 scheduler wait 持有 `net->lock`。
 - 持有 `net->lock` 时绝不调用 lwIP 函数（顺序是 lwIP 外层、net 内层）。
-- `virtio_net_poll_all()` 和 `virtio_net_class_poll()` 只获取 `net->lock`。
+- `virtio_net_class_poll()` 只获取 `net->lock`。它内部调用的 `virtio_net_complete_tx_locked()` 是唯一在 `net->lock` 下清 `tx_busy[]` 的地方，由 TX 完成中断和该 poll hook 两条路径触达。
 
 ### UART
 

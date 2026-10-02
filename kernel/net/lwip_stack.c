@@ -253,7 +253,12 @@ static void a20_lwip_register_netifs(void) {
             printf("[LWIP] failed to add %s\n", dev->name ? dev->name : "net");
             continue;
         }
-        netif_set_default(n);
+        /* First one registered becomes the default, as on Linux.  Calling
+         * this unconditionally per iteration let the last device enumerated
+         * win, so a multi-NIC host silently routed through whichever happened
+         * to probe last. */
+        if (!netif_default)
+            netif_set_default(n);
         netif_set_up(n);
         a20_lwip_sync_link_state(n);
 #if LWIP_IPV6
@@ -308,9 +313,12 @@ void a20_lwip_init(void) {
     lock_counters_enable_callsite(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_netifs();
-    /* Add loopback after physical links.  lwIP prepends netifs to its list;
-     * keeping loopback last here leaves hardware first for polling code and
-     * for diagnostics which inspect netif_list. */
+    /* Add loopback after physical links.  lwIP prepends to netif_list, so
+     * loopback ends up at the *head* -- the previous comment here claimed the
+     * opposite and that hardware was left first.  Nothing depends on the
+     * order either way: the poll loops walk the entire list and the IRQ path
+     * matches on st->idx, so this is about keeping the hardware netifs
+     * adjacent in diagnostics output, not about polling precedence. */
     a20_lwip_register_loopif();
     g_lwip_ready = 1;
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
@@ -336,23 +344,39 @@ void a20_lwip_unlock(uint64_t flags)
     spin_unlock_irqrestore(&g_lwip_lock, flags);
 }
 
-static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
+/*
+ * Drain one netif's receive ring.  `budget` caps how many packets this call
+ * processes and 0 means no cap, which is what the IRQ top-half and the
+ * scheduler path want: both are the primary reason the ring gets drained.
+ *
+ * Returns 0 when the budget ran out with packets still queued.  A caller that
+ * stops early must leave the RX pending flag set, because the interrupt that
+ * would have drained the remainder has already been consumed.
+ */
+static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
 {
     if (!n || !n->state)
-        return;
+        return 1;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
     a20_lwip_sync_link_state(n);
 
     if (!netif_is_link_up(n)) {
         netif_poll(n);
-        return;
+        return 1;
     }
 
+    int drained = 1;
+    unsigned done = 0;
     for (;;) {
+        if (budget && done >= budget) {
+            drained = 0;
+            break;
+        }
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
+        done++;
         /* recv() was handed sizeof(rx_frame), so this only fires if a driver
          * over-reports; without it an over-report reads past rx_frame below. */
         if ((size_t)len > sizeof(st->rx_frame))
@@ -393,6 +417,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         }
     }
     netif_poll(n);
+    return drained;
 }
 
 /*
@@ -418,30 +443,55 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
             continue;
         a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
         if (st->idx == net_idx) {
-            a20_lwip_process_netif_rx_tx_locked(n);
+            /* Unbounded: this interrupt is the primary reason the ring needs
+             * draining, so deferring here would only move the work. */
+            a20_lwip_process_netif_rx_tx_locked(n, 0);
             break;
         }
     }
 }
 
-void a20_lwip_poll_locked(void) {
+/*
+ * Timer advance only: no device is touched and no packet is processed, so the
+ * critical section stays short enough for the timer-interrupt path that calls
+ * it.  kernel_progress_timer_tick() runs on every CPU 0 tick, and it used to
+ * reach the receive drain from there, which put up to a ring's worth of
+ * protocol processing inside an interrupt with interrupts disabled.
+ */
+void a20_lwip_poll_timers_locked(void)
+{
     if (!g_lwip_ready)
         return;
     sys_check_timeouts();
     a20_net_config_sync_from_lwip();
+}
+
+/* Device completions plus the receive drain.  `budget` of 0 means no cap. */
+void a20_lwip_poll_rx_locked(unsigned budget)
+{
+    if (!g_lwip_ready)
+        return;
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
         if (st->dev && st->ops && st->ops->poll)
             st->ops->poll(st->dev);
     }
+    int complete = 1;
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state) {
-            a20_lwip_process_netif_rx_tx_locked(n);
+            if (!a20_lwip_process_netif_rx_tx_locked(n, budget))
+                complete = 0;
         } else {
             netif_poll(n);
         }
     }
-    a20_lwip_clear_rx_pending();
+    if (complete)
+        a20_lwip_clear_rx_pending();
+}
+
+void a20_lwip_poll_locked(void) {
+    a20_lwip_poll_timers_locked();
+    a20_lwip_poll_rx_locked(0);
 }
 
 void a20_lwip_poll(void) {
