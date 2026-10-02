@@ -2,7 +2,7 @@
 
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
-最后核实：与 `feat/net-lanes` 分支的代码一致（收包载荷拆分 + poll 分段）。
+最后核实：与 `feat/net-lanes` 分支的代码一致（收包载荷拆分 + poll 分段 + loopif 排空 + listener 分档）。
 
 ## 范围与目标
 
@@ -59,6 +59,22 @@ lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需
 提前停止排空的调用方会拿到返回值 0，此时**必须不清 RX pending 标志**：能排掉剩余包的断已经被消费掉了，标志若被清掉，剩余包会一直等到下一次中断，而那次中断可能不会来。
 
 `kernel_progress_timer_tick()` 只取 timers 段，随后用 `CONFIG_NET_RX_IRQ_BUDGET` 的包数上界取一次收包段。它在 CPU 0 的每次定时器中断上运行；该排空只是"设备中断万一丢失时不让 RX 卡死"的兜底（设备 IRQ 才是主路径），不足以正当化在中断上下文里跑一整轮协议栈处理。
+
+### loopif 必须由 timers 段排空
+
+`netif_poll()` 是 `netif->loop_first` 的**唯一**排空点，而 `netif_loop_output()` 只入队就返回。
+所以 timers 段除了推进超时，还必须遍历 netif 链表、对 `loop_first != NULL` 的 netif 调
+`netif_poll()`。
+
+**这不是优化，是正确性。** 回环流量不产生设备 RX，因此 RX-pending 提示永远不会为它置位；
+而 `kernel_progress_poll()` 与读者路径都是"按需"到达 `a20_lwip_poll_*` 的，park 在
+`connect()` 里的任务两个选择都不做。曾经因为排空只挂在按需路径上，握手 SYN 永远躺在
+`loop_first` 里直到 connect 超时。定时器中断是唯一无条件运行的进展驱动，所以它必须承担
+排空。
+
+同一条推理也约束 RX-pending 提示：它必须把 `loop_first` 一起算进"有活要干"，否则读者会
+跳过这次排空。提示里的 `loop_first` 读不需要 `g_lwip_lock`——它是对一个由
+`SYS_ARCH_PROTECT` 保护的指针做空判；假阳性只多一次锁获取，假阴性是挂死。
 
 ## 收包载荷的内存所有权
 
@@ -145,6 +161,19 @@ lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 - 递归获取 `g_lwip_lock`。
 
 `kernel/net/socket_inet.c` 使用 Deferred Bottom-Half 设计：lwIP callback 只把事件写入 per-socket 有界 `bh_ring` 并调用 `net_inet_bh_schedule()`，真正的 `net_msg_t` 分配与 payload 搬运在 bottom-half（`bh_ring` 消费路径）中完成，不持有 `g_lwip_lock`。
+
+**为什么禁分配，而不只是"规定如此"**：lwIP 的 `memp` 没有任何内部锁，它只在
+`g_lwip_lock` 这一个外部串行点下才安全（`net-lanes.md` 记录了同一个约束）。而
+`mm/objcache.c` 不能拿来当逃生口——它的 miss 路径会先 `spin_unlock` 再调普通
+`kmalloc()`（`objcache.c:40-41`），所以它对硬 IRQ 上下文不安全；只有命中 free list
+的那条路径是无锁的，而 miss 必然发生。
+
+这条约束的**直接后果**是：`net_bh_ring` 只能把 `net_bh_event_t` 按值内嵌，无法改成
+"按需从 slab 分配"。因此每 socket 的收包 staging 成本是
+`O(NET_BH_RING_SIZE × INLINE_PAYLOAD)`（DEFAULT/SERVER 档约 28 KiB/socket），
+只能靠 profile 压小，无法靠结构消除。`sizeof(net_socket_t) <=
+NET_PROFILE_SOCKET_MAX_BYTES` 的 `_Static_assert` 已经覆盖 ring size 与 inline
+payload 两个因子。改造出路与代价见 [net-lanes.md](net-lanes.md) 的"缓冲改造的前提"。
 
 ### 允许的 callback 工作
 
