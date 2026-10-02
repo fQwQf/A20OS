@@ -1091,7 +1091,13 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
 VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
 VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
-VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
+# The aarch64 UEFI loader places the flat image at a fixed address, so that
+# address has to be the one the board's linker script actually linked it at.
+# Restating it here let the two drift apart silently: the loader demanded
+# 0x08080000 (VirtualBox, RAM at 0x08000000) while the qemu-virt board links at
+# 0x40080000, so an AAVMF boot failed in allocate_pages before any kernel code
+# ran.  Read it out of the script instead, and keep it overridable.
+VBOX_AARCH64_LOAD_ADDRESS ?= $(shell sed -n 's/^PROVIDE(PHYS_BASE = \(0x[0-9a-fA-F]*\));.*/\1/p' $(LDSCRIPT) | head -1)
 VBOX_X86_64_EFI = $(BUILD_DIR)/BOOTX64.EFI
 VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 
