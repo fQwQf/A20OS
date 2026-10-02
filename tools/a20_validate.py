@@ -229,6 +229,17 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
                 e.append("package.kind grub-disk: needs target.boot_media and "
                          "target.media_device, since the image is meant to be "
                          "written to a disk")
+        case "uefi-disk":
+            if inst.arch != "x86_64":
+                e.append("package.kind uefi-disk: requires arch = \"x86_64\"")
+            if p.variant is not None:
+                e.append("package.variant: not used for uefi-disk")
+            # Same reasoning as grub-disk: the artifact is a disk to write, so a
+            # manifest that names no device has nothing to do with it.
+            if not inst.target.boot_media or not inst.target.media_device:
+                e.append("package.kind uefi-disk: needs target.boot_media and "
+                         "target.media_device, since the image is meant to be "
+                         "written to a disk")
         case "uefi-image":
             if inst.board != "virtualbox-aarch64":
                 e.append("package.kind uefi-image: requires board = \"virtualbox-aarch64\"")
