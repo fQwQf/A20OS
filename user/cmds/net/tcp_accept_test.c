@@ -27,7 +27,10 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#define TEST_PORT 12346
+/* Overridable so a multi-lane run can place connections on different ports.
+ * A lane is derived from (local_ip, local_port), so a single fixed port always
+ * lands in one lane and cannot witness that per-lane timers all still fire. */
+#define TEST_PORT_DEFAULT 12346
 /* Long enough that a loaded 4-core guest does not trip it, short enough that a
  * wedged handshake fails the gate in tens of seconds rather than minutes. */
 #define IO_TIMEOUT_SEC 5
@@ -42,6 +45,8 @@ static int arm_timeout(int fd)
     return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
+static int test_port;
+
 static int server(void)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -55,7 +60,7 @@ static int server(void)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(TEST_PORT);
+    addr.sin_port = htons(test_port);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd);
@@ -86,7 +91,7 @@ static int client(void)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = htons(TEST_PORT);
+    addr.sin_port = htons(test_port);
 
     for (int waited = 0; waited < CONNECT_BUDGET_MS; waited += CONNECT_RETRY_US) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -105,8 +110,14 @@ static int client(void)
     return -1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    test_port = (argc > 1) ? atoi(argv[1]) : TEST_PORT_DEFAULT;
+    if (test_port <= 0 || test_port > 65535) {
+        printf("TCP_ACCEPT_TEST: FAIL (bad port %d)\n", test_port);
+        return 1;
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         printf("TCP_ACCEPT_TEST: FAIL (fork)\n");
@@ -129,9 +140,11 @@ int main(void)
     }
 
     if (r == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        printf("TCP_ACCEPT_TEST: PASS (handshake completed, accept returned a fd)\n");
+        printf("TCP_ACCEPT_TEST: PASS port=%d (handshake completed, accept returned a fd)\n",
+               test_port);
         return 0;
     }
-    printf("TCP_ACCEPT_TEST: FAIL (client=%d server_status=%d)\n", r, status);
+    printf("TCP_ACCEPT_TEST: FAIL port=%d (client=%d server_status=%d)\n",
+           test_port, r, status);
     return 1;
 }
