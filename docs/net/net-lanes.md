@@ -107,21 +107,47 @@ IPv6 取地址低 32 位。熵足够分散连接，而关键在于它只由线�
 常见路径（具体地址的 listener、已建立连接）仍然只探一个桶；只有通配 listener 多探
 一次。代价可接受。
 
-### 网卡地址变化会改写已归桶 PCB 的 lane
+### 网卡地址变化：TCP 改写 listen 链表，UDP 改写全部
 
-`tcp_netif_ip_addr_changed()`（`tcp.c:2340-2361`）在网卡地址变化时会**改写 bound 与
-active PCB 的 `local_ip`**。若 lane 由 `local_ip` 哈希而来，地址一变哈希就变，
-而 PCB 仍挂在旧桶里 —— 归桶不变式被破坏。
+先前这里写的是"`tcp_netif_ip_addr_changed()` 会改写 bound 与 active PCB 的
+`local_ip`"。**那是错的**，已按源码更正：`tcp_netif_ip_addr_changed()`（`tcp.c`）对
+地址匹配的 bound/active PCB 调用的是 **`tcp_abort(pcb)`** —— 直接终止，**不改写**
+`local_ip`。所以这两条链表上的 PCB 不存在"归桶后 lane 漂移"的问题。
 
-两条路：
+真正改写 `local_ip` 的是 **listen 链表**（以及 `udp_netif_ip_addr_changed()`，它改写
+UDP PCB 的 `local_ip`）。这些需要**重归桶**：在全局锁下先摘链（此时 `pcb->lane` 是
+唯一记录着它实际在哪的凭据），再按新地址重算lane 并插入；桶未变时保持原有链表位置。
+`tcp_listen_pcb_rebucket()` 就是为此存在的。
 
-- 在地址变化时**重新归桶**（全局锁下从旧桶摘出、置新 lane、插入新桶）。地址变化是
-  罕见事件（重配/DHCP），代价可接受，且不变量保持成立。
-- 或者 lane 只哈希不可变的字段。仅端口也能分散（临时端口本就不同），但会丢掉
-  同端口不同地址的那部分分散度。
+这个区别很重要：原描述会让人以为 TCP 主路径也受影响，从而过度设计。
 
-倾向第一条：保住"已归桶的 pcb 永不跨桶"这条不变量，因为它正是让
-`TCP_REG`/`TCP_RMV` 可以安全地按存下来的 lane 索引的依据。
+### 在本项目里，TCP 的通配路径是结构性不可达的
+
+lwIP core 之外**没有任何地方调用 `tcp_listen()`**（只有 `altcp_tcp.c` 调
+`tcp_listen_with_backlog_and_err()`），而 A20OS 的 `net_listen()` 刻意不把 lwIP pcb
+传下去。因此 `tcp_listen_pcbs` 在本项目**恒为空**，TCP 侧的哨兵桶是死代码。
+
+已实测确认：把哨兵探测关掉，一个 TCP 测试仍然通过 —— 即该测试结构上无法覆盖这条路径。
+
+所以**通配路径的真实验证在 UDP**：`udp_input()` 会真的被走到。已用 A/B 证明：
+
+- 哨兵探测**开** → `WILDCARD_UDP_TEST: PASS`（发往网卡地址 10.0.2.15 的数据报到达了
+  绑在 `0.0.0.0:12459` 的 PCB，载荷相符）
+- 哨兵探测**关** → `WILDCARD_UDP_TEST: FAIL`
+
+这是目前唯一能证明哨兵桶有效的证据。
+
+### `smoke-net-lanes-n1` 比看起来弱
+
+本地 `connect()` 在 socket 层内部配对，**根本不进入 lwIP**。因此即使 TCP 分桶完全
+失效，`net_stress_test` 的输出仍会逐字节相同。N=1/N=4 等价性仍然有价值（它证明了没有
+*额外*的行为差异），但**不能**作为"TCP 分桶正确"的证据。真正的证据是上面那个 UDP A/B。
+
+### 广播 UDP 是唯一无法按桶定向的用例
+
+子网内 PCB 的桶不由目的地址决定，所以 `broadcast != 0` 时 `udp_input` 扫描**全部**桶。
+N>1 时这会改变多个同等匹配的 PCB 中谁赢得一次全局广播。TCP 不受影响 ——
+`tcp_input` 在任何查找之前就丢弃广播/组播。
 
 ### 关于 TIME-WAIT：没有回收这回事
 
@@ -146,6 +172,28 @@ bound → listen → active → tw 之间换*链表*，从不在同一链表内�
 第 3、4 条正是把"同时注册进两个桶"那种错误**变成可检出**的地方。
 
 ## 阶段 B：lwIP PCB 分桶
+
+**状态：已实现并验证。** `NET_LANES=1` 与 `4` 均在 `-Werror` 下干净编译、链接、启动；
+`net_stress_test` 两档输出逐字节相同（md5 `41ce8d13`）；`smoke-net-lanes`、
+`smoke-net-lanes-n1`、`smoke-netfilter` 全 PASS；两种启动日志均无 panic、page fault、UBSan。
+另外在 5 个文件 × N∈{1,4} × {plain, `TCP_DEBUG_PCB_LISTS=1`, `TCP_DEBUG=1`, `SO_REUSE=1`}
+共 32 种配置下全部干净编译。
+
+通配路径用 **UDP A/B** 证明（TCP 侧结构上不可达，见下）：哨兵探测开→
+`WILDCARD_UDP_TEST: PASS`（发往网卡地址的数据报到达绑在 `0.0.0.0:12459` 的 PCB，载荷相符），
+关→ `FAIL`。这是目前唯一能证明哨兵桶有效的证据，因为关掉它测试就会失败。
+
+实现中被查出并修掉的两个静默缺陷：
+
+- `NET_PCB_LANE_ANY_PROBE` 曾在两个分支都是 0，使 `NET_PCB_LANE_SEARCH_BUCKETS == 1`，
+  查找只走哈希桶、**从不探测哨兵桶** —— 通配 PCB 被写入却从不被读取。
+- 各链表数组声明为 `[CONFIG_NET_LANES]`，而哨兵下标恰等于 `CONFIG_NET_LANES`，
+  用它索引**越界一个元素**。
+
+两者互相掩盖：探测关闭所以哨兵从不被访问，恰好避开了越界。**只修其一会把静默失效变成
+内存破坏**，必须同时修。数组尺寸统一用 `NET_PCB_LANE_BUCKETS`（单 lane 时等于
+`CONFIG_NET_LANES`，多 lane 时为 `CONFIG_NET_LANES + 1`），所有"遍历全部 PCB"的循环上界
+也一并改用它，否则通配 PCB 会在 close/abort/kill_timewait 路径上泄漏。
 
 热路径要无锁，就得让已建立 TCP 的收发不再遍历全局 PCB 链表。lwIP 2.2 的链表操作
 **已经宏抽象**（`tcp_priv.h:355` `TCP_REG`、`:370` `TCP_RMV`、`:417`/`:423`

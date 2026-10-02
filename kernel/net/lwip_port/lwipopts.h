@@ -143,6 +143,35 @@ _Static_assert(TCP_MSS + 54 <= PBUF_POOL_BUFSIZE,
 _Static_assert(NET_PROFILE_TCP_WND_MULT <= NET_PROFILE_PBUF_POOL_SIZE,
                "TCP_WND exceeds what the pbuf pool can hold queued");
 
+/*
+ * The pbuf pool must be allocatable out of the heap the profile declared.
+ * MEMP_MEM_MALLOC=1 makes memp_malloc() call mem_malloc() per element instead of
+ * reserving a static array, so PBUF_POOL_SIZE bounds occupancy rather than
+ * reserving it: every element in flight is a claim on MEM_SIZE.  When the ceiling
+ * exceeds the heap the pool cannot reach its declared size, MEMP_STATS reports
+ * err > 0, and the shortfall surfaces as unexplained receive drops.
+ *
+ * MEM_ALIGNMENT stands in for the element header, because memp.c builds a
+ * PBUF_POOL element as LWIP_MEM_ALIGN_SIZE(sizeof(struct pbuf)) +
+ * LWIP_MEM_ALIGN_SIZE(PBUF_POOL_BUFSIZE) and struct pbuf does not exist yet at
+ * this point in the include chain.  So this term is deliberately optimistic --
+ * 520 B against a measured 536 B on the riscv64 tier 1 build -- because
+ * understating the element is the wrong direction to fail in.  Do not "fix" it to
+ * 24 without re-measuring; the ceiling then stops holding.  Holds on all three
+ * profiles: 12480/16384, 395264/524288, 6324224/16777216.
+ *
+ * Pbuf pool only.  The other thirteen pools this config compiles in also draw on
+ * MEM_SIZE and their element sizes are lwIP struct layouts not visible yet; on
+ * riscv64 tier 1 they add 12640 B at full occupancy against 3904 B left, so
+ * tier 1's full set of pool ceilings is not simultaneously satisfiable within
+ * tier 1's own MEM_SIZE (25696 B of claims against 16384 B).  That needs the
+ * ceilings lowered, not an assertion added.
+ */
+_Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
+               "MEM_SIZE cannot back the pbuf pool at its declared "
+               "PBUF_POOL_SIZE; with MEMP_MEM_MALLOC=1 the ceiling is a claim "
+               "on the heap, so the pool would cap below the configured size");
+
 #define IP_REASSEMBLY                   1
 #define IP_FRAG                         1
 #define IP_REASS_MAX_PBUFS              32
