@@ -80,10 +80,12 @@ static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 #define A20_LWIP_LOCK_UNOWNED 0xffffffffu
 #define A20_LWIP_LOCK_SITES 8
+#if CONFIG_NET_LOCK_ASSERT
 static volatile unsigned g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
 static unsigned g_lwip_lock_violations;
 static void *g_lwip_lock_sites[A20_LWIP_LOCK_SITES];
 static unsigned g_lwip_lock_nsites;
+#endif /* CONFIG_NET_LOCK_ASSERT */
 #define A20_NET_MAX_DEVS 4
 
 /*
@@ -393,16 +395,21 @@ uint64_t a20_lwip_lock(void)
 {
     uint64_t flags = spin_lock_irqsave(&g_lwip_lock);
     a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
+#if CONFIG_NET_LOCK_ASSERT
     g_lwip_lock_owner = cpu_current_id();
+#endif
     return flags;
 }
 
 void a20_lwip_unlock(uint64_t flags)
 {
+#if CONFIG_NET_LOCK_ASSERT
     g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
+#endif
     spin_unlock_irqrestore(&g_lwip_lock, flags);
 }
 
+#if CONFIG_NET_LOCK_ASSERT
 int a20_lwip_lock_is_held(void)
 {
     return g_lwip_lock_owner == cpu_current_id();
@@ -426,6 +433,7 @@ unsigned a20_lwip_lock_violations(void)
 {
     return __atomic_load_n(&g_lwip_lock_violations, __ATOMIC_RELAXED);
 }
+#endif
 
 /*
  * Drain one netif's receive ring.  `budget` caps how many packets this call
@@ -746,6 +754,7 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     a20_lwip_append(buf, bufsz, &off, "\n");
     snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
     a20_lwip_append(buf, bufsz, &off, cell);
+#if CONFIG_NET_LOCK_ASSERT
     snprintf(cell, sizeof(cell), "\nlwip_lock: owner=%u violations=%u sites=%u\n",
              g_lwip_lock_owner, a20_lwip_lock_violations(), g_lwip_lock_nsites);
     a20_lwip_append(buf, bufsz, &off, cell);
@@ -757,6 +766,13 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
                  (unsigned long)(uintptr_t)site);
         a20_lwip_append(buf, bufsz, &off, cell);
     }
+#else
+    /* Say it is off.  Printing violations=0 without that would read as "none
+     * found" when it means "nothing was checked". */
+    snprintf(cell, sizeof(cell),
+             "\nlwip_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)\n");
+    a20_lwip_append(buf, bufsz, &off, cell);
+#endif
     return (int)off;
 }
 
