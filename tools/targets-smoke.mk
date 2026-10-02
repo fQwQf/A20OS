@@ -460,6 +460,12 @@ smoke-smp-lock-contention:
 # Under QEMU TCG the same workload's lwip spin count has spanned 0..920024
 # across runs (docs/server-readiness.md), so a magnitude threshold would be
 # flaky.  See docs/net/net-lanes.md.
+#
+# The leading newline matters: QEMU's serial input can lose the first byte if it
+# arrives before the shell is ready, and the loss lands harmlessly on an empty
+# line instead of eating the 'n' off net_stress_test.  Observed exactly once,
+# as 'ent_stress_test: inaccessible or not found', which made this gate fail
+# with the network perfectly healthy.
 smoke-net-lanes: NET_HOSTFWD=
 smoke-net-lanes:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
@@ -467,7 +473,7 @@ smoke-net-lanes:
 	@set -e; \
 	log="$(SMOKE_LOG_DIR)/net-lanes-riscv64.log"; \
 	status=0; \
-	{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '\nnet_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 		-machine virt -m 1G -nographic -smp 4 -bios default \
 		-global virtio-mmio.force-legacy=false \
@@ -527,7 +533,7 @@ smoke-net-lanes-n1:
 	stress4_file="$(SMOKE_LOG_DIR)/net-lanes-n1.stress-lanes4"; \
 	net_lanes_boot() { \
 		dir="$$1"; log="$$2"; st=0; \
-		{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
+		{ sleep $(SMOKE_INPUT_DELAY); printf '\nnet_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
 		$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
 			-machine virt -m 1G -nographic -smp 4 -bios default \
 			-global virtio-mmio.force-legacy=false \

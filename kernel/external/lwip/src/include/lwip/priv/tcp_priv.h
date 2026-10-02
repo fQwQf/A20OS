@@ -50,6 +50,7 @@
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/prot/tcp.h"
+#include "lwip/priv/pcb_lane.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -324,30 +325,65 @@ extern struct tcp_pcb *tcp_input_pcb;
 extern u32_t tcp_ticks;
 extern u8_t tcp_active_pcbs_changed;
 
-/* The TCP PCB lists. */
+/* The TCP PCB lists.  Each is CONFIG_NET_LANES heads rather than one, indexed
+   by the pcb's own `lane` field; see lwip/priv/pcb_lane.h. */
 union tcp_listen_pcbs_t { /* List of all TCP PCBs in LISTEN state. */
   struct tcp_pcb_listen *listen_pcbs;
   struct tcp_pcb *pcbs;
 };
-extern struct tcp_pcb *tcp_bound_pcbs;
-extern union tcp_listen_pcbs_t tcp_listen_pcbs;
-extern struct tcp_pcb *tcp_active_pcbs;  /* List of all TCP PCBs that are in a
+extern struct tcp_pcb *tcp_bound_pcbs[NET_PCB_LANE_BUCKETS];
+extern union tcp_listen_pcbs_t tcp_listen_pcbs[NET_PCB_LANE_BUCKETS];
+extern struct tcp_pcb *tcp_active_pcbs[NET_PCB_LANE_BUCKETS];  /* List of all TCP PCBs that are in a
               state in which they accept or send
               data. */
-extern struct tcp_pcb *tcp_tw_pcbs;      /* List of all TCP PCBs in TIME-WAIT. */
+extern struct tcp_pcb *tcp_tw_pcbs[NET_PCB_LANE_BUCKETS];      /* List of all TCP PCBs in TIME-WAIT. */
 
 #define NUM_TCP_PCB_LISTS_NO_TIME_WAIT  3
 #define NUM_TCP_PCB_LISTS               4
+/* tcp_pcb_lists[i] is the first head of list i, so the lane-th head of list i
+   is tcp_pcb_lists[i][lane].  Keeping the element type a pointer to head is
+   what lets a caller walk all four lists, or a prefix of them, without naming
+   a bucket.  Entry 0 aliases the listen list, which is why that list is a union
+   of two pointer types rather than anything wider: its heads have to be exactly
+   one pointer apart for that subscript to land on the right one. */
 extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
+_Static_assert(sizeof(union tcp_listen_pcbs_t) == sizeof(struct tcp_pcb *),
+               "tcp_pcb_lists[0] indexes the listen list, so its heads must be one pointer apart");
+/* The listen list, as an array of struct tcp_pcb * for TCP_REG/TCP_RMV to
+   address.  The union stores the head under two types on purpose, so the array
+   that can be subscripted is the tcp_pcb_lists[0] view of the same storage. */
+#define TCP_LISTEN_PCBS  tcp_pcb_lists[0]
 
 /* Axioms about the above lists:
    1) Every TCP PCB that is not CLOSED is in one of the lists.
    2) A PCB is only in one of the lists.
    3) All PCBs in the tcp_listen_pcbs list is in LISTEN state.
    4) All PCBs in the tcp_tw_pcbs list is in TIME-WAIT state.
+   5) A PCB sits in the head its lane field names, and that field is the one
+      NET_PCB_LANE_OF_PCB() derives from its local address and port.
+   6) A PCB bound to the "any" address sits in the sentinel bucket and nowhere
+      else.  Linking one into two heads would overwrite its ->next and break
+      both lists without reporting anything, so tcp_pcbs_sane() looks for it.
 */
+/* Non-zero if any head of a per-lane list is non-empty.  timeouts.c asks this
+   to decide whether the TCP timer still has work, and answering it from lane 0
+   alone would switch the timer off while connections live in other lanes. */
+static inline int
+tcp_pcbs_any(struct tcp_pcb * const *pcbs)
+{
+  int i;
+  for (i = 0; i < CONFIG_NET_LANES; i++) {
+    if (pcbs[i] != NULL) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* Define two macros, TCP_REG and TCP_RMV that registers a TCP PCB
-   with a PCB list or removes a PCB from a list, respectively. */
+   with a PCB list or removes a PCB from a list, respectively.
+   Both take the whole per-lane array and subscript it with the pcb's own lane
+   field, so no call site can name a head that does not own the pcb. */
 #ifndef TCP_DEBUG_PCB_LISTS
 #define TCP_DEBUG_PCB_LISTS 0
 #endif
@@ -355,25 +391,25 @@ extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
 #define TCP_REG(pcbs, npcb) do {\
                             struct tcp_pcb *tcp_tmp_pcb; \
                             LWIP_DEBUGF(TCP_DEBUG, ("TCP_REG %p local port %"U16_F"\n", (void *)(npcb), (npcb)->local_port)); \
-                            for (tcp_tmp_pcb = *(pcbs); \
+                            for (tcp_tmp_pcb = (pcbs)[(npcb)->lane]; \
           tcp_tmp_pcb != NULL; \
         tcp_tmp_pcb = tcp_tmp_pcb->next) { \
                                 LWIP_ASSERT("TCP_REG: already registered", tcp_tmp_pcb != (npcb)); \
                             } \
-                            LWIP_ASSERT("TCP_REG: pcb->state != CLOSED", ((pcbs) == &tcp_bound_pcbs) || ((npcb)->state != CLOSED)); \
-                            (npcb)->next = *(pcbs); \
+                            LWIP_ASSERT("TCP_REG: pcb->state != CLOSED", ((struct tcp_pcb **)(pcbs) == tcp_bound_pcbs) || ((npcb)->state != CLOSED)); \
+                            (npcb)->next = (pcbs)[(npcb)->lane]; \
                             LWIP_ASSERT("TCP_REG: npcb->next != npcb", (npcb)->next != (npcb)); \
-                            *(pcbs) = (npcb); \
+                            (pcbs)[(npcb)->lane] = (npcb); \
                             LWIP_ASSERT("TCP_REG: tcp_pcbs sane", tcp_pcbs_sane()); \
               tcp_timer_needed(); \
                             } while(0)
 #define TCP_RMV(pcbs, npcb) do { \
                             struct tcp_pcb *tcp_tmp_pcb; \
-                            LWIP_ASSERT("TCP_RMV: pcbs != NULL", *(pcbs) != NULL); \
-                            LWIP_DEBUGF(TCP_DEBUG, ("TCP_RMV: removing %p from %p\n", (void *)(npcb), (void *)(*(pcbs)))); \
-                            if(*(pcbs) == (npcb)) { \
-                               *(pcbs) = (*pcbs)->next; \
-                            } else for (tcp_tmp_pcb = *(pcbs); tcp_tmp_pcb != NULL; tcp_tmp_pcb = tcp_tmp_pcb->next) { \
+                            LWIP_ASSERT("TCP_RMV: bucket not NULL", (pcbs)[(npcb)->lane] != NULL); \
+                            LWIP_DEBUGF(TCP_DEBUG, ("TCP_RMV: removing %p from bucket %u\n", (void *)(npcb), (unsigned)(npcb)->lane)); \
+                            if((pcbs)[(npcb)->lane] == (npcb)) { \
+                               (pcbs)[(npcb)->lane] = (npcb)->next; \
+                            } else for (tcp_tmp_pcb = (pcbs)[(npcb)->lane]; tcp_tmp_pcb != NULL; tcp_tmp_pcb = tcp_tmp_pcb->next) { \
                                if(tcp_tmp_pcb->next == (npcb)) { \
                                   tcp_tmp_pcb->next = (npcb)->next; \
                                   break; \
@@ -381,26 +417,26 @@ extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
                             } \
                             (npcb)->next = NULL; \
                             LWIP_ASSERT("TCP_RMV: tcp_pcbs sane", tcp_pcbs_sane()); \
-                            LWIP_DEBUGF(TCP_DEBUG, ("TCP_RMV: removed %p from %p\n", (void *)(npcb), (void *)(*(pcbs)))); \
+                            LWIP_DEBUGF(TCP_DEBUG, ("TCP_RMV: removed %p from bucket %u\n", (void *)(npcb), (unsigned)(npcb)->lane)); \
                             } while(0)
 
 #else /* LWIP_DEBUG */
 
 #define TCP_REG(pcbs, npcb)                        \
   do {                                             \
-    (npcb)->next = *pcbs;                          \
-    *(pcbs) = (npcb);                              \
+    (npcb)->next = (pcbs)[(npcb)->lane];           \
+    (pcbs)[(npcb)->lane] = (npcb);                 \
     tcp_timer_needed();                            \
   } while (0)
 
 #define TCP_RMV(pcbs, npcb)                        \
   do {                                             \
-    if(*(pcbs) == (npcb)) {                        \
-      (*(pcbs)) = (*pcbs)->next;                   \
+    if((pcbs)[(npcb)->lane] == (npcb)) {           \
+      (pcbs)[(npcb)->lane] = (npcb)->next;         \
     }                                              \
     else {                                         \
       struct tcp_pcb *tcp_tmp_pcb;                 \
-      for (tcp_tmp_pcb = *pcbs;                    \
+      for (tcp_tmp_pcb = (pcbs)[(npcb)->lane];     \
           tcp_tmp_pcb != NULL;                     \
           tcp_tmp_pcb = tcp_tmp_pcb->next) {       \
         if(tcp_tmp_pcb->next == (npcb)) {          \
@@ -416,19 +452,19 @@ extern struct tcp_pcb ** const tcp_pcb_lists[NUM_TCP_PCB_LISTS];
 
 #define TCP_REG_ACTIVE(npcb)                       \
   do {                                             \
-    TCP_REG(&tcp_active_pcbs, npcb);               \
+    TCP_REG(tcp_active_pcbs, npcb);                \
     tcp_active_pcbs_changed = 1;                   \
   } while (0)
 
 #define TCP_RMV_ACTIVE(npcb)                       \
   do {                                             \
-    TCP_RMV(&tcp_active_pcbs, npcb);               \
+    TCP_RMV(tcp_active_pcbs, npcb);                \
     tcp_active_pcbs_changed = 1;                   \
   } while (0)
 
 #define TCP_PCB_REMOVE_ACTIVE(pcb)                 \
   do {                                             \
-    tcp_pcb_remove(&tcp_active_pcbs, pcb);         \
+    tcp_pcb_remove(&tcp_active_pcbs[(pcb)->lane], pcb); \
     tcp_active_pcbs_changed = 1;                   \
   } while (0)
 
@@ -486,7 +522,7 @@ u16_t tcp_eff_send_mss_netif(u16_t sendmss, struct netif *outif,
 err_t tcp_recv_null(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err);
 #endif /* LWIP_CALLBACK_API */
 
-#if TCP_DEBUG || TCP_INPUT_DEBUG || TCP_OUTPUT_DEBUG
+#if TCP_DEBUG || TCP_INPUT_DEBUG || TCP_OUTPUT_DEBUG || TCP_DEBUG_PCB_LISTS
 void tcp_debug_print(struct tcp_hdr *tcphdr);
 void tcp_debug_print_flags(u8_t flags);
 void tcp_debug_print_state(enum tcp_state s);

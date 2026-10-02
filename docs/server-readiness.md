@@ -46,331 +46,55 @@ AHCI（`FLUSH CACHE EXT`）。
 
 ## 二、网络
 
-### 已达成
+### 嵌入式档在 20 KiB SRAM 下放不下 —— 已用实测数字确认
 
-可用的 IPv4 无状态包过滤（`kernel/net/netfilter.c`），控制面在
-`/proc/a20/netfilter`。启动时无规则、默认 accept，未配置机器行为不变。
-验证：`make smoke-netfilter`。
+数字来自实测结构体尺寸（探针编译单元 + `/proc/a20/netmem` 交叉验证，两者对六个池完全
+一致），不是估算。**不能**从 QEMU 镜像的 `.bss` 反推：`MEMP_MEM_MALLOC=1` 让池成为对堆的
+claim，而 riscv64 QEMU 目标有 1 GiB RAM，对 20 KiB 部件没有说明力。
 
-### 结构性限制（按严重度）
+### 真正的瓶颈不是 lwIP 池
 
-0. **收包路径的内存模型本身就使服务器不可行，且它才是锁争用的主因。**
-   这一条排在最前，因为它比全局锁更根本，而此前的排序把它完全漏掉了。
-   当时 `net_bh_event_t` 与 `net_msg_t` 各自内嵌 `data[NET_MAX_PAYLOAD]`
-   （65535 字节），于是：
+池上限合计 25696 B 对 `MEM_SIZE` 16384 B（超 57%），但**即使把池全部解决也放不下**。
+真正的约束是两块**与档位无关的静态数组**：
 
-   - `sizeof(net_socket_t)` 约 **1.05 MiB**，其中 16 项 ring 占 1.0 MiB。
-     socket obj_cache 留活 128 个对象，最坏**滞留约 134 MiB**。
-   - `sizeof(net_msg_t)` 约 65.8 KiB，**超过 `SLAB_MAX_OBJ`**，于是
-     `mm/slab.c` 对每条消息走 buddy 并按页取整：一条 100 字节的 datagram
-     实际消耗 17 页 = 68 KiB。`NET_MAX_QUEUE` 是 128，单 socket 排队载荷
-     上限约 8.5 MiB。
-   - 每个 1460 字节的 TCP 段付出约 **136 KiB memset + 三次拷贝**，其中绝大部分
-     在 `g_lwip_lock` 内完成：`bh_ring_prepare()` 先 memset 整个 65535 字节事件
-     （`socket_inet.c`），再由 callback 拷入段内容；bottom-half 侧还有一次
-     冗余的整对象 memset（`obj_cache_alloc_zero` 已经清零）。
+| | 字节 | 位置 |
+|---|---|---|
+| `g_pkt_ring` | 24,640 | `socket_packet.c`，硬编码 `NET_PACKET_RX_RING=16` × 1540 |
+| `g_netif_state` | 12,672 | `lwip_stack.c`，`A20_NET_MAX_DEVS=4` × (rx1536 + tx1536) |
+| 合计 | **37,312** | |
 
-   **这解释了下面第 1 条里那个 `max=472365` 的来源，也解释了为什么削掉读路径
-   轮询之后自旋量根本没降**（1.15M -> 1.28M）：持锁时长从来不在读路径上，而在
-   这些 memset 里。此前把归因指向读路径是错的。
+对照 20 KiB：`kernel/net` 静态合计 **42,662 B = 整个部件的 2.08 倍**；8 个
+`net_socket_t` 合计 32,768 B = 1.60 倍；lwIP 堆 16,407 B = 80%。
+而这两块都在 profile 作用域之外的文件里，**只改 `net_profile.h`/`lwipopts.h` 无法让tier 1
+装进 20 KiB**。
 
-   已修（`feat/net-lanes`）：两级暂存改为小内联缓冲 + 溢出慢路径。实测尺寸：
+64 KiB 按当前配置也**不够**：42,662 + 16,871 = 59,533 B（90.8%），余 6,003 B —— 装不下两个
+socket。要做到大约 30 KiB：profile 内降 `MEM_SIZE`/池/`MAX_SOCKETS`、关IPv6；profile 外必须让
+`socket_packet.c` 的 ring 与 `lwip_stack.c` 的 `A20_NET_MAX_DEVS`/frame 尺寸跟随 profile。
 
-   | 结构 | 修前 | 修后 | 降幅 |
-   |------|------|------|------|
-   | `net_bh_event_t` | 65752 B | 1808 B | 36x |
-   | `net_msg_t` | ~65850 B | 1368 B | 48x |
-   | `net_socket_t` | ~1053000 B | 30032 B | 35x |
+### tier 1 连 `net_stress_test` 都跑不了
 
-   `net_msg_t` 落到 `mm/slab.c` 最大 slab class（2048）以内，不再走 buddy 取整；
-   obj_cache 留活上限从约 134 MiB 降到约 3.8 MiB；锁内 memset 从 65535 B 降到
-   约 200 B。datagram 超过内联尺寸时改为在 ring 里持有一个 pbuf 引用而不是拷贝，
-   引用由 ring 槽位绕回时在 `g_lwip_lock` 下释放——因为 memp 没有任何内部加锁，
-   消费者所在的上下文不能安全 `pbuf_free()`。
+**0/5 通过**（tier 2 是 5/5）。原因确凿：`run_worker` 每个 worker 用 3 个 socket
+（client connect + server listener + accepted child）× 4 worker = 12 个并发，而 tier 1 的
+`NET_MAX_SOCKETS = 8`。单次偶发 PASS 只是 worker 未同时到达峰值。
+按要求报出来而非上调上限 —— 这说明"tier 1 可运行"这个说法需要限定。
 
-   这些尺寸现在由 `_Static_assert` 和 `NET_PROFILE_SOCKET_MAX_BYTES` 钉住，
-   而不是靠文档约定。
+### STM32F103 根本不编译网络栈 —— README 的说法在网络侧无依据
 
-   **仍未解决**：接收缓冲本身。`PBUF_POOL_SIZE` 256 x 1536 = 384 KiB 仍是天花板，
-   见第 3 条。
+两个独立障碍：
 
-1. **整个 TCP/IP 数据面被一把全局自旋锁串行化**。
-   `g_lwip_lock` 保护全部 lwIP 核心状态，每次 raw lwIP 调用都必须持有
-   （`docs/net/network-lock-contract.md`）。**多核服务器最核心的收益在这里
-   直接归零**。这不是性能调优能解决的，需要重构 lwIP 集成。
+1. 本机无 ARM 工具链（无 `arm-none-eabi-gcc`）。
+2. 更根本：`PROFILE=mcu`（armv7m 自动启用，`Makefile:181`）走 `Makefile:931` 的**另一份
+   源文件清单**，其中**既无 `kernel/net/*.c` 也无 `$(LWIP_SRC)`**。所以 `NET_PROFILE` 对该
+   目标完全没有作用，**tier 1 根本没被编译进去**。
 
-   实测（`NR_CPUS=4` 真实 SMP 构建 + `net_stress_test` 4 路并发 × 4 MiB TCP）：
-   ```
-   lwip:   27 acquires / 1149170 spins
-   proc:  3487 acquires / 5687843 spins
-   runq:   14 / 103859      (每 CPU 一把)
-   ```
-   两把锁的 spin 量都极高，`lwip` 平均每次争用要空转约 4.2 万次。
-   **而且真正更大的热点是 `proc_lock`**：争用次数约为 lwIP 的 126 倍、
-   spin 量约 5 倍。原排序把 `proc_lock` 放在 P2（"进程数上去后的扩展性"）
-   低估了；按这份数据，它比 lwIP 全局锁更该先处理。
+即README 声称的 STM32F103（20 KiB SRAM）支持，在网络上不只是"内存不够"，而是**从未构建**。
+这条要么修README，要么给mcu profile 真的纳入网络栈 —— 属于产品决定，不是调参。
 
-   **默认配置根本测不出这类问题**。`Makefile` 里
-   `NR_CPUS ?= 1`，所以所有默认 dev/smoke 门禁都是单核构建，给 QEMU 传
-   `-smp 4` 也没用：内核只起 1 个 CPU，而单核永远不可能争用自旋锁。
-   换句话说，之前观察到的 `lwip: 0 0` 是**单核默认配置伪造出来的假阴性**，
-   不能解读为"锁没问题"。跨核锁竞争只有显式 `NR_CPUS>1` 才可见。
+附带一条：`lwip_stack.c` 的 `rx_frame`/`tx_frame` 硬编码 1536，不随 `PBUF_POOL_BUFSIZE`变，
+所以 Cortex-M3 会把整尺寸帧收进 512 字节的池，每帧链 3 个元素；`PBUF_POOL_SIZE=24` 只够
+8 个整尺寸帧，而整个部件只有 20 KiB。
 
-   spin 归因已修好，热点高度集中。此前 `spin_lock_at()` 里
-   `site->spins` 是在外层重试循环里加 1，等于 acquire 次数的副本，真正
-   的自旋次数只汇总到锁级 `contended_spins`，所以归因表的 spin 列毫无信息量
-   （实测 27 次 acquire 对 114 万次自旋，调用点 spin 合计只有 27）。
-   现改为在进循环前先固定 slot、内层自旋排空后按 `spins - spun_before`
-   累加，修复后调用点 spin 合计与锁级总数精确相等（689073 = 689073，
-   另一次 381751 = 381751）。`smoke-smp-lock-contention` 现在把这条不变量
-   钉住（调用点 spin 合计须 ≥ 锁级的 90%），删掉归因即失败。
-   锁级数字（`contended_acquires`/`contended_spins`）是直接计数，可信。
-
-   归因标签已查清：`3133c97d` 的撤回是错的，这里纠正回来。
-   `net_vfile_read+0xf6` = 0x2068，正是 `socket_file.o` 里
-   `call a20_lwip_poll`（0x2064）之后的那条指令，也就是一个返回地址。
-   `lwip_stack.o` 里 `a20_lwip_poll` 调的是 `spin_lock_at.constprop.0`，
-   存在 `.constprop` 克隆说明 `caller_ra` 被常量折叠了：
-   `a20_lwip_lock` 与 `a20_lwip_poll` 同在 `lwip_stack.c`，GCC 在该编译
-   单元内可自由内联，`spin_lock_irqsave` 里的 `__builtin_return_address(0)`
-   于是被折成常量 0x2068。所以标签是可信的，指向读路径进入 poll 的
-   那个调用点。（之前怀疑"extern 跨单元不能内联"是错的：跨单元确实不能，
-   但这两个函数本就在同一单元。）
-
-   要点比"热点在读路径"更精确，必须分两半看。
-   - 谁在发起争用（acquire 侧）：socket 读路径。`net_vfile_read()`
-     在 `for(;;)` 里反复调 `a20_lwip_poll()`（`socket_file.c:28`），
-     数据没到就 park、醒来再 poll，是高频 acquire 方。
-   - 别人在为什么而自旋（hold 侧）：`a20_lwip_poll_locked()` 在同一把
-     锁里做 `sys_check_timeouts()`、逐设备 `poll()`、以及
-     `a20_lwip_process_netif_rx_tx_locked()` 的无界 `for(;;)` 收包排空。
-     自旋时间消耗在这段排空工作上，属于收包路径。
-   所以原表述"争用来自读路径而非收包路径"把 acquire 方和 hold 方混为一谈，
-   已撤回。**结构问题是一个阻塞读会高频触发 whole-stack poll，而 poll 在
-   全局锁内跨越整段收包排空**：读路径与收包路径被同一把锁串在一起。
-   注意"排空无上界"这个说法是错的：`virtio_net_recv()` 在 used ring 空时
-   返回 0，而 ring 深度是 `VIRTIO_QUEUE_SIZE` = 32，所以单次 poll 最多处理
-   32 个包，**本来就有上界，给它加界是空操作**。分片本身仍未完成。
-
-   下一步已经很明确：读路径应复用既有的 RX-pending 门控。
-   这套门控早就存在，而且正是为了解决同一类问题，只是读路径没走它：
-   - `core/progress.c:38-44` 明写 *"NO_SYS lwIP has one global core lock.
-     Letting every idle CPU poll it turns an otherwise idle SMP guest into a
-     permanent lock convoy"*，因此 `kernel_progress_poll()` 只允许 CPU 0 轮询。
-   - `kernel_progress_timer_tick()` 同样限定 CPU 0，且只有设备真的上报了
-     pending 才重新取 `g_lwip_lock`；注释明确目标是"让 per-context-switch
-     调度热路径不碰这把锁"。
-   - `net/lwip_stack.c:55-62` 的 RX progress hint 契约：virtio-net IRQ 顶半部
-     在排空前置位，`a20_lwip_poll_locked()` 消费它。
-   而 `net_vfile_read()`（`socket_file.c:28`）绕过该 hint，在 `for(;;)`
-   里无条件 `a20_lwip_poll()`，每轮都取一次全局锁，哪怕设备毫无数据。
-   这就是实测里 acquire 侧集中在读路径的直接原因。
-
-   已实现：读路径改为 `a20_lwip_poll_waiter()`，只在设备上报过工作时才取
-   `g_lwip_lock`。先回答了三个"改错就是 read 挂死"的疑问，答案都是可以：
-   - 交付不依赖读者自己 poll。virtio-net IRQ 顶半部跑
-     `a20_lwip_poll_locked()` 把包排进 `bh_ring`；真正把 `bh_ring` 搬进
-     socket 队列并唤醒 `read_waitq` 的是 `net_inet_bottom_half_process_all()`，
-     而 `sched()` 在挑下一个任务之前就会跑它（`sched.c:1838-1841`）。
-     读者一旦 park，`sched()` 必被调用，交付与唤醒照常发生。
-   - TCP 定时器不依赖它。`kernel_progress_timer_tick()` 在全部 8 个架构
-     的定时器中断里被调用，重传超时由中断推进，与读者是否 poll 无关。
-   - bottom-half 故意不门控。它取的是 `g_net_lock` 而非 `g_lwip_lock`，
-     且读者要靠它消费自己那份延迟收包数据。
-   另外 `net_vfile_read()` 在 `wait_queue_link()` 前会在 `g_net_lock` 下复查
-   `s->rx_head`（`socket_file.c:84-87`），因此不存在丢唤醒竞态。
-
-   驱动无关的做法：给 `net_dev_ops_t` 加可选 `rx_irq_driven`，**NULL 表示未知，
-   而未知按"没有 IRQ"处理**。所以任何未改造的驱动仍会被无条件排空，不会
-   静默丢 RX。
-
-   实测结果要分开看，不能只报好的一面：
-   - `lwip` 争用 acquire 次数确实大幅下降：多轮 55 / 27 / 17 → 6 / 1。
-   - **但 spin 量没有下降**：改前 1.15M / 1.07M，改后仍约 1.28M。
-   也就是说这次只削掉了"为了发现没数据而白取的锁"，大头在 hold 侧：
-   持锁者要把这一轮收的包全部走完 pbuf 分配、netfilter 和 `n->input()`
-   （含完整 TCP 输入处理）才放锁。
-   **但 spin"次数"不是持锁"时长"**：`arch_cpu_relax()` 的迭代次数与墙上时间
-   没有固定换算，所以 1.28M 不能直接当成持锁毫秒数读。
-   同时**"给排空加界"这条路是走不通的**（见上，排空本来就有 32 的上界）。
-   真正剩下的是要么把每包在锁内的工作量降下来，要么分片这把锁，两者都远大于
-   本次改动，需要各自的门禁。
-
-   **本轮（`feat/net-lanes`）做的是前者，以及把 poll 分段。** 三处改动：
-   收包载荷两级内联化（第 0 条）、`a20_lwip_poll_locked()` 拆成 timers 段与
-   带包数预算的收包段、三条 socket 发送路径每迭代只取一次锁（TCP 此前用
-   `a20_lwip_poll()` 开头，等于每迭代取放两次并多跑一轮 whole-stack pass）。
-
-   **关于这些改动的效果，必须把话说准，不能重复本文件上面犯过的同类错误。**
-   结构调整本身是确定的、可在编译期断言的：每 socket 1.05 MiB → 30 KiB，
-   锁内每包 memset 65535 B → 200 B，发送循环每迭代 2 次全局获取 → 1 次，
-   定时器中断 2 次全局获取 → 1 次 + 有界排空。
-
-   但**争用计数本身在 QEMU TCG 下噪声极大，不能作为结论**。同一
-   `NR_CPUS=4` + `net_stress_test` 负载的 4 次独立运行，stress 窗口的 `lwip`
-   自旋数分别落在 0 / 52776 / 189334 / 920024。`arch_cpu_relax()` 的迭代次数与
-   墙上时间没有固定换算（本文件上面已经因为 `rdcycle` 在 TCG 下不可信而撤回过一次
-   时长结论），所以任何以 spin 数量为阈值的门禁都是 flaky 的。
-
-   因此：`smoke-smp-lock-contention` 现在**记录**该数值而不做幅度断言，门槛只保留
-   确定性的部分——per-callsite 自旋合计与锁级总数吻合，以及压力测试本身通过。
-   曾经短暂加入过一个 400000 的 spin 上限，已在同一次运行里撤掉（它会在
-   920024 那轮误报）。
-
-   上面第一次改动后曾写下"833397 -> 528039 -> 94232，累计 -88%"这样的表述。
-   **按本条提供的方差，该表述不成立，予以撤回**：那些是不同运行的单次读数，区间
-   互相重叠，不能构成趋势。可以确定的是结构性改动本身，以及 `lwip` 在 acquire
-   次数上从 27 降到个位数。
-
-   顺带修掉一个真实的记账漏洞：`lock_counters.c` 过去会丢弃 `ra == 0` 的采样
-   （如中断上下文无可恢复返回地址），导致 per-site spin 之和与锁级
-   `contended_spins` 对不上；现在按 `?` 计入，门禁不变量恢复成立。
-2. 无连接跟踪与 NAT。因此不能做端口转发、地址转换，也无法实现
-   有状态的防火墙规则。
-3. 窗口缩放已启用，但新的瓶颈是接收缓冲而非协议上限。lwIP 2.2 自带
-   RFC 1323 实现，此前 `LWIP_WND_SCALE` 停在默认 0，整段代码被条件编译掉，
-   窗口是裸 16 位字段，双向都卡死在 65535 字节。现已置 1（`TCP_RCV_SCALE 3`），
-   `TCP_WND`/`TCP_SND_BUF` 提到 64×MSS = 93440 字节，线上字段为 `93440 >> 3`
-   = 11680，可用 `_Static_assert` 保证不溢出。
-   **但真正的天花板现在是接收缓冲**：`PBUF_POOL_SIZE` 256 × 1536 = 384 KiB，
-   `TCP_WND` 再往上就该先把 pbuf 池撑大，否则中途耗尽丢段的代价高于宽窗口
-   的收益。要真正吃满跨地域 BDP，还需要更大的接收缓冲与 AIO/零拷贝收包。
-   **本环境无法给出吞吐实测。** loopback RTT 近 0，窗口限制根本不
-   生效，因此这里只能声称"协议上限已解除"，**不能声称任何带宽数字**。
-   池压力现已可观测：`/proc/a20/netmem` 暴露 lwIP 各池的
-   used/max/err（`MEMP_STATS` 因 `MEMP_MEM_MALLOC=0` 派生为 1，计数器本来
-   就在维护，但 lwIP 自带的唯一读取入口被 `LWIP_STATS_DISPLAY=0` 编译掉了，
-   这是 A20OS 侧新写的读取路径）。其中 `err` 正是"池不够大"的信号，
-   `smoke-lwip-memp` 断言跑完网络套件后 `err` 仍为 0。
-   但 loopback 下 `max` 峰值极低，**这份数据不足以论证当前池容量合理**：
-   要定容量需要真实高 RTT/大流量负载。
-4. **本轮顺手查出并已修的实现缺陷**（都不是性能问题，但此前无人记录）：
-
-   - `a20_lwip_register_netifs()` 在注册循环里逐个调 `netif_set_default()`，
-     所以多网卡时**最后枚举到的设备覆盖前面的**，而不是第一个。已改为仅在
-     `netif_default` 为空时设置。
-   - `virtio_net_poll_all()` 全树无调用者，是死代码；而
-     `docs/drivers/guide/lock-order.md` 仍把它列为活的入口点。函数与文档引用
-     一起删除。
-   - `lwip_stack.c` 里"loopback 后注册所以硬件在 netif_list 前面"的注释是
-     **反的**：lwIP 的 `netif_add` 是前插，loopback 实际在链表头。功能上无影响
-     （轮询遍历整表、IRQ 路径按 `st->idx` 匹配），但注释会误导后续修改。
-   - `MEMP_MEM_MALLOC` 此前留空，被 `opt.h` 派生为 0，于是所有池都是 `.bss`
-     静态数组而 `MEM_SIZE` 完全没用上。同时这也让 `/proc/a20/netmem` 的 `size`
-     列变成**整列静默零值**（`memp_init_pool()` 在该模式下是空桩，唯一写
-     `avail` 的代码在 `#if !MEMP_MEM_MALLOC` 里）。现在该列报 `desc->size`，
-     并注明 per-pool 容量在 heap 模式下不存在，真实上界是 `MEM_SIZE`。
-   - `MEMP_NUM_SYS_TIMEOUT`（32）小于 `MEMP_NUM_TCP_PCB`（64），而三个 TCP
-     keepalive 宏全开，每个 established PCB 占一个 `sys_timeo`。池耗尽后
-     `tcp_pcb_alloc()` 返回 NULL，表现为 `accept()` 失败。现在是
-     `_Static_assert`。
-
-5. **门禁 `smoke-lwip-memp` 与 `smoke-network-suite` 在当前 HEAD 上不可通过，
-   与网络改动无关。** `alg_test` 在没有内核 crypto provider 时主动退出 78
-   (ABSENT)，而 `network_suite` 刻意把 absent 判为 FAIL（其注释写明目的是让
-   "被注释掉的内核实现"无法混进绿色门禁）。由于 `socket_alg.c` 明确不提供
-   provider，`NETWORK_SUITE: PASS` 因此不可达。这是有意的 fail-closed 设计，
-   不是回归——**但需要有人决定**：AF_ALG 的缺失是文档化的设计意图而非被注释掉的
-   实现，按 `network_suite` 自己的分类定义更接近 SKIP 而非 ABSENT。改之前，
-   任何依赖这两个门禁的网络验证都必须绕过它（例如直接断言 `/proc/a20/netmem`
-   的输出）。
-
-6. 无 SACK、无 ECN、无 SYN cookie、无 `MSG_ZEROCOPY`。
-7. 多队列/RSS/RPS/XPS/XDP 全部缺失；virtio-net 只有一对硬编码队列
-   （RX=0/TX=1），无 MSI-X，无任何卸载（CSUM/TSO/GSO/GRO）。
-   深度 32 来自 `virtio_blk.h` 的 `VIRTIO_QUEUE_SIZE`；注意 virtio-net 用的
-   是那里的 `ring[32]` 结构而**不是** `drivers/dual/virtq.h`（那个只有 8 深
-   且 `virtq_init` 拒绝 `num > 8`），谁"顺手统一"过去会把队列深度静默降到 8。
-8. `SO_BINDTODEVICE`、`IP_TRANSPARENT`、`TCP_CORK`、`TCP_USER_TIMEOUT`
-   等返回 `-EOPNOTSUPP`（此前它们返回成功并被静默丢弃）。
-9. accept 队列固定 128 且溢出静默丢弃；无 socket 内存压力控制，也无
-   `/proc/sys/net/*`。
-
-### 剩余工作与各自的阻塞原因
-
-完整方案在 [net/net-lanes.md](net/net-lanes.md)，那里记录了阶段 A–G 的顺序、
-各自的前置条件，以及为什么顺序不可跳。本节只记录**为什么还没做完**。
-
-**阶段 A 已落地**：lane 归属哈希、`net_socket_t.lane`、bind 时重算、
-`/proc/net/status` 的 `lanes:` 行、`NET_LANES` 构建旋钮。
-`NET_LANES=1` 与 `NET_LANES=4` 的 `net_stress_test` 输出逐字节一致
-（`4 parallel transfers, 4 rounds x 1048576 B`），嵌入式路径可证明未变。
-lanes 行目前**尚不能证明连接已被分散开**——它只统计仍在 registry 里的 socket，
-而 `net_stress_test` 会关掉自己的 socket，所以读到 `sockets=1` 是预期的。
-
-#### `g_net_lock` 分片：前置是引用计数，不是锁
-
-`g_net_lock` 覆盖 1024 个 socket、52 处获取，是当前收益最大的未做项。但它
-不只是数据锁，**还是对象生命周期锁**：
-
-- `net_socket_free()` 在 `spin_unlock_irqrestore()` **之后**调用
-  （`socket_file.c`）。所以读者只要持锁，关闭方就无法注销，对象也就不会被
-  释放。
-- 因此把它换成 per-socket 锁**必须先有 `refcount_t`**，否则
-  `net_socket_from_file()` 读到 `vf->priv` 之后、拿到锁之前，关闭方可能已经
-  清空 `vf->priv` 并释放——中间没有任何东西阻挡。
-
-**顺带查出一个既有的 use-after-free 窗口**：上面那个 `vf->priv` 与
-`net_socket_free()` 之间的空档在今天就存在，与分片无关。读线程拿到 vfile
-引用、读出 `s`、放下 vfile 引用，然后才用 `s`；关闭线程可以在此之间完成
-`vf->priv = NULL` 与释放。目前靠 `g_net_lock` 偶然挡住（读者进临界区时
-关闭方在等锁），但 `net_socket_from_file()` 本身并不持锁。
-
-设计已想清并被部分实现过，结论记录在此：
-`net_socket_t` 加 `ref_count`；`net_socket_alloc()` 起始为 1；
-`net_socket_enter(gfd, &out)` 取引用并复核 `in_registry`，`net_socket_exit()`
-释放；锁序为 registry 锁先于 socket 锁。
-
-**本轮主动回退了**。用脚本批量改写这 20 个调用点（`net_socket_from_file` 的
-使用者，含 `sys_socket_msg.c` 三个跨越整段控制流与 `recvmmsg` 循环的复杂
-站点）时三次以不同方式损坏了 C 代码，其中一次把 `socket_control.c` 从 954 行
-截到 21 行。半完成的生命周期重构比不做更危险：漏 `exit` 是泄漏，多一次
-`exit` 是 use-after-free，而这两者都无法靠编译器发现。已用
-`net_socket_exit()` 里的下溢 panic 作为运行时护栏，但护栏不等于正确。
-接手者请用**逐函数手工改写**而不是脚本，并在同一提交里跑
-`smoke-smp-lock-contention` 与 fd 相关的 stress 门禁。
-
-#### 把协议栈输入移出中断上下文：直接改会死锁
-
-`virtio_net_irq_handler()` 目前在中断上下文持 `g_lwip_lock` 跑完整协议栈。
-直觉做法是让 IRQ 只入队并置标志、由 poll 路径处理——**这会死锁**：
-
-- 阻塞读的任务 park 后，`sched()` 运行 bottom-half 去唤醒它；
-- bottom-half 需要 ring 已被排空；
-- 而能排空的 poll 路径若只在读者唤醒后跑，读者就永远在等一个不会被唤醒的
-  事件。
-
-所以需要显式 softirq 加一个**保证被执行的 poll 点**（`sched()` 内的
-`kernel_progress_run_bottom_halves()` 是候选），外加一个有界、无锁的 pbuf
-队列与溢出丢弃策略。这是数据路径上的并发代码，约 150 行新逻辑，不适合在
-没有回归门禁的条件下赶工。
-
-#### lwIP PCB 哈希分桶：`g_lwip_lock` 分片的入场费（阶段 B，**未动**）
-
-热路径要无锁，就得让 established TCP 的收发不去遍历全局 PCB 链表。lwIP 2.2 的
-`tcp_bound_pcbs` / `tcp_active_pcbs` / `tcp_listen_pcbs.pcbs` / `tcp_tw_pcbs`
-四条加上 `udp_pcbs` 都是全局链表，`tcp_lookup()` 每次线性遍历。
-
-比原估计小的关键发现：链表操作**已经宏抽象**，`TCP_REG(pcbs, npcb)` 与
-`TCP_RMV`（`tcp_priv.h:355`、`:370`，ACTIVE 变体在 `:417`、`:423`）把表头作为
-**参数**传入，所以分桶是"给表头加下标"而非"重写查找"。
-
-仍未做的原因不是工作量而是风险：它要改 `tcp.c` 里 PCB 注册/摘除/查找的全链路，
-而一次失手不会报错，表现为偶发 TCP 挂起。本轮尝试阶段 A 时用脚本批量改写 C 已经
-连续三次以不同方式损坏源文件（其中一次把 `socket_control.c` 从 954 行截到 21 行），
-在 `tcp.c` 上重复这个错误不值得。接手者请手工逐点改，并先只做分桶、不动状态机。
-
-#### `proc_lock` 分片
-
-当前最大的争用源（实测约为 lwIP 锁的 20 倍），根因是整个任务表一把全局
-自旋锁（`proc.c:42`），`sched.c` 里有 30 处取锁点。但它与上面几项共享同一个
-方法论约束：这是调度器关键路径，改错表现为偶发挂死而不是报错。**未动**。
-
-#### 多队列 / MSI-X
-
-除 QEMU `mq=` 接线外，驱动本身只协商 `F_MAC`/`F_STATUS`/`F_VERSION_1`，
-没有 `F_MQ`。需要多队列对、每队列中断向量、PLIC per-hart 路由或 MSI-X。
-注意上面第 7 条记录的 `virtq.h` 队列深度陷阱。
 ## 三、隔离与多租户
 
 ### 已达成
