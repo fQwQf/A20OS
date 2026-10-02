@@ -19,7 +19,13 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
     steps:
       - id: resolve
-        run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            OWNER="${{ github.event.pull_request.base.repo.owner.login }}"
+          else
+            OWNER="${{ github.repository_owner }}"
+          fi
+          echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/a20os-buildenv:latest" >> "$GITHUB_OUTPUT"
 
   # 工具链层门禁：a20 工具本身与其数据、源码契约门禁。
   # 全部是宿主侧纯 Python / rg / 宿主 gcc，与架构无关、无需交叉工具链、
@@ -95,6 +101,9 @@ jobs:
           make check-task-state-boundary
           make check-abi-smoke-gate
           make check-doc-drift
+
+      - name: 'Source contracts: arch boundary (static gate)'
+        run: python3 tools/gates.py check-arch-boundary
 
   # 逐架构内核构建矩阵的取值来自 Makefile 的 CI_KERNEL_ARCHES，而不是把
   # 架构列表抄进 YAML。手抄的列表是第二真源，会在 SUPPORTED_HOSTED_ARCHES
