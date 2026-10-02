@@ -9,6 +9,7 @@
 #include "core/sync.h"
 #include "core/timer.h"
 #include "lwip/ip_addr.h"
+#include "net/net_lane.h"
 
 struct udp_pcb;
 struct raw_pcb;
@@ -164,6 +165,15 @@ typedef struct net_recv_meta {
 } net_recv_meta_t;
 
 typedef struct net_socket {
+    /*
+     * Lane this socket's PCB belongs to, and which never changes for the life of
+     * the connection.  Recomputed at bind from the bound (ip, port) because that
+     * is the pair an inbound packet can reproduce: the peer's source port is our
+     * local port and the peer's destination is our local address.  Before bind
+     * it is only a provisional assignment from the creating CPU, which is why
+     * nothing may rely on it until the socket is bound.
+     */
+    unsigned lane;
     int domain;
     int type;
     int protocol;
@@ -328,6 +338,8 @@ void     net_sockaddr_set_port(void *addr, size_t len, uint16_t port);
 int      net_sockaddr_in_local(const net_sockaddr_in_t *in);
 int      net_sockaddr_to_lwip_ip(const void *addr, size_t len,
                                  ip_addr_t *ip, uint16_t *port);
+unsigned net_socket_lane_of_addr(const void *addr, size_t len,
+                                 unsigned fallback);
 int      net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                                  uint8_t out[NET_SOCKADDR_MAX],
                                  size_t *outlen);

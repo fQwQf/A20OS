@@ -441,3 +441,142 @@ smoke-smp-lock-contention:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# Network-lane observability smoke (stage A)
+# ================================================================
+# Boots a NR_CPUS=4 NET_LANES=4 build, runs net_stress_test, and reads
+# /proc/net/status.  It asserts the structural facts only:
+#
+#   * the stress test passes, so the stack still moves bytes with lanes on;
+#   * the lanes line renders with count=4, so the build knob reached the
+#     kernel and the renderer used it;
+#   * it prints exactly 4 occupancy values, one per lane;
+#   * those values sum to the socket count -- the invariant the kernel loop
+#     maintains, since every counted socket increments exactly one bucket;
+#   * no panic and no page fault.
+#
+# Deliberately NOT asserted: any throughput, spin count or timing number.
+# Under QEMU TCG the same workload's lwip spin count has spanned 0..920024
+# across runs (docs/server-readiness.md), so a magnitude threshold would be
+# flaky.  See docs/net/net-lanes.md.
+smoke-net-lanes: NET_HOSTFWD=
+smoke-net-lanes:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-lanes-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	lanes_line=$$(awk '/^lanes: count=4 /{line=$$0} END{print line}' "$$log"); \
+	occ_n=$$(printf '%s\n' "$$lanes_line" | awk '{print NF-4}'); \
+	occ_sum=$$(printf '%s\n' "$$lanes_line" | awk '{s=0; for(i=5;i<=NF;i++) s+=$$i; print s+0}'); \
+	sock_n=$$(printf '%s\n' "$$lanes_line" | awk '{for(i=1;i<=NF;i++) if($$i ~ /^sockets=/){sub(/^sockets=/,"",$$i); print $$i+0}}'); \
+	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
+	   [ -n "$$lanes_line" ] && \
+	   [ "$$occ_n" -eq 4 ] && \
+	   [ "$$occ_sum" -eq "$$sock_n" ] && \
+	   ! grep -qi 'panic' "$$log" && \
+	   ! grep -qi 'page fault' "$$log"; then \
+		echo "smoke-net-lanes: PASS (4-lane build; stress ok, lanes line renders count=4 with 4 occupancy values summing to sockets=$$sock_n); log saved to $$log"; \
+		echo "  $$lanes_line"; \
+	else \
+		echo "smoke-net-lanes: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# Network-lane equivalence gate (stage A): 1 lane == pre-lane behaviour
+# ================================================================
+# Builds and boots BOTH NET_LANES=1 and NET_LANES=4 at NR_CPUS=4, runs
+# net_stress_test in each, and requires the NET_STRESS_TEST: line to be
+# byte-identical.  That is the property stage A claims: at one lane every
+# net_lane_of() folds to a constant 0, so the embedded build compiles to the
+# code that existed before lanes.
+#
+# The comparison alone would pass vacuously if the knob stopped reaching the
+# kernel -- both builds would then be the same binary and agree trivially --
+# so the gate also proves the two builds really differ: the 1-lane log must
+# render count=1 with one occupancy value, the 4-lane log count=4 with four.
+# A gate that cannot fail is worthless.
+#
+# Each log must also show NET_STRESS_TEST: PASS and exactly one
+# NET_STRESS_TEST: line, so "FAIL == FAIL" can never be reported as
+# equivalence.
+smoke-net-lanes-n1: NET_HOSTFWD=
+smoke-net-lanes-n1:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=1 dev-build
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	lanes1_dir=".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4"; \
+	lanes4_dir=".kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-lanes4"; \
+	log1="$(SMOKE_LOG_DIR)/net-lanes-n1-lanes1-riscv64.log"; \
+	log4="$(SMOKE_LOG_DIR)/net-lanes-n1-lanes4-riscv64.log"; \
+	stress1_file="$(SMOKE_LOG_DIR)/net-lanes-n1.stress-lanes1"; \
+	stress4_file="$(SMOKE_LOG_DIR)/net-lanes-n1.stress-lanes4"; \
+	net_lanes_boot() { \
+		dir="$$1"; log="$$2"; st=0; \
+		{ sleep $(SMOKE_INPUT_DELAY); printf 'net_stress_test\ncat /proc/net/status\npoweroff\n'; } | \
+		$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+			-machine virt -m 1G -nographic -smp 4 -bios default \
+			-global virtio-mmio.force-legacy=false \
+			-drive file="$$dir/fat32.img",if=none,format=raw,id=x0 \
+			-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+			-kernel "$$dir/kernel.elf" \
+			-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+			> "$$log" 2>&1 || st=$$?; \
+		return $$st; \
+	}; \
+	s1=0; net_lanes_boot "$$lanes1_dir" "$$log1" || s1=$$?; \
+	s4=0; net_lanes_boot "$$lanes4_dir" "$$log4" || s4=$$?; \
+	stress1=$$(awk '/NET_STRESS_TEST:/{line=$$0} END{print line}' "$$log1"); \
+	stress4=$$(awk '/NET_STRESS_TEST:/{line=$$0} END{print line}' "$$log4"); \
+	n1=$$(awk '/NET_STRESS_TEST:/{n++} END{print n+0}' "$$log1"); \
+	n4=$$(awk '/NET_STRESS_TEST:/{n++} END{print n+0}' "$$log4"); \
+	line1=$$(awk '/^lanes: count=1 /{line=$$0} END{print line}' "$$log1"); \
+	line4=$$(awk '/^lanes: count=4 /{line=$$0} END{print line}' "$$log4"); \
+	occ1=$$(printf '%s\n' "$$line1" | awk '{print NF-4}'); \
+	occ4=$$(printf '%s\n' "$$line4" | awk '{print NF-4}'); \
+	printf '%s\n' "$$stress1" > "$$stress1_file"; \
+	printf '%s\n' "$$stress4" > "$$stress4_file"; \
+	if [ "$$s1" -eq 0 ] && [ "$$s4" -eq 0 ] && \
+	   grep -q 'NET_STRESS_TEST: PASS' "$$log1" && \
+	   grep -q 'NET_STRESS_TEST: PASS' "$$log4" && \
+	   [ "$$n1" -eq 1 ] && [ "$$n4" -eq 1 ] && \
+	   [ "$$occ1" -eq 1 ] && [ "$$occ4" -eq 4 ] && \
+	   [ -n "$$stress1" ] && \
+	   cmp -s "$$stress1_file" "$$stress4_file" && \
+	   ! grep -qi 'panic' "$$log1" && ! grep -qi 'panic' "$$log4" && \
+	   ! grep -qi 'page fault' "$$log1" && ! grep -qi 'page fault' "$$log4"; then \
+		echo "smoke-net-lanes-n1: PASS (1-lane and 4-lane builds both pass net_stress_test and report byte-identical verdicts)"; \
+		echo "  lanes1: $$line1"; \
+		echo "  lanes4: $$line4"; \
+		echo "  identical NET_STRESS_TEST line: $$stress1"; \
+	else \
+		echo "smoke-net-lanes-n1: FAIL"; \
+		echo "  qemu status: lanes1=$$s1 lanes4=$$s4"; \
+		echo "  lanes1 lanes line: $${line1:-<absent>}"; \
+		echo "  lanes4 lanes line: $${line4:-<absent>}"; \
+		echo "  lanes1 NET_STRESS_TEST lines: $$n1"; \
+		echo "  lanes4 NET_STRESS_TEST lines: $$n4"; \
+		echo "  lanes1 verdict: $${stress1:-<absent>}"; \
+		echo "  lanes4 verdict: $${stress4:-<absent>}"; \
+		if ! cmp -s "$$stress1_file" "$$stress4_file"; then \
+			echo "  verdicts differ:"; \
+			diff "$$stress1_file" "$$stress4_file" || true; \
+		fi; \
+		echo "  logs: $$log1 $$log4"; \
+		exit 1; \
+	fi

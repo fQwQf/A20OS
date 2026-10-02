@@ -208,12 +208,21 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 
 ## 已知未完成
 
-以下属于后续工作，本契约尚未覆盖，届时需要重写对应小节：
+以下属于后续工作。每一项的**前置条件与阻塞原因**（含 `g_net_lock` 分片必须
+先做引用计数、把协议栈输入移出中断上下文会死锁的具体推理）记录在
+`docs/server-readiness.md` 的"剩余工作与各自的阻塞原因"一节，不要只按本节
+的字面顺序动手：
 
-- `g_net_lock` 仍是全局的，1024 个 socket 在 recv/send/accept/close 上互相串行。改为 per-socket 锁加引用计数保护的 registry 是当前收益最大的单项改动。
-- `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行。
-- netif 各有一块 `rx_frame[1536]` / `tx_frame[1536]` 暂存，单 netif 同时只能处理一个包。
-- `st->ops->poll()` 与完整协议输入仍在中断上下文中执行，`g_lwip_lock` 仍从 IRQ handler 获取。
+- `g_net_lock` 仍是全局的，1024 个 socket 在 recv/send/accept/close 上互相串行。
+  **前置不是锁改造而是对象生命周期**：当前 `g_net_lock` 同时充当生命周期锁，
+  换成 per-socket 锁前必须先给 `net_socket_t` 加引用计数。
+- `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行，且每包仍
+  遍历 lwIP 的全局 PCB 链表。
+- netif 各有一块 `rx_frame[1536]` / `tx_frame[1536]` 暂存，单 netif 同时只能
+  处理一个包。
+- `st->ops->poll()` 与完整协议输入仍在中断上下文中执行，`g_lwip_lock` 仍从
+  IRQ handler 获取。**不能简单改成"IRQ 只入队"**，会死锁，推理见
+  `server-readiness.md`。
 
 ## 迁移检查清单
 
