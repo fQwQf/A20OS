@@ -599,6 +599,14 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
         if (!pcb)
             continue;
 
+#if CONFIG_NET_RACE_DELAY_US
+        /* Diagnostic amplifier; see net_profile.h.  Placed in the gap between
+         * the dequeue and the g_lwip_lock acquisition below on purpose -- that
+         * gap is the window this exists to widen. */
+        for (volatile uint32_t d = 0; d < CONFIG_NET_RACE_DELAY_US; d++)
+            __asm__ __volatile__("" ::: "memory");
+#endif
+
         if (listener->accept_count >= NET_MAX_QUEUE) {
             /* The application is not accepting.  Refusing here is the same
              * choice the socket-layer connect path makes, and the peer sees a
