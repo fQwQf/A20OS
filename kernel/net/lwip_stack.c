@@ -8,6 +8,7 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/lock_counters.h"
+#include "core/perf.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
@@ -146,6 +147,8 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
     if (r == (int)p->tot_len) {
         st->tx_packets++;
         st->tx_bytes += p->tot_len;
+        a20_perf_count(A20_PERF_NET_TX_PACKETS);
+        a20_perf_add(A20_PERF_NET_TX_BYTES, p->tot_len);
         return ERR_OK;
     }
     st->tx_errors++;
@@ -349,6 +352,7 @@ void a20_lwip_attach_netifs(void)
 
 uint64_t a20_lwip_lock(void)
 {
+    a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
     return spin_lock_irqsave(&g_lwip_lock);
 }
 
@@ -396,6 +400,8 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
             len = (int)sizeof(st->rx_frame);
         st->rx_packets++;
         st->rx_bytes += (uint64_t)len;
+        a20_perf_count(A20_PERF_NET_RX_PACKETS);
+        a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
                             (size_t)len);
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
@@ -403,6 +409,7 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
             LINK_STATS_INC(link.memerr);
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
+            a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
@@ -508,6 +515,7 @@ void a20_lwip_poll_locked(void) {
 }
 
 void a20_lwip_poll(void) {
+    a20_perf_count(A20_PERF_NET_POLL_CALLS);
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
@@ -545,6 +553,8 @@ void a20_lwip_poll_waiter(void) {
         uint64_t flags = a20_lwip_lock();
         a20_lwip_poll_locked();
         a20_lwip_unlock(flags);
+    } else {
+        a20_perf_count(A20_PERF_NET_POLL_SKIPPED);
     }
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();
