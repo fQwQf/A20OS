@@ -4997,7 +4997,7 @@ if (base + span >= end)
 
    ```
    sys_mmap            sys_mm.c:95      proc_mmap(...)
-     -> mm_mmap        mmap.c:404       spin_lock_irqsave(&mm->lock)   <-- _irqsave
+     -> proc_mmap      proc.c:776       spin_lock_irqsave(&t->mm->lock)  <-- _irqsave
        -> mm_mmap_locked  mmap.c:88
          -> mm_pt_provision_anon  mmap.c:195
            -> mm_addrspace_lock    -> frame_alloc()
@@ -5005,6 +5005,18 @@ if (base + span >= end)
                -> oom_try_reclaim() -> proc_force_exit(victim)
                  -> 受害者 VMA 拆解 -> 拿 mm->lock
    ```
+
+   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:404）。
+   实际路径**不经过**它——`proc_mmap` 自己取锁（proc.c:776）并直接调
+   `mm_mmap_locked`。`mm_mmap` 是另一个同样纪律的包装，不在本路径上。
+   取锁点是 `proc.c:776`，已核对。）
+
+   **一次被自己的实验否掉的假设（值得留着）**：我一度怀疑 `mm_anon_provisioned: 0`
+   是我把 PT 页分配改成不可回收（`frame_alloc_nr()`）造成的——因为
+   `mm_pt_provision_anon()` 里 `if (r < 0) return r;` 会在
+   `mm_addrspace_lock()` 失败时**跳过计数器**（pt.c:1208 / 1230）。
+   把那两处改回可回收的 `frame_alloc()` 重跑，**三个计数器仍然是 0**。
+   所以这个改动**不是**原因，它是通过验证的、保留。
 
    即：**`mm->lock` 是关中断的自旋锁，却跨越了一次可睡眠的回收**——睡眠发生在
    IRQ 关闭的自旋锁里。若受害者是自己的 mm，就是持 `mm->lock` 自杀。这与观测
@@ -5060,11 +5072,36 @@ if (base + span >= end)
    但 `mm_pt_provision_anon()` 那一侧还没有——而它才是这次日志里持有者的路径。
    先把这一侧也改成不可回收，再重试摘锁。
 
-   **尚未验证**：预标记快段在 `smoke-mm-pt-race` 里是否真的非空跑过。本轮
-   guest 日志中**没有任何 perf 计数行**（`mm_fault_from_status` 与 `perf` 都 grep
-   不到），所以不能拿"门禁绿"当作快段被执行过的证据——这正是本项目已经栽过一次
-   的坑（`smoke-mm-stress` 不传 `a20.anonprov` 导致假绿）。重试前必须先让
-   `/proc/a20/perf` 的 `mm_fault_from_status` 在该 smoke 里可见且非零。
+   **已验证，且我此前得出的「快段是死代码」是错的（已撤回）**：
+
+   我一度判定预标记从未发生、快段在 `smoke-mm-pt-race` 里是死代码，理由是
+   `mm_anon_provisioned: 0` / `mm_fault_from_status: 0`。**那个 0 是测量装置的
+   产物，不是系统的事实**：`a20_perf_format()`（`core/perf.c:94`）在渲染
+   `/proc/a20/perf` 时先 `g_a20_perf_enabled = 1` **再**取快照，而
+   `a20_perf_add()`（`include/core/perf.h:108`）在 `g_a20_perf_enabled == 0`
+   时直接 return。所以在负载**之后只读一次**，所有计数器必然是 0——与负载做了什么
+   无关。
+
+   修法是在负载**之前**先读一次 perf（上膛），之后再读一次取值。实测：
+
+   ```
+   上膛读（设计如此，全 0）      负载后
+   mm_anon_provisioned: 0        mm_anon_provisioned: 9464
+   mm_anon_faults:     0         mm_anon_faults:     778
+   mm_fault_from_status: 0       mm_fault_from_status: 778
+   ```
+
+   即快段在这次运行里执行了 778 次。文档 4508 行更早的一次运行也记录了
+   `mm_anon_provisioned: 331536` / `mm_fault_from_status: 164676`，与之一致。
+
+   **两个教训**：(1) 我把「我测到的 0」当成了「系统的 0」，而且是在已经 commit
+   之后才发现自己错了；(2) 本项目栽过两次同一类的坑——`smoke-mm-stress` 不传
+   `a20.anonprov` 导致假绿，这次是 perf 计数器默认休眠导致全 0。**任何「某计数器
+   为 0」的结论，必须先确认计数器本身是活的。**
+
+   `smoke-mm-pt-race` 现在断言 `mm_fault_from_status: [1-9]`（非零），并且上膛读是
+   它的一部分，所以快段退化成死代码时这个门禁会**红**。这条断言现在是有意义的，
+   不再是我之前以为的那种装饰。
 
 3. **drain 的触发频率**：`mm_pt_retire_drain()` 只在 retire 时立即调用，若
    `pt_readers > 0` 就返回，退役列表在持续多核缺页下可能堆积。当前每次 retire 都会
