@@ -6,6 +6,8 @@
 #include "console.h"
 #include "platform.h"
 #include "core/string.h"
+#include "core/klog.h"
+#include "mm/frame.h"
 #include "core/stdio.h"
 
 typedef struct {
@@ -442,6 +444,66 @@ static void x86_ram_detect(void) {
 
     if (n == 0)
         return;
+
+    /*
+     * Coalesce before handing the map over.
+     *
+     * A firmware multiboot map is not a list of the memory you may use, it is a
+     * list of everything the firmware found, so it arrives full of adjacent and
+     * sub-page pieces.  GRUB on a UEFI VM reports seven entries, and the PFA
+     * accepts at most PFA_MAX_RANGES (4), so appending entries verbatim made
+     * pfa_init() panic with "invalid ram range count" -- the x86_64 port could
+     * not boot from real firmware at all, only from QEMU's -kernel map, which
+     * conveniently reports exactly one range.
+     *
+     * Merging neighbours is not a workaround for the cap, it is what the list
+     * means: two entries that touch describe one usable region, and the PFA is
+     * better served by one range than by two.  Sorting first is what makes the
+     * merge possible, since the firmware is under no obligation to order them.
+     */
+    for (size_t i = 1; i < n; i++) {      /* insertion sort: n <= 8 */
+        paddr_t b = g_ram_base[i], e = g_ram_end[i];
+        size_t j = i;
+        while (j > 0 && g_ram_base[j - 1] > b) {
+            g_ram_base[j] = g_ram_base[j - 1];
+            g_ram_end[j] = g_ram_end[j - 1];
+            j--;
+        }
+        g_ram_base[j] = b;
+        g_ram_end[j] = e;
+    }
+
+    size_t merged = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (merged > 0 && g_ram_base[i] <= g_ram_end[merged - 1]) {
+            if (g_ram_end[i] > g_ram_end[merged - 1])
+                g_ram_end[merged - 1] = g_ram_end[i];
+            continue;
+        }
+        g_ram_base[merged] = g_ram_base[i];
+        g_ram_end[merged] = g_ram_end[i];
+        merged++;
+    }
+    n = merged;
+
+    /*
+     * Still more ranges than the PFA has room for.  Merging cannot fix that -- the
+     * gaps are real -- so keep the largest, which is the memory that matters, and
+     * say so rather than dropping the excess silently.
+     */
+    if (n > PFA_MAX_RANGES) {
+        kinfo("[RAM] %zu ranges after merge, PFA takes %d; keeping the largest\n",
+              n, PFA_MAX_RANGES);
+        size_t best = 0;
+        for (size_t i = 1; i < n; i++)
+            if (g_ram_end[i] - g_ram_base[i] >
+                g_ram_end[best] - g_ram_base[best])
+                best = i;
+        paddr_t b = g_ram_base[best], e = g_ram_end[best];
+        g_ram_base[0] = b;
+        g_ram_end[0] = e;
+        n = 1;
+    }
 
     g_ram_count = n;
     for (size_t i = 0; i < n; i++)
