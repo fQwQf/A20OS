@@ -1329,6 +1329,109 @@ int vfs_symlink(const char *target, const char *linkpath) {
     return r;
 }
 
+/* ---- per-process root and cwd references -----------------------------
+ *
+ * The strings in proc_fs_context_t are the flattened spellings; these four
+ * helpers are the only places that move the object references they are
+ * derived from, so the pair cannot drift apart.  Every transition takes the
+ * new reference before releasing the old one, which matters for chdir(".")
+ * and for re-pivoting onto the same directory. */
+
+/* Move @t's root to the (mount, vnode) pair, @root_path being the global
+ * path that spells it.  Called by chroot(2), pivot_root(2) and the
+ * namespace-apply path. */
+void vfs_task_root_set(task_t *t, mount_t *mnt, vnode_t *vn,
+                       const char *root_path) {
+    if (!t) return;
+    if (vn) vnode_get(vn);
+    vfs_mount_root_get(mnt);
+    if (t->fs.root_vn) vnode_put(t->fs.root_vn);
+    if (t->fs.root_mnt) vfs_mount_root_put(t->fs.root_mnt);
+    t->fs.root_vn = vn;
+    t->fs.root_mnt = mnt;
+    if (root_path) {
+        strncpy(t->fs.root_path, root_path, MAX_PATH_LEN - 1);
+        t->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+    }
+    /* Linux resets the cwd to the new root on chroot; pivot_root sets it
+     * explicitly afterwards.  Keeping cwd root-relative, "/" is correct for
+     * both. */
+    strncpy(t->fs.cwd, "/", MAX_PATH_LEN - 1);
+    t->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    if (t->fs.cwd_vn) vnode_put(t->fs.cwd_vn);
+    t->fs.cwd_vn = vn;
+    if (vn) vnode_get(vn);
+    if (mnt) vfs_mount_cwd_get(mnt);
+}
+
+/* Move @t's cwd to @vn, @visible being its root-relative spelling. */
+void vfs_task_cwd_set(task_t *t, vnode_t *vn, const char *visible) {
+    if (!t) return;
+    if (vn) vnode_get(vn);
+    mount_t *new_mnt = vn ? vn->mnt : NULL;
+    if (new_mnt) vfs_mount_cwd_get(new_mnt);
+    mount_t *old_mnt = t->fs.cwd_vn ? t->fs.cwd_vn->mnt : NULL;
+    if (t->fs.cwd_vn) vnode_put(t->fs.cwd_vn);
+    if (old_mnt) vfs_mount_cwd_put(old_mnt);
+    t->fs.cwd_vn = vn;
+    if (visible) {
+        strncpy(t->fs.cwd, visible, MAX_PATH_LEN - 1);
+        t->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    }
+}
+
+/* Copy @src's root/cwd references into @dst, taking @dst's own references.
+ * Used by fork/clone, where the strings are copied field by field next to
+ * this call. */
+void vfs_task_fs_pins_copy(task_t *dst, const task_t *src) {
+    if (!dst || !src)
+        return;
+    dst->fs.cwd_vn = NULL;
+    dst->fs.root_vn = NULL;
+    dst->fs.root_mnt = NULL;
+    if (src->fs.cwd_vn) {
+        dst->fs.cwd_vn = src->fs.cwd_vn;
+        vnode_get(dst->fs.cwd_vn);
+        if (dst->fs.cwd_vn->mnt)
+            vfs_mount_cwd_get(dst->fs.cwd_vn->mnt);
+    }
+    dst->fs.root_vn = src->fs.root_vn;
+    if (dst->fs.root_vn)
+        vnode_get(dst->fs.root_vn);
+    dst->fs.root_mnt = src->fs.root_mnt;
+    if (dst->fs.root_mnt)
+        vfs_mount_root_get(dst->fs.root_mnt);
+}
+
+/* Drop the per-task references.  fdtable_close_all() calls this on every
+ * exit path; it must be safe to call twice (exec re-enters teardown). */
+void vfs_task_fs_pins_release(task_t *t) {
+    if (!t) return;
+    if (t->fs.cwd_vn) {
+        if (t->fs.cwd_vn->mnt)
+            vfs_mount_cwd_put(t->fs.cwd_vn->mnt);
+        vnode_put(t->fs.cwd_vn);
+        t->fs.cwd_vn = NULL;
+    }
+    if (t->fs.root_vn) {
+        vnode_put(t->fs.root_vn);
+        t->fs.root_vn = NULL;
+    }
+    if (t->fs.root_mnt) {
+        vfs_mount_root_put(t->fs.root_mnt);
+        t->fs.root_mnt = NULL;
+    }
+}
+
+/* The mount @t is rooted in, resolving the implicit "/" root on first use
+ * without taking a reference (nothing can drop the namespace root while any
+ * process exists). */
+mount_t *vfs_task_root_mount(task_t *t) {
+    if (!t) return NULL;
+    if (t->fs.root_mnt) return t->fs.root_mnt;
+    return vfs_find_mount("/");
+}
+
 int vfs_chdir(const char *path) {
     task_t *cur = proc_current();
     if (!cur) return -EINVAL;
@@ -1350,14 +1453,15 @@ int vfs_chdir(const char *path) {
     if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (vn->type != VFS_FT_DIR) { vnode_put(vn); return -ENOTDIR; }
     if (vfs_vnode_permission(vn, X_OK) < 0) { vnode_put(vn); return -EACCES; }
-    vnode_put(vn);
     char visible[MAX_PATH_LEN];
     const char *cwd_visible =
         vfs_chroot_visible_path(cur, canon, visible, sizeof(visible));
-    if (!cwd_visible)
-        return -ENAMETOOLONG;
-    strncpy(cur->fs.cwd, cwd_visible, MAX_PATH_LEN - 1);
-    cur->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    if (!cwd_visible) { vnode_put(vn); return -ENAMETOOLONG; }
+    /* The reference @vn arrived with is adopted as the cwd pin rather than
+     * dropped: it is what makes "somebody is standing in this filesystem"
+     * answerable at umount time. */
+    vfs_task_cwd_set(cur, vn, cwd_visible);
+    vnode_put(vn);
     return 0;
 }
 

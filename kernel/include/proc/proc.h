@@ -19,9 +19,34 @@ struct vmo;
 struct cg_node;
 typedef struct mm_struct mm_struct_t;
 
+struct vnode;
+struct mount;
+
+/*
+ * Per-process filesystem position.
+ *
+ * cwd[] and root_path[] are the flattened spellings the path walker composes
+ * against; the vnode/mount fields next to them are the authority.  A process
+ * holds a reference on the directory object its cwd names and on the (mount,
+ * vnode) pair that is its root, which is what makes chroot(2) and
+ * pivot_root(2) operate on objects rather than on string prefixes:
+ *
+ *   - unmounting the filesystem a process is rooted in, or standing in, is
+ *     refused because the mount can see those references;
+ *   - pivot_root can therefore detach the old root without leaving any
+ *     process holding a mount that nothing reaches any more;
+ *   - a fork copies the pointers and takes its own references, so the parent
+ *     and child can chdir/pivot independently.
+ *
+ * fdtable_close_all() releases both references; that is the single teardown
+ * hook every exit path already calls.
+ */
 typedef struct proc_fs_context {
     char cwd[MAX_PATH_LEN];
     char root_path[MAX_PATH_LEN];
+    struct vnode *cwd_vn;      /* pin on the directory the cwd names */
+    struct mount *root_mnt;    /* mount the process root lives in */
+    struct vnode *root_vn;     /* the root directory object itself */
     int  umask;
 } proc_fs_context_t;
 

@@ -196,7 +196,7 @@ strength of a boilerplate note.
 | `utime` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1005); struct utimbuf wrapper over vfs_utimensat |
 | `utimes` | path/fs | `partial` | `smoke-vfs-stress` | x86_64-only legacy entry (spare slot 1006); struct timeval[2] wrapper over vfs_utimensat |
 | `get_thread_area` | arch | `partial` | `smoke-abi-linux` | x86_64-only legacy entry (spare slot 1007); reports the FS-base TLS pointer from the trap frame |
-| `chroot` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
+| `chroot` | path/fs | `full` | `smoke-vfs-edge`, `smoke-pivot-root` | root taken as a (mount, vnode) pair; `..` escape refused |
 | `mknodat` | path/fs | `partial` | `smoke-vfs-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `set_thread_area` | arch | `partial` | `smoke-abi-linux` | implemented subset; architecture-specific semantics remain bounded |
 | `exit` | process | `partial` | `smoke-proc-stress` | implemented subset; Linux edge semantics remain documented gaps |
@@ -346,7 +346,7 @@ strength of a boilerplate note.
 | `vhangup` | system | `partial` | `smoke-abi-linux` | reports -ENOSYS: NOT implemented. A20OS has no tty layer, so a task records no controlling terminal or session to revoke; returning success would be a fabricated capability |
 | `unshare` | namespaces | `partial` | `smoke-mntns` | CLONE_NEWNS creates a real mount namespace; other CLONE_NEW* and non-namespace unshare flags refuse with -EINVAL |
 | `setns` | namespaces | `partial` | `smoke-mntns` | joins mount namespaces via /proc/<pid>/ns/mnt fds (CAP_SYS_ADMIN/root/same-uid); non-mnt targets refuse with -EINVAL |
-| `pivot_root` | namespaces | `partial` | `smoke-abi-linux` | compatibility paths only; no full namespace model |
+| `pivot_root` | namespaces | `full` | `smoke-pivot-root` | real pivot over the mount tree; no shared-subtree propagation (no MS_SHARED mounts) |
 | `get_mempolicy` | memory | `partial` | `smoke-mm-stress` | implemented subset; Linux edge semantics remain documented gaps |
 | `sched_setattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; validates policy/flags/nice/priority and routes through proc_sched_set; no util-clamp or deadline fields |
 | `sched_getattr` | scheduler | `partial` | `smoke-proc-stress` | full struct sched_attr wire layout; reports policy/flags/nice/priority; no util-clamp or deadline fields |

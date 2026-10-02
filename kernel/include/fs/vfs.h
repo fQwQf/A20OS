@@ -296,7 +296,23 @@ typedef struct vfile {
  *   parent/current refs across restart and drop all abandoned refs on errors.
  */
 
-/* ---- Mount point ---- */
+/* ---- Mount point ----
+ *
+ * A mount is an object with a real position in a tree: mnt_parent and mnt_mp
+ * say where it is attached (mnt_mp is the vnode inside mnt_parent that this
+ * mount covers, and the mount holds a reference on it), while path[] keeps
+ * the flattened namespace-visible spelling that path resolution matches on.
+ * Both are maintained because they answer different questions: the tree is
+ * the authority for lifetime and parentage (umount busy checks, pivot_root,
+ * mountinfo parent ids), and the path is the authority for "which mount does
+ * this absolute path resolve in".
+ *
+ * VFS_MOUNT_DETACHED marks a mount that pivot_root has cut out of the tree.
+ * It stays in the table so mountinfo can still report it, but no path
+ * resolves through it any more -- which is exactly Linux's post-pivot
+ * property: the old root is unreachable by path and reachable only through
+ * an already-open file descriptor.
+ */
 typedef struct mount {
     int             type;           /* FS_TYPE_* */
     int             flags;
@@ -314,9 +330,29 @@ typedef struct mount {
      * dcache and quota caches may still point at it) until its namespace is
      * torn down. */
     struct mount   *dead_next;
+
+    /* ---- tree position and root pinning ---- */
+    struct mount   *mnt_parent;     /* NULL: namespace root */
+    vnode_t        *mnt_mp;         /* mountpoint vnode inside mnt_parent */
+    struct mount   *mnt_child;      /* first child mount */
+    struct mount   *mnt_sibling;    /* next sibling of the same parent */
+    /* 1 while the mount is in its namespace table, 0 after umount. */
+    int             attached;
+    /* Processes using this mount as their root, plus the namespace table's
+     * own reference -- so the value is >= 1 for any attached mount.  umount
+     * refuses to drop a mount that is somebody's root unless MNT_DETACH. */
+    int             root_users;
+    /* Processes whose current working directory lives in this mount.  A
+     * second umount reason: unmounting the filesystem a process is standing
+     * in would leave its cwd naming a path that resolves nowhere. */
+    int             cwd_users;
+    /* Stable identity within the namespace, reported as the mount id by
+     * /proc/self/mountinfo and statmount(2). */
+    uint32_t        mnt_id;
 } mount_t;
 
-#define VFS_MOUNT_RDONLY 0x1
+#define VFS_MOUNT_RDONLY  0x1
+#define VFS_MOUNT_DETACHED 0x2
 
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192
@@ -366,6 +402,19 @@ void vfs_set_lookup_errno(int err);
 
 /* Resolve a "/proc/<pid|self>/fd/<n>" path to the target task and fd. */
 int vfs_proc_fd_target(const char *path, struct task_t **task_out, int *fd_out);
+
+/* ---- per-process root / cwd references ---------------------------------
+ * These own the vnode and mount references behind task->fs.  They are the
+ * only writers of those fields, so the flattened cwd[]/root_path[] strings
+ * and the objects they name cannot drift apart. */
+void  vfs_task_root_set(struct task_t *t, struct mount *mnt, struct vnode *vn,
+                        const char *root_path);
+void  vfs_task_cwd_set(struct task_t *t, struct vnode *vn,
+                       const char *visible_cwd);
+void  vfs_task_fs_pins_release(struct task_t *t);
+struct mount *vfs_task_root_mount(struct task_t *t);
+/* Copy @src's root/cwd references into @dst (fork/clone). */
+void  vfs_task_fs_pins_copy(struct task_t *dst, const struct task_t *src);
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
