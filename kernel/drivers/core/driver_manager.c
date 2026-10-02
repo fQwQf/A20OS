@@ -28,6 +28,7 @@
 #include "proc/proc.h"
 #include "mm/elf.h"
 #include "fs/vfs.h"
+#include "fs/fdtable.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/udriver.h"
 #include "drivers/bus/platform_bus.h"
@@ -334,20 +335,29 @@ int driver_manager_spawn_user(const char *path)
     uint32_t root_h = 0, cwd_h = 0;
     int root_fd = vfs_open("/", O_RDONLY, 0);
     if (root_fd >= 0) {
+        vfile_t *root_vf = fdtable_get_current_file_ref(root_fd);
+        fdtable_close_current(root_fd); /* the handles own the refs */
+        if (!root_vf)
+            return -EBADF;
         int64_t h = manager_handle_install(
-            ht, (void *)(uintptr_t)root_fd, A20_OBJ_DIRECTORY,
+            ht, root_vf, A20_OBJ_DIRECTORY,
             A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP |
             A20_RIGHT_TRANSFER);
         if (h >= 0) {
             root_h = (uint32_t)h;
-            vfs_ref_fd(root_fd);
+            /* The second handle owns its own reference. */
+            vfile_get(root_vf);
             int64_t h2 = manager_handle_install(
-                ht, (void *)(uintptr_t)root_fd, A20_OBJ_DIRECTORY,
+                ht, root_vf, A20_OBJ_DIRECTORY,
                 A20_RIGHT_READ | A20_RIGHT_STAT | A20_RIGHT_DUP);
             if (h2 >= 0)
                 cwd_h = (uint32_t)h2;
+            else
+                vfs_put_file(root_vf);
             if (!cwd_h)
                 cwd_h = root_h;
+        } else {
+            vfs_put_file(root_vf);
         }
     }
 

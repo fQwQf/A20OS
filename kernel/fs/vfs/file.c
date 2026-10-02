@@ -218,40 +218,62 @@ int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
     return r;
 }
 
+long vfs_lseek_vfile(vfile_t *vf, long offset, int whence)
+{
+    if (!vf)
+        return -EBADF;
+    int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
+    long r;
+    if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
+        r = -ESPIPE;
+    } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
+        r = -ESPIPE;
+    } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == 0140000)) { /* S_IFSOCK is 0140000 */
+        r = -ESPIPE;
+    } else if (vf->ops && vf->ops->lseek) {
+        r = vf->ops->lseek(vf, offset, whence);
+    } else {
+        r = -EBADF;
+    }
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
+    return r;
+}
+
 long vfs_lseek(int fd, long offset, int whence)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
-    long r = -EBADF;
-    if (vf) {
-        int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
-        if (lock_offset)
-            mutex_lock(&vf->offset_lock);
-        if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
-            r = -ESPIPE;
-        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
-            r = -ESPIPE;
-        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == 0140000)) { /* S_IFSOCK is 0140000 */
-            r = -ESPIPE;
-        } else if (vf->ops && vf->ops->lseek) {
-            r = vf->ops->lseek(vf, offset, whence);
-        }
-        if (lock_offset)
-            mutex_unlock(&vf->offset_lock);
-    }
-    vfs_put_file_ref(fd, vf);
+    long r = vfs_lseek_vfile(vf, offset, whence);
+    vfs_put_file(vf);
     return r;
+}
+
+int vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count)
+{
+    if (!vf)
+        return -EBADF;
+    if (vf->ops && vf->ops->readdir)
+        return vf->ops->readdir(vf, dirp, count);
+    return -EBADF;
 }
 
 int vfs_getdents64(int fd, void *dirp, size_t count)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
-    int r = -EBADF;
-    if (vf) {
-        if (vf->ops && vf->ops->readdir)
-            r = vf->ops->readdir(vf, dirp, count);
-    }
-    vfs_put_file_ref(fd, vf);
+    int r = vfs_getdents64_vfile(vf, dirp, count);
+    vfs_put_file(vf);
     return r;
+}
+
+int vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg)
+{
+    if (!vf)
+        return -EBADF;
+    if (vf->ops && vf->ops->ioctl)
+        return vf->ops->ioctl(vf, req, arg);
+    return -ENOTTY;
 }
 
 int vfs_ioctl(int fd, unsigned long req, void *arg)
@@ -259,10 +281,8 @@ int vfs_ioctl(int fd, unsigned long req, void *arg)
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf)
         return -EBADF;
-    int r = -ENOTTY;
-    if (vf->ops && vf->ops->ioctl)
-        r = vf->ops->ioctl(vf, req, arg);
-    vfs_put_file_ref(fd, vf);
+    int r = vfs_ioctl_vfile(vf, req, arg);
+    vfs_put_file(vf);
     return r;
 }
 

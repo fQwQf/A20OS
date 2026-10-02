@@ -451,14 +451,13 @@ int64_t sys_unshare(int flags) {
 }
 
 int64_t sys_setns(int fd, int nstype) {
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_current_file_ref(fd, &gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
     if (!vf)
         return -EBADF;
     int kind = procfs_ns_file_kind(vf);
     if (kind < 0) {
         /* fd is not a /proc/<pid>/ns/<type> file */
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     /* Map the target kind to its CLONE_NEW* bit for the nstype check. */
@@ -472,19 +471,19 @@ int64_t sys_setns(int fd, int nstype) {
         [PROCNS_CGROUP] = 0x02000000,  /* CLONE_NEWCGROUP */
     };
     if (nstype != 0 && nstype != kind_flags[kind]) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     /* Only mount namespaces can be joined; the other namespace types are
      * system-wide singletons and setns is honestly refused. */
     if (kind != PROCNS_MNT) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     int owner_uid = -1;
     mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid);
     if (!ns) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     task_t *cur = proc_current();
@@ -495,11 +494,11 @@ int64_t sys_setns(int fd, int nstype) {
     if (!cur || (!proc_has_cap(cur, CAP_SYS_ADMIN) && cur->cred.euid != 0 &&
                  cur->cred.euid != owner_uid)) {
         mntns_put(ns);
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EPERM;
     }
     int r = mntns_join(cur, ns);  /* consumes the reference */
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     return r;
 }
 
@@ -615,10 +614,8 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
 
     int flags = (int)khow.flags;
     int mode = (int)(khow.mode & 07777);
-    int gfd = vfs_openat2(dirfd, kpath, flags, mode, khow.resolve);
-    if (gfd < 0) return gfd;
-    task_t *t = proc_current();
-    return fdtable_install(t, gfd, flags);
+    /* vfs_openat2() already installed the fd with O_CLOEXEC honoured. */
+    return vfs_openat2(dirfd, kpath, flags, mode, khow.resolve);
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {

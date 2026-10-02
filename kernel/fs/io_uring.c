@@ -144,7 +144,7 @@ static int io_uring_map_page(mm_struct_t *mm, pfn_t pfn, uint64_t *va_out)
     vma->end = addr + PAGE_SIZE;
     vma->vm_flags = VM_SHARED | VM_READ | VM_WRITE;
     vma->pte_flags = flags;
-    vma->file_fd = -1;
+    vma->file = NULL;
     uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
     mm_insert_vma(mm, vma);
     mm->total_vm++;

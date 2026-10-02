@@ -465,24 +465,25 @@ static uint64_t exec_setup_native_abi(task_t *t,
                 { 2, A20_RIGHT_WRITE | A20_RIGHT_SEEK | A20_RIGHT_DUP | A20_RIGHT_CONTROL, &stderr_h },
             };
             for (int i = 0; i < 3; i++) {
-                int gfd = fdtable_get(t, stdio[i].fd);
-                int owns_ref;
-                if (gfd >= 0) {
-                    vfs_ref_fd(gfd);
-                    owns_ref = 1;
-                } else {
+                /* Each native stdio handle owns its own vfile reference; no
+                 * fd slot is involved. */
+                vfile_t *vf = fdtable_get_file_ref(t, stdio[i].fd, NULL);
+                if (!vf) {
                     int flags = (stdio[i].rights & A20_RIGHT_READ) ? O_RDONLY : O_WRONLY;
-                    gfd = vfs_open("/dev/console", flags, 0);
-                    if (gfd < 0)
+                    int cfd = vfs_open("/dev/console", flags, 0);
+                    if (cfd < 0)
                         continue;
-                    owns_ref = 1;
+                    vf = fdtable_get_current_file_ref(cfd);
+                    fdtable_close_current(cfd);
+                    if (!vf)
+                        continue;
                 }
-                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd,
+                int64_t h = a20_handle_install(ht, vf,
                                                A20_OBJ_FILE, stdio[i].rights);
                 if (h >= 0) {
                     *stdio[i].out = (uint32_t)h;
-                } else if (owns_ref) {
-                    vfs_close(gfd);
+                } else {
+                    vfs_put_file(vf);
                 }
             }
         }
@@ -509,19 +510,28 @@ static uint64_t exec_setup_native_abi(task_t *t,
         } else {
             int root_fd = vfs_open("/", O_RDONLY, 0);
             if (root_fd >= 0) {
-                int64_t h = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
-                                               A20_OBJ_DIRECTORY,
-                                               A20_RIGHT_READ | A20_RIGHT_STAT |
-                                               A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
-                if (h >= 0) {
-                    root_h = (uint32_t)h;
-                    vfs_ref_fd(root_fd);
-                    int64_t h2 = a20_handle_install(ht, (void *)(uintptr_t)root_fd,
-                                                    A20_OBJ_DIRECTORY,
-                                                    A20_RIGHT_READ | A20_RIGHT_STAT |
-                                                    A20_RIGHT_DUP);
-                    if (h2 >= 0) cwd_h = (uint32_t)h2;
-                    if (!cwd_h) cwd_h = root_h;
+                vfile_t *root_vf = fdtable_get_current_file_ref(root_fd);
+                fdtable_close_current(root_fd); /* the handles own the refs */
+                if (root_vf) {
+                    /* Each installed handle owns one reference: install1
+                     * takes over the lookup ref, install2 gets its own. */
+                    int64_t h = a20_handle_install(ht, root_vf,
+                                                   A20_OBJ_DIRECTORY,
+                                                   A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                   A20_RIGHT_DUP | A20_RIGHT_TRANSFER);
+                    if (h >= 0) {
+                        root_h = (uint32_t)h;
+                        vfile_get(root_vf);
+                        int64_t h2 = a20_handle_install(ht, root_vf,
+                                                        A20_OBJ_DIRECTORY,
+                                                        A20_RIGHT_READ | A20_RIGHT_STAT |
+                                                        A20_RIGHT_DUP);
+                        if (h2 >= 0) cwd_h = (uint32_t)h2;
+                        else vfs_put_file(root_vf);
+                        if (!cwd_h) cwd_h = root_h;
+                    } else {
+                        vfs_put_file(root_vf);
+                    }
                 }
             }
         }

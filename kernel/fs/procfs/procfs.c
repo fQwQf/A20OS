@@ -490,13 +490,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             proc_put(task);
             return -EACCES;
         }
-        int gfd = -1;
         vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
+            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
         proc_put(task);
         if (!target)
             return -ENOENT;
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         child = new_entry(name, PF_PID_FD, dp->pid);
         type = PF_PID_FD;
         fd_symlink = 1;
@@ -513,13 +512,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             proc_put(task);
             return -EACCES;
         }
-        int gfd = -1;
         vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
+            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
         proc_put(task);
         if (!target)
             return -ENOENT;
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
         type = PF_PID_FDINFO_ENTRY;
     } else if (dp && dp->type == PF_PID_NS) {
@@ -702,15 +700,14 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
     vfile_t *target = task ?
-        fdtable_get_file_ref(task, fd, &gfd, NULL) : NULL;
+        fdtable_get_file_ref(task, fd, NULL) : NULL;
     if (!target) {
         proc_put(task);
         return -ENOENT;
     }
     if (!target->path[0]) {
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         proc_put(task);
         return -ENOENT;
     }
@@ -718,7 +715,7 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
     if (len > sz)
         len = sz;
     memcpy(buf, target->path, len);
-    vfs_put_file_ref(gfd, target);
+    vfs_put_file(target);
     proc_put(task);
     return (int)len;
 }
@@ -1036,10 +1033,9 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
         } else {
             fd = cursor - 2;
             while (fd < MAX_FILES) {
-                int gfd = -1;
-                vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, NULL);
+                vfile_t *target = fdtable_get_file_ref(task, fd, NULL);
                 if (target) {
-                    vfs_put_file_ref(gfd, target);
+                    vfs_put_file(target);
                     break;
                 }
                 fd++;

@@ -175,14 +175,16 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
          (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
     vm_area_t *vma = mm_find_vma(task->mm, va & ~(PAGE_SIZE - 1));
     if (vma) {
-        kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file_fd=%d off=0x%lx\n",
+        kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file=%lu off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
-             vma->file_fd, vma->file_offset);
-        if (vma->file_fd >= 0) {
-            vfile_t *vf = vfs_get_file_ref(vma->file_fd);
+             (unsigned long)(vma->file ? vma->file->identity : 0),
+             vma->file_offset);
+        if (vma->file) {
+            vfile_t *vf = vma->file;
+            vfile_get(vf);
             if (vf) {
                 kerr("  vma_file=%s\n", vf->path);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file(vf);
             }
         }
     } else {

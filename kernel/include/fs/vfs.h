@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/refcount.h"
 #include "core/sync.h"
+#include "fs/file.h"
 
 /* ============================================================
  * VFS — Virtual Filesystem Switch
@@ -376,8 +377,11 @@ int      vfs_read_file(vfile_t *vf, char *buf, size_t count);
 int      vfs_write_file(vfile_t *vf, const char *buf, size_t count);
 int      vfs_pread(int fd, char *buf, size_t count, uint64_t offset);
 long     vfs_lseek(int fd, long offset, int whence);
+long     vfs_lseek_vfile(vfile_t *vf, long offset, int whence);
 int      vfs_getdents64(int fd, void *dirp, size_t count);
+int      vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
+int      vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg);
 int      vfs_sync(void);
 int      vfs_fsync(int fd);
 int      vfs_fsync_vfile(vfile_t *vf);
@@ -397,6 +401,7 @@ int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint);
 int      vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int mask);
 int      vfs_fstat(int fd, kstat_t *st);
+int      vfs_vfile_stat(vfile_t *vf, kstat_t *st);
 int      vfs_statfs(vnode_t *vn, kstatfs_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
@@ -444,18 +449,13 @@ int      vfs_umount(const char *path);
 /* Pipe */
 int      vfs_pipe(int pipefd[2]);
 
-/* file table access (for dup/dup3) */
-vfile_t *vfs_get_file(int fd);
-vfile_t *vfs_get_file_ref(int fd);
-void     vfs_put_file_ref(int fd, vfile_t *vf);
-int      vfs_ref_fd(int fd);
-int      vfs_alloc_fd(vfile_t *vf);
-int      vfs_dup(int fd);
-int      vfs_dup3(int oldfd, int newfd, int flags);
+/* fd resolution goes through the calling task's files_struct (fs/fdtable.c);
+ * the fd get/put helpers are declared in fs/file.h. */
 int      vfs_fcntl(int fd, int cmd, long arg);
+int      vfs_fcntl_vfile(vfile_t *vf, int cmd, long arg);
 int      vfs_flock(int fd, int operation);
 void     vfs_release_process_locks(int pid);
-void     vfs_release_process_file_locks(int fd, int pid);
+void     vfs_release_process_file_locks(vfile_t *vf, int pid);
 
 /* Truncate */
 int      vfs_truncate(const char *path, size_t size);

@@ -41,9 +41,9 @@ int64_t sys_socket(int domain, int type, int protocol) {
             return mr;
         }
     }
-    task_t *t = proc_current();
-    int lfd = fdtable_install(t, gfd, type);
-    return lfd;
+    /* net_socket_create() already installed the fd; @type only carried
+     * SOCK_NONBLOCK handling done inside net_socket_create. */
+    return gfd;
 }
 
 int64_t sys_socketpair(int domain, int type, int protocol, int *sv) {
@@ -67,21 +67,10 @@ int64_t sys_socketpair(int domain, int type, int protocol, int *sv) {
             return mr;
         }
     }
-    task_t *t = proc_current();
-    int l0 = fdtable_install(t, gfds[0], 0);
-    if (l0 < 0) {
-        vfs_close(gfds[1]);
-        return l0;
-    }
-    int l1 = fdtable_install(t, gfds[1], 0);
-    if (l1 < 0) {
-        fdtable_close(t, l0);
-        return l1;
-    }
-    int out[2] = { l0, l1 };
+    int out[2] = { gfds[0], gfds[1] };
     if (copy_to_user(sv, out, sizeof(out)) < 0) {
-        fdtable_close(t, l0);
-        fdtable_close(t, l1);
+        fdtable_close_current(gfds[0]);
+        fdtable_close_current(gfds[1]);
         return -EFAULT;
     }
     return 0;
@@ -156,11 +145,7 @@ int64_t sys_accept4(int fd, void *addr, void *addrlen, int flags) {
     ktrace_syscall("[SYS] accept4: new_gfd=%d\n", new_gfd);
     if (flags & SOCK_NONBLOCK)
         net_set_nonblock(new_gfd, 1);
-    int lfd = fdtable_install_current( new_gfd, flags);
-    if (lfd < 0) {
-        vfs_close(new_gfd);
-        return lfd;
-    }
+    int lfd = new_gfd;
     if (addr && addrlen) {
         if (copy_to_user(addr, kaddr, klen) < 0) {
             sys_close(lfd);
