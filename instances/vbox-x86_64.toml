@@ -8,22 +8,24 @@
 # Boots via UEFI, which is what makes the form match aarch64: most current
 # machines are UEFI-only with no CSM option.
 #
-# It boots the kernel and stops there.  Measured, not assumed: under OVMF this
-# image reaches "[INIT] System ready" with a correct 992 MiB RAM map and then
-# panics with "init: no init program found", because UEFI keeps the RSDP in its
-# configuration table, GRUB does not fill the multiboot ACPI tag, and
-# kernel/boot/uefi/ has no x86_64 loader to receive it.  With no RSDP there is no
-# MCFG, so PCI falls back to a hardcoded ECAM window that holds no devices and no
-# block driver binds.  The boot log says so rather than failing quietly:
+# It boots all the way to userspace.  Measured under OVMF, not assumed:
 #
-#   [PCI] no MCFG (UEFI), using the q35 default 0x... -- UEFI without an x86_64
-#   stub cannot work
+#   [PCI] ECAM 0xffff8000e0000000 from MCFG, buses 0..255
+#   [VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
+#   [INIT] Block device -> /bin (fat32)
+#   [INIT] System ready
 #
-# So today vbox-iso-x86_64 is the instance that reaches userspace: it goes
-# through BIOS, where SeaBIOS publishes the RSDP in a region the kernel already
-# scans.  This instance is the unified *form* the two architectures were asked to
-# share, and it becomes the working one the moment an x86_64 EFI stub exists --
-# which is a loader, not a driver, and is the outstanding work.
+# The ESP holds BOOTX64.EFI, not GRUB.  GRUB 2.12 does not fill the multiboot
+# ACPI tags, so a multiboot kernel booted by GRUB under UEFI never learns the
+# RSDP address: with no RSDP there is no MCFG, PCI falls back to a hardcoded
+# window holding no devices, no block driver binds, and the boot stops at
+# "init: no init program found".  So the ESP loader reads the RSDP straight out
+# of the firmware configuration table and hands it to the kernel, which is what
+# makes the ECAM line above read from MCFG instead of the fallback.
+#
+# Note the ECAM is 0xe0000000, not QEMU's q35 default of 0xb0000000 -- which is
+# the whole point of reading MCFG, and is what makes this work on real
+# hardware whose ECAM base differs.  vbox-iso-x86_64 remains the BIOS path.
 name = "vbox-x86_64"
 description = "VirtualBox x86_64 directly bootable UEFI disk image"
 arch = "x86_64"
@@ -31,7 +33,7 @@ board = "qemu-virt-x86_64"
 abi = "both"
 
 [package]
-kind = "grub-disk"
+kind = "uefi-disk"
 
 [target]
 serial = "/dev/ttyUSB0"

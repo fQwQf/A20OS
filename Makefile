@@ -1092,6 +1092,8 @@ VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
 VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
 VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
 VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
+VBOX_X86_64_EFI = $(BUILD_DIR)/BOOTX64.EFI
+VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 
 # ================================================================
 # Targets (split into tools/targets-*.mk)

@@ -88,6 +88,8 @@ kernel-bundle: dev-build
 	@mkdir -p build/$(BOARD)
 	READELF="$(READELF)" tools/mk_kernel_bundle.sh \
 		$(KERNEL_ELF) $(KERNEL_BIN) build/$(BOARD)/handoff $(BOARD)
+_x86_64_uefi_disk_impl: $(VBOX_X86_64_IMG)
+	@echo "VirtualBox x86_64 UEFI disk ready: $(VBOX_X86_64_IMG)"
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
 _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)

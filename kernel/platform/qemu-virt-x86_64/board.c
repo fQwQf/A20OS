@@ -189,9 +189,15 @@ static void x86_64_enumerate_devices(void) {
          * nothing pointing at PCI. */
         ecam = PCI_ECAM_BASE;
         const char *fw = firmware_bios_or_uefi();
+        /* Under UEFI this used to be fatal and said so, because no x86_64 stub
+         * existed to hand the kernel its RSDP.  kernel/boot/uefi/x86_64_loader.c
+         * does now, so reaching here under UEFI means the RSDP was found and the
+         * MCFG inside it is absent or too old -- a firmware property, not a
+         * missing loader, so do not blame the stub. */
         printf("[PCI] no MCFG (%s), using the q35 default 0x%lx%s\n", fw,
                (unsigned long)ecam,
-               fw[0] == 'U' ? " -- UEFI without an x86_64 stub cannot work"
+               fw[0] == 'U' ? " -- UEFI firmware without an MCFG table; PCI "
+                              "devices here will not be found"
                             : "");
     }
 

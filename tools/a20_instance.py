@@ -31,8 +31,8 @@ RAMFS_USER_ARCHES: Final = ("loongarch64", "riscv64")
 ABI_CHOICES: Final = ("linux", "native", "both")
 DRIVER_DEPLOYMENTS: Final = ("generic", "embedded")
 PROFILES: Final = ("full", "benchmark", "mcu")
-PACKAGE_KINDS: Final = ("grub-iso", "grub-disk", "uefi-image", "fit-sdcard",
-                     "release", "kernel-bundle")
+PACKAGE_KINDS: Final = ("grub-iso", "grub-disk", "uefi-disk", "uefi-image",
+                     "fit-sdcard", "release", "kernel-bundle")
 RELEASE_ARCH_ARTIFACTS: Final = {
     "riscv64": ("kernel-rv", "disk.img"),
     "loongarch64": ("kernel-la", "disk-la.img"),

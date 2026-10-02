@@ -71,6 +71,12 @@ static const acpi_rsdp_t *acpi_find_rsdp_range(uintptr_t start, uintptr_t end) {
  * boot path had none to give, which is what BIOS firmware leaves and why the
  * scans below are still needed.
  */
+/* Parked by _start_uefi in boot/entry.S from RSI, which is where
+ * kernel/boot/uefi/x86_64_loader.c leaves the RSDP it read from the firmware
+ * configuration table.  A physical address, like g_mb_info.  It stays zero on a
+ * multiboot boot, because nothing sets it there and BSS is cleared. */
+extern uint64_t x86_boot_acpi_rsdp;
+
 static uintptr_t g_firmware_rsdp_pa;
 
 void firmware_set_rsdp_pa(uintptr_t pa)
@@ -79,6 +85,16 @@ void firmware_set_rsdp_pa(uintptr_t pa)
 }
 
 static const acpi_rsdp_t *acpi_find_rsdp(void) {
+    /* The UEFI loader's handover, checked first: under UEFI there is no EBDA and
+     * 0xE0000-0x100000 is firmware ROM, so the BIOS scans below cannot succeed
+     * and this is the only address that exists. */
+    if (x86_boot_acpi_rsdp) {
+        const acpi_rsdp_t *rsdp =
+            (const void *)(PAGE_OFFSET + x86_boot_acpi_rsdp);
+        if (memcmp(rsdp->signature, "RSD PTR ", 8) == 0)
+            return rsdp;
+    }
+
     if (g_firmware_rsdp_pa) {
         const acpi_rsdp_t *rsdp =
             (const void *)(PAGE_OFFSET + g_firmware_rsdp_pa);
@@ -171,55 +187,143 @@ size_t firmware_acpi_apic_ids(uint32_t *ids, size_t capacity,
  * ECAM at 0xE0000000, and the only reliable way to learn it is this table, so
  * real-hardware boards must read it before pci_enumerate().
  *
- * Layout (ACPI 6.x, all offsets from the table header):
- *   60 SegmentNumber, 61 StartBusNumber, 62 EndBusNumber,
- *   72 Configuration Space Base Address (QWORD), 80 its segment (QWORD).
+ *
+ * MCFG ships in two incompatible published layouts, and firmware uses both.
+ *
+ * PCI Firmware Specification r3.0 -- what SeaBIOS emits -- lays the allocation
+ * subtable out as { u64 address; u16 segment; u8 start_bus; u8 end_bus; u32
+ * reserved; }, which puts the base address at 44 and makes the whole table
+ * exactly 60 bytes.  The ACPI specification instead reserves a u64 at 44 and
+ * moves the base address out to 59, behind { u8 segment; u8 start_bus; u8
+ * end_bus; u32 reserved; }.
+ *
+ * Measured on SeaBIOS (q35, 1 GiB): length 60, base 0xb0000000 read from 44,
+ * end bus 0xff at 55, and offset 59 already holding the next table's signature.
+ * That last detail is why the layouts are told apart by length rather than by
+ * guesswork -- a 60-byte table cannot be the ACPI one.
  */
-#define ACPI_MCFG_OFF_SEGMENT       60u
-#define ACPI_MCFG_OFF_START_BUS     61u
-#define ACPI_MCFG_OFF_END_BUS       62u
-#define ACPI_MCFG_OFF_BASE_ADDRESS  72u
+#define ACPI_MCFG_OFF_PCI_BASE      44u
+#define ACPI_MCFG_OFF_PCI_SEGMENT   52u
+#define ACPI_MCFG_OFF_PCI_START     54u
+#define ACPI_MCFG_OFF_PCI_END       55u
+#define ACPI_MCFG_MIN_PCI_LEN       56u
+
+#define ACPI_MCFG_OFF_ACPI_SEGMENT  52u
+#define ACPI_MCFG_OFF_ACPI_START    53u
+#define ACPI_MCFG_OFF_ACPI_END      54u
+#define ACPI_MCFG_OFF_ACPI_BASE     59u
+#define ACPI_MCFG_MIN_ACPI_LEN      67u
+
+/* ECAM is a 256 MiB-aligned window below 4 GiB by definition. */
+#define ACPI_MCFG_BASE_MAX          0xffffffffULL
+#define ACPI_MCFG_BASE_ALIGN_MASK   0x0fffffffULL
+
+/* Only segment 0 is mapped by the boot page tables; a non-zero segment would
+ * need a real mapping rather than PAGE_OFFSET arithmetic. */
 #define ACPI_MCFG_BASE_SEGMENT      0u
 
+struct acpi_mcfg_view {
+    uint64_t base;
+    uint16_t segment;
+    uint8_t  start_bus;
+    uint8_t  end_bus;
+};
+
+static uint64_t mcfg_read_le64(const uint8_t *p)
+{
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 /*
- * "BIOS" or "UEFI", from whether the legacy RSDP search can see anything.
+ * Resolve this MCFG into base/segment/bus range, or -1 if it is neither layout.
  *
- * The distinction decides whether a missing MCFG is normal or fatal, and the
- * caller cannot tell the two apart on its own: under SeaBIOS there is no MCFG
- * table at all and the q35 ECAM address is correct, while under OVMF an absent
- * MCFG means the RSDP was never found and the fallback window is empty.  This is
- * the same check acpi_find_rsdp() makes, exposed rather than repeated.
+ * The ACPI layout is tried first because it is the longer one, so a table that
+ * is long enough to be ACPI is not misread as PCI.  Each candidate then has to
+ * survive the ECAM sanity check, which is a real filter rather than a formality:
+ * reading the base from the wrong offset lands on the reserved field or on the
+ * neighbouring table, and neither is 256 MiB aligned.
+ */
+static int acpi_mcfg_view(const acpi_sdt_t *mcfg, struct acpi_mcfg_view *out)
+{
+    const uint8_t *b = (const uint8_t *)mcfg;
+
+    if (mcfg->length >= ACPI_MCFG_MIN_ACPI_LEN) {
+        out->base      = mcfg_read_le64(b + ACPI_MCFG_OFF_ACPI_BASE);
+        out->segment   = b[ACPI_MCFG_OFF_ACPI_SEGMENT];
+        out->start_bus = b[ACPI_MCFG_OFF_ACPI_START];
+        out->end_bus   = b[ACPI_MCFG_OFF_ACPI_END];
+        if (out->base && !(out->base & ACPI_MCFG_BASE_ALIGN_MASK) &&
+            out->base <= ACPI_MCFG_BASE_MAX)
+            return 0;
+    }
+
+    if (mcfg->length >= ACPI_MCFG_MIN_PCI_LEN) {
+        out->base      = mcfg_read_le64(b + ACPI_MCFG_OFF_PCI_BASE);
+        out->segment   = (uint16_t)b[ACPI_MCFG_OFF_PCI_SEGMENT] |
+                         ((uint16_t)b[ACPI_MCFG_OFF_PCI_SEGMENT + 1] << 8);
+        out->start_bus = b[ACPI_MCFG_OFF_PCI_START];
+        out->end_bus   = b[ACPI_MCFG_OFF_PCI_END];
+        if (out->base && !(out->base & ACPI_MCFG_BASE_ALIGN_MASK) &&
+            out->base <= ACPI_MCFG_BASE_MAX)
+            return 0;
+    }
+
+    return -1;
+}
+
+/*
+ * "BIOS" or "UEFI".
+ *
+ * The distinction decides whether a missing MCFG is normal or fatal: under
+ * SeaBIOS the RSDP is in a region the legacy search already covers, while under
+ * UEFI it is not, so a missing MCFG there means the RSDP was never found and the
+ * fallback window holds nothing.
+ *
+ * A boot path that hands us an RSDP address settles it outright.  There is no
+ * such handover under BIOS -- no firmware is told where the table is, because
+ * nothing goes looking -- so a non-zero address can only have come from a
+ * UEFI-aware loader: x86_boot_acpi_rsdp from _start_uefi, or g_firmware_rsdp_pa
+ * from firmware_set_rsdp_pa().  That makes the answer a fact rather than a
+ * guess, which matters now that the UEFI path really does reach this code and
+ * the old probe would have called it "BIOS" because the loader made the table
+ * findable.
+ *
+ * With no handover to go on, fall back to the probe.  It can only be wrong for
+ * a UEFI boot that found its RSDP by scanning, which is a firmware that does
+ * both.
  */
 const char *firmware_bios_or_uefi(void)
 {
+    if (x86_boot_acpi_rsdp || g_firmware_rsdp_pa)
+        return "UEFI";
     return acpi_find_rsdp() ? "BIOS" : "UEFI";
 }
 
 uintptr_t firmware_acpi_mcfg_base(void) {
     const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
-    if (!mcfg || mcfg->length < ACPI_MCFG_OFF_BASE_ADDRESS + 8)
+    if (!mcfg)
         return 0;
-    const uint8_t *body = (const uint8_t *)mcfg;
-    /* Only segment 0 is mapped by the boot page tables; a non-zero segment
-     * would need a real mapping rather than PAGE_OFFSET arithmetic. */
-    if (body[ACPI_MCFG_OFF_SEGMENT] != ACPI_MCFG_BASE_SEGMENT)
+    struct acpi_mcfg_view v;
+    if (acpi_mcfg_view(mcfg, &v) != 0 || v.segment != ACPI_MCFG_BASE_SEGMENT)
         return 0;
-    uint64_t base = *(const uint64_t *)(body + ACPI_MCFG_OFF_BASE_ADDRESS);
-    /* ECAM is a 256 MiB-aligned, 256 MiB-long window by definition. */
-    if (!base || (base & 0x0fffffffULL) || base > 0xffffffffULL)
-        return 0;
-    return (uintptr_t)base;
+    /* Direct-mapped, not physical: the caller dereferences this directly, and
+     * dropping PAGE_OFFSET points the PCI host at unmapped memory. */
+    return PAGE_OFFSET + (uintptr_t)v.base;
 }
 
 int firmware_acpi_mcfg_bus_range(uint8_t *start_bus, uint8_t *end_bus) {
-    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
-    if (!mcfg || mcfg->length < ACPI_MCFG_OFF_END_BUS + 1)
-        return -1;
-    const uint8_t *body = (const uint8_t *)mcfg;
     if (!start_bus || !end_bus)
         return -1;
-    *start_bus = body[ACPI_MCFG_OFF_START_BUS];
-    *end_bus   = body[ACPI_MCFG_OFF_END_BUS];
+    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
+    if (!mcfg)
+        return -1;
+    struct acpi_mcfg_view v;
+    if (acpi_mcfg_view(mcfg, &v) != 0)
+        return -1;
+    *start_bus = v.start_bus;
+    *end_bus   = v.end_bus;
     return 0;
 }
 
@@ -310,7 +414,12 @@ extern __attribute__((section(".data"))) volatile uint32_t g_mb_info;
 static const char *multiboot_cmdline(void) {
     if (g_mb_magic != 0x2BADB002u || !g_mb_info)
         return NULL;
-    const struct x86_mb_info *mi = (const void *)(uintptr_t)g_mb_info;
+    /* g_mb_info is physical (EBX) and cannot hold a direct-mapped address: it is
+     * a uint32_t and PAGE_OFFSET does not fit in 32 bits.  So every dereference
+     * adds PAGE_OFFSET itself, as x86_ram_detect() does; a raw read works only
+     * because entry.S identity-maps the first gigabyte. */
+    const struct x86_mb_info *mi =
+        (const void *)(PAGE_OFFSET + (uintptr_t)g_mb_info);
     if (!mi->cmdline)
         return NULL;
     return (const char *)(PAGE_OFFSET + (uintptr_t)mi->cmdline);

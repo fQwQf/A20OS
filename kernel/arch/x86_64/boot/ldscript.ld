@@ -13,6 +13,13 @@ SECTIONS
     .text : AT(ADDR(.text) - LOAD_DELTA) {
         *(.multiboot)
         *(.text.entry)
+        /* Page-align the UEFI entry so its physical address is a constant the
+         * loader can name without a symbol lookup: PHYS_BASE + 0x1000.  It has
+         * to come after .text.entry, because the multiboot header hardcodes
+         * _start at PHYS_BASE + 0x20 and GRUB still boots this path. */
+        . = ALIGN(4096);
+        __uefi_entry_phys = . - LOAD_DELTA;   /* the counter, not ADDR(.text) */
+        *(.uefi64)
         *(.text .text.*)
     }
 

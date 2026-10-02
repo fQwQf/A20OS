@@ -11,7 +11,7 @@
 | 功能 | VirtualBox 设备 | A20OS 实现 | 当前限制 |
 |---|---|---|---|
 | 启动（可用） | BIOS + GRUB Multiboot | 实例 `vbox-iso-x86_64` | ISO 介质；SeaBIOS 发布 RSDP，内核可达用户态 |
-| 启动（统一形态，未达用户态） | UEFI + GRUB | 实例 `vbox-x86_64` | 原始 GPT 磁盘；停在 `System ready`，缺 x86_64 EFI loader，详见[直接启动磁盘镜像](#直接启动磁盘镜像) |
+| 启动（统一形态，可达用户态） | UEFI + `BOOTX64.EFI` | 实例 `vbox-x86_64` | 原始 GPT 磁盘；ESP 内是 A20OS 自己的 loader，详见[直接启动磁盘镜像](#直接启动磁盘镜像) |
 | 显示 | VMSVGA `15ad:0405` | `kernel/drivers/gpu/vmsvga.c`、`vmsvga.a20drv`、`/dev/fb0` | 固定 1024x768x32，2D framebuffer |
 | 磁盘 | Intel AHCI `8086:2922/2829` | `kernel/drivers/block/ahci.c`、`ahci.a20drv` | 首个可用 port、LBA48、512B sector、单 slot |
 | 网络 | E1000 82540EM `8086:100e` | `kernel/drivers/net/e1000.c`、`e1000.a20drv` + lwIP | 静态单实例、轮询 ring |
@@ -33,7 +33,7 @@ sudo apt-get install gcc binutils grub-common grub-pc-bin xorriso mtools
 
 ```sh
 tools/a20 package vbox-iso-x86_64   # BIOS ISO，当前唯一可达用户态的路径
-tools/a20 package vbox-x86_64       # UEFI 直接启动磁盘（见下节，尚未达用户态）
+tools/a20 package vbox-x86_64       # UEFI 直接启动磁盘（见下节）
 ```
 
 产物路径不要写死，用实例自己报告：
@@ -47,15 +47,24 @@ tools/a20 show vbox-x86_64          # 该实例需要的介质与设备字段
 
 ## 直接启动磁盘镜像
 
-`vbox-x86_64` 产出 512 MiB 原始 GPT 磁盘，只有一个 FAT32 EFI System Partition，其中含 GRUB、kernel 与 FAT32 root。这是与 aarch64 VirtualBox 镜像一致的形态：给运维的是一个直接挂载的磁盘，而不是需要先挂载的光介质。
+`vbox-x86_64` 产出 512 MiB 原始 GPT 磁盘，只有一个 FAT32 EFI System Partition，其中含 `BOOTX64.EFI`、kernel 与 FAT32 root。这是与 aarch64 VirtualBox 镜像一致的形态：给运维的是一个直接挂载的磁盘，而不是需要先挂载的光介质。
 
-**当前状态：它启动内核，然后停住。** 实测而非推断——在 OVMF 下镜像能给出正确的 992 MiB RAM map 并打印 `System ready`，随后 `init: no init program found`。原因是 UEFI 把 RSDP 放在 configuration table 里，GRUB 不填 multiboot ACPI tag，而 `kernel/boot/uefi/` 没有 x86_64 loader 去接收它。没有 RSDP 就没有 MCFG，PCI 于是回落到一个硬编码 ECAM 窗口，那里既没有设备也没有块驱动。启动日志会明说，不会静默失败：
+**当前状态：它能启动到用户态。** 实测而非推断——在 OVMF 下：
 
 ```text
-[PCI] no MCFG (UEFI), using the q35 default 0x... -- UEFI without an x86_64 stub cannot work
+[PCI] ECAM 0xffff8000e0000000 from MCFG, buses 0..255
+[VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
+[INIT] Block device -> /bin (fat32)
+[INIT] System ready
 ```
 
-因此今天要验收驱动，请用 `vbox-iso-x86_64`：它走 BIOS，SeaBIOS 会在内核已经扫描的区域内发布 RSDP。`vbox-x86_64` 是两个架构被要求共享的**统一形态**，等 x86_64 EFI loader 存在后即为可用路径——那是一个 loader，不是驱动，是尚未完成的工作。
+ESP 里放的是 `BOOTX64.EFI`，也就是 A20OS 自己的 loader，而不是 GRUB。原因是 GRUB 2.12 不再填写 multiboot ACPI tag：UEFI 把 RSDP 放在 configuration table 里，而 GRUB 不会把它交给 multiboot 内核。没有 RSDP 就没有 MCFG，PCI 于是回落到一个硬编码 ECAM 窗口，那里没有设备也没有块驱动，启动会停在 `init: no init program found`。
+
+所以这个 loader 直接从 firmware configuration table 读出 RSDP 再交给内核。注意上面日志里的 ECAM 是 `0xe0000000`，而不是 QEMU q35 的默认值 `0xb0000000`——这正是读取 MCFG 的意义所在：真实主板的 ECAM 基址不同，只有读表才对。
+
+loader 不做 32 位模式切换。`ExitBootServices` 之后固件已经把 CPU 留在 64 位长模式并保留恒等映射，这正是内核 `_start_uefi` 需要的入口状态；强行退回 32 位以满足 multiboot 约定，反而会引入一整类只能表现为裸 `#GP`、且当时控制台已死因而无法报告的失败。
+
+`vbox-iso-x86_64` 仍然是 BIOS 路径，用于对照 BIOS/SeaBIOS 下的行为。
 
 部署到真实磁盘时必须显式指定设备，`media_device` 不会默认填 `/dev/sda`：
 

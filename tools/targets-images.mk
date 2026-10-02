@@ -35,6 +35,32 @@ $(RAMFS_USER_BLOB_DIR)/%.o: $(USER_BUILD_STAMP)
 		--rename-section .data=.rodata,alloc,load,readonly,data,contents \
 		$* $(abspath $@)
 
+# x86_64 UEFI loader.  It is the ESP boot target rather than a GRUB image,
+# because the kernel has to be handed the ACPI RSDP that GRUB 2.12 drops.
+# -mabi=ms is required: UEFI passes efi_main's arguments in RCX/RDX.
+# Directly bootable x86_64 UEFI disk.  Unlike pc-rescue-disk this stages
+# BOOTX64.EFI rather than GRUB, because GRUB 2.12 drops the multiboot ACPI tags
+# and the kernel then never learns the RSDP (see instances/vbox-x86_64.toml).
+$(VBOX_X86_64_IMG): $(VBOX_X86_64_EFI) $(BUILD_DIR)/.vbox-rootfs-verified $(FAT32_IMG) tools/mk_uefi_fat_image.sh
+	tools/mk_uefi_fat_image.sh $(VBOX_X86_64_EFI) $@ $(FAT32_IMG) BOOTX64.EFI
+
+$(VBOX_X86_64_EFI): $(KERNEL_BIN) kernel/boot/uefi/x86_64_loader.c kernel/boot/uefi/x86_64_kernel_blob.S kernel/boot/uefi/x86_64_efi.lds
+	@mkdir -p $(dir $@)
+	$(CC) -mabi=ms -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
+		-fno-builtin -fvisibility=hidden \
+		-c kernel/boot/uefi/x86_64_loader.c -o $(BUILD_DIR)/x86-64-uefi-loader.o
+	$(CC) -fpic -ffreestanding -fno-stack-protector \
+		-DKERNEL_BIN_PATH='"$(abspath $(KERNEL_BIN))"' \
+		-c kernel/boot/uefi/x86_64_kernel_blob.S -o $(BUILD_DIR)/x86-64-uefi-kernel.o
+	$(CC) -nostdlib -shared -Wl,-Bsymbolic -Wl,-e,efi_main \
+		-Wl,-T,kernel/boot/uefi/x86_64_efi.lds \
+		-o $(BUILD_DIR)/x86-64-uefi-loader.so \
+		$(BUILD_DIR)/x86-64-uefi-loader.o $(BUILD_DIR)/x86-64-uefi-kernel.o
+	$(OBJCOPY) -j .text -j .reloc -j .dynamic -j .data -j .kernel \
+		-j .rela -j .rela.* -j .rodata -j .dynsym -j .dynstr \
+		-O pei-x86-64 --subsystem efi-app \
+		$(BUILD_DIR)/x86-64-uefi-loader.so $@
+
 $(VBOX_AARCH64_EFI): $(KERNEL_BIN) kernel/boot/uefi/aarch64_loader.c kernel/boot/uefi/aarch64_kernel_blob.S
 	@mkdir -p $(dir $@)
 	$(CC) -march=armv8-a -fpic -fshort-wchar -ffreestanding -fno-stack-protector \
