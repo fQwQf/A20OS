@@ -25,6 +25,13 @@ struct efi_simple_text_output {
     efi_output_string_t output_string;
 };
 
+struct efi_guid {
+    uint32_t data1;
+    uint16_t data2;
+    uint16_t data3;
+    uint8_t data4[8];
+};
+
 struct efi_boot_services {
     uint8_t header[24];
     void *raise_tpl;
@@ -76,12 +83,6 @@ struct efi_system_table {
     struct efi_configuration_table *configuration_table;
 };
 
-struct efi_guid {
-    uint32_t data1;
-    uint16_t data2;
-    uint16_t data3;
-    uint8_t data4[8];
-};
 
 struct efi_configuration_table {
     struct efi_guid vendor_guid;
@@ -167,8 +168,8 @@ struct efi_loaded_image {
 };
 
 static const struct efi_guid loaded_image_protocol_guid = {
-    { 0x5B, 0x1B, 0x31, 0xA1, 0x95, 0x62, 0x11, 0xD2,
-      0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B }
+    0x5b1b31a1U, 0x9562U, 0x11d2U,
+    { 0x8eU, 0x3fU, 0x00U, 0xa0U, 0xc9U, 0x69U, 0x72U, 0x3bU }
 };
 
 /* Copy the firmware's UTF-16 LoadOptions into a NUL-terminated ASCII buffer the
@@ -245,6 +246,22 @@ efi_status_t efi_main(efi_handle_t image, struct efi_system_table *st)
     efi_physical_address_t cmdline = collect_load_options(st, image);
 
     print(st, loading);
+    /*
+     * KERNEL_LOAD_ADDRESS must be available, so a firmware that will not give it
+     * up is a hard failure with a message rather than a boot somewhere else.
+     *
+     * Relocating to a firmware-chosen address was tried here and reverted.  It
+     * removed this error -- the allocation succeeded -- and the image then hung
+     * in a reboot loop instead, because the kernel is not yet position
+     * independent: something in its early path still assumes the image landed at
+     * the address it was linked for.  Turning a diagnosable "UEFI load failed"
+     * into an endless reboot is strictly worse than failing, so the address stays
+     * mandatory until the kernel can be entered anywhere.
+     *
+     * The audit that found this is still worth having: under QEMU virt, RAM starts
+     * at 0x40000000 and nothing lives at 0x08080000, which is why this path is
+     * taken at all off VirtualBox.
+     */
     status = bs->allocate_pages(EFI_ALLOCATE_ADDRESS, EFI_LOADER_DATA,
                                 pages, &address);
     if (EFI_ERROR(status)) {
