@@ -63,6 +63,26 @@ void *frame_alloc(void) {
     return p;
 }
 
+/* Allocate without the reclaim hook: pfa_alloc_flags(0, can_reclaim = 0).
+ *
+ * For callers that hold a spinlock.  The reclaiming allocator reaches
+ * oom_try_reclaim(), which swaps pages out and calls proc_force_exit(), and
+ * tearing a victim down runs pt_unmap_leaf(), which takes a page-table node
+ * MCS lock -- and mm->lock's holders reach this too, where reclaiming means
+ * sleeping with interrupts off.
+ *
+ * Exhaustion is reported as NULL, so a caller must have a fallback.  Callers
+ * that cannot fail this way are the ones whose failure is already a supported
+ * outcome; see mm_pt_provision_anon(), whose result is (void) and documented as
+ * best effort. */
+void *frame_alloc_nr(void) {
+    pfn_t pfn = pfa_alloc_flags(0, 0);
+    if (pfn == PFN_NONE) return NULL;
+    void *p = pfn_to_virt(pfn);
+    memset(p, 0, PAGE_SIZE);
+    return p;
+}
+
 /* Allocate a physical frame without zeroing it, for callers that overwrite
  * the contents immediately. */
 void *frame_alloc_nz(void) {
