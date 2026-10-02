@@ -298,6 +298,12 @@ smoke-pidns:
 	$(PYTHON) tools/smoke.py smoke-pidns
 
 # ================================================================
+# User namespace smoke (unshare/setns CLONE_NEWUSER + /proc/<pid>/uid_map)
+# ================================================================
+smoke-userns:
+	$(PYTHON) tools/smoke.py smoke-userns
+
+# ================================================================
 # PCI bridge traversal smoke
 # ================================================================
 # Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,

@@ -360,6 +360,7 @@ void proc_init(void) {
     task_list_tail = NULL;
     proc_pid_init();
     pidns_early_init();
+    userns_early_init();
     proc_sched_runq_init();
     spin_init(&proc_lock);
     spin_set_debug(&proc_lock, "proc", NULL);

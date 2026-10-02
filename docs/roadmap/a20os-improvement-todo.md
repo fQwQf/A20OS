@@ -73,9 +73,10 @@ IDL 化）已落地，已从本文删除。
     signals、memory management、scheduler、sockets、namespaces、capabilities、bpf、
     file advice/copy helpers、SysV/POSIX shm and memfd、fanotify、Linux AIO、
     driver modules、cross-process memory、mempolicy/NUMA、new mount API、io_uring。
-    namespaces 区域已具备真实 mount namespace 对象模型（`CLONE_NEWNS`、`setns`、
-    `/proc/<pid>/ns/mnt`），其余 ns 类型如实返回 `-EINVAL`，但仍无 userns 与完整
-    capabilities，故保持 `partial`。
+    namespaces 区域已具备真实 mount / PID / user 三种命名空间对象模型
+    （`CLONE_NEWNS`、`CLONE_NEWPID`、`CLONE_NEWUSER`，各自的 `setns` 与
+    `/proc/<pid>/ns/*`），其余 ns 类型如实返回 `-EINVAL`；`nsproxy` 缺失、
+    capabilities 仍只有 15 个子集，故保持 `partial`。
   - 完成条件：每个升级区域都在覆盖表条目旁列出对应测试。
 
 ## P0：MM、Page Cache 与文件映射
