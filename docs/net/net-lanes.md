@@ -657,6 +657,25 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 `hash(dst_ip, src_port)` 也不是 `hash(dst_ip, dst_port)`。而且改前的 4/8 也未必是
 "按 src_port 撞对的运气"，因为 1/8 与 4/8 在 8 个样本内都可能是噪声。
 
+### 两个修复都已被门禁证伪验证（`88ba28a9`）
+
+`smoke-net-tcp-lanes` 在 4 lane + `CONFIG_NET_PCB_SANE=1` 下跑 8 个端口（每 lane 一个
+真实 LISTEN pcb 的建立/匹配/拆除）。分别把两个 bug 重新放回去，确认门禁**因正确的原因**
+变红，而不是因为构建缓存坏掉：
+
+| 放回的 bug | 门禁结果 | 判定 |
+|---|---|---|
+| 修复后的树 | exit 0，`passes=8 of 8`，checker hits=0 | 绿 |
+| `16304db8` 双重索引 | exit 2，`passes=0 of 8`，**list-checker hits=3**，guest 侧 `KERNEL PANIC` |红，且是**链表损坏**特征 |
+| `f7f3d670` 源端口哈希 | exit 2，`passes=2 of 8`，**list-checker hits=0** | 红，且是**查找未命中**特征 |
+
+两种 bug 的签名不同（`0/8 + 断言` vs `2/8 + 无断言`），说明门禁不是靠"碰巧失败"，
+而是分别命中了两类不同的缺陷：前者破坏链表、后者只是查不到桶。这正是设计意图。
+
+> 第一次尝试证伪 `16304db8` 时门禁也变红了，但原因是用户态构建缓存缺
+> `build/riscv64/obj/tlse/tlse.d`，属于假阳性。补齐缓存目录后重做才得到上表。
+> **教训**：证伪必须确认失败原因，否则"门禁变红"毫无意义。
+
 ### 根因机制已定位（修复尚未找到）
 
 在 `tcp_listen_with_pcbs()` 里打印 `lpcb->lane` 与 `NET_PCB_LANE_OF_PCB(lpcb)`，
