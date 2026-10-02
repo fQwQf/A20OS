@@ -1119,6 +1119,67 @@ files = [
 ]
 
 
+# MM_AS_MODEL (2026-10-02, option C): PTE_SWAP is THE one tolerated overloaded
+# bit, and every architecture must define it explicitly.  Three of the six
+# define it as PTE_LEAF itself, so "one bit" understates it -- but the
+# invariant that matters is that it is defined deliberately and per-arch, not
+# that it is gone.  A presence check per architecture: deleting any one
+# #define (e.g. while "tidying" an unused arch) fails instead of silently
+# making PTE_SWAP undefined and turning pte_is_swap() into a constant false --
+# which would read as "no swap support" rather than as a compile error.
+#
+# The pattern carries a trailing space on purpose: "define PTE_SWAP" is a
+# PREFIX of "define PTE_SWAP_REMOVED", so a bare presence check would still
+# pass against a renamed macro and this gate would have no teeth at all.
+#
+# Teeth verified by renaming each definition in turn and watching this fail.
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/x86_64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/aarch64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/loongarch64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/riscv64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/arm32/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/ppc64le/include/page_table.h"]
+
+# Together with the six checks above this pins set EQUALITY:
+#
+#     {arch : PTE_SWAP defined}  ==  SWAP_SUPPORTED_ARCHES
+#
+# which nothing else in the tree enforces, and the two directions fail in very
+# different ways.  Adding an arch to SWAP_SUPPORTED_ARCHES without defining
+# PTE_SWAP breaks the build loudly (fault.c/mm.c/munmap.c/exit.c will not
+# compile).  The reverse -- defining PTE_SWAP on a new arch and forgetting the
+# Makefile -- silently forces CONFIG_SWAP:=n on that arch: swap becomes
+# featureless, pte_is_swap() degrades to a constant false, and the result reads
+# as "this arch has no swap support" rather than as an oversight.  A per-arch
+# presence check cannot see that; pinning the exact list can.
+#
+# Anchored ^...$ as a regex, not a literal: the arch names occur in the
+# Makefile for unrelated reasons, so per-name checks would pass on a list that
+# had lost an entry.  A literal is not enough either -- appending an arch leaves
+# the original string as a substring, so `fixed = true` passed on a list that
+# had GAINED one, which is the same hole as the prefix bug above.  Anchoring the
+# end of line is what makes "exactly this list" mean exactly this list.
+[[gate.assertion]]
+pattern = "^SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le$"
+files = ["Makefile"]
+
 [[gate]]
 name = "check-io-progress-model"
 make_target = "check-io-progress-model"

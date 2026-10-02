@@ -190,7 +190,7 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > **P6 因此没有可实现子集**：不是"大部分能做"，而是一处都做不了。7 处
 > `mm_find_vma` 全部依赖 status 字节装不下的信息（对象引用、权限位、并发重查），
 > 或者依赖尚不存在的生产者（brk）。
-| P7 | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
+| P7 ⚠ | **2026-10-02 决定：`PTE_SWAP` 正式接受为唯一被容忍的例外，不删除。**原目标"无 PTE 位被重载"收窄为"仅 `PTE_SWAP` 一个，且逐架构显式声明"（见下方决定记录与 `kernel/include/mm/pt.h`） | `PTE_SWAP` 是唯一重载位 | 已达成：逐架构断言 `PTE_SWAP` 有定义（27 条）+ `{arch: PTE_SWAP} == SWAP_SUPPORTED_ARCHES`；`CONFIG_SWAP=y` 构建（默认即开）+ `smoke-swap` PASS。**但 swap-in 未被覆盖**，见下 |
 
 > **P7 的阻塞点是硬件约束，且仓库里已写明**（`kernel/include/mm/pt.h:86-97`）：
 > 「Storing this in the PTE's software-usable bits is not an option on A20OS:
@@ -233,6 +233,82 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > 所以按论文实现 P7 是做不到的——**缺的是规格，不是工作量**。
 | P8 | 双向一致性检查器（P1 审计器覆盖反方向）；**`MM_LOCK_MODEL` 拆分**（见下注，**不是**改名）；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
 | P9 | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
+
+> **`smoke-swap` 覆盖了什么、没覆盖什么（2026-10-02 实测）**
+>
+> 实跑 `python3 tools/smoke.py smoke-swap` → PASS，日志只有两行有效输出：
+> `SWAP_TEST: swapon ok, totalswap=16769024`（16 MiB 设备）与 `SWAP_TEST: PASS`。
+>
+> **已覆盖**：`mkswap`/`swapon` 成功；`/proc/swaps` 与 sysinfo `totalswap` 账目；
+> 重复 `swapon` 返回 `EBUSY`；`swapoff` 后 `totalswap` 归零；以及 mkswap/swapon 期间
+> 经 loop 块适配器的真实 header/badmap I/O。
+>
+> **未覆盖：真正的换出与换入。** 这不是测试没写好，是**结构上够不到**——
+> `swap_test.c:11-19` 自己就写明了这条边界，实测参数印证：
+>
+> | 量 | 值 | 后果 |
+> |---|---|---|
+> | `TOUCH_SIZE` | 8 MiB | 匿名内存只触碰 8 MiB |
+> | `OOM_MIN_FREE_PAGES` | 256 页 ≈ 1 MiB | 触发回收要全局空闲帧低于此值 |
+> | `MAX_SWAP_RECLAIM` | 8 页 / 2s 冷却窗 | 换出速率上限约 4 页/s |
+>
+> 1 GiB QEMU 里空闲帧远高于 256 页，回收根本不触发；**即使触发**，把 8 MiB
+> （2048 页）换出按 8 页/2s 算需要约 **512 秒**。所以 `swap_out_victim_pages()` 与
+> `swap_read_page()` 在此 smoke 中**从未执行**。
+>
+> **因此 P7 的验收标准不能写"swap-in 测试通过"——那是假的。** 要真正关闭，需要另建
+> 一个低内存实例（压到 `OOM_MIN_FREE_PAGES` 以下）并跑够冷却窗数，或另设专用回收门禁。
+> 靠调大 `MAX_SWAP_RECLAIM`/调低 `OOM_MIN_FREE_PAGES` 去迁就测试是反的：那样门禁
+> 校验的就不是默认配置了。
+>
+> 保留 `PTE_SWAP` 这个决定本身不受影响：它是被**保留**而非被替换的行为，上面已覆盖的
+> 账目与错误路径仍全部有效。未覆盖的是**回收换出/换入路径**，这是 P9 之外的既有缺口，
+> 不是方案 C 引入的。
+
+> **P7 决定（2026-10-02，方案 C）**：`PTE_SWAP` **保留**，作为唯一一个被容忍的
+> 例外，不再追求"零位重载"。
+>
+> 理由（本轮实测，不是推断）：
+>
+> * `swp_entry()` 真实载荷 **24 bit（32 位架构）/ 44 bit（64 位架构）**
+>   （`SWP_TYPE_BITS 4` + `SWP_OFFSET_BITS 20|40`，`swap.h:8-13`）。44 > 32，一个
+>   32-bit 字装不下，所以"塞进元数据"要求 status 扩到 **8 byte/条目 = 每 PT 页 4 KiB**
+>   （512 条目）。而绝大多数 PT 页**永远不会有页被换出**——为纯度不变式预付这笔钱，
+>   代价与收益不成比例。
+> * 更关键：这个例外在半数架构上**不是"一个普通位"**。实测 6 个架构的
+>   `PTE_SWAP` 定义：
+>
+>   | 架构 | `PTE_SWAP` | 性质 |
+>   |---|---|---|
+>   | x86_64 / aarch64 / loongarch64 | `PTE_LEAF` | **别名叶子标记位** |
+>   | riscv64 | `1UL << 9` | 独立位（PTE_COW 之后、PPN 之前） |
+>   | arm32 | `1U << 7` | 独立位 |
+>   | ppc64le | `0x2` | 独立位 |
+>
+>   即三个架构上 `PTE_SWAP` 占用的是叶子 PTE 里语义最重的那一位。编码是
+>   `!PTE_V && PTE_SWAP` ⇒ 已换出（见 `pte_is_swap()`）。这正是 `pt.h:91-96` 说的
+>   "steals a hardware-meaningful bit per architecture"——删掉它不是把一个标记改成
+>   另一种标记，而是要在**没有空位**的 PTE 里重新安置一个 44-bit 的值。
+> * 论文没有给出替代格式。所以"删除 `PTE_SWAP`"不是"照论文实现"，而是需要先做一次
+>   无人做过的格式设计（status 扩宽 or 旁表），并承担上面那份预付内存。
+>
+> **因此不变式改为**：`PTE_SWAP` 是唯一重载位，且必须逐架构显式定义——由
+> `check-mm-pt-lock-order` 钉住。**这条不变式还有一个跨文件耦合，一并钉住**：
+>
+> ```
+> {arch : 定义了 PTE_SWAP}  ==  SWAP_SUPPORTED_ARCHES
+> ```
+>
+> 两个方向坏法完全不同。往 `SWAP_SUPPORTED_ARCHES` 加一个没定义 `PTE_SWAP` 的架构
+> → 编译直接炸（`fault.c`/`mm.c`/`munmap.c`/`exit.c` 报错），吵但安全。反过来，**新架构
+> 定义了 `PTE_SWAP` 却忘了改 Makefile** → `CONFIG_SWAP` 被静默降为 `n`，swap 整个消失，
+> `pte_is_swap()` 退化成恒假，读起来像"这个架构本来就不支持 swap"而不是像疏漏。
+>
+> 逐架构的存在性检查看不见后者，所以门禁额外用 `^...$` 锚定整行列表。
+> （这里也踩了和上一条一样的坑：`fixed = true` 的字面匹配在列表**变长**时会通过——追加
+> 一个架构后原串仍是子串。两次都是同一个"子串即通过"的坑。）真正要防的不是它存在，而是它被当成"还能再偷一个位"
+> 的先例；`pt.h:91-96` 原文（"precisely the hazard a general status encoding would
+> multiply"）说的正是这个风险。
 
 > **P8 指令更正（2026-10-02）**：本行原写 `MM_LOCK_MODEL` → `MM_AS_MODEL`
 > **改名**。照做会**破坏文档语义**，已核对代码后撤销：

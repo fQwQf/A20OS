@@ -94,6 +94,35 @@
  * existing PTE_SWAP already steals a hardware-meaningful bit per
  * architecture, which is precisely the hazard a general status encoding
  * would multiply.
+ *
+ * MM_AS_MODEL -- PTE_SWAP is THE ONE tolerated exception (2026-10-02)
+ * ------------------------------------------------------------------ *
+ * Unlike the status byte, the swapped bit is *not* moved into metadata:
+ * pte_to_swp_entry() recovers a 44-bit payload on 64-bit architectures,
+ * which does not fit the one-byte status and would require widening it to
+ * 8 bytes per entry -- 4 KiB of overhead per PT page, prepaid on pages
+ * that will never hold a swapped-out page.  The paper specifies no
+ * replacement encoding, so removing PTE_SWAP is not "following the paper"
+ * but an undesigned format change.  Decision and measurements:
+ * docs/roadmap/single-level-mm-model.md (P7 record).
+ *
+ * The exception is arch-dependent, and on three of six architectures it is
+ * larger than "one bit":
+ *
+ *   x86_64 / aarch64 / loongarch64   PTE_SWAP == PTE_LEAF (leaf marker)
+ *   riscv64                          1UL << 9
+ *   arm32                            1U << 7
+ *   ppc64le                          0x2
+ *
+ * i.e. on the first group the encoding is !PTE_V && PTE_SWAP ==> swapped,
+ * so the bit being reused is the most semantically loaded one in a leaf
+ * PTE, not a spare software bit.
+ *
+ * The invariant is therefore narrowed, not dropped: PTE_SWAP is the ONLY
+ * overloaded bit, and every architecture must define it explicitly.
+ * check-mm-pt-lock-order asserts this per architecture.  The hazard worth
+ * guarding against is not this bit's existence -- it being read as licence
+ * to take one more.
  */
 #define MM_ST_INVALID        0u  /* no mapping, no backing */
 #define MM_ST_ANON_VIRT      1u  /* virtually allocated, not yet backed */
