@@ -396,7 +396,16 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=8'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mm-pt-race-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['mm_stress --wide-cursor-only', 'poweroff']},
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  # The leading perf read is what ARMS collection, not a
+                  # measurement: a20_perf_format() sets g_a20_perf_enabled and
+                  # only then snapshots, so counters read dormant read 0 no
+                  # matter what the workload did.  Reading once after the
+                  # workload therefore reports zeros for everything -- which is
+                  # exactly how this case came to look like dead code.
+                  'lines': ['cat /proc/a20/perf', 'mm_stress --wide-cursor-only',
+                            'cat /proc/a20/anonprov', 'cat /proc/a20/perf',
+                            'poweroff']},
         'timeout': '240s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '8', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf', '-append', 'a20.anonprov=4096'],
@@ -405,6 +414,13 @@ CASES: dict[str, dict] = {
             # not printed and must not be expected here.
             'MM_WIDE_CURSOR: PASS',
             r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 safe=0',
+            # Non-vacuity for the status fast path, asserted rather than assumed.
+            # This gate is the only thing standing between "green" and "the fast
+            # path never ran": the workload exits without printing fault counters,
+            # and without anonprov a provisioned range is never consumed, so the
+            # phase this item is about would be dead code and still pass.  Same
+            # trap that made smoke-mm-stress pass while testing nothing.
+            r'mm_fault_from_status: [1-9]',
         ],
         # The per-CPU pool overflow and the self-deadlock detector in
         # mcs_lock() both announce themselves; either firing means the cursor
