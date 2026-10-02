@@ -586,3 +586,68 @@ smoke-net-lanes-n1:
 		echo "  logs: $$log1 $$log4"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# TCP accept gate
+# ================================================================
+# Guards the accept path in both TCP modes.  tcp_accept_test asserts only that
+# a handshake completes and accept() returns a usable fd, deliberately not the
+# data transfer: the two are separable, and a red gate has to point at the thing
+# that actually broke.
+#
+# It runs twice, once per mode, because the two modes are separate
+# implementations that must agree on the observable result:
+#   fast -- the listener is matched by the socket layer pairing the sockets
+#   lwip -- the listener is a real lwIP LISTEN pcb and the protocol stack
+#           completes the handshake
+# The mode is chosen on the kernel command line rather than by a /proc write
+# because a server's first listener is opened at boot, before a shell write can
+# run; boot-time selection is also what makes tcp_listen=1 observable here.
+#
+# The structural assertion that matters is tcp_listen > 0.  Before the LISTEN
+# pcb existed it was 0 in the steady state and an inbound SYN was answered with
+# RST, so that number is the regression guard for the actual defect.
+#
+# No magnitude threshold is asserted on the counters.  The zero-valued ones are
+# invariants, not statistics: a non-zero net_accept_drop, net_bh_overflow or
+# net_alloc_fail means the receive or accept path discarded something it had
+# already accepted, which is a defect at any magnitude.  The accept counts are
+# printed for human review instead, since how many accepts a run makes depends
+# on client retry timing.
+smoke-net-accept: NET_HOSTFWD=
+smoke-net-accept:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-accept-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '\ncat /proc/net/status\ncat /proc/a20/perf\ntcp_accept_test\necho tcpmode fast > /proc/net/config\ntcp_accept_test\ncat /proc/a20/perf\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 || status=$$?; \
+	passes=$$(grep -c 'TCP_ACCEPT_TEST: PASS' "$$log" || true); \
+	tcp_listen=$$(awk '/^pcbs: /{for(i=1;i<=NF;i++) if($$i ~ /^tcp_listen=/){v=$$i; sub(/^tcp_listen=/,"",v); print v+0; exit}}' "$$log"); \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	accept_drop=$$(last_counter net_accept_drop); \
+	bh_overflow=$$(last_counter net_bh_overflow); \
+	alloc_fail=$$(last_counter net_alloc_fail); \
+	accept_queued=$$(last_counter net_accept_queued); \
+	if [ "$$passes" -eq 2 ] && \
+	   [ "$$tcp_listen" -gt 0 ] && \
+	   [ "$$accept_drop" -eq 0 ] && \
+	   [ "$$bh_overflow" -eq 0 ] && \
+	   [ "$$alloc_fail" -eq 0 ] && \
+	   ! grep -qiE 'panic|assertion failed' "$$log"; then \
+		echo "smoke-net-accept: PASS (both TCP modes completed a handshake and accept; boot-time lwip mode shows tcp_listen=$$tcp_listen; no accept, bottom-half or allocation loss); log saved to $$log"; \
+		echo "  recorded, not asserted: net_accept_queued=$$accept_queued (depends on client retry timing)"; \
+	else \
+		echo "smoke-net-accept: failed with status $$status (passes=$$passes tcp_listen=$$tcp_listen accept_drop=$$accept_drop bh_overflow=$$bh_overflow alloc_fail=$$alloc_fail); tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi

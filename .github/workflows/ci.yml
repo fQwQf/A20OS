@@ -280,6 +280,21 @@ jobs:
           make smoke-vfs-stress
           make smoke-smp-bringup
         timeout-minutes: 60
+
+      # Networking had no CI coverage at all until this block, which is why a
+      # red smoke-network-suite could sit on main unnoticed: the suite requires
+      # a declared non-goal to be asserted explicitly, and without a gate
+      # running it nothing noticed. Kept to the two cheapest gates that cover
+      # distinct ground -- the suite is the broad functional sweep, and
+      # smoke-net-accept is the structural guard for the accept path and its
+      # real LISTEN pcb. smoke-net-lanes and smoke-smp-lock-contention are
+      # deliberately not here: both need a 4-core build plus a fixed RTT-free
+      # workload, and adding them to a 60-minute job is a separate decision.
+      - name: QEMU network smoke gates
+        run: |
+          make smoke-network-suite
+          make smoke-net-accept
+        timeout-minutes: 30
         env:
           CCACHE_DIR: ${{ github.workspace }}/build/cache/ccache
 
