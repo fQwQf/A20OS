@@ -118,7 +118,13 @@ MUSL_INC := -isystem $(MUSL_BUILD)/obj/include \
             -isystem $(MUSL_BASE)/arch/$(MUSL_ARCH) \
             -isystem $(MUSL_BASE)/arch/generic
 
-CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc $(MUSL_INC) \
+# -MMD -MP makes the compiler emit a .d next to every object it builds.  Make
+# otherwise sees only the .c file, so editing a header such as
+# init_common/runtime_setup.h rebuilds nothing and silently ships a stale
+# binary; -MP also emits empty rules for headers so a deleted one cannot wedge
+# the build.  The .d files are read back by DEP_FILES at the end of this file,
+# the same way the kernel side wires CFLAGS -MMD -MP into DEP_FILES.
+CFLAGS := -Wall -Wextra $(OPT) -ffreestanding -nostdinc -MMD -MP $(MUSL_INC) \
           -Iinit_common -Icmds $(ARCH_CFLAGS)
 LDFLAGS := -static -nostdlib -Wl,--build-id=none -Wl,-Ttext-segment=0x10000 $(ARCH_LDFLAGS)
 
@@ -754,6 +760,18 @@ clean:
 
 distclean: clean
 	rm -rf $(MUSL_BASE)/build-*
+
+# Header deps written by CFLAGS above, read back so make rebuilds the objects
+# whose translation unit included a changed header.  USER_INTERMEDIATE_TARGETS
+# already enumerates every object this makefile compiles, so one substitution
+# keeps the dep set in step with the compile rules instead of duplicating it;
+# the lib/ objects are appended because that rule has no source list of its own.
+# -include rather than include: a variant that has never been built has no .d
+# files yet and must not fail on them (same guard as targets-images.mk).
+DEP_FILES := $(filter %.d,$(USER_INTERMEDIATE_TARGETS:%.o=%.d)) \
+             $(patsubst lib/%.c,$(OBJ_DIR)/lib/%.d,$(wildcard lib/*.c))
+
+-include $(DEP_FILES)
 
 .PHONY: all clean distclean musl_prepare
 .PRECIOUS: $(USER_INTERMEDIATE_TARGETS)
