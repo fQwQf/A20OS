@@ -61,6 +61,25 @@
 #define VIRTIO_GPU_CAPSET_VENUS      4
 #define VIRTIO_GPU_CAPSET_DRM        6
 
+/* The DRM capset is answered by the kernel, not by the host.
+ *
+ * Every other capset id names a renderer-side feature set that virglrenderer
+ * (or Venus) produces and that GET_CAPSET_INFO therefore reports on. Capset 6 is
+ * different: it describes what the *kernel's own* virtio-gpu driver supports,
+ * and Linux answers it in virtio_gpu_ioctl_get_caps() without ever reaching the
+ * host. A client that asks for it is asking "what can this driver do", so
+ * forwarding it to virglrenderer returns a renderer capset under a
+ * driver-capset id, which the client then rejects.
+ *
+ * Layout matches the Linux UAPI struct virtio_gpu_drm_caps, which is the prefix
+ * of the client's own capset union -- so it must be written at offset 0 of the
+ * supplied buffer. */
+struct virtio_gpu_drm_caps {
+    uint64_t caps_set;
+    uint32_t max_version;
+    uint32_t reserved[2];
+} __attribute__((packed));
+
 /* Formats */
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM     1
 #define VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM     2

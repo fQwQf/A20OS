@@ -176,6 +176,20 @@ run-world: image-world $(FAT32_IMG)
 .PHONY: smoke-mesa-attach
 SMOKE_MESA_IMG := $(PKG_IMAGE_DIR)/mesa-probe-$(ARCH).img
 
+# GPU_3D=1 is what asks QEMU for the virgl-capable device, and DISPLAY_MODE=gui
+# is what attaches a GPU device *at all* -- under -nographic QEMU attaches none,
+# so without it the guest has no virtio-gpu and every VIRTGPU ioctl answers
+# -ENODEV.  Both are required, and the failure without them is silent: the probe
+# still runs, still reports, and reports a device that is simply not there.
+smoke-mesa-attach: DISPLAY_MODE=gui
+# egl-headless,gl=on rather than the gtk default: gtk needs an X display, and
+# without gl=on QEMU refuses to create the device at all.  Run it under
+# tools/with-virgl-display.sh on a host with two GPU drivers.
+smoke-mesa-attach: QEMU_GUI_DISPLAY=egl-headless
+# Whether "Mesa bound virgl" is a hard failure. On by default because it now
+# holds: stock Mesa reaches virgl and the renderer string says so. Set 0 to
+# downgrade to reporting-only while bisecting an attach regression.
+MESA_REQUIRE_VIRGL_ATTACH ?= 1
 smoke-mesa-attach: $(FAT32_IMG) $(KERNEL_ELF)
 	$(PYTHON) tools/mkrootfs.py --arch $(ARCH) \
 		--world packages/world/mesa-probe.world \
@@ -192,6 +206,7 @@ smoke-mesa-attach: $(FAT32_IMG) $(KERNEL_ELF)
 		--blk-second "$(QEMU_BLK_SECOND)" \
 		--kernel "$(KERNEL_ELF)" \
 		--timeout 900s \
+		$(if $(filter 1,$(MESA_REQUIRE_VIRGL_ATTACH)),--require-virgl-attach,) \
 		--input-delay "$(SMOKE_INPUT_DELAY)"
 
 # 回归门禁：上游 Alpine 包（gcc/fastfetch）经 chroot 在 guest 内真实运行。

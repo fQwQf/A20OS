@@ -385,18 +385,26 @@ def devtools_main(a: argparse.Namespace) -> int:
 def mesa_attach_main(a: argparse.Namespace) -> int:
     """Boot a Mesa-only rootfs and record what stock Mesa does with our DRM node.
 
-    Deliberately reports rather than asserts. The question -- does libEGL/libgbm
-    bind virtio_gpu_dri.so -- was open, and the honest state of knowledge is a set
-    of observations, not a verdict. Requiring success here would turn "Mesa does
-    not attach" into a red gate that says nothing beyond what the log already
-    says, and would be indistinguishable from an infrastructure failure. So the
-    gate passes when the probe ran to completion, and the transcript carries the
-    evidence either way; promoting it to pass/fail on the renderer string is the
-    next step, to be taken once attach either works or has a located cause.
+    Two verdicts, kept separate because they have different owners.
+
+    Our side -- that QEMU really attached a virtio-gpu device and the kernel
+    brought it up with virgl -- is asserted. It is fully under our control, and
+    until it is asserted the rest of this gate is vacuous: with DISPLAY_MODE left
+    at text the guest boots with no GPU at all, every VIRTGPU ioctl answers
+    -ENODEV, and "Mesa did not attach" looks exactly like a Mesa bug.
+
+    Mesa's side -- whether libEGL/libgbm bind virtio_gpu_dri.so -- is asserted
+    when --require-virgl-attach is given, which the make target passes by
+    default. Stock Mesa does reach virgl: the renderer string names it. An
+    earlier revision of this gate excused a failure as "Alpine's Mesa ships no
+    virgl backend", on the evidence that libgallium imports no virgl_renderer_*
+    symbols. That evidence was worthless -- a dlopen'd renderer leaves no import
+    -- and the real cause was ours: VIRTGPU_GETPARAM's value field is a user
+    pointer, not an in/out scalar, so Mesa read every param back as 0 and
+    abandoned the device after a full round of successful ioctls.
 
     The marker required is the probe's own "end", which it only prints after both
-    eglinfo runs. A probe that dies early therefore fails here, so this does
-    still catch "the Mesa image no longer boots", which is a real regression.
+    eglinfo runs, so a probe that dies early still fails here.
     """
     log = Path(a.log_dir) / f"mesa-attach-{a.label}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -424,11 +432,35 @@ def mesa_attach_main(a: argparse.Namespace) -> int:
         print("smoke-mesa-attach: FAIL the probe did not run to completion "
               f"(status {status})")
         return 1
-    # Surface the one fact that decides the question, without judging it.
-    attached = grep_matches(bre("OpenGL renderer string:.*virgl"), text)
-    print("smoke-mesa-attach: virtio_gpu_dri attached: "
-          f"{'yes' if attached else 'no (see renderer line above)'}")
-    print("smoke-mesa-attach: PASS")
+
+    if not grep_matches(bre("virtio-gpu 3D (virgl)"), text):
+        print("smoke-mesa-attach: FAIL the guest never brought up a virgl "
+              "virtio-gpu device, so nothing below says anything about Mesa. "
+              "Check that GPU_3D=1 and DISPLAY_MODE=gui reach this target.")
+        return 1
+
+    # eglinfo labels the line per profile ("OpenGL core profile renderer:",
+    # "OpenGL ES profile renderer:"), so anchor on "renderer:" and not on the
+    # single spelling "OpenGL renderer string:" -- that narrower pattern misses
+    # every line eglinfo actually prints.
+    attached = grep_matches(bre(r"profile renderer: *virgl"), text)
+    if attached:
+        print("smoke-mesa-attach: virtio_gpu_dri attached: yes")
+        print("smoke-mesa-attach: PASS")
+        return 0
+
+    print("smoke-mesa-attach: virtio_gpu_dri attached: NO")
+    print("smoke-mesa-attach: kernel side is healthy (virgl device up, capset "
+          "negotiated); Mesa fell back to software rendering.")
+    if a.require_virgl_attach:
+        print("smoke-mesa-attach: FAIL Mesa did not bind virgl. Check the two "
+              "gates that silently look healthy: VIRTGPU_GETPARAM must write "
+              "through the value pointer (not store a scalar in the struct), "
+              "and drm_version.version_major must be 0, or Mesa's "
+              "virgl_drm_get_version() returns -EINVAL before it ever creates "
+              "a context.")
+        return 1
+    print("smoke-mesa-attach: PASS (Mesa attach not enforced; see above)")
     return 0
 
 
@@ -451,6 +483,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--require-timeout-capacity", type=int, default=0)
     ap.add_argument("--require-smp-runqueue", type=int, default=0)
     ap.add_argument("--require-lock-split", type=int, default=0)
+    ap.add_argument("--require-virgl-attach", action="store_true",
+                    help="mesa-attach: fail unless Mesa binds virtio_gpu_dri")
     a = ap.parse_args(argv)
     if a.case == "arch-mmu-matrix":
         return matrix_main(a)
