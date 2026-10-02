@@ -93,3 +93,94 @@ check-drm-store-locking:
 
 check-external-dependency-boundary:
 	@$(PYTHON) tools/gates.py external-dependency-boundary
+
+# ----------------------------------------------------------------
+# `make check` -- the fast host-side gate tier
+# ----------------------------------------------------------------
+# Every target CI's `toolchain-gates` job runs, in the order the job runs them.
+# Keeping the list in one variable (rather than as bare prerequisites) is what
+# lets the recipe below report per-gate results and let `make help` print the
+# same list; a second hand-typed copy is exactly how a gate stops being run
+# locally while still passing in CI.
+#
+# The list is a *tier*, not a wish list: every member is host-side (pure Python,
+# rg, or the host gcc) and needs neither a cross toolchain nor QEMU, so `make
+# check` is always runnable on a bare checkout.  The 11 remaining members of
+# check-doc-test-gates each boot a QEMU guest and belong to the `smoke` job.
+#
+# When this list changes, .github/workflows/ci.yml's toolchain-gates job must
+# change with it; that file is the other half of the contract and is not
+# edited from here.
+CHECK_FAST_GATES := \
+    check-manifests \
+    check-a20-tests \
+    check-honesty-policy \
+    check-smoke-cases \
+    host-tests \
+    check-drm-abi \
+    check-task-lifetime-boundary \
+    check-smp-platform-boundary \
+    check-io-progress-model \
+    check-external-dependency-boundary \
+    check-abi-boundary \
+    check-envelope-coverage \
+    check-task-state-boundary \
+    check-abi-smoke-gate \
+    check-doc-drift
+
+# Recurse per gate instead of listing them as prerequisites.  A single make
+# would run them in parallel under -j and stop at the first failure; one
+# $(MAKE) per gate keeps the jobserver honest (so `make -j check` does not
+# oversubscribe), keeps the order deterministic, and lets every gate run so a
+# single `make check` reports *all* the drift in the tree rather than the first
+# symptom of it.  That is the same "fail-closed, name the broken assertion"
+# stance the individual gates take.
+#
+# `check-format` is deliberately NOT a member: it needs a clang-format that the
+# CI runner does not install, so folding it in here would make `make check`
+# mean something CI cannot reproduce.  Run it explicitly.
+.PHONY: check
+check:
+	@failed=''; \
+	for gate in $(CHECK_FAST_GATES); do \
+	  printf '\n=== %s ===\n' "$$gate"; \
+	  $(MAKE) --no-print-directory $$gate || failed="$$failed $$gate"; \
+	done; \
+	printf '\n'; \
+	if [ -n "$$failed" ]; then \
+	  echo "check: FAIL --$$failed"; \
+	  echo "  ($(words $(CHECK_FAST_GATES)) gates run; a full-fidelity local"; \
+	  echo "   reproduction of CI's toolchain-gates job)"; \
+	  exit 1; \
+	fi; \
+	echo "check: PASS -- all $(words $(CHECK_FAST_GATES)) host-side gates green"
+
+# ----------------------------------------------------------------
+# clang-format drift gate (docs/CONTRIBUTING.md 4.2)
+# ----------------------------------------------------------------
+# The one gate whose tool may legitimately be absent, so it is the one gate that
+# must not hard-fail on a missing binary.  A contributor without clang-format
+# gets a SKIP line naming the package, not a red build they cannot fix and not
+# a silent pass they cannot see.  Override with CLANG_FORMAT=/path/to/binary.
+CLANG_FORMAT ?= $(shell command -v clang-format 2>/dev/null)
+
+.PHONY: check-format format-baseline
+check-format:
+ifeq ($(CLANG_FORMAT),)
+	@echo "check-format: SKIP -- clang-format is not installed, so no formatting" \
+	  "assertion ran.  Install it (apt-get install clang-format) or set" \
+	  "CLANG_FORMAT=/path/to/clang-format.  This gate reports drift; it never" \
+	  "rewrites a source file."
+else
+	@$(PYTHON) tools/clang_format_gate.py --clang-format "$(CLANG_FORMAT)"
+endif
+
+# Re-record the ratchet.  Deliberately a separate target from check-format so
+# that widening the exemption set is always an explicit, reviewable act: the
+# diff of tools/clang-format-baseline.txt *is* the record of what was accepted.
+format-baseline:
+ifeq ($(CLANG_FORMAT),)
+	@echo "format-baseline: SKIP -- clang-format is not installed (see check-format)"
+else
+	@$(PYTHON) tools/clang_format_gate.py --clang-format "$(CLANG_FORMAT)" --write
+endif
