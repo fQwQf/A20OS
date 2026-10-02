@@ -290,8 +290,13 @@ void fdtable_share(task_t *dst, const task_t *src)
 {
     if (!dst || !src)
         return;
+    /* Only the descriptor table is being replaced.  @dst is a live, already
+     * initialised task: the namespace references and the fs pins it was born
+     * with were taken by proc_task_init_common() and are still in use, so this
+     * must go through fdtable_release_files() rather than the full per-task
+     * teardown that fdtable_close_all() performs. */
     if (dst->files)
-        fdtable_close_all(dst);
+        fdtable_release_files(dst);
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     dst->files = (struct files_struct *)src->files;
     if (dst->files) {
@@ -347,23 +352,9 @@ int fdtable_unshare(task_t *task)
     return 0;
 }
 
-void fdtable_close_all(task_t *task)
+void fdtable_release_files(task_t *task)
 {
-    if (!task)
-        return;
-    /* Per-task teardown also drops the mount-namespace reference.  This is
-     * the only fs-layer hook the process core calls on every teardown path
-     * (exit and final task destruction); mntns_release_task() NULLs the
-     * field, so the double call is safe. */
-    mntns_release_task(task);
-    /* Same hook for the pid namespace: the task's ids in every container it
-     * is a member of must come back as soon as the task is gone, or a long
-     * running container would leak ids until PIDNS_CHILD_MAX. */
-    pidns_release_task(task);
-    /* Release the per-process root/cwd references.  Idempotent, so the
-     * exec and exit paths that both reach this hook are safe. */
-    vfs_task_fs_pins_release(task);
-    if (!task->files)
+    if (!task || !task->files)
         return;
     uint64_t flags = spin_lock_irqsave(&proc_lock);
     files_struct_t *files = (files_struct_t *)task->files;
@@ -375,6 +366,30 @@ void fdtable_close_all(task_t *task)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
     fdtable_files_put(files);
+}
+
+void fdtable_close_all(task_t *task)
+{
+    if (!task)
+        return;
+    /* Genuine per-task teardown, reached from process exit and from
+     * proc_destroy_task().  It drops the mount-namespace reference, which
+     * mntns_release_task() NULLs, so both paths reaching it is safe. */
+    mntns_release_task(task);
+    /* Same hook for the pid namespace: the task's ids in every container it
+     * is a member of must come back as soon as the task is gone, or a long
+     * running container would leak ids until PIDNS_CHILD_MAX. */
+    pidns_release_task(task);
+    /* And the user namespace reference, on the same reasoning: a namespace
+     * that outlives its last task would keep its parent pinned. */
+    userns_release_task(task);
+    /* Release the per-process root/cwd references.  Idempotent, so the
+     * exit and destroy paths that both reach this hook are safe. */
+    vfs_task_fs_pins_release(task);
+    /* The descriptor table itself is the other half, and is separable: a
+     * task that is giving its table away rather than going away wants the
+     * files without the namespaces (see fdtable_share()). */
+    fdtable_release_files(task);
 }
 
 void fdtable_close_on_exec(task_t *task)

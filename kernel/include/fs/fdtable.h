@@ -48,6 +48,11 @@ void fdtable_init_stdio(task_t *task);
 void fdtable_copy(task_t *dst, const task_t *src);
 void fdtable_share(task_t *dst, const task_t *src);
 int  fdtable_unshare(task_t *task);
+/* Drop just the descriptor table, leaving the task's namespace references and
+ * fs pins alone.  fdtable_share() needs this; fdtable_close_all() does not. */
+void fdtable_release_files(task_t *task);
+/* Full per-task teardown: namespaces, fs pins and the descriptor table.  Only
+ * for a task that is genuinely going away (process exit, proc_destroy_task). */
 void fdtable_close_all(task_t *task);
 void fdtable_close_on_exec(task_t *task);
 

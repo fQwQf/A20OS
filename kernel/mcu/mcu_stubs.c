@@ -106,6 +106,7 @@ int proc_debug_event_stop(int sig, int event, uint64_t msg) {
 }
 
 /* MCU kernel threads never initialize a descriptor table. */
+void fdtable_release_files(task_t *task) { (void)task; }
 void fdtable_close_all(task_t *task) { (void)task; }
 void vfs_release_process_locks(int pid) { (void)pid; }
 
