@@ -153,7 +153,7 @@ int64_t sys_a20_task_info(const a20_syscall_args_t *args)
     /* Fill VM stats from target's mm_struct */
     if (target->mm) {
         info.vm_size = target->mm->total_vm * 4096ULL;
-        info.vm_rss = target->mm->rss * 4096ULL;
+        info.vm_rss = mm_rss_get(target->mm) * 4096ULL;
     }
     /* CPU time: convert ticks to nanoseconds at 100ns/tick */
     info.user_time_ns = target->total_time * 10000000ULL;
@@ -278,7 +278,7 @@ int64_t sys_a20_task_get_usage(const a20_syscall_args_t *args)
     memset(&usage, 0, sizeof(usage));
     if (target) {
         usage.user_time_ns = target->total_time * 10000000ULL;
-        usage.max_rss = target->mm ? target->mm->rss * 4096ULL : 0;
+        usage.max_rss = mm_rss_get(target->mm) * 4096ULL;
         usage.sys_time_ns = (target->child_utime + target->child_stime) * 10000000ULL;
     }
     proc_put(target);

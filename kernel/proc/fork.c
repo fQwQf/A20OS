@@ -288,7 +288,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
             t->pgdir = t->mm->pgdir;
 #ifdef CONFIG_COOPERATIVE_BOOT
             kinfo("[PROC] clone mm ready: child=%d rss=%lu vm=%lu\n",
-                  child_pid, (unsigned long)t->mm->rss,
+                  child_pid, (unsigned long)mm_rss_get(t->mm),
                   (unsigned long)t->mm->total_vm);
 #endif
         } else {

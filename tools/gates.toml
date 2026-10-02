@@ -901,6 +901,285 @@ files = ["kernel/abi/linux/sys_proc.c"]
 pattern = "mm_pt_note_present|mm_pt_note_absent"
 files = ["kernel/mm/mm.c"]
 
+# Page-table lock discipline (mm single-level migration).
+#
+# A covering-node-only cursor lock was once documented as "the unit of writer
+# exclusion".  That claim was false: a peer whose covering node is an ancestor or
+# descendant holds a different lock, and the descent takes no lock at all on
+# already-populated intermediates, so a wide cursor and a single-page cursor
+# inside it would write the same leaf with no mutual exclusion.  It never fired
+# because the wide/narrow cursor overlap is reachable after all: fault-around
+# opens a 4-page (anon) or 16-page (file) window, and pt_covering_level() aligns
+# the start rather than requiring it to be the span's first page, so those
+# windows land on covering level 1 while a single-page fault lands on level 0 --
+# both writing the same leaf table.  Only mm->lock keeps them apart today.
+#
+# A per-operation leaf lock was implemented and reverted once: its first
+# version started the descent at guard_level - 1, which reads a path[] entry
+# mm_addrspace_lock never populates, and hung the huge-page path so that
+# smoke-mm-stress timed out with no self-deadlock report.  It reads as an
+# unremarkable off-by-one, which is exactly why it needs a gate.
+#
+# So these assertions pin the two things that must not drift: the leaf lock
+# exists and is parked in the cursor, and every cursor entry point descends for
+# the address it was handed rather than trusting a stale path[0].
+[[gate]]
+name = "check-mm-pt-lock-order"
+make_target = "check-mm-pt-lock-order"
+
+# The two claims that were false, in either file.  Both comments now carry the
+# correction inline; this stops the wrong wording coming back.
+[[gate.assertion]]
+negate = true
+fixed = true
+pattern = "covering node's lock IS the unit of writer exclusion"
+files = ["kernel/mm/pt.c", "kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+negate = true
+fixed = true
+pattern = "holds a lock on EVERY descendant of the covering node"
+files = ["kernel/mm/pt.c", "kernel/include/mm/pt.h"]
+
+# MM_AS_CURSOR_ONLY_ENTRY rule 1 says every user-PTE access happens inside a
+# cursor, and pt_unmap_leaf()/pt_unmap() both break it -- they are bare walks
+# held safe only by mm->lock.  Those two functions are named in a bypass list
+# inside the invariant itself; this asserts the list is still there and still
+# names them, so deleting the list (or emptying it while the code still
+# bypasses) fails instead of passing quietly.  Phase 3 empties it for real.
+#
+# min_count, not a bare presence check: the tag occurs twice by design (once in
+# the prose that explains the list, once as the list header), and a presence
+# check cannot see one of the two being deleted.  Verified by deleting each in
+# turn and watching this fail.
+[[gate.assertion]]
+fixed = true
+pattern = "MM_AS_CURSOR_ONLY_ENTRY_BYPASSES"
+min_count = 2
+files = ["kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pt_unmap_leaf"
+files = ["kernel/include/mm/pt.h"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "pt_unmap"
+files = ["kernel/include/mm/pt.h"]
+
+# The bypass above stopped being "held safe only by mm->lock": pt_unmap_leaf()
+# and pt_unmap() now take the lock of the PT page they write, the same page
+# cursor_leaf_slot() locks, which is the exclusion rule 3 actually asks for.
+# They stay listed because they are still not cursors, so the list is what keeps
+# them honest -- and these two assertions are what keep them honest about the
+# lock.  Anchored on the call form, not the bare name, so the prose reference in
+# mm.c's comment does not satisfy them.
+[[gate.assertion]]
+fixed = true
+pattern = "mm_pt_node_lock(path"
+min_count = 3
+files = ["kernel/mm/mm.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "mm_pt_node_lock(parent)"
+min_count = 2
+files = ["kernel/mm/mm.c"]
+
+# cursor_leaf_slot() and mm_addrspace_lock() must both allocate the child PT node
+# with frame_alloc_nr(), never the reclaiming frame_alloc().  The reclaiming
+# allocator reaches oom_try_reclaim() -- swap-out and a forced process kill --
+# and both of these run while a spinlock is held: a node MCS lock on the fault
+# path, and mm->lock on the mm_mmap() -> mm_pt_provision_anon() path, where
+# mm->lock is a spin_lock_irqsave, so reclaiming there is a sleep with
+# interrupts off.  That path is a confirmed lockup, not a hazard: see
+# docs/roadmap/single-level-mm-model.md 11.7.
+#
+# mm_addrspace_lock() is the one that matters most -- it is the entry point every
+# cursor operation goes through.
+#
+# gates.py has no "must not appear between these two markers" form, only
+# fixed/min_count, so this pins that both call sites are still there rather than
+# proving the absence structurally.  A stronger check needs the gate language
+# extended.
+#
+# The 12 leading spaces are load-bearing: without them this also matches
+# "pte_t *next = (pte_t *)frame_alloc_nr();", so min_count = 2 can no longer tell
+# the two sites apart, which is how an earlier negative test deleted one of them
+# and still went green.  min_count = 2 so removing either site fails.
+[[gate.assertion]]
+fixed = true
+pattern = "            next = (pte_t *)frame_alloc_nr();"
+min_count = 2
+files = ["kernel/mm/pt.c"]
+
+# Pins that frame_alloc_nr() is actually the non-reclaiming allocator.  Without
+# this, renaming a function to _nr and leaving pfa_alloc_page() inside it would
+# satisfy every assertion above while reclaiming under the spinlock again.
+[[gate.assertion]]
+fixed = true
+pattern = "pfa_alloc_flags(0, 0)"
+files = ["kernel/mm/mm.c"]
+
+# The MCS handoff, pinned in all three parts.  This path did not run at all until
+# Phase 3: mm->lock serialised whole faults, so the node locks were never
+# contended and two independent fatal bugs sat there unnoticed -- the waiter was
+# never linked into the queue, and the unlocker recovered its own node from a
+# shared field that every acquirer overwrote.  Either one wedges the node
+# permanently on first contention, with no MCS DEADLOCK report, because the
+# waiter is not self-deadlocked -- it waits for a handoff the protocol cannot
+# produce.  A regression here is invisible in review and in the pre-Phase-3
+# workload, so it is pinned mechanically instead.
+#
+# 1. the waiter publishes itself to its predecessor
+[[gate.assertion]]
+fixed = true
+pattern = "((pt_mcs_node_t *)tail)->next"
+files = ["kernel/mm/pt.c"]
+
+# 2. the unlocker takes its OWN node from its per-CPU pool, never the shared
+#    m->node that every acquirer overwrites
+[[gate.assertion]]
+fixed = true
+pattern = "me = &pool->nodes[pool->depth - 1]"
+files = ["kernel/mm/pt.c"]
+
+# 3. losing the unlock CAS hands off to the successor instead of dropping it
+[[gate.assertion]]
+fixed = true
+pattern = "while (__atomic_load_n(&me->next, __ATOMIC_ACQUIRE) == 0)"
+files = ["kernel/mm/pt.c"]
+
+# Intent anchor: the reason the child-node allocator is the non-reclaiming one
+# is stated at the call site, not just implied by the function name.
+[[gate.assertion]]
+fixed = true
+pattern = "frame_alloc_nr(), which cannot reach"
+files = ["kernel/mm/pt.c"]
+
+# cursor_leaf_slot() is the only thing that may hand out a leaf slot, and it
+# takes the leaf table's own MCS lock and parks it for cursor_leaf_unlock().
+[[gate.assertion]]
+fixed = true
+pattern = "mcs_lock(lm)"
+files = ["kernel/mm/pt.c"]
+
+[[gate.assertion]]
+fixed = true
+pattern = "cur->leaf_meta = lm"
+files = ["kernel/mm/pt.c"]
+
+# Counted, not presence-checked: a lock taken but not released on some path is a
+# hang, and a presence check cannot see one missing unlock among the others.
+[[gate.assertion]]
+fixed = true
+pattern = "cursor_leaf_unlock(cur)"
+min_count = 12
+files = ["kernel/mm/pt.c"]
+
+# 5 = mm_cursor_replace / unmap / mark_prot / safe_test / query.  Fewer means a
+# caller is back to reading path[0] left over from another address.
+[[gate.assertion]]
+fixed = true
+pattern = "cursor_leaf_slot(cur, addr"
+min_count = 5
+files = ["kernel/mm/pt.c"]
+
+# The descent walk must start AT guard_level: mm_addrspace_lock populates
+# path[ROOT-1]..path[guard_level] and nothing below, so a `guard_level - 1`
+# start dereferences an uninitialised pointer.  grep cannot see that, but it can
+# see the loop bound, and the bound is the thing that was wrong once already.
+[[gate.assertion]]
+fixed = true
+pattern = "for (int l = cur->guard_level; l > 0; l--)"
+files = ["kernel/mm/pt.c"]
+
+# ...and it must not re-lock the covering node the cursor already holds.
+[[gate.assertion]]
+fixed = true
+pattern = "(l == cur->guard_level) ? NULL : mm_pt_meta(table)"
+files = ["kernel/mm/pt.c"]
+
+# RSS accounting is atomic and does not depend on mm->lock.  A bare `mm->rss`
+# is what that phase removed; `\b` keeps this from matching `mm->rss_atomic`.
+# The cgroup counter of the same name (cg_mem_t.rss, spelled `m->rss`) is a
+# different field with its own locking and is deliberately not covered.
+[[gate.assertion]]
+negate = true
+pattern = "mm->rss\\b"
+files = [
+    "kernel/mm/*.c",
+    "kernel/proc/*.c",
+    "kernel/abi/linux/*.c",
+    "kernel/abi/native/*.c",
+    "kernel/fs/procfs/*.c",
+    "kernel/ipc/*.c",
+    "kernel/drivers/gpu/*.c",
+]
+
+
+# MM_AS_MODEL (2026-10-02, option C): PTE_SWAP is THE one tolerated overloaded
+# bit, and every architecture must define it explicitly.  Three of the six
+# define it as PTE_LEAF itself, so "one bit" understates it -- but the
+# invariant that matters is that it is defined deliberately and per-arch, not
+# that it is gone.  A presence check per architecture: deleting any one
+# #define (e.g. while "tidying" an unused arch) fails instead of silently
+# making PTE_SWAP undefined and turning pte_is_swap() into a constant false --
+# which would read as "no swap support" rather than as a compile error.
+#
+# The pattern carries a trailing space on purpose: "define PTE_SWAP" is a
+# PREFIX of "define PTE_SWAP_REMOVED", so a bare presence check would still
+# pass against a renamed macro and this gate would have no teeth at all.
+#
+# Teeth verified by renaming each definition in turn and watching this fail.
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/x86_64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/aarch64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/loongarch64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/riscv64/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/arm32/include/page_table.h"]
+
+[[gate.assertion]]
+pattern = "#define PTE_SWAP "
+files = ["kernel/arch/ppc64le/include/page_table.h"]
+
+# Together with the six checks above this pins set EQUALITY:
+#
+#     {arch : PTE_SWAP defined}  ==  SWAP_SUPPORTED_ARCHES
+#
+# which nothing else in the tree enforces, and the two directions fail in very
+# different ways.  Adding an arch to SWAP_SUPPORTED_ARCHES without defining
+# PTE_SWAP breaks the build loudly (fault.c/mm.c/munmap.c/exit.c will not
+# compile).  The reverse -- defining PTE_SWAP on a new arch and forgetting the
+# Makefile -- silently forces CONFIG_SWAP:=n on that arch: swap becomes
+# featureless, pte_is_swap() degrades to a constant false, and the result reads
+# as "this arch has no swap support" rather than as an oversight.  A per-arch
+# presence check cannot see that; pinning the exact list can.
+#
+# Anchored ^...$ as a regex, not a literal: the arch names occur in the
+# Makefile for unrelated reasons, so per-name checks would pass on a list that
+# had lost an entry.  A literal is not enough either -- appending an arch leaves
+# the original string as a substring, so `fixed = true` passed on a list that
+# had GAINED one, which is the same hole as the prefix bug above.  Anchoring the
+# end of line is what makes "exactly this list" mean exactly this list.
+[[gate.assertion]]
+pattern = "^SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le$"
+files = ["Makefile"]
+
 [[gate]]
 name = "check-io-progress-model"
 make_target = "check-io-progress-model"

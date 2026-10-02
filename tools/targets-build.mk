@@ -377,6 +377,10 @@ check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
 	@$(PYTHON) tools/gates.py check-mm-lock-model
 	@echo "check-mm-lock-model: PASS"
 
+check-mm-pt-lock-order:
+	@$(PYTHON) tools/gates.py check-mm-pt-lock-order
+	@echo "check-mm-pt-lock-order: PASS"
+
 check-io-progress-model:
 	@$(PYTHON) tools/gates.py check-io-progress-model
 	@echo "check-io-progress-model: PASS"

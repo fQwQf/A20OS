@@ -122,7 +122,7 @@ void cg_mem_oom_kill(struct cg_node *cg)
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) continue;
         if (t->cgroup != cg) continue;
-        size_t task_rss = t->mm ? t->mm->rss : 0;
+        size_t task_rss = mm_rss_get(t->mm);
         int score = (int)task_rss + t->policy.oom_score_adj;
         if (score > worst_score) {
             worst_score = score;
