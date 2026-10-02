@@ -133,7 +133,104 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 | P4 | `core/rcu.c`；`stale` + 重试；`pt_unmap` / `pt_unmap_leaf` / `pt_destroy_*` 中的 `frame_free(child)` 改为延迟释放 | 任何遍历都到不了的页表页不会被回收 | 新 `smoke-mm-pt-race`：N 线程大范围 unmap 同时 N 线程 fault |
 | P5 ✅ | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
 | P6 | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
+
+> **P6 的可实现范围（2026-10-02 核对代码后收窄）**：原表述"page fault 分派读不到
+> 任何 VMA"**只在分派层成立**，因为 status 字节能**分类**但不能**服务**。
+>
+> * status 字节的全部容量：4 bit class（`MM_ST_INVALID` … `MM_ST_PT_NODE`，共 9 类）
+>   + `MM_ST_PROT_R/W/X` + `MM_ST_COW_BIT`。它足以回答论文 Fig. 8 的三态
+>   （PrivateAnon / Mapped / Invalid），这正是**分派**所需的全部。
+> * 但 `handle_file_fault()`（fault.c:755）要解引用 `vf->vnode`、`file_fd`、
+>   `file_pos`，并调 `page_cache_get(vf->vnode, …)`；COW 路径同理需要一个可写的
+>   文件后备。**这些对象引用在 status 字节里无处可放。**
+> * 所以 P6 落地后，`fault.c` 里剩下的 `mm_find_vma` 调用会**保留在对象解析处**，
+>   而不是消失：`fault.c:249`（COW）与 `898`（file fault）需要 vnode/fd。
+>
+>   **更正**：我先前把 `fault.c:1136` 说成"`mm_fault_from_status()` 里的 UFFD 存在性
+>   判断"，这是错的。核对后：`mm_fault_from_status` 是 1033–1096，而 **1136 属于
+>   `handle_demand_fault_access()` 的 VMA 路径**（`mm_find_vma` 喂给
+>   USERFAULTFD_MISSING_HOOK 的 `userfaultfd_range_present()` 判断）。
+>
+>   更要紧的是，**快段自己的 UFFD 门禁（1046 行）已经是 status 驱动的**——
+>   `mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)` 读的是 cursor 里的 per-PTE
+>   安全位，不查 VMA。所以"UFFD 原理上无法 status 驱动"这句话只对 VMA 路径成立：
+>   UFFDIO_REGISTER 的注册单位确实是 VMA 区间，因此**权威**的重新判定必须在 VMA 上做；
+>   但快段用 per-entry 安全位做**快筛**已经落地。两者不矛盾：安全位负责快路径分流，
+>   VMA 区间表负责权威判定与 unregister 后的失效。
+> * **更正**：我先前把 `378` / `458` / `476` / `669` 都算作「可去掉的分派点」，
+>   逐个读过之后这个说法不成立：
+>
+>   | 行 | 实际用途 | 是分派吗 |
+>   |---|---|---|
+>   | `378` | swap-in 后 `fault_map(..., vma->pte_flags, ...)`，要**权限位** | 否 |
+>   | `458` | brk 扩张的否定式判断「这里有没有 VMA」 | 勉强算 |
+>   | `476` | 主 VMA 路径：`vma->pte_flags` / `vm_flags` / `file_fd` | 否 |
+>   | `669` | 分配之后 `mm_find_vma(...) != vma` 的**并发重查** | 否 |
+>
+>   三处要的正是 status 字节装不下的东西（权限位、fd），第四处根本不是分派，而是
+>   分配窗口里的竞态检测。
+> >
+> **结论（收窄后）**：在当前 status 字节容量（4 bit class + R/W/X + COW）下，
+> **P6 基本不可实现**。唯一勉强算候选的是 `458` 那处 brk 否定式判断，价值也远小于
+> 本行原始表述所暗示的。要真正推进 P6，得先扩宽 status 字节以携带对象引用
+> （vnode / fd / offset）——那是**格式变更**而不是调度顺序变更，而**论文没有给出
+> 这个格式**。
+> >
+> 所以 P6 与 P7 同类：**卡在缺少论文规格，而不是卡在工程量**。
+
+> **P6 最后一处候选也已排除（实测）**：`mm_pt_provision_anon()` 全树只有三个调用点
+> ——`mmap.c:195`、`elf.c:184`、`munmap.c:270`。**brk 增长不在其中**：
+> `proc_brk()`（`proc/proc.c:732`）→ `mm_brk_locked()`（`munmap.c:177`），后者只遍历
+> VMA 列表并在收缩循环里拆 PTE，**从不写 status**。
+>
+> 所以 `fault.c:458` 那处 brk 否定式判断（`!mm_find_vma(...)`）**连可供查询的
+> status 都不存在**——brk 区域内的页在元数据里始终是 `MM_ST_INVALID`，与"有 VMA"
+> 无法区分。
+>
+> **P6 因此没有可实现子集**：不是"大部分能做"，而是一处都做不了。7 处
+> `mm_find_vma` 全部依赖 status 字节装不下的信息（对象引用、权限位、并发重查），
+> 或者依赖尚不存在的生产者（brk）。
 | P7 | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
+
+> **P7 的阻塞点是硬件约束，且仓库里已写明**（`kernel/include/mm/pt.h:86-97`）：
+> 「Storing this in the PTE's software-usable bits is not an option on A20OS:
+> riscv32 and arm32 have no free software bits at their root levels, and
+> loongarch64 aliases PTE_R/W/X onto the LA_PTE memory-attribute field.」
+>
+> 这把因果**倒过来**了：`pt_meta` 的 status 字节之所以是唯一可放之处，正是因为
+> PTE 没有空位。所以 `PTE_SWAP` 不是"第一个该被消灭的例子"，而是**唯一一个被容忍
+> 的例外**；本行"删除 `PTE_SWAP`"若不同时扩宽 status 字节的容量，就无处安放
+> swap 状态（`MM_ST_SWAPPED` 已经用掉 9 个 class 里的一个，且 class 只有 4 bit）。
+>
+> 要做 P7 得先解决 status 字节容量，而扩宽它又与 P6 卡在同一处（需要携带对象
+> 引用）。**P6 与 P7 是同一个根因**：status 字节位数不够。
+
+> **P7 的阻塞可判定（宽度算术，2026-10-02 核对，已按 `swp_entry()` 复核）**：
+> 注意阻塞的**理由**不是 `swap_entry_t` 的 `uint64_t` typedef——我先前这样写是不准确的。
+> 真实宽度由 `swp_entry()` 决定（`kernel/mm/swap.c:58`）：
+> `((offset & SWP_OFFSET_MASK) << SWP_TYPE_BITS) | type`，其中
+> `SWP_TYPE_BITS = 4`，`SWP_OFFSET_BITS` 按指针宽度取 **20（32 bit）或 40（64 bit）**
+> （`kernel/include/mm/swap.h:8-13`）。所以实际载荷是 **24 bit 或 44 bit**，不是 64。
+>
+> 结论不变但更精确：本次涉及的三个架构（riscv64 / x86_64 / aarch64）都是 64 bit，
+> 载荷 **44 bit > 32 bit**，一个 32-bit 字装不下，因此元数据仍需扩到 **8 byte/条目**
+> （PT 页多 8×512 = 4 KiB）。但在 32 bit 架构上载荷只有 24 bit，**4 byte/条目就够**，
+> 内存代价只有一半。**结论按架构分叉，实现前必须先确认目标位宽。**
+>
+
+> `swap_entry_t` 是 **`uint64_t`**（`kernel/include/mm/swap.h:35`），而每个条目的
+> status 只有一个 **`uint8_t`**（`kernel/include/mm/pt.h:154`，`cls[]` 数组元素），
+> 其中 class 占 4 bit、prot 占 3 bit，COW 另在 `cow[]` 位图里。
+>
+> `MM_ST_SWAPPED` 只能表达"这一页已换出"，**无法表达"换到哪里"**——那是 64 bit 的
+> swap entry（设备号 + slot）。所以 `PTE_SWAP` 被删掉之后，这个 64 bit 值在当前
+> 元数据格式里**无处安放**：PTE 不能存（见上，`pt.h:86-97` 已说明各架构无空位），
+> 元数据也放不下。
+>
+> 因此 P7 不是"工程量大"，而是**需要一个尚未做出的格式决策**：要么 status 元数据
+> 从 1 byte/条目 扩到 8 byte（每个 PT 页多 8×512 = 4 KiB，对 2 MiB 映射是实打实的
+> 内存放大），要么引入按地址索引的旁表（换来一次额外查表）。论文没有给出这个选择，
+> 所以按论文实现 P7 是做不到的——**缺的是规格，不是工作量**。
 | P8 | 双向一致性检查器（P1 审计器覆盖反方向）；**`MM_LOCK_MODEL` 拆分**（见下注，**不是**改名）；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
 | P9 | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
 
