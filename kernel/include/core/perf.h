@@ -110,6 +110,15 @@ typedef enum a20_perf_counter {
     A20_PERF_NET_BH_EVENTS,
     A20_PERF_NET_BH_OVERFLOW,
     A20_PERF_NET_ALLOC_FAIL,
+    /* Accept-path accounting for real lwIP listening sockets.  STAGED counts
+     * completed handshakes the callback parked, QUEUED counts the ones the
+     * bottom half turned into a child socket, and DROP counts a handshake the
+     * stack destroyed rather than delivered -- a non-zero value is a refused
+     * connection, so the two must be read together to tell a healthy listener
+     * from one that is dropping arrivals. */
+    A20_PERF_NET_ACCEPT_STAGED,
+    A20_PERF_NET_ACCEPT_QUEUED,
+    A20_PERF_NET_ACCEPT_DROP,
     A20_PERF_COUNTER_COUNT,
 } a20_perf_counter_t;
 
