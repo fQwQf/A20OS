@@ -129,6 +129,7 @@ typedef enum {
     PF_A20_IOMMU,
     PF_A20_NETFILTER,
     PF_A20_NETMEM,
+    PF_A20_JOURNAL,
     PF_CGROUPS,
     PF_SELF,
     PF_FSTYPE,

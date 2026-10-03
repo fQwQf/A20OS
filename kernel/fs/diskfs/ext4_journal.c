@@ -756,12 +756,83 @@ out:
  * reconstructible rather than merely present.
  */
 
-/* a20.journal_crash=<point> -- halt the machine here instead of finishing.
+/* The point the next commit should die at, or "" for none.  Two sources set
+ * it: a20.journal_crash= on the command line (handy interactively) and
+ * /proc/a20/journal (which is what the crash-consistency gate uses, because
+ * not every machine hands QEMU's -append to the kernel -- LoongArch's virt
+ * board creates an empty /chosen and drops it).  The command line is copied
+ * into the journal at open time so a mount-time decision cannot race a later
+ * procfs write; the global is what the running commit consults. */
+static char g_journal_crash_point[24];
+
+/* The injection points, in the order a commit reaches them.  Kept as a table
+ * rather than as string literals at the call sites so /proc/a20/journal can
+ * reject a typo: a misspelled point would otherwise look armed and silently
+ * never fire, which is exactly the failure this gate exists to rule out. */
+static const char *const jbd2_crash_points[] = {
+    "post-recover-flag",
+    "post-journal",
+    "post-commit",
+    "post-checkpoint",
+};
+
+static int jbd2_crash_point_known(const char *point)
+{
+    for (size_t i = 0; i < sizeof(jbd2_crash_points) /
+                        sizeof(jbd2_crash_points[0]); i++) {
+        if (strcmp(jbd2_crash_points[i], point) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+int ext4_journal_crash_points_format(char *buf, size_t bufsz)
+{
+    int n = snprintf(buf, bufsz, "crash_point: %s\npoints:", 
+                     g_journal_crash_point[0] ? g_journal_crash_point : "none");
+    if (n < 0)
+        return 0;
+    size_t off = (size_t)n;
+    for (size_t i = 0; i < sizeof(jbd2_crash_points) /
+                        sizeof(jbd2_crash_points[0]) && off + 1 < bufsz; i++) {
+        n = snprintf(buf + off, bufsz - off, " %s", jbd2_crash_points[i]);
+        if (n < 0)
+            break;
+        off += (size_t)n;
+    }
+    if (off + 1 < bufsz)
+        buf[off++] = '\n';
+    buf[off] = '\0';
+    return (int)off;
+}
+
+int ext4_journal_set_crash_point(const char *point)
+{
+    if (!point)
+        return -EINVAL;
+    size_t len = strlen(point);
+    if (len >= sizeof(g_journal_crash_point))
+        return -EINVAL;
+    if (len && !jbd2_crash_point_known(point))
+        return -EINVAL;
+    memcpy(g_journal_crash_point, point, len + 1);
+    printf("[EXT4/JBD2] crash point set to '%s'\n", g_journal_crash_point);
+    return 0;
+}
+
+const char *ext4_journal_crash_point(void)
+{
+    return g_journal_crash_point;
+}
+
+/* halt the machine at a named point in the commit sequence.
  * The only way to be sure a crash-consistency claim is true is to actually
  * crash at each step and check what the next mount makes of the result. */
 static void jbd2_crash_point(ext4_journal_t *ej, const char *point)
 {
-    if (!ej->crash_point[0] || strcmp(ej->crash_point, point) != 0)
+    const char *armed = g_journal_crash_point[0] ? g_journal_crash_point
+                                                 : ej->crash_point;
+    if (!armed[0] || strcmp(armed, point) != 0)
         return;
     printf("[EXT4/JBD2] crash injection at %s: halting\n", point);
     printf("[EXT4/JBD2] CRASH-INJECT %s blocks=%u sequence=%u\n", point,
@@ -977,6 +1048,8 @@ static int jbd2_write_journal_superblock(ext4_journal_t *ej, uint32_t start,
 
 static void jbd2_arm_crash_point(ext4_journal_t *ej)
 {
+    if (g_journal_crash_point[0])
+        return;
     const char *cmdline = bootargs_get();
     static const char key[] = "a20.journal_crash=";
     const char *p = cmdline;
@@ -991,6 +1064,12 @@ static void jbd2_arm_crash_point(ext4_journal_t *ej)
                 vlen = sizeof(ej->crash_point) - 1;
             memcpy(ej->crash_point, v, vlen);
             ej->crash_point[vlen] = '\0';
+            if (!jbd2_crash_point_known(ej->crash_point)) {
+                printf("[EXT4/JBD2] unknown crash point '%s', not armed\n",
+                       ej->crash_point);
+                ej->crash_point[0] = '\0';
+                return;
+            }
             printf("[EXT4/JBD2] crash injection armed at '%s'\n",
                    ej->crash_point);
             return;
