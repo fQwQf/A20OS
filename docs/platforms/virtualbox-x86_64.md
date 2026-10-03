@@ -43,7 +43,9 @@ tools/a20 ledger vbox-iso-x86_64    # 产物路径、大小与 sha256
 tools/a20 show vbox-x86_64          # 该实例需要的介质与设备字段
 ```
 
-`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败；`xorriso` 缺失同样只影响 ISO 路径，磁盘路径由 `tools/mk_grub_disk_image.sh` 生成，不依赖 xorriso。
+`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败；`xorriso` 缺失同样只影响 ISO 路径，磁盘路径由 `tools/mk_uefi_fat_image.sh` 生成，两者都只影响各自的路径。
+
+`pc-rescue-disk` 另有 `tools/mk_grub_disk_image.sh` 那条 GRUB 磁盘路径，供 `instances/x86_64-pc.toml` 使用；它的 ESP 装的是 GRUB，不是本实例的 `BOOTX64.EFI`，两者不可混用。
 
 ## 直接启动磁盘镜像
 
@@ -65,6 +67,8 @@ ESP 里放的是 `BOOTX64.EFI`，也就是 A20OS 自己的 loader，而不是 GR
 loader 不做 32 位模式切换。`ExitBootServices` 之后固件已经把 CPU 留在 64 位长模式并保留恒等映射，这正是内核 `_start_uefi` 需要的入口状态；强行退回 32 位以满足 multiboot 约定，反而会引入一整类只能表现为裸 `#GP`、且当时控制台已死因而无法报告的失败。
 
 `vbox-iso-x86_64` 仍然是 BIOS 路径，用于对照 BIOS/SeaBIOS 下的行为。
+
+BIOS 路径也有直接启动的磁盘形态，由 `vbox-disk-x86_64` 产出（`make pc-rescue-disk`）：同样的内核与 rootfs，只是容器换成 GRUB 磁盘。两者的差别只有一处，但那一处决定了日志长什么样——GRUB 不填 ACPI tag，所以这条路径会走 ECAM 兜底窗口而不是读 MCFG，日志里会如实显示这一点。一台无法启动 UEFI 的 VM（芯片组留在 BIOS 默认、无固件变量）用这个实例。
 
 部署到真实磁盘时必须显式指定设备，`media_device` 不会默认填 `/dev/sda`：
 
