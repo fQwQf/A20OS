@@ -158,29 +158,66 @@ int64_t a20_monitor_sample(a20_monitor_t *m)
 }
 
 /*
+ * A due check split out so the tick can bound one pass and tell whether the
+ * list still holds monitors it has not sampled.
+ */
+static int monitor_due_locked(a20_monitor_t *m, uint64_t now)
+{
+    if (!m->period_ns)
+        return 0;
+    uint64_t period_ticks = m->period_ns / (1000000000ULL / TICKS_PER_SEC);
+    if (period_ticks == 0)
+        period_ticks = 1;
+    return (now - m->last_sample) >= period_ticks;
+}
+
+/*
  * Periodic tick (called from the timer interrupt, kernel/proc/timer_heap.c).
  * For each registered monitor with a period, notify every event queue
  * watching the MONITOR handle when the period has elapsed.
+ *
+ * a20_event_notify() takes the event-hash lock and reaches the event queues,
+ * so it must not run with the registry lock held: the critical section would
+ * grow with the number of live monitors and sit in front of the scheduler
+ * pick. The monitors due this tick are referenced into a fixed batch under
+ * g_mon_lock and notified after the lock is dropped. The batch bounds the
+ * stack a tick can claim, and a tick that filled it walks again -- the ones
+ * already sampled now carry last_sample == now, so each pass makes progress.
  */
+#define MONITOR_TICK_BATCH 16
+
 void a20_monitor_tick(void)
 {
-    spin_lock(&g_mon_lock);
-    for (a20_monitor_t *m = g_mon_list; m; m = m->next_registered) {
-        if (!m->period_ns)
-            continue;
-        uint64_t now = timer_get_ticks();
-        uint64_t elapsed_ticks = now - m->last_sample;
-        uint64_t period_ticks =
-            m->period_ns / (1000000000ULL / TICKS_PER_SEC);
-        if (period_ticks == 0)
-            period_ticks = 1;
-        if (elapsed_ticks < period_ticks)
-            continue;
-        m->last_sample = now;
-        int alive;
-        uint64_t v = monitor_sample_locked(m, &alive);
-        m->count = v;
-        a20_event_notify(m, A20_OBJ_MONITOR, A20_EVENT_SIGNALED, v, 0);
+    uint64_t now = timer_get_ticks();
+
+    for (;;) {
+        a20_monitor_t *batch[MONITOR_TICK_BATCH];
+        unsigned n = 0;
+        bool more = false;
+
+        spin_lock(&g_mon_lock);
+        for (a20_monitor_t *m = g_mon_list; m; m = m->next_registered) {
+            if (!monitor_due_locked(m, now))
+                continue;
+            if (n == MONITOR_TICK_BATCH) {
+                more = true;
+                break;
+            }
+            m->last_sample = now;
+            int alive;
+            uint64_t v = monitor_sample_locked(m, &alive);
+            m->count = v;
+            a20_monitor_ref(m);
+            batch[n++] = m;
+        }
+        spin_unlock(&g_mon_lock);
+
+        for (unsigned i = 0; i < n; i++) {
+            a20_event_notify(batch[i], A20_OBJ_MONITOR, A20_EVENT_SIGNALED,
+                             batch[i]->count, 0);
+            a20_monitor_put(batch[i]);
+        }
+        if (!more)
+            return;
     }
-    spin_unlock(&g_mon_lock);
 }
