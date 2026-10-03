@@ -1,11 +1,13 @@
 #ifdef CONFIG_LOONGARCH64
 
+#include "core/bootargs.h"
 #include "core/consts.h"
 #include "core/stdio.h"
 #include "core/string.h"
 #include "core/types.h"
 #include "platform.h"
 #include "drivers/core/driver_core.h"
+#include "firmware.h"
 
 #define FDT_MAGIC       0xd00dfeedU
 #define FDT_BEGIN_NODE  1U
@@ -232,6 +234,39 @@ void loongarch64_memory_init(void)
     }
     printf("[FDT] LoongArch total RAM: %lu MiB\n",
            (unsigned long)(total >> 20));
+}
+
+/* LoongArch was the one architecture with no arch_bootargs_get() at all, so
+ * every -append was dropped: the kernel booted and quietly ignored console=
+ * and the a20.* network keys.  The FDT is the only channel available here.
+ * QEMU's virt board does create /chosen but leaves bootargs out of it, and
+ * its fw_cfg at 0x1e020000 is marked unmapped_translate, i.e. unreachable
+ * without a page table mapping this board does not build.  So the honest
+ * state is: this works wherever the firmware fills /chosen, and on QEMU's
+ * LoongArch virt it says it found nothing instead of pretending the command
+ * line was honoured.  Gates must therefore not route anything essential
+ * through bootargs -- /proc/a20/journal is how the ext4 crash-consistency
+ * gate selects its injection point, precisely so it runs unchanged on an
+ * architecture whose firmware drops -append. */
+const char *arch_bootargs_get(void)
+{
+    static char bootargs_buf[1024];
+    static int ready;
+
+    if (!ready) {
+        bootargs_buf[0] = '\0';
+        uint64_t dtb = __boot_dtb_ptr;
+        if (dtb && fdt_extract_bootargs((const void *)(uintptr_t)dtb,
+                                        bootargs_buf,
+                                        sizeof(bootargs_buf)) == 0 &&
+            bootargs_buf[0]) {
+            printf("[FDT] bootargs='%s'\n", bootargs_buf);
+        } else {
+            printf("[FDT] no bootargs extracted\n");
+        }
+        ready = 1;
+    }
+    return bootargs_buf[0] ? bootargs_buf : NULL;
 }
 
 #endif

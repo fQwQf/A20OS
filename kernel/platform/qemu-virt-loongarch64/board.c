@@ -206,10 +206,20 @@ static void la64_enumerate_devices(void) {
     pci_enumerate(PCIE_ECAM_BASE, PCIE_BUS_START, PCIE_BUS_END);
 }
 
+/* The board's ram_base/ram_end is a ceiling on what the allocator may own, not
+ * a description of how much is installed: loongarch64_memory_init intersects
+ * it with the memory@ nodes the firmware publishes.  It used to be
+ * PHYS_MEMORY_END, a hardcoded 256 MiB, which silently threw away whatever
+ * the host asked for -- `qemu-system-loongarch64 -m 1G` reported 256 MiB and
+ * the other 768 MiB simply went unallocated.  On QEMU virt the firmware's own
+ * DTB is generated from -m, so it is exactly the right description and there
+ * is no reason to cap it; the ceiling stays the architectural limit. */
+#define QEMU_VIRT_LA64_RAM_END 0x100000000UL
+
 static const board_config_t qemu_virt_la64 = {
     .name              = "qemu-virt-la64",
     .ram_base          = PHYS_MEMORY_BASE,
-    .ram_end           = PHYS_MEMORY_END,
+    .ram_end           = QEMU_VIRT_LA64_RAM_END,
     .irqchip           = &la64_irqchip_ops,
     .timer             = &la64_timer_ops,
     .smp               = &la64_smp_ops,
