@@ -477,11 +477,10 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
         return -1;
     }
 
-    dma_sync_for_cpu(priv->rx_buf[idx], GMAC_BUF_SIZE);
-
     /* ES is the error-summary bit in the status word: whatever the DMA put in
      * the buffer is unusable, so the descriptor is re-armed and the poll keeps
-     * going instead of handing a corrupt frame up. */
+     * going instead of handing a corrupt frame up.  Nothing on this path reads
+     * the buffer, so it needs no invalidate-for-CPU at all. */
     if (desc->status & RX_DESC_ES) {
         dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
         desc->length = GMAC_BUF_SIZE |
@@ -500,8 +499,21 @@ int ls2k_gmac_recv(uintptr_t base, void *buf, size_t maxlen) {
     uint32_t frame_len = RX_DESC_FRAME_LEN(desc->status);
     uint32_t len = frame_len >= 4 ? frame_len - 4 : 0;
     if (len > maxlen) len = maxlen;
-    if (len > 0) memcpy(buf, priv->rx_buf[idx], len);
 
+    /* Invalidate only what is about to be read.  The descriptor carrying FRM
+     * was synced above, so the length is known before the buffer is touched;
+     * invalidating the whole GMAC_BUF_SIZE instead spends a dsb sy and a
+     * dc ivac per cache line across ~24 lines on every frame, of which only
+     * the two to four covering the payload are ever read. */
+    if (len > 0) {
+        dma_sync_for_cpu(priv->rx_buf[idx], len);
+        memcpy(buf, priv->rx_buf[idx], len);
+    }
+
+    /* The hand-back keeps the full-width sync-for-device even though this
+     * driver never writes the buffer: on aarch64 that is dc civac, so it is
+     * also the invalidate the DMA needs before overwriting the lines the CPU
+     * just read.  It is not redundant on a non-coherent port. */
     dma_sync_for_device(priv->rx_buf[idx], GMAC_BUF_SIZE);
     /* The hand-back rewrites the whole descriptor: status (OWN) and the third
      * word (buffer size plus the ring-end marker on the last descriptor) are
