@@ -11,6 +11,13 @@
  * device I/O is synchronous (see kernel/core/psi.c for the same reasoning
  * applied to PSI "io").
  *
+ * The runnable count comes from the per-CPU runqueue tallies, so the tick does
+ * not hold proc_lock and does not have to agree with itself across CPUs.  The
+ * live-task census that /proc/loadavg also prints is taken when it is read,
+ * not on every tick: it is display-only, so paying for it in the tick would
+ * charge every CPU a full list walk 100 times a second for a value that a
+ * reader looks at occasionally.
+ *
  * The EMAs are stored in Q16 fixed point so a fractional load survives
  * rounding, and decay is applied per tick with a shift derived from the
  * window, matching the PSI accounting in kernel/core/psi.c.
@@ -18,6 +25,7 @@
 
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "core/cpu.h"
 #include "core/timer.h"
 #include "core/string.h"
 
@@ -27,8 +35,6 @@
 static uint64_t g_loadavg[3];      /* Q16 fixed point, 1/5/15 minute */
 static uint64_t g_loadavg_last_tick;
 static unsigned g_loadavg_running; /* most recent sample */
-static unsigned g_loadavg_total;   /* most recent sample */
-static int g_loadavg_max_pid;
 
 static int loadavg_alpha_shift(uint64_t window_ticks)
 {
@@ -44,37 +50,16 @@ static void loadavg_ema_update(uint64_t *avg, unsigned sample, int shift)
     *avg += (((uint64_t)sample << LOADAVG_FSHIFT) - *avg) >> shift;
 }
 
-/* Count runnable tasks and total live tasks under proc_lock. */
-static void loadavg_sample_counts(unsigned *running, unsigned *total,
-                                  int *max_pid)
-{
-    unsigned r = 0, n = 0;
-    int hi = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
-            continue;
-        n++;
-        if (t->pid > hi)
-            hi = t->pid;
-        if (t->state == PROC_READY || t->state == PROC_RUNNING)
-            r++;
-    }
-    spin_unlock_irqrestore(&proc_lock, flags);
-    *running = r;
-    *total = n;
-    *max_pid = hi;
-}
-
 void proc_loadavg_tick(void)
 {
+    /* One sampler, not one per CPU: the EMAs decay per window, so several
+     * samplers in the same tick period would weight the figures by the CPU
+     * count rather than by elapsed time. */
+    if (cpu_current_id() != 0)
+        return;
     uint64_t now = timer_get_ticks();
-    unsigned running, total;
-    int max_pid;
-    loadavg_sample_counts(&running, &total, &max_pid);
+    unsigned running = (unsigned)proc_runq_load_sum();
     g_loadavg_running = running;
-    g_loadavg_total = total;
-    g_loadavg_max_pid = max_pid;
 
     if (g_loadavg_last_tick == 0) {
         g_loadavg_last_tick = now;
@@ -92,15 +77,31 @@ void proc_loadavg_tick(void)
     }
 }
 
+/* Count live tasks and the highest live pid under proc_lock. */
+static void loadavg_task_census(unsigned *total, int *max_pid)
+{
+    unsigned n = 0;
+    int hi = 0;
+    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
+        if (t->state == PROC_UNUSED)
+            continue;
+        n++;
+        if (t->pid > hi)
+            hi = t->pid;
+    }
+    spin_unlock_irqrestore(&proc_lock, flags);
+    if (total) *total = n;
+    if (max_pid) *max_pid = hi;
+}
+
 void proc_loadavg_snapshot(uint64_t *avg1, uint64_t *avg5, uint64_t *avg15,
                            unsigned *running, unsigned *total, int *max_pid)
 {
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    if (avg1) *avg1 = g_loadavg[0];
-    if (avg5) *avg5 = g_loadavg[1];
-    if (avg15) *avg15 = g_loadavg[2];
-    if (running) *running = g_loadavg_running;
-    if (total) *total = g_loadavg_total;
-    if (max_pid) *max_pid = g_loadavg_max_pid;
-    spin_unlock_irqrestore(&proc_lock, flags);
+    if (avg1) *avg1 = __atomic_load_n(&g_loadavg[0], __ATOMIC_RELAXED);
+    if (avg5) *avg5 = __atomic_load_n(&g_loadavg[1], __ATOMIC_RELAXED);
+    if (avg15) *avg15 = __atomic_load_n(&g_loadavg[2], __ATOMIC_RELAXED);
+    if (running) *running = __atomic_load_n(&g_loadavg_running, __ATOMIC_RELAXED);
+    if (total || max_pid)
+        loadavg_task_census(total, max_pid);
 }
