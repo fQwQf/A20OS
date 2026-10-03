@@ -364,6 +364,23 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 
 失败时查看 `.kernel-build/smoke/netctl-riscv64.log` 中首个 `NETCTL: FAIL`，对照 `kernel/net/socket_file.c`（SIOCGIFCONF 与 `struct a20_ifreq` 线格式）、`kernel/net/socket_netlink.c`（`net_netlink_route_request` 与 `nlrt_snapshot`）、`kernel/net/lwip_stack.c`（`/proc/net` 渲染与 netif 命名）、`kernel/net/socket.c`（`net_msg_flags_check`）。已知边界：本栈无路由表，`/proc/net/route` 与 `RTM_GETROUTE` 只报告各 netif 的默认网关，`RTM_SET*` 与路由增删一律 `-EOPNOTSUPP`；loopback 不经过驱动收发路径，其计数寄存器读零是真实值而非统计缺失；`SIOCSIFMTU`/`SIOCSIFDSTADDR`/`SIOCSIFBRDADDR` 仍是已分发但未实现、返回 `-ENOTTY`，而不是伪造成功；`/proc/net/arp` 仍是空表头，因为 lwIP 没有暴露 ARP 表访问器。
 
+### ext4 JBD2 崩溃一致性
+
+`make smoke-ext4-journal ARCH=<arch>` 在 JBD2 提交序列的四个点上真的把机器停住（`a20.journal_crash=<point>`），用**同一块镜像**重启，检查承诺过的写入没丢、没承诺的写入没回来，并在宿主机上用 `e2fsck -fn` 检查崩溃后的镜像和恢复后的镜像都干净。四个点各自是一个不同的承诺边界，所以期望结果也不同：
+
+| 崩溃点 | 停在什么位置 | 文件是否应存活 | 重放是否应发生 |
+| --- | --- | --- | --- |
+| `post-recover-flag` | `needs_recovery` 已置位，尚未写入任何日志 | 否 | 否 |
+| `post-journal` | descriptor 与各数据块已写入，无 commit block | 否 | 否 |
+| `post-commit` | commit block 已落盘 | 是 | 是 |
+| `post-checkpoint` | 元数据已写回其本位 | 是 | 是（幂等） |
+
+每个点除文件内容外还断言：注入的 panic 确实触发（否则门禁测的是没跑到的代码）、恢复启动能挂载、日志重放横幅 `replay complete` 当且仅当该点已承诺、恢复后镜像再次 e2fsck 干净。另有一条无崩溃对照（`clean`），确认在没有崩溃的情况下这条路径不产生任何多余重放。
+
+门禁本体在 `tools/ext4_journal_gate.py`，不在 `tools/targets-smoke.mk` 里内联：一次运行是 8 次 TCG 启动加 4 次宿主 fsck，shell 写不出来。之所以要双盘，是因为 FAT32 镜像带 `/bin/init` 而被测文件系统是第二块盘（`mount_setup.c` 把它自动挂到 `/extra`，无需 bootarg）。`ARCH` 同时决定 QEMU machine 与构建目录，因此这是每个架构各自的一道门，而不是只证明 x86_64。
+
+失败时先看 `.kernel-build/smoke/ext4-journal-<arch>.log`，里面每次启动一段、日志打印保留完整；对照 `kernel/fs/diskfs/ext4_journal.c` 的 `ext4_journal_commit`（提交顺序）、`jbd2_write_descriptor`（descriptor checksum 必须在 tag checksum 回填之后算）、`jbd2_data_checksum`（数据 checksum 只覆盖未改动的块镜像）与 `kernel/fs/block_cache.c` 的 hold 语义（`bcache_sync_common` 跳过被持有的页）。宿主侧可以直接 `e2fsck -fn` 那份崩溃镜像复现。门禁断言清单见 `tools/gates.toml` 的 `ext4-journal-crash-consistency`。
+
 ### 文档漂移关键词
 
 `make check-doc-drift` 重新生成 Linux syscall 覆盖表，扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。

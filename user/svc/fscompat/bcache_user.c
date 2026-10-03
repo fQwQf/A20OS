@@ -206,10 +206,11 @@ size_t bcache_held_pages(const bcache_t *bc)
     return 0;
 }
 
-void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *))
+void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *), void *owner)
 {
     (void)bc;
     (void)hook;
+    (void)owner;
 }
 
 void bcache_invalidate_page(bcache_t *bc, uint64_t page_no)

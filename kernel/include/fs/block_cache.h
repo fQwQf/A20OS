@@ -134,8 +134,12 @@ void      bcache_invalidate_page(bcache_t *bc, uint64_t page_no);
 void      bcache_hold_page(bcache_t *bc, uint64_t page_no);
 void      bcache_release_holds(bcache_t *bc);
 size_t    bcache_held_pages(const bcache_t *bc);
-/* Install the pre-sync hook.  Pass NULL to remove it. */
-void      bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *));
+/* Install the pre-sync hook together with the filesystem it belongs to.
+ * Pass hook = NULL to remove it; owner is then cleared with it.  The owner is
+ * handed to the hook as bc->owner: a hook has no other way back to the private
+ * state it must commit, so installing one without its owner cannot be spelled. */
+void      bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *),
+                               void *owner);
 
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len);
 int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,

@@ -309,11 +309,12 @@ size_t bcache_held_pages(const bcache_t *bc)
     return n;
 }
 
-void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *))
+void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *), void *owner)
 {
     if (!bc)
         return;
     bc->sync_hook = hook;
+    bc->owner = hook ? owner : NULL;
 }
 
 /* Pool is BCACHE_MAX_BLOCKS (1024) entries of BCACHE_BLOCK_SIZE (512) bytes,
@@ -840,6 +841,7 @@ int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos, size_t count) {
 int bcache_sync_held(bcache_t *bc) {
     return bcache_sync_common(bc, NULL, 0, BC_SYNC_HELD);
 }
+
 
 // Exists for legacy fsync/unmount call sites that do not propagate errors upward.
 void bcache_sync(bcache_t *bc) {
