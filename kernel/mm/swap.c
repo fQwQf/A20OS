@@ -21,6 +21,122 @@ size_t nr_swap_pages;
 static spinlock_t swap_locks[MAX_SWAPFILES];
 static spinlock_t swap_stats_lock;
 
+/*
+ * Allocation index, one word per 64 slots of an area's swap_map, with a bit set
+ * for every slot that is free and not bad.  swap_map alone is one byte per page,
+ * so scanning it for a free slot is O(pages) of byte loads under the area lock
+ * and gets steadily worse as the area fills.  The bitmap makes a scan 64x
+ * cheaper and the hint makes the common case O(1): allocation continues from
+ * where the last one stopped instead of restarting at the start of the area.
+ *
+ * This is an index over swap_map, never a second source of truth: every bit
+ * transition here is paired with the swap_map store beside it, and swap_map
+ * remains what the I/O path validates against.
+ */
+static uint64_t *swap_free_bits[MAX_SWAPFILES];
+static uint64_t  swap_alloc_hint[MAX_SWAPFILES];
+
+/*
+ * Transfers holding a reference to an area's block device without holding the
+ * area lock, and the device captured by swap_unregister_device() awaiting
+ * release once they drain.  swap_page_io() drops the lock before driving the
+ * device because the I/O can block, so swap_unregister_device() cannot know on
+ * its own that nobody is still inside the driver.  The pending slot is cleared
+ * under the lock by whichever of the two finds the count at zero, so the
+ * release happens exactly once and never on a device still being driven.
+ */
+static unsigned int  swap_io_refs[MAX_SWAPFILES];
+static block_dev_t  *swap_pending_bdev[MAX_SWAPFILES];
+
+static inline void swap_bit_set(uint64_t *bits, uint64_t i)
+{
+    bits[i >> 6] |= (uint64_t)1 << (i & 63);
+}
+
+static inline void swap_bit_clear(uint64_t *bits, uint64_t i)
+{
+    bits[i >> 6] &= ~((uint64_t)1 << (i & 63));
+}
+
+static size_t swap_bitmap_words(uint64_t pages)
+{
+    return (size_t)((pages + 63) / 64);
+}
+
+/*
+ * Index of the highest set bit, without __builtin_clzll: that expands to a
+ * libgcc call (__clzdi2) which this freestanding link does not pull in.
+ */
+static inline uint64_t swap_highest_bit(uint64_t word)
+{
+    uint64_t bit = 0;
+    if (word & 0xFFFFFFFF00000000ull) { word >>= 32; bit += 32; }
+    if (word & 0x00000000FFFF0000ull) { word >>= 16; bit += 16; }
+    if (word & 0x000000000000FF00ull) { word >>= 8;  bit += 8; }
+    if (word & 0x00000000000000F0ull) { word >>= 4;  bit += 4; }
+    if (word & 0x000000000000000Cull) { word >>= 2;  bit += 2; }
+    if (word & 0x0000000000000002ull) { bit += 1; }
+    return bit;
+}
+
+/*
+ * Find a free slot at or after `hint`, wrapping to the start of the area once
+ * the tail is exhausted.  Scanning whole words is what keeps this cheap; the
+ * hint keeps it from re-walking the allocated prefix on every call.
+ */
+static int swap_bitmap_find_free(swap_info_struct *si, int type,
+                                 uint64_t *out)
+{
+    uint64_t *bits = swap_free_bits[type];
+    uint64_t pages = si->pages;
+    uint64_t hint = swap_alloc_hint[type];
+
+    /* Slot 0 is the header and is never allocatable. */
+    if (hint < 1) hint = 1;
+    if (hint >= pages) hint = 1;
+
+    for (int pass = 0; pass < 2; pass++) {
+        uint64_t start = pass == 0 ? hint : 1;
+        uint64_t end   = pass == 0 ? pages : hint;
+        uint64_t first_w = start >> 6;
+        uint64_t last_w  = (end + 63) >> 6;
+        for (uint64_t w = first_w; w < last_w; w++) {
+            uint64_t word = bits[w];
+            if (!word)
+                continue;
+            /* Drop the bits before `start` in the word `start` lands in. */
+            if (w == first_w && (start & 63))
+                word &= ~(((uint64_t)1 << (start & 63)) - 1);
+            if (!word)
+                continue;
+            uint64_t bit = swap_highest_bit(word);
+            uint64_t idx = (w << 6) + bit;
+            if (idx < start || idx >= end || idx >= pages || idx == 0)
+                continue;
+            *out = idx;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Claim the pending device if no transfer is still in flight, and return it
+ * unlocked so the caller can call ->release() outside the area lock.  Only one
+ * of swap_page_io() and swap_unregister_device() can win the claim.
+ */
+static block_dev_t *swap_take_pending_bdev(int type)
+{
+    uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
+    block_dev_t *bdev = NULL;
+    if (swap_io_refs[type] == 0) {
+        bdev = swap_pending_bdev[type];
+        swap_pending_bdev[type] = NULL;
+    }
+    spin_unlock_irqrestore(&swap_locks[type], flags);
+    return bdev;
+}
+
 static int swap_device_valid(block_dev_t *bdev)
 {
     return bdev && bdev->read_sector && bdev->write_sector &&
@@ -64,8 +180,13 @@ void swap_init(void) {
     total_swap_pages = 0;
     nr_swap_pages = 0;
     spin_init(&swap_stats_lock);
-    for (int i = 0; i < MAX_SWAPFILES; i++)
+    for (int i = 0; i < MAX_SWAPFILES; i++) {
         spin_init(&swap_locks[i]);
+        swap_free_bits[i] = NULL;
+        swap_pending_bdev[i] = NULL;
+        swap_alloc_hint[i] = 1;
+        swap_io_refs[i] = 0;
+    }
 }
 
 int swap_register_device(block_dev_t *bdev, const char *name) {
@@ -139,9 +260,16 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
             kfree(badmap);
             return -ENOMEM;
         }
+        uint64_t *bits = kmalloc(swap_bitmap_words(pages) * sizeof(uint64_t));
+        if (!bits) {
+            kfree(map);
+            kfree(badmap);
+            return -ENOMEM;
+        }
         size_t name_len = strlen(name) + 1;
         char *name_copy = kmalloc(name_len);
         if (!name_copy) {
+            kfree(bits);
             kfree(map);
             kfree(badmap);
             return -ENOMEM;
@@ -150,15 +278,20 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
         memset(map, 0, (size_t)pages);
         size_t available_pages = 0;
         for (uint64_t offset = 0; offset < pages; offset++) {
-            if (swap_badmap_test(badmap, offset))
+            if (swap_badmap_test(badmap, offset)) {
                 map[offset] = SWAP_MAP_BAD;
-            else
+            } else {
+                /* Bit 0 stays clear: the header is never allocatable. */
+                if (offset)
+                    swap_bit_set(bits, offset);
                 available_pages++;
+            }
         }
         flags = spin_lock_irqsave(&swap_locks[type]);
         if (si->active) {
             spin_unlock_irqrestore(&swap_locks[type], flags);
             kfree(map);
+            kfree(bits);
             kfree(name_copy);
             continue;
         }
@@ -169,6 +302,9 @@ int swap_register_device(block_dev_t *bdev, const char *name) {
         si->pages = pages;
         si->inuse_pages = 0;
         si->active = 1;
+        swap_free_bits[type] = bits;
+        swap_alloc_hint[type] = 1;
+        swap_io_refs[type] = 0;
         uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
         total_swap_pages += available_pages;
         nr_swap_pages += available_pages;
@@ -251,11 +387,21 @@ void swap_unregister_device(int type) {
     si->pages = 0;
     si->inuse_pages = 0;
     si->active = 0;
+    /* Hand the device to the drain path rather than releasing it here.  A
+     * swap_page_io() transfer may have snapshotted this same bdev and be inside
+     * read_sector()/write_sector() right now; releasing underneath it would
+     * drive a device the provider has already torn down. */
+    swap_pending_bdev[type] = bdev;
     spin_unlock_irqrestore(&swap_locks[type], flags);
+
+    block_dev_t *drained = swap_take_pending_bdev(type);
     /* Released after the swap lock so the provider's own lock is never
      * nested under it. */
-    if (bdev && bdev->release)
-        bdev->release(bdev);
+    if (drained && drained->release)
+        drained->release(drained);
+    kfree(swap_free_bits[type]);
+    swap_free_bits[type] = NULL;
+    swap_alloc_hint[type] = 1;
     kfree(map);
     kfree((void *)name);
 }
@@ -287,16 +433,20 @@ swap_entry_t get_swap_page(void) {
         swap_info_struct *si = &swap_info[type];
         uint64_t flags = spin_lock_irqsave(&swap_locks[type]);
         if (si->active) {
-            for (uint64_t offset = 1; offset < si->pages; offset++) {
-                if (si->swap_map[offset] == 0) {
-                    si->swap_map[offset] = 1;
-                    uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
-                    nr_swap_pages--;
-                    si->inuse_pages++;
-                    spin_unlock_irqrestore(&swap_stats_lock, stats_flags);
-                    spin_unlock_irqrestore(&swap_locks[type], flags);
-                    return swp_entry(type, offset);
-                }
+            uint64_t offset;
+            if (swap_bitmap_find_free(si, (int)type, &offset)) {
+                /* Clear the bit before publishing the map entry, so a
+                 * concurrent swap_free() for this slot cannot see it free. */
+                swap_bit_clear(swap_free_bits[type], offset);
+                si->swap_map[offset] = 1;
+                /* Resume the search past this slot next time. */
+                swap_alloc_hint[type] = offset + 1;
+                uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
+                nr_swap_pages--;
+                si->inuse_pages++;
+                spin_unlock_irqrestore(&swap_stats_lock, stats_flags);
+                spin_unlock_irqrestore(&swap_locks[type], flags);
+                return swp_entry(type, offset);
             }
         }
         spin_unlock_irqrestore(&swap_locks[type], flags);
@@ -315,6 +465,11 @@ void swap_free(swap_entry_t entry) {
     if (si->active && offset > 0 && offset < si->pages &&
         si->swap_map[offset] == 1) {
         si->swap_map[offset] = 0;
+        /* Rewind the hint so this slot is reachable again without a full wrap
+         * when the area is nearly full. */
+        if (swap_alloc_hint[type] > offset)
+            swap_alloc_hint[type] = offset;
+        swap_bit_set(swap_free_bits[type], offset);
         uint64_t stats_flags = spin_lock_irqsave(&swap_stats_lock);
         si->inuse_pages--;
         nr_swap_pages++;
@@ -334,14 +489,33 @@ static int swap_page_io(swap_entry_t entry, void *page, int write) {
     block_dev_t *bdev = si->bdev;
     int valid = si->active && bdev && offset < si->pages &&
                 si->swap_map[offset] == 1;
+    /* Count this transfer against the area.  swap_unregister_device() defers
+     * the device release until the count drains, so the bdev pointer above
+     * stays live for the whole call below. */
+    if (valid)
+        swap_io_refs[type]++;
     spin_unlock_irqrestore(&swap_locks[type], flags);
     if (!valid)
         return -EINVAL;
 
     uint64_t lba = offset * SWAP_SECTORS_PER_PAGE;
+    int rc;
     if (write)
-        return bdev->write_sector(bdev, lba, page, SWAP_SECTORS_PER_PAGE);
-    return bdev->read_sector(bdev, lba, page, SWAP_SECTORS_PER_PAGE);
+        rc = bdev->write_sector(bdev, lba, page, SWAP_SECTORS_PER_PAGE);
+    else
+        rc = bdev->read_sector(bdev, lba, page, SWAP_SECTORS_PER_PAGE);
+
+    flags = spin_lock_irqsave(&swap_locks[type]);
+    if (--swap_io_refs[type] == 0) {
+        spin_unlock_irqrestore(&swap_locks[type], flags);
+        /* Last one out releases the device if swapoff claimed it meanwhile. */
+        block_dev_t *drained = swap_take_pending_bdev(type);
+        if (drained && drained->release)
+            drained->release(drained);
+    } else {
+        spin_unlock_irqrestore(&swap_locks[type], flags);
+    }
+    return rc;
 }
 
 int swap_read_page(swap_entry_t entry, void *page) {
