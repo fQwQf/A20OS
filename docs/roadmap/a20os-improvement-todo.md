@@ -238,19 +238,34 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
       在 ppc64le 内建。
 - [x] **缺页判定改以 VMA 为准**（`ab700592`）。见下条。
 
-- [ ] **aarch64：mksh fork 之后 `ret` 到栈地址**。
-      `handle_present_page_fault()` 原先只看 PTE，叶 PTE 上带了一个 VMA 从未授予的
-      `PTE_X` 就把 exec fault 判为「已处理」；aarch64 的 `arch_pte_leaf()` 由 `PTE_X`
-      推出硬件 `UXN`/`PXN`，所以这个多余的 X 真的让栈页在 EL0 可执行。结果是
-      ~2.3 万次重复 prefetch abort、**零内核输出**的静默活锁（`ab700592` 已把它变成
-      一次干净且指名道姓的 SIGSEGV）。
-      仍未解决的是崩溃本身：`SIGSEGV: pid=5 code=32 sepc=0x3feb26e0 ra=0x3feb26e0`
-      —— `sepc` 与 `ra` 相等，说明 CPU 是被 `ret` 送到栈地址的，即 x30 已被破坏；
-      该栈页内容全零且软件 PTE 带着多余的 X，而同一 VMA 下相邻的活栈页
-      （`0x180000000000c05`，UXN=1）是正确的。故障需要一次 fork 才出现（只跑
-      mksh 内建的 `echo` 不崩，一跑会 fork 的 `cat /proc/version` 就崩），
-      因此嫌疑集中在 fork/exec/wait 这条路径，而不是串口或调度。
-      修好之前 aarch64 的 `smoke-ext4-journal` 仍无法转绿。
+- [ ] **aarch64：mksh 在信号跳板处预取异常**。
+      `handle_present_page_fault()` 原先只看 PTE 不看 VMA，叶 PTE 上带了一个 VMA
+      没有声明的 `PTE_X` 就把 exec fault 判为「已处理」；aarch64 的
+      `arch_pte_leaf()` 由 `PTE_X` 推出硬件 `UXN`/`PXN`，所以这个多余的 X 真的让
+      该页在 EL0 可执行。结果是约 2.3 万次重复 prefetch abort、**零内核输出**的
+      静默活锁（`ab700592` 已把它变成一次干净且指名道姓的 SIGSEGV）。
+
+      已排除的方向（都有反证，不要重走）：
+      - 那片「多余的 X」**不是 bug**，而是 `signal_make_page_exec()`
+        （`kernel/proc/signal.c`）为了跑 sigreturn 跳板**故意**加的。
+        `deliver_signal()` 会把 `TRAP_CTX_RA(ctx)` 设成 `tramp_addr`，跳板内容
+        `mov x8,#139; svc #0`（aarch64 的 `rt_sigreturn`）也确认在页里。
+      - `pt_unmap()` / `pt_map()` 没有丢帧引用：`pt_unmap()` 明确不持有叶引用，
+        由调用方释放，而 `signal_make_page_exec()` 原样复用 `pa`，没有 use-after-free。
+      - `arch_signal_tramp_pte_flags()` 在 aarch64 上确实带 `PTE_X`，映射权限没错。
+      - 栈增长/brk 的 `handle_demand_fault_locked()` 已拒绝 exec fault；
+        `mm_prot_to_pte_flags`、`PROT_*`、`pt_map_cls` 都逐个核过，均忠实于 VMA。
+      - `telnetd` 只把 socket `dup2` 进子进程，不读控制台，与本问题无关。
+
+      仍然未解的矛盾只有一条，但已经收得很窄：故障发生在
+      `SIGSEGV: pid=5 code=32 sepc=0x3feb26e0 ra=0x3feb26e0`，**`sepc` 与 `ra` 相等
+      且等于跳板地址**——CPU 是被 `ret` 送到跳板的，而软件侧同一页的 PTE 带 `PTE_X`、
+      相邻活栈页（`0x180000000000c05`，UXN=1）完全正常。也就是说硬件拒绝取指、
+      软件认为可取指，两边对同一页的认知不一致，且只发生一次 fork（跑会 fork 的
+      `cat /proc/version` 才崩，只跑 mksh 内建 `echo` 不崩）。
+      下一步应查 aarch64 的 TLB 一致性：跳板 PTE 的写入与 `tlbi` 之间是否有
+      可见性/时序缺口（`pt_map_cls` 写 PTE → `arch_tlb_flush_page`），以及
+      `sys_rt_sigreturn_impl` 返回前是否把该页改回非可执行而后续路径未再恢复。
 
 - [ ] **aarch64 的 trap storm 类缺陷需要一条通用门禁。** 当前能发现它纯属偶然：
       活锁不产生任何日志，gate 只能靠超时发现，而超时无法区分「机器慢」和
