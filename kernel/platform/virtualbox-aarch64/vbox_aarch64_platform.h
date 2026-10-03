@@ -7,8 +7,12 @@
 #define PHYS_MEMORY_END    0x28000000UL
 #define KERNEL_ENTRY       0x08080000UL
 
-#define PAGE_OFFSET        0x0000008000000000UL
-#define USER_VA_LIMIT      0x0000004000000000UL
+/* PAGE_OFFSET and USER_VA_LIMIT are deliberately not redefined here.
+ * kernel/arch/aarch64/include/platform.h sets both above this include, in an
+ * #ifdef CONFIG_NOMMU block, with the same MMU values and the right NOMMU ones.
+ * Repeating the MMU pair here is what made `ARCH=aarch64
+ * BOARD=virtualbox-aarch64 NOMMU=1` fail to compile: the NOMMU pass defined
+ * PAGE_OFFSET as 0, then this header redefined it, and -Werror rejected it. */
 
 #define UART0_BASE         (0xFFDDF000UL + PAGE_OFFSET)
 #define GICD_BASE          (0xFCD30000UL + PAGE_OFFSET)

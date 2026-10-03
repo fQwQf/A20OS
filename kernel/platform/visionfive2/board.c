@@ -16,6 +16,7 @@
  */
 
 #include "drivers/core/driver_core.h"
+#include "drivers/irqchip/plic.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/block/dw_sdio.h"
 #include "drivers/net/starfive_gmac.h"
@@ -73,44 +74,12 @@ static void vf2_gmac_clock_init(void) {
     crg[VF2_CRG_RESET2 / 4] &= ~(VF2_CRG_GMAC_AXI_RST | VF2_CRG_GMAC_AHB_RST);
 }
 
-static void vf2_plic_init(void) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) = 0;
-    *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
+/* The PLIC body is shared with every other RISC-V board: see
+ * kernel/drivers/irqchip/plic.c.  JH7110 uses the standard PLIC layout, so
+ * only the base differs from QEMU virt. */
+static uint64_t vf2_plic_hart_id(void) {
+    return arch_cpu_hart_id(cpu_current_id());
 }
-
-static void vf2_plic_enable(uint32_t irq) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    volatile uint32_t *enable = (volatile uint32_t *)(PLIC_SENABLE(hart) +
-                                                       (irq / 32) * sizeof(uint32_t));
-    *enable |= (1U << (irq % 32));
-    *(volatile uint32_t *)(PLIC_PRIORITY + (uint64_t)irq * 4) = 1;
-}
-
-static void vf2_plic_disable(uint32_t irq) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    volatile uint32_t *enable = (volatile uint32_t *)(PLIC_SENABLE(hart) +
-                                                       (irq / 32) * sizeof(uint32_t));
-    *enable &= ~(1U << (irq % 32));
-}
-
-static uint32_t vf2_plic_ack(void) {
-    /* PLIC claim/completion is handled by arch_handle_irq(); this callback
-     * exists only so driver_irq_dispatch() can optional-call ack. */
-    return 0;
-}
-
-static void vf2_plic_eoi(uint32_t irq) {
-    (void)irq;
-}
-
-static const irqchip_ops_t vf2_plic_ops = {
-    .init        = vf2_plic_init,
-    .enable_irq  = vf2_plic_enable,
-    .disable_irq = vf2_plic_disable,
-    .ack         = vf2_plic_ack,
-    .eoi         = vf2_plic_eoi,
-};
 
 static uint64_t vf2_timer_read_ticks(void) {
     return timer_get_ticks();
@@ -227,7 +196,7 @@ void rv64_ipi_tlb_flush_handler(void)
 
 static void vf2_smp_secondary_init(const smp_cpu_desc_t *cpu) {
     (void)cpu;
-    vf2_plic_init();
+    plic_irqchip_ops.init();
 }
 
 static const smp_platform_ops_t vf2_smp_ops = {
@@ -241,6 +210,7 @@ static const smp_platform_ops_t vf2_smp_ops = {
 /* ---- board lifecycle ---------------------------------------------- */
 
 static void vf2_early_init(void) {
+    plic_configure(PLIC_BASE, vf2_plic_hart_id);
     riscv64_memory_init();
     vf2_gmac_clock_init();
 }
@@ -254,6 +224,13 @@ static void vf2_reboot(void) {
 }
 
 static void vf2_enumerate_devices(void) {
+    /* The firmware's tree already names the SDIO and GMAC with the base, size and
+     * IRQ each actually has, so read it from there.  The table below stays as the
+     * fallback: this is the board's only storage path, and no VF2 has been
+     * powered to learn whether the firmware always passes a tree. */
+    if (riscv64_fdt_enumerate_platform_devices() > 0)
+        return;
+
     extern int platform_device_register(platform_device_t *pdev);
     static platform_device_t sdio_dev;
     static resource_t sdio_res[1];
@@ -296,13 +273,20 @@ static const board_config_t visionfive2 = {
     .name              = "visionfive2",
     .ram_base          = VF2_MEMORY_BASE,
     .ram_end           = VF2_MEMORY_END,
-    .irqchip           = &vf2_plic_ops,
+    .irqchip           = &plic_irqchip_ops,
     .timer             = &vf2_timer_ops,
     .smp               = &vf2_smp_ops,
     .early_init        = vf2_early_init,
     .poweroff          = vf2_poweroff,
     .reboot            = vf2_reboot,
     .enumerate_devices = vf2_enumerate_devices,
+    /* JH7110 firmware hands over without reliably granting U-mode access to the
+     * time CSR, and this board's console UART has no wired interrupt.  Both are
+     * boot-handoff facts about the board rather than properties of RISC-V, so
+     * the vDSO and console code read them from here instead of testing
+     * CONFIG_BOARD_VISIONFIVE2 for itself. */
+    .vdso_user_timer_unreliable = 1,
+    .uart_rx_is_polled         = 1,
 };
 
 const board_config_t *const current_board = &visionfive2;

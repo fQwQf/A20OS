@@ -6,16 +6,26 @@
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/irqchip/plic.h"
 #include "core/progress.h"
 
 static void plic_init_hart(void) {
     int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    /* SENABLE is a per-context register (offset 0x2080 + hart * 0x100) and its
-     * bit position is the PLIC interrupt ID itself, not an index into a smaller
-     * slice.  Only UART0_IRQ is routed to this hart, so the word written here
-     * is 2: every other bit is 0 and must stay 0, because a 1 would enable
-     * whatever other source the board happens to wire to this context. */
-    *(volatile uint32_t *)PLIC_SENABLE(hart) = (1U << UART0_IRQ);
+    /* SENABLE is a per-context array of 32-bit words (offset 0x2080 +
+     * hart * 0x100) covering 32 interrupts each, so interrupt N lives in word
+     * N/32 at bit N%32.  Indexing it as a single word -- 1U << UART0_IRQ --
+     * shifts past the width of the word for any interrupt number above 31,
+     * which is undefined behaviour in C and here it silently enabled nothing.
+     * Every in-tree board got away with it because the only source any of them
+     * wired to this hart was UART0_IRQ 10; the SophGo boards route UART0 at
+     * IRQ 44, where the old expression is a shift count of 44 on a 32-bit
+     * type.  Wipe the block, then set exactly the console's bit: every other
+     * bit must stay 0, because a 1 would enable whatever other source the
+     * board happens to wire to this context. */
+    volatile uint32_t *senable = (volatile uint32_t *)PLIC_SENABLE(hart);
+    for (unsigned i = 0; i < PLIC_ENABLE_WORDS; i++)
+        senable[i] = 0;
+    senable[UART0_IRQ / 32] = (1U << (UART0_IRQ % 32));
     /* Priority threshold before the gateway above, so the two never disagree
      * about a source in the window between the stores. */
     /* SPRIORITY is the per-context preemption threshold: a pending source is
@@ -27,7 +37,7 @@ static void plic_init_hart(void) {
     *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
 }
 
-static uint32_t plic_claim(void) {
+static uint32_t arch_plic_claim(void) {
     int hart = (int)arch_cpu_hart_id(cpu_current_id());
     /* Reading the claim register is what picks the highest-priority pending
      * source for this context and simultaneously moves it to the in-service
@@ -37,7 +47,7 @@ static uint32_t plic_claim(void) {
     return *(volatile uint32_t *)PLIC_SCLAIM(hart);
 }
 
-static void plic_complete(uint32_t irq) {
+static void arch_plic_complete(uint32_t irq) {
     int hart = (int)arch_cpu_hart_id(cpu_current_id());
     /* The same register completes a claim: writing the ID back takes the source
      * out of the in-service state, which is the only thing that lets the PLIC
@@ -93,10 +103,10 @@ void arch_handle_irq(uint64_t irq, int from_user) {
      * so there is nothing to drain in a loop, and looping instead would hold off
      * the timer for as long as the sources keep arriving. */
     if (irq == IRQ_S_EXT) {
-        uint32_t irq_id = plic_claim();
+        uint32_t irq_id = arch_plic_claim();
         if (irq_id != 0)
             driver_irq_dispatch(irq_id);
-        plic_complete(irq_id);
+        arch_plic_complete(irq_id);
         return;
     }
 

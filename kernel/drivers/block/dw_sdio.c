@@ -408,6 +408,8 @@ static driver_t dw_sdio_driver = {
     .name       = "dw-sdio",
     .id_table   = dw_sdio_ids,
     .bus        = &platform_bus,
+    /* jh7110.dtsi: mmc1 "starfive,jh7110-mmc" */
+    .of_compatible = "starfive,jh7110-mmc",
     .probe      = dw_sdio_driver_probe,
     .remove     = dw_sdio_driver_remove,
     .class_ops  = &dw_sdio_block_ops,

@@ -1,6 +1,7 @@
 #ifdef CONFIG_RISCV64
 
 #include "drivers/core/driver_core.h"
+#include "drivers/irqchip/plic.h"
 #include "core/arch.h"
 #include "core/cpu.h"
 #include "core/panic.h"
@@ -9,42 +10,12 @@
 #include "core/timer.h"
 #include "firmware.h"
 
-static void rv64_plic_init(void) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) = 0;
-    *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
+/* The PLIC body is shared: see kernel/drivers/irqchip/plic.c.  QEMU virt and
+ * every physical RISC-V board program the same controller and differ only in
+ * the MMIO base published here. */
+static uint64_t rv64_plic_hart_id(void) {
+    return arch_cpu_hart_id(cpu_current_id());
 }
-
-static void rv64_plic_enable(uint32_t irq) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) |= (1U << irq);
-    *(volatile uint32_t *)(PLIC_PRIORITY + (uint64_t)irq * 4) = 1;
-}
-
-static void rv64_plic_disable(uint32_t irq) {
-    int hart = (int)arch_cpu_hart_id(cpu_current_id());
-    *(volatile uint32_t *)PLIC_SENABLE(hart) &= ~(1U << irq);
-}
-
-static uint32_t rv64_plic_ack(void) {
-    /* PLIC claim is handled by arch_handle_irq(); this callback exists only
-     * so driver_irq_dispatch() can optional-call ack without side effects. */
-    return 0;
-}
-
-static void rv64_plic_eoi(uint32_t irq) {
-    /* PLIC completion is handled by arch_handle_irq(); this callback exists
-     * only so driver_irq_dispatch() can optional-call eoi without side effects. */
-    (void)irq;
-}
-
-static const irqchip_ops_t rv64_plic_ops = {
-    .init       = rv64_plic_init,
-    .enable_irq = rv64_plic_enable,
-    .disable_irq = rv64_plic_disable,
-    .ack        = rv64_plic_ack,
-    .eoi        = rv64_plic_eoi,
-};
 
 static uint64_t rv64_timer_read_ticks(void) {
     return timer_get_ticks();
@@ -185,7 +156,7 @@ void rv64_ipi_tlb_flush_handler(void)
 
 static void rv64_smp_secondary_init(const smp_cpu_desc_t *cpu) {
     (void)cpu;
-    rv64_plic_init();
+    plic_configure(PLIC_BASE, rv64_plic_hart_id);
 }
 
 static const smp_platform_ops_t rv64_smp_ops = {
@@ -197,6 +168,7 @@ static const smp_platform_ops_t rv64_smp_ops = {
 };
 
 static void rv64_early_init(void) {
+    plic_configure(PLIC_BASE, rv64_plic_hart_id);
     riscv64_memory_init();
 }
 
@@ -220,7 +192,7 @@ static const board_config_t qemu_virt_rv64 = {
     .name              = "qemu-virt-rv64",
     .ram_base          = PHYS_MEMORY_BASE,
     .ram_end           = PHYS_MEMORY_MAX_END,
-    .irqchip           = &rv64_plic_ops,
+    .irqchip           = &plic_irqchip_ops,
     .timer             = &rv64_sbi_timer_ops,
     .smp               = &rv64_smp_ops,
     .early_init        = rv64_early_init,

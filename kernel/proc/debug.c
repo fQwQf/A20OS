@@ -379,7 +379,7 @@ int proc_debug_singlestep(int pid, int sig)
     task_t *t = ptrace_tracee_get(pid, 0);
     if (!t)
         return -ESRCH;
-#if defined(CONFIG_X86_64)
+#if ARCH_HW_SINGLE_STEP
     int ret = ptrace_resume_internal(t, sig, PT_DEBUG_RESUME_CONT, 1);
 #else
     /* No hardware single-step on this architecture (Linux riscv64 behaves
