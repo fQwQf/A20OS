@@ -1133,6 +1133,19 @@ static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
     return 0;
 }
 
+/*
+ * The cross-runqueue scan below takes every runqueue lock and walks every
+ * queue, which costs NR_CPUS lock round trips at each of the two dozen places
+ * that assert a task invariant.  CONFIG_DEBUG_SCHED_STATE is on for any
+ * -DDEBUG build, and the benchmark profile is a -DDEBUG build, so leaving the
+ * scan under that switch means the profile measures the assertion rather than
+ * the scheduler.  Opt in by name instead: bring-up runs that want the
+ * invariant checked have to ask for it.
+ */
+#ifndef CONFIG_SCHED_MEMBERSHIP_CHECK
+#define CONFIG_SCHED_MEMBERSHIP_CHECK 0
+#endif
+
 void proc_sched_assert_task_locked(task_t *t)
 {
 #if CONFIG_DEBUG_SCHED_STATE
@@ -1146,6 +1159,9 @@ void proc_sched_assert_task_locked(task_t *t)
         t->state != PROC_BLOCKED)
         panic("sched invariant: pid=%d parked state=%d", t->pid, t->state);
 
+    unsigned memberships = 0;
+    uint64_t membership_cpus = 0;
+#if CONFIG_SCHED_MEMBERSHIP_CHECK
     /*
      * Take a stable cross-runqueue snapshot. A picker does not need proc_lock,
      * so checking one queue at a time would race with a dequeue between the
@@ -1156,8 +1172,6 @@ void proc_sched_assert_task_locked(task_t *t)
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
     }
-    unsigned memberships = 0;
-    uint64_t membership_cpus = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         if (sched_runq_contains_locked(&sched_runq[cpu], t)) {
             memberships++;
@@ -1165,11 +1179,13 @@ void proc_sched_assert_task_locked(task_t *t)
                 membership_cpus |= 1ULL << cpu;
         }
     }
+#endif
     int on_rq = t->on_rq;
     int dispatching = t->dispatching;
     int on_cpu = t->on_cpu;
     unsigned owner_cpu = t->owner_cpu;
     int state = t->state;
+#if CONFIG_SCHED_MEMBERSHIP_CHECK
     unsigned task_cpu = t->cpu_id;
     for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
         RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
@@ -1189,6 +1205,11 @@ void proc_sched_assert_task_locked(task_t *t)
         (task_cpu >= 64 || membership_cpus != (1ULL << task_cpu)))
         panic("sched invariant: pid=%d cpu_id=%u membership_cpus=0x%lx",
               t->pid, task_cpu, (unsigned long)membership_cpus);
+#else
+    (void)caller;
+    (void)memberships;
+    (void)membership_cpus;
+#endif
     if (on_rq && (dispatching || on_cpu))
         panic("sched invariant: pid=%d on_rq=%d dispatching=%d on_cpu=%d",
               t->pid, on_rq, dispatching, on_cpu);
