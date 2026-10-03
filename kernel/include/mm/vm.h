@@ -231,6 +231,14 @@ typedef struct mm_struct {
     uint32_t   def_flags;
     uint8_t    membarrier_registered; /* MEMBARRIER_CMD_REGISTER_* state */
     uint8_t    _pad_membarrier[3];
+    /*
+     * Address of the read-only signal return trampoline page installed by
+     * arch_setup_signal_trampoline(), or 0 on architectures that return to the
+     * trampoline slot inside the signal frame instead.  Consulted through
+     * arch_signal_tramp_addr().  Fork inherits the parent's value along with
+     * the copied page tables, so it stays valid for the child.
+     */
+    vaddr_t    sig_tramp;
     uint8_t    has_vdso;   /* vDSO/vvar fixed mappings present (mm/vdso.h) */
     uint8_t    _pad_vdso[3];
     refcount_t refcount;

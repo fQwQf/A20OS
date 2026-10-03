@@ -32,9 +32,24 @@ static void signal_make_page_exec(uint64_t addr) {
     if (user_prepare_write(t, (uint64_t)page) < 0) return;
     paddr_t pa = pt_translate(t->pgdir, page);
     if (!pa) return;
+
+    /*
+     * Keep the permissions the VMA already grants and add execute, rather than
+     * substituting the trampoline's own flags.  This page is part of a live
+     * stack: taking the flags from arch_signal_tramp_pte_flags() alone would
+     * drop the write bit on architectures where that constant is R+X (riscv64),
+     * and the process would take a store page fault the first time it stored
+     * through the stack again -- a crash caused by making a page executable.
+     */
+    pte_t flags = arch_signal_tramp_pte_flags();
+    spin_lock(&t->mm->lock);
+    vm_area_t *vma = mm_find_vma(t->mm, page);
+    if (vma)
+        flags = vma->pte_flags | (flags & PTE_X);
+    spin_unlock(&t->mm->lock);
+
     pt_unmap(t->mm, page);
-    pt_map(t->pgdir, page, pa,
-           mm_pte_flags_make_writable_dirty(arch_signal_tramp_pte_flags()));
+    pt_map(t->pgdir, page, pa, flags);
     arch_tlb_flush_page(page);
 }
 
@@ -48,6 +63,28 @@ __attribute__((weak)) void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame,
 
 __attribute__((weak)) void arch_setup_signal_trampoline(struct mm_struct *mm) {
     (void)mm;
+}
+
+/*
+ * Default: the handler returns to the trampoline slot inside the signal frame.
+ * Architectures that cannot execute the frame in place override this (see the
+ * declaration in signal.h).
+ *
+ * aarch64 is the case that forced the hook.  It runs with SCTLR_EL1.WXN set
+ * (arch/aarch64/mm/kwx.c), which makes every EL0-writable descriptor
+ * execute-never at EL0.  The signal frame lives on the user stack, so the
+ * in-frame trampoline is on a page that is writable by definition: the leaf had
+ * to be AP=01 (RW) to remain a usable stack, and the CPU then refused to fetch
+ * from it -- ESR EC=0x20 (instruction abort from a lower EL) with FSC=0x0f, a
+ * permission fault, while the software PTE plainly carried PTE_X.  The only
+ * working difference from a text leaf was that AP, so no choice of flags could
+ * make one page both a live stack and an executable trampoline.  aarch64
+ * therefore gets its own read-only trampoline page and returns there.
+ */
+__attribute__((weak)) uint64_t arch_signal_tramp_addr(struct mm_struct *mm,
+                                                      uint64_t stack_tramp_addr) {
+    (void)mm;
+    return stack_tramp_addr;
 }
 
 /* Default: the handler is entered at the (16-aligned) frame base.  x86_64
@@ -867,6 +904,12 @@ void signal_deliver_user(trap_context_t *ctx) {
         uint32_t tramp[2];
         arch_signal_prepare_trampoline(tramp);
         uint64_t tramp_addr = sp + arch_sigframe_tramp_offset();
+        /* Where the handler actually returns to.  Normally the in-frame slot
+         * above, which is also where the trampoline words below are written;
+         * an architecture that cannot execute the frame in place returns to its
+         * own dedicated page instead, and the frame copy is then ABI state the
+         * user can still read but never fetches from. */
+        uint64_t return_addr = arch_signal_tramp_addr(t->mm, tramp_addr);
         arch_signal_prepare_frame(&frame, tramp_addr, ctx);
 
         if (copy_to_user((void *)(uintptr_t)sp, &frame, sizeof(frame)) < 0)
@@ -875,7 +918,12 @@ void signal_deliver_user(trap_context_t *ctx) {
         if (copy_to_user((void *)(uintptr_t)tramp_addr, tramp, sizeof(tramp)) < 0)
             proc_exit_group(-signal_wait_status_dumped(SIGSEGV, 0));
 
-        signal_make_page_exec(tramp_addr);
+        /* Only the in-frame trampoline needs its page upgraded; a dedicated
+         * trampoline page was already mapped executable at address-space
+         * setup and must stay read-only, or SCTLR_EL1.WXN would make it
+         * execute-never again. */
+        if (return_addr == tramp_addr)
+            signal_make_page_exec(tramp_addr);
 
         /* x86_64 enters the handler below the 16-aligned frame (see
          * arch_signal_handler_sp); its return address goes at that entry sp
@@ -895,7 +943,7 @@ void signal_deliver_user(trap_context_t *ctx) {
             TRAP_CTX_ARG1(ctx) = sp + arch_sigframe_info_offset();
             TRAP_CTX_ARG2(ctx) = sp + arch_sigframe_uc_offset();
         }
-        TRAP_CTX_RA(ctx) = tramp_addr;
+        TRAP_CTX_RA(ctx) = return_addr;
         return;
     }
 }
