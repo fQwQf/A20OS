@@ -25,11 +25,19 @@
         stp     x9, x10, [sp]
         adrp    x9, aarch64_trap_flags
         add     x9, x9, :lo12:aarch64_trap_flags
+/*
+         * The index clamp can only ever select slot 0 when CONFIG_NR_CPUS is
+         * 1, so a single-CPU build drops the MPIDR read and the compare
+         * entirely: one CSR read and five instructions off every exception,
+         * timer IRQs included.  Multi-CPU builds still need both.
+         */
+#if CONFIG_NR_CPUS > 1
         mrs     x10, mpidr_el1
         and     x10, x10, #0xff
         cmp     x10, #CONFIG_NR_CPUS
         csel    x10, x10, xzr, lo
         add     x9, x9, x10, lsl #3
+#endif
         mov     x10, #\value
         str     x10, [x9]
         ldp     x9, x10, [sp]
@@ -244,11 +252,17 @@ __trap_from_kernel:
     ldr     x3, [x2, #SP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
 #ifndef CONFIG_NOMMU
+    /* Returning to the same translation regime cannot have left anything
+     * stale behind, so only an actual TTBR0 change earns the invalidation. */
+    mrs     x10, ttbr0_el1
+    cmp     x9, x10
+    b.eq    .Lttbr0_unchanged_k
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
+.Lttbr0_unchanged_k:
 #endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
@@ -320,11 +334,15 @@ user_trap_return:
     ldr     x4, [x2, #KSP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
 #ifndef CONFIG_NOMMU
+    mrs     x10, ttbr0_el1
+    cmp     x9, x10
+    b.eq    .Lttbr0_unchanged_u
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
+.Lttbr0_unchanged_u:
 #endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
