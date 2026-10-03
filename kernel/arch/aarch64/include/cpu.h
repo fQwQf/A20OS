@@ -113,12 +113,21 @@ static inline void arch_tlb_flush(void) {
 #endif
 }
 
-static inline void arch_tlb_flush_page(uint64_t addr) {
-    (void)addr;
-    arch_tlb_flush();
-}
+/* VAE1IS discards every EL1 translation of one VA and shares the
+ * invalidation across the inner-shareable domain, so a peer CPU cannot
+ * retain a stale copy of a page that is being unmapped.  The instruction
+ * ignores the in-page offset. */
 static inline void arch_tlb_flush_page_local(uint64_t addr) {
-    arch_tlb_flush_page(addr);
+    __asm__ __volatile__(
+        "dsb ishst\n\t"
+        "tlbi vaae1is, %0\n\t"
+        "dsb ish\n\t"
+        "isb"
+        :: "r"(addr)
+        : "memory");
+}
+static inline void arch_tlb_flush_page(uint64_t addr) {
+    arch_tlb_flush_page_local(addr);
 }
 
 static inline void arch_set_task_pointer(void *task) {

@@ -95,6 +95,17 @@ static int a64_kwx_set_pages(paddr_t pa, size_t size, pte_t flags)
     return 0;
 }
 
+static void a64_kwx_flush_all(void)
+{
+    arch_tlb_flush();
+    if (smp_remote_tlb_flush_supported()) {
+        uint32_t self = 1U << cpu_current_id();
+        uint32_t targets = smp_online_cpu_mask() & ~self;
+        if (targets && smp_remote_tlb_flush(targets, 0, 0) < 0)
+            panic("kwx: remote TLB flush failed");
+    }
+}
+
 int arch_kwx_module_protect(paddr_t base_pa, size_t exec_bytes,
                             size_t total_bytes)
 {
@@ -107,13 +118,7 @@ int arch_kwx_module_protect(paddr_t base_pa, size_t exec_bytes,
     if (a64_kwx_set_pages(base_pa + exec_size, total_size - exec_size,
                           A64_KFLAGS_DATA) < 0)
         return -ENOMEM;
-    arch_tlb_flush();
-    if (smp_remote_tlb_flush_supported()) {
-        uint32_t self = 1U << cpu_current_id();
-        uint32_t targets = smp_online_cpu_mask() & ~self;
-        if (targets && smp_remote_tlb_flush(targets, 0, 0) < 0)
-            panic("kwx: remote TLB flush failed");
-    }
+    a64_kwx_flush_all();
     return 0;
 }
 
@@ -121,7 +126,7 @@ void arch_kwx_module_unprotect(paddr_t base_pa, size_t total_bytes)
 {
     if (a64_kwx_set_pages(base_pa, ROUND_UP(total_bytes, PAGE_SIZE),
                           A64_KFLAGS_DATA) == 0)
-        arch_tlb_flush();
+        a64_kwx_flush_all();
 }
 
 void arch_kernel_wx_finalize(void)
