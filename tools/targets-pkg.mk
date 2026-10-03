@@ -36,6 +36,12 @@ PKG_SIZE_MB_DEFAULT ?= 512
 PKG_SIZE_MB   ?= $(PKG_SIZE_MB_DEFAULT)
 PKG_ALPINE    ?= 1
 
+# 服务器 world 的远程入口：镜像里没有密码（密码一旦烤进镜像就等于永久泄露），
+# 只能烤公钥。调用方给出自己的公钥路径，空格分隔多个；为空则镜像不带任何
+# authorized_keys（dropbear 仍会启动，但没人能登进去）。
+#   make image-world PKG_WORLD=server SSH_PUBKEY=~/.ssh/id_ed25519.pub
+SSH_PUBKEY    ?=
+
 # 桌面 world（xfce 等）解包后 >1 GiB，通用默认 512 MiB 装不下（mkfs.ext4 会以
 # "Could not allocate block in ext2 filesystem" 失败，看起来像磁盘满）。只要调用方
 # 没显式给出大小，桌面 world 就提升到 PKG_SIZE_MB_GUI；非桌面 world 仍用默认值。
@@ -122,7 +128,8 @@ image-world: pkg-repo $(if $(GUI_MEDIA),pkg-media-overlay)
 	--repo-dir "$(PKG_REPO_DIR)" --image-dir "$(PKG_IMAGE_DIR)" \
 	--keys-dir "$(PKG_KEYS_DIR)" --sign-key "$(PKG_SIGN_KEY)" \
 	--key-name "$(PKG_KEY_NAME)" --world "$(PKG_WORLD)" \
-	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)"
+	--size-mb "$(PKG_SIZE_MB_WORLD)" --alpine "$(PKG_ALPINE)" \
+	--ssh-pubkey "$(SSH_PUBKEY)"
 # GUI variant for desktop worlds (xfce, ...): same second-disk distro boot,
 # but with the virtio-gpu display stack and audio.  The image is built here (in
 # its own make invocation) rather than as a prerequisite so that the desktop
