@@ -9,9 +9,30 @@
 #   tools/a20 run server-riscv64
 #
 # 首次组镜像需要网络拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk
-# 缓存。**验证状态**：world/overlay 是声明式定义；在本分支上没有执行过
-# image-world 组装或 guest 内运行验证（需要 Alpine 镜像源可达），组装与
-# SSH 登录的端到端验证仍是待办，见 docs/server-readiness.md §八。
+# 缓存。
+#
+# **验证状态**（2026-10 更新，取代此前"从未执行过组装"的记录）：
+#
+#   make ARCH=riscv64 BOARD=qemu-virt-riscv64 image-world PKG_WORLD=server
+#
+# 已验证到 **包解析与安装全部成功**：23 个 Alpine 包（busybox、dropbear、chrony、
+# ca-certificates 及其依赖，共 14.6 MiB）全部下载并装进 staging 目录，说明 world
+# 清单、apk 求解与 overlay 装配这条链路是通的。
+#
+# 两点需要注意：
+#
+#   1. 默认 USTC 镜像源在本环境返回 403，需要改用官方源：
+#      `ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine`。
+#      该变量在 tools/targets-rootfs.mk 中是 `?=` 赋值，可以从命令行覆盖。
+#
+#   2. 最后一步 `mkfs.ext4 -d` 在**非特权容器**里失败：
+#      `do_write_internal: 权限不够 while opening "bbsuid"`。
+#      busybox-suid 带的 `bbsuid` 需要 mknod，而 fakeroot 只伪造文件属主，
+#      不提供 mknod 权限。单独跑 `fakeroot chown 101:101` 是正常的，所以这不是
+#      组装逻辑的问题，而是缺少 CAP_MKNOD。宿主上有 root 时该步可通过；
+#      在无特权环境里要跑通，去掉 world 里的 `busybox-suid` 即可。
+#
+# 因此 **guest 内运行与 SSH 登录的端到端验证仍未完成**，见 docs/server-readiness.md §八。
 
 musl
 busybox

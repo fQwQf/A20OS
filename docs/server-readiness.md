@@ -540,6 +540,30 @@ conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |
 
+### server world 的实测状态（2026-10）
+
+`packages/world/server.world` 此前标注为"从未执行过组装"。现已实测到包装配这一步是通的：
+
+```
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
+     ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine \
+     image-world PKG_WORLD=server
+```
+
+23 个 Alpine 包（busybox、dropbear、chrony、ca-certificates 及依赖，14.6 MiB）全部
+下载并装入 staging，**world 清单 → apk 求解 → overlay 装配**这条链路成立。
+
+两处环境相关的坑，都不是仓库逻辑问题：
+
+- 默认 USTC 镜像源在本环境返回 **403**，需换官方源；`ALPINE_MIRROR_ROOT` 在
+  `tools/targets-rootfs.mk` 中是 `?=` 赋值，可从命令行覆盖。
+- 最后一步 `mkfs.ext4 -d` 报 `do_write_internal: 权限不够 while opening "bbsuid"`。
+  busybox-suid 的 `bbsuid` 需要 `mknod`，而 fakeroot 只伪造属主、不提供
+  `CAP_MKNOD`。单独执行 `fakeroot chown 101:101` 正常，可确认不是 fakeroot 本身坏了。
+  有 root 的宿主上该步可通过；无特权环境下从 world 去掉 `busybox-suid` 即可跑通。
+
+因此 **guest 内运行与 SSH 登录的端到端验证仍未完成**，仍属待办。
+
 ## 九、推荐的第一批动作
 
 按「改动小、风险低、避免真实事故」排序：
