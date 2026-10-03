@@ -25,6 +25,14 @@ typedef struct fat32_vnode_priv {
     size_t      file_size;
     int         is_dir;
     int         unlinked;    /* directory entry removed; free clusters on release */
+    /* Number of open descriptors on this vnode.
+     *
+     * The vnode cache holds a reference for as long as the inode is cached, so
+     * the count never reaches zero while the entry lives and release() cannot be
+     * what frees an unlinked file's clusters -- deferring the free to it leaks
+     * them.  This count is what tells unlink whether the chain may be freed on
+     * the spot. */
+    int         open_count;
 } fat32_vnode_priv_t;
 
 
