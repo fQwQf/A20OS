@@ -60,6 +60,7 @@ int net_register_socket_locked(net_socket_t *s) {
         g_sock_free[w] |= (1U << bit);
         s->in_registry = 1;
         s->reg_idx = idx;
+        net_rxq_reset_slot(idx);
         net_bh_slot_clear(idx);
         return 0;
     }
