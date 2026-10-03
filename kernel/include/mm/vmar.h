@@ -11,6 +11,7 @@
 #define _MM_VMAR_H
 
 #include "core/types.h"
+#include "core/lock.h"
 #include "core/refcount.h"
 
 struct mm_struct;
@@ -29,8 +30,17 @@ typedef struct vmar {
     uint32_t        cap;            /* never exceeds parent->cap */
     uint32_t        child_count;
     struct vmar    *parent;
-    struct vmar    *sibling_next;   /* chain under one parent */
+    /* Children of this node, ordered by base.  Ordering is what lets the
+     * no-overlap test stop at the first child that starts at or after the
+     * candidate range instead of comparing against every sibling, and it makes
+     * the insertion point well defined.  `tail` is the last child in that
+     * order, so the common append-a-range-just-past-the-end case does not walk
+     * the list at all.  All three are protected by `lock`, as is
+     * child_count; sibling_next is the list link. */
     struct vmar    *child_head;
+    struct vmar    *child_tail;
+    struct vmar    *sibling_next;   /* link in the parent's ordered child list */
+    spinlock_t      lock;            /* protects the child list and child_count */
     refcount_t      refs;           /* handle refs + child refs + map refs */
 } vmar_t;
 
