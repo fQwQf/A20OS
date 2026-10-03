@@ -68,17 +68,24 @@ int net_register_socket_locked(net_socket_t *s) {
 void net_unregister_socket_locked(net_socket_t *s) {
     if (!s || !s->in_registry)
         return;
-    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
-        if (g_sockets[i] == s) {
-            g_sockets[i] = NULL;
-            net_bh_slot_clear(i);
-            int w = i / 32;
-            int bit = i % 32;
-            g_sock_free[w] &= ~(1U << bit);
-            s->in_registry = 0;
-            s->reg_idx = -1;
-            return;
-        }
+    /*
+     * Registration recorded the slot, so closing reads it back instead of
+     * searching for the pointer: the search cost one comparison per slot, and
+     * NET_MAX_SOCKETS is 65536 on the server profile, so it turned every
+     * close() into a quarter-million cache misses.
+     *
+     * The identity test is what makes the recorded index usable.  A slot can
+     * only be handed to a new socket after this one released it, so a
+     * mismatch means the index no longer describes `s` and the slot must be
+     * left to its current owner.
+     */
+    int i = s->reg_idx;
+    if (i >= 0 && i < NET_MAX_SOCKETS && g_sockets[i] == s) {
+        g_sockets[i] = NULL;
+        net_bh_slot_clear(i);
+        int w = i / 32;
+        int bit = i % 32;
+        g_sock_free[w] &= ~(1U << bit);
     }
     s->in_registry = 0;
     s->reg_idx = -1;
