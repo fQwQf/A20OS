@@ -9,6 +9,7 @@
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
+#include "fs/ext4_journal.h"
 #include "fs/page_cache.h"
 #include "ipc/objstats.h"
 #include "proc/proc.h"
@@ -846,6 +847,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)strlen(buf);
     case PF_A20_NETMEM:
         return a20_lwip_format_memp(buf, bufsz);
+    case PF_A20_JOURNAL:
+        return ext4_journal_crash_points_format(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"

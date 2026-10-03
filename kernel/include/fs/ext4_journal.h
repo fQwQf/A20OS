@@ -2,6 +2,7 @@
 #define _EXT4_JOURNAL_H
 
 #include "core/types.h"
+#include "fs/ext4_internal.h"
 
 typedef struct ext4_sb_info ext4_sb_info_t;
 typedef struct ext4_journal ext4_journal_t;
@@ -40,6 +41,17 @@ int  ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
 /* Write, commit and checkpoint the pending transaction.  Idempotent: a commit
  * with nothing pending succeeds without touching the disk. */
 int  ext4_journal_commit(ext4_sb_info_t *fs);
+
+/* Crash injection for the commit sequence, selected at runtime through
+ * /proc/a20/journal or at boot with a20.journal_crash=<point>.  The gate uses
+ * the procfs route because QEMU's LoongArch virt board creates /chosen
+ * without a bootargs property and silently drops -append; routing the gate
+ * through the command line would have made it pass on four architectures and
+ * quietly prove nothing on the fifth.  A name outside the table is rejected
+ * rather than stored, so a typo cannot look armed and never fire. */
+int         ext4_journal_set_crash_point(const char *point);
+const char *ext4_journal_crash_point(void);
+int         ext4_journal_crash_points_format(char *buf, size_t bufsz);
 
 /* Non-zero when the on-disk journal still holds a transaction to replay.
  * Independent of the needs_recovery feature, which a crash can lose. */
