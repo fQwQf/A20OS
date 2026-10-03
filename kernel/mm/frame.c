@@ -11,6 +11,22 @@ extern int proc_task_pid(const void *task);
 #include "core/arch.h"
 #include "core/timer.h"
 
+/*
+ * Release tracing and free-list audit are post-mortem diagnostics only, but
+ * both sit on the per-page alloc/free path: frame_trace() runs on every frame
+ * that reaches refcount zero and the fl_remove() membership checks run on
+ * every buddy allocation.  Each costs a timer read, a proc_current() walk and a
+ * ring write, which is a measurable tax on exactly the workload (page churn)
+ * that makes the allocator hot.  Gate them so a release build carries only the
+ * assertions, not the history.
+ *
+ * The freemap double-free bit below is NOT part of this: it is the check that
+ * turns a silent corruption into an attributed panic, so it stays unconditional.
+ */
+#ifndef CONFIG_DEBUG_MM_TRACE
+#define CONFIG_DEBUG_MM_TRACE 0
+#endif
+
 /* Release trace (diagnostics): last N frame releases with caller info. */
 #define FRAME_TRACE_ENTRIES 128
 struct frame_trace_ent {
@@ -22,8 +38,12 @@ struct frame_trace_ent {
 static struct frame_trace_ent g_frame_trace[FRAME_TRACE_ENTRIES];
 static uint32_t g_frame_trace_idx;
 
+/* Always defined: trap.c and mm/slab.c call the dump helpers from panic paths
+ * and are not gated, so the ring and its dumper must keep existing even when
+ * nothing records into them. */
 static void frame_trace(pfn_t pfn)
 {
+#if CONFIG_DEBUG_MM_TRACE
     uint32_t i = __atomic_fetch_add(&g_frame_trace_idx, 1, __ATOMIC_RELAXED) %
                  FRAME_TRACE_ENTRIES;
     g_frame_trace[i].tick = timer_get_ticks();
@@ -32,6 +52,9 @@ static void frame_trace(pfn_t pfn)
      * rejected outright on ARM even when -Wframe-address is suppressed. */
     g_frame_trace[i].ra   = (uintptr_t)__builtin_return_address(0);
     g_frame_trace[i].pid  = proc_current() ? proc_task_pid(proc_current()) : -1;
+#else
+    (void)pfn;
+#endif
 }
 
 void frame_trace_dump_pfn(pfn_t pfn)
@@ -111,6 +134,7 @@ static unsigned     g_pfa_op_hist_wraps;
 
 static void pfa_hist_record(uint8_t op, uint64_t pfn, int order, uintptr_t ra)
 {
+#if CONFIG_DEBUG_MM_TRACE
     pfa_op_rec_t *r = &g_pfa_op_hist[g_pfa_op_hist_pos];
     r->pfn   = pfn;
     r->order = (uint8_t)order;
@@ -121,6 +145,9 @@ static void pfa_hist_record(uint8_t op, uint64_t pfn, int order, uintptr_t ra)
         g_pfa_op_hist_pos = 0;
         g_pfa_op_hist_wraps++;
     }
+#else
+    (void)op; (void)pfn; (void)order; (void)ra;
+#endif
 }
 
 void pfa_hist_dump(void)
@@ -252,7 +279,14 @@ static void fl_remove(pfn_t pfn, int order) {
     /* Membership traps: a node that claims prev==NONE must be the list head,
      * and claimed neighbors must link back.  Removing a node that fails these
      * checks would silently decapitate or scramble the list (observed as
-     * later count-vs-walk mismatch and orphaned sub-chains at audit time). */
+     * later count-vs-walk mismatch and orphaned sub-chains at audit time).
+     *
+     * These three overlap with the link validation below, which is NOT gated
+     * because it gates the relink writes themselves: dropping it would turn a
+     * detectable corruption into a wild write through a bad pfn rather than a
+     * panic.  The traps cost a frame-trace dump and a 512-entry history dump
+     * on the way out, so they are diagnostics and follow the trace gate. */
+#if CONFIG_DEBUG_MM_TRACE
     if (m->prev == PFN_NONE && pfa.free_lists[order].head != pfn) {
         printf("[PFA CORRUPT] remove of non-head head-claimant: pfn=%lu "
                "order=%d head=%lu count=%lu next=%lu flags=0x%x ref=%u "
@@ -290,6 +324,7 @@ static void fl_remove(pfn_t pfn, int order) {
         pfa_hist_dump();
         panic("pfa: free-list next back-link mismatch");
     }
+#endif
     if (m->prev != PFN_NONE) {
         if (!pfn_valid(m->prev) || pfa.meta[m->prev].order != (uint8_t)order ||
             pfa.meta[m->prev].flags != FRAME_F_FREE) {
@@ -902,7 +937,15 @@ void frame_put_many(const pfn_t *pfns, size_t count) {
     spin_unlock_irqrestore(&pfa.lock, flags);
 }
 
-size_t pfa_free_count(void) { return pfa.free_frames; }
+/* pfa_t documents lock as protecting every mutable field above free_frames, so
+ * read it under pfa.lock.  oom.c samples this on the reclaim path, where a torn
+ * read would mis-size the reclaim batch and drive an OOM kill loop. */
+size_t pfa_free_count(void) {
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    size_t n = pfa.free_frames;
+    spin_unlock_irqrestore(&pfa.lock, flags);
+    return n;
+}
 
 void pfa_get_huge_stats(pfa_huge_stats_t *stats) {
     if (!stats)
