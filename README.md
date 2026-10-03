@@ -74,7 +74,7 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 `NOMMU_SUPPORTED_ARCHES = riscv64 riscv32 aarch64 arm32 armv7m`，无分页路径在这些架构上是真实存在的代码路径（mm/proc/ipc/abi 共 173 处），不是仅能启动的 stub。小内存板（如 Milk-V Duo 的 64 MiB）应当走 NOMMU：
 
 ```sh
-make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 SWAP=0 BRINGUP=1 kernel-only
+make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 ```
 
 `tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口。
@@ -118,7 +118,7 @@ make ARCH=loongarch32 BOARD=nailoong BRINGUP=1 kernel-only
 
 # 廉价 SBC / 瘦客户机（build-verified，尚未上板验证）
 make ARCH=riscv64 BOARD=licheerv-nano ABI=linux BRINGUP=1 kernel-only
-make ARCH=riscv64 BOARD=milk-v-duo    NOMMU=1 RAMFS_USER=1 SWAP=0 BRINGUP=1 kernel-only
+make ARCH=riscv64 BOARD=milk-v-duo    NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 make ARCH=aarch64 BOARD=sun50i-h616    ABI=linux BRINGUP=1 kernel-only
 make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
 make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only

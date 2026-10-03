@@ -79,6 +79,13 @@ extern uint64_t x86_boot_acpi_rsdp;
 
 static uintptr_t g_firmware_rsdp_pa;
 
+/* The second of the two RSDP input channels, for a platform that learns the
+ * address from firmware structures rather than from a handover register.  The
+ * bootloader path in the tree does not use it -- it writes x86_boot_acpi_rsdp
+ * from _start_uefi instead -- so this is an available entry point rather than a
+ * wired one.  Nothing here depends on it: firmware_bios_or_uefi() treats a
+ * non-zero value as a UEFI boot whichever channel supplied it, and with both
+ * zero it falls back to probing. */
 void firmware_set_rsdp_pa(uintptr_t pa)
 {
     g_firmware_rsdp_pa = pa;
