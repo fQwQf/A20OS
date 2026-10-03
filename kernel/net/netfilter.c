@@ -50,7 +50,28 @@ static void netfilter_rules_end(void)
     seqlock_write_end(&g_rule_seq);
 }
 
-static netfilter_stats_t g_stats;
+/*
+ * Counters, one cache-line-separated bank per direction.
+ *
+ * Every evaluated packet updates a counter in each direction, so a single
+ * netfilter_stats_t puts the receive path's increment and the transmit path's
+ * increment on the same line and makes every CPU contend for it.  Only the
+ * three counters belonging to a bank's own direction are used, which is why
+ * each bank is a whole netfilter_stats_t rather than three bare fields.
+ */
+#define NETFILTER_STATS_STRIDE 128
+
+typedef struct {
+    netfilter_stats_t stats;
+    uint8_t pad[NETFILTER_STATS_STRIDE - sizeof(netfilter_stats_t)];
+} netfilter_stats_bank_t;
+
+static netfilter_stats_bank_t g_stats[2];
+
+static netfilter_stats_t *netfilter_stats_dir(netfilter_dir_t dir)
+{
+    return &g_stats[dir == NETFILTER_DIR_IN ? 0 : 1].stats;
+}
 
 static spinlock_t g_netfilter_lock;
 
@@ -301,8 +322,18 @@ int netfilter_get_rule(unsigned index, netfilter_rule_t *out)
 
 void netfilter_get_stats(netfilter_stats_t *out)
 {
-    if (out)
-        *out = g_stats;
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    for (unsigned d = 0; d < 2; d++) {
+        const netfilter_stats_t *s = &g_stats[d].stats;
+        out->in_packets += __atomic_load_n(&s->in_packets, __ATOMIC_RELAXED);
+        out->in_dropped += __atomic_load_n(&s->in_dropped, __ATOMIC_RELAXED);
+        out->in_accepted += __atomic_load_n(&s->in_accepted, __ATOMIC_RELAXED);
+        out->out_packets += __atomic_load_n(&s->out_packets, __ATOMIC_RELAXED);
+        out->out_dropped += __atomic_load_n(&s->out_dropped, __ATOMIC_RELAXED);
+        out->out_accepted += __atomic_load_n(&s->out_accepted, __ATOMIC_RELAXED);
+    }
 }
 
 /*
@@ -355,10 +386,41 @@ static int netfilter_parse_frame(const uint8_t *f, size_t len, uint8_t *proto,
     return 1;
 }
 
+/*
+ * True when the table holds at least one rule.  Sampled under the seqlock so
+ * the fast path cannot report an empty table for a rule that has just been
+ * installed: a writer publishes the count inside netfilter_rules_begin/end,
+ * so a table that will not settle is treated as populated and the full
+ * evaluation runs.  That direction costs a parse, which is the right way to
+ * be wrong about a filter.
+ */
+static int netfilter_table_populated(void)
+{
+    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
+        unsigned seq0 = seqlock_read_begin(&g_rule_seq);
+        if (seq0 == 0u)
+            continue;               /* writer inside the table; wait for it */
+        unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
+        if (!seqlock_read_retry(&g_rule_seq, seq0))
+            return n != 0;
+    }
+    return 1;
+}
+
 static netfilter_action_t netfilter_eval(const void *frame, size_t len,
                                          netfilter_dir_t dir)
 {
     if (!frame || len < 14)
+        return NETFILTER_ACCEPT;
+
+    /*
+     * With an empty table the verdict is ACCEPT whatever the frame holds, so
+     * there is nothing to parse and nothing to count: an unconfigured system
+     * would otherwise walk Ethernet, VLAN, IPv4 and L4 headers and bump two
+     * shared counters on every packet in both directions to reach the same
+     * answer.  Once a rule exists the parse and the counters run as before.
+     */
+    if (!netfilter_table_populated())
         return NETFILTER_ACCEPT;
 
     uint8_t proto;
@@ -368,10 +430,11 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
                                &sport, &dport))
         return NETFILTER_ACCEPT;
 
+    netfilter_stats_t *st = netfilter_stats_dir(dir);
     if (dir == NETFILTER_DIR_IN)
-        __atomic_fetch_add(&g_stats.in_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->in_packets, 1, __ATOMIC_RELAXED);
     else
-        __atomic_fetch_add(&g_stats.out_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->out_packets, 1, __ATOMIC_RELAXED);
 
     /*
      * Scan under the seqlock.  The table can be mutated concurrently by
@@ -429,15 +492,15 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
      * exactly as it did before this existed. */
     if (hit >= 0 && action == NETFILTER_DROP) {
         if (dir == NETFILTER_DIR_IN)
-            __atomic_fetch_add(&g_stats.in_dropped, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&st->in_dropped, 1, __ATOMIC_RELAXED);
         else
-            __atomic_fetch_add(&g_stats.out_dropped, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&st->out_dropped, 1, __ATOMIC_RELAXED);
         return NETFILTER_DROP;
     }
     if (dir == NETFILTER_DIR_IN)
-        __atomic_fetch_add(&g_stats.in_accepted, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->in_accepted, 1, __ATOMIC_RELAXED);
     else
-        __atomic_fetch_add(&g_stats.out_accepted, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&st->out_accepted, 1, __ATOMIC_RELAXED);
     return NETFILTER_ACCEPT;
 }
 
