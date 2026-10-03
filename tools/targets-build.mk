@@ -17,7 +17,7 @@ all:
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
-check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build
+check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build check-lao64-board-builds check-arm-board-builds
 
 # Physical-board build gates: keep the VisionFive 2 and LS2K1000 sources
 # building on every commit.  The generic profile is the boot substrate; the
@@ -25,6 +25,22 @@ check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringu
 check-visionfive2-build:
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 kernel-only
 	$(MAKE) ARCH=riscv64 BOARD=visionfive2 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
+
+# Build gates for the boards added by the portable-bringup work.  Their docs and
+# board.c headers claim "build-verified", and until a target ran them that claim
+# was a statement about one afternoon rather than a property of the tree: a new
+# board could stop compiling and no gate would notice.  These keep it true.
+#
+# They are build-only on purpose.  None of these boards has been powered up, so
+# a gate asserting a boot would be asserting something unverified.
+.PHONY: check-lao64-board-builds check-arm-board-builds
+check-lao64-board-builds:
+	$(MAKE) ARCH=riscv64 BOARD=licheerv-nano ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
+	$(MAKE) ARCH=riscv64 BOARD=milk-v-duo ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded NOMMU=1 RAMFS_USER=1 CONFIG_SWAP=0 kernel-only
+
+check-arm-board-builds:
+	$(MAKE) ARCH=aarch64 BOARD=rk3328 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
+	$(MAKE) ARCH=aarch64 BOARD=sun50i-h616 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 
 # VisionFive 2 on-hardware boot artifacts (see docs/platforms/visionfive2-boot.md).
 # vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;

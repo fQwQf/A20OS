@@ -7,7 +7,9 @@ least new code: its core is a T-Head C906 that upstream describes as
 `rv64imafdc` with `mmu-type riscv,sv39`, which is exactly what the riscv64 build
 already targets.
 
-**Build-verified only. Not run on hardware.** Everything below marked
+**Build-verified only. Not run on hardware.** That build claim is now
+reproduced on every commit by `make check-lao64-board-builds`, so the board cannot
+silently stop compiling. Everything below marked
 unverified is unverified because this board has not been powered up under
 A20OS.
 
