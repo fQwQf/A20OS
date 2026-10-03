@@ -332,9 +332,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         run_flash(inst, _flash_backends(), list(args.make_args), args.dry_run)
     elif section_is_set(inst.flash):
         pass
-    elif inst.handoff and inst.handoff.commands and inst.package.kind:
-        # A handoff board's artifact is the bundle, not a kernel sitting in the
-        # build directory, so package it rather than stopping at build.
+    elif inst.package.kind and (inst.handoff or inst.target.boot_media):
+        # Whatever this instance's artifact is -- a rescue ISO, a bootable disk,
+        # a boot bundle -- it has to be assembled before anything can consume it.
+        # Both consumers need it: a handoff board loads the bundle, and a board
+        # with boot_media writes it to a device.  Keying this on handoff alone
+        # left every board that deploys by writing media building a kernel into
+        # the build directory and then failing at target-write-media, because the
+        # image it named in boot_media had never been produced.
         run_package(inst, list(args.make_args), args.dry_run)
     elif not args.dry_run:
         build_instance(inst, list(args.make_args), args.dry_run)

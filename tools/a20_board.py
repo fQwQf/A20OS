@@ -65,15 +65,18 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
             # A directly bootable raw disk rather than an ISO: the same shape the
             # aarch64 VirtualBox already produces, so both architectures hand an
             # operator one disk to attach instead of optical media.  It boots via
-            # UEFI -- most current machines are UEFI-only and there is no x86_64
-            # EFI stub in the tree, so GRUB is the only path that covers them.
+            # GRUB, which starts from BIOS or UEFI alike.
             exec_make(inst, "pc-rescue-disk", list(make_args), dry_run)
         case "uefi-disk":
             # ESP holds BOOTX64.EFI instead of GRUB.  GRUB 2.12 does not fill
             # the multiboot ACPI tags, so a multiboot kernel booted by GRUB under
             # UEFI never gets the RSDP and cannot find MCFG; our loader reads it
             # from the firmware configuration table instead.
-            exec_make(inst, "_x86_64_uefi_disk_impl", list(make_args), dry_run)
+            #
+            # The make target stages the image under build/x86_64-pc/ rather than
+            # leaving it in the per-build directory, because an instance that
+            # deploys this disk has to name one stable path in boot_media.
+            exec_make(inst, "x86_64-uefi-disk", list(make_args), dry_run)
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",
