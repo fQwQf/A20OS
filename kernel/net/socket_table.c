@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/socket_side.h"
 #include "core/consts.h"
 
 /*
@@ -62,7 +63,9 @@ int net_socket_table_walk(net_table_kind_t kind, net_table_visit_fn fn,
 /*
  * Bytes a recv() would hand over right now.  A stream socket may have a partly
  * consumed head message, so only len-off counts on it; a datagram or
- * seqpacket socket is always handed over whole.
+ * seqpacket socket is always handed over whole.  socket_queue.c keeps the sum
+ * running, so this is a load rather than a walk of the queue -- which matters
+ * because the queue is per socket and the ceiling is a profile constant.
  *
  * This is the whole readable set except for the channel-backed AF_UNIX data
  * plane, where plain bytes sit in an a20_channel and net_socket_t tracks no
@@ -72,10 +75,7 @@ int net_socket_table_walk(net_table_kind_t kind, net_table_visit_fn fn,
  */
 static size_t net_rx_queued_locked(const net_socket_t *s)
 {
-    size_t total = 0;
-    for (const net_msg_t *m = s->rx_head; m; m = m->next)
-        total += (s->type == SOCK_STREAM) ? (m->len - m->off) : m->len;
-    return total;
+    return net_rxq_bytes_locked((net_socket_t *)s);
 }
 
 int net_socket_rx_available(net_socket_t *s, size_t *out)

@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/socket_side.h"
 #include "fs/file.h"
 #include "mm/objcache.h"
 #include "mm/slab.h"
@@ -9,6 +10,87 @@
 #include "lwip/pbuf.h"
 
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
+
+/*
+ * Running receive-queue byte count, indexed by registry slot.
+ *
+ * The low 32 bits are the payload bytes still readable, the high 32 the
+ * message count.  The queue is capped at NET_MAX_QUEUE messages of at most
+ * NET_MAX_PAYLOAD bytes, so 32 bits of byte count has two orders of magnitude
+ * of headroom and the pair fits a single load.  Answering FIONREAD by summing
+ * the queue instead costs one message per entry, and NET_MAX_QUEUE is 128 on
+ * the default profile and 1024 on the server one.
+ *
+ * Carrying the message count next to the byte count is what makes the tally
+ * safe rather than merely fast.  Everything that appends to or removes from
+ * the queue moves both halves together, so they agree; a teardown that empties
+ * the queue without going through net_msg_link_locked() -- shutdown(SHUT_RD)
+ * clears rx_head and rx_count in one step -- leaves them disagreeing, and every
+ * entry point below checks the pair instead of trusting the byte half, so such
+ * a teardown costs one rebuild rather than a permanently wrong total.
+ */
+static uint64_t g_rxq_tally[NET_MAX_SOCKETS];
+
+void net_rxq_reset_slot(int idx)
+{
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    g_rxq_tally[idx] = 0;
+}
+
+static size_t net_rxq_sum_locked(const net_socket_t *s)
+{
+    size_t total = 0;
+    for (const net_msg_t *m = s->rx_head; m; m = m->next)
+        total += (s->type == SOCK_STREAM) ? (m->len - m->off) : m->len;
+    return total;
+}
+
+void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
+{
+    int idx = s->reg_idx;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    uint64_t t = g_rxq_tally[idx];
+    /* The queue grew by one message, so the tally must still describe the
+     * pre-growth queue. */
+    if ((int)(t >> 32) != s->rx_count - 1)
+        t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
+    g_rxq_tally[idx] = (t & 0xffffffff00000000ULL) |
+                       ((uint32_t)t + (uint32_t)bytes);
+}
+
+/* Called before the caller drops rx_count, so the tally still describes the
+ * queue the message is being taken from.  A partial read leaves the message in
+ * place and only the byte half moves. */
+void net_rxq_bytes_removed_locked(net_socket_t *s, size_t bytes)
+{
+    int idx = s->reg_idx;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    uint64_t t = g_rxq_tally[idx];
+    if ((int)(t >> 32) != s->rx_count)
+        t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
+    uint32_t have = (uint32_t)t;
+    g_rxq_tally[idx] = (t & 0xffffffff00000000ULL) |
+                       (have - (uint32_t)bytes < have ? have - (uint32_t)bytes
+                                                     : 0);
+}
+
+size_t net_rxq_bytes_locked(net_socket_t *s)
+{
+    int idx = s->reg_idx;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return net_rxq_sum_locked(s);
+    uint64_t t = g_rxq_tally[idx];
+    if ((int)(t >> 32) != s->rx_count)
+        t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
+    else
+        return (size_t)(uint32_t)t;
+    g_rxq_tally[idx] = ((uint64_t)(uint32_t)s->rx_count << 32) |
+                       (uint32_t)t;
+    return (size_t)(uint32_t)t;
+}
 
 /*
  * Capture the current task credentials for SCM_CREDENTIALS.  Called under
@@ -101,6 +183,7 @@ static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
         dst->rx_head = m;
     dst->rx_tail = m;
     dst->rx_count++;
+    net_rxq_bytes_added_locked(dst, m->len);
 }
 
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
@@ -350,9 +433,11 @@ int net_dequeue_msg_locked_meta(net_socket_t *s, void *buf, size_t len,
 
     if (s->type == SOCK_STREAM && n < avail) {
         m->off += n;
+        net_rxq_bytes_removed_locked(s, n);
         return (int)n;
     }
 
+    net_rxq_bytes_removed_locked(s, avail);
     s->rx_head = m->next;
     if (!s->rx_head)
         s->rx_tail = NULL;
