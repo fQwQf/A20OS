@@ -151,21 +151,14 @@ int sysv_sem_get(int key, int nsems, int semflg)
     return -ENOSPC;
 }
 
-static int sem_copy_all_to_user(sysv_sem_set_t *set, void *arg)
-{
-    if (!arg)
-        return -EINVAL;
-    return copy_to_user(arg, set->val, (size_t)set->nsems * sizeof(unsigned short)) < 0 ?
-           -EFAULT : 0;
-}
-
-static int sem_copy_all_from_user(sysv_sem_set_t *set, void *arg)
-{
-    if (!arg)
-        return -EINVAL;
-    return copy_from_user(set->val, arg, (size_t)set->nsems * sizeof(unsigned short)) < 0 ?
-           -EFAULT : 0;
-}
+/*
+ * GETALL/SETALL stage the whole value array through this file's own buffer.
+ * copy_{to,from}_user can fault and page-walk, and g_sem_lock is the single
+ * lock guarding every set, so the user access must happen with the lock
+ * dropped. The stage is sized by SYSV_SEM_PER_SET, the bound semop()/semget()
+ * already enforce on set->nsems.
+ */
+typedef unsigned short sem_val_stage_t[SYSV_SEM_PER_SET];
 
 int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
 {
@@ -244,18 +237,42 @@ int sysv_sem_control(int semid, int semnum, int cmd, void *arg)
         return 0;
     }
     case GETALL: {
-        int r = sem_copy_all_to_user(set, arg);
+        sem_val_stage_t stage;
+        size_t n;
+        if (!arg) {
+            spin_unlock_irqrestore(&g_sem_lock, flags);
+            return -EINVAL;
+        }
+        n = (size_t)set->nsems * sizeof(unsigned short);
+        memcpy(stage, set->val, n);
         spin_unlock_irqrestore(&g_sem_lock, flags);
-        return r;
+        return copy_to_user(arg, stage, n) < 0 ? -EFAULT : 0;
     }
     case SETALL: {
-        int r = sem_copy_all_from_user(set, arg);
-        if (r == 0)
-            set->last_pid = proc_current() ? proc_current()->pid : 0;
+        sem_val_stage_t stage;
+        size_t n;
+        if (!arg) {
+            spin_unlock_irqrestore(&g_sem_lock, flags);
+            return -EINVAL;
+        }
+        n = (size_t)set->nsems * sizeof(unsigned short);
         spin_unlock_irqrestore(&g_sem_lock, flags);
-        if (r == 0)
-            wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
-        return r;
+        if (copy_from_user(stage, arg, n) < 0)
+            return -EFAULT;
+
+        /* The set may have been removed and recycled while unlocked, so
+         * resolve it again rather than writing through the stale pointer. */
+        flags = spin_lock_irqsave(&g_sem_lock);
+        if (!sem_valid_locked(semid)) {
+            spin_unlock_irqrestore(&g_sem_lock, flags);
+            return -EINVAL;
+        }
+        set = &g_sem[semid];
+        memcpy(set->val, stage, n);
+        set->last_pid = proc_current() ? proc_current()->pid : 0;
+        spin_unlock_irqrestore(&g_sem_lock, flags);
+        wait_queue_wake_all(&set->waiters, 0, PROC_WAKE_EVENT);
+        return 0;
     }
     case IPC_SET: {
         sysv_semid64_ds_t ds;
