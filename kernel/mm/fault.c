@@ -849,12 +849,15 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
      * LoongArch64 and x86_64 additionally keep ALL executable private leaves
      * on the anonymous-copy path: direct exec leaves can lose text PTEs under
      * parallel loader/fault lifetimes there (dynamic-loader SIGSEGVs). */
-    int direct_private = !shared && fault_around &&
-#ifdef CONFIG_X86_64
-        !executable;
-#else
-        (!executable || vf->vnode->ops->readpages);
-#endif
+    int direct_private = !shared && fault_around && !executable;
+    /* Backends with an explicit readpages hook are the only ones allowed to hand
+     * a private executable leaf a shared page-cache frame, and only where the
+     * architecture tolerates retaining one.  This used to be a CONFIG_X86_64 test
+     * while the comment above claimed LoongArch64 behaved the same way; it now
+     * does, and on LoongArch64 the distinction is unobservable anyway because
+     * ARCH_FAULT_AROUND_UNSAFE already forces fault_around to 0. */
+    if (!ARCH_EXE_LEAF_RETAIN_UNSAFE && vf->vnode->ops->readpages)
+        direct_private = 1;
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
@@ -1164,8 +1167,8 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (vma->pte_flags & PTE_X) != 0;
-#ifdef CONFIG_LOONGARCH64
-        /* LoongArch64 cannot yet retain private page-cache leaves safely
+#if ARCH_FAULT_AROUND_UNSAFE
+        /* This architecture cannot yet retain private page-cache leaves safely
          * across the parallel loader/fault lifetime.  Keep private file pages
          * on the proven single-page copy path; direct executable leaves lose
          * text PTEs, while direct read-only leaves corrupt dynamic symbols in

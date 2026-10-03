@@ -68,8 +68,10 @@ make vbox-image-aarch64
 x86_64：
 
 ```sh
-make vbox-iso-x86_64
+tools/a20 package vbox-iso-x86_64
 ```
+
+统一形态的 UEFI 直接启动磁盘见 [VirtualBox x86_64 运行与验收手册](virtualbox-x86_64.md#直接启动磁盘镜像)，该形态目前停在 `System ready`。
 
 硬件日志至少应包含 ACPI MCFG/ECAM、目标 PCI ID、BAR、driver ready、对应类消费者（mount/lwIP/framebuffer/input）的成功信息。不能只以桌面出现或 shell 启动作为驱动成功证据，因为兼容设备或恢复路径可能掩盖目标驱动未绑定。
 

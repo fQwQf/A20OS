@@ -47,6 +47,39 @@ RocketOS 边界尚未解决：`kernel/fs/vfs.c` 写有设计启发说明，`kern
 
 两块物理板 bring-up 的硬件细节（JH7110 SYS_CRG 时钟偏移、YT8531 PHY、LS2K1000 GMAC0 基址 0x40040000 与 PCI 配置窗口 0xfe00001800 等）也参考了 RocketOS 的 StarFive `drivers/net/starfive/` 与 la2000 `drivers/net/la2000/` 驱动，并在 `docs/platforms/physical-boards.md` 中逐项标注"未核实"；该文档不等同于来源对照或授权记录。
 
+### 2.1 新增板级移植的硬件事实来源
+
+`kernel/platform/{licheerv-nano,milk-v-duo,rk3328,sun50i-h616,x86_64-pc}/` 下各
+`<board>_platform.h` 中的每一个地址、尺寸、中断号与时钟频率，都逐项转录自上游
+公开设备树与文档，并在文件内就近标注了来源文件与 commit：
+
+| 板 | 转录来源（Linux commit `551c722f40809618230001baccf219193e22fc5a`） |
+|----|--------------------------------------------------|
+| LicheeRV Nano (SG2002) | `arch/riscv/boot/dts/sophgo/{sg2002.dtsi,sg2000.dtsi,cv1800b.dtsi,cv180x.dtsi,cv181x.dtsi,cv180x-cpus.dtsi}` |
+| Milk-V Duo (CV1800B) | 同上（CV1800B 与 SG2002 共用 `cv180x.dtsi` 外设映射） |
+| RK3328 | `arch/arm64/boot/dts/rockchip/{rk3328.dtsi,rk3328-rock64.dts}` |
+| Allwinner H616/H618 | `arch/arm64/boot/dts/allwinner/{sun50i-h616.dtsi,sun50i-h618-orangepi-zero3.dts,sun50i-h618-orangepi-zero2w.dts}` |
+
+另外还核对了以下上游事实，用于判断"哪些驱动可以复用"而不是抄写代码：
+
+- `drivers/irqchip/irq-sifive-plic.c` 的 `of_device_id` 表里含 `thead,c900-plic`，
+  因此 SG2002、CV1800B 声明的 PLIC 走的是标准 SiFive 驱动，
+  `kernel/drivers/irqchip/plic.c` 得以直接复用。
+- `drivers/clk/sophgo/`、`include/dt-bindings/{clock/sophgo,cv1800.h,reset/*}` 提供了
+  CLK_UART0=77、CLK_APB_UART0=78、RST_UART0=23 等编号，用于判断"控制台 UART 的
+  时钟由 U-Boot 打开、内核无需重配"这一结论。
+- `arch/*/boot/dts/*` 中的 `"snps,dw-apb-uart"` 与 `"arm,gic-400"` compatible 字符串，
+  用来确认 16550 串口与 GICv2 可直接复用既有实现。
+
+以上均为**硬件事实的转录**（地址、编号、compatible 字符串），不含从上游内核搬运的
+代码；`board.c` 与 `<board>_platform.h` 是 A20OS 自己的实现。U-Boot 与 TF-A 的
+mainline 支持情况（板级 defconfig 名称、TF-A 平台名、是否需要厂商 blob）依据各自的
+上游文档与 defconfig，同样只作为事实核对，未复制其代码。
+
+各板移植文档中标注为 **未核实 / UNVERIFIED** 的字段（主要是 `KERNEL_ENTRY` 与
+`PHYS_MEMORY_END`），是当前无法从公开上游文档确定、必须上板读取的值。这些字段
+**不得**按上游默认值猜测填写。
+
 ---
 
 ## 3. 设计思路参考（design inspiration）

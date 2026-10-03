@@ -42,6 +42,10 @@ _UEFI_VARIANTS: Final = ("default", "text")
 # partition from an apk world (VF2_WORLD).  Reject it here rather than letting
 # a20 package pass validation and then fail inside make.
 _FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard")
+# "vbox" is the VirtualBox ISO, which is never written to a device.
+# "rescue-usb" is the same ISO at a stable path a physical PC can boot
+# from a USB stick, which is the only deployment route a thin client has.
+_GRUB_ISO_VARIANTS: Final = ("vbox", "rescue-usb")
 
 
 def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
@@ -211,6 +215,31 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
         case "grub-iso":
             if inst.arch != "x86_64":
                 e.append("package.kind grub-iso: requires arch = \"x86_64\"")
+            if (p.variant or "vbox") not in _GRUB_ISO_VARIANTS:
+                e.append(f"package.variant: unsupported '{p.variant}' for grub-iso; "
+                         f"supported: {', '.join(_GRUB_ISO_VARIANTS)}")
+        case "grub-disk":
+            if inst.arch != "x86_64":
+                e.append("package.kind grub-disk: requires arch = \"x86_64\"")
+            if p.variant is not None:
+                e.append("package.variant: not used for grub-disk")
+            # The whole point is a disk to write, so a manifest that packages one
+            # and names no device has nothing to do with it.
+            if not inst.target.boot_media or not inst.target.media_device:
+                e.append("package.kind grub-disk: needs target.boot_media and "
+                         "target.media_device, since the image is meant to be "
+                         "written to a disk")
+        case "uefi-disk":
+            if inst.arch != "x86_64":
+                e.append("package.kind uefi-disk: requires arch = \"x86_64\"")
+            if p.variant is not None:
+                e.append("package.variant: not used for uefi-disk")
+            # Same reasoning as grub-disk: the artifact is a disk to write, so a
+            # manifest that names no device has nothing to do with it.
+            if not inst.target.boot_media or not inst.target.media_device:
+                e.append("package.kind uefi-disk: needs target.boot_media and "
+                         "target.media_device, since the image is meant to be "
+                         "written to a disk")
         case "uefi-image":
             if inst.board != "virtualbox-aarch64":
                 e.append("package.kind uefi-image: requires board = \"virtualbox-aarch64\"")
@@ -229,6 +258,12 @@ def _validate_board_sections(inst: Instance, e: list[str], repo_root: Path) -> N
                 e.append(f"package.kind release: supported arches: {', '.join(RELEASE_ARCH_ARTIFACTS)}")
             if p.variant is not None:
                 e.append("package.variant: not used for release")
+        case "kernel-bundle":
+            # This kind exists for boards with no writable medium, so boot_media
+            # alongside it would leave nothing to write the bundle to.
+            if inst.target.boot_media:
+                e.append("package.kind kernel-bundle: not used with "
+                         "target.boot_media; this kind exists for boards with no medium")
         case unreachable:
             assert_never(unreachable)
     if p.kind != "release" and (p.kernel_out is not None or p.disk_out is not None):

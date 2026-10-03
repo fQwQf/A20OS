@@ -18,6 +18,7 @@ A20OS 最常用的构建和运行命令都在项目根目录执行。更详细�
 sudo apt-get install -y \
     build-essential curl git vim wget xz-utils file ripgrep \
     dosfstools e2fsprogs mtools \
+    grub-pc-bin grub-efi-amd64-bin xorriso \
     qemu-system-misc qemu-system-x86 qemu-system-arm openocd \
     gcc-riscv64-unknown-elf gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
     gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu gcc-powerpc64le-linux-gnu \
@@ -29,6 +30,7 @@ sudo apt-get install -y \
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
 - Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）。
+- `grub-pc-bin` / `grub-efi-amd64-bin` / `xorriso`：只有 x86_64 瘦客户机部署用得到。`tools/a20 package x86_64-pc` 生成 GRUB rescue ISO 时，`grub-mkrescue` 会调用 `xorriso`；缺了它会在打包这一步报 `grub-mkrescue: 未找到 xorriso`。riscv64/aarch64 板和 QEMU 虚拟机都不需要这三个包。
 
 ## 最常用的构建与运行命令
 

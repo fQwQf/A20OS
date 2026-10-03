@@ -607,6 +607,15 @@ QEMU_GPU := $(if $(QEMU_GPU_$(ARCH)),$(QEMU_GPU_$(ARCH)),$(QEMU_GPU_DEFAULT))
 QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
 QEMU_BLK_SECOND_loongarch64 := virtio-blk-pci
 QEMU_BLK_SECOND_x86_64      := virtio-blk-pci
+# aarch64 was missing here, so an instance declaring [rootfs].world -- which is
+# every xfce-*-style Alpine desktop, xfce-aarch64 included -- expanded to an
+# empty device and emitted "-device ,drive=xworld".
+#
+# The second disk goes on a second virtio-mmio bus, not on PCI: the board's
+# enumerate_devices only calls virtio_mmio_enumerate and never initialises the
+# PCI host, so a virtio-blk-pci here would satisfy QEMU and still be invisible to
+# the kernel.  The primary disk takes bus.0, which is why riscv64 does this too.
+QEMU_BLK_SECOND_aarch64     := virtio-blk-device,bus=virtio-mmio-bus.1
 
 QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_loongarch64 := virtio-net-pci
@@ -744,6 +753,11 @@ CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
 OBJCOPY := $(CROSS_PREFIX)objcopy
 endif
 
+# The handoff bundle reads the kernel's load address out of the ELF program
+# headers rather than repeating a per-board address, so it needs a readelf that
+# understands this architecture's objects.
+READELF := $(CROSS_PREFIX)readelf
+
 ifeq ($(CC),)
 $(error Unsupported ARCH '$(ARCH)')
 endif
@@ -851,6 +865,13 @@ endif
 ifeq ($(BOARD),ls2k1000)
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_ELF_EAGER_LOAD
+# Register dumps at the first task switch and on panic.  This used to be keyed on
+# CONFIG_BOARD_LS2K1000 inside kernel/core/panic.c and kernel/proc/task.c, which
+# put a board name in architecture-neutral files; the flag is opt-in here
+# instead, and the CSRs themselves moved to
+# kernel/arch/loongarch64/platform/debug.c behind arch_panic_dump() and
+# arch_debug_dump_user_state().
+CFLAGS += -DCONFIG_DEBUG_BOOT_TRACE
 ifneq ($(NR_CPUS),1)
 $(error COOPERATIVE_BOOT=1 is the single-core recovery profile and cannot be combined with NR_CPUS=$(NR_CPUS))
 endif
@@ -877,11 +898,18 @@ ifeq ($(ARCH),x86_64)
 CFLAGS += -DCONFIG_IOPORT -DCONFIG_AHCI \
           -DCONFIG_PCI_MMIO_BASE_LEGACY
 endif
+# Boards whose SoC has no PCIe root complex must leave the MMIO-allocation
+# window undefined, not defined-as-zero: pci_bus.c would otherwise map physical
+# address 0 as a device window.  The SophGo SG2000/CV1800B boards are the
+# first RISC-V targets in the tree without PCIe.
+A20OS_NO_PCIE_BOARDS := licheerv-nano milk-v-duo
+ifeq ($(filter $(BOARD),$(A20OS_NO_PCIE_BOARDS)),)
 ifneq ($(filter x86_64 loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_ALLOC
 endif
 ifneq ($(filter loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
+endif
 endif
 ifeq ($(ARCH),aarch64)
 CFLAGS += -DCONFIG_TRAP_ESR_DIAG
@@ -1102,9 +1130,15 @@ endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
 RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
+RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
 ifeq ($(RAMFS_USER),1)
-ifneq ($(ARCH),loongarch64)
-$(error RAMFS_USER=1 is currently supported only for ARCH=loongarch64)
+# Gate on the objcopy entry rather than on an arch list, so adding an
+# architecture is one table line instead of two places that can disagree.  The
+# previous check was an explicit $(error) naming loongarch64, which meant a
+# small-memory board on any other architecture had no way to run a RAMFS
+# userland at all -- the Milk-V Duo's 64 MiB is the case that needs it.
+ifeq ($(RAMFS_USER_OBJCOPY_$(ARCH)),)
+$(error RAMFS_USER=1 has no objcopy recipe for ARCH=$(ARCH); add RAMFS_USER_OBJCOPY_$(ARCH) near line 1013)
 endif
 KERNEL_OBJ += $(RAMFS_USER_BLOBS)
 endif
@@ -1155,7 +1189,15 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
 VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
 VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
-VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
+# The aarch64 UEFI loader places the flat image at a fixed address, so that
+# address has to be the one the board's linker script actually linked it at.
+# Restating it here let the two drift apart silently: the loader demanded
+# 0x08080000 (VirtualBox, RAM at 0x08000000) while the qemu-virt board links at
+# 0x40080000, so an AAVMF boot failed in allocate_pages before any kernel code
+# ran.  Read it out of the script instead, and keep it overridable.
+VBOX_AARCH64_LOAD_ADDRESS ?= $(shell sed -n 's/^PROVIDE(PHYS_BASE = \(0x[0-9a-fA-F]*\));.*/\1/p' $(LDSCRIPT) | head -1)
+VBOX_X86_64_EFI = $(BUILD_DIR)/BOOTX64.EFI
+VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 
 # ================================================================
 # Targets (split into tools/targets-*.mk)

@@ -248,9 +248,32 @@ void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
 #define X86_64_PCI_VECTOR_BASE 0x40
 #define X86_64_PCI_GSI_BASE    20U
 
+/* Set by a board that knows its chipset routes PCI INTx through the IOAPIC
+ * with a fixed formula instead of q35's swizzle; 0 selects the swizzle.  Kept
+ * as runtime state so the arch layer never learns a board name. */
+static uint32_t pci_intx_gsi_base;
+
+void arch_pci_set_intx_gsi_base(uint32_t gsi_base) {
+    pci_intx_gsi_base = gsi_base;
+}
+
 int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
     (void)func;
-    if (bus != 0 || pin < 1 || pin > 4)
+    if (pin < 1 || pin > 4)
+        return -1;
+    if (pci_intx_gsi_base) {
+        if (bus > 255)
+            return -1;
+        uint32_t gsi = pci_intx_gsi_base +
+                       (((uint32_t)bus << 8) | ((uint32_t)dev << 2) |
+                        ((uint32_t)pin - 1U));
+        if (gsi > 23U)
+            return -1;
+        uint8_t vector = (uint8_t)(X86_64_PCI_VECTOR_BASE + gsi);
+        x86_64_route_pci_irq(gsi, vector);
+        return (int)vector;
+    }
+    if (bus != 0)
         return -1;
     /* The swizzle below is q35-only, verified empirically against QEMU
      * (dev 2/3/4 pin A land on GSI 22/23/20).  i440fx routes PIRQ through

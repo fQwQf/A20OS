@@ -27,11 +27,12 @@ QEMU_RUNNABLE_ARCHES: Final = (
 )
 NOMMU_ARCHES: Final = ("riscv64", "riscv32", "aarch64", "arm32", "armv7m")
 SMP_VERIFIED_QEMU_ARCHES: Final = ("riscv64", "aarch64", "loongarch64", "x86_64")
-RAMFS_USER_ARCHES: Final = ("loongarch64",)
+RAMFS_USER_ARCHES: Final = ("loongarch64", "riscv64")
 ABI_CHOICES: Final = ("linux", "native", "both")
 DRIVER_DEPLOYMENTS: Final = ("generic", "embedded")
 PROFILES: Final = ("full", "benchmark", "mcu")
-PACKAGE_KINDS: Final = ("grub-iso", "uefi-image", "fit-sdcard", "release")
+PACKAGE_KINDS: Final = ("grub-iso", "grub-disk", "uefi-disk", "uefi-image",
+                     "fit-sdcard", "release", "kernel-bundle")
 RELEASE_ARCH_ARTIFACTS: Final = {
     "riscv64": ("kernel-rv", "disk.img"),
     "loongarch64": ("kernel-la", "disk-la.img"),
@@ -168,6 +169,29 @@ class TargetCfg:
 
 
 @dataclass(frozen=True, slots=True)
+class HandoffCfg:
+    """How the kernel reaches a board that has no bootable storage.
+
+    A board with a block driver boots from media, so [package] + boot_media is
+    the whole story.  A board whose SD controller has no driver has no media to
+    write: the only route left is to hand the kernel to the boot chain that is
+    already on the board, which is what this section describes.  It is the
+    deployment path for every SBC port that cannot mount a card yet, so leaving
+    it out meant `a20 deploy` had nothing to do for them at all.
+
+    Nothing here touches the serial line.  The operator drives the boot chain and
+    this records what to type, so the commands in the repository and the commands
+    on the board cannot drift apart silently.
+    """
+
+    method: str | None = None
+    server: str | None = None
+    load_addr: str | None = None
+    commands: tuple[str, ...] | None = None
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Instance:
     name: str
     arch: str
@@ -184,11 +208,12 @@ class Instance:
     flash: FlashCfg
     package: PackageCfg
     target: TargetCfg
+    handoff: HandoffCfg
     source: Path
 
 
 CfgSection = (KernelCfg | MachineCfg | GuiCfg | NetCfg | RootfsCfg | TestCfg
-               | Stm32Cfg | FlashCfg | PackageCfg | TargetCfg)
+               | Stm32Cfg | FlashCfg | PackageCfg | TargetCfg | HandoffCfg)
 
 
 def section_is_set(cfg: CfgSection) -> bool:
@@ -230,6 +255,8 @@ _SECTION_SPECS: Final = {
                    else "str_list" if f in ("console_check", "commands", "expect", "boot_media")
                    else "str")
                for f in TargetCfg.__dataclass_fields__},
+    "handoff": {f: ("str_list" if f == "commands" else "str")
+                for f in HandoffCfg.__dataclass_fields__},
 }
 
 
@@ -314,6 +341,7 @@ def parse_instance(path: Path) -> Instance:
         flash=FlashCfg(**sections.get("flash", {})),
         package=PackageCfg(**sections.get("package", {})),
         target=TargetCfg(**sections.get("target", {})),
+        handoff=HandoffCfg(**sections.get("handoff", {})),
         source=path,
     )
 
@@ -343,7 +371,11 @@ def applicable_actions(inst: Instance) -> tuple[str, ...]:
         acts.append("package")       # run_package: [package].kind is required
     if section_is_set(inst.target):
         acts.append("console")       # cmd_console: needs a [target] section
-        if not inst.target.boot_media or inst.target.media_device:
-            # cmd_deploy: boot_media without media_device has nowhere to go.
+        # cmd_deploy needs something to put on the board.  Either a writable
+        # medium, or a boot chain to hand the kernel to.  Advertising deploy
+        # with neither is what left the storage-less SBC ports with a command
+        # that built the kernel and then attached to a dead console.
+        if ((inst.target.boot_media and inst.target.media_device)
+                or (inst.handoff and inst.handoff.commands)):
             acts.append("deploy")
     return tuple(acts)

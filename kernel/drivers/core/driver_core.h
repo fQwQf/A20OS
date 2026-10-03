@@ -117,6 +117,12 @@ typedef struct driver {
     const device_id_t  *id_table;  /* NULL-terminated array */
     struct bus_type    *bus;       /* bus this driver lives on */
 
+    /* Optional device-tree compatible string this driver claims, e.g.
+     * "starfive,jh7110-mmc".  With it set, the driver binds to the node carrying
+     * that compatible at the addresses the firmware described, instead of every
+     * board file hand-copying an MMIO base.  NULL when not device-tree described. */
+    const char         *of_compatible;
+
     /* Optional protocol-level narrowing after the bus ID match.  It must not
      * access device registers or allocate resources. */
     int  (*match)(device_t *dev);
@@ -203,6 +209,13 @@ device_t *device_find_by_class(uint32_t class_type, int index);
 void driver_probe_all(void);
 void driver_progress_class(uint32_t class_type);
 
+/* Find the platform-bus driver claiming a device-tree compatible string and
+ * report the first id_table entry it would bind as.  Returns 0 and leaves the
+ * outputs untouched when no driver claims it, so a caller walking a device tree
+ * can skip nodes nothing supports instead of inventing an identity for them. */
+int  driver_lookup_compatible(const char *compatible,
+                              uint32_t *vendor, uint32_t *device);
+
 /* ------------------------------------------------------------------ */
 /*  Unified driver manager                                             */
 /* ------------------------------------------------------------------ */
@@ -261,6 +274,39 @@ typedef struct board_config {
 
     /* bus enumeration: board calls device_register() for each device */
     void                 (*enumerate_devices)(void);
+
+    /*
+     * Set when the board's timer interrupt cannot preempt, so idle_loop() must
+     * spin with interrupts left enabled rather than sleep on arch_idle_wait().
+     * The LS2K1000 cooperative recovery profile is the case: its firmware hands
+     * over in a state where the timer never delivers, so nothing would ever wake
+     * a sleeping idle task.
+     *
+     * Polarity matters -- every other field here is a pointer, so a
+     * static initializer leaves this at 0, and 0 has to mean "the timer works"
+     * or every board that does not mention it would silently stop sleeping.
+     */
+    int                  idle_cannot_sleep;
+
+    /*
+     * Both of these are firmware facts about the board's boot handoff, not
+     * properties of the instruction set, so they live here rather than in an
+     * ARCH_HAS_* macro.  The StarFive VisionFive 2 is the case in tree: its
+     * firmware does not grant U-mode access to the RISC-V time CSR on every
+     * boot hart, and its console UART has no wired interrupt.
+     *
+     * Like idle_cannot_sleep, 0 must be the normal case so that a board which
+     * does not mention them gets the working behaviour.
+     */
+
+    /* Set when U-mode cannot reliably read the arch's time counter, so the vDSO
+     * must not advertise it.  libc would otherwise retry the faulting rdtime
+     * forever instead of falling back to the syscall path. */
+    int                  vdso_user_timer_unreliable;
+
+    /* Set when the console UART delivers no interrupt, so receive has to be
+     * driven by polling. */
+    int                  uart_rx_is_polled;
 } board_config_t;
 
 /* Global board config — defined in kernel/board/<board>/board.c */

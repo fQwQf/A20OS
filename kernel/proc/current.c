@@ -64,10 +64,10 @@ static int proc_switch_complete_locked(unsigned cpu)
 
 task_t *proc_current(void)
 {
-#if defined(CONFIG_RISCV64)
+#if ARCH_FAST_CURRENT
     /*
-     * RISC-V keeps the task which owns the currently executing kernel stack
-     * in tp.  Returning it directly avoids the former hot-path round trip
+     * This architecture keeps the task which owns the currently executing
+     * kernel stack in a single register (tp on RISC-V).  Returning it directly avoids the former hot-path round trip
      * through arch_current_cpu_id() (tp -> cpu_id -> g_cpu_current[]) on
      * every syscall helper.  The per-CPU array remains the publication point
      * for remote observers and for proc_current_on_cpu().

@@ -10,7 +10,8 @@
 
 | 功能 | VirtualBox 设备 | A20OS 实现 | 当前限制 |
 |---|---|---|---|
-| 启动 | BIOS + GRUB Multiboot | `make vbox-iso-x86_64` | ISO 启动，非 ARM UEFI 镜像 |
+| 启动（可用） | BIOS + GRUB Multiboot | 实例 `vbox-iso-x86_64` | ISO 介质；SeaBIOS 发布 RSDP，内核可达用户态 |
+| 启动（统一形态，可达用户态） | UEFI + `BOOTX64.EFI` | 实例 `vbox-x86_64` | 原始 GPT 磁盘；ESP 内是 A20OS 自己的 loader，详见[直接启动磁盘镜像](#直接启动磁盘镜像) |
 | 显示 | VMSVGA `15ad:0405` | `kernel/drivers/gpu/vmsvga.c`、`vmsvga.a20drv`、`/dev/fb0` | 固定 1024x768x32，2D framebuffer |
 | 磁盘 | Intel AHCI `8086:2922/2829` | `kernel/drivers/block/ahci.c`、`ahci.a20drv` | 首个可用 port、LBA48、512B sector、单 slot |
 | 网络 | E1000 82540EM `8086:100e` | `kernel/drivers/net/e1000.c`、`e1000.a20drv` + lwIP | 静态单实例、轮询 ring |
@@ -20,7 +21,7 @@
 
 普通 x86_64 开发/VirtualBox 镜像默认使用 generic driver deployment，因此设备驱动由 `.a20drv` 包注册；底层协议源码仍位于 `kernel/drivers/`。E1000 使用 `DEV_CLASS_NET` 且不创建 `/dev` 节点。input class 会出现在动态 sysfs class 视图中，同时保留 `/dev/event0` 聚合兼容节点。
 
-## 构建 ISO
+## 构建介质
 
 Debian/Ubuntu 安装依赖：
 
@@ -28,19 +29,50 @@ Debian/Ubuntu 安装依赖：
 sudo apt-get install gcc binutils grub-common grub-pc-bin xorriso mtools
 ```
 
-构建：
+两种介质都通过 `tools/a20` 构建，不要直接调用 make 目标：
 
 ```sh
-make vbox-iso-x86_64
+tools/a20 package vbox-iso-x86_64   # BIOS ISO，当前唯一可达用户态的路径
+tools/a20 package vbox-x86_64       # UEFI 直接启动磁盘（见下节）
 ```
 
-该目标会递归用 `ARCH=x86_64 ABI=both BRINGUP=0` 执行完整 `dev-build`，再由 `tools/mk_grub_iso.sh` 生成：
+产物路径不要写死，用实例自己报告：
+
+```sh
+tools/a20 ledger vbox-iso-x86_64    # 产物路径、大小与 sha256
+tools/a20 show vbox-x86_64          # 该实例需要的介质与设备字段
+```
+
+`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败；`xorriso` 缺失同样只影响 ISO 路径，磁盘路径由 `tools/mk_grub_disk_image.sh` 生成，不依赖 xorriso。
+
+## 直接启动磁盘镜像
+
+`vbox-x86_64` 产出 512 MiB 原始 GPT 磁盘，只有一个 FAT32 EFI System Partition，其中含 `BOOTX64.EFI`、kernel 与 FAT32 root。这是与 aarch64 VirtualBox 镜像一致的形态：给运维的是一个直接挂载的磁盘，而不是需要先挂载的光介质。
+
+**当前状态：它能启动到用户态。** 实测而非推断——在 OVMF 下：
 
 ```text
-.kernel-build/x86_64-qemu-virt-x86_64-both-dev/a20os-x86_64.iso
+[PCI] ECAM 0xffff8000e0000000 from MCFG, buses 0..255
+[VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
+[INIT] Block device -> /bin (fat32)
+[INIT] System ready
 ```
 
-如果路径因自定义构建变量变化，以 Make 输出的 `BUILD_DIR` 为准。`grub-mkrescue not found` 表示宿主缺少 GRUB 工具，不是内核或驱动编译失败。
+ESP 里放的是 `BOOTX64.EFI`，也就是 A20OS 自己的 loader，而不是 GRUB。原因是 GRUB 2.12 不再填写 multiboot ACPI tag：UEFI 把 RSDP 放在 configuration table 里，而 GRUB 不会把它交给 multiboot 内核。没有 RSDP 就没有 MCFG，PCI 于是回落到一个硬编码 ECAM 窗口，那里没有设备也没有块驱动，启动会停在 `init: no init program found`。
+
+所以这个 loader 直接从 firmware configuration table 读出 RSDP 再交给内核。注意上面日志里的 ECAM 是 `0xe0000000`，而不是 QEMU q35 的默认值 `0xb0000000`——这正是读取 MCFG 的意义所在：真实主板的 ECAM 基址不同，只有读表才对。
+
+loader 不做 32 位模式切换。`ExitBootServices` 之后固件已经把 CPU 留在 64 位长模式并保留恒等映射，这正是内核 `_start_uefi` 需要的入口状态；强行退回 32 位以满足 multiboot 约定，反而会引入一整类只能表现为裸 `#GP`、且当时控制台已死因而无法报告的失败。
+
+`vbox-iso-x86_64` 仍然是 BIOS 路径，用于对照 BIOS/SeaBIOS 下的行为。
+
+部署到真实磁盘时必须显式指定设备，`media_device` 不会默认填 `/dev/sda`：
+
+```sh
+tools/a20 deploy vbox-x86_64        # 按提示确认目标设备
+```
+
+`tools/a20` 会拒绝写入已挂载设备，也会拒绝文件名与镜像不匹配的设备，这正是防止误写 `/dev/sda` 的那道闸。
 
 ## 创建虚拟机
 
