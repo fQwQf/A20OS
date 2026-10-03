@@ -29,6 +29,20 @@ _start:
     movl  %eax, (g_mb_magic - PAGE_OFFSET)
     movl  %ebx, (g_mb_info - PAGE_OFFSET)
 
+    /* Copy the Multiboot command line into .data before the BSS clear.
+     * QEMU places it just below the 8 MiB mark, which lands inside this
+     * kernel's BSS, so without this the -append string is zeroed before any C
+     * code can read it and every bootarg-gated feature sees no arguments at
+     * all.  .data survives the clear; BSS does not. */
+    movl  16(%ebx), %eax              /* mi->cmdline */
+    testl %eax, %eax
+    jz    2f
+    movl  %eax, %esi                  /* source: the string itself */
+    leal  g_mb_cmdline - PAGE_OFFSET, %edi
+    movl  $256, %ecx
+    rep   movsb
+2:
+
     /* Set up stack */
     movl  $(_stack_end - PAGE_OFFSET), %esp
 
