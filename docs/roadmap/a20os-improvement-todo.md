@@ -238,39 +238,69 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
       在 ppc64le 内建。
 - [x] **缺页判定改以 VMA 为准**（`ab700592`）。见下条。
 
-- [ ] **aarch64：mksh 在信号跳板处预取异常**。
+- [x] **aarch64：mksh 在信号跳板处预取异常**。
       `handle_present_page_fault()` 原先只看 PTE 不看 VMA，叶 PTE 上带了一个 VMA
       没有声明的 `PTE_X` 就把 exec fault 判为「已处理」；aarch64 的
       `arch_pte_leaf()` 由 `PTE_X` 推出硬件 `UXN`/`PXN`，所以这个多余的 X 真的让
       该页在 EL0 可执行。结果是约 2.3 万次重复 prefetch abort、**零内核输出**的
       静默活锁（`ab700592` 已把它变成一次干净且指名道姓的 SIGSEGV）。
 
+- [x] **aarch64：跳板页可写 → `SCTLR_EL1.WXN` 下不可执行**。
+      `ab700592` 之后仍然每次交付 SIGSEGV。**根因不在缺页路径，也不在 TLB
+      一致性**（那是此前最像的方向，已证伪）：aarch64 在
+      `kernel/arch/aarch64/mm/kwx.c` 里把镜像切成 RO-X/RO-NX/RW-NX 之后
+      **打开了 `SCTLR_EL1.WXN`**（bit 19），语义是「EL0 可写的叶描述符在 EL0
+      一律 execute-never」。而 sigreturn 跳板按设计就写在**用户栈**上的信号帧里
+      （`signal_deliver_user()` 把 `TRAP_CTX_RA(ctx)` 设成 `tramp_addr`），栈页按
+      定义可写，于是只能映射成 AP=01，CPU 就拒绝取指。
+
+      证据链（每一步都实测过，不要重走）：
+      - QEMU `-d int` 给出原始 ESR：正常按需缺页是 `ESR 0x24/0x92000007` /
+        `0x20/0x82000007`，**FSC=0x07**（translation fault，页不在）；跳板取指是
+        `ESR 0x20/0x8200000f`，**FSC=0x0F**（permission fault）。同一个 walk 深度，
+        一个是「不在」，一个是「在但没权限」——所以不是 TLB 陈旧。
+      - 逐位对比同一进程里两个叶描述符，**权限位只差 AP**：跳板
+        `0x3a000007f7...` 是 AP=01（EL0 读写），正常取指的 text
+        `0x2a000007f7...` 是 AP=11（EL0 只读）；其余可执行性位（`PTE_X`=1、
+        `UXN`=0、`PXN`=1、`nG`=1、`AF`=1、`AttrIndx`=1）逐位相同。
+      - 把 `mm_pte_flags_make_writable_dirty()` 从跳板映射里去掉**没有用**：
+        aarch64 上 `PTE_D` 与 `PTE_W` 是同一个 bit 56，而
+        `arch_signal_tramp_pte_flags()` 自己就带 `PTE_D`，AP 仍然是 01。
+
+      因此**没有任何标志组合能让同一页既是活栈又是可执行跳板**——这是设计问题，
+      不是标志问题。修法：给跳板一块**专用只读页**（RO+X 正是 WXN 允许的组合），
+      `arch_setup_signal_trampoline()` 在建 mm 时映射它、地址存进
+      `mm->sig_tramp`，新增的弱钩子 `arch_signal_tramp_addr()` 让投递路径把
+      `TRAP_CTX_RA` 指过去而不是指栈内槽位。x86_64 早就是这么干的
+      （`X86_64_SIGRET_TRAMP_ADDR`），只是 aarch64 没跟上。
+      **注意**：x86_64 的 `USER_VA_LIMIT` 是 2^47、aarch64 只有 2^46
+      （`kernel/arch/aarch64/include/platform.h`），照抄那个常量会被 `mm_mmap()`
+      以超范围拒绝——实测表现为 VMA 和 PTE 都没生成，RA 落在裸地址上，报
+      "user fault on KERNEL address"。所以 aarch64 改用 `mm_find_gap()` 分配，
+      不写死地址。
+      结果：aarch64 `smoke-ext4-journal` 由 FAIL 变 **5/5 PASS**，
+      mksh 在 `cat /proc/version` 这类会 fork 的命令后不再崩。
+
       已排除的方向（都有反证，不要重走）：
-      - 那片「多余的 X」**不是 bug**，而是 `signal_make_page_exec()`
+      - 那片「多余的 X」不是 bug，而是 `signal_make_page_exec()`
         （`kernel/proc/signal.c`）为了跑 sigreturn 跳板**故意**加的。
-        `deliver_signal()` 会把 `TRAP_CTX_RA(ctx)` 设成 `tramp_addr`，跳板内容
-        `mov x8,#139; svc #0`（aarch64 的 `rt_sigreturn`）也确认在页里。
       - `pt_unmap()` / `pt_map()` 没有丢帧引用：`pt_unmap()` 明确不持有叶引用，
         由调用方释放，而 `signal_make_page_exec()` 原样复用 `pa`，没有 use-after-free。
-      - `arch_signal_tramp_pte_flags()` 在 aarch64 上确实带 `PTE_X`，映射权限没错。
       - 栈增长/brk 的 `handle_demand_fault_locked()` 已拒绝 exec fault；
         `mm_prot_to_pte_flags`、`PROT_*`、`pt_map_cls` 都逐个核过，均忠实于 VMA。
       - `telnetd` 只把 socket `dup2` 进子进程，不读控制台，与本问题无关。
-
-      仍然未解的矛盾只有一条，但已经收得很窄：故障发生在
-      `SIGSEGV: pid=5 code=32 sepc=0x3feb26e0 ra=0x3feb26e0`，**`sepc` 与 `ra` 相等
-      且等于跳板地址**——CPU 是被 `ret` 送到跳板的，而软件侧同一页的 PTE 带 `PTE_X`、
-      相邻活栈页（`0x180000000000c05`，UXN=1）完全正常。也就是说硬件拒绝取指、
-      软件认为可取指，两边对同一页的认知不一致，且只发生一次 fork（跑会 fork 的
-      `cat /proc/version` 才崩，只跑 mksh 内建 `echo` 不崩）。
-      下一步应查 aarch64 的 TLB 一致性：跳板 PTE 的写入与 `tlbi` 之间是否有
-      可见性/时序缺口（`pt_map_cls` 写 PTE → `arch_tlb_flush_page`），以及
-      `sys_rt_sigreturn_impl` 返回前是否把该页改回非可执行而后续路径未再恢复。
+      - PTE 写入与 `tlbi` 之间没有可见性/时序缺口：返回用户态路径本身就会
+        `tlbi vmalle1`，且实测硬件重新 walk 后给出的是**权限**而非**翻译**故障。
 
 - [ ] **aarch64 的 trap storm 类缺陷需要一条通用门禁。** 当前能发现它纯属偶然：
       活锁不产生任何日志，gate 只能靠超时发现，而超时无法区分「机器慢」和
       「内核活锁」。可考虑对 trap 计数设上限（同一 PC 连续 N 次缺页即判定失败并打印
       完整上下文），让这类缺陷在门禁里表现为一次明确的失败而不是挂起。
+      本轮 aarch64 的两个缺陷正好说明必要性：先是一遍遍重复且**零输出**的取指异常
+      （只能靠超时发现），修完又是一个每次必崩但信息齐全的 SIGSEGV。
+      诊断侧已补上的两项能力是：QEMU `-d int` 的原始 ESR（FSC 足以区分「不在」与
+      「没权限」）和 `dump_fault_pte()` 里同一进程内可执行 text 叶的对照——
+      缺任何一项都定位不到这一层。
 
 ## P2：仓库卫生与依赖边界
 

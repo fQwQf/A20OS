@@ -403,6 +403,14 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 
 **5. 「已处理」的缺页必须真的能推进 PC。** 缺页处理路径如果对一条自己满足不了的异常返回 0，硬件就会在同一条指令上无限重入，而且因为每次都报「已处理」，**一次内核输出都没有**。aarch64 上曾表现为 mksh 在 fork 之后对同一个栈地址反复 prefetch abort（约 2.3 万次）、完全没有 fault 报告，直到超时被杀——看起来像丢唤醒，实际是活锁。根因是 `handle_present_page_fault()` 只看 PTE 不看 VMA：叶 PTE 上带了一个 VMA 从未授予的 `PTE_X` 时，它就把 exec fault 判为可满足。而 aarch64 的 `arch_pte_leaf()` 是由 `PTE_X` 推出硬件 `UXN`/`PXN` 的，所以这个"多余的 X"是真的让该页在 EL0 可执行。修法是**以 VMA 为准**：`handle_present_page_fault()` 在 `mm->lock` 下反查覆盖该地址的 VMA，VMA 没给 `VM_EXEC` 就拒绝 exec fault（写同理），`handle_demand_fault_locked()` 的 stack/brk 分支也拒绝 exec fault。这样无论叶 PTE 错成什么样，最坏结果也只是一次干净且指名道姓的 SIGSEGV，而不是静默活锁。详见 [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)。
 
+**6. 「可写且可执行」在 aarch64 上是矛盾的要求。** `kernel/arch/aarch64/mm/kwx.c` 在把内核镜像切成 RO-X/RO-NX/RW-NX 之后会打开 `SCTLR_EL1.WXN`（bit 19），语义是**EL0 可写的叶描述符在 EL0 一律 execute-never**。所以任何「先把某页变成 RWX、临执行前再改回来」的做法都会失效——而且失效方式是**静默的**：内核认为可取指，硬件报 permission fault，内核毫无察觉。凡是要「同一页既当数据又当代码」的地方，必须换成两块页。
+
+本仓库的实例是 sigreturn 跳板：它按设计写在**用户栈**上的信号帧里（栈页按定义可写），于是 AP 只能是 `01`，CPU 拒绝取指，表现为 `ESR EC=0x20 / FSC=0x0f`。注意 aarch64 上 `PTE_D` 与 `PTE_W` **是同一个 bit 56**，所以「去掉脏标记」并不能把 AP 变回 `11`——`arch_signal_tramp_pte_flags()` 本身就带 `PTE_D`。修法是给跳板一块**专用只读页**（RO+X 正是 WXN 允许的组合），地址存进 `mm->sig_tramp`，由弱钩子 `arch_signal_tramp_addr()` 交给投递路径设置 `TRAP_CTX_RA`；x86_64 一直用的就是这个模型。
+
+配套的一条教训：**跨架构不要照抄固定虚拟地址。** x86_64 的跳板页固定在 `0x700000000000`，而 `USER_VA_LIMIT` 在 x86_64 是 2^47、在 aarch64 只有 2^46（`kernel/arch/aarch64/include/platform.h`），同一个常量在 aarch64 上会被 `mm_mmap()` 以超范围拒绝——VMA 和 PTE 都不生成，故障现场看起来像「RA 是个裸地址」。aarch64 改用 `mm_find_gap()` 分配。
+
+诊断这类「硬件拒绝、软件说可以」的故障，光看软件 PTE 不够，需要两样东西：QEMU 的 `-d int` 原始 ESR（`FSC` 足以区分 *translation fault*「页不在」与 *permission fault*「页在但没权限」），以及同一进程内一个**确实能执行**的 text 叶作为对照。本轮就是靠把两个叶描述符逐位对比、发现只差 AP 两位才定位到的。
+
 ### 文档漂移关键词
 
 `make check-doc-drift` 重新生成 Linux syscall 覆盖表，扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。
