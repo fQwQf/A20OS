@@ -15,6 +15,7 @@
  */
 #include "core/arch.h"
 #include "core/types.h"
+#include "drivers/core/driver_core.h"
 #include "core/timer.h"
 
 __attribute__((weak)) uint64_t arch_vdso_counter(void)
@@ -129,18 +130,16 @@ void vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc)
 
 vaddr_t vdso_auxv_ehdr(void)
 {
-#ifdef CONFIG_BOARD_VISIONFIVE2
     /*
-     * JH7110 firmware does not consistently grant U-mode access to the time
-     * CSR on every boot hart.  Advertising the RISC-V vDSO in that state
-     * makes libc retry the faulting rdtime instruction forever.  Keep the
-     * mappings available for later bring-up, but make libc use the syscall
-     * path, where the kernel reads the counter in S-mode.
+     * Where the firmware does not grant U-mode access to the time CSR on every
+     * boot hart, advertising the vDSO makes libc retry the faulting rdtime
+     * instruction forever.  Keep the mappings available for later bring-up, but
+     * make libc use the syscall path, where the kernel reads the counter in
+     * S-mode.
      */
-    return 0;
-#else
+    if (current_board && current_board->vdso_user_timer_unreliable)
+        return 0;
     return g_vdso_pages ? (vaddr_t)A20_VDSO_VA : 0;
-#endif
 }
 
 static void vdso_append_vma(vm_area_t **list, vm_area_t *newv)

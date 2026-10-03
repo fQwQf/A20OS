@@ -13,4 +13,15 @@
 #include "trap_frame.h"
 #include "firmware.h"
 
+
+/* direct exec leaves lose their text PTE under parallel
+ * loader lifetimes, which shows up as dynamic-loader SIGSEGVs. */
+#define ARCH_EXE_LEAF_RETAIN_UNSAFE 1
+
+/* the debug registers are available and cheap enough to trap on. */
+#define ARCH_HW_SINGLE_STEP 1
+
+/* the kernel's epoll_event really is packed; musl's is not. */
+#define ARCH_LINUX_EPOLL_EVENT_PACKED 1
+
 #endif

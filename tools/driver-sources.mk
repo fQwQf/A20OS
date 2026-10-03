@@ -9,7 +9,8 @@
 
 DRIVER_CORE_SRCS := \
     $(wildcard $(KERNEL_DIR)/drivers/core/*.c) \
-    $(wildcard $(KERNEL_DIR)/drivers/bus/*.c)
+    $(wildcard $(KERNEL_DIR)/drivers/bus/*.c) \
+    $(wildcard $(KERNEL_DIR)/drivers/irqchip/*.c)
 
 # Kernel services, not migratable device drivers. They provide the substrate
 # used by optional .a20drv packages and remain in the image.

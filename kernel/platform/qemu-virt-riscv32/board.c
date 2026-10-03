@@ -1,42 +1,16 @@
 #ifdef CONFIG_RISCV32
 
 #include "drivers/core/driver_core.h"
+#include "drivers/irqchip/plic.h"
 #include "core/arch.h"
 #include "core/cpu.h"
 #include "core/timer.h"
 
-static void rv32_plic_init(void) {
-    int hart = (int)cpu_current_id();
-    *(volatile uint32_t *)PLIC_SENABLE(hart) = 0;
-    *(volatile uint32_t *)PLIC_SPRIORITY(hart) = 0;
+/* Shared PLIC body: see kernel/drivers/irqchip/plic.c.  riscv32 has no
+ * arch_cpu_hart_id(), so the hart id is the logical cpu id. */
+static uint64_t rv32_plic_hart_id(void) {
+    return (uint64_t)cpu_current_id();
 }
-
-static void rv32_plic_enable(uint32_t irq) {
-    int hart = (int)cpu_current_id();
-    *(volatile uint32_t *)PLIC_SENABLE(hart) |= (1U << irq);
-    *(volatile uint32_t *)(PLIC_PRIORITY + (uint32_t)irq * 4U) = 1;
-}
-
-static void rv32_plic_disable(uint32_t irq) {
-    int hart = (int)cpu_current_id();
-    *(volatile uint32_t *)PLIC_SENABLE(hart) &= ~(1U << irq);
-}
-
-static uint32_t rv32_plic_ack(void) {
-    return 0;
-}
-
-static void rv32_plic_eoi(uint32_t irq) {
-    (void)irq;
-}
-
-static const irqchip_ops_t rv32_plic_ops = {
-    .init = rv32_plic_init,
-    .enable_irq = rv32_plic_enable,
-    .disable_irq = rv32_plic_disable,
-    .ack = rv32_plic_ack,
-    .eoi = rv32_plic_eoi,
-};
 
 static uint64_t rv32_timer_read_ticks(void) {
     return timer_get_ticks();
@@ -52,6 +26,7 @@ static const timer_ops_t rv32_timer_ops = {
 };
 
 static void rv32_early_init(void) {
+    plic_configure(PLIC_BASE, rv32_plic_hart_id);
 }
 
 static void rv32_poweroff(void) {
@@ -72,7 +47,7 @@ static const board_config_t qemu_virt_rv32 = {
     .name = "qemu-virt-rv32",
     .ram_base = PHYS_MEMORY_BASE,
     .ram_end = PHYS_MEMORY_END,
-    .irqchip = &rv32_plic_ops,
+    .irqchip = &plic_irqchip_ops,
     .timer = &rv32_timer_ops,
     .early_init = rv32_early_init,
     .poweroff = rv32_poweroff,
