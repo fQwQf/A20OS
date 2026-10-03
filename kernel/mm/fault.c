@@ -996,8 +996,27 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
                 continue;
             }
             uint64_t map_flags = vma->pte_flags;
-            if (direct_private)
-                map_flags &= ~(uint64_t)(PTE_W | PTE_D | PTE_COW);
+            if (direct_private) {
+                /*
+                 * Map the canonical page-cache frame read-only.  PTE_COW has
+                 * to STAY: this leaf aliases a frame the page cache still
+                 * owns, so the first store must copy rather than write
+                 * through -- and PTE_COW is the only thing that routes the
+                 * store to the copy in mm_fault_handle_cow(), which is
+                 * written for exactly this leaf ("a read-only MAP_PRIVATE
+                 * fault-around leaf maps the canonical cache frame, so this
+                 * store must break that aliasing by cloning").
+                 *
+                 * Clearing it here left the leaf matching neither the COW
+                 * branch nor the PTE_W dirty-bit branch, so the very first
+                 * write to a private file page -- a .data/.bss store in
+                 * ld-musl, for one -- fell through to "unhandled" and killed
+                 * the process with SIGSEGV on a VMA the kernel itself
+                 * considered writable.
+                 */
+                map_flags &= ~(uint64_t)(PTE_W | PTE_D);
+                map_flags |= PTE_COW;
+            }
             if (direct_private && executable)
                 arch_flush_icache_range(page_cache_data(window[i]),
                                         PAGE_SIZE);
