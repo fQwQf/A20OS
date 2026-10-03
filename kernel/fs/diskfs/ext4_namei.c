@@ -34,11 +34,29 @@ int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
     return 0;
 }
 
-static int ext4_dir_write_block(ext4_sb_info_t *sb, uint64_t physical,
-                                const void *block)
+/* A checksummed directory block ends in a 12-byte tail, so an insertion has to
+ * leave that much room rather than filling the block to its last byte. */
+static size_t ext4_dir_tail_reserve(const ext4_sb_info_t *sb)
 {
-    return bcache_write_bytes(sb->bc, physical * sb->block_size, block,
-                              sb->block_size) < 0 ? -EIO : 0;
+    return ext4_has_metadata_csum(sb) ? 12 : 0;
+}
+
+static int ext4_dir_write_block(ext4_sb_info_t *sb, uint32_t dir_ino,
+                                uint32_t dir_gen, uint64_t physical,
+                                void *block)
+{
+    /* A directory block is part of the namespace, not file data: ext4 logs
+     * it so that a crash cannot leave a half-added or half-removed entry. */
+    uint8_t *raw = (uint8_t *)block;
+    if (ext4_has_metadata_csum(sb)) {
+        /* Re-terminate and re-checksum on every write.  The tail was already
+         * there for a block read off disk; installing it again is harmless
+         * because a block the kernel built itself never had one. */
+        ext4_dir_block_tail_set(raw, sb->block_size);
+        ext4_dir_block_checksum_put(sb, dir_ino, dir_gen, raw, sb->block_size);
+    }
+    return ext4_meta_write(sb, physical * sb->block_size, raw,
+                           sb->block_size) < 0 ? -EIO : 0;
 }
 
 int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
@@ -60,6 +78,7 @@ int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
             if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
                 kfree(blk); return -EIO;
             }
+            if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 if (out_ino) *out_ino = de->inode;
                 if (out_ft) *out_ft = de->file_type;
@@ -73,14 +92,16 @@ int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
 }
 
 
-int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
-                         const char *name, uint32_t ino, uint8_t ft) {
+int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                         uint64_t *dsz, const char *name, uint32_t ino,
+                         uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
     if (nl == 0) return -EINVAL;
     if (nl > 255) return -ENAMETOOLONG;
     uint16_t need = (uint16_t)((8 + nl + 3) & ~3);
-    if (need > bs) return -ENAMETOOLONG;
+    size_t reserve = ext4_dir_tail_reserve(sb);
+    if (need + reserve > bs) return -ENAMETOOLONG;
     uint32_t nb = (*dsz + bs - 1) / bs;
 
     char *blk = (char *)kmalloc(bs);
@@ -95,14 +116,19 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
             if (ext4_dir_entry_check(de, off, bs, &actual) < 0) {
                 kfree(blk); return -EIO;
             }
+            /* The block's trailing dirent is the terminator, not free space:
+             * writing into it puts the entry exactly where the tail is about
+             * to be reinstalled, so the entry vanishes on the next write and
+             * the caller is told the name was added. */
+            if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode == 0 && de->rec_len >= need) {
                 uint16_t old = de->rec_len;
                 uint16_t left = old - need;
                 de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
                 memcpy(de->name, name, nl);
-                /* A free tail is itself a directory entry and therefore
-                 * needs a complete eight-byte header.  A four-byte tail is
-                 * absorbed by the new entry instead of being overwritten. */
+                /* Whatever follows the new entry is a directory entry of its
+                 * own and needs a complete eight-byte header, so a filler
+                 * with less room than that is absorbed whole. */
                 if (left >= 8) {
                     de->rec_len = need;
                     ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + need);
@@ -110,35 +136,37 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
                 } else {
                     de->rec_len = old;
                 }
-                int wr = ext4_dir_write_block(sb, p, blk);
+                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
                 kfree(blk); return wr;
             }
+            if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             uint16_t slack = de->rec_len - actual;
-            if (slack >= need) {
+            if (slack >= need + reserve) {
                 uint16_t old = de->rec_len; de->rec_len = actual;
                 ext4_dir_entry_t *nx = (ext4_dir_entry_t *)(blk + off + actual);
                 nx->inode = ino; nx->rec_len = old - actual;
                 nx->name_len = (uint8_t)nl; nx->file_type = ft;
                 memcpy(nx->name, name, nl);
-                int wr = ext4_dir_write_block(sb, p, blk);
+                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
                 kfree(blk); return wr;
             }
             off += de->rec_len;
         }
     }
     uint64_t nb_blk = ext4_alloc_block(sb); if (!nb_blk) { kfree(blk); return -ENOSPC; }
-    int gr = ext4_block_grow(sb, di, nb, nb_blk);
+    int gr = ext4_block_grow(sb, dir_ino, di, nb, nb_blk);
     if (gr < 0) { ext4_free_block(sb, nb_blk); kfree(blk); return gr; }
     memset(blk, 0, bs);
     ext4_dir_entry_t *de = (ext4_dir_entry_t *)blk;
     de->inode = ino; de->name_len = (uint8_t)nl; de->file_type = ft;
     memcpy(de->name, name, nl);
-    if (bs - need >= 8) {
+    if (bs - need - reserve >= 8) {
         de->rec_len = need;
         ext4_dir_entry_t *tail = (ext4_dir_entry_t *)(blk + need);
-        tail->inode = 0; tail->rec_len = (uint16_t)(bs - need); tail->name_len = 0;
+        tail->inode = 0; tail->rec_len = (uint16_t)(bs - need - reserve);
+        tail->name_len = 0;
     } else de->rec_len = (uint16_t)bs;
-    int wr = ext4_dir_write_block(sb, nb_blk, blk);
+    int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, nb_blk, blk);
     kfree(blk);
     if (wr < 0) return wr;
     *dsz += bs;
@@ -146,8 +174,8 @@ int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
 }
 
 
-int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
-                            const char *name) {
+int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                            uint64_t dsz, const char *name) {
     uint32_t bs = sb->block_size, nb = (dsz + bs - 1) / bs;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
@@ -161,10 +189,11 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
             if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
                 kfree(blk); return -EIO;
             }
+            if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 if (hp) ((ext4_dir_entry_t *)(blk + prev))->rec_len += de->rec_len;
                 else de->inode = 0;
-                int wr = ext4_dir_write_block(sb, p, blk);
+                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
                 kfree(blk); return wr;
             }
             prev = off; hp = 1; off += de->rec_len;
@@ -175,8 +204,9 @@ int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
 }
 
 
-int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
-                                  const char *name, uint32_t ino, uint8_t ft) {
+int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                                  uint64_t *dsz, const char *name, uint32_t ino,
+                                  uint8_t ft) {
     uint32_t bs = sb->block_size;
     size_t nl = strlen(name);
     if (nl > 255) return -ENAMETOOLONG;
@@ -193,10 +223,11 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
             if (ext4_dir_entry_check(de, off, bs, NULL) < 0) {
                 kfree(blk); return -EIO;
             }
+            if (de->file_type == EXT4_FT_DIRENT_TAIL) break;
             if (de->inode && de->name_len == nl && memcmp(de->name, name, nl) == 0) {
                 de->inode = ino;
                 de->file_type = ft;
-                int wr = ext4_dir_write_block(sb, p, blk);
+                int wr = ext4_dir_write_block(sb, dir_ino, di->i_generation, p, blk);
                 kfree(blk);
                 return wr;
             }
@@ -208,11 +239,25 @@ int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
 }
 
 
+/* Clear an inode for reuse and stamp the deletion time on it.  i_dtime is a
+ * timestamp, not a flag: e2fsck reads any value below the inode count as the
+ * ext2 "fast delete" marker -- an inode whose blocks were released without
+ * being cleared first -- and answers "Inodes that were part of a corrupted
+ * orphan linked list found" for every inode left that way, which turns an
+ * otherwise perfectly healthy image into a filesystem with errors. */
+static void ext4_inode_mark_deleted(ext4_inode_t *inode)
+{
+    uint64_t now[2];
+    timekeeping_get_realtime(now);
+    memset(inode, 0, sizeof(*inode));
+    inode->i_dtime = (uint32_t)now[0];
+}
+
 int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
                                uint32_t dir_ino __attribute__((unused)),
                                ext4_inode_t *di, const char *name, uint32_t ino,
                                vnode_t **deferred_put) {
-    int r = ext4_dir_remove(sb, di, ext4_inode_size(di), name);
+    int r = ext4_dir_remove(sb, di, dir_ino, ext4_inode_size(di), name);
     if (r < 0) return r;
 
     /* Drop one link.  Hard-linked files survive until the last link is gone. */
@@ -248,9 +293,8 @@ int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
         return 0;
     }
 
-    ext4_block_truncate(sb, &victim);
-    memset(&victim, 0, sizeof(victim));
-    victim.i_dtime = 1;
+    ext4_block_truncate(sb, ino, &victim);
+    ext4_inode_mark_deleted(&victim);
     ext4_write_inode(sb, ino, &victim);
     vfs_drop_time_meta_identity(mnt, ino);
     ext4_free_inode(sb, ino);
@@ -341,9 +385,8 @@ void ext4_release_vn(vnode_t *vn) {
         rw_mutex_write_lock(&sb->metadata_lock);
         ext4_inode_t victim;
         if (ext4_read_inode(sb, p->inode_num, &victim) == 0) {
-            ext4_block_truncate(sb, &victim);
-            memset(&victim, 0, sizeof(victim));
-            victim.i_dtime = 1;
+            ext4_block_truncate(sb, p->inode_num, &victim);
+            ext4_inode_mark_deleted(&victim);
             ext4_write_inode(sb, p->inode_num, &victim);
         }
         vfs_drop_time_meta_identity(vn->mnt, p->inode_num);
@@ -383,6 +426,22 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
     ni.i_uid = cur ? (uint16_t)cur->cred.fsuid : 0;
     ni.i_gid = (di.i_mode & S_ISGID) ? di.i_gid : (cur ? (uint16_t)cur->cred.fsgid : 0);
     ni.i_links_count = 1;
+    /* ext4 keeps a file's block map as an extent tree, not as the twelve
+     * indirect block pointers of an ext2 inode.  Without the flag and an empty
+     * tree header the writer falls back to i_block[] holding raw block
+     * numbers, and e2fsck then reports the file's block map as unrecognised
+     * (magic 0x50d9). */
+    ni.i_flags |= EXT4_EXTENTS_FL;
+    {
+        uint8_t *raw = (uint8_t *)&ni + offsetof(ext4_inode_t, i_block);
+        ext4_extent_header_t hdr;
+        hdr.eh_magic = EXT4_EXT_MAGIC;
+        hdr.eh_entries = 0;
+        hdr.eh_max = EXT4_EXT_ROOT_MAX;
+        hdr.eh_depth = 0;
+        hdr.eh_generation = 0;
+        memcpy(raw, &hdr, sizeof(hdr));
+    }
     if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
         ext4_free_inode(p->sb, new_ino);
         return -EIO;
@@ -390,7 +449,7 @@ int ext4_vn_create_unlocked(vnode_t *dir, const char *name, int mode, vnode_t **
 
     /* Add dir entry */
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_REG_FILE);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_REG_FILE);
     if (r < 0) {
         ext4_free_inode(p->sb, new_ino);
         return r;
@@ -446,17 +505,23 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     ni.i_links_count = 2; /* . and .. */
     ni.i_flags |= EXT4_EXTENTS_FL;
 
+    /* The group this inode lands in now owns one more directory; e2fsck
+     * recounts them and reports the group whose descriptor disagrees. */
+    ext4_account_directory(p->sb, new_ino, 1);
+
     /* Write extent for the one block */
     uint8_t *raw = (uint8_t *)&ni + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr;
     hdr.eh_magic = EXT4_EXT_MAGIC; hdr.eh_entries = 1;
-    hdr.eh_max = 4; hdr.eh_depth = 0; hdr.eh_generation = 0;
+    hdr.eh_max = EXT4_EXT_ROOT_MAX; hdr.eh_depth = 0; hdr.eh_generation = 0;
     memcpy(raw, &hdr, sizeof(hdr));
     ext4_extent_t ext;
     ext.ee_block = 0; ext.ee_len = 1;
     ext.ee_start_hi = (uint16_t)(blk >> 32);
     ext.ee_start_lo = (uint32_t)(blk & 0xFFFFFFFF);
     memcpy(raw + sizeof(hdr), &ext, sizeof(ext));
+    /* i_blocks has to describe the one block the new directory just claimed. */
+    ext4_inode_sync_i_blocks(p->sb, &ni);
 
     if (ext4_write_inode(p->sb, new_ino, &ni) < 0) {
         ext4_free_block(p->sb, blk);
@@ -482,10 +547,14 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
     dotdot->inode = p->inode_num;
     dotdot->name_len = 2;
     dotdot->file_type = EXT4_FT_DIR;
-    dotdot->rec_len = (uint16_t)(p->sb->block_size - 12);
+    /* ".." has to stop short of the tail: an entry that claimed the last
+     * twelve bytes would hide the dirent tail from the walker, and e2fsck
+     * then reports the block as having no checksum at all. */
+    dotdot->rec_len = (uint16_t)(p->sb->block_size - 12 -
+                                 ext4_dir_tail_reserve(p->sb));
     dotdot->name[0] = '.'; dotdot->name[1] = '.';
 
-    int wr = ext4_dir_write_block(p->sb, blk, buf);
+    int wr = ext4_dir_write_block(p->sb, new_ino, ni.i_generation, blk, buf);
     kfree(buf);
     if (wr < 0) {
         ext4_free_block(p->sb, blk);
@@ -495,19 +564,25 @@ int ext4_vn_mkdir_unlocked(vnode_t *dir, const char *name, int mode) {
 
     /* Add entry in parent directory */
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_DIR);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_DIR);
     if (r < 0) {
         ext4_free_block(p->sb, blk);
         ext4_free_inode(p->sb, new_ino);
         return r;
     }
 
+    /* The parent gains a subdirectory, and a directory's link count is the
+     * number of its own "." plus one per subdirectory's "..".  e2fsck recounts
+     * the tree in pass 4 and reports "Inode 2 ref count is 4, should be 10" when
+     * the inode disagrees, so the parent is written back even when the entry
+     * fitted in the block it already had. */
+    di.i_links_count++;
     if (dsz != ext4_inode_size(&di)) {
         ext4_inode_set_size(&di, dsz);
-        if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
-            return -EIO;
         p->file_size = dsz;
     }
+    if (ext4_write_inode(p->sb, p->inode_num, &di) < 0)
+        return -EIO;
     return 0;
 }
 
@@ -546,7 +621,7 @@ int ext4_vn_link_unlocked(vnode_t *dir, const char *name, vnode_t *target) {
     if (ext4_write_inode(p->sb, tp->inode_num, &inode) < 0) return -EIO;
 
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, &dsz, name, tp->inode_num, EXT4_FT_REG_FILE);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, tp->inode_num, EXT4_FT_REG_FILE);
     if (r < 0) {
         /* Roll back the link count on failure. */
         inode.i_links_count--;
@@ -630,8 +705,34 @@ int ext4_vn_rmdir_unlocked(vnode_t *dir, const char *name, vnode_t **deferred_pu
     r = ext4_dir_empty(p->sb, &cdi, ext4_inode_size(&cdi));
     if (r < 0) return r;
 
-    return ext4_inode_remove(p->sb, dir->mnt, p->inode_num, &di, name,
-                             child_ino, deferred_put);
+    /* A directory's last two links are its own "." and its parent's "..",
+     * both of which disappear with it, so it cannot go through the unlink path
+     * -- that one only drops the first of the two and leaves the directory
+     * allocated forever.  The parent loses one link, the child loses both plus
+     * its blocks. */
+    r = ext4_dir_remove(p->sb, &di, p->inode_num, ext4_inode_size(&di), name);
+    if (r < 0) return r;
+
+    if (di.i_links_count > 0) di.i_links_count--;
+    if (ext4_write_inode(p->sb, p->inode_num, &di) < 0) return -EIO;
+    ext4_account_directory(p->sb, child_ino, -1);
+
+    vnode_t *live = ext4_vnode_cache_remove(p->sb, child_ino);
+    if (live) {
+        ext4_vnode_priv_t *vp = (ext4_vnode_priv_t *)live->fs_data;
+        if (vp) __atomic_store_n(&vp->unlinked, 1, __ATOMIC_RELEASE);
+        if (!vp || __atomic_load_n(&vp->open_count, __ATOMIC_ACQUIRE) == 0)
+            page_cache_discard_unlinked(live);
+        if (deferred_put) *deferred_put = live;
+        return 0;
+    }
+
+    ext4_block_truncate(p->sb, child_ino, &cdi);
+    ext4_inode_mark_deleted(&cdi);
+    if (ext4_write_inode(p->sb, child_ino, &cdi) < 0) return -EIO;
+    vfs_drop_time_meta_identity(dir->mnt, child_ino);
+    ext4_free_inode(p->sb, child_ino);
+    return 0;
 }
 
 
@@ -677,11 +778,11 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
         uint64_t odsz = ext4_inode_size(&odi);
         uint64_t ndsz = ext4_inode_size(&ndi);
 
-        r = ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, tgt_ino, tgt_ft);
+        r = ext4_dir_update_entry(op->sb, &odi, op->inode_num, &odsz, old_name, tgt_ino, tgt_ft);
         if (r < 0) return r;
-        r = ext4_dir_update_entry(np->sb, &ndi, &ndsz, new_name, src_ino, src_ft);
+        r = ext4_dir_update_entry(np->sb, &ndi, np->inode_num, &ndsz, new_name, src_ino, src_ft);
         if (r < 0) {
-            ext4_dir_update_entry(op->sb, &odi, &odsz, old_name, src_ino, src_ft);
+            ext4_dir_update_entry(op->sb, &odi, op->inode_num, &odsz, old_name, src_ino, src_ft);
             return r;
         }
         if (odsz != ext4_inode_size(&odi)) {
@@ -708,7 +809,7 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     /* Add new entry in target dir */
     uint64_t ndsz = ext4_inode_size(&ndi);
-    r = ext4_dir_add(np->sb, &ndi, &ndsz, new_name, src_ino, src_ft);
+    r = ext4_dir_add(np->sb, &ndi, np->inode_num, &ndsz, new_name, src_ino, src_ft);
     if (r < 0) return r;
     if (ndsz != ext4_inode_size(&ndi)) {
         ext4_inode_set_size(&ndi, ndsz);
@@ -718,10 +819,10 @@ int ext4_vn_rename_unlocked(vnode_t *old_dir, const char *old_name,
 
     if (ext4_read_inode(op->sb, op->inode_num, &odi) < 0)
         return -EIO;
-    r = ext4_dir_remove(op->sb, &odi, ext4_inode_size(&odi), old_name);
+    r = ext4_dir_remove(op->sb, &odi, op->inode_num, ext4_inode_size(&odi), old_name);
     if (r < 0) {
         /* Attempt rollback: remove the new entry */
-        ext4_dir_remove(np->sb, &ndi, ndsz, new_name);
+        ext4_dir_remove(np->sb, &ndi, np->inode_num, ndsz, new_name);
         return r;
     }
 
@@ -791,7 +892,7 @@ int ext4_vn_symlink_unlocked(vnode_t *dir, const char *name,
     ext4_write_inode(p->sb, new_ino, &ni);
 
     uint64_t dsz = ext4_inode_size(&di);
-    int r = ext4_dir_add(p->sb, &di, &dsz, name, new_ino, EXT4_FT_SYMLINK);
+    int r = ext4_dir_add(p->sb, &di, p->inode_num, &dsz, name, new_ino, EXT4_FT_SYMLINK);
     if (r < 0) {
         ext4_free_inode(p->sb, new_ino);
         return r;
@@ -815,14 +916,14 @@ int ext4_vn_truncate_unlocked(vnode_t *vn, size_t size) {
 
     uint64_t old_size = ext4_inode_size(&inode);
     if (size == 0) {
-        ext4_block_truncate(p->sb, &inode);
+        ext4_block_truncate(p->sb, p->inode_num, &inode);
     } else if (size < old_size) {
         /* Reclaim blocks beyond the new EOF instead of leaking them.  The
          * first logical block to drop is the one holding the new EOF. */
         uint32_t bs = p->sb->block_size;
         uint32_t lblk = (uint32_t)((size + bs - 1) / bs);
         if (lblk < (old_size + bs - 1) / bs)
-            ext4_block_truncate_at(p->sb, &inode, lblk);
+            ext4_block_truncate_at(p->sb, p->inode_num, &inode, lblk);
     }
 
     ext4_inode_set_size(&inode, size);
@@ -977,12 +1078,8 @@ int ext4_vn_statfs(vnode_t *vn, kstatfs_t *st)
 
     mutex_lock(&sb->alloc_lock);
     for (uint32_t g = 0; g < sb->groups_count; g++) {
-        free_blocks +=
-            (uint64_t)sb->group_descs[g].bg_free_blocks_count_lo |
-            ((uint64_t)sb->group_descs[g].bg_free_blocks_count_hi << 16);
-        free_inodes +=
-            (uint64_t)sb->group_descs[g].bg_free_inodes_count_lo |
-            ((uint64_t)sb->group_descs[g].bg_free_inodes_count_hi << 16);
+        free_blocks += sb->group_descs[g].bg_free_blocks_count_lo;
+        free_inodes += sb->group_descs[g].bg_free_inodes_count_lo;
     }
     mutex_unlock(&sb->alloc_lock);
 

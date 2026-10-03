@@ -40,7 +40,8 @@ UFSD_CORE_SRCS := user/svc/ufsd.c user/svc/fscompat/compat.c \
 	user/svc/fscompat/bcache_user.c user/svc/ufs_fat_backend.c \
 	user/svc/ufs_vnfs_backend.c kernel/fs/diskfs/fat32lite.c
 UFSD_VNFS_SRCS := kernel/fs/diskfs/ext4.c kernel/fs/diskfs/ext4_file.c \
-	kernel/fs/diskfs/ext4_journal.c kernel/fs/diskfs/ext4_namei.c \
+	kernel/fs/diskfs/ext4_journal.c kernel/fs/diskfs/ext4_csum.c \
+	kernel/fs/diskfs/ext4_namei.c \
 	kernel/fs/diskfs/ext4_sync.c kernel/fs/diskfs/isofs.c \
 	kernel/fs/diskfs/ntfs.c kernel/fs/diskfs/ntfs_file.c \
 	kernel/fs/diskfs/ntfs_index.c kernel/fs/diskfs/ntfs_namei.c
