@@ -170,7 +170,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 │   ├── proc/         # 任务调度与状态机
 │   ├── syscall/      # syscall 分发与追踪
 │   ├── vdso/         # 各架构 vDSO 时间快路径
-│   └── external/     # vendored 第三方源码 (lwIP)，不随上游风格重排
+│   └── external/     # vendored 第三方源码；lwIP 已带 A20OS 自有改动，见其 DIVERGENCE.md
 ├── kernel/platform/  # 板级内存、设备、IRQ、timer 与 SMP 启动
 ├── docs/             # 设计方案与技术专题说明文档
 └── Makefile          # 高度定制化跨平台构建脚本
