@@ -215,6 +215,48 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
 - [ ] 其余 smoke 门禁仍是 NR_CPUS=1（vfs-stress 已有 smp2/smp8 变体，
       见 [../server-readiness.md](../server-readiness.md) §四）。
 
+## P1：跨架构正确性（2026-10 feat/kernel-core-scalability 分支）
+
+这一批的共同特征是**在 x86_64 上完全看不出来**，因此每条都必须按架构各跑一遍
+`make smoke-ext4-journal ARCH=<arch>`，跑一个架构不算验证完。已修复的部分：
+
+- [x] **`O_*` 常量按架构取值**（`af064443`）。`O_DIRECTORY`/`O_NOFOLLOW`/`O_DIRECT`/
+      `O_LARGEFILE` 在 Linux 里逐架构定义，asm-generic、arm/arm64、powerpc 三套布局
+      互不相同，且没有任何两套顺序一致。原先 `kernel/include/core/fcntl.h` 用了一套
+      硬编码的 asm-generic 值，在 ppc64le 上 `O_DIRECTORY` 恰好等于 `O_LARGEFILE`——
+      而 musl 的 `open()` 每次都带 `O_LARGEFILE`，于是 `openat()` 静默失败。
+      这是 ppc64le 上 `smoke-ext4-journal` 从 FAIL 变 5/5 PASS 的直接原因。
+- [x] **ppc64le stack-protector guard 改 global**（`e8bedcc4`）。GCC 在 ppc64le 上默认
+      `-mstack-protector-guard=tls`（`ld 9,-28688(r13)`），而内核的 `__stack_chk_guard`
+      是普通 `.data` 全局量、r13 又已被 `arch_set_task_pointer()` 占用。
+- [x] **ppc64le trap prologue 自开 FP/VEC/VSX**（`5381bbbe`）。`__trap_from_user` 进入时
+      SRR1 带的是用户态 MSR，用户没开 FP 就保存 FPR 会直接陷入。
+- [x] **board-bound virtio transport 发布到设备模型 + probe 到槽位耗尽**（`a7a9eae4`）。
+- [x] **drvmod 导出表补 `snprintf`/`vsnprintf`/`device_register`**（`eee0535f`）。
+      缺一个符号的后果不是那个符号不可用，而是整个 `.a20drv` 加载失败、transport
+      整个消失。注意它只在加载式 profile 下显形：virtio-blk 在 aarch64 是模块、
+      在 ppc64le 内建。
+- [x] **缺页判定改以 VMA 为准**（`ab700592`）。见下条。
+
+- [ ] **aarch64：mksh fork 之后 `ret` 到栈地址**。
+      `handle_present_page_fault()` 原先只看 PTE，叶 PTE 上带了一个 VMA 从未授予的
+      `PTE_X` 就把 exec fault 判为「已处理」；aarch64 的 `arch_pte_leaf()` 由 `PTE_X`
+      推出硬件 `UXN`/`PXN`，所以这个多余的 X 真的让栈页在 EL0 可执行。结果是
+      ~2.3 万次重复 prefetch abort、**零内核输出**的静默活锁（`ab700592` 已把它变成
+      一次干净且指名道姓的 SIGSEGV）。
+      仍未解决的是崩溃本身：`SIGSEGV: pid=5 code=32 sepc=0x3feb26e0 ra=0x3feb26e0`
+      —— `sepc` 与 `ra` 相等，说明 CPU 是被 `ret` 送到栈地址的，即 x30 已被破坏；
+      该栈页内容全零且软件 PTE 带着多余的 X，而同一 VMA 下相邻的活栈页
+      （`0x180000000000c05`，UXN=1）是正确的。故障需要一次 fork 才出现（只跑
+      mksh 内建的 `echo` 不崩，一跑会 fork 的 `cat /proc/version` 就崩），
+      因此嫌疑集中在 fork/exec/wait 这条路径，而不是串口或调度。
+      修好之前 aarch64 的 `smoke-ext4-journal` 仍无法转绿。
+
+- [ ] **aarch64 的 trap storm 类缺陷需要一条通用门禁。** 当前能发现它纯属偶然：
+      活锁不产生任何日志，gate 只能靠超时发现，而超时无法区分「机器慢」和
+      「内核活锁」。可考虑对 trap 计数设上限（同一 PC 连续 N 次缺页即判定失败并打印
+      完整上下文），让这类缺陷在门禁里表现为一次明确的失败而不是挂起。
+
 ## P2：仓库卫生与依赖边界
 
 - [ ] 跨架构 `-Werror` 复核

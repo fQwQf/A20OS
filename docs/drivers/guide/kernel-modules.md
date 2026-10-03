@@ -43,7 +43,7 @@ A20OS 现在同时支持三种驱动路径：
 - DMA：`drv_dma_alloc_coherent`、`drv_dma_free_coherent`（coherent，稳定设备地址）。
 - 延时/时间：`drv_udelay`、`drv_mdelay`、`drv_clock_ticks`。
 - 中断：`drv_register_isr`、`drv_unregister_isr`（桥接 hwapi `request_irq`，向量在注册时校验范围，arch IRQ 分发真实投递）。
-- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_by_class`、`drv_driver_probe_all`、`platform_bus`。
+- 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_by_class`、`device_register`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
 - 调度/等待原语（模块完成路径）：`proc_park_prepare/commit/cancel/finish`、`proc_wake_q_init/flush`、`wait_queue_init/link/unlink/collect_one/collect_all`、`mutex_init/lock/unlock`、`timer_get_ticks`、`mdelay/udelay`。
@@ -51,7 +51,9 @@ A20OS 现在同时支持三种驱动路径：
 - DMA 增强：`dma_alloc_coherent_aligned/free_coherent_aligned`、`dma_sync_for_cpu/device`。
 - ACPI 发现（x86_64）：`firmware_acpi_tpm2`。
 - 输入 mux 唤醒与 virtio PCI 传输：`input_mux_wake`、`pci_virtio_transport_init`、`arch_current_cpu_id`。
-- 基础字符串/内存函数：`strncpy`、`memset`、`memcpy`、`memcmp`、`strcmp`、`strlen`、`strstr`，以及自旋锁内联用到的 `proc_current`/`proc_task_pid`/`printf`。
+- 基础字符串/内存函数：`strncpy`、`memset`、`memcpy`、`memcmp`、`strcmp`、`strlen`、`strstr`，`snprintf`/`vsnprintf`（需要格式化到定长缓冲的驱动，例如拼设备名），以及自旋锁内联用到的 `proc_current`/`proc_task_pid`/`printf`/`panic`。
+
+「导出表缺一个符号」的后果不是那个符号用不了，而是**整个模块加载失败**：加载器报 `unresolved symbol 'X'` 后放弃该 `.a20drv`，而 transport 随之整个消失。所以在 aarch64 上（virtio-blk 是加载模块）少导出 `snprintf` 或 `device_register`，现象是两块盘都不出现、`/bin` 挂不上、`init` 直接 panic；在 ppc64le 上（virtio-blk 内建）同一份代码完全正常。**同一个缺陷只在其中一种 deployment profile 下显形**，改完务必按两种 profile 各验一次。
 
 模块不得直接引用普通内核符号。未解析符号、未知重定位、非法 ELF 类型、越界的 section/symbol/strtab/relocation 都会在加载前拒绝，不会修改内核页表或堆。
 

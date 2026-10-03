@@ -310,6 +310,16 @@ transitional ID 的 subsystem device 常用来区分 VirtIO type，ID 表必须�
 
 PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()` 与 `pci_virtio_transport_init()`。驱动、类消费者和 `arch_virtio_*_probe()` 不得再次扫描同一 PCI host 或重写 BAR。QEMU/VirtualBox 的 PCI VirtIO 设备走统一 PCI bus；VirtIO-MMIO 设备由 `virtio_mmio_enumerate()` 发布，二者最终进入同一 driver probe，不以运行期 fallback 互相探测。
 
+## Board-bound transport 的发布与重试
+
+PCI 与 `virtio_mmio_enumerate()` 两条路径的差别只有「谁来构造这个 transport」，但它们必须落到同一个可见性规则上：**驱动不会自动出现在设备模型里**。
+
+`device_find_by_class()` 只看 `dev->drv->class_type`；`driver_matches_device()` 对双方都没有 bus 的组合，要求存在 `match()` 回调，否则拒绝绑定。board 自己构造的 transport（QEMU virt 的 `virtio-mmio` slot、ppc64le 的 `spapr-vio`）没有 bus，也没有 `match()`，所以它必须**自己调用 `device_register()`**，否则 `mount_setup_block_device()` 之类的 class 消费者永远看不到这块盘。症状是启动日志里 transport 建好了、`notify` 也在动，但 `/bin` 挂不上、`init` 报 `no init program found`。
+
+第二个坑是重试次数：QEMU virt 上 virtio-mmio slot 是递增的，板级代码若按「probe 一次，失败就放弃」，那么 slot 0 上挂的设备会把整条总线判死。应当**一直 probe 到 slot 返回非设备为止**（`VIRTIO_MMIO_MAGIC_VALUE` 为 0 即无设备）。
+
+这两点合起来解释了一个很难定位的故障：同一个 QEMU 机器上 aarch64 与 ppc64le 行为不同——因为 deployment profile 不同（见 `deployment-profiles.md`），virtio-blk 在 aarch64 是**可加载模块**、在 ppc64le 是**内建**。内建路径下 `device_register()` 是直接调用，加载路径下它必须出现在 `drv_export_table[]` 里，否则模块加载时就是 `unresolved symbol 'device_register'`。
+
 ## 失败定位
 
 没有 probe 日志时先找 `[BUS] pci ... id=vendor:device`；没有设备说明 ECAM/固件问题。有设备但未绑定，检查 ID 表和 `.driver_init`。BAR setup 失败检查 BAR size/地址窗口。`incomplete capabilities` 是 VirtualBox 控制器模式或 capability 解析问题。feature rejected 是驱动写了设备不接受的位。queue timeout 时同时检查 DMA 地址是否为物理地址、cache sync、descriptor writable 顺序、queue notify offset 和设备 status。
