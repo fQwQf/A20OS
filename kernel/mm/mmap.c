@@ -35,6 +35,159 @@ static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
 }
 #endif /* CONFIG_NOMMU */
 
+/* ------------------------------------------------------------------ *
+ * Backing-object segments  (P6, docs/roadmap/single-level-mm-model.md 12.6)
+ * ------------------------------------------------------------------ *
+ * A mapping's backing object -- the vnode, the file offset, whether it is
+ * MAP_SHARED -- is currently only reachable through the VMA, which is why the
+ * VMA still has to exist.  Recording it on the mapping's page-table path is
+ * what lets fault dispatch answer "which object backs this address?" from the
+ * page tables alone.
+ *
+ * Only file and VMO mappings get one.  An anonymous page needs no object, and
+ * giving it a segment anyway would make every process pay a page per PT node.
+ *
+ * Every function here is best effort.  A failure to allocate, or a page-table
+ * path that needs more than MM_SEGTAB_MAX distinct segments, leaves the range
+ * unannotated -- and an unannotated range behaves exactly as it did before the
+ * segment table existed, because the VMA-based fault path is still in place.
+ */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+
+static void seg_release_file(mm_seg_t *s)
+{
+    if (s->vnode)
+        vnode_put(s->vnode);
+}
+
+static void seg_release_vmo(mm_seg_t *s)
+{
+    if (s->vmo)
+        vmo_release(s->vmo);
+}
+
+/* Build a segment describing [start, end) of `kind`, or NULL.  The caller owns
+ * the returned reference. */
+static mm_seg_t *mm_seg_build(int kind, vaddr_t start, vaddr_t end, int fd,
+                              uint64_t offset, uint64_t flags,
+                              vnode_t *vnode, struct vmo *vmo)
+{
+    if (end <= start)
+        return NULL;
+    mm_seg_t *s = mm_seg_alloc();
+    if (!s)
+        return NULL;
+    s->kind    = (uint8_t)kind;
+    s->shared  = (flags & VM_SHARED) ? 1 : 0;
+    s->fd      = fd;
+    s->base_va = start;
+    s->len     = end - start;
+    s->offset  = offset;
+    s->flags   = flags;
+    s->vnode   = vnode;
+    s->vmo     = vmo;
+    s->release = (kind == MM_SEG_VMO) ? seg_release_vmo : seg_release_file;
+    if (vnode)
+        vnode_get(vnode);            /* the segment's own reference */
+    if (vmo)
+        vmo_ref(vmo);
+    return s;
+}
+
+/* Install (or rebuild) the VMA's segment, and label whatever page-table path
+ * already exists.  Caller holds mm->lock. */
+static void vma_seg_set(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
+                        vaddr_t end)
+{
+    int kind = (vma->vm_flags & VM_VMO) ? MM_SEG_VMO : MM_SEG_FILE;
+    uint64_t base_off = (vma->vm_flags & VM_VMO) ? vma->vmo_offset
+                                                 : vma->file_offset;
+    mm_seg_t *s = mm_seg_build(kind, start, end,
+                               (vma->vm_flags & VM_VMO) ? -1 : vma->file_fd,
+                               base_off + (start - vma->start),
+                               vma->vm_flags,
+                               (vma->vm_flags & VM_VMO) ? NULL
+                                                        : vma->file_vnode,
+                               (vma->vm_flags & VM_VMO) ? vma->vmo : NULL);
+    if (!s)
+        return;
+    mm_seg_put(vma->seg);            /* the old one, if any */
+    vma->seg = s;
+    (void)mm_pt_annotate_seg(mm, start, end, s);
+}
+
+void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma)
+{
+    if (!mm || !vma || vma->end <= vma->start)
+        return;
+    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
+        return;
+    vma_seg_set(mm, vma, vma->start, vma->end);
+}
+
+/* Re-apply the VMA's segment to the page-table path.
+ *
+ * This is the piece the first version was missing, and the shadow measurement
+ * is what found it.  mmap does not create any page-table path -- the path is
+ * built lazily by the first fault -- so annotating inside the mmap call
+ * labelled nothing: the walk descends only into nodes that exist, and at that
+ * moment none of them did.  Measured on the real-software gate: seg_ok=6532,
+ * seg_miss=37626, i.e. the segment table answered 15% of file faults.
+ *
+ * So it is applied again after a fault has built part of the path.  Coverage
+ * converges as the mapping is touched, and every call is one walk of the
+ * mapping's own path, which is short.
+ */
+void mm_mmap_seg_label(mm_struct_t *mm, vm_area_t *vma)
+{
+    if (!mm || !vma || !vma->seg || vma->end <= vma->start)
+        return;
+    (void)mm_pt_annotate_seg(mm, vma->start, vma->end, vma->seg);
+}
+
+void mm_mmap_seg_unannotate(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                            mm_seg_t *only)
+{
+    if (!mm || end <= start)
+        return;
+    mm_pt_unannotate_seg(mm, start, end, only);
+}
+
+/* Rebuild after a split moved a boundary.  The tail has a different offset and
+ * therefore needs its own segment; addresses in the node entry that straddles
+ * the boundary keep whichever name covers them, and lookup tells the two apart
+ * by extent -- see "Entry index packing" in mm/pt.c. */
+void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
+                            vaddr_t end)
+{
+    if (!mm || !vma || end <= start)
+        return;
+    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
+        return;
+    /* The segment being replaced still describes the range this VMA used to
+     * occupy, so retire its name there before the new one goes on.  Without
+     * this the old segment keeps answering for addresses that no longer belong
+     * to it -- its extent still covers them, which is exactly what lookup
+     * trusts. */
+    mm_seg_t *old = vma->seg;
+    if (old)
+        mm_mmap_seg_unannotate(mm, vma->start, vma->end, old);
+    vma_seg_set(mm, vma, start, end);
+}
+
+#else /* !ARCH_HAS_PGTABLE_OPS || CONFIG_NOMMU */
+
+void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma) { (void)mm; (void)vma; }
+void mm_mmap_seg_label(mm_struct_t *mm, vm_area_t *vma) { (void)mm; (void)vma; }
+void mm_mmap_seg_unannotate(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                            mm_seg_t *only)
+{ (void)mm; (void)start; (void)end; (void)only; }
+void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
+                            vaddr_t end)
+{ (void)mm; (void)vma; (void)start; (void)end; }
+
+#endif
+
 void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
 {
     if (!vn)
@@ -322,6 +475,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
+    mm_mmap_seg_annotate(mm, vma);
     return addr;
 }
 
@@ -398,6 +552,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
+    mm_mmap_seg_annotate(mm, vma);
     return addr;
 }
 

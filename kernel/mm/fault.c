@@ -398,6 +398,50 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   path below, so its pages carry no page-cache identity and no writeback
  *   route.  Inter-process shared memory is served by the VM_VMO path instead.
  */
+/* ---- P6 shadow check (see docs/roadmap/single-level-mm-model.md 12.6) ----
+ *
+ * Asks the segment table what it would have said about this fault, and counts
+ * how often that matches what the VMA actually said.  Changes nothing: this is
+ * the measurement that decides whether P6 can retire the VMA, and a non-zero
+ * disagreement count means the segment would have faulted in the wrong page.
+ *
+ * It lives here rather than in pt.c because only this side holds the VMA, and a
+ * disagreement is only diagnosable when both sides are printed together.
+ */
+static void shadow_seg_check(mm_struct_t *mm, vm_area_t *vma, vaddr_t va,
+                             uint8_t kind, uint64_t base_off)
+{
+    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
+        return;
+    if ((kind == MM_SEG_VMO) != ((vma->vm_flags & VM_VMO) != 0))
+        return;
+
+    int shared = (vma->vm_flags & VM_SHARED) ? 1 : 0;
+    uint64_t want = base_off + (va - vma->start);
+    mm_seg_t *found = NULL;
+    if (mm_pt_shadow_seg(mm, va, kind, want, shared, &found) != 0 || !found)
+        return;
+
+    /* The segment the page tables named, against the VMA that owns this
+     * address right now.  `own` is the segment the VMA itself carries: when it
+     * is a different object, the annotation came from some other mapping that
+     * shares this (much coarser) node entry, and the extents are what are
+     * supposed to tell the two apart. */
+    mm_seg_t *own = vma->seg;
+    kwarn("[SEG-SHADOW] va=0x%lx: VMA [0x%lx,0x%lx) off=0x%lx shared=%d fd=%d "
+          "says kind=%u, but the page tables name "
+          "{base=0x%lx len=0x%lx off=0x%lx kind=%u shared=%d fd=%d}"
+          "%s\n",
+          (unsigned long)va,
+          (unsigned long)vma->start, (unsigned long)vma->end,
+          (unsigned long)want, shared, vma->file_fd, kind,
+          (unsigned long)found->base_va, (unsigned long)found->len,
+          (unsigned long)found->offset, found->kind, found->shared,
+          found->fd,
+          own == found ? "" : "  (the VMA holds a different segment)");
+    mm_seg_put(found);
+}
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -518,6 +562,14 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
+
+        /* Shadow check: would the segment table have answered this fault the
+         * same way?  Nothing below changes behaviour -- it is the measurement
+         * that decides whether P6 can drop the VMA. */
+        shadow_seg_check(t->mm, vma, page_va,
+                         (vma->vm_flags & VM_VMO) ? MM_SEG_VMO : MM_SEG_FILE,
+                         (vma->vm_flags & VM_VMO) ? vma->vmo_offset
+                                                  : vma->file_offset);
 
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
             vfile_t *vf = vfs_get_file_ref(vma->file_fd);
@@ -1190,13 +1242,100 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             return -1;
         return handle_demand_fault_access(t, stval, access);
     }
+    /* P6: the backing object comes off the page-table path, not off the VMA.
+     *
+     * The segment named for this address carries everything the file-fault
+     * path needs -- fd, sharedness, protection, the object offset for this very
+     * page, and the end of the mapping -- so when one covers the address it IS
+     * the authority.  `vma` is still consulted, for two reasons that are both
+     * temporary and both load-bearing: it is the fallback for addresses no
+     * segment covers yet, and shadow_seg_check() counts every disagreement
+     * between the two.  A disagreement is a wrong-page fault if the segment
+     * wins, so it is counted, not obeyed.
+     *
+     * Put here and not in handle_demand_fault_locked(): this dispatcher claims
+     * VM_FILE first and only falls through when it declines, so instrumenting
+     * the other one records nothing and looks like a passing measurement. */
+    mm_seg_t *seg = mm_pt_lookup_seg(mm, page_va);
+    if (seg && seg->kind == MM_SEG_FILE && seg->fd >= 0) {
+        mm_seg_dispatch_seg++;
+        if (vma)
+            shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->file_offset);
+
+        uint64_t sflags = seg->flags;
+        int prot = 0;
+        if (sflags & VM_READ)  prot |= PROT_READ;
+        if (sflags & VM_WRITE) prot |= PROT_WRITE;
+        if (sflags & VM_EXEC)  prot |= PROT_EXEC;
+        pte_t seg_ptef = mm_prot_to_pte_flags(prot);
+        if (!mm_pte_flags_allow_access(seg_ptef)) {
+            mm_seg_put(seg);
+            spin_unlock(&mm->lock);
+            return -1;
+        }
+        int file_fd  = seg->fd;
+        int shared   = seg->shared;
+        int file_pos = (int)(seg->offset + (page_va - seg->base_va));
+        vaddr_t seg_end = seg->base_va + seg->len;
+        mm_seg_put(seg);
+        /* The page-table path for this range may not have existed when this
+         * fault arrived -- mmap builds no path, and the first touch is what
+         * creates it.  Re-apply the mapping's segment so the NEXT fault here
+         * is answerable from the page tables alone.  Without this the segment
+         * table answers almost nothing: measured 6532 hits against 37626
+         * misses. */
+        if (vma)
+            mm_mmap_seg_label(mm, vma);
+
+        /* Writable private mappings stay on the single-page COW path.  A
+         * read-only private mapping, including executable text, can share the
+         * canonical page-cache frame.  mprotect(PROT_WRITE) converts the leaf
+         * to COW before exposing writes, and unmap/exit drops the mapping's
+         * cache pin.  This avoids allocating and copying the same rustc text
+         * pages independently in every parallel compiler process. */
+        int executable = (seg_ptef & PTE_X) != 0;
+#ifdef CONFIG_LOONGARCH64
+        /* LoongArch64 cannot yet retain private page-cache leaves safely
+         * across the parallel loader/fault lifetime.  Keep private file pages
+         * on the proven single-page copy path; direct executable leaves lose
+         * text PTEs, while direct read-only leaves corrupt dynamic symbols in
+         * librustc_driver under parallel compile load. */
+        int fault_around = 0;
+#else
+        int fault_around = !shared && !(seg_ptef & PTE_W);
+#endif
+        vfile_t *vf = vfs_get_file_ref(file_fd);
+        spin_unlock(&mm->lock);
+        if (!vf || !vf->vnode) {
+            if (vf)
+                vfs_put_file_ref(file_fd, vf);
+            return -1;
+        }
+        int r = handle_file_fault(t, page_va, file_fd, file_pos, seg_end,
+                                  shared, fault_around, executable, vf);
+        if (r == 0) {
+            a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+            a20_perf_count(A20_PERF_MM_FILE_FAULTS);
+            __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+            t->perf_page_faults_maj++;
+        }
+        return r;
+    }
+    mm_seg_put(seg);
     if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+        mm_seg_dispatch_fallback++;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
             spin_unlock(&mm->lock);
             return -1;
         }
         int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
+        /* Fallback: no segment covers this address yet.  This is the coverage
+         * gap P6 has to close before the VMA query can go -- measured, not
+         * guessed: seg_miss in the [MM-ASM] line. */
+        shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->file_offset);
+        mm_mmap_seg_label(mm, vma);
         /* Writable private mappings stay on the single-page COW path.  A
          * read-only private mapping, including executable text, can share the
          * canonical page-cache frame.  mprotect(PROT_WRITE) converts the leaf

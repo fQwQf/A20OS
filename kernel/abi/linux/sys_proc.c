@@ -802,7 +802,10 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
             mm_pt_audit_all(&rep);
             kinfo("[MM-ASM] pt_pages=%lu entries=%lu missing_meta=%lu "
                   "present=%lu absent=%lu prot=%lu cow=%lu vma=%lu "
-                  "vmai=%lu cls=%lu safe=%lu anon_virt=%lu\n",
+                  "vmai=%lu cls=%lu safe=%lu anon_virt=%lu "
+                  "seg_slots=%lu seg_bad=%lu seg_kind=%lu "
+                  "seg_ok=%lu seg_diff=%lu seg_miss=%lu "
+                  "seg_dispatch=%lu seg_fallback=%lu\n",
                   (unsigned long)rep.pt_pages, (unsigned long)rep.entries,
                   (unsigned long)rep.missing_meta,
                   (unsigned long)rep.present_mismatch,
@@ -813,7 +816,15 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)rep.vmai_mismatch,
                   (unsigned long)rep.cls_mismatch,
                   (unsigned long)rep.safe_mismatch,
-                  (unsigned long)rep.anon_virt);
+                  (unsigned long)rep.anon_virt,
+                  (unsigned long)rep.seg_slots,
+                  (unsigned long)rep.seg_bad_slot,
+                  (unsigned long)rep.seg_kind_mismatch,
+                  (unsigned long)mm_seg_shadow_agree,
+                  (unsigned long)mm_seg_shadow_disagree,
+                  (unsigned long)mm_seg_shadow_miss,
+                  (unsigned long)mm_seg_dispatch_seg,
+                  (unsigned long)mm_seg_dispatch_fallback);
             if (rep.vma_mismatch)
                 kinfo("[MM-ASM]   first vma_mismatch  va=0x%lx\n",
                       (unsigned long)rep.vma_bad_va);
@@ -824,6 +835,13 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                 kinfo("[MM-ASM]   first cls_mismatch  va=0x%lx cls=%lu\n",
                       (unsigned long)rep.cls_bad_va,
                       (unsigned long)rep.cls_bad_class);
+            if (rep.seg_bad_slot)
+                kinfo("[MM-ASM]   first seg_bad_slot  va=0x%lx\n",
+                      (unsigned long)rep.seg_bad_va);
+            if (rep.seg_kind_mismatch)
+                kinfo("[MM-ASM]   first seg_kind_mismatch va=0x%lx kind=%lu\n",
+                      (unsigned long)rep.seg_kind_bad_va,
+                      (unsigned long)rep.seg_kind_bad);
         }
 #endif
         firmware_shutdown();

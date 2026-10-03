@@ -141,19 +141,43 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
         }
 
         if (addr <= vma->start && end >= vma->end) {
+            /* Whole VMA: the range loses its backing object, so its label goes
+             * with it.  The per-node collapse in pt_unmap_leaf only runs for
+             * tables that held no leaves, which is exactly not the case for a
+             * mapping that was never faulted.
+             *
+             * Only this VMA's own name is dropped.  The node entries here are
+             * far coarser than the mapping and may also be naming a neighbour
+             * that is still live and still correct. */
+            mm_mmap_seg_unannotate(mm, clip_start, clip_end, vma->seg);
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
             mm_vma_defer(mm, vma);
         } else if (addr <= vma->start) {
-            vma->file_offset += clip_end - vma->start;
+            /* Head cut.  The surviving VMA keeps its file_offset adjusted, so
+             * the segment that described [vma->start, clip_end) no longer
+             * describes the new range: re-label rather than leave a segment
+             * whose offset is off by the amount just cut. */
+            uint64_t new_off = vma->file_offset + (clip_end - vma->start);
+            vma->file_offset = new_off;
             vma->start = clip_end;
+            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
         } else if (end >= vma->end) {
             vma->end = clip_start;
+            /* Tail cut: the segment's extent shrank, but its base_va and
+             * offset still match, so only the extent needs narrowing. */
+            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
         } else {
             vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
             if (!tail) return -ENOMEM;
             *tail = *vma;
+            /* The struct copy also copied `seg`, which is an OWNED reference.
+             * Leaving it shared would let both halves drop the same pointer
+             * and free the segment while the other half's annotations still
+             * name it.  The tail gets a segment of its own below anyway --
+             * its file offset differs -- so drop the borrowed one here. */
+            tail->seg = NULL;
             refcount_set(&tail->refcount, 1);
             tail->start = clip_end;
             tail->end = vma->end;
@@ -168,6 +192,11 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             if (vma->next) vma->next->prev = tail;
             vma->next = tail;
             vma->end = clip_start;
+            /* Middle cut: two segments now describe one old one.  The entry
+             * that straddles the boundary can only carry one of them, so the
+             * addresses on the other side get no segment and fall back to the
+             * VMA -- see "WHERE A SEGMENT STOPS BEING AUTHORITATIVE". */
+            mm_mmap_seg_reannotate(mm, tail, tail->start, tail->end);
         }
         vma = next;
     }
