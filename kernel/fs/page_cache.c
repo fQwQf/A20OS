@@ -42,6 +42,22 @@ static page_cache_page_t g_lru_head;
 static page_cache_page_t g_lru_tail;
 static page_cache_page_t *g_hash[PAGE_CACHE_HASH_BUCKETS];
 static page_cache_page_t *g_dirty_pages;
+/* Whole-cache occupancy, maintained at the points already serialised by
+ * g_page_cache_lock (mapping publication, detach, dirty insert/remove).
+ * Deriving it by walking the descriptor array made every cachestat(2) and
+ * /proc/meminfo read an O(cache size) critical section with interrupts off. */
+static size_t g_valid_pages;
+static size_t g_dirty_page_count;
+/* Pages currently carrying a pin, one counter per bucket.  The 0->1 and 1->0
+ * transitions belong to the warm hit path, which already owns that bucket's
+ * lock; a single shared counter would make unrelated files contend on one
+ * cache line.  Padded so neighbouring buckets do not false-share. */
+struct page_cache_pin_counter {
+    size_t pinned;
+    char pad[64 - sizeof(size_t)];
+};
+static struct page_cache_pin_counter
+    g_bucket_pinned[PAGE_CACHE_BUCKET_LOCKS];
 static int g_initialized;
 
 #define PAGE_CACHE_PRESSURE_WRITEBACK_PAGES 1024U
@@ -81,6 +97,29 @@ static inline void page_cache_bucket_unlock_irqrestore(unsigned hash_idx,
 {
     spin_unlock_irqrestore(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)],
                            flags);
+}
+
+/* A pin is any refcount the cache cannot reclaim under.  Accounting only the
+ * 0->1 and 1->0 refcount edges keeps the reported pinned count equal to the
+ * number of pages with refcount > 0 without re-reading every descriptor. */
+static inline void page_cache_account_pin(page_cache_page_t *page)
+{
+    unsigned idx = page_cache_hash_key(page->vnode, page->index);
+    __atomic_fetch_add(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
+                       __ATOMIC_RELAXED);
+}
+
+static inline void page_cache_account_unpin(page_cache_page_t *page)
+{
+    unsigned idx = page_cache_hash_key(page->vnode, page->index);
+    __atomic_fetch_sub(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
+                       __ATOMIC_RELAXED);
+}
+
+static inline void page_cache_pin(page_cache_page_t *page)
+{
+    if (__atomic_fetch_add(&page->ref_count.value, 1, __ATOMIC_RELAXED) == 0)
+        page_cache_account_pin(page);
 }
 
 static void lru_remove(page_cache_page_t *page)
@@ -244,6 +283,7 @@ static void dirty_insert_locked(page_cache_page_t *page)
         g_dirty_pages->global_dirty_prev = page;
     g_dirty_pages = page;
     page->dirty = 1;
+    g_dirty_page_count++;
 }
 
 static void dirty_remove_locked(page_cache_page_t *page)
@@ -272,6 +312,7 @@ static void dirty_remove_locked(page_cache_page_t *page)
     page->global_dirty_prev = NULL;
     page->global_dirty_next = NULL;
     page->dirty = 0;
+    g_dirty_page_count--;
 }
 
 /* Caller holds g_page_cache_lock AND the page's bucket lock.  Removing the
@@ -293,6 +334,7 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
     page->dirty_gen = 0;
     page->invalidate_gen++;
     page->uptodate = 0;
+    g_valid_pages--;
     return vn;
 }
 
@@ -467,7 +509,7 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
     page_cache_page_t *page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         return page;
@@ -481,7 +523,7 @@ retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         return page;
@@ -497,7 +539,7 @@ retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -514,7 +556,7 @@ retry:
         bflags = page_cache_bucket_lock_irqsave(idx);
         page = find_locked(vn, index);
         if (page) {
-            refcount_inc(&page->ref_count);
+            page_cache_pin(page);
             page->accessed = 1;
             page_cache_bucket_unlock_irqrestore(idx, bflags);
             spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -560,6 +602,9 @@ retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     hash_insert_locked(page);
     mapping_insert_locked(page);
+    g_valid_pages++;
+    /* The descriptor came back from the free stack already pinned. */
+    page_cache_account_pin(page);
     page_cache_bucket_unlock_irqrestore(idx, bflags);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     if (deferred_put)
@@ -571,8 +616,9 @@ void page_cache_put(page_cache_page_t *page)
 {
     if (!page)
         return;
-    if (refcount_read(&page->ref_count) > 0)
-        refcount_dec_and_test(&page->ref_count);
+    if (refcount_read(&page->ref_count) > 0 &&
+        refcount_dec_and_test(&page->ref_count))
+        page_cache_account_unpin(page);
 }
 
 void *page_cache_data(page_cache_page_t *page)
@@ -976,7 +1022,7 @@ static size_t collect_dirty_batch_locked(vnode_t *vn,
     size_t count = 0;
     while (page && count < max_pages && page->vnode == batch_vn &&
            page->index == next_index) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         pages[count++] = page;
         next_index++;
         /* Per-vnode dirty pages are descending from head to tail, so the
@@ -1416,16 +1462,13 @@ void page_cache_get_stats(page_cache_stats_t *stats)
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     stats->allocated = g_allocated_pages;
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page->valid)
-            continue;
-        stats->valid++;
-        if (page->dirty)
-            stats->dirty++;
-        if (refcount_read(&page->ref_count) > 0)
-            stats->pinned++;
-    }
+    stats->valid = g_valid_pages;
+    stats->dirty = g_dirty_page_count;
+    size_t pinned = 0;
+    for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
+        pinned += __atomic_load_n(&g_bucket_pinned[i].pinned,
+                                  __ATOMIC_RELAXED);
+    stats->pinned = pinned;
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
 
@@ -1476,12 +1519,8 @@ void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty)
         return;
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page)
-            continue;
-        if (!page->valid || page->vnode != vf->vnode)
-            continue;
+    for (page_cache_page_t *page = vf->vnode->cache_pages; page;
+         page = page->mapping_next) {
         if (resident)
             *resident += PAGE_SIZE;
         if (page->dirty && dirty)
@@ -1506,11 +1545,12 @@ void page_cache_file_range_stats(vfile_t *vf, uint64_t off_bytes,
     if (last < first)
         last = ~(uint64_t)0 >> PAGE_SIZE_BITS;
 
+    /* Counting the vnode's own mapping list keeps the cost proportional to the
+     * queried file instead of the whole cache; the list is only ever spliced
+     * under g_page_cache_lock. */
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page || !page->valid || page->vnode != vf->vnode)
-            continue;
+    for (page_cache_page_t *page = vf->vnode->cache_pages; page;
+         page = page->mapping_next) {
         if (page->index < first || page->index > last)
             continue;
         if (resident)
