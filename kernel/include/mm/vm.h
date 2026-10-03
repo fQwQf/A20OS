@@ -65,6 +65,11 @@ typedef struct vm_area {
     struct vmo     *vmo;
     uint64_t        vmo_offset;
     struct vnode   *file_vnode;     /* referenced vnode for every VM_FILE */
+    /* This mapping's backing-object segment (P6).  Held here so the segment
+     * outlives the mmap call and can be re-applied to page-table paths as
+     * they come into existence -- see mm_mmap_seg_label().  Owned reference;
+     * vma_release() drops it. */
+    struct mm_seg  *seg;
 #ifdef CONFIG_NOMMU
     void           *nommu_alloc;     /* raw allocation backing this VMA */
 #endif
@@ -366,6 +371,17 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot, int flags, struct vmo *vmo,
                            uint64_t vmo_offset);
 int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len);
+/* Backing-object segment bookkeeping, driven from mm/mmap.c so the kind test
+ * stays in one place.  All three are no-ops without page-table ops. */
+void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma);
+/* Re-apply a VMA's segment to the page-table path.  mmap creates no path, so
+ * without this the annotation lands on nothing; call it once a fault has built
+ * part of the path. */
+void mm_mmap_seg_label(mm_struct_t *mm, vm_area_t *vma);
+void mm_mmap_seg_unannotate(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                            struct mm_seg *only);
+void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
+                            vaddr_t end);
 vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk);
 int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len, int prot);
 int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,

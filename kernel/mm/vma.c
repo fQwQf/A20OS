@@ -4,6 +4,7 @@
 #include "mm/frame.h"
 #include "mm/vmo.h"
 #include "mm/slab.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/page_cache.h"
 #include "ipc/sysv_shm.h"
@@ -89,6 +90,13 @@ void vma_release(vm_area_t *vma)
 {
     vma_release_file(vma);
     vma_release_ipc(vma);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* The VMA holds its mapping's only strong reference to the segment.  PT
+     * entries hold their own, so dropping this cannot pull a segment out from
+     * under an annotation -- it only ends the last way to REBUILD one. */
+    mm_seg_put(vma->seg);
+    vma->seg = NULL;
+#endif
     if (vma && (vma->vm_flags & VM_VMO) && vma->vmo) {
         vmo_release(vma->vmo);
         vma->vmo = NULL;
@@ -393,6 +401,10 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
     if (!tail) return NULL;
 
     *tail = *vma;
+    /* `seg` is an owned reference, and the struct copy copied the pointer
+     * without taking one.  The tail's offset differs from the head's, so it
+     * needs its own segment anyway; callers re-derive it. */
+    tail->seg = NULL;
     refcount_set(&tail->refcount, 1);
     tail->start = split;
     tail->file_offset += split - vma->start;
