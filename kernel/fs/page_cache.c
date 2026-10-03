@@ -35,6 +35,23 @@ static mutex_t g_page_cache_fill_locks[PAGE_CACHE_FILL_LOCKS];
 #define PAGE_CACHE_CHUNKS \
     (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
 static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
+/* Staging buffers for readpages(), checked out instead of allocated per
+ * window.  A per-task buffer of the kind the Linux ABI I/O paths use cannot be
+ * borrowed here: sys_read hands its own scratch buffer in as the copy
+ * destination, so a shared per-task allocation would be freed underneath the
+ * writer.  Checkout also survives preemption, which a bare per-CPU buffer
+ * would not.  Allocated lazily on first use and retained afterwards. */
+#define PAGE_CACHE_READAHEAD_BUFFERS 4
+static void *g_readahead_buffers[PAGE_CACHE_READAHEAD_BUFFERS];
+static spinlock_t g_readahead_buffer_lock = SPINLOCK_INIT;
+/* End of the previous read(2), per open file, for the readahead gate below. */
+#define PAGE_CACHE_READ_STATE_STRIPES 64
+struct page_cache_read_state {
+    uintptr_t vfile;
+    uint64_t end_index;
+};
+static struct page_cache_read_state
+    g_read_state[PAGE_CACHE_READ_STATE_STRIPES];
 static size_t g_allocated_pages;
 static size_t g_page_limit;
 static page_cache_page_t *g_free_pages;
@@ -478,6 +495,7 @@ int page_cache_init(void)
         return 0;
 
     spin_init(&g_page_cache_lock);
+    spin_init(&g_readahead_buffer_lock);
     for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
         spin_init(&g_page_cache_bucket_locks[i]);
     mutex_init(&g_page_cache_grow_lock);
@@ -800,6 +818,35 @@ retry:
 /* Fill an ascending, contiguous private-file fault window.  Filesystems with
  * readpages support receive a linear buffer and can merge physical disk I/O;
  * the data is scattered into the pinned cache pages only after the read. */
+static void *readahead_buffer_take(size_t bytes)
+{
+    uint64_t flags = spin_lock_irqsave(&g_readahead_buffer_lock);
+    for (size_t i = 0; i < PAGE_CACHE_READAHEAD_BUFFERS; i++) {
+        if (g_readahead_buffers[i]) {
+            void *buffer = g_readahead_buffers[i];
+            g_readahead_buffers[i] = NULL;
+            spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+            return buffer;
+        }
+    }
+    spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+    return kmalloc(bytes);
+}
+
+static void readahead_buffer_return(void *buffer)
+{
+    uint64_t flags = spin_lock_irqsave(&g_readahead_buffer_lock);
+    for (size_t i = 0; i < PAGE_CACHE_READAHEAD_BUFFERS; i++) {
+        if (!g_readahead_buffers[i]) {
+            g_readahead_buffers[i] = buffer;
+            spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+            return;
+        }
+    }
+    spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+    kfree(buffer);
+}
+
 int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                                 size_t count)
 {
@@ -823,7 +870,8 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
         return 0;
     }
 
-    char *buffer = (char *)kmalloc(count * PAGE_SIZE);
+    char *buffer = (char *)readahead_buffer_take(
+        PAGE_CACHE_READAHEAD_PAGES * PAGE_SIZE);
     if (!buffer) {
         /* Allocation pressure must not turn readahead into a fault failure. */
         return page_cache_fill_vfile_page(vf, pages[0]);
@@ -854,7 +902,9 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                 generations[i] = snapshot_invalidate_gen(pages[start + i]);
 
             size_t bytes = run * PAGE_SIZE;
-            memset(buffer, 0, bytes);
+            /* readpages() reports how much of the window it stored and the
+             * shortfall is zeroed below, so pre-clearing the buffer would only
+             * add a second pass over the same bytes. */
             int r = vf->vnode->ops->readpages(
                 vf->vnode, pages[start]->index, buffer, bytes);
             if (r < 0) {
@@ -878,7 +928,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
 out:
     for (size_t i = count; i > 0; i--)
         mutex_unlock(&pages[i - 1]->fill_lock);
-    kfree(buffer);
+    readahead_buffer_return(buffer);
     return result;
 }
 
@@ -886,8 +936,8 @@ out:
  * Ordinary read(2) used to fill one 4 KiB page at a time even when the
  * filesystem provided readpages().  Compiler inputs are predominantly
  * sequential and the ext4 implementation can merge a contiguous 128 KiB
- * window into one block request, so populate the forward window on the first
- * cold page.  The caller already pins pages[0]; pins acquired here are dropped
+ * window into one block request, so populate the forward window on a cold
+ * page.  The caller already pins pages[0]; pins acquired here are dropped
  * before returning and all publication remains protected by the existing
  * per-page fill locks.
  */
@@ -915,6 +965,35 @@ static int page_cache_readahead_vfile(vfile_t *vf,
     while (count > 1)
         page_cache_put(pages[--count]);
     return result;
+}
+
+/* Where the previous read(2) on this open file stopped, striped by vfile
+ * pointer.  The window is worth its read amplification only when the stream
+ * is walking forward: an unconditional window made a 4 KiB random read pay for
+ * 32 pages, of which 31 were never looked at.  Two indices equal means this
+ * read resumes exactly where the last one ended, which is what a sequential
+ * scan, and only a sequential scan, produces.  The first page of a stream has
+ * no evidence and fetches alone; the second page already has it.
+ *
+ * A collision between two vfiles sharing a stripe, or a torn read of the pair,
+ * can only mis-fire the hint into an unnecessary or a missed prefetch.  It
+ * cannot affect correctness, which is why the two fields are not published
+ * atomically. */
+static int page_cache_read_resumes(vfile_t *vf, uint64_t index)
+{
+    struct page_cache_read_state *s = &g_read_state[
+        ((uintptr_t)vf >> 4) & (PAGE_CACHE_READ_STATE_STRIPES - 1)];
+    if (__atomic_load_n(&s->vfile, __ATOMIC_ACQUIRE) != (uintptr_t)vf)
+        return 0;
+    return __atomic_load_n(&s->end_index, __ATOMIC_RELAXED) == index;
+}
+
+static void page_cache_record_read_end(vfile_t *vf, uint64_t index)
+{
+    struct page_cache_read_state *s = &g_read_state[
+        ((uintptr_t)vf >> 4) & (PAGE_CACHE_READ_STATE_STRIPES - 1)];
+    __atomic_store_n(&s->vfile, (uintptr_t)vf, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->end_index, index + 1, __ATOMIC_RELEASE);
 }
 
 pfn_t page_cache_pfn(page_cache_page_t *page)
@@ -960,7 +1039,8 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
 
         if (!page_cache_is_uptodate(page)) {
             int r;
-            if (vf->vnode->ops && vf->vnode->ops->readpages)
+            if (vf->vnode->ops && vf->vnode->ops->readpages &&
+                page_cache_read_resumes(vf, index))
                 r = page_cache_readahead_vfile(vf, page, file_size);
             else
                 r = page_cache_fill_vfile_page(vf, page);
@@ -972,6 +1052,7 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
             }
         }
 
+        page_cache_record_read_end(vf, index);
         memcpy(buf + done, (char *)page_cache_data(page) + page_off, chunk);
         page_cache_put(page);
         done += chunk;
