@@ -191,6 +191,34 @@ static uint32_t fw_cfg_read32(void) {
 
 static char g_fw_cfg_cmdline[256];
 
+/* Multiboot v1: EAX holds the magic and EBX a pointer to this, saved by
+ * boot/entry.S before it clears the BSS.  QEMU fills in cmdline only when the
+ * MULTIBOOT_INFO_CMDLINE flag is set, which it does for -kernel plus -append.
+ * The fw_cfg file is the aarch64/UEFI route and stays empty here, so a kernel
+ * booted this way would otherwise never see -append at all. */
+struct x86_mb_info {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+};
+
+__attribute__((section(".data"))) volatile uint32_t g_mb_magic;
+__attribute__((section(".data"))) volatile uint32_t g_mb_info;
+/* Copied out by boot/entry.S before the BSS clear, because QEMU's copy of the
+ * command line sits inside that BSS and would be zeroed first. */
+__attribute__((section(".data"))) char g_mb_cmdline[256];
+
+#define X86_MB_BOOTLOADER_MAGIC 0x2BADB002u
+#define X86_MB_INFO_MEM_MAP     0x00000040u
+#define X86_MB_INFO_CMDLINE     0x00000004u
+
 const char *firmware_bootargs(void) {
     static int ready;
     if (!ready) {
@@ -211,6 +239,20 @@ const char *firmware_bootargs(void) {
             printf("[FW_CFG] cmdline='%s'\n", g_fw_cfg_cmdline);
         } else {
             printf("[FW_CFG] no QEMU fw_cfg, using fallback bootargs\n");
+        }
+        if (!g_fw_cfg_cmdline[0] &&
+            g_mb_magic == X86_MB_BOOTLOADER_MAGIC && g_mb_info) {
+            const struct x86_mb_info *mi = (const struct x86_mb_info *)
+                (uintptr_t)(g_mb_info + PAGE_OFFSET);
+if ((mi->flags & X86_MB_INFO_CMDLINE) && g_mb_cmdline[0]) {
+                size_t n = 0;
+                while (g_mb_cmdline[n] && n < sizeof(g_fw_cfg_cmdline) - 1) {
+                    g_fw_cfg_cmdline[n] = g_mb_cmdline[n];
+                    n++;
+                }
+                g_fw_cfg_cmdline[n] = '\0';
+                printf("[MB] cmdline='%s'\n", g_fw_cfg_cmdline);
+            }
         }
     }
     return g_fw_cfg_cmdline;
@@ -245,8 +287,6 @@ int firmware_console_getchar(void) {
  * and nothing past the 2 GiB direct-map window that entry.S builds with 1 GiB
  * pages.  If anything is missing we fall back to the old 1 GiB range.
  */
-#define X86_MB_BOOTLOADER_MAGIC 0x2BADB002u
-#define X86_MB_INFO_MEM_MAP     0x00000040u
 #define X86_PAGE_SIZE           4096u
 #define X86_RAM_RANGE_MAX       8
 #define X86_LOW_RESERVED_END    0x100000ULL
@@ -275,28 +315,12 @@ static void x86_high_ram_map_flush(void)
         ::: "rax", "memory");
 }
 
-struct x86_mb_info {
-    uint32_t flags;
-    uint32_t mem_lower;
-    uint32_t mem_upper;
-    uint32_t boot_device;
-    uint32_t cmdline;
-    uint32_t mods_count;
-    uint32_t mods_addr;
-    uint32_t syms[4];
-    uint32_t mmap_length;
-    uint32_t mmap_addr;
-};
-
 struct x86_mb_mmap_entry {
     uint32_t size;
     uint64_t addr;
     uint64_t len;
     uint32_t type;
 } __attribute__((packed));
-
-__attribute__((section(".data"))) volatile uint32_t g_mb_magic;
-__attribute__((section(".data"))) volatile uint32_t g_mb_info;
 
 static paddr_t g_ram_base[X86_RAM_RANGE_MAX];
 static paddr_t g_ram_end[X86_RAM_RANGE_MAX];
