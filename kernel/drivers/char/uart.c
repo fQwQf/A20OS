@@ -24,12 +24,15 @@
 static volatile char rx_buffer[RX_BUF_SIZE];
 static volatile uint32_t rx_head;
 static volatile uint32_t rx_tail;
-/* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid.
- * Ctrl-C path holds rx_lock while calling proc_find_get()/proc_kill().
- * All other paths must not acquire additional locks while holding rx_lock. */
+/* LOCK_ORDER: rx_lock protects the RX ring and tty_foreground_pgid only.  The
+ * Ctrl-C path takes it just long enough to collect a wake; signalling runs
+ * outside it, so no other lock is ever acquired while rx_lock is held. */
 static spinlock_t rx_lock = SPINLOCK_INIT;
 static wait_queue_t rx_waiters;
 static int tty_foreground_pgid;
+/* Set by the Ctrl-C top half, consumed by the console reader in task context. */
+static int g_ctrlc_pending;
+static int g_ctrlc_signalled;
 
 static int uart_task_should_spare(task_t *t)
 {
@@ -58,19 +61,20 @@ static int uart_signal_user_pgid(int pgid, int signum)
     return count;
 }
 
-static void uart_signal_all_user(int signum, int spare_shells)
+static int uart_signal_all_user(int signum, int spare_shells)
 {
+    int count = 0;
     int max_pid = proc_pid_max();
     for (int pid = 1; pid <= max_pid; pid++) {
         task_t *t = proc_find_get(pid);
         if (t && t->pid > 1 && t->pgdir &&
             (!spare_shells || !uart_task_should_spare(t))) {
-            kdebug("[UART-SIG] pid=%d state=%d name=%s\n",
-                   t->pid, t->state, t->name);
             proc_kill(t->pid, signum);
+            count++;
         }
         proc_put(t);
     }
+    return count;
 }
 
 static void uart_dump_tasks(void)
@@ -97,14 +101,55 @@ static void uart_dump_tasks(void)
     spin_unlock_irqrestore(&proc_lock, flags);
 }
 
+/*
+ * CTRL_C_CONTEXT_SPLIT: the two signal walks stay in the top half, because the
+ * foreground process group has to learn about the key while the shell is busy
+ * running a command and therefore nowhere near a console read -- deferring them
+ * would stop Ctrl-C from killing anything.  proc_find_get() takes only pid_lock
+ * and signal delivery from an interrupt is what that path is for.
+ *
+ * The task-table dump is the part that cannot happen here.  uart_dump_tasks()
+ * takes proc_lock with interrupts disabled and then writes one kdebug line per
+ * task out of the same UART whose interrupt is running, so a dump started from
+ * the top half re-enters the console under its own IRQ and can livelock the
+ * console behind the very lock it is printing.  The top half only raises the
+ * flag and wakes the reader; uart_getc() is this driver's only task-context
+ * entry point and does the dump there.
+ */
+static void uart_signal_ctrlc(void)
+{
+    __atomic_store_n(&g_ctrlc_pending, 1, __ATOMIC_RELEASE);
+
+    /* Waking before signalling, not after: where no foreground process group
+     * has been established the walks below SIGINT every user task, init
+     * included, so a reader woken only afterwards has already been killed and
+     * the deferred dump would never run.  Waking first gives the reader a
+     * chance to observe the flag while it is still alive to do so. */
+    proc_wake_q_t wake_q;
+    proc_wake_q_init(&wake_q);
+    uint64_t flags = spin_lock_irqsave(&rx_lock);
+    (void)wait_queue_collect_one(&rx_waiters, 0, PROC_WAKE_EVENT, &wake_q);
+    spin_unlock_irqrestore(&rx_lock, flags);
+    (void)proc_wake_q_flush(&wake_q);
+
+    int pgid = uart_get_foreground_pgid();
+    int hit = uart_signal_user_pgid(pgid, SIGINT);
+    int rest = uart_signal_all_user(SIGINT, hit > 0);
+    __atomic_store_n(&g_ctrlc_signalled, hit + rest, __ATOMIC_RELAXED);
+}
+
+static void uart_service_ctrlc(void)
+{
+    if (!__atomic_exchange_n(&g_ctrlc_pending, 0, __ATOMIC_ACQ_REL))
+        return;
+    int signalled = __atomic_exchange_n(&g_ctrlc_signalled, 0, __ATOMIC_RELAXED);
+    uart_dump_tasks();
+    kdebug("[TTYDBG] Ctrl-C signalled %d task(s)\n", signalled);
+}
+
 static void uart_rx_push(char c) {
     if (c == 0x03) {  // Ctrl-C
-        /* LOCK_ORDER: rx_lock is released before acquiring proc_lock in Ctrl-C path.
-         * dump/signal helpers acquire proc_lock independently. */
-        uart_dump_tasks();
-        int pgid = uart_get_foreground_pgid();
-        int hit = uart_signal_user_pgid(pgid, SIGINT);
-        uart_signal_all_user(SIGINT, hit > 0);
+        uart_signal_ctrlc();
         return;
     }
 
@@ -146,6 +191,8 @@ void uart_putc(char c) {
 // blocking read of one character (yields the CPU if there is no data)
 int uart_getc(void) {
     for (;;) {
+        /* The Ctrl-C dump the top half could not do; see CTRL_C_CONTEXT_SPLIT. */
+        uart_service_ctrlc();
         uint64_t flags = spin_lock_irqsave(&rx_lock);
         if (rx_head != rx_tail) {
             char c = rx_buffer[rx_tail];
@@ -230,6 +277,10 @@ int uart_try_getc(void) {
 }
 
 int uart_has_input(void) {
+    /* Poll() runs in task context too, so it is the second chance to service a
+     * Ctrl-C the reader was not parked for -- a foreground process that never
+     * reads stdin still polls. */
+    uart_service_ctrlc();
     if (current_board && current_board->uart_rx_is_polled) {
         int polled = arch_uart_poll_getc();
         if (polled >= 0)
