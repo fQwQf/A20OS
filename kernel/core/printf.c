@@ -1,6 +1,12 @@
 #include "core/stdio.h"
 #include "core/string.h"
+#include "core/lock.h"
 #include "drivers/char/uart.h"
+
+/* The console lock lives with the ring buffer in kernel/core/klog.c, so
+ * klog_write() and vprintf() cannot splice their output into each other.
+ * Declared here because printf.c must not depend on klog.c's internals. */
+extern spinlock_t klog_console_lock;
 
 static int utoa(uint64_t value, char *buf, int base, int upper) {
     char tmp[32];
@@ -164,11 +170,20 @@ static void vprintf_putc(char c, void *ctx) {
         vc->buf[vc->pos++] = c;
 }
 
+/* Emit len bytes with the console lock already held by the caller. */
+void console_emit_locked(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        uart_putc(s[i]);
+}
+
 void vprintf(const char *fmt, va_list args) {
     vprintf_ctx_t vc = { .pos = 0 };
     do_format(fmt, args, vprintf_putc, &vc);
     vc.buf[vc.pos] = '\0';
-    uart_puts(vc.buf);
+    uint64_t flags = spin_lock_irqsave(&klog_console_lock);
+    console_emit_locked(vc.buf, (size_t)vc.pos);
+    spin_unlock_irqrestore(&klog_console_lock, flags);
 }
 
 void printf(const char *fmt, ...) {
