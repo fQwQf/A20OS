@@ -1616,6 +1616,44 @@ static int audit_pte_present(pt_root_t *pgdir, vaddr_t addr)
     pte_t e = table[arch_pt_vpn(addr, 0)];
     return (e & PTE_V) && arch_pte_is_leaf(e);
 }
+
+/* Is `cls` a class the VMA could legitimately have produced?
+ *
+ * This is deliberately a compatibility predicate and not an equality test.
+ * A MAP_PRIVATE file page that has been written to is class FILE_PRIVATE
+ * before the COW break and ANON_MAPPED after it, and both are correct at
+ * different times; the same holds for a VMO page and for a page that fork
+ * made shared.  Demanding equality would fire on all of those.
+ *
+ * What it does rule out is the case where the two representations disagree
+ * about something coherence depends on.  The load-bearing rule is MAP_SHARED
+ * file: there the leaf is the canonical page-cache frame and is written in
+ * place, never copied, so an anonymous class in that VMA means a write would
+ * go to a private frame while the file's readers keep the cache frame.  The
+ * symmetric rule matters just as much -- a FILE_* class inside a VMA with no
+ * file behind it means a private frame is being taken for a cache page.
+ */
+static int audit_class_compatible(uint8_t cls, const vm_area_t *v)
+{
+    /* A swapped-out page has no class to speak of yet; where its contents
+     * live is a separate question, and P7 is the stage that answers it. */
+    if (cls == MM_ST_SWAPPED)
+        return 1;
+
+    int file_shared = (v->vm_flags & VM_FILE) && (v->vm_flags & VM_SHARED);
+    int file_private = (v->vm_flags & VM_FILE) && !(v->vm_flags & VM_SHARED);
+    int vmo = (v->vm_flags & VM_VMO) != 0;
+
+    if (file_shared)
+        return cls == MM_ST_FILE_SHARED;
+    if (file_private)
+        return cls == MM_ST_FILE_PRIVATE || cls == MM_ST_ANON_MAPPED ||
+               cls == MM_ST_ANON_SHARED;
+    if (vmo)
+        return cls == MM_ST_VMO || cls == MM_ST_ANON_MAPPED ||
+               cls == MM_ST_ANON_SHARED;
+    return cls == MM_ST_ANON_MAPPED || cls == MM_ST_ANON_SHARED;
+}
 static uint64_t audit_table(pte_t *table, int level, int is_root,
                             mm_pt_audit_report_t *rep, mm_struct_t *mm,
                             vaddr_t base, int check_vma)
@@ -1704,6 +1742,23 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                     if (!rep->vmai_mismatch)
                         rep->vmai_bad_va = va;
                     rep->vmai_mismatch++;
+                } else if (present && !audit_class_compatible(cls, v)) {
+                    /* The two representations agree that something is mapped
+                     * here but not on WHAT it is.  This is the counter P6 is
+                     * gated on: switching fault dispatch to the status is only
+                     * sound while this is 0, because dispatch asks "anonymous
+                     * or file?" and today it gets the right answer from the
+                     * VMA while the status is free to be wrong about it.
+                     *
+                     * Restricted to present leaves on purpose: an absent page
+                     * carrying the wrong class is a separate, known gap (an
+                     * un-faulted file mapping has no class at all), and folding
+                     * it in here would blur two different things. */
+                    if (!rep->cls_mismatch) {
+                        rep->cls_bad_va = va;
+                        rep->cls_bad_class = cls;
+                    }
+                    rep->cls_mismatch++;
                 }
             }
         }

@@ -415,7 +415,7 @@ CASES: dict[str, dict] = {
             # --wide-cursor-only exits after this phase, so MM_STRESS: PASS is
             # not printed and must not be expected here.
             'MM_WIDE_CURSOR: PASS',
-            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 safe=0',
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0',
             # Non-vacuity for the status fast path, asserted rather than assumed.
             # This gate is the only thing standing between "green" and "the fast
             # path never ran": the workload exits without printing fault counters,
