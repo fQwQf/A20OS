@@ -64,7 +64,3 @@ pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags) {
         flags &= ~(uint64_t)PTE_COW;
     return flags;
 }
-
-pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags) {
-    return pte_flags | PTE_W | PTE_D;
-}
