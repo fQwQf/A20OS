@@ -299,6 +299,39 @@ static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
     return 0;
 }
 
+/*
+ * Devices the board bound by itself still have to enter the device model.
+ * mount_setup_block_device() and driver_progress_class() both resolve devices
+ * through device_find_by_class(), so a transport that only exists inside this
+ * driver is invisible to the whole storage stack -- which is how pSeries
+ * booted with its disks bound but nothing mounted at /bin.
+ *
+ * The records are busless on purpose: driver_matches_device() only lets a
+ * busless driver claim a busless device through its match() callback, and
+ * virtio_blk_driver declares none, so publishing an already-initialised
+ * instance cannot re-run virtio_blk_driver_probe() over it.
+ */
+static driver_t virtio_blk_driver;
+static device_t g_standalone_blk_devs[VIRTIO_MAX_DEVS];
+static char g_standalone_blk_names[VIRTIO_MAX_DEVS][16];
+
+static void virtio_blk_publish_standalone(int idx, virtio_blk_inst_t *inst) {
+    snprintf(g_standalone_blk_names[idx],
+             sizeof(g_standalone_blk_names[idx]), "virtio-blk%d", idx);
+    device_t *dev = &g_standalone_blk_devs[idx];
+    memset(dev, 0, sizeof(*dev));
+    dev->name        = g_standalone_blk_names[idx];
+    dev->drv         = &virtio_blk_driver;
+    dev->drv_priv    = inst;
+    dev->state       = DEV_STATE_PROBED;
+    if (device_register(dev) != 0) {
+        kerr("[VIRTIO-BLK] could not publish '%s' to the device model\n",
+             g_standalone_blk_names[idx]);
+        dev->drv = NULL;
+        dev->drv_priv = NULL;
+    }
+}
+
 int virtio_blk_init(void) {
     if (g_ninst >= VIRTIO_MAX_DEVS) {
         printf("[VIRTIO] Too many devices (max %d)\n", VIRTIO_MAX_DEVS);
@@ -307,17 +340,23 @@ int virtio_blk_init(void) {
 
     int idx = g_ninst;
     virtio_blk_inst_t *inst = &g_insts[idx];
+    memset(inst, 0, sizeof(*inst));
+    inst->vt.irq = -1;
 
-    if (arch_virtio_blk_probe(idx, &inst->vt) != 0) {
-        printf("[VIRTIO%d] Probe failed\n", idx);
+    /*
+     * No device at this index.  Every arch probe walks a sparse slot list,
+     * so -1 here is the normal end-of-list signal the board enumeration
+     * loops stop on, not a fault worth logging once per absent device.
+     */
+    if (arch_virtio_blk_probe(idx, &inst->vt) != 0)
         return -1;
-    }
 
     inst->slot = idx;
     if (virtio_blk_init_instance(inst) != 0)
         return -1;
 
     g_ninst++;
+    virtio_blk_publish_standalone(idx, inst);
     return 0;
 }
 

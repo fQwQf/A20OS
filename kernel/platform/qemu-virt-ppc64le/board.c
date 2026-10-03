@@ -1,7 +1,10 @@
 #ifdef CONFIG_BOARD_QEMU_VIRT_PPC64LE
 
 #include "drivers/core/driver_core.h"
+#include "drivers/block/virtio_blk.h"
+#include "drivers/net/virtio_net.h"
 #include "core/arch.h"
+#include "core/stdio.h"
 #include "core/timer.h"
 
 static void ppc64le_irqchip_init(void) {
@@ -64,11 +67,19 @@ static void ppc64le_enumerate_devices(void) {
      * transports directly (arch_virtio_blk_probe/net_probe in
      * kernel/arch/ppc64le/platform/virtio_probe.c) so mount_block_devices()
      * finds the /bin and /extra disks.
+     *
+     * Both probes report -1 once the slot list runs out, so keep pulling
+     * until they do instead of assuming a device count.  A gate run attaches
+     * a FAT32 disk for /bin and an ext4 disk for /extra; binding only the
+     * first left the ext4 side unmounted and the rootfs unbootable.
      */
-    extern int virtio_blk_init(void);
-    extern int virtio_net_init(void);
-    (void)virtio_blk_init();
-    (void)virtio_net_init();
+    int blk = 0;
+    while (blk < VIRTIO_MAX_DEVS && virtio_blk_init() == 0)
+        blk++;
+    int net = 0;
+    while (net < VIRTIO_NET_MAX_DEVS && virtio_net_init() == 0)
+        net++;
+    printf("[PCI] pseries virtio transports: %d block, %d network\n", blk, net);
 }
 
 static const board_config_t qemu_virt_ppc64le = {
