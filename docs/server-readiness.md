@@ -528,7 +528,8 @@ conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 
 ### server world 的实测状态（2026-10）
 
-`packages/world/server.world` 此前标注为"从未执行过组装"。现已实测到包装配这一步是通的：
+`packages/world/server.world` 此前标注为"从未执行过组装"。现已推进到**镜像能装出来、
+并且在 guest 内启动到 shell**：
 
 ```
 make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
@@ -536,22 +537,85 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
      image-world PKG_WORLD=server
 ```
 
-23 个 Alpine 包（busybox、dropbear、chrony、ca-certificates 及依赖，14.6 MiB）全部
-下载并装入 staging，**world 清单 → apk 求解 → overlay 装配**这条链路成立。
+22 个 Alpine 包（busybox、dropbear、chrony、ca-certificates 及依赖）全部装入 staging
+并被 `mkfs.ext4` 打包；把这张镜像作为第二块 virtio-blk 盘挂上启动后，stage-2 init
+正常 chroot，dropbear 打印主机密钥。**world 清单 → apk 求解 → overlay 装配 → mkfs
+→ chroot** 整条链路成立。
 
 两处环境相关的坑，都不是仓库逻辑问题：
 
 - 默认 USTC 镜像源在本环境返回 **403**，需换官方源；`ALPINE_MIRROR_ROOT` 在
   `tools/targets-rootfs.mk` 中是 `?=` 赋值，可从命令行覆盖。
-- 最后一步 `mkfs.ext4 -d` 报 `do_write_internal: 权限不够 while opening "bbsuid"`。
-  busybox-suid 的 `bbsuid` 需要 `mknod`，而 fakeroot 只伪造属主、不提供
-  `CAP_MKNOD`。单独执行 `fakeroot chown 101:101` 正常，可确认不是 fakeroot 本身坏了。
-  有 root 的宿主上该步可通过；无特权环境下从 world 去掉 `busybox-suid` 即可跑通。
+- `mkfs.ext4 -d` 曾报 `do_write_internal: 权限不够 while opening "bbsuid"`。这是
+  `busybox-suid` 的 `bbsuid` 需要 `mknod`、而 fakeroot 只伪造属主不提供 `CAP_MKNOD`
+  所致（单独 `fakeroot chown 101:101` 正常，可确认不是 fakeroot 本身坏了）。已从
+  world 清单去掉 `busybox-suid` 绕开，见 `6a1ab8f8`；宿主上有 root 时该包可以放回。
 
-因此 **guest 内运行与 SSH 登录的端到端验证仍未完成**，仍属待办。
+#### 让这张镜像真的能被登进去，需要两件事
+
+1. **镜像里必须有认证路径。** 镜像不含密码——密码一旦烤进镜像就等于永久泄露并随镜像
+   复制扩散——所以只能烤公钥。新增 `SSH_PUBKEY`：
+
+   ```
+   make image-world PKG_WORLD=server SSH_PUBKEY=~/.ssh/id_ed25519.pub
+   ```
+
+   见 `6702613c`。不给 `SSH_PUBKEY` 时镜像不带任何 `authorized_keys`，dropbear 照常
+   启动，但没人能登进去。
+
+2. **内核命令行必须选 `a20.tcpmode=lwip`。** 默认的 `tcpmode=fast` 里 `listen()`
+   直接丢掉已绑定的 pcb、从不把 listener 放进 lwIP，于是该端口在协议栈里根本不存在，
+   slirp 发来的 SYN 被回 RST。这与认证无关，发生在认证之前。
+
+`tcpmode=lwip` 确实修好了这一层：`/proc/net/status` 里 `tcp_listen=1`（真实 LISTEN pcb
+存在），且 `smoke-net-accept` 的 lwip 那一趟 **PASS**
+（`TCP_ACCEPT_TEST: PASS port=12346`，`net_accept_staged=1`、`net_accept_queued=1`）。
+
+#### 仍然挡在 SSH 端到端前面的东西
+
+- **入站连接能被 accept，但随即 double free 打死内核。** 这是当前挡在 SSH 面前的那一条。
+  最小复现（server world，`a20.tcpmode=lwip`，宿主经 hostfwd 连入）：
+
+  ```
+  # guest 内
+  nc -l -p 8080 0.0.0.0 < /dev/null
+  # 宿主
+  bash -c 'exec 3<>/dev/tcp/127.0.0.1/2234'
+  ```
+
+  握手是通的——宿主侧 `connect()` 返回成功，lwIP 的 LISTEN 查找命中、`tcp_listen_input()`
+  也确实执行了（在 `tcp_in.c` 的 LISTEN 分支与 `tcp_listen_input()` 入口各加一行
+  `putchar` 调试即可看到 `dest=8080` 命中非空指针）。随后立刻：
+
+  ```
+  ========== KERNEL PANIC ==========
+  lwIP assertion failed: mem_free: illegal memory: double free
+  [PANIC] task: pid=19 name=nc
+  [PANIC] caller=mem_free+0x38c
+  ```
+
+  `mem_free` 这条断言只在 `mem.c:639` 命中，即"该块已被标记为未使用"；而本分支
+  `MEMP_MEM_MALLOC=1`，memp 各池的元素都出自 `mem_malloc`，所以这等价于**某个 memp
+  元素被释放了两次**。`lwip_tcp_recv_cb()` 与 `bh_stage_payload()` 看着是对的
+  （TCP 段恒走内联拷贝分支，有 `_Static_assert` 兜底），所以问题落在 accept 路径
+  自己的 pcb 归属上：`lwip_tcp_accept_cb()` 把新 pcb 存进 accept stage、交给 bottom
+  half 再转成 child socket，中途任何一次 `tcp_abort()` 与随后的 `tcp_close()`/
+  `net_socket_free()` 叠加就会走到这里。
+
+  早先一版记录曾把这条写成"NIC 入站握手没完成"，那是**测试自身打错了端口**：
+  `hostfwd=...:2234-10.0.2.15:8080` 转发的是 guest 的 **8080**，而当时监听的是 8090。
+  打到 8080 上之后握手即告完成，暴露出来的才是上面这个 double free。
+
+- **`smoke-net-accept` 门禁是红的，红在 fast 模式而不是 lwip 模式**：
+  `TCP_ACCEPT_TEST: FAIL port=12347 (client=-1)`，即 fast 模式下 loopback 的
+  `connect()` 直接失败。这一条**在 `main`（5c7c6d48）上逐字复现**——同一个 worktree
+  外的 detached 检出跑同一门禁，同样是 `passes=1`、同样 12346 过 12347 挂——所以它是
+  既有问题，不是本分支引入的回归。两种模式本应给出同一个可观测结果，这条仍待修。
+
+以上两条都在网络 lane 的 `tcpmode` / lwIP 职责范围内，本分支（kernel-core-scalability）
+不再往里扩，复现步骤已记录在此供该 lane 直接接手。
 
 ## 九、推荐的第一批动作
-
 按「改动小、风险低、避免真实事故」排序：
 
 1. 补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。
