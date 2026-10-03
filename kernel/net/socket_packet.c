@@ -8,6 +8,7 @@
  * bottom half, which runs with g_net_lock only.
  */
 #include "net/socket_internal.h"
+#include "net/socket_side.h"
 #include "net/lwip_stack.h"
 #include "core/errno.h"
 #include "core/string.h"
@@ -31,6 +32,61 @@ static spinlock_t g_pkt_ring_lock = SPINLOCK_INIT;
 static volatile int g_pkt_pending;
 static volatile unsigned g_pkt_drops;
 
+/*
+ * Number of AF_PACKET sockets currently holding a bind filter, and the slot
+ * bitmap that makes the accounting idempotent.
+ *
+ * Capturing costs a fixed-size copy of every frame on every interface plus a
+ * walk of the whole registry per delivered frame, and on a host that never
+ * opened a packet socket all of it is thrown away -- the ring is 16 frames
+ * deep, so a burst overflows it and the frames are dropped having already
+ * been copied.  A census turns both of those into a single atomic load.
+ *
+ * The count is read on the receive path with g_lwip_lock held and is the only
+ * lock-free reader, so it is published with a release and sampled with an
+ * acquire: a bind that has returned is visible to every later receive.  A
+ * receive that raced a close either captured a frame whose socket is now gone
+ * -- delivered to nobody, the same outcome as the drop it replaces -- or
+ * missed a frame that arrived before the bind completed.  Neither loses a
+ * frame the socket was entitled to.
+ */
+static volatile int g_pkt_bound_count;
+static uint32_t g_pkt_bound_slots[(NET_MAX_SOCKETS + 31) / 32];
+
+int net_packet_bound_count(void)
+{
+    return __atomic_load_n(&g_pkt_bound_count, __ATOMIC_ACQUIRE);
+}
+
+/* Both of these run under g_net_lock, so the bitmap needs no lock of its own;
+ * it exists to keep the count balanced when the release side cannot tell
+ * whether the acquire side ran. */
+void net_packet_bound_acquire(net_socket_t *s)
+{
+    int idx = s ? s->reg_idx : -1;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    int w = idx / 32;
+    uint32_t bit = 1U << (idx % 32);
+    if (g_pkt_bound_slots[w] & bit)
+        return;
+    g_pkt_bound_slots[w] |= bit;
+    __atomic_fetch_add(&g_pkt_bound_count, 1, __ATOMIC_ACQ_REL);
+}
+
+void net_packet_bound_release(net_socket_t *s)
+{
+    int idx = s ? s->reg_idx : -1;
+    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+        return;
+    int w = idx / 32;
+    uint32_t bit = 1U << (idx % 32);
+    if (!(g_pkt_bound_slots[w] & bit))
+        return;
+    g_pkt_bound_slots[w] &= ~bit;
+    __atomic_fetch_sub(&g_pkt_bound_count, 1, __ATOMIC_ACQ_REL);
+}
+
 int net_packet_rx_pending(void)
 {
     return __atomic_load_n(&g_pkt_pending, __ATOMIC_ACQUIRE) != 0;
@@ -39,6 +95,8 @@ int net_packet_rx_pending(void)
 void net_packet_rx_defer(unsigned ifindex, const uint8_t *frame, size_t len)
 {
     if (!frame || len == 0)
+        return;
+    if (!net_packet_bound_count())
         return;
     if (len > NET_PACKET_MAX_FRAME)
         len = NET_PACKET_MAX_FRAME;
@@ -63,6 +121,11 @@ static void net_packet_deliver_locked(const net_packet_slot_t *slot,
                                       proc_wake_q_t *wake_q)
 {
     if (slot->len < ETH_HLEN)
+        return;
+    /* The ring can still hold frames captured for a socket that has since
+     * closed, so the census is re-read here rather than trusted from the
+     * capture side. */
+    if (!net_packet_bound_count())
         return;
     uint16_t ethertype = (uint16_t)((slot->frame[12] << 8) | slot->frame[13]);
 
@@ -166,6 +229,9 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
                                                         : ll->sll_halen;
     memcpy(s->pkt_haddr, ll->sll_addr, sizeof(s->pkt_haddr));
     s->pkt_bound = 1;
+    /* Published last, under the same lock the release side takes, so a bind
+     * that returns is always counted and a rebind cannot double-count. */
+    net_packet_bound_acquire(s);
     memcpy(s->local, addr, addrlen);
     s->local_len = addrlen;
     s->bound = 1;

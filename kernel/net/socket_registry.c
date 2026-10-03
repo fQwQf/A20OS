@@ -1,4 +1,5 @@
 #include "net/socket_internal.h"
+#include "net/socket_side.h"
 
 #include "core/string.h"
 
@@ -80,6 +81,9 @@ void net_unregister_socket_locked(net_socket_t *s) {
      * left to its current owner.
      */
     int i = s->reg_idx;
+    /* Released while the slot is still this socket's, because that is the key
+     * the packet census is indexed by. */
+    net_packet_bound_release(s);
     if (i >= 0 && i < NET_MAX_SOCKETS && g_sockets[i] == s) {
         g_sockets[i] = NULL;
         net_bh_slot_clear(i);
