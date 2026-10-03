@@ -148,7 +148,7 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
             if (allocated != 0) {
                 size_t grown = 0;
                 while (grown < allocated) {
-                    int gr = ext4_block_grow(fc->sb, inode,
+                    int gr = ext4_block_grow(fc->sb, fc->inode_num, inode,
                                              lblk + (uint32_t)grown,
                                              first_phys + grown);
                     if (gr < 0)
@@ -175,7 +175,7 @@ int ext4_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (!phys) {
             uint64_t nb = ext4_alloc_block(fc->sb);
             if (!nb) break;
-            int gr = ext4_block_grow(fc->sb, inode, lblk, nb);
+            int gr = ext4_block_grow(fc->sb, fc->inode_num, inode, lblk, nb);
             if (gr < 0) { ext4_free_block(fc->sb, nb); break; }
             phys = nb;
             fc->ext_valid = 0;
