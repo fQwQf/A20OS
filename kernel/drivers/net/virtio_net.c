@@ -284,6 +284,34 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
 
 static int virtio_net_irq_handler(int irq, void *priv);
 
+/*
+ * Publish a board-bound instance into the device model so the networking
+ * stack can find it by class, the same way virtio_blk_init() publishes its
+ * block devices.  Busless records never match a busless driver without a
+ * match() callback, and virtio_net_driver declares none, so this cannot
+ * re-run virtio_net_driver_probe() over an instance that is already up.
+ */
+static driver_t virtio_net_driver;
+static device_t g_standalone_net_devs[VIRTIO_NET_MAX_DEVS];
+static char g_standalone_net_names[VIRTIO_NET_MAX_DEVS][16];
+
+static void virtio_net_publish_standalone(int idx, virtio_net_inst_t *net) {
+    snprintf(g_standalone_net_names[idx],
+             sizeof(g_standalone_net_names[idx]), "virtio-net%d", idx);
+    device_t *dev = &g_standalone_net_devs[idx];
+    memset(dev, 0, sizeof(*dev));
+    dev->name     = g_standalone_net_names[idx];
+    dev->drv      = &virtio_net_driver;
+    dev->drv_priv = net;
+    dev->state    = DEV_STATE_PROBED;
+    if (device_register(dev) != 0) {
+        kerr("[VIRTIO-NET] could not publish '%s' to the device model\n",
+             g_standalone_net_names[idx]);
+        dev->drv = NULL;
+        dev->drv_priv = NULL;
+    }
+}
+
 int virtio_net_init(void) {
     if (g_nnet >= VIRTIO_NET_MAX_DEVS)
         return -1;
@@ -293,6 +321,7 @@ int virtio_net_init(void) {
     memset(net, 0, sizeof(*net));
     net->slot = idx;
     spin_init(&net->lock);
+    net->vt.irq = -1;
 
     if (arch_virtio_net_probe(idx, &net->vt) != 0)
         return -1;
@@ -303,11 +332,18 @@ int virtio_net_init(void) {
         return -1;
 
     if (net->vt.irq >= 0) {
-        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) != 0)
+        if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler, 0, net) != 0) {
             printf("[VIRTIO-NET%d] Failed to register IRQ %d\n", idx, net->vt.irq);
+            net->vt.irq = -1;
+        } else {
+            /* Without this the class interface keeps reporting a polled
+             * receive path for a device that is actually IRQ-driven. */
+            net->irq_registered = 1;
+        }
     }
 
     g_nnet++;
+    virtio_net_publish_standalone(idx, net);
     return 0;
 }
 
