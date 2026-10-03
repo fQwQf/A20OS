@@ -61,13 +61,17 @@ FEED_DELAY = 30
 
 AUDIT_RE = re.compile(
     r"\[MM-ASM\] pt_pages=(\d+) entries=(\d+) missing_meta=(\d+) present=(\d+) "
-    r"absent=(\d+) prot=(\d+) cow=(\d+) vma=(\d+) vmai=(\d+) safe=(\d+) "
-    r"anon_virt=(\d+)"
+    r"absent=(\d+) prot=(\d+) cow=(\d+) vma=(\d+) vmai=(\d+) cls=(\d+) "
+    r"safe=(\d+) anon_virt=(\d+)"
 )
 AUDIT_FIELDS = [
     "pt_pages", "entries", "missing_meta", "present", "absent", "prot",
-    "cow", "vma", "vmai", "safe", "anon_virt",
+    "cow", "vma", "vmai", "cls", "safe", "anon_virt",
 ]
+# Fields that are counts of pages and must be 0.  pt_pages and entries are
+# totals, and anon_virt is the on-demand-paging state the model is built on --
+# none of them is a mismatch.
+NOT_A_MISMATCH = ("pt_pages", "entries", "anon_virt")
 
 
 def log(msg: str) -> None:
@@ -179,12 +183,12 @@ def verdict(log_path: str) -> int:
     else:
         counts = dict(zip(AUDIT_FIELDS, (int(g) for g in m.groups())))
         bad = {k: v for k, v in counts.items()
-               if k not in ("pt_pages", "entries", "anon_virt") and v != 0}
+               if k not in NOT_A_MISMATCH and v != 0}
         if bad:
             ok = False
             log(f"audit: DIRTY {bad}")
             for line in text.splitlines():
-                if "first vma_mismatch" in line or "first vmai_mismatch" in line:
+                if "first " in line and "mismatch" in line:
                     log("  " + line.strip())
         else:
             log(f"audit: clean ({counts['pt_pages']} PT pages, "
