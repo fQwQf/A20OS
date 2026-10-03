@@ -184,7 +184,7 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
 | `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
 | `deploy` | 需要 `[target]`，并且**有东西可以放到板子上**：要么 `boot_media` + `media_device` 配对，要么 `[handoff].commands`（无块驱动的板走这条路）。有 `[flash]` 则先烧录，然后写启动介质或打印 handoff 命令，最后同 `console` 验证 |
-| `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（无块驱动的板，产出 handoff 目录而非可写镜像） |
+| `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（无块驱动的板，产出 handoff 目录而非可写镜像） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
@@ -605,6 +605,7 @@ world_size_mb = 4096
 | `make run-stm32f103-qemu` | `tools/a20 run stm32f103-qemu` |
 | `make flash-stm32f103-xuanwu` | `tools/a20 flash stm32f103-xuanwu` |
 | `make vbox-iso-x86_64` | `tools/a20 package vbox-iso-x86_64` |
+| `make x86_64-uefi-disk` / `pc-rescue-disk` | `tools/a20 package vbox-x86_64` / `vbox-disk-x86_64` |
 | `make vbox-image-aarch64` / `vbox-text-image-aarch64` | `tools/a20 package vbox-aarch64` / `vbox-aarch64-text` |
 | `make vf2-minimal` / `vf2-sdcard` | `tools/a20 package vf2-minimal` / `vf2-sdcard` |
 | `make release-rv` / `release-la` | `tools/a20 package release-riscv64` / `release-loongarch64` |
