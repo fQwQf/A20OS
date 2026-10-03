@@ -66,10 +66,13 @@ int64_t sys_copy_file_range(int fd_in, long *off_in, int fd_out, long *off_out, 
     if (in_gfd < 0) return in_gfd;
     if (out_gfd < 0) return out_gfd;
     long in_off = 0, out_off = 0;
-    long in_saved = vfs_lseek((int)in_gfd, 0, SEEK_CUR);
-    long out_saved = vfs_lseek((int)out_gfd, 0, SEEK_CUR);
+    /* Validate the caller's offset pointers before seeking anything: a bad
+     * pointer has to fail with both descriptions still where they were,
+     * which is what Linux guarantees. */
     if (off_in && copy_from_user(&in_off, off_in, sizeof(in_off)) < 0) return -EFAULT;
     if (off_out && copy_from_user(&out_off, off_out, sizeof(out_off)) < 0) return -EFAULT;
+    long in_saved = vfs_lseek((int)in_gfd, 0, SEEK_CUR);
+    long out_saved = vfs_lseek((int)out_gfd, 0, SEEK_CUR);
     if (off_in) vfs_lseek((int)in_gfd, in_off, SEEK_SET);
     if (off_out) vfs_lseek((int)out_gfd, out_off, SEEK_SET);
     char *buf = proc_scratch_buffer(LINUX_IO_CHUNK_SIZE);
