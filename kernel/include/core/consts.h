@@ -69,16 +69,12 @@
 
 #define EXT4_SUPER_MAGIC  0x4006
 
-#define MMAP_BASE_ADDR    0x60000000UL
-#define USER_STACK_TOP    0x3FFFF000UL
-#define USER_DYN_BASE     0x10000UL
-#define USER_TLS_BASE     0x3E000000UL
-#define INTERP_BASE_ADDR  0x40000000UL
-
-/* Lower bound for user stack growth and randomisation: the vDSO/vvar area is
- * pinned at 0x3F7F9000-0x3F800000 (see mm/vdso_layout.h), and neither the stack
- * VMA nor stack growth may cross this floor. */
-#define USER_STACK_FLOOR  0x3F800000UL
+/* User virtual-address layout lives in mm/user_layout.h.  It used to be a single
+ * global set defined here, which quietly assumed every architecture keeps its
+ * user space in the bottom 4 GiB; aarch64, x86_64 and LoongArch all have wider
+ * virtual addresses than that.  Nothing about the values changed -- they are the
+ * same addresses -- but the layout is now per-architecture and can differ. */
+#include "mm/user_layout.h"
 
 #define PIPE_BUF_SIZE 4096
 #define FIRST_USER_FD 3

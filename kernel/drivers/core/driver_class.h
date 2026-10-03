@@ -74,6 +74,34 @@ typedef struct block_dev_ops {
  *
  * Used by: lwIP network stack / socket layer
  * ============================================================ */
+/* Driver-level counters, distinct from the stack's own per-netif counts in
+ * a20_lwip_netif_state_t.  The stack counts what lwIP was handed; these count
+ * what the device actually moved, so the two diverging is what localizes a
+ * loss to the window between the ring and the protocol stack.
+ *
+ * Deliberately not a function pointer in net_dev_ops_t: that vtable is shared
+ * with loadable .a20drv modules, so appending a field makes the kernel read
+ * one field past the end of any module built against an older header, and then
+ * call it.  Appended fields therefore require bumping A20_DRIVER_ABI, which
+ * drvmod_load() now rejects on (a20_driver_descriptor_sane()), so a stale
+ * module fails to load instead of being misread.  A weak symbol is a separate
+ * mechanism and remains absent rather than wrong.
+ *
+ * Known limit: a weak symbol only resolves when the driver is linked into the
+ * kernel, which today means the embedded profile (virtio_net.c is in
+ * EMBEDDED_DEVICE_DRIVER_SRCS).  Under DRIVER_DEPLOYMENT=generic the driver is
+ * a .a20drv package and the kernel cannot call into it by name, so the net_dev
+ * report omits the driver line rather than showing zeros.  Closing that needs
+ * either a size-checked vtable registration or an ABI version in the module
+ * descriptor that drvmod_load() validates -- neither is a driver-local change.
+ */
+typedef struct net_dev_stats {
+    uint64_t rx_packets;
+    uint64_t rx_drops;
+    uint64_t tx_packets;
+    uint64_t tx_drops;
+} net_dev_stats_t;
+
 typedef struct net_dev_ops {
     int            (*open)(struct device *dev);
     int            (*stop)(struct device *dev);

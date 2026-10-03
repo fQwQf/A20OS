@@ -49,7 +49,7 @@
 - [drivers/classes/display.md](drivers/classes/display.md)：Framebuffer 与显示设备
 - [graphics/3d-graphics.md](graphics/3d-graphics.md)：virtio-gpu 3D 图形加速栈的原理、内核接口与当前状态清单
 - [graphics/gpu-3d-roadmap.md](graphics/gpu-3d-roadmap.md)：让 stock Mesa 挂上、把像素送上屏的路线图（VIRTGPU UAPI、ABI 门禁、排序论证、非目标）
-- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_preflight.py`（启动前资源门禁）
+- [graphics/host-tools.md](graphics/host-tools.md)：宿主侧三件套：`tools/check-drm-abi.sh`（DRM UAPI 门禁）、`tools/build-virglrenderer.sh`（需 root，**尚未运行**）、`tools/a20_resource.py`（启动前资源门禁）
 - [graphics/real-hardware-gpu.md](graphics/real-hardware-gpu.md)：真机 GPU 的现实边界：scanout（2–4 周）与 3D 加速（不可行）是两件事，附实测驱动规模与逐 SoC 结论
 - [graphics/xfce-wayland-adaptation.md](graphics/xfce-wayland-adaptation.md)：**已完全退役**（描述已删除的 `user/wayland/` 栈），仅供追溯
 - [drivers/classes/audio.md](drivers/classes/audio.md)：通用音频 UAPI、HDA、virtio-sound 与 PC Speaker
@@ -57,6 +57,9 @@
 ## 平台移植与运行
 
 - [platforms/porting-guide.md](platforms/porting-guide.md)：架构与平台边界、SMP hooks 和 bring-up 验收
+- [platforms/licheerv-nano.md](platforms/licheerv-nano.md)、[platforms/milk-v-duo.md](platforms/milk-v-duo.md)、[platforms/rk3328.md](platforms/rk3328.md)、[platforms/sun50i-h616.md](platforms/sun50i-h616.md)、[platforms/x86_64-pc.md](platforms/x86_64-pc.md)：廉价 SBC / 瘦客户机目标（build-verified，尚未上板验证）
+- `tools/a20 boards`：列出树里全部板子及其架构、SMP、链接脚本情况
+- [platforms/not-yet-ported.md](platforms/not-yet-ported.md)：Kendryte K230 与 Allwinner D1s/F133 的已核实事实与阻塞点（K230 的 PLIC 在 60 GiB，需要启动页表第三个 MMIO 槽；D1s 缺 `SOC_PERIPHERAL_IRQ` 偏移与 DDR 基址的可引用出处）
 - [platforms/physical-boards.md](platforms/physical-boards.md)：VisionFive 2 与 LS2K1000 板级事实与驱动边界
 - [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md)：VisionFive 2 从源码构建启动链与 Flash 上板流程
 - [platforms/loongarch32.md](platforms/loongarch32.md)：LoongArch32（LA32R / NaiLoong Core）移植与验证
@@ -87,7 +90,8 @@
 - [native-abi/05-ipc.md](native-abi/05-ipc.md)：Channel 与 Event Queue 机制
 - [fs/vfs-edge-semantics.md](fs/vfs-edge-semantics.md)：VFS 边界语义
 - [net/network-lock-contract.md](net/network-lock-contract.md)：网络栈锁契约
-- [net/network-config-design.md](net/network-config-design.md)：网络配置设计
+- [net/network-config-design.md](net/network-config-design.md)：网络配置设计（`a20.*` 键、`a20.tcpmode` 两档模式、运行时控制面）
+- [net/net-lanes.md](net/net-lanes.md)：网络 lane 设计与阶段顺序（阶段 A/B 已落地；含缓冲改造被锁契约挡住的原因）
 
 ### Linux ABI 兼容层
 

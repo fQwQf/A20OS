@@ -55,6 +55,53 @@ vbox-text-image-aarch64: ; tools/a20 package vbox-aarch64-text
 
 _vbox_iso_x86_64_impl: dev-build
 	tools/mk_grub_iso.sh $(KERNEL_ELF) $(BUILD_DIR)/a20os-x86_64.iso
+
+# The same ISO at a path an instance can name in [target].boot_media.  The
+# VirtualBox one lives under the per-build directory, whose name carries the arch,
+# board and variant, so it cannot be written by a manifest that has to commit to
+# one path.  This is the whole deployment route for a thin client: dd this to a
+# USB stick and boot it.
+pc-rescue-iso: dev-build
+	@mkdir -p build/x86_64-pc
+	tools/mk_grub_iso.sh $(KERNEL_ELF) build/x86_64-pc/a20os-rescue.iso
+	@echo "rescue ISO ready: build/x86_64-pc/a20os-rescue.iso"
+
+# The same content as the ISO, on a real GPT disk, so a VM or a machine boots it
+# as a hard disk instead of as optical media.  This is the shape the aarch64
+# VirtualBox image already has, so both architectures hand an operator one disk
+# to attach rather than one thing that has to be mounted first.
+#
+# GRUB rather than BOOTX64.EFI, because GRUB's multiboot v1 module starts from
+# BIOS or UEFI alike.  The UEFI disk below is the better artifact where it can
+# be used -- its ESP hands the kernel the ACPI RSDP that GRUB 2.12 drops -- but
+# it is built for the qemu-virt board, so pc-rescue-disk stays the generic
+# thin-client route described in docs/platforms/x86_64-pc.md.
+pc-rescue-disk: dev-build
+	@mkdir -p build/x86_64-pc
+	tools/mk_grub_disk_image.sh \
+		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(FAT32_IMG)
+	@echo "rescue disk ready: build/x86_64-pc/a20os-rescue-disk.img"
+
+# The BOOTX64.EFI disk at a path an instance can name in [target].boot_media.
+# $(VBOX_X86_64_IMG) alone cannot be written from a manifest, because it lands
+# under .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT) and that name varies
+# with the build.  Staging it here is what lets instances/vbox-x86_64.toml
+# deploy the disk its own comment describes, rather than a GRUB one.
+x86_64-uefi-disk: $(VBOX_X86_64_IMG)
+	@mkdir -p build/x86_64-pc
+	cp -f $(VBOX_X86_64_IMG) build/x86_64-pc/a20os-uefi-disk.img
+	@echo "UEFI disk ready: build/x86_64-pc/a20os-uefi-disk.img"
+
+# A board with no block driver has no medium to write, so its artifact is the
+# kernel plus the commands that hand it to the boot chain already on the board.
+# The load address is read back out of the ELF by the script, so a board that
+# relocates its image needs no entry here.
+kernel-bundle: dev-build
+	@mkdir -p build/$(BOARD)
+	READELF="$(READELF)" tools/mk_kernel_bundle.sh \
+		$(KERNEL_ELF) $(KERNEL_BIN) build/$(BOARD)/handoff $(BOARD)
+_x86_64_uefi_disk_impl: $(VBOX_X86_64_IMG)
+	@echo "VirtualBox x86_64 UEFI disk ready: $(VBOX_X86_64_IMG)"
 _vbox_image_aarch64_impl: $(VBOX_AARCH64_IMG)
 	@echo "VirtualBox ARM64 image ready: $(VBOX_AARCH64_IMG)"
 _vbox_text_image_aarch64_impl: $(VBOX_AARCH64_TEXT_IMG)

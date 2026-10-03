@@ -504,7 +504,7 @@ static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_
             frame_put(pfn);
             return r;
         }
-        mm->rss++;
+        mm_rss_add(mm, 1);
     }
     return 0;
 }
@@ -535,7 +535,7 @@ mm_struct_t *mm_create(void) {
     mm->stack_top  = 0;
     mm->stack_bottom = 0;
     mm->total_vm   = 0;
-    mm->rss        = 0;
+    mm_rss_set(mm, 0);
     mm->locked_vm  = 0;
     mm->def_flags  = 0;
     spin_init(&mm->lock);
@@ -707,7 +707,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     child->tlb_end = 0;
     mm_arch_context_init(child);
     refcount_set(&child->refcount, 1);
-    child->rss = 0;
+    mm_rss_set(child, 0);
     child->total_vm = 0;
     child->locked_vm = 0;
     child->def_flags = 0;

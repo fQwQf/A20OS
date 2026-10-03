@@ -47,6 +47,10 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 #define IRQ_VECTOR_RESCHEDULE 0xF0
 #define IRQ_VECTOR_TLB_FLUSH 0xF1
 
+/* Publish the chipset PCI INTx -> IOAPIC GSI base (0 selects the q35
+ * swizzle).  A board calls this once it knows the routing; see the setter in
+ * trap/irqchip.c for why this is runtime state and not a board #ifdef. */
+void arch_pci_set_intx_gsi_base(uint32_t gsi_base);
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
 /* Mask/unmask the interrupt source behind a driver IRQ line id: the IOAPIC
  * entry for a routed PCI vector (0x40+gsi) or the local APIC LVT for a

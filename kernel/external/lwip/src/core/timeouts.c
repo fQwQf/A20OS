@@ -148,7 +148,7 @@ tcpip_tcp_timer(void *arg)
   /* call TCP timer handler */
   tcp_tmr();
   /* timer still needed? */
-  if (tcp_active_pcbs || tcp_tw_pcbs) {
+  if (tcp_pcbs_any(tcp_active_pcbs) || tcp_pcbs_any(tcp_tw_pcbs)) {
     /* restart timer */
     sys_timeout(TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);
   } else {
@@ -168,7 +168,7 @@ tcp_timer_needed(void)
   LWIP_ASSERT_CORE_LOCKED();
 
   /* timer is off but needed again? */
-  if (!tcpip_tcp_timer_active && (tcp_active_pcbs || tcp_tw_pcbs)) {
+  if (!tcpip_tcp_timer_active && (tcp_pcbs_any(tcp_active_pcbs) || tcp_pcbs_any(tcp_tw_pcbs))) {
     /* enable and start timer */
     tcpip_tcp_timer_active = 1;
     sys_timeout(TCP_TMR_INTERVAL, tcpip_tcp_timer, NULL);

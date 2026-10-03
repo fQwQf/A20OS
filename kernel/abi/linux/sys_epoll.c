@@ -11,7 +11,7 @@
  * arch-packed epoll_event wire structs and the syscall surface onto it.
  */
 
-#if defined(CONFIG_X86_64)
+#if ARCH_LINUX_EPOLL_EVENT_PACKED
 #define EPOLL_EVENT_PACKED __attribute__((packed))
 #else
 #define EPOLL_EVENT_PACKED

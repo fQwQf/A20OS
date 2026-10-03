@@ -3,6 +3,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "net/lwip_stack.h"
+#include "net/net_config.h"
 #include "lwip/tcp.h"
 #include "lwip/igmp.h"
 #include "lwip/netif.h"
@@ -200,21 +201,43 @@ int net_listen_sock(net_socket_t *s, int backlog)
         backlog = NET_MAX_QUEUE;
 
     /*
-     * Local TCP connections are handled by the socket layer's accept queue.
-     * Avoid converting to an lwIP LISTEN pcb here: LTP's localhost accept
-     * tests exercise close-after-accept heavily, and keeping the listener as
-     * a normal bound pcb gives deterministic close semantics.
+     * Two ways to hold a listening socket, selected by tcpmode.
+     *
+     * fast (default): the listener never exists in lwIP.  It sets local_tcp and
+     * drops the bound pcb, so a connection is only ever matched by another
+     * process in this same kernel taking the same shortcut.  Kept as the
+     * default because it is what the existing accept tests were written
+     * against, and the comment that used to sit here recorded why: LTP's
+     * localhost accept tests exercise close-after-accept heavily, and a
+     * listener kept as a plain bound pcb gives deterministic close semantics.
+     *
+     * lwip: convert the bound pcb into a real LISTEN pcb, so the port is
+     * actually listening in the protocol stack and an inbound connection from
+     * off-box completes its handshake.  The accept queue, the child
+     * net_socket_t and the wakeup are the socket layer's in both modes, so this
+     * changes reachability only.
      */
-    s->listening = 1;
-    if (s->domain == AF_INET || s->domain == AF_INET6) {
-        s->local_tcp = 1;
-        if (s->domain == AF_INET)
-            net_tcp_drop_pcb(s);
+    if (s->domain == AF_INET && g_a20_tcp_path == A20_TCP_PATH_LWIP) {
+        int r = net_inet_tcp_listen(s, backlog);
+        if (r < 0) {
+            s->listening = 0;
+            return r;
+        }
+        s->listening = 1;
+        s->local_tcp = 0;
+    } else {
+        s->listening = 1;
+        if (s->domain == AF_INET || s->domain == AF_INET6) {
+            s->local_tcp = 1;
+            if (s->domain == AF_INET)
+                net_tcp_drop_pcb(s);
+        }
     }
     if (s->domain == AF_INET) {
         uint16_t lport = 0;
         net_sockaddr_port(s->local, s->local_len, &lport);
-        ktrace_net("[NET] listen port=%u\n", (unsigned)net_ntohs(lport));
+        ktrace_net("[NET] listen port=%u mode=%s\n", (unsigned)net_ntohs(lport),
+                   s->local_tcp ? "fast" : "lwip");
     }
     return 0;
 }

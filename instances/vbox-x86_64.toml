@@ -1,0 +1,62 @@
+# VirtualBox x86_64：可直接启动的磁盘镜像（不是 ISO）。
+#
+# Replaces the optical-media shape: the artifact is a raw GPT disk with one FAT32
+# EFI System Partition holding GRUB, the kernel and the FAT32 root.  That is the
+# same form the aarch64 VirtualBox image already produces, so both architectures
+# hand an operator one disk to attach rather than something to mount first.
+#
+# Boots via UEFI, which is what makes the form match aarch64: most current
+# machines are UEFI-only with no CSM option.
+#
+# It boots all the way to userspace.  Measured under OVMF, not assumed:
+#
+#   [PCI] ECAM 0xffff8000e0000000 from MCFG, buses 0..255
+#   [VIRTIO0] Block device ready: capacity=524288 sectors (256 MB)
+#   [INIT] Block device -> /bin (fat32)
+#   [INIT] System ready
+#
+# The ESP holds BOOTX64.EFI, not GRUB.  GRUB 2.12 does not fill the multiboot
+# ACPI tags, so a multiboot kernel booted by GRUB under UEFI never learns the
+# RSDP address: with no RSDP there is no MCFG, PCI falls back to a hardcoded
+# window holding no devices, no block driver binds, and the boot stops at
+# "init: no init program found".  So the ESP loader reads the RSDP straight out
+# of the firmware configuration table and hands it to the kernel, which is what
+# makes the ECAM line above read from MCFG instead of the fallback.
+#
+# Note the ECAM is 0xe0000000, not QEMU's q35 default of 0xb0000000 -- which is
+# the whole point of reading MCFG, and is what makes this work on real
+# hardware whose ECAM base differs.  vbox-iso-x86_64 remains the BIOS path.
+name = "vbox-x86_64"
+description = "VirtualBox x86_64 directly bootable UEFI disk image"
+arch = "x86_64"
+board = "qemu-virt-x86_64"
+abi = "both"
+
+[package]
+kind = "uefi-disk"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 5
+boot_timeout = "180s"
+# Both probes are the regression guard.  [RAM] usable means the memory map was
+# parsed, which is also the step that feeds the PFA; [BOOTARGS] multiboot means
+# the cmdline path ran, and on a real firmware fw_cfg is absent so only the
+# multiboot line can carry a20.* settings.
+#
+# There is deliberately no [FDT] line: only riscv64 and loongarch parse a device
+# tree, and this is legacy firmware with no DT to parse.
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
+# Replace /dev/sdX with the target file.  media.py refuses to write a mounted
+# device and refuses one whose name does not match the image, which is what keeps
+# a mistyped /dev/sda from being overwritten.
+#
+# This is the BOOTX64.EFI disk built by [package].kind above, staged there by
+# `make x86_64-uefi-disk`.  It is deliberately not the GRUB rescue disk: that one
+# boots, but it drops the RSDP, so the ACPI path this instance exists to exercise
+# is exactly what it cannot reach.
+boot_media = ["build/x86_64-pc/a20os-uefi-disk.img"]
+media_device = "/dev/sdX"

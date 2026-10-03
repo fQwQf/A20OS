@@ -1,13 +1,15 @@
 # A20OS Native ABI 运行时状态
 
-最后核实：2026-08。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。本页是对 [00-overview.md](00-overview.md) 中实现状态的补充。
+最后核实：2026-10。多数 Native runtime smoke 目前固定为 RISC-V64；运行类结论需在当前提交上复验。本页是对 [00-overview.md](00-overview.md) 中实现状态的补充。
 
 ## 当前运行时状态
+
+> 注：`user/archive/` 目录已于 2026-10 从仓库整体删除（含 musl 桥接参考与旧 coreutils），本节与全文提及处均成历史记录，git 历史可考。
 
 | 组件 | 路径 | 状态 | 说明 |
 |------|------|------|------|
 | Linux ABI 兼容层 | `kernel/abi/linux/` | 活跃 | 当前主用户态运行时接口。系统启动后实际运行的用户态程序基于 Linux ABI。 |
-| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 136 条，覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、pager、monitor、kernel-ext 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
+| Native ABI 内核入口 | `kernel/abi/native/` | 已登记 | `syscall_table.def` 有 142 条，覆盖 core、handle、task、memory、path、ipc、net、time、security、debug、system info、sync、device、pager、monitor、kernel-ext 等分区；部分入口仍是受限语义，登记数不等于完整实现。 |
 | Typed channel | `kernel/ipc/a20_channel.c` | 已接入 | `channel_create` 接受 `a20_channel_type_t` 类型签名（每端点一份拷贝），send/recv 路径强制执行 handle 类型 bitmask 与 `max_data_size`/`max_handles` 上限，违例返回 `TYPE_MISMATCH`。 |
 | 时态能力 | `kernel/abi/native/handle_table.c` | 已接入 | `handle_control` 提供 `SET_TEMPORAL`/`GET_TEMPORAL`/`SET_LABEL` 入口（仅可增强不可减弱）；sweeper 以 deadline 驱动周期运行（约 100ms），`AUTO_CLOSE` 过期自动回收；channel 传递保留时态约束与安全标签（不可刷新）。 |
 | 阻塞 IPC | `kernel/ipc/a20_channel.c`、`kernel/ipc/a20_event.c` | 已实现 | `channel_send`（队列满）/`channel_recv`（队列空）/`event_wait`（无事件）默认阻塞，`A20_MSG_NONBLOCK`/`timeout_ns=0` 为非阻塞；`event_wait` 支持相对超时与多事件返回，基于 tokenized Park/Wake（见 `docs/process-scheduler.md`）。 |
@@ -16,9 +18,8 @@
 | liba20c 最小 C 库 | `user/liba20c/` | 活跃 | 已实现 malloc、stdio、unistd、string、time、errno、fdtable 等 ISO C 子集。`malloc.c`、`unistd.c`、`stdio.c`、`bare_alloc.c` 已改为使用带 `size` 和 `version` 的版本化 ABI 结构体调用 syscall。 |
 | 原生测试 | `user/tests/test_native_*.c`、`test_liba20c.c`、mlibc tests | 多个独立目标 | 当前有 16 个 `test_native_*.c`，覆盖 handle、MM、IPC、contract、debug、signal、futex、registry、isolation、personality 等；另有 liba20c/mlibc 测试。构建目标覆盖多架构的子集，但多数 QEMU smoke 固定为 RISC-V64；不存在历史所称“4 套 118 cases host-mode”现行套件。 |
 | mlibc Native libc | `user/external/mlibc/sysdeps/a20/` | 活跃（RISC-V64） | 当前完整 libc 路线；`make mlibc-sysroot` 与 `make smoke-mlibc` 固定使用 RISC-V64 cross file/QEMU。 |
-> 注：`user/archive/` 目录已于 2026-10 从仓库整体删除（含 musl 桥接参考与旧 coreutils），本节与全文提及处均成历史记录，git 历史可考。
-| musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前仓库中创建。相关历史材料已移至 `user/archive/`。 |
-| 历史参考 | `user/archive/` | 不参与构建 | 包含旧版 musl 桥接、`a20coreutils`、`build_sysroot.sh`、`arch/a20/` 适配头等。这些代码仅供历史参考，路径和内容已过时，不进入当前构建。 |
+| musl 移植目录 | `user/musl-port/` | 不存在 | 该目录未在当前仓库中创建。相关历史材料曾移至 `user/archive/`，该目录亦已于 2026-10 一并删除。 |
+| 历史参考（已删除） | `user/archive/` | 已删除 | 曾包含旧版 musl 桥接、`a20coreutils`、`build_sysroot.sh`、`arch/a20/` 适配头等；2026-10 从仓库整体删除，路径与内容需查 git 历史。 |
 | Debug handle | `kernel/abi/native/` 0x0900 分区 | 完整实现 | 完整停止/恢复语义（`debug_attach/traceme/wait/event/resume/detach/read/write/read_regs/write_regs/kill`），与 Linux ABI ptrace 共享同一 `proc_debug_*` 状态机；已知边界：无硬件单步、无 TRACEFORK/CLONE 事件、无 seccomp 集成、无 watchpoint。 |
 
 ## 关键偏差说明
@@ -45,13 +46,13 @@ int64_t r = a20_vm_alloc(&args);
 
 `user/liba20rt/a20_types.h` 与 `kernel/include/abi/native/types.h` 的结构体布局已逐字段对齐（本节为此前的偏差记录，现已修复）。channel wrapper 此前将 `version` 置 0 导致 `A20_VALIDATE_AND_COPY` 拒绝，已修正为 1；`event_wait` 已切换为与 05-ipc.md §3.4 一致的结构化多事件形式。内核侧结构体验证现遵循 01-types.md §2 的演进规则（拒绝短 version-1 结构、长结构体截断、version 0 与超版本拒绝）。
 
-### 3. archive 目录不参与构建
+### 3. archive 目录已从仓库删除
 
-`user/archive/build_sysroot.sh` 引用了 `user/musl-port/`、`user/archive/src/...` 等路径，其中一些在当前仓库中已不存在。不要直接运行该脚本。如果未来需要重新启动完整 musl 移植，应以 `user/archive/` 为参考，而不是直接复用。
+`user/archive/` 已于 2026-10 从仓库整体删除。其中的 `build_sysroot.sh` 曾引用 `user/musl-port/`、`user/archive/src/...` 等路径。不要试图运行该脚本（它已不在仓库中）。如果未来需要重新启动完整 musl 移植，应以 git 历史中的 `user/archive/` 为参考，而不是直接复用。
 
 ### 4. 测试覆盖与架构边界
 
-当前源码有 16 个 `user/tests/test_native_*.c`，并有 liba20c、mlibc、服务与人格层 smoke。测试不是单一聚合矩阵：`native-test-all` 等目标可构建多个架构，但 `smoke-native-*`、`smoke-mlibc` 等大量 QEMU 入口仍硬编码 RISC-V64。历史文档中的“4 套 118 cases host-mode”套件目前不存在，不能作为证据。
+当前源码有 16 个 `user/tests/test_native_*.c`，并有 liba20c、mlibc、服务与人格层 smoke。测试不是单一聚合矩阵：`native-handle-test-all` 等目标可构建多个架构，但 `smoke-native-*`、`smoke-mlibc` 等大量 QEMU 入口仍硬编码 RISC-V64。历史文档中的“4 套 118 cases host-mode”套件目前不存在，不能作为证据。
 
 ### 5. Sync (0x0B00) 分区与 thread_create 修复（已完成）
 
@@ -173,7 +174,7 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 ### 远期：按需扩展 Native 用户态生态
 
 - 明确需求后，决定是否重新启动完整 musl 移植。
-- 若重启，应基于 `user/archive/` 的参考代码重新设计，而不是直接复用旧路径。
+- 若重启，应基于 git 历史中 `user/archive/` 的参考代码重新设计，而不是直接复用旧路径。
 - Debug handle 的 stop/resume/watchpoint 能力也只在有明确调试需求时扩展。
 
 ### 已批准设计、待排期的深水区（2026-08 评审通过）
@@ -186,5 +187,5 @@ Linux ABI 侧已有 PT_INTERP 加载，内核也已有 `elf_setup_stack_a20_dyna
 
 - 用户已确认：Linux ABI 继续作为主用户态接口，`abi/native` 保持为辅。
 - `liba20c` 已使用版本化 ABI 结构体；这是当前代码事实，不再是待办。
-- 用户已确认：`user/archive/` 作为历史参考保留，不参与当前构建。
+- 用户已确认：`user/archive/` 曾作为历史参考保留、不参与当前构建，该目录已于 2026-10 从仓库删除。
 - 用户已确认：Debug handle 保持受限调试接口（不盲目扩展为完整 ptrace）。当前 Debug 分区已实现完整停止/恢复语义（见能力清单），watchpoint 与 TRACEFORK/CLONE 事件不在扩展范围内。

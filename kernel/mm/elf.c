@@ -124,8 +124,7 @@ static int elf_validate_user_driver(int fd, const Elf64_Ehdr *eh)
             vfs_pread(fd, (char *)&desc, sizeof(desc), sh->sh_offset) !=
                 (int)sizeof(desc))
             return -ENOEXEC;
-        return desc.magic == A20_DRIVER_DESCRIPTOR_MAGIC &&
-               desc.version == A20_DRIVER_DESCRIPTOR_VERSION &&
+        return a20_driver_descriptor_sane(&desc) &&
                desc.placement == A20_DRIVER_PLACEMENT_USER_SERVICE &&
                desc.type >= A20_DRIVER_TYPE_RTC &&
                desc.type <= A20_DRIVER_TYPE_SECURITY && desc.name[0] ?
@@ -354,7 +353,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
          * fault cannot recover the faulting EA and demand paging never maps the
          * page.  Map executable file pages eagerly to avoid code-fetch faults.
          */
-#if defined(CONFIG_PPC64LE)
+#if ARCH_INSN_FAULT_UNRECOVERABLE
         if (flags & PTE_X) {
             for (vaddr_t page = start; page < file_map_end; page += PAGE_SIZE) {
                 pte_t *pte = pt_lookup_leaf(pgdir, page, NULL, NULL, NULL);
@@ -377,7 +376,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
                 }
                 if (flags & PTE_X)
                     arch_flush_icache_range(frame, PAGE_SIZE);
-                mm->rss++;
+                mm_rss_add(mm, 1);
             }
         }
 #endif
@@ -424,7 +423,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
                         pte_to_vm_flags(flags), flags, false);
         if (r < 0)
             return r;
-        mm->rss++;
+        mm_rss_add(mm, 1);
         anon_start = page + PAGE_SIZE;
     } else {
         anon_start = file_end;

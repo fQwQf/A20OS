@@ -1,0 +1,35 @@
+# VirtualBox x86_64: a directly bootable GRUB disk, for the BIOS path.
+#
+# vbox-x86_64 already covers a directly bootable disk, but its ESP carries
+# BOOTX64.EFI and it therefore only starts under UEFI.  A VirtualBox VM with
+# the chipset left at its BIOS default has no firmware variables and no secure
+# boot, so GRUB is the loader that works there, and the disk shape is the one
+# that makes it attachable as a hard disk rather than as optical media.
+#
+# Same kernel and rootfs as the ISO instance (vbox-iso-x86_64); what differs is
+# only the container.  Deploy it when the VM cannot boot UEFI.
+name = "vbox-disk-x86_64"
+description = "VirtualBox x86_64 directly bootable GRUB disk image (BIOS path)"
+arch = "x86_64"
+board = "qemu-virt-x86_64"
+abi = "both"
+
+[package]
+kind = "grub-disk"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 115200
+boot_wait = 5
+boot_timeout = "180s"
+# GRUB does not fill the multiboot ACPI tags, so this disk takes the ECAM
+# fallback path rather than the MCFG one.  That is the honest expectation for a
+# GRUB boot: with no RSDP there is no MCFG, and the log line will say so.  The
+# [RAM] and System ready probes are the ones that hold either way.
+console_check = ["[BOOTARGS] multiboot cmdline", "[RAM] usable", "System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
+# The staged path, produced by `make pc-rescue-disk`.  No media_device here:
+# the artifact is attached to a VM as a disk, not dd'd onto a block device.
+boot_media = ["build/x86_64-pc/a20os-rescue-disk.img"]
+media_device = "/dev/sdX"

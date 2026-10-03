@@ -32,9 +32,21 @@ DRVMOD_CFLAGS := -ffreestanding -nostdlib -fno-pic -mcmodel=medium \
                  -DCONFIG_LOONGARCH64 -Ikernel/arch/loongarch64/include -Ikernel/include -Ikernel
 endif
 DRVMOD_CFLAGS += -std=gnu99
+# A drvmod blob embeds a driver_t, so it shares the kernel's struct layout.  These
+# rules list their headers by hand, and any header left off the list turns a
+# driver_t or device_t change into a silent ABI mismatch: the blob keeps the old
+# offsets while the kernel reads the new ones, and the failure surfaces far away
+# as a driver registering with the wrong class.  Generate the real dependency
+# list instead of maintaining it by hand.
+DRVMOD_CFLAGS += -MMD -MP
 ifneq ($(filter $(ARCH),riscv64 x86_64 aarch64 loongarch64),)
 DRVMOD_CFLAGS += -DCONFIG_64BIT
 endif
+
+# Consume the dependency lists those flags generate.  -MP keeps a rule buildable
+# after its header is deleted, and -include (rather than a wildcard prerequisite)
+# is what lets a freshly generated .d file take effect on the next run.
+-include $(wildcard $(USER_BUILD_DIR)/*.d)
 
 # The user build and generic driver packages share USER_BUILD_DIR.  On a fresh
 # parallel build, USER_BUILD_STAMP may run `make -C user clean` while a driver
@@ -78,6 +90,10 @@ $(BUILD_DIR)/rootfs-drivers/%.o: $(USER_BUILD_DIR)/%.a20drv
 		--rename-section .data=.rodata.rootfs_drivers,alloc,load,readonly,data,contents $*.a20drv $(abspath $@)
 
 $(USER_BUILD_DIR)/rtc.a20drv: $(DRVMOD_DIR)/goldfish_rtc.c kernel/include/drvmod/drvmod.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/abi-probe.a20drv: $(DRVMOD_DIR)/abi_probe.c kernel/include/drvmod/drvmod.h
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

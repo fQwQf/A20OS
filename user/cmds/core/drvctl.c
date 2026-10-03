@@ -22,6 +22,7 @@
 
 #define A20_DRIVER_DESCRIPTOR_MAGIC   0x41323044U /* "A20D" */
 #define A20_DRIVER_DESCRIPTOR_VERSION 2U
+#define A20_DRIVER_ABI               1U
 #define A20_DRIVER_MAX_MATCH 4
 
 /* Byte layout mirrors kernel/include/drivers/driver_descriptor.h
@@ -141,6 +142,7 @@ static int read_descriptor(const char *path, a20_driver_desc_t *out)
         close(fd);
         if (out->magic != A20_DRIVER_DESCRIPTOR_MAGIC ||
             out->version != A20_DRIVER_DESCRIPTOR_VERSION ||
+            out->abi != A20_DRIVER_ABI ||
             out->match_count > A20_DRIVER_MAX_MATCH || !out->name[0])
             return -1;
         return 0;

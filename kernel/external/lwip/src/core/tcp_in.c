@@ -125,6 +125,8 @@ tcp_input(struct pbuf *p, struct netif *inp)
 #endif /* SO_REUSE */
   u8_t hdrlen_bytes;
   err_t err;
+  u8_t pcb_lane, listen_lane;
+  int search;
 
   LWIP_UNUSED_ARG(inp);
   LWIP_ASSERT_CORE_LOCKED();
@@ -249,10 +251,21 @@ tcp_input(struct pbuf *p, struct netif *inp)
      for an active connection. */
   prev = NULL;
 
-  for (pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
+  /* A pcb is bucketed by hash(local_ip, local_port).  An inbound segment is
+     always addressed to the pcb's local endpoint, so its destination address
+     and destination port ARE local_ip and local_port -- for every state, not
+     just ESTABLISHED.  Hashing the source port instead therefore looked in a
+     bucket chosen by the peer's ephemeral port, so a pcb was found only when
+     that random port collided with its own bucket: about 1 in NET_LANES.
+     One lane hid it completely, since every bucket is 0. */
+  pcb_lane = NET_PCB_LANE_OF(ip_current_dest_addr(), tcphdr->dest);
+  listen_lane = pcb_lane;
+
+  for (pcb = tcp_active_pcbs[pcb_lane]; pcb != NULL; pcb = pcb->next) {
     LWIP_ASSERT("tcp_input: active pcb->state != CLOSED", pcb->state != CLOSED);
     LWIP_ASSERT("tcp_input: active pcb->state != TIME-WAIT", pcb->state != TIME_WAIT);
     LWIP_ASSERT("tcp_input: active pcb->state != LISTEN", pcb->state != LISTEN);
+    LWIP_ASSERT("tcp_input: active pcb is in the searched bucket", pcb->lane == pcb_lane);
 
     /* check if PCB is bound to specific netif */
     if ((pcb->netif_idx != NETIF_NO_INDEX) &&
@@ -271,8 +284,8 @@ tcp_input(struct pbuf *p, struct netif *inp)
       LWIP_ASSERT("tcp_input: pcb->next != pcb (before cache)", pcb->next != pcb);
       if (prev != NULL) {
         prev->next = pcb->next;
-        pcb->next = tcp_active_pcbs;
-        tcp_active_pcbs = pcb;
+        pcb->next = tcp_active_pcbs[pcb_lane];
+        tcp_active_pcbs[pcb_lane] = pcb;
       } else {
         TCP_STATS_INC(tcp.cachehit);
       }
@@ -285,8 +298,9 @@ tcp_input(struct pbuf *p, struct netif *inp)
   if (pcb == NULL) {
     /* If it did not go to an active connection, we check the connections
        in the TIME-WAIT state. */
-    for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next) {
+    for (pcb = tcp_tw_pcbs[pcb_lane]; pcb != NULL; pcb = pcb->next) {
       LWIP_ASSERT("tcp_input: TIME-WAIT pcb->state == TIME-WAIT", pcb->state == TIME_WAIT);
+      LWIP_ASSERT("tcp_input: TIME-WAIT pcb is in the searched bucket", pcb->lane == pcb_lane);
 
       /* check if PCB is bound to specific netif */
       if ((pcb->netif_idx != NETIF_NO_INDEX) &&
@@ -315,41 +329,60 @@ tcp_input(struct pbuf *p, struct netif *inp)
     }
 
     /* Finally, if we still did not get a match, we check all PCBs that
-       are LISTENing for incoming connections. */
+       are LISTENing for incoming connections.  A listener bound to a concrete
+       address hashes to this same bucket, but one bound to the any address
+       matches every destination and lives in the sentinel bucket instead, so
+       that bucket is searched as well.  Both are searched separately and never
+       linked into twice. */
     prev = NULL;
-    for (lpcb = tcp_listen_pcbs.listen_pcbs; lpcb != NULL; lpcb = lpcb->next) {
-      /* check if PCB is bound to specific netif */
-      if ((lpcb->netif_idx != NETIF_NO_INDEX) &&
-          (lpcb->netif_idx != netif_get_index(ip_data.current_input_netif))) {
-        prev = (struct tcp_pcb *)lpcb;
-        continue;
-      }
+    lpcb = NULL;
+    for (search = 0; search < NET_PCB_LANE_SEARCH_BUCKETS; search++) {
+      u8_t search_lane = (search == 0) ? listen_lane : (u8_t)NET_PCB_LANE_ANY;
+      prev = NULL;
+      for (lpcb = tcp_listen_pcbs[search_lane].listen_pcbs; lpcb != NULL; lpcb = lpcb->next) {
+        /* check if PCB is bound to specific netif */
+        if ((lpcb->netif_idx != NETIF_NO_INDEX) &&
+            (lpcb->netif_idx != netif_get_index(ip_data.current_input_netif))) {
+          prev = (struct tcp_pcb *)lpcb;
+          continue;
+        }
 
-      if (lpcb->local_port == tcphdr->dest) {
-        if (IP_IS_ANY_TYPE_VAL(lpcb->local_ip)) {
-          /* found an ANY TYPE (IPv4/IPv6) match */
-#if SO_REUSE
-          lpcb_any = lpcb;
-          lpcb_prev = prev;
-#else /* SO_REUSE */
-          break;
-#endif /* SO_REUSE */
-        } else if (IP_ADDR_PCB_VERSION_MATCH_EXACT(lpcb, ip_current_dest_addr())) {
-          if (ip_addr_eq(&lpcb->local_ip, ip_current_dest_addr())) {
-            /* found an exact match */
-            break;
-          } else if (ip_addr_isany(&lpcb->local_ip)) {
-            /* found an ANY-match */
+        if (lpcb->local_port == tcphdr->dest) {
+          if (IP_IS_ANY_TYPE_VAL(lpcb->local_ip)) {
+            /* found an ANY TYPE (IPv4/IPv6) match */
 #if SO_REUSE
             lpcb_any = lpcb;
             lpcb_prev = prev;
 #else /* SO_REUSE */
             break;
 #endif /* SO_REUSE */
+          } else if (IP_ADDR_PCB_VERSION_MATCH_EXACT(lpcb, ip_current_dest_addr())) {
+            if (ip_addr_eq(&lpcb->local_ip, ip_current_dest_addr())) {
+              /* found an exact match */
+              break;
+            } else if (ip_addr_isany(&lpcb->local_ip)) {
+              /* found an ANY-match */
+#if SO_REUSE
+              lpcb_any = lpcb;
+              lpcb_prev = prev;
+#else /* SO_REUSE */
+              break;
+#endif /* SO_REUSE */
+            }
           }
         }
+        prev = (struct tcp_pcb *)lpcb;
       }
-      prev = (struct tcp_pcb *)lpcb;
+      /* Stop at the first bucket that produced a match.  The sentinel bucket
+         only runs when the hashed one had none, which keeps a listener bound to
+         a specific address preferred over a catch-all. */
+      if (lpcb != NULL
+#if SO_REUSE
+          || lpcb_any != NULL
+#endif /* SO_REUSE */
+         ) {
+        break;
+      }
     }
 #if SO_REUSE
     /* first try specific local IP */
@@ -366,9 +399,9 @@ tcp_input(struct pbuf *p, struct netif *inp)
       if (prev != NULL) {
         ((struct tcp_pcb_listen *)prev)->next = lpcb->next;
         /* our successor is the remainder of the listening list */
-        lpcb->next = tcp_listen_pcbs.listen_pcbs;
+        lpcb->next = tcp_listen_pcbs[lpcb->lane].listen_pcbs;
         /* put this listening pcb at the head of the listening list */
-        tcp_listen_pcbs.listen_pcbs = lpcb;
+        tcp_listen_pcbs[lpcb->lane].listen_pcbs = lpcb;
       } else {
         TCP_STATS_INC(tcp.cachehit);
       }
@@ -447,7 +480,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
            application that the connection is dead before we
            deallocate the PCB. */
         TCP_EVENT_ERR(pcb->state, pcb->errf, pcb->callback_arg, ERR_RST);
-        tcp_pcb_remove(&tcp_active_pcbs, pcb);
+        tcp_pcb_remove(tcp_active_pcbs, pcb);
         tcp_free(pcb);
       } else {
         err = ERR_OK;
@@ -612,7 +645,7 @@ tcp_input_delayed_close(struct tcp_pcb *pcb)
           ensure the application doesn't continue using the PCB. */
       TCP_EVENT_ERR(pcb->state, pcb->errf, pcb->callback_arg, ERR_CLSD);
     }
-    tcp_pcb_remove(&tcp_active_pcbs, pcb);
+    tcp_pcb_remove(tcp_active_pcbs, pcb);
     tcp_free(pcb);
     return 1;
   }
@@ -698,6 +731,12 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     /* inherit socket options */
     npcb->so_options = pcb->so_options & SOF_INHERITED;
     npcb->netif_idx = pcb->netif_idx;
+    /* The new pcb's local address is the concrete destination of this segment
+       and its local port is the listener's, so the bucket an established
+       segment for it will compute is hash of those two -- which the listener's
+       own bucket is not, since a wildcard listener is filed in the sentinel
+       one.  Derive it here, from the fields just set. */
+    npcb->lane = NET_PCB_LANE_OF_PCB(npcb);
     /* Register the new PCB so that we can begin receiving segments
        for it. */
     TCP_REG_ACTIVE(npcb);
@@ -1011,7 +1050,7 @@ tcp_process(struct tcp_pcb *pcb)
           tcp_pcb_purge(pcb);
           TCP_RMV_ACTIVE(pcb);
           pcb->state = TIME_WAIT;
-          TCP_REG(&tcp_tw_pcbs, pcb);
+          TCP_REG(tcp_tw_pcbs, pcb);
         } else {
           tcp_ack_now(pcb);
           pcb->state = CLOSING;
@@ -1029,7 +1068,7 @@ tcp_process(struct tcp_pcb *pcb)
         tcp_pcb_purge(pcb);
         TCP_RMV_ACTIVE(pcb);
         pcb->state = TIME_WAIT;
-        TCP_REG(&tcp_tw_pcbs, pcb);
+        TCP_REG(tcp_tw_pcbs, pcb);
       }
       break;
     case CLOSING:
@@ -1039,7 +1078,7 @@ tcp_process(struct tcp_pcb *pcb)
         tcp_pcb_purge(pcb);
         TCP_RMV_ACTIVE(pcb);
         pcb->state = TIME_WAIT;
-        TCP_REG(&tcp_tw_pcbs, pcb);
+        TCP_REG(tcp_tw_pcbs, pcb);
       }
       break;
     case LAST_ACK:

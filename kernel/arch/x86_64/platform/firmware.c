@@ -6,6 +6,8 @@
 #include "console.h"
 #include "platform.h"
 #include "core/string.h"
+#include "core/klog.h"
+#include "mm/frame.h"
 #include "core/stdio.h"
 
 typedef struct {
@@ -53,7 +55,60 @@ static const acpi_rsdp_t *acpi_find_rsdp_range(uintptr_t start, uintptr_t end) {
     return NULL;
 }
 
+/*
+ * An RSDP handed over by the boot path, as a physical address.
+ *
+ * The two searches below only work under BIOS: the EBDA does not exist under
+ * UEFI, and 0xE0000-0x100000 is firmware ROM that OVMF does not publish an RSDP
+ * into.  With neither available, acpi_find_table() returned NULL for everything,
+ * which is why MCFG was never found, why PCI fell back to a hardcoded ECAM base,
+ * and why enumeration then read all-zero vendor IDs and published 129 devices that
+ * matched no driver.  The whole chain failed at the first step and the symptom
+ * only appeared much later as "no init program found".
+ *
+ * A UEFI loader can always be asked for the RSDP -- it is in the firmware's
+ * configuration table -- so it passes the physical address here.  Zero means the
+ * boot path had none to give, which is what BIOS firmware leaves and why the
+ * scans below are still needed.
+ */
+/* Parked by _start_uefi in boot/entry.S from RSI, which is where
+ * kernel/boot/uefi/x86_64_loader.c leaves the RSDP it read from the firmware
+ * configuration table.  A physical address, like g_mb_info.  It stays zero on a
+ * multiboot boot, because nothing sets it there and BSS is cleared. */
+extern uint64_t x86_boot_acpi_rsdp;
+
+static uintptr_t g_firmware_rsdp_pa;
+
+/* The second of the two RSDP input channels, for a platform that learns the
+ * address from firmware structures rather than from a handover register.  The
+ * bootloader path in the tree does not use it -- it writes x86_boot_acpi_rsdp
+ * from _start_uefi instead -- so this is an available entry point rather than a
+ * wired one.  Nothing here depends on it: firmware_bios_or_uefi() treats a
+ * non-zero value as a UEFI boot whichever channel supplied it, and with both
+ * zero it falls back to probing. */
+void firmware_set_rsdp_pa(uintptr_t pa)
+{
+    g_firmware_rsdp_pa = pa;
+}
+
 static const acpi_rsdp_t *acpi_find_rsdp(void) {
+    /* The UEFI loader's handover, checked first: under UEFI there is no EBDA and
+     * 0xE0000-0x100000 is firmware ROM, so the BIOS scans below cannot succeed
+     * and this is the only address that exists. */
+    if (x86_boot_acpi_rsdp) {
+        const acpi_rsdp_t *rsdp =
+            (const void *)(PAGE_OFFSET + x86_boot_acpi_rsdp);
+        if (memcmp(rsdp->signature, "RSD PTR ", 8) == 0)
+            return rsdp;
+    }
+
+    if (g_firmware_rsdp_pa) {
+        const acpi_rsdp_t *rsdp =
+            (const void *)(PAGE_OFFSET + g_firmware_rsdp_pa);
+        if (memcmp(rsdp->signature, "RSD PTR ", 8) == 0)
+            return rsdp;
+    }
+
     uint16_t ebda_segment = *(volatile uint16_t *)(PAGE_OFFSET + 0x40e);
     uintptr_t ebda = (uintptr_t)ebda_segment << 4;
     const acpi_rsdp_t *rsdp = NULL;
@@ -132,6 +187,153 @@ size_t firmware_acpi_apic_ids(uint32_t *ids, size_t capacity,
     return found_bsp ? count : 0;
 }
 
+/*
+ * MCFG: the PCI Express memory-mapped configuration space allocation.  The
+ * base address is a firmware fact and it is not 0xB0000000 on real hardware --
+ * that address is QEMU q35's MMCONFIG.  A 2011-onward chipset normally places
+ * ECAM at 0xE0000000, and the only reliable way to learn it is this table, so
+ * real-hardware boards must read it before pci_enumerate().
+ *
+ *
+ * MCFG ships in two incompatible published layouts, and firmware uses both.
+ *
+ * PCI Firmware Specification r3.0 -- what SeaBIOS emits -- lays the allocation
+ * subtable out as { u64 address; u16 segment; u8 start_bus; u8 end_bus; u32
+ * reserved; }, which puts the base address at 44 and makes the whole table
+ * exactly 60 bytes.  The ACPI specification instead reserves a u64 at 44 and
+ * moves the base address out to 59, behind { u8 segment; u8 start_bus; u8
+ * end_bus; u32 reserved; }.
+ *
+ * Measured on SeaBIOS (q35, 1 GiB): length 60, base 0xb0000000 read from 44,
+ * end bus 0xff at 55, and offset 59 already holding the next table's signature.
+ * That last detail is why the layouts are told apart by length rather than by
+ * guesswork -- a 60-byte table cannot be the ACPI one.
+ */
+#define ACPI_MCFG_OFF_PCI_BASE      44u
+#define ACPI_MCFG_OFF_PCI_SEGMENT   52u
+#define ACPI_MCFG_OFF_PCI_START     54u
+#define ACPI_MCFG_OFF_PCI_END       55u
+#define ACPI_MCFG_MIN_PCI_LEN       56u
+
+#define ACPI_MCFG_OFF_ACPI_SEGMENT  52u
+#define ACPI_MCFG_OFF_ACPI_START    53u
+#define ACPI_MCFG_OFF_ACPI_END      54u
+#define ACPI_MCFG_OFF_ACPI_BASE     59u
+#define ACPI_MCFG_MIN_ACPI_LEN      67u
+
+/* ECAM is a 256 MiB-aligned window below 4 GiB by definition. */
+#define ACPI_MCFG_BASE_MAX          0xffffffffULL
+#define ACPI_MCFG_BASE_ALIGN_MASK   0x0fffffffULL
+
+/* Only segment 0 is mapped by the boot page tables; a non-zero segment would
+ * need a real mapping rather than PAGE_OFFSET arithmetic. */
+#define ACPI_MCFG_BASE_SEGMENT      0u
+
+struct acpi_mcfg_view {
+    uint64_t base;
+    uint16_t segment;
+    uint8_t  start_bus;
+    uint8_t  end_bus;
+};
+
+static uint64_t mcfg_read_le64(const uint8_t *p)
+{
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
+/*
+ * Resolve this MCFG into base/segment/bus range, or -1 if it is neither layout.
+ *
+ * The ACPI layout is tried first because it is the longer one, so a table that
+ * is long enough to be ACPI is not misread as PCI.  Each candidate then has to
+ * survive the ECAM sanity check, which is a real filter rather than a formality:
+ * reading the base from the wrong offset lands on the reserved field or on the
+ * neighbouring table, and neither is 256 MiB aligned.
+ */
+static int acpi_mcfg_view(const acpi_sdt_t *mcfg, struct acpi_mcfg_view *out)
+{
+    const uint8_t *b = (const uint8_t *)mcfg;
+
+    if (mcfg->length >= ACPI_MCFG_MIN_ACPI_LEN) {
+        out->base      = mcfg_read_le64(b + ACPI_MCFG_OFF_ACPI_BASE);
+        out->segment   = b[ACPI_MCFG_OFF_ACPI_SEGMENT];
+        out->start_bus = b[ACPI_MCFG_OFF_ACPI_START];
+        out->end_bus   = b[ACPI_MCFG_OFF_ACPI_END];
+        if (out->base && !(out->base & ACPI_MCFG_BASE_ALIGN_MASK) &&
+            out->base <= ACPI_MCFG_BASE_MAX)
+            return 0;
+    }
+
+    if (mcfg->length >= ACPI_MCFG_MIN_PCI_LEN) {
+        out->base      = mcfg_read_le64(b + ACPI_MCFG_OFF_PCI_BASE);
+        out->segment   = (uint16_t)b[ACPI_MCFG_OFF_PCI_SEGMENT] |
+                         ((uint16_t)b[ACPI_MCFG_OFF_PCI_SEGMENT + 1] << 8);
+        out->start_bus = b[ACPI_MCFG_OFF_PCI_START];
+        out->end_bus   = b[ACPI_MCFG_OFF_PCI_END];
+        if (out->base && !(out->base & ACPI_MCFG_BASE_ALIGN_MASK) &&
+            out->base <= ACPI_MCFG_BASE_MAX)
+            return 0;
+    }
+
+    return -1;
+}
+
+/*
+ * "BIOS" or "UEFI".
+ *
+ * The distinction decides whether a missing MCFG is normal or fatal: under
+ * SeaBIOS the RSDP is in a region the legacy search already covers, while under
+ * UEFI it is not, so a missing MCFG there means the RSDP was never found and the
+ * fallback window holds nothing.
+ *
+ * A boot path that hands us an RSDP address settles it outright.  There is no
+ * such handover under BIOS -- no firmware is told where the table is, because
+ * nothing goes looking -- so a non-zero address can only have come from a
+ * UEFI-aware loader: x86_boot_acpi_rsdp from _start_uefi, or g_firmware_rsdp_pa
+ * from firmware_set_rsdp_pa().  That makes the answer a fact rather than a
+ * guess, which matters now that the UEFI path really does reach this code and
+ * the old probe would have called it "BIOS" because the loader made the table
+ * findable.
+ *
+ * With no handover to go on, fall back to the probe.  It can only be wrong for
+ * a UEFI boot that found its RSDP by scanning, which is a firmware that does
+ * both.
+ */
+const char *firmware_bios_or_uefi(void)
+{
+    if (x86_boot_acpi_rsdp || g_firmware_rsdp_pa)
+        return "UEFI";
+    return acpi_find_rsdp() ? "BIOS" : "UEFI";
+}
+
+uintptr_t firmware_acpi_mcfg_base(void) {
+    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
+    if (!mcfg)
+        return 0;
+    struct acpi_mcfg_view v;
+    if (acpi_mcfg_view(mcfg, &v) != 0 || v.segment != ACPI_MCFG_BASE_SEGMENT)
+        return 0;
+    /* Direct-mapped, not physical: the caller dereferences this directly, and
+     * dropping PAGE_OFFSET points the PCI host at unmapped memory. */
+    return PAGE_OFFSET + (uintptr_t)v.base;
+}
+
+int firmware_acpi_mcfg_bus_range(uint8_t *start_bus, uint8_t *end_bus) {
+    if (!start_bus || !end_bus)
+        return -1;
+    const acpi_sdt_t *mcfg = acpi_find_table("MCFG");
+    if (!mcfg)
+        return -1;
+    struct acpi_mcfg_view v;
+    if (acpi_mcfg_view(mcfg, &v) != 0)
+        return -1;
+    *start_bus = v.start_bus;
+    *end_bus   = v.end_bus;
+    return 0;
+}
+
 uintptr_t firmware_acpi_hpet_address(void) {
     const acpi_sdt_t *hpet = acpi_find_table("HPET");
     if (!hpet || hpet->length < sizeof(*hpet) + 20)
@@ -189,7 +391,46 @@ static uint32_t fw_cfg_read32(void) {
     return value;
 }
 
-static char g_fw_cfg_cmdline[256];
+static char g_bootargs[256];
+
+#define MULTIBOOT_TAG_ACPI_OLD 14u
+
+struct x86_mb_info {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+};
+
+/* Defined further down with the rest of the multiboot state. */
+extern __attribute__((section(".data"))) volatile uint32_t g_mb_magic;
+extern __attribute__((section(".data"))) volatile uint32_t g_mb_info;
+
+/* Multiboot v1 passes the kernel command line as a physical address in the
+ * info block (offset 16).  This is the only source of bootargs on real
+ * hardware: GRUB hands the string over in the multiboot info whether it was
+ * loaded by BIOS or by UEFI boot services, whereas fw_cfg is a QEMU device that
+ * simply does not exist on a physical machine.  Reading only fw_cfg left every
+ * a20.* knob unreachable on real x86_64. */
+static const char *multiboot_cmdline(void) {
+    if (g_mb_magic != 0x2BADB002u || !g_mb_info)
+        return NULL;
+    /* g_mb_info is physical (EBX) and cannot hold a direct-mapped address: it is
+     * a uint32_t and PAGE_OFFSET does not fit in 32 bits.  So every dereference
+     * adds PAGE_OFFSET itself, as x86_ram_detect() does; a raw read works only
+     * because entry.S identity-maps the first gigabyte. */
+    const struct x86_mb_info *mi =
+        (const void *)(PAGE_OFFSET + (uintptr_t)g_mb_info);
+    if (!mi->cmdline)
+        return NULL;
+    return (const char *)(PAGE_OFFSET + (uintptr_t)mi->cmdline);
+}
 
 /* Multiboot v1: EAX holds the magic and EBX a pointer to this, saved by
  * boot/entry.S before it clears the BSS.  QEMU fills in cmdline only when the
@@ -220,9 +461,27 @@ __attribute__((section(".data"))) char g_mb_cmdline[256];
 #define X86_MB_INFO_CMDLINE     0x00000004u
 
 const char *firmware_bootargs(void) {
-    static int ready;
-    if (!ready) {
-        ready = 1;
+    static int mb_probed;
+    if (!mb_probed) {
+        mb_probed = 1;
+        /* Do this before anything asks about ACPI: the RSDP is what makes MCFG,
+         * MADT and the rest reachable, and on UEFI there is nowhere else to look
+         * for it. */
+        const char *mb = multiboot_cmdline();
+        if (mb) {
+            size_t i = 0;
+            for (; i + 1 < sizeof(g_bootargs) && mb[i]; i++)
+                g_bootargs[i] = mb[i];
+            g_bootargs[i] = '\0';
+            printf("[BOOTARGS] multiboot cmdline='%s'\n", g_bootargs);
+        }
+    }
+    if (g_bootargs[0])
+        return g_bootargs;
+
+    static int fw_probed;
+    if (!fw_probed) {
+        fw_probed = 1;
         outw(FW_CFG_SELECTOR_PORT, FW_CFG_SIGNATURE);
         uint32_t sig = fw_cfg_read32();
         printf("[FW_CFG] signature=0x%08x\n", sig);
@@ -230,13 +489,13 @@ const char *firmware_bootargs(void) {
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_SIZE);
             uint32_t len = fw_cfg_read32();
             printf("[FW_CFG] cmdline_size=%u\n", len);
-            if (len > sizeof(g_fw_cfg_cmdline) - 1)
-                len = sizeof(g_fw_cfg_cmdline) - 1;
+            if (len > sizeof(g_bootargs) - 1)
+                len = sizeof(g_bootargs) - 1;
             outw(FW_CFG_SELECTOR_PORT, FW_CFG_CMDLINE_DATA);
             for (uint32_t i = 0; i < len; i++)
-                g_fw_cfg_cmdline[i] = (char)fw_cfg_read8();
-            g_fw_cfg_cmdline[len] = '\0';
-            printf("[FW_CFG] cmdline='%s'\n", g_fw_cfg_cmdline);
+                g_bootargs[i] = (char)fw_cfg_read8();
+            g_bootargs[len] = '\0';
+            printf("[FW_CFG] cmdline='%s'\n", g_bootargs);
         } else {
             printf("[FW_CFG] no QEMU fw_cfg, using fallback bootargs\n");
         }
@@ -255,7 +514,7 @@ if ((mi->flags & X86_MB_INFO_CMDLINE) && g_mb_cmdline[0]) {
             }
         }
     }
-    return g_fw_cfg_cmdline;
+    return g_bootargs;
 }
 
 void firmware_reboot(void) {
@@ -387,6 +646,66 @@ static void x86_ram_detect(void) {
 
     if (n == 0)
         return;
+
+    /*
+     * Coalesce before handing the map over.
+     *
+     * A firmware multiboot map is not a list of the memory you may use, it is a
+     * list of everything the firmware found, so it arrives full of adjacent and
+     * sub-page pieces.  GRUB on a UEFI VM reports seven entries, and the PFA
+     * accepts at most PFA_MAX_RANGES (4), so appending entries verbatim made
+     * pfa_init() panic with "invalid ram range count" -- the x86_64 port could
+     * not boot from real firmware at all, only from QEMU's -kernel map, which
+     * conveniently reports exactly one range.
+     *
+     * Merging neighbours is not a workaround for the cap, it is what the list
+     * means: two entries that touch describe one usable region, and the PFA is
+     * better served by one range than by two.  Sorting first is what makes the
+     * merge possible, since the firmware is under no obligation to order them.
+     */
+    for (size_t i = 1; i < n; i++) {      /* insertion sort: n <= 8 */
+        paddr_t b = g_ram_base[i], e = g_ram_end[i];
+        size_t j = i;
+        while (j > 0 && g_ram_base[j - 1] > b) {
+            g_ram_base[j] = g_ram_base[j - 1];
+            g_ram_end[j] = g_ram_end[j - 1];
+            j--;
+        }
+        g_ram_base[j] = b;
+        g_ram_end[j] = e;
+    }
+
+    size_t merged = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (merged > 0 && g_ram_base[i] <= g_ram_end[merged - 1]) {
+            if (g_ram_end[i] > g_ram_end[merged - 1])
+                g_ram_end[merged - 1] = g_ram_end[i];
+            continue;
+        }
+        g_ram_base[merged] = g_ram_base[i];
+        g_ram_end[merged] = g_ram_end[i];
+        merged++;
+    }
+    n = merged;
+
+    /*
+     * Still more ranges than the PFA has room for.  Merging cannot fix that -- the
+     * gaps are real -- so keep the largest, which is the memory that matters, and
+     * say so rather than dropping the excess silently.
+     */
+    if (n > PFA_MAX_RANGES) {
+        kinfo("[RAM] %zu ranges after merge, PFA takes %d; keeping the largest\n",
+              n, PFA_MAX_RANGES);
+        size_t best = 0;
+        for (size_t i = 1; i < n; i++)
+            if (g_ram_end[i] - g_ram_base[i] >
+                g_ram_end[best] - g_ram_base[best])
+                best = i;
+        paddr_t b = g_ram_base[best], e = g_ram_end[best];
+        g_ram_base[0] = b;
+        g_ram_end[0] = e;
+        n = 1;
+    }
 
     g_ram_count = n;
     for (size_t i = 0; i < n; i++)

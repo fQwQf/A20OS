@@ -24,9 +24,9 @@
 extern void arch_return_to_user(trap_context_t *ctx) NORETURN;
 #endif
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-static void ls2k_dump_user_pt_path(pt_root_t *root, vaddr_t va,
-                                   const char *name)
+#ifdef CONFIG_DEBUG_BOOT_TRACE
+static void dump_user_pt_path(pt_root_t *root, vaddr_t va,
+                               const char *name)
 {
     pte_t *table = root;
 
@@ -281,7 +281,7 @@ void proc_task_first_entry(void)
     task_t *t = proc_current();
     void (*entry)(void) = t ? (void (*)(void))t->first_kernel_entry : NULL;
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
+#ifdef CONFIG_DEBUG_BOOT_TRACE
     kinfo("[SCHED] first task entry: pid=%d trap=%p entry=%p\n",
           t ? t->pid : -1, t ? (void *)t->trap_ctx : NULL, (void *)entry);
 #endif
@@ -291,26 +291,10 @@ void proc_task_first_entry(void)
     proc_switch_complete();
 #ifndef CONFIG_MCU
     if (t && t->trap_ctx) {
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-        kinfo("[SCHED] returning pid %d to user: era=0x%lx prmd=0x%lx\n",
-              t->pid, (unsigned long)TRAP_CTX_EPC(t->trap_ctx),
-              (unsigned long)TRAP_CTX_STATUS(t->trap_ctx));
-        uint64_t crmd, eentry, tlbrentry, pgdl, pwcl, pwch, tlbrehi, prcfg1;
-        __asm__ __volatile__("csrrd %0, 0x0" : "=r"(crmd));
-        __asm__ __volatile__("csrrd %0, 0xc" : "=r"(eentry));
-        __asm__ __volatile__("csrrd %0, 0x88" : "=r"(tlbrentry));
-        __asm__ __volatile__("csrrd %0, 0x19" : "=r"(pgdl));
-        __asm__ __volatile__("csrrd %0, 0x1c" : "=r"(pwcl));
-        __asm__ __volatile__("csrrd %0, 0x1d" : "=r"(pwch));
-        __asm__ __volatile__("csrrd %0, 0x8e" : "=r"(tlbrehi));
-        __asm__ __volatile__("csrrd %0, 0x21" : "=r"(prcfg1));
-        kinfo("[SCHED] CSR crmd=%lx eentry=%lx tlbrentry=%lx pgdl=%lx\n",
-              crmd, eentry, tlbrentry, pgdl);
-        kinfo("[SCHED] CSR pwcl=%lx pwch=%lx tlbrehi=%lx prcfg1=%lx\n",
-              pwcl, pwch, tlbrehi, prcfg1);
-        ls2k_dump_user_pt_path(t->pgdir, TRAP_CTX_EPC(t->trap_ctx), "entry");
-        ls2k_dump_user_pt_path(t->pgdir, TRAP_CTX_SP(t->trap_ctx) - 1,
-                               "stack");
+#ifdef CONFIG_DEBUG_BOOT_TRACE
+        arch_debug_dump_user_state();
+        dump_user_pt_path(t->pgdir, TRAP_CTX_EPC(t->trap_ctx), "entry");
+        dump_user_pt_path(t->pgdir, TRAP_CTX_SP(t->trap_ctx) - 1, "stack");
 #endif
         arch_return_to_user(t->trap_ctx);
     }

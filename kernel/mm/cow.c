@@ -62,7 +62,7 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
             frame_put(copy);
             return r;
         }
-        child->rss++;
+        mm_rss_add(child, 1);
         return 0;
     }
 
@@ -80,7 +80,7 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
         *src = arch_pte_leaf(pa, flags);
         mm_tlb_note_change(parent, base, size);
     }
-    child->rss += size / PAGE_SIZE;
+    mm_rss_add(child, size / PAGE_SIZE);
     return 0;
 }
 
@@ -126,7 +126,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
             pfa_free(copy, order);
             return r;
         }
-        child->rss += leaf_size / PAGE_SIZE;
+        mm_rss_add(child, leaf_size / PAGE_SIZE);
         return 0;
     }
 
@@ -158,7 +158,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
         *src_pte = arch_pte_leaf(pa, flags);
         mm_tlb_note_change(parent, va, leaf_size);
     }
-    child->rss += vm_pt_level_size(level) / PAGE_SIZE;
+    mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);
     return 0;
 }
 

@@ -226,7 +226,13 @@ static inline void __attribute__((noreturn)) arch_halt(void) {
 
 static inline int arch_is_kernel_address(const void *ptr) {
 #ifdef CONFIG_NOMMU
-    return (uintptr_t)ptr >= PHYS_MEMORY_BASE && (uintptr_t)ptr < PHYS_MEMORY_END;
+    /* Expressed as an offset from the window base rather than as two
+     * comparisons: the RK3328's DRAM starts at physical 0, and
+     * `ptr >= PHYS_MEMORY_BASE` is then `ptr >= 0`, which is always true and
+     * trips -Werror=type-limits.  Subtracting the base is vacuously fine when
+     * the base is 0 and still a correct containment test when it is not. */
+    return (uintptr_t)ptr - PHYS_MEMORY_BASE <
+           PHYS_MEMORY_END - PHYS_MEMORY_BASE;
 #else
     return (uintptr_t)ptr >= PAGE_OFFSET;
 #endif

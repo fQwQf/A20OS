@@ -162,7 +162,7 @@ static int swap_out_victim_pages(int target_pages)
                                  * held for the TLB flush and dropped by
                                  * mm_tlb_invalidate_finish() */
                 cg_mem_uncharge(victim->cgroup, 1);
-                mm->rss = mm->rss ? mm->rss - 1 : 0;
+                mm_rss_sub_clamped(mm, 1);
                 reclaimed++;
             } else {
                 frame_put(pfn);

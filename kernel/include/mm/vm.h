@@ -160,10 +160,24 @@ typedef struct mm_pt_retire {
  *   mutations: mm_mmap/mm_mmap_file, mm_munmap, mm_mprotect, mm_mremap,
  *   mm_brk shrink, mm_fork COW setup, demand fault installs, COW fault installs,
  *   huge-page demotion, exec replacement, and exit teardown.
+ * - ONE exception to the clause above, and it is narrow: the status fast path
+ *   (mm_fault_from_status(), P5) installs a PTE for a pre-provisioned anonymous
+ *   entry WITHOUT mm->lock, holding only the cursor.  It is the only PTE-write
+ *   path in the tree that does not take mm->lock, which is the point of it: it
+ *   consults no VMA, so there is nothing there for the lock to protect.  Every
+ *   other fault install -- COW, file, and any anon range not pre-provisioned --
+ *   still runs under mm->lock via the VMA path.  The exclusion it depends on is
+ *   per-address exclusion against unmap (mm_pt_node_lock in pt_unmap_leaf /
+ *   pt_unmap), not the absence of mm->lock.
  * - Read-only VMA walks may run without mm->lock only when the caller owns the
  *   task/mm exclusively or when the walk cannot race with mmap writers. Shared
  *   address-space readers need either mm->lock, a pinned VMA/page-cache object,
  *   or a future RCU-style VMA lifetime scheme.
+ * - RSS accounting (mm_struct_t.rss_atomic) is the one mapping statistic that
+ *   does NOT require mm->lock: the OOM victim selector reads it under
+ *   proc_lock, which does not exclude the fault/COW/unmap writers. Use the
+ *   mm_rss_* helpers, never a direct field access. The saturating subtract is
+ *   a compare-exchange loop, not fetch_sub plus a clamp.
  * - Page-table writers must publish the new PTE before dropping the object/page
  *   reference it replaces and must flush the affected TLB range before returning
  *   to user mode. Permission relax/tighten, unmap, demote, demand fault, file
@@ -226,7 +240,12 @@ typedef struct mm_struct {
     vaddr_t    stack_top;
     vaddr_t    stack_bottom;
     size_t     total_vm;
-    size_t     rss;
+    /* Resident set size in pages.  Atomic: the OOM victim selector reads it
+     * under proc_lock (kernel/mm/cg_mem.c) while fault/COW/unmap paths update
+     * it under mm->lock, and once the status fault path leaves mm->lock the
+     * two locks stop excluding each other.  The field name says "atomic" so
+     * that a plain `->rss` access cannot compile -- see mm_rss_* below. */
+    size_t     rss_atomic;
     size_t     locked_vm;
     uint32_t   def_flags;
     uint8_t    membarrier_registered; /* MEMBARRIER_CMD_REGISTER_* state */
@@ -303,6 +322,47 @@ static inline int mm_addr_is_error(vaddr_t addr)
 static inline int mm_addr_error(vaddr_t addr)
 {
     return (int)(intptr_t)addr;
+}
+
+/* RSS accounting.  See the rss_atomic field comment for why these are atomic
+ * rather than mm->lock protected.
+ *
+ * The saturating subtract is a compare-exchange loop and must not become a
+ * fetch_sub followed by a clamp: with two concurrent subtracts the loser's
+ * already-computed small value can be committed after the winner's decrement,
+ * which is an underflow window that does not exist in the sequential version.
+ * An underflowed rss feeds cg_mem's victim score, so it makes the OOM killer
+ * sacrifice the wrong process. */
+static inline void mm_rss_add(mm_struct_t *mm, size_t pages)
+{
+    if (mm)
+        __atomic_fetch_add(&mm->rss_atomic, pages, __ATOMIC_RELAXED);
+}
+
+static inline void mm_rss_sub_clamped(mm_struct_t *mm, size_t pages)
+{
+    if (!mm)
+        return;
+    size_t cur = __atomic_load_n(&mm->rss_atomic, __ATOMIC_RELAXED);
+    for (;;) {
+        size_t next = cur > pages ? cur - pages : 0;
+        if (__atomic_compare_exchange_n(&mm->rss_atomic, &cur, next, 1,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
+}
+
+static inline void mm_rss_set(mm_struct_t *mm, size_t v)
+{
+    if (mm)
+        __atomic_store_n(&mm->rss_atomic, v, __ATOMIC_RELEASE);
+}
+
+/* Acquire: the OOM victim selector reads this under proc_lock while other
+ * state it weighs alongside rss is published under mm->lock. */
+static inline size_t mm_rss_get(mm_struct_t *mm)
+{
+    return mm ? __atomic_load_n(&mm->rss_atomic, __ATOMIC_ACQUIRE) : 0;
 }
 
 /* Locked variants: caller must hold mm->lock.  Used by the public wrappers

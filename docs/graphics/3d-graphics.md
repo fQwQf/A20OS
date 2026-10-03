@@ -30,12 +30,12 @@
 | virtio-gpu 2D scanout、modeset、page-flip | ✅ 可用 | 桌面长期运行其上，有 QMP 截屏证据 |
 | virtio-gpu 3D 协议结构体与命令封装 | ✅ 已实现 | `virtio_gpu.h` / `virtio_gpu.c` 的 `CTX_CREATE`/`RESOURCE_CREATE_3D`/`SUBMIT_3D`/`RESOURCE_UNREF` |
 | QEMU 侧提供 virgl 设备 | ✅ **本轮新增** | `GPU_3D=1` 选择 `virtio-gpu-gl-*`；此前所有实例都是 2D-only |
-| 3D 传输通路端到端 | ✅ **本轮已双向验证** | `tools/a20 test smoke-gpu3d-riscv64`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
+| 3D 传输通路端到端 | ✅ **本轮已在三种架构上双向验证** | `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`：guest 协商到 VIRGL 并从 host virglrenderer 读到 `capset[0] id=1 ver=1 size=308`；反向（`GPU_3D=0`）门禁确实 FAIL。三条门禁的像素回读都得到同一组颜色值，所以"渲染器产出与 guest 架构无关"这一点现在也是被测的，而不只被假设。前提是 display 用 GLX 后端（`gtk,gl=on`）；`egl-headless` 会让 QEMU 静默降级为 2D-only，见 [gpu-3d-roadmap.md §5.0](gpu-3d-roadmap.md) |
 | 3D 资源挂载 backing | ✅ **本轮已实现并验证** | VIRTGPU 资源由 GEM handle 承载，内核把 VMO 页 materialize（`vmo_get_page_charged`）后转成 `virtio_gpu_mem_entry[]` 发 `RESOURCE_ATTACH_BACKING`；实测 host 接受：`3D resource 2 created with host backing` |
 | 命令流提交 | ✅ **本轮已验证到像素** | `gpu3d_test` 提交真实 `VIRGL_CCMD_CLEAR`（`CREATE_OBJECT(SURFACE)` → `SET_FRAMEBUFFER_STATE` → `CLEAR`，76 字节），并**回读像素**：两遍颜色都中（红 `0xffff0000`、蓝 `0xff0000ff`，各 4096 像素）。此前"编码正确但像素未验证"的状态是三个缺陷叠加的结果——SUBMIT_3D 命令头多带一个 mem_entry 导致命令体被宿主按固定 32 字节偏移截断、从未下发 `CTX_ATTACH_RESOURCE`、`TRANSFER_FROM_HOST` 是空实现；见 §0.5 |
 | 上游 `DRM_IOCTL_VIRTGPU_*` UAPI | ✅ **本轮已实现** | `GETPARAM`/`GET_CAPS`/`RESOURCE_CREATE`/`RESOURCE_INFO`/`EXECBUFFER`/`WAIT`/`MAP`/`CONTEXT_INIT`/`TRANSFER_*`；ioctl 号与 Linux UAPI 逐条比对过（`tools/check-drm-abi.sh`），未与 legacy `DRM_IOCTL_VIRGL_*` 混淆（[gpu-3d-roadmap.md §1](gpu-3d-roadmap.md)） |
 | `GET_CAPS` 在本机可用 | ✅ **本轮已实测可用** | guest 日志 `GET_CAPS returned a 308 byte capset`。此前记为"宿主限制"是错的：那次失败是**我们**把 capset *index* 当 *id* 发了（提交 `68b54d32`），修掉后同一台宿主正常返回。**`capset size=308` 也不是「renderer 老」的判据**：GET_CAPSET_INFO 按索引查，index 0 就是 capset 1，而 capset 1 本就小（见 [gpu-3d-roadmap.md §5.0.1](gpu-3d-roadmap.md)） |
-| stock Mesa 实际挂载 | ❌ **未验证** | VIRTGPU UAPI 已就绪，但尚未用完整 xfce 镜像跑一次 `virtio_gpu_dri.so` attach 来确认够用。宿主 renderer 已从 1.1.0-2 换成自建的 1.3.0（`tools/build-virglrenderer.sh`，`fca72f5f`），但 QEMU 仍不向 guest 提供 `VIRTIO_GPU_F_VIRGL`：NVIDIA EGL 下静默降级为 2D，强制 Mesa EGL 则 `eglInitialize failed`。因此这条仍未解决，且卡点已收窄到宿主 EGL/GBM 平台选择（见 gpu-3d-roadmap.md §5.1）（[gpu-3d-roadmap.md §5.1](gpu-3d-roadmap.md)） |
+| stock Mesa 实际挂载 | ✅ **已挂载 virgl** | `smoke-mesa-attach` 报 `attached: yes`，renderer 为 `virgl (…radeonsi…)`。根因是我们内核把 `VIRTGPU_GETPARAM` 的 `value` 当成 in/out 标量，而它其实是用户态指针：Mesa 传 `&value` 再读自己的本地变量，于是每个 param 读回 0，`virgl_drm_winsys_create()` 在建 context 前就放弃。改为写穿指针后 `CONTEXT_INIT`/`EXECBUFFER` 随之出现。另需 `version_major=0`（Mesa 的 `virgl_drm_get_version()` 对 major!=0 返回 -EINVAL，实测确认）。详见 §0.8 |
 | guest 里的 GL/GLES 客户端 | ✅ **已可用（llvmpipe）** | `es2gears_wayland` 在 Wayland 路径上跑到测试超时，`eglinfo -p wayland` 报 `OpenGL ES profile version: OpenGL ES 3.2 Mesa 25.2.7`（llvmpipe，LLVM 21.1.2）。即"3D 游戏"当前被呈现与性能卡住，而不是被 GPU 卡住（[gpu-3d-roadmap.md §0](gpu-3d-roadmap.md)） |
 | DRM GEM 对象模型 | ✅ **本轮已实现** | `GEM_OPEN`/`GEM_FLINK` 为真 UAPI ioctl，`GEM_CLOSE` 真正释放，dumb buffer 复用同一分配器，上限 64。`GEM_CREATE`/`GEM_MMAP` 已不是 UAPI 概念，见 §8.1 |
 | KMS 对象模型 | ✅ **本轮已实现** | 1 CRTC / 1 connector / 1 encoder / 1 plane，硬编码 id；CRTC 真正保存 framebuffer 绑定，`GETCRTC` 报绑定并回写 connector 列表。framebuffer 上限 64 |
@@ -191,8 +191,13 @@ GET_CAPSET（见提交 `68b54d32`）。修掉之后 guest 日志变成
 1. ~~`gpu3d_test` 的像素回读 4096/4096 全错~~ **已解决，见下面一节。**
 2. guest 里跑 `eglinfo` 会 segfault（`ra=0x400`，解引用未映射的 `0x87613f40`），
    崩在 Mesa 的 EGL 设备枚举里。`libvirglrenderer.so.1` 与
-   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件；是 Mesa 侧与本驱动 UAPI 的交互
-   还需要继续查。
+   `virtio_gpu_dri.so` 都在镜像里，所以不是缺件。**本轮查过并排除了"ioctl 缺口"
+   这条主要猜测**：驱动定义的 48 个 ioctl 里有 47 个真的被分发，唯一没分发的
+   `VIRTGPU_RESOURCE_CREATE_BLOB` 早就通过 `VIRTGPU_PARAM_RESOURCE_BLOB = 0`
+   声明为不可用，所以 Mesa 不会去调它；`GET_CAP` 广告的三个能力
+   （`DUMB_BUFFER`/`PRIME`/时间戳）对应的 ioctl 也都在。而落到 `default:`
+   的 ioctl 返回的是错误，不是 NULL 函数指针，因此这条路径产生不了 `ra=0x400`。
+   **仍未定位**，见 §0.7。
 3. 因此**还不能说"Mesa 已经挂上 virtio_gpu_dri"**。已有的是强旁证：强制
    `A20_RENDERER=gl`（wlroots 在 renderer 创建失败时是直接放弃而非退回）后 session
    仍然起来并呈现，且此前失败日志里的 `render/allocator/drm_dumb.c` +
@@ -258,7 +263,7 @@ SUBMIT_3D 依然回 OK——传输层确实成功了，渲染器静默丢弃而�
 - 探针里 `PIPE_TEXTURE_2D` 应为 **2**（`enum pipe_texture_target` 第一个成员是
   `PIPE_BUFFER`），这一条上一轮已更正。
 
-**门禁，而且实测会红。** 判据是 `smoke-gpu3d-riscv64` 要求出现
+**门禁，而且实测会红。** 判据是 `smoke-gpu3d-riscv64`（以及本轮新增的 x86_64/aarch64 两道）要求出现
 `pixel readback ok` 与 `PASS`。把那个 mem_entry 放回去（并临时关掉
 `_Static_assert` 以便让**运行期**门禁去抓），门禁立刻转红，且复现的正是历史上的
 那个签名：`FAIL pass 0: 4096/4096 pixels wrong, first pixel is 0xdeadbeef`。
@@ -270,8 +275,56 @@ SUBMIT_3D 依然回 OK——传输层确实成功了，渲染器静默丢弃而�
 QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,0,0)` 都不是
 必需的，`ctx_attach_resource` 才是。
 
-**仍未解决**：Mesa 侧的 `eglinfo` 段错误，以及"Mesa 到底挂上没有"缺一张直接证据
-（见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+**仍未解决**：Mesa 侧的 `eglinfo` 段错误（见 §0.7），以及"Mesa 到底挂上没有"缺一张
+直接证据（见上面第 2、3 条）。3D 通路本身现在是有像素回读门禁的。
+
+---
+
+## 0.7 `eglinfo` 段错误：排除了主要猜测，缩小了范围
+
+这一条挂了很久，本轮做的是**把它从"猜测"变成"已排除"**，而不是假装定位了。
+
+**症状**：guest 里跑 `eglinfo` 段错误，`ra=0x400`，解引用未映射的 `0x87613f40`。
+
+**先说方法论上的一个坑**：`ra=0x400` 非常像 Mesa/llvmpipe 调了一个 NULL 函数指针
+（`NULL + 某个小偏移`），所以最自然的猜测是"Mesa 问了一个我们没实现的 ioctl，
+拿到成功但什么都没填的结构体，之后解引用 NULL"。这个猜测很合理，**但实测不成立**：
+
+- 驱动定义的 48 个 ioctl 里，**47 个真的进了 `drm_ioctl` 的 switch**。唯一没进的是
+  `VIRTGPU_RESOURCE_CREATE_BLOB`，而 `VIRTGPU_PARAM_RESOURCE_BLOB` 明确返回 0，
+  Mesa 因此不会去调它。这是设计上的自洽，不是漏洞。
+- `DRM_IOCTL_GET_CAP` 广告了 3 个能力，逐个核对下来都名副其实：
+  `DUMB_BUFFER` → `CREATE_DUMB`/`MAP_DUMB`/`DESTROY_DUMB` 都在；
+  `PRIME`（IMPORT|EXPORT=3）→ 两个方向的 ioctl 都在；
+  `TIMESTAMP_MONOTONIC` → vblank 事件确实填了 `timekeeping_get_monotonic`。
+- 落到 `default:` 的 ioctl 返回 `-ENOTTY` 一类的**错误**，不是 NULL 函数指针。
+  所以"未实现 → 成功但结构体没填 → NULL 解引用"这条链在当前 dispatch 上断掉了。
+
+**顺带一度改错、已回退一处**：`DRM_CAP_TIMESTAMP_MONOTONIC` 报的是 1，而本驱动
+并没有 `DRM_IOCTL_MODE_GETTIME`（vblank 事件里的单调时间戳是真的）。本轮据此把它
+改成 0，**结果桌面直接起不来**：wlroots 把这个 cap 当**硬要求**，拿不到就放弃整个
+DRM backend（`[backend/drm/drm.c:84] DRM_CAP_TIMESTAMP_MONOTONIC unsupported`
+→ `Failed to create DRM backend` → `Could not successfully create backend on any
+GPU` → `unable to create backend`）。已回退为 1。
+
+这个 cap 因此是**承重**的，不能按"只报了没实现的能力"来理解：为了让一个真去
+`GETTIME` 的客户端拿到错误而把它清零，代价是所有客户端都起不来。**两害相权，
+保留 1 是对的**，代码注释已记下这个理由，避免下一轮再"纠正"一次。这条也说明
+§0.6 那次桌面 smoke 有多必要：纯看源码，这个改动像是无害的收紧。
+
+**因此把范围收窄到了哪里**：既然不是 ioctl 表的缺口，也不是 capability 撒谎，那么
+`ra=0x400` 更可能出现在 **Mesa 读 `/dev/dri/card0` 之后枚举设备节点的阶段**——
+本文件后面 §5.1 已记录过同类形状的问题（`eglInitialize` 成功、
+`DRI2: failed to create gbm device`，而内核侧没有任何 ioctl 报错），那次是 **GBM
+平台选择**。两条症状是否同源尚未证实。
+
+**明确说不知道的部分**：
+- 崩溃的具体指令地址没有在 guest 内复现过（没有带符号的 core dump 或
+  `MESA_DEBUG=1` 输出），所以"Mesa 的哪一行"仍是未知的；
+- 镜像里 Mesa 的具体版本与它 `eglInitialize` 时的设备枚举顺序未确认；
+- 因此**没有**在这里断言根因。要往下走，最小的一步是让 guest 在 `eglinfo`
+  崩溃时留下带符号的回溯（`ulimit -c` + core dump，或 `MESA_DEBUG=1`），
+  这需要能进 guest 交互 shell，本轮不具备。
 
 ---
 
@@ -314,6 +367,110 @@ QEMU 的真实顺序调用。附带结论：`make_current` 与 `submit_cmd(NULL,
 
 
 ---
+
+## 0.8 stock Mesa 已挂上 virgl：真正的阻塞点是 GETPARAM 的指针语义
+
+**结论先行**：`smoke-mesa-attach` 现在报 `virtio_gpu_dri attached: yes`，renderer
+字符串为 `virgl (…radeonsi…)`。阻塞点不是发行版打包，是**我们内核把
+`VIRTGPU_GETPARAM` 的 `value` 当成了 in/out 标量，而它其实是一个用户态指针**。
+
+### 0.8.1 第一个坑：这个门禁曾经在空转
+
+`make smoke-mesa-attach` 当时**没有**让 QEMU 挂上 GPU 设备。GPU 设备只在
+`DISPLAY_MODE=gui` 时才加入（`Makefile` 的 GUI device 段），而文本模式下
+`-nographic` 下一个显示设备都不挂。于是 guest 里所有 `VIRTGPU_*` ioctl 返回
+`-ENODEV`——**这是正确行为**，但看起来和"Mesa 有 bug" 一模一样。实测 PCI 总线上
+只有 `1af4:1001`(blk) 与 `1af4:1000`(net)，没有 `1af4:1050`(gpu)。
+
+门禁目标因此显式声明 `DISPLAY_MODE=gui` 与 `QEMU_GUI_DISPLAY=egl-headless`
+（gtk 需要 X；缺 `gl=on` 时 QEMU 干脆不建设备），并且**断言** guest 真的把 virgl
+virtio-gpu 起来了——否则下面所有观察都没有意义。
+
+### 0.8.2 真正的根因：`value` 是指针，不是标量
+
+加 ioctl trace 后，一次 attach 尝试的序列稳定停在：
+
+```
+VERSION ×4 → GET_CAPS(capset 6) → GETPARAM 1..7 → 结束
+```
+
+全部 `rc=0`，且**从未**出现 `DRM_IOCTL_VIRTGPU_CONTEXT_INIT`。对照 Mesa 源码
+（`src/gallium/winsys/virgl/drm/virgl_drm_winsys.c` 的 `virgl_drm_winsys_create`），
+这 7 个 `GETPARAM` 正是它的 `params[]` 循环，循环之后立刻是：
+
+```c
+if (!params[param_3d_features].value)
+   return NULL;
+```
+
+而 Mesa 是这样调用的：
+
+```c
+struct drm_virtgpu_getparam getparam = { 0 };
+uint64_t value = 0;
+getparam.param = params[i].param;
+getparam.value = (uint64_t)(uintptr_t)&value;   /* 传的是本地变量的地址 */
+ret = drmIoctl(drmFD, DRM_IOCTL_VIRTGPU_GETPARAM, &getparam);
+params[i].value = (ret == 0) ? value : 0;       /* 读回的是它自己的本地变量 */
+```
+
+我们却把算出的数值**写回 struct 的 `value` 字段**，等于把指针覆盖成了一个数字，
+Mesa 的本地 `value` 始终是 `0`。于是 `param_3d_features == 0`，winsys 在建 context
+之前就返回 NULL——**每一个 ioctl 都成功，驱动却放弃了设备**。
+
+改为 Linux 语义（`copy_to_user` 写穿指针）后，`CONTEXT_INIT` 立刻出现，
+随后是 `DRM_IOCTL_VIRTGPU_EXECBUFFER`（真正在提交 virgl 命令流），
+renderer 随之变成 virgl。`user/cmds/core/gpu3d_test.c` 同步改成指针用法。
+
+### 0.8.3 第二处：`version_major` 必须是 0
+
+`virgl_init_context()` 之前还有 `virgl_drm_get_version()`：
+
+```c
+else if (version->version_major != 0)
+   ret = -EINVAL;
+```
+
+普通 DRM 驱动报 `version_major = 1`，而 Mesa 在这里要求 **0**。这不是猜测，是
+实测：在 `GETPARAM` 修好之后分别用 `major=1` 与 `major=0` 各跑一轮——`major=1`
+时 `CONTEXT_INIT` 完全不出现、renderer 仍是 llvmpipe；`major=0` 时才 attach 成功。
+所以内核**故意**偏离常规 DRM 约定报 0。
+
+### 0.8.4 走过的弯路（结论已被推翻，留作反例）
+
+中途曾断言"Alpine 的 `mesa-dri-gallium` 没编译 virgl 后端"，依据是
+`libvirglrenderer.so.1.9.1` 导出 43 个 `virgl_renderer_*` 而
+`libgallium-25.2.7.so` 导入 0 个，且 v3.22 APKINDEX 里没有任何包把 Mesa 链接到它。
+
+**这个结论是错的**，错在用一个无效的判据下结论：ELF 里没有 `virgl_renderer_*`
+的导入，既可能因为没链接，也可能因为 Mesa 走 `dlopen`+`dlsym`。事后在
+Alpine 3.23 里用 `virglrenderer-dev` 从源码编了一份 `-Dgallium-drivers=virgl` 的
+Mesa，装进 guest 后行为与发行版版**逐字节一致**——发行版根本不是变量。
+
+真正的判据应该是**跑一次并读 ioctl 轨迹**，而不是数符号。
+
+### 0.8.5 顺带修正的 ABI 偏差
+
+- `GET_CAPS` 原先忽略用户传入的 `c.cap_set_id`，永远用 context 的 capset id。
+  `GET_CAPSET_INFO` 按索引寻址，`GET_CAPS` 按 id 寻址，二者不能混。
+- `VIRTIO_GPU_CAPSET_DRM`(=6) 由**内核**回答（Linux 在
+  `virtio_gpu_ioctl_get_caps()` 里就地填 `virtio_gpu_drm_caps`，根本不到 host）。
+  注意 `caps_set` 里填的是**可用的 renderer capset**（`(1<<VIRGL)|(1<<VIRGL2)`），
+  不是 `1<<6`——后者等于告诉客户端"没有可用 renderer"。
+- `drm_version.name` 原本上报 `"a20drm"`。Linux 上报的是 **DRM 驱动名**
+  `"virtio_gpu"`；因为 libdrm 的 `loader_get_pci_driver()` 在我们这里拿不到
+  `/sys/bus/pci/devices`（为空），它会回落到 `loader_get_kernel_driver_name()`，
+  而后者正是读 `drmGetVersion()->name`。这个名字不匹配，loader 就找不到驱动。
+
+### 0.8.6 门禁现在怎么判
+
+`smoke-mesa-attach` 默认**断言** renderer 里出现 virgl；Mesa 回落软件渲染即 FAIL
+（`MESA_REQUIRE_VIRGL_ATTACH=0` 可临时降级为只报告）。
+注意判据用 `profile renderer: *virgl`：eglinfo 打印的是
+`OpenGL core profile renderer:` / `OpenGL ES profile renderer:`，而不是
+`OpenGL renderer string:`——用后者会一条都匹配不到，并让门禁在 virgl 正常工作
+时误报"未 attach"。
+
 
 ## 1. 背景与原理
 
@@ -448,16 +605,19 @@ drvmod 模块以 `-fPIC` 编译，`gpu_ioctl` 若用 `switch` 分发会生成 PI
 `user/cmds/core/gpu3d_test.c` 是验证内核 3D 链路的独立工具，ioctl 号与结构在文件内自包含（不依赖内核头）。它需要 virgl-capable 设备（`GPU_3D=1`）：
 
 ```sh
-# 推荐走门禁（见 gpu-3d-roadmap.md §8）
+# 推荐走门禁（见 gpu-3d-roadmap.md §8）。三种架构各一道，都要求像素回读：
 tools/a20 test smoke-gpu3d-riscv64
-# 实测期望输出：
+tools/a20 test smoke-gpu3d-x86_64
+tools/a20 test smoke-gpu3d-aarch64
+# 实测期望输出（三条门禁一致）：
 #   [GPU] virtio-gpu 3D (virgl): capset[0] id=1 ver=1 size=308 ctx_init=1
-#   GPU3D_TEST: virgl available
-#   GPU3D_TEST: context 1 created
-#   GPU3D_TEST: 3D resource 2 created (16x16 RGBA8)
-#   GPU3D_TEST: resource 2 released
-#   GPU3D_TEST: context destroyed
-#   GPU3D_TEST: PASS (transport only -- no command stream submitted, rendering unverified)
+#   GPU3D_TEST: GETPARAM 3D_FEATURES=1
+#   GPU3D_TEST: GET_CAPS returned a 308 byte capset
+#   GPU3D_TEST: 3D resource 2 created with host backing
+#   GPU3D_TEST: EXECBUFFER accepted a 76 byte clear stream
+#   GPU3D_TEST: pixel readback ok (0xffff0000 across 4096 pixels)
+#   GPU3D_TEST: pixel readback ok (0xff0000ff across 4096 pixels)
+#   GPU3D_TEST: PASS (UAPI works and the host rendered the colours asked for)
 ```
 
 退出码是三态，且必须保持三态：
@@ -472,9 +632,13 @@ tools/a20 test smoke-gpu3d-riscv64
 `return 0`，于是该测试在任何配置下都是绿的，绿灯不携带任何信息，这正是
 §0 那两条失真结论的来源。SKIP 故意不等于 PASS。
 
-PASS 那行有自我限定：**它没有提交命令流，资源也没有 backing**，
-所以它证明的是*传输可达性*，不是"渲染成功"。命令流与 backing 见
-[gpu-3d-roadmap.md §7、§12](gpu-3d-roadmap.md)。
+PASS 那行现在是**有像素证据**的：两遍颜色都由 host 渲染出来、再经
+`TRANSFER_FROM_HOST_3D` 回到 guest 逐像素比对过（红 `0xffff0000`、蓝 `0xff0000ff`）。
+此前这一行带自我限定、只证明*传输可达性*，那个时代已经结束——根因见 §0.5。
+
+但**这仍然是手写命令流的证据，不是 Mesa 的**。`gpu3d_test` 自己发
+`DRM_IOCTL_VIRTGPU_*`，所以它不经过 DRI 驱动；stock Mesa 能否用上这条通路是另一个
+命题，由 `make smoke-mesa-attach` 记录、目前仍未解决（见 [§8.0](#80-本轮sysfs-那条路走了一半是死路llvmpipe-回退正在承重)）。
 
 ### 4.2 完整的 virgl 客户端栈（后续阶段）
 
@@ -533,7 +697,7 @@ boot 日志应出现：
 | `kernel/drivers/gpu/virtio_gpu.c` | 驱动：feature 协商、capset、3D 命令封装、`gpu_ioctl` 分发 |
 | `kernel/drivers/gpu/drm.c` | DRM `/dev/dri/card0`：KMS + A20 3D 透传 |
 | `kernel/drvmod/framework.c` | drvmod 导出表（含 `copy_from_user/to_user`） |
-| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-riscv64`） |
+| `user/cmds/core/gpu3d_test.c` | 用户态 3D 自测（走门禁 `tools/a20 test smoke-gpu3d-{riscv64,x86_64,aarch64}`，三条都要求像素回读） |
 | `user/cmds/core/egl_test.c` | 已删除（曾被 `user/Makefile` 从 `LOCAL_CMD_SRCS` filter 掉） |
 | `tools/check-drm-abi.sh` | DRM UAPI 门禁：ioctl 号 + 结构体布局对 Linux UAPI 双向可证伪（§8.1） |
 | `tools/build-virglrenderer.sh` | 宿主侧 virglrenderer 构建（已运行，装出 1.3.0；Mesa 仍因宿主 EGL 未 attach） |
@@ -692,6 +856,45 @@ libEGL warning: egl: failed to create dri2 screen
   注意这会动到现有 `/sys/class/drm/*` 布局，而 wlroots/libinput 现在依赖它：改之前必须先跑桌面回归，
   别把已经能用的桌面弄坏。而且这只是 GL 链的第一环，后面还有 kms_swrast 建 screen、EGL、真 dma-buf PRIME、
   MODE_GETFB2、以及放开 `WLR_RENDERER`。
+
+### 8.0 本轮：sysfs 那条路走了一半是死路，`llvmpipe` 回退正在承重
+
+本轮把 §8 上面那条猜测（"补一个 sysfs 入口就能让 Mesa attach"）实际做了一遍，**结论是它
+单独做会把已经能用的桌面弄坏**，所以已回退。记在这里是因为失败方式比结论更值得留档。
+
+**做法**：给 `/sys/class/drm/card0/` 加一个 `driver` 符号链接（指向实际绑定的驱动），
+外加 `uevent`。依据是 libdrm 的 `drmGetDevice2()` 用它来判定驱动名，而我们的
+`/sys/class/drm/card0/device/` 下**只有** `modalias`（`kernel/fs/sysfs.c` 的
+`SF_DRM_CARD_DEVICE` readdir 只列 `modalias`）。
+
+**实测结果**：
+
+- 改之前：`eglinfo -p gbm` 失败，但**默认 `eglinfo -B` 成功**，`llvmpipe (LLVM 21.1.2)`；
+  桌面的 `A20_RENDERER=pixman`/swrast 路径正常。
+- 改之后：`eglinfo -p gbm` 仍失败，而且**默认 `eglinfo -B` 也开始失败**，
+  报 `libEGL warning: DRI2: failed to create screen`。
+
+也就是说：补上 `driver` 之后 libdrm 终于认出了设备，于是 Mesa 去加载
+`virtio_gpu_dri.so`，而**那条驱动建 screen 仍然失败**——只是失败点从"找不到设备"
+提前到了"驱动初始化失败"，并且**丢掉了 llvmpipe 回退**。
+
+**结论与它推翻的假设**：
+
+1. `driver` 链接是**必要但不充分**。它只让 libdrm 前进一步，`virtio_gpu_dri.so`
+   真正需要的还有别的（下一环是 screen 创建，也就是 `kms_swrast` 那一侧）。
+2. **当前"EGL 能用"这件事，是靠 libdrm 找不到设备、从而 Mesa 回退到
+   surfaceless/llvmpipe 撑着的。** 这是一条此前完全没被记录、且**正在承重**的
+   隐式依赖：任何让 libdrm"成功"识别本设备的改动，都会先拆掉这条回退，
+   在驱动真正能用之前把桌面弄坏。
+3. 因此 §8 上写的修法顺序必须反过来：**先把 `virtio_gpu_dri.so` 需要的内核侧
+   能力补齐，再补 sysfs 入口**；先补 sysfs 只会得到一个更早、更响的失败。
+
+本轮落地的是 `tools/virgl-probe` 之外的另一件东西：`make smoke-mesa-attach`
+门禁（`packages/world/mesa-probe.world` + `tools/tests/mesa-probe-overlay/`），
+它在一个**不带 `/etc/a20-distro` 标记**的最小 world 里跑 stock Mesa，
+逐级打印 libdrm 的枚举路径。它现在只做记录、不做判定（见该脚本头部），
+因为"Mesa 能不能 attach"本身还是开放问题；门禁的价值是让下一次回答这个问题时
+不必再从一次 boot 开始。
 
 ### 8.1 本轮查出的 UAPI ABI 缺陷：错的 ioctl 常量是隐形的
 

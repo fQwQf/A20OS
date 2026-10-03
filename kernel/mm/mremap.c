@@ -127,7 +127,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             mm_munmap_locked(mm, dst, len);
             return r;
         }
-        mm->rss += leaf_size / PAGE_SIZE;
+        mm_rss_add(mm, leaf_size / PAGE_SIZE);
         off += leaf_size;
     }
 

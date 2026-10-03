@@ -31,6 +31,7 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "fs/vfs.h"
+#include "core/arch.h"
 #include "core/fcntl.h"
 #include "core/klog.h"
 #include "core/lock.h"
@@ -39,21 +40,17 @@
 #include "core/timer.h"
 #include "sys/usercopy.h"
 
-/* 64-bit ELF only.  32-bit ports keep the no-op stub (documented boundary). */
-#if defined(CONFIG_RISCV64) || defined(CONFIG_X86_64) ||   \
-    defined(CONFIG_AARCH64) || defined(CONFIG_LOONGARCH64) || \
-    defined(CONFIG_PPC64LE)
-#define COREDUMP_SUPPORTED 1
-#endif
+/* 64-bit ELF only.  32-bit ports keep the no-op stub (documented boundary).
+ *
+ * The gate is the same fact the ELF loader already gates on (elf_machine_supported
+ * in kernel/mm/elf.c), so a core dump can never describe a machine the loader
+ * would reject.  Spelling the architectures out here instead would be a second
+ * list to keep in step with Makefile's ELF_CLASS_*, which is where the
+ * architecture facts actually live. */
+#define COREDUMP_SUPPORTED (ARCH_ELF_CLASS == 2)
 
 #define CORE_PATTERN_MAX 128
 #define CORE_VMA_SNAPSHOT_MAX 1024
-
-#define CORE_EM_X86_64    62
-#define CORE_EM_AARCH64   183
-#define CORE_EM_RISCV     243
-#define CORE_EM_LOONGARCH 258
-#define CORE_EM_PPC64     21
 
 #define CORE_ET_CORE      4
 #define CORE_PT_LOAD      1
@@ -94,7 +91,7 @@ int coredump_get_pattern(char *buf, size_t bufsz)
     return n < 0 ? n : 0;
 }
 
-#ifdef COREDUMP_SUPPORTED
+#if COREDUMP_SUPPORTED
 
 /* ---- ELF64 wire structures ---- */
 
@@ -184,19 +181,7 @@ typedef struct {
 
 static uint16_t coredump_e_machine(void)
 {
-#if defined(CONFIG_RISCV64)
-    return CORE_EM_RISCV;
-#elif defined(CONFIG_X86_64)
-    return CORE_EM_X86_64;
-#elif defined(CONFIG_AARCH64)
-    return CORE_EM_AARCH64;
-#elif defined(CONFIG_LOONGARCH64)
-    return CORE_EM_LOONGARCH;
-#elif defined(CONFIG_PPC64LE)
-    return CORE_EM_PPC64;
-#else
-    return 0;
-#endif
+    return ARCH_ELF_MACHINE;
 }
 
 /*

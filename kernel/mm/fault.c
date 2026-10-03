@@ -200,7 +200,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
         return -1;
     }
 
-    mm->rss++;
+    mm_rss_add(mm, 1);
     arch_tlb_flush_page_local(page_va);
     return 0;
 }
@@ -434,7 +434,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
         swap_free(entry);
         cg_mem_swap_uncharge(t, 1);
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         arch_tlb_flush_page_local(stval);
         __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
@@ -492,7 +492,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
             if (page_va < t->mm->stack_bottom)
                 t->mm->stack_bottom = page_va;
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -518,7 +518,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         a20_perf_count(A20_PERF_MM_ANON_FAULTS);
         arch_tlb_flush_page_local(stval);
         return 0;
@@ -600,7 +600,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 }
             }
 
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -624,7 +624,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_VMO) < 0)
                 return -1;
 
-            t->mm->rss++;
+            mm_rss_add(t->mm, 1);
             arch_tlb_flush_page_local(stval);
             return 0;
         }
@@ -646,7 +646,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                     int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
                                          vma->pte_flags);
                     if (hr == 0) {
-                        t->mm->rss += PMD_PAGE_COUNT;
+                        mm_rss_add(t->mm, PMD_PAGE_COUNT);
                         arch_tlb_flush_page_local(stval);
                         return 0;
                     }
@@ -773,7 +773,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
             if (lock_held)
                 vma_put(t->mm, vma);
             if (mapped != 0) {
-                t->mm->rss += mapped;
+                mm_rss_add(t->mm, mapped);
                 a20_perf_count(A20_PERF_MM_ANON_FAULTS);
                 a20_perf_count(A20_PERF_MM_ANON_BATCH_WINDOWS);
                 a20_perf_add(A20_PERF_MM_ANON_BATCH_PAGES, mapped);
@@ -794,7 +794,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                           MM_ST_ANON_MAPPED);
         if (r < 0) { cg_mem_uncharge(t->cgroup, 1); frame_put(pfn); return -1; }
 
-        t->mm->rss++;
+        mm_rss_add(t->mm, 1);
         arch_tlb_flush_page_local(stval);
         return 0;
     }
@@ -913,12 +913,15 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
      * LoongArch64 and x86_64 additionally keep ALL executable private leaves
      * on the anonymous-copy path: direct exec leaves can lose text PTEs under
      * parallel loader/fault lifetimes there (dynamic-loader SIGSEGVs). */
-    int direct_private = !shared && fault_around &&
-#ifdef CONFIG_X86_64
-        !executable;
-#else
-        (!executable || vf->vnode->ops->readpages);
-#endif
+    int direct_private = !shared && fault_around && !executable;
+    /* Backends with an explicit readpages hook are the only ones allowed to hand
+     * a private executable leaf a shared page-cache frame, and only where the
+     * architecture tolerates retaining one.  This used to be a CONFIG_X86_64 test
+     * while the comment above claimed LoongArch64 behaved the same way; it now
+     * does, and on LoongArch64 the distinction is unobservable anyway because
+     * ARCH_FAULT_AROUND_UNSAFE already forces fault_around to 0. */
+    if (!ARCH_EXE_LEAF_RETAIN_UNSAFE && vf->vnode->ops->readpages)
+        direct_private = 1;
     size_t candidate_count = shared ? 1 : window_count;
     for (size_t i = 0; i < candidate_count; i++) {
         if (!page_cache_is_uptodate(window[i]) ||
@@ -1003,7 +1006,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
                            shared ? MM_ST_FILE_SHARED
                                   : MM_ST_FILE_PRIVATE) < 0)
                 break;
-            mm->rss++;
+            mm_rss_add(mm, 1);
             installed++;
             candidates[i] = PFN_NONE;
             charged[i] = 0;
@@ -1072,6 +1075,95 @@ int handle_demand_fault(task_t *t, uint64_t stval)
     return handle_demand_fault_access(t, stval, MM_FAULT_ACCESS_READ);
 }
 
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+/* MM_AS_FAULT_FROM_STATUS -- the paper's fault handler (Fig. 8) decides from
+ * per-PTE status alone: query() yields Status::PrivateAnon / Mapped / Invalid,
+ * and PrivateAnon is mapped directly using the permissions recorded at mmap.  No
+ * VMA is consulted, which is exactly what the paper credits for its advantage
+ * over Linux -- "the time Linux spends in the VMA" (6.2).  That is also why
+ * this runs BEFORE spin_lock(&mm->lock): it touches no VMA, so there is nothing
+ * there for that lock to be protecting.
+ *
+ * Everything it does touch is cursor-owned or atomic: mm_rss_add() and the perf
+ * counters were made atomic in Phase 0, cg_mem_charge() takes only its own
+ * node->lock, and mm_cursor_query() reports a swap entry as already-present with
+ * class MM_ST_SWAPPED, so the !already test declines swap without needing the
+ * separate swap check the mm->lock path has to do.
+ *
+ * The page allocation is pfa_alloc_flags(0, 0) -- can_reclaim = 0 on purpose.  A
+ * reclaiming allocator reaches oom_try_reclaim(), which swaps pages out and calls
+ * proc_force_exit(); tearing the victim down runs pt_unmap_leaf(), which wants a
+ * page-table node MCS lock this path is holding.  On exhaustion the fast path
+ * declines and the VMA path allocates with reclaim, under mm->lock, where
+ * sleeping is legal.
+ *
+ * Returns 1 if it served the fault, 0 if the caller must take the VMA path. */
+static int mm_fault_from_status(task_t *t, mm_struct_t *mm,
+                                uint64_t page_va, uint64_t stval)
+{
+    mm_cursor_t qcur;
+    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur) != 0)
+        return 0;
+
+    uint8_t cls_byte = 0;
+    int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
+    /* A userfaultfd registration over this entry must win: the fault has to be
+     * parked for the handler, not satisfied here.  The mark is per entry
+     * precisely so this decision needs no VMA. */
+    if (already || MM_ST_GET_CLASS(cls_byte) != MM_ST_ANON_VIRT ||
+        mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD))
+        goto decline;
+
+    /* Round-trip the recorded prot bits back to PTE flags: they were produced by
+     * mm_pt_prot_bits() from the same encoding, so the access check matches the
+     * VMA path exactly. */
+    int prot = 0;
+    if (cls_byte & MM_ST_PROT_R) prot |= 1;
+    if (cls_byte & MM_ST_PROT_W) prot |= 2;
+    if (cls_byte & MM_ST_PROT_X) prot |= 4;
+    /* Ask the architecture for the flag set rather than assembling PTE bits
+     * here: riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and an
+     * explicit NX, and the helper encodes the W=>R dependency. */
+    pte_t allow = mm_prot_to_pte_flags(prot);
+    if (!mm_pte_flags_allow_access(allow))
+        goto decline;
+
+    pfn_t np = pfa_alloc_flags(0, 0);
+    if (np == PFN_NONE)
+        goto decline;
+    if (cg_mem_charge(t->cgroup, 1) != 0) {
+        frame_put(np);
+        goto decline;
+    }
+    memset(pfn_to_virt(np), 0, PAGE_SIZE);
+    if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np), allow,
+                      MM_ST_ANON_MAPPED) != 0) {
+        cg_mem_uncharge(t->cgroup, 1);
+        frame_put(np);
+        goto decline;
+    }
+
+    mm_cursor_unlock(&qcur);
+    mm_rss_add(mm, 1);
+    a20_perf_count(A20_PERF_MM_ANON_FAULTS);
+    a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
+    a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
+    /* The per-task / global soft-fault counters the VMA paths bump alongside
+     * rss++; a fault path that skips them makes every reader of these, and
+     * /proc's reported fault rate, wrong. */
+    __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&t->perf_page_faults_maj, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1, __ATOMIC_RELAXED);
+    arch_tlb_flush_page_local(stval);
+    return 1;
+
+decline:
+    mm_cursor_unlock(&qcur);
+    return 0;
+}
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
 int handle_demand_fault_access(task_t *t, uint64_t stval,
                                enum mm_fault_access access)
 {
@@ -1100,6 +1192,11 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
 
     mm_struct_t *mm = t->mm;
     uint64_t page_va = stval & ~(PAGE_SIZE - 1);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* Lock-free: the status fast path runs before mm->lock is taken. */
+    if (mm_fault_from_status(t, mm, page_va, stval))
+        return 0;
+#endif
     spin_lock(&mm->lock);
     pte_t *pte = pt_lookup_leaf(mm->pgdir, page_va, NULL, NULL, NULL);
 #ifdef CONFIG_SWAP
@@ -1120,127 +1217,6 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
         return -1;
     }
 
-    /*
-     * MM_AS_FAULT_FROM_STATUS -- the paper's fault handler (Fig. 8) decides
-     * from per-PTE status alone: query() yields Status::PrivateAnon / Mapped /
-     * Invalid, and PrivateAnon is mapped directly using the permissions
-     * recorded at mmap.  No VMA is consulted, which is exactly what the paper
-     * credits for its advantage over Linux -- "the time Linux spends in the
-     * VMA" (§6.2).
-     *
-     * Only a range that mm_pt_provision_anon() marked as MM_ST_ANON_VIRT is
-     * served here.  Anything else -- never provisioned (too large to provision
-     * eagerly), already mapped, an intermediate node, a file/VMO mapping, a
-     * huge leaf -- reports a different status and falls through to the
-     * VMA-based path below unchanged, so no other behaviour is affected.
-     *
-     * FAULT_FROM_STATUS_ABSENT_WITHOUT_PGTABLE_OPS: this path needs the per-PTE
-     * status sidecar, and that sidecar does not exist on every architecture, so
-     * the whole block is compiled out when it is absent.  The capability is
-     * reported as ABSENT there, not faked and not silently skipped:
-     *   - arm32 is the case today.  Makefile:866-869 withholds
-     *     ARCH_HAS_PGTABLE_OPS from it because it supplies its own
-     *     short-descriptor backend (kernel/arch/arm32/mm/pgtbl.c), which is a
-     *     plain pt_map()/pt_walk() walker: no mm_cursor_query(), and no
-     *     metadata block to read a Status out of.  The status byte lives in the
-     *     software metadata that mm_pt_node_init() allocates and
-     *     mm_pt_note_present() maintains -- both in pt.c's guarded region -- so
-     *     a short-descriptor PTE carries no class at all.  Provisioning
-     *     (kernel/mm/mmap.c:193) is guarded the same way, so no arm32 leaf can
-     *     ever be marked MM_ST_ANON_VIRT and the condition below is
-     *     unsatisfiable by construction, not by accident.
-     *   - What arm32 gets instead is the VMA-based path further down, which is
-     *     the same path every other architecture takes for a non-provisioned
-     *     range and which is correct on its own.  No correctness is lost.
-     *   - What a reader can observe: /proc/a20/perf reports
-     *     mm_fault_from_status and mm_anon_provisioned as 0 on such a build,
-     *     which is the truth (the path does not exist, so it never runs) and
-     *     the same value the default configuration already reports for
-     *     eager provisioning being off (see the note on MM_ANON_PROV_DEFAULT
-     *     in kernel/include/mm/pt.h).  Writing /proc/a20/anonprov on such a
-     *     build returns -ENOSYS rather than accepting a cap nothing reads
-     *     (mm_pt_set_anon_prov_max()), so the knob cannot look live when it is
-     *     not.
-     *   - What this is NOT allowed to become: widening the ARCH_HAS_PGTABLE_OPS
-     *     guard in kernel/include/mm/pt.h so the declarations appear on an
-     *     architecture with no transactional backend behind them.  A declared
-     *     cursor that nothing implements is a fabricated capability, which is
-     *     worse than a build break because it fails silently.  arm32 gets a
-     *     real cursor path -- the per-PTE metadata threaded through its
-     *     walker -- when someone implements it; until then it is absent.
-     */
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-    {
-        mm_cursor_t qcur;
-        int qr = mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &qcur);
-        if (qr == 0) {
-            uint8_t cls_byte = 0;
-            int already = mm_cursor_query(&qcur, page_va, &cls_byte, NULL);
-            /* A userfaultfd registration over this entry must win: the fault
-             * has to be parked for the handler, not satisfied here.  The mark is
-             * per entry precisely so this decision needs no VMA.  The mark is
-             * authoritative *here* and is not re-derived from the range list:
-             * satisfying an ANON_VIRT entry returns from this function, so the
-             * userfaultfd_range_present() call on the VMA path below never
-             * runs for it.  That makes unregister obliged to clear the mark
-             * only for pages no registration still covers (docs 10.59). */
-            if (!already && MM_ST_GET_CLASS(cls_byte) == MM_ST_ANON_VIRT &&
-                !mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)) {
-                /* Round-trip the recorded prot bits back to PTE flags: they
-                 * were produced by mm_pt_prot_bits() from the same encoding,
-                 * so the access check matches the VMA path exactly. */
-                int prot = 0;
-                if (cls_byte & MM_ST_PROT_R) prot |= 1;
-                if (cls_byte & MM_ST_PROT_W) prot |= 2;
-                if (cls_byte & MM_ST_PROT_X) prot |= 4;
-                /* Ask the architecture for the flag set rather than assembling
-                 * PTE bits here.  Every user mapping needs more than R/W/X:
-                 * riscv64 needs PTE_U, x86_64 additionally needs PTE_LEAF and
-                 * an explicit NX, and the helper also encodes the W=>R
-                 * dependency.  A hand-rolled mask silently drops whichever of
-                 * those this particular architecture happens to demand -- that
-                 * is what produced the supervisor-only PTE on riscv64 (b) and
-                 * the leaf-less PTE on x86_64. */
-                pte_t allow = mm_prot_to_pte_flags(prot);
-                if (mm_pte_flags_allow_access(allow)) {
-                    pfn_t np = pfa_alloc_page();
-                    if (np != PFN_NONE) {
-                        if (cg_mem_charge(t->cgroup, 1) == 0) {
-                            memset(pfn_to_virt(np), 0, PAGE_SIZE);
-                            if (mm_cursor_map(&qcur, page_va, pfn_to_phys(np),
-                                              allow, MM_ST_ANON_MAPPED) == 0) {
-                                mm_cursor_unlock(&qcur);
-                                mm->rss++;
-                                a20_perf_count(A20_PERF_MM_ANON_FAULTS);
-                                a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
-                                a20_perf_count(A20_PERF_MM_FAULT_FROM_STATUS);
-                                /* The per-task / global soft-fault counters the
-                                 * VMA paths bump alongside rss++.  A fault path
-                                 * that does not record its faults makes every
-                                 * reader of these -- and /proc's reported fault
-                                 * rate -- wrong. */
-                                __atomic_fetch_add(&t->perf_page_faults, 1,
-                                                   __ATOMIC_RELAXED);
-                                __atomic_fetch_add(&t->perf_page_faults_maj, 1,
-                                                   __ATOMIC_RELAXED);
-                                __atomic_fetch_add(&g_perf_sw_page_faults, 1,
-                                                   __ATOMIC_RELAXED);
-                                __atomic_fetch_add(&g_perf_sw_page_faults_maj, 1,
-                                                   __ATOMIC_RELAXED);
-                                arch_tlb_flush_page_local(stval);
-                                spin_unlock(&mm->lock);
-                                return 0;
-                            }
-                            cg_mem_uncharge(t->cgroup, 1);
-                        }
-                        frame_put(np);
-                    }
-                }
-            }
-            mm_cursor_unlock(&qcur);
-        }
-    }
-#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 
     vm_area_t *vma = mm_find_vma(mm, page_va);
     /*
@@ -1272,8 +1248,8 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
          * cache pin.  This avoids allocating and copying the same rustc text
          * pages independently in every parallel compiler process. */
         int executable = (vma->pte_flags & PTE_X) != 0;
-#ifdef CONFIG_LOONGARCH64
-        /* LoongArch64 cannot yet retain private page-cache leaves safely
+#if ARCH_FAULT_AROUND_UNSAFE
+        /* This architecture cannot yet retain private page-cache leaves safely
          * across the parallel loader/fault lifetime.  Keep private file pages
          * on the proven single-page copy path; direct executable leaves lose
          * text PTEs, while direct read-only leaves corrupt dynamic symbols in

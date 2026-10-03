@@ -645,7 +645,7 @@ static int exec_install_process(task_t *t,
     new_mm->stack_top  = info->stack_top;
     new_mm->stack_bottom = info->stack_top - USER_STACK_INITIAL_PAGES * PAGE_SIZE;
     new_mm->total_vm   = 0;
-    new_mm->rss        = 0;
+    mm_rss_set(new_mm, 0);
     spin_init(&new_mm->lock);
     spin_set_debug(&new_mm->lock, "mm", new_mm);
     mutex_init(&new_mm->tlb_lock);

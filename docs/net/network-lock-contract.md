@@ -2,6 +2,20 @@
 
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
+> **更正：本文件此前多处写"两个锁从不同时持有"，这是错的。**
+> `net_inet_bottom_half_process_all()` 在 `kernel/net/socket_inet.c:871` 取
+> `g_net_lock`，并在该临界区内调用 accept 落底；而
+> `net_inet_accept_stage_drain()` 在同文件 `607`/`616`/`640` 取 `a20_lwip_lock()`
+> ——所以 **accept 路径上 `g_net_lock` 与 `g_lwip_lock` 是同时持有的**，顺序是
+> net → lwip。
+>
+> 目前没有反向路径（没有"先 g_lwip_lock 再 g_net_lock"），因此还没有 ABBA 环路。
+> 但阶段 D 要按 lane 排空收包、必然触碰 socket 状态，那就会引入反向顺序并与这条
+> 死锁。**把 net → lwip 当作固定顺序**，新增任何跨锁路径前先确认方向。
+> 本文其余"从不同时持有"的表述按此条理解。
+
+最后核实：与 `feat/net-lanes` 分支的代码一致（收包载荷拆分 + poll 分段 + loopif 排空 + listener 分档）。
+
 ## 范围与目标
 
 A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串行化所有 lwIP 核心状态。socket 层额外使用 `g_net_lock` 保护每个 socket 的消息队列、waiter 和 registry。
@@ -12,6 +26,7 @@ A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串
 - 禁止在 `g_lwip_lock` 下执行阻塞操作，保持中断和调度延迟较低。
 - 让 socket send/recv/connect/listen/accept 测试可以安全并发运行。
 - 记录 deferred bottom-half 如何与两个锁交互。
+- 记录收包载荷在两级暂存中的内存所有权。
 
 ## 锁
 
@@ -41,6 +56,65 @@ g_lwip_lock -> g_net_lock
 
 lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 `g_net_lock` 的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
+## Poll 的分段
+
+lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需要的部分不同：
+
+| 入口 | 内容 | 调用方 |
+|------|------|--------|
+| `a20_lwip_poll_timers_locked()` | 仅 `sys_check_timeouts()` 与配置同步 | 定时器中断 |
+| `a20_lwip_poll_rx_locked(budget)` | 设备完成轮询 + 收包排空 | 收包路径 |
+| `a20_lwip_poll_locked()` | 上面两者，排空不限量 | `a20_lwip_poll()`、socket 发送路径 |
+
+`budget` 为 0 表示不限量。**为 0 时语义与旧的整体 poll 完全一致**，既有调用方不受影响。`budget` 限制的是**单次持锁处理的包数**，不是 ring 能存多少包——后者本来就受 ring 深度限制，给它加界是空操作。
+
+提前停止排空的调用方会拿到返回值 0，此时**必须不清 RX pending 标志**：能排掉剩余包的断已经被消费掉了，标志若被清掉，剩余包会一直等到下一次中断，而那次中断可能不会来。
+
+`kernel_progress_timer_tick()` 只取 timers 段，随后用 `CONFIG_NET_RX_IRQ_BUDGET` 的包数上界取一次收包段。它在 CPU 0 的每次定时器中断上运行；该排空只是"设备中断万一丢失时不让 RX 卡死"的兜底（设备 IRQ 才是主路径），不足以正当化在中断上下文里跑一整轮协议栈处理。
+
+### loopif 必须由 timers 段排空
+
+`netif_poll()` 是 `netif->loop_first` 的**唯一**排空点，而 `netif_loop_output()` 只入队就返回。
+所以 timers 段除了推进超时，还必须遍历 netif 链表、对 `loop_first != NULL` 的 netif 调
+`netif_poll()`。
+
+**这不是优化，是正确性。** 回环流量不产生设备 RX，因此 RX-pending 提示永远不会为它置位；
+而 `kernel_progress_poll()` 与读者路径都是"按需"到达 `a20_lwip_poll_*` 的，park 在
+`connect()` 里的任务两个选择都不做。曾经因为排空只挂在按需路径上，握手 SYN 永远躺在
+`loop_first` 里直到 connect 超时。定时器中断是唯一无条件运行的进展驱动，所以它必须承担
+排空。
+
+同一条推理也约束 RX-pending 提示：它必须把 `loop_first` 一起算进"有活要干"，否则读者会
+跳过这次排空。提示里的 `loop_first` 读不需要 `g_lwip_lock`——它是对一个由
+`SYS_ARCH_PROTECT` 保护的指针做空判；假阳性只多一次锁获取，假阴性是挂死。
+
+## 收包载荷的内存所有权
+
+收包路径曾经让每个 1460 字节的段付出约 136 KiB 的 memset 加三次拷贝，其中绝大部分在 `g_lwip_lock` 内完成。这是 `docs/server-readiness.md` 记录的单次 acquire 自旋尖峰（`max=472365`）的来源，也是"去掉读路径轮询后自旋量没降"的真正原因——持锁时长从来不在读路径上。
+
+两级暂存现在都改成小内联缓冲 + 溢出慢路径：
+
+| 结构 | 载荷 | 溢出 |
+|------|------|------|
+| `net_bh_event_t` | 内联 `NET_BH_INLINE_PAYLOAD` | `spill`：ring 持有的 pbuf 引用 |
+| `net_msg_t` | 内联 `NET_MSG_INLINE_PAYLOAD` | `overflow`：独占的 kmalloc 缓冲 |
+
+内联尺寸由 `NET_PROFILE_INLINE_PAYLOAD` 给出，并有 `_Static_assert` 钉住两条不变式：`NET_BH_INLINE_PAYLOAD >= TCP_MSS`（否则每个 TCP 段都被推上溢出路径），以及 `NET_MAX_PAYLOAD` 仍大于内联尺寸（否则内联就不是优化了）。
+
+### spill 引用的释放时机
+
+`spill` 只可能来自 datagram socket：TCP 段最大就是 `TCP_MSS`，装得进内联缓冲。
+
+**ring 里的 pbuf 只在生产侧释放。** `bh_ring_prepare()` 在把一个槽位重新发出去之前，先释放该槽位记录的引用；socket 销毁时（`net_inet_socket_destroy()`，持 `g_lwip_lock`）排空整个 `owned[]` 数组。
+
+这样安排的原因是 memp **没有任何内部加锁**，而当前每一次 memp 调用都在 `g_lwip_lock` 下发生。消费者运行在只有 `g_net_lock` 的上下文里，在那里调 `pbuf_free()` 会让 memp 的空闲链表被两个 CPU 同时修改。槽位绕回时释放把 pbuf 的存活期限制在 ring 深度以内，并且落在唯一安全的地方。
+
+**消费者故意不释放 spill pbuf。** 如果将来看到这里少了一次 `pbuf_free()`，那是特性不是泄漏。
+
+### 溢出缓冲的所有权
+
+`net_msg_t.overflow` 由该消息独占，`net_msg_free()` 负责 `kfree()`。它在 bottom-half 里分配，也就是在 `g_net_lock` 下——契约禁的是 `g_lwip_lock` 下分配，`g_net_lock` 下分配一直是被允许的（`net_msg_alloc()` 原本就在那里调用）。
+
 ## 锁安全的 Socket 入口点
 
 以下小节按操作类型给出锁纪律。实现必须匹配这些规则。
@@ -48,6 +122,8 @@ lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 pe
 ### Socket 创建与销毁
 
 `net_inet_socket_init()` 和 `net_inet_socket_destroy()` 在创建、配置或移除 lwIP PCB 时只持有 `g_lwip_lock`，不同时访问 socket registry。registry 与 socket 字段由调用方在独立的 `g_net_lock` 临界区处理。
+
+`net_inet_socket_destroy()` 还在同一个临界区内排空 bottom-half ring 的 spill 引用（见上）。
 
 ### Bind
 
@@ -77,13 +153,15 @@ send 路径对本地 socket 和远端 socket 行为不同。
 
 对远端 UDP、RAW 或 TCP send，socket 地址/本地队列状态和 lwIP PCB 操作分成互不重叠的临界区。调用 `pbuf_alloc()`、`udp_sendto()`/`udp_send()`、`tcp_sndbuf()`、`tcp_write()` 或 `tcp_output()` 时持有 `g_lwip_lock`，不得同时持有 `g_net_lock`。需要更新本地 socket 状态或等待队列时先释放 lwIP 锁，再进入 `g_net_lock` 临界区。
 
-`net_inet_send_tcp()` 在每轮迭代中先调用 `a20_lwip_poll()`（内部获取/释放 `g_lwip_lock` 以驱动超时和 RX/TX 进展），随后在同一次 `g_lwip_lock` 持有期内完成 `tcp_sndbuf()` 空间检查与 `tcp_write()` / `tcp_output()`，将 sndbuf 校验与实际写入合并为单次锁获取。
+UDP、RAW 和 TCP 三条发送路径现在形状一致：**一次迭代一次持锁**，在临界区内调用 `a20_lwip_poll_locked()`。TCP 路径此前用 `a20_lwip_poll()` 开头，额外取放一次全局锁并多跑一整轮 whole-stack pass；按 64 KiB 发送缓冲写 4 MiB 约迭代 64 次，也就是原本 128 轮而 64 轮就够。
+
+bottom-half **不**在发送循环里逐轮运行：它们取 `g_net_lock`，而两个锁从不同时持有。循环结束后在锁外排一次即可覆盖同样的工作。错误返回路径不排是安全的，因为 `sched()` 在挑选下一个任务前会运行两个 bottom-half。
 
 ### Recv
 
 Recv 只使用 `g_net_lock`。它从 socket 接收队列中出队消息。如果队列为空且调用是阻塞的，它释放锁，通过 `net_block_on_socket_locked()` 阻塞，然后重试。
 
-当 recv 消耗 TCP 数据后，调用者随后调用 `net_tcp_recved()`，该函数获取 `g_lwip_lock` 来更新 TCP window。
+当 recv 消费 TCP 数据后，调用者随后调用 `net_tcp_recved()`，该函数获取 `g_lwip_lock` 来更新 TCP window。
 
 ## lwIP Callback 规则
 
@@ -94,16 +172,29 @@ lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 - 调入 VFS、scheduler，或任何可能获取其他 spinlock 的路径，除非该路径明确记录为非阻塞且锁顺序安全。
 - 递归获取 `g_lwip_lock`。
 
-`kernel/net/socket_inet.c` 使用 Deferred Bottom-Half 设计：lwIP callback 只把事件写入 per-socket 有界 `bh_ring` 并调用 `net_inet_bh_schedule()`，真正的 `net_msg_t` 分配与 payload 复制在 bottom-half（`bh_ring` 消费路径）中完成，不持有 `g_lwip_lock`。
+`kernel/net/socket_inet.c` 使用 Deferred Bottom-Half 设计：lwIP callback 只把事件写入 per-socket 有界 `bh_ring` 并调用 `net_inet_bh_schedule()`，真正的 `net_msg_t` 分配与 payload 搬运在 bottom-half（`bh_ring` 消费路径）中完成，不持有 `g_lwip_lock`。
+
+**为什么禁分配，而不只是"规定如此"**：lwIP 的 `memp` 没有任何内部锁，它只在
+`g_lwip_lock` 这一个外部串行点下才安全（`net-lanes.md` 记录了同一个约束）。而
+`mm/objcache.c` 不能拿来当逃生口——它的 miss 路径会先 `spin_unlock` 再调普通
+`kmalloc()`（`objcache.c:40-41`），所以它对硬 IRQ 上下文不安全；只有命中 free list
+的那条路径是无锁的，而 miss 必然发生。
+
+这条约束的**直接后果**是：`net_bh_ring` 只能把 `net_bh_event_t` 按值内嵌，无法改成
+"按需从 slab 分配"。因此每 socket 的收包 staging 成本是
+`O(NET_BH_RING_SIZE × INLINE_PAYLOAD)`（DEFAULT/SERVER 档约 28 KiB/socket），
+只能靠 profile 压小，无法靠结构消除。`sizeof(net_socket_t) <=
+NET_PROFILE_SOCKET_MAX_BYTES` 的 `_Static_assert` 已经覆盖 ring size 与 inline
+payload 两个因子。改造出路与代价见 [net-lanes.md](net-lanes.md) 的"缓冲改造的前提"。
 
 ### 允许的 callback 工作
 
 callback 只能执行轻量、有界工作：
 
-- 从 pbuf 复制少量数据到预分配的 per-PCB staging buffer。
+- 决定事件落在内联缓冲还是 spill 引用上。
 - 更新少量 socket 状态标志。
 - 记录需要由 bottom-half 处理的事件；不得在 callback 中直接进入 scheduler。
-- 释放传入 pbuf。
+- 释放 lwIP 传入的 pbuf 引用（spill 已另行 `pbuf_ref()`）。
 
 所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，释放对象锁后 flush wake queue。
 
@@ -115,7 +206,7 @@ callback 只能执行轻量、有界工作：
 
 网络 bottom-half 执行 callback 不能完成的工作：
 
-- 分配 `net_msg_t` 项并复制 payload 数据。
+- 分配 `net_msg_t` 项并搬运 payload（内联源或 spill pbuf 源）。
 - 将接收消息入队到 socket 接收队列。
 - 更新 `closed`、`connected`、`tcp_connecting` 等 socket 标志。
 - 通过 `g_net_lock` 唤醒被阻塞的 waiter。
@@ -125,43 +216,58 @@ callback 只能执行轻量、有界工作：
 lwIP callback 是 producer：
 
 1. 检查 pbuf 并确定目标 socket。
-2. 把 pbuf 数据和元数据复制进固定大小的 per-socket `bh_ring` 项。
+2. 载荷装得下就拷进内联缓冲，否则 `pbuf_ref()` 并把引用记进槽位的 `owned[]`。
 3. 原子提交 ring head 并设置 pending flag。
 4. 调度 bottom-half。
-5. 释放 pbuf 并返回。
+5. 释放 lwIP 自己的 pbuf 引用。
 
-`a20_lwip_poll()` 解锁后运行 bottom-half：
+bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locked_meta()`，spill 源走 `net_enqueue_msg_locked_pbuf()`。两者都只取 `g_net_lock`。
 
-1. 获取 `g_net_lock`。
-2. 处理该 socket 的所有 pending event。
-3. 分配 `net_msg_t` 项并复制 payload 数据。
-4. 唤醒 waiter。
-5. 释放 `g_net_lock`。
+## lwIP 锁下的分配规则
 
-### 锁交互
-
-bottom-half 绝不能持有 `g_lwip_lock`。它在 `g_net_lock` 下把 staged event 转成 `net_msg_t`、更新 socket 状态，并把 waiter 收集到局部 wake queue；释放 `g_net_lock` 后才 flush wake queue。producer 与 consumer 用原子 head/tail 传递，不靠同时持有两把锁。
-
-当前 bottom-half 不调用 lwIP。recv 消费 TCP 数据后，调用方先释放 `g_net_lock`，再由 `net_tcp_recved()` 单独获取 `g_lwip_lock`。未来增加其他 PCB 操作也必须保持这种分段方式，不能同时持有两把锁。
-
-### top-half 与 bottom-half 之间的顺序
-
-per-socket `bh_ring` 的原子 head/tail 保证 bottom-half 按 callback 入队顺序看到事件。producer 在持有 `g_lwip_lock` 且本地 IRQ 已关闭的上下文运行；consumer 在后续 poll 的 `g_net_lock` 临界区运行。
-
-## lwIP 锁下的 kmalloc 规则
-
-`kernel/include/core/lock.h` 禁止在持有 device 或 lwIP 锁时执行内存分配，除非 callee 被记录为非阻塞。旧 callback 路径曾在该上下文分配 `net_msg_t`；当前实现已改为固定 `bh_ring`，不能把已修复问题描述为现状。
+`kernel/include/core/lock.h` 禁止在持有 device 或 lwIP 锁时执行内存分配，除非 callee 被记录为非阻塞。
 
 当前规则：
 
 - 持有 `g_lwip_lock` 时不得调用 `kmalloc()`、`kfree()`、`net_msg_alloc()` 或任何 slab allocator 函数。
-- 每个 `net_socket_t` 内嵌固定 16 项 `bh_ring`，callback 无需从内核 slab 分配 staging 项。
-- 将 `net_msg_t` 的 objcache 分配和 socket 队列插入移动到底半部；bottom-half 运行时不持有 `g_lwip_lock`。
+- callback 的 staging 是内联的，不需要分配；溢出走 spill 引用，也不需要分配。
+- `net_msg_t` 分配和 socket 队列插入在 bottom-half，运行时不持有 `g_lwip_lock`。
 - 如果某条代码路径在概念上处于 lwIP 临界区内但必须分配，先释放 `g_lwip_lock`，分配后重新获取。只有当本地 PCB 状态不需要在释放期间保持稳定时，这样做才安全。
+
+## 资源档位
+
+`kernel/net/net_profile.h` 按编译期档位给出所有上限：内联缓冲尺寸、ring 深度、pbuf 池、PCB 上限、每 socket 字节上界、RX 中断预算、lane 数。`lwipopts.h` 从这里取值，不再自带常量。
+
+现有三档：`EMBEDDED`（单 lane、heap 供电的池、8 socket）、`DEFAULT`（QEMU 开发与冒烟构建）、`SERVER`。
+
+两条跨档不变式由编译期断言保证：
+
+- `MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB`。KEEPALIVE / KEEPIDLE / KEEPINTVL 全开时每个 established PCB 持有一个 `sys_timeo`，池被耗尽后 `tcp_pcb_alloc()` 返回 NULL，表现为 `accept()` 失败而不是分配失败。
+- `sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES`。socket obj_cache 会留活上百个对象，这个尺寸没有任何运行时计数器能反映。
+
+`MEMP_MEM_MALLOC` 必须显式定义。留空会派生成 0，于是所有池变成 `.bss` 里的静态数组，档位里声明的 `MEM_SIZE` 完全不起作用——这正是此前"嵌入式档声称 16 KiB 堆却同时背着几百 KiB 静态池"的成因。
+
+## 已知未完成
+
+以下属于后续工作。每一项的**前置条件与阻塞原因**（含 `g_net_lock` 分片必须
+先做引用计数、把协议栈输入移出中断上下文会死锁的具体推理）记录在
+`docs/server-readiness.md` 的"剩余工作与各自的阻塞原因"一节，不要只按本节
+的字面顺序动手：
+
+- `g_net_lock` 仍是全局的，1024 个 socket 在 recv/send/accept/close 上互相串行。
+  **前置不是锁改造而是对象生命周期**：当前 `g_net_lock` 同时充当生命周期锁，
+  换成 per-socket 锁前必须先给 `net_socket_t` 加引用计数。
+- `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行，且每包仍
+  遍历 lwIP 的全局 PCB 链表。
+- netif 各有一块 `rx_frame[1536]` / `tx_frame[1536]` 暂存，单 netif 同时只能
+  处理一个包。
+- `st->ops->poll()` 与完整协议输入仍在中断上下文中执行，`g_lwip_lock` 仍从
+  IRQ handler 获取。**不能简单改成"IRQ 只入队"**，会死锁，推理见
+  `server-readiness.md`。
 
 ## 迁移检查清单
 
-更新网络实现以符合本契约时，逐项确认（该设计已实现）：
+更新网络实现以符合本契约时，逐项确认（当前实现已满足）：
 
 - [x] lwIP callback 不再调用 `kmalloc()` 或 `kfree()`。
 - [x] lwIP callback 不再获取 `g_net_lock`。
@@ -170,4 +276,8 @@ per-socket `bh_ring` 的原子 head/tail 保证 bottom-half 按 callback 入队�
 - [x] socket send/recv/connect/listen/accept 路径遵循本文档的锁顺序。
 - [x] `a20_lwip_poll_locked()` 在持有 `g_lwip_lock` 时调用仍然安全。
 - [x] `g_lwip_lock` 下的驱动路径保持非阻塞。
+- [x] 三条 socket 发送路径每次迭代只取一次 `g_lwip_lock`。
+- [x] 定时器中断只推进 timers 段，收包排空受 `CONFIG_NET_RX_IRQ_BUDGET` 限制。
+- [x] 提前停止排空时保留 RX pending 标志。
+- [x] spill 引用的释放只发生在 `g_lwip_lock` 下（ring 槽位绕回或 socket 销毁）。
 - [x] 并发 socket stress 测试通过，且没有锁顺序告警。

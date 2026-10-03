@@ -209,7 +209,7 @@ Native ABI 一旦稳定，需要遵守：
 
 ```text
 kernel/abi/native/syscall_table.c      syscall 分发表
-syscall_table.def                      syscall 编号宏定义（136 条）
+syscall_table.def                      syscall 编号宏定义（142 条）
 sys_core.c                             核心 syscall 实现
 sys_native_{handle,task,mm,fs,ipc,net,time,security,debug,system,sync,device,ext}.c  分区 syscall
 sys_native_debug.c                     Debug (0x0900) syscall（包装 proc_debug_*）

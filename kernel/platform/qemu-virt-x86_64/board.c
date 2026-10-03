@@ -9,6 +9,7 @@
 #include "core/stdio.h"
 #include "core/timer.h"
 #include "firmware.h"
+#include "drivers/bus/pci_hal.h"
 
 /* Bootargs come from the QEMU -append command line via fw_cfg.  On
  * non-QEMU firmware (empty cmdline) fall back to the static user-network
@@ -149,7 +150,58 @@ static void x86_64_enumerate_devices(void) {
             .device = A20_DEVICE_PC_SPEAKER,
         },
     };
-    pci_enumerate(PCI_ECAM_BASE, 0, 255);
+    /*
+     * Ask the firmware where the ECAM window is, rather than assuming it.
+     *
+     * PCI_ECAM_BASE is the q35 layout's 0xB0000000 and is correct for SeaBIOS,
+     * which is what QEMU's default x86 firmware is.  It is wrong under UEFI:
+     * OVMF places the ECAM wherever MCFG says, and reading 0xB0000000 anyway
+     * returned all-ones/zero vendor IDs, so enumeration "succeeded" while
+     * publishing garbage -- 129 devices at bus fe: id=0000:0000, none of them
+     * matching a driver's ID table.  Nothing bound, no block device appeared,
+     * and the failure surfaced much later as "no init program found" with no
+     * hint that PCI was the thing that failed.
+     *
+     * x86_64-pc already reads MCFG for exactly this reason; this board did not,
+     * so it could not boot a UEFI firmware at all.
+     */
+    uintptr_t ecam = firmware_acpi_mcfg_base();
+    int bus_start = 0, bus_end = 255;
+    if (ecam) {
+        arch_pci_host_init(ecam);
+        uint8_t first = 0, last = 0;
+        if (firmware_acpi_mcfg_bus_range(&first, &last) == 0) {
+            bus_start = first;
+            bus_end   = last;
+        }
+        printf("[PCI] ECAM 0x%lx from MCFG, buses %d..%d\n",
+               (unsigned long)ecam, bus_start, bus_end);
+    } else {
+        /* No MCFG means no RSDP was reachable.  That is expected under SeaBIOS,
+         * where the legacy EBDA/0xE0000 scan finds the RSDP and the q35 ECAM is
+         * always at the compiled-in address.  Under UEFI it is not expected: OVMF
+         * publishes the RSDP only through the EFI configuration table, and
+         * x86_64 has no EFI stub to receive it, so the fallback reads a window
+         * with no ECAM in it and enumeration finds nothing.
+         *
+         * Say which case this is, because the two need opposite fixes and the
+         * symptom otherwise appears much later as "no init program found" with
+         * nothing pointing at PCI. */
+        ecam = PCI_ECAM_BASE;
+        const char *fw = firmware_bios_or_uefi();
+        /* Under UEFI this used to be fatal and said so, because no x86_64 stub
+         * existed to hand the kernel its RSDP.  kernel/boot/uefi/x86_64_loader.c
+         * does now, so reaching here under UEFI means the RSDP was found and the
+         * MCFG inside it is absent or too old -- a firmware property, not a
+         * missing loader, so do not blame the stub. */
+        printf("[PCI] no MCFG (%s), using the q35 default 0x%lx%s\n", fw,
+               (unsigned long)ecam,
+               fw[0] == 'U' ? " -- UEFI firmware without an MCFG table; PCI "
+                              "devices here will not be found"
+                            : "");
+    }
+
+    pci_enumerate(ecam, bus_start, bus_end);
     (void)platform_device_register(&speaker);
 }
 

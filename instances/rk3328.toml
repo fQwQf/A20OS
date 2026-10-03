@@ -1,0 +1,54 @@
+# Rockchip RK3328 (Rock64, NanoPi R2S) bring-up.
+#
+# Stage-1 instance, like the SophGo ones: no [package] section, because the
+# board's eMMC controller and Ethernet MAC are declared in rk3328_platform.h
+# but not driven yet.  There is nothing to put on a disk.
+#
+# This board has no blob-free boot path in the way the Allwinner parts do: the
+# SPL's DDR training binary comes from rkbin.  BL31 is TF-A's rk3328 platform,
+# which is open source, so that half is fine.
+name = "rk3328"
+description = "Rockchip RK3328 (Rock64 / NanoPi R2S) aarch64 bring-up with a serial target"
+arch = "aarch64"
+board = "rk3328"
+abi = "linux"
+
+[kernel]
+bringup = true
+driver_deployment = "embedded"
+
+[target]
+serial = "/dev/ttyUSB0"
+baud = 1500000
+# No reset line: recovery is a power cycle.  boot_timeout covers
+# SPL -> TF-A -> U-Boot -> kernel.
+boot_wait = 4
+boot_timeout = "120s"
+# No [FDT] line on aarch64: only riscv64 and loongarch parse a device tree,
+# and the aarch64 port has no DT-based RAM narrowing.  System ready is
+# printed by kernel/main.c and is the strongest evidence available here.
+console_check = ["System ready"]
+commands = ["cat /etc/os-release", "poweroff"]
+expect = ["A20OS", "poweroff"]
+
+[package]
+# No block driver on this board yet, so there is no medium to write and
+# fit-sdcard/grub-iso do not apply.  The artifact is the kernel plus the
+# boot-chain commands to load it; `a20 deploy` builds it and prints the
+# commands below.
+kind = "kernel-bundle"
+
+[handoff]
+method = "tftp"
+commands = [
+    "tftp ${loadaddr} kernel.bin",
+    "booti ${loadaddr} - ${loadaddr}",
+]
+note = """Unverified: no RK3328 board has been powered under A20OS, so this sequence is
+taken from what mainline U-Boot boots Rock64/R2S and has booti provides, not from a run.  The load address is
+deliberately absent here -- `a20 package` reads it out of the ELF and writes it
+into uboot.cmd, because a board ldscript may relocate the image.
+
+# U-Boot needs to know where the host is before tftp works:
+#   setenv serverip <host-ip>; setenv ipaddr <board-ip>
+"""
