@@ -479,3 +479,19 @@ smoke-smp-lock-contention:
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# ext4 JBD2 crash-consistency smoke
+# ================================================================
+# Halts the machine at each point in the JBD2 commit sequence, reboots the same
+# image, and checks both what survived and what the host's e2fsck makes of the
+# result.  The gate lives in tools/ext4_journal_gate.py because it is eight
+# boots plus four host-side fsck runs; inline shell here would be unreadable.
+#
+# ARCH selects the build directory as well as the QEMU machine, so this is the
+# same gate on every architecture the kernel boots under QEMU rather than one
+# that only proves x86_64.
+smoke-ext4-journal: dev-build
+	$(PYTHON) tools/ext4_journal_gate.py --arch "$(ARCH)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)

@@ -545,7 +545,7 @@ vnode_t *fat32_mount(bcache_t *bc) {
      * hook: FAT uses it to write the FSInfo hints back before the FAT that
      * they describe is flushed. */
     bc->owner = sb;
-    bcache_set_sync_hook(sb->bc, fat32_sync_hook);
+    bcache_set_sync_hook(sb->bc, fat32_sync_hook, sb);
 
 
     kdebug("[FAT32] Mounted: cluster=%d sectors, FAT starts @%d, data @%d, root_cluster=%d\n",
@@ -568,7 +568,7 @@ void fat32_unmount(vnode_t *root) {
      * are written after the flush that carried the FAT, not before it. */
     fat32_fsinfo_writeback(sb);
     bcache_sync(sb->bc);
-    bcache_set_sync_hook(sb->bc, NULL);
+    bcache_set_sync_hook(sb->bc, NULL, NULL);
     sb->bc->owner = NULL;
 
     /* Drop all cache-owned vnode references; survivors (still-open files)
