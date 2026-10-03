@@ -23,7 +23,6 @@ typedef struct {
     uint64_t parent_ino;
     char name[MAX_NAME_LEN];
     vnode_t *vn;
-    uint64_t age;
     /* Second-chance reference: set on hit under the bucket lock and cleared
      * by the evictor, so hits need not mutate the global LRU. */
     unsigned char accessed;
@@ -33,7 +32,6 @@ static spinlock_t g_dcache_lock = SPINLOCK_INIT;
 static spinlock_t g_dcache_bucket_locks[VFS_DCACHE_BUCKET_LOCKS];
 static vfs_dcache_entry_t g_dcache[VFS_DCACHE_MAX];
 static int g_dcache_hash[VFS_DCACHE_HASH_SIZE];
-static uint64_t g_dcache_age;
 static int g_dcache_free_list;
 static int g_dcache_free_count;
 static int g_dcache_lru_head;
@@ -97,7 +95,6 @@ static void dcache_init_locked(void)
         g_dcache[i].lru_next = -1;
         g_dcache[i].lru_prev = -1;
         g_dcache[i].used = 0;
-        g_dcache[i].age = 0;
         g_dcache[i].accessed = 0;
     }
     g_dcache[VFS_DCACHE_MAX - 1].free_next = -1;
@@ -213,7 +210,6 @@ vnode_t *vfs_dcache_lookup(vnode_t *dir, const char *name)
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
             strcmp(e->name, name) == 0 && vnode_get_unless_zero(e->vn)) {
-            e->age = ++g_dcache_age;
             e->accessed = 1;
             vnode_t *vn = e->vn;
             dcache_bucket_unlock_irqrestore(h, bf);
@@ -238,7 +234,6 @@ void vfs_dcache_insert(vnode_t *dir, const char *name, vnode_t *vn)
         vfs_dcache_entry_t *e = &g_dcache[i];
         if (e->used && e->mnt == dir->mnt && e->parent_ino == dir->ino &&
             strcmp(e->name, name) == 0) {
-            e->age = ++g_dcache_age;
             e->accessed = 1;
             dcache_bucket_unlock_irqrestore(h, bf);
             spin_unlock_irqrestore(&g_dcache_lock, flags);
@@ -265,7 +260,6 @@ void vfs_dcache_insert(vnode_t *dir, const char *name, vnode_t *vn)
     e->parent_ino = dir->ino;
     strncpy(e->name, name, MAX_NAME_LEN - 1);
     e->vn = vn;
-    e->age = ++g_dcache_age;
     e->accessed = 1;
     e->hash_next = -1;
     e->hash_prev = -1;
@@ -316,25 +310,78 @@ void vfs_dcache_invalidate(vnode_t *dir, const char *name)
     spin_unlock_irqrestore(&g_dcache_lock, flags);
 }
 
+/* Serialises invalidate_all() against itself and holds the batch of retired
+ * vnode references, which is too large for the kernel stack.  Nothing on any
+ * lookup path takes it, so it can never be part of a cycle. */
+static spinlock_t g_dcache_invalidate_lock = SPINLOCK_INIT;
+static vnode_t *g_dcache_retire[VFS_DCACHE_MAX];
+static unsigned g_dcache_retire_count;
+
+static void dcache_retire_push(vnode_t *vn)
+{
+    g_dcache_retire[g_dcache_retire_count++] = vn;
+}
+
+static void dcache_retire_drain(void)
+{
+    unsigned n = g_dcache_retire_count;
+    g_dcache_retire_count = 0;
+    for (unsigned i = 0; i < n; i++)
+        vnode_put(g_dcache_retire[i]);
+}
+
+/* Unlink one hash chain and hand its vnode references to the retire batch.
+ * Caller holds the bucket lock that covers @h and g_dcache_invalidate_lock.
+ * The slot is left on the LRU as an unused entry, which is what
+ * dcache_alloc_slot() already knows how to reclaim, so dropping the whole
+ * table needs no LRU or free-list pass under the global lock. */
+static void dcache_drop_chain(unsigned h)
+{
+    for (int i = g_dcache_hash[h]; i >= 0; ) {
+        vfs_dcache_entry_t *e = &g_dcache[i];
+        int next = e->hash_next;
+        if (e->used) {
+            if (e->vn)
+                dcache_retire_push(e->vn);
+            e->used = 0;
+            e->vn = NULL;
+            e->accessed = 0;
+            e->hash_next = -1;
+            e->hash_prev = -1;
+        }
+        i = next;
+    }
+    g_dcache_hash[h] = -1;
+}
+
 void vfs_dcache_invalidate_all(void)
 {
-    uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
-    dcache_init_locked();
-    uint64_t bf[VFS_DCACHE_BUCKET_LOCKS];
-    for (int i = 0; i < (int)VFS_DCACHE_BUCKET_LOCKS; i++)
-        bf[i] = spin_lock_irqsave(&g_dcache_bucket_locks[i]);
-    vnode_t *to_put[VFS_DCACHE_MAX];
-    int count = 0;
-    for (int i = 0; i < VFS_DCACHE_MAX; i++) {
-        if (g_dcache[i].used && g_dcache[i].vn)
-            to_put[count++] = g_dcache[i].vn;
-    }
-    g_dcache_initialized = 0;
-    dcache_init_locked();
-    for (int i = (int)VFS_DCACHE_BUCKET_LOCKS - 1; i >= 0; i--)
-        spin_unlock_irqrestore(&g_dcache_bucket_locks[i], bf[i]);
-    spin_unlock_irqrestore(&g_dcache_lock, flags);
+    /*
+     * Retire one bucket at a time.  Collecting the whole table first meant
+     * every VFS_DCACHE_BUCKET_LOCKS lock was held, with interrupts disabled,
+     * across all the acquisitions and a VFS_DCACHE_MAX-entry scan, so an
+     * interrupt that reached any lookup spun on a lock its own interrupted
+     * context was holding.  Emptying a bucket and releasing it before moving
+     * on bounds the masked region to a single bucket, and an entry linked
+     * after its bucket has been emptied is a cache entry created during the
+     * invalidation, which is exactly as valid as one that survived it.
+     */
+    uint64_t inv = spin_lock_irqsave(&g_dcache_invalidate_lock);
+    for (unsigned b = 0; b < VFS_DCACHE_BUCKET_LOCKS; b++) {
+        uint64_t flags = spin_lock_irqsave(&g_dcache_lock);
+        dcache_init_locked();
+        spin_unlock_irqrestore(&g_dcache_lock, flags);
 
-    for (int i = 0; i < count; i++)
-        vnode_put(to_put[i]);
+        uint64_t bf = spin_lock_irqsave(&g_dcache_bucket_locks[b]);
+        for (unsigned h = b; h < VFS_DCACHE_HASH_SIZE;
+             h += VFS_DCACHE_BUCKET_LOCKS)
+            dcache_drop_chain(h);
+        spin_unlock_irqrestore(&g_dcache_bucket_locks[b], bf);
+
+        /* vnode_put() must not run under the cache locks, and both are
+         * released above, so this is the one point where a reference can be
+         * dropped with interrupts back on. */
+        dcache_retire_drain();
+    }
+    spin_unlock_irqrestore(&g_dcache_invalidate_lock, inv);
 }
