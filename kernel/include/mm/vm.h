@@ -367,7 +367,6 @@ pte_t mm_user_stack_pte_flags(void);
 pte_t mm_user_brk_pte_flags(void);
 int   mm_pte_flags_allow_access(pte_t pte_flags);
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags);
-pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags);
 
 /* User-space W^X policy (mm/wx.c): parses the a20.wx= cmdline and filters
  * W|X protection bits out of a requested prot. */
