@@ -35,6 +35,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
+#include "drivers/bus/pci_msix.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
 extern void input_mux_wake(void);
@@ -334,6 +335,21 @@ const struct drv_export drv_export_table[] = {
     { "pci_get_bar_resource", (void *)pci_get_bar_resource },
     { "pci_intx_irq",        (void *)pci_intx_irq },
     { "pci_enable_and_assign_bars", (void *)pci_enable_and_assign_bars },
+    { "pci_find_capability", (void *)pci_find_capability },
+    { "pci_cfg_read16",      (void *)pci_cfg_read16 },
+    { "pci_cfg_read32",      (void *)pci_cfg_read32 },
+    { "pci_cfg_write16",     (void *)pci_cfg_write16 },
+    { "pci_cfg_write32",     (void *)pci_cfg_write32 },
+    /* message-signalled interrupts: capability parse, table programming and
+     * the vector allocator the table entries name */
+    { "pci_msix_capability", (void *)pci_msix_capability },
+    { "pci_msix_enable",     (void *)pci_msix_enable },
+    { "pci_msix_program_vector", (void *)pci_msix_program_vector },
+    { "pci_msix_set_vector_mask", (void *)pci_msix_set_vector_mask },
+    { "pci_msix_commit",     (void *)pci_msix_commit },
+    { "pci_msix_disable",    (void *)pci_msix_disable },
+    { "irq_alloc_vectors",   (void *)irq_alloc_vectors },
+    { "irq_free_vectors",    (void *)irq_free_vectors },
     /* console input path (PS/2 module) */
     { "uart_receive_char",   (void *)uart_receive_char },
     /* scheduling / wait primitives used by module completion paths */

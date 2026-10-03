@@ -314,6 +314,16 @@ smoke-usb-hub-x86_64:
 	$(PYTHON) tools/smoke.py smoke-usb-hub-x86_64
 
 # ================================================================
+# MSI-X smoke (x86_64)
+# ================================================================
+# The only board with a message-signalled interrupt path at all, so the only
+# place the arch-independent MSI-X code and the x86 LAPIC programming meet.
+# See the case comment in tools/smoke_cases.py for what the pass/fail line
+# actually proves -- the delivery line is printed from the interrupt handler.
+smoke-msix-x86_64:
+	$(PYTHON) tools/smoke.py smoke-msix-x86_64
+
+# ================================================================
 # PCI bridge traversal smoke
 # ================================================================
 # Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,

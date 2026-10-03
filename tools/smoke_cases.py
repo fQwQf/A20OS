@@ -1092,6 +1092,57 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-hub-x86_64: PASS; log saved to $log',
     },
+    # Message-signalled interrupts, end to end, on the one machine type where
+    # the kernel programs a real interrupt controller: x86_64's LAPIC.  Every
+    # other board has no message-signalled path at all, so this case is where
+    # the code that is arch-independent (capability parsing, table location,
+    # vector reservation, teardown) and the code that is x86-only (LVT
+    # programming, the message address) meet for the first time.
+    #
+    # Two devices with two different table layouts are on the bus on purpose.
+    # QEMU's virtio-pci puts its MSI-X table in BAR1 (msix_init_exclusive_bar,
+    # msix_bar_idx = 1) and the e1000e's in BAR3; both publish the location in
+    # the capability's Message Address Lower field using the pre-PCIe encoding,
+    # because -kernel boots without firmware to write Vector Control.  A driver
+    # that guessed a BAR, or that read only Vector Control, programs the wrong
+    # window -- the readback check in pci_msix_program_vector() catches that,
+    # so the forbid list below is what says it did not happen.
+    #
+    # The delivery line is the point of the whole case: it is printed from the
+    # interrupt handler the first time a message-signalled completion arrives,
+    # so it cannot appear unless a device really posted a message, the platform
+    # really took it, and the kernel really dispatched it to the handler that
+    # was registered on that vector.  Getting the message address wrong -- ORing
+    # the vector into the LAPIC page, say -- produces a correctly programmed
+    # table that never interrupts anything, and this line is what fails.
+    'smoke-msix-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/msix-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 18, 'lines': ['poweroff']},
+        'timeout': '45s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-net', 'nic,model=e1000e', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': [
+            r'\[MSI-X\] pci-1af4:1001-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR1\+0x0 \(Message Address Low, pba BAR\d+\), 1 requested',
+            r'\[VIRTIO-PCI\] pci-1af4:1001-\d+: MSI-X reserved, vectors 208\.\.208 for 1 queue\(s\)',
+            r'\[MSI-X\] pci-1af4:1001-\d+: enabled, 1 vector\(s\) armed',
+            r'\[VIRTIO-BLK\] pci-1af4:1001-\d+ using MSI-X vectors 208\.\.208 completions',
+            r'\[VIRTIO-BLK\] MSI-X delivery on vector 208',
+            r'\[MSI-X\] pci-8086:10d3-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR3\+0x0 \(Message Address Low, pba BAR\d+\), 2 requested',
+            r'\[E1000\] MSI-X enabled on vectors 209\.\.210',
+        ],
+        'forbid': [
+            r'\[MSI-X\] .*capability names no table',
+            r'\[MSI-X\] .*platform has no message-signalled interrupt path',
+            r'\[MSI-X\] .*this window is not an MSI-X table',
+            r'\[VIRTIO-BLK\] .*MSI-X handler registration failed',
+            r'\[VIRTIO-PCI\] .*MSI-X unavailable',
+        ],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-msix-x86_64: PASS; log saved to $log',
+    },
     'smoke-vfs-edge': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
