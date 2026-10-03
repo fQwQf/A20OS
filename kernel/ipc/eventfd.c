@@ -66,8 +66,10 @@ static int eventfd_read(vfile_t *vf, char *buf, size_t count)
     int wake_writers = (efd->counter + val == ~0ULL);
     spin_unlock(&efd->lock);
 
+    /* The read freed exactly the space this writer needs; the rest of the
+     * blocked writers still do not fit and would only re-check and re-park. */
     if (wake_writers)
-        wait_queue_wake_all(&efd->writers, 0, PROC_WAKE_EVENT);
+        wait_queue_wake_one(&efd->writers, 0, PROC_WAKE_EVENT);
     memcpy(buf, &val, sizeof(val));
     return sizeof(val);
 }
@@ -121,8 +123,10 @@ static int eventfd_write(vfile_t *vf, const char *buf, size_t count)
     efd->counter += val;
     spin_unlock(&efd->lock);
 
+    /* A non-semaphore read drains the whole counter in one call, so one
+     * reader can take everything this write published. */
     if (wake_readers)
-        wait_queue_wake_all(&efd->readers, 0, PROC_WAKE_EVENT);
+        wait_queue_wake_one(&efd->readers, 0, PROC_WAKE_EVENT);
     return sizeof(val);
 }
 
