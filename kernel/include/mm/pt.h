@@ -317,6 +317,11 @@ typedef struct mm_pt_audit_report {
     uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
     uint64_t vmai_mismatch;  /* status claims a page no VMA accounts for */
     uint64_t safe_mismatch;  /* MM_SAFE_NO_FA disagrees with VM_SEALED */
+    /* Present leaf whose status class the covering VMA could not have
+     * produced (anonymous inside a MAP_SHARED file VMA, or vice versa).
+     * This is the precondition for P6: fault dispatch may only start
+     * deciding "anonymous or file?" from the status while this is 0. */
+    uint64_t cls_mismatch;
     /* Not an error: how many leaves carry MM_AS_ANON_VIRT, i.e. are reserved
      * but not yet backed.  This is the on-demand paging state the paper
      * relies on, so it is counted to make it observable rather than inferred
@@ -328,13 +333,15 @@ typedef struct mm_pt_audit_report {
      * extra words cost nothing that matters. */
     vaddr_t vma_bad_va;
     vaddr_t vmai_bad_va;
+    vaddr_t cls_bad_va;
+    uint8_t cls_bad_class;
 } mm_pt_audit_report_t;
 
 static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 {
     return r->missing_meta + r->present_mismatch + r->absent_mismatch +
            r->prot_mismatch + r->cow_mismatch + r->vma_mismatch +
-           r->vmai_mismatch +
+           r->vmai_mismatch + r->cls_mismatch +
            r->safe_mismatch;
 }
 
