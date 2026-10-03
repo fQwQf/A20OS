@@ -1715,6 +1715,12 @@ static void sched_runq_unpick_locked(task_t *t)
  * Safely reaps orphaned zombies (parent=idle, ppid=0, CLONE_THREAD,
  * or SIGCHLD ignored).  All work is done under proc_lock to prevent
  * races with proc_wait4() which may reap the same zombie.
+ *
+ * Repeat only when a pass filled the batch.  A zombie left behind was rejected
+ * on parent, SIGCHLD, or thread-group liveness, and every event that can later
+ * satisfy one of those announces itself through proc_sched_note_zombie(), so
+ * the second full walk that reaping anything at all used to force bought
+ * nothing.
  */
 void sched_reap_zombies(void)
 {
@@ -1726,10 +1732,12 @@ void sched_reap_zombies(void)
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         task_t *current = proc_current();
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-            if (t == proc_idle_task() || t == current ||
-                proc_task_is_current_any_cpu(t))
-                continue;
-            if (t->state != PROC_ZOMBIE)
+            /* State first: proc_task_is_current_any_cpu() reads two slots per
+             * CPU, and the walk visits every live task while only zombies can
+             * ever be reaped, so the current-task test belongs after the cheap
+             * test that throws almost everything away. */
+            if (t->state != PROC_ZOMBIE || t == proc_idle_task() ||
+                t == current || proc_task_is_current_any_cpu(t))
                 continue;
             task_t *parent = t->parent;
             int reap = 0;
@@ -1762,7 +1770,7 @@ void sched_reap_zombies(void)
             proc_destroy_task(to_reap[i]);
             proc_put(to_reap[i]);
         }
-    } while (count > 0);
+    } while (count == (int)(sizeof(to_reap) / sizeof(to_reap[0])));
 }
 
 void proc_sched_note_zombie(void)
