@@ -83,6 +83,35 @@ def apply_overlay(overlay: Path, staging: Path, sudo: list[str],
     normalize_overlay_modes(overlay, staging, sudo)
 
 
+def install_ssh_pubkeys(staging: Path, pubkeys: list[Path],
+                        sudo: list[str]) -> None:
+    """Install root's authorized_keys from public key files given on the CLI.
+
+    Password authentication is not a thing a baked image can carry safely:
+    the credential would live in the image forever.  A public key is the
+    only credential that can be baked in without handing the image a way in,
+    so this is how a world image becomes reachable over dropbear.
+
+    This runs after the overlays on purpose -- an operator-supplied key must
+    win over anything an overlay happens to ship.
+    """
+    home = staging / "root"
+    ssh_dir = home / ".ssh"
+    auth = ssh_dir / "authorized_keys"
+    run(["mkdir", "-p", str(ssh_dir)], sudo)
+    run(["sh", "-c", f"cat > {auth}"], sudo, input=b"".join(
+        pk.read_bytes().rstrip(b"\n") + b"\n" for pk in pubkeys))
+    # sshd/dropbear refuse the file outright when it is group-writable, and
+    # the strict-mode check on the directory is what stops a non-root local
+    # user from planting a key.
+    run(["chmod", "0700", str(home)], sudo)
+    run(["chmod", "0700", str(ssh_dir)], sudo)
+    run(["chmod", "0600", str(auth)], sudo)
+    if sudo:
+        run(["chown", "-R", "0:0", str(home)], sudo)
+    print(f"mkrootfs: installed {len(pubkeys)} ssh key(s) into /root/.ssh")
+
+
 def normalize_overlay_modes(overlay: Path, staging: Path,
                             sudo: list[str]) -> None:
     """Force overlay entries to 0644/0755.
@@ -304,6 +333,9 @@ def main() -> None:
                     help="accept unsigned packages/indexes")
     ap.add_argument("--cache-dir", type=Path, default=None,
                     help="apk package cache (default: build/cache/apk/<arch>)")
+    ap.add_argument("--ssh-pubkey", type=Path, action="append", default=[],
+                    help="public key file to install as root's "
+                         "/root/.ssh/authorized_keys; repeatable")
     ap.add_argument("--keep-staging", action="store_true")
     args = ap.parse_args()
 
@@ -411,6 +443,13 @@ def main() -> None:
 
         for overlay in args.overlay:
             apply_overlay(overlay, staging, sudo, keep_account_files=True)
+
+        if args.ssh_pubkey:
+            keys = [pk.resolve() for pk in args.ssh_pubkey]
+            for pk in keys:
+                if not pk.is_file():
+                    die(f"--ssh-pubkey {pk} is not a readable file")
+            install_ssh_pubkeys(staging, keys, sudo)
 
         if remote_repos:
             apk_etc = staging / "etc" / "apk"

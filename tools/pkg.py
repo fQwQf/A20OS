@@ -124,6 +124,8 @@ def cmd_image_world(a) -> int:
     cmd += ["--keys-dir", a.keys_dir] if a.sign_key else ["--allow-untrusted"]
     if a.alpine == "0":
         cmd += ["--no-alpine"]
+    for pk in (a.ssh_pubkey.split() if a.ssh_pubkey else []):
+        cmd += ["--ssh-pubkey", pk]
     if hasattr(__import__("os"), "getuid") and __import__("os").getuid() != 0:
         cmd += ["--usermode"]
     cmd += ["--output", f"{a.image_dir}/{a.world}-{a.arch}.img",
@@ -146,7 +148,8 @@ def main() -> int:
                  ("key-name", "public key name"), ("world", "world name"),
                  ("size-mb", "image size in MiB"), ("alpine", "1 or 0"),
                  ("media", "GUI_MEDIA paths"), ("media-dir", "media dir in image"),
-                 ("media-overlay", "media overlay dir")):
+                 ("media-overlay", "media overlay dir"),
+                 ("ssh-pubkey", "space-separated public key files")):
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     # Root detection: a leading 0 means "we are root", so usermode is off.
