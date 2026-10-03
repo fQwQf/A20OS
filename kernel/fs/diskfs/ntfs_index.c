@@ -139,10 +139,52 @@ int ntfs_collect_entry(const uint8_t *e, uint16_t elen, uint16_t flags,
 }
 
 
+/* Growable destination for a single index walk.  The directory used to be read
+ * twice -- once to count, once to fill -- so every name resolution paid for two
+ * full passes over the MFT record and every INDX block. */
+typedef struct ntfs_dirbuf {
+    ntfs_dir_entry_t *entries;
+    uint32_t          count;
+    uint32_t          cap;
+    int               oom;
+} ntfs_dirbuf_t;
+
+
+static int ntfs_dirbuf_visit(const uint8_t *e, uint16_t elen, uint16_t flags,
+                                    void *ctx)
+{
+    ntfs_dirbuf_t *b = (ntfs_dirbuf_t *)ctx;
+    ntfs_dir_entry_t d;
+
+    if ((flags & NTFS_IDX_ENTRY_LAST) || (e[0] == 0 && e[1] == 0 && e[2] == 0))
+        return 0;
+    if (!ntfs_entry_info(e, elen, d.name, sizeof(d.name), &d.is_dir,
+                         &d.ref, &d.size))
+        return 0;
+
+    if (b->count == b->cap) {
+        uint32_t cap = b->cap ? b->cap * 2 : 32;
+        ntfs_dir_entry_t *grown = krealloc(b->entries,
+                                           cap * sizeof(ntfs_dir_entry_t));
+        if (!grown) {
+            b->oom = 1;
+            return -1;   /* stops the walk */
+        }
+        b->entries = grown;
+        b->cap = cap;
+    }
+    b->entries[b->count++] = d;
+    return 0;
+}
+
+
 int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
                                uint32_t *out_count)
 {
     ntfs_sb_t *sb = fp->sb;
+    ntfs_dirbuf_t buf;
+    memset(&buf, 0, sizeof(buf));
+
     uint8_t *rec = kmalloc(sb->mft_record_size);
     if (!rec)
         return -1;
@@ -158,42 +200,37 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
         return -1;
     }
 
-    /* Two passes: count then fill.  entries == NULL selects counting mode. */
-    uint32_t count = 0;
-    ntfs_collect_ctx_t cctx;
-    cctx.sb = sb;
-    cctx.entries = NULL;
-    cctx.max = 0;
-    cctx.count = &count;
-
-    /* Pass 1: walk the index root node. */
+    /* Walk the index root node. */
     if (ix_root[8] == 0) {
         uint16_t voff = nget16(ix_root + 0x14);
         uint32_t vlen = nget32(ix_root + 0x10);
         const uint8_t *node = ix_root + voff + 16;   /* after ntfs_index_root_t */
-        ntfs_walk_node(node, vlen - 16, ntfs_collect_entry, &cctx);
+        ntfs_walk_node(node, vlen - 16, ntfs_dirbuf_visit, &buf);
     }
 
-    /* Pass 1: walk index allocation blocks. */
+    /* Walk the index allocation blocks. */
     ntfs_run_t *blocks = NULL;
     uint32_t block_count = 0;
     uint64_t block_size = 0;
-    int have_blocks = 0;
     if (ix_alloc && ix_alloc[8] == 1) {
         uint16_t flags = nget16(ix_alloc + 0x0C);
+        /* A compressed or encrypted index cannot be interpreted without its
+         * codec, so it is not walked at all. */
         if (!(flags & (NTFS_ATTR_COMPRESSED | NTFS_ATTR_ENCRYPTED))) {
             blocks = kmalloc(1024 * sizeof(ntfs_run_t));
             if (blocks && ntfs_parse_runs(ix_alloc, 1024, blocks, &block_count,
-                                          &block_size) == 0)
-                have_blocks = 1;
+                                          &block_size) != 0) {
+                kfree(blocks);
+                blocks = NULL;
+            }
         }
     }
 
-    if (have_blocks) {
+    if (blocks) {
         uint8_t *blk = kmalloc(sb->index_record_size);
         if (blk) {
             uint64_t nblocks = block_size / sb->index_record_size;
-            for (uint64_t bi = 0; bi < nblocks; bi++) {
+            for (uint64_t bi = 0; bi < nblocks && !buf.oom; bi++) {
                 memset(blk, 0, sb->index_record_size);
                 if (ntfs_stream_read(sb, blocks, block_count, block_size,
                                      bi * sb->index_record_size, blk,
@@ -204,7 +241,7 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
                 ntfs_unfixup(blk, sb->bytes_per_sector, nget16(blk + 0x04),
                              nget16(blk + 0x06));
                 ntfs_walk_node(blk + 24, sb->index_record_size - 24,
-                               ntfs_collect_entry, &cctx);
+                               ntfs_dirbuf_visit, &buf);
             }
             kfree(blk);
         }
@@ -212,67 +249,19 @@ int ntfs_read_directory(ntfs_vnode_priv_t *fp, ntfs_dir_entry_t **out,
     }
     kfree(rec);
 
-    if (count == 0)
-        return 0;
-
-    ntfs_dir_entry_t *arr = kmalloc(count * sizeof(ntfs_dir_entry_t));
-    if (!arr)
+    if (buf.oom) {
+        kfree(buf.entries);
         return -1;
-    uint32_t real = 0;
-    ntfs_collect_ctx_t c2;
-    c2.sb = sb;
-    c2.entries = arr;
-    c2.max = count;
-    c2.count = &real;
+    }
+    if (buf.count == 0) {
+        kfree(buf.entries);
+        *out = NULL;
+        *out_count = 0;
+        return 0;
+    }
 
-    /* Re-walk to fill. */
-    rec = kmalloc(sb->mft_record_size);
-    if (!rec) { kfree(arr); return -1; }
-    if (ntfs_read_record(sb, fp->mft_index, rec) < 0) {
-        kfree(arr); kfree(rec); return -1;
-    }
-    ix_root = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ROOT, 0);
-    ix_alloc = ntfs_find_attr(rec, sb->mft_record_size, NTFS_AT_INDEX_ALLOC, 0);
-    if (ix_root && ix_root[8] == 0) {
-        uint16_t voff = nget16(ix_root + 0x14);
-        uint32_t vlen = nget32(ix_root + 0x10);
-        ntfs_walk_node(ix_root + voff + 16, vlen - 16, ntfs_collect_entry, &c2);
-    }
-    blocks = NULL;
-    block_count = 0;
-    block_size = 0;
-    have_blocks = 0;
-    if (ix_alloc && ix_alloc[8] == 1) {
-        blocks = kmalloc(1024 * sizeof(ntfs_run_t));
-        if (blocks && ntfs_parse_runs(ix_alloc, 1024, blocks, &block_count,
-                                      &block_size) == 0)
-            have_blocks = 1;
-    }
-    if (have_blocks) {
-        uint8_t *blk = kmalloc(sb->index_record_size);
-        if (blk) {
-            uint64_t nblocks = block_size / sb->index_record_size;
-            for (uint64_t bi = 0; bi < nblocks; bi++) {
-                memset(blk, 0, sb->index_record_size);
-                if (ntfs_stream_read(sb, blocks, block_count, block_size,
-                                     bi * sb->index_record_size, blk,
-                                     sb->index_record_size) < 0)
-                    break;
-                if (memcmp(blk, "INDX", 4) != 0)
-                    break;
-                ntfs_unfixup(blk, sb->bytes_per_sector, nget16(blk + 0x04),
-                             nget16(blk + 0x06));
-                ntfs_walk_node(blk + 24, sb->index_record_size - 24,
-                               ntfs_collect_entry, &c2);
-            }
-            kfree(blk);
-        }
-        kfree(blocks);
-    }
-    kfree(rec);
-
-    *out = arr;
-    *out_count = real;
+    *out = buf.entries;
+    *out_count = buf.count;
     return 0;
 }
 
