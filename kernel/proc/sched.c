@@ -1769,13 +1769,24 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
     task_t *prev = proc_current();
     eevdf_charge(&sched_runq[cpu_current_id()], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
-        uint64_t elapsed_ticks = now - prev->cg_cpu_start;
-        uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
-        int throttled = cg_cpu_account(prev->cgroup, elapsed_ns, now);
-        if (throttled)
-            prev->cg_throttled = 1;
-        if (prev->cgroup)
+        /* Both cgroup helpers take the node lock on every context switch, and
+         * on a node with no quota they return without changing anything.  An
+         * unlimited node is never charged and so can never be throttled, which
+         * makes the pair of locks avoidable: quota and throttled are written
+         * only under node->lock, so a reader racing a quota change sees one of
+         * the two values rather than a torn one, and a missed unthrottle check
+         * simply runs on the next switch. */
+        cg_cpu_state_t *cpu_state = &((cg_node_t *)prev->cgroup)->res.cpu;
+        if (__atomic_load_n(&cpu_state->quota, __ATOMIC_RELAXED) !=
+                CG_CPU_QUOTA_MAX ||
+            __atomic_load_n(&cpu_state->throttled, __ATOMIC_RELAXED)) {
+            uint64_t elapsed_ticks = now - prev->cg_cpu_start;
+            uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
+            int throttled = cg_cpu_account(prev->cgroup, elapsed_ns, now);
+            if (throttled)
+                prev->cg_throttled = 1;
             cg_cpu_check_unthrottle(prev->cgroup, now);
+        }
     }
 
     next->cg_cpu_start = now;
