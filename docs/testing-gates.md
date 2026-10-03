@@ -315,6 +315,33 @@ hub 后面，它的端口位图还会在最后两个端口上报幻影连接。�
 "hub 被正确识别、描述符被正确解析、下行总线被正确注册"，**不**证明"hub 后面的
 设备被枚举"。后者只能靠真机验证。
 
+### MSI-X 消息中断
+
+`make smoke-msix-x86_64` 在 q35 上同时挂一个 `virtio-blk-pci` 和一块
+`e1000e`，断言两者的能力都被解析出表位置（virtio 在 BAR1、e1000e 在 BAR3，
+两者都报 `Message Address Low` 来源，因为 `-kernel` 引导没有固件写 Vector
+Control）、向量被预留并 arm、virtio-blk 改用 MSI-X 而让出 INTx，最后断言
+**`[VIRTIO-BLK] MSI-X delivery on vector 208`**。
+
+这一行由中断处理程序在第一次消息中断完成时打印。表项编程正确不等于消息被
+投递：能力解析、向量号、mask 状态、设备侧的 notify 路径都对，而消息地址错
+了（把向量 OR 进 LAPIC 页基址），设备照样 notify 就是没有中断，只有这行能
+区分。
+
+**门禁可证伪**：把 `arch_msix_message_address()` 里的 `LAPIC_PHYS_BASE` 改回
+`LAPIC_PHYS_BASE | (vector & 0xFF)`，`smoke-msix-x86_64` 会**只**缺
+`MSI-X delivery on vector 208` 这一条而失败——其余七条断言照常通过，因为表项、
+向量和 mask 都还是对的。把 capability 的解析改回只读 Vector Control，门禁会以
+缺 `MSI-X enabled` 失败；把 `queue_msix_vector` 写成向量号（208）而不是表
+索引（0），同样只缺这一条。
+
+**门禁覆盖不到的部分**：只有 x86_64 有消息中断路径，其他架构的
+`arch_msix_message_address()` 返回失败，MSI-X 那段代码在这些板上只被验证到
+"干净地拒绝"为止，没有真实投递。e1000e 只验证到表被正确解析并 arm，网卡本身
+不会收到流量，所以它的两个向量同样没有真实投递；virtio-blk 的那一路才是端到端
+的。IRQ 亲和性、多 CPU 下的 per-CPU 目标字段都不存在（见
+`docs/server-readiness.md`），向量窗口因此钉死在 boot processor。
+
 ### 致命信号 core dump
 
 `make smoke-coredump` 让 `coredump_test.c` 的子进程 SIGSEGV，断言 core 文件的 ELF64/LSB magic、`e_type == ET_CORE`、program header 布局、每个 PT_LOAD 的 `filesz <= memsz`、存在 PT_NOTE 且含 prstatus/prpsinfo/fpregset 三类 note；再验证 `core_pattern` 读写往返、子进程 wait status 的 core 位，以及 `RLIMIT_CORE=0` 时不产生文件。

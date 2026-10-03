@@ -18,6 +18,9 @@
 
 #define VIRTIO_NET_QUEUE_RX        0
 #define VIRTIO_NET_QUEUE_TX        1
+/* One message-signalled vector per direction: a burst on one no longer delays
+ * the other's completion behind a shared line. */
+#define VIRTIO_NET_QUEUES          2
 #define VIRTIO_NET_HDR_SIZE        12
 #define VIRTIO_NET_MTU             1500
 #define VIRTIO_NET_FRAME_MAX       1536
@@ -577,7 +580,44 @@ static int virtio_net_driver_probe(device_t *dev) {
     }
 
     resource_t *irq_res = device_get_resource(dev, RES_IRQ, 0);
-    if (net->vt.irq >= 0) {
+
+    /* Delivery, best first: one message-signalled vector per queue, then the
+     * shared INTx line, then the gated polling path. */
+    int msix_vectors = 0;
+    if (net->vt.msix_prepare) {
+        int r = net->vt.msix_prepare(&net->vt, VIRTIO_NET_QUEUES);
+        if (r == 0) {
+            msix_vectors = net->vt.msix_vectors;
+        } else {
+            kinfo("[VIRTIO-NET] %s: MSI-X unavailable (%d)\n", dev->name, r);
+        }
+    }
+
+    if (msix_vectors > 0) {
+        int registered = 0;
+        for (int i = 0; i < msix_vectors; i++) {
+            if (request_irq((uint32_t)(net->vt.msix_base + i),
+                            virtio_net_irq_handler, 0, net) == 0)
+                registered++;
+        }
+        if (registered == msix_vectors) {
+            net->irq = net->vt.msix_base;
+            net->irq_registered = 1;
+            /* Leaving an INTx handler behind would give the device two
+             * delivery paths for the same completions. */
+            net->vt.irq = -1;
+            net->vt.msix_arm(&net->vt);
+            kinfo("[VIRTIO-NET] %s using MSI-X vectors %d..%d\n",
+                  dev->name, net->vt.msix_base,
+                  net->vt.msix_base + msix_vectors - 1);
+        } else {
+            for (int i = 0; i < registered; i++)
+                free_irq((uint32_t)(net->vt.msix_base + i), net);
+            net->vt.msix_teardown(&net->vt);
+            kinfo("[VIRTIO-NET] %s MSI-X handler registration failed (%d/%d)\n",
+                  dev->name, registered, msix_vectors);
+        }
+    } else if (net->vt.irq >= 0) {
         unsigned long irq_flags = net->vt.shared_irq ? IRQF_SHARED : 0;
         if (request_irq((uint32_t)net->vt.irq, virtio_net_irq_handler,
                         irq_flags, net) == 0) {
@@ -591,8 +631,9 @@ static int virtio_net_driver_probe(device_t *dev) {
     } else if (dev->bus == &pci_bus) {
         /* PCI transports resolve their vector through arch_pci_intx_irq()
          * during transport init; irq < 0 means the platform has no INTx
-         * routing and RX/TX stay on the gated polling path.  The legacy
-         * IRQ Line register resource is NOT a usable vector on PCI. */
+         * routing, and MSI-X was refused above, so RX/TX stay on the gated
+         * polling path.  The legacy IRQ Line register resource is NOT a
+         * usable vector on PCI. */
         kinfo("[VIRTIO-NET] PCI transport using completion polling\n");
     } else if (irq_res) {
         if (request_irq((uint32_t)irq_res->start, virtio_net_irq_handler, 0, net) == 0) {
@@ -606,8 +647,8 @@ static int virtio_net_driver_probe(device_t *dev) {
     }
 
     g_nnet++;
-    kinfo("[VIRTIO-NET] Probed device '%s' (irq=%d)\n",
-          dev->name, net->irq_registered ? net->irq : -1);
+    kinfo("[VIRTIO-NET] Probed device '%s' (irq=%d msix=%d)\n",
+          dev->name, net->irq_registered ? net->irq : -1, msix_vectors);
     return 0;
 }
 
@@ -666,8 +707,15 @@ static int virtio_net_driver_remove(device_t *dev) {
     if (!net)
         return 0;
     net->valid = 0;
-    if (net->irq_registered)
-        free_irq((uint32_t)net->irq, net);
+    if (net->irq_registered) {
+        if (net->vt.msix_vectors > 0) {
+            for (int i = 0; i < net->vt.msix_vectors; i++)
+                free_irq((uint32_t)(net->vt.msix_base + i), net);
+            net->vt.msix_teardown(&net->vt);
+        } else {
+            free_irq((uint32_t)net->irq, net);
+        }
+    }
     net->irq_registered = 0;
     net->vt.write32(&net->vt, VIRTIO_MMIO_STATUS, 0);
     mb();

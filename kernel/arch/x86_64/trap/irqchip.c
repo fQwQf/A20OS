@@ -102,6 +102,10 @@ extern void *syscall_entry_table[CONFIG_NR_CPUS];
 #define MSR_LSTAR       0xC0000082
 #define MSR_SFMASK      0xC0000084
 #define MSR_FS_BASE     0xC0000100
+#define MSR_IA32_APIC_BASE 0x1B
+#define MSR_IA32_APIC_BASE_ENABLE (1ULL << 11)
+#define MSR_IA32_APIC_BASE_BSP    (1ULL << 8)
+#define MSR_IA32_APIC_BASE_X2APIC (1ULL << 10)
 #define EFER_SCE        (1ULL << 0)
 #define EFER_NXE        (1ULL << 11)
 #define RFLAGS_IF       (1ULL << 9)
@@ -204,6 +208,23 @@ static void pic_eoi(uint64_t vector) {
 }
 
 static void lapic_enable(void) {
+    /* IA32_APIC_BASE decides how a device's interrupt message reaches the core.
+     * Firmware normally leaves the APIC in xAPIC mode with the BSP enabled, but
+     * a message-signalled device can only post to the memory-mapped register at
+     * LAPIC_BASE, so clear x2APIC (bit 10) and make sure the APIC is on.  The
+     * BSP bit belongs to the boot processor alone -- setting it on an AP would
+     * make two CPUs claim the same logical processor. */
+    uint64_t apic_base;
+    __asm__ __volatile__("rdmsr" : "=a"(apic_base)
+                         : "c"((uint32_t)MSR_IA32_APIC_BASE) : "rdx");
+    apic_base &= ~MSR_IA32_APIC_BASE_X2APIC;
+    apic_base |= MSR_IA32_APIC_BASE_ENABLE;
+    if (cpu_current_id() == 0)
+        apic_base |= MSR_IA32_APIC_BASE_BSP;
+    __asm__ __volatile__("wrmsr" :: "c"((uint32_t)MSR_IA32_APIC_BASE),
+                         "a"((uint32_t)apic_base),
+                         "d"((uint32_t)(apic_base >> 32)));
+
     lapic_write(LAPIC_SVR, 0x1FF);
     lapic_write(LAPIC_LVT_LINT0, cpu_current_id() == 0 ? 0x700 : LAPIC_LVT_MASKED);
     lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
@@ -272,7 +293,80 @@ int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
     return (int)vector;
 }
 
+/* X86_64_MSIX_MODEL:
+ * - A message-signalled vector needs no IOAPIC entry: the device posts to the
+ *   local APIC's own address register, so the kernel-side programming is one
+ *   LVT, not a redirection entry.
+ * - The LVT covering vector V sits at LAPIC_LVT_TIMER + (V - 0x10) * 16.  A
+ *   processor implements only the first six of those (timer, thermal, perf,
+ *   LINT0, LINT1, error), which is why MSI vectors are taken from the top of
+ *   the interrupt range: there the delivery mode for the message data the
+ *   device sends is fixed rather than derived from an implemented entry.  The
+ *   window is 32 vectors, clear of the 8259 range below 0x30, the
+ *   IOAPIC-routed PCI window at 0x50-0x57, and the IPIs at 0xF0/0xF1.
+ * - Delivery mode lives in LVT bits 10:8 and 000b already means fixed, so an
+ *   entry is just the vector plus the mask bit request_irq() controls.  (The
+ *   value 0x10000 a local APIC resets to already decodes as "fixed".) */
+#define X86_64_MSIX_VECTOR_BASE 0xD0
+#define X86_64_MSIX_VECTOR_END  0xF0
+
+static int x86_64_msix_vector_p(uint32_t vector) {
+    return vector >= X86_64_MSIX_VECTOR_BASE && vector < X86_64_MSIX_VECTOR_END;
+}
+
+static void x86_64_msix_lvt(uint32_t vector, int masked) {
+    uint32_t offset = LAPIC_LVT_TIMER + (((vector - 0x10U) & 0xFFU) * 16U);
+    lapic_write(offset, vector | (masked ? (uint32_t)LAPIC_LVT_MASKED : 0U));
+}
+
+int arch_irq_msix_vector_range(int *base, int *end) {
+    if (!base || !end)
+        return -EINVAL;
+    *base = X86_64_MSIX_VECTOR_BASE;
+    *end = X86_64_MSIX_VECTOR_END;
+    return 0;
+}
+
+int arch_msix_message_address(uint32_t vector, uint32_t *addr_lo,
+                             uint32_t *addr_hi)
+{
+    /* The vector travels in the message data, not in the address: the local
+     * APIC takes the low byte of the data word as the interrupt to raise, and
+     * the address only says which APIC.  That address has to be the base of
+     * the APIC's own page.  A device is free to aim its message anywhere
+     * inside that page -- real hardware ignores the offset -- but software
+     * that goes off and ORs the vector into the address is relying on the
+     * offset being ignored, and emulators are not obliged to ignore it: the
+     * LAPIC window doubles as a register file, and a write that lands inside
+     * the first kilobyte is read as one, silently delivering nothing.  Posting
+     * to the page base is the one address that means "an interrupt" in every
+     * implementation. */
+    (void)vector;
+    if (!addr_lo || !addr_hi)
+        return -EINVAL;
+    /* ID zero -- the boot processor, which is where x86_64_route_pci_irq()
+     * already points every routed INTx line.  A device cannot be steered to
+     * another core without a per-CPU destination field, and this kernel's IRQ
+     * API has no affinity, so pinning here keeps MSI-X consistent with the
+     * INTx path it replaces. */
+    *addr_lo = LAPIC_PHYS_BASE;
+    *addr_hi = 0;
+    return 0;
+}
+
+int arch_msix_vector_setup(uint32_t vector, int masked)
+{
+    if (!x86_64_msix_vector_p(vector))
+        return -EINVAL;
+    x86_64_msix_lvt(vector, masked);
+    return 0;
+}
+
 void x86_64_pci_irq_set_masked(int vector, int masked) {
+    if (x86_64_msix_vector_p((uint32_t)vector)) {
+        x86_64_msix_lvt((uint32_t)vector, masked);
+        return;
+    }
     uint32_t gsi = (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
     if (gsi < 16U || gsi > 23U)
         return;

@@ -46,6 +46,85 @@ LoongArch 分配必须完全落在 `PCIE_MMIO_BASE..PCIE_MMIO_BASE+PCIE_MMIO_SIZ
 
 64 位 BAR 占两个配置 BAR slot，但只生成一个 MMIO resource，所以必须用 `pci_get_bar_resource(dev, physical_bar_number)`。校验 `end >= start` 和最小 aperture 大小后才能访问。BAR 地址已经通过 `arch_pci_bar_to_resource` 变成内核可访问地址。
 
+## MSI-X
+
+`kernel/drivers/bus/pci_msix.c` 提供与协议无关的 MSI-X 层：解析能力、按
+平台提供的信息编排表项、分配向量。协议驱动只声明"我要几个向量"。
+
+```c
+int r = pci_msix_enable(dev, vectors);          /* 关 Enable + 置 function mask */
+for (i = 0; i < vectors; i++)
+    pci_msix_program_vector(dev, i, base + i);  /* 表项初值，先 masked */
+request_irq(base + i, handler, 0, dev);        /* 装 handler */
+pci_msix_set_vector_mask(dev, i, 0);            /* 逐项解除 mask */
+pci_msix_commit(dev);                           /* 清 function mask，置 Enable */
+```
+
+失败一律回到 `-EOPNOTSUPP`/`-EINVAL` 等负 errno，由驱动退回 INTx 或轮询；
+不允许"半装好"的中间态存在。
+
+### 表在哪里：两个字段，两种编码
+
+能力头之后偏移 `0x10` 是 **Vector Control**（PCIe 形式），偏移 `0x04` 是
+**Message Address Lower**（继承自 PCI 之前的 MSI 编码）。两处都可能描述同一
+件事，且**字段决定编码，不由设备决定**：
+
+| 字段 | BIR 位 | 偏移位 | 偏移是否缩放 |
+|---|---|---|---|
+| Vector Control | `[3:1]` | `[31:12]` | 是，字节偏移 = 值 << 4 |
+| Message Address Lower | `[2:0]` | `[31:3]` | 否，字节偏移就是值 |
+
+`pci_msix_capability()` 优先读 Vector Control，读到零则退回 Message Address
+Lower，并在 `pci_msix_info_t::from_vector_ctrl` 里记录来源。
+
+为什么 Vector Control 常读到零：**它由平台固件写**。用 `-kernel` 引导意味着
+没有任何固件跑过，所有设备的 Vector Control 都是零。QEMU 的 virtio-pci
+（`virtio_pci_dc_realize` → `msix_init_exclusive_bar`）和 e1000e 都走
+`msix_init()` 里的 `pci_set_long(config + PCI_MSIX_TABLE, ...)`，即把表位置
+写进 Message Address Lower，用的正是 pre-PCIe 编码。所以这不是兼容包袱而是
+实际布局。
+
+两处都是零时，BIR 0 / 偏移 0 与"没人配置过"无法区分，`pci_msix_enable()`
+返回 `-EOPNOTSUPP` 并保留传统中断路径——对 BAR0 是 I/O 窗口的设备，照字面
+解释会把表项写到活寄存器上。
+
+**BAR 号是实现细节，不要猜。** QEMU 的 virtio-pci 表在 BAR1（`msix_bar_idx
+= 1`），e1000e 在 BAR3，virtio spec 一个字都没规定。表项写完立刻读回，
+不符就是打错了窗口，`pci_msix_program_vector()` 因此会拒绝
+`"this window is not an MSI-X table"`。
+
+### `queue_msix_vector` 是表索引，不是中断号
+
+common config 偏移 `0x1A`（与队列选择 `0x16` 配合使用）里的值是 **MSI-X 表的
+第几项**，不是这条中断线的号。QEMU 的 `virtio_pci_common_write()` 会判
+`val < proxy->nvectors`，超界就不调用 `msix_vector_use()`，之后
+`msix_notify()` 因为 `msix_entry_used[vector]` 为 0 直接返回——表项看起来
+编程得完全正确，永远不会有中断。把 208 写进去正是这样。
+
+表项本身携带的是中断号（`pci_msix_program_vector()` 写进 message data），
+两处不要混。
+
+### 平台钩子与消息地址
+
+```c
+int arch_msix_message_address(uint32_t vector, uint32_t *addr_lo, uint32_t *addr_hi);
+int arch_msix_vector_setup(uint32_t vector, int masked);
+int arch_irq_msix_vector_range(int *base, int *end);
+```
+
+三个都是 weak 符号，默认返回负 errno。只有 x86_64 实现了它们：向量窗口
+`0xD0..0xF0`，LVT 按 `LAPIC_LVT_TIMER + ((V - 0x10) & 0xFF) * 16` 定位。
+其他架构返回失败，驱动因此停在轮询或 INTx，而不会去编程一条永远不会被投递
+的中断。
+
+消息地址必须是 **APIC 自己那一页的基地址**（x86_64 上是 `LAPIC_PHYS_BASE`
+`0xFEE00000`），向量放在消息数据里，不放在地址里。真实硬件确实会忽略该页内
+的偏移，但软件没有理由去依赖这一点：LAPIC 窗口同时是寄存器文件，把向量 OR
+进地址得到的偏移落在前 1 KiB 内，实现按寄存器写解码，**什么都不投递，也不
+报错**。表项编程正确、message control 正确、function mask 已清，设备照常
+notify，就是一条中断都没有。向页基址投递是所有实现都解释为"这是一个中断"
+的唯一地址。
+
 ## PCI probe 模式
 
 ```c
@@ -147,7 +226,7 @@ if (pci_virtio_transport_init(dev, VIRTIO_ID_SCSI, &vt) < 0)
     return -ENODEV;
 ```
 
-helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。当前 PCI transport 设置 `irq = -1`，采用轮询。
+helper 要求 capability list 中存在 common cfg、notify cfg、device cfg 和有效 notify multiplier。PCI transport 的 `msix_prepare`/`msix_arm`/`msix_teardown` 把 MSI-X 暴露成与 MMIO transport 同形的三个回调，block/net 驱动据此按「MSI-X → INTx → 轮询」的顺序降级，`irq = -1` 只表示这条 INTx 线已经让给了 MSI-X。
 
 ## VirtIO feature 协商
 

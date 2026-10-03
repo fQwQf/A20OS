@@ -434,7 +434,16 @@ OOM 评分。
   这些 bus，所以该门禁在修复前后同样通过。它锁住的是不回归，不是修复本身。
   真正体现价值的是 riscv64 `(0,1)` 与 virtualbox-aarch64（固件分配范围），
   本 QEMU 构建无法驱动这两条路径（riscv64 virt 无 PCIe controller）。
-- 无 MSI/MSI-X → 只有 INTx。
+- **MSI-X 已实现（仅 x86_64 真实投递）**：`kernel/drivers/bus/pci_msix.c`
+  提供与协议无关的 MSI-X 层，`pci_bus.c` 把 virtio transport 接上，
+  e1000e 与 virtio-blk 已实测通过 `smoke-msix-x86_64`。能力表位置解析
+  同时支持 Vector Control（PCIe 编码，BIR `3:1` + 偏移 `31:12`）与
+  Message Address Lower（pre-PCIe 编码，BIR `2:0` + 偏移 `31:3`）——
+  `-kernel` 引导没有固件写前者，必须读后者。**残留**：只有 x86_64 实现了
+  `arch_msix_message_address()`/`arch_msix_vector_setup()`，其余架构干净
+  拒绝并退回 INTx/轮询；无 IRQ 亲和性与 per-CPU 目标字段，向量窗口钉死
+  在 boot processor 的 `0xD0..0xF0`；e1000e 只验证到表被正确解析并 arm，
+  网卡无流量故未实测投递（virtio-blk 一路是端到端的）。
 - INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:251-274` 只认
   host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
   ACPI `_PRT` 与 PIRQ link 编程。
@@ -474,6 +483,13 @@ OOM 评分。
   `kswapd_*` 计数）：回收不再全部同步发生在分配最坏路径。
 - **发布流水线接入 guest 门禁**：release.yml 新增 smoke job，Release 创建
   以 `smoke-abi-linux`/`smoke-vfs-stress`/`smoke-mm-stress` 通过为前提。
+- **PCI MSI-X**：`kernel/drivers/bus/pci_msix.c` + 能力表位置双编码解析 +
+  x86_64 LAPIC 向量/LVT 编程 + virtio transport 接入（`msix_prepare`/
+  `msix_arm`/`msix_teardown`）+ e1000e 接入；门禁 `smoke-msix-x86_64`
+  断言 `[VIRTIO-BLK] MSI-X delivery on vector 208`，该行由中断处理程序
+  在首次消息中断时打印，且已做反向验证（把消息地址改回错误形式，门禁
+  只缺这一条而失败）。详见 `docs/drivers/guide/pci-and-virtio.md` 的
+  「MSI-X」一节。
 - **server world 声明层**：`packages/world/server.world`（dropbear/chrony/
   busybox syslogd+crond）+ overlay init + `server-riscv64` 实例；
   声明过 `check-instances` 门禁，端到端组装与 SSH 登录验证未做（见 world
@@ -482,7 +498,7 @@ OOM 评分。
 仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
 分支在做）、`proc_lock` 超长持有成因、ext4 可写 journal、
 其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
-conntrack/NAT、MSI-X/ACPI `_PRT`。
+conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 
 ## 八、阻塞项排序
 
@@ -493,7 +509,8 @@ conntrack/NAT、MSI-X/ACPI `_PRT`。
 | P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
-| P1 | MSI-X + ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
+| ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
+| P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
