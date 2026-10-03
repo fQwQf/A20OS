@@ -724,10 +724,21 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
         vma_pool = vma_pool->next;
         vma_capacity--;
         *cv = *pv;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+        /* `seg` is an owned reference, and the struct copy copied the pointer
+         * without taking one -- so parent and child would each drop the same
+         * segment and free it while the other's page tables still named it.
+         * Sharing is the right relationship (both address spaces describe the
+         * same file), so take the reference the copy skipped. */
+        cv->seg = pv->seg ? mm_seg_get(pv->seg) : NULL;
+#endif
         refcount_set(&cv->refcount, 1);
         cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_fork(cv) < 0) {
             vma_release_file(cv);
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            mm_seg_put(cv->seg);
+#endif
             kfree(cv);
             goto fail_locked;
         }

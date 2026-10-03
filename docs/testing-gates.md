@@ -118,10 +118,31 @@
 MMTEST: ALL STAGES PASS
 MMTEST_RESULT: PASS
 [MM-ASM] pt_pages=10 entries=3584 missing_meta=0 present=0 absent=0 prot=0 cow=0
-         vma=0 vmai=0 safe=0 anon_virt=0
+         vma=0 vmai=0 cls=0 safe=0 anon_virt=0 seg_slots=9 seg_bad=0 seg_kind=0
+         seg_ok=40459 seg_diff=0 seg_miss=3796
+         seg_dispatch=40459 seg_fallback=3796
 ```
 
-详见 [roadmap/single-level-mm-model.md §12](roadmap/single-level-mm-model.md)。
+`seg_*` 是 P6 的影子比对字段（见 roadmap §13），含义与门槛各不相同：
+
+| 字段 | 含义 | 门槛 |
+| --- | --- | --- |
+| `seg_slots` | 带段号的 PT 节点条目数（观测值） | 非 0，否则测量是空转 |
+| `seg_bad` | 段号指向**非活** `mm_seg_t` 的条目数 | **必须 0**（会读到已释放的 vnode） |
+| `seg_kind` | 段自称的 kind 与覆盖该地址的 VMA 不符的条目数 | **必须 0** |
+| `seg_ok` | 段表能回答且与 VMA 一致的缺页数 | 观测值 |
+| `seg_diff` | 段表能回答但**与 VMA 不一致**的缺页数 | **必须 0** |
+| `seg_miss` | 段表答不出的缺页数（覆盖缺口，非缺陷） | 观测值 |
+| `seg_dispatch` | 实际**由段决定**的文件缺页数 | 观测值 |
+| `seg_fallback` | 回退到 VMA 的文件缺页数 | 观测值 |
+
+`seg_diff=0` 与 `seg_ok>0` 必须同时成立：前者说明段没有骗人，后者说明它确实在
+被使用。只满足前者（`seg_ok=0`）是空转，门禁会照常变绿——所以 `seg_slots` 与
+`seg_dispatch` 也在断言行里。`seg_dispatch` 与 `seg_ok`/`seg_miss` 应当两两相等：
+相等才说明"段能回答就照段的做，答不出就走回退"。
+
+详见 [roadmap/single-level-mm-model.md §12](roadmap/single-level-mm-model.md) 与
+[§13](roadmap/single-level-mm-model.md)。
 
 ### I/O 进展
 

@@ -62,16 +62,24 @@ FEED_DELAY = 30
 AUDIT_RE = re.compile(
     r"\[MM-ASM\] pt_pages=(\d+) entries=(\d+) missing_meta=(\d+) present=(\d+) "
     r"absent=(\d+) prot=(\d+) cow=(\d+) vma=(\d+) vmai=(\d+) cls=(\d+) "
-    r"safe=(\d+) anon_virt=(\d+)"
+    r"safe=(\d+) anon_virt=(\d+) seg_slots=(\d+) seg_bad=(\d+) "
+    r"seg_kind=(\d+) seg_ok=(\d+) seg_diff=(\d+) seg_miss=(\d+) "
+    r"seg_dispatch=(\d+) seg_fallback=(\d+)"
 )
 AUDIT_FIELDS = [
     "pt_pages", "entries", "missing_meta", "present", "absent", "prot",
     "cow", "vma", "vmai", "cls", "safe", "anon_virt",
+    "seg_slots", "seg_bad", "seg_kind", "seg_ok", "seg_diff", "seg_miss",
+    "seg_dispatch", "seg_fallback",
 ]
 # Fields that are counts of pages and must be 0.  pt_pages and entries are
 # totals, and anon_virt is the on-demand-paging state the model is built on --
 # none of them is a mismatch.
-NOT_A_MISMATCH = ("pt_pages", "entries", "anon_virt")
+# seg_slots is an observation, not a verdict: it counts PT-node entries that
+# name a segment, which is > 0 for any process with a file or VMO mapping.
+# seg_bad and seg_kind are verdicts and must be 0.
+NOT_A_MISMATCH = ("pt_pages", "entries", "anon_virt", "seg_slots",
+                  "seg_ok", "seg_miss", "seg_dispatch", "seg_fallback")
 
 
 def log(msg: str) -> None:
@@ -194,6 +202,18 @@ def verdict(log_path: str) -> int:
             log(f"audit: clean ({counts['pt_pages']} PT pages, "
                 f"{counts['entries']} entries, "
                 f"{counts['anon_virt']} anon_virt)")
+            # The shadow counters are the P6 measurement, not a correctness
+            # verdict.  seg_diff must be 0; seg_ok and seg_miss are numbers to
+            # read, and printing only the verdicts would hide the one thing
+            # this gate was extended to produce.
+            if counts["seg_ok"] or counts["seg_miss"]:
+                log(f"  seg shadow: {counts['seg_ok']} agreed, "
+                    f"{counts['seg_miss']} uncovered, "
+                    f"{counts['seg_diff']} disagreed "
+                    f"({counts['seg_slots']} annotated node entries); "
+                    f"dispatch took the segment {counts['seg_dispatch']} "
+                    f"times and fell back to the VMA "
+                    f"{counts['seg_fallback']}")
 
     log("PASS" if ok else "FAIL")
     return 0 if ok else 1
