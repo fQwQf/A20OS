@@ -119,50 +119,79 @@ void pty_init(void) {
     }
 }
 
+/*
+ * PTY_BUF_SIZE is above SLAB_MAX_OBJ, so every ring buffer takes the BUDDY
+ * path, and the plain kmalloc below is the reclaiming one: under memory
+ * pressure pfa_alloc_flags() calls oom_try_reclaim(), which takes proc_lock
+ * and mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
+ * kerr()/proc_force_exit() a task.  None of that may run with interrupts
+ * disabled, so the buffers are obtained with the allocation lock released and
+ * only the reservation and the publication are done under it.
+ */
 static int pty_alloc(void) {
-    /* LOCK_ORDER: acquire g_pty_alloc_lock for allocation only;
-     * per-pair lock is not held. */
+    /* LOCK_ORDER: g_pty_alloc_lock guards slot reservation only; it is never
+     * held across an allocation and never nested with the per-pair lock. */
+    int idx = -1;
     uint64_t flags = spin_lock_irqsave(&g_pty_alloc_lock);
     for (int i = 0; i < MAX_PTYS; i++) {
         if (!g_ptys[i].in_use) {
+            /* Reserving the slot before releasing the lock is what keeps a
+             * concurrent pty_alloc() from picking the same index.  Nothing
+             * else can observe the slot yet: a pty_pair_t pointer only escapes
+             * once pty_alloc() returns, and every in_use reader runs under the
+             * per-pair lock on a pair that has already been published. */
             g_ptys[i].in_use = 1;
-            g_ptys[i].m2s_buf = (char *)kmalloc(PTY_BUF_SIZE);
-            g_ptys[i].s2m_buf = (char *)kmalloc(PTY_BUF_SIZE);
-            g_ptys[i].canon_buf = (char *)kmalloc(PTY_BUF_SIZE);
-            if (!g_ptys[i].m2s_buf || !g_ptys[i].s2m_buf || !g_ptys[i].canon_buf) {
-                if (g_ptys[i].m2s_buf) kfree(g_ptys[i].m2s_buf);
-                if (g_ptys[i].s2m_buf) kfree(g_ptys[i].s2m_buf);
-                if (g_ptys[i].canon_buf) kfree(g_ptys[i].canon_buf);
-                g_ptys[i].m2s_buf = NULL;
-                g_ptys[i].s2m_buf = NULL;
-                g_ptys[i].canon_buf = NULL;
-                g_ptys[i].in_use = 0;
-                spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
-                return -ENOMEM;
-            }
-            g_ptys[i].m2s_head = g_ptys[i].m2s_tail = g_ptys[i].m2s_used = 0;
-            g_ptys[i].s2m_head = g_ptys[i].s2m_tail = g_ptys[i].s2m_used = 0;
-            g_ptys[i].canon_len = 0;
-            g_ptys[i].canon_lines = 0;
-            g_ptys[i].locked = 0;
-            g_ptys[i].master_refs = 1;
-            g_ptys[i].slave_refs = 0;
-            g_ptys[i].ws_row = 24;
-            g_ptys[i].ws_col = 80;
-            g_ptys[i].master_nonblock = 0;
-            g_ptys[i].slave_nonblock = 0;
-            g_ptys[i].packet_mode = 0;
-            g_ptys[i].master_waiting = 0;
-            g_ptys[i].slave_waiting = 0;
-            wait_queue_init(&g_ptys[i].master_readers);
-            wait_queue_init(&g_ptys[i].slave_readers);
-            pty_fill_default_termios(&g_ptys[i].termios);
-            spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
-            return i;
+            g_ptys[i].m2s_buf = NULL;
+            g_ptys[i].s2m_buf = NULL;
+            g_ptys[i].canon_buf = NULL;
+            idx = i;
+            break;
         }
     }
     spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
-    return -ENOSPC;
+    if (idx < 0)
+        return -ENOSPC;
+
+    char *m2s_buf = (char *)kmalloc(PTY_BUF_SIZE);
+    char *s2m_buf = (char *)kmalloc(PTY_BUF_SIZE);
+    char *canon_buf = (char *)kmalloc(PTY_BUF_SIZE);
+    if (!m2s_buf || !s2m_buf || !canon_buf) {
+        if (m2s_buf) kfree(m2s_buf);
+        if (s2m_buf) kfree(s2m_buf);
+        if (canon_buf) kfree(canon_buf);
+        flags = spin_lock_irqsave(&g_pty_alloc_lock);
+        g_ptys[idx].m2s_buf = NULL;
+        g_ptys[idx].s2m_buf = NULL;
+        g_ptys[idx].canon_buf = NULL;
+        g_ptys[idx].in_use = 0;
+        spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
+        return -ENOMEM;
+    }
+
+    flags = spin_lock_irqsave(&g_pty_alloc_lock);
+    pty_pair_t *pty = &g_ptys[idx];
+    pty->m2s_buf = m2s_buf;
+    pty->s2m_buf = s2m_buf;
+    pty->canon_buf = canon_buf;
+    pty->m2s_head = pty->m2s_tail = pty->m2s_used = 0;
+    pty->s2m_head = pty->s2m_tail = pty->s2m_used = 0;
+    pty->canon_len = 0;
+    pty->canon_lines = 0;
+    pty->locked = 0;
+    pty->master_refs = 1;
+    pty->slave_refs = 0;
+    pty->ws_row = 24;
+    pty->ws_col = 80;
+    pty->master_nonblock = 0;
+    pty->slave_nonblock = 0;
+    pty->packet_mode = 0;
+    pty->master_waiting = 0;
+    pty->slave_waiting = 0;
+    wait_queue_init(&pty->master_readers);
+    wait_queue_init(&pty->slave_readers);
+    pty_fill_default_termios(&pty->termios);
+    spin_unlock_irqrestore(&g_pty_alloc_lock, flags);
+    return idx;
 }
 
 static void pty_maybe_free_locked(pty_pair_t *pty) {
