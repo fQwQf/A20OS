@@ -88,6 +88,18 @@ void fat32_release_vn(vnode_t *vn) {
 }
 
 
+/* Point a directory's ".." entry at its parent.  The parent is not named in
+ * every case: a directory directly under the root records zero here, not the
+ * root's cluster number, and fsck.fat rejects the mirror image of it with
+ * "Invalid '..' entry in the second slot" even though both names resolve. */
+static void fat32_set_dotdot_cluster(fat32_dirent_t *e, fat32_sb_t *sb,
+                                    uint32_t parent)
+{
+    uint32_t start = (parent == sb->root_cluster) ? 0 : parent;
+    e->fst_clus_hi = (uint16_t)(start >> 16);
+    e->fst_clus_lo = (uint16_t)start;
+}
+
 int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     fat32_vnode_priv_t *p = (fat32_vnode_priv_t *)dir->fs_data;
     if (!p->is_dir) return -ENOTDIR;
@@ -124,8 +136,7 @@ int fat32_vn_mkdir(vnode_t *dir, const char *name, int mode) {
     memset(dot.name, ' ', 11);
     dot.name[0] = '.'; dot.name[1] = '.';
     dot.attr = FAT_ATTR_DIRECTORY;
-    dot.fst_clus_hi = (uint16_t)(p->first_cluster >> 16);
-    dot.fst_clus_lo = (uint16_t)(p->first_cluster & 0xFFFF);
+    fat32_set_dotdot_cluster(&dot, sb, p->first_cluster);
     bcache_write_bytes(sb->bc, new_base + 32, &dot, sizeof(dot));
 
     int r = fat32_create_dirents(sb, p->first_cluster, name,
@@ -219,21 +230,32 @@ int fat32_vn_unlink(vnode_t *dir, const char *name) {
     fat32_sb_t *sb = p->sb;
     fat32_delete_dirents(sb, p->first_cluster, doff);
 
-    /* If a vnode is still alive (open fd, dcache, ...), keep the cluster
-     * chain and let release() free it once the last reference drops. */
+    /* An open descriptor keeps the cluster chain: the data still has to reach
+     * the device, and fat32_fclose() frees the chain when the last one goes.
+     * With nothing open the chain is freed here -- waiting for the vnode's last
+     * reference cannot work, because the vnode cache holds one for as long as
+     * the inode is cached and so release() never runs. */
     vnode_t *victim = fat32_vcache_remove(sb, (uint64_t)cluster);
     if (victim) {
         fat32_vnode_priv_t *vp = (fat32_vnode_priv_t *)victim->fs_data;
-        if (vp)
+        if (vp && vp->open_count > 0) {
             vp->unlinked = 1;
-        fat32_unlock(p->sb);
-        vnode_put(victim);
-        return 0;
+            fat32_unlock(p->sb);
+            vnode_put(victim);
+            return 0;
+        }
+        if (vp)
+            vp->first_cluster = 0;
     }
 
     vfs_drop_time_meta_identity(dir->mnt, (uint64_t)cluster);
     fat32_drop_meta(sb, (uint64_t)cluster);
     fat32_free_cluster_chain(sb, cluster);
+    if (victim) {
+        fat32_unlock(p->sb);
+        vnode_put(victim);
+        return 0;
+    }
     fat32_unlock(p->sb);
     return 0;
 }
@@ -380,16 +402,26 @@ int fat32_vn_rmdir(vnode_t *dir, const char *name) {
     vnode_t *victim = fat32_vcache_remove(sb, (uint64_t)cluster);
     if (victim) {
         fat32_vnode_priv_t *vp = (fat32_vnode_priv_t *)victim->fs_data;
-        if (vp)
+        /* A directory cannot be open, but a cached vnode for it exists, and the
+         * cache's own reference is what keeps release() from running. */
+        if (vp && vp->open_count > 0) {
             vp->unlinked = 1;
-        fat32_unlock(p->sb);
-        vnode_put(victim);
-        return 0;
+            fat32_unlock(p->sb);
+            vnode_put(victim);
+            return 0;
+        }
+        if (vp)
+            vp->first_cluster = 0;
     }
 
     vfs_drop_time_meta_identity(dir->mnt, (uint64_t)cluster);
     fat32_drop_meta(sb, (uint64_t)cluster);
     fat32_free_cluster_chain(sb, cluster);
+    if (victim) {
+        fat32_unlock(p->sb);
+        vnode_put(victim);
+        return 0;
+    }
     fat32_unlock(p->sb);
     return 0;
 }
@@ -460,8 +492,7 @@ int fat32_vn_rename(vnode_t *old_dir, const char *old_name,
         fat32_dirent_t dotdot;
         memset(&dotdot, 0, sizeof(dotdot));
         if (read_raw_dirent(sb, c, 32, &dotdot) > 0) {
-            dotdot.fst_clus_hi = (uint16_t)(np->first_cluster >> 16);
-            dotdot.fst_clus_lo = (uint16_t)np->first_cluster;
+            fat32_set_dotdot_cluster(&dotdot, sb, np->first_cluster);
             bcache_write_bytes(sb->bc, cluster_byte_offset(sb, c) + 32,
                                &dotdot, sizeof(dotdot));
         }
@@ -474,8 +505,16 @@ int fat32_vn_rename(vnode_t *old_dir, const char *old_name,
         vnode_t *tvictim = fat32_vcache_remove(sb, (uint64_t)tgt_cluster);
         if (tvictim) {
             fat32_vnode_priv_t *vp = (fat32_vnode_priv_t *)tvictim->fs_data;
-            if (vp)
+            if (vp && vp->open_count > 0) {
                 vp->unlinked = 1;
+            } else {
+                if (vp)
+                    vp->first_cluster = 0;
+                vfs_drop_time_meta_identity(new_dir->mnt,
+                                            (uint64_t)tgt_cluster);
+                fat32_drop_meta(sb, (uint64_t)tgt_cluster);
+                fat32_free_cluster_chain(sb, tgt_cluster);
+            }
             vnode_put(tvictim);
         } else {
             vfs_drop_time_meta_identity(new_dir->mnt,

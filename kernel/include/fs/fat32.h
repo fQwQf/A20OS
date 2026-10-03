@@ -19,6 +19,23 @@
 #define FAT32_CLUSTER_END       0x0FFFFFF8   /* >= this = end-of-chain */
 #define FAT32_CLUSTER_END_MARK  0x0FFFFFFF
 
+/* FSInfo sector: the sector whose number the BPB names, carrying two advisory
+ * hints -- the free cluster count and the next free cluster -- that fsck.fat
+ * recomputes and compares, so a filesystem that allocates and frees without
+ * updating it comes back "Free cluster summary wrong".
+ *
+ * The two signatures are 484 bytes apart, not adjacent: the FAT32 layout
+ * reserves everything between them, and ends the sector with the boot
+ * signature.  Reading the structure signature at the start of the sector --
+ * which is where the two signatures sit in every other FAT structure -- finds
+ * nothing and silently disables the whole accounting path. */
+#define FAT32_FSINFO_LEAD_SIG   0x41615252   /* "RRaA", byte 0 */
+#define FAT32_FSINFO_STRUC_SIG  0x61417272   /* "rrAa" */
+#define FAT32_FSINFO_OFF_STRUC  0x1e4        /* structure signature */
+#define FAT32_FSINFO_OFF_FREE   0x1e8        /* u32 free cluster count */
+#define FAT32_FSINFO_OFF_NEXT   0x1ec        /* u16 next free cluster */
+#define FAT32_FSINFO_UNKNOWN    0xffffffffU
+
 /* Directory entry attribute bytes */
 #define FAT_ATTR_READ_ONLY  0x01
 #define FAT_ATTR_HIDDEN     0x02
@@ -98,6 +115,17 @@ typedef struct fat32_vcache_ent {
 typedef struct fat32_sb {
     uint32_t first_fat_sector;
     uint32_t sectors_per_fat;
+    /* How many copies of the FAT the boot sector declares.  Every copy has to
+     * be updated: fsck.fat answers "FATs differ but appear to be intact" the
+     * first time a file is created if only the first one moves. */
+    uint32_t num_fats;
+    /* Byte offset of the FSInfo sector, which sits in the last sector before
+     * the data region, and the free/next counters it carries.  free_clusters
+     * is FAT32_FSINFO_UNKNOWN when the sector carried none, in which case it
+     * is counted from the FAT at mount and written back afterwards. */
+    uint64_t fsinfo_off;
+    uint32_t free_clusters;
+    int      fsinfo_dirty;
     uint32_t first_data_sector;
     uint32_t root_cluster;
     uint32_t sectors_per_cluster;
