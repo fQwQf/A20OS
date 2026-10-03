@@ -82,6 +82,12 @@ arches = ["riscv64", "aarch64"]
 description = "virtio input prober"
 
 [[driver]]
+name = "abi-probe"
+source = "kernel/drvmod/examples/abi_probe.c"
+arches = ["riscv64"]
+description = "Negative fixture: claims a mismatched A20_DRIVER_ABI and must be refused at load"
+
+[[driver]]
 name = "hda"
 source = "kernel/drvmod/examples/hda.c"
 arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]

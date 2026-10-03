@@ -160,6 +160,55 @@ run-world: image-world $(FAT32_IMG)
 		-device $(QEMU_BLK_SECOND),drive=xworld \
 		-kernel $(KERNEL_ELF)
 
+# 门禁：stock Mesa 能否 attach 到我们的 virtio-gpu（3D 传输层之外的另一半）。
+#
+# 与 smoke-gpu3d-* 的区别是本质的：那些门禁里说话的是 gpu3d_test 自己，它直接
+# 发 DRM_IOCTL_VIRTGPU_* 并自己回读像素，所以只证明**传输层**通。决定桌面能否用上
+# 3D 的客户端是 libEGL/libgbm 去加载 virtio_gpu_dri.so，那是 libdrm 设备枚举 +
+# DRI device 创建，另一条路径另一组期待。
+#
+# 镜像刻意不带 /etc/a10-distro 标记（因此不带 packages/overlay），内核便不会
+# chroot 进去 exec 桌面；它只作为 /extra 挂载，由 smoke.py 像 smoke-devtools
+# 那样手动 chroot，于是串口上始终有一个读 stdin 的 shell。
+#
+# GPU_3D=1 是必需的：GPU_3D=0 时 QEMU 提供 2D-only 设备，Mesa 找不到 virgl，
+# 测的是另一件事。
+.PHONY: smoke-mesa-attach
+SMOKE_MESA_IMG := $(PKG_IMAGE_DIR)/mesa-probe-$(ARCH).img
+
+# GPU_3D=1 is what asks QEMU for the virgl-capable device, and DISPLAY_MODE=gui
+# is what attaches a GPU device *at all* -- under -nographic QEMU attaches none,
+# so without it the guest has no virtio-gpu and every VIRTGPU ioctl answers
+# -ENODEV.  Both are required, and the failure without them is silent: the probe
+# still runs, still reports, and reports a device that is simply not there.
+smoke-mesa-attach: DISPLAY_MODE=gui
+# egl-headless,gl=on rather than the gtk default: gtk needs an X display, and
+# without gl=on QEMU refuses to create the device at all.  Run it under
+# tools/with-virgl-display.sh on a host with two GPU drivers.
+smoke-mesa-attach: QEMU_GUI_DISPLAY=egl-headless
+# Whether "Mesa bound virgl" is a hard failure. On by default because it now
+# holds: stock Mesa reaches virgl and the renderer string says so. Set 0 to
+# downgrade to reporting-only while bisecting an attach regression.
+MESA_REQUIRE_VIRGL_ATTACH ?= 1
+smoke-mesa-attach: $(FAT32_IMG) $(KERNEL_ELF)
+	$(PYTHON) tools/mkrootfs.py --arch $(ARCH) \
+		--world packages/world/mesa-probe.world \
+		--overlay tools/tests/mesa-probe-overlay \
+		$(if $(filter-out 0,$(shell id -u)),--usermode,) \
+		$(if $(PKG_SIGN_KEY),--keys-dir $(abspath $(PKG_KEYS_DIR)),--allow-untrusted) \
+		--output $(SMOKE_MESA_IMG) --size-mb 1024
+	@$(PYTHON) tools/smoke.py mesa-attach \
+		--label "$(ARCH)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--qemu "$(QEMU)" \
+		$(addprefix --qemu-flag=,$(QEMU_FLAGS_NO_SDCARD)) \
+		--img "$(SMOKE_MESA_IMG)" \
+		--blk-second "$(QEMU_BLK_SECOND)" \
+		--kernel "$(KERNEL_ELF)" \
+		--timeout 900s \
+		$(if $(filter 1,$(MESA_REQUIRE_VIRGL_ATTACH)),--require-virgl-attach,) \
+		--input-delay "$(SMOKE_INPUT_DELAY)"
+
 # 回归门禁：上游 Alpine 包（gcc/fastfetch）经 chroot 在 guest 内真实运行。
 # 守护 trap.S freemap 的 pfn 翻译修复（历史上 gcc 级负载触发
 # "corrupted kernel stack pointer" 误报 panic）。需要网络拉取上游包

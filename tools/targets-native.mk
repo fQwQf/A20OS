@@ -75,6 +75,21 @@ NATIVE_LIBC_SRC  := \
     user/liba20c/environ.c \
     user/liba20c/a20_errno.c
 
+# Every header in the native SDK / libc.  The binaries below are single-TU
+# whole-program links (one gcc invocation compiles *and* links the test plus
+# the SDK), so there is no .o step for -MMD to attach generated deps to and
+# their prerequisites used to be hand-enumerated per binary rule.  That
+# enumeration silently rotted: editing an "unlisted" header (a20_clock.h,
+# a20_sdk.h, a20_string.h, a20_registry.h, a20_system.h, a20_net.h, a20_fs.h,
+# a20_linux.h, a20_personality.h) left make with no changed prerequisite, so
+# `make native-programs` reported success while shipping binaries built
+# against the old header.  tools/stamps.py re-invokes make on a header change,
+# but the re-invocation found nothing stale to do.  Wildcard the whole set
+# instead: over-declaring is the safe direction for a correctness net, and
+# $(wildcard) yields an empty list for an absent directory rather than a
+# literal unexpanded path.
+NATIVE_SDK_HDRS := $(wildcard user/liba20rt/*.h user/liba20c/*.h user/liba20c/include/*.h)
+
 define NATIVE_HANDLE_TEST_RECIPE
 @mkdir -p $(dir $(4))
 $(1) -ffreestanding -nostdlib -static \
@@ -91,7 +106,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_HANDLE_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_handle.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_HANDLE_TEST_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-handle-test-arch: $(NATIVE_HANDLE_BIN)
@@ -132,7 +147,7 @@ endef
 
 $(NATIVE_LIBC_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_LIBC_SRC) $(NATIVE_ARCH_SRC) \
 		user/tests/test_liba20c.c user/liba20rt/a20-generic.ld \
-		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_LIBC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-libc-arch: $(NATIVE_LIBC_BIN)
@@ -174,7 +189,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_FUTEX_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_futex.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_sync.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FUTEX_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-futex-arch: $(NATIVE_FUTEX_BIN)
@@ -212,7 +227,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_DEEPEN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_deepen.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_pager.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_DEEPEN_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-deepen-arch: $(NATIVE_DEEPEN_BIN)
@@ -236,7 +251,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_DEBUG_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_debug.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_debug.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_DEBUG_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-debug-test-arch: $(NATIVE_DEBUG_BIN)
@@ -247,7 +262,7 @@ $(1) -ffreestanding -nostdlib -static     $(2)     -Iuser -Iuser/liba20rt     -T
 endef
 
 $(NATIVE_EXT_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_ext.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_ext.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_EXT_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-ext-test-arch: $(NATIVE_EXT_BIN)
@@ -302,7 +317,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_MM_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_mm.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_mem.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_MM_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-mm-arch: $(NATIVE_MM_BIN)
@@ -340,7 +355,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_SIGNAL_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_signal.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_task.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SIGNAL_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-signal-arch: $(NATIVE_SIGNAL_BIN)
@@ -378,7 +393,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_IPC_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_ipc.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_channel.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_IPC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-ipc-arch: $(NATIVE_IPC_BIN)
@@ -418,7 +433,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_CONTRACT_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_contract.c \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_channel.h user/liba20rt/a20_event.h user/liba20rt/a20_mem.h user/liba20rt/a20_handle.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_CONTRACT_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-contract-arch: $(NATIVE_CONTRACT_BIN)
@@ -458,11 +473,11 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_SVCMAN_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/svcman.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/svcman.c,$@)
 
 $(NATIVE_ECHOD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/echod.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/echod.c,$@)
 
 native-svc-arch: $(NATIVE_SVCMAN_BIN) $(NATIVE_ECHOD_BIN)
@@ -471,15 +486,15 @@ native-svc-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-svc-arch
 
 $(NATIVE_SHMRING_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_shmring.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_shmring.h user/liba20rt/a20_mem.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_shmring.c,$@)
 
 $(NATIVE_SHMRINGD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/shmringd.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_shmring.h user/liba20rt/a20_mem.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/shmringd.c,$@)
 
 $(NATIVE_CHAND_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/chand.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/chand.c,$@)
 
 native-shmring-arch: $(NATIVE_SHMRING_BIN) $(NATIVE_SHMRINGD_BIN) $(NATIVE_CHAND_BIN)
@@ -488,7 +503,7 @@ native-shmring-rv:
 	$(MAKE) ARCH=riscv64 NOMMU=$(NOMMU) native-shmring-arch
 
 $(NATIVE_RTCD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_rtcd.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20rt/a20_device.h
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_SVC_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/tests/test_native_rtcd.c,$@)
 
 define NATIVE_RTCD_RECIPE
@@ -507,7 +522,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_RTCDD_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/svc/rtcd.c $(A20_SERVICES_IDL_HDR) \
-		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h \
+		user/liba20rt/a20-generic.ld user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS) \
 		kernel/include/drivers/driver_descriptor.h kernel/include/drivers/dual/drv_env.h kernel/include/drivers/dual/goldfish_rtc.h
 	$(call NATIVE_RTCD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),user/svc/rtcd.c,$@)
 
@@ -529,7 +544,7 @@ $(1) -ffreestanding -nostdlib -static \
 endef
 
 $(NATIVE_FAKELD_BIN): user/tests/fake_ld.c user/liba20rt/a20-generic.ld \
-		user/liba20rt/a20_types.h user/liba20rt/a20_syscall.h user/liba20rt/a20_handle.h
+		user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_FAKELD_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$@)
 
 native-fakeld-arch: $(NATIVE_FAKELD_BIN)
@@ -550,7 +565,7 @@ $(1) -ffreestanding -nostdlib -Wl,--dynamic-linker=/bin/fakeld-rv \
 endef
 
 $(NATIVE_DYNPROBE_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_COMPILER_RT_SRC) $(NATIVE_ARCH_SRC) user/tests/test_native_dynprobe.c \
-		user/liba20rt/a20-dynamic.ld user/liba20rt/crt0_a20.h
+		user/liba20rt/a20-dynamic.ld user/liba20rt/crt0_a20.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_DYNPROBE_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$@)
 
 native-dynprobe-arch: $(NATIVE_DYNPROBE_BIN)
@@ -578,7 +593,7 @@ endef
 
 $(NATIVE_CHESS_BIN): $(NATIVE_CRT0) $(NATIVE_SDK_SRC) $(NATIVE_LIBC_SRC) $(NATIVE_ARCH_SRC) \
 		$(NATIVE_CHESS_SRC) user/liba20rt/a20-generic.ld \
-		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h user/liba20c/include/stdio.h
+		user/liba20rt/crt0_a20.h user/liba20rt/a20_syscall.h $(NATIVE_SDK_HDRS)
 	$(call NATIVE_CHESS_RECIPE,$(NATIVE_CC),$(NATIVE_CFLAGS),$(NATIVE_CRT0),$@)
 
 native-chess-arch: $(NATIVE_CHESS_BIN)

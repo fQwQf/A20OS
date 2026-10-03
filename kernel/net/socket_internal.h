@@ -9,18 +9,43 @@
 #include "core/sync.h"
 #include "core/timer.h"
 #include "lwip/ip_addr.h"
+#include "net/net_lane.h"
 
 struct udp_pcb;
 struct raw_pcb;
 struct tcp_pcb;
+struct pbuf;
 
-#define NET_MAX_SOCKETS 1024
+#include "net/net_profile.h"
+
+#define NET_MAX_SOCKETS NET_PROFILE_MAX_SOCKETS
 #define NET_MAX_STREAM_PAYLOAD 2048
 #define NET_MAX_PAYLOAD 65535
-#define NET_MAX_QUEUE   128
+#define NET_MAX_QUEUE   NET_PROFILE_MAX_QUEUE
 #define NET_SCM_MAX_FDS 16
 #define NET_CONNECT_TIMEOUT_TICKS MS_TO_TICKS(10000)
-#define NET_BH_RING_SIZE 16
+#define NET_BH_RING_SIZE NET_PROFILE_BH_RING_SIZE
+
+/*
+ * Payload staging sizes.
+ *
+ * Both stages below used to embed data[NET_MAX_PAYLOAD] (65535 bytes).  A
+ * 1460-byte segment therefore cost ~136 KiB of memset plus three copies, and
+ * the memsets ran inside the lwIP critical section -- the source of the
+ * single-acquire spin spikes recorded in docs/server-readiness.md, and the
+ * reason removing read-path polling did not lower the spin total.  net_msg_t
+ * was additionally oversize past SLAB_MAX_OBJ, so mm/slab.c rounded every
+ * message up to whole pages: a 100-byte datagram cost 68 KiB.
+ *
+ * A TCP segment is at most TCP_MSS and most datagrams fit inline, so only
+ * oversized payloads take the spill path.  The inline sizes must stay >= the
+ * configured TCP_MSS and <= the largest slab class respectively.
+ */
+#define NET_BH_INLINE_PAYLOAD  NET_PROFILE_INLINE_PAYLOAD
+/* Power of two: bh_ring_mask() relies on it. */
+_Static_assert((NET_BH_RING_SIZE & (NET_BH_RING_SIZE - 1)) == 0,
+               "the bottom-half ring size must be a power of two");
+#define NET_MSG_INLINE_PAYLOAD 1024
 
 typedef enum {
     NET_BH_RECV = 0,
@@ -45,14 +70,59 @@ typedef struct net_bh_event {
     uint8_t hoplimit;
     uint8_t tclass;
     uint16_t __pad_meta;
-    uint8_t data[NET_MAX_PAYLOAD];
+    /*
+     * Set instead of using `data` when the payload exceeds
+     * NET_BH_INLINE_PAYLOAD, which only a datagram socket can produce: a TCP
+     * segment is at most TCP_MSS.  `spill` is a pbuf the ring has taken a
+     * reference to and `spill_off` is where this event's slice starts in it.
+     * The ring frees the reference when it next wraps onto the same slot, so
+     * the pbuf is never released outside the lwIP critical section -- memp has
+     * no internal locking and today every memp call happens under
+     * g_lwip_lock.
+     */
+    struct pbuf *spill;
+    uint32_t spill_off;
+    uint8_t data[NET_BH_INLINE_PAYLOAD];
 } net_bh_event_t;
 
 typedef struct net_bh_ring {
     net_bh_event_t events[NET_BH_RING_SIZE];
+    /*
+     * Spill references owned per slot, indexed the same way as `events`.
+     * bh_ring_prepare() reclaims the slot's reference before handing it out
+     * again, and socket teardown drains the whole array.
+     */
+    struct pbuf *owned[NET_BH_RING_SIZE];
     uint32_t head;
     uint32_t tail;
 } net_bh_ring_t;
+
+/*
+ * Accepted-pcb staging for a real lwIP listening socket.
+ *
+ * lwIP hands a completed handshake to tcp_accept() with g_lwip_lock already
+ * held and the new pcb in ESTABLISHED.  The bookkeeping that has to follow --
+ * allocating a net_socket_t, installing its callbacks, registering it, pushing
+ * it on the listener's accept queue and waking accept_waitq -- needs
+ * g_net_lock and the allocator, and docs/net/network-lock-contract.md forbids
+ * both inside an lwIP callback.  So the callback only parks the pcb here and
+ * the bottom half finishes the job, which is the same split the receive path
+ * already uses.
+ *
+ * Bounded and lock-free in the shape of net_bh_ring_t: the producer runs with
+ * local interrupts off under g_lwip_lock and publishes head with a release
+ * fence, the consumer runs later under g_net_lock.  `dropped` is a correctness
+ * counter, not a statistic -- a non-zero value means a completed handshake was
+ * discarded, and the pcb has to be aborted rather than leaked.
+ */
+#define NET_ACCEPT_STAGE_SIZE 8
+
+typedef struct net_accept_stage {
+    struct tcp_pcb *pcbs[NET_ACCEPT_STAGE_SIZE];
+    uint32_t head;
+    uint32_t tail;
+    volatile int dropped;
+} net_accept_stage_t;
 
 typedef struct net_msg {
     struct net_msg *next;
@@ -82,8 +152,24 @@ typedef struct net_msg {
     int32_t cred_pid;
     int32_t cred_uid;
     int32_t cred_gid;
-    uint8_t data[NET_MAX_PAYLOAD];
+    /*
+     * Payload lives inline up to NET_MSG_INLINE_PAYLOAD, which is sized to land
+     * in mm/slab.c's largest slab class so ordinary messages never reach the
+     * buddy allocator.  `overflow` is allocated only for a larger payload and
+     * is owned exclusively by this message.
+     */
+    uint8_t inline_data[NET_MSG_INLINE_PAYLOAD];
+    uint8_t *overflow;
 } net_msg_t;
+
+/*
+ * Byte offset 0 of a message's payload, valid for any 0 <= off < m->len.  Both
+ * arms are contiguous, so the partial-read path can index either with m->off.
+ */
+static inline uint8_t *net_msg_payload(net_msg_t *m)
+{
+    return m->overflow ? m->overflow : m->inline_data;
+}
 
 typedef struct net_recv_meta {
     int scm_nfiles;
@@ -106,6 +192,15 @@ typedef struct net_recv_meta {
 } net_recv_meta_t;
 
 typedef struct net_socket {
+    /*
+     * Lane this socket's PCB belongs to, and which never changes for the life of
+     * the connection.  Recomputed at bind from the bound (ip, port) because that
+     * is the pair an inbound packet can reproduce: the peer's source port is our
+     * local port and the peer's destination is our local address.  Before bind
+     * it is only a provisional assignment from the creating CPU, which is why
+     * nothing may rely on it until the socket is bound.
+     */
+    unsigned lane;
     int domain;
     int type;
     int protocol;
@@ -196,6 +291,7 @@ typedef struct net_socket {
     struct net_socket *accept_head;
     struct net_socket *accept_tail;
     int accept_count;
+    net_accept_stage_t accept_stage;
     /* AF_PACKET: bound L2 filter.  pkt_protocol is host order. */
     int pkt_ifindex;
     uint16_t pkt_protocol;
@@ -215,6 +311,22 @@ typedef struct net_socket {
     volatile int bh_tx_wake;
     volatile int bh_pending;
 } net_socket_t;
+
+/*
+ * One net_socket_t exists per open socket and up to a hundred of them are kept
+ * alive by the socket obj_cache, so its size is a per-socket memory cost that
+ * no runtime counter would show.  It used to embed 16 bottom-half events of
+ * 64 KiB each, about 1.05 MiB per socket; the inline staging split in
+ * net_bh_event_t brought the default profile to about 30 KiB.
+ *
+ * The bound is per profile rather than one global number so a profile with a
+ * smaller ring or buffer is not forced to pay for the largest one, and it
+ * exists so putting a fixed NET_MAX_PAYLOAD-sized member back fails the build
+ * instead of quietly costing a megabyte per descriptor.
+ */
+_Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
+               "net_socket_t exceeds the profile's per-socket budget; a fixed "
+               "NET_MAX_PAYLOAD-sized staging member has crept back in");
 
 typedef struct sockaddr_alg_kernel {
     uint16_t family;
@@ -255,6 +367,8 @@ void     net_sockaddr_set_port(void *addr, size_t len, uint16_t port);
 int      net_sockaddr_in_local(const net_sockaddr_in_t *in);
 int      net_sockaddr_to_lwip_ip(const void *addr, size_t len,
                                  ip_addr_t *ip, uint16_t *port);
+unsigned net_socket_lane_of_addr(const void *addr, size_t len,
+                                 unsigned fallback);
 int      net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                                  uint8_t out[NET_SOCKADDR_MAX],
                                  size_t *outlen);
@@ -289,6 +403,10 @@ int      net_enqueue_msg_locked_fds(net_socket_t *dst, const void *buf,
                                     size_t addrlen,
                                     vfile_t **files, int nfiles);
 int      net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
+                                     const void *addr, size_t addrlen,
+                                     const net_bh_event_t *meta);
+int      net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
+                                     uint32_t off, size_t len,
                                      const void *addr, size_t addrlen,
                                      const net_bh_event_t *meta);
 int      net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len,
@@ -376,6 +494,10 @@ int      net_inet_connect(net_socket_t *s, const void *addr, size_t addrlen,
 int      net_inet_sendto(net_socket_t *s, const void *buf, size_t len,
                          int flags, const void *addr, size_t addrlen);
 void     net_inet_accept_child_ready(net_socket_t *s);
+/* Convert a bound AF_INET socket into a real lwIP LISTEN pcb so the port is
+ * reachable from off-box.  No-op concept for AF_INET6, which still has no
+ * LISTEN pcb path.  Takes g_lwip_lock internally. */
+int      net_inet_tcp_listen(net_socket_t *s, int backlog);
 /* Push the socket's IPPROTO_IP options into its pcb, and report the values its
  * packets actually carry when the caller never set them.  Shared rather than
  * forward-declared locally: defined in socket_inet.c, called from
@@ -391,8 +513,6 @@ void     net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
                           uint64_t data1);
 int      net_socket_close_file(vfile_t *vf);
 
-#endif /* _NET_SOCKET_INTERNAL_H */
-
 void net_tcp_recved(net_socket_t *s, size_t len);
 
 /* Internal IPC bridge (AF_UNIX socketpair): plain data flows through the
@@ -401,3 +521,5 @@ void net_tcp_recved(net_socket_t *s, size_t len);
 int unix_ch_recv(net_socket_t *s, void *buf, size_t len);
 int unix_ch_peek(net_socket_t *s, void *buf, size_t len);
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len);
+
+#endif /* _NET_SOCKET_INTERNAL_H */

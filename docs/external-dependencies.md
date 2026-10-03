@@ -21,6 +21,8 @@
 - `EXTERNAL_LWIP_CONFIG_CONTRACT`：A20OS 通过 `kernel/net/lwip_stack.c` 以 `NO_SYS=1` 模式使用 lwIP，而不是使用 lwIP 自带的 socket API。
 - 内核 socket 层拥有 socket 文件，并在 `g_lwip_lock` 保护下转换为 lwIP TCP/UDP/RAW 原语。
 - 进展推进基于轮询：`sys_check_timeouts()`、virtio-net TX 完成、RX 投递和 `netif_poll()` 都通过 `a20_lwip_poll()` 与 `kernel_progress_poll()` 驱动。
+- `EXTERNAL_LWIP_IS_A_FORK`：**`kernel/external/lwip` 不是纯上游 vendoring，而是带 A20OS 自有改动的分叉。** 它包含上游不存在的 `src/include/lwip/priv/pcb_lane.h`（PCB 链表按 lane 分桶），并给 `struct tcp_pcb` / `struct udp_pcb` 增加 `lane` 字段——属数据结构级改动，不可按上游文档推断行为。A20OS 自身改动为 9 文件 `+790 / -302`（口径：`git diff f773b0aa HEAD -- kernel/external/lwip`）。上游基线 SHA 记录在 `kernel/external/lwip/.upstream-base`，完整差异清单见 [`kernel/external/lwip/DIVERGENCE.md`](../kernel/external/lwip/DIVERGENCE.md)。`tools/lwip-sync.sh` 提供 `--record` / `--stat` / `--check`。
+  - **因此"不随上游风格重排"这句话对本目录不成立**：`pbuf.c` 里有 A20OS 自有的板级诊断，`tcp.c` / `udp.c` / `tcp_in.c` 的链表组织已被改写。读代码时必须先读 DIVERGENCE.md。
 
 ## 网络默认值与 bootargs
 

@@ -36,6 +36,7 @@ QEMU AArch64 当前不导入 FDT `/chosen/bootargs`，所以给 QEMU 增加 `-ap
 | `a20.dns` | IPv4 DNS 服务器，可出现多次 | `a20.dns=10.0.2.3` |
 | `a20.dhcp` | `1` 启用 DHCP，`0` 禁用 | `a20.dhcp=1` |
 | `a20.hostname` | hostname 字符串，最长 63 字节 | `a20.hostname=a20os` |
+| `a20.tcpmode` | `fast` 或 `lwip`，见下 | `a20.tcpmode=lwip` |
 
 ### 键规则
 
@@ -44,6 +45,10 @@ QEMU AArch64 当前不导入 FDT `/chosen/bootargs`，所以给 QEMU 增加 `-ap
 - 如果没有任何网络键，内核默认启用 DHCP；需要保持链路未配置时可显式传入 `a20.dhcp=0` 且不提供地址。
 - `a20.dns` 可以出现多次。第一次填充 DNS server slot 0，第二次填充 slot 1，依此类推，直到 lwIP DNS server 数量上限。
 - `a20.hostname` 当前只赋给 loopback netif；Ethernet netif 初始化尚未设置 `hostname` 字段。
+- `a20.tcpmode` 决定本地 TCP listener 是否真的存在于 lwIP。`fast`（默认、缺省值）
+  保持既有行为：listener 只存在于 socket 层，只能被同一内核内走同样快捷路径的进程连接。
+  `lwip` 把已绑定的 pcb 转成真正的 LISTEN pcb，端口在协议栈上 listen，**入站连接可以完成
+  握手**。未识别的值按 `fast` 处理。
 - 所有值都在早期启动期间解析一次，并存储到运行时 `a20_net_config` 结构体中。
 
 ## 解析位置
@@ -86,11 +91,23 @@ gateway=10.0.2.2
 dns0=10.0.2.3
 dhcp=1
 hostname=a20os
+tcpmode=fast
 ```
 
-该文件只读，并反映当前生效配置。如果启用 DHCP，租约变化时这些值会更新。
+地址类字段只读，并反映当前生效配置。如果启用 DHCP，租约变化时这些值会更新。
 
-**未来计划**：可以增加 `sys_net_get_config`/`sys_net_set_config` 来支持原子更新。当前没有这些 syscall，`/proc/net/config` 只读，不能作为运行时设置入口。
+**`tcpmode` 可写**，接受 `tcpmode fast` 与 `tcpmode lwip` 两条命令，其余输入返回
+`-EINVAL`。它可写是因为它是唯一一个"选在 listener 建立之前"就有意义的开关，而
+`/proc/net/config` 是现成的控制面；但**开机第一个 listener 通常由用户态创建，
+shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip` 命令行键。
+
+**运行时切换的已知限制**（实测，可复现）：命令行选定 `lwip` 时回环 TCP 传输
+（`tcp_loopback_test`）通过；先用默认 `fast` 跑一次、再用写入口切到 `lwip`，
+则 listener 建立与 `accept()` 仍正常（`smoke-net-accept` 覆盖），但**数据传输
+不完成**。原因尚未定位。因此写入口只应视为调试/实验便利，**部署一律用命令行键**。
+
+**未来计划**：可以增加 `sys_net_get_config`/`sys_net_set_config` 来支持地址的原子更新。
+当前没有这些 syscall，地址类字段仍不能作为运行时设置入口。
 
 ## 用户命令消费方式
 

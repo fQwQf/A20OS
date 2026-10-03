@@ -1,15 +1,26 @@
 #!/bin/sh
-# Create a GPT disk with a UEFI System Partition containing BOOTAA64.EFI.
+# Create a GPT disk with a UEFI System Partition containing an A20OS EFI loader.
+# Serves both architectures: the ESP entry name is the 4th argument, so BOOTAA64.EFI
+# for aarch64 and BOOTX64.EFI for x86_64 produce the same layout.
 set -eu
 
 efi_image=${1:-}
 output=${2:-}
 rootfs_image=${3:-}
+efi_name=${4:-BOOTAA64.EFI}
 
 if [ -z "$efi_image" ] || [ -z "$output" ] || [ -z "$rootfs_image" ]; then
-    echo "Usage: $0 <BOOTAA64.EFI> <output.img> <rootfs-fat32.img>" >&2
+    echo "Usage: $0 <loader.efi> <output.img> <rootfs-fat32.img> [esp-entry-name]" >&2
     exit 1
 fi
+# BOOTX64.EFI is the x86_64 loader, BOOTAA64.EFI the aarch64 one. The manifest
+# records which, so a reader of a finished disk is not told "ARM64" about a disk
+# that boots x86_64.
+case "$efi_name" in
+    BOOTX64.EFI)  arch_slug=x86_64;  loader_key=bootx64 ;;
+    BOOTAA64.EFI) arch_slug=aarch64; loader_key=bootaa64 ;;
+    *) arch_slug=unknown; loader_key=$(printf '%s' "$efi_name" | tr 'A-Z.' 'a-z_') ;;
+esac
 if [ ! -s "$efi_image" ]; then
     echo "Error: EFI image missing or empty: $efi_image" >&2
     exit 1
@@ -51,17 +62,20 @@ drive b: file="$output" offset=$esp_offset
 EOF
 MTOOLSRC="$tmp_mtoolsrc" mcopy -s 'a:/*' b:/
 MTOOLSRC="$tmp_mtoolsrc" mmd b:/EFI b:/EFI/BOOT
-MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" b:/EFI/BOOT/BOOTAA64.EFI
+MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$efi_image" "b:/EFI/BOOT/$efi_name"
 manifest=$(mktemp)
 trap 'rm -f "$tmp_mtoolsrc" "$manifest"' EXIT HUP INT TERM
 {
-    printf 'format=a20os-vbox-aarch64-gpt-v1\n'
-    printf 'bootaa64_sha256='
+    # Name the format after the ESP entry actually staged, so an x86_64 disk is
+    # not labelled as an ARM64 one and the manifest key matches the loader it
+    # really carries.
+    printf 'format=a20os-vbox-%s-gpt-v1\n' "$arch_slug"
+    printf '%s_sha256=' "$loader_key"
     sha256sum "$efi_image" | awk '{print $1}'
     printf 'rootfs_sha256='
     sha256sum "$rootfs_image" | awk '{print $1}'
 } > "$manifest"
 MTOOLSRC="$tmp_mtoolsrc" mcopy -o "$manifest" b:/A20OS.MANIFEST
 sha256sum "$output" > "$output.sha256"
-echo "VirtualBox ARM64 GPT/UEFI disk with A20OS root filesystem created: $output"
+echo "GPT/UEFI disk ($arch_slug) with A20OS root filesystem created: $output"
 echo "Image checksum: $output.sha256"

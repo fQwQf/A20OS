@@ -584,6 +584,31 @@ class TestRepositoryInstances(unittest.TestCase):
             self.assertNotIn(name, seen, f"{name} declared by both {seen.get(name)} and {path.name}")
             seen[name] = path.name
 
+    def test_boot_media_names_a_path_its_package_kind_produces(self) -> None:
+        """`a20 deploy` writes boot_media, so the image it names has to exist.
+
+        cmd_deploy calls run_package before target-write-media, so an instance
+        that declares a [package].kind gets its artifact built.  An instance that
+        names boot_media without one would instead build a kernel into the build
+        directory and then fail at the dd step, because nothing ever produced the
+        image it committed to.  This is that failure, asserted against the real
+        manifests so it cannot come back one manifest at a time.
+        """
+        failures: list[str] = []
+        for path in sorted((REPO_ROOT / "instances").glob("*.toml")):
+            inst = parse_instance(path)
+            if not inst.target.boot_media:
+                continue
+            if not inst.target.media_device:
+                continue          # separately covered: deploy refuses this
+            if not inst.package.kind:
+                failures.append(f"{path.name}: boot_media with no [package].kind")
+            elif not inst.target.boot_media[0].startswith("build/"):
+                failures.append(
+                    f"{path.name}: boot_media {inst.target.boot_media[0]} is not "
+                    f"under build/, so no make target stages it there")
+        self.assertEqual(failures, [], "\n".join(failures))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -1062,7 +1087,16 @@ class TestApplicableActions(unittest.TestCase):
         self.assertNotIn("run", self.acts(base))
         self.assertIn("run", self.acts(base + "qemu = true\n"))
 
-    def test_target_section_unlocks_console_and_deploy(self) -> None:
+    def test_target_section_unlocks_console_but_not_bare_deploy(self) -> None:
+        """A [target] section alone buys console, not deploy.
+
+        cmd_deploy has to put something on the board: either a writable medium or
+        a boot chain to hand the kernel to.  Advertising deploy for a target that
+        has neither is what left the storage-less SBC ports with a command that
+        built the kernel and then attached to a board which never received it.
+        This expectation used to assert the opposite, and disagreed with
+        test_deploy_is_withheld_when_media_has_nowhere_to_go directly below.
+        """
         self.assertNotIn("console", self.acts('arch = "riscv64"\n'))
         acts = self.acts("""
             arch = "riscv64"
@@ -1070,6 +1104,18 @@ class TestApplicableActions(unittest.TestCase):
             serial = "/dev/ttyUSB0"
         """)
         self.assertIn("console", acts)
+        self.assertNotIn("deploy", acts)
+
+    def test_deploy_is_advertised_for_a_handoff_board(self) -> None:
+        """A board with no block driver still deploys: via [handoff]."""
+        acts = self.acts("""
+            arch = "riscv64"
+            [target]
+            serial = "/dev/ttyUSB0"
+            [handoff]
+            method = "tftp"
+            commands = ["tftp ${loadaddr} kernel.bin"]
+        """)
         self.assertIn("deploy", acts)
 
     def test_deploy_is_withheld_when_media_has_nowhere_to_go(self) -> None:

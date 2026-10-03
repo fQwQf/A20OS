@@ -131,11 +131,239 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 | P2 | 让 fault 路径经由 cursor 写 PTE（仍在 `mm->lock` 之下） | 所有 PTE 写入只有一条代码路径 | 上述三个 smoke + `smoke-vfs-stress` |
 | P3 | covering node 之上 DFS 预序锁全部后代；逆序释放 | 每次 cursor 都按预序加锁、逆序解锁 | 新 `check-mm-pt-lock-order`（释放序断言 + 计数器）；`smoke-mm-stress` @ `NR_CPUS=4` |
 | P4 | `core/rcu.c`；`stale` + 重试；`pt_unmap` / `pt_unmap_leaf` / `pt_destroy_*` 中的 `frame_free(child)` 改为延迟释放 | 任何遍历都到不了的页表页不会被回收 | 新 `smoke-mm-pt-race`：N 线程大范围 unmap 同时 N 线程 fault |
-| P5 | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`；新增"两线程不相交区间测临界区重叠"测试；`smoke-sched-stress`、`smoke-mm-stress` @ `NR_CPUS=4+` |
+| P5 ✅ | 从 fault 路径摘掉 `mm->lock`，它收缩到只保护 VMA 列表与计数 | 不相交区间的写者**实测**不串行 | `smoke-mm-pt-race`（PASS，含非空断言 `mm_fault_from_status: 778`）；`smoke-mm-stress`、`smoke-mm-fork-exec-race`、`smoke-abi-linux` @ SMP=8 全 PASS，LOCK-STALL/MCS DEADLOCK/panic 全 0 |
 | P6 | fault 分派改判 `Status` 而非 `mm_find_vma`；`handle_file_fault` 从元数据重校验 | page fault 分派读不到任何 VMA | 上述全部 |
-| P7 | `Status::SWAPPED`；删除 `PTE_SWAP` 与六处前置顺序检查 | 没有任何 PTE 位被重载 | `CONFIG_SWAP=y` 构建 + swap-in 测试 |
-| P8 | 双向一致性检查器（P1 审计器覆盖反方向）；`MM_LOCK_MODEL` → `MM_AS_MODEL`；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
+
+> **P6 的可实现范围（2026-10-02 核对代码后收窄）**：原表述"page fault 分派读不到
+> 任何 VMA"**只在分派层成立**，因为 status 字节能**分类**但不能**服务**。
+>
+> * status 字节的全部容量：4 bit class（`MM_ST_INVALID` … `MM_ST_PT_NODE`，共 9 类）
+>   + `MM_ST_PROT_R/W/X` + `MM_ST_COW_BIT`。它足以回答论文 Fig. 8 的三态
+>   （PrivateAnon / Mapped / Invalid），这正是**分派**所需的全部。
+> * 但 `handle_file_fault()`（fault.c:755）要解引用 `vf->vnode`、`file_fd`、
+>   `file_pos`，并调 `page_cache_get(vf->vnode, …)`；COW 路径同理需要一个可写的
+>   文件后备。**这些对象引用在 status 字节里无处可放。**
+> * 所以 P6 落地后，`fault.c` 里剩下的 `mm_find_vma` 调用会**保留在对象解析处**，
+>   而不是消失：`fault.c:249`（COW）与 `898`（file fault）需要 vnode/fd。
+>
+>   **更正**：我先前把 `fault.c:1136` 说成"`mm_fault_from_status()` 里的 UFFD 存在性
+>   判断"，这是错的。核对后：`mm_fault_from_status` 是 1033–1096，而 **1136 属于
+>   `handle_demand_fault_access()` 的 VMA 路径**（`mm_find_vma` 喂给
+>   USERFAULTFD_MISSING_HOOK 的 `userfaultfd_range_present()` 判断）。
+>
+>   更要紧的是，**快段自己的 UFFD 门禁（1046 行）已经是 status 驱动的**——
+>   `mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)` 读的是 cursor 里的 per-PTE
+>   安全位，不查 VMA。所以"UFFD 原理上无法 status 驱动"这句话只对 VMA 路径成立：
+>   UFFDIO_REGISTER 的注册单位确实是 VMA 区间，因此**权威**的重新判定必须在 VMA 上做；
+>   但快段用 per-entry 安全位做**快筛**已经落地。两者不矛盾：安全位负责快路径分流，
+>   VMA 区间表负责权威判定与 unregister 后的失效。
+> * **更正**：我先前把 `378` / `458` / `476` / `669` 都算作「可去掉的分派点」，
+>   逐个读过之后这个说法不成立：
+>
+>   | 行 | 实际用途 | 是分派吗 |
+>   |---|---|---|
+>   | `378` | swap-in 后 `fault_map(..., vma->pte_flags, ...)`，要**权限位** | 否 |
+>   | `458` | brk 扩张的否定式判断「这里有没有 VMA」 | 勉强算 |
+>   | `476` | 主 VMA 路径：`vma->pte_flags` / `vm_flags` / `file_fd` | 否 |
+>   | `669` | 分配之后 `mm_find_vma(...) != vma` 的**并发重查** | 否 |
+>
+>   三处要的正是 status 字节装不下的东西（权限位、fd），第四处根本不是分派，而是
+>   分配窗口里的竞态检测。
+> >
+> **结论（收窄后）**：在当前 status 字节容量（4 bit class + R/W/X + COW）下，
+> **P6 基本不可实现**。唯一勉强算候选的是 `458` 那处 brk 否定式判断，价值也远小于
+> 本行原始表述所暗示的。要真正推进 P6，得先扩宽 status 字节以携带对象引用
+> （vnode / fd / offset）——那是**格式变更**而不是调度顺序变更，而**论文没有给出
+> 这个格式**。
+> >
+> 所以 P6 与 P7 同类：**卡在缺少论文规格，而不是卡在工程量**。
+
+> **P6 最后一处候选也已排除（实测）**：`mm_pt_provision_anon()` 全树只有三个调用点
+> ——`mmap.c:195`、`elf.c:184`、`munmap.c:270`。**brk 增长不在其中**：
+> `proc_brk()`（`proc/proc.c:732`）→ `mm_brk_locked()`（`munmap.c:177`），后者只遍历
+> VMA 列表并在收缩循环里拆 PTE，**从不写 status**。
+>
+> 所以 `fault.c:458` 那处 brk 否定式判断（`!mm_find_vma(...)`）**连可供查询的
+> status 都不存在**——brk 区域内的页在元数据里始终是 `MM_ST_INVALID`，与"有 VMA"
+> 无法区分。
+>
+> **P6 因此没有可实现子集**：不是"大部分能做"，而是一处都做不了。7 处
+> `mm_find_vma` 全部依赖 status 字节装不下的信息（对象引用、权限位、并发重查），
+> 或者依赖尚不存在的生产者（brk）。
+| P7 ⚠ | **2026-10-02 决定：`PTE_SWAP` 正式接受为唯一被容忍的例外，不删除。**原目标"无 PTE 位被重载"收窄为"仅 `PTE_SWAP` 一个，且逐架构显式声明"（见下方决定记录与 `kernel/include/mm/pt.h`） | `PTE_SWAP` 是唯一重载位 | 已达成：逐架构断言 `PTE_SWAP` 有定义（27 条）+ `{arch: PTE_SWAP} == SWAP_SUPPORTED_ARCHES`；`CONFIG_SWAP=y` 构建（默认即开）+ `smoke-swap` PASS。**但 swap-in 未被覆盖**，见下 |
+
+> **P7 的阻塞点是硬件约束，且仓库里已写明**（`kernel/include/mm/pt.h:86-97`）：
+> 「Storing this in the PTE's software-usable bits is not an option on A20OS:
+> riscv32 and arm32 have no free software bits at their root levels, and
+> loongarch64 aliases PTE_R/W/X onto the LA_PTE memory-attribute field.」
+>
+> 这把因果**倒过来**了：`pt_meta` 的 status 字节之所以是唯一可放之处，正是因为
+> PTE 没有空位。所以 `PTE_SWAP` 不是"第一个该被消灭的例子"，而是**唯一一个被容忍
+> 的例外**；本行"删除 `PTE_SWAP`"若不同时扩宽 status 字节的容量，就无处安放
+> swap 状态（`MM_ST_SWAPPED` 已经用掉 9 个 class 里的一个，且 class 只有 4 bit）。
+>
+> 要做 P7 得先解决 status 字节容量，而扩宽它又与 P6 卡在同一处（需要携带对象
+> 引用）。**P6 与 P7 是同一个根因**：status 字节位数不够。
+
+> **P7 的阻塞可判定（宽度算术，2026-10-02 核对，已按 `swp_entry()` 复核）**：
+> 注意阻塞的**理由**不是 `swap_entry_t` 的 `uint64_t` typedef——我先前这样写是不准确的。
+> 真实宽度由 `swp_entry()` 决定（`kernel/mm/swap.c:58`）：
+> `((offset & SWP_OFFSET_MASK) << SWP_TYPE_BITS) | type`，其中
+> `SWP_TYPE_BITS = 4`，`SWP_OFFSET_BITS` 按指针宽度取 **20（32 bit）或 40（64 bit）**
+> （`kernel/include/mm/swap.h:8-13`）。所以实际载荷是 **24 bit 或 44 bit**，不是 64。
+>
+> 结论不变但更精确：本次涉及的三个架构（riscv64 / x86_64 / aarch64）都是 64 bit，
+> 载荷 **44 bit > 32 bit**，一个 32-bit 字装不下，因此元数据仍需扩到 **8 byte/条目**
+> （PT 页多 8×512 = 4 KiB）。但在 32 bit 架构上载荷只有 24 bit，**4 byte/条目就够**，
+> 内存代价只有一半。**结论按架构分叉，实现前必须先确认目标位宽。**
+>
+
+> `swap_entry_t` 是 **`uint64_t`**（`kernel/include/mm/swap.h:35`），而每个条目的
+> status 只有一个 **`uint8_t`**（`kernel/include/mm/pt.h:154`，`cls[]` 数组元素），
+> 其中 class 占 4 bit、prot 占 3 bit，COW 另在 `cow[]` 位图里。
+>
+> `MM_ST_SWAPPED` 只能表达"这一页已换出"，**无法表达"换到哪里"**——那是 64 bit 的
+> swap entry（设备号 + slot）。所以 `PTE_SWAP` 被删掉之后，这个 64 bit 值在当前
+> 元数据格式里**无处安放**：PTE 不能存（见上，`pt.h:86-97` 已说明各架构无空位），
+> 元数据也放不下。
+>
+> 因此 P7 不是"工程量大"，而是**需要一个尚未做出的格式决策**：要么 status 元数据
+> 从 1 byte/条目 扩到 8 byte（每个 PT 页多 8×512 = 4 KiB，对 2 MiB 映射是实打实的
+> 内存放大），要么引入按地址索引的旁表（换来一次额外查表）。论文没有给出这个选择，
+> 所以按论文实现 P7 是做不到的——**缺的是规格，不是工作量**。
+| P8 | 双向一致性检查器（P1 审计器覆盖反方向）；**`MM_LOCK_MODEL` 拆分**（见下注，**不是**改名）；同一提交内更新门禁与 `docs/testing-gates.md` | VMA 列表可证为纯派生 | `check-mm-lock-model`、`check-final-definition`、`check-doc-test-gates` |
 | P9 | *(不承诺)* mseal/mlock/brk 逐页化；THP 进 `Status`；删除残留区间结构 | — | — |
+
+> **`smoke-swap` 覆盖了什么、没覆盖什么（2026-10-02 实测）**
+>
+> 实跑 `python3 tools/smoke.py smoke-swap` → PASS，日志只有两行有效输出：
+> `SWAP_TEST: swapon ok, totalswap=16769024`（16 MiB 设备）与 `SWAP_TEST: PASS`。
+>
+> **已覆盖**：`mkswap`/`swapon` 成功；`/proc/swaps` 与 sysinfo `totalswap` 账目；
+> 重复 `swapon` 返回 `EBUSY`；`swapoff` 后 `totalswap` 归零；以及 mkswap/swapon 期间
+> 经 loop 块适配器的真实 header/badmap I/O。
+>
+> **未覆盖：真正的换出与换入。** 这不是测试没写好，是**结构上够不到**——
+> `swap_test.c:11-19` 自己就写明了这条边界，实测参数印证：
+>
+> | 量 | 值 | 后果 |
+> |---|---|---|
+> | `TOUCH_SIZE` | 8 MiB | 匿名内存只触碰 8 MiB |
+> | `OOM_MIN_FREE_PAGES` | 256 页 ≈ 1 MiB | 触发回收要全局空闲帧低于此值 |
+> | `MAX_SWAP_RECLAIM` | 8 页 / 2s 冷却窗 | 换出速率上限约 4 页/s |
+>
+> 1 GiB QEMU 里空闲帧远高于 256 页，回收根本不触发；**即使触发**，把 8 MiB
+> （2048 页）换出按 8 页/2s 算需要约 **512 秒**。所以 `swap_out_victim_pages()` 与
+> `swap_read_page()` 在此 smoke 中**从未执行**。
+>
+> **因此 P7 的验收标准不能写"swap-in 测试通过"——那是假的。** 要真正关闭，需要另建
+> 一个低内存实例（压到 `OOM_MIN_FREE_PAGES` 以下）并跑够冷却窗数，或另设专用回收门禁。
+> 靠调大 `MAX_SWAP_RECLAIM`/调低 `OOM_MIN_FREE_PAGES` 去迁就测试是反的：那样门禁
+> 校验的就不是默认配置了。
+>
+> 保留 `PTE_SWAP` 这个决定本身不受影响：它是被**保留**而非被替换的行为，上面已覆盖的
+> 账目与错误路径仍全部有效。未覆盖的是**回收换出/换入路径**，这是 P9 之外的既有缺口，
+> 不是方案 C 引入的。
+
+> **P7 决定（2026-10-02，方案 C）**：`PTE_SWAP` **保留**，作为唯一一个被容忍的
+> 例外，不再追求"零位重载"。
+>
+> 理由（本轮实测，不是推断）：
+>
+> * `swp_entry()` 真实载荷 **24 bit（32 位架构）/ 44 bit（64 位架构）**
+>   （`SWP_TYPE_BITS 4` + `SWP_OFFSET_BITS 20|40`，`swap.h:8-13`）。44 > 32，一个
+>   32-bit 字装不下，所以"塞进元数据"要求 status 扩到 **8 byte/条目 = 每 PT 页 4 KiB**
+>   （512 条目）。而绝大多数 PT 页**永远不会有页被换出**——为纯度不变式预付这笔钱，
+>   代价与收益不成比例。
+> * 更关键：这个例外在半数架构上**不是"一个普通位"**。实测 6 个架构的
+>   `PTE_SWAP` 定义：
+>
+>   | 架构 | `PTE_SWAP` | 性质 |
+>   |---|---|---|
+>   | x86_64 / aarch64 / loongarch64 | `PTE_LEAF` | **别名叶子标记位** |
+>   | riscv64 | `1UL << 9` | 独立位（PTE_COW 之后、PPN 之前） |
+>   | arm32 | `1U << 7` | 独立位 |
+>   | ppc64le | `0x2` | 独立位 |
+>
+>   即三个架构上 `PTE_SWAP` 占用的是叶子 PTE 里语义最重的那一位。编码是
+>   `!PTE_V && PTE_SWAP` ⇒ 已换出（见 `pte_is_swap()`）。这正是 `pt.h:91-96` 说的
+>   "steals a hardware-meaningful bit per architecture"——删掉它不是把一个标记改成
+>   另一种标记，而是要在**没有空位**的 PTE 里重新安置一个 44-bit 的值。
+> * 论文没有给出替代格式。所以"删除 `PTE_SWAP`"不是"照论文实现"，而是需要先做一次
+>   无人做过的格式设计（status 扩宽 or 旁表），并承担上面那份预付内存。
+>
+> **因此不变式改为**：`PTE_SWAP` 是唯一重载位，且必须逐架构显式定义——由
+> `check-mm-pt-lock-order` 钉住。**这条不变式还有一个跨文件耦合，一并钉住**：
+>
+> ```
+> {arch : 定义了 PTE_SWAP}  ==  SWAP_SUPPORTED_ARCHES
+> ```
+>
+> 两个方向坏法完全不同。往 `SWAP_SUPPORTED_ARCHES` 加一个没定义 `PTE_SWAP` 的架构
+> → 编译直接炸（`fault.c`/`mm.c`/`munmap.c`/`exit.c` 报错），吵但安全。反过来，**新架构
+> 定义了 `PTE_SWAP` 却忘了改 Makefile** → `CONFIG_SWAP` 被静默降为 `n`，swap 整个消失，
+> `pte_is_swap()` 退化成恒假，读起来像"这个架构本来就不支持 swap"而不是像疏漏。
+>
+> 逐架构的存在性检查看不见后者，所以门禁额外用 `^...$` 锚定整行列表。
+> （这里也踩了和上一条一样的坑：`fixed = true` 的字面匹配在列表**变长**时会通过——追加
+> 一个架构后原串仍是子串。两次都是同一个"子串即通过"的坑。）真正要防的不是它存在，而是它被当成"还能再偷一个位"
+> 的先例；`pt.h:91-96` 原文（"precisely the hazard a general status encoding would
+> multiply"）说的正是这个风险。
+
+> **P8 指令更正（2026-10-02）**：本行原写 `MM_LOCK_MODEL` → `MM_AS_MODEL`
+> **改名**。照做会**破坏文档语义**，已核对代码后撤销：
+>
+> * `vm.h` 现在**同时**带两个名字且含义不同——`MM_AS_MODEL`（107 行，单级模型，
+>   即目标）与 `MM_LOCK_MODEL`（156 行，过渡期两层契约）；
+> * 109 行原文写着 `MM_LOCK_MODEL`「still governs every mutator that has not yet
+>   been converted」——它是**活的**契约，不是待清理的旧名；
+> * 改名会把目标模型与过渡期契约**合并成同一个名字**，读者再也无法区分
+>   「已迁移」与「仍受 `mm->lock` 约束」；
+> * `check-mm-lock-model` 与 `check-final-definition` 两条门禁都**断言**
+>   `MM_LOCK_MODEL` 字面量存在于 `vm.h`，改名会静默地废掉这两条门禁的语义。
+>
+> P5 落地后的真实边界（已核对）：`fault.c` 仍有 5 处 `spin_lock(&mm->lock)`，
+> **状态快段是唯一不再取它的 PTE 写路径**；COW / file / VMA 路径的 install 仍取。
+> 所以 `MM_LOCK_MODEL` 156 行那条「demand fault installs 必须持 `mm->lock`」现在
+> **只对非状态路径成立**，需要的是加一条例外说明，而不是把整节改名或删除。
+>
+> P8 剩下的实际工作因此是：①为状态快段在 `MM_LOCK_MODEL` 里补一条明确例外；
+> ②补双向一致性检查器；③同提交更新门禁与 `docs/testing-gates.md`。
+
+> **①已完成**：`vm.h` 的 `MM_LOCK_MODEL` 已补上状态快段的明确例外（并写明它依赖的是
+> `mm_pt_node_lock` 的按地址互斥，而不是"没有 `mm->lock`"）。`MM_LOCK_MODEL` 字面量
+> 保留——`check-mm-lock-model` 与 `check-final-definition` 两条门禁都断言它存在于该文件。
+>
+> **②的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:1517）只走**一个
+> 方向**：自 PTE 树下降，逐条比对"元数据是否与该 PTE 一致"（class / prot / cow）。反向
+> ——"元数据声称的每一页，PTE 是否同意"——**不存在**。
+>
+> 这个缺口在本代码库里不是理论问题：`audit_table()` **只下降有效的 PTE 条目**，所以
+> 父项已被清掉的 PT 页**根本不会被访问**。而那正是 `pt_unmap_leaf()` +
+> `mm_pt_retire_table()` 每天在做的事（清 `parent[idx]`、标 `stale`、延迟释放）。于是
+> "一个已脱树的 PT 页，其元数据仍声称若干页 present"这一类缺陷，对现有审计器**完全
+> 不可见**——它只会报告 0。
+>
+> 落地它需要注意（留给下一轮，不要当成一行改动）：
+>
+> * 新增遍历方向必须走**元数据侧**（存活的 `FRAME_F_PT` 帧），而不是再走一次 PTE 树，
+>   否则方向不会变；
+> * **退役列表上的帧必须豁免**：`mm_pt_retire_table()` 刚标 `stale` 而尚未 free 的帧，
+>   其元数据与 PTE 不一致是**设计如此**，不是缺陷；
+> * 需要新的 report 字段（现有 `mm_pt_audit_report_t` 只有单向的
+>   `present/absent/prot/cow` mismatch），并接进 `MM-ASM` 关机审计行；
+> * 门禁要跟着改：`MM-ASM` 的正则目前逐字段断言全 0，新增字段必须同样被断言，否则
+>   新检查又是一个"绿但没在测"的口子——这正是本项目已经栽过两次的坑。
+
+> **编号更正（2026-10-02）**：本表的 P 编号是权威的。会话里曾用"Phase 3 / Phase 4"
+> 这套临时说法，其中 **"Phase 3" 实为 P5**，而 **"Phase 4（上层统一状态预标记）"
+> 在本计划里并不存在**——真实 P4 是延迟回收（`mm_pt_retire_table` + `stale` +
+> `pt_readers`），早已落地。看到会话记录里的 "Phase N" 时一律按本表换算。
+>
+> P5 落地时顺带修掉了 MCS 节点锁的两个致命 bug（交接从未实现：等待者从不挂链、
+> 解锁方从共享字段回读自己的节点），此前因 `mm->lock` 串行化而从未被执行。形式化
+> 模型见 `docs/research/verification/LeafLock.tla`，两个 bug 作为 mutant 均被模型
+> 捕获。
 
 **P1 是整个计划里性价比最高的一步，且不可能搞坏启动**：它是影子状态、可机器验证，
 而且会找出你不知道自己有的 bug。
@@ -4688,3 +4916,705 @@ for (;;) {
 （写者在 `mm->lock` 下、OOM 读者在 `proc_lock` 下，两者互不排斥），
 只是**目前恰好因为「所有写者都持 `mm->lock`」而没有变成真 bug**。
 顺序依然不变：**先 (d)+`rss` 原子化，再把状态路径移出 `mm->lock`，最后才谈性能。**
+
+## 11. 逐条更正前述结论（2026-10-02，`feat/mm-single-level`）
+
+本节更正 §8.13、§9.2、§10.74、§10.75 与 `kernel/mm/pt.c` 注释中的若干结论。
+这些结论不是"过时"，而是**错的**：它们都指向一个已经坏掉、但被外层
+`mm->lock` 掩盖着的实现。更正过程本身也是记录，因为错的结论已经误导过
+一次外部协议评审。
+
+### 11.1 `mm_pt_defer_free` 零调用者 ≠ 退役链没接（更正 §8.13、§9.2 第 4 条）
+
+前述反复把「`mm_pt_defer_free` 零调用者」当作 P4 未接线的证据。这是找错了函数。
+
+`mm_pt_defer_free`（`pt.c`）是一个**被取代的半成品**：它调
+`mm_pt_hold_table()` 后只做 `mm_pt_node_fini()`，**并不释放帧**。真正在用的是
+`mm_pt_retire_table()`，而它**早已接线**：
+
+| 站点 | 状态 |
+|---|---|
+| `pt_unmap_leaf` → `mm_pt_retire_table` | 已接线 |
+| `pt_unmap` → `mm_pt_retire_table` | 已接线 |
+| 全部 unmap 路径（`free_vma_pages` / `munmap`×2 / `madvise`×2 / `mremap` / `sysv_shm` / `sys_mm` / demote） | 全部经由上述两个原语 |
+| `mm_pt_retire_table` 内部立即 drain | 已有 |
+| `mm_destroy` 在 `pt_destroy_user` 之前 drain | 已有，顺序正确 |
+| NOMMU 桩 | 已有 |
+
+仍然直接 `free` 的只有 `pt_destroy_level` 与 `pt_destroy_user_recursive`，即
+**整张页表的拆卸**（elf 加载失败路径、`mm_destroy`、`exec` 的 `old_pgdir`
+兜底分支）。那里表已不可达、`pt_readers == 0`，直接 free 才是对的。
+
+结论：**P4 的退役路径本来就已接线**，§8.13/§9.2 的"这条链完全没接"应删除。
+真正需要补的只是 drain 的触发频率（见 §11.6）。
+
+### 11.2 「缺页仍以 `mm_find_vma()` 为决策入口」不准确（更正 §9.2 第 1 条、§10.74）
+
+§10.74 写「论文最核心的那条主张（「缺页不碰 VMA 锁」）**目前并未实现**」，
+并把原因归结为状态路径仍以 VMA 为决策入口。前半句在后半句面前是错的。
+
+状态缺页路径存在且**不查任何 VMA**：它在 cursor 内 `mm_cursor_query()` 拿到
+`MM_ST_ANON_VIRT` 与 mmap 时记录的权限位后就直接 `mm_cursor_map()`，整段在一个
+cursor 事务内。剩下的差距**只有一条**：这段代码仍然嵌在 `mm->lock` 之下
+（`fault.c` 在状态路径之前取全局锁、之后释放，cursor 嵌套在中间）。
+即「不查 VMA」已达成，「缺页不碰全局锁」未达成——两件事被合并成了一句。
+
+另外 §10.74 引用的行号（800 取锁 / 1119 释放）也已过期。
+
+### 11.3 「覆盖节点一把锁就够」是错的（更正 §9.2 第 3 条与 `pt.c` 注释）
+
+`pt.c` 的 `mm_addrspace_lock()` 里曾写：
+
+> P3: the covering node's lock IS the unit of writer exclusion ... every other
+> cursor that could touch that path must first acquire this same node, so it is
+> sufficient
+
+**这句话是错的**，而且它就是一次外部协议评审给出错误结论的唯一起点——评审据此
+判定"实现 ADV 的后代 DFS 只会是性能倒退，建议不做"。逐条核对代码：
+
+* 下降循环对**已存在的中间节点不取任何锁**（`pt.c:651-655` 直接 `continue`）。
+  `mcs_lock` 只出现在"分配缺失中间节点"分支里，并在同一轮迭代立刻释放。
+* `mm_cursor_replace()` 写的是**叶子 PTE**（`cursor_leaf_slot()` +
+  `mm_pt_note_present(..., 0, ...)`），而它手里只有覆盖节点那一把锁。
+* `mm_pt_note_present()` → `pt_note_present_meta()` **完全无锁**，且对
+  `nr_present` 与 `*slot` 是普通读-改-写。
+
+于是：**宽范围 cursor（覆盖节点在 level≥1）与其内部的单页 cursor（覆盖节点在
+level 0）握的是不同的锁，却会写同一个叶子 PTE 与同一个 `pt_meta_t.cls[]` 字节。**
+没有任何互斥。
+
+`pt.h` 里"the cursor also holds a lock on EVERY descendant（preorder DFS）"
+同样从未成立。两处断言现已改写为真实描述。
+
+之所以一直没炸，**只有一个**原因：
+
+**所有 cursor 调用点都嵌在 `mm->lock` 里面**（fault / mprotect / munmap / mremap
+全部如此），全局锁把一切都串行化了。
+
+### 11.3.1 更正本节先前的一处错误结论（2026-10-02，第三次修订）
+
+本节先前写过「当前没有任何代码路径会创建 `guard_level > 0` 的 cursor，所以缺陷 A
+不可达」，并据此推出「摘掉 `mm->lock` 不会激活这个竞争，真正激活它的是引入宽事务」。
+**这两句都是错的**，错在只查了 `mm_pt_provision_anon()` 就下结论，漏掉了
+fault-around。
+
+`pt_covering_level()`（`pt.c`）判断覆盖层时用的是**对齐后的起点**：
+
+```c
+vaddr_t base = start & ~(span - 1);
+if (base + span >= end)
+    return level;
+```
+
+它**不要求 `start` 是该跨度的第一页**。于是一个 4 页的窗口，
+`base = start`（页对齐），level 0 判 `start + 4096 >= start + 16384` 不成立，
+直接落到 level 1：
+
+| 路径 | 窗口 | 覆盖层 |
+|---|---|---|
+| 单页缺页 | 1 页 | **0** |
+| 匿名 fault-around（`fault.c:624`，`ANON_FAULT_AROUND_PAGES = 4`） | 4 页 | **1** |
+| 文件 fault-around（`PAGE_CACHE_FAULT_AROUND_PAGES = 16`） | 16 页 | **1** |
+
+所以**宽 cursor 是常规路径，不是假想**。宽（level 1）与窄（level 0）写同一张
+叶子表，是每次匿名/文件 fault-around 都在发生的事。
+
+由此得到三条被上面那两句错误前提带偏的结论，全部更正：
+
+1. **缺陷 A 是可达的、而非潜伏的。** 它现在只被 `mm->lock` 挡着。
+2. **摘掉 `mm->lock`（Phase 3）正是会激活它的那个动作。** 这跟我先前写的
+   「Phase 3 不会激活它」正好相反。
+3. **依赖关系被我写反了。** 正确的顺序是：按操作的叶锁（本次已落地，§11.6）
+   → Phase 3 摘 `mm->lock`。上层节点统一状态标记（§11.7 第 3 项）与 Phase 3
+   **没有先后依赖**，它是独立的性能改动，不是安全前置。
+
+外部评审和我自己当时都在错的地方停住了：我用「预标记按叶子表分块」这一个
+调用点去论证「没有宽事务」，而 fault-around 就在隔壁。教训要改成：
+
+> 判断一个锁粒度缺陷是否「活的」，**要把所有会开 cursor 的路径列一遍**，
+> 不是只查最显眼的那一个；而且「不可达」和「被一把更粗的锁挡住」是两种
+> 完全不同的状态，后者一旦撤掉那把锁就会变成前者。
+
+
+### 11.4 cursor 的四个入口读的是陈旧 `path[0]`（新发现，已修）
+
+`cursor_leaf_table()` 就是 `return cur->path[0]`，而下降循环只缓存到
+`path[guard_level]`。`mm_cursor_replace()` 会先调 `cursor_leaf_slot(cur, addr, 1)`
+按地址重新下降，所以是对的；但另外四个入口直接用了 `path[0]`：
+
+`mm_cursor_query` / `mm_cursor_unmap` / `mm_cursor_mark_prot` / `mm_cursor_safe_test`
+
+对**跨叶子表的范围**，这些函数读/写的是上一次操作遗留的叶子表。今天没出事纯属
+两个巧合：唯一活的 `query` 调用是单页 fault（`guard_level == 0`，`path[0]` 恰好
+正确），`unmap` 则没有任何外部调用者。但 `mm_cursor_mark_prot` 是
+`mm_pt_provision_anon` 走的路径，预标记一个跨表范围就会写错表。现已全部改为按
+地址下降。
+
+### 11.5 §10.75 的站点清单过期（更正 §10.75）
+
+§10.75 说 `->rss` 共 52 处、跨 10 个文件。实际是 **53 处、跨 19 个文件**，
+其中 **9 处是 cgroup 的同名字段**（`cg_mem_t.rss`，`cg_mem.c` 6 处 +
+`fs/cgroupfs.c` 3 处）——那是另一个结构，动了会破坏内存限制，不在范围内。
+真正需要改写的是 **42 处**。
+
+§10.75 漏掉的文件：`abi/native/sys_native_task.c`（2 处读）、
+`abi/linux/sys_mm.c:291`（**夹取式读-改-写，且在 ABI 层**）、
+`fs/procfs/procfs_render.c`（3 处读）、`proc/exit.c`（2 处读）、
+`proc/fork.c`（1 处读）、`ipc/userfaultfd.c`（2 处）、
+`drivers/gpu/framebuffer.c`（2 处）。
+
+`proc/exit.c` 还有一处两次读 `mm->rss`（先判 `> 0` 再 uncharge），两次原子读可能
+不同导致电荷错，已改为读一次存局部。
+
+### 11.6 已完成的工作（`feat/mm-single-level`）
+
+* **§10.74/§10.75 的第 1 步：`mm->rss` 原子化。** 42 处 / 19 文件 / 4 类。
+  字段改名 `rss_atomic` 强制编译器枚举站点；夹取减法是 CAS 循环，不用
+  `fetch_sub` 再夹取（那会引入原本不存在的下溢窗口，而下溢会让 OOM 选错牺牲者）。
+* **缺陷 A：按地址的叶锁。** `cursor_leaf_slot()` 现在在下降时对每个父节点
+  锁-改-解锁（安装中间节点 + 父节点元数据读-改-写），并对叶子表**按操作**加锁、
+  存在 cursor 里，由 `cursor_leaf_unlock()` 在该次操作结束时释放。
+  之所以是"按操作"而非"按事务"：宽 cursor 会访问上千个叶子表，
+  `PT_MCS_POOL_SLOTS` 只有 1024 槽，按事务持有会 panic。
+  判据：所有写入都落在单个叶子项上，因此按地址取叶锁即足以互斥。
+* **缺陷 C：四个入口改为按地址下降。**
+* **`check-mm-pt-lock-order` 门禁。** 8 条断言，负向 + 计数。
+  已验证它在**修复前**的代码上 FAIL 6/8、在修复后 PASS —— 一个不能被 bug 弄红的
+  门禁没有价值。已有的 `check-mm-lock-model` 全是"这个 token 存在吗"型断言，
+  而缺陷 A 里那些 token **全都存在**，所以它不可能拦住这类问题。
+
+### 11.7 仍未做的事
+
+已完成的（`feat/mm-single-level`，4 个 commit）：`mm->rss` 原子化、按操作的叶锁、
+`check-mm-pt-lock-order`(9 断言)、`smoke-mm-pt-race`(SMP=8 PASS)、本节这些更正。
+
+剩下三项，**彼此没有依赖关系**（§11.3.1 更正了先前写反的顺序）：
+
+1. **~~先把 `pt_unmap_leaf()` 改成走 cursor~~ —— 已以另一种形状落地**（见本节
+   下方「第 1 项已落地」）。顺序依然是硬的：`mm->lock` 摘掉之前，unmap 侧必须先有
+   按节点互斥，否则两条路会并发写同一张叶子表。
+
+   `MM_AS_CURSOR_ONLY_ENTRY` 第 1 条写着「每一次用户 PTE 的读写都发生在
+   `mm_cursor_t` 内」，但 `mm.c` 的 `pt_unmap_leaf()` 是一次**裸遍历**：
+   `sed -n '457,515p' kernel/mm/mm.c | grep -cE 'mm_addrspace_lock|mcs_lock|mm_cursor'`
+   得到 **0**。它直接 `*pte = 0`，再调用同样无锁的 `mm_pt_note_absent()`
+   （`nr_present`/`cls[]` 的普通读-改-写）。所有调用方
+   （`free_vma_pages` / `munmap` / `madvise` / `mremap` / `sysv_shm` /
+   `sys_mm` / demote）都只靠 `mm->lock` 保护。
+
+   **今天这靠 `mm->lock` 兜住了**：缺页和 munmap 都在同一把全局锁里串行。
+   一旦把状态缺页路径移出 `mm->lock`，两条路就会并发写同一张叶子表——
+   一条持叶锁（cursor），一条完全不持锁。
+
+   实测印证（2026-10-02）：按 §11.7 的原配方拆完快段/慢段后，编译干净
+   （`-Werror -UBSan`，riscv64 smp8），两项前提检查也都通过（慢段经
+   `fault_map()` 走 cursor；`cg_mem_charge` 自带 `node->lock`），但
+   `smoke-mm-pt-race` 超时（status 124），日志 319 行，**无 panic、无
+   `MCS DEADLOCK`**。这不像死锁，像数据损坏导致的反复缺页——所以先查不变量
+   是否被违反，而不是先查锁序。（我最初的假设是 cursor 与 `mm->lock` 的 ABBA，
+   但快段根本不取 `mm->lock`，那个假设不成立。）
+
+   注意 `smoke-mm-stress` **不能**用来复现：它不传 `a20.anonprov`，
+   预标记关闭 ⇒ 快段永远直接 decline ⇒ 新代码根本不执行，门禁会假绿。
+   能复现的只有带 `a20.anonprov=4096` 的 `smoke-mm-pt-race`。
+
+   #### 第 1 项已落地：按节点锁住每次写，而不是换成 detach 原语
+
+   先更正本文档上一版的两处判断。原文说「唯一能真正关闭的形状是在
+   `[base, base+size)` 上开一个 cursor」，又说「per-node 锁不行」。**两句话都要改。**
+
+   实际落地的是 per-node 锁——所以「per-node 锁不行」这句话是错的。但它错在
+   **理由**：per-node 锁确实不能让整个写序列变成一个事务（那仍然不成立，见下），
+   可是**不需要**。真正要的是每个写点各自原子，而这正是 per-node 锁提供的。
+
+   改动（`mm_pt_node_lock()` / `mm_pt_node_unlock()`，`mcs_lock()` 是 pt.c 文件内
+   静态的，所以包装加在 pt.c）：**5 个写点全部包住**——`pt_unmap()` 的叶子清、
+   `pt_unmap_leaf()` 的 swap 清与大页清，以及两者向上回收的每一层。
+
+   * **锁 `parent` 而不是 `child`**，且 `pt_table_empty(child)` 与清
+     `parent[idx]` 必须在**同一临界区**。前者是因为节点锁按 level 递减取得
+     （规则 3；`pt.c` 的 `for (int l = cur->guard_level; l > 0; l--)`），把 child
+     压在 parent 之下就是反向持锁。后者是因为这两行看起来是独立语句，但若
+     判断与清父项之间有并发缺页重新填入 `child`，就会清掉一张非空表 → 丢失映射。
+   * **校验移进锁内**。原来在锁外判 `!(*pte & PTE_V)`，在 `mm->lock` 下这是冗余的；
+     一旦缺页路径不再取 `mm->lock`，锁外的判断就只是一个可能已经过期的状态的判断。
+   * **不嵌套**。每次 lock → 改 → unlock，所以向上回收虽然方向与 cursor 相反
+     （`mm.c` 的 `for (l = level; l < ARCH_PT_ROOT_LEVEL; l++)` 是低 → 高），也不会
+     ABBA。这正是上一版坚持「不能靠一个 cursor 覆盖整段」的原因：覆盖节点锁 +
+     向上取父锁 = 反向持锁。
+
+   为什么无锁下降本身不需要额外保护：`mm_pt_retire_table()` 会
+   `mm_pt_mark_stale_recursive()`，并把真正的 `frame_free()` 推迟到
+   `mm->pt_readers == 0`。所以已经缓存了该节点的 cursor 会看到 `stale` 而重下降，
+   不会写进被摘掉的子树。
+
+   **仍未做的，因此 bypass 列表保留**（条目已改写成"无 cursor，但每次写都在
+   `mm_pt_node_lock` 内"）：这两个函数仍然不是 cursor，仍然没有**区间级原子性**。
+   把它们宣布为合规会是假话。它们现在有的是规则 3 要求的按节点互斥，而这正是
+   Phase 3 快段需要的。`check-mm-pt-lock-order` 加了两条断言，锚定**调用形式**
+   （`mm_pt_node_lock(path` / `mm_pt_node_lock(parent)`）而非裸函数名——否则
+   `mm.c` 注释里的散文引用就能满足它们——并钉住全部 5 个写点；删掉
+   `pt_unmap()` 的叶子锁括号会让门禁 14 断言掉到 13。
+
+   验证：`check-mm-lock-model` 14/14、`check-mm-pt-lock-order` 14/14（负向测试过）、
+   riscv64/x86_64/aarch64 SMP=4 构建，以及 QEMU SMP=8 下
+   `smoke-mm-fork-exec-race`（重度 exercise unmap）、带 `a20.anonprov=4096` 且
+   `--wide-cursor-only` 的 `smoke-mm-pt-race`（预标记快段）、`smoke-mm-stress`、
+   `smoke-abi-linux`——全 PASS，`MM-ASM` 审计全 0，四份日志均无
+   `MCS DEADLOCK`、无 panic。
+
+2. **从状态缺页路径摘掉 `mm->lock`**（§10.74 的真正剩余项）。这是迁移的真正目标。
+   做法：把 `handle_demand_fault_access()` 拆成两段。快段只拿 cursor，不拿
+   `mm->lock`：`mm_addrspace_lock()` → `mm_cursor_query()` → 若
+   `MM_ST_ANON_VIRT` 且非 UFFD 则分配/清零/装入 → `mm_cursor_unlock()` →
+   `mm_rss_add()` 与各 perf 计数器（Phase 0 已把它们变成原子的）→ 返回 0。
+   慢段原样保留，在 `mm->lock` 之下走 VMA 路径。
+
+   **一个曾经看起来是阻塞点、实际不是的问题**：拆成两段之后，慢段开头那个
+   "PTE 已存在就返回 -1" 的检查会在快段与 `spin_lock(&mm->lock)` 之间变得可达
+   ——另一个线程可能刚好把同一页映射好了。这不需要新处理：`core/trap.c:373`
+   在 `handle_demand_fault_access()` 返回非 0 时，本来就会落到
+   `handle_present_page_fault()`，而那里的注释（377-381）写明的正是
+   "another thread completes the same mapping between our first present-PTE
+   check and a failed/redundant demand-fault attempt"。这条重试路径已经存在。
+
+   仍需注意：`pfa_alloc_page()` 目前是在 cursor（一个自旋锁）之下调用的
+   （`fault.c:1124`），这是既有做法；把这段移出 `mm->lock` 之后，它就成了
+   页表锁下的唯一分配点，是否会睡眠要单独复核。
+
+2. **上层节点统一状态标记**（论文 §3.3 的
+   "using upper-level PT pages to represent large memory regions with identical
+   status"），替代逐页预标记。**这是性能改动，不是安全前置**——当前预标记按叶子表
+   分块，每 2 MiB 一次 cursor，代价可接受。
+   顺带更正一次被否掉的方案：把区间状态记在**叶子表**上是不成立的——叶子表必须先
+   存在，1 GiB 稀疏映射仍要 4096 个叶子表（16 MiB 页表），并没有解决稀疏性问题。
+   真正要注意的是：**宽事务会经过 §11.3.1 说的 fault-around 那条路**，所以这项改动
+   同样依赖已落地的叶锁。
+
+   #### 第二次尝试：仍然超时，而这次有 `[LOCK-STALL]` 证据（更正我自己的错误结论）
+
+   把 `mm_fault_from_status()` 提到 `spin_lock(&mm->lock)` **之前**（快段只持
+   cursor，页分配改用 `pfa_alloc_flags(0, 0)` 不可回收，否则会在 cursor 自旋锁下
+   经 `oom_try_reclaim()` 睡觉），riscv64 SMP=4 编译干净，`smoke-mm-pt-race`
+   **仍然 status 124 超时**。
+
+   但这次日志里有硬证据，而**我上一轮的结论是错的**：
+
+   ```
+   [LOCK-STALL] cpu=3 lock=0xffffffc0bf7a0010 name=mm waiter=11 owner=12
+               owner_ra=0xffffffc0803f626e waiter_ra=0xffffffc080212d4a
+               spins=93653565440 elapsed_ms=235071
+   ```
+
+   上一轮我写的是「无 panic、无 `MCS DEADLOCK`，不像死锁，像数据损坏」。**错在
+   grep 了错的 token**：锁停滞检测器确实存在且一直在打印，事件名是
+   `[LOCK-STALL]` 而不是 `MCS DEADLOCK`。我据一次 grep 失误否掉了「这就是死锁」
+   这一整类假设，然后顺着「数据损坏」去找不变量，方向从一开始就错了。
+
+   解析两个返回地址（`addr2line` 对 `.kernel-build/.../kernel.elf`）：
+
+   | 地址 | 符号 | 含义 |
+   |---|---|---|
+   | `owner_ra=…0803f626e` | **`sys_mmap`** | CPU 12 持有 `mm->lock` 且 235 秒不释放 |
+   | `waiter_ra=…080212d4a` | **`trap_handler`** | CPU 2/3 在缺页路径上等 `mm->lock` |
+
+   所以这是 `mm->lock` 上的**真实锁死**，不是数据损坏：`name=mm`，一个持有者
+   停在 `sys_mmap`，两个等待者停在缺页入口。
+
+   **机制（已按代码结构确认，不再是假设）**：
+
+   ```
+   sys_mmap            sys_mm.c:95      proc_mmap(...)
+     -> proc_mmap      proc.c:776       spin_lock_irqsave(&t->mm->lock)  <-- _irqsave
+       -> mm_mmap_locked  mmap.c:88
+         -> mm_pt_provision_anon  mmap.c:195
+           -> mm_addrspace_lock    -> frame_alloc()
+             -> pfa_alloc_flags(0, can_reclaim=1)
+               -> oom_try_reclaim() -> proc_force_exit(victim)
+                 -> 受害者 VMA 拆解 -> 拿 mm->lock
+   ```
+
+   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:404）。
+   实际路径**不经过**它——`proc_mmap` 自己取锁（proc.c:776）并直接调
+   `mm_mmap_locked`。`mm_mmap` 是另一个同样纪律的包装，不在本路径上。
+   取锁点是 `proc.c:776`，已核对。）
+
+   **一次被自己的实验否掉的假设（值得留着）**：我一度怀疑 `mm_anon_provisioned: 0`
+   是我把 PT 页分配改成不可回收（`frame_alloc_nr()`）造成的——因为
+   `mm_pt_provision_anon()` 里 `if (r < 0) return r;` 会在
+   `mm_addrspace_lock()` 失败时**跳过计数器**（pt.c:1208 / 1230）。
+   把那两处改回可回收的 `frame_alloc()` 重跑，**三个计数器仍然是 0**。
+   所以这个改动**不是**原因，它是通过验证的、保留。
+
+   即：**`mm->lock` 是关中断的自旋锁，却跨越了一次可睡眠的回收**——睡眠发生在
+   IRQ 关闭的自旋锁里。若受害者是自己的 mm，就是持 `mm->lock` 自杀。这与观测
+   完全吻合：持有者 PC 落在 `sys_mmap`，等待者 PC 落在 `trap_handler`，锁名 `mm`。
+
+   我先前两次 grep 都没找到这条链，是因为我在 `mm_mmap_locked`（88-195）**内部**
+   找 `spin_lock(&mm->lock)`，而锁是由**调用者** `mm_mmap`（404）持有的；
+   `mmap.c:190` 的注释本身就写着「It runs under mm->lock, so the order
+   mm->lock -> page-table lock」。看注释比 grep 快。
+
+   **为什么以前不炸，摘锁后才炸**：这是既存缺陷，但要两个条件同时成立。
+   `mm_pt_provision_anon` 只在预标记开启时走到那条分配（所以只有带
+   `a20.anonprov` 的 `smoke-mm-pt-race` 受影响，`smoke-mm-stress` 不受影响）。
+   而在摘掉快段的 `mm->lock` **之前**，缺页线程会先阻塞在 `mm->lock` 上，根本
+   进不了 `mm_addrspace_lock`，于是与 provisioning 串行化、窗口关闭。摘掉之后
+   缺页不再取 `mm->lock`，就能与一个正在 `mm->lock` 下回收的 provisioning
+   并发进入同一条分配路径——**快段摘锁本身没有制造这个 bug，但它是把窗口打开
+   的那个改动。**
+
+   **下一轮该先做的（不是再改快段）**：任何 `mm->lock` 持有者都不应走可回收
+   分配。快段已经改成 `pfa_alloc_flags(0, 0)`，缺的是 provisioning 那一侧——
+   要么让 `mm_pt_provision_anon` 用不可回收分配并在耗尽时回退，要么把 PT 页
+   分配提到 `mm_mmap` 取 `mm->lock` **之前**。
+
+   **一个让方案唯一化的关键事实（读注释读出来的）**：`mm_pt_provision_anon()`
+   在 `mmap.c:195` 是以 `(void)` 调用的，返回值被丢弃，而且它上面 188-189 行的
+   注释写明「Provisioning is best effort: a range too large to provision eagerly
+   just keeps the VMA-based fault path, which remains correct」。
+
+   也就是说 **provisioning 分配失败是一个已经被支持的结局**，不是新行为。所以把
+   PT 页分配改成不可回收（`pfa_alloc_flags(0, 0)`）在 provisioning 这一侧是
+   **零风险**的：耗尽时预标记不发生，缺页照旧走 VMA 路径。
+
+   这把选项从「多种」收敛到一个：把 `mm_addrspace_lock()` 与
+   `cursor_leaf_slot()` 里那两处仍可回收的 PT 页分配改成不可回收。剩下的语义
+   影响只有一处需要盯——其它 cursor 使用者（`mm_cursor_fault` /
+   `mm_cursor_map`）在内存压力下会从「先回收再成功」变成「返回 -ENOMEM」。
+   这是把回收移出自旋锁的必然代价，且 -ENOMEM 会沿现有的缺页失败/OOM 路径走，
+   不影响正确性；但它**必须实测**，不能推断——`smoke-mm-pt-race` 恰好带
+   `a20.anonprov` 且压力足够大，是唯一会真正走到耗尽分支的用例。
+
+   注意这同时补上了快段的一个遗留洞：快段的**数据页**已经是不可回收分配，但它
+   经 `mm_cursor_map` → `cursor_leaf_slot` 分配的 **PT 页**仍然是可回收的，
+   也就是在 cursor 自旋锁下回收。之前只修了一半。
+
+   **这解释了这三轮为什么都白改**：第 1 轮我怪 cursor 不变量、第 2 轮我怪 ABBA
+   锁序、第 3 轮（本次）我怪 unmap 侧节点锁 + 睡眠分配——三次都改了真的东西
+   （都留下了、都验证过），但都不是这个死锁的成因。共同点是我从没打开过
+   `[LOCK-STALL]`，而它一直就在日志里。
+
+   **推论（下一轮该先做的）**：`mm->lock` 的任何持有者都不应走可回收分配。
+   快段已经这么改了（`pfa_alloc_flags(0, 0)`，失败就 decline 交给 VMA 路径），
+   但 `mm_pt_provision_anon()` 那一侧还没有——而它才是这次日志里持有者的路径。
+   先把这一侧也改成不可回收，再重试摘锁。
+
+   **已验证，且我此前得出的「快段是死代码」是错的（已撤回）**：
+
+   我一度判定预标记从未发生、快段在 `smoke-mm-pt-race` 里是死代码，理由是
+   `mm_anon_provisioned: 0` / `mm_fault_from_status: 0`。**那个 0 是测量装置的
+   产物，不是系统的事实**：`a20_perf_format()`（`core/perf.c:94`）在渲染
+   `/proc/a20/perf` 时先 `g_a20_perf_enabled = 1` **再**取快照，而
+   `a20_perf_add()`（`include/core/perf.h:108`）在 `g_a20_perf_enabled == 0`
+   时直接 return。所以在负载**之后只读一次**，所有计数器必然是 0——与负载做了什么
+   无关。
+
+   修法是在负载**之前**先读一次 perf（上膛），之后再读一次取值。实测：
+
+   ```
+   上膛读（设计如此，全 0）      负载后
+   mm_anon_provisioned: 0        mm_anon_provisioned: 9464
+   mm_anon_faults:     0         mm_anon_faults:     778
+   mm_fault_from_status: 0       mm_fault_from_status: 778
+   ```
+
+   即快段在这次运行里执行了 778 次。文档 4508 行更早的一次运行也记录了
+   `mm_anon_provisioned: 331536` / `mm_fault_from_status: 164676`，与之一致。
+
+   **两个教训**：(1) 我把「我测到的 0」当成了「系统的 0」，而且是在已经 commit
+   之后才发现自己错了；(2) 本项目栽过两次同一类的坑——`smoke-mm-stress` 不传
+   `a20.anonprov` 导致假绿，这次是 perf 计数器默认休眠导致全 0。**任何「某计数器
+   为 0」的结论，必须先确认计数器本身是活的。**
+
+   `smoke-mm-pt-race` 现在断言 `mm_fault_from_status: [1-9]`（非零），并且上膛读是
+   它的一部分，所以快段退化成死代码时这个门禁会**红**。这条断言现在是有意义的，
+   不再是我之前以为的那种装饰。
+
+   #### 第三次尝试：旧死锁消失，失败点前移到 TLB shootdown 并发
+
+   两个前提都修好之后（unmap 侧节点锁、`frame_alloc_nr()` 消除 `mm->lock` 下的
+   回收），第三次把 `mm_fault_from_status()` 提到 `spin_lock(&mm->lock)` 之前。
+   编译干净，`smoke-mm-pt-race`：
+
+   * **不再有 `[LOCK-STALL]`**（计数 0）——前两轮的 `mm->lock` 死锁确实修掉了；
+   * 但换了一个新的 panic：
+
+   ```
+   [RV64 TLB] timeout self=0 target=1 expected=15 request=15 ack=14 online=0xff
+   ========== KERNEL PANIC ==========
+   RISC-V remote TLB shootdown timed out
+   [PANIC] caller=rv64_smp_remote_tlb_flush+0x40e
+   ```
+
+   `expected=15` 而 `ack=14`：应答主了一个没回来。这**讲得通**，而且正是摘掉
+   `mm->lock` 之后下一个该暴露的东西——远程 TLB shootdown 的 ack 记账此前一直
+   被 `mm->lock` 隐式串行化（缺页持锁 ⇒ 同一 mm 的 shootdown 不并发），现在快段
+   不取 `mm->lock`，多个 CPU 可以并发发起 shootdown，**记账互相覆盖**，于是出现
+   `ack` 永久缺失。快段自己只做 `arch_tlb_flush_page_local()`，问题是它与别的 CPU
+   的远程 shootdown 之间的并发。
+
+   所以失败点从「`mm->lock` 死锁」前移到「TLB shootdown 需要自己的串行化」，后者
+   是更局部、更好修的问题——但要正确加固 shootdown 协议（谁持有 pending 表、如何
+   合并并发请求、超时如何重试）不是一处改动，需要单独一轮，且必须实测。
+
+   **本轮没有落地这个改动**：`fault.c` 已恢复到 20 commit 的 checkpoint，工作树
+   干净、门禁全绿。留下的成果是失败点的推进本身，加上这一条：Phase 3 的第三道
+   门槛是 TLB shootdown 的并发安全，而不是页表锁。
+
+   #### 第三次失败的机制：`arch_cpu_relax()` 是裸 `nop`，输不起软中断
+
+   `expected=15 request=15 ack=14` 说明**没有竞争请求者**——15 号请求是我们自己
+   发的、也是最后一条，所以目标 CPU 单纯**没 servicing 我们的 IPI**。而
+   `rv64_smp_remote_tlb_flush()` 的等待循环注释写得很明确：
+
+   ```
+    * Wait with interrupts enabled: the targets must service the soft IRQ
+    * (sfence + ack).  If we are inside a trap with IRQs off, they may be
+    * waiting on us for their own flush; enabling interrupts here lets us
+    * service those IPIs and breaks the ABBA cycle.
+   ```
+
+   目标要 ack 就必须能接收软中断。那么谁接收不了？看 `mcs_lock()` 的自旋：
+
+   ```c
+   while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
+       arch_cpu_relax();
+   ```
+
+   而 riscv64 的 `arch_cpu_relax()` 是（`kernel/arch/riscv64/include/cpu.h:21`）：
+
+   ```c
+   static inline void arch_cpu_relax(void) { __asm__ __volatile__("nop"); }
+   ```
+
+   **裸 `nop`，不重开中断、不让出流水线。** `mcs_lock()` 上方的注释把
+   「preemption disabled」当成了「可以无限自旋」，但**不被抢占 ≠ 可以饿死别人**。
+
+   > **注意：以下因果链是推断，不是已证实的结论。** 我**没有**证明目标 CPU 当时
+   > 正在 MCS 自旋里——panic 只记录了请求方的 PC。需要实测（打印目标 CPU 在超时
+   > 时刻的 PC，或让 `mcs_lock` 自旋循环在超时时 dump 自己的 backtrace）才能定论。
+   > 不要再把它当结论往下推。
+
+   **已核对的事实**（这些是读代码得到的，可信）：
+
+   * 陷阱入口 `trap.S:107` 的 `csrc sstatus, t1` 清 SIE，所以缺页跑在**中断关闭**
+     的上下文里；
+   * `arch_cpu_relax()` 在 riscv64 是裸 `nop`（`cpu.h:21`）；
+   * `rv64_ipi_tlb_flush_handler()`（`board.c:168`）**不取任何锁**，只做
+     `sfence.vma` + ack ——所以目标 CPU 若能接到软中断，它 ack 时不需要拿页表锁；
+   * `rv64_smp_remote_tlb_flush()` 的等待循环注释明确要求「targets must service
+     the soft IRQ」，且它自己在等之前会重开中断；
+   * `expected=15 request=15` 说明**没有第二个请求者**竞争该代次。
+
+   **已排除的假设**：`pt.c` 里**完全没有** TLB flush 调用；`mm_tlb_invalidate_finish()`
+   只在 `munmap.c` / `madvise.c` / `oom.c` 被调用。所以「远程 shootdown 在持有节点锁
+   时发出」这条**不成立**——排除了它其实是那个经典 ABBA 的可能。
+
+   剩下的待验证假设：目标 CPU 因某种原因没能接收软中断，而 `nop` 自旋 starve
+   IPI 是最合理的候选。但**这是候选，不是结论**。
+
+   为什么以前不出问题：缺页整体被 `mm->lock` 串行化，其余 CPU 阻塞在
+   `spin_lock(&mm->lock)`（IRQ 保持开启）上，能响应 IPI。快段摘掉 `mm->lock`
+   之后，大量 CPU 同时争 MCS 节点锁——**这条路径第一次被大量走到**（"被大量走到"
+   是有依据的；"因此目标饿死在 nop 里"仍是推断）。
+
+   所以这是同一个主题的第三次出现：**这一整天的三次修复都是"某条自旋路径饿死了
+   别的进展"**——睡眠压在自旋锁下、`mm->lock` 下回收、现在 `nop` 自旋饿死软中断。
+   每一次都要等到移除上层串行化才暴露。
+
+   #### 实测推翻了上面那个 TLB 推断：真症状是 level-0 节点锁被永久持有
+
+   在 `mcs_lock()` 的自旋循环里加计数（每超过 `2^26` 打一次 `[MCS SPIN]`），重跑
+   同一配方（Phase 3 改动 + SMP=8 + `a20.anonprov=4096`）：
+
+   ```
+   [MCS SPIN] cpu=1 node=0xffffffc0bf75b000 level=0 total=2013265920
+   [MCS SPIN] cpu=4 node=0xffffffc0bf75b000 level=0 total=2147483648
+   RV64 TLB 超时次数： 0
+   MCS SPIN 次数：     2493
+   ```
+
+   **两个关键事实**：
+
+   1. `[RV64 TLB]` **一次都没触发**（上一轮那个 panic 在这次带计数的复现里根本没
+      出现）。所以「目标 CPU 饿死软中断 → ack 不了 → 5 秒超时」这条链**不成立**，
+      上一小节的推断是错的。
+   2. CPU 1 和 CPU 4 卡在**同一张** level-0 节点表
+      （`0xffffffc0bf75b000`）上，`total` 单调涨到 **2^31 ≈ 21 亿次**，而且
+      `[MCS DEADLOCK]`（自死锁检测）**没有**触发。
+
+   也就是说：**这不是饿死，是那把 level-0 节点锁的持有者再也没释放**。持锁者不
+   在推进（否则等待者会拿到锁），等待者却在推进（`total` 在涨）。两个 CPU 对同一张
+   叶子表互斥竞争，其中一方永远不放。
+
+   已排除的读法：
+
+   * **不是 `mm_addrspace_lock()` 漏解锁**。逐条核对了它的返回路径：每次
+     `continue` 前都 `mcs_unlock`，两处 `return 1` 之前也都不持锁（第 54 行的
+     `return 1` 在本轮还没取任何锁）。
+   * **不是"远程 shootdown 在持节点锁时发出"**。`pt.c` 里完全没有 TLB flush 调用，
+     `mm_tlb_invalidate_finish()` 只在 `munmap.c`/`madvise.c`/`oom.c` 被调用。
+
+   剩下的候选（本轮**未**验证，不要当结论）：
+
+   * 某条路径取了 level-0 节点锁但没有配对释放——注意 `pt_unmap()` 的向上回收会
+     逐层取 `parent`，而 `mm_addrspace_lock()` 对 4 KiB 区间取的 guard 锁**正是**
+     level-0 那张表；`--wide-cursor-only` 负载里有并发 unmapper，所以这两条路径是
+     并发跑的。
+   * 两个不同 guard_level 的 cursor 之间的跨节点锁序环（ABBA）。自死锁检测只看
+     "本 CPU 是否已持有该节点"，**看不到跨 CPU 的环**，所以它不会响。
+
+   #### 定位持有者：level-0 节点锁被 acquired 但从未 `mm_cursor_unlock`
+
+   在 `[MCS SPIN]` 首次触发时把**每个 CPU 的 MCS 持有栈**（`pool->depth` +
+   `pool->held[]`）打出来，同一配方复现：
+
+   ```
+   [MCS OWN] waiter=2 node=0xffffffc0bf75b000 want_depth=1
+   [MCS OWN]   cpu2 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN]   cpu4 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN] waiter=4 node=0xffffffc0bf75b000 want_depth=1
+   [MCS OWN]   cpu2 depth=1 holds: 0xffffffc0bf75b000
+   [MCS OWN]   cpu4 depth=1 holds: 0xffffffc0bf75b000
+   ```
+
+   > **本节的读法已被下一节的实测推翻，保留原文是为了记录我错在哪。**
+   >
+   > `held[]` 确实只在 `mm_cursor_unlock()` 的 unwind 循环里弹出，但关键在于
+   > **它在进入自旋之前就被写了**。所以**正在等待的 CPU 也会显示成"持有"它正在
+   > 等的那个节点**——`want_depth=1` 不是"入队信息"，而是**同一个自旋者自己**。
+   > 因此 `cpu4 depth=1 holds: X` 只能说明 cpu4 在等 X，**不能**说明它已完成获取。
+   > 下一节拿到 PC 之后重读同一份数据，结论不同。
+
+   **尚未确定的是持有者卡在哪。** 已知它在临界区内（`depth==1`，没有嵌套取第二把
+   锁），但"在临界区内"和"永不返回临界区"是两件事。剩下的可能：
+
+   * 在临界区内又阻塞/自旋在别的东西上（但那会让 `depth` 或持有栈出现第二项——
+     没出现，所以更像是**单点卡死**）；
+   * 在临界区内进入了一个不会返回的循环；
+   * 被 QEMU 调度出去（KVM 抢走），表现为持有者不推进。
+
+   **下一轮该测的是持有者的 PC**，不是再猜：在 `mcs_lock()` 的进入点把
+   `owner_pc[节点] = 返回地址` 记下来，`[MCS SPIN]` 触发时连同等待者一起打印，
+   再用 `addr2line` 解析。这一步直接给出"是谁、哪一行、持锁没放"。
+   拿到 PC 之前，上面三条都只是候选。
+
+   #### 持有者 PC：指向 `mm_addrspace_lock`，并推翻上一节的读法
+
+   记录获取点 PC（`__builtin_return_address(0)`），自旋首次超阈值时把每 CPU 的
+   （节点, PC）对打出：
+
+   ```
+   [MCS OWN] waiter=0 node=0xffffffc0bf6b3000 want_depth=1
+   [MCS OWN]   cpu0 depth=1 [0xffffffc0bf6b3000 pc=ffffffc08023f580]
+   [MCS OWN]   cpu3 depth=1 [0xffffffc0bf6b1000 pc=ffffffc08023f580]
+   [MCS OWN] waiter=3 node=0xffffffc0bf6b1000 want_depth=1
+   ```
+
+   `addr2line`：**两个 PC 都是 `mm_addrspace_lock`**（`kernel/mm/pt.c`）。
+
+   带上 PC 重读这份数据，得到与上一节**不同**的结论：
+
+   * cpu0 自旋在 `b3000`，cpu3 自旋在 `b1000`——**两个不同节点**；
+   * 8 个 CPU 全被枚举，只有这两个 `depth > 0` ⇒ **没有任何 CPU 完成过对这两个
+     节点的获取**；
+   * 但两个节点都非空（否则 `mcs_lock` 里 `tail == 0` 直接拿到，不会自旋），
+     且都没人交出去。
+
+   所以准确说法是：**这两个 level-0 节点的 MCS 队列非空，但队列里没有活的持有者**，
+   即 `mcs_unlock()` 从未把交接做完。上一节"cpu4 取到了却没走完
+   `mm_cursor_unlock`"是错的——这是今天第二次把测量结果当成系统状态。
+
+   已核对排除：本次涉及的三个候选点都正确配对解锁——
+   `mm_addrspace_lock()` 的**每一条**返回路径（含 stale `-EAGAIN`、两条
+   `-ENOMEM`、两条 `return 1`），以及 Phase 3 的 `mm_fault_from_status()` 的 5 个
+   `goto decline` 与成功路径，全部调用 `mm_cursor_unlock()`。
+   **泄漏点不在这两处，且尚未定位。**
+
+   剩下的可能（**未**验证，不要当结论）：
+
+   * `mcs_unlock()` 的交接写错了内存序，唤醒没能传递到下一个 waiter；
+   * 某个调用方在**未持锁**状态下调用了 `mm_cursor_unlock()`，把别人的节点弹出
+     自己的 unwind 栈。
+
+   **下一轮该测 `mcs_unlock()` 本身**：交接前后打印 `m->lock`、`me->node`、
+   `me->locked` 三个值，并给每个节点加 enqueue/dequeue 计数，直接看交接有没有发生。
+   在那之前不要相信任何关于持有者的推断。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 25 commit
+   的 checkpoint、门禁全绿。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 24 commit
+   的 checkpoint、门禁全绿。
+
+   **下一轮第一步应该是定位持有者，而不是继续猜**：在 level-0 节点锁的获取/释放
+   两端各加一个 per-CPU 的 owner+depth 记录，在 `[MCS SPIN]` 触发时把等待者与
+   `owner[节点]` 一起打出来。这一步就能把上面两个候选分开。
+
+   **本轮没有落地**：instrumentation 与 Phase 3 改动都已恢复，工作树回到 23 commit
+   的 checkpoint、门禁全绿。这一节记录的是**实测结论**（TLB 推断被推翻、症状是
+
+   #### 结局：根因是 MCS 锁的交接从未实现，Phase 3 已落地并验证
+
+   上面每一轮"没有落地"都是当时的事实，但结论已经变了。**根因不是 TLB、不是
+   `arch_cpu_relax()`、也不是任何调用方漏解锁**——是 `mcs_lock()`/`mcs_unlock()`
+   的交接**根本没有实现**，两个独立的致命 bug：
+
+   1. **等待者从未被挂进队列。** `mcs_lock()` 拿到 `tail` 之后没有把自己的节点
+      写进前驱的 `->next`，所以解锁方读到的 `me->next` 恒为 `0`，永远走 CAS
+      分支——而此时 `m->lock` 已经被 `exchange` 换成了**等待者**，CAS 必然失败。
+      锁永远不释放，等待者永远不被唤醒。**一次争用就把节点永久卡死。**
+   2. **解锁方读错了自己的节点。** `mcs_unlock()` 用共享字段 `m->node` 回读
+      "自己"的节点，但**每个**获取者都会覆写它。持锁者若身后有等待者，读回的就是
+      那个等待者，于是它清掉锁却把交接给了空气。
+
+   两条都符合最初的观测：两个 CPU 各自自旋在**不同**节点上、8 个 CPU 中**没有
+   任何 CPU 完成过获取**、持有者 PC 解析到 `mm_addrspace_lock`（`exchange` 所在
+   处）、自旋次数越过 `2^31`、而 `[MCS DEADLOCK` 不响——这是对的，等待者并不是
+   自死锁，它是在等一个协议根本产生不了的交接。
+
+   修法：等待者发布 `pred->next = me`；`mcs_unlock()` 的 CAS 失败分支改为等待后继
+   链接出现并交接；解锁方从自己的 per-CPU 池取节点
+   （`pool->nodes[pool->depth - 1]`，与 `mcs_lock()` 压入的槽位一致），
+   `m->node` 随之废弃。
+
+   **为什么它一直没被发现**：`mm->lock` 把整个缺页串行化，节点锁几乎从不争用，
+   这条路径从未被执行。摘掉 `mm->lock` 让争用变成常态——**不是它导致了 bug，是它
+   让 bug 变得可达**。这与今天另外两个 bug 形状完全一致（睡眠压在自旋锁下、
+   `mm->lock` 下回收）：**都要等上层串行化被移除才暴露。**
+
+   **Phase 3 现已落地**：`mm_fault_from_status()` 在 `spin_lock(&mm->lock)` **之前**
+   运行，快段只持 cursor。它不查 VMA（这正是论文 Fig. 8 的 handler，也是不需要
+   `mm->lock` 的原因）；数据页用 `pfa_alloc_flags(0, 0)` 不可回收分配，耗尽时
+   decline 交给 VMA 路径。
+
+   验证（28 commit 的 checkpoint）：`check-mm-lock-model` 14/14、
+   `check-mm-pt-lock-order` 17/17、riscv64/x86_64/aarch64 SMP=4 构建、SMP=8 下
+   `smoke-mm-pt-race`（`a20.anonprov=4096`，复现争用的那个用例）/
+   `smoke-mm-stress` / `smoke-mm-fork-exec-race` / `smoke-abi-linux` 全 PASS，
+   guest 日志里 LOCK-STALL / MCS DEADLOCK / panic **全为 0**。
+
+   且**非空跑**：同一次运行报出 `mm_anon_provisioned: 9464`、
+   `mm_fault_from_status: 778`，即无锁快段真实服务了 778 次匿名缺页，而该 smoke
+   断言这个计数器非零。
+
+   **教训（这一天最贵的一条）**：前两轮我都在**猜**机制（TLB shootdown、
+   `arch_cpu_relax()` 饿死软中断、调用方漏解锁），三轮都改了"看起来对"的代码。
+   真正的做法是**把状态打出来**：先打等待者与每 CPU 的持有栈，再打获取点 PC，
+   最后才定到"队列从未被链接"。而我两次把**测量装置的产物**当成了系统事实
+   （`[LOCK-STALL]` 被我 grep 成 `MCS DEADLOCK`；perf 计数器休眠导致的 0 被我
+   读成"快段是死代码"）。**在门上写清楚"什么在测、什么没在测"，比多改三处代码
+   更值钱。**
+   level-0 节点锁被永久持有）和**下一步该测什么**。
+
+   **下一轮该先做的**：让节点锁的自旋可被抢占，或者让 `arch_cpu_relax()` 真正让出
+   （riscv64 上 `wfi`，或循环里检查待处理 IPI）。**没落地**——两者都改动面不小
+   （`arch_cpu_relax()` 是全局 spin helper，替换它要重测所有锁路径），需要单独
+   一轮实测，不能顺手改。
+
+3. **drain 的触发频率**：`mm_pt_retire_drain()` 只在 retire 时立即调用，若
+   `pt_readers > 0` 就返回，退役列表在持续多核缺页下可能堆积。当前每次 retire 都会
+   尝试，最终会在某个 `pt_readers == 0` 的时刻排空，所以不是硬泄漏，但需要实测
+   增长曲线。
+

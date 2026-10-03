@@ -24,6 +24,8 @@
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 | 上游包运行（Alpine gcc 经 chroot 编译+运行） | `make smoke-devtools`（需网络拉取上游包，守护 trap.S sp 守卫修复） |
+| 3D 通路像素回读（三种架构） | `tools/a20 test smoke-gpu3d-riscv64` / `-x86_64` / `-aarch64`（需 host virgl + `tools/with-virgl-display.sh`；见 [graphics/3d-graphics.md](graphics/3d-graphics.md)） |
+| stock Mesa/virgl attach 门禁 | `make smoke-mesa-attach`（需 host virgl）。**断言 guest 起来了 virgl virtio-gpu，且 Mesa 真的 bind 到 virgl**（renderer 字符串判据 `profile renderer: *virgl`）。默认硬失败；`MESA_REQUIRE_VIRGL_ATTACH=0` 可降级为只报告。已通过（renderer `virgl (…radeonsi…)`）。详见 [graphics/3d-graphics.md §0.8](graphics/3d-graphics.md) |
 
 `BUILD_MATRIX_GATE_CONTRACT`：完整 hosted 构建集合是 `riscv64`、`loongarch64`、`aarch64`、`x86_64`、`arm32`、`riscv32` 和 `ppc64le`。Linux 上 `make check-build-matrix` 使用这七项，macOS 的默认集合只含 RISC-V64；需要与主机无关的显式七架构集合时使用 `make check-build-matrix-all`，它额外包含 `loongarch32`（NaiLoong LA32R，仅 kernel-only bring-up，无 QEMU 目标）、VisionFive2 与 LS2K1000 板级构建门禁。每架构门禁列表由根 `Makefile` 的 `SUPPORTED_HOSTED_ARCHES` 单一真源派生，新增架构必须只改那一处。ARMv7-M 由独立 STM32 build/check 目标覆盖，不属于 hosted 用户态矩阵。
 
@@ -33,7 +35,7 @@
 
 `SMP_PLATFORM_BOUNDARY_CONTRACT`：`kernel/core/smp.c` 统一管理逻辑 CPU 拓扑、online 状态、启动等待和 IPI 分派；`kernel/platform/<board>/` 提供 CPU 发现、启动、IPI 和本地控制器 hooks；`kernel/arch/<arch>/platform/smp.c` 只保留 secondary 入口与架构机制，不得按具体 board 编译平台策略。
 
-`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-minimal`、`native-test` 和 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
+`ABI_SMOKE_GATE_CONTRACT`：Linux ABI smoke 通过 `smoke-abi-linux` 运行 `syscall_smoke` 和用户态命令；Native ABI 的 `native-handle-test` 与 `native-libc` 是构建检查，其中 `native-libc` 编译 `user/tests/test_liba20c.c`。用于 handle dup/transfer 的 `make smoke-native-handle` 才是 QEMU 运行时覆盖。
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
@@ -80,6 +82,15 @@
 `make check-mm-lock-model` 覆盖 MM/VMA/页表这一组静态契约：`MM_LOCK_MODEL`、`MM_VMA_PTE_AUDIT`、`COW/DEMAND_FAULT_TLB_CONTRACT`、`MM_FORK_COW_REGRESSION_GUARD`、`FILE_MMAP_PAGE_CACHE_CONTRACT`、`OOM_RECLAIM_LIFETIME_CONTRACT` 等；并确认 `smoke-mm-stress` 与 `MM_STRESS: PASS` 存在。
 
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
+
+关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**元数据与硬件页表是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：
+
+- `missing_meta` / `present` / `absent` / `prot` / `cow` —— 正向：逐条比对"元数据是否与该 PTE 一致"。
+- `vma` —— 正向：每个 VMA 是否至少有一页被元数据认识。
+- `vmai` —— **反向（P8）**：凡是元数据声称有东西的页（Mapped / COW / 已预留未缺页），是否都有 VMA 覆盖。`MM_ST_INVALID` 豁免，因为空洞不是遗漏。正向检查只从 VMA 出发，所以没有这一项时"有状态但无 VMA"的页是不可见的；这也是"VMA 列表是纯派生"这条不变式唯一能漏的地方。
+- `safe` —— `MM_SAFE_NO_FA` 与 `VM_SEALED` 的一致性。
+
+字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race`。
 
 ### I/O 进展
 
@@ -238,7 +249,7 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 
 ### Native ABI 测试
 
-`make native-minimal`、`make native-test` 和 `make native-libc` 只构建对应原生程序，其中 `native-minimal` 与 `native-test` 检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
+`make native-handle-test` 与 `make native-libc` 只构建对应原生程序，检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 
 失败时检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误，确认 `native-handle-rv` 已生成并放入 fat32 镜像，并查看 `.kernel-build/smoke/native-handle-riscv64.log`。
 
@@ -255,6 +266,53 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 它必须存在，是因为 getifaddrs()、ifconfig 与 busybox `ip` 全部建立在 SIOCGIFCONF 上，而 per-interface getter 在没有枚举手段之前不可达。SIOCGIFCONF 此前是"派发但未实现"（-ENOTTY），该区域没有任何运行门禁，因此下面两个真实缺陷是写这个门禁时才暴露的。
 
 失败时查看 `.kernel-build/smoke/smoke-net-iface.log` 中首个 `NET_IFACE: FAIL` 行，对照 `kernel/net/socket_file.c` 的 `struct a20_ifreq` 与 `net_ifreq_fill` / `net_ifreq_put_addr`。`info` 行会打印用户态 `sizeof(struct ifreq)`、`offsetof(ifr_ifru)` 与每个接口的地址，ABI 不匹配时这三行即可定位。
+
+### TCP accept 路径与 listener 存在性（Linux ABI sockets 区域）
+
+`make smoke-net-accept` 覆盖 accept 路径在**两种 TCP 模式**下的一致性，这是
+`a20.tcpmode` 分档必须成立的可观测契约。`fast` 档由 socket 层配对两个 socket 来匹配
+listener；`lwip` 档把已绑定的 PCB 转成真正的 lwIP LISTEN pcb，由协议栈完成握手。
+两档是**两套独立实现**，必须给出相同的可观测结果，所以门禁把 `tcp_accept_test`
+在两档各跑一次。
+
+`tcp_accept_test` 只断言"握手完成且 `accept()` 返回可用 fd"，**故意不覆盖数据传输**：
+两者可分离，而红门禁必须指向真正坏掉的那一处。所有阻塞步骤都用 `SO_RCVTIMEO` 兜住，
+因为 `connect()` 的内核超时是 10 s，会超出任何门禁的合理预算。
+
+承重的断言是 `tcp_listen > 0`。它是本条缺陷的回归护栏：在补上 LISTEN pcb 之前它是稳态
+0，入站 SYN 被回 RST。已验证该断言可失败——同一内核以 `a20.tcpmode=fast` 启动时
+`tcp_listen=0`、门禁转红，以 `a20.tcpmode=lwip` 启动时为 1。模式经**内核命令行**选择
+而非 `/proc/net/config` 写入口，因为服务器第一个 listener 通常由用户态开机创建，shell
+写入口来不及生效。
+
+三个按零断言的计数器是不变量而非统计量：`net_accept_drop`、`net_bh_overflow`、
+`net_alloc_fail` 任一非零，都表示 accept 或收包路径丢弃了它已经接受的数据，这在任何量级
+下都是缺陷。accept 计数只记录不断言，因为一次运行里 accept 多少次取决于客户端重试时序。
+
+它必须存在：修复之前 `tcp_listen()` 全树从未被调用，`/proc/net/status` 的 `tcp_listen=0`
+是常态，协议栈没有任何对外服务能力（SLIRP hostfwd 实测返回"连接被对方重置"），而当时
+**没有任何门禁跑网络区域**，所以这个状态可以一直不被发现。
+
+失败时查看 `.kernel-build/smoke/net-accept-riscv64.log`，对照
+`kernel/net/socket_control.c` 的 `net_listen()`（两档分派）与
+`kernel/net/socket_inet.c` 的 `net_inet_tcp_listen()` / `lwip_tcp_accept_cb()` /
+`net_inet_accept_stage_drain()`。门禁会在失败时打印 `passes` 与四个计数器值。
+
+### network_suite 的判定语义：declared-absent
+
+`network_suite` 的子测试退出码契约里新增了一个判定：**declared-absent**（`may_skip`
+是"本次运行的环境没有覆盖该能力"，属于**运行**的事实；`known_absent` 是"项目已决定
+不做该能力"，属于**树**的事实，门禁本该把它钉住）。
+
+AF_ALG 是后者的典型：它刻意不提供任何算法（见 `kernel/net/socket_alg.c`），`bind()` 必然
+失败，`alg_test` 如实返回 78（ABSENT）。此前套件把 ABSENT 一律当失败，于是
+`smoke-network-suite` 在 `main` 上就已经是红的——网络栈无论怎么改都不可能让它变绿，
+一个永远红的门禁等于没有门禁。改为：`known_absent` 的 ABSENT 结果是**被断言的状态**，
+按名字报告并单独计数，不计入退出码。
+
+fail-closed 在两个方向都保留：未声明 `known_absent` 的测试一旦 ABSENT 仍然让套件失败；
+已声明的测试若开始通过（能力落地了），报告 `PRESENT(expected-absent)` 并提示删除
+过期声明，而不是静默腐烂。
 
 ### poll / timer 边界语义（Linux ABI poll 与 timer 区域）
 

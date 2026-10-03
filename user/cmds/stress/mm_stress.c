@@ -150,6 +150,136 @@ static void *vma_deferred_race_worker(void *arg)
     return NULL;
 }
 
+/* Wide-cursor collision.
+ *
+ * mm_pt_provision_anon() is the only source of a cursor whose covering level is
+ * > 0, and it needs an anonymous private mapping larger than one leaf table
+ * (512 pages) while staying at or below MM_ANON_PROVISION_MAX_PAGES.  4 MiB is
+ * 1024 pages, inside both bounds.  Provisioning walks that range with ONE wide
+ * cursor; every later fault inside it uses a narrow single-page cursor over the
+ * same leaf tables.  Those two must exclude each other, which is exactly what
+ * the per-operation leaf lock is for, and nothing else in this file can produce
+ * the pair.
+ *
+ * The puncher also unmaps a slice from under the other threads, so the retire
+ * path (mm_pt_retire_table) runs concurrently with cursor descent and the audit
+ * at the end has something to catch if the two disagree.
+ */
+#define WIDE_CURSOR_BYTES  (4 * 1024 * 1024)
+/* Slice count must divide WIDE_CURSOR_BYTES into page-aligned pieces: a slice
+ * that is not a multiple of PAGE_SIZE makes both munmap and mmap fail EINVAL.
+ * 8 gives 512 KiB (128 pages) each; six punchers take slices 0-5, the unmapper
+ * takes slice 6, and slice 7 is left alone so a puncher never shares the slice
+ * the unmapper tears down. */
+#define WIDE_CURSOR_SLICES 8
+#define WIDE_CURSOR_WORKERS 6
+#define WIDE_CURSOR_ROUNDS 64
+
+static volatile int wide_cursor_ready;
+static volatile int wide_cursor_start;
+static char *wide_cursor_base;
+
+static void *wide_cursor_punch(void *arg)
+{
+    long id = (long)(intptr_t)arg;
+    size_t slice = WIDE_CURSOR_BYTES / WIDE_CURSOR_SLICES;
+
+    __atomic_add_fetch(&wide_cursor_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&wide_cursor_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    for (int round = 0; round < WIDE_CURSOR_ROUNDS; round++) {
+        char *p = wide_cursor_base + (size_t)id * slice;
+        for (size_t off = 0; off < slice; off += 4096)
+            p[off] = (char)(round + (int)off + (int)id);
+        for (size_t off = 0; off < slice; off += 4096)
+            if (p[off] != (char)(round + (int)off + (int)id))
+                return (void *)(intptr_t)1;
+    }
+    return NULL;
+}
+
+static void *wide_cursor_unmapper(void *arg)
+{
+    (void)arg;
+    size_t slice = WIDE_CURSOR_BYTES / WIDE_CURSOR_SLICES;
+
+    __atomic_add_fetch(&wide_cursor_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&wide_cursor_start, __ATOMIC_ACQUIRE))
+        sched_yield();
+
+    /* Drop the reserved slice, then put it back, repeatedly.  munmap tears the
+     * page-table subtree down under the punching threads, which is the side of
+     * the collision the per-page fault path never produces on its own. */
+    char *tail = wide_cursor_base + (size_t)WIDE_CURSOR_WORKERS * slice;
+    for (int round = 0; round < WIDE_CURSOR_ROUNDS; round++) {
+        if (munmap(tail, slice) < 0)
+            return (void *)(intptr_t)1;
+        char *again = mmap(tail, slice, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (again == MAP_FAILED)
+            return (void *)(intptr_t)1;
+        if (again != tail)
+            return (void *)(intptr_t)1;
+    }
+    return NULL;
+}
+
+static int concurrent_wide_cursor_faults(void)
+{
+    pthread_t workers[WIDE_CURSOR_WORKERS + 1];
+    wide_cursor_ready = 0;
+    wide_cursor_start = 0;
+
+    wide_cursor_base = mmap(NULL, WIDE_CURSOR_BYTES, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (wide_cursor_base == MAP_FAILED)
+        return fail("wide-cursor-mmap");
+
+    int created = 0;
+    for (; created < WIDE_CURSOR_WORKERS; created++) {
+        int r = pthread_create(&workers[created], NULL, wide_cursor_punch,
+                               (void *)(intptr_t)created);
+        if (r != 0) {
+            __atomic_store_n(&wide_cursor_start, 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < created; i++)
+                pthread_join(workers[i], NULL);
+            munmap(wide_cursor_base, WIDE_CURSOR_BYTES);
+            errno = r;
+            return fail("wide-cursor-pthread-create");
+        }
+    }
+    int r = pthread_create(&workers[created], NULL, wide_cursor_unmapper, NULL);
+    if (r != 0) {
+        __atomic_store_n(&wide_cursor_start, 1, __ATOMIC_RELEASE);
+        for (int i = 0; i < created; i++)
+            pthread_join(workers[i], NULL);
+        munmap(wide_cursor_base, WIDE_CURSOR_BYTES);
+        errno = r;
+        return fail("wide-cursor-unmapper-create");
+    }
+    created++;
+
+    while (__atomic_load_n(&wide_cursor_ready, __ATOMIC_ACQUIRE) != created)
+        sched_yield();
+    __atomic_store_n(&wide_cursor_start, 1, __ATOMIC_RELEASE);
+
+    int bad = 0;
+    for (int i = 0; i < created; i++) {
+        void *result = NULL;
+        if (pthread_join(workers[i], &result) != 0)
+            bad = 1;
+        else if (result)
+            bad = 1;
+    }
+
+    munmap(wide_cursor_base, WIDE_CURSOR_BYTES);
+    if (bad)
+        return fail("wide-cursor-worker");
+    printf("MM_WIDE_CURSOR: PASS\n");
+    return 0;
+}
+
 static int concurrent_vma_deferred_flush(void)
 {
     pthread_t workers[VMA_RACE_WORKERS];
@@ -1640,6 +1770,20 @@ int main(int argc, char **argv)
         if (concurrent_vma_deferred_flush() != 0)
             return 1;
         printf("MM_VMA_RACE: PASS\n");
+        return 0;
+    }
+
+    /* The wide-cursor workload spawns WIDE_CURSOR_WORKERS+1 threads that each
+     * hold a cursor against one address range and tear a slice down underneath
+     * the others.  It runs only from smoke-mm-pt-race at SMP=8, never from the
+     * bare `mm_stress` run: at -smp 1 it does not finish inside the 45s budget
+     * that smoke-mm-stress allows, and that regression is not worth paying for a
+     * check the SMP gate already covers properly. */
+    if (argc == 2 && strcmp(argv[1], "--wide-cursor-only") == 0) {
+        printf("MM_WIDE_CURSOR: start workers=%d rounds=%d bytes=%d\n",
+               WIDE_CURSOR_WORKERS, WIDE_CURSOR_ROUNDS, WIDE_CURSOR_BYTES);
+        if (concurrent_wide_cursor_faults() != 0)
+            return 1;
         return 0;
     }
 

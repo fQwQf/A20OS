@@ -146,6 +146,147 @@ gdt_desc:
     .word gdt_end - gdt - 1
     .long gdt - PAGE_OFFSET
 
+    /* ==================================================================
+     * UEFI entry.  Entered directly from kernel/boot/uefi/x86_64_loader.c
+     * in 64-bit long mode with the firmware's identity map still active.
+     *
+     * GRUB cannot be used under UEFI because GRUB 2.12 does not fill the
+     * multiboot ACPI tags, so the kernel never learns the RSDP address and
+     * ends up with no MCFG, no PCI and no root filesystem.  The loader reads
+     * the RSDP out of the firmware configuration table instead and passes it
+     * here.
+     *
+     * Doing the handover in long mode rather than dropping to 32-bit first is
+     * deliberate.  A loader that returns to 32-bit protected mode has to build
+     * a GDT, load it, reload CS and clear EFER.LME/CR4.PAE/CR0.PG in an
+     * order where any mistake is a #GP with no console left to report it.  The
+     * firmware already leaves us in the exact mode the page tables below want,
+     * so this path does none of that.
+     *
+     * Register contract, set by the loader:
+     *   rdi = physical address of a multiboot v1 information block it built
+     *   rsi = physical address of the ACPI RSDP
+     * Both are physical; the firmware map is an identity map, so the same
+     * direct addressing the multiboot path uses is valid here.
+     * ================================================================== */
+    .section .uefi64, "ax"
+    .code64
+    .globl _start_uefi
+_start_uefi:
+    cli
+    cld
+
+    /* Adopt the loader's multiboot block.  Reusing the v1 layout means
+     * x86_ram_detect() and multiboot_cmdline() need no UEFI-specific path,
+     * and it is why this entry can stay so small. */
+    /* These are physical addresses, not the symbols' VMAs.  At this point the
+     * only map is the firmware's identity map, so a write through the
+     * higher-half alias is a #PF (error 2) with nothing to report it on. */
+    movl   $0x2BADB002, %eax
+    movabsq $g_mb_magic - PAGE_OFFSET, %rcx
+    movl   %eax, (%rcx)
+    movabsq $g_mb_info - PAGE_OFFSET, %rcx
+    movl   %edi, (%rcx)                /* g_mb_info is uint32_t, like the
+                                         multiboot path's EBX */
+    movabsq $x86_boot_acpi_rsdp - PAGE_OFFSET, %rcx
+    movq   %rsi, (%rcx)
+
+    /* The stack has to be a physical address too: at this point only the
+     * firmware's identity map exists, so the higher-half alias is not
+     * translated yet. */
+    movabsq $(_stack_end - PAGE_OFFSET), %rsp
+
+    /* Clear BSS */
+    movabsq $(_bss_start - PAGE_OFFSET), %rdi
+    movabsq $(_bss_end - PAGE_OFFSET), %rcx
+    subq  %rdi, %rcx
+    xorl  %eax, %eax
+    rep stosb
+
+    /* Build the boot page tables: PML4 -> PDPT_id/PDPT_hh -> PD_id, an
+     * identity map of the first gigabyte in 2 MiB pages, and a higher-half
+     * window over 0-4 GiB in 1 GiB pages.  2-4 GiB is marked uncacheable
+     * because that is where PCI ECAM and the APICs live. */
+    movabsq $(boot_pgdir - PAGE_OFFSET), %rdi
+    xorl  %eax, %eax
+    movl   $4096, %ecx
+    rep stosl
+
+    movabsq $(boot_pgdir - PAGE_OFFSET), %rdi
+    movabsq $(boot_pdpt_id - PAGE_OFFSET), %rax
+    orq    $0x003, %rax
+    movq   %rax, (%rdi)
+    movabsq $(boot_pdpt_hh - PAGE_OFFSET), %rax
+    orq    $0x003, %rax
+    movq   %rax, 2048(%rdi)
+
+    movabsq $(boot_pdpt_id - PAGE_OFFSET), %rdi
+    movabsq $(boot_pd_id - PAGE_OFFSET), %rax
+    orq    $0x003, %rax
+    movq   %rax, (%rdi)
+
+    movabsq $(boot_pd_id - PAGE_OFFSET), %rdi
+    movl   $0x83, %eax
+    movl   $512, %ecx
+1:
+    movq   %rax, (%rdi)
+    addq   $8, %rdi
+    addl   $0x200000, %eax
+    loop   1b
+
+    movabsq $(boot_pdpt_hh - PAGE_OFFSET), %rdi
+    movl   $0x00000083, %eax
+    movq   %rax, (%rdi)
+    movl   $0x40000083, %eax
+    movq   %rax, 8(%rdi)
+    movl   $0x8000008B, %eax
+    movq   %rax, 16(%rdi)
+    movl   $0xC000008B, %eax
+    movq   %rax, 24(%rdi)
+
+    /* PAE and the 2 MiB pages the identity map uses.  LME and PG are already
+     * set: we were started in long mode by the firmware.  These are 64-bit
+     * forms because that is the only encoding .code64 accepts for CR access. */
+    movq   %cr4, %rax
+    orq    $0x30, %rax
+    movq   %rax, %cr4
+
+    movabsq $(boot_pgdir - PAGE_OFFSET), %rax
+    movq   %rax, %cr3
+
+    /* Reload CS from our own GDT, then continue in the higher half.
+     *
+     * gdt_desc cannot be reused here: in 64-bit mode a bare LGDT reads a
+     * 10-byte pointer, and gdt_desc is the 6-byte form the 32-bit path uses
+     * (16-bit limit plus a 32-bit base).  Reading 10 bytes from it would take
+     * the high half of the base from whatever follows, so the far jump would
+     * load CS from an address nothing is mapped at. */
+    movabsq $gdt_desc64 - PAGE_OFFSET, %rax
+    lgdt   (%rax)
+    /* A far return rather than a far jump with an immediate target: GAS will
+     * not accept ljmpq against a label in .code64.  The frame matches here --
+     * both halves are 64-bit because we are already in long mode.  (The 32-bit
+     * path above cannot use this, which is why it uses an architectural far
+     * jump instead.) */
+    movabsq $_start64, %rax
+    pushq   $0x20
+    pushq   %rax
+    lretq
+
+    .align 8
+gdt_desc64:
+    .word  gdt_end - gdt - 1
+    .quad  gdt                        /* 64-bit base: this path is already high */
+
+    .section .data
+    .align 8
+    .globl x86_boot_acpi_rsdp
+x86_boot_acpi_rsdp:
+    .quad 0
+
+    .section .text.entry, "ax"
+    .code32
+
     .code64
 _start64:
     /* Set up data segments */

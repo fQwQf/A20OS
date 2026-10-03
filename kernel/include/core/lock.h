@@ -37,7 +37,7 @@ extern int proc_task_pid(const void *task);
  *
  * Rules:
  *
- * Lock-safe network entry points (see docs/network-lock-contract.md):
+ * Lock-safe network entry points (see docs/net/network-lock-contract.md):
  * - a20_lwip_lock()/a20_lwip_unlock(): outer lock around all lwIP core calls.
  * - a20_lwip_poll_locked(): progress entry that runs with g_lwip_lock held;
  *   must not allocate, block, or acquire g_net_lock.

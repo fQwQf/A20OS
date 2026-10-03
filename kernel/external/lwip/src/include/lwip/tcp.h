@@ -216,7 +216,12 @@ typedef u16_t tcpflags_t;
   enum tcp_state state; /* TCP state */ \
   u8_t prio; \
   /* ports are in host byte order */ \
-  u16_t local_port
+  u16_t local_port; \
+  /* Index of the list head this pcb is linked into, out of CONFIG_NET_LANES
+     heads per PCB list; derived from local_ip/local_port, see
+     lwip/priv/pcb_lane.h.  Must stay in the common part: a listening pcb is
+     reached through a struct tcp_pcb pointer. */ \
+  u8_t lane
 
 
 /** the TCP protocol control block for listening pcbs */

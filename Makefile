@@ -112,6 +112,22 @@ RAMFS_USER ?= 0
 OPT ?= -O3
 USER_OPT ?= $(OPT)
 NR_CPUS ?= 1
+# Network lanes. 1 keeps every lane index folded to 0, which is the
+# embedded shape and byte-for-byte the pre-lane behaviour. Raise it
+# only together with stage D of docs/net/net-lanes.md; stages A-C
+# compute and report lanes but do not yet route packets by them.
+NET_LANES ?= 1
+# Network resource tier, 1..3, consumed by kernel/net/net_profile.h as
+# CONFIG_NET_PROFILE. 2 (DEFAULT) is the historical hosted configuration and
+# stays the default so no existing target changes footprint. 1 (EMBEDDED) is
+# the small-SRAM ceiling set; 3 (SERVER) is for high-connection-count hosts.
+# An out-of-range value is rejected below rather than silently falling into
+# the header's #else branch, which is DEFAULT: a typo must not quietly hand a
+# memory-constrained build the server-sized pools.
+NET_PROFILE ?= 2
+ifeq ($(filter 1 2 3,$(NET_PROFILE)),)
+$(error NET_PROFILE=$(NET_PROFILE) is not a valid tier; use 1 (embedded), 2 (default) or 3 (server))
+endif
 EXTERNAL_ROOT ?= 0
 COOPERATIVE_BOOT ?= 0
 STORAGE_READ_ONLY ?= 0
@@ -232,6 +248,86 @@ endif
 .DELETE_ON_ERROR:
 
 # ================================================================
+# `make help`
+# ================================================================
+# There are well over a thousand targets here, almost all of them generated per
+# instance/arch/smoke combination.  Printing them is how a newcomer gets a wall
+# of noise instead of an answer, so `make help` lists the handful of entry
+# points that actually get typed, grouped by what you are trying to do.  The
+# full set stays discoverable with `make -qp | grep '::'`, a deliberate opt-in.
+#
+# Placed next to .DEFAULT_GOAL, right where a newcomer's eye goes first, and
+# every value it interpolates is either defined above (ARCH, BOARD, ABI,
+# BRINGUP, NR_CPUS) or is a recursively-expanded variable defined by the
+# includes further down (CHECK_FAST_GATES).  Help text that quotes a hand-typed
+# copy of the arch list or the gate tier goes stale silently; this cannot.
+#
+# The fast-tier gate list is broken into fixed-size chunks so it stays readable
+# in a terminal, and each chunk is guarded by $(if $(wordlist ...)) so an absent
+# chunk contributes no argument (and therefore no blank line) to printf.  The
+# four chunks below cover 16 gate names; the tier has 15, so a gate added past
+# that needs a fifth chunk here rather than silently going unlisted.
+help-gate-chunk = $(if $(wordlist $(1),$(2),$(CHECK_FAST_GATES)),'     $(wordlist $(1),$(2),$(CHECK_FAST_GATES))')
+
+.PHONY: help
+help:
+	@printf '%s\n' \
+	  'A20OS -- hybrid kernel.  Usage: make <target> [VAR=VALUE ...]' \
+	  '' \
+	  "Now building: ARCH=$(ARCH) BOARD=$(BOARD) ABI=$(ABI) BRINGUP=$(BRINGUP) NR_CPUS=$(NR_CPUS)" \
+	  '' \
+	  '  Day-to-day development' \
+	  '    make run                       build ARCH=$$ARCH and boot it in QEMU' \
+	  '    make run-riscv64               ... same, for a named arch (also -loongarch64,' \
+	  '                                   -aarch64/-arm64, -x86_64, -arm32, -riscv32, -ppc64le)' \
+	  '    make debug-riscv64             boot paused with a GDB server on :1234' \
+	  '    make dev-build                 kernel + userspace + test images, no QEMU' \
+	  '    make kernel-only               just the kernel, for ARCH/BOARD' \
+	  '    make clean                     remove build output for the current variant' \
+	  '' \
+	  '  Gates -- fast and host-only (no QEMU, no cross toolchain)' \
+	  '    make check                     the whole fast tier; equals CI toolchain-gates' \
+	  '    make check-format              clang-format drift gate over first-party sources' \
+	  '' \
+	  "  What 'make check' runs ($(words $(CHECK_FAST_GATES)) gates):" \
+	  $(call help-gate-chunk,1,4) \
+	  $(call help-gate-chunk,5,8) \
+	  $(call help-gate-chunk,9,12) \
+	  $(call help-gate-chunk,13,16) \
+	  '' \
+	  '    make check-manifests           instances/ components/ Makefile agree' \
+	  '    make host-tests                host-gcc unit tests for kernel format/helper logic' \
+	  '    make check-doc-test-gates      every documented source-contract gate (11 need QEMU)' \
+	  '' \
+	  '  Gates -- need a cross toolchain and/or QEMU' \
+	  '    make check-kernel-build        build-only bring-up gate for the current ARCH' \
+	  '    make check-build-matrix        bring-up + userspace builds across the arch matrix' \
+	  '    make smoke-riscv64             BRINGUP boot stages + self power-off (no syscalls)' \
+	  '    make smoke-abi-linux           Linux ABI syscall smoke in QEMU' \
+	  '    make check-concurrency-foundation  SMP lock-model contract, builds a 2-CPU config' \
+	  '' \
+	  '  Release (what a bare `make` does)' \
+	  '    make                           dual-arch release: kernel-rv kernel-la disk*.img' \
+	  '    make image-world               package -> repository -> bootable image' \
+	  '    make docs                      build standard-reference.pdf from docs/' \
+	  '' \
+	  '  Instance tooling (the declarative layer the targets above wrap)' \
+	  '    tools/a20 list                 every predefined instance' \
+	  '    tools/a20 run <instance>       build and boot an instance' \
+	  '    tools/a20 debug <instance>     boot an instance with a GDB server' \
+	  '    tools/a20 test <instance>      run an instance smoke' \
+	  '    tools/a20 check                validate instances/, arch matrix, registries' \
+	  '    docs/instances.md              instance fields and the component registry' \
+	  '' \
+	  '  Boards and MCU' \
+	  '    make BRINGUP=1 run-<arch>      kernel-only bring-up variant' \
+	  '    make vf2-sdcard                VisionFive 2 SD card' \
+	  '    make stm32f103-bringup         STM32F103 firmware (64 KiB flash)' \
+	  '' \
+	  'Docs: docs/build.md (build), docs/testing-gates.md (gates),' \
+	  '      docs/instances.md (instances), docs/CONTRIBUTING.md (style + gates).'
+
+# ================================================================
 # Build paths and userspace artifacts
 # ================================================================
 
@@ -241,7 +337,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -533,6 +629,15 @@ QEMU_GPU := $(if $(QEMU_GPU_$(ARCH)),$(QEMU_GPU_$(ARCH)),$(QEMU_GPU_DEFAULT))
 QEMU_BLK_SECOND_riscv64     := virtio-blk-device,bus=virtio-mmio-bus.1
 QEMU_BLK_SECOND_loongarch64 := virtio-blk-pci
 QEMU_BLK_SECOND_x86_64      := virtio-blk-pci
+# aarch64 was missing here, so an instance declaring [rootfs].world -- which is
+# every xfce-*-style Alpine desktop, xfce-aarch64 included -- expanded to an
+# empty device and emitted "-device ,drive=xworld".
+#
+# The second disk goes on a second virtio-mmio bus, not on PCI: the board's
+# enumerate_devices only calls virtio_mmio_enumerate and never initialises the
+# PCI host, so a virtio-blk-pci here would satisfy QEMU and still be invisible to
+# the kernel.  The primary disk takes bus.0, which is why riscv64 does this too.
+QEMU_BLK_SECOND_aarch64     := virtio-blk-device,bus=virtio-mmio-bus.1
 
 QEMU_NET_riscv64     := virtio-net-device,bus=virtio-mmio-bus.4
 QEMU_NET_loongarch64 := virtio-net-pci
@@ -670,6 +775,11 @@ CC := $(CCACHE_PREFIX)$(CROSS_PREFIX)gcc
 OBJCOPY := $(CROSS_PREFIX)objcopy
 endif
 
+# The handoff bundle reads the kernel's load address out of the ELF program
+# headers rather than repeating a per-board address, so it needs a readelf that
+# understands this architecture's objects.
+READELF := $(CROSS_PREFIX)readelf
+
 ifeq ($(CC),)
 $(error Unsupported ARCH '$(ARCH)')
 endif
@@ -726,6 +836,8 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
          -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
+         -DCONFIG_NET_LANES=$(NET_LANES) \
+         -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
          -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
@@ -780,6 +892,13 @@ endif
 ifeq ($(BOARD),ls2k1000)
 ifeq ($(COOPERATIVE_BOOT),1)
 CFLAGS += -DCONFIG_ELF_EAGER_LOAD
+# Register dumps at the first task switch and on panic.  This used to be keyed on
+# CONFIG_BOARD_LS2K1000 inside kernel/core/panic.c and kernel/proc/task.c, which
+# put a board name in architecture-neutral files; the flag is opt-in here
+# instead, and the CSRs themselves moved to
+# kernel/arch/loongarch64/platform/debug.c behind arch_panic_dump() and
+# arch_debug_dump_user_state().
+CFLAGS += -DCONFIG_DEBUG_BOOT_TRACE
 ifneq ($(NR_CPUS),1)
 $(error COOPERATIVE_BOOT=1 is the single-core recovery profile and cannot be combined with NR_CPUS=$(NR_CPUS))
 endif
@@ -806,11 +925,18 @@ ifeq ($(ARCH),x86_64)
 CFLAGS += -DCONFIG_IOPORT -DCONFIG_AHCI \
           -DCONFIG_PCI_MMIO_BASE_LEGACY
 endif
+# Boards whose SoC has no PCIe root complex must leave the MMIO-allocation
+# window undefined, not defined-as-zero: pci_bus.c would otherwise map physical
+# address 0 as a device window.  The SophGo SG2000/CV1800B boards are the
+# first RISC-V targets in the tree without PCIe.
+A20OS_NO_PCIE_BOARDS := licheerv-nano milk-v-duo
+ifeq ($(filter $(BOARD),$(A20OS_NO_PCIE_BOARDS)),)
 ifneq ($(filter x86_64 loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_ALLOC
 endif
 ifneq ($(filter loongarch64 riscv64,$(ARCH)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
+endif
 endif
 ifeq ($(ARCH),aarch64)
 CFLAGS += -DCONFIG_TRAP_ESR_DIAG
@@ -1037,9 +1163,15 @@ endif
 RAMFS_USER_BLOB_DIR := $(BUILD_DIR)/rootfs-user
 RAMFS_USER_BLOBS := $(addprefix $(RAMFS_USER_BLOB_DIR)/,$(addsuffix .o,$(RAMFS_USER_PROGRAMS)))
 RAMFS_USER_OBJCOPY_loongarch64 := -O elf64-loongarch -B loongarch
+RAMFS_USER_OBJCOPY_riscv64   := -O elf64-littleriscv -B riscv:rv64
 ifeq ($(RAMFS_USER),1)
-ifneq ($(ARCH),loongarch64)
-$(error RAMFS_USER=1 is currently supported only for ARCH=loongarch64)
+# Gate on the objcopy entry rather than on an arch list, so adding an
+# architecture is one table line instead of two places that can disagree.  The
+# previous check was an explicit $(error) naming loongarch64, which meant a
+# small-memory board on any other architecture had no way to run a RAMFS
+# userland at all -- the Milk-V Duo's 64 MiB is the case that needs it.
+ifeq ($(RAMFS_USER_OBJCOPY_$(ARCH)),)
+$(error RAMFS_USER=1 has no objcopy recipe for ARCH=$(ARCH); add RAMFS_USER_OBJCOPY_$(ARCH) near line 1013)
 endif
 KERNEL_OBJ += $(RAMFS_USER_BLOBS)
 endif
@@ -1090,7 +1222,15 @@ KERNEL_BIN = $(BUILD_DIR)/kernel.bin
 VBOX_AARCH64_EFI = $(BUILD_DIR)/BOOTAA64.EFI
 VBOX_AARCH64_IMG = $(BUILD_DIR)/a20os-vbox-aarch64.img
 VBOX_AARCH64_TEXT_IMG = $(BUILD_DIR)/a20os-vbox-aarch64-text.img
-VBOX_AARCH64_LOAD_ADDRESS ?= 0x08080000ULL
+# The aarch64 UEFI loader places the flat image at a fixed address, so that
+# address has to be the one the board's linker script actually linked it at.
+# Restating it here let the two drift apart silently: the loader demanded
+# 0x08080000 (VirtualBox, RAM at 0x08000000) while the qemu-virt board links at
+# 0x40080000, so an AAVMF boot failed in allocate_pages before any kernel code
+# ran.  Read it out of the script instead, and keep it overridable.
+VBOX_AARCH64_LOAD_ADDRESS ?= $(shell sed -n 's/^PROVIDE(PHYS_BASE = \(0x[0-9a-fA-F]*\));.*/\1/p' $(LDSCRIPT) | head -1)
+VBOX_X86_64_EFI = $(BUILD_DIR)/BOOTX64.EFI
+VBOX_X86_64_IMG = $(BUILD_DIR)/a20os-vbox-x86_64-uefi.img
 
 # ================================================================
 # Targets (split into tools/targets-*.mk)

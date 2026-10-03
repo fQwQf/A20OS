@@ -13,12 +13,6 @@
 #define READINESS_FALLBACK_TICKS \
     (MS_TO_TICKS(1) ? MS_TO_TICKS(1) : 1)
 
-#if defined(CONFIG_BOARD_LS2K1000) && defined(CONFIG_COOPERATIVE_BOOT)
-#define LS2K_READY_MARK(ch) uart_putc(ch)
-#else
-#define LS2K_READY_MARK(ch) do { } while (0)
-#endif
-
 typedef struct readiness_slot {
     vfile_t *file;
     uint64_t identity;
@@ -190,7 +184,6 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
                         size_t max_ready, uint64_t deadline,
                         bool has_deadline)
 {
-    LS2K_READY_MARK('1');
     if ((!items && count) || (!extra && extra_count))
         return -EINVAL;
     if (count > (size_t)MAX_FILES * 3)
@@ -205,7 +198,6 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
         if (links) kfree(links);
         return -ENOMEM;
     }
-    LS2K_READY_MARK('2');
 
     bool has_local = false;
     bool fallback = false;
@@ -240,10 +232,8 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
     for (size_t i = 0; i < extra_count; i++)
         park_deadline = readiness_min_deadline(
             park_deadline, extra[i].source.deadline);
-    LS2K_READY_MARK('3');
 
     int ready = readiness_scan(items, slots, count, max_ready);
-    LS2K_READY_MARK('4');
     bool external_ready = readiness_extra_ready(extra, extra_count);
     bool sources_changed = !sources_stable ||
                            readiness_sources_changed(slots, count);
@@ -253,7 +243,6 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
         goto out;
     }
     uint64_t now = timer_get_ticks();
-    LS2K_READY_MARK('5');
     if (has_deadline && now >= deadline) {
         ready = 0;
         goto out;
@@ -320,7 +309,6 @@ int readiness_wait_once(readiness_interest_t *items, size_t count,
         wait_queue_unlink(links[i].source.queue, &links[i].entry);
     proc_park_finish(token);
 out:
-    LS2K_READY_MARK('6');
     for (size_t i = 0; i < count; i++)
         if (slots[i].file)
             vfs_put_file(slots[i].file);

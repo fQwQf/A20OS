@@ -71,3 +71,6 @@ ccfa-review-reports/
 
 # locally built host virglrenderer (tools/build-virglrenderer.sh)
 tools/virgl/
+
+# Local crash-repro logs from diagnosing the multi-lane fault
+.diag/

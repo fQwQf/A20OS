@@ -20,6 +20,11 @@
 #define A20_DRIVER_DESCRIPTOR_MAGIC   0x41323044U /* "A20D" */
 #define A20_DRIVER_DESCRIPTOR_VERSION 2U
 
+/* Bump whenever a driver's binary interface changes shape: a vtable a module
+ * hands the kernel (net_dev_ops_t and friends), a struct a module reads from
+ * the kernel, or a symbol it resolves against.  Checked on every load by
+ * a20_driver_descriptor_sane(), so a stale module is refused rather than
+ * called through a layout that no longer matches. */
 #define A20_DRIVER_ABI 1U
 
 enum a20_driver_placement {
@@ -80,6 +85,16 @@ typedef struct a20_driver_descriptor {
     a20_driver_match_t match[A20_DRIVER_MAX_MATCH];
     uint32_t match_count;
 } a20_driver_descriptor_t;
+
+/* Placement- and type-independent checks; callers layer their own on top. */
+static inline int a20_driver_descriptor_sane(const a20_driver_descriptor_t *d)
+{
+    return d->magic == A20_DRIVER_DESCRIPTOR_MAGIC &&
+           d->version == A20_DRIVER_DESCRIPTOR_VERSION &&
+           d->abi == A20_DRIVER_ABI && d->match_count <= A20_DRIVER_MAX_MATCH &&
+           d->name[0] != '\0';
+}
+
 
 #define A20_DRIVER_MATCH(bus_, vendor_, device_) \
     { (bus_), (vendor_), (device_) }

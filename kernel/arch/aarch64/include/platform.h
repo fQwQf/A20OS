@@ -15,8 +15,12 @@
  * QEMU virt (AArch64) defaults.  Boards with a different memory map can
  * override these constants by providing a board-specific header.
  */
-#ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
+#if defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
 #include "vbox_aarch64_platform.h"
+#elif defined(CONFIG_BOARD_RK3328)
+#include "rk3328_platform.h"
+#elif defined(CONFIG_BOARD_SUN50I_H616)
+#include "sun50i_h616_platform.h"
 #else
 #define PHYS_MEMORY_BASE   0x40000000UL
 #define PHYS_MEMORY_END    0x80000000UL

@@ -14,6 +14,8 @@ _start:
 #ifdef CONFIG_BOARD_VIRTUALBOX_AARCH64
     /* The UEFI loader passes the ACPI RSDP physical address in x0. */
     mov     x4, x0
+    /* ...and the firmware's LoadOptions cmdline in x2, or 0 if it gave none. */
+    mov     x6, x2
 #endif
     adrp    x0, _stack_end
     add     x0, x0, :lo12:_stack_end
@@ -36,6 +38,10 @@ _start:
     adrp    x3, aarch64_boot_acpi_rsdp
     add     x3, x3, :lo12:aarch64_boot_acpi_rsdp
     str     x4, [x3]
+
+    adrp    x3, aarch64_boot_cmdline
+    add     x3, x3, :lo12:aarch64_boot_cmdline
+    str     x6, [x3]
 #endif
     /* Enable FP/SIMD access at EL1/EL0. */
     mrs     x2, cpacr_el1
@@ -301,6 +307,11 @@ aarch64_boot_dtb:
     .align 3
     .global aarch64_boot_acpi_rsdp
 aarch64_boot_acpi_rsdp:
+    .quad 0
+
+    .align 3
+    .global aarch64_boot_cmdline
+aarch64_boot_cmdline:
     .quad 0
 #endif
 

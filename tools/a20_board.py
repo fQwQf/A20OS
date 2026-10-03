@@ -53,12 +53,41 @@ def run_package(inst: Instance, make_args: list[str], dry_run: bool) -> None:
         raise A20Error(f"{inst.source}: [package] kind is required for 'a20 package'")
     match kind:
         case "grub-iso":
-            exec_make(inst, "_vbox_iso_x86_64_impl", list(make_args), dry_run)
+            # A physical PC boots the same ISO from a USB stick, so it needs the
+            # artifact at a stable path an instance can name in boot_media; the
+            # VirtualBox one lives in the per-build directory and is never
+            # written to a device.
+            if (inst.package.variant or "vbox") == "rescue-usb":
+                exec_make(inst, "pc-rescue-iso", list(make_args), dry_run)
+            else:
+                exec_make(inst, "_vbox_iso_x86_64_impl", list(make_args), dry_run)
+        case "grub-disk":
+            # A directly bootable raw disk rather than an ISO: the same shape the
+            # aarch64 VirtualBox already produces, so both architectures hand an
+            # operator one disk to attach instead of optical media.  It boots via
+            # GRUB, which starts from BIOS or UEFI alike.
+            exec_make(inst, "pc-rescue-disk", list(make_args), dry_run)
+        case "uefi-disk":
+            # ESP holds BOOTX64.EFI instead of GRUB.  GRUB 2.12 does not fill
+            # the multiboot ACPI tags, so a multiboot kernel booted by GRUB under
+            # UEFI never gets the RSDP and cannot find MCFG; our loader reads it
+            # from the firmware configuration table instead.
+            #
+            # The make target stages the image under build/x86_64-pc/ rather than
+            # leaving it in the per-build directory, because an instance that
+            # deploys this disk has to name one stable path in boot_media.
+            exec_make(inst, "x86_64-uefi-disk", list(make_args), dry_run)
         case "uefi-image":
             variant = inst.package.variant or "default"
             target = {"default": "_vbox_image_aarch64_impl",
                       "text": "_vbox_text_image_aarch64_impl"}[variant]
             exec_make(inst, target, list(make_args), dry_run)
+        case "kernel-bundle":
+            # A board with no block driver: the artifact is the kernel plus the
+            # boot-chain commands to load it.  mk_kernel_bundle.sh takes the
+            # load address from the ELF, so nothing about the board is restated
+            # here or in the manifest.
+            exec_make(inst, "kernel-bundle", list(make_args), dry_run)
         case "fit-sdcard":
             # VF2 image assembly (firmware check, extra partition variants)
             # is orchestrated by the vf2-* make targets; the instance carries
