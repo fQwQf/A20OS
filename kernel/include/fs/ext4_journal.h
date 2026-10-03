@@ -41,6 +41,9 @@ int  ext4_journal_meta_write(ext4_sb_info_t *fs, uint64_t byte_off,
  * with nothing pending succeeds without touching the disk. */
 int  ext4_journal_commit(ext4_sb_info_t *fs);
 
+/* Non-zero when the on-disk journal still holds a transaction to replay.
+ * Independent of the needs_recovery feature, which a crash can lose. */
+int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb);
 /* bcache pre-sync hook; install with bcache_set_sync_hook() at mount. */
 int  ext4_journal_sync_hook(struct bcache *bc);
 

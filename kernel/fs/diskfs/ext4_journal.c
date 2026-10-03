@@ -187,6 +187,13 @@ static uint32_t jbd2_advance(const jbd2_t *j, uint32_t block)
     return block == j->maxlen ? j->first : block;
 }
 
+static uint32_t jbd2_advance_n(const jbd2_t *j, uint32_t block, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        block = jbd2_advance(j, block);
+    return block;
+}
+
 static int jbd2_read_block(jbd2_t *j, uint32_t logical, void *buffer)
 {
     if (logical >= j->maxlen)
@@ -233,15 +240,26 @@ static int jbd2_commit_checksum_ok(jbd2_t *j, uint8_t *block)
     return calculated == stored;
 }
 
-static int jbd2_data_checksum_ok(jbd2_t *j, const uint8_t *block,
-                                 uint32_t sequence, uint32_t stored)
+/* A data block's checksum is carried by its descriptor tag and covers the
+ * block image exactly as it is logged.  Nothing is written into the block
+ * itself: its last four bytes belong to the filesystem -- they are inside a
+ * block bitmap's hashed area, for one -- so a checksum parked there would be
+ * replayed straight back into the filesystem block and desynchronise it from
+ * the group descriptor that carries the matching value. */
+static uint32_t jbd2_data_checksum(jbd2_t *j, const uint8_t *block,
+                                   uint32_t sequence)
 {
     uint8_t encoded_sequence[4];
     put_be32(encoded_sequence, sequence);
     uint32_t crc = ext4_crc32c(j->checksum_seed, encoded_sequence,
-                          sizeof(encoded_sequence));
-    crc = ext4_crc32c(crc, block, j->block_size);
-    return crc == stored;
+                               sizeof(encoded_sequence));
+    return ext4_crc32c(crc, block, j->block_size);
+}
+
+static int jbd2_data_checksum_ok(jbd2_t *j, const uint8_t *block,
+                                 uint32_t sequence, uint32_t stored)
+{
+    return jbd2_data_checksum(j, block, sequence) == stored;
 }
 
 static int jbd2_tid_geq(uint32_t left, uint32_t right)
@@ -349,10 +367,12 @@ static int jbd2_process_descriptor(jbd2_t *j, uint8_t *descriptor,
 
         if (pass == JBD2_PASS_SCAN || pass == JBD2_PASS_REPLAY) {
             int ret = jbd2_read_block(j, data_log_block, j->data);
-            if (ret < 0)
-                return ret;
-            if (!jbd2_data_checksum_ok(j, j->data, sequence, checksum))
+            if (ret < 0) {
+                    return ret;
+            }
+            if (!jbd2_data_checksum_ok(j, j->data, sequence, checksum)) {
                 return -EIO;
+            }
         }
 
         if (pass == JBD2_PASS_REPLAY) {
@@ -524,11 +544,24 @@ static int jbd2_mark_empty(jbd2_t *j)
 
 /*
  * Set or clear EXT4_FEATURE_INCOMPAT_RECOVER on the ext4 superblock.  Both
- * directions matter: the flag is what forces the next mount to replay, so the
- * writer raises it before it touches the log and lowers it only once the
- * checkpoint is on disk.  The metadata_csum checksum covering the first 1020
- * bytes is verified on the way in and recomputed on the way out, so a
- * superblock we did not understand is never silently rewritten.
+ * directions matter: the writer raises the flag before it touches the log and
+ * lowers it only once the checkpoint is on disk, and e2fsprogs reads it to
+ * decide whether to replay.
+ *
+ * The flag is deliberately not forced out ahead of the log copy.  It shares
+ * its cache page with the superblock's free counters, which the open
+ * transaction holds precisely so they cannot reach the disk before the log
+ * does -- writing the page for the flag's sake would put the counters out
+ * early and leave a pre-commit crash with counters that disagree with the
+ * bitmaps.  Nothing is lost by waiting: the journal superblock's s_start is
+ * written and flushed before the commit block, so any mount that finds a
+ * committed transaction also finds a non-empty log, and ext4_journal_log_pending()
+ * is what makes the mount act on it.  The flag itself lands with the
+ * checkpoint, and is cleared again once the log is empty.
+ *
+ * The metadata_csum checksum covering the first 1020 bytes is verified on the
+ * way in and recomputed on the way out, so a superblock we did not understand
+ * is never silently rewritten.
  */
 static int ext4_set_recover_feature(jbd2_t *j, ext4_superblock_t *disk_sb,
                                     int set)
@@ -785,16 +818,6 @@ static void jbd2_metadata_checksum_put(jbd2_t *j, uint8_t *block)
              ext4_crc32c(j->checksum_seed, block, j->block_size));
 }
 
-static void jbd2_data_checksum_put(jbd2_t *j, uint8_t *block, uint32_t sequence)
-{
-    uint8_t encoded_sequence[4];
-    put_be32(encoded_sequence, sequence);
-    uint32_t crc = ext4_crc32c(j->checksum_seed, encoded_sequence,
-                          sizeof(encoded_sequence));
-    put_be32(block + j->block_size - JBD2_CHECKSUM_TAIL_BYTES,
-             ext4_crc32c(crc, block, j->block_size));
-}
-
 /* Pull one metadata block's current image out of the block cache.  It is
  * resident and dirty -- ext4_meta_write() put it there and the hold keeps it
  * from being evicted -- so this is the post-transaction content, which is
@@ -883,20 +906,20 @@ static int jbd2_write_descriptor(ext4_journal_t *ej, uint32_t logical)
         memcpy(block + offset, j->uuid, 16);
         offset += 16;
     }
-    jbd2_metadata_checksum_put(j, block);
     /* The data checksums depend on the sequence and on the block contents, so
      * they can only be computed once the descriptor is laid out -- do it here
-     * and rewrite the tags' checksum field in place. */
+     * and rewrite the tags' checksum field in place.  The descriptor's own
+     * checksum comes last, because those rewrites change bytes it covers. */
     uint32_t tag_offset = JBD2_HEADER_BYTES;
     for (uint32_t i = 0; i < ej->tx_count; i++) {
         int ret = jbd2_metadata_image(ej, ej->tx[i], j->data);
         if (ret < 0)
             return ret;
-        jbd2_data_checksum_put(j, j->data, j->sequence);
-        put_be32(block + tag_offset + 12, get_be32(j->data + j->block_size -
-                                                   JBD2_CHECKSUM_TAIL_BYTES));
+        put_be32(block + tag_offset + 12,
+                 jbd2_data_checksum(j, j->data, j->sequence));
         tag_offset += JBD2_TAG3_BYTES + 16;
     }
+    jbd2_metadata_checksum_put(j, block);
     return jbd2_direct_write(j, logical, block);
 }
 
@@ -908,7 +931,6 @@ static int jbd2_write_transaction_data(ext4_journal_t *ej, uint32_t first_log)
         int ret = jbd2_metadata_image(ej, ej->tx[i], j->data);
         if (ret < 0)
             return ret;
-        jbd2_data_checksum_put(j, j->data, j->sequence);
         ret = jbd2_direct_write(j, logical, j->data);
         if (ret < 0)
             return ret;
@@ -1101,6 +1123,43 @@ void ext4_journal_report(ext4_sb_info_t *fs)
            ej->head, ej->j.sequence, ej->recover_flag);
 }
 
+/* Does the on-disk journal still hold a transaction?
+ *
+ * The needs_recovery feature is the cheap signal, but it is written by a
+ * filesystem whose cache page the open transaction holds, so a crash can
+ * leave a non-empty log without it.  Reading the journal superblock is the
+ * authoritative answer, and the cost is one block read on a path that already
+ * reads it during recovery. */
+int ext4_journal_log_pending(ext4_sb_info_t *fs, ext4_superblock_t *disk_sb)
+{
+    if (!fs || !disk_sb ||
+        !(disk_sb->s_feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) ||
+        !disk_sb->s_journal_inum)
+        return 0;
+
+    jbd2_t j;
+    memset(&j, 0, sizeof(j));
+    j.fs = fs;
+    if (ext4_read_inode(fs, disk_sb->s_journal_inum, &j.journal_inode) < 0)
+        return 0;
+    j.block_size = fs->block_size;
+    uint64_t journal_blocks = ext4_inode_size(&j.journal_inode) /
+                              j.block_size;
+    if (journal_blocks < 2 || journal_blocks > JBD2_MAX_JOURNAL_BLOCKS)
+        return 0;
+    j.maxlen = (uint32_t)journal_blocks;
+    j.meta = (uint8_t *)kmalloc(j.block_size);
+    if (!j.meta)
+        return 0;
+    int pending = 0;
+    /* A journal we cannot read is not a journal we can replay, but it is
+     * also not proof of an empty log: report it as pending and let the
+     * recovery attempt produce the diagnostic. */
+    pending = jbd2_load_superblock(&j) < 0 ? 1 : (j.start != 0);
+    kfree(j.meta);
+    return pending;
+}
+
 int ext4_journal_commit(ext4_sb_info_t *fs)
 {
     ext4_journal_t *ej = fs ? fs->journal : NULL;
@@ -1168,7 +1227,11 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
     ret = jbd2_direct_flush(j);
     if (ret < 0)
         goto out;
-    log = jbd2_advance(j, log);
+    /* The commit block follows every data block this transaction wrote, so
+     * the pointer moves by the transaction's size -- advancing by one would
+     * land the commit on top of a data block and the next mount would read
+     * its own commit block back as log data and discard the transaction. */
+    log = jbd2_advance_n(j, log, ej->tx_count);
     jbd2_crash_point(ej, "post-journal");
 
     /* 4. Point the superblock at the transaction, then make it committed.
@@ -1188,7 +1251,7 @@ int ext4_journal_commit(ext4_sb_info_t *fs)
     if (ret < 0)
         goto out;
     uint32_t committed_sequence = j->sequence;
-    uint32_t new_head = jbd2_advance(j, log);
+    uint32_t new_head = jbd2_advance(j, log);  /* commit block consumed */
     uint32_t blocks = ej->tx_count;
     ej->j.sequence++;
     ej->head = new_head;

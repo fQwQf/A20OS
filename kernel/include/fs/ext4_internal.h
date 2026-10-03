@@ -43,6 +43,12 @@ uint32_t ext4_checksum_seed(const ext4_sb_info_t *sb);
  * "could be narrower", so every root header has to use exactly this. */
 #define EXT4_EXT_ROOT_MAX 4
 
+/* The primary superblock always occupies the second 1 KiB of the device, no
+ * matter how large the filesystem's blocks are.  Both the driver and the
+ * journal writer reach it, so the offset lives here rather than in ext4.c. */
+#define EXT4_SB_OFFSET            1024
+#define EXT4_SB_SIZE              1024
+
 /* Where bg_checksum sits in the on-disk descriptor for this desc_size. */
 size_t ext4_group_desc_checksum_offset(size_t desc_size);
 

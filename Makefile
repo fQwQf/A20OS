@@ -360,6 +360,11 @@ SMOKE_INPUT_DELAY ?= 8
 # A 4-core TCG run plus net_stress_test's 4 concurrent x 4 MiB transfers is
 # much slower than the single-core defaults, so it needs its own budget.
 SMOKE_TIMEOUT_SMP ?= 180s
+# The ext4 journal gate runs eight TCG boots and four host fsck passes, so it
+# needs far longer than a single smoke boot and a longer settle time than the
+# interactive-shell default.
+SMOKE_TIMEOUT_EXT4 ?= 180
+SMOKE_INPUT_DELAY_EXT4 ?= 22
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_LOG_DIR ?= .kernel-build/smoke/step35

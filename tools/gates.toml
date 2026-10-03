@@ -1440,3 +1440,61 @@ files = ["docs/drivers/guide/lock-order.md"]
 [[gate.assertion]]
 pattern = "inst->command_lock"
 files = ["docs/drivers/guide/lock-order.md"]
+
+[[gate]]
+name = "ext4-journal-crash-consistency"
+make_target = "smoke-ext4-journal"
+
+# The commit pointer has to move past every data block the transaction logged,
+# not past one of them: a commit block written on top of a data block is read
+# back as log data, so the next mount silently discards a committed
+# transaction.
+[[gate.assertion]]
+pattern = "jbd2_advance_n\\(j, log, ej->tx_count\\)"
+files = ["kernel/fs/diskfs/ext4_journal.c"]
+
+# A descriptor's own checksum covers the tag checksums written after it, so it
+# has to be computed last or every committed transaction fails its checksum on
+# replay.
+[[gate.assertion]]
+pattern = "jbd2_metadata_checksum_put\\(j, block\\);"
+files = ["kernel/fs/diskfs/ext4_journal.c"]
+
+# The data checksum lives in the descriptor tag.  Writing it into the block's
+# last four bytes would replay a journal checksum into a block bitmap's hashed
+# tail and desynchronise it from its group descriptor.
+[[gate.assertion]]
+negate = true
+pattern = "jbd2_data_checksum_put"
+files = ["kernel/fs/diskfs/ext4_journal.c"]
+
+# Mount-time recovery must not depend on the needs_recovery bit alone: that bit
+# shares a cache page with the superblock's free counters, which the open
+# transaction holds, so a crash can lose the bit while keeping the log.
+[[gate.assertion]]
+pattern = "ext4_journal_log_pending\\(esi, &sb\\)"
+files = ["kernel/fs/diskfs/ext4.c"]
+
+# The sync hook needs a way back to the filesystem it belongs to; installing one
+# without its owner is how ext4's journal commit and FAT32's FSInfo writeback
+# both became dead code.
+[[gate.assertion]]
+pattern = "bcache_set_sync_hook\\(bcache_t \\*bc, int \\(\\*hook\\)\\(bcache_t \\*\\)"
+files = ["kernel/include/fs/block_cache.h"]
+
+[[gate.assertion]]
+pattern = "bcache_set_sync_hook\\(esi->bc, ext4_journal_sync_hook, esi\\)"
+files = ["kernel/fs/diskfs/ext4.c"]
+
+[[gate.assertion]]
+pattern = "bcache_set_sync_hook\\(sb->bc, fat32_sync_hook, sb\\)"
+files = ["kernel/fs/diskfs/fat32.c"]
+
+# The gate itself, so the contract has a runner that cannot quietly go missing.
+[[gate.assertion]]
+pattern = "a20\\.journal_crash"
+files = ["tools/ext4_journal_gate.py", "kernel/fs/diskfs/ext4_journal.c"]
+
+[[gate.assertion]]
+pattern = "smoke-ext4-journal"
+files = ["tools/targets-smoke.mk"]

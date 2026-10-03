@@ -28,8 +28,6 @@ int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
 
 /* The primary superblock always occupies the second 1 KiB of the device, no
  * matter how large the filesystem's blocks are. */
-#define EXT4_SB_OFFSET            1024
-#define EXT4_SB_SIZE              1024
 #define EXT4_SB_FREE_BLOCKS_OFF   0x0c
 #define EXT4_SB_FREE_INODES_OFF   0x10
 #define EXT4_SB_FREE_BLOCKS_HI_OFF 0x150
@@ -2139,7 +2137,11 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         return NULL;
     }
 
-    if (sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) {
+    /* Replay when either signal says so.  The feature bit is the fast path;
+     * the journal superblock is authoritative and covers the crash window in
+     * which the bit did not reach the device. */
+    if ((sb.s_feature_incompat & EXT4_FEATURE_INCOMPAT_RECOVER) ||
+        ext4_journal_log_pending(esi, &sb)) {
         int jret = ext4_journal_recover(esi, &sb);
         if (jret < 0) {
             printf("[EXT4] Refusing mount after journal recovery failure\n");
@@ -2171,7 +2173,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
         return NULL;
     }
     if (esi->journal)
-        bcache_set_sync_hook(esi->bc, ext4_journal_sync_hook);
+        bcache_set_sync_hook(esi->bc, ext4_journal_sync_hook, esi);
 
     if (ext4_validate_group_counts(esi) < 0) {
         printf("[EXT4] Invalid per-group free counts or bitmap bounds\n");
@@ -2229,7 +2231,7 @@ void ext4_unmount(vnode_t *root) {
      * chance to get the metadata into a log. */
     ext4_journal_report(esi);
     ext4_journal_close(esi);
-    bcache_set_sync_hook(esi->bc, NULL);
+    bcache_set_sync_hook(esi->bc, NULL, NULL);
     bcache_sync(esi->bc);
 
     /* Drop all cache-owned vnode references for this filesystem; survivors
