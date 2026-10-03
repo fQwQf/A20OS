@@ -5,10 +5,15 @@
 # tools/mk_grub_iso.sh builds a rescue ISO whose grub.cfg uses `multiboot
 # /boot/kernel.elf`, and GRUB2's multiboot v1 module works whether it was
 # started by BIOS or by UEFI boot services.  That matters because most 2025
-# thin clients are UEFI-only with no CSM option, and A20OS has no x86_64 UEFI
-# stub -- kernel/boot/uefi/ holds an aarch64 loader only.  Writing that ISO to
-# a USB stick and booting it is the whole deployment path; see
+# thin clients are UEFI-only with no CSM option.  Writing that ISO to a USB
+# stick and booting it is the whole deployment path; see
 # docs/platforms/x86_64-pc.md.
+#
+# The tree does now carry an x86_64 UEFI loader (kernel/boot/uefi/x86_64_loader.c),
+# which is the better artifact because its ESP hands the kernel the ACPI RSDP that
+# GRUB 2.12 drops.  It is used by instances/vbox-x86_64.toml.  GRUB stays the
+# choice here because that loader is built against the qemu-virt board's memory
+# map, and this instance is explicitly the board-agnostic one.
 #
 # Like the other physical instances, [target] describes how to talk to the
 # machine, not that anyone has.  Most thin clients have no RS-232 connector --

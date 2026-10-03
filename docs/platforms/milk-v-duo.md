@@ -7,7 +7,9 @@ Roughly USD 10–13. Same SophGo IP family and the same boot chain as the
 has 64 MiB of RAM**, not 256 MiB. That makes it the second target, not the
 first.
 
-**Build-verified only. Not run on hardware.**
+**Build-verified only. Not run on hardware.** That build claim is now
+reproduced on every commit by `make check-lao64-board-builds`, so the board cannot
+silently stop compiling.
 
 ## Hardware facts
 
@@ -41,12 +43,12 @@ On 64 MiB:
 - `BRINGUP=1` and `RAMFS_USER=1` are required.
 - Swap must be off. `Makefile:187` already refuses `CONFIG_SWAP` for the
   architectures without a swap PTE encoding, and riscv64 does have one, so
-  pass `SWAP=0` explicitly.
+  pass `CONFIG_SWAP=0` explicitly.
 - A full `image-world` rootfs will not build or will not mount. Do not try
   `tools/a20 package milk-v-duo -- PKG_WORLD=base` on this board.
 
 ```sh
-tools/a20 package milk-v-duo -- RAMFS_USER=1 SWAP=0
+tools/a20 package milk-v-duo -- RAMFS_USER=1 CONFIG_SWAP=0
 ```
 
 If the goal is "cheapest board that boots A20OS", buy the LicheeRV Nano: same
@@ -104,6 +106,7 @@ attaches the console to check the result. To watch an already-running board:
 
 ```sh
 tools/a20 console milk-v-duo
+```
 
 ### Getting it onto the board
 
@@ -137,125 +140,8 @@ A boot counts only if these lines appear:
 
 | Line | What it proves |
 |---|---|
-|
- 
-`
-[
-F
-D
-T
-]
- 
-R
-A
-M
- 
-r
-a
-n
-g
-e
- 
-.
-.
-.
-`
- 
-|
- 
-t
-h
-e
- 
-f
-i
-r
-m
-w
-a
-r
-e
- 
-h
-a
-n
-d
-e
-d
- 
-o
-v
-e
-r
- 
-t
-h
-e
- 
-d
-e
-v
-i
-c
-e
- 
-t
-r
-e
-e
- 
-|
-
-
-|
- 
-`
-S
-y
-s
-t
-e
-m
- 
-r
-e
-a
-d
-y
-`
- 
-|
- 
-t
-h
-e
- 
-k
-e
-r
-n
-e
-l
- 
-r
-e
-a
-c
-h
-e
-d
- 
-u
-s
-e
-r
-s
-p
-a
-c
-e
- 
-|
+| `[FDT] RAM range ...` | the firmware handed over the device tree |
+| `System ready` | the kernel reached userspace |
 
 `console_check` in the instance waits for exactly these, so `a20 console`
 distinguishes a boot from a hang. It then runs `cat /etc/os-release` and
@@ -268,7 +154,7 @@ is. Read [The RAM budget is the whole story](#the-ram-budget-is-the-whole-story)
 before choosing between the MMU and NOMMU builds, and prefer:
 
 ```sh
-tools/a20 package milk-v-duo -- NOMMU=1 RAMFS_USER=1 SWAP=0
+tools/a20 package milk-v-duo -- NOMMU=1 RAMFS_USER=1
 ```
 
 A NOMMU build cannot run `mksh` or anything else needing `fork`/`mmap`, so on this

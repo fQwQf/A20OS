@@ -53,5 +53,10 @@ expect = ["A20OS", "poweroff"]
 # Replace /dev/sdX with the target file.  media.py refuses to write a mounted
 # device and refuses one whose name does not match the image, which is what keeps
 # a mistyped /dev/sda from being overwritten.
-boot_media = ["build/x86_64-pc/a20os-rescue-disk.img"]
+#
+# This is the BOOTX64.EFI disk built by [package].kind above, staged there by
+# `make x86_64-uefi-disk`.  It is deliberately not the GRUB rescue disk: that one
+# boots, but it drops the RSDP, so the ACPI path this instance exists to exercise
+# is exactly what it cannot reach.
+boot_media = ["build/x86_64-pc/a20os-uefi-disk.img"]
 media_device = "/dev/sdX"

@@ -71,14 +71,26 @@ pc-rescue-iso: dev-build
 # VirtualBox image already has, so both architectures hand an operator one disk
 # to attach rather than one thing that has to be mounted first.
 #
-# UEFI rather than BIOS, for the reason docs/platforms/x86_64-pc.md gives: most
-# current machines are UEFI-only with no CSM, and kernel/boot/uefi/ has an
-# aarch64 loader with no x86_64 one, so GRUB is the only path covering them.
+# GRUB rather than BOOTX64.EFI, because GRUB's multiboot v1 module starts from
+# BIOS or UEFI alike.  The UEFI disk below is the better artifact where it can
+# be used -- its ESP hands the kernel the ACPI RSDP that GRUB 2.12 drops -- but
+# it is built for the qemu-virt board, so pc-rescue-disk stays the generic
+# thin-client route described in docs/platforms/x86_64-pc.md.
 pc-rescue-disk: dev-build
 	@mkdir -p build/x86_64-pc
 	tools/mk_grub_disk_image.sh \
 		$(KERNEL_ELF) build/x86_64-pc/a20os-rescue-disk.img $(FAT32_IMG)
 	@echo "rescue disk ready: build/x86_64-pc/a20os-rescue-disk.img"
+
+# The BOOTX64.EFI disk at a path an instance can name in [target].boot_media.
+# $(VBOX_X86_64_IMG) alone cannot be written from a manifest, because it lands
+# under .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT) and that name varies
+# with the build.  Staging it here is what lets instances/vbox-x86_64.toml
+# deploy the disk its own comment describes, rather than a GRUB one.
+x86_64-uefi-disk: $(VBOX_X86_64_IMG)
+	@mkdir -p build/x86_64-pc
+	cp -f $(VBOX_X86_64_IMG) build/x86_64-pc/a20os-uefi-disk.img
+	@echo "UEFI disk ready: build/x86_64-pc/a20os-uefi-disk.img"
 
 # A board with no block driver has no medium to write, so its artifact is the
 # kernel plus the commands that hand it to the boot chain already on the board.
