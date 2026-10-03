@@ -5,19 +5,23 @@
 # docs/platforms/milk-v-duo.md.
 #
 # This board has 64 MiB of RAM -- U-Boot reports "DRAM: 63.3 MiB" -- which is
-# the whole reason it is the second target rather than the first.  ramfs_user
-# puts the userland in RAM instead of on a filesystem, and swap is off because
-# there is nowhere to put a page.  Do not try image-world on this board: a full
-# apk world does not fit in 64 MiB.  If you want the same SoC with room to
-# breathe, the LicheeRV Nano is 256 MiB for the same money.
+# the whole reason it is the second target rather than the first.  nommu is the
+# default here because 64 MiB is the whole budget: the page table structures an
+# MMU build spends on a 256 MiB-scale address space come out of the same pool the
+# userland lives in.  ramfs_user puts the userland in RAM instead of on a
+# filesystem, and swap is off because there is nowhere to put a page.  Do not try
+# image-world on this board: a full apk world does not fit in 64 MiB.  If you want
+# the same SoC with room to breathe, the LicheeRV Nano is 256 MiB for the same
+# money.  See docs/platforms/milk-v-duo.md for why NOMMU is the ceiling here.
 name = "milk-v-duo"
-description = "Milk-V Duo (CV1800B, 64 MiB) riscv64 bring-up, RAMFS userland, no swap"
+description = "Milk-V Duo (CV1800B, 64 MiB) riscv64 NOMMU bring-up, RAMFS userland, no swap"
 arch = "riscv64"
 board = "milk-v-duo"
 abi = "linux"
 
 [kernel]
 bringup = true
+nommu = true
 driver_deployment = "embedded"
 ramfs_user = true
 swap = false
