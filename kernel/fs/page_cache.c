@@ -344,12 +344,25 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
  * refcount/detach decision atomic against a concurrent warm hit, and the
  * accessed bit lets recently-used pages survive one eviction sweep without
  * any per-hit global LRU mutation.
+ *
+ * The sweep is bounded.  A run of recently-used candidates costs one bucket
+ * lock acquisition each, and an unbounded scan turned one allocation miss into
+ * an O(cache size) critical section that stalled every other miss, evict and
+ * statistics caller.  Giving up early is not a lost opportunity: the accessed
+ * bits of the candidates already visited are cleared, so the caller's next
+ * sweep reaches pages this one had to skip.
  */
+#define PAGE_CACHE_EVICT_SCAN_BUDGET 128U
+/* Extra sweeps one allocation may spend before escalating.  Each is a separate
+ * bounded critical section, so the worst case is a fixed number of short
+ * sections rather than one long one. */
+#define PAGE_CACHE_EVICT_SWEEPS 3U
+
 static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
     page_cache_page_t *page = g_lru_tail.prev;
     size_t visited = 0;
-    while (page != &g_lru_head) {
+    while (page != &g_lru_head && visited < PAGE_CACHE_EVICT_SCAN_BUDGET) {
         visited++;
         if (refcount_read(&page->ref_count) == 0 && !page->dirty &&
             pfn_valid(page->pfn) && pfa.meta[page->pfn].refcount <= 1) {
@@ -519,6 +532,8 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     if (!create)
         return NULL;
 
+    unsigned sweeps = 0;
+
 retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     page = find_locked(vn, index);
@@ -547,6 +562,9 @@ retry:
     }
     page_cache_bucket_unlock_irqrestore(idx, bflags);
 
+    /* Retry the whole allocation attempt: the free stack may have been
+     * refilled, and evict_locked() gets another bounded sweep. */
+evict:
     page = free_take_locked();
     if (!page && g_allocated_pages < g_page_limit) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -568,6 +586,16 @@ retry:
         page = evict_locked(&deferred_put);
     if (!page) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        /* The budgeted sweep gives up on a run of recently-used candidates
+         * whose second chance it has just spent.  Another bounded sweep finds
+         * them, so escalate through a few before touching anything else: the
+         * whole-cache reclaim that used to sit here discards every clean page
+         * including the ones the second chance exists to keep, which turns
+         * cache pressure into an eviction storm. */
+        if (sweeps++ < PAGE_CACHE_EVICT_SWEEPS) {
+            flags = spin_lock_irqsave(&g_page_cache_lock);
+            goto evict;
+        }
         /* Buffered writers are allowed to retain dirty data across close(),
          * so a large build can eventually consume every cache descriptor.
          * Make bounded forward progress under pressure: write a small batch,
@@ -587,6 +615,31 @@ retry:
             goto retry;
         return NULL;
     }
+
+    /* The descriptor is off the free stack and held by its own reference, so
+     * no other thread can reach the frame or fill it before publication.
+     * Clearing the previous tenant's bytes therefore belongs outside the
+     * allocation critical section rather than in it. */
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    memset(page->data, 0, PAGE_SIZE);
+    flags = spin_lock_irqsave(&g_page_cache_lock);
+
+    /* Publication is a separate critical section, so the index may have been
+     * created while the frame was being cleared. */
+    bflags = page_cache_bucket_lock_irqsave(idx);
+    page_cache_page_t *racer = find_locked(vn, index);
+    if (racer) {
+        page_cache_pin(racer);
+        racer->accessed = 1;
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
+        free_insert_locked(page);
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        if (deferred_put)
+            vnode_put(deferred_put);
+        return racer;
+    }
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
+
     page->vnode = vn;
     page->index = index;
     page->valid = 1;
@@ -595,7 +648,6 @@ retry:
     page->invalidate_gen++;
     page->uptodate = 0;
     page->accessed = 0;
-    memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
     /* Global lock held: publish the mapping and the hash entry under the
      * bucket lock so warm hits observe fully-initialised fields. */
