@@ -72,46 +72,54 @@ static wait_queue_t g_futex_buckets[FUTEX_BUCKETS] = {
 };
 
 /*
- * Hash on the virtual address only, not the mm pointer: fork-inherited
- * MAP_SHARED mappings keep the same virtual address in parent and child, so
- * cross-process shared futexes land in the same bucket (the pkey match in
- * futex_wake_match then disambiguates within the bucket).
+ * Bucket on the PHYSICAL page holding the futex word, not on its virtual
+ * address.  The virtual address is not a usable bucket key: task_spawn() gives
+ * the child a fresh, independently ASLR-randomised mm, so a MAP_SHARED futex
+ * word is one physical page under two different virtual addresses and the two
+ * peers hash apart.  Keying on the physical page puts every process sharing
+ * the word in one bucket, so a wake is a single locked pass instead of a
+ * sweep over the rest of the table.
  *
- * The virtual address alone is NOT a sufficient bucket key, though, because
- * task_spawn() gives the child a fresh, independently ASLR-randomised mm
- * rather than an inherited address layout.  A MAP_SHARED futex word is then
- * the same physical page under two different virtual addresses, so parent
- * and child hash to two different buckets and a home-bucket-only search
- * can never observe the peer.  futex_collect_below() closes that hole by
- * sweeping the remaining buckets on a miss whenever the caller supplied a
- * physical key; the match predicate is unchanged, so a hit through the
- * sweep is exactly the match the same predicate would have produced had the
- * waiter landed in the home bucket.
+ * The wait side cannot consult the caller: FUTEX_PRIVATE_FLAG is chosen by the
+ * waker, and a PRIVATE futex is matched on (mm, vaddr) alone.  So the wait
+ * side always derives the bucket from the physical key, and so must every
+ * other side -- including the PRIVATE waker, which pays the page-table walk
+ * that passing pkey = 0 to the match predicate was avoiding.  Skipping it
+ * would put a private waker in a different bucket from the waiters it must
+ * find, which is a missed wake rather than a slowdown.
+ *
+ * NOMMU has no physical addresses, so futex_user_word_map() and
+ * futex_phys_key() both fall back to the virtual address and the two agree by
+ * construction.
  */
-static unsigned futex_bucket_index(uintptr_t vkey)
+static uintptr_t futex_bucket_key(uintptr_t vkey, uintptr_t pkey)
 {
-    uint64_t h = (uint64_t)vkey * 0xC2B2AE3D27D4EB4FULL;
+    return pkey ? pkey : vkey;
+}
+
+static unsigned futex_bucket_index(uintptr_t key)
+{
+    uint64_t h = (uint64_t)key * 0xC2B2AE3D27D4EB4FULL;
     h ^= h >> 33;
     return (unsigned)(h & (FUTEX_BUCKETS - 1));
 }
 
 /*
- * Collect up to @limit matching waiters for a futex keyed at @vkey, sweeping
- * every bucket rather than only the one @vkey hashes to.
+ * Collect up to @limit matching waiters for a futex keyed in @home, sweeping
+ * every other bucket when @may_be_elsewhere.
  *
- * @pkey is the physical key the caller derived, or 0 for a PRIVATE futex.
- * A PRIVATE futex is keyed on (mm, vaddr) alone and both peers necessarily
- * agree on the virtual address, so pkey == 0 correctly short-circuits to the
- * home bucket and costs PRIVATE futexes (cargo's jobserver, libc locks)
- * nothing.  A SHARED futex pays one extra pass over the other buckets, and
- * only on the path that would otherwise have reported "nobody is waiting"
- * and silently dropped the wake.
+ * @may_be_elsewhere is set only for a SHARED wake whose own translation of the
+ * futex word failed: without a physical key there is no way to know which
+ * bucket a peer chose, so the other buckets are the only place it can be.  A
+ * wake that did derive the physical key looks in one bucket and stops, and a
+ * PRIVATE wake looks in one bucket because both peers share an mm and an
+ * address by definition.
  *
  * Each bucket is locked and released one at a time, so this cannot deadlock
  * against wait_queue_requeue_matching(), which takes two bucket locks in
  * address order.
  */
-static unsigned futex_collect_below(unsigned home, uintptr_t pkey,
+static unsigned futex_collect_below(unsigned home, bool may_be_elsewhere,
                                      wait_queue_match_fn match, void *arg,
                                      unsigned limit, proc_wake_reason_t reason,
                                      proc_wake_q_t *wake_q, bool *complete)
@@ -120,7 +128,7 @@ static unsigned futex_collect_below(unsigned home, uintptr_t pkey,
     unsigned got = wait_queue_collect_matching(&g_futex_buckets[home], match,
                                                arg, limit, reason, wake_q,
                                                &drained);
-    if (got != 0 || pkey == 0) {
+    if (got != 0 || !may_be_elsewhere) {
         if (complete)
             *complete = drained;
         return got;
@@ -187,39 +195,31 @@ static uintptr_t futex_phys_key(int *uaddr)
 }
 
 /*
- * FUTEX_WAIT_RECHECK_PROTOCOL
+ * Map the user futex word to a kernel virtual address and report the physical
+ * key the bucket is derived from.  Returns NULL if the word is not mapped.
  *
- * The first copy_from_user() below may fault the page in.  The actual
- * wait-side linearization point is this non-faulting load while mm->lock and
- * the bucket lock are both held: munmap cannot invalidate the translation,
- * and a matching FUTEX_WAKE cannot inspect the bucket until the waiter is
- * linked.
+ * The caller must hold mm->lock, which pins the translation for as long as the
+ * mapped pointer is used.
  */
-static int futex_user_load_locked(task_t *task, int *uaddr, int *value,
-                                  uintptr_t *pkey)
+static volatile int *futex_user_word_locked(task_t *task, int *uaddr,
+                                            uintptr_t *pkey)
 {
-    if (!task || !task->mm || !uaddr || !value || !pkey)
-        return -EFAULT;
-
+    if (!task || !task->mm || !uaddr)
+        return NULL;
 #ifdef CONFIG_NOMMU
-    *value = __atomic_load_n(uaddr, __ATOMIC_ACQUIRE);
     *pkey = (uintptr_t)uaddr;
-    return 0;
+    return uaddr;
 #else
     if (!task->pgdir)
-        return -EFAULT;
+        return NULL;
     paddr_t pa = pt_translate(task->pgdir, (vaddr_t)(uintptr_t)uaddr);
     if (!pa)
-        return -EFAULT;
+        return NULL;
     pfn_t pfn = phys_to_pfn(pa);
     if (!pfn_valid(pfn))
-        return -EFAULT;
-    volatile int *word =
-        (volatile int *)((uintptr_t)pfn_to_virt(pfn) +
-                         (pa & (PAGE_SIZE - 1)));
-    *value = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+        return NULL;
     *pkey = (uintptr_t)pa;
-    return 0;
+    return (volatile int *)((uintptr_t)pfn_to_virt(pfn) + (pa & (PAGE_SIZE - 1)));
 #endif
 }
 
@@ -258,6 +258,14 @@ static void futex_requeue_rekey(wait_queue_entry_t *entry, void *arg)
     w->mm = r->mm;
 }
 
+/*
+ * FUTEX_WAIT_RECHECK_PROTOCOL
+ *
+ * The copy_from_user() below may fault the page in.  The actual wait-side
+ * linearization point is the non-faulting load taken with mm->lock and the
+ * bucket lock both held: munmap cannot invalidate the translation, and a
+ * matching FUTEX_WAKE cannot inspect the bucket until the waiter is linked.
+ */
 /* ticks == 0 waits indefinitely. */
 int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
 {
@@ -281,24 +289,42 @@ int futex_wait_ticks(int *uaddr, int expected, uint64_t ticks, uint32_t bitset)
     if (!token.task)
         return -EAGAIN;
 
-    unsigned bucket = futex_bucket_index(vkey);
-    wait_queue_t *q = &g_futex_buckets[bucket];
+    /* The bucket depends on the physical key, so the word has to be mapped
+     * before the bucket is known; mm->lock pins the translation from here to
+     * the link, so the pointer stays valid across the bucket-lock acquire. */
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
-    uint64_t flags = spin_lock_irqsave(&q->lock);
-    int load_ret = futex_user_load_locked(t, uaddr, &uval, &pkey);
-    if (load_ret < 0 || uval != expected) {
-        spin_unlock_irqrestore(&q->lock, flags);
+    volatile int *word = futex_user_word_locked(t, uaddr, &pkey);
+    if (!word) {
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
-        return load_ret < 0 ? load_ret : -EAGAIN;
+        return -EFAULT;
+    }
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) {
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return -EAGAIN;
     }
     if (signal_task_has_unblocked(t)) {
-        spin_unlock_irqrestore(&q->lock, flags);
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         (void)proc_park_cancel(token);
         proc_park_finish(token);
         return -ERESTARTSYS;
+    }
+
+    unsigned bucket = futex_bucket_index(futex_bucket_key(vkey, pkey));
+    wait_queue_t *q = &g_futex_buckets[bucket];
+    uint64_t flags = spin_lock_irqsave(&q->lock);
+    /* FUTEX_WAIT_RECHECK_PROTOCOL: the waiter is linked before a matching
+     * FUTEX_WAKE can observe the bucket, so this load with both locks held
+     * decides between parking and reporting -EAGAIN. */
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != expected) {
+        spin_unlock_irqrestore(&q->lock, flags);
+        spin_unlock_irqrestore(&t->mm->lock, mm_flags);
+        (void)proc_park_cancel(token);
+        proc_park_finish(token);
+        return -EAGAIN;
     }
 
     futex_node_t *node = kmalloc(sizeof(*node));
@@ -381,16 +407,15 @@ int futex_wake(int *uaddr, int nr, uint32_t bitset, int private)
     if (nr < 0) return -EINVAL;
 
     uintptr_t vkey = (uintptr_t)uaddr;
-    /*
-     * PRIVATE futexes key only on (mm, vaddr); the physical address is used
-     * solely for cross-process SHARED matching, so the page-table walk in
-     * futex_phys_key() is pure overhead for them (cargo's jobserver and most
-     * libc locks are PRIVATE).  Passing pkey=0 also stops a PRIVATE wake from
-     * ever matching a foreign mm by physical page alias.
-     */
-    uintptr_t pkey = private ? 0 : futex_phys_key(uaddr);
+    /* The bucket is derived from the physical key even for a PRIVATE futex,
+     * because the waiter had no way to know the wake would be private.  The
+     * physical address is still withheld from the match predicate so a PRIVATE
+     * wake can never match a foreign mm by physical-page alias. */
+    uintptr_t phys = futex_phys_key(uaddr);
+    uintptr_t pkey = private ? 0 : phys;
     mm_struct_t *mm = cur ? cur->mm : NULL;
-    unsigned home = futex_bucket_index(vkey);
+    unsigned home = futex_bucket_index(futex_bucket_key(vkey, phys));
+    bool may_be_elsewhere = !private && phys == 0;
     futex_wake_arg_t arg = { mm, vkey, pkey, bitset };
 
     int woke = 0;
@@ -400,7 +425,8 @@ int futex_wake(int *uaddr, int nr, uint32_t bitset, int private)
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         bool complete = false;
-        unsigned got = futex_collect_below(home, pkey, futex_wake_match, &arg,
+        unsigned got = futex_collect_below(home, may_be_elsewhere,
+                                           futex_wake_match, &arg,
                                            want, PROC_WAKE_EVENT, &wake_q,
                                            &complete);
         if (got == 0)
@@ -432,11 +458,13 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t pkey1 = private ? 0 : futex_phys_key(uaddr);
+    uintptr_t phys1 = futex_phys_key(uaddr);
+    uintptr_t pkey1 = private ? 0 : phys1;
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t pkey2 = private ? 0 : futex_phys_key(uaddr2);
-    unsigned b1 = futex_bucket_index(vkey1);
-    unsigned b2 = futex_bucket_index(vkey2);
+    uintptr_t phys2 = futex_phys_key(uaddr2);
+    uintptr_t pkey2 = private ? 0 : phys2;
+    unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
+    unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));
     wait_queue_t *q1 = &g_futex_buckets[b1];
     wait_queue_t *q2 = &g_futex_buckets[b2];
 
@@ -449,7 +477,8 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
         if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        unsigned got = futex_collect_below(b1, pkey1, futex_wake_match, &arg1,
+        unsigned got = futex_collect_below(b1, !private && phys1 == 0,
+                                           futex_wake_match, &arg1,
                                            want, PROC_WAKE_EVENT, &wake_q, NULL);
         if (got == 0)
             break;
@@ -458,10 +487,7 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
     }
 
     /*
-     * Requeue phase: remaining bucket1 matches move to bucket2.  The sweep
-     * feeds one source bucket per call because
-     * wait_queue_requeue_matching() locks its two queues in address order;
-     * holding more than two at once would break that discipline.
+     * Requeue phase: remaining bucket1 matches move to bucket2.
      */
     int moved = 0;
     if (requeue_nr > 0) {
@@ -472,8 +498,13 @@ int futex_requeue(int *uaddr, int wake_nr, int requeue_nr, int *uaddr2,
                                                  (unsigned)requeue_nr,
                                                  futex_requeue_rekey,
                                                  &rarg);
+        /* The source sweep runs one bucket at a time because
+         * wait_queue_requeue_matching() locks its two queues in address
+         * order; holding more than two at once would break that discipline.
+         * It is reachable only when the caller's own translation of the
+         * source word failed and its bucket is therefore a guess. */
         for (unsigned i = 0; i < FUTEX_BUCKETS &&
-                            moved < requeue_nr && pkey1 != 0; i++) {
+                            moved < requeue_nr && !private && phys1 == 0; i++) {
             if (i == b1)
                 continue;
             moved += (int)wait_queue_requeue_matching(&g_futex_buckets[i], q2,
@@ -540,11 +571,13 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
     task_t *cur = proc_current();
     mm_struct_t *mm = cur ? cur->mm : NULL;
     uintptr_t vkey1 = (uintptr_t)uaddr;
-    uintptr_t pkey1 = private ? 0 : futex_phys_key(uaddr);
+    uintptr_t phys1 = futex_phys_key(uaddr);
+    uintptr_t pkey1 = private ? 0 : phys1;
     uintptr_t vkey2 = (uintptr_t)uaddr2;
-    uintptr_t pkey2 = private ? 0 : futex_phys_key(uaddr2);
-    unsigned b1 = futex_bucket_index(vkey1);
-    unsigned b2 = futex_bucket_index(vkey2);
+    uintptr_t phys2 = futex_phys_key(uaddr2);
+    uintptr_t pkey2 = private ? 0 : phys2;
+    unsigned b1 = futex_bucket_index(futex_bucket_key(vkey1, phys1));
+    unsigned b2 = futex_bucket_index(futex_bucket_key(vkey2, phys2));
 
     int woke = 0;
     futex_wake_arg_t arg1 = { mm, vkey1, pkey1, FUTEX_BITSET_MATCH_ANY };
@@ -553,7 +586,8 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
         if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        unsigned got = futex_collect_below(b1, pkey1, futex_wake_match, &arg1,
+        unsigned got = futex_collect_below(b1, !private && phys1 == 0,
+                                           futex_wake_match, &arg1,
                                            want, PROC_WAKE_EVENT, &wake_q, NULL);
         if (got == 0)
             break;
@@ -569,8 +603,9 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
             if (want > FUTEX_WAKE_BATCH) want = FUTEX_WAKE_BATCH;
             proc_wake_q_t wake_q;
             proc_wake_q_init(&wake_q);
-            unsigned got = futex_collect_below(b2, pkey2, futex_wake_match,
-                                               &arg2, want, PROC_WAKE_EVENT,
+            unsigned got = futex_collect_below(b2, !private && phys2 == 0,
+                                               futex_wake_match, &arg2,
+                                               want, PROC_WAKE_EVENT,
                                                &wake_q, NULL);
             if (got == 0)
                 break;
@@ -608,26 +643,16 @@ int futex_wake_op(int *uaddr, int wake_nr, int wake2_nr,
 static int futex_user_word_map(task_t *task, int *uaddr, volatile int **word,
                                uintptr_t *pkey_out)
 {
-    if (!task || !task->mm || !task->pgdir || !uaddr || !word)
+    uintptr_t pkey = 0;
+    if (!task || !word)
         return -EFAULT;
-#ifdef CONFIG_NOMMU
-    *word = uaddr;
+    volatile int *w = futex_user_word_locked(task, uaddr, &pkey);
+    if (!w)
+        return -EFAULT;
+    *word = w;
     if (pkey_out)
-        *pkey_out = (uintptr_t)uaddr;
+        *pkey_out = pkey;
     return 0;
-#else
-    paddr_t pa = pt_translate(task->pgdir, (vaddr_t)(uintptr_t)uaddr);
-    if (!pa)
-        return -EFAULT;
-    pfn_t pfn = phys_to_pfn(pa);
-    if (!pfn_valid(pfn))
-        return -EFAULT;
-    *word = (volatile int *)((uintptr_t)pfn_to_virt(pfn) +
-                             (pa & (PAGE_SIZE - 1)));
-    if (pkey_out)
-        *pkey_out = (uintptr_t)pa;
-    return 0;
-#endif
 }
 
 int futex_pi_acquire(int *uaddr, int try_only)
@@ -637,7 +662,10 @@ int futex_pi_acquire(int *uaddr, int try_only)
         return -ESRCH;
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
-    wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+    /* Same bucket the wait side parks in, or the compare-and-swap on the user
+     * word would not serialise against concurrent operations on that word. */
+    wait_queue_t *q = &g_futex_buckets[
+        futex_bucket_index(futex_bucket_key(vkey, futex_phys_key(uaddr)))];
 
     for (;;) {
         int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
@@ -717,7 +745,8 @@ int futex_pi_release(int *uaddr)
         return -ESRCH;
     uint32_t tid = (uint32_t)t->pid;
     uintptr_t vkey = (uintptr_t)uaddr;
-    wait_queue_t *q = &g_futex_buckets[futex_bucket_index(vkey)];
+    wait_queue_t *q = &g_futex_buckets[
+        futex_bucket_index(futex_bucket_key(vkey, futex_phys_key(uaddr)))];
 
     int pr = user_prepare_write(t, (uint64_t)(uintptr_t)uaddr);
     if (pr < 0)
