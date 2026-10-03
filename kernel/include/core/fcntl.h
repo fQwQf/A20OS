@@ -15,11 +15,45 @@
 #define O_TRUNC      0x200
 #define O_APPEND     0x400
 #define O_CLOEXEC    0x80000
-#define O_DIRECTORY  0x10000
-#define O_DIRECT     0x4000
 #define O_NONBLOCK   0x800
 #define O_EXCL       0x80
 #define O_PATH       0x200000
+
+/*
+ * O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE are NOT asm-generic: Linux
+ * defines them per architecture in arch/<arch>/include/uapi/asm/fcntl.h, and
+ * the layouts disagree.  A single hardcoded set silently misreads the wire
+ * format of whichever arch it does not match.
+ *
+ * On PowerPC the generic O_DIRECTORY (00200000 = 0x10000) is in fact
+ * O_LARGEFILE, which musl's open() passes on every call because the kernel
+ * ABI always uses 64-bit off_t.  Reading that bit as O_DIRECTORY made
+ * vfs_open() reject ENOTDIR on every open of a regular file or char device,
+ * so `cat /hello.txt`, `cat /proc/version` and mksh's own /dev/tty all
+ * failed while create-path opens (which take the !vn branch and never test
+ * the bit) appeared to work.
+ *
+ * Keep the per-arch table in step with the kernel UAPI headers.
+ */
+#if defined(CONFIG_PPC64LE)
+/* arch/powerpc: 040000 / 0100000 / 0400000 / 0200000 */
+# define O_DIRECTORY  0x4000
+# define O_NOFOLLOW   0x8000
+# define O_DIRECT     0x20000
+# define O_LARGEFILE  0x10000
+#elif defined(CONFIG_ARM32) || defined(CONFIG_ARMV7M) || defined(CONFIG_AARCH64)
+/* arch/arm and arch/arm64: 040000 / 0100000 / 0200000 / 0400000 */
+# define O_DIRECTORY  0x4000
+# define O_NOFOLLOW   0x8000
+# define O_DIRECT     0x10000
+# define O_LARGEFILE  0x20000
+#else
+/* asm-generic: 00200000 / 00400000 / 00040000 / 00100000 */
+# define O_DIRECTORY  0x10000
+# define O_NOFOLLOW   0x20000
+# define O_DIRECT     0x4000
+# define O_LARGEFILE  0x8000
+#endif
 
 #define STDIN_FILENO   0
 #define STDOUT_FILENO  1
