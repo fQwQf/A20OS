@@ -6,6 +6,7 @@
  */
 
 #include "fs/procfs.h"
+#include "fs/ext4_journal.h"
 #include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
@@ -491,6 +492,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "netmem") == 0) {
         child = new_entry(name, PF_A20_NETMEM, 0);
         type = PF_A20_NETMEM;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "journal") == 0) {
+        child = new_entry(name, PF_A20_JOURNAL, 0);
+        type = PF_A20_JOURNAL;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "anonprov") == 0) {
         child = new_entry(name, PF_A20_ANONPROV, 0);
         type = PF_A20_ANONPROV;
@@ -934,6 +938,17 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
                          __ATOMIC_RELEASE);
         return (int)count;
     }
+    if (p->type == PF_A20_JOURNAL) {
+        char tmp[64];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        while (n > 0 && (tmp[n - 1] == '\n' || tmp[n - 1] == '\r'))
+            tmp[--n] = '\0';
+        if (n == 0)
+            return -EINVAL;
+        return ext4_journal_set_crash_point(tmp) < 0 ? -EINVAL : (int)count;
+    }
     if (p->type == PF_A20_NETFILTER) {
         char tmp[192];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -1251,7 +1266,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
         "anonprov", "driver_lifecycle", "objects", "iommu", "netfilter",
-        "netmem", NULL
+        "netmem", "journal", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL

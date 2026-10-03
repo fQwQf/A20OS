@@ -183,6 +183,28 @@ virtio-pci 与 e1000e 都把表位置写在后者里。BAR 号一律从能力读
 - [ ] USB 拔线路径缺门禁。`usb_disconnect_port()` 已按端口调用 `abort_slot()`，
       hub 会同时归还总线地址；但"拔出设备后端点与 urb 的释放"没有运行门禁。
 
+已落地（文件系统持久化）：block cache 的 pre-sync hook 与它的 owner 绑成一个
+API（`bcache_set_sync_hook(bc, hook, owner)`），因为 hook 回到文件系统私有状态
+的唯一路径就是 `bc->owner`，此前该字段声明了、被 ext4 与 FAT32 的 hook 读了、
+却没有任何地方写入，于是 FAT32 的 FSInfo 回写与 ext4 的 journal 提交都是死代码。
+ext4 的 JBD2 现在真的给出 ordered 语义：提交指针按事务大小推进、descriptor 的
+checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 descriptor tag
+里（写进块尾会污染 block bitmap 的哈希区）、挂载时以 journal superblock 的
+`s_start` 而非仅 `EXT4_FEATURE_INCOMPAT_RECOVER` 判断是否重放。
+验证：`make smoke-ext4-journal`，在四个提交序列断点真的停机、用同一镜像重启、
+再用宿主 `e2fsck -fn` 双向把关。
+
+- [ ] ext4 JBD2 仍缺的特性位。`barrier`/`async_commit` 未声明（`s_features` 对应位
+      不置位，因此不写 `JBD2_FLAG_ASYNC_COMMIT`），设备级 `ordered` 与
+      `journal_data` 无区分；`fast_commit` 未实现；descriptor revoke 记录已实现
+      但只用于回放期的重复块判定，未用于延迟回滚。
+- [ ] JBD2 checksum v1/v2（`COMPAT_CHECKSUM`）只 fail closed 返回 `-EOPNOTSUPP`。
+      mke2fs 的默认配置产出 v3，因此常见镜像不受影响，但老镜像会拒绝挂载而不是
+      降级只读；需要一个显式的降级策略而不是直接失败。
+- [ ] ext4 文件数据块本身无校验和。`metadata_csum` 覆盖 group descriptor、extent
+      树与目录项，JBD2 checksum 覆盖事务传输，数据块内容不在任何校验和内；
+      静默位翻转只能靠上层应用发现（server/数据库部署下的实际风险）。
+
 - [ ] fd 路径的最终形态仍是 per-process 直接存 `vfile_t*`（消掉 gfd 间接层
       与 `files->lock -> 桶锁` 链）。本次以分桶锁达到同数量级的去串行化，
       全量改造涉及 25+ 文件（epoll/readiness/eventq/file-locks 都拿 gfd 当

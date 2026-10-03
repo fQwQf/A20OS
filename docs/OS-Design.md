@@ -183,8 +183,8 @@ mount 表是命名空间内的**堆分配稳定指针数组**（`kernel/fs/vfs/m
 
 | 后端 | rename | link | symlink | 关键限制 |
 |------|--------|------|---------|---------|
-| FAT32 | 支持 | 不支持 | 不支持 | 元数据仅存 RAM；rename 改写 `..` 项 |
-| ext4 | 支持 | 支持 | 快链 <= 60 B | 不生成新的日志事务；可对受支持的现有 JBD2 journal 做 fail-closed recovery；64 位文件大小 + 部分截断回收 |
+| FAT32 | 支持 | 不支持 | 不支持 | rename 改写 `..` 项；无目录/FSInfo 的落盘回写之外没有事务机制，断电原子性不保证 |
+| ext4 | 支持 | 支持 | 快链 <= 60 B | 运行时 metadata 更新写入 JBD2 事务（ordered 语义，commit 后元数据才落本位）；只支持 checksum v3 + `INCOMPAT_64BIT`，v1/v2 fail closed；不支持 `async_commit`/`barrier` 特性位；64 位文件大小 + 部分截断回收 |
 | NTFS | 支持 | 不支持 | 不支持 | 索引无 B-tree 分裂；不支持 `$ATTRIBUTE_LIST` |
 | ISO9660 | 不支持 | 不支持 | 不支持 | 只读 CD-ROM；名字转小写；跨块目录记录 |
 | ramfs | 支持 | 支持 | 支持 | 单目录 entry 上限 256；总 inode 上限 4096 |

@@ -249,6 +249,7 @@ endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
+EXT4_JOURNAL_IMG = $(BUILD_DIR)/ext4-journal.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 ISOFS_IMG = $(BUILD_DIR)/isofs.img
 USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)

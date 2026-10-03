@@ -1491,10 +1491,32 @@ pattern = "bcache_set_sync_hook\\(sb->bc, fat32_sync_hook, sb\\)"
 files = ["kernel/fs/diskfs/fat32.c"]
 
 # The gate itself, so the contract has a runner that cannot quietly go missing.
+# The injection point travels through /proc/a20/journal, not the command line:
+# QEMU's LoongArch virt board drops -append, and a gate whose crash selector
+# depends on bootargs would pass on four architectures and prove nothing on
+# the fifth.  The command-line route still exists for interactive use, so the
+# assertion below covers the shared table of legal points instead.
 [[gate.assertion]]
-pattern = "a20\\.journal_crash"
-files = ["tools/ext4_journal_gate.py", "kernel/fs/diskfs/ext4_journal.c"]
+pattern = "/proc/a20/journal"
+files = ["tools/ext4_journal_gate.py", "kernel/fs/procfs/procfs.c"]
+
+[[gate.assertion]]
+pattern = 'jbd2_crash_points'
+files = ["kernel/fs/diskfs/ext4_journal.c"]
+
+[[gate.assertion]]
+pattern = "ext4_journal_set_crash_point"
+files = ["kernel/fs/diskfs/ext4_journal.c", "kernel/include/fs/ext4_journal.h",
+         "kernel/fs/procfs/procfs.c"]
 
 [[gate.assertion]]
 pattern = "smoke-ext4-journal"
 files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "build-dir.*BUILD_DIR"
+files = ["tools/targets-smoke.mk"]
+
+[[gate.assertion]]
+pattern = "EXT4_JOURNAL_IMG"
+files = ["Makefile", "tools/targets-smoke.mk"]

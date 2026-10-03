@@ -491,7 +491,8 @@ smoke-smp-lock-contention:
 # ARCH selects the build directory as well as the QEMU machine, so this is the
 # same gate on every architecture the kernel boots under QEMU rather than one
 # that only proves x86_64.
-smoke-ext4-journal: dev-build
+smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
 	$(PYTHON) tools/ext4_journal_gate.py --arch "$(ARCH)" \
+		--build-dir "$(BUILD_DIR)" \
 		--log-dir "$(SMOKE_LOG_DIR)" \
 		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)

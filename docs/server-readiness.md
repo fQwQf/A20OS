@@ -19,6 +19,25 @@ A20OS 已经是一个认真的内核，但**当前形态是「QEMU 上的桌面/
 
 ### 已达成
 
+ext4 现在是可写日志文件系统，运行时 metadata 更新带 JBD2 ordered 语义：
+每次写入经 `ext4_journal_meta_write` 登记进事务并 `bcache_hold_page` 持有，
+使任何通用 sync 都不能把元数据写在其日志副本之前；`sync()`/`fsync()`
+触发 commit（数据 → descriptor → 日志 superblock `s_start` → commit block →
+元数据本位 → 标记日志为空）。挂载时是否回放以 journal superblock 的
+`s_start` 为权威判据，而不仅是 `EXT4_FEATURE_INCOMPAT_RECOVER`——后者与
+free 计数共享同一个被持有的 cache page，崩溃可能丢掉这个位却留下非空日志。
+
+验证：`make smoke-ext4-journal`。它在提交序列的四个点上真的把机器停住
+（注入点经 `/proc/a20/journal` 写入；同一机制也接受 `a20.journal_crash=`
+命令行参数，便于手工复现），用同一块镜像重启，断言承诺过的写入没丢、没承诺
+的写入没回来、`replay complete` 恰好出现在承诺点之后，并在宿主机上用
+`e2fsck -fn` 检查崩溃后的镜像与恢复后的镜像都干净。走 procfs 而不是命令行，
+是因为命令行注入点只在启动时解析一次，而 procfs 写入可以在崩溃发生前、
+提交序列进行到一半时才武装，从而命中的正是那个边界；命令行形式则留给手工
+复现。这是本文件里唯一一处
+"断电"不是模拟出来而是真发生过的地方。详见 `docs/testing-gates.md`
+「ext4 JBD2 崩溃一致性」。
+
 `fsync()` 现在真正到达稳定介质。`block_dev_t` 有可选 `flush` 原语，
 `bcache_sync_common()` 在写完数据后、缓存锁之外调用它。实现覆盖
 virtio-blk（`VIRTIO_BLK_T_FLUSH`）、loop（转发 backing file 的 fsync）、
@@ -28,15 +47,16 @@ AHCI（`FLUSH CACHE EXT`）。
 
 ### 仍缺
 
-- ext4 不是日志文件系统。`kernel/fs/diskfs/ext4_journal.c` 明确只做
-  挂载时回放，然后把日志标记为空并清除 `RECOVER`。RW 挂载后没有 journal
-  提交、没有 ordered 模式语义，写回途中崩溃可留下 journal 本可避免的
-  元数据/数据不一致。对需要崩溃一致性的数据库，这是**硬阻塞**。
 - AHCI 路径仅编译验证。`ahci.c` 位于 `CONFIG_AHCI` 之后，树内没有任何
   实例挂载 AHCI 控制器。补一个挂 `ich9-ahci` 的门禁是缺失的一环。
-- 无断电/崩溃注入测试基础设施，因此上述 journal 改造无法被验证。
 - 无 RAID、无数据校验和、无快照/CoW、无 fs-verity。
-  `crc32c` 只用于校验 JBD2 回放日志，不覆盖常规文件数据。
+  文件数据块本身仍无校验和；`crc32c` 覆盖 JBD2 日志与 ext4 元数据
+  （`metadata_csum`），不覆盖常规文件数据内容。
+- JBD2 只支持 checksum v3（`COMPAT_CHECKSUM` 的 v1/v2 返回 `-EOPNOTSUPP`），
+  没有 `barrier` 与 `async_commit` 特性位（`s_features` 中对应位不声明，
+  因此 commit block 不写 `JBD2_FLAG_ASYNC_COMMIT`，设备也没有
+  `ordered`/`journal_data` 语义差别）。断电原子性由 ordered 模式本身提供，
+  不依赖设备 FUA 之外的屏障。
 
 ## 二、网络
 
@@ -496,7 +516,7 @@ OOM 评分。
   头注），不声称可用。
 
 仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
-分支在做）、`proc_lock` 超长持有成因、ext4 可写 journal、
+分支在做）、`proc_lock` 超长持有成因、
 其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
 conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 
@@ -506,7 +526,7 @@ conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 |---|---|---|
 | P0 | lwIP 全局锁分片 | spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。持锁方一侧的时间仍缺（需 riscv64 rdcycle 封装），分锁方案待该数据再定 |
 | ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
-| P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
+| ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关 |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
 | ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
@@ -525,8 +545,11 @@ conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 按「改动小、风险低、避免真实事故」排序：
 
 1. 补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。
-2. 崩溃注入测试基础设施（QEMU 可用 `-device qemu-x-test` 或直接 kill -9 +
-   重放镜像比对），这是 ext4 journal 改造的前提。
+2. ~~崩溃注入测试基础设施~~ —— **已完成**，形式是 JBD2 提交序列内的定点
+   panic（`/proc/a20/journal` 下发注入点）+ 同镜像重启 + 宿主 `e2fsck` 比对，
+   见 `make smoke-ext4-journal`。仍未覆盖的是"到点就死"的粗粒度形态
+   （在写盘路径上随机取一个指令位置 kill -9）；当前覆盖的是语义上真正有
+   意义的边界点。
 3. 引入真机基准入口；当前所有性能结论都来自 TCG 模拟器。
 
 以下两项曾在本清单里，现已完成，不再是待办：

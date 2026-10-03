@@ -2,8 +2,8 @@
 """ext4 JBD2 crash-consistency gate.
 
 Boots a journalled ext4 image, halts the machine at a chosen point in the
-commit sequence (``a20.journal_crash=<point>``), reboots the *same* image and
-checks three things:
+commit sequence (armed through ``/proc/a20/journal``), reboots the *same*
+image and checks three things:
 
   * the writes the kernel had promised are still there,
   * the writes it had not promised are gone rather than half-there,
@@ -38,7 +38,19 @@ CRASH_POINTS = [
     ("post-checkpoint", True),
 ]
 
-WRITE_SCRIPT = "mkdir /extra/j\ncat /proc/version > /extra/j/f.txt\nsync\npoweroff\n"
+# The crash point goes in through /proc/a20/journal rather than a20.journal_crash=
+# on the command line: QEMU's LoongArch virt board creates /chosen without a
+# bootargs property and drops -append, so a gate that selected its injection
+# point that way would pass on four architectures and prove nothing on the
+# fifth.  Nothing else about the gate depends on bootargs either way.
+def write_script(point=None):
+    lines = ["mkdir /extra/j",
+             "cat /proc/version > /extra/j/f.txt"]
+    if point:
+        lines.append(f"echo {point} > /proc/a20/journal")
+    lines += ["sync", "poweroff"]
+    return "\n".join(lines) + "\n"
+
 READ_SCRIPT = "cat /extra/j/f.txt\npoweroff\n"
 
 # How the repository boots each architecture under QEMU.  Kept here rather than
@@ -125,7 +137,7 @@ def fsck_clean(image, e2fsck):
 
 
 def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
-              point, survives):
+              point, survives, timeout):
     fat32 = os.path.join(build_dir, "fat32.img")
     ext4 = os.path.join(build_dir, "ext4-journal.img")
     kernel = os.path.join(build_dir, "kernel.elf")
@@ -139,12 +151,11 @@ def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
     shutil.copyfile(fat32, fat_copy)
     shutil.copyfile(ext4, ext_copy)
 
-    make_argv = QEMU[arch](kernel, fat_copy, ext_copy,
-                           ["-append", f"console=ttyS0 a20.journal_crash={point}"])
+    make_argv = QEMU[arch](kernel, fat_copy, ext_copy, ["-append", "console=ttyS0"])
 
     # Boot 1: write, sync, and die at the chosen point.
     log1 = os.path.join(log_dir, f"ext4-journal-{arch}-{point}-crash.log")
-    feed(make_argv, WRITE_SCRIPT, delay, log1)
+    feed(make_argv, write_script(point), delay, log1, timeout)
     text1 = read_log(log1)
     marker = f"CRASH-INJECT {point}"
     if marker not in text1:
@@ -156,7 +167,8 @@ def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
 
     # Boot 2: same image, no injection.  Recovery has to run on its own.
     log2 = os.path.join(log_dir, f"ext4-journal-{arch}-{point}-recover.log")
-    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), READ_SCRIPT, delay, log2)
+    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), READ_SCRIPT, delay,
+         log2, timeout)
     text2 = read_log(log2)
     if "Refusing mount" in text2 or "[EXT4] Mounted" not in text2:
         raise GateError(f"{point}: filesystem did not mount after the crash\n"
@@ -180,7 +192,7 @@ def run_point(arch, build_dir, workdir, log_dir, delay, e2fsck,
     return replayed
 
 
-def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck):
+def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck, timeout):
     """Control: no crash at all.  Nothing may be lost and nothing may leak."""
     fat32 = os.path.join(build_dir, "fat32.img")
     ext4 = os.path.join(build_dir, "ext4-journal.img")
@@ -191,7 +203,8 @@ def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck):
     shutil.copyfile(ext4, ext_copy)
 
     log1 = os.path.join(log_dir, f"ext4-journal-{arch}-clean-write.log")
-    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), WRITE_SCRIPT, delay, log1)
+    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), write_script(), delay,
+         log1, timeout)
     text1 = read_log(log1)
     if "recovery start=" in text1:
         raise GateError("a clean run replayed a journal: the previous boot's "
@@ -199,7 +212,8 @@ def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck):
     fsck_clean(ext_copy, e2fsck)
 
     log2 = os.path.join(log_dir, f"ext4-journal-{arch}-clean-read.log")
-    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), READ_SCRIPT, delay, log2)
+    feed(QEMU[arch](kernel, fat_copy, ext_copy, []), READ_SCRIPT, delay,
+         log2, timeout)
     text2 = read_log(log2)
     if "A20OS version" not in text2:
         raise GateError("clean run lost a synced file across a reboot\n"
@@ -210,16 +224,42 @@ def run_clean(arch, build_dir, workdir, log_dir, delay, e2fsck):
     fsck_clean(ext_copy, e2fsck)
 
 
-def feed(argv, script, delay, log_path):
+def feed(argv, script, delay, log_path, timeout):
+    """Boot the guest, type `script` at the shell, and stop.
+
+    `timeout` is a hard wall on the whole interaction: a guest that never
+    reaches `halt` (a wedged scheduler, a shell that stopped accepting input)
+    would otherwise hang the gate forever instead of failing it.  The QEMU
+    process is killed and the caller sees a non-zero return so the case is
+    reported as a failure with the partial log."""
     feeder = subprocess.Popen(
         ["bash", "-c", f"sleep {delay}; printf '{script}'"],
         stdout=subprocess.PIPE,
     )
+    guest = subprocess.Popen(
+        argv, stdin=feeder.stdout,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    feeder.stdout.close()
     try:
-        with open(log_path, "w") as log:
-            subprocess.run(argv, stdin=feeder.stdout, stdout=log,
-                           stderr=subprocess.STDOUT, check=False)
+        try:
+            out, _ = guest.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            guest.kill()
+            out, _ = guest.communicate()
+            with open(log_path, "wb") as log:
+                log.write(out or b"")
+            raise GateError(
+                f"guest did not finish within {timeout}s (killed); the "
+                f"interaction hung rather than completing\n"
+                + tail((out or b"").decode("utf-8", "replace")))
+        with open(log_path, "wb") as log:
+            log.write(out or b"")
     finally:
+        if guest.poll() is None:
+            guest.kill()
+            guest.wait()
+        feeder.kill()
         feeder.wait()
 
 
@@ -253,13 +293,14 @@ def main():
     control = tempfile.mkdtemp(prefix="a20-journal-")
     try:
         run_clean(args.arch, build_dir, control, args.log_dir, args.delay,
-                  args.e2fsck)
+                  args.e2fsck, args.timeout)
         print("ext4-journal-gate: clean run PASS (no replay, file intact, "
               "e2fsck clean)")
         for point, survives in CRASH_POINTS:
             workdir = tempfile.mkdtemp(prefix="a20-journal-")
             replayed = run_point(args.arch, build_dir, workdir, args.log_dir,
-                                 args.delay, args.e2fsck, point, survives)
+                                 args.delay, args.e2fsck, point, survives,
+                                 args.timeout)
             state = "replayed" if replayed else "nothing to replay"
             expect = "survives" if survives else "correctly lost"
             print(f"ext4-journal-gate: {point} PASS "
