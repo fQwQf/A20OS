@@ -90,13 +90,30 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
 
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static proc_cpu_sched_t sched_cpu[CONFIG_NR_CPUS];
+
+/* Picks and empty picks are counted on every local dispatch, by every CPU.
+ * As globals they shared one line with the counters below, so each context
+ * switch invalidated it for every other CPU. */
+typedef struct __attribute__((aligned(64))) sched_pick_stats {
+    unsigned long picks;
+    unsigned long empty_picks;
+} sched_pick_stats_t;
+static sched_pick_stats_t sched_pick[CONFIG_NR_CPUS];
+
+/* How many local picks are in flight at once across the whole system is a
+ * system-wide property, not a per-CPU one, so the count and its high-water
+ * mark stay global; they get their own line only so the per-pick bumps above
+ * cannot drag them along. */
+typedef struct __attribute__((aligned(64))) sched_pick_parallel {
+    unsigned long active;
+    unsigned long peak;
+} sched_pick_parallel_t;
+static sched_pick_parallel_t sched_pick_parallel;
+
+/* Migrations and contract violations are rare and system-wide. */
 static unsigned sched_zombies_pending;
 static unsigned long sched_runqueue_migrations;
 static unsigned long sched_violations;
-static unsigned long sched_local_picks;
-static unsigned long sched_empty_picks;
-static unsigned long sched_local_pick_active;
-static unsigned long sched_local_pick_parallel_peak;
 
 /*
  * SCHEDULER_CPU_OWNERSHIP:
@@ -573,10 +590,9 @@ void proc_sched_runq_init(void) {
     }
     sched_runqueue_migrations = 0;
     sched_violations = 0;
-    sched_local_picks = 0;
-    sched_empty_picks = 0;
-    sched_local_pick_active = 0;
-    sched_local_pick_parallel_peak = 0;
+    memset(sched_pick, 0, sizeof(sched_pick));
+    sched_pick_parallel.active = 0;
+    sched_pick_parallel.peak = 0;
     proc_timer_heap_init();
 }
 
@@ -930,19 +946,25 @@ void proc_sched_handle_reschedule_ipi(void)
 /* Per-CPU jiffy accounting backing /proc/stat and /proc/<pid>/stat.  One
  * tick (10 ms) is charged per timer interrupt to the running context class:
  * idle task, user mode, or kernel mode.  Only the local CPU writes its own
- * slots; readers take benign races on 64-bit values. */
-static uint64_t g_cpu_user_ticks[CONFIG_NR_CPUS];
-static uint64_t g_cpu_system_ticks[CONFIG_NR_CPUS];
-static uint64_t g_cpu_idle_ticks[CONFIG_NR_CPUS];
+ * slots; readers take benign races on 64-bit values.  The three classes are
+ * interleaved per CPU rather than kept as three parallel arrays because a
+ * timer interrupt writes one of them, and adjacent arrays put two CPUs'
+ * hot counters on the same line. */
+typedef struct __attribute__((aligned(64))) proc_cpu_ticks {
+    uint64_t user;
+    uint64_t system;
+    uint64_t idle;
+} proc_cpu_ticks_t;
+static proc_cpu_ticks_t g_cpu_ticks[CONFIG_NR_CPUS];
 
 void proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
                         uint64_t *idle)
 {
     if (!user || !system || !idle || cpu >= CONFIG_NR_CPUS)
         return;
-    *user = __atomic_load_n(&g_cpu_user_ticks[cpu], __ATOMIC_RELAXED);
-    *system = __atomic_load_n(&g_cpu_system_ticks[cpu], __ATOMIC_RELAXED);
-    *idle = __atomic_load_n(&g_cpu_idle_ticks[cpu], __ATOMIC_RELAXED);
+    *user = __atomic_load_n(&g_cpu_ticks[cpu].user, __ATOMIC_RELAXED);
+    *system = __atomic_load_n(&g_cpu_ticks[cpu].system, __ATOMIC_RELAXED);
+    *idle = __atomic_load_n(&g_cpu_ticks[cpu].idle, __ATOMIC_RELAXED);
 }
 
 void proc_sched_tick(int from_user)
@@ -963,11 +985,14 @@ void proc_sched_tick(int from_user)
     unsigned tick_cpu = cpu_current_id();
     if (tick_cpu < CONFIG_NR_CPUS) {
         if (cur->pid == 0)
-            __atomic_fetch_add(&g_cpu_idle_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].idle, 1,
+                               __ATOMIC_RELAXED);
         else if (from_user)
-            __atomic_fetch_add(&g_cpu_user_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].user, 1,
+                               __ATOMIC_RELAXED);
         else
-            __atomic_fetch_add(&g_cpu_system_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].system, 1,
+                               __ATOMIC_RELAXED);
     }
     if (from_user) {
         cur->total_time++;
@@ -1053,13 +1078,15 @@ void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
         __atomic_load_n(&sched_runqueue_migrations, __ATOMIC_RELAXED);
     diag->scheduler_violations =
         __atomic_load_n(&sched_violations, __ATOMIC_RELAXED);
-    diag->runqueue_local_picks =
-        __atomic_load_n(&sched_local_picks, __ATOMIC_RELAXED);
-    diag->runqueue_empty_picks =
-        __atomic_load_n(&sched_empty_picks, __ATOMIC_RELAXED);
+    diag->runqueue_local_picks = 0;
+    diag->runqueue_empty_picks = 0;
     diag->runqueue_parallel_pick_peak =
-        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
+        __atomic_load_n(&sched_pick_parallel.peak, __ATOMIC_RELAXED);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        diag->runqueue_local_picks +=
+            __atomic_load_n(&sched_pick[cpu].picks, __ATOMIC_RELAXED);
+        diag->runqueue_empty_picks +=
+            __atomic_load_n(&sched_pick[cpu].empty_picks, __ATOMIC_RELAXED);
         proc_runq_t *rq = &sched_runq[cpu];
         proc_cpu_sched_t *state = &sched_cpu[cpu];
         diag->runqueue_lock_acquires +=
@@ -1557,17 +1584,17 @@ task_t *proc_runq_pick_local(void)
 {
     unsigned cpu = cpu_current_id();
     task_t *picked = NULL;
-    unsigned long active =
-        __atomic_add_fetch(&sched_local_pick_active, 1, __ATOMIC_ACQ_REL);
+    unsigned long active = __atomic_add_fetch(&sched_pick_parallel.active, 1,
+                                              __ATOMIC_ACQ_REL);
     unsigned long peak =
-        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
+        __atomic_load_n(&sched_pick_parallel.peak, __ATOMIC_RELAXED);
     while (active > peak &&
-           !__atomic_compare_exchange_n(&sched_local_pick_parallel_peak,
+           !__atomic_compare_exchange_n(&sched_pick_parallel.peak,
                                         &peak, active, 0,
                                         __ATOMIC_RELAXED,
                                         __ATOMIC_RELAXED)) {
     }
-    __atomic_fetch_add(&sched_local_picks, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sched_pick[cpu].picks, 1, __ATOMIC_RELAXED);
 
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
@@ -1620,9 +1647,9 @@ task_t *proc_runq_pick_local(void)
         picked = sched_runq_steal_locked(rq, cpu);
 
     if (!picked)
-        __atomic_fetch_add(&sched_empty_picks, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&sched_pick[cpu].empty_picks, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
-    __atomic_fetch_sub(&sched_local_pick_active, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_sub(&sched_pick_parallel.active, 1, __ATOMIC_RELEASE);
     return picked;
 }
 /* SCHED_LOCAL_PICK_LOCK_SPLIT_END */
