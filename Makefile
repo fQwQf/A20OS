@@ -419,7 +419,13 @@ ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-pic -st
                            -ffunction-sections -fdata-sections -fno-unwind-tables \
                            -fno-asynchronous-unwind-tables
 ARCH_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-pic -static
-ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
+# ppc64le 独自需要 -mstack-protector-guard=global：PPC64 ELFv2 的 GCC 默认把
+# canary 当成 TLS 变量经 r13 取（ld 9,-28688(13)），而内核的 __stack_chk_guard
+# 是 kernel/core/stack_protector.c 里的普通 .data 全局，且 r13 已被
+# arch_set_task_pointer() 征用为 task 指针、从不指向 TLS 基址。带 r13 取值的
+# __stack_chk_guard 会在 kernel_main 的第一个 printf 里直接 DSEG（canary 读到
+# 垃圾页，随后程序校验杀死内核）。其余架构的 GCC 默认就是 global，无需覆盖。
+ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize -mstack-protector-guard=global
 
 PHYS_BASE_aarch64     := 0x40080000
 PHYS_BASE_arm32       := 0x40080000
