@@ -13,6 +13,7 @@
 #include "core/errno.h"
 #include "core/sync.h"
 #include "core/timer.h"
+#include "core/cpu.h"
 #include "proc/proc.h"
 
 #define AHCI_MAX_PORTS          32U
@@ -58,10 +59,13 @@
 #define ATA_CMD_WRITE_DMA_EXT   0x35U
 #define ATA_CMD_FLUSH_CACHE_EXT 0xE7U
 
-/* Hybrid completion window: TCG completions usually land within a
- * millisecond; beyond it the submitter parks on the port wait queue
- * instead of busy-polling PxCI for the whole command. */
-#define AHCI_HYBRID_PRE_POLL_US 800U
+/* Hybrid completion window: with a completion IRQ live the window only has to
+ * outlast a command that has already retired, because anything still in flight
+ * wakes the parked submitter from ahci_irq_handler().  The old 800us window was
+ * sized for a transport that never raises an interrupt, and charged every
+ * command on every I/O for it.  The no-ISR fallback below keeps polling for the
+ * whole timeout instead, which is where the long window is actually needed. */
+#define AHCI_HYBRID_PRE_POLL_US 50U
 /* Bounded park chunk: a hypothetical missed wake degrades to a re-check. */
 #define AHCI_PARK_CHUNK_MS      50U
 
@@ -262,6 +266,26 @@ static int ahci_submit_nodata(ahci_port_t *port, uint8_t command) {
  * commands and the no-data commands (FLUSH CACHE) so both observe the same
  * timeout, hybrid poll/park behaviour and TFES error handling.
  */
+/*
+ * Bounded pause between register re-reads.  udelay() re-reads the board timer
+ * through current_board->timer->read_ticks() -- two indirect calls per
+ * iteration -- and carries no barrier, so a tight loop around it neither yields
+ * the pipeline nor stops the compiler from hoisting the MMIO reads it is
+ * supposed to be spacing out.  cpu_relax() plus an explicit clobber is what
+ * makes this a poll rather than a speculative spin.  udelay() itself is
+ * declared in driver_hwapi.c and is shared with every other driver, so the fix
+ * belongs there rather than here.
+ */
+static void ahci_poll_pause(uint64_t usecs)
+{
+    uint64_t wait = US_TO_TICKS(usecs);
+    uint64_t start = timer_get_ticks();
+    while ((timer_get_ticks() - start) < wait) {
+        cpu_relax();
+        __asm__ __volatile__("" ::: "memory");
+    }
+}
+
 static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
     uint64_t start = timer_get_ticks();
     uint64_t deadline = start + MS_TO_TICKS(AHCI_TIMEOUT_MS);
@@ -283,14 +307,14 @@ static int ahci_wait_complete(ahci_port_t *port, size_t bytes) {
         if (!port->irq_registered) {
             if (timer_get_ticks() >= deadline)
                 return -1;
-            udelay(1000);
+            ahci_poll_pause(1000);
             continue;
         }
         uint64_t now = timer_get_ticks();
         if (now >= deadline)
             return -1;
         if (now < pre_poll_until) {
-            udelay(20);
+            ahci_poll_pause(20);
             continue;
         }
         /* Park until the completion IRQ; the bounded chunk turns a
