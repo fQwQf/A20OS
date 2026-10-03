@@ -11,7 +11,7 @@ volatile int g_net_bh_pending[NET_MAX_SOCKETS];
 volatile int g_net_bh_pending_count;
 
 /* Free-slot bitmap for O(1) allocation.  Bit n == 0 -> slot n is free. */
-static uint32_t g_sock_free[NET_MAX_SOCKETS / 32];
+static uint32_t g_sock_free[(NET_MAX_SOCKETS + 31) / 32];
 
 void net_bh_slot_mark(int idx)
 {
@@ -43,7 +43,7 @@ void net_socket_registry_init(void) {
 }
 
 int net_register_socket_locked(net_socket_t *s) {
-    for (int w = 0; w < (int)(NET_MAX_SOCKETS / 32); w++) {
+    for (int w = 0; w < (int)((NET_MAX_SOCKETS + 31) / 32); w++) {
         uint32_t free_bits = ~g_sock_free[w];
         if (!free_bits)
             continue;

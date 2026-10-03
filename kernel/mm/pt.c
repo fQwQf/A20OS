@@ -149,7 +149,6 @@ static void mcs_lock(pt_meta_t *m)
 
     me->next = 0;
     me->locked = 1;
-    m->node = (uintptr_t)me;
 
     uintptr_t tail = __atomic_exchange_n(&m->lock, (uintptr_t)me,
                                          __ATOMIC_ACQ_REL);
@@ -158,6 +157,14 @@ static void mcs_lock(pt_meta_t *m)
         a20_perf_count(A20_PERF_MM_PT_LOCK_CONTENDED);
         a20_perf_count(A20_PERF_MM_PT_LOCK_WAITS);
         __atomic_store_n(&me->locked, 0, __ATOMIC_RELEASE);
+        /* Link behind the predecessor, or the queue never exists.  Without this
+         * the unlocker finds me->next == 0 and takes the compare-exchange
+         * branch -- but m->lock was already moved to THIS waiter by the
+         * exchange above, so that CAS always fails, the lock is never released,
+         * and this waiter is never handed the lock.  One contended acquisition
+         * wedges the node permanently. */
+        __atomic_store_n(&((pt_mcs_node_t *)tail)->next, (uintptr_t)me,
+                         __ATOMIC_RELEASE);
         uint32_t spins = 0;
         while (__atomic_load_n(&me->locked, __ATOMIC_ACQUIRE) == 0) {
             arch_cpu_relax();
@@ -186,9 +193,14 @@ static void mcs_lock(pt_meta_t *m)
 
 static void mcs_unlock(pt_meta_t *m)
 {
-    pt_mcs_node_t *me = (pt_mcs_node_t *)m->node;
+    pt_mcs_pool_t *pool = &g_pt_mcs_pool[pt_cpu()];
+    /* Our own node, NOT m->node.  Every acquirer overwrote that shared field
+     * with its own pointer, so a holder reading it back got the newest waiter
+     * instead of itself -- it then cleared the lock and handed off to nobody,
+     * and that waiter span forever.  mcs_lock pushed exactly one slot and
+     * depth is decremented only below, so our node is the top of our stack. */
+    pt_mcs_node_t *me = &pool->nodes[pool->depth - 1];
 
-    m->node = 0;
     pt_mcs_node_t *next =
         (pt_mcs_node_t *)__atomic_load_n(&me->next, __ATOMIC_ACQUIRE);
     if (next) {
@@ -197,15 +209,24 @@ static void mcs_unlock(pt_meta_t *m)
         /* We are the tail.  A compare-exchange rather than a store, so a
          * concurrent enqueue that already read the tail cannot be lost. */
         uintptr_t self = (uintptr_t)me;
-        __atomic_compare_exchange_n(&m->lock, &self, 0, 0,
-                                    __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        if (!__atomic_compare_exchange_n(&m->lock, &self, 0, 0,
+                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+            /* Lost the race: a successor swapped itself in after we read
+             * me->next but before we cleared m->lock.  It is now blocked writing
+             * our ->next, so wait for that link to appear and hand off.  Without
+             * this wait the successor waits forever on a lock nobody releases. */
+            while (__atomic_load_n(&me->next, __ATOMIC_ACQUIRE) == 0)
+                arch_cpu_relax();
+            next = (pt_mcs_node_t *)__atomic_load_n(&me->next, __ATOMIC_ACQUIRE);
+            __atomic_store_n(&next->locked, 1, __ATOMIC_RELEASE);
+        }
     }
     /* Every acquisition pushed exactly one slot in mcs_lock, so every release
      * pops exactly one here.  This is the ONLY place the depth is
      * decremented: the descent loop's inline lock/unlock pairs and the
      * cursor's unwind loop both rely on it, and pre-decrementing in a caller
      * as well is a double decrement that corrupts the stack discipline. */
-    g_pt_mcs_pool[pt_cpu()].depth--;
+    pool->depth--;
 }
 
 /* ------------------------------------------------------------------ *
@@ -230,6 +251,30 @@ void mm_pt_meta_set_stale(pt_meta_t *m, int stale)
 {
     if (m)
         __atomic_store_n(&m->stale, stale ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+/* Take/release the lock of the PT node reached by `table`, for callers that
+ * descend to their own node instead of going through a cursor -- mcs_lock() is
+ * file-local, so pt_unmap_leaf()/pt_unmap() in mm.c cannot reach it directly.
+ *
+ * Same node, and same reason, as cursor_leaf_slot(): a write touches one leaf
+ * entry plus that node's own nr_present/cls[] read-modify-write.  A node with no
+ * metadata has no lock, same as there.
+ *
+ * One at a time: cursor_leaf_slot() takes these in descending level order, so
+ * nesting one here would invert against it. */
+void mm_pt_node_lock(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (pm)
+        mcs_lock(pm);
+}
+
+void mm_pt_node_unlock(pte_t *table)
+{
+    pt_meta_t *pm = mm_pt_meta(table);
+    if (pm)
+        mcs_unlock(pm);
 }
 
 static int pt_meta_order(size_t bytes)
@@ -569,33 +614,127 @@ pte_t *mm_pt_leaf_table(pt_root_t *pgdir, vaddr_t addr)
     return table;
 }
 
-/* Index the cached path down to the leaf slot for addr, allocating any
- * missing intermediate node.  Caller holds the cursor, so the cached path
- * cannot be unlinked underneath it. */
+/* Index the cached path down to the leaf slot for addr, allocating any missing
+ * intermediate node, and return with the LEAF TABLE's own lock held.  The
+ * caller must pair that with cursor_leaf_unlock() once it has finished reading
+ * or writing the slot.
+ *
+ * Why the leaf is locked here rather than only at mm_addrspace_lock() time: the
+ * cursor's covering-node lock does not exclude a peer whose covering node is an
+ * ancestor or a descendant of ours.  A wide cursor (covering level 2) and a
+ * single-page cursor (covering level 0) inside it would otherwise hold disjoint
+ * locks while writing the same leaf PTE and the same pt_meta_t.cls[] byte.
+ * Locking the leaf per operation closes that, because every write targets
+ * exactly one leaf entry.  It has to be per operation rather than per
+ * transaction: a wide cursor visits many leaves and the per-CPU held[] stack has
+ * only PT_MCS_POOL_SLOTS entries.
+ *
+ * Caller holds the cursor, so mm->pt_readers keeps an already-cached page from
+ * being recycled under the descent; `stale` is what tells us we lost a race with
+ * a detach, in which case we drop everything and report failure so the caller
+ * re-descends. */
 static pte_t *cursor_leaf_slot(mm_cursor_t *cur, vaddr_t addr, int create)
 {
+    /* This walk must START at guard_level: mm_addrspace_lock's descent fills
+     * path[ROOT-1] .. path[guard_level] and nothing below, so starting at
+     * guard_level - 1 would dereference an uninitialised pointer.  That mistake
+     * hung the huge-page path, where wide cursors are routine, and it presented
+     * as a smoke-mm-stress timeout with no self-deadlock report.
+     *
+     * At l == guard_level the cursor already holds that node's lock for its
+     * whole lifetime, so taking it again is a non-reentrant self-deadlock -- the
+     * per-CPU detector only notices after 2^26 spins.  Every level strictly
+     * below is a different node and does need its own lock, which is what
+     * excludes a peer writing the same leaf through a higher covering node. */
     for (int l = cur->guard_level; l > 0; l--) {
         pte_t *table = cur->path[l];
         int idx = arch_pt_vpn(addr, l);
-        pte_t e = table[idx];
-        if (!(e & PTE_V)) {
-            if (!create)
-                return NULL;
-            pte_t *next = (pte_t *)frame_alloc();
+        /* Allocate the child node with frame_alloc_nr(), which cannot reach
+         * oom_try_reclaim() -- so it is safe to call while holding a node MCS
+         * lock, and hoisting it above the lock keeps the allocation out of the
+         * critical section as well.  The pre-check only decides whether
+         * allocating is worth attempting; the authoritative state is the
+         * re-read of table[idx] under the lock below, and every path that
+         * finds the speculative page unnecessary frees it. */
+        pte_t *next = NULL;
+        if (create && !(table[idx] & PTE_V)) {
+            next = (pte_t *)frame_alloc_nr();
             if (!next)
                 return NULL;
+        }
+        /* The parent's lock covers both the entry read and the install: the
+         * metadata write below is a read-modify-write on the parent's
+         * nr_present/cls[], so reading the entry outside the lock would race
+         * a peer installing the same child. */
+        pt_meta_t *pm = (l == cur->guard_level) ? NULL : mm_pt_meta(table);
+        if (pm)
+            mcs_lock(pm);
+        pte_t e = table[idx];
+        if (!(e & PTE_V)) {
+            if (!create) {
+                if (next)
+                    frame_free(next);
+                if (pm)
+                    mcs_unlock(pm);
+                return NULL;
+            }
+            if (pm && pm->stale) {
+                if (next)
+                    frame_free(next);
+                mcs_unlock(pm);
+                return NULL;
+            }
+            if (!next) {
+                if (pm)
+                    mcs_unlock(pm);
+                return NULL;
+            }
             mm_pt_node_init(next, l - 1);
             table[idx] = arch_pte_from_pa(va_to_pa(next)) | PTE_DIR;
             mm_pt_note_present(table, l, idx,
                                MM_ST_CLS_BYTE(MM_ST_PT_NODE));
+            if (pm)
+                mcs_unlock(pm);
             cur->path[l - 1] = next;
             continue;
         }
-        if (arch_pte_is_leaf(e))
+        if (arch_pte_is_leaf(e)) {
+            if (pm)
+                mcs_unlock(pm);
             return NULL;      /* huge leaf covers more than one page */
+        }
         cur->path[l - 1] = arch_pte_to_ptr(e);
+        if (pm)
+            mcs_unlock(pm);
     }
-    return &cur->path[0][arch_pt_vpn(addr, 0)];
+
+    /* When guard_level == 0 the covering node IS the leaf table and the cursor
+     * already holds its lock, so there is nothing left to take. */
+    if (cur->guard_level == 0)
+        return &cur->path[0][arch_pt_vpn(addr, 0)];
+
+    pte_t *leaf = cur->path[0];
+    pt_meta_t *lm = mm_pt_meta(leaf);
+    if (!lm)
+        return NULL;
+    mcs_lock(lm);
+    if (lm->stale) {
+        mcs_unlock(lm);
+        return NULL;          /* detached underneath us; caller re-descends */
+    }
+    cur->leaf_meta = lm;
+    return &leaf[arch_pt_vpn(addr, 0)];
+}
+
+/* Release the leaf lock taken by the matching cursor_leaf_slot().  Every
+ * failure return of that function leaves the lock already released, so calling
+ * this unconditionally after a non-NULL result is correct and idempotent. */
+static void cursor_leaf_unlock(mm_cursor_t *cur)
+{
+    if (cur->leaf_meta) {
+        mcs_unlock(cur->leaf_meta);
+        cur->leaf_meta = NULL;
+    }
 }
 
 static inline pte_t *cursor_leaf_table(const mm_cursor_t *cur)
@@ -620,6 +759,7 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
 
     cur->mm = NULL;
     cur->locked = 0;
+    cur->leaf_meta = NULL;
     cur->start = start;
     cur->end = end;
     cur->guard_level = level;
@@ -661,14 +801,35 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                 return 1;
             }
 
+            /* Hoisted for the same reason as cursor_leaf_slot(), and
+             * non-reclaiming for the same reason -- which matters most HERE:
+             * mm_mmap() reaches this function while holding mm->lock, and that
+             * lock is a spin_lock_irqsave, so a reclaiming allocation on this
+             * path is a sleep with interrupts off.  The unlocked e read at the
+             * top of this loop body is only the heuristic; the re-read under
+             * the lock is authoritative. */
+            pte_t *next = NULL;
+            if (!(e & PTE_V)) {
+                next = (pte_t *)frame_alloc_nr();
+                if (!next) {
+                    mm_pt_read_exit(mm);
+                    cur->in_read_side = 0;
+                    return -ENOMEM;
+                }
+            }
+
             pt_meta_t *pm = mm_pt_meta(table);
             if (!pm && mm_pt_node_init(table, l) < 0) {
+                if (next)
+                    frame_free(next);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return -ENOMEM;
             }
             pm = mm_pt_meta(table);
             if (!pm) {
+                if (next)
+                    frame_free(next);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return -ENOMEM;
@@ -685,19 +846,22 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
             /* Re-read under the lock: another cursor may have created it. */
             e = table[idx];
             if ((e & PTE_V) && !arch_pte_is_leaf(e)) {
+                if (next)
+                    frame_free(next);
                 mcs_unlock(pm);
                 table = arch_pte_to_ptr(e);
                 cur->path[l - 1] = table;
                 continue;
             }
             if ((e & PTE_V) && arch_pte_is_leaf(e)) {
+                if (next)
+                    frame_free(next);
                 mcs_unlock(pm);
                 mm_pt_read_exit(mm);
                 cur->in_read_side = 0;
                 return 1;
             }
 
-            pte_t *next = (pte_t *)frame_alloc();
             if (!next) {
                 mcs_unlock(pm);
                 mm_pt_read_exit(mm);
@@ -745,14 +909,18 @@ int mm_addrspace_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end,
         return -EAGAIN;      /* racing a subtree detach; caller retries */
     }
 
-    /* P3: the covering node's lock IS the unit of writer exclusion.  A
-     * cursor only ever mutates the cached path below the covering node, and
-     * every other cursor that could touch that path must first acquire this
-     * same node, so it is sufficient and it is the finest granularity that
-     * keeps disjoint ranges parallel.  Locking the whole subtree (the paper's
-     * ADV step) belongs with the lockless-traverse + RCU design in P4; done
-     * here it would both serialise unrelated ranges and risk double-locking
-     * an aliased node. */
+    /* The covering node's lock is range-level mutual exclusion, and it is NOT
+     * sufficient on its own.  It used to be documented here as the unit of
+     * writer exclusion -- on the reasoning that "every other cursor that could
+     * touch that path must first acquire this same node" -- and that is false:
+     * a peer whose covering node is an ancestor or a descendant holds a
+     * different lock.  A wide cursor (covering level 2) and a single-page
+     * cursor (covering level 0) inside it would hold disjoint locks while
+     * writing the same leaf PTE and the same pt_meta_t.cls[] byte.  That is why
+     * cursor_leaf_slot() takes the leaf's own lock per operation; see the
+     * locking contract in mm/pt.h.  Two cursors conflict exactly when they
+     * touch the same leaf table, which is what preserves the paper's semantics:
+     * disjoint ranges run in parallel, overlapping ranges serialise. */
     cur->mm = mm;
     cur->locked = 1;
     a20_perf_count(A20_PERF_MM_CURSOR_OPEN);
@@ -763,6 +931,10 @@ void mm_cursor_unlock(mm_cursor_t *cur)
 {
     if (!cur || !cur->locked || !cur->mm)
         return;
+    /* A leaked per-operation leaf lock would otherwise stay held for the rest
+     * of the cursor's life; the unwind below cannot pop it because it is not
+     * tracked in the per-CPU held[] stack. */
+    cursor_leaf_unlock(cur);
     /* Release every lock taken since the cursor opened, in reverse.  The
      * per-CPU held[] stack is the record; the cursor only remembers the
      * depth it started at, so a DFS of any width unwinds correctly. */
@@ -851,6 +1023,7 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 
     if (had_old && old_pa_out)
         *old_pa_out = old_pa;
+    cursor_leaf_unlock(cur);
     return 0;
 }
 
@@ -871,9 +1044,14 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
 
+    /* Descend for THIS address.  cursor_leaf_table() on its own returns whatever
+     * path[0] a previous operation left behind, which is the right leaf table
+     * only while the whole cursor range sits inside one. */
+    pte_t *pte = cursor_leaf_slot(cur, addr, 0);
+    if (!pte)
+        return 0;               /* no leaf table on this path: nothing mapped */
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
-    pte_t *pte = &table[idx];
 
 #ifdef CONFIG_SWAP
     if (pte_is_swap(*pte)) {
@@ -881,6 +1059,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
         *pte = 0;
         mm_pt_note_absent(table, 0, idx);
         swap_free(entry);
+        cursor_leaf_unlock(cur);
         return 1;
     }
 #endif
@@ -891,6 +1070,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
          * status and silently map a page instead of failing. */
         if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
             mm_pt_note_absent(table, 0, idx);
+        cursor_leaf_unlock(cur);
         return 0;
     }
 
@@ -898,6 +1078,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
     *pte = 0;
     mm_pt_note_absent(table, 0, idx);
     frame_put(phys_to_pfn(arch_pte_addr(old)));
+    cursor_leaf_unlock(cur);
     return 1;
 }
 
@@ -1091,11 +1272,18 @@ int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
     if (cls >= MM_ST_CLASS_MAX)
         return -EINVAL;
 
+    /* create=1: marking a reserved-but-unfaulted page is exactly the case
+     * where the leaf table may not exist yet. */
+    if (!cursor_leaf_slot(cur, addr, 1))
+        return -ENOMEM;
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
-    if (table[idx] & PTE_V)
+    if (table[idx] & PTE_V) {
+        cursor_leaf_unlock(cur);
         return -EEXIST;
+    }
     mm_pt_note_present(table, 0, idx, status_byte(cls, flags));
+    cursor_leaf_unlock(cur);
     return 0;
 }
 
@@ -1107,10 +1295,12 @@ int mm_cursor_safe_test(mm_cursor_t *cur, vaddr_t addr, unsigned flags)
 {
     if (!cur || !flags || !cursor_span_ok(cur, addr))
         return 0;
-    pte_t *table = cursor_leaf_table(cur);
-    if (!table)
+    if (!cursor_leaf_slot(cur, addr, 0))
         return 0;
-    return mm_pt_safe_test(table, 0, arch_pt_vpn(addr, 0), flags);
+    int r = mm_pt_safe_test(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
+                            flags);
+    cursor_leaf_unlock(cur);
+    return r;
 }
 
 int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
@@ -1123,6 +1313,10 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
     if (!cursor_span_ok(cur, addr))
         return -EINVAL;
 
+    /* Descend for THIS address; see mm_cursor_unmap(). */
+    pte_t *slot = cursor_leaf_slot(cur, addr, 0);
+    if (!slot)
+        return 0;               /* no leaf table here, or a larger leaf covers it */
     pte_t *table = cursor_leaf_table(cur);
     int idx = arch_pt_vpn(addr, 0);
     pte_t pte = table[idx];
@@ -1132,6 +1326,7 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         if (cls_out)
             *cls_out = MM_ST_CLS_BYTE(MM_ST_SWAPPED) |
                        mm_pt_prot_bits(arch_pte_flags(pte));
+        cursor_leaf_unlock(cur);
         return 1;
     }
 #endif
@@ -1145,10 +1340,13 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         uint8_t byte = mm_pt_peek(table, 0, idx);
         if (cls_out && MM_ST_GET_CLASS(byte) != MM_ST_INVALID)
             *cls_out = byte;
+        cursor_leaf_unlock(cur);
         return 0;
     }
-    if (!arch_pte_is_leaf(pte))
+    if (!arch_pte_is_leaf(pte)) {
+        cursor_leaf_unlock(cur);
         return 0;
+    }
 
     /* The metadata is authoritative for the class; the PTE is authoritative
      * for the frame and for the effective permission bits. */
@@ -1162,6 +1360,7 @@ int mm_cursor_query(mm_cursor_t *cur, vaddr_t addr, uint8_t *cls_out,
         *cls_out = byte;
     if (pa_out)
         *pa_out = arch_pte_addr(pte) + (addr & (PAGE_SIZE - 1));
+    cursor_leaf_unlock(cur);
     return 1;
 }
 
@@ -1316,7 +1515,8 @@ void mm_pt_mark_stale_recursive(pte_t *table, int level)
  * sanctioned consumer of a raw page-table walk outside teardown.
  */
 static uint64_t audit_table(pte_t *table, int level, int is_root,
-                            mm_pt_audit_report_t *rep)
+                            mm_pt_audit_report_t *rep, mm_struct_t *mm,
+                            vaddr_t base, int check_vma)
 {
     pt_meta_t *m = mm_pt_meta(table);
     rep->pt_pages++;
@@ -1328,6 +1528,8 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
     int entries = arch_pt_level_entries(level);
     for (int i = 0; i < entries; i++) {
         pte_t pte = table[i];
+        vaddr_t va = base + (vaddr_t)i *
+                               ((vaddr_t)PAGE_SIZE << (ARCH_PT_BITS * level));
         uint8_t byte = m->cls[i];
         uint8_t cls = MM_ST_GET_CLASS(byte);
         int cow = (m->cow[i >> 3] & (1u << (i & 7))) ? 1 : 0;
@@ -1350,7 +1552,10 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
         if (is_node) {
             if (cls != MM_ST_PT_NODE)
                 rep->present_mismatch++;
-            audit_table(arch_pte_to_ptr(pte), level - 1, 0, rep);
+            /* Accumulate this level's offset: the child table covers
+             * [va, va + span) -- passing base unchanged would report the
+             * child's entries at the wrong address. */
+            audit_table(arch_pte_to_ptr(pte), level - 1, 0, rep, mm, va, check_vma);
             continue;
         }
 
@@ -1374,8 +1579,29 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                 rep->cow_mismatch++;
         }
 
-        if (level == 0)
+        if (level == 0) {
             rep->entries++;
+            /* MM_AS_MODEL reverse direction (P8).  The loop above asks, per
+             * VMA, "does the status know about this range?".  This asks the
+             * converse for every individual leaf: if the status claims
+             * anything at all -- Mapped, COW, or reserved-but-unbacked
+             * MM_AS_ANON_VIRT -- then some VMA must account for the address.
+             *
+             * Without it a page can be mapped with no VMA covering it and the
+             * forward check still passes, because the forward check only ever
+             * starts from a VMA.  That is precisely what "the VMA list is
+             * purely derived" has to exclude, so the invariant is stated as
+             * its own counter rather than folded into vma_mismatch: a reader
+             * must be able to tell which direction broke.
+             *
+             * MM_ST_INVALID means the status claims nothing, which is exactly
+             * the case where no VMA is required -- a hole is not an omission. */
+            if (cls != MM_ST_INVALID && check_vma) {
+                vm_area_t *v = mm_find_vma(mm, va);
+                if (!v || va < v->start || va >= v->end)
+                    rep->vmai_mismatch++;
+            }
+        }
     }
     return 0;
 }
@@ -1390,7 +1616,7 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
     if (!mm || !mm->pgdir)
         return -EINVAL;
 
-    audit_table(mm->pgdir, ARCH_PT_ROOT_LEVEL, 1, rep);
+    audit_table(mm->pgdir, ARCH_PT_ROOT_LEVEL, 1, rep, mm, 0, check_vma);
 
     /* VMA cross-check.  A VMA asserts an interval is mapped; the metadata
      * asserts per page.  Different granularities, so the consistency rule is

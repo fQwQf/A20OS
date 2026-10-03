@@ -18,4 +18,12 @@ void riscv64_asid_release(uint32_t asid);
 #define ARCH_MM_ADDRESS_SPACE_TOKEN(pgdir, asid) \
     arch_make_satp_asid((pgdir), (asid))
 
+
+/* the timebase comes from the firmware DTB: QEMU virt
+ * publishes 10 MHz and StarFive JH7110 24 MHz. */
+#define ARCH_TIMER_FREQ_RUNTIME 1
+
+/* the current task pointer is kept in tp. */
+#define ARCH_FAST_CURRENT 1
+
 #endif

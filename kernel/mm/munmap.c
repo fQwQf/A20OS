@@ -123,7 +123,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                         frame_put(pfn);
                     }
                     size_t pages = size / PAGE_SIZE;
-                    mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;
+                    mm_rss_sub_clamped(mm, pages);
                 }
                 va = base + size;
             } else {
@@ -238,7 +238,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                 if (pa) {
                     frame_put(phys_to_pfn(pa));
                     size_t pages = size / PAGE_SIZE;
-                    mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;
+                    mm_rss_sub_clamped(mm, pages);
                 }
                 va = base + size;
             } else {

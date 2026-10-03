@@ -1,6 +1,8 @@
 #ifndef A20_LWIPOPTS_H
 #define A20_LWIPOPTS_H
 
+#include "net/net_profile.h"
+
 #define NO_SYS                          1
 #define SYS_LIGHTWEIGHT_PROT            1
 #define LWIP_TIMERS                     1
@@ -54,7 +56,16 @@
 #define MEMP_STATS                      1
 
 #define MEM_ALIGNMENT                   8
-#define MEM_SIZE                        (512 * 1024)
+#define MEM_SIZE                        NET_PROFILE_MEM_SIZE
+/*
+ * MEMP_MEM_MALLOC selects where memp's pools live.  Left undefined it is
+ * derived as 0, which builds every pool as a static array in .bss and makes
+ * MEM_SIZE dead -- that is how a profile that declares a 16 KiB heap ended up
+ * also carrying several hundred KiB of statically reserved pools.  Defining it
+ * explicitly costs a small allocator indirection per pool operation and makes
+ * the profile's MEM_SIZE the real bound.
+ */
+#define MEMP_MEM_MALLOC                  NET_PROFILE_MEMP_MEM_MALLOC
 /* MEMP_OVERFLOW_CHECK makes memp_malloc/memp_free assert when a pool element is
  * handed out twice or freed while still referenced.  It costs a comparison per
  * pool operation, so it stays off by default and is enabled with
@@ -69,34 +80,48 @@
 #else
 #define MEMP_OVERFLOW_CHECK            0
 #endif
-#define MEMP_NUM_PBUF                   256
-#define MEMP_NUM_RAW_PCB                16
-#define MEMP_NUM_UDP_PCB                32
-#define MEMP_NUM_TCP_PCB                64
-#define MEMP_NUM_TCP_PCB_LISTEN         16
-#define MEMP_NUM_TCP_SEG                384
+/*
+ * PCB and timer ceilings come from the selected profile.  The sys_timeout pool
+ * must cover every PCB that can hold a slow timer, which is every established
+ * PCB whenever KEEPALIVE, KEEPIDLE or KEEPINTVL is compiled in -- all three are
+ * enabled below.  tcp_pcb_alloc() returns NULL once the sys_timeout pool is
+ * exhausted, so an undersized pool shows up as accept() failing rather than as
+ * an allocation failure, which is why the ordering is asserted instead of left
+ * to be discovered under load.
+ */
+#define MEMP_NUM_PBUF                   (NET_PROFILE_PBUF_POOL_SIZE / 2)
+#define MEMP_NUM_RAW_PCB                NET_PROFILE_RAW_PCB
+#define MEMP_NUM_UDP_PCB                NET_PROFILE_UDP_PCB
+#define MEMP_NUM_TCP_PCB                NET_PROFILE_TCP_PCB
+#define MEMP_NUM_TCP_PCB_LISTEN         NET_PROFILE_TCP_PCB_LISTEN
+#define MEMP_NUM_TCP_SEG                (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT)
 #define MEMP_NUM_REASSDATA              16
 #define MEMP_NUM_FRAG_PBUF              32
-#define MEMP_NUM_ARP_QUEUE              32
+#define MEMP_NUM_ARP_QUEUE              NET_PROFILE_ARP_QUEUE
 #define MEMP_NUM_IGMP_GROUP             16
-#define MEMP_NUM_SYS_TIMEOUT            32
+#define MEMP_NUM_SYS_TIMEOUT            NET_PROFILE_SYS_TIMEOUT
 
-#define PBUF_POOL_SIZE                  256
-#define PBUF_POOL_BUFSIZE               1536
-#define TCP_MSS                         1460
+_Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
+               "every TCP PCB can hold one sys_timeo; a smaller pool makes "
+               "tcp_pcb_alloc() fail once the pool is drained");
+
+#define PBUF_POOL_SIZE                  NET_PROFILE_PBUF_POOL_SIZE
+#define PBUF_POOL_BUFSIZE               NET_PROFILE_PBUF_BUFSIZE
+#define TCP_MSS                         NET_PROFILE_TCP_MSS
 
 /*
  * lwIP leaves LWIP_WND_SCALE at 0, so the advertised window is a raw 16-bit
  * field and both directions stall at 65535 B however large TCP_WND is.  The
  * wire value is TCP_WND >> TCP_RCV_SCALE, hence TCP_WND <= 0xFFFF << the shift.
  * TCP_WND is capped by receive buffering, not by the protocol: segments park in
- * the pbuf pool, so 64 * MSS (~91 KiB, ~64 of 256 bufs) leaves 4x headroom
- * rather than risking a mid-connection pool exhaustion and the drops it causes.
+ * the pbuf pool, so a multiplier that keeps well under the pool's element count
+ * leaves headroom rather than risking a mid-connection pool exhaustion and the
+ * drops it causes.
  */
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   3
-#define TCP_WND                         (64 * TCP_MSS)
-#define TCP_SND_BUF                     (64 * TCP_MSS)
+#define TCP_WND                         (NET_PROFILE_TCP_WND_MULT * TCP_MSS)
+#define TCP_SND_BUF                     (NET_PROFILE_TCP_WND_MULT * TCP_MSS)
 #define TCP_SND_QUEUELEN                128
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_LISTEN_BACKLOG              1
@@ -106,6 +131,46 @@
  * TCP_WND would silently wrap rather than negotiate a wider window. */
 _Static_assert(TCP_WND <= (0xFFFF << TCP_RCV_SCALE),
                "TCP_WND must fit the 16-bit window field after TCP_RCV_SCALE");
+
+/* A full-size segment plus its Ethernet, IP and TCP headers must fit one
+ * PBUF_POOL element; lwIP carves the headers out of the head pbuf's payload. */
+_Static_assert(TCP_MSS + 54 <= PBUF_POOL_BUFSIZE,
+               "PBUF_POOL_BUFSIZE must leave room for headers above TCP_MSS");
+
+/* The receive window is only reachable if the pool can hold that much payload
+ * queued at once, otherwise the window advertises capacity that cannot be
+ * stored and the shortfall shows up as mid-connection drops. */
+_Static_assert(NET_PROFILE_TCP_WND_MULT <= NET_PROFILE_PBUF_POOL_SIZE,
+               "TCP_WND exceeds what the pbuf pool can hold queued");
+
+/*
+ * The pbuf pool must be allocatable out of the heap the profile declared.
+ * MEMP_MEM_MALLOC=1 makes memp_malloc() call mem_malloc() per element instead of
+ * reserving a static array, so PBUF_POOL_SIZE bounds occupancy rather than
+ * reserving it: every element in flight is a claim on MEM_SIZE.  When the ceiling
+ * exceeds the heap the pool cannot reach its declared size, MEMP_STATS reports
+ * err > 0, and the shortfall surfaces as unexplained receive drops.
+ *
+ * MEM_ALIGNMENT stands in for the element header, because memp.c builds a
+ * PBUF_POOL element as LWIP_MEM_ALIGN_SIZE(sizeof(struct pbuf)) +
+ * LWIP_MEM_ALIGN_SIZE(PBUF_POOL_BUFSIZE) and struct pbuf does not exist yet at
+ * this point in the include chain.  So this term is deliberately optimistic --
+ * 520 B against a measured 536 B on the riscv64 tier 1 build -- because
+ * understating the element is the wrong direction to fail in.  Do not "fix" it to
+ * 24 without re-measuring; the ceiling then stops holding.  Holds on all three
+ * profiles: 12480/16384, 395264/524288, 6324224/16777216.
+ *
+ * Pbuf pool only.  The other thirteen pools this config compiles in also draw on
+ * MEM_SIZE and their element sizes are lwIP struct layouts not visible yet; on
+ * riscv64 tier 1 they add 12640 B at full occupancy against 3904 B left, so
+ * tier 1's full set of pool ceilings is not simultaneously satisfiable within
+ * tier 1's own MEM_SIZE (25696 B of claims against 16384 B).  That needs the
+ * ceilings lowered, not an assertion added.
+ */
+_Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
+               "MEM_SIZE cannot back the pbuf pool at its declared "
+               "PBUF_POOL_SIZE; with MEMP_MEM_MALLOC=1 the ceiling is a claim "
+               "on the heap, so the pool would cap below the configured size");
 
 #define IP_REASSEMBLY                   1
 #define IP_FRAG                         1
@@ -127,6 +192,24 @@ _Static_assert(TCP_WND <= (0xFFFF << TCP_RCV_SCALE),
 #define PPPOE_SUPPORT                   0
 #define PPPOS_SUPPORT                   0
 #define PPPOL2TP_SUPPORT                0
+
+/* Compile in the PCB list sanity checker.  tcp_priv.h stubs tcp_pcbs_sane() to a
+   constant 1 unless one of the TCP_DEBUG* switches is set, and TCP_DEBUG_PCB_LISTS
+   is what selects the checking form of TCP_REG/TCP_RMV, so define it here rather
+   than enabling the noisy debug switches. */
+#if CONFIG_NET_PCB_SANE
+#define TCP_DEBUG_PCB_LISTS 1
+#endif
+
+#if CONFIG_NET_LOCK_ASSERT
+int  a20_lwip_lock_is_held(void);
+void a20_lwip_note_lock_violation(void *site);
+#define LWIP_ASSERT_CORE_LOCKED() \
+    do { if (!a20_lwip_lock_is_held()) \
+             a20_lwip_note_lock_violation(__builtin_return_address(0)); } while (0)
+#else
+#define LWIP_ASSERT_CORE_LOCKED()
+#endif
 
 #define LWIP_RAND()                     ((u32_t)random_u64())
 

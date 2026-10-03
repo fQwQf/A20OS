@@ -183,8 +183,8 @@ log = ".kernel-build/console/board.log"   # 仓库相对路径
 | `test` | 通用 QEMU 架构 + `[test].expect` 必填 |
 | `flash` | 需要 `[flash].tool` 指向已注册后端，且实例的 board 与 flash 几何在后端允许范围内；先构建再烧录 |
 | `console` | 需要 `[target]` 段：接串口、可选复位、等 `console_check`、注入 `commands`、断言 `expect`、落盘 transcript |
-| `deploy` | 需要 `[target]`；有 `[flash]` 则先烧录，`boot_media` + `media_device` 则先写启动介质，最后同 `console` 验证 |
-| `package` | 需要 `[package].kind`：`grub-iso`（x86_64）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64） |
+| `deploy` | 需要 `[target]`，并且**有东西可以放到板子上**：要么 `boot_media` + `media_device` 配对，要么 `[handoff].commands`（无块驱动的板走这条路）。有 `[flash]` 则先烧录，然后写启动介质或打印 handoff 命令，最后同 `console` 验证 |
+| `package` | 需要 `[package].kind`：`grub-iso`（x86_64，variant `vbox`（默认）/ `rescue-usb`）、`grub-disk`（x86_64 可直接启动的 GRUB 磁盘）、`uefi-disk`（x86_64 可直接启动的 BOOTX64.EFI 磁盘）、`uefi-image`（board=virtualbox-aarch64，variant default/text）、`fit-sdcard`（board=visionfive2，variant minimal/sdcard）、`release`（riscv64/loongarch64）、`kernel-bundle`（无块驱动的板，产出 handoff 目录而非可写镜像） |
 
 VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在 `tools/targets-build.mk` 的 `vf2-*` 目标里。实例提供经过校验的板卡身份与统一入口，编排逻辑不复制进 Python。使用前先按 [platforms/visionfive2-boot.md](platforms/visionfive2-boot.md) 跑一次 `make vf2-firmware`。
 
@@ -268,6 +268,42 @@ tools/a20 deploy  vf2-physical    # 烧录 + 写启动介质 + 上板验证
 - `target-write-media` 在 `dd` 之前检查三件事：目标存在、是块设备、且没有挂载。写错节点是这条路径上唯一不可回退的失误，而内核报 "device busy" 是发现得太晚。
 - `target.log` 必须是仓库相对路径，否则控制台日志会带上某一台机器的绝对路径，正是「产物账本」一节要消灭的那类东西。
 - 设了 `commands` 就必须设 `expect`：没有断言的上板检查只可能空洞通过。
+
+## 无块驱动的板怎么部署（`[handoff]`）
+
+`deploy` 的每一步都对应一个既有机制，而这些机制都假设**有可写介质**：烧录走烧录后端，写启动介质走 `target-write-media`。一块 SD 控制器还没有驱动的板没有介质可写，于是它既没有可打包的产物，`deploy` 也就只剩下「编个内核，然后连上一台什么都没拿到东西的板子的串口」。
+
+`[handoff]` 就是为这种板补的最后一公里。
+
+```bash
+tools/a20 package licheerv-nano    # 产出 build/licheerv-nano/handoff/
+tools/a20 deploy  licheerv-nano    # 构建 + 打包 + 打印该敲的命令 + 串口验证
+```
+
+`a20 package` 写出一个目录：`kernel.bin`、`uboot.cmd`（要在 U-Boot 提示符下敲的准确命令）、以及一份随产物走的 `README.md`。
+
+```toml
+[package]
+kind = "kernel-bundle"
+
+[handoff]
+method = "tftp"
+commands = [
+    "tftp ${loadaddr} kernel.bin",
+    "booti ${loadaddr} - ${loadaddr}",
+]
+note = "这些命令未经验证：这块板从未在 A20OS 下上电过。"
+```
+
+两个设计上的选择值得说明：
+
+**载入地址不在清单里。** `a20 package` 从刚编出来的内核 ELF 的第一个 `PT_LOAD` 头里读出来，写进 `uboot.cmd`。板级 ldscript 会挪镜像（VisionFive 2 就挪到了 `0x40200000`），把地址抄进清单等于多一份会过期的副本。
+
+**不打包 DTB。** 这一族板子走 vendor FSBL → OpenSBI → U-Boot，U-Boot 用 `a1` 传自己的板级 DTB，而那正是 `riscv64_memory_init()` 和平台设备树遍历读的东西。从内核树再打包一份，只是多一个要和固件同步、而同步坏了没人会发现的副本。
+
+`a20 deploy` 只打印命令，不代敲。让 `a20` 越过串口去驱动 boot chain 意味着去操作一条它并不拥有的线路；边界就划在这里——打包产物、打印命令、再由 `console_check` 判断结果。而命令写在清单里，就意味着仓库里的命令和板子上敲的命令是同一份。
+
+没有 `[handoff].commands` 也没有可写介质的实例，`deploy` 不会被 `a20 show` 列出。这不是新约束，是原有 guard 的漏洞：它此前只检查 `boot_media` 与 `media_device` 不是半声明状态，**两个都没有反而通过**。
 
 ## 边角但必要的开关
 
@@ -569,6 +605,7 @@ world_size_mb = 4096
 | `make run-stm32f103-qemu` | `tools/a20 run stm32f103-qemu` |
 | `make flash-stm32f103-xuanwu` | `tools/a20 flash stm32f103-xuanwu` |
 | `make vbox-iso-x86_64` | `tools/a20 package vbox-iso-x86_64` |
+| `make x86_64-uefi-disk` / `pc-rescue-disk` | `tools/a20 package vbox-x86_64` / `vbox-disk-x86_64` |
 | `make vbox-image-aarch64` / `vbox-text-image-aarch64` | `tools/a20 package vbox-aarch64` / `vbox-aarch64-text` |
 | `make vf2-minimal` / `vf2-sdcard` | `tools/a20 package vf2-minimal` / `vf2-sdcard` |
 | `make release-rv` / `release-la` | `tools/a20 package release-riscv64` / `release-loongarch64` |

@@ -8,9 +8,19 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/lock_counters.h"
+#include "core/perf.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
+/* Optional driver facility, resolved weakly for the same reason
+ * core/progress.c resolves virtio_net_poll_rx_all_bounded weakly: virtio-net
+ * may be absent or supplied as a loadable .a20drv, and the stack must build and
+ * run either way.  Checked for non-NULL before use, so an absent driver leaves
+ * the counters out rather than reporting zeros that look like a quiet link. */
+extern void virtio_net_dev_stats(struct device *dev,
+                                 net_dev_stats_t *out) __attribute__((weak));
+
+#include "core/cpu.h"
 #include "lwip/init.h"
 #include "lwip/netif.h"
 #include "lwip/timeouts.h"
@@ -18,6 +28,7 @@
 #include "lwip/memp.h"
 #include "lwip/udp.h"
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/raw.h"
 #include "lwip/dns.h"
 #include "lwip/dhcp.h"
@@ -26,6 +37,11 @@
 #include "lwip/ip6_addr.h"
 #include "netif/ethernet.h"
 #include "netif/etharp.h"
+
+/* Defined far below, next to the other /proc row formatters.  Declared here
+ * because a20_lwip_format_status() appends its lane line with it. */
+static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
+                            const char *row);
 
 /*
  * LWIP_NO_THREAD_PROGRESS_CONTRACT:
@@ -45,11 +61,31 @@
  *   acquire g_net_lock.
  * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
  *   runs the socket deferred bottom-half (net_inet_bottom_half_process_all)
- *   under g_net_lock only.  This is the only generic path that may transition
- *   from g_lwip_lock to g_net_lock, and the two locks are never held together.
+ *   under g_net_lock only.
+ *
+ * That comment used to add "the two locks are never held together", and the
+ * lane work reasoned from it.  It is false.  net_inet_bottom_half_process_all()
+ * takes g_net_lock (socket_inet.c:871) and calls the accept drain inside that
+ * region, and net_inet_accept_stage_drain() takes a20_lwip_lock() at
+ * socket_inet.c:607,616,640 -- so g_net_lock and g_lwip_lock ARE held together,
+ * in that order, on the accept path.
+ *
+ * Order matters and is currently only one-way: nothing takes g_lwip_lock and
+ * then g_net_lock, so there is no ABBA cycle today.  Any future path that does
+ * -- which stage D wants, since draining a receive ring per lane wants to touch
+ * socket state -- deadlocks against this one.  Treat net->lwip as the fixed
+ * order.  See docs/net/network-lock-contract.md.
  */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
+#define A20_LWIP_LOCK_UNOWNED 0xffffffffu
+#define A20_LWIP_LOCK_SITES 8
+#if CONFIG_NET_LOCK_ASSERT
+static volatile unsigned g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
+static unsigned g_lwip_lock_violations;
+static void *g_lwip_lock_sites[A20_LWIP_LOCK_SITES];
+static unsigned g_lwip_lock_nsites;
+#endif /* CONFIG_NET_LOCK_ASSERT */
 #define A20_NET_MAX_DEVS 4
 
 /*
@@ -65,7 +101,26 @@ static volatile unsigned g_lwip_rx_pending;
 
 int a20_lwip_rx_pending_any(void)
 {
-    return __atomic_load_n(&g_lwip_rx_pending, __ATOMIC_ACQUIRE) != 0;
+    if (__atomic_load_n(&g_lwip_rx_pending, __ATOMIC_ACQUIRE) != 0)
+        return 1;
+    /*
+     * A queued loopback packet is work in exactly the sense the hint means, and
+     * leaving it out starves the loopif.  netif_loop_output() only enqueues onto
+     * netif->loop_first; netif_poll() is the sole drain, and netif_poll() is
+     * only reached from the a20_lwip_poll_* family, which this gate otherwise
+     * skips.  A loopback TCP transfer raises no device RX, so with the gate
+     * closed on the device hint alone the SYN sits in loop_first forever and the
+     * connecting task parks until its timeout.  Reading loop_first here is safe
+     * without g_lwip_lock: it is a NULL check on a pointer the producer publishes
+     * under SYS_ARCH_PROTECT, and a false positive only costs one extra
+     * acquisition, which is what the gate is trying to avoid but cannot do by
+     * lying about pending work.
+     */
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->loop_first != NULL)
+            return 1;
+    }
+    return 0;
 }
 
 void a20_lwip_signal_rx_pending(void)
@@ -133,6 +188,8 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
     if (r == (int)p->tot_len) {
         st->tx_packets++;
         st->tx_bytes += p->tot_len;
+        a20_perf_count(A20_PERF_NET_TX_PACKETS);
+        a20_perf_add(A20_PERF_NET_TX_BYTES, p->tot_len);
         return ERR_OK;
     }
     st->tx_errors++;
@@ -253,7 +310,12 @@ static void a20_lwip_register_netifs(void) {
             printf("[LWIP] failed to add %s\n", dev->name ? dev->name : "net");
             continue;
         }
-        netif_set_default(n);
+        /* First one registered becomes the default, as on Linux.  Calling
+         * this unconditionally per iteration let the last device enumerated
+         * win, so a multi-NIC host silently routed through whichever happened
+         * to probe last. */
+        if (!netif_default)
+            netif_set_default(n);
         netif_set_up(n);
         a20_lwip_sync_link_state(n);
 #if LWIP_IPV6
@@ -308,9 +370,12 @@ void a20_lwip_init(void) {
     lock_counters_enable_callsite(&g_lwip_lock);
     lwip_init();
     a20_lwip_register_netifs();
-    /* Add loopback after physical links.  lwIP prepends netifs to its list;
-     * keeping loopback last here leaves hardware first for polling code and
-     * for diagnostics which inspect netif_list. */
+    /* Add loopback after physical links.  lwIP prepends to netif_list, so
+     * loopback ends up at the *head* -- the previous comment here claimed the
+     * opposite and that hardware was left first.  Nothing depends on the
+     * order either way: the poll loops walk the entire list and the IRQ path
+     * matches on st->idx, so this is about keeping the hardware netifs
+     * adjacent in diagnostics output, not about polling precedence. */
     a20_lwip_register_loopif();
     g_lwip_ready = 1;
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
@@ -328,37 +393,89 @@ void a20_lwip_attach_netifs(void)
 
 uint64_t a20_lwip_lock(void)
 {
-    return spin_lock_irqsave(&g_lwip_lock);
+    uint64_t flags = spin_lock_irqsave(&g_lwip_lock);
+    a20_perf_count(A20_PERF_NET_LOCK_ACQUIRES);
+#if CONFIG_NET_LOCK_ASSERT
+    g_lwip_lock_owner = cpu_current_id();
+#endif
+    return flags;
 }
 
 void a20_lwip_unlock(uint64_t flags)
 {
+#if CONFIG_NET_LOCK_ASSERT
+    g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
+#endif
     spin_unlock_irqrestore(&g_lwip_lock, flags);
 }
 
-static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
+#if CONFIG_NET_LOCK_ASSERT
+int a20_lwip_lock_is_held(void)
+{
+    return g_lwip_lock_owner == cpu_current_id();
+}
+
+void a20_lwip_note_lock_violation(void *site)
+{
+    __atomic_fetch_add(&g_lwip_lock_violations, 1, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < A20_LWIP_LOCK_SITES; i++) {
+        if (__atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED) == site)
+            return;
+        if (__atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED) == NULL) {
+            __atomic_store_n(&g_lwip_lock_sites[i], site, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_lwip_lock_nsites, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
+unsigned a20_lwip_lock_violations(void)
+{
+    return __atomic_load_n(&g_lwip_lock_violations, __ATOMIC_RELAXED);
+}
+#endif
+
+/*
+ * Drain one netif's receive ring.  `budget` caps how many packets this call
+ * processes and 0 means no cap, which is what the IRQ top-half and the
+ * scheduler path want: both are the primary reason the ring gets drained.
+ *
+ * Returns 0 when the budget ran out with packets still queued.  A caller that
+ * stops early must leave the RX pending flag set, because the interrupt that
+ * would have drained the remainder has already been consumed.
+ */
+static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
 {
     if (!n || !n->state)
-        return;
+        return 1;
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
     a20_lwip_sync_link_state(n);
 
     if (!netif_is_link_up(n)) {
         netif_poll(n);
-        return;
+        return 1;
     }
 
+    int drained = 1;
+    unsigned done = 0;
     for (;;) {
+        if (budget && done >= budget) {
+            drained = 0;
+            break;
+        }
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
         if (len <= 0)
             break;
+        done++;
         /* recv() was handed sizeof(rx_frame), so this only fires if a driver
          * over-reports; without it an over-report reads past rx_frame below. */
         if ((size_t)len > sizeof(st->rx_frame))
             len = (int)sizeof(st->rx_frame);
         st->rx_packets++;
         st->rx_bytes += (uint64_t)len;
+        a20_perf_count(A20_PERF_NET_RX_PACKETS);
+        a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
                             (size_t)len);
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
@@ -366,6 +483,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
             LINK_STATS_INC(link.memerr);
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
+            a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
             continue;
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
@@ -393,6 +511,7 @@ static void a20_lwip_process_netif_rx_tx_locked(struct netif *n)
         }
     }
     netif_poll(n);
+    return drained;
 }
 
 /*
@@ -418,33 +537,76 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
             continue;
         a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
         if (st->idx == net_idx) {
-            a20_lwip_process_netif_rx_tx_locked(n);
+            /* Unbounded: this interrupt is the primary reason the ring needs
+             * draining, so deferring here would only move the work. */
+            a20_lwip_process_netif_rx_tx_locked(n, 0);
             break;
         }
     }
 }
 
-void a20_lwip_poll_locked(void) {
+/*
+ * Timer advance only: no device is touched and no packet is processed, so the
+ * critical section stays short enough for the timer-interrupt path that calls
+ * it.  kernel_progress_timer_tick() runs on every CPU 0 tick, and it used to
+ * reach the receive drain from there, which put up to a ring's worth of
+ * protocol processing inside an interrupt with interrupts disabled.
+ */
+void a20_lwip_poll_timers_locked(void)
+{
     if (!g_lwip_ready)
         return;
     sys_check_timeouts();
     a20_net_config_sync_from_lwip();
+    /*
+     * Drain queued loopback packets here, and not only from a20_lwip_poll().
+     * netif_poll() is the sole drain for netif->loop_first, and this tick is
+     * the only progress driver that runs regardless of what any task or device
+     * is doing -- kernel_progress_poll() and the reader path both reach it by
+     * choice, and neither choice is made when a task is parked in connect()
+     * waiting for a handshake that only a loopback packet can complete.  Without
+     * this the SYN sits in loop_first until the connect timeout expires.
+     *
+     * Guarded on loop_first so an idle system does no work here beyond the
+     * pointer walk, and bounded by LWIP_LOOPBACK_MAX_PBUFS on how much can be
+     * released per tick.
+     */
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->loop_first != NULL)
+            netif_poll(n);
+    }
+}
+
+/* Device completions plus the receive drain.  `budget` of 0 means no cap. */
+void a20_lwip_poll_rx_locked(unsigned budget)
+{
+    if (!g_lwip_ready)
+        return;
     for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
         a20_lwip_netif_state_t *st = &g_netif_state[i];
         if (st->dev && st->ops && st->ops->poll)
             st->ops->poll(st->dev);
     }
+    int complete = 1;
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state) {
-            a20_lwip_process_netif_rx_tx_locked(n);
+            if (!a20_lwip_process_netif_rx_tx_locked(n, budget))
+                complete = 0;
         } else {
             netif_poll(n);
         }
     }
-    a20_lwip_clear_rx_pending();
+    if (complete)
+        a20_lwip_clear_rx_pending();
+}
+
+void a20_lwip_poll_locked(void) {
+    a20_lwip_poll_timers_locked();
+    a20_lwip_poll_rx_locked(0);
 }
 
 void a20_lwip_poll(void) {
+    a20_perf_count(A20_PERF_NET_POLL_CALLS);
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
@@ -482,6 +644,8 @@ void a20_lwip_poll_waiter(void) {
         uint64_t flags = a20_lwip_lock();
         a20_lwip_poll_locked();
         a20_lwip_unlock(flags);
+    } else {
+        a20_perf_count(A20_PERF_NET_POLL_SKIPPED);
     }
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();
@@ -540,16 +704,82 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
         (unsigned)lwip_stats.link.drop,
         (unsigned)lwip_stats.link.chkerr,
         (unsigned)lwip_stats.link.memerr);
+    /* TCP timer firings.  tcp_ticks advances exactly once per tcp_tmr() call, so
+     * at TCP_TMR_INTERVAL it directly witnesses how often the TCP timer ran.
+     * Reported because the cadence is an invariant a caller can break with no
+     * compile error: driving the timer work from a faster path makes
+     * retransmission timers expire early and tears down live connections. */
+    u32_t tmr_fired = tcp_ticks;
+
     a20_lwip_unlock(flags);
     if (n < 0)
         return 0;
     if ((size_t)n >= bufsz)
         return (int)bufsz - 1;
-    return n;
+
+    /*
+     * Lane occupancy, appended after g_lwip_lock is dropped: sockets live under
+     * g_net_lock.  The drop above is what keeps the order one-way -- the accept
+     * path nests net -> lwip, so anything that nests the other way round would
+     * deadlock against it.  A gateway / netconf
+     * line, not a hot counter -- this exists so that "did the lanes actually
+     * spread the connections" is answerable without attaching a debugger, which
+     * is the question every later stage depends on.
+     */
+    unsigned lanes[CONFIG_NET_LANES];
+    unsigned total = 0;
+    memset(lanes, 0, sizeof(lanes));
+    uint64_t nflags = spin_lock_irqsave(&g_net_lock);
+    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+        net_socket_t *s = g_sockets[i];
+        if (!s || !net_socket_is_valid_locked(s))
+            continue;
+        unsigned l = s->lane;
+        if (l < CONFIG_NET_LANES)
+            lanes[l]++;
+        total++;
+    }
+    spin_unlock_irqrestore(&g_net_lock, nflags);
+
+    size_t off = (size_t)n;
+    char cell[128];
+    snprintf(cell, sizeof(cell),
+             "\nlanes: count=%u sockets=%u occupancy:", CONFIG_NET_LANES, total);
+    a20_lwip_append(buf, bufsz, &off, cell);
+    for (unsigned i = 0; i < CONFIG_NET_LANES; i++) {
+        char num[16];
+        snprintf(num, sizeof(num), " %u", lanes[i]);
+        a20_lwip_append(buf, bufsz, &off, num);
+    }
+    a20_lwip_append(buf, bufsz, &off, "\n");
+    snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
+    a20_lwip_append(buf, bufsz, &off, cell);
+#if CONFIG_NET_LOCK_ASSERT
+    snprintf(cell, sizeof(cell), "\nlwip_lock: owner=%u violations=%u sites=%u\n",
+             g_lwip_lock_owner, a20_lwip_lock_violations(), g_lwip_lock_nsites);
+    a20_lwip_append(buf, bufsz, &off, cell);
+    for (unsigned i = 0; i < A20_LWIP_LOCK_SITES; i++) {
+        void *site = __atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED);
+        if (!site)
+            break;
+        snprintf(cell, sizeof(cell), "lwip_lock_site%u: %lx\n", i,
+                 (unsigned long)(uintptr_t)site);
+        a20_lwip_append(buf, bufsz, &off, cell);
+    }
+#else
+    /* Say it is off.  Printing violations=0 without that would read as "none
+     * found" when it means "nothing was checked". */
+    snprintf(cell, sizeof(cell),
+             "\nlwip_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)\n");
+    a20_lwip_append(buf, bufsz, &off, cell);
+#endif
+    return (int)off;
 }
 
 /* core/printf.c has no '-' flag, so rows are assembled in a local buffer and
  * appended by hand rather than with a single wide snprintf. */
+static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
+                            const char *row);
 static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
                             const char *row)
 {
@@ -649,6 +879,23 @@ int a20_lwip_format_net_dev(char *buf, size_t bufsz)
                  st ? st->tx_bytes : 0ULL, st ? st->tx_packets : 0ULL,
                  st ? st->tx_errors : 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL);
         a20_lwip_append(buf, bufsz, &off, row);
+
+        /* Driver-level counts, when the driver publishes them.  A separate line
+         * rather than extra columns because these count what the device moved
+         * while the block above counts what lwIP was handed, and the two
+         * diverging is how a loss between the ring and the protocol stack gets
+         * localized.  The symbol is weak: it is absent, not zero, when the
+         * driver is not loaded. */
+        if (virtio_net_dev_stats && st && st->dev) {
+            net_dev_stats_t ds;
+            memset(&ds, 0, sizeof(ds));
+            virtio_net_dev_stats(st->dev, &ds);
+            snprintf(row, sizeof(row),
+                     "%s-drv: rx %llu pkts %llu drops, tx %llu pkts %llu drops\n",
+                     name, ds.rx_packets, ds.rx_drops,
+                     ds.tx_packets, ds.tx_drops);
+            a20_lwip_append(buf, bufsz, &off, row);
+        }
     }
     a20_lwip_unlock(flags);
     return (int)off;
@@ -680,11 +927,22 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
     uint64_t flags = a20_lwip_lock();
     size_t off = 0;
 
-    /* The column is lwIP's `avail`, which memp_init_pool() sets to the pool
-     * size and no path ever decrements -- it is capacity, not live
-     * availability, so it is not labelled `avail`. */
+    /*
+     * `elem` is lwIP's desc->size, the bytes one element occupies.
+     *
+     * It deliberately does not report a per-pool capacity.  memp's `avail`
+     * used to serve that role and read desc->num, but desc->num only exists in
+     * the statically reserved pool layout: with MEMP_MEM_MALLOC=1 memp_init_pool()
+     * is an empty stub and `avail` is never written, so printing it yielded a
+     * column of silent zeros.  Under MEMP_MEM_MALLOC the pools draw from the
+     * lwIP heap instead, so the honest bound is MEM_SIZE rather than a per-pool
+     * element count, and the per-pool exhaustion signal is `err`.
+     *
+     * used, max and err are maintained unconditionally by memp_malloc_pool()
+     * and memp_free_pool(), so they stay meaningful in either mode.
+     */
     a20_lwip_append(buf, bufsz, &off,
-        "pool             size    used     max    err\n");
+        "pool             elem    used     max    err\n");
 
     for (size_t i = 0; i < npools; i++) {
         const struct memp_desc *desc = memp_pools[pools[i].pool];
@@ -701,7 +959,7 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         name[NAME_COL] = '\0';
 
         snprintf(row, sizeof(row), "%s%6lu%7lu%8lu%6lu\n", name,
-                 (unsigned long)desc->stats->avail,
+                 (unsigned long)desc->size,
                  (unsigned long)desc->stats->used,
                  (unsigned long)desc->stats->max,
                  (unsigned long)desc->stats->err);

@@ -100,10 +100,7 @@ int driver_descriptor_read(int fd, a20_driver_descriptor_t *out)
         if (vfs_pread(fd, (char *)out, sizeof(*out), sh->sh_offset) !=
             (int)sizeof(*out))
             return -ENOEXEC;
-        if (out->magic != A20_DRIVER_DESCRIPTOR_MAGIC ||
-            out->version != A20_DRIVER_DESCRIPTOR_VERSION ||
-            out->match_count > A20_DRIVER_MAX_MATCH ||
-            !out->name[0])
+        if (!a20_driver_descriptor_sane(out))
             return -ENOEXEC;
         return 0;
     }

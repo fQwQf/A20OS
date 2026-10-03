@@ -8,11 +8,13 @@
 #include "fs/procfs.h"
 #include "fs/ext4_journal.h"
 #include "net/netfilter.h"
+#include "net/net_config.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "core/klog.h"
 #include "core/panic.h"
 #include "core/perf.h"
+#include "core/lock_counters.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
@@ -887,6 +889,20 @@ static int procfs_parse_map(const char *buf, size_t count, uint32_t *ext)
     return next;
 }
 
+/*
+ * Strip the trailing newline a shell `echo` appends, plus any other trailing
+ * whitespace.  Without this every keyword command reached through `echo >` fails
+ * its strcmp, because the buffer is "reset\n" rather than "reset" -- which is
+ * how a reset entry point can exist and still be unreachable from a shell.
+ */
+static void procfs_chomp(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
+                     s[n - 1] == ' ' || s[n - 1] == '\t'))
+        s[--n] = '\0';
+}
+
 static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
@@ -932,6 +948,15 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         return r < 0 ? r : (int)count;
     }
     if (p->type == PF_A20_PERF) {
+        char tmp[16];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        procfs_chomp(tmp);
+        if (strcmp(tmp, "reset") == 0) {
+            a20_perf_reset();
+            return (int)count;
+        }
         if (count == 0 || (buf[0] != '0' && buf[0] != '1'))
             return -EINVAL;
         __atomic_store_n(&g_a20_perf_enabled, buf[0] == '1',
@@ -949,11 +974,30 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             return -EINVAL;
         return ext4_journal_set_crash_point(tmp) < 0 ? -EINVAL : (int)count;
     }
+    if (p->type == PF_NET_CONFIG) {
+        int r = a20_net_config_write(buf, count);
+        if (r < 0)
+            return r;
+        return (int)count;
+    }
+    if (p->type == PF_A20_LOCK_CONTENTION) {
+        char tmp[16];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        procfs_chomp(tmp);
+        if (strcmp(tmp, "reset") == 0) {
+            lock_counters_reset();
+            return (int)count;
+        }
+        return -EINVAL;
+    }
     if (p->type == PF_A20_NETFILTER) {
         char tmp[192];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
         memcpy(tmp, buf, n);
         tmp[n] = '\0';
+        procfs_chomp(tmp);
         if (strcmp(tmp, "reset") == 0) {
             netfilter_reset();
             return (int)count;

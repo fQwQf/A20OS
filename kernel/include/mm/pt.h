@@ -32,6 +32,28 @@
  *     return to userspace.  pt_walk()/pt_lookup_leaf() remain as
  *     non-authoritative helpers for teardown, auditing and /proc reporting,
  *     where no mutation follows.
+ *
+ *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES names the functions that break rule 1
+ *     today, with what is actually holding them safe.  The list is not
+ *     decoration: removing mm->lock from a fault path without accounting for it
+ *     turns each entry into a concurrent unlocked RMW against cursor-locked
+ *     faults on the same leaf.  That is not hypothetical -- it is what the
+ *     Phase 3 attempt hit (see docs/roadmap/single-level-mm-model.md 11.7
+ *     item 1).  A new bypass has to be added here, which is what makes it a
+ *     decision rather than an oversight; check-mm-pt-lock-order asserts the list
+ *     still matches the code.
+ *
+ *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES
+ *       pt_unmap_leaf   mm.c   no cursor; every mutation under mm_pt_node_lock
+ *       pt_unmap        mm.c   no cursor; every mutation under mm_pt_node_lock
+ *
+ *     These two do not satisfy rule 1 as written -- they are not cursors and
+ *     hold no range-wide atomicity, which is why they stay listed instead of
+ *     being quietly declared compliant.  What they do guarantee is the part
+ *     rule 3 asks for: every write takes the lock of the PT page being written,
+ *     the same page cursor_leaf_slot() locks, so a fault and an unmap of one
+ *     address exclude each other.  The gate checks each listed function still
+ *     brackets its writes with that lock, so dropping it fails the build.
  *  2. Every page-table WRITE allocates intermediate page-table pages only
  *     through the cursor, and every such allocation installs a metadata
  *     block (pt_meta_t) so the covering node always has a lock.
@@ -72,6 +94,35 @@
  * existing PTE_SWAP already steals a hardware-meaningful bit per
  * architecture, which is precisely the hazard a general status encoding
  * would multiply.
+ *
+ * MM_AS_MODEL -- PTE_SWAP is THE ONE tolerated exception (2026-10-02)
+ * ------------------------------------------------------------------ *
+ * Unlike the status byte, the swapped bit is *not* moved into metadata:
+ * pte_to_swp_entry() recovers a 44-bit payload on 64-bit architectures,
+ * which does not fit the one-byte status and would require widening it to
+ * 8 bytes per entry -- 4 KiB of overhead per PT page, prepaid on pages
+ * that will never hold a swapped-out page.  The paper specifies no
+ * replacement encoding, so removing PTE_SWAP is not "following the paper"
+ * but an undesigned format change.  Decision and measurements:
+ * docs/roadmap/single-level-mm-model.md (P7 record).
+ *
+ * The exception is arch-dependent, and on three of six architectures it is
+ * larger than "one bit":
+ *
+ *   x86_64 / aarch64 / loongarch64   PTE_SWAP == PTE_LEAF (leaf marker)
+ *   riscv64                          1UL << 9
+ *   arm32                            1U << 7
+ *   ppc64le                          0x2
+ *
+ * i.e. on the first group the encoding is !PTE_V && PTE_SWAP ==> swapped,
+ * so the bit being reused is the most semantically loaded one in a leaf
+ * PTE, not a spare software bit.
+ *
+ * The invariant is therefore narrowed, not dropped: PTE_SWAP is the ONLY
+ * overloaded bit, and every architecture must define it explicitly.
+ * check-mm-pt-lock-order asserts this per architecture.  The hazard worth
+ * guarding against is not this bit's existence -- it being read as licence
+ * to take one more.
  */
 #define MM_ST_INVALID        0u  /* no mapping, no backing */
 #define MM_ST_ANON_VIRT      1u  /* virtually allocated, not yet backed */
@@ -162,13 +213,28 @@ struct mm_struct;
  * pt_walk() it replaces, and -- once mm->lock no longer serialises mutators
  * in P5 -- a re-descent could observe a path that a concurrent unmap has
  * already unlinked.  Caching is what makes the cursor a single-descent
- * primitive, and it is why the lock must cover the whole subtree (P3).
+ * primitive.
  *
- * P3: the cursor also holds a lock on EVERY descendant of the covering node
- * (preorder DFS), and releases them in exactly reverse order.  Two cursors
- * conflict iff their ranges' covering nodes are equal or ancestor/descendant,
- * which is precisely the paper's concurrency semantics: disjoint ranges run
- * in parallel, overlapping ranges serialise.
+ * Locking, precisely (this used to claim a preorder DFS over the whole
+ * subtree, which the code never did):
+ * - The cursor holds the COVERING node's lock for its whole lifetime.  That
+ *   alone does NOT exclude a peer whose covering node is an ancestor or
+ *   descendant: a wide cursor (covering level 2) and a single-page cursor
+ *   (covering level 0) inside it would hold disjoint locks while writing the
+ *   same leaf PTE and the same pt_meta_t.cls[] byte.
+ * - Every leaf the cursor actually touches is therefore locked individually
+ *   and released at the end of that one operation (cursor_leaf_slot /
+ *   cursor_leaf_unlock).  Since every write targets a single leaf entry, that
+ *   is what makes two cursors conflict exactly when they touch the same leaf.
+ * - A wide cursor visits many leaves and cannot hold them all at once -- the
+ *   per-CPU held[] stack has PT_MCS_POOL_SLOTS entries -- hence per-operation
+ *   rather than per-transaction acquisition.
+ * - Intermediate nodes are installed under the parent's lock and released
+ *   immediately.  A single aligned PTE store publishes the new child, so a
+ *   concurrent reader sees either "absent" or a valid child, never a torn one.
+ *   The read-side bracket (mm->pt_readers) keeps an already-cached page from
+ *   being recycled underneath the descent; `stale` makes a cursor that lost a
+ *   race abandon the node and re-descend.
  */
 #define MM_CURSOR_PATH_MAX (ARCH_PT_ROOT_LEVEL + 1)
 
@@ -184,6 +250,10 @@ typedef struct mm_cursor {
      * without the cursor having to store one entry per locked node. */
     int               lock_base_depth;
     int               in_read_side;   /* holds mm->pt_readers */
+    /* Leaf table locked by the in-flight cursor operation, released by
+     * cursor_leaf_unlock().  Not part of the unwind: exactly one is held at a
+     * time, for the duration of a single map/unmap/mark/query. */
+    struct pt_meta   *leaf_meta;
 } mm_cursor_t;
 
 /* The report is plain data so NOMMU builds can still reference the type and
@@ -245,6 +315,7 @@ typedef struct mm_pt_audit_report {
     uint64_t prot_mismatch;  /* permission bits disagree with the PTE */
     uint64_t cow_mismatch;   /* COW bit disagrees with PTE_COW */
     uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
+    uint64_t vmai_mismatch;  /* status claims a page no VMA accounts for */
     uint64_t safe_mismatch;  /* MM_SAFE_NO_FA disagrees with VM_SEALED */
     /* Not an error: how many leaves carry MM_AS_ANON_VIRT, i.e. are reserved
      * but not yet backed.  This is the on-demand paging state the paper
@@ -257,6 +328,7 @@ static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 {
     return r->missing_meta + r->present_mismatch + r->absent_mismatch +
            r->prot_mismatch + r->cow_mismatch + r->vma_mismatch +
+           r->vmai_mismatch +
            r->safe_mismatch;
 }
 
@@ -268,6 +340,8 @@ pt_meta_t *mm_pt_meta(pte_t *table);
 static inline int mm_pt_meta_level(const pt_meta_t *m) { return m->level; }
 static inline int mm_pt_meta_stale(const pt_meta_t *m)  { return m->stale; }
 void mm_pt_meta_set_stale(pt_meta_t *m, int stale);
+void mm_pt_node_lock(pte_t *table);
+void mm_pt_node_unlock(pte_t *table);
 
 /* The table that owns the leaf slot for addr, i.e. the parent of the leaf.
  * This is the table whose metadata array describes that virtual page -- NOT

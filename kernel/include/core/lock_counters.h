@@ -20,4 +20,9 @@ size_t lock_counters_format(char *buf, size_t bufsz);
 
 void lock_counters_init(void);
 
+/* Zero the counters of every registered lock, keeping the registrations (and
+ * the allocated per-callsite tables) intact.  Lets one run own its measurement
+ * window instead of inferring it by subtracting two cumulative reads. */
+void lock_counters_reset(void);
+
 #endif /* _CORE_LOCK_COUNTERS_H */

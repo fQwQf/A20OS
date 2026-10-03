@@ -153,10 +153,28 @@ static void vbox_aa64_early_init(void) {
 /* The UEFI handoff currently has no command-line channel.  Use VBox NAT's
  * documented guest subnet directly so networking does not depend on timer
  * driven DHCP retries while this board still uses its software timer. */
+/*
+ * The loader hands over whatever the firmware passed as LoadOptions, which is how
+ * every other A20OS platform receives its command line and how a root= for a
+ * second Alpine disk gets here at all.  Falling back to a compiled-in string
+ * when the firmware supplied nothing keeps a bare `a20 run` working, which is
+ * the common case; it is a default, not the mechanism.
+ */
+extern uint64_t aarch64_boot_cmdline;
+
 const char *arch_bootargs_get(void) {
-    return "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
-           "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
-           "a20.hostname=a20os-vbox";
+    static const char defaults[] =
+        "a20.ip=10.0.2.15 a20.netmask=255.255.255.0 "
+        "a20.gateway=10.0.2.2 a20.dns=10.0.2.3 "
+        "a20.hostname=a20os-vbox";
+
+    if (aarch64_boot_cmdline) {
+        const char *cmdline =
+            (const char *)(uintptr_t)(aarch64_boot_cmdline + PAGE_OFFSET);
+        if (cmdline[0])
+            return cmdline;
+    }
+    return defaults;
 }
 
 static void vbox_aa64_poweroff(void) {

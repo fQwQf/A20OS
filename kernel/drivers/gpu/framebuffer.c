@@ -199,7 +199,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     vma->file = NULL;
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
-    mm->rss += len / PAGE_SIZE;
+    mm_rss_add(mm, len / PAGE_SIZE);
 
     arch_tlb_flush();
     spin_unlock(&mm->lock);
@@ -380,7 +380,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
             vma->file = NULL;
             mm_insert_vma(curr->mm, vma);
             curr->mm->total_vm += fb_size / PAGE_SIZE;
-            curr->mm->rss += fb_size / PAGE_SIZE;
+            mm_rss_add(curr->mm, fb_size / PAGE_SIZE);
 
             arch_tlb_flush();
             spin_unlock(&curr->mm->lock);

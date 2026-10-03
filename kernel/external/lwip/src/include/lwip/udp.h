@@ -48,6 +48,7 @@
 #include "lwip/ip.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/prot/udp.h"
+#include "lwip/priv/pcb_lane.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +91,10 @@ struct udp_pcb {
   /** ports are in host byte order */
   u16_t local_port, remote_port;
 
+  /** Index of the list head this pcb is linked into, out of CONFIG_NET_LANES
+     heads; derived from local_ip/local_port, see lwip/priv/pcb_lane.h. */
+  u8_t lane;
+
 #if LWIP_MULTICAST_TX_OPTIONS
 #if LWIP_IPV4
   /** outgoing network interface for multicast packets, by IPv4 address (if not 'any') */
@@ -112,7 +117,7 @@ struct udp_pcb {
   void *recv_arg;
 };
 /* udp_pcbs export for external reference (e.g. SNMP agent) */
-extern struct udp_pcb *udp_pcbs;
+extern struct udp_pcb *udp_pcbs[NET_PCB_LANE_BUCKETS];
 
 /* The following functions is the application layer interface to the
    UDP code. */

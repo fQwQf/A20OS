@@ -68,8 +68,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             if (pt_unmap_leaf(mm, va, &dummy, &base,
                               &leaf_size, NULL) == 0) {
                 mm_tlb_note_change(mm, base, leaf_size);
-                mm->rss = (mm->rss > leaf_size / PAGE_SIZE)
-                              ? mm->rss - leaf_size / PAGE_SIZE : 0;
+                mm_rss_sub_clamped(mm, leaf_size / PAGE_SIZE);
                 va = base + leaf_size;
                 continue;
             }
@@ -88,7 +87,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             if (pa) {
                 frame_put(phys_to_pfn(pa));
                 size_t pages = leaf_size / PAGE_SIZE;
-                mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;
+                mm_rss_sub_clamped(mm, pages);
             }
             va = base + leaf_size;
         } else {

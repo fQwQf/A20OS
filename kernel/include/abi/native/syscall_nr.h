@@ -179,6 +179,4 @@
 #define A20_SYS_monitor_create     0x0D10
 #define A20_SYS_monitor_query      0x0D11
 
-#define A20_NATIVE_SYSCALL_COUNT  135
-
 #endif

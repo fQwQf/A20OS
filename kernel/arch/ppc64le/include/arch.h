@@ -10,4 +10,9 @@
 #include "trap_frame.h"
 #include "firmware.h"
 
+
+/* an instruction storage fault reaches the external vector
+ * with SRR0 clobbered, so demand paging can never map the page. */
+#define ARCH_INSN_FAULT_UNRECOVERABLE 1
+
 #endif

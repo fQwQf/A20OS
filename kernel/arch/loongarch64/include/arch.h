@@ -27,4 +27,23 @@ static inline uintptr_t loongarch64_elf_hwcap(void)
 
 #define ARCH_ELF_HWCAP() loongarch64_elf_hwcap()
 
+
+/* This architecture can dump its own CSRs at panic and at the first switch
+ * back to user; see kernel/arch/loongarch64/platform/debug.c.  Gated on the
+ * same flag that compiles that file, so a build without bring-up tracing gets
+ * the no-op inline from core/arch.h rather than a declared-but-undefined
+ * function. */
+#ifdef CONFIG_DEBUG_BOOT_TRACE
+#define ARCH_HAS_BOOT_TRACE_DUMPS 1
+#endif
+
+
+/* private executable leaves lose text PTEs, and read-only
+ * leaves corrupt librustc_driver symbols under parallel compile load. */
+#define ARCH_EXE_LEAF_RETAIN_UNSAFE 1
+
+/* a mapped-but-not-yet-uptodate fault-around window corrupts
+ * dynamic symbols in a shared object. */
+#define ARCH_FAULT_AROUND_UNSAFE 1
+
 #endif
