@@ -32,6 +32,8 @@
     (VIRTIO_BLK_MAX_TRANSFER_BYTES / VIRTIO_BLK_SECTOR_SIZE)
 #define VIRTIO_BLK_QUEUE_DMA_BYTES        (PAGE_SIZE * 3U)
 #define VIRTIO_BLK_REQUEST_DMA_BYTES      PAGE_SIZE
+/* One request queue, so one message-signalled vector. */
+#define VIRTIO_BLK_QUEUES                 1
 
 typedef struct {
     int                in_use;
@@ -67,6 +69,7 @@ typedef struct {
     int                slot;
     int                in_flight;
     int                irq_registered;
+    int                msix_first_irq;   /* set once the first MSI-X message lands */
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
@@ -472,6 +475,17 @@ static int virtio_blk_irq_handler(int irq, void *priv) {
     virtio_blk_inst_t *inst = (virtio_blk_inst_t *)priv;
     if (!inst)
         return 0;
+
+    /* One line per device, the first time a message-signalled completion
+     * arrives: it is the only observation that distinguishes "the capability
+     * was programmed" from "the device actually posted a message and the
+     * platform took it".  It is counted before the ISR read, because a device
+     * whose queue interrupt is routed through a vector need not also set a
+     * shared ISR bit -- the arrival itself is the evidence. */
+    if (inst->vt.msix_vectors > 0 &&
+        __atomic_exchange_n(&inst->msix_first_irq, 1, __ATOMIC_RELAXED) == 0)
+        kinfo("[VIRTIO-BLK] MSI-X delivery on vector %d\n", irq);
+
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
     if (!isr)
         return 0;
@@ -682,8 +696,13 @@ static int virtio_blk_wait_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
          * Poll-only transports cannot wake a blocked task through an IRQ.
          * Keep draining the used ring here instead of depending on a later
          * scheduler pass to notice the completion.
+         *
+         * The test is whether a handler exists at all, not whether a wired
+         * line was assigned: a device on message-signalled interrupts has
+         * irq == -1 by construction, and parking on its vector is exactly what
+         * the reservation was for.
          */
-        if (inst->vt.irq < 0) {
+        if (!inst->irq_registered) {
             spin_unlock_irqrestore(&inst->lock, flags);
             (void)proc_wake_q_flush(&wake_q);
             /* The used ring was already drained at the top of this iteration.
@@ -942,7 +961,44 @@ static int virtio_blk_driver_probe(device_t *dev) {
         return ret;
     }
 
-    if (inst->vt.irq >= 0) {
+    /* Completion delivery, best first: one message-signalled vector per queue,
+     * then the shared INTx line, then polling.  Each step is entered only when
+     * the previous one failed, so a device that offers MSI-X never takes the
+     * level-triggered line it was trying to get away from. */
+    int msix_vectors = 0;
+    if (inst->vt.msix_prepare) {
+        int r = inst->vt.msix_prepare(&inst->vt, VIRTIO_BLK_QUEUES);
+        if (r == 0) {
+            msix_vectors = inst->vt.msix_vectors;
+        } else {
+            kinfo("[VIRTIO-BLK] %s: MSI-X unavailable (%d)\n", dev->name, r);
+        }
+    }
+
+    if (msix_vectors > 0) {
+        int registered = 0;
+        for (int i = 0; i < msix_vectors; i++) {
+            if (request_irq((uint32_t)(inst->vt.msix_base + i),
+                            virtio_blk_irq_handler, 0, inst) == 0)
+                registered++;
+        }
+        if (registered == msix_vectors) {
+            inst->irq_registered = 1;
+            /* The INTx line is no longer this device's to use: leaving a
+             * handler on it would give one device two delivery paths. */
+            inst->vt.irq = -1;
+            inst->vt.msix_arm(&inst->vt);
+            kinfo("[VIRTIO-BLK] %s using MSI-X vectors %d..%d completions\n",
+                  dev->name, inst->vt.msix_base,
+                  inst->vt.msix_base + msix_vectors - 1);
+        } else {
+            for (int i = 0; i < registered; i++)
+                free_irq((uint32_t)(inst->vt.msix_base + i), inst);
+            inst->vt.msix_teardown(&inst->vt);
+            kinfo("[VIRTIO-BLK] %s MSI-X handler registration failed (%d/%d)\n",
+                  dev->name, registered, msix_vectors);
+        }
+    } else if (inst->vt.irq >= 0) {
         if (request_irq((uint32_t)inst->vt.irq, virtio_blk_irq_handler,
                         0, inst) == 0) {
             inst->irq_registered = 1;
@@ -955,12 +1011,12 @@ static int virtio_blk_driver_probe(device_t *dev) {
             inst->vt.irq = -1;
         }
     }
-    if (inst->vt.irq < 0)
+    if (inst->vt.irq < 0 && !inst->irq_registered)
         kinfo("[VIRTIO-BLK] %s using completion polling\n", dev->name);
 
     g_ninst++;
-    kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%d)\n",
-          dev->name, inst->vt.legacy, inst->vt.irq);
+    kinfo("[VIRTIO-BLK] Probed device '%s' (legacy=%d irq=%d msix=%d)\n",
+          dev->name, inst->vt.legacy, inst->vt.irq, msix_vectors);
     return 0;
 }
 
@@ -1018,7 +1074,13 @@ static int virtio_blk_driver_remove(device_t *dev) {
         return 0;
     inst->blk.valid = 0;
     if (inst->irq_registered) {
-        free_irq((uint32_t)inst->vt.irq, inst);
+        if (inst->vt.msix_vectors > 0) {
+            for (int i = 0; i < inst->vt.msix_vectors; i++)
+                free_irq((uint32_t)(inst->vt.msix_base + i), inst);
+            inst->vt.msix_teardown(&inst->vt);
+        } else {
+            free_irq((uint32_t)inst->vt.irq, inst);
+        }
         inst->irq_registered = 0;
     }
     inst->vt.write32(&inst->vt, VIRTIO_MMIO_STATUS, 0);

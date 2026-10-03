@@ -19,6 +19,22 @@ typedef struct pci_user_device_info {
 
 bus_type_t *get_pci_bus(void);
 int pci_enable_and_assign_bars(device_t *dev);
+/*
+ * Config-space access for an already published function.  All reads and writes
+ * are dword accesses at ECAM: a byte or half-word crossing a dword boundary is
+ * not split, so a register that straddles 0x3C must be read through
+ * pci_cfg_read32() instead.
+ */
+uint8_t  pci_cfg_read8(const device_t *dev, uint32_t reg);
+uint16_t pci_cfg_read16(const device_t *dev, uint32_t reg);
+uint32_t pci_cfg_read32(const device_t *dev, uint32_t reg);
+void pci_cfg_write16(const device_t *dev, uint32_t reg, uint16_t val);
+void pci_cfg_write32(const device_t *dev, uint32_t reg, uint32_t val);
+/* Walk the capability list and return the config-space offset of @cap_id, or
+ * 0 when the function has no such capability.  Also returns 0 when the list
+ * advertises capabilities but the first pointer is unmasked garbage, so a
+ * caller can treat "no capability" and "broken list" alike. */
+uint8_t pci_find_capability(const device_t *dev, uint8_t cap_id);
 /* Packed class/subclass/prog-if (class << 16 | subclass << 8 | prog-if). */
 uint32_t pci_class_code(const device_t *dev);
 /* PCI vendor/device as vendor << 16 | device. */

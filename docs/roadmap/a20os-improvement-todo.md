@@ -155,6 +155,26 @@ hub 所有，因此 hub 后设备的地址来自 core 的全局地址池。`usb_
 随之变成 `alloc_slot()`，返回一个 `usb_slot_t`（控制器 token / USB 地址 / 物理
 端口三者分离），xHCI 的 `Address Device` 也据此能填 slot context 的 Hub 字段。
 
+已落地（PCI）：MSI-X 消息中断（`kernel/drivers/bus/pci_msix.c`）。能力表位置
+的解析同时支持 Vector Control（PCIe 编码：BIR `3:1` + 偏移 `31:12`，字节偏移要
+`<<4`）与 Message Address Lower（pre-PCIe 编码：BIR `2:0` + 偏移 `31:3`，不缩
+放），因为 `-kernel` 引导没有任何固件跑过、Vector Control 全零，而 QEMU 的
+virtio-pci 与 e1000e 都把表位置写在后者里。BAR 号一律从能力读出，不再由驱动猜
+（virtio 在 BAR1、e1000e 在 BAR3，virtio spec 未规定）。`queue_msix_vector` 是表
+索引不是中断号。x86_64 侧向量窗口 `0xD0..0xF0`、LVT 按 `LAPIC_LVT_TIMER +
+((V-0x10)&0xFF)*16` 定位。消息地址必须是 APIC 页基址，不能把向量 OR 进去——
+真机会忽略页内偏移，但实现不保证，前 1 KiB 落在寄存器文件里，结果是表项编程正
+确却一个中断都不来。
+
+- [ ] MSI-X 的非 x86 平台实现。`arch_msix_message_address()` /
+      `arch_msix_vector_setup()` / `arch_irq_msix_vector_range()` 目前只有
+      x86_64 有实现，其余架构返回失败，驱动干净地退回 INTx/轮询；riscv64/aarch64
+      的 GIC、loongarch64 的 EIOINTC、ppc64le 的 MPIC 都没有接线。
+- [ ] MSI-X 的 IRQ 亲和性与 per-CPU 目标字段。消息数据里的目的 APIC ID 恒为 0，
+      向量窗口钉死在 boot processor；多 CPU 下设备中断全部落到 CPU0。
+- [ ] e1000e 的 MSI-X 只验证到表被解析并 arm。门禁里网卡收不到流量，两个向量没有
+      真实投递；真实投递的那一路是 virtio-blk。见
+      [../testing-gates.md](../testing-gates.md) "MSI-X 消息中断"。
 - [ ] hub 后置设备的真机验证。QEMU 的 `usb-hub` 自 QEMU 9 起不再创建下行 bus，
       且不实现端口复位，任何设备都放不到它后面；门禁只能证明 hub 被正确识别、
       描述符被正确解析（hub 描述符必须用类请求 0xA0 取，标准 GET_DESCRIPTOR 会
