@@ -458,6 +458,22 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (stack_limit < USER_STACK_FLOOR)
             stack_limit = USER_STACK_FLOOR;
         if (page_va >= stack_limit && page_va < t->mm->stack_top) {
+            /*
+             * A stack page is mapped read/write and never executable.  Faulting
+             * one in to satisfy an *instruction* access would report success,
+             * leave the leaf non-executable, and hand control back to a PC the
+             * hardware cannot fetch from -- so the very next instruction
+             * re-faults at the same address, forever.  That is exactly what a
+             * jump through a corrupted function pointer looks like: mksh on
+             * aarch64 spun on a prefetch abort at a stack address until the
+             * timeout killed the machine, with no fault report, because every
+             * round trip returned "handled".
+             *
+             * Refuse instead, so the caller reports SIGSEGV and kills the task.
+             */
+            if (access == MM_FAULT_ACCESS_EXEC)
+                return -1;
+
             pte_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
             if (pte && (*pte & PTE_V))
                 return -1;
@@ -485,6 +501,12 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
     if (page_va >= t->mm->start_brk &&
         page_va < ROUND_UP(t->mm->brk, PAGE_SIZE) &&
         !mm_find_vma(t->mm, page_va)) {
+        /* Same reasoning as the stack branch: a heap page is never
+         * executable, so an instruction fault here must not be satisfied with
+         * a fresh read/write leaf or the fault repeats indefinitely. */
+        if (access == MM_FAULT_ACCESS_EXEC)
+            return -1;
+
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             return -ENOMEM;
         }
@@ -1349,6 +1371,37 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
             allowed = (*pte & PTE_X) != 0;
         else
             allowed = (*pte & PTE_R) != 0;
+    }
+    /*
+     * The PTE is not the only authority on what this address may be used
+     * for: the VMA is.  A leaf can carry an execute bit the VMA never
+     * granted -- a stack page whose leaf was installed from a stale flag
+     * word, or a COW copy that propagated PTE_X from the parent's leaf --
+     * and on every architecture whose descriptor encodes UXN/PXN
+     * (aarch64's arch_pte_leaf() derives them from PTE_X) that leaf is then
+     * genuinely executable at EL0.  Trusting it alone turns a jump through
+     * such a leaf into a "handled" fault: the retry succeeds, the PC does
+     * not advance to anything meaningful, and the same address faults again
+     * immediately.  That is an unbounded silent trap loop -- a shell whose
+     * stack page went executable spins on a prefetch abort at a stack
+     * address until something external kills the machine, with no fault
+     * report, because every round trip reported success.
+     *
+     * Refuse the access whenever the VMA covering the address does not grant
+     * it.  The leaf may then be as wrong as it likes and the worst outcome is
+     * the correct one: a clean SIGSEGV naming a mapping the process was never
+     * allowed to execute.
+     */
+    if (allowed) {
+        vm_area_t *vma = mm_find_vma(mm, stval);
+        if (vma) {
+            if (access == MM_FAULT_ACCESS_EXEC &&
+                !((vma->pte_flags & PTE_X) && (vma->vm_flags & VM_EXEC)))
+                allowed = 0;
+            else if (access == MM_FAULT_ACCESS_WRITE &&
+                     !(vma->vm_flags & VM_WRITE))
+                allowed = 0;
+        }
     }
     /*
      * Radix-style MMUs take a reference/access (R/C) fault on a present
