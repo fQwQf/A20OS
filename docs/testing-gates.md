@@ -381,6 +381,28 @@ netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/
 
 失败时先看 `.kernel-build/smoke/ext4-journal-<arch>.log`，里面每次启动一段、日志打印保留完整；对照 `kernel/fs/diskfs/ext4_journal.c` 的 `ext4_journal_commit`（提交顺序）、`jbd2_write_descriptor`（descriptor checksum 必须在 tag checksum 回填之后算）、`jbd2_data_checksum`（数据 checksum 只覆盖未改动的块镜像）与 `kernel/fs/block_cache.c` 的 hold 语义（`bcache_sync_common` 跳过被持有的页）。宿主侧可以直接 `e2fsck -fn` 那份崩溃镜像复现。门禁断言清单见 `tools/gates.toml` 的 `ext4-journal-crash-consistency`。
 
+### 跨架构陷阱：同一份代码只在某些架构下坏
+
+下面几条都不是逻辑 bug，而是「按 x86 写出来的假设在其他架构上不成立」。它们共同的特征是**在 x86_64 上完全看不出来**，所以每修一条都必须按架构各跑一遍 `smoke-ext4-journal`，不能只跑一个。
+
+**1. `O_*` 常量不是 asm-generic。** Linux 把 `O_DIRECTORY`、`O_NOFOLLOW`、`O_DIRECT`、`O_LARGEFILE` 放在 `arch/<arch>/include/uapi/asm/fcntl.h` 里逐架构定义，三套布局互不相同：
+
+| | `O_DIRECTORY` | `O_NOFOLLOW` | `O_DIRECT` | `O_LARGEFILE` |
+| --- | --- | --- | --- | --- |
+| asm-generic（x86/riscv/loongarch） | `0x10000` | `0x20000` | `0x4000` | `0x8000` |
+| arm / arm64 | `0x4000` | `0x8000` | `0x10000` | `0x20000` |
+| powerpc | `0x4000` | `0x8000` | `0x20000` | `0x10000` |
+
+注意 powerpc 那一行的前两列与 arm 相同、第三第四列与 asm-generic 相同——**没有任何两套布局是同一个顺序**。最坑的是 ppc64le：asm-generic 的 `O_DIRECTORY`(`00200000`) 在 PowerPC 上其实是 `O_LARGEFILE`，而 musl 的 `open()` 每次调用都会带上 `O_LARGEFILE`。用 asm-generic 的值当 `O_DIRECTORY`，等于让内核把「打开目录」理解成「设置 largefile」，`openat()` 静默返回错误，表现为挂载点莫名其妙地不存在。`kernel/include/core/fcntl.h` 现在按 `CONFIG_PPC64LE` / `CONFIG_ARM32||CONFIG_ARMV7M||CONFIG_AARCH64` / 其余三分支取值。
+
+**2. ppc64le 的 stack-protector guard 默认走 TLS。** GCC 在该目标上默认 `-mstack-protector-guard=tls`，即 `ld 9,-28688(r13)`；而内核的 `__stack_chk_guard` 是一个普通 `.data` 全局量，r13 又已经被 `arch_set_task_pointer()` 用作内核任务指针。于是取到的 guard 是一个从未初始化的值，且随每次调用变化。ppc64le 必须显式 `-mstack-protector-guard=global`。这类问题不会 panic，只会表现为随机且不可复现的栈校验失败。
+
+**3. ppc64le 的 trap prologue 必须自己开 FP。** `__trap_from_user` 进入时 SRR1 里带着**用户态的 MSR**，用户没开 FP/VEC 就没有 FP 权限，此时保存 FPR 会直接陷入。所以 prologue 里必须自己置 `MSR[FP]`/`MSR[VEC]`/`MSR[VSX]` 再保存向量寄存器。
+
+**4. `.a20drv` 的符号可见性取决于 deployment profile。** 模块只能引用 `kernel/drvmod/framework.c` 里 `drv_export_table[]` 列出的符号，缺一个就是 `unresolved symbol` → **整个模块加载失败** → 对应 transport 整个消失。virtio-blk 在 aarch64 是加载模块、在 ppc64le 是内建驱动，所以导出表少一个 `snprintf` 或 `device_register`，现象是 aarch64 挂不上 `/bin`、`init` panic，而 ppc64le 一切正常。改导出表后必须按两种 profile 各验一次。
+
+**5. 「已处理」的缺页必须真的能推进 PC。** 缺页处理路径如果对一条自己满足不了的异常返回 0，硬件就会在同一条指令上无限重入，而且因为每次都报「已处理」，**一次内核输出都没有**。aarch64 上曾表现为 mksh 在 fork 之后对同一个栈地址反复 prefetch abort（约 2.3 万次）、完全没有 fault 报告，直到超时被杀——看起来像丢唤醒，实际是活锁。根因是 `handle_present_page_fault()` 只看 PTE 不看 VMA：叶 PTE 上带了一个 VMA 从未授予的 `PTE_X` 时，它就把 exec fault 判为可满足。而 aarch64 的 `arch_pte_leaf()` 是由 `PTE_X` 推出硬件 `UXN`/`PXN` 的，所以这个"多余的 X"是真的让该页在 EL0 可执行。修法是**以 VMA 为准**：`handle_present_page_fault()` 在 `mm->lock` 下反查覆盖该地址的 VMA，VMA 没给 `VM_EXEC` 就拒绝 exec fault（写同理），`handle_demand_fault_locked()` 的 stack/brk 分支也拒绝 exec fault。这样无论叶 PTE 错成什么样，最坏结果也只是一次干净且指名道姓的 SIGSEGV，而不是静默活锁。详见 [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)。
+
 ### 文档漂移关键词
 
 `make check-doc-drift` 重新生成 Linux syscall 覆盖表，扫描 `docs/` 与 `kernel/` 中漂移关键词，但 `docs/research/**`、`docs/testing-gates.md`、`kernel/external/**` 除外。
