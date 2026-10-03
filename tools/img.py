@@ -19,6 +19,7 @@ import fcntl
 import os
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -129,7 +130,167 @@ def build_fat32(a) -> int:
     return 0
 
 
+# ---- JBD2 journal superblock surgery -------------------------------------
+#
+# mke2fs 1.47.2 leaves feature_incompat at 0 and s_checksum_type at 0 on a
+# journal it creates: the log has no descriptor, commit or data checksums at
+# all.  A kernel that mounts such a log cannot tell a complete transaction from
+# one whose tail was torn by a power cut, which is the only thing the journal
+# exists for, so ext4_journal.c declines those images outright.  e2fsprogs
+# understands journal_checksum_v3 (dumpe2fs prints it) but never turns it on
+# during creation, and there is no mke2fs or tune2fs knob that does either.
+#
+# So the flag is set here, after mkfs, on the finished image: the same three
+# fields e2fsprogs would have written, plus the crc32c it would have computed.
+# dumpe2fs and e2fsck both accept the result -- `e2fsck -fn` is clean on the
+# patched image -- so this stays an image the rest of the ext4 world can read,
+# and the guest is running against real csum_v3 semantics rather than against a
+# private format that happens to satisfy our own parser.
+#
+# Layout (all offsets are from the start of the journal superblock block):
+#   40  s_feature_incompat   64bit | csum_v3
+#   80  s_checksum_type      JBD2_CRC32C_CHKSUM
+#   252 s_checksum           crc32c seeded ~0 over the first 1024 bytes,
+#                            with the checksum field itself read as zero
+#
+# Finding the block needs the ext4 superblock, the group 0 descriptor and the
+# extent tree of the journal inode, so this is three small parses rather than a
+# `debugfs -R "blocks <8>"` whose output format is nobody's contract.
+
+JBD2_MAGIC = 0xC03B3998
+JBD2_SUPERBLOCK_V2 = 4
+JBD2_FEATURE_INCOMPAT_64BIT = 0x2
+JBD2_FEATURE_INCOMPAT_CSUM_V3 = 0x10
+JBD2_CRC32C_CHKSUM = 4
+JBD2_SB_INCOMPAT_OFF = 40
+JBD2_SB_CHECKSUM_TYPE_OFF = 80
+JBD2_SB_CHECKSUM_OFF = 252
+JBD2_SB_CHECKSUM_BYTES = 1024
+
+EXT4_SB = 1024
+EXT4_INCOMPAT_64BIT = 0x80
+EXT4_S_INODE_SIZE = 0x58
+EXT4_S_DESC_SIZE = 0xFE
+EXT4_S_FIRST_DATA_BLOCK = 0x14
+EXT4_S_JOURNAL_INUM = 0xE0
+EXT4_INODE_IBLOCK = 40
+EXTENT_MAGIC = 0xF30A
+
+
+def _crc32c(seed: int, data: bytes) -> int:
+    """The reflected Castagnoli polynomial e2fsprogs calls crc32c.
+
+    Seeded with 0xffffffff and *not* final-xored, which is what every ext4 and
+    JBD2 checksum on disk is: the code in kernel/fs/diskfs/ext4_journal.c
+    computes the same value, and a mismatch between the two would show up
+    immediately as an unreadable superblock.
+    """
+    table = _crc32c.table
+    if table is None:
+        table = []
+        for i in range(256):
+            crc = i
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
+            table.append(crc)
+        _crc32c.table = table
+    crc = seed
+    for byte in data:
+        crc = table[(crc ^ byte) & 0xFF] ^ (crc >> 8)
+    return crc & 0xFFFFFFFF
+
+
+_crc32c.table = None
+
+
+def _le32(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off:off + 4], "little")
+
+
+def _le16(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off:off + 2], "little")
+
+
+def _be32(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off:off + 4], "big")
+
+
+def _journal_superblock_offset(img: bytes) -> int:
+    """Byte offset of the JBD2 superblock, found by walking inode 8's extents."""
+    def first_extent(off: int) -> int:
+        # The journal of a 4 KiB-block filesystem is small enough to be a
+        # single leaf, but the index walk is here so a larger image does not
+        # silently misparse instead of failing.
+        magic, entries, _max, depth = struct.unpack_from("<HHHH", img, off)
+        if magic != EXTENT_MAGIC or not entries:
+            raise SystemExit("ext4-journal: journal inode has no extent tree")
+        if depth == 0:
+            # extent: ee_block u32, ee_len u16, ee_start_hi u16, ee_start_lo u32
+            return _le32(img, off + 20) | (_le16(img, off + 18) << 32)
+        leaf = _le32(img, off + 16) | (_le16(img, off + 20) << 32)
+        return first_extent(leaf * block_size)
+
+    sb = img[EXT4_SB:EXT4_SB + 1024]
+    if _le16(sb, 0x38) != 0xEF53:
+        raise SystemExit("ext4-journal: not an ext4 image")
+    block_size = 1024 << _le32(sb, 0x18)
+    incompat = _le32(sb, 0x60)
+    if incompat & EXT4_INCOMPAT_64BIT:
+        inode_size = _le16(sb, EXT4_S_INODE_SIZE)
+        desc_size = _le16(sb, EXT4_S_DESC_SIZE)
+    else:
+        inode_size, desc_size = 128, 32
+    # The descriptor table follows the primary superblock, whatever the
+    # feature flags say: block 1 for a 4 KiB filesystem (the superblock starts
+    # at byte 0), block 2 for a 1 KiB one (the superblock starts at byte 1024,
+    # so it shares block 1 with the boot sector's neighbour).
+    gdt_block = _le32(sb, EXT4_S_FIRST_DATA_BLOCK) + 1
+    group_desc = img[gdt_block * block_size:][:desc_size]
+    inode_table = _le32(group_desc, 8)
+    if desc_size >= 0x2C:
+        inode_table |= _le32(group_desc, 0x28) << 32
+    journal_inum = _le32(sb, EXT4_S_JOURNAL_INUM)
+    if not journal_inum:
+        raise SystemExit("ext4-journal: image has no journal inode")
+    inode = inode_table * block_size + (journal_inum - 1) * inode_size
+    return first_extent(inode + EXT4_INODE_IBLOCK) * block_size
+
+
+def enable_journal_checksums(path: Path) -> None:
+    data = bytearray(path.read_bytes())
+    offset = _journal_superblock_offset(bytes(data))
+    meta = bytearray(data[offset:offset + 4096])
+    if _be32(meta, 0) != JBD2_MAGIC or _be32(meta, 4) != JBD2_SUPERBLOCK_V2:
+        raise SystemExit("ext4-journal: inode 8 is not a JBD2 superblock")
+    incompat = (_be32(meta, JBD2_SB_INCOMPAT_OFF) |
+                JBD2_FEATURE_INCOMPAT_64BIT | JBD2_FEATURE_INCOMPAT_CSUM_V3)
+    struct.pack_into(">I", meta, JBD2_SB_INCOMPAT_OFF, incompat)
+    meta[JBD2_SB_CHECKSUM_TYPE_OFF] = JBD2_CRC32C_CHKSUM
+    struct.pack_into(">I", meta, JBD2_SB_CHECKSUM_OFF, 0)
+    checksum = _crc32c(0xFFFFFFFF, bytes(meta[:JBD2_SB_CHECKSUM_BYTES]))
+    struct.pack_into(">I", meta, JBD2_SB_CHECKSUM_OFF, checksum)
+    data[offset:offset + len(meta)] = meta
+    path.write_bytes(bytes(data))
+    print(f"img: journal superblock at block {offset // 4096}: "
+          f"64bit|csum_v3, crc32c {checksum:#010x}")
+
+
 def build_ext4(a) -> int:
+    return _build_ext4(a, journal=bool(getattr(a, "ext4_journal", "")))
+
+
+def build_ext4_journal(a) -> int:
+    """An ext4 image *with* an internal JBD2 journal.
+
+    The published dev images deliberately carry none (`^has_journal`): they
+    are rebuilt from staging on every build, and a journal costs 4 MiB of
+    ext4.img's 128 MiB.  The crash-consistency gate needs the opposite, so it
+    gets its own image through the same staging path.
+    """
+    return _build_ext4(a, journal=True)
+
+
+def _build_ext4(a, *, journal: bool) -> int:
     img = REPO / a.ext4_img
     img.parent.mkdir(parents=True, exist_ok=True)
     staging_parent = REPO / a.ext4_staging_dir
@@ -165,9 +326,19 @@ def build_ext4(a) -> int:
         # The `^` binds to has_journal only; the rest are enables.  Passed
         # through verbatim because the on-disk feature set is what the guest
         # boots against.
-        must([a.mkfs_ext4, "-F",
-              "-O", "^has_journal,extent,huge_file,flex_bg,uninit_bg,dir_index",
-              "-d", str(staging), str(tmp)])
+        features = "extent,huge_file,flex_bg,uninit_bg,dir_index"
+        if not journal:
+            features = "^has_journal," + features
+        cmd = [a.mkfs_ext4, "-F", "-O", features]
+        if journal:
+            # 4 KiB blocks, not the 1 KiB the journal-less dev images use: a
+            # JBD2 log block is one filesystem block, and the reader/writer
+            # (and the block cache page) all agree on 4 KiB.  Anything else
+            # would mean copying a whole page into every log block.
+            cmd += ["-b", "4096"]
+        must(cmd + ["-d", str(staging), str(tmp)])
+        if journal:
+            enable_journal_checksums(tmp)
         os.replace(tmp, img)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -374,7 +545,8 @@ def inject_mlibc(a) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("command",
-                    choices=["fat32", "ext4", "release-disk", "scratch",
+                    choices=["fat32", "ext4", "ext4-journal", "release-disk",
+                             "scratch",
                              "sbase-rootfs", "mlibc-rootfs", "copy", "verify-vbox",
                              "vf2-minimal"])
     for f in (
@@ -382,6 +554,7 @@ def main() -> int:
         ap.add_argument(f"--{f}", default="")
     a = ap.parse_args()
     return {"fat32": build_fat32, "ext4": build_ext4,
+            "ext4-journal": build_ext4_journal,
             "release-disk": build_release_disk, "scratch": build_scratch,
             "sbase-rootfs": inject_sbase,
             "mlibc-rootfs": inject_mlibc,

@@ -342,6 +342,14 @@ int puts(const char *s)
 /* Memory and user copies */
 /* ------------------------------------------------------------------ */
 
+/* No kernel command line in a userspace service: there is no DTB and no
+ * firmware, so the crash-injection knob has nothing to read and the journal
+ * runs with it disarmed. */
+const char *bootargs_get(void)
+{
+    return NULL;
+}
+
 void *kmalloc(size_t size)
 {
     return malloc(size ? size : 1);

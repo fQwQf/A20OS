@@ -1,5 +1,6 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
+#include "fs/ext4_journal.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
 #include "fs/block_cache.h"
@@ -12,6 +13,39 @@
 #include "core/klog.h"
 #include "core/perf.h"
 #include "core/timekeeping.h"
+
+/* Every metadata write goes through here.  With a journal mounted the cache
+ * write and the transaction record happen under one lock, so new metadata can
+ * never reach its home location before the log can reproduce it; without one
+ * it is exactly the buffered write it was before.  Data blocks keep using
+ * bcache_write_bytes -- ordered mode forces them durable before the metadata
+ * that names them, so they never need a log copy. */
+int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
+                    size_t len)
+{
+    return ext4_journal_meta_write(sb, byte_off, buf, len);
+}
+
+/* The primary superblock always occupies the second 1 KiB of the device, no
+ * matter how large the filesystem's blocks are. */
+#define EXT4_SB_OFFSET            1024
+#define EXT4_SB_SIZE              1024
+#define EXT4_SB_FREE_BLOCKS_OFF   0x0c
+#define EXT4_SB_FREE_INODES_OFF   0x10
+#define EXT4_SB_FREE_BLOCKS_HI_OFF 0x150
+#define EXT4_SB_FREE_INODES_HI_OFF 0x154
+#define EXT4_SB_CHECKSUM_OFF      0x3fc
+
+static void ext4_put_le32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t ext4_bg_free_blocks(const ext4_group_desc_t *gd);
+static uint32_t ext4_bg_free_inodes(const ext4_group_desc_t *gd);
 
 /* ---- 64-bit inode size accessors ----
  * i_size_high sits in the static 128-byte inode area (offset 108) and is
@@ -253,8 +287,7 @@ int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) {
     uint32_t g = (ino - 1) / sb->inodes_per_group;
     uint32_t i = (ino - 1) % sb->inodes_per_group;
     if (g >= sb->groups_count) return -EINVAL;
-    uint64_t it = (uint64_t)sb->group_descs[g].bg_inode_table_lo |
-                  ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
+    uint64_t it = (uint64_t)sb->group_descs[g].bg_inode_table_lo;
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
     memset(out, 0, sizeof(*out));
     int r = bcache_read_bytes(sb->bc, off, out, EXT4_INODE_SIZE_STATIC);
@@ -266,10 +299,41 @@ int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
     uint32_t g = (ino - 1) / sb->inodes_per_group;
     uint32_t i = (ino - 1) % sb->inodes_per_group;
     if (g >= sb->groups_count) return -EINVAL;
-    uint64_t it = (uint64_t)sb->group_descs[g].bg_inode_table_lo |
-                  ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
+    uint64_t it = (uint64_t)sb->group_descs[g].bg_inode_table_lo;
     uint64_t off = it * sb->block_size + (uint64_t)i * sb->inode_size;
-    return bcache_write_bytes(sb->bc, off, inp, EXT4_INODE_SIZE_STATIC) < 0 ? -EIO : 0;
+    size_t inode_size = sb->inode_size;
+
+    /* ext4_inode_t stops at 128 bytes, but a 256-byte inode carries the extra
+     * timestamps, the project id and -- decisively -- i_checksum_hi in the
+     * tail.  Writing only the struct therefore destroyed the high half of
+     * every checksum; write the real inode width and carry the tail through. */
+    uint8_t *raw = kmalloc(inode_size);
+    if (!raw) return -ENOMEM;
+    if (inode_size > EXT4_INODE_SIZE_STATIC &&
+        bcache_read_bytes(sb->bc, off, raw, inode_size) < 0) {
+        kfree(raw);
+        return -EIO;
+    }
+    memcpy(raw, inp, EXT4_INODE_SIZE_STATIC);
+    /* The extra inode space has to be declared.  libext2fs derives how much of
+     * an inode the checksum covers from i_extra_isize: an inode that leaves it
+     * at zero is read back as a 128-byte inode, so e2fsck and debugfs recompute
+     * the checksum over a different range and reject every inode the kernel has
+     * ever written.  mke2fs stamps the whole extra area on every inode it
+     * creates, and a freshly allocated slot is all zeroes, so the driver has to
+     * stamp it as well. */
+    if (inode_size > EXT4_INODE_SIZE_STATIC) {
+        uint16_t extra = (uint16_t)(inode_size - EXT4_INODE_SIZE_STATIC);
+        size_t eo = offsetof(ext4_inode_t, i_extra_isize);
+        raw[eo] = (uint8_t)extra;
+        raw[eo + 1] = (uint8_t)(extra >> 8);
+        inp->i_extra_isize = extra;
+    }
+    if (sb->s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM)
+        ext4_inode_checksum_put(sb, ino, raw, inode_size);
+    int ret = ext4_meta_write(sb, off, raw, inode_size) < 0 ? -EIO : 0;
+    kfree(raw);
+    return ret;
 }
 
 /* ================================================================
@@ -278,9 +342,133 @@ int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) {
 
 void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) {
     uint64_t off = sb->block_group_desc_table_byte + (uint64_t)group * sb->desc_size;
-    uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
-                 sb->desc_size : sizeof(ext4_group_desc_t);
-    bcache_write_bytes(sb->bc, off, &sb->group_descs[group], n);
+    if (!ext4_has_metadata_csum(sb)) {
+        uint32_t n = sb->desc_size < sizeof(ext4_group_desc_t) ?
+                     sb->desc_size : sizeof(ext4_group_desc_t);
+        ext4_meta_write(sb, off, &sb->group_descs[group], n);
+        return;
+    }
+    /* Every path that changes a bitmap reaches this function immediately
+     * afterwards, so refreshing the two bitmap checksums here -- rather than at
+     * each of those call sites -- is what keeps them in step with the bitmap
+     * bytes the allocator just wrote. */
+    uint8_t *bm = (uint8_t *)kmalloc(sb->block_size);
+    if (bm) {
+        const ext4_group_desc_t *gd = &sb->group_descs[group];
+        if (gd->bg_block_bitmap_lo &&
+            bcache_read_bytes(sb->bc,
+                              (uint64_t)gd->bg_block_bitmap_lo * sb->block_size,
+                              bm, sb->block_size) >= 0)
+            ext4_block_bitmap_checksum_put(sb, group, bm, sb->block_size);
+        size_t inode_bmp_len = sb->inodes_per_group / 8;
+        if (gd->bg_inode_bitmap_lo && inode_bmp_len &&
+            inode_bmp_len <= sb->block_size &&
+            bcache_read_bytes(sb->bc,
+                              (uint64_t)gd->bg_inode_bitmap_lo * sb->block_size,
+                              bm, inode_bmp_len) >= 0)
+            ext4_inode_bitmap_checksum_put(sb, group, bm, inode_bmp_len);
+        kfree(bm);
+    }
+
+    /* The checksum covers the bytes the filesystem will read back, so it has to
+     * be taken over the on-disk descriptor and not over the in-memory struct:
+     * on a 64-byte descriptor the checksum includes the padding past the last
+     * field, and on a legacy 32-byte one the fields after bg_flags sit four
+     * bytes earlier and the tail is truncated.  Start from what is already on
+     * disk so that a reserved field the driver never models survives. */
+    uint8_t raw[sizeof(ext4_group_desc_t)];
+    memset(raw, 0, sizeof(raw));
+    if (bcache_read_bytes(sb->bc, off, raw, sb->desc_size) < 0)
+        return;
+    if (sb->desc_size >= sizeof(ext4_group_desc_t)) {
+        memcpy(raw, &sb->group_descs[group], sizeof(ext4_group_desc_t));
+    } else {
+        /* The driver always tracks the 64-byte layout; reserialise it down to
+         * the narrower on-disk shape rather than truncating the struct. */
+        uint8_t legacy[32];
+        ext4_group_desc_pack_legacy(&sb->group_descs[group], legacy);
+        memcpy(raw, legacy, sizeof(legacy));
+    }
+    ext4_group_desc_checksum_put(sb, group, raw, sb->desc_size);
+    ext4_meta_write(sb, off, raw, sb->desc_size);
+    ext4_superblock_sync_counts(sb);
+}
+
+/* The superblock carries the filesystem-wide totals e2fsck cross-checks
+ * against what it recounts in pass 5.  Every allocator update moves a group's
+ * descriptor but not the superblock, so without this the two drift apart and
+ * e2fsck reports "Free blocks count wrong (N, counted=M)" on an otherwise
+ * healthy image.  Recomputing from the descriptors rather than adjusting keeps
+ * the totals correct after a crash, where the journal may have replayed some
+ * of the transactions that moved them. */
+void ext4_superblock_sync_counts(ext4_sb_info_t *sb)
+{
+    uint8_t raw[EXT4_SB_SIZE];
+    if (bcache_read_bytes(sb->bc, EXT4_SB_OFFSET, raw, EXT4_SB_SIZE) < 0)
+        return;
+
+    uint64_t free_blocks = 0, free_inodes = 0;
+    for (uint32_t g = 0; g < sb->groups_count; g++) {
+        free_blocks += ext4_bg_free_blocks(&sb->group_descs[g]);
+        free_inodes += ext4_bg_free_inodes(&sb->group_descs[g]);
+    }
+    uint32_t fb_lo = (uint32_t)(free_blocks & 0xffffffffU);
+    uint32_t fb_hi = (uint32_t)(free_blocks >> 32);
+    uint32_t fi_lo = (uint32_t)(free_inodes & 0xffffffffU);
+    uint32_t fi_hi = (uint32_t)(free_inodes >> 32);
+    if (raw[EXT4_SB_FREE_BLOCKS_OFF + 0] != (uint8_t)fb_lo ||
+        raw[EXT4_SB_FREE_BLOCKS_OFF + 1] != (uint8_t)(fb_lo >> 8) ||
+        raw[EXT4_SB_FREE_BLOCKS_OFF + 2] != (uint8_t)(fb_lo >> 16) ||
+        raw[EXT4_SB_FREE_BLOCKS_OFF + 3] != (uint8_t)(fb_lo >> 24) ||
+        raw[EXT4_SB_FREE_INODES_OFF + 0] != (uint8_t)fi_lo ||
+        raw[EXT4_SB_FREE_INODES_OFF + 1] != (uint8_t)(fi_lo >> 8) ||
+        raw[EXT4_SB_FREE_INODES_OFF + 2] != (uint8_t)(fi_lo >> 16) ||
+        raw[EXT4_SB_FREE_INODES_OFF + 3] != (uint8_t)(fi_lo >> 24) ||
+        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 0] != (uint8_t)fb_hi ||
+        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 1] != (uint8_t)(fb_hi >> 8) ||
+        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 2] != (uint8_t)(fb_hi >> 16) ||
+        raw[EXT4_SB_FREE_BLOCKS_HI_OFF + 3] != (uint8_t)(fb_hi >> 24) ||
+        raw[EXT4_SB_FREE_INODES_HI_OFF + 0] != (uint8_t)fi_hi ||
+        raw[EXT4_SB_FREE_INODES_HI_OFF + 1] != (uint8_t)(fi_hi >> 8) ||
+        raw[EXT4_SB_FREE_INODES_HI_OFF + 2] != (uint8_t)(fi_hi >> 16) ||
+        raw[EXT4_SB_FREE_INODES_HI_OFF + 3] != (uint8_t)(fi_hi >> 24)) {
+        ext4_put_le32(raw + EXT4_SB_FREE_BLOCKS_OFF, fb_lo);
+        ext4_put_le32(raw + EXT4_SB_FREE_INODES_OFF, fi_lo);
+        ext4_put_le32(raw + EXT4_SB_FREE_BLOCKS_HI_OFF, fb_hi);
+        ext4_put_le32(raw + EXT4_SB_FREE_INODES_HI_OFF, fi_hi);
+    } else {
+        /* Nothing moved: skip the write so a read-only filesystem and an idle
+         * allocator cost one block read and no I/O. */
+        return;
+    }
+
+    /* s_checksum covers the first 1020 bytes of the superblock with its own
+     * field read as zero; it is seeded with ~0, not with the metadata seed. */
+    if (ext4_has_metadata_csum(sb)) {
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF, 0);
+        ext4_put_le32(raw + EXT4_SB_CHECKSUM_OFF,
+                      ext4_crc32c(0xffffffffU, raw,
+                                  EXT4_SB_CHECKSUM_OFF));
+    }
+    ext4_meta_write(sb, EXT4_SB_OFFSET, raw, EXT4_SB_SIZE);
+}
+
+/* A directory is counted against the group its inode lives in, not the group
+ * its parent lives in, because that is the inode the count protects.  e2fsck
+ * recounts them in pass 5 and reports "Directories count wrong for group #0". */
+void ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta)
+{
+    if (!ino) return;
+    uint32_t g = (ino - 1) / sb->inodes_per_group;
+    if (g >= sb->groups_count) return;
+    mutex_lock(&sb->alloc_lock);
+    ext4_group_desc_t *gd = &sb->group_descs[g];
+    uint32_t used = gd->bg_used_dirs_count_lo;
+    used = delta > 0 ? used + 1 : (used ? used - 1 : 0);
+    if (used > 0xffffU) used = 0xffffU;
+    gd->bg_used_dirs_count_lo = (uint16_t)used;
+    ext4_writeback_gd(sb, g);
+    mutex_unlock(&sb->alloc_lock);
 }
 
 static int ext4_read_group_descs(ext4_sb_info_t *sb)
@@ -298,28 +486,29 @@ static int ext4_read_group_descs(ext4_sb_info_t *sb)
     return 0;
 }
 
+/* A group's free counters are 16 bits wide on disk and cannot exceed
+ * blocks_per_group / inodes_per_group respectively -- both of which fit in
+ * 16 bits for every layout mke2fs produces, because the on-disk counters
+ * themselves are u16.  The high halves in the descriptor are therefore dead
+ * on any valid filesystem and are carried through untouched. */
 static uint32_t ext4_bg_free_blocks(const ext4_group_desc_t *gd)
 {
-    return (uint32_t)gd->bg_free_blocks_count_lo |
-           ((uint32_t)gd->bg_free_blocks_count_hi << 16);
+    return gd->bg_free_blocks_count_lo;
 }
 
 static uint32_t ext4_bg_free_inodes(const ext4_group_desc_t *gd)
 {
-    return (uint32_t)gd->bg_free_inodes_count_lo |
-           ((uint32_t)gd->bg_free_inodes_count_hi << 16);
+    return gd->bg_free_inodes_count_lo;
 }
 
 static void ext4_bg_set_free_blocks(ext4_group_desc_t *gd, uint32_t count)
 {
     gd->bg_free_blocks_count_lo = (uint16_t)count;
-    gd->bg_free_blocks_count_hi = (uint16_t)(count >> 16);
 }
 
 static void ext4_bg_set_free_inodes(ext4_group_desc_t *gd, uint32_t count)
 {
     gd->bg_free_inodes_count_lo = (uint16_t)count;
-    gd->bg_free_inodes_count_hi = (uint16_t)(count >> 16);
 }
 
 int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
@@ -355,7 +544,7 @@ int ext4_bitmap_alloc(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t max,
 
         if (!(byte & (1U << (bit % 8)))) {
             byte |= (uint8_t)(1U << (bit % 8));
-            if (bcache_write_bytes(sb->bc, byte_off,
+            if (ext4_meta_write(sb, byte_off,
                                    &byte, sizeof(byte)) < 0) {
                 a20_perf_add(A20_PERF_EXT4_BITMAP_PROBES, scanned + 1);
                 a20_perf_add(A20_PERF_EXT4_BITMAP_BYTE_LOADS, byte_loads);
@@ -387,7 +576,7 @@ int ext4_bitmap_free(ext4_sb_info_t *sb, uint64_t bm_blk, uint32_t bit) {
     if (!(byte & (1U << (bit % 8))))
         return -EINVAL;
     byte &= (uint8_t)~(1U << (bit % 8));
-    int r = bcache_write_bytes(sb->bc, byte_off, &byte, sizeof(byte));
+    int r = ext4_meta_write(sb, byte_off, &byte, sizeof(byte));
     return r < 0 ? -EIO : 0;
 }
 
@@ -418,14 +607,11 @@ static int ext4_validate_group_counts(ext4_sb_info_t *sb)
         uint32_t blocks = ext4_group_block_count(sb, g);
         uint32_t inodes = ext4_group_inode_count(sb, g);
         uint64_t block_bitmap =
-            (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
-            ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+            (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
         uint64_t inode_bitmap =
-            (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
-            ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
+            (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo;
         uint64_t inode_table =
-            (uint64_t)sb->group_descs[g].bg_inode_table_lo |
-            ((uint64_t)sb->group_descs[g].bg_inode_table_hi << 32);
+            (uint64_t)sb->group_descs[g].bg_inode_table_lo;
         uint64_t inode_table_bytes = (uint64_t)inodes * sb->inode_size;
         uint64_t inode_table_blocks =
             (inode_table_bytes + sb->block_size - 1) / sb->block_size;
@@ -477,8 +663,7 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
         uint32_t valid = ext4_group_block_count(sb, g);
         if (!valid)
             continue;
-        uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
-                      ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+        uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
         if (bcache_read_bytes(sb->bc, bm * sb->block_size, bitmap,
                               sb->block_size) < 0)
             continue;
@@ -520,7 +705,7 @@ size_t ext4_alloc_blocks_uninitialized(ext4_sb_info_t *sb, size_t wanted,
             uint32_t bit = first + (uint32_t)i;
             bitmap[bit / 8] |= (uint8_t)(1U << (bit % 8));
         }
-        if (bcache_write_bytes(sb->bc, bm * sb->block_size, bitmap,
+        if (ext4_meta_write(sb, bm * sb->block_size, bitmap,
                                sb->block_size) < 0) {
             mutex_unlock(&sb->alloc_lock);
             kfree(bitmap);
@@ -563,8 +748,7 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         uint32_t valid = ext4_group_block_count(sb, g);
         if (!valid)
             continue;
-        uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
-                      ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+        uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
         int bit = ext4_bitmap_alloc(sb, bm, valid,
                                     sb->block_alloc_hints[g]);
         if (bit < 0) continue;
@@ -577,7 +761,7 @@ uint64_t ext4_alloc_block(ext4_sb_info_t *sb) {
         a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
         mutex_unlock(&sb->alloc_lock);
         if (zero_buf)
-            bcache_write_bytes(sb->bc, phys * sb->block_size, zero_buf, sb->block_size);
+            ext4_meta_write(sb, phys * sb->block_size, zero_buf, sb->block_size);
         if (zero_buf) kfree(zero_buf);
         return phys;
     }
@@ -605,8 +789,7 @@ void ext4_free_block(ext4_sb_info_t *sb, uint64_t phys) {
         mutex_unlock(&sb->alloc_lock);
         return;
     }
-    uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo |
-                  ((uint64_t)sb->group_descs[g].bg_block_bitmap_hi << 32);
+    uint64_t bm = (uint64_t)sb->group_descs[g].bg_block_bitmap_lo;
     uint32_t free_blocks = ext4_bg_free_blocks(&sb->group_descs[g]);
     if (free_blocks >= valid) {
         mutex_unlock(&sb->alloc_lock);
@@ -636,14 +819,23 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) {
         uint32_t valid = ext4_group_inode_count(sb, g);
         if (!valid)
             continue;
-        uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
-                      ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
+        uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo;
         int bit = ext4_bitmap_alloc(sb, bm, valid,
                                     sb->inode_alloc_hints[g]);
         if (bit < 0) continue;
         sb->inode_alloc_hints[g] = ((uint32_t)bit + 1) % valid;
         sb->inode_group_rotor = g;
         ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes - 1);
+        /* bg_itable_unused counts the inodes above the last one e2fsck may
+         * still consider in use.  Leaving it at the value mke2fs wrote makes
+         * e2fsck believe freshly allocated inodes were never initialised, and
+         * it then treats the directory entries that reference them as pointing
+         * into the unused area. */
+        if (sb->group_descs[g].bg_itable_unused_lo > bit) {
+            uint32_t unused = bit;
+            if (unused > 0xffffU) unused = 0xffffU;
+            sb->group_descs[g].bg_itable_unused_lo = (uint16_t)unused;
+        }
         ext4_writeback_gd(sb, g);
         uint32_t ino = g * sb->inodes_per_group + bit + 1;
         a20_perf_add(A20_PERF_EXT4_GROUP_PROBES, group_probes);
@@ -672,8 +864,7 @@ void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
         mutex_unlock(&sb->alloc_lock);
         return;
     }
-    uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo |
-                  ((uint64_t)sb->group_descs[g].bg_inode_bitmap_hi << 32);
+    uint64_t bm = (uint64_t)sb->group_descs[g].bg_inode_bitmap_lo;
     uint32_t free_inodes = ext4_bg_free_inodes(&sb->group_descs[g]);
     if (free_inodes >= valid) {
         mutex_unlock(&sb->alloc_lock);
@@ -686,6 +877,13 @@ void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) {
     if (sb->inode_alloc_hints)
         sb->inode_alloc_hints[g] = bit;
     ext4_bg_set_free_inodes(&sb->group_descs[g], free_inodes + 1);
+    /* A released inode is trailing-unused again, so the count can only grow. */
+    uint16_t unused = sb->group_descs[g].bg_itable_unused_lo;
+    if (bit + 1 > unused) {
+        if (bit + 1 > valid) unused = (uint16_t)valid;
+        else unused = (uint16_t)(bit + 1);
+        sb->group_descs[g].bg_itable_unused_lo = unused;
+    }
     ext4_writeback_gd(sb, g);
     mutex_unlock(&sb->alloc_lock);
 }
@@ -708,7 +906,145 @@ uint64_t ext4_extent_leaf_search(ext4_extent_t *ex, int cnt, uint32_t lblk) {
     return 0;
 }
 
-#define EXT_PER_BLK(bs) (((bs) - sizeof(ext4_extent_header_t)) / sizeof(ext4_extent_t))
+/* A block-resident tree can hold far more than the inline root does; mke2fs
+ * sizes it as "everything that fits once the 4-byte checksum in the last four
+ * bytes is reserved", and e2fsck calls a tree that declares fewer entries than
+ * that "could be narrower", so the driver has to agree with it. */
+#define EXT_ROOT_MAX EXT4_EXT_ROOT_MAX
+#define EXT_PER_BLK(bs) ((((bs) - sizeof(ext4_extent_header_t) - 4) / \
+                         sizeof(ext4_extent_t)) > 0xffff ? 0xffffu : \
+                        (((bs) - sizeof(ext4_extent_header_t) - 4) / \
+                         sizeof(ext4_extent_t)))
+
+/* i_blocks counts 512-byte sectors, so one filesystem block is worth
+ * block_size / 512 of them. */
+#define EXT4_SECTORS_PER_BLOCK(bs) ((bs) / 512)
+
+/* Write an extent tree block with the checksum its last four bytes carry.
+ * The caller has already filled in the header and the entries. */
+static int ext4_extent_block_write(ext4_sb_info_t *sb, uint32_t ino,
+                                   const ext4_inode_t *inode, uint64_t phys,
+                                   void *block)
+{
+    if (ext4_has_metadata_csum(sb))
+        ext4_extent_block_checksum_put(sb, ino, inode->i_generation,
+                                       (uint8_t *)block, sb->block_size);
+    return ext4_meta_write(sb, phys * sb->block_size, block,
+                           sb->block_size) < 0 ? -EIO : 0;
+}
+
+static uint32_t ext4_indirect_mapped_blocks(ext4_sb_info_t *sb,
+                                            ext4_inode_t *inode)
+{
+    uint32_t b[15];
+    memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
+    uint32_t apb = sb->addr_per_block;
+    uint32_t total = 0;
+
+    for (int i = 0; i < 12; i++)
+        if (b[i]) total++;
+
+    if (b[12]) {
+        total++;
+        uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+        if (ind) {
+            if (bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size,
+                                  ind, sb->block_size) == 0)
+                for (uint32_t i = 0; i < apb; i++)
+                    if (ind[i]) total++;
+            kfree(ind);
+        }
+    }
+    if (b[13]) {
+        total++;
+        uint32_t *di = (uint32_t *)kmalloc(sb->block_size);
+        if (di) {
+            if (bcache_read_bytes(sb->bc, (uint64_t)b[13] * sb->block_size,
+                                  di, sb->block_size) == 0) {
+                for (uint32_t i = 0; i < apb; i++) {
+                    if (!di[i]) continue;
+                    total++;
+                    uint32_t *ind = (uint32_t *)kmalloc(sb->block_size);
+                    if (!ind) continue;
+                    if (bcache_read_bytes(sb->bc,
+                                          (uint64_t)di[i] * sb->block_size,
+                                          ind, sb->block_size) == 0)
+                        for (uint32_t j = 0; j < apb; j++)
+                            if (ind[j]) total++;
+                    kfree(ind);
+                }
+            }
+            kfree(di);
+        }
+    }
+    return total;
+}
+
+/* i_blocks has to agree with the mapping the inode actually holds: e2fsck
+ * compares the two and reports "i_blocks is N, should be M" when they differ,
+ * and an inode that disagrees about its own block usage is one whose extent
+ * tree cannot be reasoned about after a crash.  Rather than bump a counter at
+ * each allocation and free site -- where the merge, replace and
+ * collect-and-rebuild paths each have their own idea of what was consumed, and
+ * any missed free leaves the counter permanently high -- recount the tree that
+ * is about to be written out.  The mapping is small enough that this costs a
+ * handful of cached block reads. */
+void ext4_inode_sync_i_blocks(ext4_sb_info_t *sb, ext4_inode_t *inode)
+{
+    uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
+    ext4_extent_header_t hdr;
+    memcpy(&hdr, raw, sizeof(hdr));
+
+    uint32_t blocks;
+    if (hdr.eh_magic != EXT4_EXT_MAGIC) {
+        blocks = ext4_indirect_mapped_blocks(sb, inode);
+    } else if (hdr.eh_depth == 0) {
+        int n = hdr.eh_entries;
+        if (n > EXT_ROOT_MAX) n = EXT_ROOT_MAX;
+        ext4_extent_t ext[EXT_ROOT_MAX];
+        memcpy(ext, raw + sizeof(hdr), n * sizeof(ext4_extent_t));
+        blocks = 0;
+        for (int i = 0; i < n; i++) {
+            uint16_t len = ext[i].ee_len;
+            if (len > 0x8000) len -= 0x8000;
+            blocks += len;
+        }
+    } else {
+        int ni = hdr.eh_entries;
+        if (ni > EXT_ROOT_MAX) ni = EXT_ROOT_MAX;
+        ext4_extent_idx_t idx[EXT_ROOT_MAX];
+        memcpy(idx, raw + sizeof(hdr), ni * sizeof(ext4_extent_idx_t));
+        blocks = 0;
+        for (int i = 0; i < ni; i++) {
+            uint64_t lb = (uint64_t)idx[i].ei_leaf_lo |
+                          ((uint64_t)idx[i].ei_leaf_hi << 32);
+            char *b = (char *)kmalloc(sb->block_size);
+            if (!b) continue;
+            if (bcache_read_bytes(sb->bc, lb * sb->block_size, b,
+                                  sb->block_size) == 0) {
+                ext4_extent_header_t lh;
+                memcpy(&lh, b, sizeof(lh));
+                if (lh.eh_magic == EXT4_EXT_MAGIC) {
+                    int n = lh.eh_entries;
+                    int epb = (int)EXT_PER_BLK(sb->block_size);
+                    if (n > epb) n = epb;
+                    ext4_extent_t *ep = (ext4_extent_t *)(b + sizeof(lh));
+                    for (int j = 0; j < n; j++) {
+                        uint16_t len = ep[j].ee_len;
+                        if (len > 0x8000) len -= 0x8000;
+                        blocks += len;
+                    }
+                }
+            }
+            kfree(b);
+        }
+        /* Every leaf the root points at is itself a block the inode owns. */
+        blocks += (uint32_t)ni;
+    }
+
+    uint64_t sectors = (uint64_t)blocks * EXT4_SECTORS_PER_BLOCK(sb->block_size);
+    inode->i_blocks_lo = (uint32_t)(sectors & 0xffffffffU);
+}
 
 uint64_t ext4_extent_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) {
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
@@ -754,8 +1090,9 @@ uint64_t ext4_extent_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk)
     return 0;
 }
 
-int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                             uint32_t lblk, uint64_t pb) {
+static int ext4_extent_grow_inner(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode,
+                                   uint32_t lblk, uint64_t pb) {
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr;
     memcpy(&hdr, raw, sizeof(hdr));
@@ -763,7 +1100,7 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
 
     if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) {
         hdr.eh_magic = EXT4_EXT_MAGIC; hdr.eh_entries = 1;
-        hdr.eh_max = 4; hdr.eh_depth = 0; hdr.eh_generation = 0;
+        hdr.eh_max = EXT_ROOT_MAX; hdr.eh_depth = 0; hdr.eh_generation = 0;
         memcpy(raw, &hdr, sizeof(hdr));
         ext4_extent_t e; e.ee_block = lblk; e.ee_len = 1;
         e.ee_start_hi = (uint16_t)(pb >> 32); e.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
@@ -793,39 +1130,60 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
             memcpy(raw + sizeof(hdr), ext, (n + 1) * sizeof(ext4_extent_t));
             return 0;
         }
+        /* The inline root is full, so the mapping drops a level.  Everything
+         * the root held, plus the extent being added, goes into one leaf: the
+         * level is created once and then filled, instead of spending a whole
+         * block on every extent until it happens to be full.  The two-leaf
+         * form this replaces left the first leaf half empty for the rest of
+         * the file's life, and e2fsck answers such a tree with "extent tree
+         * (at level 1) could be narrower". */
+        int nl_count = n + 1;
+        if ((uint32_t)nl_count > epb) nl_count = n; /* only reachable on a tiny block */
         uint64_t l1 = ext4_alloc_block(sb); if (!l1) return -ENOSPC;
-        uint64_t l2 = ext4_alloc_block(sb);
-        if (!l2) { ext4_free_block(sb, l1); return -ENOSPC; }
         char *b1 = (char *)kmalloc(sb->block_size);
-        char *b2 = (char *)kmalloc(sb->block_size);
-        if (!b1 || !b2) {
-            kfree(b1); kfree(b2);
-            ext4_free_block(sb, l1); ext4_free_block(sb, l2);
-            return -ENOMEM;
-        }
+        if (!b1) { ext4_free_block(sb, l1); return -ENOMEM; }
         memset(b1, 0, sb->block_size);
         ext4_extent_header_t lh1; lh1.eh_magic = EXT4_EXT_MAGIC;
-        lh1.eh_entries = n; lh1.eh_max = epb; lh1.eh_depth = 0; lh1.eh_generation = 0;
+        lh1.eh_entries = (uint16_t)nl_count; lh1.eh_max = epb;
+        lh1.eh_depth = 0; lh1.eh_generation = 0;
         memcpy(b1, &lh1, sizeof(lh1));
         memcpy(b1 + sizeof(lh1), ext, n * sizeof(ext4_extent_t));
-        bcache_write_bytes(sb->bc, l1 * sb->block_size, b1, sb->block_size);
+        if (nl_count > n) {
+            ext4_extent_t ne; ne.ee_block = lblk; ne.ee_len = 1;
+            ne.ee_start_hi = (uint16_t)(pb >> 32);
+            ne.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
+            memcpy(b1 + sizeof(lh1) + (size_t)n * sizeof(ext4_extent_t), &ne,
+                   sizeof(ne));
+        }
+        ext4_extent_block_write(sb, ino, inode, l1, b1);
+        kfree(b1);
 
-        memset(b2, 0, sb->block_size);
-        ext4_extent_header_t lh2; lh2.eh_magic = EXT4_EXT_MAGIC;
-        lh2.eh_entries = 1; lh2.eh_max = epb; lh2.eh_depth = 0; lh2.eh_generation = 0;
-        ext4_extent_t ne; ne.ee_block = lblk; ne.ee_len = 1;
-        ne.ee_start_hi = (uint16_t)(pb >> 32); ne.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
-        memcpy(b2, &lh2, sizeof(lh2));
-        memcpy(b2 + sizeof(lh2), &ne, sizeof(ne));
-        bcache_write_bytes(sb->bc, l2 * sb->block_size, b2, sb->block_size);
-        kfree(b1); kfree(b2);
-
-        hdr.eh_depth = 1; hdr.eh_entries = 2; hdr.eh_max = 4;
+        hdr.eh_depth = 1;
+        hdr.eh_entries = (uint16_t)(nl_count > n ? 1 : 2);
+        hdr.eh_max = EXT_ROOT_MAX;
         memcpy(raw, &hdr, sizeof(hdr));
         ext4_extent_idx_t idx[2];
         idx[0].ei_block = ext[0].ee_block;
         idx[0].ei_leaf_lo = (uint32_t)(l1 & 0xFFFFFFFF);
         idx[0].ei_leaf_hi = (uint16_t)(l1 >> 32); idx[0].ei_unused = 0;
+        if (nl_count > n) {
+            memcpy(raw + sizeof(hdr), idx, sizeof(ext4_extent_idx_t));
+            return 0;
+        }
+
+        uint64_t l2 = ext4_alloc_block(sb);
+        if (!l2) return -ENOSPC;
+        char *b2 = (char *)kmalloc(sb->block_size);
+        if (!b2) { ext4_free_block(sb, l2); return -ENOMEM; }
+        memset(b2, 0, sb->block_size);
+        ext4_extent_header_t lh2; lh2.eh_magic = EXT4_EXT_MAGIC;
+        lh2.eh_entries = 1; lh2.eh_max = epb; lh2.eh_depth = 0; lh2.eh_generation = 0;
+        ext4_extent_t ne2; ne2.ee_block = lblk; ne2.ee_len = 1;
+        ne2.ee_start_hi = (uint16_t)(pb >> 32); ne2.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
+        memcpy(b2, &lh2, sizeof(lh2));
+        memcpy(b2 + sizeof(lh2), &ne2, sizeof(ne2));
+        ext4_extent_block_write(sb, ino, inode, l2, b2);
+        kfree(b2);
         idx[1].ei_block = lblk;
         idx[1].ei_leaf_lo = (uint32_t)(l2 & 0xFFFFFFFF);
         idx[1].ei_leaf_hi = (uint16_t)(l2 >> 32); idx[1].ei_unused = 0;
@@ -856,10 +1214,52 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         uint64_t lp = (uint64_t)le->ee_start_lo | ((uint64_t)le->ee_start_hi << 32);
         if (lblk == le->ee_block + ll && pb == lp + ll && ll < 0x8000) {
             le->ee_len++;
-            bcache_write_bytes(sb->bc, lb * sb->block_size, leaf, sb->block_size);
+            ext4_extent_block_write(sb, ino, inode, lb, leaf);
             kfree(leaf); return 0;
         }
     }
+    /* Two leaves that between them still fit in one block are one leaf the
+     * allocator split off for no reason.  Splitting is what strands a
+     * half-empty leaf behind -- the inline root fills, the overflow goes into
+     * a fresh block, and every later append lands in that fresh block while
+     * the older one stays half empty -- and e2fsck answers such a tree with
+     * "extent tree (at level 1) could be narrower", because it compares the
+     * room two leaf blocks declare against the extents they hold.  Fold the
+     * last leaf into the one before it, drop the index entry that named it and
+     * hand the block back; the merged leaf covers exactly the range the two
+     * index entries covered, so nothing about the mapping changes. */
+    if (ni >= 2) {
+        uint64_t plb = (uint64_t)idx0[ni - 2].ei_leaf_lo |
+                       ((uint64_t)idx0[ni - 2].ei_leaf_hi << 32);
+        char *prev = (char *)kmalloc(sb->block_size);
+        int merged = 0;
+        if (prev && bcache_read_bytes(sb->bc, plb * sb->block_size, prev,
+                                      sb->block_size) >= 0) {
+            ext4_extent_header_t ph;
+            memcpy(&ph, prev, sizeof(ph));
+            if (ph.eh_depth == 0 &&
+                (uint32_t)ph.eh_entries + (uint32_t)lh.eh_entries <= epb) {
+                /* Every extent in the last leaf sorts after every extent in
+                 * this one -- that is what the index entries promised -- so
+                 * appending keeps the leaf ordered. */
+                memcpy(prev + sizeof(ph) + (size_t)ph.eh_entries * sizeof(ext4_extent_t),
+                       leaf + sizeof(lh) + (size_t)lh.eh_entries * sizeof(ext4_extent_t),
+                       (size_t)lh.eh_entries * sizeof(ext4_extent_t));
+                ph.eh_entries = (uint16_t)(ph.eh_entries + lh.eh_entries);
+                memcpy(prev, &ph, sizeof(ph));
+                ext4_extent_block_write(sb, ino, inode, plb, prev);
+                ni--;
+                hdr.eh_entries = (uint16_t)ni;
+                memcpy(raw, &hdr, sizeof(hdr));
+                memcpy(raw + sizeof(hdr), idx0, (size_t)ni * sizeof(ext4_extent_idx_t));
+                ext4_free_block(sb, lb);
+                merged = 1;
+            }
+        }
+        kfree(prev);
+        if (merged) { kfree(leaf); return 0; }
+    }
+
     if (lh.eh_entries < epb) {
         ext4_extent_t *ep = (ext4_extent_t *)(leaf + sizeof(lh));
         ep[lh.eh_entries].ee_block = lblk; ep[lh.eh_entries].ee_len = 1;
@@ -867,9 +1267,10 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         ep[lh.eh_entries].ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
         lh.eh_entries++;
         memcpy(leaf, &lh, sizeof(lh));
-        bcache_write_bytes(sb->bc, lb * sb->block_size, leaf, sb->block_size);
+        ext4_extent_block_write(sb, ino, inode, lb, leaf);
         kfree(leaf); return 0;
     }
+
     kfree(leaf);
 
     uint64_t nl = ext4_alloc_block(sb); if (!nl) return -ENOSPC;
@@ -882,10 +1283,10 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
     newe.ee_start_hi = (uint16_t)(pb >> 32); newe.ee_start_lo = (uint32_t)(pb & 0xFFFFFFFF);
     memcpy(nb, &nlh, sizeof(nlh));
     memcpy(nb + sizeof(nlh), &newe, sizeof(newe));
-    bcache_write_bytes(sb->bc, nl * sb->block_size, nb, sb->block_size);
+    ext4_extent_block_write(sb, ino, inode, nl, nb);
     kfree(nb);
 
-    if (ni < 4) {
+    if (ni < (int)EXT_ROOT_MAX) {
         idx0[ni].ei_block = lblk;
         idx0[ni].ei_leaf_lo = (uint32_t)(nl & 0xFFFFFFFF);
         idx0[ni].ei_leaf_hi = (uint16_t)(nl >> 32); idx0[ni].ei_unused = 0;
@@ -898,7 +1299,17 @@ int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
     return -ENOSPC;
 }
 
-void ext4_extent_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
+int ext4_extent_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
+                     uint32_t lblk, uint64_t pb)
+{
+    int r = ext4_extent_grow_inner(sb, ino, inode, lblk, pb);
+    if (r == 0)
+        ext4_inode_sync_i_blocks(sb, inode);
+    return r;
+}
+
+void ext4_extent_truncate(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode) {
+    (void)ino;
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr; memcpy(&hdr, raw, sizeof(hdr));
     if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) return;
@@ -935,8 +1346,12 @@ void ext4_extent_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
         }
     }
     ext4_extent_header_t rst; rst.eh_magic = EXT4_EXT_MAGIC;
-    rst.eh_entries = 0; rst.eh_max = 4; rst.eh_depth = 0; rst.eh_generation = 0;
+    rst.eh_entries = 0; rst.eh_max = EXT_ROOT_MAX; rst.eh_depth = 0;
+    rst.eh_generation = 0;
     memcpy(raw, &rst, sizeof(rst));
+    /* Every block the tree referenced has just been returned to the
+     * allocator, so the inode no longer owns any. */
+    ext4_inode_sync_i_blocks(sb, inode);
 }
 
 /* ---- Partial extent truncate (collect → rebuild) ----
@@ -1013,8 +1428,8 @@ void ext4_extent_free_tree(ext4_sb_info_t *sb, const ext4_inode_t *inode) {
     }
 }
 
-int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                   uint32_t lblk) {
+int ext4_extent_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                              ext4_inode_t *inode, uint32_t lblk) {
     uint8_t *raw = (uint8_t *)inode + offsetof(ext4_inode_t, i_block);
     ext4_extent_header_t hdr; memcpy(&hdr, raw, sizeof(hdr));
     if (hdr.eh_magic != EXT4_EXT_MAGIC || hdr.eh_entries == 0) return 0;
@@ -1083,8 +1498,8 @@ int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
             in_leaf++;
             ((ext4_extent_header_t *)lbuf)->eh_entries = (uint16_t)in_leaf;
             if (in_leaf == (int)epb || i == keep - 1) {
-                if (bcache_write_bytes(sb->bc, leaves[li] * sb->block_size,
-                                       lbuf, sb->block_size) < 0)
+                if (ext4_extent_block_write(sb, ino, inode, leaves[li],
+                                            lbuf) < 0)
                     goto stage_fail;
                 li++;
                 in_leaf = 0;
@@ -1110,18 +1525,20 @@ int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
 
     if (keep == 0) {
         ext4_extent_header_t rst; rst.eh_magic = EXT4_EXT_MAGIC;
-        rst.eh_entries = 0; rst.eh_max = 4; rst.eh_depth = 0; rst.eh_generation = 0;
+        rst.eh_entries = 0; rst.eh_max = EXT_ROOT_MAX; rst.eh_depth = 0;
+        rst.eh_generation = 0;
         memcpy(raw, &rst, sizeof(rst));
+        ext4_inode_sync_i_blocks(sb, inode);
         kfree(all);
         return 0;
     }
 
-    if (keep <= 4) {
+    if (keep <= EXT_ROOT_MAX) {
         ext4_extent_header_t nh; nh.eh_magic = EXT4_EXT_MAGIC;
-        nh.eh_entries = (uint16_t)keep; nh.eh_max = 4; nh.eh_depth = 0;
-        nh.eh_generation = 0;
+        nh.eh_entries = (uint16_t)keep; nh.eh_max = EXT_ROOT_MAX;
+        nh.eh_depth = 0; nh.eh_generation = 0;
         memcpy(raw, &nh, sizeof(nh));
-        ext4_extent_t ext[4];
+        ext4_extent_t ext[EXT_ROOT_MAX];
         for (int i = 0; i < keep; i++) {
             ext[i].ee_block    = all[i].start;
             ext[i].ee_len      = (uint16_t)all[i].len;
@@ -1129,18 +1546,20 @@ int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
             ext[i].ee_start_lo = (uint32_t)(all[i].phys & 0xffffffffu);
         }
         memcpy(raw + sizeof(nh), ext, keep * sizeof(ext4_extent_t));
+        ext4_inode_sync_i_blocks(sb, inode);
         kfree(all);
         return 0;
     }
 
-    /* keep > 4: install the depth-1 tree staged above. */
+    /* keep > EXT_ROOT_MAX: install the depth-1 tree staged above. */
     {
         ext4_extent_header_t nh; nh.eh_magic = EXT4_EXT_MAGIC;
-        nh.eh_entries = (uint16_t)nleaves; nh.eh_max = 4; nh.eh_depth = 1;
-        nh.eh_generation = 0;
+        nh.eh_entries = (uint16_t)nleaves; nh.eh_max = EXT_ROOT_MAX;
+        nh.eh_depth = 1; nh.eh_generation = 0;
         memcpy(raw, &nh, sizeof(nh));
         memcpy(raw + sizeof(nh), idx, nleaves * sizeof(ext4_extent_idx_t));
     }
+    ext4_inode_sync_i_blocks(sb, inode);
     kfree(all);
     return 0;
 
@@ -1185,8 +1604,8 @@ uint64_t ext4_indirect_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lbl
     return 0;
 }
 
-int ext4_indirect_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                               uint32_t lblk, uint64_t phys) {
+static int ext4_indirect_grow_inner(ext4_sb_info_t *sb, ext4_inode_t *inode,
+                                    uint32_t lblk, uint64_t phys) {
     uint32_t b[15]; memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
     uint32_t apb = sb->addr_per_block;
     if (lblk < 12) {
@@ -1196,7 +1615,7 @@ int ext4_indirect_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
         bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
         ind[lblk - 12] = (uint32_t)phys;
-        bcache_write_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+        ext4_meta_write(sb, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
         kfree(ind);
     } else if ((lblk - 12 - apb) < apb * apb) {
         uint32_t li = lblk - 12 - apb;
@@ -1208,20 +1627,31 @@ int ext4_indirect_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
             uint64_t nb = ext4_alloc_block(sb);
             if (!nb) { kfree(di); return -ENOSPC; }
             di[ii] = (uint32_t)nb;
-            bcache_write_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+            ext4_meta_write(sb, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
         }
         uint32_t ib = di[ii]; kfree(di);
         uint32_t *ind = (uint32_t *)kmalloc(sb->block_size); if (!ind) return -ENOMEM;
         bcache_read_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
         ind[li % apb] = (uint32_t)phys;
-        bcache_write_bytes(sb->bc, (uint64_t)ib * sb->block_size, ind, sb->block_size);
+        ext4_meta_write(sb, (uint64_t)ib * sb->block_size, ind, sb->block_size);
         kfree(ind);
     } else return -ENOSPC;
     memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
     return 0;
 }
 
-void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
+int ext4_indirect_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
+                       uint32_t lblk, uint64_t phys)
+{
+    (void)ino;
+    int r = ext4_indirect_grow_inner(sb, inode, lblk, phys);
+    if (r == 0)
+        ext4_inode_sync_i_blocks(sb, inode);
+    return r;
+}
+
+void ext4_indirect_truncate(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode) {
+    (void)ino;
     uint32_t b[15]; memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
     uint32_t apb = sb->addr_per_block;
     for (int i = 0; i < 12; i++) if (b[i]) ext4_free_block(sb, b[i]);
@@ -1245,14 +1675,16 @@ void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
         ext4_free_block(sb, b[13]);
     }
     memset(inode->i_block.i_data.i_block, 0, 60);
+    ext4_inode_sync_i_blocks(sb, inode);
 }
 
 /* ---- Partial indirect truncate (free blocks at/after lblk) ----
  * Mirrors ext4_indirect_truncate but only reclaims the range starting at
  * logical block lblk, keeping everything below it intact.  Handles the
  * 12 direct + single + double indirect levels the writer can create. */
-void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                      uint32_t lblk) {
+void ext4_indirect_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                                 ext4_inode_t *inode, uint32_t lblk) {
+    (void)ino;
     uint32_t b[15]; memcpy(b, inode->i_block.i_data.i_block, sizeof(b));
     uint32_t apb = sb->addr_per_block;
     uint32_t single_start = 12;
@@ -1289,6 +1721,7 @@ void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
         }
         for (uint32_t i = lblk; i < 15; i++) b[i] = 0;
         memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+        ext4_inode_sync_i_blocks(sb, inode);
         return;
     }
 
@@ -1300,7 +1733,7 @@ void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
             bcache_read_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
             for (uint32_t i = lblk - single_start; i < apb; i++)
                 if (ind[i]) { ext4_free_block(sb, ind[i]); ind[i] = 0; }
-            bcache_write_bytes(sb->bc, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
+            ext4_meta_write(sb, (uint64_t)b[12] * sb->block_size, ind, sb->block_size);
             kfree(ind);
         }
         if (b[13]) {
@@ -1323,6 +1756,7 @@ void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
         }
         b[14] = 0;
         memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+        ext4_inode_sync_i_blocks(sb, inode);
         return;
     }
 
@@ -1345,19 +1779,20 @@ void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
         for (uint32_t j = j0; j < apb; j++)
             if (ind[j]) { ext4_free_block(sb, ind[j]); ind[j] = 0; }
         if (j0 == 0) {
-            bcache_write_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
+            ext4_meta_write(sb, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
             kfree(ind);
             ext4_free_block(sb, di[i]);
             di[i] = 0;
         } else {
-            bcache_write_bytes(sb->bc, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
+            ext4_meta_write(sb, (uint64_t)di[i] * sb->block_size, ind, sb->block_size);
             kfree(ind);
         }
     }
-    bcache_write_bytes(sb->bc, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
+    ext4_meta_write(sb, (uint64_t)b[13] * sb->block_size, di, sb->block_size);
     kfree(di);
     b[14] = 0;
     memcpy(inode->i_block.i_data.i_block, b, sizeof(b));
+    ext4_inode_sync_i_blocks(sb, inode);
 }
 
 /* ---- generic dispatch ---- */
@@ -1366,25 +1801,26 @@ uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) 
     if (inode->i_flags & EXT4_EXTENTS_FL) return ext4_extent_map(sb, inode, lblk);
     return ext4_indirect_map(sb, inode, lblk);
 }
-int ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                            uint32_t lblk, uint64_t phys) {
-    if (inode->i_flags & EXT4_EXTENTS_FL) return ext4_extent_grow(sb, inode, lblk, phys);
-    return ext4_indirect_grow(sb, inode, lblk, phys);
+int ext4_block_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
+                      uint32_t lblk, uint64_t phys) {
+    if (inode->i_flags & EXT4_EXTENTS_FL)
+        return ext4_extent_grow(sb, ino, inode, lblk, phys);
+    return ext4_indirect_grow(sb, ino, inode, lblk, phys);
 }
-void ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) {
-    if (inode->i_flags & EXT4_EXTENTS_FL) ext4_extent_truncate(sb, inode);
-    else ext4_indirect_truncate(sb, inode);
+void ext4_block_truncate(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode) {
+    if (inode->i_flags & EXT4_EXTENTS_FL) ext4_extent_truncate(sb, ino, inode);
+    else ext4_indirect_truncate(sb, ino, inode);
 }
 
 /* Free every block at/after logical block lblk (partial truncate).  Keeps
  * the blocks below lblk, reclaiming the rest; used by truncate() on non-zero
  * new sizes so blocks beyond EOF are not leaked. */
-void ext4_block_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                   uint32_t lblk) {
+void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                             ext4_inode_t *inode, uint32_t lblk) {
     if (inode->i_flags & EXT4_EXTENTS_FL)
-        ext4_extent_truncate_at(sb, inode, lblk);
+        ext4_extent_truncate_at(sb, ino, inode, lblk);
     else
-        ext4_indirect_truncate_at(sb, inode, lblk);
+        ext4_indirect_truncate_at(sb, ino, inode, lblk);
 }
 
 /* ================================================================
@@ -1684,6 +2120,7 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
     esi->desc_size     = desc_size;
     esi->s_feature_incompat = sb.s_feature_incompat;
     esi->s_feature_ro_compat = sb.s_feature_ro_compat;
+    memcpy(esi->s_uuid, sb.s_uuid, sizeof(esi->s_uuid));
     esi->bc           = bc;
 
     esi->block_group_desc_table_byte = gd_start;
@@ -1722,6 +2159,19 @@ vnode_t *ext4_mount_flags(bcache_t *bc, int flags) {
             return NULL;
         }
     }
+
+    /* Open the log for writing.  This is fail-closed: a journal whose
+     * superblock we cannot parse, or which is non-empty without the recover
+     * flag, refuses the mount instead of being ignored. */
+    if (ext4_journal_open(esi, &sb) < 0) {
+        printf("[EXT4] Refusing mount: the filesystem has a journal this "
+               "kernel cannot use\n");
+        kfree(esi->group_descs);
+        kfree(esi);
+        return NULL;
+    }
+    if (esi->journal)
+        bcache_set_sync_hook(esi->bc, ext4_journal_sync_hook);
 
     if (ext4_validate_group_counts(esi) < 0) {
         printf("[EXT4] Invalid per-group free counts or bitmap bounds\n");
@@ -1775,6 +2225,11 @@ void ext4_unmount(vnode_t *root) {
     if (!root || !root->fs_data) return;
     ext4_vnode_priv_t *fp = (ext4_vnode_priv_t *)root->fs_data;
     ext4_sb_info_t *esi = fp->sb;
+    /* Commit the open transaction before anything else: unmount is the last
+     * chance to get the metadata into a log. */
+    ext4_journal_report(esi);
+    ext4_journal_close(esi);
+    bcache_set_sync_hook(esi->bc, NULL);
     bcache_sync(esi->bc);
 
     /* Drop all cache-owned vnode references for this filesystem; survivors
