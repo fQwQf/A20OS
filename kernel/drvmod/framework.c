@@ -326,6 +326,10 @@ const struct drv_export drv_export_table[] = {
     { "drv_driver_probe_all", drv_driver_probe_all },
     { "device_get_resource",  (void *)device_get_resource },
     { "device_find_by_class",  (void *)device_find_by_class },
+    /* A class driver that initialises its own instance (rather than being
+     * handed one by a bus scan) has to publish it, or device_find_by_class()
+     * cannot see it and mount_setup_block_device() finds no disk. */
+    { "device_register",     (void *)device_register },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
      * drv_driver_register with bus = &pci_bus) */
@@ -405,6 +409,14 @@ const struct drv_export drv_export_table[] = {
     { "proc_current",        (void *)proc_current },
     { "proc_task_pid",       (void *)proc_task_pid },
     { "printf",              (void *)printf },
+    /* A module that formats into a fixed buffer needs the bounded variants.
+     * Without these, any .a20drv whose driver builds a device name (or any
+     * other small string) fails to load with "unresolved symbol
+     * 'snprintf'", which takes the whole transport down with it -- the
+     * aarch64 embedded build ships virtio-blk as a module, so its disks
+     * silently vanished and /bin never mounted. */
+    { "snprintf",            (void *)snprintf },
+    { "vsnprintf",           (void *)vsnprintf },
     { "panic",               (void *)panic },
     /* kallsyms debug name lookup (spinlock self-acquire diagnostics).
      * kallsyms_print is referenced by the inline spin_lock_at stall reporter
