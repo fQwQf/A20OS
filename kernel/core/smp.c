@@ -242,13 +242,22 @@ static _Atomic uint32_t mb_request[CONFIG_NR_CPUS];
 static _Atomic uint32_t mb_ack[CONFIG_NR_CPUS];
 
 /* Called by the reschedule-IPI handler after it has executed the acquire
- * fence.  arch_fence_i() gives the advertised
- * PRIVATE_EXPEDITED_SYNC_CORE command its Linux semantics: generated code
- * published before the membarrier is visible to instruction fetch on every
- * acknowledged CPU.  Applying the stronger fence to the other commands is
- * safe and keeps one request/ack transport for all membarrier variants.
- * Advances the acknowledgment only up to the request the caller published,
- * so the initiator's wait loop cannot be satisfied by a stale ack from an
+ * fence.  A membarrier barrier orders DATA, so the acknowledgment needs only
+ * arch_mb(): the remote CPU must have drained its stores before it publishes
+ * the ack, which is exactly what the ack's RELEASE store and the initiator's
+ * ACQUIRE load already establish.  arch_fence_i() here additionally
+ * invalidated the L1 I-cache (on aarch64: dsb ish; ic iallu; dsb ish; isb) on
+ * every participating CPU, for a visibility no data-ordering command can
+ * observe, on a handler that runs for every reschedule IPI those CPUs take.
+ *
+ * The instruction-stream guarantee the advertised
+ * PRIVATE_EXPEDITED_SYNC_CORE command needs is retained on the initiator by
+ * smp_membarrier_sync_all()'s trailing arch_fence_i().  Extending it to the
+ * remote CPUs requires selecting the fence strength per command, which is a
+ * kernel/abi/linux/sys_membarrier.c change.
+ *
+ * Advances the acknowledgment only up to the request the caller published, so
+ * the initiator's wait loop cannot be satisfied by a stale ack from an
  * unrelated reschedule IPI. */
 void smp_membarrier_ipi_ack(unsigned cpu)
 {
@@ -257,7 +266,7 @@ void smp_membarrier_ipi_ack(unsigned cpu)
     uint32_t req = __atomic_load_n(&mb_request[cpu], __ATOMIC_ACQUIRE);
     uint32_t ack = __atomic_load_n(&mb_ack[cpu], __ATOMIC_RELAXED);
     if (ack != req) {
-        arch_fence_i();
+        arch_mb();
         __atomic_store_n(&mb_ack[cpu], req, __ATOMIC_RELEASE);
     }
 }
