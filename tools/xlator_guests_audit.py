@@ -27,7 +27,7 @@ Four things are checked:
      lookup is keyed on (e_machine, ABI), so a misspelled column is a row
      that can never match anything, and it would fail as a plain ENOEXEC
      with no hint that the registry was the problem
-  6. every architecture in XLATOR_SUPPORTED_ARCHES defines
+  6. every architecture in the trim registry's xlator capability defines
      arch_bootargs_get, so a.xlator-capable arch can actually be
      *configured* -- see check_bootargs_coverage() for why that is a
      separate fact from being compiled in
@@ -53,11 +53,10 @@ GUESTS_DEF = REPO / "kernel" / "proc" / "xlator_guests.def"
 XSLATOR_MK = REPO / "tools" / "targets-xlator.mk"
 ELF_H = REPO / "kernel" / "include" / "mm" / "elf.h"
 FETCH_PY = REPO / "tools" / "xlator_fetch.py"
-MAKEFILE = REPO / "Makefile"
+TRIM_TOML = REPO / "components" / "trim.toml"
 KERNEL_DIR = REPO / "kernel"
 WEAK_BOOTARGS = "core/bootargs.c"
 
-XLATOR_ARCHES_RE = re.compile(r"^XLATOR_SUPPORTED_ARCHES\s*:?=\s*(.*)$", re.M)
 BOOTARGS_DEF_RE = re.compile(r"^\s*(?:__attribute__\(\(weak\)\)\s*)?"
                              r"(?:const\s+char\s*\*|\w[\w \t*]*)\s*"
                              r"arch_bootargs_get\s*\(",
@@ -102,11 +101,21 @@ def fail(msg: str) -> int:
 
 
 def parse_xlator_arches() -> list[str]:
-    """The architectures the Makefile compiles CONFIG_XLATOR into."""
-    m = XLATOR_ARCHES_RE.search(MAKEFILE.read_text())
-    if not m:
-        raise ValueError(f"no XLATOR_SUPPORTED_ARCHES in {MAKEFILE.name}")
-    return m.group(1).split()
+    """The architectures the Makefile compiles CONFIG_XLATOR into.
+
+    The list moved from the Makefile into components/trim.toml
+    ([capability.xlator].arches); the generated components/trim.mk feeds the
+    Makefile and `make check-trim-registry` keeps the two identical, so this
+    reads the TOML as the source of truth.
+    """
+    import tomllib
+
+    try:
+        data = tomllib.loads(TRIM_TOML.read_text())
+        arches = data["capability"]["xlator"]["arches"]
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError) as e:
+        raise ValueError(f"cannot read [capability.xlator].arches from {TRIM_TOML.name}: {e}")
+    return list(arches)
 
 
 def archs_defining_bootargs() -> dict[str, list[str]]:
@@ -136,7 +145,7 @@ def archs_defining_bootargs() -> dict[str, list[str]]:
 def check_bootargs_coverage() -> str | None:
     """Every xlator-capable arch must be able to receive a command line.
 
-    Being listed in XLATOR_SUPPORTED_ARCHES only means CONFIG_XLATOR is
+    Being listed in the trim registry's xlator capability only means CONFIG_XLATOR is
     compiled in.  Whether the channel can be *configured* is a separate fact:
     the only configuration input is bootargs_get(), and an architecture with
     no arch_bootargs_get() falls through to the weak default in
@@ -146,7 +155,7 @@ def check_bootargs_coverage() -> str | None:
     feature as built in.
 
     loongarch64 was exactly this for the whole life of the channel: it is in
-    XLATOR_SUPPORTED_ARCHES, so CONFIG_XLATOR compiled and /proc/a20/xlator
+    the capability's arch list, so CONFIG_XLATOR compiled and /proc/a20/xlator
     was registered, and no a20.* key could ever take effect because nothing
     ever populated the command line.
 
@@ -160,7 +169,7 @@ def check_bootargs_coverage() -> str | None:
     if missing:
         subject = (f"{missing[0]} is" if len(missing) == 1
                    else f"{', '.join(missing)} are")
-        return (f"{subject} in XLATOR_SUPPORTED_ARCHES but "
+        return (f"{subject} in the xlator capability (components/trim.toml) but "
                 f"define{'s' if len(missing) == 1 else ''} no "
                 f"arch_bootargs_get(), so the weak default in "
                 f"kernel/{WEAK_BOOTARGS} returns NULL and no a20.* key can "
@@ -168,7 +177,7 @@ def check_bootargs_coverage() -> str | None:
                 f"reader is what every other MMU arch does), or -- if the "
                 f"architecture genuinely has no command line -- write an "
                 f"explicit stub returning NULL and drop it from "
-                f"XLATOR_SUPPORTED_ARCHES.")
+                f"the xlator capability.")
     return None
 
 

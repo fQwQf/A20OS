@@ -60,6 +60,15 @@ sudo apt-get install -y \
 
 STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运行和实板烧录仍分别依赖宿主机的 `qemu-system-arm`、OpenOCD 与实际调试硬件；缺少这些环境时可只运行 `make check-stm32f103` 验证编译。准确产物路径见 [STM32F103 移植说明](platforms/stm32f103-port.md)。
 
+## 声明式构建配置（instances/ 与 components/trim.toml）
+
+Makefile 之外的构建配置有两个声明式入口，日常应优先使用它们而不是直接拼 make 变量：
+
+- **实例清单** `instances/*.toml`：一个文件描述一个完整可构建/可运行/可测试的系统实例，`tools/a20 build|run|flash|... <实例>` 负责校验并推导 make 变量。字段参考见 [instances.md](instances.md)。
+- **剪裁注册表** `components/trim.toml`：内核剪裁的**策略**数据——构建 profile 策展的源码清单（如 `[profile.mcu]`）、各可选能力的架构矩阵（nommu/swap/xlator/ramfs-user/SMP 已验证平台/PCIe MMIO）、每架构固定特性宏。Makefile 经生成的 `components/trim.mk` 读它（`NOMMU_SUPPORTED_ARCHES`、`SWAP_SUPPORTED_ARCHES`、MCU 源码列表都出自这里），`tools/a20` 校验实例时读同一份 TOML。改完 TOML 执行 `make regen-trim-fragment` 重新生成；`make check-trim-registry` 会拒绝过期的 fragment、缺失的条目和没有消费者的死配置。
+
+想知道某个实例实际按什么剪裁构建，用 `tools/a20 trim <实例>` 查看完整计划（profile、各能力开关及理由、内存预算）。
+
 ## 发布与调试模式
 
 - 默认 `OPT=-O3`，对应发布构建。
@@ -71,8 +80,8 @@ STM32 固件、QEMU 和烧录目标使用同一套 `BUILD_DIR` 命名。QEMU 运
 - `BOARD`: 默认 `qemu-virt-<ARCH>`；STM32 时为 `stm32f103`。
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
-- `NR_CPUS`: 默认 `1`；只有 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 的同名 QEMU virt 板列入已验证 SMP 白名单。
-- `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
+- `NR_CPUS`: 默认 `1`；只有 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 的同名 QEMU virt 板列入已验证 SMP 白名单（出处：`components/trim.toml` 的 `smp-verified-qemu` 矩阵）。
+- `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`（出处：`components/trim.toml` 的 `nommu` 矩阵）。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
 - `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M、PPC64LE 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。
 - `QEMU_GUI_AUDIO_DEVICE`: PCM controller，默认 `hda`；设为 `virtio` 时使用 QEMU virtio-sound。

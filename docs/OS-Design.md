@@ -96,7 +96,7 @@ x86_64 PC（实体瘦客户机）。另有 Kendryte K230 与全志 D1s/F133 两�
 
 构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。PPC64LE 当前按 QEMU pSeries 单核边界记录。
 
-NOMMU 构建支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`NOMMU_SUPPORTED_ARCHES`）。其中 hosted 运行矩阵 `smoke-arch-mmu-matrix` 只覆盖前四个 hosted 架构的 MMU/NOMMU 组合；ARMv7-M 由 STM32 目标单独覆盖。LoongArch64、x86_64 和 PPC64LE 的 NOMMU 构建在入口被拒绝。
+NOMMU 构建支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`NOMMU_SUPPORTED_ARCHES`，声明于 `components/trim.toml` 的能力矩阵，经生成的 `components/trim.mk` 进入构建；实例校验读同一份 TOML）。其中 hosted 运行矩阵 `smoke-arch-mmu-matrix` 只覆盖前四个 hosted 架构的 MMU/NOMMU 组合；ARMv7-M 由 STM32 目标单独覆盖。LoongArch64、x86_64 和 PPC64LE 的 NOMMU 构建在入口被拒绝。
 
 典型构建命令：
 

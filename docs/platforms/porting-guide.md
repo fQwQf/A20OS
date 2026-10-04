@@ -18,6 +18,8 @@ const board_config_t *const current_board;
 
 构建系统自动加入该目录顶层的 `*.c`，并把该目录加入头文件搜索路径。平台若提供 `kernel/platform/<board>/ldscript.ld`，它会覆盖架构默认链接脚本。平台子目录和平台汇编不会被自动递归加入；需要它们时必须先扩展 Makefile 的明确规则。
 
+构建与实例接入有两个声明式入口，新板不需要改 Makefile 的门禁逻辑：给板写一个 `instances/<board>.toml`（架构、板卡、flash/SRAM 几何等），`tools/a20 build|run|flash <实例>` 即可用；若目标属于新的构建档位（例如第二个 MCU 级架构），在 `components/trim.toml` 里把架构加进 `[profile.mcu].arches`，或按需增改 `[capability.*]` 矩阵——改完执行 `make regen-trim-fragment`，`make check-trim-registry` 会校验自洽性与生成物时效。板级事实（引脚、时钟、内存映射）仍只写在 `kernel/platform/<board>/`，不进注册表。
+
 `board_config_t` 当前包含 RAM 描述、irqchip、timer、SMP、early init、电源控制和设备枚举。新增字段必须确认存在真实调用方，不能只增加未接通的操作表。
 
 ## SMP 接口

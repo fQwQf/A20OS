@@ -101,7 +101,8 @@ class TestCandidates(unittest.TestCase):
 
     def test_unknown_first_word_suggests_commands(self) -> None:
         got = self.complete("chec")
-        self.assertEqual(got, ["check", "check-flash-backends", "check-registry"])
+        self.assertEqual(got, ["check", "check-flash-backends", "check-registry",
+                               "check-trim"])
 
     def test_empty_words_list_all_commands(self) -> None:
         self.assertIn("boards", self.complete())

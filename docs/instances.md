@@ -4,9 +4,9 @@ A20OS 的构建、运行与冒烟测试配置统一由实例清单声明：`inst
 
 设计要点：
 
-- 未写的字段不落任何变量，直接落回 Makefile 默认值。策略只有一个出处（Makefile），实例只携带自己的增量。
+- 未写的字段不落任何变量，直接落回 Makefile 默认值。实例只携带自己的增量；门禁**逻辑**（force-off、`$(error)`）只有一个出处（Makefile），而门禁**数据**——各能力的架构矩阵与 MCU profile 的策展源码清单——只有一个出处（`components/trim.toml`，经生成的 `components/trim.mk` 喂给 Makefile，`tools/a20` 校验实例时读同一份 TOML，`tools/a20 trim` 展示它推导出的剪裁计划）。
 - 校验前置：架构/板卡/ABI/SMP/NOMMU/驱动组件等约束在启动编译前全部检查完毕，错误信息指向具体字段。
-- 声明即门禁：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
+- 声明即门禁：`make check-manifests` 一次跑完 `check-instances`、`check-instance-matrix`、`check-component-registry`、`check-trim-registry`、`check-flash-backend-registry`，`make check-a20-tests` 覆盖 a20 工具自身的逻辑；两者都由 CI 的 `toolchain-gates` job 强制，保证实例、架构矩阵、组件注册表、剪裁注册表、烧录后端与工具实现永不漂移。这些门禁是宿主侧纯 Python、与架构无关，因此该 job 不进容器、不做矩阵、不拉 submodule，并排在所有构建/冒烟 job 之前。
 
 ## 快速上手
 
@@ -15,6 +15,7 @@ tools/a20 list                            # 列出所有实例（名称、架构
 tools/a20 list --arch riscv64 armv7m      # 只看这些架构
 tools/a20 list --action test              # 只看能跑冒烟的实例
 tools/a20 show vf2-physical                # 这个实例支持什么、要多少资源、会碰什么
+tools/a20 trim qemu-riscv64               # 这个实例按什么剪裁计划构建（profile/能力/内存预算）
 tools/a20 run qemu-riscv64                # 构建并在 QEMU 启动（文本模式）
 tools/a20 run xfce-x86_64                 # 图形桌面实例（apk world，含 virtio-gpu + 声卡）
 tools/a20 debug qemu-riscv64              # -O0 -g 构建 + QEMU GDB stub（:1234）
@@ -28,6 +29,7 @@ tools/a20 build qemu-riscv64 -- -j8       # 只构建；`--` 后参数透传给 
 tools/a20 show-vars qemu-riscv64-smp4     # 查看实例推导出的 make 变量
 tools/a20 check                           # 校验全部实例（CI 门禁同款）
 tools/a20 check-registry                  # 校验驱动组件注册表并与 Makefile 交叉比对
+tools/a20 check-trim                      # 校验剪裁注册表（components/trim.toml）与生成的 trim.mk
 tools/a20 check-flash-backends            # 校验烧录后端注册表并与 makefile 交叉比对
 ```
 
@@ -69,7 +71,7 @@ board = "qemu-virt-riscv64"  # 可选；默认 qemu-virt-<arch>（armv7m 默认 
 abi = "both"                 # linux | native | both
 
 [kernel]
-profile = "full"             # full | benchmark | mcu
+profile = "full"             # full | benchmark | mcu（mcu 仅限 [profile.mcu].arches 里的架构，现即 armv7m）
 opt = "-O3"
 user_opt = "-O3"
 bringup = false              # true = 只编译内核，不组文件系统镜像
@@ -81,7 +83,7 @@ werror = true
 cooperative_boot = false
 storage_read_only = false
 external_root = false
-ramfs_user = false           # 仅 loongarch64
+ramfs_user = false           # 仅 loongarch64/riscv64（components/trim.toml 的 ramfs-user 矩阵）
 
 [machine]
 smp = 1                      # >1 仅限已验证 QEMU 平台，否则需 allow_unverified_smp
@@ -202,7 +204,7 @@ VisionFive 2 的 SD 卡编排（firmware 预检、extra 分区来源）保留在
 
 - `smp > 1` 只允许在已验证的 QEMU virt 平台（riscv64/aarch64/loongarch64/x86_64），否则必须显式 `allow_unverified_smp = true`。
 - `gui.enabled` 与 `kernel.bringup` 互斥；`[test]` 与 GUI 互斥。
-- `nommu`、`ramfs_user` 有架构白名单；`driver_deployment` 是取值枚举（`generic` | `embedded`），写错都会在编译前被拒绝。
+- `nommu`、`swap`、`ramfs_user` 有架构白名单（出处是 `components/trim.toml` 的 capability 矩阵；此前 Makefile 只会在构建期把这些请求静默 force-off，现在 `a20 check` 直接拒绝）；`kernel.profile` 必须与架构一致——`mcu` 只用于 MCU 级架构，而 MCU 级架构上的其他 profile 会被 Makefile 强制成 `mcu`，写错都会在编译前被拒绝。`driver_deployment` 是取值枚举（`generic` | `embedded`）。
 - `run`/`debug`/`test` 仅支持有通用 QEMU 路径的架构；armv7m 走 `tools/stm32.mk`，loongarch32 走 cemu 模拟器。
 
 ### 互斥组合
@@ -553,6 +555,30 @@ make_target = "flash-xuanwu-openocd"   # 配方住在 make 里，不在 Python �
 
 `make check-flash-backend-registry`（= `tools/a20 check-flash-backends`）同样两层：注册表自身（重名、board 必须真有 `kernel/platform/<board>/board.c`、`make_target` 必须是 makefile 里真实存在的规则），以及每个 `make_target` 必须在 a20 实际能派发的目标集合里；两边任何一边漂移都会 FAIL，而不是等到烧录烧到一半才发现。
 
+## 剪裁注册表（components/trim.toml）
+
+内核剪裁的**策略**数据来源：每个构建 profile 策展的源码清单、每个可选能力的架构矩阵、每个架构的固定特性宏。这三个清单过去同时活在 Makefile 和 `a20_instance.py` 里，靠手工保持一致；现在只有这一份：
+
+```toml
+[profile.mcu]                # MCU 级构建 profile
+arches = ["armv7m"]          # 列在里面的 ARCH 会被强制进该 profile（含下面的隐含开关）
+opt = "-Os"
+cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
+nommu = true                 # profile 隐含 NOMMU=1
+bringup = true               # ……以及 BRINGUP=1（kernel-only）
+sources = [ "kernel/mcu/main.c", "kernel/core/panic.c", … ]  # 策展源码白名单
+
+[capability.swap]            # 能力矩阵：架构白名单 + 可选 board 排除
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "ppc64le"]
+
+[arch-cppflags]              # 每架构无条件 -D 特性宏
+x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
+```
+
+消费路径有两条：Makefile 读 `make regen-trim-fragment` 生成的 `components/trim.mk`（`NOMMU_SUPPORTED_ARCHES`、`SWAP_SUPPORTED_ARCHES` 等矩阵与 mcu 源码列表都出自它），`tools/a20` 校验实例时直接读 TOML——同一份数据喂两边，实例校验和构建不可能各说各话。`make check-trim-registry`（= `tools/a20 check-trim`）做三件事：注册表自身自洽（必备条目存在、源码文件真实存在、board 排除项真实存在）、生成的 fragment 没有过期、每个发射的变量都有 makefile 在读（没有消费者的策略条目是死配置）。
+
+想知道一个实例按什么剪裁计划构建，用 `tools/a20 trim <实例>`：profile 是谁、哪些能力开/关/被 force-off 及其理由、flash/RAM 预算从哪来。`a20 show` 也带一行摘要。策略的**逻辑**（force-off 顺序、`$(error)`）仍在 Makefile；这份文件只搬走了**数据**。板级事实（引脚、时钟）继续留在 `kernel/platform/<board>/`，链接兼容桩（`kernel/mcu/mcu_stubs.c`）是代码，都不属于这里。
+
 ## CI 门禁
 
 | 目标 | 作用 |
@@ -626,7 +652,7 @@ world_size_mb = 4096
 
 1. 在 `instances/` 新建 `<名字>.toml`，必填只有 `arch`；
 2. 跑 `tools/a20 check <名字>` 通过校验；
-3. 用 `tools/a20 show-vars <名字>` 确认推导出的变量符合预期；
+3. 用 `tools/a20 show-vars <名字>` 确认推导出的变量符合预期，用 `tools/a20 trim <名字>` 确认剪裁计划（profile、能力开关、内存预算）符合预期；
 4. `tools/a20 run <名字>` 实际启动验证。
 
-如果新实例覆盖了一个此前没有的架构，记得 `make check-instance-matrix` 会随之更新覆盖关系；新增驱动组件时同步更新 `components/drivers.toml` 并跑 `make check-component-registry`。
+如果新实例覆盖了一个此前没有的架构，记得 `make check-instance-matrix` 会随之更新覆盖关系；新增驱动组件时同步更新 `components/drivers.toml` 并跑 `make check-component-registry`。要为实例开启/关闭某项能力而架构矩阵不允许时，改的是 `components/trim.toml` 的 capability 条目（并重新生成 fragment），不是实例或 Makefile。

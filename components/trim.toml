@@ -1,0 +1,120 @@
+# Kernel trim registry (components/trim.toml).
+#
+# This file is the single source of truth for the *policy* half of kernel
+# trimming: which sources a small-memory build profile curates, and which
+# architectures/boards each optional capability supports.  It exists because
+# these lists used to live in two places at once -- the Makefile for the build
+# and tools/a20_instance.py for instance validation -- and could only be kept
+# in agreement by hand.
+#
+# Two consumers, one file:
+#   * The Makefile reads the generated `components/trim.mk` fragment (plain
+#     variable assignments; regenerate with `make regen-trim-fragment`, and
+#     `make check-trim-registry` fails while that fragment is stale).  The
+#     Makefile stays the build engine: it owns the force-off / $(error) logic
+#     that turns these lists into gates.
+#   * `tools/a20` reads this TOML directly when validating instance manifests,
+#     so `a20 check` rejects an instance asking for a capability its
+#     architecture does not declare.
+#
+# The wildcard halves of the trim (board drivers, kernel/platform/<board>/,
+# kernel/arch/<arch>/) stay in the Makefile on purpose: they are per-board
+# facts the registry cannot enumerate.
+
+# ---------------------------------------------------------------------------
+# Build profiles
+# ---------------------------------------------------------------------------
+# A profile curates its own kernel source list.  `sources` are the
+# hand-picked core, checked in verbatim so a profile is a reviewable decision;
+# the Makefile appends the wildcard parts.  `arches` drives derivation: an
+# ARCH in this list gets PROFILE forced to the profile name, and each
+# `nommu` / `bringup` implication is forced on with it.  Adding a second
+# MCU-class architecture is therefore one TOML edit, not a Makefile patch.
+[profile.mcu]
+description = "Small-memory NOMMU firmware profile (STM32-class Cortex-M)"
+arches = ["armv7m"]
+opt = "-Os"
+cppflags = ["-DCONFIG_MCU", "-DCONFIG_KLOG_BUF_SIZE=256"]
+nommu = true
+bringup = true
+sources = [
+    "kernel/mcu/main.c",
+    "kernel/mcu/uart.c",
+    "kernel/mcu/heap.c",
+    "kernel/mcu/mcu_stubs.c",
+    "kernel/core/printf.c",
+    "kernel/core/string.c",
+    "kernel/core/panic.c",
+    "kernel/core/sync.c",
+    "kernel/core/klog.c",
+    "kernel/core/timekeeping.c",
+    "kernel/core/stack_protector.c",
+    "kernel/proc/sched.c",
+    "kernel/proc/park.c",
+    "kernel/proc/timer_heap.c",
+    "kernel/proc/current.c",
+    "kernel/proc/pid.c",
+    "kernel/proc/pidns.c",
+    "kernel/proc/proc.c",
+    "kernel/proc/userns.c",
+    "kernel/proc/task.c",
+    "kernel/proc/exit.c",
+    "kernel/proc/signal.c",
+    "kernel/proc/cg_cpu.c",
+    "kernel/mm/nommu.c",
+    "kernel/fs/diskfs/fat32lite.c",
+]
+
+# ---------------------------------------------------------------------------
+# Capability matrices
+# ---------------------------------------------------------------------------
+# A capability requested outside its arch list is force-disabled by the
+# Makefile (it used to be silently dropped; `a20 check` now rejects it
+# up front) and must never merely fail to compile.  `board_exclusions`
+# narrows an arch list by board.
+[capability.nommu]
+arches = ["riscv64", "riscv32", "aarch64", "arm32", "armv7m"]
+
+# Swap needs a PTE encoding for the 64-bit swap entry (pte_is_swap /
+# pte_to_swp_entry / swp_entry_to_pte in kernel/arch/<arch>/include/page_table.h);
+# riscv32 and loongarch32 have not defined one.
+[capability.swap]
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "arm32", "ppc64le"]
+
+# A translator JITs guest code, which needs a 64-bit host with real page
+# protections (mprotect RWX) and an MMU to demand-page from; armv7m/arm32 and
+# riscv32 are 32-bit or NOMMU.
+[capability.xlator]
+arches = ["riscv64", "loongarch64", "aarch64", "x86_64", "ppc64le"]
+
+# The make side gates RAMFS_USER on the RAMFS_USER_OBJCOPY_<arch> table (the
+# enforceable build fact), so this list is the instance-facing policy that
+# must be a superset of the recipes actually present.
+[capability.ramfs-user]
+arches = ["loongarch64", "riscv64"]
+
+# SMP >1 is only pre-verified on these QEMU virt platforms; anything else
+# needs machine.allow_unverified_smp = true.
+[capability.smp-verified-qemu]
+arches = ["riscv64", "aarch64", "loongarch64", "x86_64"]
+
+# PCIe MMIO windows.  Boards whose SoC has no PCIe root complex must leave
+# the MMIO-allocation window undefined, not defined-as-zero: pci_bus.c would
+# otherwise map physical address 0 as a device window.  The SophGo
+# SG2002/CV1800B boards are the first RISC-V targets in the tree without PCIe.
+[capability.pcie-mmio-alloc]
+arches = ["x86_64", "loongarch64", "riscv64"]
+board_exclusions = ["licheerv-nano", "milk-v-duo"]
+
+[capability.pcie-mmio-ecam]
+arches = ["loongarch64", "riscv64"]
+board_exclusions = ["licheerv-nano", "milk-v-duo"]
+
+# ---------------------------------------------------------------------------
+# Per-architecture feature defines
+# ---------------------------------------------------------------------------
+# Unconditional -D flags each architecture's common code expects.  Keys are
+# ARCH values; anything absent gets no extra defines.
+[arch-cppflags]
+x86_64 = ["-DCONFIG_IOPORT", "-DCONFIG_AHCI", "-DCONFIG_PCI_MMIO_BASE_LEGACY"]
+aarch64 = ["-DCONFIG_TRAP_ESR_DIAG"]

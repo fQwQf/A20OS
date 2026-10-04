@@ -8,6 +8,7 @@ HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
 
 .PHONY: host-tests check-vfs-abstraction check-instances check-instance-matrix \
         check-component-registry regen-driver-fragment \
+        check-trim-registry regen-trim-fragment \
         check-smoke-cases \
         check-flash-backend-registry check-manifests \
         check-a20-tests
@@ -44,6 +45,17 @@ check-xlator-guests:
 regen-driver-fragment:
 	@tools/a20 regen-drivers
 
+# components/trim.mk is generated from components/trim.toml -- the policy half
+# of kernel trimming (profile source lists, capability arch matrices).  Same
+# two-layer stance as the driver registry: the TOML is self-validated, the
+# generated fragment must not go stale, and every emitted variable must still
+# have a makefile consumer so no entry can die silently.
+check-trim-registry:
+	@tools/a20 check-trim
+
+regen-trim-fragment:
+	@tools/a20 regen-trim
+
 # Flash-programmer registry (components/flash-backends.toml).  Two layers, like
 # the driver registry: the toml is self-validated (unique names, boards that
 # exist, targets that exist as make rules), then every make target is
@@ -57,7 +69,7 @@ check-flash-backend-registry:
 # components/ and the Makefile must never drift apart.  Wired into CI as the
 # `manifest-gates` job.
 check-manifests: check-instances check-instance-matrix check-component-registry \
-                 check-flash-backend-registry
+                 check-trim-registry check-flash-backend-registry
 	@echo "check-manifests: PASS"
 
 # Unit tests for the a20 toolchain itself (tools/tests/test_a20.py).  Stdlib
