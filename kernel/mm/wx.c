@@ -11,9 +11,14 @@
  *   - off: no intervention (debug/compatibility fallback only).
  *
  * The policy is selected on the kernel cmdline: a20.wx=deny|strip|off.
- * Nothing in this tree's user space (static musl programs, the in-tree cmds,
- * native svc) needs RWX -- there is no dlopen and no JIT -- so the strictest
- * policy, deny, is the default.
+ * Nothing in this tree's own user space (static musl programs, the in-tree
+ * cmds, native svc) needs RWX -- there is no dlopen and no JIT -- so the
+ * strictest policy, deny, is the default.  The single exception is a task
+ * that execve re-execed through a foreign-architecture translator
+ * (task_t.xlator_host), which must JIT guest code; that exemption is keyed
+ * on the task, not on the policy, so it does not weaken W^X for anything
+ * else on the machine.  It exists only in a CONFIG_XLATOR build; without
+ * that knob there is nothing to exempt.
  */
 
 #include "mm/vm.h"
@@ -88,6 +93,18 @@ int mm_wx_filter_prot(int prot, const char *ctx)
 
     task_t *cur = proc_current();
     int pid = cur ? cur->pid : -1;
+
+    #ifdef CONFIG_XLATOR
+    /* The foreign-architecture translator JITs guest code, which requires
+     * an RWX buffer.  execve marks exactly that task (task_t.xlator_host)
+     * when it re-execs it, and nothing else can set the bit -- so this
+     * exemption is per-process and does not require weakening the policy
+     * for the whole system the way a20.wx=off does. */
+    if (cur && cur->xlator_host) {
+        kinfo("[WX] %s: pid=%d 翻译器宿主，放行 W|X\n", ctx ? ctx : "?", pid);
+        return prot;
+    }
+#endif
 
     switch (g_wx_policy) {
     case MM_WX_OFF:

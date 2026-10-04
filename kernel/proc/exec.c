@@ -19,6 +19,7 @@
 #include "proc/proc_internal.h"
 #include "proc/signal.h"
 #include "proc/debug.h"
+#include "proc/xlator.h"
 #include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "fs/vfs/path.h"
@@ -62,6 +63,7 @@ typedef struct {
     int     argc;
     int     envc;
     int     depth;                      /* shebang nesting depth */
+    size_t  bytes;                      /* argv+envp string bytes, for limits */
 } exec_bprm_t;
 
 /* ================================================================== */
@@ -411,6 +413,268 @@ nomem:
         kfree(new_args[i]);
     return -ENOMEM;
 }
+
+/* ================================================================== */
+/*  exec_try_translator — foreign-architecture binary -> user-space   */
+/*  translator, by in-place re-exec                                   */
+/* ================================================================== */
+
+#ifdef CONFIG_XLATOR
+
+/*
+ * Last-resort handler for an execve target that elf_load() rejected with
+ * -ENOEXEC but which elf_is_foreign_arch() recognises as a well-formed
+ * foreign-architecture ELF (see kernel/mm/elf.c).
+ *
+ * The rewrite is deliberately *re-exec*, not service forwarding: exec
+ * requires the caller to become the target image, and a wrapper-style
+ * translator is an ordinary Linux-ABI program that runs the guest inside
+ * its own address space.  So the calling task loads the translator natively
+ * and the guest becomes its argument vector -- indistinguishable, to the
+ * scheduler, the fd table and /proc, from having run natively.
+ *
+ * New argv, matching exec_try_script()'s ownership dance:
+ *
+ *     [0]  translator path
+ *     [1..] the configured template, expanded
+ *
+ * The template is where the translator's own conventions live, and it is
+ * looked up per guest rather than hardcoded.  qemu-user spells it
+ * "-0 @A @P @*": guests dispatch on argv[0] (busybox only enters applet mode
+ * when argv[0] contains "busybox"), so the caller's argv[0] has to be
+ * handed over explicitly, and the guest image is a *separate* positional
+ * argument.  A wrapper that instead wants the image path as argv[0] itself
+ * is configured "@P @*" and gets exactly that -- no stray argument in front
+ * of the path, which is what the earlier per-guest "argv0 flag" column
+ * could not express.  See kernel/include/proc/xlator.h.
+ *
+ * Two properties the rewrite preserves deliberately:
+ *
+ *   - argv[0] of the *guest* is what the caller asked for, when the
+ *     template propagates it, so /proc/self/cmdline and anything
+ *     dispatching on the program name keep working.
+ *   - The translator is a host-native image, resolved once at boot.  A
+ *     process cannot redirect the re-exec through PATH or a writable
+ *     directory, and the EXEC_RETRY depth cap stops a misconfiguration that
+ *     pointed the channel at a foreign-architecture binary from looping.
+ *
+ * Returns EXEC_RETRY to re-enter the resolution loop with the rewritten
+ * bprm, 0 when the file is not translatable (caller should keep looking),
+ * or a negative errno.
+ */
+
+/* Copy @src into the next free slot of @out, or fail.  Keeps the ownership
+ * rules in one place: everything in @out is owned by the caller and freed by
+ * the single cleanup path, whether it was allocated here or transferred from
+ * the bprm. */
+static int xlator_push(char **out, int *n, int max, const char *src)
+{
+    if (*n >= max)
+        return -E2BIG;
+    size_t len = strlen(src) + 1;
+    char *copy = kmalloc(len);
+    if (!copy)
+        return -ENOMEM;
+    memcpy(copy, src, len);
+    out[(*n)++] = copy;
+    return 0;
+}
+
+/*
+ * Expand one template token into @out.
+ *
+ * XLATOR_TOK_SPLICE differs from the others in ownership: it hands over the
+ * caller's own argv[1..] pointers instead of copying them, because a guest
+ * with a long argument vector should not pay for a second copy of it on a
+ * path that is already rare.  The handover nulls the source slot, so the
+ * bprm can no longer free them and exactly one side ends up owning each.
+ */
+static int xlator_push_token(const xlator_tmpl_t *tmpl, int i,
+                             exec_bprm_t *bprm, char **out, int *n, int max)
+{
+    switch (tmpl->kind[i]) {
+    case XLATOR_TOK_LITERAL: {
+        char lit[XLATOR_TMPL_LEN];
+        memcpy(lit, tmpl->text + tmpl->start[i], tmpl->len[i]);
+        lit[tmpl->len[i]] = '\0';
+        return xlator_push(out, n, max, lit);
+    }
+    case XLATOR_TOK_ARGV0:
+        /* The argv[0] the caller passed.  It may be absent or not match
+         * bprm->path (execve lets them disagree); honour what the caller
+         * asked for, and fall back to the path only when there is no
+         * argv[0] at all. */
+        return xlator_push(out, n, max,
+                           (bprm->argc > 0 && bprm->args[0]) ? bprm->args[0]
+                                                             : bprm->path);
+    case XLATOR_TOK_PATH:
+        return xlator_push(out, n, max, bprm->path);
+    case XLATOR_TOK_SPLICE:
+        for (int j = 1; j < bprm->argc; j++) {
+            if (*n >= max)
+                return -E2BIG;
+            if (!bprm->args[j])
+                continue;
+            out[(*n)++] = bprm->args[j];
+            bprm->args[j] = NULL;   /* ownership transferred */
+        }
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+/*
+ * Give the translator the environment it was configured to need.
+ *
+ * Injected entries go to the *front* of envp.  Lookups take the first match,
+ * so prepending is what makes an administrator-forced variable actually win
+ * over a stray one the caller happened to export -- which is the whole point
+ * of configuring it (ROSETTA_TMPDIR pointing somewhere writable is not
+ * negotiable for a Rosetta-style translator).
+ *
+ * Called only after the argv rewrite has been installed, so a failure here
+ * leaves the bprm in a consistent state the caller's bprm_free() can unwind.
+ */
+static int xlator_inject_env(exec_bprm_t *bprm, const char *spec,
+                             const task_t *t)
+{
+    if (!spec || !spec[0])
+        return 0;
+
+    char scratch[XLATOR_ENV_LEN];
+    size_t len = strlen(spec);
+    if (len >= sizeof(scratch))
+        return -EINVAL;
+    memcpy(scratch, spec, len + 1);
+
+    char *entries[XLATOR_ENV_MAX];
+    int n = xlator_split_env(scratch, entries, XLATOR_ENV_MAX);
+    if (n < 0)
+        return n;   /* boot-validated; unreachable in practice */
+
+    if (bprm->envc + n > MAX_ARG_STRINGS)
+        return -E2BIG;
+
+    /* Charge the injected strings against the same budget the caller's own
+     * argv and envp were charged against, so a configured translator cannot
+     * push the new image's initial stack past the limit. */
+    size_t added = 0;
+    for (int i = 0; i < n; i++)
+        added += strlen(entries[i]) + 1;
+    size_t budget = t->limits.stack / 4;
+    if (bprm->bytes + added > MAX_ARG_BYTES ||
+        (budget && bprm->bytes + added > budget))
+        return -E2BIG;
+
+    for (int i = 0; i < n; i++) {
+        size_t elen = strlen(entries[i]) + 1;
+        char *copy = kmalloc(elen);
+        if (!copy)
+            return -ENOMEM;
+        memcpy(copy, entries[i], elen);
+        /* Shift the existing environment up by one slot per entry already
+         * placed, so the block ends in the right order with its NULL
+         * terminator intact. */
+        memmove(&bprm->envs[i + 1], &bprm->envs[i],
+                (size_t)(bprm->envc - i + 1) * sizeof(char *));
+        bprm->envs[i] = copy;
+        bprm->envc++;
+    }
+
+    bprm->bytes += added;
+    return 0;
+}
+
+static int exec_try_translator(int fd, exec_bprm_t *bprm, task_t *t)
+{
+    if (!xlator_enabled())
+        return 0;
+
+    uint16_t machine = 0;
+    if (elf_is_foreign_arch(fd, &machine) < 0)
+        return 0;   /* not ours: corrupt file or native image */
+
+    xlator_desc_t desc;
+    if (xlator_lookup(machine, &desc) < 0)
+        return 0;   /* channel on, but nothing usable for this machine */
+
+    xlator_tmpl_t tmpl;
+    if (xlator_parse_template(desc.argv, &tmpl) < 0)
+        return 0;   /* boot-validated; unreachable without a torn config */
+
+    kinfo("[XLATOR] pid=%d execve %s (e_machine=%u) → %s  argv=\"%s\"\n",
+          t->pid, bprm->path, machine, desc.path, desc.argv);
+
+    /*
+     * Build the new argv before touching bprm, so a failure part-way
+     * through leaves the caller's bprm intact and the ENOEXEC path
+     * recoverable.
+     *
+     * argv[0] is always the translator itself, whatever the template says:
+     * the kernel is re-execing that program, and a template that tried to
+     * place the guest image there would just be a confusing way to say so.
+     */
+    char *new_args[MAX_ARG_STRINGS + 1];
+    int new_argc = 0;
+    int r;
+
+    r = xlator_push(new_args, &new_argc, MAX_ARG_STRINGS, desc.path);
+    if (r < 0)
+        goto fail;
+
+    for (int i = 0; i < tmpl.n; i++) {
+        r = xlator_push_token(&tmpl, i, bprm, new_args, &new_argc,
+                              MAX_ARG_STRINGS);
+        if (r < 0)
+            goto fail;
+    }
+    new_args[new_argc] = NULL;
+
+    /* bprm->path is now duplicated into new_args; release the original. */
+    if (bprm->args[0]) { kfree(bprm->args[0]); bprm->args[0] = NULL; }
+    if (bprm->path) { kfree(bprm->path); bprm->path = NULL; }
+
+    memcpy(bprm->args, new_args, (new_argc + 1) * sizeof(char *));
+    bprm->argc = new_argc;
+
+    bprm->path = kmalloc(strlen(desc.path) + 1);
+    if (!bprm->path)
+        return -ENOMEM;   /* bprm is consistent; the caller frees it */
+    strcpy(bprm->path, desc.path);
+
+    r = xlator_inject_env(bprm, desc.env, t);
+    if (r < 0)
+        return r;
+
+    /*
+     * The image about to be loaded is the translator, not a guest, so it
+     * will legitimately request an RWX JIT buffer.  Flag it here, before
+     * the retry loop calls elf_load()/mmap, and let mm_wx_filter_prot()
+     * honour exactly this one task.
+     *
+     * The kernel cannot know whether the configured translator actually JITs,
+     * so a translator that does not is exempted too.  That is a deliberate
+     * over-approximation: the alternative is a per-translator "needs W^X"
+     * property in the configuration, which would be a permission decision
+     * made from a string on a command line.  See
+     * docs/exec-xlator/01-usage.md for the cost.
+     */
+    t->xlator_host = 1;
+
+    return EXEC_RETRY;
+
+fail:
+    /* Covers both the allocation failure and the argument-count overflow.
+     * Entries already spliced in from the bprm are in new_args and were
+     * nulled at the source, so freeing the whole array frees each string
+     * exactly once and the bprm stays internally consistent. */
+    for (int i = 0; i < new_argc; i++)
+        kfree(new_args[i]);
+    return r;
+}
+
+#endif /* CONFIG_XLATOR */
 
 /* ================================================================== */
 /*  Native ABI setup                                                  */
@@ -810,6 +1074,7 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         kfree(bprm.path);
         return r;
     }
+    bprm.bytes = arg_bytes;
     /*
      * Linux accepts execve(path, NULL, envp), and also an argv array whose
      * first entry is NULL, by supplying an empty argv[0].  Modern glibc
@@ -833,10 +1098,12 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
         bprm.args[1] = NULL;
         bprm.argc = 1;
         arg_bytes += len;
+        bprm.bytes = arg_bytes;
     }
 
     r = exec_copy_args(envp, bprm.envs, &bprm.envc,
                        &arg_bytes, MAX_ARG_BYTES);
+    bprm.bytes = arg_bytes;
     if (r < 0) {
         bprm_free(&bprm);
         return r;
@@ -913,17 +1180,43 @@ int proc_exec(const char *path, char *const argv[], char *const envp[])
             return r;
         }
 
-        /* ELF failed — try shebang */
+        /* ELF failed — try shebang, then the foreign-arch translator */
         if (r == -ENOEXEC) {
             int sr = exec_try_script(fd, &bprm);
-            vfs_close(fd);
-            if (sr == EXEC_RETRY)
+            if (sr == EXEC_RETRY) {
+                vfs_close(fd);
                 continue;   /* loop with new interpreter */
+            }
             if (sr < 0) {
+                vfs_close(fd);
                 bprm_free(&bprm);
                 return sr;
             }
-            /* Not a script either → ENOEXEC */
+
+            /* Not a script.  A structurally valid foreign-architecture ELF
+             * for which a translator is configured is the one remaining case
+             * worth a second chance; anything else -- corrupt file, machine
+             * with no translator, channel disabled -- returns 0 here and
+             * falls through to ENOEXEC exactly as before.
+             *
+             * The whole block disappears from a CONFIG_XLATOR=n build, which
+             * is what makes that knob a real cut-down rather than a runtime
+             * no-op. */
+#ifdef CONFIG_XLATOR
+            int xr = exec_try_translator(fd, &bprm, t);
+            vfs_close(fd);
+            if (xr == EXEC_RETRY) {
+                xlator_note_forward();
+                continue;   /* loop with the translator as the image */
+            }
+            if (xr < 0) {
+                bprm_free(&bprm);
+                return xr;
+            }
+#else
+            vfs_close(fd);
+#endif
+
             bprm_free(&bprm);
             return -ENOEXEC;
         }
