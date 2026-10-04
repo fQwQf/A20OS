@@ -179,4 +179,13 @@
 #define A20_SYS_monitor_create     0x0D10
 #define A20_SYS_monitor_query      0x0D11
 
+/* Hypervisor / vcpu slice (0x0F00) — docs/hypervisor/00-design.md S5.
+ * VM and vcpu are objects, so they travel as handles like every other
+ * capability object; the returned value is a handle, never a pointer. */
+#define A20_SYS_hyp_vm_create      0x0F00
+#define A20_SYS_hyp_vm_load        0x0F01
+#define A20_SYS_hyp_vcpu_create    0x0F02
+#define A20_SYS_hyp_vcpu_run       0x0F03
+#define A20_SYS_hyp_vm_destroy     0x0F04
+
 #endif

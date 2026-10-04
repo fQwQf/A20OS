@@ -401,4 +401,15 @@
 #define SYS_a20_envelope_revoke 904
 #define SYS_a20_envelope_stats  905
 #define SYS_a20_envelope_audit  906
+
+/* A20OS Linux-ABI extensions: hypervisor VM/vcpu bridge (sys_a20_bridge.c).
+ * Same five operations as the Native ABI's 0x0F00 class, for Linux programs
+ * -- the Native handle table is not compiled into an ABI=linux image and is
+ * never allocated for a Linux task, so these hand out registry slots instead
+ * (see the note above the table in sys_a20_bridge.c). */
+#define SYS_hyp_vm_create        907
+#define SYS_hyp_vm_load          908
+#define SYS_hyp_vcpu_create      909
+#define SYS_hyp_vcpu_run         910
+#define SYS_hyp_vm_destroy       911
 #endif /* _CORE_SYSCALL_NR_H */

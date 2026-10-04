@@ -365,12 +365,28 @@ __trap_from_kernel:
 .Lkf_done:
 #endif
 
-    /* No stack swap - already on kernel stack */
+    /* No stack swap - already on kernel stack.  x[2] is the sp the trap-return
+     * resumes on, and on this path it has to be the sp the trap was TAKEN on,
+     * not the post-allocation frame base: every offset the interrupted code
+     * computes afterwards is relative to the sp it expects, so handing it a
+     * value 560 bytes lower silently retargets all of them (its own
+     * `ld ra, -8(sp)` then reads trap-frame slot 69 instead of its saved ra).
+     * Recorded here, before anything clobbers t0; slot 2 is otherwise
+     * untouched until the frame is full.  __trap_from_user stores the user sp
+     * in the same slot for the same reason.
+     *
+     * The value stored is sp ITSELF, sampled before the allocation below: the
+     * return path reloads this slot straight into x2, so recording sp+70*8 here
+     * hands the resumed code a stack pointer 560 bytes ABOVE the frame it came
+     * from -- its `ld ra, -8(sp)` then reads this trap frame instead of its own
+     * saved ra, and every push it makes lands on top of its caller's live data. */
+    addi    t0, sp, 0
     addi    sp, sp, -70*8
+    sd      t0, 2*8(sp)
 
     /* Save general-purpose registers */
     sd      x1, 1*8(sp)
-    /* Skip x2 (sp), saved later */
+    /* Skip x2 (sp), recorded above */
 
     /* Save x3~x31 */
     .set n, 3
@@ -395,9 +411,6 @@ __trap_from_kernel:
     frcsr   t1
     sd      t1, 68*8(sp)
 
-    /* Save current sp */
-    sd      sp, 2*8(sp)
-
     /* First argument: TrapContext address */
     mv      a0, sp
 
@@ -418,7 +431,7 @@ __trap_from_kernel:
     ld      t2, 68*8(sp)
     fscsr   t2
 
-    csrw    sstatus, t0
+csrw    sstatus, t0
     csrw    sepc, t1
 
     /* Restore general-purpose registers */
@@ -427,11 +440,31 @@ __trap_from_kernel:
     .set n, 3
     .rept 29
         LOAD_GP %n
-        .set n, n+1
+    .set n, n+1
     .endr
 
-    /* Release TrapContext */
-    addi    sp, sp, 70*8
+    /* Release TrapContext: the last load hands the frame's sp slot straight
+     * to x2, which pops the 560-byte frame and, on a guest trap, gives the
+     * guest its own stack back (hyp_vcpu_to_frame() overwrote slot 2 with the
+     * guest's sp; hyp_guest_trap_entry had already switched to the host stack
+     * to get here, so without this every guest trap would cost the host kernel
+     * stack one frame).  On a host kernel trap the slot holds the sp the trap
+     * was taken on, so the load lands exactly where the addi it replaces used
+     * to put it.
+     *
+     * It must be the last register load, and it must be x2: every load above
+     * addresses the frame through sp, so sp cannot move earlier, and NO other
+     * register may carry the value across the sret.  Carrying it in t0 (or any
+     * other xN) hands the resumed code a destroyed register -- t0 comes back
+     * holding the stack pointer instead of its own value -- which corrupts the
+     * interrupted code rather than resuming it.
+     *
+     * One tail serves both kinds of return.  A guest resume needs no satp
+     * dance here because the guest runs on a stage-1 root that carries the
+     * host's own subtrees (hyp_arch.c), so HS-mode -- this code, the frame,
+     * the stack -- is reachable under either root; the single switch happens
+     * on the way into the guest and on the way out of it. */
+    ld      x2, 2*8(sp)
 
     sret
 
