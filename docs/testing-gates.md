@@ -276,6 +276,16 @@ Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上
 
 失败时查 `kernel/core/progress.c`、`kernel/proc/sched.c`、`kernel/include/core/progress.h`、`kernel/net/lwip_stack.c` 中对应契约字符串，确认调度器/进程路径没有直接轮询 virtio-blk 或 lwIP。
 
+#### 这个门禁挡下来的三次真实回归
+
+device 半边的桥接由一个聚合 pending 位把门，活性下限由两件事保证：生产者置位，加上按 tick 兜底重新置位。三次回归都表现为"启动挂在块设备之前"，但断点在不同位置。
+
+**devfs 静态名字索引重复构建。** `devfs_mount()` 不只跑一次：VFS 初始化挂 `/dev`，`mount_external_root_pseudo_filesystems()` 随后在外部根下再挂一次 devtmpfs。`devfs_static_index_build()` 每次都往已经填好的表里重新插入 48 个名字，占用率 48 → 96 → 128（满 128 桶），第三次之后 `while (g_static_index[b])` 的线性探测再也找不到空桶，死循环，挂在 `[INIT] Block device -> /extra (ext4)` 之后。修复：按 ready 标志只构建一次、构建前清表、并把插入与查找两处探测都按桶数封顶（表满时退化为"查不到"而不是转圈）。
+
+**兜底间隔算错了单位。** `KERNEL_PROGRESS_FALLBACK_TICKS` 原本写成 `clock_ticks_per_sec() / 10`，而该函数返回的是**计数器频率**（qemu-virt 上是 1e9），不是 IRQ 频率，于是间隔变成约 10^8 次中断，实际上永远不触发；同时没有任何生产者置位（`kernel_progress_note_pending` 连声明都不在头文件里）。块设备遍历因此一次都不跑，aarch64 停在 `[KSWAPD] background reclaimer started`。修复：头文件里公开 `KERNEL_PROGRESS_PENDING_DEVICE` 与 `kernel_progress_note_pending()`，virtio-blk 每次发布请求时置位（并经 `kernel/drvmod/framework.c` 的导出表暴露给 `.a20drv` 模块，否则模块装载会以 -22 失败），兜底改为固定的 8 次中断。门禁现在断言 `kernel_progress_note_pending` 同时出现在这三处，并禁止再用 `clock_ticks_per_sec` 给这个宏缩放。
+
+**aarch64 在 TTBR0 未变时跳过失效。** `__trap_from_kernel`、`user_trap_return` 与 `__switch` 都改成"读 TTBR0，和帧里的一样就跳过 `tlbi vmalle1`"。但陷入处理器可以在**当前**地址空间里缺页调入并写入新映射，TTBR0 相同不代表映射相同；跳过失效后 faulting VA 依然未映射，aarch64 在 ext4 路径里死在 `lfs_crc`。`switch.S` 那处更糟：跳转目标同时跳过了栈恢复与 DAIF 解屏蔽，SP 会停在 `task_context_t` 上。修复：三处都恢复无条件失效，由 `check-arch-boundary` 禁止这两个文件里出现 TTBR0 相等跳转。
+
 ### VFS 抽象
 
 `make check-vfs-abstraction` 检查 `VFS_OPEN_DISPATCH_CONTRACT`、`VFS_REFCOUNT_HELPER_CONTRACT`、`VFS_DCACHE_MOUNT_VNODE_INVARIANT`、`VFS_CONCURRENCY_SMOKE_MATRIX` 等静态契约；确认 `vfile_ref_init`/`vfile_get`/`vfile_put_ref_only`、各文件系统 `open` 方法表、`smoke-vfs-stress` 与 `VFS_STRESS: PASS` 存在。
