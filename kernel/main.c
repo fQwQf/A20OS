@@ -438,7 +438,7 @@ void init_kthread(void) {
                (unsigned long)entry_leaf.pa, (unsigned long)entry_leaf.flags,
                entry_insn);
     } else {
-        vm_area_t *entry_vma = info.mmap;
+        mm_seg_t *entry_vma = info.mmap;
         while (entry_vma &&
                !(info.entry >= entry_vma->start && info.entry < entry_vma->end))
             entry_vma = entry_vma->next;
@@ -476,7 +476,7 @@ void init_kthread(void) {
     printf("[INIT] user_sp=0x%lx\n", (unsigned long)user_sp);
 
     size_t init_total_vm = 0;
-    for (vm_area_t *v = info.mmap; v; v = v->next)
+    for (mm_seg_t *v = info.mmap; v; v = v->next)
         init_total_vm += (v->end - v->start) / PAGE_SIZE;
 
     ret = proc_alloc_user_image(info.entry, user_sp, info.pgdir, info.mmap,

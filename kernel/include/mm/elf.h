@@ -135,7 +135,7 @@ typedef struct {
     Elf64_Xword sh_entsize;
 } Elf64_Shdr;
 
-struct vm_area;
+struct mm_seg;
 
 /* ---- Load result ---- */
 typedef struct elf_load_info {
@@ -155,7 +155,7 @@ typedef struct elf_load_info {
     uint64_t  tls_size;
     vaddr_t   tls_tp;
     vaddr_t   interp_base;
-    struct vm_area *mmap;
+    struct mm_seg *mmap;
     int       is_native_abi;
 #ifdef CONFIG_NOMMU
     void     *nommu_allocs[NOMMU_ALLOC_MAX];

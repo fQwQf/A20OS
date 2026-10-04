@@ -5,7 +5,7 @@
 
 struct task_t;
 struct mm_struct;
-struct vm_area;
+struct mm_seg;
 struct vfile;
 
 int handle_cow_fault(struct task_t *t, uint64_t stval);
@@ -27,7 +27,7 @@ int handle_demand_fault_access(struct task_t *t, uint64_t stval,
  */
 int handle_present_page_fault(struct task_t *t, uint64_t stval,
                               enum mm_fault_access access);
-int mm_shared_file_fault(struct mm_struct *mm, struct vm_area *vma,
+int mm_shared_file_fault(struct mm_struct *mm, struct mm_seg *vma,
                          uint64_t page_va, struct vfile *vf);
 
 #endif /* _MM_FAULT_H */

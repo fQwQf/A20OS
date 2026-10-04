@@ -477,6 +477,7 @@ int pt_unmap(mm_struct_t *mm, vaddr_t va) {
             break;
         }
         parent[idx_path[level + 1]] = 0;
+        mm_pt_node_clear_seg(parent, level + 1, idx_path[level + 1]);
         mm_pt_note_absent(parent, level + 1, idx_path[level + 1]);
         mm_pt_node_unlock(parent);
         mm_pt_retire_table(mm, child, level);
@@ -545,6 +546,7 @@ int pt_unmap_leaf(mm_struct_t *mm, vaddr_t va, paddr_t *pa_out,
                     break;
                 }
                 parent[idx_path[l + 1]] = 0;
+                mm_pt_node_clear_seg(parent, l + 1, idx_path[l + 1]);
                 mm_pt_note_absent(parent, l + 1, idx_path[l + 1]);
                 mm_pt_node_unlock(parent);
                 mm_pt_retire_table(mm, child, l);
