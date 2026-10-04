@@ -54,6 +54,11 @@ struct devfs_dyn_s {
 static devfs_dyn_t *g_devfs_dyn;
 static spinlock_t g_devfs_dyn_lock = SPINLOCK_INIT;
 static uint64_t g_devfs_dyn_ino = 0x40000;
+/* Live dynamic entries.  udev creates a handful of links per boot and every
+ * devfs lookup and readdir walks the list looking for them, so the
+ * overwhelmingly common case of "no runtime entries exist at all" is answered
+ * by this single relaxed load instead of a lock acquisition. */
+static int g_devfs_dyn_count;
 
 static const void *devfs_parent_key(vnode_t *dir)
 {
@@ -120,6 +125,7 @@ static int devfs_dyn_create(vnode_t *dir, const char *name, int kind,
     d->ino = g_devfs_dyn_ino++;
     d->next = g_devfs_dyn;
     g_devfs_dyn = d;
+    __atomic_fetch_add(&g_devfs_dyn_count, 1, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
     vfs_dcache_invalidate_all();
     return 0;
@@ -144,6 +150,7 @@ static int devfs_dyn_remove(vnode_t *dir, const char *name, int kind)
             }
     }
     d->removed = 1;
+    __atomic_fetch_sub(&g_devfs_dyn_count, 1, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
     vfs_dcache_invalidate_all();
     return 0;
@@ -305,50 +312,77 @@ static devfs_node_t g_nodes[] = {
 static vnode_t g_vnodes[sizeof(g_nodes) / sizeof(g_nodes[0])];
 
 
+/* One getdents() call emits at most this many dynamic children; the rest are
+ * picked up by the next call through the resume cursor in vf->offset. */
+#define DEVFS_DYN_SNAPSHOT 64
+
 static int devfs_dyn_readdir(vfile_t *vf, void *dirp, size_t count)
 {
     const void *key = devfs_parent_key(vf->vnode);
-    size_t pos = vf->offset;
     size_t total = 0;
     char *out = (char *)dirp;
-    uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
-    for (size_t idx = 0;; idx++) {
-        const char *name;
-        uint8_t dtype;
-        if (idx == 0) { name = "."; dtype = DT_DIR; }
-        else if (idx == 1) { name = ".."; dtype = DT_DIR; }
-        else {
-            size_t seen = 0;
-            devfs_dyn_t *d = NULL;
-            for (devfs_dyn_t *c = g_devfs_dyn; c; c = c->next) {
-                if (c->removed || c->parent_key != key)
-                    continue;
-                if (seen++ == idx - 2) {
-                    d = c;
-                    break;
-                }
-            }
-        if (!d)
-            break;
-        name = d->name;
-        dtype = (d->kind == DEVFS_DYN_DIR) ? DT_DIR : DT_LNK;
-        }
+    /* Entries already emitted: d_off and vf->offset both carry this cursor,
+     * so resuming skips straight to the next child instead of re-walking the
+     * list from the head on every call. */
+    size_t idx = vf->offset;
+
+    for (int dot = 0; dot < 2 && idx < 2; dot++, idx++) {
+        const char *name = dot ? ".." : ".";
         size_t nlen = strlen(name);
         size_t reclen = (offsetof(vfs_dirent64_t, d_name) + nlen + 1 + 7) & ~7UL;
         if (total + reclen > count)
-            break;
+            goto done;
         vfs_dirent64_t *de = (vfs_dirent64_t *)(out + total);
         memset(de, 0, reclen);
         de->d_ino = idx + 1;
         de->d_off = (int64_t)(idx + 1);
         de->d_reclen = (uint16_t)reclen;
-        de->d_type = dtype;
+        de->d_type = DT_DIR;
         memcpy(de->d_name, name, nlen + 1);
         total += reclen;
-        pos = idx + 1;
     }
-    spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
-    vf->offset = pos;
+
+    if (idx >= 2 && __atomic_load_n(&g_devfs_dyn_count, __ATOMIC_RELAXED)) {
+        devfs_dyn_t *snap[DEVFS_DYN_SNAPSHOT];
+        int nsnap = 0;
+        int seen = 0;
+        /* Snapshot the child pointers in one pass; entries are never freed,
+         * only hidden, so a pointer stays valid (and its name immutable) once
+         * the lock is dropped.  Rendering the dirents into the caller's
+         * buffer therefore happens with interrupts on. */
+        uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
+        for (devfs_dyn_t *d = g_devfs_dyn; d; d = d->next) {
+            if (d->removed || d->parent_key != key)
+                continue;
+            if (seen++ < (int)(idx - 2))
+                continue;
+            if (nsnap == DEVFS_DYN_SNAPSHOT)
+                break;
+            snap[nsnap++] = d;
+        }
+        spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
+
+        for (int i = 0; i < nsnap; i++) {
+            const char *name = snap[i]->name;
+            uint8_t dtype = (snap[i]->kind == DEVFS_DYN_DIR) ? DT_DIR : DT_LNK;
+            size_t nlen = strlen(name);
+            size_t reclen = (offsetof(vfs_dirent64_t, d_name) + nlen + 1 + 7) & ~7UL;
+            if (total + reclen > count)
+                goto done;
+            vfs_dirent64_t *de = (vfs_dirent64_t *)(out + total);
+            memset(de, 0, reclen);
+            de->d_ino = idx + 1;
+            de->d_off = (int64_t)(idx + 1);
+            de->d_reclen = (uint16_t)reclen;
+            de->d_type = dtype;
+            memcpy(de->d_name, name, nlen + 1);
+            total += reclen;
+            idx++;
+        }
+    }
+
+done:
+    vf->offset = idx;
     return (int)total;
 }
 
@@ -869,12 +903,62 @@ static vnode_t *node_to_vnode(size_t idx) {
     return &g_vnodes[idx];
 }
 
+/* Open-addressed index over g_nodes[1..]: /dev lookups and the "never shadow a
+ * static node" check both probed the whole 53-entry table with a strcmp per
+ * slot.  Buckets hold node index + 1 so that a zero-initialised table needs no
+ * run-time setup; devfs_static_index_build() fills it once from devfs_mount(). */
+#define DEVFS_STATIC_BUCKETS 128
+static uint8_t g_static_index[DEVFS_STATIC_BUCKETS];
+static int g_static_index_ready;
+
+static unsigned devfs_name_hash(const char *name)
+{
+    unsigned h = 2166136261u;
+    while (*name) {
+        h ^= (unsigned char)*name++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void devfs_static_index_build(void)
+{
+    size_t n = sizeof(g_nodes) / sizeof(g_nodes[0]);
+    for (size_t i = 1; i < n; i++) {
+        unsigned b = devfs_name_hash(g_nodes[i].name) &
+                     (DEVFS_STATIC_BUCKETS - 1);
+        while (g_static_index[b])
+            b = (b + 1) & (DEVFS_STATIC_BUCKETS - 1);
+        g_static_index[b] = (uint8_t)(i + 1);
+    }
+    __atomic_store_n(&g_static_index_ready, 1, __ATOMIC_RELAXED);
+}
+
+/* Index into g_nodes for a root-level static name, or -1.  Falls back to the
+ * linear scan if a lookup somehow precedes devfs_mount(). */
+static int devfs_static_index_find(const char *name)
+{
+    size_t n = sizeof(g_nodes) / sizeof(g_nodes[0]);
+    if (!__atomic_load_n(&g_static_index_ready, __ATOMIC_RELAXED)) {
+        for (size_t i = 1; i < n; i++)
+            if (strcmp(name, g_nodes[i].name) == 0)
+                return (int)i;
+        return -1;
+    }
+    unsigned b = devfs_name_hash(name) & (DEVFS_STATIC_BUCKETS - 1);
+    for (;;) {
+        uint8_t e = g_static_index[b];
+        if (!e)
+            return -1;
+        if (strcmp(g_nodes[e - 1].name, name) == 0)
+            return (int)(e - 1);
+        b = (b + 1) & (DEVFS_STATIC_BUCKETS - 1);
+    }
+}
+
 static int devfs_name_is_static(const char *name)
 {
-    for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++)
-        if (strcmp(name, g_nodes[i].name) == 0)
-            return 1;
-    return 0;
+    return devfs_static_index_find(name) >= 0;
 }
 
 static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
@@ -885,7 +969,7 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     /* Runtime-created (udev) entries shadow the class-device emulation:
      * on Linux /dev/block/<maj>:<min> etc. are exactly those udev symlinks. */
     const void *key = devfs_parent_key(dir);
-    if (key) {
+    if (key && __atomic_load_n(&g_devfs_dyn_count, __ATOMIC_RELAXED)) {
         uint64_t irq = spin_lock_irqsave(&g_devfs_dyn_lock);
         devfs_dyn_t *d = devfs_dyn_find(key, name);
         spin_unlock_irqrestore(&g_devfs_dyn_lock, irq);
@@ -899,11 +983,10 @@ static int devfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     }
 
     if (node->kind == DEVFS_ROOT) {
-        for (size_t i = 1; i < sizeof(g_nodes) / sizeof(g_nodes[0]); i++) {
-            if (strcmp(name, g_nodes[i].name) == 0) {
-                *out = node_to_vnode(i);
-                return 0;
-            }
+        int static_idx = devfs_static_index_find(name);
+        if (static_idx > 0) {
+            *out = node_to_vnode((size_t)static_idx);
+            return 0;
         }
         class_device_t *cdev = class_device_get_by_name(name);
         if (cdev && class_device_has_devnode(cdev)) {
@@ -1358,6 +1441,7 @@ vfile_t *devfs_create_stdio(int fd) {
 
 vnode_t *devfs_mount(void) {
     tty_console_init();
+    devfs_static_index_build();
     memset(&g_stdin_file, 0, sizeof(g_stdin_file));
     refcount_set(&g_stdin_file.ref_count, 999);
     g_stdin_file.ops = &g_devfs_stdin_ops;
