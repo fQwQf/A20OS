@@ -149,6 +149,16 @@ CONFIG_DRIVER_LIFECYCLE_TEST ?= 0
 CONFIG_HDA_SMOKE_TEST ?= 0
 CONFIG_NVME_SMOKE_TEST ?= 0
 
+# Slab integrity checking.  At 0 the allocator trusts its free lists; at 1
+# every kmalloc/kfree walks the page's free list and panics on a node that is
+# out of bounds, misaligned, cyclic, or inconsistent with the page's
+# accounting.  It costs O(free objects) per allocation, so it is a debugging
+# build (its own BUILD_VARIANT component) rather than a default -- but it is
+# the only detector that can see a slab page being scribbled on while it is
+# still live, which is the shape of the multi-threaded corruption reports in
+# docs/distro/known-issues.md.
+CONFIG_SLAB_DEBUG ?= 0
+
 # Single knob for the CONFIG_HDA_SMOKE_TEST / CONFIG_NVME_SMOKE_TEST macros in
 # the loadable driver packages.  Those macros are consumed *only* by
 # kernel/drvmod/examples/{hda,nvme}.c, which tools/driver-modules.mk compiles
@@ -327,7 +337,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -335,6 +345,7 @@ endif
 BUILD_DIR = .kernel-build/$(ARCH)-$(BOARD)-$(BUILD_VARIANT)
 FAT32_IMG = $(BUILD_DIR)/fat32.img
 EXT4_IMG = $(BUILD_DIR)/ext4.img
+EXT4_JOURNAL_IMG = $(BUILD_DIR)/ext4-journal.img
 FS_TEST_IMG = $(BUILD_DIR)/fs_test.img
 ISOFS_IMG = $(BUILD_DIR)/isofs.img
 USER_VARIANT = $(ARCH)$(if $(filter 1,$(NOMMU)),-nommu,)
@@ -446,6 +457,11 @@ SMOKE_INPUT_DELAY ?= 8
 # A 4-core TCG run plus net_stress_test's 4 concurrent x 4 MiB transfers is
 # much slower than the single-core defaults, so it needs its own budget.
 SMOKE_TIMEOUT_SMP ?= 180s
+# The ext4 journal gate runs eight TCG boots and four host fsck passes, so it
+# needs far longer than a single smoke boot and a longer settle time than the
+# interactive-shell default.
+SMOKE_TIMEOUT_EXT4 ?= 180
+SMOKE_INPUT_DELAY_EXT4 ?= 22
 SMOKE_LOG_DIR ?= .kernel-build/smoke
 STEP35_TIMEOUT ?= 300s
 STEP35_LOG_DIR ?= .kernel-build/smoke/step35
@@ -499,7 +515,13 @@ ARCH_CFLAGS_armv7m      := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft -fno-pic -st
                            -ffunction-sections -fdata-sections -fno-unwind-tables \
                            -fno-asynchronous-unwind-tables
 ARCH_CFLAGS_riscv32     := -march=rv32imafdc -mabi=ilp32d -mcmodel=medany -fno-pic -static
-ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize
+# ppc64le 独自需要 -mstack-protector-guard=global：PPC64 ELFv2 的 GCC 默认把
+# canary 当成 TLS 变量经 r13 取（ld 9,-28688(13)），而内核的 __stack_chk_guard
+# 是 kernel/core/stack_protector.c 里的普通 .data 全局，且 r13 已被
+# arch_set_task_pointer() 征用为 task 指针、从不指向 TLS 基址。带 r13 取值的
+# __stack_chk_guard 会在 kernel_main 的第一个 printf 里直接 DSEG（canary 读到
+# 垃圾页，随后程序校验杀死内核）。其余架构的 GCC 默认就是 global，无需覆盖。
+ARCH_CFLAGS_ppc64le     := -m64 -mcpu=power8 -mtune=power8 -mlong-double-64 -fno-pic -static -mno-vsx -mno-altivec -fno-tree-vectorize -mstack-protector-guard=global
 
 PHYS_BASE_aarch64     := 0x40080000
 PHYS_BASE_arm32       := 0x40080000
@@ -804,14 +826,19 @@ CFLAGS = -Wall -Wextra $(OPT) -ffreestanding -nostdlib \
          -MMD -MP \
          -I$(ARCH_INCLUDE_DIR) -I$(INCLUDE_DIR) -I$(KERNEL_DIR) -I$(KERNEL_DIR)/net/lwip_port \
          -I$(KERNEL_DIR)/external/lwip/src/include \
+         -I$(KERNEL_DIR)/external/littlefs \
+         -I$(KERNEL_DIR)/external/littlefs/compat \
+         -DLFS_MALLOC=lfs_kmalloc -DLFS_FREE=lfs_kfree \
+         -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR -DLFS_NO_ASSERT -DLFS_NO_TRACE \
          -I$(BOARD_INCLUDE_DIR) -I$(BUILD_DIR)/generated $(ARCH_CFLAGS) \
          -D$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_$(shell echo $(ARCH) | tr a-z A-Z) \
          -DCONFIG_ABI_$(shell echo $(ABI) | tr a-z A-Z) \
          -DCONFIG_NR_CPUS=$(NR_CPUS) \
+         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _) \
          -DCONFIG_NET_LANES=$(NET_LANES) \
          -DCONFIG_NET_PROFILE=$(NET_PROFILE) \
-         -DCONFIG_BOARD_$(shell echo $(BOARD) | tr a-z A-Z | tr - _)
+         -DCONFIG_SLAB_DEBUG=$(CONFIG_SLAB_DEBUG)
 ifeq ($(filter 1,$(KERNEL_WERROR)),1)
 CFLAGS += -Werror
 endif
@@ -1062,7 +1089,9 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(KERNEL_DIR)/proc/timer_heap.c \
              $(KERNEL_DIR)/proc/current.c \
              $(KERNEL_DIR)/proc/pid.c \
+             $(KERNEL_DIR)/proc/pidns.c \
              $(KERNEL_DIR)/proc/proc.c \
+             $(KERNEL_DIR)/proc/userns.c \
              $(KERNEL_DIR)/proc/task.c \
              $(KERNEL_DIR)/proc/exit.c \
              $(KERNEL_DIR)/proc/signal.c \
@@ -1091,7 +1120,8 @@ KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/syscall/*.c) \
              $(wildcard $(KERNEL_DIR)/shell/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort) \
-             $(LWIP_SRC)
+             $(LWIP_SRC) \
+             $(LFS_SRC)
 
 ifeq ($(NOMMU),1)
 KERNEL_SRC += $(KERNEL_DIR)/mm/nommu.c
@@ -1109,14 +1139,17 @@ ROOTFS_OVERLAY_FILES := $(shell find $(ROOTFS_OVERLAY_DIR) -type f 2>/dev/null)
 KERNEL_SRC += $(ROOTFS_OVERLAY_SRC)
 
 include $(KERNEL_DIR)/external/lwip/sources.mk
+include $(KERNEL_DIR)/external/littlefs/sources.mk
 endif
 
 include tools/driver-modules.mk
 
 # Object files
 LWIP_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/lwip/src/%.c,$(KERNEL_SRC))
-KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/%,$(KERNEL_SRC))) \
-              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC))
+LFS_KERNEL_SRC := $(filter $(KERNEL_DIR)/external/littlefs/%.c,$(KERNEL_SRC))
+KERNEL_OBJ = $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(filter-out user/% $(KERNEL_DIR)/external/lwip/% $(KERNEL_DIR)/external/littlefs/%,$(KERNEL_SRC))) \
+              $(patsubst $(KERNEL_DIR)/external/lwip/src/%.c,$(BUILD_DIR)/external/lwip/src/%.o,$(LWIP_KERNEL_SRC)) \
+              $(patsubst $(KERNEL_DIR)/external/littlefs/%.c,$(BUILD_DIR)/external/littlefs/%.o,$(LFS_KERNEL_SRC))
 KERNEL_OBJ += $(EARLY_DRIVER_BLOBS)
 
 # Optional self-contained userspace for physical-board bring-up.  Each static

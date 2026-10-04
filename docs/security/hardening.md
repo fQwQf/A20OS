@@ -113,10 +113,36 @@ LoongArch 无 SUM/PAN 等价 CSR 机制；ppc64le 的 KUAP（AMR/IAMR）
 需要 key 管理体系，均未实现。两架构当前依赖直映射拷贝集中化 +
 软件权限校验，与 SMAP 前的 x86 形态相同。
 
-### user namespace / 完整 capabilities（未做）
+### user namespace（已实现，nsproxy 仍缺）
 
-无 nsproxy/userns；`CLONE_NEWUSER` 等常量在 clone 白名单中明确拒绝。
-capabilities 为 15 个子集（缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG 等）。
+`kernel/proc/userns.c` 提供完整的 user namespace：`unshare(CLONE_NEWUSER)`
+与 `clone(CLONE_NEWUSER)` 创建命名空间，`/proc/<pid>/{uid,gid}_map` 与
+`setgroups` 由父命名空间写入，`setns(2)` / `listns(2)` 支持 user 类型，
+`/proc/<pid>/ns/user` 已实现。门禁 `smoke-userns`。
+
+`task_t::cred` 存**全局**（宿主）id，在 syscall 与 procfs 边界翻译，
+与 Linux 的 `kuid_t`/`kgid_t` 同构；未映射的全局 id 呈现为
+`USERNS_OVERFLOW_UID/GID`（65534），文件属主判定另用
+`userns_kuid_mapped()` 区分"无表示"与"恰好是 65534"。
+
+能力作用域集中在 `userns_capable()` 一处：自 `@ns` 沿 parent 链上溯，
+只有正好落到调用者自己的命名空间时才按其 `cap_effective` 判定；越过
+自己的层级即为拒绝。**没有**"创建者对父命名空间保有权限"这一条——
+加上它就等于任何用户都能靠 `unshare -U` 拿到宿主 root。无特权的例外
+只有一条，且必须由写入者本人发起：恰好一段、长度为一、映射自己的 id
+（`unshare -U; echo $USER > /proc/self/uid_map`）。
+
+capabilities 本身仍是 15 个子集（缺 CAP_NET_ADMIN/CAP_BPF/CAP_SYSLOG
+等）；`nsproxy` 未实现，所以 `setns()` 一次只能切一种命名空间。
+
+### user namespace 的引用模型
+
+每个命名空间持有 parent 的一份引用（在 `g_userns_lock` 下取得），
+`task_t::user_ns` 持一份，字段为 NULL 表示初始命名空间（静态钉住）。
+释放只发生在真正的 task teardown：新拆出的 `fdtable_release_files()`
+把"交出描述符表"和"task 消失"分开，因为 `fdtable_share()`（线程共享
+表）原先走 `fdtable_close_all()`，会在一个活着的 task 上清空
+mntns / pidns / userns 指针。
 
 ## 熵源说明
 

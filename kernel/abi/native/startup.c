@@ -7,6 +7,8 @@
 #include "core/klog.h"
 #include "proc/proc.h"
 #include "fs/vfs.h"
+#include "fs/fdtable.h"
+#include "fs/file.h"
 #include "mm/mm.h"
 #include "sys/usercopy.h"
 
@@ -32,18 +34,24 @@ static int64_t install_vfile_handle(struct a20_ht_internal *ht,
     if (gfd < 0) return -A20_ERR_NOT_FOUND;
 
     uint16_t obj_type = A20_OBJ_FILE;
-    vfile_t *vf = vfs_get_file_ref(gfd);
-    if (vf && vf->vnode && vf->vnode->type == VFS_FT_DIR)
+    /* The handle takes over the reference resolved from the fd; the fd
+     * itself keeps running the task's stdio/path operations. */
+    vfile_t *vf = fdtable_get_current_file_ref(gfd);
+    if (!vf) {
+        vfs_close(gfd);
+        return -A20_ERR_BAD_HANDLE;
+    }
+    if (vf->vnode && vf->vnode->type == VFS_FT_DIR)
         obj_type = A20_OBJ_DIRECTORY;
-    if (vf) vfs_put_file_ref(gfd, vf);
 
     if (expected_type != A20_OBJ_INVALID && obj_type != expected_type) {
+        vfs_put_file(vf);
         vfs_close(gfd);
         return -A20_ERR_TYPE_MISMATCH;
     }
 
-    int64_t h = a20_handle_install(ht, (void *)(uintptr_t)gfd, obj_type, rights);
-    if (h < 0) vfs_close(gfd);
+    int64_t h = a20_handle_install(ht, vf, obj_type, rights);
+    if (h < 0) vfs_put_file(vf);
     return h;
 }
 

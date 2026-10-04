@@ -3,6 +3,7 @@
 #include "drivers/char/uart.h"
 void riscv_iommu_early_probe(void);
 #include "mm/mm.h"
+#include "mm/oom.h"
 #include "mm/elf.h"
 #include "mm/vm.h"
 #include "mm/pt.h"
@@ -202,6 +203,8 @@ void kernel_main(void) {
     int ret = proc_alloc(init_kthread);
     if (ret < 0)
         panic("Failed to create init_kthread");
+    if (proc_alloc(oom_kswapd_thread) < 0)
+        kerr("[KSWAPD] failed to spawn background reclaimer\n");
 #endif
 
     printf("[INIT] System ready\n\n");
@@ -282,8 +285,21 @@ void init_kthread(void) {
         if (marker_fd >= 0) {
             vfs_close(marker_fd);
             printf("[INIT] Distro rootfs detected (/extra/etc/a20-distro)\n");
-            strncpy(cur->fs.root_path, "/extra", MAX_PATH_LEN - 1);
-            cur->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+            {
+                /* Take the root as the (mount, vnode) pair it is, the same
+                 * way chroot(2) does, so every later decision -- umount
+                 * busy checks, pivot_root, confinement -- sees an object
+                 * rather than a string it has to re-parse. */
+                vnode_t *distro_root = vfs_resolve("/extra");
+                if (distro_root) {
+                    vfs_task_root_set(cur, distro_root->mnt, distro_root,
+                                       "/extra");
+                    vnode_put(distro_root);
+                } else {
+                    strncpy(cur->fs.root_path, "/extra", MAX_PATH_LEN - 1);
+                    cur->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+                }
+            }
             printf("[INIT] Chrooted to /extra\n");
 
             int init_fd = vfs_open("/sbin/init", O_RDONLY, 0);

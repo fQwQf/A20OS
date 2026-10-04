@@ -37,6 +37,23 @@ typedef struct virtio_transport {
      * registration failed (a source without a handler would hold the
      * shared level line asserted forever). */
     int      shared_irq;
+
+    /* Optional message-signalled interrupt hooks, supplied by a transport
+     * whose medium can carry one (PCI).  NULL elsewhere.  The split is
+     * deliberate: msix_prepare() reserves and programs but leaves every
+     * vector masked, so the driver can register its handlers on the
+     * returned lines, and only then call msix_arm() to let the device
+     * deliver.  A driver that skips the arm step leaves the device silent
+     * rather than posting a message nothing is listening for. */
+    int  (*msix_prepare)(struct virtio_transport *t, unsigned vectors);
+    void (*msix_arm)(struct virtio_transport *t);
+    void (*msix_teardown)(struct virtio_transport *t);
+
+    /* First driver IRQ line id and the count, valid only after a successful
+     * msix_prepare().  -1/0 when the device is not on message-signalled
+     * interrupts and irq/shared_irq still describe it. */
+    int  msix_base;
+    int  msix_vectors;
 } virtio_transport_t;
 
 /* Probe for the next virtio-blk device.

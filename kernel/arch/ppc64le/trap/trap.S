@@ -48,6 +48,21 @@
 
 __trap_from_user:
     /*
+     * The interrupted MSR is restored from scratch, so the kernel inherits
+     * whatever the user process had.  A process that never used the FPU
+     * leaves MSR[FP] clear, and the FPR save in this prologue then raises
+     * FPU-unavailable *inside* the handler: the real-mode vector branches
+     * straight back here, the machine spins on the same store, and the very
+     * first syscall is never delivered.  Turn the unit on for the handler and
+     * leave the user's own MSR alone -- SRR1 carries it back unchanged on the
+     * way out, so no process gains a capability it did not ask for.
+     */
+    mfmsr   4
+    oris    4,4,0x0280       /* MSR.VEC | MSR.VSX */
+    ori     4,4,0x2000       /* MSR.FP */
+    mtmsr   4
+
+    /*
      * The real-mode vector at 0xc00 saved r0-r3 and SRR0/SRR1 in physical
      * scratch memory, then returned here with translation enabled.
      *

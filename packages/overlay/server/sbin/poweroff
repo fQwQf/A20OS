@@ -1,0 +1,7 @@
+#!/bin/sh
+# Busybox poweroff without -f sends SIGUSR1 to PID 1 (init) and hangs
+# if init doesn't respond.  In A20OS distro mode, PID 1 is the kernel
+# kthread which doesn't handle that signal.  Bypass by calling
+# poweroff -f which directly invokes the reboot(2) syscall.
+
+exec /bin/busybox poweroff -f

@@ -33,6 +33,25 @@ hostfwd 指向 guest telnetd）从"连接被对方重置"变为拿到可用 shel
 
 ### 已达成
 
+ext4 现在是可写日志文件系统，运行时 metadata 更新带 JBD2 ordered 语义：
+每次写入经 `ext4_journal_meta_write` 登记进事务并 `bcache_hold_page` 持有，
+使任何通用 sync 都不能把元数据写在其日志副本之前；`sync()`/`fsync()`
+触发 commit（数据 → descriptor → 日志 superblock `s_start` → commit block →
+元数据本位 → 标记日志为空）。挂载时是否回放以 journal superblock 的
+`s_start` 为权威判据，而不仅是 `EXT4_FEATURE_INCOMPAT_RECOVER`——后者与
+free 计数共享同一个被持有的 cache page，崩溃可能丢掉这个位却留下非空日志。
+
+验证：`make smoke-ext4-journal`。它在提交序列的四个点上真的把机器停住
+（注入点经 `/proc/a20/journal` 写入；同一机制也接受 `a20.journal_crash=`
+命令行参数，便于手工复现），用同一块镜像重启，断言承诺过的写入没丢、没承诺
+的写入没回来、`replay complete` 恰好出现在承诺点之后，并在宿主机上用
+`e2fsck -fn` 检查崩溃后的镜像与恢复后的镜像都干净。走 procfs 而不是命令行，
+是因为命令行注入点只在启动时解析一次，而 procfs 写入可以在崩溃发生前、
+提交序列进行到一半时才武装，从而命中的正是那个边界；命令行形式则留给手工
+复现。这是本文件里唯一一处
+"断电"不是模拟出来而是真发生过的地方。详见 `docs/testing-gates.md`
+「ext4 JBD2 崩溃一致性」。
+
 `fsync()` 现在真正到达稳定介质。`block_dev_t` 有可选 `flush` 原语，
 `bcache_sync_common()` 在写完数据后、缓存锁之外调用它。实现覆盖
 virtio-blk（`VIRTIO_BLK_T_FLUSH`）、loop（转发 backing file 的 fsync）、
@@ -42,15 +61,16 @@ AHCI（`FLUSH CACHE EXT`）。
 
 ### 仍缺
 
-- ext4 不是日志文件系统。`kernel/fs/diskfs/ext4_journal.c` 明确只做
-  挂载时回放，然后把日志标记为空并清除 `RECOVER`。RW 挂载后没有 journal
-  提交、没有 ordered 模式语义，写回途中崩溃可留下 journal 本可避免的
-  元数据/数据不一致。对需要崩溃一致性的数据库，这是**硬阻塞**。
 - AHCI 路径仅编译验证。`ahci.c` 位于 `CONFIG_AHCI` 之后，树内没有任何
   实例挂载 AHCI 控制器。补一个挂 `ich9-ahci` 的门禁是缺失的一环。
-- 无断电/崩溃注入测试基础设施，因此上述 journal 改造无法被验证。
 - 无 RAID、无数据校验和、无快照/CoW、无 fs-verity。
-  `crc32c` 只用于校验 JBD2 回放日志，不覆盖常规文件数据。
+  文件数据块本身仍无校验和；`crc32c` 覆盖 JBD2 日志与 ext4 元数据
+  （`metadata_csum`），不覆盖常规文件数据内容。
+- JBD2 只支持 checksum v3（`COMPAT_CHECKSUM` 的 v1/v2 返回 `-EOPNOTSUPP`），
+  没有 `barrier` 与 `async_commit` 特性位（`s_features` 中对应位不声明，
+  因此 commit block 不写 `JBD2_FLAG_ASYNC_COMMIT`，设备也没有
+  `ordered`/`journal_data` 语义差别）。断电原子性由 ordered 模式本身提供，
+  不依赖设备 FUA 之外的屏障。
 
 ## 二、网络
 
@@ -174,20 +194,27 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 
 ### 仍缺
 
-1. **8 个 namespace 只有 mount 是真的**，其余 7 个由 `unshare()` 显式返回
-   `-EINVAL`。这一点是干净的（`sys_namespace.c:4-7` 明确写了边界）。
-2. `pivot_root` 返回 `-EPERM`，且这不是顺手能补上的空洞。它的语义
-   建立在真实 mount 树之上：把 `new_root` 变成树根、把旧根挂到 `put_old`
-   之下，调用方才能用 `umount2(put_old, MNT_DETACH)` 真正摘掉旧根。但当前
-   `proc_fs_context_t` 只有 `root_path` / `cwd` 两个路径字符串
-   （`kernel/include/proc/proc.h:22-26`），`vfs_move_mount()` 也只是
-   `strncpy` 改写挂载点的路径前缀（`kernel/fs/vfs/mount.c:84-97`），
-   根本没有 `mnt_parent` 链。字符串模型里不存在"把旧根挂到新根之下"这个
-   操作，强写就只能做成一个改 `root_path` 字符串的假动作：调用返回 0，
-   旧根却并没有被隔离，`MNT_DETACH` 无从谈起。因此这里刻意保持
-   fail-closed，而不是提供一个只会骗过容器运行时的 `-EPERM` 替身。
-   真正的前置件是先把 root/cwd 从路径字符串换成真实的 mount 引用。
-3. 无 userns、无 `nsproxy`、无完整 capabilities。
+1. **8 个 namespace 已有 3 个是真的**：mount、PID（`smoke-pidns`）与
+   user（`smoke-userns`）。其余 5 个（net、cgroup、time、uts、ipc）
+   仍由 `unshare()` 显式返回 `-EINVAL`，这一点是干净的
+   （`sys_namespace.c:4-7` 明确写了边界）。
+2. ~~`pivot_root` 返回 `-EPERM`~~ —— **已补齐**。前置件确实就是先把
+   root/cwd 从路径字符串换成真实引用：现在 `mount_t` 带 `mnt_parent` /
+   `mnt_mp` / `mnt_child` 真实挂载树，`proc_fs_context_t` 带
+   `root_mnt` / `root_vn` / `cwd_vn` 三个引用，`pivot_root` 按 Linux 顺序
+   校验后把旧 root 的 mount 摘出命名空间并标记 `VFS_MOUNT_DETACHED`——
+   旧根此后不可按路径访问，只有 pivot 前打开的 fd 还能读到。
+   `umount2` 的 `MNT_FORCE` / `MNT_DETACH` 也真正转发，busy 判定基于
+   mount 上的引用计数。详见 `docs/fs/vfs-edge-semantics.md` §9.4，
+   门禁 `smoke-pivot-root`。**仍未覆盖**的是共享子树传播
+   （`MS_SHARED` / `MS_PRIVATE` / `MS_SLAVE`），所以 mount 传播语义对
+   容器编排仍然不完整——`pivot_root` 本身可用，但"pivot 之后再让子 mount
+   传播出去"这条链路还没有。
+3. **userns 已补齐**（`kernel/proc/userns.c`：`uid_map` / `gid_map` /
+   `setgroups`、全局↔命名空间 id 翻译、`setns` / `listns`、
+   `/proc/<pid>/ns/user`、按命名空间作用域化的能力判定）。
+   剩下的缺口是无 `nsproxy`（`setns()` 一次只能切一种命名空间），
+   以及 capabilities 仍是 15 个子集。
 4. 无容器运行时（lxc/runc/nspawn/crun/podman 均无），`packages/world/`
    里没有 server world。
 5. cgroup 缺 `pids` / `io` / `freeze` 控制器；`cpu.shares` 存了但调度器
@@ -195,8 +222,10 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 6. **全局 OOM killer 的评分只看 `oom_score_adj`，不看 RSS**，因此不会可靠地
    选中最大占用者（cgroup 局部路径倒是用了 RSS）。
 
-结论：**当前形态无法承载多租户**。PID ns + userns + `pivot_root` 是绕不过
-去的三件套。
+结论：**当前形态仍无法承载多租户**。PID ns + userns + `pivot_root` 三件套
+现已齐备，剩下的门槛是另外几项：没有容器运行时、没有 `nsproxy`、
+capabilities 只有 15 个子集、mount 共享子树传播未实现，以及上面第 6 条的
+OOM 评分。
 
 ## 四、进程与调度
 
@@ -357,8 +386,12 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
   以为存在 4096 的进程上限，应删除。
 - **`RLIMIT_AS` / `RLIMIT_NPROC` 本轮已实现并强制**（此前完全缺失，
   单进程可耗尽宿主机内存）。
-- 所有 `smoke-*` 门禁硬编码 `-smp 1`（`perf-overhaul.md:127` 明确警告），
-  **单核通过不证明 SMP 正确性**。对一个服务器 OS 的 CI 这是结构性缺陷。
+- **单核门禁不再一统天下（2026-10 起）**：此前所有 `smoke-*` 门禁硬编码
+  `-smp 1`，单核通过不证明 SMP 正确性。现在 vfs-stress 工作负载有了
+  `smoke-vfs-stress-smp2`（NR_CPUS=2，已接入 CI smoke job）与
+  `smoke-vfs-stress-smp8`（NR_CPUS=8，本地资源门禁 `-c 8`）两个真多核
+  变体（与既有的 `smoke-mm-fork-exec-race` 同形），其余门禁仍是单核——
+  把整套门禁矩阵 NR_CPUS 化仍是待办。
 - 全部性能数据来自 QEMU TCG 模拟器，无真机基准。
 
 ## 五、可观测性
@@ -405,7 +438,16 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
   这些 bus，所以该门禁在修复前后同样通过。它锁住的是不回归，不是修复本身。
   真正体现价值的是 riscv64 `(0,1)` 与 virtualbox-aarch64（固件分配范围），
   本 QEMU 构建无法驱动这两条路径（riscv64 virt 无 PCIe controller）。
-- 无 MSI/MSI-X → 只有 INTx。
+- **MSI-X 已实现（仅 x86_64 真实投递）**：`kernel/drivers/bus/pci_msix.c`
+  提供与协议无关的 MSI-X 层，`pci_bus.c` 把 virtio transport 接上，
+  e1000e 与 virtio-blk 已实测通过 `smoke-msix-x86_64`。能力表位置解析
+  同时支持 Vector Control（PCIe 编码，BIR `3:1` + 偏移 `31:12`）与
+  Message Address Lower（pre-PCIe 编码，BIR `2:0` + 偏移 `31:3`）——
+  `-kernel` 引导没有固件写前者，必须读后者。**残留**：只有 x86_64 实现了
+  `arch_msix_message_address()`/`arch_msix_vector_setup()`，其余架构干净
+  拒绝并退回 INTx/轮询；无 IRQ 亲和性与 per-CPU 目标字段，向量窗口钉死
+  在 boot processor 的 `0xD0..0xF0`；e1000e 只验证到表被正确解析并 arm，
+  网卡无流量故未实测投递（virtio-blk 一路是端到端的）。
 - INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:251-274` 只认
   host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
   ACPI `_PRT` 与 PIRQ link 编程。
@@ -421,18 +463,60 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
   完整（CPUID 0x15/0x16 + PIT + invariant-TSC）；idle 路径是真实架构停机
   （`sti;hlt` / `wfi`）而非忙等。
 
+## 七点五、2026-10 内核核心收敛（feat/kernel-core-scalability 分支）
+
+以下条目已在本分支落地（各提交含完整论证与验证入口；运行门禁于当前提交
+复验：`smoke-vfs-stress`、`smoke-abi-linux`、`smoke-mm-stress`、
+`smoke-vfs-stress-smp2`、`smoke-vfs-stress-smp8` 均 PASS）：
+
+- **vfile 全局表锁分片**（`kernel/fs/file.c`）：fd 解析热路径原来在
+  `g_file_lock` 单锁下串行（server-readiness 早期版本未把它计入热点排行，
+  是观测盲区——单核门禁下它永远显示 0）。现按 gfd 哈希分 128 桶锁 +
+  独立分配锁；全部桶锁登记进 `/proc/a20/lock_contention`
+  （LOCK_COUNTERS_MAX 64→192），可测而非假设干净。
+- **per-vnode 缓冲写锁**（`vnode_t.write_lock`）：替代 64 桶全局写互斥，
+  两个哈希冲突的无关文件不再互相阻塞。
+- **mount 表稳定指针**：umount 搬移内联数组导致 `vnode->mnt` 指向错误
+  mount 的正确性 bug 已修（堆分配 + 命名空间墓园）；注意 §三 的
+  `pivot_root` 前置件（root/cwd 路径字符串 → mount 引用）仍是独立待办，
+  本修复只消除了指针失真，没有引入 mount 树。
+- **EventQ 反向索引 256 桶分锁**、**路径查找 errno per-task 化**
+  （`vfs_lookup_errno()`）、**slab per-CPU 对象数组**、**timekeeping 读
+  路径 seqlock 化**。
+- **kswapd 式后台回收**（`oom_kswapd_thread`，`/proc/a20/oom` 暴露
+  `kswapd_*` 计数）：回收不再全部同步发生在分配最坏路径。
+- **发布流水线接入 guest 门禁**：release.yml 新增 smoke job，Release 创建
+  以 `smoke-abi-linux`/`smoke-vfs-stress`/`smoke-mm-stress` 通过为前提。
+- **PCI MSI-X**：`kernel/drivers/bus/pci_msix.c` + 能力表位置双编码解析 +
+  x86_64 LAPIC 向量/LVT 编程 + virtio transport 接入（`msix_prepare`/
+  `msix_arm`/`msix_teardown`）+ e1000e 接入；门禁 `smoke-msix-x86_64`
+  断言 `[VIRTIO-BLK] MSI-X delivery on vector 208`，该行由中断处理程序
+  在首次消息中断时打印，且已做反向验证（把消息地址改回错误形式，门禁
+  只缺这一条而失败）。详见 `docs/drivers/guide/pci-and-virtio.md` 的
+  「MSI-X」一节。
+- **server world 声明层**：`packages/world/server.world`（dropbear/chrony/
+  busybox syslogd+crond）+ overlay init + `server-riscv64` 实例；
+  声明过 `check-instances` 门禁，端到端组装与 SSH 登录验证未做（见 world
+  头注），不声称可用。
+
+仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
+分支在做）、`proc_lock` 超长持有成因、
+其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
+conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
+
 ## 八、阻塞项排序
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| P0 | 收包内存模型 | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
+| ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
 | P0 | `g_net_lock` 分片 | **当前收益最大的未做项**。它同样是一把覆盖 1024 个 socket 的全局锁，52 处获取。改成 per-socket 锁 + 引用计数保护的 registry 是纯局部改动，不触碰 lwIP 核心 |
-| P0 | lwIP 全局锁分片 | 持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；分片方案不应再等这个数。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历，这需要先给 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 做按端口哈希分桶 |
-| P0 | PID ns + userns + `pivot_root` | 多租户前置件；`pivot_root` 需先把 root/cwd 从路径字符串改为真实 mount 引用 |
-| P0 | ext4 可写 journal + 崩溃注入测试 | 数据库一致性的硬前提 |
+| P0 | lwIP 全局锁分片 | 持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；分片方案不应再等这个数。spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历，这需要先给 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 做按端口哈希分桶 |
+| ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
+| ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关，x86_64/riscv64/aarch64/ppc64le/loongarch64 五架构 5/5 PASS |
 | P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
-| P1 | MSI-X + ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
+| ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
+| P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
@@ -442,13 +526,140 @@ cgroup v1/v2 是真的，且在热路径上强制：`cg_mem_charge()` 在缺页�
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |
 
-## 九、推荐的第一批动作
+### server world 的实测状态（2026-10）
 
+`packages/world/server.world` 此前标注为"从未执行过组装"。现已推进到**镜像能装出来、
+并且在 guest 内启动到 shell**：
+
+```
+make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
+     ALPINE_MIRROR_ROOT=https://dl-cdn.alpinelinux.org/alpine \
+     image-world PKG_WORLD=server
+```
+
+22 个 Alpine 包（busybox、dropbear、chrony、ca-certificates 及依赖）全部装入 staging
+并被 `mkfs.ext4` 打包；把这张镜像作为第二块 virtio-blk 盘挂上启动后，stage-2 init
+正常 chroot，dropbear 打印主机密钥。**world 清单 → apk 求解 → overlay 装配 → mkfs
+→ chroot** 整条链路成立。
+
+两处环境相关的坑，都不是仓库逻辑问题：
+
+- 默认 USTC 镜像源在本环境返回 **403**，需换官方源；`ALPINE_MIRROR_ROOT` 在
+  `tools/targets-rootfs.mk` 中是 `?=` 赋值，可从命令行覆盖。
+- `mkfs.ext4 -d` 曾报 `do_write_internal: 权限不够 while opening "bbsuid"`。这是
+  `busybox-suid` 的 `bbsuid` 需要 `mknod`、而 fakeroot 只伪造属主不提供 `CAP_MKNOD`
+  所致（单独 `fakeroot chown 101:101` 正常，可确认不是 fakeroot 本身坏了）。已从
+  world 清单去掉 `busybox-suid` 绕开，见 `6a1ab8f8`；宿主上有 root 时该包可以放回。
+
+#### 让这张镜像真的能被登进去，需要两件事
+
+1. **镜像里必须有认证路径。** 镜像不含密码——密码一旦烤进镜像就等于永久泄露并随镜像
+   复制扩散——所以只能烤公钥。新增 `SSH_PUBKEY`：
+
+   ```
+   make image-world PKG_WORLD=server SSH_PUBKEY=~/.ssh/id_ed25519.pub
+   ```
+
+   见 `6702613c`。不给 `SSH_PUBKEY` 时镜像不带任何 `authorized_keys`，dropbear 照常
+   启动，但没人能登进去。
+
+2. **内核命令行必须选 `a20.tcpmode=lwip`。** 默认的 `tcpmode=fast` 里 `listen()`
+   直接丢掉已绑定的 pcb、从不把 listener 放进 lwIP，于是该端口在协议栈里根本不存在，
+   slirp 发来的 SYN 被回 RST。这与认证无关，发生在认证之前。
+
+`tcpmode=lwip` 确实修好了这一层：`/proc/net/status` 里 `tcp_listen=1`（真实 LISTEN pcb
+存在），且 `smoke-net-accept` 的 lwip 那一趟 **PASS**
+（`TCP_ACCEPT_TEST: PASS port=12346`，`net_accept_staged=1`、`net_accept_queued=1`）。
+
+#### 入站连接的 double free：已定位并修复
+
+- **入站连接能被 accept，但随即 double free 打死内核。** 最小复现（server world，
+  `a20.tcpmode=lwip`，宿主经 hostfwd 连入）：
+
+  ```
+  # guest 内
+  nc -l -p 8080 0.0.0.0 < /dev/null
+  # 宿主
+  bash -c 'exec 3<>/dev/tcp/127.0.0.1/2234'
+  ```
+
+  握手是通的——宿主侧 `connect()` 返回成功，lwIP 的 LISTEN 查找命中。随后立刻：
+
+  ```
+  ========== KERNEL PANIC ==========
+  lwIP assertion failed: mem_free: illegal memory: double free
+  [PANIC] task: pid=19 name=nc
+  [PANIC] caller=mem_free+0x38c
+  ```
+
+  `mem_free` 这条断言只在 `mem.c:639` 命中，即"该块已被标记为未使用"；而本分支
+  `MEMP_MEM_MALLOC=1`，memp 各池的元素都出自 `mem_malloc`，所以这等价于**某个 memp
+  元素被释放了两次**。
+
+  **根因不是 pcb 的引用计数算错，而是"把 pcb 交给 bottom half"和"pcb 可以安全地留在
+  lwIP 里"被当成了同一件事。** `lwip_tcp_accept_cb()` 返回 `ERR_OK`（等价于告诉 lwIP
+  这个 pcb 归应用所有），却**没有给它装任何回调**，于是 `pcb->recv == NULL`。若对端在
+  bottom half 跑完 `net_inet_tcp_apply_options()` 之前先发来 FIN，lwIP 会走到它自己的
+  `tcp_recv_null()` 兜底路径，其 `p == NULL && err == ERR_OK` 分支直接 `tcp_close(pcb)`
+  并把 pcb 释放掉——而 accept stage 槽位还指着这块已被释放的内存。bottom half 随后
+  拿到这个悬垂指针，把它交给新建的 child socket，teardown 再 `tcp_abort()` 一次，
+  第二次释放就撞上 `mem_free` 的断言。
+
+  修复（`80c20884`）把 accept stage 从"一个裸 pcb 数组"改成自带上下文的每槽位结构
+  （`net_accept_stage_slot_t`），并在 stage 时就装上 `lwip_tcp_stage_{recv,sent,err}_cb`：
+
+  - staging 期间收到的数据以 `pbuf` 引用挂在 `c->pending` 上（`pbuf_free()` 只在
+    `g_lwip_lock` 下安全，所以只能在 err 回调或 bottom half 里释放），被采纳时搬到
+    child 的 bh_ring；
+  - staging 期间到达的 FIN 只置 `c->fin`，绝不动 `dead`，并在采纳时重放到 child 的
+    `bh_closed`，于是"握完手立刻 FIN"的请求不再落到兜底路径上；
+  - `lwip_tcp_stage_err_cb()` 置 `dead` 并在 `g_lwip_lock` 下清 `pending`，bottom half
+    据此跳过这个槽位；
+  - 采纳前**先把 pcb 重新 `tcp_arg()` 到 child 并清空槽位，再推进 `tail`**——槽位地址
+  就是 pcb 的 `callback_arg`，只要 `tail` 没过 i，生产者就不可能复用槽位 i，这个顺序
+  消掉了"生产者还在往这个槽位投递事件"的窗口；
+  - listener 拆除时（`net_tcp_close_pcb()` / `net_tcp_drop_pcb()` /
+    `net_inet_socket_destroy()`）统一 `net_inet_accept_stage_purge()`，此前已建立的连接
+    会被静默泄漏。
+
+  同一条路径上还修了两个独立缺陷：`lwip_tcp_recv_cb()` 在 bh_ring 满时既 `pbuf_free(p)`
+  又 `return ERR_MEM`，而 `ERR_MEM` 的语义是 lwIP **并没有**接管这个 pbuf（`tcp_in.c`
+  把它存进 `pcb->refused_data`，`tcp_process_refused_data()` 还会再交回来），所以这本身
+  就是第二次释放；现在改成先用 `bh_ring_reserve()` 整体判定、要么全进要么全不进。另外
+  `pbuf_cat()` 会自行为被拼接的链取引用，因此"留下回调交给我的 pbuf"的正确写法是
+  直接 `pbuf_cat(c->pending, p)`，多写一次 `pbuf_ref()` 会多数一。
+
+  验证：`make smoke-net-accept` 的 lwip 那一趟 PASS（`TCP_ACCEPT_TEST: PASS port=12346`，
+  `net_accept_drop=0`、`net_bh_overflow=0`、`net_alloc_fail=0`，无 panic），此前同一份
+  产物必 panic；经 slirp 打到 guest 8080 的入站连接不再触发断言；server world 里
+  dropbear 在 22 端口可从宿主端到端登录。
+
+#### fast 模式门禁发红：是测试自身的单位错误，不是内核缺陷
+
+- **`smoke-net-accept` 门禁红在 fast 模式**：`TCP_ACCEPT_TEST: FAIL port=12347 (client=-1)`。
+  内核并没有错：`user/cmds/net/tcp_accept_test.c` 的客户端重试循环把 `waited` 按
+  `CONNECT_RETRY_US`（微秒）累加，却拿它去比 `CONNECT_BUDGET_MS`（4000，毫秒），所以
+  `waited` 从 0 加到 20000 就已经越界，**循环体只跑一次**，客户端只发起一次 `connect()`，
+  而它恰好要跟 fork 出来的服务端 `bind()`+`listen()` 抢跑。谁先谁后不确定，于是表现为
+  "fast 模式 1/4 概率挂"。注释里写的意图（"长到不会在 4 核 guest 上误触发，短到卡死时
+  几十秒内失败"）显然是想要 4 秒的重试预算，实现没兑现。
+
+  定位证据是在 `-smp 1`（串口无并发交错，输出不可能丢）下跑多轮：每个失败端口只打印
+  **一条** `connect()` 入口的调试行，而不是注释所暗示的 200 次重试。改成统一微秒预算
+  （`CONNECT_BUDGET_US`）后，同一 boot 内连跑 8 轮 8/8 PASS，且 socket 计数每轮回到基线，
+  无泄漏；关掉全部调试输出后 `make smoke-net-accept` 连跑 6 次全绿。
+
+  两种模式现在给出同一个可观测结果，这条不再是例外项。
+
+## 九、推荐的第一批动作
 按「改动小、风险低、避免真实事故」排序：
 
 1. 补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。
-2. 崩溃注入测试基础设施（QEMU 可用 `-device qemu-x-test` 或直接 kill -9 +
-   重放镜像比对），这是 ext4 journal 改造的前提。
+2. ~~崩溃注入测试基础设施~~ —— **已完成**，形式是 JBD2 提交序列内的定点
+   panic（`/proc/a20/journal` 下发注入点）+ 同镜像重启 + 宿主 `e2fsck` 比对，
+   见 `make smoke-ext4-journal`。仍未覆盖的是"到点就死"的粗粒度形态
+   （在写盘路径上随机取一个指令位置 kill -9）；当前覆盖的是语义上真正有
+   意义的边界点。
 3. 引入真机基准入口；当前所有性能结论都来自 TCG 模拟器。
 
 以下两项曾在本清单里，现已完成，不再是待办：

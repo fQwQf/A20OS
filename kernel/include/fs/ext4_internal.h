@@ -28,6 +28,64 @@ static inline void ext4_inode_set_size(ext4_inode_t *in, uint64_t size) {
     in->i_size_high = (uint32_t)(size >> 32);
 }
 
+/* crc32c as ext4 stores it: seeded, not final-xored.  Lives in
+ * ext4_journal.c because JBD2 needs the identical function. */
+uint32_t ext4_crc32c(uint32_t seed, const void *data, size_t len);
+
+/* True when the filesystem carries EXT4_FEATURE_RO_COMPAT_METADATA_CSUM, and
+ * the crc32c(~0, uuid) seed every metadata checksum derives from. */
+int ext4_has_metadata_csum(const ext4_sb_info_t *sb);
+uint32_t ext4_checksum_seed(const ext4_sb_info_t *sb);
+
+/* How many extents the extent header inside an inode may declare: the header
+ * itself claims twelve of the inode's sixty i_block bytes.  e2fsck rejects an
+ * inode whose root header declares more, and calls one that declares fewer
+ * "could be narrower", so every root header has to use exactly this. */
+#define EXT4_EXT_ROOT_MAX 4
+
+/* The primary superblock always occupies the second 1 KiB of the device, no
+ * matter how large the filesystem's blocks are.  Both the driver and the
+ * journal writer reach it, so the offset lives here rather than in ext4.c. */
+#define EXT4_SB_OFFSET            1024
+#define EXT4_SB_SIZE              1024
+
+/* Where bg_checksum sits in the on-disk descriptor for this desc_size. */
+size_t ext4_group_desc_checksum_offset(size_t desc_size);
+
+/* Rewrite the trailing checksum of an on-disk group descriptor, hashing the
+ * bytes the filesystem will read back rather than the in-memory struct. */
+void ext4_group_desc_checksum_put(ext4_sb_info_t *sb, uint32_t group,
+                                  uint8_t *raw, size_t desc_size);
+
+/* Serialise a descriptor for a filesystem whose s_desc_size is the legacy 32. */
+void ext4_group_desc_pack_legacy(const ext4_group_desc_t *gd, uint8_t *out);
+
+/* Rewrite the trailing checksum halves of an on-disk inode image. */
+void ext4_inode_checksum_put(ext4_sb_info_t *sb, uint32_t ino, uint8_t *raw,
+                             size_t inode_size);
+
+/* Refresh bg_block_bitmap_csum / bg_inode_bitmap_csum from the bitmap bytes
+ * just written (the descriptor carrying them is written back separately). */
+void ext4_block_bitmap_checksum_put(ext4_sb_info_t *sb, uint32_t group,
+                                    const uint8_t *raw, size_t len);
+void ext4_inode_bitmap_checksum_put(ext4_sb_info_t *sb, uint32_t group,
+                                    const uint8_t *raw, size_t len);
+
+/* A checksummed directory block ends in a 12-byte tail instead of a free inode
+ * number.  ext4_dir_block_tail_set() installs one; the checksum helper then
+ * hashes the whole block with the tail's own checksum read as zero. */
+size_t ext4_dir_block_tail_off(size_t block_size);
+void ext4_dir_block_tail_set(uint8_t *raw, size_t block_size);
+void ext4_dir_block_checksum_put(ext4_sb_info_t *sb, uint32_t ino,
+                                 uint32_t generation, uint8_t *raw,
+                                 size_t block_size);
+
+/* Same shape for an extent tree block: a bare crc32c in the last four bytes,
+ * over everything before it. */
+void ext4_extent_block_checksum_put(ext4_sb_info_t *sb, uint32_t ino,
+                                    uint32_t generation, uint8_t *raw,
+                                    size_t block_size);
+
 int ext4_vn_writepage(vnode_t *vn, uint64_t index,
                              const void *data, size_t len)
 ;
@@ -48,6 +106,10 @@ uint64_t ext4_block_map_cached(ext4_fctx_t *fc, ext4_inode_t *inode,
 vnode_t *ext4_vnode_cache_lookup(ext4_sb_info_t *sb, uint32_t ino) ;
 void ext4_vnode_cache_insert(ext4_sb_info_t *sb, uint32_t ino, vnode_t *vn) ;
 vnode_t *ext4_vnode_cache_remove(ext4_sb_info_t *sb, uint32_t ino) ;
+/* The only writer for ext4 metadata.  Journalled when the filesystem has a
+ * log, plain buffered otherwise; file data does not use it. */
+int ext4_meta_write(ext4_sb_info_t *sb, uint64_t byte_off, const void *buf,
+                    size_t len);
 int ext4_read_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *out) ;
 int ext4_write_inode(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inp) ;
 void ext4_writeback_gd(ext4_sb_info_t *sb, uint32_t group) ;
@@ -64,20 +126,32 @@ uint32_t ext4_alloc_inode(ext4_sb_info_t *sb) ;
 void ext4_free_inode(ext4_sb_info_t *sb, uint32_t ino) ;
 uint64_t ext4_extent_leaf_search(ext4_extent_t *ex, int cnt, uint32_t lblk) ;
 uint64_t ext4_extent_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;
-int ext4_extent_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
+int ext4_extent_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
                              uint32_t lblk, uint64_t pb) ;
-void ext4_extent_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
+void ext4_extent_truncate(ext4_sb_info_t *sb, uint32_t ino,
+                          ext4_inode_t *inode) ;
 int ext4_extent_collect(ext4_sb_info_t *sb, const ext4_inode_t *inode,
                                ext4_flatext_t *out, int max) ;
 void ext4_extent_free_tree(ext4_sb_info_t *sb, const ext4_inode_t *inode) ;
-int ext4_extent_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                   uint32_t lblk) ;
+void ext4_inode_sync_i_blocks(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
+
+/* Recompute the superblock's filesystem-wide free block / free inode totals
+ * from the group descriptors and write them back, checksum included. */
+void ext4_superblock_sync_counts(ext4_sb_info_t *sb);
+
+/* Add (delta > 0) or remove (delta < 0) a directory from the used-directory
+ * count of the group that owns the inode. */
+void ext4_account_directory(ext4_sb_info_t *sb, uint32_t ino, int delta);
+int ext4_extent_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode, uint32_t lblk) ;
 uint64_t ext4_indirect_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;
-int ext4_indirect_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                               uint32_t lblk, uint64_t phys) ;
-void ext4_indirect_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
-void ext4_indirect_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                      uint32_t lblk) ;
+int ext4_indirect_grow(ext4_sb_info_t *sb, uint32_t ino,
+                               ext4_inode_t *inode, uint32_t lblk,
+                               uint64_t phys) ;
+void ext4_indirect_truncate(ext4_sb_info_t *sb, uint32_t ino,
+                                  ext4_inode_t *inode) ;
+void ext4_indirect_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                                      ext4_inode_t *inode, uint32_t lblk) ;
 uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) ;
 /* ext4_journal_recover return convention: 0 = journal fully cleaned on disk,
  * EXT4_JOURNAL_DEFERRED = replay succeeded into the block cache but the
@@ -88,21 +162,23 @@ uint64_t ext4_block_map(ext4_sb_info_t *sb, ext4_inode_t *inode, uint32_t lblk) 
 int ext4_journal_recover(ext4_sb_info_t *sb, ext4_superblock_t *disk_sb) ;
 int ext4_dir_entry_check(const ext4_dir_entry_t *de, uint32_t off,
                          uint32_t block_size, uint16_t *actual_len) ;
-int ext4_block_grow(ext4_sb_info_t *sb, ext4_inode_t *inode,
+int ext4_block_grow(ext4_sb_info_t *sb, uint32_t ino, ext4_inode_t *inode,
                             uint32_t lblk, uint64_t phys) ;
-void ext4_block_truncate(ext4_sb_info_t *sb, ext4_inode_t *inode) ;
-void ext4_block_truncate_at(ext4_sb_info_t *sb, ext4_inode_t *inode,
-                                   uint32_t lblk) ;
+void ext4_block_truncate(ext4_sb_info_t *sb, uint32_t ino,
+                                ext4_inode_t *inode) ;
+void ext4_block_truncate_at(ext4_sb_info_t *sb, uint32_t ino,
+                                   ext4_inode_t *inode, uint32_t lblk) ;
 int ext4_dir_find(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
                           const char *name, uint32_t *out_ino, uint8_t *out_ft) ;
-int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
-                         const char *name, uint32_t ino, uint8_t ft) ;
-int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t dsz,
-                            const char *name) ;
-int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint64_t *dsz,
-                                  const char *name, uint32_t ino, uint8_t ft) ;
-int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt,
-                               uint32_t dir_ino __attribute__((unused)),
+int ext4_dir_add(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                         uint64_t *dsz, const char *name, uint32_t ino,
+                         uint8_t ft) ;
+int ext4_dir_remove(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                            uint64_t dsz, const char *name) ;
+int ext4_dir_update_entry(ext4_sb_info_t *sb, ext4_inode_t *di, uint32_t dir_ino,
+                                  uint64_t *dsz, const char *name, uint32_t ino,
+                                  uint8_t ft) ;
+int ext4_inode_remove(ext4_sb_info_t *sb, mount_t *mnt, uint32_t dir_ino,
                                ext4_inode_t *di, const char *name, uint32_t ino,
                                vnode_t **deferred_put) ;
 int ext4_lookup_unlocked(vnode_t *dir, const char *name, vnode_t **out) ;

@@ -4,6 +4,8 @@
 #include "abi/linux/fcntl.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mntns.h"
+#include "fs/vfs/mount.h"
+#include "fs/vfs/stat_perm.h"
 #include "ipc/kexec.h"
 #include "ipc/seccomp.h"
 #include "sys/usercopy.h"
@@ -81,16 +83,17 @@ __attribute__((weak)) int64_t sys_pause(void) {
     (LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES | \
      LINUX_CLONE_SIGHAND | LINUX_CLONE_PIDFD | LINUX_CLONE_PTRACE | \
      LINUX_CLONE_VFORK | LINUX_CLONE_PARENT | LINUX_CLONE_THREAD | \
-     LINUX_CLONE_NEWNS | \
+     LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID | LINUX_CLONE_NEWUSER | \
      LINUX_CLONE_SYSVSEM | LINUX_CLONE_SETTLS | \
      LINUX_CLONE_PARENT_SETTID | LINUX_CLONE_CHILD_CLEARTID | \
      LINUX_CLONE_CHILD_SETTID | LINUX_CLONE_IO | 0xFFULL)
 
-/* Namespace types other than mount namespaces are not implemented; both
- * clone and clone3 refuse them instead of silently ignoring the flag. */
+/* Namespace types other than mount, pid and user namespaces are not
+ * implemented; both clone and clone3 refuse them instead of silently ignoring
+ * the flag. */
 #define LINUX_CLONE_UNSUPPORTED_NS_FLAGS \
     (LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS | LINUX_CLONE_NEWIPC | \
-     LINUX_CLONE_NEWUSER | LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET)
+     LINUX_CLONE_NEWNET)
 
 /* CLONE_NEWNS requires privilege in the caller (Linux: CAP_SYS_ADMIN in the
  * current user namespace; simplified here to CAP_SYS_ADMIN or root). */
@@ -132,19 +135,46 @@ int64_t sys_exit_group(int code) {
     return 0;
 }
 
+/*
+ * PID_TRANSLATION_CONTRACT:
+ * getpid()/gettid()/getppid() report ids in task_active_pid_ns(), i.e. the
+ * namespace the caller's CHILDREN join -- task_t::pid_ns_for_children.  Inside
+ * a pid namespace that makes the numbers start at 1, which is the whole point:
+ * a container's init is pid 1 and its first child is pid 2.
+ *
+ * getpid() reports the thread-group id and gettid() the task id, so a
+ * multithreaded process inside a container shows N threads sharing one
+ * container-local group id, as in Linux.  Both go through the same level
+ * table on task_t, so t->tgid (a global id) must never be returned directly.
+ *
+ * The consequence that trips callers up, and is correct: unshare(CLONE_NEWPID)
+ * does not change getpid() until the NEXT fork, because the task stays a
+ * member of its old namespace and only parks a new one for its children.
+ */
 int64_t sys_getpid(void) {
     task_t *t = proc_current();
-    return t ? (t->tgid ? t->tgid : t->pid) : 0;
+    if (!t) return 0;
+    /* The THREAD GROUP's id, not this thread's -- which is why a
+     * multithreaded process inside a container has every thread reporting the
+     * same getpid() while gettid() differs.  task_t::tgid is a GLOBAL id and
+     * would leak the host numbering straight through the namespace. */
+    task_t *leader = t->tg_leader ? t->tg_leader : t;
+    return task_pid_nr_ns(leader, pidns_current());
 }
 
 int64_t sys_getppid(void) {
     task_t *t = proc_current();
-    return t ? t->ppid : 0;
+    if (!t) return 0;
+    /* Linux reports real_parent here so a ptraced child's getppid() does not
+     * leak its tracer; the visible id is whatever the parent's namespace
+     * makes it, and 0 when the parent is outside the caller's namespace. */
+    return task_ppid_nr_ns(t, pidns_current());
 }
 
 int64_t sys_gettid(void) {
     task_t *t = proc_current();
-    return t ? t->pid : 0;
+    if (!t) return 0;
+    return task_pid_nr_ns(t, pidns_current());
 }
 
 int64_t sys_set_tid_address(int *tidptr) {
@@ -176,7 +206,7 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
     if (pid == 0) {
         t = proc_get(proc_current());
     } else {
-        t = proc_find_get(pid);
+        t = proc_find_get_user(pid);
         if (!t) return -ESRCH;
         task_t *cur = proc_current();
         if (cur && t->cred.uid != cur->cred.uid &&
@@ -203,64 +233,114 @@ int64_t sys_get_robust_list(int pid, void *head_ptr, size_t *len_ptr) {
     return 0;
 }
 
+/*
+ * USERNS_CRED_CONTRACT:
+ * task_t::cred stores GLOBAL (host) ids.  Every id that crosses the syscall
+ * boundary is translated through the calling task's user namespace, in both
+ * directions:
+ *   - INBOUND  (setuid/setgid/setreuid/.../setgroups) the id the caller passed
+ *     is a namespace-local id and becomes a global one.  An id the namespace
+ *     cannot map is EINVAL, never silently accepted: substituting a global id
+ *     would let a process name a user its namespace has no authority over.
+ *   - OUTBOUND (getuid/geteuid/getgid/getegid/getresuid/getresgid/getgroups)
+ *     a global id becomes the namespace-local one, and a global id the
+ *     namespace cannot represent is reported as the overflow id (65534)
+ *     rather than leaking the host's real numbering.
+ *
+ * In the initial namespace the maps are the identity, so every one of these
+ * is the same integer arithmetic as before and no existing behaviour changes.
+ */
+static user_namespace_t *sys_cred_ns(void)
+{
+    return userns_task_own(proc_current());
+}
+
+/* Namespace-local id -> global, or -1 when unmapped. */
+static int sys_uid_in(int uid)
+{
+    return userns_to_kuid(sys_cred_ns(), uid);
+}
+
+static int sys_gid_in(int gid)
+{
+    return userns_to_kgid(sys_cred_ns(), gid);
+}
+
 int64_t sys_getuid(void) {
     task_t *t = proc_current();
-    return t ? t->cred.uid : 0;
+    return t ? userns_from_kuid(sys_cred_ns(), t->cred.uid) : 0;
 }
 
 int64_t sys_geteuid(void) {
     task_t *t = proc_current();
-    return t ? t->cred.euid : 0;
+    return t ? userns_from_kuid(sys_cred_ns(), t->cred.euid) : 0;
 }
 
 int64_t sys_getgid(void) {
     task_t *t = proc_current();
-    return t ? t->cred.gid : 0;
+    return t ? userns_from_kgid(sys_cred_ns(), t->cred.gid) : 0;
 }
 
 int64_t sys_getegid(void) {
     task_t *t = proc_current();
-    return t ? t->cred.egid : 0;
+    return t ? userns_from_kgid(sys_cred_ns(), t->cred.egid) : 0;
 }
 
 int64_t sys_setuid(int uid) {
     if (uid < 0) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -EINVAL;
-    return cred_setuid(t, uid);
+    int k = sys_uid_in(uid);
+    if (k < 0) return -EINVAL;
+    return cred_setuid(t, k);
 }
 
 int64_t sys_setgid(int gid) {
     if (gid < 0) return -EINVAL;
     task_t *t = proc_current();
     if (!t) return -EINVAL;
-    return cred_setgid(t, gid);
+    int k = sys_gid_in(gid);
+    if (k < 0) return -EINVAL;
+    return cred_setgid(t, k);
 }
 
 int64_t sys_setreuid(int ruid, int euid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (ruid < -1 || euid < -1) return -EINVAL;
-    return cred_setreuid(t, ruid, euid);
+    int kr = -1, ke = -1;
+    if (ruid != -1 && (kr = sys_uid_in(ruid)) < 0) return -EINVAL;
+    if (euid != -1 && (ke = sys_uid_in(euid)) < 0) return -EINVAL;
+    return cred_setreuid(t, kr, ke);
 }
 
 int64_t sys_setregid(int rgid, int egid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (rgid < -1 || egid < -1) return -EINVAL;
-    return cred_setregid(t, rgid, egid);
+    int kr = -1, ke = -1;
+    if (rgid != -1 && (kr = sys_gid_in(rgid)) < 0) return -EINVAL;
+    if (egid != -1 && (ke = sys_gid_in(egid)) < 0) return -EINVAL;
+    return cred_setregid(t, kr, ke);
 }
 
 int64_t sys_setresuid(int ruid, int euid, int suid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (ruid < -1 || euid < -1 || suid < -1) return -EINVAL;
-    return cred_setresuid(t, ruid, euid, suid);
+    int kr = -1, ke = -1, ks = -1;
+    if (ruid != -1 && (kr = sys_uid_in(ruid)) < 0) return -EINVAL;
+    if (euid != -1 && (ke = sys_uid_in(euid)) < 0) return -EINVAL;
+    if (suid != -1 && (ks = sys_uid_in(suid)) < 0) return -EINVAL;
+    return cred_setresuid(t, kr, ke, ks);
 }
 
 int64_t sys_getresuid(int *ruid, int *euid, int *suid) {
     task_t *t = proc_current();
-    int ids[3] = { t ? t->cred.uid : 0, t ? t->cred.euid : 0, t ? t->cred.suid : 0 };
+    user_namespace_t *ns = sys_cred_ns();
+    int ids[3] = { t ? userns_from_kuid(ns, t->cred.uid) : 0,
+                   t ? userns_from_kuid(ns, t->cred.euid) : 0,
+                   t ? userns_from_kuid(ns, t->cred.suid) : 0 };
     if (copy_to_user(ruid, &ids[0], sizeof(int)) < 0) return -EFAULT;
     if (copy_to_user(euid, &ids[1], sizeof(int)) < 0) return -EFAULT;
     if (copy_to_user(suid, &ids[2], sizeof(int)) < 0) return -EFAULT;
@@ -271,12 +351,19 @@ int64_t sys_setresgid(int rgid, int egid, int sgid) {
     task_t *t = proc_current();
     if (!t) return -EINVAL;
     if (rgid < -1 || egid < -1 || sgid < -1) return -EINVAL;
-    return cred_setresgid(t, rgid, egid, sgid);
+    int kr = -1, ke = -1, ks = -1;
+    if (rgid != -1 && (kr = sys_gid_in(rgid)) < 0) return -EINVAL;
+    if (egid != -1 && (ke = sys_gid_in(egid)) < 0) return -EINVAL;
+    if (sgid != -1 && (ks = sys_gid_in(sgid)) < 0) return -EINVAL;
+    return cred_setresgid(t, kr, ke, ks);
 }
 
 int64_t sys_getresgid(int *rgid, int *egid, int *sgid) {
     task_t *t = proc_current();
-    int ids[3] = { t ? t->cred.gid : 0, t ? t->cred.egid : 0, t ? t->cred.sgid : 0 };
+    user_namespace_t *ns = sys_cred_ns();
+    int ids[3] = { t ? userns_from_kgid(ns, t->cred.gid) : 0,
+                   t ? userns_from_kgid(ns, t->cred.egid) : 0,
+                   t ? userns_from_kgid(ns, t->cred.sgid) : 0 };
     if (copy_to_user(rgid, &ids[0], sizeof(int)) < 0) return -EFAULT;
     if (copy_to_user(egid, &ids[1], sizeof(int)) < 0) return -EFAULT;
     if (copy_to_user(sgid, &ids[2], sizeof(int)) < 0) return -EFAULT;
@@ -286,18 +373,36 @@ int64_t sys_getresgid(int *rgid, int *egid, int *sgid) {
 int64_t sys_setfsuid(int uid) {
     task_t *t = proc_current();
     if (!t) return 0;
-    return cred_setfsuid(t, uid);
+    /* setfsuid reports the OLD fsuid, in the caller's namespace like every
+     * other id this call returns. */
+    user_namespace_t *ns = sys_cred_ns();
+    int old = userns_from_kuid(ns, t->cred.fsuid);
+    if (uid < 0)
+        return old;
+    int k = sys_uid_in(uid);
+    if (k < 0)
+        return old;   /* Linux: an unmappable id leaves fsuid alone */
+    cred_setfsuid(t, k);
+    return old;
 }
 
 int64_t sys_setfsgid(int gid) {
     task_t *t = proc_current();
     if (!t) return 0;
-    return cred_setfsgid(t, gid);
+    user_namespace_t *ns = sys_cred_ns();
+    int old = userns_from_kgid(ns, t->cred.fsgid);
+    if (gid < 0)
+        return old;
+    int k = sys_gid_in(gid);
+    if (k < 0)
+        return old;
+    cred_setfsgid(t, k);
+    return old;
 }
 
 int64_t sys_getpgid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!t) return -ESRCH;
     int pgid = t->pgid;
     proc_put(t);
@@ -306,7 +411,7 @@ int64_t sys_getpgid(int pid) {
 
 int64_t sys_setpgid(int pid, int pgid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!self || !t) {
         proc_put(t);
         return -ESRCH;
@@ -340,7 +445,7 @@ int64_t sys_setsid(void) {
 
 int64_t sys_getsid(int pid) {
     task_t *self = proc_current();
-    task_t *t = pid == 0 ? proc_get(self) : proc_find_get(pid);
+    task_t *t = pid == 0 ? proc_get(self) : proc_find_get_user(pid);
     if (!t) return -ESRCH;
     int sid = t->sid;
     proc_put(t);
@@ -418,11 +523,11 @@ int64_t sys_vhangup(void) {
 }
 
 int64_t sys_unshare(int flags) {
-    /* Honest namespace semantics: CLONE_NEWNS creates a real mount
-     * namespace; every other namespace type is refused with -EINVAL
-     * (Linux's error for unsupported types) instead of faking success.
-     * The non-namespace unshare flags (CLONE_FS/FILES/SIGHAND/VM/THREAD/
-     * SYSVSEM) are likewise not implemented and refuse honestly. */
+    /* Real namespace semantics: CLONE_NEWNS, CLONE_NEWPID and CLONE_NEWUSER
+     * create real namespaces; every other namespace type is refused with
+     * -EINVAL (Linux's error for unsupported types) instead of faking
+     * success.  The non-namespace unshare flags (CLONE_FS/FILES/SIGHAND/VM/
+     * THREAD/SYSVSEM) are likewise not implemented and refuse honestly. */
     const int known = (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
                       LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
                       LINUX_CLONE_NEWNS | LINUX_CLONE_SYSVSEM |
@@ -432,33 +537,70 @@ int64_t sys_unshare(int flags) {
     if (flags & ~known)
         return -EINVAL;
     if (flags & (int)(LINUX_CLONE_NEWCGROUP | LINUX_CLONE_NEWUTS |
-                      LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWUSER |
-                      LINUX_CLONE_NEWPID | LINUX_CLONE_NEWNET))
+                      LINUX_CLONE_NEWIPC | LINUX_CLONE_NEWNET))
         return -EINVAL;
     if (flags & (int)(LINUX_CLONE_VM | LINUX_CLONE_FS | LINUX_CLONE_FILES |
                       LINUX_CLONE_SIGHAND | LINUX_CLONE_THREAD |
                       LINUX_CLONE_SYSVSEM))
         return -EINVAL;
-    if (flags & (int)LINUX_CLONE_NEWNS) {
+    /* Linux refuses CLONE_THREAD|CLONE_NEWPID: a thread's whole reason for
+     * existing is to share the group, and a namespace whose init thread is
+     * not in that group cannot be exited. */
+    if ((flags & (int)(LINUX_CLONE_NEWPID | LINUX_CLONE_THREAD)) ==
+        (int)(LINUX_CLONE_NEWPID | LINUX_CLONE_THREAD))
+        return -EINVAL;
+
+    if (flags & (int)(LINUX_CLONE_NEWNS | LINUX_CLONE_NEWPID)) {
         task_t *t = proc_current();
         if (!t)
             return -ESRCH;
         if (!proc_has_cap(t, CAP_SYS_ADMIN) && t->cred.euid != 0)
             return -EPERM;
-        return mntns_unshare(t);
+    }
+    task_t *t = proc_current();
+    /* unshare(CLONE_NEWUSER) deliberately needs NO capability: it is how an
+     * unprivileged process obtains a namespace it is root in.  The privilege
+     * that comes with it is scoped to the new namespace, so it grants nothing
+     * outside it.  It runs LAST, because it changes what the other two
+     * namespaces are created relative to: a task that unshares NEWNS and
+     * NEWUSER in one call wants the mount namespace nested under the user
+     * namespace it just joined, not the other way round. */
+    mnt_namespace_t *old_mnt = NULL;
+    if (flags & (int)LINUX_CLONE_NEWNS) {
+        old_mnt = mntns_task_get(t);
+        int r = mntns_unshare(t);
+        if (r < 0) {
+            mntns_put(old_mnt);
+            return r;
+        }
+    }
+    if (flags & (int)LINUX_CLONE_NEWPID) {
+        int r = pidns_unshare(t);
+        if (r < 0) {
+            /* Roll the mount namespace back so a multi-flag unshare is not
+             * left half applied. */
+            if (flags & (int)LINUX_CLONE_NEWNS) {
+                mntns_join(t, old_mnt);  /* consumes old_mnt */
+            }
+            return r;
+        }
+    }
+    if (flags & (int)LINUX_CLONE_NEWUSER) {
+        int r = userns_unshare(t);
+        if (r < 0)
+            return r;
     }
     return 0;
 }
 
 int64_t sys_setns(int fd, int nstype) {
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_current_file_ref(fd, &gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
     if (!vf)
         return -EBADF;
     int kind = procfs_ns_file_kind(vf);
     if (kind < 0) {
         /* fd is not a /proc/<pid>/ns/<type> file */
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     /* Map the target kind to its CLONE_NEW* bit for the nstype check. */
@@ -472,41 +614,243 @@ int64_t sys_setns(int fd, int nstype) {
         [PROCNS_CGROUP] = 0x02000000,  /* CLONE_NEWCGROUP */
     };
     if (nstype != 0 && nstype != kind_flags[kind]) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
-    /* Only mount namespaces can be joined; the other namespace types are
-     * system-wide singletons and setns is honestly refused. */
-    if (kind != PROCNS_MNT) {
-        vfs_put_file_ref(gfd, vf);
-        return -EINVAL;
-    }
-    int owner_uid = -1;
-    mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid);
-    if (!ns) {
-        vfs_put_file_ref(gfd, vf);
+    /* Mount, pid and user namespaces can be joined; the other namespace types
+     * are system-wide singletons and setns is honestly refused. */
+    if (kind != PROCNS_MNT && kind != PROCNS_PID && kind != PROCNS_USER) {
+        vfs_put_file(vf);
         return -EINVAL;
     }
     task_t *cur = proc_current();
-    /* Permission model (documented simplification of Linux's
-     * CAP_SYS_ADMIN-in-target-user-ns rule, which needs user namespaces):
-     * the caller must hold CAP_SYS_ADMIN, run as root, or share the
-     * namespace owner's uid recorded when the fd was opened. */
-    if (!cur || (!proc_has_cap(cur, CAP_SYS_ADMIN) && cur->cred.euid != 0 &&
-                 cur->cred.euid != owner_uid)) {
-        mntns_put(ns);
-        vfs_put_file_ref(gfd, vf);
+    int owner_uid = -1;
+    int r;
+    if (kind == PROCNS_MNT) {
+        user_namespace_t *owner = NULL;
+        mnt_namespace_t *ns = procfs_ns_file_mntns_get(vf, &owner_uid, &owner);
+        if (!ns) {
+            vfs_put_file(vf);
+            return -EINVAL;
+        }
+        /* Joining a mount namespace means changing what the caller can see, so
+         * the authority required is authority over the USER NAMESPACE THAT
+         * OWNS the target -- CAP_SYS_ADMIN in that namespace or in any
+         * namespace between the caller's own and it.  A bare proc_has_cap()
+         * test would answer "in my own namespace", which is exactly the wrong
+         * scope now that a process can be root inside a container and have no
+         * authority at all outside it. */
+        if (!cur || !owner || !userns_capable(cur, owner, CAP_SYS_ADMIN)) {
+            if (owner) userns_put(owner);
+            mntns_put(ns);
+            vfs_put_file(vf);
+            return -EPERM;
+        }
+        userns_put(owner);
+        r = mntns_join(cur, ns);  /* consumes the reference */
+        vfs_put_file(vf);
+        return r;
+    }
+
+    if (kind == PROCNS_PID) {
+        user_namespace_t *owner = NULL;
+        pid_namespace_t *pns = procfs_ns_file_pidns_get(vf, &owner_uid, &owner);
+        if (!pns) {
+            vfs_put_file(vf);
+            return -EINVAL;
+        }
+        /* Same scoping rule as the mount case: pid namespaces are resources of
+         * a user namespace, and joining one re-points where children join. */
+        if (!cur || !owner || !userns_capable(cur, owner, CAP_SYS_ADMIN)) {
+            if (owner) userns_put(owner);
+            pidns_put(pns);
+            vfs_put_file(vf);
+            return -EPERM;
+        }
+        userns_put(owner);
+        /* pidns_join() takes its own reference and releases the caller's, so
+         * the reference from procfs_ns_file_pidns_get() is dropped here. */
+        r = pidns_join(cur, pns);
+        pidns_put(pns);
+        vfs_put_file(vf);
+        return r;
+    }
+
+    user_namespace_t *uns = procfs_ns_file_userns_get(vf, &owner_uid);
+    if (!uns) {
+        vfs_put_file(vf);
+        return -EINVAL;
+    }
+    /* Joining a user namespace is the one setns case with no euid shortcut:
+     * the whole point of the namespace is that a process may become a
+     * different user inside it, so "already root" would be the wrong test.
+     * What is required is authority OVER the target namespace, which is
+     * CAP_SYS_ADMIN in the target or in any namespace between the caller's
+     * own one and it (userns_capable walks that chain). */
+    if (!cur || !userns_capable(cur, uns, CAP_SYS_ADMIN)) {
+        userns_put(uns);
+        vfs_put_file(vf);
         return -EPERM;
     }
-    int r = mntns_join(cur, ns);  /* consumes the reference */
-    vfs_put_file_ref(gfd, vf);
+    r = userns_join(cur, uns);
+    userns_put(uns);
+    vfs_put_file(vf);
     return r;
 }
 
+/* Resolve a caller-supplied directory path to the vnode it names, with the
+ * vnode reference the caller has to release. */
+static vnode_t *pivot_resolve_dir(task_t *cur, const char *user_path,
+                                  char *global_out, size_t global_sz,
+                                  int *err_out) {
+    char kpath[MAX_PATH_LEN];
+    long copied = user_strncpy(kpath, user_path, MAX_PATH_LEN);
+    if (copied < 0) { *err_out = -EFAULT; return NULL; }
+    if (kpath[0] == '\0') { *err_out = -ENOENT; return NULL; }
+    if (strlen(global_sz ? global_out : kpath) >= global_sz) {
+        *err_out = -ENAMETOOLONG;
+        return NULL;
+    }
+    int pr = syscall_path_at(AT_FDCWD, kpath, global_out, global_sz);
+    if (pr < 0) { *err_out = pr; return NULL; }
+    vnode_t *vn = vfs_resolve(global_out);
+    if (!vn) {
+        *err_out = vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
+        return NULL;
+    }
+    if (vn->type != VFS_FT_DIR) {
+        vnode_put(vn);
+        *err_out = -ENOTDIR;
+        return NULL;
+    }
+    if (vfs_vnode_permission(vn, X_OK) < 0) {
+        vnode_put(vn);
+        *err_out = -EACCES;
+        return NULL;
+    }
+    (void)cur;
+    return vn;
+}
+
+/*
+ * pivot_root(2), for real.
+ *
+ * The operation is only meaningful once a process root is a (mount, vnode)
+ * pair, which is what this branch introduced: the caller moves its root to
+ * another directory and the old root's mount is cut out of the namespace,
+ * after which no path resolves into it and only an already-open descriptor
+ * can still reach it.
+ *
+ * Checks, in the order Linux applies them:
+ *   1. CAP_SYS_ADMIN;
+ *   2. new_root is a directory (and is not the current root);
+ *   3. put_old is a directory, lies under the *current* root, and lies under
+ *      the *new* root -- that last condition is what stops a process from
+ *      using pivot_root to smuggle a reference to a path the new root would
+ *      otherwise hide;
+ *   4. the new root's mount is not the current root's mount and not below
+ *      it, i.e. the pivot may not widen the mount reach;
+ * then: detach the old root mount, re-root the process, and move its cwd to
+ * put_old's parent directory (Linux semantics -- the process must not be
+ * left standing in the old root).
+ */
 int64_t sys_pivot_root(const char *new_root, const char *put_old) {
-    (void)new_root;
-    (void)put_old;
-    return -EPERM;
+    if (!new_root || !put_old) return -EFAULT;
+    task_t *cur = proc_current();
+    if (!cur) return -ESRCH;
+    if (!proc_has_cap(cur, CAP_SYS_ADMIN)) return -EPERM;
+
+    char nr_path[MAX_PATH_LEN];
+    char po_path[MAX_PATH_LEN];
+    int err = 0;
+    vnode_t *nr = pivot_resolve_dir(cur, new_root, nr_path, sizeof(nr_path), &err);
+    if (!nr) return err;
+
+    mount_t *old_root_mnt = vfs_task_root_mount(cur);
+    vnode_t *old_root_vn = cur->fs.root_vn;
+
+    if (old_root_vn && nr == old_root_vn) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+    if (!nr->mnt) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+    /* Pivoting into the mount you are already rooted in changes nothing, so
+     * Linux refuses it.  A *child* of the current root's mount is exactly
+     * the normal container pattern (mount a rootfs at /newroot, pivot into
+     * it) and stays legal. */
+    if (old_root_mnt && nr->mnt == old_root_mnt) {
+        vnode_put(nr);
+        return -EINVAL;
+    }
+
+    vnode_t *po = pivot_resolve_dir(cur, put_old, po_path, sizeof(po_path), &err);
+    if (!po) { vnode_put(nr); return err; }
+
+    /* put_old must be under the new root.  Both are already normalized
+     * global paths, so this is a boundary-correct prefix test. */
+    size_t nr_len = strlen(nr_path);
+    while (nr_len > 1 && nr_path[nr_len - 1] == '/')
+        nr_path[--nr_len] = '\0';
+    if (strcmp(nr_path, po_path) == 0) {
+        /* put_old may not be the new root itself. */
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+    if (strncmp(po_path, nr_path, nr_len) != 0 ||
+        (po_path[nr_len] != '/' && po_path[nr_len] != '\0')) {
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+    /* ... and it must live in the new root's mount. */
+    if (po->mnt != nr->mnt) {
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+
+    /* put_old's parent becomes the new cwd. */
+    char parent[MAX_PATH_LEN];
+    strncpy(parent, po_path, sizeof(parent) - 1);
+    parent[sizeof(parent) - 1] = '\0';
+    size_t plen = strlen(parent);
+    while (plen > 1 && parent[plen - 1] == '/')
+        parent[--plen] = '\0';
+    char *slash = strrchr(parent, '/');
+    if (slash == parent)
+        parent[1] = '\0';
+    else if (slash)
+        *slash = '\0';
+    vnode_t *cwd_vn = vfs_resolve(parent);
+    if (!cwd_vn || cwd_vn->type != VFS_FT_DIR) {
+        if (cwd_vn) vnode_put(cwd_vn);
+        vnode_put(po); vnode_put(nr);
+        return -EINVAL;
+    }
+
+    /* Cut the old root out of the namespace first: from here on nothing can
+     * reach it by path.  The mount object stays listed in mountinfo, flagged
+     * detached, so an open descriptor into it keeps working. */
+    if (old_root_mnt && old_root_mnt != nr->mnt)
+        vfs_mount_detach_root(old_root_mnt);
+
+    /* Re-root.  The strings follow the objects: root_path is the global
+     * spelling of the new root, cwd is its root-relative spelling. */
+    vfs_task_root_set(cur, nr->mnt, nr, nr_path);
+    const char *root = cur->fs.root_path;
+    const char *visible = parent;
+    if (strlen(visible) >= strlen(root) &&
+        strncmp(visible, root, strlen(root)) == 0)
+        visible += strlen(root);
+    if (visible[0] == '\0')
+        visible = "/";
+    vfs_task_cwd_set(cur, cwd_vn, visible);
+
+    vnode_put(cwd_vn);
+    vnode_put(po);
+    vnode_put(nr);
+    return 0;
 }
 
 struct clone3_args {
@@ -554,6 +898,15 @@ int64_t sys_clone3(void *cl_args, size_t size) {
     if ((args.flags & LINUX_CLONE_FS) && (args.flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
     if (args.flags & LINUX_CLONE_NEWNS) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
+    if (args.flags & LINUX_CLONE_NEWPID) {
+        /* Linux: CLONE_THREAD|CLONE_NEWPID is EINVAL -- a thread that does
+         * not lead its group cannot host a namespace's pid 1. */
+        if (args.flags & LINUX_CLONE_THREAD)
+            return -EINVAL;
         int perm = linux_clone_newns_perm_check();
         if (perm < 0)
             return perm;
@@ -615,10 +968,8 @@ int64_t sys_openat2(int dirfd, const char *pathname, const void *how, size_t siz
 
     int flags = (int)khow.flags;
     int mode = (int)(khow.mode & 07777);
-    int gfd = vfs_openat2(dirfd, kpath, flags, mode, khow.resolve);
-    if (gfd < 0) return gfd;
-    task_t *t = proc_current();
-    return fdtable_install(t, gfd, flags);
+    /* vfs_openat2() already installed the fd with O_CLOEXEC honoured. */
+    return vfs_openat2(dirfd, kpath, flags, mode, khow.resolve);
 }
 
 int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *ctid) {
@@ -641,6 +992,16 @@ int64_t sys_clone(uint64_t flags, void *stack, int *ptid, uint64_t tls, int *cti
     if ((flags & LINUX_CLONE_FS) && (flags & LINUX_CLONE_NEWNS))
         return -EINVAL;
     if (flags & LINUX_CLONE_NEWNS) {
+        int perm = linux_clone_newns_perm_check();
+        if (perm < 0)
+            return perm;
+    }
+    if (flags & (int)LINUX_CLONE_NEWPID) {
+        /* Linux: CLONE_THREAD|CLONE_NEWPID is EINVAL -- a thread that does not
+         * lead its group cannot host a namespace's pid 1.  Checked here as
+         * well as in clone3 so both entry points agree. */
+        if (flags & LINUX_CLONE_THREAD)
+            return -EINVAL;
         int perm = linux_clone_newns_perm_check();
         if (perm < 0)
             return perm;
@@ -949,7 +1310,7 @@ int64_t sys_prlimit64(int pid, int resource, void *new_rlim, void *old_rlim) {
         return -ESRCH;
     task_t *t = self;
     if (pid != 0) {
-        t = proc_find_get(pid);
+        t = proc_find_get_user(pid);
         if (!t)
             return -ESRCH;
     }

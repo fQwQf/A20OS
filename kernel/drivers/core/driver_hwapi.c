@@ -58,6 +58,73 @@ void ioport_write8(uint16_t port, uint8_t value)
 /* DRIVER_IRQ_TABLE_FIXED_LIMIT: platform IRQ lines are capped at 256 until the
  * irq registry is replaced by a dynamically sized irqdomain-style structure. */
 
+/*
+ * A message-signalled interrupt needs a line that nothing else is using, and
+ * the line number is the vector the device puts in the message -- so unlike
+ * INTx there is no hardware routing step that could pick a free one.  The
+ * allocator below hands out a contiguous block from the window the platform
+ * declares, and irq_free_vectors() gives it back.
+ *
+ * The window is a weak arch hook rather than a constant: a platform with no
+ * message-signalled path reports an empty range, which makes every allocation
+ * fail and leaves callers on their existing fallback.
+ */
+int __attribute__((weak)) arch_irq_msix_vector_range(int *base, int *end)
+{
+    *base = 0;
+    *end = 0;
+    return -EOPNOTSUPP;
+}
+
+static uint8_t g_irq_vector_map[256];
+
+int irq_alloc_vectors(unsigned count)
+{
+    if (count == 0 || count > 256)
+        return -EINVAL;
+
+    int base, end;
+    if (arch_irq_msix_vector_range(&base, &end) < 0)
+        return -EOPNOTSUPP;
+    if (base < 0 || end > 256 || end <= base)
+        return -EINVAL;
+
+    uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
+    int first = -1;
+    for (int irq = base; irq + (int)count <= end; irq++) {
+        int free_run = 0;
+        for (int i = 0; i < (int)count; i++) {
+            if (g_irq_vector_map[irq + i]) {
+                free_run = 0;
+                break;
+            }
+            free_run++;
+        }
+        if (free_run == (int)count) {
+            for (int i = 0; i < (int)count; i++)
+                g_irq_vector_map[irq + i] = 1;
+            first = irq;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+
+    if (first < 0)
+        return -ENOSPC;
+    return first;
+}
+
+void irq_free_vectors(uint32_t first, unsigned count)
+{
+    uint64_t lock_flags = spin_lock_irqsave(&irq_table_lock);
+    for (unsigned i = 0; i < count; i++) {
+        if ((uint64_t)first + i >= 256)
+            break;
+        g_irq_vector_map[first + i] = 0;
+    }
+    spin_unlock_irqrestore(&irq_table_lock, lock_flags);
+}
+
 int request_irq(uint32_t irq, irq_handler_t handler,
                 unsigned long flags, void *priv) {
     if (irq >= 256 || !handler)

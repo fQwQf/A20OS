@@ -178,8 +178,17 @@ static inline void arch_signal_write_trampoline(void *page) {
     p[1] = 0xD4000001U;
 }
 
+/*
+ * Read-only + execute, and deliberately *not* writable: PTE_D aliases PTE_W on
+ * aarch64, and SCTLR_EL1.WXN makes every EL0-writable descriptor execute-never
+ * at EL0.  The trampoline is pure code -- the kernel writes it through the
+ * direct map and the process only ever fetches from it -- so read+execute is
+ * both sufficient and the only combination WXN actually permits.  See
+ * arch/aarch64/signal/signal_frame.c for why this has to be a dedicated page
+ * rather than the signal frame on the user stack.
+ */
 static inline uint64_t arch_signal_tramp_pte_flags(void) {
-    return PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D | PTE_MAT1 | PTE_LEAF;
+    return PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_MAT1 | PTE_LEAF;
 }
 
 static inline void arch_trap_ctx_set_kernel_stack(trap_context_t *ctx, uint64_t ksp) {

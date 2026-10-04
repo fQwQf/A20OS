@@ -223,12 +223,11 @@ static int g_prime_count;
  * and an fd received over SCM_RIGHTS resolves to the same value. */
 static uint64_t drm_fd_identity(int fd)
 {
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_current_file_ref(fd, &gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
     if (!vf)
         return 0;
     uint64_t id = vf->identity;
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     return id;
 }
 

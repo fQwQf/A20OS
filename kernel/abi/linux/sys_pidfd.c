@@ -49,18 +49,15 @@ static vfile_ops_t g_pidfd_ops = {
 
 int linux_pidfd_pid(int pidfd)
 {
-    int gfd = fdtable_get_current(pidfd);
-    if (gfd < 0)
-        return gfd;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(pidfd);
     if (!vf)
         return -EBADF;
     if (vf->ops != &g_pidfd_ops || !vf->priv) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EBADF;
     }
     int pid = ((pidfd_file_t *)vf->priv)->pid;
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     return pid;
 }
 
@@ -90,7 +87,7 @@ int64_t sys_pidfd_open(int pid, unsigned flags)
     if (pid <= 0)
         return -EINVAL;
 
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
@@ -112,24 +109,21 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
     if (flags & ~O_CLOEXEC)
         return -EINVAL;
 
-    int gfd = fdtable_get_current(pidfd);
-    if (gfd < 0)
-        return gfd;
-    vfile_t *vf = vfs_get_file_ref(gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(pidfd);
     if (!vf)
         return -EBADF;
     if (vf->ops != &g_pidfd_ops || !vf->priv) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return -EBADF;
     }
     int pid = ((pidfd_file_t *)vf->priv)->pid;
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
 
     if (targetfd < 0)
         return -EINVAL;
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {
@@ -142,34 +136,36 @@ int64_t sys_pidfd_getfd(int pidfd, int targetfd, unsigned flags)
         return -EPERM;
     }
 
-    int target_gfd = fdtable_get(target, targetfd);
-    if (target_gfd < 0) {
-        proc_put(target);
-        return -EBADF;
-    }
-    vfile_t *target_file = vfs_get_file_ref(target_gfd);
+    vfile_t *target_file = fdtable_get_file_ref(target, targetfd, NULL);
     if (!target_file) {
         proc_put(target);
         return -EBADF;
     }
-    /* A7 (docs/research/05 §2.5.1): stealing a descriptor from another
-     * task is a fresh acquisition against THIS task's envelope. */
-    if (self && env_active(self)) {
-        int mr = env_mediate_acquire_gfd(target_gfd);
-        if (mr) {
-            vfs_put_file_ref(target_gfd, target_file);
-            proc_put(target);
-            return mr;
-        }
-    }
     if (!memfd_secret_may_access(target_file, self)) {
-        vfs_put_file_ref(target_gfd, target_file);
+        vfs_put_file(target_file);
         proc_put(target);
         return -EACCES;
     }
-    int r = fdtable_install_current(target_gfd, (int)flags);
-    vfs_put_file_ref(target_gfd, target_file);
+    /* Install into THIS task's table; the install consumes the lookup
+     * reference. */
+    int r = fdtable_install_vfile(self, target_file, (int)flags);
     proc_put(target);
+    if (r < 0)
+        return r;
+    /* A7 acquire side: the stolen descriptor is a fresh authority entering
+     * this task, so the receiver's envelope decides whether it may be used
+     * (docs/research/05 §2.5.1).  Mediation keys on the NEW fd number, which
+     * is a current-task gfd exactly like on the SCM_RIGHTS receive path -- the
+     * foreign fd number it came from never needs to be meaningful.  A denied
+     * fd is closed rather than left installed, so a denial cannot be
+     * side-stepped by using the number afterwards. */
+    if (env_active(self)) {
+        int mr = env_mediate_acquire_gfd(r);
+        if (mr) {
+            fdtable_close_current(r);
+            return mr;
+        }
+    }
     return r;
 }
 
@@ -195,7 +191,7 @@ int64_t sys_pidfd_send_signal(int pidfd, int sig, void *uinfo, unsigned flags)
     vfs_put_file_ref(gfd, vf);
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     if (!target)
         return -ESRCH;
     if (target->state == PROC_ZOMBIE) {

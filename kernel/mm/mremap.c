@@ -60,7 +60,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
 
     dst_vma->vm_flags = src_vma->vm_flags;
     dst_vma->pte_flags = src_vma->pte_flags;
-    dst_vma->file_fd = src_vma->file_fd;
+    dst_vma->file = src_vma->file;
     dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
     dst_vma->file_vnode = src_vma->file_vnode;
     /* A VM_VMO VMA owns a vmo reference; the destination inherits it, or the
@@ -72,7 +72,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
             vmo_ref(dst_vma->vmo);
     }
     if (vma_ref_file(dst_vma) < 0) {
-        dst_vma->file_fd = -1;
+        dst_vma->file = NULL;
         if (dst_vma->file_vnode) {
             if (dst_vma->vm_flags & VM_SHARED)
                 vnode_shared_map_dec(dst_vma->file_vnode);
@@ -316,7 +316,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
 
     dst_vma->vm_flags = vma->vm_flags;
     dst_vma->pte_flags = vma->pte_flags;
-    dst_vma->file_fd = vma->file_fd;
+    dst_vma->file = vma->file;
     dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
     dst_vma->file_vnode = vma->file_vnode;
     if (vma->vm_flags & VM_VMO) {
@@ -326,7 +326,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
             vmo_ref(dst_vma->vmo);
     }
     if (vma_ref_file(dst_vma) < 0) {
-        dst_vma->file_fd = -1;
+        dst_vma->file = NULL;
         if (dst_vma->file_vnode) {
             if (dst_vma->vm_flags & VM_SHARED)
                 vnode_shared_map_dec(dst_vma->file_vnode);

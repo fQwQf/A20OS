@@ -35,7 +35,9 @@ void a20_object_ref(void *object, uint16_t type)
 {
     if (!object) return;
     if (a20_object_is_vfile_backed(type)) {
-        vfs_ref_fd((int)(uintptr_t)object);
+        /* Vfile-backed native objects are vfile pointers, each handle owns
+         * one vfile reference (no fd slot is involved). */
+        vfile_get((struct vfile *)object);
         return;
     }
     switch (type) {
@@ -69,21 +71,20 @@ void a20_object_ref(void *object, uint16_t type)
     }
 }
 
-void a20_eventq_on_vfile_destroy(int fd)
+void a20_eventq_on_vfile_destroy(struct vfile *vf)
 {
-    void *key = (void *)(uintptr_t)fd;
-    a20_eventq_on_object_destroy(key, A20_OBJ_FILE);
-    a20_eventq_on_object_destroy(key, A20_OBJ_DIRECTORY);
-    a20_eventq_on_object_destroy(key, A20_OBJ_PIPE_ENDPOINT);
-    a20_eventq_on_object_destroy(key, A20_OBJ_DEVICE);
-    a20_eventq_on_object_destroy(key, A20_OBJ_SOCKET);
+    a20_eventq_on_object_destroy(vf, A20_OBJ_FILE);
+    a20_eventq_on_object_destroy(vf, A20_OBJ_DIRECTORY);
+    a20_eventq_on_object_destroy(vf, A20_OBJ_PIPE_ENDPOINT);
+    a20_eventq_on_object_destroy(vf, A20_OBJ_DEVICE);
+    a20_eventq_on_object_destroy(vf, A20_OBJ_SOCKET);
 }
 
 void a20_object_release(void *object, uint16_t type)
 {
     if (!object) return;
     if (a20_object_is_vfile_backed(type)) {
-        vfs_close((int)(uintptr_t)object);
+        vfs_put_file((struct vfile *)object);
         return;
     }
     switch (type) {

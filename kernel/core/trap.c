@@ -175,14 +175,16 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
          (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
     vm_area_t *vma = mm_find_vma(task->mm, va & ~(PAGE_SIZE - 1));
     if (vma) {
-        kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file_fd=%d off=0x%lx\n",
+        kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file=%lu off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
-             vma->file_fd, vma->file_offset);
-        if (vma->file_fd >= 0) {
-            vfile_t *vf = vfs_get_file_ref(vma->file_fd);
+             (unsigned long)(vma->file ? vma->file->identity : 0),
+             vma->file_offset);
+        if (vma->file) {
+            vfile_t *vf = vma->file;
+            vfile_get(vf);
             if (vf) {
                 kerr("  vma_file=%s\n", vf->path);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file(vf);
             }
         }
     } else {
@@ -219,6 +221,43 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
                      (unsigned long)v->start, (unsigned long)leaf.pa,
                      (unsigned long)(leaf.pa >> 12));
         }
+    }
+
+    /*
+     * When the faulting address is not executable the way the CPU thinks it
+     * should be, print a leaf that demonstrably *is* executable in the same
+     * address space.  A single leaf tells you what the software believes; the
+     * only way to tell a wrong flag apart from a working one is to hold the two
+     * side by side and diff them.  On aarch64 this is what showed that the
+     * sigreturn trampoline differed from working text in AP alone (01 vs 11) --
+     * the WXN-forced "writable, therefore execute-never" pairing, which no
+     * software-side reading of the PTE can reveal on its own.
+     *
+     * Only printed when it is diagnostic: the leaf lacks PTE_X, or the covering
+     * VMA does not grant VM_EXEC.
+     */
+    {
+        mm_leaf_info_t vleaf;
+        int have_leaf = mm_query_leaf(task->mm->pgdir,
+                                      va & ~(paddr_t)(PAGE_SIZE - 1), &vleaf);
+        spin_lock(&task->mm->lock);
+        vm_area_t *vma = mm_find_vma(task->mm, va & ~(paddr_t)(PAGE_SIZE - 1));
+        int suspect = (!have_leaf || !(vleaf.flags & PTE_X)) ||
+                      (!vma || !(vma->vm_flags & VM_EXEC));
+        if (suspect) {
+            for (vm_area_t *v = task->mm->mmap; v; v = v->next) {
+                if (!(v->vm_flags & VM_EXEC))
+                    continue;
+                uintptr_t rslot = 0;
+                pte_t rval = 0;
+                mm_debug_pte_value(task->mm->pgdir, v->start, &rslot, &rval);
+                kerr("  [REF-EXEC] va=0x%lx pte_flags=0x%lx pte=%p value=0x%lx\n",
+                     (unsigned long)v->start, (unsigned long)v->pte_flags,
+                     (void *)rslot, (unsigned long)rval);
+                break;
+            }
+        }
+        spin_unlock(&task->mm->lock);
     }
 }
 
