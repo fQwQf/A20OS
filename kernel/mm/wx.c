@@ -24,6 +24,30 @@
  *
  * This is a statement about W^X, not about the memory model: node's failure
  * under deny reproduces identically on the pre-migration code.
+ *
+ * The foreign-architecture translator needs the opposite of that reasoning, and
+ * the two coexist: see the note below.
+
+ */
+
+/*
+ * Resolved by hand.  Both sides' CODE merged without conflict -- g_wx_policy
+ * defaults to MM_WX_OFF on this side and the task_xlator_host() exemption
+ * arrives intact from the other -- so the conflict was comment-only, and both
+ * paragraphs are worth keeping for different reasons.
+ *
+ * The xlator branch justifies a `deny` default with "there is no dlopen and no
+ * JIT".  That is precisely the premise this file's own default disproves: V8
+ * mprotects its code pages W|X and then writes to them, so the strictest
+ * policy does not make the kernel harder to break, it just stops node from
+ * starting.  Keeping that reasoning would put a claim back into the tree that
+ * a measured run has already refuted.
+ *
+ * The task exemption survives the merge because it is orthogonal to the
+ * default: a task re-execed through a foreign-architecture translator must JIT
+ * guest code whatever the policy is.  It is keyed on the task, not the policy,
+ * so it does not weaken W^X for anything else on the machine, and it exists
+ * only in a CONFIG_XLATOR build.
  */
 
 #include "mm/vm.h"
@@ -100,6 +124,18 @@ int mm_wx_filter_prot(int prot, const char *ctx)
 
     task_t *cur = proc_current();
     int pid = cur ? cur->pid : -1;
+
+    #ifdef CONFIG_XLATOR
+    /* The foreign-architecture translator JITs guest code, which requires
+     * an RWX buffer.  execve marks exactly that task (task_t.xlator_host)
+     * when it re-execs it, and nothing else can set the bit -- so this
+     * exemption is per-process and does not require weakening the policy
+     * for the whole system the way a20.wx=off does. */
+    if (cur && cur->xlator_host) {
+        kinfo("[WX] %s: pid=%d 翻译器宿主，放行 W|X\n", ctx ? ctx : "?", pid);
+        return prot;
+    }
+#endif
 
     switch (g_wx_policy) {
     case MM_WX_OFF:

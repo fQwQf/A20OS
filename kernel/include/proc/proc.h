@@ -440,6 +440,19 @@ typedef struct task_t {
     int             ioprio;
     /* pkey_alloc/pkey_mprotect(2): allocated protection keys bitmap. */
     uint32_t        pkey_bitset;
+#ifdef CONFIG_XLATOR
+    /* Set when execve re-execed this task through a foreign-architecture
+     * translator (kernel/proc/exec.c).  A qemu-user style translator has
+     * to JIT guest code into an RWX buffer, so this is the one task
+     * allowed past the user W^X gate in mm_wx_filter_prot().  Only the
+     * kernel sets it, on the re-exec path, and it is deliberately not
+     * inherited across fork: a child that is itself foreign has to go
+     * through execve and the same check again.
+     *
+     * Conditional on CONFIG_XLATOR (like the NOMMU fields above) so that a
+     * build with no translator channel does not carry the byte. */
+    uint8_t         xlator_host;
+#endif
 
     /* Cgroup resource control */
     struct cg_node *cgroup;

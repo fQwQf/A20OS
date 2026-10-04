@@ -1353,4 +1353,285 @@ CASES: dict[str, dict] = {
         'timeout_msg': True,
         'pass_msg': 'smoke-wx-aslr: PASS; log saved to $log',
     },
+    # Foreign-architecture translation.  xlate_exec execve()s the x86_64
+    # probe without naming a translator, so this only passes if the kernel
+    # forwarded it.
+    #
+    # Four different things have to hold, and each is a separate failure mode
+    # that a single "it translated" assertion would hide:
+    #
+    #   ok            the channel works at all;
+    #   enoexec       a file that is not a runnable ELF is still ENOEXEC,
+    #                 i.e. the hook does not go looking past the header
+    #                 checks for anything it might translate;
+    #   unconfigured  a *valid* ELF naming e_machine=183 -- a registered
+    #                 guest -- is still ENOEXEC, because no translator was
+    #                 configured for it.  This is the line that separates
+    #                 "the administrator provisioned a translator" from "the
+    #                 kernel was built knowing about aarch64";
+    #   script        a #! script still reaches its interpreter;
+    #   toggle        /proc/a20/xlator really is a switch: the same binary
+    #                 translates, stops translating after `write 0`, and
+    #                 translates again after `write 1`, with no reboot.
+    #
+    # The cmdline sets a20.xlator but NOT a20.wx=off -- the translator's JIT
+    # buffer is allowed by the per-task exemption, so a blanket W^X
+    # relaxation must not be needed and the policy must still read "deny".
+    'smoke-exec-xlator': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        # XLATOR=1, not a `pre` step: the probe and the translator land in
+        # $(USER_BUILD_DIR), which `make -C user clean` wipes whenever the
+        # userspace build id changes.  As an image prerequisite make orders
+        # them after that clean; as a pre step they were silently deleted one
+        # invocation later and the smoke failed on a missing binary.
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0',
+                           'XLATOR=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/exec-xlator-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 40, 'lines': [
+            '/bin/xlate_exec ok /bin/xlate_probe-x86_64 SMOKE',
+            '/bin/xlate_exec enoexec ignored',
+            '/bin/xlate_exec unconfigured ignored',
+            '/bin/xlate_exec script ignored',
+            '/bin/xlate_exec toggle /bin/xlate_probe-x86_64 TOGGLE',
+            'poweroff',
+        ]},
+        'timeout': '150s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'],
+        'expect': [
+            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/qemu-x86_64',
+            # The registry has two guests and only one was provisioned, so
+            # boot has to name the other rather than leaving the admin to
+            # wonder why their aarch64 binary is a bare ENOEXEC.
+            r'\[XLATOR\] aarch64 \(e_machine=183\) 未配置翻译器',
+            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62\)',
+            r'\[WX\] \S+: pid=\d+ 翻译器宿主，放行 W\|X',
+            'XLATE_PROBE: MARK=SMOKE ARGC=2',
+            'XLATE_EXEC: ok PASS: exit=42',
+            'XLATE_EXEC: enoexec PASS: ENOEXEC',
+            'XLATE_EXEC: unconfigured PASS: ENOEXEC',
+            'XLATE_EXEC: script PASS: exit=0',
+            # The runtime switch loop over one binary.  Ordering matters
+            # here in a way it does not for the other lines: step2's ENOEXEC
+            # is only meaningful because step1 proved the same binary ran.
+            r'XLATE_EXEC: toggle: node present, enabled=1',
+            r'XLATE_EXEC: toggle: step1 execve while enabled PASS \(exit=42\)',
+            r'XLATE_EXEC: toggle: step2 wrote 0, node reads enabled=0',
+            r'XLATE_EXEC: toggle: step2 execve while disabled PASS \(ENOEXEC\)',
+            r'XLATE_EXEC: toggle: step3 wrote 1, node reads enabled=1',
+            r'XLATE_EXEC: toggle: step3 execve after re-enable PASS \(exit=42\)',
+            r'XLATE_EXEC: toggle: step4 junk writes rejected EINVAL, still enabled=1',
+            'XLATE_EXEC: toggle PASS',
+            'System is going down for power-off NOW',
+        ],
+        # W^X must stay at its default deny (the translator is allowed by
+        # the per-task exemption, not by disabling the policy), and no mode
+        # may report a failure or an unusable wait.
+        'forbid': [r'W\^X 策略: off', r'XLATE_EXEC: \w+ FAIL', r'waitpid\(\d+\)'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-exec-xlator: PASS; log saved to $log',
+    },
+    # The same channel on loongarch64, where the interesting part is not the
+    # translation but the *configuration surface*: QEMU's loongarch virt hands
+    # the guest no kernel command line by any route (four routes tried and all
+    # negative -- see docs/exec-xlator/01-usage.md), so until now `a20.*` keys
+    # were compiled in and unreachable on this architecture: CONFIG_XLATOR=y,
+    # /proc/a20/xlator registered, and no way to ever turn it on.
+    #
+    # The command line therefore has to be typed on the serial port, which
+    # costs this case two things the riscv64 one does not need:
+    #
+    #   UART_CMDLINE=y  compiles the console reader in.  Off by default: it
+    #     moves authority over kernel configuration from whoever built the
+    #     image to whoever holds the serial cable at boot.
+    #   -serial stdio -monitor none -display none instead of -nographic,
+    #     because -nographic is -serial mon:stdio and QEMU's mux never hands
+    #     the bytes to the guest's 16550 (measured: the kernel prints the
+    #     prompt and times out having seen nothing).
+    #
+    # And it cannot be a 'pipe' stdin: QEMU feeds the host's pipe to the
+    # emulated UART as soon as there are bytes, which is well before the guest
+    # programs the 16550, so whatever arrived first is overwritten in the
+    # one-byte holding register.  Hence sendline_seq -- each line waits for its
+    # own marker, and the first marker is the kernel asking.
+    #
+    # The `# ` shell marker is anchored with a preceding newline because the
+    # boot banner contains `# ` inside its ASCII art; `\n# ` matches only the
+    # real prompt.  Markers are matched in order, so the later ones cannot fire
+    # on output that belongs to an earlier step.
+    'smoke-exec-xlator-la64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'build': {'vars': ['ARCH=loongarch64', 'ABI=both', 'BRINGUP=0',
+                           'XLATOR=1', 'UART_CMDLINE=y'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/exec-xlator-la64.log',
+        'stdin': {'kind': 'sendline_seq', 'steps': [
+            ('[UARTCMD] ',
+             'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'),
+            ('\n# ', '/bin/xlate_exec ok /bin/xlate_probe-x86_64 SMOKE'),
+            ('XLATE_EXEC: ok PASS', 'poweroff'),
+        ]},
+        'timeout': '300s',
+        'qemu': 'qemu-system-loongarch64',
+        'argv': ['qemu-system-loongarch64', '-machine', 'virt', '-m', '1G',
+                 '-display', 'none', '-monitor', 'none', '-serial', 'stdio',
+                 '-smp', '1', '-drive',
+                 'file=.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/fat32.img,if=none,format=raw,id=x0',
+                 '-device', 'virtio-blk-pci,drive=x0',
+                 '-netdev', 'user,id=net', '-device', 'virtio-net-pci,netdev=net',
+                 '-kernel',
+                 '.kernel-build/loongarch64-qemu-virt-loongarch64-both-dev/kernel.elf'],
+        'expect': [
+            # Two separate claims.  The first is that the serial path ran at
+            # all; the second is that its result reached bootargs_get() and
+            # not just the console -- without the second, a kernel that printed
+            # a convincing prompt and threw the string away would pass.
+            r'\[UARTCMD\] using command line from the console',
+            r"\[FDT\] bootargs='a20\.xlator=1 a20\.xlator\.x86_64=/bin/qemu-x86_64'",
+            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/qemu-x86_64',
+            r'\[XLATOR\] aarch64 \(e_machine=183\) 未配置翻译器',
+            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62\)',
+            # Same W^X claim as on riscv64: the translator's JIT buffer is
+            # allowed by the per-task exemption, so the policy itself stays
+            # at deny.
+            r'\[WX\] \S+: pid=\d+ 翻译器宿主，放行 W\|X',
+            'XLATE_PROBE: MARK=SMOKE ARGC=2',
+            'XLATE_EXEC: ok PASS: exit=42',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': [r'W\^X 策略: off', r'XLATE_EXEC: \w+ FAIL',
+                   r'no command line given',
+                   r'waitpid\(\d+\)'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-exec-xlator-la64: PASS; log saved to $log',
+    },
+    # The other end of CONFIG_XLATOR.  smoke-exec-xlator shows the channel
+    # works; this shows it can be absent, which is the property an embedded
+    # or low-resource build is actually buying.  It is asserted three ways,
+    # because "the code is gone" and "the behaviour is gone" are different
+    # claims and only the second one matters to a user:
+    #
+    #   * the foreign probe is present in the image and its execve is
+    #     ENOEXEC (checked with `xlate_exec foreign`, which verifies the file
+    #     exists before asserting -- a missing file would also be ENOEXEC and
+    #     would prove nothing);
+    #   * no [XLATOR] line appears anywhere in the boot log -- not even a
+    #     "disabled" notice, because in a cut-down build the configuration
+    #     code is not compiled at all, so there is nothing to notice;
+    #   * /proc/a20/xlator does not exist, so there is no switch to write.
+    #
+    # The cmdline still says a20.xlator=1 and still names a translator path.
+    # That is the point: with the knob compiled out the cmdline must have no
+    # effect whatsoever, rather than being honoured by a stub.
+    'smoke-exec-xlator-off': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        # XLATOR=1 here even though the kernel has the channel compiled out:
+        # the image still has to *contain* the foreign probe for
+        # `xlate_exec enoexec /bin/xlate_probe-x86_64` to have something to
+        # be rejected.
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0',
+                           'CONFIG_XLATOR=0', 'XLATOR=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/exec-xlator-off-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 40, 'lines': [
+            # `foreign`, not `enoexec`: enoexec fabricates its own fixture and
+            # would report ENOEXEC for a file that was never in the image.
+            # `foreign` execs the real cross-built probe and first checks it
+            # exists, so ENOEXEC here can only mean "present, and refused".
+            '/bin/xlate_exec foreign /bin/xlate_probe-x86_64',
+            'cat /proc/a20/xlator',
+            'poweroff',
+        ]},
+        'timeout': '120s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev-noxlator/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev-noxlator/kernel.elf', '-append', 'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'],
+        'expect': [
+            'XLATE_EXEC: foreign PASS: ENOEXEC',
+            # Positive proof the switch node is gone, rather than "the string
+            # does not appear anywhere" -- which the shell's own echo of the
+            # command would satisfy while proving nothing.
+            r'open /proc/a20/xlator: No such file or directory',
+            'System is going down for power-off NOW',
+        ],
+        # The remaining absence assertion is the kernel's own: a [XLATOR] line
+        # here would mean the configuration code is still compiled in.  There
+        # is no "disabled" notice either, because in a cut-down build there is
+        # no code left to print one.
+        'forbid': [r'\[XLATOR\]', r'XLATE_EXEC: \w+ FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-exec-xlator-off: PASS; log saved to $log',
+    },
+
+    # Plugging in a differently-shaped translator.  smoke-exec-xlator proves
+    # the channel works with qemu-user; this proves the *invocation* is
+    # configuration rather than code, which is what lets a translator that
+    # wants the Rosetta-style shape (`<path> <args...>`, no argv[0] option)
+    # or any other shape be pointed at without a kernel change.
+    #
+    # It needs no download and no cross compiler: the target is
+    # user/cmds/core/xlate_shim.c, which translates nothing and just prints
+    # the argv and environment it was handed, and the guest is a header this
+    # image's own xlate_exec synthesises.  Asserting against a program that
+    # does nothing but print is the point -- a real translator *tolerates* a
+    # wrong argv, so a smoke using one cannot tell "the kernel built what the
+    # template said" from "the translator coped".
+    #
+    # Both registered guests are configured at once and pointed at the same
+    # shim, so this also covers the table dispatching on e_machine with more
+    # than one live entry -- the case the single-guest smokes leave untested.
+    #
+    #   x86_64   default template overridden to "@P,@*"  -> [shim, path, args]
+    #            with ROSETTA-ish env injected; no stray argv[0] argument
+    #   aarch64  registry default "-0 @A @P @*"         -> [shim, -0, decoy,
+    #            path, args] with the caller's argv[0] preserved
+    #
+    # The argv[0] in the aarch64 case is a decoy passed as `--argv0=`, because
+    # execv() would otherwise make argv[0] and the path the same string and a
+    # broken @A substitution would be invisible.
+    'smoke-exec-xlator-shim': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        # No XLATOR=1: nothing has to be downloaded or cross-built, which is
+        # what keeps this smoke hermetic and fast.
+        'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0'],
+                  'target': 'dev-build'},
+        'log': '.kernel-build/smoke/exec-xlator-shim-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 40, 'lines': [
+            '/bin/xlate_exec stage 62 /tmp/guest_x86_64',
+            '/bin/xlate_exec stage 183 /tmp/guest_aarch64',
+            '/bin/xlate_exec run /tmp/guest_x86_64 ALPHA BETA',
+            '/bin/xlate_exec run --argv0=decoy-argv0 /tmp/guest_aarch64 ALPHA',
+            'poweroff',
+        ]},
+        'timeout': '120s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.xlator=1 a20.xlator.x86_64=/bin/xlate_shim a20.xlator.x86_64.argv=@P,@* a20.xlator.x86_64.env=XLATOR_TEST_ENV=hello a20.xlator.aarch64=/bin/xlate_shim'],
+        'expect': [
+            # Both guests configured at once, each with the template that will
+            # actually be used -- the override called out as such.
+            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/xlate_shim  argv="@P @\*" \(cmdline 覆盖\)',
+            r'\[XLATOR\] aarch64 \(e_machine=183\) → /bin/xlate_shim  argv="-0 @A @P @\*"',
+            r'\[XLATOR\] pid=\d+ execve /tmp/guest_x86_64 \(e_machine=62\) → /bin/xlate_shim  argv="@P @\*"',
+            # Overridden template: path first, no argv[0] option, no stray
+            # positional in front of the path.  argv[1] being the path (not
+            # the decoy, and not a leftover argv[0]) is the assertion that
+            # the old per-guest flag column could not express.
+            r'XLATE_SHIM: argv\[0\]=/bin/xlate_shim',
+            r'XLATE_SHIM: argv\[1\]=/tmp/guest_x86_64',
+            r'XLATE_SHIM: argv\[2\]=ALPHA',
+            r'XLATE_SHIM: argv\[3\]=BETA',
+            # Injected environment, from a20.xlator.x86_64.env.
+            r'XLATE_SHIM: env XLATOR_TEST_ENV=hello',
+            # Registry default: the -0 option and the caller's argv[0], which
+            # is a decoy rather than the path -- so this line can only be
+            # produced by a correct @A substitution.
+            r'XLATE_SHIM: argv\[1\]=-0',
+            r'XLATE_SHIM: argv\[2\]=decoy-argv0',
+            r'XLATE_SHIM: argv\[3\]=/tmp/guest_aarch64',
+            r'XLATE_SHIM: argv\[4\]=ALPHA',
+            'XLATE_SHIM: done',
+            'System is going down for power-off NOW',
+        ],
+        'forbid': [r'XLATE_EXEC: \w+ FAIL', r'XLATE_SHIM: argv\[\d+\]=$'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-exec-xlator-shim: PASS; log saved to $log',
+    },
 }

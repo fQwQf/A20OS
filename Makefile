@@ -140,6 +140,41 @@ PROFILE ?= full
 # keys on $(CFLAGS), which gains -DCONFIG_SWAP when this flips.
 CONFIG_SWAP ?= y
 
+# Foreign-architecture execve forwarding (a20.xlator=*).  On by default because
+# the channel is off at runtime unless an administrator both passes a20.xlator=1
+# and names a translator path, so a compiled-in-but-unconfigured kernel behaves
+# exactly like one without the feature.  CONFIG_XLATOR=0 is the embedded /
+# low-resource story: kernel/proc/xlator.c is not compiled, task_t loses the
+# xlator_host field, exec.c loses the re-exec branch and mm/wx.c loses the W^X
+# exemption.  Same rebuild-safety argument as CONFIG_SWAP above: the stamp in
+# tools/targets-images.mk keys on $(CFLAGS), which gains -DCONFIG_XLATOR when
+# this flips, so a stale object can never be linked against the wrong knob.
+#
+# CONFIG_XLATOR additionally gets a BUILD_VARIANT component when off, because
+# smoke-exec-xlator and smoke-exec-xlator-off boot the same ARCH/ABI/BOARD and
+# would otherwise share one output directory.  The stamp forces a full rebuild
+# when the flag flips, so sharing that directory means the two cases cannot run
+# concurrently under `make -j check`; a distinct directory costs one more
+# build and removes the race.
+CONFIG_XLATOR ?= y
+
+# Bring-up only: prompt for the kernel command line on the console when
+# firmware supplies none.  Off by default, because it moves authority over
+# kernel configuration -- including the a20.xlator.<guest> path -- from
+# whoever built the image to whoever holds the serial port at boot.  Set
+# UART_CMDLINE=1 on the builds where that is the intent (QEMU loongarch virt
+# has no other way to receive a command line at all).  It cannot be enabled
+# from the command line: reading the command line is what this is for.
+UART_CMDLINE ?= n
+
+# A translator JITs guest code, which needs a 64-bit host with real page
+# protections (mprotect RWX) and an MMU to demand-page from.  Targets outside
+# that set get the feature forced off rather than a kernel that fails to build
+# or a JIT that cannot work: armv7m/arm32 and riscv32 are 32-bit or NOMMU.
+# Mirrors the NOMMU and SWAP gates below -- force the feature off outside the
+# supported set instead of letting the build break.
+XLATOR_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 ppc64le
+
 # Synthetic driver lifecycle test and the HDA/NVMe in-probe smoke builds.
 # All three default to off and are enabled with the on-value their existing
 # callers already pass (tools/smoke_cases.py and docs/drivers/meta/
@@ -217,6 +252,27 @@ else
 ifeq ($(filter $(CONFIG_SWAP),y),y)
 ifeq ($(filter $(ARCH),$(SWAP_SUPPORTED_ARCHES)),)
 CONFIG_SWAP := n
+endif
+endif
+endif
+
+# Foreign-architecture translation channel (see CONFIG_XLATOR at the top and
+# docs/exec-xlator/).  Three ways it gets forced off:
+#   NOMMU=1        no MMU to demand-page guest memory from;
+#   PROFILE=mcu    that build replaces the whole source list anyway;
+#   unsupported    32-bit hosts cannot host a 64-bit guest JIT at all.
+# Same shape as the SWAP gate above: a user-set CONFIG_XLATOR=n is never
+# flipped back on.
+ifeq ($(NOMMU),1)
+CONFIG_XLATOR := n
+else
+ifeq ($(filter $(PROFILE),mcu),mcu)
+CONFIG_XLATOR := n
+else
+ifeq ($(filter $(CONFIG_XLATOR),y),y)
+ifeq ($(filter $(ARCH),$(XLATOR_SUPPORTED_ARCHES)),)
+CONFIG_XLATOR := n
+endif
 endif
 endif
 endif
@@ -337,7 +393,8 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator,),
+
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
 BUILD_VARIANT := $(BUILD_VARIANT)$(if $(filter 1,$(STM32_QEMU)),-qemu,)
@@ -1034,6 +1091,21 @@ ifeq ($(CONFIG_SWAP),y)
 CFLAGS += -DCONFIG_SWAP
 endif
 
+ifeq ($(CONFIG_XLATOR),y)
+CFLAGS += -DCONFIG_XLATOR
+endif
+
+# No console to prompt on in either of these, and no reason to carry the
+# reader: an MCU build replaces the source list, and a NOMMU target may be
+# headless by construction.
+ifneq ($(NOMMU),1)
+ifneq ($(filter $(PROFILE),mcu),mcu)
+ifeq ($(filter y,$(UART_CMDLINE)),y)
+CFLAGS += -DCONFIG_UART_CMDLINE
+endif
+endif
+endif
+
 # RISC-V IOMMU probe: accept QEMU <= 10.0's unshifted TR_RESPONSE.PPN field.
 # QEMU fixed this on master (set_field); set to 0 once the required QEMU
 # baseline no longer needs the exception.
@@ -1102,10 +1174,16 @@ KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
 else
+# The CONFIG_XLATOR=n case drops kernel/proc/xlator.c from the source list
+# outright rather than compiling it to an empty translation unit -- the same
+# shape as the mm/nommu.c filter-out a few lines below.  CONFIG_SWAP instead
+# leaves swap.o in the link as a ~1 KB object with no code in it; for a page
+# cache that is not worth special-casing, but "cut the channel out" should
+# mean the file is not built at all.
 KERNEL_SRC = $(wildcard $(KERNEL_DIR)/*.c) \
              $(wildcard $(KERNEL_DIR)/core/*.c) \
              $(filter-out $(KERNEL_DIR)/mm/nommu.c,$(wildcard $(KERNEL_DIR)/mm/*.c)) \
-             $(wildcard $(KERNEL_DIR)/proc/*.c) \
+             $(if $(filter-out y,$(CONFIG_XLATOR)),$(filter-out $(KERNEL_DIR)/proc/xlator.c,$(wildcard $(KERNEL_DIR)/proc/*.c)),$(wildcard $(KERNEL_DIR)/proc/*.c)) \
              $(filter-out $(KERNEL_DIR)/fs/rootfs_overlay.c,$(wildcard $(KERNEL_DIR)/fs/*.c)) \
              $(wildcard $(KERNEL_DIR)/fs/*/*.c) \
              $(wildcard $(KERNEL_DIR)/ipc/*.c) \
@@ -1253,6 +1331,7 @@ include tools/targets-extra.mk
 include tools/targets-native.mk
 include tools/targets-native-smoke.mk
 include tools/targets-mlibc.mk
+include tools/targets-xlator.mk
 
 # ================================================================
 # Documentation

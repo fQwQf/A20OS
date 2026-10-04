@@ -1,0 +1,72 @@
+/*
+ * A20OS foreign-architecture guest registry -- X-macro table, read this
+ * before adding an entry.
+ *
+ * This file is not a translation unit.  It is #included by kernel/proc/xlator.c
+ * with XLATOR_GUEST defined, and parsed by tools/xlator_fetch.py (guest name ->
+ * expected e_machine) and by the check-xlator-guests gate.  Like the syscall
+ * tables under kernel/abi/<arch>/, it deliberately contains no #include, no typedef
+ * and no declaration of its own.
+ *
+ *     XLATOR_GUEST(<name>, <e_machine>, <argv_template>)
+ *
+ * Column 1 -- <name>
+ *   The cmdline key suffix, so `a20.xlator.<name>=<path>` configures this
+ *   guest, and the file name of the cross-built probe (xlate_probe-<name>).
+ *   Must be a valid identifier fragment: it reaches both a shell variable
+ *   suffix (XLATOR_GUEST_CC_<name> in tools/targets-xlator.mk) and a C string.
+ *   It must not contain a dot either -- `.argv` and `.env` are reserved as
+ *   the per-guest sub-keys of the configuration surface, so a dot inside a
+ *   guest name would make the two ambiguous.
+ *
+ * Column 2 -- <e_machine>
+ *   The ELF e_machine value, spelled as a decimal number so this file stays
+ *   free of kernel includes (it cannot say EM_X86_64).  It must agree with the
+ *   EM_* constants in kernel/include/mm/elf.h; check-xlator-guests asserts
+ *   that, because a typo here would otherwise show up only as a binary that
+ *   mysteriously refuses to translate.
+ *
+ * Column 3 -- <argv_template>
+ *   A string literal (quoted, because it becomes a `const char *`): the argv
+ *   the translator is invoked with, written as a template over three
+ *   substitutions:
+ *
+ *       @A   the caller's argv[0]
+ *       @P   the guest image path
+ *       @*   the caller's argv[1..], spliced in place
+ *
+ *   Everything else becomes a literal argument.  The template must contain
+ *   @P, and an unknown @-token is rejected; both rules live in
+ *   xlator_parse_template() and are enforced at boot, so a bad template costs
+ *   a warning and an unconfigured guest, never a mistranslated exec.
+ *
+ *   qemu-user needs the explicit @A because guests dispatch on argv[0]:
+ *   busybox only enters applet mode when argv[0] contains "busybox", and
+ *   otherwise fails with "applet not found".  A translator that takes the
+ *   image path as argv[0] itself wants plain "@P @*" instead.
+ *
+ *   This is a *default*, not a commitment.  The administrator can replace it
+ *   per boot with
+ *
+ *       a20.xlator.<name>.argv=@P,@*
+ *
+ *   and that is the point of the design: the invocation convention belongs to
+ *   the translator binary an administrator points at, not to the guest
+ *   architecture, so swapping qemu-user for a differently-shaped translator
+ *   is a cmdline change rather than a kernel change.  kernel/include/proc/xlator.h
+ *   lists the shapes this covers and, honestly, the one it does not.
+ *
+ * Adding a guest architecture therefore costs exactly two edits -- one line
+ * here, one XLATOR_GUEST_CC_<name> line in tools/targets-xlator.mk -- plus
+ * passing `make check-xlator-guests`, which fails if those two disagree in
+ * either direction.  Adding a *translator* costs no edit anywhere: it is a
+ * path, plus a .argv and/or .env key if its convention differs.
+ *
+ * NOTE: membership here does not enable anything.  A guest becomes translatable
+ * only when the administrator configures a translator path for it on the
+ * cmdline; until then it stays on the plain ENOEXEC path.  See
+ * docs/hybrid-kernel/07-exec-xlator.md.
+ */
+
+XLATOR_GUEST(x86_64,  62,  "-0 @A @P @*")
+XLATOR_GUEST(aarch64, 183, "-0 @A @P @*")

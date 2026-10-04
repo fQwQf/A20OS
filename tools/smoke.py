@@ -134,6 +134,11 @@ def qemu_argv(case: dict) -> list[str]:
             argv += ["--expect", stdin["expect"]]
         for ln in stdin["lines"]:
             argv += ["--send-line", ln]
+    if stdin and stdin["kind"] == "sendline_seq":
+        # Each line waits for its own marker, so a guest that has to consume
+        # one input before it will accept the next does not lose the tail.
+        for marker, line in stdin["steps"]:
+            argv += ["--expect-line", marker, line]
     argv.append(case["timeout"])
     argv += case["argv"]
     return argv

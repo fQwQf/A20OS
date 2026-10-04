@@ -16,6 +16,9 @@
 #include "proc/proc_internal.h"
 #include "proc/lifetime.h"
 #include "proc/coredump.h"
+/* Unconditional on purpose: without CONFIG_XLATOR the header supplies
+ * stubs, so this does not pull the channel into a cut-down build. */
+#include "proc/xlator.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
@@ -772,6 +775,13 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_A20_SCHED_BASE_SLICE:
         snprintf(buf, bufsz, "%d\n", g_sched_base_slice_ms);
         return (int)strlen(buf);
+#ifdef CONFIG_XLATOR
+    case PF_A20_XLATOR:
+        /* xlator_render() formats the switch state, the forwarding counter
+         * and the per-guest table, so an administrator can tell "off" from
+         * "on but nothing configured" without reading the boot log. */
+        return xlator_render(buf, bufsz);
+#endif
     case PF_A20_BCACHE: {
         bcache_stats_t bc;
         bcache_get_stats(&bc);
