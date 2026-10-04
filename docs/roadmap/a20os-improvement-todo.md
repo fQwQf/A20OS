@@ -117,7 +117,9 @@ IDL 化）已落地，已从本文删除。
     （sched.c:1474-1520）同样的纪律逐桶扫 pkey 匹配。只动 miss 路径，命中路径逐字节
     不变，风险小得多。
   - 纯用户态绕行（把父进程地址当 hint 让子进程 map 到同一 vaddr）**不可靠**：
-    kernel/mm/mmap.c:341-344 在 hint 与已有 VMA 重叠时会静默把 addr 归 0 退回 ASLR，
+    `kernel/mm/mmap.c` 在 hint 与已有映射重叠时会静默把 addr 归 0 退回 ASLR（此处行号取自
+    2026-09 的读数，核心 MM 迁移后已变动；现行逻辑在 `kernel/mm/mmap.c` 内就地实现，
+    见其中 "Linux hint semantics" 与 "Same hint semantics as the anonymous path" 两处注释），
     实测即失败。已在该实验中放弃。
   - 完成条件：`smoke-native-shmring` 稳定 PASS 且能正常 poweroff；在此之前该门禁不得
     被计入"已验证"。

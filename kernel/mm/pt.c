@@ -422,33 +422,21 @@ static inline uint8_t *safe_bit(pt_meta_t *m, int idx)
  * locking rules with.
  */
 
-mm_seg_t *mm_seg_alloc(void)
-{
-    pfn_t pfn = pfa_alloc_page();
-    if (pfn == PFN_NONE)
-        return NULL;
-    mm_seg_t *s = (mm_seg_t *)pfn_to_virt(pfn);
-    memset(s, 0, sizeof(*s));
-    s->magic = MM_SEG_MAGIC;
-    s->refcount = 1;
-    /* memset leaves shmid 0, which is a real SysV id rather than "none", so a
-     * segment that never had one set would claim to be shmid 0. */
-    s->sysv_shmid = -1;
-    return s;
-}
-
+/* Release the record itself.  Reached only from mm_seg_put(), after the
+ * `release` callback has dropped the backing vnode/vmo. */
 static void seg_free(mm_seg_t *s)
 {
     if (!s || s->magic != MM_SEG_MAGIC)
         return;
     s->magic = 0;
-    pfa_free(virt_to_pfn(s), 0);
+
+    kfree(s);
 }
 
 mm_seg_t *mm_seg_get(mm_seg_t *s)
 {
     if (s)
-        __atomic_add_fetch(&s->refcount, 1, __ATOMIC_RELAXED);
+        refcount_inc(&s->refcount);
     return s;
 }
 
@@ -456,23 +444,34 @@ void mm_seg_put(mm_seg_t *s)
 {
     if (!s)
         return;
-    /* A put on a frame whose magic is gone is a use-after-free: the frame was
-     * recycled, so `refcount` is somebody else's number and the branch below is
-     * deciding whether to call a stale `release` pointer.  That is exactly the
+    /* A put on a record whose magic is gone is a use-after-free: the slab
+     * object was recycled, so `refcount` is somebody else's number and the
+     * branch below is deciding whether to call a stale `release` pointer.  That is exactly the
      * shape of a crash the real-software gate took while anonymous mappings
      * carried segments -- a wild jump to 0x2f0a7d203b303220, which is ASCII
      * file text, not code, because `release` had been read off a page-cache
      * page.  Dying here names the fault instead of leaving it to a frame-pointer
      * walk through the middle of it. */
     if (s->magic != MM_SEG_MAGIC)
-        panic("mm_seg_put: use-after-free, segment frame %p magic=0x%x",
+        panic("mm_seg_put: use-after-free, mapping record %p magic=0x%x",
               s, s->magic);
-    if (__atomic_sub_fetch(&s->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
-        /* The segment owns one reference on whatever backs it (a vnode, a
-         * VMO), taken by whoever built it in mm/mmap.c.  This file has no
-         * business knowing about those types, so the release is a callback. */
-        if (s->release)
+    if (refcount_dec_and_test(&s->refcount)) {
+        /* The record owns one reference on whatever backs it (a vnode, a VMO),
+         * taken by whoever created the mapping.  This file has no business
+         * knowing about those types, so the release is a callback -- and it is
+         * installed by mm_seg_new() in mm/vma.c rather than by the creator,
+         * because a record that reaches zero without one would leak the
+         * backing object.
+         *
+         * It runs here only when nothing else owes it.  A record whose list
+         * reference has already been dropped is on the deferred queue, and
+         * that queue -- which holds a reference of its own, so this put
+         * cannot be the one that frees it -- is what runs the release, in a
+         * context that is allowed to block. */
+        if (!s->released && s->release) {
+            s->released = 1;
             s->release(s);
+        }
         seg_free(s);
     }
 }
@@ -1277,7 +1276,7 @@ int mm_pt_annotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
  * fall back on.
  *
  * Returns with a reference held (mm_seg_get), so the caller may drop mm->lock
- * and then mm_seg_put -- the same discipline mm_find_vma + mm_vma_get already
+ * and then mm_seg_put -- the same discipline mm_seg_find + mm_vma_get already
  * required, and for the same reason.
  *
  * Runs its own read-side section, so callers need no cursor -- and must NOT
@@ -1346,7 +1345,7 @@ static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
                     continue;
                 named = 1;
                 mm_seg_t *cand = segtab_seg(pm->segtab, slot);
-                if (!cand || addr - cand->base_va >= cand->len)
+                if (!cand || addr < cand->start || addr >= cand->end)
                     continue;               /* named, but not about this addr */
                 if (hit) {
                     /* Two live mappings both claim this address.  That cannot
@@ -1421,14 +1420,17 @@ int mm_pt_shadow_seg(mm_struct_t *mm, vaddr_t addr, uint8_t kind,
     if (!s) {
         mm_seg_miss_why[mm_seg_last_why]++;
         verdict = -1;
-    } else if (s->kind == kind && s->shared == (shared ? 1 : 0) &&
-               s->offset + (addr - s->base_va) == off) {
+    } else if (mm_seg_kind(s) == kind && mm_seg_shared(s) == (shared ? 1 : 0) &&
+               s->backing_offset + (addr - s->start) == off) {
         verdict = 1;
     } else {
         verdict = 0;
-        /* Hand the offending segment to the caller, which holds the VMA side
-         * and can therefore print the two next to each other.  pt.c must not
-         * print a VMA -- it must not know what one is.  Capped, because a
+        /* Hand the offending record to the caller, which resolved the address
+         * through mm->mmap and can therefore print the two next to each other.
+         * pt.c deliberately does not walk that list: the whole point of the
+         * comparison is to be able to say "the page tables name a different
+         * mapping than the list does", and a checker that walked the list
+         * itself would collapse the two sides into one.  Capped, because a
          * systematic disagreement would otherwise print once per fault for
          * the whole workload. */
         if (found && mm_seg_shadow_disagree < MM_SEG_SHADOW_REPORT) {
@@ -2497,7 +2499,7 @@ static int audit_pte_present(pt_root_t *pgdir, vaddr_t addr)
  * symmetric rule matters just as much -- a FILE_* class inside a VMA with no
  * file behind it means a private frame is being taken for a cache page.
  */
-static int audit_class_compatible(uint8_t cls, const vm_area_t *v)
+static int audit_class_compatible(uint8_t cls, const mm_seg_t *v)
 {
     /* A swapped-out page has no class to speak of yet; where its contents
      * live is a separate question, and P7 is the stage that answers it. */
@@ -2577,7 +2579,7 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                     }
                     rep->seg_pages++;
                     if (check_vma) {
-                        vm_area_t *v = mm_find_vma(mm, va);
+                        mm_seg_t *v = mm_seg_find(mm, va);
                         uint8_t want = (v && (v->vm_flags & VM_VMO))
                                            ? MM_SEG_VMO
                                            : ((v && (v->vm_flags & VM_FILE))
@@ -2596,10 +2598,11 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                          * check that is supposed to catch a mislabelled
                          * mapping -- and a mapping that drifted from anon to
                          * file would have gone unreported. */
-                        if (v && va - s->base_va < s->len && s->kind != want) {
+                        if (v && va >= s->start && va < s->end &&
+                            mm_seg_kind(s) != want) {
                             if (!rep->seg_kind_mismatch) {
                                 rep->seg_kind_bad_va = va;
-                                rep->seg_kind_bad = s->kind;
+                                rep->seg_kind_bad = mm_seg_kind(s);
                             }
                             rep->seg_kind_mismatch++;
                         }
@@ -2651,7 +2654,7 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
              * MM_ST_INVALID means the status claims nothing, which is exactly
              * the case where no VMA is required -- a hole is not an omission. */
             if (cls != MM_ST_INVALID && check_vma) {
-                vm_area_t *v = mm_find_vma(mm, va);
+                mm_seg_t *v = mm_seg_find(mm, va);
                 if (!v || va < v->start || va >= v->end) {
                     if (!rep->vmai_mismatch)
                         rep->vmai_bad_va = va;
@@ -2692,13 +2695,34 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
 
     audit_table(mm->pgdir, ARCH_PT_ROOT_LEVEL, 1, rep, mm, 0, check_vma);
 
-    /* VMA cross-check.  A VMA asserts an interval is mapped; the metadata
-     * asserts per page.  Different granularities, so the consistency rule is
-     * not derivable from either side: every VMA must have at least one page
-     * the metadata knows about.  A mutator that updates one representation
-     * and forgets the other shows up here first. */
+    /* The mapping list, checked as the only representation there is.  When the
+     * page tables and the list were two answers to the same question there was
+     * an index shadow check here, comparing the two.  There is one answer now,
+     * so what is worth asserting is the property every lookup now rests on:
+     * the list is sorted by start, the entries do not overlap, and each one is
+     * a live record.  mm_seg_find()'s binary search returns a wrong mapping if
+     * any of those fails, and there is no second implementation to catch it. */
     if (check_vma) {
-        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        mm_seg_t *prev = NULL;
+        for (mm_seg_t *v = mm->mmap; v; v = v->next) {
+            rep->seg_extent_vmas++;
+            if (v->magic != MM_SEG_MAGIC || v->end <= v->start) {
+                rep->seg_extent_noseg++;
+            } else if (prev && v->start < prev->end) {
+                rep->seg_extent_mismatch++;
+            } else {
+                rep->seg_pte_agree++;
+            }
+            prev = v;
+        }
+    }
+
+    /* Mapping cross-check.  A mapping asserts an interval is mapped; the
+     * metadata asserts per page.  Different granularities, so the consistency
+     * rule is not derivable from either side.  A mutator that updates one
+     * representation and forgets the other shows up here first. */
+    if (check_vma) {
+        for (mm_seg_t *v = mm->mmap; v; v = v->next) {
             /* The rule is "a VMA with resident pages must have the status
              * know about at least one of them", NOT "a VMA must have a page
              * the status knows about".
@@ -2745,7 +2769,7 @@ int mm_pt_audit_addrspace(mm_struct_t *mm, int check_vma,
          * authoritative test is userfaultfd_range_present() on the VMA fault
          * path.  Checking it would report mismatches by construction until
          * that path clears per page after re-testing presence (docs 10.19). */
-        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        for (mm_seg_t *v = mm->mmap; v; v = v->next) {
             int want = (v->vm_flags & VM_SEALED) ? 1 : 0;
             for (vaddr_t va = v->start & ~(vaddr_t)(PAGE_SIZE - 1);
                  va < v->end; va += PAGE_SIZE) {

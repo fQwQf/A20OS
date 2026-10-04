@@ -180,7 +180,7 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
         if (pt_map(mm->pgdir, va + off, phys + off, ptef) < 0)
             goto fail;
     }
-    vm_area_t *vma = kcalloc(1, sizeof(*vma));
+    mm_seg_t *vma = kcalloc(1, sizeof(*vma));
     if (!vma)
         goto fail;
     refcount_set(&vma->refcount, 1);
@@ -207,7 +207,7 @@ void udriver_revoke_mmio(mm_struct_t *mm, uint64_t phys)
         vaddr_t start = 0;
         size_t length = 0;
         uint64_t flags = spin_lock_irqsave(&mm->lock);
-        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_PFNMAP))
                 continue;
             int level = 0;

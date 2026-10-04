@@ -280,7 +280,7 @@ int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
     uint64_t old_off = 0;
 
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
-    vm_area_t *vma = mm_find_vma(t->mm, (vaddr_t)start);
+    mm_seg_t *vma = mm_seg_find(t->mm, (vaddr_t)start);
     if (!vma || vma->start > start ||
         (uint64_t)(vma->end - start) < size) {
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
@@ -296,7 +296,7 @@ int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
     }
     gfd = vma->file_fd;
     prot = mm_pte_flags_to_prot(vma->pte_flags);
-    old_off = vma->file_offset;
+    old_off = vma->backing_offset;
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
     if (gfd < 0)

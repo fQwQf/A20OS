@@ -54,7 +54,7 @@ static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
     }
     /* No status to preserve.  Recover the backing from the VMA so a page that
      * predates the cursor still gets a coherent class rather than a guess. */
-    vm_area_t *v = mm_find_vma(mm, va);
+    mm_seg_t *v = mm_seg_find(mm, va);
     if (!v)
         return MM_ST_ANON_MAPPED;
     if (v->vm_flags & VM_VMO)
@@ -172,7 +172,7 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
         return 0;
     }
 
-    vm_area_t *vma = parent ? mm_find_vma(parent, va) : NULL;
+    mm_seg_t *vma = parent ? mm_seg_find(parent, va) : NULL;
     /* VMO frames are owned by the VMO object; mappings never hold frame
      * references (vmo_get_page contract).  Cloning a VMO PTE as shared must
      * not frame_get: the VMA's own vmo reference (vma_ref_fork) keeps the

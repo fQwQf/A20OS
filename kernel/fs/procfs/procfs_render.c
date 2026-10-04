@@ -223,7 +223,7 @@ static int snapshot_pid_maps(int pid, int smaps,
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&mm->lock);
         size_t needed = 0;
-        for (vm_area_t *v = mm->mmap; v; v = v->next)
+        for (mm_seg_t *v = mm->mmap; v; v = v->next)
             needed++;
         spin_unlock_irqrestore(&mm->lock, flags);
 
@@ -247,7 +247,7 @@ static int snapshot_pid_maps(int pid, int smaps,
         flags = spin_lock_irqsave(&mm->lock);
         size_t count = 0;
         int retry = 0;
-        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        for (mm_seg_t *v = mm->mmap; v; v = v->next) {
             if (count >= capacity) {
                 retry = 1;
                 break;
@@ -257,7 +257,7 @@ static int snapshot_pid_maps(int pid, int smaps,
             rec->start = v->start;
             rec->end = v->end;
             rec->vm_flags = v->vm_flags;
-            rec->file_offset = v->file_offset;
+            rec->file_offset = v->backing_offset;
 #ifdef ARCH_NO_PMD_LEAF
             rec->thp_eligible = 0;
 #else
@@ -943,7 +943,7 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         if (t->mm) {
             rss_kb = mm_rss_get(t->mm) * PAGE_SIZE / 1024;
             vmlck_kb = t->mm->locked_vm / 1024;
-            vm_area_t *vma = t->mm->mmap;
+            mm_seg_t *vma = t->mm->mmap;
             while (vma) {
                 if ((vma->vm_flags & VM_WRITE) && !(vma->vm_flags & VM_STACK)) {
                     vmdata_kb += (vma->end - vma->start) / 1024;
