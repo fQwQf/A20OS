@@ -234,7 +234,10 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 
 > `swap_entry_t` 是 **`uint64_t`**（`kernel/include/mm/swap.h:35`），而每个条目的
 > status 只有一个 **`uint8_t`**（`kernel/include/mm/pt.h:154`，`cls[]` 数组元素），
-> 其中 class 占 4 bit、prot 占 3 bit，COW 另在 `cow[]` 位图里。
+> 其中 class 占 4 bit、COW 占 1 bit、prot 占 3 bit。COW **就在这一个字节里**
+（`MM_ST_COW_BIT`）：曾经另有一张并行的 `cow[]` 位图，2026-10-04 随合并删掉了，
+理由见 §13.19——没有任何读者，只有审计在读，而它恰好对 fault-around 别名出来的
+那批页是陈旧的，于是审计在一次内核完全正确的运行上报了 `cow=153`。
 >
 > `MM_ST_SWAPPED` 只能表达"这一页已换出"，**无法表达"换到哪里"**——那是 64 bit 的
 > swap entry（设备号 + slot）。所以 `PTE_SWAP` 被删掉之后，这个 64 bit 值在当前
@@ -1786,8 +1789,10 @@ userfaultfd、`VM_SHARED` 与 fault-around 的安全门。论文的设想是用 
 （`MM_ST_ANON_SHARED` / `MM_ST_FILE_SHARED`）。所以并不是「没有地方放」，而是
 「剩下的两项判定确实放不下」。
 
-本次为此新增两项，并按既有 `cow[]` 的写法做成并行位图，而不是把 `cls[]` 扩成
-16 位/项（后者会把每项元数据翻倍）：
+本次为此新增两项，并做成并行位图，而不是把 `cls[]` 扩成 16 位/项（后者会把每项
+元数据翻倍）。这里保留位图是对的：`safe` 是**每 8 项 1 bit**（尺寸不敏感），
+而 COW 是**每项 1 bit**（每 PT 页 512 bit = 64 B，为一个能从状态字节直接读出的
+事实再买一张表，代价与收益不成比例——见 §13.19）：
 
 * `MM_SAFE_UFFD`：该项被 userfaultfd 区间覆盖。缺页必须停住交给 handler，
   绝不能直接造零页满足。
@@ -1797,7 +1802,8 @@ userfaultfd、`VM_SHARED` 与 fault-around 的安全门。论文的设想是用 
 `pt_meta_t` 新增 `safe[(MM_PT_META_ENTRIES + 7) / 8]`；`mm_pt_node_init()` 本来就
 `memset` 整个结构，故新位图天然归零。
 
-有个必须做对的细节：`mm_pt_note_absent()` 原本只清 cow 位。若不同步清 `safe`，
+有个必须做对的细节：`mm_pt_note_absent()` 原本只清 cow 位（该位图已于 §13.19 删除，
+这条记录保留它当初被写下的样子）。若不同步清 `safe`，
 被复用的槽位会继承上一条映射的 UFFD/NO_FA 标志，状态路径据此做出错误判定。所以
 清槽位时一并 `&= ~MM_SAFE_MASK`。同理 `mm_pt_safe_set()` 拒绝在 class 为
 `MM_ST_INVALID` 的槽位上置位：无映射的槽位上的安全位没有意义，也永远不会被清掉。
@@ -6775,3 +6781,86 @@ KERNEL PANIC: mm_seg_put: use-after-free, mapping record 0xffffffc0bf4876c0 magi
 **状态：第 4、5 步完成。`vm_area_t`、`vma_index[]`、`mm_find_vma` 与第二个映射表示
 均已删除；映射只有一条记录、一个索引、一次查询、一个 offset 字段、一个构造函数。**
 `kernel/mm/vma.c` 仍在，但存的是 `mm_seg_t`——它现在管的是映射记录本身，不是第二种表示。
+
+---
+
+### 13.19 合并回 main：两个只有合并才会暴露的缺陷（2026-10-04，`main`）
+
+`feat/mm-complete` 合回 `main`（`84b7bc2c5`）时两边已分叉约 200 个提交，`main` 上
+有一整套文件所有权模型是照着**旧的两种表示**写的。调解本身不是本节的重点
+（记录改为持有 `main` 的 `struct vfile *file` 而非裸 `file_fd`，其余保留本分支的
+单记录/单 offset 形状；`vma_split()` 取 `mm` 并自行作废索引是 `main` 的修正）。
+本节记的是**两个只有两边合到一起才暴露出来的缺陷**——它们都不是合并写坏的，
+而是各自一直错，只是要等另一边进来才看得见。
+
+#### 13.19.1 `MM_SEGTAB_NAMES` 是一个按单一架构调好的常数
+
+`pt.c` 里那条静态断言本来是防越界的，它确实也拦下了一次越界：段数组内联时
+16 槽是 4229 字节，改成每条目 8 个名字后是 4104，都超过一帧。修法是把名字数
+从 4 降到 7。**但 7 是被 `512`（Sv39 节点页的条目数）除出来的，不是被想出来的**：
+`4096 - 8 = 4088`，`4088 / 512 = 7`。
+
+riscv32 的节点页是 **1024** 条目。同样写死的 7 意味着 `1024 × 7 = 7168` 字节，
+超出它被分配的那一帧——断言拒绝编译。这不是我的分支与 `main` 冲突造成的，
+在合并之前 riscv32 就已经构建不了；只是合并让所有架构一起被构建，问题才浮上来。
+
+修法不是给 riscv32 特判一个 3，而是**把宽度算出来**：
+
+```c
+#define MM_SEGTAB_NAMES \
+    ((int)(((PAGE_SIZE - sizeof(struct mm_segarr *)) / (size_t)MM_PT_META_ENTRIES) \
+           > (size_t)MM_SEGTAB_MAX ? (size_t)MM_SEGTAB_MAX : \
+           ((PAGE_SIZE - sizeof(struct mm_segarr *)) / (size_t)MM_PT_META_ENTRIES)))
+```
+
+riscv64/aarch64/x86_64/loongarch64 得 7（与原来相同），riscv32 得 3，ppc64le 得 7，
+arm32 得 15——没有人替后两个做过决定，它们只是落到了该落的地方。
+
+**教训是可迁移的**：一个按某一个架构的页表形状调出来的常数，是一个在别的架构上
+必然错的常数。它当时能通过全部门禁，仅仅因为没有任何门禁去构建 riscv32。
+
+#### 13.19.2 `cow[]` 位图：同一个事实的第二份拷贝
+
+五软件门禁在合并后第一次跑出 `audit: DIRTY {'cow': 153}`。**153 个"不一致"里，
+内核全是对的，错的是审计自己**：它读的是 `pt_meta_t.cow[]` 位图，而每一个真正的
+写入者（`pt_map_cls()`、`mm_pt_sync_status()`）写的是状态字节里的 `MM_ST_COW_BIT`。
+位图只被 `mm_pt_set_cow()` 写——而**那个函数全树没有调用者**。
+
+也就是说：一份每个 PT 页 64 字节的第二表示，只有一个读者（审计），而它读的
+永远是陈旧值。陈旧在哪些页上暴露？fault-around 从 page cache 别名出来的那批
+可执行/只读私有页——正好是真实软件最密集命中的那一类。
+
+这**正是本模型要消灭的失效模式**：同一个事实的两份拷贝靠人手保持同步。上一节
+刚把映射记录的两种表示合并成一种，紧接着在状态元数据里又留下一份同类的重复。
+删掉 `cow[]` 及其两个访问器（`mm_pt_cow` / `mm_pt_set_cow`）之后，`cow=0`。
+
+对比之下 `safe[]` 位图**保留**：它是每 8 项 1 bit（`MM_PT_META_ENTRIES + 7) / 8`），
+尺寸与条目数无关，而且这两项判定（UFFD 覆盖、禁止 fault-around）**在状态字节里
+确实放不下**——8 位已全部分配完毕。`cow` 是每项 1 bit，换来的是一个本来就能从
+状态字节直接读出的事实。这两者的区别不在"位图"这个形状，而在**它是不是一份
+冗余的拷贝**。
+
+#### 13.19.3 顺带修掉的：main 自己的 riscv32 回归
+
+`kernel/fs/diskfs/lfs_vfs.c` 里的 libgcc 垫片把 64-bit 助手写成 `unsigned long`。
+libgcc ABI 把 `__bswapdi2` / `__ctzdi2` / `__clzdi2` 的签名在**所有目标上**固定为
+`long long`，所以这个写法在 64-bit 内核上编译通过，在 riscv32 上让 GCC 直接以
+`<< 56` 拒绝。改成 `uint64_t`。与本次迁移无关，但它挡着 riscv32 被验证。
+
+#### 13.19.4 合并后的验证
+
+| 项 | 结果 |
+|---|---|
+| `kernel-only -Werror` | riscv64 / aarch64 / x86_64 / loongarch64 / ppc64le / riscv32 全部构建通过 |
+| `check-mm-lock-model` | 14 条断言 PASS |
+| `check-mm-pt-lock-order` | 27 条断言 PASS |
+| `check-doc-test-gates` | PASS（含 `check-doc-drift`、`check-doc-citations` 及全部 smoke） |
+| `smoke-mm-software` | **PASS** |
+
+`smoke-mm-software` 的最终读数：git / vim / gcc / python / nodejs 五个阶段全过，
+审计 10 个 PT 页 / 3584 条目**全部计数器为 0**，映射链表 14 条、有序、无重叠、
+无 dead 记录，段分派取页表名 **43067** 次 / 回退 **1102** 次 / **不一致 0**。
+
+注意最后一行：1102 次回退**仍然是回退**，仍然是 `mm->mmap` 在回答。
+§13.11 的 8.6% 与 §13.12 的净结果没有被这次合并改变，原因也仍然是几何——
+Sv39 的段名在 **2 MiB** 分辨率上，一个条目里放不下的映射数量是常量调不走的。
