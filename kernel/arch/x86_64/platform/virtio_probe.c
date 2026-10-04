@@ -345,8 +345,22 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
         pci_common_write32(cb, PCOMMON_QUEUE_DEV_HI, val);
         break;
     case VIRTIO_MMIO_QUEUE_NOTIFY: {
+        /* QueueSelect still goes out: the spec defines the notify offset as a
+         * property of the selected queue, and leaving the selection alone
+         * keeps every later Queue* register the driver reads unambiguous. */
         pci_common_write16(cb, PCOMMON_QUEUE_SEL, (uint16_t)val);
-        uint16_t notify_off = pci_common_read16(cb, PCOMMON_QUEUE_NOTIFY_OFF);
+        uint16_t qidx = (uint16_t)val;
+        uint16_t notify_off;
+        if (qidx < PCI_VIRTIO_NOTIFY_CACHE &&
+            (vd->notify_off_cached & (1U << qidx))) {
+            notify_off = vd->notify_off_cache[qidx];
+        } else {
+            notify_off = pci_common_read16(cb, PCOMMON_QUEUE_NOTIFY_OFF);
+            if (qidx < PCI_VIRTIO_NOTIFY_CACHE) {
+                vd->notify_off_cache[qidx] = notify_off;
+                vd->notify_off_cached |= 1U << qidx;
+            }
+        }
         uintptr_t addr = vd->notify_base + notify_off * vd->notify_off_multiplier;
         *(volatile uint16_t *)addr = (uint16_t)val;
         break;
