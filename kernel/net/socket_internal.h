@@ -98,6 +98,42 @@ typedef struct net_bh_ring {
 } net_bh_ring_t;
 
 /*
+ * One staged inbound connection.
+ *
+ * The accept callback cannot finish the handoff, so it parks the pcb here with
+ * the socket layer's own callbacks already installed on it (see
+ * net_inet_tcp_stage_* in socket_inet.c).  Until the bottom half adopts the
+ * pcb, that context -- not the listener's net_socket_t -- is what those
+ * callbacks see, and it has to carry everything they may observe in the
+ * meantime.
+ *
+ * `pcb` is the identity check.  lwIP can still destroy a pcb behind our back
+ * (an RST abandons it outright), so a staged pcb is not guaranteed to survive
+ * until adoption; when it does not, `dead` is set and `pcb` is stale from
+ * then on and must never be dereferenced.
+ *
+ * The slot address is what identifies the entry, so it may not be recycled
+ * while a pcb can still be pointing at it.  The bottom half therefore hands the
+ * pcb over to its child -- re-arging it to the child socket and clearing `pcb`
+ * -- before it advances tail past this slot.
+ */
+typedef struct net_accept_stage_slot {
+    struct net_socket *listener;
+    struct tcp_pcb *pcb;
+    /* Payload the peer sent before the handshake was adopted.  Held by
+     * reference: pbuf_free() is only safe under g_lwip_lock, so these are
+     * released either in the callback that discovers the pcb died or in the
+     * bottom half's g_lwip_lock section. */
+    struct pbuf *pending;
+    /* Peer sent a FIN while staged.  The connection is still ours to hand to
+     * accept(), so this is recorded and replayed onto the child instead of
+     * being closed out from under it. */
+    uint32_t fin;
+    uint32_t dead;
+    int error;
+} net_accept_stage_slot_t;
+
+/*
  * Accepted-pcb staging for a real lwIP listening socket.
  *
  * lwIP hands a completed handshake to tcp_accept() with g_lwip_lock already
@@ -118,7 +154,7 @@ typedef struct net_bh_ring {
 #define NET_ACCEPT_STAGE_SIZE 8
 
 typedef struct net_accept_stage {
-    struct tcp_pcb *pcbs[NET_ACCEPT_STAGE_SIZE];
+    net_accept_stage_slot_t slots[NET_ACCEPT_STAGE_SIZE];
     uint32_t head;
     uint32_t tail;
     volatile int dropped;
