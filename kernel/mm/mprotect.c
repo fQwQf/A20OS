@@ -131,6 +131,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     continue;
                 }
                 uint64_t old_flags = arch_pte_flags(*pte);
+                paddr_t pa_now = arch_pte_addr(*pte);
                 uint64_t flags = mm_pte_flags_apply_prot(*pte, ptef);
                 if ((ptef & PTE_W) &&
                     (v->vm_flags & VM_FILE) &&
@@ -152,25 +153,40 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     if (pfn_valid(pfn))
                         arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
                 }
-                pte_t replacement = arch_pte_leaf(arch_pte_addr(*pte), flags);
-                if (replacement != *pte) {
-                    *pte = replacement;
-                    mm_tlb_note_change(mm, base, size);
-                }
-                /* The status byte is what a later status-driven fault
-                 * installs and what mm_pt_audit_all() compares, so it has to
-                 * follow the PTE here as well -- not only on the
-                 * never-faulted branch below.  Leaving it stale is what
-                 * produced prot_mismatch=5 on a real workload.
-                 *
-                 * Take the table from mm_pt_leaf_table() rather than deriving
-                 * it as `pte - vpn`: that is pointer arithmetic on a pointer
-                 * whose provenance is a lookup, and the same trap is
-                 * documented on the absent branch below. */
+                /* The rewrite and its status refresh run under the owning
+                 * table's node lock, with the PTE re-checked under it: the
+                 * lockless COW fault (mm_cow_from_status) replaces a present
+                 * COW leaf while holding exactly this lock and never takes
+                 * mm->lock.  Writing `replacement` from a stale *pte would
+                 * resurrect a frame the page no longer maps. */
                 pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
                 if (ltab)
-                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
-                                                  flags);
+                    mm_pt_node_lock(ltab);
+                int still = !ltab || ((*pte & PTE_V) &&
+                                      arch_pte_addr(*pte) == pa_now);
+                if (still) {
+                    pte_t replacement = arch_pte_leaf(arch_pte_addr(*pte),
+                                                      flags);
+                    if (replacement != *pte) {
+                        *pte = replacement;
+                        mm_tlb_note_change(mm, base, size);
+                    }
+                    /* The status byte is what a later status-driven fault
+                     * installs and what mm_pt_audit_all() compares, so it
+                     * has to follow the PTE here as well -- not only on the
+                     * never-faulted branch below.  Leaving it stale is what
+                     * produced prot_mismatch=5 on a real workload.
+                     *
+                     * Take the table from mm_pt_leaf_table() rather than
+                     * deriving it as `pte - vpn`: that is pointer arithmetic
+                     * on a pointer whose provenance is a lookup, and the
+                     * same trap is documented on the absent branch below. */
+                    if (ltab)
+                        (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
+                                                      flags);
+                }
+                if (ltab)
+                    mm_pt_node_unlock(ltab);
                 va = base + size;
             } else {
                 /* Reserved by mmap but never faulted: there is no PTE to carry
@@ -206,9 +222,18 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * MM_ST_INVALID, so the status path cannot match
                  * MM_ST_ANON_VIRT and cannot act on a stale prot. */
                 pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+                /* The status byte here is the same one the lockless fault
+                 * paths read and write under this table's node lock, so the
+                 * refresh takes that lock too: an unlocked RMW here can
+                 * interleave with mm_fault_from_status()'s install and the
+                 * later map then reinstalls the stale permissions. */
+                if (ltab)
+                    mm_pt_node_lock(ltab);
                 if (ltab)
                     (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
                                                     ptef);
+                if (ltab)
+                    mm_pt_node_unlock(ltab);
                 va += PAGE_SIZE;
             }
         }

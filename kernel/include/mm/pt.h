@@ -49,6 +49,12 @@
  *     MM_AS_CURSOR_ONLY_ENTRY_BYPASSES
  *       pt_unmap_leaf   mm.c   no cursor; every mutation under mm_pt_node_lock
  *       pt_unmap        mm.c   no cursor; every mutation under mm_pt_node_lock
+ *       fork rewrite    cow.c  no cursor; the parent-side COW rewrite and its
+ *                              status sync run under mm_pt_node_lock, with the
+ *                              PTE re-checked under that lock
+ *       mprotect prot   mprotect.c  no cursor; the present-leaf rewrite and
+ *                              the never-faulted status refresh both run under
+ *                              mm_pt_node_lock
  *
  *     These two do not satisfy rule 1 as written -- they are not cursors and
  *     hold no range-wide atomicity, which is why they stay listed instead of
@@ -738,11 +744,12 @@ int mm_cursor_replace(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
 /* Compare-and-replace for the lockless COW fault: install `pa` only while
- * the entry still maps `expect_pa` as a COW leaf, all under the leaf lock.
+ * the entry still maps `expect_pa` as a COW leaf, all under the leaf lock;
+ * the new PTE's flags are re-derived from the old one under that lock.
  * 0 = replaced, 1 = state moved underneath (nothing written), <0 = error. */
 int mm_cursor_replace_if_cow(mm_cursor_t *cur, vaddr_t addr,
-                             paddr_t expect_pa, paddr_t pa, pte_t flags,
-                             uint8_t cls, paddr_t *old_pa_out);
+                             paddr_t expect_pa, paddr_t pa, uint8_t cls,
+                             paddr_t *old_pa_out);
 int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
                         pte_t flags);
 int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef);
