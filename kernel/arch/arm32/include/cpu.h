@@ -21,7 +21,31 @@ static inline void arch_wmb(void) { __asm__ __volatile__("dmb ishst" ::: "memory
 static inline void arch_wfi(void) { __asm__ __volatile__("wfi"); }
 static inline void arch_cpu_relax(void) { __asm__ __volatile__("yield"); }
 static inline void arch_fence_i(void) { __asm__ __volatile__("dsb ish\n\tisb" ::: "memory"); }
-static inline void arch_flush_icache_range(const void *addr, size_t size) { (void)addr; (void)size; arch_fence_i(); }
+static inline void arch_flush_icache_range(const void *addr, size_t size) {
+    /*
+     * Module load and JIT publish instructions through the D-cache, so the
+     * written lines must reach the point of coherence before any core may
+     * fetch them, and every stale copy must then leave the I-cache.  A DSB
+     * and ISB do neither of those things: the first orders memory accesses,
+     * it invalidates nothing.  ICIALLU (c7, c5, 0) takes neither an address
+     * nor a line size, so unlike an MVA invalidate it cannot quietly miss
+     * lines when the implemented I-line size is not the D-line size used
+     * for the clean below.
+     */
+    if (size == 0)
+        return;
+
+    uintptr_t start = (uintptr_t)addr & ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+    uintptr_t end = ((uintptr_t)addr + size + ARM32_CACHE_LINE - 1U) &
+                    ~(uintptr_t)(ARM32_CACHE_LINE - 1U);
+
+    for (uintptr_t p = start; p < end; p += ARM32_CACHE_LINE)
+        __asm__ __volatile__("mcr p15, 0, %0, c7, c10, 1" :: "r"(p) : "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
+
+    __asm__ __volatile__("mcr p15, 0, %0, c7, c5, 0" :: "r"(0) : "memory");
+    __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");
+}
 
 static inline unsigned arch_current_cpu_id(void) {
     uint32_t mpidr;

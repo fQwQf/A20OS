@@ -96,18 +96,22 @@ __switch:
     csrwr   $t2, 0x31
     LS2K_SWITCH_MARK 68             /* D: new registers restored */
 
-    /* Restore PGDL (CSR 0x19) from offset 104 */
+    /* Restore PGDL (CSR 0x19) from offset 104.  Tasks that share a page
+     * table have nothing stale to discard, so only an actual root change
+     * invalidates. */
     ld.d    $t0, $sp, 104
+    csrrd   $t1, 0x19
+    beq     $t0, $t1, .Lpgdl_done
     csrwr   $t0, 0x19
+    /* Flush non-global TLB entries after page table switch */
+    invtlb  0x3, $zero, $zero
+.Lpgdl_done:
     LS2K_SWITCH_MARK 69             /* E: PGDL written */
 
     /* Restore PRMD (CSR 0x1) from offset 112 */
     ld.d    $t1, $sp, 112
     csrwr   $t1, 0x1
     LS2K_SWITCH_MARK 70             /* F: PRMD written */
-
-    /* Flush non-global TLB entries after page table switch */
-    invtlb  0x3, $zero, $zero
     LS2K_SWITCH_MARK 71             /* G: TLB flush complete */
 
     /* Free task context from stack */

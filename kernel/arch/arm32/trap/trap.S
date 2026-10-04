@@ -268,11 +268,17 @@ __return_to_user:
     mcr     p15, 0, r1, c13, c0, 4
 #ifndef CONFIG_NOMMU
     ldr     r1, [sp, #TF_TTBR0]
+    /* Returning to the same translation regime cannot have left anything
+     * stale behind, so only an actual TTBR0 change earns the invalidation. */
+    mrc     p15, 0, r2, c2, c0, 0
+    cmp     r1, r2
+    beq     .Lttbr0_unchanged_k32
     mcr     p15, 0, r1, c2, c0, 0
     mov     r1, #0
     mcr     p15, 0, r1, c8, c7, 0
     dsb     ish
     isb
+.Lttbr0_unchanged_k32:
 #endif
     ldmia   sp, {r0-r12}
     add     sp, sp, #88                /* tear down the dynamic kernel trap frame */
@@ -296,11 +302,15 @@ user_trap_return:
     mcr     p15, 0, r12, c13, c0, 3
 #ifndef CONFIG_NOMMU
     ldr     r12, [r0, #TF_TTBR0]
+    mrc     p15, 0, r3, c2, c0, 0
+    cmp     r12, r3
+    beq     .Lttbr0_unchanged_u32
     mcr     p15, 0, r12, c2, c0, 0
     mov     r12, #0
     mcr     p15, 0, r12, c8, c7, 0
     dsb     ish
     isb
+.Lttbr0_unchanged_u32:
 #endif
     ldr     r12, [r0, #TF_KERNEL_SP]
     mrs     r3, cpsr

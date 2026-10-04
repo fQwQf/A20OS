@@ -57,6 +57,11 @@ __switch:
     ldr     x29, [sp, #(12 * 8)]
     ldr     x10, [sp, #(14 * 8)]
 #ifndef CONFIG_NOMMU
+    /* Two tasks that share a page table cannot have left anything stale
+     * behind, so only an actual TTBR0 change earns the invalidation. */
+    mrs     x11, ttbr0_el1
+    cmp     x10, x11
+    b.eq    1f
     msr     ttbr0_el1, x10
     dsb     ishst
     tlbi    vmalle1
@@ -72,5 +77,5 @@ __switch:
     add     sp, sp, #128
     msr     daif, x10
     isb
-
+1:
     ret

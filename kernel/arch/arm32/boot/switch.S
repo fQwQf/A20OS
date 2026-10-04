@@ -1,6 +1,21 @@
     .syntax unified
     .arch armv7-a
 
+/*
+ * IRQ, prefetch-abort, data-abort and FIQ all run their vector prologue and
+ * the 88-byte trap_context_t on the banked exception stack this switch
+ * points below the incoming task_context_t, and an IRQ additionally calls
+ * into C there before the frame is copied to the task's persistent
+ * trap_ctx.  Overflow runs into the context being restored, so the reserve
+ * has to stay above the prologue plus the frame.  Enforced here because the
+ * frame size lives in trap/trap.S and would otherwise be a silent contract.
+ */
+    .equ ARM32_TRAP_FRAME_SIZE, 88
+    .equ ARM32_BANKED_SP_RESERVE, 4096
+    .if ARM32_TRAP_FRAME_SIZE + 16 > ARM32_BANKED_SP_RESERVE
+    .error "arm32 banked SP reserve is smaller than the trap frame it must hold"
+    .endif
+
     .section .text
     .global __switch
 __switch:
@@ -73,11 +88,17 @@ __switch:
     ldr     r2, [sp, #40]
     ldr     r3, [sp, #44]
 #ifndef CONFIG_NOMMU
+    /* Two tasks that share a page table cannot have left anything stale
+     * behind, so only an actual TTBR0 change earns the invalidation. */
+    mrc     p15, 0, r0, c2, c0, 0
+    cmp     r3, r0
+    beq     .Lttbr0_unchanged
     mcr     p15, 0, r3, c2, c0, 0
-    mov     r1, #0
-    mcr     p15, 0, r1, c8, c7, 0
+    mov     r0, #0
+    mcr     p15, 0, r0, c8, c7, 0
     dsb     ish
     isb
+.Lttbr0_unchanged:
 #endif
     ldr     r3, [sp, #48]
     ldr     r0, [sp, #52]            /* user_tp; r0 is free after stack switch */
@@ -91,9 +112,11 @@ __switch:
 
     /* Keep the privileged exception-mode stack pointers in sync with the
      * next task's SVC stack so IRQ/abort handlers always run on a valid
-     * kernel stack.  r2 holds the next SVC sp; r3 holds the target CPSR. */
+     * kernel stack.  The reserve below is bounded by ARM32_BANKED_SP_RESERVE
+     * at the top of this file.  r2 holds the next SVC sp; r3 holds the target
+     * CPSR. */
     mov     r12, r2
-    sub     r12, r12, #4096
+    sub     r12, r12, #ARM32_BANKED_SP_RESERVE
     cps     #0x12                    /* IRQ mode */
     mov     sp, r12
     cps     #0x17                    /* ABT mode */
@@ -110,7 +133,7 @@ __switch:
 
 1:
     mov     r12, r2
-    sub     r12, r12, #4096
+    sub     r12, r12, #ARM32_BANKED_SP_RESERVE
     cps     #0x12
     mov     sp, r12
     cps     #0x17

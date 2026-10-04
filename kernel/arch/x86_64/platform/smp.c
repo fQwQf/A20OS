@@ -72,13 +72,6 @@ static int lapic_send(unsigned apic_id, uint32_t command)
     lapic_write(LAPIC_ICR_LOW, command);
     return lapic_wait_icr();
 }
-
-static void tsc_delay(uint64_t cycles)
-{
-    uint64_t start = timer_get_ticks();
-    while (timer_get_ticks() - start < cycles)
-        cpu_relax();
-}
 #endif
 
 uint64_t arch_smp_boot_hw_id(void)
@@ -135,15 +128,16 @@ int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
         (uint64_t)entry;
     __atomic_thread_fence(__ATOMIC_RELEASE);
 
+    /* lapic_send() already holds off each message until the previous one has
+     * left the ICR (delivery status, bit 12), which is what has to be ordered
+     * here.  Counting TSC cycles instead ties the sequence to an assumed clock
+     * frequency that says nothing about how far the target has actually got. */
     if (lapic_send(apic_id, 0x0000c500) != 0)
         goto startup_timeout;
-    tsc_delay(10000000);
     if (lapic_send(apic_id, 0x00008500) != 0)
         goto startup_timeout;
-    tsc_delay(200000);
     if (lapic_send(apic_id, 0x00004600 | (AP_TRAMPOLINE_PA >> 12)) != 0)
         goto startup_timeout;
-    tsc_delay(200000);
     if (lapic_send(apic_id, 0x00004600 | (AP_TRAMPOLINE_PA >> 12)) != 0)
         goto startup_timeout;
 
@@ -193,13 +187,17 @@ void x86_64_secondary_entry(unsigned cpu_id)
 
 #if CONFIG_NR_CPUS > 1
 /*
- * Remote TLB shootdown via a dedicated IPI: each target CPU reloads CR3
- * (flushing its user TLB) and acknowledges its request generation.  The
- * requester spins with interrupts enabled so an ABBA pair of flushing CPUs
- * can service each other's IPIs.
+ * Remote TLB shootdown via a dedicated IPI: each target CPU invalidates the
+ * requested range (reloading CR3 when it is not a single page) and
+ * acknowledges its request generation.  The requester spins with interrupts
+ * enabled so an ABBA pair of flushing CPUs can service each other's IPIs.
  */
 static _Atomic uint32_t tlb_flush_request[CONFIG_NR_CPUS];
 static _Atomic uint32_t tlb_flush_ack[CONFIG_NR_CPUS];
+/* Published before the request generation, so a target that observes a new
+ * generation is guaranteed to observe the range that came with it. */
+static _Atomic uint64_t tlb_flush_addr[CONFIG_NR_CPUS];
+static _Atomic uint64_t tlb_flush_size[CONFIG_NR_CPUS];
 
 void x86_64_ipi_tlb_flush_handler(void)
 {
@@ -213,7 +211,19 @@ void x86_64_ipi_tlb_flush_handler(void)
                                        __ATOMIC_RELAXED);
         if (ack == request)
             break;
-        arch_tlb_flush();
+        uint64_t addr = __atomic_load_n(&tlb_flush_addr[cpu],
+                                        __ATOMIC_RELAXED);
+        uint64_t size = __atomic_load_n(&tlb_flush_size[cpu],
+                                        __ATOMIC_RELAXED);
+        /* A single page is the common case -- every COW unmap and every PTE
+         * clear arrives here -- and invlpg costs a few cycles where a CR3
+         * reload also discards the whole user TLB.  A wider range would need
+         * a per-page loop to stay targeted, so it keeps the reload, which is
+         * correct at any size. */
+        if (size == PAGE_SIZE)
+            arch_tlb_flush_page(addr);
+        else
+            arch_tlb_flush();
         __atomic_store_n(&tlb_flush_ack[cpu], request, __ATOMIC_RELEASE);
     }
 }
@@ -221,8 +231,6 @@ void x86_64_ipi_tlb_flush_handler(void)
 int x86_64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
                                 uint64_t size)
 {
-    (void)addr;
-    (void)size;
     uint32_t expected[CONFIG_NR_CPUS] = {0};
     uint32_t self = 1U << arch_current_cpu_id();
     pending &= ~self;
@@ -235,6 +243,8 @@ int x86_64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
         uint64_t hw_id;
         if (smp_logical_to_hw(cpu, &hw_id) < 0)
             continue;
+        __atomic_store_n(&tlb_flush_addr[cpu], addr, __ATOMIC_RELAXED);
+        __atomic_store_n(&tlb_flush_size[cpu], size, __ATOMIC_RELAXED);
         expected[cpu] = __atomic_add_fetch(&tlb_flush_request[cpu], 1,
                                            __ATOMIC_ACQ_REL);
         x86_64_smp_send_ipi((unsigned)hw_id, IRQ_VECTOR_TLB_FLUSH);
