@@ -16,6 +16,7 @@
  */
 
 #include "core/defs.h"
+#include "core/lock.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "fs/vfs.h"
@@ -120,55 +121,133 @@ typedef struct {
 
 #define DRM_MAJOR 226
 
-/* Find the class device whose devt matches devt; returns its subsystem and a
- * DEVNAME (path under /dev) derived from the class.  DRM card0 (226:0) is
- * special-cased because it is a static devfs node, not a class device. */
-static int sysfs_devchar_name(uint64_t devt, const char **devname_out,
-                              const char **subsystem_out)
-{
-    unsigned maj = (unsigned)((devt >> 8) & 0xffU);
-    unsigned min = (unsigned)(devt & 0xffU);
-    static char devname[64];
-    const char *subsystem = NULL;
+/*
+ * The class registry has no devt lookup and class_device_get_by_type() walks
+ * the whole class array under its global lock, so resolving a single devt by
+ * probing every (type, index) pair costs a quadratic number of locked
+ * comparisons — and uevent files are re-read on every enumeration.  Memoise
+ * the (type, index) that produced each devt and re-validate it with one probe;
+ * the only thing that can invalidate a hint is a device leaving or entering the
+ * registry, which is exactly what the probe detects.  A true devt index has to
+ * live in driver_class.c next to the array it indexes.
+ */
+#define SYSFS_DEVT_MEMO 16
+static struct {
+    uint64_t devt;
+    uint32_t type;
+    unsigned index;
+} g_devt_memo[SYSFS_DEVT_MEMO];
+static unsigned g_devt_memo_next;
+static spinlock_t g_devt_memo_lock = SPINLOCK_INIT;
 
-    if (maj == DRM_MAJOR && (min == 0 || min == 128)) {
-        subsystem = "drm";
-        if (min == 0)
-            snprintf(devname, sizeof(devname), "dri/card0");
-        else
-            snprintf(devname, sizeof(devname), "dri/renderD128");
-        *devname_out = devname;
-        *subsystem_out = subsystem;
-        return 0;
+/* Copy the class device name out before dropping the reference: the registry
+ * may free the device the moment the last reference goes. */
+static void sysfs_devchar_copy_name(char *dst, size_t dst_sz,
+                                    const class_device_t *cdev)
+{
+    size_t n = strlen(cdev->name);
+    if (n >= dst_sz)
+        n = dst_sz - 1;
+    memcpy(dst, cdev->name, n);
+    dst[n] = '\0';
+}
+
+/* Resolve devt to a class device, copying its name into @name. */
+static int sysfs_devchar_resolve(uint64_t devt, char *name, size_t name_sz,
+                                 uint32_t *type_out)
+{
+    uint32_t hint_type = 0;
+    unsigned hint_index = 0;
+    int have_hint = 0;
+    spin_lock(&g_devt_memo_lock);
+    for (int i = 0; i < SYSFS_DEVT_MEMO; i++) {
+        if (g_devt_memo[i].devt != devt)
+            continue;
+        hint_type = g_devt_memo[i].type;
+        hint_index = g_devt_memo[i].index;
+        have_hint = 1;
+        break;
+    }
+    spin_unlock(&g_devt_memo_lock);
+
+    if (have_hint) {
+        class_device_t *cdev = class_device_get_by_type(hint_type, hint_index);
+        if (cdev) {
+            if (cdev->devt == devt) {
+                sysfs_devchar_copy_name(name, name_sz, cdev);
+                *type_out = hint_type;
+                class_device_put(cdev);
+                return 0;
+            }
+            class_device_put(cdev);
+        }
     }
 
     for (uint32_t type = 1; type <= DEV_CLASS_AUDIO; type++) {
-        const char *sub = class_device_subsystem(type);
-        if (!sub)
+        if (!class_device_subsystem(type))
             continue;
         for (unsigned index = 0; index < 256; index++) {
             class_device_t *cdev = class_device_get_by_type(type, index);
             if (!cdev)
                 break;
-            uint64_t cdevt = cdev->devt;
+            if (cdev->devt == devt) {
+                sysfs_devchar_copy_name(name, name_sz, cdev);
+                *type_out = type;
+                class_device_put(cdev);
+                spin_lock(&g_devt_memo_lock);
+                g_devt_memo[g_devt_memo_next].devt = devt;
+                g_devt_memo[g_devt_memo_next].type = type;
+                g_devt_memo[g_devt_memo_next].index = index;
+                g_devt_memo_next = (g_devt_memo_next + 1) % SYSFS_DEVT_MEMO;
+                spin_unlock(&g_devt_memo_lock);
+                return 0;
+            }
             class_device_put(cdev);
-            if (cdevt != devt)
-                continue;
-            subsystem = sub;
-            if (type == DEV_CLASS_INPUT)
-                snprintf(devname, sizeof(devname), "input/%s", cdev->name);
-            else if (type == DEV_CLASS_DISPLAY)
-                snprintf(devname, sizeof(devname), "%s", cdev->name);
-            else if (type == DEV_CLASS_AUDIO)
-                snprintf(devname, sizeof(devname), "snd/%s", cdev->name);
-            else
-                snprintf(devname, sizeof(devname), "%s", cdev->name);
-            *devname_out = devname;
-            *subsystem_out = subsystem;
-            return 0;
         }
     }
     return -ENOENT;
+}
+
+/* Find the class device whose devt matches devt; returns its subsystem and a
+ * DEVNAME (path under /dev) derived from the class.  DRM card0 (226:0) is
+ * special-cased because it is a static devfs node, not a class device.
+ * The DEVNAME is built into the caller's buffer: a shared static buffer let
+ * two CPUs opening uevent files race on the same bytes. */
+static int sysfs_devchar_name(uint64_t devt, char *devname, size_t devname_sz,
+                              const char **subsystem_out)
+{
+    unsigned maj = (unsigned)((devt >> 8) & 0xffU);
+    unsigned min = (unsigned)(devt & 0xffU);
+    const char *subsystem = NULL;
+    char name[CLASS_DEVICE_NAME_MAX];
+
+    if (maj == DRM_MAJOR && (min == 0 || min == 128)) {
+        subsystem = "drm";
+        int n = snprintf(devname, devname_sz, "dri/%s",
+                         min == 0 ? "card0" : "renderD128");
+        if (n < 0 || (size_t)n >= devname_sz)
+            return -ENAMETOOLONG;
+        *subsystem_out = subsystem;
+        return 0;
+    }
+
+    uint32_t type = 0;
+    if (sysfs_devchar_resolve(devt, name, sizeof(name), &type) < 0)
+        return -ENOENT;
+    subsystem = class_device_subsystem(type);
+    if (!subsystem)
+        return -ENOENT;
+    int n;
+    if (type == DEV_CLASS_INPUT)
+        n = snprintf(devname, devname_sz, "input/%s", name);
+    else if (type == DEV_CLASS_AUDIO)
+        n = snprintf(devname, devname_sz, "snd/%s", name);
+    else
+        n = snprintf(devname, devname_sz, "%s", name);
+    if (n < 0 || (size_t)n >= devname_sz)
+        return -ENAMETOOLONG;
+    *subsystem_out = subsystem;
+    return 0;
 }
 
 /* Absolute index (after "." and "..") into /sys/dev/char: 0 is the DRM card,
@@ -287,8 +366,9 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                          (unsigned long)(devt & 0xffU));
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_CLASS_DEVICE_UEVENT) {
-        const char *devname = NULL, *subsystem = NULL;
-        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+        char devname[64];
+        const char *subsystem = NULL;
+        if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) == 0) {
             const char *base = strrchr(devname, '/');
             base = base ? base + 1 : devname;
             int n = snprintf(p->content, sizeof(p->content),
@@ -302,8 +382,9 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
             p->content_len = 0;
         }
     } else if (type == SF_DEV_CHAR_UEVENT) {
-        const char *devname = NULL, *subsystem = NULL;
-        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+        char devname[64];
+        const char *subsystem = NULL;
+        if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) == 0) {
             int n = snprintf(p->content, sizeof(p->content),
                              "MAJOR=%lu\nMINOR=%lu\nDEVNAME=%s\nSUBSYSTEM=%s\n",
                              (unsigned long)((devt >> 8) & 0xffU),
@@ -319,8 +400,9 @@ static sysfs_priv_t *sysfs_priv_create(sf_type_t type, int loop_idx,
                          (unsigned long)(devt & 0xffU));
         p->content_len = (size_t)(n > 0 ? n : 0);
     } else if (type == SF_DEVICES_VDEV_UEVENT) {
-        const char *devname = NULL, *subsystem = NULL;
-        if (sysfs_devchar_name(devt, &devname, &subsystem) == 0) {
+        char devname[64];
+        const char *subsystem = NULL;
+        if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) == 0) {
             int n = snprintf(p->content, sizeof(p->content),
                              "MAJOR=%lu\nMINOR=%lu\nDEVNAME=%s\nSUBSYSTEM=%s\n"
                              "DEVPATH=/devices/virtual/%s/%s\n",
@@ -520,8 +602,9 @@ static int sysfs_lookup(vnode_t *dir, const char *name, vnode_t **out)
         if (*p != '\0')
             return -ENOENT;
         uint64_t devt = ((uint64_t)(maj & 0xffU) << 8) | (min & 0xffU);
-        const char *devname = NULL, *subsystem = NULL;
-        if (sysfs_devchar_name(devt, &devname, &subsystem) < 0)
+        char devname[64];
+        const char *subsystem = NULL;
+        if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) < 0)
             return -ENOENT;
         child_type = SF_DEV_CHAR_ENTRY;
         child_idx = (int)(devt & 0xffffU);
@@ -848,13 +931,12 @@ static int sysfs_readlink(vnode_t *vn, char *buf, size_t sz)
          * util_resolve_sys_link(), and the resulting syspath must equal the
          * one an enumerate from /sys/class yields — libinput's
          * evdev_device_have_same_syspath() compares them exactly. */
-        const char *devname = NULL, *subsystem = NULL;
+        char devname[64];
+        const char *subsystem = NULL;
         uint64_t devt = dm->devt;
         if (devt == 0)
             devt = (uint64_t)((uint32_t)dm->loop_idx & 0xffffU);
-        if (sysfs_devchar_name(devt, &devname, &subsystem) < 0)
-            return -ENOENT;
-        if (!devname || !subsystem)
+        if (sysfs_devchar_name(devt, devname, sizeof(devname), &subsystem) < 0)
             return -ENOENT;
         const char *base = strrchr(devname, '/');
         base = base ? base + 1 : devname;
@@ -1161,8 +1243,9 @@ static int sysfs_fwrite(vfile_t *vf, const char *buf, size_t count)
     if (nl) *nl = 0;
     if (action[0] == 0)
         return -EINVAL;
-    const char *devname = NULL, *subsystem = NULL;
-    if (sysfs_devchar_name(p->devt, &devname, &subsystem) < 0)
+    char devname[64];
+    const char *subsystem = NULL;
+    if (sysfs_devchar_name(p->devt, devname, sizeof(devname), &subsystem) < 0)
         return -ENOENT;
     const char *base = strrchr(devname, '/');
     base = base ? base + 1 : devname;
