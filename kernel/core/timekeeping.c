@@ -14,6 +14,13 @@ static uint64_t g_realtime_base_nsec;
 /* Bumped on every discontinuous realtime-clock set; timerfd
  * TFD_TIMER_CANCEL_ON_SET compares against the generation at arm time. */
 static uint64_t g_realtime_set_gen;
+/* Writer-writer mutual exclusion only.  Readers take no lock: the realtime
+ * anchor is guarded by a seqlock (g_rt_seq odd while a writer is inside),
+ * so every clock_gettime/gettimeofday in the kernel skips the lock convoy
+ * the previous spinlock created on multi-core.  On 32-bit targets the u64
+ * fields can tear, so readers additionally re-read the trio and retry on
+ * any mismatch — a torn read can never be accepted. */
+static volatile uint32_t g_rt_seq;
 static spinlock_t g_timekeeping_lock = SPINLOCK_INIT;
 
 static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
@@ -40,11 +47,21 @@ void timekeeping_get_monotonic(uint64_t ts[2]) {
 }
 
 void timekeeping_get_realtime(uint64_t ts[2]) {
-    uint64_t flags = spin_lock_irqsave(&g_timekeeping_lock);
-    uint64_t base_ticks = g_realtime_base_ticks;
-    uint64_t base_sec = g_realtime_base_sec;
-    uint64_t base_nsec = g_realtime_base_nsec;
-    spin_unlock_irqrestore(&g_timekeeping_lock, flags);
+    uint32_t seq;
+    uint64_t base_ticks, base_sec, base_nsec;
+    do {
+        seq = __atomic_load_n(&g_rt_seq, __ATOMIC_ACQUIRE);
+        base_ticks = __atomic_load_n(&g_realtime_base_ticks, __ATOMIC_RELAXED);
+        base_sec   = __atomic_load_n(&g_realtime_base_sec, __ATOMIC_RELAXED);
+        base_nsec  = __atomic_load_n(&g_realtime_base_nsec, __ATOMIC_RELAXED);
+    } while ((seq & 1u) ||
+             seq != __atomic_load_n(&g_rt_seq, __ATOMIC_ACQUIRE) ||
+             base_ticks != __atomic_load_n(&g_realtime_base_ticks,
+                                           __ATOMIC_RELAXED) ||
+             base_sec   != __atomic_load_n(&g_realtime_base_sec,
+                                           __ATOMIC_RELAXED) ||
+             base_nsec  != __atomic_load_n(&g_realtime_base_nsec,
+                                           __ATOMIC_RELAXED));
 
     uint64_t delta[2];
     ticks_to_timespec(timer_get_ticks() - base_ticks, delta);
@@ -62,11 +79,13 @@ int timekeeping_set_realtime(uint64_t sec, uint64_t nsec) {
         nsec %= 1000000000ULL;
     }
     uint64_t flags = spin_lock_irqsave(&g_timekeeping_lock);
+    __atomic_add_fetch(&g_rt_seq, 1, __ATOMIC_ACQUIRE);
     g_realtime_base_ticks = timer_get_ticks();
     g_realtime_base_cycles = arch_vdso_counter();
     g_realtime_base_sec = sec;
     g_realtime_base_nsec = nsec;
     g_realtime_set_gen++;
+    __atomic_add_fetch(&g_rt_seq, 1, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_timekeeping_lock, flags);
     /* Keep the vDSO realtime anchor in sync (seqlock on the reader side);
      * pass the recorded cycle so both paths agree bit for bit. */
@@ -75,8 +94,5 @@ int timekeeping_set_realtime(uint64_t sec, uint64_t nsec) {
 }
 
 uint64_t timekeeping_realtime_set_generation(void) {
-    uint64_t flags = spin_lock_irqsave(&g_timekeeping_lock);
-    uint64_t gen = g_realtime_set_gen;
-    spin_unlock_irqrestore(&g_timekeeping_lock, flags);
-    return gen;
+    return __atomic_load_n(&g_realtime_set_gen, __ATOMIC_RELAXED);
 }

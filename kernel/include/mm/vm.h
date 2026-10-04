@@ -53,13 +53,15 @@ struct page_cache_page;
 #define NOMMU_ALLOC_TLS    2
 #endif
 
+struct vfile;
+
 typedef struct vm_area {
     vaddr_t         start;
     vaddr_t         end;
     uint64_t        vm_flags;
     pte_t           pte_flags;
     uint32_t        vmar_cap;       /* Native VMAR capability (PROT bits) at creation */
-    int             file_fd;
+    struct vfile   *file;   /* file-backed VMA owns one vfile reference */
     int             sysv_shmid;
     uint64_t        file_offset;
     struct vmo     *vmo;
@@ -248,6 +250,14 @@ typedef struct mm_struct {
     uint32_t   def_flags;
     uint8_t    membarrier_registered; /* MEMBARRIER_CMD_REGISTER_* state */
     uint8_t    _pad_membarrier[3];
+    /*
+     * Address of the read-only signal return trampoline page installed by
+     * arch_setup_signal_trampoline(), or 0 on architectures that return to the
+     * trampoline slot inside the signal frame instead.  Consulted through
+     * arch_signal_tramp_addr().  Fork inherits the parent's value along with
+     * the copied page tables, so it stays valid for the child.
+     */
+    vaddr_t    sig_tramp;
     uint8_t    has_vdso;   /* vDSO/vvar fixed mappings present (mm/vdso.h) */
     uint8_t    _pad_vdso[3];
     refcount_t refcount;
@@ -360,7 +370,7 @@ static inline size_t mm_rss_get(mm_struct_t *mm)
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                        int prot, int flags);
 vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
-                            int prot, int flags, int file_fd,
+                            int prot, int flags, struct vfile *file,
                             uint64_t file_offset);
 vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot, int flags, struct vmo *vmo,
@@ -417,7 +427,6 @@ pte_t mm_user_stack_pte_flags(void);
 pte_t mm_user_brk_pte_flags(void);
 int   mm_pte_flags_allow_access(pte_t pte_flags);
 pte_t mm_pte_flags_apply_prot(pte_t old_flags, pte_t prot_flags);
-pte_t mm_pte_flags_make_writable_dirty(pte_t pte_flags);
 
 /* User-space W^X policy (mm/wx.c): parses the a20.wx= cmdline and filters
  * W|X protection bits out of a requested prot. */

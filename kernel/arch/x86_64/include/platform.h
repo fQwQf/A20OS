@@ -24,7 +24,8 @@ size_t arch_ram_range_count(void);
 int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 
 /* MMIO base addresses (kernel virtual) */
-#define LAPIC_BASE         (0xFEE00000UL + PAGE_OFFSET)
+#define LAPIC_PHYS_BASE    0xFEE00000UL
+#define LAPIC_BASE         (LAPIC_PHYS_BASE + PAGE_OFFSET)
 #define IOAPIC_BASE        (0xFEC00000UL + PAGE_OFFSET)
 #define PCI_ECAM_BASE      (0xB0000000UL + PAGE_OFFSET)
 #define PCI_MMIO_BASE      (0xC0000000UL + PAGE_OFFSET)
@@ -51,8 +52,9 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
  * trap/irqchip.c for why this is runtime state and not a board #ifdef. */
 void arch_pci_set_intx_gsi_base(uint32_t gsi_base);
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector);
-/* Mask/unmask the IOAPIC entry backing a routed PCI vector (0x40+gsi).
- * Vectors outside the routed PCI window are ignored. */
+/* Mask/unmask the interrupt source behind a driver IRQ line id: the IOAPIC
+ * entry for a routed PCI vector (0x40+gsi) or the local APIC LVT for a
+ * message-signalled one (0xd0-0xef).  Anything else is ignored. */
 void x86_64_pci_irq_set_masked(int vector, int masked);
 void x86_64_set_trap_state(uint64_t cause, uint64_t epc, uint64_t tval);
 uint64_t x86_64_get_trap_cause(void);

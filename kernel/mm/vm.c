@@ -464,11 +464,12 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
 
 static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
     if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
-        vfile_t *vf = vfs_get_file_ref(vma->file_fd);
+        vfile_t *vf = vma->file;
         if (!vf)
             return -EBADF;
+        vfile_get(vf);
         if (!vf->vnode) {
-            vfs_put_file_ref(vma->file_fd, vf);
+            vfs_put_file(vf);
             return -EBADF;
         }
         uint64_t start = ROUND_DOWN(vma->start, PAGE_SIZE);
@@ -478,11 +479,11 @@ static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_
             if (pte && (*pte & PTE_V))
                 continue;
             if (mm_shared_file_fault(mm, vma, va, vf) < 0) {
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file(vf);
                 return -ENOMEM;
             }
         }
-        vfs_put_file_ref(vma->file_fd, vf);
+        vfs_put_file(vf);
         return 0;
     }
 

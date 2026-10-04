@@ -318,7 +318,10 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
 }
 
 int net_bind(int gfd, const void *addr, size_t addrlen) {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_bind_sock(net_socket_from_file(gfd), addr, addrlen);
+}
+
+int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
     if (!s) return -ENOTSOCK;
     int family = sockaddr_family(addr, addrlen);
     if (family < 0) return family;
@@ -389,7 +392,10 @@ int net_bind(int gfd, const void *addr, size_t addrlen) {
 }
 
 int net_connect(int gfd, const void *addr, size_t addrlen) {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_connect_sock(net_socket_from_file(gfd), addr, addrlen);
+}
+
+int net_connect_sock(net_socket_t *s, const void *addr, size_t addrlen) {
     if (!s) return -ENOTSOCK;
     if (!addr || addrlen > NET_SOCKADDR_MAX) return -EINVAL;
     if (s->connected) return -EISCONN;
@@ -508,7 +514,12 @@ static int net_msg_flags_check(int flags)
 
 int net_sendto(int gfd, const void *buf, size_t len, int flags,
                const void *addr, size_t addrlen) {
-    net_socket_t *s = (gfd >= 0) ? net_socket_from_file(gfd) : NULL;
+    return net_sendto_sock(net_socket_from_file(gfd), buf, len, flags,
+                           addr, addrlen);
+}
+
+int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
+                    const void *addr, size_t addrlen) {
     if (!s) return -ENOTSOCK;
     int bad = net_msg_flags_check(flags);
     if (bad) return bad;

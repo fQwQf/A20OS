@@ -53,12 +53,126 @@ uint32_t fat_read(fat32_sb_t *sb, uint32_t cluster) {
 
 /* Write the FAT entry for a cluster */
 void fat_write(fat32_sb_t *sb, uint32_t cluster, uint32_t next) {
-    /* Read-modify-write to preserve top nibble */
-    uint32_t val;
-    uint64_t off = fat_entry_offset(sb, cluster);
-    bcache_read_bytes(sb->bc, off, &val, 4);
-    val = (val & 0xF0000000) | (next & 0x0FFFFFFF);
-    bcache_write_bytes(sb->bc, off, &val, 4);
+    /* Every copy of the FAT has to move together: they are mirrors, and
+     * fsck.fat answers "FATs differ but appear to be intact" the first time a
+     * file is created if only the first one was updated.  The upper nibble is
+     * the cluster's high four bits and part of the entry, so each copy is read
+     * back before it is patched. */
+    uint32_t copies = sb->num_fats ? sb->num_fats : 1;
+    for (uint32_t f = 0; f < copies; f++) {
+        uint64_t off = fat_entry_offset(sb, cluster) +
+                       (uint64_t)f * sb->sectors_per_fat * FAT32_SECTOR_SIZE;
+        uint32_t val;
+        if (bcache_read_bytes(sb->bc, off, &val, 4) < 0)
+            continue;
+        val = (val & 0xF0000000) | (next & 0x0FFFFFFF);
+        bcache_write_bytes(sb->bc, off, &val, 4);
+    }
+}
+
+/* ---- FSInfo ---- */
+
+static void fat32_put_le16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void fat32_put_le32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t fat32_get_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t fat32_get_le16(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static int fat32_fsinfo_is(const uint8_t *sec)
+{
+    return fat32_get_le32(sec) == FAT32_FSINFO_LEAD_SIG &&
+           fat32_get_le32(sec + FAT32_FSINFO_OFF_STRUC) ==
+               FAT32_FSINFO_STRUC_SIG;
+}
+
+/* Read the two hints.  A sector without both signatures carries nothing usable,
+ * and the caller counts from the FAT instead. */
+static void fat32_fsinfo_read(fat32_sb_t *sb)
+{
+    uint8_t sec[FAT32_SECTOR_SIZE];
+    if (bcache_read_bytes(sb->bc, sb->fsinfo_off, sec, sizeof(sec)) < 0)
+        return;
+    if (!fat32_fsinfo_is(sec))
+        return;
+    uint32_t free = fat32_get_le32(sec + FAT32_FSINFO_OFF_FREE);
+    /* A count no allocation could have produced describes nothing. */
+    if (free <= sb->total_clusters)
+        sb->free_clusters = free;
+    uint16_t next = fat32_get_le16(sec + FAT32_FSINFO_OFF_NEXT);
+    if (next >= 2 && next < sb->total_clusters + 2)
+        sb->next_free_cluster = next;
+}
+
+/* Count the free clusters straight out of the FAT.  The FAT is the authority
+ * the counter has to agree with, so this is what a missing or nonsense
+ * FSInfo count is replaced by. */
+static uint32_t fat32_count_free_clusters(fat32_sb_t *sb)
+{
+    uint32_t free_count = 0;
+    for (uint32_t c = 2; c < sb->total_clusters + 2; c++)
+        if (fat_read(sb, c) == FAT32_CLUSTER_FREE)
+            free_count++;
+    return free_count;
+}
+
+static void fat32_fsinfo_writeback(fat32_sb_t *sb)
+{
+    if (!sb->fsinfo_dirty)
+        return;
+    uint8_t sec[FAT32_SECTOR_SIZE];
+    if (bcache_read_bytes(sb->bc, sb->fsinfo_off, sec, sizeof(sec)) < 0)
+        return;
+    if (!fat32_fsinfo_is(sec))
+        return;   /* not an FSInfo sector: leave it exactly as it was */
+    if (sb->free_clusters == FAT32_FSINFO_UNKNOWN)
+        sb->free_clusters = fat32_count_free_clusters(sb);
+    fat32_put_le32(sec + FAT32_FSINFO_OFF_FREE, sb->free_clusters);
+    fat32_put_le16(sec + FAT32_FSINFO_OFF_NEXT,
+                   (uint16_t)(sb->next_free_cluster < 0x10000U
+                              ? sb->next_free_cluster : 0xFFFFU));
+    bcache_write_bytes(sb->bc, sb->fsinfo_off, sec, sizeof(sec));
+    sb->fsinfo_dirty = 0;
+}
+
+/* Move the counter by `delta` free clusters: positive when a cluster is
+ * released, negative when one is taken. */
+static void fat32_fsinfo_account(fat32_sb_t *sb, int delta)
+{
+    if (sb->free_clusters == FAT32_FSINFO_UNKNOWN)
+        return;
+    sb->free_clusters = (uint32_t)((int64_t)sb->free_clusters + delta);
+    sb->fsinfo_dirty = 1;
+}
+
+/* Runs at the top of every generic sync, so a plain `sync` leaves the hints as
+ * current as the FAT they describe.  Unmount writes them once more after the
+ * FAT itself has reached the device: the hint has to describe a FAT that is
+ * already there. */
+static int fat32_sync_hook(bcache_t *bc)
+{
+    fat32_sb_t *sb = (fat32_sb_t *)bc->owner;
+    if (sb)
+        fat32_fsinfo_writeback(sb);
+    return 0;
 }
 
 /* Follow cluster chain, reading N bytes at file offset */
@@ -123,6 +237,7 @@ uint32_t fat32_alloc_cluster(fat32_sb_t *sb) {
                 sb->next_free_cluster = c + 1;
                 if (sb->next_free_cluster >= end)
                     sb->next_free_cluster = 2;
+                fat32_fsinfo_account(sb, -1);
                 return c;
             }
         }
@@ -198,6 +313,9 @@ void fat32_vcache_add(fat32_sb_t *sb, uint64_t ino, vnode_t *vn) {
     sb->vcache_count++;
 }
 
+/* Drop the entry and hand back the vnode still borrowed from the cache.  The
+ * reference fat32_vcache_add took comes with it, and the caller's vnode_put is
+ * what releases it -- reaching zero runs the reclaim work an unlink deferred. */
 vnode_t *fat32_vcache_remove(fat32_sb_t *sb, uint64_t ino) {
     for (int i = 0; i < sb->vcache_count; i++) {
         if (sb->vcache[i].vn && sb->vcache[i].ino == ino) {
@@ -216,6 +334,7 @@ void fat32_free_cluster_chain(fat32_sb_t *sb, uint32_t cluster) {
     while (cluster >= 2 && cluster < FAT32_CLUSTER_END) {
         uint32_t next = fat_read(sb, cluster);
         fat_write(sb, cluster, FAT32_CLUSTER_FREE);
+        fat32_fsinfo_account(sb, 1);
         cluster = next;
     }
 }
@@ -341,6 +460,7 @@ vnode_t *fat32_make_vnode(fat32_sb_t *sb, uint32_t cluster,
     fp->file_size     = size;
     fp->is_dir        = is_dir;
     fp->unlinked      = 0;
+    fp->open_count    = 0;
     vn->fs_data = fp;
     fat32_vcache_add(sb, ino, vn);
     return vn;
@@ -408,6 +528,24 @@ vnode_t *fat32_mount(bcache_t *bc) {
     sb->total_clusters     = (bpb.total_sectors_32 - sb->first_data_sector)
                                / bpb.sectors_per_cluster;
     sb->next_free_cluster  = 2;
+    sb->num_fats           = bpb.num_fats;
+    /* The boot sector names the FSInfo sector.  Falling back to the sector
+     * before the data region finds nothing on an image whose reserved area
+     * holds the FSInfo and its backup elsewhere, and the free-cluster count
+     * then never reaches the image at all. */
+    sb->fsinfo_off         = (uint64_t)(bpb.fs_info ? bpb.fs_info
+                             : sb->first_data_sector - 1) *
+                             FAT32_SECTOR_SIZE;
+    sb->free_clusters      = FAT32_FSINFO_UNKNOWN;
+    sb->fsinfo_dirty       = 0;
+    if (sb->first_data_sector > 0)
+        fat32_fsinfo_read(sb);
+
+    /* The block cache needs a way back to the filesystem for its pre-sync
+     * hook: FAT uses it to write the FSInfo hints back before the FAT that
+     * they describe is flushed. */
+    bc->owner = sb;
+    bcache_set_sync_hook(sb->bc, fat32_sync_hook, sb);
 
 
     kdebug("[FAT32] Mounted: cluster=%d sectors, FAT starts @%d, data @%d, root_cluster=%d\n",
@@ -426,6 +564,12 @@ void fat32_unmount(vnode_t *root) {
     fat32_vnode_priv_t *fp = (fat32_vnode_priv_t *)root->fs_data;
     fat32_sb_t *sb = fp->sb;
     bcache_sync(sb->bc);
+    /* The hints have to describe a FAT that is already on the device, so they
+     * are written after the flush that carried the FAT, not before it. */
+    fat32_fsinfo_writeback(sb);
+    bcache_sync(sb->bc);
+    bcache_set_sync_hook(sb->bc, NULL, NULL);
+    sb->bc->owner = NULL;
 
     /* Drop all cache-owned vnode references; survivors (still-open files)
      * stay alive on their remaining references and unlinked inodes are

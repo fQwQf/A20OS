@@ -265,6 +265,58 @@ static void bcache_set_page_dirty_locked(bcache_t *bc, pcache_entry_t *e,
     }
 }
 
+/* ---- journal hold set -------------------------------------------------
+ *
+ * A filesystem that logs its metadata (ext4/JBD2) needs the block cache to
+ * honour one rule: a page covered by an uncommitted transaction must not reach
+ * its home location, whatever asks for a flush.  The hold bit lives on the
+ * cache entry rather than in a side table so that both the writeback loop and
+ * the evictor see it -- a held page that could be evicted would lose the only
+ * copy of the new metadata, which is exactly what the transaction protects. */
+void bcache_hold_page(bcache_t *bc, uint64_t page_no)
+{
+    if (!bc)
+        return;
+    uint64_t flags = spin_lock_irqsave(&bc->lock);
+    for (int i = 0; i < bc->page_pool_size; i++) {
+        pcache_entry_t *e = &bc->page_pool[i];
+        if (e->valid && e->page_no == page_no) {
+            e->held = 1;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&bc->lock, flags);
+}
+
+void bcache_release_holds(bcache_t *bc)
+{
+    if (!bc)
+        return;
+    uint64_t flags = spin_lock_irqsave(&bc->lock);
+    for (int i = 0; i < bc->page_pool_size; i++)
+        bc->page_pool[i].held = 0;
+    spin_unlock_irqrestore(&bc->lock, flags);
+}
+
+size_t bcache_held_pages(const bcache_t *bc)
+{
+    if (!bc)
+        return 0;
+    size_t n = 0;
+    for (int i = 0; i < bc->page_pool_size; i++)
+        if (bc->page_pool[i].valid && bc->page_pool[i].held)
+            n++;
+    return n;
+}
+
+void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *), void *owner)
+{
+    if (!bc)
+        return;
+    bc->sync_hook = hook;
+    bc->owner = hook ? owner : NULL;
+}
+
 /* Pool is BCACHE_MAX_BLOCKS (1024) entries of BCACHE_BLOCK_SIZE (512) bytes,
  * i.e. 512 KiB.  Both constants live in kernel/include/fs/block_cache.h; a
  * previous version of this comment claimed 8192 entries, which contradicted
@@ -582,10 +634,29 @@ static int bcache_sync_page_selected(const uint64_t *page_nos, size_t count,
  * recovery must not claim success after a timed-out VirtIO request merely
  * because older callers used a void sync interface.
  */
+enum bcache_sync_mode {
+    BC_SYNC_ALL,     /* every dirty page except journal-held ones */
+    BC_SYNC_SCOPED,  /* the @page_nos selection, minus journal-held ones */
+    BC_SYNC_HELD,    /* only journal-held pages (a transaction checkpoint) */
+};
+
 static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
-                              size_t page_count) {
+                              size_t page_count,
+                              enum bcache_sync_mode mode) {
     if (!bc || !bc->dev)
         return -EINVAL;
+    /* Commit the filesystem's own log first.  ext4 uses this to write a JBD2
+     * transaction and checkpoint it before any of its metadata pages are
+     * allowed out, which is the whole ordering guarantee the journal buys.
+     * The hook's own internal syncs re-enter here with sync_hook_depth > 0
+     * and are deliberately not hooked, so the commit cannot recurse. */
+    if (bc->sync_hook && bc->sync_hook_depth == 0) {
+        bc->sync_hook_depth++;
+        int hook_ret = bc->sync_hook(bc);
+        bc->sync_hook_depth--;
+        if (hook_ret < 0)
+            return hook_ret;
+    }
     /* A recently failed write means the device is still wedged; fail fast
      * instead of paying another driver-level timeout per dirty entry. */
     if (bcache_write_quarantined(bc))
@@ -608,9 +679,12 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
             spin_unlock_irqrestore(&bc->lock, flags);
             break;
         }
-        if (!bc->page_pool[i].valid || !bc->page_pool[i].dirty ||
-            !bcache_sync_page_selected(page_nos, page_count,
-                                       bc->page_pool[i].page_no)) {
+        pcache_entry_t *cur = &bc->page_pool[i];
+        if (!cur->valid || !cur->dirty ||
+            (mode == BC_SYNC_HELD) != (cur->held != 0) ||
+            (mode == BC_SYNC_SCOPED &&
+             !bcache_sync_page_selected(page_nos, page_count,
+                                        cur->page_no))) {
             spin_unlock_irqrestore(&bc->lock, flags);
             continue;
         }
@@ -641,8 +715,10 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
             flags = spin_lock_irqsave(&bc->lock);
             pcache_entry_t *candidate = &bc->page_pool[index];
             if (!candidate->valid || !candidate->dirty ||
-                !bcache_sync_page_selected(page_nos, page_count,
-                                           candidate->page_no) ||
+                (mode == BC_SYNC_HELD) != (candidate->held != 0) ||
+                (mode == BC_SYNC_SCOPED &&
+                 !bcache_sync_page_selected(page_nos, page_count,
+                                            candidate->page_no)) ||
                 candidate->page_no != sync_nos[batch_pages - 1] + 1) {
                 spin_unlock_irqrestore(&bc->lock, flags);
                 break;
@@ -691,7 +767,10 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
     if (page_tmp)
         kfree(page_tmp);
 
-    for (int i = 0; !first_error && i < bc->pool_size; i++) {
+    /* Held pages are 4 KiB filesystem blocks; the 512-byte pool holds only
+     * never-journalled entries, so a checkpoint has nothing to do there. */
+    for (int i = 0; mode != BC_SYNC_HELD && !first_error &&
+                i < bc->pool_size; i++) {
         uint64_t flags = spin_lock_irqsave(&bc->lock);
         if (bc->dirty_blocks == 0) {
             spin_unlock_irqrestore(&bc->lock, flags);
@@ -739,7 +818,7 @@ static int bcache_sync_common(bcache_t *bc, const uint64_t *page_nos,
 }
 
 int bcache_sync_checked(bcache_t *bc) {
-    return bcache_sync_common(bc, NULL, 0);
+    return bcache_sync_common(bc, NULL, 0, BC_SYNC_ALL);
 }
 
 /*
@@ -750,8 +829,19 @@ int bcache_sync_checked(bcache_t *bc) {
  * Ordering (writeback_lock + per-page dirty_gen) is identical to a full sync.
  */
 int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos, size_t count) {
-    return bcache_sync_common(bc, page_nos, count);
+    return bcache_sync_common(bc, page_nos, count, BC_SYNC_SCOPED);
 }
+
+/*
+ * Journal checkpoint: flush only the pages a transaction is holding.  Called
+ * by the filesystem immediately after its commit block is durable, at which
+ * point the metadata may safely reach its home location -- so the caller
+ * releases the holds (bcache_release_holds) around this call.
+ */
+int bcache_sync_held(bcache_t *bc) {
+    return bcache_sync_common(bc, NULL, 0, BC_SYNC_HELD);
+}
+
 
 // Exists for legacy fsync/unmount call sites that do not propagate errors upward.
 void bcache_sync(bcache_t *bc) {
@@ -843,10 +933,10 @@ static pcache_entry_t *pcache_evict_locked(bcache_t *bc) {
                 e = e->prev;
                 continue;
             }
-            if (e->valid) {
-                uint64_t bf = pcache_bucket_lock_irqsave(bc, e->page_no);
+if (e->valid) {
+                uint64_t bf = bcache_bucket_lock_irqsave(bc, e->page_no);
                 if (cache_ref_read(&e->ref) == 0 && e->valid &&
-                    !(quarantined && e->dirty)) {
+                    !e->held && !(quarantined && e->dirty)) {
                     if (e->accessed) {
                         e->accessed = 0;
                         cleared_accessed = 1;
@@ -1183,4 +1273,32 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t 
         len      -= chunk;
     }
     return 0;
+}
+
+/*
+ * Drop one 4 KiB page.  The journal writes its log blocks with synchronous
+ * unbuffered I/O, in an order the cache cannot express (descriptor, then data,
+ * then commit), so the cached image of a log block goes stale the moment it is
+ * written.  Without this a later read would return the pre-write contents.
+ * Only ever called on clean pages: a dirty one is dropped as well, because a
+ * journal log block has no legitimate buffered copy.
+ */
+void bcache_invalidate_page(bcache_t *bc, uint64_t page_no)
+{
+    if (!bc)
+        return;
+    uint64_t flags = spin_lock_irqsave(&bc->lock);
+    uint64_t bf = pcache_bucket_lock_irqsave(bc, page_no);
+    pcache_entry_t *e = pcache_find_locked(bc, page_no);
+    if (e) {
+        pcache_hash_remove_locked(bc, e);
+        page_lru_remove(e);
+        e->valid = 0;
+        e->held = 0;
+        e->accessed = 0;
+        bcache_set_page_dirty_locked(bc, e, 0);
+        e->ref = 0;
+    }
+    pcache_bucket_unlock_irqrestore(bc, page_no, bf);
+    spin_unlock_irqrestore(&bc->lock, flags);
 }

@@ -177,6 +177,18 @@ smoke-mm-pt-race:
 smoke-vfs-stress:
 	$(PYTHON) tools/smoke.py smoke-vfs-stress
 
+smoke-lfs:
+	$(PYTHON) tools/smoke.py smoke-lfs
+
+smoke-pivot-root:
+	$(PYTHON) tools/smoke.py smoke-pivot-root
+
+smoke-vfs-stress-smp2:
+	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp2
+
+smoke-vfs-stress-smp8:
+	$(PYTHON) tools/smoke.py smoke-vfs-stress-smp8
+
 smoke-fsync-durability:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
@@ -284,6 +296,38 @@ smoke-timer-edge:
 # ================================================================
 smoke-mntns:
 	$(PYTHON) tools/smoke.py smoke-mntns
+
+smoke-mtcorrupt:
+	$(PYTHON) tools/smoke.py smoke-mtcorrupt
+
+smoke-pidns:
+	$(PYTHON) tools/smoke.py smoke-pidns
+
+# ================================================================
+# User namespace smoke (unshare/setns CLONE_NEWUSER + /proc/<pid>/uid_map)
+# ================================================================
+smoke-userns:
+	$(PYTHON) tools/smoke.py smoke-userns
+
+# ================================================================
+# USB hub smoke
+# ================================================================
+# The keyboard and mouse hang off a hub nested behind the xHCI root hub, so
+# nothing is reachable by the flat "enumerate the controller's own ports" walk:
+# the hub itself has to be enumerated, its class driver has to expose a second
+# tier of ports, and the devices behind it have to come up through that tier.
+smoke-usb-hub-x86_64:
+	$(PYTHON) tools/smoke.py smoke-usb-hub-x86_64
+
+# ================================================================
+# MSI-X smoke (x86_64)
+# ================================================================
+# The only board with a message-signalled interrupt path at all, so the only
+# place the arch-independent MSI-X code and the x86 LAPIC programming meet.
+# See the case comment in tools/smoke_cases.py for what the pass/fail line
+# actually proves -- the delivery line is printed from the interrupt handler.
+smoke-msix-x86_64:
+	$(PYTHON) tools/smoke.py smoke-msix-x86_64
 
 # ================================================================
 # PCI bridge traversal smoke
@@ -450,6 +494,21 @@ smoke-smp-lock-contention:
 	fi
 
 # ================================================================
+# ext4 JBD2 crash-consistency smoke
+# ================================================================
+# Halts the machine at each point in the JBD2 commit sequence, reboots the same
+# image, and checks both what survived and what the host's e2fsck makes of the
+# result.  The gate lives in tools/ext4_journal_gate.py because it is eight
+# boots plus four host-side fsck runs; inline shell here would be unreadable.
+#
+# ARCH selects the build directory as well as the QEMU machine, so this is the
+# same gate on every architecture the kernel boots under QEMU rather than one
+# that only proves x86_64.
+smoke-ext4-journal: dev-build $(EXT4_JOURNAL_IMG)
+	$(PYTHON) tools/ext4_journal_gate.py --arch "$(ARCH)" \
+		--build-dir "$(BUILD_DIR)" \
+		--log-dir "$(SMOKE_LOG_DIR)" \
+		--delay $(SMOKE_INPUT_DELAY_EXT4) --timeout $(SMOKE_TIMEOUT_EXT4)
 # Network-lane observability smoke (stage A)
 # ================================================================
 # Boots a NR_CPUS=4 NET_LANES=4 build, runs net_stress_test, and reads

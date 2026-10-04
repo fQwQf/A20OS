@@ -104,20 +104,25 @@ ext4 从 block cache 挂载，并使用强引用 vnode cache：同一 `(superblo
 | read/write/lseek | Y | — | `g_ext4_fops`（`ext4_file.c`）。 |
 | readdir | Y | — | `ext4_freaddir`（`ext4_file.c`）。返回 `DT_DIR`/`DT_REG`/`DT_LNK`。 |
 | ioctl | N | `-ENOTTY` | `.ioctl` 为 `NULL`。 |
-| fsync | partial | — | 同步共享脏映射与 vnode page cache，再定点刷出该文件的数据、inode 和相关分配元数据；超出定点收集范围时回退为整个 mount 的 block-cache sync。运行时 mutation 不写 JBD2 journal，因此没有 ext4 ordered/journal 保证。 |
+| fsync | Y | — | 同步共享脏映射与 vnode page cache，再定点刷出该文件的数据、inode 和相关分配元数据；超出定点收集范围时回退为整个 mount 的 block-cache sync。运行时 mutation 全部经 `ext4_journal_meta_write` 记入 JBD2 事务，`sync()`/`fsync()` 触发 commit（ordered 语义：数据先落盘，日志副本后写，commit block 最后），因此具备 ext4 ordered/journal 的断电原子性。 |
 | xattr | partial | — | 无 ext4 xattr 后端 hook；reg/dir/lnk 的值只进入全局 RAM 表。 |
 
 顺序保证（ext4）：
 
-- inode/block allocation 由 `alloc_lock` 保护，namespace mutation 由 `metadata_lock` 串行；运行时没有 journal transaction 或 ordered writeback。
-- 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些运行时更新不受 journal transaction 保护，断电原子性不等同 Linux ext4。
+- inode/block allocation 由 `alloc_lock` 保护，namespace mutation 由 `metadata_lock` 串行。每次 metadata 写入都经 `ext4_journal_meta_write`：写入 block cache 的同时登记事务覆盖的物理块并 `bcache_hold_page` 持有该页，使任何通用 sync 都无法在日志副本之前把它写出去。
+- commit 顺序（`ext4_journal_commit`）：先 `bcache_sync_checked` 落数据 → 置 `EXT4_FEATURE_INCOMPAT_RECOVER` → 写 descriptor → 写各数据块 → 写 journal superblock 的 `s_start` → 最后写 commit block → `bcache_release_holds` + `bcache_sync_held` 落元数据 → 日志置空并清 recover 标志。commit block 之前崩溃则整个事务被丢弃，之后崩溃则下个 mount 必须重放。
+- 挂载时是否重放不看 `EXT4_FEATURE_INCOMPAT_RECOVER` 一个信号：该位与 superblock 的 free 计数共享同一个 cache page，而该页被打开的事务持有，因此崩溃可能丢掉这个位却留下非空日志。`ext4_journal_log_pending()` 直接读 journal superblock 的 `s_start`，这才是权威判据。
+- 数据块的 checksum 记在 descriptor 的 tag 里，不写进块本身最后 4 字节——那 4 个字节属于文件系统（block bitmap 的校验覆盖它们），把 journal checksum 写进去会在重放时污染 bitmap 并使其与 group descriptor 里的 `bg_block_bitmap_csum` 不一致。
+- 普通 `ext4_vn_rename` 通过一组目录项更新完成，`RENAME_EXCHANGE` 交换两侧 inode；这些更新全部落在同一个 journal 事务里，因此断电原子性等同 Linux ext4 的 ordered 模式。
 - `vfs_fsync` 会先同步共享脏映射和 vnode page cache；ext4 的 `sync_vnode` 随后用 `bcache_sync_scoped` 刷出文件数据、inode table、bitmap、group descriptor 和 superblock 页，深层 extent 或定点数组不足时回退为整个 mount sync（`kernel/fs/vfs/file.c`、`kernel/fs/diskfs/ext4_sync.c`）。
 
 ext4 相对 Linux ABI 的缺口：
 
 - 只支持 fast symlink；更长 target 返回 `-ENAMETOOLONG`（`ext4.c`）。
 - hard link 已实现；`st_nlink` 来自 `i_links_count`（unlink 递减，link 递增）。
-- 挂载时对带 journal 的镜像执行 JBD2 recovery（`EXT4_FEATURE_INCOMPAT_RECOVER` 已在 `unsupported_incompat` 中显式排除，`ext4_journal_recover` 在挂载时运行），recovery 失败则 fail closed 拒绝挂载。
+- 挂载时对带 journal 的镜像执行 JBD2 recovery（`EXT4_FEATURE_INCOMPAT_RECOVER` 已在 `unsupported_incompat` 中显式排除，`ext4_journal_recover` 在挂载时运行），recovery 失败则 fail closed 拒绝挂载。日志非空而 recover 标志丢失时同样进入 recovery。
+- 只支持 JBD2 checksum v3 + `INCOMPAT_64BIT`（与 mke2fs 默认一致）；`COMPAT_CHECKSUM`（v1/v2）返回 `-EOPNOTSUPP`。
+- 崩溃一致性由 `make smoke-ext4-journal` 把守：四个注入点各做一次崩溃—重启往返，断言承诺过的写入没丢、没承诺的写入没回来，并在宿主机上用 `e2fsck -fn` 检查崩溃后的镜像和恢复后的镜像都干净。
 - 没有 xattr。
 - mount 时做 fail-closed feature 检查：不支持的 incompat 特性（meta_bg、bigalloc、inline_data、casefold、encryption、MMP）会拒绝挂载，而不是静默误读镜像。
 

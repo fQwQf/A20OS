@@ -1,5 +1,6 @@
 #define LINUX_SYSCALL_DECLARE_PROTOTYPES
 #include "syscall_impl.h"
+#include "fs/vfs/mount.h"
 #include "fs/vfs/path.h"
 #include "abi/linux/fcntl.h"
 #include "abi/linux/stat.h"
@@ -445,7 +446,7 @@ int64_t sys_statfs(const char *path, void *buf) {
     int pr = syscall_path_at(AT_FDCWD, kpath, full, sizeof(full));
     if (pr < 0) return pr;
     vnode_t *vn = vfs_resolve(full);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     kstatfs_t st;
     int r = vfs_statfs(vn, &st);
     vnode_put(vn);
@@ -514,7 +515,9 @@ int64_t sys_mount(const char *src, const char *target,
 }
 
 int64_t sys_umount2(const char *target, int flags) {
-    (void)flags;
+    /* The Linux MNT_* bits map straight onto the VFS flags. */
+    if (flags & ~(VFS_UMOUNT_FORCE | VFS_UMOUNT_DETACH | VFS_UMOUNT_EXPIRE))
+        return -EINVAL;
     if (!target) return -EFAULT;
     char ktarget[MAX_PATH_LEN];
     long prp15 = user_path_strncpy(ktarget, target, MAX_PATH_LEN);
@@ -539,7 +542,7 @@ int64_t sys_umount2(const char *target, int flags) {
         strncpy(ktarget, rooted, sizeof(ktarget) - 1);
         ktarget[sizeof(ktarget) - 1] = '\0';
     }
-    return vfs_umount(ktarget);
+    return vfs_umount_flags(ktarget, flags);
 }
 
 int64_t sys_utimensat(int dirfd, const char *path, void *times, int flags) {

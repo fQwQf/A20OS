@@ -234,6 +234,10 @@ void proc_task_init_common(task_t *t, task_t *parent, uint64_t clone_flags)
         memcpy(t->fs.cwd, parent->fs.cwd, MAX_PATH_LEN);
         memcpy(t->fs.root_path, parent->fs.root_path, MAX_PATH_LEN);
         memcpy(t->exec_path, parent->exec_path, MAX_PATH_LEN);
+        /* The child gets its own references, not aliases: parent and child
+         * chdir and pivot_root independently from here on, and each exit
+         * path releases its own pins. */
+        vfs_task_fs_pins_copy(t, parent);
     } else {
         t->fs.cwd[0] = '/';
         t->fs.cwd[1] = '\0';

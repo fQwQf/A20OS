@@ -1,6 +1,8 @@
 #ifndef _FS_READINESS_H
 #define _FS_READINESS_H
 
+struct vfile;
+
 #include "core/sync.h"
 #include "fs/vfs.h"
 
@@ -26,7 +28,8 @@ typedef struct readiness_state {
 } readiness_state_t;
 
 typedef struct readiness_interest {
-    int fd;
+    int fd;                 /* calling task's fd (ignored with F_GLOBAL_FD) */
+    struct vfile *vfile;    /* direct target with F_GLOBAL_FD */
     short events;
     short revents;
     uint32_t flags;

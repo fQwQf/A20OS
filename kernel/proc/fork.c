@@ -256,6 +256,29 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
         return -ENOMEM;
     }
 
+    /* PID namespace: the child joins the namespace the parent is spawning
+     * into, and clone(CLONE_NEWPID) makes it the first member of a brand new
+     * one (kernel/proc/pidns.c).  Done after the mount namespace so a child
+     * that fails here still has a coherent fs context to be torn down. */
+    int pidns_r = pidns_fork(t, parent, flags);
+    if (pidns_r < 0) {
+        mntns_release_task(t);
+        proc_destroy_task(t);
+        return pidns_r;
+    }
+
+    /* User namespace last of the three, because it is the one that can fail
+     * for a reason the parent could not have predicted (a new namespace is
+     * one allocation more than a shared one).  Until it is placed the child is
+     * in the parent's namespace, which is the correct rollback state. */
+    int userns_r = userns_fork(t, parent, flags);
+    if (userns_r < 0) {
+        pidns_release_task(t);
+        mntns_release_task(t);
+        proc_destroy_task(t);
+        return userns_r;
+    }
+
     /* Capability envelopes are inherited (shared root budget, refcounted);
      * see kernel/abi/linux/envelope.c and docs/research/05. */
     env_inherit_task(t, parent);

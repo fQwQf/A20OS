@@ -18,6 +18,7 @@
 #include "core/panic.h"
 #include "core/klog.h"
 #include "core/string.h"
+#include "core/errno.h"
 #include "cg/cgroup.h"
 #include "mm/swap.h"
 #include "ipc/userfaultfd.h"
@@ -163,7 +164,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     page_cache_page_t *pcp = page_cache_get(vf->vnode, index, 1);
     if (!pcp) {
         kerr("[SHFAULT] cache_get failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index);
         return -1;
     }
@@ -171,7 +172,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     if (!page_cache_is_uptodate(pcp)) {
         if (page_cache_fill_vfile_page(vf, pcp) < 0) {
             kerr("[SHFAULT] fill failed pid=%d va=0x%lx fd=%d idx=%lu\n",
-                 proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+                 proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
                  (unsigned long)index);
             page_cache_put(pcp);
             return -1;
@@ -181,7 +182,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
     pfn_t cache_pfn = page_cache_pfn(pcp);
     if (!pfn_valid(cache_pfn)) {
         kerr("[SHFAULT] bad pfn pid=%d va=0x%lx fd=%d idx=%lu pfn=%lu\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index, (unsigned long)cache_pfn);
         page_cache_put(pcp);
         return -1;
@@ -193,7 +194,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
                       MM_ST_FILE_SHARED);
     if (r < 0) {
         kerr("[SHFAULT] map failed pid=%d va=0x%lx fd=%d idx=%lu r=%d\n",
-             proc_current()->pid, (unsigned long)page_va, vma->file_fd,
+             proc_current()->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
              (unsigned long)index, r);
         page_cache_put(pcp);
         return -1;
@@ -358,6 +359,34 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  *   path below, so its pages carry no page-cache identity and no writeback
  *   route.  Inter-process shared memory is served by the VM_VMO path instead.
  */
+/*
+ * MM_FAULT_RETRY -- the fault-around window could not be installed because the
+ * VMA that authorised it is no longer the object covering the address, and it
+ * is not an error.
+ *
+ * The window deliberately drops mm->lock to allocate its frames, and while it
+ * is unlocked a sibling thread sharing this mm can reshape the VMA list at that
+ * address.  The commonest case is benign and happens constantly: mm_insert_vma()
+ * coalesces two adjacent anonymous VMAs and keeps the NEW object, deferring the
+ * old one, so a mapping nobody touched changes identity underneath the fault.
+ * The address is still mapped, still writable, and still backed by an
+ * equivalent VMA -- vma_can_merge() only merges equal vm_flags and pte_flags.
+ *
+ * Returning failure here turned that into SIGSEGV on a valid address, which is
+ * how a four-thread process died on a store into memory it owned.  The window
+ * gives its frames back and asks the caller to start over against whatever VMA
+ * is current, which costs one more lookup and turns the race into a no-op.
+ */
+#define MM_FAULT_RETRY (-EAGAIN)
+
+/* A window can only lose its VMA to a list mutation, and each retry resolves a
+ * fresh one, so the bound is generous enough for a heavy mmap/munmap workload
+ * and still finite: without it a pathological merger could spin here. */
+#define MM_FAULT_RETRY_MAX 8
+
+static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
+                                       enum mm_fault_access access);
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {
@@ -429,6 +458,22 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (stack_limit < USER_STACK_FLOOR)
             stack_limit = USER_STACK_FLOOR;
         if (page_va >= stack_limit && page_va < t->mm->stack_top) {
+            /*
+             * A stack page is mapped read/write and never executable.  Faulting
+             * one in to satisfy an *instruction* access would report success,
+             * leave the leaf non-executable, and hand control back to a PC the
+             * hardware cannot fetch from -- so the very next instruction
+             * re-faults at the same address, forever.  That is exactly what a
+             * jump through a corrupted function pointer looks like: mksh on
+             * aarch64 spun on a prefetch abort at a stack address until the
+             * timeout killed the machine, with no fault report, because every
+             * round trip returned "handled".
+             *
+             * Refuse instead, so the caller reports SIGSEGV and kills the task.
+             */
+            if (access == MM_FAULT_ACCESS_EXEC)
+                return -1;
+
             pte_t *pte = pt_walk(t->mm->pgdir, page_va, 0);
             if (pte && (*pte & PTE_V))
                 return -1;
@@ -456,6 +501,12 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
     if (page_va >= t->mm->start_brk &&
         page_va < ROUND_UP(t->mm->brk, PAGE_SIZE) &&
         !mm_find_vma(t->mm, page_va)) {
+        /* Same reasoning as the stack branch: a heap page is never
+         * executable, so an instruction fault here must not be satisfied with
+         * a fresh read/write leaf or the fault repeats indefinitely. */
+        if (access == MM_FAULT_ACCESS_EXEC)
+            return -1;
+
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             return -ENOMEM;
         }
@@ -479,51 +530,46 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
-        if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
-            vfile_t *vf = vfs_get_file_ref(vma->file_fd);
-            if (!vf) {
-                kerr("[MFAULT] file_fd dead pid=%d va=0x%lx fd=%d flags=0x%lx\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd,
-                     (unsigned long)vma->vm_flags);
-                return -1;
-            }
+        if ((vma->vm_flags & VM_FILE) && vma->file) {
+            vfile_t *vf = vma->file;
+            vfile_get(vf);
             if (!vf->vnode) {
-                kerr("[MFAULT] no vnode pid=%d va=0x%lx fd=%d\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd);
-                vfs_put_file_ref(vma->file_fd, vf);
+                kerr("[MFAULT] no vnode pid=%d va=0x%lx file=%p\n",
+                     t->pid, (unsigned long)page_va, (void *)vf);
+                vfs_put_file(vf);
                 return -1;
             }
 
             uint64_t file_pos = vma->file_offset + (page_va - vma->start);
             if (file_pos >= vf->vnode->size) {
                 kerr("[MFAULT] oob pid=%d va=0x%lx fd=%d pos=%lu size=%llu\n",
-                     t->pid, (unsigned long)page_va, vma->file_fd,
+                     t->pid, (unsigned long)page_va, (unsigned long)(vma->file ? vma->file->identity : 0),
                      (unsigned long)file_pos,
                      (unsigned long long)vf->vnode->size);
                 signal_send(t->pid, SIGBUS);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                 return -1;
             }
 
             if (vma->vm_flags & VM_SHARED) {
                 int r = mm_shared_file_fault(t->mm, vma, page_va, vf);
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                 return r;
             } else {
                 page_cache_page_t *pcp = page_cache_get(vf->vnode,
                                                          file_pos / PAGE_SIZE, 1);
                 if (!pcp) {
-                    vfs_put_file_ref(vma->file_fd, vf);
+                    vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                     return -1;
                 }
                 if (!page_cache_is_uptodate(pcp)) {
                     if (page_cache_fill_vfile_page(vf, pcp) < 0) {
                         page_cache_put(pcp);
-                        vfs_put_file_ref(vma->file_fd, vf);
+                        vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
                         return -1;
                     }
                 }
-                vfs_put_file_ref(vma->file_fd, vf);
+                vfs_put_file_ref((unsigned long)(vma->file ? vma->file->identity : 0), vf);
 
                 pfn_t cache_pfn = page_cache_pfn(pcp);
                 if (!pfn_valid(cache_pfn)) {
@@ -672,9 +718,27 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                         frame_put(pfns[i]);
                     }
                     vma_put(t->mm, vma);
-                    return -1;
+                    return MM_FAULT_RETRY;
                 } else {
                     map_flags = vma->pte_flags;
+                    /* The window was sized from the VMA as it looked before
+                     * the lock was dropped.  A concurrent munmap or a
+                     * concurrent mprotect split can have shortened that same
+                     * VMA since -- both lower vma->end in place rather than
+                     * replacing the object -- so the span prepared above may
+                     * now reach past the mapping.  Installing those pages
+                     * anyway leaves present, zero-filled PTEs sitting in what
+                     * is now a hole: the fault reports success, no thread ever
+                     * wrote that memory, and the next mmap over the same
+                     * address inherits the PTEs as if the application had
+                     * faulted them in itself.  That is silent corruption, and
+                     * it is the failure mode this window was suspected of
+                     * causing, so the span is re-clamped here, under the lock,
+                     * to the VMA's current end; the frames prepared beyond it
+                     * are released by the short count fault_map_window()
+                     * reports back. */
+                    if (end > vma->end)
+                        end = vma->end;
                     size_t keep = 0;
                     for (size_t i = 0; i < prepared; i++) {
                         uint64_t va = page_va + (uint64_t)i * PAGE_SIZE;
@@ -752,20 +816,20 @@ static uint64_t fault_file_size(vnode_t *vn)
     return vn ? vn->size : 0;
 }
 
-static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
+static int handle_file_fault(task_t *t, uint64_t page_va,
                              uint64_t file_pos, uint64_t vma_end,
                              int shared, int fault_around, int executable,
                              vfile_t *vf)
 {
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
     if (!vf->vnode->ops || !vf->vnode->ops->readpage) {
-        kerr("[HFF] no readpage pid=%d fd=%d shared=%d\n",
-             t->pid, file_fd, shared);
-        vfs_put_file_ref(file_fd, vf);
+        kerr("[HFF] no readpage pid=%d file=%lu shared=%d\n",
+             t->pid, (unsigned long)vf->identity, shared);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -774,8 +838,8 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     window[0] = page_cache_get(vf->vnode, file_pos / PAGE_SIZE, 1);
     if (!window[0]) {
         kerr("[HFF] cache_get NULL pid=%d fd=%d pos=%lu shared=%d\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared);
-        vfs_put_file_ref(file_fd, vf);
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -819,17 +883,17 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     }
     if (fill_r < 0) {
         kerr("[HFF] fill fail pid=%d fd=%d pos=%lu shared=%d\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared);
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
     if (file_pos >= fault_file_size(vf->vnode)) {
         signal_send(t->pid, SIGBUS);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         return -1;
     }
 
@@ -887,11 +951,11 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
 
     if (candidate_count == 0) {
         kerr("[HFF] no candidate pid=%d fd=%d pos=%lu shared=%d window=%lu\n",
-             t->pid, file_fd, (unsigned long)file_pos, shared,
+             t->pid, (unsigned long)vf->identity, (unsigned long)file_pos, shared,
              (unsigned long)window_count);
         for (size_t i = 0; i < window_count; i++)
             page_cache_put(window[i]);
-        vfs_put_file_ref(file_fd, vf);
+        vfs_put_file(vf);
         cg_mem_oom_kill(t->cgroup);
         return -1;
     }
@@ -899,18 +963,19 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
     mm_struct_t *mm = t->mm;
     spin_lock(&mm->lock);
     vm_area_t *vma = mm_find_vma(mm, page_va);
-    vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) &&
-                          vma->file_fd >= 0
-        ? vfs_get_file_ref(vma->file_fd) : NULL;
+    vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) && vma->file
+        ? vma->file : NULL;
+    if (current_vf)
+        vfile_get(current_vf);
     int mapping_valid = vma && current_vf && current_vf->vnode == vf->vnode &&
         (vma->vm_flags & VM_FILE) &&
         mm_pte_flags_allow_access(vma->pte_flags) &&
         !!(vma->pte_flags & PTE_X) == !!executable &&
         !!(vma->vm_flags & VM_SHARED) == !!shared &&
-        vma->file_fd == file_fd &&
+        vma->file == vf &&
         vma->file_offset + (page_va - vma->start) == file_pos;
     if (current_vf)
-        vfs_put_file_ref(vma->file_fd, current_vf);
+        vfs_put_file(current_vf);
 
     int result = -1;
     size_t installed = 0;
@@ -931,8 +996,27 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
                 continue;
             }
             uint64_t map_flags = vma->pte_flags;
-            if (direct_private)
-                map_flags &= ~(uint64_t)(PTE_W | PTE_D | PTE_COW);
+            if (direct_private) {
+                /*
+                 * Map the canonical page-cache frame read-only.  PTE_COW has
+                 * to STAY: this leaf aliases a frame the page cache still
+                 * owns, so the first store must copy rather than write
+                 * through -- and PTE_COW is the only thing that routes the
+                 * store to the copy in mm_fault_handle_cow(), which is
+                 * written for exactly this leaf ("a read-only MAP_PRIVATE
+                 * fault-around leaf maps the canonical cache frame, so this
+                 * store must break that aliasing by cloning").
+                 *
+                 * Clearing it here left the leaf matching neither the COW
+                 * branch nor the PTE_W dirty-bit branch, so the very first
+                 * write to a private file page -- a .data/.bss store in
+                 * ld-musl, for one -- fell through to "unhandled" and killed
+                 * the process with SIGSEGV on a VMA the kernel itself
+                 * considered writable.
+                 */
+                map_flags &= ~(uint64_t)(PTE_W | PTE_D);
+                map_flags |= PTE_COW;
+            }
             if (direct_private && executable)
                 arch_flush_icache_range(page_cache_data(window[i]),
                                         PAGE_SIZE);
@@ -967,7 +1051,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         if (window[i])
             page_cache_put(window[i]);
     }
-    vfs_put_file_ref(file_fd, vf);
+    vfs_put_file(vf);
     return result;
 }
 #endif
@@ -1105,6 +1189,23 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
 #ifdef CONFIG_NOMMU
     return handle_demand_fault_locked(t, stval, access, 0);
 #else
+    /* MM_FAULT_RETRY is a benign VMA-identity change under the fault-around
+     * window, so the entry point owns the retry rather than letting each
+     * handler roll its own.  Re-entering re-resolves the VMA under the lock,
+     * which is exactly the step the window could not do while unlocked. */
+    for (int attempt = 0; attempt < MM_FAULT_RETRY_MAX; attempt++) {
+        int r = handle_demand_fault_attempt(t, stval, access);
+        if (r != MM_FAULT_RETRY)
+            return r;
+    }
+    return -1;
+#endif
+}
+
+#ifndef CONFIG_NOMMU
+static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
+                                       enum mm_fault_access access)
+{
     if (!t || !t->mm || !t->mm->pgdir)
         return -1;
 
@@ -1153,12 +1254,11 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             return -1;
         return handle_demand_fault_access(t, stval, access);
     }
-    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file) {
         if (!mm_pte_flags_allow_access(vma->pte_flags)) {
             spin_unlock(&mm->lock);
             return -1;
         }
-        int file_fd = vma->file_fd;
         int shared = (vma->vm_flags & VM_SHARED) != 0;
         /* Writable private mappings stay on the single-page COW path.  A
          * read-only private mapping, including executable text, can share the
@@ -1179,14 +1279,15 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
 #endif
         uint64_t vma_end = vma->end;
         uint64_t file_pos = vma->file_offset + (page_va - vma->start);
-        vfile_t *vf = vfs_get_file_ref(file_fd);
+        vfile_t *vf = vma->file;
+        vfile_get(vf);
         spin_unlock(&mm->lock);
         if (!vf || !vf->vnode) {
             if (vf)
-                vfs_put_file_ref(file_fd, vf);
+                vfs_put_file(vf);
             return -1;
         }
-        int r = handle_file_fault(t, page_va, file_fd, file_pos, vma_end,
+        int r = handle_file_fault(t, page_va, file_pos, vma_end,
                                   shared, fault_around, executable, vf);
         if (r == 0) {
             a20_perf_count(A20_PERF_MM_DEMAND_FAULTS);
@@ -1237,8 +1338,9 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
     }
     return r;
-#endif
 }
+
+#endif /* !CONFIG_NOMMU */
 
 int handle_present_page_fault(task_t *t, uint64_t stval,
                               enum mm_fault_access access)
@@ -1264,6 +1366,37 @@ int handle_present_page_fault(task_t *t, uint64_t stval,
             allowed = (*pte & PTE_X) != 0;
         else
             allowed = (*pte & PTE_R) != 0;
+    }
+    /*
+     * The PTE is not the only authority on what this address may be used
+     * for: the VMA is.  A leaf can carry an execute bit the VMA never
+     * granted -- a stack page whose leaf was installed from a stale flag
+     * word, or a COW copy that propagated PTE_X from the parent's leaf --
+     * and on every architecture whose descriptor encodes UXN/PXN
+     * (aarch64's arch_pte_leaf() derives them from PTE_X) that leaf is then
+     * genuinely executable at EL0.  Trusting it alone turns a jump through
+     * such a leaf into a "handled" fault: the retry succeeds, the PC does
+     * not advance to anything meaningful, and the same address faults again
+     * immediately.  That is an unbounded silent trap loop -- a shell whose
+     * stack page went executable spins on a prefetch abort at a stack
+     * address until something external kills the machine, with no fault
+     * report, because every round trip reported success.
+     *
+     * Refuse the access whenever the VMA covering the address does not grant
+     * it.  The leaf may then be as wrong as it likes and the worst outcome is
+     * the correct one: a clean SIGSEGV naming a mapping the process was never
+     * allowed to execute.
+     */
+    if (allowed) {
+        vm_area_t *vma = mm_find_vma(mm, stval);
+        if (vma) {
+            if (access == MM_FAULT_ACCESS_EXEC &&
+                !((vma->pte_flags & PTE_X) && (vma->vm_flags & VM_EXEC)))
+                allowed = 0;
+            else if (access == MM_FAULT_ACCESS_WRITE &&
+                     !(vma->vm_flags & VM_WRITE))
+                allowed = 0;
+        }
     }
     /*
      * Radix-style MMUs take a reference/access (R/C) fault on a present

@@ -436,6 +436,12 @@ void env_kind_register(int gfd, uint8_t obj_type)
         __atomic_store_n(&env_gfd_kind[gfd], obj_type, __ATOMIC_RELEASE);
 }
 
+void env_kind_unregister(int gfd)
+{
+    if (gfd >= 0 && gfd < MAX_FILES)
+        __atomic_store_n(&env_gfd_kind[gfd], 0, __ATOMIC_RELEASE);
+}
+
 uint8_t env_kind_of(int gfd)
 {
     if (gfd >= 0 && gfd < MAX_FILES) {

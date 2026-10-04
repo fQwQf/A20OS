@@ -322,9 +322,83 @@ fail-closed 在两个方向都保留：未声明 `known_absent` 的测试一旦 
 
 ### mount namespace（unshare/setns CLONE_NEWNS）
 
-`make smoke-mntns` 用 `mntns_test.c` 覆盖 init 命名空间 ino 非零、`/proc/self/ns/{pid,net}` 渲染、fork 共享挂载命名空间、`unshare(CLONE_NEWNEWPID|NEWNET|NEWUSER)` 如实返回 EINVAL（不假成功）、`unshare(CLONE_NEWNS)` 生成不同 ino 且其挂载对父进程不可见、setns 经 `/proc/<pid>/ns/mnt` fd 加入（目标先退出仍可加入）、非 mnt 目标 EINVAL。
+`make smoke-mntns` 用 `mntns_test.c` 覆盖 init 命名空间 ino 非零、`/proc/self/ns/{pid,net}` 渲染、fork 共享挂载命名空间、`unshare(CLONE_NEWPID)` 生成不同 pid 命名空间、`unshare(CLONE_NEWNET)` 如实返回 EINVAL（不假成功；`CLONE_NEWUSER` 已实现，见下一节）、`unshare(CLONE_NEWNS)` 生成不同 ino 且其挂载对父进程不可见、setns 经 `/proc/<pid>/ns/mnt` fd 加入（目标先退出仍可加入）、非 mnt 目标 EINVAL。
 
 失败时查看 `.kernel-build/smoke/mntns-riscv64.log` 中首个 `MNTNS_TEST: FAIL` 行（含行号与 errno），对照 `kernel/fs/vfs/mntns.c`、`kernel/abi/linux/sys_namespace.c` 与 `kernel/fs/procfs/procfs.c` 的 ns 渲染。
+
+### user namespace（unshare/setns CLONE_NEWUSER）
+
+`make smoke-userns` 用 `userns_test.c` 覆盖：初始命名空间 ino 非零且
+`/proc/<pid>/ns/user` 渲染、`unshare(CLONE_NEWUSER)` 产生不同 ino、
+未写映射时进程看到 `USERNS_OVERFLOW_UID`（65534）而非宿主 uid、fork 与线程
+继承调用者的命名空间而只有 `clone(CLONE_NEWUSER)` 才新建、父命名空间写
+`/proc/<pid>/uid_map` 后翻译立即生效、畸形与越界映射（两字段行、负数、
+跑到 id 空间末尾、零长度、重叠）各自以 EINVAL 拒绝且不留残迹、
+合法分段可追加、`setgroups` 是单向开关（`deny` 无特权且可重复，
+`deny` 之后的 `allow` 即使满权限也 EPERM，畸形关键字 EINVAL）、以及
+rootless 全链路：uid 1000 自行建命名空间、写入"映射自己的 id"这一条
+唯一无特权路径后成为命名空间内的 0，而任何更宽的映射都是 EPERM、
+并且无法 `setns` 回初始命名空间。
+
+失败时查看 `.kernel-build/smoke/userns-riscv64.log` 中首个
+`USERNS_TEST: FAIL` 行（含行号与 errno），对照 `kernel/proc/userns.c`、
+`kernel/fs/procfs/procfs.c` 的映射写入分支与 `userns_capable()`。
+
+门禁可证伪：把 `userns_capable()` 改成"沿 parent 链向下查找、命中即授予"，
+`smoke-userns` 会以 "an unprivileged second extent mapping a foreign id was
+accepted" 失败——那正是任何用户借 `unshare -U` 拿到宿主 root 的路径。
+把 `map_from_global()` 改回按 `lower` 查找，门禁会以 "uid after installing
+its own map is 65534" 失败。
+
+### USB hub（class 9 与下行总线）
+
+`make smoke-usb-hub-x86_64` 在 q35 上挂 `qemu-xhci` + `usb-hub` + 键盘 + 鼠标，
+断言 hub 作为 class-9 设备被枚举、`[USB-HUB] hub 0409:55aa: downstream ports=N
+status_bytes=... ss=...`（hub 描述符按它真正的请求码 bmRequestType=0xA0 取回，
+位图长度由 bNbrPorts 推出）、状态变更中断端点经父控制器配好并 arm、下行总线以
+N 个端口注册进 `usb_core`，且根端口上的 HID 设备不受影响。
+
+**为什么 hub 描述符用 0xA0 而不是标准 GET_DESCRIPTOR**：hub 描述符是类请求，
+不是标准请求。用 `USB_TYPE_STANDARD` 去问，任何真 hub 都会 stall。门禁对此可证伪：
+把 `usb_hub_probe()` 里那次 `usb_control_msg()` 改回
+`USB_TYPE_STANDARD | USB_RECIP_DEVICE` 且 `wValue = USB_DT_HUB << 8`，
+`smoke-usb-hub-x86_64` 会以 `[USB-HUB] hub descriptor read failed: -110` 失败。
+把 `HUB_STATUS_BYTES()` 的 `+1`（hub 自身状态那一个字节）去掉，门禁会以缺失
+`status_bytes=3` 失败。
+
+**门禁覆盖不到的部分**：QEMU 9 起 `usb-hub` 不再创建下行 bus
+（`-device usb-kbd,bus=hub0.0` 报 "Bus 'hub0.0' not found"），QEMU 也无法实现
+hub 的端口复位（`SET_FEATURE(PORT_RESET)` 无响应），所以没有任何设备能被放到
+hub 后面，它的端口位图还会在最后两个端口上报幻影连接。因此本门禁证明的是
+"hub 被正确识别、描述符被正确解析、下行总线被正确注册"，**不**证明"hub 后面的
+设备被枚举"。后者只能靠真机验证。
+
+### MSI-X 消息中断
+
+`make smoke-msix-x86_64` 在 q35 上同时挂一个 `virtio-blk-pci` 和一块
+`e1000e`，断言两者的能力都被解析出表位置（virtio 在 BAR1、e1000e 在 BAR3，
+两者都报 `Message Address Low` 来源，因为 `-kernel` 引导没有固件写 Vector
+Control）、向量被预留并 arm、virtio-blk 改用 MSI-X 而让出 INTx，最后断言
+**`[VIRTIO-BLK] MSI-X delivery on vector 208`**。
+
+这一行由中断处理程序在第一次消息中断完成时打印。表项编程正确不等于消息被
+投递：能力解析、向量号、mask 状态、设备侧的 notify 路径都对，而消息地址错
+了（把向量 OR 进 LAPIC 页基址），设备照样 notify 就是没有中断，只有这行能
+区分。
+
+**门禁可证伪**：把 `arch_msix_message_address()` 里的 `LAPIC_PHYS_BASE` 改回
+`LAPIC_PHYS_BASE | (vector & 0xFF)`，`smoke-msix-x86_64` 会**只**缺
+`MSI-X delivery on vector 208` 这一条而失败——其余七条断言照常通过，因为表项、
+向量和 mask 都还是对的。把 capability 的解析改回只读 Vector Control，门禁会以
+缺 `MSI-X enabled` 失败；把 `queue_msix_vector` 写成向量号（208）而不是表
+索引（0），同样只缺这一条。
+
+**门禁覆盖不到的部分**：只有 x86_64 有消息中断路径，其他架构的
+`arch_msix_message_address()` 返回失败，MSI-X 那段代码在这些板上只被验证到
+"干净地拒绝"为止，没有真实投递。e1000e 只验证到表被正确解析并 arm，网卡本身
+不会收到流量，所以它的两个向量同样没有真实投递；virtio-blk 的那一路才是端到端
+的。IRQ 亲和性、多 CPU 下的 per-CPU 目标字段都不存在（见
+`docs/server-readiness.md`），向量窗口因此钉死在 boot processor。
 
 ### 致命信号 core dump
 
@@ -347,6 +421,53 @@ fail-closed 在两个方向都保留：未声明 `known_absent` 的测试一旦 
 netlink 线格式结构体在测试内独立声明（本树 musl 不带 `<linux/netlink.h>`）。独立复述契约才能证明它测的是内核而不是内核的镜像。
 
 失败时查看 `.kernel-build/smoke/netctl-riscv64.log` 中首个 `NETCTL: FAIL`，对照 `kernel/net/socket_file.c`（SIOCGIFCONF 与 `struct a20_ifreq` 线格式）、`kernel/net/socket_netlink.c`（`net_netlink_route_request` 与 `nlrt_snapshot`）、`kernel/net/lwip_stack.c`（`/proc/net` 渲染与 netif 命名）、`kernel/net/socket.c`（`net_msg_flags_check`）。已知边界：本栈无路由表，`/proc/net/route` 与 `RTM_GETROUTE` 只报告各 netif 的默认网关，`RTM_SET*` 与路由增删一律 `-EOPNOTSUPP`；loopback 不经过驱动收发路径，其计数寄存器读零是真实值而非统计缺失；`SIOCSIFMTU`/`SIOCSIFDSTADDR`/`SIOCSIFBRDADDR` 仍是已分发但未实现、返回 `-ENOTTY`，而不是伪造成功；`/proc/net/arp` 仍是空表头，因为 lwIP 没有暴露 ARP 表访问器。
+
+### ext4 JBD2 崩溃一致性
+
+`make smoke-ext4-journal ARCH=<arch>` 在 JBD2 提交序列的四个点上真的把机器停住，用**同一块镜像**重启，检查承诺过的写入没丢、没承诺的写入没回来，并在宿主机上用 `e2fsck -fn` 检查崩溃后的镜像和恢复后的镜像都干净。注入点通过 `echo <point> > /proc/a20/journal` 下发（`/proc/a20/journal` 的读操作会打印当前注入点与可选点列表），这样可以在崩溃发生前、提交序列进行到一半时才武装，命中的正是那个边界；`a20.journal_crash=<point>` 命令行参数是同一机制的启动时形式，仅供手工复现。四个点各自是一个不同的承诺边界，所以期望结果也不同：
+
+| 崩溃点 | 停在什么位置 | 文件是否应存活 | 重放是否应发生 |
+| --- | --- | --- | --- |
+| `post-recover-flag` | `needs_recovery` 已置位，尚未写入任何日志 | 否 | 否 |
+| `post-journal` | descriptor 与各数据块已写入，无 commit block | 否 | 否 |
+| `post-commit` | commit block 已落盘 | 是 | 是 |
+| `post-checkpoint` | 元数据已写回其本位 | 是 | 是（幂等） |
+
+每个点除文件内容外还断言：注入的 panic 确实触发（否则门禁测的是没跑到的代码）、恢复启动能挂载、日志重放横幅 `replay complete` 当且仅当该点已承诺、恢复后镜像再次 e2fsck 干净。另有一条无崩溃对照（`clean`），确认在没有崩溃的情况下这条路径不产生任何多余重放。
+
+门禁本体在 `tools/ext4_journal_gate.py`，不在 `tools/targets-smoke.mk` 里内联：一次运行是 8 次 TCG 启动加 4 次宿主 fsck，shell 写不出来。之所以要双盘，是因为 FAT32 镜像带 `/bin/init` 而被测文件系统是第二块盘（`mount_setup.c` 把它自动挂到 `/extra`，无需 bootarg）。`ARCH` 同时决定 QEMU machine 与构建目录，因此这是每个架构各自的一道门，而不是只证明 x86_64。
+
+失败时先看 `.kernel-build/smoke/ext4-journal-<arch>.log`，里面每次启动一段、日志打印保留完整；对照 `kernel/fs/diskfs/ext4_journal.c` 的 `ext4_journal_commit`（提交顺序）、`jbd2_write_descriptor`（descriptor checksum 必须在 tag checksum 回填之后算）、`jbd2_data_checksum`（数据 checksum 只覆盖未改动的块镜像）与 `kernel/fs/block_cache.c` 的 hold 语义（`bcache_sync_common` 跳过被持有的页）。宿主侧可以直接 `e2fsck -fn` 那份崩溃镜像复现。门禁断言清单见 `tools/gates.toml` 的 `ext4-journal-crash-consistency`。
+
+### 跨架构陷阱：同一份代码只在某些架构下坏
+
+下面几条都不是逻辑 bug，而是「按 x86 写出来的假设在其他架构上不成立」。它们共同的特征是**在 x86_64 上完全看不出来**，所以每修一条都必须按架构各跑一遍 `smoke-ext4-journal`，不能只跑一个。
+
+**1. `O_*` 常量不是 asm-generic。** Linux 把 `O_DIRECTORY`、`O_NOFOLLOW`、`O_DIRECT`、`O_LARGEFILE` 放在 `arch/<arch>/include/uapi/asm/fcntl.h` 里逐架构定义，三套布局互不相同：
+
+| | `O_DIRECTORY` | `O_NOFOLLOW` | `O_DIRECT` | `O_LARGEFILE` |
+| --- | --- | --- | --- | --- |
+| asm-generic（x86/riscv/loongarch） | `0x10000` | `0x20000` | `0x4000` | `0x8000` |
+| arm / arm64 | `0x4000` | `0x8000` | `0x10000` | `0x20000` |
+| powerpc | `0x4000` | `0x8000` | `0x20000` | `0x10000` |
+
+注意 powerpc 那一行的前两列与 arm 相同、第三第四列与 asm-generic 相同——**没有任何两套布局是同一个顺序**。最坑的是 ppc64le：asm-generic 的 `O_DIRECTORY`(`00200000`) 在 PowerPC 上其实是 `O_LARGEFILE`，而 musl 的 `open()` 每次调用都会带上 `O_LARGEFILE`。用 asm-generic 的值当 `O_DIRECTORY`，等于让内核把「打开目录」理解成「设置 largefile」，`openat()` 静默返回错误，表现为挂载点莫名其妙地不存在。`kernel/include/core/fcntl.h` 现在按 `CONFIG_PPC64LE` / `CONFIG_ARM32||CONFIG_ARMV7M||CONFIG_AARCH64` / 其余三分支取值。
+
+**2. ppc64le 的 stack-protector guard 默认走 TLS。** GCC 在该目标上默认 `-mstack-protector-guard=tls`，即 `ld 9,-28688(r13)`；而内核的 `__stack_chk_guard` 是一个普通 `.data` 全局量，r13 又已经被 `arch_set_task_pointer()` 用作内核任务指针。于是取到的 guard 是一个从未初始化的值，且随每次调用变化。ppc64le 必须显式 `-mstack-protector-guard=global`。这类问题不会 panic，只会表现为随机且不可复现的栈校验失败。
+
+**3. ppc64le 的 trap prologue 必须自己开 FP。** `__trap_from_user` 进入时 SRR1 里带着**用户态的 MSR**，用户没开 FP/VEC 就没有 FP 权限，此时保存 FPR 会直接陷入。所以 prologue 里必须自己置 `MSR[FP]`/`MSR[VEC]`/`MSR[VSX]` 再保存向量寄存器。
+
+**4. `.a20drv` 的符号可见性取决于 deployment profile。** 模块只能引用 `kernel/drvmod/framework.c` 里 `drv_export_table[]` 列出的符号，缺一个就是 `unresolved symbol` → **整个模块加载失败** → 对应 transport 整个消失。virtio-blk 在 aarch64 是加载模块、在 ppc64le 是内建驱动，所以导出表少一个 `snprintf` 或 `device_register`，现象是 aarch64 挂不上 `/bin`、`init` panic，而 ppc64le 一切正常。改导出表后必须按两种 profile 各验一次。
+
+**5. 「已处理」的缺页必须真的能推进 PC。** 缺页处理路径如果对一条自己满足不了的异常返回 0，硬件就会在同一条指令上无限重入，而且因为每次都报「已处理」，**一次内核输出都没有**。aarch64 上曾表现为 mksh 在 fork 之后对同一个栈地址反复 prefetch abort（约 2.3 万次）、完全没有 fault 报告，直到超时被杀——看起来像丢唤醒，实际是活锁。根因是 `handle_present_page_fault()` 只看 PTE 不看 VMA：叶 PTE 上带了一个 VMA 从未授予的 `PTE_X` 时，它就把 exec fault 判为可满足。而 aarch64 的 `arch_pte_leaf()` 是由 `PTE_X` 推出硬件 `UXN`/`PXN` 的，所以这个"多余的 X"是真的让该页在 EL0 可执行。修法是**以 VMA 为准**：`handle_present_page_fault()` 在 `mm->lock` 下反查覆盖该地址的 VMA，VMA 没给 `VM_EXEC` 就拒绝 exec fault（写同理），`handle_demand_fault_locked()` 的 stack/brk 分支也拒绝 exec fault。这样无论叶 PTE 错成什么样，最坏结果也只是一次干净且指名道姓的 SIGSEGV，而不是静默活锁。详见 [roadmap/a20os-improvement-todo.md](roadmap/a20os-improvement-todo.md)。
+
+**6. 「可写且可执行」在 aarch64 上是矛盾的要求。** `kernel/arch/aarch64/mm/kwx.c` 在把内核镜像切成 RO-X/RO-NX/RW-NX 之后会打开 `SCTLR_EL1.WXN`（bit 19），语义是**EL0 可写的叶描述符在 EL0 一律 execute-never**。所以任何「先把某页变成 RWX、临执行前再改回来」的做法都会失效——而且失效方式是**静默的**：内核认为可取指，硬件报 permission fault，内核毫无察觉。凡是要「同一页既当数据又当代码」的地方，必须换成两块页。
+
+本仓库的实例是 sigreturn 跳板：它按设计写在**用户栈**上的信号帧里（栈页按定义可写），于是 AP 只能是 `01`，CPU 拒绝取指，表现为 `ESR EC=0x20 / FSC=0x0f`。注意 aarch64 上 `PTE_D` 与 `PTE_W` **是同一个 bit 56**，所以「去掉脏标记」并不能把 AP 变回 `11`——`arch_signal_tramp_pte_flags()` 本身就带 `PTE_D`。修法是给跳板一块**专用只读页**（RO+X 正是 WXN 允许的组合），地址存进 `mm->sig_tramp`，由弱钩子 `arch_signal_tramp_addr()` 交给投递路径设置 `TRAP_CTX_RA`；x86_64 一直用的就是这个模型。
+
+配套的一条教训：**跨架构不要照抄固定虚拟地址。** x86_64 的跳板页固定在 `0x700000000000`，而 `USER_VA_LIMIT` 在 x86_64 是 2^47、在 aarch64 只有 2^46（`kernel/arch/aarch64/include/platform.h`），同一个常量在 aarch64 上会被 `mm_mmap()` 以超范围拒绝——VMA 和 PTE 都不生成，故障现场看起来像「RA 是个裸地址」。aarch64 改用 `mm_find_gap()` 分配。
+
+诊断这类「硬件拒绝、软件说可以」的故障，光看软件 PTE 不够，需要两样东西：QEMU 的 `-d int` 原始 ESR（`FSC` 足以区分 *translation fault*「页不在」与 *permission fault*「页在但没权限」），以及同一进程内一个**确实能执行**的 text 叶作为对照。本轮就是靠把两个叶描述符逐位对比、发现只差 AP 两位才定位到的。
 
 ### 文档漂移关键词
 

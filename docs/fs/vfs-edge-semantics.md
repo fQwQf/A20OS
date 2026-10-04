@@ -214,6 +214,60 @@ P1 保留全局 RAM xattr 表，并收紧 ABI 表面：
 - `kernel/abi/linux/sys_namespace.c`：保留现有 `sys_chroot`；该处无需改动。
 - `user/cmds/stress/vfs_edge.c`：覆盖 chroot 后通过 `..` 访问外部 sibling 的拒绝行为。
 
+## 9.4 pivot_root 与 mount 引用模型
+
+### 状态
+
+已实现。此前 `sys_pivot_root` 恒返回 `-EPERM`，因为进程 root 只是 `cur->fs.root_path` 这个字符串前缀，无法回答"谁还挂在这个 mount 上"。
+
+### 模型
+
+mount 现在同时以两种方式表达，二者一起维护、不会对同一个存活 mount 产生分歧：
+
+- **树**：`mnt_parent` / `mnt_mp` / `mnt_child` 说明 mount 挂在哪里、谁持有它。挂载点 vnode 由 mount 自己持有引用。
+- **扁平前缀**：`mount_t::path`，路径解析按最长前缀匹配用它选择 mount。
+
+树的用途：umount 的 busy 判定、pivot_root、`/proc/self/mountinfo` 的 parent id。前缀的用途：绝对路径落到哪个 mount。
+
+进程位置同样是对象而不是字符串（`proc_fs_context_t`）：
+
+| 字段 | 含义 |
+|------|------|
+| `root_mnt` / `root_vn` | 进程 root 所在的 (mount, vnode)，各持一份引用 |
+| `cwd_vn` | cwd 指向的目录对象，持有引用 |
+| `cwd` / `root_path` | 上述对象的扁平拼写，供路径拼接与显示使用 |
+
+引用计数落在 mount 上：`root_users` 是「namespace 表自身 1 份 + 每个以该 mount 为 root 的进程 1 份」，`cwd_users` 同理记录站在该 mount 里的进程数。因此 busy 判定是常数时间比较，不需要遍历进程表。
+
+`fork` 通过 `vfs_task_fs_pins_copy()` 复制指针并各取一份引用；`fdtable_close_all()`（所有 exit 路径都会经过的唯一 fs 钩子）调用 `vfs_task_fs_pins_release()` 释放。
+
+### pivot_root(2) 检查顺序
+
+按 Linux 顺序，任一步失败都返回负 errno 且不改变进程状态：
+
+1. `CAP_SYS_ADMIN`；
+2. `new_root` 是目录、可搜索（`X_OK`），且不是当前 root；
+3. `new_root` 所在 mount 不是当前 root 所在 mount（否则 pivot 什么也没改变；子 mount 合法——那正是容器的常规路径）；
+4. `put_old` 是目录；
+5. `put_old` 位于**新** root 之下，且与 `new_root` 在同一 mount——这一条阻止进程借 pivot_root 保留一个本该被新 root 隐藏的旧树句柄；
+6. `put_old` 的父目录可解析且是目录。
+
+随后：把旧 root 的 mount 从树上摘下（`vfs_mount_detach_root()`，标记 `VFS_MOUNT_DETACHED`，仍出现在 mountinfo 中但任何路径都不再经过它），重设 root 为新 (mount, vnode) 对，cwd 移到 `put_old` 的父目录。
+
+### umount2 的 busy 规则
+
+`vfs_umount_flags()` 实现三条 Linux 判定，任一成立返回 `EBUSY`：
+
+- `root_users > 1`：有进程以此为 root；
+- `mnt_child != NULL`：其下还挂着 mount；
+- `cwd_users > 0`：有进程正站在其中。
+
+`MNT_DETACH` 越过全部三条。namespace root 本身返回 `EINVAL`。`sys_umount2` 现在转发 `flags`（此前完全丢弃），并对未知位返回 `EINVAL`。
+
+### 门禁
+
+`smoke-pivot-root`（`user/cmds/stress/pivot_root_test.c`）覆盖：mountinfo 的真实 parent id、busy umount、`MNT_DETACH`、`put_old` 越界被拒、pivot 后旧 root 不可按路径访问、pivot 前打开的 fd 仍能读到旧树、新 root 可写。
+
 ## 10. 变更 / 扩展文件汇总
 
 | 文件 | 变更 |

@@ -1,4 +1,6 @@
 #include "fs/file.h"
+#include "fs/vfs.h"
+#include "fs/fdtable.h"
 #include "core/fcntl.h"
 
 #include "core/consts.h"
@@ -9,93 +11,23 @@
 #include "mm/objcache.h"
 #include "ipc/objstats.h"
 
-#define GFILE_MAX VFS_MAX_OPEN
-#define GFILE_WORDS ((GFILE_MAX + 63) / 64)
+/*
+ * The vfile layer owns vfile allocation, identity and refcounting only.
+ * There is no global file-number table: an fd is an index into a task's
+ * files_struct (fs/fdtable.c), and every fd resolution goes through
+ * fdtable_get_current_file_ref().  The former g_files[]/g_file_lock layer
+ * (and its bucket locks) was removed with the per-task pointer model.
+ */
 
-static vfile_t *g_files[GFILE_MAX];
-static uint32_t g_file_slot_refs[GFILE_MAX];
-static uint64_t g_file_mask[GFILE_WORDS];
-static int g_file_next = 3;
-static spinlock_t g_file_lock = SPINLOCK_INIT;
 static obj_cache_t g_vfile_cache = OBJ_CACHE_INIT("vfile", vfile_t, 256);
 static size_t g_vfile_live;
 static uint64_t g_vfile_next_identity;
 
-extern void a20_eventq_on_vfile_destroy(int fd);
-
-static inline void file_mask_set(int fd)
-{
-    g_file_mask[fd >> 6] |= 1ULL << (fd & 63);
-}
-
-static inline void file_mask_clear(int fd)
-{
-    g_file_mask[fd >> 6] &= ~(1ULL << (fd & 63));
-}
-
-static int file_ctz64(uint64_t bits)
-{
-    int n = 0;
-    while ((bits & 1ULL) == 0) {
-        bits >>= 1;
-        n++;
-    }
-    return n;
-}
-
-static int file_find_free_from(int minfd)
-{
-    if (minfd < 0)
-        minfd = 0;
-    if (minfd >= GFILE_MAX)
-        return -1;
-    for (int word = minfd >> 6; word < GFILE_WORDS; word++) {
-        uint64_t free_bits = ~g_file_mask[word];
-        if (word == (minfd >> 6))
-            free_bits &= ~0ULL << (minfd & 63);
-        if (word == GFILE_WORDS - 1 && (GFILE_MAX & 63))
-            free_bits &= (1ULL << (GFILE_MAX & 63)) - 1;
-        if (free_bits)
-            return (word << 6) + file_ctz64(free_bits);
-    }
-    return -1;
-}
-
-static void file_note_alloc(int fd)
-{
-    file_mask_set(fd);
-    if (fd >= g_file_next)
-        g_file_next = file_find_free_from(fd + 1);
-}
-
-static void file_note_free(int fd)
-{
-    file_mask_clear(fd);
-    if (g_file_next < 0 || fd < g_file_next)
-        g_file_next = fd;
-}
-
 void file_table_init(void)
 {
-    spin_init(&g_file_lock);
-    lock_counters_register(&g_file_lock, "vfile_table");
     obj_cache_init(&g_vfile_cache, "vfile", sizeof(vfile_t), 256);
-    memset(g_files, 0, sizeof(g_files));
-    memset(g_file_slot_refs, 0, sizeof(g_file_slot_refs));
-    memset(g_file_mask, 0, sizeof(g_file_mask));
-    g_file_next = 3;
     g_vfile_live = 0;
     g_vfile_next_identity = 0;
-}
-
-size_t file_open_fd_count(void)
-{
-    size_t count = 0;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    for (int word = 0; word < GFILE_WORDS; word++)
-        count += (size_t)__builtin_popcountll(g_file_mask[word]);
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return count;
 }
 
 size_t vfile_live_count(void)
@@ -116,6 +48,13 @@ vfile_t *vfile_alloc(void)
         a20_objstat_add(&g_a20_objstats.vfiles, 1);
         mutex_init(&vf->offset_lock);
         vf->lease = F_UNLCK;
+        /* Refcount arrives at 0 (the cache hands out zeroed memory) and the
+         * producer owns the first reference it is about to hand away.  A
+         * producer that publishes the vfile straight into an fd slot MUST
+         * call vfile_ref_init(vf, 1): skipping it leaves every later
+         * get/put pair balanced around 1 -> 0, so the first syscall that
+         * resolves the fd finalizes the file underneath the slot. */
+        vfile_ref_init(vf, 1);
     }
     return vf;
 }
@@ -157,155 +96,26 @@ int vfile_put_ref_only(vfile_t *vf)
     return refcount_dec_and_test(&vf->ref_count);
 }
 
-int file_install_at(int fd, vfile_t *vf)
-{
-    if (fd < 0 || fd >= GFILE_MAX || !vf)
-        return -EBADF;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    if (g_files[fd]) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return -EBUSY;
-    }
-    g_files[fd] = vf;
-    g_file_slot_refs[fd] = 1;
-    file_note_alloc(fd);
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return fd;
-}
-
-int vfs_alloc_fd(vfile_t *vf)
-{
-    if (!vf) return -EINVAL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    int gfd = file_find_free_from(g_file_next);
-    if (gfd < 0)
-        gfd = file_find_free_from(3);
-    if (gfd >= 0) {
-        g_files[gfd] = vf;
-        g_file_slot_refs[gfd] = 1;
-        file_note_alloc(gfd);
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return gfd;
-}
-
-vfile_t *vfs_get_file(int fd)
-{
-    if (fd < 0 || fd >= GFILE_MAX) return NULL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    vfile_t *vf = g_files[fd];
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return vf;
-}
-
+/*
+ * fd resolution.  The signatures predate the per-task pointer model and are
+ * kept so the whole tree keeps one fd vocabulary: @fd is the calling task's
+ * fd, resolved through its files_struct.
+ */
 vfile_t *vfs_get_file_ref(int fd)
 {
-    if (fd < 0 || fd >= GFILE_MAX)
-        return NULL;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    vfile_t *vf = g_files[fd];
-    if (vf)
-        vfile_get(vf);
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return vf;
+    return fdtable_get_current_file_ref(fd);
 }
 
-int vfs_ref_fd(int fd)
+void vfs_put_file_ref(int fd, vfile_t *vf)
 {
-    if (fd < 0 || fd >= GFILE_MAX)
-        return -EBADF;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    if (!g_files[fd] || g_file_slot_refs[fd] == ~(uint32_t)0) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return -EBADF;
-    }
-    g_file_slot_refs[fd]++;
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return 0;
-}
-
-int file_close_prepare(int fd, vfile_t **closed)
-{
-    if (closed) *closed = NULL;
-    if (fd < 0 || fd >= GFILE_MAX) return -EBADF;
-
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    vfile_t *vf = g_files[fd];
-    if (!vf) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return -EBADF;
-    }
-
-    if (--g_file_slot_refs[fd] == 0) {
-        a20_eventq_on_vfile_destroy(fd);
-        g_files[fd] = NULL;
-        file_note_free(fd);
-        if (vfile_put_ref_only(vf) && closed)
-            *closed = vf;
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return 0;
-}
-
-int file_put_ref_prepare(int fd, vfile_t *vf, vfile_t **closed)
-{
-    if (closed)
-        *closed = NULL;
     (void)fd;
+    vfs_put_file(vf);
+}
+
+void vfs_put_file(vfile_t *vf)
+{
     if (!vf)
-        return -EBADF;
-    if (vfile_put_ref_only(vf)) {
-        if (closed)
-            *closed = vf;
-    }
-    return 0;
-}
-
-int vfs_dupfd(int fd, int minfd)
-{
-    if (minfd < 0) minfd = 0;
-    uint64_t flags = spin_lock_irqsave(&g_file_lock);
-    if (fd < 0 || fd >= GFILE_MAX || !g_files[fd]) {
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return -EBADF;
-    }
-    int newfd = file_find_free_from(minfd);
-    if (newfd >= 0) {
-        g_files[newfd] = g_files[fd];
-        g_file_slot_refs[newfd] = 1;
-        vfile_get(g_files[newfd]);
-        file_note_alloc(newfd);
-        spin_unlock_irqrestore(&g_file_lock, flags);
-        return newfd;
-    }
-    spin_unlock_irqrestore(&g_file_lock, flags);
-    return -EMFILE;
-}
-
-int vfs_dup(int fd)
-{
-    return vfs_dupfd(fd, 3);
-}
-
-int vfs_dup3(int oldfd, int newfd, int flags)
-{
-    (void)flags;
-    if (newfd >= GFILE_MAX || newfd < 0) return -EBADF;
-    if (oldfd == newfd) return -EINVAL;
-
-    uint64_t irqflags = spin_lock_irqsave(&g_file_lock);
-    if (oldfd < 0 || oldfd >= GFILE_MAX || !g_files[oldfd]) {
-        spin_unlock_irqrestore(&g_file_lock, irqflags);
-        return -EBADF;
-    }
-    if (g_files[newfd]) {
-        spin_unlock_irqrestore(&g_file_lock, irqflags);
-        return -EBUSY;
-    }
-    g_files[newfd] = g_files[oldfd];
-    g_file_slot_refs[newfd] = 1;
-    vfile_get(g_files[newfd]);
-    file_note_alloc(newfd);
-    spin_unlock_irqrestore(&g_file_lock, irqflags);
-    return newfd;
+        return;
+    if (vfile_put_ref_only(vf))
+        vfs_finalize_closed_vfile(vf);
 }

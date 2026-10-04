@@ -179,6 +179,50 @@ int bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos,
     return 0;
 }
 
+int bcache_sync_held(bcache_t *bc)
+{
+    /* This cache is write-through: bcache_write_bytes() already put every
+     * byte on the device, so there is no buffered metadata for a transaction
+     * to hold back.  The journal's ordering guarantee is a property of the
+     * kernel's page cache, and the kernel is what owns the disk image here. */
+    (void)bc;
+    return 0;
+}
+
+void bcache_hold_page(bcache_t *bc, uint64_t page_no)
+{
+    (void)bc;
+    (void)page_no;
+}
+
+void bcache_release_holds(bcache_t *bc)
+{
+    (void)bc;
+}
+
+size_t bcache_held_pages(const bcache_t *bc)
+{
+    (void)bc;
+    return 0;
+}
+
+void bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *), void *owner)
+{
+    (void)bc;
+    (void)hook;
+    (void)owner;
+}
+
+void bcache_invalidate_page(bcache_t *bc, uint64_t page_no)
+{
+    struct bcache_compat_state *st = state_of(bc);
+    if (!st)
+        return;
+    ubc_line_t *ln = &st->lines[(uint32_t)(page_no % UBC_LINES)];
+    if (ln->valid && ln->lba == page_no)
+        ln->valid = 0;
+}
+
 void bcache_invalidate(bcache_t *bc, uint64_t lba)
 {
     struct bcache_compat_state *st = state_of(bc);

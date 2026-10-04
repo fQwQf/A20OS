@@ -118,7 +118,7 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
 
 ## 二、未解决
 
-### java 退出码 255 / mpv 偶发崩溃（JVM 本身可用；多线程内存仍待查）
+### java 退出码 255 / mpv 偶发崩溃（JVM 本身可用；多线程内存已定位，见本节末「根因已定位并修复」）
 `java -version` 能打印完整且正确的版本号，但每隔一次就 exit 255（20 次里 9 次失败；另一次 6 次里
 3 次失败，模式是 255/0/255/0），全程没有任何 SIGSEGV。mpv 那条是约 1/10 次崩溃
 （`sepc=0x638a6320 stval=0x8`、`comm=lua/<script>`），反汇编为 LuaJIT 在 `libluajit+0x53320` 读
@@ -725,6 +725,86 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
   - 至此同类缺陷共找到 3 处、修了 3 处（cleartid、futex PI、signal），
     但 mpv / LuaJIT / tumblerd 那几条症状仍未解释。
 
+**【根因已定位并修复：匿名 fault-around 窗口丢了 VMA 就把 fault 判死，多线程必崩；窗口还可能把零页装进空洞】**
+
+  这一条把上面那条长期悬置的「多线程进程的匿名内存偶发被写坏」收尾了。定位靠的是一个**全新的、
+  确定性的最小复现器**，而不是此前一直用的 mpv 症状负载。
+
+  复现器是 `user/cmds/stress/mtcorrupt_test.c`，门禁 `smoke-mtcorrupt`
+  （`NR_CPUS=4`、`CONFIG_SLAB_DEBUG=1`）。它分两段：
+
+  1. 若干条带 `PROT_NONE` 保护页的记录（数据 4096 B + 守卫页），每个字填成唯一的非零图案，
+     外加一张**所有线程共享的双向链表**，线程对链表做 push/pop 并校验自指针、magic 与无环；
+  2. 在同样的 4 个 worker 持续 mmap/munmap、堆 churn、读写记录的同时，疯狂创建/回收短命线程
+     （`CHURN_ROUNDS*10` 个 `churn_thread`）。
+
+  关键性质：**单 CPU 必过，4 CPU 每次都崩**。这正是此前整张门禁矩阵漏掉它的原因 ——
+  现有所有共享 `mm_struct` 的门禁都跑在 `-smp 1` 上，而缺陷只在真并发下才成立。
+  崩溃签名与本条目里记的 mpv / MC 完全同形：`SIGSEGV ... code=13`（store fault）、
+  随后 `FATAL: signal=11`，`stval` 落在一个**完全合法、RW、可写的匿名 VMA 内部**。
+
+  根因是 `kernel/mm/fault.c` 的匿名 fault-around 窗口（`handle_demand_fault_locked()` 内
+  `ANON_FAULT_AROUND_PAGES = 4`）。它为了在一次 fault 里装 4 页，会**主动放开 `mm->lock`** 去分配帧
+  （`vma_get(vma); spin_unlock(&t->mm->lock);`），拿回锁后做一次校验：
+
+  ```c
+  } else if (mm_find_vma(t->mm, page_va) != vma) {
+      ... 归还所有帧 ...
+      return -1;                     /* ← 就是这里 */
+  }
+  ```
+
+  指针比较失败被当成了错误。但**这不是错误**：`mm_insert_vma()` 在合并相邻匿名 VMA 时保留的是
+  **新对象**、把旧对象 `mm_vma_defer()` 掉，所以一个谁都没碰过的映射，会在别的线程一次 `mmap`
+  之后**换掉身份**。`vma_can_merge()` 要求 `vm_flags` 与 `pte_flags` 全等，所以新对象在语义上是
+  等价的：地址照样映射、照样可写。把这个窗口判成 `-1`，等于在一次完全良性的链表合并上杀进程。
+
+  诊断过程中有两处弯路值得记下来，避免下次重复：
+
+  - 曾怀疑过缓存的 VMA 二分索引（`mm->vma_index[]`）是唯一原因，于是做了「强制线性扫描」的对照构建，
+    结果照样崩 —— 索引不是原因。真凶只在**放开锁的那段窗口**里，而线性扫描与二分索引都能正确找到
+    当前 VMA，两者的差别只在于窗口返回时指针是否还等于当初那个。
+  - `kerr` 的输出在多 CPU 下会**交错撕裂**（日志里出现过
+    `win: enter va=0x91cc2000 end=0x91cc6000 vma=[[ERR0x91cc2000] ,0x91ce2000)` 这种行内嵌行）。
+    当时把撕裂读成了「`vma->end` 是垃圾值 `0x91cded9020000`」，差点得出「VMA 结构被写坏」的结论。
+    **多 CPU 下不要用 `kerr` 的自由格式输出去做结构完整性判断**；要么落进环形缓冲，要么改用锁保护。
+
+  修复分三处，都在 `kernel/mm/fault.c`：
+
+  1. **重试而不是判死**：新增 `MM_FAULT_RETRY`（`-EAGAIN`）与 `MM_FAULT_RETRY_MAX = 8`，
+     窗口发现 VMA 身份变了就归还帧、返回 `MM_FAULT_RETRY`；入口 `handle_demand_fault_access()`
+     改成循环调用新的 `handle_demand_fault_attempt()`，重试即重新在锁内解析当前 VMA ——
+     正是窗口放开锁时做不到的那一步。重试次数有界，防止病态合并把 CPU 烧在这上面。
+  2. **窗口按当前 VMA 重新夹紧**：窗口跨度 `end` 是在**放开锁之前**按当时的 `vma->end` 算的。
+     而并发 `munmap`、以及 `mprotect` 触发的 `vma_split`/`mm_split_vma_at` 都是**就地**把
+     `vma->end` 调小，不换对象。所以拿回锁后必须再夹一次（`if (end > vma->end) end = vma->end;`）。
+     不夹的后果更隐蔽：装进去的那些页落在**空洞**里，PTE 是「present + 全零」。fault 报告成功，
+     没有任何线程写过那块内存，而下一次 `mmap` 到同一地址会**继承**这些 PTE、当成应用自己
+     fault 进来的页 —— 这正是本条目记的那个「指针字段变 0/野值」的形状，而且是**静默**的，
+     比直接 SIGSEGV 更难查。超出新 `end` 的帧由 `fault_map_window()` 的短计数自动归还。
+  3. `handle_demand_fault_attempt()` 的收尾不再对每个非零返回打列表 dump。
+
+  顺带修掉了同一处的一个真实缺陷：`vma_split()` 是 VMA 链表 mutator，但原来**只接收 VMA**、
+  不动 `mm->vma_index[]`。`mm->vma_split` 全树唯一的调用者 `mprotect` 是唯一一个不做失效的 mutator，
+  于是索引数组变成一张「指针快照」：后面每个槽位都错一位，而数组仍按 `start` 有序，二分搜索照样收敛、
+  不报错，只是收敛到一个不覆盖该地址的 VMA 或干脆收敛到空。签名改成 `vma_split(mm, vma, split)`，
+  在函数内部做 `MM_VMA_INDEX_MUTATION` 失效。
+
+  实测（同一镜像，只换内核，`-smp 4`）：
+
+  ```
+  修复前：SIGSEGV code=13 ... FATAL: signal=11      # 每次必崩
+  修复后：MTCORRUPT: phase 1/2 done
+          MTCORRUPT: phase 2/2 done
+          MTCORRUPT: PASS                           # 连续 6/6 轮
+  ```
+
+  门禁同时把 `SIGSEGV` / `SLAB DEBUG` / `FATAL` 列为 `forbid`，所以这条以后会在回归里被守住。
+
+  与本条目已有结论的关系：三处「裸帧写」（cleartid、futex PI、signal）已修且保留，它们都是**真的**，
+  但如上所述都不解释这些偶发崩溃；本条是**另一条独立的、且是 SMP 才有的**机制。至此
+  「多线程进程的匿名内存偶发被写坏」有了具体代码、具体语义缺陷和确定性门禁。
+
 **【MC 的 OpenAL 有结论了：不是内核 bug，而是「把 glibc 版原生库塞进 musl 客体」】**
 
   用和 `ld-musl+0x4602b` 相同的办法（把 `__cxa_throw` 的调用方地址减去它所在 mapping 的基址），
@@ -752,7 +832,9 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
   附注：`+0xf168` 落在该库的第一个 LOAD 段内，且该库已 strip；要继续点名具体函数，
   需要用它的 `.eh_frame` 或带符号构建，但对「glibc/gcompat」这个结论已非必要。
 - 影响：JVM 可用，所以 Minecraft 的第一障碍其实是 GL 链（IN_FORMATS → PRIME → GL 渲染器）；
-  剩下的是 mpv 那条 1/10 的多线程内存问题（会影响长跑的 Java 游戏）。
+  mpv 那条 1/10 的多线程内存问题，其内核侧机制已在本节「根因已定位并修复」一条里定位并修好
+  （匿名 fault-around 窗口的 VMA 身份竞争），并由 `smoke-mtcorrupt`（`-smp 4`）守住；
+  症状层面的 mpv 端到端复测尚未重跑。
 - 2026-09 更新（信号对齐 + ucontext 布局修掉后）：`68abf68f`（handler 入口对齐）之后 JVM 能跑 handler、
   能打印崩溃报告；暴露出的真正崩溃是 HotSpot 的隐式空指针检查（`SHA5.implCompress0` 的数组访问依赖
   「空数组 fault → 处理器抛 NPE」，A20OS 上没被识别 → JVM 当致命崩溃）。最小复现器（宿主 javac 编 `.class`

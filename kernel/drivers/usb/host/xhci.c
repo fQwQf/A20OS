@@ -434,10 +434,12 @@ static int xhci_op_reset_port(usb_hcd_t *hcd, unsigned port, uint8_t *speed) {
     return -ETIMEDOUT;
 }
 
-static int xhci_op_init_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
-                             uint8_t *slot_out) {
+static int xhci_op_alloc_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
+                              uint8_t hub_address, uint8_t address,
+                              usb_slot_t *out) {
     xhci_controller_t *xhci = hcd->priv;
     xhci_trb_t event;
+    (void)address;              /* no SET_ADDRESS is sent; see out->address */
     int result = xhci_command(xhci, 0, 0,
                               XHCI_TRB_TYPE(XHCI_TRB_ENABLE_SLOT), &event);
     if (result)
@@ -450,6 +452,14 @@ static int xhci_op_init_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
     uint32_t *control = xhci_input_context(xhci, 0);
     control[1] = (1U << 0) | (1U << 1);
     xhci_fill_slot_context(xhci, (uint8_t)port, speed, 1);
+    /* The slot context's Hub field names the hub owning the port and zero
+     * means the root hub, so a root port leaves it clear.  Only a device
+     * behind an external hub writes here. */
+    if (hub_address) {
+        uint32_t *in_slot = xhci_input_context(xhci, 1);
+        unsigned hub_dword = (xhci->context_size == 64) ? 4U : 3U;
+        in_slot[hub_dword] |= hub_address;
+    }
     xhci_ring_init(&xhci->ep0_ring[slot]);
     xhci_fill_ep_context(xhci, 1, &xhci->ep0_ring[slot], 4,
                          xhci_mps_value(speed, xhci_default_mps(speed)), 0);
@@ -465,7 +475,12 @@ static int xhci_op_init_slot(usb_hcd_t *hcd, unsigned port, uint8_t speed,
     if (result == 0)
         arch_dma_sync_for_cpu(xhci->output_context[slot],
                               sizeof(xhci->output_context[slot]));
-    *slot_out = slot;
+    out->hcd = slot;
+    /* The controller routes by slot and never sends SET_ADDRESS, so the
+     * number the core reserved was not consumed by anything.  Reporting
+     * that explicitly keeps the core from parking a pool entry for an
+     * address no device holds. */
+    out->address = 0;
     return result;
 }
 
@@ -754,7 +769,7 @@ static const usb_hcd_ops_t xhci_hcd_ops = {
     .poll = xhci_op_poll,
     .port_connected = xhci_op_port_connected,
     .reset_port = xhci_op_reset_port,
-    .init_slot = xhci_op_init_slot,
+    .alloc_slot = xhci_op_alloc_slot,
     .update_ep0_mps = xhci_op_update_ep0_mps,
     .control = xhci_op_control,
     .get_descriptor = xhci_op_get_descriptor,

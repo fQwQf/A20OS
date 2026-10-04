@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "core/sync.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/readiness.h"
 #include "mm/slab.h"
 #include "proc/proc.h"
@@ -484,12 +485,12 @@ int pipe_create(int pipefd[2])
     memset(rd, 0, sizeof(*rd)); rd->ops = &g_pipe_read_ops;  rd->priv = pb; rd->flags = O_RDONLY; vfile_ref_init(rd, 1);
     memset(wr, 0, sizeof(*wr)); wr->ops = &g_pipe_write_ops; wr->priv = pb; wr->flags = O_WRONLY; vfile_ref_init(wr, 1);
 
-    int fdrd = vfs_alloc_fd(rd);
-    int fdwr = vfs_alloc_fd(wr);
+    int fdrd = fdtable_install_current_vfile(rd, 0);
+    int fdwr = fdtable_install_current_vfile(wr, 0);
     if (fdrd < 0 || fdwr < 0) {
-        if (fdrd >= 0) vfs_close(fdrd);
+        if (fdrd >= 0) fdtable_close_current(fdrd);
         else vfile_free(rd);
-        if (fdwr >= 0) vfs_close(fdwr);
+        if (fdwr >= 0) fdtable_close_current(fdwr);
         else vfile_free(wr);
         if (pb->ref > 0) {
             if (pb->data) kfree(pb->data);

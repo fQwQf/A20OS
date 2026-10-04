@@ -8,6 +8,8 @@
 #include "core/refcount.h"
 #include "core/sync.h"
 #include "proc/park.h"
+#include "proc/pidns.h"
+#include "proc/userns.h"
 #include <signal_abi.h>
 
 struct signal_state;
@@ -19,9 +21,34 @@ struct vmo;
 struct cg_node;
 typedef struct mm_struct mm_struct_t;
 
+struct vnode;
+struct mount;
+
+/*
+ * Per-process filesystem position.
+ *
+ * cwd[] and root_path[] are the flattened spellings the path walker composes
+ * against; the vnode/mount fields next to them are the authority.  A process
+ * holds a reference on the directory object its cwd names and on the (mount,
+ * vnode) pair that is its root, which is what makes chroot(2) and
+ * pivot_root(2) operate on objects rather than on string prefixes:
+ *
+ *   - unmounting the filesystem a process is rooted in, or standing in, is
+ *     refused because the mount can see those references;
+ *   - pivot_root can therefore detach the old root without leaving any
+ *     process holding a mount that nothing reaches any more;
+ *   - a fork copies the pointers and takes its own references, so the parent
+ *     and child can chdir/pivot independently.
+ *
+ * fdtable_close_all() releases both references; that is the single teardown
+ * hook every exit path already calls.
+ */
 typedef struct proc_fs_context {
     char cwd[MAX_PATH_LEN];
     char root_path[MAX_PATH_LEN];
+    struct vnode *cwd_vn;      /* pin on the directory the cwd names */
+    struct mount *root_mnt;    /* mount the process root lives in */
+    struct vnode *root_vn;     /* the root directory object itself */
     int  umask;
 } proc_fs_context_t;
 
@@ -188,6 +215,10 @@ typedef struct task_t {
     struct files_struct *files;
     proc_fs_context_t fs;
     int      vfs_open_errno;   /* specific error from the last failed vnode open */
+    int      lookup_errno;     /* error from the last failed path resolution
+                                (was the global g_lookup_errno, which made
+                                concurrent lookups overwrite each other's
+                                failure reason) */
     struct task_t *parent;
     /* Parent-children membership, kept in lockstep with ->parent under
      * proc_lock so wait4/reparent walk O(children) instead of the global
@@ -349,7 +380,29 @@ typedef struct task_t {
      * fork/unshare/setns and released by mntns_release_task() from the
      * per-task teardown in fdtable_close_all(). */
     struct mnt_namespace *mnt_ns;
+    /* User namespace membership (kernel/proc/userns.c).  Credentials in
+     * proc_cred_t are stored as GLOBAL ids and translated through this
+     * namespace's uid_map/gid_map at the syscall and procfs boundary; NULL
+     * means the initial namespace, which maps ids to themselves.  Same
+     * ownership rule as mnt_ns: one reference, released by
+     * userns_release_task() from fdtable_close_all(). */
+    struct user_namespace *user_ns;
     proc_ns_context_t ns_ctx;
+
+    /* PID namespace membership (kernel/proc/pidns.c).  pid_ns is the
+     * namespace this task is a member of -- its deepest one -- and is what
+     * its own ids are reported in; pid_ns_for_children is the namespace a
+     * fork() places the next child in.  The two differ exactly between
+     * unshare(CLONE_NEWPID) and the next fork.  Each non-NULL pointer owns
+     * one pid_namespace reference; NULL means the initial namespace, which is
+     * statically pinned. */
+    struct pid_namespace *pid_ns;
+    struct pid_namespace *pid_ns_for_children;
+    /* One id per namespace LEVEL the task is visible in.  Level 0 is the
+     * initial namespace and is task_t::pid itself; entries 1..pid_ns_level
+     * are the container-local ids. */
+    int          ns_pid[PID_MAX_LEVELS];
+    int          pid_ns_level;
 
     /* Kernel keyring subsystem (kernel/ipc/keyring.c).  Owning reference to a
      * keyring object, shared with children at fork and released at teardown. */
@@ -533,7 +586,11 @@ int      proc_exec(const char *path, char *const argv[], char *const envp[]);
 
 /* mmap/brk helpers */
 vaddr_t  proc_brk(vaddr_t newbrk);
+struct vfile;
 vaddr_t  proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off);
+/* Variant for callers already holding a vfile reference (consumed). */
+vaddr_t  proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
+                         struct vfile *file, long off);
 int      proc_munmap(vaddr_t addr, size_t len);
 
 /* Clone (fork-like) */

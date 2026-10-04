@@ -711,6 +711,7 @@ int uxfs_serve_mount(const char *path, struct a20_channel_ep *ep,
     mnt->opts[sizeof(mnt->opts) - 1] = '\0';
     root->mnt = mnt;
     vnode_get(root); /* mount holds a persistent ref, like other FS do */
+    vfs_mount_link_tree(mnt);
     vfs_dcache_invalidate_all();
     kinfo("[UXFS] mounted user filesystem at %s (block=%d)\n", path,
           block_index);

@@ -1,5 +1,6 @@
 #include "fs/ext4.h"
 #include "fs/ext4_internal.h"
+#include "fs/ext4_journal.h"
 #include "fs/block_cache.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
@@ -127,12 +128,9 @@ static int ext4_sync_group_meta(ext4_sb_info_t *sb, uint32_t group,
     if (group >= sb->groups_count)
         return 0;
     const ext4_group_desc_t *gd = &sb->group_descs[group];
-    uint64_t bbm = (uint64_t)gd->bg_block_bitmap_lo |
-                   ((uint64_t)gd->bg_block_bitmap_hi << 32);
-    uint64_t ibm = (uint64_t)gd->bg_inode_bitmap_lo |
-                   ((uint64_t)gd->bg_inode_bitmap_hi << 32);
-    uint64_t it = (uint64_t)gd->bg_inode_table_lo |
-                  ((uint64_t)gd->bg_inode_table_hi << 32);
+    uint64_t bbm = (uint64_t)gd->bg_block_bitmap_lo;
+    uint64_t ibm = (uint64_t)gd->bg_inode_bitmap_lo;
+    uint64_t it = (uint64_t)gd->bg_inode_table_lo;
     uint64_t inode_bytes = (uint64_t)sb->inodes_per_group * sb->inode_size;
     uint64_t gdt_byte = sb->block_group_desc_table_byte +
                         (uint64_t)group * sb->desc_size;
@@ -155,6 +153,16 @@ int ext4_vn_sync(vnode_t *vn)
     ext4_sb_info_t *sb = p->sb;
     if (!sb || !sb->bc)
         return -EINVAL;
+
+    /* Commit the open transaction first, and report its failure to fsync()
+     * rather than letting a later writeback hide it.  The block cache's
+     * pre-sync hook does the same for the generic sync paths; doing it
+     * explicitly here keeps the ordering visible at the call site and means
+     * the page set collected below is only advisory -- the metadata it names
+     * is already durable once this returns. */
+    int commit_ret = ext4_journal_commit(sb);
+    if (commit_ret < 0)
+        return commit_ret;
 
     ext4_inode_t inode;
     if (ext4_read_inode(sb, p->inode_num, &inode) < 0)

@@ -63,6 +63,12 @@
 #define EXT4_FT_FIFO       5
 #define EXT4_FT_SOCK       6
 #define EXT4_FT_SYMLINK    7
+/* The file type a checksummed directory block's trailing dirent carries.  It
+ * is not a name: the dirent's inode field is zero and its rec_len covers the
+ * twelve bytes of the tail itself, so a walker that treats it as free space
+ * writes an entry into it and then loses that entry when the tail is put
+ * back. */
+#define EXT4_FT_DIRENT_TAIL 0xDE
 
 #define EXT4_ROOT_INO      2
 
@@ -150,17 +156,19 @@ typedef struct __attribute__((packed)) ext4_group_desc {
     uint16_t bg_inode_bitmap_csum_lo;
     uint16_t bg_itable_unused_lo;
     uint16_t bg_checksum;
-    uint32_t bg_block_bitmap_hi;
-    uint32_t bg_inode_bitmap_hi;
-    uint32_t bg_inode_table_hi;
-    uint16_t bg_free_blocks_count_hi;
-    uint16_t bg_free_inodes_count_hi;
-    uint16_t bg_used_dirs_count_hi;
-    uint16_t bg_itable_unused_hi;
-    uint32_t bg_exclude_bitmap_hi;
+    /* The checksum sits at 0x1e and is taken over all 64 bytes, so the two
+     * bitmap checksum halves have to sit where mke2fs puts them -- 0x38 and
+     * 0x3a, well past the middle of the descriptor.  Everything between the
+     * checksum and them is the high halves of the 64-bit counters, the exclude
+     * bitmap and padding; this driver neither reads nor modifies any of it,
+     * so it is carried through verbatim rather than mis-declared.  The old
+     * layout declared those 24 bytes as the counters' high halves, which put
+     * the bitmap checksums at 0x2c/0x2e and silently corrupted both on every
+     * descriptor write. */
+    uint8_t  bg_reserved0[24];
     uint16_t bg_block_bitmap_csum_hi;
     uint16_t bg_inode_bitmap_csum_hi;
-    uint32_t bg_reserved;
+    uint32_t bg_reserved_tail;
 } ext4_group_desc_t;
 
 #define EXT4_INODE_SIZE_STATIC 128
@@ -240,6 +248,7 @@ typedef struct __attribute__((packed)) ext4_dir_entry {
 } ext4_dir_entry_t;
 
 typedef struct ext4_sb_info {
+    struct ext4_journal *journal;  /* NULL when the filesystem has no log */
     uint64_t blocks_count;
     uint64_t reserved_blocks_count;
     uint32_t block_size;
@@ -254,6 +263,8 @@ typedef struct ext4_sb_info {
     uint32_t inodes_count;
     uint32_t s_feature_incompat;
     uint32_t s_feature_ro_compat;
+    /* Seed for every metadata_csum checksum; see fs/diskfs/ext4_csum.c. */
+    uint8_t  s_uuid[16];
     uint64_t block_group_desc_table_byte;
     ext4_group_desc_t *group_descs;
     uint32_t *block_alloc_hints;

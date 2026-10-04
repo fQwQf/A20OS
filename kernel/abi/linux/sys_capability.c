@@ -83,7 +83,7 @@ int64_t sys_capget(void *hdrp, void *datap)
     task_t *target = cur;
     task_t *target_ref = NULL;
     if (hdr.pid > 0) {
-        target_ref = proc_find_get(hdr.pid);
+        target_ref = proc_find_get_user(hdr.pid);
         target = target_ref;
         if (!target) return -ESRCH;
     }
@@ -118,7 +118,7 @@ int64_t sys_capset(void *hdrp, const void *datap)
     task_t *cur = proc_current();
     if (hdr.pid < 0) return -EINVAL;
     if (hdr.pid > 0) {
-        task_t *target = proc_find_get(hdr.pid);
+        task_t *target = proc_find_get_user(hdr.pid);
         if (!target) return -ESRCH;
         proc_put(target);
         if (!cur || hdr.pid != cur->pid) return -EPERM;

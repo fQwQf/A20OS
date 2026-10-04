@@ -557,8 +557,9 @@ int64_t sys_openat(int dirfd, const char *path, int flags, int mode) {
             return mr;
         }
     }
-    task_t *t = proc_current();
-    return fdtable_install(t, gfd, flags);
+    /* vfs_open() already installed the fd (with O_CLOEXEC honoured); the
+     * old global-table re-install is gone with it. */
+    return gfd;
 }
 
 int64_t sys_close(int fd) {
@@ -639,21 +640,14 @@ int64_t sys_pipe2(int *pipefd, int flags) {
             vfs_put_file_ref(gfd[0], rd);
             vfs_put_file_ref(gfd[1], wr);
         }
-        task_t *t = proc_current();
-        int fd0 = fdtable_install(t, gfd[0], flags);
-        if (fd0 < 0) {
-            vfs_close(gfd[1]);
-            return fd0;
+        if (flags & O_CLOEXEC) {
+            fdtable_set_cloexec(proc_current(), gfd[0], 1);
+            fdtable_set_cloexec(proc_current(), gfd[1], 1);
         }
-        int fd1 = fdtable_install(t, gfd[1], flags);
-        if (fd1 < 0) {
-            fdtable_close(t, fd0);
-            return fd1;
-        }
-        int user_fds[2] = {fd0, fd1};
+        int user_fds[2] = {gfd[0], gfd[1]};
         if (copy_to_user(pipefd, user_fds, sizeof(user_fds)) < 0) {
-            fdtable_close(t, fd0);
-            fdtable_close(t, fd1);
+            fdtable_close_current(gfd[0]);
+            fdtable_close_current(gfd[1]);
             return -EFAULT;
         }
     }

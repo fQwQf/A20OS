@@ -60,10 +60,26 @@ vnode_t *vfs_resolve_no_follow_final(const char *path);
 
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd);
 
-int g_lookup_errno;
+/* Per-task lookup error (vfs_lookup_errno/vfs_set_lookup_errno).  Only the
+ * pre-task boot path resolves through the static fallback. */
+static int g_lookup_errno_boot;
+
+int vfs_lookup_errno(void)
+{
+    task_t *t = proc_current();
+    return t ? t->lookup_errno : g_lookup_errno_boot;
+}
+
+void vfs_set_lookup_errno(int err)
+{
+    task_t *t = proc_current();
+    if (t)
+        t->lookup_errno = err;
+    else
+        g_lookup_errno_boot = err;
+}
 
 /* Path resolution moved to fs/vfs/path_resolution.c */
-extern int g_lookup_errno;
 
 /* ============================================================
  * VFS open / close
@@ -156,14 +172,13 @@ static int vfs_proc_fd_open(const char *path, int flags)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
-    vfile_t *vf = fdtable_get_file_ref(task, fd, &gfd, NULL);
+    vfile_t *vf = fdtable_get_file_ref(task, fd, NULL);
     if (!vf) {
         proc_put(task);
         return -ENOENT;
     }
     if ((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         proc_put(task);
         return -EEXIST;
     }
@@ -174,7 +189,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
         vnode_get(vn);
     strncpy(target_path, vf->path, sizeof(target_path) - 1);
     target_path[sizeof(target_path) - 1] = '\0';
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     proc_put(task);
     if (!vn)
         return -ENXIO;
@@ -224,8 +239,8 @@ static int vfs_proc_fd_open(const char *path, int flags)
     }
     strncpy(opened->path, target_path, MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
-    int opened_gfd = vfs_alloc_fd(opened);
-    if (opened_gfd < 0) {
+    int opened_fd = fdtable_install_current_vfile(opened, 0);
+    if (opened_fd < 0) {
         vnode_t *opened_vn = opened->vnode;
         if (opened->ops && opened->ops->close)
             opened->ops->close(opened);
@@ -235,7 +250,7 @@ static int vfs_proc_fd_open(const char *path, int flags)
         return -EMFILE;
     }
     vnode_put(vn);
-    return opened_gfd;
+    return opened_fd;
 }
 
 int vfs_open_vnode(struct vnode *vn, int flags)
@@ -251,8 +266,8 @@ int vfs_open_vnode(struct vnode *vn, int flags)
     }
     strncpy(opened->path, "handle", MAX_PATH_LEN - 1);
     opened->path[MAX_PATH_LEN - 1] = '\0';
-    int gfd = vfs_alloc_fd(opened);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(opened, 0);
+    if (ofd < 0) {
         vnode_t *ovn = opened->vnode;
         if (opened->ops && opened->ops->close)
             opened->ops->close(opened);
@@ -262,7 +277,7 @@ int vfs_open_vnode(struct vnode *vn, int flags)
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
 int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from current process */
@@ -325,8 +340,8 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     const char *rel = vfs_strip_mount_prefix(resolved, mnt);
     vnode_t *vn = vnode_lookup_path(mnt->root, rel);
     if (!vn) {
-        if (g_lookup_errno && !(flags & O_CREAT))
-            return g_lookup_errno;
+        if (vfs_lookup_errno() && !(flags & O_CREAT))
+            return vfs_lookup_errno();
         if (!(flags & O_CREAT)) { kdebug("[VFS] open '%s' (rel='%s'): not found, no O_CREAT\n", resolved, rel); return -ENOENT; }
         if (mnt->flags & 1) return -EROFS;
         if (!mnt->root || !mnt->root->ops || !mnt->root->ops->create) { kdebug("[VFS] open '%s': root has no create ops\n", resolved); return -ENOSYS; }
@@ -340,7 +355,7 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
 
         vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
         if (!parent) {
-            return g_lookup_errno ? g_lookup_errno : -ENOENT;
+            return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
         }
         if (parent->type != VFS_FT_DIR) {
             vnode_put(parent);
@@ -417,15 +432,15 @@ int vfs_open(const char *path, int flags, int mode) {    /* Resolve cwd from cur
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(vf, flags & O_CLOEXEC);
+    if (ofd < 0) {
         vnode_put(vn);
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         vfile_free(vf);
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
 int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
@@ -437,25 +452,23 @@ int vfs_dirfd_path(int dirfd, char *out, size_t outsz) {
         out[outsz - 1] = '\0';
         return 0;
     }
-    int64_t gfd = fdtable_get_current(dirfd);
-    if (gfd < 0) return (int)gfd;
-    vfile_t *vf = vfs_get_file_ref((int)gfd);
+    vfile_t *vf = fdtable_get_current_file_ref(dirfd);
     if (!vf) return -EBADF;
     if (!vf->vnode || vf->vnode->type != VFS_FT_DIR) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -ENOTDIR;
     }
     if (!vf->path[0]) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -EINVAL;
     }
     if (strlen(vf->path) >= outsz) {
-        vfs_put_file_ref((int)gfd, vf);
+        vfs_put_file(vf);
         return -ENAMETOOLONG;
     }
     strncpy(out, vf->path, outsz - 1);
     out[outsz - 1] = '\0';
-    vfs_put_file_ref((int)gfd, vf);
+    vfs_put_file(vf);
     return 0;
 }
 
@@ -534,7 +547,7 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
                                                 vfs_strip_mount_prefix(parent_path, mnt));
             if (!parent || parent->type != VFS_FT_DIR) {
                 vnode_put(parent);
-                return g_lookup_errno ? g_lookup_errno : -ENOENT;
+                return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
             }
             if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
                 vnode_put(parent);
@@ -612,49 +625,39 @@ int vfs_openat2(int dirfd, const char *path, int flags, int mode, uint64_t resol
     strncpy(vf->path, resolved, MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
 
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int ofd = fdtable_install_current_vfile(vf, flags & O_CLOEXEC);
+    if (ofd < 0) {
         vnode_put(vn);
         if (vf->ops && vf->ops->close) vf->ops->close(vf);
         vfile_free(vf);
         return -EMFILE;
     }
     vnode_put(vn);
-    return gfd;
+    return ofd;
 }
 
-static void vfs_release_file_final(int fd, vfile_t *vf)
+/* Runs when the last reference to an open file goes away: fire EventQ
+ * destroy hooks (watches key on the vfile pointer), release file locks,
+ * run the close op, free the vfile, drop the vnode. */
+void vfs_finalize_closed_vfile(vfile_t *vf)
 {
     if (!vf)
         return;
     vnode_t *vn = vf->vnode;
-    vfs_release_open_file_locks(vf, fd);
+    a20_eventq_on_vfile_destroy(vf);
+    vfs_release_open_file_locks(vf, 0);
     if (vf->ops && vf->ops->close)
         vf->ops->close(vf);
     vfile_free(vf);
     vnode_put(vn);
-    ktrace_vfs("[VFS] close: gfd=%d done\n", fd);
-}
-
-void vfs_put_file_ref(int fd, vfile_t *vf)
-{
-    vfile_t *closed = NULL;
-    if (file_put_ref_prepare(fd, vf, &closed) == 0)
-        vfs_release_file_final(fd, closed);
-}
-
-void vfs_put_file(vfile_t *vf)
-{
-    vfile_t *closed = NULL;
-    if (file_put_ref_prepare(-1, vf, &closed) == 0)
-        vfs_release_file_final(-1, closed);
+    ktrace_vfs("[VFS] close: file=%p identity=%lu done\n",
+               (void *)vf, (unsigned long)vf->identity);
 }
 
 int vfs_close(int fd) {
-    vfile_t *vf = NULL;
-    int r = file_close_prepare(fd, &vf);
-    if (r < 0) return r;
-    vfs_release_file_final(fd, vf);
+    vfile_t *vf = fdtable_get_current_file_ref(fd);
+    if (!vf) return -EBADF;
+    vfs_put_file(vf);
     return 0;
 }
 
@@ -688,7 +691,7 @@ int vfs_mkdir(const char *path, int mode) {
         return sr;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -748,7 +751,7 @@ int vfs_unlink(const char *path) {
         return sr;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, parent_path);
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -855,7 +858,7 @@ int vfs_rename_flags(const char *old, const char *newpath, unsigned int flags) {
     if (!old_dir || !new_dir) {
         vnode_put(old_dir);
         vnode_put(new_dir);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     }
     if (old_dir->type != VFS_FT_DIR || new_dir->type != VFS_FT_DIR) {
         vnode_put(old_dir);
@@ -953,7 +956,7 @@ int vfs_rmdir(const char *path) {
     if (!mnt || !mnt->root) return -ENOENT;
 
     vnode_t *parent = vnode_lookup_path(mnt->root, vfs_strip_mount_prefix(parent_path, mnt));
-    if (!parent) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!parent) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -1119,9 +1122,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
             proc_put(proc_fd_task);
             return -EACCES;
         }
-        int gfd = -1;
-        vfile_t *vf = fdtable_get_file_ref(proc_fd_task, proc_fd, &gfd,
-                                           NULL);
+        vfile_t *vf = fdtable_get_file_ref(proc_fd_task, proc_fd, NULL);
         if (!vf) {
             proc_put(proc_fd_task);
             return -ENOENT;
@@ -1133,7 +1134,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
                                           sizeof(visible_fd))
                 : NULL;
         int r = target ? vfs_readlink_copy_target(target, buf, sz) : -ENOENT;
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         proc_put(proc_fd_task);
         return r;
     }
@@ -1183,7 +1184,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
     const char *rel = vfs_strip_mount_prefix(parent_path, mnt);
     vnode_t *parent = vnode_lookup_path(mnt->root, rel);
     if (!parent)
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         return -ENOTDIR;
@@ -1231,7 +1232,7 @@ int vfs_readlinkat(int dirfd, const char *path, char *buf, size_t sz) {
 int vfs_link(const char *oldpath, const char *newpath) {
     if (!oldpath || !newpath) return -EINVAL;
     vnode_t *target = vfs_resolve(oldpath);
-    if (!target) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!target) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (target->type == VFS_FT_DIR) {
         vnode_put(target);
         return -EPERM;
@@ -1263,7 +1264,7 @@ int vfs_link(const char *oldpath, const char *newpath) {
     if (!parent || parent->type != VFS_FT_DIR) {
         vnode_put(parent);
         vnode_put(target);
-        return g_lookup_errno ? g_lookup_errno : -ENOENT;
+        return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     }
     if (vfs_vnode_permission(parent, W_OK | X_OK) < 0) {
         vnode_put(parent);
@@ -1328,6 +1329,109 @@ int vfs_symlink(const char *target, const char *linkpath) {
     return r;
 }
 
+/* ---- per-process root and cwd references -----------------------------
+ *
+ * The strings in proc_fs_context_t are the flattened spellings; these four
+ * helpers are the only places that move the object references they are
+ * derived from, so the pair cannot drift apart.  Every transition takes the
+ * new reference before releasing the old one, which matters for chdir(".")
+ * and for re-pivoting onto the same directory. */
+
+/* Move @t's root to the (mount, vnode) pair, @root_path being the global
+ * path that spells it.  Called by chroot(2), pivot_root(2) and the
+ * namespace-apply path. */
+void vfs_task_root_set(task_t *t, mount_t *mnt, vnode_t *vn,
+                       const char *root_path) {
+    if (!t) return;
+    if (vn) vnode_get(vn);
+    vfs_mount_root_get(mnt);
+    if (t->fs.root_vn) vnode_put(t->fs.root_vn);
+    if (t->fs.root_mnt) vfs_mount_root_put(t->fs.root_mnt);
+    t->fs.root_vn = vn;
+    t->fs.root_mnt = mnt;
+    if (root_path) {
+        strncpy(t->fs.root_path, root_path, MAX_PATH_LEN - 1);
+        t->fs.root_path[MAX_PATH_LEN - 1] = '\0';
+    }
+    /* Linux resets the cwd to the new root on chroot; pivot_root sets it
+     * explicitly afterwards.  Keeping cwd root-relative, "/" is correct for
+     * both. */
+    strncpy(t->fs.cwd, "/", MAX_PATH_LEN - 1);
+    t->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    if (t->fs.cwd_vn) vnode_put(t->fs.cwd_vn);
+    t->fs.cwd_vn = vn;
+    if (vn) vnode_get(vn);
+    if (mnt) vfs_mount_cwd_get(mnt);
+}
+
+/* Move @t's cwd to @vn, @visible being its root-relative spelling. */
+void vfs_task_cwd_set(task_t *t, vnode_t *vn, const char *visible) {
+    if (!t) return;
+    if (vn) vnode_get(vn);
+    mount_t *new_mnt = vn ? vn->mnt : NULL;
+    if (new_mnt) vfs_mount_cwd_get(new_mnt);
+    mount_t *old_mnt = t->fs.cwd_vn ? t->fs.cwd_vn->mnt : NULL;
+    if (t->fs.cwd_vn) vnode_put(t->fs.cwd_vn);
+    if (old_mnt) vfs_mount_cwd_put(old_mnt);
+    t->fs.cwd_vn = vn;
+    if (visible) {
+        strncpy(t->fs.cwd, visible, MAX_PATH_LEN - 1);
+        t->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    }
+}
+
+/* Copy @src's root/cwd references into @dst, taking @dst's own references.
+ * Used by fork/clone, where the strings are copied field by field next to
+ * this call. */
+void vfs_task_fs_pins_copy(task_t *dst, const task_t *src) {
+    if (!dst || !src)
+        return;
+    dst->fs.cwd_vn = NULL;
+    dst->fs.root_vn = NULL;
+    dst->fs.root_mnt = NULL;
+    if (src->fs.cwd_vn) {
+        dst->fs.cwd_vn = src->fs.cwd_vn;
+        vnode_get(dst->fs.cwd_vn);
+        if (dst->fs.cwd_vn->mnt)
+            vfs_mount_cwd_get(dst->fs.cwd_vn->mnt);
+    }
+    dst->fs.root_vn = src->fs.root_vn;
+    if (dst->fs.root_vn)
+        vnode_get(dst->fs.root_vn);
+    dst->fs.root_mnt = src->fs.root_mnt;
+    if (dst->fs.root_mnt)
+        vfs_mount_root_get(dst->fs.root_mnt);
+}
+
+/* Drop the per-task references.  fdtable_close_all() calls this on every
+ * exit path; it must be safe to call twice (exec re-enters teardown). */
+void vfs_task_fs_pins_release(task_t *t) {
+    if (!t) return;
+    if (t->fs.cwd_vn) {
+        if (t->fs.cwd_vn->mnt)
+            vfs_mount_cwd_put(t->fs.cwd_vn->mnt);
+        vnode_put(t->fs.cwd_vn);
+        t->fs.cwd_vn = NULL;
+    }
+    if (t->fs.root_vn) {
+        vnode_put(t->fs.root_vn);
+        t->fs.root_vn = NULL;
+    }
+    if (t->fs.root_mnt) {
+        vfs_mount_root_put(t->fs.root_mnt);
+        t->fs.root_mnt = NULL;
+    }
+}
+
+/* The mount @t is rooted in, resolving the implicit "/" root on first use
+ * without taking a reference (nothing can drop the namespace root while any
+ * process exists). */
+mount_t *vfs_task_root_mount(task_t *t) {
+    if (!t) return NULL;
+    if (t->fs.root_mnt) return t->fs.root_mnt;
+    return vfs_find_mount("/");
+}
+
 int vfs_chdir(const char *path) {
     task_t *cur = proc_current();
     if (!cur) return -EINVAL;
@@ -1346,17 +1450,18 @@ int vfs_chdir(const char *path) {
         return -EACCES;
 
     vnode_t *vn = vfs_resolve(canon);
-    if (!vn) return g_lookup_errno ? g_lookup_errno : -ENOENT;
+    if (!vn) return vfs_lookup_errno() ? vfs_lookup_errno() : -ENOENT;
     if (vn->type != VFS_FT_DIR) { vnode_put(vn); return -ENOTDIR; }
     if (vfs_vnode_permission(vn, X_OK) < 0) { vnode_put(vn); return -EACCES; }
-    vnode_put(vn);
     char visible[MAX_PATH_LEN];
     const char *cwd_visible =
         vfs_chroot_visible_path(cur, canon, visible, sizeof(visible));
-    if (!cwd_visible)
-        return -ENAMETOOLONG;
-    strncpy(cur->fs.cwd, cwd_visible, MAX_PATH_LEN - 1);
-    cur->fs.cwd[MAX_PATH_LEN - 1] = '\0';
+    if (!cwd_visible) { vnode_put(vn); return -ENAMETOOLONG; }
+    /* The reference @vn arrived with is adopted as the cwd pin rather than
+     * dropped: it is what makes "somebody is standing in this filesystem"
+     * answerable at umount time. */
+    vfs_task_cwd_set(cur, vn, cwd_visible);
+    vnode_put(vn);
     return 0;
 }
 
@@ -1474,11 +1579,9 @@ void vfs_release_process_locks(int pid) {
     fs_locks_release_process(pid);
 }
 
-void vfs_release_process_file_locks(int fd, int pid) {
-    vfile_t *vf = vfs_get_file_ref(fd);
+void vfs_release_process_file_locks(vfile_t *vf, int pid) {
     if (!vf) return;
     fs_locks_release_process_file(vf, pid);
-    vfs_put_file_ref(fd, vf);
 }
 
 static void vfs_release_open_file_locks(vfile_t *vf, int gfd __attribute__((unused))) {
@@ -1496,9 +1599,26 @@ int vfs_flock(int fd, int operation) {
 int vfs_fcntl(int fd, int cmd, long arg) {
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf) return -EBADF;
+    int r;
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+        r = fdtable_dup_current(fd, (int)arg,
+                                cmd == F_DUPFD_CLOEXEC ? O_CLOEXEC : 0);
+        vfs_put_file(vf);
+        return r;
+    }
+    r = vfs_fcntl_vfile(vf, cmd, arg);
+    vfs_put_file(vf);
+    return r;
+}
+
+/* fcntl on an already-resolved vfile (native ABI file handles).  The caller
+ * owns @vf's reference.  F_DUPFD/F_DUPFD_CLOEXEC need an fd to duplicate and
+ * are only reachable through the fd-level vfs_fcntl(). */
+int vfs_fcntl_vfile(vfile_t *vf, int cmd, long arg) {
+    if (!vf) return -EBADF;
     task_t *t = proc_current();
     int owner = t ? t->pid : 0;
-#define VFS_FCNTL_RETURN(expr) do { int _vfs_fcntl_r = (expr); vfs_put_file_ref(fd, vf); return _vfs_fcntl_r; } while (0)
+#define VFS_FCNTL_RETURN(expr) do { int _vfs_fcntl_r = (expr); return _vfs_fcntl_r; } while (0)
 
     if (cmd == F_GETFL)
         VFS_FCNTL_RETURN(vf->flags);
@@ -1507,10 +1627,8 @@ int vfs_fcntl(int fd, int cmd, long arg) {
         vf->flags = accmode | ((int)arg & ~(O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC));
         VFS_FCNTL_RETURN(0);
     }
-    if (cmd == F_DUPFD)
-        VFS_FCNTL_RETURN(vfs_dupfd(fd, (int)arg));
-    if (cmd == F_DUPFD_CLOEXEC)
-        VFS_FCNTL_RETURN(vfs_dupfd(fd, (int)arg));
+    if (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)
+        VFS_FCNTL_RETURN(-EINVAL);
     if (cmd == F_GETFD || cmd == F_SETFD)
         VFS_FCNTL_RETURN(0);
 
@@ -1671,10 +1789,9 @@ void vfs_init(void) {
         }
     }
 
-    /* Install std streams at global fds 0,1,2 */
-    file_install_at(STDIN_FILENO, devfs_create_stdio(STDIN_FILENO));
-    file_install_at(STDOUT_FILENO, devfs_create_stdio(STDOUT_FILENO));
-    file_install_at(STDERR_FILENO, devfs_create_stdio(STDERR_FILENO));
+    /* std streams: no global table any more.  Boot-context fd operations
+     * lazily wire stdio into the pinned boot table on first use (fs/fdtable.c
+     * fdtable_boot()), and every task gets its own via fdtable_init_stdio(). */
 
     vfs_mkdir("/tmp", 0755);
     int overlay_err = ramfs_populate_overlay();

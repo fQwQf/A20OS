@@ -119,7 +119,9 @@ int proc_debug_event_stop(int sig, int event, uint64_t msg)
  */
 static task_t *ptrace_tracee_get(int pid, int need_stopped)
 {
-    task_t *t = proc_find_get(pid);
+    /* The pid arrives from ptrace(2), so it is an id in the caller's own
+     * namespace. */
+    task_t *t = proc_find_get_user(pid);
     if (!t)
         return NULL;
     if (t->ptracer != proc_current() || !proc_debug_is_traced(t)) {
@@ -158,7 +160,8 @@ int proc_debug_traceme(void)
 int proc_debug_attach(int pid)
 {
     task_t *caller = proc_current();
-    task_t *t = proc_find_get(pid);
+    /* User-supplied pid: resolve it in the caller's own namespace. */
+    task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
     if (t == caller || t == proc_idle_task()) {
@@ -197,7 +200,8 @@ int proc_debug_attach(int pid)
 int proc_debug_seize(int pid)
 {
     task_t *caller = proc_current();
-    task_t *t = proc_find_get(pid);
+    /* User-supplied pid: resolve it in the caller's own namespace. */
+    task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
     if (t == caller || t == proc_idle_task()) {
@@ -235,7 +239,8 @@ int proc_debug_seize(int pid)
 int proc_debug_interrupt(int pid)
 {
     task_t *caller = proc_current();
-    task_t *t = proc_find_get(pid);
+    /* User-supplied pid: resolve it in the caller's own namespace. */
+    task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
     if (t->ptracer != caller) {
@@ -254,6 +259,10 @@ int proc_debug_interrupt(int pid)
     return 0;
 }
 
+/* orig_pid is task_t::parent->pid as the KERNEL recorded it -- a global id --
+ * so it is deliberately resolved with proc_find_get() and not the
+ * caller-relative lookup: this runs from tracer teardown, where the recorded
+ * parent may well live in a different namespace than the dying tracer. */
 static void ptrace_reparent_to_original(task_t *t, int orig_pid)
 {
     task_t *reaper = NULL;
@@ -392,7 +401,7 @@ int proc_debug_singlestep(int pid, int sig)
 
 int proc_debug_kill(int pid)
 {
-    task_t *t = proc_find_get(pid);
+    task_t *t = proc_find_get_user(pid);
     if (!t)
         return -ESRCH;
     if (t->ptracer != proc_current() || !proc_debug_is_traced(t)) {
@@ -753,6 +762,9 @@ void proc_debug_tracer_exiting(task_t *tracer)
     }
     spin_unlock_irqrestore(&proc_lock, flags);
 
+    /* These three arrays hold global ids the kernel itself recorded earlier
+     * (t->pid), so they are resolved globally rather than in any caller's
+     * namespace. */
     for (int i = 0; i < tracee_count; i++) {
         task_t *t = proc_find_get(tracee_pids[i]);
         if (!t)

@@ -12,6 +12,12 @@
 #include "core/stdio.h"
 #include "core/timer.h"
 
+/* Reclaim levers outside mm/: clean page-cache drop (fs/page_cache.c) and
+ * spare-slab release (mm/slab.c).  Declared locally to keep mm -> fs
+ * dependency surface at exactly these two symbols. */
+extern size_t page_cache_drop_clean(void);
+extern size_t slab_reclaim_spare(void);
+
 #define OOM_COOLDOWN_TICKS MS_TO_TICKS(2000)
 #define OOM_MIN_FREE_PAGES 256
 #define MAX_SWAP_RECLAIM 8
@@ -232,6 +238,55 @@ int oom_try_reclaim(void)
     return 1;
 }
 
+int oom_swap_reclaim_pages(int target_pages)
+{
+#ifdef CONFIG_SWAP
+    if (__atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED))
+        return 0;
+    return swap_out_victim_pages(target_pages);
+#else
+    (void)target_pages;
+    return 0;
+#endif
+}
+
+/* Background reclaimer (kswapd role).  All memory reclamation used to run
+ * synchronously in the allocation path: an allocation that hit the watermark
+ * paid slab shrink + page-cache drop + swap I/O before it could proceed, and
+ * nothing reclaimed while the system was otherwise idle.  This thread scans
+ * once a second and pulls the three existing levers in escalating order —
+ * spare slab pages, clean page cache, anonymous swap-out — so allocations
+ * mostly find water above the mark instead of having to dig for it. */
+#define KSWAPD_INTERVAL_TICKS MS_TO_TICKS(1000)
+static unsigned long kswapd_passes;
+static unsigned long kswapd_pages_freed;
+static unsigned long kswapd_last_pass_tick;
+
+void oom_kswapd_thread(void)
+{
+    klog(KLOG_INFO, "[KSWAPD] background reclaimer started\n");
+    for (;;) {
+        uint64_t now = timer_get_ticks();
+        if (pfa_free_count() >= OOM_MIN_FREE_PAGES) {
+            proc_sleep_until(now + KSWAPD_INTERVAL_TICKS);
+            continue;
+        }
+        kswapd_passes++;
+        kswapd_last_pass_tick = now;
+        size_t freed = slab_reclaim_spare() / PAGE_SIZE;
+        freed += page_cache_drop_clean();
+        if (pfa_free_count() < OOM_MIN_FREE_PAGES)
+            freed += (size_t)oom_swap_reclaim_pages(64);
+        kswapd_pages_freed += freed;
+        /* Yield to let consumers catch up, but if nothing was freed, stop
+         * spinning: back off a full interval before trying again. */
+        if (freed == 0)
+            proc_sleep_until(now + KSWAPD_INTERVAL_TICKS);
+        else
+            proc_yield();
+    }
+}
+
 void oom_get_stats(oom_stats_t *out)
 {
     if (!out)
@@ -243,4 +298,7 @@ void oom_get_stats(oom_stats_t *out)
     out->free_pages_at_kill = oom_free_pages_at_kill;
     out->free_pages_now = pfa_free_count();
     out->in_progress = __atomic_load_n(&oom_in_progress, __ATOMIC_RELAXED);
+    out->kswapd_passes = kswapd_passes;
+    out->kswapd_pages_freed = kswapd_pages_freed;
+    out->kswapd_last_pass_tick = kswapd_last_pass_tick;
 }

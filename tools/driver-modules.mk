@@ -182,6 +182,10 @@ $(USER_BUILD_DIR)/usb-hid.a20drv: $(DRVMOD_DIR)/usb_hid.c kernel/drivers/usb/cla
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+$(USER_BUILD_DIR)/usb-hub.a20drv: $(DRVMOD_DIR)/usb_hub.c kernel/drivers/usb/class/usb_hub.c
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
 $(USER_BUILD_DIR)/usb-storage.a20drv: $(DRVMOD_DIR)/usb_storage.c kernel/drivers/usb/class/usb_storage.c
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@

@@ -2,6 +2,7 @@
 #include "fs/fat32_internal.h"
 #include "fs/file.h"
 #include "fs/vfs.h"
+#include "fs/vfs/stat_perm.h"
 #include "fs/block_cache.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
@@ -320,6 +321,22 @@ int fat32_fclose(vfile_t *vf) {
             off += 32;
         }
     }
+    /* The last descriptor on an unlinked file is what frees it: the vnode cache
+     * keeps a reference of its own, so waiting for the vnode to be released
+     * would wait forever.  The dirty writeback above has to reach the device
+     * first, which is why the free happens after it and before the unlock. */
+    if (fc) {
+        vnode_t *vn = vf->vnode;
+        fat32_vnode_priv_t *fp = vn ? (fat32_vnode_priv_t *)vn->fs_data : NULL;
+        if (fp && __atomic_sub_fetch(&fp->open_count, 1, __ATOMIC_ACQ_REL) == 0 &&
+            fp->unlinked) {
+            fp->unlinked = 0;
+            fat32_sb_t *sb = fp->sb;
+            vfs_drop_time_meta_identity(vn->mnt, vn->ino);
+            fat32_drop_meta(sb, vn->ino);
+            fat32_free_cluster_chain(sb, fp->first_cluster);
+        }
+    }
     if (fc)
         fat32_unlock(fc->sb);
     if (vf->priv) { kfree(vf->priv); vf->priv = NULL; }
@@ -346,6 +363,8 @@ vfile_t *fat32_open_vnode(vnode_t *vn, int flags) {
     if (!vf) { kfree(fc); return NULL; }
     vf->vnode     = vn;
     vnode_get(vn);
+    if (fp)
+        __atomic_add_fetch(&fp->open_count, 1, __ATOMIC_ACQ_REL);
     vf->flags     = flags;
     vf->offset    = fc->file_off;
     vfile_ref_init(vf, 1);

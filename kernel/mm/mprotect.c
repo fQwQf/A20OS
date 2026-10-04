@@ -85,12 +85,12 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         uint64_t e = v->end > end ? end : v->end;
 
         if (s > v->start) {
-            v = vma_split(v, s);
+            v = vma_split(mm, v, s);
             if (!v) return -ENOMEM;
             next = v->next;
         }
         if (e < v->end) {
-            if (!vma_split(v, e)) return -ENOMEM;
+            if (!vma_split(mm, v, e)) return -ENOMEM;
             next = v->next;
         }
 

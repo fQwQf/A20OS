@@ -6,6 +6,7 @@
  */
 
 #include "fs/procfs.h"
+#include "fs/ext4_journal.h"
 #include "net/netfilter.h"
 #include "net/net_config.h"
 #include "fs/procfs_internal.h"
@@ -21,6 +22,7 @@
 #include "fs/ext4.h"
 #include "fs/vfs/dcache.h"
 #include "fs/vfs/mntns.h"
+#include "proc/pidns.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/coredump.h"
@@ -145,6 +147,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
     if (strcmp(name, "ns") == 0) return PF_PID_NS;
     if (strcmp(name, "pid") == 0) return PF_PID_NS_PID;
+    if (strcmp(name, "pid_for_children") == 0) return PF_PID_NS_PID_FOR_CHILDREN;
     if (strcmp(name, "uts") == 0) return PF_PID_NS_UTS;
     if (strcmp(name, "user") == 0) return PF_PID_NS_USER;
     if (strcmp(name, "ipc") == 0) return PF_PID_NS_IPC;
@@ -247,6 +250,13 @@ typedef struct {
      * the target process leaves or exits the namespace. */
     void *ns_ref;
     int   ns_owner_uid;
+    /* The owner's user namespace at open time, pinned.  setns(2) authority
+     * over a mount or pid namespace is authority over the user namespace that
+     * owns it, and the owner may exit before setns runs -- so the namespace,
+     * not just the uid, has to outlive the open.  Holds the initial user
+     * namespace statically for an owner outside any user namespace; userns_get
+     * and userns_put both treat that one as needing no reference. */
+    struct user_namespace *owner_userns;
 } procfs_priv_t;
 
 static procfs_meta_t *procfs_meta_create(pf_type_t type, int pid, int fd) {
@@ -312,14 +322,28 @@ static procfs_priv_t *procfs_priv_create(pf_type_t type, int pid, int fd) {
         }
         p->content_len = (size_t)len;
     }
-    if (type == PF_PID_NS_MNT) {
-        /* Pin the target's mount namespace for setns(2); released from
+    if (type == PF_PID_NS_MNT || type == PF_PID_NS_PID ||
+        type == PF_PID_NS_PID_FOR_CHILDREN || type == PF_PID_NS_USER) {
+        /* Pin the target's namespace for setns(2); released from
          * procfs_fclose().  Done last so the failure paths above have no
-         * reference to drop. */
+         * reference to drop.  ns_ref is void* so one field serves all three
+         * namespace kinds -- procfs_ns_file_*_get() is what tells them
+         * apart, and it checks the pf_type stored alongside. */
         task_t *target = proc_find_get(real_pid);
         if (target) {
-            p->ns_ref = mntns_task_get(target);
+            if (type == PF_PID_NS_MNT)
+                p->ns_ref = mntns_task_get(target);
+            else if (type == PF_PID_NS_PID)
+                p->ns_ref = pidns_task_get(target);
+            else if (type == PF_PID_NS_USER)
+                p->ns_ref = userns_task_get(target);
+            else {
+                pid_namespace_t *fc = (pid_namespace_t *)__atomic_load_n(
+                    &target->pid_ns_for_children, __ATOMIC_ACQUIRE);
+                p->ns_ref = pidns_get(fc);
+            }
             p->ns_owner_uid = target->cred.uid;
+            p->owner_userns = userns_task_get(target);
             proc_put(target);
         }
     }
@@ -470,6 +494,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "netmem") == 0) {
         child = new_entry(name, PF_A20_NETMEM, 0);
         type = PF_A20_NETMEM;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "journal") == 0) {
+        child = new_entry(name, PF_A20_JOURNAL, 0);
+        type = PF_A20_JOURNAL;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "anonprov") == 0) {
         child = new_entry(name, PF_A20_ANONPROV, 0);
         type = PF_A20_ANONPROV;
@@ -492,13 +519,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             proc_put(task);
             return -EACCES;
         }
-        int gfd = -1;
         vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
+            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
         proc_put(task);
         if (!target)
             return -ENOENT;
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         child = new_entry(name, PF_PID_FD, dp->pid);
         type = PF_PID_FD;
         fd_symlink = 1;
@@ -515,18 +541,19 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             proc_put(task);
             return -EACCES;
         }
-        int gfd = -1;
         vfile_t *target = task ?
-            fdtable_get_file_ref(task, fd_entry, &gfd, NULL) : NULL;
+            fdtable_get_file_ref(task, fd_entry, NULL) : NULL;
         proc_put(task);
         if (!target)
             return -ENOENT;
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         child = new_entry(name, PF_PID_FDINFO_ENTRY, dp->pid);
         type = PF_PID_FDINFO_ENTRY;
     } else if (dp && dp->type == PF_PID_NS) {
         if (strcmp(name, "pid") == 0)
             type = PF_PID_NS_PID;
+        else if (strcmp(name, "pid_for_children") == 0)
+            type = PF_PID_NS_PID_FOR_CHILDREN;
         else if (strcmp(name, "uts") == 0)
             type = PF_PID_NS_UTS;
         else if (strcmp(name, "user") == 0)
@@ -547,11 +574,17 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         child = new_entry(name, PF_ROOT, -1);
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 &&
                is_pid_str(name)) {
-        task_t *task = proc_find_get(pid);
+        /* `name` is a path component, so it is an id in the *reader's*
+         * namespace.  Resolve it there, then store the resolved task's
+         * global id: every pf_entry consumer downstream (render, fd
+         * symlinks, ns pinning) looks tasks up by the global id, and the
+         * entry was already namespace-checked here. */
+        task_t *task = proc_find_get_user(pid);
         if (!task)
             return -ENOENT;
+        int global_pid = task->pid;
         proc_put(task);
-        child = new_entry(name, PF_ROOT, pid);
+        child = new_entry(name, PF_ROOT, global_pid);
     } else if (dp && dp->type == PF_ROOT && (dp->pid > 0 || dp->pid == -1) &&
                strcmp(name, "cmdline") == 0) {
         child = new_entry(name, PF_PID_CMDLINE, dp->pid);
@@ -576,7 +609,16 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type == PF_PID_NS || type == PF_PID_FDINFO ||
             type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
             type == PF_PID_LIMITS || type == PF_PID_WCHAN ||
-            type == PF_PID_STACK) {
+            type == PF_PID_STACK ||
+            /* /proc/<pid>/{uid,gid}_map and setgroups: name_to_type() already
+             * maps these three names, and the render/write paths below take
+             * their target from the entry's pid, so the same pf_types serve
+             * both /proc/ and /proc/<pid>/.  The one thing that differs is
+             * mode: these are the only procfs files the caller ever opens
+             * O_WRONLY, and the permission to write is decided in
+             * userns_write_map() rather than here. */
+            type == PF_UID_MAP || type == PF_GID_MAP ||
+            type == PF_SETGROUPS) {
             child = new_entry(name, type, dp->pid);
         } else {
             return -ENOENT;
@@ -619,7 +661,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
         type == PF_SYS_KERNEL_CORE_PATTERN ||
         type == PF_SYS_VM_DROP_CACHES ||
         type == PF_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS ||
-        type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES)
+        type == PF_SYS_FS_INOTIFY_MAX_USER_INSTANCES ||
+        type == PF_UID_MAP || type == PF_GID_MAP || type == PF_SETGROUPS)
         vn->mode = S_IFREG | 0644;
     vnode_ref_init(vn, 1);
     vn->parent = dir;
@@ -704,15 +747,14 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
     vfile_t *target = task ?
-        fdtable_get_file_ref(task, fd, &gfd, NULL) : NULL;
+        fdtable_get_file_ref(task, fd, NULL) : NULL;
     if (!target) {
         proc_put(task);
         return -ENOENT;
     }
     if (!target->path[0]) {
-        vfs_put_file_ref(gfd, target);
+        vfs_put_file(target);
         proc_put(task);
         return -ENOENT;
     }
@@ -720,7 +762,7 @@ static int procfs_readlink(vnode_t *vn, char *buf, size_t sz)
     if (len > sz)
         len = sz;
     memcpy(buf, target->path, len);
-    vfs_put_file_ref(gfd, target);
+    vfs_put_file(target);
     proc_put(task);
     return (int)len;
 }
@@ -793,6 +835,60 @@ static int procfs_fread(vfile_t *vf, char *buf, size_t count) {
     return (int)n;
 }
 
+/* Parse the body of a uid_map/gid_map write into @ext as a run of
+ * (inside, outside, count) triples.  Returns the extent count, or -EINVAL.
+ *
+ * The whole write is parsed before any of it is applied: a map is a security
+ * object, and installing the extents that happened to parse before a typo
+ * would leave the process in a half-mapped namespace it did not ask for. */
+static int procfs_parse_map(const char *buf, size_t count, uint32_t *ext)
+{
+    const char *s = buf;
+    size_t left = count;
+    int next = 0;
+    while (left > 0) {
+        /* Blank space separates lines. */
+        while (left > 0 && (*s == ' ' || *s == '\t' ||
+                            *s == '\n' || *s == '\r')) {
+            s++; left--;
+        }
+        if (left == 0)
+            break;
+        uint32_t field[3];
+        for (int i = 0; i < 3; i++) {
+            /* Whitespace separates FIELDS as well as lines: "0 0 1" is the
+             * canonical spelling of an extent and has to parse, so the
+             * separator is consumed before each field rather than only
+             * after each line. */
+            while (left > 0 && (*s == ' ' || *s == '\t')) {
+                s++; left--;
+            }
+            uint32_t v = 0;
+            int digits = 0;
+            while (left > 0 && *s >= '0' && *s <= '9') {
+                /* Reject rather than wrap: a wrapped lower bound would map
+                 * ids the writer never named. */
+                if (v > (0xFFFFFFFFU - (uint32_t)(*s - '0')) / 10U)
+                    return -EINVAL;
+                v = v * 10U + (uint32_t)(*s - '0');
+                s++; left--; digits++;
+            }
+            if (digits == 0)
+                return -EINVAL;
+            field[i] = v;
+        }
+        if (next >= USERNS_MAP_MAX)
+            return -EINVAL;
+        ext[next * 3 + 0] = field[0];
+        ext[next * 3 + 1] = field[1];
+        ext[next * 3 + 2] = field[2];
+        next++;
+    }
+    if (next == 0)
+        return -EINVAL;
+    return next;
+}
+
 /*
  * Strip the trailing newline a shell `echo` appends, plus any other trailing
  * whitespace.  Without this every keyword command reached through `echo >` fails
@@ -810,6 +906,47 @@ static void procfs_chomp(char *s)
 static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
     if (!vf || !vf->priv) return -EBADF;
     procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p->type == PF_UID_MAP || p->type == PF_GID_MAP ||
+        p->type == PF_SETGROUPS) {
+        /* Writing the id maps is how a namespace creator tells the kernel
+         * which host ids this container's 0..N are, so the permission checks
+         * live in userns_write_map() rather than here: they need the namespace
+         * and the caller's position in the chain, not just the bytes. */
+        int owned = p->pid > 0;
+        task_t *target = owned ? proc_find_get(p->pid) : proc_current();
+        if (!target)
+            return -ESRCH;
+        user_namespace_t *ns = userns_task_own(target);
+        int r;
+        if (p->type == PF_SETGROUPS) {
+            /* Exactly one keyword, and trailing junk is EINVAL rather than
+             * silently ignored -- a typo in a security-relevant one-way switch
+             * must not read as success. */
+            char tmp[16];
+            size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+            memcpy(tmp, buf, n);
+            tmp[n] = '\0';
+            char *nl = strchr(tmp, '\n');
+            if (nl) *nl = '\0';
+            if (strcmp(tmp, "deny") == 0)
+                r = userns_write_setgroups(proc_current(), ns, 1);
+            else if (strcmp(tmp, "allow") == 0)
+                r = userns_write_setgroups(proc_current(), ns, 0);
+            else
+                r = -EINVAL;
+        } else {
+            uint32_t ext[USERNS_MAP_MAX * 3];
+            int next = procfs_parse_map(buf, count, ext);
+            if (next < 0) {
+                if (owned) proc_put(target);
+                return -EINVAL;
+            }
+            r = userns_write_map(proc_current(), ns,
+                                  p->type == PF_GID_MAP, ext, next);
+        }
+        if (owned) proc_put(target);
+        return r < 0 ? r : (int)count;
+    }
     if (p->type == PF_A20_PERF) {
         char tmp[16];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
@@ -825,6 +962,17 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         __atomic_store_n(&g_a20_perf_enabled, buf[0] == '1',
                          __ATOMIC_RELEASE);
         return (int)count;
+    }
+    if (p->type == PF_A20_JOURNAL) {
+        char tmp[64];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        while (n > 0 && (tmp[n - 1] == '\n' || tmp[n - 1] == '\r'))
+            tmp[--n] = '\0';
+        if (n == 0)
+            return -EINVAL;
+        return ext4_journal_set_crash_point(tmp) < 0 ? -EINVAL : (int)count;
     }
     if (p->type == PF_NET_CONFIG) {
         int r = a20_net_config_write(buf, count);
@@ -1080,10 +1228,9 @@ static int procfs_fd_readdir(vfile_t *vf, procfs_priv_t *p,
         } else {
             fd = cursor - 2;
             while (fd < MAX_FILES) {
-                int gfd = -1;
-                vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, NULL);
+                vfile_t *target = fdtable_get_file_ref(task, fd, NULL);
                 if (target) {
-                    vfs_put_file_ref(gfd, target);
+                    vfs_put_file(target);
                     break;
                 }
                 fd++;
@@ -1130,7 +1277,12 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
         "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
-        "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack", NULL
+        "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack",
+        /* The same three names as under /proc/, but bound to THIS task's
+         * user namespace.  Writing them is how a parent installs the maps of
+         * a namespace its child just created; without them a user namespace
+         * could be entered but never given ids. */
+        "uid_map", "gid_map", "setgroups", NULL
     };
     static const char *sys_entries[] = {
         ".", "..", "fs", "kernel", "vm", "net", NULL
@@ -1158,7 +1310,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
         "anonprov", "driver_lifecycle", "objects", "iommu", "netfilter",
-        "netmem", NULL
+        "netmem", "journal", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
@@ -1209,18 +1361,29 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
                 name = root_entries[idx];
             } else {
                 int pid_idx = idx - static_count;
+                /* Only tasks visible from the reader's own pid namespace are
+                 * listed, and each is listed under the id that reader would
+                 * use to address it.  Listing global ids here would both
+                 * expose the host's numbering to a container and make the
+                 * directory entries unusable: /proc/<listed-id> has to
+                 * resolve to the same task, which means it has to be the
+                 * namespace-local one. */
                 uint64_t flags = spin_lock_irqsave(&proc_lock);
+                pid_namespace_t *ns = pidns_current();
                 int cur_idx = 0;
-                task_t *t;
-                for (t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-                    if (t->state == PROC_UNUSED || t->pid <= 0)
+                task_t *t = NULL;
+                for (task_t *it = proc_first_task_locked(); it;
+                     it = proc_next_task_locked(it)) {
+                    if (it->state == PROC_UNUSED || it->pid <= 0)
                         continue;
-                    if (cur_idx == pid_idx)
-                        break;
+                    if (!pidns_visible(ns, it))
+                        continue;
+                    if (cur_idx == pid_idx) { t = it; break; }
                     cur_idx++;
                 }
                 if (t) {
-                    snprintf(pidbuf, sizeof(pidbuf), "%d", t->pid);
+                    int shown = task_pid_nr_ns(t, ns);
+                    snprintf(pidbuf, sizeof(pidbuf), "%d", shown);
                     name = pidbuf;
                 }
                 spin_unlock_irqrestore(&proc_lock, flags);
@@ -1266,8 +1429,24 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
 static int procfs_fclose(vfile_t *vf) {
     if (vf && vf->priv) {
         procfs_priv_t *p = (procfs_priv_t *)vf->priv;
-        if (p->ns_ref)
-            mntns_put((mnt_namespace_t *)p->ns_ref);
+        /* ns_ref holds a mnt_namespace, a pid_namespace OR a user_namespace, so the
+         * release has to match the kind.  Dispatching on the kind is not
+         * optional: each module has its own statically pinned "initial"
+         * namespace, and its put() treats that pointer as "nothing to free".
+         * Handing a mount namespace to pidns_put() would fail that test and
+         * free a static object. */
+        if (p->ns_ref) {
+            if (p->type == PF_PID_NS_MNT)
+                mntns_put((mnt_namespace_t *)p->ns_ref);
+            else if (p->type == PF_PID_NS_USER)
+                userns_put((user_namespace_t *)p->ns_ref);
+            else
+                pidns_put((pid_namespace_t *)p->ns_ref);
+        }
+        /* The owner's user namespace pin, taken for the same reason and
+         * released here whatever kind of namespace file this was. */
+        if (p->owner_userns)
+            userns_put(p->owner_userns);
         kfree(p->content);
         kfree(p);
         vf->priv = NULL;
@@ -1301,7 +1480,8 @@ int procfs_ns_file_kind(const vfile_t *vf)
         return -1;
     switch (((const procfs_priv_t *)vf->priv)->type) {
     case PF_PID_NS_MNT:    return PROCNS_MNT;
-    case PF_PID_NS_PID:    return PROCNS_PID;
+    case PF_PID_NS_PID:
+    case PF_PID_NS_PID_FOR_CHILDREN: return PROCNS_PID;
     case PF_PID_NS_UTS:    return PROCNS_UTS;
     case PF_PID_NS_USER:   return PROCNS_USER;
     case PF_PID_NS_IPC:    return PROCNS_IPC;
@@ -1315,7 +1495,27 @@ int procfs_ns_file_kind(const vfile_t *vf)
  * mount namespace with an extra reference (caller mntns_put()s it) and the
  * namespace owner's uid recorded at open time.  Returns NULL when the
  * namespace could not be pinned (target already gone at open). */
-mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid)
+pid_namespace_t *procfs_ns_file_pidns_get(const vfile_t *vf, int *out_owner_uid,
+                                         user_namespace_t **out_owner_userns)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv)
+        return NULL;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if ((p->type != PF_PID_NS_PID && p->type != PF_PID_NS_PID_FOR_CHILDREN) ||
+        !p->ns_ref)
+        return NULL;
+    pid_namespace_t *ns = (pid_namespace_t *)p->ns_ref;
+    if (ns != pidns_init_ns())
+        refcount_inc(&ns->refs);
+    if (out_owner_uid)
+        *out_owner_uid = p->ns_owner_uid;
+    if (out_owner_userns)
+        *out_owner_userns = p->owner_userns ? userns_get(p->owner_userns) : NULL;
+    return ns;
+}
+
+mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid,
+                                         user_namespace_t **out_owner_userns)
 {
     if (!vfs_is_procfs_vfile(vf) || !vf->priv)
         return NULL;
@@ -1324,6 +1524,25 @@ mnt_namespace_t *procfs_ns_file_mntns_get(const vfile_t *vf, int *out_owner_uid)
         return NULL;
     mnt_namespace_t *ns = (mnt_namespace_t *)p->ns_ref;
     refcount_inc(&ns->refs);
+    if (out_owner_uid)
+        *out_owner_uid = p->ns_owner_uid;
+    if (out_owner_userns)
+        *out_owner_userns = p->owner_userns ? userns_get(p->owner_userns) : NULL;
+    return ns;
+}
+
+user_namespace_t *procfs_ns_file_userns_get(const vfile_t *vf,
+                                            int *out_owner_uid)
+{
+    if (!vfs_is_procfs_vfile(vf) || !vf->priv)
+        return NULL;
+    procfs_priv_t *p = (procfs_priv_t *)vf->priv;
+    if (p->type != PF_PID_NS_USER || !p->ns_ref)
+        return NULL;
+    user_namespace_t *ns = (user_namespace_t *)p->ns_ref;
+    /* The initial namespace is statically pinned, exactly as for pidns. */
+    if (ns != userns_init_ns())
+        refcount_inc(&ns->refs);
     if (out_owner_uid)
         *out_owner_uid = p->ns_owner_uid;
     return ns;

@@ -459,6 +459,26 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mmprobe: PASS; log saved to $log',
     },
+    # SMP-only reproducer for the multi-threaded corruption report.  Every
+    # earlier gate that shares an mm_struct ran on a single CPU, where the
+    # fault-around window can never lose its VMA to a sibling thread, so the
+    # defect was invisible to the whole matrix.  cpus=4 plus CONFIG_SLAB_DEBUG=1
+    # is the combination that fails without the fix: the slab check is what
+    # turns a stray write into a panic here instead of a wrong answer later.
+    'smoke-mtcorrupt': {
+        'gate': {'mem': '1G', 'cpus': '4'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=4', 'CONFIG_SLAB_DEBUG=1'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mtcorrupt-riscv64-smp4.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['mtcorrupt_test', 'poweroff']},
+        'timeout': '180s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '4', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/ext4.img,if=none,format=raw,id=x1', '-device', 'virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/isofs.img,if=none,format=raw,id=x2', '-device', 'virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4-slabdbg/kernel.elf'],
+        'expect': ['MTCORRUPT: PASS'],
+        'forbid': ['SIGSEGV', 'SLAB DEBUG', 'FATAL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mtcorrupt: PASS; log saved to $log',
+    },
     'smoke-mntns': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -472,6 +492,34 @@ CASES: dict[str, dict] = {
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-mntns: PASS; log saved to $log',
+    },
+    'smoke-pidns': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/pidns-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['pidns_test', 'poweroff']},
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['PIDNS_TEST: PASS'],
+        'forbid': ['SIGSEGV', 'PIDNS_TEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-pidns: PASS; log saved to $log',
+    },
+    'smoke-userns': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/userns-riscv64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['userns_test', 'poweroff']},
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['USERNS_TEST: PASS'],
+        'forbid': ['SIGSEGV', 'USERNS_TEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-userns: PASS; log saved to $log',
     },
     'smoke-native-contract': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -1062,6 +1110,98 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-x86_64: PASS; log saved to $log',
     },
+    # A USB hub on the xHCI root bus.  The hub is a genuine class-9 device,
+    # so this proves the class driver binds, reads the hub descriptor with
+    # the class request code it really uses (0xA0, not the standard
+    # GET_DESCRIPTOR that every hub stalls), derives the port bitmap size
+    # from bNbrPorts, arms the status-change interrupt endpoint through the
+    # parent controller and publishes a second bus for the core to scan.
+    #
+    # Scope: QEMU's `usb-hub` has no downstream bus (QEMU 9 dropped it, and
+    # `-device usb-kbd,bus=hub0.0` now fails), so nothing can be hung behind
+    # it, and its port bitmap reports the last two phantom ports as
+    # connected — an off-by-two that the reset then fails to clear.  So the
+    # forbid list below pins down what must NOT fail: no root port of the
+    # xHCI controller, and no hub-internal step.  The two phantom downstream
+    # ports are expected to fail here and say nothing about the driver.
+    'smoke-usb-hub-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/usb-hub-x86_64.log',
+        'stdin': None,
+        'timeout': '25s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-device', 'qemu-xhci,id=xhci', '-device', 'usb-hub,id=hub0,bus=xhci.0', '-device', 'usb-kbd', '-device', 'usb-mouse', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': [
+            '\\[USB\\] device 0409:55aa port=\\d+ speed=\\d+',
+            "\\[USB-HUB\\] hub 0409:55aa: downstream ports=10 status_bytes=3 ss=0",
+            '\\[USB-HUB\\] status-change endpoint 81 armed: mps=\\d+ interval=\\d+',
+            '\\[USB-HUB\\] downstream bus live: 10 ports behind 0409:55aa',
+            '\\[USB-HID\\] keyboard ready',
+            '\\[USB-HID\\] mouse ready',
+        ],
+        'forbid': [
+            '\\[USB\\] port [1-8] enumeration failed',
+            '\\[XHCI\\].*failed',
+            '\\[USB-HUB\\].*failed',
+            '\\[USB-HUB\\] no interrupt IN endpoint',
+            '\\[USB-HUB\\] malformed hub descriptor',
+        ],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-usb-hub-x86_64: PASS; log saved to $log',
+    },
+    # Message-signalled interrupts, end to end, on the one machine type where
+    # the kernel programs a real interrupt controller: x86_64's LAPIC.  Every
+    # other board has no message-signalled path at all, so this case is where
+    # the code that is arch-independent (capability parsing, table location,
+    # vector reservation, teardown) and the code that is x86-only (LVT
+    # programming, the message address) meet for the first time.
+    #
+    # Two devices with two different table layouts are on the bus on purpose.
+    # QEMU's virtio-pci puts its MSI-X table in BAR1 (msix_init_exclusive_bar,
+    # msix_bar_idx = 1) and the e1000e's in BAR3; both publish the location in
+    # the capability's Message Address Lower field using the pre-PCIe encoding,
+    # because -kernel boots without firmware to write Vector Control.  A driver
+    # that guessed a BAR, or that read only Vector Control, programs the wrong
+    # window -- the readback check in pci_msix_program_vector() catches that,
+    # so the forbid list below is what says it did not happen.
+    #
+    # The delivery line is the point of the whole case: it is printed from the
+    # interrupt handler the first time a message-signalled completion arrives,
+    # so it cannot appear unless a device really posted a message, the platform
+    # really took it, and the kernel really dispatched it to the handler that
+    # was registered on that vector.  Getting the message address wrong -- ORing
+    # the vector into the LAPIC page, say -- produces a correctly programmed
+    # table that never interrupts anything, and this line is what fails.
+    'smoke-msix-x86_64': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/msix-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 18, 'lines': ['poweroff']},
+        'timeout': '45s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-net', 'nic,model=e1000e', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': [
+            r'\[MSI-X\] pci-1af4:1001-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR1\+0x0 \(Message Address Low, pba BAR\d+\), 1 requested',
+            r'\[VIRTIO-PCI\] pci-1af4:1001-\d+: MSI-X reserved, vectors 208\.\.208 for 1 queue\(s\)',
+            r'\[MSI-X\] pci-1af4:1001-\d+: enabled, 1 vector\(s\) armed',
+            r'\[VIRTIO-BLK\] pci-1af4:1001-\d+ using MSI-X vectors 208\.\.208 completions',
+            r'\[VIRTIO-BLK\] MSI-X delivery on vector 208',
+            r'\[MSI-X\] pci-8086:10d3-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR3\+0x0 \(Message Address Low, pba BAR\d+\), 2 requested',
+            r'\[E1000\] MSI-X enabled on vectors 209\.\.210',
+        ],
+        'forbid': [
+            r'\[MSI-X\] .*capability names no table',
+            r'\[MSI-X\] .*platform has no message-signalled interrupt path',
+            r'\[MSI-X\] .*this window is not an MSI-X table',
+            r'\[VIRTIO-BLK\] .*MSI-X handler registration failed',
+            r'\[VIRTIO-PCI\] .*MSI-X unavailable',
+        ],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-msix-x86_64: PASS; log saved to $log',
+    },
     'smoke-vfs-edge': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -1089,6 +1229,62 @@ CASES: dict[str, dict] = {
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-vfs-stress: PASS; log saved to $log',
+    },
+    'smoke-lfs': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': ['make -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-both-dev/lfs.img', 'test -x user/build/riscv64/lfs_test'],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/lfs-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['lfs_test', 'poweroff']},
+        'timeout': '45s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/lfs.img,if=none,format=raw,id=xlfs', '-device', 'virtio-blk-device,drive=xlfs,bus=virtio-mmio-bus.1', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['LITTLEFS: PASS'],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-lfs: PASS; log saved to $log',
+    },
+    'smoke-pivot-root': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': ['test -x user/build/riscv64/pivot_root_test'],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/pivot-root-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['pivot_root_test', 'poweroff']},
+        'timeout': '45s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': ['PIVOT_ROOT: PASS'],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-pivot-root: PASS; log saved to $log',
+    },
+    'smoke-vfs-stress-smp2': {
+        'gate': {'mem': '1G', 'cpus': '2'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=2'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/vfs-stress-smp2-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['vfs_stress', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '2', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/ext4.img,if=none,format=raw,id=x1', '-device', 'virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/isofs.img,if=none,format=raw,id=x2', '-device', 'virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp2/kernel.elf'],
+        'expect': ['VFS_STRESS: PASS'],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-vfs-stress-smp2: PASS; log saved to $log',
+    },
+    'smoke-vfs-stress-smp8': {
+        'gate': {'mem': '1G', 'cpus': '8'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0', 'NR_CPUS=8'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/vfs-stress-smp8-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['vfs_stress', 'poweroff']},
+        'timeout': '90s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '8', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/ext4.img,if=none,format=raw,id=x1', '-device', 'virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/isofs.img,if=none,format=raw,id=x2', '-device', 'virtio-blk-device,drive=x2,bus=virtio-mmio-bus.2', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp8/kernel.elf'],
+        'expect': ['VFS_STRESS: PASS'],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-vfs-stress-smp8: PASS; log saved to $log',
     },
     'smoke-virtio-sound': {
         'gate': {'mem': '1G', 'cpus': '1'},

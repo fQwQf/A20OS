@@ -122,9 +122,7 @@ int64_t sys_open_tree(int dirfd, const char *path, unsigned flags)
         return -ENOENT;
     int gfd = fscontext_open_tree_fd(vn);
     vnode_put(vn);
-    if (gfd < 0)
-        return gfd;
-    return fdtable_install_current(gfd, O_PATH);
+    return gfd; /* fscontext_open_tree_fd() already installed O_PATH */
 }
 
 int64_t sys_move_mount(int from_dfd, const char *from_path, int to_dfd,
@@ -280,8 +278,9 @@ int64_t sys_listmount(uint64_t mnt_id, uint64_t last_mnt_id,
     return (int64_t)n;
 }
 
-/* listns(2): report the namespace id of the calling task.  A20OS implements
- * mount namespaces as real objects; the other ns types are system-wide
+/* listns(2): report the namespace id of the calling task.  Mount, PID and
+ * user namespaces are real objects with per-task membership, so the id
+ * reported is the caller's own.  The remaining ns types are system-wide
  * singletons rendered with their Linux init-namespace inos, exactly as
  * /proc/<pid>/ns does.  An nstype A20OS has no namespace for is refused
  * rather than answered with a fabricated id. */
@@ -290,13 +289,15 @@ int64_t sys_listns(unsigned int nstype, uint64_t *nsids, size_t nr)
     if (!nsids || nr == 0)
         return 0;
     uint64_t ino;
+    task_t *t = proc_current();
     if (nstype == 0 || nstype == LINUX_CLONE_NEWNS) {
-        task_t *t = proc_current();
         ino = mntns_task_ino(t);
     } else if (nstype == LINUX_CLONE_NEWPID) {
-        ino = MNTNS_INIT_INO_PID;
+        /* Real per-task pid namespace, not the init ino: a caller that has
+         * unshared must be able to tell it apart from the initial one. */
+        ino = pidns_task_ino(t);
     } else if (nstype == LINUX_CLONE_NEWUSER) {
-        ino = MNTNS_INIT_INO_USER;
+        ino = userns_task_ino(t);
     } else if (nstype == LINUX_CLONE_NEWUTS) {
         ino = MNTNS_INIT_INO_UTS;
     } else if (nstype == LINUX_CLONE_NEWIPC) {

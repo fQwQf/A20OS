@@ -40,6 +40,11 @@ typedef struct pcache_entry {
     int      ref;
     int      valid;
     unsigned char accessed;
+    /* Journal hold: this page's contents are covered by a filesystem
+     * transaction that has not been committed yet, so no generic sync may
+     * write it to its home location.  It is also pinned against eviction,
+     * because its only copy of the new metadata lives in this cache. */
+    int      held;
     char     data[PCACHE_PAGE_SIZE];
     struct pcache_entry *prev, *next;
     struct pcache_entry *hnext;
@@ -54,6 +59,10 @@ _Static_assert(sizeof(pcache_entry_t) * PCACHE_MAX_PAGES + 64 <=
 
 typedef struct bcache {
     block_dev_t     *dev;
+    /* The filesystem this cache belongs to (ext4_sb_info_t * for an ext4
+     * mount).  Untyped on purpose: the block cache is shared by every
+     * filesystem, but a pre-sync hook needs a way back to its owner. */
+    void            *owner;
     bcache_entry_t  *pool;
     pcache_entry_t  *page_pool;
     char            *writeback_buffer;
@@ -66,6 +75,13 @@ typedef struct bcache {
      * may issue block I/O concurrently. */
     mutex_t          fill_locks[PCACHE_FILL_LOCKS];
     rw_mutex_t       writeback_lock;
+    /* Called at the top of every sync, before any page is written, so a
+     * filesystem can commit its own log first (ext4's JBD2 transaction).
+     * A nonzero return fails the sync instead of writing anything out.
+     * sync_hook_depth makes the hook reentrant-safe: the hook's own
+     * internal syncs see the depth and skip the hook. */
+    int            (*sync_hook)(struct bcache *);
+    int              sync_hook_depth;
     /* When a device write fails (after the driver's own retry budget), further
      * flush attempts are suppressed until this tick deadline.  Dirty data
      * stays in cache so reads and in-memory writes keep working while the
@@ -102,8 +118,28 @@ int       bcache_sync_checked(bcache_t *bc);
  * single file's flush does not write the whole mount's dirty block cache. */
 int       bcache_sync_scoped(bcache_t *bc, const uint64_t *page_nos,
                              size_t count);
+/* Flush only the journal-held pages: the checkpoint half of a committed
+ * filesystem transaction.  Leaves every other dirty page alone. */
+int       bcache_sync_held(bcache_t *bc);
 void      bcache_sync(bcache_t *bc);
 void      bcache_invalidate(bcache_t *bc, uint64_t lba);
+/* Drop one 4 KiB page from the cache.  Used after synchronous unbuffered I/O
+ * to a block the cache may hold a now-stale clean image of. */
+void      bcache_invalidate_page(bcache_t *bc, uint64_t page_no);
+
+/* Journal hold set.  A held page is skipped by every generic sync and pinned
+ * against eviction; bcache_release_holds() makes it flushable again.  Holding
+ * a page that is not resident is a no-op: the caller only holds pages it has
+ * just written through this cache, so a miss means it was never cached. */
+void      bcache_hold_page(bcache_t *bc, uint64_t page_no);
+void      bcache_release_holds(bcache_t *bc);
+size_t    bcache_held_pages(const bcache_t *bc);
+/* Install the pre-sync hook together with the filesystem it belongs to.
+ * Pass hook = NULL to remove it; owner is then cleared with it.  The owner is
+ * handed to the hook as bc->owner: a hook has no other way back to the private
+ * state it must commit, so installing one without its owner cannot be spelled. */
+void      bcache_set_sync_hook(bcache_t *bc, int (*hook)(bcache_t *),
+                               void *owner);
 
 int bcache_read_bytes(bcache_t *bc, uint64_t byte_off, void *buf, size_t len);
 int bcache_read_bytes_batch(bcache_t *bc, uint64_t byte_off, void *buf,

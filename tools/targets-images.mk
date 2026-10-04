@@ -26,6 +26,36 @@ $(EXT4_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 		--protocols "$(PROTOCOLS_LINES)" \
 		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
 
+# Journalled ext4 gate image: same staging, but with an internal JBD2 journal.
+# The crash-consistency gate boots this, writes, and crashes the machine at a
+# chosen point in the commit sequence (a20.journal_crash=...).
+$(BUILD_DIR)/ext4-journal.img: $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
+	@echo "Building journalled ext4 image..."
+	@$(PYTHON) tools/img.py ext4-journal \
+		--ext4-img "$(BUILD_DIR)/ext4-journal.img" \
+		--ext4-mb "$(EXT4_IMAGE_MB)" \
+		--ext4-staging-dir "$(EXT4_STAGING_DIR)" \
+		--mkfs-ext4 "$(MKFS_EXT4)" \
+		--user-build-dir "$(USER_BUILD_DIR)" \
+		--protocols "$(PROTOCOLS_LINES)" \
+		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n'
+
+# littlefs gate image: formatted by the host mkfs_lfs tool (links the
+# vendored littlefs), carrying the fixed payload user/cmds/fs/lfs_test.c
+# verifies byte-for-byte.
+HOST_CC ?= gcc
+
+$(BUILD_DIR)/mkfs_lfs: tools/mkfs_lfs.c kernel/external/littlefs/lfs.c \
+		kernel/external/littlefs/lfs_util.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CFLAGS) tools/mkfs_lfs.c kernel/external/littlefs/lfs.c \
+		kernel/external/littlefs/lfs_util.c -Ikernel/external/littlefs -o $@
+
+$(BUILD_DIR)/lfs.img: $(BUILD_DIR)/mkfs_lfs tools/mkfs_lfs.c \
+		kernel/external/littlefs/lfs.c kernel/external/littlefs/lfs_util.c
+	@mkdir -p $(dir $@)
+	@$(BUILD_DIR)/mkfs_lfs "$@" 4
+
 $(KERNEL_BIN): $(KERNEL_ELF)
 	$(OBJCOPY) -O binary $< $@
 
@@ -152,6 +182,14 @@ $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME
 $(BUILD_DIR)/external/lwip/src/%.o: $(KERNEL_DIR)/external/lwip/src/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -fno-stack-protector -c $< -o $@
+
+# littlefs (kernel/external/littlefs) — same vendored-source policy as lwIP:
+# objects live under $(BUILD_DIR)/external/littlefs, no stack-canary
+# hardening, and the compat include dir goes FIRST so <stdlib.h>/<string.h>
+# resolve to the littlefs shims instead of the lwIP port's.
+$(BUILD_DIR)/external/littlefs/%.o: $(KERNEL_DIR)/external/littlefs/%.c $(BUILD_FLAGS_STAMP) | Makefile $(BUILD_TIME_HDR)
+	@mkdir -p $(dir $@)
+	$(CC) -I$(KERNEL_DIR)/external/littlefs/compat $(CFLAGS) -fno-stack-protector -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.S $(BUILD_FLAGS_STAMP) Makefile | $(BUILD_TIME_HDR)
 	@mkdir -p $(dir $@)

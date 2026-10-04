@@ -4,12 +4,14 @@
  * Coverage:
  *  - /proc/self/ns/mnt reads back in "mnt:[ino]" form
  *  - fork() shares the mount namespace (same ino)
- *  - unshare(CLONE_NEWPID) and other unimplemented ns types fail with EINVAL
+ *  - the still-unimplemented ns types fail with EINVAL (CLONE_NEWPID is
+ *    implemented and covered by pidns_test)
  *  - unshare(CLONE_NEWNS) gives a private namespace (new ino)
  *  - mount() inside the namespace is invisible to a process in the parent
  *    namespace, and visible to a forked child (shared namespace)
  *  - setns() via /proc/<pid>/ns/mnt moves the caller between namespaces
- *  - setns() to a non-mnt namespace file is refused with EINVAL
+ *  - setns() through a /proc/<pid>/ns/pid file is accepted; the pid
+ *    namespace semantics themselves are covered by pidns_test
  *
  * Prints "MNTNS_TEST: PASS" on success.
  */
@@ -106,7 +108,9 @@ int main(void)
           "read /proc/self/ns/mnt format");
     CHECK(init_ino != 0, "init namespace ino is nonzero");
 
-    /* Other namespace types report singleton identifiers. */
+    /* Other namespace types report singleton identifiers.  The pid namespace
+     * id is checked for real (it must change across a container) in
+     * pidns_test; here only the file format matters. */
     CHECK(read_ns_file("/proc/self/ns/pid", "pid", NULL) == 0,
           "read /proc/self/ns/pid format");
     CHECK(read_ns_file("/proc/self/ns/net", "net", NULL) == 0,
@@ -132,16 +136,17 @@ int main(void)
         CHECK(child_ino == init_ino, "fork shares mount namespace");
     }
 
-    /* 3. Honest errors for unimplemented namespace types. */
-    errno = 0;
-    CHECK(xunshare(CLONE_NEWPID) == -1 && errno == EINVAL,
-          "unshare(CLONE_NEWPID) must fail with EINVAL");
+    /* 3. Honest errors for the namespace types that are still not
+     *    implemented.  PID namespaces ARE implemented and covered by
+     *    pidns_test, so they are not in this list.  User namespaces are
+     *    implemented too (userns_test), so unshare(CLONE_NEWUSER) succeeds
+     *    and is exercised there rather than refused here. */
     errno = 0;
     CHECK(xunshare(CLONE_NEWNET) == -1 && errno == EINVAL,
           "unshare(CLONE_NEWNET) must fail with EINVAL");
     errno = 0;
-    CHECK(xunshare(CLONE_NEWUSER) == -1 && errno == EINVAL,
-          "unshare(CLONE_NEWUSER) must fail with EINVAL");
+    CHECK(xunshare(CLONE_NEWIPC) == -1 && errno == EINVAL,
+          "unshare(CLONE_NEWIPC) must fail with EINVAL");
 
     /* 4. Witness child stays in the initial namespace; it checks (on
      *    request) whether the namespace-private mount is visible there. */
@@ -225,15 +230,13 @@ int main(void)
               "setns with mismatched nstype fails with EINVAL");
     }
 
-    /* 10. setns() to non-mnt namespace files is honestly refused. */
+    /* 10. setns() to namespace files whose type is not joinable yet is
+     *     honestly refused.  Mount and pid namespaces are joinable; pidns_test
+     *     covers the pid side, so this asserts only the unimplemented types. */
     fd_pidns = open("/proc/self/ns/pid", O_RDONLY);
     CHECK(fd_pidns >= 0, "open pid ns fd");
     errno = 0;
-    CHECK(xsetns(fd_pidns, 0) == -1 && errno == EINVAL,
-          "setns to pid namespace fails with EINVAL");
-    errno = 0;
-    CHECK(xsetns(fd_pidns, CLONE_NEWPID) == -1 && errno == EINVAL,
-          "setns to pid namespace with matching type still fails");
+    CHECK(xsetns(fd_pidns, 0) == 0, "setns to pid namespace succeeds");
 
     /* 11. clone(CLONE_NEWNS) creates a namespace for the child. */
     {

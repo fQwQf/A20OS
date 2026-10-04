@@ -181,4 +181,15 @@ uint64_t arch_signal_handler_sp(uint64_t frame_sp);
 struct mm_struct;
 void arch_setup_signal_trampoline(struct mm_struct *mm);
 
+/*
+ * Architecture-specific hook returning the address the signal handler returns
+ * to, given the trampoline slot inside the signal frame.  The default is that
+ * slot, which is what any architecture whose frame memory is executable can
+ * use.  An architecture that cannot execute the frame in place overrides it to
+ * return the dedicated page installed by arch_setup_signal_trampoline(): on
+ * aarch64 SCTLR_EL1.WXN is set, so a writable stack page is execute-never at
+ * EL0 and the in-frame trampoline could never be fetched.
+ */
+uint64_t arch_signal_tramp_addr(struct mm_struct *mm, uint64_t stack_tramp_addr);
+
 #endif /* _SIGNAL_H */

@@ -1,9 +1,11 @@
+#include "drivers/bus/pci_msix.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/core/driver_register.h"
 #include "net/lwip_stack.h"
+#include "core/cpu.h"
 #include "core/defs.h"
 #include "core/klog.h"
 #include "core/lock.h"
@@ -116,6 +118,8 @@ typedef struct {
     spinlock_t lock;
     int irq;
     int irq_registered;
+    int msix_base;        /* first reserved vector, -1 when unused */
+    int msix_vectors;     /* reserved table entries in use */
     e1000_rx_desc_t rx[E1000_RING_SIZE] ALIGNED(16);
     e1000_tx_desc_t tx[E1000_RING_SIZE] ALIGNED(16);
     uint8_t rx_buf[E1000_RING_SIZE][E1000_BUF_SIZE] ALIGNED(16);
@@ -263,6 +267,70 @@ static const uint8_t *e1000_mac(device_t *dev)
     return nic ? nic->mac : NULL;
 }
 
+/* Message-signalled interrupts for the NIC's transmit and receive queues.
+ *
+ * Reserve two vectors: the first carries everything the ICR masks, the second
+ * the receive-side causes.  Both start masked, and un-masking either is what
+ * request_irq() does once a handler is really installed on the line.  Where the
+ * table lives is the function's capability to say, so nothing here encodes a
+ * BAR index: the 8254x family puts the table at the base of BAR3, but that is
+ * this part's layout rather than a fact about MSI-X, and a driver that assumed
+ * it would program the wrong window on any implementation that differs. */
+static int e1000_msix_setup(device_t *dev, e1000_device_t *nic)
+{
+    pci_msix_info_t info;
+    if (pci_msix_capability(dev, &info) < 0 || info.table_size < 2)
+        return -ENODEV;
+
+    int r = pci_msix_enable(dev, 2);
+    if (r) {
+        kinfo("[E1000] MSI-X unavailable (%d); using legacy interrupts\n", r);
+        return r;
+    }
+
+    int base = irq_alloc_vectors(2);
+    if (base < 0) {
+        pci_msix_disable(dev);
+        return base;
+    }
+    /* Vector 0 carries everything the ICR masks, vector 1 the receive-side
+     * causes; both start masked, and un-masking either is what request_irq()
+     * does once a handler is actually installed on the line. */
+    for (unsigned i = 0; i < 2; i++) {
+        r = pci_msix_program_vector(dev, i, (uint32_t)(base + (int)i));
+        if (r) {
+            irq_free_vectors((uint32_t)base, 2);
+            pci_msix_disable(dev);
+            return r;
+        }
+    }
+    nic->msix_base = base;
+    nic->msix_vectors = 2;
+    return 0;
+}
+
+/* Unmask both table entries.  Called from request_irq()'s success path, which
+ * is the earliest point at which a handler exists to receive the message. */
+static void e1000_msix_commit(device_t *dev, e1000_device_t *nic)
+{
+    for (int i = 0; i < nic->msix_vectors; i++)
+        pci_msix_set_vector_mask(dev, (unsigned)i, 0);
+    (void)pci_msix_commit(dev);
+    kinfo("[E1000] MSI-X enabled on vectors %d..%d\n",
+          nic->msix_base, nic->msix_base + nic->msix_vectors - 1);
+}
+
+static void e1000_msix_teardown(device_t *dev, e1000_device_t *nic)
+{
+    if (nic->msix_vectors <= 0)
+        return;
+    pci_msix_disable(dev);
+    irq_free_vectors((uint32_t)nic->msix_base, (unsigned)nic->msix_vectors);
+    nic->msix_base = -1;
+    nic->msix_vectors = 0;
+}
+
+
 static int e1000_probe(device_t *dev)
 {
     if (pci_enable_and_assign_bars(dev) < 0)
@@ -276,6 +344,7 @@ static int e1000_probe(device_t *dev)
 
     e1000_device_t *nic = &g_e1000;
     memset(nic, 0, sizeof(*nic));
+    nic->msix_base = -1;
     spin_init(&nic->lock);
     nic->regs = (uintptr_t)bar->start;
 
@@ -363,24 +432,52 @@ static int e1000_probe(device_t *dev)
                 E1000_RCTL_SECRC);
 
     dev->drv_priv = nic;
-    int irq = pci_intx_irq(dev);
-    if (irq >= 0) {
-        if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
-                        dev) == 0) {
-            nic->irq = irq;
+    /* Prefer message-signalled interrupts: the table entries are programmed
+     * and left masked, so nothing can arrive before the handlers below exist.
+     * A device that cannot describe its table keeps the shared INTx line, and
+     * one that does but whose vectors cannot be reserved also falls back. */
+    int msix = e1000_msix_setup(dev, nic);
+    if (msix == 0) {
+        for (int i = 0; i < nic->msix_vectors; i++) {
+            uint32_t line = (uint32_t)(nic->msix_base + i);
+            if (request_irq(line, e1000_irq_handler, 0, dev) != 0) {
+                kinfo("[E1000] vector %d not reservable; using legacy "
+                      "interrupts\n", line);
+                e1000_msix_teardown(dev, nic);
+                msix = -1;
+                break;
+            }
+        }
+        if (msix == 0) {
+            /* Both handlers are installed, so the entries may now be armed and
+             * the function enabled. */
+            e1000_msix_commit(dev, nic);
+            nic->irq = nic->msix_base;
             nic->irq_registered = 1;
-            /* Unmask device causes only with the handler in place. */
-            e1000_write(nic, E1000_IMS, E1000_IMS_USED);
-        } else {
-            kinfo("[E1000] IRQ %d registration failed; using polling\n",
-                  irq);
         }
     }
+    if (msix != 0) {
+        int irq = pci_intx_irq(dev);
+        if (irq >= 0) {
+            if (request_irq((uint32_t)irq, e1000_irq_handler, IRQF_SHARED,
+                            dev) == 0) {
+                nic->irq = irq;
+                nic->irq_registered = 1;
+            } else {
+                kinfo("[E1000] IRQ %d registration failed; using polling\n",
+                      irq);
+            }
+        }
+    }
+    /* Unmask device causes only with a handler in place. */
+    if (nic->irq_registered)
+        e1000_write(nic, E1000_IMS, E1000_IMS_USED);
     /* STATUS[1] is the read-only link status: 1 = link up. */
-    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d\n",
+    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d%s\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
           nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",
-          nic->irq_registered ? nic->irq : -1);
+          nic->irq_registered ? nic->irq : -1,
+          nic->msix_vectors > 0 ? " (msix)" : "");
     return 0;
 }
 
@@ -391,8 +488,16 @@ static int e1000_remove(device_t *dev)
         return 0;
     /* Mask device causes before releasing the handler. */
     e1000_write(nic, E1000_IMC, 0xFFFFFFFFU);
-    if (nic->irq_registered)
+    if (nic->msix_vectors > 0) {
+        /* Both table entries have to go away while their handlers are still
+         * installed, otherwise a message in flight lands on a line that has no
+         * owner left. */
+        for (int i = 0; i < nic->msix_vectors; i++)
+            free_irq((uint32_t)(nic->msix_base + i), dev);
+        e1000_msix_teardown(dev, nic);
+    } else if (nic->irq_registered) {
         free_irq((uint32_t)nic->irq, dev);
+    }
     e1000_write(nic, E1000_RCTL, 0);
     e1000_write(nic, E1000_TCTL, 0);
     dev->drv_priv = NULL;
