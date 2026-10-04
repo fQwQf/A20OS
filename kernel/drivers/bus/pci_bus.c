@@ -143,6 +143,15 @@ static uintptr_t g_pci_mmio_alloc;
 #define PCOMMON_QUEUE_DEV_HI         0x34U
 #define PCOMMON_QUEUE_NOTIFY_OFF     0x1EU
 
+/* QueueNotifyOff is fixed for the lifetime of the device, but reading it back
+ * costs a 16-bit MMIO round trip on every kick -- and the kick is the one
+ * register write a virtio driver performs per buffer, so this is a per-packet
+ * round trip on virtio-net and a per-request one on virtio-blk.  Cache it per
+ * queue index: the first kick for a queue still reads it, and every later one
+ * is a bare store to the doorbell.  A queue index outside the cache falls back
+ * to the read, so an unusually wide device is slower rather than wrong. */
+#define PCI_VIRTIO_NOTIFY_CACHE 8
+
 typedef struct pci_virtio_transport {
     uintptr_t common;
     uintptr_t notify;
@@ -150,6 +159,9 @@ typedef struct pci_virtio_transport {
     uintptr_t config;
     uint32_t notify_multiplier;
     uint16_t type;
+    /* Bit i set: notify_off_cache[i] holds queue i's QueueNotifyOff. */
+    uint32_t notify_off_cached;
+    uint16_t notify_off_cache[PCI_VIRTIO_NOTIFY_CACHE];
 } pci_virtio_transport_t;
 
 static pci_virtio_transport_t g_pci_virtio[32];
@@ -462,8 +474,23 @@ static void pci_virtio_write32(virtio_transport_t *transport, uint32_t off,
     case VIRTIO_MMIO_QUEUE_DEVICE_LOW: writel(value, (volatile void *)(vt->common + PCOMMON_QUEUE_DEV_LO)); break;
     case VIRTIO_MMIO_QUEUE_DEVICE_HIGH: writel(value, (volatile void *)(vt->common + PCOMMON_QUEUE_DEV_HI)); break;
     case VIRTIO_MMIO_QUEUE_NOTIFY: {
+        /* QueueSelect still goes out: the spec defines the notify offset as a
+         * property of the selected queue, and leaving the selection alone
+         * keeps every later Queue* register the driver reads unambiguous. */
         writew((uint16_t)value, (volatile void *)(vt->common + PCOMMON_QUEUE_SEL));
-        uint16_t notify_off = readw((const volatile void *)(vt->common + PCOMMON_QUEUE_NOTIFY_OFF));
+        uint16_t qidx = (uint16_t)value;
+        uint16_t notify_off;
+        if (qidx < PCI_VIRTIO_NOTIFY_CACHE &&
+            (vt->notify_off_cached & (1U << qidx))) {
+            notify_off = vt->notify_off_cache[qidx];
+        } else {
+            notify_off = readw((const volatile void *)(vt->common +
+                           PCOMMON_QUEUE_NOTIFY_OFF));
+            if (qidx < PCI_VIRTIO_NOTIFY_CACHE) {
+                vt->notify_off_cache[qidx] = notify_off;
+                vt->notify_off_cached |= 1U << qidx;
+            }
+        }
         writew((uint16_t)value, (volatile void *)(vt->notify +
                (uintptr_t)notify_off * vt->notify_multiplier));
         break;

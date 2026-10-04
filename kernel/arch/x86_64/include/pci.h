@@ -29,6 +29,13 @@
 
 #define PCI_MAX_DEV             32
 
+/* QueueNotifyOff is fixed for the device's lifetime, but reading it back costs
+ * an MMIO round trip on every kick, and the kick is the one register write a
+ * virtio driver performs per buffer.  Cached per queue index; see the notify
+ * case in platform/virtio_probe.c.  A queue index outside the cache falls back
+ * to the read, so a wide device is slower rather than wrong. */
+#define PCI_VIRTIO_NOTIFY_CACHE 8
+
 typedef struct {
     int      valid;
     int      dev_num;
@@ -39,6 +46,9 @@ typedef struct {
     uintptr_t config_base;
     uint32_t  notify_off_multiplier;
     uintptr_t isr_base;
+    /* Bit i set: notify_off_cache[i] holds queue i's QueueNotifyOff. */
+    uint32_t  notify_off_cached;
+    uint16_t  notify_off_cache[PCI_VIRTIO_NOTIFY_CACHE];
 } pci_virtio_dev_t;
 
 void pci_init(void);

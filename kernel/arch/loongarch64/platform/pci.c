@@ -520,8 +520,19 @@ static void pci_vt_write32(virtio_transport_t *t, uint32_t mmio_off, uint32_t va
      * write lands inside the BAR instead of raising an interrupt; and writing
      * the queue index without step 1 kicks whichever queue was selected last. */
     case VIRTIO_MMIO_QUEUE_NOTIFY: {
-        pci_common_write16(cb, PCOMMON_QUEUE_SEL, (uint16_t)val); 
-        uint16_t notify_off = pci_common_read16(cb, PCOMMON_QUEUE_NOTIFY_OFF);
+        pci_common_write16(cb, PCOMMON_QUEUE_SEL, (uint16_t)val);
+        uint16_t qidx = (uint16_t)val;
+        uint16_t notify_off;
+        if (qidx < PCI_VIRTIO_NOTIFY_CACHE &&
+            (vd->notify_off_cached & (1U << qidx))) {
+            notify_off = vd->notify_off_cache[qidx];
+        } else {
+            notify_off = pci_common_read16(cb, PCOMMON_QUEUE_NOTIFY_OFF);
+            if (qidx < PCI_VIRTIO_NOTIFY_CACHE) {
+                vd->notify_off_cache[qidx] = notify_off;
+                vd->notify_off_cached |= 1U << qidx;
+            }
+        }
         uintptr_t addr = vd->notify_base + notify_off * vd->notify_off_multiplier;
         *(volatile uint16_t *)addr = (uint16_t)val;
         break;
