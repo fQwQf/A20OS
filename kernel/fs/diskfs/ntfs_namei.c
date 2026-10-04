@@ -323,6 +323,9 @@ int ntfs_create_entry(ntfs_vnode_priv_t *dirfp, const char *name,
         return -EIO;
     }
     kfree(rec);
+    /* Mirror the flag into the in-use bitmap ntfs_find_free_record() starts
+     * from, so the next create does not have to walk back over this record. */
+    ntfs_mft_bitmap_set(sb, (uint64_t)free_idx, 1);
 
     /* Insert into the parent directory index. */
     int r = ntfs_index_insert(dirfp, name, (uint64_t)free_idx |
