@@ -7,11 +7,20 @@
 #include "mm/slab.h"
 #include "net/socket_internal.h"
 
-#define CLASS_DEVICE_INITIAL_CAP 32
+/* class_allocate_index() hands out a unique (class_type, index) pair per
+ * device and index cycles over 0..255, so the total number of published class
+ * devices is bounded by 256 per class type.  Backing the registry with a fixed
+ * static array keeps kcalloc/krealloc out of g_class_lock entirely: both
+ * allocate through the reclaiming allocator, whose OOM path takes proc_lock and
+ * mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
+ * kerr()/proc_force_exit() a task, none of which may run with interrupts
+ * disabled.  The bound is exact, not a guess: an index is never reused while
+ * its device is published. */
+#define CLASS_INDEX_SPACE     256U
+#define CLASS_DEVICE_MAX      ((DEV_CLASS_AUDIO + 1) * CLASS_INDEX_SPACE)
 
-static class_device_t **g_class_devices;
+static class_device_t *g_class_devices[CLASS_DEVICE_MAX];
 static unsigned g_class_count;
-static unsigned g_class_cap;
 static unsigned g_class_next_index[DEV_CLASS_AUDIO + 1];
 static spinlock_t g_class_lock = SPINLOCK_INIT;
 
@@ -116,27 +125,10 @@ int class_device_publish(struct device *dev)
     spin_init(&cdev->state_lock);
 
     uint64_t flags = spin_lock_irqsave(&g_class_lock);
-    if (!g_class_devices) {
-        g_class_devices = kcalloc(CLASS_DEVICE_INITIAL_CAP,
-                                  sizeof(*g_class_devices));
-        if (!g_class_devices) {
-            spin_unlock_irqrestore(&g_class_lock, flags);
-            kfree(cdev);
-            return -ENOMEM;
-        }
-        g_class_cap = CLASS_DEVICE_INITIAL_CAP;
-    }
-    if (g_class_count == g_class_cap) {
-        unsigned new_cap = g_class_cap * 2;
-        class_device_t **new_devices = krealloc(
-            g_class_devices, new_cap * sizeof(*new_devices));
-        if (!new_devices) {
-            spin_unlock_irqrestore(&g_class_lock, flags);
-            kfree(cdev);
-            return -ENOMEM;
-        }
-        g_class_devices = new_devices;
-        g_class_cap = new_cap;
+    if (g_class_count >= CLASS_DEVICE_MAX) {
+        spin_unlock_irqrestore(&g_class_lock, flags);
+        kfree(cdev);
+        return -ENOSPC;
     }
     int ret = class_allocate_index(cdev->class_type, &cdev->index);
     if (ret < 0) {
@@ -194,6 +186,24 @@ void class_device_put(class_device_t *cdev)
 {
     if (cdev && refcount_dec_and_test(&cdev->refs))
         kfree(cdev);
+}
+
+/* Reading dev->class_dev on its own races class_device_unpublish(), which
+ * clears the field and then drops the last reference: a caller that read the
+ * pointer just before the clear can be left holding freed memory.  Taking the
+ * reference under g_class_lock makes the load and the refcount bump a single
+ * event relative to the clear, so a non-NULL return is always a live cdev and
+ * unpublish's own put cannot run ahead of this one.  Callers that want to keep
+ * a class device past the call should use class_device_get_by_*() instead. */
+class_device_t *class_device_ref_for_device(const struct device *dev)
+{
+    if (!dev)
+        return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_class_lock);
+    class_device_t *cdev = dev->class_dev;
+    class_device_get(cdev);
+    spin_unlock_irqrestore(&g_class_lock, flags);
+    return cdev;
 }
 
 static class_device_t *class_device_get_match(const char *name,
