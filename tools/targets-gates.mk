@@ -32,6 +32,15 @@ check-component-registry:
 check-smoke-cases:
 	@$(PYTHON) tools/smoke_audit.py
 
+# kernel/proc/xlator_guests.def and tools/targets-xlator.mk are the two halves
+# of "which guest architectures exist", and neither can be derived from the
+# other -- one is kernel policy, the other a fact about which cross compilers
+# are installed.  They had already drifted once (a CC line for a guest the
+# kernel never registered), so the link is asserted here rather than hoped
+# for.  Host-side text only: no cross toolchain, no QEMU.
+check-xlator-guests:
+	@$(PYTHON) tools/xlator_guests_audit.py
+
 regen-driver-fragment:
 	@tools/a20 regen-drivers
 
@@ -116,6 +125,7 @@ CHECK_FAST_GATES := \
     check-a20-tests \
     check-honesty-policy \
     check-smoke-cases \
+    check-xlator-guests \
     host-tests \
     check-drm-abi \
     check-task-lifetime-boundary \

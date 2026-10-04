@@ -58,6 +58,12 @@ jobs:
       - name: Smoke case table agrees with the makefiles
         run: make check-smoke-cases
 
+      # kernel/proc/xlator_guests.def（内核策略）与 tools/targets-xlator.mk
+      # （构建宿主上装了哪些交叉编译器）互推不出来，只能断言一致。两者已经
+      # 漂移过一次：CC 表里有一个内核从未注册过的架构。
+      - name: Guest architecture registry agrees across kernel and build
+        run: make check-xlator-guests
+
       - name: Host-side unit tests for kernel format/helper logic
         run: make host-tests
 

@@ -22,7 +22,14 @@ static inline void arch_uart_init(void) {
     uart[0] = 0x03;
     uart[1] = 0x00;
     uart[3] = 0x03;
-    uart[2] = 0x07;
+    /* FCR bit 0 enables the 16-byte receive FIFO.  Without it the device keeps
+     * only a one-byte holding register, so a burst that arrives while nobody is
+     * spinning on LSR.DR overwrites itself and the earliest characters are
+     * lost.  That is invisible on output and fatal for the polled receive path
+     * (uart_cmdline_read): the operator's keystrokes are a burst.  Bit 1 clears
+     * both FIFOs, bits 6-7 set a 14-byte receive trigger; the receiver interrupt
+     * level stays masked so this board still has no IRQ route. */
+    uart[2] = 0xC7;
     uart[4] = 0x0B;
     uart[1] = 0x01;
 #endif

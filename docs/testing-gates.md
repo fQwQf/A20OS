@@ -193,6 +193,107 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 
 `make smoke-riscv64` 是独立的 `BRINGUP=1` 启动检查。它要求串口日志出现 `part ok` 与 `System is going down for power-off NOW`（即内核完成 bring-up 并主动关机）；watchdog timeout 视为失败。它不运行用户态或 syscall smoke，不能替代 `smoke-abi-linux`。
 
+### 外来架构 execve 透明转发（smoke-exec-xlator）
+
+`make smoke-exec-xlator` 验证 `execve(外来架构二进制)` 被内核改写为翻译器 re-exec，且该进程对 A20OS 其余设施与原生进程无异。通道默认关闭，本用例通过 cmdline `a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64` 打开。
+
+翻译器与探针由构建变量 `XLATOR=1` 拉进镜像（`tools/targets-xlator.mk` 把它们挂成 `$(FAT32_IMG)` 的前置依赖），这一步完成两件事：由 `tools/xlator_fetch.py` 从 Alpine v3.23 仓库解析 `qemu-x86_64` 的版本化 `.apk`、取出**宿主架构（riscv64）**静态翻译器落进 `user/build/`，并交叉编译 `xlate_probe-x86_64`（外来架构静态探针）。两条产物都随后由 `--check-guest` 断言 `e_machine`：翻译器必须是宿主原生（否则它自己会被送去翻译，造成递归），探针必须是 x86_64。这条断言是为了防止「探针其实编译成了宿主架构、于是根本没走翻译」这类假通过——它一旦发生，smoke 会安静地变成一个原生回归。
+
+用例从 Linux-ABI 启动器 `xlate_exec` 执行，**不显式调用 qemu**，五种模式都必须 PASS（另有 `stage` / `run` 两种模式供 `smoke-exec-xlator-shim` 使用，见下）：
+
+| 模式 | 输入 | 断言 |
+|------|------|------|
+| `ok` | 合法 x86_64 ELF | `[XLATOR] x86_64 (e_machine=62) → /bin/qemu-x86_64`、`[XLATOR] pid=N execve /bin/xlate_probe-x86_64 (e_machine=62)`、`[WX] ... 翻译器宿主，放行 W\|X`、`XLATE_PROBE: MARK=SMOKE ARGC=2`、退出码 42 |
+| `enoexec` | 30 字节损坏 ELF（magic 合法，`e_type=ET_NONE`，`e_machine=0x9999`） | 仍是 `ENOEXEC`，不被误送翻译器 |
+| `unconfigured` | 64 字节**合法** ELF 头，`e_machine=183`（aarch64，注册表里有，但没配路径） | 仍是 `ENOEXEC`——起门禁作用的是「配置了翻译器」，不是「内核编译时知道这个架构」 |
+| `script` | `#!/bin/echo` 脚本 | 仍走 shebang 路径，退出码 0 |
+| `toggle` | 合法 x86_64 ELF + `/proc/a20/xlator` | 运行期开关闭环，见下 |
+
+`unconfigured` 与 `enoexec` 断言的是同一个 errno，但排掉的是两种不同的错：前者证明头部校验之后不会「顺手」去找任何能翻译的东西，后者证明判定依据是配置而不是编译期名单。少了它，一个「内核里写死了 x86_64/aarch64 白名单」的实现也能让本用例全绿。
+
+`toggle` 在**同一个进程**里跑完整条闭环：读节点确认 `enabled=1` → exec 成功（对照组）→ 写 `0`、重读确认 `enabled=0` → 同一个二进制回到 `ENOEXEC` → 写 `1` → 又成功 → 写 `2` / `on` / `01` / `" 1x"` 必须被 `-EINVAL` 拒绝且开关未被改动。顺序是断言的一部分：中间那条 `ENOEXEC` 只有在前后两次 exec 成功夹着时才有意义，所以它不能拆成独立的 smoke 命令。日志里的 `[XLATOR] 通道禁用（经 /proc/a20/xlator）` 与 `通道启用` 是内核侧开关翻转的旁证。
+
+`forbid` 里有两条值得单独说明：`W\^X 策略: off` 禁止用全局 `a20.wx=off` 换取翻译器运行——本实现只给被内核标记的那一个 task 开 W\|X 放行（见 [exec-xlator/03-internals.md](exec-xlator/03-internals.md)），系统策略必须保持默认 `deny`；`waitpid\(\d+\)` 禁止 harness 打印 `waitpid(N): ...`，即不允许 `wait4` 失败被吞成 `st=0` 的假通过。
+
+失败时看 `.kernel-build/smoke/exec-xlator-riscv64.log`：缺少 `[XLATOR] pid=` 说明判定或接线没走到；缺少 `XLATE_PROBE: MARK=` 而 `[XLATOR]` 齐全，说明翻译器起来了但 guest 在 A20OS syscall 面上崩了；`XLATE_EXEC: <mode> FAIL` 则是内核路径问题，`ARGV[i]=` 逐项可对照定位 argv 改写。
+
+启动日志还必须出现 `[XLATOR] aarch64 (e_machine=183) 未配置翻译器`：注册表有两个 guest 而只配了一个，未配的那个必须被点名，否则管理员只能看到一个无从追查的 `ENOEXEC`。
+
+**默认关闭的契约**不由本用例覆盖，需要单独确认：不带 `a20.xlator` 启动时日志应为 `[XLATOR] 外来架构翻译通道: 禁用`，且 `execve(/bin/xlate_probe-x86_64)` 返回 `Exec format error`（`[ELF] header check failed: r=-8 class=2 data=1 type=2`），与接入前逐字节一致。
+
+### 通道被裁掉（smoke-exec-xlator-off）
+
+`make smoke-exec-xlator-off` 用 `CONFIG_XLATOR=0` 构建并启动，断言的是「特性可以不存在」，而不是「特性被关掉」。三条断言：
+
+- 外来探针 `xlate_probe-x86_64` **确实在镜像里**，且它的 `execve` 是 `ENOEXEC`——用的是 `xlate_exec foreign` 而不是 `enoexec`，前者先 `access()` 确认文件存在。一个不存在的文件同样会得到 `ENOEXEC`，那样的断言等于什么都没断言；
+- 日志里**没有任何** `[XLATOR]` 行——连「已禁用」的通知也没有，因为裁掉之后没有留下任何会打印通知的代码；
+- `cat /proc/a20/xlator` 报 `No such file or directory`，即运行期开关节点不存在。
+
+关键在于 cmdline 与 `smoke-exec-xlator` **完全一样**（仍然写着 `a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64`）。传了等于没传，才说明关掉的是编译而不是加了个运行时 no-op。
+
+顺带一个踩过的坑：这两个产物落在 `$(USER_BUILD_DIR)`，而 `make -C user clean` 会在用户态 build id 变化时清空该目录。把 `make xlator-assets` 写成 smoke 的 `pre` 步骤就会在**下一次 make 时被删掉**，表现为「镜像里少一个二进制」，看起来像内核问题。现在它们是镜像的前置依赖，顺序由 make 保证。
+
+`CONFIG_XLATOR=0` 带独立的 `BUILD_VARIANT` 分量（输出到 `.kernel-build/…-noxlator/`）。这不是为了整洁：`BUILD_FLAGS_STAMP` 会在 flag 翻转时强制整目录重建，两个用例共用一个输出目录就意味着它们在 `make -j check` 下不能并发。
+
+构建层面另有两条可核对的证据，不依赖 QEMU：`CONFIG_XLATOR=0` 时 `kernel/proc/xlator.c` 不在 `KERNEL_SRC` 里，构建目录中不存在 `proc/xlator.o`，且 `nm kernel.elf | grep xlator` 无输出。
+
+### 换一个形状的翻译器（smoke-exec-xlator-shim）
+
+`make smoke-exec-xlator-shim` 验证「调用约定是配置而不是代码」这一条：`a20.xlator.<guest>.argv` 与 `.env` 两个启动键真的能决定内核拼出的 argv 与环境。
+
+它**不需要下载、也不需要交叉编译器**——这是它存在的理由。被指向的翻译器是 `user/cmds/core/xlate_shim.c`：一个宿主原生的程序，什么都不翻译，只打印自己收到的 argv 和几个指定环境变量然后退出 0；被翻译的「guest」是 `xlate_exec stage <e_machine> <path>` 现写的一个合法 ELF64 头。
+
+用一个只打印的程序做断言对象是刻意的：真翻译器**会容忍**错误的 argv（qemu 就是），所以拿真翻译器测出来的结论是「qemu 忍住了」，不是「内核拼对了」。
+
+启动配置同时挂两个形状不同的 guest：
+
+```
+a20.xlator=1
+a20.xlator.x86_64=/bin/xlate_shim  a20.xlator.x86_64.argv=@P,@*  a20.xlator.x86_64.env=XLATOR_TEST_ENV=hello
+a20.xlator.aarch64=/bin/xlate_shim
+```
+
+| guest | 模板 | 断言 shim 看到的 argv |
+|---|---|---|
+| `x86_64` | cmdline 覆盖 `@P,@*`（Rosetta 形状：路径就是 argv[0]，无任何选项） | `[0]=/bin/xlate_shim`、`[1]=镜像路径`、`[2..]=guest 参数`，**且路径前面没有多余的 argv[0] 参数**；`XLATOR_TEST_ENV=hello` |
+| `aarch64` | 注册表默认 `-0 @A @P @*` | `[1]=-0`、`[2]=诱饵`、`[3]=镜像路径`、`[4]=guest 参数` |
+
+`aarch64` 的 `argv[0]` 传的是一个**诱饵**（`xlate_exec run --argv0=decoy-argv0 …`）。用 `execv` 时 `argv[0]` 与路径必然是同一个字符串，`@A` 写错了也看不出来；诱饵让它成为一个真断言。同时这一条也覆盖了「多于一个 guest 同时配置」——此前没有任何用例跑过第二个 guest。
+
+`.argv` 覆盖的非 qemu 形状正是旧设计表达不了的那一个：旧的每 guest `argv0_flag` 列在填 `-` 时只能不发 flag，可调用者的 `argv[0]` 仍然会作为一个位置参数留在路径前面。断言 `[1]` 是路径而不是别的什么，就是这一条的直接证据。
+
+失败时看 `.kernel-build/smoke/exec-xlator-shim-riscv64.log` 的 `XLATE_SHIM: argv[i]=` 逐行：它就是内核拼出来的 argv，不用推断。
+
+### loongarch64 上的同一条通道（smoke-exec-xlator-la64）
+
+`smoke-exec-xlator` 只在 riscv64 上跑。loongarch64 上这条通道曾经是「编进去了但永远配不上」：`XLATOR_SUPPORTED_ARCHES` 里有它、`CONFIG_XLATOR` 在它的构建里为 `y`，但 `arch_bootargs_get()` 静默落到 `kernel/core/bootargs.c` 的 weak 默认、返回 `NULL`，于是 13 个 `a20.*` 键全部读成「不存在」，`/proc/a20/xlator` 永远 `enabled: 0`。`smoke-exec-xlator-la64` 是这个缺口的回归护栏。
+
+它和 riscv64 那条只有一个实质区别：**命令行不是 QEMU 给的，是操作者在串口上敲的**（`UART_CMDLINE=y`，见 [exec-xlator/01-usage.md](exec-xlator/01-usage.md#没有固件时从串口收命令行)）。因此它必须用 `-serial stdio -monitor none -display none` 而不是 `-nographic`（后者的 mux 吞输入），并且在看到 `[UARTCMD]` 提示之后才送字节——QEMU 一拿到管道字节就交给仿真 UART，远早于 guest 编程 16550。
+
+断言与 riscv64 那条逐条相同（标记串、特征退出码 42、`[WX] … 翻译器宿主，放行 W|X`、W^X 策略仍是 deny），外加 `[UARTCMD] using command line from the console` 与 `[FDT] bootargs='…'`：前者证明串口这条路真的走了，后者证明 `arch_bootargs_get()` 的返回值确实进了 `bootargs_get()`，而不是只打印了一行好看的提示。
+
+同一个 case 还顺带把 loongarch64 的 16550 接收路径变成被测过的：QEMU loongarch virt 没有 UART IRQ，所以这块板子 `uart_rx_is_polled = 1`，`arch_uart_poll_getc()` 直接轮询 LSR。在此之前这条路径在这块板子上从未被读过。FCR bit 0（16 字节 FIFO）也是这次打开的：不打开的话一次按键突发落进一字节保持寄存器会自我覆盖，实测丢首字节。
+
+### 外来架构注册表一致性（check-xlator-guests）
+
+`make check-xlator-guests` 是纯文本门禁（无需交叉工具链与 QEMU，因此进 `CHECK_FAST_GATES` 与 CI 的 `toolchain-gates` job）。它断言五件事：
+
+- `kernel/proc/xlator_guests.def` 里每个 guest 都有 `tools/targets-xlator.mk` 中对应的 `XLATOR_GUEST_CC_<name>`；
+- 反向也成立（多一个没人用的 CC 定义就是漂移）；
+- 每个 `e_machine` 与 `kernel/include/mm/elf.h` 的 `EM_*` 相等；
+- 每个默认 argv 模板只用了内核认识的那三个记号（`@A` / `@P` / `@*`），并且出现了 `@P`；
+- `Makefile` 的 `XLATOR_SUPPORTED_ARCHES` 里每个架构都实现了 `arch_bootargs_get()`。
+
+第四条是对内核 `xlator_parse_template()` 的复述，不是第二个实现——内核才是权威并在启动时就地拦截，这条只是让同样的笔误在一秒内在宿主上暴露而不是在目标机启动日志里。已负向验证过：未知记号与缺 `@P` 各自 FAIL 且报错不同，`--argv0=@A @P @*` 这种记号粘字面量的写法 PASS。
+
+第五条查的是另一类「名义支持」：架构进了 `XLATOR_SUPPORTED_ARCHES` 只说明 `CONFIG_XLATOR` 编进去了，而通道**能不能被配置**是另一件事——唯一配置入口是 `bootargs_get()`，没有 `arch_bootargs_get()` 的架构会落到 `kernel/core/bootargs.c` 里返回 NULL 的弱默认，于是那个架构上所有 `a20.*` 键全部读作不存在。`loongarch64` 在这条通道的整个生命周期里都是这个状态：它在 `XLATOR_SUPPORTED_ARCHES` 里、`/proc/a20/xlator` 也注册了，可没有一条 `a20.*` 键能生效。显式写一个返回 NULL 的桩是允许的（`arm32` 与 `loongarch32` 就是有意为之，它们根本没有 FDT 通路）；这条拒绝的是**静默**回落——架构从没做过这个决定。已负向验证过：临时删掉 loongarch64 的实现即 FAIL 并指名道姓。
+
+新增或修改 guest 时的正确顺序：先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。
+
+它不是预防性的：写下这道门禁时两份清单已经漂移——`XLATOR_GUEST_CC_riscv64` 存在，而 `--guest riscv64` 会被 argparse 直接拒掉。门禁还会扫 `tools/*.py` 里是否重新长出一份 guest→e_machine 的字典（`HOST_MACHINES` 与 `mkrootfs.py` 的架构表是另外两件事，按名字而非按数字区分）。
+
+新增或修改 guest 时的正确顺序：先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。
+
 ### 能力信封（研究门禁）
 
 `make smoke-envelope` 构建 `riscv64 ABI=linux BRINGUP=0` 镜像并在 QEMU 中运行 `envelope_smoke`（docs/research/05 的调解器攻击套件）。十三个子场景：信封内正常文件工作、类型拒绝（EPERM）、权限上限拒绝（EACCES）、操作预算耗竭、数据预算预扣、时间预算过期（惰性清扫）、`/proc/self/fd/<n>` 重开不可提权（A8 方向位拒绝）、主动撤销 + KILL_ON_EXPIRE（SIGKILL 工作进程）、SCM_RIGHTS 接收经调解可用（A6）、SCM_RIGHTS 接收类外丢弃、SCM_RIGHTS 发送传播检查（propagation_types=0 → EPERM）、pidfd_getfd 窃取按类裁决（SOCKET 拒 EPERM / FILE 准且可读，A7）、shmat MEMORY 类检查（A5）。串口日志须出现全部 `ENVELOPE_SMOKE: <场景> PASS` 与总 `ENVELOPE_SMOKE: PASS`。套件末尾另通过 syscall 906 执行 E8 运行时不变式审计（TypeAllowed/RightsSubCap/预算界/挂载一致性全量走查），要求零违例。

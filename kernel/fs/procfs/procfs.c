@@ -24,6 +24,9 @@
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
 #include "proc/coredump.h"
+/* Unconditional on purpose: without CONFIG_XLATOR the header supplies
+ * stubs, so this does not pull the channel into a cut-down build. */
+#include "proc/xlator.h"
 #include "proc/lifetime.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
@@ -113,6 +116,9 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "anonprov") == 0) return PF_A20_ANONPROV;
     if (strcmp(name, "sched_base_slice") == 0) return PF_A20_SCHED_BASE_SLICE;
+#ifdef CONFIG_XLATOR
+    if (strcmp(name, "xlator") == 0) return PF_A20_XLATOR;
+#endif
     if (strcmp(name, "page_cache") == 0) return PF_A20_PAGE_CACHE;
     if (strcmp(name, "oom") == 0) return PF_A20_OOM;
     if (strcmp(name, "task_lifetime") == 0) return PF_A20_TASK_LIFETIME;
@@ -476,6 +482,11 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
+#ifdef CONFIG_XLATOR
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "xlator") == 0) {
+        child = new_entry(name, PF_A20_XLATOR, 0);
+        type = PF_A20_XLATOR;
+#endif
     } else if (dp && dp->type == PF_ROOT && dp->pid == 0 && strcmp(name, "interrupts") == 0) {
         child = new_entry(name, PF_INTERRUPTS, 0);
         type = PF_INTERRUPTS;
@@ -615,6 +626,13 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     else if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_A20_SCHED_BASE_SLICE || type == PF_SYS_FS_PIPE_MAX_SIZE ||
         type == PF_SYS_FS_LEASE_BREAK_TIME ||
+#ifdef CONFIG_XLATOR
+        /* 0644 like the other a20 tunables: enabling the channel grants no
+         * new authority, since a process able to exec the configured
+         * translator path could already exec it directly.  What governs
+         * access is which paths the administrator named at boot. */
+        type == PF_A20_XLATOR ||
+#endif
         type == PF_SYS_KERNEL_SCHED_AUTOGROUP ||
         type == PF_SYS_KERNEL_CORE_PATTERN ||
         type == PF_SYS_VM_DROP_CACHES ||
@@ -931,6 +949,39 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         int r = mm_pt_set_anon_prov_max((uint32_t)value);
         return r < 0 ? r : (int)count;
     }
+#ifdef CONFIG_XLATOR
+    /* Runtime switch for the foreign-architecture translation channel.
+     *
+     * Only the switch is writable: the translator paths stay boot-time, so
+     * a process still cannot steer which binary the kernel re-execs.  This
+     * is the emergency-off lever -- flipping it takes effect on the next
+     * execve, while translations already running are ordinary processes and
+     * are deliberately left to finish. */
+    if (p->type == PF_A20_XLATOR) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        /* Exactly "0" or "1", optionally followed by trailing whitespace.
+         * atoi() would accept "1x", "2" or "" as 0, and a silently ignored
+         * typo here reads as "it worked" -- the opposite of what the admin
+         * who just tried to shut the channel down needs.  The kernel has no
+         * strtol(), hence the hand-rolled comparison. */
+        int value;
+        if (tmp[0] == '0')
+            value = 0;
+        else if (tmp[0] == '1')
+            value = 1;
+        else
+            return -EINVAL;
+        for (size_t i = 1; i < n; i++) {
+            if (tmp[i] != ' ' && tmp[i] != '\t' && tmp[i] != '\n')
+                return -EINVAL;
+        }
+        xlator_set_enabled(value);
+        return (int)count;
+    }
+#endif
     if (p->type == PF_A20_SCHED_BASE_SLICE) {
         char tmp[32];
         size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
