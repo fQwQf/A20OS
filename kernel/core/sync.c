@@ -148,7 +148,8 @@ unsigned wait_queue_wake_one(wait_queue_t *q, uintptr_t key,
  * wait_queue_peek_key — return (with a live reference) the task of the
  * first entry matching @key, without unlinking it.  Used by the IPC
  * donation path (docs/hybrid-kernel/02-mainstream-plan.md M1), which
- * re-validates the target's park state under proc_lock before switching.
+ * re-validates the target's park state under the target's park_lock before
+ * switching.
  */
 task_t *wait_queue_peek_key(wait_queue_t *q, uintptr_t key) {
     if (!q)

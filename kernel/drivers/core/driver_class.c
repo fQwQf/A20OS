@@ -11,8 +11,9 @@
  * device and index cycles over 0..255, so the total number of published class
  * devices is bounded by 256 per class type.  Backing the registry with a fixed
  * static array keeps kcalloc/krealloc out of g_class_lock entirely: both
- * allocate through the reclaiming allocator, whose OOM path takes proc_lock and
- * mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
+ * allocate through the reclaiming allocator, whose OOM path takes tasklist_lock,
+ * a task park_lock and mm->lock, writes swap pages to disk, waits on remote TLB
+ * IPIs and can
  * kerr()/proc_force_exit() a task, none of which may run with interrupts
  * disabled.  The bound is exact, not a guess: an index is never reused while
  * its device is published. */

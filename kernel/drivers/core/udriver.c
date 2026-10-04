@@ -173,8 +173,9 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
         return -1;
 
     /* The VMA is allocated before mm->lock is taken.  kcalloc() reaches the
-     * reclaiming allocator, whose OOM path takes proc_lock and mm->lock, writes
-     * swap pages to disk, waits on remote TLB IPIs and can proc_force_exit() a
+     * reclaiming allocator, whose OOM path takes tasklist_lock, a task park_lock
+     * and mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
+     * proc_force_exit() a
      * task; none of that may run inside a spinlock section.  The object stays
      * unreachable until mm_insert_vma() publishes it below. */
     mm_seg_t *vma = mm_seg_new();

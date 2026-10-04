@@ -477,10 +477,10 @@ smoke-smp-lock-contention:
 		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
 		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
 		> "$$log" 2>&1 || status=$$?; \
-	proc_split=$$(awk '/^proc: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
+	tasklist_split=$$(awk '/^tasklist: /{b++; if(b==1){ba=$$2;bs=$$3} if(b==2){print "boot "ba" acq / "bs" spins | stress-only "($$2-ba)" acq / "($$3-bs)" spins"}} END{if(b<2)print "UNAVAILABLE (only "b" lock_contention block"b"; tail console command was dropped)"}' "$$log"); \
 	lwip_total=$$(awk '/^lwip: /{b++; if(b==2){t=$$3}} END{print t+0}' "$$log"); \
 	lwip_stress_spins=$$(awk '/^lwip: /{b++; if(b==1){bs=$$3} if(b==2){d=$$3-bs}} END{print d+0}' "$$log"); \
-	proc_max=$$(awk '/^proc: /{b++; if(b==2){v=$$4; sub(/^max=/,"",v); print v+0; exit}}' "$$log"); \
+	tasklist_max=$$(awk '/^tasklist: /{b++; if(b==2){v=$$4; sub(/^max=/,"",v); print v+0; exit}}' "$$log"); \
 	site_acq=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2)a+=$$3} END{print a+0}' "$$log"); \
 	site_spin=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2)s+=$$4} END{print s+0}' "$$log"); \
 	site_max=$$(awk '/^lwip: /{b++; next} /\[lwip\]/{if(b>=2){v=$$5; sub(/^max=/,"",v); if (v+0>m) m=v+0}} END{print m+0}' "$$log"); \
@@ -490,7 +490,7 @@ smoke-smp-lock-contention:
 	if grep -q 'NET_STRESS_TEST: PASS' "$$log" && \
 	   ! grep -q 'tcp_pcbs_sane' "$$log" && \
 	   grep -qE '^lwip: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
-	   grep -qE '^proc: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
+	   grep -qE '^tasklist: [0-9]+ [0-9]+ max=[0-9]+$$' "$$log" && \
 	   { [ "$$lwip_total" -eq 0 ] || [ "$$site_spin" -ge $$((lwip_total * 9 / 10)) ]; } && \
 	   [ "$$tlb_enters" -gt 0 ] && \
 	   ! grep -qi 'panic' "$$log"; then \
@@ -500,13 +500,13 @@ smoke-smp-lock-contention:
 		     "4-core runs of this workload have spanned 0 to ~920000, so any magnitude threshold here" \
 		     "would be flaky. The structural reductions are asserted in the kernel build instead (see the" \
 		     "net_socket_t and TCP_MSG size _Static_asserts); this number is here so drift stays visible."; \
-		grep -E '^(lwip|proc|runq): ' "$$log" || true; \
-		echo "worst single acquire (cumulative): proc_lock $$proc_max spins, lwip site $$site_max spins"; \
+		grep -E '^(lwip|tasklist|runq): ' "$$log" || true; \
+		echo "worst single acquire (cumulative): tasklist_lock $$tasklist_max spins, lwip site $$site_max spins"; \
 		if [ "$$lwip_total" -eq 0 ]; then \
 			echo "note: no lwip contention in this window, so the attribution invariant was satisfied vacuously rather than exercised"; \
 		fi; \
-		echo "proc_lock windows -- $$proc_split"; \
-		echo "TLB convergence inside proc_lock: $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
+		echo "tasklist_lock windows -- $$tasklist_split"; \
+		echo "TLB convergence in the switch path (no global lock is held there since the split; it was proc_lock before): $$tlb_enters enters, $$tlb_waits flushed at least once, $$tlb_flushes local ASID flushes"; \
 	else \
 		echo "smoke-smp-lock-contention: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
