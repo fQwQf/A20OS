@@ -117,6 +117,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "a20") == 0) return PF_A20;
     if (strcmp(name, "bcache") == 0) return PF_A20_BCACHE;
     if (strcmp(name, "anonprov") == 0) return PF_A20_ANONPROV;
+    if (strcmp(name, "hyp_selftest") == 0) return PF_A20_HYP_SELFTEST;
     if (strcmp(name, "sched_base_slice") == 0) return PF_A20_SCHED_BASE_SLICE;
 #ifdef CONFIG_XLATOR
     if (strcmp(name, "xlator") == 0) return PF_A20_XLATOR;
@@ -506,6 +507,9 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "anonprov") == 0) {
         child = new_entry(name, PF_A20_ANONPROV, 0);
         type = PF_A20_ANONPROV;
+    } else if (dp && dp->type == PF_A20 && strcmp(name, "hyp_selftest") == 0) {
+        child = new_entry(name, PF_A20_HYP_SELFTEST, 0);
+        type = PF_A20_HYP_SELFTEST;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "sched_base_slice") == 0) {
         child = new_entry(name, PF_A20_SCHED_BASE_SLICE, 0);
         type = PF_A20_SCHED_BASE_SLICE;
@@ -1361,7 +1365,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *a20_entries[] = {
         ".", "..", "bcache", "page_cache", "oom", "task_lifetime", "perf",
         "anonprov", "driver_lifecycle", "objects", "iommu", "netfilter",
-        "netmem", "journal", NULL
+        "netmem", "journal", "hyp_selftest", NULL
     };
     static const char *ns_entries[] = {
         ".", "..", "pid", "uts", "user", "ipc", "mnt", "net", "cgroup", NULL
