@@ -25,11 +25,12 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
     if (s->ch_ep)
         return net_recvfrom_socket_meta(s, buf, count, 0, NULL, NULL, NULL);
     uint64_t start = timer_get_ticks();
+    int sb = net_socket_bucket(s);
     for (;;) {
         a20_lwip_poll_waiter();
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        uint64_t irq = spin_lock_irqsave(&g_net_lock);
+        uint64_t irq = net_bucket_lock(sb);
         int rx_count_before = s->rx_count;
         int r = net_dequeue_msg_locked(s, buf, count, NULL, NULL);
         if (r > 0 && s->type == SOCK_STREAM) {
@@ -53,7 +54,7 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
             if (r > 0 && s->rx_head)
                 (void)wait_queue_collect_one(
                     &s->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             (void)proc_wake_q_flush(&wake_q);
             if (recved)
                 net_tcp_recved(s, (size_t)recved);
@@ -61,42 +62,42 @@ static int net_vfile_read(vfile_t *vf, char *buf, size_t count) {
         }
         task_t *cur = proc_current();
         if (!cur) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             return -EAGAIN;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             return -ERESTARTSYS;
         }
         if (net_socket_wait_expired(s, start, 0)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             return -EAGAIN;
         }
         uint64_t deadline = s->recv_timeout_ticks ?
                             start + s->recv_timeout_ticks : 0;
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock(sb, irq);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
         if (!token.task)
             return -EAGAIN;
 
         wait_queue_entry_t entry = {0};
-        irq = spin_lock_irqsave(&g_net_lock);
+        irq = net_bucket_lock(sb);
         if (s->rx_head || s->nonblock || s->closed || s->peer_closed ||
             s->shut_rd) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             continue;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock(sb, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ERESTARTSYS;
         }
         bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock(sb, irq);
         proc_wake_reason_t reason;
         if (linked)
             reason = proc_park_commit(token);
@@ -127,43 +128,69 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, count, NULL, 0);
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (s->closed || s->shut_wr) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
-        return -EPIPE;
-    }
-    if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
-        net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
-    net_socket_t *dst = s->peer;
-    if (dst && s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET && !net_socket_is_valid_locked(dst)) {
-        s->peer = NULL;
-        dst = NULL;
+    /* Destination first, outside any lock: it comes from a whole-table scan
+     * that has to take the shard locks one at a time, and the scan hands back a
+     * reference, which is what lets this function then take s's and dst's
+     * buckets in ascending order without nesting a third one. */
+    int sb = net_socket_bucket(s);
+    uint8_t src_local[NET_SOCKADDR_MAX];
+    size_t src_local_len = 0;
+    net_socket_t *dst = NULL;
+    {
+        uint64_t sf = net_bucket_lock(sb);
+        if (!net_socket_is_live(s)) {
+            net_bucket_unlock(sb, sf);
+            return -ENOTSOCK;
+        }
+        if (s->closed || s->shut_wr) {
+            net_bucket_unlock(sb, sf);
+            return -EPIPE;
+        }
+        if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
+            net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
+        src_local_len = s->local_len;
+        memcpy(src_local, s->local, src_local_len);
+        if (s->peer && s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET &&
+            !net_socket_is_live(s->peer))
+            s->peer = NULL;
+        dst = s->peer ? net_socket_ref(s->peer) : NULL;
+        net_bucket_unlock(sb, sf);
     }
     if (!dst && s->connected)
-        dst = net_find_bound_socket_locked(s->domain, s->type, s->peer_addr, s->peer_len);
+        dst = net_find_bound_socket(s->domain, s->type, s->peer_addr,
+                                    s->peer_len);
     if (!dst) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
         return s->connected ? -ECONNREFUSED : -EDESTADDRREQ;
     }
 
     if (count <= NET_MAX_PAYLOAD) {
-        if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            return net_enqueue_msg_blocking(s, dst, buf, count, s->local, s->local_len,
-                                            s->nonblock, s->send_timeout_ticks);
+        int r;
+        net_bucket_pair_t pair = net_bucket_lock2(sb,
+                                                  net_socket_bucket(dst));
+        if (!net_socket_is_live(dst)) {
+            net_bucket_unlock2(pair);
+            net_socket_free(dst);
+            return s->connected ? -ECONNREFUSED : -EDESTADDRREQ;
         }
-        int r = net_enqueue_msg_locked(dst, buf, count, s->local, s->local_len);
+        if (dst->rx_count >= NET_MAX_QUEUE && !s->nonblock) {
+            net_bucket_unlock2(pair);
+            r = net_enqueue_msg_blocking(s, dst, buf, count, src_local,
+                                         src_local_len, s->nonblock,
+                                         s->send_timeout_ticks);
+            net_socket_free(dst);
+            return r;
+        }
+        r = net_enqueue_msg_locked(dst, buf, count, src_local, src_local_len);
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
         if (r >= 0)
             (void)wait_queue_collect_one(
                 &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock2(pair);
         (void)proc_wake_q_flush(&wake_q);
+        net_socket_free(dst);
         return r;
     }
-
-    spin_unlock_irqrestore(&g_net_lock, irq);
 
     size_t total = 0;
     while (total < count) {
@@ -171,12 +198,15 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
         if (chunk > NET_MAX_PAYLOAD)
             chunk = NET_MAX_PAYLOAD;
         int r = net_enqueue_msg_blocking(s, dst, buf + total, chunk,
-                                          s->local, s->local_len,
-                                          s->nonblock, s->send_timeout_ticks);
-        if (r < 0)
+                                         src_local, src_local_len,
+                                         s->nonblock, s->send_timeout_ticks);
+        if (r < 0) {
+            net_socket_free(dst);
             return total ? (int)total : r;
+        }
         total += (size_t)r;
     }
+    net_socket_free(dst);
     return (int)total;
 }
 
@@ -206,7 +236,20 @@ int net_socket_close_file(vfile_t *vf) {
     bool drain_write = false;
     bool drain_peer_read = false;
     bool drain_peer_write = false;
-    uint64_t flags = spin_lock_irqsave(&g_net_lock);
+    /* s and its peer: two buckets, ascending.  s->peer is a plain back-pointer
+     * with no reference of its own, so it is sampled under s's own bucket and
+     * a reference taken there -- reading it before any lock could name a socket
+     * another CPU has already freed.  A peer that was unregistered in the
+     * window between the two steps lands in the orphan shard, which is what the
+     * pair below then holds, and net_socket_is_live() rejects it. */
+    int sb = net_socket_bucket(s);
+    {
+        uint64_t sf = net_bucket_lock(sb);
+        if (s->peer)
+            peer = net_socket_ref(s->peer);
+        net_bucket_unlock(sb, sf);
+    }
+    net_bucket_pair_t pair = net_bucket_lock2(sb, net_socket_bucket(peer));
     net_unregister_socket_locked(s);
     drain_accept = net_wait_queue_collect_all_locked(
         &s->accept_waitq, PROC_WAKE_EXIT, &wake_q);
@@ -214,8 +257,9 @@ int net_socket_close_file(vfile_t *vf) {
         &s->read_waitq, PROC_WAKE_EXIT, &wake_q);
     drain_write = net_wait_queue_collect_all_locked(
         &s->write_waitq, PROC_WAKE_EXIT, &wake_q);
-    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer)) && s->peer->peer == s) {
-        peer = s->peer;
+    if (peer &&
+        (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
+         net_socket_is_live(peer)) && peer->peer == s) {
         peer->peer = NULL;
         peer->peer_closed = 1;
         drain_peer_read = net_wait_queue_collect_all_locked(
@@ -235,7 +279,9 @@ int net_socket_close_file(vfile_t *vf) {
 #endif
     s->accept_head = s->accept_tail = NULL;
     s->accept_count = 0;
-    spin_unlock_irqrestore(&g_net_lock, flags);
+    net_bucket_unlock2(pair);
+    /* Registry reference, dropped outside the lock because it can free. */
+    net_socket_free(s);
     (void)proc_wake_q_flush(&wake_q);
     if (drain_accept)
         (void)wait_queue_wake_all(
@@ -252,6 +298,8 @@ int net_socket_close_file(vfile_t *vf) {
     if (drain_peer_write)
         (void)wait_queue_wake_all(
             &peer->write_waitq, 0, PROC_WAKE_EVENT);
+    if (peer)
+        net_socket_free(peer);
     ktrace_net("[NET] close: unregistered, rx=%d accept_q=%d\n", rx_count, acc_count);
 
     while (m) {
@@ -267,10 +315,22 @@ int net_socket_close_file(vfile_t *vf) {
         drain_write = false;
         drain_peer_read = false;
         drain_peer_write = false;
-        uint64_t accepted_flags = spin_lock_irqsave(&g_net_lock);
+        /* Each accepted child is torn down on its own, with its own peer:
+         * two buckets, ascending.  The children's accept list was detached
+         * above, so no lock from the listener's teardown is still held and the
+         * children need not all share a bucket.  The child's peer is sampled
+         * and referenced under the child's own bucket, for the same reason as
+         * above: the back-pointer carries no reference of its own. */
+        int cb = net_socket_bucket(accepted);
+        {
+            uint64_t cf = net_bucket_lock(cb);
+            if (accepted->peer)
+                peer = net_socket_ref(accepted->peer);
+            net_bucket_unlock(cb, cf);
+        }
+        net_bucket_pair_t apair = net_bucket_lock2(cb, net_socket_bucket(peer));
         accepted->closed = 1;
-        if (accepted->peer && accepted->peer->peer == accepted) {
-            peer = accepted->peer;
+        if (peer && peer->peer == accepted) {
             peer->peer = NULL;
             peer->peer_closed = 1;
             drain_peer_read = net_wait_queue_collect_all_locked(
@@ -282,7 +342,9 @@ int net_socket_close_file(vfile_t *vf) {
             &accepted->read_waitq, PROC_WAKE_EXIT, &wake_q);
         drain_write = net_wait_queue_collect_all_locked(
             &accepted->write_waitq, PROC_WAKE_EXIT, &wake_q);
-        spin_unlock_irqrestore(&g_net_lock, accepted_flags);
+        net_unregister_socket_locked(accepted);
+        net_bucket_unlock2(apair);
+        net_socket_free(accepted);
         (void)proc_wake_q_flush(&wake_q);
         if (drain_read)
             (void)wait_queue_wake_all(
@@ -296,13 +358,15 @@ int net_socket_close_file(vfile_t *vf) {
         if (drain_peer_write)
             (void)wait_queue_wake_all(
                 &peer->write_waitq, 0, PROC_WAKE_EVENT);
+        if (peer)
+            net_socket_free(peer);
         net_inet_socket_destroy(accepted);
-        uint64_t unregister_flags = spin_lock_irqsave(&g_net_lock);
-        net_unregister_socket_locked(accepted);
-        spin_unlock_irqrestore(&g_net_lock, unregister_flags);
+        /* Creator's reference, dropped last; the registry's was dropped above
+         * once the slot was released. */
         net_socket_free(accepted);
         accepted = next;
     }
+    /* Creator's reference for s, likewise. */
     net_socket_free(s);
     vf->priv = NULL;
     return 0;
@@ -679,8 +743,8 @@ int net_socket_install_file(net_socket_t *s, int flags) {
 /*
  * Push an event to every event queue watching this socket's global fd
  * (Native ABI event source wiring, docs/native-abi/09-… §5).  Cheap when no
- * Native process watches the socket.  Called from the net core; safe with
- * g_net_lock held (a20_event_notify takes its own IRQ-safe locks).
+ * Native process watches the socket.  Called from the net core; safe with a
+ * bucket lock held (a20_event_notify takes its own IRQ-safe locks).
  */
 void net_event_notify(net_socket_t *s, uint32_t event, uint64_t data0,
                       uint64_t data1)
