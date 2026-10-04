@@ -7,9 +7,15 @@
 #include "core/consts.h"
 #include "platform.h"
 
+/* DBAR hint bit 4 selects ordering rather than completion, bit 3 the preceding
+ * reads and bit 2 the preceding writes.  0x15 therefore orders the previous
+ * loads and 0x1a the previous stores, which is the LoongArch spelling of the
+ * acquire/release pair the other ports spell DMB LD/ST and FENCE IR,IW / OW,OW.
+ * A hint a core does not special-case executes as dbar 0, so neither can ever
+ * be weaker than the full barrier they replace. */
 static inline void arch_mb(void)  { __asm__ __volatile__("dbar 0" ::: "memory"); }
-static inline void arch_rmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
-static inline void arch_wmb(void) { __asm__ __volatile__("dbar 0" ::: "memory"); }
+static inline void arch_rmb(void) { __asm__ __volatile__("dbar 0x15" ::: "memory"); }
+static inline void arch_wmb(void) { __asm__ __volatile__("dbar 0x1a" ::: "memory"); }
 static inline void arch_wfi(void) { __asm__ __volatile__("idle 0"); }
 #define ARCH_HAS_SAFE_IDLE_WAIT 1
 void arch_idle_wait(void);
@@ -86,9 +92,17 @@ static inline void arch_tlb_flush_local(void) {
 static inline void arch_tlb_flush(void) {
     arch_tlb_flush_local();
 }
+/* INVTLB op 5 discards the entries for one VA inside the running ASID, the
+ * LoongArch counterpart of the `sfence.vma addr, zero` riscv64 uses to make
+ * arch_tlb_flush_page targeted.  The register-specified ASID must occupy the
+ * whole of rj, and the ASID lives in TLBIDX[25:10]. */
 static inline void arch_tlb_flush_page_local_impl(uint32_t addr) {
-    (void)addr;
-    __asm__ __volatile__("invtlb 0, $zero, $zero" ::: "memory");
+    uint32_t tlbidx;
+    __asm__ __volatile__("csrrd %0, 0x10" : "=r"(tlbidx));
+    uint32_t asid = (tlbidx >> 10) & 0xffffU;
+    __asm__ __volatile__("invtlb 5, %0, %1"
+                         :: "r"(asid), "r"(addr)
+                         : "memory");
 }
 static inline void arch_tlb_flush_page(uint32_t addr) {
     arch_tlb_flush_page_local_impl(addr);

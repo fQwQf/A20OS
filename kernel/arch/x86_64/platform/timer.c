@@ -1,6 +1,7 @@
 #ifdef CONFIG_X86_64
 
 #include "core/defs.h"
+#include "core/cpu.h"
 #include "core/timer.h"
 #include "cpu.h"
 #include "platform.h"
@@ -24,7 +25,13 @@ static volatile unsigned tsc_freq_state;
 static uint64_t hpet_freq;
 static uintptr_t hpet_base;
 static unsigned use_hpet;
-static volatile uint64_t last_ticks;
+/*
+ * Per-CPU high-water mark.  The mark only exists to absorb a counter read that
+ * lands behind an earlier one on this CPU, so keeping one per CPU lets each core
+ * take it uncontended instead of serialising every reader in the system on a
+ * single cache line.
+ */
+static volatile uint64_t last_ticks[CONFIG_NR_CPUS];
 
 static void cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax,
                   uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
@@ -56,18 +63,51 @@ static uint64_t scale_ticks(uint64_t value, uint64_t from, uint64_t to) {
     return whole + fraction;
 }
 
-/* Scale using an already-reduced from/to pair, skipping the per-call gcd. */
-static uint64_t scale_ticks_reduced(uint64_t value, uint64_t from, uint64_t to) {
-    uint64_t whole = value / from;
-    uint64_t fraction = (value % from) * to / from;
-    uint64_t max = ~0ULL;
+/*
+ * Reciprocal of the reduced (source_freq, ARCH_TIMER_FREQ) ratio, so the hot
+ * path multiplies by it rather than dividing by the source frequency.  The
+ * magic is floor(2^64 * ARCH_TIMER_FREQ / source_freq), split into two words
+ * because ARCH_TIMER_FREQ may exceed the source rate and push it past 64 bits.
+ *
+ * Dropping the remainder shortens each conversion by at most one tick and never
+ * moves it backwards, so the result stays monotonic and the error stays bounded
+ * by the tick period instead of accumulating with uptime.
+ */
+static uint64_t clk_scale_magic_lo = 0;
+static uint64_t clk_scale_magic_hi = 1;
 
-    if (whole > max / to)
-        return max;
-    whole *= to;
-    if (fraction > max - whole)
-        return max;
-    return whole + fraction;
+/* Scale using the precomputed reciprocal, with no per-call division. */
+static inline uint64_t scale_ticks_reduced(uint64_t value) {
+    uint64_t product_lo, product_hi;
+
+    /* floor(value * magic / 2^64) needs only the high half of the product with
+     * the low magic word plus a low multiply by the high word: everything below
+     * bit 64 of the full product is shifted out.  Two multiplies replace two
+     * 64-bit divisions, which cannot overlap with the surrounding loads. */
+    __asm__ __volatile__("mulq %3"
+                         : "=a"(product_lo), "=d"(product_hi)
+                         : "a"(value), "r"(clk_scale_magic_lo));
+    return product_hi + value * clk_scale_magic_hi;
+}
+
+/* floor(numerator << 64 / denominator), for numerator < denominator. */
+static uint64_t recip_shift64(uint64_t numerator, uint64_t denominator) {
+    __uint128_t remainder = 0;
+    uint64_t quotient = 0;
+
+    /* Long division over the 128-bit dividend numerator:64.  The kernel links
+     * no 128-bit divide helper, and calibration runs once per clock source. */
+    for (int bit = 127; bit >= 0; bit--) {
+        uint64_t input = (bit >= 64) ? ((numerator >> (bit - 64)) & 1U) : 0U;
+
+        remainder = (remainder << 1) | input;
+        quotient <<= 1;
+        if (remainder >= denominator) {
+            remainder -= denominator;
+            quotient |= 1U;
+        }
+    }
+    return quotient;
 }
 
 static uint64_t gcd_u64(uint64_t a, uint64_t b) {
@@ -79,17 +119,18 @@ static uint64_t gcd_u64(uint64_t a, uint64_t b) {
     return a ? a : 1;
 }
 
-/* Reduced (source_freq, ARCH_TIMER_FREQ) pair for the active clock source. */
-static uint64_t clk_scale_num = 1;
-static uint64_t clk_scale_den = 1;
-
 static void timer_update_clk_scale(void) {
     uint64_t src = use_hpet ? hpet_freq : tsc_freq;
     if (!src)
         src = ARCH_TIMER_FREQ;
     uint64_t g = gcd_u64(src, ARCH_TIMER_FREQ);
-    clk_scale_num = src / g;
-    clk_scale_den = ARCH_TIMER_FREQ / g;
+    uint64_t from = src / g;
+    uint64_t to = ARCH_TIMER_FREQ / g;
+
+    /* 2^64 * to / from splits at the word boundary into the whole ratio and the
+     * fraction shifted up by a word. */
+    clk_scale_magic_hi = to / from;
+    clk_scale_magic_lo = recip_shift64(to % from, from);
 }
 
 static uint64_t read_tsc(void) {
@@ -256,16 +297,13 @@ void timer_set_interval(uint64_t ticks) {
 
 uint64_t timer_get_ticks(void) {
     ensure_tsc_freq();
-    uint64_t ticks;
-    if (use_hpet)
-        ticks = scale_ticks_reduced(hpet_read(HPET_COUNTER),
-                                    clk_scale_num, clk_scale_den);
-    else
-        ticks = scale_ticks_reduced(read_tsc(), clk_scale_num, clk_scale_den);
+    uint64_t ticks = scale_ticks_reduced(use_hpet ? hpet_read(HPET_COUNTER)
+                                                  : read_tsc());
+    volatile uint64_t *last = &last_ticks[cpu_current_id()];
 
-    uint64_t previous = __atomic_load_n(&last_ticks, __ATOMIC_RELAXED);
+    uint64_t previous = __atomic_load_n(last, __ATOMIC_RELAXED);
     while (ticks > previous &&
-           !__atomic_compare_exchange_n(&last_ticks, &previous, ticks, 1,
+           !__atomic_compare_exchange_n(last, &previous, ticks, 1,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED))
         ;
     return ticks > previous ? ticks : previous;
