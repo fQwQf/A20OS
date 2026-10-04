@@ -56,10 +56,7 @@ CITE = re.compile(
 #
 # Each entry is removed when the branch it names lands -- that is the moment the
 # numbers stop moving and the doc can be checked like any other.
-KNOWN_MOVING = {
-    "docs/roadmap/single-level-mm-model.md":
-        "owned by feat/mm-complete, which rewrites most of kernel/mm/",
-}
+KNOWN_MOVING: dict[str, str] = {}
 
 
 def find_all(named):
@@ -122,8 +119,17 @@ def resolve(path):
         return (vendored, tier, -common)
 
     ordered = sorted(hits, key=rank)
-    # A documented prefix in the citation, or exactly one candidate the doc
-    # could plausibly mean, settles it.  Otherwise stay honest and skip.
+    # rank() puts vendored trees last and first-party kernel/user code first, so
+    # a citation like `mmap.c:300` in a doc talking about the kernel means
+    # kernel/mm/mmap.c even though user/external/musl/src/mman/mmap.c exists.
+    # Docs describe this tree, not the vendored copies inside it, so that is not
+    # a guess -- it is the only reading the sentence can have.  Settle it, or
+    # else every such citation goes unchecked forever.
+    if rank(ordered[0])[:2] < rank(ordered[1])[:2]:
+        return ordered[0], False
+    # Genuinely ambiguous: same tier, e.g. bare `trap.c` beside prose about
+    # user_trap_handler, where kernel/core/trap.c and eight arch trap.c files
+    # all match equally.  Skip rather than guess.
     return ordered[0], True
 
 
