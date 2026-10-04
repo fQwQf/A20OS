@@ -80,7 +80,7 @@
 
 ### MM/VMA/页表
 
-`make check-mm-lock-model` 覆盖 MM/VMA/页表这一组静态契约：`MM_LOCK_MODEL`、`MM_VMA_PTE_AUDIT`、`COW/DEMAND_FAULT_TLB_CONTRACT`、`MM_FORK_COW_REGRESSION_GUARD`、`FILE_MMAP_PAGE_CACHE_CONTRACT`、`OOM_RECLAIM_LIFETIME_CONTRACT` 等；并确认 `smoke-mm-stress` 与 `MM_STRESS: PASS` 存在。
+`make check-mm-lock-model` 覆盖 MM/VMA/页表这一组静态契约：`MM_LOCK_MODEL`、`MM_VMA_PTE_AUDIT`、`COW/DEMAND_FAULT_TLB_CONTRACT`、`MM_FORK_COW_REGRESSION_GUARD`、`FILE_MMAP_PAGE_CACHE_CONTRACT`、`OOM_RECLAIM_LIFETIME_CONTRACT`、`mm_seg_index_overflow` 等；并确认 `smoke-mm-stress` 与 `MM_STRESS: PASS` 存在。它现在还跑 `smoke-mm-seg-index-overflow`——那条链路的容量溢出分支是整棵树里唯一能被触达的地方，只挂在单跑用例上等于没人验证（见下文「`seg index overflow`」一节）。
 
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
 
@@ -119,21 +119,23 @@
 
 它有自己的 target、没有折进 `check-mm-lock-model`，因为它慢（一次完整镜像构建 + 约 3 分钟启动），不适合进默认 check 集合。这个取舍是有意的：慢的门禁容易被 CI 超时砍掉，而被砍掉之后剩下的门禁**全都测不到这一类缺陷**。
 
-当前状态（riscv64，`feat/mm-complete`）：
+当前状态（riscv64，`feat/mm-mmap-retire`；数值为一次真实运行，绝对值随 ASLR 变化）：
 
 ```
 MMTEST: ALL STAGES PASS
 MMTEST_RESULT: PASS
-[MM-ASM] pt_pages=9 entries=3072 missing_meta=0 present=0 absent=0 prot=0 cow=0
+[MM-ASM] pt_pages=11 entries=4096 missing_meta=0 present=0 absent=0 prot=0 cow=0
          vma=0 vmai=0 cls=0 safe=0 anon_virt=0 seg_slots=4 seg_bad=0 seg_kind=0
-         seg_ok=43081 seg_diff=0 seg_miss=1084
-         seg_dispatch=43081 seg_fallback=1084
+         seg_ok=43383 seg_diff=0 seg_miss=788
+         seg_dispatch=43383 seg_fallback=788
 [MM-ASM]   map list: entries=14 overlap=0 dead=0 ok=14
-[MM-ASM]   miss why: hole=0 leaf=0 unnamed=143 extent=939 ambig=0 bottom=2
-[MM-ASM]   annot lost: table_full=0 nibbles_full=3976 full_by_level=[0,0,0]
+[MM-ASM]   miss why: hole=0 leaf=0 unnamed=151 extent=635 ambig=0 bottom=2
+[MM-ASM]   annot lost: table_full=0 nibbles_full=113
+[MM-ASM]     full at level 2: 113
+[MM-ASM]   seg index overflow: 0
 ```
 
-**只有取 0 的字段是门槛。** 绝对值随 ASLR 变化——同一棵树相邻两次门禁给出
+**只有取 0 的字段是门槛**（唯一的例外是 `seg index overflow`，它必须**非 0**，见下文该字段一节）。绝对值随 ASLR 变化——同一棵树相邻两次门禁给出
 `entries=3072` 与 `entries=4096`、`seg_ok=43081` 与 `43120`。上面这份是一次真实
 运行（riscv64，`feat/mm-complete`，提交 `039414d37`）的输出，不是每次都该逐字复现的
 期望值：门禁判的是 `mmtest_gate.py` 那几行 `all zero`，不是这里的数字本身。
@@ -204,6 +206,39 @@ MMTEST_RESULT: PASS
 四个数合起来说的是一件事：**每个映射都活着、有序、且占用一个连续区间**。
 `overlap=0 dead=0 ok=entries` 意味着任何一次 `mm_seg_find()` 二分查找都只会返回
 一个答案。
+
+### `seg index overflow`：唯一一个"读 0 不代表通过"的字段（2026-10-04，`feat/mm-mmap-retire`）
+
+有序索引有容量上限 `MM_SEG_INDEX_CAPACITY = 1024`。超过它的地址空间
+`mm_seg_find()` 改为走链表。`[MM-ASM]` 里新增一行：
+
+```
+[MM-ASM]   seg index overflow: 2791
+```
+
+**这一行的门槛与其他所有字段相反：它必须非 0，而且非 0 是"这条路径被执行过"，
+不是"出了问题"。** 原因在门禁的设计里，不在计数本身：
+`smoke-mm-seg-index-overflow` 若只断言 `MM_SEG_INDEX_OVERFLOW: PASS`，
+那么即使映射全部合并成个位数记录、溢出分支一次都没跑，它照样 PASS——
+因为"没跑到"和"跑到了并且正确"在只断言 PASS 的门禁里是同一件事。
+其余门禁（包括 `smoke-mm-software`）这一行读 0，那才是正常的：
+它们的进程只有十几条映射。
+
+这个字段是补出来的，因为该分支里确实藏着一个真缺陷。
+`mm_seg_find()` 的重建条件写的是 `seg_index_state != 1`，
+把状态 2（"已超容量"）也当成"脏"，于是超容量的地址空间里
+**每一次查找**都会重跑完整 rebuild（取满 1024 个引用、发现仍超容量、
+全部放回），然后才去走那条本该被替代的链表遍历。
+改成 `== 0` 之后同一份负载的计数从 **10407 降到 2791**
+（残留部分是 invalidate 带来的、应该存在的开销）。详见 roadmap §13.22。
+
+这条经验比这个字段本身更值得记：**一个断言非零的门禁，仍然可能因为别的原因非零。**
+非 0 只证明"某处发生过"，不证明"这里发生过"。
+所以该门禁除这一行外**还断言 `[MM-ASM]` 审计全 0**——
+溢出回退必须同时与页表对每一条映射都一致，
+否则"它返回了某个东西"就是唯一的结论了。
+该用例自己在这个意义上错了两次（映射被 `vma_can_merge()` 合并、
+建映射时就把页全 fault 完了），两次都记在 roadmap §13.22.4。
 
 这三个数**由门禁强制**，不是印出来给人看的：`tools/mmtest_gate.py` 用 `MAPLIST_RE`
 解析这一行，`overlap`/`dead` 非 0 或 `ok != entries` 直接 FAIL，**整行缺失也 FAIL**

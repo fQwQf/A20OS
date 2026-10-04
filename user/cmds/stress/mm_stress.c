@@ -554,6 +554,141 @@ static int anonymous_fault_and_unmap(void)
     return 0;
 }
 
+/* The ordered-index capacity-overflow fallback (MM_SEG_INDEX_CAPACITY in
+ * kernel/include/mm/vm.h).
+ *
+ * Every other case here runs an address space of a few dozen mappings against a
+ * capacity of 1024, so mm_seg_find()'s overflow branch -- walk the list instead
+ * of binary-searching the index -- had never executed anywhere in the tree.  It
+ * was not merely untested: it was wrong.  The rebuild was retried on every
+ * lookup while the state said "over capacity", so each fault in such a process
+ * paid a full 1024-entry rebuild (take 1024 references, discover the overflow,
+ * put them all back) and *then* the list walk the rebuild was meant to replace.
+ * The fix is one comparison in mm_seg_find(); this is the case that would have
+ * caught it, because it is the only way to get an address space over the cap.
+ *
+* Defeating the merge is the load-bearing part of the setup, and getting it
+ * wrong is silent: vma_can_merge() coalesces ADJACENT anonymous mappings that
+ * agree on both vm_flags and pte_flags, so the obvious layouts all yield a
+ * couple of records instead of a thousand.  One big span is one record; a
+ * MAP_FIXED_NOREPLACE page inside it is EEXIST because the span is already
+ * mapped; a PROT_NONE reservation has the slot colliding with the reservation,
+ * which is itself a mapping; and plain back-to-back one-page mmaps come back
+ * from this kernel's allocator CONTIGUOUS (gap 4096), so they all coalesce too.
+ *
+ * The layout that works is a PROT_NONE guard between every slot.  The guard is
+ * what breaks adjacency: slot(PROT_READ|PROT_WRITE) and guard(PROT_NONE)
+ * cannot merge, so the count rises by two per iteration instead of by nothing.
+ * It does not depend on where the allocator puts anything, and the guards are
+ * never touched, so they cost nothing at fault time.
+ *
+ * The second thing that had to be got right is WHEN the pages are touched, and
+ * the first version got it wrong in a way that made the workload look like it
+ * was working.  It memset each slot as it was created, so every page was already
+ * faulted by the time the address space went over the cap -- the read-back loop
+ * then touched nothing, no demand fault happened while over capacity, and the
+ * gate's own non-zero assertion passed on a workload that had not actually
+ * exercised the path it exists for.  Nothing is written here: the first touch of
+ * every page happens in the read-back loop below, once all the mappings exist. */
+#define MM_SEG_INDEX_CAPACITY_GUESS 1024
+#define SEGOVF_TARGET (MM_SEG_INDEX_CAPACITY_GUESS + 64)
+#define SEGOVF_PAGE_SIZE 4096
+
+static int seg_index_overflow_workload(void)
+{
+    char *slot[SEGOVF_TARGET];
+    for (int i = 0; i < SEGOVF_TARGET; i++) {
+        char *got = mmap(NULL, SEGOVF_PAGE_SIZE, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (got == MAP_FAILED) {
+            printf("MM_STRESS: segovf mmap %d: %s\n", i, strerror(errno));
+            return fail("segovf-slot-mmap");
+        }
+        slot[i] = got;
+        /* The guard goes immediately after this slot and before the next one is
+         * allocated, so it is adjacent to both and separates both pairs. */
+        void *guard = mmap((char *)got + SEGOVF_PAGE_SIZE, SEGOVF_PAGE_SIZE,
+                           PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS
+                                    | MAP_FIXED_NOREPLACE, -1, 0);
+        if (guard == MAP_FAILED) {
+            printf("MM_STRESS: segovf guard %d: %s\n", i, strerror(errno));
+            return fail("segovf-guard-mmap");
+        }
+    }
+
+    /* Now, and only now, touch every page.  The address space is already over
+     * MM_SEG_INDEX_CAPACITY, so each first touch below is a demand fault whose
+     * address has to be resolved through mm_seg_find()'s overflow path.
+     *
+     * A distinct value per mapping is what makes this a correctness check and
+     * not just an exercise: if the over-capacity lookup ever resolved an address
+     * to the WRONG record, the neighbouring guard is not what saves it, the
+     * value read back belongs to a different mapping.  Two distinct bytes per
+     * page, because a read-back that only ever sees one value would also pass
+     * on a lookup that returned the same record every time. */
+    for (int i = 0; i < SEGOVF_TARGET; i++) {
+        memset(slot[i], 0, SEGOVF_PAGE_SIZE);
+        slot[i][0] = (char)(i + 1);
+        slot[i][SEGOVF_PAGE_SIZE - 1] = (char)(0xA0 + (i & 0x0F));
+    }
+    for (int i = 0; i < SEGOVF_TARGET; i++) {
+        if (slot[i][0] != (char)(i + 1) ||
+            slot[i][SEGOVF_PAGE_SIZE - 1] != (char)(0xA0 + (i & 0x0F))) {
+            printf("MM_STRESS: segovf readback %d got %d/%d\n", i,
+                   (int)(unsigned char)slot[i][0],
+                   (int)(unsigned char)slot[i][SEGOVF_PAGE_SIZE - 1]);
+            return fail("segovf-readback");
+        }
+    }
+
+    /* Drop every other slot AND its guard, so the address space falls back
+     * under the cap.  This is what makes the fix's memo sound rather than
+     * merely fast: an address space that is over capacity stays over it, so the
+     * rebuild is skipped until something invalidates the index -- and a munmap
+     * is exactly that.  If the memo were keyed on "still over capacity" instead
+     * of "not dirty", the index would never come back and every later lookup
+     * would keep paying the list walk.
+     *
+     * Both halves matter.  The survivors must still resolve to their own
+     * mapping (a lookup using a stale index would hand back one that no longer
+     * exists), and the gap left by the removed pairs must not be resolved to
+     * anything at all. */
+    for (int i = 0; i < SEGOVF_TARGET; i += 2) {
+        if (munmap(slot[i], 2 * SEGOVF_PAGE_SIZE) < 0)
+            return fail("segovf-half-munmap");
+    }
+
+    /* The hole where a pair used to be: slot and guard are gone together, so
+     * this is a two-page gap and must resolve to nothing. */
+    for (int i = 0; i < SEGOVF_TARGET; i += 2) {
+        char *probe = slot[i];
+        if (mprotect(probe, 2 * SEGOVF_PAGE_SIZE, PROT_READ | PROT_WRITE) == 0)
+            return fail("segovf-hole-still-mapped");
+    }
+
+    for (int i = 1; i < SEGOVF_TARGET; i += 2) {
+        if (slot[i][0] != (char)(i + 1) ||
+            slot[i][SEGOVF_PAGE_SIZE - 1] != (char)(0xA0 + (i & 0x0F)))
+            return fail("segovf-survivor-readback");
+        /* Drop and re-touch: a NEW demand fault on a mapping created before the
+         * shrink, so the lookup has to resolve it again -- this time with the
+         * index rebuilt rather than over capacity. */
+        if (mprotect(slot[i], SEGOVF_PAGE_SIZE, PROT_READ) < 0)
+            return fail("segovf-survivor-prot");
+        if (mprotect(slot[i], SEGOVF_PAGE_SIZE,
+                     PROT_READ | PROT_WRITE) < 0)
+            return fail("segovf-survivor-unprot");
+        slot[i][0] = (char)(i + 1);
+        if (slot[i][0] != (char)(i + 1))
+            return fail("segovf-survivor-rewrite");
+    }
+
+    for (int i = 1; i < SEGOVF_TARGET; i += 2)
+        if (munmap(slot[i], 2 * SEGOVF_PAGE_SIZE) < 0)
+            return fail("segovf-tail-munmap");
+    return 0;
+}
+
 static int fixed_noreplace_conflict(void)
 {
     char *mem = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
@@ -1764,6 +1899,14 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (argc == 2 && strcmp(argv[1], "--seg-index-overflow-only") == 0) {
+        printf("MM_SEG_INDEX_OVERFLOW: start mappings=%d\n", SEGOVF_TARGET);
+        if (seg_index_overflow_workload() != 0)
+            return 1;
+        printf("MM_SEG_INDEX_OVERFLOW: PASS\n");
+        return 0;
+    }
+
     if (argc == 2 && strcmp(argv[1], "--vma-race-only") == 0) {
         printf("MM_VMA_RACE: start workers=%d rounds=%d\n",
                VMA_RACE_WORKERS, VMA_RACE_ROUNDS);
@@ -1796,6 +1939,14 @@ int main(int argc, char **argv)
         return 1;
     printf("MM_STRESS: fixed start\n");
     if (fixed_noreplace_conflict() != 0)
+        return 1;
+    /* In the default run too, not only behind --seg-index-overflow-only: this
+     * is the only workload in the tree that puts an address space over
+     * MM_SEG_INDEX_CAPACITY, so running it only in its own case would leave the
+     * two big aggregate gates reading 0 for mm_seg_index_overflow and proving
+     * nothing. */
+    printf("MM_STRESS: seg-index-overflow start\n");
+    if (seg_index_overflow_workload() != 0)
         return 1;
     printf("MM_STRESS: cow start\n");
     if (fork_cow_and_exit() != 0)

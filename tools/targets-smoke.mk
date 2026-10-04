@@ -151,6 +151,12 @@ smoke-procfs-stress:
 smoke-mm-stress:
 	$(PYTHON) tools/smoke.py smoke-mm-stress
 
+# Drives an address space past MM_SEG_INDEX_CAPACITY so mm_seg_find()'s
+# list-walk fallback executes.  See the case in tools/smoke_cases.py for why
+# this needed its own gate rather than a phase of smoke-mm-stress.
+smoke-mm-seg-index-overflow:
+	$(PYTHON) tools/smoke.py smoke-mm-seg-index-overflow
+
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
 smoke-mmprobe:

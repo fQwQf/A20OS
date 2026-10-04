@@ -844,6 +844,14 @@ make_target = "check-mm-lock-model"
 pattern = "MM_LOCK_MODEL"
 files = ["kernel/include/mm/vm.h"]
 
+# The ordered-index overflow fallback.  Registered as an assertion rather than
+# left to the smoke case alone because the counter is what distinguishes "the
+# branch ran and was correct" from "the branch never ran": without it the case
+# passes on a workload whose mappings all merged into a few records.
+[[gate.assertion]]
+pattern = "mm_seg_index_overflow"
+files = ["kernel/include/mm/vm.h", "kernel/mm/vma.c", "kernel/abi/linux/sys_proc.c"]
+
 [[gate.assertion]]
 pattern = "MM_VMA_PTE_AUDIT"
 files = ["kernel/mm/vm.c"]

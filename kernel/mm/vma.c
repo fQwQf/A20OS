@@ -184,7 +184,14 @@ int vma_ref_aux(mm_seg_t *vma)
  * So invalidation keeps the stale entries and only clears the state; the
  * rebuild overwrites them, dropping what it overwrites.  That is safe only
  * because nothing reads the array while state != 1 -- the lookup below
- * rebuilds before it reads. */
+ * rebuilds before it reads, or falls through to the list without reading it at
+ * all (state 2). */
+
+/* How many times an address space has been found over MM_SEG_INDEX_CAPACITY
+ * mappings and fallen back to the list walk.  See the overflow branch in
+ * mm_seg_index_rebuild() for why this is counted rather than assumed. */
+uint64_t mm_seg_index_overflow;
+
 static void mm_seg_index_rebuild(mm_struct_t *mm)
 {
     /* Release the previous pass's references BEFORE writing any new entry.
@@ -203,7 +210,15 @@ static void mm_seg_index_rebuild(mm_struct_t *mm)
     for (mm_seg_t *v = mm->mmap; v; v = v->next) {
         if (count == MM_SEG_INDEX_CAPACITY) {
             /* Over capacity.  Release what this pass took and fall back to the
-             * list, which is always correct. */
+             * list, which is always correct.
+             *
+             * Counted, because "correct" is all this path has always claimed
+             * and nothing ever checked it: the software gates run processes
+             * with 14 mappings against a capacity of 1024, so this branch had
+             * never executed anywhere.  A zero here now means the fallback is
+             * still unexercised rather than silently unexercised -- the
+             * difference is whether a reader has to take the word for it. */
+            mm_seg_index_overflow++;
             for (uint16_t i = 0; i < count; i++) {
                 mm_seg_put(mm->seg_index[i]);
                 mm->seg_index[i] = NULL;
@@ -248,7 +263,25 @@ mm_seg_t *mm_seg_find(mm_struct_t *mm, vaddr_t addr)
     size_t steps = 0;
     a20_perf_count(A20_PERF_VMA_LOOKUPS);
 
-    if (mm->seg_index_state != 1)
+    /* Rebuild only from state 0 (dirty).  The test used to be `!= 1`, which
+     * made state 2 -- capacity overflow -- re-run the whole rebuild on EVERY
+     * lookup: walk the list, take MM_SEG_INDEX_CAPACITY references, discover
+     * the overflow, put them all back, and only then fall through to the list
+     * walk the rebuild was a shortcut for.  So the over-capacity path paid a
+     * full rebuild plus the walk it was meant to replace, per fault.
+     *
+     * It is also the case that most needs the memo: an address space over
+     * MM_SEG_INDEX_CAPACITY mappings stays over it, so nothing about the retry
+     * can change the answer.  mm_seg_index_invalidate() still forces the retry
+     * (state 0), because a mutation is exactly what could bring the count back
+     * under the cap -- one rebuild attempt per mapping change instead of one
+     * per lookup.
+     *
+     * Measured on smoke-mm-seg-index-overflow, one line changed: the same
+     * workload read 10407 overflow rebuilds with `!= 1` and 2791 with `== 0`.
+     * The residue is the invalidate-per-mutation cost and is meant to be there
+     * -- those are the rebuilds that can still change the answer. */
+    if (mm->seg_index_state == 0)
         mm_seg_index_rebuild(mm);
 
     if (mm->seg_index_state == 1) {
