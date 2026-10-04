@@ -53,9 +53,15 @@ _GUEST_RE = re.compile(
 def load_guest_targets():
     """Guest name -> ELF e_machine, read out of the kernel's own table.
 
-    Only the first two columns matter here; column 3 is the translator's
-    argv[0] convention and the kernel owns it.  The comment block is
-    skipped by construction -- the regex only matches XLATOR_GUEST lines.
+    Keyed by name, not by (name, ABI): what a *build* needs to know about a
+    guest is its architecture, and both ABI rows of one architecture are
+    cross-compiled with the same toolchain.  So an architecture registered
+    for two ABIs appears twice and collapses to one entry here, which is the
+    intended answer rather than a lossy one.  Columns 3 and 4 -- the ABI and
+    the argv template -- are the kernel's business and are not read here.
+
+    The comment block is skipped by construction -- the regex only matches
+    XLATOR_GUEST lines.
     """
     try:
         text = GUESTS_DEF.read_text()

@@ -1,6 +1,6 @@
 # 实现与设计取舍
 
-面向要改这段内核代码的人。**配置怎么用见 [01-usage.md](01-usage.md)，怎么接入翻译器见 [02-integration.md](02-integration.md)**，这里只讲「为什么是这个形态」「代码在哪」「契约与不变量是什么」。
+面向要改这段内核代码的人。**配置怎么用见 [01-usage.md](01-usage.md)，怎么接入翻译器见 [02-integration.md](02-integration.md)，怎么扩展这条通道（新增 ABI、非包装器型翻译器、binfmt_misc 的借鉴与教训）见 [04-extending.md](04-extending.md)**，这里只讲「为什么是这个形态」「代码在哪」「契约与不变量是什么」。
 
 ## 1. 代码地图
 
@@ -10,7 +10,8 @@
 | `kernel/proc/xlator.c` | 启动时解析 `a20.xlator*` 键；运行期开关与 `/proc` 渲染。整个文件体包在 `#ifdef CONFIG_XLATOR` 内，**不写 `#else`** |
 | `kernel/proc/xlator_guests.def` | 唯一的 guest 注册表（X-macro，被 `xlator.c` `#include`，同时被 `tools/` 解析） |
 | `kernel/proc/exec.c` | `exec_try_translator()`：argv 改写 + env 注入 + W^X 标记 |
-| `kernel/mm/elf.c` | `elf_is_foreign_arch()`：只回答「这是一个格式合法的外来架构 ELF64」 |
+| `kernel/mm/elf.c` | `elf_probe_foreign()`：只回答「这是一个格式合法的外来架构 ELF64，且它的 ABI 是什么」 |
+| `kernel/include/mm/elf.h` | `elf_abi_t` / `elf_guest_key_t`：`match` 轴的结果类型，被 loader 与通道共用 |
 | `kernel/mm/wx.c` | `mm_wx_filter_prot()` 里对 `task_t.xlator_host` 的放行 |
 | `kernel/fs/procfs/procfs.c` | `/proc/a20/xlator` 节点的注册、0644 模式、写入处理 |
 | `kernel/main.c` | `xlator_config_init()` 的调用点，紧随 `mm_wx_policy_init()` |
@@ -24,9 +25,11 @@
 注册表（`kernel/proc/xlator_guests.def`）的当前内容：
 
 ```
-XLATOR_GUEST(x86_64,  62,  "-0 @A @P @*")
-XLATOR_GUEST(aarch64, 183, "-0 @A @P @*")
+XLATOR_GUEST(x86_64,  62,  XLATOR_ABI_LINUX, "-0 @A @P @*")
+XLATOR_GUEST(aarch64, 183, XLATOR_ABI_LINUX, "-0 @A @P @*")
 ```
+
+第三列是 ABI，它是键的一半而不只是元数据：见第 4 节。
 
 ## 2. 为什么是「就地 re-exec」，不是「转发给服务」
 
@@ -49,20 +52,53 @@ XLATOR_GUEST(aarch64, 183, "-0 @A @P @*")
 
 两者的关系是分工而非替代。边界的选择标准是**诚实**：在 guest 看到一台 Linux 机器的地方就声称人格层已经完成，是不成立的。
 
-## 4. 外来架构判定：与「坏格式」严格分开
+## 4. 外来架构判定：与「坏格式」严格分开，且读出的是**二元组**
 
 外来 machine 与文件损坏原本共用同一个 `-ENOEXEC`：`kernel/mm/elf.c` 的判定返回 bool，两种情形在 `elf_load` 里坍缩成同一个错误码。直接复用它无法区分「请翻译这个」和「这个文件坏了」，误判会让坏文件被送进翻译器。
 
-因此新增 `elf_is_foreign_arch(fd, &machine)`，**只在 `proc_exec` 的 ENOEXEC 分支按需调用**，不改动 `elf_load` 的返回值契约。它读头部并校验 magic/class/data/type/phentsize/phnum，然后：
+因此新增 `elf_probe_foreign(fd, &elf_guest_key_t *)`，**只在 `proc_exec` 的 ENOEXEC 分支按需调用**，不改动 `elf_load` 的返回值契约。它读头部、校验 magic/class/data/type/phentsize/phnum，然后：
 
 - 宿主原生 machine → 返回 `-ENOEXEC`（走原路径，不算外来）；
-- 其它 machine → 返回 0 并输出 machine，**是否真的可翻译由通道配置回答**。
+- 其它 machine → 继续扫一遍 program header，找 `PT_A20_START_INFO`，返回 0 并输出 `(e_machine, abi)`。**是否真的可翻译由通道配置回答。**
 
-这里刻意不再有一份编译期名单。早期版本在这里用 `switch` 写死 `EM_X86_64` / `EM_AARCH64`，`xlator.c` 里又用 `strcmp` 写了一遍，加上一处硬编码的计数，三处必须同步、漏一处就静默失效。现在 `elf_is_foreign_arch()` 只回答「这是一个格式合法的 ELF64，且 machine 不是本机」，「能不能翻译」交给 `xlator_lookup()`——也就是「管理员有没有为这个 machine 配过翻译器路径」。
+### 为什么输出的是二元组
 
-「损坏文件绝不会被当成待翻译」这个安全性质没有因此变弱，反而论证更直接：magic/class/data/type/phentsize/phnum 全部由头部校验把关，走到这里说明头部合法；随后 `xlator_lookup()` 在配置表里按 machine 查，`e_machine=0x9999` 这类值查不到任何条目，仍然走 `ENOEXEC`。删掉的是重复的第二份名单，不是这个性质。
+A20OS 的两种 ABI 对同一台机器是同一个 ELF64，唯一的区别是「有没有 `PT_A20_START_INFO`」。所以 `e_machine` 单独**不足以**当键，而能跑两者的翻译器是互斥的：qemu-user 只有 Linux ABI。
 
-**可翻译的架构集合是推导出来的，不是列出来的**：一个 machine 可翻译，当且仅当管理员为它配过路径。这正是「加一个架构不用改内核」的根据。
+键只有 `e_machine` 时的实测后果（riscv64 宿主，已配 `a20.xlator.x86_64=/bin/qemu-x86_64`，喂一个 `e_machine=62` 且带 `PT_A20_START_INFO` 的合法 ELF）：
+
+```
+[XLATOR] pid=14 execve /tmp/xlate_native.elf (e_machine=62 abi=native) → /bin/qemu-x86_64
+qemu-x86_64: /tmp/xlate_native.elf: Unable to find a guest_base to satisfy all guest address mapping requirements
+```
+
+qemu-user 没有崩，它退出 1。调用方拿到的是「guest 退出码 1」而不是 `ENOEXEC`——一次配置不匹配被报告成了 guest 的行为。`user/cmds/core/xlate_exec.c` 的 `native` 模式就是为了钉住这件事，`smoke-exec-xlator` 与 `smoke-exec-xlator-shim` 都断言它，且 shim 那条另外禁止 `[XLATOR] pid=` 行提到这个文件（`ENOEXEC` 本身不足以区分「键没命中」与「翻译器拒绝了它」）。
+
+### ABI 为什么是**推导**出来的，不是配置的
+
+`elf_probe_foreign()` 扫 program header 的那几行是整个设计里最需要解释的地方：`elf_load()` 早就在做同样的扫描（`PT_A20_START_INFO` → `elf_load_info_t.is_native_abi`），native 入口就是从 `ARG0` 读 `a20_start_info_t`（`kernel/proc/exec.c`）。把这个判定写在 loader 里，是因为它**本来就是**关于文件的事实——一个声称自己带 `PT_A20_START_INFO` 的镜像就是 native-ABI 程序，不管管理员配了什么。配置文件能说的话只有「谁接得住」，不是「它是什么」。
+
+带来的直接好处是：将来加一个 native-ABI 翻译器是**注册表加一行**，不是 loader 加一条分支。完整的分步说明见 [04-extending.md](04-extending.md)。
+
+扫不到 program header table 时按 Linux ABI 上报，而不是拒绝文件：那种头部本来就宣称了一张它没有的表，这是 `elf_check_header()` 那一侧的拒绝，调用方马上会走到那里；在 `elf_probe_foreign()` 里再判一次等于在不认识这个决定的地方重复它。
+
+### 这个判定只有一处实现
+
+`elf_phdrs_native()` 是「这张镜像说的是不是 A20 原生 ABI」这一个问题在内存里的**唯一**答案，三个 loader（`elf_load_from_buf()` 与 32/64 位那两条路径）都调它，`elf_probe_foreign()` 也调它。
+
+这不是洁癖。这四类读者读的是**同一张 program header table**，而它们的结论必须一致：loader 说「这是原生 ABI」而转发钩子说「这是 Linux ABI」，得到的就是一个既不按 native 入口加载、也不转发的镜像——两份扫描里任何一份写错都是这种结果，而且两边都不会报错。之前每个 loader 各扫各的，加进来第四个读表的就成了第四份可能分叉的副本。
+
+fd 那一侧（`elf_probe_foreign()`）先把整张表**一次读进内存**再交给同一个函数，而不是每个 program header 做一次 `lseek` + 56 字节 `read`：`MAX_PHDRS` 是 64，这条路径每次都会走满，而它跑在 exec 热路径上、且只对通道拒绝转发的外来镜像发生。
+
+ABI 的**名字与反查**同理也只此一份：`xlator_abi_name()` / `xlator_abi_parse()` 定义在 `kernel/proc/xlator.c`、声明在 `kernel/include/proc/xlator.h`，启动日志、`/proc` 与转发那一行共用它们。曾经 `exec.c` 里另写了一份 `key.abi == ELF_ABI_NATIVE ? "native" : "linux"`，两份映射意味着加第三个 ABI 时只有一半的日志会知道它叫什么。
+
+### 编译期名单仍然不存在
+
+早期版本在 `mm/elf.c` 用 `switch` 写死 `EM_X86_64` / `EM_AARCH64`，`xlator.c` 里又用 `strcmp` 写了一遍，加上一处硬编码的计数，三处必须同步、漏一处就静默失效。现在 `elf_probe_foreign()` 只回答「这是一个格式合法的 ELF64，且 machine 不是本机，且它的 ABI 是什么」，「能不能翻译」交给 `xlator_lookup()`——也就是「管理员有没有为这个 (machine, ABI) 配过翻译器路径」。
+
+「损坏文件绝不会被当成待翻译」这个安全性质没有因此变弱，反而论证更直接：magic/class/data/type/phentsize/phnum 全部由头部校验把关，走到这里说明头部合法；随后 `xlator_lookup()` 在配置表里按二元组查，`e_machine=0x9999` 这类值查不到任何条目，仍然走 `ENOEXEC`。删掉的是重复的第二份名单，不是这个性质。
+
+**可翻译的集合是推导出来的，不是列出来的**：一个 (machine, ABI) 可翻译，当且仅当管理员为它配过路径。这正是「加一个架构或一种 ABI 不用改内核」的根据。
 
 ## 5. 接线点
 
@@ -88,7 +124,7 @@ elf_load 失败（-ENOEXEC）
 | `void xlator_config_init(void)` | 解析 `a20.xlator*` 键。必须在 `bootargs_init()` 之后调用一次；表此后只读 |
 | `int xlator_enabled(void)` | 读一个原子量，可在 exec 热路径上从任意 CPU 调用 |
 | `void xlator_set_enabled(int on)` | 运行期开关。影响**下一次** execve；已在跑的翻译器是普通进程，有意不打断 |
-| `int xlator_lookup(uint16_t machine, xlator_desc_t *out)` | 0 = 命中；`-ENOENT` = 通道关、或该 machine 无可用条目（调用方据此回到普通 `ENOEXEC` 路径） |
+| `int xlator_lookup(const elf_guest_key_t *key, xlator_desc_t *out)` | 0 = 命中；`-ENOENT` = 通道关、或该 `(machine, ABI)` 无可用条目（调用方据此回到普通 `ENOEXEC` 路径）。按**整个二元组**匹配，见第 4 节 |
 | `int xlator_parse_template(const char *tmpl, xlator_tmpl_t *out)` | 返回 token 数；`-EINVAL` = 未知 `@` 记号或无 `@P`；`-E2BIG` = 超长或 token 过多。启动时与 exec 时各调一次 |
 | `int xlator_split_env(char *scratch, char **entries, int max)` | 就地校验并拆分 env 规格。**条目指向 `scratch`**，它必须活得比条目久；失败时拒绝整份规格而不是转发半懂的环境 |
 | `void xlator_note_forward(void)` | 只在罕见的 re-exec 路径上调用，不是每次 exec |
@@ -100,11 +136,27 @@ elf_load 失败（-ENOEXEC）
 
 `xlator_desc_t` 里三个字符串都指向启动时写好的配置表（此后不再修改），所以借用是安全的——省掉了把 256 字节模板拷进调用者缓冲区。
 
+`elf_guest_key_t` 是从 loader 借来的一个两字段结构，不是通道自己定义的类型——理由见第 4 节。它定义在 `kernel/include/mm/elf.h`，所以 `proc/xlator.h` include 了它；那条 include 不构成环（`mm/elf.h` 只拉 `core/types.h` 与 `mm/vm.h`）。
+
+注册表的 `.def` 里 ABI 列写成 `XLATOR_ABI_LINUX` / `XLATOR_ABI_NATIVE` 两个宏而不是裸文本，因为 `.def` 按约定**没有自己的 `#include`**（与 `kernel/abi/<arch>/` 下的系统调用表一样），写不了 `ELF_ABI_LINUX`。两个宏定义在 `kernel/proc/xlator.c` 里唯一同时知道两种拼写的地方；写成裸的 `linux` / `native` 会让这一列成为没有任何工具交叉核对的拼写。
+
 ### 一次 `xlator_parse_template()`，两个调用点
 
 启动时（配置校验）与 exec 时（展开）用的是同一个解析器，所以模板规则只有一处实现。这不是省事：两处实现必然漂移，而漂移的方向是「exec 路径展开出一个启动时认为非法的 argv」。
 
 `CONFIG_XLATOR=0` 时常量与类型定义仍然留在 `#if` **之外**，因为 `#else` 的 stub 引用它们。这是一处曾经踩过的坑：把类型也关进 `#if` 里会让裁剪构建报 `unknown type name 'xlator_desc_t'`。
+
+### 一个 guest 键怎么变成一个槽
+
+`a20.xlator.x86_64.native.argv=…` 到 `g_slots[slot]` 之间有三步，每步只认一件事：
+
+1. `xlator_field_of()` 先从**最后**一个点切出 `.argv` / `.env`，剩下的叫 selector。必须先切这两个：否则一个叫 `argv` 的 ABI 会赢走 `.argv` 的含义。
+2. `xlator_selector_of()` 把 selector 拆成 `(名字, ABI)`。没有点就是裸名，等于 `ELF_ABI_LINUX`；有点则点后面必须是一个 `xlator_abi_parse()` 认识的 ABI。因为 guest 名字不能含点，这个切分没有歧义。
+3. `xlator_slot_for()` 按**整个二元组**找行。
+
+第 3 步按名字找曾经是对的，因为当时一个名字只可能有一行。现在同一个架构可以有两个 ABI 行，只比名字会返回**第一个**，于是第二行永远配不上——而且不会报错：每一条指名它的命令行都会被接受，然后存进错误的槽。加这一对比较的成本是一个字段比较，省掉它换来的是一个连日志都不会提的哑行。
+
+配错时**必须区分是哪一半错了**，因为三种情况的排查方向完全不同：名字不认识（拼错了）、ABI 不认识（`linux`/`native` 之外，或者在 `.argv` 里被吃掉了一半）、名字认识但这一半没注册（一条看上去完全合理的配置，留给管理员的只有一个无从追查的 `ENOEXEC`）。这三种过去共用一句「未知外来架构」，而错得最多的那一种恰好把一个**认识**的架构报成不认识。
 
 ### 启动时解析的两处细节
 
@@ -147,6 +199,8 @@ env 注入发生在 argv 改写**安装之后**，所以它失败时 bprm 处于
 - **模板里的固定参数不能含空格或逗号。** 真要支持得给 cmdline 解析器加引号，那是一个通用解析器改动，不属于这个功能。
 - **动态链接 guest、32 位 guest、翻译器的崩溃隔离与资源计量**，均未实现。
 - **两个 guest 同时各跑一个自己的真翻译器没有测试**——仓里只有一种真翻译器。多个 guest 的并发**配置**已经跑通。
-- **AOT / 编译器型翻译器没有实现**，需要的是新机制而不是新配置项，理由见 [02-integration.md](02-integration.md#5-aot-型翻译器prism-一类尚不支持)。
+- **AOT / 编译器型翻译器没有实现**，需要的是新机制而不是新配置项，理由见 [02-integration.md](02-integration.md#5-aot-型翻译器prism-一类尚不支持)，接口上落在哪一步见 [04-extending.md](04-extending.md#5-编译器型aot翻译器需要的那一整块)。
+- **没有预留 per-guest 的 vtable。** 现在剩下的那条轴（执行模型：包装器 vs 编译器）确实不是 argv 模板能表达的，但要给它建的不是一张全 NULL 的函数指针表，而是「同步等一个进程 + 产物缓存 + 产物的权限路径 + 新的错误契约」四块机制。理由与这一步什么时候该做，见 [04-extending.md](04-extending.md#4-为什么不预留一张-vtable)。
+- **native-ABI 翻译器不存在**，所以 native-ABI 镜像一律 `ENOEXEC`。二元组键已经就位，加上它是一行注册表；为什么现在还没有，以及移植 qemu 的可行形态是什么，见 [04-extending.md](04-extending.md#3-加一个-native-abi-翻译器需要改什么)。
 - **启动时不校验翻译器文件是否存在。**
 - **一次 `smoke-exec-xlator` 超时未定位。** 首次运行该用例时超时（guest 到了 mksh 但没有命令执行），未改任何代码重跑即通过。没有复现，也没有定位。
