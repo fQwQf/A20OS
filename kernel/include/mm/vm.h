@@ -392,6 +392,12 @@ void mm_seg_index_invalidate(mm_struct_t *mm);
 /* Drop the index's owned references.  Called when the address space is torn
  * down; the invalidation path does not, because it cannot allocate. */
 void mm_seg_index_clear(mm_struct_t *mm);
+
+/* Times an address space was found over MM_SEG_INDEX_CAPACITY mappings, so
+ * mm_seg_find() used the linked list instead of the ordered index.  Printed by
+ * the MM-ASM audit; see mm_seg_index_rebuild() in mm/vma.c. */
+extern uint64_t mm_seg_index_overflow;
+
 /*
  * Mapping lifetime (MM_AS_VMA_REFCOUNT, see the comment block in mm/vma.c).
  * One refcount covers three holders: the address-space list, the ordered

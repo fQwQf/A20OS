@@ -435,6 +435,46 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-pt-race: PASS; log saved to $log',
     },
+    # The ordered-index capacity-overflow fallback in mm_seg_find().
+    #
+    # This gate exists because the branch was both untested and wrong: the
+    # rebuild was retried on every lookup while the state said "over capacity",
+    # so every fault in an address space past MM_SEG_INDEX_CAPACITY paid a full
+    # 1024-entry rebuild and then the list walk it was meant to replace.  No
+    # workload in the tree could reach the cap, so nothing noticed.
+    #
+    # The non-zero assertion is the point of the gate, not decoration.  Asserting
+    # only MM_SEG_INDEX_OVERFLOW: PASS would pass just as happily if the
+    # workload's mappings had all merged into a handful of records and the
+    # overflow branch never ran -- which is what happens unless the workload
+    # leaves an unmapped page between each pair, since vma_can_merge()
+    # coalesces adjacent equal anonymous mappings.  A green line here has to
+    # mean the branch ran.
+    'smoke-mm-seg-index-overflow': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/mm-seg-index-overflow-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress --seg-index-overflow-only', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            'MM_SEG_INDEX_OVERFLOW: PASS',
+            # Non-vacuity: the overflow branch really executed.
+            r'seg index overflow: [1-9]',
+            # And the audit still passes while over the cap -- the list-walk
+            # fallback still has to agree with the page tables about every
+            # mapping, or "it returned something" would be the only claim.
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+        ],
+        # The list walk carries a cycle detector that panics; a matching
+        # address space must never reach it.
+        'forbid': ['VMAWALK'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-mm-seg-index-overflow: PASS; log saved to $log',
+    },
     'smoke-mm-stress': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
