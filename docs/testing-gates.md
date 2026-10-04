@@ -117,13 +117,22 @@
 ```
 MMTEST: ALL STAGES PASS
 MMTEST_RESULT: PASS
-[MM-ASM] pt_pages=10 entries=3584 missing_meta=0 present=0 absent=0 prot=0 cow=0
-         vma=0 vmai=0 cls=0 safe=0 anon_virt=0 seg_slots=9 seg_bad=0 seg_kind=0
-         seg_ok=40459 seg_diff=0 seg_miss=3796
-         seg_dispatch=40459 seg_fallback=3796
+[MM-ASM] pt_pages=9 entries=3072 missing_meta=0 present=0 absent=0 prot=0 cow=0
+         vma=0 vmai=0 cls=0 safe=0 anon_virt=0 seg_slots=4 seg_bad=0 seg_kind=0
+         seg_ok=43193 seg_diff=0 seg_miss=1067
+         seg_dispatch=43193 seg_fallback=1067
+[MM-ASM]   miss why: hole=0 leaf=0 unnamed=143 extent=922 ambig=0 bottom=2
+[MM-ASM]   annot lost: table_full=0 nibbles_full=3961 full_by_level=[0,0,0]
 ```
 
 `seg_*` 是 P6 的影子比对字段（见 roadmap §13），含义与门槛各不相同：
+
+`seg_miss` 是覆盖缺口而不是缺陷：它记的是「段表答不出、回退到 VMA」的缺页。
+它走过 37626（84%）→ 3796（8.6%）→ 265（0.6%）→ 1067（2.4%），最后一次**上升**
+是 §13.15 删掉标注走查里的 provision 换来的——那个 provision 与它自己的调用点
+契约矛盾（它会为一个映射把整段区间的页表节点建出来），在只有文件映射被标注时
+负担得起，anon 一进来就无界。覆盖率换掉了它，剩下的 fallback 全部安全回退到
+VMA，`seg_diff` 始终为 0。
 
 | 字段 | 含义 | 门槛 |
 | --- | --- | --- |
@@ -135,6 +144,28 @@ MMTEST_RESULT: PASS
 | `seg_miss` | 段表答不出的缺页数（覆盖缺口，非缺陷） | 观测值 |
 | `seg_dispatch` | 实际**由段决定**的文件缺页数 | 观测值 |
 | `seg_fallback` | 回退到 VMA 的文件缺页数 | 观测值 |
+
+`seg_miss` 的成因由 `miss why` 一行给出，`seg_*` 答不出的地址全部落在 `extent`：
+条目**有**名字，但没有哪个名字的区间覆盖该地址。这不是没记上，而是记不下——
+见下面的「覆盖缺口是分辨率，不是容量」。`annot lost` 一行给出反向的证据：
+`table_full=0` 说明每个节点页的共享段数组再没满过，`nibbles_full` 说明真正顶住
+上界的是**每个条目能记几个名字**。
+
+这两个计数器是常驻的，不是临时诊断。它们推翻过一个错误诊断：残余 `seg_miss`
+曾被归因为「条目名字不够」，而 `nibbles_full` 实测是 **0**，`table_full` 却是
+**7132**——顶住上界的是被 512 个条目共享的那个段数组。从那以后每次调容量都是
+照着这两个数字，而不是照着 frame 算术（算术从头到尾指错了限额）。
+
+### 覆盖缺口是分辨率，不是容量
+
+Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上是**以 2 MiB 分辨率**
+命名。一个 2 MiB 条目里若有超过 7 个不同映射，它就无法说明哪个是哪个；
+`mm_pt_lookup_seg()` 此时拒绝作答，而不是猜一个。剩下的 ~265 次缺页回退就是这个
+分辨率上限，不是缺陷，也不是再调大常数能消掉的——`idx[]` 是 512 项、住在同一个
+order-0 frame 里，7 项/条目是 3592 字节，8 项就是 4104，已经越界。
+
+要继续缩小这个缺口，只能提高分辨率（给叶子命名）或把索引挪出 frame，而不是把
+7 改大。
 
 `seg_diff=0` 与 `seg_ok>0` 必须同时成立：前者说明段没有骗人，后者说明它确实在
 被使用。只满足前者（`seg_ok=0`）是空转，门禁会照常变绿——所以 `seg_slots` 与
