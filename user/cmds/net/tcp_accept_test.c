@@ -34,7 +34,12 @@
 /* Long enough that a loaded 4-core guest does not trip it, short enough that a
  * wedged handshake fails the gate in tens of seconds rather than minutes. */
 #define IO_TIMEOUT_SEC 5
-#define CONNECT_BUDGET_MS 4000
+/* Retry budget in microseconds.  The unit has to match the step the loop below
+ * accumulates: `waited` grows by CONNECT_RETRY_US, so comparing it against a
+ * millisecond bound ends the loop after a single attempt.  One attempt races
+ * the forked server's bind()+listen(), which is what makes a healthy fast-mode
+ * listener look intermittently broken. */
+#define CONNECT_BUDGET_US 4000000
 #define CONNECT_RETRY_US 20000
 
 static int arm_timeout(int fd)
@@ -93,7 +98,7 @@ static int client(void)
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(test_port);
 
-    for (int waited = 0; waited < CONNECT_BUDGET_MS; waited += CONNECT_RETRY_US) {
+    for (int waited = 0; waited < CONNECT_BUDGET_US; waited += CONNECT_RETRY_US) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0)
             return -1;
