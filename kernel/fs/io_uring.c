@@ -71,6 +71,13 @@ typedef struct io_uring_cqe {
     uint32_t flags;
 } io_uring_cqe_t;
 
+/* Linux bounds one read/write to MAX_RW_COUNT (INT_MAX rounded down to a page
+ * boundary).  sqe->len is an unchecked user uint32, and the executor stages
+ * the whole transfer in a single kmalloc, so an unbounded value would let
+ * userspace ask the slab for 4 GiB.  Clamping to MAX_RW_COUNT keeps the
+ * Linux short-read behaviour and caps the allocation. */
+#define IORING_MAX_RW_COUNT ((size_t)0x7ffff000)
+
 typedef struct io_uring_ring {
     pfn_t sq_pfn;
     pfn_t cq_pfn;
@@ -82,7 +89,14 @@ typedef struct io_uring_ring {
     unsigned cq_head;
     unsigned cq_tail;
     spinlock_t lock;
-    int eventfd_fd;             /* registered notification fd, -1 = none */
+    /* Registered notification target.  The ring holds a vfile reference
+     * rather than the descriptor number it was registered under: the number
+     * can be closed and reused while completions are still landing, and
+     * re-resolving it then signals an unrelated file.  eventfd_fd is kept
+     * only to charge the envelope budget of the descriptor the caller chose.
+     */
+    vfile_t *eventfd;
+    int eventfd_fd;
 } io_uring_ring_t;
 
 static io_uring_ring_t *g_rings[IORING_MAX_RINGS];
@@ -111,6 +125,13 @@ static int io_uring_close(vfile_t *vf)
         }
         frame_put(ring->sq_pfn);
         frame_put(ring->cq_pfn);
+        vfile_t *evf;
+        spin_lock(&ring->lock);
+        evf = ring->eventfd;
+        ring->eventfd = NULL;
+        spin_unlock(&ring->lock);
+        if (evf)
+            vfs_put_file(evf);
         kfree(ring);
         vf->priv = NULL;
     }
@@ -267,22 +288,24 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
             cqe->res = (int32_t)gfd;
             return gfd;
         }
+        size_t n = sqe->len;
+        if (n > IORING_MAX_RW_COUNT)
+            n = IORING_MAX_RW_COUNT;
+        if (n == 0) {
+            cqe->res = 0;
+            return 0;
+        }
         /* Execution-point mediation (docs/research/05 §2.5.2): io_uring
          * ops bypass the read/write syscalls, so the budget is charged
          * where the authority is consumed, per SQE. */
         if (env_active(proc_current())) {
-            int mr = env_mediate_use_dir((int)gfd, sqe->len, 0);
+            int mr = env_mediate_use_dir((int)gfd, n, 0);
             if (mr) {
                 cqe->res = mr;
                 return mr;
             }
         }
-        size_t n = sqe->len;
-        if (n == 0) {
-            cqe->res = 0;
-            return 0;
-        }
-        void *kbuf = kmalloc(n ? n : 1);
+        void *kbuf = kmalloc(n);
         if (!kbuf) {
             cqe->res = -ENOMEM;
             return -ENOMEM;
@@ -323,6 +346,8 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
             return gfd;
         }
         size_t n = sqe->len;
+        if (n > IORING_MAX_RW_COUNT)
+            n = IORING_MAX_RW_COUNT;
         if (n == 0) {
             cqe->res = 0;
             return 0;
@@ -334,7 +359,7 @@ static long io_uring_execute_sqe(io_uring_sqe_t *sqe, io_uring_cqe_t *cqe)
                 return mr;
             }
         }
-        void *kbuf = kmalloc(n ? n : 1);
+        void *kbuf = kmalloc(n);
         if (!kbuf) {
             cqe->res = -ENOMEM;
             return -ENOMEM;
@@ -413,21 +438,30 @@ long io_uring_enter(int gfd, unsigned to_submit, unsigned min_complete,
     }
 
     /* IORING_REGISTER_EVENTFD: notify the registered eventfd once when new
-     * completions land, so userland can wake on the fd instead of polling. */
-    if (processed > 0 && ring->eventfd_fd >= 0) {
-        int64_t egfd = fdtable_get_current(ring->eventfd_fd);
-        if (egfd >= 0) {
-            vfile_t *evf = vfs_get_file_ref((int)egfd);
-            if (evf) {
-                if (eventfd_vfile_is(evf)) {
-                    uint64_t one = 1;
-                    if (!env_active(proc_current()) ||
+     * completions land, so userland can wake on the fd instead of polling.
+     * The vfile reference is pinned under ring->lock and the write happens
+     * with it dropped, because vfs_write_file() may block. */
+    if (processed > 0) {
+        spin_lock(&ring->lock);
+        vfile_t *evf = ring->eventfd;
+        int evfd = ring->eventfd_fd;
+        if (evf)
+            vfile_get(evf);
+        spin_unlock(&ring->lock);
+        if (evf) {
+            if (eventfd_vfile_is(evf)) {
+                uint64_t one = 1;
+                if (!env_active(proc_current())) {
+                    (void)vfs_write_file(evf, (const char *)&one, sizeof(one));
+                } else {
+                    int64_t egfd = fdtable_get_current(evfd);
+                    if (egfd >= 0 &&
                         env_mediate_use_dir((int)egfd, sizeof(one), 1) == 0)
                         (void)vfs_write_file(evf, (const char *)&one,
                                              sizeof(one));
                 }
-                vfs_put_file_ref((int)egfd, evf);
             }
+            vfs_put_file(evf);
         }
     }
     return processed;
@@ -470,8 +504,15 @@ int io_uring_register(int gfd, unsigned opcode, const void *arg,
             vfs_put_file_ref(gfd, vf);
             return -EINVAL;
         }
-        vfs_put_file_ref((int)efd, evf);
+        /* Hand the reference taken above to the ring: the descriptor may be
+         * closed and its number reused long before the completions land. */
+        spin_lock(&ring->lock);
+        vfile_t *old = ring->eventfd;
+        ring->eventfd = evf;
         ring->eventfd_fd = eventfd_fd;
+        spin_unlock(&ring->lock);
+        if (old)
+            vfs_put_file(old);
         vfs_put_file_ref(gfd, vf);
         return 0;
     }
