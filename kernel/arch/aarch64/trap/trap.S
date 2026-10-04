@@ -252,17 +252,15 @@ __trap_from_kernel:
     ldr     x3, [x2, #SP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
 #ifndef CONFIG_NOMMU
-    /* Returning to the same translation regime cannot have left anything
-     * stale behind, so only an actual TTBR0 change earns the invalidation. */
-    mrs     x10, ttbr0_el1
-    cmp     x9, x10
-    b.eq    .Lttbr0_unchanged_k
+    /* The invalidation is unconditional.  The trap handler can fault a page
+     * in and install the translation into the *current* address space, so an
+     * unchanged TTBR0 does not mean an unchanged mapping: skipping tlbi here
+     * left the faulting VA unmapped and the next touch page-faulted again. */
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
-.Lttbr0_unchanged_k:
 #endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
@@ -334,15 +332,15 @@ user_trap_return:
     ldr     x4, [x2, #KSP_OFF]
     ldr     x9, [x2, #TTBR0_OFF]
 #ifndef CONFIG_NOMMU
-    mrs     x10, ttbr0_el1
-    cmp     x9, x10
-    b.eq    .Lttbr0_unchanged_u
+    /* Unconditional for the same reason as __trap_from_kernel above: a
+     * page fault handled since the last return installed a translation into
+     * whichever address space this frame names, and only tlbi makes it
+     * visible. */
     msr     ttbr0_el1, x9
     dsb     ishst
     tlbi    vmalle1
     dsb     ish
     isb
-.Lttbr0_unchanged_u:
 #endif
     ldr     x9, [x2, #ELR_OFF]
     msr     elr_el1, x9
