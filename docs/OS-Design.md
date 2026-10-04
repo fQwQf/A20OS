@@ -117,7 +117,7 @@ Native ABI 的内存对象接口围绕两个核心抽象：
 * **VMO**（`kernel/mm/vmo.c`）：物理页容器，可 resize、共享、按页 fault。
 * **VMAR**（`kernel/abi/native/vmar.c`）：进程地址空间中的连续区域，维护自身的映射与保护规则（`mm_mmap_vmo`/`mm_munmap`/`mm_mprotect` 的薄包装）。
 
-`mm_struct` 用一把 per-process 自旋锁保护 VMA。Fork 使用写时复制（COW）：`mm_fork_clone_present_level()` 建立只读 COW 映射，写操作触发缺页后内核分配新页并复制内容。`mm_demote_huge_page()` 在 fork 或 OOM 需要回收已映射的 2 MiB 大页时，将其拆分为 4 KiB 页，同时持有 `mm->lock` 避免并发缺页竞态。
+`mm_struct` 用一把 per-process 自旋锁保护映射记录链表（`mm->mmap`，记录类型 `mm_seg_t`）。Fork 使用写时复制（COW）：`mm_fork_clone_present_level()` 建立只读 COW 映射，写操作触发缺页后内核分配新页并复制内容。`mm_demote_huge_page()` 在 fork 或 OOM 需要回收已映射的 2 MiB 大页时，将其拆分为 4 KiB 页，同时持有 `mm->lock` 避免并发缺页竞态。
 
 `MAP_SHARED` 一致性由 `kernel/fs/page_cache.c` 的页缓存统一处理，包含 dirty-page/writeback 生命周期，并在页面逐出路径中插入内存屏障。
 

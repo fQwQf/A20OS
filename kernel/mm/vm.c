@@ -462,7 +462,7 @@ int mm_demote_huge_page(mm_struct_t *mm, vaddr_t addr) {
 }
 
 
-static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, vm_area_t *vma) {
+static __attribute__((unused)) int mm_populate_shared_range(mm_struct_t *mm, mm_seg_t *vma) {
     if ((vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED)) {
         vfile_t *vf = vfs_get_file_ref(vma->file_fd);
         if (!vf)
@@ -577,10 +577,15 @@ void mm_destroy(mm_struct_t *mm) {
      * each VMA's own pages.  free_vma_pages() lives in mm/vma.c; the split
      * keeps the cold teardown path out of the hot map/unmap code. */
     mm_vma_flush_deferred(mm);
-    vm_area_t *vma = mm->mmap;
+    /* The segment index holds OWNED references.  Drop them before the VMA
+     * walk below, because vma_put() -> vma_release() -> mm_seg_put() ends the
+     * last other reference to each segment; doing it in the other order would
+     * put segments the index is still pointing at. */
+    mm_seg_index_clear(mm);
+    mm_seg_t *vma = mm->mmap;
     while (vma) {
         free_vma_pages(mm, vma);
-        vm_area_t *next = vma->next;
+        mm_seg_t *next = vma->next;
         vma_put(mm, vma);
         vma = next;
     }
@@ -629,21 +634,26 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     if (!child_pgdir) { kfree(child); return NULL; }
     pt_map_kernel(child_pgdir);
 
-    vm_area_t *vma_pool = NULL;
+    mm_seg_t *vma_pool = NULL;
     size_t vma_capacity = 0;
     uint64_t parent_flags = 0;
     for (;;) {
         mm_tlb_invalidate_begin(parent);
         parent_flags = spin_lock_irqsave(&parent->lock);
         size_t needed = 0;
-        for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+        for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
             if (!(pv->vm_flags & VM_DONTFORK))
                 needed++;
         }
         spin_unlock_irqrestore(&parent->lock, parent_flags);
 
         while (vma_capacity < needed) {
-            vm_area_t *node = kcalloc(1, sizeof(vm_area_t));
+            /* Staging only: every slot is overwritten by the struct copy
+             * below before it is linked, so this one does not need the
+             * constructor's bookkeeping -- but it does need the same
+             * allocator, or a pooled record would be a different size class
+             * from the ones mm_seg_new() hands out. */
+            mm_seg_t *node = kcalloc(1, sizeof(mm_seg_t));
             if (!node) {
                 while (vma_pool) {
                     node = vma_pool->next;
@@ -663,7 +673,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
 
         parent_flags = spin_lock_irqsave(&parent->lock);
         needed = 0;
-        for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+        for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
             if (!(pv->vm_flags & VM_DONTFORK))
                 needed++;
         }
@@ -674,11 +684,15 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     }
 
     *child = *parent;
-    /* The copied index points at the parent's VMA nodes.  Child metadata is
-     * cloned into distinct nodes below, so force a lazy rebuild on first use. */
-    child->vma_index_state = 0;
-    child->vma_index_count = 0;
-    memset(child->vma_index, 0, sizeof(child->vma_index));
+    /* The copied index points at the parent's mapping records, and this is a
+     * use-after-free rather than a stale-pointer question: `*child = *parent`
+     * copied an array of OWNED references, so without dropping it the child
+     * would release references it never took -- freeing mappings the parent is
+     * still using, from two addresses that both believe they own them.  The
+     * child's own entries are rebuilt lazily on first use. */
+    child->seg_index_state = 0;
+    child->seg_index_count = 0;
+    memset(child->seg_index, 0, sizeof(child->seg_index));
     spin_init(&child->lock);
     spin_set_debug(&child->lock, "mm", child);
     spin_init(&child->vma_ref_lock);
@@ -715,30 +729,19 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     child->pgdir = child_pgdir;
 
     // Copy every VMA
-    vm_area_t **tail = &child->mmap;
-    vm_area_t *prev = NULL;
-    for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+    mm_seg_t **tail = &child->mmap;
+    mm_seg_t *prev = NULL;
+    for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & VM_DONTFORK)
             continue;
-        vm_area_t *cv = vma_pool;
+        mm_seg_t *cv = vma_pool;
         vma_pool = vma_pool->next;
         vma_capacity--;
         *cv = *pv;
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-        /* `seg` is an owned reference, and the struct copy copied the pointer
-         * without taking one -- so parent and child would each drop the same
-         * segment and free it while the other's page tables still named it.
-         * Sharing is the right relationship (both address spaces describe the
-         * same file), so take the reference the copy skipped. */
-        cv->seg = pv->seg ? mm_seg_get(pv->seg) : NULL;
-#endif
         refcount_set(&cv->refcount, 1);
         cv->vm_flags &= ~VM_LOCKED;
         if (vma_ref_fork(cv) < 0) {
             vma_release_file(cv);
-#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
-            mm_seg_put(cv->seg);
-#endif
             kfree(cv);
             goto fail_locked;
         }
@@ -751,7 +754,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     }
 
     /* parent->lock covers both the VMA snapshot and the page-table clone. */
-    for (vm_area_t *pv = parent->mmap; pv; pv = pv->next) {
+    for (mm_seg_t *pv = parent->mmap; pv; pv = pv->next) {
         if (pv->vm_flags & (VM_DONTFORK | VM_WIPEONFORK))
             continue;
         if (pv->vm_flags & VM_VMO) {
@@ -804,7 +807,7 @@ mm_struct_t *mm_fork(mm_struct_t *parent) {
     spin_unlock_irqrestore(&parent->lock, parent_flags);
 
     while (vma_pool) {
-        vm_area_t *next = vma_pool->next;
+        mm_seg_t *next = vma_pool->next;
         kfree(vma_pool);
         vma_pool = next;
     }
@@ -815,7 +818,7 @@ fail_locked:
     spin_unlock_irqrestore(&parent->lock, parent_flags);
     mm_tlb_invalidate_finish(parent);
     while (vma_pool) {
-        vm_area_t *next = vma_pool->next;
+        mm_seg_t *next = vma_pool->next;
         kfree(vma_pool);
         vma_pool = next;
     }

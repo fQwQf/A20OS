@@ -133,13 +133,12 @@ static int io_uring_map_page(mm_struct_t *mm, pfn_t pfn, uint64_t *va_out)
         return -ENOMEM;
     frame_get(pfn);
 
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) {
         pt_unmap(mm, addr);
         frame_put(pfn);
         return -ENOMEM;
     }
-    refcount_set(&vma->refcount, 1);
     vma->start = addr;
     vma->end = addr + PAGE_SIZE;
     vma->vm_flags = VM_SHARED | VM_READ | VM_WRITE;

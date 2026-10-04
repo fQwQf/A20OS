@@ -81,6 +81,20 @@ AUDIT_FIELDS = [
 NOT_A_MISMATCH = ("pt_pages", "entries", "anon_virt", "seg_slots",
                   "seg_ok", "seg_miss", "seg_dispatch", "seg_fallback")
 
+# The mapping-record list invariant, printed as its own line.  It replaced the
+# `seg extent` / `idx_agree` / `idx_diff` counters, whose subject -- "do the
+# mapping list and the segment list agree" -- stopped existing once the two
+# representations were merged into one record (roadmap 13.18).
+#
+# Parsed for the same reason AUDIT_RE is: a counter the kernel computes and
+# prints but the gate never reads is decoration.  `overlap` is what the binary
+# search in mm_seg_find() silently depends on -- an unsorted list answers
+# "which mapping is this?" with a neighbour's -- and `dead` is the
+# use-after-free that the lock-model gate once caught as magic=0x0.
+MAPLIST_RE = re.compile(
+    r"\[MM-ASM\]\s+map list: entries=(\d+) overlap=(\d+) dead=(\d+) ok=(\d+)"
+)
+
 
 def log(msg: str) -> None:
     print(f"[mmtest] {msg}", flush=True)
@@ -211,9 +225,36 @@ def verdict(log_path: str) -> int:
                     f"{counts['seg_miss']} uncovered, "
                     f"{counts['seg_diff']} disagreed "
                     f"({counts['seg_slots']} annotated node entries); "
-                    f"dispatch took the segment {counts['seg_dispatch']} "
-                    f"times and fell back to the VMA "
+                    f"dispatch took the page-table name "
+                    f"{counts['seg_dispatch']} "
+                    f"times and fell back to the mapping list "
                     f"{counts['seg_fallback']}")
+
+    ml = MAPLIST_RE.search(text)
+    if not ml:
+        # Same reasoning as the missing [MM-ASM] line above: the invariant this
+        # check exists for did not run, so it has not been passed.
+        ok = False
+        log("map list: NO LINE -- the mapping-record list was never walked, so "
+            "the single-lookup precondition was not verified.")
+    else:
+        entries, overlap, dead, passed = (int(g) for g in ml.groups())
+        if overlap or dead or passed != entries:
+            ok = False
+            log(f"map list: BROKEN entries={entries} overlap={overlap} "
+                f"dead={dead} ok={passed}")
+            if overlap:
+                log("  the list is not sorted by start, so mm_seg_find()'s "
+                    "binary search can answer with a neighbouring mapping")
+            if dead:
+                log("  a record lost its magic or has an inverted extent "
+                    "(use-after-free)")
+            if passed != entries:
+                log(f"  {entries - passed} record(s) failed the list "
+                    "invariant check")
+        else:
+            log(f"map list: clean ({entries} mapping records, sorted, live, "
+                "no overlap)")
 
     log("PASS" if ok else "FAIL")
     return 0 if ok else 1

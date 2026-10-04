@@ -54,178 +54,86 @@ static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
  */
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
-static void seg_release_file(mm_seg_t *s)
-{
-    if (s->vnode)
-        vnode_put(s->vnode);
-}
-
-static void seg_release_vmo(mm_seg_t *s)
-{
-    if (s->vmo)
-        vmo_release(s->vmo);
-}
-
-/* Build a segment describing [start, end) of `kind`, or NULL.  The caller owns
- * the returned reference. */
-static mm_seg_t *mm_seg_build(int kind, vaddr_t start, vaddr_t end, int fd,
-                              uint64_t offset, uint64_t flags,
-                              vnode_t *vnode, struct vmo *vmo)
-{
-    if (end <= start)
-        return NULL;
-    mm_seg_t *s = mm_seg_alloc();
-    if (!s)
-        return NULL;
-    s->kind    = (uint8_t)kind;
-    s->shared  = (flags & VM_SHARED) ? 1 : 0;
-    s->fd      = fd;
-    s->base_va = start;
-    s->len     = end - start;
-    s->offset  = offset;
-    s->flags   = flags;
-    s->vnode   = vnode;
-    s->vmo     = vmo;
-    s->release = (kind == MM_SEG_VMO) ? seg_release_vmo : seg_release_file;
-    if (vnode)
-        vnode_get(vnode);            /* the segment's own reference */
-    if (vmo)
-        vmo_ref(vmo);
-    return s;
-}
-
-/* Install (or rebuild) the VMA's segment, and label whatever page-table path
- * already exists.  Caller holds mm->lock. */
-static void vma_seg_set(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
-                        vaddr_t end)
-{
-    /* Anonymous mappings get a segment too (MM_SEG_ANON).  Until now this
-     * function classified everything as VMO or FILE because it was only ever
-     * called for mappings that had VM_VMO or VM_FILE, so the segment set was
-     * never the full set of mappings -- heap, stack and anonymous mmap were
-     * simply absent from it.  An ordered index over segments cannot answer
-     * "is [start,end) covered?" while half the address space is missing, so
-     * the anon case has to be representable before that index means
-     * anything. */
-    int is_vmo = (vma->vm_flags & VM_VMO) != 0;
-    int is_file = (vma->vm_flags & VM_FILE) != 0;
-    int kind = is_vmo ? MM_SEG_VMO : (is_file ? MM_SEG_FILE : MM_SEG_ANON);
-    uint64_t base_off = is_vmo ? vma->vmo_offset : vma->file_offset;
-    mm_seg_t *s = mm_seg_build(kind, start, end,
-                               is_vmo ? -1 : vma->file_fd,
-                               base_off + (start - vma->start),
-                               vma->vm_flags,
-                               is_vmo ? NULL : vma->file_vnode,
-                               is_vmo ? vma->vmo : NULL);
-    if (!s)
-        return;
-    /* The policy half of the mapping.  mm_seg_build() cannot see these --
-     * it is handed the backing object, not the VMA -- so they are stamped on
-     * the segment that actually goes into the page table.  Everything else
-     * about this VMA is now reachable from the segment alone. */
-    s->vmar_cap    = vma->vmar_cap;
-    s->sysv_shmid  = vma->sysv_shmid;
-    mm_seg_put(vma->seg);            /* the old one, if any */
-    vma->seg = s;
-    (void)mm_pt_annotate_seg(mm, start, end, s);
-}
-
-void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma)
-{
-    if (!mm || !vma || vma->end <= vma->start)
-        return;
-    /* Anonymous mappings do NOT get a node-entry index.  They are not
-     * dispatched from -- the dispatcher claims MM_SEG_FILE only -- and a node
-     * entry is 2 MiB holding at most MM_SEGTAB_NAMES mappings, so letting anon
-     * into that shared budget spends names nothing reads on evictions.  With
-     * anon annotated unconditionally the gate measured table_full=42384,
-     * nibbles_full=47965 and seg_miss 1572 (3.6%), against 265 (0.6%) without.
-     *
-     * Anon's segment still has to exist for the segment set to be the full set
-     * of mappings; that is the ordered index's job (roadmap 13.14), not this
-     * one's.  See mm_mmap_seg_label() for why it is safe to skip here. */
-    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
-        return;
-    vma_seg_set(mm, vma, vma->start, vma->end);
-}
-
-/* Re-apply the VMA's segment to the page-table path.
+/* Whether this mapping's name belongs in the node-entry index.
  *
- * This is the piece the first version was missing, and the shadow measurement
- * is what found it.  mmap does not create any page-table path -- the path is
- * built lazily by the first fault -- so annotating inside the mmap call
- * labelled nothing: the walk descends only into nodes that exist, and at that
- * moment none of them did.  Measured on the real-software gate: seg_ok=6532,
- * seg_miss=37626, i.e. the segment table answered 15% of file faults.
+ * Annotating is about the 2 MiB node-entry table, which is a dispatch cache:
+ * it is only read for MM_SEG_FILE, and a node entry holds at most
+ * MM_SEGTAB_NAMES names, so spending those on mappings nothing dispatches
+ * from evicts the ones that are used.  With anon annotated unconditionally the
+ * gate measured table_full=42384, nibbles_full=47965 and seg_miss 1572 (3.6%),
+ * against 265 (0.6%) without.
  *
- * So it is applied again after a fault has built part of the path.  Coverage
- * converges as the mapping is touched, and every call is one walk of the
- * mapping's own path, which is short.
- */
-void mm_mmap_seg_label(mm_struct_t *mm, vm_area_t *vma)
+ * An earlier version of this file guarded on VM_VMO|VM_FILE and, because the
+ * segment was built behind the same guard, skipped BUILDING as well.  That
+ * measured as 10 of 14 mappings in the gate's own process having no segment at
+ * all -- heap, stack and brk among them -- which is exactly the hole an ordered
+ * index over segments cannot tolerate.  The two decisions are now separate, and
+ * building one is not a decision at all: every mapping is a segment. */
+static int seg_dispatchable(const mm_seg_t *m)
 {
-    if (!mm || !vma || !vma->seg || vma->end <= vma->start)
-        return;
-    (void)mm_pt_annotate_seg(mm, vma->start, vma->end, vma->seg);
+    return (m->vm_flags & (VM_VMO | VM_FILE)) != 0;
 }
 
-void mm_mmap_seg_unannotate(mm_struct_t *mm, vaddr_t start, vaddr_t end,
-                            mm_seg_t *only)
+/* Name [start, end) of @m in whatever page-table path already exists.
+ *
+ * Caller holds mm->lock.  Best effort: a range that cannot be named is left
+ * unannotated, and an unannotated range behaves exactly as it did before the
+ * segment table existed.
+ *
+ * The extent is a parameter rather than read off @m because the callers that
+ * change a mapping's bounds have already changed them by the time they get
+ * here, and the node entries must be told what the mapping named BEFORE as
+ * well as after.  That is what mm_mmap_seg_retire() is for. */
+void mm_mmap_seg_annotate(mm_struct_t *mm, mm_seg_t *m, vaddr_t start,
+                          vaddr_t end)
 {
-    if (!mm || end <= start)
+    if (!mm || !m || end <= start || !seg_dispatchable(m))
         return;
-    mm_pt_unannotate_seg(mm, start, end, only);
+    (void)mm_pt_annotate_seg(mm, start, end, m);
 }
 
-/* Rebuild after a split moved a boundary.  The tail has a different offset and
- * therefore needs its own segment; addresses in the node entry that straddles
- * the boundary keep whichever name covers them, and lookup tells the two apart
- * by extent -- see "Entry index packing" in mm/pt.c. */
-void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
-                            vaddr_t end)
+/* Stop naming [start, end) as @m.  The mirror of the above, and the reason the
+ * extent is passed in: a split narrows the mapping, and the half that was cut
+ * away must stop being named too.
+ *
+ * Passing the mapping's own bounds here instead left the CUT-AWAY part still
+ * named.  That part is exactly the range the unmap just freed, so a later
+ * mapping landing there resolved to the mapping that used to be there.  The
+ * gate's shadow check reported anonymous mappings shadowing file mappings of
+ * the identical one-page extent, and git died with SIGSEGV.  The leak was in
+ * all three split branches and predates them. */
+void mm_mmap_seg_retire(mm_struct_t *mm, mm_seg_t *m, vaddr_t start, vaddr_t end)
 {
-    if (!mm || !vma || end <= start)
+    if (!mm || !m || end <= start)
         return;
-    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))  /* anon: see mm_mmap_seg_annotate */
+    mm_pt_unannotate_seg(mm, start, end, m);
+}
+
+/* Re-apply after a fault has built part of the page-table path.
+ *
+ * mmap does not create any page-table path -- the path is built lazily by the
+ * first fault -- so annotating inside the mmap call labelled nothing: the walk
+ * descends only into nodes that exist, and at that moment none of them did.
+ * Measured on the real-software gate: seg_ok=6532, seg_miss=37626, i.e. the
+ * segment table answered 15% of file faults.
+ *
+ * Coverage therefore converges as the mapping is touched, and every call is one
+ * walk of the mapping's own path, which is short. */
+void mm_mmap_seg_label(mm_struct_t *mm, mm_seg_t *m)
+{
+    if (!m)
         return;
-    /* No VM_VMO|VM_FILE guard any more: anonymous mappings carry a segment
-     * too, and a split has to be able to re-annotate one.  Leaving the guard
-     * in would make a split of an anonymous mapping leave its old segment's
-     * name on the page table with nothing to replace it -- the range would
-     * keep resolving to the pre-split extent. */
-    /* Retire the old segment's name over the range IT named, not over the VMA's
-     * range.  The VMA's range has already been narrowed by the caller before
-     * this is reached -- a head cut has moved vma->start, a tail cut has moved
-     * vma->end, a middle cut has done both -- so passing vma->start/end here
-     * left the CUT-AWAY part still named by the old segment.  That part is
-     * exactly the range the unmap just freed, and the old segment's recorded
-     * extent still covers it, which is the one thing mm_pt_lookup_seg() trusts.
-     *
-     * So a later mapping landing there resolved to the segment of the mapping
-     * that used to be there.  Measured: the gate's shadow check reported
-     * anonymous segments shadowing file mappings of the identical one-page
-     * extent, and git died with SIGSEGV.  Anonymous mappings made it common
-     * because heap and brk are split constantly, but the leak was in all
-     * three split branches and predates them.
-     *
-     * The segment's own base_va/len is the authority for what it named, and it
-     * does not change when the VMA's bounds do. */
-    mm_seg_t *old = vma->seg;
-    if (old)
-        mm_mmap_seg_unannotate(mm, old->base_va, old->base_va + old->len, old);
-    vma_seg_set(mm, vma, start, end);
+    mm_mmap_seg_annotate(mm, m, m->start, m->end);
 }
 
 #else /* !ARCH_HAS_PGTABLE_OPS || CONFIG_NOMMU */
 
-void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma) { (void)mm; (void)vma; }
-void mm_mmap_seg_label(mm_struct_t *mm, vm_area_t *vma) { (void)mm; (void)vma; }
-void mm_mmap_seg_unannotate(mm_struct_t *mm, vaddr_t start, vaddr_t end,
-                            mm_seg_t *only)
-{ (void)mm; (void)start; (void)end; (void)only; }
-void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
-                            vaddr_t end)
-{ (void)mm; (void)vma; (void)start; (void)end; }
+void mm_mmap_seg_annotate(mm_struct_t *mm, mm_seg_t *m, vaddr_t start,
+                          vaddr_t end)
+{ (void)mm; (void)m; (void)start; (void)end; }
+void mm_mmap_seg_retire(mm_struct_t *mm, mm_seg_t *m, vaddr_t start, vaddr_t end)
+{ (void)mm; (void)m; (void)start; (void)end; }
+void mm_mmap_seg_label(mm_struct_t *mm, mm_seg_t *m) { (void)mm; (void)m; }
 
 #endif
 
@@ -249,7 +157,7 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
             continue;
         mm_struct_t *mm = t->mm;
         spin_lock(&mm->lock);
-        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_SHARED) || !(vma->vm_flags & VM_FILE))
                 continue;
             if (vma->file_vnode != vn)
@@ -261,7 +169,7 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
                     continue;
                 }
                 int dirty = leaf.dirty;
-                uint64_t idx = vma->file_offset + (va - vma->start);
+                uint64_t idx = vma->backing_offset + (va - vma->start);
                 idx /= PAGE_SIZE;
                 va = leaf.base + leaf.size;
                 if (!dirty)
@@ -341,14 +249,13 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         return (vaddr_t)-ENOMEM;
 #endif
 
-    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) {
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
 #endif
         return (vaddr_t)-ENOMEM;
     }
-    refcount_set(&vma->refcount, 1);
     vma->start     = addr;
     vma->end       = addr + len;
     vma->vm_flags  = vmf;
@@ -371,13 +278,10 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
-    /* Annotate here, where the mapping is published.  The shm and vmo helpers
-     * below both do this and the main mmap path did not -- so every mapping
-     * made by an ordinary mmap() was named only by whichever fault happened
-     * to touch it first, and one that was never faulted stayed unnamed for
-     * good.  With provisioning in mm_pt_annotate_seg() this labels the whole
-     * extent at once. */
-    mm_mmap_seg_annotate(mm, vma);
+    /* No mm_mmap_seg_annotate() here: mm_insert_vma() builds the segment for
+     * whichever mapping survives its merges, which is the only one whose
+     * extent is final.  Annotating `vma` at this point could name a mapping
+     * that the insert just merged away. */
 
     /*
      * CortenMM on-demand paging (paper SS4.3): record the reservation per PTE
@@ -472,7 +376,7 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (flags & MAP_SHARED) vmf |= VM_SHARED;
     if (flags & MAP_HUGETLB) vmf |= VM_HUGEPAGE;
 
-    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) {
 #ifdef CONFIG_NOMMU
         kfree(nommu_raw);
@@ -480,14 +384,13 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         vfs_close(file_fd);
         return (vaddr_t)-ENOMEM;
     }
-    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
     vma->pte_flags   = mm_prot_to_pte_flags(prot);
     vma->vmar_cap    = (uint32_t)prot;
     vma->file_fd     = file_fd;
-    vma->file_offset = file_offset;
+    vma->backing_offset = file_offset;
 #ifdef CONFIG_NOMMU
     vma->nommu_alloc = nommu_raw;
 #endif
@@ -523,7 +426,6 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
-    mm_mmap_seg_annotate(mm, vma);
     return addr;
 }
 
@@ -562,7 +464,7 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         if (mr < 0)
             return (vaddr_t)mr;
     } else if (addr != 0) {
-        vm_area_t *existing = mm_find_vma(mm, addr);
+        mm_seg_t *existing = mm_seg_find(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
             addr = 0;
     }
@@ -584,10 +486,9 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vmf |= VM_EXEC;
     if (flags & MAP_SHARED) vmf |= VM_SHARED;
 
-    vm_area_t *vma = kcalloc_atomic(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma)
         return (vaddr_t)-ENOMEM;
-    refcount_set(&vma->refcount, 1);
     vma->start       = addr;
     vma->end         = addr + len;
     vma->vm_flags    = vmf;
@@ -595,12 +496,11 @@ vaddr_t mm_mmap_vmo_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     vma->vmar_cap    = (uint32_t)prot;   /* Native VMAR capability at creation */
     vma->file_fd     = -1;
     vma->vmo         = vmo;
-    vma->vmo_offset  = vmo_offset;
+    vma->backing_offset  = vmo_offset;
     vmo_ref(vmo);
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
-    mm_mmap_seg_annotate(mm, vma);
     return addr;
 }
 

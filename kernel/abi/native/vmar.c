@@ -35,7 +35,7 @@ uint64_t a20_vmar_find_free(uint64_t hint, uint64_t length)
     if (length == 0) return 0;
 
     if (hint != 0 && hint < USER_VA_LIMIT) {
-        vm_area_t *v = mm_find_vma(cur->mm, hint);
+        mm_seg_t *v = mm_seg_find(cur->mm, hint);
         if (!v || (hint + length <= v->start))
             return hint;
     }
@@ -96,7 +96,7 @@ int64_t a20_vmar_protect(uint64_t addr, uint64_t length, uint32_t new_prot)
     uint64_t end = addr + length;
     if (end < start) return -A20_ERR_INVALID_ARGUMENT;
     for (uint64_t va = start; va < end; ) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
+        mm_seg_t *vma = mm_seg_find(cur->mm, va);
         if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
         if (vma->vmar_cap != 0) {
             if ((new_prot & ~vma->vmar_cap) != 0)

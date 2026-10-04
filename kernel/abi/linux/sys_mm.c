@@ -3,6 +3,7 @@
 #include "mm/fault.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "mm/mm.h"
 #include "fs/devfs.h"
 #include "fs/memfd.h"
@@ -112,7 +113,7 @@ int64_t sys_mmap(uint64_t addr, size_t len, int prot, int flags, int fd, long of
         if (t && t->mm) {
             int populate_locked = 0;
             uint64_t mm_flags = linux_mm_lock(t);
-            vm_area_t *vma = mm_find_vma(t->mm, res);
+            mm_seg_t *vma = mm_seg_find(t->mm, res);
             if (vma && (vma->vm_flags & VM_LOCKED))
                 populate_locked = 1;
             linux_mm_unlock(t, mm_flags);
@@ -164,7 +165,7 @@ int64_t sys_msync(uint64_t addr, size_t len, int flags) {
     uint64_t mm_flags = spin_lock_irqsave(&t->mm->lock);
     uint64_t cursor = addr;
     while (cursor < end) {
-        vm_area_t *vma = mm_find_vma(t->mm, cursor);
+        mm_seg_t *vma = mm_seg_find(t->mm, cursor);
         if (!vma || cursor >= vma->end) {
             linux_mm_unlock(t, mm_flags);
             return -ENOMEM;
@@ -204,8 +205,8 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     mm_tlb_invalidate_begin(t->mm);
     uint64_t mm_flags = linux_mm_lock(t);
     for (uint64_t va = start; va < end; va += PAGE_SIZE) {
-        vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma || va >= vma->end) {
+        mm_seg_t *seg = mm_seg_find(t->mm, va);
+        if (!seg || va >= seg->end) {
             linux_mm_unlock(t, mm_flags);
             mm_tlb_invalidate_finish(t->mm);
             return -ENOMEM;
@@ -251,14 +252,14 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                 }
                 continue;
             }
-            vm_area_t *vma = mm_find_vma(t->mm, va);
+            mm_seg_t *vma = mm_seg_find(t->mm, va);
             int shared_file = vma &&
                 (vma->vm_flags & (VM_FILE | VM_SHARED)) == (VM_FILE | VM_SHARED) &&
                 vma->file_vnode;
             page_cache_page_t *held_pcp = NULL;
             if (*pte & PTE_V) {
                 if (shared_file) {
-                    uint64_t idx = vma->file_offset + (va - vma->start);
+                    uint64_t idx = vma->backing_offset + (va - vma->start);
                     idx /= PAGE_SIZE;
                     held_pcp = page_cache_get(vma->file_vnode, idx, 0);
                     if (!held_pcp ||
@@ -303,7 +304,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
     case MADV_DOFORK:
     case MADV_WIPEONFORK:
     case MADV_KEEPONFORK:
-        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
             if (advice == MADV_DONTFORK) vma->vm_flags |= VM_DONTFORK;
             else if (advice == MADV_DOFORK) vma->vm_flags &= ~VM_DONTFORK;
             else if (advice == MADV_WIPEONFORK) vma->vm_flags |= VM_WIPEONFORK;
@@ -317,14 +318,14 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
         break;
     case MADV_HUGEPAGE: {
         if (t->policy.thp_disabled) break;
-        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
             vma->vm_flags |= VM_HUGEPAGE;
             vma->vm_flags &= ~VM_NOHUGEPAGE;
         }
         break;
     }
     case MADV_NOHUGEPAGE:
-        for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+        for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
             vma->vm_flags |= VM_NOHUGEPAGE;
             vma->vm_flags &= ~VM_HUGEPAGE;
         }
@@ -387,12 +388,12 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
     uint64_t mm_flags = linux_mm_lock(t);
     int64_t ret = 0;
     for (uint64_t va = start; va < end; ) {
-        vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma || va >= vma->end) {
+        mm_seg_t *seg = mm_seg_find(t->mm, va);
+        if (!seg || va >= seg->end) {
             ret = -ENOMEM;
             goto out;
         }
-        va = vma->end;
+        va = seg->end;
     }
 
     int r = mm_split_vma_at(t->mm, start);
@@ -407,7 +408,7 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
     }
 
     size_t new_locked = 0;
-    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+    for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
         if (!(vma->vm_flags & VM_LOCKED)) {
             new_locked += (vma->end - vma->start);
         }
@@ -418,7 +419,7 @@ int64_t sys_mlock(uint64_t addr, size_t len) {
         goto out;
     }
 
-    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+    for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
         if (!(vma->vm_flags & VM_LOCKED)) {
             vma->vm_flags |= VM_LOCKED;
             t->mm->locked_vm += (vma->end - vma->start);
@@ -453,12 +454,12 @@ int64_t sys_munlock(uint64_t addr, size_t len) {
     uint64_t mm_flags = linux_mm_lock(t);
     int64_t ret = 0;
     for (uint64_t va = start; va < end; ) {
-        vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma || va >= vma->end) {
+        mm_seg_t *seg = mm_seg_find(t->mm, va);
+        if (!seg || va >= seg->end) {
             ret = -ENOMEM;
             goto out;
         }
-        va = vma->end;
+        va = seg->end;
     }
 
     int r = mm_split_vma_at(t->mm, start);
@@ -472,7 +473,7 @@ int64_t sys_munlock(uint64_t addr, size_t len) {
         goto out;
     }
 
-    for (vm_area_t *vma = mm_find_vma(t->mm, start); vma && vma->start < end; vma = vma->next) {
+    for (mm_seg_t *vma = mm_seg_find(t->mm, start); vma && vma->start < end; vma = vma->next) {
         if (vma->vm_flags & VM_LOCKED) {
             vma->vm_flags &= ~VM_LOCKED;
             size_t vma_sz = vma->end - vma->start;
@@ -503,7 +504,7 @@ int64_t sys_mlockall(int flags) {
     }
 
     if (flags & MCL_CURRENT) {
-        for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = t->mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_LOCKED)) {
                 size_t vma_sz = vma->end - vma->start;
                 if (t->mm->locked_vm + vma_sz > t->limits.memlock && !proc_has_cap(t, CAP_SYS_ADMIN)) {
@@ -525,7 +526,7 @@ out:
     linux_mm_unlock(t, mm_flags);
 #ifndef CONFIG_NOMMU
     if (ret == 0 && (flags & MCL_CURRENT) && !(flags & MCL_ONFAULT)) {
-        for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = t->mm->mmap; vma; vma = vma->next) {
             for (uint64_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
                 pte_t *pte = pt_lookup_leaf(t->mm->pgdir, va, NULL, NULL, NULL);
                 if (!pte || !(*pte & PTE_V))
@@ -543,7 +544,7 @@ int64_t sys_munlockall(void) {
 
     uint64_t mm_flags = linux_mm_lock(t);
     t->mm->def_flags &= ~VM_LOCKED;
-    for (vm_area_t *vma = t->mm->mmap; vma; vma = vma->next) {
+    for (mm_seg_t *vma = t->mm->mmap; vma; vma = vma->next) {
         vma->vm_flags &= ~VM_LOCKED;
     }
     t->mm->locked_vm = 0;
@@ -573,8 +574,8 @@ int64_t sys_mincore(uint64_t addr, size_t length, unsigned char *vec) {
     uint64_t mm_flags = linux_mm_lock(t);
     for (size_t i = 0; i < pages; i++) {
         uint64_t va = start + i * PAGE_SIZE;
-        vm_area_t *vma = mm_find_vma(t->mm, va);
-        if (!vma || va >= vma->end) {
+        mm_seg_t *seg = mm_seg_find(t->mm, va);
+        if (!seg || va >= seg->end) {
             linux_mm_unlock(t, mm_flags);
             return -ENOMEM;
         }

@@ -609,7 +609,7 @@ static int exec_install_process(task_t *t,
         if (sp != 0 && ehdr != 0 &&
             /* vdso_map_image appends the vDSO VMA to the image being built:
              * info->mmap is the mutable image list head of a const struct. */
-            vdso_map_image(info->pgdir, (vm_area_t **)&info->mmap) < 0)
+            vdso_map_image(info->pgdir, (mm_seg_t **)&info->mmap) < 0)
             return -ENOMEM;
     }
     if (sp == 0)

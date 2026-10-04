@@ -147,13 +147,13 @@ static int fault_map_window(mm_struct_t *mm, vaddr_t start, vaddr_t end,
 #endif /* ARCH_HAS_PGTABLE_OPS */
 #endif /* !CONFIG_NOMMU */
 
-int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
+int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
                          vfile_t *vf)
 {
     if (!mm || !vma || !vf || !vf->vnode)
         return -1;
 
-    uint64_t file_pos = vma->file_offset + (page_va - vma->start);
+    uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
     if (file_pos >= vf->vnode->size) {
         signal_send(proc_current()->pid, SIGBUS);
         return -1;
@@ -216,7 +216,7 @@ int mm_shared_file_fault(mm_struct_t *mm, vm_area_t *vma, uint64_t page_va,
  * the caller; the class it implies is the backing, which COW does not change.
  */
 static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
-                            const vm_area_t *vma)
+                            const mm_seg_t *vma)
 {
     pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
     if (!tab)
@@ -282,7 +282,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
         /* A private file page may still be the canonical page-cache frame.
          * Its allocator refcount describes cache ownership, not the number of
          * user mappings, so rc==1 must never make it writable in place. */
-        vm_area_t *vma = mm_find_vma(t->mm, leaf_base);
+        mm_seg_t *vma = mm_seg_find(t->mm, leaf_base);
         page_cache_page_t *cache_page =
             leaf_size == PAGE_SIZE
                 ? mm_file_cache_mapping_get(vma, leaf_base, old_pfn)
@@ -368,7 +368,7 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                   PTE_G | PTE_A | PTE_MAT1 |
                                   PTE_LEAF | PTE_COW)) | PTE_D;
         *pte = arch_pte_leaf(arch_pte_addr(*pte), flags);
-        cow_sync_status(t->mm, leaf_base, mm_find_vma(t->mm, leaf_base));
+        cow_sync_status(t->mm, leaf_base, mm_seg_find(t->mm, leaf_base));
         arch_tlb_flush_page_local(stval);
         return 0;
     }
@@ -400,15 +400,20 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  */
 /* ---- P6 shadow check (see docs/roadmap/single-level-mm-model.md 12.6) ----
  *
- * Asks the segment table what it would have said about this fault, and counts
- * how often that matches what the VMA actually said.  Changes nothing: this is
- * the measurement that decides whether P6 can retire the VMA, and a non-zero
- * disagreement count means the segment would have faulted in the wrong page.
+ * Asks the page-table segment table what it would have said about this fault,
+ * and counts how often that matches what the mapping list said.  Changes
+ * nothing: a non-zero disagreement count means the segment would have faulted
+ * in the wrong page.
  *
- * It lives here rather than in pt.c because only this side holds the VMA, and a
- * disagreement is only diagnosable when both sides are printed together.
+ * Since the merge (roadmap 13.18) both sides resolve to the SAME mm_seg_t
+ * record, so this no longer compares two representations -- it compares two
+ * ways of resolving an address to one record, which can still differ when a
+ * 2 MiB node entry names a neighbouring mapping.
+ *
+ * It lives here rather than in pt.c because only this side walks mm->mmap, and
+ * a disagreement is only diagnosable when both sides are printed together.
  */
-static void shadow_seg_check(mm_struct_t *mm, vm_area_t *vma, vaddr_t va,
+static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
                              uint8_t kind, uint64_t base_off)
 {
     if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
@@ -422,23 +427,20 @@ static void shadow_seg_check(mm_struct_t *mm, vm_area_t *vma, vaddr_t va,
     if (mm_pt_shadow_seg(mm, va, kind, want, shared, &found) != 0 || !found)
         return;
 
-    /* The segment the page tables named, against the VMA that owns this
-     * address right now.  `own` is the segment the VMA itself carries: when it
-     * is a different object, the annotation came from some other mapping that
-     * shares this (much coarser) node entry, and the extents are what are
-     * supposed to tell the two apart. */
-    mm_seg_t *own = vma->seg;
-    kwarn("[SEG-SHADOW] va=0x%lx: VMA [0x%lx,0x%lx) off=0x%lx shared=%d fd=%d "
+    /* The mapping the page tables named, against the mapping that owns this
+     * address right now.  They are different records when the annotation came
+     * from a neighbour sharing this (much coarser) node entry, and the extents
+     * are what are supposed to tell the two apart. */
+    kwarn("[SEG-SHADOW] va=0x%lx: mapping [0x%lx,0x%lx) off=0x%lx shared=%d fd=%d "
           "says kind=%u, but the page tables name "
-          "{base=0x%lx len=0x%lx off=0x%lx kind=%u shared=%d fd=%d}"
-          "%s\n",
+          "[0x%lx,0x%lx) off=0x%lx kind=%u shared=%d fd=%d%s\n",
           (unsigned long)va,
           (unsigned long)vma->start, (unsigned long)vma->end,
           (unsigned long)want, shared, vma->file_fd, kind,
-          (unsigned long)found->base_va, (unsigned long)found->len,
-          (unsigned long)found->offset, found->kind, found->shared,
-          found->fd,
-          own == found ? "" : "  (the VMA holds a different segment)");
+          (unsigned long)found->start, (unsigned long)found->end,
+          (unsigned long)found->backing_offset, mm_seg_kind(found),
+          mm_seg_shared(found), found->file_fd,
+          vma == found ? "" : "  (a different mapping)");
     mm_seg_put(found);
 }
 
@@ -459,7 +461,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
 #ifdef CONFIG_SWAP
     if (pte && pte_is_swap(*pte)) {
-        vm_area_t *vma = mm_find_vma(t->mm, page_va);
+        mm_seg_t *vma = mm_seg_find(t->mm, page_va);
         if (!vma) {
             signal_send(t->pid, SIGBUS);
             return -1;
@@ -539,7 +541,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
 
     if (page_va >= t->mm->start_brk &&
         page_va < ROUND_UP(t->mm->brk, PAGE_SIZE) &&
-        !mm_find_vma(t->mm, page_va)) {
+        !mm_seg_find(t->mm, page_va)) {
         if (cg_mem_charge(t->cgroup, 1) != 0) {
             return -ENOMEM;
         }
@@ -557,19 +559,19 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         return 0;
     }
 
-    vm_area_t *vma = mm_find_vma(t->mm, page_va);
+    mm_seg_t *vma = mm_seg_find(t->mm, page_va);
     if (vma) {
 
         if (pte && (*pte & PTE_V)) return -1;
         if (!mm_pte_flags_allow_access(vma->pte_flags)) return -1;
 
         /* Shadow check: would the segment table have answered this fault the
-         * same way?  Nothing below changes behaviour -- it is the measurement
-         * that decides whether P6 can drop the VMA. */
+         * same way?  Nothing below changes behaviour -- it is the
+         * measurement that says whether the page-table name and the mapping
+         * list name the same record. */
         shadow_seg_check(t->mm, vma, page_va,
                          (vma->vm_flags & VM_VMO) ? MM_SEG_VMO : MM_SEG_FILE,
-                         (vma->vm_flags & VM_VMO) ? vma->vmo_offset
-                                                  : vma->file_offset);
+                         vma->backing_offset);
 
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
             vfile_t *vf = vfs_get_file_ref(vma->file_fd);
@@ -586,7 +588,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 return -1;
             }
 
-            uint64_t file_pos = vma->file_offset + (page_va - vma->start);
+            uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
             if (file_pos >= vf->vnode->size) {
                 kerr("[MFAULT] oob pid=%d va=0x%lx fd=%d pos=%lu size=%llu\n",
                      t->pid, (unsigned long)page_va, vma->file_fd,
@@ -652,7 +654,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
         }
 
         if ((vma->vm_flags & VM_VMO) && vma->vmo) {
-            uint64_t voff = vma->vmo_offset + (page_va - vma->start);
+            uint64_t voff = vma->backing_offset + (page_va - vma->start);
             if (voff >= vma->vmo->size) {
                 signal_send(t->pid, SIGBUS);
                 return -1;
@@ -758,7 +760,7 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                 }
                 if (prepared == 0) {
                     vma_put(t->mm, vma);
-                } else if (mm_find_vma(t->mm, page_va) != vma) {
+                } else if (mm_seg_find(t->mm, page_va) != vma) {
                     for (size_t i = 0; i < prepared; i++) {
                         cg_mem_uncharge(t->cgroup, 1);
                         frame_put(pfns[i]);
@@ -987,7 +989,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
 
     mm_struct_t *mm = t->mm;
     spin_lock(&mm->lock);
-    vm_area_t *vma = mm_find_vma(mm, page_va);
+    mm_seg_t *vma = mm_seg_find(mm, page_va);
     vfile_t *current_vf = vma && (vma->vm_flags & VM_FILE) &&
                           vma->file_fd >= 0
         ? vfs_get_file_ref(vma->file_fd) : NULL;
@@ -997,7 +999,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
         !!(vma->pte_flags & PTE_X) == !!executable &&
         !!(vma->vm_flags & VM_SHARED) == !!shared &&
         vma->file_fd == file_fd &&
-        vma->file_offset + (page_va - vma->start) == file_pos;
+        vma->backing_offset + (page_va - vma->start) == file_pos;
     if (current_vf)
         vfs_put_file_ref(vma->file_fd, current_vf);
 
@@ -1011,7 +1013,7 @@ static int handle_file_fault(task_t *t, uint64_t page_va, int file_fd,
             uint64_t va = page_va + i * PAGE_SIZE;
             uint64_t pos = file_pos + i * PAGE_SIZE;
             if (va >= vma->end ||
-                vma->file_offset + (va - vma->start) != pos)
+                vma->backing_offset + (va - vma->start) != pos)
                 break;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
             if (pte && (*pte & PTE_V)) {
@@ -1225,7 +1227,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
     }
 
 
-    vm_area_t *vma = mm_find_vma(mm, page_va);
+    mm_seg_t *vma = mm_seg_find(mm, page_va);
     /*
      * USERFAULTFD_MISSING_HOOK: anonymous private ranges registered with a
      * userfaultfd hand the fault to the handler before the kernel fabricates
@@ -1257,12 +1259,12 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
      * VM_FILE first and only falls through when it declines, so instrumenting
      * the other one records nothing and looks like a passing measurement. */
     mm_seg_t *seg = mm_pt_lookup_seg(mm, page_va);
-    if (seg && seg->kind == MM_SEG_FILE && seg->fd >= 0) {
+    if (seg && mm_seg_kind(seg) == MM_SEG_FILE && seg->file_fd >= 0) {
         mm_seg_dispatch_seg++;
         if (vma)
-            shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->file_offset);
+            shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->backing_offset);
 
-        uint64_t sflags = seg->flags;
+        uint64_t sflags = seg->vm_flags;
         int prot = 0;
         if (sflags & VM_READ)  prot |= PROT_READ;
         if (sflags & VM_WRITE) prot |= PROT_WRITE;
@@ -1273,10 +1275,10 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
             spin_unlock(&mm->lock);
             return -1;
         }
-        int file_fd  = seg->fd;
-        int shared   = seg->shared;
-        int file_pos = (int)(seg->offset + (page_va - seg->base_va));
-        vaddr_t seg_end = seg->base_va + seg->len;
+        int file_fd  = seg->file_fd;
+        int shared   = mm_seg_shared(seg);
+        int file_pos = (int)(seg->backing_offset + (page_va - seg->start));
+        vaddr_t seg_end = seg->end;
         mm_seg_put(seg);
         /* The page-table path for this range may not have existed when this
          * fault arrived -- mmap builds no path, and the first touch is what
@@ -1334,7 +1336,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         /* Fallback: no segment covers this address yet.  This is the coverage
          * gap P6 has to close before the VMA query can go -- measured, not
          * guessed: seg_miss in the [MM-ASM] line. */
-        shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->file_offset);
+        shadow_seg_check(mm, vma, page_va, MM_SEG_FILE, vma->backing_offset);
         mm_mmap_seg_label(mm, vma);
         /* Writable private mappings stay on the single-page COW path.  A
          * read-only private mapping, including executable text, can share the
@@ -1354,7 +1356,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
         int fault_around = !shared && !(vma->pte_flags & PTE_W);
 #endif
         uint64_t vma_end = vma->end;
-        uint64_t file_pos = vma->file_offset + (page_va - vma->start);
+        uint64_t file_pos = vma->backing_offset + (page_va - vma->start);
         vfile_t *vf = vfs_get_file_ref(file_fd);
         spin_unlock(&mm->lock);
         if (!vf || !vf->vnode) {
@@ -1383,7 +1385,7 @@ int handle_demand_fault_access(task_t *t, uint64_t stval,
      */
     if (vma && (vma->vm_flags & VM_VMO) && vma->vmo &&
         vma->vmo->type == VMO_PAGED) {
-        uint64_t voff = vma->vmo_offset + (page_va - vma->start);
+        uint64_t voff = vma->backing_offset + (page_va - vma->start);
         uint32_t pg_idx = (uint32_t)(voff / PAGE_SIZE);
         int paged_miss = 0;
         spin_lock(&vma->vmo->lock);

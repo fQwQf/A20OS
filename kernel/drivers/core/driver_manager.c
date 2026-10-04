@@ -259,7 +259,7 @@ int driver_manager_spawn_user(const char *path)
     }
 
     size_t total_vm = 0;
-    for (vm_area_t *v = info.mmap; v; v = v->next)
+    for (mm_seg_t *v = info.mmap; v; v = v->next)
         total_vm += (v->end - v->start) / PAGE_SIZE;
 
     int pid = proc_alloc_user_image(info.entry, info.stack_top, info.pgdir,

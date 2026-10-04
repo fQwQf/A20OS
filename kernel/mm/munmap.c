@@ -26,9 +26,9 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (len == 0) return 0;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -EINVAL;
-    mm_vma_index_invalidate(mm);
+    mm_seg_index_invalidate(mm);
 
-    for (vm_area_t *v = mm->mmap; v; v = v->next) {
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
         if (v->start >= end)
             break;
         if (v->end <= addr)
@@ -42,9 +42,9 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             return -EPERM;
     }
 
-    vm_area_t *vma = mm->mmap;
+    mm_seg_t *vma = mm->mmap;
     while (vma) {
-        vm_area_t *next = vma->next;
+        mm_seg_t *next = vma->next;
         if (vma->start >= end || vma->end <= addr) { vma = next; continue; }
 
         vaddr_t clip_start = vma->start < addr ? addr : vma->start;
@@ -79,7 +79,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                 continue;
             }
             if (shared_file_vma && vma->file_vnode && (*pte & PTE_D)) {
-                uint64_t idx = vma->file_offset + (va - vma->start);
+                uint64_t idx = vma->backing_offset + (va - vma->start);
                 idx /= PAGE_SIZE;
                 page_cache_page_t *pcp = page_cache_get(vma->file_vnode, idx, 0);
                 if (pcp) {
@@ -149,45 +149,43 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
              * Only this VMA's own name is dropped.  The node entries here are
              * far coarser than the mapping and may also be naming a neighbour
              * that is still live and still correct. */
-            mm_mmap_seg_unannotate(mm, clip_start, clip_end, vma->seg);
+            mm_mmap_seg_retire(mm, vma, clip_start, clip_end);
             if (vma->prev) vma->prev->next = vma->next;
             else mm->mmap = vma->next;
             if (vma->next) vma->next->prev = vma->prev;
             mm_vma_defer(mm, vma);
         } else if (addr <= vma->start) {
-            /* Head cut.  The surviving VMA keeps its file_offset adjusted, so
-             * the segment that described [vma->start, clip_end) no longer
-             * describes the new range: re-label rather than leave a segment
-             * whose offset is off by the amount just cut. */
-            uint64_t new_off = vma->file_offset + (clip_end - vma->start);
-            vma->file_offset = new_off;
+            /* Head cut.  The surviving mapping keeps its offset adjusted, so
+             * what it used to name no longer describes its new range: retire
+             * the old extent and name the new one. */
+            uint64_t new_off = vma->backing_offset + (clip_end - vma->start);
+            vma->backing_offset = new_off;
+            mm_mmap_seg_retire(mm, vma, vma->start, clip_end);
             vma->start = clip_end;
-            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
+            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
         } else if (end >= vma->end) {
+            /* Tail cut.  The offset still lines up -- only the extent shrank --
+             * BUT the extent is exactly what mm_pt_lookup_seg() uses to decide
+             * whether this address is its own.  Leaving the old name here
+             * therefore works while the cut is smaller than the mapping, and
+             * silently stops working the moment the mapping shrinks below its
+             * own label. */
+            mm_mmap_seg_retire(mm, vma, clip_start, vma->end);
             vma->end = clip_start;
-            /* Tail cut.  The segment's base_va and offset still line up --
-             * only its extent shrank -- BUT its extent is exactly what
-             * mm_pt_lookup_seg() uses to decide whether this address is its
-             * own.  Leaving the old segment named here therefore works while
-             * the cut is smaller than the segment, and silently stops working
-             * the moment the mapping shrinks below its own label.  Rebuild it
-             * rather than reason about when the stale extent happens to still
-             * cover the addresses. */
-            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
+            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
         } else {
-            vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
+            mm_seg_t *tail = mm_seg_new();
             if (!tail) return -ENOMEM;
             *tail = *vma;
-            /* The struct copy also copied `seg`, which is an OWNED reference.
-             * Leaving it shared would let both halves drop the same pointer
-             * and free the segment while the other half's annotations still
-             * name it.  The tail gets a segment of its own below anyway --
-             * its file offset differs -- so drop the borrowed one here. */
-            tail->seg = NULL;
-            refcount_set(&tail->refcount, 1);
+            /* Both halves name themselves, so the old extent stops being named
+             * before either half is narrowed -- otherwise the cut-away middle
+             * would still resolve to this mapping, which is exactly the range
+             * just freed. */
+            mm_mmap_seg_retire(mm, vma, vma->start, vma->end);
+            refcount_set(&tail->refcount, 1);   /* the copy brought its count */
             tail->start = clip_end;
             tail->end = vma->end;
-            tail->file_offset += clip_end - vma->start;
+            tail->backing_offset += clip_end - vma->start;
             int fr = vma_ref_aux(tail);
             if (fr < 0) {
                 kfree(tail);
@@ -198,20 +196,20 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             if (vma->next) vma->next->prev = tail;
             vma->next = tail;
             vma->end = clip_start;
-            /* Middle cut: two segments now describe one old one.  BOTH halves
-             * need fresh segments, not just the tail: the head kept the old
-             * segment, whose extent was [old_start, old_end) and therefore no
-             * longer contains [old_start, clip_start).  Lookup matches on
-             * extent, so the head's own addresses stopped resolving -- which
-             * the shadow measurement saw directly, as mappings that answered
-             * correctly and then stopped answering after a partial unmap.
+            /* Middle cut: two mappings now describe one old one.  BOTH halves
+             * need to be named afresh, not just the tail: the head's name
+             * described [old_start, old_end) and therefore no longer contains
+             * [old_start, clip_start).  Lookup matches on extent, so the head's
+             * own addresses stopped resolving -- which the shadow measurement
+             * saw directly, as mappings that answered correctly and then
+             * stopped answering after a partial unmap.
              *
-             * Order matters.  The head is relabelled FIRST, while `tail` is
-             * not yet linked, so the two walks cannot both claim the node
-             * entry that straddles the boundary; the tail then names itself
-             * there and the head's names remain valid for their own side. */
-            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
-            mm_mmap_seg_reannotate(mm, tail, tail->start, tail->end);
+             * Order matters.  The head is named FIRST, while `tail` is not yet
+             * linked, so the two walks cannot both claim the node entry that
+             * straddles the boundary; the tail then names itself there and the
+             * head's names remain valid for their own side. */
+            mm_mmap_seg_annotate(mm, vma, vma->start, vma->end);
+            mm_mmap_seg_annotate(mm, tail, tail->start, tail->end);
         }
         vma = next;
     }
@@ -245,7 +243,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
 
     if (newbrk < mm->brk) {
         /* mseal(2): refuse to shrink the heap into a sealed VMA. */
-        for (vm_area_t *v = mm->mmap; v; v = v->next) {
+        for (mm_seg_t *v = mm->mmap; v; v = v->next) {
             if (v->start >= old_brk_page)
                 break;
             if (v->end <= new_brk_page)
@@ -299,15 +297,13 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
         vaddr_t map_start = ROUND_UP(mm->brk, PAGE_SIZE);
         vaddr_t map_end = ROUND_UP(newbrk, PAGE_SIZE);
         if (map_end > map_start) {
-            vm_area_t *vma = kcalloc_atomic(1, sizeof(*vma));
+            mm_seg_t *vma = mm_seg_new();
             if (!vma)
                 return mm->brk;
-            refcount_set(&vma->refcount, 1);
             vma->start = map_start;
             vma->end = map_end;
             vma->vm_flags = VM_ANON | VM_READ | VM_WRITE;
             vma->pte_flags = mm_user_brk_pte_flags();
-            vma->file_fd = -1;
             mm_insert_vma(mm, vma);
             mm->total_vm += (map_end - map_start) / PAGE_SIZE;
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)

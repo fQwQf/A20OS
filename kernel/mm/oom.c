@@ -48,7 +48,7 @@ static int oom_pick_victim_pid(void)
 }
 
 #ifdef CONFIG_SWAP
-static int vma_is_swappable(const vm_area_t *vma)
+static int vma_is_swappable(const mm_seg_t *vma)
 {
     return vma && (vma->vm_flags & VM_ANON) &&
            !(vma->vm_flags & (VM_SHARED | VM_LOCKED | VM_PFNMAP |
@@ -85,7 +85,7 @@ static int swap_out_victim_pages(int target_pages)
      */
     int reclaimed = 0;
     mm_tlb_invalidate_begin(mm);
-    for (vm_area_t *vma = mm->mmap;
+    for (mm_seg_t *vma = mm->mmap;
          vma && reclaimed < target_pages && reclaimed < MAX_SWAP_RECLAIM;
          vma = vma->next) {
         if (!vma_is_swappable(vma))

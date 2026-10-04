@@ -151,8 +151,8 @@ under ordinary threaded churn either.
 The mpv reproducer still crashes in the very same boot (`--load-scripts=no` -> rc=139), so
 the trigger is narrower than "threads + anonymous memory".  What is left, in order:
 
-  1. The anonymous VMA holding the object had `file_fd=-1` but `off=0x2000`; check
-     VMA merge/split for anonymous mappings, since a bad merge can alias two ranges.
+  1. The anonymous mapping holding the object had `file_fd=-1` but `off=0x2000`; check
+     merge/split for anonymous mappings, since a bad merge can alias two ranges.
   2. Reproduce LuaJIT's actual access pattern instead of generic churn: mmap an arena, then
      high-frequency alloc/free plus list insert/remove, and verify the links.
   3. Keep `FAULT-BX`/`PAGE-ZEROMAP` in the dump: they are what produced all of the above.
@@ -188,13 +188,20 @@ behavioural rather than more reading: reproduce LuaJIT's own pattern (mmap an ar
 alloc/free plus list insert/remove and verify the links) instead of generic threaded churn,
 which already passed cleanly.
 
-## Also checked: VMA merge/offset (aliasing) -- cleared
+## Also checked: mapping merge/offset (aliasing) -- cleared
 
-The merge logic lives in `kernel/mm/vma.c`, not `vm.c`.  `vma_can_merge` (line 22) requires
-offset continuity only where an offset exists: `file_offset + (end - start) == b->file_offset`
-for file VMAs and the `vmo_offset` equivalent for VMO VMAs.  A plain anonymous VMA has no
+> **2026-10-04 更新：下面这段是排查当时的代码读的，字段名已变。** 核心 MM 已完成
+> 单级化迁移（roadmap §13.18）：`vm_area_t` 与页表命名的段合并为一条 `struct mm_seg`，
+> 两条 offset 字段 `file_offset` / `vmo_offset` 统一为**一个** `backing_offset`
+> （见 `kernel/include/mm/vm.h`）。结论不变，只是引用要换名字。
+
+The merge logic lives in `kernel/mm/vma.c`, not `vm.c` — and `vma.c`'s filename is now
+legacy too: the file still manages mapping records, they are just `mm_seg_t` now.
+`vma_can_merge` requires offset continuity only where an offset exists:
+`a->backing_offset + (a->end - a->start) == b->backing_offset` for both file and VMO
+records, since they share the one field.  A plain anonymous mapping has no
 backing offset, so merging two of them cannot alias anything; the `off=0x2000` seen on the
-faulting VMA is a carried value, not an aliasing hazard.
+faulting mapping is a carried value, not an aliasing hazard.
 
 That closes the last structural lead as well.  Five hypotheses are now eliminated with
 evidence: COW break, clone/TLS, MADV_DONTNEED, demand-fault install, and VMA merge aliasing.

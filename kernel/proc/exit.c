@@ -189,7 +189,7 @@ static void proc_release_exiting_mm(task_t *t)
 
     if (t->cgroup && mm->pgdir) {
         size_t swapped = 0;
-        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             for (vaddr_t va = vma->start; va < vma->end; va += PAGE_SIZE) {
                 pte_t *pte = pt_lookup_leaf(mm->pgdir, va, NULL, NULL, NULL);
 #ifdef CONFIG_SWAP

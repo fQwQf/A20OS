@@ -23,7 +23,7 @@ struct vmo *mm_lookup_vmo_region(mm_struct_t *mm, vaddr_t addr, size_t len,
         return NULL;
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
-    vm_area_t *vma = mm_find_vma(mm, addr);
+    mm_seg_t *vma = mm_seg_find(mm, addr);
     if (!vma || (uint64_t)vma->start > addr ||
         (uint64_t)vma->end < (uint64_t)addr + len ||
         !(vma->vm_flags & VM_VMO) || !vma->vmo) {
@@ -46,7 +46,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
     vaddr_t end = (addr + len + PAGE_SIZE - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
 
     for (vaddr_t va = addr; va < end; va += PAGE_SIZE) {
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) return -ENOMEM;
     }
 
@@ -59,7 +59,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
         size_t leaf_size = 0;
         pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &leaf_size);
         if (!pte || !(*pte & PTE_V)) { va += PAGE_SIZE; continue; }
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (vma && (vma->vm_flags & VM_VMO)) {
             /* VMO frames are owned by the VMO; unmapping a PTE must not
              * frame_put() them.  Drop the PTE and let the VMO keep the
@@ -107,7 +107,7 @@ int mm_vma_set_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end, int on)
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     for (vaddr_t va = start; va < end;) {
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) {
             spin_unlock_irqrestore(&mm->lock, flags);
             return -ENOMEM;

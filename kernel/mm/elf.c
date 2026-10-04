@@ -161,9 +161,8 @@ static uint64_t pte_to_vm_flags(pte_t pte_flags) {
 static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
                        uint64_t vm_flags, pte_t pte_flags, bool anon) {
     if (!mm) return 0;
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) return -ENOMEM;
-    refcount_set(&vma->refcount, 1);
     vma->start     = start;
     vma->end       = end;
     vma->vm_flags  = vm_flags;
@@ -191,9 +190,9 @@ static int elf_add_vma(mm_struct_t *mm, vaddr_t start, vaddr_t end,
 
 static void elf_discard_vmas(mm_struct_t *mm)
 {
-    vm_area_t *vma = mm->mmap;
+    mm_seg_t *vma = mm->mmap;
     while (vma) {
-        vm_area_t *next = vma->next;
+        mm_seg_t *next = vma->next;
         if ((vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
             if (vma->file_vnode) {
                 if (vma->vm_flags & VM_SHARED)
@@ -336,7 +335,7 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
      * contents.  Keep that established behaviour by selecting the eager path
      * before installing any lazy VMA whenever this segment overlaps one.
      */
-    for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+    for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
         if (vma->start < end && vma->end > start)
             return -EINVAL;
     }
