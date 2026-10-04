@@ -342,7 +342,7 @@ static int coredump_snapshot_vmas(mm_struct_t *mm, cd_vma_t **out)
     *out = NULL;
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     int count = 0;
-    for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+    for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
         if (vma->vm_flags & VM_GUARD)
             continue;
         if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))
@@ -363,7 +363,7 @@ static int coredump_snapshot_vmas(mm_struct_t *mm, cd_vma_t **out)
      * change the tail beyond our capacity, which we truncate. */
     flags = spin_lock_irqsave(&mm->lock);
     int n = 0;
-    for (vm_area_t *vma = mm->mmap; vma && n < count; vma = vma->next) {
+    for (mm_seg_t *vma = mm->mmap; vma && n < count; vma = vma->next) {
         if (vma->vm_flags & VM_GUARD)
             continue;
         if (!(vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC)))

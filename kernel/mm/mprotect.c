@@ -39,13 +39,13 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vm_prot |= VM_EXEC;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
-    mm_vma_index_invalidate(mm);
+    mm_seg_index_invalidate(mm);
 #ifndef CONFIG_NOMMU
     int touched = 0;
 #endif
 
     vaddr_t covered = addr;
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && covered < end; v = v->next) {
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && covered < end; v = v->next) {
         if (v->start > covered)
             break;
         if (v->end > covered)
@@ -55,7 +55,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         return -ENOMEM;
 
     /* mseal(2): mprotect over a sealed VMA is refused. */
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; v = v->next) {
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; v = v->next) {
         if (v->start >= end || v->end <= addr)
             continue;
         if (v->vm_flags & VM_SEALED)
@@ -64,8 +64,8 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 #ifdef CONFIG_NOMMU
     /* NOMMU has no page tables. We only update the VMA permission bits without splitting. */
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
-        vm_area_t *next = v->next;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
+        mm_seg_t *next = v->next;
         v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
         v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
                        vm_prot;
@@ -79,31 +79,34 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (r < 0) return r;
 
 
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
-        vm_area_t *next = v->next;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
+        mm_seg_t *next = v->next;
         uint64_t s = v->start < addr ? addr : v->start;
         uint64_t e = v->end > end ? end : v->end;
 
+        /* A split renames both halves, and stops naming what was cut away.
+         * vma_split() narrows the head in place and hands back the tail, so
+         * the pre-split extent has to be retired BEFORE the call: afterwards
+         * the head no longer knows what it used to cover.  Leaving it named
+         * makes lookup match on a stale extent, which is how a mprotect split
+         * left a neighbouring mapping resolving to the wrong segment --
+         * measured as seg_diff on the real-software gate. */
         if (s > v->start) {
-            vm_area_t *head = v;
+            mm_seg_t *head = v;
+            mm_mmap_seg_retire(mm, v, v->start, v->end);
             v = vma_split(v, s);
             if (!v) return -ENOMEM;
             next = v->next;
-            /* Both halves need fresh segments.  vma_split() leaves the tail
-             * with none and shrinks the head's recorded extent, so the name
-             * still on the page table describes the pre-split range.  Lookup
-             * matches on that extent, which is how a mprotect split left a
-             * neighbouring mapping resolving to the wrong segment: measured as
-             * seg_diff on the real-software gate. */
-            mm_mmap_seg_reannotate(mm, head, head->start, head->end);
-            mm_mmap_seg_reannotate(mm, v, v->start, v->end);
+            mm_mmap_seg_annotate(mm, head, head->start, head->end);
+            mm_mmap_seg_annotate(mm, v, v->start, v->end);
         }
         if (e < v->end) {
-            vm_area_t *head = v;
+            mm_seg_t *head = v;
+            mm_mmap_seg_retire(mm, v, v->start, v->end);
             if (!vma_split(v, e)) return -ENOMEM;
             next = v->next;
-            mm_mmap_seg_reannotate(mm, head, head->start, head->end);
-            mm_mmap_seg_reannotate(mm, next, next->start, next->end);
+            mm_mmap_seg_annotate(mm, head, head->start, head->end);
+            mm_mmap_seg_annotate(mm, next, next->start, next->end);
         }
 
         for (uint64_t va = v->start; va < v->end; ) {

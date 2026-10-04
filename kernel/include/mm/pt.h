@@ -4,6 +4,9 @@
 #include "core/types.h"
 #include "core/arch.h"
 #include "core/lock.h"
+/* The mapping record lives here, written in terms of the VM_* bits; pt.h only
+ * needs the type, and taking the definition from vm.h keeps one copy of it. */
+#include "mm/vm.h"
 
 /*
  * MM_AS_MODEL — single-level address-space model (CortenMM-style).
@@ -245,52 +248,7 @@ typedef struct pt_meta {
  */
 struct vmo;
 struct vnode;
-struct mm_struct;
-typedef struct mm_struct mm_struct_t;   /* the real definition lives in mm/vm.h,
-                                         * which includes this header */
 
-/* The object behind a range of mappings.  Refcounted: one mmap contributes one
- * segment however many PT pages it spans, and fork shares it rather than
- * copying it. */
-struct mm_seg;
-typedef struct mm_seg mm_seg_t;
-struct mm_seg {
-    uint32_t         magic;
-    volatile int     refcount;
-    uint8_t          kind;       /* MM_SEG_ANON / MM_SEG_FILE / MM_SEG_VMO */
-    uint8_t          shared;     /* MAP_SHARED: the leaf IS the cache frame */
-    int              fd;         /* FILE: where the vnode reference came from */
-    uint64_t         base_va;    /* the VA `offset` refers to */
-    uint64_t         len;        /* extent of the segment, in bytes */
-    uint64_t         offset;     /* file/vmo offset of base_va */
-    uint64_t         flags;      /* VM_* flags, for the reader's use */
-    /* Policy metadata that is NOT backing-object state, so the object half of
-     * a mapping never needed it and it was left on the VMA.  Both are here now
-     * because a segment is on the way to being the whole of a mapping, and
-     * these two were the only fields a reader could still not get from one:
-     *
-     *   vmar_cap   native VMAR's ceiling -- protect() may not grant a bit that
-     *              was not available when the VMAR was created.  0 means "no
-     *              ceiling recorded" (every Linux-created mapping).
-     *   sysv_shmid SysV shared memory identity, so a fault can name the shmid
-     *              without walking back to the VMA.
-     *
-     * VM_SEALED was NOT missing: it is a VM_* bit, so it already rides in
-     * `flags` above.  An earlier draft of the P6 step-4 assessment listed it as
-     * a blocker; that was wrong, and is corrected in the roadmap. */
-    uint32_t         vmar_cap;   /* native VMAR capability bits, 0 = none */
-    int32_t          sysv_shmid; /* SysV shmid, -1 = not SysV shared memory */
-    struct vnode    *vnode;      /* FILE, referenced by the segment itself */
-    struct vmo      *vmo;        /* VMO, referenced by the segment itself */
-    /* Called once when the last reference goes away, so whoever built the
-     * segment can drop those references.  pt.c must not know about vnodes. */
-    void            (*release)(mm_seg_t *s);
-};
-
-#define MM_SEG_ANON 0u
-#define MM_SEG_FILE 1u
-#define MM_SEG_VMO  2u
-#define MM_SEG_MAGIC 0x53454731u   /* "SEG1" */
 
 /* Segments nameable by ONE node entry.  This is the width of the packed index,
  * not the capacity of the table -- the two were the same number until the
@@ -520,6 +478,20 @@ typedef struct mm_pt_audit_report {
     uint64_t seg_pages;
     uint64_t seg_bad_slot;
     uint64_t seg_kind_mismatch;
+    /* Is the mapping list well formed?
+     *
+     * The list is the only representation of the address space now, and
+     * mm_seg_find() binary-searches it, so a list that is unsorted, has
+     * overlapping entries, or holds a dead record answers with the wrong
+     * mapping and nothing else is left to catch it.  vmas counts the entries
+     * walked; noseg counts records whose magic is gone or whose extent is
+     * inverted; extent_mismatch counts entries that overlap their predecessor.
+     * agree/disagree count entries that passed. */
+    uint64_t seg_extent_vmas;
+    uint64_t seg_extent_mismatch;
+    uint64_t seg_extent_noseg;
+    uint64_t seg_pte_agree;      /* entries that passed the check above */
+    uint64_t seg_pte_disagree;   /* unused; kept so the report layout is stable */
     vaddr_t seg_bad_va;
     vaddr_t seg_kind_bad_va;
     uint8_t  seg_kind_bad;
@@ -538,7 +510,8 @@ static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
     return r->missing_meta + r->present_mismatch + r->absent_mismatch +
            r->prot_mismatch + r->cow_mismatch + r->vma_mismatch +
            r->vmai_mismatch + r->cls_mismatch +
-           r->safe_mismatch + r->seg_bad_slot + r->seg_kind_mismatch;
+           r->safe_mismatch + r->seg_bad_slot + r->seg_kind_mismatch +
+           r->seg_extent_mismatch + r->seg_extent_noseg;
 }
 
 
@@ -600,9 +573,10 @@ void mm_pt_unannotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
  * a leaf.  Caller holds the parent node's lock. */
 void mm_pt_node_clear_seg(pte_t *table, int level, int idx);
 
-/* Segment lifetime.  mm_seg_alloc() returns an unreferenced-once segment the
- * caller owns; the annotation walk takes its own reference. */
-mm_seg_t *mm_seg_alloc(void);
+/* Mapping-record lifetime.  mm_seg_new() (mm/vma.c) creates one with a single
+ * reference the creator owns; the index and every annotation walk take their own
+ * with mm_seg_get(), and the last mm_seg_put() runs the record's release
+ * callback and frees it. */
 mm_seg_t *mm_seg_get(mm_seg_t *s);
 void      mm_seg_put(mm_seg_t *s);
 

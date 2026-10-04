@@ -825,6 +825,12 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)mm_seg_shadow_miss,
                   (unsigned long)mm_seg_dispatch_seg,
                   (unsigned long)mm_seg_dispatch_fallback);
+            kinfo("[MM-ASM]   map list: entries=%lu overlap=%lu dead=%lu "
+                  "ok=%lu\n",
+                  (unsigned long)rep.seg_extent_vmas,
+                  (unsigned long)rep.seg_extent_mismatch,
+                  (unsigned long)rep.seg_extent_noseg,
+                  (unsigned long)rep.seg_pte_agree);
             kinfo("[MM-ASM]   miss why: hole=%lu leaf=%lu unnamed=%lu "
                   "extent=%lu ambig=%lu bottom=%lu\n",
                   (unsigned long)mm_seg_miss_why[0],
