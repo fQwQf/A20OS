@@ -20,7 +20,38 @@ import subprocess
 import sys
 from pathlib import Path
 
+from mkrootfs import ELF_MACHINES, elf_machine
+
 REPO = Path(__file__).resolve().parent.parent
+
+
+def _media_ignore(src: Path, arch: str, dropped: list[str]):
+    """copytree ignore callback dropping ELFs built for another architecture.
+
+    Media is data, except the Mojang natives/: they are ELF, Mojang publishes
+    them for x86_64 (arm64 on newer versions) and never for riscv64, and
+    mkrootfs' overlay check would (rightly) refuse an image that ships them.
+    Dropping them here keeps the data (jars, assets) -- which is
+    arch-independent -- and turns a build failure into a log line.  With no
+    known --arch nothing is filtered.
+    """
+    want = ELF_MACHINES.get(arch)
+    if want is None:
+        return None
+
+    def ignore(directory: str, names: list[str]) -> list[str]:
+        skip: list[str] = []
+        for n in names:
+            p = Path(directory) / n
+            if p.is_symlink() or not p.is_file():
+                continue
+            machine = elf_machine(p)
+            if machine is not None and machine != want:
+                dropped.append(str(Path(directory).relative_to(src) / n))
+                skip.append(n)
+        return skip
+
+    return ignore
 
 
 def run(cmd: list[str], **kw) -> None:
@@ -100,10 +131,31 @@ def cmd_media_overlay(a) -> int:
         if not src.exists():
             raise SystemExit(f"[PKG] GUI_MEDIA not found: {m}")
         dst = ov / a.media_dir.lstrip("/") / src.name
+        want = ELF_MACHINES.get(a.arch)
+        dropped: list[str] = []
         if src.is_dir():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            shutil.copytree(src, dst, dirs_exist_ok=True,
+                            ignore=_media_ignore(src, a.arch, dropped))
+            # copytree materialises every directory it walks, so one whose
+            # files were all dropped above survives as an empty husk.  Remove
+            # it: an empty natives/ would let the guest launcher sail past its
+            # own presence check and die later in dlopen with no explanation.
+            for d in sorted(dst.rglob("*"), reverse=True):
+                if d.is_dir() and not any(d.iterdir()):
+                    d.rmdir()
+        elif want is not None and elf_machine(src) not in (None, want):
+            # A single-file media entry for another architecture: same rule as
+            # a directory, just without the copytree traversal.
+            dropped.append(src.name)
         else:
             shutil.copy2(src, dst)
+        if dropped:
+            shown = ", ".join(dropped[:3])
+            if len(dropped) > 3:
+                shown += f", ... ({len(dropped)} files)"
+            print(f"[PKG] media: dropped {len(dropped)} ELF file(s) built for "
+                  f"another architecture (target {a.arch or 'unspecified'}): "
+                  f"{shown}", flush=True)
         print(f"[PKG] media: {m} -> {a.media_dir}/{src.name}")
     link = ov / "root" / "Desktop" / "a20-media"
     if link.is_symlink() or link.exists():
