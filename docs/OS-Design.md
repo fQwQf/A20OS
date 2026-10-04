@@ -88,6 +88,12 @@ A20OS 的七个 hosted 架构都进入内核和用户态构建矩阵；ARMv7-M �
 * RISC-V 32：QEMU `qemu-virt-riscv32`
 * ARMv7-M：STM32F103 MCU profile（Cortex-M3、NOMMU，不属于 hosted 用户态矩阵）
 
+另有五块板只有**构建验证**，从未上电，因此它们的门禁只断言"能编译"，不断言"能启动"
+（`check-lao64-board-builds` / `check-arm-board-builds` / `check-x86_64-pc-build`）：
+龙芯 LicheeRV Nano、龙芯 Milk-V Duo（NOMMU）、Rockchip RK3328、全志 H616、
+x86_64 PC（实体瘦客户机）。另有 Kendryte K230 与全志 D1s/F133 两个目标**刻意未移植**，
+阻塞原因见 [platforms/not-yet-ported.md](platforms/not-yet-ported.md)。
+
 构建支持与运行验证是不同层级。`Makefile` 的已验证 SMP 白名单只包含 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 及其同名 `qemu-virt-*` 板；其他组合的 `NR_CPUS>1` 会被拒绝，除非明确设置 `ALLOW_UNVERIFIED_SMP=1` 做 bring-up。PPC64LE 当前按 QEMU pSeries 单核边界记录。
 
 NOMMU 构建支持集合为 `riscv64`、`riscv32`、`aarch64`、`arm32` 与 `armv7m`（`NOMMU_SUPPORTED_ARCHES`）。其中 hosted 运行矩阵 `smoke-arch-mmu-matrix` 只覆盖前四个 hosted 架构的 MMU/NOMMU 组合；ARMv7-M 由 STM32 目标单独覆盖。LoongArch64、x86_64 和 PPC64LE 的 NOMMU 构建在入口被拒绝。

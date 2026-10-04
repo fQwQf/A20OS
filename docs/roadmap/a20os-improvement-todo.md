@@ -274,19 +274,20 @@ checksum 在 tag checksum 回填之后才计算、数据 checksum 只记在 desc
 ## P2：仓库卫生与依赖边界
 
 - [ ] 跨架构 `-Werror` 复核
-  - 当前证据（2026-09-27，`check-kernel-build-all` 中可在本机执行的部分）：riscv64、
-    loongarch64、aarch64、x86_64、ppc64le 以及 VisionFive2 / LS2K1000 板级
+  - 当前证据（2026-10-04 复核，`check-kernel-build-all` 中可在本机执行的部分）：riscv64、
+    loongarch64、aarch64、x86_64、riscv32、ppc64le 以及 VisionFive2 / LS2K1000 板级
     `kernel-only` 全部零警告通过。
+  - riscv32 原有的 11 处 `-Wint-to-pointer-cast`（`kernel/ipc/kexec.c`、
+    `kernel/syscall/trace.c`、`kernel/abi/linux/sys_proc.c`、
+    `kernel/abi/native/sys_core.c`、`kernel/abi/native/sys_native_fs.c`、
+    `kernel/abi/native/sys_native_mm.c`）已全部改经 `uintptr_t` 中转，
+    `kernel/proc/proc.c` 的 `proc_mmap` 区间判定也已改用 `(long)`。
+    **实测 riscv32 `kernel-only` 零警告通过（2026-10-04）**，本项完成。
   - 仍缺：
-    - **riscv32 未通过**：11 处 `-Wint-to-pointer-cast`（32 位下把整数直接转指针），
-      分布在 `kernel/ipc/kexec.c`、`kernel/syscall/trace.c`、
-      `kernel/abi/linux/sys_proc.c`、`kernel/abi/native/sys_core.c`、
-      `kernel/abi/native/sys_native_fs.c`（6 处）、`kernel/abi/native/sys_native_mm.c`。
-      另有一处已修：`kernel/proc/proc.c` 的 `proc_mmap` 错误区间判定原先用
-      `(int64_t)` 转换 `vaddr_t`，32 位下零扩展使该判定成为死代码，已改为 `(long)`。
     - arm32、loongarch32、armv7m 在当前主机缺交叉工具链，未复核。
-  - 完成条件：riscv32 上述 11 处改经 `uintptr_t` 中转，并在有工具链的主机复核
-    arm32 / loongarch32 / armv7m。
+      arm32 与 loongarch32 由 CI 覆盖（arm32 工具链在镜像里，loongarch32 需从源码
+      构建 cloudspurs 工具链），armv7m 由 STM32 目标覆盖。
+  - 完成条件：在有工具链的主机复核 arm32 / loongarch32 / armv7m。
 
 ## 验证环境说明
 
