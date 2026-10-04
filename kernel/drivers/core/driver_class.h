@@ -43,6 +43,7 @@ class_device_t *class_device_get_by_type(uint32_t class_type, unsigned index);
 class_device_t *class_device_get_nth(unsigned index);
 void class_device_get(class_device_t *cdev);
 void class_device_put(class_device_t *cdev);
+class_device_t *class_device_ref_for_device(const struct device *dev);
 int class_device_call_begin(class_device_t *cdev);
 void class_device_call_end(class_device_t *cdev);
 int class_device_has_devnode(const class_device_t *cdev);
