@@ -16,6 +16,9 @@
 #include "core/consts.h"
 #include "core/klog.h"
 #include "core/kallsyms.h"
+#ifdef CONFIG_RISCV64
+#include "hyp/hyp_vcpu.h"
+#endif
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
 __attribute__((weak)) void arch_dump_trap_extra_context(const trap_context_t *ctx)
@@ -590,8 +593,23 @@ void trap_handler(trap_context_t *ctx)
 }
 
 void kernel_trap_handler(trap_context_t *ctx) {
-    TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     reg_t scause = arch_read_cause();
+
+#ifdef CONFIG_RISCV64
+    /*
+     * A guest trap arrives here too: hyp_arch_vcpu_enter() leaves stvec on
+     * the guest prelude, which banks the guest's sp/tp and joins
+     * __trap_from_kernel, so guest and host traps share this vector and this
+     * is the one point both meet.  The query is answered before anything
+     * host-side is recorded in the frame (x[0] holds the address-space token
+     * on the host path) and returns with the guest either resumed through the
+     * normal trap-return below or already gone.
+     */
+    if (hyp_arch_guest_trap(ctx))
+        return;
+#endif
+
+    TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
     vaddr_t sepc = arch_read_epc();
     vaddr_t stval = arch_read_tval();
 

@@ -503,6 +503,39 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-hyp-selftest: PASS; log saved to $log',
     },
+    # End-to-end vcpu slice: a user program creates a VM, loads 56 bytes of
+    # RISC-V machine code into it, runs the guest and asserts the guest left
+    # through the SBI shutdown call.  Runs in the same ABI=linux image as the
+    # selftest case, through the Linux bridge syscalls, because a Linux-ABI
+    # task has no Native handle table to name a VM with.
+    'smoke-hyp-vcpu': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vcpu-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hyp_test', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-selftest, -cpu rv64,h=true included: the
+        # default rv64 CPU does not expose the H extension, hyp_supported()
+        # then refuses every call, and the gate would go red on a kernel that
+        # is merely correct -- or, worse, "pass" against nothing.  The flag is
+        # load-bearing, exactly as it is for the selftest.
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            'HYP_VCPU_TEST: PASS',
+            # The guest's own console output, as its own line.  The PASS line
+            # above only proves the syscall returned; this proves the legacy
+            # SBI console_putchar path really executed inside the guest.
+            # Anchored, because a bare 'HYP' substring is already contained in
+            # 'HYP_VCPU_TEST' and would match vacuously.
+            r'^HYP$',
+        ],
+        'forbid': ['PANIC', 'LOCK-STALL', 'MCS DEADLOCK', 'HYP_VCPU_TEST: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vcpu: PASS; log saved to $log',
+    },
     'smoke-mmprobe': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

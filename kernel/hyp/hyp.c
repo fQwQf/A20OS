@@ -150,9 +150,14 @@ int hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
         return -ENOMEM;
     int idx = arch_pt_vpn(gpa, 0);
 
-    /* Stage-2 has no U bit: privilege in the guest comes from the guest's
-     * own stage-1, not from this table. */
-    pte_t flags = (prot | PTE_R | PTE_A | PTE_D) & ~(pte_t)PTE_U;
+    /* Stage-2 makes no privilege decision about the GUEST: the guest's own
+     * stage-1 has already had its say by the time this table is walked.  It
+     * is the G-stage WALK itself that runs at the privilege the guest's access
+     * implies, and that privilege is U for a VS-mode access -- a leaf without
+     * U is refused before its R/W/X are even looked at ("supervisor PTE flags
+     * when not S mode", QEMU target/riscv/cpu_helper.c).  So U is set here
+     * and a caller that wants a supervisor leaf cannot have one. */
+    pte_t flags = (prot | PTE_R | PTE_A | PTE_D | PTE_U);
 
     mm_pt_node_lock(table);
     if (table[idx] & PTE_V) {

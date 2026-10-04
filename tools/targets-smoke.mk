@@ -156,6 +156,13 @@ smoke-mm-stress:
 smoke-hyp-selftest:
 	$(PYTHON) tools/smoke.py smoke-hyp-selftest
 
+# End-to-end vcpu slice gate: a user program creates a VM, loads a
+# hand-encoded guest into it, runs it, and the guest must exit through the SBI
+# shutdown call with its console output visible.  Needs -cpu rv64,h=true, which
+# the case argv carries.
+smoke-hyp-vcpu:
+	$(PYTHON) tools/smoke.py smoke-hyp-vcpu
+
 smoke-mmprobe:
 	$(PYTHON) tools/smoke.py smoke-mmprobe
 

@@ -25,7 +25,7 @@ typedef struct a20_syscall_entry {
 } a20_syscall_entry_t;
 
 /* Number of slots in the direct-indexed dispatch table. Native numbers are
- * class<<8 | index and the highest assigned one is 0x0E04; syscall_table.c
+ * class<<8 | index and the highest assigned one is 0x0F04; syscall_table.c
  * static-asserts every entry below this bound so a future number that does
  * not fit fails the build instead of becoming an unreachable syscall. */
 #define A20_SYSCALL_TABLE_SIZE  0x1000

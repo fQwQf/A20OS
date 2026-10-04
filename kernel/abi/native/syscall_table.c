@@ -157,6 +157,13 @@ int64_t sys_a20_monitor_query(const a20_syscall_args_t *args);
 int64_t sys_a20_task_mem_read(const a20_syscall_args_t *args);
 int64_t sys_a20_task_mem_write(const a20_syscall_args_t *args);
 
+/* Hypervisor / vcpu slice (0x0F00) — sys_native_hyp.c */
+int64_t sys_a20_hyp_vm_create(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_load(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_create(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vcpu_run(const a20_syscall_args_t *args);
+int64_t sys_a20_hyp_vm_destroy(const a20_syscall_args_t *args);
+
 /* Generate handler stubs from .def */
 #define A20_NATIVE_SYSCALL(name, ...) \
     static int64_t a20_handle_##name(const a20_syscall_args_t *args) \
