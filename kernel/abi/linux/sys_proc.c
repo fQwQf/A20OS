@@ -1163,7 +1163,8 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
             mm_pt_audit_all(&rep);
             kinfo("[MM-ASM] pt_pages=%lu entries=%lu missing_meta=%lu "
                   "present=%lu absent=%lu prot=%lu cow=%lu vma=%lu "
-                  "vmai=%lu cls=%lu safe=%lu anon_virt=%lu "
+                  "vmai=%lu cls=%lu safe=%lu anon_virt=%lu huge=%lu "
+                  "huge_install=%lu "
                   "seg_slots=%lu seg_bad=%lu seg_kind=%lu "
                   "seg_ok=%lu seg_diff=%lu seg_miss=%lu "
                   "seg_dispatch=%lu seg_fallback=%lu\n",
@@ -1178,6 +1179,8 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)rep.cls_mismatch,
                   (unsigned long)rep.safe_mismatch,
                   (unsigned long)rep.anon_virt,
+                  (unsigned long)rep.huge_leaves,
+                  (unsigned long)mm_huge_install_count,
                   (unsigned long)rep.seg_slots,
                   (unsigned long)rep.seg_bad_slot,
                   (unsigned long)rep.seg_kind_mismatch,
