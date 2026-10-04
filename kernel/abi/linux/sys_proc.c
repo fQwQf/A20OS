@@ -1203,6 +1203,12 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
             kinfo("[MM-ASM]   annot lost: table_full=%lu nibbles_full=%lu\n",
                   (unsigned long)mm_seg_annot_lost[0],
                   (unsigned long)mm_seg_annot_lost[1]);
+            /* The index-overflow fallback.  Zero here is NOT a pass: it means
+             * no address space in this run had more than MM_SEG_INDEX_CAPACITY
+             * mappings, so the list-walk branch of mm_seg_find() never ran.
+             * Read it as "unexercised", not "verified". */
+            kinfo("[MM-ASM]   seg index overflow: %lu\n",
+                  (unsigned long)mm_seg_index_overflow);
             /* One line per level rather than three inline slots: the array has
              * eight entries and the inline form silently hid levels 3..7,
              * which is precisely where a loss is fine-grained rather than a

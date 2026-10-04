@@ -399,7 +399,11 @@ check-honesty-policy:
 	  echo "  FAIL read/write no longer charge I/O accounting"; exit 1; fi
 	@echo "check-honesty-policy: PASS"
 
-check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race
+# smoke-mm-seg-index-overflow is here, and not only as a case of its own,
+# because it is the only workload in the tree that reaches the ordered index's
+# capacity-overflow fallback.  The aggregate is what people actually run, so a
+# branch covered only by a case nobody invokes is a branch nobody verifies.
+check-mm-lock-model: smoke-mm-stress smoke-mm-fork-exec-race smoke-mm-seg-index-overflow
 	@$(PYTHON) tools/gates.py check-mm-lock-model
 	@echo "check-mm-lock-model: PASS"
 
