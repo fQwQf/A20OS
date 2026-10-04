@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import assert_never
 
 from a20_board import run_flash, run_package
+from a20_complete import BASH_COMPLETION, candidates as completion_candidates
 from a20_error import (
     A20Error,
     BoardUnreachable,
@@ -761,7 +762,9 @@ def _add_resource_flags(parser: argparse.ArgumentParser) -> None:
                    help="give up waiting after SEC seconds (0 waits forever)")
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The whole CLI tree.  Separated from main() so tab completion (see
+    a20_complete) can introspect the real parser instead of a copy of it."""
     parser = argparse.ArgumentParser(
         prog="a20",
         description="Declarative instance runner for A20OS (see docs/instances.md).",
@@ -834,12 +837,35 @@ def main(argv: list[str] | None = None) -> int:
     add_instance_cmd("package", "build and assemble the artifact in [package]",
                      with_make_args=True)
 
+    # Tab completion: `completion` prints the shell shim, `complete` answers
+    # one completion query (hidden -- it is plumbing the shim calls).  Both
+    # are described in tools/a20_complete.
+    p_completion = sub.add_parser(
+        "completion", help="print the shell completion script (bash)")
+    p_completion.add_argument("shell", nargs="?", choices=("bash",), default="bash",
+                              help="shell flavor (zsh works via bashcompinit)")
+    p_complete = sub.add_parser("complete", help=argparse.SUPPRESS)
+    # help=SUPPRESS alone still lists the command on this argparse (rendered
+    # literally as "==SUPPRESS=="); dropping the pseudo action that backs the
+    # listing is what actually hides it.  sub.choices keeps the parser, which
+    # is all completion introspection needs.
+    sub._choices_actions = [a for a in sub._choices_actions
+                            if a.dest != "complete"]
+    p_complete.add_argument("words", nargs=argparse.REMAINDER,
+                            help="words after the program name; last is the word under the cursor")
+
     # Every command that calls _gate_resources needs the waiting flags, not just
     # the three that launch a guest: build, flash and package are gated too, and
     # omitting them left them crashing on a missing attribute before doing any
     # work at all.
     for gated in ("build", "run", "debug", "test", "flash", "package"):
         _add_resource_flags(sub.choices[gated])
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
 
     # Unknown arguments (after an optional `--`) are forwarded to make. Using
     ns, passthrough = parser.parse_known_args(argv)
@@ -902,6 +928,13 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_flash(ns)
         case "package":
             return cmd_package(ns)
+        case "completion":
+            print(BASH_COMPLETION, end="")
+            return EXIT_OK
+        case "complete":
+            for word in completion_candidates(build_parser(), ns.words):
+                print(word)
+            return EXIT_OK
         case unreachable:
             assert_never(unreachable)
 
