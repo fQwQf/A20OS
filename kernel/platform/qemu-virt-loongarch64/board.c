@@ -227,6 +227,13 @@ static const board_config_t qemu_virt_la64 = {
     .poweroff          = la64_poweroff,
     .reboot            = la64_reboot,
     .enumerate_devices = la64_enumerate_devices,
+    /* No UART IRQ route exists here: nothing on this board registers one, so
+     * the 16550 receive FIFO is never refilled by an interrupt.  The console
+     * driver therefore polls the LSR directly, the same way the other boards
+     * without a console IRQ do.  QEMU's virt machine hands over a UART that is
+     * already enabled for receive (arch_uart_init sets IER bit 0), so the only
+     * thing the IRQ route would have added was an interrupt nobody raises. */
+    .uart_rx_is_polled = 1,
 };
 
 const board_config_t *const current_board = &qemu_virt_la64;

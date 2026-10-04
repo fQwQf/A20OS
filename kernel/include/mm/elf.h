@@ -179,6 +179,22 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info);
 /* Verify ELF header sanity */
 int elf_check_header(const Elf64_Ehdr *eh);
 
+/* Peek at an open file and report whether it is a structurally valid
+ * 64-bit LE ELF for a machine that is *not* this host's.  Returns 0 and
+ * writes the e_machine to *machine_out on a hit; returns -ENOEXEC for a
+ * native binary, a non-ELF file, or a corrupt/truncated header.
+ *
+ * Note what this deliberately does not decide: whether that machine is
+ * actually translatable.  That is a property of the channel's cmdline
+ * configuration rather than of the header, and xlator_lookup() owns it.
+ * An unknown e_machine still ends up on the ordinary ENOEXEC path -- it
+ * just gets there by failing the configuration lookup rather than by
+ * being rejected here.
+ *
+ * Callers must treat only 0 as "foreign" and fall through to the ordinary
+ * ENOEXEC path for everything else. */
+int elf_is_foreign_arch(int fd, uint16_t *machine_out);
+
 /* Build initial user stack with argc/argv/envp/auxv.
  * vdso_ehdr, when nonzero, is published as AT_SYSINFO_EHDR (mm/vdso.h);
  * the caller must have mapped the vDSO image at that address.

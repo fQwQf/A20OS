@@ -93,6 +93,15 @@
 - [net/network-config-design.md](net/network-config-design.md)：网络配置设计（`a20.*` 键、`a20.tcpmode` 两档模式、运行时控制面）
 - [net/net-lanes.md](net/net-lanes.md)：网络 lane 设计与阶段顺序（阶段 A/B 已落地；含缓冲改造被锁契约挡住的原因）
 
+### 外来架构翻译通道（exec-xlator）
+
+`execve` 一个外来架构（x86_64 / aarch64）的 Linux 可执行文件，内核把它改写成一次对用户态翻译器的就地 re-exec。不了解本系统的人从索引点进来可以按角色直接选入口：
+
+- [exec-xlator/README.md](exec-xlator/README.md)：机制说明与三分钟快速上手（入口页）
+- [exec-xlator/01-usage.md](exec-xlator/01-usage.md)：使用手册——三层开关、启动键与 argv 模板语法、`/proc/a20/xlator`、无交叉编译器的验证路径、排查表
+- [exec-xlator/02-integration.md](exec-xlator/02-integration.md)：接入指南——翻译器需要满足什么契约、加一个 guest 架构要改几处、Rosetta 型包装器与 Prism 型 AOT 的可行性
+- [exec-xlator/03-internals.md](exec-xlator/03-internals.md)：内核内部——形态取舍、代码地图、`xlator_*` API 契约、并发不变量、已知代价
+
 ### Linux ABI 兼容层
 
 - `kernel/abi/linux/syscall_coverage.md`：366 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
