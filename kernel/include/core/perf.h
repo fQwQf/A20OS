@@ -58,6 +58,11 @@ typedef enum a20_perf_counter {
      * it, a THP fault that silently fell back to 4K pages makes every
      * huge-page assertion pass against a workload that never had one. */
     A20_PERF_MM_HUGE_FAULTS,
+    /* COW breaks served by the lockless slice (mm_cow_from_status): the
+     * shared-to-private copy installed without mm->lock.  The authoritative
+     * non-vacuity read is the plain mm_cow_from_status_count global in
+     * [MM-ASM]; this perf counter exists for armed measurement windows. */
+    A20_PERF_MM_COW_FROM_STATUS,
     /* Single-level model: page-table lock behaviour.  A cursor that finds the
      * covering node busy is contending with a transaction on an overlapping
      * range; the ratio of contended to total acquisitions is the direct
