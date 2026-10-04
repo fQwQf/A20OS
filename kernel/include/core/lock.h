@@ -206,8 +206,19 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
         if (site)
             spin_atomic_max(&site->max_spins, spins);
     }
+    #if CONFIG_DEBUG_LOCKS
+    /* The owner is diagnostic state: it feeds nothing but [LOCK-STALL]'s
+     * reporting identity and the owner == cur self-deadlock test, and only
+     * once a lock has already spun for five seconds.  Recording it costs a
+     * store on every acquire at all ~920 call sites, so it stays behind
+     * CONFIG_DEBUG_LOCKS -- the same choice spin_trylock_irqsave() makes.
+     * Left unconditional it would be wrong as well as slow: cur is only read
+     * once this CPU has actually failed to take the lock, so an uncontended
+     * acquire would publish NULL and erase the very holder the stall report
+     * is trying to name. */
     lock->owner = cur;
     lock->owner_ra = waiter_ra;
+#endif
 }
 
 static inline void spin_lock(spinlock_t *lock) {
