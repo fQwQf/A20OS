@@ -149,6 +149,7 @@ int ntfs_save_bmap(ntfs_sb_t *sb, uint8_t *data, uint64_t size);
 uint64_t ntfs_alloc_clusters(ntfs_sb_t *sb, uint64_t count);
 void ntfs_free_clusters(ntfs_sb_t *sb, uint64_t lcn, uint64_t count);
 int64_t ntfs_find_free_record(ntfs_sb_t *sb, uint64_t start);
+void ntfs_mft_bitmap_set(ntfs_sb_t *sb, uint64_t index, int in_use);
 void ntfs_free_mft_record(ntfs_sb_t *sb, uint64_t index);
 int ntfs_build_file_name_attr(uint8_t *out, size_t cap,
                                      uint64_t parent_ref, const char *name,
