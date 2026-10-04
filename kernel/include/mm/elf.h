@@ -179,21 +179,52 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info);
 /* Verify ELF header sanity */
 int elf_check_header(const Elf64_Ehdr *eh);
 
+/* Which ABI a guest executable is written against.
+ *
+ * This is a fact about the *file*, read out of its program headers, so it is
+ * declared here rather than in the translation channel: the loader is what
+ * already answers it (PT_A20_START_INFO sets elf_load_info_t.is_native_abi),
+ * and every consumer of that answer should read the same enumeration.
+ *
+ * Both members are ELF64 for this host's machine, so the architecture alone
+ * does not tell them apart -- which is exactly why the translation channel
+ * has to key on the pair rather than on e_machine. */
+typedef enum {
+    ELF_ABI_LINUX  = 0,   /* an ordinary Linux-ABI executable */
+    ELF_ABI_NATIVE = 1,   /* carries PT_A20_START_INFO: A20 native ABI */
+} elf_abi_t;
+
+/* A foreign guest, identified by the pair the channel is configured on. */
+typedef struct {
+    uint16_t machine;     /* EM_* */
+    uint8_t  abi;         /* elf_abi_t */
+} elf_guest_key_t;
+
 /* Peek at an open file and report whether it is a structurally valid
  * 64-bit LE ELF for a machine that is *not* this host's.  Returns 0 and
- * writes the e_machine to *machine_out on a hit; returns -ENOEXEC for a
- * native binary, a non-ELF file, or a corrupt/truncated header.
+ * fills *out with its e_machine and its ABI on a hit; returns -ENOEXEC for
+ * a native binary, a non-ELF file, or a corrupt/truncated header.
  *
- * Note what this deliberately does not decide: whether that machine is
- * actually translatable.  That is a property of the channel's cmdline
- * configuration rather than of the header, and xlator_lookup() owns it.
- * An unknown e_machine still ends up on the ordinary ENOEXEC path -- it
- * just gets there by failing the configuration lookup rather than by
- * being rejected here.
+ * The ABI is derived here, not configured: an image carrying
+ * PT_A20_START_INFO is a native-ABI program whatever the administrator has
+ * provisioned, and one without it is a Linux-ABI program.  Deriving it is
+ * what lets the channel treat the two as separate rows of one registry
+ * instead of as "foreign" and "not foreign" -- see docs/exec-xlator/
+ * 04-extending.md for why that distinction has to exist before a native-ABI
+ * translator exists, not after.
+ *
+ * Note what this deliberately does not decide: whether that (machine, ABI)
+ * pair is actually translatable.  That is a property of the channel's
+ * cmdline configuration rather than of the file, and xlator_lookup() owns
+ * it.  An unknown e_machine still ends up on the ordinary ENOEXEC path --
+ * it just gets there by failing the configuration lookup rather than by
+ * being rejected here.  Likewise a foreign *native* image: it is reported
+ * here, and refused there, because refusing it here would put a statement
+ * about translation policy in the loader.
  *
  * Callers must treat only 0 as "foreign" and fall through to the ordinary
  * ENOEXEC path for everything else. */
-int elf_is_foreign_arch(int fd, uint16_t *machine_out);
+int elf_probe_foreign(int fd, elf_guest_key_t *out);
 
 /* Build initial user stack with argc/argv/envp/auxv.
  * vdso_ehdr, when nonzero, is published as AT_SYSINFO_EHDR (mm/vdso.h);
