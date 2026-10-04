@@ -195,9 +195,16 @@ int64_t a20_pager_supply_pages(a20_pager_t *pager, struct vmo *vmo,
     spin_unlock(&vmo->lock);
 
     if (supplied > 0) {
-        for (uint64_t off = 0; off < supplied; off += PAGE_SIZE)
-            wait_queue_wake_all(&vmo->faulters, (vmo_offset + off) / PAGE_SIZE,
-                                PROC_WAKE_EVENT);
+        /* One supply of several pages took the faulters lock once per page,
+         * re-walking the whole waiter list each time; the pages supplied are
+         * contiguous, so they are released in a single pass.  A one-page
+         * supply keeps the keyed wake, which is the common case and does not
+         * need to disturb faulters parked on other offsets. */
+        uint64_t first = vmo_offset / PAGE_SIZE;
+        if (supplied == PAGE_SIZE)
+            wait_queue_wake_all(&vmo->faulters, first, PROC_WAKE_EVENT);
+        else
+            wait_queue_wake_all(&vmo->faulters, 0, PROC_WAKE_EVENT);
     }
     return (int64_t)supplied;
 }

@@ -286,7 +286,9 @@ int sysv_msg_send(int msqid, const void *msgp, size_t msgsz, int msgflg)
     q->qnum++;
     q->stime = timer_get_ticks();
     q->lspid = cur ? cur->pid : 0;
-    wait_queue_wake_all(&q->recv_wq, 0, PROC_WAKE_EVENT);
+    /* One message was published, so one receiver has work: waking every
+     * blocked reader made N-1 of them re-run the type scan and re-park. */
+    wait_queue_wake_one(&q->recv_wq, 0, PROC_WAKE_EVENT);
     spin_unlock_irqrestore(&g_msg_lock, flags);
     return 0;
 }

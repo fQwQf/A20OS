@@ -5,6 +5,34 @@
 int syscall_sig_diag_count = 0;
 int syscall_sleep_diag_count = 0;
 
+/*
+ * Build `base` + `rel` into `dst`, inserting one '/' between them when `sep`
+ * is set and `base` does not already end in one. Returns the length written,
+ * or -1 when the result would not fit in `dstsz`.
+ *
+ * Path resolution runs this on every path-taking syscall, so it moves exactly
+ * the bytes involved instead of walking a "%s" format; the no-op cases (empty
+ * rel, no separator wanted) degrade to a single strcpy of `base`.
+ */
+static int path_build(char *dst, size_t dstsz, const char *base, const char *rel, int sep)
+{
+    size_t blen = strlen(base);
+    size_t rlen = strlen(rel);
+    if (sep && rlen > 0 && blen > 0 && base[blen - 1] != '/')
+        sep = 1;
+    else
+        sep = 0;
+    size_t total = blen + (size_t)sep + rlen;
+    if (total >= dstsz)
+        return -1;
+    memcpy(dst, base, blen);
+    if (sep)
+        dst[blen] = '/';
+    memcpy(dst + blen + sep, rel, rlen);
+    dst[total] = '\0';
+    return (int)total;
+}
+
 int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
     if (!path || !out || outsz == 0) return -EFAULT;
     task_t *t = proc_current();
@@ -12,66 +40,49 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
     if (strlen(path) >= outsz - 1)
         return -ENAMETOOLONG;
 
-    const char *base = NULL;
+    /* An absolute path is already the task-logical path, so it is joined
+     * straight into `out` below rather than staged in a second buffer. */
+    const char *logical = path;
     bool dirfd_path_is_physical = false;
     char base_buf[MAX_PATH_LEN];
-    char logical[MAX_PATH_LEN];
-    if (path[0] == '/') {
-        strncpy(logical, path, sizeof(logical) - 1);
-        logical[sizeof(logical) - 1] = '\0';
-    } else if (dirfd == AT_FDCWD) {
-        base = t->fs.cwd[0] ? t->fs.cwd : "/";
-        size_t len = strlen(base);
-        int n;
-        if (path[0] == '\0') {
-            n = snprintf(logical, sizeof(logical), "%s", base);
-        } else if (len > 0 && base[len - 1] == '/') {
-            n = snprintf(logical, sizeof(logical), "%s%s", base, path);
+    char joined[MAX_PATH_LEN];
+    if (path[0] != '/') {
+        const char *base = NULL;
+        if (dirfd == AT_FDCWD) {
+            base = t->fs.cwd[0] ? t->fs.cwd : "/";
         } else {
-            n = snprintf(logical, sizeof(logical), "%s/%s", base, path);
+            if (dirfd < 0 || dirfd >= MAX_FILES) return -EBADF;
+            int gfd = fdtable_get(t, dirfd);
+            if (gfd < 0) return -EBADF;
+            vfile_t *vf = vfs_get_file_ref(gfd);
+            if (!vf) return -EBADF;
+            if (!vf->vnode) {
+                vfs_put_file_ref(gfd, vf);
+                return -EBADF;
+            }
+            if (vf->vnode->type != VFS_FT_DIR) {
+                vfs_put_file_ref(gfd, vf);
+                return -ENOTDIR;
+            }
+            if (!vf->path[0]) {
+                vfs_put_file_ref(gfd, vf);
+                return -EINVAL;
+            } else {
+                strncpy(base_buf, vf->path, sizeof(base_buf) - 1);
+                base_buf[sizeof(base_buf) - 1] = '\0';
+            }
+            vfs_put_file_ref(gfd, vf);
+            /*
+             * vfile::path is stored in the global VFS namespace.  In particular,
+             * after chroot it already contains root_path.  Keep that provenance:
+             * treating it as a task-logical path would prefix root_path twice.
+             */
+            base = base_buf;
+            dirfd_path_is_physical = true;
         }
-        if (n < 0 || (size_t)n >= sizeof(logical))
+        if (path_build(joined, sizeof(joined), base, path, 1) < 0)
             return -ENAMETOOLONG;
-    } else {
-        if (dirfd < 0 || dirfd >= MAX_FILES) return -EBADF;
-        int gfd = fdtable_get(t, dirfd);
-        if (gfd < 0) return -EBADF;
-        vfile_t *vf = vfs_get_file_ref(gfd);
-        if (!vf) return -EBADF;
-        if (!vf->vnode) {
-            vfs_put_file_ref(gfd, vf);
-            return -EBADF;
-        }
-        if (vf->vnode->type != VFS_FT_DIR) {
-            vfs_put_file_ref(gfd, vf);
-            return -ENOTDIR;
-        }
-        if (!vf->path[0]) {
-            vfs_put_file_ref(gfd, vf);
-            return -EINVAL;
-        } else {
-            strncpy(base_buf, vf->path, sizeof(base_buf) - 1);
-            base_buf[sizeof(base_buf) - 1] = '\0';
-        }
-        vfs_put_file_ref(gfd, vf);
-        /*
-         * vfile::path is stored in the global VFS namespace.  In particular,
-         * after chroot it already contains root_path.  Keep that provenance:
-         * treating it as a task-logical path would prefix root_path twice.
-         */
-        base = base_buf;
-        dirfd_path_is_physical = true;
-        size_t len = strlen(base);
-        int n;
-        if (path[0] == '\0') {
-            n = snprintf(logical, sizeof(logical), "%s", base);
-        } else if (len > 0 && base[len - 1] == '/') {
-            n = snprintf(logical, sizeof(logical), "%s%s", base, path);
-        } else {
-            n = snprintf(logical, sizeof(logical), "%s/%s", base, path);
-        }
-        if (n < 0 || (size_t)n >= sizeof(logical))
-            return -ENAMETOOLONG;
+        logical = joined;
     }
 
     const char *root = t->fs.root_path[0] ? t->fs.root_path : "/";
@@ -79,15 +90,15 @@ int syscall_path_at(int dirfd, const char *path, char *out, size_t outsz) {
     if (dirfd_path_is_physical) {
         if (strcmp(root, "/") != 0 && !path_is_beneath(root, base_buf))
             return -EACCES;
-        n = snprintf(out, outsz, "%s", logical);
+        n = path_build(out, outsz, logical, "", 0);
     } else if (strcmp(root, "/") == 0) {
-        n = snprintf(out, outsz, "%s", logical);
+        n = path_build(out, outsz, logical, "", 0);
     } else if (strcmp(logical, "/") == 0) {
-        n = snprintf(out, outsz, "%s", root);
+        n = path_build(out, outsz, root, "", 0);
     } else {
-        n = snprintf(out, outsz, "%s%s", root, logical);
+        n = path_build(out, outsz, root, logical, 0);
     }
-    if (n < 0 || (size_t)n >= outsz)
+    if (n < 0)
         return -ENAMETOOLONG;
     out[outsz - 1] = '\0';
     if (strcmp(root, "/") != 0)
