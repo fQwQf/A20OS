@@ -478,6 +478,31 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-stress: PASS; log saved to $log',
     },
+    'smoke-hyp-selftest': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-selftest-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['cat /proc/a20/hyp_selftest', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # The per-step lines go to the console; the read's one-line
+            # verdict is what a shell can gate on.  Reading the file RUNS
+            # the selftest (create -> map 4 pages -> translate/readback ->
+            # lend-flag -> s2 audit -> unmap/remap/-EEXIST -> destroy).
+            # -cpu rv64,h=true: the default rv64 CPU does not expose the H
+            # extension, and hyp_supported() then makes the file SKIP --
+            # which would make this gate pass while testing nothing.
+            'HYP_SELFTEST: PASS',
+            'hyp_selftest=PASS',
+        ],
+        'forbid': [],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-selftest: PASS; log saved to $log',
+    },
     'smoke-mmprobe': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
