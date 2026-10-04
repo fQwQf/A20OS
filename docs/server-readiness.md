@@ -237,22 +237,23 @@ OOM 评分。
   任务可以独占 100% CPU，无预算、无计量。
 - **`proc_lock` 是当前最大的压倒性热点**：4 核实测 2528 次竞争 / 951 万自旋，
   8 核 33335 次 / 1619 万自旋，多轮优化后仍 12–20K。根因是整个任务表只有
-  一把全局自旋锁（`kernel/proc/proc.c:42`），`sched.c` 里有 30 处取锁点。
+  一把全局自旋锁（`kernel/proc/proc.c:43`），`sched.c` 里有 30 处取锁点。
   归因标签要当心：实测最大的一行是 `proc_sched_safe_point+0x42`，但
-  `proc_sched_safe_point()`（`sched.c:1005-1014`）只读一个 per-CPU 的
+  `proc_sched_safe_point()`（`sched.c:1028-1036`）只读一个 per-CPU 的
   `need_resched`，它自己不取 `proc_lock`；那一行其实是内联进去的
   `proc_yield()`，与 lwIP 那次 `net_vfile_read+0xf6` 是同一个"返回地址跳过
-  一帧"的假象。`proc_yield()`（`sched.c:1923-1934`）同样不直接取锁：它调
+  一帧"的假象。`proc_yield()`（`sched.c:1988-1999`）同样不直接取锁：它调
   `proc_make_ready()`（状态转移）与 `sched()`（切换发布），二者才按
-  `proc.h:112` 的契约去取全局 `proc_lock`。**所以争用实际落在上下文切换/
-  状态转移路径上**，与 `proc.h:106-113` 描述的"切换发布要取 proc_lock"一致。
+  `kernel/include/proc/proc.h:135-142` 的契约去取全局 `proc_lock`。**所以争用实际落在上下文切换/
+  状态转移路径上**，与 `kernel/include/proc/proc.h:135-142` 描述的"切换发布要取 proc_lock"一致。
   这里曾断言成因是"全局锁被跨着一段 TLB 收敛等待持有"，**该断言已被实测推翻**。
   代码事实仍然成立：`context_switch_locked()` 在持有 `proc_lock` 的临界区内
-  调用 `mm_context_enter(next->mm, cpu)`（`sched.c:1790`，锁在 `sched.c:1829` 取），
-  而 `mm_context_enter()`（`mm/vm.c:76-102`）内部是一个 `for(;;)`：只要
+  调用 `mm_context_enter(next->mm, cpu)`（`sched.c:1855`；`proc_lock` 由调用方取，
+  在 `sched.c:1835` 放），而 `mm_context_enter()`（`mm/vm.c:120-151`）内部是一个
+  `for(;;)`：只要
   `mm->tlb_cpu_generation[cpu] != mm->tlb_generation` 就反复
   `arch_tlb_flush_asid_local()`；`tlb_generation` 会被
-  `mm_tlb_shootdown_page()`（`vm.c:277`）持续累加。
+  `mm_tlb_shootdown_page()`（`vm.c:357`）持续累加。
   但它并不是本轮争用的成因。为此在 `mm_context_enter()` 内加入三个计数器
   （`mm_context_enters` / `mm_tlb_converge_waits` / `mm_tlb_converge_flushes`，
   经 `/proc/a20/perf` 导出），在 4 核 `smoke-smp-lock-contention` 下实测：
@@ -277,7 +278,9 @@ OOM 评分。
   这条已尝试并失败，结论是**当前验证环境下拿不到可信的持锁时长**。做法是给
   riscv64/aarch64/x86_64 补 `arch_read_cycle()`（riscv32 早已有同名封装，其余架构
   返回 0 作"无计数器"哨兵），在取锁时打时间戳、放锁时收口并按 `owner_ra` 归到
-  调用点。两个实测障碍，都不是代码能绕开的：
+  调用点。（注意第三条障碍：`owner_ra` 现在只在 `CONFIG_DEBUG_LOCKS=1` 下由
+  真正争用的 acquire 写入，见下文；即便前两条障碍不存在，默认构建里也拿不到它。）
+  两个实测障碍，都不是代码能绕开的：
    1. QEMU TCG 的 `rdcycle` 不保证单调，它由宿主时间派生，多 vCPU 线程之间
       不一致。直接相减会下溢成 `18446744009993433250`（≈1.8e19）；加"单调性检查"
       之后不再下溢，但仍得到 `holdmax=31958042598`（≈32s）这种对微秒级临界区
@@ -289,7 +292,7 @@ OOM 评分。
   （例如统计"持锁期间该 CPU 是否发生过调度切换"）。
   另需注意：这些调用点标签与先前 `proc_sched_safe_point` 一样受"返回地址跳过
   被内联帧"限制（`sched()` 是内联的），符号名未必就是真正取锁的那个函数。
-  `sched.c:1736` 的注释自己写着 *"mm_context_enter() only uses
+  `sched.c:1790` 的注释自己写着 *"mm_context_enter() only uses
   atomics"*：它按设计不需要 `proc_lock` 的一致性，却仍然被罩在临界区里。
   但不能简单把它前移：地址空间切换必须与 `proc_set_current()` 之间的
   中断窗口保持一致，否则中断处理会在"新 mm + 旧 task"的错配状态下运行。
@@ -299,16 +302,17 @@ OOM 评分。
   这段循环在本平台确实会执行，不是死代码，上面的计数器已经直接证明：
   136 次进入、其中 15 次真的刷新过 ASID。平台相关性依然要交代清楚：QEMU riscv64
   启动日志为 `[MM] RISC-V ASID mask=0xffff bits=16`（`riscv64/platform/asid.c:36`），
-  所以 `mm->arch_asid` 非零，`vm.c:83` 的条件成立；arch.h 的通用默认是
+  所以 `mm->arch_asid` 非零，`vm.c:127` 的条件成立；arch.h 的通用默认是
   `ARCH_MM_CONTEXT_ALLOC() 0U`，只有 riscv64 覆写为 `riscv64_asid_alloc()`。
   **在 `arch_asid == 0` 的架构上这三个计数器恒为 0，引用本节数字时不能跨平台套用**。
 
-  但也不能简单前移：`sched.c:1829` 那条调用点是本函数自己取锁，可以
-  改成"先关中断 → mm_context_enter → 再取锁发布"；可是 `sched.c:1885`
-  那条进入时 `proc_lock` 已经被 `sched()` 更早取走了（见 :1880 注释，
+  但也不能简单前移：`context_switch()`（`sched.c:1894`）那条调用点是本函数
+  自己取锁，可以改成"先关中断 → mm_context_enter → 再取锁发布"；可是
+  `sched()` 那条进入时 `proc_lock` 已经被更早取走了（取锁在 `sched.c:1963`，
+  进入 `context_switch_locked()` 在 `sched.c:1950`，见 :1944 注释，
   刻意为了"每次切换只取一次锁"）。在那里要先放锁才能做 mm 切换，而放锁之后
   `next` 可能被别的 CPU 抢走，必须靠 `dispatching` 引用计数兜住并重新校验。
-  这一点已核对过 `sched_runq_unpick_locked()`（`sched.c:1642`）：它的拒绝条件
+  这一点已核对过 `sched_runq_unpick_locked()`（`sched.c:1686`）：它的拒绝条件
   只在 `!t->dispatching` 时成立，也就是说一个仍处于 `dispatching` 的任务
   是允许被别的 CPU unpick 的（随后清掉 `dispatching` 与 `owner_cpu`）。
 
@@ -325,8 +329,8 @@ OOM 评分。
   而 `max=` 指出的正是"次数极少、单次极长"。到此为止是站得住的。
 
   但"因此成因就是持锁临界区里的全系统遍历"这一步不成立，本轮已撤回。
-  那样推出的 4 处候选（`mmap.c:37`、`proc.c:200`、`loadavg.c:54`、
-  `cg_mem.c:116`）经核对在实测负载下基本不会执行：`net_stress_test` 的
+  那样推出的 4 处候选（`kernel/mm/mmap.c:39`、`proc.c:200`、`kernel/proc/loadavg.c:53`、
+  `cg_mem.c:121`）经核对在实测负载下基本不会执行：`net_stress_test` 的
   `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；
   `proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，
   而门禁只 cat `/proc/a20/perf` 与 `lock_contention`，不读 meminfo。
@@ -354,11 +358,17 @@ OOM 评分。
   但要点明一个限制（本轮自查后修正了写法）：这些标签是**等待方**（发起
   acquire 并自旋的一方），不是持有方。`proc_clone_impl` 自旋 16 万次只说明
   "有别人长时间持锁"，本身不能说明是谁。
-  此前这里写的是"等待方数据在原理上无法指认持有者"，**这句话过头了**：
-  `spinlock_t.owner_ra`（`lock.h:62`）在 acquire 时写入持有者 RA
-  （`lock.h:197`、`irqsave` 变体 `:232`），到 unlock 才清（`:206`），
-  也就是整个持有期间持有者身份对等待方始终可见；现成的 `[LOCK-STALL]`
-  诊断（`lock.h:158-163`）本来就同时打印 `owner_ra` 与 `waiter_ra`。
+  此前这里写的是"等待方数据在原理上无法指认持有者"，这句话**只对了一半**，
+  且该修正本身也需要随实现更新：`spinlock_t.owner_ra`（`lock.h` 的
+  `spinlock` 结构）在 acquire 时写入持有者 RA，到 `spin_unlock()` 才清，
+  而现成的 `[LOCK-STALL]` 诊断本来就同时打印 `owner_ra` 与 `waiter_ra`。
+  但这条路径**只在 `CONFIG_DEBUG_LOCKS=1` 的调试构建里存在**，且只有真正
+  发生争用的 acquire 才写：默认构建把 `owner`/`owner_ra` 留空，因为这两个
+  字段只服务于 stall 诊断与 `owner == cur` 自死锁判定，而把它们写在全部
+  ~920 个 acquire 点上会给无争用快路径增加一次存储。**因此在默认构建上，
+  持有者身份并不是"对等待方始终可见"**——要靠 `owner_ra` 归因持有方，
+  必须开 `CONFIG_DEBUG_LOCKS` 重编译。引用本文时不要再按行号定位
+  `lock.h`：相关字段与诊断的行号已随上述改动漂移。
 
   但"不依赖时钟的持有方归因"这条路本轮已试过并否决，两次尝试都失败：
   (1) 只在 2^16 处采样一次、把剩余自旋全部记到当时持有者头上。锁在多个短暂
@@ -414,9 +424,9 @@ OOM 评分。
 
 ## 六、可靠性
 
-- panic 是关机不是重启（`panic.c:117` 调 `firmware_shutdown()`），
+- panic 是关机不是重启（`panic.c:89` 调 `firmware_shutdown()`），
   失败则 `arch_halt()` 死循环。
-- 无跨 CPU stop IPI（`panic.c:20-22` 自述）：其他核继续跑到自己 panic，
+- 无跨 CPU stop IPI（`panic.c:19-21` 自述）：其他核继续跑到自己 panic，
   输出被丢弃。
 - panic 文本不进 klog 环（直接调 `printf`/`uart_puts`），控制台卡死时
   dump 全丢。
@@ -448,7 +458,7 @@ OOM 评分。
   拒绝并退回 INTx/轮询；无 IRQ 亲和性与 per-CPU 目标字段，向量窗口钉死
   在 boot processor 的 `0xD0..0xF0`；e1000e 只验证到表被正确解析并 arm，
   网卡无流量故未实测投递（virtio-blk 一路是端到端的）。
-- INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:251-274` 只认
+- INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:297-311` 只认
   host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
   ACPI `_PRT` 与 PIRQ link 编程。
 - ECAM 基址是编译期常量（仅 virtualbox-aarch64 从 MCFG 读）。

@@ -1256,9 +1256,16 @@ DNS 正常。**该前提是错的**，所有建立在它之上的"阻塞"结论�
    `libgcc_s`、`libz/libzstd` …）在镜像里全都在；`/usr/lib/dri/*` 是指向 `libdril_dri.so` 的正常
    符号链接，`libdril_dri.so` 仅依赖 `libgbm.so.1` + libc，也都在。
 2. "render 节点上 KMS ioctl 被整体拒绝"，排除（我自己的内核里就否掉了）。
-   `kernel/drivers/gpu/drm.c`：`drm_mode_getresources()` 等 KMS 入口都没有检查 `ctx->render_only`，
-   照常执行；整个文件里只有一处 `render_only` 门控，即 `drm_set_master()`（第 798 行）
-   `return -EACCES`。所以 render 节点上 `MODE_GETRESOURCES` 是放行的。
+   `kernel/drivers/gpu/drm.c`：`drm_mode_getresources()` 等 KMS 入口**本身**不检查
+   `ctx->render_only`，照常执行；门控发生在 `drm_ioctl()` 的分发层
+   （`kernel/drivers/gpu/drm.c:3227`），由 `drm_ioctl_needs_primary_node()`
+   （`:3185`）列出需要 primary 节点的请求——`AUTH_MAGIC`、`SET_MASTER`、
+   `DROP_MASTER`、`MODE_GETRESOURCES`、`MODE_GETCRTC`、`MODE_SETCRTC`、
+   `MODE_GETCONNECTOR`、`MODE_GETENCODER`——在 render 节点上一律 `return -EACCES`。
+   `drm_set_master()` 另有一处自身的 `render_only` 检查（第 1384 行）。
+   **本条于 2026-10-04 复核时更正**：此前写的是"整个文件里只有一处 `render_only`
+   门控…所以 render 节点上 `MODE_GETRESOURCES` 是放行的"，那是分发层门控加入
+   之前的状态，现已不成立。
 
 失败点（源码级）：`gbm_create_device()` → `dri_device_create()` →
 `dri_screen_create()`（硬件）或 `dri_screen_create_sw()`（`GBM_ALWAYS_SOFTWARE`）→
@@ -1278,7 +1285,7 @@ DNS 正常。**该前提是错的**，所有建立在它之上的"阻塞"结论�
    （`src/gallium/winsys/sw/kms-dri/kms_dri_sw_winsys.c:510`）除 `CALLOC_STRUCT` 失败（OOM）外不可能返回
    NULL，它只是填一张函数指针表。所以 `create_winsys_kms_dri()` 是成功的。
 4. "DUMB ioctl 缺失"，排除。`DRM_IOCTL_MODE_CREATE_DUMB` / `MAP_DUMB` / `DESTROY_DUMB`
-   在本内核里都已实现（`drm.c:1603` 起）。
+   在本内核里都已实现（`kernel/drivers/gpu/drm.c:2135` 起）。
 
 有价值的对照是这条关键线索：`eglinfo -p wayland` 能出 `llvmpipe` 渲染器，说明 `swrast`
 （llvmpipe）这个 DRI 驱动在客体里是能正常加载并建 screen 的。而 GBM 路径上的 `kms_swrast`
@@ -1287,7 +1294,7 @@ DNS 正常。**该前提是错的**，所有建立在它之上的"阻塞"结论�
 
 → 因此卡点几乎可以确定在**「KMS 路径」**上（而不是驱动加载、依赖、sysfs、modifier）。
 剩下的两个候选也正好落在这里：Mesa 是否调用 `drmSetMaster`（本内核与 Linux 一样对 render 节点返回
-`-EACCES`，见 `drm.c:798`），或某条 KMS ioctl 成功但数据不对（注意：从未观测到任何 DRM ioctl
+`-EACCES`，见 `kernel/drivers/gpu/drm.c:1384`），或某条 KMS ioctl 成功但数据不对（注意：从未观测到任何 DRM ioctl
 返回错误，所以若在 ioctl 层，形状必然是"成功但内容错"）。这两个都还没验证。
 
 候选一已排除：对 Mesa 25.2.7 全源码 grep `drmSetMaster|drmAuthMagic|drmGetMagic|drmDropMaster`，

@@ -71,7 +71,7 @@ panic, but both make network debugging in the guest much harder than it needs to
 
 ## Candidate site, and why the obvious fix is not obviously right
 
-The receive loop is `a20_lwip_process_netif_rx_tx_locked` (`kernel/net/lwip_stack.c:325-342`):
+The receive loop is `a20_lwip_process_netif_rx_tx_locked` (`kernel/net/lwip_stack.c:462-488`):
 
     for (;;) {
         int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
@@ -211,7 +211,7 @@ The asymmetry that looked like the answer: `a20_lwip_poll()` runs the socket bot
         net_packet_bottom_half_process();
     }
 
-`virtio_net_poll_rx_all()`, which the progress poller drives (`progress.c:43-44`),
+`virtio_net_poll_rx_all()`, which the progress poller drives (`progress.c:81-82`),
 called `a20_lwip_poll_locked()` directly and never ran them.  So an RX-queued datagram sat in
 `bh_ring` with nobody to enqueue it or wake the reader, which would explain a DNS reply never
 reaching the application.
@@ -304,12 +304,12 @@ corruption is earlier than this packet:
     it twice, so `pbuf_alloc` hands out a frame another owner still holds; or
   * the RX path is entered from two contexts at once and both process the same pbuf.  Note the
     panic ran in IRQ context (`arch_handle_irq` -> `driver_irq_dispatch`) on `pid=0 idle`, and
-    `a20_lwip_process_netif_rx_tx_locked` has **two** call sites (lines 369 and 387); if one of
+    `a20_lwip_process_netif_rx_tx_locked` has **two** call sites (lines 542 and 593); if one of
     them is a poller and the other the IRQ, the "locked" contract is what needs checking first.
 
 Next step, in this order:
 
-  1. read the two call sites at `lwip_stack.c:369` and `:387` and confirm they cannot run
+  1. read the two call sites at `lwip_stack.c:542` and `:593` and confirm they cannot run
      concurrently;
   2. if they can, that is the bug and the fix is in the locking, not in the pbuf handling;
   3. if they cannot, instrument `pbuf_alloc`/`pbuf_free` with a refcount trace (and assert that

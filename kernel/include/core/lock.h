@@ -58,7 +58,11 @@ extern int proc_task_pid(const void *task);
 
 typedef struct spinlock {
     volatile int locked;
-    void *owner;        /* task_t * while held (always tracked) */
+    /* Holder identity for [LOCK-STALL] and the owner == cur self-deadlock
+     * test.  Written only under CONFIG_DEBUG_LOCKS, and only by an acquire
+     * that actually contended, so NULL here does not mean the lock is free:
+     * read it only inside a stall report. */
+    void *owner;
     uintptr_t owner_ra;
     const char *name;   /* debug name, NULL unless spin_set_debug() */
     void *container;

@@ -49,6 +49,29 @@ make check-io-progress-model      # I/O 进展
 make check-concurrency-foundation # 并发
 ```
 
+### 3.1 文档里的行号引用
+
+如果你在 `docs/` 或任何 `.md` 里写了形如「`file.c` 第 123 行」的行号引用，那么改动那个
+文件之后引用就可能不再指向所说的东西。`make check-doc-drift` 的最后一步会跑
+`tools/check_doc_citations.py`，对每条能解析到本仓库的引用检查行号是否还在文件
+范围内：
+
+```bash
+make check-doc-drift                    # 含引用检查
+python3 tools/check_doc_citations.py --verbose   # 单独跑，并列出被跳过的条目
+```
+
+它**故意**只做能精确判定的那一半：范围是否有效。它不判断"第 123 行是否还在说
+那句话"——那需要读者而不是正则；假装能判定，只会得到一个天天喊狼来了、
+最后被人加 `--no-verify` 关掉的门禁。三类条目会被跳过并计数，不会让门禁失败：
+指向仓库外的上游源码（mesa、virgl、wlroots 等）、形如 `[foo.c:122] 某条日志` 的
+**引用的程序输出**（那是证据不是引用），以及 basename 在树内不唯一的引用（裸写的
+`trap.c` 无法区分 `kernel/core/trap.c` 和八个 arch 的 `trap.c`，猜错会让门禁误报）。
+
+`tools/check_doc_citations.py` 顶部的 `KNOWN_MOVING` 列出暂时无法校验的文档，
+每条都写明原因（当前是 `feat/mm-complete` 正在重写 `kernel/mm/`，其中所有行号都会
+再动一次）。该分支合并后请从列表中删除对应条目——那一刻这些行号才稳定下来。
+
 ## 4. 代码与注释规范
 
 ### 4.1 语言

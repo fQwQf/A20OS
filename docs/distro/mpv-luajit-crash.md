@@ -121,7 +121,7 @@ kernel fix to make) or eliminates the thread path outright.
 
 ## Eliminated: TLS / thread-state sharing
 
-Read `proc_clone_impl` (`kernel/proc/fork.c:272-305`): the child gets a trap frame copied
+Read `proc_clone_impl` (`kernel/proc/fork.c:331-360`): the child gets a trap frame copied
 onto its own freshly allocated kernel stack (`ks_top - sizeof(trap_context_t)`), `SP` is
 replaced by the caller's `stack` and `TP` by `tls` only under `CLONE_SETTLS`, then mirrored
 into the task context via `arch_task_context_set_user_tp`.  Nothing is shared between the
@@ -167,7 +167,7 @@ the COW path uses, so this path does not obviously lose a live page either.
 
 ## Still unread: the fresh-frame install path
 
-`handle_demand_fault` (`kernel/mm/fault.c:815`) is the path that installs a **fresh zero
+`handle_demand_fault` (`kernel/mm/fault.c:1092`) is the path that installs a **fresh zero
 frame** for a first write to an anonymous page, which is exactly what a freshly `mmap`ed
 LuaJIT arena gets and the one remaining place where a page can legitimately become zeros.
 It has 7 callers (`sys_mmap`, `sys_madvise`, `sys_mlock`, `sys_mlockall`,
@@ -176,10 +176,10 @@ yet.  That is the next file to inspect.
 
 ## Also checked: the fresh-frame install path (cleared)
 
-`handle_demand_fault` / `handle_demand_fault_access` (`kernel/mm/fault.c:815-952`) refuses to
+`handle_demand_fault` / `handle_demand_fault_access` (`kernel/mm/fault.c:1186-1190`) refuses to
 touch an already-present leaf (`if (pte && (*pte & PTE_V)) return -1;`), and that check
 runs under `mm->lock`, which is the same lock the anonymous install path
-(`handle_demand_fault_locked`, line 939) is called under.  So a live page cannot have a fresh
+(`handle_demand_fault_locked`, line 390) is called under.  So a live page cannot have a fresh
 zero frame installed over it, which was the last mechanism that could zero a live object.
 
 All four page-management paths are now cleared by reading: COW break, clone/TLS, MADV_DONTNEED,
@@ -229,7 +229,7 @@ is directly testable by reading two functions.
 
 ## mremap lead resolved: accounting is correct
 
-`pt_map` (`kernel/mm/mm.c:258`) does not take a reference on the new frame; it only drops
+`pt_map` (`kernel/mm/mm.c:330`) does not take a reference on the new frame; it only drops
 the replaced one (`frame_put(phys_to_pfn(old_pa))` when the old leaf had a different pa).  With
 those semantics the move path balances:
 
@@ -333,7 +333,7 @@ into the wrong frame).  That is now the only open lead, and it is a specific one
 
 ## The concrete suspect: a short read is treated as EOF
 
-`page_cache_fill_vfile_page` (`kernel/fs/page_cache.c:624`) is the first-time fill, and its
+`page_cache_fill_vfile_page` (`kernel/fs/page_cache.c:753`) is the first-time fill, and its
 short-read handling is the one place that manufactures **zeros** in a file-backed page:
 
     int r = vf->ops->read(vf, (char *)data, PAGE_SIZE);
@@ -424,7 +424,7 @@ the wrong file position.  This fits every measured fact:
 
 Fix direction: serialise the fill's offset manipulation per vfile.  It must not simply take
 `vf->offset_lock`, because a page fault taken inside a `read()` syscall would re-enter and
-deadlock on that same non-recursive mutex (the comment at `sys_fs.c:164` warns about exactly
+deadlock on that same non-recursive mutex (the comment at `sys_fs.c:153` warns about exactly
 this re-entry).  Either add a dedicated per-vfile fill mutex, or give the fill a positional read
 so it never touches the shared offset.
 
@@ -447,7 +447,7 @@ per vfile:
   2. In `page_cache_fill_vfile_page`, take that lock around the whole
      `lseek(page_base)` -> `read` -> `lseek(saved)` sequence, and release it before returning.
   3. Do not use `vf->offset_lock` for this: a page fault taken inside a `read()` syscall
-     re-enters and would deadlock on that non-recursive mutex (`sys_fs.c:164` documents the
+     re-enters and would deadlock on that non-recursive mutex (`sys_fs.c:153` documents the
      re-entry).
   4. Keep `page->fill_lock` as-is; it serialises fills of the *same* page, while the new lock
      serialises the shared offset across *different* pages of the same file.

@@ -133,7 +133,7 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
   （`trap.S`），返回时写回（`trap.S` 尾部）；内核态嵌套 trap 走的是 `kernel_trap_handler`，不是
   `user_trap_handler`；
 - `arch_prctl(ARCH_SET_FS)` 的落点没问题（都逐一验证过）：syscall 快速路径同样经 `trap_handler`
-  → `user_trap_handler` 设置 `current->trap_ctx`（`trap.S:413`、`trap.c:237`）；内核态嵌套 trap 走
+  → `user_trap_handler` 设置 `current->trap_ctx`（`kernel/arch/x86_64/trap/trap.S:411`、`kernel/core/trap.c:353`）；内核态嵌套 trap 走
   `kernel_trap_handler`；switch.S 的寄存器/FPU 保存完整。
 
 **仍未定位。** 按 JVM 子系统分层看新证据：`java -version` 的退出码在三种配置下分别是
@@ -193,13 +193,13 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
 - v3 一度被记成本轮抓到的可复现内核 bug：从非 leader 线程调用 `exit_group` 时，进程被上报为「被
   SIGSEGV 杀死」而不是带着退出码正常退出。这很可能就是 `mpv` 那条「Lua 线程里 SIGSEGV」症状的来源
   （每个 Lua 脚本线程自己退出/收尾），当时认为值得优先修（`proc_exit_group()` 对 leader 的
-  `proc_force_exit()` 与 `proc_exit(self)` 组合，见 `kernel/proc/exit.c:562`）。
+  `proc_force_exit()` 与 `proc_exit(self)` 组合，见 `kernel/proc/exit.c:554`）。
 - 试过并否掉的一个候选是 `proc_release_exiting_mm()`（`kernel/proc/exit.c:161`）：它在每个线程退出时
   都会 `arch_switch_addr_space_token(kernel_as)` + `mm_context_leave(t->mm, cpu)`，看起来像「兄弟线程还在跑
   就把本 CPU 从共享 mm 上摘掉」。按「只有 mm 最后一个引用才允许摘」加了
   `refcount_read(&mm->refcount) == 1` 守卫、重新编译内核并复测，v3 仍是 `sig=11`，java 仍是
   `255 0 255 0 255 0`，桌面无回归，该假设不成立，改动已 `git checkout` 撤回。这说明 leader 是真的发生了
-  缺页（`signal.c:768` 用 `-signal_wait_status(SIGSEGV)` 收尾），而不是 active_cpus 记账问题。下一步应从
+  缺页（`kernel/proc/signal.c:848` 用 `-signal_wait_status_dumped(SIGSEGV, ...)` 收尾），而不是 active_cpus 记账问题。下一步应从
   「强制一个正在用户态自旋的线程退出」这条路径查（`proc_force_exit` → `exit_pending` → 调度器/trap
   边界消费），以及 leader 缺页时它的 mm 到底处于什么状态。
 - v2 与 v3 的差别把范围缩得更小：v2（leader 自己调 `exit_group`，其他线程还活着）正常；v3（非 leader 调
@@ -224,7 +224,7 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
   共享（每线程 `arch_prctl(ARCH_SET_FS)` 指向自己的块再循环读 `%fs:0`，4/4 次全 0 错配）。因此 `mpv`
   偶发崩溃与 `java` 退出码 255 不是由这些机制引起的；剩下可查的方向是 futex/信号等更细的语义，或它俩
   本就是程序层行为。对「视频可用」这个目标而言不受影响（ffplay 已验证可用，见下文 ffplay 条目）。
-- v5 是编码分歧。A20OS 把负的 `exit_code` 当作信号死亡编码（`wait.c:112-118` 的 `code < 0` 分支 →
+- v5 是编码分歧。A20OS 把负的 `exit_code` 当作信号死亡编码（`kernel/proc/wait.c:112-118` 的 `code < 0` 分支 →
   `(-code) & 0xFF`），而 Linux 对 `exit_group(-1)` 报的是正常退出 code=255。属于 ABI 语义差异，单独
   记录。
 - v2 与宿主一致说明「主线程带活线程 `exit_group`」这条 JVM 路径本身没问题；结合前面
@@ -463,7 +463,7 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
      - 若该页正与别的任务 COW 共享，这一写会把对方那份也改掉；
      - 若指向只读文件页，还会改到页缓存，影响所有映射它的进程。
   2. 用户指针完全没有范围 / 有效性校验。`sys_set_tid_address()`
-     （`kernel/abi/linux/sys_proc.c:135-139`）只是 `t->clear_child_tid = tidptr;`，
+     （`kernel/abi/linux/sys_proc.c:180-184`）只是 `t->clear_child_tid = tidptr;`，
      这与 Linux 一致（Linux 也不校验指针）；差别在于 Linux 的写是受检查的、这里的是裸物理写。
 
   值得优先验证的原因是它与前面所有排除项都对得上：
@@ -534,7 +534,7 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
 
   - 修法是把 `proc_clear_child_tid_direct()` 里的裸物理写换成受检查的用户写
     `copy_to_user(ctid, &zero, sizeof(zero))`。核心里这条路径本来就会做该做的事：
-    `user_resolve_leaf(..., write=1, ...)`（`kernel/mm/mm.c:585-597`）在叶子不存在时走
+    `user_resolve_leaf(..., write=1, ...)`（`kernel/mm/mm.c:755-779`）在叶子不存在时走
     `handle_demand_fault()`、在存在但不可写时调用 `handle_cow_fault()` 破坏 COW，
     再重读 PTE，最后对未映射/不可写的地址安全返回 `-EFAULT`，即 Linux `put_user(0, tidptr)` 的语义。
     出问题的那个函数绕过了它，自己 `pt_translate + pfn_to_virt` 直接写帧，跳过了 COW 破坏。
@@ -690,13 +690,13 @@ polkit：Alpine 的 polkit 包把 `/etc/polkit-1/rules.d/`、
 
   沿同一 bug 类继续审计 `pt_translate` / `pfn_to_virt` 的用法，又找到两处：
 
-  - `kernel/proc/signal.c` 的 `signal_make_page_exec()`（26-36 行；唯一调用点 796 行）是
+  - `kernel/proc/signal.c` 的 `signal_make_page_exec()`（28-54 行；唯一调用点 926 行）是
     信号投递路径：为了让栈上的 sigreturn trampoline 可执行，它 `pt_translate` 取出物理帧，
     然后 `pt_unmap()` + `pt_map(同一个 pa, ...writable_dirty_exec...)`，即把同一个帧重新映射成
-    可写可执行。要注意信号帧本身是用 `copy_to_user()` 写的（790/793 行）✓，所以帧写是安全的；
+    可写可执行。要注意信号帧本身是用 `copy_to_user()` 写的（915/918 行）✓，所以帧写是安全的；
     危险的是这个重映射：若该页此刻仍与另一个任务 COW 共享，这一步会让本任务拿到
     共享帧的可写别名，此后本任务的任何写入都会改到对方那一份 ✗。
-  - `kernel/abi/linux/sys_missing.c:573-581`（CET 影子栈 token）：`handle_demand_fault` 之后
+  - `kernel/abi/linux/sys_missing.c:563-571`（CET 影子栈 token）：`handle_demand_fault` 之后
     `pt_translate` + `pfn_to_virt` 直接 `*tok = ...`，同样是裸帧写（影子栈少见，但同类）。
 
   信号这处最可疑的原因是：`signal_make_page_exec()` 在每次投递信号时都会执行，而它操作的页就是
@@ -902,7 +902,7 @@ per-thread 状态 bug → SIGSEGV。`load-scripts=no` 关不掉这些内建脚�
 `$ORIGIN:$ORIGIN/../lib` 找它；musl 的 ldso 用 `readlink("/proc/self/exe")` 展开 `$ORIGIN`
 （`user/external/musl/ldso/dynlink.c` 的 `fixup_rpath()`）；而 A20OS 的 `/proc/<pid>/exe` 原本是普通文件
 （`readlink` 返回 `-EINVAL`），`exec_path` 也只做「绝对化 + 归一化」、不解析符号链接
-（`kernel/proc/exec.c:846` 起），于是 `$ORIGIN` 停在 `/usr/bin`。
+（`kernel/proc/exec.c:855` 起），于是 `$ORIGIN` 停在 `/usr/bin`。
 
 `/proc/<pid>/exe` 与 `/proc/<pid>/cwd` 现在是 magic symlink（`kernel/fs/procfs/procfs.c`：vnode 类型 +
 `procfs_readlink`），实测 `ls -l /proc/self/exe` 已显示 `-> /bin/ls`，这一半已修。
@@ -1331,7 +1331,7 @@ pbuf[0..15] = 0600000000000000 98d281000080ffff
   无任何地址行）。所以这条只是混杂变量的阴性结果，不能据此判定
   DHCPv6/SLAAC 无罪。真正结论是：**panic 需要真实 IPv6 收包流量才会发生。**
 - 已排除（逐一验证）：
-  - `g_lwip_lock` 确实在 IRQ 路径（`virtio_net.c:521`）与 poll 路径都持有，RX 循环本身已串行化；
+  - `g_lwip_lock` 确实在 IRQ 路径（`kernel/drivers/net/virtio_net.c:554`）与 poll 路径都持有，RX 循环本身已串行化；
   - `net_packet_rx_defer()` 在自旋锁下 `memcpy` 拷贝帧，不会保留共享 `rx_frame` 指针；
   - vendored lwIP 的重组路径已审：`ip6_reass_free_complete_datagram()` 与
     `ip6_reass()` 完成时的 `pbuf_cat` 链接逻辑均与上游所有权约定一致，未见缺陷。

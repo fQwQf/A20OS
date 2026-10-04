@@ -16,7 +16,7 @@
 
 | 事实 | 值 | 来源 |
 |---|---|---|
-| lwIP 版本宏 | `2.2.2` + `LWIP_RC_DEVELOPMENT` ⇒ 展开为 `2.2.2d` | `src/include/lwip/init.h:53-61` |
+| lwIP 版本宏 | `2.2.2` + `LWIP_RC_DEVELOPMENT` ⇒ 展开为 `2.2.2d` | `kernel/external/lwip/src/include/lwip/init.h:53-61` |
 | 树内 git 元数据 | 无（无 `.git`、无 hash 文件、无 `CHANGELOG`、无 tag） | 全树搜索 |
 | 布局 | `src/core/ipv4/`、`src/core/ipv6/`、`src/core/dns.c` | 2.2.0 之后的 master 重排布局 |
 
