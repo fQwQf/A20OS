@@ -235,6 +235,50 @@ static void mcs_unlock(pt_meta_t *m)
 static void segtab_detach_locked(pt_meta_t *m);
 static void segtab_maybe_free_locked(pt_meta_t *m);
 
+/* The array of segments a node page names, shared by all 512 of its entries.
+ *
+ * This was inline in mm_segtab_t, which capped the whole address space's
+ * expressible segments at one node page's worth -- and a level-1 node page
+ * covers a gigabyte, so eight slots were never going to cover a compiler's
+ * mappings.  Measured: segtab_slot() reported "full" 7132 times on the
+ * real-software gate, every one of which became a fallback to the VMA.
+ *
+ * Splitting it out makes the two limits independent: the per-entry index still
+ * bounds how many segments ONE entry may name (MM_SEGTAB_NAMES, because the
+ * names have to be packed into idx[]), while the array bounds how many distinct
+ * segments the whole node page may refer to.  Only the second was binding. */
+struct mm_segarr {
+    volatile int refcount;
+    uint8_t      n;                    /* slots in use, 0..MM_SEGTAB_MAX */
+    mm_seg_t    *seg[MM_SEGTAB_MAX];
+};
+
+static struct mm_segarr *segarr_alloc(void)
+{
+    pfn_t pfn = pfa_alloc_page();
+    if (pfn == PFN_NONE)
+        return NULL;
+    struct mm_segarr *a = (struct mm_segarr *)pfn_to_virt(pfn);
+    memset(a, 0, sizeof(*a));
+    a->refcount = 1;
+    return a;
+}
+
+/* Drop one reference, releasing the segments and the page with the last.  Every
+ * segment in the array is put exactly once here, which is why `n` counts
+ * distinct segments rather than annotations: a page naming one segment on 400
+ * entries holds one reference to it, not 400. */
+static void segarr_put(struct mm_segarr *a)
+{
+    if (!a)
+        return;
+    if (--a->refcount > 0)
+        return;
+    for (uint8_t i = 0; i < a->n; i++)
+        mm_seg_put(a->seg[i]);
+    pfa_free(virt_to_pfn(a), 0);
+}
+
 void mm_pt_core_init(void)
 {
     pt_mcs_pool_init();
@@ -387,6 +431,9 @@ mm_seg_t *mm_seg_alloc(void)
     memset(s, 0, sizeof(*s));
     s->magic = MM_SEG_MAGIC;
     s->refcount = 1;
+    /* memset leaves shmid 0, which is a real SysV id rather than "none", so a
+     * segment that never had one set would claim to be shmid 0. */
+    s->sysv_shmid = -1;
     return s;
 }
 
@@ -409,6 +456,17 @@ void mm_seg_put(mm_seg_t *s)
 {
     if (!s)
         return;
+    /* A put on a frame whose magic is gone is a use-after-free: the frame was
+     * recycled, so `refcount` is somebody else's number and the branch below is
+     * deciding whether to call a stale `release` pointer.  That is exactly the
+     * shape of a crash the real-software gate took while anonymous mappings
+     * carried segments -- a wild jump to 0x2f0a7d203b303220, which is ASCII
+     * file text, not code, because `release` had been read off a page-cache
+     * page.  Dying here names the fault instead of leaving it to a frame-pointer
+     * walk through the middle of it. */
+    if (s->magic != MM_SEG_MAGIC)
+        panic("mm_seg_put: use-after-free, segment frame %p magic=0x%x",
+              s, s->magic);
     if (__atomic_sub_fetch(&s->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
         /* The segment owns one reference on whatever backs it (a vnode, a
          * VMO), taken by whoever built it in mm/mmap.c.  This file has no
@@ -431,19 +489,18 @@ static mm_segtab_t *segtab_attach_locked(pt_meta_t *m)
         return NULL;
     mm_segtab_t *st = (mm_segtab_t *)pfn_to_virt(pfn);
     memset(st, 0, sizeof(*st));
-    st->refcount = 1;
+    st->arr = segarr_alloc();
+    if (!st->arr) {
+        pfa_free(pfn, 0);
+        return NULL;
+    }
     m->segtab = st;
     return st;
 }
 
-/* Release a page-table page's segment table and every segment it named.
- *
- * The subtlety is that a segment can be named by several PT pages (that is
- * the entire point -- one mmap, many PT pages), so dropping the last index
- * reference is not the same as dropping the segment.  Dropping the segtab
- * takes one reference per distinct segment, which is why `n` is a count of
- * distinct segments rather than a count of annotations: a PT page naming the
- * same segment on 400 entries holds exactly one reference to it.
+/* Release a page-table page's segment table.  The segments themselves belong to
+ * the shared array, which other node pages may still be naming, so this drops
+ * the array's reference and lets the refcount decide.
  *
  * Caller must hold the page's node lock, or have established that no cursor
  * can reach the page (mm_pt_node_fini, which runs on the detached frame). */
@@ -453,40 +510,44 @@ static void segtab_detach_locked(pt_meta_t *m)
     if (!st)
         return;
     m->segtab = NULL;
-    for (uint8_t i = 0; i < st->n && i < MM_SEGTAB_MAX; i++)
-        mm_seg_put(st->seg[i]);
+    segarr_put(st->arr);
     pfa_free(virt_to_pfn(st), 0);
 }
 
-/* Find or add `s` in `st`, returning its 1-based slot, or 0 if full.
- * `st->n` distinct slots is a hard cap: silently overwriting a slot would
+/* Find or add `s` in the node page's shared array, returning its 1-based slot,
+ * or 0 if that array is full.  A hard cap: silently overwriting a slot would
  * make one mapping's pages inherit another mapping's vnode. */
 static uint8_t segtab_slot(mm_segtab_t *st, mm_seg_t *s)
 {
-    for (uint8_t i = 0; i < st->n; i++)
-        if (st->seg[i] == s)
-            return (uint8_t)(i + 1);
-    if (st->n >= MM_SEGTAB_MAX)
+    struct mm_segarr *a = st->arr;
+    if (!a)
         return 0;
-    st->seg[st->n] = mm_seg_get(s);
-    return (uint8_t)(++st->n);
+    for (uint8_t i = 0; i < a->n; i++)
+        if (a->seg[i] == s)
+            return (uint8_t)(i + 1);
+    if (a->n >= MM_SEGTAB_MAX)
+        return 0;
+    a->seg[a->n] = mm_seg_get(s);
+    return (uint8_t)(++a->n);
 }
 
 /* ---- Entry index packing ------------------------------------------------
  *
- * mm_segtab_t.idx[] is TWO BYTES per node entry, and it packs up to
- * MM_SEGTAB_MAX slot numbers into it, four bits each, nibble k in bits
- * [4k+3:4k].  A slot number is 1..MM_SEGTAB_MAX, so 0 means "this nibble is
- * empty" and costs no separate bitmap.
+ * mm_segtab_t.idx[] is a flat byte array: slot k of entry i is
+ * idx[i * MM_SEGTAB_NAMES + k].  A slot number is 1..MM_SEGTAB_MAX, so 0 means
+ * "this slot is empty" and costs no separate bitmap.
  *
- * It was ONE byte, which is the width of two nibbles.  The truncation was
- * silent -- segtab_nib_set() casts its result back to the parameter type -- so
- * segments three and four could be written and then read back as nothing, and
- * since the auditor reads back the same byte the writer wrote, it could not
- * see the loss either.  The visible symptom was a seg_miss that stayed put no
- * matter how the annotate walk was changed.  segtab_packed_t exists so the next
- * width mistake is a compile error at every site instead of a silent one at
- * run time.
+ * The slot width and the number of slots are now different limits, which is
+ * the whole point of the split.  A slot number addresses the node page's shared
+ * array (up to MM_SEGTAB_MAX of them), while the per-entry index has to fit
+ * every name that entry carries in a fixed four bytes.
+ *
+ * It was ONE byte of FOUR-BIT slots, which is two nibbles -- and the packer
+ * cast its result back to the parameter type, so segments three and four could
+ * be written and then read back as nothing.  The truncation was silent because
+ * the auditor reads back the same byte the writer wrote, so no layer could see
+ * it.  The visible symptom was a seg_miss that stayed put no matter how the
+ * annotate walk was changed.  A flat byte array has no width to get wrong.
  *
  * Why one entry needs more than one name: a node entry is far coarser than a
  * mapping.  A level-1 entry covers 2 MiB on Sv39, and two separate mmap calls
@@ -503,69 +564,66 @@ static uint8_t segtab_slot(mm_segtab_t *st, mm_seg_t *s)
  * mappings that share an entry therefore stay separately answerable, and the
  * fallback to the VMA is reserved for the addresses where the answer really is
  * ambiguous. */
-#define SEGTAB_NIBBLE_SHIFT 4
-#define SEGTAB_NIBBLE_MASK  0xf
+/* The segtab comes from one order-0 frame (see segtab_attach_locked), so a
+ * larger idx[] silently overruns it rather than failing an allocation.  Caught
+ * the hard way, twice: when the segment array was still inline the struct at
+ * 16 slots was 4229 bytes, and at 8 names per entry it is 4104 -- each time the
+ * guest died in proc_put on a wild pointer rather than saying anything about
+ * segments.  This assert is what keeps the next attempt from rediscovering it by
+ * experiment. */
+_Static_assert(sizeof(mm_segtab_t) <= 4096,
+               "mm_segtab_t no longer fits in the single frame it is allocated from");
+/* The shared array is a frame of its own and holds MM_SEGTAB_MAX whole slot
+ * pointers, so it has the same bound. */
+_Static_assert(sizeof(struct mm_segarr) <= 4096,
+               "mm_segarr no longer fits in the single frame it is allocated from");
 
-/* Width of one packed entry index.  Must be able to hold MM_SEGTAB_MAX
- * nibbles; the _Static_assert below turns a future mismatch into a build
- * failure rather than the silent truncation this type was introduced to end. */
-typedef uint16_t segtab_packed_t;
-_Static_assert(MM_SEGTAB_MAX * SEGTAB_NIBBLE_SHIFT <=
-               sizeof(segtab_packed_t) * 8,
-               "segtab_packed_t is too narrow for MM_SEGTAB_MAX nibbles");
-
-static inline uint8_t segtab_nib_get(segtab_packed_t idx, int k)
+static inline uint8_t segtab_slot_get(const mm_segtab_t *st, int i, int k)
 {
-    return (uint8_t)((idx >> (k * SEGTAB_NIBBLE_SHIFT)) & SEGTAB_NIBBLE_MASK);
+    return st->idx[i * MM_SEGTAB_NAMES + k];
 }
 
-static inline segtab_packed_t segtab_nib_set(segtab_packed_t idx, int k,
-                                            uint8_t slot)
+static inline void segtab_slot_set(mm_segtab_t *st, int i, int k, uint8_t slot)
 {
-    unsigned int sh = (unsigned int)k * SEGTAB_NIBBLE_SHIFT;
-    segtab_packed_t mask =
-        (segtab_packed_t)(SEGTAB_NIBBLE_MASK << sh);
-    return (segtab_packed_t)((idx & (segtab_packed_t)~mask) |
-                             ((segtab_packed_t)slot << sh));
+    st->idx[i * MM_SEGTAB_NAMES + k] = slot;
 }
 
-/* Name `slot` on entry `i`, in a free nibble.  Idempotent: an entry that
+/* Name `slot` on entry `i`, in a free slot.  Idempotent: an entry that
  * already names this segment is left alone, so re-annotating a range costs
- * nothing and does not consume a nibble. */
-static void segtab_entry_name(mm_segtab_t *st, int i, uint8_t slot)
+ * nothing and does not consume a slot. */
+static int segtab_entry_name(mm_segtab_t *st, int i, uint8_t slot)
 {
-    segtab_packed_t idx = st->idx[i];
-    for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-        uint8_t v = segtab_nib_get(idx, k);
+    for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+        uint8_t v = segtab_slot_get(st, i, k);
         if (v == slot)
-            return;
+            return 1;
         if (!v) {
-            st->idx[i] = segtab_nib_set(idx, k, slot);
-            return;
+            segtab_slot_set(st, i, k, slot);
+            return 1;
         }
     }
     /* Every nibble is taken.  Each already names a live segment, so there is
      * nothing to drop: evicting one would mislabel whichever mapping owns it,
      * and leaving it out only costs coverage on addresses this entry covers
      * anyway.  The caller reports this as a lost annotation. */
+    return 0;
 }
 
 
 /* True if entry `i` already names `slot`. */
 static int segtab_entry_names(const mm_segtab_t *st, int i, uint8_t slot)
 {
-    segtab_packed_t idx = st->idx[i];
-    for (int k = 0; k < MM_SEGTAB_MAX; k++)
-        if (segtab_nib_get(idx, k) == slot)
+    for (int k = 0; k < MM_SEGTAB_NAMES; k++)
+        if (segtab_slot_get(st, i, k) == slot)
             return 1;
     return 0;
 }
 
 static inline mm_seg_t *segtab_seg(const mm_segtab_t *st, uint8_t slot)
 {
-    if (!st || slot == 0 || slot > st->n || slot > MM_SEGTAB_MAX)
+    if (!st || !st->arr || slot == 0 || slot > st->arr->n)
         return NULL;
-    return st->seg[slot - 1];
+    return st->arr->seg[slot - 1];
 }
 
 /*
@@ -829,17 +887,26 @@ int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level)
 
     /* Segments are SHARED across the fork boundary, not duplicated: both
      * address spaces describe the same file, so the vnode and the offset
-     * sequence are the same objects.  Each clone takes its own reference per
-     * distinct segment, which is what keeps the segtab's n-accounting (distinct
-     * segments, not annotations) correct on both sides. */
+     * sequence are the same objects.  Each side takes its own reference per
+     * distinct segment, so the accounting (distinct segments, not annotations)
+     * stays right on both.
+     *
+     * The array itself is COPIED rather than shared, and it has to be: slot
+     * numbers are local to the array that holds them, and
+     * segtab_entry_forget() renumbers them when it compacts.  Two address
+     * spaces sharing one array would mean a munmap in the child renumbering
+     * slots the parent's index still refers to -- the child's lookup would
+     * silently return a different mapping's segment.  The refcount is
+     * therefore about lifetime sharing only, not about sharing the contents. */
     dst->segtab = NULL;
     if (src->segtab) {
         mm_segtab_t *st = segtab_attach_locked(dst);
         if (!st)
             return -ENOMEM;
-        for (uint8_t i = 0; i < src->segtab->n; i++)
-            st->seg[i] = mm_seg_get(src->segtab->seg[i]);
-        st->n = src->segtab->n;
+        struct mm_segarr *sa = src->segtab->arr;
+        for (uint8_t i = 0; i < sa->n; i++)
+            st->arr->seg[i] = mm_seg_get(sa->seg[i]);
+        st->arr->n = sa->n;
         memcpy(st->idx, src->segtab->idx, sizeof(st->idx));
     }
     return 0;
@@ -1047,6 +1114,12 @@ static inline pte_t *cursor_leaf_table(const mm_cursor_t *cur)
  * is an existing node gets labelled, and so does everything under it -- which
  * is correct only because mmap has just created that node for this range.
  *
+ * This paragraph described the design all along while the code did the
+ * opposite: the walk carried a `provision` flag and mm_pt_annotate_seg()
+ * passed 1, so it built the very nodes it was about to label.  See the comment
+ * on the absent-entry skip below for what that cost once anonymous mappings
+ * were annotated too.
+ *
  * Locking matches cursor_leaf_slot(): the parent is locked around the entry
  * read and the segtab read-modify-write, because both live in the parent's
  * metadata.  No leaf lock is taken and none is needed -- this walk writes no
@@ -1083,23 +1156,47 @@ static int seg_annotate_rec(pte_t *table, int level, vaddr_t start,
 
     for (int i = i0; i <= i1 && i < entries; i++) {
         pte_t e = table[i];
+        /* An absent entry is skipped, NOT provisioned.  This walk used to
+         * build the intermediate node it wanted to label (provision=1), which
+         * contradicted the contract stated at its own call site: "annotating
+         * an untouched range must not bring page tables into existence just to
+         * label them".  The contradiction was affordable while only file and
+         * VMO mappings were annotated, because there are few of them and they
+         * are small.  Anonymous mappings were then given segments too -- heap,
+         * stack, every anonymous mmap -- and each one materialised a whole
+         * page-table tree across its entire extent.  The guest ran out of
+         * memory on the git stage and died with SIGSEGV, then panicked.
+         *
+         * The cost was never the walk; it was that the walk was turning a
+         * cheap label into an unbounded allocation.  Coverage does not suffer:
+         * mm_mmap_seg_label() re-applies the segment after the first fault has
+         * built part of the path, which is exactly the case provisioning was
+         * supposed to cover. */
         if (!(e & PTE_V) || arch_pte_is_leaf(e))
             continue;                       /* absent leaf or a real leaf */
         if (!st)
             st = segtab_attach_locked(pm);
         uint8_t slot = st ? segtab_slot(st, seg) : 0;
+        if (!slot) {
+            mm_seg_annot_lost[0]++;
+            if (level < 8)
+                mm_seg_full_lvl[level]++;
+        }
         if (slot) {
             /* Name this segment alongside whatever the entry already names -- an
              * entry is much coarser than a mapping, so two of them can
              * legitimately share it.  Lookup picks between them by extent. */
             if (!segtab_entry_names(st, i, slot)) {
-                segtab_entry_name(st, i, slot);
-                annotated = 1;
+                if (!segtab_entry_name(st, i, slot))
+                    mm_seg_annot_lost[1]++;
+                else
+                    annotated = 1;
             }
         }
-        /* No slot here -- either the attachment failed or this node's table is
-         * already at MM_SEGTAB_MAX -- and that is NOT a reason to abandon the
-         * range.  An earlier version broke out of the loop, which made the root
+        /* No slot here -- either the attachment failed or this node page's
+         * shared array is already at MM_SEGTAB_MAX -- and that is NOT a reason
+         * to abandon the range.  An earlier version broke out of the loop,
+         * which made the root
          * table's four slots a hard ceiling on the whole address space: once
          * they filled, every later mapping went unlabelled and every fault on
          * it had to fall back to the VMA.  Descend instead.  The child node
@@ -1112,13 +1209,19 @@ static int seg_annotate_rec(pte_t *table, int level, vaddr_t start,
     }
     mcs_unlock(pm);
 
-    if (multi || !only_child)
+    if (multi)
         return annotated;
 
     /* Exactly one node covers the whole range at this level: keep descending,
      * because the fault descent will stop at the DEEPEST annotated node and a
      * shallower annotation would be ambiguous for an address that a later
-     * mapping splits off. */
+     * mapping splits off.
+     *
+     * With no child there is nothing to descend into, and the range is not
+     * annotated at this level -- which used to be where a node got built. */
+    if (!only_child)
+        return annotated;
+
     int rc = seg_annotate_rec(arch_pte_to_ptr(only_child), level - 1,
                               start, end, seg, depth + 1);
     return rc < 0 ? rc : annotated;
@@ -1156,7 +1259,8 @@ int mm_pt_annotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
      * a fault and wrong here -- annotating an untouched range must not bring
      * page tables into existence just to label them. */
     mm_pt_read_enter(mm);
-    int rc = seg_annotate_rec(mm->pgdir, ARCH_PT_ROOT_LEVEL, start, end, seg, 0);
+    int rc = seg_annotate_rec(mm->pgdir, ARCH_PT_ROOT_LEVEL, start, end, seg,
+                              0);
     mm_pt_read_exit(mm);
     return rc;
 }
@@ -1200,27 +1304,47 @@ mm_seg_t *mm_pt_lookup_seg(mm_struct_t *mm, vaddr_t addr)
     return s;
 }
 
+/* See the definitions, and the reason these counters exist at all, in mm/pt.h. */
+uint64_t mm_seg_miss_why[MM_MW_COUNT];
+uint64_t mm_seg_annot_lost[2];
+uint64_t mm_seg_full_lvl[8];
+
+/* Set by the lookup on every NULL return; the caller decides whether to count
+ * it.  Counting inside the lookup itself would fold in the auditor's own
+ * lookups, which fall through constantly and say nothing about faults -- the
+ * first version of this counter did exactly that and reported 47650 misses for
+ * a workload that had 1987. */
+static int mm_seg_last_why;
+
 static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
 {
     pte_t *table = mm->pgdir;
+    int saw_unnamed = 0, saw_extent = 0;
     for (int l = ARCH_PT_ROOT_LEVEL; l > 0; l--) {
         int idx = arch_pt_vpn(addr, l);
         pte_t e = table[idx];
-        if (!(e & PTE_V) || arch_pte_is_leaf(e))
-            return NULL;                   /* hole, or a huge leaf */
+        if (!(e & PTE_V)) {
+            mm_seg_last_why = MM_MW_HOLE;
+            return NULL;                   /* hole */
+        }
+        if (arch_pte_is_leaf(e)) {
+            mm_seg_last_why = MM_MW_LEAF;
+            return NULL;                   /* a huge leaf */
+        }
         pt_meta_t *pm = mm_pt_meta(table);
         if (pm && pm->segtab) {
             /* An entry can name several segments -- it is much coarser than a
              * mapping, and neighbouring mappings routinely share one.  The
              * extent recorded in each is what tells them apart, so try them all
              * and take the one that actually covers this address. */
-            segtab_packed_t packed = pm->segtab->idx[idx];
             mm_seg_t *hit = NULL;
             int ambiguous = 0;
-            for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-                uint8_t slot = segtab_nib_get(packed, k);
+            int named = 0;
+            for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+                uint8_t slot = segtab_slot_get(pm->segtab, idx, k);
                 if (!slot)
                     continue;
+                named = 1;
                 mm_seg_t *cand = segtab_seg(pm->segtab, slot);
                 if (!cand || addr - cand->base_va >= cand->len)
                     continue;               /* named, but not about this addr */
@@ -1235,16 +1359,23 @@ static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
                 hit = cand;
             }
             if (ambiguous) {
+                mm_seg_last_why = MM_MW_AMBIG;
                 mm_seg_put(hit);
                 return NULL;
             }
             if (hit)
                 return mm_seg_get(hit);
+            if (named)
+                saw_extent = 1;
+            else
+                saw_unnamed = 1;
             /* Named but none about this address: keep descending, a deeper
              * node may still carry the right one. */
         }
         table = arch_pte_to_ptr(e);
     }
+    mm_seg_last_why = saw_extent ? MM_MW_EXTENT
+                                 : (saw_unnamed ? MM_MW_UNNAMED : MM_MW_BOTTOM);
     return NULL;
 }
 
@@ -1284,9 +1415,11 @@ int mm_pt_shadow_seg(mm_struct_t *mm, vaddr_t addr, uint8_t kind,
      * measures.  mm_addrspace_lock() would materialise the page-table path for
      * this address first, and the segment table would then be credited with
      * coverage the lookup itself created. */
+    mm_seg_last_why = MM_MW_BOTTOM;
     mm_seg_t *s = mm_pt_lookup_seg(mm, addr);
     int verdict;
     if (!s) {
+        mm_seg_miss_why[mm_seg_last_why]++;
         verdict = -1;
     } else if (s->kind == kind && s->shared == (shared ? 1 : 0) &&
                s->offset + (addr - s->base_va) == off) {
@@ -1401,73 +1534,81 @@ void mm_pt_unannotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
  * the audit can see. */
 static void segtab_entry_forget(mm_segtab_t *st, int idx, mm_seg_t *only)
 {
-    segtab_packed_t packed = st->idx[idx];
-    uint8_t drop = 0;
-    segtab_packed_t keep = packed;
+    struct mm_segarr *a = st->arr;
+    if (!a)
+        return;
+    int named_here = 0;
 
     if (only) {
-        /* Find the slot naming `only` and blank just that nibble. */
+        /* Find the slot naming `only` and blank just that slot. */
         uint8_t slot = 0;
-        for (uint8_t j = 0; j < st->n; j++) {
-            if (st->seg[j] == only) {
+        for (uint8_t j = 0; j < a->n; j++) {
+            if (a->seg[j] == only) {
                 slot = (uint8_t)(j + 1);
                 break;
             }
         }
         if (!slot)
             return;                        /* this entry never named it */
-        drop = slot;
-        for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-            if (segtab_nib_get(packed, k) == slot)
-                keep = segtab_nib_set(keep, k, 0);
+        for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+            if (segtab_slot_get(st, idx, k) == slot) {
+                segtab_slot_set(st, idx, k, 0);
+                named_here = 1;
+            }
         }
-        if (keep == packed)
-            return;
+        if (!named_here)
+            return;                        /* this entry never named it */
     } else {
-        keep = 0;
+        for (int k = 0; k < MM_SEGTAB_NAMES; k++)
+            segtab_slot_set(st, idx, k, 0);
     }
 
-    st->idx[idx] = keep;
-    (void)drop;
-
-    /* Compact: release every slot no entry names, then renumber what is left
-     * so the nibbles still agree with st->seg[].  Done in one pass over the
-     * used set rather than slot-by-slot, because removing slot k renumbers
-     * every slot above it and a single-pass removal would then test stale
-     * numbers. */
-    uint16_t used = 0;
+    /* Compact: release every slot no entry names, then renumber what is left so
+     * the packed slots still agree with the array.  Done in one pass over the
+     * used set rather than slot-by-slot, because removing slot k renumbers every
+     * slot above it and a single-pass removal would then test stale numbers.
+     *
+     * `used` is a bitmap rather than a bitmask: MM_SEGTAB_MAX is 255, so a
+     * uint16_t would silently alias slots 1 and 17 and release a segment some
+     * live entry still names. */
+    uint8_t used[(MM_SEGTAB_MAX + 7) / 8];
+    memset(used, 0, sizeof(used));
     for (int i = 0; i < MM_PT_META_ENTRIES; i++)
-        for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-            uint8_t v = segtab_nib_get(st->idx[i], k);
+        for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+            uint8_t v = segtab_slot_get(st, i, k);
             if (v)
-                used |= (uint16_t)(1u << (v - 1));
+                used[(v - 1) >> 3] |= (uint8_t)(1u << ((v - 1) & 7));
         }
 
+    /* These counters are `int`, not `uint8_t`, and that is load-bearing.
+     * MM_SEGTAB_MAX is 255, so a uint8_t loop bounded by `s <= a->n` wraps to 0
+     * the moment the array fills and spins forever.  It never could at the old
+     * cap of 8, which is why the bound stayed safe right up until the array
+     * grew: the guest hung on the first git stage. */
     uint8_t remap[MM_SEGTAB_MAX + 1];
     memset(remap, 0, sizeof(remap));
-    uint8_t w = 0;
-    for (uint8_t s = 1; s <= st->n; s++) {
-        if (used & (uint16_t)(1u << (s - 1))) {
-            st->seg[w] = st->seg[s - 1];
-            remap[s] = ++w;
+    int w = 0;
+    int any = 0;
+    for (int s = 1; s <= a->n; s++) {
+        if (used[(s - 1) >> 3] & (uint8_t)(1u << ((s - 1) & 7))) {
+            a->seg[w] = a->seg[s - 1];
+            remap[s] = (uint8_t)++w;
+            any = 1;
         } else {
-            mm_seg_put(st->seg[s - 1]);
+            mm_seg_put(a->seg[s - 1]);
         }
     }
-    for (uint8_t s = (uint8_t)(w + 1); s <= st->n; s++)
-        st->seg[s - 1] = NULL;
-    st->n = w;
+    for (int s = w; s < a->n; s++)
+        a->seg[s] = NULL;
+    a->n = (uint8_t)w;
 
-    if (used) {
-        for (int i = 0; i < MM_PT_META_ENTRIES; i++) {
-            segtab_packed_t p = 0;
-            for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-                uint8_t v = segtab_nib_get(st->idx[i], k);
+    if (any) {
+        for (int i = 0; i < MM_PT_META_ENTRIES; i++)
+            for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+                uint8_t v = segtab_slot_get(st, i, k);
                 if (v)
-                    p = segtab_nib_set(p, k, remap[v]);
+                    segtab_slot_set(st, i, k, remap[v]);
             }
-            st->idx[i] = p;
-        }
     }
 }
 
@@ -1511,7 +1652,7 @@ static void mm_pt_node_forget_seg(pte_t *table, int level, int idx,
 static void segtab_maybe_free_locked(pt_meta_t *pm)
 {
     mm_segtab_t *st = pm->segtab;
-    if (!st || st->n != 0)
+    if (!st || !st->arr || st->arr->n != 0)
         return;
     segtab_detach_locked(pm);
 }
@@ -2422,9 +2563,8 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
             if (level >= 1 && m->segtab && m->segtab->idx[i]) {
                 /* An entry names up to MM_SEGTAB_MAX segments, so every nibble
                  * is checked, not just the first. */
-                segtab_packed_t packed = m->segtab->idx[i];
-                for (int k = 0; k < MM_SEGTAB_MAX; k++) {
-                    uint8_t slot = segtab_nib_get(packed, k);
+                for (int k = 0; k < MM_SEGTAB_NAMES; k++) {
+                    uint8_t slot = segtab_slot_get(m->segtab, i, k);
                     if (!slot)
                         continue;
                     rep->seg_slots++;
@@ -2444,9 +2584,19 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
                                                   ? MM_SEG_FILE : MM_SEG_ANON);
                         /* Only judged when the segment actually claims this
                          * address: outside its extent it is not authoritative
-                         * and the reader falls back to the VMA anyway. */
-                        if (v && s->kind != MM_SEG_ANON &&
-                            va - s->base_va < s->len && s->kind != want) {
+                         * and the reader falls back to the VMA anyway.
+                         *
+                         * The `s->kind != MM_SEG_ANON` exemption this used to
+                         * carry is gone, and it was dead weight: no anonymous
+                         * mapping had a segment, so MM_SEG_ANON only ever
+                         * appeared here as the "VMA has no backing object"
+                         * value of `want`.  Now that anonymous mappings do get
+                         * MM_SEG_ANON segments, keeping the exemption would
+                         * have exempted exactly the new segments from the one
+                         * check that is supposed to catch a mislabelled
+                         * mapping -- and a mapping that drifted from anon to
+                         * file would have gone unreported. */
+                        if (v && va - s->base_va < s->len && s->kind != want) {
                             if (!rep->seg_kind_mismatch) {
                                 rep->seg_kind_bad_va = va;
                                 rep->seg_kind_bad = s->kind;

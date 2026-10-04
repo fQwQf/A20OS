@@ -264,6 +264,22 @@ struct mm_seg {
     uint64_t         len;        /* extent of the segment, in bytes */
     uint64_t         offset;     /* file/vmo offset of base_va */
     uint64_t         flags;      /* VM_* flags, for the reader's use */
+    /* Policy metadata that is NOT backing-object state, so the object half of
+     * a mapping never needed it and it was left on the VMA.  Both are here now
+     * because a segment is on the way to being the whole of a mapping, and
+     * these two were the only fields a reader could still not get from one:
+     *
+     *   vmar_cap   native VMAR's ceiling -- protect() may not grant a bit that
+     *              was not available when the VMAR was created.  0 means "no
+     *              ceiling recorded" (every Linux-created mapping).
+     *   sysv_shmid SysV shared memory identity, so a fault can name the shmid
+     *              without walking back to the VMA.
+     *
+     * VM_SEALED was NOT missing: it is a VM_* bit, so it already rides in
+     * `flags` above.  An earlier draft of the P6 step-4 assessment listed it as
+     * a blocker; that was wrong, and is corrected in the roadmap. */
+    uint32_t         vmar_cap;   /* native VMAR capability bits, 0 = none */
+    int32_t          sysv_shmid; /* SysV shmid, -1 = not SysV shared memory */
     struct vnode    *vnode;      /* FILE, referenced by the segment itself */
     struct vmo      *vmo;        /* VMO, referenced by the segment itself */
     /* Called once when the last reference goes away, so whoever built the
@@ -276,32 +292,81 @@ struct mm_seg {
 #define MM_SEG_VMO  2u
 #define MM_SEG_MAGIC 0x53454731u   /* "SEG1" */
 
-/* Distinct segments nameable by one page-table page.  Four is chosen so the
- * segtab still fits comfortably beside its index array in a single order-0
- * frame; exceeding it is a hard error rather than a silent overflow. */
-#define MM_SEGTAB_MAX 4
+/* Segments nameable by ONE node entry.  This is the width of the packed index,
+ * not the capacity of the table -- the two were the same number until the
+ * segment array was split out, and conflating them is what made this a
+ * capacity problem when it was a sharing one (see below).
+ *
+ * Seven is the frame's ceiling, not a chosen number.  idx[] is 512 entries
+ * living in one order-0 frame alongside `arr`: seven names each is 3592 bytes,
+ * eight is 4104 and overruns.  The segtab's own refcount was dropped to buy
+ * back the eight bytes that cost, and even then eight does not fit.
+ *
+ * Measured, one step at a time -- each step moves the ceiling rather than
+ * removing it, which is why the limits are measured rather than assumed:
+ *
+ *     4 names/entry, 8 shared slots   seg_miss 1992   nibbles_full    0
+ *     4 names/entry, 255 shared slots seg_miss  ~900  nibbles_full 5900
+ *     7 names/entry, 255 shared slots seg_miss  ~270  nibbles_full 2900
+ *
+ * What is left is not a bug to be tuned away.  A node entry is 2 MiB on Sv39,
+ * so naming a mapping means naming it at 2 MiB resolution: an entry holding
+ * more than seven distinct mappings cannot say which is which, and the lookup
+ * correctly declines rather than guessing.  Closing that needs finer
+ * resolution -- annotating the leaf, or splitting the index out of the frame --
+ * not a larger constant. */
+#define MM_SEGTAB_NAMES 7
 
-/* Per-page-table-page segment table, allocated on first annotation. */
+/* Distinct segments nameable by one page-table page's shared array.  A node
+ * entry is 2 MiB at level 1 on Sv39, so one node page spans a gigabyte and its
+ * array has to cover every mapping in it.  Measured on the real-software gate:
+ * with only eight, segtab_slot() reported the table full 7132 times and every
+ * one of those was an address that then had to fall back to the VMA -- while
+ * per-entry names were never exhausted at all (0 nibble-full events).  The
+ * binding constraint was the shared array, never the per-entry index.
+ *
+ * This lives in its own refcounted allocation rather than inline, so the
+ * per-node-page segtab is just the index array and both sizes can move
+ * independently. */
+#define MM_SEGTAB_MAX 255
+
+/* Per-page-table-page segment table, allocated on first annotation.
+ *
+ * NO refcount, unlike the mm_segarr beside it.  A segtab is owned by exactly
+ * one pt_meta_t, which frees it when that PT page goes away, so a count would
+ * be written once and never read.  Dropping it is what buys the eight bytes
+ * a wider index needs: with the field still here the struct is 4104 bytes even
+ * at MM_SEGTAB_NAMES=8, which overruns the order-0 frame it is allocated from
+ * by exactly eight. */
 typedef struct mm_segtab {
-    volatile int refcount;
-    uint8_t      n;                    /* segments in use, 1..MM_SEGTAB_MAX */
-    mm_seg_t    *seg[MM_SEGTAB_MAX];
+    /* The segments named by this node page's entries, shared by all of them.
+     * Refcounted: several node pages can be annotated from one mmap, so the
+     * array outlives any single segtab that points at it. */
+    struct mm_segarr *arr;
     /* Index is 1-based so that 0 means "no segment", which is also the state
      * of every entry in a table that never needed one.
      *
-     * TWO bytes per entry, not one.  The packer puts MM_SEGTAB_MAX four-bit
-     * slot numbers in here, and 4 x 4 = 16 bits; as a uint8_t the top two
-     * nibbles were silently truncated by the cast in segtab_nib_set(), so an
-     * entry could only ever name TWO segments however many the table held.
-     * That surfaced as a seg_miss that no amount of walking would close, and
-     * the auditor never caught it because it read back the same truncated
-     * byte the writer had written.
+     * SIX bytes per entry: MM_SEGTAB_NAMES eight-bit slot numbers.  It was
+     * ONE byte holding four-bit slots, and the packer cast its result back to
+     * that width, so slots three and four were written and read back as
+     * nothing.  Nothing could detect it -- the annotate walk, the lookup and
+     * the auditor all read back the same truncated byte -- and it showed up as
+     * a seg_miss that no amount of walking would close.  segtab_packed_t in
+     * pt.c exists so the next width mistake is a compile error.
      *
-     * The segtab already occupies a whole page for ~550 bytes of state, so
-     * the second byte is free.  Every local holding a packed index has to be
-     * widened to match -- see segtab_packed_t in pt.c. */
-    uint16_t     idx[MM_PT_META_ENTRIES];
+     * The segtab is allocated from a SINGLE order-0 frame and this array is
+     * 512 entries of it, so the static assert in pt.c is what stops the whole
+     * structure from quietly overrunning that frame -- which surfaces as a wild
+     * pointer in proc_put, not as anything to do with segments. */
+    /* Six bytes, not eight: see MM_SEGTAB_NAMES.  A byte array rather than a
+     * packed integer, so the slot accessors index it directly and a width
+     * mistake is a compile error instead of a silent truncation. */
+    uint8_t      idx[MM_PT_META_ENTRIES * MM_SEGTAB_NAMES];
 } mm_segtab_t;
+
+_Static_assert(MM_SEGTAB_NAMES <= 7,
+               "idx[] fits seven names in the frame; widen the layout before adding one");
+_Static_assert(MM_SEGTAB_MAX <= 255, "a slot number must fit the byte idx[] gives it");
 
 /*
  * Per-entry safety bits.  These exist so the per-PTE status can become the
@@ -571,6 +636,33 @@ extern uint64_t mm_seg_shadow_miss;
  * is inert; both equal means the segment is inert. */
 extern uint64_t mm_seg_dispatch_seg;
 extern uint64_t mm_seg_dispatch_fallback;
+
+/* Why a lookup found nothing, and why an annotation could not be recorded.
+ *
+ * These earned their place by refuting a diagnosis: the residual seg_miss was
+ * attributed to entries running out of names, and mm_seg_annot_lost[1] (per-entry
+ * names exhausted) measured ZERO while mm_seg_annot_lost[0] (the shared array
+ * exhausted) measured 7132.  Every capacity fix since has been chosen against
+ * these numbers rather than against the frame arithmetic, which pointed at the
+ * wrong limit the whole way.  Both are printed in [MM-ASM].
+ *
+ *   mm_seg_miss_why[]  0 hole  1 leaf  2 unnamed  3 extent  4 ambiguous
+ *                      5 fell off the bottom
+ *   mm_seg_annot_lost[] 0 shared array full  1 entry's names all taken
+ *   mm_seg_full_lvl[]  per level, how many annotations that level could not take
+ */
+enum {
+    MM_MW_HOLE = 0,      /* entry not valid */
+    MM_MW_LEAF,          /* a huge leaf, which never names a segment */
+    MM_MW_UNNAMED,       /* node has an array, this entry names nothing */
+    MM_MW_EXTENT,        /* named, but no name covers the address */
+    MM_MW_AMBIG,         /* two live names both cover it */
+    MM_MW_BOTTOM,        /* walked off the bottom, still nothing */
+    MM_MW_COUNT
+};
+extern uint64_t mm_seg_miss_why[MM_MW_COUNT];
+extern uint64_t mm_seg_annot_lost[2];
+extern uint64_t mm_seg_full_lvl[8];
 
 /* Per-PTE metadata maintenance.  mm_pt_note_present() and
  * mm_pt_note_absent() bracket every PTE write; the level-0 helpers are the

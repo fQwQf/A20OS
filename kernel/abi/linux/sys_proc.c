@@ -825,6 +825,21 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)mm_seg_shadow_miss,
                   (unsigned long)mm_seg_dispatch_seg,
                   (unsigned long)mm_seg_dispatch_fallback);
+            kinfo("[MM-ASM]   miss why: hole=%lu leaf=%lu unnamed=%lu "
+                  "extent=%lu ambig=%lu bottom=%lu\n",
+                  (unsigned long)mm_seg_miss_why[0],
+                  (unsigned long)mm_seg_miss_why[1],
+                  (unsigned long)mm_seg_miss_why[2],
+                  (unsigned long)mm_seg_miss_why[3],
+                  (unsigned long)mm_seg_miss_why[4],
+                  (unsigned long)mm_seg_miss_why[5]);
+            kinfo("[MM-ASM]   annot lost: table_full=%lu nibbles_full=%lu "
+                  "full_by_level=[%lu,%lu,%lu]\n",
+                  (unsigned long)mm_seg_annot_lost[0],
+                  (unsigned long)mm_seg_annot_lost[1],
+                  (unsigned long)mm_seg_full_lvl[0],
+                  (unsigned long)mm_seg_full_lvl[1],
+                  (unsigned long)mm_seg_full_lvl[2]);
             if (rep.vma_mismatch)
                 kinfo("[MM-ASM]   first vma_mismatch  va=0x%lx\n",
                       (unsigned long)rep.vma_bad_va);

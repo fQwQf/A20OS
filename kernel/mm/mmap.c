@@ -99,18 +99,32 @@ static mm_seg_t *mm_seg_build(int kind, vaddr_t start, vaddr_t end, int fd,
 static void vma_seg_set(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
                         vaddr_t end)
 {
-    int kind = (vma->vm_flags & VM_VMO) ? MM_SEG_VMO : MM_SEG_FILE;
-    uint64_t base_off = (vma->vm_flags & VM_VMO) ? vma->vmo_offset
-                                                 : vma->file_offset;
+    /* Anonymous mappings get a segment too (MM_SEG_ANON).  Until now this
+     * function classified everything as VMO or FILE because it was only ever
+     * called for mappings that had VM_VMO or VM_FILE, so the segment set was
+     * never the full set of mappings -- heap, stack and anonymous mmap were
+     * simply absent from it.  An ordered index over segments cannot answer
+     * "is [start,end) covered?" while half the address space is missing, so
+     * the anon case has to be representable before that index means
+     * anything. */
+    int is_vmo = (vma->vm_flags & VM_VMO) != 0;
+    int is_file = (vma->vm_flags & VM_FILE) != 0;
+    int kind = is_vmo ? MM_SEG_VMO : (is_file ? MM_SEG_FILE : MM_SEG_ANON);
+    uint64_t base_off = is_vmo ? vma->vmo_offset : vma->file_offset;
     mm_seg_t *s = mm_seg_build(kind, start, end,
-                               (vma->vm_flags & VM_VMO) ? -1 : vma->file_fd,
+                               is_vmo ? -1 : vma->file_fd,
                                base_off + (start - vma->start),
                                vma->vm_flags,
-                               (vma->vm_flags & VM_VMO) ? NULL
-                                                        : vma->file_vnode,
-                               (vma->vm_flags & VM_VMO) ? vma->vmo : NULL);
+                               is_vmo ? NULL : vma->file_vnode,
+                               is_vmo ? vma->vmo : NULL);
     if (!s)
         return;
+    /* The policy half of the mapping.  mm_seg_build() cannot see these --
+     * it is handed the backing object, not the VMA -- so they are stamped on
+     * the segment that actually goes into the page table.  Everything else
+     * about this VMA is now reachable from the segment alone. */
+    s->vmar_cap    = vma->vmar_cap;
+    s->sysv_shmid  = vma->sysv_shmid;
     mm_seg_put(vma->seg);            /* the old one, if any */
     vma->seg = s;
     (void)mm_pt_annotate_seg(mm, start, end, s);
@@ -120,6 +134,16 @@ void mm_mmap_seg_annotate(mm_struct_t *mm, vm_area_t *vma)
 {
     if (!mm || !vma || vma->end <= vma->start)
         return;
+    /* Anonymous mappings do NOT get a node-entry index.  They are not
+     * dispatched from -- the dispatcher claims MM_SEG_FILE only -- and a node
+     * entry is 2 MiB holding at most MM_SEGTAB_NAMES mappings, so letting anon
+     * into that shared budget spends names nothing reads on evictions.  With
+     * anon annotated unconditionally the gate measured table_full=42384,
+     * nibbles_full=47965 and seg_miss 1572 (3.6%), against 265 (0.6%) without.
+     *
+     * Anon's segment still has to exist for the segment set to be the full set
+     * of mappings; that is the ordered index's job (roadmap 13.14), not this
+     * one's.  See mm_mmap_seg_label() for why it is safe to skip here. */
     if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
         return;
     vma_seg_set(mm, vma, vma->start, vma->end);
@@ -162,16 +186,33 @@ void mm_mmap_seg_reannotate(mm_struct_t *mm, vm_area_t *vma, vaddr_t start,
 {
     if (!mm || !vma || end <= start)
         return;
-    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))
+    if (!(vma->vm_flags & (VM_VMO | VM_FILE)))  /* anon: see mm_mmap_seg_annotate */
         return;
-    /* The segment being replaced still describes the range this VMA used to
-     * occupy, so retire its name there before the new one goes on.  Without
-     * this the old segment keeps answering for addresses that no longer belong
-     * to it -- its extent still covers them, which is exactly what lookup
-     * trusts. */
+    /* No VM_VMO|VM_FILE guard any more: anonymous mappings carry a segment
+     * too, and a split has to be able to re-annotate one.  Leaving the guard
+     * in would make a split of an anonymous mapping leave its old segment's
+     * name on the page table with nothing to replace it -- the range would
+     * keep resolving to the pre-split extent. */
+    /* Retire the old segment's name over the range IT named, not over the VMA's
+     * range.  The VMA's range has already been narrowed by the caller before
+     * this is reached -- a head cut has moved vma->start, a tail cut has moved
+     * vma->end, a middle cut has done both -- so passing vma->start/end here
+     * left the CUT-AWAY part still named by the old segment.  That part is
+     * exactly the range the unmap just freed, and the old segment's recorded
+     * extent still covers it, which is the one thing mm_pt_lookup_seg() trusts.
+     *
+     * So a later mapping landing there resolved to the segment of the mapping
+     * that used to be there.  Measured: the gate's shadow check reported
+     * anonymous segments shadowing file mappings of the identical one-page
+     * extent, and git died with SIGSEGV.  Anonymous mappings made it common
+     * because heap and brk are split constantly, but the leak was in all
+     * three split branches and predates them.
+     *
+     * The segment's own base_va/len is the authority for what it named, and it
+     * does not change when the VMA's bounds do. */
     mm_seg_t *old = vma->seg;
     if (old)
-        mm_mmap_seg_unannotate(mm, vma->start, vma->end, old);
+        mm_mmap_seg_unannotate(mm, old->base_va, old->base_va + old->len, old);
     vma_seg_set(mm, vma, start, end);
 }
 
@@ -330,6 +371,13 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
     mm_insert_vma(mm, vma);
     mm->total_vm += len / PAGE_SIZE;
+    /* Annotate here, where the mapping is published.  The shm and vmo helpers
+     * below both do this and the main mmap path did not -- so every mapping
+     * made by an ordinary mmap() was named only by whichever fault happened
+     * to touch it first, and one that was never faulted stayed unnamed for
+     * good.  With provisioning in mm_pt_annotate_seg() this labels the whole
+     * extent at once. */
+    mm_mmap_seg_annotate(mm, vma);
 
     /*
      * CortenMM on-demand paging (paper SS4.3): record the reservation per PTE

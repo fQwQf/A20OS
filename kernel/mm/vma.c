@@ -377,6 +377,28 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     refcount_set(&tail->refcount, 1);
     tail->start = addr;
     tail->file_offset += addr - v->start;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* `seg` is an OWNED reference and the struct copy just duplicated the
+     * pointer without taking one.  Both halves would then drop the same
+     * segment: the second put frees it while the page tables still name it,
+     * and the next lookup reads the recycled frame and calls a stale release
+     * pointer.  The real-software gate took exactly that -- a wild jump to
+     * 0x2f0a7d203b303220, which is file text, not code.
+     *
+     * This is the third site with this defect and the third fix: vma_split()
+     * below and the fork copy in vm.c already handle it.  It survived here
+     * because mprotect splits a VMA far less often than anything else splits
+     * one, and only once anonymous mappings carried segments did the split
+     * happen constantly enough to fire (heap and stack are mprotected
+     * routinely).
+     *
+     * NULL it and do NOT put it: `tail` never took a reference, so the one
+     * reference that exists belongs to the head and must survive.  Putting here
+     * would spend the head's, and the head's own re-annotation below would then
+     * put a segment that was already freed.  Both halves are re-annotated just
+     * below, so nothing is left unnamed. */
+    tail->seg = NULL;
+#endif
     int fr = vma_ref_aux(tail);
     if (fr < 0) {
         kfree(tail);
@@ -390,6 +412,17 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
 
     v->end = addr;
     v->next = tail;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+    /* Both halves need segments of their own.  The head kept the borrowed one
+     * until just above, where it was dropped, so neither half is named at all
+     * right now -- and even if they were, one segment's recorded extent covers
+     * the pre-split range, which is exactly what lookup matches on.  Re-annotate
+     * the head first, then the tail, for the same ordering reason the munmap
+     * middle cut uses: the two walks must not both claim the node entry that
+     * straddles the boundary. */
+    mm_mmap_seg_reannotate(mm, v, v->start, v->end);
+    mm_mmap_seg_reannotate(mm, tail, tail->start, tail->end);
+#endif
     return 0;
 }
 

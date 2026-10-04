@@ -85,13 +85,25 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         uint64_t e = v->end > end ? end : v->end;
 
         if (s > v->start) {
+            vm_area_t *head = v;
             v = vma_split(v, s);
             if (!v) return -ENOMEM;
             next = v->next;
+            /* Both halves need fresh segments.  vma_split() leaves the tail
+             * with none and shrinks the head's recorded extent, so the name
+             * still on the page table describes the pre-split range.  Lookup
+             * matches on that extent, which is how a mprotect split left a
+             * neighbouring mapping resolving to the wrong segment: measured as
+             * seg_diff on the real-software gate. */
+            mm_mmap_seg_reannotate(mm, head, head->start, head->end);
+            mm_mmap_seg_reannotate(mm, v, v->start, v->end);
         }
         if (e < v->end) {
+            vm_area_t *head = v;
             if (!vma_split(v, e)) return -ENOMEM;
             next = v->next;
+            mm_mmap_seg_reannotate(mm, head, head->start, head->end);
+            mm_mmap_seg_reannotate(mm, next, next->start, next->end);
         }
 
         for (uint64_t va = v->start; va < v->end; ) {
