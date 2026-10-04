@@ -111,10 +111,21 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     }
 
     task_t *owner = proc_current();
-    uint64_t flags = spin_lock_irqsave(&g_net_lock);
-    if (net_find_bound_socket_locked(AF_UNIX, s->type, bind_addr, bind_len)) {
-        spin_unlock_irqrestore(&g_net_lock, flags);
+    /* The EADDRINUSE check is a whole-table scan, so it takes one bucket at a
+     * time and comes back with a reference instead of running inside s's own
+     * critical section.  It never mutates, so publishing s->local afterwards
+     * needs s's bucket alone. */
+    net_socket_t *clash = net_find_bound_socket(AF_UNIX, s->type, bind_addr,
+                                                bind_len);
+    if (clash) {
+        net_socket_free(clash);
         return -EADDRINUSE;
+    }
+    int sb = net_socket_bucket(s);
+    uint64_t flags = net_bucket_lock(sb);
+    if (!net_socket_is_live(s)) {
+        net_bucket_unlock(sb, flags);
+        return -ENOTSOCK;
     }
     memcpy(s->local, bind_addr, bind_len);
     s->local_len = bind_len;
@@ -124,16 +135,16 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
         s->owner_uid = owner->cred.uid;
         s->owner_gid = owner->cred.gid;
     }
-    spin_unlock_irqrestore(&g_net_lock, flags);
+    net_bucket_unlock(sb, flags);
 
     if (unix_pathname) {
         int fd = vfs_open(unix_path, O_CREAT | O_EXCL | O_RDWR,
                           S_IFSOCK | 0777);
         if (fd < 0) {
-            uint64_t undo = spin_lock_irqsave(&g_net_lock);
+            uint64_t undo = net_bucket_lock(sb);
             s->bound = 0;
             s->local_len = 0;
-            spin_unlock_irqrestore(&g_net_lock, undo);
+            net_bucket_unlock(sb, undo);
             return fd == -EEXIST ? -EADDRINUSE : fd;
         }
         vfs_close(fd);
@@ -155,30 +166,49 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
 
     proc_wake_q_t wake_q;
     proc_wake_q_init(&wake_q);
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+
+    /*
+     * The listener lookup is a whole-table scan: it walks the shards one at a
+     * time and returns a *reference*, which is what lets s's bucket be dropped
+     * before the two-socket section below takes them together.  Taking s's
+     * bucket first and scanning inside it would nest an arbitrary bucket under
+     * a held one, which is the ABBA the ascending order exists to forbid.
+     */
+    net_socket_t *listener = net_find_bound_socket(AF_UNIX, s->type,
+                                                  peer_addr, peer_len);
+    if (!listener)
+        return -ECONNREFUSED;
+
+    net_socket_t *child = NULL;
+    int rc = 0;
+    net_bucket_pair_t pair =
+        net_bucket_lock2(net_socket_bucket(s), net_socket_bucket(listener));
+    if (!net_socket_is_live(s) || !net_socket_is_live(listener)) {
+        rc = -ECONNREFUSED;
+        goto out;
+    }
     memcpy(s->peer_addr, peer_addr, peer_len);
     s->peer_len = peer_len;
     s->connected = 1;
     s->ever_connected = 1;
 
-    net_socket_t *listener = net_find_bound_socket_locked(AF_UNIX, s->type,
-                                                          peer_addr, peer_len);
-    if (!listener) {
-        s->connected = 0;
-        spin_unlock_irqrestore(&g_net_lock, irq);
-        return -ECONNREFUSED;
-    }
     if (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET) {
         if (!listener->listening || listener->accept_count >= NET_MAX_QUEUE) {
             s->connected = 0;
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            return listener->listening ? -EAGAIN : -ECONNREFUSED;
+            rc = listener->listening ? -EAGAIN : -ECONNREFUSED;
+            goto out;
         }
-        net_socket_t *child = net_socket_alloc();
+        /* The child is allocated here, under the same two locks the single
+         * global lock used to cover, and is not published in g_sockets[] until
+         * an accepted socket is registered -- so it owns no slot and therefore
+         * no bucket of its own.  Nothing else can reach it before the accept
+         * queue push below completes, and that push happens under the
+         * listener's bucket, so the private writes need no lock. */
+        child = net_socket_alloc();
         if (!child) {
             s->connected = 0;
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            return -ENOMEM;
+            rc = -ENOMEM;
+            goto out;
         }
         child->domain = AF_UNIX;
         child->type = s->type;
@@ -202,9 +232,8 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
             if (child->ch_ep) { a20_channel_ep_release(child->ch_ep); child->ch_ep = NULL; }
             s->connected = 0;
             s->peer = NULL;
-            net_socket_free(child);
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            return qr;
+            rc = qr;
+            goto out;
         }
         (void)wait_queue_collect_one(
             &listener->accept_waitq, 0, PROC_WAKE_EVENT, &wake_q);
@@ -227,9 +256,16 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
             s->peer_gid = listener->owner_gid;
         }
     }
-    spin_unlock_irqrestore(&g_net_lock, irq);
+out:
+    net_bucket_unlock2(pair);
+    /* Our reference from the scan.  s->peer and child->peer are plain
+     * back-pointers with no reference of their own, exactly as before the
+     * table was sharded; this only returns what this function took. */
+    net_socket_free(listener);
+    if (child && rc < 0)
+        net_socket_free(child);
     (void)proc_wake_q_flush(&wake_q);
-    return 0;
+    return rc;
 }
 
 static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
@@ -240,7 +276,15 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
     if (!s)
         return -ENOTSOCK;
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    /*
+ * Two sockets, two buckets, ascending.  As in the INET send path the
+ * destination is resolved first, outside any lock: it may come from a
+ * whole-table scan that walks the shards one at a time, and the reference that
+ * scan hands back is what lets s's bucket be dropped before the pair is taken.
+ */
+    int sb = net_socket_bucket(s);
+    uint64_t src_local_len = 0;
+    uint8_t src_local[NET_SOCKADDR_MAX];
     net_socket_t *dst = NULL;
     const void *dst_addr = addr;
     size_t dst_len = addrlen;
@@ -249,39 +293,60 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         size_t ulen = addrlen;
         int ur = net_unix_sockaddr_prepare(addr, addrlen, unix_addr,
                                            &ulen, NULL, 0);
-        if (ur < 0) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+        if (ur < 0)
             return ur;
-        }
         dst_addr = unix_addr;
         dst_len = ulen;
     }
-    if (!dst_addr && s->connected) {
-        dst_addr = s->peer_addr;
-        dst_len = s->peer_len;
-    }
-    if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET || net_socket_is_valid_locked(s->peer))) {
-        dst = s->peer;
-    } else {
-        if (s->peer) s->peer = NULL;
-        if (dst_addr) {
-            dst = net_find_bound_socket_locked(AF_UNIX, s->type, dst_addr, dst_len);
+    {
+        uint64_t sf = net_bucket_lock(sb);
+        if (!net_socket_is_live(s)) {
+            net_bucket_unlock(sb, sf);
+            return -ENOTSOCK;
         }
+        if (!dst_addr && s->connected) {
+            /* Copied out rather than pointed at: the search below runs with no
+             * lock held, so s->peer_addr must not be read after this
+             * critical section ends. */
+            dst_len = s->peer_len;
+            memcpy(unix_addr, s->peer_addr, dst_len);
+            dst_addr = unix_addr;
+        }
+        src_local_len = s->local_len;
+        memcpy(src_local, s->local, src_local_len);
+        if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
+                        net_socket_is_live(s->peer)))
+            dst = net_socket_ref(s->peer);
+        net_bucket_unlock(sb, sf);
     }
-    if (!dst) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
+    if (!dst && s->peer) {
+        /* The back-pointer is stale: drop it and fall back to a lookup. */
+        uint64_t sf = net_bucket_lock(sb);
+        if (s->peer) s->peer = NULL;
+        net_bucket_unlock(sb, sf);
+    }
+    if (!dst && dst_addr)
+        dst = net_find_bound_socket(AF_UNIX, s->type, dst_addr, dst_len);
+    if (!dst)
+        return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
+
+    net_bucket_pair_t pair = net_bucket_lock2(sb, net_socket_bucket(dst));
+    if (!net_socket_is_live(dst)) {
+        net_bucket_unlock2(pair);
+        net_socket_free(dst);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
     /* Channel-backed data plane: plain data goes through the internal
-     * channel (no g_net_lock; the channel has its own locking).  SCM_RIGHTS
-     * messages fall back to the legacy queue below. */
+     * channel (the channel has its own locking, so the pair is dropped first).
+     * SCM_RIGHTS messages fall back to the legacy queue below. */
     if (dst->ch_ep && !(files && nfiles > 0)) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock2(pair);
         int cr = unix_ch_send(s, dst, buf, len);
         if (cr >= 0) {
             net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
             wait_queue_wake_all(&dst->read_waitq, 0, PROC_WAKE_EVENT);
         }
+        net_socket_free(dst);
         return cr;
     }
     /*
@@ -302,8 +367,8 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         while (left > 0) {
             size_t n = left > NET_MAX_PAYLOAD ? NET_MAX_PAYLOAD : left;
             int rc = (left > n)
-                   ? net_enqueue_msg_locked(dst, p, n, s->local, s->local_len)
-                   : net_enqueue_msg_locked_fds(dst, p, n, s->local, s->local_len,
+                   ? net_enqueue_msg_locked(dst, p, n, src_local, src_local_len)
+                   : net_enqueue_msg_locked_fds(dst, p, n, src_local, src_local_len,
                                                 files, nfiles);
             if (rc < 0) {
                 if (r == 0)
@@ -315,7 +380,7 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
             left -= n;
         }
     } else {
-        r = net_enqueue_msg_locked_fds(dst, buf, len, s->local, s->local_len,
+        r = net_enqueue_msg_locked_fds(dst, buf, len, src_local, src_local_len,
                                        files, nfiles);
     }
     proc_wake_q_t wake_q;
@@ -325,8 +390,9 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         (void)wait_queue_collect_one(
             &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
     }
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock2(pair);
     (void)proc_wake_q_flush(&wake_q);
+    net_socket_free(dst);
     return r;
 }
 
@@ -339,15 +405,18 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
 int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len)
 {
     /* a20_channel_send(ep) delivers to ep->peer, so the sender must send
-     * on its OWN endpoint: its peer is the receiver's ch_ep. */
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+     * on its OWN endpoint: its peer is the receiver's ch_ep.  Only the
+     * receiver's credentials are stamped here, so this is dst's bucket alone;
+     * s is not touched and no second bucket is needed. */
+    int db = net_socket_bucket(dst);
+    uint64_t irq = net_bucket_lock(db);
     task_t *cur = proc_current();
     if (cur) {
         dst->ch_cred_pid = cur->pid;
         dst->ch_cred_uid = cur->cred.uid;
         dst->ch_cred_gid = cur->cred.gid;
     }
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock(db, irq);
     const uint8_t *p = (const uint8_t *)buf;
     size_t left = len;
     size_t sent = 0;

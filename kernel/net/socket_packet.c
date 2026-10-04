@@ -3,9 +3,9 @@
  *
  * TX is synchronous: a frame handed to a bound socket goes straight to the
  * device send op.  RX cannot be, because lwip_stack.c captures frames while
- * holding g_lwip_lock and that lock is never held together with g_net_lock.
- * Captures therefore land in a small ring and are delivered from the poll
- * bottom half, which runs with g_net_lock only.
+ * holding g_lwip_lock and that lock is never held together with a socket-table
+ * bucket lock.  Captures therefore land in a small ring and are delivered from
+ * the poll bottom half, which runs with bucket locks only.
  */
 #include "net/socket_internal.h"
 #include "net/socket_side.h"
@@ -51,39 +51,30 @@ static volatile unsigned g_pkt_drops;
  * frame the socket was entitled to.
  */
 static volatile int g_pkt_bound_count;
-static uint32_t g_pkt_bound_slots[(NET_MAX_SOCKETS + 31) / 32];
 
 int net_packet_bound_count(void)
 {
     return __atomic_load_n(&g_pkt_bound_count, __ATOMIC_ACQUIRE);
 }
 
-/* Both of these run under g_net_lock, so the bitmap needs no lock of its own;
- * it exists to keep the count balanced when the release side cannot tell
- * whether the acquire side ran. */
+/* Both of these run under the socket's own bucket lock, so the idempotence
+ * marker -- now a field of net_socket_t rather than a NET_MAX_SOCKETS-entry
+ * bitmap indexed by registry slot -- needs no lock of its own.  It exists to
+ * keep the count balanced when the release side cannot tell whether the
+ * acquire side ran. */
 void net_packet_bound_acquire(net_socket_t *s)
 {
-    int idx = s ? s->reg_idx : -1;
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+    if (!s || s->pkt_bound_marked)
         return;
-    int w = idx / 32;
-    uint32_t bit = 1U << (idx % 32);
-    if (g_pkt_bound_slots[w] & bit)
-        return;
-    g_pkt_bound_slots[w] |= bit;
+    s->pkt_bound_marked = 1;
     __atomic_fetch_add(&g_pkt_bound_count, 1, __ATOMIC_ACQ_REL);
 }
 
 void net_packet_bound_release(net_socket_t *s)
 {
-    int idx = s ? s->reg_idx : -1;
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
+    if (!s || !s->pkt_bound_marked)
         return;
-    int w = idx / 32;
-    uint32_t bit = 1U << (idx % 32);
-    if (!(g_pkt_bound_slots[w] & bit))
-        return;
-    g_pkt_bound_slots[w] &= ~bit;
+    s->pkt_bound_marked = 0;
     __atomic_fetch_sub(&g_pkt_bound_count, 1, __ATOMIC_ACQ_REL);
 }
 
@@ -117,8 +108,18 @@ void net_packet_rx_defer(unsigned ifindex, const uint8_t *frame, size_t len)
     spin_unlock_irqrestore(&g_pkt_ring_lock, flags);
 }
 
-static void net_packet_deliver_locked(const net_packet_slot_t *slot,
-                                      proc_wake_q_t *wake_q)
+/*
+ * Deliver one captured frame to every AF_PACKET socket it matches.
+ *
+ * The table is walked one bucket at a time: the whole set of shard locks with
+ * interrupts disabled is the livelock fs/vfs/dcache.c records, and a frame
+ * delivery that livelocks the interrupt that is trying to deliver the next
+ * frame is the worst possible place to find out.  Each bucket is taken,
+ * drained and released before the next is taken, so at most one shard lock is
+ * ever held.
+ */
+static void net_packet_deliver(const net_packet_slot_t *slot,
+                               proc_wake_q_t *wake_q)
 {
     if (slot->len < ETH_HLEN)
         return;
@@ -129,8 +130,11 @@ static void net_packet_deliver_locked(const net_packet_slot_t *slot,
         return;
     uint16_t ethertype = (uint16_t)((slot->frame[12] << 8) | slot->frame[13]);
 
-    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
-        net_socket_t *s = g_sockets[i];
+    for (int bucket = 0; bucket < NET_SOCK_BUCKETS; bucket++) {
+        uint64_t bf = net_bucket_lock(bucket);
+        int base = bucket << NET_SOCK_BUCKET_SHIFT;
+        for (int i = 0; i < NET_SOCK_SLOTS_PER_BUCKET; i++) {
+        net_socket_t *s = g_sockets[base + i];
         if (!s || s->domain != AF_PACKET || s->closed || !s->pkt_bound)
             continue;
         if (s->pkt_ifindex > 0 && (unsigned)s->pkt_ifindex != slot->ifindex)
@@ -159,6 +163,8 @@ static void net_packet_deliver_locked(const net_packet_slot_t *slot,
         if (net_enqueue_msg_locked(s, payload, payload_len, &ll, sizeof(ll)) >= 0)
             (void)wait_queue_collect_one(&s->read_waitq, 0,
                                          PROC_WAKE_EVENT, wake_q);
+        }
+        net_bucket_unlock(bucket, bf);
     }
 }
 
@@ -182,9 +188,7 @@ void net_packet_bottom_half_process(void)
         g_pkt_tail = (g_pkt_tail + 1) % NET_PACKET_RX_RING;
         spin_unlock_irqrestore(&g_pkt_ring_lock, flags);
 
-        uint64_t irq = spin_lock_irqsave(&g_net_lock);
-        net_packet_deliver_locked(&g_pkt_drain, &wake_q);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_packet_deliver(&g_pkt_drain, &wake_q);
         delivered++;
     }
     if (delivered)
@@ -221,7 +225,12 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     if (proto == 0)
         proto = ETH_P_ALL;
 
-    uint64_t flags = spin_lock_irqsave(&g_net_lock);
+    int b = net_socket_bucket(s);
+    uint64_t flags = net_bucket_lock(b);
+    if (!net_socket_is_live(s)) {
+        net_bucket_unlock(b, flags);
+        return -ENOTSOCK;
+    }
     s->pkt_ifindex = ll->sll_ifindex;
     s->pkt_protocol = proto;
     s->pkt_hatype = ARPHRD_ETHER;
@@ -235,7 +244,7 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     memcpy(s->local, addr, addrlen);
     s->local_len = addrlen;
     s->bound = 1;
-    spin_unlock_irqrestore(&g_net_lock, flags);
+    net_bucket_unlock(b, flags);
     return 0;
 }
 

@@ -127,7 +127,13 @@ int net_alg_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     if (!net_alg_name_supported(type, name))
         return -ENOENT;
 
-    uint64_t flags = spin_lock_irqsave(&g_net_lock);
+    /* One socket, one bucket. */
+    int sb = net_socket_bucket(s);
+    uint64_t flags = net_bucket_lock(sb);
+    if (!net_socket_is_live(s)) {
+        net_bucket_unlock(sb, flags);
+        return -ENOTSOCK;
+    }
     memcpy(s->local, bind_addr, addrlen);
     s->local_len = addrlen;
     strncpy(s->alg_type, type, sizeof(s->alg_type) - 1);
@@ -135,7 +141,7 @@ int net_alg_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     strncpy(s->alg_name, name, sizeof(s->alg_name) - 1);
     s->alg_name[sizeof(s->alg_name) - 1] = '\0';
     s->bound = 1;
-    spin_unlock_irqrestore(&g_net_lock, flags);
+    net_bucket_unlock(sb, flags);
     return 0;
 }
 
@@ -158,9 +164,9 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     strncpy(child->alg_type, s->alg_type, sizeof(child->alg_type) - 1);
     strncpy(child->alg_name, s->alg_name, sizeof(child->alg_name) - 1);
 
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    /* No bucket lock held: net_register_socket_locked() takes a socket-table
+     * shard itself and must not be nested under another socket's bucket. */
     int r = net_register_socket_locked(child);
-    spin_unlock_irqrestore(&g_net_lock, irq);
     if (r < 0) {
         net_socket_free(child);
         return r;

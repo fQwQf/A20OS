@@ -33,8 +33,10 @@
  *      is partitioned by which lane owns the PCB.
  *   D  receive drain hands packets to the owning lane instead of processing
  *      them inline.  Requires C.
- *   E  per-socket lock replacing g_net_lock.  Requires D, and an object
- *      refcount first -- g_net_lock is currently what keeps a socket alive.
+ *   E  per-socket lock replacing the socket-table shard locks.  DONE, ahead
+ *      of D: the table is now sharded by slot run (g_net_lock is gone) and
+ *      net_socket_t carries the refs refcount that used to be implicit in the
+ *      single global lock.
  *
  * Do not skip a stage: B without C leaves one global timeout wheel behind the
  * per-lane PCBs, which reintroduces exactly the single-core serialization this
