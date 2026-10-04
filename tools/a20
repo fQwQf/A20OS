@@ -13,6 +13,8 @@ See docs/instances.md for the manifest reference.
 # ─── How to run ───
 #   tools/a20 check                        validate every instances/*.toml
 #   tools/a20 check-registry               validate components/drivers.toml
+#   tools/a20 check-trim                   validate components/trim.toml
+#   tools/a20 trim    stm32f103            show the kernel trim plan
 #   tools/a20 list                         list known instances
 #   tools/a20 show-vars qemu-riscv64       print derived make variables
 #   tools/a20 build   qemu-riscv64         make <vars> dev-build|kernel-only
@@ -82,15 +84,22 @@ from a20_resource import (
 from a20_registry import (
     DriverComponent,
     RegistryError,
-    cross_check_flash_targets,
+    check_trim_fragment,
     check_make_fragment,
+    cross_check_flash_targets,
+    cross_check_trim_consumers,
     load_flash_backends,
     load_registry,
+    load_trim_registry,
     make_fragment_path,
+    plan_trim,
     render_make_fragment,
+    render_trim_fragment,
+    trim_fragment_path,
     validate_driver_selection,
     validate_flash_backends,
     validate_registry,
+    validate_trim_registry,
 )
 from a20_test import run_test
 from a20_validate import validate_instance
@@ -135,6 +144,17 @@ def _load_registry() -> tuple[DriverComponent, ...]:
         listing = "; ".join(errors)
         raise A20Error(f"component registry: {listing}")
     return entries
+
+
+def _load_trim():
+    try:
+        reg = load_trim_registry(REPO_ROOT)
+    except RegistryError as e:
+        raise A20Error(f"trim registry: {e}") from None
+    errors = validate_trim_registry(reg, REPO_ROOT)
+    if errors:
+        raise A20Error(f"trim registry: {'; '.join(errors)}")
+    return reg
 
 
 def _load(arg: str) -> Instance:
@@ -498,6 +518,10 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"  actions     {', '.join(acts)}")
     print(f"  board       {inst.board or default_board(inst.arch)}")
     print(f"  needs       {need.describe()}")
+    plan = plan_trim(inst, _load_trim())
+    states = {d.label: d.state for d in plan}
+    print(f"  trim        profile {plan[0].state}; nommu={states['nommu']} "
+          f"swap={states['swap']} xlator={states['xlator']} (a20 trim for the full plan)")
 
     ports = parse_hostfwd_ports(inst.net.hostfwd)
     print(f"  host ports  {', '.join(f'{a}:{p}' for a, p in ports) if ports else 'none (nothing to connect to)'}")
@@ -726,6 +750,71 @@ def cmd_regen_drivers(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_trim(args: argparse.Namespace) -> int:
+    """Show the kernel trim plan an instance's build will follow.
+
+    The Makefile owns the gates; this reports what they will do for this
+    instance -- which profile's curated source list applies, which
+    capabilities survive, and where the memory budget comes from.  Policy
+    text lives in components/trim.toml, so this is a reading of that file
+    through the same gate order make uses, not a second policy.
+    """
+    inst = _load(args.instance)
+    plan = plan_trim(inst, _load_trim())
+    print(f"{inst.name}  [{inst.arch}/{inst.board}]  "
+          "trim plan (policy: components/trim.toml)")
+    for dec in plan:
+        print(f"  {dec.label:<11} {dec.state:<12} {dec.detail}")
+    return EXIT_OK
+
+
+def cmd_check_trim(_args: argparse.Namespace) -> int:
+    """Validate the trim registry, its generated fragment, and its consumers."""
+    try:
+        reg = load_trim_registry(REPO_ROOT)
+    except RegistryError as e:
+        print(f"error: components/trim.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
+    errors = (validate_trim_registry(reg, REPO_ROOT)
+              + cross_check_trim_consumers(reg, REPO_ROOT))
+    if errors:
+        print(f"error: components/trim.toml: {'; '.join(errors)}", file=sys.stderr)
+        return EXIT_FAIL
+    stale = check_trim_fragment(reg, REPO_ROOT)
+    if stale:
+        print(f"error: components/trim.mk is stale: {'; '.join(stale)}", file=sys.stderr)
+        print("hint: run 'a20 regen-trim' to regenerate it", file=sys.stderr)
+        return EXIT_FAIL
+    print(f"check-trim: {len(reg.profiles)} profile(s), {len(reg.capabilities)} "
+          "capability(ies) OK, generated fragment current")
+    return EXIT_OK
+
+
+def cmd_regen_trim(args: argparse.Namespace) -> int:
+    """Regenerate components/trim.mk from components/trim.toml."""
+    try:
+        reg = load_trim_registry(REPO_ROOT)
+    except RegistryError as e:
+        print(f"error: components/trim.toml: {e}", file=sys.stderr)
+        return EXIT_FAIL
+    path = trim_fragment_path(REPO_ROOT)
+    rendered = render_trim_fragment(reg)
+    if args.dry_run:
+        current = path.read_text() if path.is_file() else ""
+        if current == rendered:
+            print(f"regen-trim: {path} is already up to date")
+        else:
+            print(f"regen-trim: would rewrite {path} "
+                  f"({len(rendered.splitlines())} lines)")
+        return EXIT_OK
+    try:
+        path.write_text(rendered)
+    except OSError as e:
+        raise A20Error(f"cannot write {path}: {e}") from None
+    print(f"regen-trim: wrote {path}")
+    return EXIT_OK
+
+
 def cmd_check_flash_backends(_args: argparse.Namespace) -> int:
     """Validate the flash-backend registry and cross-check it against the makefiles."""
     try:
@@ -789,6 +878,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="regenerate components/drivers.mk from components/drivers.toml")
     p_regen.add_argument("--dry-run", action="store_true",
                          help="report whether the fragment would change, without writing")
+    sub.add_parser("check-trim",
+                   help="validate components/trim.toml and its generated make fragment")
+    p_regen_trim = sub.add_parser(
+        "regen-trim",
+        help="regenerate components/trim.mk from components/trim.toml")
+    p_regen_trim.add_argument("--dry-run", action="store_true",
+                              help="report whether the fragment would change, without writing")
     sub.add_parser("check-flash-backends",
                    help="validate components/flash-backends.toml against the makefiles")
     pl = sub.add_parser("list", help="list known instances")
@@ -827,6 +923,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_instance_cmd("show", "show what an instance needs and supports",
                    with_make_args=False)
     add_instance_cmd("show-vars", "print derived make variables", with_make_args=False)
+    add_instance_cmd("trim", "show the kernel trim plan the instance builds with",
+                   with_make_args=False)
     add_instance_cmd("build", "build the instance image", with_make_args=True)
     add_instance_cmd("run", "build and boot the instance in QEMU", with_make_args=True)
     add_instance_cmd("debug", "build with -O0 -g and boot under QEMU GDB stub", with_make_args=True)
@@ -894,6 +992,12 @@ def _dispatch(ns: argparse.Namespace) -> int | None:
             return cmd_check(ns)
         case "check-registry":
             return cmd_check_registry(ns)
+        case "check-trim":
+            return cmd_check_trim(ns)
+        case "regen-trim":
+            return cmd_regen_trim(ns)
+        case "trim":
+            return cmd_trim(ns)
         case "regen-drivers":
             return cmd_regen_drivers(ns)
         case "check-flash-backends":

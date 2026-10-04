@@ -2,9 +2,12 @@
 
 Mirrors the Makefile's own guards (arch/board/ABI/SMP/NOMMU constraints) plus
 the cross-section rules for board-specific sections ([stm32], [flash],
-[package]).  Value-format policy that the Makefile already enforces with
-$(error) — e.g. STM32 bluetooth field formats — stays Makefile-owned; this
-module checks structure and compatibility only.
+[package]).  Capability arch matrices (which arch may nommu, swap, run the
+xlator, ...) are read from components/trim.toml -- the same registry the
+generated components/trim.mk feeds the Makefile, so instance validation and
+the build cannot disagree.  Value-format policy that the Makefile already
+enforces with $(error) — e.g. STM32 bluetooth field formats — stays
+Makefile-owned; this module checks structure and compatibility only.
 """
 
 from __future__ import annotations
@@ -13,18 +16,20 @@ import re
 from pathlib import Path
 from typing import Final, assert_never
 
-from a20_registry import RegistryError, load_flash_backends
+from a20_registry import (
+    RegistryError,
+    TrimRegistry,
+    load_flash_backends,
+    load_trim_registry,
+)
 from a20_instance import (
     ABI_CHOICES,
     DRIVER_DEPLOYMENTS,
     KNOWN_ARCHES,
-    NOMMU_ARCHES,
     PACKAGE_KINDS,
     PROFILES,
     QEMU_RUNNABLE_ARCHES,
-    RAMFS_USER_ARCHES,
     RELEASE_ARCH_ARTIFACTS,
-    SMP_VERIFIED_QEMU_ARCHES,
     Instance,
     default_board,
     section_is_set,
@@ -48,6 +53,20 @@ _FIT_SDCARD_VARIANTS: Final = ("minimal", "sdcard")
 _GRUB_ISO_VARIANTS: Final = ("vbox", "rescue-usb")
 
 
+def _trim(inst: Instance, repo_root: Path, e: list[str]) -> TrimRegistry | None:
+    """Load the trim registry, folding a load failure into the error list.
+
+    Capability checks need the registry; without it they are skipped rather
+    than guessed at, and the load error surfaces alongside the other
+    findings instead of aborting the whole validation run.
+    """
+    try:
+        return load_trim_registry(repo_root)
+    except RegistryError as err:
+        e.append(f"trim registry: {err} (see components/trim.toml)")
+        return None
+
+
 def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     """Semantic cross-checks mirroring the Makefile's own guards."""
     e: list[str] = []
@@ -65,15 +84,16 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     if k.driver_deployment is not None and k.driver_deployment not in DRIVER_DEPLOYMENTS:
         e.append(f"kernel.driver_deployment: unsupported '{k.driver_deployment}'; "
                  f"supported: {', '.join(DRIVER_DEPLOYMENTS)}")
-    if k.nommu and inst.arch not in NOMMU_ARCHES:
-        e.append(f"kernel.nommu: unsupported for {inst.arch}; supported: {', '.join(NOMMU_ARCHES)}")
-    if k.ramfs_user and inst.arch not in RAMFS_USER_ARCHES:
-        e.append(f"kernel.ramfs_user: supported only for {', '.join(RAMFS_USER_ARCHES)}")
+    trim = _trim(inst, repo_root, e)
+    if trim is not None:
+        _validate_capabilities(inst, trim, e)
     if m.smp is not None:
         if m.smp < 1:
             e.append("machine.smp: must be >= 1")
         elif m.smp != 1 and not m.allow_unverified_smp:
-            verified = inst.arch in SMP_VERIFIED_QEMU_ARCHES and inst.board == default_board(inst.arch)
+            verified_arches = (trim.capabilities["smp-verified-qemu"].arches
+                               if trim and "smp-verified-qemu" in trim.capabilities else ())
+            verified = inst.arch in verified_arches and inst.board == default_board(inst.arch)
             if not verified:
                 e.append(f"machine.smp={m.smp}: unverified for {inst.arch}/{inst.board}; "
                          "set machine.allow_unverified_smp = true only for explicit SMP bringup")
@@ -127,6 +147,42 @@ def validate_instance(inst: Instance, repo_root: Path) -> list[str]:
     _validate_board_sections(inst, e, repo_root)
     _validate_target(inst, e)
     return e
+
+
+def _validate_capabilities(inst: Instance, trim: TrimRegistry, e: list[str]) -> None:
+    """Capability requests vs the components/trim.toml matrices.
+
+    The Makefile force-disables a capability outside its arch list; these
+    checks reject the request at check time instead, so an instance never
+    carries a knob the build silently drops.  Profile implications are
+    checked too: the Makefile forces PROFILE=mcu (with its nommu/bringup
+    implications) for a profile arch regardless of what the manifest says,
+    so a conflicting kernel.profile would be ignored -- saying so here beats
+    a build that quietly does something else.
+    """
+    k = inst.kernel
+    mcu = trim.profiles.get("mcu")
+    mcu_arches = mcu.arches if mcu else ()
+    if k.profile == "mcu" and inst.arch not in mcu_arches:
+        e.append(f"kernel.profile: mcu is only supported for {', '.join(mcu_arches)} "
+                 f"([profile.mcu].arches in components/trim.toml), not {inst.arch}")
+    if inst.arch in mcu_arches and k.profile is not None and k.profile != "mcu":
+        e.append(f"kernel.profile: '{k.profile}' would be ignored -- arch {inst.arch} is "
+                 "forced to profile mcu by [profile.mcu].arches in components/trim.toml")
+    if k.nommu and inst.arch not in _cap_arches(trim, "nommu"):
+        e.append(f"kernel.nommu: unsupported for {inst.arch}; supported: "
+                 f"{', '.join(_cap_arches(trim, 'nommu'))}")
+    if k.swap and inst.arch not in _cap_arches(trim, "swap"):
+        e.append(f"kernel.swap: unsupported for {inst.arch}; supported: "
+                 f"{', '.join(_cap_arches(trim, 'swap'))}")
+    if k.ramfs_user and inst.arch not in _cap_arches(trim, "ramfs-user"):
+        e.append(f"kernel.ramfs_user: supported only for "
+                 f"{', '.join(_cap_arches(trim, 'ramfs-user'))}")
+
+
+def _cap_arches(trim: TrimRegistry, name: str) -> tuple[str, ...]:
+    cap = trim.capabilities.get(name)
+    return cap.arches if cap else ()
 
 
 def _validate_target(inst: Instance, e: list[str]) -> None:

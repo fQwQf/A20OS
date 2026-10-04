@@ -105,6 +105,14 @@ print-ci-kernel-arches:
 # Build configuration
 # ================================================================
 
+# The declarative half of kernel trimming (profiles' curated source lists,
+# capability arch matrices, per-arch feature defines) lives in
+# components/trim.toml; this fragment is generated from it by
+# `make regen-trim-fragment` and `make check-trim-registry` fails while it is
+# stale.  The gates below read its variables; the force-off / $(error) logic
+# itself stays here, in the build engine.
+include components/trim.mk
+
 ARCH ?= riscv64
 ABI ?= both
 BRINGUP ?= 0
@@ -132,7 +140,8 @@ EXTERNAL_ROOT ?= 0
 COOPERATIVE_BOOT ?= 0
 STORAGE_READ_ONLY ?= 0
 ALLOW_UNVERIFIED_SMP ?= 0
-SMP_VERIFIED_QEMU_ARCHES := riscv64 aarch64 loongarch64 x86_64
+# Arch matrices come from components/trim.toml via components/trim.mk.
+SMP_VERIFIED_QEMU_ARCHES := $(TRIM_CAP_SMP_VERIFIED_QEMU_ARCHES)
 PROFILE ?= full
 # Swap is on by default; the NOMMU override below forces it back off where
 # there is no MMU to demand-page from.  A toggle is rebuild-safe without a
@@ -172,8 +181,9 @@ UART_CMDLINE ?= n
 # that set get the feature forced off rather than a kernel that fails to build
 # or a JIT that cannot work: armv7m/arm32 and riscv32 are 32-bit or NOMMU.
 # Mirrors the NOMMU and SWAP gates below -- force the feature off outside the
-# supported set instead of letting the build break.
-XLATOR_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 ppc64le
+# supported set instead of letting the build break.  The arch list itself is
+# capability "xlator" in components/trim.toml.
+XLATOR_SUPPORTED_ARCHES := $(TRIM_CAP_XLATOR_ARCHES)
 
 # Synthetic driver lifecycle test and the HDA/NVMe in-probe smoke builds.
 # All three default to off and are enabled with the on-value their existing
@@ -223,9 +233,6 @@ STM32_WIFI_SSID ?=
 STM32_WIFI_PASSWORD ?=
 ifeq ($(ARCH),armv7m)
 BOARD ?= stm32f103
-PROFILE := mcu
-NOMMU := 1
-BRINGUP := 1
 STM32_FLASH_KB ?= 64
 STM32_RAM_KB ?= 20
 STM32_XUANWU ?= 0
@@ -233,11 +240,25 @@ else
 BOARD ?= qemu-virt-$(ARCH)
 endif
 
+# MCU-class builds (components/trim.toml [profile.mcu]) replace the whole
+# kernel source list and imply a NOMMU, kernel-only bring-up.  An ARCH listed
+# in a profile's arches gets that profile forced on, so adding a second
+# MCU-class architecture is one TOML edit.
+ifneq ($(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)),)
+PROFILE := mcu
+ifneq (,$(TRIM_PROFILE_MCU_FORCE_NOMMU))
+NOMMU := 1
+endif
+ifneq (,$(TRIM_PROFILE_MCU_FORCE_BRINGUP))
+BRINGUP := 1
+endif
+endif
+
 # Driver deployment depends on the selected architecture and board.
 include tools/driver-deployment.mk
 
 NOMMU ?= 0
-NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
+NOMMU_SUPPORTED_ARCHES := $(TRIM_CAP_NOMMU_ARCHES)
 
 # Swap needs a PTE encoding for the 64-bit swap entry (pte_is_swap /
 # pte_to_swp_entry / swp_entry_to_pte in kernel/arch/<arch>/include/page_table.h).
@@ -245,7 +266,7 @@ NOMMU_SUPPORTED_ARCHES := riscv64 riscv32 aarch64 arm32 armv7m
 # leave them featureless there -- kernel/mm/{fault,mm,munmap}.c and
 # kernel/proc/exit.c fail to compile.  Mirrors the NOMMU gate above: force the
 # feature off outside the supported set instead of letting the build break.
-SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le
+SWAP_SUPPORTED_ARCHES := $(TRIM_CAP_SWAP_ARCHES)
 ifeq ($(NOMMU),1)
 CONFIG_SWAP := n
 else
@@ -977,26 +998,25 @@ endif
 #
 # Feature names stay arch-agnostic so common code never branches on
 # CONFIG_<architecture>; the check-arch-boundary gate enforces that.
+# The per-arch defines and the PCIe arch lists come from
+# components/trim.toml via components/trim.mk.
 # ------------------------------------------------------------------
-ifeq ($(ARCH),x86_64)
-CFLAGS += -DCONFIG_IOPORT -DCONFIG_AHCI \
-          -DCONFIG_PCI_MMIO_BASE_LEGACY
-endif
+CFLAGS += $(TRIM_ARCH_CPPFLAGS_$(ARCH))
+
 # Boards whose SoC has no PCIe root complex must leave the MMIO-allocation
 # window undefined, not defined-as-zero: pci_bus.c would otherwise map physical
 # address 0 as a device window.  The SophGo SG2000/CV1800B boards are the
-# first RISC-V targets in the tree without PCIe.
-A20OS_NO_PCIE_BOARDS := licheerv-nano milk-v-duo
-ifeq ($(filter $(BOARD),$(A20OS_NO_PCIE_BOARDS)),)
-ifneq ($(filter x86_64 loongarch64 riscv64,$(ARCH)),)
+# first RISC-V targets in the tree without PCIe, and are named as
+# board_exclusions of the two pcie-mmio capabilities in components/trim.toml.
+ifeq ($(filter $(BOARD),$(TRIM_CAP_PCIE_MMIO_ALLOC_BOARD_EXCLUSIONS)),)
+ifneq ($(filter $(ARCH),$(TRIM_CAP_PCIE_MMIO_ALLOC_ARCHES)),)
 CFLAGS += -DCONFIG_PCI_MMIO_ALLOC
 endif
-ifneq ($(filter loongarch64 riscv64,$(ARCH)),)
+endif
+ifeq ($(filter $(BOARD),$(TRIM_CAP_PCIE_MMIO_ECAM_BOARD_EXCLUSIONS)),)
+ifneq ($(filter $(ARCH),$(TRIM_CAP_PCIE_MMIO_ECAM_ARCHES)),)
 CFLAGS += -DCONFIG_PCI_MMIO_BASE_ECAM
 endif
-endif
-ifeq ($(ARCH),aarch64)
-CFLAGS += -DCONFIG_TRAP_ESR_DIAG
 endif
 ELF_MACHINE_riscv64     := 243
 ELF_MACHINE_loongarch64 := 258
@@ -1144,32 +1164,13 @@ ABI_SRCS = $(wildcard $(KERNEL_DIR)/abi/$(ABI)/*.c)
 endif
 
 ifeq ($(PROFILE),mcu)
-CFLAGS += -Os -DCONFIG_MCU -DCONFIG_KLOG_BUF_SIZE=256
-KERNEL_SRC = $(KERNEL_DIR)/mcu/main.c \
-             $(KERNEL_DIR)/mcu/uart.c \
-             $(KERNEL_DIR)/mcu/heap.c \
-             $(KERNEL_DIR)/mcu/mcu_stubs.c \
-             $(KERNEL_DIR)/core/printf.c \
-             $(KERNEL_DIR)/core/string.c \
-             $(KERNEL_DIR)/core/panic.c \
-             $(KERNEL_DIR)/core/sync.c \
-             $(KERNEL_DIR)/core/klog.c \
-             $(KERNEL_DIR)/core/timekeeping.c \
-             $(KERNEL_DIR)/core/stack_protector.c \
-             $(KERNEL_DIR)/proc/sched.c \
-             $(KERNEL_DIR)/proc/park.c \
-             $(KERNEL_DIR)/proc/timer_heap.c \
-             $(KERNEL_DIR)/proc/current.c \
-             $(KERNEL_DIR)/proc/pid.c \
-             $(KERNEL_DIR)/proc/pidns.c \
-             $(KERNEL_DIR)/proc/proc.c \
-             $(KERNEL_DIR)/proc/userns.c \
-             $(KERNEL_DIR)/proc/task.c \
-             $(KERNEL_DIR)/proc/exit.c \
-             $(KERNEL_DIR)/proc/signal.c \
-             $(KERNEL_DIR)/proc/cg_cpu.c \
-             $(KERNEL_DIR)/mm/nommu.c \
-             $(KERNEL_DIR)/fs/diskfs/fat32lite.c \
+# The curated core of the MCU trim lives in components/trim.toml
+# ([profile.mcu].sources); this is the only place a source enters the MCU
+# build, so a profile change is one reviewed TOML edit.  The wildcard parts
+# below stay here on purpose: board drivers, platform files and the arch are
+# per-board facts the registry cannot enumerate.
+CFLAGS += $(TRIM_PROFILE_MCU_OPT) $(TRIM_PROFILE_MCU_CPPFLAGS)
+KERNEL_SRC = $(TRIM_PROFILE_MCU_SOURCES) \
              $(if $(filter 1,$(STM32_QEMU)),$(BOARD_DRIVER_DIR)/stm32_uart.c $(BOARD_DRIVER_DIR)/extsram.c,$(wildcard $(BOARD_DRIVER_DIR)/*.c)) \
              $(wildcard $(KERNEL_DIR)/platform/$(BOARD)/*.c) \
              $(shell find $(KERNEL_DIR)/arch/$(ARCH) -type f -name '*.c' | sort)
