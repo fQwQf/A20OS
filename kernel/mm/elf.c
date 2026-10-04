@@ -839,26 +839,63 @@ int elf_check_header(const Elf64_Ehdr *eh) {
     return 0;
 }
 
+/* The one definition of "this image speaks the A20 native ABI".
+ *
+ * A single PT_A20_START_INFO in the program header table is the marker, and
+ * every reader of that table has to reach the same verdict: the native entry
+ * stub pulls an a20_start_info_t out of that segment and expects nine
+ * a20_handle_t values there, which is not what a Linux ABI entry does.  So
+ * the scan lives here once instead of being open-coded in each loader, where
+ * a later reader could disagree with the loader about the very same file and
+ * neither would be looking for the other.
+ *
+ * @base + @off locates @n headers of @entsize bytes; @avail is how many bytes
+ * are readable from there.  Headers that would reach past @avail are not
+ * read.  A table that cannot be read in full reports Linux ABI: the header
+ * already claimed a program header table the file does not have, which is
+ * the elf_check_header() rejection the caller reaches anyway, and returning
+ * that verdict from here would duplicate it somewhere that does not own it. */
+static int elf_phdrs_native(const char *base, uint64_t off,
+                            uint32_t n, uint32_t entsize, uint64_t avail)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        /* Stop before the arithmetic wraps rather than indexing with an
+         * offset derived from a header we do not trust.  Out-of-range is
+         * monotonic in i, so stopping here and skipping are the same scan. */
+        uint64_t at = off + (uint64_t)i * entsize;
+        if (at < off || at + entsize < at || at + entsize > avail)
+            break;
+        if (((const Elf64_Phdr *)(base + at))->p_type == PT_A20_START_INFO)
+            return 1;
+    }
+    return 0;
+}
+
 /* Decide whether a file that elf_load() already rejected as -ENOEXEC is
- * structurally a foreign-architecture Linux executable, reporting its
- * e_machine.
+ * structurally a foreign-architecture executable, reporting the pair the
+ * translation channel is keyed on: its e_machine and its ABI.
  *
  * The checks mirror elf_check_header() *except* for the machine test, which
- * only has to exclude the native machine.  Deciding whether a given machine
- * is *translatable* is not this function's business and is not a compiled-in
+ * only has to exclude the native machine.  Deciding whether a given pair is
+ * *translatable* is not this function's business and is not a compiled-in
  * list: it belongs to the translator channel, whose answer depends on what an
  * administrator configured (kernel/proc/xlator.c).  Keeping that out of here
- * is what lets a new guest architecture be added without touching the kernel.
+ * is what lets a new guest architecture -- or a new ABI for a guest
+ * architecture already present -- be added without touching the kernel.
  *
  * The fail-closed property is unchanged by that move, and rests on the same
  * two facts as before: everything this predicate rejects -- bad magic, wrong
  * class/endianness, wrong e_type, a short program header table -- is still
- * rejected here, and a machine nobody configured a translator for has no
- * entry to find in xlator_lookup().  A corrupt header therefore cannot be
- * mistaken for "please translate this": a garbage e_machine matches nothing.
+ * rejected here, and a pair nobody configured a translator for has no entry
+ * to find in xlator_lookup().  A corrupt header therefore cannot be mistaken
+ * for "please translate this": a garbage e_machine matches nothing.
  *
- * Only the e_machine is reported; the header is never trusted beyond it. */
-int elf_is_foreign_arch(int fd, uint16_t *machine_out)
+ * The ABI is read from the program headers rather than configured, because it
+ * is a fact about the file in the same way e_machine is: an image carrying
+ * PT_A20_START_INFO is a native-ABI program no matter what the command line
+ * says.  Deriving it here is what lets a native-ABI translator be a new row of
+ * the registry rather than a new branch in the loader. */
+int elf_probe_foreign(int fd, elf_guest_key_t *out)
 {
     if (vfs_lseek(fd, 0, SEEK_SET) < 0)
         return -ENOEXEC;
@@ -880,8 +917,34 @@ int elf_is_foreign_arch(int fd, uint16_t *machine_out)
     if (elf_machine_supported(eh.e_machine, ELFCLASS64))
         return -ENOEXEC;   /* native: it already loaded, or failed for another reason */
 
-    if (machine_out)
-        *machine_out = eh.e_machine;
+    if (out) {
+        out->machine = eh.e_machine;
+        out->abi     = ELF_ABI_LINUX;
+    }
+
+    /* The ABI is decided by elf_phdrs_native(), the same function the
+     * loaders use, so the forwarding decision and the load decision can never
+     * describe the same image two different ways.  The table is read in one
+     * go rather than a seek and a 56-byte read per header: this runs on the
+     * exec path for every foreign image the channel declines to forward, and
+     * MAX_PHDRS is 64. */
+    if (eh.e_phoff) {
+        uint64_t tablen = (uint64_t)eh.e_phnum * eh.e_phentsize;
+        if (tablen && tablen / eh.e_phentsize == eh.e_phnum) {
+            void *tab = kmalloc((size_t)tablen);
+            if (tab) {
+                if (vfs_lseek(fd, (long)eh.e_phoff, SEEK_SET) >= 0) {
+                    int got = vfs_read(fd, (char *)tab, (size_t)tablen);
+                    if (got > 0 &&
+                        elf_phdrs_native((const char *)tab, 0, eh.e_phnum,
+                                         eh.e_phentsize, (uint64_t)got) &&
+                        out)
+                        out->abi = ELF_ABI_NATIVE;
+                }
+                kfree(tab);
+            }
+        }
+    }
     return 0;
 }
 
@@ -921,15 +984,14 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
     int is_native = 0;
 
+    is_native = elf_phdrs_native((const char *)buf, eh->e_phoff, eh->e_phnum,
+                                 eh->e_phentsize, len);
+
     for (int i = 0; i < eh->e_phnum; i++) {
         if (eh->e_phoff + (i + 1) * eh->e_phentsize > len) continue;
         const Elf64_Phdr *ph = (const Elf64_Phdr *)
             ((const char *)buf + eh->e_phoff + i * eh->e_phentsize);
 
-        if (ph->p_type == PT_A20_START_INFO) {
-            is_native = 1;
-            continue;
-        }
         if (ph->p_type == PT_TLS) {
             tls_data   = (const char *)buf + ph->p_offset;
             tls_filesz = ph->p_filesz;
@@ -1041,11 +1103,11 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
 
+    is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
+                                 (uint32_t)sizeof(phdrs[0]),
+                                 (uint64_t)nph * sizeof(phdrs[0]));
+
     for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type == PT_A20_START_INFO) {
-            is_native = 1;
-            continue;
-        }
         if (phdrs[i].p_type == PT_INTERP) {
             has_interp = 1;
             vfs_lseek(fd, (long)phdrs[i].p_offset, SEEK_SET);
@@ -1215,11 +1277,11 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
 
+    is_native = elf_phdrs_native((const char *)phdrs, 0, nph,
+                                 (uint32_t)sizeof(phdrs[0]),
+                                 (uint64_t)nph * sizeof(phdrs[0]));
+
     for (int i = 0; i < nph; i++) {
-        if (phdrs[i].p_type == PT_A20_START_INFO) {
-            is_native = 1;
-            continue;
-        }
         if (phdrs[i].p_type == PT_INTERP) {
             int ilen = phdrs[i].p_filesz < MAX_PATH_LEN
                        ? (int)phdrs[i].p_filesz : MAX_PATH_LEN - 1;

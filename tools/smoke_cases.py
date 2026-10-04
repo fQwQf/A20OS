@@ -1391,25 +1391,31 @@ CASES: dict[str, dict] = {
             '/bin/xlate_exec ok /bin/xlate_probe-x86_64 SMOKE',
             '/bin/xlate_exec enoexec ignored',
             '/bin/xlate_exec unconfigured ignored',
+            # x86_64 *is* configured on this boot, so an ENOEXEC here can
+            # only come from the ABI half of the key missing: a
+            # native-ABI image of a guest that has a Linux-ABI translator
+            # must not be handed to it.
+            '/bin/xlate_exec native ignored',
             '/bin/xlate_exec script ignored',
             '/bin/xlate_exec toggle /bin/xlate_probe-x86_64 TOGGLE',
             'poweroff',
         ]},
         'timeout': '150s',
         'qemu': 'qemu-system-riscv64',
-        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'],
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-both-dev/kernel.elf', '-append', 'a20.wx=deny a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'],
         'expect': [
-            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/qemu-x86_64',
+            r'\[XLATOR] x86_64 \(e_machine=62 abi=linux\) → /bin/qemu-x86_64',
             # The registry has two guests and only one was provisioned, so
             # boot has to name the other rather than leaving the admin to
             # wonder why their aarch64 binary is a bare ENOEXEC.
-            r'\[XLATOR\] aarch64 \(e_machine=183\) 未配置翻译器',
-            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62\)',
+            r'\[XLATOR] aarch64 \(e_machine=183 abi=linux\) 未配置翻译器',
+            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62 abi=linux\)',
             r'\[WX\] \S+: pid=\d+ 翻译器宿主，放行 W\|X',
             'XLATE_PROBE: MARK=SMOKE ARGC=2',
             'XLATE_EXEC: ok PASS: exit=42',
             'XLATE_EXEC: enoexec PASS: ENOEXEC',
             'XLATE_EXEC: unconfigured PASS: ENOEXEC',
+            'XLATE_EXEC: native PASS: ENOEXEC',
             'XLATE_EXEC: script PASS: exit=0',
             # The runtime switch loop over one binary.  Ordering matters
             # here in a way it does not for the other lines: step2's ENOEXEC
@@ -1424,9 +1430,15 @@ CASES: dict[str, dict] = {
             'XLATE_EXEC: toggle PASS',
             'System is going down for power-off NOW',
         ],
-        # W^X must stay at its default deny (the translator is allowed by
-        # the per-task exemption, not by disabling the policy), and no mode
-        # may report a failure or an unusable wait.
+        # W^X has to be *deny* for the translator's JIT buffer to prove
+        # anything.  Under the tree's default (off -- kernel/mm/wx.c keeps it
+        # that way on purpose) the per-task exemption would fire and assert
+        # nothing, because nothing was ever refused; and the forbid below
+        # names the policy line precisely so the case cannot silently run
+        # with the policy it is not about.  So the append sets a20.wx=deny
+        # explicitly, and this then tests the real claim: the translator is
+        # allowed by an exemption on the task, not by turning W^X off.  No
+        # mode may report a failure or an unusable wait.
         'forbid': [r'W\^X 策略: off', r'XLATE_EXEC: \w+ FAIL', r'waitpid\(\d+\)'],
         'timeout_msg': True,
         'pass_msg': 'smoke-exec-xlator: PASS; log saved to $log',
@@ -1467,7 +1479,7 @@ CASES: dict[str, dict] = {
         'log': '.kernel-build/smoke/exec-xlator-la64.log',
         'stdin': {'kind': 'sendline_seq', 'steps': [
             ('[UARTCMD] ',
-             'a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'),
+             'a20.wx=deny a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'),
             ('\n# ', '/bin/xlate_exec ok /bin/xlate_probe-x86_64 SMOKE'),
             ('XLATE_EXEC: ok PASS', 'poweroff'),
         ]},
@@ -1487,13 +1499,15 @@ CASES: dict[str, dict] = {
             # not just the console -- without the second, a kernel that printed
             # a convincing prompt and threw the string away would pass.
             r'\[UARTCMD\] using command line from the console',
-            r"\[FDT\] bootargs='a20\.xlator=1 a20\.xlator\.x86_64=/bin/qemu-x86_64'",
-            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/qemu-x86_64',
-            r'\[XLATOR\] aarch64 \(e_machine=183\) 未配置翻译器',
-            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62\)',
-            # Same W^X claim as on riscv64: the translator's JIT buffer is
-            # allowed by the per-task exemption, so the policy itself stays
-            # at deny.
+            r"\[FDT\] bootargs='a20\.wx=deny a20\.xlator=1 "
+            r"a20\.xlator\.x86_64=/bin/qemu-x86_64'",
+            r'\[XLATOR] x86_64 \(e_machine=62 abi=linux\) → /bin/qemu-x86_64',
+            r'\[XLATOR] aarch64 \(e_machine=183 abi=linux\) 未配置翻译器',
+            r'\[XLATOR\] pid=\d+ execve /bin/xlate_probe-x86_64 \(e_machine=62 abi=linux\)',
+            # Same W^X claim as on riscv64, and for the same reason it has
+            # to be asked for explicitly: the tree's default is off, and the
+            # translator's JIT buffer is allowed by the per-task exemption
+            # rather than by weakening the policy.
             r'\[WX\] \S+: pid=\d+ 翻译器宿主，放行 W\|X',
             'XLATE_PROBE: MARK=SMOKE ARGC=2',
             'XLATE_EXEC: ok PASS: exit=42',
@@ -1599,6 +1613,12 @@ CASES: dict[str, dict] = {
             '/bin/xlate_exec stage 183 /tmp/guest_aarch64',
             '/bin/xlate_exec run /tmp/guest_x86_64 ALPHA BETA',
             '/bin/xlate_exec run --argv0=decoy-argv0 /tmp/guest_aarch64 ALPHA',
+            # The sharp form of the ABI check, and the reason it is here
+            # rather than only in smoke-exec-xlator: both machines are
+            # configured at this point, so a channel keyed on the machine
+            # alone would hand this file to the shim -- and the shim prints
+            # its argv, which is what the two new forbids below look for.
+            '/bin/xlate_exec native ignored',
             'poweroff',
         ]},
         'timeout': '120s',
@@ -1607,9 +1627,9 @@ CASES: dict[str, dict] = {
         'expect': [
             # Both guests configured at once, each with the template that will
             # actually be used -- the override called out as such.
-            r'\[XLATOR\] x86_64 \(e_machine=62\) → /bin/xlate_shim  argv="@P @\*" \(cmdline 覆盖\)',
-            r'\[XLATOR\] aarch64 \(e_machine=183\) → /bin/xlate_shim  argv="-0 @A @P @\*"',
-            r'\[XLATOR\] pid=\d+ execve /tmp/guest_x86_64 \(e_machine=62\) → /bin/xlate_shim  argv="@P @\*"',
+            r'\[XLATOR\] x86_64 \(e_machine=62 abi=linux\) → /bin/xlate_shim  argv="@P @\*" \(cmdline 覆盖\)',
+            r'\[XLATOR\] aarch64 \(e_machine=183 abi=linux\) → /bin/xlate_shim  argv="-0 @A @P @\*"',
+            r'\[XLATOR\] pid=\d+ execve /tmp/guest_x86_64 \(e_machine=62 abi=linux\) → /bin/xlate_shim  argv="@P @\*"',
             # Overridden template: path first, no argv[0] option, no stray
             # positional in front of the path.  argv[1] being the path (not
             # the decoy, and not a leftover argv[0]) is the assertion that
@@ -1628,9 +1648,18 @@ CASES: dict[str, dict] = {
             r'XLATE_SHIM: argv\[3\]=/tmp/guest_aarch64',
             r'XLATE_SHIM: argv\[4\]=ALPHA',
             'XLATE_SHIM: done',
+            # Refused at the lookup, not after it: neither the shim's argv
+            # nor the kernel's own forward line may ever name this file.  A
+            # positive ENOEXEC alone would not distinguish "the key missed"
+            # from "the translator declined it", and only the first keeps the
+            # outcome a diagnostic instead of a fault inside a program that
+            # cannot load the file.
+            'XLATE_EXEC: native PASS: ENOEXEC',
             'System is going down for power-off NOW',
         ],
-        'forbid': [r'XLATE_EXEC: \w+ FAIL', r'XLATE_SHIM: argv\[\d+\]=$'],
+        'forbid': [r'XLATE_EXEC: \w+ FAIL', r'XLATE_SHIM: argv\[\d+\]=$',
+                   r'XLATE_SHIM: \S*xlate_native',
+                   r'\[XLATOR\] pid=\d+ execve /tmp/xlate_native\.elf'],
         'timeout_msg': True,
         'pass_msg': 'smoke-exec-xlator-shim: PASS; log saved to $log',
     },

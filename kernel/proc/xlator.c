@@ -25,11 +25,15 @@
  *     half of the key was a typo -- is the failure mode worth spending a
  *     warning on.
  *
- * The guest set is *derived*, never listed here: a machine is translatable
- * exactly when an administrator configured a path for it.  That is what lets
- * a new architecture be added without touching the kernel, and it is why a
- * corrupt e_machine still lands on the plain ENOEXEC path -- a garbage value
- * has no entry to find.
+ * The guest set is *derived*, never listed here: a (machine, ABI) pair is
+ * translatable exactly when an administrator configured a path for it.  That
+ * is what lets a new architecture -- or a new ABI for an architecture already
+ * present -- be added without touching the kernel, and it is why a corrupt
+ * e_machine still lands on the plain ENOEXEC path -- a garbage value has no
+ * entry to find.  The pair, rather than the machine, is what is looked up:
+ * the two ABIs are the same ELF64 for the same machine and the translators
+ * that run them are disjoint, so a machine-only key would hand a native-ABI
+ * image to a Linux-ABI translator.
  */
 
 #include "proc/xlator.h"
@@ -48,25 +52,65 @@
 #define XLATOR_GUEST_KEY  "a20.xlator."
 
 /*
- * The registry.  XLATOR_GUEST(name, machine, argv_template); see the file's
- * header for the column contract.  Including it once keeps the guest set, the
- * e_machine numbers and the default per-translator argv shape in one place --
- * previously these were spread across a switch in mm/elf.c and a strcmp chain
- * here, which had to be edited in lockstep.
+ * The registry.  XLATOR_GUEST(name, machine, abi, argv_template); see the
+ * file's header for the column contract.  Including it once keeps the guest
+ * set, the e_machine numbers, the ABIs and the default per-translator argv
+ * shape in one place -- previously these were spread across a switch in
+ * mm/elf.c and a strcmp chain here, which had to be edited in lockstep.
  */
 typedef struct {
     const char *name;
     uint16_t    machine;
+    uint8_t     abi;       /* elf_abi_t */
     const char *argv;
 } xlator_guest_t;
 
-#define XLATOR_GUEST(name, machine, argv) { #name, machine, argv },
+/* The .def has no #include of its own -- like the syscall tables under
+ * kernel/abi/ -- so it cannot say ELF_ABI_LINUX.  Naming the column with these
+ * two macros puts the only place that has to know both spellings here, and
+ * gives the check-xlator-guests gate a token it can cross-check against the
+ * elf_abi_t enumeration. */
+#define XLATOR_ABI_LINUX  ELF_ABI_LINUX
+#define XLATOR_ABI_NATIVE ELF_ABI_NATIVE
+
+#define XLATOR_GUEST(name, machine, abi, argv) { #name, machine, abi, argv },
 static const xlator_guest_t g_guests[] = {
 #include "proc/xlator_guests.def"
 };
 #undef XLATOR_GUEST
 
 #define XLATOR_GUEST_COUNT ((int)(sizeof(g_guests) / sizeof(g_guests[0])))
+
+/* The ABI column spelled for a human, and spelled back.  Both boot lines and
+ * /proc show it: an administrator looking at why an exec returned ENOEXEC
+ * needs to be able to see which half of the pair missed, and "no row for
+ * e_machine 62" is not an answer when one exists for the other ABI.
+ *
+ * Exported rather than static because kernel/proc/exec.c logs the same fact
+ * on the forwarding line, and a second copy of this mapping is exactly the
+ * kind that survives until a third ABI arrives and only half the log lines
+ * learn its name. */
+const char *xlator_abi_name(uint8_t abi)
+{
+    return abi == ELF_ABI_NATIVE ? "native" : "linux";
+}
+
+/* The inverse, for the cmdline.  Strict on purpose: an ABI this kernel does
+ * not know is a configuration the administrator wrote against something else,
+ * and silently treating it as Linux ABI would point a translator at images
+ * that speak a different one. */
+int xlator_abi_parse(const char *s, size_t len, uint8_t *out)
+{
+    if (len == 5 && strncmp(s, "linux", 5) == 0) {
+        *out = ELF_ABI_LINUX;
+        return 0;
+    }
+    if (len == 6 && strncmp(s, "native", 6) == 0) {
+        *out = ELF_ABI_NATIVE;
+        return 0;
+    }
+    return -EINVAL;
+}
 
 /* One slot per registered guest, indexed in lockstep with g_guests.  Written
  * once by xlator_config_init() before any userspace exists, read-only after --
@@ -259,11 +303,18 @@ int xlator_split_env(char *scratch, char **entries, int max)
 /*  cmdline parsing                                                   */
 /* ================================================================== */
 
-static int xlator_slot_for_name(const char *name, size_t namelen)
+/* Find the registry row for one guest.  The name alone is no longer a key:
+ * a foreign image is identified by the pair, and the day an architecture
+ * registers translators for two ABIs its name appears twice.  Matching on
+ * the name alone would return the first of them and make the second row
+ * permanently unreachable -- silently, because every command line naming it
+ * would be accepted and stored against the wrong slot. */
+static int xlator_slot_for(const char *name, size_t namelen, uint8_t abi)
 {
     for (int i = 0; i < XLATOR_GUEST_COUNT; i++) {
         if (strlen(g_guests[i].name) == namelen &&
-            strncmp(g_guests[i].name, name, namelen) == 0)
+            strncmp(g_guests[i].name, name, namelen) == 0 &&
+            g_guests[i].abi == abi)
             return i;
     }
     return -1;
@@ -285,21 +336,74 @@ static int xlator_valid_guest_name(const char *name, size_t namelen)
 }
 
 /*
+ * Split a guest *selector* -- the key with any ".argv"/".env" suffix already
+ * removed -- into a name and an ABI:
+ *
+ *   "x86_64"        ->  name x86_64,  ELF_ABI_LINUX
+ *   "x86_64.native" ->  name x86_64,  ELF_ABI_NATIVE
+ *
+ * The bare form means Linux ABI because that is what every command line
+ * already in the wild spells, and demanding an explicit ABI for the common
+ * case would be a syntax change carrying no information.  It is a shorthand,
+ * not a wildcard: "x86_64" never resolves to "whichever ABI happens to be
+ * registered first", because that would silently repoint every existing
+ * configuration the day a second row appeared under the same name.
+ *
+ * Unambiguous because a guest name cannot contain a dot (see the registry's
+ * column-1 contract), so the ABI suffix is always the last field.
+ *
+ * Returns 0, or -EINVAL with a reason the caller can print.
+ */
+static int xlator_selector_of(const char *sel, size_t sel_len,
+                              size_t *name_len, uint8_t *abi)
+{
+    const char *dot = NULL;
+    for (size_t i = 0; i < sel_len; i++) {
+        if (sel[i] == '.')
+            dot = sel + i;
+    }
+
+    if (!dot)
+        goto bare;
+
+    {
+        const char *abi_str = dot + 1;
+        size_t abi_len = sel_len - (size_t)(dot - sel) - 1;
+        if (abi_len == 0)
+            return -EINVAL;   /* trailing dot: "x86_64." */
+        if (xlator_abi_parse(abi_str, abi_len, abi) < 0)
+            return -EINVAL;
+        *name_len = (size_t)(dot - sel);
+        if (*name_len == 0)
+            return -EINVAL;   /* ".native" with no architecture */
+        return 0;
+    }
+
+bare:
+    if (!xlator_valid_guest_name(sel, sel_len))
+        return -EINVAL;
+    *name_len = sel_len;
+    *abi = ELF_ABI_LINUX;
+    return 0;
+}
+
+/*
  * Which of the three per-guest keys is this?
  *
  * The guest name is an identifier fragment and cannot contain a dot (the
  * registry's column-1 contract says so), so ".argv" and ".env" can be
  * recognised from the last dot alone.  Keeping that decision in one function
  * is what stops "a20.xlator.x86_64.argv" from being read as a request for a
- * guest literally named "x86_64.argv".
+ * guest literally named "x86_64.argv" -- and it is checked *before* the ABI
+ * suffix, so an ABI may never be named "argv" or "env".
  *
- * Anything else falls through to PATH with the whole key as the name, so the
- * name validation downstream is what rejects "x86_64.foo" -- one place that
- * knows what a guest name may look like, not two.
+ * Anything else falls through to PATH with the whole key as the selector, so
+ * the selector validation downstream is what rejects "x86_64.foo" -- one place
+ * that knows what a guest selector may look like, not two.
  */
 enum xlator_field { XL_FIELD_PATH = 0, XL_FIELD_ARGV, XL_FIELD_ENV };
 
-static int xlator_field_of(const char *key, size_t keylen, size_t *name_len)
+static int xlator_field_of(const char *key, size_t keylen, size_t *sel_len)
 {
     const char *dot = NULL;
     for (size_t i = 0; i < keylen; i++) {
@@ -307,17 +411,17 @@ static int xlator_field_of(const char *key, size_t keylen, size_t *name_len)
             dot = key + i;
     }
 
-    *name_len = keylen;
+    *sel_len = keylen;
     if (!dot || dot == key)
         return XL_FIELD_PATH;
 
     size_t tail = keylen - (size_t)(dot - key) - 1;
     if (tail == 4 && strncmp(dot + 1, "argv", 4) == 0) {
-        *name_len = (size_t)(dot - key);
+        *sel_len = (size_t)(dot - key);
         return XL_FIELD_ARGV;
     }
     if (tail == 3 && strncmp(dot + 1, "env", 3) == 0) {
-        *name_len = (size_t)(dot - key);
+        *sel_len = (size_t)(dot - key);
         return XL_FIELD_ENV;
     }
     return XL_FIELD_PATH;
@@ -420,37 +524,68 @@ static int xlator_parse_guest_key(const char *tok, const char *tok_end)
         return 1;
     }
 
+    size_t sel_len = 0;
+    int field = xlator_field_of(key, key_len, &sel_len);
+
+    /* NUL-terminate at the end of the selector so a "%.*s" is not needed:
+     * this kernel's klog printf has no '*' precision, and asking for one
+     * prints the conversion literally -- a warning that never says which
+     * guest it was about. */
+    key[sel_len] = '\0';
+
     size_t name_len = 0;
-    int field = xlator_field_of(key, key_len, &name_len);
-
-    /* NUL-terminate at the guest name so a "%.*s" is not needed: this
-     * kernel's klog printf has no '*' precision, and asking for one prints
-     * the conversion literally -- a warning about an unknown guest that
-     * never says which guest. */
-    key[name_len] = '\0';
-
-    if (!xlator_valid_guest_name(key, name_len)) {
-        kwarn("[XLATOR] 未知外来架构 '%s'，忽略（见 proc/xlator_guests.def）\n",
-              key);
+    uint8_t abi = ELF_ABI_LINUX;
+    if (xlator_selector_of(key, sel_len, &name_len, &abi) < 0) {
+        /* Three different mistakes used to land on one message, and the one
+         * that was wrong most often was the one that named a *known*
+         * architecture as unknown: "x86_64.native", back when only the bare
+         * name was understood, read as a guest literally named that.  Say
+         * which half of the selector is bad instead.  Split on the dot in
+         * place rather than printing "%.*s" -- this klog printf has no '*'
+         * precision and would print the conversion literally. */
+        char *dot = strchr(key, '.');
+        if (!dot) {
+            kwarn("[XLATOR] 未知外来架构 '%s'，忽略（见 proc/xlator_guests.def）\n",
+                  key);
+            return 1;
+        }
+        *dot = '\0';
+        if (dot[1] == '\0')
+            kwarn("[XLATOR] %s%s.<abi> 缺少 ABI 名（linux 或 native），忽略\n",
+                  XLATOR_GUEST_KEY, key);
+        else if (!xlator_valid_guest_name(key, strlen(key)))
+            kwarn("[XLATOR] 未知外来架构 '%s'，忽略（见 proc/xlator_guests.def）\n",
+                  key);
+        else
+            kwarn("[XLATOR] 未知 ABI '%s'，%s%s.<abi> 忽略"
+                  "（当前可用 linux / native）\n",
+                  dot + 1, XLATOR_GUEST_KEY, key);
         return 1;
     }
+    key[name_len] = '\0';
 
-    int slot = xlator_slot_for_name(key, name_len);
+    int slot = xlator_slot_for(key, name_len, abi);
     if (slot < 0) {
-        /* An architecture the registry has never heard of.  Report it: the
-         * administrator believes they provisioned a guest, and nothing will
-         * ever translate it.  Silently dropping this is how a typo becomes an
-         * unexplained ENOEXEC weeks later. */
-        kwarn("[XLATOR] 未知外来架构 '%s'，忽略（见 proc/xlator_guests.def）\n",
-              key);
+        /* Either an architecture the registry has never heard of, or one that
+         * is registered for the *other* ABI.  Report which: the second is a
+         * configuration that looks entirely reasonable and would otherwise
+         * become an unexplained ENOEXEC weeks later. */
+        if (xlator_slot_for(key, name_len,
+                            abi == ELF_ABI_LINUX ? ELF_ABI_NATIVE : ELF_ABI_LINUX) >= 0)
+            kwarn("[XLATOR] '%s' 未注册 %s ABI 的翻译器，"
+                  "忽略（见 proc/xlator_guests.def）\n",
+                  key, xlator_abi_name(abi));
+        else
+            kwarn("[XLATOR] 未知外来架构 '%s'，忽略（见 proc/xlator_guests.def）\n",
+                  key);
         return 1;
     }
 
     if (field == XL_FIELD_PATH) {
         size_t vlen = strlen(val);
         if (vlen == 0 || val[0] != '/') {
-            kwarn("[XLATOR] %s%s 不是绝对路径，忽略\n", XLATOR_GUEST_KEY,
-                  g_guests[slot].name);
+            kwarn("[XLATOR] %s%s.%s 不是绝对路径，忽略\n", XLATOR_GUEST_KEY,
+                  g_guests[slot].name, xlator_abi_name(g_guests[slot].abi));
             return 1;
         }
         /* A repeated key overwrites rather than appends: last one wins, which
@@ -469,8 +604,9 @@ static int xlator_parse_guest_key(const char *tok, const char *tok_end)
              * template that did not parse are a configuration the
              * administrator did not write, and guessing on their behalf is how
              * a guest ends up exec'd with the wrong argv. */
-            kwarn("[XLATOR] %s%s.argv='%s' 非法（%s），该 guest 不会被转发\n",
-                  XLATOR_GUEST_KEY, g_guests[slot].name, val,
+            kwarn("[XLATOR] %s%s.%s.argv='%s' 非法（%s），该 guest 不会被转发\n",
+                  XLATOR_GUEST_KEY, g_guests[slot].name,
+                  xlator_abi_name(g_guests[slot].abi), val,
                   r == -E2BIG ? "过长或 token 过多" : "未知 @ 记号或缺少 @P");
             g_slots[slot].argv_valid = 0;
             g_slots[slot].argv_overridden = 1;
@@ -487,8 +623,9 @@ static int xlator_parse_guest_key(const char *tok, const char *tok_end)
     char scratch[XLATOR_ENV_LEN];
     size_t vlen = strlen(val);
     if (vlen >= sizeof(scratch)) {
-        kwarn("[XLATOR] %s%s.env 过长（上限 %d 字节），该 guest 不会被转发\n",
-              XLATOR_GUEST_KEY, g_guests[slot].name, XLATOR_ENV_LEN - 1);
+        kwarn("[XLATOR] %s%s.%s.env 过长（上限 %d 字节），该 guest 不会被转发\n",
+              XLATOR_GUEST_KEY, g_guests[slot].name,
+              xlator_abi_name(g_guests[slot].abi), XLATOR_ENV_LEN - 1);
         g_slots[slot].env_valid = 0;
         return 1;
     }
@@ -497,8 +634,9 @@ static int xlator_parse_guest_key(const char *tok, const char *tok_end)
     char *entries[XLATOR_ENV_MAX];
     int r = xlator_split_env(scratch, entries, XLATOR_ENV_MAX);
     if (r < 0) {
-        kwarn("[XLATOR] %s%s.env='%s' 非法（%s），该 guest 不会被转发\n",
-              XLATOR_GUEST_KEY, g_guests[slot].name, val,
+        kwarn("[XLATOR] %s%s.%s.env='%s' 非法（%s），该 guest 不会被转发\n",
+              XLATOR_GUEST_KEY, g_guests[slot].name,
+              xlator_abi_name(g_guests[slot].abi), val,
               r == -E2BIG ? "条目过多" : "缺少 '=' 或名称为空");
         g_slots[slot].env_valid = 0;
         g_slots[slot].env_overridden = 1;
@@ -603,8 +741,9 @@ void xlator_config_init(void)
             !g_slots[i].env_valid)
             continue;
         nconfigured++;
-        kinfo("[XLATOR] %s (e_machine=%u) → %s  argv=\"%s\"%s%s%s%s\n",
-              g_guests[i].name, g_guests[i].machine, g_slots[i].path,
+        kinfo("[XLATOR] %s (e_machine=%u abi=%s) → %s  argv=\"%s\"%s%s%s%s\n",
+              g_guests[i].name, g_guests[i].machine,
+              xlator_abi_name(g_guests[i].abi), g_slots[i].path,
               g_slots[i].argv,
               g_slots[i].argv_overridden ? " (cmdline 覆盖)" : "",
               g_slots[i].env[0] ? "  env=\"" : "",
@@ -624,16 +763,17 @@ void xlator_config_init(void)
      * sees every exec fail as a bare ENOEXEC with no hint as to why. */
     for (int i = 0; i < XLATOR_GUEST_COUNT; i++) {
         if (!g_slots[i].path_set) {
-            kwarn("[XLATOR] %s (e_machine=%u) 未配置翻译器，execve 将返回 -ENOEXEC\n",
-                  g_guests[i].name, g_guests[i].machine);
+            kwarn("[XLATOR] %s (e_machine=%u abi=%s) 未配置翻译器，execve 将返回 -ENOEXEC\n",
+                  g_guests[i].name, g_guests[i].machine,
+                  xlator_abi_name(g_guests[i].abi));
             continue;
         }
         if (!g_slots[i].argv_valid)
-            kwarn("[XLATOR] %s argv 模板非法，execve 将返回 -ENOEXEC\n",
-                  g_guests[i].name);
+            kwarn("[XLATOR] %s.%s argv 模板非法，execve 将返回 -ENOEXEC\n",
+                  g_guests[i].name, xlator_abi_name(g_guests[i].abi));
         if (!g_slots[i].env_valid)
-            kwarn("[XLATOR] %s env 规格非法，execve 将返回 -ENOEXEC\n",
-                  g_guests[i].name);
+            kwarn("[XLATOR] %s.%s env 规格非法，execve 将返回 -ENOEXEC\n",
+                  g_guests[i].name, xlator_abi_name(g_guests[i].abi));
     }
 }
 
@@ -652,13 +792,19 @@ void xlator_set_enabled(int on)
     kinfo("[XLATOR] 通道%s（经 /proc/a20/xlator）\n", on ? "启用" : "禁用");
 }
 
-int xlator_lookup(uint16_t machine, xlator_desc_t *out)
+int xlator_lookup(const elf_guest_key_t *key, xlator_desc_t *out)
 {
+    if (!key)
+        return -ENOENT;
     if (!xlator_enabled())
         return -ENOENT;
 
     for (int i = 0; i < XLATOR_GUEST_COUNT; i++) {
-        if (g_guests[i].machine != machine)
+        /* Both halves, deliberately: a native-ABI image of an architecture
+         * that also has a Linux-ABI translator must miss, because handing it
+         * to that translator turns a clear ENOEXEC into a fault inside a
+         * program that cannot load it. */
+        if (g_guests[i].machine != key->machine || g_guests[i].abi != key->abi)
             continue;
         /* path_set && argv_valid && env_valid is the same rule config_init
          * applied when it reported the boot lines; re-stating it here means
@@ -696,8 +842,9 @@ int xlator_render(char *buf, size_t bufsz)
         int usable = g_slots[i].path_set && g_slots[i].argv_valid &&
                      g_slots[i].env_valid;
         int w = snprintf(buf + n, bufsz - (size_t)n,
-                         "guest %s: machine=%u path=%s argv=\"%s\"%s env=%s\n",
+                         "guest %s: machine=%u abi=%s path=%s argv=\"%s\"%s env=%s\n",
                          g_guests[i].name, g_guests[i].machine,
+                         xlator_abi_name(g_guests[i].abi),
                          usable ? g_slots[i].path : "(none)",
                          usable ? g_slots[i].argv : "(unset)",
                          g_slots[i].argv_overridden ? " (override)" : "",

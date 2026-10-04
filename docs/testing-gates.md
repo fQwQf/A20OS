@@ -387,25 +387,30 @@ handler 的纪律仍归 SMP smoke 测试，规则本身记在 lock-order.md。
 
 翻译器与探针由构建变量 `XLATOR=1` 拉进镜像（`tools/targets-xlator.mk` 把它们挂成 `$(FAT32_IMG)` 的前置依赖），这一步完成两件事：由 `tools/xlator_fetch.py` 从 Alpine v3.23 仓库解析 `qemu-x86_64` 的版本化 `.apk`、取出**宿主架构（riscv64）**静态翻译器落进 `user/build/`，并交叉编译 `xlate_probe-x86_64`（外来架构静态探针）。两条产物都随后由 `--check-guest` 断言 `e_machine`：翻译器必须是宿主原生（否则它自己会被送去翻译，造成递归），探针必须是 x86_64。这条断言是为了防止「探针其实编译成了宿主架构、于是根本没走翻译」这类假通过——它一旦发生，smoke 会安静地变成一个原生回归。
 
-用例从 Linux-ABI 启动器 `xlate_exec` 执行，**不显式调用 qemu**，五种模式都必须 PASS（另有 `stage` / `run` 两种模式供 `smoke-exec-xlator-shim` 使用，见下）：
+用例从 Linux-ABI 启动器 `xlate_exec` 执行，**不显式调用 qemu**，六种模式都必须 PASS（另有 `stage` / `run` 两种模式供 `smoke-exec-xlator-shim` 使用，见下）：
 
 | 模式 | 输入 | 断言 |
 |------|------|------|
-| `ok` | 合法 x86_64 ELF | `[XLATOR] x86_64 (e_machine=62) → /bin/qemu-x86_64`、`[XLATOR] pid=N execve /bin/xlate_probe-x86_64 (e_machine=62)`、`[WX] ... 翻译器宿主，放行 W\|X`、`XLATE_PROBE: MARK=SMOKE ARGC=2`、退出码 42 |
+| `ok` | 合法 x86_64 ELF | `[XLATOR] x86_64 (e_machine=62 abi=linux) → /bin/qemu-x86_64`、`[XLATOR] pid=N execve /bin/xlate_probe-x86_64 (e_machine=62 abi=linux)`、`[WX] ... 翻译器宿主，放行 W\|X`、`XLATE_PROBE: MARK=SMOKE ARGC=2`、退出码 42 |
 | `enoexec` | 30 字节损坏 ELF（magic 合法，`e_type=ET_NONE`，`e_machine=0x9999`） | 仍是 `ENOEXEC`，不被误送翻译器 |
 | `unconfigured` | 64 字节**合法** ELF 头，`e_machine=183`（aarch64，注册表里有，但没配路径） | 仍是 `ENOEXEC`——起门禁作用的是「配置了翻译器」，不是「内核编译时知道这个架构」 |
+| `native` | `e_machine=62`、唯一那个程序头是 `PT_A20_START_INFO` 的 ELF（A20 **原生 ABI**，外来架构） | 仍是 `ENOEXEC`，且**不出现它的 `[XLATOR] pid=` 行**——查找键是 `(e_machine, ABI)` 二元组，见下 |
 | `script` | `#!/bin/echo` 脚本 | 仍走 shebang 路径，退出码 0 |
 | `toggle` | 合法 x86_64 ELF + `/proc/a20/xlator` | 运行期开关闭环，见下 |
 
 `unconfigured` 与 `enoexec` 断言的是同一个 errno，但排掉的是两种不同的错：前者证明头部校验之后不会「顺手」去找任何能翻译的东西，后者证明判定依据是配置而不是编译期名单。少了它，一个「内核里写死了 x86_64/aarch64 白名单」的实现也能让本用例全绿。
 
+`native` 排掉的是第三种错，而且它是**唯一一个必须靠 fixture 才能测到的错**：同一个 `e_machine=62`，带上 `PT_A20_START_INFO` 就是 A20 原生 ABI 的外来二进制，翻译器不认它（qemu-user 只实现 Linux ABI，而原生 ABI 的入口从 `a20_start_info_t` 里取 `root_dir` / `cwd_dir` / `stdin_handle` 那九个句柄，不是从 fd 表取）。只按 `e_machine` 查表就会把它送给 `qemu-x86_64`，qemu 抱怨一句 `Unable to find a guest_base` 然后退出 1，调用方看到的是「guest 退出码 1」而不是 `ENOEXEC`——一次静默的误转发。已负向验证过：把 `xlator_lookup()` 里的 `|| g_guests[i].abi != key->abi` 去掉，本用例立刻以这条 `FAIL: expected ENOEXEC, got no error (exit 1)` 变红。
+
+这个 fixture 同时是「未来加一个 native-ABI 翻译器」的验收位：那天给 `.def` 加一行 `(x86_64, 62, XLATOR_ABI_NATIVE, …)`，这个模式就该从「必须 `ENOEXEC`」翻转成「必须被转发」，而它的镜像仍写成 `abi=native`。
+
 `toggle` 在**同一个进程**里跑完整条闭环：读节点确认 `enabled=1` → exec 成功（对照组）→ 写 `0`、重读确认 `enabled=0` → 同一个二进制回到 `ENOEXEC` → 写 `1` → 又成功 → 写 `2` / `on` / `01` / `" 1x"` 必须被 `-EINVAL` 拒绝且开关未被改动。顺序是断言的一部分：中间那条 `ENOEXEC` 只有在前后两次 exec 成功夹着时才有意义，所以它不能拆成独立的 smoke 命令。日志里的 `[XLATOR] 通道禁用（经 /proc/a20/xlator）` 与 `通道启用` 是内核侧开关翻转的旁证。
 
-`forbid` 里有两条值得单独说明：`W\^X 策略: off` 禁止用全局 `a20.wx=off` 换取翻译器运行——本实现只给被内核标记的那一个 task 开 W\|X 放行（见 [exec-xlator/03-internals.md](exec-xlator/03-internals.md)），系统策略必须保持默认 `deny`；`waitpid\(\d+\)` 禁止 harness 打印 `waitpid(N): ...`，即不允许 `wait4` 失败被吞成 `st=0` 的假通过。
+`forbid` 里有两条值得单独说明：`W\^X 策略: off` 禁止用全局 `a20.wx=off` 换取翻译器运行——本实现只给被内核标记的那一个 task 开 W\|X 放行（见 [exec-xlator/03-internals.md](exec-xlator/03-internals.md)）。**本仓库的用户态 W^X 默认策略是 `off`**（`kernel/mm/wx.c` 的 `g_wx_policy = MM_WX_OFF`，默认 `deny` 的写法被实测否掉了：V8 会先把代码段 mprotect 成 W\|X 再写），所以这条 forbid 配得上的前提是 `-append` 里**显式**写了 `a20.wx=deny`——本用例正是这么启的。少了它，这条 forbid 断言的是一个树本身就不会出现的字符串，用例要么永远红要么永远绿，都不携带信息。`waitpid\(\d+\)` 禁止 harness 打印 `waitpid(N): ...`，即不允许 `wait4` 失败被吞成 `st=0` 的假通过。
 
-失败时看 `.kernel-build/smoke/exec-xlator-riscv64.log`：缺少 `[XLATOR] pid=` 说明判定或接线没走到；缺少 `XLATE_PROBE: MARK=` 而 `[XLATOR]` 齐全，说明翻译器起来了但 guest 在 A20OS syscall 面上崩了；`XLATE_EXEC: <mode> FAIL` 则是内核路径问题，`ARGV[i]=` 逐项可对照定位 argv 改写。
+失败时看 `.kernel-build/smoke/exec-xlator-riscv64.log`：缺少 `[XLATOR] pid=` 说明判定或接线没走到；缺少 `XLATE_PROBE: MARK=` 而 `[XLATOR]` 齐全，说明翻译器起来了但 guest 在 A20OS syscall 面上崩了；`XLATE_EXEC: <mode> FAIL` 则是内核路径问题，`ARGV[i]=` 逐项可对照定位 argv 改写；`XLATE_EXEC: native FAIL` 且日志里有它的 `[XLATOR] pid=` 行，说明查找键退回成了只比 `e_machine`。
 
-启动日志还必须出现 `[XLATOR] aarch64 (e_machine=183) 未配置翻译器`：注册表有两个 guest 而只配了一个，未配的那个必须被点名，否则管理员只能看到一个无从追查的 `ENOEXEC`。
+启动日志还必须出现 `[XLATOR] aarch64 (e_machine=183 abi=linux) 未配置翻译器`：注册表有两个 guest 而只配了一个，未配的那个必须被点名，否则管理员只能看到一个无从追查的 `ENOEXEC`。注意这行里的 `abi=`：查找键是 `(e_machine, ABI)`，启动日志逐行打出它，意味着「架构认得、ABI 对不上」这种「配置了路径却仍然 `ENOEXEC`」的状况在日志里是可区分的，而不必靠猜。
 
 **默认关闭的契约**不由本用例覆盖，需要单独确认：不带 `a20.xlator` 启动时日志应为 `[XLATOR] 外来架构翻译通道: 禁用`，且 `execve(/bin/xlate_probe-x86_64)` 返回 `Exec format error`（`[ELF] header check failed: r=-8 class=2 data=1 type=2`），与接入前逐字节一致。
 
@@ -450,6 +455,8 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 `.argv` 覆盖的非 qemu 形状正是旧设计表达不了的那一个：旧的每 guest `argv0_flag` 列在填 `-` 时只能不发 flag，可调用者的 `argv[0]` 仍然会作为一个位置参数留在路径前面。断言 `[1]` 是路径而不是别的什么，就是这一条的直接证据。
 
+这个用例也跑 `native` 模式，并配两条 `forbid`：`XLATE_SHIM: \S*xlate_native` 与 `[XLATOR] pid=\d+ execve /tmp/xlate_native\.elf`。只断言「结果仍是 `ENOEXEC`」是不够的：`xlate_shim` **什么都能执行**（它是宿主原生程序），所以一次误转发会安静地成功——`execve` 返回 0，shim 打印自己收到的 argv，调用方看不出出错了。`forbid` 才能把它翻出来。
+
 失败时看 `.kernel-build/smoke/exec-xlator-shim-riscv64.log` 的 `XLATE_SHIM: argv[i]=` 逐行：它就是内核拼出来的 argv，不用推断。
 
 ### loongarch64 上的同一条通道（smoke-exec-xlator-la64）
@@ -458,29 +465,33 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 它和 riscv64 那条只有一个实质区别：**命令行不是 QEMU 给的，是操作者在串口上敲的**（`UART_CMDLINE=y`，见 [exec-xlator/01-usage.md](exec-xlator/01-usage.md#没有固件时从串口收命令行)）。因此它必须用 `-serial stdio -monitor none -display none` 而不是 `-nographic`（后者的 mux 吞输入），并且在看到 `[UARTCMD]` 提示之后才送字节——QEMU 一拿到管道字节就交给仿真 UART，远早于 guest 编程 16550。
 
-断言与 riscv64 那条逐条相同（标记串、特征退出码 42、`[WX] … 翻译器宿主，放行 W|X`、W^X 策略仍是 deny），外加 `[UARTCMD] using command line from the console` 与 `[FDT] bootargs='…'`：前者证明串口这条路真的走了，后者证明 `arch_bootargs_get()` 的返回值确实进了 `bootargs_get()`，而不是只打印了一行好看的提示。
+断言与 riscv64 那条逐条相同（标记串、特征退出码 42、`[WX] … 翻译器宿主，放行 W|X`、W^X 策略仍是 deny——这个 deny 由串口敲进去的命令行里的 `a20.wx=deny` 显式给出，因为树本身默认是 `off`，理由见上一节），外加 `[UARTCMD] using command line from the console` 与 `[FDT] bootargs='a20.wx=deny a20.xlator=1 a20.xlator.x86_64=/bin/qemu-x86_64'`：前者证明串口这条路真的走了，后者证明 `arch_bootargs_get()` 的返回值确实进了 `bootargs_get()`，而不是只打印了一行好看的提示。
 
 同一个 case 还顺带把 loongarch64 的 16550 接收路径变成被测过的：QEMU loongarch virt 没有 UART IRQ，所以这块板子 `uart_rx_is_polled = 1`，`arch_uart_poll_getc()` 直接轮询 LSR。在此之前这条路径在这块板子上从未被读过。FCR bit 0（16 字节 FIFO）也是这次打开的：不打开的话一次按键突发落进一字节保持寄存器会自我覆盖，实测丢首字节。
 
 ### 外来架构注册表一致性（check-xlator-guests）
 
-`make check-xlator-guests` 是纯文本门禁（无需交叉工具链与 QEMU，因此进 `CHECK_FAST_GATES` 与 CI 的 `toolchain-gates` job）。它断言五件事：
+`make check-xlator-guests` 是纯文本门禁（无需交叉工具链与 QEMU，因此进 `CHECK_FAST_GATES` 与 CI 的 `toolchain-gates` job）。它断言七件事：
 
 - `kernel/proc/xlator_guests.def` 里每个 guest 都有 `tools/targets-xlator.mk` 中对应的 `XLATOR_GUEST_CC_<name>`；
 - 反向也成立（多一个没人用的 CC 定义就是漂移）；
 - 每个 `e_machine` 与 `kernel/include/mm/elf.h` 的 `EM_*` 相等；
+- 每个 ABI 列是 `XLATOR_ABI_LINUX` 或 `XLATOR_ABI_NATIVE`，并且 `XLATOR_ABI_X` 在 `kernel/include/mm/elf.h` 里真有对应的 `ELF_ABI_X`；
+- 每个 `(名字, ABI)` 二元组只出现一次——**同一个名字出现两次是合法的**（一个架构注册两个 ABI），重复的是**二元组**；
 - 每个默认 argv 模板只用了内核认识的那三个记号（`@A` / `@P` / `@*`），并且出现了 `@P`；
 - `Makefile` 的 `XLATOR_SUPPORTED_ARCHES` 里每个架构都实现了 `arch_bootargs_get()`。
 
-第四条是对内核 `xlator_parse_template()` 的复述，不是第二个实现——内核才是权威并在启动时就地拦截，这条只是让同样的笔误在一秒内在宿主上暴露而不是在目标机启动日志里。已负向验证过：未知记号与缺 `@P` 各自 FAIL 且报错不同，`--argv0=@A @P @*` 这种记号粘字面量的写法 PASS。
+第四条挡住的是一类特别安静的错：`.def` 是 X-macro，不 `#include` 任何东西，所以 `XLATOR_ABI_NATIVE` 拼错**不会编译失败**——它只是一个没人认领的 `uint8_t`，而 `xlator_lookup()` 比的是 `key->abi`，于是那一行永远匹配不上，那个 guest 的每一次 `execve` 都返回 `ENOEXEC`，启动日志也不会点名。已负向验证过：把 ABI 列临时写成 `XLATOR_ABI_NATIVEY`，门禁 FAIL 并说明「`xlator_lookup()` 按 `(e_machine, ABI)` 查，这一行永远匹配不上」。
 
-第五条查的是另一类「名义支持」：架构进了 `XLATOR_SUPPORTED_ARCHES` 只说明 `CONFIG_XLATOR` 编进去了，而通道**能不能被配置**是另一件事——唯一配置入口是 `bootargs_get()`，没有 `arch_bootargs_get()` 的架构会落到 `kernel/core/bootargs.c` 里返回 NULL 的弱默认，于是那个架构上所有 `a20.*` 键全部读作不存在。`loongarch64` 在这条通道的整个生命周期里都是这个状态：它在 `XLATOR_SUPPORTED_ARCHES` 里、`/proc/a20/xlator` 也注册了，可没有一条 `a20.*` 键能生效。显式写一个返回 NULL 的桩是允许的（`arm32` 与 `loongarch32` 就是有意为之，它们根本没有 FDT 通路）；这条拒绝的是**静默**回落——架构从没做过这个决定。已负向验证过：临时删掉 loongarch64 的实现即 FAIL 并指名道姓。
+第五条是「名字可以重复、键不可以」这条约定的守卫。重复的二元组意味着其中一行永远匹配不上，而且**没有任何日志会提到这件事**：每一条指名它的命令行都会被接受，然后落进第一个槽。已正反双向验证过：加一行 `(x86_64, 62, XLATOR_ABI_NATIVE, …)` 使 PASS（2 guest → 3 guest，两行同名不同 ABI），再加一行完全相同的 `(x86_64, 62, XLATOR_ABI_NATIVE, …)` 则 FAIL 并说明二元组才是查找键。CC 交叉编译器的正反向检查按**架构名**比对而非二元组，因为同一架构的两个 ABI 行用同一把编译器。
+
+第六条是对内核 `xlator_parse_template()` 的复述，不是第二个实现——内核才是权威并在启动时就地拦截，这条只是让同样的笔误在一秒内在宿主上暴露而不是在目标机启动日志里。已负向验证过：未知记号与缺 `@P` 各自 FAIL 且报错不同，`--argv0=@A @P @*` 这种记号粘字面量的写法 PASS。
+
+第七条查的是另一类「名义支持」：架构进了 `XLATOR_SUPPORTED_ARCHES` 只说明 `CONFIG_XLATOR` 编进去了，而通道**能不能被配置**是另一件事——唯一配置入口是 `bootargs_get()`，没有 `arch_bootargs_get()` 的架构会落到 `kernel/core/bootargs.c` 里返回 NULL 的弱默认，于是那个架构上所有 `a20.*` 键全部读作不存在。`loongarch64` 在这条通道的整个生命周期里都是这个状态：它在 `XLATOR_SUPPORTED_ARCHES` 里、`/proc/a20/xlator` 也注册了，可没有一条 `a20.*` 键能生效。显式写一个返回 NULL 的桩是允许的（`arm32` 与 `loongarch32` 就是有意为之，它们根本没有 FDT 通路）；这条拒绝的是**静默**回落——架构从没做过这个决定。已负向验证过：临时删掉 loongarch64 的实现即 FAIL 并指名道姓。
 
 新增或修改 guest 时的正确顺序：先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。
 
 它不是预防性的：写下这道门禁时两份清单已经漂移——`XLATOR_GUEST_CC_riscv64` 存在，而 `--guest riscv64` 会被 argparse 直接拒掉。门禁还会扫 `tools/*.py` 里是否重新长出一份 guest→e_machine 的字典（`HOST_MACHINES` 与 `mkrootfs.py` 的架构表是另外两件事，按名字而非按数字区分）。
-
-新增或修改 guest 时的正确顺序：先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。
 
 ### 能力信封（研究门禁）
 

@@ -23,7 +23,11 @@ Four things are checked:
      in kernel/include/mm/elf.h
   4. every argv template in the .def is well-formed: it names only the
      three substitutions the kernel knows, and it contains @P
-  5. every architecture in XLATOR_SUPPORTED_ARCHES defines
+  5. every ABI in the .def is one the kernel actually defines -- the
+     lookup is keyed on (e_machine, ABI), so a misspelled column is a row
+     that can never match anything, and it would fail as a plain ENOEXEC
+     with no hint that the registry was the problem
+  6. every architecture in XLATOR_SUPPORTED_ARCHES defines
      arch_bootargs_get, so a.xlator-capable arch can actually be
      *configured* -- see check_bootargs_coverage() for why that is a
      separate fact from being compiled in
@@ -64,7 +68,16 @@ BOOTARGS_DEF_RE = re.compile(r"^\s*(?:__attribute__\(\(weak\)\)\s*)?"
 # whitespace-normalised before the token check.
 GUEST_RE = re.compile(
     r"^\s*XLATOR_GUEST\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*(\d+)\s*,"
+    r"\s*(XLATOR_ABI_[A-Z_]+)\s*,"
     r"\s*\"([^\"]*)\"\s*\)", re.M)
+
+# The ABI column is spelled as one of these macros because the .def has no
+# #include of its own and so cannot say ELF_ABI_LINUX; kernel/proc/xlator.c
+# defines them as that enumeration's members.  Keeping the set here explicit
+# rather than parsing xlator.c is deliberate: what needs checking is that the
+# column names an ABI the kernel *defines*, and the authority for that is the
+# elf_abi_t enum in elf.h, cross-checked in check_abi_column().
+XLATOR_ABIS = {"XLATOR_ABI_LINUX", "XLATOR_ABI_NATIVE"}
 
 # The kernel's whole template vocabulary (kernel/proc/xlator.c,
 # xlator_parse_template).  A '@' followed by anything else is rejected there,
@@ -74,6 +87,13 @@ XLATOR_TOKENS = {"@A", "@P", "@*"}
 CC_RE = re.compile(r"^XLATOR_GUEST_CC_([A-Za-z_][A-Za-z0-9_]*)\s*:?=", re.M)
 
 EM_RE = re.compile(r"#define\s+(EM_[A-Z0-9_]+)\s+(\d+)")
+
+# The elf_abi_t enumeration: `ELF_ABI_LINUX = 0,` and so on.  Read so the
+# allowed set above can be tied to the kernel's own names rather than asserted
+# here -- the check is "does every XLATOR_ABI_* in the registry correspond to
+# an ELF_ABI_* the loader knows", which is the one thing that silently rots if
+# a third ABI is added and the .def is not updated.
+ELF_ABI_RE = re.compile(r"^\s*(ELF_ABI_[A-Z_]+)\s*=", re.M)
 
 
 def fail(msg: str) -> int:
@@ -152,16 +172,63 @@ def check_bootargs_coverage() -> str | None:
     return None
 
 
-def parse_guests() -> dict[str, tuple[int, str]]:
-    out: dict[str, tuple[int, str]] = {}
+def parse_guests() -> dict[tuple[str, str], tuple[int, str, str]]:
+    """Registry rows, keyed by (name, abi) -- the pair xlator_lookup() matches.
+
+    Keying on the name alone stopped being correct once an architecture could
+    register a translator per ABI, because `x86_64` may then legitimately
+    appear twice.  What has to stay unique is the pair: it is the lookup key,
+    so two rows sharing it means one of them is dead, silently, since every
+    cmdline naming it lands on whichever came first.
+    """
+    out: dict[tuple[str, str], tuple[int, str, str]] = {}
     for m in GUEST_RE.finditer(GUESTS_DEF.read_text()):
-        name, machine, tmpl = m.group(1), int(m.group(2)), m.group(3)
-        if name in out:
-            raise ValueError(f"{name} listed twice in {GUESTS_DEF.name}")
-        out[name] = (machine, tmpl)
+        name = m.group(1)
+        machine, abi, tmpl = int(m.group(2)), m.group(3), m.group(4)
+        key = (name, abi)
+        if key in out:
+            raise ValueError(
+                f"{name}/{abi} listed twice in {GUESTS_DEF.name}: (name, ABI) "
+                f"is the lookup key, so one of the two rows could never be "
+                f"reached -- give the second ABI its own XLATOR_ABI_* column")
+        out[key] = (machine, abi, tmpl)
     if not out:
         raise ValueError(f"no XLATOR_GUEST rows in {GUESTS_DEF.name}")
     return out
+
+
+def parse_elf_abis() -> set[str]:
+    return set(ELF_ABI_RE.findall(ELF_H.read_text()))
+
+
+def check_abi_column(abi: str) -> str | None:
+    """Return why @abi is unusable as a registry column, or None when fine.
+
+    Two facts, not one.  The macro must be one kernel/proc/xlator.c defines
+    -- otherwise the tree does not compile at all, which is loud but leaves
+    the *name* unverified -- and the ELF_ABI_* it stands for must be a member
+    of the loader's elf_abi_t, which is what makes the row reachable.
+
+    The second check is the one worth having.  Nothing reads a row's ABI except
+    xlator_lookup(), and a lookup that cannot match returns -ENOENT, which is
+    indistinguishable at the call site from "this guest has no translator
+    configured".  A row nobody can reach is therefore a silent gap, and the
+    boot log would name the guest as merely unconfigured.
+    """
+    if abi not in XLATOR_ABIS:
+        return (f"{abi} is not one of {sorted(XLATOR_ABIS)}, and "
+                f"kernel/proc/xlator.c defines no such macro")
+
+    kernel_abis = parse_elf_abis()
+    if not kernel_abis:
+        raise ValueError(f"no ELF_ABI_* enumeration found in {ELF_H.name}")
+
+    # XLATOR_ABI_NATIVE <-> ELF_ABI_NATIVE: the prefix is the only difference.
+    implied = abi.replace("XLATOR_", "ELF_", 1)
+    if implied not in kernel_abis:
+        return (f"{abi} stands for {implied}, which {ELF_H.name} does not "
+                f"define; the kernel's ABIs are {sorted(kernel_abis)}")
+    return None
 
 
 def check_template(name: str, tmpl: str) -> str | None:
@@ -237,22 +304,27 @@ def main() -> int:
 
     cc_map = parse_cc_map()
 
-    missing_cc = sorted(set(guests) - cc_map)
+    # A cross compiler is a property of the guest *architecture*: both ABI
+    # rows of one architecture are cross-compiled with the same toolchain,
+    # so this compares names, not pairs.
+    guest_names = {name for name, _abi in guests}
+
+    missing_cc = sorted(guest_names - cc_map)
     if missing_cc:
         return fail(f"guest(s) {missing_cc} are in {GUESTS_DEF.name} but have "
                     f"no XLATOR_GUEST_CC_<name> in {XSLATOR_MK.name}")
 
-    stale_cc = sorted(cc_map - set(guests))
+    stale_cc = sorted(cc_map - guest_names)
     if stale_cc:
         named = ", ".join(f"XLATOR_GUEST_CC_{g}" for g in stale_cc)
         return fail(f"{XSLATOR_MK.name} defines {named} for guest(s) the kernel "
                     f"does not register -- either add XLATOR_GUEST rows for "
                     f"them or delete the assignments")
 
-    # e_machine agreement and argv template well-formedness.  A typo in
-    # either is invisible until some binary mysteriously refuses to translate,
-    # so both are worth a hard failure.
-    for name, (machine, tmpl) in sorted(guests.items()):
+    # e_machine agreement, ABI validity and argv template well-formedness.  A
+    # typo in any of the three is invisible until some binary mysteriously
+    # refuses to translate, so all three are worth a hard failure.
+    for (name, abi), (machine, _abi, tmpl) in sorted(guests.items()):
         em = f"EM_{name.upper()}"
         if em not in elf_machines:
             return fail(f"{GUESTS_DEF.name} guest {name} has no {em} in "
@@ -260,6 +332,14 @@ def main() -> int:
         if elf_machines[em] != machine:
             return fail(f"{GUESTS_DEF.name} says {name} is e_machine {machine}, "
                         f"but {ELF_H.name} says {em} = {elf_machines[em]}")
+
+        why = check_abi_column(abi)
+        if why:
+            return fail(f"{GUESTS_DEF.name} guest {name} names ABI {abi}, which "
+                        f"{why}.  xlator_lookup() keys on (e_machine, ABI), so "
+                        f"the row could never match and every exec of a {name} "
+                        f"guest would return ENOEXEC for a reason the boot log "
+                        f"would not name.")
 
         why = check_template(name, tmpl)
         if why:
@@ -281,8 +361,10 @@ def main() -> int:
         return fail(why)
 
     arches = parse_xlator_arches()
+    abis = sorted({abi for _, abi, _ in guests.values()})
     print(f"check-xlator-guests: PASS -- {len(guests)} guest(s) "
-          f"({', '.join(sorted(guests))}) agree across "
+          f"({', '.join(sorted(guest_names))}) "
+          f"({', '.join(abis)}) agree across "
           f"{GUESTS_DEF.name}, {XSLATOR_MK.name} and {ELF_H.name}; "
           f"all {len(arches)} xlator-capable arch(es) "
           f"({', '.join(arches)}) can receive a command line")

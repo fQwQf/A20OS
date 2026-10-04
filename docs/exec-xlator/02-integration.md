@@ -17,6 +17,21 @@
 
 判据很简单：**你的程序能不能吃下一个镜像路径、然后自己把它跑完并返回它的退出码？** 能，就是包装器型，落到第 3 节。不能（需要先产出别的东西），就是编译器型，落到第 5 节。
 
+### 先确认一件更早的事：你的翻译器跑哪种 ABI
+
+A20OS 有两种 ABI（Linux ABI 与 A20 native ABI），通道的键是 `(架构, ABI)` 二元组。**qemu-user 只有 Linux ABI**——它实现的是 Linux 的 syscall ABI，遇到带 `PT_A20_START_INFO` 的镜像会直接失败。
+
+所以先问：你要服务的是 Linux-ABI 的 guest，还是 native-ABI 的 guest？
+
+- **Linux-ABI** → 下面第 3 节，适用于今天，零代码改动。
+- **native-ABI** → 这条路今天走不通，因为通道里没有任何 native-ABI 翻译器。加一个需要哪些改动、为什么移植 qemu 不是配置项，见 [04-extending.md](04-extending.md#3-加一个-native-abi-翻译器需要改什么)。
+
+想亲眼看到通道怎么拒绝 native-ABI 镜像：
+
+```
+/bin/xlate_exec native ignored      # 期望：XLATE_EXEC: native PASS: ENOEXEC
+```
+
 ## 2. 包装器的契约
 
 内核对翻译器程序的要求只有四条：
@@ -80,8 +95,8 @@ a20.xlator.aarch64=/bin/xlate_shim
 配好后启动，内核日志与 shim 输出：
 
 ```
-[XLATOR] x86_64 (e_machine=62) → /bin/xlate_shim  argv="@P @*" (cmdline 覆盖)
-[XLATOR] aarch64 (e_machine=183) → /bin/xlate_shim  argv="-0 @A @P @*"
+[XLATOR] x86_64 (e_machine=62 abi=linux) → /bin/xlate_shim  argv="@P @*" (cmdline 覆盖)
+[XLATOR] aarch64 (e_machine=183 abi=linux) → /bin/xlate_shim  argv="-0 @A @P @*"
 ...
 XLATE_SHIM: argv[0]=/bin/xlate_shim
 XLATE_SHIM: argv[1]=/tmp/guest_x86_64      <- Rosetta 形状：路径是第一个位置参数，无选项
@@ -108,20 +123,24 @@ XLATE_SHIM: argv[3]=/tmp/guest_aarch64
 
 - 加一个**翻译器** = 一次启动配置改动，零代码（本文第 3 节）。
 - 加一个 **guest 架构** = 两处编辑，外加过一道门禁。
+- 加一个 **guest ABI**（同一架构的第二种 ABI，例如将来的 native-ABI 翻译器）= `.def` 加一行，外加门禁的一条新断言。CC 表那条「两处编辑」对它不直接适用，理由与处理方式见 [04-extending.md](04-extending.md#第-3-步tools-targets-xlator-mk-加交叉编译器)。
 
 两处编辑：
 
 **1. `kernel/proc/xlator_guests.def`** —— 唯一的 guest 注册表：
 
 ```
-XLATOR_GUEST(<name>, <e_machine>, <argv_template>)
+XLATOR_GUEST(<name>, <e_machine>, <abi>, <argv_template>)
 ```
 
 | 列 | 要求 |
 |---|---|
 | `<name>` | 合法标识符片段；**不能含 `.`**（`.argv` / `.env` 是保留后缀）；会同时用作 shell 变量后缀和 C 字符串 |
 | `<e_machine>` | 十进制数（这个文件不含内核 include，写不了 `EM_X86_64`）；必须与 `kernel/include/mm/elf.h` 里的 `EM_*` 一致 |
+| `<abi>` | `XLATOR_ABI_LINUX` 或 `XLATOR_ABI_NATIVE`，必须对应 `elf.h` 里真实存在的 `ELF_ABI_*`。写成裸的 `linux` / `native` 会被门禁拒掉：`.def` 按约定没有自己的 `#include`，用宏名是让「这一列对应内核哪个枚举」可被工具交叉核对的唯一办法 |
 | `<argv_template>` | 带引号的字符串字面量，模板语法见 [01-usage.md](01-usage.md#4-argv-模板语法)；必须含 `@P`，只能用 `@A`/`@P`/`@*` |
+
+ABI 列不是元数据，它是**查找键的一半**：同一台机器的两种 ABI 在 `e_machine` 上无法区分，而能跑它们的翻译器是互斥的。键只有 `e_machine` 时会发生什么，是实测出来的而不是推出来的，见 [03-internals.md](03-internals.md#为什么输出的是二元组)。
 
 **2. `tools/targets-xlator.mk`** —— 一行 `XLATOR_GUEST_CC_<name> := <交叉编译器>`。
 
@@ -130,7 +149,10 @@ XLATOR_GUEST(<name>, <e_machine>, <argv_template>)
 - `.def` 里每个 guest 都有对应的 `XLATOR_GUEST_CC_<name>`；
 - 反向也成立（多余的 CC 定义就是漂移）；
 - `.def` 的 `e_machine` 与 `elf.h` 的 `EM_*` 一致；
+- `.def` 的 `abi` 对应 `elf.h` 里真实存在的 `ELF_ABI_*`；
 - 每个模板只含内核认识的记号，且出现 `@P`。
+
+倒数第二条对应第 4 节那个实测出来的误转发，所以它不是「多查一个字段」那么轻：这一列写错，内核**编译得出来、启动日志也干净**，只是那一行永远匹配不到，每次 exec 都 `ENOEXEC`，而启动日志只会说这个 guest「未配置翻译器」。
 
 最后一条是对内核 `xlator_parse_template()` 的**复述**，不是第二个实现——内核才是权威，并且在启动时就地拦住。门禁的价值只是让同样的错误在一秒内在宿主上暴露，而不是在目标机的启动日志里。
 
@@ -172,7 +194,9 @@ Prism 不是包装器，是**提前编译器**：输入一个模块，输出一�
 - **产物是什么 ELF。** 它是宿主原生镜像，所以 `elf_load` 能直接吃——这一点反而是顺的。但它必须可写、可执行，而 `CONFIG_XLATOR` 目前给转发出去的进程开的是 W^X 放行，不是文件权限。
 - **失败怎么办。** 编译器崩溃、缓存写满、目标不被支持——每一种都要一个新的错误路径，而不是复用 `ENOEXEC`（`ENOEXEC` 已经明确表示「这不是能跑的东西」，拿来表示「翻译器编译失败」是撒谎）。
 
-这一整块是**独立的功能**，不是本机制的一个配置项。所以这里不写半成品：既没有为它预留一个假的 `aot` 枚举值，也没有暗示「配一下就能用」。要做的时候，它应该长成 `.def` 里一个新的 class，配合一个自己的 exec 阶段，而不是把 `@P @*` 硬拗出第三种含义。
+这一整块是**独立的功能**，不是本机制的一个配置项。所以这里不写半成品：既没有为它预留一个假的 `aot` 枚举值，也没有暗示「配一下就能用」，也没有为此预建一张全 NULL 的 vtable。要做的时候，它应该长成 `.def` 里一个新的 class，配合一个自己的 exec 阶段，而不是把 `@P @*` 硬拗出第三种含义。
+
+**它在接口上落在哪一步**——即上面四条分别要改 `exec_try_translator()` 里的哪一段——见 [04-extending.md](04-extending.md#5-编译器型aot翻译器需要的那一整块)，那一节还解释了为什么「预留一张 vtable」在这里是错的做法。
 
 如果你要做的是这一类，本文档给不出配置步骤——请先按上面四条评估工作量。
 
@@ -184,14 +208,16 @@ Prism 不是包装器，是**提前编译器**：输入一个模块，输出一�
 - [ ] 翻译器在 A20OS 的 Linux ABI 下能独立运行
 - [ ] 选了匹配的 `.argv` 模板，用 shim 验证过 `argv[i]` 逐项符合预期
 - [ ] 环境需求写进了 `.env`（如果有）
-- [ ] `cat /proc/a20/xlator` 里该 guest 显示 `path=…` 而不是 `path=(none)`
-- [ ] 启动日志有 `[XLATOR] <guest> (e_machine=…) → …` 一行
+- [ ] **它服务的是 Linux-ABI 的 guest**（qemu-user 只有 Linux ABI；native-ABI 见第 1 节与 [04-extending.md](04-extending.md)）
+- [ ] `cat /proc/a20/xlator` 里该 guest 显示 `path=…` 而不是 `path=(none)`，且 `abi=` 是你期望的那一个
+- [ ] 启动日志有 `[XLATOR] <guest> (e_machine=… abi=…) → …` 一行
 - [ ] 真实运行后 guest 的输出、argv、退出码都正确（`make smoke-exec-xlator` 的断言集）
+- [ ] `/bin/xlate_exec native ignored` 仍然 `PASS: ENOEXEC`（确认你没有把翻译器接到一个装不下它的 ABI 上）
 
 新增 guest 架构时追加：
 
-- [ ] `kernel/proc/xlator_guests.def` 加了一行
+- [ ] `kernel/proc/xlator_guests.def` 加了一行（ABI 列不要漏，它进查找键）
 - [ ] `tools/targets-xlator.mk` 加了 `XLATOR_GUEST_CC_<name>`
 - [ ] `make check-xlator-guests` 通过
 
-设计与取舍、代码位置、内核 API 契约：[03-internals.md](03-internals.md)。
+设计与取舍、代码位置、内核 API 契约：[03-internals.md](03-internals.md)。扩展这条通道本身（新增 ABI、AOT、binfmt_misc 的借鉴）：[04-extending.md](04-extending.md)。
