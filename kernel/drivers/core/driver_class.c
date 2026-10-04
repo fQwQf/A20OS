@@ -188,6 +188,24 @@ void class_device_put(class_device_t *cdev)
         kfree(cdev);
 }
 
+/* Reading dev->class_dev on its own races class_device_unpublish(), which
+ * clears the field and then drops the last reference: a caller that read the
+ * pointer just before the clear can be left holding freed memory.  Taking the
+ * reference under g_class_lock makes the load and the refcount bump a single
+ * event relative to the clear, so a non-NULL return is always a live cdev and
+ * unpublish's own put cannot run ahead of this one.  Callers that want to keep
+ * a class device past the call should use class_device_get_by_*() instead. */
+class_device_t *class_device_ref_for_device(const struct device *dev)
+{
+    if (!dev)
+        return NULL;
+    uint64_t flags = spin_lock_irqsave(&g_class_lock);
+    class_device_t *cdev = dev->class_dev;
+    class_device_get(cdev);
+    spin_unlock_irqrestore(&g_class_lock, flags);
+    return cdev;
+}
+
 static class_device_t *class_device_get_match(const char *name,
                                                uint32_t type,
                                                unsigned nth,
