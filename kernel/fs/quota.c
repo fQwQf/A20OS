@@ -30,6 +30,7 @@ typedef struct {
 typedef struct {
     mount_t *mnt;
     spinlock_t lock;
+    int any_enabled;           /* relaxed: OR of enabled[], gates qm->lock */
     int enabled[MAXQUOTAS];
     dqent_t ents[MAXQUOTAS][DQENT_MAX];
 } qmount_t;
@@ -37,6 +38,12 @@ typedef struct {
 static qmount_t g_qmounts[QMOUNT_MAX];
 static spinlock_t g_quota_global_lock;
 static int g_quota_ready;
+/* Slots ever claimed from g_qmounts.  qmount_lookup() takes the global lock
+ * on every call, and quota_check_space()/quota_account_space() sit on the
+ * buffered-write path, so a system with quota never enabled must be able to
+ * prove that with a single relaxed load instead of two spinlocks.  Slots are
+ * never released, so the count only grows. */
+static int g_quota_mounts_used;
 
 static const uint64_t DEFAULT_GRACE = 7 * 24 * 3600;
 
@@ -50,6 +57,9 @@ int quota_init(void)
 static qmount_t *qmount_lookup(mount_t *mnt, int create)
 {
     if (!g_quota_ready || !mnt)
+        return NULL;
+    if (!create &&
+        __atomic_load_n(&g_quota_mounts_used, __ATOMIC_RELAXED) == 0)
         return NULL;
     uint64_t flags = spin_lock_irqsave(&g_quota_global_lock);
     qmount_t *free_slot = NULL;
@@ -66,6 +76,7 @@ static qmount_t *qmount_lookup(mount_t *mnt, int create)
         return NULL;
     }
     free_slot->mnt = mnt;
+    __atomic_fetch_add(&g_quota_mounts_used, 1, __ATOMIC_RELAXED);
     spin_unlock_irqrestore(&g_quota_global_lock, flags);
     return free_slot;
 }
@@ -106,9 +117,13 @@ static int quota_owner_ids(vnode_t *vn, uint32_t *uid, uint32_t *gid)
 
 int quota_check_space(vnode_t *vn, uint64_t extra_bytes)
 {
+    if (__atomic_load_n(&g_quota_mounts_used, __ATOMIC_RELAXED) == 0)
+        return 0;
     mount_t *mnt = quota_mount_of_vnode(vn);
     qmount_t *qm = mnt ? qmount_lookup(mnt, 0) : NULL;
     if (!qm || extra_bytes == 0)
+        return 0;
+    if (__atomic_load_n(&qm->any_enabled, __ATOMIC_RELAXED) == 0)
         return 0;
 
     uint32_t uid = 0, gid = 0;
@@ -161,9 +176,13 @@ int quota_check_inode_mnt(mount_t *mnt, uint32_t uid, uint32_t gid)
 
 void quota_account_space(vnode_t *vn, int64_t bytes_delta)
 {
+    if (__atomic_load_n(&g_quota_mounts_used, __ATOMIC_RELAXED) == 0)
+        return;
     mount_t *mnt = quota_mount_of_vnode(vn);
     qmount_t *qm = mnt ? qmount_lookup(mnt, 0) : NULL;
     if (!qm || bytes_delta == 0)
+        return;
+    if (__atomic_load_n(&qm->any_enabled, __ATOMIC_RELAXED) == 0)
         return;
 
     uint32_t uid = 0, gid = 0;
@@ -311,12 +330,20 @@ static int quota_cmd_on_mnt(mount_t *mnt, uint32_t base_cmd, int type,
     case Q_QUOTAON: {
         uint64_t flags = spin_lock_irqsave(&qm->lock);
         qm->enabled[type] = 1;
+        int any = 0;
+        for (int i = 0; i < MAXQUOTAS; i++)
+            any |= qm->enabled[i];
+        qm->any_enabled = any;
         spin_unlock_irqrestore(&qm->lock, flags);
         return 0;
     }
     case Q_QUOTAOFF: {
         uint64_t flags = spin_lock_irqsave(&qm->lock);
         qm->enabled[type] = 0;
+        int any = 0;
+        for (int i = 0; i < MAXQUOTAS; i++)
+            any |= qm->enabled[i];
+        qm->any_enabled = any;
         spin_unlock_irqrestore(&qm->lock, flags);
         return 0;
     }
