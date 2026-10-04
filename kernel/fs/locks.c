@@ -4,6 +4,7 @@
 #include "core/lock.h"
 #include "core/sync.h"
 #include "core/string.h"
+#include "mm/slab.h"
 #include "proc/proc.h"
 #include "proc/signal.h"
 
@@ -25,6 +26,29 @@ typedef struct fs_bsd_flock {
 } fs_bsd_flock_t;
 
 #define FS_FILE_LOCK_MAX 256
+/* Subtracting the requested range can split every range this owner holds on
+ * the file in two, and the requested range itself is appended, so the algebra
+ * needs room for twice the table plus one. */
+#define FS_LOCK_SCRATCH_MAX (FS_FILE_LOCK_MAX * 2 + 1)
+
+typedef struct {
+    int64_t start;
+    int64_t end;
+    int16_t type;
+} fs_lock_range_t;
+
+/*
+ * The range algebra used to run over ~23 KiB of per-call stack arrays inside
+ * the g_file_lock_table_lock region — a third of a thread's 64 KiB kernel
+ * stack in one frame.  The scratch is heap-allocated before the lock is taken
+ * instead: a reclaiming kmalloc must never run under a spinlock, and the
+ * scan-and-split below only reads the table, so it can be prepared first.
+ */
+static fs_lock_range_t *fs_lock_scratch_alloc(void)
+{
+    return (fs_lock_range_t *)kmalloc(sizeof(fs_lock_range_t) *
+                                      FS_LOCK_SCRATCH_MAX);
+}
 
 static fs_file_lock_t g_file_locks[FS_FILE_LOCK_MAX];
 static fs_bsd_flock_t g_bsd_flocks[FS_FILE_LOCK_MAX];
@@ -50,7 +74,7 @@ static int fs_lock_wait(uint64_t table_flags)
     proc_wait_token_t token =
         proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, 0);
     if (!token.task)
-        return 0;
+        return -EAGAIN;
 
     wait_queue_entry_t entry = {0};
     table_flags = spin_lock_irqsave(&g_file_lock_table_lock);
@@ -73,9 +97,15 @@ static int fs_lock_wait(uint64_t table_flags)
     }
     wait_queue_unlink(&g_file_lock_waiters, &entry);
     proc_park_finish(token);
-    return proc_wake_reason_is_task_interrupt(reason) ||
-           signal_task_has_unblocked(cur) ?
-           -ERESTARTSYS : 0;
+    if (proc_wake_reason_is_task_interrupt(reason) ||
+        signal_task_has_unblocked(cur))
+        return -ERESTARTSYS;
+    /* Neither a park failure nor a failed enqueue may be reported as "keep
+     * retrying": the caller re-enters the table scan under the spinlock, so a
+     * 0 here burns the whole retry budget without ever sleeping. */
+    if (!linked)
+        return -EAGAIN;
+    return 0;
 }
 
 static void fs_lock_wake_waiters(void)
@@ -193,6 +223,9 @@ int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind,
     if (r < 0) return r;
     uintptr_t key = fs_lock_key(vf);
 
+    fs_lock_range_t *sc = fs_lock_scratch_alloc();
+    if (!sc) return -ENOMEM;
+
     /* Deadlock detection: track the conflicting holder across retries.
      * If we repeatedly conflict with the same holder who also blocks
      * on a lock we own, that's a deadlock cycle. */
@@ -201,8 +234,10 @@ int fs_locks_set(vfile_t *vf, const fs_flock_t *lk, int owner_kind,
 #define FS_LOCK_MAX_RETRIES 1024
 
 retry:
-    if (deadlock_retries >= FS_LOCK_MAX_RETRIES)
+    if (deadlock_retries >= FS_LOCK_MAX_RETRIES) {
+        kfree(sc);
         return -EDEADLK;
+    }
     deadlock_retries++;
 
     uint64_t flags = spin_lock_irqsave(&g_file_lock_table_lock);
@@ -215,6 +250,7 @@ retry:
                                    lk->l_type, start, end)) {
                 if (!wait) {
                     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+                    kfree(sc);
                     return -EAGAIN;
                 }
                 /* Simple deadlock heuristic: if we keep conflicting
@@ -232,6 +268,7 @@ retry:
                              * could be part of a deadlock cycle */
                             if (deadlock_retries > 4) {
                                 spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+                                kfree(sc);
                                 return -EDEADLK;
                             }
                         }
@@ -239,137 +276,106 @@ retry:
                 }
                 prev_blocker = blocker;
                 r = fs_lock_wait(flags);
-                if (r < 0)
+                if (r < 0) {
+                    kfree(sc);
                     return r;
+                }
                 goto retry;
             }
         }
     }
 
-    /* 2. Collect existing locks owned by this owner on this file, and remove them from the active table */
-    int temp_count = 0;
-    int64_t temp_start[FS_FILE_LOCK_MAX];
-    int64_t temp_end[FS_FILE_LOCK_MAX];
-    short temp_type[FS_FILE_LOCK_MAX];
-
+    /* 2. Collect the ranges this owner already holds on this file and
+     * subtract [start, end] from each, leaving the non-overlapping left and
+     * right remnants.  Nothing in the table is mutated yet, so an -ENOLCK
+     * outcome below leaves the existing locks exactly as they were. */
+    int own_count = 0;
+    int count = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
-        if (g_file_locks[i].used && g_file_locks[i].key == key &&
-            g_file_locks[i].owner_kind == owner_kind &&
-            g_file_locks[i].owner == owner) {
-            changed = 1;
-            
-            temp_start[temp_count] = g_file_locks[i].start;
-            temp_end[temp_count] = g_file_locks[i].end;
-            temp_type[temp_count] = g_file_locks[i].type;
-            temp_count++;
-            
-            g_file_locks[i].used = 0; /* Temporarily remove it */
-        }
-    }
-
-    /* 3. Apply the new lock range [start, end] with lk->l_type by splitting/truncating existing locks */
-    int new_count = 0;
-    int64_t new_start[FS_FILE_LOCK_MAX * 2];
-    int64_t new_end[FS_FILE_LOCK_MAX * 2];
-    short new_type[FS_FILE_LOCK_MAX * 2];
-
-    for (int i = 0; i < temp_count; i++) {
-        int64_t s_L = temp_start[i];
-        int64_t e_L = temp_end[i];
-        short t_L = temp_type[i];
+        if (!g_file_locks[i].used || g_file_locks[i].key != key ||
+            g_file_locks[i].owner_kind != owner_kind ||
+            g_file_locks[i].owner != owner)
+            continue;
+        own_count++;
+        int64_t s_L = g_file_locks[i].start;
+        int64_t e_L = g_file_locks[i].end;
+        int16_t t_L = g_file_locks[i].type;
 
         if (e_L < start || s_L > end) {
-            /* No overlap */
-            new_start[new_count] = s_L;
-            new_end[new_count] = e_L;
-            new_type[new_count] = t_L;
-            new_count++;
+            sc[count].start = s_L;   /* No overlap */
+            sc[count].end = e_L;
+            sc[count].type = t_L;
+            count++;
         } else {
-            /* Overlap exists. Keep non-overlapping left and right parts */
             if (s_L < start) {
-                new_start[new_count] = s_L;
-                new_end[new_count] = start - 1;
-                new_type[new_count] = t_L;
-                new_count++;
+                sc[count].start = s_L;
+                sc[count].end = start - 1;
+                sc[count].type = t_L;
+                count++;
             }
             if (e_L > end) {
-                new_start[new_count] = end + 1;
-                new_end[new_count] = e_L;
-                new_type[new_count] = t_L;
-                new_count++;
+                sc[count].start = end + 1;
+                sc[count].end = e_L;
+                sc[count].type = t_L;
+                count++;
             }
         }
     }
 
-    /* 4. Add the new lock range if it is not an unlock request */
+    /* 3. Add the new lock range if it is not an unlock request */
     if (lk->l_type != F_UNLCK) {
-        new_start[new_count] = start;
-        new_end[new_count] = end;
-        new_type[new_count] = lk->l_type;
-        new_count++;
+        sc[count].start = start;
+        sc[count].end = end;
+        sc[count].type = (int16_t)lk->l_type;
+        count++;
     }
 
-    /* 5. Sort the resulting locks by start address to facilitate merging */
-    for (int i = 0; i < new_count - 1; i++) {
-        for (int j = i + 1; j < new_count; j++) {
-            if (new_start[i] > new_start[j]) {
-                int64_t tmp_s = new_start[i]; new_start[i] = new_start[j]; new_start[j] = tmp_s;
-                int64_t tmp_e = new_end[i]; new_end[i] = new_end[j]; new_end[j] = tmp_e;
-                short tmp_t = new_type[i]; new_type[i] = new_type[j]; new_type[j] = tmp_t;
-            }
+    /* 4. Sort by start address to facilitate merging.  Insertion sort: the
+     * remnants arrive in table order, which is already almost sorted. */
+    for (int i = 1; i < count; i++) {
+        fs_lock_range_t tmp = sc[i];
+        int j = i - 1;
+        while (j >= 0 && sc[j].start > tmp.start) {
+            sc[j + 1] = sc[j];
+            j--;
         }
+        sc[j + 1] = tmp;
     }
 
-    /* 6. Merge adjacent or overlapping locks of the same type */
+    /* 5. Merge adjacent or overlapping locks of the same type, in place. */
     int merged_count = 0;
-    int64_t merged_start[FS_FILE_LOCK_MAX * 2];
-    int64_t merged_end[FS_FILE_LOCK_MAX * 2];
-    short merged_type[FS_FILE_LOCK_MAX * 2];
-
-    for (int i = 0; i < new_count; i++) {
+    for (int i = 0; i < count; i++) {
         if (merged_count > 0 &&
-            merged_type[merged_count - 1] == new_type[i] &&
-            merged_end[merged_count - 1] + 1 >= new_start[i]) {
-            if (new_end[i] > merged_end[merged_count - 1]) {
-                merged_end[merged_count - 1] = new_end[i];
-            }
+            sc[merged_count - 1].type == sc[i].type &&
+            sc[merged_count - 1].end + 1 >= sc[i].start) {
+            if (sc[i].end > sc[merged_count - 1].end)
+                sc[merged_count - 1].end = sc[i].end;
         } else {
-            merged_start[merged_count] = new_start[i];
-            merged_end[merged_count] = new_end[i];
-            merged_type[merged_count] = new_type[i];
+            sc[merged_count] = sc[i];
             merged_count++;
         }
     }
 
-    /* 7. Verify we have enough space in the global table to write the locks back */
-    int free_slots = 0;
-    for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
-        if (!g_file_locks[i].used) {
-            free_slots++;
-        }
-    }
-
-    if (merged_count > free_slots) {
-        /* Not enough space! Restore original locks and return ENOLCK */
-        for (int i = 0; i < temp_count; i++) {
-            for (int j = 0; j < FS_FILE_LOCK_MAX; j++) {
-                if (!g_file_locks[j].used) {
-                    g_file_locks[j].used = 1;
-                    g_file_locks[j].key = key;
-                    g_file_locks[j].owner_kind = owner_kind;
-                    g_file_locks[j].owner = owner;
-                    g_file_locks[j].start = temp_start[i];
-                    g_file_locks[j].end = temp_end[i];
-                    g_file_locks[j].type = temp_type[i];
-                    break;
-                }
-            }
-        }
+    /* 6. The result has to fit once this owner's old ranges are withdrawn. */
+    int used = 0;
+    for (int i = 0; i < FS_FILE_LOCK_MAX; i++)
+        if (g_file_locks[i].used)
+            used++;
+    if (used - own_count + merged_count > FS_FILE_LOCK_MAX) {
         spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
+        kfree(sc);
         return -ENOLCK;
     }
 
-    /* 8. Write the merged locks back into the global table */
+    /* 7. Withdraw this owner's old ranges and write the merged ones back. */
+    if (own_count)
+        changed = 1;
+    for (int i = 0; i < FS_FILE_LOCK_MAX; i++) {
+        if (g_file_locks[i].used && g_file_locks[i].key == key &&
+            g_file_locks[i].owner_kind == owner_kind &&
+            g_file_locks[i].owner == owner)
+            g_file_locks[i].used = 0;
+    }
     int write_idx = 0;
     for (int i = 0; i < FS_FILE_LOCK_MAX && write_idx < merged_count; i++) {
         if (!g_file_locks[i].used) {
@@ -377,9 +383,9 @@ retry:
             g_file_locks[i].key = key;
             g_file_locks[i].owner_kind = owner_kind;
             g_file_locks[i].owner = owner;
-            g_file_locks[i].start = merged_start[write_idx];
-            g_file_locks[i].end = merged_end[write_idx];
-            g_file_locks[i].type = merged_type[write_idx];
+            g_file_locks[i].start = sc[write_idx].start;
+            g_file_locks[i].end = sc[write_idx].end;
+            g_file_locks[i].type = sc[write_idx].type;
             write_idx++;
         }
     }
@@ -390,6 +396,7 @@ retry:
     spin_unlock_irqrestore(&g_file_lock_table_lock, flags);
     if (wake_waiters)
         fs_lock_wake_waiters();
+    kfree(sc);
     return 0;
 }
 
