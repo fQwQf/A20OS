@@ -13,6 +13,7 @@
 #include "core/panic.h"
 #include "core/errno.h"
 #include "mm/slab.h"
+#include "core/cpu.h"
 
 /* DRIVER_CORE_DYNAMIC_LIMITS: initial capacity for bringup; registries grow
  * dynamically via krealloc when capacity is exhausted. */
@@ -37,6 +38,54 @@ static int         g_device_cap;
 static bus_type_t **g_buses;
 static int         g_bus_count;
 static int         g_bus_cap;
+
+/* The scheduler bridge runs driver_progress_class() from every CPU on every
+ * pass, and it must never block or skip a device, so it cannot take
+ * g_driver_core_ops -- a mutex held across probe/remove -- to walk the
+ * registry.  Each CPU therefore keeps a private mirror of the bound devices
+ * that have a progress callback, rebuilt under that mutex only when
+ * g_progress_epoch moves.  The mirror is a caching hint, never the lifetime
+ * guard: entries are device_t pointers, which are static objects that outlive
+ * every binding, and each entry is entered through class_device_ref_for_device()
+ * plus class_device_call_begin(), so a device unbound mid-walk is either
+ * skipped or is pinned until class_device_unpublish() drains it, which happens
+ * before drv->remove() frees the driver's private state. */
+static device_t **g_progress_mirror[CONFIG_NR_CPUS];
+static int         g_progress_count[CONFIG_NR_CPUS];
+static int         g_progress_cap[CONFIG_NR_CPUS];
+static uint32_t    g_progress_epoch = 1;
+static uint32_t    g_progress_mirror_epoch[CONFIG_NR_CPUS];
+
+/* Bumped under g_driver_core_ops whenever a binding changes, so the mirrors
+ * know to re-read the registry.  A mirror that has not caught up only costs its
+ * CPU one pass of polling a stale device set. */
+static void driver_progress_binding_changed(void)
+{
+    __atomic_add_fetch(&g_progress_epoch, 1, __ATOMIC_RELEASE);
+}
+
+static void driver_progress_refresh(unsigned cpu)
+{
+    int need = g_device_count > 0 ? g_device_count : 1;
+    if (need > g_progress_cap[cpu]) {
+        device_t **grown = krealloc(g_progress_mirror[cpu],
+                                    (size_t)need * sizeof(*grown));
+        if (!grown)
+            return;
+        g_progress_mirror[cpu] = grown;
+        g_progress_cap[cpu] = need;
+    }
+    int n = 0;
+    for (int i = 0; i < g_device_count; i++) {
+        device_t *dev = g_devices[i];
+        if (dev->drv && dev->drv->progress)
+            g_progress_mirror[cpu][n++] = dev;
+    }
+    __atomic_store_n(&g_progress_count[cpu], n, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_progress_mirror_epoch[cpu],
+                     __atomic_load_n(&g_progress_epoch, __ATOMIC_RELAXED),
+                     __ATOMIC_RELEASE);
+}
 
 static int driver_matches_device(driver_t *drv, device_t *dev)
 {
@@ -70,6 +119,7 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     dev->drv = drv;
     if (!drv->probe) {
         dev->state = DEV_STATE_PROBED;
+        driver_progress_binding_changed();
         return 0;
     }
     int ret = drv->probe(dev);
@@ -83,8 +133,10 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
             dev->drv_priv = NULL;
             dev->matched_id = NULL;
             dev->state = DEV_STATE_UNINIT;
+            driver_progress_binding_changed();
             return ret;
         }
+        driver_progress_binding_changed();
         return 0;
     }
     /* DRIVER_PROBE_FAILURE_CLEANUP: failed probes leave no half-bound device. */
@@ -92,6 +144,7 @@ static int driver_probe_bound_device(driver_t *drv, device_t *dev) {
     dev->drv_priv = NULL;
     dev->matched_id = NULL;
     dev->state = DEV_STATE_UNINIT;
+    driver_progress_binding_changed();
     return ret;
 }
 
@@ -118,6 +171,19 @@ void driver_core_init(void) {
     if (!g_drivers || !g_devices || !g_buses) {
         panic("driver_core_init: kmalloc failed\n");
     }
+
+    /* Seed every CPU's progress mirror before any device is bound.  A mirror
+     * is only read once it has a nonzero count, so the initial capacity is a
+     * starting point that driver_progress_refresh() grows from. */
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        g_progress_count[cpu] = 0;
+        g_progress_cap[cpu] = DEVICE_INITIAL_CAP;
+        g_progress_mirror_epoch[cpu] = 0;
+        g_progress_mirror[cpu] = kcalloc(DEVICE_INITIAL_CAP, sizeof(device_t *));
+        if (!g_progress_mirror[cpu])
+            panic("driver_core_init: progress mirror kmalloc failed\n");
+    }
+    g_progress_epoch = 1;
 
     /* Iterate the .driver_init pointer table as raw uintptr_t slots.  The
      * section holds pointers to static driver_t objects placed by
@@ -213,6 +279,7 @@ int driver_unregister(driver_t *drv) {
                 dev->drv_priv = NULL;
                 dev->matched_id = NULL;
                 dev->state = DEV_STATE_REMOVED;
+                driver_progress_binding_changed();
             }
             mutex_unlock(&g_driver_core_ops);
             return 0;
@@ -295,6 +362,7 @@ void device_unregister(device_t *dev) {
             dev->drv_priv = NULL;
             dev->state = DEV_STATE_REMOVED;
             dev->matched_id = NULL;
+            driver_progress_binding_changed();
             mutex_unlock(&g_driver_core_ops);
             return;
         }
@@ -464,18 +532,40 @@ void driver_probe_all(void) {
 
 void driver_progress_class(uint32_t class_type)
 {
-    /* DRIVER_PROGRESS_LIFECYCLE_SERIALIZATION: scheduler/idle progress runs
-     * on every CPU and must not race registry growth or device binding.  Never
-     * block from the scheduler bridge; the next poll retries after the
-     * lifecycle operation completes. */
-    if (!mutex_trylock(&g_driver_core_ops))
-        return;
-    for (int i = 0; i < g_device_count; i++) {
-        device_t *dev = g_devices[i];
-        if (dev->drv && dev->drv->class_type == class_type && dev->drv->progress)
-            dev->drv->progress(dev);
+    /* DRIVER_PROGRESS_LIFECYCLE_SERIALIZATION: scheduler/idle progress runs on
+     * every CPU and must never block, so it cannot take g_driver_core_ops to
+     * walk the registry.  The per-CPU mirror absorbs that walk; the mutex is
+     * taken only to rebuild it, and only when a binding has changed since the
+     * last rebuild, which never happens on the steady-state path.  The next
+     * poll retries if a concurrent lifecycle operation still owns the mutex. */
+    unsigned cpu = cpu_current_id();
+    if (__atomic_load_n(&g_progress_mirror_epoch[cpu], __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&g_progress_epoch, __ATOMIC_ACQUIRE) &&
+        mutex_trylock(&g_driver_core_ops)) {
+        driver_progress_refresh(cpu);
+        mutex_unlock(&g_driver_core_ops);
     }
-    mutex_unlock(&g_driver_core_ops);
+
+    int n = __atomic_load_n(&g_progress_count[cpu], __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        device_t *dev = g_progress_mirror[cpu][i];
+        driver_t *drv = dev ? dev->drv : NULL;
+        if (!drv || drv->class_type != class_type || !drv->progress)
+            continue;
+        /* Pin the class device for the callback.  class_device_unpublish()
+         * waits for the matching call_end() and runs before drv->remove(),
+         * so a driver cannot have its private state freed under a poll that
+         * has already entered this window. */
+        class_device_t *cdev = class_device_ref_for_device(dev);
+        if (!cdev)
+            continue;
+        if (class_device_call_begin(cdev) == 0) {
+            if (dev->drv == drv && drv->progress)
+                drv->progress(dev);
+            class_device_call_end(cdev);
+        }
+        class_device_put(cdev);
+    }
 }
 
 /* Format the registered drivers for /proc/drivers (Linux format). */
