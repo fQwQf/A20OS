@@ -172,6 +172,17 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
     if (!(ptef & (PTE_R | PTE_W)))
         return -1;
 
+    /* The VMA is allocated before mm->lock is taken.  kcalloc() reaches the
+     * reclaiming allocator, whose OOM path takes proc_lock and mm->lock, writes
+     * swap pages to disk, waits on remote TLB IPIs and can proc_force_exit() a
+     * task; none of that may run inside a spinlock section.  The object stays
+     * unreachable until mm_insert_vma() publishes it below. */
+    vm_area_t *vma = kcalloc(1, sizeof(*vma));
+    if (!vma)
+        return -1;
+    refcount_set(&vma->refcount, 1);
+    vma->vm_flags = vma_flags;
+
     spin_lock(&mm->lock);
     vaddr_t va = mm_find_gap(mm, mm->mmap_base, size);
     if (!va)
@@ -180,13 +191,8 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
         if (pt_map(mm->pgdir, va + off, phys + off, ptef) < 0)
             goto fail;
     }
-    vm_area_t *vma = kcalloc(1, sizeof(*vma));
-    if (!vma)
-        goto fail;
-    refcount_set(&vma->refcount, 1);
     vma->start = va;
     vma->end = va + size;
-    vma->vm_flags = vma_flags;
     mm_insert_vma(mm, vma);
     spin_unlock(&mm->lock);
     mm_vma_flush_deferred(mm);
@@ -195,6 +201,9 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
 
 fail:
     spin_unlock(&mm->lock);
+    /* vma_put() takes mm->vma_ref_lock rather than mm->lock precisely so the
+     * last holder can schedule the free without the lock it just dropped. */
+    vma_put(mm, vma);
     return -1;
 }
 

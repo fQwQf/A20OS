@@ -176,6 +176,19 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
     uint64_t frequency = clock_ticks_per_sec();
     uint64_t deadline = (start && frequency) ? start + frequency : 0;
     uint32_t spins = 100000000U;
+    /* The device writes used->idx behind our back, so every observation of it
+     * must be preceded by an invalidate-for-CPU: on a coherent port that helper
+     * is a no-op, on aarch64 it is a dsb sy and a dc ivac per line, and a load
+     * that hits the line cached by the previous observation would never see the
+     * completion.  That per-observation sync cannot be hoisted out.
+     *
+     * What can go is the 65536-iteration chunk that paid for it before the
+     * first sleep -- 131072 dsb sy on aarch64, twice per page flip and twice
+     * more per 30Hz flush.  Once a completion IRQ is registered the wait queue
+     * is the cheap way to observe the index, so park on the first iteration and
+     * let the handler schedule each re-check.  Without an IRQ there is nothing
+     * to park on and the chunked poll stands. */
+    uint32_t park_mask = (inst->irq_registered && proc_current()) ? 0U : 0xffffU;
     while (spins--) {
         arch_dma_sync_for_cpu((void *)used, sizeof(*used));
         if (used->idx != used_before) {
@@ -190,7 +203,7 @@ static int virtio_gpu_send_cmd(virtio_gpu_inst_t *inst, void *req, size_t req_le
          * progress paths are not starved by a full-vCPU busy loop; with a
          * registered IRQ the flush instead parks until the completion
          * interrupt (bounded chunks guard against a missed wake). */
-        if ((spins & 0xffffU) == 0 && proc_current()) {
+        if ((spins & park_mask) == 0 && proc_current()) {
             if (inst->irq_registered && deadline) {
                 uint64_t now = clock_get_ticks();
                 if (now < deadline) {
