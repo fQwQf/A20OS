@@ -1211,6 +1211,23 @@ files = [
 pattern = "VIRTIO_BLK_COMPLETION_MODEL"
 files = ["kernel/drivers/block/virtio_blk.c"]
 
+# The device half of the progress bridge is gated on an aggregated pending
+# bit.  Its liveness floor is the producer in virtio-blk plus a fallback
+# counted in timer IRQs; scaling that fallback by clock_ticks_per_sec() made
+# it ~10^8 IRQs, so nothing ever re-armed the bit and block I/O stalled.
+[[gate.assertion]]
+pattern = "kernel_progress_note_pending"
+files = [
+    "kernel/include/core/progress.h",
+    "kernel/drivers/block/virtio_blk.c",
+    "kernel/drvmod/framework.c",
+]
+
+[[gate.assertion]]
+negate = true
+pattern = "KERNEL_PROGRESS_FALLBACK_TICKS \\(clock_ticks_per_sec"
+files = ["kernel/core/progress.c"]
+
 [[gate.assertion]]
 pattern = "LWIP_NO_THREAD_PROGRESS_CONTRACT"
 files = ["kernel/net/lwip_stack.c"]
@@ -1343,6 +1360,20 @@ pattern = "smoke-arch-mmu-matrix"
 files = [
     "tools/targets-smoke.mk",
     "docs/OS-Design.md",
+]
+
+# A trap handler can fault a page in and install the translation into the
+# address space it is already running under, so an unchanged TTBR0 does not
+# mean unchanged mappings.  Skipping tlbi on TTBR0 equality left the faulting
+# VA unmapped and aarch64 guests died in the ext4 path.  Both aarch64 return
+# paths must keep the invalidation unconditional.
+[[gate.assertion]]
+segment = 0
+negate = true
+pattern = "b\\.eq[[:space:]]+\\.?L?[Tt][Tt][Bb][Rr]0_|ttbr0_unchanged"
+files = [
+    "kernel/arch/aarch64/trap/trap.S",
+    "kernel/arch/aarch64/boot/switch.S",
 ]
 
 
