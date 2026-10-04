@@ -840,6 +840,52 @@ int elf_check_header(const Elf64_Ehdr *eh) {
     return 0;
 }
 
+/* Decide whether a file that elf_load() already rejected as -ENOEXEC is
+ * structurally a foreign-architecture Linux executable, reporting its
+ * e_machine.
+ *
+ * The checks mirror elf_check_header() *except* for the machine test, which
+ * only has to exclude the native machine.  Deciding whether a given machine
+ * is *translatable* is not this function's business and is not a compiled-in
+ * list: it belongs to the translator channel, whose answer depends on what an
+ * administrator configured (kernel/proc/xlator.c).  Keeping that out of here
+ * is what lets a new guest architecture be added without touching the kernel.
+ *
+ * The fail-closed property is unchanged by that move, and rests on the same
+ * two facts as before: everything this predicate rejects -- bad magic, wrong
+ * class/endianness, wrong e_type, a short program header table -- is still
+ * rejected here, and a machine nobody configured a translator for has no
+ * entry to find in xlator_lookup().  A corrupt header therefore cannot be
+ * mistaken for "please translate this": a garbage e_machine matches nothing.
+ *
+ * Only the e_machine is reported; the header is never trusted beyond it. */
+int elf_is_foreign_arch(int fd, uint16_t *machine_out)
+{
+    if (vfs_lseek(fd, 0, SEEK_SET) < 0)
+        return -ENOEXEC;
+
+    Elf64_Ehdr eh;
+    int n = vfs_read(fd, (char *)&eh, sizeof(eh));
+    if (n < 0)
+        return -ENOEXEC;
+    if (n != (int)sizeof(eh))
+        return -ENOEXEC;
+
+    if (*(uint32_t *)eh.e_ident != ELF_MAGIC) return -ENOEXEC;
+    if (eh.e_ident[4] != ELFCLASS64)           return -ENOEXEC;
+    if (eh.e_ident[5] != ELFDATA2LSB)          return -ENOEXEC;
+    if (eh.e_type != ET_EXEC && eh.e_type != ET_DYN) return -ENOEXEC;
+    if (eh.e_phentsize < sizeof(Elf64_Phdr))   return -ENOEXEC;
+    if (eh.e_phnum == 0 || eh.e_phnum > MAX_PHDRS) return -ENOEXEC;
+
+    if (elf_machine_supported(eh.e_machine, ELFCLASS64))
+        return -ENOEXEC;   /* native: it already loaded, or failed for another reason */
+
+    if (machine_out)
+        *machine_out = eh.e_machine;
+    return 0;
+}
+
 int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     if (len < sizeof(Elf64_Ehdr)) return -ENOEXEC;
     const Elf64_Ehdr *eh = (const Elf64_Ehdr *)buf;

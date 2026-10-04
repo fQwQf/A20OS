@@ -9,6 +9,7 @@ void riscv_iommu_early_probe(void);
 #include "core/trap.h"
 #include "proc/proc.h"
 #include "proc/proc_internal.h"
+#include "proc/xlator.h"
 #include "sys/syscall.h"
 #include "core/timer.h"
 #include "core/smp.h"
@@ -123,6 +124,12 @@ void kernel_main(void) {
     /* The W^X policy depends on the cmdline (a20.wx=deny|strip|off), so this
      * must run after bootargs */
     mm_wx_policy_init();
+    /* Same: the foreign-architecture translation channel is a cmdline
+     * feature (a20.xlator=*), so it also needs bootargs parsed first.
+     * Absent entirely in a CONFIG_XLATOR=n build. */
+#ifdef CONFIG_XLATOR
+    xlator_config_init();
+#endif
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
     /* 预标记上限同理走 cmdline（a20.anonprov=<pages>），须在 bootargs 之后 */
     mm_pt_anon_prov_init();

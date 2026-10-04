@@ -27,8 +27,21 @@ def main():
 
     expected = []
     send_lines = []
-    while args and args[0] in ("--expect", "--send-line"):
+    # (marker, line) pairs, each sent when its own marker is seen.  Needed
+    # when one input depends on the program having consumed an earlier one --
+    # e.g. a guest that asks for its command line on the serial port and only
+    # afterwards has a shell to type into.  A single --expect plus a batch of
+    # --send-line sends them all at once, which works for a shell prompt (the
+    # guest buffers them) and not for anything with a round trip in it.
+    steps = []
+    while args and args[0] in ("--expect", "--send-line", "--expect-line"):
         option = args.pop(0)
+        if option == "--expect-line":
+            if len(args) < 2:
+                print("missing value for --expect-line", file=sys.stderr)
+                return 2
+            steps.append((args.pop(0).encode(), args.pop(0).encode()))
+            continue
         if not args:
             print(f"missing value for {option}", file=sys.stderr)
             return 2
@@ -38,10 +51,17 @@ def main():
         else:
             send_lines.append(value.encode())
 
+    if steps:
+        # The markers gate the streaming path, and `tail` is trimmed by marker
+        # length, so the step markers have to be in `expected` and in order.
+        expected = [marker for marker, _ in steps]
+        send_lines = []
+
     if len(args) < 2:
         print(
             "usage: run_with_timeout.py [--foreground] "
-            "[--expect MARKER] [--send-line LINE] DURATION COMMAND [ARG]...",
+            "[--expect MARKER] [--send-line LINE] "
+            "[--expect-line MARKER LINE]... DURATION COMMAND [ARG]...",
             file=sys.stderr,
         )
         return 2
@@ -83,6 +103,7 @@ def main():
     marker_index = 0
     tail = bytearray()
     sent = False
+    sent_steps = []
 
     try:
         while True:
@@ -119,6 +140,15 @@ def main():
                     process.stdin.write(line + b"\n")
                 process.stdin.flush()
                 sent = True
+
+            if steps:
+                for index in range(marker_index):
+                    if index < len(sent_steps) or index >= len(steps):
+                        continue
+                    process.stdin.write(steps[index][1] + b"\n")
+                    sent_steps.append(index)
+                if sent_steps:
+                    process.stdin.flush()
 
             status = process.poll()
             if status is not None:
