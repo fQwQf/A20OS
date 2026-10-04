@@ -571,10 +571,10 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
 存在），且 `smoke-net-accept` 的 lwip 那一趟 **PASS**
 （`TCP_ACCEPT_TEST: PASS port=12346`，`net_accept_staged=1`、`net_accept_queued=1`）。
 
-#### 仍然挡在 SSH 端到端前面的东西
+#### 入站连接的 double free：已定位并修复
 
-- **入站连接能被 accept，但随即 double free 打死内核。** 这是当前挡在 SSH 面前的那一条。
-  最小复现（server world，`a20.tcpmode=lwip`，宿主经 hostfwd 连入）：
+- **入站连接能被 accept，但随即 double free 打死内核。** 最小复现（server world，
+  `a20.tcpmode=lwip`，宿主经 hostfwd 连入）：
 
   ```
   # guest 内
@@ -583,9 +583,7 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
   bash -c 'exec 3<>/dev/tcp/127.0.0.1/2234'
   ```
 
-  握手是通的——宿主侧 `connect()` 返回成功，lwIP 的 LISTEN 查找命中、`tcp_listen_input()`
-  也确实执行了（在 `tcp_in.c` 的 LISTEN 分支与 `tcp_listen_input()` 入口各加一行
-  `putchar` 调试即可看到 `dest=8080` 命中非空指针）。随后立刻：
+  握手是通的——宿主侧 `connect()` 返回成功，lwIP 的 LISTEN 查找命中。随后立刻：
 
   ```
   ========== KERNEL PANIC ==========
@@ -596,24 +594,62 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
 
   `mem_free` 这条断言只在 `mem.c:639` 命中，即"该块已被标记为未使用"；而本分支
   `MEMP_MEM_MALLOC=1`，memp 各池的元素都出自 `mem_malloc`，所以这等价于**某个 memp
-  元素被释放了两次**。`lwip_tcp_recv_cb()` 与 `bh_stage_payload()` 看着是对的
-  （TCP 段恒走内联拷贝分支，有 `_Static_assert` 兜底），所以问题落在 accept 路径
-  自己的 pcb 归属上：`lwip_tcp_accept_cb()` 把新 pcb 存进 accept stage、交给 bottom
-  half 再转成 child socket，中途任何一次 `tcp_abort()` 与随后的 `tcp_close()`/
-  `net_socket_free()` 叠加就会走到这里。
+  元素被释放了两次**。
 
-  早先一版记录曾把这条写成"NIC 入站握手没完成"，那是**测试自身打错了端口**：
-  `hostfwd=...:2234-10.0.2.15:8080` 转发的是 guest 的 **8080**，而当时监听的是 8090。
-  打到 8080 上之后握手即告完成，暴露出来的才是上面这个 double free。
+  **根因不是 pcb 的引用计数算错，而是"把 pcb 交给 bottom half"和"pcb 可以安全地留在
+  lwIP 里"被当成了同一件事。** `lwip_tcp_accept_cb()` 返回 `ERR_OK`（等价于告诉 lwIP
+  这个 pcb 归应用所有），却**没有给它装任何回调**，于是 `pcb->recv == NULL`。若对端在
+  bottom half 跑完 `net_inet_tcp_apply_options()` 之前先发来 FIN，lwIP 会走到它自己的
+  `tcp_recv_null()` 兜底路径，其 `p == NULL && err == ERR_OK` 分支直接 `tcp_close(pcb)`
+  并把 pcb 释放掉——而 accept stage 槽位还指着这块已被释放的内存。bottom half 随后
+  拿到这个悬垂指针，把它交给新建的 child socket，teardown 再 `tcp_abort()` 一次，
+  第二次释放就撞上 `mem_free` 的断言。
 
-- **`smoke-net-accept` 门禁是红的，红在 fast 模式而不是 lwip 模式**：
-  `TCP_ACCEPT_TEST: FAIL port=12347 (client=-1)`，即 fast 模式下 loopback 的
-  `connect()` 直接失败。这一条**在 `main`（5c7c6d48）上逐字复现**——同一个 worktree
-  外的 detached 检出跑同一门禁，同样是 `passes=1`、同样 12346 过 12347 挂——所以它是
-  既有问题，不是本分支引入的回归。两种模式本应给出同一个可观测结果，这条仍待修。
+  修复（`80c20884`）把 accept stage 从"一个裸 pcb 数组"改成自带上下文的每槽位结构
+  （`net_accept_stage_slot_t`），并在 stage 时就装上 `lwip_tcp_stage_{recv,sent,err}_cb`：
 
-以上两条都在网络 lane 的 `tcpmode` / lwIP 职责范围内，本分支（kernel-core-scalability）
-不再往里扩，复现步骤已记录在此供该 lane 直接接手。
+  - staging 期间收到的数据以 `pbuf` 引用挂在 `c->pending` 上（`pbuf_free()` 只在
+    `g_lwip_lock` 下安全，所以只能在 err 回调或 bottom half 里释放），被采纳时搬到
+    child 的 bh_ring；
+  - staging 期间到达的 FIN 只置 `c->fin`，绝不动 `dead`，并在采纳时重放到 child 的
+    `bh_closed`，于是"握完手立刻 FIN"的请求不再落到兜底路径上；
+  - `lwip_tcp_stage_err_cb()` 置 `dead` 并在 `g_lwip_lock` 下清 `pending`，bottom half
+    据此跳过这个槽位；
+  - 采纳前**先把 pcb 重新 `tcp_arg()` 到 child 并清空槽位，再推进 `tail`**——槽位地址
+  就是 pcb 的 `callback_arg`，只要 `tail` 没过 i，生产者就不可能复用槽位 i，这个顺序
+  消掉了"生产者还在往这个槽位投递事件"的窗口；
+  - listener 拆除时（`net_tcp_close_pcb()` / `net_tcp_drop_pcb()` /
+    `net_inet_socket_destroy()`）统一 `net_inet_accept_stage_purge()`，此前已建立的连接
+    会被静默泄漏。
+
+  同一条路径上还修了两个独立缺陷：`lwip_tcp_recv_cb()` 在 bh_ring 满时既 `pbuf_free(p)`
+  又 `return ERR_MEM`，而 `ERR_MEM` 的语义是 lwIP **并没有**接管这个 pbuf（`tcp_in.c`
+  把它存进 `pcb->refused_data`，`tcp_process_refused_data()` 还会再交回来），所以这本身
+  就是第二次释放；现在改成先用 `bh_ring_reserve()` 整体判定、要么全进要么全不进。另外
+  `pbuf_cat()` 会自行为被拼接的链取引用，因此"留下回调交给我的 pbuf"的正确写法是
+  直接 `pbuf_cat(c->pending, p)`，多写一次 `pbuf_ref()` 会多数一。
+
+  验证：`make smoke-net-accept` 的 lwip 那一趟 PASS（`TCP_ACCEPT_TEST: PASS port=12346`，
+  `net_accept_drop=0`、`net_bh_overflow=0`、`net_alloc_fail=0`，无 panic），此前同一份
+  产物必 panic；经 slirp 打到 guest 8080 的入站连接不再触发断言；server world 里
+  dropbear 在 22 端口可从宿主端到端登录。
+
+#### fast 模式门禁发红：是测试自身的单位错误，不是内核缺陷
+
+- **`smoke-net-accept` 门禁红在 fast 模式**：`TCP_ACCEPT_TEST: FAIL port=12347 (client=-1)`。
+  内核并没有错：`user/cmds/net/tcp_accept_test.c` 的客户端重试循环把 `waited` 按
+  `CONNECT_RETRY_US`（微秒）累加，却拿它去比 `CONNECT_BUDGET_MS`（4000，毫秒），所以
+  `waited` 从 0 加到 20000 就已经越界，**循环体只跑一次**，客户端只发起一次 `connect()`，
+  而它恰好要跟 fork 出来的服务端 `bind()`+`listen()` 抢跑。谁先谁后不确定，于是表现为
+  "fast 模式 1/4 概率挂"。注释里写的意图（"长到不会在 4 核 guest 上误触发，短到卡死时
+  几十秒内失败"）显然是想要 4 秒的重试预算，实现没兑现。
+
+  定位证据是在 `-smp 1`（串口无并发交错，输出不可能丢）下跑多轮：每个失败端口只打印
+  **一条** `connect()` 入口的调试行，而不是注释所暗示的 200 次重试。改成统一微秒预算
+  （`CONNECT_BUDGET_US`）后，同一 boot 内连跑 8 轮 8/8 PASS，且 socket 计数每轮回到基线，
+  无泄漏；关掉全部调试输出后 `make smoke-net-accept` 连跑 6 次全绿。
+
+  两种模式现在给出同一个可观测结果，这条不再是例外项。
 
 ## 九、推荐的第一批动作
 按「改动小、风险低、避免真实事故」排序：
