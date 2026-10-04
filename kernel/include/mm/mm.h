@@ -36,7 +36,16 @@ int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
  * so a later fault resolves it from the metadata instead of a VMA. */
 int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
                uint8_t cls);
-int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags);
+/* cls is the status class the huge leaf carries (MM_ST_ANON_MAPPED for a
+ * fresh THP fault, the parent's class across fork, the source's class across
+ * mremap).  A huge leaf is ONE entry of its table, so it gets ONE status
+ * slot -- at its own level, not level 0 -- and the auditor checks the pair.
+ * An empty level-0 table left by earlier 4K faulting is retired (mm owns
+ * the retire queue), not treated as a conflict. */
+int pt_map_huge(struct mm_struct *mm, vaddr_t va, paddr_t pa, pte_t flags,
+                uint8_t cls);
+/* Huge-leaf installs (see mm/mm.c).  Plain global, printed in [MM-ASM]. */
+extern uint64_t mm_huge_install_count;
 int pt_unmap(struct mm_struct *mm, vaddr_t va);
 int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out,
                   vaddr_t *base_out, size_t *size_out, int *level_out);

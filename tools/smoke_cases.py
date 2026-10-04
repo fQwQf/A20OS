@@ -440,11 +440,30 @@ CASES: dict[str, dict] = {
         'pre': [],
         'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/mm-stress-riscv64.log',
-        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['mm_stress', 'poweroff']},
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['mm_stress', 'poweroff']},
         'timeout': '45s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
-        'expect': ['MM_STRESS: PASS'],
+        'expect': [
+            'MM_STRESS: PASS',
+            # mm_stress runs the huge-page phases (basic / fork-COW / prot),
+            # the only workload in the gate set that exercises pt_map_huge
+            # and the huge-leaf demote path.  That is exactly why the audit
+            # line must be asserted *here*: before the huge leaf carried
+            # status, every THP fault left a present_mismatch that only
+            # smoke-mm-pt-race and smoke-mm-software would have caught --
+            # and neither of those maps huge pages, so the gap was invisible
+            # to every gate that could have seen it.
+            r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
+            # Non-vacuity for the huge-leaf path, same discipline as the
+            # mm_fault_from_status assertion in smoke-mm-pt-race: huge=0
+            # means the workload never had a huge leaf and every huge-path
+            # assertion above proved nothing.  Counted by the auditor itself
+            # (present leaves at level > 0), so it needs no perf-arming read
+            # and cannot be gated off.
+            r'\[MM-ASM\].*\bhuge_install=[1-9]\b',
+        ],
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-mm-stress: PASS; log saved to $log',

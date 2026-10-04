@@ -1,6 +1,7 @@
 #include "mm/vm.h"
 #include "mm/vm_internal.h"
 #include "mm/mm.h"
+#include "mm/pt.h"
 #include "mm/frame.h"
 #include "mm/slab.h"
 #include "mm/vmo.h"
@@ -116,8 +117,15 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
         if (!pcp && !vmo_owned)
             frame_get(pfn);
-        int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, arch_pte_flags(*src))
-                            : pt_map(mm->pgdir, dst + off, pa, arch_pte_flags(*src));
+        /* Keep the source's class across the move so the copy's status still
+         * names the same backing; a huge leaf's slot is level-aware. */
+        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+        if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
+            move_cls = MM_ST_ANON_MAPPED;
+        int r = (level > 0) ? pt_map_huge(mm, dst + off, pa,
+                                          arch_pte_flags(*src), move_cls)
+                            : pt_map(mm->pgdir, dst + off, pa,
+                                     arch_pte_flags(*src));
         if (r < 0) {
             if (pcp) {
                 page_cache_put(pcp);
@@ -169,7 +177,11 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
         if (!pcp && !vmo_owned)
             frame_get(pfn);
-        int r = (level > 0) ? pt_map_huge(mm->pgdir, dst + off, pa, pte_flags)
+        uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+        if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
+            move_cls = MM_ST_ANON_MAPPED;
+        int r = (level > 0) ? pt_map_huge(mm, dst + off, pa, pte_flags,
+                                          move_cls)
                             : pt_map(mm->pgdir, dst + off, pa, pte_flags);
         if (r < 0) {
             if (pcp) {

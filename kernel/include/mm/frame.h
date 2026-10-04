@@ -69,6 +69,20 @@ _Static_assert(sizeof(frame_meta_t) == 16,
 #define FRAME_F_ALLOC   0x01
 #define FRAME_F_KDATA   0x02
 #define FRAME_F_PT      0x04
+/* The frame is lent to a virtual machine's stage-2 (second-stage) address
+ * space.  The VM holds a normal frame reference for as long as the mapping
+ * exists, so refcounting alone already keeps the frame alive; this flag is
+ * the *identity* side of that fact:
+ *   - reclaim paths that scan for victim frames can see the flag without
+ *     walking who holds the reference, and must skip it;
+ *   - the hypervisor audit asserts flag == "mapped by some stage-2 entry",
+ *     so a frame whose VM died without returning its pages cannot hide;
+ *   - debugging: a freed-and-reused guest frame is visible as a flag/owner
+ *     mismatch instead of silent corruption in the guest.
+ * Set by the stage-2 map path, cleared when the last stage-2 entry naming
+ * the frame is removed.  Never set on frames that also carry FRAME_F_PT: a
+ * page-table page belongs to one address space, host or guest, never both. */
+#define FRAME_F_GUEST   0x08
 
 /* Free-list head per order */
 typedef struct {
