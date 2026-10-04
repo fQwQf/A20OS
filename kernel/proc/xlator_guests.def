@@ -8,7 +8,7 @@
  * tables under kernel/abi/<arch>/, it deliberately contains no #include, no typedef
  * and no declaration of its own.
  *
- *     XLATOR_GUEST(<name>, <e_machine>, <argv_template>)
+ *     XLATOR_GUEST(<name>, <e_machine>, <abi>, <argv_template>)
  *
  * Column 1 -- <name>
  *   The cmdline key suffix, so `a20.xlator.<name>=<path>` configures this
@@ -26,7 +26,29 @@
  *   that, because a typo here would otherwise show up only as a binary that
  *   mysteriously refuses to translate.
  *
- * Column 3 -- <argv_template>
+ * Column 3 -- <abi>
+ *   Which ABI of that machine this row serves: XLATOR_ABI_LINUX or
+ *   XLATOR_ABI_NATIVE, spelled as one of those two macros for the same reason
+ *   column 2 is a number -- this file cannot include elf.h, and a bare
+ *   "linux"/"native" column would be a spelling nothing in the build
+ *   cross-checks against the kernel's elf_abi_t.
+ *
+ *   Why the column exists: both ABIs are ELF64 for the same e_machine, so
+ *   the machine alone cannot tell them apart, while the translators that can
+ *   run them are disjoint.  qemu-user implements the Linux ABI only, so a
+ *   native-ABI image of an architecture that also has a Linux-ABI translator
+ *   matches on machine alone and gets forwarded to a program that cannot
+ *   load it -- a fault inside the translator instead of an ENOEXEC.  Keying
+ *   the lookup on the pair turns that into a configuration miss.
+ *
+ *   The ABI is derived from the file (elf_probe_foreign() reads
+ *   PT_A20_START_INFO), never configured: a row says what this channel *can*
+ *   serve, and whether a given image belongs to that row is the loader's
+ *   answer.  A native-ABI translator is therefore a new row here, not a new
+ *   branch in the loader -- docs/exec-xlator/04-extending.md has the
+ *   step-by-step.
+ *
+ * Column 4 -- <argv_template>
  *   A string literal (quoted, because it becomes a `const char *`): the argv
  *   the translator is invoked with, written as a template over three
  *   substitutions:
@@ -62,11 +84,18 @@
  * either direction.  Adding a *translator* costs no edit anywhere: it is a
  * path, plus a .argv and/or .env key if its convention differs.
  *
+ * A row for an ABI no translator exists for is legal and costs nothing at
+ * runtime -- with no path configured, the row is simply never matched, and
+ * the boot log says so by name.  That is deliberate: the registry records
+ * what the channel can serve, and adding one ahead of the translator is how
+ * a gap stays visible instead of turning into a crash later.  The gate only
+ * demands that the column names an ABI the kernel knows.
+ *
  * NOTE: membership here does not enable anything.  A guest becomes translatable
  * only when the administrator configures a translator path for it on the
  * cmdline; until then it stays on the plain ENOEXEC path.  See
- * docs/hybrid-kernel/07-exec-xlator.md.
+ * docs/exec-xlator/README.md.
  */
 
-XLATOR_GUEST(x86_64,  62,  "-0 @A @P @*")
-XLATOR_GUEST(aarch64, 183, "-0 @A @P @*")
+XLATOR_GUEST(x86_64,  62,  XLATOR_ABI_LINUX, "-0 @A @P @*")
+XLATOR_GUEST(aarch64, 183, XLATOR_ABI_LINUX, "-0 @A @P @*")

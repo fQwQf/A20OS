@@ -423,7 +423,7 @@ nomem:
 
 /*
  * Last-resort handler for an execve target that elf_load() rejected with
- * -ENOEXEC but which elf_is_foreign_arch() recognises as a well-formed
+ * -ENOEXEC but which elf_probe_foreign() recognises as a well-formed
  * foreign-architecture ELF (see kernel/mm/elf.c).
  *
  * The rewrite is deliberately *re-exec*, not service forwarding: exec
@@ -591,20 +591,26 @@ static int exec_try_translator(int fd, exec_bprm_t *bprm, task_t *t)
     if (!xlator_enabled())
         return 0;
 
-    uint16_t machine = 0;
-    if (elf_is_foreign_arch(fd, &machine) < 0)
+    /* What the file says it is -- architecture and ABI, both read out of the
+     * bytes.  The ABI matters because it is not the same test as the
+     * architecture: a foreign-ABI machine still needs a translator configured
+     * for its *particular* ABI, or forwarding it would hand a native-ABI
+     * image to a Linux-ABI translator that cannot load it. */
+    elf_guest_key_t key;
+    if (elf_probe_foreign(fd, &key) < 0)
         return 0;   /* not ours: corrupt file or native image */
 
     xlator_desc_t desc;
-    if (xlator_lookup(machine, &desc) < 0)
-        return 0;   /* channel on, but nothing usable for this machine */
+    if (xlator_lookup(&key, &desc) < 0)
+        return 0;   /* channel on, but nothing usable for this guest */
 
     xlator_tmpl_t tmpl;
     if (xlator_parse_template(desc.argv, &tmpl) < 0)
         return 0;   /* boot-validated; unreachable without a torn config */
 
-    kinfo("[XLATOR] pid=%d execve %s (e_machine=%u) → %s  argv=\"%s\"\n",
-          t->pid, bprm->path, machine, desc.path, desc.argv);
+    kinfo("[XLATOR] pid=%d execve %s (e_machine=%u abi=%s) → %s  argv=\"%s\"\n",
+          t->pid, bprm->path, key.machine, xlator_abi_name(key.abi),
+          desc.path, desc.argv);
 
     /*
      * Build the new argv before touching bprm, so a failure part-way

@@ -10,6 +10,7 @@
  *   xlate_exec ok           <path> [args...]  child must exit XLATE_PROBE_EXIT
  *   xlate_exec enoexec      <path>            execve must fail with ENOEXEC
  *   xlate_exec unconfigured <path>            execve must fail with ENOEXEC
+ *   xlate_exec native       <path>            execve must fail with ENOEXEC
  *   xlate_exec foreign      <path>            execve(<path>) must fail ENOEXEC
  *   xlate_exec script       <path>            child must exit 0 as a script
  *   xlate_exec toggle       <path> [args...]  drive /proc/a20/xlator through
@@ -33,7 +34,14 @@
  *                   ENOEXEC.  This is the one that distinguishes "the
  *                   administrator configured a translator" from "the kernel
  *                   was built knowing about this architecture".
- *   foreign      -- unlike the two above, this one execs the path it is
+ *   native       -- a valid ELF for a guest that *does* have a translator,
+ *                   carrying PT_A20_START_INFO so it is a native-ABI image.
+ *                   Must still be ENOEXEC: the channel is keyed on
+ *                   (architecture, ABI), and no native-ABI row is
+ *                   registered, because no native-ABI translator exists.
+ *                   Without this, the fixture would be handed to a Linux-ABI
+ *                   translator that cannot load it.
+ *   foreign      -- unlike the three above, this one execs the path it is
  *                   actually given instead of a fixture.  It is what says
  *                   something about a *real* binary in the image: `enoexec`
  *                   against a missing file would also report ENOEXEC, but
@@ -123,6 +131,51 @@ static const char UNCONFIGURED_ELF[] =
     "\x00\x00\x00\x00\x00\x00";
 
 static const char SHEBANG_SCRIPT[] = "#!/bin/echo\nSHEBANG_RAN\n";
+
+/* A header valid in every field the foreign-arch check inspects, naming
+ * e_machine 62 (x86_64) -- the guest every smoke using this mode *has*
+ * configured a translator for -- followed by one program header of type
+ * PT_A20_START_INFO, the marker that makes an A20 image native-ABI.
+ *
+ * This fixture exists for the one failure the other three cannot see.  Both
+ * ABIs are ELF64 for the same e_machine, so a channel keyed on the machine
+ * alone finds a row for 62, finds a path configured for it, and hands this
+ * file to qemu-x86_64 -- which implements the Linux ABI and cannot load it.
+ * The visible result is not an ENOEXEC but a fault inside a translator, on
+ * an image nobody pointed that translator at.
+ *
+ * So the assertion is ENOEXEC, and smoke-exec-xlator-shim additionally
+ * forbids the shim from ever naming this path.  The first says the lookup
+ * missed; the second says it missed before anything observable happened,
+ * which is the difference between a refused image and a crashed one.
+ *
+ * p_type is the only field that is not zero, and it is byte-swapped out of
+ * the obvious order on purpose: 0x6a20a200 little-endian is 00 a2 20 6a.
+ */
+static const char NATIVE_ELF[] =
+    "\x7f" "ELF" "\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    "\x02\x00"                           /* e_type = ET_EXEC */
+    "\x3e\x00"                           /* e_machine = 62 (x86_64) */
+    "\x01\x00\x00\x00"                   /* e_version = EV_CURRENT */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* e_entry */
+    "\x40\x00\x00\x00\x00\x00\x00\x00"   /* e_phoff = 64 */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* e_shoff */
+    "\x00\x00\x00\x00"                   /* e_flags */
+    "\x40\x00"                           /* e_ehsize = 64 */
+    "\x38\x00"                           /* e_phentsize = 56 */
+    "\x01\x00"                           /* e_phnum = 1 */
+    "\x00\x00\x00\x00\x00\x00"
+    /* the one program header: a PT_A20_START_INFO and nothing else */
+    "\x00\xa2\x20\x6a"                   /* p_type = PT_A20_START_INFO */
+    "\x00\x00\x00\x00"                   /* p_flags */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* p_offset */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* p_vaddr */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* p_paddr */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* p_filesz */
+    "\x00\x00\x00\x00\x00\x00\x00\x00"   /* p_memsz */
+    "\x00\x00\x00\x00\x00\x00\x00\x00";  /* p_align */
+
+#define NATIVE_ELF_PATH "/tmp/xlate_native.elf"
 
 /* A header valid in every field the foreign-arch check inspects, with the
  * e_machine patched in by stage().  Built by copying UNCONFIGURED_ELF and
@@ -538,7 +591,7 @@ int main(int argc, char **argv)
 {
     if (argc < 3) {
         fprintf(stderr,
-                "usage: xlate_exec {ok|enoexec|unconfigured|foreign|script|toggle|run} "
+                "usage: xlate_exec {ok|enoexec|unconfigured|native|foreign|script|toggle|run} "
                 "<path> [args...]\n"
                 "       xlate_exec stage <e_machine> <path>\n");
         return 2;
@@ -583,6 +636,17 @@ int main(int argc, char **argv)
             return 1;
         char *script_argv[] = { (char *)"/tmp/xlate_shebang.sh", NULL };
         return mode_script(script_argv);
+    }
+
+    /* Like unconfigured, this ignores <path>: the fixture is the point.  The
+     * machine is deliberately one that *is* configured, so ENOEXEC can only
+     * come from the ABI half of the key missing. */
+    if (strcmp(mode, "native") == 0) {
+        if (write_file(NATIVE_ELF_PATH,
+                       NATIVE_ELF, sizeof(NATIVE_ELF) - 1) < 0)
+            return 1;
+        char *native_argv[] = { (char *)NATIVE_ELF_PATH, NULL };
+        return mode_enoexec(native_argv, "native");
     }
 
     /* Takes the caller's path verbatim -- that is the whole difference from
