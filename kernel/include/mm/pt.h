@@ -290,9 +290,12 @@ struct mm_segarr;
  *    32 names/entry (index split out)  fallback  767   nibbles_full  159
  *
  * The 7-name row broken down by level is the number that says what those losses
- * meant: 749 at level 1 and 3169 at level 2, none at the root.  So the annotate
- * walk does reach 2 MiB resolution, and what runs out is entries holding more
- * than seven distinct mappings.
+ * meant: 749 at level 1 and 3169 at level 2.  On riscv64 ARCH_PT_ROOT_LEVEL is
+ * 2, so those 3169 are AT THE ROOT -- 1 GiB granularity.  This file first read
+ * that histogram as "2 MiB, the walk descends fine" and was wrong; check which
+ * level the root is before drawing a resolution conclusion from these numbers
+ * (roadmap 13.21).  The conclusion that survives is the one the widths support:
+ * the constant was mis-sized, not the resolution final.
  *
  * Sixteen halved the losses and thirty-two nearly ended them, and that is the
  * point at which this stops being a capacity question: at 159 losses the index
