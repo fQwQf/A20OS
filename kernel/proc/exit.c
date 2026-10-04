@@ -14,6 +14,11 @@
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 extern void a20_registry_task_exit(int pid);
 #endif
+/* Slot ownership in the Linux ABI hypervisor bridge is keyed on the pid, and
+ * pids are recycled, so the keys have to go before the pid does. */
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+extern void hyp_bridge_task_exit(int pid);
+#endif
 extern void udisk_task_exit(int pid);
 #include "mm/frame.h"
 #include "mm/mm.h"
@@ -436,6 +441,9 @@ void proc_exit(int exit_code)
     udisk_task_exit(t->pid);
 #if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     a20_registry_task_exit(t->pid);
+#endif
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
+    hyp_bridge_task_exit(t->pid);
 #endif
 
     /* Native ABI task handles store the pid as the object pointer, so the
