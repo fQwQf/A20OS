@@ -1056,9 +1056,16 @@ ppc64le（`MSR_FP`）都启用；loongarch32/armv7m 无 FPU，不受影响。ppc
 
 ### 32 位架构构建
 
-riscv32 在 HEAD 上有多处既有编译错误（`arch_vdso_counter` 声明、`pfa_range_t` 断言、`proc.c`
-type-limits 等）；前两处已修，`proc.c` 等仍待处理。非 VDSO 架构（riscv32/arm32/loongarch32）都会撞到
-`arch_vdso_counter` 声明缺失。
+> **状态（2026-10-04 复核）：本节原列的阻塞已全部修复，本条可撤回。**
+> riscv32 此前确有 `arch_vdso_counter` 声明缺失、`pfa_range_t` 断言与 `proc.c`
+> type-limits 三类编译错误；现在 `kernel/mm/vdso.c` 以 `__attribute__((weak))` 给出
+> 缺省实现，`pfa_range_t` 落在 `kernel/include/mm/frame.h`，`proc_mmap` 的错误区间判定
+> 改用 `(long)`。实测 riscv32 `kernel-only` 零警告通过。
+>
+> 仍未在本机复核的是 **arm32** 与 **loongarch32**：两者都缺交叉工具链
+> （`arm-linux-gnueabihf-gcc`、`loongarch32-unknown-elf-gcc`），本机装不了，
+> 所以不能把它们算作已验证。CI 覆盖 arm32（其工具链在 `tools/ci/Dockerfile` 里安装），
+> loongarch32 则需要从源码构建 cloudspurs 工具链，只能本机跑。
 
 ### x86_64 桌面：lwIP IPv6 收包路径 pbuf 引用计数被破坏
 

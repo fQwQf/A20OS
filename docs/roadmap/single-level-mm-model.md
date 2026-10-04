@@ -154,38 +154,38 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > * status 字节的全部容量：4 bit class（`MM_ST_INVALID` … `MM_ST_PT_NODE`，共 9 类）
 >   + `MM_ST_PROT_R/W/X` + `MM_ST_COW_BIT`。它足以回答论文 Fig. 8 的三态
 >   （PrivateAnon / Mapped / Invalid），这正是**分派**所需的全部。
-> * 但 `handle_file_fault()`（fault.c:755）要解引用 `vf->vnode`、`file_fd`、
+> * 但 `handle_file_fault()`（fault.c:913）要解引用 `vf->vnode`、`file_fd`、
 >   `file_pos`，并调 `page_cache_get(vf->vnode, …)`；COW 路径同理需要一个可写的
 >   文件后备。**这些对象引用在 status 字节里无处可放。**
 > * 所以 P6 落地后，`fault.c` 里剩下的 `mm_find_vma` 调用会**保留在对象解析处**，
->   而不是消失：`fault.c:249`（COW）与 `898`（file fault）需要 vnode/fd。
+>   而不是消失：`fault.c:286`（COW）与 `1059`（file fault）需要 vnode/fd。
 >
 >   **更正**：我先前把 `fault.c:1136` 说成"`mm_fault_from_status()` 里的 UFFD 存在性
->   判断"，这是错的。核对后：`mm_fault_from_status` 是 1033–1096，而 **1136 属于
+>   判断"，这是错的。核对后：`mm_fault_from_status` 是 1214–1277，而 **1136 属于
 >   `handle_demand_fault_access()` 的 VMA 路径**（`mm_find_vma` 喂给
 >   USERFAULTFD_MISSING_HOOK 的 `userfaultfd_range_present()` 判断）。
 >
->   更要紧的是，**快段自己的 UFFD 门禁（1046 行）已经是 status 驱动的**——
+>   更要紧的是，**快段自己的 UFFD 门禁（1227 行）已经是 status 驱动的**——
 >   `mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)` 读的是 cursor 里的 per-PTE
 >   安全位，不查 VMA。所以"UFFD 原理上无法 status 驱动"这句话只对 VMA 路径成立：
 >   UFFDIO_REGISTER 的注册单位确实是 VMA 区间，因此**权威**的重新判定必须在 VMA 上做；
 >   但快段用 per-entry 安全位做**快筛**已经落地。两者不矛盾：安全位负责快路径分流，
 >   VMA 区间表负责权威判定与 unregister 后的失效。
 > * **更正**：我先前把 `378` / `458` / `476` / `669` 都算作「可去掉的分派点」，
->   逐个读过之后这个说法不成立：
+>   逐个读过之后这个说法不成立（下表行号已换成 `84b7bc2c5` 之后的当前行号）：
 >
 >   | 行 | 实际用途 | 是分派吗 |
 >   |---|---|---|
->   | `378` | swap-in 后 `fault_map(..., vma->pte_flags, ...)`，要**权限位** | 否 |
->   | `458` | brk 扩张的否定式判断「这里有没有 VMA」 | 勉强算 |
->   | `476` | 主 VMA 路径：`vma->pte_flags` / `vm_flags` / `file_fd` | 否 |
->   | `669` | 分配之后 `mm_find_vma(...) != vma` 的**并发重查** | 否 |
+>   | `513` | swap-in 后 `fault_map(..., vma->pte_flags, ...)`，要**权限位** | 否 |
+>   | `589` | brk 扩张的否定式判断「这里有没有 VMA」 | 勉强算 |
+>   | `613` | 主 VMA 路径：`vma->pte_flags` / `vm_flags` / `file_fd` | 否 |
+>   | `809` | 分配之后 `mm_seg_find(...) != vma` 的**并发重查** | 否 |
 >
 >   三处要的正是 status 字节装不下的东西（权限位、fd），第四处根本不是分派，而是
 >   分配窗口里的竞态检测。
 > >
 > **结论（收窄后）**：在当前 status 字节容量（4 bit class + R/W/X + COW）下，
-> **P6 基本不可实现**。唯一勉强算候选的是 `458` 那处 brk 否定式判断，价值也远小于
+> **P6 基本不可实现**。唯一勉强算候选的是 `589` 那处 brk 否定式判断，价值也远小于
 > 本行原始表述所暗示的。要真正推进 P6，得先扩宽 status 字节以携带对象引用
 > （vnode / fd / offset）——那是**格式变更**而不是调度顺序变更，而**论文没有给出
 > 这个格式**。
@@ -193,17 +193,29 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > 所以 P6 与 P7 同类：**卡在缺少论文规格，而不是卡在工程量**。
 
 > **P6 最后一处候选也已排除（实测）**：`mm_pt_provision_anon()` 全树只有三个调用点
-> ——`mmap.c:195`、`elf.c:184`、`munmap.c:270`。**brk 增长不在其中**：
-> `proc_brk()`（`proc/proc.c:732`）→ `mm_brk_locked()`（`munmap.c:177`），后者只遍历
+> ——`mmap.c:301`、`elf.c:182`、`munmap.c:310`。**brk 增长不在其中**：
+> `proc_brk()`（`proc/proc.c:732`）→ `mm_brk_locked()`（`munmap.c:219`），后者只遍历
 > VMA 列表并在收缩循环里拆 PTE，**从不写 status**。
 >
-> 所以 `fault.c:458` 那处 brk 否定式判断（`!mm_find_vma(...)`）**连可供查询的
+> 所以 `fault.c:589` 那处 brk 否定式判断（`!mm_seg_find(...)`）**连可供查询的
 > status 都不存在**——brk 区域内的页在元数据里始终是 `MM_ST_INVALID`，与"有 VMA"
 > 无法区分。
 >
 > **P6 因此没有可实现子集**：不是"大部分能做"，而是一处都做不了。7 处
 > `mm_find_vma` 全部依赖 status 字节装不下的信息（对象引用、权限位、并发重查），
 > 或者依赖尚不存在的生产者（brk）。
+>
+> > **更正（2026-10-04，`84b7bc2c5` 合并 `feat/mm-complete` 后逐行重核）**：本节
+> > > 行号已随 `fault.c`/`munmap.c` 重排失效，三个 `provision_anon` 调用点现为
+> > > `mmap.c:301`、`elf.c:182`、`munmap.c:310`，`mm_brk_locked()` 定义在
+> > > `munmap.c:219`，brk 否定式判断在 `fault.c:589`。`mm_find_vma` 已改名为
+> > > `mm_seg_find()`（`kernel/mm/vma.c:244`），正文按当时的名字写。
+> > > **更实质的一处**：「brk 增长从不写 status」现在不成立——`mm_brk_locked()`
+> > > 的增长分支已调用 `mm_pt_provision_anon(mm, map_start, map_end,
+> > > mm_user_brk_pte_flags())`（`munmap.c:310-311`），brk 区域不再是
+> > > `MM_ST_INVALID`。因此 `fault.c:589` 那处**已有**可查询的状态；
+> > > 「P6 没有可实现子集」不再由「brk 缺生产者」支撑，这条候选需要按当前
+> > > 状态语义重新评估。
 | P7 ⚠ | **2026-10-02 决定：`PTE_SWAP` 正式接受为唯一被容忍的例外，不删除。**原目标"无 PTE 位被重载"收窄为"仅 `PTE_SWAP` 一个，且逐架构显式声明"（见下方决定记录与 `kernel/include/mm/pt.h`） | `PTE_SWAP` 是唯一重载位 | 已达成：逐架构断言 `PTE_SWAP` 有定义（27 条）+ `{arch: PTE_SWAP} == SWAP_SUPPORTED_ARCHES`；`CONFIG_SWAP=y` 构建（默认即开）+ `smoke-swap` PASS。**但 swap-in 未被覆盖**，见下 |
 
 > **P7 的阻塞点是硬件约束，且仓库里已写明**（`kernel/include/mm/pt.h:86-97`）：
@@ -221,7 +233,7 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 
 > **P7 的阻塞可判定（宽度算术，2026-10-02 核对，已按 `swp_entry()` 复核）**：
 > 注意阻塞的**理由**不是 `swap_entry_t` 的 `uint64_t` typedef——我先前这样写是不准确的。
-> 真实宽度由 `swp_entry()` 决定（`kernel/mm/swap.c:58`）：
+> 真实宽度由 `swp_entry()` 决定（`kernel/mm/swap.c:174`）：
 > `((offset & SWP_OFFSET_MASK) << SWP_TYPE_BITS) | type`，其中
 > `SWP_TYPE_BITS = 4`，`SWP_OFFSET_BITS` 按指针宽度取 **20（32 bit）或 40（64 bit）**
 > （`kernel/include/mm/swap.h:8-13`）。所以实际载荷是 **24 bit 或 44 bit**，不是 64。
@@ -351,7 +363,7 @@ MCS 锁按 `(cpu, depth)` 从静态池取 node，不在锁路径上分配。
 > `mm_pt_node_lock` 的按地址互斥，而不是"没有 `mm->lock`"）。`MM_LOCK_MODEL` 字面量
 > 保留——`check-mm-lock-model` 与 `check-final-definition` 两条门禁都断言它存在于该文件。
 >
-> **②的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:1517）只走**一个
+> **②的双向缺口已定位，但本轮未落地**。现有 `audit_table()`（pt.c:2495）只走**一个
 > 方向**：自 PTE 树下降，逐条比对"元数据是否与该 PTE 一致"（class / prot / cow）。反向
 > ——"元数据声称的每一页，PTE 是否同意"——**不存在**。
 >
@@ -612,8 +624,11 @@ per-PTE 状态。但这引出一个结构性问题：per-PTE 状态挂在**页�
 
 另有既有问题（非本轮引入）：
 
-* `riscv32` 在 `main` 上即构建失败（`kernel/ipc/kexec.c` 指针转换），因此
-  `smoke-arch-mmu-matrix` 覆盖不到 riscv32。
+* ~~`riscv32` 在 `main` 上即构建失败（`kernel/ipc/kexec.c` 指针转换）~~ ——
+  **已修正（2026-10-04）**：该指针转换早已改经 `uintptr_t` 中转，riscv32 现在
+  `kernel-only` 零警告通过，本节这条"覆盖不到"的前提不再成立；同文 §13.19 的
+  构建记录才是现状。`smoke-arch-mmu-matrix` 是否真的跑到了 riscv32，应以该门禁
+  自身的输出为准，不要以本行推断。
 * `arm32` 缺 `arm-linux-gnueabihf` 工具链，本机无法构建。
 * smoke 门以 grep `*_PASS` 标记判定，而该标记在关机审计之前打印，因此关机
   路径上的 panic 不会让门失败。审计行必须与 PASS 标记一并检查。
@@ -727,7 +742,7 @@ fork 有两处状态继承必须重置，否则子进程会用着带父锁状态
 
 已在当前分支核实的两条事实：
 
-* **shootdown 已经在 `mm->lock` 之外发起。** 例如 `mprotect.c:154-158` 与
+* **shootdown 已经在 `mm->lock` 之外发起。** 例如 `mprotect.c:231-235` 与
   `fault.c` 的 COW 路径都是 `mm_tlb_invalidate_begin` → `spin_lock_irqsave` →
   改写 → `spin_unlock_irqrestore` → `mm_tlb_invalidate_finish`，即派发 IPI 时
   `mm->lock` 已释放。所以「持 `mm->lock` 派发 shootdown」这一环在本分支不存在。
@@ -810,9 +825,9 @@ VM_VMO → THP → anon batch → 单页 anon。把快路径前置到这条链�
 
 核实结果（此前文档表述不够精确）：
 
-* 叶数据帧的延迟释放已接线：`mm_tlb_hold_frame` 在 `munmap.c:105/236`、
-  `madvise.c:81`、`oom.c:135`、`vm.c:402` 均有真实调用。
-* 页表帧的延迟释放未接线：`mm_pt_defer_free`（`pt.c:797`）已实现，内部正确
+* 叶数据帧的延迟释放已接线：`mm_tlb_hold_frame` 在 `munmap.c:107/274`、
+  `madvise.c:95`、`oom.c:141`、`vm.c:427` 均有真实调用。
+* 页表帧的延迟释放未接线：`mm_pt_defer_free`（`pt.c:2282`）已实现，内部正确
   调用 `mm_pt_hold_table` 并置 `stale`，但**全树没有任何调用者**，是死代码。
 
 即：当前只有数据帧受 P4 保护，页表帧仍是同步释放。这在**现有**设计下是安全的
@@ -861,14 +876,14 @@ VM_VMO → THP → anon batch → 单页 anon。把快路径前置到这条链�
 * *判定链被打乱*：就地改造已排除该假设，失败依旧。
 * *THP 被抢占*：守卫已排除 `VM_HUGEPAGE`。
 * *`-EAGAIN` 后的 UAF*：已改为取引用后只返回确定值。
-* *栈增长路径被绕过*：`VM_STACK` 确由 `elf.c:578/599` 设置，故 VMA 命中即可排除。
+* *栈增长路径被绕过*：`VM_STACK` 确由 `elf.c:592/614` 设置，故 VMA 命中即可排除。
 * *`pfa.lock` → `mm->lock` 锁序反转*：`frame.c` 中 `pfa.lock` 在调用
   `oom_try_reclaim()` **之前**已释放（`spin_unlock` 早于 reclaim），不存在该持锁序。
 
 **尚未排除、最值得下一步追查的线索**：第五、六两次的**唯一共同点**是把
 `pfa_alloc_page()`（及其 `cg_mem_charge` / `memset`）移出 `mm->lock`。签名是
 **静默卡死而非 panic**，符合自旋锁互等而非断言失败。尚未验证的具体机制：
-`pfa_alloc_page` 的慢路径（`oom_try_reclaim` → `oom.c:100/146` 的
+`pfa_alloc_page` 的慢路径（`oom_try_reclaim` → `oom.c:106/152` 的
 `spin_lock_irqsave(&mm->lock)`）在另一个正在 fault 的 CPU 上与本进程的
 `mm->lock` 发生互等。下一步应先用插桩确认卡死时各 CPU 的持锁栈（而非继续猜测），
 再决定 P5 的形态。
@@ -890,15 +905,15 @@ mm_find_vma: VMA list cycle
 reused 的内存。**VMA 链表成环**。
 
 根因是 `b10b267b` 的一个真实缺陷：当时用 `grep sizeof(vm_area_t)` 找分配点，
-漏掉了 4 处用 `sizeof(*vma)` 写法的站点：`munmap.c:262`、`udriver.c:183`、
-`framebuffer.c:181` 与 `:363`。这些 VMA 的引用计数停留在 `kcalloc` 的 0。
+漏掉了 4 处用 `sizeof(*vma)` 写法的站点：`munmap.c:300`、`udriver.c:180`、
+`framebuffer.c:181` 与 `:364`。这些 VMA 的引用计数停留在 `kcalloc` 的 0。
 
 该缺陷在 `b10b267b` 中**潜伏**：没有代码调用 `vma_get/vma_put`，计数为 0 只会让
 `munmap` 少释放一次（泄漏），不会出错。P5 让 fault 路径真的
 `vma_get` → `vma_put` 后，计数走 0→1→0，VMA 在**仍挂在 `mm->mmap` 上**时被释放，
 链表指针随即悬垂。
 
-触发点 `munmap.c:262` 建的正是 `VM_ANON | VM_READ | VM_WRITE` 的 brk VMA，恰好
+触发点 `munmap.c:300` 建的正是 `VM_ANON | VM_READ | VM_WRITE` 的 brk VMA，恰好
 落在 P5 快路径匹配的类别里；`execve` 会同时走「拆旧镜像 + 建 brk VMA + 首次
 写入」，所以每次都稳定命中。
 
@@ -1140,7 +1155,7 @@ TCG 单核慢、计时窗口偏短，比例只能作相对参考。论文的 33x
 **存在于 per-PTE 元数据里**。核对发现：
 
 * `MM_ST_ANON_VIRT`（= 论文的 `Status::PrivateAnon`）在全树只有一处出现，
-  而且只是审计代码里的白名单判断（`pt.c:887`）。**没有任何地方写入它。**
+  而且只是审计代码里的白名单判断（`pt.c:2602`）。**没有任何地方写入它。**
 * `mmap` 路径（`mm_mmap_locked` / `mm_mmap_file_locked` / `mm_mmap_vmo_locked`）
   **完全不写 per-PTE 状态**，只做 `mm_insert_vma()`。
 
@@ -1149,8 +1164,18 @@ TCG 单核慢、计时窗口偏短，比例只能作相对参考。论文的 33x
 根本原因**，也是我们与论文差距的最小可操作切入点。
 
 审计代码早就为它准备好了位置：`mm_pt_audit_addrspace` 对「PTE 缺失」
-的叶节点允许 `MM_ST_ANON_VIRT` 与 `MM_ST_SWAPPED` 两种 class（`pt.c:885-887`），
+的叶节点允许 `MM_ST_ANON_VIRT` 与 `MM_ST_SWAPPED` 两种 class（`pt.c:2602-2603`），
 即设计上**本来就预期** on-demand paging 会写入 `MM_ST_ANON_VIRT`。只是这一层从未接上。
+
+> **更正（2026-10-04，`84b7bc2c5` 合并 `feat/mm-complete` 后逐行重核）**：上面这段的
+> 行号随 `pt.c` 重排失效（`pt.c` 增长约 1000 行），白名单判断现为 `pt.c:2602-2603`。
+> **结论本身也已被推翻**：`MM_ST_ANON_VIRT` 现在**有写入者**——
+> `mm_pt_provision_anon()` 在 `pt.c:2103` 执行 `status_byte(MM_ST_ANON_VIRT, flags)`，
+> 并由 `mm_cursor_unmap()` 在 `pt.c:1960` 读回判定。该函数的全树调用点是
+> `mmap.c:301`、`elf.c:182`、`munmap.c:310`（brk 增长），匿名 VMO 侧仍无调用。
+> 因此下面施工顺序第 1 条「mmap 时按需预标记」**已经落地**，§9.2 第 1 条的
+> 阻塞点从「缺写入者」变成了「brk 之外的路径是否覆盖、以及状态路径能否在不查 VMA
+> 的前提下完成 COW/共享语义」。
 
 因此 P6 的正确施工顺序是：
 
@@ -1299,9 +1324,16 @@ x86 镜像启动故障。
 > 不安全：它把 `pt_unmap()` / `pt_unmap_leaf()` 的首参从 `pgdir` 改成 `mm`，并在这两个
 > 函数内部调用 `mm_pt_defer_free()`。而 8 个调用点中有 6 个既不持 `mm->lock`、也不在
 > `mm_tlb_invalidate_begin()/finish()` 事务内（`vma.c` 全文没有任何
-> `mm_tlb_invalidate_*`；`sys_mm.c` 的调用点在第 281 行，而 `finish` 在第 210 行，
-> 已在事务之外）。`mm_pt_hold_table()` 会无锁地改写 `mm->tlb_holds` 链表，且没有事务
+> `mm_tlb_invalidate_*`；`sys_mm.c` 当时把 `pt_unmap_leaf()` 放在 `finish()` 之后
+> 一行，即事务之外）。`mm_pt_hold_table()` 会无锁地改写 `mm->tlb_holds` 链表，且没有事务
 > 就永远没有人来排空它；既是链表竞争，也是 PT 页泄漏。
+>
+> > **更正（2026-10-04，`84b7bc2c5` 后重核）**：上面那句 `sys_mm.c` 的行号已失效。
+> > > 当前 `kernel/abi/linux/sys_mm.c` 的 `pt_unmap_leaf()` 在 **282** 行，而
+> > > `mm_tlb_invalidate_begin()` 在 **205**、正常出口的 `finish()` 在 **344**，
+> > > 中途那条错误返回路径上的 `finish()` 在 **211**。也就是说**该调用点如今在事务之内**
+> > > （205–344），不再"已在事务之外"。「6 个调用点在事务外」的计数需按当前代码重数，
+> > > 但本节结论（**不要重新套用该补丁**）不受影响。
 >
 > 正确修法必须先给这些调用点补齐 `mm->lock` + 事务边界（或改用一个不需要事务的
 > 独立回收队列），再谈接生产端。在此之前**不要重新套用该补丁**。
@@ -1331,7 +1363,7 @@ cursor 观察到 `stale` 并重下降，这本来就是 `mm_addrspace_lock()` �
 task），改为 `t->mm`。`mm.h` 补 `struct mm_struct;` 前向声明，NOMMU stub 同步改签名。
 
 安全性前提已核对：munmap/mremap/madvise 的拆表点都在 `mm_tlb_invalidate_begin()` …
-`mm_tlb_invalidate_finish()` 事务内（`mm_munmap` 在 287 行开、291 行关，中间调用
+`mm_tlb_invalidate_finish()` 事务内（`mm_munmap` 在 `munmap.c:322` 开、`:326` 关，中间调用
 `mm_munmap_locked`），所以入队的帧一定会被排空，不会残留。
 
 验证：riscv64 / aarch64 / loongarch64 / ppc64le / x86_64 与 riscv64/aarch64 的 NOMMU
@@ -1380,19 +1412,19 @@ file_fd=-1 off=0x1000`，该页已映射但全 0。**根因未定位**，故状�
 
 ### 10.7 状态路径的位置本身是设计缺陷（与 (b) 无关的独立问题）
 
-排查 (b) 时发现一个更根本的问题：状态块（`fault.c` 958–996）排在
-`vm_area_t *vma = mm_find_vma(mm, page_va);`（998 行）前面。一旦启用，它在完全不查
+排查 (b) 时发现一个更根本的问题：状态块（`fault.c` 1214–1277）排在
+`mm_seg_t *vma = mm_seg_find(t->mm, page_va);`（613 行）前面。一旦启用，它在完全不查
 VMA 的情况下直接映射并返回，后面所有基于 VMA 的判定全被绕开：
 
-* 绕过 userfaultfd（1007–1008）：已注册 userfaultfd 的区间本应把缺页停住交给
+* 绕过 userfaultfd（1342–1344）：已注册 userfaultfd 的区间本应把缺页停住交给
   handler，状态路径却会直接给出零页，handler 永远收不到事件。
-* 绕过 VM_SHARED 判定（1021）：共享映射的写缺页需要 COW/共享语义，不能按私有
+* 绕过 VM_SHARED 判定（648）：共享映射的写缺页需要 COW/共享语义，不能按私有
   匿名处理。
-* 绕过 fault-around 的安全门（522）：那段逻辑明确要求
+* 绕过 fault-around 的安全门（763）：那段逻辑明确要求
   `!(vma->vm_flags & (VM_SHARED | VM_STACK | VM_FILE | VM_VMO))` 才做 4 页
   fault-around；状态路径没有任何等价门限。
-* 与 brk 路径的前提冲突：`fault.c:355` 的 brk 处理条件是
-  `page_va >= start_brk && page_va < ROUND_UP(brk) && !mm_find_vma(...)`，它只
+* 与 brk 路径的前提冲突：`fault.c:587` 的 brk 处理条件是
+  `page_va >= start_brk && page_va < ROUND_UP(brk) && !mm_seg_find(...)`，它只
   处理「没有 VMA」的地址；而状态路径恰恰是「有状态标记但可能没有 VMA」的产生者。
 
 论文的设想是 per-PTE 状态取代 VMA 作为权威来源。那要求状态本身携带全部安全信息
@@ -1460,11 +1492,11 @@ KERNEL PANIC: init: no init program found
 ```
 
 即 virtio-blk / virtio-scsi / ahci 三个块驱动全部加载失败，所以扫不到 FAT32 设备，
-`mount_block_devices()`（`kernel/fs/mount_setup.c:310`）无法把 FAT32 挂到 `/bin`，于是
+`mount_block_devices()`（`kernel/fs/mount_setup.c:333`）无法把 FAT32 挂到 `/bin`，于是
 `/bin/init` ENOENT。`mdir` 显示镜像里 `init` 在根目录，根本没有 `/bin` 目录。
 riscv64 能跑起来是因为它走的是另一条路径，两个镜像的目录结构其实一样。
 
-失败点在 `kernel/drvmod/loader.c:1471`：
+失败点在 `kernel/drvmod/loader.c:1485`：
 
 ```c
 if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,
@@ -1475,8 +1507,8 @@ if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,
 }
 ```
 
-x86_64 实现（`kernel/arch/x86_64/mm/kwx.c:92`）转发到 `x86_kwx_set_pages()`
-（同文件 :64），后者对每一页调用 `x86_kwx_split_pmd(va)`，而该函数返回 NULL 就是 -ENOMEM。
+x86_64 实现（`kernel/arch/x86_64/mm/kwx.c:103`）转发到 `x86_kwx_set_pages()`
+（同文件 :80），后者对每一页调用 `x86_kwx_split_pmd(va)`，而该函数返回 NULL 就是 -ENOMEM。
 `x86_kwx_split_pmd()` 只有两条路返回 NULL：
 
 1. `x86_kwx_pd(va)` 返回 NULL，即 `boot_pdpt_hh[slot]` 不是 `PTE_V`，或仍是 1 GiB 大页
@@ -1712,20 +1744,23 @@ cursor 可能在帧被 buddy 回收后继续读它。`mm_pt_defer_free()` /
 
 | 拆表点 | 所在函数 | `mm->lock` | TLB 事务 | 结论 |
 |---|---|---|---|---|
-| `munmap.c:111` | `mm_munmap_locked` | 是（`mm_munmap` 287） | 是（287/291） | 安全 |
-| `munmap.c:241` | `mm_brk_locked` | 是（`mm_brk` 299） | 是（298/302） | 安全 |
-| `madvise.c:68/86` | `mm_madvise_dontneed` | 是（55） | 是（54/99） | 安全 |
-| `mprotect.c:103` | `mm_mprotect_locked` | 是（162） | 是（161/165） | 安全 |
-| `vm.c:421` | `mm_demote_huge_page` | 视调用者 | 视调用者 | 混合，见下 |
-| `vma.c:466` | `free_vma_pages` | 否 | 是（`vm.c:545`） | 缺 `mm->lock` |
-| `vma.c:442` | `mm_demote_huge_page` 的调用点 | 否 | 否 | 不安全 |
-| `sysv_shm.c:80` | `sysv_shm_unmap_attached_pages` | 否 | 否 | 不安全 |
+| `munmap.c:112` | `mm_munmap_locked` | 是（`mm_munmap` 323） | 是（322/326） | 安全 |
+| `munmap.c:278` | `mm_brk_locked` | 是（`mm_brk` 334） | 是（333/337） | 安全 |
+| `madvise.c:83/100` | `mm_madvise_dontneed` | 是（61） | 是（60/115） | 安全 |
+| `mprotect.c:129` | `mm_mprotect_locked` | 是（232） | 是（231/235） | 安全 |
+| `vm.c:446` | `mm_demote_huge_page` | 视调用者 | 视调用者 | 混合，见下 |
+| `vma.c:641` | `free_vma_pages` | 否 | 是（`vm.c:567`） | 缺 `mm->lock` |
+| `vma.c:617` | `mm_demote_huge_page` 的调用点 | 否 | 否 | 不安全 |
+| `kernel/ipc/sysv_shm.c:129` | `sysv_shm_unmap_attached_pages` | 否 | 否 | 不安全 |
 | `mremap.c:184` | `mm_move_mapping_pages` | — | — | `__attribute__((unused))` 死代码 |
 
+> 行号口径已按 `84b7bc2c5` 合并后的当前代码重核（`sysv_shm.c` 在 `kernel/ipc/` 下，
+> 不在 `kernel/mm/`）。
+
 有一条不那么显然的结论：`mm_demote_huge_page()` 自身不能被当作安全点，它的调用者
-安全性不一致（`munmap.c:90/232`、`mprotect.c:103` 安全，而 `vma.c:442` 既不持锁也不在
+安全性不一致（`munmap.c:91/269`、`mprotect.c:129` 安全，而 `vma.c:617` 既不持锁也不在
 事务内）。所以不能只在 `mm_demote_huge_page()` 内部加 `mm_pt_defer_free()`，否则从
-`vma.c:442` 进来时依旧是无锁改链表。要么把 `vma.c:442` 的调用者补齐锁与事务，要么让
+`vma.c:617` 进来时依旧是无锁改链表。要么把 `vma.c:617` 的调用者补齐锁与事务，要么让
 拆表本身不依赖 TLB 事务（例如独立的、由 `mm->lock` 保护的回收队列 + 在
 `mm_tlb_invalidate_finish()` 之外也能排空的路径）。
 
@@ -1745,8 +1780,8 @@ UAF 一直存在，成因与 §10.16 记的完全一致：`pt_unmap()` / `pt_unm
 填充的链表。
 
 为什么上次接不上：把 `mm_pt_defer_free()` 塞进 `pt_unmap*` 内部，要求每个拆表点都在
-`mm->lock` + TLB 事务内，但 8 个调用点里有 6 个两者皆无（`vma.c:466`、
-`vma.c:442`、`sysv_shm.c:80` …），于是只能无锁改写 `mm->tlb_holds`，那版已回退。
+`mm->lock` + TLB 事务内，但 8 个调用点里有 6 个两者皆无（`vma.c:641`、
+`vma.c:617`、`kernel/ipc/sysv_shm.c:129` …），于是只能无锁改写 `mm->tlb_holds`，那版已回退。
 根因是把两件无关的事耦合了：TLB 事务的语义是「本事务改了哪些地址、需要
 shootdown」，而 PT 页回收的语义是「该节点已不可达、等读侧退出再释放」。
 
@@ -2403,7 +2438,7 @@ per-PTE status 标记并没有比它描述的 VMA 活得久。§10.29 那个「�
 `a20.wx=` 在 x86_64 上被静默忽略（默认 `deny` 仍生效，所以是「无法放宽 W^X」的功能缺口，
 不是安全漏洞），本次新增的 `a20.anonprov=` 同样到不了。根因已定位到具体常量。
 
-`kernel/arch/x86_64/platform/firmware.c:175-179`：
+`kernel/arch/x86_64/platform/firmware.c:377-381`：
 
 ```c
 #define FW_CFG_SELECTOR_PORT 0x510
@@ -2659,7 +2694,8 @@ riscv64/TCG 上它既不更快也不更慢。论文声称的优势是「省掉 L
 验证，于是「修好了」只在一个架构上成立。**页表抽象层的任何改动都必须至少在两个语义不同的
 架构上验证**，这正是本仓库有 riscv64 / x86_64 / aarch64 的意义。
 
-顺带发现一个独立问题：`mprotect.c:141` 的
+顺带发现一个独立问题：`mprotect.c:141`（历史行号，该行随后在 §10.38/§10.40 被删除，
+现由 `mprotect.c:208-211` 的 `mm_pt_leaf_table()` + `mm_pt_refresh_leaf_prot()` 取代）的
 `mm_pt_refresh_absent_prot(pte - idx, idx, ptef)` 被 UBSAN 报 pointer-overflow
 （`pte - idx` 从表内某个条目反推表基址，在对象边界外做指针运算）。一次 x86_64 运行里出现
 35 次。这与 (b) 无关（是 UBSAN 诊断，不是 FATAL 的原因），但它说明「用条目指针反推表基址」
@@ -2706,7 +2742,7 @@ pte_t mm_prot_to_pte_flags(int prot) {
 x86_64 的崩溃**仍然未定位**。已知事实：状态路径在 x86_64 上确实跑了 12 次
 （`mm_fault_from_status=12`），随后 `mm_stress` 在 `pc=0x1e2e2` 崩溃；关机审计全 0
 （`pt_pages=9`、各 mismatch 全 0、`safe=0`），说明元数据与 PTE 没有失配；
-同一次运行里有 35 次 `mprotect.c:141` 的 UBSAN pointer-overflow。
+同一次运行里有 35 次 `mprotect.c:141`（历史行号）的 UBSAN pointer-overflow。
 
 `pc=0x1e2e2` 在 `mm_stress` 里，落在用户态。下一步该做的是把 `pc` 解析回源码行，而不是继续
 猜权限位。这是连续三次猜权限/记账/回收都落空之后，应当改换的取证方式。
@@ -2744,11 +2780,19 @@ VMA 说这段可写，PTE 却是只读。用户态的写（`__copy_tls` 往线�
 页故障：这是内核正确拒绝了一次越权写，错的是映射本身与 VMA 不一致。
 
 这指向 mprotect。同一次运行里有 35 次 UBSAN pointer-overflow，位置全部在
-`kernel/mm/mprotect.c:141`：
+`kernel/mm/mprotect.c:141`（历史行号）：
 
 ```c
 mm_pt_refresh_absent_prot(pte - idx, idx, ptef);   /* 由条目指针反推表基址 */
 ```
+
+> **更正（2026-10-04）**：上面这行在当前 `kernel/mm/mprotect.c` 里**已不存在**。
+> 它先在 §10.38 被 `if (pte)` 包住，随后在 §10.40 被彻底换成按表查询：
+> `pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va); if (ltab)
+> (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), ptef);`
+> （`mprotect.c:208-211`）。函数名也随之由 `mm_pt_refresh_absent_prot()` 改名为
+> `mm_pt_refresh_leaf_prot()`（`pt.c:1998`）。§10.37 的推理对象已不存在，但当时
+> 现场证据（PTE 只读 + VMA 可写）与「状态权限一旦 fault 就被永久冻结」的结论不受影响。
 
 该行属于 mprotect 的「已预留但从未缺页」分支。而本次故障的现象是「VMA 已改成可写、PTE 仍是
 只读」，正好是 mprotect 只更新了 VMA、没更新 PTE。
@@ -2767,11 +2811,11 @@ mprotect 在已映射页上是否走了另一个分支，以及那 35 次 UBSAN 
 且在 riscv64 上不复现（riscv64 走完 2836 次状态缺页、stress PASS、审计全 0）。
 
 状态：x86_64 崩溃仍未修复，但已从「不可观测的 FATAL」收窄到「mprotect 使 PTE 与 VMA 权限
-分叉 + `mprotect.c:141` 的指针反推越界」这一处具体矛盾。riscv64 侧功能与性能结论不受影响。
+分叉 + `mprotect.c:141`（历史行号）的指针反推越界」这一处具体矛盾。riscv64 侧功能与性能结论不受影响。
 
 ### 10.38 修掉 mprotect 的 NULL 指针运算（真实缺陷，但**不是** x86_64 崩溃的原因）
 
-§10.37 观察到 mprotect 的「已预留未缺页」分支里有一行：
+§10.37 观察到 mprotect 的「已预留未缺页」分支里有一行（原文照录，**该行现已删除**）：
 
 ```c
 } else {
@@ -2798,6 +2842,16 @@ if (pte) {
     mm_pt_refresh_absent_prot(pte - idx, idx, ptef);
 }
 ```
+
+> **更正（2026-10-04）**：上面这个中间形态也已被 §10.40 取代。按 `pt_lookup_leaf()`
+> 的 NULL 判断仍然会漏掉「表存在但 level-0 条目非 present」这类真正要刷新的页，
+> 当前代码改为向表查询（`mprotect.c:208-211`）：
+>
+> ```c
+> pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+> if (ltab)
+>     (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0), ptef);
+> ```
 
 验证：
 
@@ -2954,9 +3008,9 @@ VMA      vpte=0x467           有读，有写     ← 只有它不同
 
 | 写入点 | 是否可能 | 理由 |
 |---|---|---|
-| `mprotect.c:68` | **排除** | 位于 `#ifdef CONFIG_NOMMU` 内；NOMMU 无页表，只改 VMA 是正确的。有页表时该分支根本不编译。 |
-| `mprotect.c:169` | **排除** | 前面有逐页循环会改 PTE；§10.38/§10.40 两次修完，崩溃与计数一字未变。 |
-| `mmap.c:163`、`elf.c:170`、`munmap.c:270`、`sysv_shm.c:298`、`framebuffer.c:198/379`、`io_uring.c:146` | **排除** | 全是 VMA 创建点：新建 VMA 时对应叶子尚不存在，之后的第一页要么走 VMA 缺页路径按 VMA 装帧，要么走状态路径按状态装帧。没有任何一条能在「PTE 与状态都已是只读」之后再把 VMA 变可写。 |
+| `mprotect.c:69` | **排除** | 位于 `#ifdef CONFIG_NOMMU` 内（`mprotect.c:65`）；NOMMU 无页表，只改 VMA 是正确的。有页表时该分支根本不编译。 |
+| `mprotect.c:215` | **排除** | 前面有逐页循环会改 PTE；§10.38/§10.40 两次修完，崩溃与计数一字未变。 |
+| `mmap.c:263`、`elf.c:169`、`munmap.c:306`、`sysv_shm.c:346`、`framebuffer.c:198/379`、`io_uring.c:166` | **排除** | 全是 VMA 创建点：新建 VMA 时对应叶子尚不存在，之后的第一页要么走 VMA 缺页路径按 VMA 装帧，要么走状态路径按状态装帧。没有任何一条能在「PTE 与状态都已是只读」之后再把 VMA 变可写。 |
 
 由此可以确定地收窄：既不是 mprotect（两个分支都排除），也不是任何 VMA 创建点。剩下的
 可能只有两类，且都不是「谁改了 VMA」：
@@ -3000,8 +3054,8 @@ if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
 
 | 路径 | 结论 |
 |---|---|
-| `mprotect.c:68` | 排除（`#ifdef CONFIG_NOMMU` 内，有页表时不编译） |
-| `mprotect.c:169` 的逐页循环 | 排除（两次修复后崩溃与计数一字未变） |
+| `mprotect.c:69` | 排除（`#ifdef CONFIG_NOMMU` 内，有页表时不编译） |
+| `mprotect.c:215` 的逐页循环 | 排除（两次修复后崩溃与计数一字未变） |
 | `mprotect` 跳过大 leaf 其余条目 | 排除（修复后计数一字未变） |
 | `mmap/elf/munmap/sysv_shm/framebuffer/io_uring` 的 VMA 创建点 | 排除（创建时叶子尚不存在） |
 | `mm_split_vma_at()` | 排除（`*tail = *v` 原样继承 `pte_flags`） |
@@ -3060,7 +3114,7 @@ x86_64 的排查不影响上述任何结论。
 出生了。六次被证伪的假设（权限位集合 / `PTE_U` / 状态未刷新 / 跳过大 leaf / VMA 创建点 /
 VMA 拆分合并）全部属于「事后改坏」这一类，因此全部与本现象无关。
 
-唯一尚未被检查过的路径是 `mm_pt_provision_anon()`（`kernel/mm/pt.c:951`），它在 mmap 时把
+唯一尚未被检查过的路径是 `mm_pt_provision_anon()`（`kernel/mm/pt.c:2091`），它在 mmap 时把
 一整段匿名范围预标记为 `status_byte(MM_ST_ANON_VIRT, flags)`。缺陷只可能在这两个地方之一：
 
 1. 调用点传入的 `flags` 与覆盖它的 VMA 的 `pte_flags` 不一致，例如按 `PROT_READ` 传参、
@@ -3094,9 +3148,9 @@ VMA 拆分合并）全部属于「事后改坏」这一类，因此全部与本�
 
 | 调用点 | 传入 `flags` | 同函数里写入 VMA 的值 | 是否一致 |
 |---|---|---|---|
-| `mmap.c:197` | `ptef` | `vma->pte_flags = ptef;`（`mmap.c:163`） | **一致** |
-| `elf.c:183` | `pte_flags` | `vma->pte_flags = pte_flags;`（`elf.c:170`） | **一致** |
-| `munmap.c:275` | `mm_user_brk_pte_flags()` | `vma->pte_flags = mm_user_brk_pte_flags();`（`munmap.c:270`） | **一致** |
+| `mmap.c:301` | `ptef` | `vma->pte_flags = ptef;`（`mmap.c:263`） | **一致** |
+| `elf.c:182` | `pte_flags` | `vma->pte_flags = pte_flags;`（`elf.c:169`） | **一致** |
+| `munmap.c:310` | `mm_user_brk_pte_flags()` | `vma->pte_flags = mm_user_brk_pte_flags();`（`munmap.c:306`） | **一致** |
 
 且 `mm_pt_prot_bits()` 逐位正确打包 `PTE_R/W/X`，`status_byte()` 只做 `cls | COW | prot` 的
 组合，不会丢可写位。所以预标记阶段在结构上不可能造成「VMA 可写、状态只读」，三处都把同一个
@@ -3116,6 +3170,25 @@ int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef) {
 ```
 
 而 §10.39 现场读回的状态是 `cls = 2`，即 `MM_ST_ANON_MAPPED`，不是 `MM_ST_ANON_VIRT`。
+
+> **更正（2026-10-04，`84b7bc2c5` 后重核）**：上面那段 early-return **在当前代码里
+> 已经不存在**，该发现随实现一起被推翻。函数改名为 `mm_pt_refresh_leaf_prot()`
+> （`pt.c:1998`），门禁条件也从「只放行 `ANON_VIRT`」改成只挡两种非映射类：
+>
+> ```c
+> uint8_t cls = MM_ST_GET_CLASS(*slot);
+> /* Only classes that describe a mapping the caller may re-protect.  A
+>  * PT_NODE slot is not a mapping, and INVALID has nothing to describe. */
+> if (cls == MM_ST_INVALID || cls == MM_ST_PT_NODE)
+>     return 0;
+> *slot = (uint8_t)((*slot & (uint8_t)~MM_ST_PROT_MASK) |
+>                   mm_pt_prot_bits(ptef));
+> ```
+>
+> 也就是说**已 fault 的 `ANON_MAPPED` 页现在照样能刷权限**，「状态权限一旦 fault 就被
+> 永久冻结」不再成立。§10.45 那条「第 5 步是 mprotect 漏写 `*pte`」的收敛结论也随之
+> 失去前提：状态侧当时只是缺少写入者，现在有了。下文各节按当时的代码状态记录，
+> 未按此结论回改。
 
 也就是说，**一个预标记页一旦被 fault 过、状态类从 `ANON_VIRT` 翻成 `ANON_MAPPED`，
 它的状态权限位就再也没有任何代码路径能改写了**。唯一会改写状态权限的函数对已 fault 的页直接
@@ -3182,7 +3255,7 @@ if (ptef & PTE_W) {
 §10.39 一直把现场读数当作「三向分叉」：`PTE 只读` / `per-PTE 状态只读` / `VMA 可写`，并据此
 推出「PTE 与状态一致、只有 VMA 不同」。
 
-但 `mm_pt_query()` 在返回前会用 PTE 覆写状态里的权限位（`kernel/mm/pt.c:1095-1099`）：
+但 `mm_pt_query()`（现已改名 `mm_cursor_query()`，`pt.c:2206`）在返回前会用 PTE 覆写状态里的权限位（`kernel/mm/pt.c:2253-2257`）：
 
 ```c
 uint8_t byte = mm_pt_peek(table, 0, idx);
@@ -3217,12 +3290,12 @@ mprotect 不会造成这种分叉（守卫 0 命中），VMA 侧其它写入点�
 压着一张旧的、只读的 PTE」。具体要查两件事：
 
 1. VMA 拆除是否把该范围内所有 PTE 都反映射了。`mm_pt_note_absent()` 只在
-   `kernel/mm/pt.c:819/830/836` 三处被调用，需核对 munmap/brk-收缩/`vma_release`
+   `kernel/mm/pt.c:1949/1961/1968` 三处被调用，需核对 munmap/brk-收缩/`vma_release`
    是否都走到了，以及是否有「只清 VMA 不清 PTE」或「只清一部分」的分支
    （尤其 `mm_pt_note_absent()` 里 `if (cls != MM_ST_INVALID && m->nr_present)` 这个
    有条件 early-return）。
 2. VMA 新建是否会覆盖到仍存在的 PTE。`mm_pt_provision_anon()` 在 `if (r > 0)`（被更大的
-   leaf 覆盖）时是 `continue` 跳过而不做任何处理，需确认 brk 扩张（`munmap.c:262-280`）
+   leaf 覆盖，`pt.c:2131-2136`）时是 `continue` 跳过而不做任何处理，需确认 brk 扩张（`munmap.c:296-314`）
    与 ELF 段加载在目标地址上已有 PTE 时的行为。
 
 本节诊断为临时插桩，已在记录后移除（`kernel/mm/mprotect.c` 执行 `git checkout`），不留调试
@@ -3236,7 +3309,7 @@ mprotect 这一轮的插桩同样没有改变 riscv64 侧：5 架构 + 2 NOMMU �
 
 按 §10.45 定下的方向，核对「旧 PTE 是否会残留」这条线的拆除侧两端。
 
-`mm_pt_note_absent()`（`pt.c:305-324`）正确。它置 `*slot = 0`（回到 `MM_ST_INVALID`）、按条件
+`mm_pt_note_absent()`（`pt.c:691-707`）正确。它置 `*slot = 0`（回到 `MM_ST_INVALID`）、按条件
 递减 `m->nr_present`、清 COW 位，并且显式清安全位：
 
 ```c
@@ -3250,7 +3323,7 @@ if (sb) *sb &= (uint8_t)~MM_SAFE_MASK;
 `if (cls != MM_ST_INVALID && m->nr_present)` 这个有条件递减不是漏清的 bug：它只在槽位本来就
 持有 class 且计数非零时递减，避免下溢。**排除。**
 
-`mm_cursor_unmap()`（`pt.c:805-840`）也正确。三条分支都把 PTE 与状态一并清掉，且专门覆盖了
+`mm_cursor_unmap()`（`pt.c:1931-1972`）也正确。三条分支都把 PTE 与状态一并清掉，且专门覆盖了
 「预标记但从未 fault」的页：
 
 ```c
@@ -3296,7 +3369,7 @@ if (!(*pte & PTE_V) || !arch_pte_is_leaf(pte)) {
 
 ### 10.47 根因定位：`mm_pt_provision_anon()` 遇到已存在的 PTE 时直接跳过
 
-读完 §10.46 留下的那条唯一未读路径后，**崩溃的根因找到了**（`kernel/mm/pt.c:1000-1005`）：
+读完 §10.46 留下的那条唯一未读路径后，**崩溃的根因找到了**（`kernel/mm/pt.c:2140-2145`）：
 
 ```c
 for (vaddr_t va = lo; va < hi; va += PAGE_SIZE) {
@@ -3314,7 +3387,7 @@ for (vaddr_t va = lo; va < hi; va += PAGE_SIZE) {
 * 旧的那张只读 PTE 被原样留下（`continue` 之前没有任何改写）；
 * 旧的状态字节也被原样留下（`pt_note_present_meta()` 根本没被调用）；
 * 而**新建的 VMA** 已经带着自己的 `pte_flags`（可写）插进了 `mm`：三个调用点
-  （`mmap.c:197` / `elf.c:183` / `munmap.c:275`）都是在 `mm_insert_vma()` **之后**才调
+  （`mmap.c:301` / `elf.c:182` / `munmap.c:310`）都是在 `mm_insert_vma()` **之后**才调
   预标记的，所以 VMA 是这段地址上更新、也更权威的那一份声明。
 
 结果就是一张只读的残留 PTE 压在可写的 VMA 之下，正是 §10.45 认定的唯一真实
@@ -3380,7 +3453,8 @@ mprotect 留下的。
 
 #### 缺页安装这一步读码的结论
 
-状态路径（`kernel/mm/fault.c:960-993`）完全不查 VMA，权限只从记录的状态字节还原：
+状态路径（`kernel/mm/fault.c:1214-1277`，即 `mm_fault_from_status()`）完全不查 VMA，
+权限只从记录的状态字节还原（`fault.c:1234-1253`）：
 
 ```c
 if (cls_byte & MM_ST_PROT_R) prot |= 1;
@@ -3397,12 +3471,19 @@ mm_cursor_map(&qcur, page_va, pfn_to_phys(np), allow, MM_ST_ANON_MAPPED);
 
 > **谁把该页的状态权限改成了「只读」，却没有同步把 VMA 改回只读？**
 
-写状态权限的函数全仓库只有一个：`mm_pt_refresh_absent_prot()`（`pt.c:857`），它只被 mprotect
+写状态权限的函数全仓库只有一个：`mm_pt_refresh_absent_prot()`（`pt.c:857`，历史行号；
+现改名 `mm_pt_refresh_leaf_prot()`，在 `pt.c:1998`），它只被 mprotect
 的「该页尚未映射」分支调用，且带一道早退：
 
 ```c
 if (cls != MM_ST_ANON_VIRT) return 0;
 ```
+
+> **更正（2026-10-04）**：这道 `cls != MM_ST_ANON_VIRT` 的早退**已不存在**。
+> `mm_pt_refresh_leaf_prot()` 现在只挡 `MM_ST_INVALID` 与 `MM_ST_PT_NODE`
+> （`pt.c:2011`），`MM_ST_ANON_MAPPED` 会照常刷新权限。因此本节「已 fault 的页状态
+> 权限刷不进去」这条机制**在当前代码里不成立**，下面那条待验实验的必要性也随之消失。
+> 本节其余读码结论（状态路径不查 VMA、`mm_cursor_query()` 的同义反复）不受影响。
 
 而 mprotect 的同一个分支会无条件执行 `v->pte_flags = mm_pte_flags_apply_prot(...)`。这两行在
 同一次调用里、传的是同一个 `ptef`，因此单次 mprotect 内部不可能分叉。分叉只可能来自两次
@@ -3458,7 +3539,7 @@ FATAL: pid=6 signal=11 pc=0x1e2e2 comm=mm_stress path=/bin/mm_stress
 #### 这推翻了前八次排查赖以成立的前提
 
 对 file-backed private 的 VMA，mprotect 故意把 PTE 留成只读并置 `PTE_COW`
-（`mprotect.c:120-133`）：
+（`mprotect.c:135-148`）：
 
 ```c
 if ((ptef & PTE_W) && (v->vm_flags & VM_FILE) && !(v->vm_flags & VM_SHARED)) {
@@ -3477,8 +3558,9 @@ if ((ptef & PTE_W) && (v->vm_flags & VM_FILE) && !(v->vm_flags & VM_SHARED)) {
 东西：对文件私有 COW 段，这种情况本来就该发生，守卫理应静默。把它的静默读成「mprotect
 无关」，是把符合设计的行为误判成了缺陷。§10.47、§10.48 建立在该结论上的推理也随之失效。
 
-另外，§10.39 读到的 `cls=2 (MM_ST_ANON_MAPPED)` 同样是假象：`mm_pt_query()` 在
-`MM_ST_GET_CLASS(byte) == MM_ST_INVALID` 时会凭空合成 `MM_ST_ANON_MAPPED`（`pt.c:1097`），
+另外，§10.39 读到的 `cls=2 (MM_ST_ANON_MAPPED)` 同样是假象：`mm_pt_query()`
+（现 `mm_cursor_query()`）在 `MM_ST_GET_CLASS(byte) == MM_ST_INVALID` 时会凭空合成
+`MM_ST_ANON_MAPPED`（`pt.c:2254-2255`），
 所以一个没有状态记录的文件页读回来就是 `ANON_MAPPED`。「这是匿名页」这个判断，从一开始就是
 查询函数伪造出来的。
 
@@ -3513,7 +3595,7 @@ COW 的写故障」（是查 `PTE_COW` 位，还是查 VMA 的 `VM_FILE && !VM_S
 (1) 出错页的 PTE 是 `0x425`，而 `PTE_COW = 1UL << 9 = 0x200`（`x86_64/include/page_table.h:26`），
 `0x425 & 0x200 == 0`，`PTE_COW` 没有置。该页 present、user、leaf、只读。
 
-(2) `handle_cow_fault_locked()` 只认两种情况（`fault.c:150` 起）：
+(2) `handle_cow_fault_locked()` 只认两种情况（`fault.c:244` 起，判据在 `:266` 与 `:263` 附近）：
 
 ```c
 if (*pte & PTE_COW) { ... 复制 ... }
@@ -3525,14 +3607,14 @@ return -1;                       /* 既非 COW 又不可写 → 放弃 */
 致命。这与观测完全吻合：`code=14` → 错误码 `0xE` = present + write + user（页确实在、
 确实是写）。
 
-(3) 私有文件缺页安装这条路径（`fault.c:428-448`）根本没有 COW 的概念：它老老实实 `memcpy`
+(3) 私有文件缺页安装这条路径（`fault.c:684-689`）根本没有 COW 的概念：它老老实实 `memcpy`
 出一份私有副本，然后
 
 ```c
 int r = fault_map(t->mm, page_va, copy, vma->pte_flags, MM_ST_FILE_PRIVATE);
 ```
 
-就这样把页装上了，没有像 `mprotect.c:120-133` 那样「清 W、置 `PTE_COW`、让第一次写去
+就这样把页装上了，没有像 `mprotect.c:135-148` 那样「清 W、置 `PTE_COW`、让第一次写去
 `handle_cow_fault()` 收尾」。而 mprotect 那段置 COW 的代码位于它的已映射分支里，本次运行中
 这些页 `pte=0`（连叶子表都没有），该分支一次都没执行。
 
@@ -3577,16 +3659,30 @@ PTE `0x425` 不含 W。这决定了修复应当落在 `fault_map()` 内部（按
 
 顺着 §10.50 的修复前置条件，把私有文件页的安装链一路读到底：
 
+> **行号复核（2026-10-04）**：本节原引用的 `fault.c:428-447`、`fault.c:~470`、
+> `pt.c:795-802`、`pt.c:786`、`pt.c:~840` 是合并 `84b7bc2c5` 之前的行号，下表已重指向。
+> 结论本身经复核**依然成立**，且下面第 6 行的"唯一置位点"措辞同时被修正——它现在
+> 曾经是唯一的那个置位点，不再是唯一的置位点。
+
 | 环节 | 位置 | 是否处理 `PTE_COW` |
 |---|---|---|
-| 私有文件缺页准备副本 | `fault.c:428-447`（`memcpy` + icache） | **否** |
-| `fault_map()` | `fault.c:~470` | **否**，纯转发 `flags` |
-| `mm_cursor_map()` | `pt.c:795-802` | **否**，纯转发 `flags` |
-| `mm_cursor_replace()` | `pt.c:786` | **否**，`*pte = arch_pte_leaf(pa, flags);` 原样写入 |
-| `status_byte(cls, flags)` | `pt.c:~840` | 只在 `PTE_COW` 已置时才记 `MM_ST_COW_BIT` |
+| 私有文件缺页准备副本 | `fault.c:683-689`（`memcpy` + icache） | **否** |
+| `fault_map()` | `fault.c:67` / `fault.c:79`（`NOMMU` 与常规两份定义） | **否**，纯转发 `flags` |
+| `mm_cursor_map()` | `pt.c:1919-1929` | **否**，纯转发 `flags` |
+| `mm_cursor_replace()` | `pt.c:1876-1916`（写入在 `pt.c:1909`） | **否**，`*pte = arch_pte_leaf(pa, flags);` 原样写入 |
+| `status_byte(cls, flags)` | `pt.c:1863-1867` | 只在 `PTE_COW` 已置时才记 `MM_ST_COW_BIT` |
 
-结论：整条安装链没有任何一处会为私有文件页置 `PTE_COW`。唯一置位点是 `mprotect.c:120-133`
-的已映射分支。因此只要一个私有文件段先被 mprotect 放宽权限、之后才首次缺页（本次正是如此：
+结论：整条安装链没有任何一处会为私有文件页置 `PTE_COW`。**当时的**唯一置位点是
+`mprotect.c` 的已映射分支（当时的 `mprotect.c:120-133`，现为 `mprotect.c:135-148`，
+置位语句在 `mprotect.c:145`）。
+
+> **更正（2026-10-04）**：现在 `flags |= PTE_COW` 有**两个**置位点，不再只有
+> `mprotect.c:145` 一处——`kernel/mm/fault.c:1112` 在私有文件 fault-around 的
+> `direct_private && !executable` 分支里也会置位。但这条更正**不改变本节的结论**：
+> 两个置位点都在"页已映射/正在映射"的路径上，"私有文件缺页安装"这条链（表中前五行）
+> 依然一个都不置。`kernel/mm/cow.c:30` 是第三处，但那是 COW 完成时的再次置位，不是建立。
+
+因此只要一个私有文件段先被 mprotect 放宽权限、之后才首次缺页（本次正是如此：
 `[MM-DIV]` 的 33 次全部 `pte=0`），它的页就永远拿不到 `PTE_COW`；而
 `handle_cow_fault_locked()` 又只认 `PTE_COW` 或 `PTE_W`，两者皆无即 `return -1`。缺陷的
 结构性成因至此完全确认：
@@ -3603,7 +3699,7 @@ PTE `0x425` 不含 W。这决定了修复应当落在 `fault_map()` 内部（按
 2. 调用点传入的 `vma->pte_flags` 在缺页当时本来就不含 `PTE_W`（例如该段先被
    `mprotect(PROT_READ)` 收窄过、随后又被放宽，而 VMA 上的 `pte_flags` 与实际不符）。
 
-决定性实验一次即可：在 `fault.c:445` 的 `fault_map(... MM_ST_FILE_PRIVATE)` 处打印
+决定性实验一次即可：在 `fault.c:688` 的 `fault_map(... MM_ST_FILE_PRIVATE)` 处打印
 `vma->pte_flags` 与传入的 `flags`，并同时打印 `PTE_COW`/`PTE_W` 位。缺 `PTE_COW` 这一点已经
 确证，`PTE_W` 的去向尚待确证。二者的修法落点不同：若 `vma->pte_flags` 本就含 W 而 PTE 里没有，
 修 `arch_pte_leaf()` 或安装点的掩码；若 `vma->pte_flags` 本就不含 W，修 VMA 权限与 `pte_flags`
@@ -3679,7 +3775,7 @@ SIGSEGV: pid=6 code=14 stval=0xabd17f20
 
 2. 装它的是状态路径（per-PTE status），不是 VMA 路径。状态路径是全仓库唯一
    不从 VMA 取权限、而是把记录的状态字节回环成 PTE 权限的地方
-   （`fault.c:968-980`：`prot` → `mm_prot_to_pte_flags(prot)`）：
+   （`fault.c:1233-1240`：`prot` → `mm_prot_to_pte_flags(prot)`）：
 
    ```c
    if (cls_byte & MM_ST_PROT_R) prot |= 1;
@@ -3699,16 +3795,21 @@ SIGSEGV: pid=6 code=14 stval=0xabd17f20
 
 「谁把这一页的状态改成了只读，却没有同步 VMA？」
 
-写状态权限的函数**全仓库只有一个**：`mm_pt_refresh_absent_prot()`（`pt.c:857`），
-只被 mprotect 的「该页尚未映射」分支调用。而 mprotect 在同一个分支之后会
+写状态权限的函数**全仓库只有一个**：`mm_pt_refresh_leaf_prot()`（`pt.c:1998`，
+原名 `mm_pt_refresh_absent_prot()`），只被 mprotect 的两个分支调用（`mprotect.c:172`
+已映射分支与 `mprotect.c:210` 未映射分支）。而 mprotect 在同一个分支之后会
 无条件执行 `v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);`。
 两者传同一个 `ptef`，所以单次 mprotect 不会分叉；分叉只能来自两次 mprotect：
 前一次把状态刷成只读，后一次把 VMA 放宽回可写却没能刷新状态，而它有两条现成的
 「刷不成」路径，且 `[MM-DIV]` 已经证明其中一条在本次运行中真实发生过 33 次
 （`pte=0`，即 `pt_lookup_leaf` 返回 NULL、调用点直接跳过刷新）：
 
-* `pte == NULL` → 调用点 `if (pte)` 为假，根本没调用刷新（`mprotect.c:162-165`）；
-* `cls != MM_ST_ANON_VIRT` → 刷新函数自己 `return 1` 早退（`pt.c:867`）。
+* `pte == NULL` → 调用点 `if (pte)` 为假，根本没调用刷新（当时的 `mprotect.c:162-165`；
+  **该判断已按 §10.57 改掉**，现在是 `mm_pt_leaf_table()` + `if (ltab)`，
+  见 `mprotect.c:208-211`）；
+* `cls != MM_ST_ANON_VIRT` → 刷新函数自己早退（当时的 `pt.c:867`；**该早退条件也已改**，
+  现在是 `cls == MM_ST_INVALID || cls == MM_ST_PT_NODE` 才 `return 0`，且 `ANON_VIRT`
+  照刷，见 `pt.c:2011-2012`）。
 
 #### 修复方向（**证据已足，但本轮不做**）
 根本问题是状态与 VMA 之间没有一致性约束：状态路径信任状态字节到「不查 VMA」的程度，
@@ -3725,7 +3826,7 @@ SIGSEGV: pid=6 code=14 stval=0xabd17f20
 并把当前静默的分叉变成不可能的分叉。
 未做完的收尾（下一次务必先做，成本极低）：
 
-1. 在状态路径（`fault.c:993` 附近）加独立标记，确证 `0x425` 那次确实来自它；
+1. 在状态路径（`fault.c:1252` 附近）加独立标记，确证 `0x425` 那次确实来自它；
 2. **移除全部 TEMP 插桩**：`pt.c`（`[MM-INS]`、declined 区分）、
    `mprotect.c`（`[MM-DIV]`）、`fault.c`（`[MM-FP]`）。三处均为热路径 `kerr`，
    修复验证通过后必须清理；
@@ -3801,11 +3902,11 @@ riscv64 侧不受影响：5 架构 + 2 NOMMU 变体构建通过、三个门全�
 
 核对元数据的生命周期（`kernel/mm/pt.c`）：
 
-* `mm_pt_meta()`（`pt.c:180`）按叶子表的 PFN 查 `pfa.meta[pfn].pt`，
+* `mm_pt_meta()`（`pt.c:287`）按叶子表的 PFN 查 `pfa.meta[pfn].pt`，
   并要求 `pfa.meta[pfn].flags == FRAME_F_PT`；
-* `mm_pt_node_init()`（`pt.c:210`）分配元数据后 `memset(m, 0, sizeof(*m))`，
+* `mm_pt_node_init()`（`pt.c:340`）分配元数据后 `memset(m, 0, sizeof(*m))`，
   再在 `pfa.lock` 下发布 `flags = FRAME_F_PT`；
-* `mm_pt_node_fini()`（`pt.c:241`）把指针置 NULL、`flags = FRAME_F_ALLOC`，并回收元数据页。
+* `mm_pt_node_fini()`（`pt.c:366`）把指针置 NULL、`flags = FRAME_F_ALLOC`，并回收元数据页。
 
 因此新建叶子表的元数据必然是全 0（即全 `MM_ST_INVALID`），
 **一个陈旧的 `ANON_VIRT|R` 状态绝不可能来自一张新建的叶子表。** 这条解释被排除。
@@ -3815,9 +3916,11 @@ riscv64 侧不受影响：5 架构 + 2 NOMMU 变体构建通过、三个门全�
 1. `pt_lookup_leaf()` 返回 NULL 的原因不是「没有叶子表」。这是我此前的误读：
    `[MM-RF]` 的 `pte=0` 只说明返回指针为空，而 `pt_lookup_leaf()` 返回 NULL 也可能是因为
    该地址被一个非 leaf 的上层条目（中间节点或大页）覆盖，或其它查找失败情形。
-   若如此，则当时叶子表是存在的，`mm_pt_refresh_absent_prot()` 本该被调用；
+   若如此，则当时叶子表是存在的，`mm_pt_refresh_absent_prot()`（现名
+   `mm_pt_refresh_leaf_prot()`）本该被调用；
    而它被调用却返回 `declined=1`，只可能是走了 `cls != MM_ST_ANON_VIRT` 的早退
-   （`pt.c:867`）；但那样状态路径就不会用这份状态了（它要求 `cls == ANON_VIRT`），
+   （当时的 `pt.c:867`；该早退条件现已改成只对 `INVALID`/`PT_NODE` 生效，
+   见 `pt.c:2011-2012`）；但那样状态路径就不会用这份状态了（它要求 `cls == ANON_VIRT`），
    于是又与 `[MM-ST]` 读出 `status_prot=1` 矛盾。**这条也需要查清。**
 2. 同一 4K 对齐区域里兄弟页的缺页顺带创建了叶子表，其元数据里该页带着更早一次
    `mprotect(PROT_READ)` 刷下的 R。但这与第 1 条的 `memset` 结论并不冲突，
@@ -3944,7 +4047,7 @@ helper），然后无条件对 `table[idx]` 调用 `mm_pt_refresh_absent_prot()`
 +      (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0), ptef);
 ```
 
-关键点在于：仓库里早就有 `mm_pt_leaf_table(pgdir, addr)`（`kernel/include/mm/pt.h:208`，
+关键点在于：仓库里早就有 `mm_pt_leaf_table(pgdir, addr)`（`kernel/include/mm/pt.h:568`，
 注释写着「The table that owns the leaf slot for addr … NOT the table `pt_walk()` returns」），
 它正是不分配任何东西的「下探到叶子表」，`mm_pt_refresh_absent_prot()` 需要的
 `table` 参数可以直接由它给出。所以**真正的缺陷不是「缺一个 helper」，而是
@@ -4032,8 +4135,9 @@ riscv64 开启臂的 2844 与修复前的 2836 几乎相同，说明**修复没�
 
 #### 缺陷的确切形状
 
-`kernel/ipc/userfaultfd.c:517-532`（unregister）在合并并 unlink 了本次要注销的所有 range 之后，
-对合并后的整段 `[rlo, rhi)` 无条件清标记：
+`kernel/ipc/userfaultfd.c:524-553`（unregister；此处引用的代码是**修复前**的形状，
+§10.61 已把它改成逐页清除 + 每页复查 presence）在合并并 unlink 了本次要注销的所有
+range 之后，曾对合并后的整段 `[rlo, rhi)` 无条件清标记：
 
 ```c
 /* A page can in principle still be covered by a *different* uffd
@@ -4050,14 +4154,16 @@ spin_unlock(&t->mm->lock);
 注释里那句「`userfaultfd_range_present()` 是权威判定，标记陈旧不会让缺页跳过 handler」，
 现在对 `ANON_VIRT` 页已经不成立：
 
-* 状态缺页路径 `kernel/mm/fault.c:970` 用的是位：
+* 状态缺页路径 `kernel/mm/fault.c:1227` 用的是位：
   `!mm_cursor_safe_test(&qcur, page_va, MM_SAFE_UFFD)`；
-* 权威的 `userfaultfd_range_present()` 在 `fault.c:1036`，即 VMA 路径上；
-* 而 `ANON_VIRT` 的页在 `fault.c:970` 就被就地满足并返回，根本走不到 1036。
+* 权威的 `userfaultfd_range_present()` 在 `fault.c:1344`，即 VMA 路径上；
+* 而 `ANON_VIRT` 的页在 `fault.c:1252` 就被就地满足并返回，根本走不到 1344。
 
-`fault.c:967` 那句注释（「the authoritative userfaultfd_range_present() check still runs on
+`fault.c:1223` 那句注释（「the authoritative userfaultfd_range_present() check still runs on
 the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类恰恰是假的：
 注释是随状态路径一起写的，写的时候没有意识到这条路径会短路掉权威检查。
+（该注释已按 §10.61「改动四」重写为「标记在此处具有权威性、不被重新推导」，
+现在的 `fault.c:1223-1225` 不再含 "authoritative" 一词。）
 
 后果：若同一页同时被两次注册覆盖，注销其中一次会把 `MM_SAFE_UFFD` 清掉，
 此后该页的缺页不会 parked 给仍存活的 handler，而会被状态路径直接满足，
@@ -4066,7 +4172,7 @@ the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类恰恰
 #### 缓解（必须说清楚，避免夸大严重性）
 
 默认构建不受影响：实测默认 riscv64 构建 `mm_anon_provisioned: 0`（§10.58），
-即预标记默认关闭，状态缺页路径不启用，UFFD 仍由 `fault.c:1036` 的权威检查把关。
+即预标记默认关闭，状态缺页路径不启用，UFFD 仍由 `fault.c:1344` 的权威检查把关。
 该缺口目前仅存在于 `a20.anonprov=<n>` / `CONFIG_ANON_PROV_DEFAULT=<n>` 的实验构建里。
 （`MM_ANON_PROVISION_MAX_PAGES = 4096` 与 `CONFIG_ANON_PROV_DEFAULT` 是两个东西：
 前者是上限常量，后者才是默认开关，实测默认为 0。）
@@ -4081,7 +4187,7 @@ the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类恰恰
 2. 或者：让状态路径在 `ANON_VIRT` 命中时也调用 `userfaultfd_range_present()`
    （它查的是 range 链表，不是 VMA，比 VMA 遍历便宜得多），代价是每次状态缺页多一次
    加锁查询。这比方案 1 简单，但确实侵蚀论文「缺页不查任何表」的主张。
-3. 顺手修正 `fault.c:967` 那句已经不成立的注释。
+3. 顺手修正 `fault.c:1223` 那句已经不成立的注释（**已按 §10.61 完成**）。
 
 当前状态是默认构建安全（预标记关闭），UFFD 语义正确。**在 1 或 2 完成之前，
 不要把预标记默认打开。**
@@ -4098,8 +4204,23 @@ the VMA path below for **every other case**」）对 `ANON_VIRT` 这一类恰恰
 unregister 更是明确地先放掉 `g_uffd_lock`（第 516 行）再取 `mm->lock`（约 530 行），
 两者从不嵌套。
 
+> **这段证据已被后来的落地代码推翻。**
+> 现在 `g_uffd_lock` 的临界区是 128-136、146-155、175-177、445-469、502-522、
+> **544-551**、593-606、700-709；`mm->lock` 在本文件里**只剩一处**取用，
+> 而且就在 544-551 这段里——`spin_lock_irqsave(&g_uffd_lock)`（`userfaultfd.c:544`）
+> 之后紧跟着 `spin_lock(&t->mm->lock)`（`userfaultfd.c:545`）。
+> 原来那些取用点（209、212、241、244、421、428、435）已经全部消失：
+> `userfaultfd_handle_fault()` 与 register 路径现在只持 `uffd->lock`，不再碰 `mm->lock`。
+> 也就是说 `g_uffd_lock → mm->lock` 这个嵌套**现在确实存在**，与本节结论相反。
+> 它与下方证据二（`fault.c:1344` 在 `mm->lock` 下取 `g_uffd_lock`）构成一对反向边，
+> 需要重新判定。§10.61 首次落地时用的是「先 `spin_lock(&t->mm->lock)`、再在循环里
+> 逐页调 `userfaultfd_range_present()`」，方向是 `mm->lock → g_uffd_lock`；
+> 后来为避免一次 256 MiB unregister 拿 65536 次全局锁，改成「整段只取一次
+> `g_uffd_lock` + 新 helper `uffd_range_present_locked()`」（`userfaultfd.c:544-551`
+> 上方的注释自陈了这个改动理由），锁序随之翻转。
+
 证据二：`mm->lock → g_uffd_lock` 这个顺序早已在本代码库里实际使用。
-`kernel/mm/fault.c:1036` 在仍然持有 `mm->lock` 的情况下调用
+`kernel/mm/fault.c:1344` 在仍然持有 `mm->lock` 的情况下调用
 `userfaultfd_range_present()`，紧接着的下一行才是 `spin_unlock(&mm->lock);`：
 
 ```c
@@ -4119,8 +4240,8 @@ presence）不引入任何新的锁嵌套，不构成死锁，可以安全实施
 1. `mm_pt_set_safe_range()` 增加一个「清 UFFD 标记前先复查 presence」的钩子，或在
    `userfaultfd.c` 里改成逐页处理而非整段一次性清除；
 2. presence 复查复用既有的 `userfaultfd_range_present(mm, page_va)`（它查 range 链表，
-   已在 `fault.c:1036` 于 `mm->lock` 内被调用，安全）；
-3. 顺带修正 `fault.c:967` 那句对 `ANON_VIRT` 已不成立的注释（§10.59 第 3 条）；
+   已在 `fault.c:1344` 于 `mm->lock` 内被调用，安全）；
+3. 顺带修正 `fault.c:1223` 那句对 `ANON_VIRT` 已不成立的注释（§10.59 第 3 条）；
 4. 验证：需覆盖「同一页被两次注册」的场景。现有 `mm_stress` 未必包含，
    应补一个针对性用例，否则改完也无法证明过度清除已消除。
 
@@ -4162,15 +4283,20 @@ int mm_pt_safe_clear_page(struct mm_struct *mm, vaddr_t va, unsigned flags)
 +#endif
 ```
 
+（以上是**当时的 diff**。当前 `userfaultfd.c:544-551` 已不是这个形状：
+`spin_lock_irqsave(&g_uffd_lock)` 被提到 `spin_lock(&t->mm->lock)` **之前**，
+逐页复查改用新 helper `uffd_range_present_locked()`，整段只取一次 `g_uffd_lock`。
+见 §10.60 末尾的更正。）
+
 改动三：NOMMU 守卫。`pt.c` 的全部安全位函数位于
-`#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)`（`pt.c:33`）之内，
+`#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)`（`pt.c:72`）之内，
 NOMMU 构建下不参与编译，故调用点必须同样加守卫。NOMMU 无页表、也就没有安全位，
 不加守卫会得到 `undefined reference to mm_pt_safe_clear_page`。**这是本次改动
 唯一一次编译失败，且是靠链接错误而非源码错误暴露的，值得记住。**
 
 改动四：修正 `fault.c` 那句已经不成立的注释（§10.59 第 3 条）。原文声称
 「`userfaultfd_range_present()` 是权威判定……对其它所有情况都仍会在下面的 VMA 路径上运行」，
-而 `ANON_VIRT` 的页在状态路径里就地满足并返回，根本走不到 `fault.c:1036`。
+而 `ANON_VIRT` 的页在状态路径里就地满足并返回，根本走不到 `fault.c:1344`。
 现已改成直接描述：标记在此处具有权威性、不被重新推导，因此 unregister 有义务
 只为「无任何注册仍覆盖」的页清标记。
 
@@ -4245,7 +4371,9 @@ UFFD 逐页清位这一修复本身已合入并验证（§10.61），缺的只�
 §10.62 把 `MM_STRESS: FAIL evict-mmap-verify-mapped errno=17` 读成「带提示地址的 `mmap`
 返回 `EEXIST`」，据此把下一轮任务定为「查提示地址撞车」。**这个读法是错的。**
 
-`user/cmds/stress/mm_stress.c:15` 的 `fail()` 只接收一个字符串，并打印环境里遗留的 `errno`：
+`user/cmds/stress/mm_stress.c:22` 的 `fail()`（**§10.63 记录时的形状；§10.67 已修掉
+`errno` 打印，见 `mm_stress.c:15-21` 的新注释**）当时只接收一个字符串，
+并打印环境里遗留的 `errno`：
 
 ```c
 static int fail(const char *what)
@@ -4255,13 +4383,13 @@ static int fail(const char *what)
 }
 ```
 
-而这一处调用是 `return fail("evict-mmap-verify-mapped");`（`mm_stress.c:1416`），
+而这一处调用是 `return fail("evict-mmap-verify-mapped");`（`mm_stress.c:1553`），
 没有传 errno，所以那个 `errno=17 (EEXIST)` 是早前某次无关系统调用留下的残留值，
 与失败原因毫无关系。§10.62 建立在它之上的因果链（「提示地址被占用」）**作废**。
 
 #### 真正的失败性质
 
-`mm_stress.c:1404-1416` 那段循环是逐页内容校验：
+`mm_stress.c:1542-1556` 那段循环是逐页内容校验：
 
 ```c
 for (size_t p = 0; p < mmap_pages; p++) {
@@ -4320,7 +4448,7 @@ for (size_t p = 0; p < mmap_pages; p++) {
 ### 10.64 `no evictable page` 的诊断数据自相矛盾：2000 个 valid 页，引用计数**全是 0**
 
 §10.63 定下的第 2 步（查 `valid=2000` 却判定无可回收）已经有了决定性的数据。
-`kernel/fs/block_cache.c:907-931` 那段诊断在 `pcache_evict_locked()` 返回 NULL 之后，
+`kernel/fs/block_cache.c:1036-1061` 那段诊断在 `pcache_evict_locked()` 返回 NULL 之后，
 遍历整个 page pool 统计：
 
 ```
@@ -4348,7 +4476,7 @@ for (size_t p = 0; p < mmap_pages; p++) {
 1. 脏页为主 + 回写失败/被跳过。`dirty=1879 / valid=2000`，即 94% 是脏页。
    若 `pcache_evict_locked()` 对脏页要求先成功回写，而此路径下回写失败或被跳过
    （注意调用链上游刚拿过 `bc->writeback_lock` 并做过一次 fill 尝试，
-   `block_cache.c:900` 处 `return e`），则所有脏页都会被判为不可回收，
+   `block_cache.c:1032` 处 `return e`），则所有脏页都会被判为不可回收，
    剩下 121 个干净页又因别的原因落选，最终返回 NULL。
 2. 存在 `valid` 但被 pin / 正在被填充（inflight）的页，淘汰扫描显式跳过它们。
 3. 扫描范围与诊断范围不同：淘汰可能只扫 `page_no` 附近的一个窗口/时钟环
@@ -4362,7 +4490,7 @@ for (size_t p = 0; p < mmap_pages; p++) {
 
 #### 这与 §10.63 的内容丢失如何连起来
 
-`evict-mmap` 是 `MAP_SHARED` 文件映射（`mm_stress.c:1320`，`hint=NULL`，顺带再次确认
+`evict-mmap` 是 `MAP_SHARED` 文件映射（`mm_stress.c:1457`，`hint=NULL`，顺带再次确认
 §10.62「提示地址撞车」的读法是错的）。它在内存压力下逐页写入图案并 `fsync`，
 然后通过同一映射读回逐字节比对，结果不一致。
 
@@ -4375,13 +4503,13 @@ for (size_t p = 0; p < mmap_pages; p++) {
 (a) 它扫描的范围是全池还是某个页号窗口；(b) 对 `dirty` 页是否要求回写成功才可淘汰；
 (c) 是否有 pin/inflight 跳过条件。三者任一即可解释「2000 个未引用页却零候选」。
 
-同时值得单独确认：`block_cache.c:900` 那个 `return e` 分支，上游 fill 失败后是否
+同时值得单独确认：`block_cache.c:1032` 那个 `return e` 分支，上游 fill 失败后是否
 也直接返回 NULL 而根本没有尝试淘汰。若是，则「无可回收」的诊断信息会误导：
 真正的失败原因是**回写/填充出错**，而不是「找不到可淘汰的页」。
 
 ### 10.65 根因与修复：`pcache_evict_locked()` 单趟扫描，热的页被跳过后就再也不被看
 
-读了 `pcache_evict_locked()`（`kernel/fs/block_cache.c:801`），§10.64 的矛盾有了解释：
+读了 `pcache_evict_locked()`（`kernel/fs/block_cache.c:914`），§10.64 的矛盾有了解释：
 
 ```c
 pcache_entry_t *e = bc->page_lru_tail.prev;
@@ -4561,7 +4689,7 @@ static int fail(const char *what)
 | 实现 | 注销后该页再缺页 | 结果 |
 |---|---|---|
 | 标记**已**清掉 | 走状态路径，**不 park**，按状态装帧 | 正常 |
-| 标记**残留** | `fault.c:974` 的 `!mm_cursor_safe_test(... MM_SAFE_UFFD)` 为假 → **跳过状态路径**，落回 VMA 路径 | 同样**不 park**，按 VMA 装帧 |
+| 标记**残留** | `fault.c:1227` 的 `!mm_cursor_safe_test(... MM_SAFE_UFFD)` 为假 → **跳过状态路径**，落回 VMA 路径 | 同样**不 park**，按 VMA 装帧 |
 
 两种情况都不会 park、都能正确完成缺页，因为此时该页确实已无任何注册覆盖，
 「不被 park」本就是正确行为。差别只在快慢：标记残留会让这一页永久走不到
@@ -4574,7 +4702,7 @@ handler 永远收不到事件。这正是 `test_uffd_double_registration()` 断�
 （注销其一 → 断言另一方**仍**收到 `UFFD_EVENT_PAGEFAULT`），且已在两个平台的
 开启臂构建上真实跑通。
 
-补充一点：`pt.c:312-323` 的 `mm_pt_note_absent()` 在清 class 的同时清 `MM_SAFE_MASK`，
+补充一点：`pt.c:691-707` 的 `mm_pt_note_absent()` 在清 class 的同时清 `MM_SAFE_MASK`，
 注释也写明了理由（否则被复用的槽位会继承过期的 UFFD/NO_FA 标志）。
 所以标记不会比它描述的映射活得更久，跨映射泄漏的情形也不存在。
 
@@ -4869,11 +4997,19 @@ p 值最小 0.070，没有一项达到 0.05；离散 32%–72% 仍远大于臂�
 在那之前，**CortenMM 的性能结论只限 riscv64**（§10.34，TCG，配对 A/B，性能中性），
 且必须注明 TCG 与 KVM 的绝对数值不可互相比较。
 
-### 10.74 下一项工程：让状态缺页路径**不持 `mm->lock`**（论文核心主张，仍未实现）
+### 10.74 下一项工程：让状态缺页路径**不持 `mm->lock`**（论文核心主张）
 
-已核实当前状态：`kernel/mm/fault.c` 在 800 行取 `spin_lock(&mm->lock)`、1119 行才释放，
+> **本节结论已被 §11.6 推翻（2026-10-02，`feat/mm-single-level`）。**
+> 状态缺页路径现在已经整体移到 `spin_lock(&mm->lock)` **之前**运行：
+> `mm_fault_from_status()`（`fault.c:1214-1217`）的源码注释明写 "that is also why
+> this runs BEFORE spin_lock(&mm->lock): it touches no VMA, so there is nothing
+> there for that lock to be protecting"（`fault.c:1196-1199`）。VMA 路径现在在
+> `fault.c:1058` 取 `spin_lock(&mm->lock)`、`fault.c:1136` 释放，状态路径已不在
+> 这个区间内。下面记录的是**改造之前**的状态。
+
+当时的现状：`kernel/mm/fault.c` 在 800 行取 `spin_lock(&mm->lock)`、1119 行才释放，
 而完全不查 VMA 的状态缺页路径（963-1010）就嵌在这个区间内部。
-因此论文最核心的那条主张（「缺页不碰 VMA 锁」）**目前并未实现**：
+因此当时论文最核心的那条主张（「缺页不碰 VMA 锁」）**尚未实现**：
 状态路径确实不查 VMA，但它仍然**在 mm 全局锁下运行**，
 所有并发缺页（多核、多线程）会在 `mm->lock` 上排队。
 这与 §10.33 测出的「性能中性」是一致的：拿不到 VMA 查找的收益，
@@ -4881,18 +5017,25 @@ p 值最小 0.070，没有一项达到 0.05；离散 32%–72% 仍远大于臂�
 
 #### 前置条件已经查清：卡点是 `mm->rss` 的数据竞争
 
+> **本段所述现状已被 §11.6 推翻（2026-10-02，`feat/mm-single-level`）：**
+> `mm->rss` 已改名 `mm->rss_atomic`（`vm.h:349`）并由 `mm_rss_*` helper 原子访问，
+> 42 处 / 19 文件全部改写完毕。下面三条记录的是**改造之前**的状态。
+
 要让状态路径在 `mm->lock` 之外运行，必须先解决它顺带要更新的那些计数：
 
-* `mm->rss` 是普通 `size_t`（`vm.h:227`），不是原子量；
+* `mm->rss` 是普通 `size_t`（当时的 `vm.h:227`；**现已改为原子字段 `rss_atomic`，
+  见 `vm.h:344-349`**），不是原子量；
 * `fault.c` 里有 **12 处** `rss++` / `rss +=`，`cow.c` 另有 3 处；
-* 状态路径自己也要 `mm->rss++`（`fault.c:1010` 附近），
+* 状态路径自己也要 `mm->rss++`（当时的 `fault.c:1010` 附近；**现在是一句
+  `mm_rss_add(mm, 1)`，见 `fault.c:1260`**），
   而它必须在不持 `mm->lock` 的情况下做这件事；
-* 更要紧的是读侧：`cg_mem.c:125` 在 **OOM 选 victim** 时读 `t->mm->rss`，
+* 更要紧的是读侧：`cg_mem.c:125` 在 **OOM 选 victim** 时读 `t->mm->rss`
+  （**现已改为 `mm_rss_get(t->mm)`，见 `cg_mem.c:125`**），
   而那段代码只持 `proc_lock`，不持 `mm->lock`：
   ```c
   uint64_t pflags = spin_lock_irqsave(&proc_lock);
   ...
-  size_t task_rss = t->mm ? t->mm->rss : 0;
+  size_t task_rss = t->mm ? t->mm->rss : 0;   /* 现为 mm_rss_get(t->mm); 见 cg_mem.c:125 */
   int score = (int)task_rss + t->policy.oom_score_adj;
   ```
   **这已经是潜在的数据竞争**（读者在 `proc_lock` 下，写者在 `mm->lock` 下，
@@ -4906,7 +5049,7 @@ p 值最小 0.070，没有一项达到 0.05；离散 32%–72% 仍远大于臂�
    即使不做状态路径改造也该做。
 2. 再把状态路径的临界区从 `mm->lock` 移到页表游标锁之下。
    这一点设计上前途是通的：状态路径只碰 per-PTE 元数据 + PT 项，
-   而这些由 `mm_addrspace_lock()` 的 PT 页锁保护（`pt.h:29-43` 的注释正是这个契约）；
+   而这些由 `mm_addrspace_lock()` 的 PT 页锁保护（`pt.h:29-47` 的注释正是这个契约）；
    它不需要 VMA 锁，因为它按设计不读 VMA 列表。
    真正要小心的是**与 `munmap`/`mremap` 的页表拆表并发**：
    `mm_pt_read_enter()` 的读侧令牌必须覆盖「判断 ANON_VIRT」到「写入 PT 项」全程，
@@ -4939,8 +5082,10 @@ p 值最小 0.070，没有一项达到 0.05；离散 32%–72% 仍远大于臂�
 
 **(b) 读-改-写带夹取**——**这才是难点，简单原子操作是错的**：
 ```c
-mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;   /* munmap.c:125,246 madvise.c:71,91 */
-mm->rss = mm->rss ? mm->rss - 1 : 0;                 /* oom.c:159 */
+/* 改造前： */
+mm->rss = (mm->rss > pages) ? mm->rss - pages : 0;   /* munmap.c:126,283 madvise.c:86,105 */
+mm->rss = mm->rss ? mm->rss - 1 : 0;                 /* oom.c:165 */
+/* 改造后：这几处各自变成一句 mm_rss_sub_clamped(...)（同上行号） */
 ```
 这 5 处必须写成 CAS 循环才能既原子又不会下溢：
 ```c
@@ -4957,9 +5102,9 @@ for (;;) {
 （§10.74 的 `cg_mem.c:125`），下溢会让 OOM 选出**错误的牺牲者**，这是安全性方向的真实回归，
 不是风格问题。
 
-**(c) 初始化/清零**——`vm.c:514,709`、`proc.c:605`、`exec.c:640`（release store 即可）。
+**(c) 初始化/清零**——`vm.c:538,724`、`proc.c:603`、`exec.c:648`（release store 即可）。
 
-**(d) 跨锁读取**——`fork.c:267`（在 `proc_lock` 下打印）、`cg_mem.c:125`（OOM 选 victim，
+**(d) 跨锁读取**——`fork.c:313`（在 `proc_lock` 下打印）、`cg_mem.c:125`（OOM 选 victim，
 也在 `proc_lock` 下）。这两处必须用 acquire 语义读到一致值，
 否则只是把竞争从「非原子」换成「原子但撕裂」。
 
@@ -5031,7 +5176,7 @@ cursor 事务内。剩下的差距**只有一条**：这段代码仍然嵌在 `m
 **这句话是错的**，而且它就是一次外部协议评审给出错误结论的唯一起点——评审据此
 判定"实现 ADV 的后代 DFS 只会是性能倒退，建议不做"。逐条核对代码：
 
-* 下降循环对**已存在的中间节点不取任何锁**（`pt.c:651-655` 直接 `continue`）。
+* 下降循环对**已存在的中间节点不取任何锁**（`pt.c:1676-1684` 直接 `continue`）。
   `mcs_lock` 只出现在"分配缺失中间节点"分支里，并在同一轮迭代立刻释放。
 * `mm_cursor_replace()` 写的是**叶子 PTE**（`cursor_leaf_slot()` +
   `mm_pt_note_present(..., 0, ...)`），而它手里只有覆盖节点那一把锁。
@@ -5072,7 +5217,7 @@ if (base + span >= end)
 | 路径 | 窗口 | 覆盖层 |
 |---|---|---|
 | 单页缺页 | 1 页 | **0** |
-| 匿名 fault-around（`fault.c:624`，`ANON_FAULT_AROUND_PAGES = 4`） | 4 页 | **1** |
+| 匿名 fault-around（`fault.c:764`，`ANON_FAULT_AROUND_PAGES = 4`） | 4 页 | **1** |
 | 文件 fault-around（`PAGE_CACHE_FAULT_AROUND_PAGES = 16`） | 16 页 | **1** |
 
 所以**宽 cursor 是常规路径，不是假想**。宽（level 1）与窄（level 0）写同一张
@@ -5117,7 +5262,7 @@ if (base + span >= end)
 真正需要改写的是 **42 处**。
 
 §10.75 漏掉的文件：`abi/native/sys_native_task.c`（2 处读）、
-`abi/linux/sys_mm.c:291`（**夹取式读-改-写，且在 ABI 层**）、
+`abi/linux/sys_mm.c:292`（**夹取式读-改-写，且在 ABI 层**）、
 `fs/procfs/procfs_render.c`（3 处读）、`proc/exit.c`（2 处读）、
 `proc/fork.c`（1 处读）、`ipc/userfaultfd.c`（2 处）、
 `drivers/gpu/framebuffer.c`（2 处）。
@@ -5158,8 +5303,8 @@ if (base + span >= end)
 
    > **本段已过期（2026-10-03，`feat/mm-complete` 更正）。** 下面这段把它描述成
    > "裸遍历、完全无锁"是不成立的：`pt_unmap_leaf()` 现在在下降的每一级对自己要
-   > 写的那张页表页取节点锁（`mm.c:506` 的 `mm_pt_node_lock(path[level])`，以及
-   > 拆分路径的 `:528`），锁序由 `check-mm-pt-lock-order` 门禁断言。它仍然不是
+   > 写的那张页表页取节点锁（`mm.c:507` 的 `mm_pt_node_lock(path[level])`，以及
+   > 拆分路径的 `:529`），锁序由 `check-mm-pt-lock-order` 门禁断言。它仍然不是
    > cursor，仍然只靠 `mm->lock` 之外的那把节点锁互斥，这一条仍然成立。
    > 原文那句"得到 **0**"是在改动之前跑的，改动之后同一命令返回非零。
    > 保留原文是为了不假装当时没有量过：**在门上写清楚"什么时候量的"，比只留结论
@@ -5241,14 +5386,14 @@ if (base + span >= end)
 
    **一个曾经看起来是阻塞点、实际不是的问题**：拆成两段之后，慢段开头那个
    "PTE 已存在就返回 -1" 的检查会在快段与 `spin_lock(&mm->lock)` 之间变得可达
-   ——另一个线程可能刚好把同一页映射好了。这不需要新处理：`core/trap.c:373`
+   ——另一个线程可能刚好把同一页映射好了。这不需要新处理：`core/trap.c:412`
    在 `handle_demand_fault_access()` 返回非 0 时，本来就会落到
-   `handle_present_page_fault()`，而那里的注释（377-381）写明的正是
+   `handle_present_page_fault()`，而那里的注释（`core/trap.c:416-420`）写明的正是
    "another thread completes the same mapping between our first present-PTE
    check and a failed/redundant demand-fault attempt"。这条重试路径已经存在。
 
    仍需注意：`pfa_alloc_page()` 目前是在 cursor（一个自旋锁）之下调用的
-   （`fault.c:1124`），这是既有做法；把这段移出 `mm->lock` 之后，它就成了
+   （`fault.c:1244`），这是既有做法；把这段移出 `mm->lock` 之后，它就成了
    页表锁下的唯一分配点，是否会睡眠要单独复核。
 
 2. **上层节点统一状态标记**（论文 §3.3 的
@@ -5293,25 +5438,26 @@ if (base + span >= end)
    **机制（已按代码结构确认，不再是假设）**：
 
    ```
-   sys_mmap            sys_mm.c:95      proc_mmap(...)
-     -> proc_mmap      proc.c:776       spin_lock_irqsave(&t->mm->lock)  <-- _irqsave
-       -> mm_mmap_locked  mmap.c:88
-         -> mm_pt_provision_anon  mmap.c:195
+   sys_mmap            sys_mm.c:96      proc_mmap(...)
+     -> proc_mmap      proc.c:821       spin_lock_irqsave(&t->mm->lock)  <-- _irqsave
+       -> mm_mmap_locked  mmap.c:191
+         -> mm_pt_provision_anon  mmap.c:301
            -> mm_addrspace_lock    -> frame_alloc()
              -> pfa_alloc_flags(0, can_reclaim=1)
                -> oom_try_reclaim() -> proc_force_exit(victim)
                  -> 受害者 VMA 拆解 -> 拿 mm->lock
    ```
 
-   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:404）。
-   实际路径**不经过**它——`proc_mmap` 自己取锁（proc.c:776）并直接调
+   （链条更正：我在前一条 commit 里把中间节点写成了 `mm_mmap`（mmap.c:505）。
+   实际路径**不经过**它——`proc_mmap` 自己取锁（proc.c:821）并直接调
    `mm_mmap_locked`。`mm_mmap` 是另一个同样纪律的包装，不在本路径上。
-   取锁点是 `proc.c:776`，已核对。）
+   取锁点是 `proc.c:821`，已核对。）
 
    **一次被自己的实验否掉的假设（值得留着）**：我一度怀疑 `mm_anon_provisioned: 0`
    是我把 PT 页分配改成不可回收（`frame_alloc_nr()`）造成的——因为
    `mm_pt_provision_anon()` 里 `if (r < 0) return r;` 会在
-   `mm_addrspace_lock()` 失败时**跳过计数器**（pt.c:1208 / 1230）。
+   `mm_addrspace_lock()` 失败时**跳过计数器**（`pt.c:2129` 早退 /
+   `pt.c:2151` 的 `a20_perf_add` 是唯一计数点）。
    把那两处改回可回收的 `frame_alloc()` 重跑，**三个计数器仍然是 0**。
    所以这个改动**不是**原因，它是通过验证的、保留。
 
@@ -5319,9 +5465,9 @@ if (base + span >= end)
    IRQ 关闭的自旋锁里。若受害者是自己的 mm，就是持 `mm->lock` 自杀。这与观测
    完全吻合：持有者 PC 落在 `sys_mmap`，等待者 PC 落在 `trap_handler`，锁名 `mm`。
 
-   我先前两次 grep 都没找到这条链，是因为我在 `mm_mmap_locked`（88-195）**内部**
-   找 `spin_lock(&mm->lock)`，而锁是由**调用者** `mm_mmap`（404）持有的；
-   `mmap.c:190` 的注释本身就写着「It runs under mm->lock, so the order
+   我先前两次 grep 都没找到这条链，是因为我在 `mm_mmap_locked`（191-305）**内部**
+   找 `spin_lock(&mm->lock)`，而锁是由**调用者** `mm_mmap`（505）持有的；
+   `mmap.c:296` 的注释本身就写着「It runs under mm->lock, so the order
    mm->lock -> page-table lock」。看注释比 grep 快。
 
    **为什么以前不炸，摘锁后才炸**：这是既存缺陷，但要两个条件同时成立。
@@ -5339,7 +5485,7 @@ if (base + span >= end)
    分配提到 `mm_mmap` 取 `mm->lock` **之前**。
 
    **一个让方案唯一化的关键事实（读注释读出来的）**：`mm_pt_provision_anon()`
-   在 `mmap.c:195` 是以 `(void)` 调用的，返回值被丢弃，而且它上面 188-189 行的
+   在 `mmap.c:301` 是以 `(void)` 调用的，返回值被丢弃，而且它上面 294-297 行的
    注释写明「Provisioning is best effort: a range too large to provision eagerly
    just keeps the VMA-based fault path, which remains correct」。
 
@@ -5373,9 +5519,9 @@ if (base + span >= end)
 
    我一度判定预标记从未发生、快段在 `smoke-mm-pt-race` 里是死代码，理由是
    `mm_anon_provisioned: 0` / `mm_fault_from_status: 0`。**那个 0 是测量装置的
-   产物，不是系统的事实**：`a20_perf_format()`（`core/perf.c:94`）在渲染
+   产物，不是系统的事实**：`a20_perf_format()`（`core/perf.c:109`，赋值在 `:115`）在渲染
    `/proc/a20/perf` 时先 `g_a20_perf_enabled = 1` **再**取快照，而
-   `a20_perf_add()`（`include/core/perf.h:108`）在 `g_a20_perf_enabled == 0`
+   `a20_perf_add()`（`include/core/perf.h:138`，判定在 `:141`）在 `g_a20_perf_enabled == 0`
    时直接 return。所以在负载**之后只读一次**，所有计数器必然是 0——与负载做了什么
    无关。
 
@@ -5388,7 +5534,7 @@ if (base + span >= end)
    mm_fault_from_status: 0       mm_fault_from_status: 778
    ```
 
-   即快段在这次运行里执行了 778 次。文档 4508 行更早的一次运行也记录了
+   即快段在这次运行里执行了 778 次。§10.72（文档 4909 行）更早的一次运行也记录了
    `mm_anon_provisioned: 331536` / `mm_fault_from_status: 164676`，与之一致。
 
    **两个教训**：(1) 我把「我测到的 0」当成了「系统的 0」，而且是在已经 commit
@@ -5470,7 +5616,8 @@ if (base + span >= end)
    * 陷阱入口 `trap.S:107` 的 `csrc sstatus, t1` 清 SIE，所以缺页跑在**中断关闭**
      的上下文里；
    * `arch_cpu_relax()` 在 riscv64 是裸 `nop`（`cpu.h:21`）；
-   * `rv64_ipi_tlb_flush_handler()`（`board.c:168`）**不取任何锁**，只做
+   * `rv64_ipi_tlb_flush_handler()`（`kernel/platform/qemu-virt-riscv64/board.c:139`）
+     **不取任何锁**，只做
      `sfence.vma` + ack ——所以目标 CPU 若能接到软中断，它 ack 时不需要拿页表锁；
    * `rv64_smp_remote_tlb_flush()` 的等待循环注释明确要求「targets must service
      the soft IRQ」，且它自己在等之前会重开中断；
@@ -5520,8 +5667,10 @@ if (base + span >= end)
    已排除的读法：
 
    * **不是 `mm_addrspace_lock()` 漏解锁**。逐条核对了它的返回路径：每次
-     `continue` 前都 `mcs_unlock`，两处 `return 1` 之前也都不持锁（第 54 行的
-     `return 1` 在本轮还没取任何锁）。
+     `continue` 前都 `mcs_unlock`，两处 `return 1` 之前也都不持锁
+     （当时的「第 54 行」那句 `return 1` 现在是 `pt.c:1690`：走「大页已覆盖该区间、
+     调用方须先 demote」那条分支，此时还没取任何锁；另一处是 `pt.c:1751`，
+     在 `mcs_unlock(pm)` + `mm_pt_read_exit(mm)` 之后才返回）。
    * **不是"远程 shootdown 在持节点锁时发出"**。`pt.c` 里完全没有 TLB flush 调用，
      `mm_tlb_invalidate_finish()` 只在 `munmap.c`/`madvise.c`/`oom.c` 被调用。
 
@@ -5817,14 +5966,13 @@ mprotect 成 W|X，然后**往里写**。所以 `strip` 也救不了——实测
 
 #### 阻塞点不是 8 位，是"预留态只有一种 class"
 
-`fault.c:516` 的分派入口读 `vma->vm_flags`（`VM_FILE` / `VM_SHARED` / `VM_VMO`）来
-选分支。status 字节理论上能回答同样的问题（`MM_ST_FILE_PRIVATE` /
+`fault.c:627`（`VM_FILE`/`:648` 的 `VM_SHARED`/`:702` 的 `VM_VMO`）的分派入口读
+`vma->vm_flags` 来选分支。status 字节理论上能回答同样的问题（`MM_ST_FILE_PRIVATE` /
 `MM_ST_FILE_SHARED` / `MM_ST_VMO` / `MM_ST_ANON_MAPPED` 四类正好对应），**但只在
 已经缺过页之后才成立**：
 
 * 预留是**默认关的**（`a20.anonprov=0`，`smoke-mm-pt-race` 得显式传 4096 才打开）。
-* 打开时 `mmap.c:195` 对**所有** mmap 调 `mm_pt_provision_anon()`，一律写
-  `MM_ST_ANON_VIRT`。
+* 打开时 `mmap.c:301` 调 `mm_pt_provision_anon()`，一律写 `MM_ST_ANON_VIRT`。
 
 所以一个**从未缺页的 MAP_PRIVATE 文件映射，status 是 `MM_ST_INVALID`；开了预留也
 只是 `MM_ST_ANON_VIRT`，而这对文件映射是错的**——它声称这一页将来是匿名页。
@@ -5833,9 +5981,10 @@ mprotect 成 W|X，然后**往里写**。所以 `strip` 也救不了——实测
 缺页的匿名页"**。它比"8 位满了"窄，因为 class 字段本身已经装得下答案，缺的只是
 在**映射时刻**把答案写进去，以及装下答案指向的那个对象。
 
-顺带一条已经存在的缺陷：`mmap.c:195` 把文件映射也标成 `MM_ST_ANON_VIRT`。今天无害，
-因为分派读 VMA；**P6 一落地它立刻变成错页**——和 §12.3(2) 的 COW 状态不同步同一
-类问题，只是还没被触发。
+顺带一条**已修**的缺陷：`mmap.c:301` 原先把文件映射也标成 `MM_ST_ANON_VIRT`。
+它当时无害，因为分派读 VMA；**P6 一落地它立刻变成错页**——和 §12.3(2) 的 COW
+状态不同步同一类问题。现在调用点已加守卫
+`if ((vmf & VM_ANON) && !(vmf & VM_SHARED))`（`mmap.c:300`），文件映射不再被预留。
 
 #### 需要的数据结构：按 PT 页懒分配的段表
 
@@ -6751,9 +6900,9 @@ KERNEL PANIC: mm_seg_put: use-after-free, mapping record 0xffffffc0bf4876c0 magi
 `magic=0x0` 说明它**从来没被初始化过**，不是被释放两次。这与 put 侧无关，于是改成
 在 `seg_free` 里记 `__builtin_return_address(0)`——回来的 `freed_by=0x0`，证明
 `seg_free` 从未在这个地址上跑过。于是定位到四个用裸 `kcalloc` 而不是构造函数的地方：
-`vdso.c:192,193`（vDSO 与 vvar，它们进 `mm->mmap`、会被索引，因此**每次 exec 必崩**）、
-`elf.c:164`、`sysv_shm.c:324`、`io_uring.c:136`。四个全部改走 `mm_seg_new()`。
-`vm.c:651` fork 的暂存池**保持**裸 `kcalloc`（`*cv = *pv` 之前它完全不作为记录存在），
+`vdso.c:191,192`（vDSO 与 vvar，它们进 `mm->mmap`、会被索引，因此**每次 exec 必崩**）、
+`elf.c:164`、`sysv_shm.c:324`、`io_uring.c:157`。四个全部改走 `mm_seg_new()`。
+`vm.c:657` fork 的暂存池**保持**裸 `kcalloc`（`*cv = *pv` 之前它完全不作为记录存在），
 并加了注释说明为什么不改。
 
 #### 13.18.5 证据

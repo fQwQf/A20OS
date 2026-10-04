@@ -29,6 +29,8 @@ sudo apt-get install -y \
 注意两点：
 
 - LoongArch64：Ubuntu 24.04 的 apt 源没有 `gcc-loongarch64-linux-gnu`，需要单独安装 Loongson 官方交叉工具链。
+- LoongArch32（LA32R）：**发行版完全没有**这个包，需要按 [platforms/loongarch32.md](platforms/loongarch32.md) 从源码构建 cloudspurs 的 binutils/gcc la32 分支。没有它就跑不了 `make check-loongarch32-bringup`，该门禁也因此只在装了自建工具链的本机跑，不进 CI。
+- arm32：需要 `gcc-arm-linux-gnueabihf`（Debian/Ubuntu 有），`tools/ci/Dockerfile` 会装它。ARMv7-M 另走 STM32 目标，工具链不同。
 - Python：Makefile 在检测到 conda 时通过 `conda run -n a20os python` 调用 Python，请创建名为 `a20os` 的 conda 环境（Python 3.11）。
 - `grub-pc-bin` / `grub-efi-amd64-bin` / `xorriso`：只有 x86_64 瘦客户机部署用得到。`tools/a20 package x86_64-pc` 生成 GRUB rescue ISO 时，`grub-mkrescue` 会调用 `xorriso`；缺了它会在打包这一步报 `grub-mkrescue: 未找到 xorriso`。riscv64/aarch64 板和 QEMU 虚拟机都不需要这三个包。
 

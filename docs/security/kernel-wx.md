@@ -117,7 +117,7 @@ arm32 / riscv32 / loongarch32 / armv7m 属 32 位或 MCU 平台，内核映像
 
 ## 验证
 
-- 各架构 `kernel-only` 零警告构建（`-Werror`）；
+- 六个 hosted 架构 `kernel-only` 零警告构建（`-Werror`）：riscv64、riscv32、loongarch64、aarch64、x86_64、ppc64le（2026-10-04 实测）。arm32 与 loongarch32 本机无交叉工具链、未在此复核，由 CI 与 loongarch32 专用门禁覆盖；armv7m 由 STM32 目标覆盖。
 - `make smoke-riscv64`、`make smoke-abi-linux`、`make smoke-x86_64`、
   `make smoke-aarch64`、`make smoke-smp-bringup`（riscv64 NR_CPUS=2）PASS；
 - 引导日志可见 `[KXAN] <arch>: text=ROX rodata=RO data=RW+NX dmap=NX`

@@ -20,6 +20,9 @@
  *     exist on a physical machine, so every a20.* knob was unreachable.  The
  *     multiboot info block is now read first (see firmware.c).
  *
+ * Verified: builds clean under -Werror (check-x86_64-pc-build).  NOT run on
+ * hardware.  See docs/platforms/x86_64-pc.md.
+ *
  * RAM is not declared here: x86_64 discovers it from the multiboot memory map,
  * so the values below are only the window the boot page tables cover.
  */

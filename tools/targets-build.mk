@@ -17,7 +17,7 @@ all:
 
 check-kernel-build: $(DEFAULT_KERNEL_CHECK_TARGETS)
 
-check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build check-lao64-board-builds check-arm-board-builds
+check-kernel-build-all: $(foreach a,$(SUPPORTED_HOSTED_ARCHES),check-$(a)-bringup) check-loongarch32-bringup check-visionfive2-build check-ls2k1000-build check-lao64-board-builds check-arm-board-builds check-x86_64-pc-build
 
 # Physical-board build gates: keep the VisionFive 2 and LS2K1000 sources
 # building on every commit.  The generic profile is the boot substrate; the
@@ -33,7 +33,7 @@ check-visionfive2-build:
 #
 # They are build-only on purpose.  None of these boards has been powered up, so
 # a gate asserting a boot would be asserting something unverified.
-.PHONY: check-lao64-board-builds check-arm-board-builds
+.PHONY: check-lao64-board-builds check-arm-board-builds check-x86_64-pc-build
 check-lao64-board-builds:
 	$(MAKE) ARCH=riscv64 BOARD=licheerv-nano ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 	$(MAKE) ARCH=riscv64 BOARD=milk-v-duo ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded NOMMU=1 RAMFS_USER=1 CONFIG_SWAP=0 kernel-only
@@ -41,6 +41,15 @@ check-lao64-board-builds:
 check-arm-board-builds:
 	$(MAKE) ARCH=aarch64 BOARD=rk3328 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
 	$(MAKE) ARCH=aarch64 BOARD=sun50i-h616 ABI=$(ABI) BRINGUP=1 DRIVER_DEPLOYMENT=embedded kernel-only
+
+# x86_64-pc was the fifth board whose doc claims "build-verified" while no
+# target rebuilt it, which is exactly the drift the comment above says these
+# gates exist to prevent.  Build-only for the same reason: no physical PC has
+# run this, so a gate asserting a boot would assert something unverified.
+# The GRUB rescue ISO it packages is covered separately by the x86_64-pc
+# packaging target, not here.
+check-x86_64-pc-build:
+	$(MAKE) ARCH=x86_64 BOARD=x86_64-pc ABI=$(ABI) BRINGUP=1 kernel-only
 
 # VisionFive 2 on-hardware boot artifacts (see docs/platforms/visionfive2-boot.md).
 # vf2-firmware builds OpenSBI + U-Boot SPL from pinned upstream sources;

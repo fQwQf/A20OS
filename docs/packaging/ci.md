@@ -105,15 +105,20 @@ smoke-riscv64（与 build 并行，riscv64，QEMU TCG）：
 
 ## CI 的内核构建矩阵
 
-`SUPPORTED_HOSTED_ARCHES` 是七架构的单一真源，但 CI 只构建其中六个
-（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 riscv32 ppc64le`，
-由 `make print-ci-kernel-arches` 解析给 `strategy.matrix`）。两个架构被显式
-排除，理由写在 `Makefile` 的 `CI_KERNEL_ARCHES` 注释里，不是静默丢弃：
+`SUPPORTED_HOSTED_ARCHES` 是七架构的单一真源，CI 逐架构构建的也是这七项
+（`CI_KERNEL_ARCHES` = `riscv64 loongarch64 aarch64 x86_64 arm32 riscv32 ppc64le`，
+由 `make print-ci-kernel-arches` 解析给 `strategy.matrix`）。唯一在集合之外的是
+`loongarch32`，理由写在 `Makefile` 的 `CI_KERNEL_ARCHES` 注释里，不是静默丢弃：
 
 | 架构 | 排除原因 |
 |------|----------|
-| `arm32` | 工具链在镜像里（`gcc-arm-linux-gnueabihf`），但 `kernel/mm/fault.c` 使用了 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口，而 `kernel/include/mm/pt.h` 只在 `ARCH_HAS_PGTABLE_OPS` 下声明它们，`Makefile` 又刻意不给 arm32 这个宏（它有自己的短描述符页表后端 `kernel/arch/arm32/mm/pgtbl.c`）。`check-arm32-bringup` 当前编译不过。修复属于内核代码，所以在修好之前把 arm32 放进 CI 只会让 CI 一直红着。 |
 | `loongarch32` | LA32R 没有发行版交叉工具链可装：Debian 不提供 loongarch32 gcc，项目是从源码构建 cloudspurs 的 binutils/gcc la32 分支（[platforms/loongarch32.md](../platforms/loongarch32.md)）。`tools/ci/Dockerfile` 无法 apt-get 一个上游不存在的包。它同时也不是 hosted 架构，因此不在 `SUPPORTED_HOSTED_ARCHES` 里，`check-kernel-build-all` 中单独的 `check-loongarch32-bringup` 仍只在本机跑。 |
+
+`arm32` 曾以"编译不过"为由被排除（`kernel/mm/fault.c` 曾直接调用只在
+`ARCH_HAS_PGTABLE_OPS` 下声明的 `mm_addrspace_lock()` / `mm_cursor_*` 事务接口，
+而该宏刻意不给自带短描述符页表后端的 arm32）。该缺陷已修复——两处故障路径改为经
+`fault.c` 的架构 hook 调用，`Makefile` 也没有放宽 `pt.h` 的守卫——所以 arm32 现在
+在 CI 列表内。若 arm32 在 CI 里变红，那是新的真实回归，不是被豁免的状态。
 
 `kernel-build` 与 `build` 分开不是重复：`build` 要产出发布打包产物
 （apk 仓库 + world 镜像），因此需要可用的用户态，而 riscv32 的用户态当前
