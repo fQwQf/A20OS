@@ -112,16 +112,31 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
     }
 
     if (!shared && (*src & (PTE_W | PTE_COW))) {
-        *src = arch_pte_leaf(pa, flags);
-        mm_tlb_note_change(parent, base, size);
-        /* The parent's PTE just lost W and gained COW; the status has to
-         * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
-         * status-driven fault would keep installing the parent's old
-         * write permission over a page the child now shares. */
+        /* The rewrite and its status sync run under the owning table's node
+         * lock, and the PTE is RE-CHECKED under it: the lockless COW fault
+         * (mm_cow_from_status) replaces a present COW leaf while holding
+         * exactly this lock and nothing else -- it never takes mm->lock, so
+         * mm->lock excludes nothing there.  Rewriting from the stale *src
+         * would resurrect a frame the process no longer maps while the
+         * frame reference taken above belongs to the child. */
         pte_t *stab = mm_pt_leaf_table(parent->pgdir, base);
         if (stab)
-            (void)mm_pt_sync_status(stab, level, arch_pt_vpn(base, level),
-                                    mm_fork_page_class(parent, base));
+            mm_pt_node_lock(stab);
+        int still = (*src & PTE_V) && (*src & (PTE_W | PTE_COW)) &&
+                    arch_pte_addr(*src) == pa;
+        if (still) {
+            *src = arch_pte_leaf(pa, flags);
+            mm_tlb_note_change(parent, base, size);
+            /* The parent's PTE just lost W and gained COW; the status has to
+             * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
+             * status-driven fault would keep installing the parent's old
+             * write permission over a page the child now shares. */
+            if (stab)
+                (void)mm_pt_sync_status(stab, level, arch_pt_vpn(base, level),
+                                        mm_fork_page_class(parent, base));
+        }
+        if (stab)
+            mm_pt_node_unlock(stab);
     }
     mm_rss_add(child, size / PAGE_SIZE);
     return 0;
@@ -200,16 +215,27 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
     }
 
     if (!shared && (*src_pte & (PTE_W | PTE_COW))) {
-        *src_pte = arch_pte_leaf(pa, flags);
-        mm_tlb_note_change(parent, va, leaf_size);
-        /* See mm_fork_clone_page(): the parent's status must follow the PTE
-         * it just rewrote.  A huge leaf's slot lives in its own table at its
-         * own level -- mm_pt_leaf_table() returns that owner for both cases,
-         * and the index must be taken at the leaf's level. */
+        /* Same node-lock discipline as mm_fork_clone_page(): re-check under
+         * the owning table's lock, because the lockless COW fault replaces
+         * present COW leaves while holding exactly this lock. */
         pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
         if (stab)
-            (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
-                                    mm_fork_page_class(parent, va));
+            mm_pt_node_lock(stab);
+        int still = (*src_pte & PTE_V) && (*src_pte & (PTE_W | PTE_COW)) &&
+                    arch_pte_addr(*src_pte) == pa;
+        if (still) {
+            *src_pte = arch_pte_leaf(pa, flags);
+            mm_tlb_note_change(parent, va, leaf_size);
+            /* The parent's status must follow the PTE it just rewrote.  A
+             * huge leaf's slot lives in its own table at its own level --
+             * mm_pt_leaf_table() returns that owner for both cases, and the
+             * index must be taken at the leaf's level. */
+            if (stab)
+                (void)mm_pt_sync_status(stab, level, arch_pt_vpn(va, level),
+                                        mm_fork_page_class(parent, va));
+        }
+        if (stab)
+            mm_pt_node_unlock(stab);
     }
     mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);
     return 0;

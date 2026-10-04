@@ -56,6 +56,11 @@
  *   about MAP_PRIVATE, whose COW conversion is specified at
  *   handle_cow_fault_locked() below.
  */
+
+/* COW breaks served by the lockless slice (mm_cow_from_status).  See
+ * fault.h -- plain global so the shutdown audit can assert non-vacuity. */
+uint64_t mm_cow_from_status_count;
+
 /*
  * Install one mapping through the transactional cursor.  Every fault-path PTE
  * write goes through here, so the per-PTE status and the hardware entry are
@@ -1158,6 +1163,119 @@ static int handle_file_fault(task_t *t, uint64_t page_va,
 }
 #endif
 
+/*
+ * MM_COW_FROM_STATUS -- the lockless slice of the COW fault.
+ *
+ * A write fault whose leaf says class MM_ST_ANON_MAPPED with the COW bit is
+ * a private anonymous page fork made shared; its private copy installs
+ * without mm->lock, under the leaf lock alone:
+ *   - the class answers "anonymous" (file pages need the page-cache branch
+ *     and VMO pages answer to the VMO, so both decline here);
+ *   - the PTE is re-verified as still COW/still this frame UNDER the leaf
+ *     lock by mm_cursor_replace_if_cow(), which is the same lock fork's
+ *     parent-side rewrite and mprotect's prot rewrite now take;
+ *   - the refcount decision runs under pfa.lock, and the frame is pinned
+ *     there, so reclaim cannot free it out from under the copy;
+ *   - rc==1 declines: the in-place upgrade must exclude fork, which
+ *     serialises under mm->lock.
+ *
+ * Copying a frame that turned out exclusive is a waste, never a bug: the
+ * COW bit only means "was shared when we looked", and every sharer copies
+ * or upgrades under its own exclusion.
+ */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+static int mm_cow_from_status(task_t *t, mm_struct_t *mm,
+                              uint64_t page_va, uint64_t stval)
+{
+    mm_cursor_t cur;
+    if (mm_addrspace_lock(mm, page_va, page_va + PAGE_SIZE, &cur) != 0)
+        return 0;
+
+    uint8_t cls_byte = 0;
+    paddr_t old_pa = 0;
+    int already = mm_cursor_query(&cur, page_va, &cls_byte, &old_pa);
+    if (!already || MM_ST_GET_CLASS(cls_byte) != MM_ST_ANON_MAPPED ||
+        !(cls_byte & MM_ST_COW_BIT) ||
+        mm_cursor_safe_test(&cur, page_va, MM_SAFE_UFFD))
+        goto decline;
+
+    pfn_t old_pfn = phys_to_pfn(old_pa);
+    if (!pfn_valid(old_pfn))
+        goto decline;
+
+    /* Refcount decision + pin under pfa.lock.  Node-then-pfa is the order
+     * the cursor already establishes (mm_addrspace_lock holds node locks
+     * while the caller allocates).  The pin is a manual refcount increment
+     * rather than frame_get(): frame_get() takes pfa.lock itself, and
+     * nesting it inside this critical section deadlocks on the very lock
+     * the LOCK-STALL report pointed at.  The increment is exactly what
+     * frame_get() does under the same lock, minus its zero-ref panic --
+     * unreachable here, because rc>1 was read in the same critical
+     * section. */
+    uint64_t pfa_flags = spin_lock_irqsave(&pfa.lock);
+    uint16_t rc = pfa.meta[old_pfn].refcount;
+    if (rc <= 1) {
+        /* rc==0 is the corrupted state the locked path panic-diagnoses;
+         * rc==1 wants the in-place upgrade, which must exclude fork. */
+        spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+        goto decline;
+    }
+    pfa.meta[old_pfn].refcount++;
+    spin_unlock_irqrestore(&pfa.lock, pfa_flags);
+
+    /* can_reclaim = 0, for the same reason the anon fast path insists on
+     * it: a reclaiming allocation reaches oom_try_reclaim(), whose victim
+     * teardown wants the page-table node locks this path holds. */
+    pfn_t new_pfn = pfa_alloc_flags(0, 0);
+    if (new_pfn == PFN_NONE) {
+        frame_put(old_pfn);
+        goto decline;
+    }
+    if (cg_mem_charge(t->cgroup, 1) != 0) {
+        frame_put(new_pfn);
+        frame_put(old_pfn);
+        goto decline;
+    }
+    memcpy(pfn_to_virt(new_pfn), pfn_to_virt(old_pfn), PAGE_SIZE);
+
+    paddr_t replaced = 0;
+    int r = mm_cursor_replace_if_cow(&cur, page_va, old_pa,
+                                     pfn_to_phys(new_pfn), MM_ST_ANON_MAPPED,
+                                     &replaced);
+    mm_cursor_unlock(&cur);
+    if (r != 0) {
+        /* State moved underneath us (fork rewrote it, another thread of
+         * this mm broke the COW first, or the page was unmapped).  The
+         * pinned frame is spare and so is the copy; the fault is resolved
+         * either way -- the retried store either succeeds on the new state
+         * or re-faults into the mm->lock path. */
+        cg_mem_uncharge(t->cgroup, 1);
+        frame_put(new_pfn);
+        frame_put(old_pfn);
+        return 1;
+    }
+
+    /* Remote shootdown BEFORE the old frame can be recycled: the pin holds
+     * the frame alive until every CPU has dropped the stale translation
+     * (the same contract handle_cow_fault's wrapper implements with
+     * mm_tlb_hold_frame).  Two puts then release pin + our mapping's
+     * reference. */
+    mm_tlb_shootdown_page(mm, stval);
+    frame_put(old_pfn);
+    frame_put(old_pfn);
+
+    a20_perf_count(A20_PERF_MM_COW_FAULTS);
+    a20_perf_count(A20_PERF_MM_COW_FROM_STATUS);
+    mm_cow_from_status_count++;    __atomic_fetch_add(&t->perf_page_faults, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_perf_sw_page_faults, 1, __ATOMIC_RELAXED);
+    return 1;
+
+decline:
+    mm_cursor_unlock(&cur);
+    return 0;
+}
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
 int handle_cow_fault(task_t *t, uint64_t stval)
 {
 #ifdef CONFIG_NOMMU
@@ -1166,6 +1284,16 @@ int handle_cow_fault(task_t *t, uint64_t stval)
     if (!t || !t->mm)
         return -1;
     mm_struct_t *mm = t->mm;
+#if defined(ARCH_HAS_PGTABLE_OPS)
+    /* Lockless slice first, same shape as mm_fault_from_status(): a shared
+     * private-anonymous COW leaf is broken under the leaf lock alone.  The
+     * rc==1 in-place upgrade stays on the mm->lock path below -- making the
+     * last reference writable has to exclude fork's frame_get, which
+     * serialises under mm->lock, and skipping a copy that turns out
+     * unneeded is an optimisation, not a correctness requirement. */
+    if (mm_cow_from_status(t, mm, stval & ~(uint64_t)(PAGE_SIZE - 1), stval))
+        return 0;
+#endif
     pfn_t old_pfn = PFN_NONE;
     page_cache_page_t *old_page = NULL;
     spin_lock(&mm->lock);

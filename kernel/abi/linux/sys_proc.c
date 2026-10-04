@@ -2,6 +2,7 @@
 #include "syscall_impl.h"
 #include "abi/linux/futex.h"
 #include "abi/linux/fcntl.h"
+#include "mm/fault.h"
 #include "fs/procfs.h"
 #include "fs/vfs/mntns.h"
 #include "fs/vfs/mount.h"
@@ -1164,7 +1165,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
             kinfo("[MM-ASM] pt_pages=%lu entries=%lu missing_meta=%lu "
                   "present=%lu absent=%lu prot=%lu cow=%lu vma=%lu "
                   "vmai=%lu cls=%lu safe=%lu anon_virt=%lu huge=%lu "
-                  "huge_install=%lu "
+                  "huge_install=%lu cow_from_status=%lu "
                   "seg_slots=%lu seg_bad=%lu seg_kind=%lu "
                   "seg_ok=%lu seg_diff=%lu seg_miss=%lu "
                   "seg_dispatch=%lu seg_fallback=%lu\n",
@@ -1181,6 +1182,7 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)rep.anon_virt,
                   (unsigned long)rep.huge_leaves,
                   (unsigned long)mm_huge_install_count,
+                  (unsigned long)mm_cow_from_status_count,
                   (unsigned long)rep.seg_slots,
                   (unsigned long)rep.seg_bad_slot,
                   (unsigned long)rep.seg_kind_mismatch,

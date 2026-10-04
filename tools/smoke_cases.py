@@ -442,7 +442,10 @@ CASES: dict[str, dict] = {
         'log': '.kernel-build/smoke/mm-stress-riscv64.log',
         'stdin': {'kind': 'sendline', 'expect': '# ',
                   'lines': ['mm_stress', 'poweroff']},
-        'timeout': '45s',
+        # 45s was enough before the huge-leaf path ran: huge_install>0 and
+        # cow_from_status>0 mean the phases now do the 2 MiB copies and the
+        # lockless COW work they always claimed to, which costs time.
+        'timeout': '90s',
         'qemu': 'qemu-system-riscv64',
         'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
         'expect': [
@@ -457,12 +460,19 @@ CASES: dict[str, dict] = {
             # to every gate that could have seen it.
             r'\[MM-ASM\].*missing_meta=0 present=0 absent=0 prot=0 cow=0 vma=0 vmai=0 cls=0 safe=0.*\bseg_bad=0\b.*\bseg_kind=0\b.*\bseg_diff=0\b',
             # Non-vacuity for the huge-leaf path, same discipline as the
-            # mm_fault_from_status assertion in smoke-mm-pt-race: huge=0
+            # mm_fault_from_status assertion in smoke-mm-pt-race: huge_install=0
             # means the workload never had a huge leaf and every huge-path
-            # assertion above proved nothing.  Counted by the auditor itself
-            # (present leaves at level > 0), so it needs no perf-arming read
-            # and cannot be gated off.
-            r'\[MM-ASM\].*\bhuge_install=[1-9]\b',
+            # assertion above proved nothing.  Plain globals printed in
+            # [MM-ASM]; matched WITHOUT the line prefix because a concurrent
+            # klog line can split the audit record mid-print, and both names
+            # exist nowhere else in the kernel's output.
+            r'huge_install=[1-9]',
+            # Non-vacuity for the lockless COW slice: mm_stress's fork phases
+            # make shared anonymous COW leaves, and mm_cow_from_status must
+            # be the one serving them (rc>1 copies).  cow_from_status=0 with
+            # the fork phases green means the fast path declined every fault
+            # and the mm->lock path did all the work again.
+            r'cow_from_status=[1-9]',
         ],
         'forbid': [],
         'timeout_msg': False,

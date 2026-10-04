@@ -1180,6 +1180,53 @@ files = ["kernel/arch/ppc64le/include/page_table.h"]
 pattern = "^SWAP_SUPPORTED_ARCHES := riscv64 loongarch64 aarch64 x86_64 arm32 ppc64le$"
 files = ["Makefile"]
 
+# MM_COW_FROM_STATUS: the lockless COW slice installs its private copy under
+# the leaf lock alone, which is only sound because every writer that can
+# race it on the same leaf takes that same lock.  These assertions pin the
+# three sides of that triangle.
+#
+# 1. fork's parent-side COW rewrite must be node-lock bracketed at both
+#    clone sites, and both must RE-CHECK the PTE under the lock: rewriting
+#    from a value read before the lock would resurrect a frame the process
+#    no longer maps.  `mm_pt_node_lock(stab)` twice (mm_fork_clone_page and
+#    mm_fork_clone_leaf) and the re-check twice.
+[[gate.assertion]]
+pattern = "mm_pt_node_lock\\(stab\\)"
+min_count = 2
+files = ["kernel/mm/cow.c"]
+
+[[gate.assertion]]
+pattern = "int still = "
+min_count = 2
+files = ["kernel/mm/cow.c"]
+
+# 2. mprotect's present-leaf rewrite and its never-faulted status refresh
+#    take the owning table's node lock -- the refresh guards the status byte
+#    the lockless fault paths read and write under that same lock.
+[[gate.assertion]]
+pattern = "mm_pt_node_lock\\(ltab\\)"
+min_count = 2
+files = ["kernel/mm/mprotect.c"]
+
+# 3. The lockless COW slice must use the non-reclaiming allocator, exactly
+#    like the anon status fast path: a reclaiming allocation reaches
+#    oom_try_reclaim(), whose victim teardown wants the node locks this
+#    path holds.  Not hypothetical -- the first version allocated
+#    reclaiming and LOCK-STALLed on pfa.lock (the waiter was the COW fault,
+#    the holder the reclaim).  min_count = 2: the anon fast path has one,
+#    the COW fast path needs its own.
+[[gate.assertion]]
+pattern = "pfa_alloc_flags\\(0, 0\\)"
+min_count = 2
+files = ["kernel/mm/fault.c"]
+
+# The lockless slice must run BEFORE mm->lock is taken in handle_cow_fault,
+# or it is not lockless.
+[[gate.assertion]]
+pattern = "if \\(mm_cow_from_status\\(t, mm"
+min_count = 1
+files = ["kernel/mm/fault.c"]
+
 [[gate]]
 name = "check-io-progress-model"
 make_target = "check-io-progress-model"

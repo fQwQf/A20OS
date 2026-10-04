@@ -1934,16 +1934,22 @@ int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
  * mm->lock, so the install must refuse to fire when a competing writer got
  * there first.  The entry is replaced only while it still maps `expect_pa`
  * as a COW leaf under the same lock the competing writers now take (fork's
- * parent-side rewrite, mm_pt_node_lock in the unmap bypasses); anything else
- * -- demoted, unmapped, already broken, moved -- returns 1 having written
- * nothing, and the caller falls back to the mm->lock path.
+ * parent-side rewrite, mprotect's prot rewrite, mm_pt_node_lock in the unmap
+ * bypasses); anything else -- demoted, unmapped, already broken, moved --
+ * returns 1 having written nothing, and the caller falls back to the
+ * mm->lock path.
+ *
+ * The new PTE's flags are derived from the OLD PTE under the same lock
+ * (exactly the formula handle_cow_fault_locked() applies), so a concurrent
+ * mprotect that changed R/X between the fault's unlocked observation and
+ * this install is honoured instead of overwritten.
  *
  * Returns 0 when the replace happened (*old_pa_out = the displaced frame),
  * 1 when the entry no longer matches (nothing written), <0 on error.
  */
 int mm_cursor_replace_if_cow(mm_cursor_t *cur, vaddr_t addr,
-                             paddr_t expect_pa, paddr_t pa, pte_t flags,
-                             uint8_t cls, paddr_t *old_pa_out)
+                             paddr_t expect_pa, paddr_t pa, uint8_t cls,
+                             paddr_t *old_pa_out)
 {
     if (old_pa_out)
         *old_pa_out = 0;
@@ -1964,9 +1970,11 @@ int mm_cursor_replace_if_cow(mm_cursor_t *cur, vaddr_t addr,
         return 1;
     }
 
-    /* The copy is byte-identical, but exec pages still need the I-cache
-     * sync before the new frame's mapping becomes visible -- same contract
-     * as mm_cursor_replace(). */
+    pte_t flags = (old & (PTE_R | PTE_X | PTE_U | PTE_A |
+                          PTE_G | PTE_MAT1 | PTE_LEAF)) | PTE_W | PTE_D;
+    /* The copy is byte-identical, but an executable page still needs the
+     * I-cache sync before the new frame's mapping becomes visible -- same
+     * contract as mm_cursor_replace(). */
     if (flags & PTE_X) {
         pfn_t pfn = phys_to_pfn(pa);
         if (pfn_valid(pfn))
