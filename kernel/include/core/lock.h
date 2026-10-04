@@ -118,9 +118,10 @@ static inline void spin_set_debug(spinlock_t *lock, const char *name, void *cont
 
 static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
     uint64_t spins = 0;
-    uint64_t stall_start = timer_get_ticks();
-    uint64_t next_report = MS_TO_TICKS(5000);
-    struct task_t *cur = proc_current();
+    uint64_t stall_start = 0;
+    uint64_t next_report = 0;
+    int armed = 0;
+    struct task_t *cur = NULL;
     uintptr_t waiter_ra = caller_ra ? caller_ra
                                     : (uintptr_t)__builtin_return_address(0);
     /* The exchange must be retried after the owner releases the lock: an
@@ -150,10 +151,22 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
         if (site)
             __atomic_fetch_add(&site->contended, 1, __ATOMIC_RELAXED);
         uint64_t spun_before = spins;
+        /* The stall clock and the reporting identity are read on the first
+         * contended observation, not before the exchange: timer_get_ticks()
+         * costs rdtsc plus two 64-bit divisions and proc_current() costs a
+         * cpuid on SMP x86, and neither value means anything until this CPU
+         * has actually failed to take the lock. */
+        if (!armed) {
+            armed = 1;
+            stall_start = timer_get_ticks();
+            next_report = stall_start + MS_TO_TICKS(5000);
+            cur = proc_current();
+        }
         while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED)) {
             if ((++spins & ((1UL << 20) - 1)) == 0) {
-                uint64_t elapsed = timer_get_ticks() - stall_start;
-                if (elapsed >= next_report) {
+                uint64_t now = timer_get_ticks();
+                uint64_t elapsed = now - stall_start;
+                if (now >= next_report) {
                     struct task_t *owner = (struct task_t *)lock->owner;
                     printf("[LOCK-STALL] cpu=%u lock=%p name=%s waiter=%d owner=%d owner_ra=0x%lx waiter_ra=0x%lx spins=%lu elapsed_ms=%lu\n",
                            cpu_current_id(), (void *)lock,
@@ -178,7 +191,7 @@ static inline void spin_lock_at(spinlock_t *lock, uintptr_t caller_ra) {
                             printf("\n");
                         }
                     }
-                    next_report = elapsed + MS_TO_TICKS(5000);
+                    next_report = now + MS_TO_TICKS(5000);
                 }
             }
             arch_cpu_relax();

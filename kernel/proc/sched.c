@@ -90,13 +90,30 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
 
 static proc_runq_t sched_runq[CONFIG_NR_CPUS];
 static proc_cpu_sched_t sched_cpu[CONFIG_NR_CPUS];
+
+/* Picks and empty picks are counted on every local dispatch, by every CPU.
+ * As globals they shared one line with the counters below, so each context
+ * switch invalidated it for every other CPU. */
+typedef struct __attribute__((aligned(64))) sched_pick_stats {
+    unsigned long picks;
+    unsigned long empty_picks;
+} sched_pick_stats_t;
+static sched_pick_stats_t sched_pick[CONFIG_NR_CPUS];
+
+/* How many local picks are in flight at once across the whole system is a
+ * system-wide property, not a per-CPU one, so the count and its high-water
+ * mark stay global; they get their own line only so the per-pick bumps above
+ * cannot drag them along. */
+typedef struct __attribute__((aligned(64))) sched_pick_parallel {
+    unsigned long active;
+    unsigned long peak;
+} sched_pick_parallel_t;
+static sched_pick_parallel_t sched_pick_parallel;
+
+/* Migrations and contract violations are rare and system-wide. */
 static unsigned sched_zombies_pending;
 static unsigned long sched_runqueue_migrations;
 static unsigned long sched_violations;
-static unsigned long sched_local_picks;
-static unsigned long sched_empty_picks;
-static unsigned long sched_local_pick_active;
-static unsigned long sched_local_pick_parallel_peak;
 
 /*
  * SCHEDULER_CPU_OWNERSHIP:
@@ -573,10 +590,9 @@ void proc_sched_runq_init(void) {
     }
     sched_runqueue_migrations = 0;
     sched_violations = 0;
-    sched_local_picks = 0;
-    sched_empty_picks = 0;
-    sched_local_pick_active = 0;
-    sched_local_pick_parallel_peak = 0;
+    memset(sched_pick, 0, sizeof(sched_pick));
+    sched_pick_parallel.active = 0;
+    sched_pick_parallel.peak = 0;
     proc_timer_heap_init();
 }
 
@@ -930,19 +946,25 @@ void proc_sched_handle_reschedule_ipi(void)
 /* Per-CPU jiffy accounting backing /proc/stat and /proc/<pid>/stat.  One
  * tick (10 ms) is charged per timer interrupt to the running context class:
  * idle task, user mode, or kernel mode.  Only the local CPU writes its own
- * slots; readers take benign races on 64-bit values. */
-static uint64_t g_cpu_user_ticks[CONFIG_NR_CPUS];
-static uint64_t g_cpu_system_ticks[CONFIG_NR_CPUS];
-static uint64_t g_cpu_idle_ticks[CONFIG_NR_CPUS];
+ * slots; readers take benign races on 64-bit values.  The three classes are
+ * interleaved per CPU rather than kept as three parallel arrays because a
+ * timer interrupt writes one of them, and adjacent arrays put two CPUs'
+ * hot counters on the same line. */
+typedef struct __attribute__((aligned(64))) proc_cpu_ticks {
+    uint64_t user;
+    uint64_t system;
+    uint64_t idle;
+} proc_cpu_ticks_t;
+static proc_cpu_ticks_t g_cpu_ticks[CONFIG_NR_CPUS];
 
 void proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
                         uint64_t *idle)
 {
     if (!user || !system || !idle || cpu >= CONFIG_NR_CPUS)
         return;
-    *user = __atomic_load_n(&g_cpu_user_ticks[cpu], __ATOMIC_RELAXED);
-    *system = __atomic_load_n(&g_cpu_system_ticks[cpu], __ATOMIC_RELAXED);
-    *idle = __atomic_load_n(&g_cpu_idle_ticks[cpu], __ATOMIC_RELAXED);
+    *user = __atomic_load_n(&g_cpu_ticks[cpu].user, __ATOMIC_RELAXED);
+    *system = __atomic_load_n(&g_cpu_ticks[cpu].system, __ATOMIC_RELAXED);
+    *idle = __atomic_load_n(&g_cpu_ticks[cpu].idle, __ATOMIC_RELAXED);
 }
 
 void proc_sched_tick(int from_user)
@@ -963,11 +985,14 @@ void proc_sched_tick(int from_user)
     unsigned tick_cpu = cpu_current_id();
     if (tick_cpu < CONFIG_NR_CPUS) {
         if (cur->pid == 0)
-            __atomic_fetch_add(&g_cpu_idle_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].idle, 1,
+                               __ATOMIC_RELAXED);
         else if (from_user)
-            __atomic_fetch_add(&g_cpu_user_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].user, 1,
+                               __ATOMIC_RELAXED);
         else
-            __atomic_fetch_add(&g_cpu_system_ticks[tick_cpu], 1, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_cpu_ticks[tick_cpu].system, 1,
+                               __ATOMIC_RELAXED);
     }
     if (from_user) {
         cur->total_time++;
@@ -1053,13 +1078,15 @@ void proc_sched_diag_snapshot(proc_sched_diag_t *diag)
         __atomic_load_n(&sched_runqueue_migrations, __ATOMIC_RELAXED);
     diag->scheduler_violations =
         __atomic_load_n(&sched_violations, __ATOMIC_RELAXED);
-    diag->runqueue_local_picks =
-        __atomic_load_n(&sched_local_picks, __ATOMIC_RELAXED);
-    diag->runqueue_empty_picks =
-        __atomic_load_n(&sched_empty_picks, __ATOMIC_RELAXED);
+    diag->runqueue_local_picks = 0;
+    diag->runqueue_empty_picks = 0;
     diag->runqueue_parallel_pick_peak =
-        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
+        __atomic_load_n(&sched_pick_parallel.peak, __ATOMIC_RELAXED);
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        diag->runqueue_local_picks +=
+            __atomic_load_n(&sched_pick[cpu].picks, __ATOMIC_RELAXED);
+        diag->runqueue_empty_picks +=
+            __atomic_load_n(&sched_pick[cpu].empty_picks, __ATOMIC_RELAXED);
         proc_runq_t *rq = &sched_runq[cpu];
         proc_cpu_sched_t *state = &sched_cpu[cpu];
         diag->runqueue_lock_acquires +=
@@ -1106,6 +1133,19 @@ static int sched_runq_contains_locked(proc_runq_t *rq, task_t *t)
     return 0;
 }
 
+/*
+ * The cross-runqueue scan below takes every runqueue lock and walks every
+ * queue, which costs NR_CPUS lock round trips at each of the two dozen places
+ * that assert a task invariant.  CONFIG_DEBUG_SCHED_STATE is on for any
+ * -DDEBUG build, and the benchmark profile is a -DDEBUG build, so leaving the
+ * scan under that switch means the profile measures the assertion rather than
+ * the scheduler.  Opt in by name instead: bring-up runs that want the
+ * invariant checked have to ask for it.
+ */
+#ifndef CONFIG_SCHED_MEMBERSHIP_CHECK
+#define CONFIG_SCHED_MEMBERSHIP_CHECK 0
+#endif
+
 void proc_sched_assert_task_locked(task_t *t)
 {
 #if CONFIG_DEBUG_SCHED_STATE
@@ -1119,6 +1159,9 @@ void proc_sched_assert_task_locked(task_t *t)
         t->state != PROC_BLOCKED)
         panic("sched invariant: pid=%d parked state=%d", t->pid, t->state);
 
+    unsigned memberships = 0;
+    uint64_t membership_cpus = 0;
+#if CONFIG_SCHED_MEMBERSHIP_CHECK
     /*
      * Take a stable cross-runqueue snapshot. A picker does not need proc_lock,
      * so checking one queue at a time would race with a dequeue between the
@@ -1129,8 +1172,6 @@ void proc_sched_assert_task_locked(task_t *t)
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         rq_flags[cpu] = RUNQ_LOCK_IRQ(cpu);
     }
-    unsigned memberships = 0;
-    uint64_t membership_cpus = 0;
     for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
         if (sched_runq_contains_locked(&sched_runq[cpu], t)) {
             memberships++;
@@ -1138,11 +1179,13 @@ void proc_sched_assert_task_locked(task_t *t)
                 membership_cpus |= 1ULL << cpu;
         }
     }
+#endif
     int on_rq = t->on_rq;
     int dispatching = t->dispatching;
     int on_cpu = t->on_cpu;
     unsigned owner_cpu = t->owner_cpu;
     int state = t->state;
+#if CONFIG_SCHED_MEMBERSHIP_CHECK
     unsigned task_cpu = t->cpu_id;
     for (unsigned cpu = CONFIG_NR_CPUS; cpu > 0; cpu--)
         RUNQ_UNLOCK_IRQ(cpu - 1, rq_flags[cpu - 1]);
@@ -1162,6 +1205,11 @@ void proc_sched_assert_task_locked(task_t *t)
         (task_cpu >= 64 || membership_cpus != (1ULL << task_cpu)))
         panic("sched invariant: pid=%d cpu_id=%u membership_cpus=0x%lx",
               t->pid, task_cpu, (unsigned long)membership_cpus);
+#else
+    (void)caller;
+    (void)memberships;
+    (void)membership_cpus;
+#endif
     if (on_rq && (dispatching || on_cpu))
         panic("sched invariant: pid=%d on_rq=%d dispatching=%d on_cpu=%d",
               t->pid, on_rq, dispatching, on_cpu);
@@ -1557,17 +1605,17 @@ task_t *proc_runq_pick_local(void)
 {
     unsigned cpu = cpu_current_id();
     task_t *picked = NULL;
-    unsigned long active =
-        __atomic_add_fetch(&sched_local_pick_active, 1, __ATOMIC_ACQ_REL);
+    unsigned long active = __atomic_add_fetch(&sched_pick_parallel.active, 1,
+                                              __ATOMIC_ACQ_REL);
     unsigned long peak =
-        __atomic_load_n(&sched_local_pick_parallel_peak, __ATOMIC_RELAXED);
+        __atomic_load_n(&sched_pick_parallel.peak, __ATOMIC_RELAXED);
     while (active > peak &&
-           !__atomic_compare_exchange_n(&sched_local_pick_parallel_peak,
+           !__atomic_compare_exchange_n(&sched_pick_parallel.peak,
                                         &peak, active, 0,
                                         __ATOMIC_RELAXED,
                                         __ATOMIC_RELAXED)) {
     }
-    __atomic_fetch_add(&sched_local_picks, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sched_pick[cpu].picks, 1, __ATOMIC_RELAXED);
 
     uint64_t rf = RUNQ_LOCK_IRQ(cpu);
     proc_runq_t *rq = &sched_runq[cpu];
@@ -1620,9 +1668,9 @@ task_t *proc_runq_pick_local(void)
         picked = sched_runq_steal_locked(rq, cpu);
 
     if (!picked)
-        __atomic_fetch_add(&sched_empty_picks, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&sched_pick[cpu].empty_picks, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
-    __atomic_fetch_sub(&sched_local_pick_active, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_sub(&sched_pick_parallel.active, 1, __ATOMIC_RELEASE);
     return picked;
 }
 /* SCHED_LOCAL_PICK_LOCK_SPLIT_END */
@@ -1667,6 +1715,12 @@ static void sched_runq_unpick_locked(task_t *t)
  * Safely reaps orphaned zombies (parent=idle, ppid=0, CLONE_THREAD,
  * or SIGCHLD ignored).  All work is done under proc_lock to prevent
  * races with proc_wait4() which may reap the same zombie.
+ *
+ * Repeat only when a pass filled the batch.  A zombie left behind was rejected
+ * on parent, SIGCHLD, or thread-group liveness, and every event that can later
+ * satisfy one of those announces itself through proc_sched_note_zombie(), so
+ * the second full walk that reaping anything at all used to force bought
+ * nothing.
  */
 void sched_reap_zombies(void)
 {
@@ -1678,10 +1732,12 @@ void sched_reap_zombies(void)
         uint64_t flags = spin_lock_irqsave(&proc_lock);
         task_t *current = proc_current();
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-            if (t == proc_idle_task() || t == current ||
-                proc_task_is_current_any_cpu(t))
-                continue;
-            if (t->state != PROC_ZOMBIE)
+            /* State first: proc_task_is_current_any_cpu() reads two slots per
+             * CPU, and the walk visits every live task while only zombies can
+             * ever be reaped, so the current-task test belongs after the cheap
+             * test that throws almost everything away. */
+            if (t->state != PROC_ZOMBIE || t == proc_idle_task() ||
+                t == current || proc_task_is_current_any_cpu(t))
                 continue;
             task_t *parent = t->parent;
             int reap = 0;
@@ -1714,7 +1770,7 @@ void sched_reap_zombies(void)
             proc_destroy_task(to_reap[i]);
             proc_put(to_reap[i]);
         }
-    } while (count > 0);
+    } while (count == (int)(sizeof(to_reap) / sizeof(to_reap[0])));
 }
 
 void proc_sched_note_zombie(void)
@@ -1742,13 +1798,24 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
     task_t *prev = proc_current();
     eevdf_charge(&sched_runq[cpu_current_id()], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
-        uint64_t elapsed_ticks = now - prev->cg_cpu_start;
-        uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
-        int throttled = cg_cpu_account(prev->cgroup, elapsed_ns, now);
-        if (throttled)
-            prev->cg_throttled = 1;
-        if (prev->cgroup)
+        /* Both cgroup helpers take the node lock on every context switch, and
+         * on a node with no quota they return without changing anything.  An
+         * unlimited node is never charged and so can never be throttled, which
+         * makes the pair of locks avoidable: quota and throttled are written
+         * only under node->lock, so a reader racing a quota change sees one of
+         * the two values rather than a torn one, and a missed unthrottle check
+         * simply runs on the next switch. */
+        cg_cpu_state_t *cpu_state = &((cg_node_t *)prev->cgroup)->res.cpu;
+        if (__atomic_load_n(&cpu_state->quota, __ATOMIC_RELAXED) !=
+                CG_CPU_QUOTA_MAX ||
+            __atomic_load_n(&cpu_state->throttled, __ATOMIC_RELAXED)) {
+            uint64_t elapsed_ticks = now - prev->cg_cpu_start;
+            uint64_t elapsed_ns = elapsed_ticks * 1000000000ULL / TICKS_PER_SEC;
+            int throttled = cg_cpu_account(prev->cgroup, elapsed_ns, now);
+            if (throttled)
+                prev->cg_throttled = 1;
             cg_cpu_check_unthrottle(prev->cgroup, now);
+        }
     }
 
     next->cg_cpu_start = now;
