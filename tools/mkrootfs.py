@@ -136,6 +136,23 @@ def normalize_overlay_modes(overlay: Path, staging: Path,
         run(["chmod", f"{mode:04o}", str(dst)], sudo)
 
 
+def elf_machine(path: Path) -> int | None:
+    """e_machine of a little-endian ELF file, or None when it is not one.
+
+    Unreadable files and big-endian objects read as None, matching the inline
+    check this was extracted from: none of the supported targets is
+    big-endian, and guessing a machine for one would reject good files.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(20)
+    except OSError:
+        return None
+    if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] == 2:
+        return None
+    return struct.unpack_from("<H", head, 18)[0]
+
+
 def check_overlay_elf_arch(overlay: Path, arch: str) -> None:
     """Reject an overlay ELF built for a different target architecture."""
     want = ELF_MACHINES.get(arch)
@@ -144,15 +161,8 @@ def check_overlay_elf_arch(overlay: Path, arch: str) -> None:
     for src in overlay.rglob("*"):
         if src.is_symlink() or not src.is_file():
             continue
-        try:
-            with src.open("rb") as fh:
-                head = fh.read(20)
-        except OSError:
-            continue
-        if len(head) < 20 or head[:4] != b"\x7fELF" or head[5] == 2:
-            continue
-        machine = struct.unpack_from("<H", head, 18)[0]
-        if machine != want:
+        machine = elf_machine(src)
+        if machine is not None and machine != want:
             die(f"overlay {overlay} ships an ELF for another architecture: "
                 f"{src.relative_to(overlay)} (e_machine={machine}, --arch "
                 f"{arch} expects {want})")
