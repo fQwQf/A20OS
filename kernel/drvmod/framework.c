@@ -30,6 +30,7 @@
 #include "core/lock.h"
 #include "core/cpu.h"
 #include "core/perf.h"
+#include "core/progress.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
 #include "drivers/core/driver_core.h"
@@ -383,6 +384,9 @@ const struct drv_export drv_export_table[] = {
     { "riscv64_timer_freq",  (void *)riscv64_timer_freq },
 #endif
     { "clock_ticks_per_sec", (void *)clock_ticks_per_sec },
+    /* The block progress bridge is gated on an aggregated pending bit; a
+     * deployed virtio-blk module ORs it when it publishes a request. */
+    { "kernel_progress_note_pending", (void *)kernel_progress_note_pending },
     { "clock_get_ticks",     (void *)clock_get_ticks },
     { "klog_write",          (void *)klog_write },
     { "klog_level",          (void *)&klog_level },
