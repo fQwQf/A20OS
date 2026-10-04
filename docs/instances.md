@@ -37,6 +37,16 @@ tools/a20 check-flash-backends            # 校验烧录后端注册表并与 ma
 
 需要 Python ≥ 3.11（只用标准库，无第三方依赖）。
 
+### Tab 补全
+
+```bash
+eval "$(tools/a20 completion)"    # bash；当次会话生效
+```
+
+要长期生效就把这行放进 `~/.bashrc`；zsh 先执行 `autoload -U +X bashcompinit && bashcompinit` 再 eval 同样可用。注册的补全入口是 `a20`、`tools/a20` 与 `./tools/a20` 三种写法，别的写法（绝对路径、自定义别名）用 `complete -F _a20_completions <词>` 追加。
+
+补全内容包括：子命令、实例名（`instances/*.toml` 的 stem，`run`/`build`/`test` 等实例参数位）、每个子命令自己的选项，以及 `list --arch` / `boards --arch` / `check --require-arch`（架构取自实例清单）、`list --action`、`ledger --format` 的参数值。候选来自 `a20` 自身的 argparse 树，新增子命令或选项无需改补全脚本。`check` 的清单路径位与 `--` 之后的 make 参数位不做候选，回退到文件名补全。
+
 ## 实例文件参考
 
 最小实例只有两个字段：
