@@ -381,6 +381,169 @@ int ntfs_resolve_data(ntfs_vnode_priv_t *fp)
 /* $Bitmap cluster allocator                                           */
 /* ------------------------------------------------------------------ */
 
+/* Both bitmaps NTFS keeps -- the cluster bitmap and the MFT in-use bitmap --
+ * are little-endian bit arrays: a set bit means "in use".  The supported
+ * architectures are all little-endian, which the rest of the driver already
+ * relies on for every on-disk field. */
+
+static uint64_t ntfs_bit_word(const uint8_t *bm, uint64_t bit)
+{
+    uint64_t w;
+    memcpy(&w, bm + (bit >> 3), sizeof w);
+    return w;
+}
+
+static int ntfs_bit_test(const uint8_t *bm, uint64_t bit)
+{
+    return (bm[bit >> 3] >> (bit & 7)) & 1;
+}
+
+static void ntfs_bit_set(uint8_t *bm, uint64_t bit, int on)
+{
+    uint8_t mask = (uint8_t)(1u << (bit & 7));
+    if (on)
+        bm[bit >> 3] |= mask;
+    else
+        bm[bit >> 3] &= (uint8_t)~mask;
+}
+
+/* First position at or after @base holding @count consecutive free bits.
+ * Returns 0 when there is no such run.  Whole words of free bits are accepted
+ * 64 at a time; only a word holding a set bit, or one the run ends inside,
+ * falls through to per-bit tests. */
+static uint64_t ntfs_bit_scan(const uint8_t *bm, uint64_t total_bits,
+                                    uint64_t base, uint64_t count)
+{
+    while (base + count <= total_bits) {
+        uint64_t run = 0;
+        while (base + run < total_bits) {
+            uint64_t bit = base + run;
+            if (bit + 64 <= total_bits && run + 64 <= count &&
+                ntfs_bit_word(bm, bit) == 0) {
+                run += 64;
+                continue;
+            }
+            if (ntfs_bit_test(bm, bit))
+                break;
+            run++;
+            if (run == count)
+                break;
+        }
+        if (run >= count)
+            return base;
+        base += run + 1;
+    }
+    return 0;
+}
+
+/* Resident $Bitmap.
+ *
+ * Loading the cluster bitmap costs an MFT record read plus a read of the whole
+ * map, and writing it back costs another MFT record read plus a write of the
+ * whole map.  The allocator did both per cluster handed out, and then walked
+ * the map one bit at a time, so a create or an append cost a fixed number of
+ * whole-volume I/Os multiplied by the number of clusters it needed.
+ *
+ * Lifetime: a slot is claimed by the volume's first allocation and released by
+ * ntfs_bmap_release() from ntfs_unmount().  A slot's bytes are only read or
+ * written with that volume's sb->lock held, which every allocation and free
+ * already takes; the slot table's own lock is held only across pointer
+ * bookkeeping, never across disk I/O.  A volume that finds no free slot uses
+ * the uncached path, so running out of slots costs speed and not correctness.
+ */
+#define NTFS_BMAP_SLOTS 4
+
+typedef struct ntfs_bmap_slot {
+    ntfs_sb_t *sb;      /* owning volume, NULL when the slot is free */
+    uint8_t   *data;    /* resident bitmap; NULL until first use */
+    uint64_t   size;
+    int        dirty;   /* changed in memory and not yet written back */
+} ntfs_bmap_slot_t;
+
+static ntfs_bmap_slot_t g_bmap_slot[NTFS_BMAP_SLOTS];
+static spinlock_t g_bmap_slot_lock = SPINLOCK_INIT;
+
+
+static ntfs_bmap_slot_t *ntfs_bmap_claim(ntfs_sb_t *sb)
+{
+    ntfs_bmap_slot_t *s = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_bmap_slot_lock);
+    for (int i = 0; i < NTFS_BMAP_SLOTS; i++)
+        if (g_bmap_slot[i].sb == sb) {
+            s = &g_bmap_slot[i];
+            break;
+        }
+    if (!s)
+        for (int i = 0; i < NTFS_BMAP_SLOTS; i++)
+            if (!g_bmap_slot[i].sb) {
+                g_bmap_slot[i].sb = sb;
+                s = &g_bmap_slot[i];
+                break;
+            }
+    spin_unlock_irqrestore(&g_bmap_slot_lock, flags);
+    return s;
+}
+
+
+static int ntfs_bmap_flush(ntfs_bmap_slot_t *s)
+{
+    if (!s->data || !s->dirty)
+        return 0;
+    int r = ntfs_save_bmap(s->sb, s->data, s->size);
+    if (r == 0)
+        s->dirty = 0;
+    return r;
+}
+
+
+/* Make @s hold @sb's $Bitmap.  The slot invariant is that resident bytes always
+ * belong to the volume the slot is claimed for, so no foreign state is lost
+ * here.  Returns 0 once the bytes are in memory. */
+static int ntfs_bmap_resident(ntfs_bmap_slot_t *s, ntfs_sb_t *sb)
+{
+    if (s->data)
+        return 0;
+    uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (ntfs_load_bmap(sb, &data, &size) < 0 || size == 0) {
+        kfree(data);
+        return -1;
+    }
+    s->data = data;
+    s->size = size;
+    s->dirty = 0;
+    return 0;
+}
+
+
+/* Called from ntfs_unmount(), which only runs once the mount's last user is
+ * gone, so no allocation or free can still be reaching the slot.  The bitmap
+ * goes to the volume before the slot is freed. */
+static void ntfs_bmap_release(ntfs_sb_t *sb)
+{
+    ntfs_bmap_slot_t *s = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_bmap_slot_lock);
+    for (int i = 0; i < NTFS_BMAP_SLOTS; i++)
+        if (g_bmap_slot[i].sb == sb) {
+            s = &g_bmap_slot[i];
+            break;
+        }
+    spin_unlock_irqrestore(&g_bmap_slot_lock, flags);
+    if (!s)
+        return;
+
+    ntfs_bmap_flush(s);
+    uint8_t *data = s->data;
+    flags = spin_lock_irqsave(&g_bmap_slot_lock);
+    s->sb = NULL;
+    s->data = NULL;
+    s->size = 0;
+    s->dirty = 0;
+    spin_unlock_irqrestore(&g_bmap_slot_lock, flags);
+    kfree(data);
+}
+
+
 /* Copy the $Bitmap file's $DATA into *out (freshly allocated). */
 int ntfs_load_bmap(ntfs_sb_t *sb, uint8_t **out, uint64_t *out_size)
 {
@@ -461,6 +624,27 @@ int ntfs_save_bmap(ntfs_sb_t *sb, uint8_t *data, uint64_t size)
 
 uint64_t ntfs_alloc_clusters(ntfs_sb_t *sb, uint64_t count)
 {
+    ntfs_bmap_slot_t *slot = ntfs_bmap_claim(sb);
+    if (slot && ntfs_bmap_resident(slot, sb) == 0) {
+        uint64_t total_bits = slot->size * 8;
+        if (total_bits > sb->total_clusters)
+            total_bits = sb->total_clusters;
+        uint64_t found = ntfs_bit_scan(slot->data, total_bits, 0, count);
+        if (found) {
+            for (uint64_t i = 0; i < count; i++)
+                ntfs_bit_set(slot->data, found + i, 1);
+            slot->dirty = 1;
+            /* A writeback that fails leaves the bits set in memory: the run
+             * is then skipped rather than handed out twice, which is the only
+             * safe reading of a bitmap that is not the one on the volume. */
+            if (ntfs_bmap_flush(slot) < 0)
+                return 0;
+        }
+        return found;
+    }
+
+    /* No slot available, or the bitmap would not read: read, use and write it
+     * back for this one allocation. */
     uint8_t *bm = NULL;
     uint64_t bm_size = 0;
     if (ntfs_load_bmap(sb, &bm, &bm_size) < 0 || bm_size == 0) {
@@ -470,41 +654,43 @@ uint64_t ntfs_alloc_clusters(ntfs_sb_t *sb, uint64_t count)
     uint64_t total_bits = bm_size * 8;
     if (total_bits > sb->total_clusters)
         total_bits = sb->total_clusters;
-    uint64_t found = 0;
-    for (uint64_t base = 0; base + count <= total_bits; ) {
-        uint64_t run = 0;
-        while (base + run < total_bits) {
-            if (bm[(base + run) >> 3] & (1u << ((base + run) & 7)))
-                break;
-            if (++run >= count)
-                break;
-        }
-        if (run >= count) {
-            found = base;
-            for (uint64_t i = 0; i < count; i++)
-                bm[(base + i) >> 3] |= (uint8_t)(1u << ((base + i) & 7));
-            if (ntfs_save_bmap(sb, bm, bm_size) < 0)
-                found = 0;
-            kfree(bm);
-            return found;
-        }
-        base += run ? run : 1;
+    uint64_t found = ntfs_bit_scan(bm, total_bits, 0, count);
+    if (found) {
+        for (uint64_t i = 0; i < count; i++)
+            ntfs_bit_set(bm, found + i, 1);
+        if (ntfs_save_bmap(sb, bm, bm_size) < 0)
+            found = 0;
     }
     kfree(bm);
-    return 0;
+    return found;
 }
 
 void ntfs_free_clusters(ntfs_sb_t *sb, uint64_t lcn, uint64_t count)
 {
+    ntfs_bmap_slot_t *slot = ntfs_bmap_claim(sb);
+    if (slot && ntfs_bmap_resident(slot, sb) == 0) {
+        for (uint64_t i = 0; i < count; i++) {
+            uint64_t c = lcn + i;
+            if (c >= slot->size * 8)
+                break;
+            ntfs_bit_set(slot->data, c, 0);
+        }
+        slot->dirty = 1;
+        ntfs_bmap_flush(slot);
+        return;
+    }
+
     uint8_t *bm = NULL;
     uint64_t bm_size = 0;
-    if (ntfs_load_bmap(sb, &bm, &bm_size) < 0)
+    if (ntfs_load_bmap(sb, &bm, &bm_size) < 0) {
+        kfree(bm);
         return;
+    }
     for (uint64_t i = 0; i < count; i++) {
         uint64_t c = lcn + i;
         if (c >= bm_size * 8)
             break;
-        bm[c >> 3] &= (uint8_t)~(1u << (c & 7));
+        ntfs_bit_set(bm, c, 0);
     }
     ntfs_save_bmap(sb, bm, bm_size);
     kfree(bm);
@@ -514,8 +700,105 @@ void ntfs_free_clusters(ntfs_sb_t *sb, uint64_t lcn, uint64_t count)
 /* MFT record allocation / freeing                                     */
 /* ------------------------------------------------------------------ */
 
-/* Find a free MFT record index by scanning (first-fit from @start). */
-int64_t ntfs_find_free_record(ntfs_sb_t *sb, uint64_t start)
+/* The MFT in-use bitmap is the named $MFT $BITMAP in record 6: one bit per
+ * record, set while the record is in use.  mkntfs writes it, so it is normally
+ * non-resident.  A read that does not produce the whole map is a failure rather
+ * than a partial answer: a short map would name records as free that the
+ * volume has no room for. */
+static int ntfs_mft_bitmap_read(ntfs_sb_t *sb, uint8_t **out, uint64_t *out_size)
+{
+    uint8_t *rec = kmalloc(sb->mft_record_size);
+    if (!rec)
+        return -1;
+    int result = -1;
+    if (ntfs_read_record(sb, NTFS_MFT_REC_BITMAP, rec) == 0) {
+        uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size,
+                                       NTFS_AT_BITMAP, 0);
+        if (attr && attr[8] == 0) {
+            uint32_t vlen = nget32(attr + 0x10);
+            uint16_t voff = nget16(attr + 0x14);
+            if (vlen && voff + vlen <= sb->mft_record_size) {
+                uint8_t *data = kmalloc(vlen);
+                if (data) {
+                    memcpy(data, attr + voff, vlen);
+                    *out = data;
+                    *out_size = vlen;
+                    result = 0;
+                }
+            }
+        } else if (attr) {
+            ntfs_run_t runs[1024];
+            uint32_t count;
+            uint64_t size;
+            if (ntfs_parse_runs(attr, 1024, runs, &count, &size) == 0 && size) {
+                uint8_t *data = kmalloc(size);
+                if (data) {
+                    memset(data, 0, size);
+                    if (ntfs_stream_read(sb, runs, count, size, 0, data,
+                                         size) >= 0) {
+                        *out = data;
+                        *out_size = size;
+                        result = 0;
+                    } else {
+                        kfree(data);
+                    }
+                }
+            }
+        }
+    }
+    kfree(rec);
+    return result;
+}
+
+
+/* Mirror one record's in-use flag into the bitmap.  Best effort by design: a
+ * record is in use or free according to its own flag, and the bitmap only has
+ * to be right often enough to save the scan, so a volume whose map cannot be
+ * updated loses speed and nothing else. */
+void ntfs_mft_bitmap_set(ntfs_sb_t *sb, uint64_t index, int in_use)
+{
+    uint8_t *bm = NULL;
+    uint64_t bm_size = 0;
+    if (ntfs_mft_bitmap_read(sb, &bm, &bm_size) == 0) {
+        if (index < bm_size * 8) {
+            ntfs_bit_set(bm, index, in_use);
+            uint8_t *rec = kmalloc(sb->mft_record_size);
+            if (rec) {
+                if (ntfs_read_record(sb, NTFS_MFT_REC_BITMAP, rec) == 0) {
+                    uint8_t *attr = ntfs_find_attr(rec, sb->mft_record_size,
+                                                  NTFS_AT_BITMAP, 0);
+                    if (attr && attr[8] == 0) {
+                        uint16_t voff = nget16(attr + 0x14);
+                        if (voff + bm_size <= sb->mft_record_size) {
+                            memcpy(attr + voff, bm, bm_size);
+                            uint32_t used = nget32(rec + 0x18);
+                            uint32_t end = (uint32_t)(attr - rec) + voff +
+                                           (uint32_t)bm_size;
+                            if (used < end)
+                                nput32(rec + 0x18, end);
+                            ntfs_write_record(sb, NTFS_MFT_REC_BITMAP, rec);
+                        }
+                    } else if (attr) {
+                        ntfs_run_t runs[1024];
+                        uint32_t count;
+                        uint64_t size;
+                        if (ntfs_parse_runs(attr, 1024, runs, &count, &size) == 0)
+                            ntfs_stream_write(sb, runs, count, 0, bm, bm_size);
+                    }
+                }
+                kfree(rec);
+            }
+        }
+        kfree(bm);
+    }
+}
+
+
+/* First-fit from @start, reading one MFT record per candidate slot.  This is
+ * the authority on whether a record is free; the bitmap below only chooses
+ * where to start looking, because it and the per-record in-use flags are two
+ * copies of the same fact that a half-completed update can leave disagreeing. */
+static int64_t ntfs_find_free_record_scan(ntfs_sb_t *sb, uint64_t start)
 {
     uint8_t *rec = kmalloc(sb->mft_record_size);
     if (!rec)
@@ -540,19 +823,65 @@ int64_t ntfs_find_free_record(ntfs_sb_t *sb, uint64_t start)
     return -1;
 }
 
+
+/* Find a free MFT record index (first-fit from @start).
+ *
+ * Reading every record from @start upwards costs one MFT record read per slot,
+ * so a volume with many files turned every create into an O(#inodes) read
+ * storm.  The in-use bitmap names the first free slot, so the scan starts
+ * there instead.  The bitmap is only a hint: the candidate is confirmed by
+ * reading its record, and any disagreement -- map missing, unreadable, or out
+ * of step with the flags it mirrors -- falls back to the full scan, which
+ * returns the same index the original always returned. */
+int64_t ntfs_find_free_record(ntfs_sb_t *sb, uint64_t start)
+{
+    uint8_t *bm = NULL;
+    uint64_t bm_size = 0;
+
+    if (ntfs_mft_bitmap_read(sb, &bm, &bm_size) == 0) {
+        uint64_t max_records = sb->mft_data_size / sb->mft_record_size;
+        uint64_t total_bits = bm_size * 8;
+        if (total_bits > max_records)
+            total_bits = max_records;
+        if (start < total_bits) {
+            /* Record 0 always holds $MFT itself, so a zero return means "no
+             * free bit at or after start" rather than "free at record 0". */
+            uint64_t bit = ntfs_bit_scan(bm, total_bits, start, 1);
+            if (bit && bit < max_records) {
+                uint8_t *rec = kmalloc(sb->mft_record_size);
+                if (rec) {
+                    int r = ntfs_read_record(sb, bit, rec);
+                    /* -2 is an uninitialised slot inside the allocated $MFT
+                     * range: never written, so free. */
+                    if (r == -2 ||
+                        (r == 0 && !(nget16(rec + 0x16) & NTFS_REC_IN_USE))) {
+                        kfree(rec);
+                        kfree(bm);
+                        return (int64_t)bit;
+                    }
+                    kfree(rec);
+                }
+            }
+        }
+    }
+    kfree(bm);
+
+    return ntfs_find_free_record_scan(sb, start);
+}
+
+
 void ntfs_free_mft_record(ntfs_sb_t *sb, uint64_t index)
 {
     uint8_t *rec = kmalloc(sb->mft_record_size);
     if (!rec)
         return;
     if (ntfs_read_record(sb, index, rec) == 0) {
-        /* Mark free: clear in-use and set signature to "BAAD" is not needed;
-         * clearing the in-use flag suffices for our first-fit scan. */
         nput16(rec + 0x16, nget16(rec + 0x16) & ~(uint16_t)NTFS_REC_IN_USE);
         nput32(rec + 0x18, 0);   /* used size */
         ntfs_write_record(sb, index, rec);
     }
     kfree(rec);
+    ntfs_mft_bitmap_set(sb, index, 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -807,6 +1136,9 @@ void ntfs_unmount(vnode_t *root)
         return;
     ntfs_vnode_priv_t *fp = (ntfs_vnode_priv_t *)root->fs_data;
     ntfs_sb_t *sb = fp->sb;
+    /* Write the resident cluster bitmap out before sb goes away; there is no
+     * later moment at which a dirty copy could reach the volume. */
+    ntfs_bmap_release(sb);
     bcache_sync(sb->bc);
     if (sb->mft_runs)
         kfree(sb->mft_runs);
