@@ -23,7 +23,7 @@ struct vmo *mm_lookup_vmo_region(mm_struct_t *mm, vaddr_t addr, size_t len,
         return NULL;
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
-    vm_area_t *vma = mm_find_vma(mm, addr);
+    mm_seg_t *vma = mm_seg_find(mm, addr);
     if (!vma || (uint64_t)vma->start > addr ||
         (uint64_t)vma->end < (uint64_t)addr + len ||
         !(vma->vm_flags & VM_VMO) || !vma->vmo) {
@@ -45,13 +45,13 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     vaddr_t end = (addr + len + PAGE_SIZE - 1) & ~(vaddr_t)(PAGE_SIZE - 1);
 
-    /* Coverage check.  Step to the end of each covering VMA rather than one
-     * page at a time: mm_find_vma() is a binary search, so a per-page probe
-     * costs log2(nvma) per page for a range that usually spans a handful of
-     * VMAs -- half a million probes for a 1GB MADV_DONTNEED where four would
-     * do. */
+    /* Coverage check.  Step to the end of each covering mapping record rather
+     * than one page at a time: mm_seg_find() is a binary search, so a per-page
+     * probe costs log2(nrecords) per page for a range that usually spans a
+     * handful of records -- half a million probes for a 1GB MADV_DONTNEED
+     * where four would do. */
     for (vaddr_t va = addr; va < end;) {
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) return -ENOMEM;
         va = vma->end;
     }
@@ -59,12 +59,12 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
 #ifndef CONFIG_NOMMU
     mm_tlb_invalidate_begin(mm);
     uint64_t mm_flags = spin_lock_irqsave(&mm->lock);
-    /* Walk VMA by VMA for the same reason as the coverage pass above: hoist
-     * the VMO classification out of the per-page body and step by leaf width
-     * instead of by PAGE_SIZE.  Both loops run under mm->lock, so the VMA
-     * pointers stay valid for the span each one covers. */
+    /* Walk record by record for the same reason as the coverage pass above:
+     * hoist the VMO classification out of the per-page body and step by leaf
+     * width instead of by PAGE_SIZE.  Both loops run under mm->lock, so the
+     * record pointers stay valid for the span each one covers. */
     for (vaddr_t va = addr; va < end;) {
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) break;
         int is_vmo = (vma->vm_flags & VM_VMO) != 0;
         vaddr_t vma_end = vma->end;
@@ -134,7 +134,7 @@ int mm_vma_set_lock(mm_struct_t *mm, vaddr_t start, vaddr_t end, int on)
 
     uint64_t flags = spin_lock_irqsave(&mm->lock);
     for (vaddr_t va = start; va < end;) {
-        vm_area_t *vma = mm_find_vma(mm, va);
+        mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) {
             spin_unlock_irqrestore(&mm->lock, flags);
             return -ENOMEM;

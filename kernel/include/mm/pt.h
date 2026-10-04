@@ -4,6 +4,9 @@
 #include "core/types.h"
 #include "core/arch.h"
 #include "core/lock.h"
+/* The mapping record lives here, written in terms of the VM_* bits; pt.h only
+ * needs the type, and taking the definition from vm.h keeps one copy of it. */
+#include "mm/vm.h"
 
 /*
  * MM_AS_MODEL — single-level address-space model (CortenMM-style).
@@ -180,14 +183,173 @@ typedef struct pt_meta {
     uint16_t          nr_present;   /* present or PT-node entries */
     uint8_t           level;        /* page-table depth of this page */
     uint8_t           stale;        /* detached from parent; subtree poisoned */
+    /* The status byte: 4 bits of class, 1 of COW, 3 of protection.  COW lives
+     * HERE and nowhere else.  There used to be a second `cow[]` bitmap beside
+     * it, written by mm_pt_set_cow() and read by nothing but the auditor --
+     * and the two drifted: every real writer (pt_map_cls, mm_pt_sync_status)
+     * sets the byte, so the bitmap was stale for exactly the pages the
+     * fault-around path aliases from the page cache, and the audit reported
+     * cow=153 on a run where the kernel was correct.  Two copies of one fact
+     * kept in step by hand is the failure mode this whole model exists to
+     * delete; one copy cannot drift. */
     uint8_t           cls[MM_PT_META_ENTRIES];
-    uint8_t           cow[(MM_PT_META_ENTRIES + 7) / 8];
     /* Safety semantics that the status byte has no room for: all 8 bits are
      * allocated (4 class + COW + 3 prot) and shared-ness already lives in the
-     * class field, so these ride alongside `cow` as a bitmap rather than
-     * widening cls[] to 16 bits per entry. */
+     * class field, so these ride alongside it as a bitmap rather than widening
+     * cls[] to 16 bits per entry. */
     uint8_t           safe[(MM_PT_META_ENTRIES + 7) / 8];
+    /* Backing-object inheritance, allocated only for page-table pages that
+     * actually carry file/VMO node annotations (see mm_segtab_t).  NULL on
+     * every PT page of a purely anonymous address space, so anonymous
+     * workloads pay exactly nothing. */
+    struct mm_segtab *segtab;
 } pt_meta_t;
+
+/* ------------------------------------------------------------------ *
+ * Backing-object segments  (P6, see docs/roadmap/single-level-mm-model.md 12.6)
+ * ------------------------------------------------------------------ *
+ * The status byte records WHAT a page is (class + COW + prot) but cannot
+ * record WHICH OBJECT backs it -- a vnode, an offset, a VMO.  Until fault
+ * dispatch can name that object from the status alone, it has to ask the VMA,
+ * and the VMA cannot be deleted.
+ *
+ * Those facts are per RANGE, not per page: one 3 GiB file mapping has one
+ * offset sequence, not 786432 of them.  So they live in a segment shared by
+ * every page-table page the mapping crosses.
+ *
+ * WHY THE INDEX IS PER NODE ENTRY, NOT PER LEAF
+ * ----------------------------------------------
+ * The obvious encoding -- a per-leaf segment index -- does not work, and the
+ * reason is worth keeping because it is not obvious.  Writing a leaf entry
+ * requires that leaf table to exist, so annotating an un-faulted range by
+ * leaf would force every page-table page in that range to be materialised: a
+ * 3 GiB mapping becomes 1536 leaf tables plus 1536 pt_meta_t.  That is
+ * precisely the cost g_anon_prov_max exists to cap (measured: 512 cursor
+ * round trips for a 2 MiB mapping already cost ~1.5x), and precisely why
+ * eager provisioning ships off.
+ *
+ * Putting the index on the PARENT's entry for a child node instead makes the
+ * annotation mean "this whole subtree is backed by segment S".  mmap writes
+ * one index per node on the path -- three or four for a 3 GiB Sv39 mapping --
+ * and a fault descent stops at the first annotated node.  Cost is O(nodes).
+ * The four class bits currently spent on MM_ST_PT_NODE are free to carry it,
+ * because a node entry needs nothing else from them.
+ *
+ * WHERE A SEGMENT STOPS BEING AUTHORITATIVE
+ * ------------------------------------------
+ * An annotation names a subtree, so its precision is one node entry -- 2 MiB
+ * at level 1 on Sv39.  A VMA split (munmap in the middle of a mapping) puts a
+ * boundary at an arbitrary page address, and the straddling entry can only be
+ * labelled with one side's segment; the other side's pages sit inside an entry
+ * that claims the wrong file offset.
+ *
+ * Rather than pretend otherwise, the segment carries the extent it actually
+ * describes and mm_pt_lookup_seg() refuses to answer for an address outside
+ * it.  A caller that gets NULL has not been lied to: it falls back to the VMA,
+ * exactly as it did before the segment existed.  That is what makes this safe
+ * to land before the fault path stops consulting the VMA -- the fallback is
+ * still there and is still correct, it just becomes rarer.
+ *
+ * A leaf entry never carries a segment: once a page exists, its class already
+ * says what it is, and the segment is only needed to resolve pages that have
+ * not been backed yet.
+ */
+struct vmo;
+struct vnode;
+struct mm_segarr;
+
+
+/* Segments nameable by ONE node entry.  This is the width of the packed index,
+ * not the capacity of the table -- the two were the same number until the
+ * segment array was split out, and conflating them is what made this a
+ * capacity problem when it was a sharing one (see below).
+ *
+ * The width is the frame's ceiling, not a chosen number, so it is computed
+ * from the geometry rather than written down: idx[] is one byte per name per
+ * PT entry and lives in a single order-0 frame alongside `arr`, so the frame
+ * holds PAGE_SIZE bytes and PT entries is MM_PT_META_ENTRIES.  The segtab's own
+ * refcount was dropped to buy back the eight bytes that cost.
+ *
+ * Deriving it is what lets the table exist on more than one architecture.  It
+ * was hardcoded at seven, which is right for the 512-entry node pages of
+ * Sv39/Sv48 (3592 of 4096 bytes) and 4104 -- an overrun -- at eight, but
+ * riscv32 has 1024-entry node pages, so seven names each is 7176 bytes and the
+ * static assert in pt.c refused to compile it.  A constant tuned to one
+ * architecture's page-table shape is a constant that is wrong somewhere else;
+ * arm32 (256 non-root entries) and ppc64le (512) land on 15 and 7
+ * respectively without anyone deciding what they should be.
+ *
+ * Measured, one step at a time -- each step moves the ceiling rather than
+ * removing it, which is why the limits are measured rather than assumed:
+ *
+ *     4 names/entry, 8 shared slots   seg_miss 1992   nibbles_full    0
+ *     4 names/entry, 255 shared slots seg_miss  ~900  nibbles_full 5900
+ *     7 names/entry, 255 shared slots seg_miss  ~270  nibbles_full 2900
+ *
+ * What is left is not a bug to be tuned away.  A node entry is 2 MiB on Sv39,
+ * so naming a mapping means naming it at 2 MiB resolution: an entry holding
+ * more than seven distinct mappings cannot say which is which, and the lookup
+ * correctly declines rather than guessing.  Closing that needs finer
+ * resolution -- annotating the leaf, or splitting the index out of the frame --
+ * not a larger constant. */
+#define MM_SEGTAB_NAMES                                                     \
+    ((int)(((PAGE_SIZE - sizeof(struct mm_segarr *)) /                      \
+            (size_t)MM_PT_META_ENTRIES) > (size_t)MM_SEGTAB_MAX             \
+           ? (size_t)MM_SEGTAB_MAX                                          \
+           : ((PAGE_SIZE - sizeof(struct mm_segarr *)) /                    \
+              (size_t)MM_PT_META_ENTRIES)))
+
+/* Distinct segments nameable by one page-table page's shared array.  A node
+ * entry is 2 MiB at level 1 on Sv39, so one node page spans a gigabyte and its
+ * array has to cover every mapping in it.  Measured on the real-software gate:
+ * with only eight, segtab_slot() reported the table full 7132 times and every
+ * one of those was an address that then had to fall back to the VMA -- while
+ * per-entry names were never exhausted at all (0 nibble-full events).  The
+ * binding constraint was the shared array, never the per-entry index.
+ *
+ * This lives in its own refcounted allocation rather than inline, so the
+ * per-node-page segtab is just the index array and both sizes can move
+ * independently. */
+#define MM_SEGTAB_MAX 255
+
+/* Per-page-table-page segment table, allocated on first annotation.
+ *
+ * NO refcount, unlike the mm_segarr beside it.  A segtab is owned by exactly
+ * one pt_meta_t, which frees it when that PT page goes away, so a count would
+ * be written once and never read.  Dropping it is what buys the eight bytes
+ * a wider index needs: with the field still here the struct is 4104 bytes even
+ * at MM_SEGTAB_NAMES=8, which overruns the order-0 frame it is allocated from
+ * by exactly eight. */
+typedef struct mm_segtab {
+    /* The segments named by this node page's entries, shared by all of them.
+     * Refcounted: several node pages can be annotated from one mmap, so the
+     * array outlives any single segtab that points at it. */
+    struct mm_segarr *arr;
+    /* Index is 1-based so that 0 means "no segment", which is also the state
+     * of every entry in a table that never needed one.
+     *
+     * SIX bytes per entry: MM_SEGTAB_NAMES eight-bit slot numbers.  It was
+     * ONE byte holding four-bit slots, and the packer cast its result back to
+     * that width, so slots three and four were written and read back as
+     * nothing.  Nothing could detect it -- the annotate walk, the lookup and
+     * the auditor all read back the same truncated byte -- and it showed up as
+     * a seg_miss that no amount of walking would close.  segtab_packed_t in
+     * pt.c exists so the next width mistake is a compile error.
+     *
+     * The segtab is allocated from a SINGLE order-0 frame and this array is
+     * 512 entries of it, so the static assert in pt.c is what stops the whole
+     * structure from quietly overrunning that frame -- which surfaces as a wild
+     * pointer in proc_put, not as anything to do with segments. */
+    /* Six bytes, not eight: see MM_SEGTAB_NAMES.  A byte array rather than a
+     * packed integer, so the slot accessors index it directly and a width
+     * mistake is a compile error instead of a silent truncation. */
+    uint8_t      idx[MM_PT_META_ENTRIES * MM_SEGTAB_NAMES];
+} mm_segtab_t;
+
+_Static_assert(MM_SEGTAB_NAMES >= 1,
+               "a node page too wide to name even one mapping per entry; the "
+               "segtab needs more room than one frame gives it");
+_Static_assert(MM_SEGTAB_MAX <= 255, "a slot number must fit the byte idx[] gives it");
 
 /*
  * Per-entry safety bits.  These exist so the per-PTE status can become the
@@ -317,19 +479,64 @@ typedef struct mm_pt_audit_report {
     uint64_t vma_mismatch;   /* VMA coverage disagrees with the status */
     uint64_t vmai_mismatch;  /* status claims a page no VMA accounts for */
     uint64_t safe_mismatch;  /* MM_SAFE_NO_FA disagrees with VM_SEALED */
+    /* Present leaf whose status class the covering VMA could not have
+     * produced (anonymous inside a MAP_SHARED file VMA, or vice versa).
+     * This is the precondition for P6: fault dispatch may only start
+     * deciding "anonymous or file?" from the status while this is 0. */
+    uint64_t cls_mismatch;
     /* Not an error: how many leaves carry MM_AS_ANON_VIRT, i.e. are reserved
      * but not yet backed.  This is the on-demand paging state the paper
      * relies on, so it is counted to make it observable rather than inferred
      * from the absence of mismatches. */
     uint64_t anon_virt;
+    /* Segment annotations (P6).  seg_slots counts PT-node entries that name a
+     * segment; seg_pages counts distinct segments those entries resolve to.
+     * Both are observations, not verdicts -- a purely anonymous address space
+     * has zero of each and is fine.
+     *
+     * seg_bad_slot IS a verdict: a non-zero index that does not resolve to a
+     * live mm_seg_t means fault dispatch would dereference a freed vnode the
+     * first time it trusted the annotation.  seg_kind_mismatch is the same
+     * idea one level up: the segment says FILE where the covering VMA says
+     * VMO, so the reader would take the wrong branch for the page. */
+    uint64_t seg_slots;
+    uint64_t seg_pages;
+    uint64_t seg_bad_slot;
+    uint64_t seg_kind_mismatch;
+    /* Is the mapping list well formed?
+     *
+     * The list is the only representation of the address space now, and
+     * mm_seg_find() binary-searches it, so a list that is unsorted, has
+     * overlapping entries, or holds a dead record answers with the wrong
+     * mapping and nothing else is left to catch it.  vmas counts the entries
+     * walked; noseg counts records whose magic is gone or whose extent is
+     * inverted; extent_mismatch counts entries that overlap their predecessor.
+     * agree/disagree count entries that passed. */
+    uint64_t seg_extent_vmas;
+    uint64_t seg_extent_mismatch;
+    uint64_t seg_extent_noseg;
+    uint64_t seg_pte_agree;      /* entries that passed the check above */
+    uint64_t seg_pte_disagree;   /* unused; kept so the report layout is stable */
+    vaddr_t seg_bad_va;
+    vaddr_t seg_kind_bad_va;
+    uint8_t  seg_kind_bad;
+    /* First offending address per counter.  A bare count says "some VMA is
+     * inconsistent"; an address says which mutator to read.  The audit runs
+     * only on the shutdown path and on the gate's explicit request, so the
+     * extra words cost nothing that matters. */
+    vaddr_t vma_bad_va;
+    vaddr_t vmai_bad_va;
+    vaddr_t cls_bad_va;
+    uint8_t cls_bad_class;
 } mm_pt_audit_report_t;
 
 static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 {
     return r->missing_meta + r->present_mismatch + r->absent_mismatch +
            r->prot_mismatch + r->cow_mismatch + r->vma_mismatch +
-           r->vmai_mismatch +
-           r->safe_mismatch;
+           r->vmai_mismatch + r->cls_mismatch +
+           r->safe_mismatch + r->seg_bad_slot + r->seg_kind_mismatch +
+           r->seg_extent_mismatch + r->seg_extent_noseg;
 }
 
 
@@ -359,15 +566,115 @@ void mm_pt_core_init(void);
 int  mm_pt_node_init(pte_t *table, int level);
 void mm_pt_node_fini(pte_t *table);
 
+/* ---- backing-object segments (P6) ----
+ *
+ * Annotate the node entries covering [start, end) with `seg`, and resolve the
+ * segment backing an address.  Both are described in mm/pt.h above; the short
+ * version is that the index lives on PT-NODE entries so that recording the
+ * kind of a mapping costs one write per node rather than one per page.
+ *
+ * mm_pt_annotate_seg() touches no PTE and takes its own per-node locks, so it
+ * is not a cursor operation; it is called with mm->lock held.  It descends
+ * only into nodes that already exist, so run it AFTER the mapping's path is
+ * installed.
+ *
+ * mm_pt_lookup_seg() returns a referenced segment (NULL for anonymous), which
+ * is what lets a reader resolve the object after dropping mm->lock; pair it
+ * with mm_seg_put(). */
+int mm_pt_annotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                       mm_seg_t *seg);
+mm_seg_t *mm_pt_lookup_seg(mm_struct_t *mm, vaddr_t addr);
+/* Drop annotations covering [start, end).  munmap needs this because the node
+ * collapse only runs for tables that hold no leaves, and the mappings a
+ * segment exists for are precisely the ones that hold none.
+ *
+ * `only` names the segment giving up its claim; NULL drops every name on the
+ * entries in the range.  Pass the segment wherever the caller knows it, because
+ * an entry is coarser than a mapping and may also be naming a neighbour that is
+ * still perfectly well described. */
+void mm_pt_unannotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
+                          mm_seg_t *only);
+/* Drop one entry's index; for the unmap path that turns a node entry back into
+ * a leaf.  Caller holds the parent node's lock. */
+void mm_pt_node_clear_seg(pte_t *table, int level, int idx);
+
+/* Mapping-record lifetime.  mm_seg_new() (mm/vma.c) creates one with a single
+ * reference the creator owns; the index and every annotation walk take their own
+ * with mm_seg_get(), and the last mm_seg_put() runs the record's release
+ * callback and frees it. */
+mm_seg_t *mm_seg_get(mm_seg_t *s);
+void      mm_seg_put(mm_seg_t *s);
+
+/* Shadow check (P6, docs 12.6).  Asking the segment what it would have said,
+ * and comparing against what the VMA actually said, turns "the segment is
+ * good enough to replace the VMA" from a claim into a number.  It is a
+ * measurement, not a code path: nothing here changes what the fault does.
+ *
+ * `kind` is MM_SEG_FILE or MM_SEG_VMO (what the caller believes the mapping
+ * is), `off` the object offset it computed for `addr`, `shared` the MAP_SHARED
+ * flag.  Returns 1 if a segment covered the address AND agreed on all three,
+ * 0 if it covered the address and disagreed, -1 if none covered it (the
+ * straddling-entry case in "WHERE A SEGMENT STOPS BEING AUTHORITATIVE").
+ *
+ * On a disagreement, and only for the first MM_SEG_SHADOW_REPORT of them,
+ * `*found` receives the offending segment with a reference the CALLER must
+ * drop.  The caller is the only side that can name a VMA, so it is the only
+ * side that can print a comparison worth reading. */
+#define MM_SEG_SHADOW_REPORT 8
+int mm_pt_shadow_seg(mm_struct_t *mm, vaddr_t addr, uint8_t kind,
+                     uint64_t off, int shared, mm_seg_t **found);
+
+/* Counters behind those verdicts, printed in [MM-ASM].  shadow_miss counts
+ * faults that asked and got nothing, which is the number that says how much of
+ * the workload the segment table still cannot serve. */
+extern uint64_t mm_seg_shadow_agree;
+extern uint64_t mm_seg_shadow_disagree;
+extern uint64_t mm_seg_shadow_miss;
+
+/* Which side of the P6 dispatch actually decided.  Both zero means the change
+ * is inert; both equal means the segment is inert. */
+extern uint64_t mm_seg_dispatch_seg;
+extern uint64_t mm_seg_dispatch_fallback;
+
+/* Why a lookup found nothing, and why an annotation could not be recorded.
+ *
+ * These earned their place by refuting a diagnosis: the residual seg_miss was
+ * attributed to entries running out of names, and mm_seg_annot_lost[1] (per-entry
+ * names exhausted) measured ZERO while mm_seg_annot_lost[0] (the shared array
+ * exhausted) measured 7132.  Every capacity fix since has been chosen against
+ * these numbers rather than against the frame arithmetic, which pointed at the
+ * wrong limit the whole way.  Both are printed in [MM-ASM].
+ *
+ *   mm_seg_miss_why[]  0 hole  1 leaf  2 unnamed  3 extent  4 ambiguous
+ *                      5 fell off the bottom
+ *   mm_seg_annot_lost[] 0 shared array full  1 entry's names all taken
+ *   mm_seg_full_lvl[]  per level, how many annotations that level could not take
+ */
+enum {
+    MM_MW_HOLE = 0,      /* entry not valid */
+    MM_MW_LEAF,          /* a huge leaf, which never names a segment */
+    MM_MW_UNNAMED,       /* node has an array, this entry names nothing */
+    MM_MW_EXTENT,        /* named, but no name covers the address */
+    MM_MW_AMBIG,         /* two live names both cover it */
+    MM_MW_BOTTOM,        /* walked off the bottom, still nothing */
+    MM_MW_COUNT
+};
+extern uint64_t mm_seg_miss_why[MM_MW_COUNT];
+extern uint64_t mm_seg_annot_lost[2];
+extern uint64_t mm_seg_full_lvl[8];
+
 /* Per-PTE metadata maintenance.  mm_pt_note_present() and
  * mm_pt_note_absent() bracket every PTE write; the level-0 helpers are the
  * leaf forms.  The AUDIT-only entry point exists so the auditor can compare
  * the two representations without going through a cursor. */
 void mm_pt_note_present(pte_t *table, int level, int idx, uint8_t cls_byte);
 void mm_pt_note_absent(pte_t *table, int level, int idx);
+/* Re-derive protection and the COW bit from a PTE a non-cursor writer just
+ * rewrote, keeping the class the caller already knows.  Every direct-PTE
+ * writer outside pt.c (mprotect, cow, madvise, demote) must call this after
+ * its store, or the status silently keeps describing the old page. */
+int mm_pt_sync_status(pte_t *table, int level, int idx, uint8_t cls);
 uint8_t mm_pt_peek(pte_t *table, int level, int idx);
-int mm_pt_cow(pte_t *table, int level, int idx);
-void mm_pt_set_cow(pte_t *table, int level, int idx, int on);
 
 /* Copy a page-table page's metadata to a freshly cloned page. */
 int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level);
@@ -401,7 +708,7 @@ int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr);
 int mm_cursor_mark(mm_cursor_t *cur, vaddr_t addr, uint8_t cls);
 int mm_cursor_mark_prot(mm_cursor_t *cur, vaddr_t addr, uint8_t cls,
                         pte_t flags);
-int mm_pt_refresh_absent_prot(pte_t *table, int idx, pte_t ptef);
+int mm_pt_refresh_leaf_prot(pte_t *table, int idx, pte_t ptef);
 
 /*
  * Eagerly provision an anonymous range: build the page-table path and mark

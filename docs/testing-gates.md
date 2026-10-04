@@ -16,6 +16,7 @@
 | SMP runqueue、迁移与抢占 | `make check-smp-runqueue-boundary` |
 | 本地 pick 锁拆分 | `make check-process-lock-split-boundary` |
 | MM/VMA/页表 | `make check-mm-lock-model` |
+| 内存模型跑真实软件 | `make smoke-mm-software`（在 mmtest world 里跑 git/vim/gcc/python/nodejs，并要求关机审计全 0；见下文「MM/VMA/页表」的说明） |
 | I/O 进展 | `make check-io-progress-model` |
 | VFS 抽象 | `make check-vfs-abstraction` |
 | ABI 边界 | `make check-abi-boundary` |
@@ -83,14 +84,154 @@
 
 失败时补充或恢复 `kernel/include/mm/vm.h`、`kernel/mm/vm.c`、`kernel/mm/fault.c`、`kernel/include/mm/oom.h` 中对应契约字符串，并确保 MM 压力测试入口未删除。
 
-关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**元数据与硬件页表是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：
+关机审计行 `[MM-ASM]` 由 `/proc/a20/perf`（`sys_proc.c` 的 `mm_pt_audit_all()`）在每次关机时打印，它是**每页元数据与硬件页表、映射记录与元数据是否全程一致**的机器证据。各字段都是失配计数，正常必须全 0：
 
-- `missing_meta` / `present` / `absent` / `prot` / `cow` —— 正向：逐条比对"元数据是否与该 PTE 一致"。
-- `vma` —— 正向：每个 VMA 是否至少有一页被元数据认识。
-- `vmai` —— **反向（P8）**：凡是元数据声称有东西的页（Mapped / COW / 已预留未缺页），是否都有 VMA 覆盖。`MM_ST_INVALID` 豁免，因为空洞不是遗漏。正向检查只从 VMA 出发，所以没有这一项时"有状态但无 VMA"的页是不可见的；这也是"VMA 列表是纯派生"这条不变式唯一能漏的地方。
+- `missing_meta` / `present` / `absent` / `prot` / `cow` —— 逐条比对"元数据是否与该 PTE 一致"。
+- `vma` —— 正向：一条映射记录若已经有驻留的 PTE 叶，那些页是否至少有一页被元数据认识。**注意判据不是"每条记录都至少有一页被认识"**：记录是映射的授权、元数据是状态，一个刚 mmap 出来没人碰过的区间两者对不上完全合法（按需调页正是模型赖以成立的东西）。用弱判据会在普通程序上开火，而会误报的门禁最后只会被关掉。
+- `vmai` —— **反向（P8）**：凡是元数据声称有东西的页（Mapped / COW / 已预留未缺页），是否都有映射记录覆盖。`MM_ST_INVALID` 豁免，因为空洞不是遗漏。正向检查只从记录出发，所以没有这一项时"有状态但无记录"的页是不可见的。
+- `cls` —— 双方都认为某页已映射时，对**那是什么**（anon / file / …）的判断是否一致。
 - `safe` —— `MM_SAFE_NO_FA` 与 `VM_SEALED` 的一致性。
+- `map list` 的 `overlap` / `dead` / `ok` —— 映射记录链表自身的不变量（§13.18 新增，见下）。
 
-字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race`。
+> **2026-10-04 更新**：这一段原先把元数据与硬件页表之外的第二个对象称作"VMA"，
+> 并把不变式写作"VMA 列表是纯派生"。合并之后那条不变式**不再有意义**——
+> 列表不是派生视图，它**就是**记录本身。此处改按"映射记录 ↔ 每页元数据"
+> 这一对来表述，这是目前仍然成立的交叉校验关系。
+
+计数失配时审计器另外打印**第一个出错地址**（`[MM-ASM]   first vma_mismatch  va=…`）。只有计数不给出地址，等于没说该读哪个 mutator。
+
+字段在**测量处**被断言：`smoke-mm-pt-race` 的期望正则要求 `vmai=0`，反之则门禁变红。注意 `smoke-mm-stress` **不**断言 `[MM-ASM]` 这一行，它只凭 `MM_STRESS: PASS` 通过，因此不是本字段的门禁——要验证 `vmai` 请用 `smoke-mm-pt-race` 或 `smoke-mm-software`。
+
+#### `make smoke-mm-software`：真实软件门禁
+
+上面这些 smoke 跑的都是**内核自己写的系统调用、用内核自己分配的页**。它们测不到真实程序踩的形状：编译器 mmap 一大块 arena、JIT mprotect 代码页、git 建大索引再 remap、解释器 fork 五千个对象。
+
+`smoke-mm-software`（`tools/mmtest_gate.py`）起 `packages/world/mmtest.world` 的镜像，在里面跑 **git / vim / gcc / python / nodejs**，逐个**验证内容**而不是验证退出码（`git clone` 一个空仓库也是退出 0）。
+
+需要**两个**判定同时成立：
+
+1. `MMTEST_RESULT: PASS` —— 五个都跑完并核对通过。
+2. 关机时的 `[MM-ASM]` 审计行全 0。
+
+只有 1 会漏掉"软件跑完了但映射记录与每页元数据已经漂移"；只有 2，一个只 `memset` 的空跑也能过。
+
+审计行**只在关机路径上打印**，所以客端脚本自己 `poweroff -f`。这一点不是形式主义：早期版本没有它，宿主超时杀掉客端，审计从未执行，而门禁因为"没看到错误输出"判成了通过。**一道看不见自己不变量的门禁不算通过**——`tools/mmtest_gate.py` 因此把"没有 `[MM-ASM]` 行"直接判 FAIL，而不是跳过。
+
+它有自己的 target、没有折进 `check-mm-lock-model`，因为它慢（一次完整镜像构建 + 约 3 分钟启动），不适合进默认 check 集合。这个取舍是有意的：慢的门禁容易被 CI 超时砍掉，而被砍掉之后剩下的门禁**全都测不到这一类缺陷**。
+
+当前状态（riscv64，`feat/mm-complete`）：
+
+```
+MMTEST: ALL STAGES PASS
+MMTEST_RESULT: PASS
+[MM-ASM] pt_pages=9 entries=3072 missing_meta=0 present=0 absent=0 prot=0 cow=0
+         vma=0 vmai=0 cls=0 safe=0 anon_virt=0 seg_slots=4 seg_bad=0 seg_kind=0
+         seg_ok=43081 seg_diff=0 seg_miss=1084
+         seg_dispatch=43081 seg_fallback=1084
+[MM-ASM]   map list: entries=14 overlap=0 dead=0 ok=14
+[MM-ASM]   miss why: hole=0 leaf=0 unnamed=143 extent=939 ambig=0 bottom=2
+[MM-ASM]   annot lost: table_full=0 nibbles_full=3976 full_by_level=[0,0,0]
+```
+
+**只有取 0 的字段是门槛。** 绝对值随 ASLR 变化——同一棵树相邻两次门禁给出
+`entries=3072` 与 `entries=4096`、`seg_ok=43081` 与 `43120`。上面这份是一次真实
+运行（riscv64，`feat/mm-complete`，提交 `039414d37`）的输出，不是每次都该逐字复现的
+期望值：门禁判的是 `mmtest_gate.py` 那几行 `all zero`，不是这里的数字本身。
+
+`seg_*` 是 P6 的影子比对字段（见 roadmap §13），含义与门槛各不相同：
+
+`seg_miss` 是覆盖缺口而不是缺陷：它记的是「段表答不出、回退到映射链表」的缺页。
+它走过 37626（84%）→ 3796（8.6%）→ 265（0.6%）→ 1084（2.5%），最后一次**上升**
+是 §13.15 删掉标注走查里的 provision 换来的——那个 provision 与它自己的调用点
+契约矛盾（它会为一个映射把整段区间的页表节点建出来），在只有文件映射被标注时
+负担得起，anon 一进来就无界。覆盖率换掉了它，剩下约 2.5% 全部安全回退，
+`seg_diff` 始终为 0。
+
+> **2026-10-04 更新：合并之后这组字段的含义变了，名字没变。** 合并前它们比较的是
+> **两种不同的映射表示**（页表命名的段 vs 链表里的 VMA）。现在两条路径解析出的
+> **是同一条 `mm_seg_t` 记录**——`mm_pt_lookup_seg()` 与 `mm_seg_find()` 返回同一个
+> 类型的对象。所以：
+> - `seg_ok` / `seg_diff` 不再是"跨表示一致性"，而是**同一批记录的两种解析方式是否
+>   指向同一条**：页表节点条目按名字解析出的记录，与链表按地址查出的记录。它们只在
+>   一种情况下会不同——2 MiB 的节点条目把名字给了邻居映射时。这仍然是真缺陷
+>   （会缺错文件的一页），所以 `seg_diff` 仍是**必须 0**。
+> - `seg_fallback` 也不再是"退回另一个真相"，而是"用链表解析而非页表名字解析"。
+>   **这正是分派能安全进行的原因**：两条路给出同一个答案，所以残余的 2.5% 缺口
+>   是性能问题而不是正确性问题。
+
+| 字段 | 含义 | 门槛 |
+| --- | --- | --- |
+| `seg_slots` | 带段号的 PT 节点条目数（观测值） | 非 0，否则测量是空转 |
+| `seg_bad` | 段号指向**非活**映射记录的条目数 | **必须 0**（会读到已释放的 vnode） |
+| `seg_kind` | 节点条目命中的记录，其 kind 与链表查到的覆盖该地址的记录不符的条目数 | **必须 0** |
+| `seg_ok` | 页表名字解析出的记录与链表解析出的是同一条的缺页数 | 观测值 |
+| `seg_diff` | 两者**不是同一条**（名字落在了邻居映射上）的缺页数 | **必须 0** |
+| `seg_miss` | 段表答不出的缺页数（覆盖缺口，非缺陷） | 观测值 |
+| `seg_dispatch` | 实际**由页表名字决定**的文件缺页数 | 观测值 |
+| `seg_fallback` | 回退到链表解析的文件缺页数 | 观测值 |
+
+`map list` 一行是**门槛**，不是观测值：合并之后（roadmap §13.18）地址空间里只剩**一种**
+映射表示，于是没有第二样东西可以比对，可校验的不变量变成链表本身。
+
+| 字段 | 含义 | 门槛 |
+| --- | --- | --- |
+| `entries` | 链表上的映射记录条数（观测值） | 非 0 |
+| `overlap` | 与前一条区间**重叠**的记录数 | **必须 0**（索引按 `start` 有序，二分查找靠的就是它） |
+| `dead` | magic 不对或区间倒置的记录数 | **必须 0**（那就是 use-after-free 的现场） |
+| `ok` | 通过以上全部检查的记录数 | **必须等于 `entries`** |
+
+四个数合起来说的是一件事：**每个映射都活着、有序、且占用一个连续区间**。
+`overlap=0 dead=0 ok=entries` 意味着任何一次 `mm_seg_find()` 二分查找都只会返回
+一个答案。
+
+这三个数**由门禁强制**，不是印出来给人看的：`tools/mmtest_gate.py` 用 `MAPLIST_RE`
+解析这一行，`overlap`/`dead` 非 0 或 `ok != entries` 直接 FAIL，**整行缺失也 FAIL**
+（与 `[MM-ASM]` 主行缺失同一条理由：审计没跑过就不等于通过）。这是补上的——合并
+刚做完时内核已经在算这三个数，但门禁脚本只解析主行，于是它们一度只是装饰。
+现在验证过四种坏输入（`overlap=2` / `dead=1` / `ok<entries` / 整行缺失）全部 FAIL，
+干净日志 PASS。
+
+这条审计的形态是被真实故障换来的。地址空间曾经同时有 `vm_area_t` 与 `mm_seg_t`
+两套记录，所以这一行当时是 `seg extent: vmas=… noseg=… mismatch=… pte_disagree=…`
+加上 `idx_agree/idx_diff`（逐页比较 `mm_find_vma()` 与 `mm_seg_find()` 给的是不是
+同一个段）。合并之后那三个计数器**测的东西不存在了**：没有第二个表示，也就没有
+"只改了一种、忘了另一种"可查。因此它们被换成对链表本身的不变量检查——不是把门禁
+删掉，而是把门禁指向仍然会崩的那个不变量上。
+
+`seg extent` 那一行曾经把一个静默的洞量了出来：门禁自己的进程里 14 个映射有 **10 个
+没有段**（堆、栈、brk、SysV shm、io_uring、两条 framebuffer 路径都不建段）。根因是
+`mm_mmap_seg_annotate()` 开头一个 `VM_VMO|VM_FILE` 守卫把**建记录**和**标注**
+一起挡掉了，而它们本该是两个决定。合并后守卫自然消失，见 roadmap §13.16、§13.18。
+
+`seg_miss` 的成因由 `miss why` 一行给出，`seg_*` 答不出的地址全部落在 `extent`：
+条目**有**名字，但没有哪个名字的区间覆盖该地址。这不是没记上，而是记不下——
+见下面的「覆盖缺口是分辨率，不是容量」。`annot lost` 一行给出反向的证据：
+`table_full=0` 说明每个节点页的共享段数组再没满过，`nibbles_full` 说明真正顶住
+上界的是**每个条目能记几个名字**。
+
+这两个计数器是常驻的，不是临时诊断。它们推翻过一个错误诊断：残余 `seg_miss`
+曾被归因为「条目名字不够」，而 `nibbles_full` 实测是 **0**，`table_full` 却是
+**7132**——顶住上界的是被 512 个条目共享的那个段数组。从那以后每次调容量都是
+照着这两个数字，而不是照着 frame 算术（算术从头到尾指错了限额）。
+
+### 覆盖缺口是分辨率，不是容量
+
+Sv39 上一个节点条目是 2 MiB，所以「给一个映射命名」实际上是**以 2 MiB 分辨率**
+命名。一个 2 MiB 条目里若有超过 7 个不同映射，它就无法说明哪个是哪个；
+`mm_pt_lookup_seg()` 此时拒绝作答，而不是猜一个。剩下的 ~265 次缺页回退就是这个
+分辨率上限，不是缺陷，也不是再调大常数能消掉的——`idx[]` 是 512 项、住在同一个
+order-0 frame 里，7 项/条目是 3592 字节，8 项就是 4104，已经越界。
+
+要继续缩小这个缺口，只能提高分辨率（给叶子命名）或把索引挪出 frame，而不是把
+7 改大。
+
+`seg_diff=0` 与 `seg_ok>0` 必须同时成立：前者说明段没有骗人，后者说明它确实在
+被使用。只满足前者（`seg_ok=0`）是空转，门禁会照常变绿——所以 `seg_slots` 与
+`seg_dispatch` 也在断言行里。`seg_dispatch` 与 `seg_ok`/`seg_miss` 应当两两相等：
+相等才说明"段能回答就照段的做，答不出就走回退"。
+
+详见 [roadmap/single-level-mm-model.md §12](roadmap/single-level-mm-model.md) 与
+[§13](roadmap/single-level-mm-model.md)。
 
 ### I/O 进展
 

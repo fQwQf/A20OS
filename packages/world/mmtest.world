@@ -1,0 +1,35 @@
+# mmtest profile —— 内存子系统真实负载门禁
+#
+# 目的不是"内核起得来"，而是让**真实软件**在单级内存模型上跑足够多的
+# mmap/munmap/mprotect/madvise/fork/COW 循环，把只跑 mm_stress 覆盖不到的
+# 路径压出来。四类负载各自针对模型的一个面：
+#
+#   git    —— 大量小文件 mmap + page cache 读写 + rename/unlink，考验
+#             file-backed private 缺页与 VMA 拆分
+#   vim    —— 长驻进程反复编辑保存，mprotect(PROT_READ|PROT_WRITE) 翻转
+#             与 mmap 共享段反复映射/解除
+#   gcc    —— fork+exec 大量子进程、mmap 大量文件页、链接器重定位写只读段
+#             触发 COW，是本模型最重的负载
+#   python —— 解释器自身的 arena 分配（大量 brk/mmap/munmap 抖动）
+#   node   —— V8 堆按块增长，mmap 大区间 + madvise(DONTNEED) 回收
+#
+#   a20-corpus-tools 提供原生 mount(2)（busybox mount 在本 OS 不可用）。
+#
+#   tools/a20 run mmtest-riscv64
+#
+# 首次组装需要拉取上游包（默认 USTC 镜像源），之后走 build/cache/apk 缓存。
+
+musl
+busybox
+ca-certificates
+curl
+git
+vim
+gcc
+musl-dev
+python3
+py3-pip
+nodejs
+npm
+
+a20-corpus-tools

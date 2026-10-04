@@ -43,7 +43,7 @@ static void signal_make_page_exec(uint64_t addr) {
      */
     pte_t flags = arch_signal_tramp_pte_flags();
     spin_lock(&t->mm->lock);
-    vm_area_t *vma = mm_find_vma(t->mm, page);
+    mm_seg_t *vma = mm_seg_find(t->mm, page);
     if (vma)
         flags = vma->pte_flags | (flags & PTE_X);
     spin_unlock(&t->mm->lock);

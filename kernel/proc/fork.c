@@ -66,7 +66,7 @@ static int nommu_vfork_snapshot_create(task_t *parent)
             parent->mm->nommu_alloc_sizes[i])
             count++;
     }
-    for (vm_area_t *v = parent->mm->mmap; v; v = v->next) {
+    for (mm_seg_t *v = parent->mm->mmap; v; v = v->next) {
         if (v->nommu_alloc && (v->vm_flags & VM_WRITE))
             count++;
     }
@@ -92,7 +92,7 @@ static int nommu_vfork_snapshot_create(task_t *parent)
         snaps[parent->nommu_num_vfork_snapshots++] =
             (nommu_vfork_snap_entry_t){ .dst = src, .data = copy, .size = size };
     }
-    for (vm_area_t *v = parent->mm->mmap; v; v = v->next) {
+    for (mm_seg_t *v = parent->mm->mmap; v; v = v->next) {
         if (!v->nommu_alloc || !(v->vm_flags & VM_WRITE))
             continue;
 

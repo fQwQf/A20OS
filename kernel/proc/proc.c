@@ -163,7 +163,7 @@ task_t *proc_next_task_locked(task_t *t)
     return next;
 }
 
-static void proc_count_vma_huge_pages(mm_struct_t *mm, vm_area_t *vma,
+static void proc_count_vma_huge_pages(mm_struct_t *mm, mm_seg_t *vma,
                                       proc_vm_stats_t *stats)
 {
     if (!mm || !mm->pgdir || !vma || !stats)
@@ -215,7 +215,7 @@ void proc_get_vm_stats(proc_vm_stats_t *stats)
         if (seen_count < (int)(sizeof(seen_mm) / sizeof(seen_mm[0])))
             seen_mm[seen_count++] = t->mm;
 
-        for (vm_area_t *v = t->mm->mmap; v; v = v->next)
+        for (mm_seg_t *v = t->mm->mmap; v; v = v->next)
             proc_count_vma_huge_pages(t->mm, v, stats);
     }
 
@@ -543,7 +543,7 @@ int proc_alloc(void (*entry)(void)) {
 
 /* Allocate a user-mode task with given entry point and stack */
 int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
-                          vm_area_t *mmap, vaddr_t brk,
+                          mm_seg_t *mmap, vaddr_t brk,
                           vaddr_t stack_top, size_t total_vm,
                           vaddr_t tls_tp
 #ifdef CONFIG_NOMMU

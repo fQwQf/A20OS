@@ -18,7 +18,7 @@
 
 /* mremap: relocate/grow/shrink an existing mapping. */
 
-static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
+static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
                                    vaddr_t src_addr, size_t len,
                                    int flags, vaddr_t new_addr,
                                    vaddr_t *out_addr) {
@@ -52,7 +52,7 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     }
 #endif
 
-    vm_area_t *dst_vma = mm_find_vma(mm, dst);
+    mm_seg_t *dst_vma = mm_seg_find(mm, dst);
     if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + len) {
         mm_munmap_locked(mm, dst, len);
         return -ENOMEM;
@@ -61,13 +61,13 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, vm_area_t *src_vma,
     dst_vma->vm_flags = src_vma->vm_flags;
     dst_vma->pte_flags = src_vma->pte_flags;
     dst_vma->file = src_vma->file;
-    dst_vma->file_offset = src_vma->file_offset + (src_addr - src_vma->start);
+    dst_vma->backing_offset = src_vma->backing_offset + (src_addr - src_vma->start);
     dst_vma->file_vnode = src_vma->file_vnode;
     /* A VM_VMO VMA owns a vmo reference; the destination inherits it, or the
      * source's later teardown would free frames this VMA still maps. */
     if (src_vma->vm_flags & VM_VMO) {
         dst_vma->vmo = src_vma->vmo;
-        dst_vma->vmo_offset = src_vma->vmo_offset + (src_addr - src_vma->start);
+        dst_vma->backing_offset = src_vma->backing_offset + (src_addr - src_vma->start);
         if (dst_vma->vmo)
             vmo_ref(dst_vma->vmo);
     }
@@ -162,7 +162,7 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
             return -ENOMEM;
 
         uint64_t pte_flags = arch_pte_flags(*src);
-        vm_area_t *src_vma = mm_find_vma(mm, src_va);
+        mm_seg_t *src_vma = mm_seg_find(mm, src_va);
         page_cache_page_t *pcp =
             mm_file_cache_mapping_get(src_vma, src_va, pfn);
         /* VMO frames are owned by the VMO; mappings never hold frame refs. */
@@ -208,7 +208,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         return -EINVAL;
     if ((flags & MREMAP_DONTUNMAP) && !(flags & MREMAP_MAYMOVE))
         return -EINVAL;
-    mm_vma_index_invalidate(mm);
+    mm_seg_index_invalidate(mm);
 
     size_t old_len = ROUND_UP(old_size, PAGE_SIZE);
     size_t new_len = ROUND_UP(new_size, PAGE_SIZE);
@@ -218,14 +218,14 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     if ((flags & MREMAP_FIXED) && new_addr + new_len < new_addr)
         return -EINVAL;
 
-    vm_area_t *vma = mm_find_vma(mm, old_addr);
+    mm_seg_t *vma = mm_seg_find(mm, old_addr);
     if (!vma) return -EFAULT;
 
     /* mseal(2): remapping (move/shrink/grow or DONTUNMAP) of a sealed VMA is
      * refused. */
     {
         vaddr_t chk_end = old_addr + old_len;
-        for (vm_area_t *v = mm_find_vma(mm, old_addr); v && v->start < chk_end;
+        for (mm_seg_t *v = mm_seg_find(mm, old_addr); v && v->start < chk_end;
              v = v->next) {
             if (v->start >= chk_end || v->end <= old_addr)
                 continue;
@@ -254,7 +254,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     if (r < 0) return r;
     r = mm_split_vma_at(mm, old_addr + old_len);
     if (r < 0) return r;
-    vma = mm_find_vma(mm, old_addr);
+    vma = mm_seg_find(mm, old_addr);
     if (!vma || vma->start != old_addr || vma->end < old_addr + old_len)
         return -EFAULT;
 
@@ -308,7 +308,7 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
         return sr;
     }
 
-    vm_area_t *dst_vma = mm_find_vma(mm, dst);
+    mm_seg_t *dst_vma = mm_seg_find(mm, dst);
     if (!dst_vma || dst_vma->start != dst || dst_vma->end != dst + new_len) {
         mm_munmap_locked(mm, dst, new_len);
         return -ENOMEM;
@@ -317,11 +317,11 @@ int mm_mremap_locked(mm_struct_t *mm, vaddr_t old_addr, size_t old_size,
     dst_vma->vm_flags = vma->vm_flags;
     dst_vma->pte_flags = vma->pte_flags;
     dst_vma->file = vma->file;
-    dst_vma->file_offset = vma->file_offset + (old_addr - vma->start);
+    dst_vma->backing_offset = vma->backing_offset + (old_addr - vma->start);
     dst_vma->file_vnode = vma->file_vnode;
     if (vma->vm_flags & VM_VMO) {
         dst_vma->vmo = vma->vmo;
-        dst_vma->vmo_offset = vma->vmo_offset + (old_addr - vma->start);
+        dst_vma->backing_offset = vma->backing_offset + (old_addr - vma->start);
         if (dst_vma->vmo)
             vmo_ref(dst_vma->vmo);
     }

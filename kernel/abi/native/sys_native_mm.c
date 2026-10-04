@@ -19,6 +19,7 @@
 #include "mm/slab.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/pt.h"
 #include "fs/vfs.h"
 #include "fs/fdtable.h"
 #include "fs/xattr.h"
@@ -217,7 +218,7 @@ int64_t sys_a20_vm_map(const a20_syscall_args_t *args)
         return -A20_ERR_NO_SPACE;
     }
     if (route) {
-        vm_area_t *nv = mm_find_vma(cur->mm, (vaddr_t)addr);
+        mm_seg_t *nv = mm_seg_find(cur->mm, (vaddr_t)addr);
         if (nv && nv->start == (vaddr_t)addr) {
             uint32_t cap_bits = 0;
             if (route_can & VMAR_CAN_MAP_READ)  cap_bits |= A20_PROT_READ;
@@ -433,8 +434,8 @@ int64_t sys_a20_vm_flush(const a20_syscall_args_t *args)
 
     uint64_t end = (addr + len + 4095) & ~(uint64_t)4095;
     for (uint64_t va = addr & ~(uint64_t)4095; va < end; va += 4096) {
-        vm_area_t *vma = mm_find_vma(cur->mm, va);
-        if (!vma || va >= vma->end) return -A20_ERR_NO_MEMORY;
+        mm_seg_t *seg = mm_seg_find(cur->mm, va);
+        if (!seg || va >= seg->end) return -A20_ERR_NO_MEMORY;
     }
 
     if (flags & A20_FLUSH_SYNC)

@@ -177,10 +177,9 @@ int udriver_map_mmio(mm_struct_t *mm, uint64_t phys, uint64_t size,
      * swap pages to disk, waits on remote TLB IPIs and can proc_force_exit() a
      * task; none of that may run inside a spinlock section.  The object stays
      * unreachable until mm_insert_vma() publishes it below. */
-    vm_area_t *vma = kcalloc(1, sizeof(*vma));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma)
         return -1;
-    refcount_set(&vma->refcount, 1);
     vma->vm_flags = vma_flags;
 
     spin_lock(&mm->lock);
@@ -216,7 +215,7 @@ void udriver_revoke_mmio(mm_struct_t *mm, uint64_t phys)
         vaddr_t start = 0;
         size_t length = 0;
         uint64_t flags = spin_lock_irqsave(&mm->lock);
-        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_PFNMAP))
                 continue;
             int level = 0;

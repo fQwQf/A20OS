@@ -63,11 +63,11 @@ typedef struct a20_vvar {
 #ifdef ARCH_HAS_VDSO
 
 struct mm_struct;
-struct vm_area;
+struct mm_seg;
 
 void     vdso_init(uint64_t boot_cycles, uint64_t timer_freq);
 void     vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc);
-int      vdso_map_image(pt_root_t *pgdir, struct vm_area **list);
+int      vdso_map_image(pt_root_t *pgdir, struct mm_seg **list);
 int      vdso_exec_map(struct mm_struct *mm);
 int      vdso_fork_map(struct mm_struct *child_mm);
 vaddr_t  vdso_auxv_ehdr(void);
@@ -75,13 +75,13 @@ vaddr_t  vdso_auxv_ehdr(void);
 #else /* !ARCH_HAS_VDSO */
 
 struct mm_struct;
-struct vm_area;
+struct mm_seg;
 
 static inline void vdso_init(uint64_t boot_cycles, uint64_t timer_freq)
 { (void)boot_cycles; (void)timer_freq; }
 static inline void vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc)
 { (void)sec; (void)nsec; (void)base_cyc; }
-static inline int vdso_map_image(pt_root_t *pgdir, struct vm_area **list)
+static inline int vdso_map_image(pt_root_t *pgdir, struct mm_seg **list)
 { (void)pgdir; (void)list; return -1; }
 static inline int vdso_exec_map(struct mm_struct *mm) { (void)mm; return 0; }
 static inline int vdso_fork_map(struct mm_struct *child_mm) { (void)child_mm; return 0; }
