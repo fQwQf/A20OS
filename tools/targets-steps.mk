@@ -244,6 +244,21 @@ smoke-bpf:
 smoke-wx-aslr:
 	$(PYTHON) tools/smoke.py smoke-wx-aslr
 
+smoke-exec-xlator:
+	$(PYTHON) tools/smoke.py smoke-exec-xlator
+
+smoke-exec-xlator-off:
+	$(PYTHON) tools/smoke.py smoke-exec-xlator-off
+
+smoke-exec-xlator-shim:
+	$(PYTHON) tools/smoke.py smoke-exec-xlator-shim
+
+# The loongarch64 half of the same channel: the command line comes from the
+# serial console rather than from QEMU, so it is a separate build and a
+# separate case rather than another arch on smoke-exec-xlator.
+smoke-exec-xlator-la64:
+	$(PYTHON) tools/smoke.py smoke-exec-xlator-la64
+
 # Thin wrappers: release configurations live in instances/release-*.toml.
 release-rv:
 	tools/a20 package release-riscv64

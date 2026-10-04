@@ -9,6 +9,25 @@
  * /chosen/bootargs. */
 const char *arch_bootargs_get(void);
 
+#if defined(CONFIG_UART_CMDLINE)
+/* Prompt for a command line on the console and copy it into @out.
+ *
+ * Only compiled when CONFIG_UART_CMDLINE=y, which the build does not set by
+ * default: this moves authority over kernel configuration -- including the
+ * a20.xlator.<guest> path -- from whoever built the image to whoever holds
+ * the serial port at boot.  It cannot be turned on from the command line,
+ * because reading the command line is what it is for.
+ *
+ * Returns the length written, or -1 when nothing usable was entered (empty
+ * line, or the timeout expiring).  The caller is expected to treat -1 as
+ * "boot without one", which is the behaviour an image had before this
+ * existed.  Call it from an arch_bootargs_get() fallback, not from
+ * bootargs_init(), so an architecture with a working firmware command line
+ * never prompts.
+ */
+int uart_cmdline_read(char *out, size_t outsz);
+#endif
+
 /* Extract /chosen/bootargs from a Flattened Device Tree.  dtb_va must be
  * directly dereferenceable in the caller's address space; returns 0 on
  * success, -1 when absent or malformed. */

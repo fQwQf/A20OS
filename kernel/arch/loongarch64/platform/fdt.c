@@ -96,6 +96,55 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end)
     return 0;
 }
 
+/* The kernel command line, out of the same DTB the memory map comes from.
+ *
+ * Without this, LoongArch64 had no arch_bootargs_get() at all and fell through
+ * to the weak default in core/bootargs.c that returns NULL.  That is not a
+ * niche gap: bootargs_get() feeds every `a20.*` key, so with no command line
+ * the whole configurable surface was unreachable here -- `a20.ip` and
+ * `a20.tcpmode` as much as `a20.xlator`.  The instance manifests passed no
+ * -append for the same reason, so nothing had ever exercised it.
+ *
+ * The DTB address is a build-time constant in boot/entry.S rather than a
+ * register the firmware hands over (compare riscv64, which saves `a1`), so
+ * `dtb` can legitimately be zero on a board whose firmware publishes nothing.
+ * That case falls through to NULL, which is the fail-closed answer: no
+ * command line, and therefore no behaviour the administrator did not ask for.
+ *
+ * The result is cached because bootargs_init() copies it once but the pointer
+ * outlives that copy, and several consumers call this independently.
+ *
+ * With CONFIG_UART_CMDLINE=y there is a console fallback for the case that
+ * matters here in practice: QEMU's loongarch virt publishes no command line
+ * by any route, so the DTB comes up empty and every a20.* key is dead.  The
+ * fallback is opt-in at build time precisely because it is an input path --
+ * see kernel/core/uart_cmdline.c for why.
+ */
+const char *arch_bootargs_get(void)
+{
+    static char bootargs_buf[1024];
+    static int ready;
+
+    if (!ready) {
+        bootargs_buf[0] = '\0';
+        uint64_t dtb = __boot_dtb_ptr;
+        printf("[FDT] dtb_ptr=0x%lx\n", dtb);
+        if (dtb && fdt_extract_bootargs((const void *)(uintptr_t)dtb,
+                                         bootargs_buf,
+                                         sizeof(bootargs_buf)) == 0) {
+            printf("[FDT] bootargs='%s'\n", bootargs_buf);
+        } else {
+            printf("[FDT] no bootargs extracted\n");
+#if defined(CONFIG_UART_CMDLINE)
+            if (uart_cmdline_read(bootargs_buf, sizeof(bootargs_buf)) > 0)
+                printf("[FDT] bootargs='%s'\n", bootargs_buf);
+#endif
+        }
+        ready = 1;
+    }
+    return bootargs_buf[0] ? bootargs_buf : NULL;
+}
+
 void loongarch64_memory_init(void)
 {
     /* A physical board without a firmware FDT falls back to the physical
