@@ -219,14 +219,21 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
 static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
                             const mm_seg_t *vma)
 {
+    /* A COW break can also run on a huge leaf (the rc>1 branch copies the
+     * whole 2 MiB frame).  The leaf's status slot then lives in its own
+     * table at its own level, so both the table and the index must be taken
+     * level-aware; a level-0 peek would read a neighbouring entry. */
+    int level = 0;
+    if (!pt_lookup_leaf(mm->pgdir, va, &level, NULL, NULL))
+        return;
     pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
     if (!tab)
         return;
-    int idx = arch_pt_vpn(va, 0);
+    int idx = arch_pt_vpn(va, level);
 
     /* Prefer the class the status already records; fall back to the VMA only
      * when there is none (a page whose status predates this path). */
-    uint8_t cls = MM_ST_GET_CLASS(mm_pt_peek(tab, 0, idx));
+    uint8_t cls = MM_ST_GET_CLASS(mm_pt_peek(tab, level, idx));
     if (cls == MM_ST_INVALID || cls == MM_ST_PT_NODE) {
         if (!vma)
             return;
@@ -238,7 +245,7 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
         else
             cls = MM_ST_ANON_MAPPED;
     }
-    (void)mm_pt_sync_status(tab, 0, idx, cls);
+    (void)mm_pt_sync_status(tab, level, idx, cls);
 }
 
 static int handle_cow_fault_locked(task_t *t, uint64_t stval,
@@ -737,9 +744,10 @@ static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                         return -ENOMEM;
                     }
                     memset(pfn_to_virt(hpfn), 0, PMD_SIZE);
-                    int hr = pt_map_huge(t->mm->pgdir, hbase, pfn_to_phys(hpfn),
-                                         vma->pte_flags);
+                    int hr = pt_map_huge(t->mm, hbase, pfn_to_phys(hpfn),
+                                         vma->pte_flags, MM_ST_ANON_MAPPED);
                     if (hr == 0) {
+                        a20_perf_count(A20_PERF_MM_HUGE_FAULTS);
                         mm_rss_add(t->mm, PMD_PAGE_COUNT);
                         arch_tlb_flush_page_local(stval);
                         return 0;

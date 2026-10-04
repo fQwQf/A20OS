@@ -27,6 +27,16 @@
 #include "proc/proc.h"
 #include "mm/swap.h"
 
+static int pt_table_empty(pte_t *table, int level);
+
+/* Huge-leaf installs through pt_map_huge (THP fault, fork clone, mremap
+ * move).  A plain global rather than an a20_perf counter, for the same
+ * reason mm_seg_dispatch_seg is: the audit-time [MM-ASM] reader must see it
+ * even though a20_perf collection stays dormant until a /proc read arms it,
+ * and even though the process whose page tables held the huge leaf has long
+ * exited by the time the shutdown audit runs. */
+uint64_t mm_huge_install_count;
+
 static inline int pte_user_readable(pte_t pte) {
     return arch_pte_is_leaf(pte) && (pte & PTE_U) && (pte & PTE_R);
 }
@@ -371,15 +381,18 @@ int pt_map_cls(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags,
     return 0;
 }
 
-int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
+int pt_map_huge(mm_struct_t *mm, vaddr_t va, paddr_t pa, pte_t flags,
+                uint8_t cls) {
 #ifdef ARCH_NO_PMD_LEAF
-    (void)pgdir;
+    (void)mm;
     (void)va;
     (void)pa;
     (void)flags;
+    (void)cls;
     return -EOPNOTSUPP;
 #else
-    if (!pgdir) return -EINVAL;
+    if (!mm || !mm->pgdir) return -EINVAL;
+    pt_root_t *pgdir = mm->pgdir;
     if ((va & (PMD_SIZE - 1)) || (pa & (PMD_SIZE - 1)))
         return -EINVAL;
 
@@ -403,8 +416,40 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
     }
 
     pte_t *pte = &table[arch_pt_vpn(va, 1)];
-    if (*pte & PTE_V)
-        return -EEXIST;
+    if (*pte & PTE_V) {
+        /* A level-0 table left behind by earlier 4K faulting in this 2 MiB
+         * block used to refuse the huge leaf with -EEXIST unconditionally --
+         * and since pt_lookup_leaf() only reports the (still-absent) 4K
+         * entry, the caller could not tell that apart either.  Measured on
+         * smoke-mm-stress: every single THP decline in every huge phase hit
+         * an EMPTY child (live-children=0), so on a reused address space the
+         * THP path never fired at all and every huge gate passed on 4K
+         * pages.  An empty child is retired under the parent-then-child node
+         * locks (the preorder the cursor uses) and the huge leaf installed;
+         * a child holding any live or swapped entry still refuses, because a
+         * 2 MiB frame would cover pages it does not own. */
+        if (arch_pte_is_leaf(*pte))
+            return -EEXIST;
+        pte_t *l0 = arch_pte_to_ptr(*pte);
+        if (!mm_pt_meta(l0))
+            return -EEXIST;
+        int idx1 = arch_pt_vpn(va, 1);
+        mm_pt_node_lock(table);
+        mm_pt_node_lock(l0);
+        if (!pt_table_empty(l0, 0)) {
+            mm_pt_node_unlock(l0);
+            mm_pt_node_unlock(table);
+            return -EEXIST;
+        }
+        *pte = 0;
+        mm_pt_node_clear_seg(table, 1, idx1);
+        mm_pt_note_absent(table, 1, idx1);
+        mm_pt_node_unlock(l0);
+        mm_pt_node_unlock(table);
+        /* Deferred reclamation: a lockless fault may already hold this
+         * table's pointer; stale + grace period, never a direct free. */
+        mm_pt_retire_table(mm, l0, 0);
+    }
 #ifdef ARCH_HAS_PTE_BLOCK
     if (flags & PTE_X) {
         pfn_t pfn = phys_to_pfn(pa);
@@ -417,6 +462,16 @@ int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) {
 #else
     *pte = arch_pte_leaf(pa, flags);
 #endif
+    /* A huge leaf is one entry of THIS table, so its status slot lives here
+     * at level 1, not at level 0 -- there is no level-0 table under it.  A
+     * present leaf whose slot says INVALID is exactly what the auditor's
+     * present_mismatch counts, and before this note the THP path produced
+     * one on every huge fault. */
+    mm_pt_note_present(table, 1, arch_pt_vpn(va, 1),
+                       (uint8_t)(MM_ST_CLS_BYTE(cls) |
+                                 (flags & PTE_COW ? MM_ST_COW_BIT : 0) |
+                                 mm_pt_prot_bits(flags)));
+    mm_huge_install_count++;
     return 0;
 #endif
 }

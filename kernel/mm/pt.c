@@ -1928,6 +1928,59 @@ int mm_cursor_map(mm_cursor_t *cur, vaddr_t addr, paddr_t pa, pte_t flags,
     return 0;
 }
 
+/*
+ * Compare-and-replace one leaf PTE under the leaf lock, for the lockless COW
+ * fault: the decision (shared frame -> private copy) is made WITHOUT
+ * mm->lock, so the install must refuse to fire when a competing writer got
+ * there first.  The entry is replaced only while it still maps `expect_pa`
+ * as a COW leaf under the same lock the competing writers now take (fork's
+ * parent-side rewrite, mm_pt_node_lock in the unmap bypasses); anything else
+ * -- demoted, unmapped, already broken, moved -- returns 1 having written
+ * nothing, and the caller falls back to the mm->lock path.
+ *
+ * Returns 0 when the replace happened (*old_pa_out = the displaced frame),
+ * 1 when the entry no longer matches (nothing written), <0 on error.
+ */
+int mm_cursor_replace_if_cow(mm_cursor_t *cur, vaddr_t addr,
+                             paddr_t expect_pa, paddr_t pa, pte_t flags,
+                             uint8_t cls, paddr_t *old_pa_out)
+{
+    if (old_pa_out)
+        *old_pa_out = 0;
+    if (!cursor_span_ok(cur, addr))
+        return -EINVAL;
+    if (cls >= MM_ST_CLASS_MAX)
+        return -EINVAL;
+
+    pte_t *pte = cursor_leaf_slot(cur, addr, 1);
+    if (!pte)
+        /* Huge leaf, stale node, missing metadata: not served here. */
+        return 1;
+
+    pte_t old = *pte;
+    if (!((old & PTE_V) && arch_pte_is_leaf(old) && (old & PTE_COW) &&
+          arch_pte_addr(old) == expect_pa)) {
+        cursor_leaf_unlock(cur);
+        return 1;
+    }
+
+    /* The copy is byte-identical, but exec pages still need the I-cache
+     * sync before the new frame's mapping becomes visible -- same contract
+     * as mm_cursor_replace(). */
+    if (flags & PTE_X) {
+        pfn_t pfn = phys_to_pfn(pa);
+        if (pfn_valid(pfn))
+            arch_flush_icache_range(pfn_to_virt(pfn), PAGE_SIZE);
+    }
+    *pte = arch_pte_leaf(pa, flags);
+    mm_pt_note_present(cursor_leaf_table(cur), 0, arch_pt_vpn(addr, 0),
+                       status_byte(cls, flags));
+    if (old_pa_out)
+        *old_pa_out = expect_pa;
+    cursor_leaf_unlock(cur);
+    return 0;
+}
+
 int mm_cursor_unmap(mm_cursor_t *cur, vaddr_t addr)
 {
     if (!cursor_span_ok(cur, addr))
@@ -2437,6 +2490,21 @@ static uint8_t audit_status_at(pt_root_t *pgdir, vaddr_t addr)
     return MM_ST_GET_CLASS(mm_pt_peek(table, 0, arch_pt_vpn(addr, 0)));
 }
 
+/* Level-aware status read for mutators, not just the auditor: a huge leaf's
+ * slot lives one level up, so a caller that peeks level 0 unconditionally
+ * reads a neighbouring entry's byte and acts on it. */
+uint8_t mm_pt_status_at(pt_root_t *pgdir, vaddr_t addr)
+{
+    pte_t *table = pgdir;
+    for (int l = ARCH_PT_ROOT_LEVEL; l > 0; l--) {
+        pte_t e = table[arch_pt_vpn(addr, l)];
+        if (!(e & PTE_V) || arch_pte_is_leaf(e))
+            return mm_pt_peek(table, l, arch_pt_vpn(addr, l));
+        table = arch_pte_to_ptr(e);
+    }
+    return mm_pt_peek(table, 0, arch_pt_vpn(addr, 0));
+}
+
 /* Does the hardware map a leaf at `addr`?  Counterpart to audit_status_at():
  * the pair (status, PTE) has to be read together to tell "the status forgot a
  * page that is really mapped" apart from "this address is a hole". */
@@ -2591,6 +2659,8 @@ static uint64_t audit_table(pte_t *table, int level, int is_root,
         if (present) {
             if (cls == MM_ST_INVALID || cls == MM_ST_PT_NODE)
                 rep->present_mismatch++;
+            if (level > 0)
+                rep->huge_leaves++;
             if ((byte & MM_ST_PROT_MASK) != mm_pt_prot_bits(pte))
                 rep->prot_mismatch++;
             if (cow != ((pte & PTE_COW) ? 1 : 0))
@@ -2783,6 +2853,105 @@ int mm_pt_audit_all(mm_pt_audit_report_t *out)
         spin_unlock(&mm->lock);
     }
     spin_unlock_irqrestore(&proc_lock, pf);
+
+    return mm_pt_audit_errors(rep) ? -EFAULT : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * Stage-2 (second-stage / guest physical) support.
+ *
+ * A guest physical address space is a radix page table of the same shape as
+ * a host one, so it reuses pt_meta_t wholesale: the same node lock the host
+ * cursor locks, the same per-entry status byte the host auditor compares.
+ * Two meanings MUST NOT be shared with the host plane, and both are enforced
+ * here rather than by convention:
+ *
+ *  - a mapped stage-2 leaf carries class MM_ST_GUEST_MEM.  The host classes
+ *    (anon/file/vmo) describe how the HOST resolves a page's backing; a
+ *    stage-2 entry's backing question is "which host frame", which the PTE
+ *    already answers.  mm_pt_audit_addrspace() counts GUEST_MEM as a
+ *    mismatch, so a stage-2 byte written into a host table is caught.
+ *  - the frame a stage-2 leaf names carries FRAME_F_GUEST for as long as
+ *    the mapping exists.  The refcount already keeps the frame alive; the
+ *    flag is the identity side, and the audit below cross-checks it so a
+ *    frame whose VM died without returning its pages cannot hide.
+ * ------------------------------------------------------------------ */
+
+void mm_pt_frame_lend(pfn_t pfn)
+{
+    if (!pfn_valid(pfn))
+        return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    if (pfa.meta[pfn].flags == FRAME_F_PT) {
+        /* A page-table page backs exactly one address space, host or guest.
+         * Lending it to a stage-2 would put one frame on both sides of the
+         * boundary; refuse rather than corrupt. */
+        spin_unlock_irqrestore(&pfa.lock, flags);
+        return;
+    }
+    pfa.meta[pfn].flags |= FRAME_F_GUEST;
+    spin_unlock_irqrestore(&pfa.lock, flags);
+}
+
+void mm_pt_frame_return(pfn_t pfn)
+{
+    if (!pfn_valid(pfn))
+        return;
+    uint64_t flags = spin_lock_irqsave(&pfa.lock);
+    pfa.meta[pfn].flags &= (uint8_t)~FRAME_F_GUEST;
+    spin_unlock_irqrestore(&pfa.lock, flags);
+}
+
+int frame_is_lent_to_guest(pfn_t pfn)
+{
+    if (!pfn_valid(pfn))
+        return 0;
+    return (pfa.meta[pfn].flags & FRAME_F_GUEST) != 0;
+}
+
+/* Second walk over a stage-2 tree: every present leaf must name a frame
+ * carrying FRAME_F_GUEST, and the frame must not be a page-table page.
+ * audit_table() already compared status vs PTE; this closes the frame side. */
+static uint64_t s2_audit_flags(pte_t *table, int level, int is_root)
+{
+    pt_meta_t *m = mm_pt_meta(table);
+    if (!m)
+        return 0;
+    uint64_t bad = 0;
+    int entries = arch_pt_level_entries(level);
+    for (int i = 0; i < entries; i++) {
+        pte_t pte = table[i];
+        /* The stage-2 root may legitimately map guest frames at indexes the
+         * host layout reserves for its kernel half, so the is_root skip the
+         * host audit applies does not apply here. */
+        (void)is_root;
+        if (!(pte & PTE_V))
+            continue;
+        if (!arch_pte_is_leaf(pte)) {
+            bad += s2_audit_flags(arch_pte_to_ptr(pte), level - 1, 0);
+            continue;
+        }
+        pfn_t pfn = phys_to_pfn(arch_pte_addr(pte));
+        if (!pfn_valid(pfn) || !frame_is_lent_to_guest(pfn) ||
+            pfa.meta[pfn].flags == FRAME_F_PT)
+            bad++;
+    }
+    return bad;
+}
+
+int mm_s2_audit(pte_t *root, int root_level, mm_pt_audit_report_t *out)
+{
+    mm_pt_audit_report_t local;
+    mm_pt_audit_report_t *rep = out ? out : &local;
+    memset(rep, 0, sizeof(*rep));
+    if (!root)
+        return -EINVAL;
+
+    /* check_vma = 0: a stage-2 space has no host mapping list, and mm = NULL
+     * keeps every seg cross-check off.  is_root = 0 so the host kernel-half
+     * skip does not hide guest entries that land in those indexes. */
+    audit_table(root, root_level, 0, rep, NULL, 0, 0);
+    rep->seg_extent_mismatch += s2_audit_flags(root, root_level, 0);
 
     return mm_pt_audit_errors(rep) ? -EFAULT : 0;
 }
