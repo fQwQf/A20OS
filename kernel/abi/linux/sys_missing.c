@@ -74,8 +74,8 @@ static int64_t kcmp_order(uintptr_t a, uintptr_t b)
 int64_t sys_kcmp(int pid1, int pid2, int type, unsigned long idx1,
                  unsigned long idx2)
 {
-    task_t *t1 = proc_find_get(pid1);
-    task_t *t2 = proc_find_get(pid2);
+    task_t *t1 = proc_find_get_user(pid1);
+    task_t *t2 = proc_find_get_user(pid2);
     if (!t1 || !t2) {
         if (t1) proc_put(t1);
         if (t2) proc_put(t2);
@@ -275,7 +275,7 @@ int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
     if (!t || !t->mm)
         return -EINVAL;
 
-    int gfd = -1;
+
     int prot = PROT_READ;
     uint64_t old_off = 0;
 
@@ -294,35 +294,34 @@ int64_t sys_remap_file_pages(uint64_t start, size_t size, int prot_unused,
         spin_unlock_irqrestore(&t->mm->lock, mm_flags);
         return -EPERM;
     }
-    gfd = vma->file_fd;
+    vfile_t *vf = vma->file;
+    if (vf)
+        vfile_get(vf); /* the VMA's file, pinned across the remap */
     prot = mm_pte_flags_to_prot(vma->pte_flags);
     old_off = vma->file_offset;
     spin_unlock_irqrestore(&t->mm->lock, mm_flags);
 
-    if (gfd < 0)
-        return -EINVAL;
-
-    vfile_t *vf = vfs_get_file_ref(gfd);
     if (!vf)
-        return -EBADF;
+        return -EINVAL;
 
     int64_t r = mm_munmap(t->mm, (vaddr_t)start, size);
     if (r < 0) {
-        vfs_put_file_ref(gfd, vf);
+        vfs_put_file(vf);
         return r;
     }
 
     uint64_t new_off = pgoff << PAGE_SIZE_BITS;
-    vaddr_t mapped = proc_mmap((vaddr_t)start, size, prot,
-                               MAP_SHARED | MAP_FIXED, gfd, (long)new_off);
+    vaddr_t mapped = proc_mmap_vfile((vaddr_t)start, size, prot,
+                                     MAP_SHARED | MAP_FIXED, vf,
+                                     (long)new_off);
     if (mm_addr_is_error(mapped)) {
         int64_t err = mm_addr_error(mapped);
-        proc_mmap((vaddr_t)start, size, prot, MAP_SHARED | MAP_FIXED, gfd,
-                  (long)old_off);
-        vfs_put_file_ref(gfd, vf);
+        proc_mmap_vfile((vaddr_t)start, size, prot, MAP_SHARED | MAP_FIXED,
+                        vf, (long)old_off);
+        vfs_put_file(vf);
         return err;
     }
-    vfs_put_file_ref(gfd, vf);
+    vfs_put_file(vf);
     return 0;
 }
 

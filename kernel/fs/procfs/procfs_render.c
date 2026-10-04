@@ -1,12 +1,15 @@
 #include "fs/procfs.h"
+#include "fs/vfs/mount.h"
 #include "net/netfilter.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "fs/vfs/mntns.h"
+#include "proc/pidns.h"
 #include "core/bootargs.h"
 #include "fs/file.h"
 #include "fs/fdtable.h"
 #include "fs/block_cache.h"
+#include "fs/ext4_journal.h"
 #include "fs/page_cache.h"
 #include "ipc/objstats.h"
 #include "proc/proc.h"
@@ -270,16 +273,13 @@ static int snapshot_pid_maps(int pid, int smaps,
                 strncpy(rec->name, "[stack]", sizeof(rec->name) - 1);
             } else if (v->start >= mm->start_brk && v->start < mm->brk) {
                 strncpy(rec->name, "[heap]", sizeof(rec->name) - 1);
-            } else if (v->file_fd >= 0) {
-                vfile_t *vf = vfs_get_file_ref(v->file_fd);
-                if (vf) {
-                    if (vf->path[0])
-                        strncpy(rec->name, vf->path,
-                                sizeof(rec->name) - 1);
-                    if (vf->vnode)
-                        rec->ino = (unsigned long)vf->vnode->ino;
-                    vfs_put_file_ref(v->file_fd, vf);
-                }
+            } else if (v->file) {
+                vfile_t *vf = v->file;
+                if (vf->path[0])
+                    strncpy(rec->name, vf->path,
+                            sizeof(rec->name) - 1);
+                if (vf->vnode)
+                    rec->ino = (unsigned long)vf->vnode->ino;
             }
         }
         spin_unlock_irqrestore(&mm->lock, flags);
@@ -820,14 +820,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             "last_victim_score: %d\n"
             "free_pages_at_kill: %lu\n"
             "free_pages_now: %lu\n"
-            "in_progress: %d\n",
+            "in_progress: %d\n"
+            "kswapd_passes: %lu\n"
+            "kswapd_pages_freed: %lu\n"
+            "kswapd_last_pass_tick: %lu\n",
             os.kills,
             os.last_kill_tick,
             os.last_victim_pid,
             os.last_victim_score,
             os.free_pages_at_kill,
             os.free_pages_now,
-            os.in_progress);
+            os.in_progress,
+            os.kswapd_passes,
+            os.kswapd_pages_freed,
+            os.kswapd_last_pass_tick);
         break;
     }
     case PF_A20_TASK_LIFETIME:
@@ -841,6 +847,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         return (int)strlen(buf);
     case PF_A20_NETMEM:
         return a20_lwip_format_memp(buf, bufsz);
+    case PF_A20_JOURNAL:
+        return ext4_journal_crash_points_format(buf, bufsz);
     case PF_A20_OBJECTS:
         snprintf(buf, bufsz,
             "handles: %lu\n"
@@ -1087,19 +1095,45 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         proc_put(t);
         break;
     }
-    case PF_PID_NS_PID:
-        /* Singleton namespaces: static identifiers (init-namespace inos). */
+    case PF_PID_NS_PID: {
+        /* Real pid namespaces: report the target task's own namespace.  A
+         * task that is not visible from the reader's namespace renders as
+         * the initial id, which is what the reader would have seen anyway
+         * rather than leaking the container's identity. */
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "pid:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_PID);
+                 (unsigned long long)(t ? pidns_task_ino(t) : PIDNS_INIT_INO));
+        proc_put(t);
         break;
+    }
+    case PF_PID_NS_PID_FOR_CHILDREN: {
+        /* The namespace this task's NEXT child joins, which is what
+         * unshare(CLONE_NEWPID) changes and /proc/<pid>/ns/pid does not. */
+        task_t *t = proc_find_get(pid);
+        uint64_t ino = PIDNS_INIT_INO;
+        if (t) {
+            pid_namespace_t *ns = (pid_namespace_t *)__atomic_load_n(
+                &t->pid_ns_for_children, __ATOMIC_ACQUIRE);
+            ino = ns ? ns->ino : PIDNS_INIT_INO;
+        }
+        snprintf(buf, bufsz, "pid:[%llu]\n", (unsigned long long)ino);
+        proc_put(t);
+        break;
+    }
     case PF_PID_NS_UTS:
         snprintf(buf, bufsz, "uts:[%llu]\n",
                  (unsigned long long)MNTNS_INIT_INO_UTS);
         break;
-    case PF_PID_NS_USER:
+    case PF_PID_NS_USER: {
+        /* Real user namespaces: report the target task's namespace ino, so a
+         * container and the host are distinguishable by reading
+         * /proc/<pid>/ns/user. */
+        task_t *t = proc_find_get(pid);
         snprintf(buf, bufsz, "user:[%llu]\n",
-                 (unsigned long long)MNTNS_INIT_INO_USER);
+                 (unsigned long long)userns_task_ino(t));
+        proc_put(t);
         break;
+    }
     case PF_PID_NS_IPC:
         snprintf(buf, bufsz, "ipc:[%llu]\n",
                  (unsigned long long)MNTNS_INIT_INO_IPC);
@@ -1129,9 +1163,20 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
             const char *fstype = m->fstype[0] ? m->fstype : "unknown";
             const char *dev = m->dev[0] ? m->dev : "none";
             const char *opts = m->opts[0] ? m->opts : "rw";
+            /* Real mount ids and the real parent, straight from the mount
+             * tree.  A mount pivot_root cut loose reports parent 0 and no
+             * root, which is how mountinfo spells "unreachable". */
+            char root_field[MAX_PATH_LEN];
+            if (m->flags & VFS_MOUNT_DETACHED)
+                strncpy(root_field, "none", sizeof(root_field) - 1);
+            else
+                strncpy(root_field, "/", sizeof(root_field) - 1);
+            root_field[sizeof(root_field) - 1] = '\0';
             int n = snprintf(buf + pos, bufsz - pos,
-                "%d %d 0:%d / %s %s - %s %s %s\n",
-                i + 1, i + 1, i + 1, m->path, opts, fstype, dev, opts);
+                "%u %u 0:%u %s %s %s - %s %s %s\n",
+                (unsigned)m->mnt_id, vfs_mount_parent_id(m),
+                (unsigned)m->mnt_id, root_field, m->path, opts,
+                fstype, dev, opts);
             if (n < 0 || (size_t)n >= bufsz - pos) break;
             pos += n;
         }
@@ -1259,17 +1304,47 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
 
     case PF_UID_MAP:
     case PF_GID_MAP: {
-        /* User namespace mapping: the single root namespace identity maps
-         * 1:1.  Format: "<inside> <outside> <length>\n". */
-        task_t *t = proc_current();
-        int id = 0;
-        snprintf(buf, bufsz, "%10d %10d 4294967295\n", id, id);
-        (void)t;
+        /* Real mapping content, "<inside> <outside> <length>" per extent.
+         * The initial namespace is the single identity extent, so this reads
+         * exactly as before for a system with no user namespaces, and a
+         * container shows the mapping its creator actually installed.
+         *
+         * pid <= 0 means the entry came from /proc/ rather than /proc/<pid>/:
+         * Linux makes /proc/uid_map the caller's own file, so resolve it
+         * against the reading task instead of against process 0. */
+        task_t *t = (pid > 0) ? proc_find_get(pid) : proc_current();
+        if (!t) return 0;
+        user_namespace_t *ns = userns_task_own(t);
+        uint64_t f = spin_lock_irqsave(&ns->lock);
+        int is_gid = (type == PF_GID_MAP);
+        const uid_gid_extent_t *map = is_gid ? ns->gid_map : ns->uid_map;
+        int n = is_gid ? ns->gid_map_extents : ns->uid_map_extents;
+        int off = 0;
+        buf[0] = '\0';
+        for (int i = 0; i < n && off < (int)bufsz - 1; i++) {
+            int w = snprintf(buf + off, bufsz - (size_t)off,
+                             "%10u %10u %10u\n",
+                             (unsigned)map[i].lower,
+                             (unsigned)map[i].parent_lower,
+                             (unsigned)map[i].count);
+            if (w < 0) break;
+            off += w;
+        }
+        spin_unlock_irqrestore(&ns->lock, f);
+        if (pid > 0) proc_put(t);
+        return off;
+    }
+    case PF_SETGROUPS: {
+        task_t *t = (pid > 0) ? proc_find_get(pid) : proc_current();
+        if (!t) return 0;
+        user_namespace_t *ns = userns_task_own(t);
+        uint64_t f = spin_lock_irqsave(&ns->lock);
+        int allowed = ns->setgroups_allowed;
+        spin_unlock_irqrestore(&ns->lock, f);
+        if (pid > 0) proc_put(t);
+        snprintf(buf, bufsz, allowed ? "allow\n" : "deny\n");
         break;
     }
-    case PF_SETGROUPS:
-        snprintf(buf, bufsz, "allow\n");
-        break;
     case PF_SYSVIPC: {
         /* /proc/sysvipc/{msg,sem,shm} directory is represented as a summary
          * of live SysV objects.  We report counts via the IPC layers. */
@@ -1430,9 +1505,8 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
         proc_put(task);
         return -EACCES;
     }
-    int gfd = -1;
     int cloexec = 0;
-    vfile_t *target = fdtable_get_file_ref(task, fd, &gfd, &cloexec);
+    vfile_t *target = fdtable_get_file_ref(task, fd, &cloexec);
     proc_put(task);
     if (!target)
         return -ENOENT;
@@ -1448,6 +1522,6 @@ int generate_pid_fdinfo(int pid, int fd, char *buf, size_t bufsz)
     int len = snprintf(buf, bufsz,
                        "pos:\t%lu\nflags:\t0%o\nino:\t%lu\n",
                        (unsigned long)pos, open_flags, ino);
-    vfs_put_file_ref(gfd, target);
+    vfs_put_file(target);
     return len < 0 ? 0 : len;
 }

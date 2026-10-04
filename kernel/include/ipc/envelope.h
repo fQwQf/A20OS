@@ -142,6 +142,15 @@ uint64_t env_shadow_rights_of_gfd(int gfd, int *tracked);
 /* ---- Global fd-kind registry (backs classification above) ---- */
 
 void env_kind_register(int gfd, uint8_t obj_type);
+/*
+ * Forget the class recorded for @gfd.  Required when a descriptor closes:
+ * the registry is keyed by fd NUMBER and numbers are recycled, so a stale
+ * byte classifies a brand-new descriptor as whatever the previous occupant
+ * of that slot was.  A fresh file landing on a retired socket's number would
+ * be refused as a socket; the converse -- a socket landing on a retired
+ * file's number -- would be a real capability over-grant.
+ */
+void env_kind_unregister(int gfd);
 uint8_t env_kind_of(int gfd);
 
 /* True when current task runs inside an envelope (hot-path guard). */

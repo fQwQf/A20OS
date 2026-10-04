@@ -64,7 +64,7 @@ static int64_t process_vm_io_common(int pid, const void *riov,
     }
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     int perr = process_vm_check_target(self, target);
     if (perr < 0) {
         if (target) proc_put(target);
@@ -161,7 +161,7 @@ int64_t sys_process_madvise(int pid, const void *iov, unsigned long iovcnt,
         return -EFAULT;
 
     task_t *self = proc_current();
-    task_t *target = proc_find_get(pid);
+    task_t *target = proc_find_get_user(pid);
     int perr = process_vm_check_target(self, target);
     if (perr < 0) {
         if (target) proc_put(target);

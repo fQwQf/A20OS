@@ -4,6 +4,7 @@
 #include "core/string.h"
 #include "fs/anonfd.h"
 #include "fs/file.h"
+#include "fs/fdtable.h"
 #include "fs/vfs.h"
 #include "mm/slab.h"
 
@@ -198,12 +199,12 @@ int fscontext_open_tree_fd(struct vnode *vn)
     vfile_ref_init(vf, 1);
     strncpy(vf->path, "tree", MAX_PATH_LEN - 1);
     vf->path[MAX_PATH_LEN - 1] = '\0';
-    int gfd = vfs_alloc_fd(vf);
+    int gfd = fdtable_install_current_vfile(vf, 0);
     if (gfd < 0) {
         if (vf->ops && vf->ops->close)
             vf->ops->close(vf);
         vfile_free(vf);
-        return -EMFILE;
+        return gfd;
     }
     return gfd;
 }

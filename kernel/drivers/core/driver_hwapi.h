@@ -107,6 +107,14 @@ void  irq_enable(uint32_t irq);
 void  irq_disable(uint32_t irq);
 void  driver_irq_dispatch(uint32_t irq);
 
+/* Reserve @count consecutive IRQ line ids and return the first, or a negative
+ * errno.  A message-signalled device puts the returned number straight into
+ * its interrupt message, so the ids have to be exclusive rather than routed.
+ * The window comes from arch_irq_msix_vector_range(); a platform without one
+ * returns -ENOTSUP and the caller keeps its fallback path. */
+int   irq_alloc_vectors(unsigned count);
+void  irq_free_vectors(uint32_t first, unsigned count);
+
 #define IRQF_TRIGGER_RISING  0x01
 #define IRQF_TRIGGER_FALLING 0x02
 /* Both the existing registration and the new request must carry IRQF_SHARED

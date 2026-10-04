@@ -145,6 +145,11 @@ Listen 将 TCP PCB 设置为监听状态。listen 调用必须在 `tcp_listen()`
 
 Accept 只使用 `g_net_lock`。它从 listener accept 队列中弹出预创建的 child socket。如果返回了 child，调用者随后调用 `net_inet_accept_child_ready()`，该函数获取 `g_lwip_lock` 并调用 `tcp_backlog_accepted()`。
 
+`tcpmode=lwip` 下 inbound 走的是两段式交接：`lwip_tcp_accept_cb()` 在 `g_lwip_lock` 内
+把已完成握手的 pcb 停进 listener 的 accept stage 并返回 `ERR_OK`，child socket 的分配、
+注册与 accept 队列入队都在 bottom half 里做。**返回 `ERR_OK` 只代表"pcb 归应用所有"，
+不代表"pcb 现在可以放着不管"**，规则见下文「停在 accept stage 里的 pcb」。
+
 ### Send
 
 send 路径对本地 socket 和远端 socket 行为不同。
@@ -197,6 +202,35 @@ callback 只能执行轻量、有界工作：
 - 释放 lwIP 传入的 pbuf 引用（spill 已另行 `pbuf_ref()`）。
 
 所有重工作，包括内存分配、队列插入、大块数据复制和 waiter wake，都必须推迟到底半部。bottom-half 在对象锁内 collect 带 `wait_seq` 的 wait entry，释放对象锁后 flush wake queue。
+
+### 停在 accept stage 里的 pcb
+
+accept stage 是唯一一个「pcb 已经归应用、但应用还没准备好处理它」的窗口，所以它有自己
+的一套规则。踩错的表现是 `mem_free` 的 double free 断言，不是崩溃概率问题，而是必然。
+
+- **返回 `ERR_OK` 之前必须装齐 recv/sent/err 回调。** `pcb->recv == NULL` 时 lwIP 会走它
+  自己的 `tcp_recv_null()` 兜底，其 `p == NULL && err == ERR_OK` 分支直接
+  `tcp_close(pcb)`，在应用毫不知情的情况下释放这块内存；stage 槽位还指着它，于是
+  bottom half 采纳一个悬垂指针、teardown 再释放一次。**"已接管所有权" 与 "可以安全
+  放置" 是两件事。**
+- **回调里不得释放 pending 的 pbuf，除非自己拿 `g_lwip_lock`。** stage 期间收到的数据
+  以引用形式挂在 `c->pending` 上（`pbuf_free()` 只在 `g_lwip_lock` 下安全），只能在
+  err 回调——那里已经持有该锁——或 bottom half 的 `g_lwip_lock` 临界区里释放。
+- **记住回调交给你的 pbuf 不要再 `pbuf_ref()`。** 正确写法是首次 `c->pending = p;`、
+  其后 `pbuf_cat(c->pending, p);` 然后返回 `ERR_OK`；`pbuf_cat()` 本身会为被拼接的链
+  取引用，多 ref 一次会多数一。
+- **recv 回调返回 `ERR_MEM` 时不得 `pbuf_free()`。** `ERR_MEM` 的语义是 lwIP **没有**
+  接管这个 pbuf：`tcp_in.c` 把它存进 `pcb->refused_data`，`tcp_process_refused_data()`
+  之后还会再交回来。释放了就是第二次释放。要么不碰（交给 lwIP 重试），要么先把数据
+  完整收下再返回 `ERR_OK`。当前实现的做法是先用 `bh_ring_reserve()` 整体判定容量，
+  装得下就一次性全部转成内联事件，装不下原样返回 `ERR_MEM`。
+- **槽位地址就是 pcb 的 `callback_arg`，所以槽位必须在 `tail` 越过它之前就与 pcb 脱钩。**
+  bottom half 的采纳顺序固定为：先把 pcb `tcp_arg()` 到 child、清空槽位，再
+  `__atomic_store_n(&st->tail, tail + 1)`。反过来就存在「生产者仍在往这个槽位投递事件」
+  的窗口。
+- **listener 消失时必须 purge stage。** `net_tcp_close_pcb()` / `net_tcp_drop_pcb()` /
+  `net_inet_socket_destroy()` 三条拆除路径都要走 `net_inet_accept_stage_purge()`，
+  否则已经握手成功的连接会被静默泄漏。
 
 ## Deferred Bottom-Half 实现
 

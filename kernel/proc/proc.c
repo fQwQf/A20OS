@@ -357,6 +357,8 @@ void proc_init(void) {
     task_list_head = NULL;
     task_list_tail = NULL;
     proc_pid_init();
+    pidns_early_init();
+    userns_early_init();
     proc_sched_runq_init();
     spin_init(&proc_lock);
     spin_set_debug(&proc_lock, "proc", NULL);
@@ -750,6 +752,51 @@ vaddr_t proc_brk(vaddr_t newbrk) {
 }
 
 // Create a memory mapping; the implementation of the mmap syscall
+/* mmap that already holds a vfile reference (VMA remap paths); @file is
+ * consumed on both success and failure. */
+vaddr_t proc_mmap_vfile(vaddr_t addr, size_t len, int prot, int flags,
+                        vfile_t *file, long off) {
+    task_t *t = proc_current();
+    if (!t || !t->mm) {
+        vfs_put_file(file);
+        return (vaddr_t)-1;
+    }
+
+    size_t map_len = ROUND_UP(len, PAGE_SIZE);
+    if (map_len == 0) {
+        vfs_put_file(file);
+        return (vaddr_t)-EINVAL;
+    }
+
+    uint64_t as_limit = t->limits.as;
+    if (as_limit) {
+        uint64_t vm_now = t->mm->total_vm;
+        uint64_t vm_add = map_len / PAGE_SIZE;
+        if (vm_now + vm_add > as_limit / PAGE_SIZE) {
+            vfs_put_file(file);
+            return (vaddr_t)-ENOMEM;
+        }
+    }
+
+    mm_tlb_invalidate_begin(t->mm);
+    uint64_t lock_flags = spin_lock_irqsave(&t->mm->lock);
+    vaddr_t ret;
+    if (off < 0 || ((uint64_t)off & (PAGE_SIZE - 1))) {
+        spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+        mm_tlb_invalidate_finish(t->mm);
+        vfs_put_file(file);
+        return (vaddr_t)-EINVAL;
+    }
+    ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, file,
+                              (uint64_t)off);
+    spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+    mm_tlb_invalidate_finish(t->mm);
+    if ((long)ret < 0 && (long)ret >= -4095)
+        ktrace_mm("[MM] mmap-vfile fail pid=%d addr=%lx len=%lu ret=%ld\n",
+                  t->pid, (unsigned long)addr, (unsigned long)len, (long)ret);
+    return ret;
+}
+
 vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long off) {
     task_t *t = proc_current();
     if (!t || !t->mm) return (vaddr_t)-1;
@@ -782,7 +829,15 @@ vaddr_t proc_mmap(vaddr_t addr, size_t len, int prot, int flags, int fd, long of
             return (vaddr_t)-EINVAL;
         }
 
-        ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, fd,
+        /* Resolve the caller's fd; mm_mmap_file_locked takes over the
+         * reference (success) or drops it (failure). */
+        vfile_t *mfile = fdtable_get_current_file_ref(fd);
+        if (!mfile) {
+            spin_unlock_irqrestore(&t->mm->lock, lock_flags);
+            mm_tlb_invalidate_finish(t->mm);
+            return (vaddr_t)-EBADF;
+        }
+        ret = mm_mmap_file_locked(t->mm, addr, len, prot, flags, mfile,
                                   (uint64_t)off);
     }
     spin_unlock_irqrestore(&t->mm->lock, lock_flags);

@@ -179,7 +179,11 @@ static int net_ip_group_membership(net_socket_t *s, const net_ip_mreqn_t *mreq,
 
 int net_listen(int gfd, int backlog)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_listen_sock(net_socket_from_file(gfd), backlog);
+}
+
+int net_listen_sock(net_socket_t *s, int backlog)
+{
     if (!s)
         return -ENOTSOCK;
     if (s->domain == AF_ALG)
@@ -240,9 +244,13 @@ int net_listen(int gfd, int backlog)
 
 int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
 {
+    return net_accept_sock(net_socket_from_file(gfd), addr, addrlen, flags);
+}
+
+int net_accept_sock(net_socket_t *s, void *addr, size_t *addrlen, int flags)
+{
     if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
         return -EINVAL;
-    net_socket_t *s = net_socket_from_file(gfd);
     if (!s)
         return -ENOTSOCK;
     if (s->domain == AF_ALG)
@@ -371,7 +379,11 @@ int net_accept(int gfd, void *addr, size_t *addrlen, int flags)
 
 int net_getsockname(int gfd, void *addr, size_t *addrlen)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_getsockname_sock(net_socket_from_file(gfd), addr, addrlen);
+}
+
+int net_getsockname_sock(net_socket_t *s, void *addr, size_t *addrlen)
+{
     if (!s)
         return -ENOTSOCK;
     if (!addr || !addrlen)
@@ -388,7 +400,11 @@ int net_getsockname(int gfd, void *addr, size_t *addrlen)
 
 int net_getpeername(int gfd, void *addr, size_t *addrlen)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_getpeername_sock(net_socket_from_file(gfd), addr, addrlen);
+}
+
+int net_getpeername_sock(net_socket_t *s, void *addr, size_t *addrlen)
+{
     if (!s)
         return -ENOTSOCK;
     if (!s->connected)
@@ -401,7 +417,13 @@ int net_getpeername(int gfd, void *addr, size_t *addrlen)
 
 int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t optlen)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_setsockopt_sock(net_socket_from_file(gfd), level, optname,
+                               optval, optlen);
+}
+
+int net_setsockopt_sock(net_socket_t *s, int level, int optname,
+                        const void *optval, size_t optlen)
+{
     if (!s)
         return -ENOTSOCK;
     if (s->domain == AF_ALG && level == SOL_ALG && optname == ALG_SET_KEY) {
@@ -673,7 +695,13 @@ int net_setsockopt(int gfd, int level, int optname, const void *optval, size_t o
 
 int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_getsockopt_sock(net_socket_from_file(gfd), level, optname,
+                               optval, optlen);
+}
+
+int net_getsockopt_sock(net_socket_t *s, int level, int optname,
+                        void *optval, size_t *optlen)
+{
     if (!s)
         return -ENOTSOCK;
     if (!optval || !optlen)
@@ -833,7 +861,11 @@ int net_getsockopt(int gfd, int level, int optname, void *optval, size_t *optlen
 
 int net_shutdown(int gfd, int how)
 {
-    net_socket_t *s = net_socket_from_file(gfd);
+    return net_shutdown_sock(net_socket_from_file(gfd), how);
+}
+
+int net_shutdown_sock(net_socket_t *s, int how)
+{
     if (!s)
         return -ENOTSOCK;
     proc_wake_q_t wake_q;
@@ -902,6 +934,17 @@ int net_shutdown(int gfd, int how)
     if (drain_peer_write)
         (void)wait_queue_wake_all(
             &peer->write_waitq, 0, PROC_WAKE_EVENT);
+    return 0;
+}
+
+int net_set_nonblock_vfile(vfile_t *vf, int nonblock)
+{
+    net_socket_t *s = vf && net_is_socket_vfile(vf) ? vf->priv : NULL;
+    if (!s)
+        return -ENOTSOCK;
+    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    s->nonblock = nonblock ? 1 : 0;
+    spin_unlock_irqrestore(&g_net_lock, irq);
     return 0;
 }
 

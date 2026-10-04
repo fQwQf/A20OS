@@ -1,5 +1,6 @@
 #include "fs/tty.h"
 #include "fs/file.h"
+#include "fs/vfs.h"
 #include "core/string.h"
 #include "core/consts.h"
 #include "core/defs.h"

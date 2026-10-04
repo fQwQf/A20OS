@@ -35,6 +35,7 @@
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
+#include "drivers/bus/pci_msix.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
 extern void input_mux_wake(void);
@@ -325,6 +326,10 @@ const struct drv_export drv_export_table[] = {
     { "drv_driver_probe_all", drv_driver_probe_all },
     { "device_get_resource",  (void *)device_get_resource },
     { "device_find_by_class",  (void *)device_find_by_class },
+    /* A class driver that initialises its own instance (rather than being
+     * handed one by a bus scan) has to publish it, or device_find_by_class()
+     * cannot see it and mount_setup_block_device() finds no disk. */
+    { "device_register",     (void *)device_register },
     { "platform_bus",        &platform_bus },
     /* PCI class-driver accessors (device_t-based; modules bind through
      * drv_driver_register with bus = &pci_bus) */
@@ -334,6 +339,21 @@ const struct drv_export drv_export_table[] = {
     { "pci_get_bar_resource", (void *)pci_get_bar_resource },
     { "pci_intx_irq",        (void *)pci_intx_irq },
     { "pci_enable_and_assign_bars", (void *)pci_enable_and_assign_bars },
+    { "pci_find_capability", (void *)pci_find_capability },
+    { "pci_cfg_read16",      (void *)pci_cfg_read16 },
+    { "pci_cfg_read32",      (void *)pci_cfg_read32 },
+    { "pci_cfg_write16",     (void *)pci_cfg_write16 },
+    { "pci_cfg_write32",     (void *)pci_cfg_write32 },
+    /* message-signalled interrupts: capability parse, table programming and
+     * the vector allocator the table entries name */
+    { "pci_msix_capability", (void *)pci_msix_capability },
+    { "pci_msix_enable",     (void *)pci_msix_enable },
+    { "pci_msix_program_vector", (void *)pci_msix_program_vector },
+    { "pci_msix_set_vector_mask", (void *)pci_msix_set_vector_mask },
+    { "pci_msix_commit",     (void *)pci_msix_commit },
+    { "pci_msix_disable",    (void *)pci_msix_disable },
+    { "irq_alloc_vectors",   (void *)irq_alloc_vectors },
+    { "irq_free_vectors",    (void *)irq_free_vectors },
     /* console input path (PS/2 module) */
     { "uart_receive_char",   (void *)uart_receive_char },
     /* scheduling / wait primitives used by module completion paths */
@@ -389,6 +409,14 @@ const struct drv_export drv_export_table[] = {
     { "proc_current",        (void *)proc_current },
     { "proc_task_pid",       (void *)proc_task_pid },
     { "printf",              (void *)printf },
+    /* A module that formats into a fixed buffer needs the bounded variants.
+     * Without these, any .a20drv whose driver builds a device name (or any
+     * other small string) fails to load with "unresolved symbol
+     * 'snprintf'", which takes the whole transport down with it -- the
+     * aarch64 embedded build ships virtio-blk as a module, so its disks
+     * silently vanished and /bin never mounted. */
+    { "snprintf",            (void *)snprintf },
+    { "vsnprintf",           (void *)vsnprintf },
     { "panic",               (void *)panic },
     /* kallsyms debug name lookup (spinlock self-acquire diagnostics).
      * kallsyms_print is referenced by the inline spin_lock_at stall reporter
@@ -423,9 +451,11 @@ const struct drv_export drv_export_table[] = {
     /* user copy helpers (virtio-gpu 3D ioctl passthrough) */
     { "copy_from_user",        (void *)copy_from_user },
     { "copy_to_user",          (void *)copy_to_user },
-    /* USB core bridge (xhci / usb-hid / usb-storage) */
+    /* USB core bridge (xhci / usb-hid / usb-hub / usb-storage) */
     { "usb_core_register_hcd",   (void *)usb_core_register_hcd },
     { "usb_core_unregister_hcd", (void *)usb_core_unregister_hcd },
+    { "usb_core_alloc_address",  (void *)usb_core_alloc_address },
+    { "usb_core_free_address",   (void *)usb_core_free_address },
     { "usb_control_msg",         (void *)usb_control_msg },
     { "usb_submit_urb",          (void *)usb_submit_urb },
     /* in-kernel lwIP bridge (virtio-net) */

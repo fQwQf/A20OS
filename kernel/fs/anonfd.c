@@ -16,14 +16,14 @@ int anonfd_free_priv_close(vfile_t *vf)
 }
 int anonfd_install_vfile(vfile_t *vf, int flags)
 {
-    int gfd = vfs_alloc_fd(vf);
-    if (gfd < 0) {
+    int fd = fdtable_install_current_vfile(vf, flags);
+    if (fd < 0) {
         if (vf->ops && vf->ops->close)
             vf->ops->close(vf);
         vfile_free(vf);
-        return -EMFILE;
+        return fd < 0 ? fd : -EMFILE;
     }
-    return fdtable_install_current(gfd, flags);
+    return fd;
 }
 
 /* ---- generic anonymous in-memory file (staging buffer) ---- */

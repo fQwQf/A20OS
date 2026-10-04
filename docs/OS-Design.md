@@ -121,6 +121,8 @@ Native ABI 的内存对象接口围绕两个核心抽象：
 
 `MAP_SHARED` 一致性由 `kernel/fs/page_cache.c` 的页缓存统一处理，包含 dirty-page/writeback 生命周期，并在页面逐出路径中插入内存屏障。
 
+回收不是全部同步的：`oom_kswapd_thread()`（`kernel/mm/oom.c`，main.c 在 init_kthread 旁启动）每秒检查一次水位，依次动用 spare slab 释放、干净页缓存丢弃和有界换出（无 OOM 击杀、无冷却），把回收从分配最坏路径挪到后台；passes/pages 计数经 `/proc/a20/oom` 的 `kswapd_*` 字段暴露。kmalloc 快路径是 per-CPU 对象数组（`kernel/mm/slab.c`，本地关中断 pop/push，与物理页分配器的 CPU 页批量同纪律），缓存锁只按 refill/drain 批量持有。
+
 ### 进程调度与 SMP（`kernel/proc/`）
 
 调度器使用 per-CPU 运行队列。级 0 承载实时任务（`SCHED_FIFO`/`SCHED_RR`，优先级 1..99）；普通任务使用 **EEVDF（最早资格虚拟截止时间优先）**：每个任务按权重累加虚拟运行时间（`vruntime += dt * EEVDF_NICE0_LOAD / weight`），runqueue 的系统虚拟时间 `vtime` 以排队中的 EEVDF 权重和推进，不包含当前运行任务。picker 沿按 deadline 排序的 treap 下降（子树以 `min_vruntime` 增广），选择第一个 `vruntime <= vtime` 的任务；若没有 eligible 任务，则回退到缓存的最早 deadline 任务保证进展。该下降最坏为 O(log n)，即树高而非队列长度。nice/weight 控制 CPU 份额；affinity 同时受 online CPU 与 cgroup cpuset 限制，CPU quota 由 `kernel/proc/cg_cpu.c` 执行。
@@ -148,11 +150,14 @@ proc_lock -> signal_state.lock
 park_lock -> signal_state.lock
 park_lock -> g_wait_timer_lock
 park_lock -> runq_lock
-proc_lock -> files_struct.lock -> VFS global-file/vnode locks
+proc_lock -> files_struct.lock -> vfile bucket locks (per-gfd, 128)
+vfile bucket lock -> vfile alloc lock
+vnode.write_lock (per-vnode, leaf)
 proc_lock -> mm_struct.lock
 proc_lock -> a20_handle_table.lock
 driver registry/IRQ locks -> device-private locks
 g_lwip_lock -> g_net_lock
+evq bucket lock -> owner eq->lock
 ```
 
 核心规则：持有自旋锁时禁止阻塞；持有 `runq_lock` 时禁止获取`proc_lock`；对象/设备锁内只 collect waiter，实际 wake 在释放对象锁后 flush；持有设备或 lwIP 锁时，除非被调用方明确声明非阻塞，否则禁止调用 VFS、内存分配或调度路径。
@@ -172,12 +177,14 @@ Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wak
 * `kernel/fs/vfs/dcache.c`：目录项缓存。
 * `kernel/fs/vfs/stat_perm.c`：权限检查与 sticky-bit。
 
+mount 表是命名空间内的**堆分配稳定指针数组**（`kernel/fs/vfs/mount.c`）：umount 只把表项指针摘下并挂入命名空间墓园，对象到命名空间销毁才释放——`vnode->mnt`、dcache 与 quota 的缓存指针在 umount 之后读到的仍是同一个冻结对象，而不是旧内联数组搬移后指错的邻居。
+
 支持的后端及当前限制：
 
 | 后端 | rename | link | symlink | 关键限制 |
 |------|--------|------|---------|---------|
-| FAT32 | 支持 | 不支持 | 不支持 | 元数据仅存 RAM；rename 改写 `..` 项 |
-| ext4 | 支持 | 支持 | 快链 <= 60 B | 不生成新的日志事务；可对受支持的现有 JBD2 journal 做 fail-closed recovery；64 位文件大小 + 部分截断回收 |
+| FAT32 | 支持 | 不支持 | 不支持 | rename 改写 `..` 项；无目录/FSInfo 的落盘回写之外没有事务机制，断电原子性不保证 |
+| ext4 | 支持 | 支持 | 快链 <= 60 B | 运行时 metadata 更新写入 JBD2 事务（ordered 语义，commit 后元数据才落本位）；只支持 checksum v3 + `INCOMPAT_64BIT`，v1/v2 fail closed；不支持 `async_commit`/`barrier` 特性位；64 位文件大小 + 部分截断回收 |
 | NTFS | 支持 | 不支持 | 不支持 | 索引无 B-tree 分裂；不支持 `$ATTRIBUTE_LIST` |
 | ISO9660 | 不支持 | 不支持 | 不支持 | 只读 CD-ROM；名字转小写；跨块目录记录 |
 | ramfs | 支持 | 支持 | 支持 | 单目录 entry 上限 256；总 inode 上限 4096 |
@@ -190,6 +197,8 @@ Linux ABI 的 Futex 实现在 `kernel/abi/linux/sys_futex.c`，支持 wait、wak
 | sysfs | 不支持 | 不支持 | 不支持 | 合成只读视图；暴露 loop、DRM，以及 `/sys/class/{char,block,net,input,display,audio}` 动态 class 设备 |
 
 Linux ABI 兼容层实现了高复杂度的边界语义，包括 `openat2` 解析标志、`renameat2` 的 `RENAME_NOREPLACE`/`RENAME_EXCHANGE`、`statx` mask，以及 `faccessat2`/`fchmodat2` 的 flag 校验。
+
+fd 热路径的锁粒度：进程 fd 表（`files_struct_t`）之下的 vfile 表按 gfd 哈希分 128 桶锁（`kernel/fs/file.c`），读写/close/dup 每次只取自己那一桶，空闲位图与分配游标单独一把锁（锁序桶锁 → 分配锁）；缓冲写序列化在每 vnode 一把的 `vnode_t.write_lock` 上，而不是旧的全局 64 桶互斥。查找失败的 errno 记录在 task 私有槽（`vfs_lookup_errno()`），不再经全局变量跨核串扰。
 
 四条主线架构（riscv64、aarch64、loongarch64、x86_64）的 Linux syscall 编号覆盖均达 Linux 水平：riscv64/aarch64 覆盖 asm-generic 全表；loongarch64 补齐私有 `file_getattr(468)`/`file_setattr(469)`；x86_64 的映射表（`kernel/arch/x86_64/include/syscall_nr_x86_64.h`）扩展至 463 槽，包含 `io_uring`/`landlock`/`pidfd`/`mseal` 等现代 syscall。编号覆盖不等于语义完整：兼容层按 `partial` 保守记录（见 `kernel/abi/linux/syscall_coverage.md`），仅在支持的 flag/对象范围内主张 Linux 语义。
 
@@ -232,7 +241,7 @@ trap/MM/time init -> board->early_init() -> driver_core_init()
 Native IPC 提供两个互补原语：
 
 * **Channel**（`kernel/ipc/a20_channel.c`）：双向消息通道。单条消息最多 64 KiB 数据 + 8 个 handle，采用两阶段写入和类型化通道约束。
-* **EventQ**（`kernel/ipc/a20_event.c`）：Native ABI 事件等待机制，维护 watch list、ring buffer 和全局反向索引。当前实际生产事件的是 Channel、task 退出、Native timer 和用户态驱动 IRQ；file、socket 与 signalfd 尚未生产 EventQ 事件。
+* **EventQ**（`kernel/ipc/a20_event.c`）：Native ABI 事件等待机制，维护 watch list、ring buffer 和按对象哈希的 256 桶反向索引（每桶独立自旋锁，锁序为桶锁 → 队列锁；任何路径都不同时持有两把桶锁）。当前实际生产事件的是 Channel、task 退出、Native timer 和用户态驱动 IRQ；file、socket 与 signalfd 尚未生产 EventQ 事件。
 
 Channel 传递 handle 时，接收方权限为 `receiver_rights = sender_rights ∩ transfer_rights`。handle 采用共享语义而非移动语义：发送方在 `send` 后仍保留原 handle。
 

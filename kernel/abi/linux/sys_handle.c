@@ -95,5 +95,8 @@ int64_t sys_open_by_handle_at(int mount_fd, struct linux_file_handle *handle,
     int gfd = vfs_open_vnode(vn, flags & O_ACCMODE);
     if (gfd < 0)
         return gfd;
-    return fdtable_install_current(gfd, flags);
+    /* vfs_open_vnode() installed the fd; cloexec is the only remaining flag. */
+    if (flags & O_CLOEXEC)
+        fdtable_set_cloexec(proc_current(), gfd, 1);
+    return gfd;
 }

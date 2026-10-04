@@ -5,6 +5,7 @@
 #include "core/consts.h"
 #include "core/refcount.h"
 #include "core/sync.h"
+#include "fs/file.h"
 
 /* ============================================================
  * VFS — Virtual Filesystem Switch
@@ -53,6 +54,7 @@ struct open_how {
 #define FS_TYPE_NTFS     8
 #define FS_TYPE_ISOFS    9
 #define FS_TYPE_UXFS    10
+#define FS_TYPE_LITTLEFS 11
 
 /* ---- Forward declarations ---- */
 struct vnode;
@@ -183,6 +185,9 @@ typedef struct vfile_ops {
     int     (*poll)(struct vfile *vf, short events);
     size_t  (*poll_sources)(struct vfile *vf, short events,
                             struct readiness_source *sources, size_t max);
+    /* Per-open-file durability commit (littlefs syncs files, not inodes).
+     * NULL falls back to the vnode/mount flush in vfs_fsync_vfile. */
+    int     (*sync)(struct vfile *vf);
     int     (*close)(struct vfile *vf);
 } vfile_ops_t;
 
@@ -213,6 +218,13 @@ typedef struct vnode {
     struct page_cache_page *cache_pages;
     struct page_cache_page *cache_dirty_pages;
     struct page_cache_page *cache_dirty_tail;
+    /* Serializes buffered writes against each other so size/offset updates
+     * and page-cache insertion stay consistent for one file.  Per-vnode on
+     * purpose: the previous fixed array of 64 hash-bucket mutexes made any
+     * two hash-colliding unrelated files block each other.  Lifetime is the
+     * vnode itself — an in-progress writer holds a vnode reference through
+     * its open vfile, so the lock cannot be freed under a waiter. */
+    mutex_t         write_lock;
     /* Number of live MAP_SHARED file VMAs backing this vnode.  The VFS read
      * and fsync paths use this to skip the global dirty-bit harvest scan
      * entirely when the vnode has no shared file mappings.  Updated with
@@ -284,7 +296,23 @@ typedef struct vfile {
  *   parent/current refs across restart and drop all abandoned refs on errors.
  */
 
-/* ---- Mount point ---- */
+/* ---- Mount point ----
+ *
+ * A mount is an object with a real position in a tree: mnt_parent and mnt_mp
+ * say where it is attached (mnt_mp is the vnode inside mnt_parent that this
+ * mount covers, and the mount holds a reference on it), while path[] keeps
+ * the flattened namespace-visible spelling that path resolution matches on.
+ * Both are maintained because they answer different questions: the tree is
+ * the authority for lifetime and parentage (umount busy checks, pivot_root,
+ * mountinfo parent ids), and the path is the authority for "which mount does
+ * this absolute path resolve in".
+ *
+ * VFS_MOUNT_DETACHED marks a mount that pivot_root has cut out of the tree.
+ * It stays in the table so mountinfo can still report it, but no path
+ * resolves through it any more -- which is exactly Linux's post-pivot
+ * property: the old root is unreachable by path and reachable only through
+ * an already-open file descriptor.
+ */
 typedef struct mount {
     int             type;           /* FS_TYPE_* */
     int             flags;
@@ -298,9 +326,33 @@ typedef struct mount {
      * namespace-private mount.  The filesystem teardown runs only when the
      * last namespace drops it; VFS_MOUNT_NS_SHARED marks the shared case. */
     int             ns_users;
+    /* Graveyard link: after umount the object stays allocated (vnode->mnt,
+     * dcache and quota caches may still point at it) until its namespace is
+     * torn down. */
+    struct mount   *dead_next;
+
+    /* ---- tree position and root pinning ---- */
+    struct mount   *mnt_parent;     /* NULL: namespace root */
+    vnode_t        *mnt_mp;         /* mountpoint vnode inside mnt_parent */
+    struct mount   *mnt_child;      /* first child mount */
+    struct mount   *mnt_sibling;    /* next sibling of the same parent */
+    /* 1 while the mount is in its namespace table, 0 after umount. */
+    int             attached;
+    /* Processes using this mount as their root, plus the namespace table's
+     * own reference -- so the value is >= 1 for any attached mount.  umount
+     * refuses to drop a mount that is somebody's root unless MNT_DETACH. */
+    int             root_users;
+    /* Processes whose current working directory lives in this mount.  A
+     * second umount reason: unmounting the filesystem a process is standing
+     * in would leave its cwd naming a path that resolves nowhere. */
+    int             cwd_users;
+    /* Stable identity within the namespace, reported as the mount id by
+     * /proc/self/mountinfo and statmount(2). */
+    uint32_t        mnt_id;
 } mount_t;
 
-#define VFS_MOUNT_RDONLY 0x1
+#define VFS_MOUNT_RDONLY  0x1
+#define VFS_MOUNT_DETACHED 0x2
 
 /* ---- Open file table (global) ---- */
 #define VFS_MAX_OPEN   8192
@@ -343,10 +395,26 @@ vnode_t *vnode_lookup_path_openat2(const char *path,
                                    char *resolved_out,
                                    size_t resolved_out_sz,
                                    int *lookup_err);
- extern int g_lookup_errno;
+/* Error from the last failed path resolution on this task (per-task slot;
+ * the boot path with no current task falls back to a static). */
+int  vfs_lookup_errno(void);
+void vfs_set_lookup_errno(int err);
 
 /* Resolve a "/proc/<pid|self>/fd/<n>" path to the target task and fd. */
 int vfs_proc_fd_target(const char *path, struct task_t **task_out, int *fd_out);
+
+/* ---- per-process root / cwd references ---------------------------------
+ * These own the vnode and mount references behind task->fs.  They are the
+ * only writers of those fields, so the flattened cwd[]/root_path[] strings
+ * and the objects they name cannot drift apart. */
+void  vfs_task_root_set(struct task_t *t, struct mount *mnt, struct vnode *vn,
+                        const char *root_path);
+void  vfs_task_cwd_set(struct task_t *t, struct vnode *vn,
+                       const char *visible_cwd);
+void  vfs_task_fs_pins_release(struct task_t *t);
+struct mount *vfs_task_root_mount(struct task_t *t);
+/* Copy @src's root/cwd references into @dst (fork/clone). */
+void  vfs_task_fs_pins_copy(struct task_t *dst, const struct task_t *src);
 
 /* File operations */
 int      vfs_open(const char *path, int flags, int mode);
@@ -362,8 +430,11 @@ int      vfs_read_file(vfile_t *vf, char *buf, size_t count);
 int      vfs_write_file(vfile_t *vf, const char *buf, size_t count);
 int      vfs_pread(int fd, char *buf, size_t count, uint64_t offset);
 long     vfs_lseek(int fd, long offset, int whence);
+long     vfs_lseek_vfile(vfile_t *vf, long offset, int whence);
 int      vfs_getdents64(int fd, void *dirp, size_t count);
+int      vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count);
 int      vfs_ioctl(int fd, unsigned long req, void *arg);
+int      vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg);
 int      vfs_sync(void);
 int      vfs_fsync(int fd);
 int      vfs_fsync_vfile(vfile_t *vf);
@@ -383,6 +454,7 @@ int      vfs_stat(const char *path, kstat_t *st);
 int      vfs_statx(const char *path, kstat_t *st, unsigned int mask, int sync_hint);
 int      vfs_fstatx(int dirfd, const char *path, kstat_t *st, int flags, unsigned int mask);
 int      vfs_fstat(int fd, kstat_t *st);
+int      vfs_vfile_stat(vfile_t *vf, kstat_t *st);
 int      vfs_statfs(vnode_t *vn, kstatfs_t *st);
 int      vfs_fstatat(int dirfd, const char *path, kstat_t *st, int flags);
 int      vfs_faccessat(int dirfd, const char *path, int mode);
@@ -423,6 +495,11 @@ int      vfs_getcwd(char *buf, size_t size);
 /* Mount */
 int      vfs_mount(const char *dev, const char *path, const char *fstype, int flags, const char *data);
 int      vfs_mount_bc(const char *path, const char *fstype, struct bcache *bc);
+/* littlefs (power-loss resilient embedded FS, kernel/external/littlefs) */
+struct bcache;
+vnode_t *littlefs_mount(struct bcache *bc);
+void     littlefs_unmount(vnode_t *root);
+
 int      vfs_mount_bc_flags(const char *path, const char *fstype,
                             struct bcache *bc, int flags);
 int      vfs_umount(const char *path);
@@ -430,18 +507,13 @@ int      vfs_umount(const char *path);
 /* Pipe */
 int      vfs_pipe(int pipefd[2]);
 
-/* file table access (for dup/dup3) */
-vfile_t *vfs_get_file(int fd);
-vfile_t *vfs_get_file_ref(int fd);
-void     vfs_put_file_ref(int fd, vfile_t *vf);
-int      vfs_ref_fd(int fd);
-int      vfs_alloc_fd(vfile_t *vf);
-int      vfs_dup(int fd);
-int      vfs_dup3(int oldfd, int newfd, int flags);
+/* fd resolution goes through the calling task's files_struct (fs/fdtable.c);
+ * the fd get/put helpers are declared in fs/file.h. */
 int      vfs_fcntl(int fd, int cmd, long arg);
+int      vfs_fcntl_vfile(vfile_t *vf, int cmd, long arg);
 int      vfs_flock(int fd, int operation);
 void     vfs_release_process_locks(int pid);
-void     vfs_release_process_file_locks(int fd, int pid);
+void     vfs_release_process_file_locks(vfile_t *vf, int pid);
 
 /* Truncate */
 int      vfs_truncate(const char *path, size_t size);

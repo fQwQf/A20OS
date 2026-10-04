@@ -34,6 +34,7 @@ git
 | `min` | a20-min + a20-drivers（**面向真机出厂**的最小用户态） | 无 |
 | `base` | a20-base + a20-drivers（纯自有，对应旧 disk.img 的内容） | 无 |
 | `devel` | base + Alpine 上游 musl/busybox/vim/git/curl 等 | 需要访问 Alpine 镜像站 |
+| `server` | Alpine 上游 dropbear（SSH）/ chrony（NTP）/ busybox syslogd+crond，overlay init 拉起（实例 `server-riscv64`，SSH 转发 host:2222）；声明层就绪，端到端验证待办 | 需要访问 Alpine 镜像站 |
 
 ### `min` 与 `base` 怎么选
 

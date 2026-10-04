@@ -7,6 +7,7 @@
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_hal.h"
+#include "drivers/bus/pci_msix.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/block/virtio_blk.h"
 #include "core/defs.h"
@@ -135,6 +136,7 @@ static uintptr_t g_pci_mmio_alloc;
 #define PCOMMON_QUEUE_SEL            0x16U
 #define PCOMMON_QUEUE_SIZE           0x18U
 #define PCOMMON_QUEUE_ENABLE         0x1CU
+#define PCOMMON_QUEUE_MSIX_VECTOR    0x1AU
 #define PCOMMON_QUEUE_DESC_LO        0x20U
 #define PCOMMON_QUEUE_DESC_HI        0x24U
 #define PCOMMON_QUEUE_DRV_LO         0x28U
@@ -162,6 +164,8 @@ typedef struct pci_virtio_transport {
     /* Bit i set: notify_off_cache[i] holds queue i's QueueNotifyOff. */
     uint32_t notify_off_cached;
     uint16_t notify_off_cache[PCI_VIRTIO_NOTIFY_CACHE];
+    device_t   *device;       /* the function this transport describes */
+    unsigned queues_selected;  /* queues given a vector by msix_prepare() */
 } pci_virtio_transport_t;
 
 static pci_virtio_transport_t g_pci_virtio[32];
@@ -175,6 +179,67 @@ static uint8_t pci_read8(const pci_dev_info_t *info, uint32_t reg) {
 static uint16_t pci_read16(const pci_dev_info_t *info, uint32_t reg) {
     uint32_t word = pci_ecam_read(info->bus, info->dev, info->func, reg & ~3U);
     return (uint16_t)(word >> ((reg & 2U) * 8U));
+}
+
+uint8_t pci_cfg_read8(const device_t *dev, uint32_t reg) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    return info ? pci_read8(info, reg) : 0;
+}
+
+uint16_t pci_cfg_read16(const device_t *dev, uint32_t reg) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    return info ? pci_read16(info, reg) : 0;
+}
+
+uint32_t pci_cfg_read32(const device_t *dev, uint32_t reg) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    return info ? pci_ecam_read(info->bus, info->dev, info->func, reg) : 0;
+}
+
+void pci_cfg_write16(const device_t *dev, uint32_t reg, uint16_t val) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    if (!info)
+        return;
+    uint32_t offset = reg & ~3U;
+    uint32_t word = pci_ecam_read(info->bus, info->dev, info->func, offset);
+    uint32_t shift = (reg & 2U) * 8U;
+    word &= ~(0xFFFFU << shift);
+    word |= (uint32_t)val << shift;
+    pci_ecam_write(info->bus, info->dev, info->func, offset, word);
+}
+
+void pci_cfg_write32(const device_t *dev, uint32_t reg, uint32_t val) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    if (!info)
+        return;
+    pci_ecam_write(info->bus, info->dev, info->func, reg, val);
+}
+
+/* CONFIG_CAP_WALK_MODEL:
+ * - The capability list is a singly linked list of dword-aligned headers, each
+ *   byte 0 the capability ID and byte 1 the next offset in its low six bits.
+ * - Two guards bound the walk: a hard iteration limit, and the self-loop test
+ *   below.  A cycle through two or more entries is not covered by that test,
+ *   which is why the limit exists; without it a firmware bug would spin here
+ *   with no other work to do. */
+#define PCI_CAP_WALK_LIMIT 48
+
+uint8_t pci_find_capability(const device_t *dev, uint8_t cap_id) {
+    const pci_dev_info_t *info = dev ? (const pci_dev_info_t *)dev->plat_data : NULL;
+    if (!info || !(pci_read16(info, 0x06) & PCI_STATUS_CAP_LIST))
+        return 0;
+
+    uint8_t ptr = pci_read8(info, PCI_CAPABILITIES_PTR) & 0xFCU;
+    for (int limit = 0; ptr && limit < PCI_CAP_WALK_LIMIT; limit++) {
+        uint32_t cap = pci_ecam_read(info->bus, info->dev, info->func, ptr);
+        if ((uint8_t)(cap & 0xFFU) == cap_id)
+            return ptr;
+        uint8_t next = (uint8_t)(cap >> 8) & 0xFCU;
+        if (next == ptr)
+            break;
+        ptr = next;
+    }
+    return 0;
 }
 
 static int pci_match(device_t *dev, const driver_t *drv) {
@@ -510,6 +575,97 @@ int __attribute__((weak)) arch_pci_intx_irq(int bus, int dev, int func, int pin)
     return -1;
 }
 
+/* Message-signalled interrupts for one virtio function.  Queue i is bound to
+ * vector msix_base + i, which is the whole point of MSI-X over a shared INTx
+ * line: one queue no longer contends with another for the same line. */
+static int pci_virtio_msix_prepare(virtio_transport_t *t, unsigned vectors)
+{
+    pci_virtio_transport_t *vt = (pci_virtio_transport_t *)t->priv;
+    device_t *dev = vt->device;
+    if (!dev)
+        return -EINVAL;
+
+    pci_msix_info_t info;
+    if (pci_msix_capability(dev, &info) < 0)
+        return -ENODEV;
+    /* Never take more vectors than there are queues: the driver asks for one
+     * per queue, and a function with a shorter table would otherwise have the
+     * extra table entries armed with no queue behind them. */
+    if (vectors > info.table_size)
+        vectors = info.table_size;
+
+    /* The function's own capability states where its table lives, in either
+     * of the two fields a device may publish it in; pci_msix_enable() takes
+     * that as authoritative and refuses the case where neither does.  Nothing
+     * here needs to know the layout, which is the point: the virtio-pci BAR
+     * that holds the table is an implementation choice, not part of the
+     * virtio specification, and a driver that hard-coded it would program the
+     * wrong window on any implementation that chose differently. */
+    int r = pci_msix_enable(dev, vectors);
+    if (r) {
+        kinfo("[VIRTIO-PCI] %s: MSI-X unavailable (%d); using legacy "
+              "interrupts\n", dev->name, r);
+        return r;
+    }
+
+    int base = irq_alloc_vectors(vectors);
+    if (base < 0) {
+        pci_msix_disable(dev);
+        return base;
+    }
+
+    for (unsigned i = 0; i < vectors; i++) {
+        r = pci_msix_program_vector(dev, i, (uint32_t)(base + (int)i));
+        if (r) {
+            irq_free_vectors((uint32_t)base, vectors);
+            pci_msix_disable(dev);
+            return r;
+        }
+        /* queue_msix_vector lives in common config at 0x1A and names which
+         * table entry the queue posts through -- it is an index into the
+         * table, not the interrupt line's number, so it can only be written
+         * with the queue selected.  The line the entry delivers on is the one
+         * already programmed into that entry above; putting the line number
+         * here instead would point the queue past the end of the table. */
+        writew((uint16_t)i, (volatile void *)(vt->common + PCOMMON_QUEUE_SEL));
+        writew((uint16_t)i,
+               (volatile void *)(vt->common + PCOMMON_QUEUE_MSIX_VECTOR));
+    }
+    /* Leave the device interrupt-free until the driver has handlers on every
+     * reserved line. */
+    vt->queues_selected = vectors;
+
+    t->msix_base = base;
+    t->msix_vectors = (int)vectors;
+    kinfo("[VIRTIO-PCI] %s: MSI-X reserved, vectors %d..%d for %u queue(s)\n",
+          dev->name, base, base + (int)vectors - 1, vectors);
+    return 0;
+}
+
+static void pci_virtio_msix_arm(virtio_transport_t *t)
+{
+    pci_virtio_transport_t *vt = (pci_virtio_transport_t *)t->priv;
+    device_t *dev = vt->device;
+    if (!dev || t->msix_vectors <= 0)
+        return;
+
+    for (unsigned i = 0; i < vt->queues_selected; i++)
+        pci_msix_set_vector_mask(dev, i, 0);
+    (void)pci_msix_commit(dev);
+}
+
+static void pci_virtio_msix_teardown(virtio_transport_t *t)
+{
+    pci_virtio_transport_t *vt = (pci_virtio_transport_t *)t->priv;
+    device_t *dev = vt->device;
+    if (!dev || t->msix_vectors <= 0)
+        return;
+    pci_msix_disable(dev);
+    irq_free_vectors((uint32_t)t->msix_base, (unsigned)t->msix_vectors);
+    t->msix_base = -1;
+    t->msix_vectors = 0;
+}
+
 int pci_virtio_transport_init(device_t *dev, int type,
                               virtio_transport_t *transport) {
     pci_dev_info_t *info = dev ? (pci_dev_info_t *)dev->plat_data : NULL;
@@ -525,7 +681,7 @@ int pci_virtio_transport_init(device_t *dev, int type,
         return -1;
     }
 
-    pci_virtio_transport_t candidate = { .type = (uint16_t)type };
+    pci_virtio_transport_t candidate = { .type = (uint16_t)type, .device = dev };
     int found = 0;
     uint8_t ptr = pci_read8(info, PCI_CAPABILITIES_PTR) & 0xFCU;
     for (int limit = 0; ptr && limit < 48; limit++) {
@@ -574,6 +730,11 @@ int pci_virtio_transport_init(device_t *dev, int type,
     transport->priv = &g_pci_virtio[g_pci_virtio_count++];
     transport->legacy = 0;
     transport->shared_irq = 1;
+    transport->msix_prepare = pci_virtio_msix_prepare;
+    transport->msix_arm = pci_virtio_msix_arm;
+    transport->msix_teardown = pci_virtio_msix_teardown;
+    transport->msix_base = -1;
+    transport->msix_vectors = 0;
     transport->irq = arch_pci_intx_irq(info->bus, info->dev, info->func,
                                        pci_read8(info, 0x3D) & 0x7U);
     kinfo("[VIRTIO-PCI] %s: common=0x%lx notify=0x%lx isr=0x%lx config=0x%lx mult=%u\n",

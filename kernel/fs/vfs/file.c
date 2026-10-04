@@ -11,17 +11,6 @@
 #include "ipc/ipc.h"
 #include "mm/vm.h"
 
-#define VFS_WRITE_LOCK_COUNT 64U
-static mutex_t g_vfs_write_locks[VFS_WRITE_LOCK_COUNT] = {
-    [0 ... VFS_WRITE_LOCK_COUNT - 1] = MUTEX_INIT,
-};
-
-static mutex_t *vfs_write_lock_for(vnode_t *vn)
-{
-    uintptr_t key = (uintptr_t)vn >> 4;
-    return &g_vfs_write_locks[key & (VFS_WRITE_LOCK_COUNT - 1)];
-}
-
 int vfs_is_pipe_vfile(vfile_t *vf)
 {
     return pipe_vfile_is(vf);
@@ -54,7 +43,10 @@ static int vfs_file_uses_page_cache(vnode_t *vn)
          mnt->type == FS_TYPE_PROCFS ||
          mnt->type == FS_TYPE_CGROUP ||
          mnt->type == FS_TYPE_DEVFS ||
-         mnt->type == FS_TYPE_SYSFS))
+         mnt->type == FS_TYPE_SYSFS ||
+         /* littlefs does direct vfile I/O through lfs_file (its own
+          * metadata pairs + buffering); no readpage/writepage hooks. */
+         mnt->type == FS_TYPE_LITTLEFS))
         return 0;
     return 1;
 }
@@ -133,8 +125,8 @@ int vfs_write_file(vfile_t *vf, const char *buf, size_t count)
     }
     if (vf->ops && vf->ops->write) {
         mutex_t *write_lock =
-            use_page_cache && !(vf->flags & O_DIRECT)
-                ? vfs_write_lock_for(vf->vnode) : NULL;
+            use_page_cache && !(vf->flags & O_DIRECT) && vf->vnode
+                ? &vf->vnode->write_lock : NULL;
         if (write_lock)
             mutex_lock(write_lock);
         if ((vf->flags & O_APPEND) && vf->vnode)
@@ -229,40 +221,62 @@ int vfs_pread(int fd, char *buf, size_t count, uint64_t offset)
     return r;
 }
 
+long vfs_lseek_vfile(vfile_t *vf, long offset, int whence)
+{
+    if (!vf)
+        return -EBADF;
+    int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
+    if (lock_offset)
+        mutex_lock(&vf->offset_lock);
+    long r;
+    if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
+        r = -ESPIPE;
+    } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
+        r = -ESPIPE;
+    } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == 0140000)) { /* S_IFSOCK is 0140000 */
+        r = -ESPIPE;
+    } else if (vf->ops && vf->ops->lseek) {
+        r = vf->ops->lseek(vf, offset, whence);
+    } else {
+        r = -EBADF;
+    }
+    if (lock_offset)
+        mutex_unlock(&vf->offset_lock);
+    return r;
+}
+
 long vfs_lseek(int fd, long offset, int whence)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
-    long r = -EBADF;
-    if (vf) {
-        int lock_offset = vf->vnode && vf->ops && vf->ops->lseek;
-        if (lock_offset)
-            mutex_lock(&vf->offset_lock);
-        if (devfs_is_tty_vfile(vf) || vfs_is_pipe_vfile(vf)) {
-            r = -ESPIPE;
-        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == S_IFIFO)) {
-            r = -ESPIPE;
-        } else if (vf->vnode && (((vf->vnode->mode) & S_IFMT) == 0140000)) { /* S_IFSOCK is 0140000 */
-            r = -ESPIPE;
-        } else if (vf->ops && vf->ops->lseek) {
-            r = vf->ops->lseek(vf, offset, whence);
-        }
-        if (lock_offset)
-            mutex_unlock(&vf->offset_lock);
-    }
-    vfs_put_file_ref(fd, vf);
+    long r = vfs_lseek_vfile(vf, offset, whence);
+    vfs_put_file(vf);
     return r;
+}
+
+int vfs_getdents64_vfile(vfile_t *vf, void *dirp, size_t count)
+{
+    if (!vf)
+        return -EBADF;
+    if (vf->ops && vf->ops->readdir)
+        return vf->ops->readdir(vf, dirp, count);
+    return -EBADF;
 }
 
 int vfs_getdents64(int fd, void *dirp, size_t count)
 {
     vfile_t *vf = vfs_get_file_ref(fd);
-    int r = -EBADF;
-    if (vf) {
-        if (vf->ops && vf->ops->readdir)
-            r = vf->ops->readdir(vf, dirp, count);
-    }
-    vfs_put_file_ref(fd, vf);
+    int r = vfs_getdents64_vfile(vf, dirp, count);
+    vfs_put_file(vf);
     return r;
+}
+
+int vfs_ioctl_vfile(vfile_t *vf, unsigned long req, void *arg)
+{
+    if (!vf)
+        return -EBADF;
+    if (vf->ops && vf->ops->ioctl)
+        return vf->ops->ioctl(vf, req, arg);
+    return -ENOTTY;
 }
 
 int vfs_ioctl(int fd, unsigned long req, void *arg)
@@ -270,10 +284,8 @@ int vfs_ioctl(int fd, unsigned long req, void *arg)
     vfile_t *vf = vfs_get_file_ref(fd);
     if (!vf)
         return -EBADF;
-    int r = -ENOTTY;
-    if (vf->ops && vf->ops->ioctl)
-        r = vf->ops->ioctl(vf, req, arg);
-    vfs_put_file_ref(fd, vf);
+    int r = vfs_ioctl_vfile(vf, req, arg);
+    vfs_put_file(vf);
     return r;
 }
 
@@ -295,6 +307,13 @@ int vfs_fsync_vfile(vfile_t *vf)
     if (!vf)
         return -EBADF;
     int r = 0;
+    /* Filesystems that commit per open file (littlefs) sync here, before
+     * the generic device flush below. */
+    if (vf->ops && vf->ops->sync) {
+        r = vf->ops->sync(vf);
+        if (r < 0)
+            return r;
+    }
     if (vf->vnode) {
         mm_sync_shared_dirty_for_vnode(vf->vnode);
         int pc_r = page_cache_writeback_vnode(vf->vnode, NULL, NULL);

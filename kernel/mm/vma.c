@@ -51,7 +51,7 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
     if (a->vm_flags != b->vm_flags || a->pte_flags != b->pte_flags)
         return 0;
     if ((a->vm_flags | b->vm_flags) & VM_FILE) {
-        if (a->file_fd != b->file_fd)
+        if (a->file != b->file)
             return 0;
         return a->file_offset + (a->end - a->start) == b->file_offset;
     }
@@ -67,15 +67,15 @@ static int vma_can_merge(vm_area_t *a, vm_area_t *b)
 
 void vma_release_file(vm_area_t *vma)
 {
-    if (vma && (vma->vm_flags & VM_FILE) && vma->file_fd >= 0) {
+    if (vma && (vma->vm_flags & VM_FILE) && vma->file) {
         if (vma->file_vnode) {
             if (vma->vm_flags & VM_SHARED)
                 vnode_shared_map_dec(vma->file_vnode);
             vnode_put(vma->file_vnode);
             vma->file_vnode = NULL;
         }
-        vfs_close(vma->file_fd);
-        vma->file_fd = -1;
+        vfs_put_file(vma->file);
+        vma->file = NULL;
     }
 }
 
@@ -98,14 +98,16 @@ void vma_release(vm_area_t *vma)
 
 int vma_ref_file(vm_area_t *vma)
 {
-    if (!vma || !(vma->vm_flags & VM_FILE) || vma->file_fd < 0)
+    if (!vma || !(vma->vm_flags & VM_FILE) || !vma->file)
         return 0;
     if (vma->file_vnode) {
         vnode_get(vma->file_vnode);
         if (vma->vm_flags & VM_SHARED)
             vnode_shared_map_inc(vma->file_vnode);
     }
-    return vfs_ref_fd(vma->file_fd);
+    /* The forked/copied VMA owns its own vfile reference. */
+    vfile_get(vma->file);
+    return 0;
 }
 
 int vma_ref_fork(vm_area_t *vma)
@@ -385,7 +387,29 @@ int mm_split_vma_at(mm_struct_t *mm, vaddr_t addr) {
     return 0;
 }
 
-vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
+/*
+ * Split @vma at @split and return the new tail.
+ *
+ * MM_VMA_INDEX_MUTATION: this mutates the address space's VMA list, so it must
+ * take @mm and drop mm's cached lookup index.  It used to take only the VMA and
+ * leave the index alone, and mprotect -- its only caller -- was the one mutator
+ * in the tree that did not invalidate.  The consequence was not a stale VMA but
+ * a *misaligned* one: the index array is a snapshot of the list's pointers, so
+ * inserting the tail leaves every later slot one position behind.  The array is
+ * still sorted by start, so the binary search inside mm_find_vma() converges
+ * without complaint -- onto a VMA that ends before the address, or onto none at
+ * all.  A lookup then reports "unmapped" for a range that is mapped, and the
+ * callers act on that: mm_split_vma_at() declines to split, mprotect() returns
+ * success having changed nothing, and handle_demand_fault_locked() answers -1
+ * for a store into a perfectly good anonymous page.  Under a single CPU the
+ * window is too narrow to hit; with threads sharing an address space it is the
+ * difference between a program that runs and one that dies of SIGSEGV.
+ *
+ * Taking @mm here rather than asking the caller to remember is deliberate: this
+ * is the only VMA-splitting helper that cannot invalidate on its own, and the
+ * signature is what makes the obligation impossible to forget.
+ */
+vm_area_t *vma_split(mm_struct_t *mm, vm_area_t *vma, vaddr_t split) {
     if (!vma) return NULL;
     if (split <= vma->start || split >= vma->end) return vma;
 
@@ -400,6 +424,7 @@ vm_area_t *vma_split(vm_area_t *vma, vaddr_t split) {
         kfree(tail);
         return NULL;
     }
+    mm_vma_index_invalidate(mm);
     tail->prev = vma;
     tail->next = vma->next;
     if (tail->next) tail->next->prev = tail;
