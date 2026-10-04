@@ -68,17 +68,26 @@ __switch:
     ld.w    $s7, $sp, 36
     ld.w    $s8, $sp, 40
     ld.w    $fp, $sp, 44
+    /* Reload SAVE1 alongside $tp.  The scheduler publishes the outgoing task
+     * through arch_set_task_pointer() before entering __switch, so on this side
+     * only $tp has moved: without the CSR write arch_get_task_pointer() would
+     * keep naming the previous task for the whole incoming context.
+     * csrwr exchanges its operands, hence the temporary. */
+    move    $t2, $tp
+    csrwr   $t2, 0x31
 
-    /* Restore PGDL (CSR 0x19) from offset 52 */
+    /* Restore PGDL (CSR 0x19) from offset 52.  Tasks sharing a page table have
+     * nothing stale to discard, so only an actual root change invalidates. */
     ld.w    $t0, $sp, 52
+    csrrd   $t1, 0x19
+    beq     $t0, $t1, .Lpgdl_done
     csrwr   $t0, 0x19
+    invtlb  0x3, $zero, $zero
+.Lpgdl_done:
 
     /* Restore PRMD (CSR 0x1) from offset 56 */
     ld.w    $t1, $sp, 56
     csrwr   $t1, 0x1
-
-    /* Flush non-global TLB entries after page table switch */
-    invtlb  0x3, $zero, $zero
 
     /* Free task context from stack */
     addi.w  $sp, $sp, 60
