@@ -58,6 +58,12 @@ make ARCH=x86_64 image-world PKG_WORLD=xfce PKG_SIZE_MB=4096 \
   （用 `tools/a20 run xfce-x86_64` 时由 `instances/xfce-x86_64.toml` 的 `world_size_mb = 4096` 兜住。）
 - 游戏会落在镜像内的 `/usr/share/a20-media/1.21.11/`，桌面上的 `a20-media` 软链可以直接进。
 
+非 x86_64 目标：Mojang 只发布 x86_64 的 native（新版本另有 arm64，从来没有 riscv64），
+而媒体除了 `natives/` 全是架构无关的数据（jar、assets）。所以生成 overlay 时会按目标
+架构过滤 ELF：给 `xfce-riscv64` 组镜像时 `natives/` 会被剔除并在构建日志里提示一行，
+游戏数据照常装入；镜像里的启动器会以 `no natives under ...` 明确拒绝启动，而不是装着
+跑不起来的 x86_64 native 让 mkrootfs 的 overlay 架构检查把整个镜像拒掉。
+
 ## 3. 启动
 
 镜像里带了启动器 `/usr/local/bin/minecraft`（源码在

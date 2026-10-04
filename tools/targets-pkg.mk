@@ -64,6 +64,8 @@ QEMU_MEMORY_WORLD   := $(if $(filter $(QEMU_MEMORY_DEFAULT),$(QEMU_MEMORY)),$(QE
 # GUI_MEDIA 时才生成 —— 于是 `make run-gui-x86_64`（不带变量）会把上次注入的
 # /usr/share/a20-media 悄悄丢掉，看起来像"媒体没进镜像"。默认从已取件的
 # build/minecraft/* 注入；要显式关掉就传 `GUI_MEDIA=`。
+# 媒体里的 ELF 若与目标架构不符会在生成 overlay 时剔除并提示（Mojang 的 natives
+# 只有 x86_64，没有 riscv64）—— 不剔除的话 mkrootfs 的 overlay 架构检查会拒绝整个镜像。
 GUI_MEDIA_AUTO     := $(wildcard build/minecraft/*)
 GUI_MEDIA          ?= $(GUI_MEDIA_AUTO)
 GUI_MEDIA_DIR      ?= /usr/share/a20-media
