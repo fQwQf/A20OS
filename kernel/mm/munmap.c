@@ -165,8 +165,14 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
         } else if (end >= vma->end) {
             vma->end = clip_start;
-            /* Tail cut: the segment's extent shrank, but its base_va and
-             * offset still match, so only the extent needs narrowing. */
+            /* Tail cut.  The segment's base_va and offset still line up --
+             * only its extent shrank -- BUT its extent is exactly what
+             * mm_pt_lookup_seg() uses to decide whether this address is its
+             * own.  Leaving the old segment named here therefore works while
+             * the cut is smaller than the segment, and silently stops working
+             * the moment the mapping shrinks below its own label.  Rebuild it
+             * rather than reason about when the stale extent happens to still
+             * cover the addresses. */
             mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
         } else {
             vm_area_t *tail = kcalloc_atomic(1, sizeof(vm_area_t));
@@ -192,10 +198,19 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
             if (vma->next) vma->next->prev = tail;
             vma->next = tail;
             vma->end = clip_start;
-            /* Middle cut: two segments now describe one old one.  The entry
-             * that straddles the boundary can only carry one of them, so the
-             * addresses on the other side get no segment and fall back to the
-             * VMA -- see "WHERE A SEGMENT STOPS BEING AUTHORITATIVE". */
+            /* Middle cut: two segments now describe one old one.  BOTH halves
+             * need fresh segments, not just the tail: the head kept the old
+             * segment, whose extent was [old_start, old_end) and therefore no
+             * longer contains [old_start, clip_start).  Lookup matches on
+             * extent, so the head's own addresses stopped resolving -- which
+             * the shadow measurement saw directly, as mappings that answered
+             * correctly and then stopped answering after a partial unmap.
+             *
+             * Order matters.  The head is relabelled FIRST, while `tail` is
+             * not yet linked, so the two walks cannot both claim the node
+             * entry that straddles the boundary; the tail then names itself
+             * there and the head's names remain valid for their own side. */
+            mm_mmap_seg_reannotate(mm, vma, vma->start, vma->end);
             mm_mmap_seg_reannotate(mm, tail, tail->start, tail->end);
         }
         vma = next;
