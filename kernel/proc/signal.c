@@ -335,7 +335,7 @@ static int signal_queue_task(task_t *t, int signum, const void *info,
     /*
      * SIGCONT always leaves a pending marker until the target reaches a
      * signal boundary.  proc_sched_stop_current() checks that marker while
-     * holding proc_lock, closing SIGCONT-versus-STOPPED publication races.
+     * holding the task's park_lock, closing SIGCONT-versus-STOPPED publication races.
      * Other ignored/default-ignored signals can be discarded at generation.
      */
     if (signum != SIGCONT &&

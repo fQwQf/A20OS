@@ -132,14 +132,23 @@ typedef struct proc_vm_stats {
  *     PROC_RUNNING/BLOCKED -> PROC_ZOMBIE -> PROC_UNUSED
  *   A task must not be put on a run queue unless its state is PROC_READY, and a
  *   zombie or unused task must never be requeued.
- * - proc_lock protects allocation, all-task list membership, parent/wait
- *   relationships, zombie/reap transitions, and most task state transitions
- *   and scheduler ownership metadata. PID lookup has its own pid_lock and
- *   signal pending/actions have signal_state.lock. Per-CPU runqueue locks
- *   protect rq_next/rq_prev/eevdf_node/on_rq and queue membership. Local pick atomically
- *   publishes on_rq -> dispatching under only that CPU's runqueue lock, then
- *   releases it before switch publication takes proc_lock. Every path needing
- *   both locks follows proc_lock -> runq_lock.
+ * - Lock ownership (design lock-serialization-split §1.2):
+ *     task->park_lock  owns ->state / ->park_state / ->wait_seq / ->wake_reason /
+ *                      ->on_cpu, plus the ptrace and ->mm / ->files / ->cred
+ *                      fields that travel with the task;
+ *     per-CPU runqueue lock owns ->on_rq / ->cpu_id / ->sched_level /
+ *                      ->ready_since and publishes ->dispatching / ->owner_cpu
+ *                      (atomic reads elsewhere);
+ *     tasklist_lock    owns task-list membership (->all_next/->all_prev) and
+ *                      the parent/children and thread-group chains.  It does
+ *                      NOT protect scheduling state.
+ *   PID lookup has its own pid_lock and signal pending/actions have
+ *   signal_state.lock.  Local pick atomically publishes on_rq -> dispatching
+ *   under only that CPU's runqueue lock and then releases it before switch
+ *   publication takes the selected task's park_lock.  Every path needing two
+ *   of these locks follows tasklist_lock -> park_lock -> runq_lock; a path
+ *   needing two task park_locks takes them in ascending task-pointer order
+ *   (proc_lock_two_tasks).
  * - cpu_id selects the owning run queue while on_rq is true. Code that changes
  *   cpu_id for a queued task must first remove it from its current run queue or
  *   hold the locks needed to move it atomically.
@@ -221,7 +230,7 @@ typedef struct task_t {
                                 failure reason) */
     struct task_t *parent;
     /* Parent-children membership, kept in lockstep with ->parent under
-     * proc_lock so wait4/reparent walk O(children) instead of the global
+     * tasklist_lock so wait4/reparent walk O(children) instead of the global
      * task list. */
     struct task_t *sibling_next;
     struct task_t **sibling_prev_ptr;
@@ -349,10 +358,10 @@ typedef struct task_t {
     arch_sigaltstack_t sigaltstack;
     uint64_t       thread_pending;
 
-    /* Debug/tracing state (kernel/proc/debug.c).  Protected by proc_lock
-     * for transitions; the tracer reads the snapshot fields only while the
-     * tracee is in a ptrace stop (ptrace_stop_active), which the tracee
-     * publishes under proc_lock before blocking. */
+    /* Debug/tracing state (kernel/proc/debug.c).  Protected by the task's own
+     * park_lock for transitions; the tracer reads the snapshot fields only
+     * while the tracee is in a ptrace stop (ptrace_stop_active), which the
+     * tracee publishes under its park_lock before blocking. */
     struct task_t *ptracer;          /* observing task, or NULL */
     int            ptrace_orig_parent_pid; /* real parent pid, restored on detach */
     uint32_t       ptrace_flags;     /* PT_DEBUG_FLAG_* */
@@ -466,8 +475,9 @@ typedef struct task_t {
      * transitions between PREPARING/PARKED/WOKEN and IDLE plus the timer
      * register/cancel (park_lock -> timer_heap lock) and the runqueue
      * enqueue in the wake path (park_lock -> runq lock).  It must never be
-     * held while acquiring proc_lock; proc_lock protects the task list,
-     * fork/exit/wait and the context-switch publication, not this state. */
+     * held while acquiring tasklist_lock, and never held while acquiring
+     * another task's park_lock except through proc_lock_two_tasks(), which
+     * imposes the ascending task-pointer order. */
     spinlock_t         park_lock;
     uint64_t           wait_seq;
     uint64_t           wait_deadline;
@@ -613,7 +623,32 @@ int      proc_clone(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls, int *
  * starts at `entry` with `arg` in the first argument register. */
 int      proc_create_thread(uint64_t entry, uint64_t arg, vaddr_t sp, vaddr_t tls);
 
+/* Global task-list membership (task_list_head/tail, ->all_next/->all_prev) and
+ * the parent/children/sibling plus thread-group chains are guarded by
+ * tasklist_lock, which does NOT protect scheduling state. */
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);
+
+/*
+ * Consistent read of a task's scheduling state.
+ *
+ * ->state and ->on_cpu are park_lock-owned (INV-P1), while ->on_rq/->cpu_id are
+ * runq_lock-owned and ->dispatching/->owner_cpu are published under the
+ * runqueue lock (INV-P2/INV-P4b).  A low-frequency reader that walks the task
+ * list under tasklist_lock must NOT read those fields directly: doing so has no
+ * synchronisation relationship with any writer.  Take a snapshot instead.
+ */
+typedef struct proc_task_sched_state {
+    proc_state_t state;
+    int          on_cpu;
+    int          on_rq;
+    int          dispatching;
+    unsigned     owner_cpu;
+    unsigned     cpu_id;
+} proc_task_sched_state_t;
+
+void proc_task_sched_state_snapshot(task_t *t, proc_task_sched_state_t *out);
+/* Convenience wrapper for callers that only need ->state. */
+int  proc_task_state_get(task_t *t);
 
 #endif /* _PROC_H */

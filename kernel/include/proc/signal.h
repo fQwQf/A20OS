@@ -47,8 +47,9 @@ typedef struct signal_state {
     /*
      * SIGNAL_STATE_LOCK_CONTRACT: protects shared actions/process pending
      * state and the per-task mask/thread-pending/sigwait fields of every task
-     * referencing this object.  When proc_lock is also needed the order is
-     * proc_lock -> signal_state.lock.
+     * referencing this object.  When the task's park_lock is also needed the
+     * order is park_lock -> signal_state.lock.  No global task lock takes
+     * part in the park protocol any more.
      */
     spinlock_t lock;
     wait_queue_t readiness_waiters;
