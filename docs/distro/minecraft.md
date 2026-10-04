@@ -302,13 +302,13 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
      所以那一轮 MC 什么都没跑到（日志里没有任何 MC 进展行）。
 
      已排除（读码确认，别再追）：
-     - AF_PACKET 的 TX 不是这条路：`a20_lwip_packet_tx()`（`lwip_stack.c:508`）是同步
+     - AF_PACKET 的 TX 不是这条路：`a20_lwip_packet_tx()`（`lwip_stack.c:1123`）是同步
        直接 `st->ops->send()`，不建 pbuf、也不经过 `ethernet_output` ⇒ `29357cbc` 那套
        RX tap / poll 下半部与它无关。
      - 不是「把用户态缓冲塞进 pbuf」：所有发送路径都拷贝。UDP 是
-       `pbuf_alloc(PBUF_TRANSPORT, …, PBUF_RAM)` + `pbuf_take()`（`socket_inet.c:1009/1042`），
-       TCP 是 `tcp_write(…, TCP_WRITE_FLAG_COPY)`（`socket_inet.c:1158`），RX 是 `PBUF_POOL` +
-       `pbuf_take()`（`lwip_stack.c:331/337`）。没有任何 `PBUF_REF`/`PBUF_ROM` 指向用户态内存。
+       `pbuf_alloc(PBUF_TRANSPORT, …, PBUF_RAM)` + `pbuf_take()`（`socket_inet.c:1698/1733`），
+       TCP 是 `tcp_write(…, TCP_WRITE_FLAG_COPY)`（`socket_inet.c:1866`），RX 是 `PBUF_POOL` +
+       `pbuf_take()`（`lwip_stack.c:481/489`）。没有任何 `PBUF_REF`/`PBUF_ROM` 指向用户态内存。
      - `ethernet_output` 的调用者只有 lwIP 自己的 IPv4/IPv6 发送路径
        （`etharp.c:487/770/897/1008/1161/1165`、`ethip6.c:101/120`），即普通 IP 发包，
        不是 raw socket 路径。
@@ -469,8 +469,8 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
   1. 没有任何代码会创建「引用型」pbuf：搜 `PBUF_REF` / `PBUF_ROM` / `pbuf_alloc_reference` /
      `pbuf_alloced_custom`，A20OS 自己的代码里 0 处命中；vendored lwIP 里也只有头文件里的声明，
      没有任何 `.c` 使用点 ⇒「有人把用户态缓冲以引用方式塞进 pbuf」不成立。A20OS 自己的
-     `pbuf_alloc` 总共只有 3 处（`lwip_stack.c:331` 的 RX 用 `PBUF_POOL`、
-     `socket_inet.c:1009/1042` 用 `PBUF_RAM`），且全部配 `pbuf_take()` 拷贝。
+     `pbuf_alloc` 总共只有 3 处（`lwip_stack.c:481` 的 RX 用 `PBUF_POOL`、
+     `socket_inet.c:1698/1733` 用 `PBUF_RAM`），且全部配 `pbuf_take()` 拷贝。
   2. 也没有「延迟 TX」机制（`tx_defer` / `pending_tx` / `txq` 等在 `kernel/net/` 里 0 命中）。
   3. 结合上一段的探针结论（无双重释放、毒化值从未出现）⇒ 那个坏 pbuf 从未被释放，
      它是活的，只是 `payload` 字段在使用中被改掉了 ⇒
@@ -790,9 +790,9 @@ MC_HOME=/usr/share/a20-media/1.21.11 minecraft
   能避开它」一致。下一步就是抓上面那个 throw 的 caller 与 errno。
 
 - **已排除的假设（读码确认，别再追）**：通道「发送方等空间」的 park/wake 配对是**对的** ——
-  发送方在 `peer->waiters` 上以 `A20_CH_WAIT_SEND` 挂起（`a20_channel.c:312`，`peer` 是接收端
+  发送方在 `peer->waiters` 上以 `A20_CH_WAIT_SEND` 挂起（`a20_channel.c:348`，`peer` 是接收端
   的 endpoint），接收方 `a20_channel_recv_finish()` 在**同一把** `peer->lock` 下让出空间并唤醒
-  `ep->waiters`（`a20_channel.c:618`），两者是同一条队列且对锁原子，不存在丢唤醒。
+  `ep->waiters`（`a20_channel.c:653`），两者是同一条队列且对锁原子，不存在丢唤醒。
   同理 `unix_ch_recv()` 对半消费消息的暂存（`s->ch_buf`/`s->ch_len` + `memmove`）逻辑也是对的。
   ⇒ 客户端那次「只拿到 40640 就 EAGAIN」确实是**当时通道里就这么多**，问题在更上游：
   要么 Xwayland 没把剩下的写出去，要么写了但在到达客户端前被丢掉。
