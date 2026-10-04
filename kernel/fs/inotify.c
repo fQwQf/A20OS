@@ -49,6 +49,12 @@ typedef struct inotify_instance {
 
 static inotify_instance_t *g_instances;
 static spinlock_t g_inotify_lock = SPINLOCK_INIT;
+/* Total live watches across every instance.  Buffered writes, page-cache
+ * eviction and every other VFS mutation funnel through
+ * inotify_vnode_event(), and the common case is that nothing is being
+ * watched anywhere on the system: one relaxed load there keeps the global
+ * instance lock off that path entirely. */
+static int g_inotify_watch_count;
 
 static int inotify_ops_read(vfile_t *vf, char *buf, size_t count);
 
@@ -110,6 +116,8 @@ static void inotify_notify_locked(inotify_instance_t *inst,
 void inotify_vnode_event(struct vnode *vn, const char *name, uint32_t mask)
 {
     if (!vn)
+        return;
+    if (__atomic_load_n(&g_inotify_watch_count, __ATOMIC_RELAXED) == 0)
         return;
 
     spin_lock(&g_inotify_lock);
@@ -324,13 +332,17 @@ static int inotify_ops_close(vfile_t *vf)
     spin_unlock(&g_inotify_lock);
 
     inotify_watch_t *w = inst->watches;
+    int dropped = 0;
     while (w) {
         inotify_watch_t *nw = w->next;
         if (w->vnode)
             vnode_put(w->vnode);
         kfree(w);
+        dropped++;
         w = nw;
     }
+    if (dropped)
+        __atomic_fetch_sub(&g_inotify_watch_count, dropped, __ATOMIC_RELAXED);
     kfree(inst);
     vf->priv = NULL;
     return 0;
@@ -427,6 +439,7 @@ static int fanotify_add_watch(inotify_instance_t *inst, struct vnode *vn,
     w->instance = inst;
     w->next = inst->watches;
     inst->watches = w;
+    __atomic_fetch_add(&g_inotify_watch_count, 1, __ATOMIC_RELAXED);
     int wd = w->wd;
     spin_unlock(&inst->lock);
     return wd;
@@ -480,12 +493,15 @@ int fanotify_mark(int gfd, unsigned flags, uint64_t mask, int dfd,
                 if (w->vnode)
                     vnode_put(w->vnode);
                 kfree(w);
-                removed = 1;
+                removed++;
             } else {
                 pp = &(*pp)->next;
             }
         }
         spin_unlock(&inst->lock);
+        if (removed)
+            __atomic_fetch_sub(&g_inotify_watch_count, removed,
+                               __ATOMIC_RELAXED);
         vnode_put(vn);
         return removed ? 0 : -ENOENT;
     }
@@ -546,6 +562,7 @@ int inotify_add_watch(int gfd, const char *path, uint32_t mask)
     w->instance = inst;
     w->next = inst->watches;
     inst->watches = w;
+    __atomic_fetch_add(&g_inotify_watch_count, 1, __ATOMIC_RELAXED);
     int wd = w->wd;
     spin_unlock(&inst->lock);
     return wd;
@@ -574,5 +591,6 @@ int inotify_rm_watch(int gfd, int wd)
     if (found->vnode)
         vnode_put(found->vnode);
     kfree(found);
+    __atomic_fetch_sub(&g_inotify_watch_count, 1, __ATOMIC_RELAXED);
     return 0;
 }
