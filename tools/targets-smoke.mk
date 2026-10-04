@@ -153,6 +153,9 @@ smoke-mm-stress:
 
 # Regression gate for the V8/Node.js hint-fallback fix: mmap with a
 # hint above USER_VA_LIMIT must fall back, not fail with ENOMEM.
+smoke-hyp-selftest:
+	$(PYTHON) tools/smoke.py smoke-hyp-selftest
+
 smoke-mmprobe:
 	$(PYTHON) tools/smoke.py smoke-mmprobe
 
