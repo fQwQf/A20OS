@@ -20,11 +20,38 @@
  * - Cross-CPU wakeup and IPI reschedule tests must prove that cpu_current_id(),
  *   runqueue selection, and current slot lookup agree for the CPU handling the
  *   interrupt.
+ *
+ * LOCKING (see docs/roadmap/lock-serialization-split.md §1.2):
+ * - The switching-out slot and the outgoing task's ownership release are
+ *   serialized by the per-CPU g_cpu_switch_out[cpu].lock. It is strictly
+ *   outside every task lock: g_cpu_switch_out[cpu] -> park_lock -> runq_lock.
+ * - The outgoing task's ->on_cpu / ->owner_cpu are park_lock-owned (INV-P1), so
+ *   the completion window holds exactly one task lock. The pending outgoing
+ *   task is completed before proc_set_current() replaces the slot, which is
+ *   what the old "complete the stale predecessor from inside proc_set_current"
+ *   callback used to do under the global proc_lock.
+ * - g_cpu_current[] stays a plain acquire/release publication point: only this
+ *   CPU writes its own slot.
  */
 static task_t *g_cpu_current[CONFIG_NR_CPUS];
 static task_t *g_cpu_switching_out[CONFIG_NR_CPUS];
+static spinlock_t g_cpu_switch_out[CONFIG_NR_CPUS];
 
-/* Caller holds proc_lock whenever a pending outgoing task can exist. */
+void proc_current_slots_init(void)
+{
+    for (unsigned cpu = 0; cpu < CONFIG_NR_CPUS; cpu++) {
+        spin_init(&g_cpu_switch_out[cpu]);
+        spin_set_debug(&g_cpu_switch_out[cpu], "switch_out", NULL);
+        g_cpu_current[cpu] = NULL;
+        g_cpu_switching_out[cpu] = NULL;
+    }
+}
+
+/*
+ * Release the CPU slot held by the outgoing task and publish a raced READY
+ * task to its runqueue.  Caller holds g_cpu_switch_out[cpu] and, once a
+ * pending outgoing task exists, that task's park_lock.
+ */
 static int proc_switch_complete_locked(unsigned cpu)
 {
     task_t *old =
@@ -48,7 +75,9 @@ static int proc_switch_complete_locked(unsigned cpu)
      * CPU. It becomes queueable only after execution has continued on the
      * replacement stack.
      */
-    if (old->state == PROC_READY && !old->dispatching && !old->on_rq) {
+    if (old->state == PROC_READY &&
+        !__atomic_load_n(&old->dispatching, __ATOMIC_RELAXED) &&
+        !__atomic_load_n(&old->on_rq, __ATOMIC_RELAXED)) {
         proc_runq_enqueue_locked(old);
         if (old->on_rq && proc_sched_should_preempt_locked(old, cpu))
             proc_sched_request_cpu(cpu, 1);
@@ -60,6 +89,33 @@ static int proc_switch_complete_locked(unsigned cpu)
     /* Drop the CPU slot reference after the outgoing stack is inactive. */
     proc_put(old);
     return zombie;
+}
+
+/*
+ * Finish a pending outgoing task left behind by a previous switch on this CPU.
+ * It is the A' half of the split: the outgoing work happens in its own
+ * g_cpu_switch_out -> park_lock window, before the new current is published,
+ * instead of as a callback under one global lock.
+ */
+void proc_switch_out_finish_pending(void)
+{
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+
+    uint64_t sf = spin_lock_irqsave(&g_cpu_switch_out[cpu]);
+    task_t *pending =
+        __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
+    if (!pending) {
+        spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
+        return;
+    }
+    uint64_t pf = spin_lock_irqsave(&pending->park_lock);
+    int reap = proc_switch_complete_locked(cpu);
+    spin_unlock_irqrestore(&pending->park_lock, pf);
+    spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
+    if (reap)
+        proc_sched_note_zombie();
 }
 
 task_t *proc_current(void)
@@ -125,14 +181,12 @@ task_t *proc_set_current(task_t *next)
               next ? next->owner_cpu : PROC_CPU_NONE);
     /*
      * Some architectures restore interrupt state in __switch before returning
-     * to the C completion hook. If that incoming task is immediately
-     * preempted, finish the already-inactive predecessor before replacing the
-     * single switching_out slot.
+     * to the C completion hook.  If that incoming task is immediately
+     * preempted, the stale predecessor is finished by the caller through
+     * proc_switch_out_finish_pending() before this slot is replaced -- doing it
+     * here would nest a second task lock inside the caller's next->park_lock
+     * window with no defined order between the two.
      */
-    if (__atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE) &&
-        proc_switch_complete_locked(cpu))
-        proc_sched_note_zombie();
-
     task_t *old = g_cpu_current[cpu];
     /* Publish the outgoing task before replacing current. Reapers must keep
      * its task storage and kernel stack alive until the switch completes. */
@@ -144,10 +198,20 @@ task_t *proc_set_current(task_t *next)
 void proc_switch_complete(void)
 {
     unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t sf = spin_lock_irqsave(&g_cpu_switch_out[cpu]);
+    task_t *old =
+        __atomic_load_n(&g_cpu_switching_out[cpu], __ATOMIC_ACQUIRE);
+    if (!old) {
+        spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
+        return;
+    }
+    uint64_t pf = spin_lock_irqsave(&old->park_lock);
     int reap = proc_switch_complete_locked(cpu);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&old->park_lock, pf);
+    spin_unlock_irqrestore(&g_cpu_switch_out[cpu], sf);
     if (reap)
         proc_sched_note_zombie();
 }

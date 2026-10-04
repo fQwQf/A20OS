@@ -49,7 +49,7 @@ static unsigned long wait_timer_stale_expirations;
 /*
  * Per-task SIGALRM (ITIMER_REAL) deadline min-heap.  Protected by
  * g_alarm_timer_lock; entries hold a task reference released on remove.
- * proc_wake_child_waiters_locked-style global scans are avoided: the heap
+ * proc_wake_child_waiters-style global scans are avoided: the heap
  * root is the next alarm deadline and expiry pops only due entries.
  */
 typedef struct alarm_timer {

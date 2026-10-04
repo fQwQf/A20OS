@@ -1419,13 +1419,13 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
                  * directory entries unusable: /proc/<listed-id> has to
                  * resolve to the same task, which means it has to be the
                  * namespace-local one. */
-                uint64_t flags = spin_lock_irqsave(&proc_lock);
+                uint64_t flags = spin_lock_irqsave(&tasklist_lock);
                 pid_namespace_t *ns = pidns_current();
                 int cur_idx = 0;
                 task_t *t = NULL;
                 for (task_t *it = proc_first_task_locked(); it;
                      it = proc_next_task_locked(it)) {
-                    if (it->state == PROC_UNUSED || it->pid <= 0)
+                    if (proc_task_state_get(it) == PROC_UNUSED || it->pid <= 0)
                         continue;
                     if (!pidns_visible(ns, it))
                         continue;
@@ -1437,7 +1437,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
                     snprintf(pidbuf, sizeof(pidbuf), "%d", shown);
                     name = pidbuf;
                 }
-                spin_unlock_irqrestore(&proc_lock, flags);
+                spin_unlock_irqrestore(&tasklist_lock, flags);
             }
         } else {
             name = entries[idx];

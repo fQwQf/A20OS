@@ -12,8 +12,8 @@
  * applied to PSI "io").
  *
  * The runnable count comes from the per-CPU runqueue tallies, so the tick does
- * not hold proc_lock and does not have to agree with itself across CPUs.  The
- * live-task census that /proc/loadavg also prints is taken when it is read,
+ * not walk the task list and does not have to agree with itself across CPUs.
+ * The live-task census that /proc/loadavg also prints is taken when it is read,
  * not on every tick: it is display-only, so paying for it in the tick would
  * charge every CPU a full list walk 100 times a second for a value that a
  * reader looks at occasionally.
@@ -77,20 +77,21 @@ void proc_loadavg_tick(void)
     }
 }
 
-/* Count live tasks and the highest live pid under proc_lock. */
+/* Count live tasks and the highest live pid under tasklist_lock; each task's
+ * ->state is sampled under its own park_lock (E1/E2). */
 static void loadavg_task_census(unsigned *total, int *max_pid)
 {
     unsigned n = 0;
     int hi = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
         n++;
         if (t->pid > hi)
             hi = t->pid;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     if (total) *total = n;
     if (max_pid) *max_pid = hi;
 }

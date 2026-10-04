@@ -763,8 +763,9 @@ int mm_pt_provision_anon(struct mm_struct *mm, vaddr_t start, vaddr_t end,
 int mm_pt_audit_addrspace(struct mm_struct *mm, int check_vma,
                           mm_pt_audit_report_t *out);
 
-/* Audit every live address space, aggregating into *out.  Callers must not
- * hold proc_lock. */
+/* Audit every live address space, aggregating into *out.  Takes tasklist_lock
+ * internally and pins each address space with mm_get() under the owning task's
+ * park_lock; callers must not hold tasklist_lock themselves. */
 int mm_pt_audit_all(mm_pt_audit_report_t *out);
 
 #endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */

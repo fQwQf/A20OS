@@ -122,8 +122,9 @@ void pty_init(void) {
 /*
  * PTY_BUF_SIZE is above SLAB_MAX_OBJ, so every ring buffer takes the BUDDY
  * path, and the plain kmalloc below is the reclaiming one: under memory
- * pressure pfa_alloc_flags() calls oom_try_reclaim(), which takes proc_lock
- * and mm->lock, writes swap pages to disk, waits on remote TLB IPIs and can
+ * pressure pfa_alloc_flags() calls oom_try_reclaim(), which takes tasklist_lock,
+ * a task park_lock and mm->lock, writes swap pages to disk, waits on remote TLB
+ * IPIs and can
  * kerr()/proc_force_exit() a task.  None of that may run with interrupts
  * disabled, so the buffers are obtained with the allocation lock released and
  * only the reservation and the publication are done under it.

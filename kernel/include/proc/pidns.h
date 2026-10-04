@@ -102,7 +102,7 @@ void                 pidns_release_task(struct task_t *t);
  * namespace beneath it. */
 int                  pidns_visible(pid_namespace_t *ns, struct task_t *target);
 /* Iterate the tasks visible from @ns -- a member of @ns or of any namespace
- * below it -- by walking the global task list under proc_lock.  Seeding with
+ * below it -- by walking the global task list under tasklist_lock.  Seeding with
  * *iter == NULL starts the walk; each call returns the next task with a
  * reference taken, or NULL when exhausted.  A namespace-local member list
  * would be faster, but keeping the walk on the one list every other subsystem

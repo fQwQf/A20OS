@@ -74,8 +74,9 @@ int64_t sys_a20_registry_claim(const a20_syscall_args_t *args)
     struct a20_ht_internal *ht = task_get_a20_ht(cur);
     if (!ht) return -A20_ERR_BAD_HANDLE;
 
-    /* Ownership CAS without holding the registry lock across proc_lock:
-     * the lock is leaf-level, the exit path clears ownership separately. */
+    /* Ownership CAS without holding the registry lock across the scheduler
+     * locks: the lock is leaf-level, the exit path clears ownership
+     * separately. */
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&g_registry_lock);
         int owner = g_registry_owner_pid;

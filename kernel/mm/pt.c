@@ -2773,16 +2773,23 @@ int mm_pt_audit_all(mm_pt_audit_report_t *out)
     mm_pt_audit_report_t *rep = out ? out : &local;
     memset(rep, 0, sizeof(*rep));
 
-    uint64_t pf = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the global list; the address space is pinned
+     * with mm_get() under the owning task's park_lock so a concurrent exit
+     * cannot drop the last reference mid-audit.  Order stays
+     * tasklist_lock -> park_lock -> mm->lock. */
+    uint64_t pf = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED || !t->mm)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
-        mm_struct_t *mm = t->mm;
+        mm_struct_t *mm = proc_task_get_mm(t);
+        if (!mm)
+            continue;
         spin_lock(&mm->lock);
         mm_pt_audit_addrspace(mm, 1, rep);
         spin_unlock(&mm->lock);
+        mm_destroy(mm);   /* drop the audit's reference */
     }
-    spin_unlock_irqrestore(&proc_lock, pf);
+    spin_unlock_irqrestore(&tasklist_lock, pf);
 
     return mm_pt_audit_errors(rep) ? -EFAULT : 0;
 }

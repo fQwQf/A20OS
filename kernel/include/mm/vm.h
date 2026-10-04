@@ -258,8 +258,9 @@ typedef struct mm_pt_retire {
  *   address-space readers need either mm->lock, or a held reference to the
  *   mapping (mm_seg_get) for as long as they use it.
  * - RSS accounting (mm_struct_t.rss_atomic) is the one mapping statistic that
- *   does NOT require mm->lock: the OOM victim selector reads it under
- *   proc_lock, which does not exclude the fault/COW/unmap writers. Use the
+ *   does NOT require mm->lock: the OOM victim selector reads it while holding
+ *   the victim task's park_lock, which does not exclude the fault/COW/unmap
+ *   writers. Use the
  *   mm_rss_* helpers, never a direct field access. The saturating subtract is
  *   a compare-exchange loop, not fetch_sub plus a clamp.
  * - Page-table writers must publish the new PTE before dropping the object/page
@@ -342,7 +343,8 @@ typedef struct mm_struct {
     vaddr_t    stack_bottom;
     size_t     total_vm;
     /* Resident set size in pages.  Atomic: the OOM victim selector reads it
-     * under proc_lock (kernel/mm/cg_mem.c) while fault/COW/unmap paths update
+     * under the victim task's park_lock (kernel/mm/cg_mem.c) while
+     * fault/COW/unmap paths update
      * it under mm->lock, and once the status fault path leaves mm->lock the
      * two locks stop excluding each other.  The field name says "atomic" so
      * that a plain `->rss` access cannot compile -- see mm_rss_* below. */
@@ -484,8 +486,9 @@ static inline void mm_rss_set(mm_struct_t *mm, size_t v)
         __atomic_store_n(&mm->rss_atomic, v, __ATOMIC_RELEASE);
 }
 
-/* Acquire: the OOM victim selector reads this under proc_lock while other
- * state it weighs alongside rss is published under mm->lock. */
+/* Acquire: the OOM victim selector reads this under the victim task's
+ * park_lock while other state it weighs alongside rss is published under
+ * mm->lock. */
 static inline size_t mm_rss_get(mm_struct_t *mm)
 {
     return mm ? __atomic_load_n(&mm->rss_atomic, __ATOMIC_ACQUIRE) : 0;

@@ -240,9 +240,12 @@ task_t *pidns_find_get(pid_namespace_t *ns, int pid)
         return proc_find_get(pid);
 
     int level = ns->level;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E1/E2: tasklist_lock walks the global list; each candidate's ->state is
+     * sampled under its own park_lock.  The namespace chain and ->ns_pid[] are
+     * fixed once the task is linked, so they need no lock. */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
         if (t->pid_ns_level < level)
             continue;
@@ -258,13 +261,13 @@ task_t *pidns_find_get(pid_namespace_t *ns, int pid)
         if (cur != ns)
             continue;
         if (!proc_get(t)) {
-            spin_unlock_irqrestore(&proc_lock, flags);
+            spin_unlock_irqrestore(&tasklist_lock, flags);
             return NULL;
         }
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
         return t;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return NULL;
 }
 
@@ -272,10 +275,10 @@ task_t *pidns_next_visible(pid_namespace_t *ns, task_t **iter)
 {
     if (!ns || !iter)
         return NULL;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     task_t *t = *iter ? proc_next_task_locked(*iter) : proc_first_task_locked();
     while (t) {
-        if (t->state == PROC_UNUSED || !pidns_visible(ns, t)) {
+        if (proc_task_state_get(t) == PROC_UNUSED || !pidns_visible(ns, t)) {
             t = proc_next_task_locked(t);
             continue;
         }
@@ -284,10 +287,10 @@ task_t *pidns_next_visible(pid_namespace_t *ns, task_t **iter)
             continue;
         }
         *iter = t;
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
         return t;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return NULL;
 }
 
@@ -296,14 +299,14 @@ int pidns_nr_tasks(pid_namespace_t *ns)
     if (!ns)
         return 0;
     int n = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
         if (pidns_visible(ns, t))
             n++;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return n;
 }
 

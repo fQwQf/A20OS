@@ -152,11 +152,17 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
     if (__atomic_load_n(&vn->shared_file_maps, __ATOMIC_ACQUIRE) == 0)
         return;
 
-    uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the global list; the address space is pinned
+     * with mm_get() under the owning task's park_lock so a concurrent exit
+     * cannot drop the last reference mid-scan.  Order stays
+     * tasklist_lock -> park_lock -> mm->lock. */
+    uint64_t proc_flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED || !t->mm)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
-        mm_struct_t *mm = t->mm;
+        mm_struct_t *mm = proc_task_get_mm(t);
+        if (!mm)
+            continue;
         spin_lock(&mm->lock);
         for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             if (!(vma->vm_flags & VM_SHARED) || !(vma->vm_flags & VM_FILE))
@@ -184,8 +190,9 @@ void mm_sync_shared_dirty_for_vnode(vnode_t *vn)
             }
         }
         spin_unlock(&mm->lock);
+        mm_destroy(mm);   /* drop the scan's reference */
     }
-    spin_unlock_irqrestore(&proc_lock, proc_flags);
+    spin_unlock_irqrestore(&tasklist_lock, proc_flags);
 }
 
 vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,

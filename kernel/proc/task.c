@@ -428,9 +428,11 @@ mm_struct_t *proc_task_get_mm(task_t *t)
 {
     if (!t)
         return NULL;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* The ->mm pointer is published together with the task's scheduling state,
+     * so it is read under the same park_lock. */
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     mm_struct_t *mm = mm_get(t->mm);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
     return mm;
 }
 
@@ -438,13 +440,22 @@ int proc_task_may_access(const task_t *caller, const task_t *target)
 {
     if (!caller || !target)
         return 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* Credentials and the thread-group id are per-task state, so the two-task
+     * INV-P3 ordering applies: caller and target are locked in ascending
+     * task-pointer order rather than in argument order.  Acquiring a spinlock
+     * needs a non-const park_lock, so the const qualification of this
+     * predicate's parameters is dropped for the lock/unlock pair only; the
+     * body below still reads both tasks and never writes them. */
+    task_t *a = (task_t *)caller;
+    task_t *b = (task_t *)target;
+    uint64_t cf = 0, tf = 0;
+    proc_lock_two_tasks(a, b, &cf, &tf);
     int allowed = caller->tgid == target->tgid ||
         proc_has_cap(caller, CAP_SYS_PTRACE) ||
         (caller->cred.fsuid == target->cred.uid &&
          caller->cred.fsuid == target->cred.euid &&
          caller->cred.fsuid == target->cred.suid);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    proc_unlock_two_tasks(a, b, cf, tf);
     return allowed;
 }
 
@@ -453,10 +464,15 @@ void proc_destroy_task(task_t *t)
     if (!t)
         return;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* D: the UNUSED transition, the timer cancellation and the runqueue
+     * removal are one park_lock critical section (park_lock -> timer heap /
+     * runq_lock); the list unlink nests tasklist_lock outside it. */
+    uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     if (t->destroy_started) {
         proc_lifetime_note_duplicate_destroy();
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, list_flags);
         return;
     }
     t->destroy_started = 1;
@@ -464,8 +480,9 @@ void proc_destroy_task(task_t *t)
     proc_wait_timer_cancel_locked(t, t->wait_seq);
     proc_alarm_cancel(t);
     proc_runq_remove_locked(t);
+    spin_unlock_irqrestore(&t->park_lock, flags);
     proc_unlink_task_locked(t);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, list_flags);
 
     proc_pid_unregister(t);
     /* Drop the allocation/global-list lifetime reference. */

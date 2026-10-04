@@ -77,28 +77,89 @@ static int uart_signal_all_user(int signum, int spare_shells)
     return count;
 }
 
+/*
+ * Snapshot-then-print, deliberately (design E3).  Holding a global lock across
+ * one kdebug line per task is what makes this dump unsafe from the top half:
+ * see the CTRL_C_CONTEXT_SPLIT note below.  So the lock is taken only to copy
+ * the fields out, and every kdebug happens after the release.
+ *
+ * The snapshot is a file-scope array rather than a stack array because this
+ * runs on the uart reader task, whose kernel stack is 512-2048 bytes on the
+ * MCU profiles and the entries are far larger than that.  Two CPUs can
+ * interleave into it if they dump at the same time; that is acceptable for a
+ * hang diagnostic and is not worth a second global lock.
+ */
+enum { UART_DUMP_SNAP_MAX = 32 };
+struct uart_dump_snap {
+    int pid, ppid, pgid, sid;
+    int state;
+    unsigned long wake_time;
+    int on_rq;
+    char name[16];
+};
+static struct uart_dump_snap g_uart_dump_snap[UART_DUMP_SNAP_MAX];
+
 static void uart_dump_tasks(void)
 {
-    /* LOCK_ORDER: proc_lock acquired while not holding rx_lock (task dump helper). */
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    kdebug("[TTYDBG] task dump begin\n");
+    /* LOCK_ORDER: tasklist_lock acquired while not holding rx_lock (task dump
+     * helper); it is released before any kdebug. */
+    int n = 0;
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
+        uint64_t tf = spin_lock_irqsave(&t->park_lock);
+        int state = t->state;
+        if (state == PROC_UNUSED) {
+            spin_unlock_irqrestore(&t->park_lock, tf);
             continue;
+        }
+        if (n < UART_DUMP_SNAP_MAX) {
+            /* Fill the array element in place rather than through a
+             * 'struct uart_dump_snap *e'.  Same stores, but the left-hand side
+             * is then a '.' member of the snapshot array instead of '->': the
+             * gate check-task-state-boundary forbids '->(on_rq|...) =' outside
+             * the park-lock owning files because that shape is what a lockless
+             * task-field write looks like, and a copy out of a task into a
+             * non-task struct must not be able to be read as one.  Keeping the
+             * array as the destination also keeps the zero-stack discipline
+             * this dump was written for (see the file-scope note above). */
+            g_uart_dump_snap[n].pid = t->pid;
+            g_uart_dump_snap[n].ppid = t->ppid;
+            g_uart_dump_snap[n].pgid = t->pgid;
+            g_uart_dump_snap[n].sid = t->sid;
+            g_uart_dump_snap[n].state = state;
+            g_uart_dump_snap[n].wake_time = (unsigned long)t->wake_time;
+            g_uart_dump_snap[n].on_rq = __atomic_load_n(&t->on_rq,
+                                                        __ATOMIC_RELAXED);
+            strncpy(g_uart_dump_snap[n].name, t->name,
+                    sizeof(g_uart_dump_snap[n].name) - 1);
+            g_uart_dump_snap[n].name[sizeof(g_uart_dump_snap[n].name) - 1] =
+                '\0';
+            n++;
+        }
+        spin_unlock_irqrestore(&t->park_lock, tf);
+    }
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+
+    kdebug("[TTYDBG] task dump begin\n");
+    for (int i = 0; i < n; i++) {
+        const struct uart_dump_snap *e = &g_uart_dump_snap[i];
         const char *state = "?";
-        switch (t->state) {
+        switch (e->state) {
         case PROC_READY:   state = "READY"; break;
         case PROC_RUNNING: state = "RUN"; break;
         case PROC_BLOCKED: state = "BLOCK"; break;
         case PROC_ZOMBIE:  state = "ZOMB"; break;
+        case PROC_STOPPED: state = "STOP"; break;
         default: break;
         }
         kdebug("[TTYDBG] pid=%d ppid=%d pgid=%d sid=%d state=%s wake=%lu onrq=%d name=%s\n",
-               t->pid, t->ppid, t->pgid, t->sid, state,
-               (unsigned long)t->wake_time, t->on_rq, t->name);
+               e->pid, e->ppid, e->pgid, e->sid, state,
+               e->wake_time, e->on_rq, e->name);
     }
+    if (n == UART_DUMP_SNAP_MAX)
+        kdebug("[TTYDBG] task dump truncated at %d entries\n",
+               UART_DUMP_SNAP_MAX);
     kdebug("[TTYDBG] task dump end\n");
-    spin_unlock_irqrestore(&proc_lock, flags);
 }
 
 /*
@@ -109,10 +170,11 @@ static void uart_dump_tasks(void)
  * and signal delivery from an interrupt is what that path is for.
  *
  * The task-table dump is the part that cannot happen here.  uart_dump_tasks()
- * takes proc_lock with interrupts disabled and then writes one kdebug line per
- * task out of the same UART whose interrupt is running, so a dump started from
- * the top half re-enters the console under its own IRQ and can livelock the
- * console behind the very lock it is printing.  The top half only raises the
+ * holds tasklist_lock with interrupts disabled while it copies the task table
+ * out, then writes one kdebug line per entry out of the same UART whose
+ * interrupt is running, so a dump started from the top half re-enters the
+ * console under its own IRQ.  The snapshot-then-print shape is what keeps the
+ * console writes off the lock: no kdebug happens while tasklist_lock is held.  The top half only raises the
  * flag and wakes the reader; uart_getc() is this driver's only task-context
  * entry point and does the dump there.
  */
