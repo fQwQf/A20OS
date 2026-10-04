@@ -1,14 +1,33 @@
 # A20OS Native ABI：内存子系统设计
 
-> 内容按 2026-08 的 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c` 和 `abi/native/vmar.c` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
+> 内容按 `sys_core.c`、`sys_native_mm.c`、`kernel/mm/vmo.c`、`abi/native/vmar.c` 与
+> `kernel/include/mm/vm.h` 核对。当前 VMAR 不是独立层级对象；部分常量和 flag 仍只是保留接口。
+>
+> **2026-10-04 修订**：核心内存模型已完成单级化迁移（roadmap
+> `docs/roadmap/single-level-mm-model.md` §13.18）。原先并存的两种映射记录
+> ——地址空间区间 `vm_area_t` 与页表节点条目命名的 `mm_seg_t`——已合并为**一条**
+> `struct mm_seg`。本文先前引用的 `vm_area_t`、`file_offset`/`vmo_offset` 两个字段、
+> `base_va`/`len` 拼写均已不存在，下文按现状重写。
 
 ---
 
 ## 1. 内存模型概述
 
-Native ABI 在核心 VMA 之上增加可传递的 VMO 抽象，但当前尚未把所有映射统一为 VMO。
+核心地址空间里，一个映射只有**一条记录** `struct mm_seg`（`kernel/include/mm/vm.h`）：
+它既在 `mm->mmap` 链表上、表示地址空间区间，又被页表节点条目按名字引用。**不存在
+第二份映射表示**——这正是本次迁移删除的东西。此前 `vm_area_t`（区间）与 `mm_seg_t`
+（后端对象描述符）是两个结构体，必须逐字保持一致，还带一个 `->seg` 回指。
 
-VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory Address Region) 当前只是 Native syscall 对核心 `vm_area_t`/`mm_mmap_*` 的称呼和薄包装，不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` VMA。除此之外还有普通 VMA：`vm_alloc` 建立普通匿名 VMA，FILE/DEVICE source 建立 `VM_FILE` VMA，二者都不是 MEMORY-handle-backed VMO。
+每页的状态由挂在覆盖该页的页表页上的元数据承载，是页状态的**唯一权威**；页表条目
+与映射记录只提供区间与后端对象，**不是**页状态的副本。查找一次映射用
+`mm_seg_find()`，没有第二种查询。
+
+VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，独立于地址空间；
+`vm_map(source=NULL)` 也会创建一个无返回 handle 的匿名 VMO。VMAR (Virtual Memory
+Address Region) 当前只是 Native syscall 对核心 `mm_seg_t`/`mm_mmap_*` 的称呼和薄包装，
+不存在独立 VMAR handle 或层级树；VMO 通过 `vm_map` 建立 `VM_VMO` 映射记录。除此之外
+还有普通映射：`vm_alloc` 建立普通匿名记录，FILE/DEVICE source 建立 `VM_FILE` 记录，
+二者都不是 MEMORY-handle-backed VMO。
 
 ```text
 进程地址空间 (VMAR)
@@ -16,14 +35,14 @@ VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，�
 │ 0x0000_0000_0000                                 │
 │  ... (不可映射)                                   │
 │ 0x0001_0000_0000  ┌──────────────┐               │
-│                    │ VMA: code    │ ← ELF/file    │
+│                    │ 映射: code   │ ← ELF/file    │
 │ 0x0001_0001_0000  └──────────────┘               │
 │                    ┌──────────────┐               │
-│                    │ VMA: heap    │ ← anonymous   │
+│                    │ 映射: heap   │ ← anonymous   │
 │                    └──────────────┘               │
 │  ...                                              │
 │ 0x7fff_0000_0000  ┌──────────────┐               │
-│                    │ VMA: shared  │ ← VMO handle  │
+│                    │ 映射: shared │ ← VMO handle  │
 │ 0x8000_0000_0000  └──────────────┘               │
 │  ... (内核空间)                                   │
 └──────────────────────────────────────────────────┘
@@ -33,9 +52,9 @@ VMO (Virtual Memory Object) 是可由 MEMORY handle 引用的物理页容器，�
 
 | POSIX mmap | Native ABI |
 |-----------|-----------|
-| 匿名映射没有独立可传递对象 | `vm_alloc` 同样建立普通匿名 VMA；需要共享时显式创建 VMO handle |
+| 匿名映射没有独立可传递对象 | `vm_alloc` 同样建立普通匿名映射记录；需要共享时显式创建 VMO handle |
 | 共享内存通常通过 SysV/POSIX shm 或共享文件 | Native 共享路径是传递 MEMORY handle，再由接收方 `vm_map` |
-| 保护位与映射绑定 | 当前保护位也保存在 VMA；source handle rights 只收紧首次 `vm_map` |
+| 保护位与映射绑定 | 当前保护位也保存在映射记录；source handle rights 只收紧首次 `vm_map` |
 | `mremap`、`madvise`、`msync` 分别操作映射 | Native 提供对应操作，但 `vm_remap`/`vm_advise`/`vm_flush` 都只有受限语义 |
 
 ---
@@ -83,23 +102,26 @@ VMO 的核心属性可以形式化为四元组 `(pages, size, type, physical lay
 
 ### 3.1 定义
 
-层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入 VMA 的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
+层级 VMAR（2026-08 落地）的核心对象是 `vmar_t`（`kernel/mm/vmar.c`、`include/mm/vmar.h`）。它维护一棵保留区间树，子节点区间必须落在父节点内且与兄弟不相交。能力天花板（`VMAR_CAN_MAP_*`）沿树单调收窄；经 VMAR 路由的映射把天花板写入映射记录的 `vmar_cap`，使后续 `vm_protect` 不越过当初授权范围。syscall `A20_SYS_vm_create_vmar (0x030b)` 创建根（parent=NULL）或子节点并发布 `A20_OBJ_VMAR` 句柄，`vm_map` args 按 E-APPEND 追加 `vmar` 字段选择路由，含 `SPECIFIC` 定点检查与越界 NO_SPACE 回滚。关闭句柄仅减引用：子节点持有父引用，树随最后一个引用消亡。
 
-Native VMAR 操作的地址空间语义仍直接作用于核心 `vm_area_t`，与后端相关的字段可简化为：
+Native VMAR 操作的地址空间语义仍直接作用于核心映射记录，与后端相关的字段可简化为：
 
 ```c
-typedef struct vm_area {
-    vaddr_t          start;
-    vaddr_t          end;
-    uint64_t         vm_flags;
-    pte_t            pte_flags;
-    int              file_fd;           /* VM_FILE 后端 */
-    uint64_t         file_offset;
-    struct vmo      *vmo;               /* 仅 VM_VMO 后端非 NULL */
-    uint64_t         vmo_offset;
-    /* 另有 vnode、链表和 NOMMU 字段 */
-} vm_area_t;
+struct mm_seg {
+    vaddr_t      start, end;    /* 区间，左闭右开 */
+    uint64_t     vm_flags;      /* VM_* 位：anon / file / vmo / shared / 保护位 */
+    pte_t        pte_flags;     /* 架构叶子保护位（不能由 vm_flags 完全推导，故显式携带）*/
+    uint64_t     backing_offset;/* 后端对象内的偏移：VM_FILE 对 vnode，VM_VMO 对 vmo */
+    int          file_fd;       /* VM_FILE 后端 */
+    struct vmo  *vmo;           /* 仅 VM_VMO 后端非 NULL */
+    /* 另有 magic、共用 refcount、vmar_cap、sysv_shmid、链表指针等 */
+};
 ```
+
+原先这里是 `vm_area_t`，并且 `file_offset` 与 `vmo_offset` 是两个字段。二者从来不会
+同时有效（`mmap.c` 已按 `VM_VMO` 二选一），所以现在是一个 `backing_offset`。
+记录由 `mm_seg_new()` 构造，**必须**走这个构造函数：`magic` 与初始 refcount 在那里
+设置，漏掉会让后续 `mm_seg_put()` 把一条从未初始化的记录当作已释放对象而 panic。
 
 ### 3.2 VMAR 三元组
 
@@ -135,7 +157,7 @@ int64_t vm_alloc(a20_vm_alloc_args_t *args);
 
 语义：
 1. 校验版本化参数与非零长度
-2. 调用 `proc_mmap(..., MAP_ANONYMOUS, -1, 0)` 建立普通匿名 VMA
+2. 调用 `proc_mmap(..., MAP_ANONYMOUS, -1, 0)` 建立普通匿名映射记录
 3. 返回映射地址；不会返回 VMO handle
 
 错误条件有三类。`NO_MEMORY` 表示核心匿名 mmap 失败；`INVALID_ARGUMENT` 表示版本化结构校验失败或 `length == 0`；`FAULT` 表示参数结构不可访问，或结果复制回用户态失败。
@@ -154,7 +176,7 @@ int64_t vm_map(a20_vm_map_args_t *args);
 3. source 是 `MEMORY`：复用已有 VMO，验证 `[offset, offset+length)` 不越界；`offset` 需页对齐
 4. source 是 `FILE`/`DEVICE`：走核心 `mm_mmap_file`，经 page cache **按需分页**填充（不再 eager-load 到匿名 VMO）；`offset` 需页对齐
 5. 计算 READ/WRITE 的 `prot_eff` 与 handle rights 交集；当前 EXEC 位直接透传，没有检查 source handle 的 `A20_RIGHT_EXEC`
-6. MEMORY source 创建 `VM_VMO` VMA并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有 VMA并持 fd 引用
+6. MEMORY source 创建 `VM_VMO` 映射记录并持 VMO 引用；FILE/DEVICE source 创建 `VM_FILE` 私有映射记录并持 fd 引用
 
 与 POSIX mmap 的关键区别在于，非匿名映射的 source 是 handle。READ/WRITE rights 会收紧对应保护位；EXEC rights 当前未在该路径强制，属于实现与目标 rights 模型之间的已知缺口。
 
@@ -167,9 +189,9 @@ int64_t vm_unmap(uint64_t addr, uint64_t length);
 ```
 
 语义：
-1. 直接调用核心 `proc_munmap` 解除指定范围内的普通匿名、文件或 VMO VMA
-2. 核心 MM 拆分/移除 VMA，并执行所需 TLB invalidation
-3. 仅当移除的是 `VM_VMO` VMA 时才释放该 VMA 持有的 VMO 引用；最后一个 VMO 引用释放 canonical frames
+1. 直接调用核心 `proc_munmap` 解除指定范围内的普通匿名、文件或 VMO 映射记录
+2. 核心 MM 拆分/移除映射记录，并执行所需 TLB invalidation
+3. 仅当移除的是 `VM_VMO` 映射记录时才释放该映射记录持有的 VMO 引用；最后一个 VMO 引用释放 canonical frames
 
 ### 4.4 vm_protect — 修改保护
 
@@ -207,7 +229,7 @@ int64_t vm_flush(uint64_t addr, uint64_t length, uint32_t flags);
 | `A20_FLUSH_INVALIDATE` | 使缓存无效 |
 | `A20_FLUSH_SYNC` | 等待写回完成 |
 
-当前实现先验证地址范围均有 VMA；`SYNC` 调用全局 `vfs_sync()`，`INVALIDATE` 只执行本地 `arch_tlb_flush()`，`CLEAN` 单独使用时是 no-op。它没有按给定 VMA 范围执行脏页写回或 page-cache invalidation，多个 flag 组合也因顺序返回而不是完整组合语义。
+当前实现先验证地址范围均有映射记录；`SYNC` 调用全局 `vfs_sync()`，`INVALIDATE` 只执行本地 `arch_tlb_flush()`，`CLEAN` 单独使用时是 no-op。它没有按给定映射记录的范围执行脏页写回或 page-cache invalidation，多个 flag 组合也因顺序返回而不是完整组合语义。
 
 ---
 
@@ -222,7 +244,7 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 [读写 addr_A]       ← canonical VMO frames → [读写 addr_B]
 ```
 
-权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。但当前 `vm_protect` 不重新检查原 handle rights，仍可能把该 VMA 放宽为可写，这是尚未收口的权限缺口。
+权限传递上，`vm_share` 的 `rights` 参数限制接收方 handle 权限：只有 READ 时，首次 `vm_map` 的 WRITE 会被清除。但当前 `vm_protect` 不重新检查原 handle rights，仍可能把该映射记录放宽为可写，这是尚未收口的权限缺口。
 
 ---
 
@@ -231,24 +253,25 @@ vm_share(vmo_A, task_B, rights) ─────────→ vmo_B
 ### 6.1 映射到现有 mm_struct
 
 ```c
-// Native VMAR syscall 是 mm_struct/vm_area 操作的薄包装。
-// 普通匿名映射: vm_area -> anonymous frames
-// FILE/DEVICE source: vm_area -> vm_file/page cache
-// MEMORY source: vm_area -> vmo (VM_VMO)
-// 三者共享核心页表、fault 和 TLB invalidation 机制。
+// Native VMAR syscall 是 mm_struct/映射记录（mm_seg_t）操作的薄包装。
+// 普通匿名映射: mm_seg -> anonymous frames
+// FILE/DEVICE source: mm_seg -> vm_file/page cache
+// MEMORY source: mm_seg -> vmo (VM_VMO)
+// 三者共享核心页表、fault 和 TLB invalidation 机制，且共用同一条记录。
 ```
 
 ### 6.2 缺页处理
 
-1. CPU 触发 page fault，内核查找对应 `vm_area_t`
-2. `VM_VMO` VMA 从 VMO 的 `pages[]` 获取或首次物化 canonical frame
-3. `VM_FILE` VMA 通过 vnode/page cache 填充；当前不会创建 `VMO_PAGED`
-4. 普通匿名 VMA 走核心匿名 fault/COW 路径
+1. CPU 触发 page fault。分派先读**该页的每页元数据**（`Status` 字节）与页表节点条目
+   命名的记录；`mm_seg_find()` 只在需要区间策略时按地址查一次链表。
+2. `VM_VMO` 映射从 VMO 的 `pages[]` 获取或首次物化 canonical frame
+3. `VM_FILE` 映射通过 vnode/page cache 填充；当前不会创建 `VMO_PAGED`
+4. 普通匿名映射走核心匿名 fault/COW 路径
 5. 更新页表项并返回用户态
 
 ### 6.3 fork 与 VMO 共享
 
-`handle_dup(VMO_handle)` 只创建指向同一 VMO 的新 handle，不提供 COW 选项。`VM_VMO` VMA 在 fork 后继续映射 VMO 持有的 canonical frames，并按共享映射处理；普通匿名私有 VMA 才走核心 fork COW 路径。
+`handle_dup(VMO_handle)` 只创建指向同一 VMO 的新 handle，不提供 COW 选项。`VM_VMO` 映射记录在 fork 后继续映射 VMO 持有的 canonical frames，并按共享映射处理；普通匿名私有映射记录才走核心 fork COW 路径。
 
 ---
 

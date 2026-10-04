@@ -10,21 +10,21 @@
  */
 
 int mm_range_overlaps(mm_struct_t *mm, vaddr_t start, vaddr_t len,
-                      vm_area_t *ignore);
+                      mm_seg_t *ignore);
 
-void vma_release_file(vm_area_t *vma);
-void vma_release_ipc(vm_area_t *vma);
-void vma_release(vm_area_t *vma);
-int  vma_ref_file(vm_area_t *vma);
-int  vma_ref_fork(vm_area_t *vma);
-int  vma_ref_aux(vm_area_t *vma);
-void mm_vma_index_invalidate(mm_struct_t *mm);
-vm_area_t *vma_split(mm_struct_t *mm, vm_area_t *vma, vaddr_t split);
-vm_area_t *vma_try_merge(mm_struct_t *mm, vm_area_t *vma);
-struct page_cache_page *mm_file_cache_mapping_get(vm_area_t *vma,
+void vma_release_file(mm_seg_t *vma);
+void vma_release_ipc(mm_seg_t *vma);
+void vma_release(mm_seg_t *vma);
+int  vma_ref_file(mm_seg_t *vma);
+int  vma_ref_fork(mm_seg_t *vma);
+int  vma_ref_aux(mm_seg_t *vma);
+void mm_seg_index_invalidate(mm_struct_t *mm);
+mm_seg_t *vma_split(mm_struct_t *mm, mm_seg_t *vma, vaddr_t split);
+mm_seg_t *vma_try_merge(mm_struct_t *mm, mm_seg_t *vma);
+struct page_cache_page *mm_file_cache_mapping_get(mm_seg_t *vma,
                                                    vaddr_t va, pfn_t pfn);
 
-void free_vma_pages(mm_struct_t *mm, vm_area_t *vma);
+void free_vma_pages(mm_struct_t *mm, mm_seg_t *vma);
 
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                        int shared);

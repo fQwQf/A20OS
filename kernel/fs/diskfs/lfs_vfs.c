@@ -526,14 +526,20 @@ void *lfs_krealloc(void *ptr, unsigned long size) {
 
 /* GCC libgcc helpers littlefs' builtins expand to.  The kernel links
  * -nostdlib and deliberately avoids libgcc (see fdtable.c's software ctz),
- * so these live here as plain software implementations. */
+ * so these live here as plain software implementations.
+ *
+ * The 64-bit ones take and return uint64_t, NOT unsigned long.  The libgcc ABI
+ * fixes those signatures at "long long" on every target, so spelling them with
+ * unsigned long compiles on a 64-bit kernel and silently becomes a
+ * 32-bit-shift-overflow error on riscv32 -- GCC rejects `<< 56` on a 32-bit
+ * long outright, which is how the 32-bit build caught it. */
 unsigned int __bswapsi2(unsigned int v)
 {
     return ((v & 0x000000ffU) << 24) | ((v & 0x0000ff00U) << 8) |
            ((v & 0x00ff0000U) >> 8)  | ((v & 0xff000000U) >> 24);
 }
 
-unsigned long __bswapdi2(unsigned long v)
+uint64_t __bswapdi2(uint64_t v)
 {
     return ((v & 0x00000000000000ffUL) << 56) |
            ((v & 0x000000000000ff00UL) << 40) |
@@ -545,7 +551,7 @@ unsigned long __bswapdi2(unsigned long v)
            ((v & 0xff00000000000000UL) >> 56);
 }
 
-int __ctzdi2(unsigned long v)
+int __ctzdi2(uint64_t v)
 {
     if (!v)
         return 64;
@@ -559,17 +565,17 @@ int __ctzdi2(unsigned long v)
     return n;
 }
 
-int __clzdi2(unsigned long v)
+int __clzdi2(uint64_t v)
 {
     if (!v)
         return 64;
     int n = 0;
-    if ((v & 0xFFFFFFFF00000000UL) == 0) { n += 32; v <<= 32; }
-    if ((v & 0xFFFF000000000000UL) == 0) { n += 16; v <<= 16; }
-    if ((v & 0xFF00000000000000UL) == 0) { n += 8;  v <<= 8;  }
-    if ((v & 0xF000000000000000UL) == 0) { n += 4;  v <<= 4;  }
-    if ((v & 0xC000000000000000UL) == 0) { n += 2;  v <<= 2;  }
-    if ((v & 0x8000000000000000UL) == 0) { n += 1; }
+    if ((v & 0xFFFFFFFF00000000ULL) == 0) { n += 32; v <<= 32; }
+    if ((v & 0xFFFF000000000000ULL) == 0) { n += 16; v <<= 16; }
+    if ((v & 0xFF00000000000000ULL) == 0) { n += 8;  v <<= 8;  }
+    if ((v & 0xF000000000000000ULL) == 0) { n += 4;  v <<= 4;  }
+    if ((v & 0xC000000000000000ULL) == 0) { n += 2;  v <<= 2;  }
+    if ((v & 0x8000000000000000ULL) == 0) { n += 1; }
     return n;
 }
 

@@ -426,7 +426,7 @@ static int uffd_io_register(userfaultfd_t *uffd, void *arg)
     /* The whole range must be covered by anonymous private VMAs. */
     spin_lock(&mm->lock);
     uint64_t covered = 0;
-    for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+    for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
         if ((uint64_t)vma->end <= start || (uint64_t)vma->start >= end)
             continue;
         if ((vma->vm_flags & (VM_ANON | VM_FILE | VM_VMO | VM_SHARED)) !=
@@ -650,7 +650,7 @@ static int uffd_io_copy(userfaultfd_t *uffd, void *arg)
             ret = -EEXIST;
             break;
         }
-        vm_area_t *vma = mm_find_vma(mm, dst);
+        mm_seg_t *vma = mm_seg_find(mm, dst);
         if (!vma) {
             spin_unlock(&mm->lock);
             if (t)
@@ -746,7 +746,7 @@ static int uffd_io_zeropage(userfaultfd_t *uffd, void *arg)
             ret = -EEXIST;
             break;
         }
-        vm_area_t *vma = mm_find_vma(mm, dst);
+        mm_seg_t *vma = mm_seg_find(mm, dst);
         if (!vma) {
             spin_unlock(&mm->lock);
             if (t)

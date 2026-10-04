@@ -48,7 +48,7 @@ A20OS 提供一套完整的 Linux 兼容层，让未修改的 musl 程序（以�
 
 * **双 ABI 架构**：`abi/linux`（Linux syscall，运行 musl 生态）与 `abi/native`（面向能力、句柄与事件的 A20 原生接口）共享同一套对象/等待/IPC 底座；Linux 侧只是线格式翻译（`syscall_table.def` 当前登记 366 个入口）。
 * **实现全部有效 Linux syscall，覆盖比 Linux 更全面**：riscv64 / aarch64 / loongarch64 / x86_64 四条主线架构完整实现各自的 Linux syscall 编号表——`x86_64` 463 槽全表映射、LoongArch 私有 `file_getattr/file_setattr`、以及 `mseal`/`io_uring`/`landlock`/`pidfd` 等现代 syscall，一应俱全；甚至覆盖了 Linux 编号表中的内部占位槽，无任何未实现的空位。
-* **核心实现、ABI 薄包装**：调度、MM/VMA、VFS、页缓存等状态归属内核子系统，ABI 层只做参数翻译——例如 `mseal` 的 VMA 封禁、fileattr 属性模型、`utime`/`utimes` 时间戳写入都落在核心层。
+* **核心实现、ABI 薄包装**：调度、MM（映射记录 + 每页元数据）、VFS、页缓存等状态归属内核子系统，ABI 层只做参数翻译——例如 `mseal` 的区间封禁、fileattr 属性模型、`utime`/`utimes` 时间戳写入都落在核心层。
 * **运行真实用户态**：可引导 stock Alpine + XFCE Wayland rootfs，直接运行 git、vim、fastfetch、mksh 等静态链接 musl 程序；`vDSO` 提供 `clock_gettime`/`gettimeofday`/`getcpu` 零陷入快路径。
 * **验证门禁**：`make smoke-abi-linux`、`smoke-syscall-ext`、`smoke-mm-stress` 等在 QEMU 中逐组验证 syscall 语义。
 

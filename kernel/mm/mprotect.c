@@ -39,13 +39,13 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (prot & 4) vm_prot |= VM_EXEC;
     vaddr_t end = addr + len;
     if (end < addr || end > USER_VA_LIMIT) return -ENOMEM;
-    mm_vma_index_invalidate(mm);
+    mm_seg_index_invalidate(mm);
 #ifndef CONFIG_NOMMU
     int touched = 0;
 #endif
 
     vaddr_t covered = addr;
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && covered < end; v = v->next) {
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && covered < end; v = v->next) {
         if (v->start > covered)
             break;
         if (v->end > covered)
@@ -55,7 +55,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
         return -ENOMEM;
 
     /* mseal(2): mprotect over a sealed VMA is refused. */
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; v = v->next) {
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; v = v->next) {
         if (v->start >= end || v->end <= addr)
             continue;
         if (v->vm_flags & VM_SEALED)
@@ -64,8 +64,8 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
 
 #ifdef CONFIG_NOMMU
     /* NOMMU has no page tables. We only update the VMA permission bits without splitting. */
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
-        vm_area_t *next = v->next;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
+        mm_seg_t *next = v->next;
         v->pte_flags = mm_pte_flags_apply_prot(v->pte_flags, ptef);
         v->vm_flags  = (v->vm_flags & ~(uint64_t)(VM_READ | VM_WRITE | VM_EXEC)) |
                        vm_prot;
@@ -79,19 +79,34 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     if (r < 0) return r;
 
 
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end; ) {
-        vm_area_t *next = v->next;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end; ) {
+        mm_seg_t *next = v->next;
         uint64_t s = v->start < addr ? addr : v->start;
         uint64_t e = v->end > end ? end : v->end;
 
+        /* A split renames both halves, and stops naming what was cut away.
+         * vma_split() narrows the head in place and hands back the tail, so
+         * the pre-split extent has to be retired BEFORE the call: afterwards
+         * the head no longer knows what it used to cover.  Leaving it named
+         * makes lookup match on a stale extent, which is how a mprotect split
+         * left a neighbouring mapping resolving to the wrong segment --
+         * measured as seg_diff on the real-software gate. */
         if (s > v->start) {
+            mm_seg_t *head = v;
+            mm_mmap_seg_retire(mm, v, v->start, v->end);
             v = vma_split(mm, v, s);
             if (!v) return -ENOMEM;
             next = v->next;
+            mm_mmap_seg_annotate(mm, head, head->start, head->end);
+            mm_mmap_seg_annotate(mm, v, v->start, v->end);
         }
         if (e < v->end) {
+            mm_seg_t *head = v;
+            mm_mmap_seg_retire(mm, v, v->start, v->end);
             if (!vma_split(mm, v, e)) return -ENOMEM;
             next = v->next;
+            mm_mmap_seg_annotate(mm, head, head->start, head->end);
+            mm_mmap_seg_annotate(mm, next, next->start, next->end);
         }
 
         for (uint64_t va = v->start; va < v->end; ) {
@@ -142,6 +157,20 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                     *pte = replacement;
                     mm_tlb_note_change(mm, base, size);
                 }
+                /* The status byte is what a later status-driven fault
+                 * installs and what mm_pt_audit_all() compares, so it has to
+                 * follow the PTE here as well -- not only on the
+                 * never-faulted branch below.  Leaving it stale is what
+                 * produced prot_mismatch=5 on a real workload.
+                 *
+                 * Take the table from mm_pt_leaf_table() rather than deriving
+                 * it as `pte - vpn`: that is pointer arithmetic on a pointer
+                 * whose provenance is a lookup, and the same trap is
+                 * documented on the absent branch below. */
+                pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
+                if (ltab)
+                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
+                                                  flags);
                 va = base + size;
             } else {
                 /* Reserved by mmap but never faulted: there is no PTE to carry
@@ -155,7 +184,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * table there is no status to refresh.  Computing `pte - idx`
                  * from NULL is pointer arithmetic on a null pointer (UBSAN
                  * flagged it on every such page) and handed
-                 * mm_pt_refresh_absent_prot() a wild pointer, so the refresh
+                 * mm_pt_refresh_leaf_prot() a wild pointer, so the refresh
                  * silently did nothing: the status kept its OLD permissions,
                  * v->pte_flags below was updated anyway, and a later
                  * status-driven fault installed the stale permissions --
@@ -178,7 +207,7 @@ int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                  * MM_ST_ANON_VIRT and cannot act on a stale prot. */
                 pte_t *ltab = mm_pt_leaf_table(mm->pgdir, va);
                 if (ltab)
-                    (void)mm_pt_refresh_absent_prot(ltab, arch_pt_vpn(va, 0),
+                    (void)mm_pt_refresh_leaf_prot(ltab, arch_pt_vpn(va, 0),
                                                     ptef);
                 va += PAGE_SIZE;
             }

@@ -36,7 +36,7 @@ static int mm_range_has_sealed_locked(mm_struct_t *mm, vaddr_t addr,
                                       size_t len)
 {
     vaddr_t end = addr + len;
-    for (vm_area_t *v = mm->mmap; v && v->start < end; v = v->next) {
+    for (mm_seg_t *v = mm->mmap; v && v->start < end; v = v->next) {
         if (v->end <= addr)
             continue;
         if (v->vm_flags & VM_SEALED)
@@ -85,7 +85,7 @@ int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
      * whole range to be mapped, otherwise -ENOMEM and no sealing. */
     {
         vaddr_t covered = addr;
-        for (vm_area_t *v = mm_find_vma(mm, covered); v && covered < end;
+        for (mm_seg_t *v = mm_seg_find(mm, covered); v && covered < end;
              v = v->next) {
             if (v->start > covered)
                 return -ENOMEM;
@@ -97,7 +97,7 @@ int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
     }
 
     /* Refuse to seal special regions whose lifetime is kernel-owned. */
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
          v = v->next) {
         if (v->start >= end || v->end <= addr)
             continue;
@@ -112,7 +112,7 @@ int mm_mseal_locked(mm_struct_t *mm, vaddr_t addr, size_t len)
     if (mm_split_vma_at(mm, end) < 0)
         return -ENOMEM;
 
-    for (vm_area_t *v = mm_find_vma(mm, addr); v && v->start < end;
+    for (mm_seg_t *v = mm_seg_find(mm, addr); v && v->start < end;
          v = v->next) {
         if (v->start >= end || v->end <= addr)
             continue;

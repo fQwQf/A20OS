@@ -173,12 +173,12 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
     kerr("  mm: brk=0x%lx start_brk=0x%lx stack=[0x%lx,0x%lx)\n",
          (unsigned long)task->mm->brk, (unsigned long)task->mm->start_brk,
          (unsigned long)task->mm->stack_bottom, (unsigned long)task->mm->stack_top);
-    vm_area_t *vma = mm_find_vma(task->mm, va & ~(PAGE_SIZE - 1));
+    mm_seg_t *vma = mm_seg_find(task->mm, va & ~(PAGE_SIZE - 1));
     if (vma) {
         kerr("  vma=[0x%lx,0x%lx) flags=0x%lx pte_flags=0x%lx file=%lu off=0x%lx\n",
              vma->start, vma->end, vma->vm_flags, vma->pte_flags,
              (unsigned long)(vma->file ? vma->file->identity : 0),
-             vma->file_offset);
+             vma->backing_offset);
         if (vma->file) {
             vfile_t *vf = vma->file;
             vfile_get(vf);
@@ -191,7 +191,7 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
         kerr("  vma=<none> (mmap=%p, total_vm=%lu)\n",
              task->mm->mmap, (unsigned long)task->mm->total_vm);
         int nvma = 0;
-        for (vm_area_t *v = task->mm->mmap; v && nvma < 10; v = v->next, nvma++)
+        for (mm_seg_t *v = task->mm->mmap; v && nvma < 10; v = v->next, nvma++)
             kerr("    [%d] [0x%lx,0x%lx)\n", nvma,
                  (unsigned long)v->start, (unsigned long)v->end);
     }
@@ -213,7 +213,7 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
                      (unsigned int)*content);
             }
         }
-        for (vm_area_t *v = task->mm->mmap; v; v = v->next) {
+        for (mm_seg_t *v = task->mm->mmap; v; v = v->next) {
             if (!(v->vm_flags & VM_VMO) || !v->vmo)
                 continue;
             if (mm_query_leaf(task->mm->pgdir, v->start, &leaf) == 0)
@@ -241,11 +241,11 @@ static void dump_fault_pte(task_t *task, vaddr_t va) {
         int have_leaf = mm_query_leaf(task->mm->pgdir,
                                       va & ~(paddr_t)(PAGE_SIZE - 1), &vleaf);
         spin_lock(&task->mm->lock);
-        vm_area_t *vma = mm_find_vma(task->mm, va & ~(paddr_t)(PAGE_SIZE - 1));
+        mm_seg_t *vma = mm_seg_find(task->mm, va & ~(paddr_t)(PAGE_SIZE - 1));
         int suspect = (!have_leaf || !(vleaf.flags & PTE_X)) ||
                       (!vma || !(vma->vm_flags & VM_EXEC));
         if (suspect) {
-            for (vm_area_t *v = task->mm->mmap; v; v = v->next) {
+            for (mm_seg_t *v = task->mm->mmap; v; v = v->next) {
                 if (!(v->vm_flags & VM_EXEC))
                     continue;
                 uintptr_t rslot = 0;

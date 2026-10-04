@@ -142,10 +142,10 @@ vaddr_t vdso_auxv_ehdr(void)
     return g_vdso_pages ? (vaddr_t)A20_VDSO_VA : 0;
 }
 
-static void vdso_append_vma(vm_area_t **list, vm_area_t *newv)
+static void vdso_append_vma(mm_seg_t **list, mm_seg_t *newv)
 {
-    vm_area_t **pp = list;
-    vm_area_t *prev = NULL;
+    mm_seg_t **pp = list;
+    mm_seg_t *prev = NULL;
     while (*pp && (*pp)->start < newv->start) {
         prev = *pp;
         pp = &(*pp)->next;
@@ -154,6 +154,17 @@ static void vdso_append_vma(vm_area_t **list, vm_area_t *newv)
     newv->prev = prev;
     if (*pp) (*pp)->prev = newv;
     *pp = newv;
+
+    /* Give the mapping a segment too.  This is a private re-implementation of
+     * mm_insert_vma's linking, so it does not pick up the node-entry annotation
+     * that lives there.
+     *
+     * It has to be linked here rather than by calling mm_insert_vma(), because
+     * this same helper also links into the exec-time image list, which is not
+     * an mm and has no index to invalidate.
+     *
+     * No annotation either: these are VM_PFNMAP with no backing object, and
+     * the node-entry index is only for dispatchable kinds. */
 }
 
 /*
@@ -161,7 +172,7 @@ static void vdso_append_vma(vm_area_t **list, vm_area_t *newv)
  * VMAs to @list.  The caller serializes the list (mm->lock, or the
  * exec-time image list which is not yet shared).
  */
-int vdso_map_image(pt_root_t *pgdir, vm_area_t **list)
+int vdso_map_image(pt_root_t *pgdir, mm_seg_t **list)
 {
     if (!pgdir || !list || !g_vdso_pages || !g_vvar)
         return -1;
@@ -177,8 +188,8 @@ int vdso_map_image(pt_root_t *pgdir, vm_area_t **list)
     if (pt_map(pgdir, A20_VVAR_VA, pfn_to_phys(g_vvar_pfn), data_f) < 0)
         return -1;
 
-    vm_area_t *code = kcalloc(1, sizeof(*code));
-    vm_area_t *data = kcalloc(1, sizeof(*data));
+    mm_seg_t *code = mm_seg_new();
+    mm_seg_t *data = mm_seg_new();
     if (!code || !data) {
         kfree(code);
         kfree(data);

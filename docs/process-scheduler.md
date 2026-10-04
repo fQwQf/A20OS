@@ -68,7 +68,7 @@ IDLE -> PREPARING -> PARKED -> WOKEN -> IDLE
 | PID hash | 独立 PID 锁；查询返回带引用的 task |
 | 每个 CPU 的队列链、bitmap、`on_rq` | 对应 `runq.lock` |
 | signal action、进程/线程 pending、mask、sigwait 交接 | `signal_state.lock` |
-| MM/VMA/PTE | `mm->lock` |
+| MM 映射记录 / PTE | `mm->lock` |
 | files/fd | `files_struct.lock` |
 
 主要顺序是：

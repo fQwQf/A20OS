@@ -136,7 +136,7 @@ static int sysv_shm_range_overlaps(mm_struct_t *mm, uint64_t start, size_t len)
     uint64_t end = start + len;
     if (end < start || end > USER_VA_LIMIT)
         return 1;
-    for (vm_area_t *v = mm->mmap; v; v = v->next) {
+    for (mm_seg_t *v = mm->mmap; v; v = v->next) {
         if (v->start < end && v->end > start)
             return 1;
         if (v->start >= end)
@@ -321,12 +321,11 @@ uint64_t sysv_shm_at(int shmid, uint64_t shmaddr, int shmflg)
         return (uint64_t)-EINVAL;
     }
 
-    vm_area_t *vma = kcalloc(1, sizeof(vm_area_t));
+    mm_seg_t *vma = mm_seg_new();
     if (!vma) {
         sysv_shm_unref_attach(shmid);
         return (uint64_t)-ENOMEM;
     }
-    refcount_set(&vma->refcount, 1);
 
     size_t mapped = 0;
     for (size_t p = 0; p < npages; p++) {
@@ -364,7 +363,7 @@ int sysv_shm_detach(const void *shmaddr)
         return -EINVAL;
 
     uint64_t addr = (uint64_t)(uintptr_t)shmaddr;
-    vm_area_t *vma = mm_find_vma(t->mm, addr);
+    mm_seg_t *vma = mm_seg_find(t->mm, addr);
     if (!vma || vma->start != addr || !(vma->vm_flags & VM_SYSV_SHM))
         return -EINVAL;
     size_t len = vma->end - vma->start;

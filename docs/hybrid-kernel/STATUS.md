@@ -56,7 +56,7 @@
 混合内核的 IPC/MM 路径在 SMP 下已收敛的已知问题（供参考）：
 
 - 句柄表与 I/O scratch buffer 分离：Native 句柄表使用独立 `task->a20_ht` 字段，不再与 Linux ABI 的 `proc_scratch_buffer()` 共用存储；
-- VMA 链表统一持锁：`mm_mmap/munmap/brk/mprotect/mremap` 及 Linux ABI 对应 syscall 全部在 `mm->lock` 下修改 VMA 与页表；
+- VMA 链表统一持锁：`mm_mmap/munmap/brk/mprotect/mremap` 及 Linux ABI 对应 syscall 全部在 `mm->lock` 下修改映射记录与页表；
 - 远程 TLB 刷新：IPI-based 远程刷（替代 SBI REMOTE SFENCE，TCG 下全量服务），且所有远程刷在解锁后发布、页释放前完成；
 - buddy 分配器：脏块（内部帧仍被引用）不再回填空闲链表，`fl_push_clean` 拆解后只回填干净子块；
 - channel 入队：`ch_try_enqueue` 对 peer 持引用，避免并发释放下的悬空入队。

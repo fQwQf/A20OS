@@ -138,7 +138,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     spin_lock(&mm->lock);
 
     if ((flags & MAP_FIXED_NOREPLACE) && addr != 0) {
-        for (vm_area_t *vma = mm->mmap; vma; vma = vma->next) {
+        for (mm_seg_t *vma = mm->mmap; vma; vma = vma->next) {
             if (vma->start < addr + len && vma->end > addr) {
                 spin_unlock(&mm->lock);
                 return -EEXIST;
@@ -151,7 +151,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
     if ((flags & MAP_FIXED) && addr != 0) {
         mm_munmap(mm, addr, len);
     } else if (addr != 0) {
-        vm_area_t *existing = mm_find_vma(mm, addr);
+        mm_seg_t *existing = mm_seg_find(mm, addr);
         if (existing && existing->start < addr + len && existing->end > addr)
             addr = 0;
     }
@@ -178,7 +178,7 @@ int64_t fbdev_linux_mmap(uint64_t addr, size_t len, int prot, int flags,
         return r;
     }
 
-    vm_area_t *vma = kcalloc(1, sizeof(*vma));
+    mm_seg_t *vma = kcalloc(1, sizeof(*vma));
     if (!vma) {
         while (mapped > 0) {
             mapped -= PAGE_SIZE;
@@ -320,7 +320,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return -EINVAL;
 
             spin_lock(&curr->mm->lock);
-            for (vm_area_t *vma = curr->mm->mmap; vma; vma = vma->next) {
+            for (mm_seg_t *vma = curr->mm->mmap; vma; vma = vma->next) {
                 if (vma->start < va + fb_size && vma->end > va) {
                     spin_unlock(&curr->mm->lock);
                     return -EEXIST;
@@ -361,7 +361,7 @@ static int fb_ioctl(vfile_t *vf, unsigned long req, void *arg) {
                 return r;
             }
 
-            vm_area_t *vma = kcalloc(1, sizeof(*vma));
+            mm_seg_t *vma = kcalloc(1, sizeof(*vma));
             if (!vma) {
                 while (mapped > 0) {
                     mapped -= PAGE_SIZE;
