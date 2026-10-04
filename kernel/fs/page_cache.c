@@ -35,6 +35,23 @@ static mutex_t g_page_cache_fill_locks[PAGE_CACHE_FILL_LOCKS];
 #define PAGE_CACHE_CHUNKS \
     (PAGE_CACHE_MAX_PAGES / PAGE_CACHE_CHUNK_PAGES)
 static page_cache_page_t *g_page_chunks[PAGE_CACHE_CHUNKS];
+/* Staging buffers for readpages(), checked out instead of allocated per
+ * window.  A per-task buffer of the kind the Linux ABI I/O paths use cannot be
+ * borrowed here: sys_read hands its own scratch buffer in as the copy
+ * destination, so a shared per-task allocation would be freed underneath the
+ * writer.  Checkout also survives preemption, which a bare per-CPU buffer
+ * would not.  Allocated lazily on first use and retained afterwards. */
+#define PAGE_CACHE_READAHEAD_BUFFERS 4
+static void *g_readahead_buffers[PAGE_CACHE_READAHEAD_BUFFERS];
+static spinlock_t g_readahead_buffer_lock = SPINLOCK_INIT;
+/* End of the previous read(2), per open file, for the readahead gate below. */
+#define PAGE_CACHE_READ_STATE_STRIPES 64
+struct page_cache_read_state {
+    uintptr_t vfile;
+    uint64_t end_index;
+};
+static struct page_cache_read_state
+    g_read_state[PAGE_CACHE_READ_STATE_STRIPES];
 static size_t g_allocated_pages;
 static size_t g_page_limit;
 static page_cache_page_t *g_free_pages;
@@ -42,6 +59,22 @@ static page_cache_page_t g_lru_head;
 static page_cache_page_t g_lru_tail;
 static page_cache_page_t *g_hash[PAGE_CACHE_HASH_BUCKETS];
 static page_cache_page_t *g_dirty_pages;
+/* Whole-cache occupancy, maintained at the points already serialised by
+ * g_page_cache_lock (mapping publication, detach, dirty insert/remove).
+ * Deriving it by walking the descriptor array made every cachestat(2) and
+ * /proc/meminfo read an O(cache size) critical section with interrupts off. */
+static size_t g_valid_pages;
+static size_t g_dirty_page_count;
+/* Pages currently carrying a pin, one counter per bucket.  The 0->1 and 1->0
+ * transitions belong to the warm hit path, which already owns that bucket's
+ * lock; a single shared counter would make unrelated files contend on one
+ * cache line.  Padded so neighbouring buckets do not false-share. */
+struct page_cache_pin_counter {
+    size_t pinned;
+    char pad[64 - sizeof(size_t)];
+};
+static struct page_cache_pin_counter
+    g_bucket_pinned[PAGE_CACHE_BUCKET_LOCKS];
 static int g_initialized;
 
 #define PAGE_CACHE_PRESSURE_WRITEBACK_PAGES 1024U
@@ -81,6 +114,29 @@ static inline void page_cache_bucket_unlock_irqrestore(unsigned hash_idx,
 {
     spin_unlock_irqrestore(&g_page_cache_bucket_locks[page_cache_bucket(hash_idx)],
                            flags);
+}
+
+/* A pin is any refcount the cache cannot reclaim under.  Accounting only the
+ * 0->1 and 1->0 refcount edges keeps the reported pinned count equal to the
+ * number of pages with refcount > 0 without re-reading every descriptor. */
+static inline void page_cache_account_pin(page_cache_page_t *page)
+{
+    unsigned idx = page_cache_hash_key(page->vnode, page->index);
+    __atomic_fetch_add(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
+                       __ATOMIC_RELAXED);
+}
+
+static inline void page_cache_account_unpin(page_cache_page_t *page)
+{
+    unsigned idx = page_cache_hash_key(page->vnode, page->index);
+    __atomic_fetch_sub(&g_bucket_pinned[page_cache_bucket(idx)].pinned, 1,
+                       __ATOMIC_RELAXED);
+}
+
+static inline void page_cache_pin(page_cache_page_t *page)
+{
+    if (__atomic_fetch_add(&page->ref_count.value, 1, __ATOMIC_RELAXED) == 0)
+        page_cache_account_pin(page);
 }
 
 static void lru_remove(page_cache_page_t *page)
@@ -244,6 +300,7 @@ static void dirty_insert_locked(page_cache_page_t *page)
         g_dirty_pages->global_dirty_prev = page;
     g_dirty_pages = page;
     page->dirty = 1;
+    g_dirty_page_count++;
 }
 
 static void dirty_remove_locked(page_cache_page_t *page)
@@ -272,6 +329,7 @@ static void dirty_remove_locked(page_cache_page_t *page)
     page->global_dirty_prev = NULL;
     page->global_dirty_next = NULL;
     page->dirty = 0;
+    g_dirty_page_count--;
 }
 
 /* Caller holds g_page_cache_lock AND the page's bucket lock.  Removing the
@@ -293,6 +351,7 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
     page->dirty_gen = 0;
     page->invalidate_gen++;
     page->uptodate = 0;
+    g_valid_pages--;
     return vn;
 }
 
@@ -302,12 +361,25 @@ static vnode_t *detach_mapping_deferred_locked(page_cache_page_t *page)
  * refcount/detach decision atomic against a concurrent warm hit, and the
  * accessed bit lets recently-used pages survive one eviction sweep without
  * any per-hit global LRU mutation.
+ *
+ * The sweep is bounded.  A run of recently-used candidates costs one bucket
+ * lock acquisition each, and an unbounded scan turned one allocation miss into
+ * an O(cache size) critical section that stalled every other miss, evict and
+ * statistics caller.  Giving up early is not a lost opportunity: the accessed
+ * bits of the candidates already visited are cleared, so the caller's next
+ * sweep reaches pages this one had to skip.
  */
+#define PAGE_CACHE_EVICT_SCAN_BUDGET 128U
+/* Extra sweeps one allocation may spend before escalating.  Each is a separate
+ * bounded critical section, so the worst case is a fixed number of short
+ * sections rather than one long one. */
+#define PAGE_CACHE_EVICT_SWEEPS 3U
+
 static page_cache_page_t *evict_locked(vnode_t **deferred_put)
 {
     page_cache_page_t *page = g_lru_tail.prev;
     size_t visited = 0;
-    while (page != &g_lru_head) {
+    while (page != &g_lru_head && visited < PAGE_CACHE_EVICT_SCAN_BUDGET) {
         visited++;
         if (refcount_read(&page->ref_count) == 0 && !page->dirty &&
             pfn_valid(page->pfn) && pfa.meta[page->pfn].refcount <= 1) {
@@ -423,6 +495,7 @@ int page_cache_init(void)
         return 0;
 
     spin_init(&g_page_cache_lock);
+    spin_init(&g_readahead_buffer_lock);
     for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
         spin_init(&g_page_cache_bucket_locks[i]);
     mutex_init(&g_page_cache_grow_lock);
@@ -467,7 +540,7 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
     page_cache_page_t *page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         return page;
@@ -477,11 +550,13 @@ page_cache_page_t *page_cache_get(vnode_t *vn, uint64_t index, int create)
     if (!create)
         return NULL;
 
+    unsigned sweeps = 0;
+
 retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         return page;
@@ -497,7 +572,7 @@ retry:
     bflags = page_cache_bucket_lock_irqsave(idx);
     page = find_locked(vn, index);
     if (page) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         page->accessed = 1;
         page_cache_bucket_unlock_irqrestore(idx, bflags);
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -505,6 +580,9 @@ retry:
     }
     page_cache_bucket_unlock_irqrestore(idx, bflags);
 
+    /* Retry the whole allocation attempt: the free stack may have been
+     * refilled, and evict_locked() gets another bounded sweep. */
+evict:
     page = free_take_locked();
     if (!page && g_allocated_pages < g_page_limit) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -514,7 +592,7 @@ retry:
         bflags = page_cache_bucket_lock_irqsave(idx);
         page = find_locked(vn, index);
         if (page) {
-            refcount_inc(&page->ref_count);
+            page_cache_pin(page);
             page->accessed = 1;
             page_cache_bucket_unlock_irqrestore(idx, bflags);
             spin_unlock_irqrestore(&g_page_cache_lock, flags);
@@ -526,6 +604,16 @@ retry:
         page = evict_locked(&deferred_put);
     if (!page) {
         spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        /* The budgeted sweep gives up on a run of recently-used candidates
+         * whose second chance it has just spent.  Another bounded sweep finds
+         * them, so escalate through a few before touching anything else: the
+         * whole-cache reclaim that used to sit here discards every clean page
+         * including the ones the second chance exists to keep, which turns
+         * cache pressure into an eviction storm. */
+        if (sweeps++ < PAGE_CACHE_EVICT_SWEEPS) {
+            flags = spin_lock_irqsave(&g_page_cache_lock);
+            goto evict;
+        }
         /* Buffered writers are allowed to retain dirty data across close(),
          * so a large build can eventually consume every cache descriptor.
          * Make bounded forward progress under pressure: write a small batch,
@@ -545,6 +633,31 @@ retry:
             goto retry;
         return NULL;
     }
+
+    /* The descriptor is off the free stack and held by its own reference, so
+     * no other thread can reach the frame or fill it before publication.
+     * Clearing the previous tenant's bytes therefore belongs outside the
+     * allocation critical section rather than in it. */
+    spin_unlock_irqrestore(&g_page_cache_lock, flags);
+    memset(page->data, 0, PAGE_SIZE);
+    flags = spin_lock_irqsave(&g_page_cache_lock);
+
+    /* Publication is a separate critical section, so the index may have been
+     * created while the frame was being cleared. */
+    bflags = page_cache_bucket_lock_irqsave(idx);
+    page_cache_page_t *racer = find_locked(vn, index);
+    if (racer) {
+        page_cache_pin(racer);
+        racer->accessed = 1;
+        page_cache_bucket_unlock_irqrestore(idx, bflags);
+        free_insert_locked(page);
+        spin_unlock_irqrestore(&g_page_cache_lock, flags);
+        if (deferred_put)
+            vnode_put(deferred_put);
+        return racer;
+    }
+    page_cache_bucket_unlock_irqrestore(idx, bflags);
+
     page->vnode = vn;
     page->index = index;
     page->valid = 1;
@@ -553,13 +666,15 @@ retry:
     page->invalidate_gen++;
     page->uptodate = 0;
     page->accessed = 0;
-    memset(page->data, 0, PAGE_SIZE);
     vnode_get(vn);
     /* Global lock held: publish the mapping and the hash entry under the
      * bucket lock so warm hits observe fully-initialised fields. */
     bflags = page_cache_bucket_lock_irqsave(idx);
     hash_insert_locked(page);
     mapping_insert_locked(page);
+    g_valid_pages++;
+    /* The descriptor came back from the free stack already pinned. */
+    page_cache_account_pin(page);
     page_cache_bucket_unlock_irqrestore(idx, bflags);
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
     if (deferred_put)
@@ -571,8 +686,9 @@ void page_cache_put(page_cache_page_t *page)
 {
     if (!page)
         return;
-    if (refcount_read(&page->ref_count) > 0)
-        refcount_dec_and_test(&page->ref_count);
+    if (refcount_read(&page->ref_count) > 0 &&
+        refcount_dec_and_test(&page->ref_count))
+        page_cache_account_unpin(page);
 }
 
 void *page_cache_data(page_cache_page_t *page)
@@ -702,6 +818,35 @@ retry:
 /* Fill an ascending, contiguous private-file fault window.  Filesystems with
  * readpages support receive a linear buffer and can merge physical disk I/O;
  * the data is scattered into the pinned cache pages only after the read. */
+static void *readahead_buffer_take(size_t bytes)
+{
+    uint64_t flags = spin_lock_irqsave(&g_readahead_buffer_lock);
+    for (size_t i = 0; i < PAGE_CACHE_READAHEAD_BUFFERS; i++) {
+        if (g_readahead_buffers[i]) {
+            void *buffer = g_readahead_buffers[i];
+            g_readahead_buffers[i] = NULL;
+            spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+            return buffer;
+        }
+    }
+    spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+    return kmalloc(bytes);
+}
+
+static void readahead_buffer_return(void *buffer)
+{
+    uint64_t flags = spin_lock_irqsave(&g_readahead_buffer_lock);
+    for (size_t i = 0; i < PAGE_CACHE_READAHEAD_BUFFERS; i++) {
+        if (!g_readahead_buffers[i]) {
+            g_readahead_buffers[i] = buffer;
+            spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+            return;
+        }
+    }
+    spin_unlock_irqrestore(&g_readahead_buffer_lock, flags);
+    kfree(buffer);
+}
+
 int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                                 size_t count)
 {
@@ -725,7 +870,8 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
         return 0;
     }
 
-    char *buffer = (char *)kmalloc(count * PAGE_SIZE);
+    char *buffer = (char *)readahead_buffer_take(
+        PAGE_CACHE_READAHEAD_PAGES * PAGE_SIZE);
     if (!buffer) {
         /* Allocation pressure must not turn readahead into a fault failure. */
         return page_cache_fill_vfile_page(vf, pages[0]);
@@ -756,7 +902,9 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
                 generations[i] = snapshot_invalidate_gen(pages[start + i]);
 
             size_t bytes = run * PAGE_SIZE;
-            memset(buffer, 0, bytes);
+            /* readpages() reports how much of the window it stored and the
+             * shortfall is zeroed below, so pre-clearing the buffer would only
+             * add a second pass over the same bytes. */
             int r = vf->vnode->ops->readpages(
                 vf->vnode, pages[start]->index, buffer, bytes);
             if (r < 0) {
@@ -780,7 +928,7 @@ int page_cache_fill_vfile_pages(vfile_t *vf, page_cache_page_t **pages,
 out:
     for (size_t i = count; i > 0; i--)
         mutex_unlock(&pages[i - 1]->fill_lock);
-    kfree(buffer);
+    readahead_buffer_return(buffer);
     return result;
 }
 
@@ -788,8 +936,8 @@ out:
  * Ordinary read(2) used to fill one 4 KiB page at a time even when the
  * filesystem provided readpages().  Compiler inputs are predominantly
  * sequential and the ext4 implementation can merge a contiguous 128 KiB
- * window into one block request, so populate the forward window on the first
- * cold page.  The caller already pins pages[0]; pins acquired here are dropped
+ * window into one block request, so populate the forward window on a cold
+ * page.  The caller already pins pages[0]; pins acquired here are dropped
  * before returning and all publication remains protected by the existing
  * per-page fill locks.
  */
@@ -817,6 +965,35 @@ static int page_cache_readahead_vfile(vfile_t *vf,
     while (count > 1)
         page_cache_put(pages[--count]);
     return result;
+}
+
+/* Where the previous read(2) on this open file stopped, striped by vfile
+ * pointer.  The window is worth its read amplification only when the stream
+ * is walking forward: an unconditional window made a 4 KiB random read pay for
+ * 32 pages, of which 31 were never looked at.  Two indices equal means this
+ * read resumes exactly where the last one ended, which is what a sequential
+ * scan, and only a sequential scan, produces.  The first page of a stream has
+ * no evidence and fetches alone; the second page already has it.
+ *
+ * A collision between two vfiles sharing a stripe, or a torn read of the pair,
+ * can only mis-fire the hint into an unnecessary or a missed prefetch.  It
+ * cannot affect correctness, which is why the two fields are not published
+ * atomically. */
+static int page_cache_read_resumes(vfile_t *vf, uint64_t index)
+{
+    struct page_cache_read_state *s = &g_read_state[
+        ((uintptr_t)vf >> 4) & (PAGE_CACHE_READ_STATE_STRIPES - 1)];
+    if (__atomic_load_n(&s->vfile, __ATOMIC_ACQUIRE) != (uintptr_t)vf)
+        return 0;
+    return __atomic_load_n(&s->end_index, __ATOMIC_RELAXED) == index;
+}
+
+static void page_cache_record_read_end(vfile_t *vf, uint64_t index)
+{
+    struct page_cache_read_state *s = &g_read_state[
+        ((uintptr_t)vf >> 4) & (PAGE_CACHE_READ_STATE_STRIPES - 1)];
+    __atomic_store_n(&s->vfile, (uintptr_t)vf, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->end_index, index + 1, __ATOMIC_RELEASE);
 }
 
 pfn_t page_cache_pfn(page_cache_page_t *page)
@@ -862,7 +1039,8 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
 
         if (!page_cache_is_uptodate(page)) {
             int r;
-            if (vf->vnode->ops && vf->vnode->ops->readpages)
+            if (vf->vnode->ops && vf->vnode->ops->readpages &&
+                page_cache_read_resumes(vf, index))
                 r = page_cache_readahead_vfile(vf, page, file_size);
             else
                 r = page_cache_fill_vfile_page(vf, page);
@@ -874,6 +1052,7 @@ int page_cache_read_vfile(vfile_t *vf, char *buf, size_t count)
             }
         }
 
+        page_cache_record_read_end(vf, index);
         memcpy(buf + done, (char *)page_cache_data(page) + page_off, chunk);
         page_cache_put(page);
         done += chunk;
@@ -976,7 +1155,7 @@ static size_t collect_dirty_batch_locked(vnode_t *vn,
     size_t count = 0;
     while (page && count < max_pages && page->vnode == batch_vn &&
            page->index == next_index) {
-        refcount_inc(&page->ref_count);
+        page_cache_pin(page);
         pages[count++] = page;
         next_index++;
         /* Per-vnode dirty pages are descending from head to tail, so the
@@ -1416,16 +1595,13 @@ void page_cache_get_stats(page_cache_stats_t *stats)
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
     stats->allocated = g_allocated_pages;
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page->valid)
-            continue;
-        stats->valid++;
-        if (page->dirty)
-            stats->dirty++;
-        if (refcount_read(&page->ref_count) > 0)
-            stats->pinned++;
-    }
+    stats->valid = g_valid_pages;
+    stats->dirty = g_dirty_page_count;
+    size_t pinned = 0;
+    for (size_t i = 0; i < PAGE_CACHE_BUCKET_LOCKS; i++)
+        pinned += __atomic_load_n(&g_bucket_pinned[i].pinned,
+                                  __ATOMIC_RELAXED);
+    stats->pinned = pinned;
     spin_unlock_irqrestore(&g_page_cache_lock, flags);
 }
 
@@ -1476,12 +1652,8 @@ void page_cache_file_stats(vfile_t *vf, size_t *resident, size_t *dirty)
         return;
 
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page)
-            continue;
-        if (!page->valid || page->vnode != vf->vnode)
-            continue;
+    for (page_cache_page_t *page = vf->vnode->cache_pages; page;
+         page = page->mapping_next) {
         if (resident)
             *resident += PAGE_SIZE;
         if (page->dirty && dirty)
@@ -1506,11 +1678,12 @@ void page_cache_file_range_stats(vfile_t *vf, uint64_t off_bytes,
     if (last < first)
         last = ~(uint64_t)0 >> PAGE_SIZE_BITS;
 
+    /* Counting the vnode's own mapping list keeps the cost proportional to the
+     * queried file instead of the whole cache; the list is only ever spliced
+     * under g_page_cache_lock. */
     uint64_t flags = spin_lock_irqsave(&g_page_cache_lock);
-    for (size_t i = 0; i < g_allocated_pages; i++) {
-        page_cache_page_t *page = page_cache_page_at(i);
-        if (!page || !page->valid || page->vnode != vf->vnode)
-            continue;
+    for (page_cache_page_t *page = vf->vnode->cache_pages; page;
+         page = page->mapping_next) {
         if (page->index < first || page->index > last)
             continue;
         if (resident)
