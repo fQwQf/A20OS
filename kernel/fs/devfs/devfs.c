@@ -921,14 +921,25 @@ static unsigned devfs_name_hash(const char *name)
     return h;
 }
 
+/* devfs_mount() is not called once: VFS init mounts /dev, and
+ * mount_external_root_pseudo_filesystems() then mounts devtmpfs again under the
+ * external root.  Re-inserting into an already-populated table doubles the
+ * occupancy each time until the probe below can no longer find a free bucket
+ * and spins forever, so the build has to be idempotent. */
 static void devfs_static_index_build(void)
 {
     size_t n = sizeof(g_nodes) / sizeof(g_nodes[0]);
+    if (__atomic_load_n(&g_static_index_ready, __ATOMIC_RELAXED))
+        return;
+    memset(g_static_index, 0, sizeof(g_static_index));
     for (size_t i = 1; i < n; i++) {
         unsigned b = devfs_name_hash(g_nodes[i].name) &
                      (DEVFS_STATIC_BUCKETS - 1);
-        while (g_static_index[b])
+        for (unsigned probe = 0; g_static_index[b] && probe < DEVFS_STATIC_BUCKETS;
+             probe++)
             b = (b + 1) & (DEVFS_STATIC_BUCKETS - 1);
+        if (g_static_index[b])
+            continue;
         g_static_index[b] = (uint8_t)(i + 1);
     }
     __atomic_store_n(&g_static_index_ready, 1, __ATOMIC_RELAXED);
@@ -946,7 +957,9 @@ static int devfs_static_index_find(const char *name)
         return -1;
     }
     unsigned b = devfs_name_hash(name) & (DEVFS_STATIC_BUCKETS - 1);
-    for (;;) {
+    /* Bounded by the bucket count so a full table reports "absent" instead of
+     * walking the probe sequence forever. */
+    for (unsigned probe = 0; probe < DEVFS_STATIC_BUCKETS; probe++) {
         uint8_t e = g_static_index[b];
         if (!e)
             return -1;
@@ -954,6 +967,7 @@ static int devfs_static_index_find(const char *name)
             return (int)(e - 1);
         b = (b + 1) & (DEVFS_STATIC_BUCKETS - 1);
     }
+    return -1;
 }
 
 static int devfs_name_is_static(const char *name)
