@@ -164,35 +164,35 @@ int64_t sys_a20_task_mem_write(const a20_syscall_args_t *args);
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 
-/* Build the dispatch table: indexed by syscall number.
- * Native ABI uses sparse 16-bit numbers (0x0000..0x0A02),
- * so we use a hash-style lookup rather than a flat array. */
+/* Build the dispatch table: direct-indexed by syscall number.
+ * Native ABI numbers are sparse 16-bit values (class<<8 | index), so a flat
+ * pointer index of A20_SYSCALL_TABLE_SIZE turns dispatch into one load and
+ * a bounds check. */
 
-struct a20_table_entry {
-    uint64_t nr;
-    const char *name;
-    a20_syscall_handler_t handler;
-};
-
-static const struct a20_table_entry a20_syscall_table[] = {
+/* One const entry per syscall, so the index below can point into it. */
 #define A20_NATIVE_SYSCALL(name, ...) \
-    { A20_SYS_##name, #name, a20_handle_##name },
+    static const a20_syscall_entry_t a20_entry_##name = \
+        { A20_SYS_##name, #name, a20_handle_##name };
+#include "syscall_table.def"
+#undef A20_NATIVE_SYSCALL
+
+#define A20_NATIVE_SYSCALL(name, ...) \
+    _Static_assert(A20_SYS_##name < A20_SYSCALL_TABLE_SIZE, \
+                   "Native syscall number exceeds the dispatch index");
+#include "syscall_table.def"
+#undef A20_NATIVE_SYSCALL
+
+/* Every lookup returns a pointer into this array, so it must stay const: a
+ * shared mutable copy would be one data race between two CPUs in syscalls. */
+static const a20_syscall_entry_t *const a20_syscall_index[A20_SYSCALL_TABLE_SIZE] = {
+#define A20_NATIVE_SYSCALL(name, ...) [A20_SYS_##name] = &a20_entry_##name,
 #include "syscall_table.def"
 #undef A20_NATIVE_SYSCALL
 };
 
-#define A20_TABLE_SIZE (sizeof(a20_syscall_table) / sizeof(a20_syscall_table[0]))
-
 const a20_syscall_entry_t *a20_syscall_lookup(uint64_t nr)
 {
-    for (uint64_t i = 0; i < A20_TABLE_SIZE; i++) {
-        if (a20_syscall_table[i].nr == nr) {
-            static a20_syscall_entry_t result;
-            result.nr = a20_syscall_table[i].nr;
-            result.name = a20_syscall_table[i].name;
-            result.handler = a20_syscall_table[i].handler;
-            return &result;
-        }
-    }
-    return NULL;
+    if (nr >= A20_SYSCALL_TABLE_SIZE)
+        return NULL;
+    return a20_syscall_index[nr];
 }

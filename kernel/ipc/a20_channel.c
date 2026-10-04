@@ -7,11 +7,15 @@
  * CH_PEER_TEARDOWN_PROTOCOL:
  * Both endpoints are freed independently once their refcount hits zero, so
  * all peer dereferences are serialized by g_ch_lock: an endpoint reads its
- * peer pointer under g_ch_lock, then takes peer->lock before dropping
- * g_ch_lock.  Release takes g_ch_lock and then peer->lock before kfree,
- * which guarantees a sender holding peer->lock never touches freed memory.
+ * peer pointer under g_ch_lock, then either takes peer->lock before dropping
+ * g_ch_lock, or -- on the paths that only read peer state -- takes a peer
+ * reference under g_ch_lock and uses peer->lock after dropping it, which the
+ * send and park paths already do.  Release takes g_ch_lock and then peer->lock
+ * before kfree, which guarantees a sender holding peer->lock never touches
+ * freed memory.
  */
 #include "core/types.h"
+#include "core/bootargs.h"
 #include "core/string.h"
 #include "core/klog.h"
 #include "core/lock.h"
@@ -44,8 +48,35 @@ struct ch_trace_ent {
 };
 static struct ch_trace_ent g_ch_trace[CH_TRACE_ENTRIES];
 static uint32_t g_ch_trace_idx;
+static int g_ch_trace_ready;
+static int g_ch_trace_on;
+
+/*
+ * CHTRACE_BOOTARG
+ *
+ * The ring exists to explain a crash, and a20_channel_trace_dump() is not
+ * reached from a hot path, so nothing on the send or receive side ever reads
+ * what it collects.  Recording unconditionally costs every send and every
+ * receive an atomic bump on one global, a timer read and two proc_current()
+ * lookups.  Recording is therefore opt-in through "chtrace" on the kernel
+ * command line, the way the syscall trace is gated on "trace=".
+ */
+static void ch_trace_init(void)
+{
+    const char *args = bootargs_get();
+    g_ch_trace_ready = 1;
+    if (!args || !strstr(args, "chtrace="))
+        return;
+    g_ch_trace_on = 1;
+    printf("[CHTRACE] enabled\n");
+}
+
 void a20_channel_trace(uint32_t op, uint32_t len, void *p1, void *p2, uint32_t meta)
 {
+    if (!g_ch_trace_ready)
+        ch_trace_init();
+    if (!g_ch_trace_on)
+        return;
     uint32_t i = __atomic_fetch_add(&g_ch_trace_idx, 1, __ATOMIC_RELAXED) %
                  CH_TRACE_ENTRIES;
     g_ch_trace[i].tick = timer_get_ticks();
@@ -58,6 +89,10 @@ void a20_channel_trace(uint32_t op, uint32_t len, void *p1, void *p2, uint32_t m
 }
 void a20_channel_trace_dump(void)
 {
+    if (!g_ch_trace_ready)
+        ch_trace_init();
+    if (!g_ch_trace_on)
+        return;
     uint32_t n = g_ch_trace_idx;
     uint32_t start = n > CH_TRACE_ENTRIES ? n - CH_TRACE_ENTRIES : 0;
     for (uint32_t i = start; i < n; i++) {
@@ -668,15 +703,22 @@ int a20_channel_writable(a20_channel_ep_t *ep)
         return 0;
 
     /* Sending on an endpoint enqueues into its peer.  Readiness therefore
-     * depends on the peer queue, not this endpoint's inbound queue. */
+     * depends on the peer queue, not this endpoint's inbound queue.  Only a
+     * reference is taken under g_ch_lock; the queue is inspected after the
+     * global lock is dropped, so a poll on one endpoint does not serialise
+     * against a send on any other. */
     spin_lock(&g_ch_lock);
     a20_channel_ep_t *peer = ep->peer;
-    if (peer)
-        spin_lock(&peer->lock);
-    int r = peer && !peer->peer_closed && peer->msg_count < peer->msg_cap;
-    if (peer)
-        spin_unlock(&peer->lock);
+    if (peer && !refcount_inc_not_zero(&peer->refcount))
+        peer = NULL;
     spin_unlock(&g_ch_lock);
+
+    if (!peer)
+        return 0;
+    spin_lock(&peer->lock);
+    int r = !peer->peer_closed && peer->msg_count < peer->msg_cap;
+    spin_unlock(&peer->lock);
+    a20_channel_ep_release(peer);
     return r;
 }
 

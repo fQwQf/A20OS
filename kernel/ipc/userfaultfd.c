@@ -156,20 +156,26 @@ static userfaultfd_t *userfaultfd_range_lookup(struct mm_struct *mm,
     return NULL;
 }
 
+/* Caller holds g_uffd_lock.  Split out so a caller clearing a whole range can
+ * hold the lock once instead of re-taking it per page. */
+static int uffd_range_present_locked(struct mm_struct *mm, uint64_t page_va)
+{
+    for (userfaultfd_range_t *r = g_uffd_ranges; r; r = r->gnext) {
+        if (r->mm == mm && (r->flags & UFFDIO_REGISTER_MODE_MISSING) &&
+            page_va >= (uint64_t)r->start && page_va < (uint64_t)r->end)
+            return 1;
+    }
+    return 0;
+}
+
 int userfaultfd_range_present(struct mm_struct *mm, uint64_t page_va)
 {
     if (!mm || g_uffd_range_count == 0)
         return 0;
     uint64_t flags = spin_lock_irqsave(&g_uffd_lock);
-    for (userfaultfd_range_t *r = g_uffd_ranges; r; r = r->gnext) {
-        if (r->mm == mm && (r->flags & UFFDIO_REGISTER_MODE_MISSING) &&
-            page_va >= (uint64_t)r->start && page_va < (uint64_t)r->end) {
-            spin_unlock_irqrestore(&g_uffd_lock, flags);
-            return 1;
-        }
-    }
+    int present = uffd_range_present_locked(mm, page_va);
     spin_unlock_irqrestore(&g_uffd_lock, flags);
-    return 0;
+    return present;
 }
 
 static void userfaultfd_enqueue_event_locked(userfaultfd_t *uffd,
@@ -529,16 +535,20 @@ static int uffd_io_unregister(userfaultfd_t *uffd, void *arg)
          * userfaultfd_range_present() walks the range list and takes
          * g_uffd_lock.  fault.c already calls it while holding mm->lock, so
          * mm->lock -> g_uffd_lock is the established order and this adds no
-         * new nesting. */
+         * new nesting.  Here the lock is taken once for the whole span: a
+         * per-page call made a 256 MiB unregister 65536 acquisitions of the
+         * one global lock and 65536 walks of the range list. */
         task_t *t = proc_current();
         if (t && t->mm) {
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+            uint64_t present_flags = spin_lock_irqsave(&g_uffd_lock);
             spin_lock(&t->mm->lock);
             for (vaddr_t p = rlo; p < rhi; p += PAGE_SIZE) {
-                if (!userfaultfd_range_present(t->mm, p))
+                if (!uffd_range_present_locked(t->mm, p))
                     (void)mm_pt_safe_clear_page(t->mm, p, MM_SAFE_UFFD);
             }
             spin_unlock(&t->mm->lock);
+            spin_unlock_irqrestore(&g_uffd_lock, present_flags);
 #endif
         }
         wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
@@ -556,9 +566,9 @@ static int uffd_io_wake(userfaultfd_t *uffd, void *arg)
     if (range.len == 0 || (range.start & (PAGE_SIZE - 1)) ||
         (range.len & (PAGE_SIZE - 1)))
         return -EINVAL;
-    for (uint64_t page = range.start; page < range.start + range.len;
-         page += PAGE_SIZE)
-        wait_queue_wake_all(&uffd->faulters, page, PROC_WAKE_EVENT);
+    /* The range is contiguous, so the parked faulters on it are released in
+     * one pass instead of re-taking the faulters lock once per page. */
+    wait_queue_wake_all(&uffd->faulters, 0, PROC_WAKE_EVENT);
     return 0;
 }
 
