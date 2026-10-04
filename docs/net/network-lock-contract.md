@@ -3,9 +3,9 @@
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
 > **更正：本文件此前多处写"两个锁从不同时持有"，这是错的。**
-> `net_inet_bottom_half_process_all()` 在 `kernel/net/socket_inet.c:871` 取
+> `net_inet_bottom_half_process_all()` 在 `kernel/net/socket_inet.c:1134` 取
 > `g_net_lock`，并在该临界区内调用 accept 落底；而
-> `net_inet_accept_stage_drain()` 在同文件 `607`/`616`/`640` 取 `a20_lwip_lock()`
+> `net_inet_accept_stage_drain()` 在同文件 `848`/`910`/`920` 取 `a20_lwip_lock()`
 > ——所以 **accept 路径上 `g_net_lock` 与 `g_lwip_lock` 是同时持有的**，顺序是
 > net → lwip。
 >
@@ -182,7 +182,7 @@ lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 **为什么禁分配，而不只是"规定如此"**：lwIP 的 `memp` 没有任何内部锁，它只在
 `g_lwip_lock` 这一个外部串行点下才安全（`net-lanes.md` 记录了同一个约束）。而
 `mm/objcache.c` 不能拿来当逃生口——它的 miss 路径会先 `spin_unlock` 再调普通
-`kmalloc()`（`objcache.c:40-41`），所以它对硬 IRQ 上下文不安全；只有命中 free list
+`kmalloc()`（`objcache.c:41-42`），所以它对硬 IRQ 上下文不安全；只有命中 free list
 的那条路径是无锁的，而 miss 必然发生。
 
 这条约束的**直接后果**是：`net_bh_ring` 只能把 `net_bh_event_t` 按值内嵌，无法改成

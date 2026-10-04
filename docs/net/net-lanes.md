@@ -81,12 +81,12 @@ IPv6 取地址低 32 位。熵足够分散连接，而关键在于它只由线�
 
 已建立连接不受影响，这是不对称性的唯一原因：
 
-- 被动开放：`tcp_listen_input()`（`tcp_in.c:678`）把**具体**的
+- 被动开放：`tcp_listen_input()`（`tcp_in.c:665`）把**具体**的
   `ip_current_dest_addr()` 拷进新 PCB
 - 主动开放：`tcp_connect()`（`tcp.c:1102`）在发 SYN 前先经 `ip_route()` 定出具体
   `local_ip`
 
-所以缺陷**只在 LISTEN 路径**（`tcp_in.c:320-353` 遍历 `tcp_listen_pcbs`），
+所以缺陷**只在 LISTEN 路径**（`tcp_in.c:339-420` 遍历 `tcp_listen_pcbs`），
 `tcp_active_pcbs` 与 `tcp_tw_pcbs` 的 4 元组精确匹配都是安全的。
 
 修法是**给通配 pcb 一个专用桶**，而不是让它同时进两个桶：
@@ -196,20 +196,20 @@ bound → listen → active → tw 之间换*链表*，从不在同一链表内�
 也一并改用它，否则通配 PCB 会在 close/abort/kill_timewait 路径上泄漏。
 
 热路径要无锁，就得让已建立 TCP 的收发不再遍历全局 PCB 链表。lwIP 2.2 的链表操作
-**已经宏抽象**（`tcp_priv.h:355` `TCP_REG`、`:370` `TCP_RMV`、`:417`/`:423`
+**已经宏抽象**（`tcp_priv.h:391` `TCP_REG`、`:406` `TCP_RMV`、`:453`/`:459`
 ACTIVE 变体），且表头是**参数**，所以分桶比"重写 TCP 查找"小得多：
 
 | 现在 | 之后 |
 |---|---|
 | `tcp_bound_pcbs`、`tcp_active_pcbs`（`tcp.c:171,176`） | `[NET_LANES]` |
-| `tcp_pcb_lists[]`（`tcp.c:181`，含 listen/bound/active/tw 四条） | 每条各一个数组 |
-| `udp_pcbs`（`udp.c:81`） | `[NET_LANES]` |
+| `tcp_pcb_lists[]`（`tcp.c:183`，含 listen/bound/active/tw 四条） | 每条各一个数组 |
+| `udp_pcbs`（`udp.c:83`） | `[NET_LANES]` |
 | — | `struct tcp_pcb` / `udp_pcb` 加 `u8_t lane` |
 | `tcp_lookup()` 四条链表全遍历 | 只进 `net_lane_of()` 那一个桶 |
 
 `NET_LANES == 1` 时全部退化为下标 0，行为不变 —— 这是这个补丁能安全落地的依据。
 
-lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:185`）这个代际标志，说明"用代际计数
+lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:187`）这个代际标志，说明"用代际计数
 替代遍历"在上游被认可。顺带一提：`kernel/net/netfilter.c` 的文件头曾**声称**有同款
 机制而代码里没有，已在另一提交中补上。
 
@@ -228,7 +228,7 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:185`）这个代际标志，�
 三条出路，各有代价，**都需要先做决定**：
 
 1. **放开契约**：允许 callback 走一条无锁的 per-CPU magazine 快路径。`obj_cache_t`
-   不能用——它 miss 路径会 `spin_unlock` 后调普通 `kmalloc()`（`objcache.c:40-41`），
+   不能用——它 miss 路径会 `spin_unlock` 后调普通 `kmalloc()`（`objcache.c:41-42`），
    不是硬 IRQ 安全。需要新写一个，并为其单独设门禁。
 2. **预分配池**：init 时按 lane/CPU 预填 `net_bh_event_t`（范式见 `mm/pt.c` 的
    `pt_mcs_pool_t`，注释明确"锁路径禁用抢占所以绝不能调分配器"）。代价是这批内存变成
@@ -249,10 +249,10 @@ ring size 与 inline payload，所以再加聚合断言是同义反复。
 不是计时器私有的**：
 
 - `tcp_timer`（快慢交替的奇偶计数）与 `tcp_timer_ctr`（本轮去重）确实只被 timer 读，
-  只在 `tcp_fasttmr` / `tcp_slowtmr` 里出现（`tcp.c:241,1250,1256,1547,1549`），
+  只在 `tcp_fasttmr` / `tcp_slowtmr` 里出现（`tcp.c:251,1263,1269,1560,1562`），
   按 lane 切开是自洽的。
 - `tcp_ticks` **不是**。它是整个协议栈的共享时基，而且在**收包与发包路径**上被写入：
-  `pcb->tmr = tcp_ticks`（`tcp_in.c:805,885`）、`pcb->rttest = tcp_ticks`
+  `pcb->tmr = tcp_ticks`（`tcp_in.c:809,889`）、`pcb->rttest = tcp_ticks`
   （`tcp_out.c:1543`）。读它的地方包括 keepalive、zero-window probe、persist、
   ooseq 超时、TIME_WAIT 的 MSL（`2 * TCP_MSL / TCP_SLOW_INTERVAL`）以及 RTT 估算。
 
@@ -329,8 +329,8 @@ make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
   返回**哨兵桶** `NET_PCB_LANE_ANY`（= `CONFIG_NET_LANES`，即 N）。
 
 也就是"socket 说 lane 2、PCB 在桶 4"。但它**不是**当前 panic 的原因：
-`net_socket_t::lane` 目前只被写、从不被读——`grep` 全树只有 `socket.c:30` 与
-`socket.c:386` 两处赋值，没有任何 dispatch、锁选择或桶索引用它。阶段 A 只留了字段，
+`net_socket_t::lane` 目前只被写、从不被读——`grep` 全树只有 `kernel/net/socket.c:30` 与
+`kernel/net/socket.c:389` 两处赋值，没有任何 dispatch、锁选择或桶索引用它。阶段 A 只留了字段，
 阶段 D 才会消费它。
 
 留在这里是因为它会在阶段 D 变成真 bug：一旦按 socket 的 lane 选处理 lane，
@@ -342,7 +342,7 @@ make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
 `tcp_active_pcbs` / `tcp_tw_pcbs` / `tcp_timer[]` / `tcp_timer_ctr[]` 全部声明为
 `[NET_PCB_LANE_BUCKETS]`（= N+1），而不是 `[CONFIG_NET_LANES]`；`tcp_pcb_lists[]`
 按状态索引后再按 lane 索引，元素类型是 `struct tcp_pcb **`，与这些数组匹配。
-`tcp_listen_pcbs` 的三处使用（`tcp.c:890,2475,2648`）也都以
+`tcp_listen_pcbs` 的三处使用（`tcp.c:895,2488,2661`）也都以
 `NET_PCB_LANE_BUCKETS` 为界。所以"`CONFIG_NET_LANES` 大小数组被 `NET_PCB_LANE_ANY`
 索引"这个猜测是错的。
 
@@ -370,11 +370,11 @@ LISTEN pcb"两个条件都对得上的路径。
 - `kernel/net/socket_inet.c` 的 accept 落底路径（`net_inet_accept_stage_drain`）在每一次
   `tcp_abort()`、`net_inet_tcp_apply_options()`、子 socket 拆除周围**都**取了
   `a20_lwip_lock()`；整个树里没有一处裸调 `tcp_abort`。
-- RST 生成侧：`tcp_abort()` 的调用点（`tcp_in.c:479,644`）本身带
+- RST 生成侧：`tcp_abort()` 的调用点（`tcp_in.c:531,1004`）本身带
   `LWIP_ASSERT_CORE_LOCKED()`，虽然断言是空的，但取锁由上层
   `a20_lwip_process_netif_rx_tx_locked()` 保证。
 - netif 地址变更侧：`a20_lwip_if_set_addr()` 在 `netif_set_ipaddr()` **之前**就取了锁
-  （`kernel/net/lwip_stack.c:969`），所以会触发 `tcp_listen_pcb_rebucket()` 的跨 lane
+  （`kernel/net/lwip_stack.c:1045`），所以会触发 `tcp_listen_pcb_rebucket()` 的跨 lane
   搬动是在锁内的。
 - `lwip_tcp_accept_cb()` 生产者用 release fence + acquire load 配对，是正确的 SPSC
   无锁 ring；`net_inet_bottom_half_process_all()` 只持 `g_net_lock` 但它不碰 lwIP core。
@@ -408,13 +408,13 @@ accept、计时器或 PCB 增删路径上**。
 
 **但这不足以证伪"某处忘了取 `g_lwip_lock`"**——我先前写得过强，已更正。原因是探针
 只能看见**存在断言**的函数：`tcp.c` 里 45 个函数没有 `LWIP_ASSERT_CORE_LOCKED()`，
-其中就包括 **`tcp_abort()`（`tcp.c:650`）**——而 RST/abort 正是
+其中就包括 **`tcp_abort()`（`tcp.c:654`）**——而 RST/abort 正是
 `tcp_pcb_remove` 崩溃的路径。也就是说，探针对最可疑的那条路径是**盲的**，它的 0 违规
 对它不构成任何证据。
 
 这个盲点是可以补的，而且成本很低：给这些入口补上断言（或者统一在一个 wrapper 里
 断言），再跑一次同样的探针，盲区就变成覆盖区。目前 `tcp_abort` 的调用方逐个查过
-（`socket_inet.c:575`、`tcp_in.c:527,1000`、`altcp_tcp.c:310`）都在 `g_lwip_lock`
+（`socket_inet.c:729`、`tcp_in.c:531,1004`、`altcp_tcp.c:310`）都在 `g_lwip_lock`
 下，所以它**可能**仍是安全的——但那是读代码得出的，不是探针测出来的，两者不能混为一谈。
 
 另：`tcp_kill_state` / `tcp_kill_prio` / `tcp_kill_timewait` 会遍历所有 lane，是与
@@ -690,8 +690,8 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 2. 让 memp 自己按"当前 lane"索引 pool 数组 —— 但**当前 lane 从哪来是个坑**。
 
 第2 条正是本次已经踩过两次的坑：lane 有两套来源。socket 层用绑定地址/端口
-（`NET_PCB_LANE_OF_PCB`，权威值，`socket_inet.c:212`的`net_socket_lane_of_addr()`），
-而 `socket.c:30` 那个 `s->lane = net_lane_of_cpu(cpu_current_id())` 注释明写
+（`NET_PCB_LANE_OF_PCB`，权威值，`socket_inet.c:213`的`net_socket_lane_of_addr()`），
+而 `kernel/net/socket.c:30` 那个 `s->lane = net_lane_of_cpu(cpu_current_id())` 注释明写
 "Provisional only"。若 memp 用 `cpu_current_id() % CONFIG_NET_LANES` 选池，
 就会**重新引入"CPU 派生 lane"与"地址派生 lane"两套语义**——那正是
 `16304db8` / `f7f3d670` 两类 bug 的根源。
@@ -762,7 +762,7 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
   `a20_lwip_poll_timers_locked()`，它遍历 `netif_list` 对 `loop_first != NULL` 的
   netif 调 `netif_poll()`（`lwip_stack.c:574`）。
 - **该排空只在 CPU 0 上发生**：`kernel_progress_timer_tick()` 开头就是
-  `if (cpu_current_id() != 0) return;`（`progress.c:47`）。理由是 NO_SYS 下
+  `if (cpu_current_id() != 0) return;`（`progress.c:95`）。理由是 NO_SYS 下
   lwIP 只有一把全局 core lock，让每个空闲 CPU 都去轮询会变成锁护航。
 - `LWIP_LOOPBACK_MAX_PBUFS` 在 `opt.h:1800` 默认为 `0`，而 `netif.c` 里限流判断
   写在 `#if LWIP_LOOPBACK_MAX_PBUFS` 内（1154-1166），所以**当前没有队列上限**。
@@ -796,7 +796,7 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
   （`tcp_priv.h:339`、`tcp.c:178`），即每 lane 一个链表头；
 - `tcp_slowtmr()` 已经是按 lane 遍历 `tcp_tw_pcbs[lane]`（`tcp.c:1505`）；
 - TIME-WAIT pcb 在建链前就打好 lane 戳：`npcb->lane = NET_PCB_LANE_OF_PCB(npcb)`
-  （`tcp_in.c:739`），而 `tcp_input.c:1052/1070/1080` 三处 `state = TIME_WAIT`
+  （`tcp_in.c:739`），而 `tcp_in.c:1052/1070/1080` 三处 `state = TIME_WAIT`
   都在这之后，因此进桶依据与桶数组下标一致。
 
 **所以阶段 C 剩下的只有 per-lane pbuf pool**：目前 `MEMP_NUM_PBUF` 由

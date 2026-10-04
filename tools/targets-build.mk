@@ -245,6 +245,7 @@ check-doc-drift:
 	@$(PYTHON) tools/gates.py check-doc-drift
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
 	@$(PYTHON) tools/gates.py check-doc-drift --segment 1
+	@$(PYTHON) tools/check_doc_citations.py
 	@echo "check-doc-drift: PASS"
 
 check-task-lifetime-boundary:
