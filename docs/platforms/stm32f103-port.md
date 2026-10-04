@@ -11,7 +11,7 @@ STM32F103 是 ARMv7-M/Cortex-M3、无 MMU 的 bring-up profile。它复用 A20OS
 - `kernel/platform/stm32f103`：clock/memory 配置、NVIC-facing board 操作、外部 IRQ 路由、board/device 组合。
 - `kernel/mcu`：小内存 kernel profile 和 allocator。
 
-MCU profile 链接通用调度器和一小部分 NOMMU/VFS，但不包含完整网络或 VM 子系统。STM32F103 通常只有 20 KiB SRAM 且无 MMU，所以这些设施需要嵌入式配置层，而不是只加新 CPU 和设备驱动。源码实现 reset/data/BSS 设置、UART、IRQ、1 kHz SysTick、抢占式任务调度、设备服务任务和动态分配；实际板上行为需按“硬件 smoke test”重新验证。
+MCU profile 链接通用调度器和一小部分 NOMMU/VFS，但不包含完整网络或 VM 子系统。STM32F103 通常只有 20 KiB SRAM 且无 MMU，所以这些设施需要嵌入式配置层，而不是只加新 CPU 和设备驱动。源码实现 reset/data/BSS 设置、UART、IRQ、1 kHz SysTick、抢占式任务调度、设备服务任务和动态分配；实际板上行为需按“硬件 smoke test”重新验证。MCU profile 的策展源码清单、能力矩阵与 `-Os`/`CONFIG_MCU` 等构建参数声明在 `components/trim.toml`（`[profile.mcu]`，经生成的 `components/trim.mk` 喂给 Makefile）；`tools/a20 trim stm32f103` 可查看该实例推导出的完整剪裁计划。
 
 ## 构建固件
 

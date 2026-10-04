@@ -71,13 +71,13 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
 
 ### 关于 NOMMU
 
-`NOMMU_SUPPORTED_ARCHES = riscv64 riscv32 aarch64 arm32 armv7m`，无分页路径在这些架构上是真实存在的代码路径（mm/proc/ipc/abi 共 173 处），不是仅能启动的 stub。小内存板（如 Milk-V Duo 的 64 MiB）应当走 NOMMU：
+`NOMMU_SUPPORTED_ARCHES = riscv64 riscv32 aarch64 arm32 armv7m`（声明在 [components/trim.toml](components/trim.toml) 的能力矩阵，经生成的 `components/trim.mk` 进入构建），无分页路径在这些架构上是真实存在的代码路径（mm/proc/ipc/abi 共 173 处），不是仅能启动的 stub。小内存板（如 Milk-V Duo 的 64 MiB）应当走 NOMMU：
 
 ```sh
 make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 ```
 
-`tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口。
+`tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口；`make check-trim-registry` 保证实例校验与构建读到的矩阵不漂移。
 
 ## 构建与运行
 

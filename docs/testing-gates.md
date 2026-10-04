@@ -22,6 +22,7 @@
 | ABI 边界 | `make check-abi-boundary` |
 | 驱动核心 | `make check-driver-core-model` |
 | 外部依赖 | `make check-external-dependency-boundary` |
+| 剪裁注册表 | `make check-trim-registry`（`components/trim.toml` 自洽、生成的 `components/trim.mk` 不过期、每个发射变量都有 makefile 消费者；并入 `check-manifests`） |
 | 架构边界 | `make check-arch-boundary` |
 | SMP 平台边界 | `make check-smp-platform-boundary` |
 | 上游包运行（Alpine gcc 经 chroot 编译+运行） | `make smoke-devtools`（需网络拉取上游包，守护 trap.S sp 守卫修复） |
@@ -514,7 +515,7 @@ a20.xlator.aarch64=/bin/xlate_shim
 - 每个 ABI 列是 `XLATOR_ABI_LINUX` 或 `XLATOR_ABI_NATIVE`，并且 `XLATOR_ABI_X` 在 `kernel/include/mm/elf.h` 里真有对应的 `ELF_ABI_X`；
 - 每个 `(名字, ABI)` 二元组只出现一次——**同一个名字出现两次是合法的**（一个架构注册两个 ABI），重复的是**二元组**；
 - 每个默认 argv 模板只用了内核认识的那三个记号（`@A` / `@P` / `@*`），并且出现了 `@P`；
-- `Makefile` 的 `XLATOR_SUPPORTED_ARCHES` 里每个架构都实现了 `arch_bootargs_get()`。
+- `components/trim.toml` 的 xlator capability（经 `components/trim.mk` 喂给 `Makefile` 的 `XLATOR_SUPPORTED_ARCHES`）里每个架构都实现了 `arch_bootargs_get()`。
 
 第四条挡住的是一类特别安静的错：`.def` 是 X-macro，不 `#include` 任何东西，所以 `XLATOR_ABI_NATIVE` 拼错**不会编译失败**——它只是一个没人认领的 `uint8_t`，而 `xlator_lookup()` 比的是 `key->abi`，于是那一行永远匹配不上，那个 guest 的每一次 `execve` 都返回 `ENOEXEC`，启动日志也不会点名。已负向验证过：把 ABI 列临时写成 `XLATOR_ABI_NATIVEY`，门禁 FAIL 并说明「`xlator_lookup()` 按 `(e_machine, ABI)` 查，这一行永远匹配不上」。
 
@@ -522,7 +523,7 @@ a20.xlator.aarch64=/bin/xlate_shim
 
 第六条是对内核 `xlator_parse_template()` 的复述，不是第二个实现——内核才是权威并在启动时就地拦截，这条只是让同样的笔误在一秒内在宿主上暴露而不是在目标机启动日志里。已负向验证过：未知记号与缺 `@P` 各自 FAIL 且报错不同，`--argv0=@A @P @*` 这种记号粘字面量的写法 PASS。
 
-第七条查的是另一类「名义支持」：架构进了 `XLATOR_SUPPORTED_ARCHES` 只说明 `CONFIG_XLATOR` 编进去了，而通道**能不能被配置**是另一件事——唯一配置入口是 `bootargs_get()`，没有 `arch_bootargs_get()` 的架构会落到 `kernel/core/bootargs.c` 里返回 NULL 的弱默认，于是那个架构上所有 `a20.*` 键全部读作不存在。`loongarch64` 在这条通道的整个生命周期里都是这个状态：它在 `XLATOR_SUPPORTED_ARCHES` 里、`/proc/a20/xlator` 也注册了，可没有一条 `a20.*` 键能生效。显式写一个返回 NULL 的桩是允许的（`arm32` 与 `loongarch32` 就是有意为之，它们根本没有 FDT 通路）；这条拒绝的是**静默**回落——架构从没做过这个决定。已负向验证过：临时删掉 loongarch64 的实现即 FAIL 并指名道姓。
+第七条查的是另一类「名义支持」：架构进了 xlator capability（`components/trim.toml`）只说明 `CONFIG_XLATOR` 编进去了，而通道**能不能被配置**是另一件事——唯一配置入口是 `bootargs_get()`，没有 `arch_bootargs_get()` 的架构会落到 `kernel/core/bootargs.c` 里返回 NULL 的弱默认，于是那个架构上所有 `a20.*` 键全部读作不存在。`loongarch64` 在这条通道的整个生命周期里都是这个状态：它在 `XLATOR_SUPPORTED_ARCHES` 里、`/proc/a20/xlator` 也注册了，可没有一条 `a20.*` 键能生效。显式写一个返回 NULL 的桩是允许的（`arm32` 与 `loongarch32` 就是有意为之，它们根本没有 FDT 通路）；这条拒绝的是**静默**回落——架构从没做过这个决定。已负向验证过：临时删掉 loongarch64 的实现即 FAIL 并指名道姓。
 
 新增或修改 guest 时的正确顺序：先改 `.def`，再改 `targets-xlator.mk`，然后 `make check-xlator-guests`。
 
