@@ -1332,6 +1332,7 @@ include tools/targets-native.mk
 include tools/targets-native-smoke.mk
 include tools/targets-mlibc.mk
 include tools/targets-xlator.mk
+include tools/targets-bench.mk
 
 # ================================================================
 # Documentation
