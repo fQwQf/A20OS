@@ -1200,13 +1200,17 @@ int64_t sys_reboot(uint64_t magic1, uint64_t magic2, uint64_t cmd) {
                   (unsigned long)mm_seg_miss_why[3],
                   (unsigned long)mm_seg_miss_why[4],
                   (unsigned long)mm_seg_miss_why[5]);
-            kinfo("[MM-ASM]   annot lost: table_full=%lu nibbles_full=%lu "
-                  "full_by_level=[%lu,%lu,%lu]\n",
+            kinfo("[MM-ASM]   annot lost: table_full=%lu nibbles_full=%lu\n",
                   (unsigned long)mm_seg_annot_lost[0],
-                  (unsigned long)mm_seg_annot_lost[1],
-                  (unsigned long)mm_seg_full_lvl[0],
-                  (unsigned long)mm_seg_full_lvl[1],
-                  (unsigned long)mm_seg_full_lvl[2]);
+                  (unsigned long)mm_seg_annot_lost[1]);
+            /* One line per level rather than three inline slots: the array has
+             * eight entries and the inline form silently hid levels 3..7,
+             * which is precisely where a loss is fine-grained rather than a
+             * statement about the root table's four gigabytes. */
+            for (int _l = 0; _l < 8; _l++)
+                if (mm_seg_full_lvl[_l])
+                    kinfo("[MM-ASM]     full at level %d: %lu\n", _l,
+                          (unsigned long)mm_seg_full_lvl[_l]);
             if (rep.vma_mismatch)
                 kinfo("[MM-ASM]   first vma_mismatch  va=0x%lx\n",
                       (unsigned long)rep.vma_bad_va);

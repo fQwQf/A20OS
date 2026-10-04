@@ -476,14 +476,18 @@ static mm_segtab_t *segtab_attach_locked(pt_meta_t *m)
 {
     if (m->segtab)
         return m->segtab;
-    pfn_t pfn = pfa_alloc_page();
-    if (pfn == PFN_NONE)
+    /* One block holding the segtab and its index together, so the index needs
+     * no second allocation and no second failure path: a segtab with no index
+     * is not a segtab.  kcalloc rather than a frame, which is what lets the
+     * index width be a chosen number -- see MM_SEGTAB_NAMES. */
+    mm_segtab_t *st = kcalloc(1, sizeof(*st) +
+                              (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
+    if (!st)
         return NULL;
-    mm_segtab_t *st = (mm_segtab_t *)pfn_to_virt(pfn);
-    memset(st, 0, sizeof(*st));
+    st->idx = (uint8_t *)(st + 1);
     st->arr = segarr_alloc();
     if (!st->arr) {
-        pfa_free(pfn, 0);
+        kfree(st);
         return NULL;
     }
     m->segtab = st;
@@ -503,7 +507,10 @@ static void segtab_detach_locked(pt_meta_t *m)
         return;
     m->segtab = NULL;
     segarr_put(st->arr);
-    pfa_free(virt_to_pfn(st), 0);
+    /* idx is not a separate allocation -- it is the tail of this block, so
+     * freeing the segtab frees both and there is no second pointer to get
+     * wrong. */
+    kfree(st);
 }
 
 /* Find or add `s` in the node page's shared array, returning its 1-based slot,
@@ -556,15 +563,6 @@ static uint8_t segtab_slot(mm_segtab_t *st, mm_seg_t *s)
  * mappings that share an entry therefore stay separately answerable, and the
  * fallback to the VMA is reserved for the addresses where the answer really is
  * ambiguous. */
-/* The segtab comes from one order-0 frame (see segtab_attach_locked), so a
- * larger idx[] silently overruns it rather than failing an allocation.  Caught
- * the hard way, twice: when the segment array was still inline the struct at
- * 16 slots was 4229 bytes, and at 8 names per entry it is 4104 -- each time the
- * guest died in proc_put on a wild pointer rather than saying anything about
- * segments.  This assert is what keeps the next attempt from rediscovering it by
- * experiment. */
-_Static_assert(sizeof(mm_segtab_t) <= 4096,
-               "mm_segtab_t no longer fits in the single frame it is allocated from");
 /* The shared array is a frame of its own and holds MM_SEGTAB_MAX whole slot
  * pointers, so it has the same bound. */
 _Static_assert(sizeof(struct mm_segarr) <= 4096,
@@ -863,7 +861,12 @@ int mm_pt_meta_clone(pte_t *dst_table, pte_t *src_table, int level)
         for (uint8_t i = 0; i < sa->n; i++)
             st->arr->seg[i] = mm_seg_get(sa->seg[i]);
         st->arr->n = sa->n;
-        memcpy(st->idx, src->segtab->idx, sizeof(st->idx));
+        /* An explicit element count, because idx is a pointer now and
+         * sizeof(st->idx) is the size of the pointer -- which would have
+         * copied sixteen bytes of unrelated struct and left the index
+         * uninitialised. */
+        memcpy(st->idx, src->segtab->idx,
+               (size_t)MM_PT_META_ENTRIES * MM_SEGTAB_NAMES);
     }
     return 0;
 }
@@ -1143,10 +1146,22 @@ static int seg_annotate_rec(pte_t *table, int level, vaddr_t start,
              * entry is much coarser than a mapping, so two of them can
              * legitimately share it.  Lookup picks between them by extent. */
             if (!segtab_entry_names(st, i, slot)) {
-                if (!segtab_entry_name(st, i, slot))
+                if (!segtab_entry_name(st, i, slot)) {
+                    /* Record the level here too.  It used to be recorded only
+                     * on the shared-array-full branch above, which made the
+                     * level histogram describe a different event than the
+                     * counter it sat next to: mm_seg_full_lvl[] read
+                     * [0,0,0] while mm_seg_annot_lost[1] read 4329.  The
+                     * level is the whole question -- names lost at the root
+                     * mean 7 mappings per GiB, names lost two levels down mean
+                     * 7 per 4 KiB -- so a histogram that cannot tell them apart
+                     * cannot tell whether the losses are coarse or fine. */
                     mm_seg_annot_lost[1]++;
-                else
+                    if (level < 8)
+                        mm_seg_full_lvl[level]++;
+                } else {
                     annotated = 1;
+                }
             }
         }
         /* No slot here -- either the attachment failed or this node page's

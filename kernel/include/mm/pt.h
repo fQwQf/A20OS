@@ -264,40 +264,45 @@ struct mm_segarr;
  * segment array was split out, and conflating them is what made this a
  * capacity problem when it was a sharing one (see below).
  *
- * The width is the frame's ceiling, not a chosen number, so it is computed
- * from the geometry rather than written down: idx[] is one byte per name per
- * PT entry and lives in a single order-0 frame alongside `arr`, so the frame
- * holds PAGE_SIZE bytes and PT entries is MM_PT_META_ENTRIES.  The segtab's own
- * refcount was dropped to buy back the eight bytes that cost.
+ * It used to be the frame's ceiling rather than a chosen number, computed as
+ * (PAGE_SIZE - sizeof(arr)) / MM_PT_META_ENTRIES because idx[] lived inside the
+ * segtab, which was one order-0 frame.  That made a policy number a function of
+ * somebody else's memory layout: seven on the 512-entry node pages of
+ * Sv39/Sv48, and on riscv32's 1024-entry pages seven names each is 7176 bytes,
+ * so the static assert refused to compile it at all.  arm32 (256 non-root
+ * entries) and ppc64le (512) landed on 15 and 7 without anyone deciding what
+ * they should be.  A constant tuned to one architecture's page-table shape is a
+ * constant that is wrong somewhere else.
  *
- * Deriving it is what lets the table exist on more than one architecture.  It
- * was hardcoded at seven, which is right for the 512-entry node pages of
- * Sv39/Sv48 (3592 of 4096 bytes) and 4104 -- an overrun -- at eight, but
- * riscv32 has 1024-entry node pages, so seven names each is 7176 bytes and the
- * static assert in pt.c refused to compile it.  A constant tuned to one
- * architecture's page-table shape is a constant that is wrong somewhere else;
- * arm32 (256 non-root entries) and ppc64le (512) land on 15 and 7
- * respectively without anyone deciding what they should be.
+ * The index is now its own allocation (see idx[] below), so this is an ordinary
+ * chosen number that costs one byte per name per PT entry of a page-table page
+ * that is actually annotated, rather than a whole frame reserved for every one.
+ * That is the trade the frame forced and nobody chose: 4 KiB reserved per node
+ * page to hold at most 3592 bytes of index, and the leftover thrown away.
  *
- * Measured, one step at a time -- each step moves the ceiling rather than
- * removing it, which is why the limits are measured rather than assumed:
+ * Measured, one step at a time, each row a real gate run, all counting
+ * seg_fallback out of ~44k dispatches:
  *
- *     4 names/entry, 8 shared slots   seg_miss 1992   nibbles_full    0
- *     4 names/entry, 255 shared slots seg_miss  ~900  nibbles_full 5900
- *     7 names/entry, 255 shared slots seg_miss  ~270  nibbles_full 2900
+ *     4 names/entry, 8 shared slots    fallback 1992   nibbles_full    0
+ *     4 names/entry, 255 shared slots  fallback  ~900  nibbles_full 5900
+ *     7 names/entry, 255 shared slots  fallback 1036   nibbles_full 3918
+ *    16 names/entry (index split out)  fallback  796   nibbles_full 1992
+ *    32 names/entry (index split out)  fallback  767   nibbles_full  159
  *
- * What is left is not a bug to be tuned away.  A node entry is 2 MiB on Sv39,
- * so naming a mapping means naming it at 2 MiB resolution: an entry holding
- * more than seven distinct mappings cannot say which is which, and the lookup
- * correctly declines rather than guessing.  Closing that needs finer
- * resolution -- annotating the leaf, or splitting the index out of the frame --
- * not a larger constant. */
-#define MM_SEGTAB_NAMES                                                     \
-    ((int)(((PAGE_SIZE - sizeof(struct mm_segarr *)) /                      \
-            (size_t)MM_PT_META_ENTRIES) > (size_t)MM_SEGTAB_MAX             \
-           ? (size_t)MM_SEGTAB_MAX                                          \
-           : ((PAGE_SIZE - sizeof(struct mm_segarr *)) /                    \
-              (size_t)MM_PT_META_ENTRIES)))
+ * The 7-name row broken down by level is the number that says what those losses
+ * meant: 749 at level 1 and 3169 at level 2, none at the root.  So the annotate
+ * walk does reach 2 MiB resolution, and what runs out is entries holding more
+ * than seven distinct mappings.
+ *
+ * Sixteen halved the losses and thirty-two nearly ended them, and that is the
+ * point at which this stops being a capacity question: at 159 losses the index
+ * is no longer the binding constraint, and the residual fallback is dominated
+ * by MM_MW_EXTENT (625 of 767) -- an entry naming something that does not cover
+ * the address, which is the resolution limit below rather than a shortage of
+ * names.  Thirty-two is the width to ship: past it, each doubling buys coverage
+ * the index never had (16 KiB of it per annotated PT page) while the misses it
+ * would remove are the ones no width can remove. */
+#define MM_SEGTAB_NAMES 32
 
 /* Distinct segments nameable by one page-table page's shared array.  A node
  * entry is 2 MiB at level 1 on Sv39, so one node page spans a gigabyte and its
@@ -316,10 +321,20 @@ struct mm_segarr;
  *
  * NO refcount, unlike the mm_segarr beside it.  A segtab is owned by exactly
  * one pt_meta_t, which frees it when that PT page goes away, so a count would
- * be written once and never read.  Dropping it is what buys the eight bytes
- * a wider index needs: with the field still here the struct is 4104 bytes even
- * at MM_SEGTAB_NAMES=8, which overruns the order-0 frame it is allocated from
- * by exactly eight. */
+ * be written once and never read.
+ *
+ * Two allocations rather than one, which is the whole point of this struct
+ * having changed shape: `arr` and `idx` were both inline in an order-0 frame,
+ * so the index width was whatever the frame had left over after the pointer --
+ * MM_SEGTAB_NAMES was frame arithmetic wearing a policy's clothes, and raising
+ * it meant either overrunning the frame or landing on a different number per
+ * architecture.  Now `arr` is a pointer to a refcounted array and `idx` is a
+ * pointer to an allocation sized exactly MM_PT_META_ENTRIES * MM_SEGTAB_NAMES,
+ * so the width is chosen once in one place and the two sizes move independently.
+ *
+ * Both are kcalloc'd rather than frame-backed: a segtab exists only on the PT
+ * pages that actually carry a named mapping, and reserving a 4 KiB frame for
+ * one to hold 512 bytes of mostly-zero index was the cost of the old layout. */
 typedef struct mm_segtab {
     /* The segments named by this node page's entries, shared by all of them.
      * Refcounted: several node pages can be annotated from one mmap, so the
@@ -328,27 +343,21 @@ typedef struct mm_segtab {
     /* Index is 1-based so that 0 means "no segment", which is also the state
      * of every entry in a table that never needed one.
      *
-     * SIX bytes per entry: MM_SEGTAB_NAMES eight-bit slot numbers.  It was
-     * ONE byte holding four-bit slots, and the packer cast its result back to
-     * that width, so slots three and four were written and read back as
-     * nothing.  Nothing could detect it -- the annotate walk, the lookup and
-     * the auditor all read back the same truncated byte -- and it showed up as
-     * a seg_miss that no amount of walking would close.  segtab_packed_t in
-     * pt.c exists so the next width mistake is a compile error.
+     * ONE byte per name: eight-bit slot numbers.  It was ONE byte holding
+     * four-bit slots, and the packer cast its result back to that width, so
+     * slots three and four were written and read back as nothing.  Nothing
+     * could detect it -- the annotate walk, the lookup and the auditor all read
+     * back the same truncated byte -- and it showed up as a seg_miss that no
+     * amount of walking would close.  segtab_packed_t in pt.c exists so the
+     * next width mistake is a compile error.
      *
-     * The segtab is allocated from a SINGLE order-0 frame and this array is
-     * 512 entries of it, so the static assert in pt.c is what stops the whole
-     * structure from quietly overrunning that frame -- which surfaces as a wild
-     * pointer in proc_put, not as anything to do with segments. */
-    /* Six bytes, not eight: see MM_SEGTAB_NAMES.  A byte array rather than a
-     * packed integer, so the slot accessors index it directly and a width
-     * mistake is a compile error instead of a silent truncation. */
-    uint8_t      idx[MM_PT_META_ENTRIES * MM_SEGTAB_NAMES];
+     * A byte array rather than a packed integer, so the slot accessors index it
+     * directly and a width mistake is a compile error instead of a silent
+     * truncation.  Owned: freed with the segtab in segtab_detach_locked(). */
+    uint8_t          *idx;
 } mm_segtab_t;
 
-_Static_assert(MM_SEGTAB_NAMES >= 1,
-               "a node page too wide to name even one mapping per entry; the "
-               "segtab needs more room than one frame gives it");
+_Static_assert(MM_SEGTAB_NAMES >= 1, "a node entry must be able to name something");
 _Static_assert(MM_SEGTAB_MAX <= 255, "a slot number must fit the byte idx[] gives it");
 
 /*
