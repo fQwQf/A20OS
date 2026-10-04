@@ -14,6 +14,7 @@
 #include "core/consts.h"
 #include "core/lock.h"
 #include "core/perf.h"
+#include "core/progress.h"
 #include "core/sync.h"
 #include "core/timer.h"
 #include "proc/proc.h"
@@ -624,6 +625,9 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
         wmb();
         vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
         mb();
+        /* Tell the progress bridge a completion is now outstanding, so the
+         * scheduler/idle pass actually walks this device. */
+        kernel_progress_note_pending(KERNEL_PROGRESS_PENDING_DEVICE);
         return 0;
     }
 
@@ -665,6 +669,7 @@ static int virtio_blk_submit_req(virtio_blk_inst_t *inst, virtio_blk_req_t *req,
 
     vt->write32(vt, VIRTIO_MMIO_QUEUE_NOTIFY, 0);
     mb();
+    kernel_progress_note_pending(KERNEL_PROGRESS_PENDING_DEVICE);
     return 0;
 }
 

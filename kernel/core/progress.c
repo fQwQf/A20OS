@@ -46,11 +46,13 @@ extern void virtio_net_poll_rx_all_bounded(unsigned budget) __attribute__((weak)
  *   unless a device signalled work.
  */
 
-#define KERNEL_PROGRESS_PENDING_DEVICE (1u << 0)
-
-/* Fallback re-arm interval, in timer ticks, for the device bit.  Bounds how
- * long a completion can be deferred when no producer has notified. */
-#define KERNEL_PROGRESS_FALLBACK_TICKS (clock_ticks_per_sec() / 10)
+/* Fallback re-arm interval for the device bit, counted in timer IRQs.  It
+ * bounds how long a completion can be deferred when a producer missed its
+ * notification.  Scaling this by clock_ticks_per_sec() is wrong: that reports
+ * the timer's *counter* frequency (1 GHz on qemu-virt), not the IRQ rate, so
+ * the interval became ~10^8 IRQs and the bit was never re-armed in practice.
+ * A fixed small count of IRQs is the honest unit. */
+#define KERNEL_PROGRESS_FALLBACK_TICKS 8u
 
 static _Atomic uint32_t g_progress_pending;
 static uint64_t g_progress_fallback_ticks;
