@@ -127,11 +127,10 @@ int net_alg_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     if (!net_alg_name_supported(type, name))
         return -ENOENT;
 
-    /* One socket, one bucket. */
-    int sb = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(sb);
+    /* One socket, one lock. */
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(sb, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     memcpy(s->local, bind_addr, addrlen);
@@ -141,7 +140,7 @@ int net_alg_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     strncpy(s->alg_name, name, sizeof(s->alg_name) - 1);
     s->alg_name[sizeof(s->alg_name) - 1] = '\0';
     s->bound = 1;
-    net_bucket_unlock(sb, flags);
+    net_sock_unlock(s, flags);
     return 0;
 }
 
@@ -164,7 +163,7 @@ int net_alg_socket_accept(net_socket_t *s, size_t *addrlen, int flags)
     strncpy(child->alg_type, s->alg_type, sizeof(child->alg_type) - 1);
     strncpy(child->alg_name, s->alg_name, sizeof(child->alg_name) - 1);
 
-    /* No bucket lock held: net_register_socket_locked() takes a socket-table
+    /* No net lock held: net_register_socket_locked() takes a
      * shard itself and must not be nested under another socket's bucket. */
     int r = net_register_socket_locked(child);
     if (r < 0) {

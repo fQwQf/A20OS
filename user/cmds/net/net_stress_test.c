@@ -7,9 +7,21 @@
  * per-CPU lock traffic overlaps.
  *
  * Integrity is checked with an additive checksum, not just a byte count, so a
- * transfer that completes with the wrong bytes fails instead of passing. */
+ * transfer that completes with the wrong bytes fails instead of passing.
+ *
+ * The one thing this test is NOT is a tier-agnostic pass/fail.  Each worker
+ * needs three sockets alive at once -- the forked server's listener, the child
+ * it accepts, and the client's connect -- so the workload's floor is
+ * WORKERS * 3.  On a profile whose socket table is smaller than that floor the
+ * run cannot succeed no matter what the stack does, and the honest output is a
+ * SKIP naming the two numbers rather than a FAIL that reads like a stack bug
+ * or a PASS earned by luck when the workers happen not to peak together.  The
+ * ceiling is read from the kernel rather than compiled in: the userland build
+ * is not rebuilt per NET_PROFILE (Makefile's USER_BUILD_ID does not contain
+ * it), so a compiled-in constant would silently go stale. */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +36,43 @@
 #define CHUNK     (32 * 1024)
 #define ROUND_LEN (1024 * 1024)
 #define PORT_BASE 23400
+
+/* Concurrent sockets the workload needs: listener + accepted child + client,
+ * per worker.  Spelled as a product of the two so the SKIP line and the
+ * derivation cannot drift apart. */
+#define SOCKETS_PER_WORKER 3
+#define SOCKETS_NEEDED     (WORKERS * SOCKETS_PER_WORKER)
+
+/*
+ * The kernel's socket-table ceiling, from "syscall-sockets: ... max=N" on
+ * /proc/net/status.  Returns 0 when it cannot be read -- an older kernel, a
+ * procfs that is not mounted, or a read that failed -- and the caller then runs
+ * the test anyway rather than skipping on absent evidence.  Skipping because a
+ * number could not be fetched would turn a working test into a silent no-op.
+ */
+static int socket_table_ceiling(void)
+{
+    static char buf[8192];
+    char *p;
+    int fd = open("/proc/net/status", O_RDONLY);
+    ssize_t n;
+
+    if (fd < 0)
+        return 0;
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    buf[n] = '\0';
+
+    p = strstr(buf, "syscall-sockets:");
+    if (!p)
+        return 0;
+    p = strstr(p, " max=");
+    if (!p)
+        return 0;
+    return (int)strtol(p + 5, NULL, 10);
+}
 
 static unsigned long chunk_tag(size_t off, unsigned long seed)
 {
@@ -200,6 +249,22 @@ int main(void)
 {
     pid_t kids[WORKERS];
     int started = 0;
+    int ceiling = socket_table_ceiling();
+
+    /* Not a failure and not a pass: the profile cannot hold the workload, and
+     * it never could.  Exit status 0 because nothing was broken and nothing
+     * was proven -- every gate that wants a verdict keys on the literal
+     * 'NET_STRESS_TEST: PASS', which this line deliberately is not, so a tier
+     * too small for the test fails those gates instead of being read as
+     * tested. */
+    if (ceiling > 0 && ceiling < SOCKETS_NEEDED) {
+        printf("NET_STRESS_TEST: SKIP (socket table ceiling %d < %d concurrent "
+               "sockets required: %d workers x %d (listener + accepted child + "
+               "client)); tier too small for this workload, upper limits left "
+               "as configured\n",
+               ceiling, SOCKETS_NEEDED, WORKERS, SOCKETS_PER_WORKER);
+        return 0;
+    }
 
     for (int i = 0; i < WORKERS; i++) {
         kids[i] = fork();

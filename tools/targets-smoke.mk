@@ -127,6 +127,100 @@ smoke-netfilter:
 		exit 1; \
 	fi
 
+# DNAT port forwarding, end to end.
+#
+# smoke-netfilter above can only ever see traffic the guest originates, and a
+# DNAT is by definition a rewrite of an *inbound* packet.  So this case does
+# what the other one structurally cannot: it forwards a host port into the guest
+# (NET_HOSTFWD), connects to that port from the host, and asserts that a socket
+# listening on a *different* port in the guest accepted the connection and
+# echoed a byte back.
+#
+# Both directions of the translation are covered by that one assertion.  The
+# inbound half is the destination rewrite; the outbound half is forced by the
+# echo, because the host's QEMU only accepts a reply whose source port is the
+# forwarded port again -- and nothing but the conntrack entry's recorded DNAT
+# tuple produces that, because the guest socket's own port is LISTEN_PORT.
+#
+# The host-side probe retries until the guest has booted and installed the
+# rule, then fails loudly if the forward never completed.  QEMU runs in the
+# background so a failed probe still leaves a guest log to read.
+#
+# Deliberately NOT asserted: a NAT rule's "matched" count on its own.  That
+# counter moves whether or not the rewrite reached lwIP with a valid checksum,
+# which is exactly the failure this gate exists to rule out.
+#
+# The forward is spelled "hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081" for two
+# reasons, both found by running QEMU 10.0.13 here rather than by reading its
+# docs:
+#
+#   - The bare "tcp:hostaddr:port-:guest" spelling is rejected outright:
+#     QEMU parses the value as a deprecated boolean and refuses to start
+#     ("Invalid parameter").  The hostfwd= prefix is required.
+#   - There is no colon before the guest address.  With one, the guest half is
+#     parsed as [addr]:port and the address field swallows the host part, so the
+#     port comes out as "10" and the SYN reaches the guest on 10.0.2.15:10.
+#     Measured with -object filter-dump on the netdev, both spellings booted and
+#     both accepted the host connection:
+#       tcp:127.0.0.1:18081-10.0.2.15:18081  -> guest sees 10.0.2.15:18081
+#       tcp:127.0.0.1:18082-:10.0.2.15:18082 -> guest sees 10.0.2.15:10
+#     A silently wrong guest port is exactly the failure this gate exists to
+#     catch, so it is worth writing down rather than rediscovering.
+#
+# Note for whoever owns tools/a20_derive.py: it emits "tcp::5555-:5555", which
+# QEMU 10 refuses ("Missing guest address").  Left alone here -- that string is
+# asserted by tools/tests/test_a20.py and is a different stream's file.
+#
+# a20.tcpmode=lwip is load-bearing for the same reason.  Under the default
+# "fast" mode the socket layer never creates a LISTEN pcb (see the comment in
+# kernel/net/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
+# and no port forward can ever complete -- NAT would be exonerated of a failure
+# that is really the listener model.  Same knob smoke-net-accept uses.
+smoke-netfilter-nat: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081
+smoke-netfilter-nat:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NET_HOSTFWD='hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081' dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/netfilter-nat-riscv64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'netnat_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_NAT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/netnat_host_probe.py 18081 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-netfilter-nat: FAIL -- the host never completed the port forward"; \
+		echo "  (tools/netnat_host_probe.py exit $$probe). Guest verdict, if any:"; \
+		grep -E 'NETNAT_TEST' "$$log" || echo "  (none: the guest never got that far)"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif grep -q 'NETNAT_TEST: PASS' "$$log"; then \
+		echo "smoke-netfilter-nat: PASS dnat 18081 -> 10.0.2.15:18082"; \
+		echo "  log saved to $$log"; \
+	elif grep -q 'NETNAT_TEST: FAIL' "$$log"; then \
+		echo "smoke-netfilter-nat: FAIL -- the guest reported a failure:"; \
+		grep -E 'NETNAT_TEST' "$$log" | tail -n 5; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-netfilter-nat: timeout without verdict; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-netfilter-nat: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
 
@@ -788,6 +882,71 @@ smoke-net-tcp-lanes:
 	else \
 		echo "smoke-net-tcp-lanes: failed with status $$status (passes=$$passes of 8; list-checker hits=$$(grep -c 'tcp_pcbs_sane' "$$log" || true))"; \
 		grep -E 'TCP_ACCEPT_TEST: FAIL' "$$log" || echo "  (no per-port FAIL line; see log tail)"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# IPv6 inbound-listen gate
+# ================================================================
+# Guards the v6 bind/listen/accept path, which did not exist: an AF_INET6
+# SOCK_STREAM socket() succeeded but net_inet_socket_init gave it no tcp_pcb
+# (that arm was AF_INET-only), so bind() had no pcb to bind, net_listen() had
+# no bound pcb to convert into a LISTEN pcb, and connect() to a v6 listener
+# failed with -ECONNREFUSED -- an errno that reads like "nothing is listening"
+# rather than "this kernel has no v6 path at all", which is how the gap
+# survived.
+#
+# ipv6_loopback_test asserts more than the handshake, unlike tcp_accept_test:
+# it also moves 4000 B each way and checks the accepted peer really is reported
+# as AF_INET6 on ::1.  Those are the two places the v6 path was separately
+# wrong -- the accept drain hardcoded child->domain = AF_INET, so a v6
+# connection was adopted into a v4 socket -- and a handshake-only gate would
+# have stayed green through both.
+#
+# Run in both TCP modes, as smoke-net-accept does for v4: "fast" pairs the two
+# sockets in the socket layer, "lwip" completes the handshake in the stack.
+# A mode that regresses while the other passes is a real defect the gate has
+# to be able to see, so neither run is optional.
+#
+# The /proc/net/tcp6 check lives inside ipv6_loopback_test, not here.  A gate
+# that `cat`s /proc/net/tcp6 after the test returns reads an empty file --
+# every socket the test made is closed by then -- so it could not have detected
+# a missing or empty tcp6 file, only its own grep failing.  The test therefore
+# reads both files while its own listener is still open and fails if the row is
+# absent, rendered in the v4 layout, or listed in /proc/net/tcp as well.
+smoke-net-ipv6: NET_HOSTFWD=
+smoke-net-ipv6:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-ipv6-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '\nipv6_loopback_test 13001\nipv6_loopback_test 13002\necho tcpmode fast > /proc/net/config\nipv6_loopback_test 13003\nipv6_loopback_test 13004\ncat /proc/a20/perf\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 || status=$$?; \
+	passes=$$(grep -c 'IPV6_LOOPBACK_TEST: PASS' "$$log" || true); \
+	fails=$$(grep -c 'IPV6_LOOPBACK_TEST: FAIL' "$$log" || true); \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	accept_drop=$$(last_counter net_accept_drop); \
+	bh_overflow=$$(last_counter net_bh_overflow); \
+	alloc_fail=$$(last_counter net_alloc_fail); \
+	if [ "$$passes" -eq 4 ] && [ "$$fails" -eq 0 ] && \
+	   [ "$$accept_drop" -eq 0 ] && \
+	   [ "$$bh_overflow" -eq 0 ] && \
+	   [ "$$alloc_fail" -eq 0 ] && \
+	   ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-ipv6: PASS (4 v6 loopback connections accepted and carried 4000 B each way, both TCP modes; each listener verified in /proc/net/tcp6 in the tcp6 layout and absent from /proc/net/tcp); log saved to $$log"; \
+	else \
+		echo "smoke-net-ipv6: failed with status $$status (passes=$$passes of 4, fails=$$fails accept_drop=$$accept_drop bh_overflow=$$bh_overflow alloc_fail=$$alloc_fail); tail of $$log:"; \
+		grep -E 'IPV6_LOOPBACK_TEST: FAIL|procheck|server:|client:' "$$log" | head -20 || true; \
 		tail -n 60 "$$log"; \
 		exit 1; \
 	fi

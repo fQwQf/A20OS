@@ -17,8 +17,53 @@ void a20_lwip_poll_locked(void);
 void a20_lwip_poll_timers_locked(void);
 void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
+/* Stage D: the guaranteed receive poll point.  kernel_progress_run_bottom_halves()
+ * (i.e. every sched() and idle pass, on every CPU) calls A20_LWIP_LANE_RX_POLL(),
+ * so staged frames are processed without any task having to ask for them.
+ *
+ * Below two lanes the call site is not an empty function body -- it is absent
+ * from the preprocessed source, for the same reason a20_lwip_lane_enter() below
+ * is a macro (measured there, and re-measured here: at CONFIG_NET_LANES == 1 a
+ * real call to an out-of-line empty poll adds ten bytes to progress.c's .text).
+ * There is nothing staged at one lane: the device interrupt still hands every
+ * frame straight to netif input as it always did. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_lane_rx_poll(unsigned budget);
+#define A20_LWIP_LANE_RX_POLL(budget) a20_lwip_lane_rx_poll(budget)
+#else
+#define A20_LWIP_LANE_RX_POLL(budget) ((void)(budget))
+#endif
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
+/* Stage C: say which lane owns the lwIP work that is about to run, so lwIP's
+ * allocator can index that lane's pbuf pool.  Call only with g_lwip_lock held
+ * and only right after taking it; a20_lwip_unlock() clears it again, so there
+ * is no matching exit call.
+ *
+ * At CONFIG_NET_LANES == 1 this has to disappear from the *preprocessed
+ * source*, not merely from the assembly, and that is why it is a macro rather
+ * than an out-of-line function or even a static inline:
+ *
+ *   - out of line, it exists at one lane too, so all ~19 call sites in
+ *     socket_inet.c would gain a relocation and a call, to hold an empty body;
+ *   - static inline with an empty body is still not enough.  Measured: with
+ *     `(void)net_lane_ctx_push(lane)` at CONFIG_NET_LANES == 1, GCC's IR for
+ *     socket_inet.c differs from HEAD's even though the instruction stream
+ *     barely moves -- one function's stack-slot assignment shuffles and .text
+ *     ends up four bytes shorter.  An empty inline still passes `s->lane` as an
+ *     argument, and the argument's deadness is decided early enough to perturb
+ *     register allocation.
+ *
+ * So at one lane the macro expands to nothing and `s->lane` is never read.  The
+ * N=1 objects then differ from the pre-lane build only in UBSan's embedded
+ * source-line table, which shifts because this file gained lines at all; the
+ * generated code is byte-identical, verified by rebuilding these files with
+ * -fno-sanitize=undefined on both trees. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_lane_enter(unsigned lane);
+#else
+#define a20_lwip_lane_enter(lane) ((void)0)
+#endif
 int  a20_lwip_lock_is_held(void);
 void a20_lwip_note_lock_violation(void *site);
 unsigned a20_lwip_lock_violations(void);
@@ -36,6 +81,12 @@ int  a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len);
 int  a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8]);
 int  a20_lwip_if_up(unsigned ifindex);
 int  a20_lwip_if_default_index(void);
+
+/* The IPv4 address of netif `net_idx` in host order, or 0 if it has none.
+ * A negative index means "whichever netif currently has an address", for
+ * callers that cannot pin an interface (netfilter's MASQUERADE).  Requires
+ * g_lwip_lock. */
+uint32_t a20_lwip_netif_ipv4(int net_idx);
 
 /* Netif reconfiguration for the netlink write path.  Each takes g_lwip_lock
  * itself; callers must not already hold it.  A NULL mask or gw leaves that

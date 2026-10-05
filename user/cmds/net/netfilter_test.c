@@ -14,6 +14,13 @@
  *   6. The same send with no matching rule must increment out_packets and
  *      leave out_dropped alone, proving the drop was the rule and not a
  *      blanket failure of the transmit path.
+ *   7. g_lwip_lock is registered for contention accounting.
+ *   8. conntrack tracks that UDP flow, reports its tuple, and honours ctoff.
+ *
+ * NAT is not tested here.  A DNAT port forward needs an inbound connection
+ * from outside the guest, which this single-shot serial script cannot produce;
+ * tools/targets-smoke.mk:smoke-netfilter-nat does that with a QEMU hostfwd
+ * rule, and user/cmds/net/netnat_test.c is its payload.
  */
 
 #include <errno.h>
@@ -284,7 +291,62 @@ int main(void)
     CHK(strstr(locks, "lwip:") != NULL,
         "g_lwip_lock is registered for contention accounting");
 
-    printf("NETFILTER_TEST: PASS dropped=%llu out_packets=%llu\n",
-           out_drop1 - out_drop0, out_pkt1 - out_pkt0);
+    /*
+     * 8. conntrack, without configuring any NAT.
+     *
+     * The cases above prove the verdict path; this proves the state table the
+     * verdict path now sits on top of actually tracks a flow.  The tuple is
+     * checked by its gateway address and port rather than by a row count,
+     * because a count of 1 would be satisfied just as well by an unrelated
+     * flow.
+     *
+     * ctflush is a separate verb from reset precisely so this can clear live
+     * state without also destroying the configuration installed above.
+     */
+    CHK(nf_write("ctflush") == 0, "flush conntrack");
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after flush");
+    CHK(strstr(buf, "conntrack: on") != NULL, "conntrack is on by default");
+    CHK(nf_stat(buf, "ct_capacity") > 0, "a capacity is reported");
+    unsigned long long ct0 = nf_stat(buf, "ct_tracked");
+    unsigned long long cp0 = nf_stat(buf, "ct_packets");
+
+    udp_send_once();
+
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after the tracked send");
+    unsigned long long ct1 = nf_stat(buf, "ct_tracked");
+    unsigned long long cp1 = nf_stat(buf, "ct_packets");
+    CHK(cp1 > cp0, "conntrack counted the packet");
+    CHK(ct1 > ct0, "the flow created an entry");
+    /* Both ends of the tuple, so an entry for some other flow cannot pass. */
+    CHK(strstr(buf, "-> " TEST_DST ":") != NULL,
+        "the tracked flow's destination is recorded");
+    CHK(strstr(buf, "proto=17") != NULL, "the tracked flow is UDP");
+    CHK(strstr(buf, "nat=none") != NULL,
+        "an untranslated flow reports nat=none rather than being omitted");
+
+    /*
+     * ctoff stops entries being created but keeps the existing ones: tearing
+     * them down would break every flow whose reply depends on a recorded NAT
+     * binding.  A plain counter comparison is the only way to observe that, and
+     * it is the property that makes the switch safe to flip on a live system.
+     */
+    CHK(nf_write("ctoff") == 0, "turn conntrack off");
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after ctoff");
+    CHK(strstr(buf, "conntrack: off") != NULL, "conntrack reports off");
+    unsigned long long ct2 = nf_stat(buf, "ct_tracked");
+
+    udp_send_once();
+    udp_send_once();
+
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after sends with tracking off");
+    CHK(nf_stat(buf, "ct_tracked") == ct2,
+        "no new entry while tracking is off");
+    CHK(nf_write("cton") == 0, "turn conntrack back on");
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after cton");
+    CHK(strstr(buf, "conntrack: on") != NULL, "conntrack reports on again");
+
+    printf("NETFILTER_TEST: PASS dropped=%llu out_packets=%llu "
+           "ct_tracked=%llu ct_packets=%llu\n",
+           out_drop1 - out_drop0, out_pkt1 - out_pkt0, ct1 - ct0, cp1 - cp0);
     return 0;
 }

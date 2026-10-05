@@ -49,6 +49,13 @@ struct page_cache_page;
  * entry per mapping. */
 #define MM_SEG_INDEX_CAPACITY 1024
 
+/* Pairs the exec path records for /proc/<pid>/auxv, terminator included.
+ * Sized above the 19 pairs elf_setup_stack() publishes today so that adding an
+ * AT_ entry does not silently truncate the vector a reader sees: the exec path
+ * refuses to record more than this rather than reporting a shorter auxv than
+ * the program actually received. */
+#define A20_AUXV_MAX_PAIRS 32
+
 #ifdef CONFIG_NOMMU
 #define NOMMU_ALLOC_MAX    32
 #define NOMMU_ALLOC_IMAGE  0
@@ -363,6 +370,26 @@ typedef struct mm_struct {
     vaddr_t    sig_tramp;
     uint8_t    has_vdso;   /* vDSO/vvar fixed mappings present (mm/vdso.h) */
     uint8_t    _pad_vdso[3];
+    /*
+     * The auxiliary vector this mm was exec'd with, as {type,value} pairs,
+     * replayed by /proc/<pid>/auxv.
+     *
+     * It is stored rather than re-derived from the stack at read time on
+     * purpose.  The vector lives on the user stack, which the program owns:
+     * it may overwrite it, and by the time anything asks the bytes there need
+     * not be the ones the kernel wrote.  Re-reading would therefore answer
+     * with whatever the program last left behind -- which is a statement about
+     * the reader's own memory, not about the image it was exec'd from.  What
+     * AT_PHDR, AT_ENTRY and the rest describe is a property of the exec, so
+     * the copy is made while exec still knows it.
+     *
+     * Plain values, not pointers: mm_fork's `*child = *parent` inherits them
+     * with the address space, which is what Linux does for the same reason.
+     * auxv_n counts pairs and includes the terminating {AT_NULL,0}.
+     */
+    uint32_t   auxv_n;
+    uint32_t   _pad_auxv;
+    uintptr_t  auxv[A20_AUXV_MAX_PAIRS][2];
     refcount_t refcount;
 #ifdef CONFIG_NOMMU
     void      *nommu_allocs[NOMMU_ALLOC_MAX];

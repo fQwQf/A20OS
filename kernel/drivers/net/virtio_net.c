@@ -21,19 +21,98 @@
 /* One message-signalled vector per direction: a burst on one no longer delays
  * the other's completion behind a shared line. */
 #define VIRTIO_NET_QUEUES          2
-#define VIRTIO_NET_HDR_SIZE        12
+
+/* Ring depth.  The generic VIRTIO_QUEUE_SIZE in drivers/block/virtio_blk.h
+ * stays at 32 because it also sizes virtio_blk/gpu/snd ring structures; the
+ * network rings are sized here instead, which is why this driver carries its
+ * own avail/used types below rather than the block ones. */
+#define VIRTIO_NET_QUEUE_SIZE      256
+
+/* Descriptors consumed per posted receive buffer: one, holding the
+ * virtio_net_hdr_mrg_rxbuf (12 B) followed by the frame data.
+ *
+ * Two shapes were built and measured against QEMU 10.0 with MRG_RXBUF
+ * acknowledged, and only the single descriptor delivers frames:
+ *
+ *   [hdr 12B][data 1536B][ctx 4B]  ping 0/4 replies -- the device returns the
+ *                                 right used length and num_buffers, and every
+ *                                 frame after the first reaches the stack as
+ *                                 zeros, so ethernet_input() drops it;
+ *   [data 1548B][ctx 4B]           ping 0/4 replies, same symptom;
+ *   [data 1548B]                   ping 4/4 replies.
+ *
+ * So the payload has to share a descriptor with the header, and the context
+ * descriptor is left off.  What the feature still buys is the 12-byte header
+ * and num_buffers, both of which this driver reads; what it does not buy is a
+ * frame spanning several posted buffers, because a one-descriptor buffer has no
+ * NEXT to walk.  The reassembly below still handles num_buffers > 1 -- it is
+ * what the spec asks for and what a device that spreads a frame anyway
+ * produces -- but with this posting it never triggers. */
+#define VIRTIO_NET_RX_DESC_MAX     VIRTIO_NET_QUEUE_SIZE
+#define VIRTIO_NET_TX_DESC_MAX     VIRTIO_NET_QUEUE_SIZE
+
+/* virtio_net_hdr_mrg_rxbuf is 12 bytes; plain virtio_net_hdr is 10.  Buffers
+ * are always allocated with the larger header in front so one array serves
+ * both, and net->hdr_len says which one this device actually writes. */
+#define VIRTIO_NET_HDR_BASE        10
+#define VIRTIO_NET_HDR_MRG         12
+#define VIRTIO_NET_BUF_SIZE        (VIRTIO_NET_HDR_MRG + VIRTIO_NET_FRAME_MAX)
+/* Offset of num_buffers inside the header (virtio spec 5.1.6). */
+#define VIRTIO_NET_HDR_NUMBUF_OFF  10
+
 #define VIRTIO_NET_MTU             1500
 #define VIRTIO_NET_FRAME_MAX       1536
-#define VIRTIO_NET_BUF_SIZE        (VIRTIO_NET_HDR_SIZE + VIRTIO_NET_FRAME_MAX)
+
+/* Legacy (v1) transports lay the three rings out by hand: descriptor table
+ * first, then the available ring and the used ring each on a 4096-byte
+ * boundary, because the 0.9.5 spec requires the available ring not to cross a
+ * page and the used ring to be page aligned.  Three pages is exactly enough
+ * for the 256-descriptor table plus both rings (4096 + 518 + 2054). */
+#define VIRTIO_NET_LEGACY_PAGES    3
+#define VIRTIO_NET_LEGACY_BYTES    (4096 * VIRTIO_NET_LEGACY_PAGES)
+
+#define VIRTIO_NET_F_CSUM          0
+#define VIRTIO_NET_F_GUEST_CSUM    1
 #define VIRTIO_NET_F_MAC           5
+#define VIRTIO_NET_F_MRG_RXBUF     15
 #define VIRTIO_NET_F_STATUS        16
+#define VIRTIO_NET_F_MQ            22
 #define VIRTIO_NET_TX_TIMEOUT_TICKS (clock_ticks_per_sec() * 2)
 
 typedef struct {
-    virtq_desc_t  desc[VIRTIO_QUEUE_SIZE] ALIGNED(16);
-    virtq_avail_t avail                   ALIGNED(2);
-    virtq_used_t  used                    ALIGNED(4);
-    ALIGNED(4096) uint8_t legacy_vq[4096 * 3];
+    uint16_t flags;
+    uint16_t idx;
+    uint16_t ring[VIRTIO_NET_QUEUE_SIZE];
+    uint16_t used_event;
+} virtio_net_avail_t;
+
+typedef struct {
+    uint16_t flags;
+    uint16_t idx;
+    virtq_used_elem_t ring[VIRTIO_NET_QUEUE_SIZE];
+    uint16_t avail_event;
+} virtio_net_used_t;
+
+typedef struct {
+    /* Every array below lives inside the instance's single kmalloc() block
+     * (see virtio_net_ring_bytes) rather than in .bss.  A modern transport
+     * addresses desc/avail/used separately; a legacy one addresses the whole
+     * ring area by page frame number, so legacy_vq -- when non-NULL -- is the
+     * page-aligned base and the three offsets place the parts within it. */
+    virtq_desc_t      *desc;
+    virtio_net_avail_t *avail;
+    virtio_net_used_t  *used;
+    uint8_t           *legacy_vq;
+    /* Legacy ring placement, computed by virtio_net_setup_queue() from the
+     * descriptor count actually in use. */
+    uint32_t legacy_desc_off;
+    uint32_t legacy_avail_off;
+    uint32_t legacy_used_off;
+    /* used->ring[].id is an index into the available ring (virtio 1.0 §2.7.8),
+     * not a descriptor head.  This maps it back to the buffer slot, which is
+     * what the driver owns.  The old code read id as the slot directly, which
+     * only worked because every queue kept avail->ring[i] == i. */
+    uint16_t *slot_of_avail;
     uint16_t last_used;
 } virtio_net_queue_t;
 
@@ -41,20 +120,48 @@ typedef struct {
     virtio_transport_t vt;
     virtio_net_queue_t rxq;
     virtio_net_queue_t txq;
-    uint8_t rx_buf[VIRTIO_QUEUE_SIZE][VIRTIO_NET_BUF_SIZE] ALIGNED(64);
-    uint8_t tx_buf[VIRTIO_QUEUE_SIZE][VIRTIO_NET_BUF_SIZE] ALIGNED(64);
-    uint8_t tx_busy[VIRTIO_QUEUE_SIZE];
+    /* Owns every ring, buffer and side table below, in one piece.  Must be the
+     * kmalloc() return value, not a pointer derived from it, because that is
+     * what kfree() takes. */
+    void   *ring_mem;
+    size_t  ring_mem_size;
+    uint8_t (*rx_buf)[VIRTIO_NET_BUF_SIZE];
+    uint8_t (*tx_buf)[VIRTIO_NET_BUF_SIZE];
+    uint8_t  *tx_busy;
+    /* Buffers consumed by the frame being reassembled, in available-ring order,
+     * so every one of them goes back on the ring.  A mergeable receive buffer
+     * lets the device span one frame over however many posted buffers it needs
+     * -- a jumbo frame reaches six at 1536 bytes each -- so this has to be as
+     * long as the ring, not as long as one posted buffer.
+     *
+     * Per instance rather than per call on purpose: virtio_net_recv() holds
+     * net->lock for its whole body and never nests, so a scratch array there is
+     * exclusive, and it keeps a 512-byte array off the interrupt stack. */
+    uint16_t *rx_recycle;
     uint8_t mac[6];
     /* LOCK_ORDER: net->lock is innermost under g_lwip_lock.
      * Local order: g_lwip_lock -> net->lock.
      * Protects TX/RX descriptor rings, tx_busy[], rx_buf[], tx_buf[],
-     * last_used, avail->idx, rx_packets, tx_packets, rx_drops, tx_drops. */
+     * slot_of_avail[], last_used, avail->idx, rx_packets,
+     * tx_packets, rx_drops, tx_drops. */
     spinlock_t lock;
     int valid;
     int legacy;
     int slot;
     int irq;
     int irq_registered;
+    /* Ring depth this device can actually host: min(256, QueueNumMax).
+     * A device offering fewer than 256 must not fail the probe, so every ring
+     * index is taken modulo this rather than the compile-time constant. */
+    unsigned qsize;
+    /* Bytes of virtio_net_hdr this device writes in front of the frame. */
+    unsigned hdr_len;
+    int mrg_rxbuf;
+    /* Feature bits the device offered but this driver deliberately does not
+     * acknowledge.  Kept only so the ready line can report them. */
+    int have_mq;
+    int have_csum;
+    int have_guest_csum;
     uint32_t rx_packets;
     uint32_t tx_packets;
     uint32_t rx_drops;
@@ -68,28 +175,198 @@ static void virtio_net_select_queue(virtio_net_inst_t *net, int qidx) {
     net->vt.write32(&net->vt, VIRTIO_MMIO_QUEUE_SEL, (uint32_t)qidx);
 }
 
-static int virtio_net_setup_queue(virtio_net_inst_t *net, virtio_net_queue_t *q, int qidx) {
+/* Page-aligning helper for the legacy layout; see VIRTIO_NET_LEGACY_PAGES. */
+static uint32_t virtio_net_page_align(uint32_t off)
+{
+    return (off + 4095u) & ~4095u;
+}
+
+/*
+ * Why the rings are kmalloc()ed instead of declared as static arrays.
+ *
+ * Under the default DRIVER_DEPLOYMENT=generic profile this driver is not
+ * linked into the kernel image: tools/driver-modules.mk packages it as
+ * virtio-net.a20drv and drvmod_load() rejects any package whose .text + .data
+ * + .bss exceeds DRV_MOD_MAX_SIZE (kernel/include/drvmod/drvmod.h:31,
+ * 512 KiB, enforced in kernel/drvmod/loader.c on "bad total_size").  256 slots
+ * of header plus payload, twice, is about 800 KiB of .bss on its own -- the
+ * statically sized version produced a .bss of 0x1a60e8 bytes and the probe
+ * never ran, because the loader refused the module with -ENOEXEC before any
+ * code in it was reached.
+ *
+ * Taking the memory at probe time keeps the package small and sizes the rings
+ * to the device.  Two properties make it safe to hand these addresses to the
+ * device:
+ *
+ *   - va_to_pa() (kernel/include/mm/mm.h:26) is a flat subtraction of
+ *     PAGE_OFFSET, so any kernel virtual address converts, and
+ *   - sizes above SLAB_MAX_OBJ (kernel/mm/slab.c:12) go straight to the buddy
+ *     allocator and are returned as whole pages, which is what the legacy
+ *     PFN-addressed ring layout needs.
+ *
+ * The size is asked for before the transport is known only in the sense that
+ * the legacy area is reserved conditionally; nothing here touches the device.
+ */
+static size_t virtio_net_ring_bytes(int legacy)
+{
+    size_t n = 2 * (size_t)VIRTIO_NET_QUEUE_SIZE * VIRTIO_NET_BUF_SIZE;
+    /* Both ring descriptor tables are sized for VIRTIO_NET_RX_DESC_MAX. */
+    n += (size_t)VIRTIO_NET_RX_DESC_MAX * sizeof(virtq_desc_t);
+    n += (size_t)VIRTIO_NET_TX_DESC_MAX * sizeof(virtq_desc_t);
+    n += 2 * sizeof(virtio_net_avail_t);
+    n += 2 * sizeof(virtio_net_used_t);
+    n += 2 * (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);  /* slot_of_avail */
+    n += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);      /* rx_recycle */
+    n += (size_t)VIRTIO_NET_QUEUE_SIZE;                         /* tx_busy */
+    /* Alignment slack: every region below is 64-byte aligned so the payload
+     * buffers keep the cache-line granularity arch_dma_sync_for_device()
+     * expects, and so the descriptor tables satisfy their 16-byte rule.  Twelve
+     * regions, less than one page of headroom over ~800 KiB. */
+    n += 64 * 12;
+    if (legacy)
+        n += 2 * ((size_t)VIRTIO_NET_LEGACY_BYTES + 4096);
+    return n;
+}
+
+#define VIRTIO_NET_ALIGN(p, a) \
+    ((p) = (void *)(((uintptr_t)(p) + ((a) - 1)) & ~(uintptr_t)((a) - 1)))
+
+static void virtio_net_free_ring(virtio_net_inst_t *net)
+{
+    /* Only ring_mem is passed to kfree(); everything else points inside it and
+     * must be cleared rather than freed. */
+    if (net->ring_mem)
+        kfree(net->ring_mem);
+    net->ring_mem = NULL;
+    net->ring_mem_size = 0;
+    net->rx_buf = NULL;
+    net->tx_buf = NULL;
+    net->tx_busy = NULL;
+    net->rx_recycle = NULL;
+    memset(&net->rxq, 0, sizeof(net->rxq));
+    memset(&net->txq, 0, sizeof(net->txq));
+}
+
+static int virtio_net_alloc_ring(virtio_net_inst_t *net)
+{
+    size_t size = virtio_net_ring_bytes(net->legacy);
+    void *raw = kmalloc(size);
+    if (!raw) {
+        kinfo("[VIRTIO-NET%d] no memory for %u-slot rings (%zu bytes)\n",
+              net->slot, VIRTIO_NET_QUEUE_SIZE, size);
+        return -1;
+    }
+    memset(raw, 0, size);
+    net->ring_mem = raw;
+    net->ring_mem_size = size;
+
+    void *p = raw;
+
+    if (net->legacy) {
+        /* virtio 0.9.5 addresses this ring area by PFN, so its base has to be
+         * page aligned.  The returned pointer is not (the slab allocator puts
+         * a header in front of objects), hence the reserved page of slack. */
+        VIRTIO_NET_ALIGN(p, 4096);
+        net->rxq.legacy_vq = p;
+        p += VIRTIO_NET_LEGACY_BYTES;
+        net->txq.legacy_vq = p;
+        p += VIRTIO_NET_LEGACY_BYTES;
+    }
+
+    VIRTIO_NET_ALIGN(p, 64);
+    net->rxq.desc = p;
+    p += (size_t)VIRTIO_NET_RX_DESC_MAX * sizeof(virtq_desc_t);
+    net->txq.desc = p;
+    p += (size_t)VIRTIO_NET_TX_DESC_MAX * sizeof(virtq_desc_t);
+
+    VIRTIO_NET_ALIGN(p, 2);
+    net->rxq.avail = p;
+    p += sizeof(virtio_net_avail_t);
+    net->txq.avail = p;
+    p += sizeof(virtio_net_avail_t);
+
+    VIRTIO_NET_ALIGN(p, 4);
+    net->rxq.used = p;
+    p += sizeof(virtio_net_used_t);
+    net->txq.used = p;
+    p += sizeof(virtio_net_used_t);
+
+    VIRTIO_NET_ALIGN(p, 2);
+    net->rxq.slot_of_avail = p;
+    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
+    net->txq.slot_of_avail = p;
+    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
+
+    VIRTIO_NET_ALIGN(p, 2);
+    net->rx_recycle = p;
+    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
+
+    net->tx_busy = p;
+    p += (size_t)VIRTIO_NET_QUEUE_SIZE;
+
+    VIRTIO_NET_ALIGN(p, 64);
+    net->rx_buf = p;
+    p += (size_t)VIRTIO_NET_QUEUE_SIZE * VIRTIO_NET_BUF_SIZE;
+    net->tx_buf = p;
+
+    return 0;
+}
+
+static int virtio_net_setup_queue(virtio_net_inst_t *net, virtio_net_queue_t *q,
+                                  int qidx, unsigned ndesc)
+{
     virtio_transport_t *vt = &net->vt;
 
     virtio_net_select_queue(net, qidx);
     uint32_t qmax = vt->read32(vt, VIRTIO_MMIO_QUEUE_NUM_MAX);
-    if (qmax == 0 || qmax < VIRTIO_QUEUE_SIZE) {
-        printf("[VIRTIO-NET%d] queue %d max too small: %u\n", net->slot, qidx, qmax);
+    /* Take the device's own maximum rather than refusing the probe: a NIC that
+     * offers 64 slots is still a NIC, and the ring arrays are statically sized
+     * for the 256-slot case, so a smaller qsize simply leaves the tail unused. */
+    if (qmax == 0) {
+        printf("[VIRTIO-NET%d] queue %d max is zero\n", net->slot, qidx);
         return -1;
     }
-    vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, VIRTIO_QUEUE_SIZE);
+    unsigned want = VIRTIO_NET_QUEUE_SIZE;
+    if (qmax < want) {
+        /* Largest power of two not exceeding qmax.  Spelled as a loop rather
+         * than __builtin_clz: a .a20drv package is linked without libgcc, and
+         * the 64-bit lowering of __builtin_clz becomes a call to __clzdi2,
+         * which the module loader reports as an unresolved symbol
+         * ("[DRVMOD] unresolved symbol '__clzdi2'") and refuses the module. */
+        want = 1;
+        while ((want << 1) != 0 && (want << 1) <= qmax)
+            want <<= 1;
+    }
+    if (want == 0 || want > VIRTIO_NET_QUEUE_SIZE) {
+        printf("[VIRTIO-NET%d] queue %d max unusable: %u\n", net->slot, qidx, qmax);
+        return -1;
+    }
+    if (ndesc > VIRTIO_NET_RX_DESC_MAX) {
+        printf("[VIRTIO-NET%d] queue %d wants %u descriptors, table holds %u\n",
+               net->slot, qidx, ndesc, VIRTIO_NET_RX_DESC_MAX);
+        return -1;
+    }
+    net->qsize = want;
+    vt->write32(vt, VIRTIO_MMIO_QUEUE_NUM, want);
 
-    memset(q, 0, sizeof(*q));
+    /* virtio_net_alloc_ring() already zeroed the whole block; re-zeroing the
+     * queue's own state here is enough -- the descriptor and ring arrays start
+     * empty because the device has not seen them yet. */
+    q->last_used = 0;
+    q->legacy_desc_off = q->legacy_avail_off = q->legacy_used_off = 0;
+
     if (net->legacy) {
-        virtq_desc_t *l_desc = (virtq_desc_t *)(uintptr_t)q->legacy_vq;
-        virtq_avail_t *l_avail =
-            (virtq_avail_t *)(uintptr_t)(q->legacy_vq + VIRTIO_QUEUE_SIZE * sizeof(virtq_desc_t));
-        virtq_used_t *l_used = (virtq_used_t *)(uintptr_t)(q->legacy_vq + 4096);
-
-        q->last_used = 0;
-        memcpy(l_desc, q->desc, sizeof(q->desc));
-        memcpy(l_avail, &q->avail, sizeof(q->avail));
-        memcpy(l_used, &q->used, sizeof(q->used));
+        q->legacy_desc_off = 0;
+        q->legacy_avail_off = virtio_net_page_align(ndesc * sizeof(virtq_desc_t));
+        q->legacy_used_off  = virtio_net_page_align(q->legacy_avail_off +
+                                                    (uint32_t)sizeof(virtio_net_avail_t));
+        if (q->legacy_used_off + (uint32_t)sizeof(virtio_net_used_t) >
+            (uint32_t)VIRTIO_NET_LEGACY_BYTES) {
+            printf("[VIRTIO-NET%d] queue %d legacy layout %u+%u does not fit\n",
+                   net->slot, qidx, q->legacy_used_off,
+                   (unsigned)sizeof(virtio_net_used_t));
+            return -1;
+        }
 
         uint64_t vq_pa = va_to_pa(q->legacy_vq);
         vt->write32(vt, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
@@ -98,8 +375,8 @@ static int virtio_net_setup_queue(virtio_net_inst_t *net, virtio_net_queue_t *q,
         mb();
     } else {
         uint64_t desc_pa = va_to_pa(q->desc);
-        uint64_t avail_pa = va_to_pa(&q->avail);
-        uint64_t used_pa = va_to_pa(&q->used);
+        uint64_t avail_pa = va_to_pa(q->avail);
+        uint64_t used_pa = va_to_pa(q->used);
 
         vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_LOW, (uint32_t)desc_pa);
         vt->write32(vt, VIRTIO_MMIO_QUEUE_DESC_HIGH, (uint32_t)(desc_pa >> 32));
@@ -116,20 +393,20 @@ static int virtio_net_setup_queue(virtio_net_inst_t *net, virtio_net_queue_t *q,
 
 static virtq_desc_t *queue_desc(virtio_net_inst_t *net, virtio_net_queue_t *q) {
     if (net->legacy)
-        return (virtq_desc_t *)(uintptr_t)q->legacy_vq;
+        return (virtq_desc_t *)(uintptr_t)(q->legacy_vq + q->legacy_desc_off);
     return q->desc;
 }
 
-static virtq_avail_t *queue_avail(virtio_net_inst_t *net, virtio_net_queue_t *q) {
+static virtio_net_avail_t *queue_avail(virtio_net_inst_t *net, virtio_net_queue_t *q) {
     if (net->legacy)
-        return (virtq_avail_t *)(uintptr_t)(q->legacy_vq + VIRTIO_QUEUE_SIZE * sizeof(virtq_desc_t));
-    return &q->avail;
+        return (virtio_net_avail_t *)(uintptr_t)(q->legacy_vq + q->legacy_avail_off);
+    return q->avail;
 }
 
-static virtq_used_t *queue_used(virtio_net_inst_t *net, virtio_net_queue_t *q) {
+static virtio_net_used_t *queue_used(virtio_net_inst_t *net, virtio_net_queue_t *q) {
     if (net->legacy)
-        return (virtq_used_t *)(uintptr_t)(q->legacy_vq + 4096);
-    return &q->used;
+        return (virtio_net_used_t *)(uintptr_t)(q->legacy_vq + q->legacy_used_off);
+    return q->used;
 }
 
 static void virtio_net_kick(virtio_net_inst_t *net, int qidx) {
@@ -146,13 +423,25 @@ static void virtio_net_wait_for_tx_progress(void)
         cpu_relax();
 }
 
-static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, uint16_t slot) {
+/*
+ * Publish one device-writable receive buffer.
+ *
+ * One descriptor holds the virtio_net_hdr_mrg_rxbuf and the frame data
+ * together.  The two split layouts that were measured against QEMU 10.0 --
+ * [hdr 12B][data 1536B][ctx 4B] and [data 1548B][ctx 4B] -- both hand the
+ * stack zeroed frames even though the device reports the right used length,
+ * so the payload has to share a descriptor with the header; see the note on
+ * VIRTIO_NET_RX_DESC_MAX above.
+ */
+static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, unsigned slot) {
     virtio_net_queue_t *q = &net->rxq;
     virtq_desc_t *desc = queue_desc(net, q);
-    virtq_avail_t *avail = queue_avail(net, q);
+    virtio_net_avail_t *avail = queue_avail(net, q);
+    uint8_t *buf = net->rx_buf[slot];
 
-    memset(net->rx_buf[slot], 0, VIRTIO_NET_HDR_SIZE);
-    desc[slot].addr = va_to_pa(net->rx_buf[slot]);
+    memset(buf, 0, VIRTIO_NET_HDR_MRG);
+
+    desc[slot].addr = va_to_pa(buf);
     desc[slot].len = VIRTIO_NET_BUF_SIZE;
     desc[slot].flags = VIRTQ_DESC_F_WRITE;
     desc[slot].next = 0;
@@ -162,33 +451,35 @@ static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, uint16_t slot) {
      * cache line rather than ordering the store stream, so cleaning after the
      * store gives the device the same view as virtio_blk's clean-before.
      * virtio_net.c and virtio_blk.c differ in placement on purpose. */
-    uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
-    avail->ring[avail_slot] = slot;
+    uint16_t avail_slot = avail->idx % net->qsize;
+    q->slot_of_avail[avail_slot] = (uint16_t)slot;
+    avail->ring[avail_slot] = (uint16_t)slot;
     wmb();
     avail->idx++;
 
     arch_dma_sync_for_device(net->rx_buf[slot], VIRTIO_NET_BUF_SIZE);
-    arch_dma_sync_for_device(&desc[slot], sizeof(desc[slot]));
+    arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
 }
 
 static void virtio_net_seed_rx_locked(virtio_net_inst_t *net) {
-    for (uint16_t i = 0; i < VIRTIO_QUEUE_SIZE; i++)
+    for (unsigned i = 0; i < net->qsize; i++)
         virtio_net_submit_rx_locked(net, i);
 }
 
 static void virtio_net_complete_tx_locked(virtio_net_inst_t *net) {
     virtio_net_queue_t *q = &net->txq;
-    virtq_used_t *used = queue_used(net, q);
+    virtio_net_used_t *used = queue_used(net, q);
 
     arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
-    uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
+    uint16_t used_idx = ((volatile virtio_net_used_t *)used)->idx;
     while (q->last_used != used_idx) {
-        uint16_t ring_idx = q->last_used % VIRTIO_QUEUE_SIZE;
+        uint16_t ring_idx = q->last_used % net->qsize;
         arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
-        uint16_t slot = (uint16_t)used->ring[ring_idx].id;
-        if (slot < VIRTIO_QUEUE_SIZE)
+        uint16_t avail_idx = (uint16_t)used->ring[ring_idx].id;
+        uint16_t slot = q->slot_of_avail[avail_idx % net->qsize];
+        if (slot < VIRTIO_NET_QUEUE_SIZE)
             net->tx_busy[slot] = 0;
         q->last_used++;
     }
@@ -196,9 +487,9 @@ static void virtio_net_complete_tx_locked(virtio_net_inst_t *net) {
 
 static int virtio_net_tx_free_locked(virtio_net_inst_t *net) {
     virtio_net_complete_tx_locked(net);
-    for (int i = 0; i < VIRTIO_QUEUE_SIZE; i++) {
+    for (unsigned i = 0; i < net->qsize; i++) {
         if (!net->tx_busy[i])
-            return i;
+            return (int)i;
     }
     return -1;
 }
@@ -221,6 +512,45 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         driver_lo |= (1U << VIRTIO_NET_F_MAC);
     if (features_lo & (1U << VIRTIO_NET_F_STATUS))
         driver_lo |= (1U << VIRTIO_NET_F_STATUS);
+    /*
+     * MRG_RXBUF is acknowledged only on a modern (version 1) transport.
+     *
+     * It is offered on legacy devices too, but the two differ in a way that
+     * decides the whole receive path: with VERSION_1 the spec fixes the guest
+     * header at virtio_net_hdr_mrg_rxbuf (12 bytes) regardless of the feature,
+     * while without it the header is virtio_net_hdr (10 bytes) unless MRG_RXBUF
+     * is acknowledged.  This driver has one buffer layout and one header size
+     * per instance, and net->hdr_len is computed from the negotiated set, so
+     * the legacy path keeps the layout that provably fits its three-page ring
+     * area and costs only a receive buffer of 1536 rather than 1548 bytes.
+     *
+     * Acknowledging the feature does not buy a frame spread over several posted
+     * buffers: virtio_net_submit_rx_locked() posts one descriptor per buffer
+     * because that is the only shape QEMU 10.0 delivers (see
+     * VIRTIO_NET_RX_DESC_MAX).  It does buy the 12-byte header and the
+     * num_buffers field, both of which virtio_net_recv() reads, and it is what
+     * makes net->hdr_len come out at 12 rather than 10.
+     */
+    if (!net->legacy && (features_lo & (1U << VIRTIO_NET_F_MRG_RXBUF)))
+        driver_lo |= (1U << VIRTIO_NET_F_MRG_RXBUF);
+    /*
+     * VIRTIO_NET_F_CSUM / VIRTIO_NET_F_GUEST_CSUM are deliberately NOT
+     * acknowledged.  Acknowledging either means the device stops computing the
+     * L4 checksum and expects the partial sum in the vnet header instead, and
+     * lwIP 2.2.2 as vendored cannot be told that is the case: LWIP_CHECKSUM_ON_COPY
+     * defaults to 0 (opt.h:2449-2450) and netif.h:84-107 defines no flag that
+     * carries the handshake.  Accepting the feature anyway would leave lwIP
+     * verifying a checksum the device never produced -- a silent corruption of
+     * every packet, not a missing feature.  The offer is recorded and printed
+     * so the gap is visible rather than forgotten.
+     */
+    net->have_csum       = (features_lo & (1U << VIRTIO_NET_F_CSUM)) != 0;
+    net->have_guest_csum = (features_lo & (1U << VIRTIO_NET_F_GUEST_CSUM)) != 0;
+    /* VIRTIO_NET_F_MQ is detected, not negotiated: the multiqueue path is not
+     * implemented, and acknowledging a control-queue layout this driver never
+     * builds would leave the device posting into queues that do not exist. */
+    net->have_mq = (features_lo & (1U << VIRTIO_NET_F_MQ)) != 0;
+
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES_SEL, 0);
     vt->write32(vt, VIRTIO_MMIO_DRIVER_FEATURES, driver_lo);
 
@@ -243,6 +573,12 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         }
     }
 
+    net->mrg_rxbuf = (driver_lo & (1U << VIRTIO_NET_F_MRG_RXBUF)) != 0;
+    /* VERSION_1 fixes a 12-byte header; a legacy device writes 10 unless
+     * MRG_RXBUF was acknowledged, and this driver never acknowledges it there. */
+    net->hdr_len = (!net->legacy || net->mrg_rxbuf) ? VIRTIO_NET_HDR_MRG
+                                                     : VIRTIO_NET_HDR_BASE;
+
     if (driver_lo & (1U << VIRTIO_NET_F_MAC)) {
         uint32_t mac0 = vt->read32(vt, VIRTIO_MMIO_CONFIG + 0);
         uint32_t mac1 = vt->read32(vt, VIRTIO_MMIO_CONFIG + 4);
@@ -256,15 +592,29 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         net->mac[0] = 0x02;
         net->mac[1] = 0x20;
         net->mac[2] = 0x25;
-        net->mac[3] = 0xa2;
+        net->mac[3] = 0xa3;
         net->mac[4] = 0x00;
         net->mac[5] = (uint8_t)idx;
     }
 
-    if (virtio_net_setup_queue(net, &net->rxq, VIRTIO_NET_QUEUE_RX) < 0)
+    /* A mergeable receive buffer costs two descriptors instead of one. */
+    unsigned rx_desc = net->mrg_rxbuf ? VIRTIO_NET_RX_DESC_MAX : VIRTIO_NET_QUEUE_SIZE;
+
+    /* Allocated before either queue is programmed, and freed on every path out
+     * of this function below: a probe that fails after the rings exist must not
+     * leak ~800 KiB, and the instance is memset() by its next probe attempt. */
+    if (virtio_net_alloc_ring(net) < 0)
         return -1;
-    if (virtio_net_setup_queue(net, &net->txq, VIRTIO_NET_QUEUE_TX) < 0)
+
+    if (virtio_net_setup_queue(net, &net->rxq, VIRTIO_NET_QUEUE_RX, rx_desc) < 0) {
+        virtio_net_free_ring(net);
         return -1;
+    }
+    if (virtio_net_setup_queue(net, &net->txq, VIRTIO_NET_QUEUE_TX,
+                               VIRTIO_NET_TX_DESC_MAX) < 0) {
+        virtio_net_free_ring(net);
+        return -1;
+    }
 
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_seed_rx_locked(net);
@@ -276,9 +626,11 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
     virtio_net_kick(net, VIRTIO_NET_QUEUE_RX);
 
     net->valid = 1;
-    printf("[VIRTIO-NET%d] ready legacy=%d mac=%02x:%02x:%02x:%02x:%02x:%02x\n",
+    printf("[VIRTIO-NET%d] ready legacy=%d mac=%02x:%02x:%02x:%02x:%02x:%02x "
+           "qsize=%u hdr=%u mrg_rxbuf=%d offered(mq=%d csum=%d guest_csum=%d)\n",
            idx, net->legacy, net->mac[0], net->mac[1], net->mac[2],
-           net->mac[3], net->mac[4], net->mac[5]);
+           net->mac[3], net->mac[4], net->mac[5], net->qsize, net->hdr_len,
+           net->mrg_rxbuf, net->have_mq, net->have_csum, net->have_guest_csum);
     return 0;
 }
 
@@ -357,20 +709,13 @@ const uint8_t *virtio_net_mac(int idx) {
     return g_net[idx].mac;
 }
 
-/* lwIP linkoutput calls this to send a frame while holding g_lwip_lock.
- * Blocking here (waiting for a TX slot, or for send completion) deadlocks:
- *   g_lwip_lock -> virtio_net_send (blocks) -> IRQ -> lwIP cb -> needs g_lwip_lock
- * Fix: with nonblock=1, submit the descriptor and return without waiting.
- * The non-nonblock path keeps busy-waiting until done, for unlocked callers. */
-int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
-    if (!packet || len == 0 || len > VIRTIO_NET_FRAME_MAX)
-        return -1;
-    if (!virtio_net_ready(idx))
-        return -1;
-
-    virtio_net_inst_t *net = &g_net[idx];
-    int slot = -1;
+/* Shared submit body for the linear and scatter-gather entry points. */
+static int virtio_net_send_iov(virtio_net_inst_t *net, const uint8_t *const *segs,
+                               const size_t *lens, unsigned nr, size_t total,
+                               int nonblock)
+{
     uint64_t deadline = timer_get_ticks() + VIRTIO_NET_TX_TIMEOUT_TICKS;
+    int slot = -1;
 
     for (;;) {
         uint64_t flags = spin_lock_irqsave(&net->lock);
@@ -394,25 +739,30 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
     }
 
     uint8_t *buf = net->tx_buf[slot];
-    memset(buf, 0, VIRTIO_NET_HDR_SIZE);
-    memcpy(buf + VIRTIO_NET_HDR_SIZE, packet, len);
+    memset(buf, 0, net->hdr_len);
+    size_t off = net->hdr_len;
+    for (unsigned i = 0; i < nr; i++) {
+        memcpy(buf + off, segs[i], lens[i]);
+        off += lens[i];
+    }
 
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->txq;
     virtq_desc_t *desc = queue_desc(net, q);
-    virtq_avail_t *avail = queue_avail(net, q);
+    virtio_net_avail_t *avail = queue_avail(net, q);
 
     desc[slot].addr = va_to_pa(buf);
-    desc[slot].len = (uint32_t)(VIRTIO_NET_HDR_SIZE + len);
+    desc[slot].len = (uint32_t)off;
     desc[slot].flags = 0;
     desc[slot].next = 0;
 
-    uint16_t avail_slot = avail->idx % VIRTIO_QUEUE_SIZE;
+    uint16_t avail_slot = avail->idx % net->qsize;
+    q->slot_of_avail[avail_slot] = (uint16_t)slot;
     avail->ring[avail_slot] = (uint16_t)slot;
     wmb();
     avail->idx++;
 
-    arch_dma_sync_for_device(buf, VIRTIO_NET_HDR_SIZE + len);
+    arch_dma_sync_for_device(buf, off);
     arch_dma_sync_for_device(&desc[slot], sizeof(desc[slot]));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
@@ -424,7 +774,7 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
      * from the TX completion interrupt or from the device class poll hook. */
     if (nonblock) {
         net->tx_packets++;
-        return (int)len;
+        return (int)total;
     }
 
     for (;;) {
@@ -434,11 +784,11 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
         spin_unlock_irqrestore(&net->lock, flags);
         if (done) {
             net->tx_packets++;
-            return (int)len;
+            return (int)total;
         }
         if (timer_get_ticks() >= deadline) {
             flags = spin_lock_irqsave(&net->lock);
-            if (slot >= 0 && slot < VIRTIO_QUEUE_SIZE)
+            if (slot >= 0 && slot < VIRTIO_NET_QUEUE_SIZE)
                 net->tx_busy[slot] = 0;
             spin_unlock_irqrestore(&net->lock, flags);
             net->tx_drops++;
@@ -446,6 +796,25 @@ int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
         }
         virtio_net_wait_for_tx_progress();
     }
+}
+
+/* lwIP linkoutput calls this to send a frame while holding g_lwip_lock.
+ * Blocking here (waiting for a TX slot, or for send completion) deadlocks:
+ *   g_lwip_lock -> virtio_net_send (blocks) -> IRQ -> lwIP cb -> needs g_lwip_lock
+ * Fix: submit the descriptor and return without waiting.
+ * The non-nonblock path keeps busy-waiting until done, for unlocked callers. */
+int virtio_net_send(int idx, const void *packet, size_t len, int nonblock) {
+    if (!packet || len == 0 || len > VIRTIO_NET_FRAME_MAX)
+        return -1;
+    if (!virtio_net_ready(idx))
+        return -1;
+
+    virtio_net_inst_t *net = &g_net[idx];
+    const uint8_t *segs[1];
+    size_t lens[1];
+    segs[0] = (const uint8_t *)packet;
+    lens[0] = len;
+    return virtio_net_send_iov(net, segs, lens, 1, len, nonblock);
 }
 
 int virtio_net_recv(int idx, void *packet, size_t maxlen) {
@@ -457,41 +826,116 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
     virtio_net_inst_t *net = &g_net[idx];
     uint64_t flags = spin_lock_irqsave(&net->lock);
     virtio_net_queue_t *q = &net->rxq;
-    virtq_used_t *used = queue_used(net, q);
+    virtio_net_used_t *used = queue_used(net, q);
 
     arch_dma_sync_for_cpu(&used->idx, sizeof(uint16_t));
-    uint16_t used_idx = ((volatile virtq_used_t *)used)->idx;
+    uint16_t used_idx = ((volatile virtio_net_used_t *)used)->idx;
     if (q->last_used == used_idx) {
         spin_unlock_irqrestore(&net->lock, flags);
         return 0;
     }
 
-    uint16_t ring_idx = q->last_used % VIRTIO_QUEUE_SIZE;
+    unsigned hdr_len = net->hdr_len;
+    /* Used entries the device has published but this call has not consumed. */
+    unsigned pending = (unsigned)(uint16_t)(used_idx - q->last_used);
+    uint16_t ring_idx = q->last_used % net->qsize;
     arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
-    uint16_t slot = (uint16_t)used->ring[ring_idx].id;
+    uint16_t avail_idx = (uint16_t)used->ring[ring_idx].id;
     uint32_t used_len = used->ring[ring_idx].len;
+    unsigned slot = q->slot_of_avail[avail_idx % net->qsize];
     q->last_used++;
 
-    int ret = 0;
-    if (slot >= VIRTIO_QUEUE_SIZE || used_len <= VIRTIO_NET_HDR_SIZE) {
+    if (slot >= net->qsize) {
         net->rx_drops++;
-    } else {
-        if (used_len > VIRTIO_NET_BUF_SIZE)
-            used_len = VIRTIO_NET_BUF_SIZE;
-        size_t pkt_len = used_len - VIRTIO_NET_HDR_SIZE;
-        if (pkt_len > maxlen) {
-            pkt_len = maxlen;
-            net->rx_drops++;
-        }
-        arch_dma_sync_for_cpu(net->rx_buf[slot], used_len);
-        memcpy(packet, net->rx_buf[slot] + VIRTIO_NET_HDR_SIZE, pkt_len);
-        net->rx_packets++;
-        ret = (int)pkt_len;
+        spin_unlock_irqrestore(&net->lock, flags);
+        return 0;
     }
 
-    if (slot < VIRTIO_QUEUE_SIZE) {
-        virtio_net_submit_rx_locked(net, slot);
-        virtio_net_kick(net, VIRTIO_NET_QUEUE_RX);
+    /*
+     * num_buffers says how many posted buffers this one frame consumed.  The
+     * device writes it into the header of the FIRST buffer of the chain
+     * (virtio 1.1 5.1.6) at offset 10, and each consumed buffer gets its own
+     * used-ring entry carrying only the bytes written into it.  Without
+     * MRG_RXBUF there is no such field and a frame is exactly one buffer.
+     *
+     * It is clamped to the entries actually published.  A device claiming more
+     * buffers than it wrote used entries for is describing a frame this driver
+     * cannot finish; consuming only what exists keeps the used ring and the
+     * posted buffers in step, so the cost is one dropped frame rather than a
+     * permanently desynchronised ring.
+     */
+    unsigned nbuf = 1;
+    if (net->mrg_rxbuf) {
+        arch_dma_sync_for_cpu(net->rx_buf[slot], VIRTIO_NET_HDR_MRG);
+        nbuf = (unsigned)net->rx_buf[slot][VIRTIO_NET_HDR_NUMBUF_OFF] |
+               ((unsigned)net->rx_buf[slot][VIRTIO_NET_HDR_NUMBUF_OFF + 1] << 8);
+        if (nbuf == 0)
+            nbuf = 1;
+        if (nbuf > pending)
+            nbuf = pending;
+        if (nbuf > net->qsize)
+            nbuf = net->qsize;
+    }
+    int truncated = 0;
+    size_t copied = 0;
+
+    for (unsigned k = 0; k < nbuf; k++) {
+        unsigned buf_slot;
+        uint32_t buf_len;
+
+        if (k == 0) {
+            buf_slot = slot;
+            buf_len = used_len;
+        } else {
+            ring_idx = q->last_used % net->qsize;
+            arch_dma_sync_for_cpu(&used->ring[ring_idx], sizeof(virtq_used_elem_t));
+            avail_idx = (uint16_t)used->ring[ring_idx].id;
+            buf_len = used->ring[ring_idx].len;
+            q->last_used++;
+            buf_slot = q->slot_of_avail[avail_idx % net->qsize];
+            if (buf_slot >= net->qsize) {
+                /* Nothing sane left to do with this entry: keep the buffers
+                 * accounted for so far and drop the frame. */
+                truncated = 1;
+                nbuf = k;
+                break;
+            }
+        }
+        net->rx_recycle[k] = (uint16_t)buf_slot;
+
+        /* Every buffer of the chain starts with its own virtio_net_hdr: the
+         * spec puts one in front of each posted buffer the device consumes,
+         * not just in front of the frame. */
+        size_t skip = hdr_len;
+        if (buf_len <= skip)
+            continue;
+        size_t n = buf_len - skip;
+        if (n > (size_t)VIRTIO_NET_FRAME_MAX)
+            n = VIRTIO_NET_FRAME_MAX;
+        arch_dma_sync_for_cpu(net->rx_buf[buf_slot], skip + n);
+        if (copied < maxlen) {
+            size_t room = maxlen - copied;
+            size_t take = n < room ? n : room;
+            memcpy((uint8_t *)packet + copied, net->rx_buf[buf_slot] + skip, take);
+            copied += take;
+        } else {
+            truncated = 1;
+        }
+    }
+    /* Whatever was taken off the used ring goes straight back, including a
+     * frame that turned out to be unusable: a buffer that is not re-posted is
+     * a permanently lost receive slot. */
+    for (unsigned k = 0; k < nbuf; k++)
+        virtio_net_submit_rx_locked(net, net->rx_recycle[k]);
+    virtio_net_kick(net, VIRTIO_NET_QUEUE_RX);
+
+
+    int ret = 0;
+    if (truncated || copied == 0) {
+        net->rx_drops++;
+    } else {
+        net->rx_packets++;
+        ret = (int)copied;
     }
     spin_unlock_irqrestore(&net->lock, flags);
     return ret;
@@ -713,6 +1157,17 @@ static int virtio_net_class_rx_irq_driven(struct device *dev) {
     return net && net->irq_registered;
 }
 
+static uint32_t virtio_net_class_caps(struct device *dev) {
+    virtio_net_inst_t *net = (virtio_net_inst_t *)dev->drv_priv;
+    uint32_t caps = 0;
+    /* Only bits whose driver-side path exists are reported.  MRG_RXBUF is
+     * implemented; the two checksum bits are not, because lwIP cannot be told
+     * a checksum was offloaded (see virtio_net_init_instance()). */
+    if (net && net->mrg_rxbuf)
+        caps |= NET_DEV_CAP_MRG_RXBUF;
+    return caps;
+}
+
 /* Published to the stack as a weak symbol rather than through net_dev_ops_t.
  * These four counters were already maintained here but were unreachable from
  * anywhere, so a drop could not be attributed to the device or to lwIP. */
@@ -738,6 +1193,7 @@ static net_dev_ops_t virtio_net_class_ops = {
     .mac  = virtio_net_class_mac,
     .poll = virtio_net_class_poll,
     .rx_irq_driven = virtio_net_class_rx_irq_driven,
+    .caps = virtio_net_class_caps,
 };
 
 static const device_id_t virtio_net_ids[] = {
@@ -770,6 +1226,10 @@ static int virtio_net_driver_remove(device_t *dev) {
     net->irq_registered = 0;
     net->vt.write32(&net->vt, VIRTIO_MMIO_STATUS, 0);
     mb();
+    /* After the device is stopped and the IRQ freed: the rings are what it was
+     * writing into, and virtio_net_recv() must not reach them once they are
+     * gone. */
+    virtio_net_free_ring(net);
     dev->drv_priv = NULL;
     return 0;
 }

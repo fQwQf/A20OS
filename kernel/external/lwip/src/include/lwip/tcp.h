@@ -50,6 +50,11 @@
 #include "lwip/err.h"
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
+#if LWIP_TCP_CUBIC
+/* A20OS divergence: per-connection congestion control.  This header defines
+ * struct tcp_cubic_state and does not include lwip/tcp.h back. */
+#include "lwip/priv/tcp_cubic_priv.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -288,6 +293,13 @@ struct tcp_pcb {
   u32_t rcv_nxt;   /* next seqno expected */
   tcpwnd_size_t rcv_wnd;   /* receiver window available */
   tcpwnd_size_t rcv_ann_wnd; /* receiver window to announce */
+  /* A20OS divergence: a per-pcb ceiling for rcv_wnd, 0 meaning "no ceiling".
+   * tcp_recved() reopens the window on every read up to TCP_WND_MAX(pcb), so a
+   * SO_RCVBUF smaller than TCP_WND would be undone by the first read() unless
+   * that ceiling is somewhere; this is that place.  It only ever lowers the
+   * window, never raises it above what TCP_WND_MAX allows.  See
+   * kernel/external/lwip/DIVERGENCE.md 2.6. */
+  tcpwnd_size_t wnd_limit;
   u32_t rcv_ann_right_edge; /* announced right edge of window */
 
 #if LWIP_TCP_SACK_OUT
@@ -369,6 +381,17 @@ struct tcp_pcb {
   u32_t ts_lastacksent;
   u32_t ts_recent;
 #endif /* LWIP_TCP_TIMESTAMPS */
+
+#if LWIP_TCP_CUBIC
+  /* CUBIC (RFC 8312) per-PCB state.  See lwip/priv/tcp_cubic_priv.h; these
+     fields are meaningless when cong_alg is not TCP_CONG_CUBIC. */
+  struct tcp_cubic_state cubic;
+#endif /* LWIP_TCP_CUBIC */
+
+  /* Congestion control algorithm for this connection.  A20OS divergence:
+     upstream has exactly one algorithm and hardcodes it.  Values are
+     TCP_CONG_RENO / TCP_CONG_CUBIC from lwip/priv/tcp_cubic_priv.h. */
+  u8_t cong_alg;
 
   /* idle time before KEEPALIVE is sent */
   u32_t keep_idle;

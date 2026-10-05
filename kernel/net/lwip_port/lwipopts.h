@@ -31,6 +31,23 @@
 #define LWIP_NETIF_API                  0
 #define LWIP_TCPIP_CORE_LOCKING         0
 
+/*
+ * SO_REUSEADDR support.  Left at opt.h's default of 0 this port had no way to
+ * honour setsockopt(SO_REUSEADDR): the socket layer stores the flag in
+ * net_socket_t::reuseaddr and net_bind_reuse_allowed() consults it, but lwIP
+ * never learns of it, so tcp_bind() keeps scanning the TIME-WAIT list and a
+ * listener restarted on the same port gets ERR_USE (EADDRINUSE) for as long as
+ * the previous connection's TIME-WAIT pcb lives -- 2 * TCP_MSL, i.e. two
+ * minutes here.  Turning the switch on is only half the fix; the other half is
+ * net_inet_tcp_apply_options() copying reuseaddr onto the pcb's SOF_REUSEADDR,
+ * because lwIP keys every SO_REUSE decision off the pcb, not off the caller.
+ * Together they make rebinding work the way Linux does: TIME-WAIT is skipped
+ * for a REUSEADDR bind, and listen()/connect() re-check the 5-tuple and the
+ * local address/port so a REUSEADDR bind cannot silently alias two live
+ * listeners.
+ */
+#define SO_REUSE                        1
+
 #define LWIP_HAVE_LOOPIF                1
 #define LWIP_NETIF_LOOPBACK             1
 #define LWIP_LOOPBACK_MAX_PBUFS         16
@@ -127,15 +144,76 @@ _Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
 #define TCP_LISTEN_BACKLOG              1
 #define TCP_DEFAULT_LISTEN_BACKLOG      16
 
+/*
+ * SACK (RFC 2018) and timestamps (RFC 7323).  Both default to 0 in opt.h, and
+ * both were left there, so a connection to any modern off-box peer negotiated
+ * neither: every loss was recovered by Reno's dupack threshold alone, and PAWS
+ * -- which is what stops an old duplicate from being accepted after a PAWS
+ * timeout reuses sequence numbers -- was simply absent.
+ *
+ * Neither is a change to lwIP's behaviour, only to what it is willing to
+ * negotiate; both code paths already existed and were compiled out.
+ *
+ * Costs, so these are not free:
+ *   - Per PCB: 2 * u32_t for the timestamp state (ts_lastacksent, ts_recent)
+ *     plus LWIP_TCP_MAX_SACK_NUM * 8 B of SACK ranges.  Every established
+ *     connection pays it, so the pool multiplier below is what keeps this
+ *     affordable on the small profiles.
+ *   - Per segment: up to 12 B of TCP options for TS and up to (1 + 2 * 4) * 4 =
+ *     36 B for four SACK blocks, added to every data segment header.  That is
+ *     why the PBUF_POOL_BUFSIZE assertion below now budgets options, and why
+ *     the profiles raise the multiplier instead of leaving it at opt.h's 4.
+ *
+ * EMBEDDED leaves both off.  With PBUF_POOL_BUFSIZE 512 and 8 PCBs the header
+ * growth competes directly with payload for the same element, and an MCU
+ * profile whose stated goal is a bounded, proportional footprint should not
+ * spend it on options that only matter on a real network path.
+ */
+#define LWIP_TCP_SACK_OUT               NET_PROFILE_TCP_SACK_OUT
+#define LWIP_TCP_MAX_SACK_NUM           NET_PROFILE_TCP_MAX_SACK_NUM
+#define LWIP_TCP_TIMESTAMPS             NET_PROFILE_TCP_TIMESTAMPS
+
+/* CUBIC (RFC 8312) as a second, per-connection congestion control algorithm.
+ * Not an upstream option -- see kernel/external/lwip/DIVERGENCE.md 2.5.  It
+ * adds ~28 B to every tcp_pcb and ~4 KB of .text; EMBEDDED leaves it off for
+ * the same reason it leaves the options off. */
+#define LWIP_TCP_CUBIC                  NET_PROFILE_TCP_CUBIC
+
+/* init.c rejects SACK_OUT without the ooseq queue, and SACK is only meaningful
+ * with somewhere to record the ranges it reports. */
+_Static_assert(!LWIP_TCP_SACK_OUT || TCP_QUEUE_OOSEQ,
+               "LWIP_TCP_SACK_OUT requires TCP_QUEUE_OOSEQ");
+_Static_assert(LWIP_TCP_MAX_SACK_NUM >= 1,
+               "LWIP_TCP_MAX_SACK_NUM must be at least 1");
+
 /* lwIP truncates the advertised window to 16 bits after shifting; a larger
  * TCP_WND would silently wrap rather than negotiate a wider window. */
 _Static_assert(TCP_WND <= (0xFFFF << TCP_RCV_SCALE),
                "TCP_WND must fit the 16-bit window field after TCP_RCV_SCALE");
 
-/* A full-size segment plus its Ethernet, IP and TCP headers must fit one
- * PBUF_POOL element; lwIP carves the headers out of the head pbuf's payload. */
-_Static_assert(TCP_MSS + 54 <= PBUF_POOL_BUFSIZE,
-               "PBUF_POOL_BUFSIZE must leave room for headers above TCP_MSS");
+/*
+ * A full-size segment plus its Ethernet, IP and TCP headers must fit one
+ * PBUF_POOL element; lwIP carves the headers out of the head pbuf's payload.
+ *
+ * The "+ 54" was Ethernet(14) + IPv4(20) + TCP(20) with no options, which
+ * stops being the true figure the moment any option is negotiated: the header
+ * grows by exactly the option bytes the segment carries, and an ignored
+ * remainder here is a mid-connection drop rather than a build failure.  The
+ * worst case is a data segment, which cannot carry MSS or window-scale (both
+ * are SYN-only) but does carry TS and up to LWIP_TCP_MAX_SACK_NUM SACK blocks.
+ *
+ * The literals are PBUF_LINK_HLEN + IP_HLEN + TCP_HLEN spelled out because
+ * lwipopts.h is read before pbuf.h defines them; 14/20/20 are those values for
+ * the Ethernet netif this port builds.
+ */
+#define A20_TCP_OPT_HDR_MAX                                              \
+    (14 /* Ethernet */ + 20 /* IPv4 */ + 20 /* TCP */                     \
+     + (LWIP_TCP_TIMESTAMPS ? 12 : 0)                                     \
+     + (LWIP_TCP_SACK_OUT ? (1 + 2 * LWIP_TCP_MAX_SACK_NUM) * 4 : 0))
+
+_Static_assert(TCP_MSS + A20_TCP_OPT_HDR_MAX <= PBUF_POOL_BUFSIZE,
+               "PBUF_POOL_BUFSIZE must leave room for headers and TCP options "
+               "above TCP_MSS");
 
 /* The receive window is only reachable if the pool can hold that much payload
  * queued at once, otherwise the window advertises capacity that cannot be
@@ -201,14 +279,51 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
 #define TCP_DEBUG_PCB_LISTS 1
 #endif
 
+/*
+ * Turn the documented core-lock discipline into something the CPU enforces.
+ *
+ * lwIP ships LWIP_ASSERT_CORE_LOCKED() as an empty macro
+ * (src/include/lwip/opt.h:227) unless the port defines it, which is why the
+ * lock contract used to be prose only: the ~50 sites in tcp.c/tcp_in.c/
+ * raw.c/udp.c all expanded to nothing, so a path that touched PCB lists
+ * without g_lwip_lock corrupted them silently.  docs/net/net-lanes.md
+ * ("为什么没有任何断言拦住它") records the concrete damage that let through.
+ *
+ * The owner is recorded as a CPU id rather than a boolean because a boolean
+ * answers "is this flag set", which is true on every CPU while *another* CPU
+ * holds the lock -- exactly the case the assertion exists to catch.  The
+ * __builtin is evaluated at the macro's expansion point, so `site` is the
+ * return address inside the lwIP function that ran unlocked.
+ */
 #if CONFIG_NET_LOCK_ASSERT
-int  a20_lwip_lock_is_held(void);
-void a20_lwip_note_lock_violation(void *site);
+void a20_lwip_assert_core_locked(void *site);
 #define LWIP_ASSERT_CORE_LOCKED() \
-    do { if (!a20_lwip_lock_is_held()) \
-             a20_lwip_note_lock_violation(__builtin_return_address(0)); } while (0)
+    do { a20_lwip_assert_core_locked(__builtin_return_address(0)); } while (0)
 #else
 #define LWIP_ASSERT_CORE_LOCKED()
+#endif
+
+/*
+ * Which lane owns the network work in progress, as seen from inside lwIP.
+ *
+ * memp's API has no lane dimension -- memp_malloc(MEMP_PBUF) receives a pool
+ * id and nothing else -- so partitioning a pool per lane means memp has to
+ * ask.  The question is answered by the port rather than inside lwIP because
+ * the answer is an A20OS concept: the lane is the address-derived ownership
+ * hash (net_lane_of), and the only place it is known is the A20OS entry point
+ * that is about to enter the lwIP core.  net_lane.h records why this may not
+ * be derived from the CPU instead; kernel/external/lwip/DIVERGENCE.md lists
+ * what this adds to the upstream tree.
+ *
+ * Left undefined it means "no lane concept", which is upstream's behaviour and
+ * what a CONFIG_NET_LANES == 1 build has to keep.  memp.c tests it with
+ * #ifdef, so at one lane not one statement of the lane-indexed pool path is
+ * compiled -- see the equivalence rule at the top of docs/net/net-lanes.md.
+ */
+#if CONFIG_NET_LANES > 1
+unsigned a20_lwip_memp_lane(void);
+#define LWIP_MEMP_LANE() a20_lwip_memp_lane()
+#define LWIP_MEMP_LANES CONFIG_NET_LANES
 #endif
 
 #define LWIP_RAND()                     ((u32_t)random_u64())
