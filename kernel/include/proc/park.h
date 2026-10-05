@@ -76,7 +76,7 @@ typedef struct proc_wake_q {
  * A token belongs to one logical wait, not to one wait queue.  The caller may
  * link the same token into several wait queues.  prepare/cancel/commit/finish
  * must never be called while an object or wait-queue lock is held; queue
- * link/unlink operations do not acquire proc_lock.
+ * link/unlink operations do not acquire any scheduler lock.
  */
 proc_wait_token_t proc_park_prepare(proc_wait_mode_t mode,
                                     uint64_t deadline);

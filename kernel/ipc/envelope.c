@@ -106,16 +106,16 @@ static void env_mark_expired_locked(a20_envelope_t *e)
 static void env_kill_tasks(a20_envelope_t *e)
 {
     /* KILL_ON_EXPIRE: SIGKILL every task still attached.  Pids are collected
-     * under proc_lock (task-list membership) and signalled after release —
+     * under tasklist_lock (task-list membership) and signalled after release —
      * signal_send takes its own locks, and the documented lock order does
-     * not include signal locks under proc_lock. */
+     * not include signal locks under tasklist_lock. */
     enum { KILL_BATCH = 32 };
     int cursor = -1;
 
     for (;;) {
         int pids[KILL_BATCH];
         int n = 0;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
         for (task_t *t = proc_first_task_locked(); t;
              t = proc_next_task_locked(t)) {
             if (__atomic_load_n(&t->envelope, __ATOMIC_ACQUIRE) != (void *)e ||
@@ -132,7 +132,7 @@ static void env_kill_tasks(a20_envelope_t *e)
             }
             pids[pos] = t->pid;
         }
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
 
         if (n == 0)
             break;
@@ -680,7 +680,7 @@ int64_t env_audit(struct a20_env_audit *out)
 
     /* Attachment consistency: every task envelope pointer must name a
      * registered instance. */
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t;
          t = proc_next_task_locked(t)) {
         a20_envelope_t *evp =
@@ -691,7 +691,7 @@ int64_t env_audit(struct a20_env_audit *out)
         if (!env_registry_contains(evp))
             r.v_task_dangling++;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
 
     r.violations = r.v_type_allowed + r.v_rights_sub_cap +
                    r.v_budget_nonneg + r.v_task_dangling;

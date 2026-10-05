@@ -34,22 +34,33 @@ static int oom_pick_victim_pid(void)
     int victim_pid = -1;
     int best_score = -1;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the global list; every field read below is
+     * park_lock-owned and is sampled under that task's own park_lock, one task
+     * at a time.  Reading ->state without the lock would be unsynchronised
+     * against the park state machine (INV-P1). */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t == proc_idle_task() || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        if (t == proc_idle_task())
             continue;
-        if (t->pid <= 2)
-            continue;
+        uint64_t tf = spin_lock_irqsave(&t->park_lock);
+        int st = t->state;
         int score = t->policy.oom_score_adj;
-        if (!t->mm)
+        int has_mm = t->mm != NULL;
+        int tpid = t->pid;
+        spin_unlock_irqrestore(&t->park_lock, tf);
+        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
+            continue;
+        if (tpid <= 2)
+            continue;
+        if (!has_mm)
             score -= 100;
         if (score > best_score ||
-            (score == best_score && t->pid > victim_pid)) {
+            (score == best_score && tpid > victim_pid)) {
             best_score = score;
-            victim_pid = t->pid;
+            victim_pid = tpid;
         }
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return victim_pid;
 }
 

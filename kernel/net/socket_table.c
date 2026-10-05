@@ -5,11 +5,17 @@
 /*
  * Socket-table enumeration behind /proc/net/{tcp,udp,unix}.
  *
- * Everything in this file runs under g_net_lock and nothing else.  procfs
+ * This file runs under socket-table bucket locks and nothing else.  procfs
  * renders its rows from the walk callback, so that callback executes in
  * spinlock context: no blocking, no allocation, and no lwIP call, because
- * g_lwip_lock and g_net_lock are never held together
+ * g_lwip_lock and a bucket lock are never held together
  * (docs/net/network-lock-contract.md).
+ *
+ * The walk takes ONE bucket lock at a time and releases it before taking the
+ * next.  Taking all of them would be the livelock fs/vfs/dcache.c records --
+ * with interrupts disabled, an interrupt that reaches a lookup then spins on a
+ * lock its own interrupted context was holding -- and vfs_dcache_invalidate_all
+ * is the shape used there.
  */
 
 /*
@@ -17,9 +23,15 @@
  * a pcb".  A loopback connect() pairs two kernel-internal sockets and then
  * drops both lwIP pcbs (net_inet_connect_stream -> net_tcp_drop_pcb), so a
  * pcb test would hide exactly the connections a loopback-only stack makes.
- * `closed` is the teardown signal: net_socket_close_file sets it in the same
- * g_net_lock section that unregisters the slot, so a table snapshot can never
- * catch a half-freed socket.
+ *
+ * `closed` is the teardown signal, and the invariant it buys is now per bucket
+ * rather than global: net_socket_close_file unregisters the slot and sets
+ * `closed` inside one bucket critical section, so every socket this walk visits
+ * is still an in-registry reference holder within *its own* bucket's critical
+ * section.  The walk does not promise a same-instant snapshot across buckets.  A
+ * socket closed concurrently may still be seen (with `closed` already set, so
+ * net_table_claims() or the row renderer drops it), but a socket whose slot has
+ * already been released can never be.
  */
 static int net_table_claims(net_table_kind_t kind, const net_socket_t *s)
 {
@@ -39,6 +51,24 @@ static int net_table_claims(net_table_kind_t kind, const net_socket_t *s)
     return 0;
 }
 
+typedef struct {
+    net_table_kind_t   kind;
+    net_table_visit_fn fn;
+    void              *arg;
+    int                visited;
+} net_walk_arg_t;
+
+static bool net_walk_slot(net_socket_t *s, int idx, void *arg)
+{
+    net_walk_arg_t *w = arg;
+    (void)idx;
+    if (s->closed || !net_table_claims(w->kind, s))
+        return false;
+    w->visited++;
+    w->fn(s, w->arg);
+    return false;
+}
+
 /* Visits every socket of `kind` still owned by the table.  Returns the number
  * of visits, or -EINVAL when there is no callback to run. */
 int net_socket_table_walk(net_table_kind_t kind, net_table_visit_fn fn,
@@ -47,17 +77,9 @@ int net_socket_table_walk(net_table_kind_t kind, net_table_visit_fn fn,
     if (!fn)
         return -EINVAL;
 
-    int visited = 0;
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
-        net_socket_t *s = g_sockets[i];
-        if (!s || s->closed || !net_table_claims(kind, s))
-            continue;
-        visited++;
-        fn(s, arg);
-    }
-    spin_unlock_irqrestore(&g_net_lock, irq);
-    return visited;
+    net_walk_arg_t w = { kind, fn, arg, 0 };
+    net_table_scan_all(net_walk_slot, &w);
+    return w.visited;
 }
 
 /*
@@ -86,19 +108,20 @@ int net_socket_rx_available(net_socket_t *s, size_t *out)
         return -ENOTSOCK;
 
     size_t total;
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    if (!net_socket_is_valid_locked(s)) {
-        spin_unlock_irqrestore(&g_net_lock, irq);
+    int b = net_socket_bucket(s);
+    uint64_t irq = net_bucket_lock(b);
+    if (!net_socket_is_live(s)) {
+        net_bucket_unlock(b, irq);
         return -ENOTSOCK;
     }
     if (s->domain == AF_PACKET) {
         /* Captured frames are whole L2 payloads with no stream position, so
          * there is no byte count this socket can honestly report. */
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock(b, irq);
         return -EOPNOTSUPP;
     }
     total = net_rx_queued_locked(s);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock(b, irq);
     *out = total;
     return 0;
 }

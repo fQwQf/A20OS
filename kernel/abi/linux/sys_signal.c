@@ -143,7 +143,8 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
      */
     signal_state_t *ss = (signal_state_t *)t->signals;
     proc_wait_token_t token = {0};
-    uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+    /* park_lock -> signal_state.lock; no global task lock takes part in the
+     * park protocol. */
     uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
     uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
     t->sigsuspend_old_blocked = t->sig_blocked;
@@ -153,7 +154,6 @@ int64_t sys_sigsuspend(void *mask, size_t sigsetsize) {
     if (!signal_task_has_unblocked(t))
         token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, 0);
     spin_unlock_irqrestore(&t->park_lock, park_flags);
-    spin_unlock_irqrestore(&proc_lock, proc_flags);
 
     if (token.task) {
         (void)proc_park_commit(token);
@@ -244,7 +244,8 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
     for (;;) {
         proc_wait_token_t token = {0};
         int selected = 0;
-        uint64_t proc_flags = spin_lock_irqsave(&proc_lock);
+        /* park_lock -> signal_state.lock; no global task lock takes part in
+         * the park protocol. */
         uint64_t park_flags = spin_lock_irqsave(&t->park_lock);
         uint64_t signal_flags = spin_lock_irqsave(&ss->lock);
         uint64_t matching = (ss->pending | t->thread_pending) & mask;
@@ -270,7 +271,6 @@ int64_t sys_sigtimedwait(const uint64_t *set, void *info, const void *timeout, s
         if (!selected && !poll_only)
             token = proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, until);
         spin_unlock_irqrestore(&t->park_lock, park_flags);
-        spin_unlock_irqrestore(&proc_lock, proc_flags);
 
         if (selected) {
             if (info && copy_to_user(info, infobuf, sizeof(infobuf)) < 0)
