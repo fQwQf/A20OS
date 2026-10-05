@@ -9,6 +9,7 @@
 #include "core/lock.h"
 #include "core/lock_counters.h"
 #include "core/perf.h"
+#include "core/panic.h"
 #include "drivers/core/driver_class.h"
 #include "drivers/core/driver_core.h"
 
@@ -86,6 +87,25 @@ static spinlock_t g_lwip_lock = SPINLOCK_INIT;
 #if CONFIG_NET_LOCK_ASSERT
 static volatile unsigned g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
 static unsigned g_lwip_lock_violations;
+/*
+ * Armed at the end of a20_lwip_init().  Until then the assertion is a no-op on
+ * purpose, not because the boot path is exempt by decree: lwIP's own
+ * netif_add()/netif_init()/dhcp_start() chain runs inside a20_lwip_init() with
+ * no A20OS lock held at all, and the probe measured 23 assertion hits across
+ * 8 distinct return addresses there (netif_init, netif_add, lwip_init,
+ * netif_add_ip6_address, a20_lwip_init, a20_lwip_loopif_init_cb).  Panicking
+ * on those would kill every configuration at boot.  What matters is the claim
+ * made about *steady state*, so the assertion starts biting exactly when the
+ * stack becomes reachable: after arming, every LWIP_ASSERT_CORE_LOCKED() site
+ * must be holding g_lwip_lock, and one that is not is a defect, not noise.
+ *
+ * Pre-arm hits are therefore *not* counted either: a counter that mixes 23
+ * known-init hits with real ones reads as noise and trains everyone to ignore
+ * the line.  The exemption rests on the earlier probe's site list, recorded in
+ * docs/net/net-lanes.md ("运行时证据（已验证）"); a post-arm violation is the
+ * only thing this counter is for, and it panics rather than merely counting.
+ */
+static volatile int g_lwip_lock_armed;
 static void *g_lwip_lock_sites[A20_LWIP_LOCK_SITES];
 static unsigned g_lwip_lock_nsites;
 #endif /* CONFIG_NET_LOCK_ASSERT */
@@ -381,6 +401,11 @@ void a20_lwip_init(void) {
      * adjacent in diagnostics output, not about polling precedence. */
     a20_lwip_register_loopif();
     g_lwip_ready = 1;
+#if CONFIG_NET_LOCK_ASSERT
+    /* Past this point every lwIP entry point that carries an assertion must be
+     * reached with g_lwip_lock held.  See g_lwip_lock_armed. */
+    __atomic_store_n(&g_lwip_lock_armed, 1, __ATOMIC_RELEASE);
+#endif
     printf("[LWIP] initialized: IPv4 IPv6 TCP UDP RAW ICMP DHCP DNS loopif\n");
 }
 
@@ -435,6 +460,35 @@ void a20_lwip_note_lock_violation(void *site)
 unsigned a20_lwip_lock_violations(void)
 {
     return __atomic_load_n(&g_lwip_lock_violations, __ATOMIC_RELAXED);
+}
+
+/*
+ * The whole point of the lock contract is that it is executable, not prose.
+ * lwIP ships LWIP_ASSERT_CORE_LOCKED() as an empty macro
+ * (src/include/lwip/opt.h:227), so every one of the ~50 sites in tcp.c,
+ * tcp_in.c, raw.c, udp.c, dns.c and ethernet.c expanded to nothing and a path
+ * that mutated PCB lists without g_lwip_lock corrupted them silently --
+ * exactly the failure net-lanes.md had to chase through assembly and UBSan
+ * descriptors.  lwipopts.h maps the macro here; this is the mapping.
+ *
+ * `site` is the return address taken at the macro's expansion point, so it
+ * identifies the lwIP function that ran unlocked rather than this function.
+ * It is recorded before the panic because the backtrace of a panic in a kernel
+ * built without a line table is only as good as the return address it prints.
+ */
+void a20_lwip_assert_core_locked(void *site)
+{
+    if (g_lwip_lock_owner == cpu_current_id())
+        return;
+    /* Pre-arm: boot-time lwIP construction, which by construction holds no
+     * A20OS lock.  Counted (that count is the evidence for the exemption),
+     * not fatal. */
+    if (!__atomic_load_n(&g_lwip_lock_armed, __ATOMIC_ACQUIRE))
+        return;
+    a20_lwip_note_lock_violation(site);
+    panic("lwIP core unlocked: site=%lx owner=%u cpu=%u violations=%u",
+          (unsigned long)(uintptr_t)site, g_lwip_lock_owner,
+          cpu_current_id(), a20_lwip_lock_violations());
 }
 #endif
 
@@ -766,8 +820,10 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
     a20_lwip_append(buf, bufsz, &off, cell);
 #if CONFIG_NET_LOCK_ASSERT
-    snprintf(cell, sizeof(cell), "\nlwip_lock: owner=%u violations=%u sites=%u\n",
-             g_lwip_lock_owner, a20_lwip_lock_violations(), g_lwip_lock_nsites);
+    snprintf(cell, sizeof(cell),
+             "\nlwip_lock: armed=%d owner=%u violations=%u sites=%u\n",
+             g_lwip_lock_armed ? 1 : 0, g_lwip_lock_owner,
+             a20_lwip_lock_violations(), g_lwip_lock_nsites);
     a20_lwip_append(buf, bufsz, &off, cell);
     for (unsigned i = 0; i < A20_LWIP_LOCK_SITES; i++) {
         void *site = __atomic_load_n(&g_lwip_lock_sites[i], __ATOMIC_RELAXED);
@@ -1150,3 +1206,4 @@ int a20_lwip_packet_tx(unsigned ifindex, const uint8_t *frame, size_t len)
     a20_lwip_unlock(flags);
     return r == (int)len ? (int)len : -EIO;
 }
+
