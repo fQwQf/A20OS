@@ -4,10 +4,13 @@
  * contract and docs/hypervisor/00-design.md for the design record.
  */
 #include "hyp/hyp.h"
+#include "hyp/hyp_vcpu.h"
 #include "mm/pt.h"
 #include "mm/frame.h"
 #include "mm/mm.h"
 #include "mm/slab.h"
+#include "proc/proc.h"
+#include "cg/cgroup.h"
 #include "core/panic.h"
 #include "core/stdio.h"
 #include "core/string.h"
@@ -15,6 +18,36 @@
 /* Root entries this implementation programs.  Sv39x4 could address 4x this
  * through the same root shape; see the header comment before raising it. */
 #define HYP_GPA_LIMIT (1ULL << 39)
+
+/* The guest's default RAM window: where the qemu-virt demo guest (and A20OS
+ * as a guest) is loaded, which is also where a DTB gets copied to. */
+#define HYP_RAM_BASE_DEFAULT 0x80000000ULL
+
+/*
+ * What an on-demand guest RAM page gets in stage-2.
+ *
+ * R|W|X, and all three are needed here rather than a narrower set: the window
+ * exists to supply the pages the guest allocates for ITSELF -- page tables,
+ * bss, stacks -- but nothing in the interface says which kind of page a given
+ * GPA is, so the leaf has to permit both halves of the access space.  The
+ * alternative split (R|X for anything the guest might fetch and R|W for
+ * anything it might store) needs a per-page classification the contract's
+ * hyp_ram_fill(vm, gpa) signature has no room to carry.
+ *
+ * The priv spec calls R|W|X in a leaf PTE a reserved encoding, and this is
+ * known: it is one of the cases the G-stage walk refuses.  What QEMU 10.0.13
+ * actually does with it (target/riscv/cpu_helper.c, get_physical_address(),
+ * the reserved-RWX switch at :1598) is switch on (pte & (R|W|X)) with cases
+ * PTE_W|PTE_X, PTE_W and PTE_R -- i.e. only the R-less combinations are
+ * refused; the value 7 (R|W|X) falls through and yields
+ * prot = PAGE_READ|PAGE_WRITE|PAGE_EXEC.  The guest's stage-1 has already had
+ * its say by the time this leaf is walked, so permitting everything in stage-2
+ * does not weaken it: it defers to a table that says nothing.  A guest with a
+ * real stage-1 would be protected by it instead.  hyp_s2_map() adds A|D|U on
+ * top of this, which the walk also requires (adue off: a leaf without A, or a
+ * leaf without D for a store, fails).
+ */
+#define HYP_RAM_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
 /* One VMID per VM, never reused while the kernel runs: hgatp.VMID tags the
  * guest TLB, and handing a dead VM's tag to a new VM would let stale guest
@@ -26,6 +59,17 @@ static uint16_t hyp_next_vmid;
 
 hyp_vm_t *hyp_vm_create(uint64_t mem_size)
 {
+    /* The window is [HYP_RAM_BASE_DEFAULT, +mem_size) and has to land inside
+     * what hgatp can name -- the same bound hyp_vm_set_ram() enforces, and for
+     * the same reason: this implementation programs stage-2 root entries [0,512)
+     * only, so a window reaching past HYP_GPA_LIMIT would be silently
+     * unreachable rather than refused, and the guest would fault on memory it
+     * had been told it had.  Written as `mem_size > LIMIT - BASE` and not as
+     * `BASE > LIMIT - mem_size` so that a size past the limit cannot wrap the
+     * subtraction into a value that passes. */
+    if (mem_size == 0 || mem_size > HYP_GPA_LIMIT - HYP_RAM_BASE_DEFAULT)
+        return NULL;
+
     hyp_vm_t *vm = kcalloc(1, sizeof(*vm));
     if (!vm)
         return NULL;
@@ -45,6 +89,11 @@ hyp_vm_t *hyp_vm_create(uint64_t mem_size)
     vm->vmid     = hyp_next_vmid++;
     vm->mem_size = mem_size;
     vm->refcount = 1;
+    /* Default RAM window (hyp_vcpu.h v2): the guest RAM this VM is provisioned
+     * for, at the address the demo guest is loaded at.  A loader that wants
+     * the window somewhere else calls hyp_vm_set_ram() before the run. */
+    vm->ram_base = HYP_RAM_BASE_DEFAULT;
+    vm->ram_size = mem_size;
     /* Fresh VMID: no guest translation under this tag can exist anywhere. */
     hyp_arch_vmid_fenced(vm->vmid);
     return vm;
@@ -224,6 +273,84 @@ int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return -EINVAL;
     return mm_s2_audit(vm->s2_root, ARCH_PT_ROOT_LEVEL, out);
+}
+
+/* ---- v2: the on-demand RAM window (hyp_vcpu.h) ---- */
+
+int hyp_vm_set_ram(hyp_vm_t *vm, uint64_t base, uint64_t size)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return -EINVAL;
+    if (size == 0)
+        return -EINVAL;
+    /* The window must be inside what hgatp can name: this implementation
+     * programs root entries [0,512) only, so a window that reaches past
+     * HYP_GPA_LIMIT would be silently unreachable rather than refused. */
+    if (base > HYP_GPA_LIMIT - size)
+        return -ERANGE;
+
+    /* Plain stores, and that is enough: the host sets the window before the
+     * run, and while a guest is live only hyp_ram_fill() reads it -- on the
+     * CPU running the guest, which is the CPU that published it. */
+    vm->ram_base = base;
+    vm->ram_size = size;
+    return 0;
+}
+
+int hyp_vm_ram_contains(hyp_vm_t *vm, uint64_t gpa)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return 0;
+    return gpa >= vm->ram_base && gpa - vm->ram_base < vm->ram_size;
+}
+
+/*
+ * Demand-fill one guest page.  The second-stage trap handler calls this with
+ * the htval address and the run loop resumes the guest when it returns 0; a
+ * guest access outside the window is not ours to serve and stays a fault.
+ *
+ * Zeroed, because the window is a supply channel for memory the guest has not
+ * written yet (its own page tables, bss, fresh stacks) and a recycled frame's
+ * old contents would be the guest's first read of its own address space.
+ */
+int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return -EINVAL;
+    if (gpa & (PAGE_SIZE - 1))
+        return -EINVAL;
+    if (!hyp_vm_ram_contains(vm, gpa))
+        return -EFAULT;
+
+    /* Already translated: there is nothing to fill.  Reached when the guest
+     * touches the page twice through two different faults (or when a caller
+     * re-asks), and answering 0 keeps the call idempotent for its only two
+     * possible callers. */
+    if (hyp_s2_translate(vm, gpa) != 0)
+        return 0;
+
+    pfn_t pfn = pfa_alloc_page();
+    if (pfn == PFN_NONE)
+        return -ENOMEM;
+    memset(pfn_to_virt(pfn), 0, PAGE_SIZE);
+
+    /* Charged to whoever is running the guest, the same rule every other
+     * allocation on this path uses (mm/fault.c, ipc/userfaultfd.c): the cgroup
+     * of the current task is the thing that gets the guest's memory bill. */
+    task_t *t = proc_current();
+    if (t && cg_mem_charge(t->cgroup, 1) != 0) {
+        frame_put(pfn);
+        return -ENOMEM;
+    }
+
+    int rc = hyp_s2_map(vm, gpa, pfn, HYP_RAM_PAGE_PROT);
+    if (rc) {
+        if (t)
+            cg_mem_uncharge(t->cgroup, 1);
+        frame_put(pfn);
+        return rc;
+    }
+    return 0;
 }
 
 /* ---- kernel-side selftest (docs/hypervisor/00-design.md, S4) ---- */

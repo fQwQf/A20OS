@@ -76,27 +76,106 @@ unmap（翻译消失、帧归还、标志清除）→ remap/-EEXIST → destroy�
 扩展，不带该参数时自测 SKIP——那会让门禁"过了但什么都没测"，参数是门禁的
 承重件。
 
-## 5. 下一片：vcpu 运行循环（未落地）
+## 5. vcpu 运行循环（已落地，`9858550b8`）
 
-这是 hypervisor 真正"跑指令"的部分，刻意独立成片：
+"真正跑指令"这一片已落地并过了门禁（`make smoke-hyp-vcpu`）。落地形状与当初
+设想有一处实质改动：**guest trap 不再走独立向量与独立状态，而是复用内核标准
+trap 路径，trap 帧本身就是 guest 状态**。当初提的 KVM-riscv sscratch 双区方案
+因此没有采用。
 
-- **上下文切换形状**：host 线程陷在 syscall 里，enter 例程把宿主被调者
-  保存寄存器存入 vcpu，装入 guest GPR，`sret`（`hstatus.SPV=1`）进 VS-mode；
-  guest trap 落到内核 `stvec`，trap 入口必须在污染宿主状态**之前**识别
-  guest trap（`hstatus.SPV`），把寄存器存进 vcpu 的 guest 保存区，再恢复
-  宿主 C 上下文返回运行循环。KVM-riscv 的 sscratch 双区方案是参照。
-- **最小拦截集**：VS ecall（legacy SBI console_putchar/shutdown）、
-  二级缺页（`htval`+`stval` → `hyp_s2_map` 补表）、WFI（vcpu 睡眠）。
-- **用户 API**：native ABI 上的 vm_create/vcpu_run（handle 语义天然贴合：
-  VM 是对象，vcpu 是它的 handle）。
-- **最小 guest**：由用户态测试程序直接往 guest RAM 写入字节码（SBI putchar
-  循环 + shutdown ecall），不引入 guest 镜像构建。
+### 5.1 运行形状
+
+- **进入**（`kernel/arch/riscv64/hyp/hyp_vcpu_asm.S:89`）：先把宿主被调用者保存
+  寄存器按冻结构造的偏移写进 `vcpu->arch[]`（`ra sp gp tp t0-t6 s0-s11`），
+  发布 `g_hyp_arch_vcpu`，在内核栈上**清零并填出一个 70 槽标准 trap 帧**，
+  `csrw stvec` 指向 `hyp_guest_trap_entry`，最后 `sret`（`hstatus.SPV=1`、
+  `sstatus.SPP=1`）进 VS-mode。
+- **guest trap 前导**（同上 `:66`）：VS-mode 与 HS-mode 共享物理寄存器组，从
+  guest 陷出来时 `sp`/`tp` 是 guest 的，而 `__trap_from_kernel` 在任何 C 运行
+  之前就通过 `tp` 存 sp guard 并在当前栈上建帧。前导把 guest 的 `sp`/`tp` 存进
+  `vcpu->regs[2]`/`regs[4]`，切回宿主栈与宿主 `tp`，再 `j __trap_from_kernel`。
+- **分类**（`kernel/core/trap.c:608`）：`kernel_trap_handler()` 在往帧里写任何
+  宿主侧状态（x[0] 存地址空间 token）之前先问 `hyp_arch_guest_trap(ctx)`，答案为
+  1 就直接返回，由 trap 返回路径把 guest 恢复。判定条件是"有活跃 vcpu 且
+  `hstatus.SPV` 为 1"（`hyp_arch.c:246`）。
+- **帧即状态 / 唯一接缝**：`hyp_vcpu_handle_trap()`（`kernel/hyp/hyp_vcpu.c:246`）
+  只改 `vcpu->regs[]`/`vcpu->pc`，从不碰交给它的 trap 帧；架构半在返回 1 时把
+  寄存器写回帧（`hyp_arch.c:286`）再走标准 trap 返回，在返回 0 时从 `arch[]`
+  恢复宿主上下文。
+- **退出**（`hyp_vcpu_asm.S:233`）：清掉 guest 侧的 hstatus 位、把 `stvec`
+  换回 `__trap_from_kernel`、清 `g_hyp_arch_vcpu`，从 `arch[]` 装回宿主寄存器
+  并 `ret` —— 直接回到 `hyp_arch_vcpu_enter()` 的调用点，整条 guest 帧连同它
+  下面的 C trap 路径一起被 `arch[1]`（宿主 sp）丢弃。
+- **宿主中断**：guest 运行期间来的是宿主 IRQ，它照样走同一个入口，在
+  `hyp_arch.c:281` 对着 guest 帧跑完宿主 IRQ 机器，然后直接 `sret` 回 guest。
+  宿主任务被抢占只是一次围绕栈帧的上下文切换。
+
+三处支撑改动：
+
+- `trap.S` 的帧释放从 `addi sp, sp, 70*8` 改成 `ld x2, 2*8(sp)`（`:467`）——
+  x[2] 是 trap 返回要恢复的 sp，帧其余槽都由 sp 寻址，sp 只能最后动。同一处
+  把帧的 x[2] 改成"trap 发生时的 sp 本身"（`:383-385`），此前存的
+  `sp + 70*8` 会让被打断的代码每一条相对 sp 的偏移都偏 560 字节。
+- `kernel/hyp/hyp.c:198` 的 stage-2 叶**加上 `PTE_U`**：G-stage 走查本身以 U
+  权限运行，没有 U 的叶会在看 R/W/X 之前就被拒（QEMU `cpu_helper.c` 的
+  "supervisor PTE flags when not S mode"）。v1 半原来剥掉 U 是反的。
+- Linux ABI 桥 `kernel/abi/linux/sys_a20_bridge.c` 用 pid 打标签的槽表暴露同一
+  批内核对象，`proc_exit()` 调 `hyp_bridge_task_exit()` 回收（`exit.c:446`）——
+  pid 会回收，不回收就等于后来的任务能装进、跑起并拆掉一个已死任务的 VM。
+
+### 5.2 验证
+
+`make smoke-hyp-vcpu`：`hyp_test`（`user/cmds/core/hyp_test.c`）建 VM、装 56 字节
+手写 RISC-V 机器码、跑 guest，断言退出原因是 `HYP_EXIT_SHUTDOWN`，并且 console
+上必须出现 guest 自己打出的独立一行 `HYP`（`tools/smoke_cases.py:533` 用
+`^HYP$` 锚定，裸 `HYP` 已被 `HYP_VCPU_TEST` 包含而不成立）。同一条 gate 必须带
+`-cpu rv64,h=true`：默认 rv64 CPU 不暴露 H，`hyp_supported()` 会让所有调用
+SKIP，gate 就变成"过了但什么都没测"。
+
+### 5.3 评审发现与遗留
+
+均为本片读码得出的结论；本片只写文档，没有改任何代码。
+
+1. **`trap.S:461-466` 的注释与实现不符**：它说 guest 跑在一棵"带着宿主子树的
+   自己的 stage-1 根"上、进出各有一次 satp 切换。实际是 vsatp 停在 MODE=Bare、
+   satp 全程不动（`hyp_arch.c:184-193`、`hyp_vcpu_asm.S:200-205`），trap 返回时
+   硬件自己完成 satp 与 vsatp 的暂存/恢复。注释是早期形状的残留。
+2. **只在 TCG 上验证过**：`hedeleg`/`hideleg` 全写 0（`hyp_arch.c:168-169`），
+   这一片只在 QEMU 10.0.13（Debian 1:10.0.13+ds-0+deb13u1）的
+   `-cpu rv64,h=true` 下跑过，没有在真实实现 H 的 CPU 上验证过任何行为。
+3. ~~**guest RAM 页面是 R|X，不是 R|W**~~ —— **已推翻并修正。** 原结论说 W 与 X
+   同时置位在叶 PTE 里是保留组合、G-stage 走查直接拒，**不成立**：QEMU
+   `get_physical_address()` 的叶处理只特判 `rwx==6`（W|X）与 `rwx==2`（W），
+   `rwx==7`（R|W|X）落到 `PAGE_READ|PAGE_WRITE|PAGE_EXEC`，正常翻译。
+   工作树现在按 `HYP_RAM_PAGE_PROT (PTE_R|PTE_W|PTE_X)` 装 guest RAM
+   （`kernel/hyp/hyp.c:50`），`hyp_vm_load()` 装进去的镜像用同一个值
+   （`kernel/hyp/hyp_vcpu.c:91` 的 `HYP_GUEST_PAGE_PROT`）。所以"guest 代码与
+   数据不能同页、镜像不能带栈"这个后果不存在——A20OS 的 `.bss` 与其中的
+   `_stack_end` 正需要 R|W。
+4. **句柄类型没进对象枚举**：Native ABI 的 VM/vcpu 用私有 type 18/19
+   （`sys_native_hyp.c:53-54`），`a20_type_valid_rights()` 对其返回 0，于是
+   handle 表的 ref/release 臂是空操作，vcpu 持有的 VM 引用永远不会被 drop；
+   Native ABI 也没有 vcpu-destroy。两条缺口在 `sys_native_hyp.c` 文件头里已经
+   写明。
+5. **单 guest 槽是全局的**：`hyp_active_vcpu` + `spin_trylock_irqsave`
+   （`hyp_vcpu.c:74-88,311-322`）。claim 用的必须是真跨 CPU 锁而不是
+   `arch_local_irq_disable()`（后者只关本 CPU 的窗）；用 trylock 而非等锁，
+   是因为输了竞争要回 `-EBUSY`，而不是举着锁穿进 guest 执行。
+6. **`trap.S:434` 与 `:443` 的缩进**在该提交里被压到了行首，是格式回退。
+
+### 5.4 下一片：v2
+
+把 A20OS 自己当 guest：委托式 trap、按需 RAM 窗口、16550/CLINT 设备模型、
+最小 FDT 引导。行为契约在 `kernel/include/hyp/hyp_vcpu.h` 的 v2 段，设计、
+评审发现与冒烟判据见 [01-a20os-guest.md](01-a20os-guest.md)，后续切片见
+[02-roadmap.md](02-roadmap.md)。
 
 ## 6. 验证入口汇总
 
 | 内容 | 入口 |
 | --- | --- |
 | stage-2/出借/审计自测 | `make smoke-hyp-selftest` |
+| vcpu 运行循环端到端 | `make smoke-hyp-vcpu` |
 | 大页叶建模 | `make smoke-mm-stress`（huge_install>=1 + 审计全零） |
 | 无锁 COW | 同上（cow_from_status>=1）+ `make check-mm-pt-lock-order`（32 条） |
 | 锁模型回归 | `make check-mm-lock-model`（14 条） |

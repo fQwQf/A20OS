@@ -13,6 +13,7 @@
 #include "core/errno.h"
 #include "core/fcntl.h"
 #include "core/lock.h"
+#include "core/string.h"
 #include "fs/fdtable.h"
 #include "ipc/envelope.h"
 #include "ipc/ipc.h"
@@ -412,7 +413,8 @@ int64_t sys_hyp_vcpu_run(const linux_syscall_args_t *args)
     return (int64_t)vcpu->exit;
 }
 
-/* SYS_hyp_vm_destroy(vm) -> 0.  A vcpu keeps its VM alive through the
+/*
+ * SYS_hyp_vm_destroy(vm) -> 0.  A vcpu keeps its VM alive through the
  * reference hyp_vcpu_create() took, so only the caller's own reference goes. */
 int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
 {
@@ -422,6 +424,126 @@ int64_t sys_hyp_vm_destroy(const linux_syscall_args_t *args)
     if (!vm || vm->magic != HYP_VM_MAGIC)
         return -EBADF;
     hyp_vm_put(vm);
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * A20OS-as-guest: boot a real kernel instead of a byte-coded demo.
+ *
+ * hyp_vcpu_run() answers "how did the guest leave", which is not the question
+ * a kernel guest raises.  Three facts are unreachable without these three
+ * calls, and all three are part of the frozen contract rather than policy
+ * invented here (kernel/include/hyp/hyp_vcpu.h v2):
+ *
+ *   - the guest is entered with a0=hartid, a1=dtb_gpa.  A demo guest ignores
+ *     them; a kernel guest parses the DTB in a1 and panics on a null one, so
+ *     the caller has to be able to say what the loader found.
+ *   - the device model counts every guest console byte, but "the guest wrote
+ *     something" is not "the guest reached its banner": with a full kernel on
+ *     the same console as the host, only a named substring distinguishes the
+ *     two.
+ *   - the byte count and the exit detail are the report a smoke gate prints,
+ *     and hyp_vcpu_run() only returns the reason.
+ * ------------------------------------------------------------------------- */
+
+/* Contract: the device model scans against a marker of at most 32 bytes.  The
+ * buffer is one byte larger so an over-long user string can be rejected by
+ * length instead of being silently truncated into a prefix that matches. */
+#define HYP_MARKER_MAX 32
+
+/* SYS_hyp_vcpu_set_boot(vcpu, hartid, dtb_gpa) -> 0 */
+int64_t sys_hyp_vcpu_set_boot(const linux_syscall_args_t *args)
+{
+    hyp_vcpu_t *vcpu = hyp_bridge_vcpu((int64_t)args->arg[0]);
+    if (!vcpu)
+        return -EBADF;
+
+    if (hyp_vcpu_set_boot(vcpu, args->arg[1], args->arg[2]) != 0)
+        return -EINVAL;
+    return 0;
+}
+
+/* SYS_hyp_vm_set_marker(vm, marker) -> 0.  The string is copied rather than
+ * pinned: a Linux task's address space is not the kernel's to keep a pointer
+ * into across the run, and the copy is 32 bytes on a syscall stack. */
+int64_t sys_hyp_vm_set_marker(const linux_syscall_args_t *args)
+{
+    hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
+    if (!vm)
+        return -EBADF;
+
+    const char *umarker = (const char *)(uintptr_t)args->arg[1];
+    if (!umarker)
+        return -EFAULT;
+
+    char marker[HYP_MARKER_MAX + 1];
+    if (copy_from_user(marker, umarker, HYP_MARKER_MAX) < 0)
+        return -EFAULT;
+    marker[HYP_MARKER_MAX] = '\0';
+    if (strlen(marker) == HYP_MARKER_MAX)
+        return -EINVAL;   /* no room for the terminator the contract wants */
+
+    hyp_vm_set_marker(vm, marker);
+    return 0;
+}
+
+/*
+ * Post-run status, copied out in one struct so a caller gets a consistent
+ * snapshot.  The layout is all uint64_t on purpose: a kernel struct with mixed
+ * widths would need packing rules that a user program cannot see, and every
+ * field here is a small integer or a raw CSR value.
+ *
+ * user/cmds/core/hyp_boot.c mirrors this layout; it is the user-side ABI copy,
+ * the same way hyp_test.c mirrors the syscall numbers.
+ */
+struct hyp_vm_status {
+    uint64_t exit;            /* hyp_exit_reason_t of the vcpu that ran */
+    uint64_t scause;
+    uint64_t stval;
+    uint64_t htval;
+    uint64_t marker_seen;
+    uint64_t console_bytes;
+};
+
+/* SYS_hyp_vm_status(vm, out) -> 0 */
+int64_t sys_hyp_vm_status(const linux_syscall_args_t *args)
+{
+    hyp_vm_t *vm = hyp_bridge_vm((int64_t)args->arg[0]);
+    if (!vm)
+        return -EBADF;
+
+    void *uout = (void *)(uintptr_t)args->arg[1];
+    if (!uout)
+        return -EFAULT;
+
+    /* The exit detail is the VM's most recent vcpu, not the VM: the caller
+     * names the VM and asks what came back.  Only one guest runs at a time in
+     * this slice (hyp_vcpu.h), so the slot scan is the whole lookup. */
+    hyp_vcpu_t *last = NULL;
+    uint64_t flags = spin_lock_irqsave(&g_hyp_slots_lock);
+    for (int i = 0; i < HYP_BRIDGE_SLOTS; i++) {
+        if (!g_hyp_slots[i].used || g_hyp_slots[i].owner != proc_current()->pid ||
+            g_hyp_slots[i].kind != HYP_SLOT_VCPU)
+            continue;
+        hyp_vcpu_t *vcpu = (hyp_vcpu_t *)g_hyp_slots[i].obj;
+        if (vcpu && vcpu->magic == HYP_VCPU_MAGIC && vcpu->vm == vm)
+            last = vcpu;
+    }
+    spin_unlock_irqrestore(&g_hyp_slots_lock, flags);
+
+    struct hyp_vm_status st;
+    memset(&st, 0, sizeof(st));
+    if (last) {
+        st.exit   = (uint64_t)last->exit;
+        st.scause = last->exit_scause;
+        st.stval  = last->exit_stval;
+        st.htval  = last->exit_htval;
+    }
+    st.marker_seen    = (uint64_t)hyp_vm_marker_seen(vm);
+    st.console_bytes  = hyp_vm_console_bytes(vm);
+
+    if (copy_to_user(uout, &st, sizeof(st)) < 0)
+        return -EFAULT;
     return 0;
 }
 

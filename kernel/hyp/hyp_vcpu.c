@@ -30,9 +30,7 @@
  * than taken from kernel/<arch>/include/platform.h because that header
  * publishes the generic ECALL-from-U code but not the VS-mode one, and the
  * guest enters VS-mode with hstatus.SPV=1 (S5), so which of the two it
- * issues is a run-shape decision, not a per-arch header fact.  A guest page
- * fault is the code stage-1 and stage-2 faults share in this extension, which
- * is precisely why they are terminal here (see hyp_vcpu_handle_trap).
+ * issues is a run-shape decision, not a per-arch header fact.
  *
  * All three ECALL codes are accepted because which one the guest issues
  * depends on the privilege half of the entry, and this run shape enters at
@@ -40,28 +38,66 @@
  * reports against, so a guest entered this way raises 10 (from S-mode) and not
  * 9.  8 (from U-mode) and 9 (from VS-mode proper, i.e. an SPP=0 entry) stay
  * in the table so a guest entered the other way round is still served.
+ *
+ * The second-stage codes below are the H extension's own, and note what they
+ * are NOT: 20 is the instruction guest page fault, 21 the load/AMO one, 22 is
+ * the VIRTUAL INSTRUCTION fault and 23 is the store/AMO guest page fault
+ * (target/riscv/cpu_bits.h, RISCV_EXCP_*_GUEST_*; QEMU composes htval for all
+ * of them in raise_mmu_exception, cpu_helper.c:1773-1810).  A v2 brief that
+ * calls 22 a guest page fault would send every trapped guest CSR access --
+ * which is what hstatus.VTVM makes of the guest's satp write -- into the
+ * demand-fill path and fault it there instead.
+ *
+ * 22 is the number this platform actually delivers, measured rather than
+ * assumed: the boot smoke logs "scause=16" -- which the trace prints with
+ * %lx, so that is 0x16 = 22 -- together with stval carrying the instruction
+ * encoding (.kernel-build/smoke/hyp-a20os-riscv64.log, trap #0/#1).  stval
+ * holds env->bins for exactly two causes in QEMU, illegal instruction and
+ * virtual instruction fault (cpu_helper.c:2405-2407), and cause 2 is not
+ * what was logged.  Read "16" out of that line as decimal and you would
+ * route the guest's satp write nowhere; it is the other half of 0x16.
+ *
+ * Codes 12/13/15 (the guest's OWN stage-1 faults) are delegated to VS-mode in
+ * v2 and therefore cannot reach this loop; they stay below only so that a
+ * guest whose delegation is not in force still exits with a recorded cause
+ * instead of falling through to "unhandled".
  */
 #define HYP_SCAUSE_ECALL_VU   8ULL
 #define HYP_SCAUSE_ECALL_VS   9ULL
 #define HYP_SCAUSE_ECALL_S   10ULL
-#define HYP_SCAUSE_FETCH_GPF  12ULL
-#define HYP_SCAUSE_LOAD_GPF   13ULL
-#define HYP_SCAUSE_STORE_GPF  15ULL
+#define HYP_SCAUSE_FETCH_PF  12ULL
+#define HYP_SCAUSE_LOAD_PF   13ULL
+#define HYP_SCAUSE_STORE_PF  15ULL
+#define HYP_SCAUSE_GPF_INST  20ULL
+#define HYP_SCAUSE_GPF_LOAD  21ULL
+#define HYP_SCAUSE_VIRT_INST 22ULL
+#define HYP_SCAUSE_GPF_STORE 23ULL
 #define HYP_SCAUSE_INTR_BIT   (1ULL << 63)
 
 /* What a page of guest RAM loaded through hyp_vm_load() gets in stage-2.
  *
- * X, not W: W together with X is a reserved combination in a leaf PTE and the
- * G-stage walk rejects it outright (QEMU, target/riscv/cpu_helper.c, the
- * reserved-RWX switch in the leaf path), so "R|W|X" would fail every guest
- * access on a page that is otherwise mapped correctly.  Loaded RAM is guest
- * code in this slice, the demo guest is register-only, and it enters with
- * sp = 0, so executable-and-readable is the whole of what is needed.  A guest
- * that wants writable RAM needs pages mapped without X -- which means the
- * loaded program cannot live on the same page as its data, and that is a
- * decision for the slice that grows a guest with a stack.
+ * R|W|X, the same leaf the demand-fill window uses (hyp.c,
+ * HYP_RAM_PAGE_PROT), and for the same reason: hyp_vm_load() carries no
+ * per-page flags, so the loader cannot tell a code page from a data page and
+ * cannot map them differently.  R|X was enough while the v1 demo guest was
+ * register-only, but it is not enough for a real kernel: the guest image's
+ * .data and .bss are loaded by hyp_vm_load() like everything else, and the
+ * first thing A20OS's entry.S does is an LR/SC on a lock word in .data
+ * (.kernel-build smoke log hyp-a20os-riscv64.log, "undecodable guest access
+ * at pc=80200044", scause 23 on gpa 0x8060de78) -- a store to a page mapped
+ * read-only, which faults before the guest has printed anything.  Page
+ * granularity is what makes the split impossible anyway: .data and .bss share
+ * pages.
+ *
+ * R|W|X is a reserved leaf encoding by the priv spec; that is already known
+ * and argued in full above HYP_RAM_PAGE_PROT.  QEMU 10.0.13's G-stage walk
+ * refuses only the R-less combinations (target/riscv/cpu_helper.c,
+ * get_physical_address(): cases PTE_W|PTE_X and PTE_W), so value 7 falls
+ * through to prot = PAGE_READ|PAGE_WRITE|PAGE_EXEC.  hyp_s2_map() adds
+ * A|D|U on top of this.  The guest's own stage-1 has already had its say by
+ * the time this leaf is walked.
  */
-#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_X)
+#define HYP_GUEST_PAGE_PROT (PTE_R | PTE_W | PTE_X)
 
 /* The one vcpu whose guest is live kernel-wide, or NULL.  A lock is not held
  * across it, because hyp_arch_vcpu_enter() ends in sret and a lock held across
@@ -107,6 +143,19 @@ hyp_vcpu_t *hyp_vcpu_create(hyp_vm_t *vm, uint64_t entry_gpa)
      * hyp_arch_vcpu_setup() knows the guest RAM layout it is entering. */
     vm->refcount++;
     return vcpu;
+}
+
+/* Guest boot registers (contract): the loader puts the hartid and the DTB's
+ * GPA in a0/a1, the SBI/S-mode convention _start reads them from.  Only the
+ * two argument registers are described, so that is all this writes: every
+ * other register, including sp, stays whatever create() left. */
+int hyp_vcpu_set_boot(hyp_vcpu_t *vcpu, uint64_t hartid, uint64_t dtb_gpa)
+{
+    if (!vcpu || vcpu->magic != HYP_VCPU_MAGIC)
+        return -EINVAL;
+    vcpu->regs[10] = hartid;
+    vcpu->regs[11] = dtb_gpa;
+    return 0;
 }
 
 void hyp_vcpu_put(hyp_vcpu_t *vcpu)
@@ -218,30 +267,617 @@ static void hyp_vcpu_record_fault(hyp_vcpu_t *vcpu, uint64_t scause,
     vcpu->exit        = HYP_EXIT_FAULT;
 }
 
+/* ---- SBI: the closed list of calls this slice serves ----
+ *
+ * Enumerated from the guest side, not guessed: the riscv64 firmware shim
+ * (kernel/arch/riscv64/platform/firmware.c) is the only thing that issues an
+ * ecall, and it issues exactly these seven.
+ *
+ *   a7=0x00 legacy set_timer      firmware.c:39   -> Sstc on this platform,
+ *                                                      served through vstimecmp
+ *   a7=0x01 console_putchar       firmware.c:43   -> host console
+ *   a7=0x02 console_getchar       firmware.c:47   -> never called on riscv64
+ *                                                      (only the aarch64
+ *                                                      console reads it)
+ *   a7=0x08 legacy shutdown       firmware.c:51 is SRST, so this one is dead
+ *                                                      code on this platform but
+ *                                                      stays for an older guest
+ *   a7=0x53525354 SRST shutdown   firmware.c:51 (board poweroff, kernel/main.c)
+ *   a7=0x53525354 SRST reset      firmware.c:58
+ *   a7=0x735049 IPI / 0x48534d HSM hart_start
+ *                                  firmware.c:86/90, called only from
+ *                                  CONFIG_NR_CPUS > 1 board code
+ *
+ * There is NO base-extension probe anywhere in the tree: no sbi_get_version /
+ * get_spec_version / get_impl_id, and firmware.h declares no base EID, so the
+ * SBI spec version the guest believes it is talking to is whatever the guest
+ * assumes.  Nothing to implement, and nothing to advertise.
+ */
+#define HYP_SBI_EID_SRST     0x53525354ULL
+#define HYP_SBI_EID_HSM      0x48534dULL
+#define HYP_SBI_EID_IPI      0x735049ULL
+#define HYP_SBI_FID_SRST_RESET 1ULL
+/* SBI error return values (SBI v2.0 spec, the errors a v1 hypervisor may
+ * report); delivered in a0 like every SBI return. */
+#define HYP_SBI_ERR_NOT_SUPPORTED (-2)
+
+/* ---- the legacy / v0.2 split, which is a7 and nothing else ----
+ *
+ * Both conventions put the call selector in a7 and pass their arguments in
+ * a0.., and BOTH are issued by the same firmware shim (firmware.c:4-15 builds
+ * one ecall for all of them).  They are told apart by the VALUE of a7 alone:
+ * the legacy (v0.1) EIDs are the single digits 0x00..0x0F, while every v0.2+
+ * extension id is a large ASCII-derived constant -- 0x10 or above -- because
+ * the spec reserves the whole 0x10..0x1F band for the base extension and
+ * builds everything else out of four characters.
+ *
+ * This is the split the first version of this dispatcher did not make, and
+ * getting it wrong is silent in the worst way: a legacy console_putchar is
+ * a7=1/a6=0, which read as a v0.2 call is "extension 1, function 0" -- and
+ * extension 1 IS the base extension (putchar is base fid 0x01, not 0), so
+ * the guest's very first printchar fell through the whole v0.2 table and
+ * exited the run with "guest SBI call eid=1 fid=0 is not implemented"
+ * (.kernel-build/smoke/hyp-vcpu-riscv64.log, before this table).
+ *
+ * So a7 < HYP_SBI_EID_V02_BASE is legacy and takes its argument in a0 with
+ * a6 MEANINGLESS (the shim passes fid=0 there for every legacy call too --
+ * firmware.c:43, sbi_call(SBI_CONSOLE_PUTCHAR_EID, 0, c, 0, 0)), and only
+ * a7 >= HYP_SBI_EID_V02_BASE is a v0.2 extension id whose function is a6. */
+#define HYP_SBI_EID_V02_BASE 0x10ULL
+#define HYP_SBI_LEGACY_SET_TIMER 0x0ULL
+#define HYP_SBI_CONSOLE_GETCHAR  0x02ULL
+
+/* The guest's copy of the Sstc comparator.  Writing it from HS-mode is what
+ * "inject VSTIP" means on this platform: QEMU arms the hart's timer against
+ * vstimecmp and raises mip.VSTIP when it expires (write_vstimecmp ->
+ * riscv_timer_write_timecmp), and with hideleg's STI bit set that is the
+ * guest's vsip.STIP, so the interrupt is delivered to VS-mode by hardware and
+ * the guest's own trap handler runs it.  Numeric CSR number because the tree's
+ * -march does not carry the Sstc mnemonic, same reason timer.c uses 0x14d.
+ *
+ * This write is only ever reached on a hart that HAS Sstc: the guest reaches
+ * legacy set_timer precisely because the DTB it was handed did not advertise
+ * sstc (kernel/arch/riscv64/platform/timer.c:30), and the platform that
+ * publishes a DTB is the one this hypervisor runs on.  On a hart without Sstc
+ * the write below would raise an illegal instruction in HS-mode, which is why
+ * this is documented rather than assumed away. */
+static void hyp_write_vstimecmp(uint64_t deadline)
+{
+    __asm__ volatile("csrw 0x24d, %0" :: "r"(deadline) : "memory");
+}
+
+/* Dispatch table.  The legacy half is keyed on a7 alone (a0 is the only
+ * argument, a6 is not a function id there); the v0.2 half is keyed on the
+ * (a7, a6) pair.  See the split above HYP_SBI_EID_V02_BASE for why a7 alone
+ * decides which half a call belongs to.
+ *
+ *   legacy a7=0x00 set_timer(a0)   arm vstimecmp, return 0, resume
+ *   legacy a7=0x01 putchar(a0)      host console, resume
+ *   legacy a7=0x02 getchar()        -2, resume (never called on riscv64)
+ *   legacy a7=0x08 shutdown()       HYP_EXIT_SHUTDOWN
+ *   eid=SRST fid=0  shutdown()      HYP_EXIT_SHUTDOWN
+ *   eid=SRST fid=1  reset()         no host reboot hook in this slice: a
+ *                                     recorded fault, not a silent success
+ *   eid=HSM  fid=0  hart_start()    -2 (see below)
+ *   eid=IPI  fid=0  send_ipi()      -2 (see below)
+ * Everything else is HYP_EXIT_FAULT with the extension id recorded.
+ *
+ * hart_start and send_ipi are answered with SBI_ERR_NOT_SUPPORTED rather than
+ * faulting because they are reachable only from CONFIG_NR_CPUS > 1 board code
+ * (kernel/core/smp.c guards the whole secondary path on it, and the default is
+ * 1); a spec error keeps a multi-cpu guest booting single-cpu with the failure
+ * printed, where a fault would kill a run that is otherwise fine.  legacy
+ * getchar gets the same answer for the same kind of reason: the aarch64
+ * console reads it, the riscv64 one does not, and a guest that did call it
+ * has to be told "no such call" rather than killed for asking.
+ */
 static int hyp_guest_ecall(hyp_vcpu_t *vcpu, uint64_t scause)
 {
-    uint64_t fid = vcpu->regs[17];
+    uint64_t eid = vcpu->regs[17];   /* a7 */
+    uint64_t fid = vcpu->regs[16];   /* a6 -- a function id in v0.2 only */
 
-    if (fid == HYP_SBI_CONSOLE_PUTCHAR) {
-        putchar((char)(vcpu->regs[10] & 0xff));
+    if (eid < HYP_SBI_EID_V02_BASE) {
+        switch (eid) {
+        case HYP_SBI_LEGACY_SET_TIMER:
+            hyp_write_vstimecmp(vcpu->regs[10]);
+            vcpu->regs[10] = 0;
+            break;
+        case HYP_SBI_CONSOLE_PUTCHAR:
+            putchar((char)(vcpu->regs[10] & 0xff));
+            vcpu->regs[10] = 0;    /* the legacy convention's success value */
+            break;
+        case HYP_SBI_CONSOLE_GETCHAR:
+            vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
+            break;
+        case HYP_SBI_SHUTDOWN:
+            vcpu->exit_scause = scause;
+            vcpu->exit = HYP_EXIT_SHUTDOWN;
+            return 0;
+        default:
+            /* The legacy list is closed for the same reason the v0.2 one is:
+             * an unknown call is a guest bug, not the next feature here. */
+            kerr("hyp: legacy SBI call %lu is not implemented\n",
+                 (unsigned long)eid);
+            hyp_vcpu_record_fault(vcpu, scause, eid, 0);
+            return 0;
+        }
         vcpu->pc += 4;   /* sepc past the ecall; arch writes pc back on resume */
         return 1;
     }
 
-    if (fid == HYP_SBI_SHUTDOWN) {
-        vcpu->exit_scause = scause;
-        vcpu->exit = HYP_EXIT_SHUTDOWN;
+    if (eid == HYP_SBI_EID_SRST) {
+        if (fid == 0) {
+            vcpu->exit_scause = scause;
+            vcpu->exit = HYP_EXIT_SHUTDOWN;
+            return 0;
+        }
+        if (fid == HYP_SBI_FID_SRST_RESET) {
+            kwarn("hyp: guest asked for a system reset, which this slice "
+                  "cannot honour\n");
+            hyp_vcpu_record_fault(vcpu, scause, eid, fid);
+            return 0;
+        }
+    } else if (eid == HYP_SBI_EID_HSM && fid == 0) {
+        kwarn("hyp: guest SBI hart_start (hw_id=%lu) -> NOT_SUPPORTED, "
+              "single-vcpu slice\n", (unsigned long)vcpu->regs[10]);
+        vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
+        vcpu->pc += 4;
+        return 1;
+    } else if (eid == HYP_SBI_EID_IPI && fid == 0) {
+        vcpu->regs[10] = (uint64_t)HYP_SBI_ERR_NOT_SUPPORTED;
+        vcpu->pc += 4;
+        return 1;
+    }
+
+    /* The v0.2 subset is closed on purpose: an unknown call is a guest bug,
+     * not an invitation to implement the next one here.  The extension id goes
+     * in stval because that is the register the guest chose it with, and it is
+     * the only detail this exit has. */
+    kwarn("hyp: guest SBI call eid=%lx fid=%lu is not implemented\n",
+          (unsigned long)eid, (unsigned long)fid);
+    hyp_vcpu_record_fault(vcpu, scause, eid, fid);
+    return 0;
+}
+
+/* ---- second-stage faults: what a guest memory access that leaves stage-1
+ * walk becomes ----
+ *
+ * The faulting instruction has not retired.  QEMU raises the second-stage
+ * exception from the load/store slow path before the access (raise_mmu_exception,
+ * target/riscv/cpu_helper.c:1773-1810) and leaves pc on the instruction, so
+ * the guest's destination register and its store buffer still hold their old
+ * contents when this C code runs.  That is what makes the two exits below
+ * legal: after a successful mapping the instruction is simply retried, and
+ * after an emulated MMIO access the run loop writes the result itself and
+ * steps over the instruction.
+ */
+
+/* One 64-bit word of guest memory by GUEST PHYSICAL address.  Stage-2 is the
+ * only map the host has for guest addresses; a GPA it does not translate is
+ * simply not readable from here. */
+static int hyp_guest_read_gpa(hyp_vcpu_t *vcpu, uint64_t gpa, uint64_t *out)
+{
+    paddr_t pa = hyp_s2_translate(vcpu->vm, gpa);
+    if (!pa)
+        return 0;
+    pfn_t pfn = phys_to_pfn(pa);
+    if (!pfn_valid(pfn))
+        return 0;
+    *out = *(volatile uint64_t *)(pfn_to_virt(pfn) + (gpa & (PAGE_SIZE - 1)));
+    return 1;
+}
+
+/* The guest's own stage-1, walked in software.  Once the guest kernel turns
+ * paging on, its pc and its effective addresses are VS-virtual, and nothing in
+ * the host can translate them: the host MMU walks the HOST's satp, and vsatp
+ * roots a tree that lives in guest physical memory.  The run loop needs the
+ * instruction word (to know an access's width, direction and operand) and the
+ * hardware only hands it the guest PHYSICAL fault address, so the Sv39 walk
+ * the guest's own MMU would do is done here, with every table fetch served by
+ * stage-2.  Only the answer the decoder needs is computed: A/D/U are not
+ * checked, and a walk that is wrong about permissions still yields the page the
+ * hardware itself just used. */
+static int hyp_guest_read_va(hyp_vcpu_t *vcpu, uint64_t va, uint64_t *out)
+{
+    uint64_t vsatp;
+    __asm__ volatile("csrr %0, 0x280" : "=r"(vsatp));   /* vsatp, CSR 0x280 */
+
+    uint64_t gva = va;
+    uint64_t mode = (vsatp >> 60) & 0xf;
+    if (mode != 0) {
+        if (mode != 8)              /* Sv39 is the only guest shape this walks */
+            return 0;
+        uint64_t gpa = (vsatp & ((1ULL << 44) - 1)) << 12;   /* root PPN */
+        /* level >= 0, not level > 0: the loop has to fetch the level-0 entry,
+         * which IS the leaf.  With level > 0 it stopped after VPN2/VPN1, never
+         * looked at a leaf, and `level == 0` below then refused every walk --
+         * so once the guest turned paging on, nothing in it decoded and every
+         * data access fell into hyp_guest_mem_fault's terminal exit.  This is
+         * the shape the tree's own walks use (kernel/mm/mm.c:228,
+         * kernel/mm/mm.c:554); `level > 0` is the ALLOCATION shape, where the
+         * caller has already been handed the table to put a leaf in. */
+        int level;
+        int leaf = 0;
+        unsigned leaf_level = 0;
+        for (level = ARCH_PT_ROOT_LEVEL; level >= 0; level--) {
+            uint64_t pte;
+            if (!hyp_guest_read_gpa(vcpu, gpa +
+                                    ((va >> (12 + 9 * level)) & 0x1ff) * 8, &pte))
+                return 0;
+            if (!(pte & PTE_V))
+                return 0;
+            gpa = arch_pte_addr(pte);
+            if (arch_pte_is_leaf(pte)) {
+                leaf = 1;
+                leaf_level = (unsigned)level;
+                break;
+            }
+        }
+        if (!leaf)                /* ran out of levels without finding one */
+            return 0;
+        /* arch_pte_addr() is the PPN shifted up by 12, which for a leaf found
+         * at level L is only the first 4KB of a 1<<(12 + 9*L) region: the rest
+         * of the guest's offset inside that region lives in va itself and is
+         * NOT in gpa.  ORing just the page offset therefore resolves every
+         * address to the START of the superpage -- for the guest this walk
+         * exists to serve (A20OS maps its whole physical window with 1GB
+         * megapages) that is a different 4KB page than the one the guest is
+         * executing, so the instruction could not be read back and the faulting
+         * access decoded as nothing at all.  The whole covered range is what
+         * goes on: PPN << 12 | va & (range - 1). */
+        unsigned bits = 12 + 9 * leaf_level;
+        gva = gpa | (va & ((1ULL << bits) - 1));
+    }
+    return hyp_guest_read_gpa(vcpu, gva, out);
+}
+
+/* What the faulting instruction was asking for.  Only the shapes a device
+ * model can serve are decoded: the 32-bit LOAD and STORE encodings, with the
+ * width and signedness straight out of the RISC-V load/store funct3 table
+ * (lb/lh/lw sign-extend, lbu/lhu/lwu zero-extend, ld is 8 bytes).  An AMO or
+ * an SC is NOT decoded: answering one would also have to write the old value
+ * back into rd, which no device in this slice asks for, so it stays a
+ * recorded fault instead of a half-implemented access. */
+struct hyp_guest_access {
+    uint64_t va;      /* effective address the instruction computed */
+    uint64_t value;   /* store data (already the guest register) */
+    unsigned rd;      /* load destination register */
+    int      len;     /* access width in bytes */
+    int      store;
+    int      sign;    /* sign-extend the loaded value (rv64 rule) */
+};
+
+static int hyp_guest_read_insn(hyp_vcpu_t *vcpu, uint32_t *insn)
+{
+    uint64_t word;
+    if (!hyp_guest_read_va(vcpu, vcpu->pc, &word))
+        return 0;
+    *insn = (uint32_t)word;
+    /* RVC: the 16-bit encodings carry no load/store, and every CSR/sfence
+     * instruction this loop emulates is 32-bit. */
+    return 1;
+}
+
+/* Immediate field, sign-extended from its encoded width (both load and store
+ * immediates are 12 bits). */
+static uint64_t hyp_sext(uint64_t v, unsigned bits)
+{
+    return (uint64_t)((int64_t)(v << (64 - bits)) >> (64 - bits));
+}
+
+static int hyp_decode_guest_access(hyp_vcpu_t *vcpu, struct hyp_guest_access *a)
+{
+    uint32_t insn;
+    if (!hyp_guest_read_insn(vcpu, &insn) || (insn & 3) != 3)
+        return 0;
+
+    unsigned opcode = insn & 0x7f;
+    unsigned funct3 = (insn >> 12) & 7;
+    unsigned rs1    = (insn >> 15) & 0x1f;
+    unsigned rd     = (insn >> 7) & 0x1f;
+    uint64_t base   = vcpu->regs[rs1];
+
+    if (opcode == 0x03) {                       /* LOAD: imm is I-type, 12-bit */
+        switch (funct3) {
+        case 0: a->len = 1; a->sign = 1; break;  /* lb  */
+        case 1: a->len = 2; a->sign = 1; break;  /* lh  */
+        case 2: a->len = 4; a->sign = 1; break;  /* lw  */
+        case 3: a->len = 8; a->sign = 0; break;  /* ld  */
+        case 4: a->len = 1; a->sign = 0; break;  /* lbu */
+        case 5: a->len = 2; a->sign = 0; break;  /* lhu */
+        case 6: a->len = 4; a->sign = 0; break;  /* lwu */
+        default: return 0;
+        }
+        a->va    = base + hyp_sext((uint64_t)(insn >> 20), 12);
+        a->store = 0;
+        a->rd    = rd;
+        a->value = 0;
+        return 1;
+    }
+
+    if (opcode == 0x23) {                       /* STORE: imm is S-type, 12-bit */
+        switch (funct3) {
+        case 0: a->len = 1; break;               /* sb */
+        case 1: a->len = 2; break;               /* sh */
+        case 2: a->len = 4; break;               /* sw */
+        case 3: a->len = 8; break;               /* sd */
+        default: return 0;
+        }
+        uint32_t imm = (uint32_t)(((insn >> 25) << 5) | ((insn >> 7) & 0x1f));
+        a->va    = base + hyp_sext(imm, 12);
+        a->store = 1;
+        a->rd    = 0;
+        a->sign  = 0;
+        a->value = vcpu->regs[(insn >> 20) & 0x1f];   /* rs2 */
+        return 1;
+    }
+
+    return 0;
+}
+
+/* The rv64 rule for what a load leaves in rd: the low len bytes, sign-extended
+ * for lb/lh/lw and zero-extended for lbu/lhu/lwu/ld. */
+static uint64_t hyp_extend_loaded(uint64_t value, int len, int sign)
+{
+    uint64_t mask = (len >= 8) ? ~0ULL : ((1ULL << (len * 8)) - 1);
+    value &= mask;
+    if (sign && len < 8 && (value & (1ULL << (len * 8 - 1))))
+        value |= ~mask;
+    return value;
+}
+
+/* One guest memory access that could not be walked by stage-2.  Two exits,
+ * in the order the contract fixes them:
+ *
+ *   gpa inside the RAM window -> hyp_ram_fill(), and the guest retries the
+ *     instruction itself.  A fill that fails is NOT papered over: the window
+ *     owns that address, so the answer is a recorded fault.
+ *   otherwise -> hyp_dev_mmio().  The access is served HERE (the model returns
+ *     the data, or takes the value), so the instruction is stepped over
+ *     instead of retried -- retrying would fault again on the same unmapped
+ *     page and loop forever.
+ */
+static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
+                               uint64_t htval)
+{
+    /* htval is the guest physical address of the faulting access, shifted
+     * right by two.  QEMU composes it as (im_address | (address &
+     * (TARGET_PAGE_SIZE - 1))) >> 2 (target/riscv/cpu_helper.c:1997, the
+     * G-stage branch of riscv_cpu_tlb_fill), so htval << 2 carries the
+     * INTRA-PAGE OFFSET as well as the page -- it is not a page base.  The
+     * offset is masked off here because every consumer below wants a page:
+     * hyp_ram_fill() rejects a non-page-aligned gpa outright (-EINVAL), and
+     * the fetches of a page-granular table are keyed by page.
+     *
+     * The intra-page offset for the reported GPA comes from the instruction's
+     * effective address instead, which is the same thing QEMU ORs in:
+     * translation is page granular, so the offset the guest computed survives
+     * into the GPA unchanged. */
+    uint64_t gpage = (htval << 2) & ~(uint64_t)(PAGE_SIZE - 1);
+
+    if (scause == HYP_SCAUSE_GPF_INST) {
+        /* A fetch has neither width nor operand, so the device model is not
+         * its place; a missing code page is the RAM window's to answer, and if
+         * it cannot, executing a zero page is the guest's own illegal
+         * instruction trap to report. */
+        int rc = hyp_ram_fill(vcpu->vm, gpage);
+        if (rc == 0)
+            return 1;
+        kerr("hyp: guest instruction fetch fault gpa=%lx pc=%lx rc=%d\n",
+             (unsigned long)gpage, (unsigned long)vcpu->pc, rc);
+        hyp_vcpu_record_fault(vcpu, scause, gpage, htval);
         return 0;
     }
 
-    /* The SBI subset is closed on purpose (contract): an unknown call is a
-     * guest bug, not an invitation to implement the next one here.  The
-     * call id goes in stval because that is the register the guest chose it
-     * with, and it is the only detail this exit has. */
-    kwarn("hyp: guest SBI call %lu is not implemented\n", (unsigned long)fid);
-    hyp_vcpu_record_fault(vcpu, scause, fid, 0);
+    struct hyp_guest_access a;
+    if (!hyp_decode_guest_access(vcpu, &a)) {
+        kerr("hyp: undecodable guest access at pc=%lx (second-stage fault)\n",
+             (unsigned long)vcpu->pc);
+        hyp_vcpu_record_fault(vcpu, scause, gpage, htval);
+        return 0;
+    }
+    uint64_t gpa = gpage | (a.va & (PAGE_SIZE - 1));
+
+    int rc = hyp_ram_fill(vcpu->vm, gpage);
+    if (rc == 0)
+        return 1;                 /* RAM: the guest retries the instruction */
+    if (rc != -EFAULT) {
+        kerr("hyp: guest RAM fill gpa=%lx pc=%lx rc=%d\n",
+             (unsigned long)gpage, (unsigned long)vcpu->pc, rc);
+        hyp_vcpu_record_fault(vcpu, scause, gpa, htval);
+        return 0;
+    }
+
+    uint64_t value = a.value;
+    if (!hyp_dev_mmio(vcpu->vm, gpa, a.store, &value, a.len)) {
+        kerr("hyp: no device for guest %s of %d byte(s) at gpa=%lx\n",
+             a.store ? "store" : "load", a.len, (unsigned long)gpa);
+        hyp_vcpu_record_fault(vcpu, scause, gpa, htval);
+        return 0;
+    }
+
+    /* rd 0 is not a discard sink on this path, it is x0 -- hardwired zero in
+     * hardware, so a load into it leaves no trace and the register file must
+     * not be touched at all.  The guard is explicit rather than borrowed from
+     * hyp_frame_to_vcpu() re-zeroing regs[0] on every guest trap: that is an
+     * invariant in a different file, and a writeback that depended on it would
+     * silently corrupt a banked x0 the day it stopped holding. */
+    if (!a.store && a.rd)
+        vcpu->regs[a.rd] = hyp_extend_loaded(value, a.len, a.sign);
+    vcpu->pc += 4;                /* the access happened; do not redo it */
+    return 1;
+}
+
+/* ---- scause 22: a VS-mode instruction trapped to HS-mode ----
+ *
+ * With hstatus.VTVM=1 the guest cannot touch its own memory-management CSRs,
+ * so a real guest kernel raises this the first time it writes satp (QEMU
+ * gates the satp CSR on VTVM, target/riscv/csr.c:626-634; SFENCE.VMA is gated
+ * the same way).  The instruction arrives in the trap, not only in memory:
+ * QEMU puts env->bins into stval for a virtual instruction fault
+ * (cpu_helper.c:2405-2407), and htinst carries the same word when the guest
+ * faults are reported with a transformed instruction.  Decoding stval first is
+ * therefore both cheaper and more robust than a memory read -- it still works
+ * when the guest's own page tables are what just broke -- and the memory read
+ * stays as the fallback for a platform that leaves stval at zero.
+ *
+ * hstatus.SPV is 1 on this path, so this IS a guest trap: decoding and
+ * re-executing one instruction on the guest's behalf is the same contract the
+ * ecall path already runs under.
+ */
+#define HYP_CSR_SATP      0x180
+#define HYP_CSR_VSTIMECMP 0x14d
+#define HYP_OP_SYSTEM     0x73
+/* SYSTEM funct3=0 carries the operation in imm[11:0], and the two that matter
+ * here are distinct values: WFI is 0x105, SFENCE.VMA is funct7=0x09 with rs1
+ * and rd riding in the operand fields (which is why the all-zero form is
+ * 0x120 -- the boot code's "sfence.vma" at 0x8020011e encodes as 0x12000073,
+ * the same bits a WFI-shaped imm would occupy but a different instruction).
+ * ECALL (0x000) and EBREAK (0x001) are NOT ours to step over: the first
+ * arrives as an ecall cause, the second is delegated. */
+#define HYP_SYS_WFI        0x105u
+#define HYP_SYS_FENCE_F7   0x09u
+
+static void hyp_write_vsatp(uint64_t v)
+{
+    __asm__ volatile("csrw 0x280, %0" :: "r"(v) : "memory");
+}
+
+/* The trapped instruction, from the trap report when it carries one.
+ * QEMU's stval for this cause is env->bins, so a word whose low two bits are
+ * 11 and whose opcode is SYSTEM is the instruction itself; anything else (a
+ * zero, or a transformed-instruction pseudo-op such as the 0x00003000 the
+ * G-stage walk failures carry) is not decodable and the memory read decides. */
+static int hyp_virt_inst_word(hyp_vcpu_t *vcpu, uint64_t stval,
+                              uint32_t *insn)
+{
+    if (stval && (stval & 3) == 3 &&
+        (stval & 0x7f) == HYP_OP_SYSTEM) {
+        *insn = (uint32_t)stval;
+        return 1;
+    }
+    return hyp_guest_read_insn(vcpu, insn);
+}
+
+static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
+{
+    uint32_t insn;
+    if (!hyp_virt_inst_word(vcpu, stval, &insn))
+        return -1;
+
+    unsigned opcode = insn & 0x7f;
+    unsigned funct3 = (insn >> 12) & 7;
+    if (opcode != HYP_OP_SYSTEM)
+        return -1;
+
+    if (funct3 == 0) {
+        unsigned imm   = (insn >> 20) & 0xfff;
+        unsigned f7    = (insn >> 25) & 0x7f;
+
+        if (imm == HYP_SYS_WFI) {
+            /* WFI, treated as recoverable and stepped over.  The semantic
+             * trade-off is deliberate and narrow: this slice gives the
+             * guest's idle loop NO power semantics -- the instruction is
+             * consumed and the guest keeps running.  That is sound here
+             * because hstatus.VTW is left clear, so a guest WFI is not
+             * trapped by the hardware in the first place and this branch
+             * only exists for a platform that does gate it.  Where it
+             * matters, the guest's idle spin is woken by its own DELEGATED
+             * interrupts (hideleg carries the VS timer, bits 2/6/10), so
+             * "do not sleep" costs a spinning guest, not a lost wakeup. */
+            vcpu->pc += 4;
+            return 0;
+        }
+        if (f7 == HYP_SYS_FENCE_F7) {
+            /* SFENCE.VMA.  In HS-mode it is not gated, and it invalidates the
+             * whole hart's translations, which is a superset of what the guest
+             * asked for. */
+            __asm__ volatile("sfence.vma" ::: "memory");
+            vcpu->pc += 4;
+            return 0;
+        }
+        if (imm == 0 || imm == 1)
+            return -1;       /* ECALL / EBREAK: not this path's to step over */
+        kerr("hyp: guest virtual instruction %08lx is not a SYSTEM CSR op "
+             "this slice emulates\n", (unsigned long)insn);
+        return -1;
+    }
+
+    if (funct3 != 1 && funct3 != 2 && funct3 != 3 &&
+        funct3 != 5 && funct3 != 6 && funct3 != 7)
+        return -1;
+
+    unsigned rs1 = (insn >> 15) & 0x1f;
+    unsigned rd  = (insn >> 7) & 0x1f;
+    unsigned csr = insn >> 20;
+    uint64_t src = (funct3 >= 5) ? (uint64_t)rs1 : vcpu->regs[rs1];
+    uint64_t old, next;
+
+    if (csr == HYP_CSR_SATP) {
+        uint64_t v;
+        __asm__ volatile("csrr %0, 0x280" : "=r"(v));   /* vsatp */
+        old = v;
+        next = (funct3 == 1) ? src
+             : (funct3 == 2) ? (old | src)
+             : (old & ~src);
+        hyp_write_vsatp(next);
+    } else if (csr == HYP_CSR_VSTIMECMP) {
+        /* A set/clear form on a CSR that only ever takes a value is refused
+         * rather than approximated.  Reading the old value back is only done
+         * when the instruction asks for it in rd, and it is safe to ask: a
+         * virtual instruction fault out of this CSR is only reachable when the
+         * Sstc extension is implemented at all (the gate checks ext_sstc
+         * before the henvcfg test, target/riscv/csr.c:572-614). */
+        if (funct3 != 1 && funct3 != 5)
+            return -1;
+        if (rd) {
+            __asm__ volatile("csrr %0, 0x24d" : "=r"(old));   /* vstimecmp */
+        } else {
+            old = 0;
+        }
+        next = src;
+        hyp_write_vstimecmp(next);
+    } else {
+        /* Every other CSR is a recorded fault, never a silent pass-through:
+         * the alternative is to let the guest believe a VS-mode CSR write
+         * took effect when it did not, which is the failure mode this whole
+         * emulation path exists to avoid.  The CSR number goes to stval --
+         * that is the register the guest chose it with -- and the kerr names
+         * it so the log says which one. */
+        kerr("hyp: guest virtual instruction wrote CSR 0x%03x, which this "
+             "slice does not emulate\n", csr);
+        return -1;
+    }
+
+    if (rd)
+        vcpu->regs[rd] = old;
+    vcpu->pc += 4;
     return 0;
 }
+
+/* ---- bounded guest-trap trace ----
+ *
+ * A guest that stops talking looks identical from outside whether it is
+ * wedged in one of its own loops or re-executing a trapped instruction the
+ * host keeps re-trapping, and neither shape prints anything: the run loop
+ * only speaks on a terminal exit, which neither of them reaches.  So the
+ * dispatcher says where the guest was, twice over and both bounded:
+ *
+ *   - the first HYP_TRAP_TRACE_HEAD guest traps, in order, which bounds how
+ *     far into the boot the guest actually got;
+ *   - one line the first time any single (pc, scause) pair recurs
+ *     HYP_TRAP_TRACE_REPEAT times, which names a trap loop outright.
+ *
+ * Both are counters on a slice that runs one guest on one CPU, which is the
+ * same scope hyp_active_vcpu already claims for itself, so no locking is
+ * needed and none is taken. */
+#define HYP_TRAP_TRACE_HEAD   24
+#define HYP_TRAP_TRACE_REPEAT 256
+
+static uint64_t g_hyp_trap_seen;      /* guest traps since the run started   */
+static uint64_t g_hyp_trap_loop_pc;
+static uint64_t g_hyp_trap_loop_scause;
+static uint64_t g_hyp_trap_loop_run;
 
 int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
                          uint64_t scause, uint64_t stval, uint64_t htval)
@@ -256,25 +892,74 @@ int hyp_vcpu_handle_trap(hyp_vcpu_t *vcpu, void *trap_frame,
     if (scause & HYP_SCAUSE_INTR_BIT)
         return 1;
 
+    /* A guest ecall is the guest TALKING, and the SBI dispatcher answers it
+     * every time -- the vcpu test's guest spells one line this way.  Printing
+     * a trace line between the character and the next one does not just add
+     * noise, it splits the guest's own output across host lines: the line
+     * smoke-hyp-vcpu anchors on (^HYP$) can then never appear, however
+     * correct the SBI path underneath it is.  The trace exists to say where a
+     * guest that STOPS got to, and an ecall is not that, so the handled
+     * ecall causes stay out of both counters below.  Everything else -- page
+     * faults, virtual instructions, unhandled causes -- is still traced. */
+    uint64_t cause = scause & ~HYP_SCAUSE_INTR_BIT;
+    int traced = (cause != HYP_SCAUSE_ECALL_VU &&
+                  cause != HYP_SCAUSE_ECALL_VS &&
+                  cause != HYP_SCAUSE_ECALL_S);
+
+    if (traced && g_hyp_trap_seen < HYP_TRAP_TRACE_HEAD) {
+        kerr("hyp: trap #%lu scause=%lx pc=%lx stval=%lx htval=%lx\n",
+             (unsigned long)g_hyp_trap_seen, (unsigned long)scause,
+             (unsigned long)vcpu->pc, (unsigned long)stval,
+             (unsigned long)htval);
+    }
+    if (traced)
+        g_hyp_trap_seen++;
+
+    if (traced && vcpu->pc == g_hyp_trap_loop_pc &&
+        scause == g_hyp_trap_loop_scause) {
+        if (++g_hyp_trap_loop_run == HYP_TRAP_TRACE_REPEAT) {
+            kerr("hyp: trap loop at pc=%lx scause=%lx (%lu traps so far)\n",
+                 (unsigned long)vcpu->pc, (unsigned long)scause,
+                 (unsigned long)g_hyp_trap_seen);
+        }
+    } else {
+        g_hyp_trap_loop_pc    = vcpu->pc;
+        g_hyp_trap_loop_scause = scause;
+        g_hyp_trap_loop_run   = 1;
+    }
+
     switch (scause & ~HYP_SCAUSE_INTR_BIT) {
     case HYP_SCAUSE_ECALL_VU:
     case HYP_SCAUSE_ECALL_VS:
     case HYP_SCAUSE_ECALL_S:
         return hyp_guest_ecall(vcpu, scause);
 
-    case HYP_SCAUSE_FETCH_GPF:
-    case HYP_SCAUSE_LOAD_GPF:
-    case HYP_SCAUSE_STORE_GPF:
-        /* Guest page fault.  Guest RAM comes only from hyp_vm_load(); an
-         * unmapped GPA is the guest walking off what it was provisioned,
-         * and the contract forbids a silent on-demand fill here.  RISC-V H
-         * reports stage-1 and stage-2 page faults under these same codes
-         * (htval distinguishing them), and a guest in this slice has no
-         * stage-1 to fault in, so both are terminal. */
+    case HYP_SCAUSE_GPF_INST:
+    case HYP_SCAUSE_GPF_LOAD:
+    case HYP_SCAUSE_GPF_STORE:
+        return hyp_guest_mem_fault(vcpu, scause, htval);
+
+    case HYP_SCAUSE_VIRT_INST:
+        if (hyp_emulate_virt_inst(vcpu, stval) == 0)
+            return 1;
+        /* Whatever else the guest did that traps here, this loop does not
+         * know how to be the hypervisor for. */
+        kerr("hyp: guest virtual instruction fault not emulated "
+             "(pc=%lx stval=%lx)\n", (unsigned long)vcpu->pc,
+             (unsigned long)stval);
         hyp_vcpu_record_fault(vcpu, scause, stval, htval);
-        kerr("hyp: guest page fault scause=%lu stval=%lx htval=%lx\n",
-             (unsigned long)scause, (unsigned long)stval,
-             (unsigned long)htval);
+        return 0;
+
+    case HYP_SCAUSE_FETCH_PF:
+    case HYP_SCAUSE_LOAD_PF:
+    case HYP_SCAUSE_STORE_PF:
+        /* The guest's own stage-1 fault.  v2 delegates these to VS-mode, so
+         * reaching here means the delegation is not in force; the host has no
+         * second page table to fill for the guest's user address space, so the
+         * run exits with the fault recorded rather than pretending. */
+        kerr("hyp: undelegated guest page fault scause=%lu stval=%lx\n",
+             (unsigned long)scause, (unsigned long)stval);
+        hyp_vcpu_record_fault(vcpu, scause, stval, htval);
         return 0;
 
     default:
@@ -329,6 +1014,12 @@ int hyp_vcpu_run(hyp_vcpu_t *vcpu)
     vcpu->exit_scause = 0;
     vcpu->exit_stval  = 0;
     vcpu->exit_htval  = 0;
+
+    /* The trace describes one run, so it starts empty with it. */
+    g_hyp_trap_seen      = 0;
+    g_hyp_trap_loop_pc   = 0;
+    g_hyp_trap_loop_scause = 0;
+    g_hyp_trap_loop_run  = 0;
 
     int rc = hyp_arch_vcpu_setup(vcpu);
     if (rc != 0) {
