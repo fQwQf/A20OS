@@ -121,10 +121,9 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
         net_socket_free(clash);
         return -EADDRINUSE;
     }
-    int sb = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(sb);
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(sb, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     memcpy(s->local, bind_addr, bind_len);
@@ -135,16 +134,16 @@ int net_unix_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
         s->owner_uid = owner->cred.uid;
         s->owner_gid = owner->cred.gid;
     }
-    net_bucket_unlock(sb, flags);
+    net_sock_unlock(s, flags);
 
     if (unix_pathname) {
         int fd = vfs_open(unix_path, O_CREAT | O_EXCL | O_RDWR,
                           S_IFSOCK | 0777);
         if (fd < 0) {
-            uint64_t undo = net_bucket_lock(sb);
+            uint64_t undo = net_sock_lock(s);
             s->bound = 0;
             s->local_len = 0;
-            net_bucket_unlock(sb, undo);
+            net_sock_unlock(s, undo);
             return fd == -EEXIST ? -EADDRINUSE : fd;
         }
         vfs_close(fd);
@@ -181,8 +180,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
 
     net_socket_t *child = NULL;
     int rc = 0;
-    net_bucket_pair_t pair =
-        net_bucket_lock2(net_socket_bucket(s), net_socket_bucket(listener));
+    net_sock_pair_t pair = net_sock_lock2(s, listener);
     if (!net_socket_is_live(s) || !net_socket_is_live(listener)) {
         rc = -ECONNREFUSED;
         goto out;
@@ -257,7 +255,7 @@ int net_unix_socket_connect(net_socket_t *s, const void *addr, size_t addrlen)
         }
     }
 out:
-    net_bucket_unlock2(pair);
+    net_sock_unlock2(pair);
     /* Our reference from the scan.  s->peer and child->peer are plain
      * back-pointers with no reference of their own, exactly as before the
      * table was sharded; this only returns what this function took. */
@@ -276,16 +274,17 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
     if (!s)
         return -ENOTSOCK;
 
-    /*
- * Two sockets, two buckets, ascending.  As in the INET send path the
- * destination is resolved first, outside any lock: it may come from a
- * whole-table scan that walks the shards one at a time, and the reference that
- * scan hands back is what lets s's bucket be dropped before the pair is taken.
- */
-    int sb = net_socket_bucket(s);
+/*
+ * Two sockets, ascending by address.  As in the INET send path the
+     * destination is resolved first, outside any lock: it may come from a
+     * whole-table scan that walks the buckets one at a time, and the reference
+     * that scan hands back is what lets s's lock be dropped before the pair is
+     * taken.
+     */
     uint64_t src_local_len = 0;
     uint8_t src_local[NET_SOCKADDR_MAX];
     net_socket_t *dst = NULL;
+    bool had_peer = false;
     const void *dst_addr = addr;
     size_t dst_len = addrlen;
     uint8_t unix_addr[NET_SOCKADDR_MAX];
@@ -299,9 +298,9 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         dst_len = ulen;
     }
     {
-        uint64_t sf = net_bucket_lock(sb);
+        uint64_t sf = net_sock_lock(s);
         if (!net_socket_is_live(s)) {
-            net_bucket_unlock(sb, sf);
+            net_sock_unlock(s, sf);
             return -ENOTSOCK;
         }
         if (!dst_addr && s->connected) {
@@ -314,25 +313,29 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         }
         src_local_len = s->local_len;
         memcpy(src_local, s->local, src_local_len);
-        if (s->peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
-                        net_socket_is_live(s->peer)))
-            dst = net_socket_ref(s->peer);
-        net_bucket_unlock(sb, sf);
+        /* Sampled under s's lock, so it cannot be freed between
+         * the test and the reference below. */
+        net_socket_t *peer = s->peer;
+        if (peer && (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
+                      net_socket_is_live(peer)))
+            dst = net_socket_ref(peer);
+        had_peer = (peer != NULL);
+        net_sock_unlock(s, sf);
     }
-    if (!dst && s->peer) {
+    if (!dst && had_peer) {
         /* The back-pointer is stale: drop it and fall back to a lookup. */
-        uint64_t sf = net_bucket_lock(sb);
+        uint64_t sf = net_sock_lock(s);
         if (s->peer) s->peer = NULL;
-        net_bucket_unlock(sb, sf);
+        net_sock_unlock(s, sf);
     }
     if (!dst && dst_addr)
         dst = net_find_bound_socket(AF_UNIX, s->type, dst_addr, dst_len);
     if (!dst)
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
 
-    net_bucket_pair_t pair = net_bucket_lock2(sb, net_socket_bucket(dst));
+    net_sock_pair_t pair = net_sock_lock2(s, dst);
     if (!net_socket_is_live(dst)) {
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         net_socket_free(dst);
         return dst_addr ? -ECONNREFUSED : -EDESTADDRREQ;
     }
@@ -340,7 +343,7 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
      * channel (the channel has its own locking, so the pair is dropped first).
      * SCM_RIGHTS messages fall back to the legacy queue below. */
     if (dst->ch_ep && !(files && nfiles > 0)) {
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         int cr = unix_ch_send(s, dst, buf, len);
         if (cr >= 0) {
             net_event_notify(dst, A20_EVENT_READABLE, 0, 0);
@@ -390,7 +393,7 @@ static int net_unix_socket_sendto_impl(net_socket_t *s, const void *buf,
         (void)wait_queue_collect_one(
             &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
     }
-    net_bucket_unlock2(pair);
+    net_sock_unlock2(pair);
     (void)proc_wake_q_flush(&wake_q);
     net_socket_free(dst);
     return r;
@@ -406,17 +409,16 @@ int unix_ch_send(net_socket_t *s, net_socket_t *dst, const void *buf, size_t len
 {
     /* a20_channel_send(ep) delivers to ep->peer, so the sender must send
      * on its OWN endpoint: its peer is the receiver's ch_ep.  Only the
-     * receiver's credentials are stamped here, so this is dst's bucket alone;
-     * s is not touched and no second bucket is needed. */
-    int db = net_socket_bucket(dst);
-    uint64_t irq = net_bucket_lock(db);
+     * receiver's credentials are stamped here, so this is dst's lock alone and
+     * s is not touched. */
+    uint64_t irq = net_sock_lock(dst);
     task_t *cur = proc_current();
     if (cur) {
         dst->ch_cred_pid = cur->pid;
         dst->ch_cred_uid = cur->cred.uid;
         dst->ch_cred_gid = cur->cred.gid;
     }
-    net_bucket_unlock(db, irq);
+    net_sock_unlock(dst, irq);
     const uint8_t *p = (const uint8_t *)buf;
     size_t left = len;
     size_t sent = 0;

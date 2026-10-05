@@ -4,8 +4,8 @@
  * TX is synchronous: a frame handed to a bound socket goes straight to the
  * device send op.  RX cannot be, because lwip_stack.c captures frames while
  * holding g_lwip_lock and that lock is never held together with a socket-table
- * bucket lock.  Captures therefore land in a small ring and are delivered from
- * the poll bottom half, which runs with bucket locks only.
+ * net lock.  Captures therefore land in a small ring and are delivered from
+ * the poll bottom half, which runs with socket locks only.
  */
 #include "net/socket_internal.h"
 #include "net/socket_side.h"
@@ -91,7 +91,7 @@ int net_packet_bound_count(void)
     return __atomic_load_n(&g_pkt_bound_count, __ATOMIC_ACQUIRE);
 }
 
-/* Both of these run under the socket's own bucket lock, so the idempotence
+/* Both of these run under the socket's own lock, so the idempotence
  * marker -- now a field of net_socket_t rather than a NET_MAX_SOCKETS-entry
  * bitmap indexed by registry slot -- needs no lock of its own.  It exists to
  * keep the count balanced when the release side cannot tell whether the
@@ -169,34 +169,40 @@ static void net_packet_deliver(const net_packet_slot_t *slot,
         int base = bucket << NET_SOCK_BUCKET_SHIFT;
         for (int i = 0; i < NET_SOCK_SLOTS_PER_BUCKET; i++) {
         net_socket_t *s = g_sockets[base + i];
-        if (!s || s->domain != AF_PACKET || s->closed || !s->pkt_bound)
+        if (!s)
             continue;
-        if (s->pkt_ifindex > 0 && (unsigned)s->pkt_ifindex != slot->ifindex)
-            continue;
-        if (s->pkt_protocol != ETH_P_ALL && s->pkt_protocol != ethertype)
-            continue;
-        if (s->rx_count >= NET_MAX_QUEUE)
-            continue;
+        /* Bucket outer, socket inner: the same nesting net_bucket_scan() does,
+         * and the only order a bucket lock is ever taken in. */
+        uint64_t sf = net_sock_lock(s);
+        bool skip = s->domain != AF_PACKET || s->closed || !s->pkt_bound ||
+                    (s->pkt_ifindex > 0 &&
+                     (unsigned)s->pkt_ifindex != slot->ifindex) ||
+                    (s->pkt_protocol != ETH_P_ALL &&
+                     s->pkt_protocol != ethertype) ||
+                    s->rx_count >= NET_MAX_QUEUE;
+        if (!skip) {
+            net_sockaddr_ll_t ll;
+            memset(&ll, 0, sizeof(ll));
+            ll.sll_family = AF_PACKET;
+            ll.sll_protocol = net_ntohs(ethertype);
+            ll.sll_ifindex = (int32_t)slot->ifindex;
+            ll.sll_hatype = ARPHRD_ETHER;
+            ll.sll_pkttype = PACKET_HOST;
+            ll.sll_halen = ETH_ALEN;
+            memcpy(ll.sll_addr, slot->frame + ETH_ALEN, ETH_ALEN);
 
-        net_sockaddr_ll_t ll;
-        memset(&ll, 0, sizeof(ll));
-        ll.sll_family = AF_PACKET;
-        ll.sll_protocol = net_ntohs(ethertype);
-        ll.sll_ifindex = (int32_t)slot->ifindex;
-        ll.sll_hatype = ARPHRD_ETHER;
-        ll.sll_pkttype = PACKET_HOST;
-        ll.sll_halen = ETH_ALEN;
-        memcpy(ll.sll_addr, slot->frame + ETH_ALEN, ETH_ALEN);
-
-        const uint8_t *payload = slot->frame;
-        size_t payload_len = slot->len;
-        if (s->type != SOCK_RAW) {
-            payload += ETH_HLEN;
-            payload_len -= ETH_HLEN;
+            const uint8_t *payload = slot->frame;
+            size_t payload_len = slot->len;
+            if (s->type != SOCK_RAW) {
+                payload += ETH_HLEN;
+                payload_len -= ETH_HLEN;
+            }
+            if (net_enqueue_msg_locked(s, payload, payload_len, &ll,
+                                       sizeof(ll)) >= 0)
+                (void)wait_queue_collect_one(&s->read_waitq, 0,
+                                             PROC_WAKE_EVENT, wake_q);
         }
-        if (net_enqueue_msg_locked(s, payload, payload_len, &ll, sizeof(ll)) >= 0)
-            (void)wait_queue_collect_one(&s->read_waitq, 0,
-                                         PROC_WAKE_EVENT, wake_q);
+        net_sock_unlock(s, sf);
         }
         net_bucket_unlock(bucket, bf);
     }
@@ -259,10 +265,9 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     if (proto == 0)
         proto = ETH_P_ALL;
 
-    int b = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(b);
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     s->pkt_ifindex = ll->sll_ifindex;
@@ -278,7 +283,7 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     memcpy(s->local, addr, addrlen);
     s->local_len = addrlen;
     s->bound = 1;
-    net_bucket_unlock(b, flags);
+    net_sock_unlock(s, flags);
     return 0;
 }
 
