@@ -1607,6 +1607,43 @@ void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
 #endif
 }
 
+uint32_t net_socket_buf_ceiling(net_socket_t *s, int is_snd)
+{
+    if (!s)
+        return 0;
+    if (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET) {
+        if (is_snd) {
+            /* The pcb's real capacity: asking for more send buffer buys nothing
+             * because tcp_write() will not be handed more than snd_buf. */
+            return (uint32_t)TCP_SND_BUF;
+        }
+        /* min(TCP_WND, what window scaling can put on the wire).  The wire
+         * field is rcv_wnd >> rcv_scale and is 16 bits, so a larger local
+         * window would be truncated to one the caller did not ask for. */
+        uint32_t ceiling = (uint32_t)TCP_WND;
+        uint32_t scale_ceiling = (uint32_t)0xFFFFu << TCP_RCV_SCALE;
+        return scale_ceiling < ceiling ? scale_ceiling : ceiling;
+    }
+    /* One datagram, staged in this layer. */
+    if (is_snd)
+        return (uint32_t)NET_MAX_PAYLOAD;
+    /* The receive queue's own message-count cap, in bytes. */
+    return NET_DGRAM_RCV_BUF_DEFAULT;
+}
+
+uint32_t net_socket_buf_in_force(net_socket_t *s, int is_snd)
+{
+    if (!s)
+        return 0;
+    uint32_t ceiling = net_socket_buf_ceiling(s, is_snd);
+    uint32_t have = is_snd ? s->snd_buf : s->rcv_buf;
+    /* A zero stored value means "never set", which only reaches here on a
+     * socket that never went through socket()'s per-type defaults.  The ceiling
+     * is the honest answer for it, and it is what the stream path already
+     * treats zero as. */
+    return (have && have < ceiling) ? have : ceiling;
+}
+
 /*
  * Apply SO_SNDBUF / SO_RCVBUF to an lwIP pcb.
  *
@@ -2333,6 +2370,13 @@ void net_inet_ip_opts_apply(net_socket_t *s)
 static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
                              int flags, const void *addr, size_t addrlen)
 {
+    /* SO_SNDBUF on a datagram socket bounds the one datagram this socket will
+     * hand on, which is the only send-side buffer a datagram socket has: the
+     * pbuf is handed to udp_sendto() and freed by it, so nothing accumulates.
+     * Compared against net_socket_buf_in_force() rather than s->snd_buf directly,
+     * so the number that rejects the send is the number getsockopt reports. */
+    if (len > net_socket_buf_in_force(s, 1))
+        return -EMSGSIZE;
     if (!s->bound) {
         uint16_t port = net_alloc_ephemeral_port_locked();
         if (s->domain == AF_INET6) {
@@ -2465,6 +2509,12 @@ static int net_inet_send_udp(net_socket_t *s, const void *buf, size_t len,
 static int net_inet_send_raw(net_socket_t *s, const void *buf, size_t len,
                              const void *addr, size_t addrlen)
 {
+    /* Same datagram ceiling as the UDP path, and for the same reason.  Checked
+     * before the pbuf is allocated: the allocation is sized by len, and a
+     * request the socket has already said it will not send should not be able
+     * to fail for want of memory instead. */
+    if (len > net_socket_buf_in_force(s, 1))
+        return -EMSGSIZE;
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (!p)
         return -ENOMEM;

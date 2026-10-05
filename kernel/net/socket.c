@@ -330,6 +330,23 @@ int net_socket_create(int domain, int type, int protocol) {
     s->protocol = protocol;
     s->nonblock = (type & SOCK_NONBLOCK) != 0;
     s->ipv6_checksum_offset = -1;
+    /*
+     * The SO_SNDBUF / SO_RCVBUF defaults are per type, not one pair for the
+     * whole tree.  net_socket_alloc() seeded the stream values because it does
+     * not know the type yet; a datagram socket has no pcb for either option to
+     * mean anything about, so leaving it with TCP_SND_BUF / TCP_WND would both
+     * misreport what it can honour and -- on the receive side -- silently bound
+     * its queue at one window's worth of bytes.  See the NET_DGRAM_* block in
+     * socket_internal.h for both numbers and for why the receive default is a
+     * no-op against the message-count cap that already exists.
+     */
+    if (base_type == SOCK_STREAM || base_type == SOCK_SEQPACKET) {
+        s->snd_buf = TCP_SND_BUF;
+        s->rcv_buf = TCP_WND;
+    } else {
+        s->snd_buf = NET_DGRAM_SND_BUF_DEFAULT;
+        s->rcv_buf = NET_DGRAM_RCV_BUF_DEFAULT;
+    }
 
     int init_r = net_inet_socket_init(s);
     if (init_r < 0) {

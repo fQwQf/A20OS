@@ -27,6 +27,34 @@ struct pbuf;
 #define NET_BH_RING_SIZE NET_PROFILE_BH_RING_SIZE
 
 /*
+ * Default SO_SNDBUF / SO_RCVBUF for a datagram socket (UDP, RAW), which have no
+ * pcb for either option to mean anything about.
+ *
+ * Send: a datagram is handed straight to udp_sendto()/raw_send() and the pbuf is
+ * freed on the way out, so this socket queues nothing on the send side.  What the
+ * ceiling can honestly bound is the single datagram it is willing to hand to the
+ * stack, and that is NET_MAX_PAYLOAD -- the largest one the socket layer will
+ * stage at all.  Larger requests are clamped to it, and net_inet_send_udp() /
+ * net_inet_send_raw() return -EMSGSIZE for a datagram above it.
+ *
+ * Receive: the socket's receive queue is already capped at NET_MAX_QUEUE messages
+ * of at most NET_MAX_PAYLOAD bytes, so that product is the largest byte ceiling
+ * the queue can ever reach.  The default is set to exactly that, which is what
+ * makes "never set it" behave identically to before this option was accepted for
+ * datagrams: the byte check can only fire for a socket that asked for something
+ * smaller.  Anything lower and a default UDP socket would start dropping
+ * datagrams it used to queue.
+ *
+ * Neither is Linux's sk_sndbuf / sk_rcvbuf.  Linux bounds unsent skbs and does
+ * memory accounting; this bounds one datagram and one queued byte total.  There is
+ * no window-scale folding either -- see the doc note in
+ * docs/net/network-config-design.md.
+ */
+#define NET_DGRAM_SND_BUF_DEFAULT ((uint32_t)NET_MAX_PAYLOAD)
+#define NET_DGRAM_RCV_BUF_DEFAULT                                              \
+    ((uint32_t)NET_MAX_QUEUE * (uint32_t)NET_MAX_PAYLOAD)
+
+/*
  * Payload staging sizes.
  *
  * Both stages below used to embed data[NET_MAX_PAYLOAD] (65535 bytes).  A
@@ -977,6 +1005,23 @@ void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
  * connect and on the accept path, so one code path owns the clamping for all
  * three entry points. */
 void     net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb);
+
+/* The largest SO_SNDBUF / SO_RCVBUF this socket could honour, ignoring what it
+ * currently has.  `is_snd` selects which of the two.
+ *
+ * The stream and datagram ceilings are unrelated by construction -- a pcb's
+ * capacity against this layer's staging and queue limits -- which is why this
+ * cannot be a constant.  See the header comment on net_inet_tcp_buf_apply() for
+ * what the stream ceiling is, and the NET_DGRAM_*_DEFAULT block above for what
+ * the datagram one is.
+ *
+ * setsockopt clamps against this; nothing else should. */
+uint32_t net_socket_buf_ceiling(net_socket_t *s, int is_snd);
+
+/* The value actually in force: min(stored, ceiling).  This -- not the raw
+ * field -- is what getsockopt reports and what the datagram send paths compare
+ * against, so a report and an enforcement cannot drift apart. */
+uint32_t net_socket_buf_in_force(net_socket_t *s, int is_snd);
 
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);
