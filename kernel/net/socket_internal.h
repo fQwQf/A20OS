@@ -242,10 +242,19 @@ typedef struct net_socket {
     /*
      * Lane this socket's PCB belongs to, and which never changes for the life of
      * the connection.  Recomputed at bind from the bound (ip, port) because that
-     * is the pair an inbound packet can reproduce: the peer's source port is our
-     * local port and the peer's destination is our local address.  Before bind
+     * is the pair an inbound packet can reproduce: the packet's destination
+     * address and port are this connection's local address and port.  Before bind
      * it is only a provisional assignment from the creating CPU, which is why
-     * nothing may rely on it until the socket is bound.
+     * nothing may rely on it until the socket is bound -- and the accept path,
+     * which never binds, overwrites it with the adopted pcb's owning lane
+     * instead (net_inet_accept_stage_drain).
+     *
+     * The value is always a real lane in 0..CONFIG_NET_LANES-1, wildcard binds
+     * included: for bind(0.0.0.0) it is net_lane_of(0, port), which is what lwIP
+     * calls the owning lane of the matching wildcard pcb.  It is NOT the same
+     * index as that pcb's *bucket*, which for a wildcard bind is the sentinel;
+     * see NET_PCB_LANE_OWNER_OF_PCB() and NET_PCB_LANE_OF_PCB() in
+     * lwip/priv/pcb_lane.h.
      */
     unsigned lane;
     int domain;
