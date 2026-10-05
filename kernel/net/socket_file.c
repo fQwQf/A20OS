@@ -125,6 +125,12 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, count, 0, NULL, 0);
+    /* Same rule and same reason as net_sendto_sock(): a stream socket in an
+     * inet family with no pcb is a connection lwIP tore down, not a
+     * non-socket, so it owes the caller EPIPE rather than ENOTSOCK. */
+    if (s->type == SOCK_STREAM && !s->local_tcp && !s->tcp &&
+        (s->domain == AF_INET || s->domain == AF_INET6))
+        return s->ever_connected ? -EPIPE : -ENOTCONN;
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, count, NULL, 0);
 
