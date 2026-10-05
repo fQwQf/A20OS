@@ -237,17 +237,44 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 
 ### RTNETLINK 多播组
 
-`NETLINK_ROUTE` 套接字 bind 时可以选组。本轮新增两个
-（`kernel/net/socket_netlink.c:1011-1012`）：
+`NETLINK_ROUTE` 套接字 bind 时可以选组（`kernel/net/socket_netlink.c`）：
 
-| 组 | 值 | 收到什么 |
-|---|---|---|
-| `RTNLGRP_LINK` | `0x1` | `RTM_NEWLINK`：链路状态变化（`a20_lwip_sync_link_state()` 观察到驱动翻转 admin/carrier 时） |
-| `RTNLGRP_IPV4_IFADDR` | `0x5` | `RTM_NEWADDR` / `RTM_DELADDR`：IPv4 地址写入或删除 |
+| 组 | 值 | 收到什么 | 事件源（写入路径） |
+|---|---|---|---|
+| `RTNLGRP_LINK` | `0x1` | `RTM_NEWLINK`：链路状态变化 | `a20_lwip_sync_link_state()` |
+| `RTNLGRP_IPV4_IFADDR` | `0x5` | `RTM_NEWADDR` / `RTM_DELADDR` | `a20_lwip_if_set_addr()` |
+| `RTNLGRP_IPV6_IFADDR` | `0xA` | `RTM_NEWADDR` | `a20_lwip_if_set_addr6()` |
 
-地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有地址 0.0.0.0"不是任何
-接口处于的状态，没有监听者能对它采取行动（`socket_netlink.c:1128-1130`，实现见 `:1152`）。
-**只覆盖 IPv4 地址组**：本树没有 IPv6 地址写入路径，所以没有 IPv6 地址组事件。
+**表里第三列是本轮新增 `RTNLGRP_IPV6_IFADDR` 的理由**：先有写入路径，才有组。只定义一个
+组号而没有任何内核代码能往里投递，等于给监听者一个可以 bind 却永远收不到东西的承诺——
+那比不定义更糟。所以本轮同时补上了 IPv6 地址写入路径
+（`a20_lwip_if_set_addr6()`，`kernel/net/lwip_stack.c`），`nlrt_apply_addr6()` 把
+`ifa_family == AF_INET6` 的 `RTM_NEWADDR` 接到它上面，`net_netlink_addr6_notify()` 负责
+投递到 `RTNLGRP_IPV6_IFADDR`。`netlink_test` 的 IPv6 那一节就是钉这一条的：
+它 bind 上这个组、真的收一条事件、并断言 `IFA_ADDRESS` / `IFA_LOCAL` 是 16 字节。
+
+IPv4 地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有地址 0.0.0.0"不是任何
+接口处于的状态，没有监听者能对它采取行动（实现见 `net_netlink_addr_notify()`）。
+
+**IPv6 写入路径的边界（必须一起读）**：
+
+- **只有加，没有删。** `LWIP_NETIF_API=0` 下 lwIP 不导出
+  `netif_remove_ip6_addr()`，删除要走 `nd6.c` 内部地址池的拆除流程，从 socket 层伸手进去
+  是一项真实的分歧，而树里目前没有任何东西需要它。所以 `RTM_DELADDR` +
+  `AF_INET6` **显式返回 `-EOPNOTSUPP`**，而不是接受之后改发一条 `RTM_NEWADDR` 去谎报
+  "已删除"一个其实还在的地址。
+- **不做 DAD。** `netif_add_ip6_address()` 会把地址置为 `TENTATIVE` 等 ND6 定时器探测后
+  提升；本路径直接置 `IP6_ADDR_VALID`，因为地址来自一条显式的管理请求而不是路由器通告，
+  且回环 netif 已经走同一条捷径（`a20_lwip_loopif_init_cb()`）。**监听者不得把这个事件
+  读成"重复地址检测通过"。**
+- **`ifa_prefixlen` 只校验、不落地。** lwIP 的 IPv6 子网成员关系编在地址自身里
+  （`ip6_addr_t`），`struct netif` 没有每地址的前缀长度字段。它被校验（>128 报
+  `-EINVAL`），并且是通知里回报的那个数。
+- **回环的 `::1` 不产生事件。** 它在 netif 初始化时由 `a20_lwip_loopif_init_cb()` 加入，
+  早于任何 netlink 监听者存在，不是"变化"。
+- ND6 自己从路由器通告学到的地址（本树开着 `LWIP_IPV6_AUTOCONFIG`）**不会**发通知：
+  lwIP 没有给出这个事件的钩子。**已知会漏的事件**。
+
 一个监听者的接收队列满不会挡住其他监听者——Linux 在这里丢消息并报溢出，本树没有
 socket 级的溢出上报面，所以计数并 `klog` 一条
 （`[RTNETLINK] multicast group 0x%x dropped for %d listener(s)`）。
@@ -334,13 +361,15 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
       `getsockopt` 回读生效值；抬高对既有连接立即生效（写 `pcb->snd_buf`，
       DIVERGENCE §2.10）；无自动调优这一点已写进源码注释与本文。
 - [x] `TCP_CONGESTION` 对未知名返回 `-ENOPROTOOPT`，`getsockopt` 回真实算法名。
-- [x] RTNETLINK 向 `RTNLGRP_LINK` / `RTNLGRP_IPV4_IFADDR`
-      投递 `RTM_NEWLINK` / `RTM_NEWADDR`（全零地址改发 `RTM_DELADDR`）。
+- [x] RTNETLINK 向 `RTNLGRP_LINK` / `RTNLGRP_IPV4_IFADDR` / `RTNLGRP_IPV6_IFADDR`
+      投递 `RTM_NEWLINK` / `RTM_NEWADDR`（IPv4 地址全零时改发 `RTM_DELADDR`）；三个组
+      都有真实写入路径，IPv6 的边界见上面那一节。
 - [x] conntrack 与 NAT 的运行时动词挂在 `/proc/a20/netfilter`，并有
       `make smoke-netfilter-nat` 端到端门禁覆盖 DNAT。
 - [x] UDP / RAW 的 `SO_SNDBUF` / `SO_RCVBUF` 被接受并真正执行：单数据报发送上限与
       接收队列字节上限，`getsockopt` 回读生效值，语义差异见上面那一节。
 - [ ] **未做**：套接字缓冲无自动调优（无 `tcp_wmem` / `tcp_rmem`、无内存压力反馈、
-      不从实测吞吐调整）；rtnetlink 组播无 IPv6 地址组；conntrack 不跟踪 ICMP。
+      不从实测吞吐调整）；IPv6 地址只有加没有删、不做 DAD、ND6 自学地址不发通知；
+      conntrack 不跟踪 ICMP。
 - [ ] **未做**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输不完成的
       现象，本轮一次都没复现，原因未查明。功能未削减，建议（部署用命令行键）保留。

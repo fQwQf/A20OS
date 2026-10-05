@@ -690,6 +690,46 @@ static size_t nlrt_build_addrmsg(uint8_t *buf, uint32_t ifindex,
     return total;
 }
 
+/*
+ * The IPv6 counterpart of nlrt_build_addrmsg().  Same shape, three differences
+ * that are all forced by the address family rather than chosen:
+ *
+ *   - ifa_family is AF_INET6 and the two address attributes carry 16 bytes.
+ *   - ifa_prefixlen comes from the request's ifa_prefixlen, validated to <= 128
+ *     by the caller.  There is no netmask to derive it from the way the IPv4
+ *     builder calls nlrt_mask_prefixlen() on a mask: lwIP stores IPv6 subnet
+ *     membership inside the address, not beside it.
+ *   - scope is universe unless the interface is loopback, matching IPv4.
+ *
+ * RTM_NEWADDR only: a20_lwip_if_set_addr6() is add-only, so this builder is
+ * never asked for a DELADDR payload and does not pretend otherwise.
+ */
+static size_t nlrt_build_addrmsg6(uint8_t *buf, uint32_t ifindex,
+                                  const uint8_t addr[16], uint8_t prefixlen,
+                                  const char *name, uint8_t loopback,
+                                  uint16_t msg_type,
+                                  uint32_t pid, uint32_t seq)
+{
+    size_t off = sizeof(netlink_msghdr_t);
+    ifaddrmsg_t *ifa = (ifaddrmsg_t *)(buf + off);
+    memset(ifa, 0, sizeof(*ifa));
+    ifa->ifa_family = AF_INET6;
+    ifa->ifa_prefixlen = prefixlen;
+    ifa->ifa_scope = loopback ? 254 : NLRT_SCOPE_UNIVERSE;
+    ifa->ifa_index = ifindex;
+    off += sizeof(*ifa);
+    off = nlrt_put_attr(buf, off, IFA_ADDRESS, addr, 16);
+    off = nlrt_put_attr(buf, off, IFA_LOCAL, addr, 16);
+    if (name && name[0])
+        off = nlrt_put_attr(buf, off, IFA_LABEL, name, strlen(name) + 1);
+    size_t total = sizeof(netlink_msghdr_t) + off;
+    if (total > NLRT_MSG_MAX)
+        return 0;
+    nlrt_fill_hdr((netlink_msghdr_t *)buf, msg_type, (uint32_t)total,
+                  seq, pid);
+    return total;
+}
+
 /* Bounded rtattr walker over a user-supplied attribute block.  The payload is
  * only ever bounded by the validated nlmsg_len, and a length that does not fit
  * the remaining block is a parse error, not a reason to stop early. */
@@ -800,12 +840,63 @@ static int nlrt_ip4_isany(const uint8_t a[4])
  * carries no mask attribute.  A NULL gw leaves the gateway alone: RTM_NEWADDR
  * has no way to spell one.
  */
+/*
+ * RTM_NEWADDR / RTM_DELADDR for AF_INET6.  Split out of nlrt_apply_addr()
+ * because almost nothing is shared: the attribute payload is 16 bytes rather
+ * than 4, the prefix length goes to 128, there is no netmask or gateway, and
+ * the write path underneath is a different lwIP call with different rules.
+ *
+ * Add-only.  There is no netif_remove_ip6_address() under LWIP_NETIF_API=0, so
+ * RTM_DELADDR is refused with -EOPNOTSUPP instead of being accepted and turned
+ * into an RTM_NEWADDR -- which would answer "removed" for an address that is
+ * still configured.
+ */
+static int nlrt_apply_addr6(uint16_t type, const ifaddrmsg_t *ifa,
+                            const uint8_t *attrs, size_t alen)
+{
+    if (type != RTM_NEWADDR)
+        return -EOPNOTSUPP;          /* no IPv6 delete; see above */
+    if (ifa->ifa_index == 0)
+        return -EINVAL;
+    if (ifa->ifa_prefixlen > 128)
+        return -EINVAL;
+    unsigned ifindex = ifa->ifa_index;
+
+    uint8_t address[16], local[16];
+    int have_address = 0, have_local = 0;
+    nlrt_attr_iter_t it = { attrs, alen, 0, 0 };
+    const rtattr_t *a;
+    while ((a = nlrt_attr_next(&it))) {
+        if (a->rta_type == IFA_ADDRESS) {
+            int r = nlrt_attr_get(a, sizeof(address), address);
+            if (r < 0)
+                return r;
+            have_address = 1;
+        } else if (a->rta_type == IFA_LOCAL) {
+            int r = nlrt_attr_get(a, sizeof(local), local);
+            if (r < 0)
+                return r;
+            have_local = 1;
+        }
+    }
+    if (it.bad)
+        return -EINVAL;
+    if (have_local && have_address && memcmp(local, address, 16) != 0)
+        return -EOPNOTSUPP;          /* point-to-point form; see the IPv4 arm */
+    if (!have_local && !have_address)
+        return -EINVAL;
+    const uint8_t *want = have_local ? local : address;
+    return a20_lwip_if_set_addr6(ifindex, want, ifa->ifa_prefixlen);
+}
+
 static int nlrt_apply_addr(uint16_t type, uint16_t flags,
                            const ifaddrmsg_t *ifa,
                            const uint8_t *attrs, size_t alen)
 {
+    if (ifa->ifa_family == AF_INET6)
+        return nlrt_apply_addr6(type, ifa, attrs, alen);
     if (ifa->ifa_family != AF_INET)
-        return -EAFNOSUPPORT;      /* no IPv6 address write path */
+        return -EAFNOSUPPORT;
     if (ifa->ifa_index == 0)
         return -EINVAL;
     if (ifa->ifa_prefixlen > 32)
@@ -1006,10 +1097,19 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 
 /* Group numbers from linux/rtnetlink.h.  RTNLGRP_LINK is what NetworkManager
  * and `ip monitor link` bind to see carrier transitions; RTNLGRP_IPV4_IFADDR
- * is the address group.  A listener binds the bitwise OR of the groups it
- * wants, exactly as it already does for the uevent group. */
+ * and RTNLGRP_IPV6_IFADDR are the two address groups.  A listener binds the
+ * bitwise OR of the groups it wants, exactly as it already does for the uevent
+ * group.
+ *
+ * Both address groups are emitted from a write path that exists:
+ * RTNLGRP_IPV4_IFADDR from a20_lwip_if_set_addr(), RTNLGRP_IPV6_IFADDR from
+ * a20_lwip_if_set_addr6().  Defining a group here with nothing able to feed it
+ * would be a number a listener could bind to and then never hear from, which is
+ * the failure mode worth avoiding -- so the IPv6 group came with the write path
+ * that makes it reachable. */
 #define RTNLGRP_LINK        0x1
 #define RTNLGRP_IPV4_IFADDR 0x5
+#define RTNLGRP_IPV6_IFADDR 0xA
 
 /*
  * Sequence numbers for notifications.  Atomic because the broadcast is not
@@ -1154,4 +1254,35 @@ void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
     if (total == 0)
         return;
     (void)nlrt_broadcast(msg.b, total, RTNLGRP_IPV4_IFADDR);
+}
+
+/*
+ * An interface gained an IPv6 address.  RTM_NEWADDR always: the only writer,
+ * a20_lwip_if_set_addr6(), is add-only, so there is no DELADDR event to
+ * publish and inventing one for a deletion this tree cannot perform would tell
+ * listeners about an address that is still there.
+ */
+void net_netlink_addr6_notify(unsigned ifindex, const uint8_t addr[16],
+                              uint8_t prefixlen)
+{
+    if (!addr)
+        return;
+    nlrt_link_t links[NLRT_MAX_LINKS];
+    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    const nlrt_link_t *e = NULL;
+    for (int k = 0; k < nlinks; k++)
+        if (links[k].index == ifindex) {
+            e = &links[k];
+            break;
+        }
+    if (!e)
+        return;
+
+    union { uint64_t align; uint8_t b[NLRT_MSG_MAX]; } msg;
+    size_t total = nlrt_build_addrmsg6(msg.b, e->index, addr, prefixlen,
+                                       e->name, e->loopback, RTM_NEWADDR,
+                                       0, nlrt_next_seq());
+    if (total == 0)
+        return;
+    (void)nlrt_broadcast(msg.b, total, RTNLGRP_IPV6_IFADDR);
 }
