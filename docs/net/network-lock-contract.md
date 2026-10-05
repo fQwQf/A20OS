@@ -56,6 +56,48 @@ g_lwip_lock -> g_net_lock
 
 lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 `g_net_lock` 的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
+## conntrack 与 NAT 用哪把锁
+
+**决定：conntrack 表由 `g_lwip_lock` 保护，不另设专用锁。** NAT 规则表用
+`g_netfilter_lock` 下的 seqlock，因为它的写者只有 /proc 配置面。这两者不是同一类
+状态，分开对待是有理由的，不是省事。
+
+分界的依据是**写者是谁**：
+
+| 状态 | 写者 | 锁 |
+|---|---|---|
+| NAT 规则表 `g_nat[]` | 只有 /proc `natadd`/`natdel` | `g_netfilter_lock` + seqlock |
+| conntrack 表 `g_ct[]` | 每包一次（插入、计数、状态迁移） | `g_lwip_lock` |
+
+conntrack 的每个包都要写（`e->packets++`、`e->last_ms`），所以 seqlock 不适用：它会把
+写区段放到包路径上，让并发 /proc 读者变成写者饥饿的候选者，而包路径不允许阻塞。
+
+**为什么不加专用 conntrack 自旋锁。** 包路径本来就持有 `g_lwip_lock`，再加一把锁等于
+每包多一次全局获取；更要紧的是，等 `g_lwip_lock` 按
+[net-lanes.md](./net-lanes.md) 拆成 per-lane 之后，这把新锁会**取代** `g_lwip_lock`
+成为新的串行点——正是 lane 改造要消除的那个结果。所以本文件所有 conntrack 变更都发生
+在已经持有 `g_lwip_lock` 的上下文里：
+
+- 两个 hook：input 在 `a20_lwip_process_netif_rx_tx_locked()`，output 在
+  `a20_lwip_linkoutput()`；
+- 空闲超时清扫：`a20_lwip_poll_timers_locked()`（`kernel/net/lwip_stack.c:651`），
+  选 timers 段正因为它是唯一无条件推进的驱动点，任务阻塞在 `connect()` 里时只有它还在走。
+
+**/proc 侧自己取锁**，因为 procfs 访问是系统调用，不在 `g_lwip_lock` 下：
+
+- 写动词 `ctflush` 在 `kernel/fs/procfs/procfs.c:1040` 显式取放；
+- 读渲染由 `netfilter_format()` 在 `kernel/net/netfilter.c:641` 取一次锁后调用
+  `netfilter_nat_format()`。**渲染路径不得再取第二次**：`spin_lock_irqsave()` 不可重入，
+  二次获取是自死锁。它表现得像锁竞争而不是自死锁——单 CPU 构建上是
+  `netfilter_nat_format` 里的 `[LOCK-STALL]`，`owner=-1`，因为 `g_lwip_lock` 的 owner
+  字段只在 `CONFIG_NET_LOCK_ASSERT=1` 下维护，否则一直是陈旧值。判据是单 CPU 上
+  trylock 必然失败：失败只可能意味着当前 CPU 已经持有它。
+
+同族先例：`a20_lwip_format_memp()`（`procfs_render.c`）渲染 lwIP 自有状态时取同一把锁。
+
+conntrack 表不分配内存（静态数组，档位见 `net_profile.h` 的
+`NET_PROFILE_CONNTRACK_ENTRIES`），符合本文件"锁下不得分配"那条规则，不需要例外。
+
 ## Poll 的分段
 
 lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需要的部分不同：
