@@ -12,6 +12,9 @@
  *   - 4.1, 4.3, 4.4  the growth function W_cubic(t) = C * (t - K)^3 + W_max,
  *                     with cwnd driven onto the candidate target once per RTT
  *   - Eq. 2           K = cbrt(W_max * (1 - beta_cubic) / C)
+ *   - 4.2             the TCP-friendly region: W_est(t) = W_max * beta_cubic +
+ *                     alpha_aimd * (t / RTT), and the target is the larger of
+ *                     W_cubic(t) and W_est(t)
  *   - 4.5             multiplicative decrease: W_max = cwnd, then
  *                     ssthresh = max(cwnd * beta_cubic, 2 MSS), cwnd = ssthresh
  *   - 4.6             fast convergence, when W_max < W_last_max:
@@ -24,15 +27,22 @@
  *                     the epoch clock restarts rather than running through it
  *
  * What is deliberately NOT implemented, and must not be assumed:
- *   - 4.2, the TCP-friendly region, is approximated rather than implemented.
- *     Eq. 4's W_est(t) needs an RTT-driven term; what stands in for it is
- *     Reno's own rate (1 MSS per cwnd acknowledged) applied whenever W_cubic
- *     offers no growth.  That errs in the safe direction -- the connection
- *     never grows slower than Standard TCP -- but it is not W_est, and it does
- *     not deliver the "at least AIMD(0.529, 0.7) throughput" guarantee.
  *   - TCP-AQ / HyStart / DCTCP / Prague
  *   - the ECN and RTT-variance couplings Linux layers on top of CUBIC
  *   - persistence of W_max beyond the life of one tcp_pcb
+ *
+ * HONEST BOUNDARY of 4.2 on this port: Eq. 4 divides the elapsed time by the
+ * RTT, and the only RTT this stack can measure is pcb->sa -- lwIP's Van Jacobson
+ * estimator, which samples `tcp_ticks - pcb->rttest` and is therefore quantised
+ * to whole TCP_SLOW_INTERVAL ticks (500 ms with this port's configuration).
+ * A sub-tick RTT reads as sa == 0.  tcp_cubic_w_est() floors that at one tick,
+ * which makes the friendly slope alpha/0.5 s = 1.07 segments/second: a real,
+ * conservative floor, but it is not the RTT of a loopback or a LAN link, and
+ * on this port Eq. 4's region is consequently almost never the binding one at
+ * realistic window sizes (see the derivation in tcp_cubic.c).  Giving the stack
+ * a millisecond-resolution RTT would mean a new field on struct tcp_pcb updated
+ * in tcp_in.c; that is not done here, and until it is, do not read CUBIC's
+ * behaviour as "Linux CUBIC's TCP-friendly region".
  *
  * Time base.  W_cubic's C is 0.4 segments per second^3, so Eq. 1's time axis is
  * SECONDS.  The stack's only clock is tcp_ticks, one tick per tcp_slowtmr(),
@@ -116,6 +126,24 @@ struct tcp_pcb;
  *  unnoticed, so it does not exist. */
 #define TCP_CUBIC_C           410   /* 0.4   */
 #define TCP_CUBIC_BETA        717   /* 0.7   */
+
+/** alpha_aimd = 3 * (1 - beta_cubic) / (1 + beta_cubic) (RFC 8312 Eq. 4), the
+ *  slope of the TCP-friendly line, in 1/1024 SEGMENTS PER RTT.
+ *
+ *  Derived here rather than transcribed, because a transcribed 0.53 is a second
+ *  thing to drift out of step with BETA above:
+ *
+ *      alpha = 3 * (1 - beta) / (1 + beta)
+ *            = 3 * (1024 - 717) / (1024 + 717)
+ *            = 3 * 307 / 1741 = 921 / 1741 = 0.5289994...
+ *            x 1024 = 541.77..., rounded to 542 (0.529297)
+ *
+ *  Rounded, not truncated: 541.77 is closer to 542 than to 541, and the
+ *  residual 0.0003 is under half the 0.000977 granularity, so no other integer
+ *  constant here would be closer.  Unlike C and BETA this one cannot claim a
+ *  sub-0.05% error -- 1/1024 of 0.529 is 0.092% on its own, so the honest bound
+ *  is half an LSB. */
+#define TCP_CUBIC_TF_ALPHA    542
 
 /** Per-PCB CUBIC state.  Window fields are in 1/256 segments, K is in 1/256
  *  seconds, epoch_start is in raw ticks, `acked` is in bytes. */
