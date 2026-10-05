@@ -27,6 +27,16 @@
  */
 static void signal_make_page_exec(uint64_t addr) {
     task_t *t = proc_current();
+#ifdef CONFIG_NOMMU
+    /* There is nothing to upgrade: with no page tables, the boot-time flat
+     * identity map is the only source of permissions, and its descriptors leave
+     * XN clear, so every page the frame allocator hands a process is already
+     * executable.  The PTE rewrite below could not be performed even in
+     * principle -- there is no second mapping to rewrite -- so this early return
+     * is the correct result, not a silent failure to reach it. */
+    (void)t;
+    (void)addr;
+#else
     if (!t || !t->mm || !t->mm->pgdir) return;
     vaddr_t page = addr & ~(vaddr_t)(PAGE_SIZE - 1);
     if (user_prepare_write(t, (uint64_t)page) < 0) return;
@@ -51,6 +61,7 @@ static void signal_make_page_exec(uint64_t addr) {
     pt_unmap(t->mm, page);
     pt_map(t->pgdir, page, pa, flags);
     arch_tlb_flush_page(page);
+#endif
 }
 
 __attribute__((weak)) void arch_signal_prepare_frame(arch_sig_rt_frame_t *frame,

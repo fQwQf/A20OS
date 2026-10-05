@@ -102,29 +102,77 @@ _start:
 #endif
 #ifdef CONFIG_NOMMU
     /*
-     * Split DRAM into 2 MiB blocks.  Kernel text remains privileged while the
-     * allocator-backed portion of RAM is accessible to EL0.  A single 1 GiB
-     * AP=01 block makes writable kernel text executable from EL0 and also
-     * trips architectural W^X controls on some CPUs.
+     * An identity map over all of DRAM in 2 MiB blocks, split once: the
+     * kernel image plus the drvmod arena are privileged (AP=00), everything
+     * the frame allocator hands out is EL0 read/write (AP=01).  Both sides
+     * are Normal memory (MAIR AttrIndx 1) -- the same attributes the MMU
+     * build's DRAM block uses.
+     *
+     * AttrIndx 1 is the point of running an identity map with the MMU on
+     * under NOMMU: with translation disabled AArch64 treats every access as
+     * Device, where libc's exclusive atomics (LDAXR/STLXR) fault.  These
+     * descriptors used to encode AttrIndx 0 (Device-nGnRnE) while calling
+     * themselves normal-memory, so they never delivered the attributes the
+     * map exists to provide.
+     *
+     * The split exists because AArch64 makes a stage-1 page that is writable
+     * by EL0 execute-never for every higher Exception level -- a privileged
+     * fetch from an EL0-writable page raises Execute Never.  QEMU enforces
+     * this unconditionally for AA64, ignoring SCTLR_EL1.WXN entirely
+     * (target/arm/ptw.c get_S1prot(), gated on regime_has_2_ranges(), which
+     * is a pure mmu_idx switch that never consults TCR), so no AP can serve
+     * both EL0-writable user memory and privileged-executable kernel code.
+     *
+     * A flat AP=00 map therefore fixes drvmods and breaks userland: it makes
+     * EL0 unable to touch *any* memory, and /bin/init dies on its first
+     * instruction.  A flat AP=01 map is the mirror image -- the first drvmod
+     * entry point takes an instruction abort:
+     *
+     *   ESR_EL1=0x8600000e  EC=0x21 (IABT from current EL)  ISS=0xe (XN)
+     *   L2[510]=0x7fc00741 -> stval=0x7fd9e134  (mapping present, no PXN)
+     *
+     * So the boundary is pushed just past __drvmod_arena_end.  drvmod images
+     * are the only privileged code the frame pool ever holds (there is no
+     * BPF/JIT, no vDSO under NOMMU, and arch_kwx_module_protect() is compiled
+     * out), and drvmod_arena_alloc() serves them from that reserved prefix
+     * while pfa_init() keeps kmalloc -- user and kernel alike -- out of it.
+     *
+     * The old claim that a NOMMU instance has no EL0 process to run is what
+     * this map got wrong: qemu-aarch64-nommu carries a rootfs, and it arrives
+     * over virtio-blk, which is itself a drvmod.  The MMU builds keep the
+     * real high-half alias and are unaffected.
      */
     orr     x2, x4, #0x3
     str     x2, [x1, #(1 * 8)]
 
-    mov     x5, xzr
-    ldr     x6, =0x0000000040000701  /* privileged normal-memory block */
-    ldr     x7, =0x0000000040000741  /* EL0 RWX normal-memory block */
+    ldr     x6, =0x0000000040000705  /* AP=00, AttrIndx 1, AF, inner-shareable */
+    ldr     x7, =0x0000000040000745  /* AP=01, AttrIndx 1, AF, inner-shareable */
     /*
-     * Keep every 2 MiB block occupied by the linked kernel privileged.  Derive
-     * the boundary from _end so kernel growth cannot silently expose kernel
-     * data to EL0.
+     * Blocks below the arena stay privileged.  __drvmod_arena_end is a VA,
+     * and NOMMU links the kernel at VIRT_BASE == PHYS_BASE, so subtracting
+     * PHYS_MEMORY_BASE turns it back into a DRAM offset.
      */
-    adrp    x8, _end
-    add     x8, x8, :lo12:_end
+    adrp    x8, __drvmod_arena_end
+    add     x8, x8, :lo12:__drvmod_arena_end
     ldr     x9, =0x40000000
     sub     x8, x8, x9
     ldr     x9, =0x1fffff
     add     x8, x8, x9
-    lsr     x8, x8, #21
+    lsr     x8, x8, #21              /* privileged block count */
+    /*
+     * The map has to end where the frame allocator's window ends.  This used
+     * to stop at a hardcoded 256 blocks (512 MiB) while PHYS_MEMORY_END is
+     * 1 GiB above PHYS_MEMORY_BASE, so pfa_init handed out frames in the top
+     * half of DRAM that no L2 block covers -- and the first kmalloc that
+     * landed there took a store page fault writing its own header.  Derive
+     * the bound from the same window the MMU build covers with its single
+     * 1 GiB L1 block, so the two builds cannot drift apart again.
+     */
+    ldr     x9, =0x40000000
+    ldr     x10, =0x80000000
+    sub     x10, x10, x9
+    lsr     x10, x10, #21
+    mov     x5, xzr
 .Lnommu_l2_loop:
     cmp     x5, x8
     csel    x2, x6, x7, lo
@@ -132,7 +180,7 @@ _start:
     add     x5, x5, #1
     add     x6, x6, #(1 << 21)
     add     x7, x7, #(1 << 21)
-    cmp     x5, #256                 /* 512 MiB of configured DRAM */
+    cmp     x5, x10
     b.lo    .Lnommu_l2_loop
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
     /* RAM and the mixed ACPI/MMIO window are already covered above. */

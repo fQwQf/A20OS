@@ -30,6 +30,13 @@ typedef struct {
 typedef struct {
     uint32_t handler;
     uint32_t flags;
+    /* musl's struct k_sigaction carries sa_restorer between the flags and the
+     * mask on every architecture whose signal.h defines SA_RESTORER, which
+     * riscv32's does.  Delivery always returns through the in-frame trampoline
+     * arch_signal_prepare_trampoline() builds, so the user's restorer is never
+     * invoked -- but the slot still has to be reserved, or sa_mask is read out
+     * of it. */
+    uint32_t restorer;
     uint64_t mask;
 } arch_user_sigaction_t;
 
