@@ -368,8 +368,11 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
       `make smoke-netfilter-nat` 端到端门禁覆盖 DNAT。
 - [x] UDP / RAW 的 `SO_SNDBUF` / `SO_RCVBUF` 被接受并真正执行：单数据报发送上限与
       接收队列字节上限，`getsockopt` 回读生效值，语义差异见上面那一节。
+- [x] conntrack 最小跟踪 ICMP echo：`type` 归一化 / `id` 进元组，回程经回程链匹配
+      （echo 只交换地址，不交换字段），`ping` 形态的计数与 `state=established` 进
+      `smoke-netfilter` 断言；无 ALG、无差错报文跟踪，边界见 conntrack-nat.md。
 - [ ] **未做**：套接字缓冲无自动调优（无 `tcp_wmem` / `tcp_rmem`、无内存压力反馈、
       不从实测吞吐调整）；IPv6 地址只有加没有删、不做 DAD、ND6 自学地址不发通知；
-      conntrack 不跟踪 ICMP。
+      conntrack 不跟踪 ICMP 差错报文（PMTU 探测因此不可用）。
 - [ ] **未做**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输不完成的
       现象，本轮一次都没复现，原因未查明。功能未削减，建议（部署用命令行键）保留。
