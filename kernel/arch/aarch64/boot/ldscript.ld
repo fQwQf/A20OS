@@ -63,6 +63,28 @@ SECTIONS
 
     _end = .;
 
+    /*
+     * NOMMU only: a 2 MiB-aligned arena for drvmod images.  Under NOMMU the
+     * whole of DRAM is one flat identity map, and AArch64 makes a stage-1
+     * block that grants EL0 write access execute-never for every higher EL,
+     * so a single AP cannot serve both EL0 user memory and kernel code.  The
+     * boot map therefore marks everything up to __drvmod_arena_end AP=00 and
+     * the remainder AP=01, which forces drvmod images -- the only privileged
+     * code the frame pool ever holds -- into this reserved prefix.
+     *
+     * These are absolute symbols: they occupy no output bytes.  The MMU
+     * builds ignore them (pfa_init() starts at _bss_end and the boot map is
+     * the normal high-half alias), so they cost nothing there.
+     *
+     * The size is DRV_MOD_MAX_MODULES (32) * DRV_MOD_MAX_SIZE (512 KiB)
+     * exactly, so the arena is a hard guarantee rather than a guess; the
+     * modules this platform actually loads need well under a megabyte.
+     */
+    __drvmod_arena_start = ALIGN(_end, 0x200000);
+    __drvmod_arena_end = __drvmod_arena_start + 0x1000000;
+    ASSERT(__drvmod_arena_start >= _end,
+           "drvmod arena must start at or after the kernel image")
+
     /DISCARD/ : {
         *(.comment)
         *(.note*)
