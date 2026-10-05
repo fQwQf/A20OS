@@ -401,25 +401,43 @@ DEVICE 侧的 netif 暂存仍是 1536——它装整帧（1500 + 14），不是�
 的是描述符而不是 lwIP 的 pbuf，省掉的是驱动内部再拷一次。
 
 **校验和卸载按诚实原则未启用**：`TX_CSUM_OFFLOAD` / `RX_CSUM_OFFLOAD` 两个能力位
-已定义（`driver_class.h:145-146`）但**永不置位**。vendored 的 lwIP 2.2.2 没有任何
-承载该握手的 flag——`opt.h:2449-2450` 的 `LWIP_CHECKSUM_ON_COPY` 默认 0，
-`pbuf_take()` 自己算自己验；`netif.h:84-107` 的七个 `NETIF_FLAG_*` 里没有一个是给
-校验和握手用的。贸然协商会让 lwIP 去验一个设备根本没算的校验和，属于静默损坏。
-`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**
-上报它。
+已定义（`driver_class.h:145-146`）但**永不置位**。此前记录的理由（"vendored lwIP 2.2.2
+没有任何承载该握手的 flag"）经复核**不成立**，已更正：位与字段都在
+（`netif.h:140-153`、`:340-342`、`:408-417`），只是被
+`LWIP_CHECKSUM_CTRL_PER_NETIF` 关着（`opt.h:2371-2373` 默认 0）。不启用的真实理由是
+三条接不上的线：TCP 发送路径 `tcp_out.c:1587-1596` 无条件写完整校验和、lwIP 的位是
+**每 netif** 而不是**每帧**而本 HAL 的 `recv()` 只回长度、QEMU 的 virtio-net 从不设置
+`VIRTIO_NET_HDR_F_DATA_VALID`。完整调查与"要启用需要改哪些上游文件"见
+`docs/net/checksum-offload.md`，意向已登记在
+`kernel/external/lwip/DIVERGENCE.md` §2.10。`MRG_RXBUF` 不同：它是纯设备侧的接收
+属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它。
 
 virtio-net 收发环 32 → 256 并协商 `MRG_RXBUF`；e1000 环 64 → 256、多缓冲帧线性重组、
-82574L ITR 节流。**MRG_RXBUF 的协商、num_buffers 读取与重组分支都已落地，但当前投递
-形状下不会触发**：实测三种收包投递形状，只有「头与载荷同处一个描述符」能收到帧
-（`[hdr12B][data1536B][ctx4B]` 与 `[data1548B][ctx4B]` 都是 ping 0/4，`[data1548B]`
-ping 4/4）；单描述符缓冲没有 `NEXT`，设备无法跨缓冲拼 jumbo 帧。取舍与三组实测数据
-写在 `virtio_net.c:31-50` 的 `VIRTIO_NET_RX_DESC_MAX` 注释里。
+82574L ITR 节流。**MRG_RXBUF 的重组分支现在由真实流量跑到了**：接收缓冲改为 512 字节
+载荷的小缓冲（各占一条独立 avail 条目、非链式描述符），按 QEMU 的收包循环算术，
+一个满 MTU 帧跨 3 个缓冲、600 字节上下的帧跨 2 个。QEMU 10.0.13 下实测首个跨缓冲帧
+打出 `[VIRTIO-NET0] first frame reassembled from 2 buffers (rxbuf=524)`，同一轮里
+guest `wget` 取回 65536 字节且 `wc -c` 复核为 65536、`ping 10.0.2.2 4` 为 4/4。
+原先"重组永不触发"的原因是投递的缓冲比帧还大，
+而"拆成多个描述符就收不到"的原因是把头拆去了另一个描述符——取舍与三组实测数据写在
+`virtio_net.c` 的 `VIRTIO_NET_RX_DESC_MAX` 注释里。
+
+**这一条的门禁边界**：`make smoke-network-suite` 本身**不**覆盖跨缓冲收帧——它跑的是
+回环与 telnetd/DNS 的小帧，`ping` 回包和 TCP 握手帧都装得下一个 524 字节缓冲，
+`num_buffers` 恒为 1，所以该套件通过时日志里不会有重组行。跨缓冲路径要单独用上面那
+种"guest 向宿主 HTTP 服务器拉大文件 + ping"的实测来证明。
 `VIRTIO_NET_F_MQ` 只探测不协商（多队列未实现），启动行以 `offered(mq=.. csum=..)`
 打印，不存在"协商了却没用"的半成品。
 
-**验证边界**：82574L ITR 节流与 e1000 多缓冲重组**已被真实流量跑到**——QEMU 的
-e1000 是 82540EM，无 ITR 寄存器，驱动按设计跳过（打印 `itr=0us`），也没有能产生
-跨描述符帧的实机或配置。这两条路径只做到编译 + QEMU 启动验证（ring=256）。
+**验证边界**：QEMU 的 e1000 是 82540EM，无 ITR 寄存器，驱动按设计跳过（打印
+`itr=0us`）——这一条仍是"只做到编译 + QEMU 启动验证（ring=256）"。e1000 多缓冲重组
+**已被真实跨描述符帧跑到**：默认 RCTL 丢弃 1514 字节以上的帧（`e1000x_is_oversized()`），
+所以驱动现在置 `RCTL.LPE` 并把 `JUMBO` 定在两个缓冲（4074 字节）；帧由
+`-netdev socket,id=n0,fd=N` 从一个无需特权的数据报 socketpair 注入（slirp 无 mtu 选项、
+本机无 raw socket，都产不出 2048 字节以上的帧）。实测
+`[E1000] first frame reassembled from 2 descriptors (buf=2048)`。
+**未做到的**：这样的帧在 lwIP 里仍会被丢弃，因为链路 MTU 是 1500
+（`net_profile.h`），端到端 jumbo 需要档位表与 pbuf 一起改，属协议栈范围。
 
 ### conntrack + NAT 已落地（`f48a8f5f2` / `0d9d0885f` / `4b4472d17`）
 
