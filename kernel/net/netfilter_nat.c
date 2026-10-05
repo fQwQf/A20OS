@@ -6,7 +6,13 @@
  * function in this file requires g_lwip_lock to be held.  That is already true
  * of both hook call sites and of a20_lwip_poll_timers_locked(), which is where
  * the sweeper runs from; the /proc entry points take the lock themselves
- * because a procfs write is a syscall and never runs under it.
+ * because a procfs access is a syscall and never runs under it.  That includes
+ * this file's renderer: netfilter_format() acquires the lock before calling
+ * netfilter_nat_format(), so nothing in this file may take it again.  A second
+ * acquisition here self-deadlocks -- spin_lock_irqsave() is not recursive --
+ * and it does so quietly enough to be mistaken for contention: the report is a
+ * [LOCK-STALL] in netfilter_nat_format with owner=-1, because g_lwip_lock's
+ * owner field is only maintained when CONFIG_NET_LOCK_ASSERT=1.
  *
  * Nothing here allocates either.  The table is a static array sized by
  * NET_PROFILE_CONNTRACK_ENTRIES and the translation is an in-place rewrite of
@@ -43,6 +49,7 @@ _Static_assert((NET_CONNTRACK_MAX % NET_CONNTRACK_BUCKETS) == 0,
 
 static net_conntrack_entry_t g_ct[NET_CONNTRACK_MAX];
 static uint16_t g_ct_head[NET_CONNTRACK_BUCKETS];   /* NET_CONNTRACK_NONE = empty */
+static uint16_t g_ct_rhead[NET_CONNTRACK_BUCKETS];  /* reply-direction chain */
 static unsigned g_ct_used;
 static unsigned g_ct_sweep;                          /* sweeper resume point */
 static int g_ct_enabled = 1;
@@ -82,6 +89,8 @@ void netfilter_conntrack_init(void)
 {
     for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
         g_ct_head[b] = NET_CONNTRACK_NONE;
+    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
+        g_ct_rhead[b] = NET_CONNTRACK_NONE;
     memset(g_ct, 0, sizeof(g_ct));
     g_ct_used = 0;
     g_ct_sweep = 0;
@@ -156,6 +165,42 @@ static uint32_t netfilter_ct_hash(uint32_t src, uint32_t dst, uint16_t sport,
     return h % NET_CONNTRACK_BUCKETS;
 }
 
+/*
+ * The tuple a reply to this entry arrives with, derived from the fields above.
+ *
+ * The entry keeps the tuple as it looked on the wire *before* any translation,
+ * so a reply -- which carries the translated values -- is not the reverse of it
+ * and cannot be found by the swapped probe.  The reply's source is the
+ * forward direction's destination after translation, and its destination is the
+ * forward direction's source after translation:
+ *
+ *   DNAT            reply = (nat_dst_addr:nat_dst_port) -> (src_addr:src_port)
+ *   SNAT/MASQUERADE reply = (dst_addr:dst_port) -> (nat_src_addr:nat_src_port)
+ *   untranslated    reply = (dst_addr:dst_port) -> (src_addr:src_port)
+ *
+ * A zero translated port means the rule did not remap the port, so the original
+ * is used -- the same convention the rewrite itself follows.
+ */
+static void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e,
+                                     uint32_t *rsrc, uint32_t *rdst,
+                                     uint16_t *rsport, uint16_t *rdport)
+{
+    if (e->nat == NET_NAT_DNAT) {
+        *rsrc = e->nat_dst_addr ? e->nat_dst_addr : e->dst_addr;
+        *rsport = e->nat_dst_port ? e->nat_dst_port : e->dst_port;
+    } else {
+        *rsrc = e->dst_addr;
+        *rsport = e->dst_port;
+    }
+    if (e->nat == NET_NAT_SNAT || e->nat == NET_NAT_MASQUERADE) {
+        *rdst = e->nat_src_addr ? e->nat_src_addr : e->src_addr;
+        *rdport = e->nat_src_port ? e->nat_src_port : e->src_port;
+    } else {
+        *rdst = e->src_addr;
+        *rdport = e->src_port;
+    }
+}
+
 /* Returns the slot index, or NET_CONNTRACK_NONE.  *is_reverse distinguishes the
  * entry's own direction from the reply half. */
 static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
@@ -182,28 +227,69 @@ static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
             }
         }
     }
+
+    /* The reply-direction chain, which is the only place a translated reply can
+     * be found.  One probe: the packet's tuple *is* the reply tuple, so the
+     * swap is not tried here -- an entry whose reply tuple happens to equal the
+     * swapped packet is not a match, and treating it as one would translate a
+     * packet in the wrong direction. */
+    for (unsigned idx = g_ct_rhead[b0]; idx != NET_CONNTRACK_NONE;
+         idx = g_ct[idx].rhash_next) {
+        const net_conntrack_entry_t *e = &g_ct[idx];
+        uint32_t rsrc, rdst;
+        uint16_t rsport, rdport;
+        if (e->proto != proto)
+            continue;
+        netfilter_ct_reply_tuple(e, &rsrc, &rdst, &rsport, &rdport);
+        if (rsrc == src && rdst == dst && rsport == sport && rdport == dport) {
+            *is_reverse = 1;
+            return idx;
+        }
+    }
     return NET_CONNTRACK_NONE;
+}
+
+/* Unlink from one chain of `head`, comparing the link field named by `link`. */
+static void netfilter_ct_unlink_from(uint16_t *head, unsigned b, unsigned idx,
+                                     int reply)
+{
+    unsigned prev = NET_CONNTRACK_NONE;
+    for (unsigned i = head[b]; i != NET_CONNTRACK_NONE;) {
+        uint16_t next = reply ? g_ct[i].rhash_next : g_ct[i].hash_next;
+        if (i != idx) {
+            prev = i;
+            i = next;
+            continue;
+        }
+        if (prev == NET_CONNTRACK_NONE)
+            head[b] = next;
+        else if (reply)
+            g_ct[prev].rhash_next = next;
+        else
+            g_ct[prev].hash_next = next;
+        if (reply)
+            g_ct[i].rhash_next = NET_CONNTRACK_NONE;
+        else
+            g_ct[i].hash_next = NET_CONNTRACK_NONE;
+        return;
+    }
 }
 
 static void netfilter_ct_unlink(unsigned idx)
 {
-    unsigned b = (unsigned)netfilter_ct_hash(g_ct[idx].src_addr,
-                                             g_ct[idx].dst_addr,
-                                             g_ct[idx].src_port,
-                                             g_ct[idx].dst_port,
-                                             g_ct[idx].proto);
-    unsigned prev = NET_CONNTRACK_NONE;
-    for (unsigned i = g_ct_head[b]; i != NET_CONNTRACK_NONE;
-         prev = i, i = g_ct[i].hash_next) {
-        if (i != idx)
-            continue;
-        if (prev == NET_CONNTRACK_NONE)
-            g_ct_head[b] = g_ct[i].hash_next;
-        else
-            g_ct[prev].hash_next = g_ct[i].hash_next;
-        g_ct[i].hash_next = NET_CONNTRACK_NONE;
-        return;
-    }
+    unsigned bf = (unsigned)netfilter_ct_hash(g_ct[idx].src_addr,
+                                              g_ct[idx].dst_addr,
+                                              g_ct[idx].src_port,
+                                              g_ct[idx].dst_port,
+                                              g_ct[idx].proto);
+    netfilter_ct_unlink_from(g_ct_head, bf, idx, 0);
+
+    uint32_t rsrc, rdst;
+    uint16_t rsport, rdport;
+    netfilter_ct_reply_tuple(&g_ct[idx], &rsrc, &rdst, &rsport, &rdport);
+    unsigned br = (unsigned)netfilter_ct_hash(rsrc, rdst, rsport, rdport,
+                                              g_ct[idx].proto);
+    netfilter_ct_unlink_from(g_ct_rhead, br, idx, 1);
 }
 
 /* Least recently used: the live entry with the smallest last_ms.  Ties are
@@ -254,9 +340,16 @@ static int netfilter_ct_insert(net_conntrack_entry_t *entry)
     unsigned b = (unsigned)netfilter_ct_hash(entry->src_addr, entry->dst_addr,
                                              entry->src_port, entry->dst_port,
                                              entry->proto);
+    uint32_t rsrc, rdst;
+    uint16_t rsport, rdport;
+    netfilter_ct_reply_tuple(entry, &rsrc, &rdst, &rsport, &rdport);
+    unsigned rb = (unsigned)netfilter_ct_hash(rsrc, rdst, rsport, rdport,
+                                              entry->proto);
     g_ct[slot] = *entry;
     g_ct[slot].hash_next = g_ct_head[b];
     g_ct_head[b] = (uint16_t)slot;
+    g_ct[slot].rhash_next = g_ct_rhead[rb];
+    g_ct_rhead[rb] = (uint16_t)slot;
     if (!was_full)
         g_ct_used++;
     __atomic_fetch_add(&g_ct_lifetime.created, 1, __ATOMIC_RELAXED);
@@ -284,6 +377,8 @@ void netfilter_conntrack_flush(void)
 {
     for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
         g_ct_head[b] = NET_CONNTRACK_NONE;
+    for (unsigned b = 0; b < NET_CONNTRACK_BUCKETS; b++)
+        g_ct_rhead[b] = NET_CONNTRACK_NONE;
     memset(g_ct, 0, sizeof(g_ct));
     g_ct_used = 0;
     g_ct_sweep = 0;
@@ -553,7 +648,7 @@ int netfilter_nat_parse_rule(const char *line, size_t len, net_nat_rule_t *out)
         } else if (klen == 6 && strncmp(key, "action", 6) == 0) {
             if (vlen == 4 && strncmp(val, "snat", 4) == 0) {
                 out->nat = NET_NAT_SNAT;
-            } else if (vlen == 11 && strncmp(val, "masquerade", 11) == 0) {
+            } else if (vlen == 10 && strncmp(val, "masquerade", 10) == 0) {
                 out->nat = NET_NAT_MASQUERADE;
             } else if (vlen == 4 && strncmp(val, "dnat", 4) == 0) {
                 out->nat = NET_NAT_DNAT;
@@ -644,14 +739,24 @@ static int netfilter_nat_pick(const netfilter_frame_t *pkt,
     return found >= 0;
 }
 
-/* Incremental ones-complement update, RFC 1624.  The existing checksum is
- * folded in and only the delta applied, so the field is never re-summed. */
+/*
+ * Incremental ones-complement update, RFC 1624 equation 3:
+ *
+ *     HC' = ~(~HC + ~m + m')
+ *
+ * The sign of each word matters and getting it backwards is silent: the result
+ * is a plausible-looking checksum that is wrong by twice the change, which is
+ * what this function did before it was measured against a full re-sum.  A TCP
+ * port that goes 18081 -> 18082 has to come out 0x93bf -> 0x93be, and the
+ * inverted form produced 0x93c0.  lwIP dropped every such segment, so the
+ * symptom was "the rule matches and the connection never happens".
+ */
 static uint16_t netfilter_csum_delta(uint16_t old_csum, uint32_t old_word,
                                      uint32_t new_word)
 {
     uint32_t sum = (uint32_t)(~old_csum & 0xffffu);
-    sum += (old_word & 0xffffu) + (old_word >> 16);
-    sum += (~new_word & 0xffffu) + ((~new_word >> 16) & 0xffffu);
+    sum += (~old_word & 0xffffu) + ((~old_word >> 16) & 0xffffu);
+    sum += (new_word & 0xffffu) + (new_word >> 16);
     while (sum >> 16)
         sum = (sum & 0xffffu) + (sum >> 16);
     return (uint16_t)(~sum & 0xffffu);
@@ -670,10 +775,20 @@ static void netfilter_put16(uint8_t *p, uint16_t v)
 
 /*
  * Offset of the L4 checksum field within the frame, or 0 if it cannot be
- * located inside `len`.  TCP's sits behind the options, whose length is the
- * data-offset field, so it has to be found rather than assumed -- and a header
- * that claims more options than the frame holds is a header that must not be
- * used to compute an offset.
+ * located inside `len`.
+ *
+ * UDP's is at a fixed offset 6.  TCP's is at a fixed offset 16 -- *before* the
+ * options, not after them.  An earlier version of this function added the
+ * option length from the data-offset field, on the theory that the checksum
+ * "sits behind the options"; that theory is simply wrong, and the cost of
+ * holding it was that every translated SYN had a correct-looking checksum
+ * written over its MSS option while the real checksum field kept the value
+ * computed for the pre-NAT port.  lwIP dropped every such segment as corrupt,
+ * which is what made the first end-to-end DNAT run fail.
+ *
+ * The data-offset field is still validated, for the reason that matters: a
+ * header claiming options the frame does not contain is a header that must not
+ * be checksummed at all.
  */
 static uint16_t netfilter_l4_ckoff(const uint8_t *frame, size_t len,
                                    const netfilter_frame_t *pkt)
@@ -681,13 +796,16 @@ static uint16_t netfilter_l4_ckoff(const uint8_t *frame, size_t len,
     if (pkt->proto == NETFILTER_PROTO_UDP)
         return (len >= (size_t)pkt->l4_off + 8) ? (uint16_t)(pkt->l4_off + 6)
                                                 : 0;
-    if (len < (size_t)pkt->l4_off + 20)
+    if (pkt->proto != NETFILTER_PROTO_TCP)
+        return 0;
+    if (len < (size_t)pkt->l4_off + 18)
         return 0;
     uint16_t doff_words = (uint16_t)((frame[pkt->l4_off + 12] >> 4) & 0xf);
     if (doff_words < 5)
         return 0;                       /* shorter than a TCP header */
-    size_t off = (size_t)pkt->l4_off + 16 + (size_t)(doff_words - 5) * 4;
-    return off + 2 <= len ? (uint16_t)off : 0;
+    if (len < (size_t)pkt->l4_off + (size_t)doff_words * 4)
+        return 0;                       /* options claim more than the frame has */
+    return (uint16_t)(pkt->l4_off + 16);
 }
 
 /*
@@ -846,20 +964,44 @@ void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
             e->state = NET_CONNTRACK_ESTABLISHED;
 
         /*
-         * The reply half rewrites itself from the entry, not from the rules.
-         * That is the whole reason the translation is recorded: a NAT rule may
-         * have been deleted, reordered or replaced since the flow was first
-         * seen, and re-evaluating it would either break the reply or silently
-         * move a live binding.
+         * Every later packet of the flow is translated from the entry, not from
+         * the rules.  That is the whole reason the translation is recorded: a
+         * NAT rule may have been deleted, reordered or replaced since the flow
+         * was first seen, and re-evaluating it would either break the reply or
+         * silently move a live binding.
+         *
+         * "Later packet" includes the *same direction* as the first one, which
+         * is not a hypothetical: a TCP SYN that is retransmitted arrives as a
+         * conntrack hit travelling the forward way, and translating only the
+         * reverse way leaves that retransmission addressed to the port nothing
+         * is listening on.  lwIP answers it with a RST, and the peer's
+         * connection dies to a packet the peer never got wrong.  That is
+         * exactly what the first end-to-end DNAT run did: the first SYN was
+         * translated, the second arrived untranslated and drew the RST.
+         *
+         * The four rewrites are the inverse of each other, so both directions
+         * come out of the same pair of fields: the entry keeps the tuple as it
+         * appeared before any translation (e->src_addr and friends) plus the
+         * translated values it applied (e->nat_src_addr and friends).
          */
         if (e->nat == NET_NAT_SNAT || e->nat == NET_NAT_MASQUERADE) {
-            if (dir == NETFILTER_DIR_IN) {
+            if (is_reverse) {
+                /* Reply arriving: its destination is the translated source, and
+                 * the original source is where that destination has to go. */
+                netfilter_set_addr(frame, len, pkt, pkt->src_addr, e->src_addr);
+                netfilter_set_port(frame, len, pkt, 0, e->src_port);
+            } else {
                 netfilter_set_addr(frame, len, pkt, e->nat_src_addr,
                                    pkt->dst_addr);
                 netfilter_set_port(frame, len, pkt, 1, e->nat_src_port);
             }
         } else if (e->nat == NET_NAT_DNAT) {
-            if (dir == NETFILTER_DIR_OUT) {
+            if (is_reverse) {
+                /* Reply leaving: its source is the translated destination, and
+                 * the original destination is where that source has to go. */
+                netfilter_set_addr(frame, len, pkt, e->dst_addr, pkt->dst_addr);
+                netfilter_set_port(frame, len, pkt, 1, e->dst_port);
+            } else {
                 netfilter_set_addr(frame, len, pkt, pkt->src_addr,
                                    e->nat_dst_addr);
                 netfilter_set_port(frame, len, pkt, 0, e->nat_dst_port);

@@ -528,6 +528,10 @@ comma := ,
 NET_HOSTFWD ?=
 NETDEV_USER = -netdev user,id=net$(if $(strip $(NET_HOSTFWD)),$(comma)$(NET_HOSTFWD),)
 SMOKE_TIMEOUT ?= 20s
+# The DNAT gate boots a guest, waits for it to install a NAT rule, and then
+# needs the host-side probe's own retry window on top, so it needs more than
+# the single-shot serial gates use.
+SMOKE_TIMEOUT_NAT ?= 90s
 # TCG boot can take longer than two seconds after a full image rebuild.  Wait
 # until the interactive mksh has had time to print its prompt before injecting
 # smoke commands; PASS markers and clean poweroff still decide the result.

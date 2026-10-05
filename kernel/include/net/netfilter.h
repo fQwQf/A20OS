@@ -12,8 +12,10 @@
  *      aggregate counters.
  *   2. conntrack: a fixed-size 5-tuple table with TCP/UDP flow state
  *      (NEW/ESTABLISHED), idle-timeout reclamation, LRU eviction at capacity,
- *      and counters.  Always on; an untracked packet still gets its filter
- *      verdict, it just has no state.
+ *      and counters.  On by default and switchable at runtime with
+ *      "cton"/"ctoff"; switching it off stops *new* entries and keeps existing
+ *      ones, so a live NAT binding is never broken by turning tracking off.  An
+ *      untracked packet still gets its filter verdict, it just has no state.
  *   3. NAT: SNAT/MASQUERADE on the output hook and DNAT on the input hook,
  *      with the translated tuple remembered in the conntrack entry so the
  *      reply direction is rewritten back.
@@ -33,11 +35,20 @@
  * (docs/net/net-lanes.md), become the new serialisation point in its place --
  * the exact outcome the lane work exists to avoid.  So every mutation happens
  * from a context that already holds g_lwip_lock: the two hooks, and the sweep
- * called from a20_lwip_poll_timers_locked().  The only mutator that does not is
- * the /proc flush, and it takes g_lwip_lock itself (a20_lwip_lock), which is
- * safe because a procfs write is a syscall and never runs under it.  Readers
- * from /proc take the same lock rather than a seqlock, because the table is
- * mutated in place with no copy-out step to bracket.
+ * called from a20_lwip_poll_timers_locked().  The /proc entry points are the
+ * exception and take g_lwip_lock themselves (a20_lwip_lock): the flush verb
+ * because it mutates, and netfilter_format() before it calls
+ * netfilter_nat_format(), because the renderer walks both tables while the
+ * packet path rewrites them in place.  That is safe because a procfs access is
+ * a syscall and never runs under g_lwip_lock; a20_lwip_format_memp() takes the
+ * same lock for the same reason one case over in procfs_render.c.
+ *
+ * The renderer takes the lock rather than a seqlock, which is what the filter
+ * rule table uses.  A seqlock suits a table whose only mutations are
+ * configuration changes; this one is mutated by every packet (each entry's
+ * counters), so a seqlock would put a write section on the packet path and make
+ * concurrent /proc readers into writer-starvation candidates on a path that
+ * must not block.
  *
  * The frame buffer is what makes NAT possible here at all: the hooks sit
  * below lwIP, on the raw Ethernet frame, so a translation is an in-place
@@ -50,15 +61,17 @@
  *   - No ALG.  There is no FTP/SIP/ISAKMP payload inspection, so a protocol
  *     that carries its addresses in the body is translated only in the
  *     headers and its control channel will not follow.
-*   - No ICMP tracking.  Only TCP and UDP create conntrack entries.  An ICMP
-*     error is therefore not matched against a flow, and an ICMP error
-*     quoting an untracked flow does not create one.  Path MTU discovery, which
-*     depends on ICMP error tracking, does not work through this.
-*   - Flow state is inferred from the tuple and the TCP flags byte only.  A flow
-*     is ESTABLISHED once a reply is seen, or once a forward packet carries ACK
-*     without SYN.  There is no sequence-number window check, no RST/FIN teardown
-*     (a closed flow lingers until its idle timeout), and no half-open limit
-*     separate from the table size.
+ *   - No ICMP tracking.  Only TCP and UDP create conntrack entries; anything
+ *     else, ICMP included, is passed through untracked and untranslated
+ *     (netfilter_nat.c, the proto test at the top of the per-packet path).  An
+ *     ICMP error is therefore neither matched against a flow nor able to
+ *     create one, so path MTU discovery, which depends on ICMP error tracking,
+ *     does not work through this.
+ *   - Flow state is inferred from the tuple and the TCP flags byte only.  A flow
+ *     is ESTABLISHED once a reply is seen, or once a forward packet carries ACK
+ *     without SYN.  There is no sequence-number window check, no RST/FIN teardown
+ *     (a closed flow lingers until its idle timeout), and no half-open limit
+ *     separate from the table size.
  *   - No helper modules, no fullcone/port-preserving variants beyond what is
  *     listed below, and no NAT of IPv6 (the hook parses IPv4 only).
  *   - Translation applies to unfragmented packets and to first fragments.
@@ -206,16 +219,24 @@ typedef enum {
  * tracked but not translated -- that is the common case for a host that only
  * wants stateful accounting.
  *
- * The trailing link field is a table internal, visible only because the table
+ * The trailing link fields are table internals, visible only because the table
  * is a static array of this type and /proc hands the same struct to its
- * reader.  NET_CONNTRACK_NONE is the "no entry" sentinel in the chain and in
+ * reader.  NET_CONNTRACK_NONE is the "no entry" sentinel in the chains and in
  * every accessor that returns an index.
+ *
+ * Two chains, not one, and the second is not redundancy: src_addr/dst_addr are
+ * the tuple *before* NAT, while a reply arrives carrying the tuple *after* it.
+ * Under no translation the reply is the reverse of the stored tuple and one
+ * bucket plus a swapped probe finds it; under translation it is not, so the
+ * entry is also linked into the bucket of its reply tuple.  See
+ * netfilter_ct_reply_tuple() for the derivation.  Getting this wrong is silent:
+ * the reply misses, the peer sees an untranslated source port, and the flow
+ * never gets past the handshake while every counter still looks healthy.
  *
  * There is no LRU list: `last_ms` is the LRU key, and eviction at capacity is
  * a linear scan for its minimum.  That is deliberately the dumb version --
  * it costs one extra pass over the table only when a *new* flow arrives while
- * the table is already full, and in exchange there is no second set of links
- * that every insert and every eviction has to keep consistent.
+ * the table is already full.
  */
 typedef struct {
     uint32_t src_addr;      /* host order */
@@ -234,6 +255,7 @@ typedef struct {
     uint64_t packets;
     uint64_t bytes;
     uint16_t hash_next;     /* index of the next entry in this bucket */
+    uint16_t rhash_next;    /* ... and in the reply-direction bucket */
 } net_conntrack_entry_t;
 
 #define NET_CONNTRACK_NONE 0xFFFFu
