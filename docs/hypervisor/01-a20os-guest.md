@@ -431,9 +431,9 @@ v2 的 guest 会打出整个内核启动日志，而宿主自己的日志与之�
 
 | # | 断言 | 它排除什么 | 实现状态 |
 | --- | --- | --- | --- |
-| 1 | `hyp_vm_marker_seen(vm) == 1` | guest 走完了从入口到打印 banner 的整条路——包括委托的异常处理、按需 RAM 窗口和 16550 的 THR 路径 | **已实现**（`hyp_boot.c:626`） |
-| 2 | `hyp_vm_console_bytes(vm) > <marker 长度>` | marker 不是"只匹配到开头就停"的退化命中 | **已实现**（`hyp_boot.c:629`） |
-| 3 | `hyp_vcpu_run()` 返回 0 且 `vcpu->exit == HYP_EXIT_SHUTDOWN` | guest 是自己关机，不是撞死 | **未实现**，且**这条判据本身与 PASS 的定义冲突**：本门禁的 PASS 是"guest 打到了自己的 banner"，不是"guest 正常关机"。guest 无块设备，在 `init_kthread` 里找不到 init 就 panic 退出（见 §8.3），那是**预期到达**而不是缺陷。当前代码只检查 `exit_reason >= 0`（`hyp_boot.c:606`），退出原因只打出来给人看（`:613-616`），不参与判定 |
+| 1 | `hyp_vm_marker_seen(vm) == 1` | guest 走完了从入口到打印 banner 的整条路——包括委托的异常处理、按需 RAM 窗口和 16550 的 THR 路径 | **已实现**（`hyp_boot.c:218-219`） |
+| 2 | `hyp_vm_console_bytes(vm) > <marker 长度>` | marker 不是"只匹配到开头就停"的退化命中 | **已实现**（`hyp_boot.c:221-223`） |
+| 3 | `hyp_vcpu_run()` 返回 0 且 `vcpu->exit == HYP_EXIT_SHUTDOWN` | guest 是自己关机，不是撞死 | **未实现**，且**这条判据本身与 PASS 的定义冲突**：本门禁的 PASS 是"guest 打到了自己的 banner"，不是"guest 正常关机"。guest 无块设备，在 `init_kthread` 里找不到 init 就 panic 退出（见 §8.3），那是**预期到达**而不是缺陷。当前代码只检查 `exit_reason >= 0`（`hyp_boot.c:201`），退出原因只打出来给人看（`:205-212`），不参与判定 |
 | 4 | `mm_s2_audit(vm)` 返回 0 | 出借的帧与 stage-2 表在 guest 死后仍然对得上 | **未实现**：内核侧有 `hyp_s2_audit()`/`mm_s2_audit()`（`kernel/hyp/hyp.c:275`），但没有任何 syscall 能从用户态取到它的结果 |
 
 第 1 条已经包含了"这份输出来自 guest 通道"这层意思——marker 只在 guest UART
@@ -463,11 +463,35 @@ verdict 行在宿主活着的时候才写得出来。这条 gate 的 timeout 是
 60 s：每个 guest console 字节、每次页表走查、每次二级缺页都要陷回宿主，
 guest 引导比宿主自举慢好几个数量级。
 
+**guest 在 banner 之后 fault 退出同样是预期到达**，不是失败。实测（`.kernel-build/
+smoke/hyp-a20os-riscv64.log` 第 261-263 行）是一次 `exit=2(fault)` 与
+`HYP_A20OS: PASS` **同时出现**的运行：guest 在 `trap_init()` 写 PLIC
+（gpa `0xC000028`）时撞上"访存指令解不出来"——那条是 16 位压缩 store，而当前
+解码器只认 32 位编码。`exit=2` 说的是 guest 停在哪儿，PASS 说的是它有没有到达，
+两件事。**判据只看 marker，不看退出原因。**
+
+> **命令行入口的行前缀是 `HYPVM:`，不是 `HYP_A20OS:`。** 本节与
+> `tools/smoke_cases.py` 记的是硬编码装载器 `user/cmds/core/hyp_boot.c` 的
+> `HYP_A20OS:` 前缀。带参数的 CLI 工具 `hypvm` 另起一套 `HYPVM:` 前缀的行，
+> 其参数、DTB 放置规则、输出逐行含义、限制与排查表见
+> [03-usage.md](03-usage.md)。门禁 `smoke-hyp-a20os` 断言的仍是装载器那条
+> `HYP_A20OS: PASS`；`hypvm` 的判据行是 `HYPVM: PASS`。集成时若两者行文另有
+> 出入，以实现为准并回来改这两篇。
+
 ### 8.4 一条纪律
 
 `-cpu rv64,h=true` 依然是承重件（与 v1 相同，见
 [00-design.md §5.2](00-design.md)）。默认 rv64 CPU 不暴露 H，`hyp_supported()`
 会让所有调用返回 NOT_SUPPORTED，于是 gate 变成"过了但什么都没测"。
+
+> **本条在 QEMU 10.0.13 上没能复现，已实跑核对。** `user/cmds/core/hypvm.c` 的
+> 使用文档那一片跑了四组 `-cpu`（`h=true` / `rv64` / 完全不写 / `h=false`）：
+> **QEMU 10.0.13 的默认 `rv64` 已经带 H**，去掉 `-cpu` 门禁照样过；而
+> `-cpu rv64,h=false` **不是**得到 `NOT_SUPPORTED`，是宿主在 `hyp_arch_vcpu_exit`
+> 里 KERNEL PANIC——`hyp_probe()` 只读一次 `hstatus` 看会不会陷，而 QEMU 在
+> `h=false` 下这个 CSR 照样可读。逐条数据与命令见
+> [03-usage.md §1.1](03-usage.md)。**建议保留该参数**（它把意图写进命令行，
+> 换一台默认不带 H 的 QEMU 时不会静默退化），但别把"去掉它门禁会红"当事实。
 
 ---
 
@@ -524,3 +548,66 @@ VMO 级。
    本文关于 v2 行为的一切描述都是"契约 + 代码 + 规格"三者的推演，不是运行
    结论。QEMU 的 TCG 对 `hgatp`、VS CSR 影子、`htimedelta`、`hideleg` 翻译的
    贴合度需要实跑确认。真机更没有——见 [02-roadmap.md](02-roadmap.md)。
+9. **一次宿主会话里只能引导一台 guest。** 实测：同一 shell 里连续两次运行
+   `/hypvm`，第一次正常 PASS，第二次——**参数与第一次完全相同**——打完
+   `HYPVM: running` 之后一个 guest 控制台字节都没有，`hyp_vcpu_run()` 一直不
+   返回，QEMU 100% CPU，宿主连一条 `[ERR] hyp:` 都没打（说明 guest 在跑、且没有
+   陷入）。单独跑 `hypvm -m 96`、单独跑自定义 `-b` 都正常，所以与参数无关，是第
+   一次 guest 以 `HYP_EXIT_FAULT` 退出之后留下的状态。根因未查（怀疑与第 2 条
+   "不路由中断"下 guest 等待一个永远不会到来的中断有关），修它属于
+   [02-roadmap.md](02-roadmap.md) §2 的范围。**后果**：`smoke-hyp-vm` 与
+   `smoke-hyp-vm-96` 因此是两个门禁、两次 QEMU 启动，而不是一个门禁里的两行
+   命令。
+---
+
+## 11. 用户入口：hypvm
+
+`/hyp_boot`（`user/cmds/core/hyp_boot.c`）是这套引导的**门禁**：所有参数编译期
+写死，因为 `smoke-hyp-a20os` 按它打印的字面行判定（§8.3）。它不适合当工具——
+想在 shell 里换一台 guest 的内存大小都做不到。
+
+`/hypvm`（`user/cmds/core/hypvm.c`）是同一套引导的**用户入口**：ELF 路径、
+RAM 窗口、guest 的 `bootargs`、marker、入口 GPA 全部来自 argv，默认值逐个等于
+`hyp_boot` 的编译期常量，所以裸跑 `hypvm` 和 `hyp_boot` 引导的是同一台机器。
+两者共用的机械部分（ELF 装载、最小 FDT、八个系统调用的包装）提炼在
+`user/cmds/core/hyp/hyp_guest.c`；它只返回结果、不打印，所以两个程序各自的措辞
+互不牵连。
+
+**怎么用（命令行、输出行逐行含义、排查）见
+[03-usage.md](03-usage.md)。** 本节只留三件属于设计记录的事。
+
+### 11.1 FDT 放在窗口顶部，而不是固定地址
+
+`hyp_boot` 把 DTB 写死在 `0x87f00000`，那个数只对 128 MiB 的窗口成立：窗口一小，
+它就落进 guest 镜像里，而 `entry.S` 在读 `a1` 之前用自己的 `la` 指令清 bss，会把
+它擦掉（§7.2、§7.4 的两条约束同时发作）。`hypvm` 因此从窗口顶端往下留 1 MiB 放
+FDT（`hypvm.c:300`），并在它与镜像重叠时报错而不是硬塞。默认值下算出来的地址恰好
+还是 `0x87f00000`，所以"参数化的工具"和"写死的门禁"在默认配置下引导的是同一台
+机器——这正是 `smoke-hyp-vm` 要断言的东西。
+
+`-g` 还多两条约束，因为 §7.4 那条硬约束对用户是可见的：基址必须页对齐
+（`hyp_vm_load()` 整页取），且整个窗口必须落在 `entry.S` 铺的 16 GiB identity 映射
+里，否则 `__boot_dtb_ptr` 在 guest 装上 `satp` 之后就不是可解引用的指针。
+
+### 11.2 判据不变，措辞可变
+
+`hypvm` 的 PASS 判据与 `hyp_boot` 同款且只有两条：marker 命中（设备模型只在
+**guest** 控制台字节上匹配，所以宿主自己那行同名 banner 顶不上，见 §8.2），以及
+`console_bytes` 大于 marker 长度（排除"只打到开头"的退化命中）。`exit=2(fault)`
+与 PASS 同时出现是预期的：guest 没有块设备、挂不上 rootfs，和 §8.3 是同一条边界。
+`hyp_boot` 的三行字面输出被 `smoke-hyp-a20os` 按字面匹配，所以它一个字都没改；
+`hypvm` 的 PASS 行带上窗口大小，正是为了让门禁能分辨两次不同参数的运行。
+
+### 11.3 门禁是两个，不是一个
+
+`smoke-hyp-vm` 跑一次裸 `hypvm`（默认参数），`smoke-hyp-vm-96` 跑
+`hypvm -m 96 -b ...`；两条期望行都锚在各自报告的窗口大小上，否则一条
+`HYPVM: PASS` 的 grep 会被任何一次运行满足，等于没测出参数有没有生效。第二个门禁
+为什么必要，就是 §11.1：窗口不是 128 MiB 时固定 DTB 地址必错。
+
+**是两次 QEMU 启动，不是一个门禁里的两行命令**：§10 第 9 条，同一会话里第二次
+guest 引导不回来。把两行塞进一个门禁只会得到一个必红的门禁。
+
+`-cpu rv64,h=true` 依然是承重件（§8.4）。没有 H 时内核对每个调用回 `ENOTSUP`，
+`hypvm` 把它单独报成 `HYPVM: FAIL vm_create ...` 并以退出码 4 结束，而不是伪装成
+一次引导尝试。
