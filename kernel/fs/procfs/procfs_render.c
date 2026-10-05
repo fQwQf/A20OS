@@ -1072,6 +1072,44 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_PID_ENVIRON:
         buf[0] = '\0';
         return 0;
+    case PF_PID_AUXV: {
+        /* Linux format: one {type,value} pair per line, both as %08lx.  A
+         * reader parses the file by shape, so the width is part of the
+         * interface rather than cosmetics. */
+        task_t *t = proc_find_get(pid);
+        if (!t)
+            break;
+        mm_struct_t *mm = t->mm;
+        if (mm) {
+            uint64_t flags = spin_lock_irqsave(&mm->lock);
+            uint32_t n = mm->auxv_n;
+            if (n > A20_AUXV_MAX_PAIRS)
+                n = A20_AUXV_MAX_PAIRS;
+            size_t len = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                /* Leave room for the last line's NUL: the buffer is the
+                 * contract, and a line written without it would hand back an
+                 * unterminated record. */
+                int w = snprintf(buf + len, (len < bufsz) ? bufsz - len : 0,
+                                 "%08lx %08lx\n",
+                                 (unsigned long)mm->auxv[i][0],
+                                 (unsigned long)mm->auxv[i][1]);
+                if (w < 0)
+                    break;
+                len += (size_t)w;
+                if (len >= bufsz) {      /* truncated: stop cleanly */
+                    len = bufsz - 1;
+                    break;
+                }
+            }
+            spin_unlock_irqrestore(&mm->lock, flags);
+            proc_put(t);
+            buf[len] = '\0';
+            return (int)len;
+        }
+        proc_put(t);
+        break;
+    }
     case PF_PID_IO: {
         task_t *t = proc_find_get(pid);
         unsigned long rchar = 0, wchar = 0, syscr = 0, syscw = 0;
