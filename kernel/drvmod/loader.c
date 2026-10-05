@@ -35,6 +35,22 @@
 
 #define DRV_MOD_MAX_MODULES  32
 
+/*
+ * The drvmod arena is an aarch64-only NOMMU feature.
+ *
+ * AArch64 makes a stage-1 block that grants EL0 write execute-never for every
+ * higher exception level, and QEMU enforces that unconditionally for AA64, so
+ * a NOMMU aarch64 boot has to keep privileged code out of the EL0-writable
+ * remainder of DRAM -- and drvmod images are the only privileged code the
+ * frame pool holds.  arch/aarch64/boot/ldscript.ld reserves the arena and
+ * entry.S maps it AP=00; every other NOMMU architecture either leaves the MMU
+ * off entirely (riscv64, which writes satp only outside CONFIG_NOMMU) and so
+ * has no such rule.  Hence AARCH64 here, not CONFIG_NOMMU alone.
+ */
+#if defined(CONFIG_NOMMU) && defined(CONFIG_AARCH64)
+#define DRVMOD_HAS_ARENA 1
+#endif
+
 #define ELFCLASS64 2
 #define ELFDATA2LSB 1
 #define EM_RISCV    243
@@ -226,7 +242,7 @@ static void drvmod_free_pages(pfn_t pfn, uint32_t order)
         pfa_free(pfn, (int)order);
 }
 
-#ifdef CONFIG_NOMMU
+#ifdef DRVMOD_HAS_ARENA
 /*
  * drvmod image arena (aarch64 NOMMU only).
  *
@@ -340,7 +356,7 @@ static void drvmod_arena_free(void *addr, uint32_t order)
         drvmod_arena_used[i + j] = 0;
     spin_unlock(&drvmod_arena_lock);
 }
-#endif /* CONFIG_NOMMU */
+#endif /* DRVMOD_HAS_ARENA */
 
 /* Resolve a relocation symbol to its final address.  Returns 0 on success;
  * on failure *err is set and the result must not be used. */
@@ -1480,7 +1496,7 @@ int drvmod_load(int fd, const char *name)
      * PC-relative displacements are relative to the runtime PC. */
     pfn_t alloc_pfn = PFN_NONE;
     uintptr_t load_base;
-#ifdef CONFIG_NOMMU
+#ifdef DRVMOD_HAS_ARENA
     /* The pool is AP=01 under NOMMU, which AArch64 makes execute-never for
      * EL1, so a module fetched from it takes an instruction abort.  Serve the
      * image from the privileged arena instead. */
@@ -1622,7 +1638,7 @@ int drvmod_load(int fd, const char *name)
      * Under NOMMU the arena block is already AP=00 -- privileged and
      * executable from the boot map -- so there is nothing to change and no
      * pfn to translate. */
-#ifndef CONFIG_NOMMU
+#ifndef DRVMOD_HAS_ARENA
     if (arch_kwx_module_protect(pfn_to_phys(alloc_pfn), text_region_size,
                                 total_size) < 0) {
         kerr("[DRVMOD] %s: cannot mark module text executable\n", name);
@@ -1659,7 +1675,7 @@ int drvmod_unload(int id)
     /* Restore the module pages to the plain RW+NX direct-map state before
      * returning them to the allocator, so the next owner never inherits an
      * executable (or read-only) mapping. */
-#ifdef CONFIG_NOMMU
+#ifdef DRVMOD_HAS_ARENA
     /* Arena space goes back to the arena, not to the frame pool it was
      * deliberately kept out of. */
     drvmod_arena_free((void *)m->base, m->alloc_order);

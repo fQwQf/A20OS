@@ -41,7 +41,7 @@ static inline size_t pt_level_size(int level) {
 
 void mm_init(void) {
     printf("[MM] mm_init begin\n");
-#ifdef CONFIG_NOMMU
+#if defined(CONFIG_NOMMU) && defined(CONFIG_AARCH64)
     /*
      * Reserve past the drvmod arena, not just past the kernel image.  Under
      * NOMMU the boot map marks everything below __drvmod_arena_end AP=00
