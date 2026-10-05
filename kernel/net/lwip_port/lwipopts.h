@@ -201,12 +201,26 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
 #define TCP_DEBUG_PCB_LISTS 1
 #endif
 
+/*
+ * Turn the documented core-lock discipline into something the CPU enforces.
+ *
+ * lwIP ships LWIP_ASSERT_CORE_LOCKED() as an empty macro
+ * (src/include/lwip/opt.h:227) unless the port defines it, which is why the
+ * lock contract used to be prose only: the ~50 sites in tcp.c/tcp_in.c/
+ * raw.c/udp.c all expanded to nothing, so a path that touched PCB lists
+ * without g_lwip_lock corrupted them silently.  docs/net/net-lanes.md
+ * ("为什么没有任何断言拦住它") records the concrete damage that let through.
+ *
+ * The owner is recorded as a CPU id rather than a boolean because a boolean
+ * answers "is this flag set", which is true on every CPU while *another* CPU
+ * holds the lock -- exactly the case the assertion exists to catch.  The
+ * __builtin is evaluated at the macro's expansion point, so `site` is the
+ * return address inside the lwIP function that ran unlocked.
+ */
 #if CONFIG_NET_LOCK_ASSERT
-int  a20_lwip_lock_is_held(void);
-void a20_lwip_note_lock_violation(void *site);
+void a20_lwip_assert_core_locked(void *site);
 #define LWIP_ASSERT_CORE_LOCKED() \
-    do { if (!a20_lwip_lock_is_held()) \
-             a20_lwip_note_lock_violation(__builtin_return_address(0)); } while (0)
+    do { a20_lwip_assert_core_locked(__builtin_return_address(0)); } while (0)
 #else
 #define LWIP_ASSERT_CORE_LOCKED()
 #endif

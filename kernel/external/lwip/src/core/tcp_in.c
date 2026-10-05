@@ -2086,6 +2086,8 @@ tcp_parseopt(struct tcp_pcb *pcb)
 void
 tcp_trigger_input_pcb_close(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
+
   recv_flags |= TF_CLOSED;
 }
 
