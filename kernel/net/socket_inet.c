@@ -11,6 +11,10 @@
 #include "lwip/udp.h"
 #include "lwip/raw.h"
 #include "lwip/tcp.h"
+#if LWIP_TCP_CUBIC
+/* TCP_CONG_* values for the per-socket congestion control selection. */
+#include "lwip/priv/tcp_cubic_priv.h"
+#endif
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/prot/icmp.h"
@@ -55,8 +59,27 @@ uint16_t net_alloc_ephemeral_port_locked(void)
     return net_htons(p);
 }
 
+/*
+ * Implicit bind of an unbound inet socket to the loopback address of its own
+ * family.  An AF_INET6 socket used to get a 16-byte sockaddr_in with
+ * sin_family = AF_INET6 and the v4 loopback in sin_addr, which is not a valid
+ * sockaddr_in6 -- the 16 bytes then read back as sin6_flowinfo/sin6_scope_id.
+ * getpeername()/getsockname() and the netlink diag path both read that struct
+ * back, so a v6 socket's implicit bind reported a nonsense scope id.
+ */
 void net_sockaddr_loopback(net_socket_t *s, uint16_t port)
 {
+    if (s->domain == AF_INET6) {
+        net_sockaddr_in6_t in6;
+        memset(&in6, 0, sizeof(in6));
+        in6.sin6_family = AF_INET6;
+        in6.sin6_port = port;
+        in6.sin6_addr[15] = 1;      /* ::1 */
+        memcpy(s->local, &in6, sizeof(in6));
+        s->local_len = sizeof(in6);
+        s->bound = 1;
+        return;
+    }
     net_sockaddr_in_t in;
     memset(&in, 0, sizeof(in));
     in.sin_family = (uint16_t)s->domain;
@@ -263,18 +286,45 @@ static net_socket_t *net_find_udp_dst(net_socket_t *src,
     return a.best ? a.best : a.first;
 }
 
+/*
+ * Both families, because lwIP's tcp_bind()/tcp_connect()/udp_bind() take an
+ * ip_addr_t that carries its own type and there is nothing downstream that
+ * needs an IPv4-only view.  This used to refuse AF_INET6 outright, which is
+ * what left net_inet_bind_pcb() and the whole stream connect path unreachable
+ * for v6 -- a v6 socket could be bound in the socket layer and then had no pcb
+ * behind it at all.
+ *
+ * AF_UNIX / AF_PACKET / AF_NETLINK still return -EOPNOTSUPP: they have no IP
+ * representation, and mapping them onto the wildcard would silently bind a
+ * socket to every address.
+ */
 int net_sockaddr_to_lwip_ip(const void *addr, size_t len,
                             ip_addr_t *ip, uint16_t *port)
 {
     if (!addr || !ip || len < sizeof(net_sockaddr_in_t))
         return -EINVAL;
     const net_sockaddr_in_t *in = (const net_sockaddr_in_t *)addr;
-    if (in->sin_family != AF_INET)
-        return -EOPNOTSUPP;
-    ip_addr_set_ip4_u32(ip, in->sin_addr);
-    if (port)
-        *port = net_ntohs(in->sin_port);
-    return 0;
+    if (in->sin_family == AF_INET) {
+        ip_addr_set_ip4_u32(ip, in->sin_addr);
+        if (port)
+            *port = net_ntohs(in->sin_port);
+        return 0;
+    }
+#if LWIP_IPV6
+    if (in->sin_family == AF_INET6) {
+        if (len < sizeof(net_sockaddr_in6_t))
+            return -EINVAL;
+        const net_sockaddr_in6_t *in6 = (const net_sockaddr_in6_t *)addr;
+        ip6_addr_t a6;
+        memcpy(a6.addr, in6->sin6_addr, sizeof(a6.addr));
+        a6.zone = 0;
+        ip_addr_copy_from_ip6(*ip, a6);
+        if (port)
+            *port = net_ntohs(in6->sin6_port);
+        return 0;
+    }
+#endif
+    return -EOPNOTSUPP;
 }
 
 /*
@@ -311,19 +361,43 @@ unsigned net_socket_lane_of_addr(const void *addr, size_t len,
 }
 
 
+/*
+ * Inverse of net_sockaddr_to_lwip_ip().  Dual-stack for the same reason: the
+ * accept stage fills the child's peer address from the accepted pcb's remote
+ * IP, and a v6 listener's accepted connection has an ip6_addr_t there.  With
+ * the v4-only version that call returned -EINVAL and left peer_len at whatever
+ * the previous stage left, so accept() on a v6 socket reported a v4-shaped
+ * (or empty) peer.
+ */
 int net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                             uint8_t out[NET_SOCKADDR_MAX], size_t *outlen)
 {
-    if (!out || !outlen || !IP_IS_V4(ip))
+    if (!out || !outlen || !ip)
         return -EINVAL;
-    net_sockaddr_in_t in;
-    memset(&in, 0, sizeof(in));
-    in.sin_family = AF_INET;
-    in.sin_port = net_htons(port);
-    in.sin_addr = ip_2_ip4(ip)->addr;
-    memcpy(out, &in, sizeof(in));
-    *outlen = sizeof(in);
-    return 0;
+    if (IP_IS_V4(ip)) {
+        net_sockaddr_in_t in;
+        memset(&in, 0, sizeof(in));
+        in.sin_family = AF_INET;
+        in.sin_port = net_htons(port);
+        in.sin_addr = ip_2_ip4(ip)->addr;
+        memcpy(out, &in, sizeof(in));
+        *outlen = sizeof(in);
+        return 0;
+    }
+#if LWIP_IPV6
+    if (IP_IS_V6(ip)) {
+        net_sockaddr_in6_t in6;
+        memset(&in6, 0, sizeof(in6));
+        in6.sin6_family = AF_INET6;
+        in6.sin6_port = net_htons(port);
+        memcpy(in6.sin6_addr, ip_2_ip6(ip)->addr,
+               sizeof(in6.sin6_addr));
+        memcpy(out, &in6, sizeof(in6));
+        *outlen = sizeof(in6);
+        return 0;
+    }
+#endif
+    return -EINVAL;
 }
 
 /*
@@ -948,7 +1022,12 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                 a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
             }
             if (child) {
-                child->domain = AF_INET;
+                /* The accepted connection inherits the listener's family.  It
+                 * used to be hardcoded AF_INET, so a v6 connection that reached
+                 * this drain was adopted into a v4 socket while holding a v6
+                 * pcb -- every later address lookup on that fd read a 16-byte
+                 * v6 sockaddr back as a 16-byte v4 one. */
+                child->domain = listener->domain;
                 child->type = SOCK_STREAM;
                 child->protocol = listener->protocol;
                 child->bound = 1;
@@ -956,6 +1035,19 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                 child->ever_connected = 1;
                 child->nonblock = listener->nonblock;
                 child->tcp_nodelay = listener->tcp_nodelay;
+                /* Linux: an accepted socket inherits the listener's congestion
+                 * control.  Without this a server that set TCP_CONGESTION on
+                 * its listener would have every accepted connection silently
+                 * fall back to the default, and getsockopt on the child would
+                 * report an algorithm the caller never asked for. */
+                child->tcp_congestion = listener->tcp_congestion;
+                /* Same reasoning for the buffer ceilings: a listener that sized
+                 * itself before accept() is sizing every connection it hands
+                 * out, and a child that started from the defaults would report
+                 * ceilings its parent never asked for.  net_inet_tcp_apply_options()
+                 * below clamps them against the accepted pcb. */
+                child->snd_buf = listener->snd_buf;
+                child->rcv_buf = listener->rcv_buf;
                 child->keepalive = listener->keepalive;
                 child->keep_idle = listener->keep_idle;
                 child->keep_intvl = listener->keep_intvl;
@@ -1010,7 +1102,12 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
             if (fin) {
                 /* The peer sent a FIN before we got here.  Handing the child a
                  * connection that is already at EOF, rather than one whose
-                 * first read() blocks on a close that has already happened. */
+                 * first read() blocks on a close that has already happened.
+                 * `peer_closed`, not `closed`: this is the peer's half-close,
+                 * and marking the child itself dead here would also make the
+                 * staging loop below drop the payload the peer pipelined into
+                 * the handshake -- which is exactly what an HTTP client does. */
+                child->peer_closed = 1;
                 __atomic_store_n(&child->bh_closed, 1, __ATOMIC_RELEASE);
             }
             adopted = true;
@@ -1198,7 +1295,7 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
             drain |= NET_BH_DRAIN_WRITE;
     }
 
-    /*
+/*
      * Take the peer-EOF and peer-error flags but do not act on them yet.  They
      * are applied *after* the ring has been drained, and that ordering is the
      * fix for a whole class of "the transfer never finishes": TCP delivers data
@@ -1214,6 +1311,10 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
      * *pre-existing* s->closed, which is the local close the guard was written
      * for.  A reader still sees the buffered bytes first and only then the EOF
      * or the error, which is what read(2) promises.
+     *
+     * Note that deferring is what makes the FIN fix below expressible at all:
+     * acting on bh_closed before the staging loop is exactly what used to throw
+     * the peer's last segment away.
      */
     int bh_error = __atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE);
     int bh_error_code = bh_error ? __atomic_load_n(&s->bh_err_code,
@@ -1262,7 +1363,26 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
     }
 
     if (bh_closed) {
-        s->closed = 1;
+        /*
+         * The peer sent a FIN.  That is the peer half-closing, not this socket
+         * dying, so it belongs in `peer_closed` -- which is the flag every read
+         * path already treats as end-of-file (socket.c's recv checks
+         * `s->closed || s->peer_closed` and returns 0 for either).
+         *
+         * Setting `closed` here instead was wrong twice over.  It made
+         * net_socket_is_live() (socket_internal.h: `return s && !s->closed`)
+         * report a perfectly healthy socket as dead, so the socket vanished
+         * from /proc/net/tcp and was rejected by the ~39 is_live() call sites
+         * the moment its peer finished writing -- a peer that merely stopped
+         * writing killed the socket outright.  And, before the deferral above,
+         * it ran *before* the staging loop, whose `if (!s->closed)` guard then
+         * discarded every payload event still sitting in the ring.
+         *
+         * Applied after the drain, so the peer's final bytes are already queued
+         * by the time this marks end-of-file: the reader sees the data first
+         * and then the 0.  Both orderings are load-bearing, independently.
+         */
+        s->peer_closed = 1;
         net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
@@ -1371,6 +1491,163 @@ void net_inet_bottom_half_process_all(void)
 }
 
 /*
+ * Select the congestion control algorithm for a pcb.
+ *
+ * Separate from net_inet_tcp_apply_options() because setsockopt needs it on an
+ * already-established pcb, where re-running that function would also reinstall
+ * the callbacks and re-apply every other socket option.  Requires
+ * g_lwip_lock held: it writes pcb state.
+ */
+void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
+{
+#if LWIP_TCP_CUBIC
+    if (!pcb)
+        return;
+    if (alg == TCP_CONG_CUBIC) {
+        if (pcb->cong_alg != TCP_CONG_CUBIC) {
+            pcb->cong_alg = TCP_CONG_CUBIC;
+            /* Switching algorithm on a live connection must not reset the
+             * window or throw away how far it has grown, so the cubic state
+             * starts empty rather than seeded: RFC 8312 4.8 already says what
+             * to do when a connection enters congestion avoidance without a
+             * congestion event behind it, and that is exactly this case --
+             * W_max := the window as it is now, K := 0.  Seeding W_max from
+             * cwnd here instead would be the same computation done in the
+             * wrong place, and would leave the pcb's state depending on a
+             * caller's choice of when to switch.
+             *
+             * Note this deliberately does NOT reproduce the RFC 2581 initial
+             * window for an unhandshaken pcb, the way the old comment here
+             * did: LWIP_TCP_CALC_INITIAL_CWND is a macro private to tcp_in.c,
+             * and a second copy of it in the socket layer is a second thing to
+             * drift out of step.  A pcb that has not finished its handshake
+             * has not entered congestion avoidance at all, so tcp_cubic_on_ack
+             * will not read this state until it has. */
+            tcp_cubic_init(pcb);
+        }
+    } else {
+        /* Back to Reno.  tcp_cubic_on_ack()/on_loss() are gated on cong_alg,
+         * so the stale cubic state is simply never read again -- there is
+         * nothing to unwind and no window to restore. */
+        pcb->cong_alg = TCP_CONG_RENO;
+    }
+#else
+    /* CUBIC is not compiled in.  On this configuration the setsockopt path
+     * rejects every name but "reno" (see socket_control.c), so this can only
+     * ever be called with the default and there is nothing to do. */
+    LWIP_UNUSED_ARG(pcb);
+    LWIP_UNUSED_ARG(alg);
+#endif
+}
+
+/*
+ * Apply SO_SNDBUF / SO_RCVBUF to an lwIP pcb.
+ *
+ * What each one actually does here, stated plainly because neither is Linux's
+ * option and both are weaker than the name suggests:
+ *
+ *   SO_SNDBUF bounds how many bytes this socket may have sitting in its pcb's
+ *   send queue at once.  net_inet_send_tcp() measures the queue depth against
+ *   it and stops handing data to tcp_write() once the ceiling is reached, so
+ *   the socket blocks (or reports a short write) instead of filling lwIP's
+ *   TCP_SND_BUF.  It does NOT bound data in flight on the wire: that is
+ *   congestion control's job, and bounding it here would fight the algorithm.
+ *
+ *   SO_RCVBUF bounds this pcb's receive window, via the pcb's wnd_limit field
+ *   (A20OS divergence, DIVERGENCE.md 2.6).  Without that field the ceiling
+ *   would survive exactly until the first read(), because tcp_recved() hands
+ *   the window straight back to TCP_WND on every read.
+ *
+ *   NEITHER is tuned.  There is no auto-tuning, no memory-pressure feedback and
+ *   no adjustment from observed throughput: the value a caller sets is the
+ *   value in force until it changes it.  Linux grows sk_sndbuf and sk_rcvbuf
+ *   from tcp_wmem / tcp_rmem based on SO_SNDBUFFORCE and measured behaviour;
+ *   nothing here does, and a caller that relies on that growth will not get it.
+ *
+ * Clamping, and why: the send ceiling cannot exceed TCP_SND_BUF, which is the
+ * pcb's real capacity -- asking for more buys nothing, and the caller is told
+ * the clamped value by getsockopt rather than being left to believe otherwise.
+ * The receive ceiling cannot exceed this build's configured TCP_WND for the
+ * same reason, and additionally cannot break window scaling: the wire field is
+ * rcv_wnd >> rcv_scale and is 16 bits, so anything above 0xFFFF << TCP_RCV_SCALE
+ * would be truncated to a window the caller did not ask for.  Both bounds are
+ * the *configured* constants rather than the pcb's current state; see the
+ * comment in the body for why using the pcb's state here is a trap.
+ *
+ * Must be called with g_lwip_lock held.
+ */
+void net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb)
+{
+    if (!s || !pcb)
+        return;
+
+    /* A LISTEN pcb has no receive window of its own -- lwIP creates the real
+     * one in tcp_accept() -- and tcp_recved() asserts against it.  The socket
+     * fields still carry the value, so the accepted child gets it when
+     * net_inet_tcp_apply_options() runs on it. */
+    if (pcb->state == LISTEN)
+        return;
+
+    if (s->snd_buf) {
+        uint32_t snd = s->snd_buf;
+        if (snd > (uint32_t)TCP_SND_BUF)
+            snd = (uint32_t)TCP_SND_BUF;
+        /* Written back, so getsockopt reports what is actually in force. */
+        s->snd_buf = snd;
+        /* pcb->snd_buf is AVAILABLE space, not capacity: tcp_write() subtracts
+         * from it and an incoming ACK adds to it.  Assigning the ceiling would
+         * therefore hand out fresh room every time the caller lowered SO_SNDBUF
+         * below what is already queued.  Only ever lowering keeps the pcb's
+         * arithmetic consistent; the matching cost is that a raised ceiling
+         * takes effect on the next connection, because lwIP has no mechanism to
+         * grow snd_buf once bytes are outstanding, and this does not invent one. */
+        if (snd < pcb->snd_buf)
+            pcb->snd_buf = (tcpwnd_size_t)snd;
+    }
+
+    if (s->rcv_buf) {
+        /*
+         * The ceiling is this build's configured TCP_WND, NOT
+         * TCP_WND_MAX(pcb), and the scale bound uses the configured
+         * TCP_RCV_SCALE, NOT pcb->rcv_scale.  Both of the pcb-relative forms
+         * are wrong before the handshake, and wrong in a way that does not
+         * recover: TCP_WND_MAX() is TCPWND16(TCP_WND) until the peer has
+         * advertised window scaling, so on a socket created by socket() it
+         * answers 65535 rather than 93440, and pcb->rcv_scale is still 0
+         * until lwIP sends its first window-update option.  Clamping against
+         * them would permanently pin every socket to 64 KiB from the instant
+         * it was created, which is exactly what happened: an IPv6 loopback
+         * transfer stopped completing in lwIP TCP mode, where a real pcb
+         * exists, and not in fast mode, where one does not.
+         */
+        uint32_t rcv = s->rcv_buf;
+        uint32_t ceiling = (uint32_t)TCP_WND;
+        uint32_t scale_ceiling = (uint32_t)0xFFFFu << TCP_RCV_SCALE;
+        if (scale_ceiling < ceiling)
+            ceiling = scale_ceiling;
+        if (rcv > ceiling)
+            rcv = ceiling;
+        s->rcv_buf = rcv;
+        pcb->wnd_limit = (tcpwnd_size_t)rcv;
+        /* Only a shrink needs announcing.  rcv_wnd can only be lowered here,
+         * so a caller that raised the ceiling leaves nothing to say. */
+        if (pcb->rcv_wnd > (tcpwnd_size_t)rcv) {
+            pcb->rcv_wnd = (tcpwnd_size_t)rcv;
+            /* And only when a window has been announced.  tcp_recved() on a
+             * pcb that has not completed a handshake takes the
+             * rcv_ann_wnd == 0 branch, inflates the window by a full segment
+             * count, sets TF_ACK_NOW and calls tcp_output() -- which emits a
+             * bare ACK for a connection that does not exist.  That stray
+             * packet goes on the wire for every socket() in the system, and
+             * a listener that has already bound the port sees it before any
+             * handshake. */
+            if (pcb->rcv_ann_wnd != 0)
+                tcp_recved(pcb, 0);
+        }
+    }
+}
+
+/*
  * Apply the socket's TCP options and install its callbacks on an lwIP pcb.
  *
  * Shared by socket creation and by the accept path, which adopts a pcb lwIP
@@ -1381,6 +1658,8 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb)
 {
     if (s->tcp_nodelay)
         tcp_nagle_disable(pcb);
+    a20_net_cong_apply(pcb, s->tcp_congestion);
+    net_inet_tcp_buf_apply(s, pcb);
     if (s->keepalive)
         pcb->so_options |= SOF_KEEPALIVE;
     /*
@@ -1475,8 +1754,18 @@ int net_inet_socket_init(net_socket_t *s)
         raw_recv(s->raw, lwip_raw_recv_cb, s);
         goto out;
     }
-    if (s->domain == AF_INET && s->type == SOCK_STREAM) {
-        s->tcp = tcp_new_ip_type(IPADDR_TYPE_V4);
+    /*
+     * SOCK_STREAM is dual-stack: lwIP's tcp_pcb carries an IPADDR_TYPE_V6 pcb
+     * natively and takes the family from the ip_addr_t bind/connect hand it,
+     * so one socket layer serves both.  This arm used to be AF_INET-only,
+     * which is why net_listen() had no v6 path to convert -- an AF_INET6
+     * socket() succeeded and then had s->tcp == NULL forever, so bind() could
+     * not reach a pcb and listen() had nothing to turn into a LISTEN pcb.
+     */
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        s->type == SOCK_STREAM) {
+        s->tcp = tcp_new_ip_type(s->domain == AF_INET6 ? IPADDR_TYPE_V6
+                                                       : IPADDR_TYPE_V4);
         if (!s->tcp) {
             ret = -ENOMEM;
             goto out;
@@ -1513,21 +1802,33 @@ void net_inet_socket_destroy(net_socket_t *s)
              * so they have to go before it does. */
             net_inet_accept_stage_purge(s);
         } else {
-            /* Graceful close, not abort.  tcp_abort() is tcp_abandon(pcb, 1),
-             * which puts a RST on the wire; that is the right teardown for a pcb
-             * the application never spoke on, and the wrong one for every
-             * socket close(), because it tells the peer "discard what I sent
-             * you".  A server that does the ordinary thing --
-             * write(), close() -- had its last segment routinely destroyed by
-             * this line, and whether the peer saw it depended on whether the
-             * RST or the data won the race to its receive queue.
+/* Graceful close, not abort.  close() on a stream socket has to
+             * flush what the application already handed to write() and then
+             * send a FIN; tcp_abort() is tcp_abandon(pcb, 1), which sends an
+             * RST instead.  An RST makes the peer throw away data it has
+             * already received, so `write(); close()` lost the tail of every
+             * message on this path -- the single most common shape a
+             * request/response server uses to reply.
+             *
+             * That tail loss is also why the ordering fix in
+             * net_inet_bottom_half_process_socket_locked() exists: the FIN and
+             * the last segment routinely arrive in the same bottom-half pass,
+             * so the reader has to see the data before the EOF.
+             *
+             * It survived because the loss is a race against the peer's read,
+             * not a deterministic one: a workload that sleeps before closing
+             * passes, and the same workload with an immediate close sees a
+             * short read.  The loopback probe that found it wrote 4000 B and
+             * closed; with an 8 s pause in between the same probe passed.
              *
              * The same shape net_tcp_close_pcb() uses, deliberately: callbacks
              * are unbound first so the teardown cannot re-enter the socket
              * layer, tcp_close() sends the FIN and hands the pcb to lwIP's
              * closing states, and abort is the documented fallback for the one
              * case where tcp_close() cannot take the pcb (ERR_MEM with no room
-             * for the FIN and no CLOSEPEND retry). */
+             * for the FIN and no CLOSEPEND retry).  net_tcp_close_pcb()
+             * already closes gracefully for the connect-timeout paths; this arm
+             * had disagreed with it about the same pcb. */
             tcp_arg(s->tcp, NULL);
             tcp_recv(s->tcp, NULL);
             tcp_err(s->tcp, NULL);
@@ -1549,11 +1850,18 @@ void net_inet_socket_destroy(net_socket_t *s)
     a20_lwip_unlock(flags);
 }
 
+/*
+ * Bind the socket's pcb to the address bind() recorded.  Both families: the
+ * ip_addr_t conversion above is dual-stack and lwIP's udp_bind()/raw_bind()/
+ * tcp_bind() all take the family from that struct, so there is no reason to
+ * refuse v6 here.  The AF_INET6 early return this used to carry is what made
+ * an AF_INET6 stream socket unbindable at the pcb level, and therefore
+ * unlistenable (net_listen converts a *bound* pcb) and unreachable from
+ * off-box.
+ */
 int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
-        return 0;
-    if (s->domain == AF_INET6)
         return 0;
     if (s->udp) {
         ip_addr_t ip;
@@ -1697,7 +2005,12 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     }
     net_socket_free(child);
 
-    if (s->domain != AF_INET || !s->tcp) {
+    /* The stack path.  s->tcp exists for both families now
+     * (net_inet_socket_init), and tcp_connect() reads the family off the
+     * ip_addr_t, so the AF_INET-only guard this used to carry just refused
+     * every v6 connect outright -- with -ECONNREFUSED, which is a lie: the
+     * address was fine, the kernel simply had no path for it. */
+    if (!s->tcp) {
         s->connected = 0;
         return -ECONNREFUSED;
     }
@@ -2133,13 +2446,36 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
         uint64_t lwip_flags = a20_lwip_lock();
         a20_lwip_poll_locked();
         int tcp_alive = s->tcp && !s->closed && s->connected;
-        u16_t room = tcp_alive ? tcp_sndbuf(s->tcp) : 0;
+        /*
+         * Room under the socket's own SO_SNDBUF ceiling, not just under the
+         * pcb's capacity.  pcb->snd_buf is AVAILABLE space (tcp_write
+         * subtracts, an incoming ACK adds), so the queue depth is
+         * TCP_SND_BUF minus what is left of it; comparing that against
+         * s->snd_buf is what makes the option mean anything.  Without it the
+         * loop would keep filling lwIP's TCP_SND_BUF whatever the caller asked
+         * for, and SO_SNDBUF would be the no-op it was before.
+         *
+         * Reading pcb->snd_buf directly rather than through tcp_sndbuf() is
+         * deliberate: that macro is TCPWND16(), upstream's 16-bit accessor, so
+         * on this port it reports at most 65535 even though TCP_SND_BUF is
+         * 93440.  Going through it would quietly cap every send at 64 KiB.
+         */
+        uint32_t room32 = 0;
+        if (tcp_alive) {
+            tcpwnd_size_t avail = s->tcp->snd_buf;
+            uint32_t queued = (uint32_t)TCP_SND_BUF > (uint32_t)avail
+                              ? (uint32_t)(TCP_SND_BUF - avail) : 0;
+            uint32_t ceiling = s->snd_buf ? s->snd_buf : (uint32_t)TCP_SND_BUF;
+            room32 = (ceiling > queued) ? (ceiling - queued) : 0;
+            if (room32 > 0xffff)
+                room32 = 0xffff;
+        }
         if (!tcp_alive) {
             a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
         }
         net_inet_ip_opts_apply_locked(s);
-        if (room == 0) {
+        if (room32 == 0) {
             a20_lwip_unlock(lwip_flags);
             if (sent || s->nonblock)
                 return sent ? (int)sent : -EAGAIN;
@@ -2163,7 +2499,14 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 wait_queue_link(&s->write_waitq, &entry, token, 0);
             net_bucket_unlock(net_socket_bucket(s), irq);
             uint64_t room_flags = a20_lwip_lock();
-            int room_now = s->tcp && tcp_sndbuf(s->tcp) > 0;
+            int room_now = 0;
+            if (s->tcp && !s->closed && s->connected) {
+                tcpwnd_size_t avail = s->tcp->snd_buf;
+                uint32_t queued = (uint32_t)TCP_SND_BUF > (uint32_t)avail
+                                  ? (uint32_t)(TCP_SND_BUF - avail) : 0;
+                uint32_t ceiling = s->snd_buf ? s->snd_buf : (uint32_t)TCP_SND_BUF;
+                room_now = (ceiling > queued) && (ceiling - queued) > 0;
+            }
             a20_lwip_unlock(room_flags);
             if (room_now)
                 (void)proc_try_wake(cur, token.seq, PROC_WAKE_EVENT);
@@ -2182,12 +2525,13 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -EAGAIN;
             continue;
         }
-        /* room > 0: merge sndbuf check with write/output under one lock
-         * acquisition.  The earlier lock acquired tcp_sndbuf and confirmed
-         * liveness; re-verify under the same lock before writing. */
+        /* room32 > 0: merge the sndbuf check with write/output under one lock
+         * acquisition.  The lock above measured room and confirmed liveness;
+         * re-verify liveness under the same lock before writing, because
+         * tcp_write() would otherwise have to fail on a dead pcb. */
         size_t n = len - sent;
-        if (n > room)
-            n = room;
+        if (n > room32)
+            n = room32;
         if (n > 0xffff)
             n = 0xffff;
         if (!s->tcp || s->closed || !s->connected) {

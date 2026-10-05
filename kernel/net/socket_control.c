@@ -9,6 +9,12 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/ip.h"
+/* TCP_CONGESTION name validation and the real algorithm name.  A20OS divergence
+ * in lwIP; see kernel/external/lwip/DIVERGENCE.md 2.7.  Included
+ * unconditionally: the TCP_CONG_* values are outside the header's
+ * LWIP_TCP_CUBIC guard precisely so that a build without CUBIC can still accept
+ * "reno" and reject "cubic" by name. */
+#include "lwip/priv/tcp_cubic_priv.h"
 
 #ifndef SHUT_RD
 #define SHUT_RD   0
@@ -217,8 +223,14 @@ int net_listen_sock(net_socket_t *s, int backlog)
      * off-box completes its handshake.  The accept queue, the child
      * net_socket_t and the wakeup are the socket layer's in both modes, so this
      * changes reachability only.
+     *
+     * Both families take the lwip path.  It was AF_INET-only, which combined
+     * with net_inet_socket_init's AF_INET-only pcb arm to make AF_INET6
+     * inbound TCP impossible in either mode: the fast path dropped a NULL pcb
+     * and left the port unreachable, and the lwip path refused outright.
      */
-    if (s->domain == AF_INET && g_a20_tcp_path == A20_TCP_PATH_LWIP) {
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        g_a20_tcp_path == A20_TCP_PATH_LWIP) {
         int r = net_inet_tcp_listen(s, backlog);
         if (r < 0) {
             s->listening = 0;
@@ -230,11 +242,11 @@ int net_listen_sock(net_socket_t *s, int backlog)
         s->listening = 1;
         if (s->domain == AF_INET || s->domain == AF_INET6) {
             s->local_tcp = 1;
-            if (s->domain == AF_INET)
+            if (s->tcp)
                 net_tcp_drop_pcb(s);
         }
     }
-    if (s->domain == AF_INET) {
+    if (s->domain == AF_INET || s->domain == AF_INET6) {
         uint16_t lport = 0;
         net_sockaddr_port(s->local, s->local_len, &lport);
         ktrace_net("[NET] listen port=%u mode=%s\n", (unsigned)net_ntohs(lport),
@@ -591,8 +603,44 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
     if (level == IPPROTO_TCP) {
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;
-        if (optname == TCP_CONGESTION)
-            return optval && optlen ? 0 : -EINVAL;
+        if (optname == TCP_CONGESTION) {
+            /* Validate the name instead of accepting anything.  This used to
+             * `return optval && optlen ? 0 : -EINVAL`, so "bbr", "reno " and
+             * "cubic-but-not-really" all set successfully on a stack that has
+             * exactly one algorithm, and the caller had no way to find out
+             * which one it got.  -ENOPROTOOPT is what Linux returns for an
+             * algorithm it cannot honour, and it is the only answer that tells
+             * the truth: the request was well-formed, this kernel has no such
+             * algorithm.  That includes the EMBEDDED profile, where CUBIC is
+             * compiled out -- "cubic" is a real name this build cannot serve. */
+            char name[16];
+            size_t n;
+            int alg;
+            if (!optval || !optlen)
+                return -EINVAL;
+            /* The name is a NUL-terminated string, not a fixed-size blob: Linux
+             * treats optlen as the buffer size and reads up to it.  Truncating
+             * at 15 chars means an over-long name is rejected as unknown
+             * rather than silently matching a prefix. */
+            n = optlen < sizeof(name) ? optlen : sizeof(name);
+            memcpy(name, optval, n);
+            name[n - 1] = '\0';
+            alg = tcp_cong_alg_parse(name);
+            if (alg < 0)
+                return -ENOPROTOOPT;
+            s->tcp_congestion = (uint8_t)alg;
+            /* Apply immediately to a live pcb as well as to future ones, so
+             * the option means what the caller just asked for.  Linux allows
+             * this on an established connection.  Switching does not reset the
+             * window or discard the algorithm's state: RFC 8312 4.8 already
+             * says what a connection entering congestion avoidance without a
+             * congestion event behind it must do, and that is exactly this
+             * case. */
+            if (s->tcp) {
+                a20_net_cong_apply(s->tcp, (uint8_t)alg);
+            }
+            return 0;
+        }
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
         int val;
@@ -711,6 +759,45 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         }
         return 0;
     }
+    if (level == SOL_SOCKET &&
+        (optname == SO_SNDBUF || optname == SO_RCVBUF)) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        /* Linux clamps a non-positive request up to a minimal buffer rather
+         * than failing; this refuses it instead.  -EINVAL is the honest answer
+         * here because a clamped-to-zero buffer cannot send anything, and
+         * silently accepting one would leave a caller believing it had asked
+         * for a usable size. */
+        if (val <= 0)
+            return -EINVAL;
+        /* Only TCP has a buffer for the option to mean anything about: the
+         * ceilings live on the lwIP pcb (snd_buf's available space and the
+         * wnd_limit field that gates tcp_recved()).  UDP and RAW keep returning
+         * -EOPNOTSUPP below, which is what they already did -- their buffers
+         * live in the socket layer and are a different, unsized mechanism. */
+        if (s->domain != AF_INET && s->domain != AF_INET6)
+            return -EOPNOTSUPP;
+        if (s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET)
+            return -EOPNOTSUPP;
+        uint32_t is_snd = (optname == SO_SNDBUF);
+        if (is_snd)
+            s->snd_buf = (uint32_t)val;
+        else
+            s->rcv_buf = (uint32_t)val;
+        /* Apply now if a pcb exists, so an established connection does not have
+         * to wait for the next connect().  net_inet_tcp_buf_apply() clamps to
+         * TCP_SND_BUF / TCP_WND_MAX(pcb) and writes the clamped value back;
+         * it is also where "raising a send ceiling takes effect next time" is
+         * documented, so do not invent that here. */
+        if (s->tcp) {
+            uint64_t flags = a20_lwip_lock();
+            net_inet_tcp_buf_apply(s, s->tcp);
+            a20_lwip_unlock(flags);
+        }
+        return 0;
+    }
     if (level == SOL_SOCKET && optname == SO_PASSCRED) {
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
@@ -753,7 +840,11 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         val = s->protocol;
     else if (level == SOL_SOCKET &&
              (optname == SO_SNDBUF || optname == SO_RCVBUF))
-        val = NET_MAX_QUEUE * NET_MAX_PAYLOAD;
+        /* The value in force, not a constant.  net_inet_tcp_buf_apply() writes
+         * the clamped value back into these fields, so this reports a ceiling
+         * that was cut down to what the pcb can actually honour rather than
+         * echoing back a request the stack silently ignored. */
+        val = (int)(optname == SO_SNDBUF ? s->snd_buf : s->rcv_buf);
     else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
         val = s->reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)
@@ -813,15 +904,33 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;
         if (optname == TCP_CONGESTION) {
-            /* lwIP's only congestion control is Reno (src/core/tcp.c).
-             * Reporting "cubic" made monitoring and tuning tools believe
-             * a CUBIC implementation existed.  setsockopt rejects every
-             * name, so reporting the one real algorithm keeps the two
-             * consistent. */
-            static const char congestion[] = "reno";
-            size_t n = *optlen < sizeof(congestion) ? *optlen : sizeof(congestion);
+            /* Report the algorithm this connection will actually use, which is
+             * the whole point of the option.  It used to hardcode "reno" (and,
+             * before that, "cubic" when no CUBIC existed at all): the first
+             * made a caller that had set "cubic" unable to tell whether the
+             * request took, the second made monitoring tools believe an
+             * implementation existed that did not.
+             *
+             * A live pcb is authoritative over the stored request, because
+             * setsockopt applies to the pcb as well -- a connection that was
+             * accepted inherits its listener's algorithm, so the socket's own
+             * field is not always the answer. */
+            uint8_t alg = s->tcp_congestion;
+#if LWIP_TCP_CUBIC
+            if (s->tcp) {
+                alg = s->tcp->cong_alg;
+            }
+#else
+            /* Without CUBIC there is only ever one algorithm, whatever the
+             * socket recorded.  Saying otherwise here would put this
+             * getsockopt at odds with the setsockopt above it. */
+            alg = TCP_CONG_RENO;
+#endif
+            const char *name = tcp_cong_alg_name(alg);
+            size_t len = strlen(name) + 1;
+            size_t n = *optlen < len ? *optlen : len;
             if (n)
-                memcpy(optval, congestion, n);
+                memcpy(optval, name, n);
             *optlen = n;
             return 0;
         }
