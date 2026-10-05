@@ -8,6 +8,7 @@
 #include "lwip/igmp.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/ip.h"
 
 #ifndef SHUT_RD
 #define SHUT_RD   0
@@ -674,6 +675,18 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         int val;
         memcpy(&val, optval, sizeof(val));
         s->reuseaddr = val != 0;
+        /* setsockopt() normally runs between socket() and bind(), and socket()
+         * has already made the pcb, so net_inet_tcp_apply_options() saw the old
+         * value.  Push it across here or bind() would consult a stale
+         * SOF_REUSEADDR. */
+        if (s->tcp) {
+            uint64_t flags = a20_lwip_lock();
+            if (s->reuseaddr)
+                ip_set_option(s->tcp, SOF_REUSEADDR);
+            else
+                ip_reset_option(s->tcp, SOF_REUSEADDR);
+            a20_lwip_unlock(flags);
+        }
         return 0;
     }
     if (level == SOL_SOCKET && optname == SO_REUSEPORT) {

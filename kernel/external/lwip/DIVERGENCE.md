@@ -72,8 +72,10 @@ commit**。现已显式抓取并记录基线：
 
 ```
 +481/-222  src/core/tcp.c                            PCB 链表按 lane 分桶
+                                            （+9）  补齐缺失的 LWIP_ASSERT_CORE_LOCKED()
 +260/-178  src/core/udp.c                            PCB 链表按 lane 分桶
 +105/-73   src/core/tcp_in.c                         lane 感知的输入查找
+                                      （+2）        tcp_trigger_input_pcb_close() 补断言
  +86/-45   src/include/lwip/priv/tcp_priv.h          TCP_REG/TCP_RMV 改为 lane 索引
 +112       src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
  +30/-15   src/core/pbuf.c                           LS2K1000 板级诊断 printf
@@ -93,6 +95,7 @@ commit**。现已显式抓取并记录基线：
 | `7a0966c0` | lane stage B：按 lane 分桶 lwIP PCB 链表 |
 | `b1bb28b5` | 按 lane 分片 TCP 快/慢定时器 |
 | `16304db8` | 修 lane 桶中 TCP pcb 双重索引移除 |
+| 见 §2.5 | 把锁契约变成可执行：`LWIP_ASSERT_CORE_LOCKED()` 从空宏接到 `g_lwip_lock` 的持有者 CPU |
 
 ### 2.2 引入的独有概念
 
@@ -126,6 +129,64 @@ HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 因此 `struct netif` 仍是上游定义：单组 input/output/linkoutput 回调、无队列、
 无 RSS、无多队列、无校验和/TSO 卸载。**多队列与卸载能力完全受限于上游 `netif`
 抽象**——这是 lwIP 无法通过"小幅修改"解决的能力天花板。
+
+### 2.5 `LWIP_ASSERT_CORE_LOCKED()` 的接线（本树独有）
+
+上游 `src/include/lwip/opt.h:227` 把 `LWIP_ASSERT_CORE_LOCKED()` 定义成**空宏**，
+除非移植层自己 `#define` 它。本树此前没有定义，于是 `tcp.c` / `tcp_in.c` / `raw.c` /
+`udp.c` / `dns.c` / `ethernet.c` 里那几十处断言**全部是空操作**——
+`docs/net/network-lock-contract.md` 里的锁纪律在运行时没有任何强制手段。
+
+现在 `kernel/net/lwip_port/lwipopts.h` 在 `CONFIG_NET_LOCK_ASSERT=1` 下把它映射到
+`a20_lwip_assert_core_locked()`（`kernel/net/lwip_stack.c`）：
+
+- `a20_lwip_lock()` 记录持有者 **CPU id**（不是布尔量——布尔量在"别的 CPU 持有"时
+  会误判为通过），`a20_lwip_unlock()` 清回 `A20_LWIP_LOCK_UNOWNED`；
+- 宏里传的 `__builtin_return_address(0)` 在展开点求值，指向**未持锁运行的那个 lwIP
+  函数**，panic 之前先记录下来；
+- `a20_lwip_init()` 结束时才 **arm**。arm 之前断言是 no-op：lwIP 自己的
+  `lwip_init()` / `netif_add()` / `netif_init()` / `dhcp_start()` 链在
+  `a20_lwip_init()` 内部跑，那里根本没有 A20OS 的锁；早先的探针在引导期测到 23 次
+  命中、8 个不同返回地址（`netif_init`、`netif_add`、`lwip_init`、
+  `netif_add_ip6_address`、`a20_lwip_init`、`a20_lwip_loopif_init_cb`），
+  对它们 panic 会让**每一个**配置启动即死。
+- arm 之后一次违规即 **panic**（不是只计数）：计数型信号会被当成噪声忽略，而这条
+  契约的价值恰恰在于"违反必须停下来"。
+
+同时补上了此前**没有**断言的入口，把探针的盲区变成覆盖区（上游在此处也没有断言，
+所以这些是纯新增行）：`tcp_new()`、`tcp_new_ip_type()`、`tcp_slowtmr()`、
+`tcp_fasttmr()`、`tcp_netif_ip_addr_changed()`、`tcp_process_refused_data()`、
+`tcp_trigger_input_pcb_close()`。`tcp_abort()` 在本树**已经**带断言
+（`tcp.c:656`），`docs/net/net-lanes.md` 说它没有，那条记录已过时。
+
+默认构建 `CONFIG_NET_LOCK_ASSERT=0`，宏仍为空，代价为零。
+
+### 2.6 `SO_REUSE=1`（编译期开关，非源码改动）
+
+`SO_REUSE` 在上游 `opt.h:2137` 默认为 `0`。本树的 `lwipopts.h` 现在显式打开它。
+不改任何 lwIP 源码，但**改变了上游代码的编译结果**，因此登记在此。
+
+关闭状态下 `setsockopt(SO_REUSEADDR)` 是**空操作**：socket 层把标志存进
+`net_socket_t::reuseaddr`，`net_bind_reuse_allowed()`（`kernel/net/socket.c:170`）
+也确实读它，但 lwIP 只在 `tcp_bind()` / `tcp_listen_with_backlog_and_err()` /
+`tcp_connect()` 里问 `ip_get_option(pcb, SOF_REUSEADDR)`，而没有任何代码把这个
+标志搬上 pcb。后果是 `tcp_bind()` 照旧扫 TIME-WAIT 表
+（`max_pcb_list = NUM_TCP_PCB_LISTS`），上一次连接留下的 TIME-WAIT pcb 会把本地
+端口占住 `2 * TCP_MSL`（本树 `TCP_MSL=60000`，即 2 分钟），同端口重启的 listener
+拿到 `ERR_USE`（EADDRINUSE）。
+
+打开后需要两处配合，缺一不可：
+
+- `net_inet_tcp_apply_options()`（`kernel/net/socket_inet.c`）把 `s->reuseaddr`
+  搬成 `SOF_REUSEADDR`。accept 出来的子 pcb 通过 `SOF_INHERITED` 继承
+  （`tcp_in.c`: `npcb->so_options = pcb->so_options & SOF_INHERITED`），所以一个
+  调用点同时覆盖 socket() 路径与 accept 路径；
+- `setsockopt(SO_REUSEADDR)` 在 socket 层把新值推回已存在的 pcb——它通常发生在
+  `socket()` 与 `bind()` 之间，而 pcb 在 `socket()` 时就建好了。
+
+语义与 Linux 一致：REUSEADDR 的 bind 跳过 TIME-WAIT；`listen()` 与 `connect()`
+补做"同一 local addr/port 只能有一个 listener"和 5-tuple 唯一性检查，所以打开这个
+开关不会让两个活着的 listener 静默别名。
 
 ## 3. 重新同步上游的流程
 
