@@ -106,6 +106,9 @@
 #include "lwip/memp.h"
 #include "lwip/tcp.h"
 #include "lwip/priv/tcp_priv.h"
+#if LWIP_TCP_CUBIC
+#include "lwip/priv/tcp_cubic_priv.h" /* A20OS: per-connection congestion control */
+#endif
 #include "lwip/debug.h"
 #include "lwip/stats.h"
 #include "lwip/ip6.h"
@@ -1011,13 +1014,26 @@ tcp_recved(struct tcp_pcb *pcb, u16_t len)
   LWIP_ASSERT("don't call tcp_recved for listen-pcbs",
               pcb->state != LISTEN);
 
-  rcv_wnd = (tcpwnd_size_t)(pcb->rcv_wnd + len);
-  if ((rcv_wnd > TCP_WND_MAX(pcb)) || (rcv_wnd < pcb->rcv_wnd)) {
-    /* window got too big or tcpwnd_size_t overflow */
-    LWIP_DEBUGF(TCP_DEBUG, ("tcp_recved: window got too big or tcpwnd_size_t overflow\n"));
-    pcb->rcv_wnd = TCP_WND_MAX(pcb);
-  } else  {
-    pcb->rcv_wnd = rcv_wnd;
+  /* A20OS divergence: the reopen ceiling is the pcb's own wnd_limit when it has
+   * one, not unconditionally TCP_WND_MAX(pcb).  Without this a SO_RCVBUF below
+   * TCP_WND is undone by the first read(): every read calls tcp_recved(), which
+   * hands the window straight back.  0 means "no limit", which is what a memset
+   * pcb and every pcb that never asked for one carries.  It only ever lowers
+   * the ceiling -- a limit above TCP_WND_MAX(pcb) is not honoured -- so it
+   * cannot be used to widen the window past what the peer negotiated. */
+  {
+    tcpwnd_size_t wnd_max = TCP_WND_MAX(pcb);
+    if (pcb->wnd_limit && pcb->wnd_limit < wnd_max) {
+      wnd_max = pcb->wnd_limit;
+    }
+    rcv_wnd = (tcpwnd_size_t)(pcb->rcv_wnd + len);
+    if ((rcv_wnd > wnd_max) || (rcv_wnd < pcb->rcv_wnd)) {
+      /* window got too big or tcpwnd_size_t overflow */
+      LWIP_DEBUGF(TCP_DEBUG, ("tcp_recved: window got too big or tcpwnd_size_t overflow\n"));
+      pcb->rcv_wnd = wnd_max;
+    } else  {
+      pcb->rcv_wnd = rcv_wnd;
+    }
   }
 
   wnd_inflation = tcp_update_rcv_ann_wnd(pcb);
@@ -1340,6 +1356,33 @@ tcp_slowtmr_active_bucket(int lane)
 
             /* Reduce congestion window and ssthresh. */
             eff_wnd = LWIP_MIN(pcb->cwnd, pcb->snd_wnd);
+#if LWIP_TCP_CUBIC
+            /* A20OS divergence: an RTO is a loss event like any other, so CUBIC
+             * applies the same multiplicative decrease and restarts its epoch
+             * from here.  RFC 8312 4.7 is explicit that the congestion avoidance
+             * after a timeout uses Eq. 1 with K := 0 and W_max set to the
+             * window at the start of that avoidance, which is why this calls
+             * tcp_cubic_on_rto() and not tcp_cubic_on_loss(): routing the RTO
+             * through the fast-retransmit path would put the connection on a
+             * curve anchored to a W_max the timeout has already moved past.
+             *
+             * Note the difference from the Reno arm below, which sets
+             * cwnd = mss: that is a full reset to slow start, whereas CUBIC
+             * drops to W_max * beta_cubic and leaves slow start immediately.
+             * Sharing one path would silently turn CUBIC's loss response into
+             * Reno's. */
+            if (pcb->cong_alg == TCP_CONG_CUBIC) {
+              tcp_cubic_on_rto(pcb, eff_wnd);
+              LWIP_DEBUGF(TCP_CWND_DEBUG, ("tcp_slowtmr: cubic cwnd %"TCPWNDSIZE_F
+                                           " ssthresh %"TCPWNDSIZE_F"\n",
+                                           pcb->cwnd, pcb->ssthresh));
+              pcb->bytes_acked = 0;
+              /* The following needs to be called AFTER cwnd is set to one
+                 mss - STJ */
+              tcp_rexmit_rto_commit(pcb);
+              continue;
+            }
+#endif /* LWIP_TCP_CUBIC */
             pcb->ssthresh = eff_wnd >> 1;
             if (pcb->ssthresh < (tcpwnd_size_t)(pcb->mss << 1)) {
               pcb->ssthresh = (tcpwnd_size_t)(pcb->mss << 1);
@@ -2017,6 +2060,12 @@ tcp_alloc(u8_t prio)
     pcb->rtime = -1;
     pcb->cwnd = 1;
     pcb->tmr = tcp_ticks;
+    /* A20OS divergence: cong_alg is 0 == TCP_CONG_RENO after the memset above,
+     * which is the right default -- a connection nobody asked about behaves
+     * exactly as it did before CUBIC existed.  tcp_cubic_init() is called from
+     * the socket layer only when a caller selects "cubic", because W_max has
+     * to be seeded from the real MSS, which is still INITIAL_MSS here and gets
+     * replaced by the peer's MSS option later. */
     /* Deliberately not stamped with a lane counter: tcp_alloc() runs before
        tcp_bind() has derived ->lane from local_ip/local_port, so there is no
        lane to stamp.  A fresh pcb must not look already-processed to whichever

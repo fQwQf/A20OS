@@ -65,6 +65,9 @@
 #if LWIP_TCP /* don't build if not configured for use in lwipopts.h */
 
 #include "lwip/priv/tcp_priv.h"
+#if LWIP_TCP_CUBIC
+#include "lwip/priv/tcp_cubic_priv.h" /* A20OS: per-connection congestion control */
+#endif
 #include "lwip/def.h"
 #include "lwip/mem.h"
 #include "lwip/memp.h"
@@ -1796,6 +1799,21 @@ tcp_rexmit_fast(struct tcp_pcb *pcb)
                  (u16_t)pcb->dupacks, pcb->lastack,
                  lwip_ntohl(pcb->unacked->tcphdr->seqno)));
     if (tcp_rexmit(pcb) == ERR_OK) {
+#if LWIP_TCP_CUBIC
+      /* A20OS divergence: CUBIC owns its own loss response, because RFC 8312
+       * does not reduce to "ssthresh = wnd/2, cwnd = ssthresh + 3*mss" -- the
+       * +3*MSS is Reno fast recovery, and the cubic curve has to start from
+       * the reduced window or it overshoots on the first ACK.  The window
+       * before the reduction is what W_max is defined from, so it is captured
+       * here, before anything touches pcb->cwnd. */
+      if (pcb->cong_alg == TCP_CONG_CUBIC) {
+        tcp_cubic_on_loss(pcb, pcb->cwnd);
+        tcp_set_flags(pcb, TF_INFR);
+        /* Reset the retransmission timer to prevent immediate rto retransmissions */
+        pcb->rtime = 0;
+        return;
+      }
+#endif /* LWIP_TCP_CUBIC */
       /* Set ssthresh to half of the minimum of the current
        * cwnd and the advertised window */
       pcb->ssthresh = LWIP_MIN(pcb->cwnd, pcb->snd_wnd) / 2;

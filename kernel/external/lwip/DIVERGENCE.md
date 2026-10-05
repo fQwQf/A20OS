@@ -36,7 +36,7 @@ commit**。现已显式抓取并记录基线：
 
 | 口径 | 测量方法 | 结果 |
 |---|---|---|
-| **A20OS 自己的改动** | `git diff f773b0aa HEAD -- kernel/external/lwip`（`f773b0aa` = 重新 vendoring 的提交） | **9 文件,+790 / −302** |
+| **A20OS 自己的改动** | `git diff f773b0aa HEAD -- kernel/external/lwip`（`f773b0aa` = 重新 vendoring 的提交） | **14 文件(源码),+1458 / −304** |
 | **相对上游的落后程度** | vendoring 时的树 vs `d08f477` | **18 个文件不同** |
 | **与上游 HEAD 的合并差异** | vendored 树 vs `d08f477` | 25 文件,+761 / −427 |
 
@@ -65,23 +65,30 @@ commit**。现已显式抓取并记录基线：
 
 ## 2. A20OS 自有改动
 
-**测量口径：`git diff f773b0aa HEAD -- kernel/external/lwip` = 9 文件，+790 / −302**
+**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 13 文件，+1505 / −311**
 （`f773b0aa` 是把 lwIP 重新 vendoring 进内核的提交，作为"未改动基线"）。
 
-### 2.1 受影响的文件（9 个）
+> 口径说明：数字只统计 `src/` 与 `sources.mk`，不含本文件自身；重跑上面那条
+> `git diff` 即可复核。下文 §2.1 的清单以当前口径为准。
+
+### 2.1 受影响的文件（13 个）
 
 ```
-+481/-222  src/core/tcp.c                            PCB 链表按 lane 分桶
++397/-0   src/core/tcp_cubic.c                      【新增文件，上游无对应物】
++396/-157 src/core/tcp.c                            PCB 链表按 lane 分桶 + CUBIC RTO 分支 + wnd_limit
                                             （+9）  补齐缺失的 LWIP_ASSERT_CORE_LOCKED()
-+260/-178  src/core/udp.c                            PCB 链表按 lane 分桶
-+105/-73   src/core/tcp_in.c                         lane 感知的输入查找
++181/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
++178/-82  src/core/udp.c                            PCB 链表按 lane 分桶
++112/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
++100/-37  src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
                                       （+2）        tcp_trigger_input_pcb_close() 补断言
- +86/-45   src/include/lwip/priv/tcp_priv.h          TCP_REG/TCP_RMV 改为 lane 索引
-+112       src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
- +30/-15   src/core/pbuf.c                           LS2K1000 板级诊断 printf
-  +7/-1    src/include/lwip/tcp.h                    struct tcp_pcb 增加 lane 字段
-  +7/-1    src/include/lwip/udp.h                    struct udp_pcb 增加 lane 字段
-  +4/-1    src/core/timeouts.c                       定时器按 lane 分片
+ +61/-25  src/include/lwip/priv/tcp_priv.h         TCP_REG/TCP_RMV 改为 lane 索引
+ +29/-1   src/include/lwip/tcp.h                    struct tcp_pcb 增加 lane / cong_alg / wnd_limit 字段
+ +24/-6   src/core/pbuf.c                           LS2K1000 板级诊断 printf
+ +18/-0   src/core/tcp_out.c                        CUBIC 快重传分支
+  +6/-1   src/include/lwip/udp.h                    struct udp_pcb 增加 lane 字段
+  +2/-2   src/core/timeouts.c                       定时器按 lane 分片
+  +1/-0   sources.mk                                登记 tcp_cubic.c
 ```
 
 引入这些改动的 A20OS 提交：
@@ -123,7 +130,7 @@ PPP、6LoWPAN、SLIP、Zephyr 网关。若要启用其中任一项，需要先�
 
 ### 2.4 明确的非改动
 
-`src/core/netif.c` **未被 A20OS 改动**（见 §2.1 的 9 文件清单不含它；它与上游
+`src/core/netif.c` **未被 A20OS 改动**（见 §2.1 的文件清单不含它；它与上游
 HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 
 因此 `struct netif` 仍是上游定义：单组 input/output/linkoutput 回调、无队列、
@@ -187,6 +194,90 @@ HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 语义与 Linux 一致：REUSEADDR 的 bind 跳过 TIME-WAIT；`listen()` 与 `connect()`
 补做"同一 local addr/port 只能有一个 listener"和 5-tuple 唯一性检查，所以打开这个
 开关不会让两个活着的 listener 静默别名。
+
+### 2.7 CUBIC 拥塞控制（RFC 8312 核心）
+
+上游 lwIP 2.2.2d **只有 Reno 一种拥塞控制算法**，且硬编码在
+`tcp_in.c` / `tcp_out.c` / `tcp.c` 三处：`tcp_in.c` 的 ACK 分支里 `cwnd += 1 MSS
+per cwnd acked`，`tcp_out.c` 的 `tcp_rexmit_fast()` 里 `ssthresh = MIN(cwnd,
+snd_wnd)/2`，`tcp.c` 的 RTO 分支里 `cwnd = mss`。上游没有任何"按连接选择算法"的
+机制，`TCP_CONGESTION` 在 lwIP 里根本不存在。
+
+A20OS 新增：
+
+| 文件 | 作用 |
+|---|---|
+| `src/core/tcp_cubic.c`（新增） | 算法本体：整数定点实现，无一个 float |
+| `src/include/lwip/priv/tcp_cubic_priv.h`（新增） | `struct tcp_cubic_state`、定标常量、算法名解析 |
+| `src/include/lwip/tcp.h` | `struct tcp_pcb` 增加 `cong_alg` 与 `cubic` 字段 |
+| `src/core/tcp_in.c` | ACK 分支按 `cong_alg` 分派；`dupacks > 3` 的 Reno 加窗对 CUBIC 关闭 |
+| `src/core/tcp_out.c` | `tcp_rexmit_fast()` 里的快重传降窗分派 |
+| `src/core/tcp.c` | RTO 分支调用 `tcp_cubic_on_rto()` |
+| `sources.mk` | 登记新文件 |
+
+**这不是"补丁级"改动，而是算法级改动。** §2.2 的警告同样适用于此：
+读本树 TCP 代码时不能按"lwIP = Reno"推断行为。开关是 `LWIP_TCP_CUBIC`，
+由 `kernel/net/net_profile.h` 按资源档位给出（EMBEDDED 关，DEFAULT/SERVER 开）。
+
+实现的 RFC 条款与**未**实现的条款，都逐条写在
+`src/include/lwip/priv/tcp_cubic_priv.h` 的文件注释里。特别注意三条**不是**
+上游行为的语义：
+
+1. **快收敛（§4.6）是"减小" `W_max`**，用 `W_max * (1 + beta_cubic) / 2`，
+   不是 `W_max * (1 + beta_c)`。名字有误导性：它让流在更长的时间里长得**更慢**，
+   目的是给新加入的流让出带宽。Linux 的 fast-convergence 注释里那个
+   `beta_c = 0.85` 出自更早的版本，RFC 8312 的伪代码用的是 `beta_cubic = 0.7`
+   并带 `/2.0`。
+2. **§4.5 的 `ssthresh = cwnd * beta_cubic`（即 ×0.7），不是 `cwnd * (1 - beta)`**
+   （§4.1 描述的是 cwnd 被降到 `W_max * beta_cubic`，两处同为 ×0.7）。
+3. **§4.7（RTO）与 §4.5（快重传）是两条不同的规则**：RTO 之后的第一次拥塞
+   避免用 `K := 0`、`W_max := 当时的 cwnd`。因此 `tcp.c` 的 RTO 分支调
+   `tcp_cubic_on_rto()` 而不是 `tcp_cubic_on_loss()`——走同一条路径会让连接停在
+   一条锚定在已被超时甩掉的 `W_max` 上的曲线上。
+
+**时间基准是秒。** `W_cubic` 的 `C = 0.4` 单位是 segment/s³，而本栈唯一的时钟是
+`tcp_ticks`（每 `TCP_SLOW_INTERVAL` = 500 ms 一跳）。所以 `K` 与 epoch 经过时间都
+先换算成 1/256 秒再进立方项。这一步漏掉不是精度损失而是**速率差 8 倍**。
+
+**没有实现、因此不得假定的**（同样逐条列在头注释里）：§4.2 的 TCP-friendly
+区域只以 Reno 速率近似，不是 Eq. 4 的 `W_est(t)`；HyStart / TCP-AQ / DCTCP /
+Prague / ECN 与 RTT 方差耦合均无；`W_max` 不跨 pcb 生命周期持久化。
+
+算法正确性由主机侧单元测试 `tools/test-tcp-cubic-host.sh`
+（`tools/test-tcp-cubic-host.c`）覆盖，参考值全部按 RFC 原文的双精度公式独立算出，
+不从实现反推。往返传输的 smoke 门禁**不能**覆盖这些：一条从不丢包的连接根本不
+会离开慢启动，因此对本文件里那几类算错（立方根截断、定标错位、时间轴单位错、
+快收敛方向反了）全部不敏感。
+
+### 2.8 每 pcb 接收窗口上限（`wnd_limit`）
+
+lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_WND_MAX(pcb)`
+（`src/core/tcp.c` 的注释写的是 "restore the window"）。因此**在 lwIP 内部没有任何
+一处可以挂一个比 `TCP_WND` 更小的常驻接收上限**——任何写进 `rcv_wnd` 的较小值
+都会在下一次 `recv()` 时被抹掉。要让 `SO_RCVBUF` 成为一个真的约束而不是设置即丢，
+必须给 pcb 一个上限字段：
+
+| 改动 | 位置 |
+|---|---|
+| `tcpwnd_size_t wnd_limit;`（0 = 无上限） | `src/include/lwip/tcp.h` 的 receiver 段 |
+| `tcp_recved()` 先取 `min(TCP_WND_MAX(pcb), wnd_limit)`，两者皆 0 时保持上游值 | `src/core/tcp.c` |
+
+`struct tcp_pcb` 是 lwIP 的公开结构体，`wnd_limit` 属于**必须与上游同步的字段**，
+和 §2.2 的 `lane` / §2.7 的 `cong_alg` 同类：合并上游时这三个字段要一起搬。
+
+**语义边界（不要按 Linux 推断）**：
+
+- 上限只约束 `rcv_wnd`（本地还愿意收多少），不约束 `rx_buf` 的 pbuf 数量，
+  也不影响 `tcp_recved()` 之外的行为。
+- 上限不能突破窗口缩放：线上字段是 `rcv_wnd >> rcv_scale`，16 位，所以有效天花板
+  是 `min(TCP_WND, 0xFFFF << TCP_RCV_SCALE)`，超出的部分在
+  `kernel/net/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 里被夹掉。两个界都用
+  **配置常量**而不是 pcb 的当前状态：`TCP_WND_MAX(pcb)` 在握手完成、对端通告窗口
+  缩放之前等于 `TCPWND16(TCP_WND)`，而 `pcb->rcv_scale` 在第一条窗口更新选项发出去
+  之前还是 0。拿 pcb 状态去夹，会让每个刚 `socket()` 出来的 socket 被永久钉死在
+  64 KiB。
+- 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
+  "还回去" 的机制。
 
 ## 3. 重新同步上游的流程
 

@@ -594,6 +594,76 @@ static void nlrt_fill_hdr(netlink_msghdr_t *nlh, uint16_t type, uint32_t total,
     nlh->nlmsg_pid = pid;
 }
 
+/*
+ * Build one RTM_NEWLINK/RTM_GETLINK-shaped message from a snapshot entry.
+ * Returns the total nlmsg_len, or 0 if the payload does not fit NLRT_MSG_MAX.
+ *
+ * Factored out of the RTM_GETLINK dump so a multicast notification is built by
+ * the same code as the dump.  A listener that diffs "the link I was told about"
+ * against "the link in the next dump" would otherwise be comparing two
+ * independently written encodings, and any drift between them shows up as a
+ * phantom change rather than as a bug.
+ */
+static size_t nlrt_build_linkmsg(uint8_t *buf, const nlrt_link_t *e,
+                                 uint16_t msg_type, uint32_t pid,
+                                 uint32_t seq)
+{
+    size_t off = sizeof(netlink_msghdr_t);
+    ifinfomsg_t *ifi = (ifinfomsg_t *)(buf + off);
+    memset(ifi, 0, sizeof(*ifi));
+    ifi->ifi_family = AF_UNSPEC;
+    ifi->ifi_index = (int32_t)e->index;
+    ifi->ifi_flags = e->flags;
+    ifi->ifi_change = 0xffffffffU;
+    off += sizeof(*ifi);
+    if (e->mtu)
+        off = nlrt_put_attr(buf, off, IFLA_MTU, &e->mtu, sizeof(e->mtu));
+    off = nlrt_put_attr(buf, off, IFLA_ADDRESS, e->mac, sizeof(e->mac));
+    off = nlrt_put_attr(buf, off, IFLA_IFNAME, e->name, strlen(e->name) + 1);
+    size_t total = sizeof(netlink_msghdr_t) + off;
+    if (total > NLRT_MSG_MAX)
+        return 0;
+    nlrt_fill_hdr((netlink_msghdr_t *)buf, msg_type, (uint32_t)total,
+                  seq, pid);
+    return total;
+}
+
+/*
+ * Build one RTM_NEWADDR/RTM_GETADDR-shaped message.  Same reason as above.
+ *
+ * `addr` / `mask` are passed rather than taken from the snapshot entry because
+ * the caller holds the values it just applied (or, for a delete, the values it
+ * just removed).  Reading them back from a post-change snapshot would report an
+ * all-zero address for a delete, which is not an address anyone can act on.
+ * `msg_type` selects RTM_NEWADDR vs RTM_DELADDR; the payload is identical,
+ * which is what Linux does too -- the type is the whole difference.
+ */
+static size_t nlrt_build_addrmsg(uint8_t *buf, uint32_t ifindex,
+                                 const uint8_t addr[4], const uint8_t mask[4],
+                                 const char *name, uint8_t loopback,
+                                 uint16_t msg_type,
+                                 uint32_t pid, uint32_t seq)
+{
+    size_t off = sizeof(netlink_msghdr_t);
+    ifaddrmsg_t *ifa = (ifaddrmsg_t *)(buf + off);
+    memset(ifa, 0, sizeof(*ifa));
+    ifa->ifa_family = AF_INET;
+    ifa->ifa_prefixlen = nlrt_mask_prefixlen(mask);
+    ifa->ifa_scope = loopback ? 254 : NLRT_SCOPE_UNIVERSE;
+    ifa->ifa_index = ifindex;
+    off += sizeof(*ifa);
+    off = nlrt_put_attr(buf, off, IFA_ADDRESS, addr, 4);
+    off = nlrt_put_attr(buf, off, IFA_LOCAL, addr, 4);
+    if (name && name[0])
+        off = nlrt_put_attr(buf, off, IFA_LABEL, name, strlen(name) + 1);
+    size_t total = sizeof(netlink_msghdr_t) + off;
+    if (total > NLRT_MSG_MAX)
+        return 0;
+    nlrt_fill_hdr((netlink_msghdr_t *)buf, msg_type, (uint32_t)total,
+                  seq, pid);
+    return total;
+}
+
 /* Bounded rtattr walker over a user-supplied attribute block.  The payload is
  * only ever bounded by the validated nlmsg_len, and a length that does not fit
  * the remaining block is a parse error, not a reason to stop early. */
@@ -856,39 +926,22 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 
     for (int i = 0; i < nlinks && rc >= 0; i++) {
         const nlrt_link_t *e = &links[i];
-        /* The payload follows the header, so it starts past it -- writing the
-         * header last would otherwise clobber the leading struct. */
-        size_t off = sizeof(netlink_msghdr_t);
+        /* The builders share the encoding with the multicast path; `type` is
+         * the only thing that differs between a dump and a notification. */
+        size_t total;
         if (type == RTM_GETLINK) {
-            ifinfomsg_t *ifi = (ifinfomsg_t *)(msg.b + off);
-            memset(ifi, 0, sizeof(*ifi));
-            ifi->ifi_family = AF_UNSPEC;
-            ifi->ifi_index = (int32_t)e->index;
-            ifi->ifi_flags = e->flags;
-            ifi->ifi_change = 0xffffffffU;
-            off += sizeof(*ifi);
-            if (e->mtu)
-                off = nlrt_put_attr(msg.b, off, IFLA_MTU, &e->mtu, sizeof(e->mtu));
-            off = nlrt_put_attr(msg.b, off, IFLA_ADDRESS, e->mac, sizeof(e->mac));
-            off = nlrt_put_attr(msg.b, off, IFLA_IFNAME, e->name,
-                                strlen(e->name) + 1);
+            total = nlrt_build_linkmsg(msg.b, e, RTM_GETLINK, pid,
+                                       req->nlmsg_seq);
         } else if (type == RTM_GETADDR) {
             if (!e->has_ip)
                 continue;
-            ifaddrmsg_t *ifa = (ifaddrmsg_t *)(msg.b + off);
-            memset(ifa, 0, sizeof(*ifa));
-            ifa->ifa_family = AF_INET;
-            ifa->ifa_prefixlen = nlrt_mask_prefixlen(e->mask);
-            ifa->ifa_scope = e->loopback ? 254 : NLRT_SCOPE_UNIVERSE;
-            ifa->ifa_index = e->index;
-            off += sizeof(*ifa);
-            off = nlrt_put_attr(msg.b, off, IFA_ADDRESS, e->ip, sizeof(e->ip));
-            off = nlrt_put_attr(msg.b, off, IFA_LOCAL, e->ip, sizeof(e->ip));
-            off = nlrt_put_attr(msg.b, off, IFA_LABEL, e->name,
-                                strlen(e->name) + 1);
+            total = nlrt_build_addrmsg(msg.b, e->index, e->ip, e->mask,
+                                       e->name, e->loopback, RTM_GETADDR,
+                                       pid, req->nlmsg_seq);
         } else {
             if (!e->has_gw)
                 continue;
+            size_t off = sizeof(netlink_msghdr_t);
             rtmsg_t *rt = (rtmsg_t *)(msg.b + off);
             memset(rt, 0, sizeof(*rt));
             rt->rtm_family = AF_INET;
@@ -901,10 +954,12 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
             off = nlrt_put_attr(msg.b, off, RTA_GATEWAY, e->gw, sizeof(e->gw));
             uint32_t oif = e->index;
             off = nlrt_put_attr(msg.b, off, RTA_OIF, &oif, sizeof(oif));
+            total = sizeof(netlink_msghdr_t) + off;
+            nlrt_fill_hdr((netlink_msghdr_t *)msg.b, type, (uint32_t)total,
+                          req->nlmsg_seq, pid);
         }
-        size_t total = sizeof(netlink_msghdr_t) + off;
-        nlrt_fill_hdr((netlink_msghdr_t *)msg.b, type, (uint32_t)total,
-                      req->nlmsg_seq, pid);
+        if (total == 0)
+            continue;               /* nlrt_put_attr refused; see NLRT_MSG_MAX */
         rc = net_enqueue_msg_locked(requester, msg.b, total, &from, sizeof(from));
     }
 
@@ -918,4 +973,149 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
     }
     net_bucket_unlock(rb, irq);
     return rc < 0 ? rc : (int)len;
+}
+
+/* ------------------------------------------------------------------ */
+/* RTNETLINK multicast: RTM_NEWLINK / RTM_NEWADDR                     */
+/* ------------------------------------------------------------------ */
+
+/* Group numbers from linux/rtnetlink.h.  RTNLGRP_LINK is what NetworkManager
+ * and `ip monitor link` bind to see carrier transitions; RTNLGRP_IPV4_IFADDR
+ * is the address group.  A listener binds the bitwise OR of the groups it
+ * wants, exactly as it already does for the uevent group. */
+#define RTNLGRP_LINK        0x1
+#define RTNLGRP_IPV4_IFADDR 0x5
+
+/*
+ * Sequence numbers for notifications.  Atomic because the broadcast is not
+ * serialised by any single lock: two CPUs flushing pending link events walk
+ * the table under different bucket locks, and a repeated nlmsg_seq is what
+ * lets a listener's reorder logic mistake a fresh event for a retransmit.
+ */
+static volatile uint32_t g_nlrt_notify_seq;
+
+static uint32_t nlrt_next_seq(void)
+{
+    return __atomic_add_fetch(&g_nlrt_notify_seq, 1, __ATOMIC_RELAXED);
+}
+
+/*
+ * Hand one already-built message to every NETLINK_ROUTE socket bound to
+ * `group`.
+ *
+ * Takes no lock of its own beyond the one bucket at a time, and must be called
+ * with g_lwip_lock NOT held: the lock contract forbids holding it together with
+ * a socket-table bucket lock, and nlrt_snapshot() takes it for itself.
+ *
+ * A full receive queue for one listener does not stop the others: Linux drops
+ * the message for that socket and reports the overflow, because the
+ * alternative -- abandoning the broadcast -- would let one slow reader silence
+ * every other reader.  There is no socket-level "report the drop" surface here,
+ * so this counts it and moves on; see the klog below.
+ */
+static int nlrt_broadcast(const uint8_t *msg, size_t len, uint32_t group)
+{
+    net_sockaddr_nl_t src = {
+        .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = group,
+    };
+    int delivered = 0, dropped = 0;
+    for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
+        uint64_t bf = net_bucket_lock(b);
+        int base = b << NET_SOCK_BUCKET_SHIFT;
+        for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
+            net_socket_t *s = g_sockets[base + k];
+            if (!s || s->domain != AF_NETLINK ||
+                s->protocol != NETLINK_ROUTE || !s->bound)
+                continue;
+            net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
+            if (!nl || !(nl->nl_groups & group))
+                continue;
+            if (net_enqueue_msg_locked(s, msg, len, &src, sizeof(src)) < 0)
+                dropped++;
+            else
+                delivered++;
+        }
+        net_bucket_unlock(b, bf);
+    }
+    /* A silent drop is the one failure mode a listener can never diagnose:
+     * it sees a gap in the event stream with nothing to explain it.  There is
+     * no per-socket overflow report on this stack to surface it in, so it is
+     * logged here instead. */
+    if (dropped)
+        klog(KLOG_WARN,
+             "[RTNETLINK] multicast group 0x%x dropped for %d listener(s), delivered=%d\n",
+             (unsigned)group, dropped, delivered);
+    return dropped ? -EAGAIN : (delivered ? 0 : -ENOENT);
+}
+
+/*
+ * A link's admin/carrier state changed (a20_lwip_sync_link_state() saw the
+ * driver flip), or user space asked for a change through RTM_NEWLINK.  Publish
+ * the link's post-change state to RTNLGRP_LINK.
+ *
+ * `events` is the batch a20_lwip_netlink_flush() collected while holding
+ * g_lwip_lock; it is replayed here with the lock released.
+ */
+void net_netlink_link_notify(const nlrt_link_event_t *events, int n)
+{
+    if (!events || n <= 0)
+        return;
+    nlrt_link_t links[NLRT_MAX_LINKS];
+    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    if (nlinks <= 0)
+        return;
+
+    union { uint64_t align; uint8_t b[NLRT_MSG_MAX]; } msg;
+    for (int i = 0; i < n; i++) {
+        const nlrt_link_t *e = NULL;
+        for (int k = 0; k < nlinks; k++)
+            if (links[k].index == events[i].index) {
+                e = &links[k];
+                break;
+            }
+        if (!e)
+            continue;               /* the netif went away; nothing to publish */
+        size_t total = nlrt_build_linkmsg(msg.b, e, RTM_NEWLINK, 0,
+                                          nlrt_next_seq());
+        if (total == 0)
+            continue;
+        (void)nlrt_broadcast(msg.b, total, RTNLGRP_LINK);
+    }
+}
+
+/*
+ * An interface's IPv4 address changed.  `addr` / `mask` are the values that
+ * were just applied (or just removed), not a re-read: after a delete the slot
+ * is empty, and a notification carrying 0.0.0.0 would tell every listener to
+ * forget an address without ever naming it.
+ *
+ * An all-zero address is published as RTM_DELADDR rather than RTM_NEWADDR.
+ * Emitting RTM_NEWADDR with 0.0.0.0 would be a message no listener can act on:
+ * "you now have address 0.0.0.0" is not a state any interface is in.
+ */
+void net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
+                             const uint8_t mask[4])
+{
+    if (!addr)
+        return;
+    nlrt_link_t links[NLRT_MAX_LINKS];
+    int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
+    const nlrt_link_t *e = NULL;
+    for (int k = 0; k < nlinks; k++)
+        if (links[k].index == ifindex) {
+            e = &links[k];
+            break;
+        }
+    if (!e)
+        return;
+
+    int deleted = nlrt_ip4_isany(addr);
+    union { uint64_t align; uint8_t b[NLRT_MSG_MAX]; } msg;
+    size_t total = nlrt_build_addrmsg(msg.b, e->index, addr, mask, e->name,
+                                      e->loopback,
+                                      deleted ? RTM_DELADDR : RTM_NEWADDR,
+                                      0, nlrt_next_seq());
+    if (total == 0)
+        return;
+    (void)nlrt_broadcast(msg.b, total, RTNLGRP_IPV4_IFADDR);
 }
