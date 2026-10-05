@@ -50,6 +50,11 @@
 #include "lwip/err.h"
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
+#if LWIP_TCP_CUBIC
+/* A20OS divergence: per-connection congestion control.  This header defines
+ * struct tcp_cubic_state and does not include lwip/tcp.h back. */
+#include "lwip/priv/tcp_cubic_priv.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -369,6 +374,17 @@ struct tcp_pcb {
   u32_t ts_lastacksent;
   u32_t ts_recent;
 #endif /* LWIP_TCP_TIMESTAMPS */
+
+#if LWIP_TCP_CUBIC
+  /* CUBIC (RFC 8312) per-PCB state.  See lwip/priv/tcp_cubic_priv.h; these
+     fields are meaningless when cong_alg is not TCP_CONG_CUBIC. */
+  struct tcp_cubic_state cubic;
+#endif /* LWIP_TCP_CUBIC */
+
+  /* Congestion control algorithm for this connection.  A20OS divergence:
+     upstream has exactly one algorithm and hardcodes it.  Values are
+     TCP_CONG_RENO / TCP_CONG_CUBIC from lwip/priv/tcp_cubic_priv.h. */
+  u8_t cong_alg;
 
   /* idle time before KEEPALIVE is sent */
   u32_t keep_idle;

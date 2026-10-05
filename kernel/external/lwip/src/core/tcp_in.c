@@ -46,6 +46,9 @@
 #if LWIP_TCP /* don't build if not configured for use in lwipopts.h */
 
 #include "lwip/priv/tcp_priv.h"
+#if LWIP_TCP_CUBIC
+#include "lwip/priv/tcp_cubic_priv.h" /* A20OS: per-connection congestion control */
+#endif
 #include "lwip/def.h"
 #include "lwip/ip_addr.h"
 #include "lwip/netif.h"
@@ -1262,8 +1265,18 @@ tcp_receive(struct tcp_pcb *pcb)
                 ++pcb->dupacks;
               }
               if (pcb->dupacks > 3) {
-                /* Inflate the congestion window */
-                TCP_WND_INC(pcb->cwnd, pcb->mss);
+                /* Inflate the congestion window.  A20OS divergence: this is
+                 * Reno's "cwnd += 1 MSS per extra dupack" fudge, and it is
+                 * wrong for CUBIC -- the cubic function is defined in terms of
+                 * time since the epoch, and letting dupacks add to cwnd behind
+                 * its back makes the connection overshoot the curve it is
+                 * supposed to be following.  CUBIC grows on ACK alone. */
+#if LWIP_TCP_CUBIC
+                if (pcb->cong_alg != TCP_CONG_CUBIC)
+#endif
+                {
+                  TCP_WND_INC(pcb->cwnd, pcb->mss);
+                }
               }
               if (pcb->dupacks >= 3) {
                 /* Do fast retransmit (checked via TF_INFR, not via dupacks count) */
@@ -1302,6 +1315,15 @@ tcp_receive(struct tcp_pcb *pcb)
       /* Update the congestion control variables (cwnd and
          ssthresh). */
       if (pcb->state >= ESTABLISHED) {
+#if LWIP_TCP_CUBIC
+        /* A20OS divergence: dispatch to the connection's algorithm.  CUBIC
+         * covers both slow start and congestion avoidance, so it replaces the
+         * whole block rather than only the avoidance arm -- see
+         * tcp_cubic.c for why the two arms are not separable. */
+        if (pcb->cong_alg == TCP_CONG_CUBIC) {
+          tcp_cubic_on_ack(pcb, acked);
+        } else
+#endif /* LWIP_TCP_CUBIC */
         if (pcb->cwnd < pcb->ssthresh) {
           tcpwnd_size_t increase;
           /* limit to 1 SMSS segment during period following RTO */

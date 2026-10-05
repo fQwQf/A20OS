@@ -8,6 +8,12 @@
 #include "lwip/igmp.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
+/* TCP_CONGESTION name validation and the real algorithm name.  A20OS divergence
+ * in lwIP; see kernel/external/lwip/DIVERGENCE.md 2.5.  Included
+ * unconditionally: the TCP_CONG_* values are outside the header's
+ * LWIP_TCP_CUBIC guard precisely so that a build without CUBIC can still accept
+ * "reno" and reject "cubic" by name. */
+#include "lwip/priv/tcp_cubic_priv.h"
 
 #ifndef SHUT_RD
 #define SHUT_RD   0
@@ -596,8 +602,44 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
     if (level == IPPROTO_TCP) {
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;
-        if (optname == TCP_CONGESTION)
-            return optval && optlen ? 0 : -EINVAL;
+        if (optname == TCP_CONGESTION) {
+            /* Validate the name instead of accepting anything.  This used to
+             * `return optval && optlen ? 0 : -EINVAL`, so "bbr", "reno " and
+             * "cubic-but-not-really" all set successfully on a stack that has
+             * exactly one algorithm, and the caller had no way to find out
+             * which one it got.  -ENOPROTOOPT is what Linux returns for an
+             * algorithm it cannot honour, and it is the only answer that tells
+             * the truth: the request was well-formed, this kernel has no such
+             * algorithm.  That includes the EMBEDDED profile, where CUBIC is
+             * compiled out -- "cubic" is a real name this build cannot serve. */
+            char name[16];
+            size_t n;
+            int alg;
+            if (!optval || !optlen)
+                return -EINVAL;
+            /* The name is a NUL-terminated string, not a fixed-size blob: Linux
+             * treats optlen as the buffer size and reads up to it.  Truncating
+             * at 15 chars means an over-long name is rejected as unknown
+             * rather than silently matching a prefix. */
+            n = optlen < sizeof(name) ? optlen : sizeof(name);
+            memcpy(name, optval, n);
+            name[n - 1] = '\0';
+            alg = tcp_cong_alg_parse(name);
+            if (alg < 0)
+                return -ENOPROTOOPT;
+            s->tcp_congestion = (uint8_t)alg;
+            /* Apply immediately to a live pcb as well as to future ones, so
+             * the option means what the caller just asked for.  Linux allows
+             * this on an established connection.  Switching does not reset the
+             * window or discard the algorithm's state: RFC 8312 4.8 already
+             * says what a connection entering congestion avoidance without a
+             * congestion event behind it must do, and that is exactly this
+             * case. */
+            if (s->tcp) {
+                a20_net_cong_apply(s->tcp, (uint8_t)alg);
+            }
+            return 0;
+        }
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
         int val;
@@ -806,15 +848,33 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         if (s->type != SOCK_STREAM)
             return -ENOPROTOOPT;
         if (optname == TCP_CONGESTION) {
-            /* lwIP's only congestion control is Reno (src/core/tcp.c).
-             * Reporting "cubic" made monitoring and tuning tools believe
-             * a CUBIC implementation existed.  setsockopt rejects every
-             * name, so reporting the one real algorithm keeps the two
-             * consistent. */
-            static const char congestion[] = "reno";
-            size_t n = *optlen < sizeof(congestion) ? *optlen : sizeof(congestion);
+            /* Report the algorithm this connection will actually use, which is
+             * the whole point of the option.  It used to hardcode "reno" (and,
+             * before that, "cubic" when no CUBIC existed at all): the first
+             * made a caller that had set "cubic" unable to tell whether the
+             * request took, the second made monitoring tools believe an
+             * implementation existed that did not.
+             *
+             * A live pcb is authoritative over the stored request, because
+             * setsockopt applies to the pcb as well -- a connection that was
+             * accepted inherits its listener's algorithm, so the socket's own
+             * field is not always the answer. */
+            uint8_t alg = s->tcp_congestion;
+#if LWIP_TCP_CUBIC
+            if (s->tcp) {
+                alg = s->tcp->cong_alg;
+            }
+#else
+            /* Without CUBIC there is only ever one algorithm, whatever the
+             * socket recorded.  Saying otherwise here would put this
+             * getsockopt at odds with the setsockopt above it. */
+            alg = TCP_CONG_RENO;
+#endif
+            const char *name = tcp_cong_alg_name(alg);
+            size_t len = strlen(name) + 1;
+            size_t n = *optlen < len ? *optlen : len;
             if (n)
-                memcpy(optval, congestion, n);
+                memcpy(optval, name, n);
             *optlen = n;
             return 0;
         }

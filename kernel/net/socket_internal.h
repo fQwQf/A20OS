@@ -284,6 +284,10 @@ typedef struct net_socket {
     int tcp_connecting;
     int tcp_err;
     int tcp_nodelay;
+    /* Congestion control requested via TCP_CONGESTION, as a TCP_CONG_*
+     * value from lwip/priv/tcp_cubic_priv.h.  TCP_CONG_RENO is the default
+     * and is also what getsockopt reports for a socket that never set it. */
+    uint8_t tcp_congestion;
     int reuseaddr;
     int reuseport;
     int ipv6_v6only;
@@ -807,6 +811,13 @@ int      net_inet_tcp_listen(net_socket_t *s, int backlog);
 void     net_inet_ip_opts_apply(net_socket_t *s);
 void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                                uint8_t *mc_ttl);
+
+/* Select the congestion control algorithm (TCP_CONGESTION) on an lwIP pcb.
+ * Defined in socket_inet.c, called from socket_control.c's setsockopt handler,
+ * so an established connection can switch algorithms without the socket's
+ * other options being reapplied.  Takes g_lwip_lock.  `alg` is a TCP_CONG_*
+ * value; with LWIP_TCP_CUBIC off only the default is reachable. */
+void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
 
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);

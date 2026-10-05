@@ -86,6 +86,7 @@
 #define NET_PROFILE_TCP_SACK_OUT     0
 #define NET_PROFILE_TCP_MAX_SACK_NUM 1
 #define NET_PROFILE_TCP_TIMESTAMPS   0
+#define NET_PROFILE_TCP_CUBIC        0
 
 /*
  * Budget, stated honestly: this profile is sized so the *stack's own* pools
@@ -142,6 +143,7 @@
 #define NET_PROFILE_TCP_SACK_OUT     1
 #define NET_PROFILE_TCP_MAX_SACK_NUM 4
 #define NET_PROFILE_TCP_TIMESTAMPS   1
+#define NET_PROFILE_TCP_CUBIC        1
 
 #else
 
@@ -175,6 +177,7 @@
 #define NET_PROFILE_TCP_SACK_OUT     1
 #define NET_PROFILE_TCP_MAX_SACK_NUM 4
 #define NET_PROFILE_TCP_TIMESTAMPS   1
+#define NET_PROFILE_TCP_CUBIC        1
 
 #endif /* CONFIG_NET_PROFILE */
 
