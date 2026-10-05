@@ -352,6 +352,48 @@ per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被�
 重编后整个目标文件也逐字节相同（仅存的差异是 UBSan 内嵌的源码行号表，因为文件
 多了行——加一行注释也会让它动，这不是本改动特有的）。
 
+### 2.10 意向登记：per-netif 校验和卸载（**未实施**，不要当成已生效能力）
+
+**状态：只调查，未启用。** 本节记录"如果将来要做 TX/RX 校验和卸载，本树需要哪些
+偏离上游的改动"，以及为什么现在不做。完整调查见 `docs/net/checksum-offload.md`。
+
+**先更正一个此前的错误说法。** 上一轮记录的是"vendored lwIP 2.2.2 没有任何承载
+握手协商的 flag"。这句话不成立，登记在案的载体是：
+
+| 已有（上游自带，本树未启用） | 位置 |
+|---|---|
+| `LWIP_CHECKSUM_CTRL_PER_NETIF`，默认 **0** | `src/include/lwip/opt.h:2371-2373` |
+| `NETIF_CHECKSUM_GEN_IP/UDP/TCP/ICMP/ICMP6`、`NETIF_CHECKSUM_CHECK_*` 十个位 | `src/include/lwip/netif.h:140-153` |
+| `struct netif::chksum_flags` 字段（开关关闭时不编译） | `src/include/lwip/netif.h:340-342` |
+| `NETIF_SET_CHECKSUM_CTRL()` / `IF__NETIF_CHECKSUM_ENABLED()` | `src/include/lwip/netif.h:408-417` |
+
+开关为 0 时 `IF__NETIF_CHECKSUM_ENABLED(...)` 展开为空语句（`netif.h:416`），
+收发两侧的校验和因此**无条件**执行。这是"能力位永远不置位"的真实原因，
+不是缺少表达手段。
+
+**若要实施，需要动上游的文件与位置：**
+
+| 改动 | 位置 | 为什么绕不开 |
+|---|---|---|
+| `LWIP_CHECKSUM_CTRL_PER_NETIF=1` | `src/include/lwip/opt.h:2371-2373`（或在 `kernel/net/lwip_port/lwipopts.h` 定义，那属配置不属分歧） | 整个机制的入口 |
+| TCP 发送路径接入 per-netif 控制 | `src/core/tcp_out.c:1587-1596` | **该处没有任何 `IF__NETIF_CHECKSUM_ENABLED` 包裹**，`seg->tcphdr->chksum` 无条件被写成完整校验和；只打开开关会得到"UDP 卸载、TCP 不卸载"的半吊子状态 |
+| 逐帧的校验和已验证通道（RX） | `src/include/lwip/pbuf.h` 的 `PBUF_FLAG_*` | lwIP 现有的 `chksum_flags` 是**每 netif 一个位**，而"这一帧验没验"必须逐帧；`PBUF_FLAG_NOCHECKSUM` 这类位在 2.2.2 已不存在（`CHECKSUM_BY_HARDWARE` 整棵树无引用） |
+
+**风险（按严重度）：** 协商而不逐帧传递结果 ⇒ lwIP 去验设备没算的校验和 ⇒ 每一个包
+都被丢、静默损坏；NAT 的 L4 校验和增量修正（`kernel/net/netfilter_nat.c:754-892`）
+与"校验和字段是部分和"互斥；`NETIF_CHECKSUM_CHECK_IP` 关掉后 IPv4 头校验和不再
+过滤。
+
+**设备侧现状（决定了 RX 一半本机不可验证）：** `VIRTIO_NET_HDR_F_DATA_VALID`
+在 `qemu-10.0.13+ds/include/standard-headers/linux/virtio_net.h:132` 有定义，
+但 `hw/net/virtio-net.c` 全文不使用它（只有 e1000e / igb / vmxnet3 用），即 QEMU
+10.0 的 virtio-net 不逐帧上报校验和有效性。TX 一半设备侧是通的：
+`hw/net/net_tx_pkt.c:833-838` 会为带 `VIRTIO_NET_HDR_F_NEEDS_CSUM` 的帧补算校验和。
+
+**重新同步上游时**：本节是意向登记，不是已生效差异，合并上游时**没有**必须搬运的
+代码；但若上游将来把 `LWIP_CHECKSUM_CTRL_PER_NETIF` 的默认值或 TCP 发送路径改掉，
+上面三条"必须动上游"的清单要重新评估。
+
 ## 3. 重新同步上游的流程
 
 ```sh
