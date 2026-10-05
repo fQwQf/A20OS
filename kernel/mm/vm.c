@@ -124,7 +124,13 @@ void mm_context_enter(mm_struct_t *mm, unsigned cpu)
         /* The active bit must be globally visible before the architecture can
          * install this mm's page-table token. */
         arch_mb();
-        if (mm->arch_asid && cpu < CONFIG_NR_CPUS) {
+        /* This convergence is not arch-specific.  Only riscv64 defines
+         * ARCH_MM_CONTEXT_ALLOC, so on x86_64 mm->arch_asid is always 0 and
+         * gating on it made the whole block dead code.  Without it a CPU that
+         * sets its active_cpus bit after mm_tlb_invalidate_finish() sampled
+         * the mask is neither IPI'd nor able to self-heal, and keeps stale
+         * translations of frames the shootdown already released. */
+        if (cpu < CONFIG_NR_CPUS) {
             unsigned flushes = 0;
             for (;;) {
                 uint64_t generation = __atomic_load_n(
