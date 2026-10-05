@@ -31,6 +31,23 @@
 #define LWIP_NETIF_API                  0
 #define LWIP_TCPIP_CORE_LOCKING         0
 
+/*
+ * SO_REUSEADDR support.  Left at opt.h's default of 0 this port had no way to
+ * honour setsockopt(SO_REUSEADDR): the socket layer stores the flag in
+ * net_socket_t::reuseaddr and net_bind_reuse_allowed() consults it, but lwIP
+ * never learns of it, so tcp_bind() keeps scanning the TIME-WAIT list and a
+ * listener restarted on the same port gets ERR_USE (EADDRINUSE) for as long as
+ * the previous connection's TIME-WAIT pcb lives -- 2 * TCP_MSL, i.e. two
+ * minutes here.  Turning the switch on is only half the fix; the other half is
+ * net_inet_tcp_apply_options() copying reuseaddr onto the pcb's SOF_REUSEADDR,
+ * because lwIP keys every SO_REUSE decision off the pcb, not off the caller.
+ * Together they make rebinding work the way Linux does: TIME-WAIT is skipped
+ * for a REUSEADDR bind, and listen()/connect() re-check the 5-tuple and the
+ * local address/port so a REUSEADDR bind cannot silently alias two live
+ * listeners.
+ */
+#define SO_REUSE                        1
+
 #define LWIP_HAVE_LOOPIF                1
 #define LWIP_NETIF_LOOPBACK             1
 #define LWIP_LOOPBACK_MAX_PBUFS         16

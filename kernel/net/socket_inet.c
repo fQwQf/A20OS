@@ -1198,30 +1198,28 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
             drain |= NET_BH_DRAIN_WRITE;
     }
 
-    if (__atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE)) {
-        s->tcp_connecting = 0;
-        s->tcp_err = __atomic_load_n(&s->bh_err_code, __ATOMIC_RELAXED);
-        s->closed = 1;
-        net_event_notify(s, A20_EVENT_ERROR, (uint64_t)s->tcp_err, 0);
-        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
-        if (net_wait_queue_collect_all_locked(
-                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
-            drain |= NET_BH_DRAIN_READ;
-        if (net_wait_queue_collect_all_locked(
-                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
-            drain |= NET_BH_DRAIN_WRITE;
-    }
-
-    if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
-        s->closed = 1;
-        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
-        if (net_wait_queue_collect_all_locked(
-                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
-            drain |= NET_BH_DRAIN_READ;
-        if (net_wait_queue_collect_all_locked(
-                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
-            drain |= NET_BH_DRAIN_WRITE;
-    }
+    /*
+     * Take the peer-EOF and peer-error flags but do not act on them yet.  They
+     * are applied *after* the ring has been drained, and that ordering is the
+     * fix for a whole class of "the transfer never finishes": TCP delivers data
+     * and the FIN that follows it in the same bottom-half pass whenever both
+     * arrived together, and the ring's `if (!s->closed)` guard then threw away
+     * bytes lwIP had already handed over.  read() answered 0 -- an EOF -- for a
+     * connection that still owed the application its last segment.
+     *
+     * The same happened on reset, which is worse: an RST arriving behind the
+     * peer's final data set bh_error, and the data went with it.
+     *
+     * So the flags are captured here and the ring is drained against the
+     * *pre-existing* s->closed, which is the local close the guard was written
+     * for.  A reader still sees the buffered bytes first and only then the EOF
+     * or the error, which is what read(2) promises.
+     */
+    int bh_error = __atomic_exchange_n(&s->bh_error, 0, __ATOMIC_ACQUIRE);
+    int bh_error_code = bh_error ? __atomic_load_n(&s->bh_err_code,
+                                                   __ATOMIC_RELAXED)
+                                 : 0;
+    int bh_closed = __atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE);
 
     for (;;) {
         net_bh_event_t *e = bh_ring_consume(&s->bh_ring);
@@ -1247,6 +1245,31 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
             }
         }
         bh_ring_consume_commit(&s->bh_ring);
+    }
+
+    if (bh_error) {
+        s->tcp_connecting = 0;
+        s->tcp_err = bh_error_code;
+        s->closed = 1;
+        net_event_notify(s, A20_EVENT_ERROR, (uint64_t)s->tcp_err, 0);
+        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
+        if (net_wait_queue_collect_all_locked(
+                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_READ;
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
+    }
+
+    if (bh_closed) {
+        s->closed = 1;
+        net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
+        if (net_wait_queue_collect_all_locked(
+                &s->read_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_READ;
+        if (net_wait_queue_collect_all_locked(
+                &s->write_waitq, PROC_WAKE_EVENT, wake_q))
+            drain |= NET_BH_DRAIN_WRITE;
     }
 
     if (__atomic_exchange_n(&s->bh_tx_wake, 0, __ATOMIC_ACQUIRE)) {
@@ -1360,6 +1383,19 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb)
         tcp_nagle_disable(pcb);
     if (s->keepalive)
         pcb->so_options |= SOF_KEEPALIVE;
+    /*
+     * SO_REUSEADDR has to reach the pcb, not just the socket record.  lwIP asks
+     * ip_get_option(pcb, SOF_REUSEADDR) in tcp_bind(),
+     * tcp_listen_with_backlog_and_err() and tcp_connect(), and nowhere else, so
+     * a flag that stays in net_socket_t leaves the option inert: the TIME-WAIT
+     * pcb of the previous connection keeps the local port reserved for
+     * 2 * TCP_MSL and a restart on the same port fails with EADDRINUSE.  The
+     * accepted child inherits it through SOF_INHERITED (tcp_in.c:
+     * `npcb->so_options = pcb->so_options & SOF_INHERITED`), so this one call
+     * site covers both the socket() path and the accept path.
+     */
+    if (s->reuseaddr)
+        ip_set_option(pcb, SOF_REUSEADDR);
     if (s->keep_idle > 0)
         pcb->keep_idle = (u32_t)s->keep_idle * 1000U;
     if (s->keep_intvl > 0)
@@ -1477,11 +1513,27 @@ void net_inet_socket_destroy(net_socket_t *s)
              * so they have to go before it does. */
             net_inet_accept_stage_purge(s);
         } else {
+            /* Graceful close, not abort.  tcp_abort() is tcp_abandon(pcb, 1),
+             * which puts a RST on the wire; that is the right teardown for a pcb
+             * the application never spoke on, and the wrong one for every
+             * socket close(), because it tells the peer "discard what I sent
+             * you".  A server that does the ordinary thing --
+             * write(), close() -- had its last segment routinely destroyed by
+             * this line, and whether the peer saw it depended on whether the
+             * RST or the data won the race to its receive queue.
+             *
+             * The same shape net_tcp_close_pcb() uses, deliberately: callbacks
+             * are unbound first so the teardown cannot re-enter the socket
+             * layer, tcp_close() sends the FIN and hands the pcb to lwIP's
+             * closing states, and abort is the documented fallback for the one
+             * case where tcp_close() cannot take the pcb (ERR_MEM with no room
+             * for the FIN and no CLOSEPEND retry). */
             tcp_arg(s->tcp, NULL);
             tcp_recv(s->tcp, NULL);
             tcp_err(s->tcp, NULL);
             tcp_sent(s->tcp, NULL);
-            tcp_abort(s->tcp);
+            if (tcp_close(s->tcp) != ERR_OK)
+                tcp_abort(s->tcp);
         }
         s->tcp = NULL;
     }
