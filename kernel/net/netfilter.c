@@ -20,9 +20,18 @@
  * Writers bracket their mutation with an odd then even value; readers sample
  * it around the scan and retry when it moved or was odd.  Readers stay
  * wait-free, which taking a lock under the global lwIP lock would not be.
+ *
+ * A packet meets three things here, in this order: the rule table (this file),
+ * then conntrack and NAT (kernel/net/netfilter_nat.c).  The order is
+ * deliberate -- a dropped packet must not create flow state or consume a NAT
+ * binding -- and it is why the Ethernet/IPv4/L4 walk lives in
+ * netfilter_parse_frame() below and is handed to the NAT half rather than
+ * repeated there.
  */
 
 #include "net/netfilter.h"
+#include "net/netfilter_internal.h"
+#include "net/lwip_stack.h"
 #include "core/lock.h"
 #include "core/seqlock.h"
 #include "core/string.h"
@@ -39,6 +48,10 @@ static unsigned g_rule_count;
  * packet path, which run under a different lock entirely.
  */
 static seqlock_t g_rule_seq = SEQLOCK_INIT;
+
+/* Shared with netfilter_nat.c; see netfilter_internal.h for why the NAT table
+ * uses the same writer lock rather than one of its own. */
+spinlock_t g_netfilter_lock;
 
 static void netfilter_rules_begin(void)
 {
@@ -73,9 +86,7 @@ static netfilter_stats_t *netfilter_stats_dir(netfilter_dir_t dir)
     return &g_stats[dir == NETFILTER_DIR_IN ? 0 : 1].stats;
 }
 
-static spinlock_t g_netfilter_lock;
-
-static uint32_t ipv4_from_str(const char *s, size_t len, uint32_t *out)
+int netfilter_ipv4_from_str(const char *s, size_t len, uint32_t *out)
 {
     uint32_t parts[4] = { 0, 0, 0, 0 };
     size_t i = 0, p = 0;
@@ -107,7 +118,7 @@ static uint32_t ipv4_from_str(const char *s, size_t len, uint32_t *out)
     return 1;
 }
 
-static void ipv4_to_str(uint32_t addr, char *buf, size_t bufsz)
+void netfilter_ipv4_to_str(uint32_t addr, char *buf, size_t bufsz)
 {
     snprintf(buf, bufsz, "%u.%u.%u.%u", (addr >> 24) & 0xff,
              (addr >> 16) & 0xff, (addr >> 8) & 0xff, addr & 0xff);
@@ -194,7 +205,7 @@ int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out)
                 out->src_addr = NETFILTER_NO_ADDR;
             } else {
                 uint32_t a;
-                if (!ipv4_from_str(val, vlen, &a))
+                if (!netfilter_ipv4_from_str(val, vlen, &a))
                     return -EINVAL;
                 out->src_addr = a;
             }
@@ -203,7 +214,7 @@ int netfilter_parse_rule(const char *line, size_t len, netfilter_rule_t *out)
                 out->dst_addr = NETFILTER_NO_ADDR;
             } else {
                 uint32_t a;
-                if (!ipv4_from_str(val, vlen, &a))
+                if (!netfilter_ipv4_from_str(val, vlen, &a))
                     return -EINVAL;
                 out->dst_addr = a;
             }
@@ -337,15 +348,19 @@ void netfilter_get_stats(netfilter_stats_t *out)
 }
 
 /*
- * Extract src/dst address, protocol and ports from an Ethernet+IPv4 frame.
- * Returns 0 when the frame is not IPv4 or is truncated; VLAN tags are
- * skipped.  Ports are only meaningful for TCP/UDP and are set to
+ * Extract src/dst address, protocol, ports and header offsets from an
+ * Ethernet+IPv4 frame.  Returns 0 when the frame is not IPv4 or is truncated;
+ * VLAN tags are skipped.  Ports are only meaningful for TCP/UDP and are set to
  * NETFILTER_NO_PORT otherwise.
+ *
+ * The offsets are part of the result rather than something the NAT rewriter
+ * re-derives: a rewriter working from its own arithmetic could disagree with
+ * the matcher about where the L4 header starts, and the two would then rewrite
+ * different bytes of the same packet.
  */
-static int netfilter_parse_frame(const uint8_t *f, size_t len, uint8_t *proto,
-                                 uint32_t *src, uint32_t *dst,
-                                 uint16_t *sport, uint16_t *dport)
+int netfilter_parse_frame(const uint8_t *f, size_t len, netfilter_frame_t *out)
 {
+    memset(out, 0, sizeof(*out));
     size_t off = 14;
     if (len < off)
         return 0;
@@ -368,20 +383,26 @@ static int netfilter_parse_frame(const uint8_t *f, size_t len, uint8_t *proto,
         return 0;
     /* Fragmented non-first fragments carry no usable L4 header. */
     uint16_t frag = (uint16_t)(((ip[6] << 8) | ip[7]) & 0x1fff);
-    *proto = ip[9];
-    *src = ((uint32_t)ip[12] << 24) | ((uint32_t)ip[13] << 16) |
-           ((uint32_t)ip[14] << 8) | ip[15];
-    *dst = ((uint32_t)ip[16] << 24) | ((uint32_t)ip[17] << 16) |
-           ((uint32_t)ip[18] << 8) | ip[19];
-    *sport = NETFILTER_NO_PORT;
-    *dport = NETFILTER_NO_PORT;
+    out->proto = ip[9];
+    out->src_addr = ((uint32_t)ip[12] << 24) | ((uint32_t)ip[13] << 16) |
+                    ((uint32_t)ip[14] << 8) | ip[15];
+    out->dst_addr = ((uint32_t)ip[16] << 24) | ((uint32_t)ip[17] << 16) |
+                    ((uint32_t)ip[18] << 8) | ip[19];
+    out->src_port = NETFILTER_NO_PORT;
+    out->dst_port = NETFILTER_NO_PORT;
+    out->ip_off = (uint16_t)off;
     if (frag != 0)
         return 1;
-    if ((*proto == NETFILTER_PROTO_TCP || *proto == NETFILTER_PROTO_UDP) &&
+    if ((out->proto == NETFILTER_PROTO_TCP ||
+         out->proto == NETFILTER_PROTO_UDP) &&
         len >= off + ihl + 4) {
         const uint8_t *l4 = ip + ihl;
-        *sport = (uint16_t)((l4[0] << 8) | l4[1]);
-        *dport = (uint16_t)((l4[2] << 8) | l4[3]);
+        out->src_port = (uint16_t)((l4[0] << 8) | l4[1]);
+        out->dst_port = (uint16_t)((l4[2] << 8) | l4[3]);
+        out->l4_off = (uint16_t)(off + ihl);
+        out->has_ports = 1;
+        if (out->proto == NETFILTER_PROTO_TCP && len >= off + ihl + 14)
+            out->tcp_flags = l4[13];
     }
     return 1;
 }
@@ -391,8 +412,13 @@ static int netfilter_parse_frame(const uint8_t *f, size_t len, uint8_t *proto,
  * the fast path cannot report an empty table for a rule that has just been
  * installed: a writer publishes the count inside netfilter_rules_begin/end,
  * so a table that will not settle is treated as populated and the full
- * evaluation runs.  That direction costs a parse, which is the right way to
- * be wrong about a filter.
+ * evaluation runs.  That direction costs a rule scan, which is the right way
+ * to be wrong about a filter.
+ *
+ * The header parse this used to skip is no longer skippable -- conntrack needs
+ * the 5-tuple on every TCP/UDP packet -- so the fast path now saves only the
+ * scan.  What it no longer saves is the counters, which are now maintained for
+ * every packet; see netfilter_eval.
  */
 static int netfilter_table_populated(void)
 {
@@ -407,34 +433,30 @@ static int netfilter_table_populated(void)
     return 1;
 }
 
-static netfilter_action_t netfilter_eval(const void *frame, size_t len,
-                                         netfilter_dir_t dir)
+/* Verdict only; `pkt` is NULL when the frame did not parse as IPv4, in which
+ * case no rule can match it (a rule's fields are IPv4 fields) and the answer is
+ * the default policy. */
+static netfilter_action_t netfilter_eval(size_t len, netfilter_dir_t dir,
+                                         const netfilter_frame_t *pkt)
 {
-    if (!frame || len < 14)
-        return NETFILTER_ACCEPT;
-
     /*
-     * With an empty table the verdict is ACCEPT whatever the frame holds, so
-     * there is nothing to parse and nothing to count: an unconfigured system
-     * would otherwise walk Ethernet, VLAN, IPv4 and L4 headers and bump two
-     * shared counters on every packet in both directions to reach the same
-     * answer.  Once a rule exists the parse and the counters run as before.
+     * Counters are bumped for every packet that reaches the hook, not only for
+     * packets seen while a rule exists.  They used to be skipped on an empty
+     * table, and that made "did the hook run at all?" unanswerable from
+     * /proc: a wrong wiring and a quiet system looked identical.  Since conntrack
+     * now walks every IPv4 packet anyway, the counter increment is no longer
+     * what makes the path expensive, and making it unconditional turns
+     * in_packets/out_packets into the hook-liveness signal they were being used
+     * as all along.
      */
-    if (!netfilter_table_populated())
-        return NETFILTER_ACCEPT;
-
-    uint8_t proto;
-    uint32_t src, dst;
-    uint16_t sport, dport;
-    if (!netfilter_parse_frame((const uint8_t *)frame, len, &proto, &src, &dst,
-                               &sport, &dport))
-        return NETFILTER_ACCEPT;
-
     netfilter_stats_t *st = netfilter_stats_dir(dir);
     if (dir == NETFILTER_DIR_IN)
         __atomic_fetch_add(&st->in_packets, 1, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&st->out_packets, 1, __ATOMIC_RELAXED);
+
+    if (!pkt)
+        goto accept_no_rule;
 
     /*
      * Scan under the seqlock.  The table can be mutated concurrently by
@@ -450,41 +472,46 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
      */
     int hit = -1;
     netfilter_action_t action = NETFILTER_ACCEPT;
-    for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
-        unsigned seq0 = seqlock_read_begin(&g_rule_seq);
-        if (seq0 == 0u)
-            continue;               /* writer inside the table; wait for it */
-        unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
-        int found = -1;
-        netfilter_action_t found_action = NETFILTER_ACCEPT;
-        for (unsigned i = 0; i < n; i++) {
-            netfilter_rule_t *r = &g_rules[i];
-            if (r->dir != dir)
-                continue;
-            if (r->proto != NETFILTER_PROTO_ANY && r->proto != proto)
-                continue;
-            if (r->src_addr != NETFILTER_NO_ADDR && r->src_addr != src)
-                continue;
-            if (r->dst_addr != NETFILTER_NO_ADDR && r->dst_addr != dst)
-                continue;
-            if (r->src_port != NETFILTER_NO_PORT && r->src_port != sport)
-                continue;
-            if (r->dst_port != NETFILTER_NO_PORT && r->dst_port != dport)
-                continue;
-            found = (int)i;
-            found_action = (netfilter_action_t)r->action;
+    if (netfilter_table_populated()) {
+        for (unsigned attempt = 0; attempt < SEQLOCK_READ_ATTEMPTS; attempt++) {
+            unsigned seq0 = seqlock_read_begin(&g_rule_seq);
+            if (seq0 == 0u)
+                continue;           /* writer inside the table; wait for it */
+            unsigned n = __atomic_load_n(&g_rule_count, __ATOMIC_RELAXED);
+            int found = -1;
+            netfilter_rule_t *found_rule = NULL;
+            for (unsigned i = 0; i < n; i++) {
+                netfilter_rule_t *r = &g_rules[i];
+                if (r->dir != dir)
+                    continue;
+                if (r->proto != NETFILTER_PROTO_ANY && r->proto != pkt->proto)
+                    continue;
+                if (r->src_addr != NETFILTER_NO_ADDR &&
+                    r->src_addr != pkt->src_addr)
+                    continue;
+                if (r->dst_addr != NETFILTER_NO_ADDR &&
+                    r->dst_addr != pkt->dst_addr)
+                    continue;
+                if (r->src_port != NETFILTER_NO_PORT &&
+                    r->src_port != pkt->src_port)
+                    continue;
+                if (r->dst_port != NETFILTER_NO_PORT &&
+                    r->dst_port != pkt->dst_port)
+                    continue;
+                found = (int)i;
+                found_rule = r;
+                break;
+            }
+            if (seqlock_read_retry(&g_rule_seq, seq0))
+                continue;           /* moved under us; rescan */
+            hit = found;
+            if (hit >= 0) {
+                action = (netfilter_action_t)found_rule->action;
+                __atomic_fetch_add(&found_rule->matched, 1, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&found_rule->bytes, len, __ATOMIC_RELAXED);
+            }
             break;
         }
-        if (seqlock_read_retry(&g_rule_seq, seq0))
-            continue;               /* moved under us; rescan */
-        hit = found;
-        action = found_action;
-        if (hit >= 0) {
-            netfilter_rule_t *r = &g_rules[hit];
-            __atomic_fetch_add(&r->matched, 1, __ATOMIC_RELAXED);
-            __atomic_fetch_add(&r->bytes, len, __ATOMIC_RELAXED);
-        }
-        break;
     }
 
     /* No rule matched, the table never settled, or no rule applies: default
@@ -497,6 +524,8 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
             __atomic_fetch_add(&st->out_dropped, 1, __ATOMIC_RELAXED);
         return NETFILTER_DROP;
     }
+
+accept_no_rule:
     if (dir == NETFILTER_DIR_IN)
         __atomic_fetch_add(&st->in_accepted, 1, __ATOMIC_RELAXED);
     else
@@ -504,25 +533,63 @@ static netfilter_action_t netfilter_eval(const void *frame, size_t len,
     return NETFILTER_ACCEPT;
 }
 
-netfilter_action_t netfilter_input(const void *frame, size_t len)
+/*
+ * Filter verdict first, then conntrack and NAT.  A dropped packet must not
+ * create flow state or consume a NAT binding, so the order is not negotiable.
+ * A frame that did not parse as IPv4 is counted and accepted: conntrack has
+ * nothing to key on and NAT nothing to rewrite, both of which are stated
+ * limits rather than gaps.
+ */
+static netfilter_action_t netfilter_process(uint8_t *frame, size_t len,
+                                            int net_idx, netfilter_dir_t dir)
 {
-    return netfilter_eval(frame, len, NETFILTER_DIR_IN);
+    netfilter_frame_t pkt;
+    int parsed = netfilter_parse_frame(frame, len, &pkt);
+
+    netfilter_action_t verdict = netfilter_eval(len, dir, parsed ? &pkt : NULL);
+    if (verdict == NETFILTER_DROP || !parsed)
+        return verdict;
+
+    netfilter_conntrack_process(frame, len, net_idx, dir, &pkt);
+    return NETFILTER_ACCEPT;
 }
 
-netfilter_action_t netfilter_output(const void *frame, size_t len)
+netfilter_action_t netfilter_input(uint8_t *frame, size_t len, int net_idx)
 {
-    return netfilter_eval(frame, len, NETFILTER_DIR_OUT);
+    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_IN);
+}
+
+netfilter_action_t netfilter_output(uint8_t *frame, size_t len, int net_idx)
+{
+    return netfilter_process(frame, len, net_idx, NETFILTER_DIR_OUT);
+}
+
+/*
+ * The 4096-byte buffer procfs hands the renderer is not enough for the filter
+ * table, the NAT table and the conntrack table at once, so the filter section
+ * is written first and netfilter_nat_format() appends the rest under the
+ * remaining budget.  Every cursor here is clamped: snprintf reports the length
+ * it *would* have written, and an unclamped cursor would make every later
+ * bufsz - off underflow into a huge size.
+ */
+static size_t netfilter_append(char *buf, size_t bufsz, size_t off,
+                               const char *s)
+{
+    while (*s && off < bufsz)
+        buf[off++] = *s++;
+    return off;
 }
 
 void netfilter_format(char *buf, size_t bufsz)
 {
     if (!buf || bufsz == 0)
         return;
+    char line[256];
     size_t off = 0;
 
     netfilter_stats_t s;
     netfilter_get_stats(&s);
-    off += (size_t)snprintf(buf + off, bufsz - off,
+    snprintf(line, sizeof(line),
         "policy: accept\n"
         "in_packets: %llu\n"
         "out_packets: %llu\n"
@@ -535,28 +602,43 @@ void netfilter_format(char *buf, size_t bufsz)
         (unsigned long long)s.in_dropped, (unsigned long long)s.out_dropped,
         (unsigned long long)s.in_accepted, (unsigned long long)s.out_accepted,
         g_rule_count);
-    if (off >= bufsz)
-        return;
-
-    for (unsigned i = 0; i < g_rule_count && off < bufsz; i++) {
-        const netfilter_rule_t *r = &g_rules[i];
-        char src[16] = "any", dst[16] = "any";
-        if (r->src_addr != NETFILTER_NO_ADDR)
-            ipv4_to_str(r->src_addr, src, sizeof(src));
-        if (r->dst_addr != NETFILTER_NO_ADDR)
-            ipv4_to_str(r->dst_addr, dst, sizeof(dst));
-        char sport[8] = "any", dport[8] = "any";
-        if (r->src_port != NETFILTER_NO_PORT)
-            snprintf(sport, sizeof(sport), "%u", r->src_port);
-        if (r->dst_port != NETFILTER_NO_PORT)
-            snprintf(dport, sizeof(dport), "%u", r->dst_port);
-        off += (size_t)snprintf(buf + off, bufsz - off,
-            "rule %u: %s proto=%s src=%s dst=%s sport=%s dport=%s action=%s "
-            "matched=%llu bytes=%llu\n",
-            i, r->dir == NETFILTER_DIR_IN ? "in" : "out",
-            proto_name(r->proto), src, dst, sport, dport,
-            r->action == NETFILTER_DROP ? "drop" : "accept",
-            (unsigned long long)__atomic_load_n(&r->matched, __ATOMIC_RELAXED),
-            (unsigned long long)__atomic_load_n(&r->bytes, __ATOMIC_RELAXED));
+    off = netfilter_append(buf, bufsz, off, line);
+    if (off < bufsz && g_rule_count) {
+        off = netfilter_append(buf, bufsz, off, "(filter rules)\n");
+        for (unsigned i = 0; i < g_rule_count && off < bufsz; i++) {
+            const netfilter_rule_t *r = &g_rules[i];
+            char src[16] = "any", dst[16] = "any";
+            if (r->src_addr != NETFILTER_NO_ADDR)
+                netfilter_ipv4_to_str(r->src_addr, src, sizeof(src));
+            if (r->dst_addr != NETFILTER_NO_ADDR)
+                netfilter_ipv4_to_str(r->dst_addr, dst, sizeof(dst));
+            char sport[8] = "any", dport[8] = "any";
+            if (r->src_port != NETFILTER_NO_PORT)
+                snprintf(sport, sizeof(sport), "%u", r->src_port);
+            if (r->dst_port != NETFILTER_NO_PORT)
+                snprintf(dport, sizeof(dport), "%u", r->dst_port);
+            snprintf(line, sizeof(line),
+                "rule %u: %s proto=%s src=%s dst=%s sport=%s dport=%s "
+                "action=%s matched=%llu bytes=%llu\n",
+                i, r->dir == NETFILTER_DIR_IN ? "in" : "out",
+                proto_name(r->proto), src, dst, sport, dport,
+                r->action == NETFILTER_DROP ? "drop" : "accept",
+                (unsigned long long)__atomic_load_n(&r->matched,
+                                                    __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&r->bytes,
+                                                    __ATOMIC_RELAXED));
+            off = netfilter_append(buf, bufsz, off, line);
+        }
     }
+
+    /*
+     * The conntrack and NAT sections are snapshots of state the packet path
+     * mutates in place, so they are taken under g_lwip_lock -- the lock the
+     * packet path holds.  The filter section above is not: its table is read
+     * through a seqlock precisely so no lock is needed.  Safe from here
+     * because procfs rendering runs from a read(), never under g_lwip_lock.
+     */
+    uint64_t flags = a20_lwip_lock();
+    netfilter_nat_format(buf, bufsz, off);
+    a20_lwip_unlock(flags);
 }
