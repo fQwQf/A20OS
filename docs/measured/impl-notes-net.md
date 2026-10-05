@@ -358,6 +358,12 @@ single-consumer 仍然成立——slot 索引唯一属于一个桶，per-socket 
 
 ## 8. 待验证（本轮无法在 agent 内验证）
 
+> **2026-10-06 更新**：本节 §8.2 / §8.3 / §8.5 / §8.6 / §8.7 已由
+> `067d0eb96` 与 `2dd28758c` 落成运行期的东西，逐条状态见 **§11** 的对照表。
+> 下面保留原文，因为它记的是"当时为什么没法验证"，而那个"为什么"本身仍然是
+> 读这份笔记的人需要知道的。§11.2 记的 AF_UNIX 缺陷正是从 §8.3/§8.6 这两条
+> 长出来的——账本接上之后第一次运行就抓到了。
+
 1. **构建与冒烟**：任务书禁止本 agent 跑 `make` / QEMU，因此 **没有链接过、
    没有跑过一次内核**。集成阶段必须先 `make` 一次再进 `smoke-smp-lock-contention`。
 
@@ -578,3 +584,133 @@ proc 笔记 §8 里记录。
 自己会跑 `net_stress_test`，本轮跑了）；§8 的引用计数待验证清单（§8.3 / §8.6）仍然只有
 静态走查、无压力测试证据——本轮这两个 bug 恰好各命中它列的一个盲区（§8.5 的"取桶后复查"
 和 §8.6 的"释放两次"），所以那份清单的优先级应当提高。
+
+---
+
+## 11. 第 3 轮（正确性续修，2026-10-06）：§8 的待验证清单第一次被跑起来
+
+§8 记了七条"本轮无法在 agent 内验证"。这一轮把其中 §8.2 / §8.3 / §8.5 /
+§8.6 / §8.7 落成了**运行期**的东西，并且**第一条跑起来就抓到一个真缺陷**。
+逐条对照，不含糊：
+
+| §8 条目 | 现在的状态 | 落点 |
+|---|---|---|
+| §8.2 `LOCK_COUNTERS_MAX` 预算 | **已解决** | `067d0eb96`：`lock_counters_register()` 超出 `LOCK_COUNTERS_MAX` 时改为计数并在 `/proc/a20/lock_contention` 末行打印 `lock_counters: registered=<n> capacity=<n> dropped=<n>`。此前是**静默丢弃**。 |
+| §8.3 / §8.6 引用计数漏点 | **已落地，并抓到一个真 bug** | `net_socket_free()` 改 CAS 循环 + `ref_magic` 金丝雀 + `net_sock_ref:` 账本。抓到的缺陷见 §11.2。 |
+| §8.5 `-ENOTCONN` 窗口 | **已落地**（可观测，未复现） | 13 处 `-ENOTCONN` 全部改走 `net_notconn(reason)`，其中 4 个 reason 属于该窗口；`/proc/net/status` 分开打印 `total=` 与 `window=`。 |
+| §8.4 `NET_PROFILE_SOCKET_MAX_BYTES` 静态断言 | 早已确认（§8 自记） | 本轮新增 `ref_magic` 字段后断言仍通过，三档默认构建均编译成功。 |
+| §8.1 构建与冒烟 | 见 §11.4 | |
+| §8.8 AF_UNIX child 不注册 | **已确认为真，且正是缺陷成因** | 见 §11.2。 |
+
+### 11.1 三个探针的形态与它们各自的盲区
+
+**net 锁探针**（`kernel/net/net_lock_probe.c`）：per-CPU 持锁集合，逐次取锁检查
+重复取锁 / socket 锁地址乱序 / 第三把 socket 锁 / 桶锁取在 socket 锁之下 / 第二把
+桶锁。开关复用 `CONFIG_NET_LOCK_ASSERT`，三档 `0` 无 / `1` panic / `2` 只计数。
+
+盲区（写下来免得被读成更强的结论）：它只知道"哪个 CPU 取了哪把锁"，不知道是哪个
+任务，因此抓不到"取用顺序与释放顺序不一致"和"某对锁提前放掉了一把"。抓的是**集合**
+违反契约的那一类——本树历来所有 ABBA 都出自这一类。
+
+**引用计数账本**（`kernel/net/socket.c`）：`allocs` / `frees` / `live` / `faults`，
+无条件计数，`/proc/net/status` 打印。`live` 是"漏"的读数，`faults` 是"重"的读数。
+`live` 与 `syscall-sockets: open=` 的差是刻意的：前者算上正在创建和正在拆除、
+没有槽位的那部分 socket，后者只数表里看得见的。
+
+金丝雀的盲区也写明：`obj_cache_alloc_zero()` 会把同一个地址交给下一个 socket，
+下一个 socket 会重新写上金丝雀，所以**落在已复用槽位上**的重复释放仍然看不见。
+它抓的是"落在还没被复用的槽位上"这一种，也正是实际发生的那一种。
+
+**`-ENOTCONN` 归因**：§8.5 问的是"这个窗口可达吗"，而它当时**没法问**——窗口和
+"这个 socket 从来没连过"返回的是同一个 errno。现在按 reason 分开计数，`window=`
+一个数字就能回答。
+
+### 11.2 账本抓到的真缺陷：AF_UNIX close 少一次引用、多一次释放
+
+`CONFIG_NET_REF_ASSERT=1` 的第一次运行就在第一个 AF_UNIX close 上 panic：
+
+```
+net_socket_free: canary-mismatch: object was not a live socket
+s=ffffffc0be440010 refs=0 allocs=127 frees=126 faults=1
+[PANIC] task: pid=19 name=unix_test
+net_socket_free <- net_socket_close_file <- vfs_finalize_closed_vfile <- sys_close
+```
+
+**成因**：`net_socket_unregister()` 对没有槽位的 socket 直接 early-return，
+**不释放引用**（槽位引用由调用方在锁外释放）。但两条通用拆除路径
+（`net_socket_close_file()` 与 `accept()` 安装失败的回滚）**无条件**释放了
+"槽位引用"。
+
+而 AF_UNIX 的 accepted child **从不注册**——`grep -rn net_register_socket_locked
+kernel/net/socket_unix.c` 零命中，这正是 §3bis(b) 记的"沿用原代码"的行为。所以它
+只有**一个**引用（`net_socket_alloc()` 的创建者引用），不是两个。于是每一次
+AF_UNIX 关闭都会：
+
+1. 在 `net_socket_close_file()` 中途就把 socket 释放掉（`refs` 1→0）；
+2. 继续对已释放内存解引用——`wait_queue_wake_all(&s->accept_waitq, ...)` 等；
+3. 函数末尾再 `net_socket_free(s)` 一次。
+
+**这不是本轮引入的，也不是当场就在破坏内存的。** 旧的
+`__atomic_fetch_sub(&s->refs, 1) != 1` 在 `refs == 0` 时读到 -1、不等于 1、直接
+返回，对象恰好只被释放了一次——**出于巧合而不是出于设计**；这个 use-after-free
+之所以活下来，是因为没有任何一处读已释放内存的方式会触发缺页。变的是它现在
+**看得见了**。
+
+**修法**：`net_socket_unregister()` 改为返回"是否真的释放了槽位"，调用方只在
+返回 true 时才释放槽位引用。五个调用点全部更新：
+
+| 位置 | 情形 |
+|---|---|
+| `socket_file.c:309` | fd 自己的 socket `s`。**AF_UNIX accepted child 走的就是这里**，且它自己没有槽位。 |
+| `socket_file.c:379` | listener 关闭时仍在 accept 队列里的 child。 |
+| `socket_control.c:396` | `accept()` 安装 fd 失败的回滚。 |
+| `socket_inet.c:1235` | accept stage drain 回滚（保证已注册，形状统一）。 |
+| `socket_inet.c:2076` | 本地 listener 快捷路径 connect 回滚（同上）。 |
+
+把"有没有槽位"作为返回值交出去，是让**释放了被计数的那个东西的函数**自己回答
+"这个引用存不存在"，于是这个配对以后不会再漂。
+
+### 11.3 探针不是空转：两组故意注入的对照
+
+只跑一次干净的日志证明不了"探针在检查"。两组**临时**注入，跑完即回退，
+**不在提交里**：
+
+1. 让 arm 之后第一次取桶锁看起来像"已经持有一把 socket 锁"，在
+   `CONFIG_NET_LOCK_ASSERT=1` 下得到
+   `net lock contract: bucket lock under socket lock ... cpu=0 held=1 violations=1`
+   紧接 `[PANIC]`——违规确实 abort。
+2. 把已持集合污染成一把地址更高的 socket 锁，在 `CONFIG_NET_LOCK_ASSERT=2` 下得到
+   `net_lock: armed=1 violations=11449 sites=8`，且 `SOCKET_STRESS: PASS` 走完——
+   地址升序检查确实会触发，且第三档只计数不 abort。
+
+**没做的对照**：第三把 socket 锁那一支与地址乱序那一支共用同一个
+`net_lock_violation()` 上报路径，但**没有单独注入过**。两次对照两次分支，不要说成
+三次对照三次分支。
+
+### 11.4 本轮实跑
+
+```console
+$ make dev-build
+EXIT=0（-Werror）
+
+$ make dev-build OPT="-DCONFIG_NET_LOCK_ASSERT=1 -DCONFIG_NET_REF_ASSERT=1"
+EXIT=0
+
+$ <qemu-system-riscv64, riscv64 both-dev, 单 CPU>
+SOCKET_STRESS: PASS
+NET_STRESS_TEST: PASS (4 parallel transfers, 4 rounds x 1048576 B)
+UNIX_TEST: PASS
+lwip_lock: armed=1 owner=4294967295 violations=0 sites=0
+net_lock: armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0
+syscall-sockets: open=1 bound=1 queued=0 max=1024
+net_sock_ref: live=1 allocs=129 frees=128 faults=0
+net_notconn: total=0 window=0 reasons=13
+```
+
+`live=1` 与 `open=1` 和 `lanes: sockets=1`（那个 DHCP socket）三者一致——这正是
+两个读数互相印证的地方。
+
+**仍未跑的**：ASAN 压力测试、`smoke-network-suite` 与 `smoke-smp-lock-contention`
+本轮**没有复跑**（全量回归由编排层统一做）。所以"`live` 在真正的多核压测下不增长"
+这一句，本轮**没有**证据；§11.4 的数据是单 CPU、三个自带用例跑完的账本平衡，
+不是压力测试下的不漏证明。这一点不要被上面的 `live=1` 读成后者。

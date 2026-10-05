@@ -257,6 +257,41 @@ claim 本身**不是 `spinlock_t`**，是一个普通原子标志，`core/lock.h
 （72 次连接，`sites=0`），见 `net-lanes.md`「放大实验已执行」——这构成一条负面证据：
 那条 flake 不经由"未持锁调 lwIP 入口"这条路发生。
 
+### net 锁一侧的探针（`2dd28758c`）
+
+lwIP 侧那套把契约变成可执行代码之后，net 锁侧还只有散文。`2dd28758c` 补上：
+
+- **per-CPU 持锁集合**（`kernel/net/net_lock_probe.c`），逐次取锁检查：重复取锁
+  （自死锁，而自旋锁本身只会给你一个没有解释的挂起）、socket 锁地址乱序、
+  第三把 socket 锁、桶锁取在 socket 锁之下、第二把桶锁。
+- **按地址升序是对整个已持集合判定的**，不是重算一遍 `net_sock_lock2()` 自己已经
+  算过的那个比较。区别是实质的：后者只能抓到"第三把乱序的锁"，抓不到"经由另一对
+  已持有的锁再次取同一把"这一类。
+- **per-CPU 而不是 per-task**，理由是承重的，写在定义的注释里而不是留给读者推：
+  每把 net 锁都是 `spin_lock_irqsave()`/`spin_unlock_irqrestore()`，而
+  `net_sock_lock2()` 的第二把是在第一把已经关中断之后才取的，所以整个持有窗口
+  中断是关着的——持有者既不会被抢占，也不会被中断进同 CPU 的嵌套取锁，更不会
+  在持有期间迁移。**哪一把 net 锁一旦不再是 irqsave，这张表就不再可信。**
+- **arm 时机**在 `net_init()` 末尾，理由与 `g_lwip_lock_armed` 同源：之前槽位锁
+  还不存在，无从判断。
+- **开关三档**：`CONFIG_NET_LOCK_ASSERT` `0`（探针不存在）/ `1`（违规 panic）/
+  `2`（只计数）。第三档是为了长跑：计数型信号会被训练成噪声，而长跑里"最终计数
+  多少"比"第一次命中就死机"更有用。
+- **桶锁注册预算**由 `net_socket_registry_init()` 自己核对：取锁计数表在注册循环
+  前后的差值必须等于 `NET_SOCK_BUCKETS`，否则报"contention 审计已经半盲"。
+  配合 `067d0eb96` 给 `lock_counters_register()` 加的被拒计数
+  （此前超出 `LOCK_COUNTERS_MAX` 是**静默丢弃**，报告因此会对一把从未被观测的锁
+  报"干净"）。
+
+`/proc/net/status` 上与 `lwip_lock:` 并排打印 `net_lock:`；开关关闭时打印
+`net_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)`，同样是为了不让"没报错"被读成
+"没问题"。
+
+**探针看不见什么**，写在这里免得把一次干净的长跑读成比它更强的结论：它只知道
+"哪个 CPU 取了哪把锁"，不知道是哪个任务，因此抓不到"取用顺序与释放顺序不一致"，
+也抓不到"某对锁提前放掉了一把"。它抓的是**集合**违反契约的那一类，而这一类正是
+本树历来所有 ABBA 的来源。
+
 ### 移植层自己补的断言
 
 上游的断言集中在 pbuf 列表/计时器与 TCP 内部函数上，**不覆盖**应用直接调用的裸入口。
@@ -650,11 +685,16 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
   IRQ 上下文里调用。一 lane 构建的行为完全未变。
   仍未解决的是**回环**：它不入队（本来就被摘链原地处理），所以同机 socket 之间的往返
   仍是单 lane 串行。
-- 锁契约的**运行期强制**目前只覆盖 `g_lwip_lock`（`LWIP_ASSERT_CORE_LOCKED()`，
-  见「核心锁断言」一节）。net 锁这一侧**没有**对应断言：没有"当前 CPU 是否持有
-  期望的 socket 锁"的探针，`net_sock_lock2()` 的地址升序约定同样只有代码评审在把关。
-  lane claim 一侧同样没有探针。**这是本文与实现之间最大的一处落差**。
-  需要 per-CPU 持锁集合跟踪才能补上，本轮未做；补的形态见文末那条未勾选项。
+- ~~锁契约的**运行期强制**只覆盖 `g_lwip_lock`，net 锁一侧没有对应断言~~
+  —— **部分完成**（`2dd28758c`）。`g_lwip_lock` 侧的
+  `LWIP_ASSERT_CORE_LOCKED()` 见「核心锁断言」一节；net 锁侧现在有了 per-CPU
+  持锁集合探针 `kernel/net/net_lock_probe.c`，逐次取锁检查重复取锁、socket 锁
+  地址乱序、第三把 socket 锁、桶锁取在 socket 锁之下、以及第二把桶锁。
+  `/proc/net/status` 上与 lwip 行并排打印 `net_lock:` 一行，`CONFIG_NET_LOCK_ASSERT=0`
+  的构建显式打印 `not checked`。
+  **仍然没有**的是"当前 CPU 是否持有期望的 socket 锁"这个**正向**查询原语
+  （探针只回答"这一把取得合不合规"，不回答"我此刻持有什么"），以及 lane claim
+  一侧的探针——两者形态见文末那两条未勾选项。
 
 ## 迁移检查清单
 
@@ -683,15 +723,27 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 - [x] `CONFIG_NET_LANES=1` 时上面这些入口从预处理结果里消失，不是空函数体。
 - [x] `LWIP_ASSERT_CORE_LOCKED()` 已接线到 `g_lwip_lock` 持有者 CPU
       （默认关闭，开关语义与可见性见「核心锁断言」一节）。
-- [ ] net 锁一侧**没有**对应断言。阶段 E 之后剩下的缺口只有一处，且形态比原先窄：
-      `net_sock_lock2()`（`socket_internal.h:584`）的**地址升序**与"同时至多两把 socket
-      锁"目前只有代码评审在把关，没有运行期探针能证明一把锁没有以相反顺序被另一把
-      顶着取。原先这条里的另一半——桶锁侧的 `net_bucket_lock2()` 升序与"至多两把"——
-      **已经不存在了**：该函数随 `NET_SOCK_ORPHAN_BUCKET` / `NET_SOCK_BUCKET_COUNT`
-      在 `7c7a4d7c8` 一起删除，全树 `grep -rn net_bucket_lock2 kernel/` 零命中。桶锁
-      现在只被 `net_bucket_lock()` 单把取用，方向问题不存在，剩下的探针需求是
-      "当前 CPU 是否持有期望的 socket 锁"与"桶锁不得在 socket 锁之下取得"两条。
-      一个 `CONFIG_NET_SOCK_ASSERT` 需要 per-CPU 持锁集合跟踪，本轮未做。
+- [x] net 锁一侧有对应断言了（`2dd28758c`，`kernel/net/net_lock_probe.c`）。
+      阶段 E 之后剩下的缺口已由 per-CPU 持锁集合探针填上：`net_sock_lock2()` 的
+      **地址升序**与"同类至多两把 socket 锁"由 `net_lock_probe_acquire()` 在每次
+      取锁时按**整个已持集合**判定（`net_sock_lock2()` 现于
+      `kernel/net/socket_internal.h:682`；不是重算一遍它自己已经算过的
+      那个比较——那样只能抓到第三把乱序的锁，抓不到经由另一对已持有的锁再次取同一把）。
+      "桶锁不得在 socket 锁之下取得"同样在里面；反向（socket 锁取在桶锁之内）是
+      `net_bucket_scan()` 与 register/unregister 的合法形状，不算违规。
+      开关复用 `CONFIG_NET_LOCK_ASSERT`，并新增第三档 `=2`（只计数不 abort，供长跑
+      取最终计数）。`CONFIG_NET_LOCK_ASSERT=0` 的构建探针整个不存在，
+      `/proc/net/status` 打印 `net_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)`。
+      探针本身在 4 CPU + 4 lane 下跑过 120 次真实 TCP 握手，`violations=0 sites=0`；
+      另有两组**故意注入**的对照证明它不是空转（详见 `impl-notes-net.md` §11）。
+- [ ] 仍然没有的是**正向**查询原语："当前 CPU 是否持有 socket X 的锁"。
+      探针只回答"这一把取得合不合规"，调用方无法问"我此刻持有什么"。
+      谁需要它：`net_inet_*` 里几处"我刚在 pair 里改过 `s`，现在想在不取第二次锁的
+      前提下确认"的地方——目前一律再取一次锁。
+- [ ] `net_socket_unregister()` 的返回值把"槽位释放了没有"告诉了调用方
+      （`2dd28758c`），但这是**引用计数**的对账，不是锁的断言：探针看不见
+      "某条路径多释放了一次引用"。那件事由 `net_sock_ref:` 账本负责，见
+      `impl-notes-net.md` §11。
 - [ ] lane claim 一侧同样没有探针：没有"当前 CPU 是否持有某条 lane 的消费权"的
       运行期判据，`net-lanes.md` 里"claim 先于 `g_lwip_lock`、判空在锁外"两条同样只由
       代码评审保证。
