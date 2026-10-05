@@ -221,6 +221,7 @@ int mm_shared_file_fault(mm_struct_t *mm, mm_seg_t *vma, uint64_t page_va,
  * `vma` is the mapping the fault was attributed to and is already resolved by
  * the caller; the class it implies is the backing, which COW does not change.
  */
+#ifndef CONFIG_NOMMU
 static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
                             const mm_seg_t *vma)
 {
@@ -252,6 +253,7 @@ static void cow_sync_status(struct mm_struct *mm, vaddr_t va,
     }
     (void)mm_pt_sync_status(tab, level, idx, cls);
 }
+#endif /* CONFIG_NOMMU */
 
 static int handle_cow_fault_locked(task_t *t, uint64_t stval,
                                    pfn_t *old_pfn_out,
@@ -436,8 +438,14 @@ static int handle_cow_fault_locked(task_t *t, uint64_t stval,
  * and still finite: without it a pathological merger could spin here. */
 #define MM_FAULT_RETRY_MAX 8
 
+/* The definition sits behind #ifndef CONFIG_NOMMU, as does the only call site
+ * (handle_demand_fault_access's non-NOMMU branch), so the declaration has to
+ * carry the same guard -- otherwise a NOMMU build sees a static declaration
+ * with no definition and -Werror takes the whole kernel down. */
+#ifndef CONFIG_NOMMU
 static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
                                        enum mm_fault_access access);
+#endif
 /* ---- P6 shadow check (see docs/roadmap/single-level-mm-model.md 12.6) ----
  *
  * Asks the page-table segment table what it would have said about this fault,
@@ -453,6 +461,7 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
  * It lives here rather than in pt.c because only this side walks mm->mmap, and
  * a disagreement is only diagnosable when both sides are printed together.
  */
+#ifndef CONFIG_NOMMU
 static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
                              uint8_t kind, uint64_t base_off)
 {
@@ -485,6 +494,8 @@ static void shadow_seg_check(mm_struct_t *mm, mm_seg_t *vma, vaddr_t va,
           vma == found ? "" : "  (a different mapping)");
     mm_seg_put(found);
 }
+#endif /* CONFIG_NOMMU */
+
 static int handle_demand_fault_locked(task_t *t, uint64_t stval,
                                       enum mm_fault_access access,
                                       int lock_held) {

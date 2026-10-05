@@ -332,18 +332,23 @@ static void hyp_vcpu_record_fault(hyp_vcpu_t *vcpu, uint64_t scause,
  * vstimecmp and raises mip.VSTIP when it expires (write_vstimecmp ->
  * riscv_timer_write_timecmp), and with hideleg's STI bit set that is the
  * guest's vsip.STIP, so the interrupt is delivered to VS-mode by hardware and
- * the guest's own trap handler runs it.  Numeric CSR number because the tree's
- * -march does not carry the Sstc mnemonic, same reason timer.c uses 0x14d.
+ * the guest's own trap handler runs it.  The register and its number are the
+ * arch half's (hyp_arch_vstimecmp_*), because a generic file cannot hold a CSR
+ * number: 0x24d means nothing to an architecture that has no Sstc.
  *
  * This write is only ever reached on a hart that HAS Sstc: the guest reaches
  * legacy set_timer precisely because the DTB it was handed did not advertise
  * sstc (kernel/arch/riscv64/platform/timer.c:30), and the platform that
  * publishes a DTB is the one this hypervisor runs on.  On a hart without Sstc
  * the write below would raise an illegal instruction in HS-mode, which is why
- * this is documented rather than assumed away. */
+ * this is documented rather than assumed away.
+ *
+ * The register itself belongs to the arch half: the number 0x24d and the fact
+ * that this is the VIRTUAL comparator are RISC-V facts, and a file that has to
+ * assemble for architectures with no such CSR cannot hold them. */
 static void hyp_write_vstimecmp(uint64_t deadline)
 {
-    __asm__ volatile("csrw 0x24d, %0" :: "r"(deadline) : "memory");
+    hyp_arch_vstimecmp_set(deadline);
 }
 
 /* Dispatch table.  The legacy half is keyed on a7 alone (a0 is the only
@@ -479,8 +484,7 @@ static int hyp_guest_read_gpa(hyp_vcpu_t *vcpu, uint64_t gpa, uint64_t *out)
  * hardware itself just used. */
 static int hyp_guest_read_va(hyp_vcpu_t *vcpu, uint64_t va, uint64_t *out)
 {
-    uint64_t vsatp;
-    __asm__ volatile("csrr %0, 0x280" : "=r"(vsatp));   /* vsatp, CSR 0x280 */
+    uint64_t vsatp = hyp_arch_vsatp_get();
 
     uint64_t gva = va;
     uint64_t mode = (vsatp >> 60) & 0xf;
@@ -740,7 +744,7 @@ static int hyp_guest_mem_fault(hyp_vcpu_t *vcpu, uint64_t scause,
 
 static void hyp_write_vsatp(uint64_t v)
 {
-    __asm__ volatile("csrw 0x280, %0" :: "r"(v) : "memory");
+    hyp_arch_vsatp_set(v);
 }
 
 /* The trapped instruction, from the trap report when it carries one.
@@ -792,7 +796,7 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
             /* SFENCE.VMA.  In HS-mode it is not gated, and it invalidates the
              * whole hart's translations, which is a superset of what the guest
              * asked for. */
-            __asm__ volatile("sfence.vma" ::: "memory");
+            hyp_arch_host_tlb_fence();
             vcpu->pc += 4;
             return 0;
         }
@@ -814,8 +818,7 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
     uint64_t old, next;
 
     if (csr == HYP_CSR_SATP) {
-        uint64_t v;
-        __asm__ volatile("csrr %0, 0x280" : "=r"(v));   /* vsatp */
+        uint64_t v = hyp_arch_vsatp_get();
         old = v;
         next = (funct3 == 1) ? src
              : (funct3 == 2) ? (old | src)
@@ -831,7 +834,7 @@ static int hyp_emulate_virt_inst(hyp_vcpu_t *vcpu, uint64_t stval)
         if (funct3 != 1 && funct3 != 5)
             return -1;
         if (rd) {
-            __asm__ volatile("csrr %0, 0x24d" : "=r"(old));   /* vstimecmp */
+            old = hyp_arch_vstimecmp_get();
         } else {
             old = 0;
         }

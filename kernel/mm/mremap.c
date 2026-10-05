@@ -118,8 +118,15 @@ static int mm_clone_shared_mapping(mm_struct_t *mm, mm_seg_t *src_vma,
         if (!pcp && !vmo_owned)
             frame_get(pfn);
         /* Keep the source's class across the move so the copy's status still
-         * names the same backing; a huge leaf's slot is level-aware. */
+         * names the same backing; a huge leaf's slot is level-aware.  With no
+         * page tables there is no status slot to ask, so the move starts from
+         * MM_ST_INVALID and takes the default below -- the same answer the
+         * query gives when the slot is unreadable. */
+#ifndef CONFIG_NOMMU
         uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+#else
+        uint8_t move_cls = MM_ST_INVALID;
+#endif
         if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
             move_cls = MM_ST_ANON_MAPPED;
         int r = (level > 0) ? pt_map_huge(mm, dst + off, pa,
@@ -177,7 +184,14 @@ static __attribute__((unused)) int mm_move_mapping_pages(mm_struct_t *mm, vaddr_
         int vmo_owned = src_vma && (src_vma->vm_flags & VM_VMO);
         if (!pcp && !vmo_owned)
             frame_get(pfn);
+#ifndef CONFIG_NOMMU
         uint8_t move_cls = MM_ST_GET_CLASS(mm_pt_status_at(mm->pgdir, src_va));
+#else
+        /* Same reason as the move path above: no page table, no status slot,
+         * so the class starts out the one the default below turns into
+         * MM_ST_ANON_MAPPED. */
+        uint8_t move_cls = MM_ST_INVALID;
+#endif
         if (move_cls == MM_ST_INVALID || move_cls == MM_ST_PT_NODE)
             move_cls = MM_ST_ANON_MAPPED;
         int r = (level > 0) ? pt_map_huge(mm, dst + off, pa, pte_flags,

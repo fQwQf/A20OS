@@ -8,6 +8,8 @@
 #include "proc/proc.h"
 #include "core/string.h"
 
+#ifndef CONFIG_NOMMU
+
 /*
  * Fork / copy-on-write page-table cloning.
  *
@@ -286,3 +288,41 @@ int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
     return mm_fork_clone_present_level(child, parent, parent->pgdir, ARCH_PT_ROOT_LEVEL,
                                        0, start, end, shared);
 }
+
+#else /* CONFIG_NOMMU */
+
+/* There is no page table to clone and nothing to copy: a NOMMU address space is
+ * flat, so every mapping in it is already shared between parent and child and
+ * there is no write protection to drop.  Returning 0 is the honest answer, and
+ * it is the one mm_fork() in mm/vm.c understands -- it fails a clone only on a
+ * negative return, and those call sites are not guarded, so removing these
+ * functions outright would not build.
+ *
+ * They could not simply have stayed unguarded either.  mm_pt_leaf_table(),
+ * mm_pt_peek() and mm_pt_sync_status() are declared in mm/pt.h inside the
+ * guard that also tests !CONFIG_NOMMU, so under NOMMU these bodies referenced
+ * declarations that do not exist -- an implicit declaration that -Werror turns
+ * into a build failure on every NOMMU instance. */
+int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
+                       int shared)
+{ (void)child; (void)parent; (void)va; (void)shared; return 0; }
+
+int mm_fork_clone_range(mm_struct_t *child, mm_struct_t *parent,
+                        vaddr_t start, vaddr_t end, int shared)
+{ (void)child; (void)parent; (void)start; (void)end; (void)shared; return 0; }
+
+int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
+                       pte_t *src_pte, vaddr_t va, int level, int shared)
+{ (void)child; (void)parent; (void)src_pte; (void)va; (void)level; (void)shared; return 0; }
+
+int mm_fork_clone_present_level(mm_struct_t *child, mm_struct_t *parent,
+                                pte_t *table, int level, vaddr_t base,
+                                vaddr_t start, vaddr_t end, int shared)
+{ (void)child; (void)parent; (void)table; (void)level; (void)base;
+  (void)start; (void)end; (void)shared; return 0; }
+
+int mm_fork_clone_present_range(mm_struct_t *child, mm_struct_t *parent,
+                                vaddr_t start, vaddr_t end, int shared)
+{ (void)child; (void)parent; (void)start; (void)end; (void)shared; return 0; }
+
+#endif /* CONFIG_NOMMU */
