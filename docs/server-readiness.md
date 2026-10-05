@@ -432,10 +432,21 @@ guest `wget` 取回 65536 字节且 `wc -c` 复核为 65536、`ping 10.0.2.2 4` 
 **验证边界**：QEMU 的 e1000 是 82540EM，无 ITR 寄存器，驱动按设计跳过（打印
 `itr=0us`）——这一条仍是"只做到编译 + QEMU 启动验证（ring=256）"。e1000 多缓冲重组
 **已被真实跨描述符帧跑到**：默认 RCTL 丢弃 1514 字节以上的帧（`e1000x_is_oversized()`），
-所以驱动现在置 `RCTL.LPE` 并把 `JUMBO` 定在两个缓冲（4074 字节）；帧由
-`-netdev socket,id=n0,fd=N` 从一个无需特权的数据报 socketpair 注入（slirp 无 mtu 选项、
-本机无 raw socket，都产不出 2048 字节以上的帧）。实测
-`[E1000] first frame reassembled from 2 descriptors (buf=2048)`。
+所以驱动现在置 `RCTL.LPE` 并把 `JUMBO` 定在两个缓冲（4074 字节）。帧由
+`-netdev socket,id=n0,udp=127.0.0.1:<P>,localaddr=127.0.0.1:<P+1>` 从一个普通 UDP
+socket 注入，一个数据报即一帧（slirp 无 mtu 选项、本机无 raw socket，都产不出 2048
+字节以上的帧；UDP 形式比 `fd=N` 形式少一道 fd 传递，QEMU 10.0 才肯收）。
+**正反对照都实测过**：同一份注入脚本（2842 / 3000 / 1500 / 64 字节各一帧，帧头目的 MAC
+填 guest 的 `52:54:00:12:34:56`）在 `RCTL.LPE` 置位时打出
+
+```
+[E1000] ready: mac=52:54:00:12:34:56 link=up irq=87 ring=256 itr=0us
+[E1000] first frame reassembled from 2 descriptors (buf=2048)
+```
+
+把 `E1000_RCTL_LPE` 从 RCTL 写入里去掉、重编、重跑同一脚本：ready 行照旧，
+**重组行完全不出现**——四种长度的帧全被设备按 oversized 丢掉。所以决定性的是 LPE，
+不是缓冲大小。
 **未做到的**：这样的帧在 lwIP 里仍会被丢弃，因为链路 MTU 是 1500
 （`net_profile.h`），端到端 jumbo 需要档位表与 pbuf 一起改，属协议栈范围。
 
