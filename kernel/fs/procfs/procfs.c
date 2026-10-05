@@ -9,6 +9,7 @@
 #include "fs/ext4_journal.h"
 #include "net/netfilter.h"
 #include "net/net_config.h"
+#include "net/lwip_stack.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "core/klog.h"
@@ -148,6 +149,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "cwd") == 0) return PF_PID_CWD;
     if (strcmp(name, "fd") == 0) return PF_PID_FD;
     if (strcmp(name, "environ") == 0) return PF_PID_ENVIRON;
+    if (strcmp(name, "auxv") == 0) return PF_PID_AUXV;
     if (strcmp(name, "io") == 0) return PF_PID_IO;
     if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
@@ -459,6 +461,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_NET && strcmp(name, "udp") == 0) {
         child = new_entry(name, PF_NET_UDP, 0);
         type = PF_NET_UDP;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "tcp6") == 0) {
+        child = new_entry(name, PF_NET_TCP6, 0);
+        type = PF_NET_TCP6;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "udp6") == 0) {
+        child = new_entry(name, PF_NET_UDP6, 0);
+        type = PF_NET_UDP6;
     } else if (dp && dp->type == PF_NET && strcmp(name, "unix") == 0) {
         child = new_entry(name, PF_NET_UNIX, 0);
         type = PF_NET_UNIX;
@@ -615,7 +623,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
             type == PF_PID_COMM || type == PF_PID_EXE ||
             type == PF_PID_CWD || type == PF_PID_FD ||
-            type == PF_PID_ENVIRON || type == PF_PID_IO ||
+            type == PF_PID_ENVIRON || type == PF_PID_AUXV ||
+            type == PF_PID_IO ||
             type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
             type == PF_PID_NS || type == PF_PID_FDINFO ||
             type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
@@ -1016,12 +1025,37 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         memcpy(tmp, buf, n);
         tmp[n] = '\0';
         procfs_chomp(tmp);
+        /*
+         * The conntrack verbs below take g_lwip_lock.  That is safe here and
+         * only here: this runs from a procfs write, i.e. a syscall, and no
+         * procfs write is issued from under g_lwip_lock.  See the locking note
+         * at the top of kernel/include/net/netfilter.h.
+         */
         if (strcmp(tmp, "reset") == 0) {
             netfilter_reset();
+            netfilter_nat_reset();
             return (int)count;
         }
         if (strcmp(tmp, "flush") == 0) {
             netfilter_reset();
+            return (int)count;
+        }
+        /* A separate verb rather than an extension of "reset": "reset" clears
+         * configuration, "ctflush" throws away live flow state.  Conflating them
+         * would mean a test that wants a clean NAT binding has to destroy the
+         * rules it is about to exercise. */
+        if (strcmp(tmp, "ctflush") == 0) {
+            uint64_t lf = a20_lwip_lock();
+            netfilter_conntrack_flush();
+            a20_lwip_unlock(lf);
+            return (int)count;
+        }
+        if (strcmp(tmp, "cton") == 0) {
+            netfilter_conntrack_set_enabled(1);
+            return (int)count;
+        }
+        if (strcmp(tmp, "ctoff") == 0) {
+            netfilter_conntrack_set_enabled(0);
             return (int)count;
         }
         if (strncmp(tmp, "add ", 4) == 0) {
@@ -1033,6 +1067,30 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             if (idx < 0)
                 return idx;
             return (int)count;
+        }
+        if (strncmp(tmp, "natadd ", 7) == 0) {
+            net_nat_rule_t rule;
+            int r = netfilter_nat_parse_rule(tmp + 7, strlen(tmp + 7), &rule);
+            if (r < 0)
+                return r;
+            int idx = netfilter_nat_add_rule(&rule);
+            if (idx < 0)
+                return idx;
+            return (int)count;
+        }
+        if (strncmp(tmp, "natdel ", 7) == 0) {
+            const char *d = tmp + 7;
+            if (*d == '\0')
+                return -EINVAL;
+            unsigned idx = 0;
+            for (; *d; d++) {
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                if (idx > (NETFILTER_MAX_NAT_RULES * 2))
+                    return -ERANGE;
+                idx = idx * 10 + (unsigned)(*d - '0');
+            }
+            return netfilter_nat_del_rule(idx) < 0 ? -EINVAL : (int)count;
         }
         if (strncmp(tmp, "del ", 4) == 0) {
             const char *d = tmp + 4;
@@ -1327,7 +1385,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
-        "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
+        "fd", "environ", "auxv", "io", "loginuid", "sessionid", "ns", "fdinfo",
         "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack",
         /* The same three names as under /proc/, but bound to THIS task's
          * user namespace.  Writing them is how a parent installs the maps of
@@ -1349,8 +1407,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", NULL
     };
     static const char *net_entries[] = {
-        ".", "..", "status", "config", "route", "arp", "dev", "tcp", "udp",
-        "unix", NULL
+        ".", "..", "status", "config", "route", "arp", "dev", "tcp", "tcp6",
+        "udp", "udp6", "unix", NULL
     };
     static const char *sys_vm_entries[] = {
         ".", "..", "drop_caches", NULL

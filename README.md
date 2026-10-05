@@ -67,7 +67,7 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
   * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
   * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
-* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向 NaiLoong Core LA32R SoC（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
+  * **不含网络**：`PROFILE=mcu` 走 [components/trim.toml](components/trim.toml) `[profile.mcu].sources` 的独立源文件清单，其中既没有 `kernel/net/*.c` 也没有 lwIP，所以 socket 层与协议栈在这个目标上**从未被编译**，`NET_PROFILE` 对它完全无效。网络对 STM32F103 的支持需要先把网络栈纳入 MCU trim（并按 20 KiB SRAM 重新定档），那是尚未做的产品决定，不是打开某个开关即可。详见 [docs/server-readiness.md](docs/server-readiness.md) §二。
 
 ### 关于 NOMMU
 
@@ -78,6 +78,30 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 ```
 
 `tools/a20 boards` 与 `make check-arch-boundary`（`smoke-arch-mmu-matrix`）是这条契约的验证入口；`make check-trim-registry` 保证实例校验与构建读到的矩阵不漂移。
+
+* **LoongArch32 (LA32R) bring-up**：`ARCH=loongarch32 BOARD=nailoong` 面向 NaiLoong Core LA32R SoC（软件 TLB refill，无 FPU/IOCSR，单核）；已在 LA32R 全系统模拟器上验证到 `init_kthread`，详见 [docs/platforms/loongarch32.md](docs/platforms/loongarch32.md)
+
+## 网络栈的当前边界
+按名字读大这份能力是最容易出错的地方，所以把边界写在 README 而不是只留在设计文档里：
+
+* **入站 TCP 默认不通。** `a20.tcpmode` 默认 `fast`，此时 listener 只存在于 socket 层，
+  任何入站 SYN 都会被 lwIP 回 RST。服务器必须显式传 `a20.tcpmode=lwip`，端口才真正在
+  协议栈上 listen。命令行的优先级高于 `/proc/net/config` 写入口。
+* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、无 ICMP 跟踪、不做分片 NAT，
+  端到端门禁只覆盖 DNAT（SNAT/MASQUERADE 有解析器与 `/proc` 规则，没有端到端门禁）。
+  运行时动词挂在 `/proc/a20/netfilter`。
+* **TCP 选项按档位**：`SACK` / 时间戳 / `CUBIC`（RFC 8312 核心条款）在默认与服务器档
+  开启、嵌入式档关闭。`SO_SNDBUF` / `SO_RCVBUF` 真的生效，但**没有自动调优**，且抬高
+  `SO_SNDBUF` 只在下一条连接生效。
+* **驱动校验和卸载刻意不做**：`/proc/net/stats` 里 `tx_csum_offload` / `rx_csum_offload`
+  恒为 `off`。vendored 的 lwIP 2.2.2 没有任何承载该握手的 flag，贸然协商会让协议栈去
+  验一个设备根本没算的校验和——这是设计结果，不是未完成项。
+* **锁契约只有一半可执行**：`LWIP_ASSERT_CORE_LOCKED()` 已接到 `g_lwip_lock` 的持有者
+  CPU 上，但 net 锁一侧没有对应探针，`net_sock_lock2()` 的锁序只有代码评审在把关。
+
+逐条见 [docs/net/network-config-design.md](docs/net/network-config-design.md)、
+[docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 与
+[docs/server-readiness.md](docs/server-readiness.md) §二。
 
 ## 构建与运行
 
@@ -123,7 +147,7 @@ make ARCH=aarch64 BOARD=sun50i-h616    ABI=linux BRINGUP=1 kernel-only
 make ARCH=aarch64 BOARD=rk3328        ABI=linux BRINGUP=1 kernel-only
 make ARCH=x86_64  BOARD=x86_64-pc      ABI=linux BRINGUP=1 kernel-only
 
-# STM32F103 64 KiB Flash / 20 KiB SRAM 固件
+# STM32F103 64 KiB Flash / 20 KiB SRAM 固件（无网络栈，见上）
 make stm32f103-bringup
 
 # 普中玄武 STM32F103ZET6（512 KiB Flash / 64 KiB SRAM）
@@ -166,6 +190,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
 * **用户态服务测试**：运行 `make smoke-native-fs-all`，验证 svcmgr 托管的用户态文件系统宿主 ufsd 四种后端（FAT/ext4 读写、ISO9660/NTFS 只读）及 SIGKILL 崩溃恢复；`smoke-native-svc`/`smoke-native-registry` 覆盖监管自愈与按名重绑。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
+* **网络门禁**：`make smoke-network-suite` 覆盖 socket 与协议栈；`smoke-net-accept` 覆盖真实 lwIP LISTEN pcb 的入站 accept；`smoke-netfilter-nat` 用 QEMU `hostfwd` 打通 DNAT（宿主 18081 → guest 18082）并由宿主侧探针收到回显；`smoke-net-tcp-lanes` 是多 lane 下的 TCP 结构性门禁。
 
 ## 参与贡献
 我们非常欢迎来自开源社区的代码贡献，共同探索下一代操作系统架构！

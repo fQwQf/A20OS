@@ -33,6 +33,25 @@
  * anyway, and no second probe is made -- a single-lane build must not walk an
  * extra list, and it must compile to the code it compiled to before lanes
  * existed.
+ *
+ * THE SENTINEL IS A LOOKUP BUCKET, NOT AN OWNING LANE.  Two different questions
+ * are answered by two different indices, and conflating them is what put the
+ * "accept staging" blocker in net-lanes.md on stage D's critical path:
+ *
+ *   - which list head does a lookup walk?  NET_PCB_LANE_OF_PCB(), the sentinel
+ *     for a wildcard pcb, because no hash of (0, port) can equal the hash of a
+ *     concrete destination.
+ *   - which lane owns the pcb's *work*?     NET_PCB_LANE_OWNER_OF_PCB(),
+ *     always a real lane, because a lane index has to index something.
+ *
+ * Stage D dispatches received packets to the owning lane, so the second
+ * question is the one a socket's net_socket_t::lane has to agree with.  For a
+ * wildcard pcb the owning lane is the lane net_lane_of(0.0.0.0, local_port)
+ * names -- which is exactly what net_socket_lane_of_addr() returns for a socket
+ * that bound INADDR_ANY, because the wildcard address it hashes is zero too.
+ * The two agree by construction rather than by a second rule, and the value is
+ * still derived only from the socket's own bound address, so it needs no extra
+ * field anywhere.
  */
 
 #include "lwip/opt.h"
@@ -108,5 +127,20 @@ net_pcb_lane_ip(const ip_addr_t *ip)
     (NET_PCB_IS_ANY_LOCAL_IP(&(pcb)->local_ip) \
      ? (u8_t)NET_PCB_LANE_ANY \
      : NET_PCB_LANE_OF(&(pcb)->local_ip, (pcb)->local_port))
+
+/** The real lane that owns a pcb filed in the sentinel bucket.  See the header
+ *  comment: the sentinel answers "where do I look", this answers "whose work is
+ *  it".  net_lane_of(0, port) is the owning lane of a wildcard bind, which is
+ *  the same number the socket that performed that bind derived for itself. */
+#define NET_PCB_LANE_OWNING_ANY(port) ((u8_t)net_lane_of(0, (u16_t)(port)))
+
+/** The owning lane of any pcb: its hashed bucket when it has one, and the
+ *  wildcard bind's own lane when it does not.  Always < CONFIG_NET_LANES, so it
+ *  is safe to index per-lane state with; that is the whole difference from
+ *  NET_PCB_LANE_OF_PCB(), which may return NET_PCB_LANE_ANY. */
+#define NET_PCB_LANE_OWNER_OF_PCB(pcb) \
+    (NET_PCB_IS_ANY_LOCAL_IP(&(pcb)->local_ip) \
+     ? NET_PCB_LANE_OWNING_ANY((pcb)->local_port) \
+     : NET_PCB_LANE_OF_PCB(pcb))
 
 #endif /* LWIP_PRIV_PCB_LANE_H */
