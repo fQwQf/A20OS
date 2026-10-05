@@ -235,23 +235,24 @@
  * rather than discovered on an MCU at run time.
  *
  * NET_PROFILE_NETIF_STATE_OVERHEAD is a deliberate *upper* bound on the
- * non-frame part of one netif state (idx + device_t* + ops pointer + nine
- * u64 counters + the link_pending byte, measured 104 B on riscv64 LP64 and
- * smaller on ILP32).  Being generous in that direction is the safe direction
- * for a budget assert; the exact sizeof() is pinned where the struct exists,
- * in lwip_stack.c.
+ * non-frame part of one netif state (idx + device_t* + ops pointer + caps +
+ * eleven u64 counters + the link_pending byte, measured 128 B on riscv64 LP64
+ * and smaller on ILP32).  Being generous in that direction is the safe
+ * direction for a budget assert; the exact sizeof() is pinned where the struct
+ * exists, in lwip_stack.c.
  *
- * 104, not 96: link_pending (the RTNLGRP_LINK broadcast's deferred-publish
- * flag) lands in the struct's 8-byte tail padding ahead of its next 8-aligned
- * member only because the u64 counters before it are odd in count, so adding
- * it moved the tail padding out of the struct and the non-frame part went from
- * exactly 96 to exactly 104.  The value is not a guess to be tuned for
- * headroom -- lwip_stack.c asserts sizeof() against it, so anything below 104
- * fails the riscv64 build rather than silently overstating the budget.
+ * 128, not 96: this term has moved twice, and both times it was a real struct
+ * growth that the assert caught rather than a rounding fudge.  link_pending
+ * (the RTNLGRP_LINK broadcast's deferred-publish flag) pushed the tail padding
+ * out of the struct and took it 96 -> 104; then the driver work added `caps`
+ * and the tx_sg_frames/tx_sg_bytes pair, taking it 104 -> 128.  The value is
+ * not a number to be tuned for headroom -- lwip_stack.c asserts sizeof()
+ * against it, so anything below the true figure fails the riscv64 build rather
+ * than silently overstating the budget.
  */
 #define NET_PROFILE_PACKET_SLOT_BYTES (4 + NET_PROFILE_PACKET_FRAME_SIZE)
 #ifndef NET_PROFILE_NETIF_STATE_OVERHEAD
-#define NET_PROFILE_NETIF_STATE_OVERHEAD 104
+#define NET_PROFILE_NETIF_STATE_OVERHEAD 128
 #endif
 #define NET_PROFILE_NETIF_STATE_BYTES \
     (2 * NET_PROFILE_NETIF_FRAME_SIZE + NET_PROFILE_NETIF_STATE_OVERHEAD)

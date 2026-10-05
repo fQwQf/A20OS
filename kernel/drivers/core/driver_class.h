@@ -95,6 +95,10 @@ typedef struct block_dev_ops {
  * report omits the driver line rather than showing zeros.  Closing that needs
  * either a size-checked vtable registration or an ABI version in the module
  * descriptor that drvmod_load() validates -- neither is a driver-local change.
+ *
+ * The same rule is why send_sg() and caps() below are appended rather than
+ * inserted, and why landing them required A20_DRIVER_ABI 1 -> 2: the field
+ * order is now part of the module ABI.
  */
 typedef struct net_dev_stats {
     uint64_t rx_packets;
@@ -102,6 +106,45 @@ typedef struct net_dev_stats {
     uint64_t tx_packets;
     uint64_t tx_drops;
 } net_dev_stats_t;
+
+/*
+ * One segment of a transmit buffer chain.  Same shape as POSIX struct iovec
+ * and the kernel's own net_txiovec_t, but spelled out here so the driver HAL
+ * has no dependency on either.
+ */
+typedef struct net_iovec {
+    const uint8_t *base;
+    size_t         len;
+} net_iovec_t;
+
+/*
+ * Capability bits returned by net_dev_ops_t::caps().
+ *
+ * These answer "what did this device actually negotiate", not "what could it in
+ * principle do": a driver sets a bit only after the corresponding feature was
+ * agreed with the hardware and the driver implements the matching path.  A
+ * consumer that acts on a bit it was handed without checking the matching
+ * callback is relying on the driver having lied, which is exactly the failure
+ * this split exists to make impossible.
+ *
+ * Why the two checksum bits exist but stay clear:
+ *
+ * lwIP 2.2.2 as vendored offers no way for a stack to tell a driver "the L4
+ * checksum in this frame is a partial sum you must finish".  opt.h:2449-2450
+ * defaults LWIP_CHECKSUM_ON_COPY to 0, so pbuf_take() computes and verifies
+ * checksums itself, and netif.h:84-107 defines exactly seven NETIF_FLAG_*
+ * bits (UP, BROADCAST, LINK_UP, ETHARP, ETHERNET, IGMP, MLD6) -- none of which
+ * a checksum-offload handshake would ride on.  Setting either bit under those
+ * semantics would leave lwIP verifying a checksum the device never computed, so
+ * the bits are defined now and are set only by a driver that has a stack able
+ * to express the handshake.  MRG_RXBUF is different: it is a pure device-side
+ * receive property lwIP never sees, so a driver that negotiated it can and
+ * should report it.
+ */
+#define NET_DEV_CAP_TX_SG           (1u << 0) /* send_sg() consumes a segment list */
+#define NET_DEV_CAP_TX_CSUM_OFFLOAD (1u << 1) /* needs_csum/csum_start in the vnet hdr */
+#define NET_DEV_CAP_RX_CSUM_OFFLOAD (1u << 2) /* hdr carries a valid, verified checksum */
+#define NET_DEV_CAP_MRG_RXBUF       (1u << 3) /* device may merge several RX buffers */
 
 typedef struct net_dev_ops {
     int            (*open)(struct device *dev);
@@ -119,6 +162,23 @@ typedef struct net_dev_ops {
      * treated as "no IRQ" so an unconverted driver keeps being drained
      * unconditionally rather than silently losing RX. */
     int            (*rx_irq_driven)(struct device *dev);
+    /* Optional scatter-gather transmit, appended so every existing
+     * designated initializer keeps compiling.  Consumes nr segments whose total
+     * length is the frame, and returns the frame length exactly as send() does,
+     * or a negative errno.  NULL -- the state of every driver that predates
+     * this field -- means "linear only": the stack copies the pbuf chain into
+     * its staging buffer and calls send() instead, so an unconverted driver
+     * sees byte-for-byte the same frames at the same points as before.
+     *
+     * The caller keeps ownership of every segment for the duration of the call.
+     * A driver must not retain them. */
+    int            (*send_sg)(struct device *dev, const net_iovec_t *iov,
+                              unsigned nr);
+    /* Optional capability query, in the same appended-field position and for
+     * the same reason: see the ABI note above net_dev_stats_t.  NULL, or a 0
+     * return, means "linear send only, no offload, no mergeable RX", which is
+     * the safe reading for a driver that has not been converted. */
+    uint32_t       (*caps)(struct device *dev);
 } net_dev_ops_t;
 
 /* net ioctl requests */

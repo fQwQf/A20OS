@@ -24,8 +24,13 @@
  * hands the kernel (net_dev_ops_t and friends), a struct a module reads from
  * the kernel, or a symbol it resolves against.  Checked on every load by
  * a20_driver_descriptor_sane(), so a stale module is refused rather than
- * called through a layout that no longer matches. */
-#define A20_DRIVER_ABI 1U
+ * called through a layout that no longer matches.
+ *
+ * 2: net_dev_ops_t grew send_sg() and caps() (scatter-gather transmit and a
+ * negotiated-capability query).  Both are appended, so a module built against
+ * ABI 1 still has a shorter vtable -- which the kernel would read past the end
+ * of -- and must be refused rather than called. */
+#define A20_DRIVER_ABI 2U
 
 enum a20_driver_placement {
     A20_DRIVER_PLACEMENT_KERNEL_MODULE = 1,
