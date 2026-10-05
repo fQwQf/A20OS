@@ -127,15 +127,70 @@ _Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
 #define TCP_LISTEN_BACKLOG              1
 #define TCP_DEFAULT_LISTEN_BACKLOG      16
 
+/*
+ * SACK (RFC 2018) and timestamps (RFC 7323).  Both default to 0 in opt.h, and
+ * both were left there, so a connection to any modern off-box peer negotiated
+ * neither: every loss was recovered by Reno's dupack threshold alone, and PAWS
+ * -- which is what stops an old duplicate from being accepted after a PAWS
+ * timeout reuses sequence numbers -- was simply absent.
+ *
+ * Neither is a change to lwIP's behaviour, only to what it is willing to
+ * negotiate; both code paths already existed and were compiled out.
+ *
+ * Costs, so these are not free:
+ *   - Per PCB: 2 * u32_t for the timestamp state (ts_lastacksent, ts_recent)
+ *     plus LWIP_TCP_MAX_SACK_NUM * 8 B of SACK ranges.  Every established
+ *     connection pays it, so the pool multiplier below is what keeps this
+ *     affordable on the small profiles.
+ *   - Per segment: up to 12 B of TCP options for TS and up to (1 + 2 * 4) * 4 =
+ *     36 B for four SACK blocks, added to every data segment header.  That is
+ *     why the PBUF_POOL_BUFSIZE assertion below now budgets options, and why
+ *     the profiles raise the multiplier instead of leaving it at opt.h's 4.
+ *
+ * EMBEDDED leaves both off.  With PBUF_POOL_BUFSIZE 512 and 8 PCBs the header
+ * growth competes directly with payload for the same element, and an MCU
+ * profile whose stated goal is a bounded, proportional footprint should not
+ * spend it on options that only matter on a real network path.
+ */
+#define LWIP_TCP_SACK_OUT               NET_PROFILE_TCP_SACK_OUT
+#define LWIP_TCP_MAX_SACK_NUM           NET_PROFILE_TCP_MAX_SACK_NUM
+#define LWIP_TCP_TIMESTAMPS             NET_PROFILE_TCP_TIMESTAMPS
+
+/* init.c rejects SACK_OUT without the ooseq queue, and SACK is only meaningful
+ * with somewhere to record the ranges it reports. */
+_Static_assert(!LWIP_TCP_SACK_OUT || TCP_QUEUE_OOSEQ,
+               "LWIP_TCP_SACK_OUT requires TCP_QUEUE_OOSEQ");
+_Static_assert(LWIP_TCP_MAX_SACK_NUM >= 1,
+               "LWIP_TCP_MAX_SACK_NUM must be at least 1");
+
 /* lwIP truncates the advertised window to 16 bits after shifting; a larger
  * TCP_WND would silently wrap rather than negotiate a wider window. */
 _Static_assert(TCP_WND <= (0xFFFF << TCP_RCV_SCALE),
                "TCP_WND must fit the 16-bit window field after TCP_RCV_SCALE");
 
-/* A full-size segment plus its Ethernet, IP and TCP headers must fit one
- * PBUF_POOL element; lwIP carves the headers out of the head pbuf's payload. */
-_Static_assert(TCP_MSS + 54 <= PBUF_POOL_BUFSIZE,
-               "PBUF_POOL_BUFSIZE must leave room for headers above TCP_MSS");
+/*
+ * A full-size segment plus its Ethernet, IP and TCP headers must fit one
+ * PBUF_POOL element; lwIP carves the headers out of the head pbuf's payload.
+ *
+ * The "+ 54" was Ethernet(14) + IPv4(20) + TCP(20) with no options, which
+ * stops being the true figure the moment any option is negotiated: the header
+ * grows by exactly the option bytes the segment carries, and an ignored
+ * remainder here is a mid-connection drop rather than a build failure.  The
+ * worst case is a data segment, which cannot carry MSS or window-scale (both
+ * are SYN-only) but does carry TS and up to LWIP_TCP_MAX_SACK_NUM SACK blocks.
+ *
+ * The literals are PBUF_LINK_HLEN + IP_HLEN + TCP_HLEN spelled out because
+ * lwipopts.h is read before pbuf.h defines them; 14/20/20 are those values for
+ * the Ethernet netif this port builds.
+ */
+#define A20_TCP_OPT_HDR_MAX                                              \
+    (14 /* Ethernet */ + 20 /* IPv4 */ + 20 /* TCP */                     \
+     + (LWIP_TCP_TIMESTAMPS ? 12 : 0)                                     \
+     + (LWIP_TCP_SACK_OUT ? (1 + 2 * LWIP_TCP_MAX_SACK_NUM) * 4 : 0))
+
+_Static_assert(TCP_MSS + A20_TCP_OPT_HDR_MAX <= PBUF_POOL_BUFSIZE,
+               "PBUF_POOL_BUFSIZE must leave room for headers and TCP options "
+               "above TCP_MSS");
 
 /* The receive window is only reachable if the pool can hold that much payload
  * queued at once, otherwise the window advertises capacity that cannot be
