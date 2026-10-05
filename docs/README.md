@@ -115,8 +115,11 @@ riscv64 H 扩展下的 stage-2 地基与 vcpu 切片。宿主侧两片（stage-2
 - [hypervisor/00-design.md](hypervisor/00-design.md)：设计记录——单级内存模型如何复用为 stage-2、riscv64 架构半、vcpu 运行循环的已落地形状、评审发现与遗留
 - [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
 - [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
+- [hypervisor/03-usage.md](hypervisor/03-usage.md)：使用指南——前置条件（riscv64 + `-cpu rv64,h=true`）、`hypvm` 命令行逐参数与 DTB 放置规则、输出逐行解读与 PASS 判据、当前限制、排查表
 
 验证入口：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-a20os`（后者是 v2：把同一个内核当 guest 启起来，PASS 判据是设备模型数到的 guest 自己的 banner）。三条 gate 都必须带 `-cpu rv64,h=true`，否则默认 rv64 CPU 不暴露 H 扩展，测的是 SKIP 而不是功能。
+
+> 上一句末尾那个因果在 QEMU 10.0.13 上复现不出来：实跑四组 `-cpu`（`h=true` / `rv64` / 完全不写 / `h=false`）显示默认 `rv64` 本来就带 H，去掉该参数 gate 照样过；而 `h=false` 得到的是宿主 KERNEL PANIC，不是 `NOT_SUPPORTED`。参数仍建议保留。数据与命令见 [hypervisor/03-usage.md §1.1](hypervisor/03-usage.md)。
 
 ## 研究与项目背景
 
