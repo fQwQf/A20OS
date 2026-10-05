@@ -40,9 +40,22 @@
 **容量与超时。** 表满时退化成有界 LRU 缓存而不是失败：路由器留住新流、忘掉最老的流，对
 这么小的表是合适的取舍。清扫在 `a20_lwip_poll_timers_locked()` 里每秒一次，每次只扫
 `max_scan` 条并从上次的断点续扫（`netfilter_conntrack_expire`），所以满表也不会让某个
-tick 无界。空闲超时按协议和状态分开：TCP NEW 30s、TCP ESTABLISHED 120s、UDP 30s。分开
-的理由是半开 TCP 流不能占着槽位等一个已建立连接的寿命，而 UDP 的"流"常常就是单个数据
-报，对端不会再回。
+tick 无界。空闲超时按协议和状态分开：TCP NEW 30s、TCP ESTABLISHED 120s、UDP 30s、**ICMP
+echo 30s（跟 UDP 一起）**。分开的理由是半开 TCP 流不能占着槽位等一个已建立连接的寿命，
+而 UDP 的"流"常常就是单个数据报，对端不会再回。
+
+**ICMP echo 的元组编码。** 表里那两个 16 位字段对 TCP/UDP 是端口，对 echo 是**类型与
+标识符**：类型一律**归一化**成请求值 8 存进 `src_port`，标识符存进 `dst_port`。归一化
+是安全的，因为被跟踪的只有 8 与 0 两种类型，而它们互为补集，不会有两次不同的交换归一化
+到同一个元组上。**归一化的目的**是让回程匹配不必到处开特例：echo 的两个方向**只交换地址，
+两个字段都不换**——标识符在请求与回程里是同一个数（这正是它们成对的依据），类型则是 8↔0
+互补。TCP/UDP 那套"两个端口全换"的比较式永远匹配不上它，所以 `netfilter_ct_icmp_is()`
+单独处理；归一化之后，这个比较退化成"地址交换、两个字段相等"。
+回程链上同理：ICMP 只有地址会因翻译而移动，标识符不会，类型两边都已归一化。
+
+`/proc` 里 echo 条目**不带 `:端口` 字段**渲染，而是
+`ct N: A -> B proto=1 icmp=echo id=<id> state=... nat=... packets=N`。照 TCP/UDP 的形状
+印出来会读成"这条流去端口 1234"，而那个端口根本不存在。
 
 **状态推断只有元组和 TCP flags 字节。** 见到回程包，或前向包带 ACK 不带 SYN，就是
 ESTABLISHED。没有序列号窗口校验，没有 RST/FIN 拆除（关掉的流会挂到空闲超时），也没有独立
@@ -77,22 +90,32 @@ natadd out proto=tcp dport=80    action=masquerade
 
 以下都是**本实现的限制**，不是设计的限制，每一条都是调用方可能踩到的：
 
-- **没有 ALG。** 无 FTP/SIP/ISAKMP 载荷检查，地址写在报文体里的协议只翻头部，控制通道
-  不会跟着走。
-- **没有 ICMP 跟踪。** 只有 TCP 和 UDP 建条目，ICMP 既不匹配已有流也不能新建流。因此
-  依赖 ICMP 差错跟踪的路径 MTU 探测在这里不工作。
+- **只跟踪 ICMP echo，不跟踪任何 ICMP 差错报文。** TCP、UDP 与 **ICMP echo**（type 8/0）
+  会建条目；其余 ICMP 类型（destination unreachable、time exceeded 等）既不匹配已有流
+  也不能新建流。**为什么是 echo 而不是别的**：echo 请求与回程由发送方自己选的标识
+  （identifier）配对，"这两个包属于同一次交换"这件事已经在线上了，不需要推断；而把差错
+  报文配到流上必须去读它引用的那个原始包再比对，那就是一个 ALG，本轮不做。
+  因此**依赖 ICMP 差错跟踪的路径 MTU 探测在这里不工作**：一条被翻过 NAT、需要 PMTU 的流
+  会黑洞，而不是靠 fragmentation-needed 恢复。
+- **ICMP echo 只按地址翻译。** 它没有端口，所以 NAT 规则里写了 `toport=` 也无处可落，该
+  字段被忽略；报文体内部（比如引用的内嵌头部）一个字都不改。**echo 标识符从不翻译**，
+  这正是回程还能配上的原因。ICMP 校验和覆盖 ICMP 头与载荷、**不覆盖 IP 地址**，所以
+  地址改写不必动它——这一点是"只翻地址"能成立的前提，不是省事。
+  另外 ICMP 超时走 **UDP 的空闲超时**而不是 TCP 的：echo 是无连接协议，回程时间由对方
+  决定，没有握手可据以判断"新建"状态，用 connect 超时去计它是在陈述一个它没有的握手。
 - **不分片 NAT。** 无分片包和首片会翻；非首片没有端口，既无元组可索引也无头部可改，直接
   放行——选择放行而不是"记条目但不翻译"，因为后者会让条目看起来有状态而实际转换是残的。
-  被分片的流因此可能被静默弄坏。
+  被分片的流因此可能被静默弄坏。**分片的 echo 属于这一类**：解析器只在未分片的包上认出
+  echo 类型，所以它既不被跟踪也不被翻译。
 - **无 helper 模块**，无 fullcone / 端口保持变体，无 IPv6 NAT（hook 只解析 IPv4）。
-- **不跟踪非 TCP/UDP 协议**，即使 NAT 规则里写了 `proto=`。
+- **除 TCP/UDP/ICMP echo 外一律不跟踪**，即使 NAT 规则里写了 `proto=`。
 - **表是定长的**。SERVER 档 1024 条，满即 LRU 淘汰（`ct_evicted` 计数），不是拒绝新流。
 
 ## 门禁
 
 | 门禁 | 断言 |
 |---|---|
-| `smoke-netfilter` | 既有 drop/accept 语义不回归，且 conntrack 计数随 `udp_send_once` 增长、`/proc` 里能看到该五元组（`user/cmds/net/netfilter_test.c` 测试 8） |
+| `smoke-netfilter` | 既有 drop/accept 语义不回归，且 conntrack 计数随 `udp_send_once` 增长、`/proc` 里能看到该五元组（`user/cmds/net/netfilter_test.c` 测试 8）；**外加 ICMP echo 跟踪**：手工构造的 echo 请求发往网关，`ct_packets` 增长、`ct_tracked` 增加、`/proc` 里出现 `icmp=echo id=...` 且条目是 `state=established`——回程能匹配上这条状态才是本项的关键证据，只有 insert 的话条目会一直是 `new`（测试 9） |
 | `smoke-netfilter-nat` | 端到端 DNAT 端口转发：QEMU `hostfwd` 把 `127.0.0.1:18081` 转到 guest 18081，guest 侧规则转到 18082，host 侧 `tools/netnat_host_probe.py` 连上、发出、收到回显 |
 
 DNAT 门禁有两个 QEMU 10 的坑，都写在 `tools/targets-smoke.mk` 的目标注释里：规则必须
