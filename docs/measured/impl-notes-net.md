@@ -687,6 +687,19 @@ AF_UNIX 关闭都会：
 `net_lock_violation()` 上报路径，但**没有单独注入过**。两次对照两次分支，不要说成
 三次对照三次分支。
 
+> **2026-10-06 独立复跑**：换人重做了这两组注入，结论一致（注入点写法略有不同，
+> 所以计数不同——**计数值本身不是结论，"是否 abort / 是否继续跑完"才是**）：
+>
+> 1. `CONFIG_NET_LOCK_ASSERT=1` 下让首次取桶锁时已持集合里有一把 socket 锁：
+>    `net lock contract: bucket lock under socket lock lock=ffffffc081292688
+>    kind=bucket site=ffffffc0804b0004 cpu=0 held=1 violations=1` 紧接
+>    `========== KERNEL PANIC ==========`。
+> 2. `CONFIG_NET_LOCK_ASSERT=2` 下把已持集合污染成一把地址更高的 socket 锁：
+>    `net_lock: armed=1 violations=15440 sites=8 held_cpu0=1`，且 `SOCKET_STRESS: PASS`
+>    正常走完——第三档只计数、不 abort。
+>
+> 两次注入均已 `git checkout --` 回退，`git status` 在 kernel/ 下为空。
+
 ### 11.4 本轮实跑
 
 ```console
@@ -711,6 +724,27 @@ net_notconn: total=0 window=0 reasons=13
 两个读数互相印证的地方。
 
 **仍未跑的**：ASAN 压力测试、`smoke-network-suite` 与 `smoke-smp-lock-contention`
-本轮**没有复跑**（全量回归由编排层统一做）。所以"`live` 在真正的多核压测下不增长"
-这一句，本轮**没有**证据；§11.4 的数据是单 CPU、三个自带用例跑完的账本平衡，
-不是压力测试下的不漏证明。这一点不要被上面的 `live=1` 读成后者。
+本轮**没有复跑**（全量回归由编排层统一做）。
+
+> **2026-10-06 补：多核那一块现在有数据了。** 上面那段是单 CPU 的账本平衡，
+> 不能读成"压力测试下不漏"。为补这一块，同一分支又跑了 20 次
+> **4 CPU + 4 lane** 的独立引导（`make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4
+> NET_LANES=4 OPT="-DCONFIG_NET_PCB_SANE=1 -DCONFIG_NET_LOCK_ASSERT=1
+> -DCONFIG_NET_RACE_DELAY_US=<500|0>" dev-build`，guest 带 `a20.tcpmode=lwip`，
+> 每引导 40 次 `tcp_accept_test`，合计 800 次下发 / **797 次实际执行**，
+> 详见 `docs/net/net-lanes.md`「放大实验第二轮（2026-10-06）」）：
+>
+> - `net_sock_ref:` 在全部 20 次引导里都是 **`live=1 faults=0`**，`allocs` 落在
+>   159–167，`frees` 恒等于 `allocs-1`。`live=1` 仍是那个常驻的 DHCP socket。
+>   这是"真实多核握手流下引用计数不漏"的证据，量级比单 CPU 那三个自带用例大一个数量级。
+> - `net_lock: armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0`，
+>   20 次全部如此：**阶段 E 的锁序在这份负载下没有被违反**。
+> - `lock_counters: registered=48 capacity=192 dropped=0`（DEFAULT 档）。
+>   §8.2/§8.7 那个"预算够不够"的问题也一并测了 **server 档**（`NET_PROFILE=3`，
+>   `NET_PROFILE_MAX_SOCKETS=65536` -> `NET_SOCK_BUCKET_SHIFT=9` -> 128 个桶锁）：
+>   实测 `registered=141 capacity=192 dropped=0`，即 128 个桶锁 + 13 个其他锁，
+>   **余量 51**，`lockcounters_short=0`。所以预算不是"勉强够"，是**当前三档都够**——
+>   但这个"够"现在每次引导都会自己报出来，而不是靠人记得去看。
+>
+> **仍未跑的**依旧是 ASAN 压力测试与全量回归。797 次是"握手 + 建连 + 拆除"这一类
+> 路径的覆盖，不是 `net_stress_test` 那种 128 MiB 搬运的覆盖。
