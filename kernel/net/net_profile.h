@@ -88,6 +88,11 @@
 #define NET_PROFILE_TCP_TIMESTAMPS   0
 #define NET_PROFILE_TCP_CUBIC        0
 
+/* Conntrack + NAT ceilings.  The table is static, so these are real bytes:
+ * NET_CONNTRACK_ENTRY_BYTES (~64) x entries. */
+#define NET_PROFILE_CONNTRACK_ENTRIES 64
+#define NET_PROFILE_CONNTRACK_BUCKETS 8
+
 /*
  * Frame-buffer geometry, which is the other half of the pbuf story.
  *
@@ -185,6 +190,15 @@
 #define NET_PROFILE_NETIF_MTU         1500
 #define NET_PROFILE_STATIC_BUDGET     (128 * 1024)
 
+/*
+ * A conntrack entry is 64 bytes, so 1024 entries is 64 KiB of static table.
+ * Kept well under the PCB ceilings above it: a tracked flow is coarser than a
+ * PCB, and a table that fills at a thousand flows evicts by LRU rather than
+ * refusing.
+ */
+#define NET_PROFILE_CONNTRACK_ENTRIES 1024
+#define NET_PROFILE_CONNTRACK_BUCKETS 128
+
 #else
 
 /*
@@ -227,6 +241,14 @@
 #define NET_PROFILE_NETIF_FRAME_SIZE  1536
 #define NET_PROFILE_NETIF_MTU         1500
 #define NET_PROFILE_STATIC_BUDGET     (64 * 1024)
+
+/*
+ * QEMU dev/smoke default.  A conntrack entry is 64 bytes, so 256 entries is
+ * 16 KiB of static table -- affordable here, and enough that a NAT gate never
+ * reaches the eviction path by accident.
+ */
+#define NET_PROFILE_CONNTRACK_ENTRIES 256
+#define NET_PROFILE_CONNTRACK_BUCKETS 32
 
 #endif /* CONFIG_NET_PROFILE */
 

@@ -9,6 +9,7 @@
 #include "fs/ext4_journal.h"
 #include "net/netfilter.h"
 #include "net/net_config.h"
+#include "net/lwip_stack.h"
 #include "fs/procfs_internal.h"
 #include "mm/pt.h"
 #include "core/klog.h"
@@ -1024,12 +1025,37 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         memcpy(tmp, buf, n);
         tmp[n] = '\0';
         procfs_chomp(tmp);
+        /*
+         * The conntrack verbs below take g_lwip_lock.  That is safe here and
+         * only here: this runs from a procfs write, i.e. a syscall, and no
+         * procfs write is issued from under g_lwip_lock.  See the locking note
+         * at the top of kernel/include/net/netfilter.h.
+         */
         if (strcmp(tmp, "reset") == 0) {
             netfilter_reset();
+            netfilter_nat_reset();
             return (int)count;
         }
         if (strcmp(tmp, "flush") == 0) {
             netfilter_reset();
+            return (int)count;
+        }
+        /* A separate verb rather than an extension of "reset": "reset" clears
+         * configuration, "ctflush" throws away live flow state.  Conflating them
+         * would mean a test that wants a clean NAT binding has to destroy the
+         * rules it is about to exercise. */
+        if (strcmp(tmp, "ctflush") == 0) {
+            uint64_t lf = a20_lwip_lock();
+            netfilter_conntrack_flush();
+            a20_lwip_unlock(lf);
+            return (int)count;
+        }
+        if (strcmp(tmp, "cton") == 0) {
+            netfilter_conntrack_set_enabled(1);
+            return (int)count;
+        }
+        if (strcmp(tmp, "ctoff") == 0) {
+            netfilter_conntrack_set_enabled(0);
             return (int)count;
         }
         if (strncmp(tmp, "add ", 4) == 0) {
@@ -1041,6 +1067,30 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             if (idx < 0)
                 return idx;
             return (int)count;
+        }
+        if (strncmp(tmp, "natadd ", 7) == 0) {
+            net_nat_rule_t rule;
+            int r = netfilter_nat_parse_rule(tmp + 7, strlen(tmp + 7), &rule);
+            if (r < 0)
+                return r;
+            int idx = netfilter_nat_add_rule(&rule);
+            if (idx < 0)
+                return idx;
+            return (int)count;
+        }
+        if (strncmp(tmp, "natdel ", 7) == 0) {
+            const char *d = tmp + 7;
+            if (*d == '\0')
+                return -EINVAL;
+            unsigned idx = 0;
+            for (; *d; d++) {
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                if (idx > (NETFILTER_MAX_NAT_RULES * 2))
+                    return -ERANGE;
+                idx = idx * 10 + (unsigned)(*d - '0');
+            }
+            return netfilter_nat_del_rule(idx) < 0 ? -EINVAL : (int)count;
         }
         if (strncmp(tmp, "del ", 4) == 0) {
             const char *d = tmp + 4;
