@@ -53,6 +53,7 @@ static int net_table_claims(net_table_kind_t kind, const net_socket_t *s)
 
 typedef struct {
     net_table_kind_t   kind;
+    int                family;   /* AF_INET, AF_INET6, or AF_UNSPEC for both */
     net_table_visit_fn fn;
     void              *arg;
     int                visited;
@@ -64,20 +65,22 @@ static bool net_walk_slot(net_socket_t *s, int idx, void *arg)
     (void)idx;
     if (s->closed || !net_table_claims(w->kind, s))
         return false;
+    if (w->family != AF_UNSPEC && s->domain != w->family)
+        return false;
     w->visited++;
     w->fn(s, w->arg);
     return false;
 }
 
-/* Visits every socket of `kind` still owned by the table.  Returns the number
- * of visits, or -EINVAL when there is no callback to run. */
-int net_socket_table_walk(net_table_kind_t kind, net_table_visit_fn fn,
-                          void *arg)
+/* Visits every socket of `kind` and `family` still owned by the table.  Returns
+ * the number of visits, or -EINVAL when there is no callback to run. */
+int net_socket_table_walk(net_table_kind_t kind, int family,
+                          net_table_visit_fn fn, void *arg)
 {
     if (!fn)
         return -EINVAL;
 
-    net_walk_arg_t w = { kind, fn, arg, 0 };
+    net_walk_arg_t w = { kind, family, fn, arg, 0 };
     net_table_scan_all(net_walk_slot, &w);
     return w.visited;
 }
