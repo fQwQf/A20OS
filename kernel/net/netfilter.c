@@ -403,6 +403,23 @@ int netfilter_parse_frame(const uint8_t *f, size_t len, netfilter_frame_t *out)
         out->has_ports = 1;
         if (out->proto == NETFILTER_PROTO_TCP && len >= off + ihl + 14)
             out->tcp_flags = l4[13];
+    } else if (out->proto == NETFILTER_PROTO_ICMP && len >= off + ihl + 4) {
+        /*
+         * Echo only.  Every other ICMP type -- destination unreachable, time
+         * exceeded and the rest -- is parsed past but not tracked, and the
+         * reason is a boundary rather than an omission: pairing those means
+         * inferring a flow from the packet they quote from the original, which
+         * is an ALG.  Echo needs none of that, because the sender's own
+         * identifier already pairs the request with the reply.
+         */
+        const uint8_t *l4 = ip + ihl;
+        uint8_t type = l4[0];
+        if (type == NETFILTER_ICMP_ECHO_REQUEST ||
+            type == NETFILTER_ICMP_ECHO_REPLY) {
+            out->icmp_type = type;
+            out->icmp_id = (uint16_t)((l4[4] << 8) | l4[5]);
+            out->icmp_off = (uint16_t)(off + ihl);
+        }
     }
     return 1;
 }
