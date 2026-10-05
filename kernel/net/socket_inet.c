@@ -18,6 +18,7 @@
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/prot/icmp.h"
+#include "lwip/priv/pcb_lane.h"
 
 /*
  * Next ephemeral port to hand out.
@@ -338,6 +339,18 @@ int net_sockaddr_to_lwip_ip(const void *addr, size_t len,
  * that is enough entropy to spread connections, and -- the part that actually
  * matters -- it is computed only from bytes that arrive on the wire, so the
  * peer's view and ours produce the same value.
+ *
+ * THE ANSWER IS ALWAYS A REAL LANE, INCLUDING FOR A WILDCARD BIND.  bind(0.0.0.0)
+ * hashes the zero address, so this returns net_lane_of(0, port) -- a number in
+ * 0..CONFIG_NET_LANES-1, never a sentinel.  That is deliberate and it is the
+ * same number lwIP computes for the pcb: see NET_PCB_LANE_OWNER_OF_PCB() in
+ * lwip/priv/pcb_lane.h, which answers "which lane owns this pcb's work" and is
+ * distinct from NET_PCB_LANE_OF_PCB(), which answers "which list head does a
+ * lookup walk" and returns the sentinel bucket for the same wildcard bind.
+ * Stage D dispatches packets to the owning lane, so the socket side of the pair
+ * has to be the owning one; keeping the wildcard case here on the owning
+ * definition is what stops "socket says lane 2, pcb is somewhere else" from
+ * becoming a real dispatch bug.
  */
 unsigned net_socket_lane_of_addr(const void *addr, size_t len,
                                  unsigned fallback)
@@ -1067,16 +1080,46 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
          * against it -- and it restores the rule that g_lwip_lock is never held
          * together with a bucket lock, which the single global lock broke. */
         uint64_t lf = a20_lwip_lock();
-        /* The accepted connection's owning lane is hash(local_ip, local_port)
-         * of *this* pcb, and that local port is the listener's -- the child has
-         * not bound yet, so child->lane is still the provisional CPU-derived
-         * one.  The listener's address-derived lane is the same value, which is
-         * why the listener's is the one declared here. */
-        a20_lwip_lane_enter(listener->lane);
         struct tcp_pcb *pcb = c->pcb;
         bool adopted = false;
         bool fin = c->fin;
         bool payload = (c->pending != NULL);
+#if CONFIG_NET_LANES > 1
+        /*
+         * The child's owning lane, taken from the pcb it is adopting rather
+         * than from the listener.  This is the fix for the blocker
+         * docs/net/net-lanes.md records under "阻塞": the two were not the same
+         * number and neither of them was right for both ends.
+         *
+         * For a passive open the pcb copies the concrete destination address
+         * out of the segment into local_ip (tcp_in.c, tcp_listen_input()), so
+         * the pcb's owning lane is hash(that address, local_port).  The
+         * listener's own lane is hash(its bound address, its port), which for
+         * a specific bind is the same number but for a wildcard bind is not:
+         * net_socket_lane_of_addr() hashes the zero address, so the listener
+         * says net_lane_of(0, port) while its pcb is filed in the sentinel
+         * bucket and the child it is about to hand out belongs to
+         * hash(concrete_dst_ip, port).  telnetd binds INADDR_ANY, so this is
+         * the common case, not the corner case.
+         *
+         * Declaring the child's lane before anything in this critical section
+         * allocates is what makes it the lane the child's own work runs in:
+         * net_inet_tcp_stage_payload() below and every later syscall on this
+         * fd take the lane from the socket, and stage D dispatches inbound
+         * packets to the pcb's owning lane.
+         *
+         * Guarded, not left to fold: at one lane the value is 0 either way,
+         * but the store itself is not something the compiler may drop, and
+         * the N=1 rule is that the preprocessed source is the old source.
+         * `pcb` may be NULL on a slot whose producer already gave up, in
+         * which case nothing is adopted and the listener's lane is the only
+         * thing this section can meaningfully declare.
+         */
+        child->lane = pcb ? NET_PCB_LANE_OWNER_OF_PCB(pcb) : listener->lane;
+        a20_lwip_lane_enter(child->lane);
+#else
+        a20_lwip_lane_enter(listener->lane);
+#endif
         if (!c->dead && pcb && child) {
             child->tcp = pcb;
             /* Re-args the pcb to the child socket.  This is what makes the slot
