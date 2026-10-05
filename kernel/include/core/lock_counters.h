@@ -20,6 +20,21 @@ size_t lock_counters_format(char *buf, size_t bufsz);
 
 void lock_counters_init(void);
 
+/*
+ * How many locks the fixed registry currently holds, and how many
+ * lock_counters_register() calls it had to refuse because it was full.
+ *
+ * impl-notes-net.md §8.2 and §8.7 recorded the budget question -- the server
+ * profile registers 128 socket-table bucket locks plus proc, runq, lwip, the
+ * three fs locks and the slab cache, against LOCK_COUNTERS_MAX of 192 -- and
+ * noted that a registration past the ceiling was *silently* dropped.  A silent
+ * drop is the one failure mode a contention audit cannot detect: the lock still
+ * works, the lock just stops being visible, and the report reads clean.  These
+ * two accessors make the drop visible instead of inferable.
+ */
+unsigned lock_counters_count(void);
+unsigned lock_counters_dropped(void);
+
 /* Zero the counters of every registered lock, keeping the registrations (and
  * the allocated per-callsite tables) intact.  Lets one run own its measurement
  * window instead of inferring it by subtracting two cumulative reads. */
