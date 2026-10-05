@@ -576,6 +576,85 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-hyp-a20os: PASS; log saved to $log',
     },
+    # /hypvm is the same guest boot with its parameters on the command line
+    # (user/cmds/core/hypvm.c), so this gate is smoke-hyp-a20os run with argv
+    # instead of with it compiled in: bare `hypvm`, i.e. exactly the defaults
+    # hyp_boot carries.  Its partner is smoke-hyp-vm-96 below, which runs the
+    # same program on a 96 MiB window with a bootargs string of its own.
+    #
+    # ONE guest boot per host boot, deliberately.  Two hypvm runs in one shell
+    # session were tried first and do not work: the first run PASSes and the
+    # second one (default arguments, so nothing about the arguments explains it)
+    # never produces a single guest console byte and never returns --
+    # hyp_vcpu_run() spins at 100% CPU with no host trap message at all.  The
+    # two parameter combinations therefore live in two gates, one QEMU boot
+    # each, rather than one gate with two shell lines; the limitation itself is
+    # written up in docs/hypervisor/01-a20os-guest.md §10 item 9.
+    'smoke-hyp-vm': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vm-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ', 'lines': ['hypvm', 'poweroff']},
+        # 300s, same as smoke-hyp-a20os: every guest console byte, page-table
+        # walk and second-stage fault traps through the host, so a guest boot is
+        # orders of magnitude slower than a host boot of the same kernel.
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-a20os; -cpu rv64,h=true is load-bearing (the
+        # default rv64 CPU has no H extension, hyp_supported() refuses every
+        # call, and hypvm reports that as its own exit code 4 rather than a
+        # silent pass).
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # marker_seen=1 is the whole verdict (device-model counter over
+            # guest console bytes only); console_bytes=[0-9]+ is the second half
+            # of the same judgement hyp_boot makes, a marker length's worth of
+            # output would be a degenerate hit.  exit= keeps the reason on the
+            # record: the guest has no rootfs, so it is expected to end in a
+            # second-stage fault rather than a shutdown.  mem= is what says this
+            # really ran on the default window.
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ exit=[0-9]+\(\w+\) mem=128 MiB',
+        ],
+        # Same discipline as smoke-hyp-a20os: no PANIC, because a guest panic's
+        # bytes are the host kernel's own panic bytes and the guest's arrival
+        # path is allowed to end there.  A host that actually dies cannot print
+        # the verdict lines the expectations require.
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYPVM: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vm: PASS; log saved to $log',
+    },
+    # The second hypvm gate: same program, a window that is not the default, and
+    # a /chosen/bootargs of its own.  This is the run hyp_boot cannot express at
+    # all -- the FDT address is derived from the window top, so a window other
+    # than 128 MiB is exactly the case where a fixed DTB GPA lands inside the
+    # guest image (docs/hypervisor/01-a20os-guest.md §11.3).
+    #
+    # No spaces inside -b: the guest shell would split them into a second argv
+    # entry, and hypvm would (rightly) reject it as an unknown argument.
+    'smoke-hyp-vm-96': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-vm-96-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hypvm -m 96 -b a20.hypguest=1,a20.hypvm=smoke',
+                            'poweroff']},
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            r'HYPVM: PASS marker_seen=1 console_bytes=[0-9]+ exit=[0-9]+\(\w+\) mem=96 MiB',
+            # The bootargs string went into the synthesized FDT's /chosen, which
+            # is the only way to tell -b apart from a run where the flag was
+            # silently dropped.
+            r'HYPVM: guest=\S+ elf_bytes=\d+ mem=96 MiB base=0x80000000 '
+            r"marker='A20OS Kernel' bootargs='a20.hypguest=1,a20.hypvm=smoke'",
+        ],
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYPVM: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-vm-96: PASS; log saved to $log',
+    },
     'smoke-mmprobe': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

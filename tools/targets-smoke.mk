@@ -170,6 +170,21 @@ smoke-hyp-vcpu:
 smoke-hyp-a20os:
 	$(PYTHON) tools/smoke.py smoke-hyp-a20os
 
+# /hypvm is that boot with its parameters on the command line.  Two gates,
+# one QEMU boot each: smoke-hyp-vm runs it on hyp_boot's defaults,
+# smoke-hyp-vm-96 on a 96 MiB window with its own bootargs -- the run that
+# matters, because the FDT address is derived from the window top, so a window
+# other than 128 MiB is where a fixed DTB GPA lands inside the guest image.
+# They are two boots rather than two shell lines in one because a second guest
+# boot in the same host session does not come back (see the case comment in
+# tools/smoke_cases.py).  Both need -cpu rv64,h=true (carried by the case argv)
+# and 300s each, for smoke-hyp-a20os's reason.
+smoke-hyp-vm:
+	$(PYTHON) tools/smoke.py smoke-hyp-vm
+
+smoke-hyp-vm-96:
+	$(PYTHON) tools/smoke.py smoke-hyp-vm-96
+
 smoke-mmprobe:
 	$(PYTHON) tools/smoke.py smoke-mmprobe
 

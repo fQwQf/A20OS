@@ -258,6 +258,18 @@ TLSE_CFLAGS := $(TLSE_BASE_CFLAGS) $(TLSE_OPT) $(TLSE_ARCH_CFLAGS) $(TLSE_NOMMU_
 LOCAL_CMD_OBJS := $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(LOCAL_CMD_SRCS))
 LOCAL_CMDS := $(addprefix $(BUILD_DIR)/,$(LOCAL_CMD_NAMES))
 
+# The hypervisor guest loader, shared by the two programs that boot a guest:
+# /hyp_boot (the fixed-parameter smoke gate) and /hypvm (the same boot with its
+# parameters on the command line).  It lives one level deeper than
+# cmds/<dir>/<file>.c on purpose -- LOCAL_CMD_SRCS above is cmds/*/*.c, so the
+# same code at cmds/core/hyp_guest.c would be built into a third binary called
+# hyp_guest; a subdirectory is what keeps it a module.  The generic object rule
+# ($(OBJ_DIR)/cmds/%.o: cmds/%.c) still compiles it, and the two commands get
+# it as an extra link prerequisite at their rules below.  Listed in
+# USER_INTERMEDIATE_TARGETS so its .d file joins DEP_FILES and a header edit
+# under cmds/core/hyp/ rebuilds both commands.
+HYP_GUEST_OBJ := $(OBJ_DIR)/cmds/core/hyp/hyp_guest.o
+
 FF_DIR := external/apps/fastfetch
 FF_GEN := $(OBJ_DIR)/fastfetch/gen
 FF_MAIN := $(FF_DIR)/src/fastfetch.c
@@ -575,7 +587,8 @@ MKSH_CFLAGS := $(CFLAGS) -I$(MKSH_DIR) \
 USER_INTERMEDIATE_TARGETS := $(INIT_OBJ) $(INIT_EXTRA_OBJS) $(MKSH_OBJS) \
                              $(LOCAL_CMD_OBJS) $(SBASE_OBJS) $(SBASE_LIBUTF_OBJS) \
                              $(SBASE_LIBUTIL_OBJS) $(SBASE_LIBUTF) $(SBASE_LIBUTIL) \
-                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB)
+                             $(WGET_OBJ) $(TLSE_OBJ) $(FF_MAIN_OBJ) $(FF_LIB_OBJS) $(FF_LIB) \
+                             $(HYP_GUEST_OBJ)
 
 ifneq ($(wildcard $(FF_DIR)/src/fastfetch.c),)
 FF_AVAILABLE := 1
@@ -648,12 +661,19 @@ $(BUILD_DIR)/init: $(INIT_OBJ) $(INIT_EXTRA_OBJS) | build_dir musl_prepare
 
 # One explicit rule per local command: flat binary -> subdir object, so make
 # tracks the source dependency (the object rule below builds it from cmds/%/%.c).
+# The link line takes $^ rather than $< so that a command which names extra
+# prerequisites (hyp_boot/hypvm with the shared guest loader) links them too;
+# for every other command $^ is just its own object, the same single file $< was.
 define LOCAL_CMD_RULE
 $(BUILD_DIR)/$(basename $(notdir $(1))): $(patsubst cmds/%.c,$(OBJ_DIR)/cmds/%.o,$(1)) | build_dir musl_prepare
 	@mkdir -p $$(dir $$@)
-	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$< $(CRT_END) $(LIBC)
+	$(CC) $(LDFLAGS) -o $$@ $(CRT_START) $$^ $(CRT_END) $(LIBC)
 endef
 $(foreach src,$(LOCAL_CMD_SRCS),$(eval $(call LOCAL_CMD_RULE,$(src))))
+
+# The two guest-boot commands additionally link the shared loader.  Prerequisite
+# only, no recipe: the rule above already gave both targets one.
+$(BUILD_DIR)/hyp_boot $(BUILD_DIR)/hypvm: $(HYP_GUEST_OBJ)
 
 $(SBASE_CMDS): $(BUILD_DIR)/%: $(OBJ_DIR)/sbase/%.o $(SBASE_LIBUTIL) $(SBASE_LIBUTF) | build_dir musl_prepare
 	@mkdir -p $(dir $@)
