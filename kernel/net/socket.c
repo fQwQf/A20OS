@@ -16,6 +16,7 @@
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
 #include "net/lwip_stack.h"
+#include "lwip/tcp.h"
 
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
 
@@ -24,6 +25,13 @@ net_socket_t *net_socket_alloc(void) {
     if (s) {
         s->ipv6_checksum_offset = -1;
         s->reg_idx = -1;
+        /* SO_SNDBUF / SO_RCVBUF defaults.  Zero has to mean "never set" for
+         * setsockopt to be able to tell, so the default is written here rather
+         * than being inferred from zero later.  These are the stack's own
+         * compile-time limits, which is the honest default: a caller that never
+         * asks gets exactly the window lwIP would have given it anyway. */
+        s->snd_buf = TCP_SND_BUF;
+        s->rcv_buf = TCP_WND;
         /* The creator's reference.  A socket that also reaches the registry
          * carries a second one, taken by net_register_socket_locked() and
          * dropped by one more net_socket_free() after the slot is released. */
