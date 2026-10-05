@@ -23,6 +23,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/un.h>
 #include <time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -364,12 +365,20 @@ static void test_proc_net_rows(void)
  * fail on that behaviour.
  *
  * The clamping assertions are not decoration.  The honest contract is "the
- * value in force", not "the value requested": a request above what the pcb can
- * honour buys nothing, and getsockopt reporting the request would leave the
+ * value in force", not "the value requested": a request above what the socket
+ * can honour buys nothing, and getsockopt reporting the request would leave the
  * caller believing otherwise.  The specific ceilings are a property of this
- * port's lwIP configuration (TCP_SND_BUF, TCP_WND) and are only probed as
- * bounds -- the test does not hard-code 93440 or 5840, only that asking for an
+ * port's lwIP configuration (TCP_SND_BUF, TCP_WND) on a stream socket and of
+ * this build's profile (one staged datagram, the receive queue's capacity in
+ * bytes) on a datagram socket, and are only probed as bounds -- the test does
+ * not hard-code 93440, 5840 or either datagram number, only that asking for an
  * absurd value comes back clamped and below the request.
+ *
+ * UDP and RAW were refused outright until now, which was honest about them and
+ * useless: a datagram socket really does have buffers, they just live in this
+ * layer rather than on a pcb.  The datagram assertions are written to fail on the
+ * refusal as well as on a silent accept, because the failure this test guards
+ * against is a socket that reports a buffer size it does not have.
  */
 static void test_sock_buffers(void)
 {
@@ -472,20 +481,117 @@ static void test_sock_buffers(void)
        errno == EINVAL,
        "a negative SO_SNDBUF is refused with EINVAL");
 
-    /* UDP has no pcb buffer for these to mean anything about, and the old
-     * build refused both names.  It must still refuse them rather than accept
-     * a setting it does not honour. */
+    /*
+     * UDP used to refuse both names with EOPNOTSUPP, and the assertion here used
+     * to pin that refusal.  It does not any more, and the assertions below are
+     * the ones that matter now: the option is accepted, the value in force is
+     * the socket layer's own ceiling rather than a pcb's, and a request above
+     * it comes back clamped instead of silently ignored.
+     *
+     * The ceilings are deliberately not hard-coded.  A datagram socket has no
+     * pcb, so its send ceiling is one staged datagram and its receive ceiling is
+     * this build's receive-queue capacity in bytes -- both are properties of the
+     * profile, and this test runs on whichever profile was built.  It pins the
+     * contract (accepted, read back exactly, clamped above the ceiling) and
+     * leaves the numbers to the kernel.
+     */
     int udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp >= 0) {
+    if (udp < 0) {
+        ok(0, "open a UDP socket");
+    } else {
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv > 0,
+           "a UDP socket reports a positive SO_SNDBUF");
+        int udp_snd_default = rv;
+
         v = 16384;
+        ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+           "SO_SNDBUF is accepted on a UDP socket");
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 16384,
+           "a UDP SO_SNDBUF reads back exactly what was set");
+
+        v = 1 << 30;
+        ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+           "an oversized UDP SO_SNDBUF is accepted, not refused");
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv > 0 &&
+           rv < (1 << 30) && rv != udp_snd_default,
+           "an oversized UDP SO_SNDBUF reads back clamped to the datagram "
+           "ceiling");
+
+        v = 32768;
+        ok(setsockopt(udp, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
+           "SO_RCVBUF is accepted on a UDP socket");
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv == 32768,
+           "a UDP SO_RCVBUF reads back exactly what was set");
+
+        v = 1 << 30;
+        ok(setsockopt(udp, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
+           "an oversized UDP SO_RCVBUF is accepted, not refused");
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv > 0 &&
+           rv < (1 << 30),
+           "an oversized UDP SO_RCVBUF reads back clamped to the queue "
+           "capacity");
+
+        /* Same contract on a raw socket, which has the same kind of buffer:
+         * none on a pcb, both in this layer.  SOCK_RAW needs CAP_NET_RAW, so a
+         * refusal to create one is an environment fact and is reported as such
+         * rather than failing the gate. */
+        int raw = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+        if (raw < 0) {
+            printf("NETOPT: SKIP raw socket unavailable (errno=%d); the RAW "
+                   "half of the datagram buffer contract is not exercised\n",
+                   errno);
+        } else {
+            v = 8192;
+            ok(setsockopt(raw, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+               "SO_SNDBUF is accepted on a RAW socket");
+            sl = sizeof(rv);
+            ok(getsockopt(raw, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 &&
+               rv == 8192,
+               "a RAW SO_SNDBUF reads back exactly what was set");
+            v = 32768;
+            ok(setsockopt(raw, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
+               "SO_RCVBUF is accepted on a RAW socket");
+            sl = sizeof(rv);
+            ok(getsockopt(raw, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 &&
+               rv == 32768,
+               "a RAW SO_RCVBUF reads back exactly what was set");
+            close(raw);
+        }
+
+        /* A non-positive request is refused the same way it is on TCP: a
+         * zero-byte datagram socket cannot send anything, and accepting the
+         * request would leave the caller believing otherwise. */
+        v = 0;
         errno = 0;
         ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) < 0 &&
-           errno == EOPNOTSUPP,
-           "SO_SNDBUF on a UDP socket is refused with EOPNOTSUPP, not "
-           "silently accepted");
+           errno == EINVAL,
+           "SO_SNDBUF 0 is refused with EINVAL on a UDP socket too");
+
         close(udp);
+    }
+
+    /*
+     * And the refusal still exists where it should: a domain with no buffer
+     * for either option to mean anything about must not accept it.  Without
+     * this arm the "UDP now accepts it" change above would also have widened to
+     * "everything accepts it", which is the failure mode this file exists to
+     * prevent.
+     */
+    int un = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (un >= 0) {
+        v = 16384;
+        errno = 0;
+        ok(setsockopt(un, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) < 0 &&
+           errno == EOPNOTSUPP,
+           "SO_SNDBUF on an AF_UNIX socket is still refused with EOPNOTSUPP");
+        close(un);
     } else {
-        ok(0, "open a UDP socket");
+        ok(0, "open an AF_UNIX datagram socket");
     }
 
     close(fd);
