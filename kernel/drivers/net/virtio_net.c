@@ -28,14 +28,27 @@
  * own avail/used types below rather than the block ones. */
 #define VIRTIO_NET_QUEUE_SIZE      256
 
-/* Descriptors consumed per posted receive buffer:
- *   0  virtio_net_hdr_mrg_rxbuf (12 B, device-writable)
- *   1  frame data                (device-writable)
- *   2  virtio_net_hdr_ctx        (4 B, device-writable)
- * The three-descriptor chain is what VIRTIO_NET_F_MRG_RXBUF mandates; with the
- * feature off the whole buffer is a single descriptor. */
-#define VIRTIO_NET_RX_DESC_MRG     3
-#define VIRTIO_NET_RX_DESC_MAX     (VIRTIO_NET_QUEUE_SIZE * VIRTIO_NET_RX_DESC_MRG)
+/* Descriptors consumed per posted receive buffer: one, holding the
+ * virtio_net_hdr_mrg_rxbuf (12 B) followed by the frame data.
+ *
+ * Two shapes were built and measured against QEMU 10.0 with MRG_RXBUF
+ * acknowledged, and only the single descriptor delivers frames:
+ *
+ *   [hdr 12B][data 1536B][ctx 4B]  ping 0/4 replies -- the device returns the
+ *                                 right used length and num_buffers, and every
+ *                                 frame after the first reaches the stack as
+ *                                 zeros, so ethernet_input() drops it;
+ *   [data 1548B][ctx 4B]           ping 0/4 replies, same symptom;
+ *   [data 1548B]                   ping 4/4 replies.
+ *
+ * So the payload has to share a descriptor with the header, and the context
+ * descriptor is left off.  What the feature still buys is the 12-byte header
+ * and num_buffers, both of which this driver reads; what it does not buy is a
+ * frame spanning several posted buffers, because a one-descriptor buffer has no
+ * NEXT to walk.  The reassembly below still handles num_buffers > 1 -- it is
+ * what the spec asks for and what a device that spreads a frame anyway
+ * produces -- but with this posting it never triggers. */
+#define VIRTIO_NET_RX_DESC_MAX     VIRTIO_NET_QUEUE_SIZE
 #define VIRTIO_NET_TX_DESC_MAX     VIRTIO_NET_QUEUE_SIZE
 
 /* virtio_net_hdr_mrg_rxbuf is 12 bytes; plain virtio_net_hdr is 10.  Buffers
@@ -114,15 +127,12 @@ typedef struct {
     size_t  ring_mem_size;
     uint8_t (*rx_buf)[VIRTIO_NET_BUF_SIZE];
     uint8_t (*tx_buf)[VIRTIO_NET_BUF_SIZE];
-    /* virtio_net_hdr_ctx: num_buffers plus the padding the spec's 4-byte
-     * context descriptor requires. */
-    uint32_t *rx_ctx;
     uint8_t  *tx_busy;
     /* Buffers consumed by the frame being reassembled, in available-ring order,
      * so every one of them goes back on the ring.  A mergeable receive buffer
      * lets the device span one frame over however many posted buffers it needs
      * -- a jumbo frame reaches six at 1536 bytes each -- so this has to be as
-     * long as the ring, not as long as the three-descriptor chain.
+     * long as the ring, not as long as one posted buffer.
      *
      * Per instance rather than per call on purpose: virtio_net_recv() holds
      * net->lock for its whole body and never nests, so a scratch array there is
@@ -132,7 +142,7 @@ typedef struct {
     /* LOCK_ORDER: net->lock is innermost under g_lwip_lock.
      * Local order: g_lwip_lock -> net->lock.
      * Protects TX/RX descriptor rings, tx_busy[], rx_buf[], tx_buf[],
-     * rx_ctx[], slot_of_avail[], last_used, avail->idx, rx_packets,
+     * slot_of_avail[], last_used, avail->idx, rx_packets,
      * tx_packets, rx_drops, tx_drops. */
     spinlock_t lock;
     int valid;
@@ -200,15 +210,12 @@ static uint32_t virtio_net_page_align(uint32_t off)
 static size_t virtio_net_ring_bytes(int legacy)
 {
     size_t n = 2 * (size_t)VIRTIO_NET_QUEUE_SIZE * VIRTIO_NET_BUF_SIZE;
-    /* The receive side needs three descriptors per buffer, the transmit side
-     * one; each ring's table is sized for the larger and leaves the tail
-     * unused, which is what the offsets computed in setup_queue() assume. */
+    /* Both ring descriptor tables are sized for VIRTIO_NET_RX_DESC_MAX. */
     n += (size_t)VIRTIO_NET_RX_DESC_MAX * sizeof(virtq_desc_t);
     n += (size_t)VIRTIO_NET_TX_DESC_MAX * sizeof(virtq_desc_t);
     n += 2 * sizeof(virtio_net_avail_t);
     n += 2 * sizeof(virtio_net_used_t);
     n += 2 * (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);  /* slot_of_avail */
-    n += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint32_t);      /* rx_ctx */
     n += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);      /* rx_recycle */
     n += (size_t)VIRTIO_NET_QUEUE_SIZE;                         /* tx_busy */
     /* Alignment slack: every region below is 64-byte aligned so the payload
@@ -234,7 +241,6 @@ static void virtio_net_free_ring(virtio_net_inst_t *net)
     net->ring_mem_size = 0;
     net->rx_buf = NULL;
     net->tx_buf = NULL;
-    net->rx_ctx = NULL;
     net->tx_busy = NULL;
     net->rx_recycle = NULL;
     memset(&net->rxq, 0, sizeof(net->rxq));
@@ -290,10 +296,6 @@ static int virtio_net_alloc_ring(virtio_net_inst_t *net)
     p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
     net->txq.slot_of_avail = p;
     p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint16_t);
-
-    VIRTIO_NET_ALIGN(p, 4);
-    net->rx_ctx = p;
-    p += (size_t)VIRTIO_NET_QUEUE_SIZE * sizeof(uint32_t);
 
     VIRTIO_NET_ALIGN(p, 2);
     net->rx_recycle = p;
@@ -421,19 +423,15 @@ static void virtio_net_wait_for_tx_progress(void)
         cpu_relax();
 }
 
-/* Descriptor head for receive buffer `slot`. */
-static unsigned virtio_net_rx_head(const virtio_net_inst_t *net, unsigned slot)
-{
-    return net->mrg_rxbuf ? slot * VIRTIO_NET_RX_DESC_MRG : slot;
-}
-
 /*
  * Publish one device-writable receive buffer.
  *
- * With MRG_RXBUF the buffer is a three-descriptor chain and the device may
- * consume it together with the buffers that follow it in the available ring to
- * assemble one oversized frame, so the head must stay slot * 3 for the device
- * to walk the chain forward from the right place.
+ * One descriptor holds the virtio_net_hdr_mrg_rxbuf and the frame data
+ * together.  The two split layouts that were measured against QEMU 10.0 --
+ * [hdr 12B][data 1536B][ctx 4B] and [data 1548B][ctx 4B] -- both hand the
+ * stack zeroed frames even though the device reports the right used length,
+ * so the payload has to share a descriptor with the header; see the note on
+ * VIRTIO_NET_RX_DESC_MAX above.
  */
 static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, unsigned slot) {
     virtio_net_queue_t *q = &net->rxq;
@@ -442,30 +440,11 @@ static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, unsigned slot) {
     uint8_t *buf = net->rx_buf[slot];
 
     memset(buf, 0, VIRTIO_NET_HDR_MRG);
-    net->rx_ctx[slot] = 0;
 
-    unsigned head = virtio_net_rx_head(net, slot);
-    if (net->mrg_rxbuf) {
-        desc[head].addr = va_to_pa(buf);
-        desc[head].len = VIRTIO_NET_HDR_MRG;
-        desc[head].flags = VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT;
-        desc[head].next = (uint16_t)(head + 1);
-
-        desc[head + 1].addr = va_to_pa(buf + VIRTIO_NET_HDR_MRG);
-        desc[head + 1].len = VIRTIO_NET_FRAME_MAX;
-        desc[head + 1].flags = VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT;
-        desc[head + 1].next = (uint16_t)(head + 2);
-
-        desc[head + 2].addr = va_to_pa(&net->rx_ctx[slot]);
-        desc[head + 2].len = sizeof(net->rx_ctx[slot]);
-        desc[head + 2].flags = VIRTQ_DESC_F_WRITE;
-        desc[head + 2].next = 0;
-    } else {
-        desc[head].addr = va_to_pa(buf);
-        desc[head].len = VIRTIO_NET_BUF_SIZE;
-        desc[head].flags = VIRTQ_DESC_F_WRITE;
-        desc[head].next = 0;
-    }
+    desc[slot].addr = va_to_pa(buf);
+    desc[slot].len = VIRTIO_NET_BUF_SIZE;
+    desc[slot].flags = VIRTQ_DESC_F_WRITE;
+    desc[slot].next = 0;
 
     /* Publish first, then clean.  See the DMA publication contract in
      * kernel/include/drivers/dual/virtq.h: arch_dma_sync_for_device() cleans a
@@ -474,14 +453,12 @@ static void virtio_net_submit_rx_locked(virtio_net_inst_t *net, unsigned slot) {
      * virtio_net.c and virtio_blk.c differ in placement on purpose. */
     uint16_t avail_slot = avail->idx % net->qsize;
     q->slot_of_avail[avail_slot] = (uint16_t)slot;
-    avail->ring[avail_slot] = (uint16_t)head;
+    avail->ring[avail_slot] = (uint16_t)slot;
     wmb();
     avail->idx++;
 
     arch_dma_sync_for_device(net->rx_buf[slot], VIRTIO_NET_BUF_SIZE);
-    arch_dma_sync_for_device(&net->rx_ctx[slot], sizeof(net->rx_ctx[slot]));
-    arch_dma_sync_for_device(&desc[head], sizeof(virtq_desc_t) *
-                             (net->mrg_rxbuf ? VIRTIO_NET_RX_DESC_MRG : 1));
+    arch_dma_sync_for_device(&desc[slot], sizeof(virtq_desc_t));
     arch_dma_sync_for_device(&avail->ring[avail_slot], sizeof(uint16_t));
     arch_dma_sync_for_device(&avail->idx, sizeof(uint16_t));
 }
@@ -544,11 +521,15 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
      * while without it the header is virtio_net_hdr (10 bytes) unless MRG_RXBUF
      * is acknowledged.  This driver has one buffer layout and one header size
      * per instance, and net->hdr_len is computed from the negotiated set, so
-     * acknowledging MRG_RXBUF on a legacy device would work only if the legacy
-     * layout below also reserved three descriptors per buffer -- which does not
-     * fit the three-page legacy ring area.  Leaving it off keeps the legacy path
-     * on the layout that provably fits, and costs only the ability to receive a
-     * frame larger than one 1536-byte buffer.
+     * the legacy path keeps the layout that provably fits its three-page ring
+     * area and costs only a receive buffer of 1536 rather than 1548 bytes.
+     *
+     * Acknowledging the feature does not buy a frame spread over several posted
+     * buffers: virtio_net_submit_rx_locked() posts one descriptor per buffer
+     * because that is the only shape QEMU 10.0 delivers (see
+     * VIRTIO_NET_RX_DESC_MAX).  It does buy the 12-byte header and the
+     * num_buffers field, both of which virtio_net_recv() reads, and it is what
+     * makes net->hdr_len come out at 12 rather than 10.
      */
     if (!net->legacy && (features_lo & (1U << VIRTIO_NET_F_MRG_RXBUF)))
         driver_lo |= (1U << VIRTIO_NET_F_MRG_RXBUF);
@@ -616,7 +597,7 @@ static int virtio_net_init_instance(virtio_net_inst_t *net) {
         net->mac[5] = (uint8_t)idx;
     }
 
-    /* A mergeable receive buffer costs three descriptors instead of one. */
+    /* A mergeable receive buffer costs two descriptors instead of one. */
     unsigned rx_desc = net->mrg_rxbuf ? VIRTIO_NET_RX_DESC_MAX : VIRTIO_NET_QUEUE_SIZE;
 
     /* Allocated before either queue is programmed, and freed on every path out
@@ -922,9 +903,10 @@ int virtio_net_recv(int idx, void *packet, size_t maxlen) {
         }
         net->rx_recycle[k] = (uint16_t)buf_slot;
 
-        /* The first buffer carries the header in front of the data; the rest
-         * are data from byte 0. */
-        size_t skip = (k == 0) ? hdr_len : 0;
+        /* Every buffer of the chain starts with its own virtio_net_hdr: the
+         * spec puts one in front of each posted buffer the device consumes,
+         * not just in front of the frame. */
+        size_t skip = hdr_len;
         if (buf_len <= skip)
             continue;
         size_t n = buf_len - skip;
