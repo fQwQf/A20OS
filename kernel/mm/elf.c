@@ -437,6 +437,269 @@ static int map_fd_segment_lazy(mm_struct_t *mm, pt_root_t *pgdir,
 #endif
 
 /*
+ * The relocation types this loader applies, per machine.
+ *
+ * A static-pie image needs two families and no more.  RELATIVE covers every
+ * pointer whose target the linker already knows: the word becomes the load
+ * base plus the link-time address.  The ABS64 family covers the pointers the
+ * linker had to leave symbolic -- in mksh that is the keyword and operator
+ * string tables its parser dispatches through, so skipping them yields a shell
+ * that runs simple commands but cannot recognise `while', `case', or `{' --
+ * and resolves the symbol out of .dynsym to get the address.  There is no PLT
+ * to fill and no symbol to bind to an outside object, so nothing else is
+ * reachable from .rela.dyn.
+ */
+#define R_ARM_RELATIVE        23
+#define R_X86_64_RELATIVE     8
+#define R_AARCH64_RELATIVE    1027
+#define R_RISCV_RELATIVE      3
+#define R_PPC64_RELATIVE      1
+#define R_LOONGARCH_RELATIVE  2
+
+#define R_ARM_ABS32           2
+#define R_X86_64_64           1
+#define R_AARCH64_ABS64       257
+#define R_RISCV_64            2
+#define R_PPC64_ADDR64        38
+#define R_LOONGARCH_64        3
+
+#ifdef CONFIG_NOMMU
+static uint32_t elf_relative_reltype(uint16_t machine) {
+    switch (machine) {
+    case EM_ARM:       return R_ARM_RELATIVE;
+    case EM_X86_64:    return R_X86_64_RELATIVE;
+    case EM_AARCH64:   return R_AARCH64_RELATIVE;
+    case EM_RISCV:     return R_RISCV_RELATIVE;
+    case EM_PPC64:     return R_PPC64_RELATIVE;
+    case EM_LOONGARCH: return R_LOONGARCH_RELATIVE;
+    default:           return UINT32_MAX;
+    }
+}
+
+/* The ABS64 (or ABS32 on a 32-bit machine) relocation type, or UINT32_MAX. */
+static uint32_t elf_absolute_reltype(uint16_t machine, bool elf64) {
+    switch (machine) {
+    case EM_ARM:       return elf64 ? UINT32_MAX : R_ARM_ABS32;
+    case EM_X86_64:    return elf64 ? R_X86_64_64 : UINT32_MAX;
+    case EM_AARCH64:   return elf64 ? R_AARCH64_ABS64 : UINT32_MAX;
+    case EM_RISCV:     return elf64 ? R_RISCV_64 : UINT32_MAX;
+    case EM_PPC64:     return elf64 ? R_PPC64_ADDR64 : UINT32_MAX;
+    case EM_LOONGARCH: return elf64 ? R_LOONGARCH_64 : UINT32_MAX;
+    default:           return UINT32_MAX;
+    }
+}
+
+/*
+ * The number of symbols .dynsym holds, from whichever hash table the linker
+ * emitted.  Neither table carries the count directly, so this is the standard
+ * reconstruction: the SysV table states it in its second word, and the GNU
+ * table has to be walked from its last bucket to the first non-terminator.
+ */
+static uint64_t elf_dynsym_count(uint32_t *sysv, uint32_t *gnu) {
+    if (sysv)
+        return sysv[1];
+    if (!gnu)
+        return 0;
+    uint32_t nbuckets = gnu[0];
+    uint32_t symoffset = gnu[1];
+    uint32_t bloom_words = gnu[2] * (uint32_t)(sizeof(vaddr_t) / 4);
+    uint32_t *buckets = gnu + 4 + bloom_words;
+
+    uint64_t nsym = 0;
+    for (uint32_t i = 0; i < nbuckets; i++)
+        if (buckets[i] > nsym)
+            nsym = buckets[i];
+    if (nsym == 0)
+        return 0;
+    /* The chain for the highest bucket runs to the first symbol whose chain
+     * word has its low bit clear; that symbol is the last one. */
+    uint32_t *chain = buckets + nbuckets + (nsym - symoffset);
+    do {
+        nsym++;
+    } while ((*chain++ & 1U) && nsym < 0x1000000ULL);
+    return nsym;
+}
+
+/*
+ * Apply the dynamic relocations of a position-independent image.
+ *
+ * The NOMMU userland is built static-pie, so every pointer that lives in the
+ * image's own data -- and every non-zero initializer in .data, which is itself
+ * just a relocation against the linker base -- arrives as an unapplied entry.
+ * Without this pass such an image faults the moment it dereferences one of
+ * them, typically by jumping through the truncated address an unrelocated
+ * pointer still holds, and one that survives to run reaches its parser with
+ * the keyword and operator tables still holding link-time addresses.
+ *
+ * The MMU rootfs ships static ET_EXEC images, which carry no PT_DYNAMIC at
+ * all, so this pass has nothing to do there -- and must not run: the MMU
+ * loader maps file-backed segments lazily, so reading the dynamic array from
+ * kernel context would take a data abort on a not-yet-faulted user page.  An
+ * ET_DYN under MMU is a dynamically linked executable whose PT_INTERP hands
+ * relocation to ld-musl, which owns the whole job.
+ *
+ * @dyn_va is the *runtime* address of the dynamic array, which the NOMMU
+ * PT_LOAD pass has already copied into the image, so it is read from the image
+ * rather than from the file.  @load_bias is added to every link-time address,
+ * and it is the only adjustment a RELATIVE entry needs: unlike a pointer
+ * stored in the dynamic array itself, an addend is not itself relocated.
+ */
+static int elf_apply_relocs(vaddr_t dyn_va, uint64_t dyn_size,
+                            vaddr_t load_bias, uint16_t machine,
+                            bool elf64) {
+    uint32_t want = elf_relative_reltype(machine);
+    uint32_t want_abs = elf_absolute_reltype(machine, elf64);
+    if (dyn_size == 0 || (want == UINT32_MAX && want_abs == UINT32_MAX))
+        return 0;
+
+    uint64_t rela = 0, relasz = 0;
+    uint64_t symtab = 0, hash_sysv = 0, hash_gnu = 0;
+    /* Three distinct strides live here: the dynamic array is an array of
+     * Elf64_Dyn and the relocation table an array of Elf64_Rela, and neither
+     * is the same width as the other.  DT_RELAENT is what states how wide the
+     * relocation entries are. */
+    uint64_t dyn_ent = elf64 ? sizeof(Elf64_Dyn) : sizeof(Elf32_Dyn);
+    uint64_t min_rela = elf64 ? sizeof(Elf64_Rela) : sizeof(Elf32_Rela);
+    uint64_t syment = elf64 ? sizeof(Elf64_Sym) : sizeof(Elf32_Sym);
+    uint64_t ent = min_rela;
+
+    for (uint64_t off = 0; off + dyn_ent <= dyn_size; off += dyn_ent) {
+        uint64_t tag, val;
+        if (elf64) {
+            const Elf64_Dyn *d = (const Elf64_Dyn *)(uintptr_t)(dyn_va + off);
+            tag = (uint64_t)d->d_tag;
+            val = d->d_un;
+        } else {
+            const Elf32_Dyn *d = (const Elf32_Dyn *)(uintptr_t)(dyn_va + off);
+            tag = (uint64_t)(uint32_t)d->d_tag;
+            val = d->d_un;
+        }
+        if (tag == DT_NULL)
+            break;
+        switch (tag) {
+        case DT_RELA:    rela = val;     break;
+        case DT_RELASZ:  relasz = val;   break;
+        case DT_RELAENT: ent = val;      break;
+        case DT_SYMTAB:  symtab = val;   break;
+        case DT_SYMENT:  syment = val;   break;
+        case DT_HASH:    hash_sysv = val; break;
+        case DT_GNU_HASH:hash_gnu = val; break;
+        default: break;
+        }
+    }
+    if (rela == 0 || relasz == 0)
+        return 0;
+    if (ent < min_rela)
+        return -ENOEXEC;
+    if (syment == 0)
+        syment = elf64 ? sizeof(Elf64_Sym) : sizeof(Elf32_Sym);
+
+    uint64_t nsyms = 0;
+    if (symtab && want_abs != UINT32_MAX) {
+        nsyms = elf_dynsym_count(
+            hash_sysv ? (uint32_t *)(uintptr_t)(load_bias + hash_sysv) : NULL,
+            hash_gnu  ? (uint32_t *)(uintptr_t)(load_bias + hash_gnu)  : NULL);
+        /* A count of zero is not by itself an error: it is what a GNU hash
+         * table over an all-local .dynsym looks like, and an image carrying
+         * only RELATIVE entries -- which is most static-pie images -- never
+         * consults the table.  The loop below refuses the image if an ABS64
+         * entry turns out to need a symbol the count cannot vouch for. */
+    }
+    vaddr_t syms = load_bias + (vaddr_t)symtab;
+
+    vaddr_t table = load_bias + (vaddr_t)rela;
+    uint32_t applied = 0;
+    for (uint64_t off = 0; off + ent <= relasz; off += ent) {
+        vaddr_t at = table + (vaddr_t)off;
+        vaddr_t dst;
+        uint32_t type, symidx;
+
+        if (elf64) {
+            const Elf64_Rela *r = (const Elf64_Rela *)(uintptr_t)at;
+            type    = (uint32_t)(r->r_info & 0xffffffffU);
+            symidx  = (uint32_t)(r->r_info >> 32);
+            dst     = load_bias + (vaddr_t)r->r_offset;
+            if (type == want) {
+                *(uint64_t *)(uintptr_t)dst =
+                    (uint64_t)((int64_t)load_bias + r->r_addend);
+            } else if (type != want_abs) {
+                continue;
+            } else {
+                uint64_t s;
+                if (symidx >= nsyms)
+                    return -ENOEXEC; /* an ABS64 entry names a symbol the
+                                      * hash table cannot account for */
+                if (elf64 ? ((const Elf64_Sym *)(uintptr_t)
+                                 (syms + (uint64_t)symidx * syment))->st_shndx == 0
+                          : ((const Elf32_Sym *)(uintptr_t)
+                                 (syms + (uint64_t)symidx * syment))->st_shndx == 0) {
+                    /* Undefined.  A weak reference legitimately resolves to
+                     * nothing; a strong one means the image is not the
+                     * self-contained executable it claims to be. */
+                    uint8_t info = elf64
+                        ? ((const Elf64_Sym *)(uintptr_t)
+                              (syms + (uint64_t)symidx * syment))->st_info
+                        : ((const Elf32_Sym *)(uintptr_t)
+                              (syms + (uint64_t)symidx * syment))->st_info;
+                    if ((info >> 4) != STB_WEAK)
+                        return -ENOEXEC;
+                    s = 0;
+                } else {
+                    s = elf64 ? ((const Elf64_Sym *)(uintptr_t)
+                                     (syms + (uint64_t)symidx * syment))->st_value
+                             : ((const Elf32_Sym *)(uintptr_t)
+                                     (syms + (uint64_t)symidx * syment))->st_value;
+                }
+                *(uint64_t *)(uintptr_t)dst =
+                    (uint64_t)((int64_t)load_bias + (int64_t)s + r->r_addend);
+            }
+        } else {
+            const Elf32_Rela *r = (const Elf32_Rela *)(uintptr_t)at;
+            type    = r->r_info & 0xffU;
+            symidx  = r->r_info >> 8;
+            dst     = load_bias + (vaddr_t)r->r_offset;
+            if (type == want) {
+                *(uint32_t *)(uintptr_t)dst =
+                    (uint32_t)((int64_t)load_bias + (int32_t)r->r_addend);
+            } else if (type != want_abs) {
+                continue;
+            } else {
+                const Elf32_Sym *sy;
+                uint32_t s;
+                if (symidx >= nsyms)
+                    return -ENOEXEC;
+                sy = (const Elf32_Sym *)(uintptr_t)
+                     (syms + (uint64_t)symidx * syment);
+                if (sy->st_shndx == 0) {
+                    if ((sy->st_info >> 4) != STB_WEAK)
+                        return -ENOEXEC;
+                    s = 0;
+                } else {
+                    s = sy->st_value;
+                }
+                *(uint32_t *)(uintptr_t)dst =
+                    (uint32_t)((int64_t)load_bias + (int64_t)s +
+                               (int32_t)r->r_addend);
+            }
+        }
+        applied++;
+    }
+    if (applied)
+        ktrace_mm("[ELF] reloc: %u entry(s), %u nsyms, bias 0x%lx\n",
+                  applied, (uint32_t)nsyms, (unsigned long)load_bias);
+    return 0;
+}
+#else /* !CONFIG_NOMMU */
+static int elf_apply_relocs(vaddr_t dyn_va, uint64_t dyn_size,
+                            vaddr_t load_bias, uint16_t machine,
+                            bool elf64) {
+    (void)dyn_va; (void)dyn_size; (void)load_bias;
+    (void)machine; (void)elf64;
+    return 0;
+}
+#endif /* CONFIG_NOMMU */
+
+/*
  * Map an ELF segment into the page table.
  *
  * Handles both buffer-backed and fd-backed segments through @src.
@@ -982,6 +1245,8 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
     vaddr_t base = 0, max_va = 0, brk_va = 0;
     const void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
+    uint64_t dyn_size = 0;
+    vaddr_t dyn_va = 0;
     int is_native = 0;
 
     is_native = elf_phdrs_native((const char *)buf, eh->e_phoff, eh->e_phnum,
@@ -997,6 +1262,11 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
             tls_filesz = ph->p_filesz;
             tls_memsz  = ph->p_memsz;
             tls_align  = ph->p_align < 1 ? 1 : ph->p_align;
+            continue;
+        }
+        if (ph->p_type == PT_DYNAMIC) {
+            dyn_va   = ph->p_vaddr + load_bias;
+            dyn_size = ph->p_memsz;
             continue;
         }
         if (ph->p_type != PT_LOAD) continue;
@@ -1019,6 +1289,10 @@ int elf_load_from_buf(const void *buf, size_t len, elf_load_info_t *info) {
         if (seg_end > max_va) max_va = seg_end;
         if ((ph->p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
+
+    /* Relocate before anything can dereference the image's own data. */
+    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, true);
+    if (r < 0) { pt_destroy_user(pgdir); return r; }
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
@@ -1099,6 +1373,8 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
     uint64_t hdr_map_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
+    uint64_t dyn_size = 0;
+    vaddr_t dyn_va = 0;
     int has_interp = 0;
     int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
@@ -1130,6 +1406,11 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
             }
             continue;
         }
+        if (phdrs[i].p_type == PT_DYNAMIC) {
+            dyn_va   = (vaddr_t)phdrs[i].p_vaddr + load_bias;
+            dyn_size = phdrs[i].p_memsz;
+            continue;
+        }
         if (phdrs[i].p_type != PT_LOAD) continue;
 
         if (!hdr_map_va)
@@ -1155,6 +1436,10 @@ static int elf_load64(int fd, const Elf64_Ehdr *eh, const char *path,
         if (seg_end > max_va) max_va = seg_end;
         if ((phdrs[i].p_flags & PF_W) && seg_end > brk_va) brk_va = seg_end;
     }
+
+    /* Relocate before anything can dereference the image's own data. */
+    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, true);
+    if (r < 0) goto fail64;
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
@@ -1274,6 +1559,8 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
     uint64_t hdr_map_va = 0;
     void *tls_data = NULL;
     uint64_t tls_filesz = 0, tls_memsz = 0, tls_align = 1;
+    uint64_t dyn_size = 0;
+    vaddr_t dyn_va = 0;
     int is_native = 0;
     char interp_path[MAX_PATH_LEN] = {0};
 
@@ -1301,6 +1588,11 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
                 int nr = vfs_read(fd, (char *)tls_data, (size_t)tls_filesz);
                 if (nr < 0) { kfree(tls_data); tls_data = NULL; goto fail32; }
             }
+            continue;
+        }
+        if (phdrs[i].p_type == PT_DYNAMIC) {
+            dyn_va   = (vaddr_t)phdrs[i].p_vaddr + load_bias;
+            dyn_size = phdrs[i].p_memsz;
             continue;
         }
         if (phdrs[i].p_type != PT_LOAD) continue;
@@ -1333,6 +1625,10 @@ static int elf_load32(int fd, const Elf32_Ehdr *eh, const char *path,
         r = -ENOEXEC;
         goto fail32;
     }
+
+    /* Relocate before anything can dereference the image's own data. */
+    r = elf_apply_relocs(dyn_va, dyn_size, load_bias, eh->e_machine, false);
+    if (r < 0) goto fail32;
 
 #ifdef CONFIG_NOMMU
     if (max_va > base) {
