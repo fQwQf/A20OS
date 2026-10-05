@@ -62,19 +62,35 @@ void arch_setup_signal_trampoline(struct mm_struct *mm)
     if (mm_addr_is_error(addr) || !addr)
         return;
 
-    void *page = frame_alloc();
-    if (!page)
-        return;
-    memset(page, 0, PAGE_SIZE);
-
     /*
      * The trampoline is position-independent: it only has to put
      * __NR_rt_sigreturn (139) into x8 and trap.  It reads nothing, so it does
      * not care that sp still points at the signal frame rather than here.
      */
+#ifdef CONFIG_NOMMU
+    /*
+     * Under NOMMU there is no page table to publish a separate frame through:
+     * pt_map() is a no-op, so the VMA address already *is* the mapping.
+     * Staging the code in a frame_alloc() page and pointing m->sig_tramp at
+     * the VMA would leave the first signal a process ever takes returning
+     * through x30 into the zeroed region mm_mmap() handed back -- a udf #0,
+     * reported as SIGILL.  Write through the VMA address itself.  This is the
+     * same reasoning that retires the bogus vDSO advertisement in
+     * vdso_auxv_ehdr() (kernel/mm/vdso.c), and it uses
+     * arch_signal_write_trampoline(), which existed for this and had no
+     * caller.  It also drops a per-exec leaked buddy page.
+     */
+    arch_signal_write_trampoline((void *)(uintptr_t)addr);
+#else
+    void *page = frame_alloc();
+    if (!page)
+        return;
+    memset(page, 0, PAGE_SIZE);
+
     arch_signal_prepare_trampoline((uint32_t *)page);
 
     pt_map(m->pgdir, addr, va_to_pa(page), arch_signal_tramp_pte_flags());
+#endif
     m->sig_tramp = addr;
 }
 

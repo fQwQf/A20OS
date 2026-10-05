@@ -77,7 +77,21 @@ void arch_setup_signal_trampoline(struct mm_struct *mm)
     p[5] = 0x0F;         /* syscall */
     p[6] = 0x05;
 
+#ifdef CONFIG_NOMMU
+    /*
+     * With page tables the code sits in its own frame, published at addr by
+     * pt_map().  Under NOMMU pt_map() is a no-op and mm_mmap() returns
+     * freshly allocated memory, so that frame is an address nothing ever
+     * reaches -- while the RET pops addr, per arch_signal_prepare_frame()
+     * above, which hardcodes X86_64_SIGRET_TRAMP_ADDR.  The first signal a
+     * process takes would therefore execute whatever happens to sit at addr.
+     * Copy the trampoline there instead: under NOMMU the mapping IS the
+     * destination.  This also drops a leaked buddy page per process.
+     */
+    memcpy((void *)(uintptr_t)addr, page, 16);
+#else
     paddr_t pa = va_to_pa(page);
     pt_map(m->pgdir, addr, pa,
            PTE_V | PTE_R | PTE_X | PTE_U | PTE_A | PTE_D);
+#endif
 }

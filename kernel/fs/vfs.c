@@ -654,11 +654,32 @@ void vfs_finalize_closed_vfile(vfile_t *vf)
                (void *)vf, (unsigned long)vf->identity);
 }
 
+/*
+ * Release a descriptor slot.
+ *
+ * Dropping the slot's vfile reference is not enough: files->fd[fd] stays
+ * non-NULL, its open_mask bit stays set, and next_fd never rewinds, so
+ * fdtable_install_vfile() eventually walks 0..MAX_FILES and returns EMFILE
+ * against a table that is entirely empty.  Because install takes place in the
+ * *calling task's* table, every internal vfs_open()/vfs_close() pair burned
+ * one of that task's slots -- and the stat() shebang probe (see
+ * path_is_shebang_script) does exactly such a pair on every stat of a
+ * non-executable regular file, which is most of what a desktop session
+ * touches.  xfce4-panel exhausted all MAX_FILES slots during its own startup
+ * and GLib then hit EMFILE from g_wakeup_new().
+ *
+ * fdtable_close() releases the slot and does the teardown that used to live
+ * here -- the vfile reference, the envelope registry entry, the per-process
+ * file locks, and vfs_finalize_closed_vfile() (ops->close, vnode_put, the
+ * destroy event).  With no current task the descriptor belongs to the boot
+ * table, which has no owning task; fdtable_close_active() reaches that table
+ * through fdtable_close_files(), so a descriptor opened before the first task
+ * existed is released the same way.  Every boot-time caller in main.c,
+ * driver_manager.c and elf.c stops using the descriptor immediately after the
+ * close, so none of them depends on the slot staying open.
+ */
 int vfs_close(int fd) {
-    vfile_t *vf = fdtable_get_current_file_ref(fd);
-    if (!vf) return -EBADF;
-    vfs_put_file(vf);
-    return 0;
+    return fdtable_close_active(fd);
 }
 
 /* ============================================================

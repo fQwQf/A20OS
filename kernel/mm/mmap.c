@@ -34,6 +34,33 @@ static void *nommu_alloc_aligned(size_t len, vaddr_t *addr_out)
         *addr_out = addr;
     return raw;
 }
+
+/*
+ * Pick the memory a NOMMU mapping is made of, and where it lands.
+ *
+ * With page tables a caller may name the address and the kernel either honours
+ * it or picks a gap.  Here there is no address space to place anything at: a
+ * named address is only ever compared against *this* process's VMAs, so an
+ * address that misses them is not free memory -- it is another process's
+ * image, a slab, a kernel object, or this process's own already-loaded
+ * executable.  Laying a mapping over any of those silently aliases it.
+ * glibc's allocator reaches this on its second mmap-backed arena, which is why
+ * a small workload survives and a larger one walks a corrupted heap; and an
+ * exec that MAP_FIXEDs over its own image is how a process ends up jumping to
+ * a freshly zeroed page and dying on SIGILL.
+ *
+ * So the hint is dropped unconditionally -- MAP_FIXED included.  It cannot be
+ * honoured here, because satisfying it would mean taking memory away from
+ * whoever really owns it rather than reserving anything new.  Every mapping
+ * gets freshly allocated memory instead.
+ */
+static void *nommu_pick_region(int flags, size_t len, vaddr_t addr,
+                               vaddr_t *addr_out)
+{
+    (void)flags;
+    (void)addr;
+    return nommu_alloc_aligned(len, addr_out);
+}
 #endif /* CONFIG_NOMMU */
 
 /* ------------------------------------------------------------------ *
@@ -243,11 +270,8 @@ vaddr_t mm_mmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
 #ifdef CONFIG_NOMMU
-    void *nommu_raw = NULL;
-    if (addr == 0) {
-        nommu_raw = nommu_alloc_aligned(len, &addr);
-        if (!nommu_raw) return (vaddr_t)-ENOMEM;
-    }
+    void *nommu_raw = nommu_pick_region(flags, len, addr, &addr);
+    if (!nommu_raw) return (vaddr_t)-ENOMEM;
 #else
     if (addr == 0)
         addr = mm_find_gap(mm, mm->mmap_base ? mm->mmap_base : MMAP_BASE_ADDR, len);
@@ -359,13 +383,10 @@ vaddr_t mm_mmap_file_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
     }
 
 #ifdef CONFIG_NOMMU
-    void *nommu_raw = NULL;
-    if (addr == 0) {
-        nommu_raw = nommu_alloc_aligned(len, &addr);
-        if (!nommu_raw) {
-            vfs_put_file(file);
-            return (vaddr_t)-ENOMEM;
-        }
+    void *nommu_raw = nommu_pick_region(flags, len, addr, &addr);
+    if (!nommu_raw) {
+        vfs_put_file(file);
+        return (vaddr_t)-ENOMEM;
     }
 #else
     if (addr == 0)

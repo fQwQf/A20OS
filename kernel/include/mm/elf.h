@@ -135,6 +135,66 @@ typedef struct {
     Elf64_Xword sh_entsize;
 } Elf64_Shdr;
 
+/* Dynamic section tags (the subset the loader walks) */
+#define DT_NULL      0
+#define DT_HASH      4   /* SysV hash table; its [1] word is the symbol count */
+#define DT_STRTAB    5
+#define DT_SYMTAB    6
+#define DT_RELA      7   /* Elf64_Rela array; the tag's value is an address */
+#define DT_RELASZ    8   /* byte size of the DT_RELA array */
+#define DT_RELAENT   9   /* byte size of one Elf64_Rela entry */
+#define DT_SYMENT    11
+#define DT_REL       17
+#define DT_RELSZ     18
+#define DT_RELENT    19
+#define DT_PLTREL    20
+#define DT_JMPREL    23
+#define DT_GNU_HASH  0x6ffffef5
+
+/* Symbol binding, from the high nibble of st_info */
+#define STB_GLOBAL   1
+#define STB_WEAK     2
+
+typedef struct {
+    Elf64_Sxword d_tag;
+    uint64_t     d_un;   /* for DT_RELA/DT_JMPREL an address, else a value */
+} Elf64_Dyn;
+
+typedef struct {
+    Elf64_Addr   r_offset;
+    Elf64_Xword  r_info;
+    Elf64_Sxword r_addend;
+} Elf64_Rela;
+
+typedef struct {
+    Elf32_Sword  d_tag;
+    Elf32_Word   d_un;
+} Elf32_Dyn;
+
+typedef struct {
+    Elf32_Addr   r_offset;
+    Elf32_Word   r_info;
+    Elf32_Sword  r_addend;
+} Elf32_Rela;
+
+typedef struct {
+    Elf32_Word   st_name;
+    uint8_t      st_info;
+    uint8_t      st_other;
+    Elf32_Half   st_shndx;    /* 0 == SHN_UNDEF */
+    Elf32_Addr   st_value;
+    Elf32_Word   st_size;
+} Elf32_Sym;
+
+typedef struct {
+    Elf64_Word   st_name;
+    uint8_t      st_info;
+    uint8_t      st_other;
+    Elf64_Half   st_shndx;    /* 0 == SHN_UNDEF */
+    Elf64_Addr   st_value;
+    Elf64_Xword  st_size;
+} Elf64_Sym;
+
 struct mm_seg;
 
 /* ---- Load result ---- */
