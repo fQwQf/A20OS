@@ -123,5 +123,30 @@ void kernel_progress_run_bottom_halves(void)
         KERNEL_PROGRESS_PENDING_DEVICE)
         kernel_progress_devices();
     net_inet_bottom_half_process_all();
+    /*
+     * Stage D's receive poll point, and the reason it is HERE and not in the
+     * reader path.
+     *
+     * net-lanes.md flags this as a deadlock if it is got wrong: a blocked read is
+     * woken by the socket bottom half, the bottom half needs the staged frames to
+     * have been processed, and a receive poll that only runs after the wake-up is
+     * waiting for an event that will never arrive.  sched() reaches this on every
+     * context switch, on every timer tick that reschedules and on every idle pass,
+     * whether or not any task is waiting on the network -- so "somebody asked for
+     * it" is not part of the condition.
+     *
+     * It runs before kernel_progress_net_rx() rather than after on purpose: that
+     * one is where CPU 0 drains the device ring, and on a multi-lane build draining
+     * stages frames rather than processing them, so the frames it produces are
+     * picked up on the same pass instead of waiting for the next one.
+     *
+     * The call is unconditional above one lane and the work behind it is not: the
+     * function's own first act is one relaxed load of the staged-frame counter, so
+     * an idle system pays a load on the scheduler hot path and nothing else.  At
+     * CONFIG_NET_LANES == 1 the macro expands to a void cast -- there is nothing
+     * staged to poll for, because the interrupt still processes frames directly --
+     * so this line contributes no code at all to a one-lane build.
+     */
+    A20_LWIP_LANE_RX_POLL(CONFIG_NET_RX_IRQ_BUDGET);
     kernel_progress_net_rx();
 }

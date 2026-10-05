@@ -34,6 +34,13 @@ typedef enum {
     PF_NET_DEV,
     PF_NET_TCP,
     PF_NET_UDP,
+    /* Linux's /proc/net/tcp6 and /proc/net/udp6.  Separate node types from
+     * PF_NET_TCP/PF_NET_UDP because the two differ in which family the file
+     * lists, not in row layout: the tcp6 layout is what procfs_net_addr() has
+     * always emitted for a v6 socket, but it was emitted inside /proc/net/tcp
+     * among v4 rows. */
+    PF_NET_TCP6,
+    PF_NET_UDP6,
     PF_NET_UNIX,
     PF_CONFIG_GZ,
     PF_PID_STAT,
@@ -50,6 +57,7 @@ typedef enum {
     PF_PID_CWD,
     PF_PID_FD,
     PF_PID_ENVIRON,
+    PF_PID_AUXV,
     PF_PID_IO,
     PF_PID_LOGINUID,
     PF_PID_SESSIONID,

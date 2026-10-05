@@ -6,7 +6,7 @@
 #include "core/lock_counters.h"
 #include "core/string.h"
 
-net_bucket_t g_net_buckets[NET_SOCK_BUCKET_COUNT];
+net_bucket_t g_net_buckets[NET_SOCK_BUCKETS];
 net_socket_t *g_sockets[NET_MAX_SOCKETS];
 volatile int g_net_bh_pending[NET_MAX_SOCKETS];
 /* Number of slots whose pending flag is currently set.  Every 0->1 and 1->0
@@ -73,10 +73,16 @@ void net_socket_registry_init(void) {
      *
      * The polarity is the pre-sharding one, unchanged: a CLEAR bit is a free
      * slot, a SET bit is occupied.  net_bucket_claim() picks a clear bit and
-     * sets it, net_unregister_socket_locked() clears it again, and both were
+     * sets it, net_socket_unregister() clears it again, and both were
      * carried over verbatim from g_sock_free ("bit n == 0 -> slot n is free").
+     *
+     * There is no orphan shard any more.  One existed for sockets with no
+     * registry slot at all -- being created, or the accepted end of an AF_UNIX
+     * stream -- because that state used to be protected by the bucket lock and
+     * a socket with no slot has no bucket.  Per-socket state is now protected
+     * by a lock inside the socket, so the case needs nothing.
      */
-    for (int b = 0; b < NET_SOCK_BUCKET_COUNT; b++) {
+    for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
         spin_init(&g_net_buckets[b].lock);
         memset(g_net_buckets[b].free_bits, 0,
                sizeof(g_net_buckets[b].free_bits));
@@ -97,8 +103,6 @@ void net_socket_registry_init(void) {
         spin_set_debug(&g_net_buckets[b].lock, g_net_bucket_names[b], NULL);
         lock_counters_register(&g_net_buckets[b].lock, g_net_bucket_names[b]);
     }
-    spin_set_debug(&g_net_buckets[NET_SOCK_ORPHAN_BUCKET].lock,
-                   "net_bucket_orphan", NULL);
 }
 
 /*
@@ -125,10 +129,11 @@ static int net_bucket_claim(net_bucket_t *bk)
 
 /*
  * Publish `s` into the table, choosing its shard here.  The caller must have
- * finished filling `s` and must not hold another socket's bucket lock: this
- * function takes shard locks itself, one at a time, and a bucket is shared by
- * NET_SOCK_SLOTS_PER_BUCKET slots, so nesting an arbitrary shard under a held
- * one is the ABBA the ascending order exists to prevent.
+ * finished filling `s` and must hold no net lock: this function takes a shard
+ * lock itself, one at a time, and then the socket's own lock to publish
+ * in_registry / reg_idx, and a bucket is shared by NET_SOCK_SLOTS_PER_BUCKET
+ * slots, so nesting an arbitrary shard under anything already held is exactly
+ * the ABBA the order above exists to prevent.
  *
  * The buckets are scanned as a ring starting at the registering CPU's own, so
  * concurrent registrations land on different shards first instead of all
@@ -146,13 +151,18 @@ int net_register_socket_locked(net_socket_t *s) {
         int k = net_bucket_claim(&g_net_buckets[b]);
         if (k >= 0) {
             int idx = (b << NET_SOCK_BUCKET_SHIFT) + k;
+            /* Shard outer, socket inner: in_registry and reg_idx belong to the
+             * socket, so they are written under its lock, which is the order
+             * net_bucket_scan() reads them in too. */
+            uint64_t sflags = net_sock_lock(s);
             g_sockets[idx] = s;
             s->in_registry = 1;
             s->reg_idx = idx;
             net_rxq_reset_locked(s);
+            net_sock_unlock(s, sflags);
             net_bh_slot_clear(idx);
             /* The registry's own reference, handed back by a second
-             * net_socket_free() after net_unregister_socket_locked(). */
+             * net_socket_free() after net_socket_unregister(). */
             net_socket_ref(s);
             net_bucket_unlock(b, flags);
             return 0;
@@ -162,8 +172,8 @@ int net_register_socket_locked(net_socket_t *s) {
     return -ENFILE;
 }
 
-void net_unregister_socket_locked(net_socket_t *s) {
-    if (!s || !s->in_registry)
+void net_socket_unregister(net_socket_t *s) {
+    if (!s)
         return;
     /*
      * Registration recorded the slot, so closing reads it back instead of
@@ -175,23 +185,35 @@ void net_unregister_socket_locked(net_socket_t *s) {
      * only be handed to a new socket after this one released it, so a
      * mismatch means the index no longer describes `s` and the slot must be
      * left to its current owner.
+     *
+     * reg_idx is read before the shard lock because choosing the shard is what
+     * the read is for; `s` is the socket that owns the slot here (the caller is
+     * its teardown), so the value cannot change under it.
      */
     int i = s->reg_idx;
     int b = net_socket_bucket(s);
+    if (b < 0 || i < 0 || i >= NET_MAX_SOCKETS)
+        return;
+    uint64_t flags = net_bucket_lock(b);
+    uint64_t sflags = net_sock_lock(s);
     /* Released while the slot is still this socket's, because that is the key
-     * the packet census is indexed by. */
+     * the packet census is indexed by.  It writes pkt_bound_marked, which is
+     * per-socket state, so it runs under the socket's lock like everything
+     * else here. */
     net_packet_bound_release(s);
-    if (i >= 0 && i < NET_MAX_SOCKETS && g_sockets[i] == s) {
+    if (g_sockets[i] == s) {
         g_sockets[i] = NULL;
         net_bh_slot_clear(i);
         g_net_buckets[b].free_bits[i / 32] &= ~(1U << (i % 32));
     }
     s->in_registry = 0;
     s->reg_idx = -1;
+    net_sock_unlock(s, sflags);
+    net_bucket_unlock(b, flags);
     /* The registry's own reference is released by the caller with one more
-     * net_socket_free(), *after* dropping the bucket lock: it can free the
-     * socket, and obj_cache_free() is not something to run with a shard lock
-     * held and interrupts disabled. */
+     * net_socket_free(), *after* this function returns and every lock is
+     * dropped: it can free the socket, and obj_cache_free() is not something to
+     * run with a shard lock held and interrupts disabled. */
 }
 
 /*

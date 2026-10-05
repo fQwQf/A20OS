@@ -22,7 +22,11 @@
 int mm_mprotect_locked(mm_struct_t *mm, vaddr_t addr, size_t len,
                            int prot) {
     if (!mm || !mm->pgdir) return -EINVAL;
-    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
+    if (prot & ~PROT_KNOWN_MASK) return -EINVAL;
+    /* A pointer-signature hint is not an access bit.  Drop it here, before the
+     * W^X policy and the page table both re-read prot through
+     * PROT_READ/WRITE/EXEC, so that neither can read it as a permission. */
+    prot &= ~PROT_HINT_MASK;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
     len = ROUND_UP(len, PAGE_SIZE);
     if (len == 0) return 0;

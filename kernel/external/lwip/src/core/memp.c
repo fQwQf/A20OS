@@ -87,6 +87,144 @@ const struct memp_desc *const memp_pools[MEMP_MAX] = {
 #include LWIP_HOOK_FILENAME
 #endif
 
+#ifdef LWIP_MEMP_LANE
+/*
+ * Per-lane pbuf pools (stage C).
+ *
+ * Upstream's memp has no lane dimension anywhere: memp_malloc() takes a pool
+ * id, do_memp_malloc_pool() takes a descriptor, and pbuf_alloc() forwards
+ * MEMP_PBUF_POOL without adding anything.  The port supplies
+ * LWIP_MEMP_LANE() to answer "which lane owns the work in progress" (see
+ * kernel/net/lwip_port/lwipopts.h and net_lane.h for why the answer has to be
+ * the address-derived lane rather than the CPU), and this file indexes a
+ * per-lane descriptor array with it.  Only MEMP_PBUF and MEMP_PBUF_POOL are
+ * partitioned; every other pool stays global, because their contents are not
+ * per-packet and not per-connection.
+ *
+ * Lane 0 reuses the upstream descriptor object itself rather than a copy, so
+ * memp_pools[] and lwip_stats.memp[] keep pointing at the very same counters
+ * they always did.  Lanes 1..N-1 are copies taken at memp_init() time, which
+ * is the only point where a descriptor is complete: LWIP_MEMPOOL_DECLARE
+ * computes the element size from the pool's LWIP_MEMPOOL() line, and repeating
+ * that expression here would be a second copy of it to keep in sync.
+ *
+ * WHAT THIS DOES AND DOES NOT BUY, stated plainly because it is easy to
+ * over-read the name:
+ *
+ *  - It does not partition memory.  Every profile in net_profile.h sets
+ *    MEMP_MEM_MALLOC=1, under which memp_init_pool() is a stub and
+ *    do_memp_malloc_pool() is mem_malloc(MEMP_SIZE + MEMP_ALIGN_SIZE(desc->size)):
+ *    the descriptor contributes a size and nothing else, so two descriptors of
+ *    the same size draw from the same heap.  Real partitioning needs the
+ *    statically reserved layout (!MEMP_MEM_MALLOC), where each lane would need
+ *    its own base array and free list -- that is not built, and the profile
+ *    static asserts in lwipopts.h budget .bss for a single copy.
+ *  - Freeing is unaffected either way.  do_memp_free_pool() ignores the
+ *    descriptor under MEMP_MEM_MALLOC, so an element always returns to the
+ *    lwIP heap no matter which lane's table the free indexed.
+ *  - Consequently the per-lane table is the indexing skeleton stage C needs,
+ *    and the counter below is the only thing it currently makes observable.
+ *
+ * The counter is deliberately a pair of monotonic counters rather than a
+ * "used" gauge.  A free carries no lane -- memp_free(MEMP_PBUF, mem) has
+ * nothing but the pool id and the pointer -- so crediting a decrement to the
+ * freeing lane would make the gauge wrong, and crediting it to the allocating
+ * lane would need a per-pbuf ownership tag, which lwIP's pbuf struct has no
+ * room for.  A gauge fed that way underflows its u16_t on the first lane
+ * mismatch, so it is not offered at all.  What is counted here is exact and
+ * cannot underflow: how many elements each lane's pool handed out, and how
+ * many came back.
+ *
+ * The type itself lives in memp_priv.h next to the accessor, because the port
+ * renders these counters and cannot include a .c file.
+ */
+static struct memp_lane_count memp_lane_counts[LWIP_MEMP_LANES];
+static struct memp_desc memp_lane_desc_pbuf[LWIP_MEMP_LANES];
+static struct memp_desc memp_lane_desc_pbuf_pool[LWIP_MEMP_LANES];
+/* The pool name token in memp_std.h is PBUF / PBUF_POOL, while the *enum* is
+ * MEMP_PBUF / MEMP_PBUF_POOL; LWIP_MEMPOOL_DECLARE builds the descriptor name
+ * from the token, so the objects are memp_PBUF and memp_PBUF_POOL. */
+static const struct memp_desc *memp_lane_pbuf[LWIP_MEMP_LANES] = {
+  &memp_PBUF
+};
+static const struct memp_desc *memp_lane_pbuf_pool[LWIP_MEMP_LANES] = {
+  &memp_PBUF_POOL
+};
+
+const struct memp_lane_count *
+memp_lane_count_get(unsigned lane)
+{
+  LWIP_ASSERT("memp_lane_count_get: lane out of range", lane < LWIP_MEMP_LANES);
+  return &memp_lane_counts[lane < LWIP_MEMP_LANES ? lane : 0];
+}
+#endif /* LWIP_MEMP_LANE */
+
+/* The lane the port says owns this work, forced into range.  The clamp is
+ * belt and braces: net_lane_ctx_push() already stores lane % LWIP_MEMP_LANES,
+ * and the assert is what turns a future violation of that into a report rather
+ * than an out-of-bounds read. */
+#ifdef LWIP_MEMP_LANE
+static u16_t
+memp_lane_index(void)
+{
+  unsigned lane = (unsigned)LWIP_MEMP_LANE();
+  if (lane >= LWIP_MEMP_LANES) {
+    LWIP_ASSERT("memp: current lane out of range", 0);
+    lane = 0;
+  }
+  return (u16_t)lane;
+}
+
+/* Which lane's table a pool id resolved through; 0 for every pool that is not
+ * partitioned.  Only ever called from the lane-counter blocks in memp_malloc()
+ * and memp_free(), which are themselves inside #ifdef LWIP_MEMP_LANE. */
+static u16_t
+memp_pool_lane(memp_t type)
+{
+  if (type == MEMP_PBUF || type == MEMP_PBUF_POOL) {
+    return memp_lane_index();
+  }
+  return 0;
+}
+#endif /* LWIP_MEMP_LANE */
+
+#ifndef LWIP_MEMP_LANE
+/* One lane, one pool per id, spelled as upstream's own expression rather than
+ * left to a static function that returns it.
+ *
+ * Both spellings compile to the same code: with the static-function form, memp.o
+ * at CONFIG_NET_LANES == 1 was measured byte-identical to the pre-lane build in
+ * .text, .rodata and .sdata.  So this is not a correctness fix.  It is chosen
+ * because "the optimiser folds it" is a claim about one compiler version,
+ * while "the preprocessed source at one lane is `memp_pools[type]`" is a
+ * property anyone can check by reading the output, and the N=1 equivalence rule
+ * is worth keeping checkable that way. */
+#define memp_desc_for(type) memp_pools[type]
+#else /* LWIP_MEMP_LANE */
+/* The descriptor a pool id resolves to right now.
+ *
+ * A lane slot that is still NULL means memp_init() has not run for it yet.
+ * Falling back to the shared descriptor is deliberate: it makes the window
+ * before initialisation behave like the pre-lane stack rather than turn into a
+ * NULL descriptor that memp_malloc_pool() would answer with a silent NULL. */
+static const struct memp_desc *
+memp_desc_for(memp_t type)
+{
+  if (type == MEMP_PBUF) {
+    const struct memp_desc *desc = memp_lane_pbuf[memp_lane_index()];
+    if (desc != NULL) {
+      return desc;
+    }
+  } else if (type == MEMP_PBUF_POOL) {
+    const struct memp_desc *desc = memp_lane_pbuf_pool[memp_lane_index()];
+    if (desc != NULL) {
+      return desc;
+    }
+  }
+  return memp_pools[type];
+}
+#endif /* LWIP_MEMP_LANE */
+
 #if MEMP_MEM_MALLOC && MEMP_OVERFLOW_CHECK >= 2
 #undef MEMP_OVERFLOW_CHECK
 /* MEMP_OVERFLOW_CHECK >= 2 does not work with MEMP_MEM_MALLOC, use 1 instead */
@@ -234,6 +372,18 @@ memp_init(void)
 #endif
   }
 
+#ifdef LWIP_MEMP_LANE
+  /* Take the per-lane copies now, from the descriptors memp_init_pool() has
+   * just finished with.  Lane 0 keeps pointing at the upstream object, so
+   * memp_pools[] and lwip_stats.memp[] are untouched for it. */
+  for (i = 1; i < LWIP_MEMP_LANES; i++) {
+    memp_lane_desc_pbuf[i] = *memp_lane_pbuf[0];
+    memp_lane_pbuf[i] = &memp_lane_desc_pbuf[i];
+    memp_lane_desc_pbuf_pool[i] = *memp_lane_pbuf_pool[0];
+    memp_lane_pbuf_pool[i] = &memp_lane_desc_pbuf_pool[i];
+  }
+#endif /* LWIP_MEMP_LANE */
+
 #if MEMP_OVERFLOW_CHECK >= 2
   /* check everything a first time to see if it worked */
   memp_overflow_check_all();
@@ -347,10 +497,19 @@ memp_malloc_fn(memp_t type, const char *file, const int line)
 #endif /* MEMP_OVERFLOW_CHECK >= 2 */
 
 #if !MEMP_OVERFLOW_CHECK
-  memp = do_memp_malloc_pool(memp_pools[type]);
+  memp = do_memp_malloc_pool(memp_desc_for(type));
 #else
-  memp = do_memp_malloc_pool_fn(memp_pools[type], file, line);
+  memp = do_memp_malloc_pool_fn(memp_desc_for(type), file, line);
 #endif
+
+#ifdef LWIP_MEMP_LANE
+  /* Counted after the allocation, so a failure does not inflate the lane's
+   * share and a reader can tell a lane that was refused from one that never
+   * asked.  u32_t wraps only after 4G elements, and it only ever increments. */
+  if (memp != NULL) {
+    memp_lane_counts[memp_pool_lane(type)].alloc++;
+  }
+#endif /* LWIP_MEMP_LANE */
 
   return memp;
 }
@@ -434,10 +593,22 @@ memp_free(memp_t type, void *mem)
 #endif /* MEMP_OVERFLOW_CHECK >= 2 */
 
 #ifdef LWIP_HOOK_MEMP_AVAILABLE
-  old_first = *memp_pools[type]->tab;
+  old_first = *memp_desc_for(type)->tab;
 #endif
 
-  do_memp_free_pool(memp_pools[type], mem);
+  do_memp_free_pool(memp_desc_for(type), mem);
+
+#ifdef LWIP_MEMP_LANE
+  /*
+   * Counted here, against the freeing lane.  It is deliberately not a "used"
+   * gauge: memp_free() is handed a pool id and a pointer and nothing that says
+   * which lane's pool handed the element out, so a decrement attributed to the
+   * freeing lane would drift, and one attributed to the allocating lane would
+   * need a per-element tag lwIP has nowhere to put.  Two monotonic counters
+   * are exact and cannot underflow; see the note on memp_lane_count above.
+   */
+  memp_lane_counts[memp_pool_lane(type)].freed++;
+#endif /* LWIP_MEMP_LANE */
 
 #ifdef LWIP_HOOK_MEMP_AVAILABLE
   if (old_first == NULL) {

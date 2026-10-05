@@ -44,7 +44,7 @@ extern int proc_task_pid(const void *task);
  *   park_lock -> mm_struct.lock
  *   park_lock -> a20_handle_table.lock
  *   driver registry/IRQ locks -> device-private locks
- *   g_lwip_lock -> net_bucket[*]
+ *   g_lwip_lock -> nothing net-side at all
  *   g_lwip_lock -> virtio-net nonblocking send/recv paths only
  *
  * cg_node.lock is never held together with tasklist_lock: the memory
@@ -55,50 +55,69 @@ extern int proc_task_pid(const void *task);
  * Lock-safe network entry points (see docs/net/network-lock-contract.md):
  * - a20_lwip_lock()/a20_lwip_unlock(): outer lock around all lwIP core calls.
  * - a20_lwip_poll_locked(): progress entry that runs with g_lwip_lock held;
- *   must not allocate, block, or acquire a socket-table bucket lock.
+ *   must not allocate, block, or acquire any net lock (neither a socket lock nor
+ *   a socket-table bucket lock).
  * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
- *   runs the socket bottom-half under the socket-table bucket lock only.
+ *   runs the socket bottom-half under socket locks only.
  * - lwIP callbacks run under g_lwip_lock and must only stage events into the
  *   preallocated per-PCB ring; allocation, enqueue, and wakeup happen in the
- *   bottom-half with a socket-table bucket lock held.
+ *   bottom-half, in process context, with a socket lock held.
  *
- * Socket-table shard locks (lock-serialization-split §2; text handed over by
- * the net implementer, merged during integration):
- * - The socket registry is sharded into net_bucket[0 .. NET_SOCK_BUCKETS-1],
- *   one lock per contiguous run of NET_SOCK_SLOTS_PER_BUCKET registry slots
- *   (512 on the server profile, 32 on the default one, 1 on the embedded one;
- *   see socket_internal.h).  The bucket of a socket is reg_idx >>
- *   NET_SOCK_BUCKET_SHIFT.  A per-socket critical section takes the one bucket
- *   that owns the socket; a section that touches two sockets takes their two
- *   buckets in ascending bucket order, so no pair is ever held in two
- *   directions and the order is acyclic.  At most two bucket locks are held at
- *   any time.
+ * Socket locks and socket-table bucket locks (stage E of
+ * docs/net/net-lanes.md; full text in docs/net/network-lock-contract.md):
+ * - Every per-socket field -- receive and accept queues, rx_count, closed /
+ *   shut_rd / shut_wr / peer_closed, local / peer addresses and their lengths,
+ *   lane, timeouts, the accept stage -- is protected by net_socket_t.lock and by
+ *   nothing else.  net_sock_lock() / net_sock_unlock() are the only way to take
+ *   it.
+ * - The bucket lock protects the registry slot table and the free bitmap, and
+ *   only that: net_register_socket_locked(), net_socket_unregister() and
+ *   net_bucket_slot_ref() (which pins one slot and hands back a reference).
+ *   Nothing else takes a bucket lock for longer than one slot read.
+ * - Order, outermost first:
+ *       net_bucket[b]  ->  net_socket_t.lock  ->  (task locks above)
+ *     A bucket lock is never taken while a socket lock is held.  That is the
+ *     whole ABBA surface now, because a bucket lock is reached only from
+ *     net_register_socket_locked(), net_socket_unregister() and
+ *     net_bucket_slot_ref(), and each of those is a leaf that the caller
+ *     invokes with no net lock held.
+ * - A bucket lock and one socket lock may be held together -- that is how
+ *   net_bucket_scan() and the four broadcast walks work -- but never two bucket
+ *   locks and never a second socket lock underneath.  Two sockets are taken
+ *     with net_sock_lock2(), which orders by address, so no pair is ever held in
+ *     two directions and the order is acyclic.
  * - Never hold more than one bucket lock while walking the table: taking all
  *   NET_SOCK_BUCKETS with interrupts disabled livelocks against an interrupt
  *   that reaches a lookup on a lock its own interrupted context was holding
  *   (see the same failure recorded for VFS dcache in kernel/fs/vfs/dcache.c).
  *   net_socket_table_walk() and every other table scan walk bucket by bucket,
  *   taking and releasing one bucket at a time.
- * - g_lwip_lock is never held together with any net bucket lock.  This is the
- *   unchanged meaning of the old "g_lwip_lock and g_net_lock are never held
- *   together" rule (docs/net/network-lock-contract.md), and it is now true
- *   everywhere rather than "true except on the accept path".
- * - A socket with reg_idx < 0 (being created, or racing a concurrent close)
- *   has no bucket.  Such accesses take net_bucket[NET_SOCK_ORPHAN_BUCKET],
- *   re-check s->in_registry, and bail out if it is clear.
- * - net_register_socket_locked() takes shard locks itself, one at a time, so
- *   it must NOT be called with another socket's bucket lock held.  Callers
- *   resolve their counterpart (listener, peer) through a search that returns a
- *   reference, register with no lock held, and only then take the ordered
- *   pair.  This is the one rule that is easy to break by accident: every new
- *   accept/connect path has to be written in that shape.
- * - Carrying a net_socket_t pointer out of a bucket critical section requires
- *   net_socket_ref() / net_socket_free().  The bucket lock can no longer be
- *   what keeps the object alive, because a lookup that finds a socket in one
- *   bucket and then needs a second bucket cannot keep the first one held.
- * - Bucket locks are independent of the task locks above: no net bucket lock
- *   nests under tasklist_lock / park_lock / runq_lock, and none of those three
- *   is ever taken while a bucket lock is held.
+ * - g_lwip_lock is never held together with any net lock -- neither a socket
+ *   lock nor a bucket lock.  This is the unchanged meaning of the old
+ *   "g_lwip_lock and g_net_lock are never held together" rule
+ *   (docs/net/network-lock-contract.md), and it is now true everywhere rather
+ *   than "true except on the accept path".
+ * - A socket that owns no registry slot (being created, the accepted end of an
+ *   AF_UNIX stream, or one whose close() is in flight) needs no special shard.
+ *   Its per-socket state is covered by its own lock; only the slot does not
+ *   exist, and the slot is the bucket lock's business.
+ * - net_register_socket_locked() takes bucket locks itself, one at a time, so
+ *   it must NOT be called with a socket lock held.  Callers resolve their
+ *   counterpart (listener, peer) through a search that returns a reference,
+ *   register with no lock held, and only then take the ordered pair.  This is
+ *   the one rule that is easy to break by accident: every new accept/connect
+ *   path has to be written in that shape.
+ * - net_socket_unregister() takes a bucket lock itself, for the same reason, so
+ *   it is likewise called with no net lock held.  Every close path therefore
+ *   splits into two phases: mark the socket closed and drain its wait queues
+ *   under the socket lock, release it, then release the slot.  Nothing waits for
+ *   the reference count to reach zero while a lock is held; the registry's
+ *   reference is handed back by the caller after every lock is dropped, because
+ *   dropping it can free and obj_cache_free() is not something to run with
+ *   interrupts disabled.
+ * - Carrying a net_socket_t pointer out of its lock requires net_socket_ref() /
+ *   net_socket_free().  The reference is also what pins a peer across the
+ *   unlocked window between sampling s->peer and taking the pair.
  * - Never acquire a task's park_lock while holding a runqueue lock (INV-P4b).
  *   A local scheduler pick is runqueue-only: it publishes ->dispatching and
  *   ->owner_cpu under that one CPU's runqueue lock and releases the lock before

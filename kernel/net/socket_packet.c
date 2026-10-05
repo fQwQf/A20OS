@@ -4,8 +4,8 @@
  * TX is synchronous: a frame handed to a bound socket goes straight to the
  * device send op.  RX cannot be, because lwip_stack.c captures frames while
  * holding g_lwip_lock and that lock is never held together with a socket-table
- * bucket lock.  Captures therefore land in a small ring and are delivered from
- * the poll bottom half, which runs with bucket locks only.
+ * net lock.  Captures therefore land in a small ring and are delivered from
+ * the poll bottom half, which runs with socket locks only.
  */
 #include "net/socket_internal.h"
 #include "net/socket_side.h"
@@ -15,14 +15,32 @@
 
 #include "lwip/netif.h"
 
-#define NET_PACKET_RX_RING   16
-#define NET_PACKET_MAX_FRAME 1536
+/*
+ * Both the depth and the slot size follow the profile.  This array is
+ * unconditional .bss: 16 slots of 1540 B was 24640 B on every rung, more than
+ * a 20 KiB MCU part's entire SRAM, and no runtime counter reports it.  See
+ * docs/server-readiness.md and the budget assert in net_profile.h.
+ */
+#define NET_PACKET_RX_RING   NET_PROFILE_PACKET_RING_SLOTS
+#define NET_PACKET_MAX_FRAME NET_PROFILE_PACKET_FRAME_SIZE
 
 typedef struct {
     uint16_t len;
     uint16_t ifindex;
     uint8_t  frame[NET_PACKET_MAX_FRAME];
 } net_packet_slot_t;
+
+/*
+ * The macro arithmetic in net_profile.h is an upper bound; this is the layout
+ * the compiler actually produced, so the budget cannot silently stop
+ * describing the array because a field crept into the slot.  The four bytes of
+ * len + ifindex are padding-free here only because every rung's frame size is
+ * even, which keeps the struct at an even size with no tail padding.
+ */
+_Static_assert(sizeof(net_packet_slot_t) == NET_PROFILE_PACKET_SLOT_BYTES,
+               "net_packet_slot_t no longer matches the profile's per-slot "
+               "accounting; update NET_PROFILE_PACKET_SLOT_BYTES with the real "
+               "layout rather than letting the static budget become fiction");
 
 static net_packet_slot_t g_pkt_ring[NET_PACKET_RX_RING];
 static net_packet_slot_t g_pkt_drain;
@@ -33,14 +51,30 @@ static volatile int g_pkt_pending;
 static volatile unsigned g_pkt_drops;
 
 /*
+ * Bytes this file places in .bss unconditionally, for /proc/a20/netmem.
+ *
+ * The pool table above it reports what the lwIP heap hands out, and with
+ * MEMP_MEM_MALLOC=1 the heap is exactly where these arrays are *not*: they are
+ * reserved whether or not a single frame is ever captured.  Reporting them is
+ * what lets a tier's static footprint be read off a running system instead of
+ * only off a linker's symbol table, which is how the profile-scope fix for
+ * docs/server-readiness.md is meant to be checked in the future.
+ */
+size_t net_packet_static_bytes(void)
+{
+    return sizeof(g_pkt_ring) + sizeof(g_pkt_drain);
+}
+
+/*
  * Number of AF_PACKET sockets currently holding a bind filter, and the slot
  * bitmap that makes the accounting idempotent.
  *
  * Capturing costs a fixed-size copy of every frame on every interface plus a
  * walk of the whole registry per delivered frame, and on a host that never
- * opened a packet socket all of it is thrown away -- the ring is 16 frames
- * deep, so a burst overflows it and the frames are dropped having already
- * been copied.  A census turns both of those into a single atomic load.
+ * opened a packet socket all of it is thrown away -- the ring is
+ * NET_PACKET_RX_RING frames deep, so a burst overflows it and the frames are
+ * dropped having already been copied.  A census turns both of those into a
+ * single atomic load.
  *
  * The count is read on the receive path with g_lwip_lock held and is the only
  * lock-free reader, so it is published with a release and sampled with an
@@ -57,7 +91,7 @@ int net_packet_bound_count(void)
     return __atomic_load_n(&g_pkt_bound_count, __ATOMIC_ACQUIRE);
 }
 
-/* Both of these run under the socket's own bucket lock, so the idempotence
+/* Both of these run under the socket's own lock, so the idempotence
  * marker -- now a field of net_socket_t rather than a NET_MAX_SOCKETS-entry
  * bitmap indexed by registry slot -- needs no lock of its own.  It exists to
  * keep the count balanced when the release side cannot tell whether the
@@ -135,34 +169,40 @@ static void net_packet_deliver(const net_packet_slot_t *slot,
         int base = bucket << NET_SOCK_BUCKET_SHIFT;
         for (int i = 0; i < NET_SOCK_SLOTS_PER_BUCKET; i++) {
         net_socket_t *s = g_sockets[base + i];
-        if (!s || s->domain != AF_PACKET || s->closed || !s->pkt_bound)
+        if (!s)
             continue;
-        if (s->pkt_ifindex > 0 && (unsigned)s->pkt_ifindex != slot->ifindex)
-            continue;
-        if (s->pkt_protocol != ETH_P_ALL && s->pkt_protocol != ethertype)
-            continue;
-        if (s->rx_count >= NET_MAX_QUEUE)
-            continue;
+        /* Bucket outer, socket inner: the same nesting net_bucket_scan() does,
+         * and the only order a bucket lock is ever taken in. */
+        uint64_t sf = net_sock_lock(s);
+        bool skip = s->domain != AF_PACKET || s->closed || !s->pkt_bound ||
+                    (s->pkt_ifindex > 0 &&
+                     (unsigned)s->pkt_ifindex != slot->ifindex) ||
+                    (s->pkt_protocol != ETH_P_ALL &&
+                     s->pkt_protocol != ethertype) ||
+                    s->rx_count >= NET_MAX_QUEUE;
+        if (!skip) {
+            net_sockaddr_ll_t ll;
+            memset(&ll, 0, sizeof(ll));
+            ll.sll_family = AF_PACKET;
+            ll.sll_protocol = net_ntohs(ethertype);
+            ll.sll_ifindex = (int32_t)slot->ifindex;
+            ll.sll_hatype = ARPHRD_ETHER;
+            ll.sll_pkttype = PACKET_HOST;
+            ll.sll_halen = ETH_ALEN;
+            memcpy(ll.sll_addr, slot->frame + ETH_ALEN, ETH_ALEN);
 
-        net_sockaddr_ll_t ll;
-        memset(&ll, 0, sizeof(ll));
-        ll.sll_family = AF_PACKET;
-        ll.sll_protocol = net_ntohs(ethertype);
-        ll.sll_ifindex = (int32_t)slot->ifindex;
-        ll.sll_hatype = ARPHRD_ETHER;
-        ll.sll_pkttype = PACKET_HOST;
-        ll.sll_halen = ETH_ALEN;
-        memcpy(ll.sll_addr, slot->frame + ETH_ALEN, ETH_ALEN);
-
-        const uint8_t *payload = slot->frame;
-        size_t payload_len = slot->len;
-        if (s->type != SOCK_RAW) {
-            payload += ETH_HLEN;
-            payload_len -= ETH_HLEN;
+            const uint8_t *payload = slot->frame;
+            size_t payload_len = slot->len;
+            if (s->type != SOCK_RAW) {
+                payload += ETH_HLEN;
+                payload_len -= ETH_HLEN;
+            }
+            if (net_enqueue_msg_locked(s, payload, payload_len, &ll,
+                                       sizeof(ll)) >= 0)
+                (void)wait_queue_collect_one(&s->read_waitq, 0,
+                                             PROC_WAKE_EVENT, wake_q);
         }
-        if (net_enqueue_msg_locked(s, payload, payload_len, &ll, sizeof(ll)) >= 0)
-            (void)wait_queue_collect_one(&s->read_waitq, 0,
-                                         PROC_WAKE_EVENT, wake_q);
+        net_sock_unlock(s, sf);
         }
         net_bucket_unlock(bucket, bf);
     }
@@ -225,10 +265,9 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     if (proto == 0)
         proto = ETH_P_ALL;
 
-    int b = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(b);
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     s->pkt_ifindex = ll->sll_ifindex;
@@ -244,7 +283,7 @@ int net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen)
     memcpy(s->local, addr, addrlen);
     s->local_len = addrlen;
     s->bound = 1;
-    net_bucket_unlock(b, flags);
+    net_sock_unlock(s, flags);
     return 0;
 }
 

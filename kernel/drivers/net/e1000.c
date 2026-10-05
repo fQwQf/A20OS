@@ -25,6 +25,12 @@
 #define E1000_ICR    0x00C0U
 #define E1000_IMS    0x00D0U
 #define E1000_IMC    0x00D8U
+/* ITR (interrupt throttle control) exists only on the e1000e-generation parts;
+ * on the 82540EM / 82545EM / 82546EB / 82541PI it is a reserved hole in the
+ * register file.  e1000_itr_init() gates every write to it on the device id, so
+ * the define existing here is not the same as the register existing.  Bits 15:1
+ * are the throttle interval in 1024 ns units, bit 0 is the throttle enable. */
+#define E1000_ITR    0x000CU
 #define E1000_RCTL   0x0100U
 #define E1000_TCTL   0x0400U
 #define E1000_TIPG   0x0410U
@@ -76,7 +82,12 @@
 #define E1000_IMS_USED       (E1000_IMS_TXDW | E1000_IMS_LSC | \
                               E1000_IMS_RXO | E1000_IMS_RXT0)
 
-#define E1000_RING_SIZE 64U
+/* 256 entries per direction, up from 64.  With a 2048-byte buffer that is
+ * 512 KiB of payload per direction, which is why the rings are taken from
+ * kmalloc() at probe time rather than declared here -- see
+ * e1000_ring_bytes() for the .a20drv package-size reason.  RDLEN takes a
+ * descriptor count, not a byte count, so the count is what is programmed. */
+#define E1000_RING_SIZE 256U
 #define E1000_BUF_SIZE  2048U
 
 /* The legacy (non-EXT) descriptor is a 16-byte wire format, not a C layout:
@@ -120,10 +131,17 @@ typedef struct {
     int irq_registered;
     int msix_base;        /* first reserved vector, -1 when unused */
     int msix_vectors;     /* reserved table entries in use */
-    e1000_rx_desc_t rx[E1000_RING_SIZE] ALIGNED(16);
-    e1000_tx_desc_t tx[E1000_RING_SIZE] ALIGNED(16);
-    uint8_t rx_buf[E1000_RING_SIZE][E1000_BUF_SIZE] ALIGNED(16);
-    uint8_t tx_buf[E1000_RING_SIZE][E1000_BUF_SIZE] ALIGNED(16);
+    e1000_rx_desc_t *rx;
+    e1000_tx_desc_t *tx;
+    uint8_t (*rx_buf)[E1000_BUF_SIZE];
+    uint8_t (*tx_buf)[E1000_BUF_SIZE];
+    /* Owns the four arrays above in one piece; this is the kmalloc() pointer
+     * itself, because that is what kfree() takes. */
+    void *ring_mem;
+    /* Interrupt throttle interval programmed into ITR, in microseconds, or 0
+     * when the part has no ITR.  Reported on the ready line so a diff of two
+     * boots shows whether throttling is in force. */
+    uint32_t itr_us;
 } e1000_device_t;
 
 static e1000_device_t g_e1000;
@@ -136,6 +154,72 @@ static inline uint32_t e1000_read(e1000_device_t *nic, uint32_t reg)
 static inline void e1000_write(e1000_device_t *nic, uint32_t reg, uint32_t value)
 {
     writel(value, (volatile void *)(nic->regs + reg));
+}
+
+/*
+ * Why the rings are kmalloc()ed rather than static arrays.
+ *
+ * Under the default DRIVER_DEPLOYMENT=generic profile this driver ships as
+ * e1000.a20drv, and drvmod_load() rejects any package whose .text + .data +
+ * .bss exceeds DRV_MOD_MAX_SIZE (kernel/include/drvmod/drvmod.h:31, 512 KiB,
+ * enforced on "bad total_size" in kernel/drvmod/loader.c).  256 descriptors and
+ * 2048-byte payload buffers on each of two directions is just over 1 MiB, so the
+ * statically sized version cannot be loaded at all.
+ *
+ * va_to_pa() (kernel/include/mm/mm.h:26) is a flat subtraction of PAGE_OFFSET,
+ * so any kernel virtual address converts; and a request above SLAB_MAX_OBJ
+ * (kernel/mm/slab.c:12) goes straight to the buddy allocator and comes back as
+ * whole pages, which is the 16-byte ring-base alignment RDBAL/RDBAL need.
+ */
+static size_t e1000_ring_bytes(void)
+{
+    size_t n = 2 * (size_t)E1000_RING_SIZE * sizeof(e1000_rx_desc_t);
+    n += 2 * (size_t)E1000_RING_SIZE * E1000_BUF_SIZE;
+    n += 64 * 4;   /* alignment slack for the four regions */
+    return n;
+}
+
+#define E1000_ALIGN(p, a) \
+    ((p) = (void *)(((uintptr_t)(p) + ((a) - 1)) & ~(uintptr_t)((a) - 1)))
+
+static void e1000_free_rings(e1000_device_t *nic)
+{
+    if (nic->ring_mem)
+        kfree(nic->ring_mem);
+    nic->ring_mem = NULL;
+    nic->rx = NULL;
+    nic->tx = NULL;
+    nic->rx_buf = NULL;
+    nic->tx_buf = NULL;
+}
+
+static int e1000_alloc_rings(e1000_device_t *nic)
+{
+    size_t size = e1000_ring_bytes();
+    void *raw = kmalloc(size);
+    if (!raw) {
+        kinfo("[E1000] no memory for %u-entry rings (%zu bytes)\n",
+              (unsigned)E1000_RING_SIZE, size);
+        return -1;
+    }
+    memset(raw, 0, size);
+    nic->ring_mem = raw;
+
+    void *p = raw;
+    /* The rings go first and page aligned: RDBAL is the low 32 bits of a 64-bit
+     * physical address, and a ring base that is not 16-byte aligned makes the
+     * device walk the descriptors off the alignment it expects. */
+    E1000_ALIGN(p, 64);
+    nic->rx = p;
+    p += (size_t)E1000_RING_SIZE * sizeof(e1000_rx_desc_t);
+    nic->tx = p;
+    p += (size_t)E1000_RING_SIZE * sizeof(e1000_tx_desc_t);
+
+    E1000_ALIGN(p, 64);
+    nic->rx_buf = p;
+    p += (size_t)E1000_RING_SIZE * E1000_BUF_SIZE;
+    nic->tx_buf = p;
+    return 0;
 }
 
 /* E1000_IRQ_MODEL:
@@ -177,16 +261,16 @@ static int e1000_irq_handler(int irq, void *priv) {
 static void e1000_poll(device_t *dev)
 {
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic)
+    if (!nic || !nic->tx)
         return;
     (void)e1000_read(nic, E1000_ICR);
-    arch_dma_sync_for_cpu(nic->tx, sizeof(nic->tx));
+    arch_dma_sync_for_cpu(nic->tx, (size_t)E1000_RING_SIZE * sizeof(nic->tx[0]));
 }
 
 static int e1000_send(device_t *dev, const void *packet, size_t length)
 {
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic || !packet || length == 0 || length > E1000_BUF_SIZE)
+    if (!nic || !packet || length == 0 || length > E1000_BUF_SIZE || !nic->tx)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
@@ -223,7 +307,7 @@ static int e1000_send(device_t *dev, const void *packet, size_t length)
 static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
 {
     e1000_device_t *nic = dev ? dev->drv_priv : NULL;
-    if (!nic || !buffer || max_length == 0)
+    if (!nic || !buffer || max_length == 0 || !nic->rx)
         return -1;
 
     uint64_t flags = spin_lock_irqsave(&nic->lock);
@@ -236,29 +320,75 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
 
     /* DD (status[0]) says the device filled the descriptor, EOP (status[1])
      * says it is the last descriptor of the frame, and a non-zero errors word
-     * retires the descriptor without delivering it.  A frame split across
-     * several of these 16-byte buffers is dropped here instead of being
-     * reassembled, so multi-buffer frames never reach the stack. */
-    size_t length = nic->rx[slot].length;
-    if (length > max_length)
-        length = max_length;
-    if (nic->rx[slot].errors || !(nic->rx[slot].status & E1000_RXD_STAT_EOP))
-        length = 0;
-    if (length) {
-        arch_dma_sync_for_cpu(nic->rx_buf[slot], length);
-        memcpy(buffer, nic->rx_buf[slot], length);
+     * retires the descriptor without delivering it.
+     *
+     * A frame longer than one 2048-byte buffer spans several descriptors.
+     * They are walked here and concatenated into the caller's buffer rather
+     * than dropped.  The old code zeroed the length whenever EOP was absent,
+     * which threw away the first fragment of every jumbo frame -- and, because
+     * it still returned the single descriptor to the device, left RDT pointing
+     * into the middle of a frame so the next read started mid-packet.  Walking
+     * to EOP retires the whole chain, so the two failures go together.
+     *
+     * The walk is bounded by the ring size: a device that never sets EOP costs
+     * one full ring of descriptors and then resynchronises at a descriptor
+     * boundary, instead of spinning on the same head forever. */
+    size_t copied = 0;
+    int bad = 0;
+    int eop = 0;
+    uint32_t last = nic->rx_next;
+
+    for (uint32_t n = 0; n < E1000_RING_SIZE && !eop; n++) {
+        last = slot;
+        arch_dma_sync_for_cpu(&nic->rx[slot], sizeof(nic->rx[slot]));
+        /* Read every flag out of the descriptor word before clearing it: EOP
+         * lives in the same byte that is about to be zeroed. */
+        uint8_t status = nic->rx[slot].status;
+        uint16_t chunk = nic->rx[slot].length;
+        uint8_t errors = nic->rx[slot].errors;
+        eop = (status & E1000_RXD_STAT_EOP) != 0;
+
+        /* An error retires the whole frame, not just this descriptor: handing
+         * the caller a prefix of a frame the device flagged as bad would be
+         * worse than handing it nothing. */
+        if (errors)
+            bad = 1;
+        if (!(status & E1000_RXD_STAT_DD))
+            bad = 1;
+
+        /* Truncation is not an error.  The stack gets what fits in max_length
+         * and the rest of the frame is discarded, which is what a caller with a
+         * short buffer means; copied stays short and EOP still ends the walk,
+         * so the ring does not drift. */
+        if (!bad && chunk > 0 && copied < max_length) {
+            size_t take = chunk;
+            if (take > max_length - copied)
+                take = max_length - copied;
+            arch_dma_sync_for_cpu(nic->rx_buf[slot], take);
+            memcpy((uint8_t *)buffer + copied, nic->rx_buf[slot], take);
+            copied += take;
+        }
+
+        /* Retire every descriptor the walk touches, delivered or not. */
+        nic->rx[slot].status = 0;
+        nic->rx[slot].errors = 0;
+        arch_dma_sync_for_device(&nic->rx[slot], sizeof(nic->rx[slot]));
+
+        if (bad)
+            break;
+        slot = (slot + 1U) % E1000_RING_SIZE;
     }
 
-    nic->rx[slot].status = 0;
-    nic->rx[slot].errors = 0;
-    arch_dma_sync_for_device(&nic->rx[slot], sizeof(nic->rx[slot]));
-    /* RDT is the last index the device may fill, so the slot just consumed is
-     * written back verbatim.  Writing slot + 1 instead is the classic
-     * off-by-one and costs exactly one packet of stall on every ring wrap. */
-    e1000_write(nic, E1000_RDT, slot);
-    nic->rx_next = (slot + 1U) % E1000_RING_SIZE;
+    /* RDT is the last index the device may fill, so the last descriptor this
+     * walk retired is written back verbatim -- not `last + 1`, which is the
+     * classic off-by-one and costs exactly one packet of stall on every ring
+     * wrap.  `last` rather than `slot` also makes the broken-frame path
+     * correct: the walk stops on the descriptor it gave up on, and that
+     * descriptor has already been cleared, so it must be the one handed back. */
+    e1000_write(nic, E1000_RDT, last);
+    nic->rx_next = (last + 1U) % E1000_RING_SIZE;
     spin_unlock_irqrestore(&nic->lock, flags);
-    return (int)length;
+    return bad ? 0 : (int)copied;
 }
 
 static const uint8_t *e1000_mac(device_t *dev)
@@ -331,6 +461,47 @@ static void e1000_msix_teardown(device_t *dev, e1000_device_t *nic)
 }
 
 
+/* Simple RX interrupt throttling, 82574L only.
+ *
+ * The register is not in the 8254x register file at all, so this is gated on
+ * the device id rather than written unconditionally: on an 82540EM, 0x000C is
+ * a reserved hole and writing it is at best ignored and at worst undefined.
+ * On the 82574L it throttles interrupt delivery to at most one message per
+ * interval, which bounds the per-packet interrupt cost of a bulk receive.
+ *
+ * Why a throttle is safe here rather than a throughput cut: the drain the
+ * interrupt triggers is unbounded.  e1000_irq_handler() hands the netif index
+ * to a20_lwip_process_netif_irq_locked(), which calls
+ * a20_lwip_process_netif_rx_tx_locked(n, 0) with a zero budget -- the whole
+ * ring is emptied per interrupt.  The longer interval therefore reduces how
+ * often the ring is emptied, never how much of it is emptied, and with 256
+ * descriptors the burst that arrives in one interval is bounded by the ring.
+ *
+ * 3.9 ms (3904 * 1024 ns).  Chosen small on purpose: the cost of throttling is
+ * a receive packet waiting for the next interrupt, so the interval is a
+ * latency budget, and 3.9 ms is invisible to every application this stack
+ * serves while still cutting interrupt rate on a bulk receive by roughly an
+ * order of magnitude against no throttling at all.  Bits 15:1 hold the count;
+ * bit 0 enables. */
+#define E1000_ITR_INTERVAL_US 3904U
+
+static void e1000_itr_init(device_t *dev, e1000_device_t *nic)
+{
+    uint32_t id = pci_device_id(dev);
+    if (id != E1000_DEVICE_82574L) {
+        nic->itr_us = 0;
+        return;
+    }
+    /* The field is 15 bits wide, so clamp rather than let a future edit write a
+     * count that silently truncates into a shorter interval than intended. */
+    uint32_t units = E1000_ITR_INTERVAL_US / 1024U;
+    if (units > 0x7FFFU)
+        units = 0x7FFFU;
+    e1000_write(nic, E1000_ITR, (units << 1) | 1U);
+    nic->itr_us = units * 1024U;
+    kinfo("[E1000] 82574L: interrupt throttle %u us\n", (unsigned)nic->itr_us);
+}
+
 static int e1000_probe(device_t *dev)
 {
     if (pci_enable_and_assign_bars(dev) < 0)
@@ -363,6 +534,12 @@ static int e1000_probe(device_t *dev)
     if (!(rah & (1U << 31)))
         return -1;
 
+    /* After the MAC read, before anything is programmed: a NIC whose rings
+     * cannot be allocated must fail the probe, not come up with a device
+     * pointing at memory this driver does not own. */
+    if (e1000_alloc_rings(nic) < 0)
+        return -1;
+
     /* IMC is write-1-to-clear against IMS, so writing all ones masks every
      * cause; the ICR read immediately after is the acknowledge of anything the
      * device had already latched, because ICR is read-to-clear.  SLU is forced
@@ -379,10 +556,12 @@ static int e1000_probe(device_t *dev)
          * E1000_TXD_STAT_DD above. */
         nic->tx[i].status = E1000_TXD_STAT_DD;
     }
-    arch_dma_sync_for_device(nic->rx_buf, sizeof(nic->rx_buf));
-    arch_dma_sync_for_device(nic->tx_buf, sizeof(nic->tx_buf));
-    arch_dma_sync_for_device(nic->rx, sizeof(nic->rx));
-    arch_dma_sync_for_device(nic->tx, sizeof(nic->tx));
+    arch_dma_sync_for_device(nic->rx_buf,
+                             (size_t)E1000_RING_SIZE * E1000_BUF_SIZE);
+    arch_dma_sync_for_device(nic->tx_buf,
+                             (size_t)E1000_RING_SIZE * E1000_BUF_SIZE);
+    arch_dma_sync_for_device(nic->rx, (size_t)E1000_RING_SIZE * sizeof(nic->rx[0]));
+    arch_dma_sync_for_device(nic->tx, (size_t)E1000_RING_SIZE * sizeof(nic->tx[0]));
 
     uint64_t rx_pa = va_to_pa(nic->rx);
     /* The ring base is a 64-bit physical address split into the low and the
@@ -390,10 +569,10 @@ static int e1000_probe(device_t *dev)
      * writing sizeof(nic->rx) (16 bytes per descriptor) would size the ring 16x
      * too large and let the device DMA past the arrays.  RDH is the first
      * descriptor the device may fill and RDT the last one it is allowed to
-     * fill, so an empty 64-entry ring is RDH = 0, RDT = 63. */
+     * fill, so an empty ring is RDH = 0, RDT = size - 1. */
     e1000_write(nic, E1000_RDBAL, (uint32_t)rx_pa);
     e1000_write(nic, E1000_RDBAH, (uint32_t)(rx_pa >> 32));
-    e1000_write(nic, E1000_RDLEN, sizeof(nic->rx));
+    e1000_write(nic, E1000_RDLEN, E1000_RING_SIZE);
     e1000_write(nic, E1000_RDH, 0);
     e1000_write(nic, E1000_RDT, E1000_RING_SIZE - 1U);
 
@@ -403,7 +582,7 @@ static int e1000_probe(device_t *dev)
      * send, so an empty ring is both 0. */
     e1000_write(nic, E1000_TDBAL, (uint32_t)tx_pa);
     e1000_write(nic, E1000_TDBAH, (uint32_t)(tx_pa >> 32));
-    e1000_write(nic, E1000_TDLEN, sizeof(nic->tx));
+    e1000_write(nic, E1000_TDLEN, E1000_RING_SIZE);
     e1000_write(nic, E1000_TDH, 0);
     e1000_write(nic, E1000_TDT, 0);
 
@@ -432,6 +611,9 @@ static int e1000_probe(device_t *dev)
                 E1000_RCTL_SECRC);
 
     dev->drv_priv = nic;
+    /* Throttle before the causes are unmasked below, so the first interrupt
+     * this device can raise is already governed by ITR. */
+    e1000_itr_init(dev, nic);
     /* Prefer message-signalled interrupts: the table entries are programmed
      * and left masked, so nothing can arrive before the handlers below exist.
      * A device that cannot describe its table keeps the shared INTx line, and
@@ -473,11 +655,12 @@ static int e1000_probe(device_t *dev)
     if (nic->irq_registered)
         e1000_write(nic, E1000_IMS, E1000_IMS_USED);
     /* STATUS[1] is the read-only link status: 1 = link up. */
-    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d%s\n",
+    kinfo("[E1000] ready: mac=%02x:%02x:%02x:%02x:%02x:%02x link=%s irq=%d%s ring=%u itr=%uus\n",
           nic->mac[0], nic->mac[1], nic->mac[2], nic->mac[3], nic->mac[4],
           nic->mac[5], (e1000_read(nic, E1000_STATUS) & 2U) ? "up" : "down",
           nic->irq_registered ? nic->irq : -1,
-          nic->msix_vectors > 0 ? " (msix)" : "");
+          nic->msix_vectors > 0 ? " (msix)" : "",
+          (unsigned)E1000_RING_SIZE, (unsigned)nic->itr_us);
     return 0;
 }
 
@@ -500,6 +683,9 @@ static int e1000_remove(device_t *dev)
     }
     e1000_write(nic, E1000_RCTL, 0);
     e1000_write(nic, E1000_TCTL, 0);
+    /* Rings go last: they are what the device was DMAing into, and RCTL/TCTL
+     * above are what stop it. */
+    e1000_free_rings(nic);
     dev->drv_priv = NULL;
     memset(nic, 0, sizeof(*nic));
     return 0;

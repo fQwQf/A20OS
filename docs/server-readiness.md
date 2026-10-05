@@ -1,8 +1,12 @@
 # A20OS 服务器就绪度评估
 
-最后核实：2026-10（`feat/net-lanes`）。下文按服务器部署视角列出 A20OS 的
-当前能力边界、已知的结构性限制，以及按严重度排序的阻塞项；每条都给出文件位置，
-便于自行复核。
+最后核实：2026-10（`feat/net-strengthening`）。§二 的网络小节与 §八 的阻塞项排序表
+已按本轮实际提交逐条重写：入站 TCP / 回环传输 / IPv6 入站 / SACK 与时间戳 /
+CUBIC / SO_SNDBUF·RCVBUF / RTNETLINK 通知 / 驱动 SG 与能力位 / conntrack+NAT /
+核心锁断言接线 / socket 表与 per-socket 锁，均已落到代码并在对应小节给出
+`path:line` 与门禁名；没做的项保持「未做」并写清原因。下文按服务器部署视角列出
+A20OS 的当前能力边界、已知的结构性限制，以及按严重度排序的阻塞项；每条都给出
+文件位置，便于自行复核。
 
 运行类结论以当期提交为准；历史记录见 [archive/](archive/)。
 
@@ -23,9 +27,14 @@ hostfwd 指向 guest telnetd）从"连接被对方重置"变为拿到可用 shel
 网络这一项另有实质进展：收包路径的**内存模型**已经被认定为比全局锁更根本的
 瓶颈并修掉了（见第二节），此前把归因指向读路径是错的——真正的解释是
 `net_stress_test` 根本不经过 TCP 路径（见第二节"从没有测过 TCP"一条）。
-当前剩下的最大单项是 `g_net_lock` 分片，其次才是 `g_lwip_lock` 本身。需要强调
-的是：所有性能数字都来自 QEMU TCG，`lwip` 自旋计数在该环境下噪声极大（同一负载
-四次运行跨越 0 到 920024），因此本文件不再以自旋数量作为任何结论的依据。
+
+**本轮（`feat/net-strengthening`）之后，socket 侧的最大单项已经不是全局锁了**：
+`g_net_lock` 被删（`2f17a5ba8`），socket 表分片为桶锁，桶锁又被 per-socket 锁取代
+（`7c7a4d7c8`，阶段 E），于是"1024 个 socket 在 recv/send/accept/close 上互相串行"
+这条**已不再是未做项**。剩下最大的一项是 `g_lwip_lock` 本身——它至今仍是一把全局锁，
+阶段 C/D/E 三步都只改了 socket 侧与分发侧。需要强调的是：所有性能数字都来自
+QEMU TCG，`lwip` 自旋计数在该环境下噪声极大（同一负载四次运行跨越 0 到 920024），
+因此本文件不再以自旋数量作为任何结论的依据。
 
 在下面的阻塞项收敛之前，把数据库或不受信任的工作负载放上去是不安全的。
 
@@ -93,13 +102,49 @@ AHCI（`FLUSH CACHE EXT`）。
 选择方式有 `a20.tcpmode=lwip` 内核命令行与 `/proc/net/config` 写入口两处：服务器的
 第一个 listener 通常由用户态开机创建，shell 写入口来不及生效。
 
-**遗留缺口**：`tcpmode=lwip` 下的**回环** TCP 传输仍过不了 `tcp_loopback_test`
-（握手完成、`tcp_recv_cb` 收到 18 B，但传输不结束）。不影响上面的入站用例。
+**遗留缺口已修（`edc29d31a`）**：`tcpmode=lwip` 下的回环 TCP 传输此前过不了
+`tcp_loopback_test`（握手完成、`tcp_recv_cb` 收到 18 B，但传输不结束）。两个成因：
+
+1. `net_inet_socket_destroy()` 对已建立的 pcb **无条件** `tcp_abort()`。那是
+   `tcp_abandon(pcb, 1)`，会把 RST 放上线，等于告诉对端"丢掉我发的东西"。服务端做
+   的是最普通的 `write(); close()`，最后一段数据被这一行 routine 地毁掉，对端能不能
+   看见取决于 RST 和数据谁先到接收队列。改成先解绑回调再 `tcp_close()`，`ERR_MEM`
+   时才退回 `tcp_abort()`。
+2. `net_inet_bottom_half_process_socket_locked()` 先处理 `bh_error`/`bh_closed` 再
+   drain `bh_ring`，于是 ring 的 `if (!s->closed)` 守卫把 lwIP **已经交付**的字节
+   一起扔了。TCP 在同一趟 bottom half 里交付数据和紧随其后的 FIN，于是 `read()` 对
+   一个还欠着数据的连接回答 EOF。改成先把两个标志 capture 到局部变量、drain 完再按序
+   施加。
+
+实证（`ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build`，QEMU，
+`a20.tcpmode=lwip`）：修前端口 12345 连跑 3 次 3 PASS、连跑 10 次 **0 PASS**，
+每次 CLI 都报 `recv=0`，换 6 个不同端口仍 0/6；修后同端口连跑 8 次 **8 PASS**，
+CLI 报 `recv=2 data=ok`。`make smoke-network-suite` PASS。
+
+修 (1) 还暴露出一个此前被它掩盖的缺陷：优雅关闭会留 TIME_WAIT pcb，而 `SO_REUSE`
+在本树曾是 `opt.h` 的默认 0、socket 层的 `reuseaddr` 又从未搬上 pcb，于是同端口
+重启一律 `EADDRINUSE`。`lwipopts.h` 打开 `SO_REUSE=1`，`net_inet_tcp_apply_options()`
+把 `reuseaddr` 搬成 `SOF_REUSEADDR`，登记见 `DIVERGENCE.md` §2.6。
+
+**同一条路径上还修好了一个对外撒谎的错误码（`ec47d621e`）**：对端 reset 之后
+`send()` 返回 `ENOTSOCK` 而不是 `EPIPE`。原因是派发按"当前是否持有 pcb"路由，
+而 `lwip_tcp_err_cb()` 在 RST 和每一个致命错误上都会把 `s->tcp` 置 NULL，于是
+`s->tcp == NULL` 恰恰是一条死掉的 TCP 连接的常态，这些 `write` 绕过
+`net_inet_sendto()` 掉进通用的"两个套接字"路径。改成按套接字类型判定并显式豁免
+fast 路径，沿用 `net_inet_send_tcp()` 已有的 Linux ABI 规则：`ever_connected` 则
+`EPIPE`，否则 `ENOTCONN`。`sys_sendto` 与 `write(2)` 两条派发路径都有同一个缺陷。
+这不是上一提交引入的——基线上它失败在 partial-io 上（3 次连跑只有 2 次过），
+优雅关闭改变了 RST 与 send 的先后，把一直存在的窗口变成了稳定命中。
+实证：`tcp_edge_test` 修前 2/3、修后 3/3；跨模式 lwip→fast→lwip 各跑一次，两次实际
+执行均 PASS。
 
 ### `net_stress_test` 从来没有测过 TCP —— 历史性能归因需重读
 
-本地 TCP connect 走 `net_inet_send_tcp()` 的 `local_tcp` 短路：取 `g_net_lock` 直接
+本地 TCP connect 走 `net_inet_send_tcp()` 的 `local_tcp` 短路：直接
 把数据入队到 peer 的 socket 队列，**不分配 pbuf、不进 lwIP 状态机、不触发 recv 回调**。
+（这段短路此前写的是"取 `g_net_lock`"；`g_net_lock` 已随 `2f17a5ba8` 删除，
+阶段 E 之后它取的是 `(s, peer)` 那对 socket 锁，见
+[net/network-lock-contract.md](net/network-lock-contract.md)。事实本身不变。）
 
 实测（4 核，16 MiB）：`net_rx_packets` / `net_tx_packets` / `net_bh_runs` /
 `net_bh_events` **全部恰好为 0**，`net_lock_acquires` 仅 51。
@@ -141,10 +186,10 @@ progress 驱动），并让提示认 `loop_first`。假阳性只多一次锁获�
 一致），不是估算。**不能**从 QEMU 镜像的 `.bss` 反推：`MEMP_MEM_MALLOC=1` 让池成为对堆的
 claim，而 riscv64 QEMU 目标有 1 GiB RAM，对 20 KiB 部件没有说明力。
 
-### 真正的瓶颈不是 lwIP 池
+### 真正的瓶颈不是 lwIP 池 —— 两块静态数组已纳入档位（2026-10）
 
 池上限合计 25696 B 对 `MEM_SIZE` 16384 B（超 57%），但**即使把池全部解决也放不下**。
-真正的约束是两块**与档位无关的静态数组**：
+真正的约束曾是两块**与档位无关的静态数组**：
 
 | | 字节 | 位置 |
 |---|---|---|
@@ -154,35 +199,275 @@ claim，而 riscv64 QEMU 目标有 1 GiB RAM，对 20 KiB 部件没有说明力�
 
 对照 20 KiB：`kernel/net` 静态合计 **42,662 B = 整个部件的 2.08 倍**；8 个
 `net_socket_t` 合计 32,768 B = 1.60 倍；lwIP 堆 16,407 B = 80%。
-而这两块都在 profile 作用域之外的文件里，**只改 `net_profile.h`/`lwipopts.h` 无法让tier 1
-装进 20 KiB**。
+这两块当时都在 profile 作用域之外，所以**只改 `net_profile.h`/`lwipopts.h` 无法让
+tier 1 装进 20 KiB**。
 
-64 KiB 按当前配置也**不够**：42,662 + 16,871 = 59,533 B（90.8%），余 6,003 B —— 装不下两个
-socket。要做到大约 30 KiB：profile 内降 `MEM_SIZE`/池/`MAX_SOCKETS`、关IPv6；profile 外必须让
-`socket_packet.c` 的 ring 与 `lwip_stack.c` 的 `A20_NET_MAX_DEVS`/frame 尺寸跟随 profile。
+**现已修（`wt/embedded`）**：`net_profile.h` 新增 `PACKET_RING_SLOTS` /
+`PACKET_FRAME_SIZE` / `NETIF_MAX_DEVS` / `NETIF_FRAME_SIZE` / `NETIF_MTU` /
+`STATIC_BUDGET`，EMBEDDED 档取 4 × 512 与 1 个 netif，DEFAULT/SERVER 保持 16 × 1536
+与 4 个 netif。总账由断言钉住而不是靠注释：`net_profile.h` 断言宏算术的上界
+（≤ `STATIC_BUDGET`），`socket_packet.c:40` 与 `lwip_stack.c:178` 各断言一次真实
+`sizeof()`。
 
-### tier 1 连 `net_stress_test` 都跑不了
+实测（`make dev-build NET_PROFILE=1`，`nm --size-sort` / 运行期 `/proc/a20/netmem`）：
+
+| | 前 | 后 |
+|---|---|---|
+| `g_pkt_ring` | 24,640 | 2,064 |
+| `g_netif_state` | 12,672 | 1,120 |
+| 合计 | **37,312** | **3,184**（−91.5%） |
+
+DEFAULT 与 SERVER 两档的同名符号字节不变（`0x6040` / `0x3180`），行为未动。为让这个
+数字在运行期可读，`/proc/a20/netmem` 在池表**之后**追加一行
+`static .bss (not from the heap): ...`（放在表外，故不干扰任何 `^POOLNAME <数字>`
+形态的既有断言）。
+
+**仍未解决，因此本节标题的结论只被部分推翻**：20 KiB 依然装不下 tier 1 —— 8 个
+`net_socket_t` 单是 32,768 B（1.60 倍）就已经越界，lwIP 堆 16,407 B 也是 80%，这两项
+都在 profile 之内、且本次未降。64 KiB 按当前配置仍**不够**：42,662 + 16,871 =
+59,533 B（90.8%），余 6,003 B —— 装不下两个 socket。净效果是 tier 1 的静态部分从
+"整个部件的 2.08 倍"变成"约 0.16 倍"，即**剩下的账全在 profile 之内、可以按档位调的量
+上了**；要真做到 30 KiB，还需要 profile 内降 `MEM_SIZE`/池/`MAX_SOCKETS` 与关 IPv6。
+
+### tier 1 连 `net_stress_test` 都跑不了 —— 现在它自己会说（2026-10）
 
 **0/5 通过**（tier 2 是 5/5）。原因确凿：`run_worker` 每个 worker 用 3 个 socket
 （client connect + server listener + accepted child）× 4 worker = 12 个并发，而 tier 1 的
 `NET_MAX_SOCKETS = 8`。单次偶发 PASS 只是 worker 未同时到达峰值。
 按要求报出来而非上调上限 —— 这说明"tier 1 可运行"这个说法需要限定。
 
-### STM32F103 根本不编译网络栈 —— README 的说法在网络侧无依据
+**现已改为显式 SKIP**：`net_stress_test` 在起跑前从 `/proc/net/status` 读档位上限
+（`syscall-sockets: ... max=N`，为此在 `kernel/net/socket.c` 的该行末尾追加了
+`max=`），算不出 `WORKERS * 3 < 上限` 时输出
+
+```
+NET_STRESS_TEST: SKIP (socket table ceiling 8 < 12 concurrent sockets required:
+4 workers x 3 (listener + accepted child + client)); tier too small for this
+workload, upper limits left as configured
+```
+
+并以 0 退出。**上限没有上调，也不会有门禁因为这个 SKIP 变绿**：所有以
+`NET_STRESS_TEST: PASS` 为判据的门禁（`smoke-smp-lock-contention` /
+`smoke-net-lanes` / `smoke-net-lanes-n1`）都匹配不到这一行，档位过小时它们仍然失败。
+上限在运行时读而不是编译进测试，是因为用户态构建不随 `NET_PROFILE` 重建
+（`Makefile:447` 的 `USER_BUILD_ID` 只含 `ARCH/NOMMU/OPT/PROFILE`）；读不到时照常跑
+测试，不会因缺证据而静默跳过。实测：tier 1 输出上面的 SKIP（`max=8`），tier 2 仍是
+`NET_STRESS_TEST: PASS (4 parallel transfers, 4 rounds x 1048576 B)`（`max=1024`）。
+
+### STM32F103 根本不编译网络栈 —— README 已按实情改写（2026-10）
 
 两个独立障碍：
 
 1. 本机无 ARM 工具链（无 `arm-none-eabi-gcc`）。
-2. 更根本：`PROFILE=mcu`（armv7m 自动启用，`Makefile:181`）走 `Makefile:931` 的**另一份
-   源文件清单**，其中**既无 `kernel/net/*.c` 也无 `$(LWIP_SRC)`**。所以 `NET_PROFILE` 对该
-   目标完全没有作用，**tier 1 根本没被编译进去**。
+2. 更根本：`PROFILE=mcu`（armv7m 自动启用，`Makefile:247-248`）走 `Makefile:1166` 的
+   **另一份源文件清单**（`components/trim.toml` 的 `[profile.mcu].sources`），其中**既无
+   `kernel/net` 源文件也无 `$(LWIP_SRC)`**。所以 `NET_PROFILE` 对该目标完全没有作用，
+   **tier 1 根本没被编译进去**。
 
-即README 声称的 STM32F103（20 KiB SRAM）支持，在网络上不只是"内存不够"，而是**从未构建**。
-这条要么修README，要么给mcu profile 真的纳入网络栈 —— 属于产品决定，不是调参。
+即 README 声称的 STM32F103（20 KiB SRAM）支持，在网络上不只是"内存不够"，而是**从未构建**。
 
-附带一条：`lwip_stack.c` 的 `rx_frame`/`tx_frame` 硬编码 1536，不随 `PBUF_POOL_BUFSIZE`变，
-所以 Cortex-M3 会把整尺寸帧收进 512 字节的池，每帧链 3 个元素；`PBUF_POOL_SIZE=24` 只够
-8 个整尺寸帧，而整个部件只有 20 KiB。
+**已处理（本条按"修 README"的方向关闭）**：README「支持的硬件平台」的 MCU 条目现在
+明写"**不含网络**"，说明 `PROFILE=mcu` 的独立源清单里既没有 `kernel/net/*.c` 也没有
+lwIP、`NET_PROFILE` 对该目标无效，并把"给 mcu profile 真的纳入网络栈"记为尚未做的
+**产品决定**而非调参；`make stm32f103-bringup` 的注释也一并标注"无网络栈"。
+（行号随本节引用漂移：`Makefile:931` 现在是 CFLAGS 段，MCU 源清单在 `:1166`。）
+
+### ~~`rx_frame`/`tx_frame` 硬编码 1536~~ —— 已修（2026-10）
+
+原附带项：`lwip_stack.c` 的 `rx_frame`/`tx_frame` 硬编码 1536，不随 `PBUF_POOL_BUFSIZE`
+变，所以 Cortex-M3 会把整尺寸帧收进 512 字节的池，每帧链 3 个元素；`PBUF_POOL_SIZE=24`
+只够 8 个整尺寸帧，而整个部件只有 20 KiB。
+
+**现已修**：帧缓冲区改为 `NET_PROFILE_NETIF_FRAME_SIZE`（EMBEDDED 档 = `PBUF_POOL_BUFSIZE`
+= 512），并且 `NET_PROFILE_NETIF_MTU`（= `PBUF_POOL_BUFSIZE - ETH_HLEN` = 498）跟着走 ——
+只改缓冲区不解决链元素的问题，MTU 还是 1500 时收上来的帧仍要链 3 个元素。DEFAULT 与
+SERVER 档这两个值就是原来的 1536 与 1500，行为不变。同时补上了
+`a20_lwip_if_set_mtu()` 这个运行时漏洞（它此前只校验 RFC 791 下限，`SIOCSIFMTU=1500`
+会让收包截断、发包 `ERR_BUF`），现按档位帧尺寸封顶。
+
+**未验证的边界**：`a20_lwip_if_set_mtu()` 的新封顶路径没有任何门禁——树内除 musl
+头文件外没有 `SIOCSIFMTU` 使用者。DEFAULT/SERVER 的上限 1522 高于历史 1500，
+所以现有行为不变，但这条路径未被任何 smoke 覆盖。EMBEDDED 档 MTU=498 与
+`net_stress_test` 的 SKIP 行为只在 riscv64 QEMU 上实测过（`TCP_LOOPBACK_TEST` /
+`ICMP_LOOPBACK_TEST` PASS）；本机没有 ARM 工具链，且 `PROFILE=mcu` 根本不编译网络栈，
+所以 Cortex-M3 上的行为**无实测证据**。
+
+### `g_net_lock` 分片 —— 已完成（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）
+
+本文件此前把"`g_net_lock` 分片"列为 P0「当前收益最大的未做项」。**它已经做完了**，而且
+分两步：`2f17a5ba8` 删掉 `g_net_lock`、把 socket 表分片成 `g_net_buckets[]`；
+阶段 E 再把 per-socket 状态从桶锁搬到 `net_socket_t` 内嵌的 `spinlock_t lock`
+（`socket_internal.h:405`）。桶锁现在**只**管 registry slot 表与每桶空闲位图。
+
+对服务器的净影响：SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的
+`recv` 要和同桶另外 511 个 socket 互斥——**桶号来自 slot 分配顺序，不来自 lane**，
+所以 lane 分得再细也没用。阶段 E 之后只剩真正共享同一对象的那一对。
+
+**但验证缺口仍在**，且不要把它读成"已完成"：`2f17a5ba8` 的提交说明自陈三项运行期
+验证未做——引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口，
+清单在 `docs/measured/impl-notes-net.md`。合并后**没有跑全量回归，ASAN + SMP 压测
+未做**；阶段 C/D/E 自身只做了各自的编译期与逐字节等价自检。锁规则写在
+[net/network-lock-contract.md](net/network-lock-contract.md)。
+
+### IPv6 入站 TCP：AF_INET6 socket 现在真的能拿 pcb（`c34ddd7f8`）
+
+此前 AF_INET6 流式套接字在**两种 TCP 模式下都无法从外部 accept**，而且对端 FIN 会
+静默丢掉对端已经发来的数据。两件事都已修。
+
+v6 入站不可达有五处各自独立的丢弃点：`net_inet_socket_init()` 只对 AF_INET 调
+`tcp_new_ip_type()`，所以 v6 socket 一辈子 `s->tcp == NULL`；`net_inet_bind_pcb()`
+对 AF_INET6 提前返回 0，留不下 pcb，于是 `listen()` 没有东西可转成 LISTEN pcb；
+`net_listen_sock()` 把 lwIP LISTEN-pcb 路径按 AF_INET 门控；`net_inet_connect_stream()`
+要求 `domain == AF_INET`，于是每个 v6 connect 都得到 `-ECONNREFUSED`——一个误导性的
+errno，因为没有任何东西拒绝过；accept drain 硬编码 `child->domain = AF_INET`，
+于是被接受的 v6 连接把 16 字节的 v6 地址按 v4 布局读回来。
+
+lwIP 的 `tcp_pcb` 本身是双栈的：family 来自交给 `tcp_bind` /
+`tcp_listen_with_backlog` 的那个 `ip_addr_t`，不需要任何 pcb 机制。要做的是 socket 层
+别再把 family 扔掉。
+
+数据丢失是另一个与 family 无关的既有缺陷，是 v6 的工作把它暴露出来的：
+`net_inet_bottom_half_process_socket_locked()` 在对端 FIN 到达时置 `s->closed = 1`，
+而 `s->closed` 是**本地**生命周期标志、`net_socket_is_live()` 是
+`s && !s->closed`——于是一个健康 socket 报告自己死了并从 `/proc/net/tcp` 消失。更糟的是
+FIN 分支跑在同一趟的 staging 循环**之前**，那个循环的 `if (!s->closed)` 守卫于是把
+ring 里还没搬的每个载荷事件一起丢掉。lwIP 先交付数据再交付 FIN，所以对端一次
+`write(); close()` 把两者放进同一趟 bottom half，消息的尾巴被扔了。现在对端 FIN
+只置 `s->peer_closed`（`socket.c` 本来就当它 EOF）加一次 `A20_EVENT_CLOSED`。
+
+隔离方法值得记一笔，因为它是**量出来的不是猜的**：一个按 family 参数化的探针显示
+v4 与 v6 **在同一偏移截断**，在 stash 出来的基线上重跑该探针，v4 也在同一偏移截断
+——所以丢失是既有的、不是本次引入的，而 v6 的 accept 是彻底超时。在对端 close 之前
+插 8 秒 sleep 让两者都过，于是定位为"与对端 read 的竞态"而非发送故障，指向 bottom
+half 的顺序，修复确认了这个判断。
+
+`/proc/net` 下现在有真的 `tcp6` 与 `udp6`（`procfs.c:464-469`），按 v6 布局渲染，
+v4 文件不再混入 v6 行。**残留**：rtnetlink 组播只覆盖 IPv4 地址组，没有 IPv6 地址
+写入路径。
+
+### TCP 选项与拥塞控制从 opt.h 的默认 0 变成档位决定（`89bb8c348` / `0d42ca758`）
+
+SACK（RFC 2018）与 TCP 时间戳（RFC 7323）在上游 `opt.h` 里默认是 0，于是对着真实
+对端只有 Reno 的丢包恢复、没有 PAWS。现在按 `net_profile.h` 的档位决定：DEFAULT 与
+SERVER 打开（各 4 个 SACK 块），EMBEDDED 关掉——在 512 B 的池元素上这两个选项的开销
+直接从载荷预算里扣，而那个档位的目标是有界占用。代价记在同一处：选项与载荷**共用**
+池的头元素，所以 `NET_PROFILE_PBUF_BUFSIZE` 必须从 1536 涨到 1600，账是
+`1460 + 54 + 12 + 36 = 1562`，并由 `lwipopts.h:214` 的 `_Static_assert` 钉住。
+DEVICE 侧的 netif 暂存仍是 1536——它装整帧（1500 + 14），不是带选项的段。
+
+`TCP_CONGESTION` 此前接受 `"cubic"` 并返回成功，**而本树没有 CUBIC**：一个
+`cubic-but-not-really` 的名字会让调用方以为自己拿到了算法。现在未知名返回
+`-ENOPROTOOPT`，`getsockopt` 回真实算法名，`"cubic"` 走 RFC 8312 的核心条款。
+
+**CUBIC 未做的部分**（逐条登记在 `DIVERGENCE.md` §2.5 与
+`lwip/priv/tcp_cubic_priv.h` 的头注释）：没有 §4.2 的 TCP-friendly 公式（只以 Reno
+速率近似），没有 HyStart / TCP-AQ / DCTCP / Prague，没有 ECN，`W_max` 不跨 pcb 持久化。
+
+### `SO_SNDBUF` / `SO_RCVBUF` 不再是被接受然后忽略（`aacce4dcc`）
+
+`SO_SNDBUF` 现在约束该 socket 在 pcb 发送队列里的字节上限，`net_inet_send_tcp()`
+拿它量队列深度；`SO_RCVBUF` 经 pcb 的新字段 `wnd_limit` 约束该连接的接收窗口
+（没有这个字段，上限会活到第一次 `read()` 为止，因为 `tcp_recved()` 每次读都把窗口
+原样还给 `TCP_WND`）。`getsockopt` 回读夹紧后的生效值。
+
+边界四条，都写进 `net_inet_tcp_buf_apply()` 的注释：发送侧**不约束在途飞行字节**
+（在途是拥塞控制的事）；**无自动调优**（没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈）；
+**抬高 `SO_SNDBUF` 只在下一条连接生效**（lwIP 在已有未确认字节时没有把 `snd_buf`
+涨回去的机制，本轮没发明该机制）；两者都是 **TCP 范围**（UDP/RAW 的 `SO_SNDBUF`
+仍返回 `-EOPNOTSUPP`，它们的缓冲区在 socket 层而不是 pcb 上）。
+
+修 `SO_RCVBUF` 时自己引入过一条回归：`socket()` 时发出杂散 ACK。成因是拿
+`TCP_WND_MAX(pcb)` 与 `pcb->rcv_scale` 当夹紧上限——两者在握手前都不对
+（`TCP_WND_MAX()` 此时答 65535 而非 93440，`rcv_scale` 仍是 0），会把每个 socket 从
+创建那一刻永久钉在 64 KiB。症状是 IPv6 回环传输在 lwIP TCP 模式下不完成而 fast
+模式下正常（后者根本没有 pcb）。改为用**编译期常量** `TCP_WND` 与 `TCP_RCV_SCALE`
+夹紧，另加"只有收窄才需要通告窗口"的判定。回归定位与修复见 `f34b451f4`。
+
+### RTNETLINK 现在真的会通知（`8b15e3323`）
+
+`NETLINK_ROUTE` 套接字 bind 到 `RTNLGRP_LINK` / `RTNLGRP_IPV4_IFADDR` 时，分别会
+收到 `RTM_NEWLINK`（链路状态变化）与 `RTM_NEWADDR` / `RTM_DELADDR`（IPv4 地址写入
+或删除）。地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有地址 0.0.0.0"
+不是任何接口处于的状态。一个监听者的队列满不挡其他监听者（计数并 klog 一条）。
+**残留**：只覆盖 IPv4 地址组。
+
+### 驱动：SG 发送与能力位上报已接线，校验和卸载刻意不做（`d12733f48` / `089a2055c`）
+
+`net_dev_ops_t` 增加了可选的 `send_sg()` 与 `caps()`（`driver_class.h:174-175`），
+`lwip_stack.c` 在 `a20_lwip_linkoutput()` 里二选一。**没实现 `send_sg` 的驱动走原
+线性拷贝路径，逐字节不变**——但要注意 SG 分支**不是零拷贝**：命中前提是
+`p->next == NULL`，帧仍然先拷进 `st->tx_frame`，因为 netfilter 的 output hook 是对调用
+方手里那块帧的**原地改写**，而 pbuf payload 是别的持有者也在看的池内存。SG 给驱动
+的是描述符而不是 lwIP 的 pbuf，省掉的是驱动内部再拷一次。
+
+**校验和卸载按诚实原则未启用**：`TX_CSUM_OFFLOAD` / `RX_CSUM_OFFLOAD` 两个能力位
+已定义（`driver_class.h:145-146`）但**永不置位**。vendored 的 lwIP 2.2.2 没有任何
+承载该握手的 flag——`opt.h:2449-2450` 的 `LWIP_CHECKSUM_ON_COPY` 默认 0，
+`pbuf_take()` 自己算自己验；`netif.h:84-107` 的七个 `NETIF_FLAG_*` 里没有一个是给
+校验和握手用的。贸然协商会让 lwIP 去验一个设备根本没算的校验和，属于静默损坏。
+`MRG_RXBUF` 不同：它是纯设备侧的接收属性，lwIP 从来看不见，所以协商了的驱动**应该**
+上报它。
+
+virtio-net 收发环 32 → 256 并协商 `MRG_RXBUF`；e1000 环 64 → 256、多缓冲帧线性重组、
+82574L ITR 节流。**MRG_RXBUF 的协商、num_buffers 读取与重组分支都已落地，但当前投递
+形状下不会触发**：实测三种收包投递形状，只有「头与载荷同处一个描述符」能收到帧
+（`[hdr12B][data1536B][ctx4B]` 与 `[data1548B][ctx4B]` 都是 ping 0/4，`[data1548B]`
+ping 4/4）；单描述符缓冲没有 `NEXT`，设备无法跨缓冲拼 jumbo 帧。取舍与三组实测数据
+写在 `virtio_net.c:31-50` 的 `VIRTIO_NET_RX_DESC_MAX` 注释里。
+`VIRTIO_NET_F_MQ` 只探测不协商（多队列未实现），启动行以 `offered(mq=.. csum=..)`
+打印，不存在"协商了却没用"的半成品。
+
+**验证边界**：82574L ITR 节流与 e1000 多缓冲重组**已被真实流量跑到**——QEMU 的
+e1000 是 82540EM，无 ITR 寄存器，驱动按设计跳过（打印 `itr=0us`），也没有能产生
+跨描述符帧的实机或配置。这两条路径只做到编译 + QEMU 启动验证（ring=256）。
+
+### conntrack + NAT 已落地（`f48a8f5f2` / `0d9d0885f` / `4b4472d17`）
+
+五元组哈希表（EMBEDDED 64 条 / DEFAULT 256 / SERVER 1024，按档位）、NEW/ESTABLISHED
+状态、按状态分开的空闲超时（TCP NEW 30s、ESTABLISHED 120s、UDP 30s）、满表 LRU、
+`/proc` 计数。SNAT/MASQUERADE 在 output hook，DNAT 在 input hook，就地改写帧并按
+RFC 1624 增量修校验和。运行时动词挂在 `/proc/a20/netfilter`（`ctflush` / `cton` /
+`ctoff` / `natadd` / `natdel` / `reset` / `flush`）。
+
+新增门禁 `make smoke-netfilter-nat`：QEMU `hostfwd` 18081 → guest 18082，宿主侧探针
+连上并收到回显。
+
+**三个必须一起说的边界**：
+
+- **每条目挂正向 + 回程两条链**，否则回程按转换后元组查不到条目。这是本实现最容易
+  做错的一处：只挂一条链的失败模式是**静默**的——正向翻译正常、回程查不到、原样发出，
+  对端收到一个不认识的源地址，没有任何计数器会动。
+- **端到端门禁只覆盖 DNAT**。SNAT/MASQUERADE 只有解析器与 `/proc` 规则、conntrack
+  记账和单元级证据，没有端到端门禁——QEMU user-net 拓扑里 SNAT 没有对等场景。
+  `masquerade` 相对 `snat` 的差别仅是取址时机（`a20_lwip_netif_ipv4(-1)` 选当前有
+  地址的 netif），**未在真机上验证过 DHCP 换址后的行为**。
+- **LRU 淘汰与空闲超时两条路径只有 `/proc` 计数暴露**（`ct_evicted` / `ct_timeout`），
+  没有门禁真的把表填满或跑满 30s/120s 超时；`netfilter_test` 测试 8 覆盖的是新建条目
+  与计数增长。
+
+其余限制（无 ALG、无 ICMP 跟踪、不做分片 NAT）写在
+[net/conntrack-nat.md](net/conntrack-nat.md) 的「诚实边界」一节，不重复。
+
+顺带一条方法教训记在这里，因为它会被下一个人重犯：审计 `netfilter.h` 时得出过
+"`/proc` 读者未取锁"这个**误判**——`netfilter.c:641` 早已取锁；据此加的那把锁造成了
+自死锁（`spin_lock_irqsave()` 不可重入），已在 `4fde1c089` 回滚。误判的原因很朴素：
+那次 grep 只覆盖了 `lwip_stack.c` 和 `procfs.c`，没覆盖 `netfilter.c`。怀疑锁问题先量
+reentrancy，别先读 owner 字段。
+
+### 核心锁断言接上了，net 锁一侧仍然没有（`7d217d3fd`）
+
+本文件此前隐含一个前提：`docs/net/network-lock-contract.md` 只是文档，没有运行期
+强制手段。这**不再成立**。`LWIP_ASSERT_CORE_LOCKED()` 从上游的空宏接到 `g_lwip_lock`
+的**持有者 CPU** 上：违规先记站点再 panic，`/proc/net/stats` 打印
+`armed= / owner= / violations= / sites=`。开关 `CONFIG_NET_LOCK_ASSERT` 默认 0
+（排查用，不进常规构建）。同时给 7 个此前完全没有断言的裸入口补上断言，把探针盲区
+变成覆盖区。
+
+**但覆盖只有 `g_lwip_lock` 这一把。** net 锁一侧**没有**对应探针：没有"当前 CPU
+是否持有期望的 socket 锁"的判据，`net_sock_lock2()` 的地址升序与"同时至多两把"只由
+代码评审把关，lane claim 一侧同样没有。补它需要 per-CPU 持锁集合跟踪，本轮未做。
+这是锁契约与实现之间最大的一处落差，记在
+[net/network-lock-contract.md](net/network-lock-contract.md) 的迁移检查清单末尾。
 
 ## 三、隔离与多租户
 
@@ -411,6 +696,14 @@ OOM 评分。
 `/proc/<pid>/io`、`/proc/loadavg`、`/proc/pressure`、`getrusage`、
 `TCP_CONGESTION` 现均为真实值。
 
+`TCP_CONGESTION` 这一条在 `0d42ca758` 之后才真正成立：此前它接受 `"cubic"` 并返回
+成功，而本树**没有** CUBIC，`getsockopt` 也不回真实算法名。现在未知名返回
+`-ENOPROTOOPT`，回读的是真正生效的算法。同一原则下，`SO_SNDBUF` / `SO_RCVBUF`
+也从"接受然后忽略"变成真的生效值（`aacce4dcc`）；而**驱动能力位里那两个校验和
+卸载位刻意永不置位**（`driver_class.h:145-146`），因为 vendored 的 lwIP 2.2.2 没有承载
+该握手的 flag，置位会让 lwIP 去验设备没算的校验和——`/proc/net/stats` 里那两行因此
+**恒为 `off`，且这是设计结果不是未完成项**。
+
 仍然缺失或不可用：
 
 - 无硬件 PMU：`perf_event_open` 只有 software event，无 mmap ring
@@ -509,21 +802,28 @@ OOM 评分。
   声明过 `check-instances` 门禁，端到端组装与 SSH 登录验证未做（见 world
   头注），不声称可用。
 
-仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
-分支在做）、`proc_lock` 超长持有成因、
+仍属本文件记录且**未**在本分支处理的：`proc_lock` 超长持有成因、
 其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
-conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
+ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
+
+其中 **conntrack/NAT 已在 `feat/net-strengthening` 落地**（见 §二 与 §八），
+lwIP 全局锁分片推进到阶段 E（`g_lwip_lock` 本身仍是全局锁）。
 
 ## 八、阻塞项排序
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
 | ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
-| P0 | `g_net_lock` 分片 | **当前收益最大的未做项**。它同样是一把覆盖 1024 个 socket 的全局锁，52 处获取。改成 per-socket 锁 + 引用计数保护的 registry 是纯局部改动，不触碰 lwIP 核心 |
-| P0 | lwIP 全局锁分片 | 持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；分片方案不应再等这个数。spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历，这需要先给 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 做按端口哈希分桶 |
+| ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）仍开放，清单在 `docs/measured/impl-notes-net.md`；合并后全量回归与 ASAN + SMP 压测**未做**；net 锁一侧**没有**运行期探针（见下一行） |
+| P0 | net 锁一侧的运行期探针 | `LWIP_ASSERT_CORE_LOCKED()` 只覆盖 `g_lwip_lock` 一把。没有"当前 CPU 是否持有期望的 socket 锁"的判据，`net_sock_lock2()` 的地址升序与"至多两把"、以及"桶锁不得在 socket 锁之下取得"只由代码评审把关，lane claim 一侧同样没有。补它需要 per-CPU 持锁集合跟踪（`CONFIG_NET_SOCK_ASSERT`），本轮未做 |
+| P0 | lwIP 全局锁分片 | **本轮推进了三步，但仍是最大未做项。** 阶段 C（`5ea06a786`）落「当前 lane」上下文 + memp 的 lane 索引**骨架**（内存未分片）；阶段 D（`f6f327b96`）把协议输入搬出中断上下文、按 lane 分发；阶段 E 收窄 socket 侧锁。**`g_lwip_lock` 本身至今仍是一把全局锁**，所以"各 CPU 各自处理 socket"只成立在"谁处理"这一层，不成立在"谁能同时处理"。持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历（PCB 链表按 lane 分桶已在阶段 B 落地），仍需给 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 定 per-lane 所有权与冷路径的死锁边界 |
+| P0 | 多 lane 的 2% connect flake 仍未定位 | 两轮放大实验（`CONFIG_NET_RACE_DELAY_US` 200 / 2000 µs）共 78 次连接 0 失败，全程 `violations=0 sites=0`、`PCB_SANE` 零命中。**未复现、未定位，未声称已修**。统计边界：72 次放大样本在 2% 下期望 1.6 次失败，观测 0 次的概率约 23%，**不构成"已消失"的证据**。配方见 [net/net-lanes.md](net/net-lanes.md) |
 | ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
 | ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关，x86_64/riscv64/aarch64/ppc64le/loongarch64 五架构 5/5 PASS |
-| P1 | conntrack + NAT | 容器网络与服务暴露的依赖 |
+| ~~P1~~ | ~~conntrack + NAT~~ | **已实现**（`f48a8f5f2` / `0d9d0885f` / `4b4472d17` / `1475cd9dd` / `dd4e5678a`）：五元组哈希表（按档位 64/256/1024）、NEW/ESTABLISHED、按状态分开的空闲超时、满表 LRU、SNAT/MASQUERADE（output）与 DNAT（input），RFC 1624 增量校验和，门禁 `make smoke-netfilter-nat`（hostfwd 18081 → guest 18082，宿主探针收到回显）。**残留**：无 ALG / 无 ICMP 跟踪 / 不做分片 NAT；**端到端门禁只覆盖 DNAT**，SNAT/MASQUERADE 只有解析器、`/proc` 规则与单元级证据，`masquerade` 的 DHCP 换址行为未在真机验证；LRU 与超时两条路径只有 `/proc` 计数（`ct_evicted` / `ct_timeout`），没有门禁真的跑满。详见 [net/conntrack-nat.md](net/conntrack-nat.md) |
+| P1 | IPv6 地址路径 | AF_INET6 的 **入站 TCP 已通**（`c34ddd7f8`），`/proc/net/tcp6` / `udp6` 按 v6 布局渲染。但 **rtnetlink 组播只覆盖 IPv4 地址组**，本树没有 IPv6 地址写入路径，所以没有 IPv6 地址变更事件 |
+| P1 | 接收缓冲自动调优 | `SO_RCVBUF` / `SO_SNDBUF` 已不再是 no-op（`aacce4dcc`），但**没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈、不从实测吞吐调整，依赖 Linux 那种增长的调用方拿不到。且抬高 `SO_SNDBUF` 只在下一条连接生效。窗口缩放已解除协议上限，池与档位仍是硬边界 |
+| P1 | 嵌入式档仍装不进 20 KiB | 两块静态数组已纳入档位并由断言钉住（`g_pkt_ring` 24640→2064，`g_netif_state` 12672→1120，合计 37312→3184 B，−91.5%），但 8 个 `net_socket_t` 单是 32768 B（1.60 倍部件）就越界，lwIP 堆 16407 B 是 80%。剩下的账全在 profile 之内：降 `MEM_SIZE`/池/`MAX_SOCKETS` 与关 IPv6 **未做**——那会改变 EMBEDDED 档的协议能力，属产品决定 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
 | ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
 | P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |

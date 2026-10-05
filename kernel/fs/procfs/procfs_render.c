@@ -425,12 +425,23 @@ static void procfs_net_addr(char *out, size_t outsz, const uint8_t *addr,
     if (net_sockaddr_port(addr, addrlen, &sport) < 0)
         sport = 0;
 
-    if (domain == AF_INET6 && addrlen >= sizeof(net_sockaddr_in6_t)) {
-        const uint8_t *a = ((const net_sockaddr_in6_t *)addr)->sin6_addr;
+    if (domain == AF_INET6) {
+        /* The layout follows the socket's family, NOT whether this particular
+         * address happens to be filled in.  A peerless listener has no peer
+         * address at all, and keying the width off addrlen rendered its remote
+         * column in the tcp (8 hex digit) layout inside a tcp6 file -- so the
+         * one row that proves IPv6 inbound listen works was the one row whose
+         * columns did not line up.  Linux prints the all-zero address and port
+         * 0000 in the full four-word width for a listener with no peer: the
+         * column width of a /proc/net/tcp6 file is uniform by construction. */
+        uint32_t w[4] = { 0, 0, 0, 0 };
+        if (addr && addrlen >= sizeof(net_sockaddr_in6_t)) {
+            const uint8_t *a = ((const net_sockaddr_in6_t *)addr)->sin6_addr;
+            for (int i = 0; i < 4; i++)
+                w[i] = procfs_net_le32(a + 4 * i);
+        }
         snprintf(out, outsz, "%08X%08X%08X%08X:%04X",
-                 procfs_net_le32(a), procfs_net_le32(a + 4),
-                 procfs_net_le32(a + 8), procfs_net_le32(a + 12),
-                 (unsigned)net_ntohs(sport));
+                 w[0], w[1], w[2], w[3], (unsigned)net_ntohs(sport));
         return;
     }
     /* An unbound socket has no address yet; the column reads as the wildcard,
@@ -734,16 +745,25 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         net_format_status(buf, bufsz);
         break;
     case PF_NET_TCP:
-    case PF_NET_UDP: {
+    case PF_NET_UDP:
+    case PF_NET_TCP6:
+    case PF_NET_UDP6: {
         snprintf(buf, bufsz,
                  "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        /* Linux splits the two families into separate files, and so does this:
+         * tcp/udp list AF_INET rows, tcp6/udp6 list AF_INET6 rows.  The row
+         * format is identical -- procfs_net_addr() picks the address layout
+         * from the socket's own family, so a v6 row is four 32-bit words and a
+         * v4 row is one, exactly as on Linux. */
+        int datagram = (type == PF_NET_UDP || type == PF_NET_UDP6);
+        int family = (type == PF_NET_TCP6 || type == PF_NET_UDP6) ? AF_INET6
+                                                                 : AF_INET;
         procfs_net_rows_t rows = {
             .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
-            .datagram = (type == PF_NET_UDP),
+            .datagram = datagram,
         };
-        (void)net_socket_table_walk(rows.datagram ? NET_TABLE_UDP
-                                                  : NET_TABLE_TCP,
-                                    procfs_net_inet_row, &rows);
+        (void)net_socket_table_walk(datagram ? NET_TABLE_UDP : NET_TABLE_TCP,
+                                    family, procfs_net_inet_row, &rows);
         break;
     }
     case PF_NET_UNIX: {
@@ -752,7 +772,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         procfs_net_rows_t rows = {
             .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
         };
-        (void)net_socket_table_walk(NET_TABLE_UNIX, procfs_net_unix_row, &rows);
+        (void)net_socket_table_walk(NET_TABLE_UNIX, AF_UNSPEC,
+                                    procfs_net_unix_row, &rows);
         break;
     }
     case PF_NET_CONFIG:
@@ -1072,6 +1093,44 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
     case PF_PID_ENVIRON:
         buf[0] = '\0';
         return 0;
+    case PF_PID_AUXV: {
+        /* Linux format: one {type,value} pair per line, both as %08lx.  A
+         * reader parses the file by shape, so the width is part of the
+         * interface rather than cosmetics. */
+        task_t *t = proc_find_get(pid);
+        if (!t)
+            break;
+        mm_struct_t *mm = t->mm;
+        if (mm) {
+            uint64_t flags = spin_lock_irqsave(&mm->lock);
+            uint32_t n = mm->auxv_n;
+            if (n > A20_AUXV_MAX_PAIRS)
+                n = A20_AUXV_MAX_PAIRS;
+            size_t len = 0;
+            for (uint32_t i = 0; i < n; i++) {
+                /* Leave room for the last line's NUL: the buffer is the
+                 * contract, and a line written without it would hand back an
+                 * unterminated record. */
+                int w = snprintf(buf + len, (len < bufsz) ? bufsz - len : 0,
+                                 "%08lx %08lx\n",
+                                 (unsigned long)mm->auxv[i][0],
+                                 (unsigned long)mm->auxv[i][1]);
+                if (w < 0)
+                    break;
+                len += (size_t)w;
+                if (len >= bufsz) {      /* truncated: stop cleanly */
+                    len = bufsz - 1;
+                    break;
+                }
+            }
+            spin_unlock_irqrestore(&mm->lock, flags);
+            proc_put(t);
+            buf[len] = '\0';
+            return (int)len;
+        }
+        proc_put(t);
+        break;
+    }
     case PF_PID_IO: {
         task_t *t = proc_find_get(pid);
         unsigned long rchar = 0, wchar = 0, syscr = 0, syscw = 0;

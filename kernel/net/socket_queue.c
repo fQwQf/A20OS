@@ -17,7 +17,7 @@ static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
  * This used to be a NET_MAX_SOCKETS-entry array indexed by registry slot --
  * 512 KiB of table on the server profile, holding one number per socket.  It
  * lives in net_socket_t now (rxq_tally) and is written only under that
- * socket's bucket lock, which is what makes the two halves below impossible to
+ * socket's lock, which is what makes the two halves below impossible to
  * observe from two CPUs at once.  The low 32 bits are the payload bytes still
  * readable, the high 32 the message count.
  *
@@ -87,7 +87,7 @@ size_t net_rxq_bytes_locked(net_socket_t *s)
 
 /*
  * Capture the current task credentials for SCM_CREDENTIALS.  Called under the
- * destination socket's bucket lock while that socket is being serviced;
+ * destination socket's lock while that socket is being serviced;
  * proc_current() is safe there (it is a CPU-local read).
  */
 static void net_capture_sender_cred(net_msg_t *m)
@@ -259,19 +259,18 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
     for (;;) {
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        /* Two buckets, ascending.  Both sockets are pinned by their caller's
+        /* Two sockets, ascending by address.  Both are pinned by their caller's
          * references, so neither can be freed under us here. */
-        net_bucket_pair_t pair = net_bucket_lock2(net_socket_bucket(s),
-                                                  net_socket_bucket(dst));
+        net_sock_pair_t pair = net_sock_lock2(s, dst);
         if (!net_socket_is_live(s) || !net_socket_is_live(dst)) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             return -ENOTCONN;
         }
         /* UDP connect sets peer_addr but NOT s->peer, so s->peer is
            legitimately NULL — skip this check for DGRAM. */
         if (s->connected && s->peer != dst &&
             s->type != SOCK_DGRAM) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             return -ENOTCONN;
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
@@ -281,35 +280,35 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             }
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             (void)proc_wake_q_flush(&wake_q);
             return r;
         }
         task_t *cur = proc_current();
         if (!cur) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             return -EAGAIN;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             return -ERESTARTSYS;
         }
         if (timeout_ticks &&
             (int64_t)(timer_get_ticks() - (start + timeout_ticks)) >= 0) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             return -EAGAIN;
         }
         if (!timeout_ticks && s->type == SOCK_DGRAM) {
             uint64_t udp_deadline = start + MS_TO_TICKS(200);
             if ((int64_t)(timer_get_ticks() - udp_deadline) >= 0) {
-                net_bucket_unlock2(pair);
+                net_sock_unlock2(pair);
                 return -EAGAIN;
             }
         }
         if (!timeout_ticks && s->type == SOCK_STREAM) {
             uint64_t tcp_deadline = start + MS_TO_TICKS(5000);
             if ((int64_t)(timer_get_ticks() - tcp_deadline) >= 0) {
-                net_bucket_unlock2(pair);
+                net_sock_unlock2(pair);
                 return -EAGAIN;
             }
         }
@@ -318,17 +317,17 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             deadline = start + MS_TO_TICKS(200);
         if (!deadline && s->type == SOCK_STREAM)
             deadline = start + MS_TO_TICKS(5000);
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
         if (!token.task)
             return -EAGAIN;
 
         wait_queue_entry_t entry = {0};
-        pair = net_bucket_lock2(net_socket_bucket(s), net_socket_bucket(dst));
+        pair = net_sock_lock2(s, dst);
         if (!net_socket_is_live(s) || !net_socket_is_live(dst) ||
             (s->connected && s->peer != dst && s->type != SOCK_DGRAM)) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ENOTCONN;
@@ -340,21 +339,21 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             }
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             (void)proc_wake_q_flush(&wake_q);
             return r;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ERESTARTSYS;
         }
         bool linked =
             wait_queue_link(&dst->write_waitq, &entry, token, 0);
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         proc_wake_reason_t reason;
         if (linked)
             reason = proc_park_commit(token);

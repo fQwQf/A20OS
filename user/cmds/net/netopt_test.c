@@ -25,7 +25,14 @@
 #include <sys/time.h>
 #include <time.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
+
+/* musl's <netinet/tcp.h> carries TCP_CONGESTION but this tree's copy may not;
+ * the number is the UAPI one and is pinned against the kernel's own. */
+#ifndef TCP_CONGESTION
+#define TCP_CONGESTION 13
+#endif
 
 #define TEST_NAME "NETOPT"
 
@@ -343,6 +350,166 @@ static void test_proc_net_rows(void)
         close(udp);
 }
 
+/* ---------------------------------------------------------------- */
+/* SO_SNDBUF / SO_RCVBUF / TCP_CONGESTION                           */
+/* ---------------------------------------------------------------- */
+
+/*
+ * These three used to be absent from the option surface in the worst possible
+ * way: setsockopt refused them with -EOPNOTSUPP and getsockopt answered both
+ * buffer names with the constant NET_MAX_QUEUE * NET_MAX_PAYLOAD.  A caller
+ * sizing a listen socket was therefore told its socket had a buffer, of a size
+ * that corresponded to no buffer on the machine, and told so for every socket
+ * regardless of what it had asked for.  Every assertion below is written to
+ * fail on that behaviour.
+ *
+ * The clamping assertions are not decoration.  The honest contract is "the
+ * value in force", not "the value requested": a request above what the pcb can
+ * honour buys nothing, and getsockopt reporting the request would leave the
+ * caller believing otherwise.  The specific ceilings are a property of this
+ * port's lwIP configuration (TCP_SND_BUF, TCP_WND) and are only probed as
+ * bounds -- the test does not hard-code 93440 or 5840, only that asking for an
+ * absurd value comes back clamped and below the request.
+ */
+static void test_sock_buffers(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int v, rv;
+    socklen_t sl;
+
+    if (fd < 0) {
+        ok(0, "open a TCP socket for the buffer options");
+        return;
+    }
+
+    sl = sizeof(v);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, &sl) == 0 && v > 0,
+       "getsockopt reports a positive default SO_SNDBUF");
+    int dflt_snd = v;
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv > 0,
+       "getsockopt reports a positive default SO_RCVBUF");
+
+    v = 16384;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "SO_SNDBUF accepts a 16 KiB request");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 16384,
+       "SO_SNDBUF reads back exactly what was set");
+    ok(dflt_snd != 16384 || dflt_snd == 0,
+       "the default send buffer is distinguishable from the one just set");
+
+    v = 32768;
+    ok(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
+       "SO_RCVBUF accepts a 32 KiB request");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv == 32768,
+       "SO_RCVBUF reads back exactly what was set");
+
+    /* An absurd request must come back clamped, and below the request.  The
+     * old build answered with a fixed constant that was neither. */
+    v = 1 << 30;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "an oversized SO_SNDBUF request is accepted, not refused");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv > 0 &&
+       rv < (1 << 30),
+       "an oversized SO_SNDBUF reads back clamped to what the pcb can honour");
+
+    v = 1 << 30;
+    ok(setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
+       "an oversized SO_RCVBUF request is accepted, not refused");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv > 0 &&
+       rv < (1 << 30),
+       "an oversized SO_RCVBUF reads back clamped");
+
+    /* A lower ceiling than the one already in force must stick. */
+    v = 8192;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "lowering SO_SNDBUF below the current ceiling is accepted");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 8192,
+       "a lowered SO_SNDBUF takes effect and reads back");
+
+    /* Zero and negative are refused rather than silently clamped up to some
+     * minimum: a caller that asked for a zero-byte buffer has a bug, and
+     * accepting it would leave it believing it had asked for something usable. */
+    v = 0;
+    errno = 0;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) < 0 &&
+       errno == EINVAL,
+       "SO_SNDBUF 0 is refused with EINVAL");
+    v = -1;
+    errno = 0;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) < 0 &&
+       errno == EINVAL,
+       "a negative SO_SNDBUF is refused with EINVAL");
+
+    /* UDP has no pcb buffer for these to mean anything about, and the old
+     * build refused both names.  It must still refuse them rather than accept
+     * a setting it does not honour. */
+    int udp = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp >= 0) {
+        v = 16384;
+        errno = 0;
+        ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) < 0 &&
+           errno == EOPNOTSUPP,
+           "SO_SNDBUF on a UDP socket is refused with EOPNOTSUPP, not "
+           "silently accepted");
+        close(udp);
+    } else {
+        ok(0, "open a UDP socket");
+    }
+
+    close(fd);
+}
+
+/*
+ * TCP_CONGESTION.  An unknown algorithm name used to be accepted silently,
+ * which is the failure mode worth guarding: the socket then ran whatever the
+ * stack defaults to while the application believed it had selected an
+ * algorithm.  getsockopt reporting the real name is what makes the option
+ * checkable at all.
+ */
+static void test_congestion(void)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    char name[16];
+    socklen_t sl;
+
+    if (fd < 0) {
+        ok(0, "open a TCP socket for TCP_CONGESTION");
+        return;
+    }
+
+    sl = sizeof(name);
+    ok(getsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, name, &sl) == 0,
+       "getsockopt reports the congestion algorithm in force");
+    ok(strlen(name) > 0 && strlen(name) < sizeof(name),
+       "the reported algorithm name is a non-empty NUL-terminated string");
+
+    ok(strcmp(name, "reno") == 0 || strcmp(name, "cubic") == 0,
+       "the reported algorithm is one this stack actually implements "
+       "(reno or cubic), not an invented name");
+
+    if (strcmp(name, "cubic") == 0) {
+        ok(setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, "reno", 4) == 0,
+           "TCP_CONGESTION accepts reno on a build with cubic");
+        sl = sizeof(name);
+        ok(getsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, name, &sl) == 0 &&
+           strcmp(name, "reno") == 0,
+           "the algorithm can be read back after being set");
+    }
+
+    errno = 0;
+    ok(setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, "not-an-algorithm", 16) < 0 &&
+       errno == ENOPROTOOPT,
+       "an unknown congestion algorithm is refused with ENOPROTOOPT");
+
+    close(fd);
+}
+
 int main(void)
 {
     test_ip_options();
@@ -352,6 +519,8 @@ int main(void)
     test_msg_trunc();
     test_msg_oob_still_refused();
     test_proc_net_rows();
+    test_sock_buffers();
+    test_congestion();
 
     if (failures == 0) {
         printf("%s: PASS (%d checks)\n", TEST_NAME, checks);
