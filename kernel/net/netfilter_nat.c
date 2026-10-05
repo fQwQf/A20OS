@@ -40,7 +40,7 @@
  * so a future field that blows the budget is a build error rather than a
  * silently larger .bss on a target that was sized against the old number.
  */
-_Static_assert(sizeof(net_conntrack_entry_t) <= 64,
+_Static_assert(sizeof(net_conntrack_entry_t) <= NET_PROFILE_CONNTRACK_ENTRY_BYTES,
                "conntrack entry exceeds the per-tier budget in net_profile.h");
 _Static_assert(NET_CONNTRACK_MAX < NET_CONNTRACK_NONE,
                "the chain sentinel must be outside the table index range");
@@ -471,6 +471,22 @@ unsigned netfilter_conntrack_expire(unsigned max_scan)
 static net_nat_rule_t g_nat[NETFILTER_MAX_NAT_RULES];
 static unsigned g_nat_count;
 static seqlock_t g_nat_seq = SEQLOCK_INIT;
+
+#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
+/*
+ * The filter tables are unconditional .bss that a target pays for on every
+ * boot whether or not netfilter is ever loaded, so on the tier whose whole
+ * point is a bounded footprint they belong in the budget.  Checked here because
+ * this is the only place both arrays exist.  32 entries x 56 B + 16 rules x
+ * 80 B = 3072 B measured, against a 3328 B ceiling; the two bucket-head arrays
+ * and the counters above are a further 72 B and are not counted, which is the
+ * direction that lets the assert hold rather than the direction that could
+ * hide a regression.
+ */
+_Static_assert(sizeof(g_ct) + sizeof(g_nat) <= NET_PROFILE_FILTER_BUDGET,
+               "the embedded profile's conntrack and NAT tables exceed the "
+               "filter term of its own memory budget");
+#endif
 
 int netfilter_nat_rule_count(void)
 {
