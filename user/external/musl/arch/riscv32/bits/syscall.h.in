@@ -237,6 +237,54 @@
 #define __NR_bpf 280
 #define __NR_execveat 281
 #define __NR_userfaultfd 282
+
+/* Upstream musl omits pselect6/ppoll here because upstream riscv32 Linux only
+ * exposes the _time64 forms, and its internal shim
+ * (src/internal/syscall.h, "#ifndef SYS_pselect6 -> SYS_pselect6_time64")
+ * exists to paper over that.  That shim does not apply to A20OS: this kernel
+ * registers every syscall from include/core/syscall_nr.h, in which pselect6 is
+ * 72 and ppoll is 73 -- the same numbers riscv64 uses, because riscv32 shares
+ * that generic table and has no arch-specific override (only arm32 and x86_64
+ * carry one).  So both the plain and the _time64 spelling would miss, and
+ * user code including the public <sys/syscall.h> failed to compile at all.
+ *
+ * These two match kernel/include/core/syscall_nr.h:54-55 and musl's own riscv64
+ * header; they are deliberately out of ascending order with the block below. */
+#define __NR_pselect6 72
+#define __NR_ppoll 73
+
+/* The same disagreement, same reason, for the rest of the plain Linux calls the
+ * tree's userland reaches directly.  Upstream riscv32 Linux numbers these from
+ * asm-generic (renameat 264, clock_gettime 403, timer_gettime 408, ...) or
+ * drops them entirely, while A20OS registers them from its own generic table.
+ * Every value below is copied verbatim from kernel/include/core/syscall_nr.h --
+ * that file, not upstream Linux, is what the running kernel dispatches on, so
+ * using upstream's numbers here would compile and then call the wrong syscall.
+ *
+ * Checked against the tree, these are the ones user/cmds actually needs:
+ *   renameat       syscall_smoke.c
+ *   timer_gettime  timer_edge.c
+ *   timer_settime  timer_edge.c
+ *   clock_gettime  clock_bench.c
+ *   close_range    vfs_stress.c
+ *   io_getevents   syscall_ext.c
+ *   time           syscall_ext.c
+ *   utimes         syscall_ext.c
+ *
+ * SYS_mkswap and the a20_* syscalls are absent here on purpose: those are
+ * A20OS-specific and reach userland through kernel headers the commands
+ * include directly (e.g. cmds/core/mkswap.c includes kernel/include/mm/swap.h),
+ * not through musl.  a20_channel_test.c still expects SYS_a20_channel_pair /
+ * SYS_a20_registry_client from somewhere it does not yet include. */
+#define __NR_renameat 38
+#define __NR_timer_gettime 108
+#define __NR_timer_settime 110
+#define __NR_clock_gettime 113
+#define __NR_close_range 436
+#define __NR_io_getevents 4
+#define __NR_time 1003
+#define __NR_utimes 1006
+
 #define __NR_membarrier 283
 #define __NR_mlock2 284
 #define __NR_copy_file_range 285
