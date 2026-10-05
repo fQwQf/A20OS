@@ -211,7 +211,33 @@ class TestDeriveMakeVars(unittest.TestCase):
             [net]
             hostfwd = ["tcp::5555-:5555", "udp::5555-:5555"]
         """)
-        self.assertEqual(got["NET_HOSTFWD"], "tcp::5555-:5555,udp::5555-:5555")
+        # QEMU 10 rejects the bare short form outright ("Invalid parameter"),
+        # and the derived string names the guest address the way
+        # smoke-netfilter-nat measures as working.
+        self.assertEqual(
+            got["NET_HOSTFWD"],
+            "hostfwd=tcp::5555-10.0.2.15:5555=on,"
+            "hostfwd=udp::5555-10.0.2.15:5555=on")
+
+    def test_hostfwd_guest_address_is_filled_in_once(self) -> None:
+        """A guest address the manifest spelled out is left alone."""
+        from a20_instance import _qemu_hostfwd
+        self.assertEqual(_qemu_hostfwd("tcp::2222-:22"),
+                         "hostfwd=tcp::2222-10.0.2.15:22=on")
+        self.assertEqual(_qemu_hostfwd("tcp:127.0.0.1:8080-:80"),
+                         "hostfwd=tcp:127.0.0.1:8080-10.0.2.15:80=on")
+        self.assertEqual(_qemu_hostfwd("tcp::2222-192.168.7.9:22"),
+                         "hostfwd=tcp::2222-192.168.7.9:22=on")
+
+    def test_hostfwd_explicit_key_passes_through(self) -> None:
+        from a20_instance import _qemu_hostfwd
+        rule = "hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081"
+        self.assertEqual(_qemu_hostfwd(rule), rule)
+
+    def test_hostfwd_unparseable_is_not_rewritten_into_something_else(self) -> None:
+        from a20_instance import _qemu_hostfwd
+        self.assertEqual(_qemu_hostfwd("nonsense"), "hostfwd=nonsense")
+        self.assertEqual(_qemu_hostfwd("tcp::x-:1"), "hostfwd=tcp::x-:1")
 
     def test_test_section(self) -> None:
         got = derived(self.tmp, """
