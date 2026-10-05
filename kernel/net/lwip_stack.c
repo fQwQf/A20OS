@@ -143,11 +143,18 @@ typedef struct {
     int idx;
     device_t *dev;
     const net_dev_ops_t *ops;
+    /* Capabilities the driver reported at registration time, sampled once.
+     * Sampling here rather than per packet is deliberate: a caps() query on
+     * every linkoutput() would put a driver call in front of every frame, and
+     * the answer can only change across a re-probe, which replaces `ops`
+     * wholesale in a20_lwip_register_netifs() anyway. */
+    uint32_t caps;
     uint8_t rx_frame[1536];
     uint8_t tx_frame[1536];
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
     uint64_t rx_filtered, tx_filtered;
+    uint64_t tx_sg_frames, tx_sg_bytes;
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
@@ -182,12 +189,53 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
     if (p->tot_len > sizeof(st->tx_frame))
         return ERR_BUF;
 
-    pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-    if (netfilter_output(st->tx_frame, p->tot_len) == NETFILTER_DROP) {
-        st->tx_filtered++;
-        return ERR_OK;
+    int r;
+
+    /*
+     * Scatter-gather transmit, taken only when the driver advertised
+     * NET_DEV_CAP_TX_SG *and* the chain is already one contiguous segment.
+     *
+     * Both conditions are load bearing:
+     *
+     *  - The capability is what says the driver implements send_sg().  A
+     *    driver that leaves the callback NULL reports no bit, and lands in the
+     *    staging-copy path below with byte-identical behaviour -- the same
+     *    pbuf_copy_partial() into the same tx_frame, the same netfilter call on
+     *    the same bytes, the same send() entry, the same counters.
+     *
+     *  - Single-segment only.  netfilter_output() takes a flat buffer
+     *    (netfilter.c:512) and parses Ethernet/VLAN/IPv4/L4 out of it, so a
+     *    multi-segment chain has to be linearised before the hook can run.  A
+     *    PBUF_POOL head element is contiguous, so the one-segment case can be
+     *    filtered straight out of p->payload with no copy at all; anything
+     *    longer still takes the staging buffer.  Growing the filter to walk a
+     *    pbuf chain is a netfilter.c change and out of scope here.
+     *
+     * The loopback netif never reaches this function (netif_loop_output()
+     * bypasses linkoutput entirely), so the fast path cannot affect it.
+     */
+    if ((st->caps & NET_DEV_CAP_TX_SG) && st->ops->send_sg && p->next == NULL) {
+        net_iovec_t iov;
+        iov.base = (const uint8_t *)p->payload;
+        iov.len = p->tot_len;
+        if (netfilter_output(iov.base, p->tot_len) == NETFILTER_DROP) {
+            st->tx_filtered++;
+            return ERR_OK;
+        }
+        r = st->ops->send_sg(st->dev, &iov, 1);
+        if (r == (int)p->tot_len) {
+            st->tx_sg_frames++;
+            st->tx_sg_bytes += p->tot_len;
+        }
+    } else {
+        pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
+        if (netfilter_output(st->tx_frame, p->tot_len) == NETFILTER_DROP) {
+            st->tx_filtered++;
+            return ERR_OK;
+        }
+        r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
     }
-    int r = st->ops->send(st->dev, st->tx_frame, p->tot_len);
+
     if (r == (int)p->tot_len) {
         st->tx_packets++;
         st->tx_bytes += p->tot_len;
@@ -305,6 +353,7 @@ static void a20_lwip_register_netifs(void) {
         g_netif_state[i].idx = i;
         g_netif_state[i].dev = dev;
         g_netif_state[i].ops = ops;
+        g_netif_state[i].caps = ops->caps ? ops->caps(dev) : 0;
         struct netif *n = netif_add(&g_netifs[i], &ipaddr, &netmask, &gw,
                                     &g_netif_state[i],
                                     a20_lwip_netif_init_cb,
@@ -667,6 +716,8 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     char maskbuf[24] = "0.0.0.0";
     char gwbuf[24] = "0.0.0.0";
     char dnsbuf[24] = "0.0.0.0";
+    uint32_t devcaps = 0;
+    uint64_t sg_frames = 0, sg_bytes = 0;
     if (netif_default) {
         static char namebuf[8];
         snprintf(namebuf, sizeof(namebuf), "%c%c%d",
@@ -674,6 +725,13 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
                  netif_default->num);
         ifname = namebuf;
         state = netif_is_up(netif_default) ? "up" : "down";
+        if (netif_default->state) {
+            const a20_lwip_netif_state_t *dst =
+                (const a20_lwip_netif_state_t *)netif_default->state;
+            devcaps = dst->caps;
+            sg_frames = dst->tx_sg_frames;
+            sg_bytes = dst->tx_sg_bytes;
+        }
         const ip4_addr_t *ip = netif_ip4_addr(netif_default);
         const ip4_addr_t *mask = netif_ip4_netmask(netif_default);
         const ip4_addr_t *gw = netif_ip4_gw(netif_default);
@@ -764,6 +822,23 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     }
     a20_lwip_append(buf, bufsz, &off, "\n");
     snprintf(cell, sizeof(cell), "\ntcp_ticks: %lu", (unsigned long)tmr_fired);
+    a20_lwip_append(buf, bufsz, &off, cell);
+    /*
+     * What the driver under this netif actually negotiated.  Printed rather than
+     * assumed: a bit set here means a driver implemented the matching path, and
+     * the two offload bits read 0 on every current NIC because lwIP 2.2.2 as
+     * vendored has no way to be told they are in use -- see the note on
+     * NET_DEV_CAP_TX_CSUM_OFFLOAD in drivers/core/driver_class.h.
+     */
+    snprintf(cell, sizeof(cell),
+             "\ndevcaps: %s caps=0x%x [tx_sg:%s][tx_csum_offload:%s]"
+             "[rx_csum_offload:%s][mrg_rxbuf:%s] sg_tx=%llu sg_tx_bytes=%llu",
+             ifname, devcaps,
+             (devcaps & NET_DEV_CAP_TX_SG) ? "on" : "off",
+             (devcaps & NET_DEV_CAP_TX_CSUM_OFFLOAD) ? "on" : "off",
+             (devcaps & NET_DEV_CAP_RX_CSUM_OFFLOAD) ? "on" : "off",
+             (devcaps & NET_DEV_CAP_MRG_RXBUF) ? "on" : "off",
+             (unsigned long long)sg_frames, (unsigned long long)sg_bytes);
     a20_lwip_append(buf, bufsz, &off, cell);
 #if CONFIG_NET_LOCK_ASSERT
     snprintf(cell, sizeof(cell), "\nlwip_lock: owner=%u violations=%u sites=%u\n",
