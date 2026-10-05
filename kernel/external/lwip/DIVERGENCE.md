@@ -209,8 +209,12 @@ lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_
 - 上限只约束 `rcv_wnd`（本地还愿意收多少），不约束 `rx_buf` 的 pbuf 数量，
   也不影响 `tcp_recved()` 之外的行为。
 - 上限不能突破窗口缩放：线上字段是 `rcv_wnd >> rcv_scale`，16 位，所以有效天花板
-  是 `min(TCP_WND_MAX(pcb), 0xFFFF << pcb->rcv_scale)`，超出的部分在
-  `kernel/net/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 里被夹掉。
+  是 `min(TCP_WND, 0xFFFF << TCP_RCV_SCALE)`，超出的部分在
+  `kernel/net/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 里被夹掉。两个界都用
+  **配置常量**而不是 pcb 的当前状态：`TCP_WND_MAX(pcb)` 在握手完成、对端通告窗口
+  缩放之前等于 `TCPWND16(TCP_WND)`，而 `pcb->rcv_scale` 在第一条窗口更新选项发出去
+  之前还是 0。拿 pcb 状态去夹，会让每个刚 `socket()` 出来的 socket 被永久钉死在
+  64 KiB。
 - 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
   "还回去" 的机制。
 
