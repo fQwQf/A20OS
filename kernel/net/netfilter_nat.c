@@ -201,6 +201,41 @@ static void netfilter_ct_reply_tuple(const net_conntrack_entry_t *e,
     }
 }
 
+/*
+ * Does `e` hold this ICMP exchange?
+ *
+ * ICMP echo does not fit the generic 5-tuple comparison above, and pretending it
+ * does is the bug this function exists to avoid.  For TCP and UDP the two
+ * directions swap *both* ports; for an echo they swap *neither* field.  The
+ * identifier is the same number in the request and in the reply -- that is
+ * precisely what makes the two a pair -- and the type is complemented (8 <-> 0).
+ * So the reply of (A -> B, id) is (B -> A, id), not (B -> A, swapped id), and a
+ * full-swap test can never match it.
+ *
+ * That is also why the tuple stores the type NORMALISED to the request value in
+ * src_port and the identifier in dst_port: with both directions carrying the
+ * same pair, the comparison reduces to "addresses swapped, both fields equal",
+ * which is what the two comparisons below say.  Normalising is safe precisely
+ * because the only two types tracked are complements of each other, so no two
+ * distinct exchanges can normalise onto the same tuple.
+ */
+static int netfilter_ct_icmp_is(const net_conntrack_entry_t *e,
+                                uint32_t src, uint32_t dst, uint16_t id,
+                                int *is_reverse)
+{
+    if (e->dst_port != id || e->src_port != NETFILTER_ICMP_ECHO_REQUEST)
+        return 0;
+    if (e->src_addr == src && e->dst_addr == dst) {
+        *is_reverse = 0;
+        return 1;
+    }
+    if (e->src_addr == dst && e->dst_addr == src) {
+        *is_reverse = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* Returns the slot index, or NET_CONNTRACK_NONE.  *is_reverse distinguishes the
  * entry's own direction from the reply half. */
 static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
@@ -215,6 +250,11 @@ static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
             const net_conntrack_entry_t *e = &g_ct[idx];
             if (e->proto != proto)
                 continue;
+            if (proto == NETFILTER_PROTO_ICMP) {
+                if (netfilter_ct_icmp_is(e, src, dst, dport, is_reverse))
+                    return idx;
+                continue;
+            }
             if (e->src_addr == src && e->dst_addr == dst &&
                 e->src_port == sport && e->dst_port == dport) {
                 *is_reverse = 0;
@@ -240,6 +280,16 @@ static unsigned netfilter_ct_find(uint32_t src, uint32_t dst, uint16_t sport,
         uint16_t rsport, rdport;
         if (e->proto != proto)
             continue;
+        if (proto == NETFILTER_PROTO_ICMP) {
+            /* Only the addresses move under translation; the identifier does
+             * not, and the type is normalised on both sides already. */
+            netfilter_ct_reply_tuple(e, &rsrc, &rdst, &rsport, &rdport);
+            if (rsrc == src && rdst == dst && e->dst_port == dport) {
+                *is_reverse = 1;
+                return idx;
+            }
+            continue;
+        }
         netfilter_ct_reply_tuple(e, &rsrc, &rdst, &rsport, &rdport);
         if (rsrc == src && rdst == dst && rsport == sport && rdport == dport) {
             *is_reverse = 1;
@@ -443,7 +493,13 @@ unsigned netfilter_conntrack_expire(unsigned max_scan)
         if (!netfilter_ct_slot_used(i))
             continue;
         uint32_t limit;
-        if (g_ct[i].proto == NETFILTER_PROTO_UDP)
+        /* ICMP echo is connectionless like UDP: a request goes out and a reply
+         * comes back on its own schedule, with no handshake to measure a "new"
+         * state from.  Falling through to g_to_tcp_new would age the entry out
+         * on the TCP-connect timeout, which is a statement about a handshake
+         * this protocol does not have. */
+        if (g_ct[i].proto == NETFILTER_PROTO_UDP ||
+            g_ct[i].proto == NETFILTER_PROTO_ICMP)
             limit = g_to_udp;
         else if (g_ct[i].state == NET_CONNTRACK_ESTABLISHED)
             limit = g_to_tcp_established;
@@ -943,18 +999,46 @@ void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
         return;
 
     /*
-     * Only TCP and UDP are tracked.  Everything else -- ICMP above all -- is
-     * passed through untranslated and untracked, which is stated in the
-     * header's HONEST BOUNDARIES rather than left for a reader to discover.
+     * TCP and UDP are tracked, and so -- minimally -- is ICMP echo.  Every
+     * other protocol and every other ICMP type is passed through untranslated
+     * and untracked, which is stated in the header's HONEST BOUNDARIES rather
+     * than left for a reader to discover.
+     *
+     * Echo is the one ICMP type that needs no inference.  A request and its
+     * reply are paired by an identifier the sender chose and put in both, so
+     * "these two belong to the same exchange" is already on the wire.  Doing
+     * that for destination-unreachable or time-exceeded would mean reading the
+     * packet they quote and matching on that, which is an ALG and is not done
+     * here; see docs/net/conntrack-nat.md.
      */
-    if (pkt->proto != NETFILTER_PROTO_TCP && pkt->proto != NETFILTER_PROTO_UDP)
+    int icmp_echo = (pkt->proto == NETFILTER_PROTO_ICMP && pkt->icmp_off != 0);
+    if (pkt->proto != NETFILTER_PROTO_TCP && pkt->proto != NETFILTER_PROTO_UDP &&
+        !icmp_echo)
         return;
+
+    /*
+     * The tuple's two 16-bit fields.  For TCP and UDP they are the ports and
+     * the parser already put them there.  For ICMP echo they carry the type and
+     * the identifier, with the type NORMALISED to the request value on both
+     * sides -- see netfilter_ct_icmp_is() for why that makes the reply match
+     * without a special case anywhere else in the table.
+     */
+    uint16_t t_sport, t_dport;
+    if (icmp_echo) {
+        t_sport = NETFILTER_ICMP_ECHO_REQUEST;
+        t_dport = pkt->icmp_id;
+    } else {
+        t_sport = pkt->src_port;
+        t_dport = pkt->dst_port;
+    }
 
     /* A non-first fragment carries no ports, so there is no tuple to key on and
      * no header to rewrite against.  Passing it through untranslated is the
      * honest choice: the alternative -- track the flow but translate nothing --
-     * would make the entry look stateful while its translation is incomplete. */
-    if (!pkt->has_ports || pkt->l4_off == 0)
+     * would make the entry look stateful while its translation is incomplete.
+     * ICMP echo is already excluded here, because the parser only sets icmp_off
+     * on an unfragmented one. */
+    if (!icmp_echo && (!pkt->has_ports || pkt->l4_off == 0))
         return;
 
     net_conntrack_stats_t *st =
@@ -963,9 +1047,8 @@ void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
     __atomic_fetch_add(&st->bytes, len, __ATOMIC_RELAXED);
 
     int is_reverse = 0;
-    unsigned idx = netfilter_ct_find(pkt->src_addr, pkt->dst_addr,
-                                     pkt->src_port, pkt->dst_port, pkt->proto,
-                                     &is_reverse);
+    unsigned idx = netfilter_ct_find(pkt->src_addr, pkt->dst_addr, t_sport,
+                                     t_dport, pkt->proto, &is_reverse);
 
     if (idx != NET_CONNTRACK_NONE) {
         net_conntrack_entry_t *e = &g_ct[idx];
@@ -1033,8 +1116,8 @@ void netfilter_conntrack_process(uint8_t *frame, size_t len, int net_idx,
     memset(&e, 0, sizeof(e));
     e.src_addr = pkt->src_addr;
     e.dst_addr = pkt->dst_addr;
-    e.src_port = pkt->src_port;
-    e.dst_port = pkt->dst_port;
+    e.src_port = t_sport;
+    e.dst_port = t_dport;
     e.proto = pkt->proto;
     e.dir = (uint8_t)dir;
     e.state = NET_CONNTRACK_NEW;
@@ -1145,6 +1228,28 @@ void netfilter_nat_format(char *buf, size_t bufsz, size_t off)
     int n = netfilter_conntrack_snapshot(rows, NET_CT_FORMAT_ROWS);
     for (int i = 0; i < n && off < bufsz; i++) {
         const net_conntrack_entry_t *e = &rows[i];
+        if (e->proto == NETFILTER_PROTO_ICMP) {
+            /*
+             * Printed without the ":port" fields because there are none.  The
+             * two 16-bit tuple fields hold the type (normalised to the request
+             * value) and the identifier, and rendering them in the TCP/UDP
+             * shape would read as "this flow goes to port 1234" -- which is
+             * exactly the reading that sends someone looking for a port that
+             * does not exist.
+             */
+            NETFILTER_EMIT("ct %d: %u.%u.%u.%u -> %u.%u.%u.%u proto=1 "
+                           "icmp=echo id=%u state=%s nat=%s packets=%llu\n",
+                           i, (e->src_addr >> 24) & 0xff, (e->src_addr >> 16) & 0xff,
+                           (e->src_addr >> 8) & 0xff, e->src_addr & 0xff,
+                           (e->dst_addr >> 24) & 0xff, (e->dst_addr >> 16) & 0xff,
+                           (e->dst_addr >> 8) & 0xff, e->dst_addr & 0xff,
+                           e->dst_port,
+                           e->state == NET_CONNTRACK_ESTABLISHED ? "established"
+                                                                : "new",
+                           netfilter_nat_name(e->nat),
+                           (unsigned long long)e->packets);
+            continue;
+        }
         NETFILTER_EMIT("ct %d: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u proto=%u "
                        "state=%s nat=%s packets=%llu\n",
                        i, (e->src_addr >> 24) & 0xff, (e->src_addr >> 16) & 0xff,

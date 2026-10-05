@@ -2103,6 +2103,80 @@ int a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
     return 0;
 }
 
+/*
+ * Add one IPv6 address to a netif.  This is the kernel write path behind
+ * RTM_NEWADDR with ifa_family == AF_INET6, and it exists so RTNLGRP_IPV6_IFADDR
+ * has an event source: without it the group could be defined and bound but
+ * never fed, which is exactly the "negotiated and unused" state worth avoiding.
+ *
+ * Add-only, and deliberately so.  lwIP with LWIP_NETIF_API == 0 exposes no
+ * netif_remove_ip6_address(); removal goes through nd6.c's internal pool
+ * teardown, and reaching into it from here would be a real divergence for a
+ * capability nothing in this tree uses yet.  So RTM_DELADDR for AF_INET6 is
+ * refused with -EOPNOTSUPP by the caller rather than half-performed.
+ *
+ * No DAD either.  netif_add_ip6_address() parks the address TENTATIVE and
+ * lwIP's ND6 timer would promote it after the probes; this promotes it straight
+ * to IP6_ADDR_VALID instead, because the address came from an explicit
+ * administrative request rather than from a router advertisement, and the
+ * loopback netif already takes the same shortcut (a20_lwip_loopif_init_cb).
+ * The boundary is recorded in docs/net/network-config-design.md: a listener
+ * must not read this event as "duplicate address detection passed".
+ *
+ * prefixlen is accepted and validated but not applied: lwIP's IPv6 subnet
+ * membership comes from the prefix-length field carried inside the address
+ * itself (ip6_addr_t's zone/subnet encoding), not from a separate netmask, and
+ * there is no per-address prefixlen in struct netif.  It is validated so a
+ * malformed request is still refused, and it is what the notification reports.
+ */
+int a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
+                          uint8_t prefixlen)
+{
+    if (!addr)
+        return -EINVAL;
+    if (prefixlen > 128)
+        return -EINVAL;
+    ip6_addr_t want;
+    /* IP6_ADDR_PART() is lwIP's own byte-part-to-u32 setter and applies the
+     * byte-order conversion, so this cannot drift from how the rest of the stack
+     * reads an ip6_addr_t. */
+    ip6_addr_set_zero(&want);
+    IP6_ADDR_PART(&want, 0, addr[0], addr[1], addr[2], addr[3]);
+    IP6_ADDR_PART(&want, 1, addr[4], addr[5], addr[6], addr[7]);
+    IP6_ADDR_PART(&want, 2, addr[8], addr[9], addr[10], addr[11]);
+    IP6_ADDR_PART(&want, 3, addr[12], addr[13], addr[14], addr[15]);
+    /* An all-zero address is not a state an interface can be put into, and
+     * lwIP treats it as invalid, so it would be stored and then never used.
+     * Refuse it here rather than accept a write that reports success. */
+    int any = 1;
+    for (int i = 0; i < 16; i++)
+        if (addr[i]) { any = 0; break; }
+    if (any)
+        return -EINVAL;
+
+    uint64_t flags = a20_lwip_lock();
+    struct netif *n = a20_lwip_netif_by_index(ifindex);
+    if (!n) {
+        a20_lwip_unlock(flags);
+        return -ENODEV;
+    }
+    s8_t idx = -1;
+    /* netif_add_ip6_address() returns ERR_OK with chosen_idx set for an address
+     * that is already present, so this is idempotent the same way the IPv4 path
+     * is: re-adding an address already configured is a no-op, not a duplicate
+     * slot. */
+    err_t e = netif_add_ip6_address(n, &want, &idx);
+    if (e != ERR_OK || idx < 0) {
+        a20_lwip_unlock(flags);
+        return -ENOSPC;               /* every slot taken, or no slot for this scope */
+    }
+    netif_ip6_addr_set_state(n, idx, IP6_ADDR_VALID);
+    a20_lwip_unlock(flags);
+    /* Outside g_lwip_lock: the notify path takes net locks. */
+    net_netlink_addr6_notify(ifindex, addr, prefixlen);
+    return 0;
+}
+
 int a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu)
 {
     if (mtu < 68)                  /* RFC 791 minimum link MTU */

@@ -778,25 +778,30 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
          * for a usable size. */
         if (val <= 0)
             return -EINVAL;
-        /* Only TCP has a buffer for the option to mean anything about: the
-         * ceilings live on the lwIP pcb (snd_buf's available space and the
-         * wnd_limit field that gates tcp_recved()).  UDP and RAW keep returning
-         * -EOPNOTSUPP below, which is what they already did -- their buffers
-         * live in the socket layer and are a different, unsized mechanism. */
+        /* Both families and both buffer-bearing types are accepted now.  The
+         * ceilings are completely unrelated between them -- a pcb's capacity
+         * against this layer's staging and queue limits -- so the clamp is
+         * delegated to net_socket_buf_in_force(), which is also what getsockopt
+         * reports and what the datagram send paths compare against, and a
+         * report and an enforcement cannot drift apart.  A domain with neither
+         * buffers nor a clamp that would mean anything (AF_UNIX, AF_NETLINK,
+         * ...) still refuses. */
         if (s->domain != AF_INET && s->domain != AF_INET6)
             return -EOPNOTSUPP;
-        if (s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET)
-            return -EOPNOTSUPP;
         uint32_t is_snd = (optname == SO_SNDBUF);
+        uint32_t want = net_socket_buf_ceiling(s, is_snd);
+        if ((uint32_t)val > want)
+            val = (int)want;
         if (is_snd)
             s->snd_buf = (uint32_t)val;
         else
             s->rcv_buf = (uint32_t)val;
         /* Apply now if a pcb exists, so an established connection does not have
-         * to wait for the next connect().  net_inet_tcp_buf_apply() clamps to
-         * TCP_SND_BUF / TCP_WND_MAX(pcb) and writes the clamped value back;
-         * it is also where "raising a send ceiling takes effect next time" is
-         * documented, so do not invent that here. */
+         * to wait for the next connect(), and so a raised ceiling lands on it
+         * immediately rather than on the next connection.
+         * net_inet_tcp_buf_apply() writes the value back onto the pcb in both
+         * directions and is also where the boundary between "queued" and "in
+         * flight" is documented, so do not invent that here. */
         if (s->tcp) {
             uint64_t flags = a20_lwip_lock();
             net_inet_tcp_buf_apply(s, s->tcp);
@@ -846,11 +851,13 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         val = s->protocol;
     else if (level == SOL_SOCKET &&
              (optname == SO_SNDBUF || optname == SO_RCVBUF))
-        /* The value in force, not a constant.  net_inet_tcp_buf_apply() writes
-         * the clamped value back into these fields, so this reports a ceiling
-         * that was cut down to what the pcb can actually honour rather than
-         * echoing back a request the stack silently ignored. */
-        val = (int)(optname == SO_SNDBUF ? s->snd_buf : s->rcv_buf);
+        /* The value in force, not a constant and not the request.
+         * net_socket_buf_in_force() is the same clamp setsockopt applied, so a
+         * caller that asked for more than the socket can honour reads back the
+         * reduced ceiling instead of a number the stack ignored -- and on a
+         * datagram socket, where there is no pcb to write the clamp back onto,
+         * it is the only place the clamp exists at all. */
+        val = (int)net_socket_buf_in_force(s, optname == SO_SNDBUF);
     else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
         val = s->reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)

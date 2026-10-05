@@ -220,6 +220,65 @@ tcp_cubic_w_cubic(const struct tcp_cubic_state *cc, u32_t t_fp)
   return (u32_t)v;
 }
 
+/** W_est(t) = W_max*beta_cubic + alpha_aimd * (t / RTT) (RFC 8312 Eq. 4), in
+ *  1/256 segments.  This is the TCP-friendly function: the window that
+ *  AIMD(alpha_aimd, beta_cubic) would have reached, which is what makes CUBIC
+ *  deliver "at least the same throughput as Standard TCP" on the short-RTT,
+ *  small-BDP paths 4.2 exists for.
+ *
+ *  Unit bookkeeping, because all three terms have to land in the same place:
+ *
+ *      W_max * beta       W_max is 1/256 SEGMENTS, beta is 1/1024
+ *                         =>  (W_max * 717) / 1024
+ *      alpha * t / RTT    alpha is 1/1024 SEGMENTS PER RTT; t_fp and rtt_fp are
+ *                         both 1/256 SECONDS, so the ratio is dimensionless and
+ *                         the answer is in SEGMENTS -- it still has to be scaled
+ *                         up to the 1/256 SEGMENTS the result is returned in
+ *                         =>  (549 * t_fp * 256) / (1024 * rtt_fp)
+ *
+ *  That trailing * 256 is not a fudge and not optional: dropping it is a silent
+ *  factor of 256 on the friendly slope, which still produces a rising curve --
+ *  just one so gentle that W_est never leaves W_max*beta and the region stops
+ *  existing.  Written as a multiplication rather than as a division by 4 so the
+ *  scale cannot be misread: the two 1/256 denominators in t_fp/rtt_fp cancel,
+ *  and what is left is exactly one 1/1024 to undo and one 256 to re-apply.
+ *
+ *  Overflow: 549 * 256 = 140544 and t_fp is a u32, so the numerator peaks
+ *  around 6.0e14 -- comfortably inside u64.
+ *
+ *  RTT: the only estimator this stack has is pcb->sa, Van Jacobson's smoothed
+ *  RTT, which tcp_in.c updates from `tcp_ticks - pcb->rttest` and is therefore
+ *  quantised to whole TCP_SLOW_INTERVAL ticks -- 500 ms with this port's
+ *  configuration.  sa == 0 means either "no sample yet" or "sub-tick RTT", which
+ *  is what loopback and most LAN traffic produce, so it is floored at one tick
+ *  instead of divided by.  That floor makes the slope alpha / 0.5 s = 1.07
+ *  segments/s: conservative (never faster than the real RTT would allow) but not
+ *  the RTT the RFC means.  Registered as a boundary in tcp_cubic_priv.h.
+ */
+static u32_t
+tcp_cubic_w_est(const struct tcp_pcb *pcb, const struct tcp_cubic_state *cc,
+                u32_t t_fp)
+{
+  u64_t base = ((u64_t)cc->W_max * (u64_t)TCP_CUBIC_BETA)
+               / (u64_t)TCP_CUBIC_FRAC_ONE;
+  s32_t sa = pcb->sa;
+  if (sa < 1) {
+    sa = 1;
+  }
+  /* sa counts TCP_SLOW_INTERVAL ticks; t_fp counts 1/256 s.  The conversion
+   * constant is the same one the cubic time axis already uses, so the two
+   * cannot disagree about how long a tick is. */
+  u64_t rtt_fp = (u64_t)(u32_t)sa * (u64_t)TCP_CUBIC_SEC_PER_TICK_FP;
+  u64_t grow = ((u64_t)TCP_CUBIC_TF_ALPHA * (u64_t)t_fp * (u64_t)TCP_CUBIC_FP_ONE)
+               / ((u64_t)TCP_CUBIC_FRAC_ONE * rtt_fp);
+  u64_t v = base + grow;
+
+  if (v > (u64_t)(u32_t)-1) {
+    return (u32_t)-1;
+  }
+  return (u32_t)v;
+}
+
 void
 tcp_cubic_init(struct tcp_pcb *pcb)
 {
@@ -294,15 +353,42 @@ tcp_cubic_on_ack(struct tcp_pcb *pcb, u32_t acked)
     int rounds = 0;
     while (cc->acked >= (u32_t)pcb->cwnd && rounds++ < TCP_CUBIC_MAX_ROUNDS) {
       u32_t t_fp = (u32_t)((u64_t)(now - cc->epoch_start) * TCP_CUBIC_SEC_PER_TICK_FP);
+      u32_t target = tcp_cubic_w_cubic(cc, t_fp);
       tcpwnd_size_t inc;
 
       cc->acked -= (u32_t)pcb->cwnd;
-      inc = tcp_cubic_headroom(pcb, tcp_cubic_w_cubic(cc, t_fp));
+      /*
+       * RFC 8312 4.2, verbatim in shape: "CUBIC checks whether W_cubic(t) is
+       * less than W_est(t).  If so, CUBIC is in the TCP-friendly region and
+       * cwnd SHOULD be set to W_est(t)".  So the target is the LARGER of the
+       * two, not the smaller -- the friendly line is a floor that keeps a
+       * short-RDP flow from being throttled below what Standard TCP would have
+       * achieved, which is the whole point of the region.
+       *
+       * This replaces an approximation: when W_cubic offered no growth the old
+       * code added Reno's rate, 1 MSS per cwnd acknowledged.  That is a rate,
+       * not a target, so it neither tracked t/RTT nor responded to the flow's
+       * own W_max, and on a plateau it kept a flow climbing at 1/cwnd segments
+       * per RTT forever -- which for any window above one segment is slower
+       * than the AIMD(alpha_aimd, beta_cubic) Eq. 4 is derived from, so the
+       * "at least Standard TCP" property was not actually delivered.
+       */
+      {
+        u32_t est = tcp_cubic_w_est(pcb, cc, t_fp);
+        if (est > target) {
+          target = est;
+        }
+      }
+      inc = tcp_cubic_headroom(pcb, target);
       if (inc == 0) {
-        /* Plateau, or still climbing out of one -- which fast convergence
-         * deliberately forces (4.6).  RFC 8312 4.2's TCP-friendly region is
-         * approximated here by Reno's rate, 1 MSS per cwnd acknowledged, which
-         * is the approximation the header says is not Eq. 4. */
+        /* Neither curve is above cwnd.  This is the plateau itself (4.5/4.6
+         * deliberately create one) or a K == 0 epoch whose curve has not left
+         * the window yet, and RFC 8312 says nothing about incrementing when the
+         * target is below cwnd -- (W_cubic(t+RTT) - cwnd)/cwnd is simply
+         * negative there.  Adding 1 MSS keeps the connection making progress
+         * instead of stalling on the plateau until a loss moves the epoch; it is
+         * a floor, not a growth rule, and it is reached only when 4.2's target
+         * AND the cubic curve both sit at or under cwnd. */
         inc = pcb->mss;
       }
       TCP_WND_INC(pcb->cwnd, inc);
