@@ -101,6 +101,31 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有桶锁的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
+### lane claim：`CONFIG_NET_LANES > 1` 下的第三个获取者（`f6f327b96`）
+
+阶段 D 把收包拆成"中断里入队、进程里处理"之后，多 lane 构建多了一个锁序参与者：
+per-lane 的接收队列消费权 `g_lane_rx_claim[]`（`kernel/net/net_lane.c`）。
+
+```text
+lane claim -> g_lwip_lock        （唯一允许的方向）
+g_lwip_lock 不得在持有 lane claim 时被再次获取来排另一条 lane
+```
+
+规则只有两条，都因为"排空是 while 循环"才成立：
+
+- **claim 先于 `g_lwip_lock`**，绝不可颠倒。先拿锁再取 claim 意味着排空期间一直占着
+  全局锁，即使发现有别的 CPU 正在排这条 lane。
+- **判空在锁外**。`net_lane_rx_claim()` 先用 `net_lane_rx_ready()` 看一眼再考虑拿锁，
+  空队列一次锁都不取。
+
+claim 本身**不是 `spinlock_t`**，是一个普通原子标志，`core/lock.h` 只有
+`spin_trylock_irqsave` 可用，而拿 spinlock 意味着整个协议处理都在关中断的状态下跑
+——那正是阶段 D 要搬出中断的原因。因此持有 claim 期间中断是开的；这安全，因为
+**没有任何中断路径会去取 claim**（IRQ 只做入队）。
+
+一条 lane 同时只有一个消费者是**正确性要求**而不是性能取舍：两条 CPU 排同一条 lane
+会打乱一条流式 socket 的段序，也会交错 IP 重组。被抢占的持有者只是延迟问题。
+
 ## 核心锁断言：本文从"文档"变成"可执行"
 
 本文此前只是一份文档——上面每条规则都要靠人读代码去核对。上游
@@ -225,6 +250,34 @@ lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需
 提前停止排空的调用方会拿到返回值 0，此时**必须不清 RX pending 标志**：能排掉剩余包的断已经被消费掉了，标志若被清掉，剩余包会一直等到下一次中断，而那次中断可能不会来。
 
 `kernel_progress_timer_tick()` 只取 timers 段，随后用 `CONFIG_NET_RX_IRQ_BUDGET` 的包数上界取一次收包段。它在 CPU 0 的每次定时器中断上运行；该排空只是"设备中断万一丢失时不让 RX 卡死"的兜底（设备 IRQ 才是主路径），不足以正当化在中断上下文里跑一整轮协议栈处理。
+
+### 多 lane 下"入队"与"处理"是两个入口（`CONFIG_NET_LANES > 1`）
+
+一 lane 时 `a20_lwip_poll_rx_locked()` 排空设备 ring 并就地 `n->input()`，两者在同一个临界区里。
+多 lane 时拆成两步，这一步的拆分理由与 `net-lanes.md`「阶段 D」一致，这里只记锁相关的后果：
+
+| 入口 | 一 lane | 多 lane |
+|------|---------|---------|
+| `a20_lwip_process_netif_irq_locked()` | 排空 + 就地 `n->input()` | **只入队**（`a20_lwip_rx_enqueue_locked()`），返回 |
+| `a20_lwip_poll_rx_locked(budget)` | 排空 + 就地 `n->input()` | 入队**并**就地排空各 lane（`a20_lwip_lane_drain_all()`） |
+| `A20_LWIP_LANE_RX_POLL(budget)` | 展开为 `((void)(budget))` | 排空各 lane（`a20_lwip_lane_rx_poll()`） |
+
+三条后果，写在这里是因为它们都是锁契约而不是实现细节：
+
+1. **设备中断在多 lane 下不再获取 `g_lwip_lock` 之外的东西，也不跑协议输入。**
+   它仍然取 `g_lwip_lock`（入队要与消费者对 `rx_head`/`rx_tail` 取得一致的视图），但临界区
+   里只有一次帧拷贝和几个计数器。剩下的协议处理在进程上下文、持 lane claim、取
+   `g_lwip_lock` 完成。
+2. **`a20_lwip_poll_rx_locked()` 在多 lane 下仍然要就地排空**，不能只入队就走。
+   它的调用方（读者、socket 发送路径、定时器兜底）是**来拿包到手**的，把入队当成投递
+   会让它们空转返回。因此同一个 `if (complete) a20_lwip_clear_rx_pending()` 里要补一条
+   `net_lane_rx_queued_total() != 0 → complete = 0`，理由与上一段那句"必须不清标志"完全相同。
+3. **poll 点必须无条件可达**。`A20_LWIP_LANE_RX_POLL()` 挂在
+   `kernel_progress_run_bottom_halves()` 里，而 `sched()` 每次调度决策、每次引发重新调度的
+   时钟 tick、每次 idle pass 都走到它。放在"读者唤醒之后"就是死锁：阻塞读由 socket
+   bottom-half 唤醒，bottom-half 需要暂存的帧已经被处理掉。
+   头文件里它是宏而不是函数，理由见 `net-lanes.md`：一 lane 下调用一个空的 out-of-line
+   函数仍然是一次 `call`，实测会让 `progress.c` 的 `.text` 多 10 字节。
 
 ### loopif 必须由 timers 段排空
 
@@ -452,6 +505,13 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 
 `MEMP_MEM_MALLOC` 必须显式定义。留空会派生成 0，于是所有池变成 `.bss` 里的静态数组，档位里声明的 `MEM_SIZE` 完全不起作用——这正是此前"嵌入式档声称 16 KiB 堆却同时背着几百 KiB 静态池"的成因。
 
+阶段 D 加了两个只在 `CONFIG_NET_LANES > 1` 下存在的量：`NET_PROFILE_LANE_RXQ_SLOTS`
+（每 lane 接收队列的静态槽位数，默认 4）与 `NET_PROFILE_LANE_RXQ_BUDGET`（它们的 `.bss`
+预算，默认 `NET_PROFILE_STATIC_BUDGET / 2`），后者由 `net_lane.c` 的静态断言兜住。
+槽位是**帧**不是 pbuf：memp 没有内部锁，只有持 `g_lwip_lock` 时才安全，而把这步搬出中断
+正是阶段 D 的目的——要搬的是分配，不是拷贝。
+**槽位是深度决策不是容量优化**：队列没法把压力推回网卡上，满了就只能丢并计数。
+
 ## 已知未完成
 
 以下属于后续工作。每一项的**前置条件与阻塞原因**记录在
@@ -469,15 +529,24 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 - `g_lwip_lock` 尚未分片。热路径（已建立 TCP 的收发）仍然全局串行，且每包仍
   遍历 lwIP 的全局 PCB 链表。分片的前置条件记录在 `net-lanes.md`：
   **memp 与 lane 上下文的前提没定之前不要动 memp**。
+  阶段 D（`f6f327b96`）落地的是分发与出中断上下文：**哪个 CPU 处理哪条 lane 的包**
+  已经定下来了，但"谁能同时处理"没有变，因为 `g_lwip_lock` 仍是一把全局锁。
 - netif 各有一块 `rx_frame[1536]` / `tx_frame[1536]` 暂存，单 netif 同时只能
   处理一个包。
-- `st->ops->poll()` 与完整协议输入仍在中断上下文中执行，`g_lwip_lock` 仍从
-  IRQ handler 获取。**不能简单改成"IRQ 只入队"**，会死锁，推理见
-  `server-readiness.md`。
+- ~~`st->ops->poll()` 与完整协议输入仍在中断上下文中执行，`g_lwip_lock` 仍从
+  IRQ handler 获取。**不能简单改成"IRQ 只入队"**，会死锁~~ —— **部分完成**
+  （`f6f327b96`）。`CONFIG_NET_LANES > 1` 下设备中断只做"解析头部定 lane + 拷贝入队"，
+  完整协议输入移到进程上下文、由 `kernel_progress_run_bottom_halves()` 里那个无条件
+  poll 点驱动（见「多 lane 下"入队"与"处理"是两个入口」）。
+  但 `g_lwip_lock` **仍然**从 IRQ handler 获取——入队本身要在临界区里与消费者对
+  `rx_head`/`rx_tail` 取得一致视图，而且 `st->ops->poll()` 本身按契约仍可被驱动在
+  IRQ 上下文里调用。一 lane 构建的行为完全未变。
+  仍未解决的是**回环**：它不入队（本来就被摘链原地处理），所以同机 socket 之间的往返
+  仍是单 lane 串行。
 - 锁契约的**运行期强制**目前只覆盖 `g_lwip_lock`（`LWIP_ASSERT_CORE_LOCKED()`，
   见「核心锁断言」一节）。桶锁这一侧**没有**对应断言：没有"当前 CPU 是否持有
   期望的桶锁"的探针，`net_bucket_lock2()` 的升序约定同样只有代码评审在把关。
-  这是本文与实现之间最大的一处落差。
+  lane claim 一侧同样没有探针。**这是本文与实现之间最大的一处落差**。
 
 ## 迁移检查清单
 
@@ -499,6 +568,8 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 - [x] 全表扫描（`net_socket_table_walk()` 等）一次一把，取了就放，不取全组。
 - [x] `net_register_socket_locked()` 不在持有别的桶锁时被调用。
 - [x] `g_lwip_lock` 与任何桶锁不同持。
+- [x] 多 lane 下 lane claim 先于 `g_lwip_lock` 获取，判空在锁外，且 claim 期间中断保持开。
+- [x] `CONFIG_NET_LANES=1` 时上面这些入口从预处理结果里消失，不是空函数体。
 - [x] `LWIP_ASSERT_CORE_LOCKED()` 已接线到 `g_lwip_lock` 持有者 CPU
       （默认关闭，开关语义与可见性见「核心锁断言」一节）。
 - [ ] 桶锁一侧**没有**对应断言：`net_bucket_lock2()` 的升序与"至多两把"目前只有
