@@ -102,8 +102,10 @@ _start:
 #endif
 #ifdef CONFIG_NOMMU
     /*
-     * One identity map over all of DRAM, in 2 MiB blocks, privileged (AP=00)
-     * and Normal memory (MAIR AttrIndx 1) -- the same attributes the MMU
+     * An identity map over all of DRAM in 2 MiB blocks, split once: the
+     * kernel image plus the drvmod arena are privileged (AP=00), everything
+     * the frame allocator hands out is EL0 read/write (AP=01).  Both sides
+     * are Normal memory (MAIR AttrIndx 1) -- the same attributes the MMU
      * build's DRAM block uses.
      *
      * AttrIndx 1 is the point of running an identity map with the MMU on
@@ -113,33 +115,50 @@ _start:
      * themselves normal-memory, so they never delivered the attributes the
      * map exists to provide.
      *
-     * The blocks deliberately do NOT grant EL0 access.  AArch64 makes a
-     * stage-1 page that is writable by EL0 execute-never for every higher
-     * Exception level -- a privileged fetch from an EL0-writable page raises
-     * Execute Never -- and that rule holds regardless of SCTLR_EL1.WXN.
-     * An AP=01 map is therefore executable *by EL0* but not by the kernel.
-     * This used to split DRAM at _end, keeping the kernel image privileged
-     * and marking the allocator-backed remainder AP=01; the kernel escaped
-     * the rule because it lives only _end bytes into DRAM, but the first
-     * thing the kernel executes out of the frame pool did not, and the
-     * first drvmod entry point took an instruction abort:
+     * The split exists because AArch64 makes a stage-1 page that is writable
+     * by EL0 execute-never for every higher Exception level -- a privileged
+     * fetch from an EL0-writable page raises Execute Never.  QEMU enforces
+     * this unconditionally for AA64, ignoring SCTLR_EL1.WXN entirely
+     * (target/arm/ptw.c get_S1prot(), gated on regime_has_2_ranges(), which
+     * is a pure mmu_idx switch that never consults TCR), so no AP can serve
+     * both EL0-writable user memory and privileged-executable kernel code.
+     *
+     * A flat AP=00 map therefore fixes drvmods and breaks userland: it makes
+     * EL0 unable to touch *any* memory, and /bin/init dies on its first
+     * instruction.  A flat AP=01 map is the mirror image -- the first drvmod
+     * entry point takes an instruction abort:
      *
      *   ESR_EL1=0x8600000e  EC=0x21 (IABT from current EL)  ISS=0xe (XN)
      *   L2[510]=0x7fc00741 -> stval=0x7fd9e134  (mapping present, no PXN)
      *
-     * With a flat map there is no AP that serves both: kernel code allocated
-     * from the pool and EL0 user memory want opposite permissions, and
-     * there is no second range giving EL0 a different view of the same page.
-     * Privileged wins here because a NOMMU instance with no root filesystem
-     * has no EL0 process to run, and under this build it could not get one:
-     * virtio-blk is itself a drvmod, so leaving the pool EL0-writable is
-     * what makes the disk unreachable in the first place.  The MMU builds
-     * keep the real high-half alias and are unaffected.
+     * So the boundary is pushed just past __drvmod_arena_end.  drvmod images
+     * are the only privileged code the frame pool ever holds (there is no
+     * BPF/JIT, no vDSO under NOMMU, and arch_kwx_module_protect() is compiled
+     * out), and drvmod_arena_alloc() serves them from that reserved prefix
+     * while pfa_init() keeps kmalloc -- user and kernel alike -- out of it.
+     *
+     * The old claim that a NOMMU instance has no EL0 process to run is what
+     * this map got wrong: qemu-aarch64-nommu carries a rootfs, and it arrives
+     * over virtio-blk, which is itself a drvmod.  The MMU builds keep the
+     * real high-half alias and are unaffected.
      */
     orr     x2, x4, #0x3
     str     x2, [x1, #(1 * 8)]
 
     ldr     x6, =0x0000000040000705  /* AP=00, AttrIndx 1, AF, inner-shareable */
+    ldr     x7, =0x0000000040000745  /* AP=01, AttrIndx 1, AF, inner-shareable */
+    /*
+     * Blocks below the arena stay privileged.  __drvmod_arena_end is a VA,
+     * and NOMMU links the kernel at VIRT_BASE == PHYS_BASE, so subtracting
+     * PHYS_MEMORY_BASE turns it back into a DRAM offset.
+     */
+    adrp    x8, __drvmod_arena_end
+    add     x8, x8, :lo12:__drvmod_arena_end
+    ldr     x9, =0x40000000
+    sub     x8, x8, x9
+    ldr     x9, =0x1fffff
+    add     x8, x8, x9
+    lsr     x8, x8, #21              /* privileged block count */
     /*
      * The map has to end where the frame allocator's window ends.  This used
      * to stop at a hardcoded 256 blocks (512 MiB) while PHYS_MEMORY_END is
@@ -155,9 +174,12 @@ _start:
     lsr     x10, x10, #21
     mov     x5, xzr
 .Lnommu_l2_loop:
-    str     x6, [x4, x5, lsl #3]
+    cmp     x5, x8
+    csel    x2, x6, x7, lo
+    str     x2, [x4, x5, lsl #3]
     add     x5, x5, #1
     add     x6, x6, #(1 << 21)
+    add     x7, x7, #(1 << 21)
     cmp     x5, x10
     b.lo    .Lnommu_l2_loop
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)

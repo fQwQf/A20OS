@@ -40,9 +40,25 @@ static inline size_t pt_level_size(int level) {
 }
 
 void mm_init(void) {
-    extern char _bss_end[];
     printf("[MM] mm_init begin\n");
+#ifdef CONFIG_NOMMU
+    /*
+     * Reserve past the drvmod arena, not just past the kernel image.  Under
+     * NOMMU the boot map marks everything below __drvmod_arena_end AP=00
+     * (privileged, execute-never for EL0-writable pages) and the remainder
+     * AP=01, because a single AP cannot serve both EL0 user memory and
+     * privileged-executable drvmod code.  pfa_init() marks
+     * [ram_base, meta_end) FRAME_F_KDATA, so raising kernel_end to the arena
+     * end is what keeps kmalloc -- user images, stacks, every mmap -- out of
+     * the privileged prefix.  drvmod_arena_alloc() serves module loads from
+     * inside it instead.
+     */
+    extern char __drvmod_arena_end[];
+    pfa_init(va_to_pa(__drvmod_arena_end));
+#else
+    extern char _bss_end[];
     pfa_init(va_to_pa(_bss_end));
+#endif
     printf("[MM] pfa_init done\n");
     slab_init();
     printf("[MM] slab_init done\n");
