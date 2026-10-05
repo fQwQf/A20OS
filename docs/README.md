@@ -9,7 +9,7 @@
 ## 文档范围与权威性
 
 - 当前事实文档：本页、[OS-Design.md](OS-Design.md)、[build.md](build.md)、[instances.md](instances.md)、[process-scheduler.md](process-scheduler.md) 和 [testing-gates.md](testing-gates.md) 以当前源码接口为目标；它们不单独证明运行结果。
-- 设计与规划文档：`hybrid-kernel/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
+- 设计与规划文档：`hybrid-kernel/`、`hypervisor/`、`roadmap/` 以及标题或正文明确标为 plan/design 的页面可以描述目标能力；未在源码和测试入口中落地的内容不能当作当前功能。
 - 研究笔记：`research/` 是 A20OS 研究方向的主张与设计材料（能力信封、预算能力、形式化议程）。其中标注"未开始/进行中"的内容是研究计划，不是系统功能。
 - 历史档案：`archive/` 保留已完成里程碑的审计快照，冻结后不再随 HEAD 更新；其中的 PASS、测量数字和"已验证"只适用于各自标明的历史时点。
 - 第三方材料：`kernel/external/`、`user/external/` 中的 vendor 文档解释上游背景，不定义 A20OS 当前接口。
@@ -107,6 +107,16 @@
 - `kernel/abi/linux/syscall_coverage.md`：366 个 syscall 的逐项兼容等级（全部登记、保守 `partial`，含四主线架构编号覆盖说明）
 - `kernel/abi/linux/compat_notes.md`：Linux ABI 兼容性说明（高风险 partial 区域、文件化接口、占位符决策记录）
 - [OS-Design.md](OS-Design.md)：ABI 分层原则（核心实现、ABI 薄包装）与两套 ABI 对比
+
+### 虚拟化（hypervisor）
+
+riscv64 H 扩展下的 stage-2 地基与 vcpu 切片。宿主侧两片（stage-2 与 vcpu 运行循环）已落地；v2（把 A20OS 自己当 guest）的契约已冻结，完整实现也已提交（`1aa0603ea`）——设备模型（`kernel/hyp/hyp_dev.c`）、RAM 窗口与 marker（`kernel/hyp/hyp.c`）、装载器与门禁（`user/cmds/core/hyp_boot.c`、`smoke-hyp-a20os`）、Linux ABI 桥新增的三个调用。各篇内部仍逐条标注哪些是"已落地"（HEAD 有代码）、哪些只是"在工作树里"：
+
+- [hypervisor/00-design.md](hypervisor/00-design.md)：设计记录——单级内存模型如何复用为 stage-2、riscv64 架构半、vcpu 运行循环的已落地形状、评审发现与遗留
+- [hypervisor/01-a20os-guest.md](hypervisor/01-a20os-guest.md)：v2 设计——委托表、VS CSR 直通、SBI 面、二级缺页路由、16550/CLINT 设备模型、引导协议、冒烟判据，以及与 Linux KVM 的设计差异
+- [hypervisor/02-roadmap.md](hypervisor/02-roadmap.md)：v2 之后的切片顺序（HS-mode CSR 规格化、SMP 多 vcpu 与中断虚拟化、零拷贝 VMO guest RAM、virtio 设备模型、x4 根表、真机验证）与各自的前置条件
+
+验证入口：`make smoke-hyp-selftest`、`make smoke-hyp-vcpu`、`make smoke-hyp-a20os`（后者是 v2：把同一个内核当 guest 启起来，PASS 判据是设备模型数到的 guest 自己的 banner）。三条 gate 都必须带 `-cpu rv64,h=true`，否则默认 rv64 CPU 不暴露 H 扩展，测的是 SKIP 而不是功能。
 
 ## 研究与项目背景
 

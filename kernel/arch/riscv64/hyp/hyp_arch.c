@@ -98,6 +98,7 @@ void hyp_arch_s2_fence(uint16_t vmid, uint64_t gpa)
 #define HYP_HSTATUS_SPV  (1ULL << 7)   /* trap-return destination is virtual */
 #define HYP_HSTATUS_SPVP (1ULL << 8)
 #define HYP_HSTATUS_HU   (1ULL << 9)
+#define HYP_HSTATUS_VIE  (1ULL << 10)  /* virtual interrupts enabled (spec) */
 #define HYP_HSTATUS_VTVM (1ULL << 20)  /* guest VS-CSR accesses trap to HS */
 
 /*
@@ -107,20 +108,72 @@ void hyp_arch_s2_fence(uint16_t vmid, uint64_t gpa)
  * instruction on the platform this slice is measured on, and with
  * hedeleg/hideleg zero nothing delegates to VS-mode anyway, so its reset
  * value is inert here.
+ *
+ * VIE is in GUEST_ON from v2: without it the guest's delegated interrupts
+ * have no enable of their own and the only thing letting a timer interrupt
+ * reach VS-mode on this platform is QEMU's hardcoded hsie=1 (below).
  */
-#define HYP_HSTATUS_GUEST_ON  (HYP_HSTATUS_SPV | HYP_HSTATUS_SPVP | HYP_HSTATUS_VTVM)
+#define HYP_HSTATUS_GUEST_ON  (HYP_HSTATUS_SPV | HYP_HSTATUS_SPVP | \
+                               HYP_HSTATUS_VTVM | HYP_HSTATUS_VIE)
 #define HYP_HSTATUS_GUEST_OFF (HYP_HSTATUS_GUEST_ON | HYP_HSTATUS_HU)
+
+/*
+ * v2 delegation.  The guest is a real kernel, so it keeps every trap that is
+ * its own business and the hypervisor keeps only what has to be the
+ * hypervisor's.
+ *
+ * hedeleg -- every delegatable exception except the ecalls.  Per code:
+ *   0 inst addr misaligned, 1 inst access fault, 2 illegal instruction,
+ *   3 breakpoint, 4 load addr misaligned, 5 load access fault,
+ *   6 store addr misaligned, 7 store access fault   -- the guest's own
+ *   8 ecall from U-mode    -- REQUIRED: a guest user process runs at VS-U and
+ *                              its ecall must land on the guest's vs tvec,
+ *                              not here
+ *   12/13/15 inst/load/store page fault             -- the guest page-faults
+ *                              its own user processes; this is the whole point
+ *                              of running a real kernel as the guest
+ *   18 software check (Zicfiss)                     -- the guest's own CFI
+ * NOT delegated, and NOT delegable:
+ *   9/10/11 ecall -- QEMU refuses these bits outright while V=1
+ *     (write_hedeleg masks with vs_delegable_excps, target/riscv/csr.c:1802);
+ *     code 10 is what the guest raises for the ecall path this slice serves,
+ *     so excluding the whole ecall group is the contract's "except
+ *     ecall-from-VS" and reaches further than the single bit 10
+ *   20/21/23 guest inst/load/store page fault -- never delegatable (same
+ *     mask); these are the second-stage faults hyp_vcpu.c routes
+ *   22 virtual instruction fault -- never delegatable, and the code the
+ *     VTVM-trapped CSR accesses arrive as
+ */
+#define HYP_HEDELEG_DEFAULT ((1ULL << 0)  | (1ULL << 1)  | (1ULL << 2)  | \
+                             (1ULL << 3)  | (1ULL << 4)  | (1ULL << 5)  | \
+                             (1ULL << 6)  | (1ULL << 7)  | (1ULL << 8)  | \
+                             (1ULL << 12) | (1ULL << 13) | (1ULL << 15) | \
+                             (1ULL << 18))
+
+/* hideleg is the contract's HYP_HIDELEG_DEFAULT (VS-level SSI/STI/SEI, i.e.
+ * bits 2/6/10): the guest dispatches its own interrupts from vs tvec and WFI
+ * in the guest wakes on whatever is left pending.  The bits QEMU keeps are
+ * exactly vs_delegable_ints = (VS_MODE_INTERRUPTS | LOCAL_INTERRUPTS) &
+ * ~MIP_LCOFIP (target/riscv/csr.c:1779), and VS_MODE_INTERRUPTS is 2/6/10
+ * (cpu_bits.h:790), so every bit of that mask survives the write.  rmw_hideleg64
+ * applies the mask by ANDing, not by refusing the write (csr.c:4658-4668), so
+ * a mask outside it would read back as 0 -- which is what the S-level bits 1/5/9
+ * this macro used to name did, silently delegating nothing. */
 
 /* Terminal exit path: restores the host context from vcpu->arch[] and returns
  * to hyp_arch_vcpu_enter()'s caller.  Declared here rather than in the frozen
  * header because only the arch half -- hyp_arch_guest_trap() -- calls it. */
 void __attribute__((noreturn)) hyp_arch_vcpu_exit(hyp_vcpu_t *vcpu);
 
-/* The guest trap prelude (hyp_vcpu_asm.S) has to switch to the host stack and
- * host tp before the kernel's trap entry stores anything, so it needs the live
- * vcpu without going through C.  NULL whenever no guest is running, which is
- * also the prelude's "not a guest trap" answer.  One running guest at a time
- * is the run loop's rule; this only mirrors it. */
+/* ASM: the guest trap prelude in hyp_vcpu_asm.S.  Installed in stvec while
+ * the guest runs, so hyp_arch_guest_trap() has to name it to put it back. */
+extern void hyp_guest_trap_entry(void);
+
+/* The arch half's statement about which vcpu owns the trap path right now.
+ * NULL whenever no guest is running, which is also the C half's "not a guest
+ * trap" answer.  The assembly prelude does NOT read it: it reaches its bank
+ * through sscratch instead, which is what lets it spend no register.  One
+ * running guest at a time is the run loop's rule; this only mirrors it. */
 hyp_vcpu_t *g_hyp_arch_vcpu;
 
 /* The assembly hardcodes these; a struct change that moves one of them would
@@ -131,6 +184,16 @@ _Static_assert(__builtin_offsetof(hyp_vcpu_t, pc) == HYP_ASM_VCPU_PC_OFF,
                "hyp_vcpu_asm.S indexes pc at HYP_ASM_VCPU_PC_OFF");
 _Static_assert(__builtin_offsetof(hyp_vcpu_t, arch) == HYP_ASM_VCPU_ARCH_OFF,
                "hyp_vcpu_asm.S indexes arch[] at HYP_ASM_VCPU_ARCH_OFF");
+_Static_assert(__builtin_offsetof(hyp_vcpu_t, tramp) == HYP_ASM_VCPU_TRAMP_OFF,
+               "hyp_vcpu_asm.S indexes tramp[] at HYP_ASM_VCPU_TRAMP_OFF");
+/* The bank has to be big enough for its own indexing scheme: guest x[31] is
+ * tramp[HYP_ASM_TRAMP_X0 + 31].  Without this a shorter HYP_VCPU_TRAMP_U64
+ * would still compile and would write the last registers past the field. */
+_Static_assert(sizeof(((hyp_vcpu_t *)0)->tramp) / sizeof(uint64_t) ==
+                   HYP_ASM_TRAMP_SLOTS,
+               "HYP_VCPU_TRAMP_U64 and HYP_ASM_TRAMP_SLOTS disagree");
+_Static_assert(HYP_ASM_TRAMP_X0 + 31 < HYP_ASM_TRAMP_SLOTS,
+               "tramp[] must hold guest x[31]");
 
 static uint64_t hyp_read_hstatus(void)
 {
@@ -162,11 +225,31 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
         !vcpu->vm || vcpu->vm->magic != HYP_VM_MAGIC)
         return -EINVAL;
 
-    /* Nothing is delegated in this slice: every guest exception and every
-     * guest interrupt traps to HS, which is what makes hyp_arch_guest_trap()
-     * the one place a trap is classified. */
-    __asm__ volatile("csrw hedeleg, zero" ::: "memory");
-    __asm__ volatile("csrw hideleg, zero" ::: "memory");
+    /* v2 delegation: the guest keeps its own traps and interrupts, and only
+     * the ecall path (plus the second-stage and virtual-instruction faults,
+     * which cannot be delegated) still lands here.  This is what makes
+     * hyp_arch_guest_trap() a classifier of a much smaller stream than in v1,
+     * not a dispatcher for every guest event. */
+    __asm__ volatile("csrw hedeleg, %0" :: "r"(HYP_HEDELEG_DEFAULT) : "memory");
+    __asm__ volatile("csrw hideleg, %0" :: "r"(HYP_HIDELEG_DEFAULT) : "memory");
+
+    /* hcounteren.TM lets the guest read the time CSR from VS-mode at all: with
+     * it clear, `csrr time` in the guest raises a virtual instruction fault
+     * (the counter gate, target/riscv/csr.c:144-156), which would put every
+     * timer_get_ticks() in the guest kernel on the emulation path.  henvcfg
+     * .STCE is the same gate for vstimecmp (target/riscv/csr.c:601-612); it is
+     * worth writing, but QEMU masks it against menvcfg (read_henvcfg ANDs the
+     * M-mode field in), so on a machine whose firmware never set menvcfg.STCE
+     * it stays zero and the guest's vstimecmp write arrives as a virtual
+     * instruction fault instead.  hyp_vcpu.c emulates that one CSR, so both
+     * shapes work; hcounteren.TM has no such fallback because the fault is not
+     * an emulatable CSR write. */
+    uint64_t hcounteren;
+    __asm__ volatile("csrr %0, 0x606" : "=r"(hcounteren));   /* hcounteren */
+    __asm__ volatile("csrw 0x606, %0" :: "r"(hcounteren | (1ULL << 1)) : "memory");
+    uint64_t henvcfg;
+    __asm__ volatile("csrr %0, 0x60a" : "=r"(henvcfg));       /* henvcfg */
+    __asm__ volatile("csrw 0x60a, %0" :: "r"(henvcfg | (1ULL << 63)) : "memory");
 
     /* hgatp names the stage-2 root.  HS-mode translations never consult it --
      * only a VS-mode access runs the G-stage -- so programming it while the
@@ -196,14 +279,18 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
 
 
 /*
- * Frame -> vcpu.  The frame's x[2] and x[4] hold HOST values by the time C
- * sees them, and that is not a fact about the guest's register state but about
- * the ORDER in hyp_guest_trap_entry: the prelude stores sp and tp into
- * vcpu->regs[] and only then reloads the host's sp and tp from arch[1]/arch[3]
- * before jumping to the ordinary kernel entry.  So the frame this C path reads
- * was built on the host stack with the host tp -- architectural x2 and x4 are
- * the host pair, never the guest's, which is why the two banked values are the
- * only guest registers not recovered from the frame.
+ * Bank -> vcpu.  The frame is NOT the source of truth for the guest's
+ * registers, and none of it can be: the prelude that got us here had already
+ * switched to the host's sp and tp before __trap_from_kernel ran, so the
+ * frame's x[2] and x[4] are host values by the time C sees them, and every
+ * other slot is a register the prelude spent after banking the guest's copy.
+ * The guest's image is in vcpu->tramp[], written by hyp_guest_trap_entry
+ * before it touched anything, and that is where it is read from.
+ *
+ * This is what makes t0 correct in vcpu->regs[5] for the first time: the
+ * earlier prelude reached the vcpu through t0, so nothing else held the
+ * guest's t0 and the frame's copy of the slot was the pointer.  The bank holds
+ * it because the prelude writes x1 and x3..x31 straight to host memory.
  *
  * x[0] is hardwired zero in hardware and the guest image keeps it that way;
  * on the host path that slot carries the address-space token, which is why the
@@ -211,15 +298,37 @@ int hyp_arch_vcpu_setup(hyp_vcpu_t *vcpu)
  */
 static void hyp_frame_to_vcpu(hyp_vcpu_t *vcpu, trap_context_t *ctx)
 {
-    uint64_t guest_sp = vcpu->regs[2];
-    uint64_t guest_tp = vcpu->regs[4];
-
     for (int i = 1; i < 32; i++)
-        vcpu->regs[i] = ctx->x[i];
+        vcpu->regs[i] = vcpu->tramp[HYP_ASM_TRAMP_X0 + i];
     vcpu->regs[0] = 0;
-    vcpu->regs[2] = guest_sp;
-    vcpu->regs[4] = guest_tp;
+    vcpu->regs[2] = vcpu->tramp[HYP_ASM_TRAMP_GUEST_SP];
     vcpu->pc = TRAP_CTX_EPC(ctx);
+}
+
+/* Re-arm the guest trap channel for the sret that is about to leave.
+ *
+ * sscratch has to name the bank again because the C half runs between the
+ * bank and the guest: __trap_from_kernel's own entry does not write sscratch,
+ * but nothing makes that a property we may rely on across future changes to
+ * the host trap path, and the resume is the last point where the vcpu is known
+ * to be the one the guest is about to run on.
+ *
+ * The host sp/tp slots are refreshed from arch[] -- arch[1] and arch[3] in the
+ * layout hyp_vcpu.h pins beside HYP_VCPU_ARCH_U64, which is where
+ * hyp_arch_vcpu_enter() took them and which does not move for the life of the
+ * run.  They are refreshed rather than assumed only so that the value cannot
+ * silently go stale if the enter path ever starts adjusting sp before arming
+ * (it does not: it arms first, then builds the frame below sp).  They are NOT
+ * the current C sp -- that is a few frames deeper than the frame the trap
+ * entry is about to pop, and writing it here would aim the NEXT guest trap's
+ * frame at a stack region that only happens to be free.
+ */
+static void hyp_arm_guest_trap_channel(hyp_vcpu_t *vcpu)
+{
+    vcpu->tramp[HYP_ASM_TRAMP_HOST_SP] = vcpu->arch[1];
+    vcpu->tramp[HYP_ASM_TRAMP_HOST_TP] = vcpu->arch[3];
+    __asm__ volatile("csrw sscratch, %0"
+                     :: "r"((uint64_t)&vcpu->tramp[0]) : "memory");
 }
 
 /*
@@ -263,10 +372,15 @@ int hyp_arch_guest_trap(void *trap_frame)
 
     /* From here until the guest resumes the CPU is in HS-mode on the host's
      * own sp and tp, so a trap taken inside this handler is a host trap, not a
-     * second guest trap.  Clearing the published pointer says so: the prelude
-     * hands such a trap straight to the kernel entry instead of banking the
-     * host's sp/tp as if they were the guest's.  Restored on the resume path,
-     * where the guest is live again. */
+     * second guest trap, and it must not be run through the prelude again:
+     * the live registers are the host's and sscratch is the host's own, so the
+     * prelude would bank host registers over the guest's and resume the guest
+     * from the wreckage.  hyp_guest_trap_entry takes stvec over at its last
+     * step, before it jumps here, so that already holds; the writes below and
+     * on the resume path state the same invariant from the C side, where a
+     * reader looks for it and where a future change to the prelude's tail would
+     * otherwise silently drop it.  The published pointer follows it. */
+    __asm__ volatile("csrw stvec, %0" :: "r"((uint64_t)__trap_from_kernel) : "memory");
     g_hyp_arch_vcpu = NULL;
 
     hyp_frame_to_vcpu(vcpu, ctx);
@@ -284,6 +398,16 @@ int hyp_arch_guest_trap(void *trap_frame)
     if (hyp_vcpu_handle_trap(vcpu, ctx, scause, arch_read_tval(),
                              hyp_read_htval())) {
         hyp_vcpu_to_frame(vcpu, ctx);
+        /* Guest is live again: the vector and the bank channel go back with
+         * it, in that order relative to the sret -- nothing may trap between
+         * the two, and nothing can: the prelude's step 1 (SIE off) plus the
+         * interrupt-off window hyp_arch_vcpu_enter holds across its own sret is
+         * the same reasoning, and here the remaining window is the handful of
+         * instructions in __trap_from_kernel's tail before its sret with
+         * interrupts still disabled from the trap we are returning from. */
+        __asm__ volatile("csrw stvec, %0" :: "r"((uint64_t)hyp_guest_trap_entry)
+                         : "memory");
+        hyp_arm_guest_trap_channel(vcpu);
         g_hyp_arch_vcpu = vcpu;
         return 1;
     }
