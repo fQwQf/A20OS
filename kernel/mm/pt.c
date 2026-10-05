@@ -69,6 +69,76 @@ int mm_pt_set_anon_prov_max(uint32_t pages)
 #endif
 }
 
+/* Faults actually DISPATCHED from the segment rather than fallen back to the
+ * VMA.  Without this the dispatch change is unverifiable from the outside: seg_ok
+ * only says the segment and the VMA agreed, not that the segment was obeyed.
+ * A non-zero disagree with a zero here would mean the fallback was taken every
+ * time and the change did nothing.
+ *
+ * Deliberately outside the arch-ops guard below: these are statistics, not
+ * capability, so they exist on every build.  arm32 supplies its own
+ * short-descriptor backend and has no dispatch path at all, but fault.c counts
+ * unconditionally, and leaving the counters behind the guard made those sites
+ * reference nothing -- which is a link error on arm32 rather than a zero.
+ * The auditor that prints them (abi/linux/sys_proc.c) is itself guarded, so
+ * arm32 simply never reports them. */
+uint64_t mm_seg_dispatch_seg;
+uint64_t mm_seg_dispatch_fallback;
+
+/* Release the record itself.  Reached only from mm_seg_put(), after the
+ * `release` callback has dropped the backing vnode/vmo. */
+static void seg_free(mm_seg_t *s)
+{
+    if (!s || s->magic != MM_SEG_MAGIC)
+        return;
+    s->magic = 0;
+
+    kfree(s);
+}
+
+mm_seg_t *mm_seg_get(mm_seg_t *s)
+{
+    if (s)
+        refcount_inc(&s->refcount);
+    return s;
+}
+
+void mm_seg_put(mm_seg_t *s)
+{
+    if (!s)
+        return;
+    /* A put on a record whose magic is gone is a use-after-free: the slab
+     * object was recycled, so `refcount` is somebody else's number and the
+     * branch below is deciding whether to call a stale `release` pointer.  That is exactly the
+     * shape of a crash the real-software gate took while anonymous mappings
+     * carried segments -- a wild jump to 0x2f0a7d203b303220, which is ASCII
+     * file text, not code, because `release` had been read off a page-cache
+     * page.  Dying here names the fault instead of leaving it to a frame-pointer
+     * walk through the middle of it. */
+    if (s->magic != MM_SEG_MAGIC)
+        panic("mm_seg_put: use-after-free, mapping record %p magic=0x%x",
+              s, s->magic);
+    if (refcount_dec_and_test(&s->refcount)) {
+        /* The record owns one reference on whatever backs it (a vnode, a VMO),
+         * taken by whoever created the mapping.  This file has no business
+         * knowing about those types, so the release is a callback -- and it is
+         * installed by mm_seg_new() in mm/vma.c rather than by the creator,
+         * because a record that reaches zero without one would leak the
+         * backing object.
+         *
+         * It runs here only when nothing else owes it.  A record whose list
+         * reference has already been dropped is on the deferred queue, and
+         * that queue -- which holds a reference of its own, so this put
+         * cannot be the one that frees it -- is what runs the release, in a
+         * context that is allowed to block. */
+        if (!s->released && s->release) {
+            s->released = 1;
+            s->release(s);
+        }
+        seg_free(s);
+    }
+}
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 /* ------------------------------------------------------------------ *
@@ -414,60 +484,6 @@ static inline uint8_t *safe_bit(pt_meta_t *m, int idx)
  * annotates a range is further down, next to the cursor it has to share
  * locking rules with.
  */
-
-/* Release the record itself.  Reached only from mm_seg_put(), after the
- * `release` callback has dropped the backing vnode/vmo. */
-static void seg_free(mm_seg_t *s)
-{
-    if (!s || s->magic != MM_SEG_MAGIC)
-        return;
-    s->magic = 0;
-
-    kfree(s);
-}
-
-mm_seg_t *mm_seg_get(mm_seg_t *s)
-{
-    if (s)
-        refcount_inc(&s->refcount);
-    return s;
-}
-
-void mm_seg_put(mm_seg_t *s)
-{
-    if (!s)
-        return;
-    /* A put on a record whose magic is gone is a use-after-free: the slab
-     * object was recycled, so `refcount` is somebody else's number and the
-     * branch below is deciding whether to call a stale `release` pointer.  That is exactly the
-     * shape of a crash the real-software gate took while anonymous mappings
-     * carried segments -- a wild jump to 0x2f0a7d203b303220, which is ASCII
-     * file text, not code, because `release` had been read off a page-cache
-     * page.  Dying here names the fault instead of leaving it to a frame-pointer
-     * walk through the middle of it. */
-    if (s->magic != MM_SEG_MAGIC)
-        panic("mm_seg_put: use-after-free, mapping record %p magic=0x%x",
-              s, s->magic);
-    if (refcount_dec_and_test(&s->refcount)) {
-        /* The record owns one reference on whatever backs it (a vnode, a VMO),
-         * taken by whoever created the mapping.  This file has no business
-         * knowing about those types, so the release is a callback -- and it is
-         * installed by mm_seg_new() in mm/vma.c rather than by the creator,
-         * because a record that reaches zero without one would leak the
-         * backing object.
-         *
-         * It runs here only when nothing else owes it.  A record whose list
-         * reference has already been dropped is on the deferred queue, and
-         * that queue -- which holds a reference of its own, so this put
-         * cannot be the one that frees it -- is what runs the release, in a
-         * context that is allowed to block. */
-        if (!s->released && s->release) {
-            s->released = 1;
-            s->release(s);
-        }
-        seg_free(s);
-    }
-}
 
 /* Attach the segment table to a page-table page, allocating it on first use.
  * Caller holds that page's node lock (cursor_leaf_slot()'s lock, or the
@@ -1366,13 +1382,9 @@ uint64_t mm_seg_shadow_agree;
 uint64_t mm_seg_shadow_disagree;
 uint64_t mm_seg_shadow_miss;
 
-/* Faults actually DISPATCHED from the segment rather than fallen back to the
- * VMA.  Without this the dispatch change is unverifiable from the outside: seg_ok
- * only says the segment and the VMA agreed, not that the segment was obeyed.
- * A non-zero disagree with a zero here would mean the fallback was taken every
- * time and the change did nothing. */
-uint64_t mm_seg_dispatch_seg;
-uint64_t mm_seg_dispatch_fallback;
+/* mm_seg_dispatch_seg / mm_seg_dispatch_fallback are defined above the
+ * page-table guard with their declarations in pt.h: they are counters, and
+ * fault.c counts them on every build. */
 
 int mm_pt_shadow_seg(mm_struct_t *mm, vaddr_t addr, uint8_t kind,
                      uint64_t off, int shared, mm_seg_t **found)

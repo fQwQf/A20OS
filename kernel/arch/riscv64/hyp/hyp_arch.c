@@ -87,6 +87,56 @@ void hyp_arch_s2_fence(uint16_t vmid, uint64_t gpa)
                      :: "r"(page), "r"((uint64_t)vmid) : "memory");
 }
 
+/* ---- the host CSR and fence hooks (hyp_arch.h) ----
+ *
+ * The CSR NUMBERS are the whole point of this half.  They are spelled as
+ * numbers because the tree-wide -march (rv64imafdc_zicsr_zifencei) carries
+ * neither the `h` extension nor Sstc, so neither mnemonic assembles -- the
+ * same reason hyp_arch_s2_fence() above goes through .insn.  The generic half
+ * keeps those numbers as DECODE data (which CSR number a guest instruction
+ * names, kernel/hyp/hyp_vcpu.c: HYP_CSR_SATP/HYP_CSR_VSTIMECMP) and comes here
+ * for the act of reading or writing one.
+ */
+
+/* vsatp, CSR 0x280: the GUEST's stage-1 root as HS-mode sees it.  Not satp
+ * (0x180) -- that is the host's own table, and the trap-return into the guest
+ * parks the host's satp and puts vsatp in its place. */
+uint64_t hyp_arch_vsatp_get(void)
+{
+    uint64_t v;
+    __asm__ volatile("csrr %0, 0x280" : "=r"(v));
+    return v;
+}
+
+void hyp_arch_vsatp_set(uint64_t satp)
+{
+    __asm__ volatile("csrw 0x280, %0" :: "r"(satp) : "memory");
+}
+
+/* vstimecmp, CSR 0x24d: the Sstc comparator, whose expiry QEMU turns into
+ * mip.VSTIP for this hart.  0x24d and not 0x14d because this is the VIRTUAL
+ * register; kernel/arch/riscv64/platform/timer.c uses 0x14d for the host's own
+ * stimecmp. */
+uint64_t hyp_arch_vstimecmp_get(void)
+{
+    uint64_t v;
+    __asm__ volatile("csrr %0, 0x24d" : "=r"(v));
+    return v;
+}
+
+void hyp_arch_vstimecmp_set(uint64_t deadline)
+{
+    __asm__ volatile("csrw 0x24d, %0" :: "r"(deadline) : "memory");
+}
+
+void hyp_arch_host_tlb_fence(void)
+{
+    /* SFENCE.VMA with every operand zero: this hart, every address.  A superset
+     * of whatever the guest asked its own SFENCE.VMA for, which is what the
+     * caller's comment already claimed and what is harmless here. */
+    __asm__ volatile("sfence.vma" ::: "memory");
+}
+
 /* ---- vcpu half: guest entry state and the trap dispatcher's query ---- */
 
 /*

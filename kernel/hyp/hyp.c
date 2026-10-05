@@ -55,6 +55,26 @@
  * fence per VM creation instead.  Width: hgatp.VMID is implementation
  * defined (QEMU: 14 bits); the counter wraps long after any real run, and
  * the wrap is a documented limit, not a silent alias. */
+/*
+ * Everything below this line -- the stage-2 tree and the walk over it -- is
+ * built out of the HOST page-table machinery: the mm_pt_node/lock/note calls,
+ * the mm_pt_frame_lend/return pair, mm_s2_audit() and frame_is_lent_to_guest()
+ * are declared under pt.h's own guard
+ * (ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU), so they are not merely unbuilt in a
+ * NOMMU or non-pagetable configuration, they are UNDECLARED.  The guard used
+ * here is deliberately that same expression, spelled the same way, so the two
+ * halves cannot disagree about when the machinery exists.
+ *
+ * What is left in the #else is not a second implementation: it is every public
+ * entry point answering "impossible here".  A build with no page tables has no
+ * stage-2 tree to build, so there is nothing for the vcpu run loop or the
+ * device model to be handed, and the honest answer is the one the contract
+ * already allows -- hyp_vm_create() returns NULL, which is its documented
+ * failure return, and a caller that gets NULL cannot go on to map or run
+ * anything.
+ */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
+
 static uint16_t hyp_next_vmid;
 
 hyp_vm_t *hyp_vm_create(uint64_t mem_size)
@@ -275,6 +295,63 @@ int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
     return mm_s2_audit(vm->s2_root, ARCH_PT_ROOT_LEVEL, out);
 }
 
+#else /* no host page tables in this configuration: every entry point is a no */
+
+/* The contract's failure returns, unchanged: NULL from create is what a caller
+ * must already handle, and a caller that got NULL never reaches the rest. */
+hyp_vm_t *hyp_vm_create(uint64_t mem_size)
+{
+    (void)mem_size;
+    return NULL;
+}
+
+void hyp_vm_put(hyp_vm_t *vm)
+{
+    if (!vm || vm->magic != HYP_VM_MAGIC)
+        return;
+    if (--vm->refcount > 0)
+        return;
+    /* No s2_root to walk: nothing in this configuration can have set one.  The
+     * reference accounting is kept identical to the real half so a caller
+     * cannot tell the two apart by how it cleans up. */
+    vm->magic = 0;
+    kfree(vm);
+}
+
+/* No tree, so no mapping can be created.  -ENOSYS is the honest answer and is
+ * distinct from -EEXIST, which a caller reading "already mapped" would take as
+ * a stage-2 entry existing. */
+int hyp_s2_map(hyp_vm_t *vm, uint64_t gpa, pfn_t pfn, pte_t prot)
+{
+    (void)vm; (void)gpa; (void)pfn; (void)prot;
+    return -ENOSYS;
+}
+
+/* -ENOENT rather than -ENOSYS: nothing is mapped here, and that is the
+ * contract's answer for a gpa with no mapping. */
+int hyp_s2_unmap(hyp_vm_t *vm, uint64_t gpa)
+{
+    (void)vm; (void)gpa;
+    return -ENOENT;
+}
+
+/* 0 is the contract's "no translation for this gpa". */
+paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa)
+{
+    (void)vm; (void)gpa;
+    return 0;
+}
+
+/* There is no tree to audit, so there is nothing to certify: a 0 return would
+ * be read as "clean", which is a claim this configuration cannot make. */
+int hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out)
+{
+    (void)vm; (void)out;
+    return -ENOSYS;
+}
+
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
+
 /* ---- v2: the on-demand RAM window (hyp_vcpu.h) ---- */
 
 int hyp_vm_set_ram(hyp_vm_t *vm, uint64_t base, uint64_t size)
@@ -321,6 +398,7 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
         return -EINVAL;
     if (!hyp_vm_ram_contains(vm, gpa))
         return -EFAULT;
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
     /* Already translated: there is nothing to fill.  Reached when the guest
      * touches the page twice through two different faults (or when a caller
@@ -351,9 +429,20 @@ int hyp_ram_fill(hyp_vm_t *vm, uint64_t gpa)
         return rc;
     }
     return 0;
+#else
+    /* Without a stage-2 there is nowhere to put the page even if one could be
+     * allocated, and -EFAULT is deliberately NOT what this returns: the
+     * second-stage fault path in hyp_vcpu.c reads -EFAULT as "outside the RAM
+     * window, try the device model", and handing it a page the kernel cannot
+     * back would send the guest at a GPA it never owns. */
+    (void)gpa;
+    return -ENOSYS;
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */
 }
 
 /* ---- kernel-side selftest (docs/hypervisor/00-design.md, S4) ---- */
+
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 static int st_fail(const char *step)
 {
@@ -434,3 +523,19 @@ int hyp_selftest(void)
           0, (unsigned long)rep.entries);
     return 0;
 }
+
+#else /* no host page tables in this configuration */
+
+int hyp_selftest(void)
+{
+    /* SKIP rather than FAIL, and NOT by way of the hyp_supported() test above:
+     * that test asks whether the CPU has a virtualization extension, which on
+     * this configuration can be answered 1 while every step below is
+     * impossible.  Reporting the reason this build cannot run the test is the
+     * useful half of the line; the caller still gets the contract's 0 for
+     * "not a failure". */
+    kinfo("HYP_SELFTEST: SKIP (no host page tables in this configuration)\n");
+    return 0;
+}
+
+#endif /* ARCH_HAS_PGTABLE_OPS && !CONFIG_NOMMU */

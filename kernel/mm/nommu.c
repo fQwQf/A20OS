@@ -29,7 +29,12 @@ int mm_pt_set_safe_range(struct mm_struct *mm, vaddr_t start, vaddr_t end,
 pte_t *pt_create(void) { return (pte_t *)1; }
 void pt_destroy(pt_root_t *pgdir) { (void)pgdir; }
 int pt_map(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
-int pt_map_huge(pt_root_t *pgdir, vaddr_t va, paddr_t pa, pte_t flags) { (void)pgdir; (void)va; (void)pa; (void)flags; return 0; }
+/* Signature per mm.h: the huge install takes the mm and the status class the
+ * leaf carries, and no page table means neither is used.  A stub still has to
+ * match the declaration it is defining -- a stale pt_root_t/4-argument form
+ * here is a conflicting-types error, not a silent no-op. */
+int pt_map_huge(struct mm_struct *mm, vaddr_t va, paddr_t pa, pte_t flags,
+                uint8_t cls) { (void)mm; (void)va; (void)pa; (void)flags; (void)cls; return 0; }
 int pt_unmap(struct mm_struct *mm, vaddr_t va) { (void)mm; (void)va; return 0; }
 int pt_unmap_leaf(struct mm_struct *mm, vaddr_t va, paddr_t *pa_out, vaddr_t *base_out, size_t *size_out, int *level_out) {
     (void)mm;
