@@ -50,16 +50,38 @@ SECTIONS
 
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_DELTA) {
         _bss_start = .;
+        /* The BSP boot stack must be the FIRST input collected here.
+         * *(.bss .bss.*) already matches the .bss.stack input section and GNU
+         * ld applies the first matching directive, so the old *(.bss.stack)
+         * below the wildcard was dead code.  The stack therefore landed at the
+         * end of .bss instead of the bottom: measured on this arch it put
+         * _stack_end exactly at _bss_end (0xc0008000019d4000), zero margin to
+         * the boundary where pfa_init starts zeroing its frame-metadata bitmap
+         * (mm_init passes va_to_pa(_bss_end), mm/frame.c rounds that up to 64),
+         * and it shared pages with whatever general .bss object happened to be
+         * allocated against it.  Collect it first and the 64 KiB range sits at
+         * the bottom of .bss, where nothing else can be placed and far below
+         * the allocator's memset region. */
+        KEEP(*(.bss.stack))
+        . = ALIGN(4096);
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
         *(.bss.page_tables)
-        *(.bss.stack)
         . = ALIGN(4096);
         _bss_end = .;
     } :data
 
     _end = .;
+
+    /* Both invariants of the layout above, stated so a later edit that breaks
+     * either fails the link instead of booting into silent corruption. */
+    ASSERT(_stack_bottom == _bss_start,
+           "ppc64le: boot stack must be the first thing in .bss")
+    ASSERT(_stack_end <= _bss_end,
+           "ppc64le: boot stack must stay below _bss_end (pfa owns everything above it)")
+    ASSERT(_stack_end - _stack_bottom >= 64 * 1024,
+           "ppc64le: boot stack is below the 64 KiB every arch reserves")
 
     /DISCARD/ : {
         *(.comment)

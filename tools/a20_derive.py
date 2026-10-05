@@ -67,7 +67,7 @@ def derive_make_vars(inst: Instance) -> list[str]:
     if g.audio_device is not None:
         v.append(f"QEMU_GUI_AUDIO_DEVICE={g.audio_device}")
     if n.hostfwd is not None:
-        v.append(f"NET_HOSTFWD={','.join(n.hostfwd)}")
+        v.append(f"NET_HOSTFWD={n.qemu_hostfwd()}")
     if r.size_mb is not None:
         v.append(f"FAT32_IMAGE_MB={r.size_mb}")
     if r.ext4_size_mb is not None:

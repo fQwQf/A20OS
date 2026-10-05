@@ -552,6 +552,13 @@ static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 }
 
 
+/* Segment-dispatch statistics.  Kept outside the arch-ops guard with their
+ * definitions in mm/pt.c: they are counters, not capability, and fault.c
+ * increments them on every build.  arm32 has no dispatch path and so leaves
+ * them at zero. */
+extern uint64_t mm_seg_dispatch_seg;
+extern uint64_t mm_seg_dispatch_fallback;
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 /* Descriptor access.  table is a direct-mapped pointer to a page-table page. */
@@ -644,9 +651,8 @@ extern uint64_t mm_seg_shadow_disagree;
 extern uint64_t mm_seg_shadow_miss;
 
 /* Which side of the P6 dispatch actually decided.  Both zero means the change
- * is inert; both equal means the segment is inert. */
-extern uint64_t mm_seg_dispatch_seg;
-extern uint64_t mm_seg_dispatch_fallback;
+ * is inert; both equal means the segment is inert.  Declared above, outside the
+ * arch-ops guard, because fault.c counts them on every build. */
 
 /* Why a lookup found nothing, and why an annotation could not be recorded.
  *
