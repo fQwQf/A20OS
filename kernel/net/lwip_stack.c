@@ -1631,6 +1631,19 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
              "\nlwip_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)\n");
     a20_lwip_append(buf, bufsz, &off, cell);
 #endif
+    /*
+     * The net-lock side of the same switch.  Rendered here rather than in
+     * net_format_status() because this is the function that already owns the
+     * lwIP row and the two are read together; it runs with no lock held (the
+     * lane census above dropped both of its own), and net_lock_probe_format()
+     * only reads per-CPU counters.
+     */
+    {
+        char lockrow[512];
+        int lockn = net_lock_probe_format(lockrow, sizeof(lockrow));
+        if (lockn > 0)
+            a20_lwip_append(buf, bufsz, &off, lockrow);
+    }
     return (int)off;
 }
 
