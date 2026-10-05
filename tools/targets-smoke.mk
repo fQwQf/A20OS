@@ -167,9 +167,14 @@ smoke-netfilter:
 #     A silently wrong guest port is exactly the failure this gate exists to
 #     catch, so it is worth writing down rather than rediscovering.
 #
-# Note for whoever owns tools/a20_derive.py: it emits "tcp::5555-:5555", which
-# QEMU 10 refuses ("Missing guest address").  Left alone here -- that string is
-# asserted by tools/tests/test_a20.py and is a different stream's file.
+# Resolved: a derived [net].hostfwd short form now names the guest address, so
+# tools/a20_instance.py emits "hostfwd=tcp::5555-10.0.2.15:5555=on" rather than
+# the addressless "tcp::5555-:5555".  Measured on QEMU 10.0.13 while doing it:
+# the *bare* short form is what QEMU rejects ("Invalid parameter"); the
+# addressless rule behind a hostfwd= key starts and binds normally, so the
+# "Missing guest address" this note used to quote does not reproduce through
+# -netdev user on that version.  The explicit address is spelled out anyway
+# because it is the form measured to work end to end here.
 #
 # a20.tcpmode=lwip is load-bearing for the same reason.  Under the default
 # "fast" mode the socket layer never creates a LISTEN pcb (see the comment in
