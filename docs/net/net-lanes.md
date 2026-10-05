@@ -35,7 +35,7 @@ A  lane 骨架与归属哈希            无（本文件已完成的部分）
 B  lwIP PCB 链表按 lane 分桶       需要 A
 C  per-lane pbuf 池与定时轮        需要 B
 D  收包投递给目标 lane             需要 C
-E  per-socket 锁替 g_net_lock      需要 D，且先要有对象引用计数
+E  per-socket 锁替 net 桶锁          需要 D，且先要有对象引用计数   ← 本文件已落地
 F  多队列 + 每队列中断             需要 D
 G  RSS / 流引导                    需要 F
 ```
@@ -1191,14 +1191,69 @@ lane 得跟着改写后的元组走）；回环**不入队**（它本来就已�
 pbuf 计数同一个理由：读水位要么得拿 claim（`/proc` 与收包路径抢），要么读一个在跨 CPU
 下没有意义的 head-tail 差值。`rx staged` 那行才是当下有多少帧在等，那个量是单值的。
 
+## 阶段 E：per-socket 锁
+
+阶段 C/D 把 socket 状态按 lane 分了片，但**保护它们的锁没有跟着变**：一个 socket 的
+接收队列、accept 队列和连接状态一直由"拥有它那个 registry slot 的桶锁"保护，而桶在
+server profile 上是 512 个 slot（`NET_SOCK_BUCKET_SHIFT = 9`，socket_internal.h:516）。
+一个 socket 的 recv 因此要和同桶另外 511 个 socket 互斥——lane 分得再细也没用，因为
+所有 lane 的 hot socket 大概率落在同一个桶里（桶号来自 slot 分配顺序，不来自 lane）。
+
+阶段 E 做的就是把粒度从桶降到 socket。落地在 `7c7a4d7c8`，锁契约写在
+[network-lock-contract.md](./network-lock-contract.md) 的「锁」一节。
+
+### 落地记录
+
+`net_socket_t` 内嵌一把 `spinlock_t lock`（socket_internal.h:405）。struct 里除
+`g_sockets[]` 的槽位本身之外的一切——队列、`closed`、`connected`、wait 队列、pending
+计数——只由这把锁保护，别无其他。桶锁 `net_bucket[b]` 此后**只**管 slot 表和每桶空闲
+位图，调用点收敛到三个：`net_register_socket_locked()`、`net_socket_unregister()`、
+`net_bucket_slot_ref()`。
+
+锁序（外到内）：`net_bucket[b]` → `net_socket_t.lock`。桶锁**绝不在** socket 锁之下
+取，这就是现在全部的 ABBA 面。两把 socket 锁走 `net_sock_lock2()`，按 socket 指针
+升序；`b == NULL` 表示只取一把（peer 为空是常态，不必凑合）。原来的 `net_bucket_lock2()`
+连同 `NET_SOCK_ORPHAN_BUCKET`、`NET_SOCK_BUCKET_COUNT` 一起删除——孤儿桶存在的唯一
+理由是"没有 slot 的 socket 没有桶，而它的状态当时靠桶锁保护"，现在它的状态有自己的锁，
+不再需要额外分片。
+
+### 三处值得记下来的
+
+**销毁必须拆两段。** `net_socket_unregister()` 要取桶锁，因此不能运行在 socket 锁之下。
+`close()` 相应改成：socket 锁内标 `closed`、摘队列、把 wake 收进 `proc_wake_q_t`，然后
+解锁，才 unregister + free。锁内绝不等引用归零。这顺手修掉两个既有 bug：
+`net_unregister_socket_locked(child)` 曾经在 listener 的桶锁下、以及在 `(s, listener)`
+有序对下被调用，两次都写 `g_net_buckets[child_bucket].free_bits`——那把桶锁并不在手上。
+
+**带出指针先 ref。** 桶锁不再能当"对象活着"的凭据（跨桶查找没法一直举着第一把桶锁），
+所以从任一临界区带出 `net_socket_t *` 都要 `net_socket_ref()`、用完在锁外 drop。采样
+peer 指针的写法因此是"在 `s` 自己的锁下 `net_socket_ref(peer)`"，把采样和取引用放在
+同一个临界区，避免中间的 UAF 窗口；`s` 自己的答案（connected / nonblock / timeout /
+peer_addr）则在锁内拷到栈上，因为真正入队发生在解锁之后。
+
+**`net_bucket_scan()` 是唯一允许"桶锁里嵌 socket 锁"的地方**，且只用于只读遍历。
+`kernel/fs/procfs/procfs_render.c:527` 的 visitor 直接读 `s->reg_idx`，把 socket 锁嵌进
+`net_bucket_scan()` 内部就让那类只读回调自动被覆盖，而不需要去动 procfs。
+
+顺带改了 `net_inet_bottom_half_process_all()` 的遍历形状：原来按桶走、每桶整段持桶锁，
+正是锁规则禁掉的"取整组"（见 VFS dcache 的活锁记录）。现在改为无锁读
+`g_net_bh_pending[]` 位图 + `net_bucket_slot_ref(i)` 逐个取引用，再在那个 socket 自己的
+锁下处理事件。
+
+### 这一步没有解决的
+
+`g_lwip_lock` 仍然是一把全局锁，阶段 D 的"各 CPU 各自处理自己的 socket"依然只成立在
+"谁处理"这一层。阶段 E 去掉的是 socket 侧的伪共享，没动协议栈侧的全局串行——那要等
+把 lwIP 核心状态按 lane 分片，是另一份契约。
+
 ## 必须保持全局的部分
 
 | 对象 | 处理 | 理由 |
 |---|---|---|
 | ARP / etharp 缓存 | seqlock | 每包都要读，必须无锁；几乎不写 |
 | 路由 / netif 列表 | seqlock | 同上 |
-| socket registry | 分片哈希 + 引用计数 | 冷路径 |
-| bind/listen/accept/close 等 PCB 冷路径 | 单把 `g_netctl_lock` | 频率是连接率级，不是包率级 |
+| socket registry | 分片哈希 + 引用计数，桶锁只管 slot 表（阶段 E） | 冷路径 |
+| bind/listen/accept/close 等 PCB 冷路径 | 每 socket 一把 `net_socket_t.lock`（阶段 E） | 频率是连接率级，但没必要为低频付整桶的伪共享 |
 | conntrack 表 `g_ct[]` | 保持全局，`g_lwip_lock` 保护 | 五元组与 lane 无关，且 NAT 绑定是**流级**的：把表按 lane 切开，一条跨 lane 的流会分裂成两条互不知情的记录，回程方向就找不到入口 |
 
 conntrack 那行是本表里唯一"因为语义而不能分桶"的条目。NAT 规则表反而可以按 lane 切
