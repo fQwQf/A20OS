@@ -910,6 +910,82 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 在此之前阶段 C 的 per-lane 计时器分片可以保留（它本身已验证正确且受
 `sys_check_timeouts()` 的间隔门控），但**不要**再去动分派。
 
+### 放大实验已执行（2026-10-05）：**没炸，也没定位**
+
+上面那份配方被执行了两轮。结论先写清楚：**这条 flake 在本轮实验里没有复现，
+因此没有被修，也没有被定位。** 下面是原始数据，不做美化。
+
+放大器与探针的位置（先确认它们真的在，才有意义）：
+
+- `CONFIG_NET_RACE_DELAY_US` 门控在 `kernel/net/net_profile.h:201`（默认 0），
+  注入点是 `kernel/net/socket_inet.c:926-932` 的 `for (volatile uint32_t d = 0; ...)`，
+  位置确实在 accept stage 取出 slot 之后、第一次 `a20_lwip_lock()` 之前——
+  正是配方第 1 步要求的那段窗口。
+- 探针 `-DCONFIG_NET_LOCK_ASSERT=1` 走第 1 项接好的 `a20_lwip_assert_core_locked()`：
+  armed 之后调用者 CPU 不是持有者就 abort，并累加 `violations` / `sites`。
+
+配置：`make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
+OPT="-DCONFIG_NET_PCB_SANE=1 -DCONFIG_NET_LOCK_ASSERT=1 -DCONFIG_NET_RACE_DELAY_US=<D>" dev-build`，
+guest 参数 `a20.tcpmode=lwip`，每轮换一批端口跑多连接。
+
+| 轮次 | `CONFIG_NET_RACE_DELAY_US` | 样本 | 结果 |
+|---|---|---|---|
+| 1 | 200 | 5 轮 × 8 端口 = 40 | **40/40 PASS，0 FAIL** |
+| 2 | 2000 | 4 轮 × 8 端口 = 32 | **32/32 PASS，0 FAIL** |
+| 3（不放大） | 0 | 6 × `make smoke-net-tcp-lanes` | **6/6 PASS** |
+
+三组共 78 次连接，失败 0 次。每轮末尾 `/proc/net/stats` 均为
+`lwip_lock: armed=1 owner=4294967295 violations=0 sites=0`
+（`owner=4294967295` 即 `CPU_NONE`，说明采样时锁是空闲的——`sites=0` 表示探针
+一次都没触发，**没有出现过 arm 后非持有者调用**），且
+`net_accept_drop=0`、`net_bh_overflow=0`、`net_alloc_fail=0`。
+`CONFIG_NET_PCB_SANE=1` 全程 0 命中，即链表桶不变量也没被破坏。
+
+**这组数据能说明什么、不能说明什么**：
+
+- **不能**说"2% 的 flake 已经消失"。72 次放大样本下按 2% 计期望失败 1.6 次，
+  观测 0 次的概率约 `0.98^72 ≈ 23%`——不构成任何"已修复"的证据。样本量根本不够。
+- **能**说的是：在"accept stage 出队后、取 lwip 锁前"这个被指认为最可疑的窗口里，
+  把窗口放大到 200 µs（相对 `a20_lwip_lock()` 的一次获取是数千倍）**没有**让间歇故障
+  变必然。配合 `sites=0`，**配方第 2 步的前提在这段窗口上不成立**。
+- 附带排除：放大到 2000 µs 仍 0 失败，说明该窗口内就算确实有竞态，其参与方也不在
+  这条路径上，或者它的触发条件与本放大器无关。
+
+**顺带记一个本轮才出现的观测**：`tcp_active` 在长跑中从 48 爬到 64。这是第 2 项
+修复把 server 侧 `close()` 从 `tcp_abort()`（RST，立即回收）改成 `tcp_close()`
+（FIN）之后必然出现的 TIME_WAIT 累积，不是新 bug，但会影响任何按 `tcp_active`
+判断"还有余量"的解读。已确认它有界：dev profile 的 `MEMP_NUM_TCP_PCB = 8192`，
+且 `tcp_alloc()`（`tcp.c:1953` 起）在池压力下会回收最老的 TIME_WAIT pcb。
+
+### 下一步（配方被否定后该换哪一侧）
+
+按上文"如果加了延时仍然不炸，说明嫌疑区选错了"的约定，**换生产者一侧**。
+具体按这个顺序，因为成本递增：
+
+1. **先补样本，而不是先换位置。** 上面 78 次全是阴性，真正的缺口是"2% 这个数字本身
+   是在 80 次样本上估出来的，置信区间极宽"。在同样配置（4 lane + 4 CPU + lwip +
+   锁探针 + 链表检查器，**放大器保持 0**）下把 `smoke-net-tcp-lanes` 跑满 200 次以上。
+   - 若 200 次 0 失败：2% 的估计多半来自更早的脏树，问题已经不在当前代码里，
+     应当去查历史样本（`12404` / `12405` 两次失败）的构建号，而不是继续找竞态。
+   - 若仍出现 1-2 次失败：**这才是唯一值得带走的线索**，立刻把该轮的完整
+     `/proc/net/stats`、`/proc/net/config`、各 lane 计数和 console 全量存盘。
+2. **换放大器位置到生产者 `lwip_tcp_accept_cb()`。** 现有放大器只加在消费者
+   （`net_inet_accept_stage_drain`）一侧。配方只覆盖了"跨两个锁域"这一半；
+   另一半是生产者把 pcb 塞进 stage ring 的时刻，那里同样在 lwIP 锁下写、
+   在桶锁外读。若要做，用一个新开关（**不要**复用 `CONFIG_NET_RACE_DELAY_US`，
+   否则两组实验的数据无法分开看）。
+3. **在 `netif_loop_output()` / `netif_poll()` 一侧再看一次。** 回环队列的无界性
+   （上文已记 `LWIP_LOOPBACK_MAX_PBUFS=0`）意味着"哪一 CPU 在哪一刻排空它"完全
+   不受控；`net_tcp_lane_input()` 把包投给哪条 lane 的时机也就跟着漂。这不是可静态
+   证明的东西，只能靠把"入队时刻"和"排空时刻"打上 CPU id + 时间戳对照来缩小范围。
+4. 仍然定位不到时，**把 TCP 层的连接建立时序全量打点**（SYN 入、pcb 分配、
+   桶查找、SYN-ACK 出、SYN-ACK 重传、accept 入 stage、accept 出 stage），
+   逐条打 lane / CPU / 时间戳，然后**用失败样本比对**。这是最后手段，因为它很慢。
+
+> 不要为了"能变红"而降低门禁或改弱 `smoke-net-tcp-lanes`。上面 78 次全绿
+> **不是**把门禁改绿的结果——门禁配置全程未动，`CONFIG_NET_PCB_SANE=1` 与
+> `CONFIG_NET_LOCK_ASSERT=1` 只会让失败更容易被看见，不会更容易被隐藏。
+
 ## 阶段 D：收包引导
 
 单 NIC ring 的**排空**天然串行（一把锁、一个 ring），但**协议栈处理**并不，而后者才是

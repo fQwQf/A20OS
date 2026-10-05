@@ -632,6 +632,24 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
     if ((s->domain == AF_INET || s->domain == AF_INET6) &&
         (s->udp || s->raw || s->tcp))
         return net_inet_sendto(s, buf, len, flags, addr, addrlen);
+    /*
+     * A stream socket with no pcb, in a family the stack owns, is a connection
+     * lwIP tore down rather than a socket that never had one: lwip_tcp_err_cb()
+     * NULLs s->tcp on RST and on every fatal error, so "s->tcp == NULL" is the
+     * normal state of a dead TCP connection.  Dispatching on the presence of a
+     * pcb therefore sent those writes past net_inet_sendto() into the generic
+     * two-socket path below, which reported ENOTSOCK -- a claim that the fd is
+     * not a socket at all, on an fd that is very much one.  send(2) on a
+     * connection the peer reset owes the caller EPIPE, per the same Linux-ABI
+     * rule net_inet_send_tcp() applies on the s->closed path.
+     *
+     * local_tcp is what keeps this off the fast path: a fast-mode socket drops
+     * its pcb by design and is served by the shortcut below, so the exemption
+     * has to be explicit rather than implied.
+     */
+    if (s->type == SOCK_STREAM && !s->local_tcp && !s->tcp &&
+        (s->domain == AF_INET || s->domain == AF_INET6))
+        return s->ever_connected ? -EPIPE : -ENOTCONN;
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 
