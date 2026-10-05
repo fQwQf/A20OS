@@ -249,9 +249,19 @@ int net_format_status(char *buf, size_t bufsz) {
     net_status_arg_t a = { 0, 0, 0 };
     net_table_scan_all(net_status_slot, &a);
 
+    /*
+     * `max` is the profile's slot ceiling, not a free-slot reading: it is the
+     * constant that decides whether a workload can be admitted at all, and it
+     * is what tells a user why socket() started returning EMFILE.  Published
+     * here because the table has no other observable -- the bitmap words are
+     * internal and per-bucket, and a user process cannot count the slots it is
+     * not holding.  Appended rather than inserted so the existing
+     * "open= bound= queued=" prefix stays byte-compatible with anything that
+     * reads it.
+     */
     int m = snprintf(buf + n, bufsz - (size_t)n,
-                     "syscall-sockets: open=%d bound=%d queued=%d\n",
-                     a.used, a.bound, a.queued);
+                     "syscall-sockets: open=%d bound=%d queued=%d max=%d\n",
+                     a.used, a.bound, a.queued, NET_MAX_SOCKETS);
     if (m > 0)
         n += m;
     if ((size_t)n >= bufsz)

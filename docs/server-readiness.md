@@ -141,10 +141,10 @@ progress 驱动），并让提示认 `loop_first`。假阳性只多一次锁获�
 一致），不是估算。**不能**从 QEMU 镜像的 `.bss` 反推：`MEMP_MEM_MALLOC=1` 让池成为对堆的
 claim，而 riscv64 QEMU 目标有 1 GiB RAM，对 20 KiB 部件没有说明力。
 
-### 真正的瓶颈不是 lwIP 池
+### 真正的瓶颈不是 lwIP 池 —— 两块静态数组已纳入档位（2026-10）
 
 池上限合计 25696 B 对 `MEM_SIZE` 16384 B（超 57%），但**即使把池全部解决也放不下**。
-真正的约束是两块**与档位无关的静态数组**：
+真正的约束曾是两块**与档位无关的静态数组**：
 
 | | 字节 | 位置 |
 |---|---|---|
@@ -154,35 +154,91 @@ claim，而 riscv64 QEMU 目标有 1 GiB RAM，对 20 KiB 部件没有说明力�
 
 对照 20 KiB：`kernel/net` 静态合计 **42,662 B = 整个部件的 2.08 倍**；8 个
 `net_socket_t` 合计 32,768 B = 1.60 倍；lwIP 堆 16,407 B = 80%。
-而这两块都在 profile 作用域之外的文件里，**只改 `net_profile.h`/`lwipopts.h` 无法让tier 1
-装进 20 KiB**。
+这两块当时都在 profile 作用域之外，所以**只改 `net_profile.h`/`lwipopts.h` 无法让
+tier 1 装进 20 KiB**。
 
-64 KiB 按当前配置也**不够**：42,662 + 16,871 = 59,533 B（90.8%），余 6,003 B —— 装不下两个
-socket。要做到大约 30 KiB：profile 内降 `MEM_SIZE`/池/`MAX_SOCKETS`、关IPv6；profile 外必须让
-`socket_packet.c` 的 ring 与 `lwip_stack.c` 的 `A20_NET_MAX_DEVS`/frame 尺寸跟随 profile。
+**现已修（`wt/embedded`）**：`net_profile.h` 新增 `PACKET_RING_SLOTS` /
+`PACKET_FRAME_SIZE` / `NETIF_MAX_DEVS` / `NETIF_FRAME_SIZE` / `NETIF_MTU` /
+`STATIC_BUDGET`，EMBEDDED 档取 4 × 512 与 1 个 netif，DEFAULT/SERVER 保持 16 × 1536
+与 4 个 netif。总账由断言钉住而不是靠注释：`net_profile.h` 断言宏算术的上界
+（≤ `STATIC_BUDGET`），`socket_packet.c:40` 与 `lwip_stack.c:178` 各断言一次真实
+`sizeof()`。
 
-### tier 1 连 `net_stress_test` 都跑不了
+实测（`make dev-build NET_PROFILE=1`，`nm --size-sort` / 运行期 `/proc/a20/netmem`）：
+
+| | 前 | 后 |
+|---|---|---|
+| `g_pkt_ring` | 24,640 | 2,064 |
+| `g_netif_state` | 12,672 | 1,120 |
+| 合计 | **37,312** | **3,184**（−91.5%） |
+
+DEFAULT 与 SERVER 两档的同名符号字节不变（`0x6040` / `0x3180`），行为未动。为让这个
+数字在运行期可读，`/proc/a20/netmem` 在池表**之后**追加一行
+`static .bss (not from the heap): ...`（放在表外，故不干扰任何 `^POOLNAME <数字>`
+形态的既有断言）。
+
+**仍未解决，因此本节标题的结论只被部分推翻**：20 KiB 依然装不下 tier 1 —— 8 个
+`net_socket_t` 单是 32,768 B（1.60 倍）就已经越界，lwIP 堆 16,407 B 也是 80%，这两项
+都在 profile 之内、且本次未降。64 KiB 按当前配置仍**不够**：42,662 + 16,871 =
+59,533 B（90.8%），余 6,003 B —— 装不下两个 socket。净效果是 tier 1 的静态部分从
+"整个部件的 2.08 倍"变成"约 0.16 倍"，即**剩下的账全在 profile 之内、可以按档位调的量
+上了**；要真做到 30 KiB，还需要 profile 内降 `MEM_SIZE`/池/`MAX_SOCKETS` 与关 IPv6。
+
+### tier 1 连 `net_stress_test` 都跑不了 —— 现在它自己会说（2026-10）
 
 **0/5 通过**（tier 2 是 5/5）。原因确凿：`run_worker` 每个 worker 用 3 个 socket
 （client connect + server listener + accepted child）× 4 worker = 12 个并发，而 tier 1 的
 `NET_MAX_SOCKETS = 8`。单次偶发 PASS 只是 worker 未同时到达峰值。
 按要求报出来而非上调上限 —— 这说明"tier 1 可运行"这个说法需要限定。
 
-### STM32F103 根本不编译网络栈 —— README 的说法在网络侧无依据
+**现已改为显式 SKIP**：`net_stress_test` 在起跑前从 `/proc/net/status` 读档位上限
+（`syscall-sockets: ... max=N`，为此在 `kernel/net/socket.c` 的该行末尾追加了
+`max=`），算不出 `WORKERS * 3 < 上限` 时输出
+
+```
+NET_STRESS_TEST: SKIP (socket table ceiling 8 < 12 concurrent sockets required:
+4 workers x 3 (listener + accepted child + client)); tier too small for this
+workload, upper limits left as configured
+```
+
+并以 0 退出。**上限没有上调，也不会有门禁因为这个 SKIP 变绿**：所有以
+`NET_STRESS_TEST: PASS` 为判据的门禁（`smoke-smp-lock-contention` /
+`smoke-net-lanes` / `smoke-net-lanes-n1`）都匹配不到这一行，档位过小时它们仍然失败。
+上限在运行时读而不是编译进测试，是因为用户态构建不随 `NET_PROFILE` 重建
+（`Makefile:447` 的 `USER_BUILD_ID` 只含 `ARCH/NOMMU/OPT/PROFILE`）；读不到时照常跑
+测试，不会因缺证据而静默跳过。实测：tier 1 输出上面的 SKIP（`max=8`），tier 2 仍是
+`NET_STRESS_TEST: PASS (4 parallel transfers, 4 rounds x 1048576 B)`（`max=1024`）。
+
+### STM32F103 根本不编译网络栈 —— README 已按实情改写（2026-10）
 
 两个独立障碍：
 
 1. 本机无 ARM 工具链（无 `arm-none-eabi-gcc`）。
-2. 更根本：`PROFILE=mcu`（armv7m 自动启用，`Makefile:181`）走 `Makefile:931` 的**另一份
-   源文件清单**，其中**既无 `kernel/net/*.c` 也无 `$(LWIP_SRC)`**。所以 `NET_PROFILE` 对该
-   目标完全没有作用，**tier 1 根本没被编译进去**。
+2. 更根本：`PROFILE=mcu`（armv7m 自动启用，`Makefile:247-248`）走 `Makefile:1166` 的
+   **另一份源文件清单**（`components/trim.toml` 的 `[profile.mcu].sources`），其中**既无
+   `kernel/net` 源文件也无 `$(LWIP_SRC)`**。所以 `NET_PROFILE` 对该目标完全没有作用，
+   **tier 1 根本没被编译进去**。
 
-即README 声称的 STM32F103（20 KiB SRAM）支持，在网络上不只是"内存不够"，而是**从未构建**。
-这条要么修README，要么给mcu profile 真的纳入网络栈 —— 属于产品决定，不是调参。
+即 README 声称的 STM32F103（20 KiB SRAM）支持，在网络上不只是"内存不够"，而是**从未构建**。
 
-附带一条：`lwip_stack.c` 的 `rx_frame`/`tx_frame` 硬编码 1536，不随 `PBUF_POOL_BUFSIZE`变，
-所以 Cortex-M3 会把整尺寸帧收进 512 字节的池，每帧链 3 个元素；`PBUF_POOL_SIZE=24` 只够
-8 个整尺寸帧，而整个部件只有 20 KiB。
+**已处理（本条按"修 README"的方向关闭）**：README「支持的硬件平台」的 MCU 条目现在
+明写"**不含网络**"，说明 `PROFILE=mcu` 的独立源清单里既没有 `kernel/net/*.c` 也没有
+lwIP、`NET_PROFILE` 对该目标无效，并把"给 mcu profile 真的纳入网络栈"记为尚未做的
+**产品决定**而非调参；`make stm32f103-bringup` 的注释也一并标注"无网络栈"。
+（行号随本节引用漂移：`Makefile:931` 现在是 CFLAGS 段，MCU 源清单在 `:1166`。）
+
+### ~~`rx_frame`/`tx_frame` 硬编码 1536~~ —— 已修（2026-10）
+
+原附带项：`lwip_stack.c` 的 `rx_frame`/`tx_frame` 硬编码 1536，不随 `PBUF_POOL_BUFSIZE`
+变，所以 Cortex-M3 会把整尺寸帧收进 512 字节的池，每帧链 3 个元素；`PBUF_POOL_SIZE=24`
+只够 8 个整尺寸帧，而整个部件只有 20 KiB。
+
+**现已修**：帧缓冲区改为 `NET_PROFILE_NETIF_FRAME_SIZE`（EMBEDDED 档 = `PBUF_POOL_BUFSIZE`
+= 512），并且 `NET_PROFILE_NETIF_MTU`（= `PBUF_POOL_BUFSIZE - ETH_HLEN` = 498）跟着走 ——
+只改缓冲区不解决链元素的问题，MTU 还是 1500 时收上来的帧仍要链 3 个元素。DEFAULT 与
+SERVER 档这两个值就是原来的 1536 与 1500，行为不变。同时补上了
+`a20_lwip_if_set_mtu()` 这个运行时漏洞（它此前只校验 RFC 791 下限，`SIOCSIFMTU=1500`
+会让收包截断、发包 `ERR_BUF`），现按档位帧尺寸封顶。
 
 ## 三、隔离与多租户
 

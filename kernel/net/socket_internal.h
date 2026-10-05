@@ -771,6 +771,10 @@ void     net_packet_rx_defer(unsigned ifindex, const uint8_t *frame, size_t len)
 void     net_packet_bottom_half_process(void);
 int      net_packet_rx_pending(void);
 int      net_packet_ifindex_by_name(const char *name);
+/* Unconditional .bss owned by socket_packet.c (the capture ring plus its drain
+ * copy), reported on /proc/a20/netmem so a tier's static footprint is readable
+ * off a running system rather than only off a linker's symbol table. */
+size_t   net_packet_static_bytes(void);
  int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
  int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
