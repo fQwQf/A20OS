@@ -1,8 +1,21 @@
 # 网络 lane
 
-最后核实：阶段 A 已落地（`kernel/include/net/net_lane.h`、`kernel/net/net_lane.c`、
-`net_socket_t.lane`、`net_socket_lane_of_addr()`、`/proc/net/status` 的 lanes 行）。
-阶段 B 及以后**尚未实现**，本文件记录它们的顺序与前置条件。
+最后核实：阶段 A–E **均已落地**（按落地顺序）：
+阶段 A（`kernel/include/net/net_lane.h`、`kernel/net/net_lane.c`、`net_socket_t.lane`、
+`net_socket_lane_of_addr()`、`/proc/net/status` 的 lanes 行）、
+阶段 B（lwIP PCB 链表按 lane 分桶，含通配哨兵桶）、
+阶段 C（`5ea06a786`：当前 lane 上下文 + memp 的 `MEMP_PBUF`/`MEMP_PBUF_POOL` lane
+索引**骨架**）、阶段 D（`f6f327b96`：IRQ 只按 lane 入队、协议处理移到进程上下文）、
+阶段 E（`7c7a4d7c8`：per-socket 锁取代桶锁保护全部 socket 状态）。
+
+**仍未落地**的是 F（多队列 + 每队列中断）与 G（RSS / 流引导），以及阶段 C 的
+**内存真分片**与阶段 D/E 都未触及的 `g_lwip_lock` 分片。本文件记录顺序、前置条件，
+以及每阶段"做到哪、剩什么"的边界。
+
+> **一处必须先更正的旧记录。** 本文「阻塞」一节里"为什么当初没有任何断言拦住它"
+> 那一段，是**提交 `7d217d3fd` 之前**的状态。该宏现在已接到 `g_lwip_lock` 的持有者
+> CPU 上，见下文「断言已接线」。保留原文是因为它记录了方法与教训，但**不要再把它读成
+> 当前状态**。同一节还有一处把 `tcp_abort()` 记成"没有断言"，那也是错的，已在该处更正。
 
 ## 为什么是 lane
 
@@ -31,13 +44,13 @@
 ## 分层与前置
 
 ```
-A  lane 骨架与归属哈希            无（本文件已完成的部分）
-B  lwIP PCB 链表按 lane 分桶       需要 A
-C  per-lane pbuf 池与定时轮        需要 B
-D  收包投递给目标 lane             需要 C
-E  per-socket 锁替 net 桶锁          需要 D，且先要有对象引用计数   ← 本文件已落地
-F  多队列 + 每队列中断             需要 D
-G  RSS / 流引导                    需要 F
+A  lane 骨架与归属哈希            无                                  ← 已落地
+B  lwIP PCB 链表按 lane 分桶       需要 A                              ← 已落地
+C  per-lane pbuf 池与定时轮        需要 B                              ← 骨架已落地，内存未分片
+D  收包投递给目标 lane             需要 C                              ← 已落地
+E  per-socket 锁替 net 桶锁          需要 D，且先要有对象引用计数            ← 已落地
+F  多队列 + 每队列中断             需要 D                              ← 未做
+G  RSS / 流引导                    需要 F                              ← 未做
 ```
 
 顺序不可跳。**B 只做分桶而没有 C，会把一个全局定时轮留在 per-lane PCB 后面**，
@@ -377,7 +390,8 @@ make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4 dev-build
 `NET_PCB_LANE_BUCKETS` 为界。所以"`CONFIG_NET_LANES` 大小数组被 `NET_PCB_LANE_ANY`
 索引"这个猜测是错的。
 
-**为什么没有任何断言拦住它：`LWIP_ASSERT_CORE_LOCKED()` 是空的。**
+**为什么当初没有任何断言拦住它：`LWIP_ASSERT_CORE_LOCKED()` 当时是空的。**
+（**这是 `7d217d3fd` 之前的状态**，见下文「断言已接线」。）
 `kernel/external/lwip/src/include/lwip/opt.h:227` 把它定义成空宏，于是 `tcp.c` 与
 `tcp_in.c` 里那几十处 `LWIP_ASSERT_CORE_LOCKED()`（`tcp_close` / `tcp_abort` /
 `tcp_bind` / `tcp_new` / `tcp_input` …）**全部是空操作**。本仓库的锁契约
@@ -438,13 +452,20 @@ accept、计时器或 PCB 增删路径上**。
    `tcp_input` 等断言点无一违规。
 
 **但这不足以证伪"某处忘了取 `g_lwip_lock`"**——我先前写得过强，已更正。原因是探针
-只能看见**存在断言**的函数：`tcp.c` 里 45 个函数没有 `LWIP_ASSERT_CORE_LOCKED()`，
-其中就包括 **`tcp_abort()`（`tcp.c:654`）**——而 RST/abort 正是
-`tcp_pcb_remove` 崩溃的路径。也就是说，探针对最可疑的那条路径是**盲的**，它的 0 违规
-对它不构成任何证据。
+只能看见**存在断言**的函数：`tcp.c` 里有一批函数没有 `LWIP_ASSERT_CORE_LOCKED()`。
+当时我据此把 **`tcp_abort()`（记作 `tcp.c:654`）**也列了进去——**这条记错了**：
+`tcp_abort()` 一直带着断言，它在当前树里是 `tcp.c:658`，断言在 `:660`（它是个两行包装，
+转发给 `tcp_abandon(pcb, 1)`，后者自己在 `:590` 也带一条）。`7d217d3fd` 的提交说明
+沿用了同一个错行号（写的是 `tcp.c:656`）。这条记录错在**行号**，不在结论方向：
+探针当时确实漏了一批入口，只是 RST/abort 那条并不在漏的里面。
+
+真正被漏掉、且补断言后仍然值得盯的是 `tcp_slowtmr` / `tcp_fasttmr` /
+`tcp_process_refused_data` / `tcp_alloc` / `tcp_new` / `tcp_new_ip_type` /
+`tcp_netif_ip_addr_changed` 这七个，它们已由 `7d217d3fd` 补上（行号见
+[network-lock-contract.md](network-lock-contract.md)「移植层自己补的断言」）。
 
 这个盲点是可以补的，而且成本很低：给这些入口补上断言（或者统一在一个 wrapper 里
-断言），再跑一次同样的探针，盲区就变成覆盖区。目前 `tcp_abort` 的调用方逐个查过
+断言），再跑一次同样的探针，盲区就变成覆盖区。`tcp_abort` 的调用方逐个查过
 （`socket_inet.c:729`、`tcp_in.c:531,1004`、`altcp_tcp.c:310`）都在 `g_lwip_lock`
 下，所以它**可能**仍是安全的——但那是读代码得出的，不是探针测出来的，两者不能混为一谈。
 
@@ -471,6 +492,26 @@ accept 落底之间的时序），这类问题静态审计看不出来。
 一个便宜且值得先做的前置动作：把 `LWIP_ASSERT_CORE_LOCKED()` 在本配置下接到
 `g_lwip_lock` 的实际持有状态上（若 `g_lwip_lock` 有 owner 字段或可测试），让契约
 先变成可执行的。之后所有 lane 相关改动才有回归护栏。
+
+### 断言已接线：上面那个前置动作已经做完了（`7d217d3fd`）
+
+`LWIP_ASSERT_CORE_LOCKED()` 现在由 `kernel/net/lwip_port/lwipopts.h:298-304` 映射到
+`a20_lwip_assert_core_locked(__builtin_return_address(0))`。细节、开关
+（`CONFIG_NET_LOCK_ASSERT`，`net_profile.h:44-45` 默认 0）与 `/proc/net/stats` 的
+可见性写在 [network-lock-contract.md](network-lock-contract.md)「核心锁断言」一节。
+
+对上面这条线的净影响，有三件事必须说清楚：
+
+1. **上面那个"探针对最可疑路径是盲的"的缺口已经补掉**，七个此前无断言的裸入口
+   （`tcp_new` / `tcp_new_ip_type` / `tcp_slowtmr` / `tcp_fasttmr` /
+   `tcp_netif_ip_addr_changed` / `tcp_process_refused_data` /
+   `tcp_trigger_input_pcb_close`）现在都在探针覆盖之内。上面记的"`tcp_abort` 没有
+   断言"是错的，见上一段的更正。
+2. **它没有、也不可能解释 `16304db8` 那个崩溃**：那是一条纯地址算术错误（lane 被索引
+   两次），与锁无关，探针显示 0 违规是正确的观测，不是探针失灵。
+3. **它在两轮放大实验里全程 `violations=0 sites=0`**（78 次连接，见下文「放大实验已
+   执行」），所以它是一条**负面证据**：那条 flake 不经由"未持锁调 lwIP 入口"这条路
+   发生。它**不构成**"那条 flake 已定位"的证据。
 
 尚未定位。曾经的嫌疑是通配 bind 用的哨兵桶：`NET_PCB_LANE_ANY` 定义为
 `CONFIG_NET_LANES`（即"最后一个真实 lane 之后"），`NET_PCB_LANE_BUCKETS` 才把它
@@ -736,9 +777,10 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 
 上面那个前提已经定了，选**地址派生 lane**。因此：
 
-- 新增「当前 lane」上下文 `net_lane_ctx_push/pop/get`（`kernel/include/net/net_lane.h`，
-  实体 `a20_net_lane_cur` 在 `kernel/net/net_lane.c`，**只在 `CONFIG_NET_LANES > 1`
-  下存在**）。它是一个上下文，不是一个新的派生式。
+- 新增「当前 lane」上下文 `net_lane_ctx_push/pop/get`（`kernel/include/net/net_lane.h:232`
+  / `:239` / `:244`，**只在 `CONFIG_NET_LANES > 1` 下存在**；实体 `a20_net_lane_cur`
+  的 extern 声明在 `net_lane.h:228`，定义在 `kernel/net/net_lane.c:26`）。
+  它是一个上下文，不是一个新的派生式。
 - **没有、也明确禁止 `cpu_current_id()` 选池。** 这不是为了守规矩好看：一旦 memp 里
   出现第二种"lane 是什么"，一条连接的 pcb 与 pbuf 就可能落在两条 lane 上，而那正是
   `16304db8` / `f7f3d670` 两类 bug 的机制。全树只能有一个答案。
@@ -834,6 +876,36 @@ ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是�
 `smoke-net-lanes`、`smoke-net-lanes-n1`、新增的 `smoke-net-tcp-lanes` 稳定通过；
 `smoke-net-accept` 因运行时切 tcpmode 的既有问题而 flaky（约 2/3 失败），
 该问题独立于 lane 工作，且本次未修。
+
+### 更正一则：2026-10-06 一轮里这条 flake 完全没复现（deferred，不是"已修"）
+
+上面那张表与"约 2/3 失败率"是当时三次采样得出的。**本轮（`feat/net-strengthening`
+合并后的树）一次都没复现**，所以本节按 **deferred** 记，不声称已修。
+
+本轮实际执行的（由正确性加固那条工作流在
+`/home/fqwqf/OS/A20OS-wt-correctness` 里跑，主工作区未参与；以下数字转引自该流的
+实验记录，**本文档作者未复跑**）：
+
+| 项 | 结果 |
+|---|---|
+| `make smoke-net-accept` | 10/10 PASS |
+| 12 轮 fast↔lwip 运行时切换（每轮换一个 `tcp_accept_test` 端口） | 24/24 PASS |
+| lwip → fast 之后：`tcp_loopback_test` ×2 + `tcp_accept_test` | 全过 |
+| fast → lwip 之后：同样两组 | 全过 |
+| 跨模式 `tcp_edge_test`，两次执行 | 均 PASS |
+
+即上文那张"boot-time lwip PASS、运行时切换 FAIL"的形态，在约 40 次执行里一次未现。
+
+**诚实边界**：这只能说明**触发条件在本轮环境里不存在**，不能说明它不存在。原因未查明，
+两种可能都没被排除——
+
+- 记载本身来自更早的脏树（当时确有另一个进程在并发 `git stash` / `stash pop`，
+  见下文「更正一则不存在的构建缺陷」一节），那么这个 flake 从来就不在当前代码里；
+- 触发条件依赖某个本轮恰好没有出现的环境维度。
+
+因此写入口 `/proc/net/config` 的 `tcpmode` **功能原样保留、未削减**，
+[network-config-design.md](network-config-design.md) 里那条"部署一律用命令行键"的
+建议也随之保留，只是它的依据从"实测可复现"降级为"机理未查明"。
 
 ### 残留 flake：已定量，且**不是** lane 0 相关（假设已被证伪）
 
@@ -1115,28 +1187,32 @@ bottom-half 需要 ring 已排空，而只在读者唤醒后才跑的 poll 在�
 所以「各 CPU 各自处理自己的 socket」今天成立在"谁去处理"这一层，不成立在
 "谁能同时处理"这一层。这条必须写在最前面，否则下一个人会按名字把阶段 D 读大。
 
-**IRQ 侧**（`a20_lwip_process_netif_irq_locked()`）：解析刚好够定 lane 的头部，
-把帧拷进该 lane 的接收队列，返回。排空仍然是串行的短锁 + `CONFIG_NET_RX_IRQ_BUDGET`。
+**IRQ 侧**（`a20_lwip_process_netif_irq_locked()`，`lwip_stack.c:1242`）：解析刚好够
+定 lane 的头部，把帧拷进该 lane 的接收队列，返回。排空仍然是串行的短锁 +
+`CONFIG_NET_RX_IRQ_BUDGET`。
 
 包的归属 lane 取**目的地址与目的端口**，不是对端源端口。这是从代码里读出来的，不是
 选的：`tcp_in.c` 用 `NET_PCB_LANE_OF(ip_current_dest_addr(), tcphdr->dest)`，
 `udp.c` 用 `NET_PCB_LANE_OF(ip_current_dest_addr(), dest)`。目的地址加目的端口就是
 这条连接自己的本地四元组，已建立连接、UDP 与被动开出的子连接因此落在同一条 lane 上。
 
-**处理侧**：`a20_lwip_lane_drain_locked()` 取 lane 的消费权，拿 `g_lwip_lock`，
+**处理侧**：`a20_lwip_lane_drain_locked()`（`lwip_stack.c:1043`）取 lane 的消费权
+（`net_lane_rx_claim()`，`net_lane.h:318`），拿 `g_lwip_lock`，
 `net_lane_ctx_push(lane)`，然后逐帧 `pbuf_alloc` + `pbuf_take` + `n->input()`。
+驱动遍历的入口是 `a20_lwip_lane_drain_all()`（`lwip_stack.c:1083`）。
 
 #### 三处必须记住的坑
 
 1. **不要简单地让 IRQ 只入队——死锁是真的，但解法不是"更聪明的门控"。**
-   解法是**无条件会跑到的 poll 点**。`kernel_progress_run_bottom_halves()` 里调用
-   `A20_LWIP_LANE_RX_POLL()`，而 `sched()` 每次调度决策、每次会引发重新调度的时钟
-   tick、每次 idle pass 都走到它。放在"读者醒来之后"就晚了：阻塞读由 socket
-   bottom-half 唤醒，bottom-half 需要暂存的帧已经被处理掉，而只在唤醒后才跑的 poll
-   在等一个不会到来的事件。门控用的量是生产者自己抬起来的"已暂存帧数"计数器，
-   它只可能假阳，假阳的代价是一次 relaxed load。
-   位置在 `kernel_progress_net_rx()` **之前**而不是之后：后者是 CPU 0 排设备 ring 的
-   地方，多 lane 下它排出来的帧只是暂存，放在它之后要等下一趟。
+   解法是**无条件会跑到的 poll 点**。`kernel/core/progress.c:150` 在
+   `kernel_progress_run_bottom_halves()` 里调用 `A20_LWIP_LANE_RX_POLL()`，而
+   `sched()` 每次调度决策、每次会引发重新调度的时钟 tick、每次 idle pass 都走到它。
+   放在"读者醒来之后"就晚了：阻塞读由 socket bottom-half 唤醒，bottom-half 需要暂存的
+   帧已经被处理掉，而只在唤醒后才跑的 poll 在等一个不会到来的事件。门控用的量是
+   生产者自己抬起来的"已暂存帧数"计数器（`net_lane_rx_queued_total()`，
+   `net_lane.h:339`；poll 点在 `lwip_stack.c:1412` 判空），它只可能假阳，假阳的代价是
+   一次 relaxed load。位置在 `kernel_progress_net_rx()` **之前**而不是之后：后者是
+   CPU 0 排设备 ring 的地方，多 lane 下它排出来的帧只是暂存，放在它之后要等下一趟。
 2. **claim 用原子标志，不是 `spinlock_t`。** `core/lock.h` 只有
    `spin_trylock_irqsave`，用 spinlock 意味着拿着 claim 的整个协议处理过程都在关中断
    的状态下跑——而那正是这个阶段要搬出中断的原因。所以 claim 期间中断是开的，这既
@@ -1204,18 +1280,18 @@ server profile 上是 512 个 slot（`NET_SOCK_BUCKET_SHIFT = 9`，socket_intern
 
 ### 落地记录
 
-`net_socket_t` 内嵌一把 `spinlock_t lock`（socket_internal.h:405）。struct 里除
+`net_socket_t` 内嵌一把 `spinlock_t lock`（`socket_internal.h:405`）。struct 里除
 `g_sockets[]` 的槽位本身之外的一切——队列、`closed`、`connected`、wait 队列、pending
 计数——只由这把锁保护，别无其他。桶锁 `net_bucket[b]` 此后**只**管 slot 表和每桶空闲
 位图，调用点收敛到三个：`net_register_socket_locked()`、`net_socket_unregister()`、
-`net_bucket_slot_ref()`。
+`net_bucket_slot_ref()`（`socket_internal.h:724`）。
 
 锁序（外到内）：`net_bucket[b]` → `net_socket_t.lock`。桶锁**绝不在** socket 锁之下
-取，这就是现在全部的 ABBA 面。两把 socket 锁走 `net_sock_lock2()`，按 socket 指针
-升序；`b == NULL` 表示只取一把（peer 为空是常态，不必凑合）。原来的 `net_bucket_lock2()`
-连同 `NET_SOCK_ORPHAN_BUCKET`、`NET_SOCK_BUCKET_COUNT` 一起删除——孤儿桶存在的唯一
-理由是"没有 slot 的 socket 没有桶，而它的状态当时靠桶锁保护"，现在它的状态有自己的锁，
-不再需要额外分片。
+取，这就是现在全部的 ABBA 面。两把 socket 锁走 `net_sock_lock2()`（`socket_internal.h:584`），
+按 socket 指针升序；`b == NULL` 表示只取一把（peer 为空是常态，不必凑合）。原来的
+`net_bucket_lock2()` 连同 `NET_SOCK_ORPHAN_BUCKET`、`NET_SOCK_BUCKET_COUNT` 一起删除
+（`grep -rn net_bucket_lock2 kernel/` 当前零命中）——孤儿桶存在的唯一理由是"没有 slot
+的 socket 没有桶，而它的状态当时靠桶锁保护"，现在它的状态有自己的锁，不再需要额外分片。
 
 ### 三处值得记下来的
 
@@ -1245,6 +1321,18 @@ peer_addr）则在锁内拷到栈上，因为真正入队发生在解锁之后�
 `g_lwip_lock` 仍然是一把全局锁，阶段 D 的"各 CPU 各自处理自己的 socket"依然只成立在
 "谁处理"这一层。阶段 E 去掉的是 socket 侧的伪共享，没动协议栈侧的全局串行——那要等
 把 lwIP 核心状态按 lane 分片，是另一份契约。
+
+**运行期强制这一侧仍然空着。** 阶段 C/D/E 三步都只改了代码，没有给 net 锁加任何探针：
+没有"当前 CPU 是否持有期望的 socket 锁"的判据，`net_sock_lock2()` 的地址升序约定
+只有代码评审在把关，lane claim 一侧同样没有。`LWIP_ASSERT_CORE_LOCKED()` 只覆盖
+`g_lwip_lock`（见上文「断言已接线」）。要补需要 per-CPU 持锁集合跟踪，本轮未做，
+形态记在 [network-lock-contract.md](network-lock-contract.md) 的迁移检查清单末尾。
+
+**验证缺口仍在。** 合并后没有跑全量回归，ASAN + SMP 压测未做。`2f17a5ba8` 的提交
+说明自陈的三项运行期验证缺口——引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、
+`-ENOTCONN` 窗口——**仍然开放**，清单在 `docs/measured/impl-notes-net.md`。
+阶段 C/D/E 自身只做了各自的编译期与逐字节等价自检；按本轮 lane 阶段的指令，
+`smoke-*` 门禁没有跑。
 
 ## 必须保持全局的部分
 
