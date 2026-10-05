@@ -1488,6 +1488,8 @@ tcp_slowtmr(void)
   u8_t pcb_remove;      /* flag if a PCB should be removed */
   int lane;
 
+  LWIP_ASSERT_CORE_LOCKED();
+
   ++tcp_ticks;
 
 tcp_slowtmr_start:
@@ -1597,6 +1599,8 @@ tcp_fasttmr(void)
 {
   int lane;
 
+  LWIP_ASSERT_CORE_LOCKED();
+
 tcp_fasttmr_start:
   for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {
     ++tcp_timer_ctr[lane];
@@ -1632,6 +1636,7 @@ tcp_process_refused_data(struct tcp_pcb *pcb)
   struct pbuf *rest;
 #endif /* TCP_QUEUE_OOSEQ && LWIP_WND_SCALE */
 
+  LWIP_ASSERT_CORE_LOCKED();
   LWIP_ERROR("tcp_process_refused_data: invalid pcb", pcb != NULL, return ERR_ARG);
 
 #if TCP_QUEUE_OOSEQ && LWIP_WND_SCALE
@@ -2061,6 +2066,7 @@ tcp_alloc(u8_t prio)
 struct tcp_pcb *
 tcp_new(void)
 {
+  LWIP_ASSERT_CORE_LOCKED();
   return tcp_alloc(TCP_PRIO_NORMAL);
 }
 
@@ -2080,6 +2086,7 @@ struct tcp_pcb *
 tcp_new_ip_type(u8_t type)
 {
   struct tcp_pcb *pcb;
+  LWIP_ASSERT_CORE_LOCKED();
   pcb = tcp_alloc(TCP_PRIO_NORMAL);
 #if LWIP_IPV4 && LWIP_IPV6
   if (pcb != NULL) {
@@ -2475,6 +2482,8 @@ void
 tcp_netif_ip_addr_changed(const ip_addr_t *old_addr, const ip_addr_t *new_addr)
 {
   int lane;
+
+  LWIP_ASSERT_CORE_LOCKED();
 
   if (!ip_addr_isany(old_addr)) {
     for (lane = 0; lane < NET_PCB_LANE_BUCKETS; lane++) {

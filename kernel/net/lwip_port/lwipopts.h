@@ -31,6 +31,23 @@
 #define LWIP_NETIF_API                  0
 #define LWIP_TCPIP_CORE_LOCKING         0
 
+/*
+ * SO_REUSEADDR support.  Left at opt.h's default of 0 this port had no way to
+ * honour setsockopt(SO_REUSEADDR): the socket layer stores the flag in
+ * net_socket_t::reuseaddr and net_bind_reuse_allowed() consults it, but lwIP
+ * never learns of it, so tcp_bind() keeps scanning the TIME-WAIT list and a
+ * listener restarted on the same port gets ERR_USE (EADDRINUSE) for as long as
+ * the previous connection's TIME-WAIT pcb lives -- 2 * TCP_MSL, i.e. two
+ * minutes here.  Turning the switch on is only half the fix; the other half is
+ * net_inet_tcp_apply_options() copying reuseaddr onto the pcb's SOF_REUSEADDR,
+ * because lwIP keys every SO_REUSE decision off the pcb, not off the caller.
+ * Together they make rebinding work the way Linux does: TIME-WAIT is skipped
+ * for a REUSEADDR bind, and listen()/connect() re-check the 5-tuple and the
+ * local address/port so a REUSEADDR bind cannot silently alias two live
+ * listeners.
+ */
+#define SO_REUSE                        1
+
 #define LWIP_HAVE_LOOPIF                1
 #define LWIP_NETIF_LOOPBACK             1
 #define LWIP_LOOPBACK_MAX_PBUFS         16
@@ -201,12 +218,26 @@ _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
 #define TCP_DEBUG_PCB_LISTS 1
 #endif
 
+/*
+ * Turn the documented core-lock discipline into something the CPU enforces.
+ *
+ * lwIP ships LWIP_ASSERT_CORE_LOCKED() as an empty macro
+ * (src/include/lwip/opt.h:227) unless the port defines it, which is why the
+ * lock contract used to be prose only: the ~50 sites in tcp.c/tcp_in.c/
+ * raw.c/udp.c all expanded to nothing, so a path that touched PCB lists
+ * without g_lwip_lock corrupted them silently.  docs/net/net-lanes.md
+ * ("为什么没有任何断言拦住它") records the concrete damage that let through.
+ *
+ * The owner is recorded as a CPU id rather than a boolean because a boolean
+ * answers "is this flag set", which is true on every CPU while *another* CPU
+ * holds the lock -- exactly the case the assertion exists to catch.  The
+ * __builtin is evaluated at the macro's expansion point, so `site` is the
+ * return address inside the lwIP function that ran unlocked.
+ */
 #if CONFIG_NET_LOCK_ASSERT
-int  a20_lwip_lock_is_held(void);
-void a20_lwip_note_lock_violation(void *site);
+void a20_lwip_assert_core_locked(void *site);
 #define LWIP_ASSERT_CORE_LOCKED() \
-    do { if (!a20_lwip_lock_is_held()) \
-             a20_lwip_note_lock_violation(__builtin_return_address(0)); } while (0)
+    do { a20_lwip_assert_core_locked(__builtin_return_address(0)); } while (0)
 #else
 #define LWIP_ASSERT_CORE_LOCKED()
 #endif
