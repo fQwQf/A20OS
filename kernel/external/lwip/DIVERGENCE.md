@@ -161,6 +161,33 @@ HEAD 的 2 行差异属于 §0.1 的"上游漂移"，不是我们的编辑）。
 
 默认构建 `CONFIG_NET_LOCK_ASSERT=0`，宏仍为空，代价为零。
 
+### 2.6 `SO_REUSE=1`（编译期开关，非源码改动）
+
+`SO_REUSE` 在上游 `opt.h:2137` 默认为 `0`。本树的 `lwipopts.h` 现在显式打开它。
+不改任何 lwIP 源码，但**改变了上游代码的编译结果**，因此登记在此。
+
+关闭状态下 `setsockopt(SO_REUSEADDR)` 是**空操作**：socket 层把标志存进
+`net_socket_t::reuseaddr`，`net_bind_reuse_allowed()`（`kernel/net/socket.c:170`）
+也确实读它，但 lwIP 只在 `tcp_bind()` / `tcp_listen_with_backlog_and_err()` /
+`tcp_connect()` 里问 `ip_get_option(pcb, SOF_REUSEADDR)`，而没有任何代码把这个
+标志搬上 pcb。后果是 `tcp_bind()` 照旧扫 TIME-WAIT 表
+（`max_pcb_list = NUM_TCP_PCB_LISTS`），上一次连接留下的 TIME-WAIT pcb 会把本地
+端口占住 `2 * TCP_MSL`（本树 `TCP_MSL=60000`，即 2 分钟），同端口重启的 listener
+拿到 `ERR_USE`（EADDRINUSE）。
+
+打开后需要两处配合，缺一不可：
+
+- `net_inet_tcp_apply_options()`（`kernel/net/socket_inet.c`）把 `s->reuseaddr`
+  搬成 `SOF_REUSEADDR`。accept 出来的子 pcb 通过 `SOF_INHERITED` 继承
+  （`tcp_in.c`: `npcb->so_options = pcb->so_options & SOF_INHERITED`），所以一个
+  调用点同时覆盖 socket() 路径与 accept 路径；
+- `setsockopt(SO_REUSEADDR)` 在 socket 层把新值推回已存在的 pcb——它通常发生在
+  `socket()` 与 `bind()` 之间，而 pcb 在 `socket()` 时就建好了。
+
+语义与 Linux 一致：REUSEADDR 的 bind 跳过 TIME-WAIT；`listen()` 与 `connect()`
+补做"同一 local addr/port 只能有一个 listener"和 5-tuple 唯一性检查，所以打开这个
+开关不会让两个活着的 listener 静默别名。
+
 ## 3. 重新同步上游的流程
 
 ```sh
