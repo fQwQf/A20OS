@@ -23,10 +23,9 @@
  */
 extern spinlock_t g_netfilter_lock;
 
-/* Dotted-quad parse/format, defined in netfilter.c and shared so the NAT rule
- * parser does not carry a second copy that could disagree about what counts as
- * a valid address. */
-int  netfilter_ipv4_from_str(const char *s, size_t len, uint32_t *out);
-void netfilter_ipv4_to_str(uint32_t addr, char *buf, size_t bufsz);
+/* netfilter_ipv4_from_str / netfilter_ipv4_to_str are declared in
+ * kernel/include/net/netfilter.h: procfs parses a dotted quad for "ctinject"
+ * too, and duplicating the declaration here would only mean two places to
+ * forget to update. */
 
 #endif /* _NET_NETFILTER_INTERNAL_H */

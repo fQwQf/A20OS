@@ -52,25 +52,24 @@
 #include <arpa/inet.h>
 
 /* Must match the hostfwd rule in tools/targets-smoke.mk:smoke-netfilter-nat. */
-#define FWD_PORT   18081
+#define FWD_PORT 18081
 #define LISTEN_PORT 18082
 
-#define GUEST_IP   "10.0.2.15"
+#define GUEST_IP "10.0.2.15"
 #define GATEWAY_IP "10.0.2.2"
 
 #define NF_PATH "/proc/a20/netfilter"
 
-#define CHK(cond, msg)                                                        \
+#define CHK(cond, msg)                                                         \
     do {                                                                       \
         if (!(cond)) {                                                         \
-            printf("NETNAT_TEST: FAIL %s:%d %s (errno=%d %s)\n",               \
-                   __func__, __LINE__, (msg), errno, strerror(errno));         \
+            printf("NETNAT_TEST: FAIL %s:%d %s (errno=%d %s)\n", __func__,     \
+                   __LINE__, (msg), errno, strerror(errno));                   \
             return 1;                                                          \
         }                                                                      \
     } while (0)
 
-static int nf_read(char *buf, size_t bufsz)
-{
+static int nf_read(char *buf, size_t bufsz) {
     int fd = open(NF_PATH, O_RDONLY);
     if (fd < 0)
         return -1;
@@ -82,8 +81,7 @@ static int nf_read(char *buf, size_t bufsz)
     return (int)n;
 }
 
-static int nf_write(const char *s)
-{
+static int nf_write(const char *s) {
     int fd = open(NF_PATH, O_WRONLY);
     if (fd < 0)
         return -1;
@@ -93,8 +91,7 @@ static int nf_write(const char *s)
     return e;
 }
 
-static unsigned long long nf_stat(const char *text, const char *key)
-{
+static unsigned long long nf_stat(const char *text, const char *key) {
     size_t klen = strlen(key);
     const char *p = text;
     while (p && *p) {
@@ -111,8 +108,7 @@ static unsigned long long nf_stat(const char *text, const char *key)
     return 0;
 }
 
-static int udp_send_once(const char *dst, unsigned port)
-{
+static int udp_send_once(const char *dst, unsigned port) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
         return -1;
@@ -127,8 +123,7 @@ static int udp_send_once(const char *dst, unsigned port)
 }
 
 /* True when some `ct ` line mentions `needle`. */
-static int ct_mentions(const char *text, const char *needle)
-{
+static int ct_mentions(const char *text, const char *needle) {
     const char *p = text;
     while (p && *p) {
         if (strncmp(p, "ct ", 3) == 0 && strstr(p, needle))
@@ -140,8 +135,7 @@ static int ct_mentions(const char *text, const char *needle)
     return 0;
 }
 
-int main(void)
-{
+int main(void) {
     char buf[4096];
 
     /* 1. conntrack, with no NAT configured at all. */
@@ -244,16 +238,18 @@ int main(void)
     unsigned long long in0 = nf_stat(buf, "in_packets");
 
     printf("NETNAT_TEST: waiting for the host connection\n");
-    struct pollfd pfd = { .fd = lfd, .events = POLLIN, .revents = 0 };
+    struct pollfd pfd = {.fd = lfd, .events = POLLIN, .revents = 0};
     int pr = poll(&pfd, 1, 30000);
     if (pr <= 0) {
         if (nf_read(buf, sizeof(buf)) > 0) {
             unsigned long long in1 = nf_stat(buf, "in_packets");
             printf("NETNAT_TEST: no connection after %d ms "
-                   "(in_packets +%llu)\n", pr == 0 ? 30000 : -1, in1 - in0);
+                   "(in_packets +%llu)\n",
+                   pr == 0 ? 30000 : -1, in1 - in0);
             printf("%s", buf);
         }
-        printf("NETNAT_TEST: FAIL main: the forwarded connection never arrived\n");
+        printf(
+            "NETNAT_TEST: FAIL main: the forwarded connection never arrived\n");
         return 1;
     }
 
@@ -272,8 +268,7 @@ int main(void)
     CHK(nf_read(buf, sizeof(buf)) > 0, "read after the forward");
     CHK(strstr(buf, "nat=dnat") != NULL,
         "the conntrack entry records the DNAT binding");
-    CHK(ct_mentions(buf, "state=established") ||
-        ct_mentions(buf, "state=new"),
+    CHK(ct_mentions(buf, "state=established") || ct_mentions(buf, "state=new"),
         "the forwarded flow has a conntrack entry with a state");
     CHK(nf_stat(buf, "ct_tracked") >= 1, "the table is not empty");
 

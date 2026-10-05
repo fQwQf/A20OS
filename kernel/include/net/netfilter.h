@@ -394,6 +394,55 @@ void netfilter_conntrack_get_stats(net_conntrack_stats_t *out);
 unsigned netfilter_conntrack_expire(unsigned max_scan);
 
 /*
+ * How many times the idle sweeper has run.  The timeout counter says what a
+ * sweep reclaimed; this says whether one ran at all, which is the difference
+ * between "nothing was idle" and "nothing ever looked".  /proc renders it as
+ * ct_sweeps, and the capacity gate asserts it moved across the idle wait.
+ */
+unsigned netfilter_conntrack_sweeps(void);
+
+/*
+ * The source port of the entry netfilter_ct_lru() would evict next, or -1 when
+ * the table is empty.  Exposed because the eviction *counters* cannot say which
+ * flow a full table would forget, and "the table is at capacity" is not an
+ * answer an operator debugging a dropped flow can act on.  /proc renders it as
+ * ct_lru_victim, and the capacity gate asserts the victim's identity rather
+ * than only that the evicted counter moved.
+ */
+int netfilter_conntrack_lru_victim(void);
+
+/*
+ * Test hooks.  Both exist because the two conntrack limits that matter most --
+ * capacity and idle timeout -- have the property that no realistic packet
+ * stream reaches them: filling a 256-entry table takes 256 distinct flows, and
+ * the shortest compiled-in timeout is 30 seconds, so a gate that had to drive
+ * either through the data plane would either be very slow or prove nothing
+ * about the limit itself.  These let a gate put the table in the state it is
+ * asking about, and then read the counters back.
+ *
+ * netfilter_conntrack_inject() inserts through the same netfilter_ct_insert()
+ * the packet path uses, so it exercises the real insert, chaining, LRU and
+ * eviction code -- it is not a second, easier implementation of them.
+ * netfilter_conntrack_set_timeouts() overrides the millisecond constants below
+ * at runtime; a 0 argument restores that one default, so "cttimeout 0 0 0" is
+ * how a gate puts the compiled-in values back.
+ */
+int netfilter_conntrack_inject(uint32_t src, uint32_t dst, uint16_t sport,
+                               uint16_t dport, uint8_t proto, uint8_t state);
+void netfilter_conntrack_set_timeouts(unsigned tcp_new_ms, unsigned tcp_est_ms,
+                                      unsigned udp_ms);
+
+/*
+ * Dotted-quad parse/format, defined in netfilter.c and shared by the filter
+ * rule parser, the NAT rule parser and the conntrack injection verb, so none
+ * of them carries a second copy that could disagree about what counts as a
+ * valid address.  `from_str` returns 1 on success and 0 on anything that is
+ * not exactly four decimal octets in s[0..len).
+ */
+int netfilter_ipv4_from_str(const char *s, size_t len, uint32_t *out);
+void netfilter_ipv4_to_str(uint32_t addr, char *buf, size_t bufsz);
+
+/*
  * Idle timeouts, in milliseconds.  Split by protocol and state because the
  * two lifetimes are genuinely different: a half-open TCP flow that never
  * completes its handshake must not pin a table slot for the length of an
