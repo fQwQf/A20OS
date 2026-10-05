@@ -65,13 +65,13 @@ commit**。现已显式抓取并记录基线：
 
 ## 2. A20OS 自有改动
 
-**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 13 文件，+1505 / −311**
+**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 15 文件，+1692 / −315**
 （`f773b0aa` 是把 lwIP 重新 vendoring 进内核的提交，作为"未改动基线"）。
 
 > 口径说明：数字只统计 `src/` 与 `sources.mk`，不含本文件自身；重跑上面那条
 > `git diff` 即可复核。下文 §2.1 的清单以当前口径为准。
 
-### 2.1 受影响的文件（13 个）
+### 2.1 受影响的文件（15 个）
 
 ```
 +397/-0   src/core/tcp_cubic.c                      【新增文件，上游无对应物】
@@ -79,6 +79,7 @@ commit**。现已显式抓取并记录基线：
                                             （+9）  补齐缺失的 LWIP_ASSERT_CORE_LOCKED()
 +181/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
 +178/-82  src/core/udp.c                            PCB 链表按 lane 分桶
++175/-4   src/core/memp.c                           MEMP_PBUF/MEMP_PBUF_POOL 按当前 lane 索引的池表（见 §2.9）
 +112/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
 +100/-37  src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
                                       （+2）        tcp_trigger_input_pcb_close() 补断言
@@ -86,6 +87,7 @@ commit**。现已显式抓取并记录基线：
  +29/-1   src/include/lwip/tcp.h                    struct tcp_pcb 增加 lane / cong_alg / wnd_limit 字段
  +24/-6   src/core/pbuf.c                           LS2K1000 板级诊断 printf
  +18/-0   src/core/tcp_out.c                        CUBIC 快重传分支
+ +12/-0   src/include/lwip/priv/memp_priv.h         per-lane 分配计数器读取口（见 §2.9）
   +6/-1   src/include/lwip/udp.h                    struct udp_pcb 增加 lane 字段
   +2/-2   src/core/timeouts.c                       定时器按 lane 分片
   +1/-0   sources.mk                                登记 tcp_cubic.c
@@ -96,12 +98,13 @@ commit**。现已显式抓取并记录基线：
 | 提交 | 说明 |
 |---|---|
 | `a06f4575` | 首次引入网络栈（lwIP 初次 vendoring） |
-| `74578420` | ABI 文件拆分 |
+| `74578420` | ABI 文件划分 |
 | `f773b0aa` | 重新 vendoring：210 文件一次性引入（用户态 → 内核） |
 | `8e466330` | LS2K1000 移植，`pbuf.c` +15 行板级诊断 |
 | `7a0966c0` | lane stage B：按 lane 分桶 lwIP PCB 链表 |
 | `b1bb28b5` | 按 lane 分片 TCP 快/慢定时器 |
 | `16304db8` | 修 lane 桶中 TCP pcb 双重索引移除 |
+| `5ea06a78` | lane stage C：pbuf 池按当前 lane 索引的骨架（见 §2.9） |
 | 见 §2.5 | 把锁契约变成可执行：`LWIP_ASSERT_CORE_LOCKED()` 从空宏接到 `g_lwip_lock` 的持有者 CPU |
 
 ### 2.2 引入的独有概念
@@ -112,6 +115,13 @@ commit**。现已显式抓取并记录基线：
 
 **这不是"补丁级"改动，而是数据结构级改动。** 这一点必须让任何读代码的人知道：
 本目录下的 TCP/UDP 链表组织方式与上游不同，不可按上游文档推断行为。
+
+§2.9 的 `LWIP_MEMP_LANE()` 是同一族概念的另一处：**"当前 lane"是移植层维护的
+上下文**（`net_lane.h` 的 `net_lane_ctx_push/pop/get`），由进入 lwIP 核心的各入口
+设置，而不是 lwIP 自己推导出来的。它刻意**不是**第二种 lane 定义——从 CPU 派生
+lane 的 `net_lane_of_cpu()` 已经存在，`docs/net/net-lanes.md` 记录了那正是
+`16304db8` 与 `f7f3d670` 两次事故的成因：一条连接上的 pcb 与 pbuf 必须落在同一条
+lane 上，而这件事只有在"lane 是什么"全树只有一个定义时才可能成立。
 
 ### 2.3 我们主动裁掉的上游目录
 
@@ -278,6 +288,55 @@ lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_
   64 KiB。
 - 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
   "还回去" 的机制。
+
+### 2.9 `LWIP_MEMP_LANE()`：pbuf 池按当前 lane 索引（本树独有）
+
+**这条与 §2.5 是同一种接线**：上游不提供这个维度，移植层提供，lwIP 侧只加一个
+受 `#ifdef` 保护的分派。它不是"给 memp 打补丁"，因为改的是**分配器回答什么问题**。
+
+上游 `src/core/memp.c` 里没有 lane：`memp_malloc()` 收一个 pool id，
+`do_memp_malloc_pool()` 收一个描述符，`pbuf_alloc()` 原样转发 `MEMP_PBUF_POOL`。
+本树在 `CONFIG_NET_LANES > 1` 下让移植层通过 `LWIP_MEMP_LANE()`（声明在
+`kernel/net/lwip_port/lwipopts.h`，实现在 `kernel/net/lwip_stack.c` 的
+`a20_lwip_memp_lane()`）回答"当前这段工作属于哪条 lane"，memp 用它索引一张
+per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被分片**，其余池
+保持全局——它们的内容既不按包也不按连接。
+
+| 改动 | 位置 |
+|---|---|
+| `memp_desc_for(type)`：`MEMP_PBUF` / `MEMP_PBUF_POOL` 走 lane 表，其余走 `memp_pools[]` | `src/core/memp.c` |
+| `memp_init()` 在自身池循环之后，为 lane 1..N-1 复制一份描述符 | `src/core/memp.c` |
+| `struct memp_lane_count { u32_t alloc; u32_t freed; }` 与 `memp_lane_count_get()` | `src/include/lwip/priv/memp_priv.h` |
+| `memp_malloc()` / `memp_free()` 各自记一次单调计数 | `src/core/memp.c` |
+
+**lane 0 指向上游那个描述符对象本身**，不是副本，所以 `memp_pools[]` 与
+`lwip_stats.memp[]` 对 lane 0 的指向和上游一模一样。lane 1..N-1 的副本在
+`memp_init()` 里取——那是描述符唯一完整的那一刻（`LWIP_MEMPOOL_DECLARE` 用池自己的
+`LWIP_MEMPOOL()` 行算出元素大小，在这里重写一遍就是第二份要同步的副本）。
+
+**必须说清楚它没有做到什么**，因为名字很容易被读大：
+
+- **它没有分片内存。** `net_profile.h` 三档全是 `MEMP_MEM_MALLOC=1`，该模式下
+  `memp_init_pool()` 是空桩，`do_memp_malloc_pool()` 是
+  `mem_malloc(MEMP_SIZE + MEMP_ALIGN_SIZE(desc->size))`——描述符只贡献一个大小，
+  于是两个同样大小的描述符从同一块堆上取。真正的分片要走静态预留布局
+  （`!MEMP_MEM_MALLOC`），每条 lane 一份 base 数组和一条空闲链表；本树没有建，
+  `lwipopts.h` 里的 profile 静态断言也只按**一份**拷贝预留 `.bss`。
+- **释放路径没有因此改变。** 同一模式下 `do_memp_free_pool()` 忽略描述符，元素
+  无论经哪条 lane 的表索引进来，都回到同一块 lwIP 堆。
+- 因此今天可观测的只有那条 per-lane 计数。
+
+**为什么是计数器而不是"已用"水位。** `memp_free()` 拿到的是 pool id 和指针，
+没有任何东西说明这个元素是哪条 lane 发出去的；把它记到释放方会漂移，记到分配方
+需要 lwIP 的 `struct pbuf` 里没有位置放的所有权标签。按前一种口径喂出来的水位会在
+第一次 lane 不匹配时下溢 `u16_t`，所以干脆不提供。现在这两个单调计数是精确的、
+不会下溢的：每条 lane 的池发出去多少、回来多少。
+
+**`CONFIG_NET_LANES=1` 折叠成什么**：`memp_desc_for(type)` 是宏
+`memp_pools[type]`，即上游原句；`LWIP_MEMP_LANE()` 不被定义。实测 `memp.o` 在
+一 lane 下 `.text`/`.rodata`/`.sdata` 与改动前逐字节相同，加 `-fno-sanitize=undefined`
+重编后整个目标文件也逐字节相同（仅存的差异是 UBSan 内嵌的源码行号表，因为文件
+多了行——加一行注释也会让它动，这不是本改动特有的）。
 
 ## 3. 重新同步上游的流程
 

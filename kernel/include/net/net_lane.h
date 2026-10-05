@@ -115,4 +115,91 @@ static inline struct net_lane *net_lane(unsigned index)
     return &g_net_lanes[index % CONFIG_NET_LANES];
 }
 
+/*
+ * The current lane: which lane owns the network work in progress right now.
+ *
+ * Stage C needs this because lwIP's allocator API has no lane dimension:
+ * memp_malloc(MEMP_PBUF) takes a pool id and nothing else, and pbuf_alloc()
+ * has no lane parameter either.  The only way to partition a pool per lane
+ * without rewriting every allocation site in the stack is for memp to ask
+ * "which lane is this?" and index its pool array by the answer.
+ *
+ * WHY IT IS A CONTEXT AND NOT A HASH.  The obvious cheap answer is to derive
+ * the lane from the CPU that happens to be running, and that answer is
+ * forbidden here.  Lane already has exactly one definition in this tree --
+ * net_lane_of(ip, port), address derived, and both ends of a connection must
+ * compute the same value (see the header comment above).  A CPU-derived lane
+ * is a *second* definition, and having two is what produced the two bugs
+ * net-lanes.md records: 16304db8 (a pcb indexed by its lane twice) and
+ * f7f3d670 (a lookup hashing the wrong port).  A pbuf pool keyed on the CPU
+ * would put the pbufs of one connection in a different lane's pool from the
+ * PCBs of the same connection, and the two halves would stop agreeing.
+ * net_lane_of_cpu() exists for work that genuinely belongs to a CPU rather
+ * than to a connection (ARP, ICMP, NDP -- see its comment), and must not be
+ * used here.
+ *
+ * WHO SETS IT.  Every A20OS entry point into the lwIP core sets it before
+ * calling into lwIP, and it stays valid for the whole g_lwip_lock critical
+ * section:
+ *
+ *   - receive drain:  the netif being drained, by its own IPv4 address
+ *     (a20_lwip_process_netif_rx_tx_locked).  Stage D replaces this with the
+ *     owning lane of each individual packet, which is the real answer and is
+ *     not available before a packet has been parsed.
+ *   - socket system calls:  net_socket_t::lane, which is address derived from
+ *     the bound (ip, port) by net_socket_lane_of_addr().
+ *   - the timer segment:  whatever the caller established; it walks every
+ *     lane, so it has no single owning lane.
+ *
+ * STORAGE.  One plain global, not a per-CPU array.  There is no per-CPU data
+ * infrastructure in this tree yet (core/cpu.h only offers cpu_current_id()),
+ * and a global is sufficient because the value is written and read only while
+ * g_lwip_lock is held, which is what makes it a value at all.  The invariant
+ * is stated here rather than assumed: reading it without the lock is a bug,
+ * and a20_lwip_unlock() resets it to lane 0 so that a section which forgets
+ * to set it degrades to lane 0 rather than inheriting a foreign lane.
+ *
+ * AT ONE LANE every function below compiles to a constant, so a caller can
+ * write net_lane_ctx_push(lane) unconditionally and the embedded build folds
+ * it away -- the same property net_lane_of() has.
+ */
+#if CONFIG_NET_LANES > 1
+extern unsigned a20_net_lane_cur;
+
+/* Scope a stretch of lwIP work to one lane.  Returns the previous lane so a
+ * nested section can restore it; see net_lane_ctx_pop(). */
+static inline unsigned net_lane_ctx_push(unsigned lane)
+{
+    unsigned prev = a20_net_lane_cur;
+    a20_net_lane_cur = lane % CONFIG_NET_LANES;
+    return prev;
+}
+
+static inline void net_lane_ctx_pop(unsigned prev)
+{
+    a20_net_lane_cur = prev;
+}
+
+static inline unsigned net_lane_ctx_get(void)
+{
+    return a20_net_lane_cur;
+}
+#else /* CONFIG_NET_LANES == 1 */
+static inline unsigned net_lane_ctx_push(unsigned lane)
+{
+    (void)lane;
+    return 0;
+}
+
+static inline void net_lane_ctx_pop(unsigned prev)
+{
+    (void)prev;
+}
+
+static inline unsigned net_lane_ctx_get(void)
+{
+    return 0;
+}
+#endif /* CONFIG_NET_LANES > 1 */
+
 #endif /* _NET_LANE_H */
