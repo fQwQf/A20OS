@@ -53,7 +53,7 @@ net_socket_t *net_socket_alloc(void) {
  * global g_net_lock kept every holder of a socket pointer inside one critical
  * section.  With the registry sharded, a lookup that finds a socket in one
  * bucket and then needs a second bucket cannot keep the first one held, so a
- * pointer has to outlive its bucket lock on its own -- see net_socket_ref() in
+ * pointer has to outlive its lock on its own -- see net_socket_ref() in
  * socket_internal.h.  This also closes a pre-existing hole: net_socket_from_file()
  * drops its vfile reference before returning, so a concurrent close() on another
  * CPU could free the socket before the caller got as far as taking a lock.
@@ -367,11 +367,9 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
     }
     net_socket_t *sa = net_socket_from_file(a);
     net_socket_t *sb = net_socket_from_file(b);
-    /* Two buckets, taken in ascending order.  They are usually in different
-     * shards precisely because registration starts from the creating CPU's own
-     * bucket, so the pair lock is the common case here, not a corner. */
-    net_bucket_pair_t pair = net_bucket_lock2(net_socket_bucket(sa),
-                                              net_socket_bucket(sb));
+    /* Two sockets, taken in ascending address order.  Which registry buckets
+     * they landed in is irrelevant now: the lock is the socket's own. */
+    net_sock_pair_t pair = net_sock_lock2(sa, sb);
     sa->peer = sb;
     sb->peer = sa;
     sa->connected = 1;
@@ -389,7 +387,7 @@ int net_socketpair_create(int domain, int type, int protocol, int out_gfd[2]) {
             sb->peer_pid = pid; sb->peer_uid = uid; sb->peer_gid = gid;
         }
     }
-    net_bucket_unlock2(pair);
+    net_sock_unlock2(pair);
     out_gfd[0] = a;
     out_gfd[1] = b;
     return 0;
@@ -460,10 +458,9 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
         net_socket_free(conflict);
         return -EADDRINUSE;
     }
-    int b = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(b);
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     memcpy(s->local, bind_addr, bind_len);
@@ -474,7 +471,7 @@ int net_bind_sock(net_socket_t *s, const void *addr, size_t addrlen) {
      * same critical section that publishes s->local so no reader can see one
      * without the other. */
     s->lane = net_socket_lane_of_addr(bind_addr, bind_len, s->lane);
-    net_bucket_unlock(b, flags);
+    net_sock_unlock(s, flags);
     return net_inet_bind_pcb(s, bind_addr, addrlen);
 }
 
@@ -495,17 +492,16 @@ int net_connect_sock(net_socket_t *s, const void *addr, size_t addrlen) {
             return -EAFNOSUPPORT;
     }
 
-    int b = net_socket_bucket(s);
-    uint64_t flags = net_bucket_lock(b);
+    uint64_t flags = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, flags);
+        net_sock_unlock(s, flags);
         return -ENOTSOCK;
     }
     if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
         net_sockaddr_loopback(s, net_alloc_ephemeral_port_locked());
     memcpy(s->peer_addr, addr, addrlen);
     s->peer_len = addrlen;
-    net_bucket_unlock(b, flags);
+    net_sock_unlock(s, flags);
     int r = net_inet_connect(s, addr, addrlen, addr, addrlen);
     if (r < 0 && r != -EINPROGRESS) {
         return r;
@@ -549,10 +545,9 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
     }
 
     int delivered = 0;
-    int b = net_socket_bucket(s);
-    uint64_t irq = net_bucket_lock(b);
+    uint64_t irq = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, irq);
+        net_sock_unlock(s, irq);
         return -ENOTSOCK;
     }
     if (!s->bound) {
@@ -572,11 +567,22 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
     uint8_t src_local[NET_SOCKADDR_MAX];
     size_t src_local_len = s->local_len;
     memcpy(src_local, s->local, src_local_len);
-    net_bucket_unlock(b, irq);
+    /* Copied out for the same reason src_local is: the loop below runs with no
+     * lock on s at all. */
+    int proto = s->protocol;
+    net_sock_unlock(s, irq);
 
-    /* One destination bucket at a time.  The wake batch is flushed when it
-     * fills -- exactly as the old single-lock loop did when it filled -- so
-     * every destination is still visited and no wake is dropped. */
+    /* One destination bucket at a time, and inside it one destination socket
+     * lock at a time.  The slot table is still read under the bucket lock --
+     * that is the one thing the bucket is for -- but the queue work, which is
+     * what this loop spends its time on, is now serialized only against the
+     * one socket being enqueued.  Before, a raw send on one socket blocked
+     * every socket in the bucket, and holding s's own bucket across the whole
+     * scan blocked all 512 of them at once.
+     *
+     * The wake batch is flushed when it fills -- exactly as the old single-lock
+     * loop did when it filled -- so every destination is still visited and no
+     * wake is dropped. */
     for (int bucket = 0; bucket < NET_SOCK_BUCKETS; bucket++) {
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
@@ -584,19 +590,24 @@ static int net_sendto_raw_ipv6(net_socket_t *s, void *buf, size_t len,
         int base = bucket << NET_SOCK_BUCKET_SHIFT;
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
             net_socket_t *dst = g_sockets[base + k];
-            if (!dst || dst->closed || dst->domain != AF_INET6 ||
-                dst->type != SOCK_RAW || dst->protocol != s->protocol)
+            if (!dst)
                 continue;
-            if (!raw_ipv6_filter_passes(dst, buf, len))
-                continue;
-            if (net_enqueue_msg_locked(dst, buf, len, src_local,
-                                       src_local_len) >= 0) {
-                delivered++;
-                (void)wait_queue_collect_one(
-                    &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-                if (wake_q.count == PROC_WAKE_Q_CAPACITY)
-                    break;
+            /* Bucket outer, socket inner: the same nesting net_bucket_scan()
+             * does, and the only order a bucket lock may ever be taken in. */
+            uint64_t df = net_sock_lock(dst);
+            if (!dst->closed && dst->domain == AF_INET6 &&
+                dst->type == SOCK_RAW && dst->protocol == proto &&
+                raw_ipv6_filter_passes(dst, buf, len)) {
+                if (net_enqueue_msg_locked(dst, buf, len, src_local,
+                                           src_local_len) >= 0) {
+                    delivered++;
+                    (void)wait_queue_collect_one(
+                        &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
+                }
             }
+            net_sock_unlock(dst, df);
+            if (wake_q.count == PROC_WAKE_Q_CAPACITY)
+                break;
         }
         net_bucket_unlock(bucket, bf);
         (void)proc_wake_q_flush(&wake_q);
@@ -672,26 +683,29 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 
     /*
-     * Two sockets, two buckets, taken in ascending order.  The destination is
+     * Two sockets, taken in ascending address order.  The destination is
      * resolved first, outside any lock, because it comes from a whole-table
-     * scan that has to walk the shards one at a time; the scan returns a
-     * reference, which is what lets the bucket be dropped before the pair is
-     * taken and is why this path cannot nest a third lock.
+     * scan that walks the registry a bucket at a time; the scan returns a
+     * reference, which is what lets s's lock be dropped before the pair is
+     * taken and is why this path cannot nest a third socket lock.
      */
     net_socket_t *dst = NULL;
     const void *dst_addr = addr;
     size_t dst_len = addrlen;
+    uint8_t dst_scratch[NET_SOCKADDR_MAX];
     uint8_t src_local[NET_SOCKADDR_MAX];
     size_t src_local_len = 0;
-    int sb = net_socket_bucket(s);
+    bool stream_end = false;
+    bool had_peer = false;
+    uint64_t send_timeout = 0;
     {
-        uint64_t sf = net_bucket_lock(sb);
+        uint64_t sf = net_sock_lock(s);
         if (!net_socket_is_live(s)) {
-            net_bucket_unlock(sb, sf);
+            net_sock_unlock(s, sf);
             return -ENOTSOCK;
         }
         if (s->closed || s->shut_wr) {
-            net_bucket_unlock(sb, sf);
+            net_sock_unlock(s, sf);
             return -EPIPE;
         }
         if (!s->bound && (s->domain == AF_INET || s->domain == AF_INET6))
@@ -699,22 +713,32 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
         src_local_len = s->local_len;
         memcpy(src_local, s->local, src_local_len);
         if (!dst_addr && s->connected) {
-            dst_addr = s->peer_addr;
+            /* Copied out rather than pointed at: the enqueue below runs after
+             * this lock is dropped, and s->peer_addr is bind-rewritable. */
+            memcpy(dst_scratch, s->peer_addr, s->peer_len);
             dst_len = s->peer_len;
+            dst_addr = dst_scratch;
         }
-        if (s->peer &&
+        /* The peer pointer is sampled under s's lock, which is what keeps it
+         * from being freed between the test and the net_socket_ref() below. */
+        net_socket_t *peer = s->peer;
+        if (peer &&
             (s->type == SOCK_STREAM || s->type == SOCK_SEQPACKET ||
-             net_socket_is_live(s->peer))) {
-            dst = net_socket_ref(s->peer);
+             net_socket_is_live(peer))) {
+            dst = net_socket_ref(peer);
         }
-        net_bucket_unlock(sb, sf);
+        /* Sampled here because every use of it below is with no lock on s. */
+        stream_end = (s->type == SOCK_STREAM && s->ever_connected);
+        send_timeout = s->send_timeout_ticks;
+        had_peer = (s->peer != NULL);
+        net_sock_unlock(s, sf);
     }
-    if (!dst && s->peer) {
+    if (!dst && had_peer) {
         /* The peer is gone (or was never a live socket); drop the stale
          * back-pointer and fall back to an address lookup. */
-        uint64_t sf = net_bucket_lock(sb);
+        uint64_t sf = net_sock_lock(s);
         if (s->peer) s->peer = NULL;
-        net_bucket_unlock(sb, sf);
+        net_sock_unlock(s, sf);
     }
     if (!dst && dst_addr)
         dst = net_find_bound_socket(s->domain, s->type, dst_addr, dst_len);
@@ -727,24 +751,22 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
     }
 
     int r;
-    net_bucket_pair_t pair = net_bucket_lock2(sb, net_socket_bucket(dst));
+    net_sock_pair_t pair = net_sock_lock2(s, dst);
     /* The search above ran without a lock, so the destination may have been
-     * closed and unregistered in between.  A live socket's bucket never moves,
-     * so re-checking in_registry under the pair is enough to know this is still
-     * the socket the scan found. */
+     * closed in between; the reference taken on it keeps it from being freed
+     * underneath, so a liveness re-check is all that is left to do. */
     if (!net_socket_is_live(dst)) {
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         net_socket_free(dst);
-        return (s->type == SOCK_STREAM && s->ever_connected)
-                   ? -EPIPE
-                   : (dst_addr ? -ECONNREFUSED : -EDESTADDRREQ);
+        return stream_end ? -EPIPE
+                          : (dst_addr ? -ECONNREFUSED : -EDESTADDRREQ);
     }
     if (len <= NET_MAX_PAYLOAD) {
         if (dst->rx_count >= NET_MAX_QUEUE && !dontwait) {
-            net_bucket_unlock2(pair);
+            net_sock_unlock2(pair);
             int br = net_enqueue_msg_blocking(s, dst, buf, len, src_local,
                                               src_local_len, dontwait,
-                                              s->send_timeout_ticks);
+                                              send_timeout);
             net_socket_free(dst);
             return br;
         }
@@ -754,12 +776,12 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
         if (r >= 0)
             (void)wait_queue_collect_one(
                 &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-        net_bucket_unlock2(pair);
+        net_sock_unlock2(pair);
         (void)proc_wake_q_flush(&wake_q);
         net_socket_free(dst);
         return r;
     }
-    net_bucket_unlock2(pair);
+    net_sock_unlock2(pair);
 
     size_t total = 0;
     while (total < len) {
@@ -768,7 +790,7 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
             chunk = NET_MAX_PAYLOAD;
         int br = net_enqueue_msg_blocking(s, dst, (const uint8_t *)buf + total,
                                           chunk, src_local, src_local_len,
-                                          dontwait, s->send_timeout_ticks);
+                                          dontwait, send_timeout);
         if (br < 0) {
             net_socket_free(dst);
             return total ? (int)total : br;
@@ -822,8 +844,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         for (;;) {
             a20_lwip_poll_waiter();
             int r = -EAGAIN;
-            int rb = net_socket_bucket(s);
-        uint64_t irq = net_bucket_lock(rb);
+        uint64_t irq = net_sock_lock(s);
             if (s->rx_head) {
                 if (flags & MSG_PEEK) {
                     net_msg_t *head = s->rx_head;
@@ -869,52 +890,52 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
                 proc_wake_q_init(&wq);
                 (void)wait_queue_collect_one(&s->write_waitq, 0,
                                              PROC_WAKE_EVENT, &wq);
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 (void)proc_wake_q_flush(&wq);
                 return r;
             }
             if (r != -EAGAIN) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 return r;
             }
             task_t *cur = proc_current();
             if (!cur) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 return -EAGAIN;
             }
             if (net_task_has_unblocked_signal(cur)) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 return -ERESTARTSYS;
             }
             if (net_socket_wait_expired(s, start, 0)) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 return -EAGAIN;
             }
             if (s->nonblock || dontwait || s->closed || s->peer_closed ||
                 s->shut_rd) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 return (s->closed || s->peer_closed || s->shut_rd) ? 0 : -EAGAIN;
             }
             uint64_t deadline = s->recv_timeout_ticks ?
                                 start + s->recv_timeout_ticks : 0;
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             proc_wait_token_t token =
                 proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
             if (!token.task)
                 return -EAGAIN;
             wait_queue_entry_t entry = {0};
-            irq = net_bucket_lock(rb);
+            irq = net_sock_lock(s);
             /* Re-check before linking: a send between the empty check and
              * the park would otherwise wake nobody and we would sleep
              * forever (classic lost-wakeup; the legacy loop does the same). */
             if (s->rx_head || a20_channel_readable(s->ch_ep)) {
-                net_bucket_unlock(rb, irq);
+                net_sock_unlock(s, irq);
                 (void)proc_park_cancel(token);
                 proc_park_finish(token);
                 continue;
             }
             bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             proc_wake_reason_t reason;
             if (linked)
                 reason = proc_park_commit(token);
@@ -932,8 +953,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         a20_lwip_poll_waiter();
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        int rb = net_socket_bucket(s);
-        uint64_t irq = net_bucket_lock(rb);
+        uint64_t irq = net_sock_lock(s);
         int rx_count_before = s->rx_count;
         net_msg_t *head = s->rx_head;
         size_t datagram_len =
@@ -984,7 +1004,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         if (r != -EAGAIN || s->nonblock || dontwait || s->closed || s->peer_closed || s->shut_rd) {
             if (r == -EAGAIN && (s->closed || s->peer_closed || s->shut_rd))
                 r = 0;
-            /* Accounting is deliberately outside the bucket lock: net_tcp_recved()
+            /* Accounting is deliberately outside the socket lock: net_tcp_recved()
              * takes g_lwip_lock, and the two must never nest.  A peeked stream
              * message is charged too -- the bytes are in the receive queue
              * either way, and never charging them would stall the window once
@@ -997,7 +1017,7 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
             if (r > 0 && s->rx_head)
                 (void)wait_queue_collect_one(
                     &s->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             (void)proc_wake_q_flush(&wake_q);
             if (recved)
                 net_tcp_recved(s, (size_t)recved);
@@ -1005,42 +1025,42 @@ int net_recvfrom_socket_meta(net_socket_t *s, void *buf, size_t len, int flags,
         }
         task_t *cur = proc_current();
         if (!cur) {
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             return -EAGAIN;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             return -ERESTARTSYS;
         }
         if (net_socket_wait_expired(s, start, 0)) {
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             return -EAGAIN;
         }
         uint64_t deadline = s->recv_timeout_ticks ?
                             start + s->recv_timeout_ticks : 0;
-        net_bucket_unlock(rb, irq);
+        net_sock_unlock(s, irq);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
         if (!token.task)
             return -EAGAIN;
 
         wait_queue_entry_t entry = {0};
-        irq = net_bucket_lock(rb);
+        irq = net_sock_lock(s);
         if (s->rx_head || s->nonblock || dontwait || s->closed ||
             s->peer_closed || s->shut_rd) {
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             continue;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            net_bucket_unlock(rb, irq);
+            net_sock_unlock(s, irq);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ERESTARTSYS;
         }
         bool linked = wait_queue_link(&s->read_waitq, &entry, token, 0);
-        net_bucket_unlock(rb, irq);
+        net_sock_unlock(s, irq);
         proc_wake_reason_t reason;
         if (linked)
             reason = proc_park_commit(token);

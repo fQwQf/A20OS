@@ -59,26 +59,25 @@ static void a20_lwip_append(char *buf, size_t bufsz, size_t *off,
  * Lock-safe entry points:
  * - a20_lwip_lock()/a20_lwip_unlock(): outer lock for all lwIP API calls.
  * - a20_lwip_poll_locked(): run with g_lwip_lock held; does not allocate or
- *   acquire a socket-table bucket lock.
+ *   acquire a net lock.
  * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
  *   runs the socket deferred bottom-half (net_inet_bottom_half_process_all)
- *   under a socket-table bucket lock only.
+ *   under socket locks only.
  *
- * "The two locks are never held together" used to be false here, and the lane
- * work below reasoned from that.  net_inet_accept_stage_drain() ran inside the
- * g_net_lock region and took a20_lwip_lock() for the pcb handoff, so both were
- * genuinely held together on the accept path.  The socket-table sharding
- * removed the reason for it: the drain now drops the listener's bucket across
- * the handoff (it has to, because it also registers each child, and
- * net_register_socket_locked() takes a shard of its own), so the rule holds
- * again for the accept path.
+ * "The two locks are never held together" used to be false here.  Under the
+ * single g_net_lock, net_inet_accept_stage_drain() held it and then took
+ * a20_lwip_lock() for the pcb handoff, so both were genuinely held together on
+ * the accept path.  Two changes removed the reason for it, in that order: the
+ * registry sharding made the drain drop the listener's lock across the handoff
+ * (it has to, because it also registers each child and
+ * net_register_socket_locked() takes a bucket lock of its own), and stage E
+ * replaced that lock with a socket lock that covers strictly less.
  *
- * Order still matters and is still one-way: nothing takes g_lwip_lock and then
- * a socket-table bucket lock, so there is no ABBA cycle.  Any future path that
- * does -- which stage D wants, since draining a receive ring per lane wants to
- * touch socket state -- deadlocks against this one.  Treat net->lwip as the
- * fixed order.  See docs/net/network-lock-contract.md and
- * docs/measured/impl-notes-net.md.
+ * The order is one-way and no path nests them at all: nothing takes
+ * g_lwip_lock and then a net lock, so there is no ABBA cycle to form.  A future
+ * path that did -- draining a receive ring per lane while touching socket state
+ * is the obvious candidate -- has to drop g_lwip_lock first.  See
+ * docs/net/network-lock-contract.md and docs/measured/impl-notes-net.md.
  */
 static int g_lwip_ready;
 static spinlock_t g_lwip_lock = SPINLOCK_INIT;
@@ -259,9 +258,9 @@ static void a20_lwip_sync_link_state(struct netif *netif)
  *
  * Called with g_lwip_lock NOT held.  That is the whole reason the change is
  * not broadcast from a20_lwip_sync_link_state() directly: net_netlink_link_notify()
- * walks the socket table under bucket locks, and the lock contract in
+ * walks the socket table under net locks, and the lock contract in
  * docs/net/network-lock-contract.md forbids holding g_lwip_lock together with a
- * bucket lock.  So the event is recorded under the lwIP lock, collected here,
+ * net lock.  So the event is recorded under the lwIP lock, collected here,
  * and the lwIP lock is dropped before any bucket is touched.
  *
  * Events are collected under the lock so the netif cannot be freed or re-registered
@@ -1224,7 +1223,7 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
 /*
  * IRQ top-half entry for a single virtio-net instance.
  * Runs with g_lwip_lock held; performs bounded work only (descriptor ring
- * drainer, lwIP input, no kmalloc, no socket-table bucket lock).
+ * drainer, lwIP input, no kmalloc, no net lock).
  *
  * AT MORE THAN ONE LANE IT DOES NOT RUN THE PROTOCOL STACK.  It reads each
  * frame out of the device ring and stages it on its owning lane's queue, and
@@ -1443,7 +1442,7 @@ void a20_lwip_poll(void) {
  * the socket queues and wake read_waitq) before picking the next task.  TCP
  * timers likewise advance from kernel_progress_timer_tick() on the timer IRQ.
  *
- * The bottom-halves are NOT gated: they take a socket-table bucket lock rather
+ * The bottom-halves are NOT gated: they take a socket lock rather
  * than g_lwip_lock, and the waiter needs them to drain its own deferred
  * receive data.
  */
@@ -1547,10 +1546,10 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
 
     /*
      * Lane occupancy, appended after g_lwip_lock is dropped: sockets live under
-     * the socket-table bucket locks.  The drop above is what keeps the order
-     * one-way -- the accept
-     * path nests net -> lwip, so anything that nests the other way round would
-     * deadlock against it.  A gateway / netconf
+     * net locks, and no path nests a net lock under g_lwip_lock, so nothing
+     * here could deadlock even if it were the other way round.  It runs outside
+     * g_lwip_lock anyway, because the census takes a lock per socket and an
+     * lwIP critical section must not do that.  A gateway / netconf
      * line, not a hot counter -- this exists so that "did the lanes actually
      * spread the connections" is answerable without attaching a debugger, which
      * is the question every later stage depends on.
@@ -1558,20 +1557,25 @@ int a20_lwip_format_status(char *buf, size_t bufsz) {
     unsigned lanes[CONFIG_NET_LANES];
     unsigned total = 0;
     memset(lanes, 0, sizeof(lanes));
-    /* One bucket at a time.  The census never needs a second lock -- it reads
-     * only `lane`, which is fixed for the life of the socket -- so it does not
-     * take the shard set as a whole, which the lock rules forbid. */
+    /* One bucket at a time, only to reach the slot table; each socket found is
+     * read under its own lock.  The census never needs a second net lock -- it
+     * reads only `lane`, which is fixed for the life of the socket -- so it does
+     * not take the shard set as a whole, which the lock rules forbid. */
     for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
         uint64_t nflags = net_bucket_lock(b);
         int base = b << NET_SOCK_BUCKET_SHIFT;
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
             net_socket_t *s = g_sockets[base + k];
-            if (!s || !net_socket_is_live(s))
+            if (!s)
                 continue;
-            unsigned l = s->lane;
-            if (l < CONFIG_NET_LANES)
-                lanes[l]++;
-            total++;
+            uint64_t sflags = net_sock_lock(s);
+            if (net_socket_is_live(s)) {
+                unsigned l = s->lane;
+                if (l < CONFIG_NET_LANES)
+                    lanes[l]++;
+                total++;
+            }
+            net_sock_unlock(s, sflags);
         }
         net_bucket_unlock(b, nflags);
     }
@@ -2017,7 +2021,7 @@ int a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
         netif_set_gw(n, &g);
     }
     a20_lwip_unlock(flags);
-    /* Outside g_lwip_lock: the notify path takes socket-table bucket locks. */
+    /* Outside g_lwip_lock: the notify path takes net locks. */
     net_netlink_addr_notify(ifindex, eff_addr, eff_mask);
     return 0;
 }

@@ -129,17 +129,16 @@ int net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen)
         task_t *cur = proc_current();
         local.nl_pid = cur ? (uint32_t)cur->pid : 1;
     }
-    /* One socket, one bucket: publishing the bound address needs nothing else. */
-    int sb = net_socket_bucket(s);
-    uint64_t irq = net_bucket_lock(sb);
+    /* One socket, one lock: publishing the bound address needs nothing else. */
+    uint64_t irq = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(sb, irq);
+        net_sock_unlock(s, irq);
         return -ENOTSOCK;
     }
     memcpy(s->local, &local, sizeof(local));
     s->local_len = sizeof(local);
     s->bound = 1;
-    net_bucket_unlock(sb, irq);
+    net_sock_unlock(s, irq);
 
     /* udevd subscribes to the uevent multicast group when it starts; devices
      * registered before udevd ran had no listener, so their "add" uevents were
@@ -181,33 +180,46 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
         .nl_pid = 0,
         .nl_groups = 0,
     };
-    /* One bucket at a time, each paired with the requester's own bucket so the
-     * reply can be enqueued without ever holding a third lock.  Two buckets is
-     * the documented ceiling, and net_bucket_lock2() takes them ascending, so
-     * the scan cannot form a cycle with any other two-socket path. */
-    int rb = net_socket_bucket(requester);
+    /* The requester's own answers are read once, under its lock, and reused for
+     * every reply. */
     uint32_t recipient_pid = 0;
+    {
+        uint64_t rf = net_sock_lock(requester);
+        if (requester->local_len >= sizeof(net_sockaddr_nl_t))
+            recipient_pid = ((const net_sockaddr_nl_t *)requester->local)->nl_pid;
+        net_sock_unlock(requester, rf);
+    }
+    /* One bucket at a time, only to reach the slot table; each socket found is
+     * read under its own lock and the reply is built there.  The enqueue goes to
+     * the requester, so that lock is taken separately -- one socket at a time,
+     * never three at once, and never a bucket lock under a socket lock. */
     for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
-        net_bucket_pair_t pair = net_bucket_lock2(rb, b);
-        if (pair.lo == rb)
-            recipient_pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
-                ? ((const net_sockaddr_nl_t *)requester->local)->nl_pid : 0;
+        uint64_t bf = net_bucket_lock(b);
         int base = b << NET_SOCK_BUCKET_SHIFT;
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
         int i = base + k;
         net_socket_t *s = g_sockets[i];
-        if (!s || s == requester ||
+        if (!s || s == requester)
+            continue;
+        inet_diag_reply_t reply;
+        /* Bucket outer, socket inner: the same nesting net_bucket_scan() does. */
+        uint64_t sf = net_sock_lock(s);
+        bool skip =
             (s->domain != AF_INET && s->domain != AF_INET6) ||
             (req->sdiag_family != AF_UNSPEC &&
              s->domain != req->sdiag_family) ||
-            !net_diag_protocol_matches(s, req->sdiag_protocol))
+            !net_diag_protocol_matches(s, req->sdiag_protocol);
+        if (skip) {
+            net_sock_unlock(s, sf);
             continue;
+        }
 
         uint8_t state = net_diag_state(s);
-        if (req->idiag_states && !(req->idiag_states & (1U << state)))
+        if (req->idiag_states && !(req->idiag_states & (1U << state))) {
+            net_sock_unlock(s, sf);
             continue;
+        }
 
-        inet_diag_reply_t reply;
         memset(&reply, 0, sizeof(reply));
         reply.nlh.nlmsg_len = sizeof(reply);
         reply.nlh.nlmsg_type = SOCK_DIAG_BY_FAMILY;
@@ -226,14 +238,17 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
         reply.diag.id.idiag_cookie[1] = 0;
         reply.diag.idiag_rqueue = net_diag_rx_bytes(s);
         reply.diag.idiag_inode = (uint32_t)(i + 1);
+        net_sock_unlock(s, sf);
+        uint64_t rf = net_sock_lock(requester);
         int r = net_enqueue_msg_locked(requester, &reply, sizeof(reply),
                                        &kernel_addr, sizeof(kernel_addr));
+        net_sock_unlock(requester, rf);
         if (r < 0) {
-            net_bucket_unlock2(pair);
+            net_bucket_unlock(b, bf);
             return r;
         }
         }
-        net_bucket_unlock2(pair);
+        net_bucket_unlock(b, bf);
     }
 
     netlink_done_t done;
@@ -243,11 +258,11 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
     done.nlh.nlmsg_flags = NLM_F_MULTI;
     done.nlh.nlmsg_seq = req_nlh->nlmsg_seq;
     done.nlh.nlmsg_pid = recipient_pid;
-    /* The closing NLMSG_DONE needs the requester's bucket only. */
-    uint64_t df = net_bucket_lock(rb);
+    /* The closing NLMSG_DONE needs the requester's own lock only. */
+    uint64_t df = net_sock_lock(requester);
     int r = net_enqueue_msg_locked(requester, &done, sizeof(done),
                                    &kernel_addr, sizeof(kernel_addr));
-    net_bucket_unlock(rb, df);
+    net_sock_unlock(requester, df);
     return r < 0 ? r : (int)len;
 }
 
@@ -314,18 +329,29 @@ static int netlink_uevent_broadcast(const char *action,
         int base = b << NET_SOCK_BUCKET_SHIFT;
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
             net_socket_t *s = g_sockets[base + k];
-            if (!s || s->domain != AF_NETLINK ||
-                s->protocol != NETLINK_KOBJECT_UEVENT || !s->bound)
+            if (!s)
                 continue;
-            net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
-            if (!nl || !(nl->nl_groups & UEVENT_GROUP))
-                continue;
-            int r = net_enqueue_msg_locked(s, buf, (size_t)n, &src, sizeof(src));
+            /* Bucket outer, socket inner: the same nesting net_bucket_scan()
+             * does, and the only order a bucket lock is ever taken in. */
+            uint64_t sf = net_sock_lock(s);
+            bool matched = false;
+            int r = 0;
+            if (s->domain == AF_NETLINK && s->bound &&
+                s->protocol == NETLINK_KOBJECT_UEVENT) {
+                net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
+                if (nl && (nl->nl_groups & UEVENT_GROUP)) {
+                    matched = true;
+                    r = net_enqueue_msg_locked(s, buf, (size_t)n, &src,
+                                               sizeof(src));
+                }
+            }
+            net_sock_unlock(s, sf);
             if (r < 0) {
                 net_bucket_unlock(b, bf);
                 return r;
             }
-            delivered++;
+            if (matched)
+                delivered++;
         }
         net_bucket_unlock(b, bf);
     }
@@ -524,7 +550,7 @@ static uint8_t nlrt_mask_prefixlen(const uint8_t mask[4])
 
 /*
  * Copy the interface list out of lwIP.  The lock contract forbids holding
- * g_lwip_lock together with a socket-table bucket lock, so the snapshot is
+ * g_lwip_lock together with a net lock, so the snapshot is
  * taken and the lwIP
  * lock dropped before any reply is enqueued.
  */
@@ -840,7 +866,7 @@ static int nlrt_apply_addr(uint16_t type, uint16_t flags,
      * *different* address can only be reconfigured by an explicit
      * NLM_F_REPLACE (ip addr replace), never silently overwritten by a plain
      * add.  The read and the write are separate lock acquisitions because the
-     * lock contract forbids holding g_lwip_lock and a socket-table bucket lock
+     * lock contract forbids holding g_lwip_lock and a net lock
      * together, and
      * this stack has no rtnl_lock equivalent; two config requests racing on
      * one interface are therefore last-writer-wins. */
@@ -890,7 +916,7 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 
     /* Write requests run before any reply is built and hold no lock: the lwIP
      * helpers take g_lwip_lock themselves, and the lock contract forbids
-     * holding it together with a socket-table bucket lock (taken only further
+     * holding it together with a net lock (taken only further
      * down). */
     if (type == RTM_NEWLINK || type == RTM_NEWADDR || type == RTM_DELADDR) {
         /* Only a single-message write is honoured; a multipart request would
@@ -911,11 +937,10 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 
     net_sockaddr_nl_t from = { .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = 0 };
     /* Every reply below is enqueued into the requester, and nothing else is
-     * touched, so the requester's own bucket is the only lock this needs. */
-    int rb = net_socket_bucket(requester);
-    uint64_t irq = net_bucket_lock(rb);
+     * touched, so the requester's own lock is the only lock this needs. */
+    uint64_t irq = net_sock_lock(requester);
     if (!net_socket_is_live(requester)) {
-        net_bucket_unlock(rb, irq);
+        net_sock_unlock(requester, irq);
         return -ENOTSOCK;
     }
     uint32_t pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
@@ -971,7 +996,7 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
         rc = net_enqueue_msg_locked(requester, &done, sizeof(done),
                                     &from, sizeof(from));
     }
-    net_bucket_unlock(rb, irq);
+    net_sock_unlock(requester, irq);
     return rc < 0 ? rc : (int)len;
 }
 
@@ -989,7 +1014,7 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 /*
  * Sequence numbers for notifications.  Atomic because the broadcast is not
  * serialised by any single lock: two CPUs flushing pending link events walk
- * the table under different bucket locks, and a repeated nlmsg_seq is what
+ * the table under different locks, and a repeated nlmsg_seq is what
  * lets a listener's reorder logic mistake a fresh event for a retransmit.
  */
 static volatile uint32_t g_nlrt_notify_seq;
@@ -1005,7 +1030,7 @@ static uint32_t nlrt_next_seq(void)
  *
  * Takes no lock of its own beyond the one bucket at a time, and must be called
  * with g_lwip_lock NOT held: the lock contract forbids holding it together with
- * a socket-table bucket lock, and nlrt_snapshot() takes it for itself.
+ * a net lock, and nlrt_snapshot() takes it for itself.
  *
  * A full receive queue for one listener does not stop the others: Linux drops
  * the message for that socket and reports the overflow, because the
@@ -1024,13 +1049,24 @@ static int nlrt_broadcast(const uint8_t *msg, size_t len, uint32_t group)
         int base = b << NET_SOCK_BUCKET_SHIFT;
         for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
             net_socket_t *s = g_sockets[base + k];
-            if (!s || s->domain != AF_NETLINK ||
-                s->protocol != NETLINK_ROUTE || !s->bound)
+            if (!s)
                 continue;
-            net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
-            if (!nl || !(nl->nl_groups & group))
+            /* Bucket outer, socket inner, as above. */
+            uint64_t sf = net_sock_lock(s);
+            bool matched = false;
+            int r = -1;
+            if (s->domain == AF_NETLINK && s->bound &&
+                s->protocol == NETLINK_ROUTE) {
+                net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
+                if (nl && (nl->nl_groups & group)) {
+                    matched = true;
+                    r = net_enqueue_msg_locked(s, msg, len, &src, sizeof(src));
+                }
+            }
+            net_sock_unlock(s, sf);
+            if (!matched)
                 continue;
-            if (net_enqueue_msg_locked(s, msg, len, &src, sizeof(src)) < 0)
+            if (r < 0)
                 dropped++;
             else
                 delivered++;

@@ -5,10 +5,11 @@
 /*
  * Socket-table enumeration behind /proc/net/{tcp,udp,unix}.
  *
- * This file runs under socket-table bucket locks and nothing else.  procfs
+ * This file runs under the socket's own lock, nested inside a bucket lock
+ * that is held only to reach the slot table.  procfs
  * renders its rows from the walk callback, so that callback executes in
  * spinlock context: no blocking, no allocation, and no lwIP call, because
- * g_lwip_lock and a bucket lock are never held together
+ * g_lwip_lock and a net lock are never held together
  * (docs/net/network-lock-contract.md).
  *
  * The walk takes ONE bucket lock at a time and releases it before taking the
@@ -111,20 +112,19 @@ int net_socket_rx_available(net_socket_t *s, size_t *out)
         return -ENOTSOCK;
 
     size_t total;
-    int b = net_socket_bucket(s);
-    uint64_t irq = net_bucket_lock(b);
+    uint64_t irq = net_sock_lock(s);
     if (!net_socket_is_live(s)) {
-        net_bucket_unlock(b, irq);
+        net_sock_unlock(s, irq);
         return -ENOTSOCK;
     }
     if (s->domain == AF_PACKET) {
         /* Captured frames are whole L2 payloads with no stream position, so
          * there is no byte count this socket can honestly report. */
-        net_bucket_unlock(b, irq);
+        net_sock_unlock(s, irq);
         return -EOPNOTSUPP;
     }
     total = net_rx_queued_locked(s);
-    net_bucket_unlock(b, irq);
+    net_sock_unlock(s, irq);
     *out = total;
     return 0;
 }

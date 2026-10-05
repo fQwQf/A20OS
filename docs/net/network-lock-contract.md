@@ -2,26 +2,31 @@
 
 本契约定义 A20OS 内核网络路径的锁规则，适用于 `kernel/net/` 中的 socket 层、`kernel/net/lwip_stack.c` 中的 lwIP 集成，以及任何会触碰网络状态的 deferred bottom-half 或 workqueue。
 
-> **更正（2026-10-05，两次）：**
+> **更正（2026-10-05，三次）：**
 >
 > 1. 本文此前写"accept 路径上 `g_net_lock` 与 `g_lwip_lock` 同时持有，顺序 net → lwip"。
 >    这条**已经不成立**。提交 `2f17a5ba8`（`net: 删除 g_net_lock，socket 表分片为
 >    net_bucket 桶锁`）删除了 `g_net_lock`，全树再无该符号；accept 落底现在只取
->    listener 所在的那一把 `net_bucket[b]`。`g_lwip_lock` 与**任何** bucket 锁不得
->    同时持有这条互斥不变量在分片时被明确保留（`kernel/include/core/lock.h:82-84`，
->    `kernel/net/socket_internal.h:434-436`）。**净效果是本文变严格了，不是放松了**：
->    原来只禁 `g_net_lock` 一把，现在禁全部 `NET_SOCK_BUCKET_COUNT` 把。
+>    listener 所在的那一把 `net_bucket[b]`。`g_lwip_lock` 与**任何** net 锁不得同时
+>    持有这条互斥不变量在分片时被明确保留（`kernel/include/core/lock.h:95-98`，
+>    `kernel/net/socket_internal.h:500`）。**净效果是本文变严格了，不是放松了**：
+>    原来只禁 `g_net_lock` 一把，现在禁全部 net 锁。
 > 2. 本文把 `g_net_lock` 当作"现存的一把全局锁"来描述适用范围（哪些状态由它保护、
->    谁可以取它、取它的顺序要求）。这些描述**逐条按 `net_bucket` 重写**在下方
->    「锁」一节；正文其余部分凡出现 `g_net_lock` 的，统一读作
->    "**该 socket 所属的 bucket 锁**"，而不是一把全局锁。
-
-最后核实：与 `2f17a5ba8` 之后的 `net_bucket` 分片树一致，并补入 `7d217d3fd`
-（`LWIP_ASSERT_CORE_LOCKED()` 接线）与 `edc29d31a`（回环 TCP 传输不结束）的事实。
+>    谁可以取它、取它的顺序要求）。这些描述**逐条按 `net_socket_t.lock` 重写**在
+>    下方「锁」一节；正文其余部分凡出现 `g_net_lock` 的，统一读作
+>    "**该 socket 自己的 `net_socket_t.lock`**"，而不是一把全局锁。
+> 3. 提交 `7c7a4d7c8`（阶段 E，per-socket 锁收窄）落地后，桶锁 `net_bucket[b]`
+>    **不再保护任何 socket 状态**，只管 registry slot 表与每桶空闲位图。正文凡写
+>    "桶锁保护接收队列 / accept 队列 / waiter"的地方，一律读作"该 socket 自己的锁"。
+>    旧表述与新表述的逐条对照见下方「锁」一节的三列表。
+>
+>最后核实：与 `7c7a4d7c8` 之后的 per-socket 锁树一致（桶锁仅剩 slot 表职责），并补入
+>`7d217d3fd`（`LWIP_ASSERT_CORE_LOCKED()` 接线）与 `edc29d31a`
+>（回环 TCP 传输不结束）的事实。
 
 ## 范围与目标
 
-A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串行化所有 lwIP 核心状态。socket 层用一组分片桶锁 `g_net_buckets[]` 保护 socket 表、每个 socket 的消息队列、accept 队列与 waiter。
+A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串行化所有 lwIP 核心状态。socket 表本身由一组分片桶锁 `g_net_buckets[]` 保护（阶段 E 之后它只管 slot 表的分配与查找），而每个 socket 的消息队列、accept 队列、连接状态与 waiter 由该 socket 自己的 `net_socket_t.lock` 保护。
 
 本契约目标：
 
@@ -41,65 +46,115 @@ A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串
 - `a20_lwip_lock()` 禁用本地中断并获取 spinlock；`a20_lwip_unlock()` 恢复之前的中断状态。
 - 每个 raw lwIP API 调用都必须在持有该锁时运行。
 
-### `g_net_buckets[]`（原 `g_net_lock`，已删除）
+### `net_socket_t.lock`：per-socket 锁（阶段 E，`7c7a4d7c8`）
 
-**`g_net_lock` 不再存在。** `2f17a5ba8` 删除了它并把 socket 表分片。当前形态：
+**`g_net_lock` 已不存在，`g_net_buckets[]` 也不再保护任何 socket 状态。** 两步走完：
+
+- `2f17a5ba8` 删掉 `g_net_lock`，把 socket 表分片成 `g_net_buckets[]`。
+- `7c7a4d7c8`（阶段 E）把 per-socket 状态从桶锁搬到 `net_socket_t` 内嵌的
+  `spinlock_t lock`。桶锁此后**只**保护 registry slot 表与每桶空闲位图。
+
+两代历史值得记住，因为"哪把锁保护什么"是这份文档最容易读错的部分：
+
+| 状态 | `g_net_lock` 时代 | 分片后（`2f17a5ba8`） | 现在（`7c7a4d7c8`） |
+| --- | --- | --- | --- |
+| 每 socket 队列与状态 | `g_net_lock` | 拥有该 slot 的桶锁 | **该 socket 自己的锁** |
+| `g_sockets[]`、空闲位图 | `g_net_lock` | 桶锁 | 桶锁（不变） |
+| 临时端口分配 | `g_net_lock` | 桶锁 | 无锁（本来就是 CAS） |
+
+- 声明于 `kernel/net/socket_internal.h`（`net_socket_t` 内，`vf` 与 `bh_ring` 之间）。
+  内嵌而非指针：没有 slot 的 socket 也得有锁。
+- 获取走内联包装，**不要直接摸 `s->lock`**：
+  `net_sock_lock(s)` / `net_sock_unlock(s, flags)` /
+  `net_sock_lock2(a, b)` / `net_sock_unlock2(p)`。`net_sock_pair_t` 里存的是
+  socket 指针与 flags；`NULL` 参与配对表示"只取一把"。
+- **孤儿桶已删除。** `NET_SOCK_ORPHAN_BUCKET` 存在的唯一理由是"没有 slot 的 socket
+  没有桶，而它的状态当时靠桶锁保护"；状态改由自带的锁保护之后，这个状态不再需要任何
+  额外的分片。`NET_SOCK_BUCKET_COUNT` 随之消失，`g_net_buckets[]` 长度回到
+  `NET_SOCK_BUCKETS`。
+
+**锁序**，由外到内：
+
+```text
+net_bucket[b]  ->  net_socket_t.lock  ->  （上文的任务锁）
+```
+
+- **桶锁绝不在持有 socket 锁时被取。** 这就是现在全部的 ABBA 面：桶锁只能从
+  `net_register_socket_locked()`、`net_socket_unregister()` 和
+  `net_bucket_slot_ref()` 到达，三者都是叶子，调用点必须不持任何 net 锁。
+- 一个桶锁 + 一把 socket 锁可以同时持有——`net_bucket_scan()` 和四个全表广播
+  （raw IPv6 send、uevent、rtnetlink、AF_PACKET）都是这个形状，因为它们要先读
+  `g_sockets[]` 再进 `g_sockets[i]` 那个 socket。但**两把桶锁同时持有**、
+  **两把 socket 锁嵌在一把桶锁之下**都不允许。
+- 两个 socket 用 `net_sock_lock2()`，**按地址升序**，所以任何一对都不会被反向持有，
+  顺序无环。`net_bucket_lock2()`（按桶号升序）随同删除。
+- `g_lwip_lock` **不与任何 net 锁同时持有**——桶锁和 socket 锁都不行。这是旧
+  "`g_lwip_lock` 与 `g_net_lock` 从不同时持有" 那条规则的**原样保留**，范围从一把锁
+  扩到全部 net 锁。
+- 遍历整张表时**绝不可**把整组桶锁都取上：中断已关的情况下，一个走到查表的中断会
+  去自旋等一把它自己的被中断上下文正持有的锁，那个活锁的记录见 `fs/vfs/dcache.c`
+  的同一处错误。`net_socket_table_walk()` 和其他全表扫描都是一次一把、取了就放。
+
+### `g_net_buckets[]`（现在只管 slot 表）
 
 - 声明于 `kernel/net/socket_internal.h`，类型 `net_bucket_t[]`，下标是
-  `net_socket_bucket(s)`（`socket_internal.h:505-511`）。该下标是
-  `s->reg_idx >> NET_SOCK_BUCKET_SHIFT`，即 **slot 号的高位**，不是哈希。
-- **分片粒度**（`socket_internal.h:457-467`）按 profile 缩放：
-  `NET_MAX_SOCKETS >= 65536`（SERVER）→ 512 slot/桶 → 128 桶；
-  `>= 1024`（DEFAULT）→ 32 slot/桶 → 32 桶；
-  否则 1 slot/桶。三条 `_Static_assert` 钉住"桶宽整除 slot 上限"与"slot 上限是 2 的幂"。
-- 额外有一个**孤儿桶** `NET_SOCK_ORPHAN_BUCKET = NET_SOCK_BUCKETS`
-  （`socket_internal.h:470-473`）：`reg_idx < 0` 的 socket——正在创建，或正与并发
-  `close()` 竞争——还没有 slot，因而没有桶。它们取这把额外的锁，并在入口重新检查
-  `in_registry`。它是最后一个下标，因此在 `net_bucket_lock2()` 里排在所有真桶之后。
-- 保护的状态与旧 `g_net_lock` 相同：`g_sockets[]`、每个 socket 的字段、消息队列、
-  accept 队列、临时端口分配和 socket waiter，外加**每桶的空闲位图**
-  （`net_bucket_t.free_bits`，位清=空闲，与分片前的 `g_sock_free` 极性一致）。
-  位图按桶整字对齐，一个字只属于一个桶，所以注册/注销不会碰到别的桶锁保护的东西。
-- 获取必须走内联包装，不要直接摸 `g_net_buckets[b].lock`：
-  `net_bucket_lock(b)` / `net_bucket_unlock(b, flags)` / `net_bucket_lock2(b1, b2)` /
-  `net_bucket_unlock2(p)`（`socket_internal.h:513-557`）。它们统一用
-  `spin_lock_irqsave` / `spin_unlock_irqrestore`。
+  `net_socket_bucket(s)`。该下标是 `s->reg_idx >> NET_SOCK_BUCKET_SHIFT`，
+  即 **slot 号的高位**，不是哈希。
+- **分片粒度**按 profile 缩放：`NET_MAX_SOCKETS >= 65536`（SERVER）→ 512 slot/桶
+  → 128 桶；`>= 1024`（DEFAULT）→ 32 slot/桶 → 32 桶；否则 1 slot/桶。
+  三条 `_Static_assert` 钉住"桶宽整除 slot 上限"与"slot 上限是 2 的幂"。
+- 保护的东西只有两样：`g_sockets[]`（slot → socket 指针）和
+  `net_bucket_t.free_bits`（每桶空闲位图，位清=空闲，与分片前的 `g_sock_free`
+  极性一致）。位图按桶整字对齐，一个字只属于一个桶，所以注册/注销不会碰到别的桶锁
+  保护的东西。
+- 获取走内联包装：`net_bucket_lock(b)` / `net_bucket_unlock(b, flags)`，
+  统一用 `spin_lock_irqsave` / `spin_unlock_irqrestore`。
+- **持有时长**：够读一个 slot 就放。全表扫描的形状是"桶锁读指针 → 放桶锁 →
+  socket 锁做正事"。`net_bucket_slot_ref(idx)` 就是这个模式的名字：它取桶锁、
+  读 `g_sockets[idx]`、取引用、放桶锁，调用方随后 `net_socket_free()`。
+  这是每个被收窄的热路径都用的写法。
 
-**取桶锁的规则**（完整表述见 `socket_internal.h:424-442`，权威副本在
-`kernel/include/core/lock.h:67-90`）：
+**销毁路径与引用计数**（阶段 E 改动最大的一块）：
 
-- 单 socket 临界区：只取**拥有该 socket 的那一把**。
-- 需要两个 socket：取两把，按**桶号升序**。`net_bucket_lock2()` 是唯一被认可的写法；
-  它把较小者放进 `lo` 较大者放进 `hi`，所以任何一对桶都不会被反向持有，顺序无环。
-- **同时最多持两把桶锁。** 遍历整张表时**绝不可**把整组桶锁都取上：中断已关的
-  情况下，一个走到查表的中断会去自旋等一把它自己的被中断上下文正持有的锁，那个
-  活锁的记录见 `fs/vfs/dcache.c` 的同一处错误。`net_socket_table_walk()` 和其他
-  全表扫描都是一次一把、取了就放。
-- `g_lwip_lock` **不与任何桶锁同时持有**。这是旧 "`g_lwip_lock` 与 `g_net_lock`
-  从不同时持有" 那条规则的**原样保留**，只是范围从一把锁扩到全部桶。
-- `net_register_socket_locked()` 自己会取桶锁（一次一把），所以**不得**在已持有
-  另一个 socket 桶锁的情况下调用它：一个桶由 512 个 slot 共享，把任意一把桶锁嵌到
-  已持有的一把之下，正是这个顺序规则要禁的 ABBA。
+`net_unregister_socket_locked(s)` 改名为 `net_socket_unregister(s)`，因为它现在
+**自己取桶锁**——桶锁不可在 socket 锁之下取。于是所有销毁路径拆成两段：
 
-生命周期与桶锁是两件事。`2f17a5ba8` 把 socket 注销改成新引用计数原语
-（注册 +1 / 锁外注销 -1），accept drain 另加 `drain_active` 显式串行化
-（`socket_inet.c:917-919`）——原先这个 single-consumer 保证是隐含在全局锁里的，
-分片之后必须显式化。
+```text
+段一（持 socket 锁，或 socket pair）：  closed = 1；摘队列；收 waitq 进 wake 批
+段二（不持任何 net 锁）：              net_socket_unregister(s)；net_socket_free(s)
+```
+
+段二必须在段一之后：`closed` 已经置上，中间窗口里落到该 socket 的全表扫描会把它当死
+socket 跳过。这一拆分顺带修掉两个**既有**的跨桶写：
+`socket_inet.c` 的 accept drain 与 fast-path connect 原先在 listener 的桶锁 /
+`(s, listener)` pair 下调用注销，而两次写的都是
+`g_net_buckets[child_bucket].free_bits`——那把桶锁并不在手上。
+
+引用计数与锁的关系：`refs` 是注册持有的那一份加各调用方自己拿的一份。
+**锁内不等引用归零**；registry 的那一份由调用方在所有锁都放掉之后用一次
+`net_socket_free()` 还回去，因为那一步可能释放对象，而 `obj_cache_free()` 不该在
+关中断的状态下跑。socket 指针从锁里带出来一律先 `net_socket_ref()`——包括 peer
+回指：peer 是在自己的锁下采样并取引用的，采样与取引用之间不能有窗口。
+
+`accept drain` 的 single-consumer 保证另加 `drain_active` 显式串行化
+（`socket_inet.c` 的 `net_inet_accept_stage_drain()`）——原先这个保证是隐含在全局锁里的，
+分片之后必须显式化；阶段 E 换成 socket 锁后它依然必要，因为单把 socket 锁不提供
+"排空期间不许第二个排空者"。
 
 ### 全局顺序与当前更严格规则
 
-`kernel/include/core/lock.h:47-48` 给出的全局允许顺序上界是：
+`kernel/include/core/lock.h` 给出的全局允许顺序上界里，网络那一行现在是：
 
 ```text
-g_lwip_lock -> net_bucket[*]
+g_lwip_lock -> （net 侧什么也不嵌套）
 g_lwip_lock -> virtio-net nonblocking send/recv paths only
 ```
 
-当前网络实现采用更严格的契约：`g_lwip_lock` 与**任何** `net_bucket` 锁
-**不得同时持有**。桶与桶之间按升序，无环。箭头只表示若将来确有经审查的嵌套，
-反向顺序永远禁止；它不是对 callback 获取桶锁的许可。
+即 `g_lwip_lock` 不与任何 net 锁嵌套，而 net 锁内部自己的顺序是
+`net_bucket[b] -> net_socket_t.lock`。箭头只表示若将来确有经审查的嵌套，
+反向顺序永远禁止；它不是对 callback 获取 net 锁的许可。
 
-lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有桶锁的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
+lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 socket 锁的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
 ### lane claim：`CONFIG_NET_LANES > 1` 下的第三个获取者（`f6f327b96`）
 
@@ -314,13 +369,13 @@ lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需
 
 **ring 里的 pbuf 只在生产侧释放。** `bh_ring_prepare()` 在把一个槽位重新发出去之前，先释放该槽位记录的引用；socket 销毁时（`net_inet_socket_destroy()`，持 `g_lwip_lock`）排空整个 `owned[]` 数组。
 
-这样安排的原因是 memp **没有任何内部加锁**，而当前每一次 memp 调用都在 `g_lwip_lock` 下发生。消费者运行在只有桶锁的上下文里，在那里调 `pbuf_free()` 会让 memp 的空闲链表被两个 CPU 同时修改。槽位绕回时释放把 pbuf 的存活期限制在 ring 深度以内，并且落在唯一安全的地方。
+这样安排的原因是 memp **没有任何内部加锁**，而当前每一次 memp 调用都在 `g_lwip_lock` 下发生。消费者运行在只有 socket 锁的上下文里，在那里调 `pbuf_free()` 会让 memp 的空闲链表被两个 CPU 同时修改。槽位绕回时释放把 pbuf 的存活期限制在 ring 深度以内，并且落在唯一安全的地方。
 
 **消费者故意不释放 spill pbuf。** 如果将来看到这里少了一次 `pbuf_free()`，那是特性不是泄漏。
 
 ### 溢出缓冲的所有权
 
-`net_msg_t.overflow` 由该消息独占，`net_msg_free()` 负责 `kfree()`。它在 bottom-half 里分配，也就是在桶锁下——契约禁的是 `g_lwip_lock` 下分配，桶锁下分配一直是被允许的（`net_msg_alloc()` 原本就在那里调用）。
+`net_msg_t.overflow` 由该消息独占，`net_msg_free()` 负责 `kfree()`。它在 bottom-half 里分配，也就是在 socket 锁下——契约禁的是 `g_lwip_lock` 下分配，net 锁下分配一直是被允许的（`net_msg_alloc()` 原本就在那里调用）。
 
 ## 锁安全的 Socket 入口点
 
@@ -328,21 +383,26 @@ lwIP 进展推进被拆成可独立进入的临界区，因为不同调用方需
 
 ### Socket 创建与销毁
 
-`net_inet_socket_init()` 和 `net_inet_socket_destroy()` 在创建、配置或移除 lwIP PCB 时只持有 `g_lwip_lock`，不同时访问 socket registry。registry 与 socket 字段由调用方在独立的桶锁临界区处理。
+`net_inet_socket_init()` 和 `net_inet_socket_destroy()` 在创建、配置或移除 lwIP PCB 时只持有 `g_lwip_lock`，不同时访问 socket registry。registry 与 socket 字段由调用方在独立的 socket 锁临界区处理。
+
+`net_socket_close_file()` 是这段销毁纪律最完整的例子，两阶段见上文「销毁路径与引用计数」：段一持 `(s, peer)` 这对 socket 锁把 `closed` 置上、摘掉 recv 与 accept 队列、收 waitq；段二在无 net 锁的情况下 `net_socket_unregister(s)` 再 `net_socket_free(s)`。listener 的 accept 队列里每个已接受 child 各自重复一遍这两段（child 的 pair 锁与 listener 的 pair 锁互不相干，因为 child 链表在上面已经摘下来了）。
 
 `net_inet_socket_destroy()` 还在同一个临界区内排空 bottom-half ring 的 spill 引用（见上）。
 
 ### Bind
 
-`net_inet_bind_pcb()` 在不持有任何锁的情况下解析用户地址，然后只在调用 `udp_bind()`、`raw_bind()` 或 `tcp_bind()` 时获取 `g_lwip_lock`。bind 期间 socket registry 不发生变化。
+`net_inet_bind_pcb()` 在不持有任何锁的情况下解析用户地址，然后只在调用 `udp_bind()`、`raw_bind()` 或 `tcp_bind()` 时获取 `g_lwip_lock`。bind 期间 socket registry 不发生变化。发布 `s->local` / `s->lane` 的那段临界区取的是
+`s` 自己的锁；在这之前 `net_find_bind_conflict()` 已在锁外扫完整张表并拿回一个引用。
 
 ### Connect
 
 Stream connect 分为三个阶段：
 
-1. 本地目标解析。如果目的地址是本地地址，该路径在搜索 listener 表并构造配对 socket 时取相关桶（跨两个 socket 时按升序取两把）。此时不持有 `g_lwip_lock`。
+1. 本地目标解析。如果目的地址是本地地址，该路径在锁外搜索 listener 表并拿到一个**引用**，随后在 `(s, listener)` 这对 socket 锁下接线并入队。此时不持有 `g_lwip_lock`。
 2. 远端 TCP connect。地址解析后，路径获取 `g_lwip_lock`，带 connected callback 调用 `tcp_connect()`，然后释放 `g_lwip_lock`。
-3. 阻塞等待。调用者释放所有锁，并通过 `net_block_on_socket_locked()` 在该 socket 的桶锁上阻塞。connected callback 只向 `bh_ring` 发布事件；随后不持有 `g_lwip_lock` 的 bottom-half 获取桶锁、更新状态并在解锁后唤醒 waiter。
+3. 阻塞等待。调用者释放所有锁，并通过 `net_block_on_socket_locked()` 在该 socket 自己的锁上阻塞。connected callback 只向 `bh_ring` 发布事件；随后不持有 `g_lwip_lock` 的 bottom-half 获取 socket 锁、更新状态并在解锁后唤醒 waiter。
+
+fast path 里 `child` 的注册（`net_register_socket_locked()`）与失败时的注销（`net_socket_unregister(child)`）都必须在**不持任何 net 锁**的情况下调用：前者在锁外，后者必须等 `(s, listener)` pair 解锁之后。child 在注销前先被标 `closed`，所以中间窗口里落到它身上的全表扫描会跳过它。
 
 UDP 和 RAW connect 遵循与 bind 相同的模式：在锁外解析，然后只在调用 `udp_connect()` 或 `raw_connect()` 时获取 `g_lwip_lock`。
 
@@ -350,17 +410,20 @@ UDP 和 RAW connect 遵循与 bind 相同的模式：在锁外解析，然后只
 
 Listen 将 TCP PCB 设置为监听状态。listen 调用必须在 `tcp_listen()` 状态转换和安装 accept callback 时持有 `g_lwip_lock`。
 
-Accept 只取 listener 所属的那一把桶锁（`net_bucket_lock(net_socket_bucket(listener))`）。
+Accept 只取 listener 自己那把锁（`net_sock_lock(listener)`）。
 它从 listener accept 队列中弹出预创建的 child socket。如果返回了 child，调用者随后
 调用 `net_inet_accept_child_ready()`，该函数获取 `g_lwip_lock` 并调用
 `tcp_backlog_accepted()`。
 
 `2f17a5ba8` 之前这段用的是全局 `g_net_lock`，所以"accept 落底"曾经是
 `net_inet_accept_stage_drain()` 在 `g_lwip_lock` **之外**、全局 net 锁之内运行。
-分片后这里只取 listener 那一把桶，**且必须先放掉 `g_lwip_lock` 再取它**——
-`g_lwip_lock` 与任何桶锁不得同持。原先隐含在全局锁里的 single-consumer 保证
+分片后这里只取 listener 那一把，**且必须先放掉 `g_lwip_lock` 再取它**——
+`g_lwip_lock` 与任何 net 锁不得同持。阶段 E 把那把锁换成了 listener 的 socket 锁，
+覆盖范围严格更小，但要走的边界一模一样：drain 的每一轮都在"取 listener 锁 → 读/改
+accept stage → 放锁 → 取 `g_lwip_lock` 做 pcb 交接"之间来回，绝不在持有任何 net 锁
+时取 `g_lwip_lock`。原先隐含在全局锁里的 single-consumer 保证
 （"只有一个消费者会排空这个 listener 的 stage"）现在由 `drain_active` 显式串行化
-（`socket_inet.c:917-919`），不要因为"只有一把桶锁"就以为不需要它。
+（`net_inet_accept_stage_drain()` 开头），不要因为"只有一把 socket 锁"就以为不需要它。
 
 `tcpmode=lwip` 下 inbound 走的是两段式交接：`lwip_tcp_accept_cb()` 在 `g_lwip_lock` 内
 把已完成握手的 pcb 停进 listener 的 accept stage 并返回 `ERR_OK`，child socket 的分配、
@@ -372,23 +435,32 @@ Accept 只取 listener 所属的那一把桶锁（`net_bucket_lock(net_socket_bu
 send 路径对本地 socket 和远端 socket 行为不同。
 
 对本地 UDP loopback 或已连接本地 socket，路径要碰到**两个** socket（源与目的），
-所以取的是**两把**桶锁、按升序——`net_bucket_lock2()`，这是唯一被认可的写法
-（`socket_inet.c:2091` 的 `net_inet_send_tcp()` 就是这个形状）。如果目的队列已满
-且调用是阻塞的，它会释放两把桶锁、阻塞并重试。
+所以取的是**两把** socket 锁、按地址升序——`net_sock_lock2()`，这是唯一被认可的写法
+（`net_inet_send_tcp()` 的 local_tcp 分支与 `net_enqueue_msg_blocking()` 都是这个形状）。
+如果目的队列已满且调用是阻塞的，它会释放这两把锁、阻塞并重试。
 
-对远端 UDP、RAW 或 TCP send，socket 地址/本地队列状态和 lwIP PCB 操作分成互不重叠的临界区。调用 `pbuf_alloc()`、`udp_sendto()`/`udp_send()`、`tcp_sndbuf()`、`tcp_write()` 或 `tcp_output()` 时持有 `g_lwip_lock`，不得同时持有任何桶锁。需要更新本地 socket 状态或等待队列时先释放 lwIP 锁，再进入桶锁临界区。
+对远端 UDP、RAW 或 TCP send，socket 地址/本地队列状态和 lwIP PCB 操作分成互不重叠的临界区。调用 `pbuf_alloc()`、`udp_sendto()`/`udp_send()`、`tcp_sndbuf()`、`tcp_write()` 或 `tcp_output()` 时持有 `g_lwip_lock`，不得同时持有任何 net 锁。需要更新本地 socket 状态或等待队列时先释放 lwIP 锁，再进入 socket 锁临界区。
 
-> 分片带来的新约束：跨 socket 的目的地址解析（`net_sendto_sock()`、
+> 分片带来的约束：跨 socket 的目的地址解析（`net_sendto_sock()`、
 > `net_vfile_write()` 里的两 socket 路径）要扫整张表，因此是**一次一把**地走桶
 > （`net_socket_table_walk()`），不是一次取全组。目的地址在锁外解析完再进临界区。
 
+> 阶段 E 带来的约束：入队那一步发生在**源 socket 的锁放掉之后**，所以 `s` 自己的
+> 答案（`connected` / `nonblock` / `send_timeout_ticks` / `peer_addr`）必须在锁内拷出
+> 到栈上，不能在锁外回头读 `s->`。peer 回指同理：在 `s` 的锁下采样、同一临界区里
+> `net_socket_ref()`，之后的 pair 才有可用的对象。
+
 UDP、RAW 和 TCP 三条发送路径现在形状一致：**一次迭代一次持锁**，在临界区内调用 `a20_lwip_poll_locked()`。TCP 路径此前用 `a20_lwip_poll()` 开头，额外取放一次全局锁并多跑一整轮 whole-stack pass；按 64 KiB 发送缓冲写 4 MiB 约迭代 64 次，也就是原本 128 轮而 64 轮就够。
 
-bottom-half **不**在发送循环里逐轮运行：它们只取桶锁，而 `g_lwip_lock` 与桶锁从不同时持有。循环结束后在锁外排一次即可覆盖同样的工作。错误返回路径不排是安全的，因为 `sched()` 在挑选下一个任务前会运行两个 bottom-half。
+bottom-half **不**在发送循环里逐轮运行：它们只取 socket 锁，而 `g_lwip_lock` 与任何 net 锁从不同时持有。循环结束后在锁外排一次即可覆盖同样的工作。错误返回路径不排是安全的，因为 `sched()` 在挑选下一个任务前会运行两个 bottom-half。
 
 ### Recv
 
-Recv 只取该 socket 所属的那一把桶锁。它从 socket 接收队列中出队消息。如果队列为空且调用是阻塞的，它释放锁，通过 `net_block_on_socket_locked()` 阻塞，然后重试。
+Recv 只取该 socket 自己那把锁（`net_sock_lock(s)`）。它从 socket 接收队列中出队消息。如果队列为空且调用是阻塞的，它释放锁，通过 `net_block_on_socket_locked()` 阻塞，然后重试。
+
+这一步是阶段 E 收窄得最直接的一处：recv 之前取的是拥有该 socket 的**桶锁**，而一个桶
+在 SERVER 档是 512 个 slot，于是同桶内任意两个 socket 的 recv 互相串行。换成 per-socket
+锁之后只剩真正共享同一对象的那一对。
 
 当 recv 消费 TCP 数据后，调用者随后调用 `net_tcp_recved()`，该函数获取 `g_lwip_lock` 来更新 TCP window。
 
@@ -467,7 +539,7 @@ accept stage 是唯一一个「pcb 已经归应用、但应用还没准备好处
 - 分配 `net_msg_t` 项并搬运 payload（内联源或 spill pbuf 源）。
 - 将接收消息入队到 socket 接收队列。
 - 更新 `closed`、`connected`、`tcp_connecting` 等 socket 标志。
-- 通过该 socket 的桶锁唤醒被阻塞的 waiter。
+- 通过该 socket 自己的锁唤醒被阻塞的 waiter。
 
 ### Top-half / bottom-half 拆分
 
@@ -479,7 +551,9 @@ lwIP callback 是 producer：
 4. 调度 bottom-half。
 5. 释放 lwIP 自己的 pbuf 引用。
 
-bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locked_meta()`，spill 源走 `net_enqueue_msg_locked_pbuf()`。两者都只取该 socket 所属的桶锁。
+bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locked_meta()`，spill 源走 `net_enqueue_msg_locked_pbuf()`。两者都只取该事件所属 socket 的 `net_socket_t.lock`。
+
+`net_inet_bottom_half_process_all()` 因此不能再按桶遍历、每桶整段持锁——那正是锁规则禁掉的「取整组」形状。它改为：无锁读 `g_net_bh_pending[]` 位图，对每个置位的索引调 `net_bucket_slot_ref(i)`（取桶锁 → 读 `g_sockets[i]` → 取引用 → 放桶锁），然后**只在那个 socket 自己的锁下**处理事件。同一个模式也用在 `lwip_stack.c` 的 lane census 上（那里连 socket 锁都不必取，因为只读固定不变的 `s->lane`，且全程持桶锁）。
 
 ## lwIP 锁下的分配规则
 
@@ -544,8 +618,8 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
   仍未解决的是**回环**：它不入队（本来就被摘链原地处理），所以同机 socket 之间的往返
   仍是单 lane 串行。
 - 锁契约的**运行期强制**目前只覆盖 `g_lwip_lock`（`LWIP_ASSERT_CORE_LOCKED()`，
-  见「核心锁断言」一节）。桶锁这一侧**没有**对应断言：没有"当前 CPU 是否持有
-  期望的桶锁"的探针，`net_bucket_lock2()` 的升序约定同样只有代码评审在把关。
+  见「核心锁断言」一节）。net 锁这一侧**没有**对应断言：没有"当前 CPU 是否持有
+  期望的 socket 锁 / 桶锁"的探针，`net_sock_lock2()` 的地址升序约定同样只有代码评审在把关。
   lane claim 一侧同样没有探针。**这是本文与实现之间最大的一处落差**。
 
 ## 迁移检查清单
@@ -553,9 +627,9 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 更新网络实现以符合本契约时，逐项确认（当前实现已满足）：
 
 - [x] lwIP callback 不再调用 `kmalloc()` 或 `kfree()`。
-- [x] lwIP callback 不再获取任何 socket 表桶锁。
+- [x] lwIP callback 不再获取任何 socket 锁或 socket 表桶锁。
 - [x] lwIP callback 只执行有界工作并调度 bottom-half（`net_inet_bh_schedule`）。
-- [x] bottom-half 只持有该 socket 的桶锁运行，且不持有 `g_lwip_lock`。
+- [x] bottom-half 只持有该 socket 自己的 `net_socket_t.lock` 运行，且不持有 `g_lwip_lock`。
 - [x] socket send/recv/connect/listen/accept 路径遵循本文档的锁顺序。
 - [x] `a20_lwip_poll_locked()` 在持有 `g_lwip_lock` 时调用仍然安全。
 - [x] `g_lwip_lock` 下的驱动路径保持非阻塞。
@@ -564,13 +638,17 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 - [x] 提前停止排空时保留 RX pending 标志。
 - [x] spill 引用的释放只发生在 `g_lwip_lock` 下（ring 槽位绕回或 socket 销毁）。
 - [x] 并发 socket stress 测试通过，且没有锁顺序告警。
-- [x] 跨 socket 的临界区用 `net_bucket_lock2()`，桶号升序；同时最多持两把桶锁。
+- [x] 跨 socket 的临界区用 `net_sock_lock2()`，socket 指针升序；同时最多持两把 socket 锁。
 - [x] 全表扫描（`net_socket_table_walk()` 等）一次一把，取了就放，不取全组。
-- [x] `net_register_socket_locked()` 不在持有别的桶锁时被调用。
-- [x] `g_lwip_lock` 与任何桶锁不同持。
+- [x] `net_register_socket_locked()` 与 `net_socket_unregister()` 都不在持有任何 socket 锁时被调用（两者自己取桶锁）。
+- [x] 桶锁从不在 socket 锁之下取得；`net_bucket_scan()` 是唯一的例外形状，它在桶锁内嵌 socket 锁，且只用于只读遍历。
+- [x] socket 销毁是两阶段的：`close` 在 socket 锁内标记 `closed` 并摘队列收 wake，解锁后才 unregister + free；锁内不等引用归零。
+- [x] 从任一临界区带出 `net_socket_t *` 时先 `net_socket_ref()`，用完在锁外 drop。
+- [x] `g_lwip_lock` 与任何 net 锁不同持。
 - [x] 多 lane 下 lane claim 先于 `g_lwip_lock` 获取，判空在锁外，且 claim 期间中断保持开。
 - [x] `CONFIG_NET_LANES=1` 时上面这些入口从预处理结果里消失，不是空函数体。
 - [x] `LWIP_ASSERT_CORE_LOCKED()` 已接线到 `g_lwip_lock` 持有者 CPU
       （默认关闭，开关语义与可见性见「核心锁断言」一节）。
-- [ ] 桶锁一侧**没有**对应断言：`net_bucket_lock2()` 的升序与"至多两把"目前只有
-      评审在把关。补一个 `CONFIG_NET_BUCKET_ASSERT` 探针。
+- [ ] net 锁一侧**没有**对应断言：`net_sock_lock2()` 的地址升序与"至多两把"目前只有
+      评审在把关。补一个 `CONFIG_NET_SOCK_ASSERT` 探针（覆盖 socket 锁持有者与
+      "桶锁不得在 socket 锁之下取得"这两条）。

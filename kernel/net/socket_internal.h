@@ -140,7 +140,7 @@ typedef struct net_accept_stage_slot {
  * held and the new pcb in ESTABLISHED.  The bookkeeping that has to follow --
  * allocating a net_socket_t, installing its callbacks, registering it, pushing
  * it on the listener's accept queue and waking accept_waitq -- needs
- * a socket-table bucket lock and the allocator, and
+ * a socket lock and the allocator, and
  * docs/net/network-lock-contract.md forbids
  * both inside an lwIP callback.  So the callback only parks the pcb here and
  * the bottom half finishes the job, which is the same split the receive path
@@ -148,7 +148,7 @@ typedef struct net_accept_stage_slot {
  *
  * Bounded and lock-free in the shape of net_bh_ring_t: the producer runs with
  * local interrupts off under g_lwip_lock and publishes head with a release
- * fence, the consumer runs later under the listener's bucket lock.  `dropped`
+ * fence, the consumer runs later under the listener's own lock.  `dropped`
  * is a correctness counter, not a statistic -- a non-zero value means a completed handshake was
  * discarded, and the pcb has to be aborted rather than leaked.
  */
@@ -160,13 +160,13 @@ typedef struct net_accept_stage {
     uint32_t tail;
     volatile int dropped;
     /*
-     * Single-consumer guard for the drain, guarded by the listener's bucket
-     * lock.  The ring has exactly one consumer because a slot's ownership
-     * hands over when tail moves, and two drains reading the same tail would
-     * both release the same slot.  The single g_net_lock used to provide that
-     * exclusion implicitly; with the table sharded the drain has to drop the
-     * listener's bucket (it registers children, which takes a shard of its
-     * own), so the exclusion is explicit here.
+     * Single-consumer guard for the drain, guarded by the listener's own lock.
+     * The ring has exactly one consumer because a slot's ownership hands over
+     * when tail moves, and two drains reading the same tail would both release
+     * the same slot.  The single g_net_lock used to provide that exclusion
+     * implicitly; the drain now has to drop the listener's lock to register the
+     * children (which takes a bucket of its own), so the exclusion is explicit
+     * here and the flag is what stands in for the lock in that window.
      */
     int drain_active;
 } net_accept_stage_t;
@@ -371,9 +371,9 @@ typedef struct net_socket {
      * bitmap indexed by registry slot (socket_packet.c's g_pkt_bound_slots),
      * which made a single global lock the only thing keeping the accounting
      * balanced.  It is per-socket state, so it lives with the socket and is
-     * written under that socket's bucket lock; the global counter it feeds,
+     * written under that socket's own lock; the global counter it feeds,
      * g_pkt_bound_count, stays atomic because the lwIP receive path reads it
-     * with g_lwip_lock held and never a bucket lock. */
+     * with g_lwip_lock held and never a net lock. */
     int pkt_bound_marked;
     int in_registry;
     int reg_idx;
@@ -384,11 +384,25 @@ typedef struct net_socket {
      * registry slot -- 512 KiB of table on the server profile for a per-socket
      * number.  High 32 bits are the message count, low 32 the readable bytes;
      * see socket_queue.c for why the pair, not just the byte half, is what
-     * makes it safe to trust.  Touched only under this socket's bucket lock.
+     * makes it safe to trust.  Touched only under this socket's own lock.
      */
     uint64_t rxq_tally;
     int gfd;                       /* creating task's fd carrying this socket */
     struct vfile *vf;              /* the socket's vfile (EventQ identity) */
+    /*
+     * This socket's own lock: everything above in this struct except the
+     * registry slot is protected by it, and by nothing else.  Stage E of
+     * docs/net/net-lanes.md moved it off the socket-table bucket lock, which
+     * used to serialise every socket against every other socket in the same
+     * run of registry slots.  The bucket locks now cover only the slot table
+     * itself; see the lock rules below.
+     *
+     * It is embedded rather than pointed at so that a socket that owns no
+     * registry slot -- being created, the accepted end of an AF_UNIX stream --
+     * has a working lock anyway.  That case used to need the orphan shard,
+     * which no longer exists.
+     */
+    spinlock_t lock;
     net_bh_ring_t bh_ring;
     volatile int bh_connected;
     volatile int bh_closed;
@@ -423,11 +437,28 @@ typedef struct sockaddr_alg_kernel {
 } sockaddr_alg_kernel_t;
 
 /*
- * Socket-table shard locks.
+ * Socket locks: one per socket, plus one per run of registry slots.
  *
- * g_net_lock used to cover the whole registry in one spinlock, so every socket
- * operation -- a send on one connection, a poll on another, the /proc/net walk,
- * a socket() -- serialized on the same word.  The table is now sharded.
+ * Two earlier generations are visible in this file.  g_net_lock covered the
+ * whole registry in one spinlock, so every socket operation -- a send on one
+ * connection, a poll on another, the /proc/net walk, a socket() -- serialized
+ * on the same word.  2f17a5ba8 sharded that into net_bucket[]; stage E
+ * (docs/net/net-lanes.md, "阶段 E") took the per-socket state off the shard,
+ * because a shard is a run of NET_SOCK_SLOTS_PER_BUCKET slots and every socket
+ * in that run still fought over one word.
+ *
+ * What each lock covers now, which is the whole point and the thing a future
+ * edit must not blur:
+ *
+ *   net_bucket_t.lock   g_sockets[] -- publishing and clearing a registry slot,
+ *                      net_bucket_t.free_bits, and nothing else.  Taken for slot
+ *                      allocation (register) and slot lookup (walks).  A walk
+ *                      nests the socket's own lock around whatever it reads out
+ *                      of the object it found.
+ *   net_socket_t.lock   every other field in net_socket_t: the receive queue,
+ *                      the accept queue, the three wait queues, the state flags,
+ *                      the addresses, the option ceilings.  This is the lock the
+ *                      recv/send/close/accept hot paths take.
  *
  * The shard is a *contiguous* run of registry slots, not a hash: bucket =
  * reg_idx >> NET_SOCK_BUCKET_SHIFT, NET_SOCK_SLOTS_PER_BUCKET slots each.  That
@@ -443,24 +474,32 @@ typedef struct sockaddr_alg_kernel {
  * that the run divides both profile ceilings: the server profile's 65536 slots
  * become 128 buckets and the default profile's 1024 become 2.
  *
- * Lock rules (mirrored in kernel/include/core/lock.h, whose network paragraph
- * belongs to the file's owner):
+ * Lock order, outermost to innermost.  (Mirrored in kernel/include/core/lock.h,
+ * whose network paragraph belongs to the file's owner.)
  *
- *   - A per-socket critical section takes the one bucket that owns the socket.
- *   - A section that needs two sockets takes their two buckets in *ascending
- *     bucket order*, so no pair is ever held in two directions and the order is
- *     acyclic.  net_bucket_lock2() is the only sanctioned way to do it.
- *   - At most two bucket locks are held at a time.  Never take the whole set
- *     to walk the table: with interrupts disabled, an interrupt that reaches a
- *     lookup then spins on a lock its own interrupted context is holding, and
- *     that livelock is recorded for the same mistake in fs/vfs/dcache.c.
- *   - g_lwip_lock is never held together with any bucket lock.  That is the
- *     unchanged meaning of the old "g_lwip_lock and g_net_lock are never held
- *     together" rule (docs/net/network-lock-contract.md).
- *   - net_register_socket_locked() takes the bucket locks itself, one at a
- *     time, so it must NOT be called with another socket's bucket lock held:
- *     a bucket is shared by 512 slots, so nesting an arbitrary bucket under a
- *     held one is exactly the ABBA this ordering forbids.
+ *   g_lwip_lock                     never held with either net lock, as before
+ *   net_bucket[b]                   at most one at a time; taken only to reach
+ *                                   the slot table
+ *   net_socket_t.lock               any number, in ascending socket-pointer order
+ *
+ * The three rules that make that order work:
+ *
+ *   - A bucket lock is never taken while a socket lock is held.  This is the
+ *     whole ABBA surface now, because the bucket lock is only ever reached for
+ *     the slot table: net_register_socket_locked() and net_socket_unregister()
+ *     acquire it themselves and callers must hold nothing when they call.
+ *   - Two sockets are taken with net_sock_lock2(), which orders by address, so
+ *     no pair is ever held in two directions.  Reading one socket's fields
+ *     under only the *other* one's lock is not a cheaper version of this: it is
+ *     the same race with fewer locks.
+ *   - Never take the whole shard set to walk the table: with interrupts
+ *     disabled, an interrupt that reaches a lookup then spins on a lock its own
+ *     interrupted context is holding, and that livelock is recorded for the same
+ *     mistake in fs/vfs/dcache.c.  Every walk goes one bucket at a time.
+ *
+ * g_lwip_lock is never held together with either net lock.  That is the
+ * unchanged meaning of the old "g_lwip_lock and g_net_lock are never held
+ * together" rule (docs/net/network-lock-contract.md).
  */
 /*
  * Shard size, expressed as a shift of the global slot index.
@@ -486,13 +525,6 @@ typedef struct sockaddr_alg_kernel {
  * pinned occupied.  See net_bucket_claim() and net_socket_registry_init(). */
 #define NET_SOCK_BUCKET_WORDS     ((NET_SOCK_SLOTS_PER_BUCKET + 31) / 32)
 #define NET_SOCK_BUCKETS          (NET_MAX_SOCKETS / NET_SOCK_SLOTS_PER_BUCKET)
-/* A socket with reg_idx < 0 -- being created, or racing a concurrent close --
- * owns no slot and therefore no bucket.  Those accesses take this one extra
- * shard and re-check in_registry on entry; create and teardown are the only
- * traffic that ever reaches it.  It is the last index, so it sorts after every
- * real bucket in net_bucket_lock2(). */
-#define NET_SOCK_ORPHAN_BUCKET    NET_SOCK_BUCKETS
-#define NET_SOCK_BUCKET_COUNT     (NET_SOCK_BUCKETS + 1)
 
 _Static_assert((NET_MAX_SOCKETS % NET_SOCK_SLOTS_PER_BUCKET) == 0,
                "the socket-table shard size must divide the profile's slot "
@@ -507,27 +539,92 @@ typedef struct {
     spinlock_t lock;
     /* Bit clear == slot free, bit set == occupied: the polarity g_sock_free
      * had before the sharding ("bit n == 0 -> slot n is free"), which
-     * net_bucket_claim() and net_unregister_socket_locked() still use.  Only
+     * net_bucket_claim() and net_socket_unregister() still use.  Only
      * this bucket's lock ever touches these words. */
     uint32_t   free_bits[NET_SOCK_BUCKET_WORDS];
 } net_bucket_t;
 
-extern net_bucket_t g_net_buckets[NET_SOCK_BUCKET_COUNT];
+extern net_bucket_t g_net_buckets[NET_SOCK_BUCKETS];
 extern net_socket_t *g_sockets[NET_MAX_SOCKETS];
 extern volatile int g_net_bh_pending[NET_MAX_SOCKETS];
 extern volatile int g_net_bh_pending_count;
 void net_bh_slot_mark(int idx);
 int net_bh_slot_clear(int idx);
 
-/* Bucket that owns `s`.  Read reg_idx without a lock on purpose: the value is
- * only a hint for picking a shard, and every caller re-checks s->in_registry
- * once it holds the shard it landed on (net_socket_is_valid_locked()).  A
- * socket is registered exactly once, so a live socket's bucket never moves. */
+/* ------------------------------------------------------------------ *
+ * Per-socket lock
+ * ------------------------------------------------------------------ */
+
+static inline uint64_t net_sock_lock(net_socket_t *s)
+{
+    return spin_lock_irqsave(&s->lock);
+}
+
+static inline void net_sock_unlock(net_socket_t *s, uint64_t flags)
+{
+    spin_unlock_irqrestore(&s->lock, flags);
+}
+
+/*
+ * Two sockets, always in ascending address order.  NULL means "no second
+ * socket", which is how a peer back-pointer that turned out to be absent is
+ * spelled; a == b collapses to one lock.
+ *
+ * The order is by address rather than by registry slot on purpose: a socket that
+ * owns no slot -- the accepted end of an AF_UNIX stream, or one being created --
+ * has no bucket to sort by at all, which is exactly why the orphan shard that
+ * used to cover that case is gone.
+ */
+typedef struct {
+    net_socket_t *lo;
+    net_socket_t *hi;
+    uint64_t      flags;
+} net_sock_pair_t;
+
+static inline net_sock_pair_t net_sock_lock2(net_socket_t *a, net_socket_t *b)
+{
+    net_sock_pair_t p;
+    if (!a || !b || a == b) {
+        p.lo = a ? a : b;
+        p.hi = NULL;
+    } else if ((uintptr_t)a < (uintptr_t)b) {
+        p.lo = a;
+        p.hi = b;
+    } else {
+        p.lo = b;
+        p.hi = a;
+    }
+    p.flags = spin_lock_irqsave(&p.lo->lock);
+    if (p.hi) {
+        /* Interrupts are already off, so the second acquire's return value is
+         * always 0 and must not be restored over the first unlock. */
+        spin_lock(&p.hi->lock);
+    }
+    return p;
+}
+
+static inline void net_sock_unlock2(net_sock_pair_t p)
+{
+    if (p.hi)
+        spin_unlock(&p.hi->lock);
+    spin_unlock_irqrestore(&p.lo->lock, p.flags);
+}
+
+/* ------------------------------------------------------------------ *
+ * Registry-slot lock
+ * ------------------------------------------------------------------ */
+
+/* Bucket that owns `s`, or -1 when it owns no slot.  Read reg_idx without a
+ * lock: the only caller that still needs a bucket is net_socket_unregister(),
+ * which is the code that clears the slot in the first place, and a live socket's
+ * bucket never moves because it is registered exactly once.  The value is
+ * written while both the bucket and the socket's own lock are held, so a
+ * concurrent reader sees either the old slot or no slot, never a torn one. */
 static inline int net_socket_bucket(const net_socket_t *s)
 {
     int idx = s ? s->reg_idx : -1;
     if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return NET_SOCK_ORPHAN_BUCKET;
+        return -1;
     return idx >> NET_SOCK_BUCKET_SHIFT;
 }
 
@@ -541,45 +638,15 @@ static inline void net_bucket_unlock(int b, uint64_t flags)
     spin_unlock_irqrestore(&g_net_buckets[b].lock, flags);
 }
 
-/* Two buckets, always ascending.  b < 0 means "no bucket to take". */
-typedef struct {
-    int      lo;
-    int      hi;
-    uint64_t flags;
-} net_bucket_pair_t;
-
-static inline net_bucket_pair_t net_bucket_lock2(int b1, int b2)
-{
-    net_bucket_pair_t p;
-    if (b1 < 0 || b2 < 0 || b1 == b2) {
-        p.lo = (b1 < 0) ? b2 : b1;
-        p.hi = -1;
-    } else if (b1 < b2) {
-        p.lo = b1;
-        p.hi = b2;
-    } else {
-        p.lo = b2;
-        p.hi = b1;
-    }
-    p.flags = spin_lock_irqsave(&g_net_buckets[p.lo].lock);
-    if (p.hi >= 0) {
-        /* Interrupts are already off, so the second acquire's return value is
-         * always 0 and must not be restored over the first unlock. */
-        spin_lock_irqsave(&g_net_buckets[p.hi].lock);
-    }
-    return p;
-}
-
-static inline void net_bucket_unlock2(net_bucket_pair_t p)
-{
-    if (p.hi >= 0)
-        spin_unlock(&g_net_buckets[p.hi].lock);
-    spin_unlock_irqrestore(&g_net_buckets[p.lo].lock, p.flags);
-}
-
-/* Visit every registered socket of one bucket with that bucket's lock held.
- * Returning true stops the scan; the return value is forwarded to the caller so
- * a "find one" search can bail out of the bucket loop. */
+/* Visit every registered socket of one bucket.  The bucket lock covers reading
+ * the slot table and nothing else; each socket the scan lands on is visited
+ * under its own lock, nested inside, so a walk sees the same per-socket state a
+ * syscall would.  Returning true stops the scan; the return value is forwarded
+ * to the caller so a "find one" search can bail out of the bucket loop.
+ *
+ * The nesting is safe because no interrupt path takes a socket lock: lwIP
+ * callbacks run under g_lwip_lock and only stage into the per-socket ring.  A
+ * visitor callback must still not block, allocate, or take g_lwip_lock. */
 typedef bool (*net_bucket_slot_fn)(net_socket_t *s, int idx, void *arg);
 
 static inline bool net_bucket_scan(int b, net_bucket_slot_fn fn, void *arg)
@@ -591,7 +658,10 @@ static inline bool net_bucket_scan(int b, net_bucket_slot_fn fn, void *arg)
         net_socket_t *s = g_sockets[base + k];
         if (!s)
             continue;
-        if (fn(s, base + k, arg)) {
+        uint64_t sflags = net_sock_lock(s);
+        bool hit = fn(s, base + k, arg);
+        net_sock_unlock(s, sflags);
+        if (hit) {
             stop = true;
             break;
         }
@@ -600,8 +670,7 @@ static inline bool net_bucket_scan(int b, net_bucket_slot_fn fn, void *arg)
     return stop;
 }
 
-/* Walk every bucket, one lock at a time.  The orphan shard is not part of the
- * table and is never scanned. */
+/* Walk every bucket, one lock at a time. */
 static inline bool net_table_scan_all(net_bucket_slot_fn fn, void *arg)
 {
     for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
@@ -615,13 +684,19 @@ static inline bool net_table_scan_all(net_bucket_slot_fn fn, void *arg)
  * Reference count on net_socket_t.
  *
  * The registry holds one reference for as long as the socket is published in
- * g_sockets[], and any code that carries a socket pointer out of a bucket
- * critical section holds one of its own.  The bucket lock used to do that job:
- * a lookup found its target in the table and used it without ever releasing
- * the single global lock.  With the table sharded a lookup that finds a socket
- * in one bucket and then needs a second bucket cannot keep the first one held
- * -- it would have to take them in an order the finder did not know -- so the
- * pointer has to outlive the lock on its own.
+ * g_sockets[], and any code that carries a socket pointer out of a lock holds
+ * one of its own.  A lock used to do that job: a lookup found its target in the
+ * table and used it without ever releasing the single global lock.  Once the
+ * table was sharded, a lookup that found a socket and then needed another
+ * socket's lock could not keep the first one held -- it would have to take them
+ * in an order the finder did not know -- so the pointer has to outlive the lock
+ * on its own.  That is now true of every net lock, and a socket's own lock is no
+ * exception: net_bucket_slot_ref() is how a caller leaves the bucket behind.
+ *
+ * Nothing waits for this count to reach zero while holding a lock.  The last
+ * reference is dropped after the last lock is released, because dropping it can
+ * free the object (obj_cache_free(), then kfree for the AF_UNIX staging buffer)
+ * and neither belongs in a spinlock critical section.
  *
  * This also closes a hole that predates the sharding: net_socket_from_file()
  * drops its vfile reference before returning, so a concurrent close() on
@@ -632,6 +707,28 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
     if (!s)
         return NULL;
     __atomic_fetch_add(&s->refs, 1, __ATOMIC_ACQ_REL);
+    return s;
+}
+
+/*
+ * Pin one slot of the table long enough to leave the bucket lock behind it.
+ *
+ * This is the pattern every narrowed hot path uses: the bucket lock exists only
+ * to read g_sockets[i], and everything that then happens to that socket runs
+ * under the socket's own lock.  Without the reference the object could be freed
+ * by a concurrent close() in the window between the two.
+ *
+ * Returns NULL when the slot is empty.  The caller drops the reference with
+ * net_socket_free().
+ */
+static inline net_socket_t *net_bucket_slot_ref(int idx)
+{
+    int b = idx >> NET_SOCK_BUCKET_SHIFT;
+    uint64_t flags = net_bucket_lock(b);
+    net_socket_t *s = g_sockets[idx];
+    if (s)
+        net_socket_ref(s);
+    net_bucket_unlock(b, flags);
     return s;
 }
 
@@ -666,8 +763,25 @@ int      net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                                  size_t *outlen);
 net_socket_t *net_find_bound_socket(int domain, int type,
                                     const void *addr, size_t addrlen);
+/*
+ * Registry slot allocation.  Takes bucket locks itself, one at a time, and the
+ * socket's own lock to publish in_registry / reg_idx, so the caller must hold
+ * no net lock at all.  The trailing _locked in the name is the historical one:
+ * it always named a function that took its own locks, and renaming it would have
+ * churned every call site for no gain in meaning.
+ */
 int      net_register_socket_locked(net_socket_t *s);
-void     net_unregister_socket_locked(net_socket_t *s);
+/*
+ * Release the registry slot.  Takes the socket's bucket and then the socket's own
+ * lock, for the same reason: a bucket lock is never taken under a socket lock,
+ * so unregistering from inside a per-socket critical section cannot be written
+ * at all.  It returns without touching anything for a socket that owns no slot,
+ * which is what makes the socket-free-without-a-slot case (an AF_UNIX stream
+ * child) fall out without a special shard.
+ *
+ * The caller drops the registry's reference afterwards, outside every lock.
+ */
+void     net_socket_unregister(net_socket_t *s);
 int      net_socket_is_valid_locked(net_socket_t *s);
 
 /*
@@ -679,14 +793,15 @@ int      net_socket_is_valid_locked(net_socket_t *s);
  * this socket still own a registry slot", which is the right question for a
  * socket a scan found in g_sockets[] but the wrong one for the accepted end of
  * an AF_UNIX stream: that child owns no slot by design (net_unix_socket_connect
- * leaves it with reg_idx == -1, so it lives in the orphan shard) while being
- * entirely in use.  Asking it the slot question there rejected the peer of
- * every connected AF_UNIX socket, so send() on one returned ECONNREFUSED and
- * the connection the listener had already accepted went unused.
+ * leaves it with reg_idx == -1) while being entirely in use.  Asking it the
+ * slot question there rejected the peer of every connected AF_UNIX socket, so
+ * send() on one returned ECONNREFUSED and the connection the listener had
+ * already accepted went unused.
  *
  * With a reference in hand the object cannot be freed under the caller, and
- * net_socket_close_file() clears the slot and sets ->closed inside one bucket
- * critical section, so "not closed" is the whole of what liveness means here.
+ * net_socket_close_file() sets ->closed under this socket's own lock, so "not
+ * closed" is the whole of what liveness means here.  Read it under that lock,
+ * or under the ordered pair when a peer is involved.
  */
 static inline bool net_socket_is_live(const net_socket_t *s)
 {
@@ -695,7 +810,7 @@ static inline bool net_socket_is_live(const net_socket_t *s)
 
 /* Socket table enumeration for /proc/net/{tcp,tcp6,udp,udp6,unix}
  * (socket_table.c).  The walk takes one bucket lock at a time and runs the
- * callback under that bucket's lock, so the callback must not block,
+ * callback under the visited socket's own lock, so the callback must not block,
  * allocate, or take g_lwip_lock.
  *
  * `family` narrows the walk to AF_INET or AF_INET6, or AF_UNSPEC for "either"
@@ -714,7 +829,7 @@ int      net_socket_table_walk(net_table_kind_t kind, int family,
                                net_table_visit_fn fn, void *arg);
 
 /* Total bytes currently readable, for ioctl(FIONREAD) on a socket.  Holds only
- * the socket's own bucket lock.  Returns -ENOTSOCK for a non-socket and
+ * the socket's own lock.  Returns -ENOTSOCK for a non-socket and
  * -EOPNOTSUPP for a socket whose readability cannot be expressed as a byte
  * count (AF_PACKET). */
 int      net_socket_rx_available(net_socket_t *s, size_t *out);
@@ -792,8 +907,8 @@ void     netlink_uevent_emit(const char *action, const char *subsystem,
  * and it learns of the change while holding g_lwip_lock -- so the event is
  * recorded as a pending flag and the notify functions below run after that
  * lock is dropped.  They must therefore be called with g_lwip_lock NOT held:
- * they take socket-table bucket locks, which the lock contract forbids holding
- * together with g_lwip_lock. */
+ * they take net locks, which the lock contract forbids holding together with
+ * g_lwip_lock. */
 typedef struct {
     uint32_t index;      /* netif index, as ifi_index / ifa_index */
     uint8_t  want_up;    /* the carrier/admin state the change settled on */
@@ -805,7 +920,7 @@ void     net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
 
 /* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
  * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held
- * together with a socket-table bucket lock. */
+ * together with a net lock. */
 int      net_packet_socket_bind(net_socket_t *s, const void *addr, size_t addrlen);
 int      net_packet_socket_send(net_socket_t *s, const void *buf, size_t len,
                                 const void *addr, size_t addrlen);
