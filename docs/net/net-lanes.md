@@ -1109,6 +1109,88 @@ bottom-half 需要 ring 已排空，而只在读者唤醒后才跑的 poll 在�
 
 阶段 F（多队列）再去掉排空瓶颈，属二阶优化。
 
+### 阶段 D 落地记录：IRQ 只按 lane 入队，处理在进程上下文（`f6f327b96`）
+
+落地的是**分发与出中断上下文**，不是 per-lane 锁。`g_lwip_lock` 仍然是一把全局锁，
+所以「各 CPU 各自处理自己的 socket」今天成立在"谁去处理"这一层，不成立在
+"谁能同时处理"这一层。这条必须写在最前面，否则下一个人会按名字把阶段 D 读大。
+
+**IRQ 侧**（`a20_lwip_process_netif_irq_locked()`）：解析刚好够定 lane 的头部，
+把帧拷进该 lane 的接收队列，返回。排空仍然是串行的短锁 + `CONFIG_NET_RX_IRQ_BUDGET`。
+
+包的归属 lane 取**目的地址与目的端口**，不是对端源端口。这是从代码里读出来的，不是
+选的：`tcp_in.c` 用 `NET_PCB_LANE_OF(ip_current_dest_addr(), tcphdr->dest)`，
+`udp.c` 用 `NET_PCB_LANE_OF(ip_current_dest_addr(), dest)`。目的地址加目的端口就是
+这条连接自己的本地四元组，已建立连接、UDP 与被动开出的子连接因此落在同一条 lane 上。
+
+**处理侧**：`a20_lwip_lane_drain_locked()` 取 lane 的消费权，拿 `g_lwip_lock`，
+`net_lane_ctx_push(lane)`，然后逐帧 `pbuf_alloc` + `pbuf_take` + `n->input()`。
+
+#### 三处必须记住的坑
+
+1. **不要简单地让 IRQ 只入队——死锁是真的，但解法不是"更聪明的门控"。**
+   解法是**无条件会跑到的 poll 点**。`kernel_progress_run_bottom_halves()` 里调用
+   `A20_LWIP_LANE_RX_POLL()`，而 `sched()` 每次调度决策、每次会引发重新调度的时钟
+   tick、每次 idle pass 都走到它。放在"读者醒来之后"就晚了：阻塞读由 socket
+   bottom-half 唤醒，bottom-half 需要暂存的帧已经被处理掉，而只在唤醒后才跑的 poll
+   在等一个不会到来的事件。门控用的量是生产者自己抬起来的"已暂存帧数"计数器，
+   它只可能假阳，假阳的代价是一次 relaxed load。
+   位置在 `kernel_progress_net_rx()` **之前**而不是之后：后者是 CPU 0 排设备 ring 的
+   地方，多 lane 下它排出来的帧只是暂存，放在它之后要等下一趟。
+2. **claim 用原子标志，不是 `spinlock_t`。** `core/lock.h` 只有
+   `spin_trylock_irqsave`，用 spinlock 意味着拿着 claim 的整个协议处理过程都在关中断
+   的状态下跑——而那正是这个阶段要搬出中断的原因。所以 claim 期间中断是开的，这既
+   安全（没有任何中断路径会去拿 claim）也是必需的。一条 lane 同时只有一个消费者是
+   **正确性要求**：两条 CPU 排同一条 lane 会打乱一条流式 socket 的段序，也会交错重组。
+   被抢占的持有者只是延迟问题，不是正确性问题。
+3. **IP 分片必须只按地址散列。** 非首片没有传输层头，从里面读"端口"读到的是负载，
+   会把一个数据报的分片拆到不同 CPU 上。判据用 `MF || frag_offset != 0`：被拆包的所有
+   分片都满足，没拆的一个都不满足。IPv6 那边片头本身就是扩展头，而本移植不遍历扩展头，
+   所以 v6 分片自动落到"只按地址"这一支。
+
+另外两处不是可选的：netfilter 必须跑在**算 lane 之前**（DNAT 原地改写目的地址，
+lane 得跟着改写后的元组走）；回环**不入队**（它本来就已经被摘链并在原地处理了）。
+
+#### `CONFIG_NET_LANES=1` 等价：实测，以及第三个坑
+
+方法与阶段 C 相同：`git worktree add` 拉出改动前的 `fe03aac27`，两边**同一条命令行**
+编 `lwip_stack.c`、`net_lane.c`、`socket_inet.c`、`progress.c`、`udp.c`、`tcp.c`、
+`tcp_in.c`、`tcp_out.c`，逐 section 比对。
+
+- `-fno-sanitize=undefined`：`.text` / `.rodata` / `.data` / `.sdata` / `.srodata`
+  **全部逐字节相同**。
+- 开着 UBSan：`.text` / `.rodata` / `.sdata` / `.srodata` 相同，只有 `.data` 差。
+  已定位：那 11 个字节是 UBSan 内嵌的 `SourceLocation` 行号表，差的数值**恰好是
+  `pcb_lane.h` 里多出的 19 行注释造成的偏移**；把 `pcb_lane.h` 换回改动前的版本，
+  差异归零（换 `net_lane.h` / `net_profile.h` 则不归零，所以责任人是前者）。
+  这些 TU 的 `.data` 里**一个符号都没有**，且关掉 UBSan 后整段缩为 0 字节。
+
+**第三个坑：out-of-line 的空函数仍然是调用。** poll 点最初写成普通函数
+`a20_lwip_lane_rx_poll()`，一 lane 下函数体是 `(void)budget;`。实测
+`progress.c` 的 `.text` 多了 10 字节——多出来的是一次 `call`。
+这与阶段 C 的第 1、2 条同源：**"优化器会把空函数折掉"不是等价证明**，能 `grep`
+出来的事实才算。改成一 lane 下展开为 `((void)(budget))` 的宏
+`A20_LWIP_LANE_RX_POLL()` 之后，调用点从预处理结果里消失。头文件里三处都按这个写法。
+
+#### 阶段 D 还剩下的（不要当成已完成）
+
+- **`g_lwip_lock` 仍然是一把全局锁。** lane 决定的是"谁处理"，不是"谁能并行处理"。
+  真正分片要改的是锁的粒度与所有权（谁持有、由谁释放、跨 lane 的 PCB 冷路径怎么不
+  死锁），那是一次锁契约的改动，不是本阶段带得上的。
+- **回环不入队。** `LWIP_LOOPBACK_MAX_PBUFS=0` 的无界队列问题照旧（见上文
+  「`netif_poll()` 排空侧读到这里（未完成）」），所以同机 socket 之间的往返仍然是
+  单条 lane 上的串行工作。
+- **广播 UDP 仍然无法定向**，见「广播 UDP 是唯一无法按桶定向的用例」。
+- **队列深度是 4 的静态槽位环**（`NET_PROFILE_LANE_RXQ_SLOTS`），满了就丢并计数——
+  队列没法把压力推回网卡上，就必须丢掉点什么。丢包率是否可接受要等真机。
+
+#### 本阶段新增的观测
+
+`/proc/net/status` 在多 lane 下多一段 per-lane 的 `rx lane / rx / drop`，以及一行
+`rx staged (not yet processed)`。per-lane 给的是**单调计数**而不是水位，与阶段 C 的
+pbuf 计数同一个理由：读水位要么得拿 claim（`/proc` 与收包路径抢），要么读一个在跨 CPU
+下没有意义的 head-tail 差值。`rx staged` 那行才是当下有多少帧在等，那个量是单值的。
+
 ## 必须保持全局的部分
 
 | 对象 | 处理 | 理由 |
