@@ -732,6 +732,83 @@ lane 全坏"或"某个桶溢出"，规律应当是周期性的，而实际不是
 "当前 lane"），还是接受 CPU 派生（则与 PCB 分桶不一致，必须写清代价）。
 **这个前提没定之前不建议动 memp。**
 
+### 阶段 C 落地记录：当前 lane 上下文 + memp lane 索引骨架（`5ea06a78`）
+
+上面那个前提已经定了，选**地址派生 lane**。因此：
+
+- 新增「当前 lane」上下文 `net_lane_ctx_push/pop/get`（`kernel/include/net/net_lane.h`，
+  实体 `a20_net_lane_cur` 在 `kernel/net/net_lane.c`，**只在 `CONFIG_NET_LANES > 1`
+  下存在**）。它是一个上下文，不是一个新的派生式。
+- **没有、也明确禁止 `cpu_current_id()` 选池。** 这不是为了守规矩好看：一旦 memp 里
+  出现第二种"lane 是什么"，一条连接的 pcb 与 pbuf 就可能落在两条 lane 上，而那正是
+  `16304db8` / `f7f3d670` 两类 bug 的机制。全树只能有一个答案。
+- 存储是一个全局量而不是 per-CPU：本树没有 per-CPU 设施。正确性来自
+  `g_lwip_lock` 独占 + `a20_lwip_unlock()` 清零——退出锁时上下文归 0，不跨锁泄漏。
+
+各入口在进入 lwIP 核心前声明自己的 lane：
+
+| 入口 | 声明的 lane | 备注 |
+|---|---|---|
+| RX 排空 `a20_lwip_process_netif_rx_tx_locked()` | `net_lane_of_ip(netif 的 IPv4)` | **作用域式** push/pop：socket 的发送路径会经 `a20_lwip_poll_locked()` 走到这里，pop 才能让排空时释放的 loopback 回声仍算在那个 socket 头上，而不是算到 netif 头上 |
+| socket 系统调用（bind / connect / listen / send / accept / recved …） | `socket->lane` | 19 处；accept 阶段的 pcb 交接用 `listener->lane`，因为子连接此刻还没 bind，`child->lane` 还是那个标注为 provisional 的 CPU 派生值 |
+| `a20_lwip_unlock()` | 清零 | 无参调用点无需配对 |
+
+`memp` 侧只对 `MEMP_PBUF` / `MEMP_PBUF_POOL` 两个池按当前 lane 索引；其余池的内容
+既不按包也不按连接，保持全局。lane 0 指向上游那个描述符对象本身，
+`memp_pools[]` 与 `lwip_stats.memp[]` 的指向因此和上游一模一样；lane 1..N-1 是
+`memp_init()` 里取的副本。
+
+**落地的是骨架，不是 per-lane pool。** 理由必须写在这里，否则下一个人会按名字
+读大它：
+
+- `net_profile.h` 三档全是 `MEMP_MEM_MALLOC=1`，该模式下描述符只贡献一个大小，
+  两份同样大小的描述符从同一块 lwIP 堆上取。**内存没有被分片**。真分片要走
+  `!MEMP_MEM_MALLOC` 的静态预留布局，每条 lane 一份 base 数组和空闲链表，
+  `lwipopts.h` 的 profile 静态断言目前只按一份拷贝预留 `.bss`。
+- 释放路径不变：`do_memp_free_pool()` 在该模式下忽略描述符，元素回到同一块堆。
+- 因此今天唯一可观测的是 per-lane 的**分配/释放单调计数**，渲染在既有
+  `/proc/net` memp 表下方（仅 `CONFIG_NET_LANES > 1`）。
+  之所以是计数而不是"已用"水位：`memp_free()` 只拿到 pool id 和指针，说不出这元素
+  是哪条 lane 发出去的；按释放方记会漂移，按分配方记需要 `struct pbuf` 里没有的
+  所有权标签，而按前一种口径喂出来的水位会在第一次 lane 不匹配时下溢 `u16_t`。
+
+**RX 排空用的 lane 不是包的归属 lane。** netif 没有自己的 lane（`struct netif`
+未改，见 DIVERGENCE.md §2.4），只能拿它自己的地址去 `net_lane_of_ip()`，理由与
+ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是阶段 D。所以今天
+所有 lane 的连接仍经同一个 netif 进来，在 netif 那条 lane 上被排空。
+
+**阶段 C 还剩下的**（不要当成已完成）：
+
+- **内存分片没做**，如上。要做需要先把三个 profile 切到 `!MEMP_MEM_MALLOC` 的静态
+  预留布局，并让 `lwipopts.h` 的静态断言按 `CONFIG_NET_LANES` 倍预留 `.bss`——那是
+  一次会改变嵌入式构建内存占用的决定，不是本阶段能顺手带上的。
+- **per-lane 定时器遍历的入口还没导出。** `b1bb28b5` 把 TCP 快/慢定时器按 lane 分片
+  了，但驱动遍历的那个入口目前是全局的，`a20_lwip_poll_timers_locked()` 里的
+  loopback 排空**刻意继承调用者的 lane**（代码里有注释说明为什么），所以定时器侧
+  目前没有自己的 lane 声明点。
+- **pbuf 的归属 lane 还无从得知**，阶段 D 才能解；在此之前 per-lane 池表分的是
+  "谁在分配"，不是"这个包属于谁"。
+
+#### `CONFIG_NET_LANES=1` 等价：实测结论，以及两个比想象中难缠的坑
+
+`memp.o`、`lwip_stack.o`、`socket_inet.o` 在一 lane 下 `.text` / `.rodata` /
+`.sdata` 与改动前**逐字节相同**；再加 `-fno-sanitize=undefined` 重编，三个目标文件
+整体也逐字节相同。仅存的差异是 UBSan 内嵌的 `SourceLocation` 行号表——文件多了行
+它就变，**加一行注释也一样会变**，所以这不是本改动特有的，也不代表行为差异。
+
+两个坑值得留在案上，因为它们的结论都是反直觉的：
+
+1. **`static inline` 空函数体不够。** 一开始 `a20_lwip_lane_enter()` 写成头文件里的
+   `static inline`、一 lane 下函数体为空。实测 `socket_inet.o` 的 `.text` 变了：
+   一个函数的栈槽分配被打乱（`sd a4,56(sp)` 与 `sd a4,64(sp)` 互换），`.text` 短了
+   4 字节。原因是空 inline 仍然把 `s->lane` 当实参传下去，而这个实参的死活判定
+   早到足以扰动寄存器分配。改成一 lane 下展开为空的宏之后，`s->lane` 根本不被读。
+   **写成 out-of-line 函数更糟**：19 个调用点会各多一条重定位和一次调用。
+2. **"让优化器折叠"不是等价证明。** `memp_desc_for()` 在一 lane 下现在是宏
+   `memp_pools[type]`，即上游原句。两种写法编出来的机器码相同（实测 `.text` 相同），
+   但"编译器会折叠"是对某个编译器版本的断言，"一 lane 下预处理结果就是上游那句"
+   是可以 `grep` 出来的事实。铁律该按后者守。
+
 ### 门禁现状：`smoke-net-accept` 本身是 flaky 的（与本次修复无关）
 
 在最终干净树上复跑 `smoke-net-accept` 三次：
@@ -1056,6 +1133,11 @@ lanes: count=4 sockets=8 occupancy: 3 2 2 1
 ```
 
 `CONFIG_NET_BUSY_POLL` 与 lane 数是正交的：单 lane 时轮询就是今天的行为。
+
+多 lane 构建下，`/proc/net` 的 memp 表下方还会多出一段 per-lane 的 pbuf 分配/释放
+计数（`5ea06a78`）。它回答的是"分配点是不是真的按 lane 分开了"，**不是**每条 lane
+占了多少内存——见上面「阶段 C 落地记录」里为什么内存并没有被分片、为什么给的是两个
+单调计数而不是一个水位。
 
 ## 验证
 

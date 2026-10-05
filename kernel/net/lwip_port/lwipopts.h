@@ -303,6 +303,29 @@ void a20_lwip_assert_core_locked(void *site);
 #define LWIP_ASSERT_CORE_LOCKED()
 #endif
 
+/*
+ * Which lane owns the network work in progress, as seen from inside lwIP.
+ *
+ * memp's API has no lane dimension -- memp_malloc(MEMP_PBUF) receives a pool
+ * id and nothing else -- so partitioning a pool per lane means memp has to
+ * ask.  The question is answered by the port rather than inside lwIP because
+ * the answer is an A20OS concept: the lane is the address-derived ownership
+ * hash (net_lane_of), and the only place it is known is the A20OS entry point
+ * that is about to enter the lwIP core.  net_lane.h records why this may not
+ * be derived from the CPU instead; kernel/external/lwip/DIVERGENCE.md lists
+ * what this adds to the upstream tree.
+ *
+ * Left undefined it means "no lane concept", which is upstream's behaviour and
+ * what a CONFIG_NET_LANES == 1 build has to keep.  memp.c tests it with
+ * #ifdef, so at one lane not one statement of the lane-indexed pool path is
+ * compiled -- see the equivalence rule at the top of docs/net/net-lanes.md.
+ */
+#if CONFIG_NET_LANES > 1
+unsigned a20_lwip_memp_lane(void);
+#define LWIP_MEMP_LANE() a20_lwip_memp_lane()
+#define LWIP_MEMP_LANES CONFIG_NET_LANES
+#endif
+
 #define LWIP_RAND()                     ((u32_t)random_u64())
 
 #endif /* A20_LWIPOPTS_H */

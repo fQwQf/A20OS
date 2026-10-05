@@ -19,6 +19,35 @@ void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
+/* Stage C: say which lane owns the lwIP work that is about to run, so lwIP's
+ * allocator can index that lane's pbuf pool.  Call only with g_lwip_lock held
+ * and only right after taking it; a20_lwip_unlock() clears it again, so there
+ * is no matching exit call.
+ *
+ * At CONFIG_NET_LANES == 1 this has to disappear from the *preprocessed
+ * source*, not merely from the assembly, and that is why it is a macro rather
+ * than an out-of-line function or even a static inline:
+ *
+ *   - out of line, it exists at one lane too, so all ~19 call sites in
+ *     socket_inet.c would gain a relocation and a call, to hold an empty body;
+ *   - static inline with an empty body is still not enough.  Measured: with
+ *     `(void)net_lane_ctx_push(lane)` at CONFIG_NET_LANES == 1, GCC's IR for
+ *     socket_inet.c differs from HEAD's even though the instruction stream
+ *     barely moves -- one function's stack-slot assignment shuffles and .text
+ *     ends up four bytes shorter.  An empty inline still passes `s->lane` as an
+ *     argument, and the argument's deadness is decided early enough to perturb
+ *     register allocation.
+ *
+ * So at one lane the macro expands to nothing and `s->lane` is never read.  The
+ * N=1 objects then differ from the pre-lane build only in UBSan's embedded
+ * source-line table, which shifts because this file gained lines at all; the
+ * generated code is byte-identical, verified by rebuilding these files with
+ * -fno-sanitize=undefined on both trees. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_lane_enter(unsigned lane);
+#else
+#define a20_lwip_lane_enter(lane) ((void)0)
+#endif
 int  a20_lwip_lock_is_held(void);
 void a20_lwip_note_lock_violation(void *site);
 unsigned a20_lwip_lock_violations(void);
