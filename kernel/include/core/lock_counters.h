@@ -11,7 +11,7 @@ void lock_counters_register(spinlock_t *lock, const char *name);
 
 /* Allocate the per-callsite sample table for one lock so the contended path
  * records the caller's return address.  Only call for the locks you want to
- * attribute (e.g. the scheduler's proc_lock). */
+ * attribute (e.g. the scheduler's tasklist_lock). */
 void lock_counters_enable_callsite(spinlock_t *lock);
 
 /* Render "<name>: <contended_acquires> <contended_spins>\n" for every

@@ -129,11 +129,17 @@ int net_netlink_bind(net_socket_t *s, const void *addr, size_t addrlen)
         task_t *cur = proc_current();
         local.nl_pid = cur ? (uint32_t)cur->pid : 1;
     }
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    /* One socket, one bucket: publishing the bound address needs nothing else. */
+    int sb = net_socket_bucket(s);
+    uint64_t irq = net_bucket_lock(sb);
+    if (!net_socket_is_live(s)) {
+        net_bucket_unlock(sb, irq);
+        return -ENOTSOCK;
+    }
     memcpy(s->local, &local, sizeof(local));
     s->local_len = sizeof(local);
     s->bound = 1;
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock(sb, irq);
 
     /* udevd subscribes to the uevent multicast group when it starts; devices
      * registered before udevd ran had no listener, so their "add" uevents were
@@ -175,10 +181,20 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
         .nl_pid = 0,
         .nl_groups = 0,
     };
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    uint32_t recipient_pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
-        ? ((const net_sockaddr_nl_t *)requester->local)->nl_pid : 0;
-    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
+    /* One bucket at a time, each paired with the requester's own bucket so the
+     * reply can be enqueued without ever holding a third lock.  Two buckets is
+     * the documented ceiling, and net_bucket_lock2() takes them ascending, so
+     * the scan cannot form a cycle with any other two-socket path. */
+    int rb = net_socket_bucket(requester);
+    uint32_t recipient_pid = 0;
+    for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
+        net_bucket_pair_t pair = net_bucket_lock2(rb, b);
+        if (pair.lo == rb)
+            recipient_pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
+                ? ((const net_sockaddr_nl_t *)requester->local)->nl_pid : 0;
+        int base = b << NET_SOCK_BUCKET_SHIFT;
+        for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
+        int i = base + k;
         net_socket_t *s = g_sockets[i];
         if (!s || s == requester ||
             (s->domain != AF_INET && s->domain != AF_INET6) ||
@@ -213,9 +229,11 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
         int r = net_enqueue_msg_locked(requester, &reply, sizeof(reply),
                                        &kernel_addr, sizeof(kernel_addr));
         if (r < 0) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             return r;
         }
+        }
+        net_bucket_unlock2(pair);
     }
 
     netlink_done_t done;
@@ -225,9 +243,11 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
     done.nlh.nlmsg_flags = NLM_F_MULTI;
     done.nlh.nlmsg_seq = req_nlh->nlmsg_seq;
     done.nlh.nlmsg_pid = recipient_pid;
+    /* The closing NLMSG_DONE needs the requester's bucket only. */
+    uint64_t df = net_bucket_lock(rb);
     int r = net_enqueue_msg_locked(requester, &done, sizeof(done),
                                    &kernel_addr, sizeof(kernel_addr));
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock(rb, df);
     return r < 0 ? r : (int)len;
 }
 
@@ -239,11 +259,15 @@ int net_netlink_diag_request(net_socket_t *requester, const void *buf,
  * Broadcast a uevent to every netlink socket bound to KOBJECT_UEVENT with
  * multicast group 1 (the udev listener group).  The uevent datagram is the
  * raw "ACTION@DEVPATH" plus NUL-terminated KEY=VALUE pairs terminated by an
- * extra NUL, exactly the format libudev/udevd parse.  Caller holds g_net_lock.
+ * extra NUL, exactly the format libudev/udevd parse.
+ *
+ * Takes no lock of its own: the table walk is per-bucket and each listener is
+ * enqueued into under the bucket that owns it, so this is safe with no bucket
+ * lock held and is deliberately not callable from inside one.
  */
-static int netlink_uevent_broadcast_locked(const char *action,
-                                           const char *subsystem,
-                                           const char *name, uint64_t devt)
+static int netlink_uevent_broadcast(const char *action,
+                                    const char *subsystem,
+                                    const char *name, uint64_t devt)
 {
     unsigned major = (unsigned)((devt >> 8) & 0xffU);
     unsigned minor = (unsigned)(devt & 0xffU);
@@ -253,8 +277,12 @@ static int netlink_uevent_broadcast_locked(const char *action,
      * is_devpath_busy) relies on it: with all-seqnum-zero events the first
      * queued event is misjudged as "busy" (delaying_seqnum 0 == seqnum 0)
      * and no worker is ever spawned. */
-    static uint64_t g_uevent_seq;
-    uint64_t seqnum = ++g_uevent_seq;
+    /* Atomic because the broadcast is no longer serialised by one global lock:
+     * two CPUs emitting uevents now walk the table under different buckets and
+     * would otherwise hand udevd the same sequence number twice, which is
+     * exactly what the ordering comment below says it must not do. */
+    static volatile uint64_t g_uevent_seq;
+    uint64_t seqnum = __atomic_add_fetch(&g_uevent_seq, 1, __ATOMIC_RELAXED);
 
     char buf[256];
     int n = snprintf(buf, sizeof(buf),
@@ -281,18 +309,25 @@ static int netlink_uevent_broadcast_locked(const char *action,
         .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = UEVENT_GROUP,
     };
     int delivered = 0;
-    for (int i = 0; i < NET_MAX_SOCKETS; i++) {
-        net_socket_t *s = g_sockets[i];
-        if (!s || s->domain != AF_NETLINK ||
-            s->protocol != NETLINK_KOBJECT_UEVENT || !s->bound)
-            continue;
-        net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
-        if (!nl || !(nl->nl_groups & UEVENT_GROUP))
-            continue;
-        int r = net_enqueue_msg_locked(s, buf, (size_t)n, &src, sizeof(src));
-        if (r < 0)
-            return r;
-        delivered++;
+    for (int b = 0; b < NET_SOCK_BUCKETS; b++) {
+        uint64_t bf = net_bucket_lock(b);
+        int base = b << NET_SOCK_BUCKET_SHIFT;
+        for (int k = 0; k < NET_SOCK_SLOTS_PER_BUCKET; k++) {
+            net_socket_t *s = g_sockets[base + k];
+            if (!s || s->domain != AF_NETLINK ||
+                s->protocol != NETLINK_KOBJECT_UEVENT || !s->bound)
+                continue;
+            net_sockaddr_nl_t *nl = (net_sockaddr_nl_t *)s->local;
+            if (!nl || !(nl->nl_groups & UEVENT_GROUP))
+                continue;
+            int r = net_enqueue_msg_locked(s, buf, (size_t)n, &src, sizeof(src));
+            if (r < 0) {
+                net_bucket_unlock(b, bf);
+                return r;
+            }
+            delivered++;
+        }
+        net_bucket_unlock(b, bf);
     }
     klog(KLOG_INFO,
          "[UEVENT] %s %s/%s devt=%u:%u delivered=%d\n",
@@ -306,9 +341,9 @@ static int netlink_uevent_broadcast_locked(const char *action,
 void netlink_uevent_emit(const char *action, const char *subsystem,
                          const char *name, uint64_t devt)
 {
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
-    (void)netlink_uevent_broadcast_locked(action, subsystem, name, devt);
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    /* The broadcast walks the table one bucket at a time and enqueues into
+     * each matching socket, so it takes no lock of its own here. */
+    (void)netlink_uevent_broadcast(action, subsystem, name, devt);
 }
 
 /* The verbs the kobject uevent layer accepts (kernel/ksysfs.c
@@ -489,7 +524,8 @@ static uint8_t nlrt_mask_prefixlen(const uint8_t mask[4])
 
 /*
  * Copy the interface list out of lwIP.  The lock contract forbids holding
- * g_lwip_lock together with g_net_lock, so the snapshot is taken and the lwIP
+ * g_lwip_lock together with a socket-table bucket lock, so the snapshot is
+ * taken and the lwIP
  * lock dropped before any reply is enqueued.
  */
 static int nlrt_snapshot(nlrt_link_t *out, int max)
@@ -734,7 +770,8 @@ static int nlrt_apply_addr(uint16_t type, uint16_t flags,
      * *different* address can only be reconfigured by an explicit
      * NLM_F_REPLACE (ip addr replace), never silently overwritten by a plain
      * add.  The read and the write are separate lock acquisitions because the
-     * lock contract forbids holding g_lwip_lock and g_net_lock together, and
+     * lock contract forbids holding g_lwip_lock and a socket-table bucket lock
+     * together, and
      * this stack has no rtnl_lock equivalent; two config requests racing on
      * one interface are therefore last-writer-wins. */
     if (!nlrt_ip4_isany(cur) && memcmp(cur, want, 4) != 0 &&
@@ -783,7 +820,8 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
 
     /* Write requests run before any reply is built and hold no lock: the lwIP
      * helpers take g_lwip_lock themselves, and the lock contract forbids
-     * holding it together with g_net_lock (taken only further down). */
+     * holding it together with a socket-table bucket lock (taken only further
+     * down). */
     if (type == RTM_NEWLINK || type == RTM_NEWADDR || type == RTM_DELADDR) {
         /* Only a single-message write is honoured; a multipart request would
          * carry further nlmsghdrs this path does not walk. */
@@ -802,7 +840,14 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
     int nlinks = nlrt_snapshot(links, NLRT_MAX_LINKS);
 
     net_sockaddr_nl_t from = { .nl_family = AF_NETLINK, .nl_pid = 0, .nl_groups = 0 };
-    uint64_t irq = spin_lock_irqsave(&g_net_lock);
+    /* Every reply below is enqueued into the requester, and nothing else is
+     * touched, so the requester's own bucket is the only lock this needs. */
+    int rb = net_socket_bucket(requester);
+    uint64_t irq = net_bucket_lock(rb);
+    if (!net_socket_is_live(requester)) {
+        net_bucket_unlock(rb, irq);
+        return -ENOTSOCK;
+    }
     uint32_t pid = requester->local_len >= sizeof(net_sockaddr_nl_t)
         ? ((const net_sockaddr_nl_t *)requester->local)->nl_pid : 0;
 
@@ -871,6 +916,6 @@ int net_netlink_route_request(net_socket_t *requester, const void *buf,
         rc = net_enqueue_msg_locked(requester, &done, sizeof(done),
                                     &from, sizeof(from));
     }
-    spin_unlock_irqrestore(&g_net_lock, irq);
+    net_bucket_unlock(rb, irq);
     return rc < 0 ? rc : (int)len;
 }

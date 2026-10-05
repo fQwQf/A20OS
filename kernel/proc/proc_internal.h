@@ -57,21 +57,38 @@ static inline uint32_t sched_weight_for_nice(int nice)
     return sched_prio_to_weight[idx];
 }
 
-extern spinlock_t proc_lock;
+/* tasklist_lock guards global task-list membership and the parent/children
+ * and thread-group chains only.  Scheduling state (->state, ->on_cpu, ...) and
+ * CPU ownership live on the owning task's park_lock / runqueue lock; the
+ * context-switch publication path takes no global lock at all. */
+extern spinlock_t tasklist_lock;
 void proc_sched_note_zombie(void);
 task_t *proc_current_on_cpu(unsigned cpu);
 int proc_task_is_current_any_cpu(task_t *task);
 int proc_sched_resume_stopped(task_t *task, int report_continued);
 int proc_sched_stop_for_debug(task_t *task, int sig);
-void proc_wake_child_waiters_locked(task_t *parent);
+void proc_wake_child_waiters(task_t *parent);
 void proc_switch_complete(void);
+/* Finish a pending outgoing task left by a previous switch on this CPU.
+ * Separate window (g_cpu_switch_out[cpu] -> park_lock) so the context-switch
+ * publication path never nests two task locks. */
+void proc_switch_out_finish_pending(void);
+void proc_current_slots_init(void);
 
 task_t *proc_idle_task(void);
 task_t *proc_first_task_locked(void);
 task_t *proc_next_task_locked(task_t *t);
+/* INV-P3: nest two different tasks' park_locks in ascending task-pointer
+ * order and release them in reverse order.  Every site that holds two task
+ * locks goes through this pair.  Passing b == NULL or b == a takes only a.
+ * Per-CPU slots (g_cpu_switch_out[cpu]) sit outside this order. */
+void proc_lock_two_tasks(task_t *a, task_t *b, uint64_t *flags_a,
+                         uint64_t *flags_b);
+void proc_unlock_two_tasks(task_t *a, task_t *b, uint64_t flags_a,
+                           uint64_t flags_b);
 void proc_unlink_task_locked(task_t *t);
 void proc_children_link_locked(task_t *parent, task_t *child);
-void proc_link_newborn_locked(task_t *t);
+void proc_link_newborn(task_t *t);
 void proc_children_unlink_locked(task_t *t);
 void proc_reparent_task_locked(task_t *new_parent, task_t *t);
 void proc_tg_link_locked(task_t *t);
@@ -94,7 +111,10 @@ task_t *proc_alloc_task_slot(void);
 int proc_clone_deferred(vaddr_t stack, task_t **out_task);
 int proc_copy_to_task_user(task_t *task, void *dst, const void *src, size_t n);
 void proc_complete_vfork(task_t *child);
-void proc_reap_detach_locked(task_t *t);
+/* The UNUSED transition is park_lock-owned and the list unlink is
+ * tasklist_lock-owned; tasklist_lock is strictly outside park_lock.  The
+ * caller must already hold tasklist_lock and no task park_lock. */
+void proc_reap_detach_list_locked(task_t *t);
 int proc_tg_group_dead_locked(task_t *t);
 
 void proc_sched_runq_init(void);
@@ -143,20 +163,25 @@ void proc_wait_timer_cancel_locked(task_t *t, uint64_t wait_seq);
  * park_lock first). */
 int proc_wait_timer_register(task_t *t, uint64_t deadline, uint64_t wait_seq);
 void proc_wait_timer_cancel(task_t *t, uint64_t wait_seq);
-/* Count of tasks blocked in wait4() with waiting_for_child set; guarded by
- * proc_lock.  proc_wake_child_waiters_locked() skips its global task-list
- * scan when the count is zero. */
+/* Count of tasks blocked in wait4() with ->waiting_for_child set.  It is
+ * maintained in lockstep with the owning task's ->waiting_for_child, under that
+ * task's park_lock, so the two can never disagree; readers on other tasks only
+ * use it as an advisory fast-path hint and read it relaxed.
+ * proc_wake_child_waiters() skips its global task-list scan when it is zero. */
 extern unsigned long g_proc_waiting_child_waiter_count;
-/* Park-state wake transition; requires task->park_lock held (and, when the
- * caller holds it, proc_lock -> park_lock is the documented order). */
+/* Park-state wake transition; requires task->park_lock held (tasklist_lock ->
+ * park_lock is the documented order). */
 int proc_try_wake_locked_common(task_t *task, uint64_t seq,
                                 proc_wake_reason_t reason,
                                 uint64_t *remote_cpus,
                                 uint64_t *priority_cpus);
 /* Remove a task's SIGALRM deadline from the alarm heap (acquires the alarm
- * heap lock; task destruction calls this while holding proc_lock). */
+ * heap lock; task destruction calls this while holding the target's
+ * park_lock, which nests inside tasklist_lock). */
 void proc_alarm_cancel(task_t *t);
-void proc_runq_enqueue_locked(task_t *t);
+/* Enqueues t and returns its resulting ->on_rq, read under the runqueue lock
+ * (see the definition for why the caller must not re-read ->on_rq itself). */
+int proc_runq_enqueue_locked(task_t *t);
 void proc_runq_remove_locked(task_t *t);
 task_t *proc_runq_pick_local(void);
 void sched_reap_zombies(void);

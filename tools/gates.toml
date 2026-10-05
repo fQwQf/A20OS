@@ -722,15 +722,51 @@ files = ["docs/archive/process-lock-split-audit.md"]
 pattern = "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN"
 files = ["kernel/proc/sched.c"]
 
+# EVOLVED (lock-serialization-split design 1.5): the positive assertion used to
+# be "pick_local(); ... uint64_t flags = spin_lock_irqsave(&proc_lock)".  Class A
+# replaces the global lock with the picked task's own park_lock, so the old text
+# is necessarily gone.
+#
+# The design spells the replacement as
+#   "...pick_local();[\s\S]{0,2048}if \(next\)[\s\S]{0,256}spin_lock_irqsave\(&next->park_lock\)"
+# That regex cannot match a correct implementation of INV-P3.  sched() has to
+# hold the picked task's park_lock AND this CPU's current task's park_lock at
+# the same time (the keep-current branch publishes next and transitions current),
+# and those two must be taken in ascending task-pointer order -- a literal
+# "current first, then next" order deadlocks against proc_task_may_access(),
+# which takes {caller, target} in address order and can be entered with caller
+# == this CPU's current and target == a task on the same runqueue.  So the
+# acquire goes through proc_lock_two_tasks(), and the pattern below pins the
+# same intent the design states in prose: right after the pick, `next` is
+# aliased into `picked` and the per-task lock is taken through the INV-P3 helper
+# before anything dereferences `next`.  Deviation recorded in
+# docs/measured/impl-notes-proc.md section 3, class A.
 [[gate.assertion]]
-rg_flags = ["-U"]
-pattern = "task_t \\*next = proc_runq_pick_local\\(\\);[\\s\\S]{0,2048}uint64_t flags = spin_lock_irqsave\\(&proc_lock\\)"
+rg_flags = ["-U", "--pcre2"]
+pattern = "task_t \\*next = proc_runq_pick_local\\(\\);[\\s\\S]{0,2048}picked = next;[\\s\\S]{0,512}proc_lock_two_tasks\\(picked, current, &nf, &cf\\)"
+files = ["kernel/proc/sched.c"]
+
+# ...and nothing between the pick and that acquire may dereference next->.
+[[gate.assertion]]
+negate = true
+rg_flags = ["-U", "--pcre2"]
+pattern = "task_t \\*next = proc_runq_pick_local\\(\\);[\\s\\S]{0,1024}proc_lock_two_tasks\\(picked, current, &nf, &cf\\)[\\s\\S]{0,64}next->"
 files = ["kernel/proc/sched.c"]
 
 [[gate.assertion]]
 negate = true
 rg_flags = ["-U", "--pcre2"]
 pattern = "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\\s\\S])*spin_lock_irqsave\\(&proc_lock\\)"
+files = ["kernel/proc/sched.c"]
+
+# NEW (design 1.5, INV-P4b): the pick side must never take a task park_lock.
+# Without this, a future edit that reaches for ->park_lock inside the pick
+# region would reverse runq_lock -> park_lock and deadlock against every
+# park_lock -> runq_lock enqueue/unpick path.
+[[gate.assertion]]
+negate = true
+rg_flags = ["-U", "--pcre2"]
+pattern = "SCHED_LOCAL_PICK_LOCK_SPLIT_BEGIN(?:(?!SCHED_LOCAL_PICK_LOCK_SPLIT_END)[\\s\\S])*spin_lock_irqsave\\(&[^)]*->park_lock\\)"
 files = ["kernel/proc/sched.c"]
 
 [[gate.assertion]]
@@ -747,6 +783,43 @@ files = [
     "kernel/include/proc/lifetime.h",
     "kernel/proc/lifetime.c",
 ]
+
+# NEW (design 1.5, INV-P4a): the switch publication path itself -- context_switch_locked()
+# / context_switch() / sched().  context_switch_locked() and proc_switch_complete()
+# do not take the lock themselves but every switch passes through them, so a
+# scope limited to sched()/context_switch() would let P0 regress with the gate
+# still green.
+[[gate.assertion]]
+pattern = "SCHED_SWITCH_PATH_BEGIN"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+pattern = "SCHED_SWITCH_PATH_END"
+files = ["kernel/proc/sched.c"]
+
+[[gate.assertion]]
+negate = true
+rg_flags = ["-U", "--pcre2"]
+pattern = "SCHED_SWITCH_PATH_BEGIN(?:(?!SCHED_SWITCH_PATH_END)[\\s\\S])*spin_lock_irqsave\\(&proc_lock\\)"
+files = ["kernel/proc/sched.c"]
+
+# NEW (design 1.5, INV-P4a points 4 and 5): the outgoing-task completion runs on
+# every switch but lives in current.c, outside the sched.c marker region.
+[[gate.assertion]]
+negate = true
+pattern = "spin_lock_irqsave\\(&proc_lock\\)"
+files = ["kernel/proc/current.c"]
+
+# NEW (design 1.5, INV-P5): the replacement global lock must exist and be
+# registered with the contention counters, or /proc/a20/lock_contention loses
+# the task-table walk that proc_lock used to cover.
+[[gate.assertion]]
+pattern = "spinlock_t tasklist_lock"
+files = ["kernel/proc/proc.c"]
+
+[[gate.assertion]]
+pattern = "lock_counters_register\\(&tasklist_lock"
+files = ["kernel/proc/proc.c"]
 
 [[gate.assertion]]
 pattern = "SCHED_STRESS: lock-split PASS"

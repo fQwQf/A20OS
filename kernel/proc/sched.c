@@ -78,8 +78,9 @@ typedef struct __attribute__((aligned(64))) proc_cpu_sched {
  *   enter sched() with interrupts enabled.
  * - IPI reschedule must be safe from any CPU after proc_make_ready() publishes a
  *   remote READY task and before the target CPU picks it from its runqueue.
- * - Cross-CPU wakeup must hold proc_lock before choosing target cpu_id, then
- *   acquire only the target runqueue lock for enqueue. Reverse order is banned.
+ * - Cross-CPU wakeup must hold the target task's park_lock before choosing
+ *   target cpu_id, then acquire only the target runqueue lock for enqueue.
+ *   Reverse order is banned (INV-P2).
  * - context_switch() must be the only path that publishes PROC_RUNNING for a
  *   runnable task; proc_runq_pick_local() must atomically move on_rq to
  *   dispatching before that point.
@@ -119,13 +120,16 @@ static unsigned long sched_violations;
  * SCHEDULER_CPU_OWNERSHIP:
  *   on_rq -> dispatching -> on_cpu -> unowned
  *
- * proc_lock serializes task-state and CPU ownership transitions except for the
- * local on_rq -> dispatching hand-off. That hand-off changes queue membership
- * and dispatch ownership atomically under the selected per-CPU runqueue lock,
- * without holding proc_lock. All enqueue, migration, unpick, switch publication,
- * Park, exit, and reap paths retain proc_lock -> runqueue lock ordering. An
- * outgoing task keeps on_cpu set across __switch; proc_switch_complete() clears
- * ownership only after the replacement task is executing on its own stack.
+ * Task state and CPU ownership are serialized per task: park_lock owns
+ * ->state/->on_cpu, the per-CPU runqueue lock owns ->on_rq and publishes
+ * dispatching/->owner_cpu. The global proc_lock is gone from the switch path
+ * entirely; what remains global is tasklist_lock, which covers list membership
+ * and the parent/children and thread-group chains only. All enqueue, migration,
+ * unpick, Park, exit, and reap paths keep the park_lock -> runqueue lock
+ * direction, and no path takes park_lock while holding a runqueue lock
+ * (INV-P4b). An outgoing task keeps on_cpu set across __switch;
+ * proc_switch_complete() clears ownership only after the replacement task is
+ * executing on its own stack.
  */
 
 
@@ -141,13 +145,15 @@ unsigned proc_sched_select_cpu(task_t *t);
 #define SCHED_REAP_BATCH   32
 #endif
 
-/* Per-CPU runqueue lock — separate from proc_lock.
- * runq_lock protects enqueue/dequeue/pick and per-runqueue state.
- * proc_lock protects task_list, task->state transitions, and zombie list.
+/* Per-CPU runqueue lock.
+ * runq_lock protects enqueue/dequeue/pick and per-runqueue state, including
+ * the dispatching/->owner_cpu publication.
+ * park_lock protects task->state transitions; tasklist_lock protects task_list
+ * and the parent/children and thread-group chains.
  *
- * Ordering: proc_lock -> runq_lock (never the reverse). A local picker acquires
- * only its runqueue lock and releases it before acquiring proc_lock to publish
- * the selected task. */
+ * Ordering: park_lock -> runq_lock (never the reverse, INV-P4b), and
+ * tasklist_lock -> park_lock. A local picker acquires only its runqueue lock
+ * and releases it before the caller takes the selected task's park_lock. */
 static uint64_t sched_runq_lock_irq(unsigned cpu)
 {
     proc_runq_t *rq = &sched_runq[cpu];
@@ -644,9 +650,9 @@ static int sched_nice_value(task_t *t)
 /*
  * Liveness gate for sched_get/set on a task the caller reached through
  * proc_find_get() (refcounted).  Global-list membership is implied by
- * state != PROC_UNUSED under proc_lock: the list unlink happens together with the
- * UNUSED transition at reap/destroy, and half-initialized allocation slots
- * (linked but UNUSED) must be rejected anyway.
+ * state != PROC_UNUSED under the task's park_lock: the list unlink happens
+ * together with the UNUSED transition at reap/destroy, and half-initialized
+ * allocation slots (linked but UNUSED) must be rejected anyway.
  */
 static int sched_task_linked_locked(task_t *target)
 {
@@ -656,8 +662,9 @@ static int sched_task_linked_locked(task_t *target)
 
 /*
  * SMP_RUNQUEUE_MIGRATION_PROTOCOL:
- * A queued task moves from source to destination while proc_lock and both
- * runqueue locks are held. Runqueue locks are always acquired by ascending CPU
+ * A queued task moves from source to destination while the task's park_lock
+ * and both runqueue locks are held. Runqueue locks are always acquired by
+ * ascending CPU
  * number and released in reverse order. cpu_id changes only during the
  * on_rq=0 interval protected by those locks; the runqueue-owned task reference
  * is transferred without a put/get gap.
@@ -729,9 +736,11 @@ int proc_sched_get(task_t *t, proc_sched_config_t *out)
 {
     if (!t || !out)
         return -1;
-    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+    /* D': the scheduler attributes and the queue position they select are
+     * published together, so the target's park_lock covers both. */
+    uint64_t lock_flags = spin_lock_irqsave(&t->park_lock);
     if (!sched_task_linked_locked(t)) {
-        spin_unlock_irqrestore(&proc_lock, lock_flags);
+        spin_unlock_irqrestore(&t->park_lock, lock_flags);
         return -1;
     }
     out->fields = PROC_SCHED_POLICY | PROC_SCHED_PRIORITY |
@@ -741,7 +750,7 @@ int proc_sched_get(task_t *t, proc_sched_config_t *out)
     out->nice = sched_nice_value(t);
     out->affinity = proc_sched_effective_affinity(t);
     out->reset_on_fork = t->sched_reset_on_fork;
-    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    spin_unlock_irqrestore(&t->park_lock, lock_flags);
     return 0;
 }
 
@@ -752,7 +761,10 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     if (!t || !config || (config->fields & ~all_fields))
         return -1;
 
-    uint64_t lock_flags = spin_lock_irqsave(&proc_lock);
+    /* D': policy/priority/nice/affinity are written together with the queue
+     * position they imply, and sched_runq_requeue_locked() nests the two
+     * runqueue locks (CPU order ascending) inside this park_lock. */
+    uint64_t lock_flags = spin_lock_irqsave(&t->park_lock);
     if (!sched_task_linked_locked(t))
         goto invalid;
     int policy = (config->fields & PROC_SCHED_POLICY)
@@ -778,13 +790,17 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
         }
         if (!eligible)
             goto invalid;
-        if ((t->on_cpu || t->dispatching) &&
-            (t->owner_cpu >= 32 ||
-             !(eligible & (1U << t->owner_cpu))))
+        /* INV-P4b: dispatching/owner_cpu are runq publications, so they are
+         * read atomically rather than under this task's park_lock. */
+        if ((t->on_cpu || __atomic_load_n(&t->dispatching, __ATOMIC_RELAXED)) &&
+            (__atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED) >= 32 ||
+             !(eligible & (1U << __atomic_load_n(&t->owner_cpu,
+                                                 __ATOMIC_RELAXED)))))
             goto invalid;
     }
 
-    int ready = t->on_rq && t->state == PROC_READY;
+    int ready = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED) &&
+                t->state == PROC_READY;
     unsigned old_cpu = t->cpu_id;
     int old_level = t->sched_level;
     int old_nice = sched_nice_value(t);
@@ -819,7 +835,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     }
 
     unsigned target_cpu = t->cpu_id;
-    if (!t->on_cpu && !t->dispatching) {
+    if (!t->on_cpu && !__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED)) {
         uint32_t eligible = sched_task_cpu_mask(t);
         if (target_cpu >= 32 || !(eligible & (1U << target_cpu)))
             target_cpu = proc_sched_select_cpu_locked(t);
@@ -830,14 +846,16 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
          (PROC_SCHED_POLICY | PROC_SCHED_PRIORITY | PROC_SCHED_NICE)) != 0;
     if (ready && (queue_fields_changed || target_cpu != old_cpu))
         sched_runq_requeue_locked(t, target_cpu, old_level);
-    else if (!ready && !t->on_cpu && !t->dispatching && !t->on_rq)
+    else if (!ready && !t->on_cpu &&
+             !__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
+             !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED))
         t->cpu_id = target_cpu;
 
-    int queued = t->on_rq;
+    int queued = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
     int priority_preempt =
         queued && proc_sched_should_preempt_locked(t, target_cpu);
     proc_sched_assert_task_locked(t);
-    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    spin_unlock_irqrestore(&t->park_lock, lock_flags);
 
     if (queued &&
         (target_cpu != cpu_current_id() || priority_preempt))
@@ -845,7 +863,7 @@ int proc_sched_set(task_t *t, const proc_sched_config_t *config)
     return 0;
 
 invalid:
-    spin_unlock_irqrestore(&proc_lock, lock_flags);
+    spin_unlock_irqrestore(&t->park_lock, lock_flags);
     return -1;
 }
 
@@ -1163,7 +1181,7 @@ void proc_sched_assert_task_locked(task_t *t)
     uint64_t membership_cpus = 0;
 #if CONFIG_SCHED_MEMBERSHIP_CHECK
     /*
-     * Take a stable cross-runqueue snapshot. A picker does not need proc_lock,
+     * Take a stable cross-runqueue snapshot. A picker needs no task lock,
      * so checking one queue at a time would race with a dequeue between the
      * scan and the final on_rq read and report a false invariant failure.
      * No scheduler path holds two runqueue locks, so CPU order is deadlock-free.
@@ -1273,19 +1291,19 @@ void proc_make_ready(task_t *t)
         return;
 
     unsigned target_cpu = cpu_current_id();
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* D: the state transition, the park wake and the runqueue publication are
+     * one critical section on the target task's park_lock.  park_lock ->
+     * runq_lock is the documented order (INV-P2), so proc_runq_enqueue_locked()
+     * nests safely here. */
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
     if (t->park_state == PROC_PARK_PREPARING ||
         t->park_state == PROC_PARK_PARKED) {
-        /* proc_lock -> park_lock is the documented order; the park-state
-         * transition itself is serialized by t->park_lock. */
-        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
-        spin_unlock_irqrestore(&t->park_lock, plf);
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
 
@@ -1297,9 +1315,10 @@ void proc_make_ready(task_t *t)
      */
     if (t->state == PROC_RUNNING &&
         (t != proc_current() || !t->on_cpu ||
-         t->owner_cpu != cpu_current_id())) {
+         __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED) !=
+             cpu_current_id())) {
         proc_sched_assert_task_locked(t);
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
 
@@ -1307,18 +1326,18 @@ void proc_make_ready(task_t *t)
     if (t->state != PROC_READY)
         t->state = PROC_READY;
     if (t->on_cpu) {
-        t->cpu_id = t->owner_cpu;
-    } else if (!t->dispatching && !t->on_rq) {
+        t->cpu_id = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
+    } else if (!__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
+               !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) {
         if (!was_blocked)
             t->cpu_id = proc_sched_select_cpu_locked(t);
     }
     target_cpu = t->cpu_id;
-    proc_runq_enqueue_locked(t);
-    int queued = t->on_rq;
+    int queued = proc_runq_enqueue_locked(t);
     int priority_preempt =
         queued && proc_sched_should_preempt_locked(t, target_cpu);
     proc_sched_assert_task_locked(t);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
 
     if (queued &&
         (target_cpu != cpu_current_id() || priority_preempt))
@@ -1332,7 +1351,15 @@ void proc_sched_stop_current(int exit_code)
         return;
 
     task_t *notify_parent = NULL;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    task_t *wake_for = NULL;
+    /*
+     * D: only this task's park_lock is held here.  The child-waiter wake walks
+     * the global list and takes each candidate's park_lock, so it runs after
+     * this lock is released rather than nested inside it -- nesting two task
+     * park_locks here would need INV-P3 address ordering with an unbounded
+     * candidate set, and the wake is a best-effort notification anyway.
+     */
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     /*
      * SIGCONT generation publishes a persistent pending marker before it
      * attempts to resume STOPPED.  If it raced the stop transition and found
@@ -1342,7 +1369,7 @@ void proc_sched_stop_current(int exit_code)
     if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE) ||
         signal_task_has_fatal(t) ||
         signal_task_continue_pending(t)) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
         return;
     }
     if (t->state == PROC_RUNNING) {
@@ -1351,16 +1378,20 @@ void proc_sched_stop_current(int exit_code)
         t->continue_report_pending = 0;
         t->state = PROC_STOPPED;
         task_t *parent = t->parent;
-        if (parent && parent->state != PROC_UNUSED &&
-            parent->state != PROC_ZOMBIE) {
-            proc_wake_child_waiters_locked(parent);
-            if (!signal_task_sigchld_no_cldstop(parent))
-                notify_parent = proc_get(parent);
+        if (parent) {
+            int pstate = proc_task_state_get(parent);
+            if (pstate != PROC_UNUSED && pstate != PROC_ZOMBIE) {
+                wake_for = parent;
+                if (!signal_task_sigchld_no_cldstop(parent))
+                    notify_parent = proc_get(parent);
+            }
         }
         proc_sched_assert_task_locked(t);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
 
+    if (wake_for)
+        proc_wake_child_waiters(wake_for);
     if (notify_parent) {
         (void)signal_send(notify_parent->pid, SIGCHLD);
         proc_put(notify_parent);
@@ -1382,12 +1413,13 @@ int proc_sched_stop_for_debug(task_t *t, int sig)
         return -EINTR;
 
     task_t *notify_parent = NULL;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    task_t *wake_for = NULL;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE) ||
         signal_task_has_fatal(t) ||
         signal_task_continue_pending(t) ||
         (t->state != PROC_RUNNING && t->state != PROC_READY)) {
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&t->park_lock, flags);
         return -EINTR;
     }
     t->exit_code = sig;
@@ -1396,15 +1428,19 @@ int proc_sched_stop_for_debug(task_t *t, int sig)
     t->ptrace_stop_active = 1;
     t->state = PROC_STOPPED;
     task_t *parent = t->parent;
-    if (parent && parent->state != PROC_UNUSED &&
-        parent->state != PROC_ZOMBIE) {
-        proc_wake_child_waiters_locked(parent);
-        if (!signal_task_sigchld_no_cldstop(parent))
-            notify_parent = proc_get(parent);
+    if (parent) {
+        int pstate = proc_task_state_get(parent);
+        if (pstate != PROC_UNUSED && pstate != PROC_ZOMBIE) {
+            wake_for = parent;
+            if (!signal_task_sigchld_no_cldstop(parent))
+                notify_parent = proc_get(parent);
+        }
     }
     proc_sched_assert_task_locked(t);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
 
+    if (wake_for)
+        proc_wake_child_waiters(wake_for);
     if (notify_parent) {
         (void)signal_send(notify_parent->pid, SIGCHLD);
         proc_put(notify_parent);
@@ -1412,11 +1448,11 @@ int proc_sched_stop_for_debug(task_t *t, int sig)
 
     sched();
 
-    uint64_t f2 = spin_lock_irqsave(&proc_lock);
+    uint64_t f2 = spin_lock_irqsave(&t->park_lock);
     t->ptrace_stop_active = 0;
     t->ptrace_stop_kind = PT_DEBUG_STOP_NONE;
     t->ptrace_event = 0;
-    spin_unlock_irqrestore(&proc_lock, f2);
+    spin_unlock_irqrestore(&t->park_lock, f2);
     return 0;
 }
 
@@ -1429,35 +1465,41 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
     int queued = 0;
     int resumed = 0;
     task_t *notify_parent = NULL;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    task_t *wake_for = NULL;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     if (t->state == PROC_STOPPED) {
         t->state = PROC_READY;
         t->stop_report_pending = 0;
         t->continue_report_pending = report_continued != 0;
         if (t->on_cpu) {
-            t->cpu_id = t->owner_cpu;
-        } else if (!t->dispatching && !t->on_rq) {
+            t->cpu_id = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
+        } else if (!__atomic_load_n(&t->dispatching, __ATOMIC_RELAXED) &&
+                   !__atomic_load_n(&t->on_rq, __ATOMIC_RELAXED)) {
             t->cpu_id = proc_sched_select_cpu_locked(t);
         }
         target_cpu = t->cpu_id;
-        proc_runq_enqueue_locked(t);
-        queued = t->on_rq;
+        queued = proc_runq_enqueue_locked(t);
         resumed = 1;
 
         if (report_continued) {
             task_t *parent = t->parent;
-            if (parent && parent->state != PROC_UNUSED &&
-                parent->state != PROC_ZOMBIE) {
-                proc_wake_child_waiters_locked(parent);
-                if (!signal_task_sigchld_no_cldstop(parent))
-                    notify_parent = proc_get(parent);
+            if (parent) {
+                int pstate = proc_task_state_get(parent);
+                if (pstate != PROC_UNUSED && pstate != PROC_ZOMBIE) {
+                    wake_for = parent;
+                    if (!signal_task_sigchld_no_cldstop(parent))
+                        notify_parent = proc_get(parent);
+                }
             }
         }
         proc_sched_assert_task_locked(t);
     }
     int priority_preempt =
         queued && proc_sched_should_preempt_locked(t, target_cpu);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
+
+    if (wake_for)
+        proc_wake_child_waiters(wake_for);
 
     if (queued &&
         (target_cpu != cpu_current_id() || priority_preempt))
@@ -1470,10 +1512,21 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
 }
 
 
-/* Enqueue a task onto its CPU's runqueue. Caller must hold proc_lock. */
-void proc_runq_enqueue_locked(task_t *t) {
+/* Enqueue a task onto its CPU's runqueue.  Caller must hold the task's
+ * park_lock (which is what makes park_lock -> runq_lock legal here).
+ * Returns the task's ->on_rq as it stands when this call returns, read under
+ * the runqueue lock on the paths where that lock is held: the caller used to
+ * re-read ->on_rq after the call with a relaxed atomic load, which is both an
+ * unsynchronised read of a runq-owned field (INV-P4b) and, at this call
+ * site's position in proc_make_ready(), a construct GCC's -Waccess pass
+ * rejects outright ("__atomic_load_4 writing 4 bytes into a region of size 0"
+ * once the callee is inlined and proc_make_ready is split into .part.0).
+ * Taking the value from inside the lock removes both problems; the only
+ * out-of-lock read left is the early-out below, which stays an explicit
+ * relaxed atomic read exactly as INV-P4b requires. */
+int proc_runq_enqueue_locked(task_t *t) {
     if (!t || t == proc_idle_task() || t->state != PROC_READY)
-        return;
+        return __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
 
     unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();
 
@@ -1481,8 +1534,9 @@ void proc_runq_enqueue_locked(task_t *t) {
     proc_runq_t *rq = &sched_runq[cpu];
 
     if (t->on_rq || t->dispatching || t->on_cpu) {
+        int was_queued = t->on_rq;
         RUNQ_UNLOCK_IRQ(cpu, rf);
-        return;
+        return was_queued;
     }
 #if CONFIG_DEBUG_SCHED_STATE
     if (t->owner_cpu != PROC_CPU_NONE)
@@ -1493,7 +1547,7 @@ void proc_runq_enqueue_locked(task_t *t) {
     int q = sched_task_rt(t) ? 0 : EEVDF_LEVEL;
     if (!proc_get(t)) {
         RUNQ_UNLOCK_IRQ(cpu, rf);
-        return;
+        return 0;
     }
     t->sched_level = q;
     t->cpu_id = cpu;
@@ -1505,9 +1559,10 @@ void proc_runq_enqueue_locked(task_t *t) {
     t->on_rq = 1;
     __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
     RUNQ_UNLOCK_IRQ(cpu, rf);
+    return 1;
 }
 
-/* Remove a queued task. Caller must hold proc_lock. */
+/* Remove a queued task.  Caller must hold the task's park_lock. */
 void proc_runq_remove_locked(task_t *t) {
     if (!t || !t->on_rq)
         return;
@@ -1597,9 +1652,10 @@ static task_t *sched_runq_steal_locked(proc_runq_t *lrq, unsigned local)
  *
  * Pick the next task and transfer on_rq -> dispatching using only the current
  * CPU's runqueue lock. Queue membership, cpu_id, and the dispatch owner are
- * published as one local critical section. The caller acquires proc_lock only
- * after this function returns, to validate current-versus-next and publish the
- * context switch. A path holding a runqueue lock must never acquire proc_lock.
+ * published as one local critical section.  The caller acquires the selected
+ * task's park_lock only after this function returns, to validate
+ * current-versus-next and publish the context switch.  A path holding a
+ * runqueue lock must never acquire a park_lock (INV-P4b).
  */
 task_t *proc_runq_pick_local(void)
 {
@@ -1680,8 +1736,8 @@ task_t *proc_runq_pick_local(void)
  * yielding current task still strictly outranks the selected task: the old
  * stack cannot relinquish CPU ownership before the replacement stack runs, so
  * retaining the current task avoids exposing a lower-priority interval.
- * Caller holds proc_lock and the dispatch reference becomes the runqueue
- * reference again without a put/get gap.
+ * Caller holds the task's park_lock (park_lock -> runq_lock) and the dispatch
+ * reference becomes the runqueue reference again without a put/get gap.
  */
 static void sched_runq_unpick_locked(task_t *t)
 {
@@ -1710,11 +1766,16 @@ static void sched_runq_unpick_locked(task_t *t)
 }
 
 
-/* Scan for reapable zombies — called from idle loop, not hot path.
+/* Scan for reapable zombies.  sched() calls this whenever
+ * proc_sched_note_zombie() has fired, so it is on the context-switch path even
+ * though a pass only runs when there is something to collect.
  *
  * Safely reaps orphaned zombies (parent=idle, ppid=0, CLONE_THREAD,
- * or SIGCHLD ignored).  All work is done under proc_lock to prevent
- * races with proc_wait4() which may reap the same zombie.
+ * or SIGCHLD ignored).  The walk holds tasklist_lock for list membership and
+ * takes each candidate's park_lock to read its state (INV-P5: tasklist_lock
+ * alone would give the ->state read no synchronisation relationship at all).
+ * proc_wait4() contends on the same tasklist_lock for the same reason it used
+ * to contend on proc_lock.
  *
  * Repeat only when a pass filled the batch.  A zombie left behind was rejected
  * on parent, SIGCHLD, or thread-group liveness, and every event that can later
@@ -1729,25 +1790,33 @@ void sched_reap_zombies(void)
 
     do {
         count = 0;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
         task_t *current = proc_current();
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
             /* State first: proc_task_is_current_any_cpu() reads two slots per
              * CPU, and the walk visits every live task while only zombies can
              * ever be reaped, so the current-task test belongs after the cheap
              * test that throws almost everything away. */
-            if (t->state != PROC_ZOMBIE || t == proc_idle_task() ||
-                t == current || proc_task_is_current_any_cpu(t))
-                continue;
-            task_t *parent = t->parent;
+            uint64_t tf = spin_lock_irqsave(&t->park_lock);
+            int state = t->state;
+            int is_current = t == current || proc_task_is_current_any_cpu(t);
             int reap = 0;
-            if (!parent || parent == proc_idle_task() ||
-                t->ppid == 0 || (t->clone_flags & CLONE_THREAD))
-                reap = 1;
-            else if (signal_task_sigchld_auto_reap(parent))
-                reap = 1;
+            task_t *parent = t->parent;
+            if (state == PROC_ZOMBIE && !is_current &&
+                t != proc_idle_task()) {
+                if (!parent || parent == proc_idle_task() ||
+                    t->ppid == 0 || (t->clone_flags & CLONE_THREAD))
+                    reap = 1;
+                else if (signal_task_sigchld_auto_reap(parent))
+                    reap = 1;
+            }
+            spin_unlock_irqrestore(&t->park_lock, tf);
+            /* The thread-group liveness probe samples each member's park_lock
+             * one at a time, so it runs with no task lock held here -- nesting
+             * it inside t->park_lock would order two task locks outside
+             * INV-P3. */
             if (reap && !proc_tg_group_dead_locked(t))
-                reap = 0;       /* leader still has live member threads */
+                reap = 0;   /* leader still has live member threads */
             if (reap && count < (int)(sizeof(to_reap) / sizeof(to_reap[0]))) {
                 task_t *owned = proc_get(t);
                 if (owned)
@@ -1755,16 +1824,18 @@ void sched_reap_zombies(void)
             }
         }
 
-        /* Reserve and detach the zombies while still holding proc_lock.
-         * proc_destroy_task() reacquires proc_lock, so destruction itself must
-         * happen after unlock, but the nodes must no longer be reachable from
-         * the global task list during that window. */
+        /* Reserve and detach the zombies while still holding tasklist_lock.
+         * proc_destroy_task() reacquires tasklist_lock, so destruction itself
+         * must happen after unlock, but the nodes must no longer be reachable
+         * from the global task list during that window. */
         for (int i = 0; i < count; i++) {
+            uint64_t tf = spin_lock_irqsave(&to_reap[i]->park_lock);
             to_reap[i]->state = PROC_UNUSED;
+            spin_unlock_irqrestore(&to_reap[i]->park_lock, tf);
             proc_unlink_task_locked(to_reap[i]);
         }
 
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
 
         for (int i = 0; i < count; i++) {
             proc_destroy_task(to_reap[i]);
@@ -1779,24 +1850,33 @@ void proc_sched_note_zombie(void)
 }
 
 /*
- * Publish the switch of the CPU from prev to @next.  The locked variant
- * assumes proc_lock is already held with the irqsave @flags from the caller's
- * acquire and releases it at the same points as the wrapper; the wrapper only
- * supplies the acquire.  sched() uses the locked variant so a context switch
- * takes proc_lock once instead of twice (once for the preemption check and
- * again here).  Holding proc_lock through the publication also closes the
- * window in which a remote observer could see @next neither selected nor
- * owned.  Lock order is unchanged: proc_lock -> mm_struct.lock is the
- * documented order and mm_context_enter() only uses atomics.
+ * Publish the switch of the CPU from prev to @next.
+ *
+ * LOCKING (docs/roadmap/lock-serialization-split.md §1.2 INV-P1/P3/P4a):
+ * The publication no longer takes any global lock.  It is split into three
+ * single-task-lock windows on this CPU only:
+ *
+ *   1. g_cpu_switch_out[cpu] -> pending->park_lock, finishing a predecessor
+ *      left behind by an earlier switch on this CPU (A');
+ *   2. next->park_lock, publishing dispatching -> on_cpu for the incoming task;
+ *   3. after __switch() on the new stack, old->park_lock under
+ *      g_cpu_switch_out[cpu], releasing the outgoing ownership.
+ *
+ * No two task park_locks are ever held at once here, so INV-P3's address
+ * ordering has no window to order in this path; it applies to the lifecycle
+ * paths that do nest them.  Lock order is g_cpu_switch_out[cpu] -> park_lock
+ * -> runq_lock, and the pick side never takes park_lock (INV-P4b).
  */
-static void context_switch_locked(task_t *next, uint64_t flags) {
+/* SCHED_SWITCH_PATH_BEGIN */
+static void context_switch_locked(task_t *next) {
     if (!next || !next->kstack)
         return;
 
     uint64_t now = timer_get_ticks();
 
     task_t *prev = proc_current();
-    eevdf_charge(&sched_runq[cpu_current_id()], prev, now);
+    unsigned cpu = cpu_current_id();
+    eevdf_charge(&sched_runq[cpu], prev, now);
     if (prev && prev->cgroup && prev->cg_cpu_start > 0) {
         /* Both cgroup helpers take the node lock on every context switch, and
          * on a node with no quota they return without changing anything.  An
@@ -1820,50 +1900,63 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
 
     next->cg_cpu_start = now;
 
-    unsigned cpu = cpu_current_id();
-    if (next == proc_current()) {
-        int had_dispatch_ref = next->dispatching;
+    if (next == prev) {
+        /* next is this CPU's own current task, so its park_lock has no other
+         * CPU contending for it and the INV-P3 exception applies directly. */
+        int had_dispatch_ref =
+            __atomic_load_n(&next->dispatching, __ATOMIC_RELAXED);
+        uint64_t nf = spin_lock_irqsave(&next->park_lock);
         next->state = PROC_RUNNING;
         next->on_rq = 0;
-        next->dispatching = 0;
+        __atomic_store_n(&next->dispatching, 0, __ATOMIC_RELAXED);
         next->on_cpu = 1;
-        next->owner_cpu = cpu;
+        __atomic_store_n(&next->owner_cpu, cpu, __ATOMIC_RELAXED);
         rseq_publish(next);
         proc_sched_assert_task_locked(next);
+        spin_unlock_irqrestore(&next->park_lock, nf);
         if (had_dispatch_ref)
             proc_put(next);
-        spin_unlock_irqrestore(&proc_lock, flags);
         return;
     }
 #if CONFIG_DEBUG_SCHED_STATE
     if (next != proc_idle_task() &&
-        (!next->dispatching || next->on_cpu ||
-         next->owner_cpu != cpu))
+        (!__atomic_load_n(&next->dispatching, __ATOMIC_RELAXED) ||
+         __atomic_load_n(&next->on_cpu, __ATOMIC_RELAXED) ||
+         __atomic_load_n(&next->owner_cpu, __ATOMIC_RELAXED) != cpu))
         panic("context switch: next=%d dispatch=%d on_cpu=%d owner=%u cpu=%u",
               next->pid, next->dispatching, next->on_cpu,
               next->owner_cpu, cpu);
-    if (next->on_rq)
+    if (__atomic_load_n(&next->on_rq, __ATOMIC_RELAXED))
         panic("context switch: queued next pid=%d", next->pid);
 #endif
 
     /*
-     * Publish the current slot before dispatching -> on_cpu. Remote observers
-     * holding proc_lock therefore see either a selected task or an owned task,
-     * never an unowned dequeue gap.
+     * Window 1 (A'): finish a predecessor left inactive by an earlier switch on
+     * this CPU before its slot is overwritten.  mm_context_enter() and the
+     * current-slot publication below must observe the slot we are about to
+     * write, so this has to happen first.
      */
-    int had_dispatch_ref = next->dispatching;
+    proc_switch_out_finish_pending();
+
+    /*
+     * Window 2: publish the incoming task.  g_cpu_current[cpu] is written
+     * before ->state becomes PROC_RUNNING, so a remote observer sees either a
+     * selected task or an owned task and never an unowned dequeue gap.
+     */
+    int had_dispatch_ref = __atomic_load_n(&next->dispatching, __ATOMIC_RELAXED);
     mm_context_enter(next->mm, cpu);
     task_t *old = proc_set_current(next);
+    uint64_t nf = spin_lock_irqsave(&next->park_lock);
     next->state  = PROC_RUNNING;
     next->on_rq  = 0;
-    next->dispatching = 0;
+    __atomic_store_n(&next->dispatching, 0, __ATOMIC_RELAXED);
     next->on_cpu = 1;
-    next->owner_cpu = cpu;
+    __atomic_store_n(&next->owner_cpu, cpu, __ATOMIC_RELAXED);
     rseq_publish(next);
     proc_sched_assert_task_locked(next);
+    spin_unlock_irqrestore(&next->park_lock, nf);
     if (had_dispatch_ref)
         proc_put(next);
-    spin_unlock_irqrestore(&proc_lock, flags);
     if (prev && prev->pid != 0) {
         __atomic_fetch_add(&prev->perf_switches, 1, __ATOMIC_RELAXED);
         if (prev->state == PROC_BLOCKED)
@@ -1891,9 +1984,10 @@ static void context_switch_locked(task_t *next, uint64_t flags) {
 void context_switch(task_t *next) {
     if (!next || !next->kstack)
         return;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    context_switch_locked(next, flags);
+    context_switch_locked(next);
 }
+
+/* SCHED_SWITCH_PATH_END */
 
 void sched(void) {
     task_t *sched_owner = proc_current();
@@ -1918,15 +2012,45 @@ void sched(void) {
 
     /*
      * Local queue traversal and on_rq -> dispatching no longer serialize on
-     * proc_lock across CPUs. The global lock is acquired only after the local
-     * runqueue lock has been released, for state/ownership publication.
+     * any global lock across CPUs.  The publication below takes the selected
+     * task's own park_lock, and only after proc_runq_pick_local() has released
+     * the runqueue lock, so the two never nest (INV-P4b).
      */
     task_t *next = proc_runq_pick_local();
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /*
+     * Window W1: between the pick and the park_lock acquires below, the picked
+     * task is dispatch-owned but its state has not been re-validated.  The
+     * recheck under next->park_lock is what closes that window, and it is a
+     * real serialization (not an incidental one): the waker side
+     * (proc_try_wake_locked_common) only ever held the task's park_lock, so
+     * before this change the late-wake recheck and the waker wrote the same
+     * fields under two different locks.
+     *
+     * INV-P3: the keep-current branch publishes the publication for `next` and
+     * a state transition for `current`, so both task locks are held at once and
+     * must be taken in ascending task-pointer order.  This CPU's own current
+     * task is not an exception here -- a remote CPU can still move it (stop,
+     * exit, debug kill), which is exactly what the global lock used to exclude.
+     */
     task_t *current = proc_current();
+    task_t *picked = next;
+    uint64_t nf = 0, cf = 0;
+    proc_lock_two_tasks(picked, current, &nf, &cf);
+    if (next) {
+        /* The picked task must still be publishable: a wake, exit or stop
+         * racing the pick may have moved it out of READY.  Returning it to the
+         * runqueue is the unpick, which nests park_lock -> runq_lock. */
+        int publishable = next->state == PROC_READY && next->kstack &&
+                          !__atomic_load_n(&next->on_cpu, __ATOMIC_RELAXED);
+        if (!publishable) {
+            sched_runq_unpick_locked(next);
+            next = NULL;
+        }
+    }
     if (next && current && current != proc_idle_task() &&
         current->state == PROC_READY && current->on_cpu &&
-        current->owner_cpu == cpu_current_id() &&
+        __atomic_load_n(&current->owner_cpu, __ATOMIC_RELAXED) ==
+            cpu_current_id() &&
         sched_task_strictly_preempts(current, next)) {
         /*
          * A READY current task is still the CPU owner until switch completion
@@ -1942,41 +2066,64 @@ void sched(void) {
     if (next) {
         next->exec_start = now;
         next->eevdf_last_account = now;
-        /* Keep proc_lock held across the publication: context_switch_locked()
-         * releases it at the same point context_switch() would.  One acquire
-         * per switch instead of two halves proc_lock pressure in
-         * switch-heavy builds and closes the "neither selected nor owned"
-         * observation window entirely. */
-        context_switch_locked(next, flags);
+        proc_unlock_two_tasks(picked, current, nf, cf);
+        context_switch_locked(next);
         goto out;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    proc_unlock_two_tasks(picked, current, nf, cf);
 
     /*
      * A wake can race after the empty runqueue pick while the blocked task is
-     * still executing on this sched() stack. Recheck under proc_lock, which
-     * serializes against proc_try_wake(). If that late wake published
-     * READY + on_rq, consume its queue entry before allowing the current task
-     * to continue as RUNNING.
+     * still executing on this sched() stack.  Recheck under the current task's
+     * own park_lock: that is the same lock proc_try_wake() takes, so this is
+     * the first point at which the recheck and the waker are actually
+     * serialized on the same fields (before the split they used proc_lock and
+     * park_lock respectively and did not exclude each other).
+     *
+     * Window W2: between the release below and context_switch(idle), a waker
+     * can still publish READY again, so the fall-to-idle branch re-takes
+     * cur->park_lock and re-checks before committing to the idle switch.
      */
     int keep_current = 0;
-    flags = spin_lock_irqsave(&proc_lock);
     task_t *cur = proc_current();
-    if (cur && (cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
-        if (cur->on_rq)
-            proc_runq_remove_locked(cur);
-        cur->state = PROC_RUNNING;
-        proc_sched_assert_task_locked(cur);
-        keep_current = 1;
+    if (cur) {
+        uint64_t cf = spin_lock_irqsave(&cur->park_lock);
+        if (cur->state == PROC_READY || cur->state == PROC_RUNNING) {
+            if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
+                proc_runq_remove_locked(cur);
+            cur->state = PROC_RUNNING;
+            proc_sched_assert_task_locked(cur);
+            keep_current = 1;
+        }
+        spin_unlock_irqrestore(&cur->park_lock, cf);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
     if (keep_current)
         goto out;
 
     task_t *idle = proc_idle_task();
     if (cur != idle) {
+        /* W2: re-close the window opened by the release above.  A wake that
+         * landed between the two critical sections re-published READY +
+         * on_rq; consume it and keep this task instead of idling. */
+        int late_ready = 0;
+        if (cur) {
+            uint64_t cf = spin_lock_irqsave(&cur->park_lock);
+            if ((cur->state == PROC_READY || cur->state == PROC_RUNNING)) {
+                if (__atomic_load_n(&cur->on_rq, __ATOMIC_RELAXED))
+                    proc_runq_remove_locked(cur);
+                cur->state = PROC_RUNNING;
+                proc_sched_assert_task_locked(cur);
+                late_ready = 1;
+            }
+            spin_unlock_irqrestore(&cur->park_lock, cf);
+        }
+        if (late_ready)
+            goto out;
         if (cur && cur->pid >= 4)
             ktrace_sched("[SCHED] fall-to-idle: cur=%d state=%d\n", cur->pid, cur->state);
+        /* idle never parks and never blocks, so its park_lock has no
+         * cross-CPU contender; context_switch_locked() takes it as part of the
+         * ordinary publication. */
         context_switch(idle);
     }
 

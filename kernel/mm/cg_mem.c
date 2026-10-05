@@ -118,18 +118,30 @@ void cg_mem_oom_kill(struct cg_node *cg)
     int victim_pid = -1;
     int worst_score = -1;
 
-    uint64_t pflags = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the global list, each candidate's ->state,
+     * ->cgroup and ->mm are park_lock-owned.  The mm reference the exiting
+     * task holds is still live while that park_lock is held, so ->mm cannot be
+     * freed under the scan. */
+    uint64_t pflags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) continue;
-        if (t->cgroup != cg) continue;
+        uint64_t tf = spin_lock_irqsave(&t->park_lock);
+        int st = t->state;
+        if (st == PROC_UNUSED || st == PROC_ZOMBIE || t->cgroup != cg) {
+            spin_unlock_irqrestore(&t->park_lock, tf);
+            continue;
+        }
+        /* ->mm stays pinned by the exiting task for as long as this task's
+         * park_lock is held, so the RSS read below cannot race the drop. */
         size_t task_rss = mm_rss_get(t->mm);
         int score = (int)task_rss + t->policy.oom_score_adj;
+        int tpid = t->pid;
+        spin_unlock_irqrestore(&t->park_lock, tf);
         if (score > worst_score) {
             worst_score = score;
-            victim_pid = t->pid;
+            victim_pid = tpid;
         }
     }
-    spin_unlock_irqrestore(&proc_lock, pflags);
+    spin_unlock_irqrestore(&tasklist_lock, pflags);
 
     if (victim_pid > 0) {
         kinfo("cg_mem_oom: killing pid %d (score %d)\n", victim_pid, worst_score);

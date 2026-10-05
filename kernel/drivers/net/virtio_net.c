@@ -537,7 +537,8 @@ void virtio_net_poll_rx_all(void) {
  * - The handler is a minimal top-half: it runs under g_lwip_lock, acks the
  *   device, drains the RX used ring into lwIP input (which copies pbuf data
  *   into the preallocated per-PCB bottom-half ring), schedules the bottom-half,
- *   and returns.  It never calls kmalloc or acquires g_net_lock.
+ *   and returns.  It never calls kmalloc or acquires a socket-table bucket
+ *   lock.
  */
 static int virtio_net_irq_handler(int irq, void *priv) {
     (void)irq;

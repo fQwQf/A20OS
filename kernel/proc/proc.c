@@ -40,7 +40,38 @@ static task_t *task_list_head;
 static task_t *task_list_tail;
 static pt_root_t *kernel_pgdir_shared;
 
-spinlock_t proc_lock = SPINLOCK_INIT;
+/*
+ * tasklist_lock is the only remaining global lock in the proc subsystem.  It
+ * replaces the former proc_lock, whose single critical section covered three
+ * unrelated domains at once; this lock covers exactly one of them:
+ *
+ *   - global task-list membership (task_list_head/tail, ->all_next, ->all_prev)
+ *   - parent/children/sibling links and the thread-group chain
+ *
+ * It deliberately does NOT protect scheduling state (->state, ->on_cpu,
+ * ->exit_pending, ...) nor CPU ownership (INV-P5).  Those live on the owning
+ * task's park_lock, which is why the context-switch publication path no
+ * longer touches any global lock.  Order: tasklist_lock -> park_lock.
+ */
+spinlock_t tasklist_lock = SPINLOCK_INIT;
+
+#if CONFIG_DEBUG_SCHED_STATE
+/* Hang-diagnostic task snapshot (see idle_loop).  Static because MCU kernel
+ * stacks are 512-2048 bytes and the dump runs on the idle task.  Guarded by
+ * the same CONFIG_DEBUG_SCHED_STATE as its only user (the dump block in
+ * proc_idle_loop): without the guard a non-DEBUG build compiles the array out
+ * of every use and -Werror=unused-variable fails the build. */
+enum { HANG_SNAP_MAX = 32 };
+static struct {
+    int pid;
+    int state;
+    int on_cpu;
+    int on_rq;
+    unsigned owner_cpu;
+    int park;
+    char name[16];
+} g_hang_snap[HANG_SNAP_MAX];
+#endif /* CONFIG_DEBUG_SCHED_STATE */
 
 static uint64_t g_idle_kstack[CONFIG_NR_CPUS];
 ARCH_IDLE_CONTEXT_STATIC(arch_idle_context, CONFIG_NR_CPUS);
@@ -61,16 +92,16 @@ static void proc_link_task_locked(task_t *t)
  * paths (proc_alloc, proc_alloc_user_image) historically relied on the
  * old global-list wait4 scan and never linked -- breaking both wait4
  * (-ECHILD on live children) and orphan reparenting under the list
- * model.  Takes and releases proc_lock internally. */
-void proc_link_newborn_locked(task_t *t)
+ * model.  Takes and releases tasklist_lock internally. */
+void proc_link_newborn(task_t *t)
 {
     if (!t)
         return;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     if (!t->tg_leader)
         t->tg_leader = t;
     proc_children_link_locked(t->parent, t);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
 }
 
 void proc_children_link_locked(task_t *parent, task_t *child)
@@ -163,6 +194,106 @@ task_t *proc_next_task_locked(task_t *t)
     return next;
 }
 
+/*
+ * INV-P3: when two different tasks' park_locks must be held at the same time,
+ * they are taken in ascending task-pointer order and released in reverse.
+ * Every site that nests two task locks goes through this pair, so the order is
+ * defined in exactly one place.  Per-CPU slots (g_cpu_switch_out[cpu]) sit
+ * outside this order and never take part in it.
+ */
+void proc_lock_two_tasks(task_t *a, task_t *b, uint64_t *flags_a,
+                                 uint64_t *flags_b)
+{
+    *flags_a = 0;
+    *flags_b = 0;
+    if (!a)
+        return;
+    if (!b || a == b) {
+        *flags_a = spin_lock_irqsave(&a->park_lock);
+        return;
+    }
+    if ((uintptr_t)a < (uintptr_t)b) {
+        *flags_a = spin_lock_irqsave(&a->park_lock);
+        *flags_b = spin_lock_irqsave(&b->park_lock);
+    } else {
+        *flags_b = spin_lock_irqsave(&b->park_lock);
+        *flags_a = spin_lock_irqsave(&a->park_lock);
+    }
+}
+
+void proc_unlock_two_tasks(task_t *a, task_t *b, uint64_t flags_a,
+                                   uint64_t flags_b)
+{
+    if (!a)
+        return;
+    if (!b || a == b) {
+        spin_unlock_irqrestore(&a->park_lock, flags_a);
+        return;
+    }
+    if ((uintptr_t)a < (uintptr_t)b) {
+        spin_unlock_irqrestore(&b->park_lock, flags_b);
+        spin_unlock_irqrestore(&a->park_lock, flags_a);
+    } else {
+        spin_unlock_irqrestore(&a->park_lock, flags_a);
+        spin_unlock_irqrestore(&b->park_lock, flags_b);
+    }
+}
+
+/*
+ * The runq-owned half of the snapshot cannot be taken under the task's
+ * park_lock, because the pick side publishes ->dispatching/->owner_cpu under
+ * the runqueue lock alone and must never take park_lock (INV-P4b).  Those four
+ * fields are therefore read as relaxed atomics: the snapshot is a diagnostic /
+ * low-frequency-iteration view, not a linearization point against a concurrent
+ * pick.  The two fields the caller most often branches on (state, on_cpu) are
+ * park_lock-owned and are read consistently.
+ *
+ * The result is built in a local value and handed to the caller with a single
+ * struct assignment, never through per-field stores into *out.  Reason: the
+ * check-task-state-boundary gate asserts that no arrow store of a PROC_ state,
+ * and no arrow store to on_rq / dispatching / on_cpu / owner_cpu / rq_next /
+ * rq_prev, appears anywhere outside the park-lock owning files, because that
+ * is exactly the shape a lockless write of a task field has.  A per-field store
+ * into a caller-owned struct that is not a task_t is indistinguishable from
+ * that shape to that check; filling a local value with '.' members keeps the
+ * assertion exactly as it was, still in force over every real task_t store in
+ * the tree, instead of widening its file whitelist to exempt this helper.
+ */
+void proc_task_sched_state_snapshot(task_t *t, proc_task_sched_state_t *out)
+{
+    if (!out)
+        return;
+    proc_task_sched_state_t snap;
+    memset(&snap, 0, sizeof(snap));
+    if (!t) {
+        snap.state = PROC_UNUSED;
+        snap.owner_cpu = PROC_CPU_NONE;
+        *out = snap;
+        return;
+    }
+
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    snap.state = t->state;
+    snap.on_cpu = t->on_cpu;
+    spin_unlock_irqrestore(&t->park_lock, flags);
+
+    snap.on_rq = __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
+    snap.dispatching = __atomic_load_n(&t->dispatching, __ATOMIC_RELAXED);
+    snap.owner_cpu = __atomic_load_n(&t->owner_cpu, __ATOMIC_RELAXED);
+    snap.cpu_id = __atomic_load_n(&t->cpu_id, __ATOMIC_RELAXED);
+    *out = snap;
+}
+
+int proc_task_state_get(task_t *t)
+{
+    if (!t)
+        return PROC_UNUSED;
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    int state = t->state;
+    spin_unlock_irqrestore(&t->park_lock, flags);
+    return state;
+}
+
 static void proc_count_vma_huge_pages(mm_struct_t *mm, mm_seg_t *vma,
                                       proc_vm_stats_t *stats)
 {
@@ -197,9 +328,9 @@ void proc_get_vm_stats(proc_vm_stats_t *stats)
     mm_struct_t *seen_mm[256];
     int seen_count = 0;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED || !t->mm)
+        if (proc_task_state_get(t) == PROC_UNUSED || !t->mm)
             continue;
 
         int duplicate = 0;
@@ -219,7 +350,7 @@ void proc_get_vm_stats(proc_vm_stats_t *stats)
             proc_count_vma_huge_pages(t->mm, v, stats);
     }
 
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
 }
 
 size_t proc_format_pidmap(char *buf, size_t bufsz)
@@ -228,11 +359,14 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
         return 0;
 
     size_t off = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E1: only list membership is read here, so tasklist_lock suffices.  The
+     * UNUSED test still needs the park-owned state word, hence the per-task
+     * read helper instead of a direct ->state load. */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     int used = 0;
 
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state != PROC_UNUSED)
+        if (proc_task_state_get(t) != PROC_UNUSED)
             used++;
     }
 
@@ -246,7 +380,7 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
 
     for (task_t *t = proc_first_task_locked(); t && off + 16 < bufsz;
          t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED)
+        if (proc_task_state_get(t) == PROC_UNUSED)
             continue;
         n = snprintf(buf + off, bufsz - off, " %d", t->pid);
         if (n <= 0)
@@ -258,7 +392,7 @@ size_t proc_format_pidmap(char *buf, size_t bufsz)
         buf[off++] = '\n';
     buf[off < bufsz ? off : bufsz - 1] = '\0';
 
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return off;
 }
 
@@ -317,17 +451,46 @@ void idle_loop(void) {
         uint64_t now = timer_get_ticks();
         if (now - last_activity > 3 * TICKS_PER_SEC &&
             now - last_warn > 2 * TICKS_PER_SEC) {
-            uint64_t flags = spin_lock_irqsave(&proc_lock);
+            /* Snapshot under the locks, print with none held: the dump writes
+             * through the console, and the idle path runs it with interrupts
+             * disabled, so holding a global lock across the printf is the
+             * self-deadlock the E3 rule exists to prevent.  The buffer is
+             * file-scope, not stack: MCU kernel stacks are 512-2048 bytes and
+             * this dump runs on the idle task.  Concurrent dumpers on two CPUs
+             * may interleave their lines; that is acceptable for a hang
+             * diagnostic and preferable to a stack overflow. */
+            int snap_count = 0;
             int nonidle_running = 0;
+
+            uint64_t flags = spin_lock_irqsave(&tasklist_lock);
             for (task_t *t = proc_first_task_locked(); t;
                  t = proc_next_task_locked(t)) {
-                if (t->pid != 0 && t->state == PROC_RUNNING && t->on_cpu) {
+                proc_task_sched_state_t st;
+                proc_task_sched_state_snapshot(t, &st);
+                if (t->pid != 0 && st.state == PROC_RUNNING && st.on_cpu) {
                     nonidle_running = 1;
                     break;
                 }
+                if (st.state == PROC_UNUSED)
+                    continue;
+                if (snap_count < HANG_SNAP_MAX) {
+                    g_hang_snap[snap_count].pid = t->pid;
+                    g_hang_snap[snap_count].state = (int)st.state;
+                    g_hang_snap[snap_count].on_cpu = st.on_cpu;
+                    g_hang_snap[snap_count].on_rq = st.on_rq;
+                    g_hang_snap[snap_count].owner_cpu = st.owner_cpu;
+                    g_hang_snap[snap_count].park =
+                        (int)__atomic_load_n(&t->park_state, __ATOMIC_RELAXED);
+                    strncpy(g_hang_snap[snap_count].name, t->name,
+                            sizeof(g_hang_snap[snap_count].name) - 1);
+                    g_hang_snap[snap_count].name[
+                        sizeof(g_hang_snap[snap_count].name) - 1] = '\0';
+                    snap_count++;
+                }
             }
+            spin_unlock_irqrestore(&tasklist_lock, flags);
+
             if (nonidle_running) {
-                spin_unlock_irqrestore(&proc_lock, flags);
                 last_activity = now;
                 continue;
             }
@@ -335,15 +498,13 @@ void idle_loop(void) {
             printf("[HANG] cpu=%u no progress for %lu ticks; tasks:\n",
                    cpu_current_id(),
                    (unsigned long)(now - last_activity));
-            for (task_t *t = proc_first_task_locked(); t;
-                 t = proc_next_task_locked(t)) {
-                if (t->state == PROC_UNUSED)
-                    continue;
+            for (int i = 0; i < snap_count; i++) {
                 printf("  pid=%d name=%s state=%d on_cpu=%d on_rq=%d cpu=%u park=%d\n",
-                       t->pid, t->name, (int)t->state, t->on_cpu, t->on_rq,
-                       t->owner_cpu, (int)t->park_state);
+                       g_hang_snap[i].pid, g_hang_snap[i].name,
+                       g_hang_snap[i].state, g_hang_snap[i].on_cpu,
+                       g_hang_snap[i].on_rq, g_hang_snap[i].owner_cpu,
+                       g_hang_snap[i].park);
             }
-            spin_unlock_irqrestore(&proc_lock, flags);
             extern void a20_channel_trace_dump(void);
             a20_channel_trace_dump();
         }
@@ -360,10 +521,11 @@ void proc_init(void) {
     pidns_early_init();
     userns_early_init();
     proc_sched_runq_init();
-    spin_init(&proc_lock);
-    spin_set_debug(&proc_lock, "proc", NULL);
-    lock_counters_register(&proc_lock, "proc");
-    lock_counters_enable_callsite(&proc_lock);
+    proc_current_slots_init();
+    spin_init(&tasklist_lock);
+    spin_set_debug(&tasklist_lock, "tasklist", NULL);
+    lock_counters_register(&tasklist_lock, "tasklist");
+    lock_counters_enable_callsite(&tasklist_lock);
 
     task_t *idle = &idle_tasks[0];
     proc_link_task_locked(idle);
@@ -487,9 +649,9 @@ task_t *proc_alloc_task_slot(void) {
     if (!t)
         return NULL;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     proc_link_task_locked(t);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return t;
 }
 
@@ -503,7 +665,7 @@ int proc_alloc(void (*entry)(void)) {
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
-    proc_link_newborn_locked(t);
+    proc_link_newborn(t);
     proc_pid_register(t);
 #ifndef CONFIG_MCU
     fdtable_close_all(t);
@@ -559,7 +721,7 @@ int proc_alloc_user_image(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir,
         return -EAGAIN;
     }
     proc_task_init_common(t, proc_current(), 0);
-    proc_link_newborn_locked(t);
+    proc_link_newborn(t);
     proc_pid_register(t);
     t->entry = entry;
     t->pgdir = pgdir;
@@ -676,15 +838,16 @@ int proc_alloc_user(uintptr_t entry, vaddr_t sp, pt_root_t *pgdir) {
 /* Console TIOCGPGRP self-heal: is any live user task in this process group? */
 int proc_pgid_alive(int pgid) {
     if (pgid <= 0) return 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     int alive = 0;
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (t == proc_idle_task()) continue;
-        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE) continue;
+        int state = proc_task_state_get(t);
+        if (state == PROC_UNUSED || state == PROC_ZOMBIE) continue;
         if (!t->pgdir) continue;
         if (t->pgid == pgid) { alive = 1; break; }
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return alive;
 }
 
@@ -702,10 +865,10 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
     for (;;) {
         int pid_count = 0;
         int seen = 0;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
         for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
             if (t == proc_idle_task()) continue;
-            if (t->state == PROC_UNUSED) continue;
+            if (proc_task_state_get(t) == PROC_UNUSED) continue;
             if (t->pgid != pgid) continue;
             if (skip_self && t == self) continue;
             if (seen++ < count) continue;
@@ -713,7 +876,7 @@ int proc_kill_pgid(int pgid, int signum, int skip_self) {
             if (pid_count == (int)(sizeof(pids) / sizeof(pids[0])))
                 break;
         }
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
 
         if (pid_count == 0)
             break;
@@ -866,11 +1029,37 @@ int proc_munmap(vaddr_t addr, size_t len) {
 
 void proc_dump(void) {
     printf("  PID  PPID  STATE  PRI  NAME\n");
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E3: snapshot under tasklist_lock, print with no lock held.  proc_dump()
+     * writes through the console, so holding the global lock across printf is
+     * the self-deadlock this rule exists to prevent. */
+    enum { DUMP_SNAP_MAX = 32 };
+    static struct {
+        int pid;
+        int ppid;
+        int priority;
+        int state;
+        char name[16];
+    } snap[DUMP_SNAP_MAX];
+    int count = 0;
+
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED) continue;
+        int state = proc_task_state_get(t);
+        if (state == PROC_UNUSED) continue;
+        if (count >= DUMP_SNAP_MAX) break;
+        snap[count].pid = t->pid;
+        snap[count].ppid = t->ppid;
+        snap[count].priority = t->priority;
+        snap[count].state = state;
+        strncpy(snap[count].name, t->name, sizeof(snap[count].name) - 1);
+        snap[count].name[sizeof(snap[count].name) - 1] = '\0';
+        count++;
+    }
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+
+    for (int i = 0; i < count; i++) {
         const char *s = "?";
-        switch (t->state) {
+        switch (snap[i].state) {
             case PROC_READY:   s = "RDY"; break;
             case PROC_RUNNING: s = "RUN"; break;
             case PROC_BLOCKED: s = "BLK"; break;
@@ -878,7 +1067,6 @@ void proc_dump(void) {
             default: break;
         }
         printf("  %3d   %3d   %s   %3d  %s\n",
-               t->pid, t->ppid, s, t->priority, t->name);
+               snap[i].pid, snap[i].ppid, s, snap[i].priority, snap[i].name);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
 }

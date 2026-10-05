@@ -12,31 +12,29 @@
 static obj_cache_t g_net_msg_cache = OBJ_CACHE_INIT("net_msg", net_msg_t, 16);
 
 /*
- * Running receive-queue byte count, indexed by registry slot.
+ * Running receive-queue byte count.
  *
- * The low 32 bits are the payload bytes still readable, the high 32 the
- * message count.  The queue is capped at NET_MAX_QUEUE messages of at most
- * NET_MAX_PAYLOAD bytes, so 32 bits of byte count has two orders of magnitude
- * of headroom and the pair fits a single load.  Answering FIONREAD by summing
- * the queue instead costs one message per entry, and NET_MAX_QUEUE is 128 on
- * the default profile and 1024 on the server one.
+ * This used to be a NET_MAX_SOCKETS-entry array indexed by registry slot --
+ * 512 KiB of table on the server profile, holding one number per socket.  It
+ * lives in net_socket_t now (rxq_tally) and is written only under that
+ * socket's bucket lock, which is what makes the two halves below impossible to
+ * observe from two CPUs at once.  The low 32 bits are the payload bytes still
+ * readable, the high 32 the message count.
+ *
+ * The queue is capped at NET_MAX_QUEUE messages of at most NET_MAX_PAYLOAD
+ * bytes, so 32 bits of byte count has two orders of magnitude of headroom and
+ * the pair fits a single load.  Answering FIONREAD by summing the queue
+ * instead costs one message per entry, and NET_MAX_QUEUE is 128 on the
+ * default profile and 1024 on the server one.
  *
  * Carrying the message count next to the byte count is what makes the tally
- * safe rather than merely fast.  Everything that appends to or removes from
- * the queue moves both halves together, so they agree; a teardown that empties
- * the queue without going through net_msg_link_locked() -- shutdown(SHUT_RD)
+ * safe rather than merely fast.  Everything that appends to or removes from the
+ * queue moves both halves together, so they agree; a teardown that empties the
+ * queue without going through net_msg_link_locked() -- shutdown(SHUT_RD)
  * clears rx_head and rx_count in one step -- leaves them disagreeing, and every
  * entry point below checks the pair instead of trusting the byte half, so such
  * a teardown costs one rebuild rather than a permanently wrong total.
  */
-static uint64_t g_rxq_tally[NET_MAX_SOCKETS];
-
-void net_rxq_reset_slot(int idx)
-{
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return;
-    g_rxq_tally[idx] = 0;
-}
 
 static size_t net_rxq_sum_locked(const net_socket_t *s)
 {
@@ -46,18 +44,21 @@ static size_t net_rxq_sum_locked(const net_socket_t *s)
     return total;
 }
 
+void net_rxq_reset_locked(net_socket_t *s)
+{
+    if (s)
+        s->rxq_tally = 0;
+}
+
 void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
 {
-    int idx = s->reg_idx;
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return;
-    uint64_t t = g_rxq_tally[idx];
+    uint64_t t = s->rxq_tally;
     /* The queue grew by one message, so the tally must still describe the
      * pre-growth queue. */
     if ((int)(t >> 32) != s->rx_count - 1)
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
-    g_rxq_tally[idx] = (t & 0xffffffff00000000ULL) |
-                       ((uint32_t)t + (uint32_t)bytes);
+    s->rxq_tally = (t & 0xffffffff00000000ULL) |
+                   ((uint32_t)t + (uint32_t)bytes);
 }
 
 /* Called before the caller drops rx_count, so the tally still describes the
@@ -65,37 +66,29 @@ void net_rxq_bytes_added_locked(net_socket_t *s, size_t bytes)
  * place and only the byte half moves. */
 void net_rxq_bytes_removed_locked(net_socket_t *s, size_t bytes)
 {
-    int idx = s->reg_idx;
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return;
-    uint64_t t = g_rxq_tally[idx];
+    uint64_t t = s->rxq_tally;
     if ((int)(t >> 32) != s->rx_count)
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
     uint32_t have = (uint32_t)t;
-    g_rxq_tally[idx] = (t & 0xffffffff00000000ULL) |
-                       (have - (uint32_t)bytes < have ? have - (uint32_t)bytes
-                                                     : 0);
+    s->rxq_tally = (t & 0xffffffff00000000ULL) |
+                   (have - (uint32_t)bytes < have ? have - (uint32_t)bytes
+                                                 : 0);
 }
 
 size_t net_rxq_bytes_locked(net_socket_t *s)
 {
-    int idx = s->reg_idx;
-    if (idx < 0 || idx >= NET_MAX_SOCKETS)
-        return net_rxq_sum_locked(s);
-    uint64_t t = g_rxq_tally[idx];
-    if ((int)(t >> 32) != s->rx_count)
+    uint64_t t = s->rxq_tally;
+    if ((int)(t >> 32) != s->rx_count) {
         t = (uint64_t)(uint32_t)net_rxq_sum_locked(s);
-    else
-        return (size_t)(uint32_t)t;
-    g_rxq_tally[idx] = ((uint64_t)(uint32_t)s->rx_count << 32) |
-                       (uint32_t)t;
+        s->rxq_tally = ((uint64_t)(uint32_t)s->rx_count << 32) | (uint32_t)t;
+    }
     return (size_t)(uint32_t)t;
 }
 
 /*
- * Capture the current task credentials for SCM_CREDENTIALS.  Called under
- * g_net_lock while the sending socket is being serviced; proc_current() is
- * safe there (it is a CPU-local read).
+ * Capture the current task credentials for SCM_CREDENTIALS.  Called under the
+ * destination socket's bucket lock while that socket is being serviced;
+ * proc_current() is safe there (it is a CPU-local read).
  */
 static void net_capture_sender_cred(net_msg_t *m)
 {
@@ -266,20 +259,19 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
     for (;;) {
         proc_wake_q_t wake_q;
         proc_wake_q_init(&wake_q);
-        uint64_t irq = spin_lock_irqsave(&g_net_lock);
-        if (!net_socket_is_valid_locked(s) || s->closed) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
-            return -ENOTCONN;
-        }
-        if (!net_socket_is_valid_locked(dst) || dst->closed) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+        /* Two buckets, ascending.  Both sockets are pinned by their caller's
+         * references, so neither can be freed under us here. */
+        net_bucket_pair_t pair = net_bucket_lock2(net_socket_bucket(s),
+                                                  net_socket_bucket(dst));
+        if (!net_socket_is_live(s) || !net_socket_is_live(dst)) {
+            net_bucket_unlock2(pair);
             return -ENOTCONN;
         }
         /* UDP connect sets peer_addr but NOT s->peer, so s->peer is
            legitimately NULL — skip this check for DGRAM. */
         if (s->connected && s->peer != dst &&
             s->type != SOCK_DGRAM) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             return -ENOTCONN;
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
@@ -289,35 +281,35 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             }
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             (void)proc_wake_q_flush(&wake_q);
             return r;
         }
         task_t *cur = proc_current();
         if (!cur) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             return -EAGAIN;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             return -ERESTARTSYS;
         }
         if (timeout_ticks &&
             (int64_t)(timer_get_ticks() - (start + timeout_ticks)) >= 0) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             return -EAGAIN;
         }
         if (!timeout_ticks && s->type == SOCK_DGRAM) {
             uint64_t udp_deadline = start + MS_TO_TICKS(200);
             if ((int64_t)(timer_get_ticks() - udp_deadline) >= 0) {
-                spin_unlock_irqrestore(&g_net_lock, irq);
+                net_bucket_unlock2(pair);
                 return -EAGAIN;
             }
         }
         if (!timeout_ticks && s->type == SOCK_STREAM) {
             uint64_t tcp_deadline = start + MS_TO_TICKS(5000);
             if ((int64_t)(timer_get_ticks() - tcp_deadline) >= 0) {
-                spin_unlock_irqrestore(&g_net_lock, irq);
+                net_bucket_unlock2(pair);
                 return -EAGAIN;
             }
         }
@@ -326,18 +318,17 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             deadline = start + MS_TO_TICKS(200);
         if (!deadline && s->type == SOCK_STREAM)
             deadline = start + MS_TO_TICKS(5000);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock2(pair);
         proc_wait_token_t token =
             proc_park_prepare(PROC_WAIT_INTERRUPTIBLE, deadline);
         if (!token.task)
             return -EAGAIN;
 
         wait_queue_entry_t entry = {0};
-        irq = spin_lock_irqsave(&g_net_lock);
-        if (!net_socket_is_valid_locked(s) || s->closed ||
-            !net_socket_is_valid_locked(dst) || dst->closed ||
+        pair = net_bucket_lock2(net_socket_bucket(s), net_socket_bucket(dst));
+        if (!net_socket_is_live(s) || !net_socket_is_live(dst) ||
             (s->connected && s->peer != dst && s->type != SOCK_DGRAM)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ENOTCONN;
@@ -349,21 +340,21 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
                 (void)wait_queue_collect_one(
                     &dst->read_waitq, 0, PROC_WAKE_EVENT, &wake_q);
             }
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             (void)proc_wake_q_flush(&wake_q);
             return r;
         }
         if (net_task_has_unblocked_signal(cur)) {
-            spin_unlock_irqrestore(&g_net_lock, irq);
+            net_bucket_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
             return -ERESTARTSYS;
         }
         bool linked =
             wait_queue_link(&dst->write_waitq, &entry, token, 0);
-        spin_unlock_irqrestore(&g_net_lock, irq);
+        net_bucket_unlock2(pair);
         proc_wake_reason_t reason;
         if (linked)
             reason = proc_park_commit(token);

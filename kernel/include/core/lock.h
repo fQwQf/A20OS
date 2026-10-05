@@ -20,35 +20,97 @@ extern int proc_task_pid(const void *task);
  * For the full driver-private lock contracts see
  * docs/drivers/guide/lock-order.md.
  *
+ * Scheduler/task locks (lock-serialization-split §1.2).  There is no global
+ * proc_lock any more; the states it used to cover are split three ways:
+ *   tasklist_lock  task-list membership (all_next/all_prev) and the
+ *                  parent/children and thread-group chains.  NOT scheduling
+ *                  state.
+ *   park_lock      one task's ->state / ->park_state / ->wait_seq /
+ *                  ->wake_reason / ->on_cpu, plus the per-task fields that
+ *                  travel with it (->mm, ->files, ->cred, ptrace state).
+ *   runq_lock      one CPU's queue membership (->on_rq / ->cpu_id /
+ *                  ->sched_level / ->ready_since) and the ->dispatching /
+ *                  ->owner_cpu publication.
+ *   g_cpu_switch_out[cpu]  the per-CPU outgoing-task slot; strictly outside
+ *                  park_lock and not part of the task address order.
+ *
  * Global order:
- *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
- *   proc_lock -> park_lock
- *   proc_lock -> runq_lock
- *   proc_lock -> signal_state.lock
+ *   cg_node.lock -> tasklist_lock -> park_lock -> runq_lock -> pfa.lock
+ *   tasklist_lock -> park_lock
+ *   tasklist_lock -> runq_lock
  *   park_lock -> signal_state.lock
  *   park_lock -> g_wait_timer_lock
- *   park_lock -> runq_lock
- *   proc_lock -> files_struct.lock -> VFS global-file/vnode locks
- *   proc_lock -> mm_struct.lock
- *   proc_lock -> a20_handle_table.lock
+ *   park_lock -> files_struct.lock -> VFS global-file/vnode locks
+ *   park_lock -> mm_struct.lock
+ *   park_lock -> a20_handle_table.lock
  *   driver registry/IRQ locks -> device-private locks
- *   g_lwip_lock -> g_net_lock
+ *   g_lwip_lock -> net_bucket[*]
  *   g_lwip_lock -> virtio-net nonblocking send/recv paths only
+ *
+ * cg_node.lock is never held together with tasklist_lock: the memory
+ * controller releases it before scanning tasks for an OOM victim.
  *
  * Rules:
  *
  * Lock-safe network entry points (see docs/net/network-lock-contract.md):
  * - a20_lwip_lock()/a20_lwip_unlock(): outer lock around all lwIP core calls.
  * - a20_lwip_poll_locked(): progress entry that runs with g_lwip_lock held;
- *   must not allocate, block, or acquire g_net_lock.
+ *   must not allocate, block, or acquire a socket-table bucket lock.
  * - a20_lwip_poll(): acquires g_lwip_lock, runs progress, releases it, then
- *   runs the socket bottom-half under g_net_lock only.
+ *   runs the socket bottom-half under the socket-table bucket lock only.
  * - lwIP callbacks run under g_lwip_lock and must only stage events into the
  *   preallocated per-PCB ring; allocation, enqueue, and wakeup happen in the
- *   bottom-half with g_net_lock held.
- * - Never acquire proc_lock while holding a runqueue lock. A local scheduler
- *   pick is runqueue-only and releases the runqueue lock before publishing the
- *   selected task under proc_lock.
+ *   bottom-half with a socket-table bucket lock held.
+ *
+ * Socket-table shard locks (lock-serialization-split §2; text handed over by
+ * the net implementer, merged during integration):
+ * - The socket registry is sharded into net_bucket[0 .. NET_SOCK_BUCKETS-1],
+ *   one lock per contiguous run of NET_SOCK_SLOTS_PER_BUCKET registry slots
+ *   (512 on the server profile, 32 on the default one, 1 on the embedded one;
+ *   see socket_internal.h).  The bucket of a socket is reg_idx >>
+ *   NET_SOCK_BUCKET_SHIFT.  A per-socket critical section takes the one bucket
+ *   that owns the socket; a section that touches two sockets takes their two
+ *   buckets in ascending bucket order, so no pair is ever held in two
+ *   directions and the order is acyclic.  At most two bucket locks are held at
+ *   any time.
+ * - Never hold more than one bucket lock while walking the table: taking all
+ *   NET_SOCK_BUCKETS with interrupts disabled livelocks against an interrupt
+ *   that reaches a lookup on a lock its own interrupted context was holding
+ *   (see the same failure recorded for VFS dcache in kernel/fs/vfs/dcache.c).
+ *   net_socket_table_walk() and every other table scan walk bucket by bucket,
+ *   taking and releasing one bucket at a time.
+ * - g_lwip_lock is never held together with any net bucket lock.  This is the
+ *   unchanged meaning of the old "g_lwip_lock and g_net_lock are never held
+ *   together" rule (docs/net/network-lock-contract.md), and it is now true
+ *   everywhere rather than "true except on the accept path".
+ * - A socket with reg_idx < 0 (being created, or racing a concurrent close)
+ *   has no bucket.  Such accesses take net_bucket[NET_SOCK_ORPHAN_BUCKET],
+ *   re-check s->in_registry, and bail out if it is clear.
+ * - net_register_socket_locked() takes shard locks itself, one at a time, so
+ *   it must NOT be called with another socket's bucket lock held.  Callers
+ *   resolve their counterpart (listener, peer) through a search that returns a
+ *   reference, register with no lock held, and only then take the ordered
+ *   pair.  This is the one rule that is easy to break by accident: every new
+ *   accept/connect path has to be written in that shape.
+ * - Carrying a net_socket_t pointer out of a bucket critical section requires
+ *   net_socket_ref() / net_socket_free().  The bucket lock can no longer be
+ *   what keeps the object alive, because a lookup that finds a socket in one
+ *   bucket and then needs a second bucket cannot keep the first one held.
+ * - Bucket locks are independent of the task locks above: no net bucket lock
+ *   nests under tasklist_lock / park_lock / runq_lock, and none of those three
+ *   is ever taken while a bucket lock is held.
+ * - Never acquire a task's park_lock while holding a runqueue lock (INV-P4b).
+ *   A local scheduler pick is runqueue-only: it publishes ->dispatching and
+ *   ->owner_cpu under that one CPU's runqueue lock and releases the lock before
+ *   the switch path takes the selected task's park_lock.  Enqueue, migrate,
+ *   unpick, Park, exit and reap go the other way and nest park_lock ->
+ *   runq_lock.  A park_lock holder therefore cannot trust ->dispatching /
+ *   ->owner_cpu and must read them atomically.
+ * - When two different tasks' park_locks must be held at the same time, take
+ *   them in ascending task-pointer order and release them in reverse.  Every
+ *   site that does this goes through proc_lock_two_tasks() /
+ *   proc_unlock_two_tasks() so the order is written down once.  Per-CPU slots
+ *   (g_cpu_switch_out[]) sit outside that order.
  * - Never block while holding a spinlock or while interrupts are disabled.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.

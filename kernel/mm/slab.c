@@ -3,6 +3,7 @@
 #include "mm/oom.h"
 #include "core/cpu.h"
 #include "core/lock.h"
+#include "core/lock_counters.h"
 #include "core/string.h"
 #include "core/panic.h"
 #include "core/stdio.h"
@@ -153,6 +154,12 @@ void slab_init(void) {
         caches[i].spare   = NULL;
         caches[i].spare_count = 0;
         spin_init(&caches[i].lock);
+        /* Publish the cache lock to /proc/a20/lock_contention.  spin_lock_at()
+         * already accumulates contended_acquires/spins unconditionally, so
+         * registration only makes the numbers reachable -- it costs the fast
+         * path nothing.  Without it the per-CPU arrays leave no trace at all
+         * and the before/after comparison has no slab dimension to read. */
+        lock_counters_register(&caches[i].lock, "slab_cache");
     }
 }
 
@@ -450,10 +457,13 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
 
     /* CPU-array fast path: identical discipline to the frame allocator's
      * order-0 batch — local IRQ exclusion protects the array against a
-     * re-entrant interrupt handler and against migration mid-pop. */
-    slab_cpu_array_t *arr = slab_cpu_array(idx);
+     * re-entrant interrupt handler and against migration mid-pop.  Sample the
+     * IRQ flags and mask first, then resolve the CPU: reading the CPU id before
+     * masking is frame.c's discipline reversed, and it would leave the array
+     * pointer pinned to a CPU this thread could still leave. */
     uint64_t irq_gate = arch_irqs_enabled() ? 1 : 0;
     arch_local_irq_disable();
+    slab_cpu_array_t *arr = slab_cpu_array(idx);
     if (arr->count) {
         void *obj = arr->objs[--arr->count];
         if (irq_gate)
@@ -540,9 +550,9 @@ void kfree(void *ptr) {
     }
 
     int idx = sp->cache_idx;
-    slab_cpu_array_t *arr = slab_cpu_array(idx);
     uint64_t irq_gate = arch_irqs_enabled() ? 1 : 0;
     arch_local_irq_disable();
+    slab_cpu_array_t *arr = slab_cpu_array(idx);
     if (arr->count < SLAB_CPU_ARRAY_CAP) {
         arr->objs[arr->count++] = ptr;
         if (irq_gate)

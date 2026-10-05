@@ -48,9 +48,19 @@ int proc_try_wake_locked_common(task_t *task, uint64_t seq,
         return 1;
 
     case PROC_PARK_PARKED: {
+        /* INV-P4b: the pick side publishes dispatching/->owner_cpu under the
+         * runqueue lock alone and must never take this park_lock, so the park
+         * side cannot trust a plain load of those fields.  They are read
+         * atomically here and used only to pick an IPI target; a stale read can
+         * cost one redundant reschedule request, never a lost wake, because
+         * the publication that matters for correctness is the park_state ->
+         * WOKEN transition above. */
+        unsigned owner_cpu =
+            __atomic_load_n(&task->owner_cpu, __ATOMIC_RELAXED);
         unsigned target_cpu =
-            (task->on_cpu || task->dispatching)
-                ? task->owner_cpu : task->cpu_id;
+            (task->on_cpu ||
+             __atomic_load_n(&task->dispatching, __ATOMIC_RELAXED))
+                ? owner_cpu : task->cpu_id;
         proc_wait_timer_cancel(task, seq);
         task->park_state = PROC_PARK_WOKEN;
         task->wake_reason = reason;
@@ -286,8 +296,9 @@ proc_wake_reason_t proc_park_commit(proc_wait_token_t token)
      * Lock-free read of the wake reason: the waker published wake_reason
      * under the target's park_lock (and the runqueue entry) before we were
      * resumed, so an acquire load is ordered after it.  task->wait_seq has
-     * no writer other than this task's own prepare().  Kept out of proc_lock
-     * unless measurement shows the lock-free read regresses contention.
+     * no writer other than this task's own prepare().  Kept out of any
+     * scheduler lock unless measurement shows the lock-free read regresses
+     * contention.
      */
     return proc_park_wake_reason_unlocked(task, token.seq);
 }
@@ -312,7 +323,8 @@ void proc_park_finish(proc_wait_token_t token)
     /*
      * The wake that resumed this task already cancelled its timer
      * (proc_try_wake_locked_common and the timer expiry both reset
-     * wait_timer_index to -1), so the common case needs no proc_lock at all.
+     * wait_timer_index to -1), so the common case needs no scheduler lock at
+     * all.
      * Only a stale pending index falls back to the heap lock.  The reset
      * fields have no writer other than this task once it is running, and a
      * concurrent stale wake on a WOKEN/IDLE task is a no-op.

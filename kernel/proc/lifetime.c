@@ -161,7 +161,10 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->resched_pending = sched_diag.resched_pending;
     stats->scheduler_violations = sched_diag.scheduler_violations;
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* tasklist_lock -> runq_lock: the snapshot helper takes every per-CPU
+     * runqueue lock, and the runqueue lock is below tasklist_lock in the
+     * documented order. */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     stats->timeout_entries = proc_wait_timer_count_locked();
     stats->timeout_capacity = proc_wait_timer_capacity();
     stats->timeout_full_failures =
@@ -180,7 +183,8 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
             stats->listed_refs += (unsigned long)refs;
         else
             stats->state_violations++;
-        if (t->state == PROC_ZOMBIE)
+        int tstate = proc_task_state_get(t);
+        if (tstate == PROC_ZOMBIE)
             stats->zombies++;
         proc_sched_task_snapshot_t sched;
         proc_sched_task_snapshot_locked(t, &sched);
@@ -219,7 +223,7 @@ void proc_lifetime_snapshot(proc_lifetime_stats_t *stats)
     stats->cpu_owned_tasks = proc_current_slot_count_locked();
     stats->state_violations +=
         proc_current_lifetime_violations_locked();
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
 
     stats->lifetime_errors =
         stats->ref_get_failures + stats->ref_underflows +

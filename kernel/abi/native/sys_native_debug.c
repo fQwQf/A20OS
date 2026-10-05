@@ -55,7 +55,8 @@ static task_t *a20_debug_target_get(struct a20_ht_internal *ht,
 }
 
 /* Snapshot the current stop into a user-visible event structure.  Caller
- * holds proc_lock; the tracee is stopped, so the fields are stable. */
+ * holds the target's park_lock; the tracee is stopped, so the fields are
+ * stable. */
 static void a20_debug_fill_event(task_t *target, a20_debug_event_info_t *info)
 {
     memset(info, 0, sizeof(*info));
@@ -70,7 +71,7 @@ static void a20_debug_fill_event(task_t *target, a20_debug_event_info_t *info)
 /* The Native ABI has no wait4/WUNTRACED channel, so debug_wait/debug_event
  * also report task exit: a zombie target is reported once as an EXIT event
  * whose message is the exit code (ptrace_exit_reported is the one-shot
- * marker).  Caller holds proc_lock. */
+ * marker).  Caller holds the target's park_lock. */
 static int a20_debug_target_has_event(task_t *target)
 {
     if (target->ptrace_stop_active && target->state == PROC_STOPPED)
@@ -164,7 +165,7 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
         if (!target)
             return -A20_ERR_BAD_HANDLE;
 
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        uint64_t flags = spin_lock_irqsave(&target->park_lock);
         int stopped = a20_debug_target_has_event(target);
         if (stopped) {
             a20_debug_event_info_t info;
@@ -176,7 +177,7 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
             } else {
                 a20_debug_fill_exit_event(target, &info);
             }
-            spin_unlock_irqrestore(&proc_lock, flags);
+            spin_unlock_irqrestore(&target->park_lock, flags);
             proc_put(target);
             if (out) {
                 if (copy_to_user(out, &info, sizeof(info)) < 0)
@@ -185,32 +186,34 @@ int64_t sys_a20_debug_wait(const a20_syscall_args_t *args)
             return A20_OK;
         }
         if (deadline != 0 && timer_get_ticks() >= deadline) {
-            spin_unlock_irqrestore(&proc_lock, flags);
+            spin_unlock_irqrestore(&target->park_lock, flags);
             proc_put(target);
             return -A20_ERR_TIMED_OUT;
         }
         if (timeout_us == 0) {
-            spin_unlock_irqrestore(&proc_lock, flags);
+            spin_unlock_irqrestore(&target->park_lock, flags);
             proc_put(target);
             return -A20_ERR_WOULD_BLOCK;
         }
 
         /* Park like a child waiter; the tracee's stop path wakes child
          * waiters of its (reparented) parent, i.e. us. */
-        cur->waiting_for_child = 1;
+        /* The waiter's own park_lock, in its own critical section: the
+         * target's lock was released above, so no two task park_locks are
+         * ever nested here (INV-P3). */
         uint64_t park_flags = spin_lock_irqsave(&cur->park_lock);
+        cur->waiting_for_child = 1;
         proc_wait_token_t token =
             proc_park_prepare_locked(PROC_WAIT_INTERRUPTIBLE, deadline);
         spin_unlock_irqrestore(&cur->park_lock, park_flags);
-        spin_unlock_irqrestore(&proc_lock, flags);
         proc_put(target);
 
         proc_wake_reason_t reason = proc_park_commit(token);
         proc_park_finish(token);
 
-        uint64_t f2 = spin_lock_irqsave(&proc_lock);
+        uint64_t f2 = spin_lock_irqsave(&cur->park_lock);
         cur->waiting_for_child = 0;
-        spin_unlock_irqrestore(&proc_lock, f2);
+        spin_unlock_irqrestore(&cur->park_lock, f2);
 
         if (reason == PROC_WAKE_TIMEOUT)
             return -A20_ERR_TIMED_OUT;
@@ -232,7 +235,7 @@ int64_t sys_a20_debug_event(const a20_syscall_args_t *args)
     if (!target) return -A20_ERR_BAD_HANDLE;
 
     a20_debug_event_info_t info;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&target->park_lock);
     int stopped = a20_debug_target_has_event(target);
     if (stopped) {
         if (target->ptrace_stop_active && target->state == PROC_STOPPED)
@@ -240,7 +243,7 @@ int64_t sys_a20_debug_event(const a20_syscall_args_t *args)
         else
             a20_debug_fill_exit_event(target, &info);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&target->park_lock, flags);
     proc_put(target);
 
     if (!stopped)

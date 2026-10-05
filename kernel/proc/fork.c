@@ -119,14 +119,17 @@ fail:
 static uint32_t proc_count_tasks_for_uid(int uid)
 {
     uint32_t n = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the list; each task's ->state is sampled under
+     * its own park_lock, one at a time.  ->cred.uid is fixed at clone time. */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        int st = proc_task_state_get(t);
+        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
             continue;
         if (t->cred.uid == uid)
             n++;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     return n;
 }
 
@@ -209,7 +212,8 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     if (flags & CLONE_THREAD)
         t->tgid = parent ? parent->tgid : t->pid;
 
-    uint64_t list_flags = spin_lock_irqsave(&proc_lock);
+    /* The thread-group and children chains are tasklist_lock-owned (INV-P5). */
+    uint64_t list_flags = spin_lock_irqsave(&tasklist_lock);
     if (flags & CLONE_THREAD) {
         if (parent && parent->tg_leader)
             t->tg_leader = parent->tg_leader;
@@ -223,7 +227,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     proc_children_link_locked(t->parent, t);
     if (t->tg_leader != t)
         proc_tg_link_locked(t);
-    spin_unlock_irqrestore(&proc_lock, list_flags);
+    spin_unlock_irqrestore(&tasklist_lock, list_flags);
 
     t->clone_flags = (int)flags;
     if (flags & CLONE_CHILD_CLEARTID)
@@ -394,9 +398,11 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
 #endif
 
     if (flags & CLONE_VFORK) {
-        uint64_t pf = spin_lock_irqsave(&proc_lock);
+        /* Pairs with proc_complete_vfork(), which clears the flag under the
+         * same parent park_lock. */
+        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
         parent->vfork_waiting = 1;
-        spin_unlock_irqrestore(&proc_lock, pf);
+        spin_unlock_irqrestore(&parent->park_lock, pf);
     }
 
     /*
@@ -409,9 +415,9 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     if (flags & CLONE_VFORK) {
         vfork_child_ref = proc_get(t);
         if (!vfork_child_ref) {
-            uint64_t pf = spin_lock_irqsave(&proc_lock);
+            uint64_t pf = spin_lock_irqsave(&parent->park_lock);
             parent->vfork_waiting = 0;
-            spin_unlock_irqrestore(&proc_lock, pf);
+            spin_unlock_irqrestore(&parent->park_lock, pf);
 #ifdef CONFIG_NOMMU
             nommu_vfork_snapshot_discard(parent);
 #endif

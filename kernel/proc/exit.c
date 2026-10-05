@@ -49,40 +49,73 @@ static int proc_task_tgid(task_t *t)
  * member threads remain.  The leader anchors the tg_next chain -- its own
  * proc_tg_unlink_locked() is a no-op because it has no tg_prev_ptr -- so
  * freeing it early leaves members traversing freed memory on their next
- * group walk (proc_find_live_thread_reaper_locked / wait_group_start). */
+ * group walk (proc_find_live_thread_reaper_locked / wait_group_start).
+ *
+ * Chain membership is tasklist_lock; each member's ->state is park_lock-owned,
+ * so every member is sampled under its own park_lock, one at a time.  Only
+ * ->tgid/->pid are read from the leader, and both are fixed at clone time.
+ * Holding no task lock across the whole walk is deliberate: it is what keeps
+ * this callable from a site that already holds another task's park_lock
+ * without creating an INV-P3 ordering constraint. */
 int proc_tg_group_dead_locked(task_t *t)
 {
     if (!t || t->tg_leader != t)
         return 1;               /* members never anchor the chain */
+    int tgid = proc_task_tgid(t);
     for (task_t *m = t->tg_next; m; m = m->tg_next) {
-        if (m == t || m->state == PROC_UNUSED || m->state == PROC_ZOMBIE)
+        if (m == t)
             continue;
-        if (proc_task_tgid(m) == proc_task_tgid(t))
+        int mstate = proc_task_state_get(m);
+        if (mstate == PROC_UNUSED || mstate == PROC_ZOMBIE)
+            continue;
+        if (proc_task_tgid(m) == tgid)
             return 0;
     }
     return 1;
 }
 
-void proc_reap_detach_locked(task_t *t)
+/* Detach a zombie: the UNUSED transition is park_lock-owned, the list unlink is
+ * tasklist_lock-owned, and tasklist_lock is strictly outside park_lock, so the
+ * two nest in that order.  Every caller here already walks the task list (or a
+ * children list) under tasklist_lock, which is why this variant takes the outer
+ * lock from the caller instead of acquiring it again. */
+void proc_reap_detach_list_locked(task_t *t)
 {
     if (!t)
         return;
+    uint64_t pf = spin_lock_irqsave(&t->park_lock);
     t->state = PROC_UNUSED;
+    spin_unlock_irqrestore(&t->park_lock, pf);
     proc_unlink_task_locked(t);
 }
 
+/* Is *needle* still reachable from the global task list in a non-UNUSED state?
+ * E2: tasklist_lock walks the membership list, and the needle's ->state is read
+ * under its own park_lock.  Takes tasklist_lock itself, so the caller must not
+ * hold it, and must not hold any task park_lock either, or the sample below
+ * would nest two task locks. */
 static int proc_task_is_live_locked(task_t *needle)
 {
     if (!needle)
         return 0;
+    if (proc_task_state_get(needle) == PROC_UNUSED)
+        return 0;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    int found = 0;
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
-        if (t == needle && t->state != PROC_UNUSED)
-            return 1;
+        if (t == needle) {
+            found = 1;
+            break;
+        }
     }
-    return 0;
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+    return found;
 }
 
-static int proc_complete_vfork_locked(task_t *child)
+/* Requires both the child's and the parent's park_lock held (parent may be
+ * NULL).  The public entry points resolve the parent and nest the two locks in
+ * INV-P3 order instead of holding one while acquiring the other. */
+static int proc_complete_vfork_locked(task_t *child, task_t *parent)
 {
     if (!child)
         return 0;
@@ -91,7 +124,6 @@ static int proc_complete_vfork_locked(task_t *child)
         return 0;
 
     child->clone_flags &= ~CLONE_VFORK;
-    task_t *parent = child->parent;
 
 #ifdef CONFIG_NOMMU
     if (parent && parent->nommu_vfork_snaps && parent->nommu_num_vfork_snapshots > 0) {
@@ -118,9 +150,18 @@ static int proc_complete_vfork_locked(task_t *child)
 
 void proc_complete_vfork(task_t *child)
 {
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    int completed = proc_complete_vfork_locked(child);
-    spin_unlock_irqrestore(&proc_lock, flags);
+    /* Resolve the parent under tasklist_lock (parent/children chain ownership),
+     * then nest {child, parent} park_locks in ascending address order. */
+    task_t *parent = NULL;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    parent = child ? child->parent : NULL;
+    spin_unlock_irqrestore(&tasklist_lock, lf);
+
+    int completed = 0;
+    uint64_t cf = 0, pf = 0;
+    proc_lock_two_tasks(child, parent, &cf, &pf);
+    completed = proc_complete_vfork_locked(child, parent);
+    proc_unlock_two_tasks(child, parent, cf, pf);
     if (completed)
         complete(&child->vfork_done);
 }
@@ -136,26 +177,45 @@ static int proc_child_auto_reaps(task_t *child, task_t *parent)
     return proc_ignores_sigchld(parent);
 }
 
-void proc_wake_child_waiters_locked(task_t *parent)
+/* Wake the tasks blocked in wait4() whose reaper is *parent*.
+ *
+ * E2: tasklist_lock walks the global list, and each candidate's ->waiting_for_child
+ * and ->tgid are park_lock-owned, so the walk nests tasklist_lock -> park_lock.
+ * The parent's own tgid is sampled in its own critical section *before* the
+ * walk, so no two task park_locks are ever held at once (INV-P3).  It is read
+ * under tasklist_lock only as a fast-path guard; the value that decides matches
+ * is the sampled one. */
+void proc_wake_child_waiters(task_t *parent)
 {
     if (!parent)
         return;
 
-    /* Fast path: no task is parked in wait4(), so no waiter can match. */
-    if (!g_proc_waiting_child_waiter_count)
+    /* Fast path: no task is parked in wait4(), so no waiter can match.  The
+     * counter is maintained in lockstep with each waiter's ->waiting_for_child
+     * under that waiter's park_lock, so it is only an advisory hint here and is
+     * read relaxed. */
+    if (!__atomic_load_n(&g_proc_waiting_child_waiter_count, __ATOMIC_RELAXED))
         return;
 
-    int parent_tgid = proc_task_tgid(parent);
+    int parent_tgid;
+    {
+        uint64_t pf = spin_lock_irqsave(&parent->park_lock);
+        parent_tgid = proc_task_tgid(parent);
+        spin_unlock_irqrestore(&parent->park_lock, pf);
+    }
+
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t; t = proc_next_task_locked(t)) {
         if (!t->waiting_for_child)
             continue;
         if (proc_task_tgid(t) != parent_tgid)
             continue;
-        /* proc_lock -> park_lock is the documented order. */
         uint64_t plf = spin_lock_irqsave(&t->park_lock);
-        (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
+        if (t->waiting_for_child && proc_task_tgid(t) == parent_tgid)
+            (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_EVENT);
         spin_unlock_irqrestore(&t->park_lock, plf);
     }
+    spin_unlock_irqrestore(&tasklist_lock, lf);
 }
 
 static void proc_release_exiting_mm(task_t *t)
@@ -171,15 +231,17 @@ static void proc_release_exiting_mm(task_t *t)
         mm_context_leave(t->mm, cpu_current_id());
     }
 
-    uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
+    /* ->mm / ->pgdir are published together with the task's scheduling state,
+     * so the swap happens under the task's park_lock. */
+    uint64_t mm_swap_flags = spin_lock_irqsave(&t->park_lock);
     mm_struct_t *mm = t->mm;
     if (!mm) {
-        spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
+        spin_unlock_irqrestore(&t->park_lock, mm_swap_flags);
         return;
     }
     t->mm = NULL;
     t->pgdir = kernel_pgdir;
-    spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
+    spin_unlock_irqrestore(&t->park_lock, mm_swap_flags);
     if (t->trap_ctx)
         TRAP_CTX_KScratch0(t->trap_ctx) = kernel_as;
 
@@ -207,6 +269,9 @@ static void proc_release_exiting_mm(task_t *t)
     mm_destroy(mm);
 }
 
+/* Pick a live thread of *dead*'s group to take over reaping.  Each candidate's
+ * ->state is sampled under its own park_lock, one at a time; the caller must
+ * not hold a task park_lock (INV-P3). */
 static task_t *proc_find_live_thread_reaper_locked(task_t *dead)
 {
     int dead_tgid = proc_task_tgid(dead);
@@ -217,7 +282,8 @@ static task_t *proc_find_live_thread_reaper_locked(task_t *dead)
     for (task_t *t = leader; t; t = t->tg_next) {
         if (t == dead || t == proc_idle_task())
             continue;
-        if (t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+        int st = proc_task_state_get(t);
+        if (st == PROC_UNUSED || st == PROC_ZOMBIE)
             continue;
         if (proc_task_tgid(t) == dead_tgid)
             return t;
@@ -235,14 +301,19 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     int force_kill_children = (dead->exit_code < 0 &&
         dead->exit_code != -SIGCHLD && dead->exit_code != -SIGSTOP);
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* tasklist_lock covers the children chain and every reparent/unlink in this
+     * loop.  Child ->state and ->pdeathsig are park_lock-owned and are read
+     * under the child's own park_lock nested inside it (tasklist_lock ->
+     * park_lock).  The two helpers that sample several tasks' states run with
+     * no task lock held, so no two park_locks are ever nested (INV-P3). */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     task_t *thread_reaper = proc_find_live_thread_reaper_locked(dead);
     task_t *actual_reaper = thread_reaper;
     if (!thread_reaper) {
         actual_reaper = reaper;
         if (!actual_reaper || actual_reaper == dead ||
-            actual_reaper->state == PROC_UNUSED ||
-            actual_reaper->state == PROC_ZOMBIE)
+            proc_task_state_get(actual_reaper) == PROC_UNUSED ||
+            proc_task_state_get(actual_reaper) == PROC_ZOMBIE)
             actual_reaper = proc_idle_task();
     }
 
@@ -252,40 +323,48 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
     int pdeathsig_signals[64];
     int pdeathsig_count = 0;
 
+    task_t *wake_for = NULL;
     for (task_t *child = dead->children; child; ) {
         task_t *next = child->sibling_next;
         if (child == proc_idle_task()) {
             child = next;
             continue;
         }
-        if (child->state == PROC_UNUSED) {
+        int cstate = proc_task_state_get(child);
+        if (cstate == PROC_UNUSED) {
             child = next;
             continue;
         }
 
         /* PR_SET_PDEATHSIG: when the parent dies, the child receives the
          * recorded signal exactly once (the field is then cleared).  Deliver
-         * it after the lock is dropped, like the force-kill list below. */
-        if (child->state != PROC_ZOMBIE && child->pdeathsig != 0 &&
+         * it after the lock is dropped, like the force-kill list below.
+         * ->pdeathsig is park_lock-owned, so the claim is a critical section. */
+        uint64_t pf = spin_lock_irqsave(&child->park_lock);
+        int pdeathsig = (cstate != PROC_ZOMBIE) ? child->pdeathsig : 0;
+        if (pdeathsig &&
             pdeathsig_count < (int)(sizeof(pdeathsig_pids) /
                                     sizeof(pdeathsig_pids[0]))) {
             pdeathsig_pids[pdeathsig_count] = child->pid;
-            pdeathsig_signals[pdeathsig_count] = child->pdeathsig;
+            pdeathsig_signals[pdeathsig_count] = pdeathsig;
             child->pdeathsig = 0;
             pdeathsig_count++;
         }
+        spin_unlock_irqrestore(&child->park_lock, pf);
 
-        if (!thread_reaper &&
-            proc_tg_group_dead_locked(child) &&
+        int reap_group_dead = 0;
+        if (!thread_reaper)
+            reap_group_dead = proc_tg_group_dead_locked(child);
+        if (reap_group_dead &&
             (actual_reaper == proc_idle_task() ||
              child->exit_signal != SIGCHLD ||
              (child->clone_flags & CLONE_THREAD)) &&
-            child->state == PROC_ZOMBIE &&
+            proc_task_state_get(child) == PROC_ZOMBIE &&
             !proc_task_is_current_any_cpu(child)) {
             if (destroy_count < (int)(sizeof(to_destroy) / sizeof(to_destroy[0]))) {
                 task_t *owned = proc_get(child);
                 if (owned) {
-                    proc_reap_detach_locked(child);
+                    proc_reap_detach_list_locked(child);
                     to_destroy[destroy_count++] = owned;
                 }
             } else {
@@ -298,27 +377,32 @@ static void proc_reparent_children(task_t *dead, task_t *reaper)
             if (!thread_reaper) {
                 actual_reaper = reaper;
                 if (!actual_reaper || actual_reaper == dead ||
-                    actual_reaper->state == PROC_UNUSED ||
-                    actual_reaper->state == PROC_ZOMBIE)
+                    proc_task_state_get(actual_reaper) == PROC_UNUSED ||
+                    proc_task_state_get(actual_reaper) == PROC_ZOMBIE)
                     actual_reaper = proc_idle_task();
             }
-            if (child->state == PROC_UNUSED) {
+            if (proc_task_state_get(child) == PROC_UNUSED) {
                 child = next;
                 continue;
             }
         }
 
-        if (force_kill_children && child->state != PROC_ZOMBIE) {
+        cstate = proc_task_state_get(child);
+        if (force_kill_children && cstate != PROC_ZOMBIE) {
             if (child_pid_count < (int)(sizeof(child_pids) / sizeof(child_pids[0])))
                 child_pids[child_pid_count++] = child->pid;
         }
 
         proc_reparent_task_locked(actual_reaper, child);
-        if (child->state == PROC_ZOMBIE)
-            proc_wake_child_waiters_locked(actual_reaper);
+        if (cstate == PROC_ZOMBIE && !wake_for)
+            wake_for = actual_reaper;
         child = next;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
+
+    /* The waiter scan re-acquires tasklist_lock, so it runs after the loop. */
+    if (wake_for)
+        proc_wake_child_waiters(wake_for);
 
     for (int i = 0; i < destroy_count; i++) {
         proc_destroy_task(to_destroy[i]);
@@ -398,33 +482,57 @@ void proc_exit(int exit_code)
         (void)proc_debug_event_stop(SIGTRAP, PT_DEBUG_EVENT_EXIT,
                                     (uint64_t)(uintptr_t)exit_code);
 
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
-    proc_runq_remove_locked(t);
-    task_t *parent = t->parent;
+    /*
+     * Three phases, each holding at most one lock class at a time:
+     *
+     *  1. tasklist_lock resolves the parent and samples its liveness.  Done
+     *     first, and separately, so the ZOMBIE publication below never nests
+     *     {t, parent} park_locks (INV-P3).  proc_complete_vfork() needs the
+     *     parent too and is called while no lock of ours is held.
+     *  2. t->park_lock publishes ->state / ->exit_code and drops the task from
+     *     the runqueue (park_lock -> runq_lock).
+     *  3. tasklist_lock rewrites the parent/children chains for auto-reap.
+     *
+     * The waiter wake is deferred to phase 3+ because it re-acquires
+     * tasklist_lock on its own.
+     */
+    task_t *parent = NULL;
+    uint64_t lf = spin_lock_irqsave(&tasklist_lock);
+    parent = t->parent;
+    spin_unlock_irqrestore(&tasklist_lock, lf);
     if (!proc_task_is_live_locked(parent))
         parent = NULL;
     int auto_reap = proc_child_auto_reaps(t, parent);
 
+    uint64_t cf = 0, pf = 0;
+    proc_lock_two_tasks(t, parent, &cf, &pf);
+    int vfork_completed = proc_complete_vfork_locked(t, parent);
+    proc_unlock_two_tasks(t, parent, cf, pf);
+    if (vfork_completed)
+        complete(&t->vfork_done);
+
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
+    proc_runq_remove_locked(t);
     t->exit_code = exit_code;
     __atomic_thread_fence(__ATOMIC_RELEASE);
     t->state = PROC_ZOMBIE;
+    spin_unlock_irqrestore(&t->park_lock, flags);
 
     ktrace_exit("[EXIT] pid=%d: zombie, auto_reap=%d ctid=%p\n",
                 t->pid, auto_reap, (void *)ctid_to_wake);
 
-    int vfork_completed = proc_complete_vfork_locked(t);
-
     if (auto_reap) {
+        lf = spin_lock_irqsave(&tasklist_lock);
         proc_sched_note_zombie();
         t->parent = proc_idle_task();
         t->ppid = 0;
         proc_children_unlink_locked(t);
+        spin_unlock_irqrestore(&tasklist_lock, lf);
     } else {
-        proc_wake_child_waiters_locked(parent);
+        proc_wake_child_waiters(parent);
     }
     int notify_parent_pid =
         !auto_reap && parent && t->exit_signal > 0 ? parent->pid : -1;
-    spin_unlock_irqrestore(&proc_lock, flags);
 
     if (vfork_completed)
         complete(&t->vfork_done);
@@ -467,7 +575,10 @@ void proc_force_exit(task_t *t, int exit_code)
         proc_exit(exit_code);
 
     int resume_stopped = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* Forced exit touches only the target task's own scheduling and wait
+     * bookkeeping, so the target's park_lock is the whole critical section
+     * (with the alarm heap and runqueue locks nested inside it). */
+    uint64_t flags = spin_lock_irqsave(&t->park_lock);
     if (t->state != PROC_UNUSED && t->state != PROC_ZOMBIE) {
         t->pending_exit_code = exit_code;
         __atomic_store_n(&t->exit_pending, 1, __ATOMIC_RELEASE);
@@ -493,17 +604,16 @@ void proc_force_exit(task_t *t, int exit_code)
         /*
          * REMOTE_EXIT_SAFE_BOUNDARY: always meet a concurrent Park under its
          * lock.  Checking only PROC_BLOCKED misses the PREPARING -> PARKED
-         * transition and can leave an exec sibling asleep forever.
+         * transition and can leave an exec sibling asleep forever.  The lock
+         * is the one already held here, so this is not a nested re-acquire.
          */
-        uint64_t plf = spin_lock_irqsave(&t->park_lock);
         (void)proc_try_wake_locked(t, t->wait_seq, PROC_WAKE_TASK_EXIT);
-        spin_unlock_irqrestore(&t->park_lock, plf);
 
         if (t->state == PROC_STOPPED) {
             resume_stopped = 1;
         }
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&t->park_lock, flags);
 
     if (resume_stopped)
         (void)proc_sched_resume_stopped(t, 0);
@@ -522,11 +632,13 @@ void proc_exec_terminate_siblings(task_t *self)
     do {
         pid_count = 0;
         active = 0;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        /* Chain membership is tasklist_lock; each sibling's ->state is sampled
+         * under its own park_lock, one at a time (no two task locks nested). */
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
         task_t *leader = self->tg_leader ? self->tg_leader : self;
         for (task_t *t = leader; t; t = t->tg_next) {
-            if (t == self || t->state == PROC_UNUSED ||
-                t->state == PROC_ZOMBIE)
+            if (t == self || proc_task_state_get(t) == PROC_UNUSED ||
+                proc_task_state_get(t) == PROC_ZOMBIE)
                 continue;
             if (proc_task_tgid(t) != self_tgid)
                 continue;
@@ -537,7 +649,7 @@ void proc_exec_terminate_siblings(task_t *self)
                 break;
             pids[pid_count++] = t->pid;
         }
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
 
         for (int i = 0; i < pid_count; i++) {
             task_t *sibling = proc_find_get(pids[i]);
@@ -568,10 +680,11 @@ void proc_exit_group(int exit_code)
 
     do {
         pid_count = 0;
-        uint64_t flags = spin_lock_irqsave(&proc_lock);
+        uint64_t flags = spin_lock_irqsave(&tasklist_lock);
         task_t *leader = self->tg_leader ? self->tg_leader : self;
         for (task_t *t = leader; t; t = t->tg_next) {
-            if (t == self || t->state == PROC_UNUSED || t->state == PROC_ZOMBIE)
+            if (t == self || proc_task_state_get(t) == PROC_UNUSED ||
+                proc_task_state_get(t) == PROC_ZOMBIE)
                 continue;
             if (__atomic_load_n(&t->exit_pending, __ATOMIC_ACQUIRE))
                 continue;
@@ -588,7 +701,7 @@ void proc_exit_group(int exit_code)
                     break;
             }
         }
-        spin_unlock_irqrestore(&proc_lock, flags);
+        spin_unlock_irqrestore(&tasklist_lock, flags);
         for (int i = 0; i < pid_count; i++) {
             task_t *t = proc_find_get(pids[i]);
             if (t) {

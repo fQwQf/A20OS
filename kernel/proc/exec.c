@@ -960,12 +960,12 @@ static int exec_install_process(task_t *t,
     uint64_t user_as = mm_address_space_token(new_mm);
 
     /* ---- 3. Atomically swap mm ---- */
-    uint64_t mm_swap_flags = spin_lock_irqsave(&proc_lock);
+    uint64_t mm_swap_flags = spin_lock_irqsave(&t->park_lock);
     mm_struct_t *old_mm    = t->mm;
     pt_root_t   *old_pgdir = t->pgdir;
     t->mm   = new_mm;
     t->pgdir = info->pgdir;
-    spin_unlock_irqrestore(&proc_lock, mm_swap_flags);
+    spin_unlock_irqrestore(&t->park_lock, mm_swap_flags);
     t->entry = info->entry;
     t->ustack = sp;
     strncpy(t->exec_path, abs_path, MAX_PATH_LEN - 1);

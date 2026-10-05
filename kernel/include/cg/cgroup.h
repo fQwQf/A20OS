@@ -8,7 +8,10 @@
  * Cgroup resource controller state.
  *
  * Lock ordering (outermost -> innermost):
- *   cg_node.lock -> proc_lock -> runq_lock -> pfa.lock
+ *   cg_node.lock -> tasklist_lock -> park_lock -> runq_lock -> pfa.lock
+ * cg_node.lock is never held together with tasklist_lock; the memory
+ * controller releases it before the victim scan, which is why cg_mem's task
+ * walk nests tasklist_lock -> park_lock on its own.
  */
 
 /* ---- Memory controller ---- */
