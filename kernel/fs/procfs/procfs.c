@@ -148,6 +148,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "cwd") == 0) return PF_PID_CWD;
     if (strcmp(name, "fd") == 0) return PF_PID_FD;
     if (strcmp(name, "environ") == 0) return PF_PID_ENVIRON;
+    if (strcmp(name, "auxv") == 0) return PF_PID_AUXV;
     if (strcmp(name, "io") == 0) return PF_PID_IO;
     if (strcmp(name, "loginuid") == 0) return PF_PID_LOGINUID;
     if (strcmp(name, "sessionid") == 0) return PF_PID_SESSIONID;
@@ -615,7 +616,8 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
             type == PF_PID_OOM_SCORE || type == PF_PID_CGROUP ||
             type == PF_PID_COMM || type == PF_PID_EXE ||
             type == PF_PID_CWD || type == PF_PID_FD ||
-            type == PF_PID_ENVIRON || type == PF_PID_IO ||
+            type == PF_PID_ENVIRON || type == PF_PID_AUXV ||
+            type == PF_PID_IO ||
             type == PF_PID_LOGINUID || type == PF_PID_SESSIONID ||
             type == PF_PID_NS || type == PF_PID_FDINFO ||
             type == PF_PID_MOUNTINFO || type == PF_PID_PAGEMAP ||
@@ -1327,7 +1329,7 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
     static const char *pid_entries[] = {
         ".", "..", "stat", "status", "statm", "maps", "smaps",
         "oom_score", "oom_score_adj", "cgroup", "cmdline", "comm", "exe", "cwd",
-        "fd", "environ", "io", "loginuid", "sessionid", "ns", "fdinfo",
+        "fd", "environ", "auxv", "io", "loginuid", "sessionid", "ns", "fdinfo",
         "mountinfo", "mounts", "pagemap", "limits", "wchan", "stack",
         /* The same three names as under /proc/, but bound to THIS task's
          * user namespace.  Writing them is how a parent installs the maps of

@@ -860,6 +860,11 @@ static int exec_install_process(task_t *t,
 #ifdef CONFIG_ABI_NATIVE
     vaddr_t native_start_info = 0;
 #endif
+    /* The auxv this image is exec'd with, copied out of the stack the
+     * program owns and published at /proc/<pid>/auxv.  Stays empty for the
+     * native ABI, which builds no auxv. */
+    uintptr_t auxv_pairs[A20_AUXV_MAX_PAIRS][2];
+    uint32_t auxv_n = 0;
 #ifdef CONFIG_ABI_NATIVE
     if (info->is_native_abi) {
         sp = exec_setup_native_abi(t, info, bprm->argc,
@@ -872,7 +877,8 @@ static int exec_install_process(task_t *t,
         vaddr_t ehdr = vdso_auxv_ehdr();
         sp = elf_setup_stack(info->stack_top, bprm->argc,
                               (char *const *)bprm->args,
-                              (char *const *)bprm->envs, info, ehdr);
+                              (char *const *)bprm->envs, info, ehdr,
+                              auxv_pairs, &auxv_n);
 #ifdef CONFIG_ABI_NATIVE
         /* Exec from a Native program into a Linux ABI program: the old
          * handle table is process-local and must be released here. */
@@ -923,6 +929,17 @@ static int exec_install_process(task_t *t,
     refcount_set(&new_mm->refcount, 1);
     new_mm->mmap       = info->mmap;
     new_mm->has_vdso   = vdso_auxv_ehdr() != 0;
+
+    /* The auxv is a property of this exec, so it lands with the address space
+     * it describes -- new_mm is the one being installed, and /proc/<pid>/auxv
+     * reads it from there. */
+    new_mm->auxv_n = auxv_n;
+    if (auxv_n) {
+        for (uint32_t i = 0; i < auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
+            new_mm->auxv[i][0] = auxv_pairs[i][0];
+            new_mm->auxv[i][1] = auxv_pairs[i][1];
+        }
+    }
 
 #ifdef CONFIG_NOMMU
     /* Transfer NOMMU segment allocation tracking into the new mm.
