@@ -432,6 +432,32 @@ static void test_sock_buffers(void)
     ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 8192,
        "a lowered SO_SNDBUF takes effect and reads back");
 
+    /* And raising it again must take effect at once, on this same socket, with
+     * no connect() in between.  The ceiling used to be only ever lowered into
+     * pcb->snd_buf, so a raise could not reach a pcb with bytes already
+     * outstanding and did not land until the next connection -- and the write
+     * path's parallel depth estimate made a raise actively unsound, because it
+     * shrank the depth it derived from the very field the raise had just grown.
+     * The readback is the observable half; what it is read back *from* is the
+     * pcb, not the socket record. */
+    v = 32768;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "raising SO_SNDBUF above the current ceiling is accepted");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 32768,
+       "a raised SO_SNDBUF takes effect immediately and reads back");
+    /* Lower once more and raise past it, so the two directions are exercised on
+     * one socket rather than only at the extremes. */
+    v = 4096;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "SO_SNDBUF lowers again");
+    v = 65536;
+    ok(setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
+       "SO_SNDBUF raises above the lower value");
+    sl = sizeof(rv);
+    ok(getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv == 65536,
+       "the second raise is what reads back");
+
     /* Zero and negative are refused rather than silently clamped up to some
      * minimum: a caller that asked for a zero-byte buffer has a bug, and
      * accepting it would leave it believing it had asked for something usable. */
