@@ -1058,6 +1058,96 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             netfilter_conntrack_set_enabled(0);
             return (int)count;
         }
+        /* Idle-timeout override for the capacity gate: three milliseconds, 0
+         * restoring the compiled-in default for that one.  See the declaration
+         * comment in netfilter.h for why this is a runtime knob and not a
+         * per-build constant. */
+        if (strncmp(tmp, "cttimeout ", 10) == 0) {
+            unsigned ms[3] = { 0, 0, 0 };
+            const char *d = tmp + 10;
+            for (int i = 0; i < 3; i++) {
+                while (*d == ' ')
+                    d++;
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                unsigned v = 0;
+                while (*d >= '0' && *d <= '9') {
+                    if (v > 3600000u)
+                        return -ERANGE;
+                    v = v * 10 + (unsigned)(*d - '0');
+                    d++;
+                }
+                ms[i] = v;
+            }
+            while (*d == ' ')
+                d++;
+            if (*d != '\0')
+                return -EINVAL;
+            uint64_t lf = a20_lwip_lock();
+            netfilter_conntrack_set_timeouts(ms[0], ms[1], ms[2]);
+            a20_lwip_unlock(lf);
+            return (int)count;
+        }
+        /* Synthetic flow insertion: ctinject <src> <dst> <sport> <dport>
+         * <proto> <state>, all decimal, proto 6 or 17.  Goes through the same
+         * insert the packet path uses -- see netfilter.h. */
+        if (strncmp(tmp, "ctinject ", 9) == 0) {
+            const char *d = tmp + 9;
+            char *tok[6];
+            unsigned ntok = 0;
+            /* The first two tokens are addresses and are parsed separately, so
+             * split off six space-delimited tokens in place: `tmp` is this
+             * function's own stack buffer, so NUL-ing the separators in it is
+             * safe and needs no second buffer. */
+            while (ntok < 6) {
+                while (*d == ' ')
+                    d++;
+                if (*d == '\0')
+                    return -EINVAL;
+                tok[ntok++] = (char *)d;
+                while (*d && *d != ' ')
+                    d++;
+                if (*d)
+                    *(char *)d++ = '\0';
+            }
+            while (*d == ' ')
+                d++;
+            if (*d != '\0')
+                return -EINVAL;
+            uint32_t addr[2];
+            for (int i = 0; i < 2; i++) {
+                const char *s = tok[i];
+                size_t len = 0;
+                while (s[len])
+                    len++;
+                if (!netfilter_ipv4_from_str(s, len, &addr[i]))
+                    return -EINVAL;
+            }
+            unsigned num[4];
+            for (int i = 0; i < 4; i++) {
+                const char *s = tok[2 + i];
+                if (*s < '0' || *s > '9')
+                    return -EINVAL;
+                unsigned v = 0;
+                while (*s >= '0' && *s <= '9') {
+                    if (v > 65535u)
+                        return -ERANGE;
+                    v = v * 10 + (unsigned)(*s - '0');
+                    s++;
+                }
+                if (*s != '\0')
+                    return -EINVAL;
+                num[i] = v;
+            }
+            uint64_t lf = a20_lwip_lock();
+            int r = netfilter_conntrack_inject(addr[0], addr[1],
+                                               (uint16_t)num[0],
+                                               (uint16_t)num[1],
+                                               (uint8_t)num[2],
+                                               (uint8_t)num[3]);
+            a20_lwip_unlock(lf);
+            return r < 0 ? r : (int)count;
+        }
         if (strncmp(tmp, "add ", 4) == 0) {
             netfilter_rule_t rule;
             int r = netfilter_parse_rule(tmp + 4, strlen(tmp + 4), &rule);
