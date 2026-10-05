@@ -152,6 +152,16 @@ int a20_lwip_rx_pending_any(void)
         if (n->loop_first != NULL)
             return 1;
     }
+#if CONFIG_NET_LANES > 1
+    /* Same reasoning one stage further along.  With more than one lane the
+     * device interrupt only stages frames, so a frame already off the device is
+     * not yet delivered, and a reader that gated on the device hint alone would
+     * skip the drain that would have delivered it.  One relaxed load, and the
+     * same false-positive-only argument applies: it is a lower bound on real
+     * work. */
+    if (net_lane_rx_queued_total() != 0)
+        return 1;
+#endif
     return 0;
 }
 
@@ -764,6 +774,318 @@ void a20_lwip_assert_core_locked(void *site)
 }
 #endif
 
+#if CONFIG_NET_LANES > 1
+/*
+ * STAGE D: the receive split.
+ *
+ * Everything in this block exists only on a multi-lane build.  At one lane
+ * a20_lwip_process_netif_rx_tx_locked() below still reads a frame and hands it
+ * straight to n->input() under g_lwip_lock, which is what it always did, and
+ * this whole arrangement is absent from the preprocessed source.  That is not
+ * tidiness: net-lanes.md's rule is that the one-lane build has to *be* the
+ * pre-lane build, so the duplicated receive prologue below is deliberate.
+ */
+
+/* Spelled out rather than taken from lwip/sockets.h, which this file does not
+ * include and should not: the only thing wanted from it is these two numbers,
+ * and the frame parser below must agree with what ip4_input() will decide the
+ * protocol is. */
+#define A20_IPPROTO_TCP 6
+#define A20_IPPROTO_UDP 17
+
+/* Which lane owns the connection this frame belongs to.
+ *
+ * net_lane_of(dst_ip, dst_port), and the two halves have to be the same halves
+ * two other places use, or a packet lands on a lane that does not own its pcb:
+ *
+ *   - lwIP looks the pcb up in the bucket NET_PCB_LANE_OF(ip_current_dest_addr(),
+ *     hdr->dest), i.e. exactly this pair (tcp_in.c, udp.c);
+ *   - a socket's own lane is net_socket_lane_of_addr() on its bound address,
+ *     and for an established connection the bound address IS this frame's
+ *     destination.
+ *
+ * An inbound frame's destination address and port are our local address and
+ * port, so the value is computable from wire bytes alone, on a CPU that has
+ * never seen the connection.  That is the same property the ownership hash has
+ * always had; stage D is the first caller that has to evaluate it on every
+ * packet, from outside lwIP.
+ *
+ * Both values are read out of the frame in network byte order and fed to the
+ * hash in network byte order, which is what net_pcb_lane_ip() and the tcphdr /
+ * udphdr port fields give lwIP.  Byte-swapping here would make every packet
+ * land on the wrong lane while still looking self-consistent.
+ *
+ * Three classes deliberately do not use the port:
+ *
+ *   - a fragment.  Only the first fragment of a datagram carries the transport
+ *     header, so reading a "port" out of a later one reads payload.  Every
+ *     fragment of a datagram satisfies (MF || frag_offset), so all of them take
+ *     the address-only hash and land on one lane, and reassembly cannot be split
+ *     across two CPUs.
+ *   - an IPv4 header whose own length field is nonsense, and any frame too short
+ *     to hold what is being read.  Those go to the netif's own lane, which is
+ *     where every packet went before stage D; the frame is about to be dropped
+ *     by ethernet_input() regardless, and reading past the end to decide which
+ *     lane it belongs to would be a bug in the code that is supposed to be the
+ *     safe one.
+ *   - everything that is not IPv4/IPv6 carrying TCP or UDP, which is hashed by
+ *     address for the reason net_lane_of_ip() gives: ARP, ICMP and NDP have no
+ *     port, and there is no PCB for an inbound packet of that shape to miss.
+ *
+ * One VLAN tag is skipped.  A second one is not, and falls into the last case
+ * above: the address is still the one the frame is really for, it just does not
+ * get the port.
+ */
+static unsigned a20_lwip_frame_lane(const struct netif *n, const uint8_t *f,
+                                    unsigned len)
+{
+    unsigned l3 = ETH_HLEN;
+    uint16_t ethertype;
+
+    if (len < l3 + 2)
+        return a20_lwip_netif_lane(n);
+    ethertype = (uint16_t)(((uint16_t)f[l3 - 2] << 8) | f[l3 - 1]);
+    if (ethertype == ETHTYPE_VLAN) {
+        l3 += 4;
+        if (len < l3 + 2)
+            return a20_lwip_netif_lane(n);
+        ethertype = (uint16_t)(((uint16_t)f[l3 - 2] << 8) | f[l3 - 1]);
+    }
+
+    if (ethertype == ETHTYPE_IP) {
+        unsigned ihl;
+        uint16_t frag;
+        uint32_t dst;
+        if (len < l3 + 20)
+            return a20_lwip_netif_lane(n);
+        ihl = (unsigned)(f[l3] & 0x0f) * 4;
+        if (ihl < 20 || len < l3 + ihl)
+            return a20_lwip_netif_lane(n);
+        memcpy(&dst, f + l3 + 16, sizeof(dst));
+        frag = (uint16_t)(((uint16_t)f[l3 + 6] << 8) | f[l3 + 7]);
+        /* MF is the low bit of the flags half-word; the offset is the top 13
+         * bits of the same field.  Either set means this is one fragment of a
+         * datagram that was split, which is the condition that has to hold for
+         * every fragment of it. */
+        if (frag & 0x2000u || (frag & 0x1fffu) != 0)
+            return net_lane_of_ip(dst);
+        if (len < l3 + ihl + 4)
+            return net_lane_of_ip(dst);
+        if (f[l3 + 9] == A20_IPPROTO_TCP || f[l3 + 9] == A20_IPPROTO_UDP) {
+            uint16_t dport;
+            memcpy(&dport, f + l3 + ihl + 2, sizeof(dport));
+            return net_lane_of(dst, dport);
+        }
+        return net_lane_of_ip(dst);
+    }
+
+    if (ethertype == ETHTYPE_IPV6) {
+        uint8_t nexthdr;
+        uint32_t dst;
+        if (len < l3 + 40)
+            return a20_lwip_netif_lane(n);
+        nexthdr = f[l3 + 6];
+        /* The low 32 bits, which is what net_pcb_lane_ip() takes for v6 and
+         * what net_socket_lane_of_addr() takes from a sockaddr_in6. */
+        memcpy(&dst, f + l3 + 24 + 12, sizeof(dst));
+        /* No extension-header walk: an extension header means the transport
+         * header is not where it would be, so this falls to the address-only
+         * hash rather than reading a port out of an extension header.  Every
+         * fragment of a v6 datagram is on this path too, since the fragment
+         * header is itself an extension header. */
+        if (nexthdr == A20_IPPROTO_TCP || nexthdr == A20_IPPROTO_UDP) {
+            uint16_t dport;
+            if (len < l3 + 40 + 4)
+                return net_lane_of_ip(dst);
+            memcpy(&dport, f + l3 + 40 + 2, sizeof(dport));
+            return net_lane_of(dst, dport);
+        }
+        return net_lane_of_ip(dst);
+    }
+
+    if (ethertype == ETHTYPE_ARP) {
+        /* The target protocol address is the address being resolved, i.e. the
+         * one this frame is about.  That is the same value net_lane_of_ip()
+         * hashes for every other portless protocol, so ARP lands with the rest
+         * of the traffic for its address rather than in a bucket of its own.
+         * Fixed layout: htype(2) ptype(2) hlen(1) plen(1) oper(2) sha(6) spa(4)
+         * tha(6) tpa(4), all of it IPv4-over-Ethernet on this link by
+         * definition of the ethertype we matched. */
+        uint32_t tpa;
+        if (len < l3 + 38)
+            return a20_lwip_netif_lane(n);
+        memcpy(&tpa, f + l3 + 24 + 14, sizeof(tpa));
+        return net_lane_of_ip(tpa);
+    }
+
+    return a20_lwip_netif_lane(n);
+}
+
+/*
+ * Read every frame the device has and put each one on its lane's queue.
+ * Requires g_lwip_lock, which is what serialises this against a device
+ * interrupt landing on another CPU.  Returns 0 when the budget ran out with
+ * frames still queued, with the same "leave the RX pending flag set" contract
+ * the inline drain has.
+ */
+static int a20_lwip_rx_enqueue_locked(struct netif *n, unsigned budget)
+{
+    if (!n || !n->state)
+        return 1;
+
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+    a20_lwip_sync_link_state(n);
+
+    if (!netif_is_link_up(n)) {
+        netif_poll(n);
+        return 1;
+    }
+
+    int drained = 1;
+    unsigned done = 0;
+    for (;;) {
+        if (budget && done >= budget) {
+            drained = 0;
+            break;
+        }
+        int len = st->ops->recv(st->dev, st->rx_frame, sizeof(st->rx_frame));
+        if (len <= 0)
+            break;
+        done++;
+        if ((size_t)len > sizeof(st->rx_frame))
+            len = (int)sizeof(st->rx_frame);
+        st->rx_packets++;
+        st->rx_bytes += (uint64_t)len;
+        a20_perf_count(A20_PERF_NET_RX_PACKETS);
+        a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
+        net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
+                            (size_t)len);
+        /* The filter still runs here, on rx_frame, before the lane is worked
+         * out -- and that ordering is load-bearing for the same reason it was
+         * before the pbuf existed: a DNAT rewrites the destination in place, so
+         * a lane derived before the rewrite would be the lane of the address
+         * the packet used to have.  Running it after the enqueue would make the
+         * dispatch disagree with the lookup in udp_input(), which reads the
+         * post-NAT destination. */
+        if (netfilter_input(st->rx_frame, (size_t)len, st->idx) ==
+            NETFILTER_DROP) {
+            LINK_STATS_INC(link.drop);
+            st->rx_filtered++;
+            continue;
+        }
+        unsigned lane = a20_lwip_frame_lane(n, st->rx_frame, (unsigned)len);
+        if (!net_lane_rx_put(lane, n, st->rx_frame, (unsigned)len)) {
+            /* Counted twice on purpose, at two different granularities: the
+             * netif counts a frame it could not hand on, the lane counts a queue
+             * that was full, and only the second one says which lane's consumer
+             * failed to keep up.  No perf event for this -- a staged-frame drop
+             * is not the bottom-half overflow the existing counter describes,
+             * and reusing that one would make an unrelated counter move. */
+            LINK_STATS_INC(link.drop);
+            st->rx_dropped++;
+        }
+    }
+    /* Loopback is not staged.  netif_poll() already unlinks the pbuf from
+     * loop_first under SYS_ARCH_PROTECT and processes it in place, so there is
+     * no window to close by deferring it, and turning it into a staged frame
+     * would mean freeing a pbuf and re-allocating one to say the same thing. */
+    netif_poll(n);
+    return drained;
+}
+
+/* Hand one staged frame to netif input.  Requires g_lwip_lock and the lane's
+ * current-lane context already declared by the caller. */
+static void a20_lwip_lane_input_one(unsigned lane, struct netif *n,
+                                    const uint8_t *frame, unsigned len)
+{
+    if (!n || !n->state || !n->input)
+        return;
+    a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
+
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+    if (!p) {
+        LINK_STATS_INC(link.memerr);
+        LINK_STATS_INC(link.drop);
+        st->rx_dropped++;
+        a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
+        return;
+    }
+    pbuf_take(p, frame, (u16_t)len);
+    /* One pbuf_free() call site brackets the n->input() call below, and it is
+     * not redundant -- ownership moves at the call.  After ethernet_input() has
+     * taken ownership it frees the pbuf itself on its error paths while still
+     * returning ERR_OK, so the caller must not free again. */
+    if (n->input(p, n) != ERR_OK) {
+        LINK_STATS_INC(link.drop);
+        st->rx_dropped++;
+    }
+    net_lane_rx_count_processed(lane);
+}
+
+/*
+ * Drain one lane's staged frames.  `budget` of 0 means no cap.
+ *
+ * THE ORDERING RULES, because both of them are easy to get wrong:
+ *
+ *   - the lane is claimed before g_lwip_lock, never the other way round.  The
+ *     claim is only ever taken from process context and g_lwip_lock is taken
+ *     from interrupt context, so the reverse order is an inversion with a real
+ *     deadlock behind it: an interrupt on this CPU would wait for g_lwip_lock
+ *     while this CPU holds it and spins for the claim.  Nothing takes a lane
+ *     claim under g_lwip_lock, so the pair is a strict order, not a cycle.
+ *   - the emptiness test happens before the lock, while the claim is held.  A
+ *     producer only ever adds, so a lane found non-empty cannot become empty
+ *     under us, and the test saves taking the core lock for nothing on the
+ *     overwhelmingly common "no traffic" pass.
+ *
+ * The claim is given back before returning, including on the early return, so
+ * a lane is never left unclaimable.
+ */
+static unsigned a20_lwip_lane_drain_locked(unsigned lane, unsigned budget)
+{
+    if (!net_lane_rx_claim(lane))
+        return 0;
+    unsigned done = 0;
+    if (net_lane_rx_ready(lane)) {
+        uint64_t flags = a20_lwip_lock();
+        /* Declare this lane for the whole batch: every pbuf the stack allocates
+         * here belongs to the connections whose packets these are, which is
+         * what makes stage C's per-lane pool table mean something.  Popped and
+         * restored rather than assigned, because the caller may have arrived
+         * with a lane of its own -- a socket's send path reaches the receive
+         * drain through a20_lwip_poll_locked() -- and giving it up for the
+         * duration would charge this traffic to the wrong pool. */
+        unsigned prev_lane = net_lane_ctx_push(lane);
+        for (;;) {
+            if (budget && done >= budget)
+                break;
+            const uint8_t *frame;
+            unsigned len;
+            struct netif *n = net_lane_rx_pop(lane, &frame, &len);
+            if (!n)
+                break;
+            done++;
+            a20_lwip_lane_input_one(lane, n, frame, len);
+        }
+        net_lane_ctx_pop(prev_lane);
+        a20_lwip_unlock(flags);
+    }
+    net_lane_rx_release(lane);
+    return done;
+}
+
+/* Drain every lane that will hand itself over.  `budget` caps each lane, not
+ * the total, because the point of the stage is that four CPUs can each be
+ * inside a different lane at the same time. */
+static unsigned a20_lwip_lane_drain_all(unsigned budget)
+{
+    unsigned done = 0;
+    for (unsigned lane = 0; lane < CONFIG_NET_LANES; lane++)
+        done += a20_lwip_lane_drain_locked(lane, budget);
+    return done;
+}
+#endif /* CONFIG_NET_LANES > 1 */
+
 /*
  * Drain one netif's receive ring.  `budget` caps how many packets this call
  * processes and 0 means no cap, which is what the IRQ top-half and the
@@ -772,7 +1094,34 @@ void a20_lwip_assert_core_locked(void *site)
  * Returns 0 when the budget ran out with packets still queued.  A caller that
  * stops early must leave the RX pending flag set, because the interrupt that
  * would have drained the remainder has already been consumed.
+ *
+ * AT MORE THAN ONE LANE THIS IS SPLIT IN TWO, and the split is the whole of
+ * stage D.  The code below is the one-lane version and is compiled unchanged;
+ * a20_lwip_rx_enqueue_locked() and a20_lwip_lane_drain_locked() above it are
+ * what a multi-lane build runs instead:
+ *
+ *   - enqueue copies each frame into the queue of the lane that owns the
+ *     connection it belongs to, and returns.  No pbuf, no protocol stack, no
+ *     allocation: the interrupt path's per-packet cost becomes a bounded memcpy.
+ *   - processing pops a lane's queue and runs netif input on it, with that lane
+ *     declared as the current one, so lwIP's allocator and the pcb buckets it
+ *     touches belong to the connection's own lane.
+ *
+ * Two callers, two shapes.  a20_lwip_process_netif_irq_locked() enqueues only,
+ * so the interrupt does no protocol work; every other caller enqueues and then
+ * drains inline, because those callers arrived to get packets delivered (a
+ * blocked reader, a socket's send path, the timer-tick safety net) and a poll
+ * point elsewhere is not a substitute for the thing they asked for.
+ *
+ * WHICH MEANS THIS FUNCTION IS THE ONE-LANE VERSION ONLY, and is compiled out
+ * above one lane.  That is not an omission: with the split in place nothing
+ * calls it, and leaving it there would be a second, dead, subtly different
+ * receive path for a reader to find.  Its loopback drain, its link-state sync
+ * and its per-frame accounting all still exist -- inside
+ * a20_lwip_rx_enqueue_locked(), which is the same code doing the same things in
+ * the same order, minus the n->input() call.
  */
+#if CONFIG_NET_LANES == 1
 static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
 {
     if (!n || !n->state)
@@ -870,11 +1219,26 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
     net_lane_ctx_pop(prev_lane);
     return drained;
 }
+#endif /* CONFIG_NET_LANES == 1 */
 
 /*
  * IRQ top-half entry for a single virtio-net instance.
  * Runs with g_lwip_lock held; performs bounded work only (descriptor ring
  * drainer, lwIP input, no kmalloc, no socket-table bucket lock).
+ *
+ * AT MORE THAN ONE LANE IT DOES NOT RUN THE PROTOCOL STACK.  It reads each
+ * frame out of the device ring and stages it on its owning lane's queue, and
+ * returns; the processing happens at a poll point that runs outside interrupt
+ * context.  That is the entire reason for stage D, and it is also the reason
+ * this is not simply "a20_lwip_poll_rx_locked(0)": an interrupt that runs the
+ * stack still runs it with interrupts disabled, on whatever CPU took the
+ * interrupt, holding the one global lock for the whole burst.
+ *
+ * Unbounded enqueue, matching what this function did before the split: this
+ * interrupt is the primary reason the ring needs draining, so bounding it would
+ * only move the work.  What bounds the *processing* is the lane queue depth and
+ * the poll point's budget; a frame that finds its lane full is dropped and
+ * counted, which for TCP means a retransmission.
  */
 void a20_lwip_process_netif_irq_locked(int net_idx)
 {
@@ -894,9 +1258,13 @@ void a20_lwip_process_netif_irq_locked(int net_idx)
             continue;
         a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
         if (st->idx == net_idx) {
+#if CONFIG_NET_LANES > 1
+            a20_lwip_rx_enqueue_locked(n, 0);
+#else
             /* Unbounded: this interrupt is the primary reason the ring needs
              * draining, so deferring here would only move the work. */
             a20_lwip_process_netif_rx_tx_locked(n, 0);
+#endif
             break;
         }
     }
@@ -960,7 +1328,16 @@ void a20_lwip_poll_timers_locked(void)
     }
 }
 
-/* Device completions plus the receive drain.  `budget` of 0 means no cap. */
+/* Device completions plus the receive drain.  `budget` of 0 means no cap.
+ *
+ * More than one lane: the device ring is staged onto the owning lanes and then
+ * drained here, in the same call and under the same lock, because every caller
+ * of this function arrived to get packets delivered -- the reader path, the
+ * socket send path, the timer-interrupt safety net.  Asking them to come back
+ * later would be a liveness regression for exactly the case the function
+ * exists for.  The interrupt is the caller that does *not* drain, because its
+ * job is to get off the CPU.
+ */
 void a20_lwip_poll_rx_locked(unsigned budget)
 {
     if (!g_lwip_ready)
@@ -973,8 +1350,13 @@ void a20_lwip_poll_rx_locked(unsigned budget)
     int complete = 1;
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->state) {
+#if CONFIG_NET_LANES > 1
+            if (!a20_lwip_rx_enqueue_locked(n, budget))
+                complete = 0;
+#else
             if (!a20_lwip_process_netif_rx_tx_locked(n, budget))
                 complete = 0;
+#endif
         } else {
             /* No state means a netif the port does not drive, so there is no
              * address to hash and no per-netif lane to adopt.  It still has to
@@ -982,9 +1364,57 @@ void a20_lwip_poll_rx_locked(unsigned budget)
             netif_poll(n);
         }
     }
+#if CONFIG_NET_LANES > 1
+    a20_lwip_lane_drain_all(budget);
+    /* "Complete" has to mean the queues are empty too.  Clearing the RX pending
+     * flag with frames still staged would let the reader path skip a drain it
+     * should have made, and the frames would sit until the next interrupt --
+     * which, since this interrupt is what staged them, may not come. */
+    if (net_lane_rx_queued_total() != 0)
+        complete = 0;
+#endif
     if (complete)
         a20_lwip_clear_rx_pending();
 }
+
+/*
+ * The stage D poll point.  Called from kernel_progress_run_bottom_halves(),
+ * which sched() runs on every scheduling decision and every idle pass, on every
+ * CPU.
+ *
+ * WHY IT IS CALLED FROM THERE AND NOT FROM WHEREVER THE READER IS.  This is the
+ * red-flagged trap in net-lanes.md, and the deadlock it describes is real: if
+ * the only thing that ran the receive queues were a reader waking up, then a
+ * blocked reader waits for a wake-up that only the receive path can produce,
+ * while the receive path waits for a reader.  A blocked read is woken by the
+ * socket bottom half, the bottom half needs the staged frames already gone, and
+ * a poll that only runs after the wake-up is waiting for an event that will
+ * never arrive.  The fix is not a cleverer gate, it is a poll point that runs
+ * unconditionally: sched() is reached on every context switch, on every timer
+ * tick that reschedules, and on every idle pass, whether or not any task is
+ * blocked on the network at all.
+ *
+ * The gate here is a counter of frames actually staged, not a prediction about
+ * whether some task might care.  It is raised by the producer itself, so it can
+ * only ever be a false positive, and a false positive costs one relaxed load.
+ *
+ * `budget` caps each lane rather than the whole pass: four CPUs reaching four
+ * different lanes at the same time is the entire point, and a global cap would
+ * hand three of them to a fourth.
+ *
+ * The whole function is guarded rather than given an empty body at one lane,
+ * because a call to an empty out-of-line function is still a call: measured, it
+ * added ten bytes to progress.c's .text at CONFIG_NET_LANES == 1.  The header's
+ * A20_LWIP_LANE_RX_POLL() macro removes the call site from the preprocessed
+ * source instead. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_lane_rx_poll(unsigned budget)
+{
+    if (net_lane_rx_queued_total() == 0)
+        return;
+    a20_lwip_lane_drain_all(budget);
+}
+#endif /* CONFIG_NET_LANES > 1 */
 
 void a20_lwip_poll_locked(void) {
     a20_lwip_poll_timers_locked();
@@ -1418,6 +1848,35 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
                      (unsigned long)c->freed);
             a20_lwip_append(buf, bufsz, &off, lane_row);
         }
+    }
+
+    /*
+     * Stage D's dispatch accounting.  `rx` counts frames this lane handed to
+     * netif input and `drop` counts frames its queue refused, and the question
+     * they answer is the one stage D exists to answer: is the traffic actually
+     * being spread across lanes, or is one lane taking everything?
+     *
+     * Read without the lane claim and without g_lwip_lock, which is why the
+     * numbers are monotonic rather than a depth: a per-lane occupancy gauge would
+     * have to be sampled under the claim, and /proc is not a place that gets to
+     * contend with the receive path.  A drop count that is not zero means a
+     * lane's consumer did not keep up, and that is a defect to see rather than
+     * load to average over.
+     */
+    {
+        char lane_row[80];
+        a20_lwip_append(buf, bufsz, &off,
+            "rx lane            rx   drop\n");
+        for (unsigned l = 0; l < CONFIG_NET_LANES; l++) {
+            snprintf(lane_row, sizeof(lane_row), "%-15lu%6llu%7llu\n",
+                     (unsigned long)l,
+                     net_lane_rx_stat(l, NET_LANE_RX_PROCESSED),
+                     net_lane_rx_stat(l, NET_LANE_RX_DROPPED));
+            a20_lwip_append(buf, bufsz, &off, lane_row);
+        }
+        snprintf(lane_row, sizeof(lane_row), "rx staged (not yet processed): %u\n",
+                 net_lane_rx_queued_total());
+        a20_lwip_append(buf, bufsz, &off, lane_row);
     }
 #endif /* CONFIG_NET_LANES > 1 */
 

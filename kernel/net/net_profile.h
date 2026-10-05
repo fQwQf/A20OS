@@ -311,6 +311,50 @@ _Static_assert(NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
                "counter reports, so the ceiling has to be a compile-time one");
 
 /*
+ * Stage D: frames staged per lane between the device interrupt and the point
+ * that runs the protocol stack on them.
+ *
+ * The device ring is drained by copying each frame into one of these, and the
+ * copy is the only per-packet work left in interrupt context: no pbuf, no
+ * ARP/TCP/UDP, no bottom-half.  Everything else moved out, which is the whole
+ * point of the stage -- per-packet protocol processing is the dominant cost and
+ * it is what wants to run on the owning lane instead of on whichever CPU took
+ * the interrupt.
+ *
+ * Depth is the honest form of the backpressure decision.  A lane's queue
+ * holding frames means those frames are already off the device, so a full
+ * queue cannot be backpressured onto the wire; the producer drops and counts
+ * instead, and TCP retransmits.  Four is enough to absorb a short burst while
+ * a lane is being claimed, and small enough that four lanes do not cost more
+ * static memory than the whole rest of this profile's frame budget -- which is
+ * why it gets a quarter of the budget rather than a share of the remainder.
+ *
+ * NOTHING IS ALLOCATED AT ONE LANE.  The array lives inside
+ * `#if CONFIG_NET_LANES > 1` in net_lane.h, so an embedded build does not pay
+ * for it and, more importantly, its preprocessed source does not contain it.
+ *
+ * The budget is half of what the rest of this profile's frame arrays get, which
+ * is why four lanes on the default rung fit and more than about a dozen would
+ * not.  An embedded rung with more than one lane is EXPECTED TO FAIL THE ASSERT
+ * IN net_lane.c, and that is the correct outcome rather than a bug: four lanes
+ * of per-lane frame state does not fit a 20 KiB part, and the honest response
+ * to that configuration is a build error saying so, not a silent overrun of the
+ * budget the rest of this file exists to enforce.
+ */
+#ifndef NET_PROFILE_LANE_RXQ_SLOTS
+#define NET_PROFILE_LANE_RXQ_SLOTS 4
+#endif
+#ifndef NET_PROFILE_LANE_RXQ_BUDGET
+#define NET_PROFILE_LANE_RXQ_BUDGET (NET_PROFILE_STATIC_BUDGET / 2)
+#endif
+_Static_assert(NET_PROFILE_LANE_RXQ_SLOTS >= 2,
+               "a lane receive queue of one slot turns every frame into a "
+               "drop unless the consumer happens to be looking at that lane");
+_Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
+               "a full-MTU frame does not fit a lane receive slot, so the "
+               "device drain would have to truncate it");
+
+/*
  * Whether the receive path may poll for packets from the idle path instead of
  * waiting for an interrupt.  On a single-lane build the historical CPU-0-only
  * poll in kernel/core/progress.c was correct, because every CPU polling one

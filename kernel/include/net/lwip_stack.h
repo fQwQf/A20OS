@@ -17,6 +17,22 @@ void a20_lwip_poll_locked(void);
 void a20_lwip_poll_timers_locked(void);
 void a20_lwip_poll_rx_locked(unsigned budget); /* budget 0 = no cap */
 void a20_lwip_process_netif_irq_locked(int net_idx);
+/* Stage D: the guaranteed receive poll point.  kernel_progress_run_bottom_halves()
+ * (i.e. every sched() and idle pass, on every CPU) calls A20_LWIP_LANE_RX_POLL(),
+ * so staged frames are processed without any task having to ask for them.
+ *
+ * Below two lanes the call site is not an empty function body -- it is absent
+ * from the preprocessed source, for the same reason a20_lwip_lane_enter() below
+ * is a macro (measured there, and re-measured here: at CONFIG_NET_LANES == 1 a
+ * real call to an out-of-line empty poll adds ten bytes to progress.c's .text).
+ * There is nothing staged at one lane: the device interrupt still hands every
+ * frame straight to netif input as it always did. */
+#if CONFIG_NET_LANES > 1
+void a20_lwip_lane_rx_poll(unsigned budget);
+#define A20_LWIP_LANE_RX_POLL(budget) a20_lwip_lane_rx_poll(budget)
+#else
+#define A20_LWIP_LANE_RX_POLL(budget) ((void)(budget))
+#endif
 uint64_t a20_lwip_lock(void);
 void a20_lwip_unlock(uint64_t flags);
 /* Stage C: say which lane owns the lwIP work that is about to run, so lwIP's
