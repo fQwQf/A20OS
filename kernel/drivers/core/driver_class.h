@@ -126,6 +126,20 @@ typedef struct net_iovec {
  * consumer that acts on a bit it was handed without checking the matching
  * callback is relying on the driver having lied, which is exactly the failure
  * this split exists to make impossible.
+ *
+ * Why the two checksum bits exist but stay clear:
+ *
+ * lwIP 2.2.2 as vendored offers no way for a stack to tell a driver "the L4
+ * checksum in this frame is a partial sum you must finish".  opt.h:2449-2450
+ * defaults LWIP_CHECKSUM_ON_COPY to 0, so pbuf_take() computes and verifies
+ * checksums itself, and netif.h:84-107 defines exactly seven NETIF_FLAG_*
+ * bits (UP, BROADCAST, LINK_UP, ETHARP, ETHERNET, IGMP, MLD6) -- none of which
+ * a checksum-offload handshake would ride on.  Setting either bit under those
+ * semantics would leave lwIP verifying a checksum the device never computed, so
+ * the bits are defined now and are set only by a driver that has a stack able
+ * to express the handshake.  MRG_RXBUF is different: it is a pure device-side
+ * receive property lwIP never sees, so a driver that negotiated it can and
+ * should report it.
  */
 #define NET_DEV_CAP_TX_SG           (1u << 0) /* send_sg() consumes a segment list */
 #define NET_DEV_CAP_TX_CSUM_OFFLOAD (1u << 1) /* needs_csum/csum_start in the vnet hdr */
