@@ -390,9 +390,13 @@ int net_accept_sock(net_socket_t *s, void *addr, size_t *addrlen, int flags)
          * lock may never be nested under a socket lock.  child->closed is
          * already set, so a table scan that lands on it in between finds it dead
          * and skips it. */
-        net_socket_unregister(child);
+        /* Only if there was a slot.  An AF_UNIX child is never registered, so
+         * on that path the registry reference does not exist and dropping it
+         * freed the socket here, before the wake_all() calls below. */
+        bool had_slot = net_socket_unregister(child);
         /* Registry reference, dropped outside the lock: it can free. */
-        net_socket_free(child);
+        if (had_slot)
+            net_socket_free(child);
         (void)proc_wake_q_flush(&wake_q);
         if (drain_peer_read)
             (void)wait_queue_wake_all(
@@ -444,7 +448,7 @@ int net_getpeername_sock(net_socket_t *s, void *addr, size_t *addrlen)
     if (!s)
         return -ENOTSOCK;
     if (!s->connected)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_GETPEERNAME);
     size_t n = s->peer_len < *addrlen ? s->peer_len : *addrlen;
     memcpy(addr, s->peer_addr, n);
     *addrlen = n;
@@ -873,7 +877,7 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
              * peer identity when available. */
             extern int linux_pidfd_create(int pid, int flags);
             if (s->peer_pid <= 0)
-                return -ENOTCONN;
+                return net_notconn(NET_NOTCONN_PEERPIDFD);
             if (*optlen < sizeof(int32_t))
                 return -EINVAL;
             int pfd = linux_pidfd_create(s->peer_pid, 0);

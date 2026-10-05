@@ -184,7 +184,7 @@ int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                 const net_bh_event_t *meta)
 {
     if (!dst || dst->closed)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_ENQUEUE_META);
     if (len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
@@ -207,7 +207,7 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
                                 const net_bh_event_t *meta)
 {
     if (!dst || dst->closed)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
     if (!p || len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
     if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
@@ -264,14 +264,14 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         net_sock_pair_t pair = net_sock_lock2(s, dst);
         if (!net_socket_is_live(s) || !net_socket_is_live(dst)) {
             net_sock_unlock2(pair);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_PRE_PARK_RACE);
         }
         /* UDP connect sets peer_addr but NOT s->peer, so s->peer is
            legitimately NULL — skip this check for DGRAM. */
         if (s->connected && s->peer != dst &&
             s->type != SOCK_DGRAM) {
             net_sock_unlock2(pair);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_PEER_MISMATCH);
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN || dontwait) {
@@ -330,7 +330,7 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             net_sock_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_POST_PARK_RACE);
         }
         r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN) {
