@@ -64,3 +64,51 @@ unlock(this_cpu.runqueue)
 竞争计数器是诊断性的：它记录锁在获取开始时就已被持有，可能保守地低估竞态。并行峰值记录重叠的本地 pick 尝试，并不要求在特定模拟器运行上超过一。
 
 `sched_stress` 强制 256 个显式调度点，并验证本地 pick 与运行队列锁计数器前进、竞争从不超过获取数、并行峰值已初始化且调度器违规保持为零。现有的 SMP 迁移/抢占测试以及累积的生命周期、futex、进程、信号、超时、I/O、VFS 和 socket 测试继续不变地运行。
+
+---
+
+## 2026-10-05 追加：proc_lock 全面退场（lock-serialization-split §1）
+
+上一节的"延迟拆分"结论只对 `proc_lock` 仍然存在时成立。本轮
+（`docs/roadmap/lock-serialization-split.md` §1）把那条结论推翻了：切换发布
+路径上的全局锁被拆成三把锁，`proc_lock` 这个符号从树上消失。
+
+### 锁归属
+
+| 锁 | 覆盖 |
+|---|---|
+| `tasklist_lock`（新，取代 `proc_lock`） | 全局任务表成员关系 `task_list_head/tail`、`->all_next/->all_prev`，以及 parent/children/sibling 链与线程组链。**不保护调度状态。** |
+| `task->park_lock` | 该任务自己的 `->state` / `->park_state` / `->wait_seq` / `->wake_reason` / `->on_cpu`，以及随任务走的 per-task 字段（`->mm`、`->files`、`->cred`、ptrace 状态、`->pdeathsig`、`->waiting_for_child`）。 |
+| 每 CPU `sched_runq[cpu].lock` | `->on_rq` / `->cpu_id` / `->sched_level` / `->ready_since`，并作为发布动作写 `->dispatching` / `->owner_cpu`（锁外只允许原子读）。 |
+| 每 CPU `g_cpu_switch_out[cpu]`（新） | outgoing 槽位；严格在 `park_lock` 之外，不参与 task 地址序。 |
+
+锁序：`tasklist_lock -> park_lock -> runq_lock`；两把 task 锁按 task 指针升序
+加锁、逆序释放（`proc_lock_two_tasks()`）。反向（`runq_lock -> park_lock`）
+被禁止：pick 侧绝不取 `park_lock`。
+
+### 覆盖范围
+
+`proc_lock` 的 265 处文本引用、73 个 `spin_lock_irqsave(&proc_lock)` 获取点
+全部转换完毕。设计 §1.4 的降级许可**未被使用**：A / A' 两类（切换发布与
+outgoing 收尾）按设计完整实现，INV-P4a 的断言范围未放宽、未删除。
+
+### 已知的行为性弱化（已在 impl-notes §4 记录）
+
+拆除 `proc_lock` 之后，几处跨任务的一次性判断不再是一个原子读：
+
+- `proc_exit()` 解析父任务并采样其存活状态，与发布 ZOMBIE 分成了两个临界区；
+- `sched_reap_zombies()` 对同一候选先读 `->state`、再单独判定线程组是否已死；
+- `proc_debug_attach/seize()` 采样父任务存活与设置 `->ppid` 分为两段。
+
+这些窗口原先靠 `proc_lock` 关闭，现在靠 per-task 锁的逐位检查收敛；影响面是
+"父任务恰好在同一瞬间退出的那一轮"，最坏结果是一次多余的 reparent 或一次
+延迟的 reap 判定，不是状态撕裂。
+
+### 门禁
+
+`check-process-lock-split-boundary` 按设计 §1.5 演进：原有的 7 条断言一条未删，
+其中一条正向断言被替换（理由见 `tools/gates.toml` 该处的注释与 impl-notes
+§3 A 类）；新增 `SCHED_SWITCH_PATH_BEGIN/END` 负向断言（覆盖
+`context_switch_locked` / `context_switch` / `sched`）、`kernel/proc/current.c`
+的 `proc_switch_complete*` 负向断言、pick 区间"不得取 `->park_lock`"负向断言，
+以及 `tasklist_lock` 存在且已注册进竞争计数器的两条正向断言。

@@ -297,14 +297,16 @@ void fdtable_share(task_t *dst, const task_t *src)
      * teardown that fdtable_close_all() performs. */
     if (dst->files)
         fdtable_release_files(dst);
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* ->files is published with the task's other per-task state, so the
+     * install is done under the target's park_lock. */
+    uint64_t flags = spin_lock_irqsave(&dst->park_lock);
     dst->files = (struct files_struct *)src->files;
     if (dst->files) {
         files_struct_t *files = (files_struct_t *)dst->files;
         refcount_inc(&files->refcount);
         files->owners++;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&dst->park_lock, flags);
 }
 
 int fdtable_unshare(task_t *task)
@@ -314,9 +316,9 @@ int fdtable_unshare(task_t *task)
     files_struct_t *old = fdtable_files(task);
     if (!old)
         return -ENOMEM;
-    uint64_t owner_flags = spin_lock_irqsave(&proc_lock);
+    uint64_t owner_flags = spin_lock_irqsave(&old->lock);
     int shared = old->owners > 1;
-    spin_unlock_irqrestore(&proc_lock, owner_flags);
+    spin_unlock_irqrestore(&old->lock, owner_flags);
     if (!shared)
         return 0;
 
@@ -344,10 +346,14 @@ int fdtable_unshare(task_t *task)
     }
     files->next_fd = old->next_fd;
     spin_unlock_irqrestore(&old->lock, flags);
-    uint64_t task_flags = spin_lock_irqsave(&proc_lock);
+    /* The swap is the task's own park_lock critical section; the owner count
+     * on the retired table stays under that table's lock. */
+    uint64_t task_flags = spin_lock_irqsave(&task->park_lock);
     task->files = files;
+    spin_unlock_irqrestore(&task->park_lock, task_flags);
+    uint64_t old_flags = spin_lock_irqsave(&old->lock);
     old->owners--;
-    spin_unlock_irqrestore(&proc_lock, task_flags);
+    spin_unlock_irqrestore(&old->lock, old_flags);
     fdtable_files_put(old);
     return 0;
 }
@@ -356,7 +362,7 @@ void fdtable_release_files(task_t *task)
 {
     if (!task || !task->files)
         return;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    uint64_t flags = spin_lock_irqsave(&task->park_lock);
     files_struct_t *files = (files_struct_t *)task->files;
     task->files = NULL;
     if (files) {
@@ -364,7 +370,7 @@ void fdtable_release_files(task_t *task)
         if (files->owners == 0)
             files->release_owner_pid = task->pid;
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&task->park_lock, flags);
     fdtable_files_put(files);
 }
 
@@ -486,11 +492,11 @@ struct vfile *fdtable_get_file_ref(task_t *task, int fd, int *cloexec_out)
 
     files_struct_t *files;
     if (task) {
-        uint64_t task_flags = spin_lock_irqsave(&proc_lock);
+        uint64_t task_flags = spin_lock_irqsave(&task->park_lock);
         files = (files_struct_t *)task->files;
         if (files && !refcount_inc_not_zero(&files->refcount))
             files = NULL;
-        spin_unlock_irqrestore(&proc_lock, task_flags);
+        spin_unlock_irqrestore(&task->park_lock, task_flags);
     } else {
         files = fdtable_boot(); /* pinned: no refcount games */
     }
@@ -698,16 +704,23 @@ int fdtable_set_cloexec(task_t *task, int fd, int cloexec)
 size_t fdtable_open_fd_count(void)
 {
     size_t count = 0;
-    uint64_t flags = spin_lock_irqsave(&proc_lock);
+    /* E2: tasklist_lock walks the global list and each task's ->files is
+     * park_lock-owned; the table's own lock is taken nested inside
+     * (tasklist_lock -> park_lock -> files->lock). */
+    uint64_t flags = spin_lock_irqsave(&tasklist_lock);
     for (task_t *t = proc_first_task_locked(); t;
          t = proc_next_task_locked(t)) {
+        uint64_t tf = spin_lock_irqsave(&t->park_lock);
         files_struct_t *files = (files_struct_t *)t->files;
-        if (!files)
-            continue;
-        for (int word = 0; word < FDTABLE_WORDS; word++)
-            count += (size_t)__builtin_popcountll(files->open_mask[word]);
+        if (files) {
+            uint64_t ff = spin_lock_irqsave(&files->lock);
+            for (int word = 0; word < FDTABLE_WORDS; word++)
+                count += (size_t)__builtin_popcountll(files->open_mask[word]);
+            spin_unlock_irqrestore(&files->lock, ff);
+        }
+        spin_unlock_irqrestore(&t->park_lock, tf);
     }
-    spin_unlock_irqrestore(&proc_lock, flags);
+    spin_unlock_irqrestore(&tasklist_lock, flags);
     for (int word = 0; word < FDTABLE_WORDS; word++)
         count += (size_t)__builtin_popcountll(fdtable_boot_files.open_mask[word]);
     return count;

@@ -1253,16 +1253,23 @@ int64_t sys_prctl(int op, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4) {
             return -ESRCH;
         if (a1 >= 64)
             return -EINVAL;
-        uint64_t pf = spin_lock_irqsave(&proc_lock);
+        /* The parent's state is sampled in its own critical section before
+         * the target's lock is taken, so the two park_locks are never nested
+         * (INV-P3).  ->pdeathsig is park_lock-owned and paired with the claim
+         * proc_reparent_children() makes under the same lock. */
         task_t *parent = t->parent;
-        int parent_dead = (!parent || parent->state == PROC_ZOMBIE ||
-                           parent->state == PROC_UNUSED);
-        if (parent_dead) {
-            spin_unlock_irqrestore(&proc_lock, pf);
-            return -ESRCH;
+        int parent_dead = 1;
+        if (parent) {
+            uint64_t ppf = spin_lock_irqsave(&parent->park_lock);
+            int pstate = parent->state;
+            spin_unlock_irqrestore(&parent->park_lock, ppf);
+            parent_dead = (pstate == PROC_ZOMBIE || pstate == PROC_UNUSED);
         }
+        if (parent_dead)
+            return -ESRCH;
+        uint64_t pf = spin_lock_irqsave(&t->park_lock);
         t->pdeathsig = (int)a1;
-        spin_unlock_irqrestore(&proc_lock, pf);
+        spin_unlock_irqrestore(&t->park_lock, pf);
         return 0;
     }
     if (op == PR_GET_PDEATHSIG) {
