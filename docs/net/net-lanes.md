@@ -213,6 +213,37 @@ lwIP 2.2 已有 `tcp_active_pcbs_changed`（`tcp.c:187`）这个代际标志，�
 替代遍历"在上游被认可。顺带一提：`kernel/net/netfilter.c` 的文件头曾**声称**有同款
 机制而代码里没有，已在另一提交中补上。
 
+### 头文件声明审计：第二例，以及一次把自己当骗子的审计
+
+上面那处之后又做了一次同类审计，范围是 `kernel/include/net/netfilter.h` 的文件头
+（conntrack + NAT 那一节）。结论记在这里，因为**方法上的教训比结论更值得留**。
+
+头里几条机制性声明，逐条对代码：
+
+| 声明 | 审计结果 |
+|---|---|
+| "conntrack ... **Always on**" | **不成立**。`/proc/a20/netfilter` 有 `cton`/`ctoff` 动词，`netfilter_conntrack_set_enabled()` 门控插入。实际语义是"默认开、运行时可关"，且关只停**新**条目、保留既有条目，以免拆掉正在用的 NAT 绑定。已改。 |
+| hook 在 `a20_lwip_process_netif_rx_tx_locked` / `a20_lwip_linkoutput` 下调用 | 成立。`lwip_stack.c:542` / `:232`，函数边界已核。 |
+| 清扫从 `a20_lwip_poll_timers_locked()` 调用 | 成立。`lwip_stack.c:651`。 |
+| "/proc 读者取同一把锁而非 seqlock" | **成立，但审计者一度判错**。 |
+
+最后一条是这次审计真正的收获。`netfilter_format()` 在 `netfilter.c:641` 已经取了
+`g_lwip_lock` 再调 `netfilter_nat_format()`，所以 connwalk 并没有漏锁。但当初那次
+grep 只覆盖了 `lwip_stack.c` 和 `procfs.c`，没覆盖 `netfilter.c`，读出来像"缺一把锁"，
+于是加了一把。加锁的后果是自死锁——`spin_lock_irqsave()` 不可重入。
+
+它**不像自死锁**：单 CPU 构建上表现为 `netfilter_nat_format` 里 owner=-1、spins 20 亿的
+`[LOCK-STALL]`，因为 `g_lwip_lock` 的 owner 字段只在 `CONFIG_NET_LOCK_ASSERT=1` 下维护，
+否则恒为陈旧值，看起来就是"有别人拿着"。真正定位靠的是 trylock 探针：62 次渲染
+**全部**获取失败，而单 CPU 上 trylock 失败只可能是当前 CPU 已经持有。教训是：怀疑锁
+问题先量 reentrancy，别先读 owner 字段——在这个构建里 `owner=-1` 不是信息。
+
+对 lane 改造的净影响：conntrack 是**必须保持全局**的状态（见下节表格），所以 lane 拆分
+时它不参与分桶，`g_lwip_lock` 拆成 per-lane 之后 conntrack 会成为需要单独处理的那个
+全局点。这条已写进
+[network-lock-contract.md](./network-lock-contract.md) 的理由里——不另设专用锁，正是为了
+不让它在 lane 化之后顶替 `g_lwip_lock` 成为新的串行点。
+
 ## 缓冲改造的前提：callback 里不能分配
 
 `net_bh_ring` 目前把 `net_bh_event_t` **按值内嵌**，所以每 socket 的 staging 成本是
@@ -933,9 +964,11 @@ bottom-half 需要 ring 已排空，而只在读者唤醒后才跑的 poll 在�
 | 路由 / netif 列表 | seqlock | 同上 |
 | socket registry | 分片哈希 + 引用计数 | 冷路径 |
 | bind/listen/accept/close 等 PCB 冷路径 | 单把 `g_netctl_lock` | 频率是连接率级，不是包率级 |
+| conntrack 表 `g_ct[]` | 保持全局，`g_lwip_lock` 保护 | 五元组与 lane 无关，且 NAT 绑定是**流级**的：把表按 lane 切开，一条跨 lane 的流会分裂成两条互不知情的记录，回程方向就找不到入口 |
 
-现有契约里 `g_lwip_lock` 与 `g_net_lock` **从不同时持有**，所以新层级是一张白纸，
-不存在需要拆解的既有嵌套。
+conntrack 那行是本表里唯一"因为语义而不能分桶"的条目。NAT 规则表反而可以按 lane 切
+（规则匹配的是报文头，不依赖流状态），但 conntrack 不行——理由写在
+[network-lock-contract.md](./network-lock-contract.md) 的 "conntrack 与 NAT 用哪把锁" 一节。
 
 ## 观测
 
