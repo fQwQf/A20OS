@@ -448,6 +448,14 @@ strength of a boilerplate note.
 | `a20_envelope_revoke` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: revoke an envelope, with optional KILL_ON_EXPIRE of the hosted process |
 | `a20_envelope_stats` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: query envelope budget and usage counters |
 | `a20_envelope_audit` | a20-envelope | `full` | `smoke-envelope` | A20OS extension: run the runtime invariant audit over envelope state (E8) |
+| `hyp_vm_create` | hypervisor | `full` | `smoke-hyp-selftest` | A20OS extension: create a stage-2 address space; -EOPNOTSUPP when the CPU has no H extension |
+| `hyp_vm_load` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: copy bytes into guest RAM, one host page per stage-2 mapping |
+| `hyp_vcpu_create` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: create a vcpu pinned to an entry GPA |
+| `hyp_vcpu_run` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: run the guest to a terminal exit and return the reason |
+| `hyp_vm_destroy` | hypervisor | `full` | `smoke-hyp-vcpu` | A20OS extension: drop the caller's own VM reference |
+| `hyp_vcpu_set_boot` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: set the guest entry registers a0=hartid, a1=DTB GPA |
+| `hyp_vm_set_marker` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: name the guest console substring (max 32 bytes) that proves the guest reached its own banner |
+| `hyp_vm_status` | hypervisor | `full` | `smoke-hyp-a20os` | A20OS extension: post-run exit reason and fault detail, marker_seen, guest console byte count |
 <!-- LINUX_SYSCALL_COVERAGE_END -->
 
 ## Placeholder Resolution Record

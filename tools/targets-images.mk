@@ -1,5 +1,17 @@
 
-$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
+# The kernel the hypervisor guest smoke boots, carried on the image as
+# /boot/guest-kernel.elf.  Defined before the FAT32 rule because a
+# prerequisite list is expanded when the rule is read, and the rule below needs
+# it as one.  riscv64 only: it is the only architecture whose vcpu slice has a
+# stage-2 to load it into.
+GUEST_KERNEL_ELF := $(BUILD_DIR)/kernel-nosyms.elf
+ifeq ($(ARCH),riscv64)
+GUEST_KERNEL_DEP := $(GUEST_KERNEL_ELF)
+else
+GUEST_KERNEL_DEP :=
+endif
+
+$(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP) $(GUEST_KERNEL_DEP)
 	@echo "Building FAT32 image..."
 	@$(PYTHON) tools/img.py fat32 \
 		--fat32-img "$(FAT32_IMG)" --fat32-mb "$(FAT32_IMAGE_MB)" \
@@ -9,6 +21,7 @@ $(FAT32_IMG): $(USER_BUILD_STAMP) $(NATIVE_BUILD_STAMP)
 		--libc "$(if $(wildcard user/external/musl/build-$(USER_VARIANT)/lib/libc.so),user/external/musl/build-$(USER_VARIANT)/lib/libc.so,)" \
 		--libgcc "$(LIBGCC_S_ARCH)" \
 		--protocols "$(PROTOCOLS_LINES)" \
+		--guest-kernel "$(GUEST_KERNEL_ELF)" \
 		--os-release 'ID=A20OS\nNAME="A20OS"\nPRETTY_NAME="A20OS"\nVERSION="0.2"\nVERSION_ID="0.2"\n' \
 		--test-txt 'Hello from A20OS FAT32!\n'
 
@@ -139,7 +152,7 @@ $(VBOX_AARCH64_TEXT_IMG): $(VBOX_AARCH64_EFI) $(FAT32_IMG) tools/mk_uefi_fat_ima
 # linkable.
 KALLSYMS_SRC      := $(BUILD_DIR)/kallsyms/kallsyms.c
 KALLSYMS_OBJ      := $(BUILD_DIR)/kallsyms/kallsyms.o
-KERNEL_NOSYMS_ELF := $(BUILD_DIR)/kernel-nosyms.elf
+KERNEL_NOSYMS_ELF := $(GUEST_KERNEL_ELF)
 
 $(KERNEL_NOSYMS_ELF): $(KERNEL_OBJ) $(ASM_OBJ) $(LDSCRIPT)
 	@mkdir -p $(dir $@)

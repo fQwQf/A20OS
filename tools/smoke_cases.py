@@ -536,6 +536,46 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-hyp-vcpu: PASS; log saved to $log',
     },
+    # A20OS as a guest: /hyp_boot reads the kernel ELF off the image
+    # (/boot/guest-kernel.elf), lays its PT_LOAD segments into guest RAM at
+    # their link-time physical addresses, hands the vcpu a minimal FDT and runs
+    # it.  PASS is the guest's own banner counted by the device model
+    # (marker_seen), not a parse of the interleaved console: host and guest
+    # share one UART, and only the marker counter separates them.
+    #
+    # forbid deliberately does NOT list PANIC.  A guest with no block device
+    # cannot mount a rootfs and panics in init_kthread ("init: no init program
+    # found", kernel/main.c) -- an expected arrival, not a defect -- and its
+    # panic text is byte-identical to the host's, so a PANIC forbid would go red
+    # on a correct run.  A host that actually dies is caught by the missing
+    # 'HYP_A20OS: PASS' expectation instead, which the verdict line cannot
+    # produce.
+    'smoke-hyp-a20os': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/hyp-a20os-riscv64.log',
+        'stdin': {'kind': 'sendline', 'expect': '# ',
+                  'lines': ['hyp_boot', 'poweroff']},
+        # 300s, not 60s: every guest console byte, page-table walk and second
+        # stage fault traps through the host, so a guest boot is orders of
+        # magnitude slower than a host boot of the same kernel.
+        'timeout': '300s',
+        'qemu': 'qemu-system-riscv64',
+        # Same argv as smoke-hyp-vcpu; -cpu rv64,h=true is load-bearing (the
+        # default rv64 CPU has no H extension and hyp_supported() would refuse
+        # every call, making this gate pass or fail against nothing).
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-cpu', 'rv64,h=true', '-global', 'virtio-mmio.force-legacy=false', '-drive', 'file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0', '-netdev', 'user,id=net', '-device', 'virtio-net-device,netdev=net,bus=virtio-mmio-bus.4', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf'],
+        'expect': [
+            # marker_seen was non-zero: the guest reached its own banner.  The
+            # marker counter covers guest console bytes only, so this cannot be
+            # satisfied by the host's identical "A20OS Kernel" line.
+            'HYP_A20OS: PASS',
+        ],
+        'forbid': ['LOCK-STALL', 'MCS DEADLOCK', 'HYP_A20OS: FAIL'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-hyp-a20os: PASS; log saved to $log',
+    },
     'smoke-mmprobe': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],

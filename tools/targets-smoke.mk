@@ -163,6 +163,13 @@ smoke-hyp-selftest:
 smoke-hyp-vcpu:
 	$(PYTHON) tools/smoke.py smoke-hyp-vcpu
 
+# A20OS as a guest: /hyp_boot boots the kernel carried on the image as
+# /boot/guest-kernel.elf and the gate passes when the guest's own banner was
+# seen on the guest console.  Needs -cpu rv64,h=true, which the case argv
+# carries, and 300s, because every guest access traps through the host.
+smoke-hyp-a20os:
+	$(PYTHON) tools/smoke.py smoke-hyp-a20os
+
 smoke-mmprobe:
 	$(PYTHON) tools/smoke.py smoke-mmprobe
 

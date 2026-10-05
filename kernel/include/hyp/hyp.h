@@ -34,6 +34,10 @@
  * see kernel/arch/riscv64/hyp/.
  */
 
+/* Guest console marker, hyp_vcpu.h's bound.  The device model keeps the bytes
+ * in the VM so the match state travels with the object the host sets up. */
+#define HYP_VM_MARKER_MAX 32
+
 typedef struct hyp_vm {
     uint32_t magic;
 #define HYP_VM_MAGIC 0x48594d56 /* 'HYMV' */
@@ -41,6 +45,20 @@ typedef struct hyp_vm {
     uint16_t  vmid;         /* hgatp.VMID; TLB tag for this address space */
     uint64_t  mem_size;     /* guest RAM the VM is provisioned for */
     int       refcount;
+
+    /* ---- v2 (hyp_vcpu.h): on-demand RAM window and console marker ----
+     * Appended, never in front of the fields above: hyp_vcpu_asm.S pins no
+     * offset into hyp_vm_t, but a stage-2 entry address derived from any of
+     * the first five must not move.  marker_len / marker_pos / marker_seen /
+     * console_bytes are touched from the guest trap path (no lock context) and
+     * are therefore only ever reached through __atomic ops; see hyp_dev.c. */
+    uint64_t  ram_base;       /* first GPA hyp_ram_fill() will serve */
+    uint64_t  ram_size;       /* window length in bytes */
+    uint64_t  console_bytes;  /* guest UART bytes since VM creation */
+    uint32_t  marker_len;     /* valid bytes in marker[]; release/acquire */
+    uint32_t  marker_pos;     /* sliding-match cursor into marker[] */
+    int       marker_seen;    /* 1 once the marker matched in full */
+    char      marker[HYP_VM_MARKER_MAX];
 } hyp_vm_t;
 
 /* Feature probe: 1 when the CPU implements the virtualization extension and
@@ -66,6 +84,12 @@ paddr_t hyp_s2_translate(hyp_vm_t *vm, uint64_t gpa);
 /* Audit the stage-2 tree against its metadata (mm_s2_audit) plus the
  * frame-flag cross-check.  Returns 0 when clean. */
 int  hyp_s2_audit(hyp_vm_t *vm, mm_pt_audit_report_t *out);
+
+/* 1 when gpa is inside the VM's on-demand RAM window (hyp_vm_set_ram, set by
+ * hyp_vm_create to [0x80000000, mem_size)).  The device model asks this so a
+ * GPA the RAM path claims is never answered as an ignored MMIO access: a fill
+ * that failed must stay a visible guest fault, not a silent drop. */
+int  hyp_vm_ram_contains(hyp_vm_t *vm, uint64_t gpa);
 
 /* Kernel-side selftest, run by reading /proc/a20/hyp_selftest.  Creates a
  * VM, maps and verifies pages, audits, unmaps, destroys, and writes one

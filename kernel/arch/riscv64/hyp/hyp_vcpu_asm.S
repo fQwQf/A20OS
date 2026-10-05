@@ -30,9 +30,15 @@
 
     .set HYP_FRAME_SIZE, 70*8
 
-    .set HYP_VCPU_REGS_OFF, HYP_ASM_VCPU_REGS_OFF
-    .set HYP_VCPU_PC_OFF,   HYP_ASM_VCPU_PC_OFF
-    .set HYP_VCPU_ARCH_OFF, HYP_ASM_VCPU_ARCH_OFF
+    .set HYP_VCPU_REGS_OFF,  HYP_ASM_VCPU_REGS_OFF
+    .set HYP_VCPU_PC_OFF,    HYP_ASM_VCPU_PC_OFF
+    .set HYP_VCPU_ARCH_OFF,  HYP_ASM_VCPU_ARCH_OFF
+    .set HYP_VCPU_TRAMP_OFF, HYP_ASM_VCPU_TRAMP_OFF
+
+    .set HYP_TRAMP_HOST_SP,  HYP_ASM_TRAMP_HOST_SP
+    .set HYP_TRAMP_HOST_TP,  HYP_ASM_TRAMP_HOST_TP
+    .set HYP_TRAMP_GUEST_SP, HYP_ASM_TRAMP_GUEST_SP
+    .set HYP_TRAMP_X0,       HYP_ASM_TRAMP_X0
 
 /*
  * hstatus field positions (QEMU target/riscv cpu_bits.h HSTATUS_*, which the
@@ -41,9 +47,10 @@
     .set HSTATUS_SPV,  (1 << 7)
     .set HSTATUS_SPVP, (1 << 8)
     .set HSTATUS_HU,   (1 << 9)
+    .set HSTATUS_VIE,  (1 << 10)
     .set HSTATUS_VTVM, (1 << 20)
-    .set HSTATUS_GUEST_ON,  (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM)
-    .set HSTATUS_GUEST_OFF, (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_HU)
+    .set HSTATUS_GUEST_ON,  (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_VIE)
+    .set HSTATUS_GUEST_OFF, (HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTVM | HSTATUS_VIE | HSTATUS_HU)
 
     .equ SSTATUS_SIE,  (1 << 1)
     .equ SSTATUS_SPIE, (1 << 5)
@@ -53,29 +60,98 @@
 .macro LOAD_GP n
     ld x\n, \n*8(sp)
 .endm
+.macro BANK_GP n
+    sd x\n, (HYP_TRAMP_X0 + \n)*8(sp)
+.endm
 
     .section .text
 
 /* ------------------------------------------------------------------ */
-/* Guest trap prelude.  Installed in stvec by the enter path; the run    */
-/* loop's exit path puts __trap_from_kernel back.                        */
+/* Guest trap prelude.  Installed in stvec by the enter path;            */
+/* hyp_arch_guest_trap() takes stvec back for the C half and puts this   */
+/* one back on the resume path.                                         */
 /* ------------------------------------------------------------------ */
     .align 2
     .globl hyp_guest_trap_entry
     .type hyp_guest_trap_entry, @function
 hyp_guest_trap_entry:
-    /* Only a trap taken out of a running guest reaches here, so the live
-     * registers are the guest's and g_hyp_arch_vcpu is set.  The NULL test is
-     * belt and braces for the window where stvec is still this vector but
-     * the guest has already been torn down. */
-    la      t0, g_hyp_arch_vcpu
-    ld      t0, 0(t0)
-    beqz    t0, .Lhyp_guest_into_kernel
-    sd      sp, HYP_VCPU_REGS_OFF + 2*8(t0)
-    sd      tp, HYP_VCPU_REGS_OFF + 4*8(t0)
-    ld      sp, HYP_VCPU_ARCH_OFF + 1*8(t0)
-    ld      tp, HYP_VCPU_ARCH_OFF + 3*8(t0)
-.Lhyp_guest_into_kernel:
+    /* A trap out of VS-mode arrives with the GUEST's live registers and, just
+     * as importantly, on the GUEST's sp.  The ordinary kernel entry cannot be
+     * used directly: it stores through tp (the sp guard) before any C runs and
+     * it builds its frame on the current stack, so both have to be the host's
+     * first.  This prelude is what makes them so.
+     *
+     * The shape is KVM-riscv's: the bank lives in host memory ON the vcpu, and
+     * sscratch carries its address, so no GPR is spent reaching it.  That
+     * matters twice over, and the second time is fatal:
+     *
+     *   - Reaching the bank through a GPR would clobber that register before it
+     *     could be banked, which is how the earlier t0-based prelude lost the
+     *     guest's t0 for the frame (a defect: hyp_decode_guest_access() takes
+     *     its base operand from vcpu->regs[rs1] and rs1 is t0 constantly).
+     *
+     *   - The bank cannot be reached through the guest's sp either.  A20OS sets
+     *     sp to _stack_end (inside .bss) and then clears .bss, so the guest's
+     *     very first fault is a store to a page the second stage has never
+     *     seen, with sp pointing into that same unmapped .bss.  A prelude that
+     *     stashed anything at 0(sp-8) therefore faults on its own first
+     *     instruction, is re-entered through stvec, faults identically, and
+     *     spins forever without the trap ever reaching __trap_from_kernel --
+     *     the guest produces no output and the dispatcher sees no traps at all
+     *     (smoke log hyp-a20os-riscv64.log: "HYP_A20OS: running" then nothing,
+     *     exit 124).
+     *
+     * So the sequence spends no register and touches no guest memory until
+     * every guest register is already in host memory:
+     *
+     *   1. SIE off.  A CSR-immediate, so it costs nothing, and it closes the
+     *      window in which a nested trap would bank the half-banked state
+     *      again.  From here the guest's GPRs only get better, never worse.
+     *   2. sp <- &tramp, sscratch <- the guest's sp.  The one exchange that
+     *      gets us off the guest's stack without a scratch register.
+     *   3. bank x1 and x3..x31.  sp IS the bank here, so these are plain
+     *      sp-relative stores and x2 is simply absent from the range: it went
+     *      into sscratch and is banked in step 4.
+     *   4. the guest's sp out of sscratch into its own bank slot.  t0 is free
+     *      for the rest of this sequence -- it was banked in step 3.
+     *   5. sscratch reloaded with the bank address.  From here a nested trap
+     *      re-entering this prelude is idempotent rather than fatal: it sees
+     *      sscratch already pointing at the bank.  Note what csrrw leaves in
+     *      its rd: the OLD sscratch, i.e. the guest's sp, NOT the bank.  So
+     *      step 6 addresses through sp, which still holds the bank address,
+     *      and not through t0.
+     *   6. the host's sp and tp out of the bank, both addressed through sp.
+     *      tp is not in the bank of guest registers because
+     *      __trap_from_kernel needs the HOST's: its first instruction is the
+     *      sp guard, which does `sd sp, 16(tp)` and reads back through tp
+     *      before anything else runs.  `ld sp, 0(sp)` reads its own address
+     *      before writing sp, so it is ordered after the tp load.
+     *   7. stvec to the ordinary kernel entry.  From here on the live registers
+     *      are the HOST's and sscratch is the host's own, so a trap arriving
+     *      anywhere in the frame build or in the C dispatcher must NOT be
+     *      preluded again -- it would bank host registers over the guest's and
+     *      resume the guest from the wreckage.  Put back by
+     *      hyp_arch_guest_trap() on the resume path, which is where the guest is
+     *      live again.
+     *   8. the ordinary kernel entry, untouched.  The frame it builds is a
+     *      normal trap frame, and hyp_vcpu_to_frame() restores the guest image
+     *      into it before the sret.
+     */
+    csrci   sstatus, SSTATUS_SIE
+    csrrw   sp, sscratch, sp
+    sd      x1, (HYP_TRAMP_X0 + 1)*8(sp)
+    .set n, 3
+    .rept 29
+    BANK_GP %n
+    .set n, n+1
+    .endr
+    csrr    t0, sscratch
+    sd      t0, HYP_TRAMP_GUEST_SP*8(sp)
+    csrrw   t0, sscratch, sp
+    ld      tp, HYP_TRAMP_HOST_TP*8(sp)
+    ld      sp, HYP_TRAMP_HOST_SP*8(sp)
+    la      t0, __trap_from_kernel
+    csrw    stvec, t0
     j       __trap_from_kernel
     .size hyp_guest_trap_entry, . - hyp_guest_trap_entry
 
@@ -114,10 +190,34 @@ hyp_arch_vcpu_enter:
     sd      s10, HYP_VCPU_ARCH_OFF + 21*8(a0)
     sd      s11, HYP_VCPU_ARCH_OFF + 22*8(a0)
 
-    /* Publish the vcpu for the guest trap prelude, which has to reach it
-     * before any C runs.  Cleared by hyp_arch_guest_trap() on the way out. */
+    /* Publish the vcpu for the C half's "is this frame a guest" path.  The
+     * prelude no longer reads it -- it finds its bank through sscratch -- but
+     * it is the arch half's statement about which vcpu owns the trap path, and
+     * hyp_arch_vcpu_exit() clears it so nothing can keep naming a vcpu that is
+     * being torn down. */
     la      t0, g_hyp_arch_vcpu
     sd      a0, 0(t0)
+
+    /* Arm the guest trap channel.  sscratch is how hyp_guest_trap_entry finds
+     * the bank without spending a register on the address; tramp[HOST_SP] and
+     * tramp[HOST_TP] are the host's sp and tp, which it reloads after the
+     * guest's registers are already banked.  Both are the values saved just
+     * above, i.e. the host stack this function was entered on -- the stack the
+     * frame it is about to build below sp sits on top of, and the one a guest
+     * trap must build its frame on.
+     *
+     * sscratch survives the sret into the guest.  QEMU's register swap
+     * (target/riscv/cpu_helper.c, riscv_cpu_swap_hypervisor_regs) parks the
+     * host's sscratch in sscratch_hs on the way in and brings it back on the
+     * way out, so the guest runs with sscratch = vsscratch (its own) and a
+     * guest trap always finds the bank here again -- the guest cannot clobber
+     * this channel even by writing sscratch itself.  hyp_arch_guest_trap()
+     * re-arms it on every resume anyway, because the C half runs between the
+     * two and only the C half knows the frame is on its way out. */
+    addi    t0, a0, HYP_VCPU_TRAMP_OFF
+    sd      sp, HYP_TRAMP_HOST_SP*8(t0)
+    sd      tp, HYP_TRAMP_HOST_TP*8(t0)
+    csrw    sscratch, t0
 
     /* The guest image goes into a real trap frame on the kernel stack, so the
      * run loop's fixups (sepc past an ecall, a rewritten GPR) happen in the
@@ -164,7 +264,10 @@ hyp_arch_vcpu_enter:
     /* hstatus for the guest.  Only the VS-facing permission bits are
      * touched; hstatus.SIE and everything else the host owns is left alone,
      * because sret does not restore SPV (hardware cleared it on the last
-     * trap-return) and that is the one field enter has to re-assert. */
+     * trap-return) and that is the one field enter has to re-assert.  VIE is
+     * re-asserted here for the same reason of not trusting a caller's earlier
+     * hstatus write: it is what the spec uses as the guest's interrupt
+     * enable, and hyp_arch_vcpu_setup() programs it too. */
     csrr    t0, hstatus
     li      t1, HSTATUS_GUEST_ON
     or      t0, t0, t1
@@ -175,17 +278,18 @@ hyp_arch_vcpu_enter:
 
     /* Guest exceptions and host interrupts both land on the prelude, which
      * joins the ordinary kernel entry.  A host interrupt is delivered to HS
-     * because hideleg is zero, so every guest-external interrupt traps here
-     * instead of being handled by the guest; the frame's sstatus carries
-     * SIE, which is what lets the guest's own interrupts pending be a
-     * separate question (nothing is delegated either way).  No hstatus bit
-     * gates this on the platform this slice is measured on: QEMU's
-     * VS-to-HS path takes hsie = 1 unconditionally while V=1
-     * (target/riscv/cpu_helper.c, riscv_cpu_pending_to_irq) and has no
-     * interrupt-enable field in hstatus at all -- bit 5 is VSBE there.  An
-     * earlier version of this comment claimed "hstatus.VIE set above"; no
-     * such field was ever programmed here, and none is, so do not read this
-     * as depending on one.
+     * because hideleg leaves every H-level interrupt bit with the
+     * hypervisor, so those still trap here instead of being handled by the
+     * guest; the frame's sstatus carries SIE, which is what lets the guest's
+     * own interrupts pending be a separate question (they are delegated).
+     * hstatus.VIE is programmed above: on the platform this slice is measured
+     * on it is belt and braces, because QEMU's VS-to-HS path takes hsie = 1
+     * unconditionally while V=1 (target/riscv/cpu_helper.c,
+     * riscv_cpu_pending_to_irq) and has no interrupt-enable field in hstatus at
+     * all -- bit 5 is VSBE there, and bit 10 is simply unimplemented (the
+     * HSTATUS_* defines in target/riscv/cpu_bits.h stop at SPV/SPVP/HU).  The
+     * field is written because it is what the spec says gates VS interrupts,
+     * not because this platform needs it.
      *
      * From here to the sret there is no window for a host trap: hstatus.SPV is
      * already set, so anything that arrived now would be taken for a guest trap
