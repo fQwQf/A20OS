@@ -254,6 +254,71 @@ workload, upper limits left as configured
 测试，不会因缺证据而静默跳过。实测：tier 1 输出上面的 SKIP（`max=8`），tier 2 仍是
 `NET_STRESS_TEST: PASS (4 parallel transfers, 4 rounds x 1048576 B)`（`max=1024`）。
 
+### 嵌入式档的账全部进了 profile，并且被断言钉住 —— 代价是能力，本节列出代价（2026-10）
+
+上一条之前的两条已经把静态数组（`g_pkt_ring` / `g_netif_state`）纳入档位，但当时留了一句
+"剩下的账全在 profile 之内、可以按档位调的量上了"，并且没有做。本节把它做掉：档位现在
+有一个自己声明、自己断言、自己运行期可读的总账，代价是**明确的协议/并发能力削减**，
+下面逐项列出。
+
+**总账（riscv64 LP64 实测，`make dev-build NET_PROFILE=1`）**：
+
+| 项 | 字节 | 断言位置 |
+|---|---|---|
+| socket 表 `8 × sizeof(net_socket_t)` | **19,520** | `kernel/net/socket_internal.h:457`，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB（余 960 B） |
+| 帧数组（netif 状态 + AF_PACKET 环） | 4,100 | `kernel/net/socket_packet.c` 与 `kernel/net/lwip_stack.c` 各自的 `sizeof()` |
+| filter 表（conntrack + NAT 规则） | 3,072 | `kernel/net/netfilter_nat.c:486`，对上 `NET_PROFILE_FILTER_BUDGET` = 3,328 B |
+| lwIP 堆 `MEM_SIZE` | 16,384 | `memp/mem.c` 里就是这么大一个静态数组 |
+| 合计 | **约 42.6 KiB** | 上限 `NET_PROFILE_TOTAL_BUDGET` = 44 KiB（`kernel/net/socket_internal.h:462` 的四项求和断言） |
+
+运行期可读：`/proc/a20/netmem` 在池表之后多两行（`kernel/net/lwip_stack.c:1947`）。EMBEDDED
+档实测：
+
+```
+static .bss (not from the heap): netif_state=1152 netif=368 pkt_ring=2580 total=4100
+socket table: per_socket=2440 slots=8 bh_ring=2 inline_payload=256 total=19520 budget=20480
+```
+
+只有 EMBEDDED 档定义了 `NET_PROFILE_SOCKET_BUDGET`，所以另外两档这一列打印 `budget=n/a`
+而不是 `0` —— 打印 0 会被读成"3100 万字节的 socket 表对 0 预算"，那是一个内核并不持有、
+也没有任何断言支持的越界结论。DEFAULT 档实测同一行是
+`per_socket=30552 slots=1024 bh_ring=16 inline_payload=1600 total=31285248 budget=n/a`，
+ring 深度与内联载荷与改动前逐字节一致。
+
+**池上限与堆对账**（子项 2）。此前 tier 1 的池上限合计 22,880 B，而 `MEM_SIZE` 只有
+16,384 B —— 声明了 22 KiB 的池容量却只有 16 KiB 的堆。在 `MEMP_MEM_MALLOC=1` 下这不是
+无害的夸大：`memp` 没有 per-pool 上限，所有池从同一个 `mem_malloc()` 里抢，差额会以
+`/proc/a20/netmem` 上某一行 `err > 0` 的形式冒出来，看起来像一次莫名其妙的收包丢失。
+现在 `net_profile.h` 把每个池的元素尺寸上限（向上取整到 8 的倍数，故只会让断言提前发火）
+写成宏，求和得 `NET_PROFILE_MEMP_CLAIM_BYTES`，并在 `net_profile.h:251` 断言它不超过
+`MEM_SIZE`：13,332 B 对 16,384 B，余 3,052 B 给 `memp` 不服务的那些分配
+（`pbuf_custom` 链、netconn、DNS 表、lwIP 自身）。`MEMP_NUM_ND6_QUEUE` /
+`MEMP_NUM_MLD6_GROUP` 原来根本没走 profile，直接吃 lwIP `opt.h` 的默认值 20 / 4 —— 那是
+给另一个部件定的数，现在进 profile（`kernel/net/lwip_port/lwipopts.h:117-118`）。
+
+**因此减少的能力，逐条**（这是档位定义，不是回归）：
+
+| 能力 | 之前 | 现在 | 换来了什么 / 代价是什么 |
+|---|---|---|---|
+| 每 socket 收包 staging 深度 | 4 | **2** | ring 满时 `net_inet_tcp_stage_payload()` 返回 false → lwIP callback 回 `ERR_MEM` → pbuf 进 `refused_data` 重试。**不丢段**，但突发吸收从 4 段降到 2 段，突发下的延迟与重传变差 |
+| 每 socket 内联载荷 | 320 B | **256 B** | 256 是地板不是圆整值：`socket_inet.c` 断言 `NET_BH_INLINE_PAYLOAD >= TCP_MSS`，本档 MSS 就是 256。再低则每段走 spill（按 pbuf 引用暂存），正确但每段多一次引用计数、拷贝变成链表遍历 |
+| `SO_SNDBUF` / `SO_RCVBUF` 上限 | 8 KiB | **2.5 KiB** | 收紧到与 ring 同量级；旧上限是它所守护的结构体的三倍，等于守不住 |
+| pbuf pool 元素数 | 24 | **10** | 单个 536 B 元素，本档同时在网的整尺寸帧从 ~8 降到 ~4 |
+| TCP 段缓存 `TCP_SEG_MULT × WND_MULT` | 16 × 4 = 64 | **8 × 4 = 32** | 拥塞时的排队深度减半 |
+| IP 重组 / 分片 | 16 / 32 | **8 / 8** | 分片重组深度降到 8 段 |
+| IPv6 邻居队列 / 组播组 | 20 / 4 | **6 / 2** | 邻居发现与组播的并发等待项都按比例缩小 |
+| conntrack 表项 | 64 | **32** | 同时跟踪的流 64 → 32。表是无条件 `.bss`，每次启动都付，即使 netfilter 从未加载 |
+| 链路 MTU | 1536 B 帧缓冲 | 512 B 帧缓冲 → **MTU 上限 498** | 嵌入式档的 MTU 由 profile 的帧缓冲决定，`a20_lwip_if_set_mtu()` 拒收 `mtu + ETH_HLEN > 帧尺寸` |
+
+**DEFAULT 与 SERVER 两档逐字节不变**：ring 深度、内联载荷、socket 预算、池上限、conntrack
+表项在这两档都没有被改，新增宏的缺省值就是 `lwipopts.h` 原有的值
+（`net_profile.h:463-473`）。两档的 `dev-build` 门禁（`NET_PROFILE=2` / `=3`）通过。
+
+**20 KiB 依然装不下，这一点没有变，也不打算变**。八个 socket 就是 19,520 B，本身占满
+20 KiB 部件的 95%，一个 socket-capable 的 lwIP 塞不进剩下的 960 B。所以本档现在诚实地
+声明自己要 44 KiB，而不是像上一轮那样声明 20 KiB 然后被自己的代码违反。README 里的
+STM32F103（20 KiB SRAM）仍然不编译网络栈，见下一条。
+
 ### STM32F103 根本不编译网络栈 —— README 已按实情改写（2026-10）
 
 两个独立障碍：
@@ -823,7 +888,7 @@ lwIP 全局锁分片推进到阶段 E（`g_lwip_lock` 本身仍是全局锁）�
 | ~~P1~~ | ~~conntrack + NAT~~ | **已实现**（`f48a8f5f2` / `0d9d0885f` / `4b4472d17` / `1475cd9dd` / `dd4e5678a`）：五元组哈希表（按档位 64/256/1024）、NEW/ESTABLISHED、按状态分开的空闲超时、满表 LRU、SNAT/MASQUERADE（output）与 DNAT（input），RFC 1624 增量校验和，门禁 `make smoke-netfilter-nat`（hostfwd 18081 → guest 18082，宿主探针收到回显）。**残留**：无 ALG / 无 ICMP 跟踪 / 不做分片 NAT；**端到端门禁只覆盖 DNAT**，SNAT/MASQUERADE 只有解析器、`/proc` 规则与单元级证据，`masquerade` 的 DHCP 换址行为未在真机验证；LRU 与超时两条路径只有 `/proc` 计数（`ct_evicted` / `ct_timeout`），没有门禁真的跑满。详见 [net/conntrack-nat.md](net/conntrack-nat.md) |
 | P1 | IPv6 地址路径 | AF_INET6 的 **入站 TCP 已通**（`c34ddd7f8`），`/proc/net/tcp6` / `udp6` 按 v6 布局渲染。但 **rtnetlink 组播只覆盖 IPv4 地址组**，本树没有 IPv6 地址写入路径，所以没有 IPv6 地址变更事件 |
 | P1 | 接收缓冲自动调优 | `SO_RCVBUF` / `SO_SNDBUF` 已不再是 no-op（`aacce4dcc`），但**没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈、不从实测吞吐调整，依赖 Linux 那种增长的调用方拿不到。且抬高 `SO_SNDBUF` 只在下一条连接生效。窗口缩放已解除协议上限，池与档位仍是硬边界 |
-| P1 | 嵌入式档仍装不进 20 KiB | 两块静态数组已纳入档位并由断言钉住（`g_pkt_ring` 24640→2064，`g_netif_state` 12672→1120，合计 37312→3184 B，−91.5%），但 8 个 `net_socket_t` 单是 32768 B（1.60 倍部件）就越界，lwIP 堆 16407 B 是 80%。剩下的账全在 profile 之内：降 `MEM_SIZE`/池/`MAX_SOCKETS` 与关 IPv6 **未做**——那会改变 EMBEDDED 档的协议能力，属产品决定 |
+| P1 | 嵌入式档仍装不进 20 KiB | **账已全部纳入 profile 并被四项求和断言钉住，20 KiB 仍然不够，且这不是调参问题**：两块静态数组先降 91.5%（`g_pkt_ring` 24640→2064，`g_netif_state` 12672→1120），随后每 socket staging 按档位压小（ring 4→2、内联载荷 320→256，`8 × sizeof(net_socket_t)` 32768→**19520 B**，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB），池上限从 22,880 B 降到 13,332 B 对上 `MEM_SIZE` 16,384 B，conntrack 64→32。总账四项 42.6 KiB，由 `socket_internal.h` 的断言封在 44 KiB。**本档现在诚实地声明自己要 44 KiB，而不是声明 20 KiB 然后被自己的代码违反**——八个 socket 就占满 20 KiB 部件的 95%。减少的能力（burst 吸收、缓冲深度、并发流数、MTU 498）逐条写在「嵌入式档的账全部进了 profile」一节。**残留**：三档里只有 tier 1 有这个总账断言，tier 2/3 的池上限仍远大于它们的 `MEM_SIZE`，那是另一件工作 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
 | ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
 | P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |

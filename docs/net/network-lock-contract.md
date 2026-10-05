@@ -519,6 +519,16 @@ lwIP callback 运行时，lwIP 已经持有 `g_lwip_lock`。callback 不得：
 NET_PROFILE_SOCKET_MAX_BYTES` 的 `_Static_assert` 已经覆盖 ring size 与 inline
 payload 两个因子。改造出路与代价见 [net-lanes.md](net-lanes.md) 的"缓冲改造的前提"。
 
+**EMBEDDED 档已经按这条路压过一轮**（`net_profile.h` 的 `NET_PROFILE_BH_RING_SIZE` /
+`NET_PROFILE_INLINE_PAYLOAD`）：ring 4 → 2、内联载荷 320 → 256 B，
+`sizeof(net_socket_t)` 3640 → 2440 B，8 个 socket 合计 29120 → 19520 B。内联载荷 256 是
+地板而非圆整值，因为 `_Static_assert` 要求 `NET_BH_INLINE_PAYLOAD >= TCP_MSS` 而本档 MSS
+就是 256；ring 深度 2 也是地板而非任意值，ring 满时
+`net_inet_tcp_stage_payload()` 返回 false、lwIP callback 回 `ERR_MEM`、pbuf 进
+`refused_data` 重试——**背压而非丢段**。代价（突发吸收深度、每 socket 缓冲上限）写在
+[server-readiness.md](../server-readiness.md) 的"嵌入式档的账全部进了 profile"一节。
+DEFAULT/SERVER 两档的这两个数字未动。
+
 ### 允许的 callback 工作
 
 callback 只能执行轻量、有界工作：
