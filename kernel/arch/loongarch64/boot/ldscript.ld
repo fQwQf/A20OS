@@ -46,15 +46,38 @@ SECTIONS {
     . = ALIGN(4096);
     .bss (NOLOAD) : {
         _bss_start = .;
+        /* The BSP boot stack must be the FIRST input collected here.
+         * *(.bss .bss.*) already matches the .bss.stack input section and GNU
+         * ld applies the first matching directive, so a *(.bss.stack) placed
+         * after that wildcard is dead code -- the stack used to land
+         * wherever the general .bss run put it, sharing its pages with
+         * unrelated kernel objects.  Collect it first and the 64 KiB range
+         * sits at the bottom of .bss, where nothing else can be placed.
+         *
+         * It also has to stay inside .bss, below _bss_end: mm_init hands
+         * va_to_pa(_bss_end) to pfa_init, which zeroes its multi-megabyte
+         * frame-metadata bitmap starting at ROUND_UP(kernel_end, 64)
+         * (mm/frame.c), so anything reserved at or above _bss_end is memset
+         * out from under itself once the allocator comes up. */
+        KEEP(*(.bss.stack))
+        . = ALIGN(4096);
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
-        *(.bss.stack)
         . = ALIGN(4096);
         _bss_end = .;
     } :data
 
     _end = .;
+
+    /* Both invariants of the layout above, stated so a later edit that breaks
+     * either fails the link instead of booting into silent corruption. */
+    ASSERT(boot_stack == _bss_start,
+           "loongarch64: boot stack must be the first thing in .bss")
+    ASSERT(boot_stack_top <= _bss_end,
+           "loongarch64: boot stack must stay below _bss_end (pfa owns everything above it)")
+    ASSERT(boot_stack_top - boot_stack >= 64 * 1024,
+           "loongarch64: boot stack is below the 64 KiB every arch reserves")
 
     /DISCARD/ : {
         *(.comment)
