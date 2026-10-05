@@ -27,7 +27,13 @@
 #include "proc/proc.h"
 #include "mm/swap.h"
 
+/* Forward declaration for pt_table_empty(), whose definition sits below inside
+ * the page-table region with the rest of the walk.  The declaration has to
+ * travel with it: left outside, a NOMMU build has a static declaration and no
+ * definition, which -Werror calls an unused function. */
+#if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 static int pt_table_empty(pte_t *table, int level);
+#endif
 
 /* Huge-leaf installs through pt_map_huge (THP fault, fork clone, mremap
  * move).  A plain global rather than an a20_perf counter, for the same
