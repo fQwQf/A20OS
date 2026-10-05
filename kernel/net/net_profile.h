@@ -79,6 +79,14 @@
 #define NET_PROFILE_INLINE_PAYLOAD   320
 #define NET_PROFILE_SOCKET_MAX_BYTES (8 * 1024)
 
+/* SACK and TCP timestamps off: both grow the TCP header of every data segment
+ * and every established PCB, and on a 512 B pool element that comes straight out
+ * of the payload budget.  A profile whose stated goal is a bounded footprint
+ * should not spend it on options that only pay off on a real network path. */
+#define NET_PROFILE_TCP_SACK_OUT     0
+#define NET_PROFILE_TCP_MAX_SACK_NUM 1
+#define NET_PROFILE_TCP_TIMESTAMPS   0
+
 /*
  * Budget, stated honestly: this profile is sized so the *stack's own* pools
  * fit a small SRAM part, not so a full-featured TCP/IP stack plus an
@@ -110,7 +118,7 @@
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (16 * 1024 * 1024)
-#define NET_PROFILE_PBUF_BUFSIZE     1536
+#define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   4096
 #define NET_PROFILE_TCP_MSS          1460
 #define NET_PROFILE_TCP_WND_MULT     64
@@ -125,6 +133,16 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
 
+/* SACK and timestamps on.  lwIP implements both and leaves them at opt.h's 0,
+ * so nothing here negotiated them: against a real peer that means Reno-only
+ * loss recovery and no PAWS.  PBUF_POOL_BUFSIZE is 1600 rather than 1536
+ * because the options share the head element with the payload --
+ * 1460 + 54 + 12 (TS) + 36 (four SACK blocks) = 1562 -- and the assertion in
+ * lwipopts.h checks that sum rather than the old option-free 54. */
+#define NET_PROFILE_TCP_SACK_OUT     1
+#define NET_PROFILE_TCP_MAX_SACK_NUM 4
+#define NET_PROFILE_TCP_TIMESTAMPS   1
+
 #else
 
 /*
@@ -138,7 +156,7 @@
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (512 * 1024)
-#define NET_PROFILE_PBUF_BUFSIZE     1536
+#define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   256
 #define NET_PROFILE_TCP_MSS          1460
 #define NET_PROFILE_TCP_WND_MULT     64
@@ -152,6 +170,11 @@
 #define NET_PROFILE_BH_RING_SIZE     16
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
+
+/* Same reasoning as the SERVER tier: options on, pool element grown to match. */
+#define NET_PROFILE_TCP_SACK_OUT     1
+#define NET_PROFILE_TCP_MAX_SACK_NUM 4
+#define NET_PROFILE_TCP_TIMESTAMPS   1
 
 #endif /* CONFIG_NET_PROFILE */
 
