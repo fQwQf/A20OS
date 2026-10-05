@@ -170,6 +170,45 @@ static void a20_lwip_sync_link_state(struct netif *netif)
         netif_set_link_down(netif);
 }
 
+/*
+ * The IPv4 address of one netif, in host order, or 0 if it has none yet.  A
+ * negative index means "whichever netif has an address", which is what a NAT
+ * rule installed before DHCP completes wants: translating with the wrong
+ * interface's address is worse than not translating at all, but translating
+ * with the only address the host has is usually right.
+ *
+ * Callers hold g_lwip_lock -- netfilter's MASQUERADE runs from a packet hook,
+ * which is under it by construction.
+ */
+static uint32_t a20_netif_ipv4_host(const struct netif *n);
+
+uint32_t a20_lwip_netif_ipv4(int net_idx)
+{
+    if (net_idx < 0 || net_idx >= A20_NET_MAX_DEVS) {
+        for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+            uint32_t a = a20_netif_ipv4_host(&g_netifs[i]);
+            if (a)
+                return a;
+        }
+        return 0;
+    }
+    return a20_netif_ipv4_host(&g_netifs[net_idx]);
+}
+
+/* ip_addr_t is a union over both IP versions here (LWIP_IPV6 is on), so the v4
+ * member has to be selected before it can be read; ip4_addr_get_u32() yields
+ * network byte order and every netfilter address is host order. */
+static uint32_t a20_netif_ipv4_host(const struct netif *n)
+{
+    const ip4_addr_t *v4;
+    if (!n)
+        return 0;
+    v4 = &n->ip_addr.u_addr.ip4;
+    if (ip4_addr_isany_val(*v4))
+        return 0;
+    return lwip_ntohl(ip4_addr_get_u32(v4));
+}
+
 u32_t sys_now(void) {
     return (u32_t)(timer_get_ticks() * 1000UL / TICKS_PER_SEC);
 }
@@ -183,7 +222,15 @@ static err_t a20_lwip_linkoutput(struct netif *netif, struct pbuf *p) {
         return ERR_BUF;
 
     pbuf_copy_partial(p, st->tx_frame, p->tot_len, 0);
-    if (netfilter_output(st->tx_frame, p->tot_len) == NETFILTER_DROP) {
+    /*
+     * Between the copy above and the send() below the frame exists only in
+     * tx_frame, so this hook is the last point at which an SNAT rewrite can
+     * still reach the wire.  Moving it either side breaks one of the two:
+     * before the copy and the rewrite is discarded, after the send and it is
+     * pointless.
+     */
+    if (netfilter_output(st->tx_frame, p->tot_len, st->idx) ==
+        NETFILTER_DROP) {
         st->tx_filtered++;
         return ERR_OK;
     }
@@ -359,6 +406,8 @@ void a20_lwip_init(void) {
         return;
 
     a20_net_config_init();
+    /* Before lwip_init(), so no packet can meet a half-built conntrack table. */
+    netfilter_conntrack_init();
     spin_init(&g_lwip_lock);
     spin_set_debug(&g_lwip_lock, "lwip", NULL);
     /* g_lwip_lock serialises the entire TCP/IP data plane, so its contention
@@ -481,6 +530,21 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
         a20_perf_add(A20_PERF_NET_RX_BYTES, (uint64_t)len);
         net_packet_rx_defer((unsigned)netif_get_index(n), st->rx_frame,
                             (size_t)len);
+        /*
+         * The filter runs on rx_frame, before the pbuf is filled from it, and
+         * that ordering is load-bearing rather than incidental.  A DNAT rewrites
+         * the destination in place; if the hook ran after pbuf_take() the copy
+         * lwIP would go on to parse would still hold the pre-NAT destination and
+         * the translation would silently do nothing -- the rule would report a
+         * match and the connection would never be made.  Running first also
+         * means the drop path has no pbuf to release.
+         */
+        if (netfilter_input(st->rx_frame, (size_t)len, st->idx) ==
+            NETFILTER_DROP) {
+            LINK_STATS_INC(link.drop);
+            st->rx_filtered++;
+            continue;
+        }
         struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
         if (!p) {
             LINK_STATS_INC(link.memerr);
@@ -491,23 +555,14 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
         }
         pbuf_take(p, st->rx_frame, (u16_t)len);
         /*
-         * Two pbuf_free() sites bracket the n->input() call below, and they
-         * are not redundant -- ownership moves at the call:
-         *
-         *   - Before n->input(): the pbuf is still ours, so the filter's drop
-         *     path is the one place we must free it.  The packet never reaches
-         *     the IP layer, so no socket is woken and no state is built.
-         *   - After n->input(): ethernet_input() has taken ownership and frees
-         *     the pbuf itself on its error paths while still returning ERR_OK
-         *     (see the "so the caller doesn't have to free it again" note in
-         *     lwip ethernet.c), so the caller must not free again.
+         * One pbuf_free() call site brackets the n->input() call below, and it
+         * is not redundant -- ownership moves at the call.  After
+         * ethernet_input() has taken ownership it frees the pbuf itself on its
+         * error paths while still returning ERR_OK (see the "so the caller
+         * doesn't have to free it again" note in lwip ethernet.c), so the
+         * caller must not free again.  The filter's drop path no longer
+         * appears here at all: it runs before the pbuf exists.
          */
-        if (netfilter_input(st->rx_frame, (size_t)len) == NETFILTER_DROP) {
-            pbuf_free(p);
-            LINK_STATS_INC(link.drop);
-            st->rx_filtered++;
-            continue;
-        }
         if (n->input(p, n) != ERR_OK) {
             LINK_STATS_INC(link.drop);
             st->rx_dropped++;
@@ -577,6 +632,22 @@ void a20_lwip_poll_timers_locked(void)
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->loop_first != NULL)
             netif_poll(n);
+    }
+
+    /*
+     * Conntrack idle-timeout sweep.  This is the timers segment precisely
+     * because it is the one progress driver that runs unconditionally: a task
+     * parked in connect() makes no a20_lwip_poll_* call of its own, so
+     * anything that must happen on a wall clock can only live here.  The scan
+     * is bounded and resumes where it stopped (see netfilter_conntrack_expire),
+     * and it is gated on a one-second interval so an idle system does not walk
+     * the table on every tick.
+     */
+    static uint64_t g_ct_sweep_at;
+    uint64_t now_ticks = timer_get_ticks();
+    if (now_ticks >= g_ct_sweep_at) {
+        g_ct_sweep_at = now_ticks + (TICKS_PER_SEC ? TICKS_PER_SEC : 1000);
+        netfilter_conntrack_expire(32);
     }
 }
 

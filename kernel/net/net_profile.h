@@ -79,6 +79,11 @@
 #define NET_PROFILE_INLINE_PAYLOAD   320
 #define NET_PROFILE_SOCKET_MAX_BYTES (8 * 1024)
 
+/* Conntrack + NAT ceilings.  The table is static, so these are real bytes:
+ * NET_CONNTRACK_ENTRY_BYTES (~64) x entries. */
+#define NET_PROFILE_CONNTRACK_ENTRIES 64
+#define NET_PROFILE_CONNTRACK_BUCKETS 8
+
 /*
  * Budget, stated honestly: this profile is sized so the *stack's own* pools
  * fit a small SRAM part, not so a full-featured TCP/IP stack plus an
@@ -125,6 +130,15 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
 
+/*
+ * A conntrack entry is 64 bytes, so 1024 entries is 64 KiB of static table.
+ * Kept well under the PCB ceilings above it: a tracked flow is coarser than a
+ * PCB, and a table that fills at a thousand flows evicts by LRU rather than
+ * refusing.
+ */
+#define NET_PROFILE_CONNTRACK_ENTRIES 1024
+#define NET_PROFILE_CONNTRACK_BUCKETS 128
+
 #else
 
 /*
@@ -152,6 +166,14 @@
 #define NET_PROFILE_BH_RING_SIZE     16
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
+
+/*
+ * QEMU dev/smoke default.  A conntrack entry is 64 bytes, so 256 entries is
+ * 16 KiB of static table -- affordable here, and enough that a NAT gate never
+ * reaches the eviction path by accident.
+ */
+#define NET_PROFILE_CONNTRACK_ENTRIES 256
+#define NET_PROFILE_CONNTRACK_BUCKETS 32
 
 #endif /* CONFIG_NET_PROFILE */
 

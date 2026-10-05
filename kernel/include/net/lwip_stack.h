@@ -37,6 +37,12 @@ int  a20_lwip_if_hwaddr(unsigned ifindex, uint8_t out[8]);
 int  a20_lwip_if_up(unsigned ifindex);
 int  a20_lwip_if_default_index(void);
 
+/* The IPv4 address of netif `net_idx` in host order, or 0 if it has none.
+ * A negative index means "whichever netif currently has an address", for
+ * callers that cannot pin an interface (netfilter's MASQUERADE).  Requires
+ * g_lwip_lock. */
+uint32_t a20_lwip_netif_ipv4(int net_idx);
+
 /* Netif reconfiguration for the netlink write path.  Each takes g_lwip_lock
  * itself; callers must not already hold it.  A NULL mask or gw leaves that
  * field unchanged.  With LWIP_NETIF_API=0 only the primary IPv4 address is
