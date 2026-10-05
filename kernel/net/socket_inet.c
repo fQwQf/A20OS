@@ -1540,10 +1540,12 @@ void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
  * Clamping, and why: the send ceiling cannot exceed TCP_SND_BUF, which is the
  * pcb's real capacity -- asking for more buys nothing, and the caller is told
  * the clamped value by getsockopt rather than being left to believe otherwise.
- * The receive ceiling cannot exceed TCP_WND_MAX(pcb) for the same reason, and
- * additionally cannot break window scaling: the wire field is rcv_wnd >>
- * rcv_scale and is 16 bits, so anything above 0xFFFF << pcb->rcv_scale would be
- * truncated to a window the caller did not ask for.
+ * The receive ceiling cannot exceed this build's configured TCP_WND for the
+ * same reason, and additionally cannot break window scaling: the wire field is
+ * rcv_wnd >> rcv_scale and is 16 bits, so anything above 0xFFFF << TCP_RCV_SCALE
+ * would be truncated to a window the caller did not ask for.  Both bounds are
+ * the *configured* constants rather than the pcb's current state; see the
+ * comment in the body for why using the pcb's state here is a trap.
  *
  * Must be called with g_lwip_lock held.
  */
@@ -1577,22 +1579,44 @@ void net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb)
     }
 
     if (s->rcv_buf) {
+        /*
+         * The ceiling is this build's configured TCP_WND, NOT
+         * TCP_WND_MAX(pcb), and the scale bound uses the configured
+         * TCP_RCV_SCALE, NOT pcb->rcv_scale.  Both of the pcb-relative forms
+         * are wrong before the handshake, and wrong in a way that does not
+         * recover: TCP_WND_MAX() is TCPWND16(TCP_WND) until the peer has
+         * advertised window scaling, so on a socket created by socket() it
+         * answers 65535 rather than 93440, and pcb->rcv_scale is still 0
+         * until lwIP sends its first window-update option.  Clamping against
+         * them would permanently pin every socket to 64 KiB from the instant
+         * it was created, which is exactly what happened: an IPv6 loopback
+         * transfer stopped completing in lwIP TCP mode, where a real pcb
+         * exists, and not in fast mode, where one does not.
+         */
         uint32_t rcv = s->rcv_buf;
-        tcpwnd_size_t ceiling = TCP_WND_MAX(pcb);
-        tcpwnd_size_t scaled = (tcpwnd_size_t)((uint32_t)0xFFFF << pcb->rcv_scale);
-        if (scaled < ceiling)
-            ceiling = scaled;
-        if (rcv > (uint32_t)ceiling)
-            rcv = (uint32_t)ceiling;
+        uint32_t ceiling = (uint32_t)TCP_WND;
+        uint32_t scale_ceiling = (uint32_t)0xFFFFu << TCP_RCV_SCALE;
+        if (scale_ceiling < ceiling)
+            ceiling = scale_ceiling;
+        if (rcv > ceiling)
+            rcv = ceiling;
         s->rcv_buf = rcv;
         pcb->wnd_limit = (tcpwnd_size_t)rcv;
-        /* A lowered ceiling takes effect immediately, not at the next read.
-         * tcp_recved(pcb, 0) re-runs the announcement logic and sends a window
-         * update if the shrink is worth a segment; it cannot itself shrink
-         * rcv_wnd, which is why the assignment is above. */
-        if (pcb->rcv_wnd > (tcpwnd_size_t)rcv)
+        /* Only a shrink needs announcing.  rcv_wnd can only be lowered here,
+         * so a caller that raised the ceiling leaves nothing to say. */
+        if (pcb->rcv_wnd > (tcpwnd_size_t)rcv) {
             pcb->rcv_wnd = (tcpwnd_size_t)rcv;
-        tcp_recved(pcb, 0);
+            /* And only when a window has been announced.  tcp_recved() on a
+             * pcb that has not completed a handshake takes the
+             * rcv_ann_wnd == 0 branch, inflates the window by a full segment
+             * count, sets TF_ACK_NOW and calls tcp_output() -- which emits a
+             * bare ACK for a connection that does not exist.  That stray
+             * packet goes on the wire for every socket() in the system, and
+             * a listener that has already bound the port sees it before any
+             * handshake. */
+            if (pcb->rcv_ann_wnd != 0)
+                tcp_recved(pcb, 0);
+        }
     }
 }
 
