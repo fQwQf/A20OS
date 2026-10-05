@@ -932,12 +932,6 @@ int      net_packet_ifindex_by_name(const char *name);
  * copy), reported on /proc/a20/netmem so a tier's static footprint is readable
  * off a running system rather than only off a linker's symbol table. */
 size_t   net_packet_static_bytes(void);
- int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
-                                   const void *addr, size_t addrlen);
- int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
-                                  const void *addr, size_t addrlen);
- void     netlink_uevent_emit(const char *action, const char *subsystem,
-                              const char *name, uint64_t devt);
 
 void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
