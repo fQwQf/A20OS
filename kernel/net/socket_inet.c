@@ -1232,16 +1232,17 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
             child->closed = 1;
             net_sock_unlock(child, chf);
         }
-        net_socket_unregister(child);
+        bool had_slot = net_socket_unregister(child);
         uint64_t cf = a20_lwip_lock();
         tcp_abort(child->tcp);
         child->tcp = NULL;
         a20_lwip_unlock(cf);
-        /* Two references: the creator's from net_socket_alloc() and the one
-         * registration added a moment ago.  Both are gone, because the child
-         * never reached the accept queue. */
+        /* The creator's reference from net_socket_alloc(), plus the one
+         * registration added a moment ago if there was a slot to release.  Both
+         * are gone because the child never reached the accept queue. */
         net_socket_free(child);
-        net_socket_free(child);
+        if (had_slot)
+            net_socket_free(child);
         a20_perf_count(A20_PERF_NET_ACCEPT_DROP);
         continue;
     }
@@ -2069,9 +2070,12 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
                  * held, because net_socket_unregister() takes a bucket lock. */
                 child->closed = 1;
                 net_sock_unlock2(pair);
-                net_socket_unregister(child);
-                /* The registry's reference, then the creator's. */
-                net_socket_free(child);
+                /* Registry's reference if there was a slot, then the
+                 * creator's -- the same two-reference teardown as the accept
+                 * drop above. */
+                bool had_slot = net_socket_unregister(child);
+                if (had_slot)
+                    net_socket_free(child);
                 net_socket_free(child);
                 net_socket_free(listener);
                 (void)proc_wake_q_flush(&wake_q);
@@ -2479,9 +2483,10 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
 {
     /* Linux ABI: writes on a once-established endpoint that died report EPIPE */
     if (!s->connected || s->closed)
-        return s->ever_connected ? -EPIPE : -ENOTCONN;
+        return s->ever_connected ? -EPIPE
+                                  : net_notconn(NET_NOTCONN_SEND_TCP_NOT_CONNECTED);
     if (s->shut_wr)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_SEND_TCP_SHUT_WR);
     if (s->local_tcp) {
         /* Two sockets, ascending by address; net_enqueue_msg_blocking()
          * takes that same pair itself, so this section only resolves `dst` and
@@ -2507,14 +2512,14 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
         send_timeout = s->send_timeout_ticks;
         net_sock_unlock(s, irq);
         if (!dst)
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_SEND_TCP_NO_PEER);
         {
             net_sock_pair_t pair = net_sock_lock2(s, dst);
             bool usable = net_socket_is_live(dst);
             net_sock_unlock2(pair);
             if (!usable) {
                 net_socket_free(dst);
-                return -ENOTCONN;
+                return net_notconn(NET_NOTCONN_SEND_TCP_PEER_GONE);
             }
         }
         int rv = net_enqueue_msg_blocking(s, dst, buf, len,

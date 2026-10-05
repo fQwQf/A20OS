@@ -22,6 +22,18 @@ static spinlock_t g_lock_counters_lock = SPINLOCK_INIT;
 static lock_counter_entry_t g_lock_counters[LOCK_COUNTERS_MAX];
 static int g_lock_counter_count;
 static int g_lock_counters_initialized;
+/*
+ * Registrations refused because the table was full.
+ *
+ * The refusal used to be completely silent, which is the worst possible
+ * behaviour for this subsystem: the lock keeps working, it just stops being
+ * counted, and /proc/a20/lock_contention then reports a clean run for a lock
+ * that was never observed.  impl-notes-net.md §8.2/§8.7 flagged exactly this
+ * for the socket-table bucket locks (128 of them on the server profile against
+ * a ceiling of 192), so the drop is now counted and rendered on the same
+ * report that would otherwise have lied.
+ */
+static unsigned g_lock_counters_dropped;
 
 void lock_counters_init(void)
 {
@@ -29,6 +41,24 @@ void lock_counters_init(void)
         return;
     spin_init(&g_lock_counters_lock);
     g_lock_counters_initialized = 1;
+}
+
+unsigned lock_counters_count(void)
+{
+    lock_counters_init();
+    /* Read under the registry lock, not with a relaxed atomic: the count is
+     * maintained as a plain int under that lock, and a torn or stale read here
+     * would be reported as a missing registration by the caller that compares
+     * two of these. */
+    uint64_t flags = spin_lock_irqsave(&g_lock_counters_lock);
+    unsigned n = (unsigned)g_lock_counter_count;
+    spin_unlock_irqrestore(&g_lock_counters_lock, flags);
+    return n;
+}
+
+unsigned lock_counters_dropped(void)
+{
+    return __atomic_load_n(&g_lock_counters_dropped, __ATOMIC_ACQUIRE);
 }
 
 void lock_counters_register(spinlock_t *lock, const char *name)
@@ -49,6 +79,8 @@ void lock_counters_register(spinlock_t *lock, const char *name)
         g_lock_counters[g_lock_counter_count].lock = lock;
         g_lock_counters[g_lock_counter_count].name = name;
         g_lock_counter_count++;
+    } else {
+        __atomic_fetch_add(&g_lock_counters_dropped, 1, __ATOMIC_RELAXED);
     }
     spin_unlock_irqrestore(&g_lock_counters_lock, flags);
 }
@@ -136,6 +168,19 @@ size_t lock_counters_format(char *buf, size_t bufsz)
             break;
     }
     spin_unlock_irqrestore(&g_lock_counters_lock, flags);
+    /*
+     * The audit's own coverage line, and the only honest way to report that a
+     * lock was left out: a report that silently omits a contended lock reads
+     * exactly like a report that found no contention.  `dropped` is the number
+     * of lock_counters_register() calls the fixed table refused.
+     */
+    unsigned dropped = lock_counters_dropped();
+    unsigned held = (unsigned)g_lock_counter_count;
+    int n = snprintf(buf + off, bufsz - off,
+                     "lock_counters: registered=%u capacity=%u dropped=%u\n",
+                     held, (unsigned)LOCK_COUNTERS_MAX, dropped);
+    if (n > 0 && (size_t)n < bufsz - off)
+        off += (size_t)n;
     return off;
 }
 

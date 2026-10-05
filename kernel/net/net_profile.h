@@ -40,9 +40,36 @@
  * (OPT="-DCONFIG_NET_LOCK_ASSERT=1") when investigating a lock-discipline
  * question -- it reports the owning CPU and a violation count per boot on
  * /proc/net/status as "lwip_lock: owner=<cpu> violations=<n>", and the one-shot
- * init-path violations it finds there are expected, not a defect. */
+ * init-path violations it finds there are expected, not a defect.
+ *
+ * The same switch now drives the net-lock probe as well
+ * (kernel/net/net_lock_probe.c), which is what closes the gap the lwIP half
+ * never had: the two net-lock rules (address order in net_sock_lock2(), and
+ * "never a bucket lock under a socket lock") were prose only.  Values:
+ *
+ *   0  no probe at all.  /proc/net/status says "net_lock: not checked", so an
+ *      absent probe is never read as a clean one.  This is the default and it
+ *      cannot abort anything.
+ *   1  probe on; a violation records its site and panics.  A counting signal
+ *      gets trained to be ignored, so a violation has to stop the machine.
+ *   2  probe on; a violation is counted and its site recorded, no panic.  For a
+ *      long soak where the violation count at the end is worth more than a dead
+ *      machine on the first hit.
+ */
 #ifndef CONFIG_NET_LOCK_ASSERT
 #define CONFIG_NET_LOCK_ASSERT 0
+#endif
+
+/* Reference-count checking.  The net_socket_t refcount ledger
+ * (socket_internal.h, net_socket_free()) is always compiled in and always
+ * counted -- allocs, frees, live, faults all render on /proc/net/status -- and
+ * this switch only decides what a *fault* does.  Off by default, because a
+ * fault means some path dropped one reference too many and the machine is
+ * already in undefined behaviour by the time the counter moves; that is a
+ * reason to stop, not a reason to keep running and print a number.
+ * OPT="-DCONFIG_NET_REF_ASSERT=1" turns the fault into a panic. */
+#ifndef CONFIG_NET_REF_ASSERT
+#define CONFIG_NET_REF_ASSERT 0
 #endif
 
 #if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED

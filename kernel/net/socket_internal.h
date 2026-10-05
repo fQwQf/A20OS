@@ -380,6 +380,21 @@ typedef struct net_socket {
     /* Reference count, see net_socket_ref() in this header. */
     volatile int refs;
     /*
+     * Canary for the reference count, set by net_socket_alloc() and cleared by
+     * the one free that actually releases the object.
+     *
+     * The count alone cannot see a double free: the second net_socket_free()
+     * reads a refs value the first one already drove to zero, and on an object
+     * that has been handed back to obj_cache that read is whatever the slot now
+     * holds.  The canary makes the common case loud instead.  Stated honestly,
+     * it is a canary and not a proof: obj_cache_alloc_zero() hands the same
+     * address back to the next socket, which sets the canary again, so a double
+     * free that lands on a *reused* slot stays invisible.  It catches the case
+     * that actually shows up -- a free arriving after the slot was reused by
+     * something that is not a socket, or before any reuse at all.
+     */
+    uint32_t      ref_magic;
+    /*
      * Running receive-queue byte/message tally, formerly g_rxq_tally indexed by
      * registry slot -- 512 KiB of table on the server profile for a per-socket
      * number.  High 32 bits are the message count, low 32 the readable bytes;
@@ -526,6 +541,11 @@ typedef struct sockaddr_alg_kernel {
 #define NET_SOCK_BUCKET_WORDS     ((NET_SOCK_SLOTS_PER_BUCKET + 31) / 32)
 #define NET_SOCK_BUCKETS          (NET_MAX_SOCKETS / NET_SOCK_SLOTS_PER_BUCKET)
 
+/* Canary written by net_socket_alloc() and cleared by the free that releases the
+ * object; see the ref_magic comment in net_socket_t.  Any value but this one at
+ * net_socket_free() time means the pointer is not a live socket. */
+#define NET_SOCK_REF_MAGIC        0x4e534f4bu  /* 'N','S','O','K' */
+
 _Static_assert((NET_MAX_SOCKETS % NET_SOCK_SLOTS_PER_BUCKET) == 0,
                "the socket-table shard size must divide the profile's slot "
                "ceiling, or a bucket would straddle the end of the slot space");
@@ -555,13 +575,91 @@ int net_bh_slot_clear(int idx);
  * Per-socket lock
  * ------------------------------------------------------------------ */
 
+/*
+ * Runtime probe for the net-lock side of the lock contract.
+ *
+ * g_lwip_lock got an executable assertion in 7d217d3fd (LWIP_ASSERT_CORE_LOCKED()
+ * -> a20_lwip_assert_core_locked(), lwip_stack.c:760).  The net locks had none,
+ * which left the two rules below as prose only:
+ *
+ *   - net_sock_lock2() takes two sockets in ascending address order and a
+ *     critical section holds at most two socket locks;
+ *   - a bucket lock is never taken while a socket lock is held (the bucket is
+ *     the OUTER lock; net_bucket_scan() and the register/unregister pair nest
+ *     the other way round, which is the sanctioned direction).
+ *
+ * The probe is a per-CPU set of the net locks this CPU currently holds.  It is
+ * sound as a *per-CPU* set rather than a per-task one for a reason that is load
+ * bearing and worth stating: every net lock is entered with spin_lock_irqsave()
+ * and left with spin_unlock_irqrestore() (net_sock_lock2() takes its second
+ * lock with plain spin_lock(), but only after the first acquire disabled
+ * interrupts).  Interrupts stay off for the whole held window, so the holder can
+ * neither be preempted by the timer nor interrupted into a nested acquisition
+ * on the same CPU -- which also means it cannot migrate to another CPU while
+ * holding one.  That is why one array indexed by cpu_current_id() is enough.
+ *
+ * Cost and switch, following the lwIP probe's shape (net_profile.h:37-46):
+ *
+ *   CONFIG_NET_LOCK_ASSERT == 0  the probe does not exist.  Nothing is counted,
+ *                                 nothing can abort, /proc/net/status says
+ *                                 "not checked" so a silent build is not read
+ *                                 as a clean one.
+ *   CONFIG_NET_LOCK_ASSERT == 1  a violation records its site and panics.
+ *   CONFIG_NET_LOCK_ASSERT == 2  same bookkeeping, count only, no panic -- for
+ *                                 a long soak where you want the violation count
+ *                                 at the end rather than a dead machine on the
+ *                                 first one.
+ *
+ * arming happens at the end of net_init() (socket.c), for the reason
+ * g_lwip_lock_armed documents: nothing before that point may be judged, because
+ * the registry locks do not exist yet.
+ */
+#if CONFIG_NET_LOCK_ASSERT
+#define NET_LOCK_PROBE_SOCKET 0
+#define NET_LOCK_PROBE_BUCKET 1
+
+/* Deep enough for the contract's own ceiling (two socket + one bucket) plus one
+ * slot of slack, so an overflow is reported as a violation instead of silently
+ * overwriting a live entry. */
+#define NET_LOCK_PROBE_MAX 4
+#define NET_LOCK_PROBE_SITES 8
+#endif
+
+/*
+ * Declared outside the switch because a20_lwip_format_status() renders a
+ * "net_lock:" row in both builds -- the switch-off one says "not checked", so a
+ * reader cannot mistake an absent probe for a clean run.  With the switch off
+ * these resolve to the stubs at the bottom of net_lock_probe.c and no call site
+ * in the lock helpers below reaches them.
+ */
+void net_lock_probe_acquire(const void *lock, int kind, const void *site);
+void net_lock_probe_release(const void *lock, int kind);
+void net_lock_probe_arm(void);
+/* Renders the "net_lock:" row plus one "net_lock_siteN:" row per recorded site.
+ * Returns the number of bytes it would have written, like the snprintf it uses. */
+int net_lock_probe_format(char *buf, size_t bufsz);
+unsigned net_lock_probe_violations(void);
+/* Reported by net_socket_registry_init() when lock_counters_register() could not
+ * fit a bucket lock; see net_lock_probe.c. */
+void net_lockcounters_short(unsigned got, unsigned want, unsigned dropped);
+
 static inline uint64_t net_sock_lock(net_socket_t *s)
 {
-    return spin_lock_irqsave(&s->lock);
+    uint64_t flags = spin_lock_irqsave(&s->lock);
+#if CONFIG_NET_LOCK_ASSERT
+    net_lock_probe_acquire(&s->lock, NET_LOCK_PROBE_SOCKET,
+                           __builtin_return_address(0));
+#endif
+    return flags;
 }
 
 static inline void net_sock_unlock(net_socket_t *s, uint64_t flags)
 {
+#if CONFIG_NET_LOCK_ASSERT
+    /* Dropped before the spinlock is released, so the set never describes a
+     * lock this CPU has already given up. */
+    net_lock_probe_release(&s->lock, NET_LOCK_PROBE_SOCKET);
+#endif
     spin_unlock_irqrestore(&s->lock, flags);
 }
 
@@ -600,11 +698,30 @@ static inline net_sock_pair_t net_sock_lock2(net_socket_t *a, net_socket_t *b)
          * always 0 and must not be restored over the first unlock. */
         spin_lock(&p.hi->lock);
     }
+#if CONFIG_NET_LOCK_ASSERT
+    /* Recorded after both acquires rather than between them: the probe checks
+     * the whole set (depth, ascending order, no repeats), so a half-populated
+     * set would report a violation that the code does not have.  The ordering
+     * this function exists to guarantee is therefore checked as a property of
+     * the finished pair, not re-derived from the same comparison that built it
+     * -- what the probe catches is a *third* lock arriving out of order, or a
+     * single net_sock_lock() on a socket already held through another pair. */
+    net_lock_probe_acquire(&p.lo->lock, NET_LOCK_PROBE_SOCKET,
+                           __builtin_return_address(0));
+    if (p.hi)
+        net_lock_probe_acquire(&p.hi->lock, NET_LOCK_PROBE_SOCKET,
+                               __builtin_return_address(0));
+#endif
     return p;
 }
 
 static inline void net_sock_unlock2(net_sock_pair_t p)
 {
+#if CONFIG_NET_LOCK_ASSERT
+    if (p.hi)
+        net_lock_probe_release(&p.hi->lock, NET_LOCK_PROBE_SOCKET);
+    net_lock_probe_release(&p.lo->lock, NET_LOCK_PROBE_SOCKET);
+#endif
     if (p.hi)
         spin_unlock(&p.hi->lock);
     spin_unlock_irqrestore(&p.lo->lock, p.flags);
@@ -630,11 +747,19 @@ static inline int net_socket_bucket(const net_socket_t *s)
 
 static inline uint64_t net_bucket_lock(int b)
 {
-    return spin_lock_irqsave(&g_net_buckets[b].lock);
+    uint64_t flags = spin_lock_irqsave(&g_net_buckets[b].lock);
+#if CONFIG_NET_LOCK_ASSERT
+    net_lock_probe_acquire(&g_net_buckets[b].lock, NET_LOCK_PROBE_BUCKET,
+                           __builtin_return_address(0));
+#endif
+    return flags;
 }
 
 static inline void net_bucket_unlock(int b, uint64_t flags)
 {
+#if CONFIG_NET_LOCK_ASSERT
+    net_lock_probe_release(&g_net_buckets[b].lock, NET_LOCK_PROBE_BUCKET);
+#endif
     spin_unlock_irqrestore(&g_net_buckets[b].lock, flags);
 }
 
@@ -711,6 +836,87 @@ static inline net_socket_t *net_socket_ref(net_socket_t *s)
 }
 
 /*
+ * Reference-count ledger.
+ *
+ * docs/measured/impl-notes-net.md §8.3 and §8.6 recorded the reference count as
+ * a primitive that had been walked by hand over 54 sites and never once run.
+ * These four counters are that run, made visible:
+ *
+ *   allocs   sockets handed out by net_socket_alloc()
+ *   frees    sockets whose last reference was dropped
+ *   live     allocs - frees, i.e. sockets that exist and are not yet freed.  A
+ *            create/destroy cycle that leaks shows up here as live climbing and
+ *            never coming back down, which is the "不漏" half.
+ *   faults   frees that arrived when the count said the object was already gone
+ *            (refs <= 0) or when the canary did not match.  This is the "不重"
+ *            half: a non-zero value means some path dropped one reference too
+ *            many, which under an unchecked build is a silent double free.
+ *
+ * All four are counted unconditionally -- an alloc and a free already do an
+ * atomic read-modify-write, so the marginal cost is three more relaxed
+ * increments on a path that is nowhere near hot -- and rendered on
+ * /proc/net/status.  CONFIG_NET_REF_ASSERT (net_profile.h) turns a fault from a
+ * counter into a panic; the ledger itself is always there.
+ */
+extern volatile int g_net_sock_ref_allocs;
+extern volatile int g_net_sock_ref_frees;
+extern volatile int g_net_sock_ref_faults;
+int net_sock_ref_live(void);
+/* One "net_sock_ref:" row plus the per-fault-reason rows; returns the byte
+ * count it would have written, like the snprintf it uses. */
+int net_sock_ref_format(char *buf, size_t bufsz);
+
+/*
+ * -ENOTCONN attribution.
+ *
+ * impl-notes-net.md §8.5 left one question open: the peer is resolved with no
+ * lock held and re-checked after the ordered pair is taken, so a concurrent
+ * close() in that window turns a send into an error.  The mitigation (re-check
+ * and fail) was in place; what was missing was any way to tell "the window
+ * fired" from "this socket was never connected", because both surface as the
+ * same errno.  On a 2%-failure bug whose whole difficulty is telling two
+ * similar-looking things apart, that is not a cosmetic gap.
+ *
+ * Every -ENOTCONN return site therefore goes through net_notconn() with a
+ * reason, and the three reasons that correspond to the §8.5 window are flagged
+ * as such.  The /proc row separates "window" from "genuine" in one number:
+ *
+ *   net_notconn: total=<n> window=<n>
+ *   net_notconn_<reason>: <n>
+ *
+ * `window` is the answer to the question §8.5 asked.  A soak that ends with
+ * window=0 next to a large total is evidence the window is not reachable in
+ * practice; a soak that ends with window climbing is evidence it is, and
+ * without this counter the two would have been indistinguishable.
+ *
+ * net_notconn() is a real call rather than a macro because the counter is the
+ * point; it sits on an error path, which is not hot.
+ */
+typedef enum {
+    /* The §8.5 window: a peer resolved outside the lock failed its re-check. */
+    NET_NOTCONN_SEND_TCP_NO_PEER = 0,
+    NET_NOTCONN_SEND_TCP_PEER_GONE,
+    NET_NOTCONN_BLOCKING_PRE_PARK_RACE,
+    NET_NOTCONN_BLOCKING_POST_PARK_RACE,
+    /* Ordinary "this socket has no connection" errors, for contrast. */
+    NET_NOTCONN_SENDTO_NOT_CONNECTED,
+    NET_NOTCONN_SEND_TCP_NOT_CONNECTED,
+    NET_NOTCONN_SEND_TCP_SHUT_WR,
+    NET_NOTCONN_GETPEERNAME,
+    NET_NOTCONN_PEERPIDFD,
+    NET_NOTCONN_VFS_WRITE_NO_PCB,
+    NET_NOTCONN_ENQUEUE_META,
+    NET_NOTCONN_ENQUEUE_PBUF,
+    NET_NOTCONN_BLOCKING_PEER_MISMATCH,
+    NET_NOTCONN__COUNT
+} net_notconn_reason_t;
+
+int net_notconn(net_notconn_reason_t why);
+int net_notconn_window_total(void);
+/* One "net_notconn:" row plus one row per non-zero reason. */
+int net_notconn_format(char *buf, size_t bufsz);
+
+/*
  * Pin one slot of the table long enough to leave the bucket lock behind it.
  *
  * This is the pattern every narrowed hot path uses: the bucket lock exists only
@@ -781,7 +987,13 @@ int      net_register_socket_locked(net_socket_t *s);
  *
  * The caller drops the registry's reference afterwards, outside every lock.
  */
-void     net_socket_unregister(net_socket_t *s);
+/* Returns true when a registry slot was actually released, i.e. when the caller
+ * still owes the registry's reference and must drop it with one more
+ * net_socket_free().  False for a socket that never owned a slot -- an AF_UNIX
+ * accepted child, or one mid-creation -- which carries only the creator's
+ * reference.  Getting this wrong is a use-after-free in the teardown path; see
+ * the comment on the definition in socket_registry.c. */
+bool      net_socket_unregister(net_socket_t *s);
 int      net_socket_is_valid_locked(net_socket_t *s);
 
 /*
@@ -932,12 +1144,6 @@ int      net_packet_ifindex_by_name(const char *name);
  * copy), reported on /proc/a20/netmem so a tier's static footprint is readable
  * off a running system rather than only off a linker's symbol table. */
 size_t   net_packet_static_bytes(void);
- int      net_netlink_diag_request(net_socket_t *s, const void *buf, size_t len,
-                                   const void *addr, size_t addrlen);
- int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
-                                  const void *addr, size_t addrlen);
- void     netlink_uevent_emit(const char *action, const char *subsystem,
-                              const char *name, uint64_t devt);
 
 void     net_tcp_close_pcb(net_socket_t *s);
 void     net_tcp_drop_pcb(net_socket_t *s);
