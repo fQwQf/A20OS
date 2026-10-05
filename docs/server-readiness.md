@@ -535,9 +535,18 @@ RFC 1624 增量修校验和。运行时动词挂在 `/proc/a20/netfilter`（`ctf
   记账和单元级证据，没有端到端门禁——QEMU user-net 拓扑里 SNAT 没有对等场景。
   `masquerade` 相对 `snat` 的差别仅是取址时机（`a20_lwip_netif_ipv4(-1)` 选当前有
   地址的 netif），**未在真机上验证过 DHCP 换址后的行为**。
-- **LRU 淘汰与空闲超时两条路径只有 `/proc` 计数暴露**（`ct_evicted` / `ct_timeout`），
-  没有门禁真的把表填满或跑满 30s/120s 超时；`netfilter_test` 测试 8 覆盖的是新建条目
-  与计数增长。
+- **LRU 淘汰与空闲超时两条路径曾只有 `/proc` 计数暴露**（`ct_evicted` / `ct_timeout`），
+  没有门禁真的把表填满或跑满 30s/120s 超时——这一条**已补**（`faa8ca1b3`）：新增
+  `make smoke-ct-capacity`，把表填到 `ct_capacity` 恰好停住、多一条流恰好淘汰一条，并用
+  `ct_lru_victim` 断言被淘汰的是最久未用的那一条（淘汰前后各读一次）；随后
+  `cttimeout 100 100 100` 把超时压到 100ms，断言条目在截止时间内被回收、`ct_timeout`
+  恰好 +1 且 `ct_sweeps` 前进。代价是两个 `/proc` 测试钩子：`ctinject` 经数据面同一个
+  `netfilter_ct_insert` 插入合成流，`cttimeout` 运行期覆盖三个毫秒常量（0 恢复默认）。
+  它们不新增内核状态，只是让断言不必靠 256 条真实流和 30 秒等待达成。
+- **SNAT/MASQUERADE 的地址与端口改写现在有主机侧单元门禁**（`ee883ac7e`），但仍**不是**
+  端到端：guest 外没有第二个对端，回程包不存在，这一点没变，只是多了一层对出货源码
+  （`kernel/net/netfilter_rewrite.c`，为此从 `netfilter_nat.c` 里拆出来）的直接断言，
+  校验和用独立的一次性重算 oracle 对拍。
 
 其余限制（无 ALG、无 ICMP 跟踪、不做分片 NAT）写在
 [net/conntrack-nat.md](net/conntrack-nat.md) 的「诚实边界」一节，不重复。
@@ -907,28 +916,57 @@ lwIP 全局锁分片推进到阶段 E（`g_lwip_lock` 本身仍是全局锁）�
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
-| ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
-| ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）仍开放，清单在 `docs/measured/impl-notes-net.md`；合并后全量回归与 ASAN + SMP 压测**未做**；net 锁一侧**没有**运行期探针（见下一行） |
+按**两轮实际完成情况**重排过一次：先列仍然阻塞的项并按级别排序，再把已完成的项整体
+移到末尾一张表。上一版把已修的项和未做的项按插入顺序混在一张表里，最上面几行全是
+已完成的，读者看不到当前真正的队头。
+
+| 级别 | 阻塞项 | 理由 |
+|---|---|---|
 | P0 | net 锁一侧的运行期探针 | `LWIP_ASSERT_CORE_LOCKED()` 只覆盖 `g_lwip_lock` 一把。没有"当前 CPU 是否持有期望的 socket 锁"的判据，`net_sock_lock2()` 的地址升序与"至多两把"、以及"桶锁不得在 socket 锁之下取得"只由代码评审把关，lane claim 一侧同样没有。补它需要 per-CPU 持锁集合跟踪（`CONFIG_NET_SOCK_ASSERT`），本轮未做 |
 | P0 | lwIP 全局锁分片 | **本轮推进了三步，但仍是最大未做项。** 阶段 C（`5ea06a786`）落「当前 lane」上下文 + memp 的 lane 索引**骨架**（内存未分片）；阶段 D（`f6f327b96`）把协议输入搬出中断上下文、按 lane 分发；阶段 E 收窄 socket 侧锁。**`g_lwip_lock` 本身至今仍是一把全局锁**，所以"各 CPU 各自处理 socket"只成立在"谁处理"这一层，不成立在"谁能同时处理"。持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历（PCB 链表按 lane 分桶已在阶段 B 落地），仍需给 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 定 per-lane 所有权与冷路径的死锁边界 |
 | P0 | 多 lane 的 2% connect flake 仍未定位 | 两轮放大实验（`CONFIG_NET_RACE_DELAY_US` 200 / 2000 µs）共 78 次连接 0 失败，全程 `violations=0 sites=0`、`PCB_SANE` 零命中。**未复现、未定位，未声称已修**。统计边界：72 次放大样本在 2% 下期望 1.6 次失败，观测 0 次的概率约 23%，**不构成"已消失"的证据**。配方见 [net/net-lanes.md](net/net-lanes.md) |
-| ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
-| ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关，x86_64/riscv64/aarch64/ppc64le/loongarch64 五架构 5/5 PASS |
-| ~~P1~~ | ~~conntrack + NAT~~ | **已实现**（`f48a8f5f2` / `0d9d0885f` / `4b4472d17` / `1475cd9dd` / `dd4e5678a`）：五元组哈希表（按档位 64/256/1024）、NEW/ESTABLISHED、按状态分开的空闲超时、满表 LRU、SNAT/MASQUERADE（output）与 DNAT（input），RFC 1624 增量校验和，门禁 `make smoke-netfilter-nat`（hostfwd 18081 → guest 18082，宿主探针收到回显）。**残留**：无 ALG / 无 ICMP 跟踪 / 不做分片 NAT；**端到端门禁只覆盖 DNAT**，SNAT/MASQUERADE 只有解析器、`/proc` 规则与单元级证据，`masquerade` 的 DHCP 换址行为未在真机验证；LRU 与超时两条路径只有 `/proc` 计数（`ct_evicted` / `ct_timeout`），没有门禁真的跑满。详见 [net/conntrack-nat.md](net/conntrack-nat.md) |
+| P0 | `proc_lock` 超长持有的成因未定 | **只证伪了一半**。已证伪"被抢占"（成立）：全树 69 处 `proc_lock` 获取全部走 `spin_lock_irqsave`，无一处关中断之外；持锁临界区内无任何 `sched()`/`proc_yield()`。所以持有者确实在长时间执行。但**"成因类别已确定"这个说法不成立，本条已撤回**：先前据"持锁临界区里做全系统遍历"推出的 4 处候选，经核对在实测负载下基本不会执行：`net_stress_test` 的 `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；`proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，而门禁只 cat `/proc/a20/perf` 与 `lock_contention`。更关键的是计数器自启动起累计、没有 reset 入口，所以那个 905K–136 万自旋的单次极值可能发生在引导期而非压力期。结论：成因仍未定位。**观测窗口缺陷已修**：`/proc/a20/{perf,lock_contention}` 现有 `reset` 写入口（`feat/net-lanes`），门禁可前后各读一次求差；`lock_counters_reset()` 连 `contended_max_spins` 一起清零，因为 reset 之后要回答的是"本窗口内的最大值" |
 | P1 | IPv6 地址路径 | AF_INET6 的 **入站 TCP 已通**（`c34ddd7f8`），`/proc/net/tcp6` / `udp6` 按 v6 布局渲染。但 **rtnetlink 组播只覆盖 IPv4 地址组**，本树没有 IPv6 地址写入路径，所以没有 IPv6 地址变更事件 |
 | P1 | 接收缓冲自动调优 | `SO_RCVBUF` / `SO_SNDBUF` 已不再是 no-op（`aacce4dcc`），但**没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈、不从实测吞吐调整，依赖 Linux 那种增长的调用方拿不到。且抬高 `SO_SNDBUF` 只在下一条连接生效。窗口缩放已解除协议上限，池与档位仍是硬边界 |
 | P1 | 嵌入式档仍装不进 20 KiB | **账已全部纳入 profile 并被四项求和断言钉住，20 KiB 仍然不够，且这不是调参问题**：两块静态数组先降 91.5%（`g_pkt_ring` 24640→2064，`g_netif_state` 12672→1120），随后每 socket staging 按档位压小（ring 4→2、内联载荷 320→256，`8 × sizeof(net_socket_t)` 32768→**19520 B**，对上 `NET_PROFILE_SOCKET_BUDGET` = 20 KiB），池上限从 22,880 B 降到 13,332 B 对上 `MEM_SIZE` 16,384 B，conntrack 64→32。总账四项 42.6 KiB，由 `socket_internal.h` 的断言封在 44 KiB。**本档现在诚实地声明自己要 44 KiB，而不是声明 20 KiB 然后被自己的代码违反**——八个 socket 就占满 20 KiB 部件的 95%。减少的能力（burst 吸收、缓冲深度、并发流数、MTU 498）逐条写在「嵌入式档的账全部进了 profile」一节。**残留**：三档里只有 tier 1 有这个总账断言，tier 2/3 的池上限仍远大于它们的 `MEM_SIZE`，那是另一件工作 |
 | P1 | 扩大接收缓冲（pbuf 池 / 零拷贝收包） | 窗口缩放已解除协议上限，现在卡在 384 KiB pbuf 池 |
-| ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
 | P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
 | P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |
-| P0 | `proc_lock` 超长持有的成因未定 | **只证伪了一半**。已证伪"被抢占"（成立）：全树 69 处 `proc_lock` 获取全部走 `spin_lock_irqsave`，无一处关中断之外；持锁临界区内无任何 `sched()`/`proc_yield()`。所以持有者确实在长时间执行。但**"成因类别已确定"这个说法不成立，本条已撤回**：先前据"持锁临界区里做全系统遍历"推出的 4 处候选，经核对在实测负载下基本不会执行：`net_stress_test` 的 `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；`proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，而门禁只 cat `/proc/a20/perf` 与 `lock_contention`。更关键的是计数器自启动起累计、没有 reset 入口，所以那个 905K–136 万自旋的单次极值可能发生在引导期而非压力期。结论：成因仍未定位。**观测窗口缺陷已修**：`/proc/a20/{perf,lock_contention}` 现有 `reset` 写入口（`feat/net-lanes`），门禁可前后各读一次求差；`lock_counters_reset()` 连 `contended_max_spins` 一起清零，因为 reset 之后要回答的是"本窗口内的最大值" |
 | P2 | virtio-fs/DAX | 共享存储 |
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |
+
+**已完成，不再是阻塞项**（列在这里是为了说明它们曾挡住什么，以及各自还剩什么残留）：
+
+| 级别 | 阻塞项 | 理由 |
+|---|---|---|
+| ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
+| ~~P0~~ | ~~`g_net_lock` 分片~~ | **已完成**（`2f17a5ba8` + 阶段 E `7c7a4d7c8`）：`g_net_lock` 已删除，socket 表分片为桶锁，桶锁又被 `net_socket_t.lock` 取代，现在只管 slot 表。SERVER 档一个桶是 512 个 slot，所以阶段 E 之前一个 socket 的 `recv` 要和同桶另外 511 个互斥。**残留**：`2f17a5ba8` 自陈的三项运行期验证（引用计数不漏不重、`LOCK_COUNTERS_MAX` 注册预算、`-ENOTCONN` 窗口）仍开放，清单在 `docs/measured/impl-notes-net.md`；合并后全量回归与 ASAN + SMP 压测**未做**；net 锁一侧**没有**运行期探针（见下一行） |
+| ~~P0~~ | ~~PID ns + userns + `pivot_root`~~ | **已完成**：`pivot_root`（`smoke-pivot-root`）、PID ns（`smoke-pidns`）、userns（`smoke-userns`）均已落地。残留：无 `nsproxy`、capabilities 仅 15 个子集、mount 共享子树传播未实现 |
+| ~~P0~~ | ~~ext4 可写 journal + 崩溃注入测试~~ | **已完成**：运行时 metadata 写入走 JBD2 ordered commit，commit 指针按事务大小推进，数据 checksum 记在 descriptor tag 内（不再写进块尾污染 bitmap），挂载时以日志 `s_start` 为权威判据；`make smoke-ext4-journal` 做四点崩溃—重启往返并用 `e2fsck -fn` 双向把关，x86_64/riscv64/aarch64/ppc64le/loongarch64 五架构 5/5 PASS |
+| ~~P1~~ | ~~conntrack + NAT~~ | **已实现**（`f48a8f5f2` / `0d9d0885f` / `4b4472d17` / `1475cd9dd` / `dd4e5678a`）：五元组哈希表（按档位 64/256/1024）、NEW/ESTABLISHED、按状态分开的空闲超时、满表 LRU、SNAT/MASQUERADE（output）与 DNAT（input），RFC 1624 增量校验和，门禁 `make smoke-netfilter-nat`（hostfwd 18081 → guest 18082，宿主探针收到回显）。**残留**：无 ALG / 无 ICMP 跟踪 / 不做分片 NAT；**端到端门禁只覆盖 DNAT**（QEMU user-net 里 SNAT 没有对等场景），SNAT/MASQUERADE 靠主机侧单元门禁 `test-nat-rewrite` 覆盖出货源码，`masquerade` 的 DHCP 换址行为仍未在真机验证；LRU 与超时两条路径的门禁已补（`faa8ca1b3`，`smoke-ct-capacity`），代价是两个 `/proc` 测试钩子。详见 [net/conntrack-nat.md](net/conntrack-nat.md) |
+| ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
+
+### 第二轮（门禁与文档）落地的五条流
+
+第一轮收的是「功能能不能跑」，这一轮收的是「有没有门禁真的跑过」。逐条对应上表里的哪句话：
+
+| 流 | 落地 | 对应阻塞项 |
+|---|---|---|
+| `make check-format` 真正执行 | 装上 `clang-format` 23.1.2（pipx），新文件 `netfilter_nat.c` / `netfilter_internal.h` / `netnat_test.c` 过格式；**门禁本身仍红**，见下 | 新增，见文末 |
+| conntrack LRU / 空闲超时门禁 | `make smoke-ct-capacity`（`faa8ca1b3`） | conntrack + NAT 行的 "LRU 与超时只有计数" 一句已失效，改写 |
+| SNAT/MASQUERADE 可测性 | `test-nat-rewrite`（`ee883ac7e`），把 NAT 纯改写半边拆到 `kernel/net/netfilter_rewrite.c` 供主机侧编译 | conntrack + NAT 行的 "端到端只覆盖 DNAT" 一句保留并加注 |
+| `tools/a20_derive.py` 的 hostfwd 拼写 | `tcp::5555-:5555` 补出 guest 地址与 `=on`（`32764f659`）。**原判据不成立**：QEMU 10.0.13 上 `-netdev user` 并不报 "Missing guest address"，裸短格式被拒的报错是 "Invalid parameter"；补齐前后两种拼写都真的绑上 5555。改动仍然保留，因为带地址的拼写是 QEMU 唯一在 `-netdev user` 与 `-nic user` 两种写法下都稳定的形状 | 无（本来不在表里） |
+| 文档对齐 | 本节表重排 + `net/conntrack-nat.md` 补 ICMP / LRU / 超时边界与门禁表 + README 网络段 | — |
+
+**`check-format` 为什么还是红的**：`.clang-format` 写的是 `BreakBeforeBraces: Attach`，树里
+写的是 Linux 风格，995 个在册源文件有 843 个被基线豁免（`tools/clang-format-baseline.txt`
+写着 "Only ever shrink"），剩下 57 个漂移文件属于别的流。改 `.clang-format` 只会更糟——
+实测改成 `Linux` 后漂移从 60 涨到 138。这一条要么全树重排（跨流），要么明确决定重新划基线，
+不是网络这条流能单方面定的，所以留在这里而不是被顺手抹平。
 
 ### server world 的实测状态（2026-10）
 
