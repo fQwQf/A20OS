@@ -383,7 +383,9 @@ static void user_trap_handler(trap_context_t *ctx) {
          * successful syscalls avoid two emulated CSR reads under QEMU TCG. */
         vaddr_t stval = arch_read_tval();
         vaddr_t sepc = TRAP_CTX_EPC(ctx);
+#ifndef ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN
         TRAP_CTX_KScratch0(ctx) = arch_read_addr_space_token();
+#endif
         /* Instruction bytes are only diagnostic input for fault/illegal
          * paths.  Looking up and copying sepc on every successful ecall made
          * the syscall hot path perform an unrelated page-table walk. */
@@ -434,9 +436,25 @@ static void user_trap_handler(trap_context_t *ctx) {
                 signal_deliver_user(ctx);
                 return;
             }
-            if (user_sync_signal_is_handled(cur, SIGSEGV) &&
-                deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
-                return;
+            if (user_sync_signal_is_handled(cur, SIGSEGV)) {
+                /* A process that installed its own SIGSEGV handler -- the JVM
+                 * does, to write hs_err -- used to return here with nothing
+                 * printed, so every MC crash reached the log undecoded while
+                 * the unhandled-fault path below dumped page_words/va_words/
+                 * frame refs.  Deliver exactly as before, but diagnose first. */
+                dump_fault_pte(cur, stval);
+                dump_fault_pte(cur, sepc);
+                /* A load fault names its base register, not its source.  The
+                 * failing walk is musl's `mov -0x10(%rdi),%rax` followed by
+                 * `cmp %rcx,0x10(%rax)`, so rax is the null and rdi is the chunk
+                 * whose metadata is broken -- and no FAULT-* dump below reaches
+                 * here, because that block sits past this early return. */
+                vaddr_t rdi = (vaddr_t)arch_trap_ctx_reg(ctx, 5);
+                if (rdi && rdi != stval)
+                    dump_user_object(cur, rdi, "FAULT-DI");
+                if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
+                    return;
+            }
             printf("SIGSEGV: pid=%d code=%lu sepc=0x%lx stval=0x%lx abi=%d\n",
                   cur ? cur->pid : -1, (unsigned long)code,
                   (unsigned long)sepc, (unsigned long)stval,

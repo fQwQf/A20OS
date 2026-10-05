@@ -120,8 +120,39 @@ static void fdtable_files_put(files_struct_t *files)
     if (!files || !refcount_dec_and_test(&files->refcount))
         return;
 
-    vfile_t *to_close[MAX_FILES];
+    /* On the heap, not the stack: at MAX_FILES this array is 32 KiB and the
+     * kernel stack is 64 KiB. */
+    vfile_t **to_close = kmalloc(sizeof(vfile_t *) * MAX_FILES);
     int close_count = 0;
+    if (!to_close) {
+        /* Cannot snapshot the vfile pointers, so drop the table in place under
+         * the lock instead.  Every vfile still gets its owner lock released
+         * and its last reference dropped; only the ordering differs from the
+         * usual two-phase form, and this path runs once, at table teardown. */
+        uint64_t f = spin_lock_irqsave(&files->lock);
+        for (int word = 0; word < FDTABLE_WORDS; word++) {
+            uint64_t open = files->open_mask[word];
+            while (open) {
+                int bit = fdtable_ctz64(open);
+                int fd = (word << 6) + bit;
+                open &= open - 1;
+                if (fd >= MAX_FILES)
+                    break;
+                vfile_t *vf = files->fd[fd];
+                files->fd[fd] = NULL;
+                files->cloexec[fd] = 0;
+                env_kind_unregister(fd);
+                if (files == &fdtable_boot_files)
+                    continue;
+                if (files->release_owner_pid >= 0)
+                    vfs_release_process_file_locks(vf, files->release_owner_pid);
+                fdtable_slot_put(vf);
+            }
+            files->open_mask[word] = 0;
+        }
+        spin_unlock_irqrestore(&files->lock, f);
+        return;
+    }
     uint64_t flags = spin_lock_irqsave(&files->lock);
     for (int word = 0; word < FDTABLE_WORDS; word++) {
         uint64_t open = files->open_mask[word];
@@ -140,15 +171,16 @@ static void fdtable_files_put(files_struct_t *files)
     }
     spin_unlock_irqrestore(&files->lock, flags);
 
-    if (files == &fdtable_boot_files)
-        return; /* pinned forever; its stdio slots are never dropped */
-    for (int i = 0; i < close_count; i++) {
-        if (files->release_owner_pid >= 0)
-            vfs_release_process_file_locks(to_close[i],
-                                           files->release_owner_pid);
-        fdtable_slot_put(to_close[i]);
+    if (files != &fdtable_boot_files) {
+        for (int i = 0; i < close_count; i++) {
+            if (files->release_owner_pid >= 0)
+                vfs_release_process_file_locks(to_close[i],
+                                               files->release_owner_pid);
+            fdtable_slot_put(to_close[i]);
+        }
+        kfree(files);
     }
-    kfree(files);
+    kfree(to_close);
 }
 
 static int fdtable_ctz64(uint64_t bits)
@@ -404,8 +436,35 @@ void fdtable_close_on_exec(task_t *task)
     if (!files)
         return;
     uint64_t flags = spin_lock_irqsave(&files->lock);
-    vfile_t *to_close[MAX_FILES];
+    /* Heap, not the stack: MAX_FILES pointers is 32 KiB against a 64 KiB
+     * kernel stack.  A descriptor carrying O_CLOEXEC is normally a handful, so
+     * on allocation failure fall back to dropping them in place. */
+    vfile_t **to_close = kmalloc(sizeof(vfile_t *) * MAX_FILES);
     int close_count = 0;
+    if (!to_close) {
+        for (int word = 0; word < FDTABLE_WORDS; word++) {
+            uint64_t open = files->open_mask[word];
+            while (open) {
+                int bit = fdtable_ctz64(open);
+                int fd = (word << 6) + bit;
+                open &= open - 1;
+                if (fd >= MAX_FILES)
+                    break;
+                if (!files->cloexec[fd])
+                    continue;
+                vfile_t *vf = files->fd[fd];
+                files->fd[fd] = NULL;
+                files->cloexec[fd] = 0;
+                fdtable_note_free(files, fd);
+                env_kind_unregister(fd);
+                vfs_release_process_file_locks(vf, task->pid);
+                fdtable_slot_put(vf);
+            }
+        }
+        spin_unlock_irqrestore(&files->lock, flags);
+        fdtable_init_stdio(task);
+        return;
+    }
     for (int word = 0; word < FDTABLE_WORDS; word++) {
         uint64_t open = files->open_mask[word];
         while (open) {
@@ -432,6 +491,7 @@ void fdtable_close_on_exec(task_t *task)
         vfs_release_process_file_locks(to_close[i], task->pid);
         fdtable_slot_put(to_close[i]);
     }
+    kfree(to_close);
     fdtable_init_stdio(task);
 }
 

@@ -3,7 +3,9 @@
 #include "mm/mm.h"
 #include "mm/frame.h"
 #include "mm/vm.h"
+#include "mm/vm_internal.h"
 #include "mm/vmo.h"
+#include "fs/page_cache.h"
 
 /*
  * VMO-backed region export and madvise/mlock helpers — ABI-agnostic MM
@@ -12,7 +14,10 @@
  * mm_lookup_vmo_region backs the Native vm_share_region syscall: the range
  * must be fully covered by a single VM_VMO VMA and the returned VMO carries
  * its own reference.  mm_madvise_dontneed implements MADV_DONTNEED/MADV_FREE
- * page discard (VMO frames stay owned by their VMO).  mm_vma_set_lock
+ * page discard with the same frame-ownership classification as munmap:
+ * VM_VMO and VM_PFNMAP frames stay owned by their VMO/global allocator, and
+ * file-backed leaves are released through the page cache, never frame_put().
+ * mm_vma_set_lock
  * toggles the mlock-style VMA flag under mm->lock.
  */
 
@@ -66,7 +71,7 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
     for (vaddr_t va = addr; va < end;) {
         mm_seg_t *vma = mm_seg_find(mm, va);
         if (!vma || va >= vma->end) break;
-        int is_vmo = (vma->vm_flags & VM_VMO) != 0;
+        int no_frame_ref = (vma->vm_flags & (VM_PFNMAP | VM_VMO)) != 0;
         vaddr_t vma_end = vma->end;
 
         while (va < vma_end && va < end) {
@@ -75,10 +80,29 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             size_t leaf_size = 0;
             pte_t *pte = pt_lookup_leaf(mm->pgdir, va, &level, &base, &leaf_size);
             if (!pte || !(*pte & PTE_V)) { va += PAGE_SIZE; continue; }
-            if (is_vmo) {
-                /* VMO frames are owned by the VMO; unmapping a PTE must not
-                 * frame_put() them.  Drop the PTE and let the VMO keep the
-                 * canonical frame. */
+            /* A huge leaf that straddles either end of the request cannot be
+             * dropped wholesale: pt_unmap_leaf() would discard the whole leaf,
+             * including pages outside [addr, end) and outside the VMA, and the
+             * cursor would then step past them.  Split it first, exactly as
+             * munmap.c, mprotect.c and mremap.c do. */
+            if (level > 0 &&
+                (base < va || base + leaf_size > end || base + leaf_size > vma_end)) {
+                int dr = mm_demote_huge_page(mm, va);
+                if (dr < 0) {
+                    spin_unlock_irqrestore(&mm->lock, mm_flags);
+                    mm_tlb_invalidate_finish(mm);
+                    return dr;
+                }
+                continue;
+            }
+            if (no_frame_ref) {
+                /* VMO frames are owned by the VMO; PFNMAP leaves (vdso/vvar,
+                 * framebuffer, driver BARs) carry no per-mapping frame
+                 * reference at all -- vdso.c installs the single global frame
+                 * with pt_map() and never frame_get()s it.  Unmapping such a
+                 * PTE must drop the PTE only, or the mapping's own "release"
+                 * drives a globally shared, still-executable frame to zero and
+                 * buddy recycles it.  Same guard as mm/munmap.c. */
                 paddr_t dummy = 0;
                 if (pt_unmap_leaf(mm, va, &dummy, &base,
                                   &leaf_size, NULL) == 0) {
@@ -92,7 +116,22 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             }
             paddr_t pa = 0;
             pfn_t held = phys_to_pfn(arch_pte_addr(*pte));
-            if (!pfn_valid(held) || mm_tlb_hold_frame(mm, held) < 0) {
+            /* A MAP_PRIVATE file leaf may still be the canonical page-cache
+             * frame (handle_file_fault() keeps one installed read-only +
+             * PTE_COW with a cache pin for the VMA's lifetime).  Its frame
+             * refcount belongs to the page cache, so the frame hold/put pair
+             * below would both leak the mapping's cache pin and put the
+             * cache's own frame down to zero.  Same leaf test as munmap.c. */
+            page_cache_page_t *held_pcp =
+                mm_file_cache_mapping_get(vma, va, held);
+            if (held_pcp) {
+                if (mm_tlb_hold_page(mm, held_pcp) < 0) {
+                    page_cache_put(held_pcp);
+                    spin_unlock_irqrestore(&mm->lock, mm_flags);
+                    mm_tlb_invalidate_finish(mm);
+                    return -ENOMEM;
+                }
+            } else if (!pfn_valid(held) || mm_tlb_hold_frame(mm, held) < 0) {
                 spin_unlock_irqrestore(&mm->lock, mm_flags);
                 mm_tlb_invalidate_finish(mm);
                 return -ENOMEM;
@@ -100,12 +139,19 @@ int mm_madvise_dontneed(mm_struct_t *mm, vaddr_t addr, size_t len)
             if (pt_unmap_leaf(mm, va, &pa, &base, &leaf_size, NULL) == 0) {
                 mm_tlb_note_change(mm, base, leaf_size);
                 if (pa) {
-                    frame_put(phys_to_pfn(pa));
+                    if (held_pcp) {
+                        page_cache_put(held_pcp);
+                        page_cache_put(held_pcp);
+                    } else {
+                        frame_put(phys_to_pfn(pa));
+                    }
                     size_t pages = leaf_size / PAGE_SIZE;
                     mm_rss_sub_clamped(mm, pages);
                 }
                 va = base + leaf_size;
             } else {
+                if (held_pcp)
+                    page_cache_put(held_pcp);
                 va += PAGE_SIZE;
             }
         }
