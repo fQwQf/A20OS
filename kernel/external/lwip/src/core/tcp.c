@@ -106,6 +106,9 @@
 #include "lwip/memp.h"
 #include "lwip/tcp.h"
 #include "lwip/priv/tcp_priv.h"
+#if LWIP_TCP_CUBIC
+#include "lwip/priv/tcp_cubic_priv.h" /* A20OS: per-connection congestion control */
+#endif
 #include "lwip/debug.h"
 #include "lwip/stats.h"
 #include "lwip/ip6.h"
@@ -1340,6 +1343,33 @@ tcp_slowtmr_active_bucket(int lane)
 
             /* Reduce congestion window and ssthresh. */
             eff_wnd = LWIP_MIN(pcb->cwnd, pcb->snd_wnd);
+#if LWIP_TCP_CUBIC
+            /* A20OS divergence: an RTO is a loss event like any other, so CUBIC
+             * applies the same multiplicative decrease and restarts its epoch
+             * from here.  RFC 8312 4.7 is explicit that the congestion avoidance
+             * after a timeout uses Eq. 1 with K := 0 and W_max set to the
+             * window at the start of that avoidance, which is why this calls
+             * tcp_cubic_on_rto() and not tcp_cubic_on_loss(): routing the RTO
+             * through the fast-retransmit path would put the connection on a
+             * curve anchored to a W_max the timeout has already moved past.
+             *
+             * Note the difference from the Reno arm below, which sets
+             * cwnd = mss: that is a full reset to slow start, whereas CUBIC
+             * drops to W_max * beta_cubic and leaves slow start immediately.
+             * Sharing one path would silently turn CUBIC's loss response into
+             * Reno's. */
+            if (pcb->cong_alg == TCP_CONG_CUBIC) {
+              tcp_cubic_on_rto(pcb, eff_wnd);
+              LWIP_DEBUGF(TCP_CWND_DEBUG, ("tcp_slowtmr: cubic cwnd %"TCPWNDSIZE_F
+                                           " ssthresh %"TCPWNDSIZE_F"\n",
+                                           pcb->cwnd, pcb->ssthresh));
+              pcb->bytes_acked = 0;
+              /* The following needs to be called AFTER cwnd is set to one
+                 mss - STJ */
+              tcp_rexmit_rto_commit(pcb);
+              continue;
+            }
+#endif /* LWIP_TCP_CUBIC */
             pcb->ssthresh = eff_wnd >> 1;
             if (pcb->ssthresh < (tcpwnd_size_t)(pcb->mss << 1)) {
               pcb->ssthresh = (tcpwnd_size_t)(pcb->mss << 1);
@@ -2012,6 +2042,12 @@ tcp_alloc(u8_t prio)
     pcb->rtime = -1;
     pcb->cwnd = 1;
     pcb->tmr = tcp_ticks;
+    /* A20OS divergence: cong_alg is 0 == TCP_CONG_RENO after the memset above,
+     * which is the right default -- a connection nobody asked about behaves
+     * exactly as it did before CUBIC existed.  tcp_cubic_init() is called from
+     * the socket layer only when a caller selects "cubic", because W_max has
+     * to be seeded from the real MSS, which is still INITIAL_MSS here and gets
+     * replaced by the peer's MSS option later. */
     /* Deliberately not stamped with a lane counter: tcp_alloc() runs before
        tcp_bind() has derived ->lane from local_ip/local_port, so there is no
        lane to stamp.  A fresh pcb must not look already-processed to whichever

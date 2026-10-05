@@ -156,6 +156,12 @@ _Static_assert(MEMP_NUM_SYS_TIMEOUT >= MEMP_NUM_TCP_PCB,
 #define LWIP_TCP_MAX_SACK_NUM           NET_PROFILE_TCP_MAX_SACK_NUM
 #define LWIP_TCP_TIMESTAMPS             NET_PROFILE_TCP_TIMESTAMPS
 
+/* CUBIC (RFC 8312) as a second, per-connection congestion control algorithm.
+ * Not an upstream option -- see kernel/external/lwip/DIVERGENCE.md 2.5.  It
+ * adds ~28 B to every tcp_pcb and ~4 KB of .text; EMBEDDED leaves it off for
+ * the same reason it leaves the options off. */
+#define LWIP_TCP_CUBIC                  NET_PROFILE_TCP_CUBIC
+
 /* init.c rejects SACK_OUT without the ooseq queue, and SACK is only meaningful
  * with somewhere to record the ranges it reports. */
 _Static_assert(!LWIP_TCP_SACK_OUT || TCP_QUEUE_OOSEQ,

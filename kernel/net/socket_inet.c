@@ -11,6 +11,10 @@
 #include "lwip/udp.h"
 #include "lwip/raw.h"
 #include "lwip/tcp.h"
+#if LWIP_TCP_CUBIC
+/* TCP_CONG_* values for the per-socket congestion control selection. */
+#include "lwip/priv/tcp_cubic_priv.h"
+#endif
 #include "lwip/pbuf.h"
 #include "lwip/ip.h"
 #include "lwip/prot/icmp.h"
@@ -1031,6 +1035,12 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                 child->ever_connected = 1;
                 child->nonblock = listener->nonblock;
                 child->tcp_nodelay = listener->tcp_nodelay;
+                /* Linux: an accepted socket inherits the listener's congestion
+                 * control.  Without this a server that set TCP_CONGESTION on
+                 * its listener would have every accepted connection silently
+                 * fall back to the default, and getsockopt on the child would
+                 * report an algorithm the caller never asked for. */
+                child->tcp_congestion = listener->tcp_congestion;
                 child->keepalive = listener->keepalive;
                 child->keep_idle = listener->keep_idle;
                 child->keep_intvl = listener->keep_intvl;
@@ -1447,6 +1457,56 @@ void net_inet_bottom_half_process_all(void)
 }
 
 /*
+ * Select the congestion control algorithm for a pcb.
+ *
+ * Separate from net_inet_tcp_apply_options() because setsockopt needs it on an
+ * already-established pcb, where re-running that function would also reinstall
+ * the callbacks and re-apply every other socket option.  Requires
+ * g_lwip_lock held: it writes pcb state.
+ */
+void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
+{
+#if LWIP_TCP_CUBIC
+    if (!pcb)
+        return;
+    if (alg == TCP_CONG_CUBIC) {
+        if (pcb->cong_alg != TCP_CONG_CUBIC) {
+            pcb->cong_alg = TCP_CONG_CUBIC;
+            /* Switching algorithm on a live connection must not reset the
+             * window or throw away how far it has grown, so the cubic state
+             * starts empty rather than seeded: RFC 8312 4.8 already says what
+             * to do when a connection enters congestion avoidance without a
+             * congestion event behind it, and that is exactly this case --
+             * W_max := the window as it is now, K := 0.  Seeding W_max from
+             * cwnd here instead would be the same computation done in the
+             * wrong place, and would leave the pcb's state depending on a
+             * caller's choice of when to switch.
+             *
+             * Note this deliberately does NOT reproduce the RFC 2581 initial
+             * window for an unhandshaken pcb, the way the old comment here
+             * did: LWIP_TCP_CALC_INITIAL_CWND is a macro private to tcp_in.c,
+             * and a second copy of it in the socket layer is a second thing to
+             * drift out of step.  A pcb that has not finished its handshake
+             * has not entered congestion avoidance at all, so tcp_cubic_on_ack
+             * will not read this state until it has. */
+            tcp_cubic_init(pcb);
+        }
+    } else {
+        /* Back to Reno.  tcp_cubic_on_ack()/on_loss() are gated on cong_alg,
+         * so the stale cubic state is simply never read again -- there is
+         * nothing to unwind and no window to restore. */
+        pcb->cong_alg = TCP_CONG_RENO;
+    }
+#else
+    /* CUBIC is not compiled in.  On this configuration the setsockopt path
+     * rejects every name but "reno" (see socket_control.c), so this can only
+     * ever be called with the default and there is nothing to do. */
+    LWIP_UNUSED_ARG(pcb);
+    LWIP_UNUSED_ARG(alg);
+#endif
+}
+
+/*
  * Apply the socket's TCP options and install its callbacks on an lwIP pcb.
  *
  * Shared by socket creation and by the accept path, which adopts a pcb lwIP
@@ -1457,6 +1517,7 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb)
 {
     if (s->tcp_nodelay)
         tcp_nagle_disable(pcb);
+    a20_net_cong_apply(pcb, s->tcp_congestion);
     if (s->keepalive)
         pcb->so_options |= SOF_KEEPALIVE;
     if (s->keep_idle > 0)
