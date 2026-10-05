@@ -113,6 +113,20 @@ commit**。现已显式抓取并记录基线：
 `NET_PCB_LANE_WILDCARD`、以及把 4 元组哈希到 lane 的 `net_lane_of()`。
 `struct tcp_pcb` / `struct udp_pcb` 增加了 `lane` 字段。
 
+**桶下标与归属 lane 是两个不同的量，`pcb_lane.h` 现在把两者分开命名：**
+
+| 宏 | 回答的问题 | 取值 |
+|---|---|---|
+| `NET_PCB_LANE_OF_PCB(pcb)` | 查找要遍历哪个链表头 | 通配 pcb 返回哨兵桶 `NET_PCB_LANE_ANY` |
+| `NET_PCB_LANE_OWNER_OF_PCB(pcb)` | 这个 pcb 的**工作**归哪条 lane | 恒为 `0..CONFIG_NET_LANES-1` 的真实 lane |
+
+通配 pcb（`bind(0.0.0.0)`）在 `NET_PCB_LANE_OWNER_OF_PCB()` 下的归属 lane 是
+`net_lane_of(0, local_port)`，与移植层 `net_socket_lane_of_addr()` 对同一个通配
+bind 算出的值相同——两处都是"哈希零地址"，所以这是一致而不是两套需要手工对齐
+的规则。阶段 D 按归属 lane 分发收包，所以 socket 侧必须取归属 lane。哨兵桶只是
+查找用的桶，`CONFIG_NET_LANES` 并不存在这一条 lane，任何拿它去索引 per-lane 数组
+的地方都是越界。
+
 **这不是"补丁级"改动，而是数据结构级改动。** 这一点必须让任何读代码的人知道：
 本目录下的 TCP/UDP 链表组织方式与上游不同，不可按上游文档推断行为。
 
