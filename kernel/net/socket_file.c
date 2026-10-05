@@ -653,6 +653,33 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
         return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &mtu, sizeof(mtu)) < 0
                ? -EFAULT : 0;
     }
+    case A20_SIOCSIFMTU: {
+        /*
+         * Routed through a20_lwip_if_set_mtu(), not a bare nif->mtu write, and
+         * the reason is the same one RTM_NEWLINK goes through it for: the
+         * RFC 791 floor and the profile's frame-size ceiling are enforced
+         * there and nowhere else.  Setting nif->mtu directly would be the one
+         * way to configure an MTU the receive path then silently truncates at
+         * its scratch-buffer clamp and the transmit path refuses with ERR_BUF.
+         *
+         * This case was missing -- SIOCSIFMTU was dispatched here by
+         * net_vfile_ioctl() but had no arm in the switch, so every caller got
+         * -ENOTTY and the ceiling a20_lwip_if_set_mtu() enforces was reachable
+         * only from netlink.  That is why the smoke for the ceiling had to go
+         * through RTM_NEWLINK until now; it now covers both entry points.
+         *
+         * The range check is here rather than in the callee because that takes
+         * uint16_t: an ifreq's ifr_mtu is an int, and 0x10000 would truncate
+         * back to 0 and be refused as a below-minimum MTU rather than as the
+         * out-of-range value it is.
+         */
+        int mtu;
+        if (copy_from_user(&mtu, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(mtu)) < 0)
+            return -EFAULT;
+        if (mtu < 0 || mtu > 0xffff)
+            return -EINVAL;
+        return a20_lwip_if_set_mtu(netif_get_index(nif), (uint16_t)mtu);
+    }
     case A20_SIOCGIFINDEX: {
         /* Not netif_name_to_index(): netif->name is a two-character
          * abbreviation, not a NUL-terminated name, so that lookup compared

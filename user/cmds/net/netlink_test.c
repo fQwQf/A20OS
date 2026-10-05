@@ -376,10 +376,19 @@ static void test_envelope_refusals(int fd, int ifindex)
        "a multipart RTM_NEWADDR is refused with EINVAL");
 }
 
-static void test_link(int fd, int ifindex)
+static void test_link(int fd, int sfd, int ifindex, const char *name)
 {
     uint32_t mtu;
     uint16_t small = 0;
+    struct ifreq ifr;
+    uint32_t current_mtu = 0;
+
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    if (ioctl(sfd, SIOCGIFMTU, &ifr) == 0)
+        current_mtu = (uint32_t)ifr.ifr_mtu;
+    else
+        ok(0, "read the interface's MTU before the link write tests");
 
     errno = 0;
     ok(send_link(fd, ifindex, 0x10000, 0, NULL, 0) < 0 && errno == EOPNOTSUPP,
@@ -407,9 +416,148 @@ static void test_link(int fd, int ifindex)
     ok(send_link(fd, ifindex, 0x1, 0x1 /* IFF_UP in both */, NULL, 0) >= 0,
        "RTM_NEWLINK setting IFF_UP on an already-up link is accepted");
 
-    mtu = 1500;
+    /* The interface's own MTU, read rather than written as 1500.  This check
+     * is "re-applying the current MTU is accepted", and 1500 was only ever the
+     * current MTU on the default and server tiers: the embedded tier's frame
+     * buffer is 512 B so its link runs at 498, and asking for 1500 there is not
+     * a no-op but a request the profile's ceiling refuses.  The hardcoded
+     * value therefore made this an implicit profile-1 failure -- it only did
+     * not show on tier 1 because the suite never got that far there. */
+    mtu = current_mtu;
     ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) >= 0,
        "RTM_NEWLINK re-applying the current MTU is accepted");
+}
+
+/* ------------------------------------------------------------------ */
+/* The MTU ceiling                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * a20_lwip_if_set_mtu() refuses an MTU whose frame (MTU + ETH_HLEN) does not
+ * fit the profile's device scratch buffer, and that refusal had no gate at
+ * all: the tree shipped no user of SIOCSIFMTU, and netlink_test only ever
+ * re-applied the MTU the interface already had, which is accepted on the tiers
+ * where it is below the ceiling.  So the ceiling was a line of kernel code
+ * nothing had ever run.
+ *
+ * The ceiling is per profile -- the embedded tier's frame buffer is 512 B so
+ * the cap is 498, the default and server tiers use 1536 B so theirs is 1522 --
+ * and userspace has no way to read which tier is built.  It is therefore
+ * discovered instead of hardcoded: acceptance is monotonic in the requested
+ * MTU (below 68 is the RFC 791 floor, above the cap is the frame buffer), so a
+ * bisection converges on the exact boundary, and both sides of that boundary
+ * are then asserted rather than one arbitrary oversized value being refused.
+ *
+ * Both entry points are covered, because they are two doors to one check:
+ * RTM_NEWLINK/IFLA_MTU and SIOCSIFMTU both end in a20_lwip_if_set_mtu().
+ */
+static void test_mtu_ceiling(int fd, int sfd, int ifindex, const char *name)
+{
+    struct ifreq ifr;
+    uint32_t mtu, original = 0, cap;
+    int have_original;
+
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    have_original = ioctl(sfd, SIOCGIFMTU, &ifr) == 0;
+    if (have_original)
+        original = (uint32_t)ifr.ifr_mtu;
+    else
+        ok(0, "read the interface's current MTU");
+
+    /* Above every profile's ceiling: 65535 + ETH_HLEN exceeds both the 512 B
+     * and the 1536 B scratch buffers.  Without this the rest of the function
+     * could pass on a kernel that had no ceiling at all, as long as bisection
+     * then reported 65535 -- so the bisection result is checked against this
+     * rather than trusted on its own. */
+    mtu = 0xffff;
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "an MTU of 65535 is refused with EINVAL on every profile");
+
+    /* Bisect: lo is known-acceptable (the RFC 791 minimum), hi is known
+     * refused (65535, asserted just above). */
+    {
+        uint32_t lo = 68, hi = 0xffff;
+        while (lo < hi) {
+            uint32_t mid = lo + (hi - lo + 1) / 2;
+            if (send_link(fd, ifindex, 0, 0, &mid, sizeof(mid)) >= 0)
+                lo = mid;
+            else
+                hi = mid - 1;
+        }
+        cap = lo;
+    }
+
+    ok(cap > 68 && cap < 0xffff,
+       "the MTU ceiling is a profile bound, not the bottom or the top of the "
+       "u16 range");
+    /* Printed because the value is the whole point of the test and it differs
+     * per profile: 498 on the embedded tier, 1522 on the default and server
+     * ones.  A gate log that records it turns "the ceiling still holds" into a
+     * number that can be compared across builds. */
+    printf("%s: info MTU ceiling discovered at %u (profile frame buffer %u B, "
+           "running with %u)\n", TEST_NAME, (unsigned)cap,
+           (unsigned)(cap + 14), (unsigned)original);
+
+    if (have_original)
+        ok(cap >= original,
+           "the MTU ceiling is at least the MTU the interface is running with");
+
+    /* One byte over.  This is the assertion the path never had: the value is
+     * derived from the kernel's own behaviour, so it fails if the cap moves
+     * without this test following, and it fails if the cap stops existing. */
+    mtu = cap + 1;
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "one byte above the profile's MTU ceiling is refused with EINVAL");
+    errno = 0;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) < 0 && errno == EINVAL,
+       "the refusal is repeatable, not a one-shot");
+
+    mtu = cap;
+    ok(send_link(fd, ifindex, 0, 0, &mtu, sizeof(mtu)) >= 0,
+       "the MTU ceiling itself is accepted");
+
+    /* And the ceiling took effect, rather than being validated and discarded. */
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    if (ioctl(sfd, SIOCGIFMTU, &ifr) == 0)
+        ok((uint32_t)ifr.ifr_mtu == cap,
+           "an accepted MTU is the MTU the interface then reports");
+    else
+        ok(0, "read the MTU back after setting it");
+
+    /* The ioctl door to the same check.  SIOCSIFMTU returned ENOTTY for every
+     * caller until it was wired to a20_lwip_if_set_mtu(), so this is also the
+     * only assertion that the ioctl reaches the check at all. */
+    memset(&ifr, 0, sizeof(ifr));
+    snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+    ifr.ifr_mtu = (int)cap + 1;
+    errno = 0;
+    ok(ioctl(sfd, SIOCSIFMTU, &ifr) < 0 && errno == EINVAL,
+       "SIOCSIFMTU above the profile's MTU ceiling is refused with EINVAL");
+    ifr.ifr_mtu = (int)cap;
+    ok(ioctl(sfd, SIOCSIFMTU, &ifr) == 0,
+       "SIOCSIFMTU at the profile's MTU ceiling is accepted");
+
+    /* Put the link back the way it was found: the rest of this test walks the
+     * address, netmask and flag state afterwards, and an MTU left at the
+     * ceiling is not the state the suite was written against. */
+    if (have_original) {
+        memset(&ifr, 0, sizeof(ifr));
+        snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+        ifr.ifr_mtu = (int)original;
+        if (ioctl(sfd, SIOCSIFMTU, &ifr) == 0) {
+            memset(&ifr, 0, sizeof(ifr));
+            snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%s", name);
+            ok(ioctl(sfd, SIOCGIFMTU, &ifr) == 0 &&
+                   (uint32_t)ifr.ifr_mtu == original,
+               "the MTU is back where the test found it");
+        } else {
+            ok(0, "restore the interface's original MTU");
+        }
+    }
 }
 
 static void test_addr_idempotent(int fd, int ifindex, const uint8_t addr[4],
@@ -734,7 +882,8 @@ int main(void)
 
     test_addr_refusals(nl, ifindex, addr);
     test_envelope_refusals(nl, ifindex);
-    test_link(nl, ifindex);
+    test_link(nl, sfd, ifindex, name);
+    test_mtu_ceiling(nl, sfd, ifindex, name);
     test_addr_idempotent(nl, ifindex, addr, mask);
     test_state_intact(sfd, name, addr, mask);
     test_multicast(ifindex, name, addr, mask);
