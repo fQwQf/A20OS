@@ -46,6 +46,35 @@
 #define E1000_TDT    0x3818U
 #define E1000_RAL0   0x5400U
 #define E1000_RAH0   0x5404U
+/* JUMBO[13:0] is the number of bytes of maximum frame beyond a plain 1514 B
+ * Ethernet frame; the receiver drops anything longer when RCTL[5] LPE is clear
+ * (hw/net/e1000x_common.c:141-161). */
+#define E1000_JUMBO  0x3CA0U
+
+/* Long-packet enable, and the ceiling this driver programs with it.
+ *
+ * Without LPE the device discards every frame past 1514 bytes
+ * (e1000x_is_oversized(), hw/net/e1000x_common.c:141-152), and since one
+ * receive descriptor here holds E1000_BUF_SIZE = 2048 bytes, no frame could
+ * ever span two descriptors: the EOP walk in e1000_recv() would be unreachable
+ * on any traffic.  LPE is what makes a cross-descriptor frame expressible at
+ * all.
+ *
+ * The ceiling is deliberately two buffers and not the 16 KiB the part can
+ * address, because that is the largest frame the walk above is claimed to
+ * handle without a burst of descriptors per packet: 1514 + 2560 = 4074 bytes
+ * of frame plus the 4-byte FCS lands inside 2 * 2048.  Real hardware honours
+ * JUMBO; QEMU checks only LPE against its own 16 KiB limit
+ * (hw/net/e1000x_common.c:147-149), so the register is written for the part's
+ * sake and not because QEMU reads it.
+ *
+ * This is a receive-side capability only.  The link MTU the stack advertises is
+ * NET_PROFILE_NETIF_MTU (kernel/net/net_profile.h), which stays 1500 on every
+ * profile, so a frame between 1515 and 4074 bytes is reassembled correctly here
+ * and then dropped by lwIP as over-long.  Raising the two together needs the
+ * profile table and the pbuf sizing in the net stack, not a driver register. */
+#define E1000_RCTL_LPE       (1U << 5)
+#define E1000_JUMBO_BYTES    2560U
 
 /* CTRL[6] SLU forces the PHY link up regardless of a cable, which the MAC
  * needs before it will pass traffic on some parts.  RCTL[1] EN is the receiver
@@ -142,6 +171,13 @@ typedef struct {
      * when the part has no ITR.  Reported on the ready line so a diff of two
      * boots shows whether throttling is in force. */
     uint32_t itr_us;
+    /* Frames the device spread over more than one receive descriptor, and
+     * whether that has been reported once.  Same job as the virtio-net counter:
+     * the EOP walk in e1000_recv() is only exercised by a frame that does not
+     * fit one buffer, so a zero here says the traffic never produced one, not
+     * that the walk works. */
+    uint32_t rx_multi_desc;
+    int rx_multi_reported;
 } e1000_device_t;
 
 static e1000_device_t g_e1000;
@@ -337,9 +373,11 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
     int bad = 0;
     int eop = 0;
     uint32_t last = nic->rx_next;
+    uint32_t walked = 0;
 
     for (uint32_t n = 0; n < E1000_RING_SIZE && !eop; n++) {
         last = slot;
+        walked++;
         arch_dma_sync_for_cpu(&nic->rx[slot], sizeof(nic->rx[slot]));
         /* Read every flag out of the descriptor word before clearing it: EOP
          * lives in the same byte that is about to be zeroed. */
@@ -387,6 +425,17 @@ static int e1000_recv(device_t *dev, void *buffer, size_t max_length)
      * descriptor has already been cleared, so it must be the one handed back. */
     e1000_write(nic, E1000_RDT, last);
     nic->rx_next = (last + 1U) % E1000_RING_SIZE;
+    /* Reported once: the multi-descriptor frame is the only thing that
+     * exercises the walk above, so its absence from a boot log is otherwise
+     * indistinguishable from the walk being broken. */
+    if (walked > 1) {
+        nic->rx_multi_desc++;
+        if (!nic->rx_multi_reported) {
+            nic->rx_multi_reported = 1;
+            kinfo("[E1000] first frame reassembled from %u descriptors (buf=%u)\n",
+                  walked, (unsigned)E1000_BUF_SIZE);
+        }
+    }
     spin_unlock_irqrestore(&nic->lock, flags);
     return bad ? 0 : (int)copied;
 }
@@ -606,9 +655,11 @@ static int e1000_probe(device_t *dev)
     /* The receiver is enabled last, after both rings and the transmit side, so
      * the device can never DMA into a ring this driver is still filling.  RCTL
      * also has to be 0 before the ring base registers are programmed again on a
-     * re-probe; e1000_remove() clears it. */
+     * re-probe; e1000_remove() clears it.  JUMBO is written before RCTL.EN so
+     * the ceiling is in place the instant the receiver can pass a long frame. */
+    e1000_write(nic, E1000_JUMBO, E1000_JUMBO_BYTES);
     e1000_write(nic, E1000_RCTL, E1000_RCTL_EN | E1000_RCTL_BAM |
-                E1000_RCTL_SECRC);
+                E1000_RCTL_SECRC | E1000_RCTL_LPE);
 
     dev->drv_priv = nic;
     /* Throttle before the causes are unmasked below, so the first interrupt
