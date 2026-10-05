@@ -130,6 +130,18 @@ void vdso_sync_realtime(uint64_t sec, uint64_t nsec, uint64_t base_cyc)
 
 vaddr_t vdso_auxv_ehdr(void)
 {
+#ifdef CONFIG_NOMMU
+    /* Without page tables there is no way to place the vDSO image at
+     * A20_VDSO_VA: pt_map() is a no-op, so vdso_map_image() reports success
+     * while the address keeps whatever else lives there.  Advertising it then
+     * hands libc a pointer to memory that is not the vDSO, and musl's
+     * __vdsosym() dereferences it as an ELF header -- reading a nonsense
+     * e_phnum and e_phentsize and walking phdrs until the walk leaves mapped
+     * memory.  Report no vDSO so libc takes the syscall path, which costs
+     * nothing here because there is no isolation to protect in the first
+     * place.  The initial image already passes 0 for the same reason. */
+    return 0;
+#else
     /*
      * Where the firmware does not grant U-mode access to the time CSR on every
      * boot hart, advertising the vDSO makes libc retry the faulting rdtime
@@ -140,6 +152,7 @@ vaddr_t vdso_auxv_ehdr(void)
     if (current_board && current_board->vdso_user_timer_unreliable)
         return 0;
     return g_vdso_pages ? (vaddr_t)A20_VDSO_VA : 0;
+#endif
 }
 
 static void vdso_append_vma(mm_seg_t **list, mm_seg_t *newv)
