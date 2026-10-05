@@ -503,6 +503,10 @@ static void test_sock_buffers(void)
         ok(getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv > 0,
            "a UDP socket reports a positive SO_SNDBUF");
         int udp_snd_default = rv;
+        sl = sizeof(rv);
+        ok(getsockopt(udp, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv > 0,
+           "a UDP socket reports a positive SO_RCVBUF");
+        int udp_rcv_default = rv;
 
         v = 16384;
         ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
@@ -515,8 +519,14 @@ static void test_sock_buffers(void)
         ok(setsockopt(udp, SOL_SOCKET, SO_SNDBUF, &v, sizeof(v)) == 0,
            "an oversized UDP SO_SNDBUF is accepted, not refused");
         sl = sizeof(rv);
+        /* Equal to udp_snd_default, not different from it: the send ceiling IS
+         * the default (one staged datagram), so an oversized request has to come
+         * back as exactly that.  Asserting equality is the stronger claim -- it
+         * pins the clamp to the ceiling rather than merely proving the number
+         * moved off the 1 GiB that was asked for, and it fails if the clamp
+         * ever lands somewhere arbitrary. */
         ok(getsockopt(udp, SOL_SOCKET, SO_SNDBUF, &rv, &sl) == 0 && rv > 0 &&
-           rv < (1 << 30) && rv != udp_snd_default,
+           rv < (1 << 30) && rv == udp_snd_default,
            "an oversized UDP SO_SNDBUF reads back clamped to the datagram "
            "ceiling");
 
@@ -531,8 +541,13 @@ static void test_sock_buffers(void)
         ok(setsockopt(udp, SOL_SOCKET, SO_RCVBUF, &v, sizeof(v)) == 0,
            "an oversized UDP SO_RCVBUF is accepted, not refused");
         sl = sizeof(rv);
+        /* Same equality argument as the send side: the receive ceiling is the
+         * queue's byte capacity, which is also the default, so the clamp has to
+         * land on precisely that number.  Compared against a value read from
+         * this same socket rather than a literal, so the test stays
+         * profile-independent. */
         ok(getsockopt(udp, SOL_SOCKET, SO_RCVBUF, &rv, &sl) == 0 && rv > 0 &&
-           rv < (1 << 30),
+           rv < (1 << 30) && rv == udp_rcv_default,
            "an oversized UDP SO_RCVBUF reads back clamped to the queue "
            "capacity");
 
