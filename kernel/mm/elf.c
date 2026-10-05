@@ -1460,7 +1460,9 @@ int elf_load(int fd, const char *path, elf_load_info_t *info) {
 
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                         char *const envp[], const elf_load_info_t *info,
-                        vaddr_t vdso_ehdr) {
+                        vaddr_t vdso_ehdr,
+                        uintptr_t out_auxv[A20_AUXV_MAX_PAIRS][2],
+                        uint32_t *out_auxv_n) {
     if (argc < 0 || argc > MAX_ARG_STRINGS)
         return 0;
 
@@ -1537,6 +1539,19 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
         { AT_NULL,   0               },
     };
     int naux = (int)(sizeof(auxv) / sizeof(auxv[0]));
+
+    /* Publish the vector for /proc/<pid>/auxv.  Copied here rather than read
+     * back from the stack at read time, because the stack belongs to the
+     * program: by the time anything asks, it may hold different bytes. */
+    if (naux > A20_AUXV_MAX_PAIRS)
+        return 0;   /* refuse rather than record a truncated vector */
+    if (out_auxv) {
+        for (int i = 0; i < naux; i++) {
+            out_auxv[i][0] = auxv[i][0];
+            out_auxv[i][1] = auxv[i][1];
+        }
+        *out_auxv_n = (uint32_t)naux;
+    }
 
     /* Keep the entry SP aligned without inserting padding between argc and
      * argv.  The auxv byte count is not 16-byte aligned on 32-bit targets. */
@@ -1682,8 +1697,12 @@ vaddr_t elf_setup_stack_a20_dynamic(vaddr_t stack_top, int argc,
 
     vaddr_t si_va = stack_top - sizeof(a20_start_info_t);
     /* Native-dynamic tasks keep the syscall path for now: no vDSO is
-     * mapped for them, so AT_SYSINFO_EHDR must be 0 (musl falls back). */
-    vaddr_t sp_va = elf_setup_stack(si_va, argc, argv, envp, info, 0);
+     * mapped for them, so AT_SYSINFO_EHDR must be 0 (musl falls back).
+     * A20's native ABI boots from a20_start_info_t rather than from a Linux
+     * auxv, so there is no vector to publish and /proc/<pid>/auxv stays empty
+     * for these tasks -- matching a program that was never handed one. */
+    vaddr_t sp_va = elf_setup_stack(si_va, argc, argv, envp, info, 0,
+                                    NULL, NULL);
     if (!sp_va)
         return 0;
 

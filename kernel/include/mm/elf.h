@@ -229,10 +229,18 @@ int elf_probe_foreign(int fd, elf_guest_key_t *out);
 /* Build initial user stack with argc/argv/envp/auxv.
  * vdso_ehdr, when nonzero, is published as AT_SYSINFO_EHDR (mm/vdso.h);
  * the caller must have mapped the vDSO image at that address.
+ *
+ * out_auxv receives the auxiliary vector that was written, as {type,value}
+ * pairs including the terminating {AT_NULL,0}, and out_auxv_n its pair count.
+ * The caller keeps that copy in the new mm_struct_t so /proc/<pid>/auxv can
+ * replay it; passing NULL for out_auxv skips the copy, for callers that have
+ * no mm to publish it into.
  * Returns new sp value. */
 vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                         char *const envp[], const elf_load_info_t *info,
-                        vaddr_t vdso_ehdr);
+                        vaddr_t vdso_ehdr,
+                        uintptr_t out_auxv[A20_AUXV_MAX_PAIRS][2],
+                        uint32_t *out_auxv_n);
 
 #ifdef CONFIG_ABI_NATIVE
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],

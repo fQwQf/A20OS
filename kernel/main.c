@@ -476,7 +476,10 @@ void init_kthread(void) {
     }
     /* pid 2 keeps the syscall time path (no vDSO); everything it execs
      * gets the vDSO through the regular exec path (proc/exec.c). */
-    uint64_t user_sp = elf_setup_stack(info.stack_top, init_argc, init_argv, NULL, &info, 0);
+    uintptr_t init_auxv[A20_AUXV_MAX_PAIRS][2];
+    uint32_t init_auxv_n = 0;
+    uint64_t user_sp = elf_setup_stack(info.stack_top, init_argc, init_argv, NULL, &info, 0,
+                                       init_auxv, &init_auxv_n);
     if (user_sp == 0) {
         panic("init: elf_setup_stack failed");
     }
@@ -496,6 +499,20 @@ void init_kthread(void) {
                                 , 0);
     if (ret < 0) {
         panic("init: proc_alloc_user failed: %d\n", ret);
+    }
+
+    /* Publish the init image's auxv for /proc/<pid>/auxv.  proc_alloc_user_image
+     * creates the mm, so this has to land after it rather than be passed in. */
+    {
+        task_t *init_task = proc_find_get(ret);
+        if (init_task && init_task->mm) {
+            init_task->mm->auxv_n = init_auxv_n;
+            for (uint32_t i = 0; i < init_auxv_n && i < A20_AUXV_MAX_PAIRS; i++) {
+                init_task->mm->auxv[i][0] = init_auxv[i][0];
+                init_task->mm->auxv[i][1] = init_auxv[i][1];
+            }
+            proc_put(init_task);
+        }
     }
 
 #ifdef CONFIG_NOMMU

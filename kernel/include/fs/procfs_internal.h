@@ -50,6 +50,7 @@ typedef enum {
     PF_PID_CWD,
     PF_PID_FD,
     PF_PID_ENVIRON,
+    PF_PID_AUXV,
     PF_PID_IO,
     PF_PID_LOGINUID,
     PF_PID_SESSIONID,

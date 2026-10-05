@@ -12,6 +12,34 @@
 #define PROT_WRITE     2
 #define PROT_EXEC      4
 
+/*
+ * AArch64 pointer-signature hints.  Both name page properties rather than
+ * access, so neither may be OR'd into the R|W|X triple above: a mapping is
+ * R+W+X-or-not independently of whether it was marked BTI-checked or
+ * tag-checked.  The values match the Linux ABI wire format and musl's
+ * arch/aarch64/bits/mman.h, so a program that includes <sys/mman.h> and passes
+ * them compiles and links without a private copy of the header.
+ *
+ * Rejecting them as unknown -- which is what a bare
+ * `prot & ~(PROT_READ|PROT_WRITE|PROT_EXEC)` test does -- turns such a caller
+ * into an EINVAL it cannot explain, and it is a caller with no way to recover:
+ * the bits arrive in the same argument as the access rights, so there is no
+ * separate request to retry without them.  Accepting them means the hint is
+ * dropped rather than honoured, which is a weaker guarantee and never a
+ * stronger one: nothing here grants access a mapping would not otherwise get.
+ */
+#define PROT_BTI       0x10
+#define PROT_MTE       0x20
+
+/* Bits that select a page property rather than an access.  Stripped from
+ * prot before it reaches the W^X policy and the page table, so a hint can
+ * never be mistaken for a permission by either. */
+#define PROT_HINT_MASK (PROT_BTI | PROT_MTE)
+
+/* Every prot bit this kernel recognises: the three access bits plus the
+ * accepted hints.  Anything else is still EINVAL. */
+#define PROT_KNOWN_MASK (PROT_READ | PROT_WRITE | PROT_EXEC | PROT_HINT_MASK)
+
 #define MAP_SHARED     0x01
 #define MAP_PRIVATE    0x02
 #define MAP_FIXED      0x10
