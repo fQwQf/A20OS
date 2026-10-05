@@ -479,6 +479,19 @@ void mm_insert_vma(mm_struct_t *mm, mm_seg_t *newv) {
 
     if (vma_can_merge(newv, newv->next)) {
         mm_seg_t *nxt = newv->next;
+        /* Stop naming nxt's extent before the survivor grows over it.  These
+         * two merges were the only mutators that dropped a mapping from the
+         * list without retiring its annotation first: every unmap, split and
+         * protect path does, and without it the shared entry keeps naming the
+         * absorbed record for good.  A node entry is much coarser than a
+         * mapping (2 MiB on x86_64), so ld.so mapping consecutive segments of
+         * one shared object routinely leaves one entry naming both the survivor
+         * and the mapping it just absorbed -- and a fault into the absorbed
+         * half then resolved two live records and declined to guess.
+         *
+         * Retire BEFORE the extent grows, so the range passed is nxt's own and
+         * not the survivor's. */
+        mm_mmap_seg_retire(mm, nxt, nxt->start, nxt->end);
         newv->end = nxt->end;
         newv->next = nxt->next;
         if (nxt->next) nxt->next->prev = newv;
@@ -486,6 +499,7 @@ void mm_insert_vma(mm_struct_t *mm, mm_seg_t *newv) {
     }
     if (vma_can_merge(newv->prev, newv)) {
         mm_seg_t *prv = newv->prev;
+        mm_mmap_seg_retire(mm, newv, newv->start, newv->end);
         prv->end = newv->end;
         prv->next = newv->next;
         if (newv->next) newv->next->prev = prv;
