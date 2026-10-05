@@ -672,10 +672,16 @@ static inline bool net_socket_is_live(const net_socket_t *s)
     return s && !s->closed;
 }
 
-/* Socket table enumeration for /proc/net/{tcp,udp,unix} (socket_table.c).
- * The walk takes one bucket lock at a time and runs the callback under that
- * bucket's lock, so the callback must not block, allocate, or take
- * g_lwip_lock. */
+/* Socket table enumeration for /proc/net/{tcp,tcp6,udp,udp6,unix}
+ * (socket_table.c).  The walk takes one bucket lock at a time and runs the
+ * callback under that bucket's lock, so the callback must not block,
+ * allocate, or take g_lwip_lock.
+ *
+ * `family` narrows the walk to AF_INET or AF_INET6, or AF_UNSPEC for "either"
+ * -- which is what /proc/net/tcp needs, because Linux's /proc/net/tcp lists
+ * IPv4 only and /proc/net/tcp6 lists IPv6 only, and a kernel that mixed the
+ * two into one file made every v6 row unreadable as a v6 row (it was rendered
+ * with the tcp6 address layout inside a file whose siblings are all v4). */
 typedef enum {
     NET_TABLE_TCP = 0,
     NET_TABLE_UDP,
@@ -683,7 +689,7 @@ typedef enum {
 } net_table_kind_t;
 
 typedef void (*net_table_visit_fn)(net_socket_t *s, void *arg);
-int      net_socket_table_walk(net_table_kind_t kind,
+int      net_socket_table_walk(net_table_kind_t kind, int family,
                                net_table_visit_fn fn, void *arg);
 
 /* Total bytes currently readable, for ioctl(FIONREAD) on a socket.  Holds only

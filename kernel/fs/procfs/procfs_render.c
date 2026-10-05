@@ -425,12 +425,23 @@ static void procfs_net_addr(char *out, size_t outsz, const uint8_t *addr,
     if (net_sockaddr_port(addr, addrlen, &sport) < 0)
         sport = 0;
 
-    if (domain == AF_INET6 && addrlen >= sizeof(net_sockaddr_in6_t)) {
-        const uint8_t *a = ((const net_sockaddr_in6_t *)addr)->sin6_addr;
+    if (domain == AF_INET6) {
+        /* The layout follows the socket's family, NOT whether this particular
+         * address happens to be filled in.  A peerless listener has no peer
+         * address at all, and keying the width off addrlen rendered its remote
+         * column in the tcp (8 hex digit) layout inside a tcp6 file -- so the
+         * one row that proves IPv6 inbound listen works was the one row whose
+         * columns did not line up.  Linux prints the all-zero address and port
+         * 0000 in the full four-word width for a listener with no peer: the
+         * column width of a /proc/net/tcp6 file is uniform by construction. */
+        uint32_t w[4] = { 0, 0, 0, 0 };
+        if (addr && addrlen >= sizeof(net_sockaddr_in6_t)) {
+            const uint8_t *a = ((const net_sockaddr_in6_t *)addr)->sin6_addr;
+            for (int i = 0; i < 4; i++)
+                w[i] = procfs_net_le32(a + 4 * i);
+        }
         snprintf(out, outsz, "%08X%08X%08X%08X:%04X",
-                 procfs_net_le32(a), procfs_net_le32(a + 4),
-                 procfs_net_le32(a + 8), procfs_net_le32(a + 12),
-                 (unsigned)net_ntohs(sport));
+                 w[0], w[1], w[2], w[3], (unsigned)net_ntohs(sport));
         return;
     }
     /* An unbound socket has no address yet; the column reads as the wildcard,
@@ -734,16 +745,25 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         net_format_status(buf, bufsz);
         break;
     case PF_NET_TCP:
-    case PF_NET_UDP: {
+    case PF_NET_UDP:
+    case PF_NET_TCP6:
+    case PF_NET_UDP6: {
         snprintf(buf, bufsz,
                  "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n");
+        /* Linux splits the two families into separate files, and so does this:
+         * tcp/udp list AF_INET rows, tcp6/udp6 list AF_INET6 rows.  The row
+         * format is identical -- procfs_net_addr() picks the address layout
+         * from the socket's own family, so a v6 row is four 32-bit words and a
+         * v4 row is one, exactly as on Linux. */
+        int datagram = (type == PF_NET_UDP || type == PF_NET_UDP6);
+        int family = (type == PF_NET_TCP6 || type == PF_NET_UDP6) ? AF_INET6
+                                                                 : AF_INET;
         procfs_net_rows_t rows = {
             .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
-            .datagram = (type == PF_NET_UDP),
+            .datagram = datagram,
         };
-        (void)net_socket_table_walk(rows.datagram ? NET_TABLE_UDP
-                                                  : NET_TABLE_TCP,
-                                    procfs_net_inet_row, &rows);
+        (void)net_socket_table_walk(datagram ? NET_TABLE_UDP : NET_TABLE_TCP,
+                                    family, procfs_net_inet_row, &rows);
         break;
     }
     case PF_NET_UNIX: {
@@ -752,7 +772,8 @@ int generate_content(pf_type_t type, int pid, char *buf, size_t bufsz) {
         procfs_net_rows_t rows = {
             .buf = buf, .bufsz = bufsz, .off = (size_t)strlen(buf),
         };
-        (void)net_socket_table_walk(NET_TABLE_UNIX, procfs_net_unix_row, &rows);
+        (void)net_socket_table_walk(NET_TABLE_UNIX, AF_UNSPEC,
+                                    procfs_net_unix_row, &rows);
         break;
     }
     case PF_NET_CONFIG:

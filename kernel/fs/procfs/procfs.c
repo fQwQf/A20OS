@@ -459,6 +459,12 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_NET && strcmp(name, "udp") == 0) {
         child = new_entry(name, PF_NET_UDP, 0);
         type = PF_NET_UDP;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "tcp6") == 0) {
+        child = new_entry(name, PF_NET_TCP6, 0);
+        type = PF_NET_TCP6;
+    } else if (dp && dp->type == PF_NET && strcmp(name, "udp6") == 0) {
+        child = new_entry(name, PF_NET_UDP6, 0);
+        type = PF_NET_UDP6;
     } else if (dp && dp->type == PF_NET && strcmp(name, "unix") == 0) {
         child = new_entry(name, PF_NET_UNIX, 0);
         type = PF_NET_UNIX;
@@ -1349,8 +1355,8 @@ static int procfs_freaddir(vfile_t *vf, void *dirp, size_t count) {
         ".", "..", NULL
     };
     static const char *net_entries[] = {
-        ".", "..", "status", "config", "route", "arp", "dev", "tcp", "udp",
-        "unix", NULL
+        ".", "..", "status", "config", "route", "arp", "dev", "tcp", "tcp6",
+        "udp", "udp6", "unix", NULL
     };
     static const char *sys_vm_entries[] = {
         ".", "..", "drop_caches", NULL

@@ -216,8 +216,14 @@ int net_listen_sock(net_socket_t *s, int backlog)
      * off-box completes its handshake.  The accept queue, the child
      * net_socket_t and the wakeup are the socket layer's in both modes, so this
      * changes reachability only.
+     *
+     * Both families take the lwip path.  It was AF_INET-only, which combined
+     * with net_inet_socket_init's AF_INET-only pcb arm to make AF_INET6
+     * inbound TCP impossible in either mode: the fast path dropped a NULL pcb
+     * and left the port unreachable, and the lwip path refused outright.
      */
-    if (s->domain == AF_INET && g_a20_tcp_path == A20_TCP_PATH_LWIP) {
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        g_a20_tcp_path == A20_TCP_PATH_LWIP) {
         int r = net_inet_tcp_listen(s, backlog);
         if (r < 0) {
             s->listening = 0;
@@ -229,11 +235,11 @@ int net_listen_sock(net_socket_t *s, int backlog)
         s->listening = 1;
         if (s->domain == AF_INET || s->domain == AF_INET6) {
             s->local_tcp = 1;
-            if (s->domain == AF_INET)
+            if (s->tcp)
                 net_tcp_drop_pcb(s);
         }
     }
-    if (s->domain == AF_INET) {
+    if (s->domain == AF_INET || s->domain == AF_INET6) {
         uint16_t lport = 0;
         net_sockaddr_port(s->local, s->local_len, &lport);
         ktrace_net("[NET] listen port=%u mode=%s\n", (unsigned)net_ntohs(lport),

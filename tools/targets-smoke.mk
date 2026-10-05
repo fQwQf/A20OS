@@ -791,3 +791,68 @@ smoke-net-tcp-lanes:
 		tail -n 60 "$$log"; \
 		exit 1; \
 	fi
+
+# ================================================================
+# IPv6 inbound-listen gate
+# ================================================================
+# Guards the v6 bind/listen/accept path, which did not exist: an AF_INET6
+# SOCK_STREAM socket() succeeded but net_inet_socket_init gave it no tcp_pcb
+# (that arm was AF_INET-only), so bind() had no pcb to bind, net_listen() had
+# no bound pcb to convert into a LISTEN pcb, and connect() to a v6 listener
+# failed with -ECONNREFUSED -- an errno that reads like "nothing is listening"
+# rather than "this kernel has no v6 path at all", which is how the gap
+# survived.
+#
+# ipv6_loopback_test asserts more than the handshake, unlike tcp_accept_test:
+# it also moves 4000 B each way and checks the accepted peer really is reported
+# as AF_INET6 on ::1.  Those are the two places the v6 path was separately
+# wrong -- the accept drain hardcoded child->domain = AF_INET, so a v6
+# connection was adopted into a v4 socket -- and a handshake-only gate would
+# have stayed green through both.
+#
+# Run in both TCP modes, as smoke-net-accept does for v4: "fast" pairs the two
+# sockets in the socket layer, "lwip" completes the handshake in the stack.
+# A mode that regresses while the other passes is a real defect the gate has
+# to be able to see, so neither run is optional.
+#
+# The /proc/net/tcp6 check lives inside ipv6_loopback_test, not here.  A gate
+# that `cat`s /proc/net/tcp6 after the test returns reads an empty file --
+# every socket the test made is closed by then -- so it could not have detected
+# a missing or empty tcp6 file, only its own grep failing.  The test therefore
+# reads both files while its own listener is still open and fails if the row is
+# absent, rendered in the v4 layout, or listed in /proc/net/tcp as well.
+smoke-net-ipv6: NET_HOSTFWD=
+smoke-net-ipv6:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-ipv6-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf '\nipv6_loopback_test 13001\nipv6_loopback_test 13002\necho tcpmode fast > /proc/net/config\nipv6_loopback_test 13003\nipv6_loopback_test 13004\ncat /proc/a20/perf\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_SMP) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 4 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev-smp4/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 || status=$$?; \
+	passes=$$(grep -c 'IPV6_LOOPBACK_TEST: PASS' "$$log" || true); \
+	fails=$$(grep -c 'IPV6_LOOPBACK_TEST: FAIL' "$$log" || true); \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	accept_drop=$$(last_counter net_accept_drop); \
+	bh_overflow=$$(last_counter net_bh_overflow); \
+	alloc_fail=$$(last_counter net_alloc_fail); \
+	if [ "$$passes" -eq 4 ] && [ "$$fails" -eq 0 ] && \
+	   [ "$$accept_drop" -eq 0 ] && \
+	   [ "$$bh_overflow" -eq 0 ] && \
+	   [ "$$alloc_fail" -eq 0 ] && \
+	   ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-ipv6: PASS (4 v6 loopback connections accepted and carried 4000 B each way, both TCP modes; each listener verified in /proc/net/tcp6 in the tcp6 layout and absent from /proc/net/tcp); log saved to $$log"; \
+	else \
+		echo "smoke-net-ipv6: failed with status $$status (passes=$$passes of 4, fails=$$fails accept_drop=$$accept_drop bh_overflow=$$bh_overflow alloc_fail=$$alloc_fail); tail of $$log:"; \
+		grep -E 'IPV6_LOOPBACK_TEST: FAIL|procheck|server:|client:' "$$log" | head -20 || true; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
