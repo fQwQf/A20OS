@@ -108,6 +108,38 @@ static double ref_k(double W_max)
     return ref_cbrt(W_max * (1.0 - BETA) / C_);
 }
 
+/* alpha_aimd = 3(1-beta)/(1+beta), the TCP-friendly slope, in segments per RTT
+ * (RFC 8312 Eq. 4's coefficient).  Written out from the RFC's own expression
+ * rather than read from TCP_CUBIC_TF_ALPHA, so the test checks the constant
+ * against the formula and not against itself. */
+static double ref_alpha(void)
+{
+    return 3.0 * (1.0 - BETA) / (1.0 + BETA);
+}
+
+/* W_est(t) = W_max*beta + alpha_aimd * (t / RTT) (Eq. 4), in segments, with
+ * `rtt_s` in SECONDS.  This is the TCP-friendly target, and it is a floor
+ * rather than a ceiling: 4.2 says cwnd SHOULD be set to W_est(t) whenever
+ * W_cubic(t) is below it. */
+static double ref_w_est(double t_s, double W_max, double rtt_s)
+{
+    if (rtt_s <= 0.0) {
+        rtt_s = 0.0;
+    }
+    return W_max * BETA + (rtt_s > 0.0 ? ref_alpha() * (t_s / rtt_s) : 0.0);
+}
+
+/* The target tcp_cubic_on_ack() drives towards: the larger of W_cubic(t) and
+ * W_est(t), in segments.  Mirrors the implementation's `max` on purpose -- the
+ * test's job is to pin which of the two wins in each region, and pinning the
+ * comparison itself is what the two dedicated region tests below do. */
+static double ref_target(double t_s, double K, double W_max, double rtt_s)
+{
+    double cubic = ref_w_cubic(t_s, K, W_max);
+    double est = ref_w_est(t_s, W_max, rtt_s);
+    return est > cubic ? est : cubic;
+}
+
 /* Seconds represented by one tcp_ticks increment, read from the implementation's
  * own constant so the reference and the code cannot drift on the tick period
  * while still being derived from TCP_SLOW_INTERVAL independently of the
@@ -115,6 +147,20 @@ static double ref_k(double W_max)
 static double tick_seconds(void)
 {
     return (double)TCP_CUBIC_SEC_PER_TICK_FP / TCP_CUBIC_FP_ONE;
+}
+
+/* The RTT that a given pcb->sa represents, in SECONDS, from TCP_SLOW_INTERVAL
+ * rather than from the implementation's own tick constant -- so the reference
+ * for Eq. 4 cannot drift with the arithmetic under test.  sa is floored at one
+ * tick here for the same reason tcp_cubic_w_est() floors it, so the reference
+ * and the code agree on what "no sample yet" means instead of the reference
+ * quietly assuming an RTT the code will never see. */
+static double sa_rtt_seconds(int sa_ticks)
+{
+    if (sa_ticks < 1) {
+        sa_ticks = 1;
+    }
+    return (double)sa_ticks * (double)TCP_SLOW_INTERVAL / 1000.0;
 }
 
 static void test_icbrt(void)
@@ -187,6 +233,13 @@ static struct tcp_pcb *fresh_pcb(u16_t mss, tcpwnd_size_t cwnd, int busy)
     p->cwnd = cwnd;
     p->ssthresh = TCP_WND;
     p->cong_alg = TCP_CONG_CUBIC;
+    /* pcb->sa is lwIP's smoothed RTT, in TCP_SLOW_INTERVAL ticks -- the only
+     * RTT this stack can measure, and the one RFC 8312 Eq. 4 divides by.  Two
+     * ticks, so the TCP-friendly slope is a real number and not the sa == 0
+     * floor; sa_rtt_seconds() converts back the same way the reference does, so
+     * the two cannot drift on the tick period.  A test that wants the "no
+     * sample yet" behaviour sets sa to 0 itself. */
+    p->sa = 2;
     tcp_cubic_init(p);
     if (busy) {
         mark_busy(p);
@@ -398,12 +451,167 @@ static void test_curve_value(void)
         tcp_cubic_on_ack(p, 1460);
     }
 
-    double want = ref_w_cubic(4.0, k_s, 64.0);
+    /* At t = 4 s the CUBIC curve is the binding one and 4.2's friendly floor sits
+     * far below it, so the target here is still W_cubic -- the other branch is
+     * pinned in test_tcp_friendly / test_friendly_region_binding.  Saying which
+     * one wins is what keeps this test from silently passing against an
+     * implementation that only ever returned W_cubic. */
+    double cubic = ref_w_cubic(4.0, k_s, 64.0);
+    double est = ref_w_est(4.0, 64.0, sa_rtt_seconds(p->sa));
+    CHECK(cubic > est,
+          "t=4s should be the cubic region: W_cubic %.4f vs W_est %.4f", cubic, est);
+    double want = ref_target(4.0, k_s, 64.0, sa_rtt_seconds(p->sa));
     double have = (double)p->cwnd / 1460.0;
     CHECK(fabs(have - want) < 0.1,
-          "cwnd %.4f seg after one round at t=4s, want W_cubic = %.4f", have, want);
-    printf("    one round at t=4.0s: cwnd %.4f seg, W_cubic = %.4f seg\n", have, want);
+          "cwnd %.4f seg after one round at t=4s, want %.4f", have, want);
+    printf("    one round at t=4.0s: cwnd %.4f seg, target %.4f seg "
+           "(W_cubic %.4f, W_est %.4f)\n", have, want, cubic, est);
     free(p);
+}
+
+/* RFC 8312 4.2's TCP-friendly update: W_est(t) = W_max*beta + alpha_aimd*t/RTT,
+ * and it is a FLOOR on the target, not a ceiling.
+ *
+ * The sweep is spread over (t, RTT) pairs on purpose, because the RTT term is
+ * the part most likely to be wrong: an alpha applied without the 1/RTT, or a t
+ * measured in ticks where Eq. 4 wants seconds, still produces a rising curve
+ * that still looks plausible.  The reference derives alpha from the RFC's own
+ * expression and the RTT from TCP_SLOW_INTERVAL, so neither is read back out of
+ * the constant under test. */
+static void test_tcp_friendly(void)
+{
+    printf("test_tcp_friendly (RFC 8312 4.2, Eq. 4)\n");
+
+    /* TCP_CUBIC_TF_ALPHA is the 1/1024 fixed-point form of 3(1-beta)/(1+beta).
+     * Checking it against beta pins it to the formula it came from, not to
+     * whatever TCP_CUBIC_BETA happens to be set to today. */
+    CHECK(fabs((double)TCP_CUBIC_TF_ALPHA / (double)TCP_CUBIC_FRAC_ONE
+               - ref_alpha()) < 1.0 / 1024.0,
+          "TCP_CUBIC_TF_ALPHA %d is not 3(1-beta)/(1+beta) = %.5f",
+          TCP_CUBIC_TF_ALPHA, ref_alpha());
+
+    for (int sa = 1; sa <= 8; sa++) {
+        struct tcp_pcb *p = fresh_pcb(1460, 64 * 1460, 1);
+        p->sa = (s16_t)sa;
+        tcp_cubic_on_loss(p, p->cwnd);
+        for (int step = 1; step <= 40; step++) {
+            /* step/10 s, expressed in the 1/256 s the implementation uses.
+             * step * 256 / 10 rather than a hand-written per-step constant, so
+             * the test's time axis is defined by the reference's and cannot
+             * drift from it. */
+            u32_t t_fp = ((u32_t)step * 256u) / 10u;
+            double have = (double)tcp_cubic_w_est(p, &p->cubic, t_fp)
+                          / TCP_CUBIC_FP_ONE;
+            double want = ref_w_est(step / 10.0, 64.0, sa_rtt_seconds(sa));
+            CHECK(fabs(have - want) < 1.0 / 64.0,
+                  "W_est(sa=%d, t=%.1fs) = %.5f seg, want %.5f", sa, step / 10.0,
+                  have, want);
+        }
+        free(p);
+    }
+
+    /* sa == 0 means "no sample yet" or "sub-tick RTT" -- which is what loopback
+     * and most LAN traffic produce, the estimator being quantised to whole
+     * TCP_SLOW_INTERVAL ticks.  It is floored at one tick rather than divided
+     * by, so it must behave exactly like sa == 1, and must still grow. */
+    struct tcp_pcb *zero = fresh_pcb(1460, 64 * 1460, 1);
+    struct tcp_pcb *one = fresh_pcb(1460, 64 * 1460, 1);
+    struct tcp_pcb *two = fresh_pcb(1460, 64 * 1460, 1);
+    zero->sa = 0;
+    one->sa = 1;
+    two->sa = 2;
+    tcp_cubic_on_loss(zero, zero->cwnd);
+    tcp_cubic_on_loss(one, one->cwnd);
+    tcp_cubic_on_loss(two, two->cwnd);
+    for (int step = 1; step <= 20; step++) {
+        u32_t t_fp = ((u32_t)step * 256u) / 10u;
+        CHECK(tcp_cubic_w_est(zero, &zero->cubic, t_fp)
+              == tcp_cubic_w_est(one, &one->cubic, t_fp),
+              "sa == 0 must floor to one tick, differs at t=%.1fs", step / 10.0);
+    }
+    /* And that floor is a floor, not a stand-in for "no RTT information": a
+     * one-tick estimate is the STEEPER of the two, because Eq. 4 divides by
+     * RTT, so it must still be distinguishable from a genuinely longer one. */
+    CHECK(tcp_cubic_w_est(zero, &zero->cubic, 1024u)
+          > tcp_cubic_w_est(two, &two->cubic, 1024u),
+          "the one-tick floor must grow faster than a 2-tick RTT");
+    free(zero); free(one); free(two);
+}
+
+/* The observable consequence of 4.2, driven through the real ACK path: in the
+ * TCP-friendly region the window lands on W_est(t), not on W_cubic(t) and not
+ * one MSS higher.
+ *
+ * Where that region lies is a property of this port's RTT estimator, and the
+ * test states it rather than hiding it.  W_est overtakes W_cubic only when
+ * alpha*K/RTT > 0.3*W_max; with pcb->sa quantised to 500 ms the shortest RTT
+ * the stack can express is 0.5 s, which reduces the condition to W_max below
+ * roughly 3.25 segments.  So the region is reachable exactly where a freshly
+ * reset connection operates, and unreachable at the bulk-transfer windows
+ * CUBIC exists to handle -- recorded as a boundary in tcp_cubic_priv.h.  That
+ * narrowness is also what makes the region reachable for testing at all. */
+static void test_friendly_region_binding(void)
+{
+    printf("test_friendly_region_binding (RFC 8312 4.2 region selection)\n");
+
+    double k_s = ref_k(4.0);
+    double cubic_at_k = ref_w_cubic(k_s, k_s, 4.0);
+    double est_short = ref_w_est(k_s, 4.0, sa_rtt_seconds(1));
+    double est_long = ref_w_est(k_s, 4.0, sa_rtt_seconds(40));
+    CHECK(fabs(cubic_at_k - 4.0) < 1.0 / 64.0,
+          "sanity: W_cubic(K) = %.4f, want W_max = 4", cubic_at_k);
+    CHECK(est_short > cubic_at_k,
+          "sanity: a one-tick RTT must give a friendly region here "
+          "(W_est %.4f vs W_cubic %.4f)", est_short, cubic_at_k);
+    CHECK(est_long < cubic_at_k,
+          "sanity: a 20 s RTT must not (W_est %.4f vs W_cubic %.4f)", est_long,
+          cubic_at_k);
+
+    /* One round at t = 1.5 s -- past K -- for a short RTT and a long one. */
+    double short_rtt_cwnd = 0.0, long_rtt_cwnd = 0.0;
+    int sa_tab[2] = { 1, 40 };
+    for (int i = 0; i < 2; i++) {
+        struct tcp_pcb *p = fresh_pcb(1460, 4 * 1460, 1);
+        p->sa = (s16_t)sa_tab[i];
+        tcp_ticks = 0;
+        tcp_cubic_on_loss(p, p->cwnd);          /* cwnd := 0.7 * 4 = 2.8 seg */
+        tcp_ticks = 3;                          /* 3 ticks = 1.5 s */
+        u32_t one_round = ((u32_t)p->cwnd + 1459) / 1460;
+        for (u32_t k = 0; k < one_round; k++) {
+            tcp_cubic_on_ack(p, 1460);
+        }
+        double have = (double)p->cwnd / 1460.0;
+        double cubic_15 = ref_w_cubic(1.5, k_s, 4.0);
+        double est_15 = ref_w_est(1.5, 4.0, sa_rtt_seconds(sa_tab[i]));
+        CHECK(fabs(have - (est_15 > cubic_15 ? est_15 : cubic_15)) < 0.05,
+              "sa=%d: cwnd %.4f seg after one round at t=1.5s, want %.4f "
+              "(W_cubic %.4f, W_est %.4f)", sa_tab[i], have,
+              est_15 > cubic_15 ? est_15 : cubic_15, cubic_15, est_15);
+        /* Which branch 4.2 selected is the whole claim, so assert it directly.
+         * Driving W_cubic alone -- the behaviour this replaced -- lands on
+         * cubic_15, so the friendly case has to miss that by a clear margin
+         * and the non-friendly case has to hit it. */
+        if (est_15 > cubic_15) {
+            CHECK(have > cubic_15 + 0.1,
+                  "sa=%d: friendly region, but cwnd %.4f seg is the cubic-only "
+                  "value %.4f", sa_tab[i], have, cubic_15);
+        } else {
+            CHECK(have <= cubic_15 + 0.05,
+                  "sa=%d: not the friendly region, yet cwnd %.4f seg exceeds "
+                  "W_cubic %.4f", sa_tab[i], have, cubic_15);
+        }
+        if (i == 0) {
+            short_rtt_cwnd = have;
+        } else {
+            long_rtt_cwnd = have;
+        }
+        free(p);
+    }
+    CHECK(short_rtt_cwnd > long_rtt_cwnd,
+          "a shorter RTT must give a steeper friendly slope (%.4f vs %.4f)",
+          short_rtt_cwnd, long_rtt_cwnd);
+    printf("    sa=1 (%.1f s RTT) -> %.4f seg; sa=40 (%.1f s) -> %.4f seg\n",
+           sa_rtt_seconds(1), short_rtt_cwnd, sa_rtt_seconds(40), long_rtt_cwnd);
 }
 
 /* The growth function must track C*(t-K)^3 + W_max in SECONDS, must never run
@@ -608,6 +816,8 @@ int main(void)
     test_slow_start();
     test_epoch_from_slow_start();
     test_curve_value();
+    test_tcp_friendly();
+    test_friendly_region_binding();
     test_growth_curve();
     test_beats_reno();
     test_idle_restart();

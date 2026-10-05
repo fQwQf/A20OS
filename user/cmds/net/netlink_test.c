@@ -55,6 +55,7 @@
 /* Multicast groups from linux/rtnetlink.h, which musl does not publish. */
 #define RTNLGRP_LINK        0x1
 #define RTNLGRP_IPV4_IFADDR 0x5
+#define RTNLGRP_IPV6_IFADDR 0xA
 
 #define IFA_ADDRESS     1
 #define IFA_LOCAL       2
@@ -174,6 +175,37 @@ static int send_addr(int fd, uint16_t type, uint16_t flags, int ifindex,
     return send_nl(fd, buf, off);
 }
 
+/* The AF_INET6 twin of send_addr().  Same envelope, but IFA_ADDRESS /
+ * IFA_LOCAL carry 16 bytes instead of 4.  A separate helper rather than a width
+ * parameter on send_addr() because the width changes what the kernel validates:
+ * an IPv6 request carrying a 4-byte attribute must be refused on its LENGTH,
+ * and reusing the 4-byte helper is the only way to write that negative case. */
+static int send_addr6(int fd, uint16_t type, uint16_t flags, int ifindex,
+                      int prefixlen, const uint8_t *a1, uint16_t t1,
+                      const uint8_t *a2, uint16_t t2)
+{
+    unsigned char buf[256];
+    struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+    struct ifaddrmsg *ifa = (struct ifaddrmsg *)(buf + sizeof(*nlh));
+    size_t off;
+
+    memset(buf, 0, sizeof(buf));
+    nlh->nlmsg_len = NLMSG_LENGTH(sizeof(*ifa));
+    nlh->nlmsg_type = type;
+    nlh->nlmsg_flags = flags;
+    ifa->ifa_family = AF_INET6;
+    ifa->ifa_prefixlen = (uint8_t)prefixlen;
+    ifa->ifa_index = (uint32_t)ifindex;
+
+    off = sizeof(*nlh) + sizeof(*ifa);
+    if (a1)
+        off = add_attr(buf, off, t1, a1, 16);
+    if (a2)
+        off = add_attr(buf, off, t2, a2, 16);
+    nlh->nlmsg_len = (uint32_t)off;
+    return send_nl(fd, buf, off);
+}
+
 static int send_link(int fd, int ifindex, uint32_t change, uint32_t flags,
                      const void *mtu, size_t mtu_len)
 {
@@ -285,10 +317,14 @@ static void test_addr_refusals(int fd, int ifindex, const uint8_t addr[4])
            errno == EOPNOTSUPP,
        "the secondary-address form (IFA_LOCAL != IFA_ADDRESS) is refused");
 
+    /* An address family with no write path at all is still refused.  This used
+     * to be AF_INET6, which asserted the absence of a feature; it is now a
+     * family nothing claims, so the assertion covers what it always meant --
+     * an unrecognised family must not be treated as IPv4 by falling through. */
     errno = 0;
-    ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, AF_INET6, 64,
+    ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, AF_UNSPEC, 24,
                  addr, IFA_LOCAL, NULL, 0) < 0 && errno == EAFNOSUPPORT,
-       "RTM_NEWADDR with an IPv6 family is refused with EAFNOSUPPORT");
+       "RTM_NEWADDR with an unsupported family is refused with EAFNOSUPPORT");
 
     errno = 0;
     ok(send_addr(fd, RTM_NEWADDR, NLM_F_REQUEST, 0, AF_INET, 24,
@@ -333,6 +369,106 @@ static void test_addr_refusals(int fd, int ifindex, const uint8_t addr[4])
     ok(send_addr(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, AF_INET, 24,
                  other, IFA_LOCAL, NULL, 0) < 0 && errno == EADDRNOTAVAIL,
        "RTM_DELADDR of an address the interface does not hold is refused");
+}
+
+/*
+ * The AF_INET6 write path.  This exists because RTNLGRP_IPV6_IFADDR was added:
+ * a group number a listener can bind to is only honest if the kernel can
+ * produce an event for it, and the only thing that can produce one is a write
+ * path.  Until a20_lwip_if_set_addr6() existed, the honest move would have been
+ * to leave the group undefined -- so these assertions are what make the group
+ * definition load-bearing rather than decorative.
+ *
+ * The address used is 2001:db8::1, RFC 3849's documentation prefix.  It is
+ * reserved precisely so that configuring it cannot reach anything real.
+ */
+static void test_addr6(int fd, int ifindex)
+{
+    static const uint8_t doc[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x01,
+    };
+    static const uint8_t doc2[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x02,
+    };
+
+    /* Refusals first: the IPv6 arm must not be a hole where malformed requests
+     * get through. */
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 129,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 prefix length over 128 is refused with EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, 0, 64,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 RTM_NEWADDR with ifa_index 0 is refused with EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  NULL, 0, NULL, 0) < 0 && errno == EINVAL,
+       "an IPv6 RTM_NEWADDR carrying no address attribute is refused with "
+       "EINVAL");
+
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, doc2, IFA_ADDRESS) < 0 &&
+           errno == EOPNOTSUPP,
+       "the IPv6 secondary-address form (IFA_LOCAL != IFA_ADDRESS) is "
+       "refused");
+
+    /* IFA_ADDRESS alone is a legitimate spelling (Linux treats the two as
+     * equivalent when they carry the same address), so it must not be
+     * confused with the "no address attribute at all" case above. */
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  NULL, 0, doc, IFA_ADDRESS) >= 0,
+       "an IPv6 RTM_NEWADDR naming only IFA_ADDRESS is accepted, not "
+       "confused with carrying no address at all");
+
+    /* All-zero is not an address an interface can hold; accepting it would
+     * store a slot lwIP treats as invalid and then report success. */
+    static const uint8_t zero[16] = { 0 };
+    errno = 0;
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  zero, IFA_LOCAL, NULL, 0) < 0 && errno == EINVAL,
+       "an all-zero IPv6 address is refused with EINVAL");
+
+    /* Delete is not implemented, and saying so is better than accepting it:
+     * lwIP with LWIP_NETIF_API=0 has no netif_remove_ip6_address(). */
+    errno = 0;
+    ok(send_addr6(fd, RTM_DELADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) < 0 && errno == EOPNOTSUPP,
+       "RTM_DELADDR for AF_INET6 is refused with EOPNOTSUPP, not faked");
+
+    /* An IPv6 request whose attribute is 4 bytes wide must be refused on its
+     * length -- this is why send_addr6() exists separately from send_addr(). */
+    {
+        unsigned char buf[256];
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        struct ifaddrmsg *ifa = (struct ifaddrmsg *)(buf + sizeof(*nlh));
+
+        memset(buf, 0, sizeof(buf));
+        nlh->nlmsg_type = RTM_NEWADDR;
+        nlh->nlmsg_flags = NLM_F_REQUEST;
+        ifa->ifa_family = AF_INET6;
+        ifa->ifa_prefixlen = 64;
+        ifa->ifa_index = (uint32_t)ifindex;
+        nlh->nlmsg_len = (uint32_t)add_attr(buf, sizeof(*nlh) + sizeof(*ifa),
+                                            IFA_LOCAL, doc, 4);
+        errno = 0;
+        ok(send_nl(fd, buf, nlh->nlmsg_len) < 0 && errno == EINVAL,
+           "a 4-byte IFA_LOCAL on an AF_INET6 request is refused with EINVAL");
+    }
+
+    /* The positive case, twice: the second add must be idempotent, matching
+     * how the IPv4 path treats a re-asserted address. */
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) >= 0,
+       "an IPv6 RTM_NEWADDR is accepted");
+    ok(send_addr6(fd, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc, IFA_LOCAL, NULL, 0) >= 0,
+       "re-adding the same IPv6 address is accepted (idempotent)");
 }
 
 static void test_envelope_refusals(int fd, int ifindex)
@@ -768,8 +904,9 @@ static void test_multicast(int ifindex, const char *ifname_want,
             close(mute);
         return;
     }
-    ok(bind_groups(sub, RTNLGRP_LINK | RTNLGRP_IPV4_IFADDR) == 0,
-       "bind a route socket to the link and address groups");
+    ok(bind_groups(sub, RTNLGRP_LINK | RTNLGRP_IPV4_IFADDR |
+                        RTNLGRP_IPV6_IFADDR) == 0,
+       "bind a route socket to the link and both address groups");
     ok(bind_groups(mute, 0) == 0,
        "bind a second route socket to no group at all");
 
@@ -807,6 +944,47 @@ static void test_multicast(int ifindex, const char *ifname_want,
                        IFA_LOCAL, 4, got) == 0 &&
            memcmp(got, addr, 4) == 0,
            "IFA_LOCAL in the event is the same address");
+    }
+
+    /* --- IPv6 address --- */
+    /* Same add the write-path test made, re-asserted so the event fires again.
+     * This is the assertion that gives RTNLGRP_IPV6_IFADDR its reason to
+     * exist: a group a listener binds to must actually receive something. */
+    static const uint8_t doc6[16] = {
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+        0,    0,    0,    0,    0, 0, 0, 0x01,
+    };
+    ok(send_addr6(sub, RTM_NEWADDR, NLM_F_REQUEST, ifindex, 64,
+                  doc6, IFA_LOCAL, NULL, 0) >= 0,
+       "re-assert the IPv6 address to trigger an IPv6 multicast");
+
+    n = recv_nl(sub, buf, sizeof(buf), 2000);
+    ok(n > 0, "the subscribed socket receives the IPv6 address event");
+    if (n > 0) {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        ok(nlh->nlmsg_type == RTM_NEWADDR,
+           "the IPv6 address event arrives as RTM_NEWADDR");
+        ok(nlh->nlmsg_pid == 0,
+           "the IPv6 notification names the kernel (nlmsg_pid 0) as its "
+           "source");
+        const struct ifaddrmsg *ifa =
+            (const struct ifaddrmsg *)(buf + sizeof(*nlh));
+        ok(n >= (int)(sizeof(*nlh) + sizeof(*ifa)) &&
+           ifa->ifa_family == AF_INET6,
+           "the IPv6 payload is an AF_INET6 ifaddrmsg, not the IPv4 shape");
+        ok(ifa->ifa_index == (uint32_t)ifindex,
+           "the IPv6 event names the interface that changed");
+        ok(ifa->ifa_prefixlen == 64,
+           "the IPv6 event carries the prefix length that was requested");
+        uint8_t got6[16] = { 0 };
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_ADDRESS, 16, got6) == 0 &&
+           memcmp(got6, doc6, 16) == 0,
+           "IFA_ADDRESS in the IPv6 event is the address now configured");
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_LOCAL, 16, got6) == 0 &&
+           memcmp(got6, doc6, 16) == 0,
+           "IFA_LOCAL in the IPv6 event is the same address");
     }
 
     /* --- link --- */
@@ -881,6 +1059,7 @@ int main(void)
            mask_to_prefixlen(mask));
 
     test_addr_refusals(nl, ifindex, addr);
+    test_addr6(nl, ifindex);
     test_envelope_refusals(nl, ifindex);
     test_link(nl, sfd, ifindex, name);
     test_mtu_ceiling(nl, sfd, ifindex, name);

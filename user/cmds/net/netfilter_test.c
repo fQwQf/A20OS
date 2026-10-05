@@ -158,6 +158,67 @@ static void udp_send_once(void)
     close(fd);
 }
 
+/*
+ * One ICMP echo request to the gateway, built by hand.
+ *
+ * The point is the send path only: the request has to reach
+ * netfilter_conntrack_process() as a parseable ICMP echo so the table has
+ * something to create an entry from.  The reply is not waited for here --
+ * main() sleeps once after the requests, and it is the reply that proves the
+ * match, not the send.
+ *
+ * The raw socket is the same capability netopt_test already exercises.  A
+ * refusal to open one is an environment fact reported as such rather than a
+ * silent skip: a test that quietly does nothing when it cannot run is how a
+ * missing feature survives.
+ */
+static int icmp_echo_once(unsigned id)
+{
+    struct icmp_echo_hdr {
+        uint8_t type;
+        uint8_t code;
+        uint16_t csum;
+        uint16_t echo_id;
+        uint16_t seq;
+    } h;
+    unsigned char payload[16];
+    unsigned char pkt[sizeof(h) + sizeof(payload)];
+    struct sockaddr_in sa;
+
+    int fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if (fd < 0)
+        return -1;
+
+    memset(&h, 0, sizeof(h));
+    h.type = 8;                   /* echo request */
+    h.code = 0;
+    h.echo_id = htons((uint16_t)id);
+    h.seq = htons(1);
+    memset(payload, 'i', sizeof(payload));
+    memcpy(pkt, &h, sizeof(h));
+    memcpy(pkt + sizeof(h), payload, sizeof(payload));
+
+    /* The ICMP checksum covers the header and the payload and no
+     * pseudo-header, so this is the whole of it -- there is no second half to
+     * get wrong the way there is for TCP or UDP.  An echo header is 8 bytes,
+     * even, so the odd-length tail case cannot arise here. */
+    uint32_t sum = 0;
+    for (size_t i = 0; i + 1 < sizeof(pkt); i += 2)
+        sum += (uint32_t)pkt[i] << 8 | pkt[i + 1];
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    uint16_t ck = htons((uint16_t)~sum);
+    memcpy(pkt + 2, &ck, 2);
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = inet_addr(TEST_DST);
+    ssize_t n = sendto(fd, pkt, sizeof(pkt), 0, (struct sockaddr *)&sa,
+                       sizeof(sa));
+    close(fd);
+    return n == (ssize_t)sizeof(pkt) ? 0 : -1;
+}
+
 int main(void)
 {
     char buf[4096];
@@ -345,8 +406,64 @@ int main(void)
     CHK(nf_read(buf, sizeof(buf)) > 0, "read after cton");
     CHK(strstr(buf, "conntrack: on") != NULL, "conntrack reports on again");
 
+    /*
+     * 9. ICMP echo is tracked too, and its reply is matched back to it.
+     *
+     * This is the part that cannot be faked by a merely-parsing implementation.
+     * Creating an entry on the request is easy; what is being asked is that the
+     * *reply* finds that same entry, and the only evidence available from
+     * outside is the entry's own state: the reply lands on the inbound path,
+     * matches the reply half of the tuple, and moves the entry to established.
+     * A reply that did not match would leave it "new" no matter how many times
+     * the request was sent, because ICMP echo has no flags byte for the
+     * TCP-style "reply seen" shortcut.
+     *
+     * Two identifiers on purpose: same id twice is one exchange, a third
+     * request under a different id is a second one.  That is what makes
+     * ct_tracked's increase attributable to the identifier being part of the
+     * tuple rather than to "some ICMP got tracked".
+     */
+    CHK(nf_write("ctflush") == 0, "flush conntrack before the ICMP case");
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after the ICMP flush");
+    unsigned long long ic0 = nf_stat(buf, "ct_tracked");
+    unsigned long long icp0 = nf_stat(buf, "ct_packets");
+
+    CHK(icmp_echo_once(0x1234) == 0, "send ICMP echo request id=0x1234");
+    CHK(icmp_echo_once(0x1234) == 0, "send a second echo with the same id");
+    /* One sleep for the whole case rather than one per request: the gateway
+     * replies in well under a second, and a per-request sleep would only make
+     * the gate slower without making it stricter. */
+    usleep(400000);
+    CHK(icmp_echo_once(0x5678) == 0, "send ICMP echo request id=0x5678");
+    usleep(400000);
+
+    CHK(nf_read(buf, sizeof(buf)) > 0, "read after the ICMP exchanges");
+    unsigned long long ic1 = nf_stat(buf, "ct_tracked");
+    unsigned long long icp1 = nf_stat(buf, "ct_packets");
+    CHK(icp1 > icp0, "conntrack counted the ICMP packets");
+    /* At least one new exchange, and the entry carries the gateway as its peer,
+     * so an unrelated flow cannot satisfy this. */
+    CHK(ic1 > ic0, "an ICMP exchange created a conntrack entry");
+    CHK(strstr(buf, "icmp=echo") != NULL,
+        "the ICMP entry is rendered as an echo, not as a flow with a port");
+    const char *icmp_line = strstr(buf, "icmp=echo");
+    CHK(icmp_line != NULL && strstr(icmp_line, "proto=1") != NULL,
+        "the ICMP entry reports protocol 1");
+    CHK(icmp_line != NULL && strstr(icmp_line, "icmp=echo id=4660") != NULL,
+        "the entry carries the echo identifier that was sent (0x1234)");
+    CHK(icmp_line != NULL && strstr(icmp_line, "state=established") != NULL,
+        "the echo reply matched the entry and established it -- this is the "
+        "reply-direction match, not just the insert");
+    CHK(icmp_line != NULL && strstr(icmp_line, TEST_DST) != NULL,
+        "the ICMP entry names the gateway it was exchanged with");
+    /* The second identifier is a different tuple, so it must be a second entry
+     * rather than more packets on the first. */
+    CHK(ic1 >= ic0 + 2, "each echo identifier is its own conntrack entry");
+
     printf("NETFILTER_TEST: PASS dropped=%llu out_packets=%llu "
-           "ct_tracked=%llu ct_packets=%llu\n",
-           out_drop1 - out_drop0, out_pkt1 - out_pkt0, ct1 - ct0, cp1 - cp0);
+           "ct_tracked=%llu ct_packets=%llu icmp_tracked=%llu "
+           "icmp_packets=%llu\n",
+           out_drop1 - out_drop0, out_pkt1 - out_pkt0, ct1 - ct0, cp1 - cp0,
+           ic1 - ic0, icp1 - icp0);
     return 0;
 }

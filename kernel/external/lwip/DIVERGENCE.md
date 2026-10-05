@@ -65,7 +65,7 @@ commit**。现已显式抓取并记录基线：
 
 ## 2. A20OS 自有改动
 
-**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 15 文件，+1692 / −315**
+**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 15 文件，+1840 / −315**
 （`f773b0aa` 是把 lwIP 重新 vendoring 进内核的提交，作为"未改动基线"）。
 
 > 口径说明：数字只统计 `src/` 与 `sources.mk`，不含本文件自身；重跑上面那条
@@ -74,13 +74,13 @@ commit**。现已显式抓取并记录基线：
 ### 2.1 受影响的文件（15 个）
 
 ```
-+397/-0   src/core/tcp_cubic.c                      【新增文件，上游无对应物】
++483/-0   src/core/tcp_cubic.c                      【新增文件，上游无对应物】
 +396/-157 src/core/tcp.c                            PCB 链表按 lane 分桶 + CUBIC RTO 分支 + wnd_limit
                                             （+9）  补齐缺失的 LWIP_ASSERT_CORE_LOCKED()
-+181/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
++209/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
 +178/-82  src/core/udp.c                            PCB 链表按 lane 分桶
 +175/-4   src/core/memp.c                           MEMP_PBUF/MEMP_PBUF_POOL 按当前 lane 索引的池表（见 §2.9）
-+112/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
++146/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
 +100/-37  src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
                                       （+2）        tcp_trigger_input_pcb_close() 补断言
  +61/-25  src/include/lwip/priv/tcp_priv.h         TCP_REG/TCP_RMV 改为 lane 索引
@@ -263,8 +263,23 @@ A20OS 新增：
 `tcp_ticks`（每 `TCP_SLOW_INTERVAL` = 500 ms 一跳）。所以 `K` 与 epoch 经过时间都
 先换算成 1/256 秒再进立方项。这一步漏掉不是精度损失而是**速率差 8 倍**。
 
-**没有实现、因此不得假定的**（同样逐条列在头注释里）：§4.2 的 TCP-friendly
-区域只以 Reno 速率近似，不是 Eq. 4 的 `W_est(t)`；HyStart / TCP-AQ / DCTCP /
+**§4.2 的 TCP-friendly 区域已按 Eq. 4 实现**（`tcp_cubic_w_est()`，目标是
+`max(W_cubic, W_est)`），但它的 RTT 分辨率在本栈上有硬边界，不知道就会误读行为：
+lwIP 2.2.x 的 `struct tcp_pcb` **没有 `rtt` 字段**，唯一的 RTT 估计量是 `pcb->sa`
+（Van Jacobson 平滑 RTT，以整个 `TCP_SLOW_INTERVAL` = 500 ms 为单位取整）。所以
+Eq. 4 里 `t/RTT` 的分母在 0.5 s 之下没有任何表达方式：`sa == 0`（回环与绝大多数
+局域网流量都会读到 0，因为亚 tick 的 RTT 在 tick 量化里无处安放）被**下限钳到
+1 tick**，得到 alpha/0.5 s = 1.07 段/秒——比真实 RTT 允许的更保守，但不是 RFC 说的
+那个 RTT。要拿到毫秒级 RTT 得给 `struct tcp_pcb` 加字段并改 `tcp_in.c`，本轮**不做**。
+
+由这条边界还能推出一条对使用者有意义的结论：Eq. 4 压过 Eq. 1 需要
+`alpha*K/RTT > 0.3*W_max`，代入最短可表达的 RTT = 0.5 s，条件退化为
+`W_max < 约 3.25 段`。也就是说 **TCP-friendly 区域只在刚复位、窗口极小的连接上
+可能生效**，在 CUBIC 真正要对付的大窗口传输上永远不会成为约束项。主机侧测试
+`test_friendly_region_binding()` 正是在 `W_max = 4` 段、`sa = 1` 的配置下把这一区域
+钉住的——否则这个分支在任何可跑的测试里都观测不到，只能靠读代码相信它。
+
+**没有实现、因此不得假定的**（同样逐条列在头注释里）：HyStart / TCP-AQ / DCTCP /
 Prague / ECN 与 RTT 方差耦合均无；`W_max` 不跨 pcb 生命周期持久化。
 
 算法正确性由主机侧单元测试 `tools/test-tcp-cubic-host.sh`
@@ -351,6 +366,44 @@ per-lane 描述符表。**只有 `MEMP_PBUF` 与 `MEMP_PBUF_POOL` 两个池被�
 一 lane 下 `.text`/`.rodata`/`.sdata` 与改动前逐字节相同，加 `-fno-sanitize=undefined`
 重编后整个目标文件也逐字节相同（仅存的差异是 UBSan 内嵌的源码行号表，因为文件
 多了行——加一行注释也会让它动，这不是本改动特有的）。
+
+### 2.10 从 socket 层直接写 `pcb->snd_buf`（SO_SNDBUF 抬高对既有连接生效）
+
+上游 lwIP **没有任何接口**可以在 pcb 存活期间调整它的发送缓冲大小：
+`pcb->snd_buf` 只被两处改写——`src/core/tcp_out.c:786`（`tcp_write()` 按写入量扣减）
+和 `src/core/tcp_in.c:1386`（收到 ACK 时按 `recv_acked` 加回）。没有任何 setter，
+`tcp_new()` 之后它只能随流量自身漂移。
+
+因此 A20OS 的 socket 层在 `kernel/net/socket_inet.c` 的
+`net_inet_tcp_buf_apply()` 里**直接写 `pcb->snd_buf` 字段**，把 `SO_SNDBUF` 的
+ceiling 双向（下调与抬高）写进去。这是为了让抬高在**已建立的连接**上立即生效：
+不写的话，一次 `setsockopt()` 抬高只对下一个 `connect()` 有效，因为 lwIP 在字节已经
+在途时没有任何机制把 `snd_buf` 涨回去。
+
+**依赖的不变量（必须与上游一起维护）**：
+
+| 事实 | 出处 |
+|---|---|
+| `snd_buf` 是**可用空间**，不是容量 | `src/include/lwip/tcp.h:343` |
+| 只有 `tcp_write()` 扣减它 | `src/core/tcp_out.c:786` |
+| 只有已确认的字节把它加回来，且加回量不超过当初扣减量 | `src/core/tcp_in.c:1386` |
+| 唯一的容量检查是 `len > pcb->snd_buf` | `src/core/tcp_out.c:327` |
+| 初值 `TCP_SND_BUF` | `src/core/tcp.c:2048` |
+
+由前两条可得 `snd_buf <= TCP_SND_BUF` 恒成立，因此直接赋值不会让 pcb 报告比它真实
+拥有的更多容量；由第四条可得赋值也永远不会让 `tcp_write()` 意外失败（socket 层喂给
+`tcp_write()` 的长度取自同一个字段）。
+
+**必须一起记住的边界**：这个写入假定 `snd_buf` 永远只由上面两处 lwIP 代码改写。
+如果上游将来给 `snd_buf` 加上别的含义（例如与某个配额共享），本树的写入就会绕过那个
+配额——重新同步上游时这一节要重读。
+
+**同时删掉的一段并行记账**：改之前 socket 层另外维护了一个"队列深度 =
+`TCP_SND_BUF - pcb->snd_buf`"的估计，再拿它和 ceiling 比。那是把 ceiling 已经写进
+`snd_buf` 这件事算了两遍：`TCP_SND_BUF` 93440、ceiling 16384 时，它把 77056 字节的
+**预留但未用**空间当成已排队，报出 room = 0，socket 在发送队列为空的情况下永久阻塞。
+现在 `net_inet_send_tcp()` 直接读 `snd_buf`，对从未设置过该选项的 socket 是同一个数
+（`TCP_SND_BUF - (TCP_SND_BUF - avail) == avail`），因此只有原来错的地方变了。
 
 ## 3. 重新同步上游的流程
 

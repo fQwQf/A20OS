@@ -61,12 +61,21 @@
  *   - No ALG.  There is no FTP/SIP/ISAKMP payload inspection, so a protocol
  *     that carries its addresses in the body is translated only in the
  *     headers and its control channel will not follow.
- *   - No ICMP tracking.  Only TCP and UDP create conntrack entries; anything
- *     else, ICMP included, is passed through untracked and untranslated
- *     (netfilter_nat.c, the proto test at the top of the per-packet path).  An
- *     ICMP error is therefore neither matched against a flow nor able to
- *     create one, so path MTU discovery, which depends on ICMP error tracking,
- *     does not work through this.
+ *   - No ICMP error tracking, and no ALG to get it.  TCP, UDP and ICMP *echo*
+ *     create conntrack entries; every other ICMP type -- destination
+ *     unreachable, time exceeded, everything else -- is passed through
+ *     untracked and untranslated.  Pairing those with a flow means reading the
+ *     packet they quote from the original and matching on that, which is an
+ *     ALG, so it is not done here.  Path MTU discovery therefore does not work
+ *     through this: a translated flow that needs a PMTU will black-hole rather
+ *     than recover from the fragmentation-needed message.
+ *   - ICMP echo is translated by ADDRESS only.  It has no port, so a NAT rule
+ *     that asks for a toport= has no field to apply it to and the port is
+ *     ignored; and no ICMP payload rewriting happens at all (the embedded
+ *     headers inside a quoted packet, for instance).  The echo *identifier* is
+ *     never translated, which is what keeps a reply pairable.  Echo is also
+ *     exempt from the non-first-fragment rule below, since the parser only
+ *     recognises it unfragmented.
  *   - Flow state is inferred from the tuple and the TCP flags byte only.  A flow
  *     is ESTABLISHED once a reply is seen, or once a forward packet carries ACK
  *     without SYN.  There is no sequence-number window check, no RST/FIN teardown
@@ -95,6 +104,11 @@
 #define NETFILTER_PROTO_ICMP 1
 #define NETFILTER_PROTO_TCP  6
 #define NETFILTER_PROTO_UDP  17
+
+/* ICMP echo types (RFC 792).  The only two this tree tracks; see
+ * netfilter_frame_t::icmp_off and docs/net/conntrack-nat.md. */
+#define NETFILTER_ICMP_ECHO_REPLY   0
+#define NETFILTER_ICMP_ECHO_REQUEST 8
 
 typedef enum {
     NETFILTER_DIR_IN = 0,
@@ -162,6 +176,21 @@ typedef struct {
     uint16_t ip_off;      /* offset of the IPv4 header in the frame */
     uint16_t l4_off;      /* offset of the L4 header, 0 if none */
     uint16_t tcp_flags;   /* TCP flags byte 0, 0 otherwise */
+    /*
+     * ICMP echo, and only ICMP echo.  These are separate fields rather than an
+     * overload of src_port / dst_port on purpose: those two are the rule
+     * matcher's, and a rule written before this existed that says `sport=any`
+     * must keep meaning "any port", not "any ICMP identifier".  Widening them
+     * would silently change what every existing icmp rule matches.
+     *
+     * icmp_off is the offset of the ICMP header, 0 when the packet is not
+     * echo (request type 8 or reply type 0) or is a non-first fragment.  It is
+     * deliberately NOT l4_off: l4_off drives netfilter_set_port(), which would
+     * read an ICMP type and code as if they were a port and rewrite them.
+     */
+    uint16_t icmp_off;    /* offset of the ICMP header, 0 if not ICMP echo */
+    uint8_t  icmp_type;   /* 8 (request) or 0 (reply) when icmp_off is set */
+    uint16_t icmp_id;     /* the echo identifier, which pairs the two */
 } netfilter_frame_t;
 
 /* Returns 0 when the frame is not IPv4 (including VLAN-tagged ARP and IPv6)
