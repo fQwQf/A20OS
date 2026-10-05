@@ -945,6 +945,12 @@ typedef struct {
 void     net_netlink_link_notify(const nlrt_link_event_t *events, int n);
 void     net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
                                  const uint8_t mask[4]);
+/* The AF_INET6 counterpart, broadcast to RTNLGRP_IPV6_IFADDR.  Emitted by
+ * a20_lwip_if_set_addr6() -- the only writer of an IPv6 address in this tree
+ * besides the loopback netif's own ::1 -- so the group has a real event source
+ * rather than being a defined number nothing can feed. */
+void     net_netlink_addr6_notify(unsigned ifindex, const uint8_t addr[16],
+                                  uint8_t prefixlen);
 
 /* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
  * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held

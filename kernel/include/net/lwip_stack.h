@@ -97,6 +97,13 @@ int  a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
                           const uint8_t mask[4], const uint8_t gw[4]);
 int  a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
                           uint8_t gw[4]);
+/* IPv6 counterpart of a20_lwip_if_set_addr(): add one address, which is all
+ * lwIP with LWIP_NETIF_API=0 exposes.  There is no remove, so the netlink write
+ * path refuses RTM_DELADDR for AF_INET6 rather than half-performing it, and the
+ * address goes VALID without DAD because it came from an administrative
+ * request rather than a router advertisement. */
+int  a20_lwip_if_set_addr6(unsigned ifindex, const uint8_t addr[16],
+                           uint8_t prefixlen);
 int  a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu);
 int  a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask);
 
