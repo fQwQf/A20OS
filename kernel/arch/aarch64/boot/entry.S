@@ -102,49 +102,62 @@ _start:
 #endif
 #ifdef CONFIG_NOMMU
     /*
-     * Split DRAM into 2 MiB blocks.  Kernel text remains privileged while the
-     * allocator-backed portion of RAM is accessible to EL0.  A single 1 GiB
-     * AP=01 block makes writable kernel text executable from EL0 and also
-     * trips architectural W^X controls on some CPUs.
+     * One identity map over all of DRAM, in 2 MiB blocks, privileged (AP=00)
+     * and Normal memory (MAIR AttrIndx 1) -- the same attributes the MMU
+     * build's DRAM block uses.
+     *
+     * AttrIndx 1 is the point of running an identity map with the MMU on
+     * under NOMMU: with translation disabled AArch64 treats every access as
+     * Device, where libc's exclusive atomics (LDAXR/STLXR) fault.  These
+     * descriptors used to encode AttrIndx 0 (Device-nGnRnE) while calling
+     * themselves normal-memory, so they never delivered the attributes the
+     * map exists to provide.
+     *
+     * The blocks deliberately do NOT grant EL0 access.  AArch64 makes a
+     * stage-1 page that is writable by EL0 execute-never for every higher
+     * Exception level -- a privileged fetch from an EL0-writable page raises
+     * Execute Never -- and that rule holds regardless of SCTLR_EL1.WXN.
+     * An AP=01 map is therefore executable *by EL0* but not by the kernel.
+     * This used to split DRAM at _end, keeping the kernel image privileged
+     * and marking the allocator-backed remainder AP=01; the kernel escaped
+     * the rule because it lives only _end bytes into DRAM, but the first
+     * thing the kernel executes out of the frame pool did not, and the
+     * first drvmod entry point took an instruction abort:
+     *
+     *   ESR_EL1=0x8600000e  EC=0x21 (IABT from current EL)  ISS=0xe (XN)
+     *   L2[510]=0x7fc00741 -> stval=0x7fd9e134  (mapping present, no PXN)
+     *
+     * With a flat map there is no AP that serves both: kernel code allocated
+     * from the pool and EL0 user memory want opposite permissions, and
+     * there is no second range giving EL0 a different view of the same page.
+     * Privileged wins here because a NOMMU instance with no root filesystem
+     * has no EL0 process to run, and under this build it could not get one:
+     * virtio-blk is itself a drvmod, so leaving the pool EL0-writable is
+     * what makes the disk unreachable in the first place.  The MMU builds
+     * keep the real high-half alias and are unaffected.
      */
     orr     x2, x4, #0x3
     str     x2, [x1, #(1 * 8)]
 
-    mov     x5, xzr
-    ldr     x6, =0x0000000040000701  /* privileged normal-memory block */
-    ldr     x7, =0x0000000040000741  /* EL0 RWX normal-memory block */
-    /*
-     * Keep every 2 MiB block occupied by the linked kernel privileged.  Derive
-     * the boundary from _end so kernel growth cannot silently expose kernel
-     * data to EL0.
-     */
-    adrp    x8, _end
-    add     x8, x8, :lo12:_end
-    ldr     x9, =0x40000000
-    sub     x8, x8, x9
-    ldr     x9, =0x1fffff
-    add     x8, x8, x9
-    lsr     x8, x8, #21
+    ldr     x6, =0x0000000040000705  /* AP=00, AttrIndx 1, AF, inner-shareable */
     /*
      * The map has to end where the frame allocator's window ends.  This used
      * to stop at a hardcoded 256 blocks (512 MiB) while PHYS_MEMORY_END is
      * 1 GiB above PHYS_MEMORY_BASE, so pfa_init handed out frames in the top
-     * half of DRAM that no L2 block covers -- and the first kmalloc that landed
-     * there took a store page fault writing its own header.  Derive the bound
-     * from the same window the MMU build covers with its single 1 GiB L1
-     * block, so the two builds cannot drift apart again.
+     * half of DRAM that no L2 block covers -- and the first kmalloc that
+     * landed there took a store page fault writing its own header.  Derive
+     * the bound from the same window the MMU build covers with its single
+     * 1 GiB L1 block, so the two builds cannot drift apart again.
      */
     ldr     x9, =0x40000000
     ldr     x10, =0x80000000
     sub     x10, x10, x9
     lsr     x10, x10, #21
+    mov     x5, xzr
 .Lnommu_l2_loop:
-    cmp     x5, x8
-    csel    x2, x6, x7, lo
-    str     x2, [x4, x5, lsl #3]
+    str     x6, [x4, x5, lsl #3]
     add     x5, x5, #1
     add     x6, x6, #(1 << 21)
-    add     x7, x7, #(1 << 21)
     cmp     x5, x10
     b.lo    .Lnommu_l2_loop
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
