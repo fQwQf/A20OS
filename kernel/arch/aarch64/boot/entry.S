@@ -125,6 +125,19 @@ _start:
     ldr     x9, =0x1fffff
     add     x8, x8, x9
     lsr     x8, x8, #21
+    /*
+     * The map has to end where the frame allocator's window ends.  This used
+     * to stop at a hardcoded 256 blocks (512 MiB) while PHYS_MEMORY_END is
+     * 1 GiB above PHYS_MEMORY_BASE, so pfa_init handed out frames in the top
+     * half of DRAM that no L2 block covers -- and the first kmalloc that landed
+     * there took a store page fault writing its own header.  Derive the bound
+     * from the same window the MMU build covers with its single 1 GiB L1
+     * block, so the two builds cannot drift apart again.
+     */
+    ldr     x9, =0x40000000
+    ldr     x10, =0x80000000
+    sub     x10, x10, x9
+    lsr     x10, x10, #21
 .Lnommu_l2_loop:
     cmp     x5, x8
     csel    x2, x6, x7, lo
@@ -132,7 +145,7 @@ _start:
     add     x5, x5, #1
     add     x6, x6, #(1 << 21)
     add     x7, x7, #(1 << 21)
-    cmp     x5, #256                 /* 512 MiB of configured DRAM */
+    cmp     x5, x10
     b.lo    .Lnommu_l2_loop
 #elif defined(CONFIG_BOARD_VIRTUALBOX_AARCH64)
     /* RAM and the mixed ACPI/MMIO window are already covered above. */

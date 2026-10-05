@@ -166,7 +166,17 @@ static inline void __attribute__((noreturn)) arch_halt(void) {
 
 static inline int arch_is_kernel_address(const void *ptr) {
 #ifdef CONFIG_NOMMU
-    return (uintptr_t)ptr >= PHYS_MEMORY_BASE;
+    /* Not PHYS_MEMORY_BASE.  Without paging the kernel and the RAM it manages
+     * share one number space, so the RAM base answers "is this physical?", not
+     * "is this ours?" -- and OpenSBI keeps its per-hart state inside firmware
+     * RAM below the image and leaves it in tp.  arch_current_cpu_id() reads tp
+     * before any task exists, that firmware pointer passed the RAM-base test,
+     * and the first field read took a Kernel Address Error on memory S-mode
+     * may not touch at all.  The kernel load address is the bound that means
+     * what the MMU branch means: every task, stack and frame the kernel
+     * dereferences lives at or above it. */
+    extern char _start[];
+    return (uintptr_t)ptr >= (uintptr_t)_start;
 #else
     return (uintptr_t)ptr >= PAGE_OFFSET;
 #endif
