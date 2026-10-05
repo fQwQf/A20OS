@@ -11,3 +11,13 @@
  * indexes a lane has to be revisited.
  */
 struct net_lane g_net_lanes[CONFIG_NET_LANES];
+
+#if CONFIG_NET_LANES > 1
+/*
+ * Stage C's "which lane owns the work in progress" context.  Declared in
+ * net_lane.h with the full rationale; the two facts that matter here are that
+ * it is only meaningful under g_lwip_lock, and that lane 0 is the value a
+ * section gets when it never establishes one of its own.
+ */
+unsigned a20_net_lane_cur;
+#endif

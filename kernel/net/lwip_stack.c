@@ -633,8 +633,81 @@ void a20_lwip_unlock(uint64_t flags)
 #if CONFIG_NET_LOCK_ASSERT
     g_lwip_lock_owner = A20_LWIP_LOCK_UNOWNED;
 #endif
+    /*
+     * The lane context ends with the critical section.  Resetting it here is
+     * what makes "lane 0" the value a section gets when it never establishes
+     * one of its own, instead of inheriting whatever lane the previous holder
+     * of this lock happened to be working on.  Folding to nothing at one lane
+     * is what net_lane_ctx_pop(0) is for.
+     */
+    net_lane_ctx_pop(0);
     spin_unlock_irqrestore(&g_lwip_lock, flags);
 }
+
+/*
+ * Stage C: at CONFIG_NET_LANES == 1 the declaration of a lane is a macro that
+ * expands to nothing, in lwip_stack.h -- see the note there for why it has to
+ * vanish from the preprocessed source and not merely fold away.
+ *
+ * What this file owns is the three halves that cannot fold: the definition the
+ * macro stands for at more than one lane, the reset on unlock, and the answer
+ * lwIP asks through the LWIP_MEMP_LANE() hook.
+ */
+#if CONFIG_NET_LANES > 1
+/*
+ * Declare which lane owns the work that is about to run inside the lwIP core.
+ * lwIP's allocator has no lane parameter, so memp asks the port
+ * (LWIP_MEMP_LANE -> a20_lwip_memp_lane below) which pool to index.
+ *
+ * Call this only with g_lwip_lock held, and only at a top-level entry: there is
+ * no scoped push/pop here because a20_lwip_unlock() clears the context, so a
+ * previous value has nothing to restore to.  The one caller that genuinely
+ * nests -- a20_lwip_process_netif_rx_tx_locked(), reached from a socket's
+ * a20_lwip_poll_locked() -- uses net_lane_ctx_push()/pop() directly so the
+ * socket's lane survives the drain.
+ */
+void a20_lwip_lane_enter(unsigned lane)
+{
+    (void)net_lane_ctx_push(lane);
+}
+
+/*
+ * The port's answer to "which lane is this?", handed to lwIP through the
+ * LWIP_MEMP_LANE() hook in lwipopts.h.  Declared there rather than here
+ * because lwipopts.h is read before any kernel header.
+ *
+ * It reads the context rather than hashing anything itself.  A second
+ * derivation of "the lane" inside memp is exactly the hazard net-lane.h
+ * describes: the PCBs of one connection and the pbufs of the same connection
+ * must agree on one lane, and they can only do that if there is exactly one
+ * definition of it.
+ */
+unsigned a20_lwip_memp_lane(void)
+{
+    return net_lane_ctx_get();
+}
+
+/*
+ * Which lane owns the receive drain of one netif.
+ *
+ * A netif has no lane of its own -- upstream's struct netif is unmodified, see
+ * DIVERGENCE.md 2.4 -- so the address is what there is to hash, and it is the
+ * same reasoning net_lane_of_ip() already applies to ARP, ICMP and NDP: state
+ * with no port to key on is spread by address rather than left to land on
+ * whichever CPU took the interrupt.  A netif that has no address yet hashes
+ * 0.0.0.0, which is deterministic, so the boot-time drain is not a special
+ * case.
+ *
+ * This is NOT the packet's owning lane.  That one is only known once the
+ * packet has been parsed far enough to find the connection, which is stage D;
+ * until then, packets for every lane's connections arrive through the same
+ * netif and are drained in its lane.
+ */
+static unsigned a20_lwip_netif_lane(const struct netif *n)
+{
+    return net_lane_of_ip(a20_netif_ipv4_host(n));
+}
+#endif /* CONFIG_NET_LANES > 1 */
 
 #if CONFIG_NET_LOCK_ASSERT
 int a20_lwip_lock_is_held(void)
@@ -705,11 +778,32 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
     if (!n || !n->state)
         return 1;
 
+    /*
+     * Scoped, not a plain assignment: this runs under a caller's lane too --
+     * a socket's send path reaches it through a20_lwip_poll_locked() -- and the
+     * caller has no reason to give up its lane for the drain.  Restoring on the
+     * way out is what keeps a loopback echo released here from being charged to
+     * the netif instead of to the socket that will consume it.
+     *
+     * The whole statement, not just the helper, is what the N=1 build drops.
+     * Leaving `net_lane_ctx_push(a20_lwip_netif_lane(n))` to fold away on its
+     * own would be a bet on -O3 seeing through an inlined static, and the N=1
+     * equivalence rule is not a bet.  At one lane the drain's lane is 0, which
+     * is also what net_lane_ctx_push() returns, so `prev_lane = 0` is the same
+     * value by construction rather than by optimisation.
+     */
+#if CONFIG_NET_LANES > 1
+    unsigned prev_lane = net_lane_ctx_push(a20_lwip_netif_lane(n));
+#else
+    unsigned prev_lane = 0;
+#endif
+
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)n->state;
     a20_lwip_sync_link_state(n);
 
     if (!netif_is_link_up(n)) {
         netif_poll(n);
+        net_lane_ctx_pop(prev_lane);
         return 1;
     }
 
@@ -773,6 +867,7 @@ static int a20_lwip_process_netif_rx_tx_locked(struct netif *n, unsigned budget)
         }
     }
     netif_poll(n);
+    net_lane_ctx_pop(prev_lane);
     return drained;
 }
 
@@ -832,6 +927,16 @@ void a20_lwip_poll_timers_locked(void)
      * Guarded on loop_first so an idle system does no work here beyond the
      * pointer walk, and bounded by LWIP_LOOPBACK_MAX_PBUFS on how much can be
      * released per tick.
+     *
+     * The lane context is deliberately left as the caller established it,
+     * rather than being reset to the netif's own lane the way the receive
+     * drain does.  loop_first is one FIFO holding packets from every lane's
+     * connections, and which of them a given netif_poll() releases is not
+     * knowable before the packet is parsed, so there is no per-netif answer to
+     * adopt.  Inheriting at least keeps a socket's own loopback echo in that
+     * socket's lane, because a socket reaches this through
+     * a20_lwip_poll_locked() with its lane already set.  From the timer tick
+     * it is lane 0, which a20_lwip_unlock() established.
      */
     for (struct netif *n = netif_list; n; n = n->next) {
         if (n->loop_first != NULL)
@@ -871,6 +976,9 @@ void a20_lwip_poll_rx_locked(unsigned budget)
             if (!a20_lwip_process_netif_rx_tx_locked(n, budget))
                 complete = 0;
         } else {
+            /* No state means a netif the port does not drive, so there is no
+             * address to hash and no per-netif lane to adopt.  It still has to
+             * be drained, so it runs in whatever lane the caller set. */
             netif_poll(n);
         }
     }
@@ -1281,6 +1389,37 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
                  (unsigned long)desc->stats->err);
         a20_lwip_append(buf, bufsz, &off, row);
     }
+
+#if CONFIG_NET_LANES > 1
+    /*
+     * Per-lane pbuf pool accounting, printed after everything above so no gate
+     * keying on "^POOLNAME <digits>" can see a row it did not expect.
+     *
+     * These are two monotonic counters per lane, not a used/free pair, and the
+     * reason is in memp.c: memp_free() is handed a pool id and a pointer and
+     * nothing that says which lane allocated the element, so alloc-minus-freed
+     * would be wrong for any pool that is ever allocated on one lane and
+     * released on another -- which is the normal case for a pbuf.  A gauge fed
+     * that way underflows stats_mem's u16_t.  What these two numbers do answer
+     * is the question /proc/net/status's lanes line is built to answer: is
+     * traffic actually being spread over the lanes, or is everything landing on
+     * one of them?
+     */
+    {
+        char lane_row[64];
+        a20_lwip_append(buf, bufsz, &off,
+            "pbuf lane         alloc   freed\n");
+        for (unsigned l = 0; l < CONFIG_NET_LANES; l++) {
+            const struct memp_lane_count *c = memp_lane_count_get(l);
+            if (!c)
+                continue;
+            snprintf(lane_row, sizeof(lane_row), "%-15lu%7lu%8lu\n",
+                     (unsigned long)l, (unsigned long)c->alloc,
+                     (unsigned long)c->freed);
+            a20_lwip_append(buf, bufsz, &off, lane_row);
+        }
+    }
+#endif /* CONFIG_NET_LANES > 1 */
 
     /*
      * The two frame-buffer arrays are the part of the stack's footprint that
