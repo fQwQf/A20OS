@@ -127,6 +127,100 @@ smoke-netfilter:
 		exit 1; \
 	fi
 
+# DNAT port forwarding, end to end.
+#
+# smoke-netfilter above can only ever see traffic the guest originates, and a
+# DNAT is by definition a rewrite of an *inbound* packet.  So this case does
+# what the other one structurally cannot: it forwards a host port into the guest
+# (NET_HOSTFWD), connects to that port from the host, and asserts that a socket
+# listening on a *different* port in the guest accepted the connection and
+# echoed a byte back.
+#
+# Both directions of the translation are covered by that one assertion.  The
+# inbound half is the destination rewrite; the outbound half is forced by the
+# echo, because the host's QEMU only accepts a reply whose source port is the
+# forwarded port again -- and nothing but the conntrack entry's recorded DNAT
+# tuple produces that, because the guest socket's own port is LISTEN_PORT.
+#
+# The host-side probe retries until the guest has booted and installed the
+# rule, then fails loudly if the forward never completed.  QEMU runs in the
+# background so a failed probe still leaves a guest log to read.
+#
+# Deliberately NOT asserted: a NAT rule's "matched" count on its own.  That
+# counter moves whether or not the rewrite reached lwIP with a valid checksum,
+# which is exactly the failure this gate exists to rule out.
+#
+# The forward is spelled "hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081" for two
+# reasons, both found by running QEMU 10.0.13 here rather than by reading its
+# docs:
+#
+#   - The bare "tcp:hostaddr:port-:guest" spelling is rejected outright:
+#     QEMU parses the value as a deprecated boolean and refuses to start
+#     ("Invalid parameter").  The hostfwd= prefix is required.
+#   - There is no colon before the guest address.  With one, the guest half is
+#     parsed as [addr]:port and the address field swallows the host part, so the
+#     port comes out as "10" and the SYN reaches the guest on 10.0.2.15:10.
+#     Measured with -object filter-dump on the netdev, both spellings booted and
+#     both accepted the host connection:
+#       tcp:127.0.0.1:18081-10.0.2.15:18081  -> guest sees 10.0.2.15:18081
+#       tcp:127.0.0.1:18082-:10.0.2.15:18082 -> guest sees 10.0.2.15:10
+#     A silently wrong guest port is exactly the failure this gate exists to
+#     catch, so it is worth writing down rather than rediscovering.
+#
+# Note for whoever owns tools/a20_derive.py: it emits "tcp::5555-:5555", which
+# QEMU 10 refuses ("Missing guest address").  Left alone here -- that string is
+# asserted by tools/tests/test_a20.py and is a different stream's file.
+#
+# a20.tcpmode=lwip is load-bearing for the same reason.  Under the default
+# "fast" mode the socket layer never creates a LISTEN pcb (see the comment in
+# kernel/net/socket_control.c:204), so *any* inbound SYN gets an RST from lwIP
+# and no port forward can ever complete -- NAT would be exonerated of a failure
+# that is really the listener model.  Same knob smoke-net-accept uses.
+smoke-netfilter-nat: NET_HOSTFWD=hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081
+smoke-netfilter-nat:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 NET_HOSTFWD='hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081' dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/netfilter-nat-riscv64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'netnat_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_NAT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/netnat_host_probe.py 18081 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-netfilter-nat: FAIL -- the host never completed the port forward"; \
+		echo "  (tools/netnat_host_probe.py exit $$probe). Guest verdict, if any:"; \
+		grep -E 'NETNAT_TEST' "$$log" || echo "  (none: the guest never got that far)"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif grep -q 'NETNAT_TEST: PASS' "$$log"; then \
+		echo "smoke-netfilter-nat: PASS dnat 18081 -> 10.0.2.15:18082"; \
+		echo "  log saved to $$log"; \
+	elif grep -q 'NETNAT_TEST: FAIL' "$$log"; then \
+		echo "smoke-netfilter-nat: FAIL -- the guest reported a failure:"; \
+		grep -E 'NETNAT_TEST' "$$log" | tail -n 5; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-netfilter-nat: timeout without verdict; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-netfilter-nat: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-network-suite:
 	$(PYTHON) tools/smoke.py smoke-network-suite
 
