@@ -428,6 +428,50 @@ _Static_assert(sizeof(net_socket_t) <= NET_PROFILE_SOCKET_MAX_BYTES,
                "net_socket_t exceeds the profile's per-socket budget; a fixed "
                "NET_MAX_PAYLOAD-sized staging member has crept back in");
 
+#if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
+
+/*
+ * The embedded tier's whole accounting, asserted here because this is the first
+ * point in the include chain where net_socket_t is a complete type.
+ *
+ * The other three terms are checked against real sizeof() in the files that own
+ * them -- socket_packet.c for the AF_PACKET ring, lwip_stack.c for the netif
+ * state, netfilter_nat.c for the filter tables -- and the heap is a static
+ * array of exactly NET_PROFILE_MEM_SIZE bytes in memp/mem.c.  What only this
+ * file can check is the socket table, and it was the one term that overran the
+ * part: eight net_socket_t at the old ring-4 / payload-320 geometry were 29120 B
+ * against a 20 KiB device, which is the number docs/server-readiness.md kept
+ * quoting as the reason the tier could not fit.
+ *
+ * With the per-tier ring depth and inline payload it is 8 x 2440 = 19520 B, so
+ * the socket table is inside NET_PROFILE_SOCKET_BUDGET with 960 B to spare, and
+ * the four terms together are 42644 B against NET_PROFILE_TOTAL_BUDGET (44 KiB).
+ *
+ * The frame term below is the macro bound, not the measured 3732 B: the AF_PACKET
+ * ring carries one more slot than the profile's macro counts (the drain scratch
+ * buffer in socket_packet.c), so the macro undercounts by 516 B and the real
+ * total is 42644 rather than the 42128 the assert is checking.  That is the
+ * right direction for a bound this tight and is why the ceiling carries 2.4 KiB
+ * of slack.
+ */
+_Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) <= NET_PROFILE_SOCKET_BUDGET,
+               "the embedded profile's whole socket table does not fit the "
+               "budget the profile declares for it; shrink the bottom-half ring "
+               "depth or the inline payload rather than raising the ceiling");
+
+_Static_assert(NET_MAX_SOCKETS * sizeof(net_socket_t) +
+                   NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
+                   NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES +
+                   NET_PROFILE_FILTER_BUDGET +
+                   NET_PROFILE_MEM_SIZE
+               <= NET_PROFILE_TOTAL_BUDGET,
+               "the embedded profile's total RAM -- socket table, frame arrays, "
+               "filter tables and the lwIP heap -- exceeds the ceiling the "
+               "profile declares for itself; one of the four terms grew and the "
+               "tier no longer fits the part it names");
+
+#endif /* CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED */
+
 typedef struct sockaddr_alg_kernel {
     uint16_t family;
     uint8_t type[14];

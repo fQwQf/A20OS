@@ -1909,6 +1909,41 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off, row);
     }
 
+    /*
+     * The socket table's half of the same account, which no pool row can show
+     * either.  These objects come from the socket obj_cache rather than from
+     * .bss, so they cost nothing until a socket exists -- but the ceiling is a
+     * compile-time number and the cache will fill it, which is exactly why
+     * "the netmem page looked small" was never evidence that the tier fitted.
+     *
+     * `total` is NET_MAX_SOCKETS x sizeof(net_socket_t) -- the worst case the
+     * table can reach, not a live count, so it is directly comparable with the
+     * static .bss line above and with NET_PROFILE_SOCKET_BUDGET, the ceiling
+     * socket_internal.h asserts it against.  The ring and payload columns are
+     * the two profile numbers that decide it, printed because a reader looking
+     * at a tier that no longer fits has to be able to see which knob moved.
+     */
+    {
+        /* Its own buffer: six numbers on a 128 B row would truncate, and a
+         * truncated accounting line is worse than no line. */
+        char sock_row[192];
+        snprintf(sock_row, sizeof(sock_row),
+                 "socket table: per_socket=%lu slots=%lu bh_ring=%lu "
+                 "inline_payload=%lu total=%lu budget=%lu\n",
+                 (unsigned long)sizeof(net_socket_t),
+                 (unsigned long)NET_MAX_SOCKETS,
+                 (unsigned long)NET_BH_RING_SIZE,
+                 (unsigned long)NET_BH_INLINE_PAYLOAD,
+                 (unsigned long)(NET_MAX_SOCKETS * sizeof(net_socket_t)),
+#ifdef NET_PROFILE_SOCKET_BUDGET
+                 (unsigned long)NET_PROFILE_SOCKET_BUDGET
+#else
+                 0UL
+#endif
+                 );
+        a20_lwip_append(buf, bufsz, &off, sock_row);
+    }
+
     a20_lwip_unlock(flags);
     return (int)off;
 }

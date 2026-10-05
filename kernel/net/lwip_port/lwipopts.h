@@ -112,8 +112,10 @@
 #define MEMP_NUM_TCP_PCB                NET_PROFILE_TCP_PCB
 #define MEMP_NUM_TCP_PCB_LISTEN         NET_PROFILE_TCP_PCB_LISTEN
 #define MEMP_NUM_TCP_SEG                (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT)
-#define MEMP_NUM_REASSDATA              16
-#define MEMP_NUM_FRAG_PBUF              32
+#define MEMP_NUM_REASSDATA              NET_PROFILE_REASSDATA
+#define MEMP_NUM_FRAG_PBUF              NET_PROFILE_FRAG_PBUF
+#define MEMP_NUM_ND6_QUEUE              NET_PROFILE_ND6_QUEUE
+#define MEMP_NUM_MLD6_GROUP             NET_PROFILE_MLD6_GROUP
 #define MEMP_NUM_ARP_QUEUE              NET_PROFILE_ARP_QUEUE
 #define MEMP_NUM_IGMP_GROUP             16
 #define MEMP_NUM_SYS_TIMEOUT            NET_PROFILE_SYS_TIMEOUT
@@ -234,16 +236,22 @@ _Static_assert(NET_PROFILE_TCP_WND_MULT <= NET_PROFILE_PBUF_POOL_SIZE,
  * LWIP_MEM_ALIGN_SIZE(PBUF_POOL_BUFSIZE) and struct pbuf does not exist yet at
  * this point in the include chain.  So this term is deliberately optimistic --
  * 520 B against a measured 536 B on the riscv64 tier 1 build -- because
- * understating the element is the wrong direction to fail in.  Do not "fix" it to
- * 24 without re-measuring; the ceiling then stops holding.  Holds on all three
- * profiles: 12480/16384, 395264/524288, 6324224/16777216.
+ * understating the element is the wrong direction to fail in.  Do not "fix" it
+ * to 544 without re-measuring; the ceiling then stops holding.  Holds on all
+ * three profiles: 5160/16384, 395264/524288, 6324224/16777216.
  *
  * Pbuf pool only.  The other thirteen pools this config compiles in also draw on
- * MEM_SIZE and their element sizes are lwIP struct layouts not visible yet; on
- * riscv64 tier 1 they add 12640 B at full occupancy against 3904 B left, so
- * tier 1's full set of pool ceilings is not simultaneously satisfiable within
- * tier 1's own MEM_SIZE (25696 B of claims against 16384 B).  That needs the
- * ceilings lowered, not an assertion added.
+ * MEM_SIZE and their element sizes are lwIP struct layouts not visible yet at
+ * this point in the include chain, so this assert cannot see them.  The full
+ * sum is instead computed from per-pool element ceilings in net_profile.h
+ * (NET_PROFILE_MEMP_CLAIM_BYTES) and asserted there against MEM_SIZE: tier 1
+ * reconciles at 13332 B of claims against 16384 B of heap, where before this
+ * change the same sum was 22880 B against the same heap -- a tier declaring
+ * pool capacity it could never allocate, which under MEMP_MEM_MALLOC=1 shows up
+ * as memp err > 0 on /proc/a20/netmem rather than as a clean allocation
+ * failure.  Tiers 2 and 3 are not asserted and are not reconciled; their pool
+ * ceilings exceed their heaps by a wide margin and always have, which is a
+ * separate piece of work rather than something to quietly change here.
  */
 _Static_assert(PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE + MEM_ALIGNMENT) <= MEM_SIZE,
                "MEM_SIZE cannot back the pbuf pool at its declared "
