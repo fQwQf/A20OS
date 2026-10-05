@@ -143,11 +143,23 @@ shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip
 | `NET_PROFILE_TCP_MAX_SACK_NUM` | 1 | 4 | 每段最多 4 个 SACK 块 |
 | `NET_PROFILE_TCP_TIMESTAMPS` | 0 | 1 | TCP 时间戳与 PAWS（RFC 7323）。上游默认 0 |
 | `NET_PROFILE_TCP_CUBIC` | 0 | 1 | CUBIC 拥塞控制（RFC 8312 核心条款） |
-| `NET_PROFILE_CONNTRACK_ENTRIES` | 64 | 256 / 1024 | conntrack 静态表条目数 |
+| `NET_PROFILE_CONNTRACK_ENTRIES` | **32** | 256 / 1024 | conntrack 静态表条目数。EMBEDDED 本轮从 64 降到 32：它是无条件 `.bss`，每次启动都付，即使 netfilter 从未加载 |
 | `NET_PROFILE_CONNTRACK_BUCKETS` | 8 | 32 / 128 | conntrack 哈希桶数 |
+| `NET_PROFILE_CONNTRACK_ENTRY_BYTES` | 64 | 64 | 每条目字节上界，由 `netfilter_nat.c:44` 的 `_Static_assert` 钉住 |
 | `NET_PROFILE_PACKET_RING_SLOTS` / `_FRAME_SIZE` | 4 / 512 | 16 / 1536 | `socket_packet.c` 的静态帧环 |
 | `NET_PROFILE_NETIF_MAX_DEVS` / `_FRAME_SIZE` / `_MTU` | 1 / 512 / 498 | 4 / 1536 / 1500 | 每 netif 的 `rx_frame` / `tx_frame` 与 MTU |
+| `NET_PROFILE_SOCKET_BUDGET` | 20 KiB | **未定义** | `NET_MAX_SOCKETS × sizeof(net_socket_t)` 的上界。只有 EMBEDDED 档定义它 |
+| `NET_PROFILE_TOTAL_BUDGET` | 44 KiB | **未定义** | socket 表 + 帧数组 + filter 表 + lwIP 堆的四项求和上界 |
+| `NET_PROFILE_FILTER_BUDGET` | 3,328 | **未定义** | `sizeof(g_ct) + sizeof(g_nat)`，由 `netfilter_nat.c:561` 的断言钉住。EMBEDDED 档现在**正好占满**：条目在 `810e9e431` 后由 56 B 涨到 64 B，32×64 + 16×80 = 3,328 |
 | `NET_PROFILE_STATIC_BUDGET` | 20 KiB | 64 KiB / 128 KiB | 上面那些静态数组的 `.bss` 上界，由断言钉住 |
+
+**"未定义"不是 0，也不是"无限"。** `NET_PROFILE_SOCKET_BUDGET`、
+`NET_PROFILE_TOTAL_BUDGET` 与 `NET_PROFILE_FILTER_BUDGET` 都只在 EMBEDDED 档定义
+（`net_profile.h:155` / `:208` / `:207`），所以 DEFAULT / SERVER 的
+`/proc/a20/netmem` 那一行打印 `budget=n/a` 而不是 `0`——打印 0 会被读成"三千多万字节的
+socket 表对 0 预算"，那是一个内核并不持有、也没有任何断言支持的越界结论。
+**代价也要一起说**：这三条断言因此只有 tier 1 有，tier 2/3 的**池上限**仍远大于各自的
+`MEM_SIZE`（它们由 `obj_cache` 动态分配，不是同一件事），本轮未对账。
 
 **EMBEDDED 档把 SACK 与时间戳关掉是刻意的**：两者都会加大每个数据段的 TCP 头，
 也会加大每个已建立 PCB 的结构，而在 512 B 的池元素上这笔开销直接从载荷预算里扣。
@@ -160,10 +172,32 @@ DEFAULT / SERVER 开启后，`NET_PROFILE_PBUF_BUFSIZE` 必须从 1536 涨到 16
 那个无选项的 54**。DEVICE 侧的 `NETIF_FRAME_SIZE` 仍是 1536：它装的是整帧
 （MTU 1500 + 14 = 1514），而要装进池元素的是带选项的**段**，两者的几何不是一回事。
 
-CUBIC 的范围与未做的部分逐条登记在 `kernel/external/lwip/DIVERGENCE.md` §2.5
-（源码侧是 `lwip/priv/tcp_cubic_priv.h` 的头注释）。**它没有** RFC 8312 §4.2 的
-TCP-friendly 公式（只以 Reno 速率近似），没有 HyStart / TCP-AQ / DCTCP / Prague，
-没有 ECN，`W_max` 不跨 pcb 持久化。
+CUBIC 的范围与未做的部分逐条登记在 `kernel/external/lwip/DIVERGENCE.md` §2.7
+（源码侧是 `lwip/priv/tcp_cubic_priv.h` 的头注释）。
+
+- **§4.2 的 TCP-friendly 区域已落地**（`8115a0c1a`）。`tcp_cubic_w_est()` 按
+  `W_max*beta_cubic + alpha_aimd*(t/RTT)` 算 Eq. 4，两条曲线取**较大者**作为目标
+  （4.2 原文是 "cwnd SHOULD be set to W_est(t)"，所以友好线是地板不是天花板）。
+  `alpha_aimd` 由 `BETA` 导出（`3(1-b)/(1+b) = 542/1024`）而不是抄写，因此不会与上面的
+  beta 走散。此前那个"Reno 速率近似"（W_cubic 不给增长就每确认 cwnd 加 1 MSS）已删除：
+  那是一个**速率**而不是**目标**，它既不看 `t/RTT` 也不看流量自己的 `W_max`，在平台上
+  以 1/cwnd 段每 RTT 的速度无限爬，比 Eq. 4 所派生的 AIMD(alpha_aimd, beta_cubic) 慢，
+  也就是说"至少不差于 Standard TCP"这条性质此前只是**声称**、没有交付。
+- **没有做的部分**：HyStart / TCP-AQ / DCTCP / Prague、ECN、`W_max` 跨 pcb 持久化。
+  平台分支保留 1 MSS 的地板，理由也改了：它不再是 4.2 的近似，而是 4.2 在
+  `W_cubic(t)` 与 `W_est(t)` **双双不高于 cwnd** 时唯一给出的进展
+  （此时 `(W_cubic(t+RTT)-cwnd)/cwnd` 为负，RFC 没说话）。
+- **必须一起读的边界**（登记在 `tcp_cubic_priv.h` 与 DIVERGENCE §2.7）：lwIP 2.2.x 的
+  `struct tcp_pcb` **没有 `rtt` 字段**，本栈唯一能测的 RTT 是 `pcb->sa`，以整个
+  `TCP_SLOW_INTERVAL`（500 ms）为单位采样，所以 Eq. 4 的分母在 0.5 s 以下没有分辨率。
+  `sa == 0`（回环、大多数局域网）被兜底成一个 tick，于是 `alpha/0.5s = 1.07` 段/秒。
+  这反过来界定了这一区域能在哪里起约束作用：Eq. 4 只在 `alpha*K/RTT > 0.3*W_max`
+  时压过 Eq. 1，也就是 `W_max` 低于约 3.25 段。**所以 4.2 是真的，但只在窗口量级的
+  低端决定窗口**——在 CUBIC 真正要对付的大窗口传输上它不会成为约束项。毫秒级 RTT
+  需要在 `tcp_in.c` 里更新一个新 pcb 字段，未做。
+- 主机侧门禁 `tools/test-tcp-cubic-host.sh`，`test_tcp_friendly()` 跨 (t, RTT) 钉住
+  Eq. 4，`test_friendly_region_binding()` 在 `sa=1` 与 `sa=40` 下把区域选择推过真实的
+  ACK 路径。
 
 ### 运行时控制面：`/proc/a20/netfilter` 的 conntrack 与 NAT 动词
 
@@ -196,10 +230,17 @@ NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无
 
 - `SO_SNDBUF` 只约束**已排队未确认**的字节，**不约束在途飞行字节**——在途由拥塞控制
   （cwnd / `pcb->cwnd`）负责，在这里也管它会与算法对着干。抬高位子不会放宽 cwnd。
-- **抬高对既有连接立即生效。** ceiling 双向写进 `pcb->snd_buf`：lwIP 自己没有在途
-  增长 `snd_buf` 的接口，本轮**发明**了这个写入（`socket_inet.c` 中 `net_inet_tcp_buf_apply()`
-  里那一句无条件赋值），并把依赖的不变量登记进 DIVERGENCE §2.10。下调不会凭空缩掉
-  已经排进 lwIP 的数据：已排队的字节要等 ACK 回来才让出新的可用空间。
+- **抬高对既有连接立即生效**（`272c80a2f`）。ceiling 双向写进 `pcb->snd_buf`：lwIP 自己
+  没有在途增长 `snd_buf` 的接口，本轮**发明**了这个写入（`socket_inet.c:1688` 的
+  `net_inet_tcp_buf_apply()` 里那一句无条件赋值），并把依赖的不变量登记进
+  DIVERGENCE §2.10。**改这一句顺带修掉一个死锁**：发送路径原先另外维护一个
+  "队列深度 = `TCP_SND_BUF - pcb->snd_buf`"的估计再拿它和 ceiling 比——而 ceiling 已经
+  被写进 `snd_buf` 了，于是**预留但未用**的空间被当成已排队：`TCP_SND_BUF` 93440、
+  ceiling 16384 时它报出 77056 字节已排队对 16384 上限，room 为 0，socket 在**空发送
+  队列**上永久阻塞（park 路径重复计数）。同一个错误在抬高方向也不健全：抬高会缩小
+  推导出的深度，把 pcb 并不拥有的 room 发出去。现在循环直接问 pcb，对从未设置过该
+  选项的 socket 这与改动前逐字节相同。
+  下调不会凭空缩掉已经排进 lwIP 的数据：已排队的字节要等 ACK 回来才让出新的可用空间。
 - **两者都没有自动调优。** 没有 `tcp_wmem` / `tcp_rmem`，没有内存压力反馈，也不从
   实测吞吐调整。Linux 会据此增长 `sk_sndbuf` / `sk_rcvbuf`，本树不会；依赖那种增长的
   调用方拿不到。
@@ -279,19 +320,43 @@ IPv4 地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有
 socket 级的溢出上报面，所以计数并 `klog` 一条
 （`[RTNETLINK] multicast group 0x%x dropped for %d listener(s)`）。
 
+### `SIOCSIFMTU`：两个入口，一条封顶（本轮）
+
+MTU 是本轮唯一一个**此前只有内核代码、没有任何人跑过**的配置面。
+`a20_lwip_if_set_mtu()` 按档位帧缓冲封顶（EMBEDDED 512 B → MTU 上限 498；
+DEFAULT / SERVER 1536 B → 1522），同时校验 RFC 791 下限。**此前这条路径只有
+rtnetlink 走得到**，因为 `net_vfile_ioctl()` 把 `SIOCSIFMTU` 派发到 `socket_file.c`
+却没有对应的 `case`，每个调用者拿到的是 `-ENOTTY`（`kernel/net/socket_file.c:656-683`
+是本轮补上的那一支）。
+
+范围检查放在 ioctl 这一侧而不是被调方，是因为后者收 `uint16_t`：ifreq 的 `ifr_mtu`
+是 `int`，`0x10000` 会被截回 0，然后被当成低于下限的 MTU 拒绝，而不是被当成
+超范围值。
+
+门禁 `netlink_test` 的 `test_mtu_ceiling()` **二分发现**档位上限而不是写死它——
+用户态读不到构建的是哪一档，而接受性对请求的 MTU 是单调的（低于 68 是 RFC 791 下限，
+高于上限是帧缓冲），所以二分收敛到确切边界，然后把**边界两侧**都断言：65535 在任何档
+都被拒、`cap+1` 被拒且可重复、`cap` 本身被接受、且封顶确实生效而不只是被校验后丢弃。
+两个入口都覆盖，因为它们是通向同一个检查的两扇门（`RTM_NEWLINK`/`IFLA_MTU` 与
+`SIOCSIFMTU`）。
+
 ### 观测面：`/proc/net/stats` 的本轮新增行
 
 | 行 | 何时出现 | 含义 |
 |---|---|---|
 | `lwip_lock: armed=… owner=… violations=… sites=…` | `CONFIG_NET_LOCK_ASSERT=1` | 核心锁断言探针状态。关闭时**显式**打印 `not checked (CONFIG_NET_LOCK_ASSERT=0)` |
 | `lwip_lock_siteN: <addr>` | 同上，且探针触发过 | 违约点（宏展开处的返回地址） |
+| `net_lock: armed=… violations=… sites=… held_cpu0=… lockcounters_short=…` | `CONFIG_NET_LOCK_ASSERT=1` | net 锁契约探针（per-CPU 持锁集合）。`held_cpu0` 是 CPU 0 此刻持有的 net 锁数（正常读取时应为 0），`lockcounters_short` 是"取锁计数表注册不足 `NET_SOCK_BUCKETS`"的次数。关闭时同样显式打印 `not checked` |
+| `net_lock_siteN: <addr>` | 同上，且探针触发过 | 违约点 |
 | `…[sg_tx=N sg_tx_bytes=M]` | 总是 | 走 `send_sg()` 描述符路径的发送帧数与字节 |
 | `…[tx_csum_offload:on/off][mrg_rxbuf:on/off]` | 总是 | 驱动上报的能力位 |
 
 `owner=4294967295` 表示采样时锁空闲；`sites=0` 表示探针一次都没触发。
 **`violations=0` 在开关关闭时是没有意义的**——那行 `not checked` 就是为了不让人
-把它读成"没问题"。细节见
-[network-lock-contract.md](network-lock-contract.md)「核心锁断言」。
+把它读成"没问题"。`net_lock:` 那一行由 `a20_lwip_format_stats()` 渲染（不是
+`net_format_status()`），因为两行本来就该一起读。细节见
+[network-lock-contract.md](network-lock-contract.md)「核心锁断言」与
+「net 锁一侧的探针」。
 
 `/proc/net/` 下另有 `tcp6` 与 `udp6` 两个文件（`procfs.c:464-469`），按 v6 的四字布局
 渲染，与 `tcp` / `udp` 分开，v4 文件不再混入 v6 行。这一对文件是 `c34ddd7f8`
@@ -374,8 +439,28 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 - [x] conntrack 最小跟踪 ICMP echo：`type` 归一化 / `id` 进元组，回程经回程链匹配
       （echo 只交换地址，不交换字段），`ping` 形态的计数与 `state=established` 进
       `smoke-netfilter` 断言；无 ALG、无差错报文跟踪，边界见 conntrack-nat.md。
+- [x] CUBIC 实现 RFC 8312 §4.2 的 TCP-friendly 区域：`tcp_cubic_w_est()` 按 Eq. 4
+      算 `W_est(t)` 并取 `max(W_cubic, W_est)` 作为目标（友好线是地板不是天花板）。
+      「不约束在途」「无自动调优」两条限制不变。
+- [x] 档位新增三项预算宏（`NET_PROFILE_SOCKET_BUDGET` / `_TOTAL_BUDGET` /
+      `_FILTER_BUDGET`）与 EMBEDDED 档的 `NET_PROFILE_CONNTRACK_ENTRIES` 64 → 32；
+      三条预算由 `socket_internal.h` 与 `netfilter_nat.c` 的 `_Static_assert` 钉住，
+      未定义档位在 `/proc/a20/netmem` 打印 `budget=n/a` 而不是 `0`。
+- [x] `SIOCSIFMTU` 的 ioctl 分支补齐（此前派发得到 `-ENOTTY`），两个入口共用
+      `a20_lwip_if_set_mtu()` 的档位封顶；`netlink_test` 的 `test_mtu_ceiling()`
+      二分发现档位上限并断言边界两侧。
 - [ ] **未做**：套接字缓冲无自动调优（无 `tcp_wmem` / `tcp_rmem`、无内存压力反馈、
       不从实测吞吐调整）；IPv6 地址只有加没有删、不做 DAD、ND6 自学地址不发通知；
       conntrack 不跟踪 ICMP 差错报文（PMTU 探测因此不可用）。
+- [ ] **未做**：CUBIC 的 HyStart / DCTCP / `W_max` 跨 pcb 持久化；Eq. 4 的 RTT 分母
+      只能是 `pcb->sa`（整个 `TCP_SLOW_INTERVAL` = 500 ms 一档），所以该区域只在
+      `W_max` 低于约 3.25 段时可能成为约束项——见上面那一节。
+- [ ] **未做**：三条预算断言只有 tier 1 有，tier 2/3 的池上限仍远大于各自的
+      `MEM_SIZE`，本轮未对账。
 - [ ] **未做**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输不完成的
       现象，本轮一次都没复现，原因未查明。功能未削减，建议（部署用命令行键）保留。
+- [ ] **未跑**（按分工由编排层在合并后统一执行）：ASAN 压力测试与全量回归，
+      含 `smoke-network-suite`、`smoke-net-accept`、`smoke-netfilter*`、
+      `smoke-net-lanes*`、`smoke-socket-stress`。**本轮各流只跑了自己门禁里点名的
+      那些**，上面的勾选项因此只表示"实现已落地并被对应的窄门禁验过"，不表示
+      "全量回归通过"。

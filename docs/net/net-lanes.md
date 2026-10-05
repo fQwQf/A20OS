@@ -1189,6 +1189,15 @@ lanes: count=4 sockets=1 occupancy: 0 0 1 0
 `2dd28758c` 新加的 net 锁契约探针（`CONFIG_NET_LOCK_ASSERT=1`，违规即 abort）；
 它在 4 CPU 下 800 次真实握手全程 `violations=0`，即**阶段 E 的锁序在本负载下没被违反**。
 
+上面那行 `lock_counters: registered=48 capacity=192 dropped=0` 是 **DEFAULT 档**的。
+**server 档**（`NET_PROFILE=3` → `NET_PROFILE_MAX_SOCKETS=65536` →
+`NET_SOCK_BUCKET_SHIFT=9` → 128 个桶锁）另测过一次：
+`registered=141 capacity=192 dropped=0`，即 128 个桶锁 + 13 个其他锁，**余量 51**，
+`lockcounters_short=0`。所以 `LOCK_COUNTERS_MAX = 192` 不是"勉强够"，是三档都够——
+而这个"够"现在每次引导都会由 `net_socket_registry_init()` 自己报出来
+（`kernel/net/socket_registry.c:109-122`），不再依赖有没有人记得去看。原始读数见
+`impl-notes-net.md` §11.4 补记。
+
 **引用计数账本顺带补上了多核数据**（`impl-notes-net.md` §11.4 自记缺的那一块）：
 20 次引导的 `net_sock_ref` 全部 `live=1 faults=0`，`allocs` 在 159–167 之间，
 `frees` 恒等于 `allocs-1`。这是"4 CPU + 4 lane 真实握手下引用计数不漏"的证据，
@@ -1236,12 +1245,18 @@ E: mksh: ctp_accept_test: inaccessible or not found
    mksh 的 `inaccessible or not found` 数、以及 PASS/FAIL 行数，三者对不上就报
    "样本受损"而不是报 0 失败。这条排在第 2 位不是因为它更重要，而是因为它**便宜**
    且不做的话第 3、4 条的实验数据同样不可信。
+   **本轮未实施**：只做了记录，定位与修复会落到
+   `kernel/arch/riscv64/platform/timer.c` 与 `kernel/drivers/char/uart.c`，不属于网络
+   这条流的范围。本轮的做法是在统计口径上分列"下发"与"实际执行"两栏（宁可报
+   样本受损也不报 0 失败），但那只是**回避**这个问题，不是修它。
 3. **换放大器位置到生产者 `lwip_tcp_accept_cb()`。** 现有放大器只加在消费者
    （`net_inet_accept_stage_drain`）一侧。配方只覆盖了"跨两个锁域"这一半；
    另一半是生产者把 pcb 塞进 stage ring 的时刻，那里同样在 lwIP 锁下写、
    在桶锁外读。若要做，用一个新开关（**不要**复用 `CONFIG_NET_RACE_DELAY_US`，
    否则两组实验的数据无法分开看）。**注意**：这一条现在是在"当前树已 797 次不复现"
    的前提下做的——它值得做的理由是排除假设，不是预期还能复现。
+   **本轮未实施**：它按本文是成本递增的第 3 步，在"当前树 797 次不复现"的前提下
+   本轮的价值主要是排除假设，按时间盒留给下一轮。
 4. **在 `netif_loop_output()` / `netif_poll()` 一侧再看一次。** 回环队列的无界性
    （上文已记 `LWIP_LOOPBACK_MAX_PBUFS=0`）意味着"哪一 CPU 在哪一刻排空它"完全
    不受控；`net_tcp_lane_input()` 把包投给哪条 lane 的时机也就跟着漂。这不是可静态
