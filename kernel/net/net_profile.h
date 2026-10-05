@@ -80,16 +80,43 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (8 * 1024)
 
 /*
- * Budget, stated honestly: this profile is sized so the *stack's own* pools
- * fit a small SRAM part, not so a full-featured TCP/IP stack plus an
- * application fits in 20 KiB.  With the inline staging split, one net_socket_t
- * is roughly 8 * ~700 B, so 8 sockets land near 48 KiB before any lwIP pool.
- * The MCU targets in README.md (STM32F103, 20 KiB SRAM) therefore still do not
- * fit a socket-capable lwIP, and the honest statement is that they need the
- * bring-up gates in docs/platforms/stm32f103-port.md extended to cover networking
- * before the README claim holds.  Until then this profile exists to make the
- * embedded cost *bounded and proportional to the configured ceilings* rather
- * than to claim the target boots.
+ * Frame-buffer geometry, which is the other half of the pbuf story.
+ *
+ * The device scratch buffers were a hardcoded 1536 on every profile while
+ * PBUF_POOL_BUFSIZE was 512 here, so a full-size frame was received into a
+ * 1536 B buffer and then handed to pbuf_alloc() as one 1536 B request: three
+ * chained 512 B elements for every frame.  PBUF_POOL_SIZE=24 therefore held
+ * eight full-size frames instead of twenty-four, and the profile's own pool
+ * count silently stopped meaning what it says.
+ *
+ * A buffer is only worth sizing to the pool when the link MTU lets a frame fit
+ * one element, so the MTU follows the buffer rather than staying at 1500: the
+ * frame is the Ethernet header plus the MTU, and MTU + ETH_HLEN must be <=
+ * both the scratch buffer and the pool element.  ETH_HLEN is not visible here
+ * (lwip/ethernet.h is downstream of this header), so the 14 is spelled out and
+ * the exact sizeof() side of the same relation is asserted in lwip_stack.c.
+ */
+#define NET_PROFILE_PACKET_RING_SLOTS 4
+#define NET_PROFILE_PACKET_FRAME_SIZE NET_PROFILE_PBUF_BUFSIZE
+#define NET_PROFILE_NETIF_MAX_DEVS    1
+#define NET_PROFILE_NETIF_FRAME_SIZE  NET_PROFILE_PBUF_BUFSIZE
+#define NET_PROFILE_NETIF_MTU         (NET_PROFILE_PBUF_BUFSIZE - 14)
+#define NET_PROFILE_STATIC_BUDGET     (20 * 1024)
+
+/*
+ * Budget, stated honestly: this profile is sized so the *stack's own* static
+ * arrays and pools fit a small SRAM part, not so a full-featured TCP/IP stack
+ * plus an application fits in 20 KiB.  The static arrays below the profile's
+ * two frame buffers are now inside the profile's scope, so what they cost is
+ * bounded and proportional to the ceilings above; one net_socket_t is still
+ * roughly 8 * ~700 B, so 8 sockets land near 48 KiB before any lwIP pool.
+ *
+ * The honest consequence, unchanged by this work: the MCU targets in
+ * README.md (STM32F103, 20 KiB SRAM) do not fit a socket-capable lwIP *and*
+ * do not build one at all -- PROFILE=mcu compiles a curated source list
+ * (components/trim.toml [profile.mcu].sources) that contains neither the
+ * kernel/net sources nor lwIP, so NET_PROFILE has no effect on that target.
+ * See README.md and docs/server-readiness.md.
  */
 
 #elif CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_SERVER
@@ -125,6 +152,16 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
 
+/* Unchanged from the historical hardcoded 16 x 1536 / 4 x (1536 + 1536): this
+ * profile is what those constants were, and the accounting below simply states
+ * where the 37312 B went instead of leaving it implicit. */
+#define NET_PROFILE_PACKET_RING_SLOTS 16
+#define NET_PROFILE_PACKET_FRAME_SIZE 1536
+#define NET_PROFILE_NETIF_MAX_DEVS    4
+#define NET_PROFILE_NETIF_FRAME_SIZE  1536
+#define NET_PROFILE_NETIF_MTU         1500
+#define NET_PROFILE_STATIC_BUDGET     (128 * 1024)
+
 #else
 
 /*
@@ -153,7 +190,64 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
 
+/* Unchanged from the historical hardcoded values; only now stated.  See the
+ * SERVER block above for what these cost. */
+#define NET_PROFILE_PACKET_RING_SLOTS 16
+#define NET_PROFILE_PACKET_FRAME_SIZE 1536
+#define NET_PROFILE_NETIF_MAX_DEVS    4
+#define NET_PROFILE_NETIF_FRAME_SIZE  1536
+#define NET_PROFILE_NETIF_MTU         1500
+#define NET_PROFILE_STATIC_BUDGET     (64 * 1024)
+
 #endif /* CONFIG_NET_PROFILE */
+
+/*
+ * Geometry the profile above has to satisfy, checked on all three rungs
+ * rather than discovered on an MCU at run time.
+ *
+ * NET_PROFILE_NETIF_STATE_OVERHEAD is a deliberate *upper* bound on the
+ * non-frame part of one netif state (idx + device_t* + ops pointer + eight
+ * u64 counters, measured 96 B on riscv64 LP64 and smaller on ILP32).  Being
+ * generous in that direction is the safe direction for a budget assert; the
+ * exact sizeof() is pinned where the struct exists, in lwip_stack.c.
+ */
+#define NET_PROFILE_PACKET_SLOT_BYTES (4 + NET_PROFILE_PACKET_FRAME_SIZE)
+#ifndef NET_PROFILE_NETIF_STATE_OVERHEAD
+#define NET_PROFILE_NETIF_STATE_OVERHEAD 96
+#endif
+#define NET_PROFILE_NETIF_STATE_BYTES \
+    (2 * NET_PROFILE_NETIF_FRAME_SIZE + NET_PROFILE_NETIF_STATE_OVERHEAD)
+
+/* A max-size frame is one Ethernet header plus the MTU, and it has to fit both
+ * the device scratch buffer and a single pbuf-pool element -- otherwise the
+ * receive path silently chains elements and PBUF_POOL_SIZE stops meaning what
+ * the profile says it means. */
+_Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_NETIF_FRAME_SIZE,
+               "a full-MTU frame does not fit the device RX/TX scratch buffer; "
+               "the receive path would truncate it or fail the transmit");
+_Static_assert(NET_PROFILE_NETIF_FRAME_SIZE <= NET_PROFILE_PBUF_BUFSIZE,
+               "the device scratch buffer is larger than a pbuf-pool element, "
+               "so a full-MTU frame chains pool elements instead of using one");
+_Static_assert(NET_PROFILE_NETIF_MTU + 14 <= NET_PROFILE_PBUF_BUFSIZE,
+               "a full-MTU frame does not fit one pbuf-pool element");
+/* The AF_PACKET capture ring copies what the driver hands it, so its slot
+ * cannot be larger than the buffer the frame was read into. */
+_Static_assert(NET_PROFILE_PACKET_FRAME_SIZE <= NET_PROFILE_NETIF_FRAME_SIZE,
+               "the AF_PACKET capture ring's slot is larger than the device "
+               "scratch buffer it copies from");
+/*
+ * The total this profile costs in unconditional .bss.  These two arrays were
+ * the reason "embedded" could not mean small: they were compiled outside the
+ * profile's scope at 37312 B on every rung, which is 1.8x a 20 KiB part on its
+ * own.  docs/server-readiness.md records the measurement; this assert is what
+ * keeps a future hardcoded constant from quietly reinstating it.
+ */
+_Static_assert(NET_PROFILE_PACKET_RING_SLOTS * NET_PROFILE_PACKET_SLOT_BYTES +
+                   NET_PROFILE_NETIF_MAX_DEVS * NET_PROFILE_NETIF_STATE_BYTES
+               <= NET_PROFILE_STATIC_BUDGET,
+               "the profile-scope frame buffers exceed the profile's static "
+               "budget; these arrays are unconditional .bss that no runtime "
+               "counter reports, so the ceiling has to be a compile-time one");
 
 /*
  * Whether the receive path may poll for packets from the idle path instead of
