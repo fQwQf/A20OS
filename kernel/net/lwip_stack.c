@@ -89,7 +89,16 @@ static unsigned g_lwip_lock_violations;
 static void *g_lwip_lock_sites[A20_LWIP_LOCK_SITES];
 static unsigned g_lwip_lock_nsites;
 #endif /* CONFIG_NET_LOCK_ASSERT */
-#define A20_NET_MAX_DEVS 4
+/*
+ * Device count follows the profile.  This was a hardcoded 4 on every rung,
+ * and each entry carries two frame buffers -- 12672 B of unconditional .bss on
+ * a build whose whole point was to fit a 20 KiB part.  Every use of the array
+ * is a bounded loop over this ceiling, and a20_lwip_register_netifs() breaks at
+ * the first index the device class does not have, so a smaller ceiling means
+ * "only that many NICs are ever registered", never an overrun.  See
+ * docs/server-readiness.md.
+ */
+#define A20_NET_MAX_DEVS NET_PROFILE_NETIF_MAX_DEVS
 
 /*
  * RX progress hint.  The virtio-net IRQ top-half raises this flag before
@@ -143,12 +152,33 @@ typedef struct {
     int idx;
     device_t *dev;
     const net_dev_ops_t *ops;
-    uint8_t rx_frame[1536];
-    uint8_t tx_frame[1536];
+    uint8_t rx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
+    uint8_t tx_frame[NET_PROFILE_NETIF_FRAME_SIZE];
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
     uint64_t rx_filtered, tx_filtered;
 } a20_lwip_netif_state_t;
+
+/*
+ * The frame buffers were a hardcoded 1536 on every profile while
+ * PBUF_POOL_BUFSIZE was 512 on the embedded one, so a full-size frame was read
+ * into a 1536 B buffer and then handed to pbuf_alloc() as a single 1536 B
+ * request: three chained 512 B elements per frame, and PBUF_POOL_SIZE=24 held
+ * eight full-size frames rather than the twenty-four the profile names.  They
+ * now follow PBUF_POOL_BUFSIZE, and NET_PROFILE_NETIF_MTU keeps the link MTU
+ * small enough that a frame still fits one element (see the assertions in
+ * net_profile.h).
+ *
+ * The exact layout is asserted here rather than only in the header because the
+ * header can only approximate it: 96 B is the non-frame part measured on
+ * riscv64 LP64, and ILP32 has narrower pointers and counters.  Overstating
+ * that term is the safe direction for a ceiling; understating it is not, which
+ * is why sizeof() is what the per-profile budget is checked against here.
+ */
+_Static_assert(sizeof(a20_lwip_netif_state_t) <=
+                   NET_PROFILE_NETIF_STATE_BYTES,
+               "a20_lwip_netif_state_t exceeds the profile's per-netif state "
+               "budget; these are unconditional .bss per registered device");
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
 
@@ -215,7 +245,7 @@ static err_t a20_lwip_netif_init_cb(struct netif *netif) {
 #if LWIP_IPV6
     netif->output_ip6 = ethip6_output;
 #endif
-    netif->mtu = 1500;
+    netif->mtu = NET_PROFILE_NETIF_MTU;
     netif->hwaddr_len = ETH_HWADDR_LEN;
     memcpy(netif->hwaddr, mac, ETH_HWADDR_LEN);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
@@ -232,7 +262,10 @@ static err_t a20_lwip_loopif_init_cb(struct netif *netif)
     netif->hostname = hostname;
     netif->name[0] = 'l';
     netif->name[1] = 'o';
-    netif->mtu = 1500;
+    /* Same reasoning as the device netif: the loopback path also allocates from
+     * PBUF_POOL, so its MTU has to leave a frame inside one pool element.  On
+     * the default and server rungs this is the historical 1500. */
+    netif->mtu = NET_PROFILE_NETIF_MTU;
     netif->flags = NETIF_FLAG_LINK_UP;
 #if LWIP_IPV6
     static s8_t sn[] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -977,6 +1010,31 @@ int a20_lwip_format_memp(char *buf, size_t bufsz)
         a20_lwip_append(buf, bufsz, &off, row);
     }
 
+    /*
+     * The two frame-buffer arrays are the part of the stack's footprint that
+     * the pool table above structurally cannot show: with MEMP_MEM_MALLOC=1
+     * every pool element is a claim on the heap, but these are reserved in
+     * .bss whether or not a frame is ever moved.  They were 37312 B on every
+     * tier before net_profile.h took them into scope, and no runtime counter
+     * reported them -- which is the whole reason the embedded tier could not
+     * fit a 20 KiB part while its netmem page looked small.  Printed after the
+     * pool rows (not among them) so that gates keying on '^POOLNAME <digits>'
+     * are unaffected.
+     */
+    {
+        size_t netif_bytes = sizeof(g_netif_state);
+        size_t netif_structs = sizeof(g_netifs);
+        size_t packet_bytes = net_packet_static_bytes();
+        snprintf(row, sizeof(row),
+                 "static .bss (not from the heap): netif_state=%lu netif=%lu "
+                 "pkt_ring=%lu total=%lu\n",
+                 (unsigned long)netif_bytes,
+                 (unsigned long)netif_structs,
+                 (unsigned long)packet_bytes,
+                 (unsigned long)(netif_bytes + netif_structs + packet_bytes));
+        a20_lwip_append(buf, bufsz, &off, row);
+    }
+
     a20_lwip_unlock(flags);
     return (int)off;
 }
@@ -1099,6 +1157,19 @@ int a20_lwip_if_get_addr(unsigned ifindex, uint8_t addr[4], uint8_t mask[4],
 int a20_lwip_if_set_mtu(unsigned ifindex, uint16_t mtu)
 {
     if (mtu < 68)                  /* RFC 791 minimum link MTU */
+        return -EINVAL;
+    /*
+     * An MTU larger than the profile's frame buffer is not a smaller MTU, it is
+     * a broken one: the receive path would truncate every full-size frame to
+     * the scratch buffer (silently, at a20_lwip_process_netif_rx_tx_locked()'s
+     * clamp) and the transmit path would refuse the frame outright with
+     * ERR_BUF.  Bounding it here keeps the invariant the profile asserts --
+     * a frame fits one pbuf-pool element -- reachable from userspace too,
+     * rather than only at netif_add() time.  The default and server rungs are
+     * unaffected: their ceiling is 1536 - ETH_HLEN = 1522, above the historical
+     * 1500.
+     */
+    if (mtu + ETH_HLEN > NET_PROFILE_NETIF_FRAME_SIZE)
         return -EINVAL;
     uint64_t flags = a20_lwip_lock();
     struct netif *n = a20_lwip_netif_by_index(ifindex);
