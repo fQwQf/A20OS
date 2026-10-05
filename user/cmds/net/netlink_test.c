@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -51,9 +52,14 @@
 #define RTM_NEWADDR     20
 #define RTM_DELADDR     21
 
+/* Multicast groups from linux/rtnetlink.h, which musl does not publish. */
+#define RTNLGRP_LINK        0x1
+#define RTNLGRP_IPV4_IFADDR 0x5
+
 #define IFA_ADDRESS     1
 #define IFA_LOCAL       2
 #define IFLA_MTU        4
+#define IFLA_IFNAME     3
 
 struct nlmsghdr {
     uint32_t nlmsg_len;
@@ -492,6 +498,212 @@ static void test_uevent(void)
     close(route);
 }
 
+/* ---------------------------------------------------------------- */
+/* RTNETLINK multicast                                               */
+/* ---------------------------------------------------------------- */
+
+/* Walk a received message's attributes, which begin at `body` -- past the
+ * nlmsghdr AND the ifaddrmsg/ifinfomsg.  Starting at the nlmsghdr instead
+ * would read the payload struct as a rtattr and reject the walk.  Returns 0
+ * and fills the payload when an attribute of `type` carrying at least `want`
+ * bytes is present, else -1. */
+static int find_attr(const unsigned char *buf, size_t len, size_t body,
+                     uint16_t type, size_t want, void *out)
+{
+    size_t off = body;
+
+    while (off + sizeof(struct rtattr) <= len) {
+        const struct rtattr *rta = (const struct rtattr *)(buf + off);
+        size_t alen = rta->rta_len;
+
+        if (alen < sizeof(struct rtattr) || off + alen > len)
+            return -1;
+        if ((rta->rta_type & 0x3fff) == type) {
+            /* "at least", not "exactly": a fixed-size field such as an IPv4
+             * address is a length check, but IFLA_IFNAME is a NUL-terminated
+             * string whose length depends on the interface name, and pinning
+             * it to the size of the caller's buffer would be asserting that
+             * every interface name is IFNAMSIZ-1 long. */
+            if (alen - sizeof(struct rtattr) < want)
+                return -1;
+            memcpy(out, buf + off + sizeof(struct rtattr), want);
+            return 0;
+        }
+        off += NLMSG_ALIGN(alen);
+    }
+    return -1;
+}
+
+/* As find_attr, but for a NUL-terminated string attribute: copies at most
+ * `cap - 1` bytes and always terminates.  `*len` receives the attribute's
+ * payload size, so a caller can tell "en0" from "en0" plus a longer name that
+ * did not fit. */
+static int find_attr_str(const unsigned char *buf, size_t len, size_t body,
+                         uint16_t type, char *out, size_t cap,
+                         size_t *out_len)
+{
+    size_t off = body;
+
+    while (off + sizeof(struct rtattr) <= len) {
+        const struct rtattr *rta = (const struct rtattr *)(buf + off);
+        size_t alen = rta->rta_len;
+
+        if (alen < sizeof(struct rtattr) || off + alen > len)
+            return -1;
+        if ((rta->rta_type & 0x3fff) == type) {
+            size_t slen = alen - sizeof(struct rtattr);
+            size_t take = slen < cap - 1 ? slen : cap - 1;
+            memcpy(out, buf + off + sizeof(struct rtattr), take);
+            out[take] = '\0';
+            if (out_len)
+                *out_len = slen;
+            /* A missing terminator means the attribute is malformed, not that
+             * the name is long: report failure rather than a truncated name
+             * that would compare equal to nothing. */
+            return (slen > 0 && buf[off + sizeof(struct rtattr) + slen - 1] == 0)
+                       ? 0 : -1;
+        }
+        off += NLMSG_ALIGN(alen);
+    }
+    return -1;
+}
+
+/* Receive one message, or -1 on timeout.  A timeout is a normal outcome here:
+ * the negative control below asserts that nothing arrives. */
+static int recv_nl(int fd, unsigned char *buf, size_t cap, int ms)
+{
+    struct timeval tv;
+
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+        return -1;
+    return (int)recv(fd, buf, cap, 0);
+}
+
+static int bind_groups(int fd, uint32_t groups)
+{
+    struct nl_sockaddr sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.nl_family = AF_NETLINK;
+    sa.nl_groups = groups;
+    return bind(fd, (struct sockaddr *)&sa, sizeof(struct nl_sockaddr));
+}
+
+/*
+ * RTM_NEWLINK / RTM_NEWADDR must reach the multicast groups that subscribe to
+ * them, and must NOT reach a socket that subscribed to neither.
+ *
+ * The negative control is the assertion that matters.  A kernel that
+ * broadcast to every NETLINK_ROUTE socket regardless of nl_groups would pass a
+ * positive-only test and would break `ip monitor` in the other direction: a
+ * process that never asked for events would get them, and would have to learn
+ * to discard them.
+ *
+ * Both positive checks drive a change that is a no-op on the machine's own
+ * state -- re-asserting the address it already has, and setting IFF_UP on a
+ * link that is already up -- so this test cannot disturb the rest of the suite.
+ */
+static void test_multicast(int ifindex, const char *ifname_want,
+                           const uint8_t addr[4], const uint8_t mask[4])
+{
+    unsigned char buf[512];
+    int sub = socket(AF_NETLINK, SOCK_RAW, NL_ROUTE);
+    int mute = socket(AF_NETLINK, SOCK_RAW, NL_ROUTE);
+
+    if (sub < 0 || mute < 0) {
+        ok(0, "open the two multicast route sockets");
+        if (sub >= 0)
+            close(sub);
+        if (mute >= 0)
+            close(mute);
+        return;
+    }
+    ok(bind_groups(sub, RTNLGRP_LINK | RTNLGRP_IPV4_IFADDR) == 0,
+       "bind a route socket to the link and address groups");
+    ok(bind_groups(mute, 0) == 0,
+       "bind a second route socket to no group at all");
+
+    /* --- address --- */
+    ok(send_addr(sub, RTM_NEWADDR, NLM_F_REQUEST | NLM_F_REPLACE, ifindex,
+                 AF_INET, mask_to_prefixlen(mask), addr, IFA_LOCAL,
+                 NULL, 0) >= 0,
+       "re-assert the current address to trigger a multicast");
+
+    int n = recv_nl(sub, buf, sizeof(buf), 2000);
+    ok(n > 0, "the subscribed socket receives the address event");
+    if (n > 0) {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        ok(nlh->nlmsg_len == (uint32_t)n,
+           "the notification's nlmsg_len matches the bytes delivered");
+        ok(nlh->nlmsg_type == RTM_NEWADDR,
+           "the address event arrives as RTM_NEWADDR, not RTM_GETADDR");
+        ok(nlh->nlmsg_pid == 0,
+           "the notification names the kernel (nlmsg_pid 0) as its source");
+        const struct ifaddrmsg *ifa =
+            (const struct ifaddrmsg *)(buf + sizeof(*nlh));
+        ok(n >= (int)(sizeof(*nlh) + sizeof(*ifa)) &&
+           ifa->ifa_family == AF_INET,
+           "the payload is an AF_INET ifaddrmsg");
+        ok(ifa->ifa_index == (uint32_t)ifindex,
+           "the event names the interface that changed");
+        ok(ifa->ifa_prefixlen == (uint8_t)mask_to_prefixlen(mask),
+           "the event carries the prefix length that is in force");
+        uint8_t got[4] = { 0 };
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_ADDRESS, 4, got) == 0 &&
+           memcmp(got, addr, 4) == 0,
+           "IFA_ADDRESS in the event is the address now configured");
+        ok(find_attr(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifa),
+                       IFA_LOCAL, 4, got) == 0 &&
+           memcmp(got, addr, 4) == 0,
+           "IFA_LOCAL in the event is the same address");
+    }
+
+    /* --- link --- */
+    ok(send_link(sub, ifindex, 0x1 /* ifi_change & IFF_UP */,
+                  0x1 /* ifi_flags & IFF_UP */, NULL, 0) >= 0,
+       "set IFF_UP on an already-up link to trigger a link event");
+
+    n = recv_nl(sub, buf, sizeof(buf), 2000);
+    ok(n > 0, "the subscribed socket receives the link event");
+    if (n > 0) {
+        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+        ok(nlh->nlmsg_type == RTM_NEWLINK,
+           "the link event arrives as RTM_NEWLINK");
+        const struct ifinfomsg *ifi =
+            (const struct ifinfomsg *)(buf + sizeof(*nlh));
+        ok(n >= (int)(sizeof(*nlh) + sizeof(*ifi)) &&
+           ifi->ifi_index == ifindex,
+           "the link event names the interface that changed");
+        ok((ifi->ifi_flags & 0x1) != 0,
+           "the link event reports the link up");
+        char ifname[16] = { 0 };
+        size_t namelen = 0;
+        ok(find_attr_str(buf, (size_t)n, sizeof(*nlh) + sizeof(*ifi),
+                         IFLA_IFNAME, ifname, sizeof(ifname), &namelen) == 0,
+           "the link event carries a NUL-terminated IFLA_IFNAME");
+        ok(strcmp(ifname, ifname_want) == 0,
+           "IFLA_IFNAME in the event is this interface's own name");
+    }
+
+    /* --- negative control --- */
+    errno = 0;
+    n = recv_nl(mute, buf, sizeof(buf), 300);
+    ok(n < 0 && errno == EAGAIN,
+       "a socket bound to no group receives no multicast at all");
+
+    /* The two address/link events must not have been queued for the plain
+     * socket later either; drain and confirm nothing turned up. */
+    errno = 0;
+    n = recv_nl(mute, buf, sizeof(buf), 100);
+    ok(n < 0, "still nothing for the unsubscribed socket");
+
+    close(sub);
+    close(mute);
+}
+
 int main(void)
 {
     int sfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -525,6 +737,7 @@ int main(void)
     test_link(nl, ifindex);
     test_addr_idempotent(nl, ifindex, addr, mask);
     test_state_intact(sfd, name, addr, mask);
+    test_multicast(ifindex, name, addr, mask);
     test_uevent();
 
     close(sfd);

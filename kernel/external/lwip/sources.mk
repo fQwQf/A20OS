@@ -19,6 +19,7 @@ LWIP_SRC = \
     $(LWIPDIR)/core/tcp.c \
     $(LWIPDIR)/core/tcp_in.c \
     $(LWIPDIR)/core/tcp_out.c \
+    $(LWIPDIR)/core/tcp_cubic.c \
     $(LWIPDIR)/core/timeouts.c \
     $(LWIPDIR)/core/udp.c \
     $(LWIPDIR)/core/ipv4/acd.c \

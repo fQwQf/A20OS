@@ -79,6 +79,15 @@
 #define NET_PROFILE_INLINE_PAYLOAD   320
 #define NET_PROFILE_SOCKET_MAX_BYTES (8 * 1024)
 
+/* SACK and TCP timestamps off: both grow the TCP header of every data segment
+ * and every established PCB, and on a 512 B pool element that comes straight out
+ * of the payload budget.  A profile whose stated goal is a bounded footprint
+ * should not spend it on options that only pay off on a real network path. */
+#define NET_PROFILE_TCP_SACK_OUT     0
+#define NET_PROFILE_TCP_MAX_SACK_NUM 1
+#define NET_PROFILE_TCP_TIMESTAMPS   0
+#define NET_PROFILE_TCP_CUBIC        0
+
 /*
  * Frame-buffer geometry, which is the other half of the pbuf story.
  *
@@ -137,7 +146,7 @@
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (16 * 1024 * 1024)
-#define NET_PROFILE_PBUF_BUFSIZE     1536
+#define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   4096
 #define NET_PROFILE_TCP_MSS          1460
 #define NET_PROFILE_TCP_WND_MULT     64
@@ -152,9 +161,23 @@
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
 
+/* SACK and timestamps on.  lwIP implements both and leaves them at opt.h's 0,
+ * so nothing here negotiated them: against a real peer that means Reno-only
+ * loss recovery and no PAWS.  PBUF_POOL_BUFSIZE is 1600 rather than 1536
+ * because the options share the head element with the payload --
+ * 1460 + 54 + 12 (TS) + 36 (four SACK blocks) = 1562 -- and the assertion in
+ * lwipopts.h checks that sum rather than the old option-free 54. */
+#define NET_PROFILE_TCP_SACK_OUT     1
+#define NET_PROFILE_TCP_MAX_SACK_NUM 4
+#define NET_PROFILE_TCP_TIMESTAMPS   1
+#define NET_PROFILE_TCP_CUBIC        1
+
 /* Unchanged from the historical hardcoded 16 x 1536 / 4 x (1536 + 1536): this
  * profile is what those constants were, and the accounting below simply states
- * where the 37312 B went instead of leaving it implicit. */
+ * where the 37312 B went instead of leaving it implicit.  The netif scratch
+ * buffer stays at 1536 even with options on: it holds whole frames
+ * (MTU 1500 + 14 = 1514), while the option-bearing *segment* is what has to
+ * fit a pbuf element, and that is the 1600 above. */
 #define NET_PROFILE_PACKET_RING_SLOTS 16
 #define NET_PROFILE_PACKET_FRAME_SIZE 1536
 #define NET_PROFILE_NETIF_MAX_DEVS    4
@@ -175,7 +198,7 @@
 
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (512 * 1024)
-#define NET_PROFILE_PBUF_BUFSIZE     1536
+#define NET_PROFILE_PBUF_BUFSIZE     1600
 #define NET_PROFILE_PBUF_POOL_SIZE   256
 #define NET_PROFILE_TCP_MSS          1460
 #define NET_PROFILE_TCP_WND_MULT     64
@@ -189,6 +212,12 @@
 #define NET_PROFILE_BH_RING_SIZE     16
 #define NET_PROFILE_SOCKET_MAX_BYTES (32 * 1024)
 #define NET_PROFILE_INLINE_PAYLOAD   1600
+
+/* Same reasoning as the SERVER tier: options on, pool element grown to match. */
+#define NET_PROFILE_TCP_SACK_OUT     1
+#define NET_PROFILE_TCP_MAX_SACK_NUM 4
+#define NET_PROFILE_TCP_TIMESTAMPS   1
+#define NET_PROFILE_TCP_CUBIC        1
 
 /* Unchanged from the historical hardcoded values; only now stated.  See the
  * SERVER block above for what these cost. */
@@ -206,14 +235,23 @@
  * rather than discovered on an MCU at run time.
  *
  * NET_PROFILE_NETIF_STATE_OVERHEAD is a deliberate *upper* bound on the
- * non-frame part of one netif state (idx + device_t* + ops pointer + eight
- * u64 counters, measured 96 B on riscv64 LP64 and smaller on ILP32).  Being
- * generous in that direction is the safe direction for a budget assert; the
- * exact sizeof() is pinned where the struct exists, in lwip_stack.c.
+ * non-frame part of one netif state (idx + device_t* + ops pointer + nine
+ * u64 counters + the link_pending byte, measured 104 B on riscv64 LP64 and
+ * smaller on ILP32).  Being generous in that direction is the safe direction
+ * for a budget assert; the exact sizeof() is pinned where the struct exists,
+ * in lwip_stack.c.
+ *
+ * 104, not 96: link_pending (the RTNLGRP_LINK broadcast's deferred-publish
+ * flag) lands in the struct's 8-byte tail padding ahead of its next 8-aligned
+ * member only because the u64 counters before it are odd in count, so adding
+ * it moved the tail padding out of the struct and the non-frame part went from
+ * exactly 96 to exactly 104.  The value is not a guess to be tuned for
+ * headroom -- lwip_stack.c asserts sizeof() against it, so anything below 104
+ * fails the riscv64 build rather than silently overstating the budget.
  */
 #define NET_PROFILE_PACKET_SLOT_BYTES (4 + NET_PROFILE_PACKET_FRAME_SIZE)
 #ifndef NET_PROFILE_NETIF_STATE_OVERHEAD
-#define NET_PROFILE_NETIF_STATE_OVERHEAD 96
+#define NET_PROFILE_NETIF_STATE_OVERHEAD 104
 #endif
 #define NET_PROFILE_NETIF_STATE_BYTES \
     (2 * NET_PROFILE_NETIF_FRAME_SIZE + NET_PROFILE_NETIF_STATE_OVERHEAD)

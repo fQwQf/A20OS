@@ -284,6 +284,18 @@ typedef struct net_socket {
     int tcp_connecting;
     int tcp_err;
     int tcp_nodelay;
+    /* Congestion control requested via TCP_CONGESTION, as a TCP_CONG_*
+     * value from lwip/priv/tcp_cubic_priv.h.  TCP_CONG_RENO is the default
+     * and is also what getsockopt reports for a socket that never set it. */
+    uint8_t tcp_congestion;
+    /* SO_SNDBUF / SO_RCVBUF, in bytes, as the caller asked for them.
+     *
+     * These are NOT Linux's sk_sndbuf / sk_rcvbuf and must not be described as
+     * such; see the block comment above net_inet_tcp_buf_apply() for exactly
+     * what each one does and does not bound.  Zero means "never set", which is
+     * why net_socket_alloc() fills in the stack defaults. */
+    uint32_t snd_buf;
+    uint32_t rcv_buf;
     int reuseaddr;
     int reuseport;
     int ipv6_v6only;
@@ -672,10 +684,16 @@ static inline bool net_socket_is_live(const net_socket_t *s)
     return s && !s->closed;
 }
 
-/* Socket table enumeration for /proc/net/{tcp,udp,unix} (socket_table.c).
- * The walk takes one bucket lock at a time and runs the callback under that
- * bucket's lock, so the callback must not block, allocate, or take
- * g_lwip_lock. */
+/* Socket table enumeration for /proc/net/{tcp,tcp6,udp,udp6,unix}
+ * (socket_table.c).  The walk takes one bucket lock at a time and runs the
+ * callback under that bucket's lock, so the callback must not block,
+ * allocate, or take g_lwip_lock.
+ *
+ * `family` narrows the walk to AF_INET or AF_INET6, or AF_UNSPEC for "either"
+ * -- which is what /proc/net/tcp needs, because Linux's /proc/net/tcp lists
+ * IPv4 only and /proc/net/tcp6 lists IPv6 only, and a kernel that mixed the
+ * two into one file made every v6 row unreadable as a v6 row (it was rendered
+ * with the tcp6 address layout inside a file whose siblings are all v4). */
 typedef enum {
     NET_TABLE_TCP = 0,
     NET_TABLE_UDP,
@@ -683,7 +701,7 @@ typedef enum {
 } net_table_kind_t;
 
 typedef void (*net_table_visit_fn)(net_socket_t *s, void *arg);
-int      net_socket_table_walk(net_table_kind_t kind,
+int      net_socket_table_walk(net_table_kind_t kind, int family,
                                net_table_visit_fn fn, void *arg);
 
 /* Total bytes currently readable, for ioctl(FIONREAD) on a socket.  Holds only
@@ -758,8 +776,23 @@ int      net_netlink_route_request(net_socket_t *s, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
 int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
                                   const void *addr, size_t addrlen);
- void     netlink_uevent_emit(const char *action, const char *subsystem,
+void     netlink_uevent_emit(const char *action, const char *subsystem,
                               const char *name, uint64_t devt);
+
+/* RTNETLINK multicast (socket_netlink.c).  lwip_stack.c is the only producer,
+ * and it learns of the change while holding g_lwip_lock -- so the event is
+ * recorded as a pending flag and the notify functions below run after that
+ * lock is dropped.  They must therefore be called with g_lwip_lock NOT held:
+ * they take socket-table bucket locks, which the lock contract forbids holding
+ * together with g_lwip_lock. */
+typedef struct {
+    uint32_t index;      /* netif index, as ifi_index / ifa_index */
+    uint8_t  want_up;    /* the carrier/admin state the change settled on */
+} nlrt_link_event_t;
+
+void     net_netlink_link_notify(const nlrt_link_event_t *events, int n);
+void     net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
+                                 const uint8_t mask[4]);
 
 /* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
  * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held
@@ -805,6 +838,21 @@ int      net_inet_tcp_listen(net_socket_t *s, int backlog);
 void     net_inet_ip_opts_apply(net_socket_t *s);
 void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
                                uint8_t *mc_ttl);
+
+/* Select the congestion control algorithm (TCP_CONGESTION) on an lwIP pcb.
+ * Defined in socket_inet.c, called from socket_control.c's setsockopt handler,
+ * so an established connection can switch algorithms without the socket's
+ * other options being reapplied.  Takes g_lwip_lock.  `alg` is a TCP_CONG_*
+ * value; with LWIP_TCP_CUBIC off only the default is reachable. */
+void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
+
+/* Re-apply the socket's SO_SNDBUF / SO_RCVBUF ceilings to an lwIP pcb.
+ * Defined in socket_inet.c next to the doc comment that explains what each
+ * option does and does not bound.  Takes g_lwip_lock.  Reached from
+ * socket_control.c's setsockopt handler, from net_inet_tcp_apply_options() on
+ * connect and on the accept path, so one code path owns the clamping for all
+ * three entry points. */
+void     net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb);
 
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);
