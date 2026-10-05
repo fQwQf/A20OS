@@ -73,6 +73,12 @@ int  fdtable_install_vfile(task_t *task, vfile_t *vf, int flags);
 int  fdtable_install_current_vfile(vfile_t *vf, int flags);
 int  fdtable_close(task_t *task, int fd);
 int  fdtable_close_current(int fd);
+/* Release a slot in @files directly.  For descriptors that live in the boot
+ * table, which fdtable_close() cannot reach because it has no owning task. */
+int  fdtable_close_files(files_struct_t *files, int fd, int pid);
+/* Release a slot in the caller's table: the current task's, or the boot table
+ * when there is no current task. */
+int  fdtable_close_active(int fd);
 int  fdtable_dup(task_t *task, int oldfd, int minfd, int flags);
 int  fdtable_dup_current(int oldfd, int minfd, int flags);
 int  fdtable_dup_to(task_t *task, int oldfd, int newfd, int flags);

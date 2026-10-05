@@ -551,9 +551,22 @@ int fdtable_install_current_vfile(vfile_t *vf, int flags)
 
 int fdtable_close(task_t *task, int fd)
 {
-    if (!task || !task->files || fd < 0 || fd >= MAX_FILES)
+    if (!task || !task->files)
         return -EBADF;
-    files_struct_t *files = (files_struct_t *)task->files;
+    return fdtable_close_files((files_struct_t *)task->files, fd, task->pid);
+}
+
+/*
+ * Release one descriptor slot in @files.  Split out of fdtable_close() because
+ * a descriptor opened with no current task lands in the boot table rather than
+ * in any task's files_struct, and that slot has to be releasable too -- see
+ * fdtable_close_active().  @pid is used only for tracing and to scope the
+ * per-process file locks; the boot table passes 0.
+ */
+int fdtable_close_files(files_struct_t *files, int fd, int pid)
+{
+    if (!files || fd < 0 || fd >= MAX_FILES)
+        return -EBADF;
     uint64_t flags = spin_lock_irqsave(&files->lock);
     vfile_t *vf = files->fd[fd];
     if (!vf) {
@@ -570,8 +583,8 @@ int fdtable_close(task_t *task, int fd)
      * descriptor that just left. */
     env_kind_unregister(fd);
     wait_queue_wake_all(&files->readiness_waiters, 0, PROC_WAKE_EVENT);
-    ktrace_fd("[FD] close: pid=%d lfd=%d\n", task->pid, fd);
-    vfs_release_process_file_locks(vf, task->pid);
+    ktrace_fd("[FD] close: pid=%d lfd=%d\n", pid, fd);
+    vfs_release_process_file_locks(vf, pid);
     fdtable_slot_put(vf);
     return 0;
 }
@@ -579,6 +592,19 @@ int fdtable_close(task_t *task, int fd)
 int fdtable_close_current(int fd)
 {
     return fdtable_close(proc_current(), fd);
+}
+
+/* Release a slot in whichever table the caller is actually using.  With no
+ * current task that is the boot table, which has no owning task, so
+ * fdtable_close() cannot express it -- the slot used to survive the close,
+ * leaving a permanently occupied slot and an unreleased vfile reference behind
+ * for every descriptor opened before the first task existed. */
+int fdtable_close_active(int fd)
+{
+    task_t *cur = proc_current();
+    if (cur)
+        return fdtable_close(cur, fd);
+    return fdtable_close_files(fdtable_boot(), fd, 0);
 }
 
 int fdtable_dup(task_t *task, int oldfd, int minfd, int flags)

@@ -181,11 +181,11 @@ int vma_ref_aux(mm_seg_t *vma)
  * this is the O(n) part, and paying it per mutation would put a per-mmap
  * refcount storm on the hot path.
  *
- * So invalidation keeps the stale entries and only clears the state; the
- * rebuild overwrites them, dropping what it overwrites.  That is safe only
- * because nothing reads the array while state != 1 -- the lookup below
- * rebuilds before it reads, or falls through to the list without reading it at
- * all (state 2). */
+ * So invalidation keeps the stale entries, keeps the count that says how many
+ * of them are owned, and only clears the state; the rebuild releases the old
+ * pass and writes the new one in the same walk.  That ordering is safe because
+ * nothing reads the array while state != 1 -- the lookup below rebuilds before
+ * it reads, or falls through to the list without reading it at all (state 2). */
 
 /* How many times an address space has been found over MM_SEG_INDEX_CAPACITY
  * mappings and fallen back to the list walk.  See the overflow branch in
@@ -197,8 +197,19 @@ static void mm_seg_index_rebuild(mm_struct_t *mm)
     /* Release the previous pass's references BEFORE writing any new entry.
      * The rebuild writes in place, so putting afterwards would put slots the
      * new pass had already overwritten -- dropping references the new entries
- * now hold, and leaking the old ones. */
-    uint16_t old_count = (mm->seg_index_state == 1) ? mm->seg_index_count : 0;
+     * now hold, and leaking the old ones.
+     *
+     * old_count is seg_index_count unconditionally, NOT `state == 1 ?
+     * seg_index_count : 0`.  This function is only ever reached from state 0,
+     * so that guard was dead: invalidate() had already zeroed the count while
+     * leaving the owned pointers in the array, and the loop below therefore
+     * never ran.  Every reference the index took was orphaned at the next
+     * mutation and never put, so a VMA dropped from the list could never reach
+     * refcount zero and neither it nor its backing vnode/VMO was ever
+     * released.  Invalidate keeps the count so this pass can give the
+     * references back; state 2 has already NULLed its slots and zeroed the
+     * count, so it correctly contributes nothing here. */
+    uint16_t old_count = mm->seg_index_count;
     for (uint16_t i = 0; i < old_count; i++) {
         mm_seg_put(mm->seg_index[i]);
         mm->seg_index[i] = NULL;
@@ -237,18 +248,20 @@ void mm_seg_index_invalidate(mm_struct_t *mm)
 {
     if (!mm)
         return;
+    /* seg_index_count deliberately survives: the slots below still hold owned
+     * references, and the rebuild is the pass that puts them.  Zeroing the
+     * count here is what orphaned them -- see mm_seg_index_rebuild(). */
     mm->seg_index_state = 0;
-    mm->seg_index_count = 0;
 }
 
 void mm_seg_index_clear(mm_struct_t *mm)
 {
     if (!mm)
         return;
-    if (mm->seg_index_state == 1) {
-        for (uint16_t i = 0; i < mm->seg_index_count; i++)
-            mm_seg_put(mm->seg_index[i]);
-    }
+    /* Keyed on the count, not on state == 1: a dirty index (state 0) still
+     * owns every reference the last valid pass took. */
+    for (uint16_t i = 0; i < mm->seg_index_count; i++)
+        mm_seg_put(mm->seg_index[i]);
     memset(mm->seg_index, 0, sizeof(mm->seg_index));
     mm->seg_index_count = 0;
     mm->seg_index_state = 0;
