@@ -1014,13 +1014,26 @@ tcp_recved(struct tcp_pcb *pcb, u16_t len)
   LWIP_ASSERT("don't call tcp_recved for listen-pcbs",
               pcb->state != LISTEN);
 
-  rcv_wnd = (tcpwnd_size_t)(pcb->rcv_wnd + len);
-  if ((rcv_wnd > TCP_WND_MAX(pcb)) || (rcv_wnd < pcb->rcv_wnd)) {
-    /* window got too big or tcpwnd_size_t overflow */
-    LWIP_DEBUGF(TCP_DEBUG, ("tcp_recved: window got too big or tcpwnd_size_t overflow\n"));
-    pcb->rcv_wnd = TCP_WND_MAX(pcb);
-  } else  {
-    pcb->rcv_wnd = rcv_wnd;
+  /* A20OS divergence: the reopen ceiling is the pcb's own wnd_limit when it has
+   * one, not unconditionally TCP_WND_MAX(pcb).  Without this a SO_RCVBUF below
+   * TCP_WND is undone by the first read(): every read calls tcp_recved(), which
+   * hands the window straight back.  0 means "no limit", which is what a memset
+   * pcb and every pcb that never asked for one carries.  It only ever lowers
+   * the ceiling -- a limit above TCP_WND_MAX(pcb) is not honoured -- so it
+   * cannot be used to widen the window past what the peer negotiated. */
+  {
+    tcpwnd_size_t wnd_max = TCP_WND_MAX(pcb);
+    if (pcb->wnd_limit && pcb->wnd_limit < wnd_max) {
+      wnd_max = pcb->wnd_limit;
+    }
+    rcv_wnd = (tcpwnd_size_t)(pcb->rcv_wnd + len);
+    if ((rcv_wnd > wnd_max) || (rcv_wnd < pcb->rcv_wnd)) {
+      /* window got too big or tcpwnd_size_t overflow */
+      LWIP_DEBUGF(TCP_DEBUG, ("tcp_recved: window got too big or tcpwnd_size_t overflow\n"));
+      pcb->rcv_wnd = wnd_max;
+    } else  {
+      pcb->rcv_wnd = rcv_wnd;
+    }
   }
 
   wnd_inflation = tcp_update_rcv_ann_wnd(pcb);
