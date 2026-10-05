@@ -55,8 +55,27 @@ uint16_t net_alloc_ephemeral_port_locked(void)
     return net_htons(p);
 }
 
+/*
+ * Implicit bind of an unbound inet socket to the loopback address of its own
+ * family.  An AF_INET6 socket used to get a 16-byte sockaddr_in with
+ * sin_family = AF_INET6 and the v4 loopback in sin_addr, which is not a valid
+ * sockaddr_in6 -- the 16 bytes then read back as sin6_flowinfo/sin6_scope_id.
+ * getpeername()/getsockname() and the netlink diag path both read that struct
+ * back, so a v6 socket's implicit bind reported a nonsense scope id.
+ */
 void net_sockaddr_loopback(net_socket_t *s, uint16_t port)
 {
+    if (s->domain == AF_INET6) {
+        net_sockaddr_in6_t in6;
+        memset(&in6, 0, sizeof(in6));
+        in6.sin6_family = AF_INET6;
+        in6.sin6_port = port;
+        in6.sin6_addr[15] = 1;      /* ::1 */
+        memcpy(s->local, &in6, sizeof(in6));
+        s->local_len = sizeof(in6);
+        s->bound = 1;
+        return;
+    }
     net_sockaddr_in_t in;
     memset(&in, 0, sizeof(in));
     in.sin_family = (uint16_t)s->domain;
@@ -263,18 +282,45 @@ static net_socket_t *net_find_udp_dst(net_socket_t *src,
     return a.best ? a.best : a.first;
 }
 
+/*
+ * Both families, because lwIP's tcp_bind()/tcp_connect()/udp_bind() take an
+ * ip_addr_t that carries its own type and there is nothing downstream that
+ * needs an IPv4-only view.  This used to refuse AF_INET6 outright, which is
+ * what left net_inet_bind_pcb() and the whole stream connect path unreachable
+ * for v6 -- a v6 socket could be bound in the socket layer and then had no pcb
+ * behind it at all.
+ *
+ * AF_UNIX / AF_PACKET / AF_NETLINK still return -EOPNOTSUPP: they have no IP
+ * representation, and mapping them onto the wildcard would silently bind a
+ * socket to every address.
+ */
 int net_sockaddr_to_lwip_ip(const void *addr, size_t len,
                             ip_addr_t *ip, uint16_t *port)
 {
     if (!addr || !ip || len < sizeof(net_sockaddr_in_t))
         return -EINVAL;
     const net_sockaddr_in_t *in = (const net_sockaddr_in_t *)addr;
-    if (in->sin_family != AF_INET)
-        return -EOPNOTSUPP;
-    ip_addr_set_ip4_u32(ip, in->sin_addr);
-    if (port)
-        *port = net_ntohs(in->sin_port);
-    return 0;
+    if (in->sin_family == AF_INET) {
+        ip_addr_set_ip4_u32(ip, in->sin_addr);
+        if (port)
+            *port = net_ntohs(in->sin_port);
+        return 0;
+    }
+#if LWIP_IPV6
+    if (in->sin_family == AF_INET6) {
+        if (len < sizeof(net_sockaddr_in6_t))
+            return -EINVAL;
+        const net_sockaddr_in6_t *in6 = (const net_sockaddr_in6_t *)addr;
+        ip6_addr_t a6;
+        memcpy(a6.addr, in6->sin6_addr, sizeof(a6.addr));
+        a6.zone = 0;
+        ip_addr_copy_from_ip6(*ip, a6);
+        if (port)
+            *port = net_ntohs(in6->sin6_port);
+        return 0;
+    }
+#endif
+    return -EOPNOTSUPP;
 }
 
 /*
@@ -311,19 +357,43 @@ unsigned net_socket_lane_of_addr(const void *addr, size_t len,
 }
 
 
+/*
+ * Inverse of net_sockaddr_to_lwip_ip().  Dual-stack for the same reason: the
+ * accept stage fills the child's peer address from the accepted pcb's remote
+ * IP, and a v6 listener's accepted connection has an ip6_addr_t there.  With
+ * the v4-only version that call returned -EINVAL and left peer_len at whatever
+ * the previous stage left, so accept() on a v6 socket reported a v4-shaped
+ * (or empty) peer.
+ */
 int net_lwip_ip_to_sockaddr(const ip_addr_t *ip, uint16_t port,
                             uint8_t out[NET_SOCKADDR_MAX], size_t *outlen)
 {
-    if (!out || !outlen || !IP_IS_V4(ip))
+    if (!out || !outlen || !ip)
         return -EINVAL;
-    net_sockaddr_in_t in;
-    memset(&in, 0, sizeof(in));
-    in.sin_family = AF_INET;
-    in.sin_port = net_htons(port);
-    in.sin_addr = ip_2_ip4(ip)->addr;
-    memcpy(out, &in, sizeof(in));
-    *outlen = sizeof(in);
-    return 0;
+    if (IP_IS_V4(ip)) {
+        net_sockaddr_in_t in;
+        memset(&in, 0, sizeof(in));
+        in.sin_family = AF_INET;
+        in.sin_port = net_htons(port);
+        in.sin_addr = ip_2_ip4(ip)->addr;
+        memcpy(out, &in, sizeof(in));
+        *outlen = sizeof(in);
+        return 0;
+    }
+#if LWIP_IPV6
+    if (IP_IS_V6(ip)) {
+        net_sockaddr_in6_t in6;
+        memset(&in6, 0, sizeof(in6));
+        in6.sin6_family = AF_INET6;
+        in6.sin6_port = net_htons(port);
+        memcpy(in6.sin6_addr, ip_2_ip6(ip)->addr,
+               sizeof(in6.sin6_addr));
+        memcpy(out, &in6, sizeof(in6));
+        *outlen = sizeof(in6);
+        return 0;
+    }
+#endif
+    return -EINVAL;
 }
 
 /*
@@ -948,7 +1018,12 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                 a20_perf_count(A20_PERF_NET_ALLOC_FAIL);
             }
             if (child) {
-                child->domain = AF_INET;
+                /* The accepted connection inherits the listener's family.  It
+                 * used to be hardcoded AF_INET, so a v6 connection that reached
+                 * this drain was adopted into a v4 socket while holding a v6
+                 * pcb -- every later address lookup on that fd read a 16-byte
+                 * v6 sockaddr back as a 16-byte v4 one. */
+                child->domain = listener->domain;
                 child->type = SOCK_STREAM;
                 child->protocol = listener->protocol;
                 child->bound = 1;
@@ -1010,7 +1085,12 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
             if (fin) {
                 /* The peer sent a FIN before we got here.  Handing the child a
                  * connection that is already at EOF, rather than one whose
-                 * first read() blocks on a close that has already happened. */
+                 * first read() blocks on a close that has already happened.
+                 * `peer_closed`, not `closed`: this is the peer's half-close,
+                 * and marking the child itself dead here would also make the
+                 * staging loop below drop the payload the peer pipelined into
+                 * the handshake -- which is exactly what an HTTP client does. */
+                child->peer_closed = 1;
                 __atomic_store_n(&child->bh_closed, 1, __ATOMIC_RELEASE);
             }
             adopted = true;
@@ -1213,7 +1293,26 @@ net_inet_bottom_half_process_socket_locked(net_socket_t *s,
     }
 
     if (__atomic_exchange_n(&s->bh_closed, 0, __ATOMIC_ACQUIRE)) {
-        s->closed = 1;
+        /*
+         * The peer sent a FIN.  That is the peer half-closing, not this socket
+         * dying, so it belongs in `peer_closed` -- which is the flag every read
+         * path already treats as end-of-file (socket.c's recv checks
+         * `s->closed || s->peer_closed` and returns 0 for either).
+         *
+         * It used to set `closed`, the local lifecycle flag, which was wrong
+         * twice over.  It made net_socket_is_live() report a perfectly healthy
+         * socket as dead, so the socket vanished from /proc/net/tcp and was
+         * rejected by the ~39 is_live() call sites the moment its peer
+         * finished writing -- and, worse, it ran *before* the staging loop
+         * below, whose `if (!s->closed)` guard then discarded every payload
+         * event still sitting in the ring.  lwIP delivers a connection's data
+         * before its FIN, so when both landed in the same bottom-half pass --
+         * which is what `write(); close()` from the peer produces -- the data
+         * was thrown away and the reader saw a short message.  A peer that
+         * closed later put the two in separate passes and worked, which is why
+         * this read as an intermittent short read rather than a lost tail.
+         */
+        s->peer_closed = 1;
         net_event_notify(s, A20_EVENT_CLOSED, 0, 0);
         if (net_wait_queue_collect_all_locked(
                 &s->read_waitq, PROC_WAKE_EVENT, wake_q))
@@ -1439,8 +1538,18 @@ int net_inet_socket_init(net_socket_t *s)
         raw_recv(s->raw, lwip_raw_recv_cb, s);
         goto out;
     }
-    if (s->domain == AF_INET && s->type == SOCK_STREAM) {
-        s->tcp = tcp_new_ip_type(IPADDR_TYPE_V4);
+    /*
+     * SOCK_STREAM is dual-stack: lwIP's tcp_pcb carries an IPADDR_TYPE_V6 pcb
+     * natively and takes the family from the ip_addr_t bind/connect hand it,
+     * so one socket layer serves both.  This arm used to be AF_INET-only,
+     * which is why net_listen() had no v6 path to convert -- an AF_INET6
+     * socket() succeeded and then had s->tcp == NULL forever, so bind() could
+     * not reach a pcb and listen() had nothing to turn into a LISTEN pcb.
+     */
+    if ((s->domain == AF_INET || s->domain == AF_INET6) &&
+        s->type == SOCK_STREAM) {
+        s->tcp = tcp_new_ip_type(s->domain == AF_INET6 ? IPADDR_TYPE_V6
+                                                       : IPADDR_TYPE_V4);
         if (!s->tcp) {
             ret = -ENOMEM;
             goto out;
@@ -1477,11 +1586,30 @@ void net_inet_socket_destroy(net_socket_t *s)
              * so they have to go before it does. */
             net_inet_accept_stage_purge(s);
         } else {
+            /* Graceful close, not abort.  close() on a stream socket has to
+             * flush what the application already handed to write() and then
+             * send a FIN; tcp_abort() is tcp_abandon(pcb, 1), which sends an
+             * RST instead.  An RST makes the peer throw away data it has
+             * already received, so `write(); close()` lost the tail of every
+             * message on this path -- the single most common shape a
+             * request/response server uses to reply.
+             *
+             * It survived because the loss is a race against the peer's read,
+             * not a deterministic one: a workload that sleeps before closing
+             * passes, and the same workload with an immediate close sees a
+             * short read.  The loopback probe that found it wrote 4000 B and
+             * closed; with an 8 s pause in between the same probe passed.
+             *
+             * net_tcp_close_pcb() already closes gracefully for the
+             * connect-timeout paths; this arm disagreed with it about the
+             * same pcb.  Abort stays as the fallback for the states lwIP
+             * cannot close gracefully. */
             tcp_arg(s->tcp, NULL);
             tcp_recv(s->tcp, NULL);
             tcp_err(s->tcp, NULL);
             tcp_sent(s->tcp, NULL);
-            tcp_abort(s->tcp);
+            if (tcp_close(s->tcp) != ERR_OK)
+                tcp_abort(s->tcp);
         }
         s->tcp = NULL;
     }
@@ -1497,11 +1625,18 @@ void net_inet_socket_destroy(net_socket_t *s)
     a20_lwip_unlock(flags);
 }
 
+/*
+ * Bind the socket's pcb to the address bind() recorded.  Both families: the
+ * ip_addr_t conversion above is dual-stack and lwIP's udp_bind()/raw_bind()/
+ * tcp_bind() all take the family from that struct, so there is no reason to
+ * refuse v6 here.  The AF_INET6 early return this used to carry is what made
+ * an AF_INET6 stream socket unbindable at the pcb level, and therefore
+ * unlistenable (net_listen converts a *bound* pcb) and unreachable from
+ * off-box.
+ */
 int net_inet_bind_pcb(net_socket_t *s, const void *addr, size_t addrlen)
 {
     if (!s || (s->domain != AF_INET && s->domain != AF_INET6))
-        return 0;
-    if (s->domain == AF_INET6)
         return 0;
     if (s->udp) {
         ip_addr_t ip;
@@ -1645,7 +1780,12 @@ static int net_inet_connect_stream(net_socket_t *s, const void *addr, size_t add
     }
     net_socket_free(child);
 
-    if (s->domain != AF_INET || !s->tcp) {
+    /* The stack path.  s->tcp exists for both families now
+     * (net_inet_socket_init), and tcp_connect() reads the family off the
+     * ip_addr_t, so the AF_INET-only guard this used to carry just refused
+     * every v6 connect outright -- with -ECONNREFUSED, which is a lie: the
+     * address was fine, the kernel simply had no path for it. */
+    if (!s->tcp) {
         s->connected = 0;
         return -ECONNREFUSED;
     }
