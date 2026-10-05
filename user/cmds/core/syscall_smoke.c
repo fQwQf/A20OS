@@ -1,11 +1,13 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 static int fail(const char *what)
@@ -136,6 +138,51 @@ int main(int argc, char **argv)
         return fail("exec-waitpid");
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
         return fail("exec-status");
+
+    /*
+     * rt_sigaction's kernel-side struct is musl's struct k_sigaction, which
+     * carries sa_restorer between the flags and the mask on every architecture
+     * whose signal.h defines SA_RESTORER (aarch64, x86_64, riscv32, arm32,
+     * ppc64le) and has no such slot on the others (riscv64, loongarch64).
+     * Get the offset wrong in the kernel and the mask is read out of the
+     * restorer on the way in, and written where the caller never looks on the
+     * way out -- so a disposition set with a mask comes back with an empty
+     * one, silently.  Round-trip a non-empty mask and a non-default handler.
+     */
+    {
+        struct sigaction sa, back;
+
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = (void (*)(int))0;   /* SIG_DFL */
+        sigemptyset(&sa.sa_mask);
+        sigaddset(&sa.sa_mask, SIGUSR1);
+        /* oldact is deliberately NULL: passing it makes the kernel report the
+         * disposition that was installed *before* this call, which is still the
+         * empty default, so it says nothing about the layout.  Reading the
+         * disposition back with a separate query is the check. */
+        if (sigaction(SIGUSR2, &sa, NULL) < 0)
+            return fail("sigaction-set");
+
+        memset(&back, 0, sizeof(back));
+        if (sigaction(SIGUSR2, NULL, &back) < 0)
+            return fail("sigaction-get");
+        if (!sigismember(&back.sa_mask, SIGUSR1))
+            return fail("sigaction-mask-roundtrip");
+        if (back.sa_handler != (void (*)(int))0)
+            return fail("sigaction-handler-roundtrip");
+
+        /* SIG_IGN, to cover the other reserved handler value. */
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = (void (*)(int))1;   /* SIG_IGN */
+        sigemptyset(&sa.sa_mask);
+        if (sigaction(SIGUSR2, &sa, NULL) < 0)
+            return fail("sigaction-ignore");
+        memset(&back, 0, sizeof(back));
+        if (sigaction(SIGUSR2, NULL, &back) < 0)
+            return fail("sigaction-ignore-get");
+        if (back.sa_handler != (void (*)(int))1)
+            return fail("sigaction-ignore-roundtrip");
+    }
 
     printf("SYSCALL_SMOKE: PASS\n");
     return 0;

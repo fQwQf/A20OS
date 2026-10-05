@@ -292,9 +292,28 @@ static void drvmod_arena_init(void)
     printf("[DRVMOD] arena %lx..%lx (%u MiB)\n", (unsigned long)start,
            (unsigned long)end,
            (unsigned int)(((uintptr_t)DRVMOD_ARENA_UNITS * span) >> 20));
-    printf("[DRVMOD] arena %lx..%lx (%u MiB)\n", (unsigned long)start,
-           (unsigned long)end,
-           (unsigned int)((uintptr_t)DRVMOD_ARENA_UNITS * span >> 20));
+}
+
+/*
+ * How many arena units an order-@order request occupies.  One unit is a whole
+ * 2^DRVMOD_ARENA_MAX_ORDER-page span, so the count is
+ * ceil(2^order / 2^MAX_ORDER) -- which is 1 for every order up to the cap,
+ * since nothing is larger than a span.
+ *
+ * Derived as a shift on MAX_ORDER - order this came out inverted: an order-1
+ * (two-page) module asked for 1 << 6 = 64 units out of a 32-unit arena, the
+ * allocation loop's `i + units <= DRVMOD_ARENA_UNITS` bound was never
+ * satisfied, and drvmod_arena_alloc() returned NULL for every module whose
+ * image was not exactly 512 KiB.  Nothing logged that as an error -- the load
+ * just failed with ENOMEM and the guest carried on without the driver -- so a
+ * NOMMU instance lost every .a20drv except the order-7 ones and still booted
+ * to a shell.
+ */
+static uint32_t drvmod_arena_units(uint32_t order)
+{
+    if (order >= DRVMOD_ARENA_MAX_ORDER)
+        return 1u << (order - DRVMOD_ARENA_MAX_ORDER);
+    return 1;   /* smaller than a span; a span is the indivisible unit */
 }
 
 /* Reserve @order pages' worth of arena, or NULL if it is full.  NOMMU links
@@ -312,7 +331,7 @@ static void *drvmod_arena_alloc(uint32_t order)
     if (order > DRVMOD_ARENA_MAX_ORDER)
         return NULL;
 
-    uint32_t units = 1u << (DRVMOD_ARENA_MAX_ORDER - order);
+    uint32_t units = drvmod_arena_units(order);
     uintptr_t span = (uintptr_t)DRVMOD_ARENA_SPAN_PAGES * PAGE_SIZE;
     void *ret = NULL;
 
@@ -347,7 +366,7 @@ static void drvmod_arena_free(void *addr, uint32_t order)
         return;
 
     uint32_t i = (uint32_t)(((uintptr_t)addr - start) / span);
-    uint32_t units = 1u << (DRVMOD_ARENA_MAX_ORDER - order);
+    uint32_t units = drvmod_arena_units(order);
     if (i >= DRVMOD_ARENA_UNITS)
         return;
 

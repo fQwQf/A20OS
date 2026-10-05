@@ -672,18 +672,14 @@ void vfs_finalize_closed_vfile(vfile_t *vf)
  * here -- the vfile reference, the envelope registry entry, the per-process
  * file locks, and vfs_finalize_closed_vfile() (ops->close, vnode_put, the
  * destroy event).  With no current task the descriptor belongs to the boot
- * table, which has no owning task to release a slot in; keep the old
- * reference-dropping behaviour there rather than changing what the boot-time
- * callers in main.c and driver_manager.c rely on.
+ * table, which has no owning task; fdtable_close_active() reaches that table
+ * through fdtable_close_files(), so a descriptor opened before the first task
+ * existed is released the same way.  Every boot-time caller in main.c,
+ * driver_manager.c and elf.c stops using the descriptor immediately after the
+ * close, so none of them depends on the slot staying open.
  */
 int vfs_close(int fd) {
-    if (proc_current())
-        return fdtable_close_current(fd);
-
-    vfile_t *vf = fdtable_get_current_file_ref(fd);
-    if (!vf) return -EBADF;
-    vfs_put_file(vf);
-    return 0;
+    return fdtable_close_active(fd);
 }
 
 /* ============================================================
