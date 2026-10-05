@@ -87,9 +87,12 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 * **入站 TCP 默认不通。** `a20.tcpmode` 默认 `fast`，此时 listener 只存在于 socket 层，
   任何入站 SYN 都会被 lwIP 回 RST。服务器必须显式传 `a20.tcpmode=lwip`，端口才真正在
   协议栈上 listen。命令行的优先级高于 `/proc/net/config` 写入口。
-* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、无 ICMP 跟踪、不做分片 NAT，
-  端到端门禁只覆盖 DNAT（SNAT/MASQUERADE 有解析器与 `/proc` 规则，没有端到端门禁）。
-  运行时动词挂在 `/proc/a20/netfilter`。
+* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、无 ICMP 跟踪（ICMP echo 不建条目、
+  差错报文不跟踪，因此路径 MTU 发现在这条路径上不工作）、不分片 NAT。**端到端门禁只覆盖
+  DNAT**：QEMU user-net 自己在宿主侧做 NAT，guest 外面没有第二个对端，回程包不存在，
+  SNAT/MASQUERADE 不可能有端到端门禁——它由主机侧单元门禁 `test-nat-rewrite` 直接编译并
+  断言出货源码（`kernel/net/netfilter_rewrite.c`）覆盖。LRU 淘汰与空闲超时有门禁
+  `smoke-ct-capacity`。运行时动词挂在 `/proc/a20/netfilter`。
 * **TCP 选项按档位**：`SACK` / 时间戳 / `CUBIC`（RFC 8312 核心条款）在默认与服务器档
   开启、嵌入式档关闭。`SO_SNDBUF` / `SO_RCVBUF` 真的生效，但**没有自动调优**，且抬高
   `SO_SNDBUF` 只在下一条连接生效。
@@ -190,7 +193,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
 * **用户态服务测试**：运行 `make smoke-native-fs-all`，验证 svcmgr 托管的用户态文件系统宿主 ufsd 四种后端（FAT/ext4 读写、ISO9660/NTFS 只读）及 SIGKILL 崩溃恢复；`smoke-native-svc`/`smoke-native-registry` 覆盖监管自愈与按名重绑。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
-* **网络门禁**：`make smoke-network-suite` 覆盖 socket 与协议栈；`smoke-net-accept` 覆盖真实 lwIP LISTEN pcb 的入站 accept；`smoke-netfilter-nat` 用 QEMU `hostfwd` 打通 DNAT（宿主 18081 → guest 18082）并由宿主侧探针收到回显；`smoke-net-tcp-lanes` 是多 lane 下的 TCP 结构性门禁。
+* **网络门禁**：`make smoke-network-suite` 覆盖 socket 与协议栈；`smoke-net-accept` 覆盖真实 lwIP LISTEN pcb 的入站 accept；`smoke-netfilter-nat` 用 QEMU `hostfwd` 打通 DNAT（宿主 18081 → guest 18082）并由宿主侧探针收到回显；`smoke-ct-capacity` 把 conntrack 表填到 `ct_capacity` 断言 LRU 淘汰的是最久未用的那一条、再用短超时断言回收；`test-nat-rewrite` 在主机侧对 SNAT/MASQUERADE 的地址与端口改写、回程元组做单元断言；`smoke-net-tcp-lanes` 是多 lane 下的 TCP 结构性门禁。
 
 ## 参与贡献
 我们非常欢迎来自开源社区的代码贡献，共同探索下一代操作系统架构！

@@ -167,9 +167,14 @@ smoke-netfilter:
 #     A silently wrong guest port is exactly the failure this gate exists to
 #     catch, so it is worth writing down rather than rediscovering.
 #
-# Note for whoever owns tools/a20_derive.py: it emits "tcp::5555-:5555", which
-# QEMU 10 refuses ("Missing guest address").  Left alone here -- that string is
-# asserted by tools/tests/test_a20.py and is a different stream's file.
+# Resolved: a derived [net].hostfwd short form now names the guest address, so
+# tools/a20_instance.py emits "hostfwd=tcp::5555-10.0.2.15:5555=on" rather than
+# the addressless "tcp::5555-:5555".  Measured on QEMU 10.0.13 while doing it:
+# the *bare* short form is what QEMU rejects ("Invalid parameter"); the
+# addressless rule behind a hostfwd= key starts and binds normally, so the
+# "Missing guest address" this note used to quote does not reproduce through
+# -netdev user on that version.  The explicit address is spelled out anyway
+# because it is the form measured to work end to end here.
 #
 # a20.tcpmode=lwip is load-bearing for the same reason.  Under the default
 # "fast" mode the socket layer never creates a LISTEN pcb (see the comment in
@@ -217,6 +222,53 @@ smoke-netfilter-nat:
 		exit 1; \
 	else \
 		echo "smoke-netfilter-nat: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# conntrack capacity (LRU eviction) and idle-timeout reclamation.
+#
+# Both limits had /proc counters (ct_evicted / ct_timeout) and no gate that ever
+# moved them, so "the table evicts LRU at capacity" and "the sweeper reclaims
+# idle flows" were assertions in a design note, not properties of a running
+# kernel.  This case drives the table to the state each limit describes --
+# filled to ct_capacity, then one flow past it; one entry with a 100 ms timeout
+# and a 3 s wait -- and asserts the counters *and* the identity of the flow that
+# was dropped, because "evicted went up" is also true of an implementation that
+# evicts an arbitrary entry.
+#
+# No host port forward: nothing here puts a packet on the wire, so the case runs
+# on the same image as smoke-netfilter and needs no listener model.
+smoke-ct-capacity:
+	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/ct-capacity-riscv64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'ct_capacity_test\npoweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-riscv64 \
+		-machine virt -m 1G -nographic -smp 1 -bios default \
+		-global virtio-mmio.force-legacy=false \
+		-drive file=.kernel-build/riscv64-qemu-virt-riscv64-linux-dev/fat32.img,if=none,format=raw,id=x0 \
+		-device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+		$(NETDEV_USER) -device virtio-net-device,netdev=net,bus=virtio-mmio-bus.4 \
+		-kernel .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os' \
+		> "$$log" 2>&1 || status=$$?; \
+	if grep -q 'CTCAP_TEST: PASS' "$$log"; then \
+		echo "smoke-ct-capacity: PASS $$(grep -o 'capacity=[0-9]*' "$$log" | tail -n 1)"; \
+		echo "  log saved to $$log"; \
+	elif grep -q 'CTCAP_TEST: FAIL' "$$log"; then \
+		echo "smoke-ct-capacity: FAIL -- the guest reported a failure:"; \
+		grep -E 'CTCAP_TEST' "$$log" | tail -n 5; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif [ "$$status" -eq 124 ]; then \
+		echo "smoke-ct-capacity: timeout without verdict; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	else \
+		echo "smoke-ct-capacity: failed with status $$status; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
