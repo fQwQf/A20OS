@@ -1041,6 +1041,13 @@ static bool net_inet_accept_stage_drain(net_socket_t *listener,
                  * fall back to the default, and getsockopt on the child would
                  * report an algorithm the caller never asked for. */
                 child->tcp_congestion = listener->tcp_congestion;
+                /* Same reasoning for the buffer ceilings: a listener that sized
+                 * itself before accept() is sizing every connection it hands
+                 * out, and a child that started from the defaults would report
+                 * ceilings its parent never asked for.  net_inet_tcp_apply_options()
+                 * below clamps them against the accepted pcb. */
+                child->snd_buf = listener->snd_buf;
+                child->rcv_buf = listener->rcv_buf;
                 child->keepalive = listener->keepalive;
                 child->keep_idle = listener->keep_idle;
                 child->keep_intvl = listener->keep_intvl;
@@ -1507,6 +1514,89 @@ void a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg)
 }
 
 /*
+ * Apply SO_SNDBUF / SO_RCVBUF to an lwIP pcb.
+ *
+ * What each one actually does here, stated plainly because neither is Linux's
+ * option and both are weaker than the name suggests:
+ *
+ *   SO_SNDBUF bounds how many bytes this socket may have sitting in its pcb's
+ *   send queue at once.  net_inet_send_tcp() measures the queue depth against
+ *   it and stops handing data to tcp_write() once the ceiling is reached, so
+ *   the socket blocks (or reports a short write) instead of filling lwIP's
+ *   TCP_SND_BUF.  It does NOT bound data in flight on the wire: that is
+ *   congestion control's job, and bounding it here would fight the algorithm.
+ *
+ *   SO_RCVBUF bounds this pcb's receive window, via the pcb's wnd_limit field
+ *   (A20OS divergence, DIVERGENCE.md 2.6).  Without that field the ceiling
+ *   would survive exactly until the first read(), because tcp_recved() hands
+ *   the window straight back to TCP_WND on every read.
+ *
+ *   NEITHER is tuned.  There is no auto-tuning, no memory-pressure feedback and
+ *   no adjustment from observed throughput: the value a caller sets is the
+ *   value in force until it changes it.  Linux grows sk_sndbuf and sk_rcvbuf
+ *   from tcp_wmem / tcp_rmem based on SO_SNDBUFFORCE and measured behaviour;
+ *   nothing here does, and a caller that relies on that growth will not get it.
+ *
+ * Clamping, and why: the send ceiling cannot exceed TCP_SND_BUF, which is the
+ * pcb's real capacity -- asking for more buys nothing, and the caller is told
+ * the clamped value by getsockopt rather than being left to believe otherwise.
+ * The receive ceiling cannot exceed TCP_WND_MAX(pcb) for the same reason, and
+ * additionally cannot break window scaling: the wire field is rcv_wnd >>
+ * rcv_scale and is 16 bits, so anything above 0xFFFF << pcb->rcv_scale would be
+ * truncated to a window the caller did not ask for.
+ *
+ * Must be called with g_lwip_lock held.
+ */
+void net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb)
+{
+    if (!s || !pcb)
+        return;
+
+    /* A LISTEN pcb has no receive window of its own -- lwIP creates the real
+     * one in tcp_accept() -- and tcp_recved() asserts against it.  The socket
+     * fields still carry the value, so the accepted child gets it when
+     * net_inet_tcp_apply_options() runs on it. */
+    if (pcb->state == LISTEN)
+        return;
+
+    if (s->snd_buf) {
+        uint32_t snd = s->snd_buf;
+        if (snd > (uint32_t)TCP_SND_BUF)
+            snd = (uint32_t)TCP_SND_BUF;
+        /* Written back, so getsockopt reports what is actually in force. */
+        s->snd_buf = snd;
+        /* pcb->snd_buf is AVAILABLE space, not capacity: tcp_write() subtracts
+         * from it and an incoming ACK adds to it.  Assigning the ceiling would
+         * therefore hand out fresh room every time the caller lowered SO_SNDBUF
+         * below what is already queued.  Only ever lowering keeps the pcb's
+         * arithmetic consistent; the matching cost is that a raised ceiling
+         * takes effect on the next connection, because lwIP has no mechanism to
+         * grow snd_buf once bytes are outstanding, and this does not invent one. */
+        if (snd < pcb->snd_buf)
+            pcb->snd_buf = (tcpwnd_size_t)snd;
+    }
+
+    if (s->rcv_buf) {
+        uint32_t rcv = s->rcv_buf;
+        tcpwnd_size_t ceiling = TCP_WND_MAX(pcb);
+        tcpwnd_size_t scaled = (tcpwnd_size_t)((uint32_t)0xFFFF << pcb->rcv_scale);
+        if (scaled < ceiling)
+            ceiling = scaled;
+        if (rcv > (uint32_t)ceiling)
+            rcv = (uint32_t)ceiling;
+        s->rcv_buf = rcv;
+        pcb->wnd_limit = (tcpwnd_size_t)rcv;
+        /* A lowered ceiling takes effect immediately, not at the next read.
+         * tcp_recved(pcb, 0) re-runs the announcement logic and sends a window
+         * update if the shrink is worth a segment; it cannot itself shrink
+         * rcv_wnd, which is why the assignment is above. */
+        if (pcb->rcv_wnd > (tcpwnd_size_t)rcv)
+            pcb->rcv_wnd = (tcpwnd_size_t)rcv;
+        tcp_recved(pcb, 0);
+    }
+}
+
+/*
  * Apply the socket's TCP options and install its callbacks on an lwIP pcb.
  *
  * Shared by socket creation and by the accept path, which adopts a pcb lwIP
@@ -1518,6 +1608,7 @@ void net_inet_tcp_apply_options(net_socket_t *s, struct tcp_pcb *pcb)
     if (s->tcp_nodelay)
         tcp_nagle_disable(pcb);
     a20_net_cong_apply(pcb, s->tcp_congestion);
+    net_inet_tcp_buf_apply(s, pcb);
     if (s->keepalive)
         pcb->so_options |= SOF_KEEPALIVE;
     if (s->keep_idle > 0)
@@ -2282,13 +2373,36 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
         uint64_t lwip_flags = a20_lwip_lock();
         a20_lwip_poll_locked();
         int tcp_alive = s->tcp && !s->closed && s->connected;
-        u16_t room = tcp_alive ? tcp_sndbuf(s->tcp) : 0;
+        /*
+         * Room under the socket's own SO_SNDBUF ceiling, not just under the
+         * pcb's capacity.  pcb->snd_buf is AVAILABLE space (tcp_write
+         * subtracts, an incoming ACK adds), so the queue depth is
+         * TCP_SND_BUF minus what is left of it; comparing that against
+         * s->snd_buf is what makes the option mean anything.  Without it the
+         * loop would keep filling lwIP's TCP_SND_BUF whatever the caller asked
+         * for, and SO_SNDBUF would be the no-op it was before.
+         *
+         * Reading pcb->snd_buf directly rather than through tcp_sndbuf() is
+         * deliberate: that macro is TCPWND16(), upstream's 16-bit accessor, so
+         * on this port it reports at most 65535 even though TCP_SND_BUF is
+         * 93440.  Going through it would quietly cap every send at 64 KiB.
+         */
+        uint32_t room32 = 0;
+        if (tcp_alive) {
+            tcpwnd_size_t avail = s->tcp->snd_buf;
+            uint32_t queued = (uint32_t)TCP_SND_BUF > (uint32_t)avail
+                              ? (uint32_t)(TCP_SND_BUF - avail) : 0;
+            uint32_t ceiling = s->snd_buf ? s->snd_buf : (uint32_t)TCP_SND_BUF;
+            room32 = (ceiling > queued) ? (ceiling - queued) : 0;
+            if (room32 > 0xffff)
+                room32 = 0xffff;
+        }
         if (!tcp_alive) {
             a20_lwip_unlock(lwip_flags);
             return sent ? (int)sent : -EPIPE;
         }
         net_inet_ip_opts_apply_locked(s);
-        if (room == 0) {
+        if (room32 == 0) {
             a20_lwip_unlock(lwip_flags);
             if (sent || s->nonblock)
                 return sent ? (int)sent : -EAGAIN;
@@ -2312,7 +2426,14 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 wait_queue_link(&s->write_waitq, &entry, token, 0);
             net_bucket_unlock(net_socket_bucket(s), irq);
             uint64_t room_flags = a20_lwip_lock();
-            int room_now = s->tcp && tcp_sndbuf(s->tcp) > 0;
+            int room_now = 0;
+            if (s->tcp && !s->closed && s->connected) {
+                tcpwnd_size_t avail = s->tcp->snd_buf;
+                uint32_t queued = (uint32_t)TCP_SND_BUF > (uint32_t)avail
+                                  ? (uint32_t)(TCP_SND_BUF - avail) : 0;
+                uint32_t ceiling = s->snd_buf ? s->snd_buf : (uint32_t)TCP_SND_BUF;
+                room_now = (ceiling > queued) && (ceiling - queued) > 0;
+            }
             a20_lwip_unlock(room_flags);
             if (room_now)
                 (void)proc_try_wake(cur, token.seq, PROC_WAKE_EVENT);
@@ -2331,12 +2452,13 @@ static int net_inet_send_tcp(net_socket_t *s, const void *buf, size_t len)
                 return -EAGAIN;
             continue;
         }
-        /* room > 0: merge sndbuf check with write/output under one lock
-         * acquisition.  The earlier lock acquired tcp_sndbuf and confirmed
-         * liveness; re-verify under the same lock before writing. */
+        /* room32 > 0: merge the sndbuf check with write/output under one lock
+         * acquisition.  The lock above measured room and confirmed liveness;
+         * re-verify liveness under the same lock before writing, because
+         * tcp_write() would otherwise have to fail on a dead pcb. */
         size_t n = len - sent;
-        if (n > room)
-            n = room;
+        if (n > room32)
+            n = room32;
         if (n > 0xffff)
             n = 0xffff;
         if (!s->tcp || s->closed || !s->connected) {

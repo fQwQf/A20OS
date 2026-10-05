@@ -293,6 +293,13 @@ struct tcp_pcb {
   u32_t rcv_nxt;   /* next seqno expected */
   tcpwnd_size_t rcv_wnd;   /* receiver window available */
   tcpwnd_size_t rcv_ann_wnd; /* receiver window to announce */
+  /* A20OS divergence: a per-pcb ceiling for rcv_wnd, 0 meaning "no ceiling".
+   * tcp_recved() reopens the window on every read up to TCP_WND_MAX(pcb), so a
+   * SO_RCVBUF smaller than TCP_WND would be undone by the first read() unless
+   * that ceiling is somewhere; this is that place.  It only ever lowers the
+   * window, never raises it above what TCP_WND_MAX allows.  See
+   * kernel/external/lwip/DIVERGENCE.md 2.6. */
+  tcpwnd_size_t wnd_limit;
   u32_t rcv_ann_right_edge; /* announced right edge of window */
 
 #if LWIP_TCP_SACK_OUT

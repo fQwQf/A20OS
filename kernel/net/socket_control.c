@@ -746,6 +746,45 @@ int net_setsockopt_sock(net_socket_t *s, int level, int optname,
         }
         return 0;
     }
+    if (level == SOL_SOCKET &&
+        (optname == SO_SNDBUF || optname == SO_RCVBUF)) {
+        if (!optval || optlen < sizeof(int))
+            return -EINVAL;
+        int val;
+        memcpy(&val, optval, sizeof(val));
+        /* Linux clamps a non-positive request up to a minimal buffer rather
+         * than failing; this refuses it instead.  -EINVAL is the honest answer
+         * here because a clamped-to-zero buffer cannot send anything, and
+         * silently accepting one would leave a caller believing it had asked
+         * for a usable size. */
+        if (val <= 0)
+            return -EINVAL;
+        /* Only TCP has a buffer for the option to mean anything about: the
+         * ceilings live on the lwIP pcb (snd_buf's available space and the
+         * wnd_limit field that gates tcp_recved()).  UDP and RAW keep returning
+         * -EOPNOTSUPP below, which is what they already did -- their buffers
+         * live in the socket layer and are a different, unsized mechanism. */
+        if (s->domain != AF_INET && s->domain != AF_INET6)
+            return -EOPNOTSUPP;
+        if (s->type != SOCK_STREAM && s->type != SOCK_SEQPACKET)
+            return -EOPNOTSUPP;
+        uint32_t is_snd = (optname == SO_SNDBUF);
+        if (is_snd)
+            s->snd_buf = (uint32_t)val;
+        else
+            s->rcv_buf = (uint32_t)val;
+        /* Apply now if a pcb exists, so an established connection does not have
+         * to wait for the next connect().  net_inet_tcp_buf_apply() clamps to
+         * TCP_SND_BUF / TCP_WND_MAX(pcb) and writes the clamped value back;
+         * it is also where "raising a send ceiling takes effect next time" is
+         * documented, so do not invent that here. */
+        if (s->tcp) {
+            uint64_t flags = a20_lwip_lock();
+            net_inet_tcp_buf_apply(s, s->tcp);
+            a20_lwip_unlock(flags);
+        }
+        return 0;
+    }
     if (level == SOL_SOCKET && optname == SO_PASSCRED) {
         if (!optval || optlen < sizeof(int))
             return -EINVAL;
@@ -788,7 +827,11 @@ int net_getsockopt_sock(net_socket_t *s, int level, int optname,
         val = s->protocol;
     else if (level == SOL_SOCKET &&
              (optname == SO_SNDBUF || optname == SO_RCVBUF))
-        val = NET_MAX_QUEUE * NET_MAX_PAYLOAD;
+        /* The value in force, not a constant.  net_inet_tcp_buf_apply() writes
+         * the clamped value back into these fields, so this reports a ceiling
+         * that was cut down to what the pcb can actually honour rather than
+         * echoing back a request the stack silently ignored. */
+        val = (int)(optname == SO_SNDBUF ? s->snd_buf : s->rcv_buf);
     else if (level == SOL_SOCKET && optname == SO_REUSEADDR)
         val = s->reuseaddr;
     else if (level == SOL_SOCKET && optname == SO_REUSEPORT)

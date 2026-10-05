@@ -288,6 +288,14 @@ typedef struct net_socket {
      * value from lwip/priv/tcp_cubic_priv.h.  TCP_CONG_RENO is the default
      * and is also what getsockopt reports for a socket that never set it. */
     uint8_t tcp_congestion;
+    /* SO_SNDBUF / SO_RCVBUF, in bytes, as the caller asked for them.
+     *
+     * These are NOT Linux's sk_sndbuf / sk_rcvbuf and must not be described as
+     * such; see the block comment above net_inet_tcp_buf_apply() for exactly
+     * what each one does and does not bound.  Zero means "never set", which is
+     * why net_socket_alloc() fills in the stack defaults. */
+    uint32_t snd_buf;
+    uint32_t rcv_buf;
     int reuseaddr;
     int reuseport;
     int ipv6_v6only;
@@ -818,6 +826,14 @@ void     net_inet_ip_effective(net_socket_t *s, uint8_t *ttl, uint8_t *tos,
  * other options being reapplied.  Takes g_lwip_lock.  `alg` is a TCP_CONG_*
  * value; with LWIP_TCP_CUBIC off only the default is reachable. */
 void     a20_net_cong_apply(struct tcp_pcb *pcb, uint8_t alg);
+
+/* Re-apply the socket's SO_SNDBUF / SO_RCVBUF ceilings to an lwIP pcb.
+ * Defined in socket_inet.c next to the doc comment that explains what each
+ * option does and does not bound.  Takes g_lwip_lock.  Reached from
+ * socket_control.c's setsockopt handler, from net_inet_tcp_apply_options() on
+ * connect and on the accept path, so one code path owns the clamping for all
+ * three entry points. */
+void     net_inet_tcp_buf_apply(net_socket_t *s, struct tcp_pcb *pcb);
 
 net_socket_t *net_socket_from_file(int gfd);
 int net_poll_file(vfile_t *vf, short events);

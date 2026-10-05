@@ -65,28 +65,28 @@ commit**。现已显式抓取并记录基线：
 
 ## 2. A20OS 自有改动
 
-**测量口径：`git diff f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 14 文件，+1458 / −304**
+**测量口径：`git diff --numstat f773b0aa -- kernel/external/lwip/src kernel/external/lwip/sources.mk` = 13 文件，+1495 / −311**
 （`f773b0aa` 是把 lwIP 重新 vendoring 进内核的提交，作为"未改动基线"）。
 
 > 口径说明：数字只统计 `src/` 与 `sources.mk`，不含本文件自身；重跑上面那条
 > `git diff` 即可复核。下文 §2.1 的清单以当前口径为准。
 
-### 2.1 受影响的文件（14 个）
+### 2.1 受影响的文件（13 个）
 
 ```
-+367/-150  src/core/tcp.c                            PCB 链表按 lane 分桶 + CUBIC RTO 分支
-+178/-82   src/core/udp.c                            PCB 链表按 lane 分桶
-+391       src/core/tcp_cubic.c                      【新增文件，上游无对应物】
- +98/-37   src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
- +61/-25   src/include/lwip/priv/tcp_priv.h         TCP_REG/TCP_RMV 改为 lane 索引
-+171       src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
-+112       src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
- +24/-6    src/core/pbuf.c                           LS2K1000 板级诊断 printf
- +22/-1    src/include/lwip/tcp.h                    struct tcp_pcb 增加 lane / cong_alg 字段
-  +6/-1    src/include/lwip/udp.h                    struct udp_pcb 增加 lane 字段
- +18       src/core/tcp_out.c                        CUBIC 快重传分支
-  +2/-2    src/core/timeouts.c                       定时器按 lane 分片
-  +1       sources.mk                                登记 tcp_cubic.c
++397/-0   src/core/tcp_cubic.c                      【新增文件，上游无对应物】
++387/-157 src/core/tcp.c                            PCB 链表按 lane 分桶 + CUBIC RTO 分支 + wnd_limit
++181/-0   src/include/lwip/priv/tcp_cubic_priv.h    【新增文件，上游无对应物】
++178/-82  src/core/udp.c                            PCB 链表按 lane 分桶
++112/-0   src/include/lwip/priv/pcb_lane.h          【新增文件，上游无对应物】
+ +98/-37  src/core/tcp_in.c                         lane 感知的输入查找 + CUBIC ACK 分派
+ +61/-25  src/include/lwip/priv/tcp_priv.h         TCP_REG/TCP_RMV 改为 lane 索引
+ +29/-1   src/include/lwip/tcp.h                    struct tcp_pcb 增加 lane / cong_alg / wnd_limit 字段
+ +24/-6   src/core/pbuf.c                           LS2K1000 板级诊断 printf
+ +18/-0   src/core/tcp_out.c                        CUBIC 快重传分支
+  +6/-1   src/include/lwip/udp.h                    struct udp_pcb 增加 lane 字段
+  +2/-2   src/core/timeouts.c                       定时器按 lane 分片
+  +1/-0   sources.mk                                登记 tcp_cubic.c
 ```
 
 引入这些改动的 A20OS 提交：
@@ -187,6 +187,32 @@ Prague / ECN 与 RTT 方差耦合均无；`W_max` 不跨 pcb 生命周期持久�
 不从实现反推。往返传输的 smoke 门禁**不能**覆盖这些：一条从不丢包的连接根本不
 会离开慢启动，因此对本文件里那几类算错（立方根截断、定标错位、时间轴单位错、
 快收敛方向反了）全部不敏感。
+
+### 2.6 每 pcb 接收窗口上限（`wnd_limit`）
+
+lwIP 的 `tcp_recved()` 每次应用层读完就把 `rcv_wnd` 直接补回 `TCP_WND_MAX(pcb)`
+（`src/core/tcp.c` 的注释写的是 "restore the window"）。因此**在 lwIP 内部没有任何
+一处可以挂一个比 `TCP_WND` 更小的常驻接收上限**——任何写进 `rcv_wnd` 的较小值
+都会在下一次 `recv()` 时被抹掉。要让 `SO_RCVBUF` 成为一个真的约束而不是设置即丢，
+必须给 pcb 一个上限字段：
+
+| 改动 | 位置 |
+|---|---|
+| `tcpwnd_size_t wnd_limit;`（0 = 无上限） | `src/include/lwip/tcp.h` 的 receiver 段 |
+| `tcp_recved()` 先取 `min(TCP_WND_MAX(pcb), wnd_limit)`，两者皆 0 时保持上游值 | `src/core/tcp.c` |
+
+`struct tcp_pcb` 是 lwIP 的公开结构体，`wnd_limit` 属于**必须与上游同步的字段**，
+和 §2.2 的 `lane` / §2.5 的 `cong_alg` 同类：合并上游时这三个字段要一起搬。
+
+**语义边界（不要按 Linux 推断）**：
+
+- 上限只约束 `rcv_wnd`（本地还愿意收多少），不约束 `rx_buf` 的 pbuf 数量，
+  也不影响 `tcp_recved()` 之外的行为。
+- 上限不能突破窗口缩放：线上字段是 `rcv_wnd >> rcv_scale`，16 位，所以有效天花板
+  是 `min(TCP_WND_MAX(pcb), 0xFFFF << pcb->rcv_scale)`，超出的部分在
+  `kernel/net/socket_inet.c` 的 `net_inet_tcp_buf_apply()` 里被夹掉。
+- 下调立即生效（同时写 `rcv_wnd` 并重跑公告逻辑）；上调也要写，因为 lwIP 没有
+  "还回去" 的机制。
 
 ## 3. 重新同步上游的流程
 
