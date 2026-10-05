@@ -69,6 +69,22 @@ int mm_pt_set_anon_prov_max(uint32_t pages)
 #endif
 }
 
+/* Faults actually DISPATCHED from the segment rather than fallen back to the
+ * VMA.  Without this the dispatch change is unverifiable from the outside: seg_ok
+ * only says the segment and the VMA agreed, not that the segment was obeyed.
+ * A non-zero disagree with a zero here would mean the fallback was taken every
+ * time and the change did nothing.
+ *
+ * Deliberately outside the arch-ops guard below: these are statistics, not
+ * capability, so they exist on every build.  arm32 supplies its own
+ * short-descriptor backend and has no dispatch path at all, but fault.c counts
+ * unconditionally, and leaving the counters behind the guard made those sites
+ * reference nothing -- which is a link error on arm32 rather than a zero.
+ * The auditor that prints them (abi/linux/sys_proc.c) is itself guarded, so
+ * arm32 simply never reports them. */
+uint64_t mm_seg_dispatch_seg;
+uint64_t mm_seg_dispatch_fallback;
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 /* ------------------------------------------------------------------ *
@@ -1317,7 +1333,14 @@ static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
                     continue;
                 named = 1;
                 mm_seg_t *cand = segtab_seg(pm->segtab, slot);
-                if (!cand || addr < cand->start || addr >= cand->end)
+                /* The magic test is the same one the auditor uses to spot a
+                 * dangling slot (below).  It reads a word the loop has already
+                 * pulled in, and without it an over-draw anywhere else in this
+                 * file would be a use-after-free READ on cand->start/cand->end
+                 * -- one instruction past any panic that could name it. */
+                if (!cand || cand->magic != MM_SEG_MAGIC)
+                    continue;               /* slot outlived its record */
+                if (addr < cand->start || addr >= cand->end)
                     continue;               /* named, but not about this addr */
                 if (hit) {
                     /* Two live mappings both claim this address.  That cannot
@@ -1330,8 +1353,19 @@ static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
                 hit = cand;
             }
             if (ambiguous) {
+                /* `hit` is a borrow: segtab_seg() hands back the pointer the
+                 * node's shared array owns (segtab_slot() took that reference),
+                 * and this walk holds none of its own.  The put that used to sit
+                 * here dropped the array's last one, which freed a record the
+                 * page tables still named -- the next fault into the same range
+                 * then read `cand->start` off freed memory and put it again,
+                 * dying in mm_seg_put with magic=0.
+                 *
+                 * Nothing needs releasing on this path.  Every reference is
+                 * balanced by the slot it belongs to: one get per slot on
+                 * annotate, one put per slot in segtab_entry_forget() and on
+                 * segarr teardown. */
                 mm_seg_last_why = MM_MW_AMBIG;
-                mm_seg_put(hit);
                 return NULL;
             }
             if (hit)
@@ -1365,14 +1399,6 @@ static mm_seg_t *mm_pt_lookup_seg_rcu(mm_struct_t *mm, vaddr_t addr)
 uint64_t mm_seg_shadow_agree;
 uint64_t mm_seg_shadow_disagree;
 uint64_t mm_seg_shadow_miss;
-
-/* Faults actually DISPATCHED from the segment rather than fallen back to the
- * VMA.  Without this the dispatch change is unverifiable from the outside: seg_ok
- * only says the segment and the VMA agreed, not that the segment was obeyed.
- * A non-zero disagree with a zero here would mean the fallback was taken every
- * time and the change did nothing. */
-uint64_t mm_seg_dispatch_seg;
-uint64_t mm_seg_dispatch_fallback;
 
 int mm_pt_shadow_seg(mm_struct_t *mm, vaddr_t addr, uint8_t kind,
                      uint64_t off, int shared, mm_seg_t **found)

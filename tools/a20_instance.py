@@ -10,6 +10,7 @@ a20_derive.py.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass, fields
 from pathlib import Path
@@ -88,6 +89,39 @@ class GuiCfg:
 @dataclass(frozen=True, slots=True)
 class NetCfg:
     hostfwd: tuple[str, ...] | None = None
+
+    def qemu_hostfwd(self) -> str:
+        """[net].hostfwd as QEMU wants it on the -netdev command line.
+
+        QEMU 9 deprecated the bare short form and QEMU 10 rejects it outright,
+        so every instance that declared a forward died before the guest ever
+        booted, with
+
+            qemu-system-riscv64: -netdev user,id=net,tcp::2222-:22:
+              Invalid parameter 'tcp::2222-:22'
+
+        The manifest format stays the readable `tcp::2222-:22`; the rewrite into
+        the explicit `hostfwd=...=on` form happens here, once, so no caller can
+        forget it.  An entry that already spells out `hostfwd=` is passed
+        through untouched.
+        """
+        return ",".join(_qemu_hostfwd(f) for f in (self.hostfwd or ()))
+
+
+# A short-form rule: proto:hostaddr:hostport-guestaddr:guestport, carrying no
+# key in front and no explicit boolean.  An entry that already names its own
+# `hostfwd=` key is left alone, and a trailing `=on`/`=off` is an explicit
+# choice we must not double up.
+_HOSTFWD_SHORT_RE: Final = re.compile(r"^(?:tcp|udp):[^-]*-[^:]*:\d+$")
+
+
+def _qemu_hostfwd(entry: str) -> str:
+    rule = entry.strip()
+    if rule.startswith("hostfwd="):
+        return rule
+    if _HOSTFWD_SHORT_RE.match(rule):
+        rule = f"{rule}=on"
+    return f"hostfwd={rule}"
 
 
 @dataclass(frozen=True, slots=True)
