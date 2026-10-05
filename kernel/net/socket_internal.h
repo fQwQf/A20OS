@@ -776,8 +776,23 @@ int      net_netlink_route_request(net_socket_t *s, const void *buf, size_t len,
                                    const void *addr, size_t addrlen);
 int      net_netlink_uevent_send(net_socket_t *s, const void *buf, size_t len,
                                   const void *addr, size_t addrlen);
- void     netlink_uevent_emit(const char *action, const char *subsystem,
+void     netlink_uevent_emit(const char *action, const char *subsystem,
                               const char *name, uint64_t devt);
+
+/* RTNETLINK multicast (socket_netlink.c).  lwip_stack.c is the only producer,
+ * and it learns of the change while holding g_lwip_lock -- so the event is
+ * recorded as a pending flag and the notify functions below run after that
+ * lock is dropped.  They must therefore be called with g_lwip_lock NOT held:
+ * they take socket-table bucket locks, which the lock contract forbids holding
+ * together with g_lwip_lock. */
+typedef struct {
+    uint32_t index;      /* netif index, as ifi_index / ifa_index */
+    uint8_t  want_up;    /* the carrier/admin state the change settled on */
+} nlrt_link_event_t;
+
+void     net_netlink_link_notify(const nlrt_link_event_t *events, int n);
+void     net_netlink_addr_notify(unsigned ifindex, const uint8_t addr[4],
+                                 const uint8_t mask[4]);
 
 /* AF_PACKET raw L2 sockets (socket_packet.c).  The RX capture must stay
  * deferred: lwip_stack.c calls it holding g_lwip_lock, which is never held

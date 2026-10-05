@@ -148,9 +148,17 @@ typedef struct {
     uint64_t rx_packets, rx_bytes, rx_errors, rx_dropped;
     uint64_t tx_packets, tx_bytes, tx_errors;
     uint64_t rx_filtered, tx_filtered;
+    /* A link state change not yet published to RTNLGRP_LINK.  Set under
+     * g_lwip_lock, cleared by a20_lwip_netlink_flush().  See the comment on
+     * that function for why the broadcast cannot happen here. */
+    uint8_t link_pending;
 } a20_lwip_netif_state_t;
 
 static a20_lwip_netif_state_t g_netif_state[A20_NET_MAX_DEVS];
+
+/* Bumped whenever some netif's link_pending goes 0 -> 1, so the flush's fast
+ * path is one relaxed load instead of a walk of every device. */
+static volatile uint32_t g_netif_link_pending;
 
 static int a20_lwip_device_link_up(const a20_lwip_netif_state_t *st)
 {
@@ -164,10 +172,60 @@ static void a20_lwip_sync_link_state(struct netif *netif)
 
     a20_lwip_netif_state_t *st = (a20_lwip_netif_state_t *)netif->state;
     int link_up = a20_lwip_device_link_up(st);
-    if (link_up && !netif_is_link_up(netif))
+    if (link_up && !netif_is_link_up(netif)) {
         netif_set_link_up(netif);
-    else if (!link_up && netif_is_link_up(netif))
+    } else if (!link_up && netif_is_link_up(netif)) {
         netif_set_link_down(netif);
+    } else {
+        return;
+    }
+    /* Only a transition, not every poll: netif_set_link_up() on every pass
+     * would flood RTNLGRP_LINK with a message per poll per device.  The event
+     * is queued here and published by a20_lwip_netlink_flush(), which is
+     * reachable from the same poll path. */
+    st->link_pending = 1;
+    __atomic_store_n(&g_netif_link_pending, 1, __ATOMIC_RELAXED);
+}
+
+/*
+ * Publish link-state changes collected under g_lwip_lock to RTNLGRP_LINK.
+ *
+ * Called with g_lwip_lock NOT held.  That is the whole reason the change is
+ * not broadcast from a20_lwip_sync_link_state() directly: net_netlink_link_notify()
+ * walks the socket table under bucket locks, and the lock contract in
+ * docs/net/network-lock-contract.md forbids holding g_lwip_lock together with a
+ * bucket lock.  So the event is recorded under the lwIP lock, collected here,
+ * and the lwIP lock is dropped before any bucket is touched.
+ *
+ * Events are collected under the lock so the netif cannot be freed or re-registered
+ * between noticing the change and naming the interface.  Coalescing is by
+ * device: two flips between two flushes publish only the settled state, which
+ * is what a listener wants and what it would have to do the work of deriving
+ * itself.
+ */
+static void a20_lwip_netlink_flush(void)
+{
+    if (!__atomic_load_n(&g_netif_link_pending, __ATOMIC_RELAXED))
+        return;
+
+    nlrt_link_event_t events[A20_NET_MAX_DEVS];
+    int n = 0;
+    uint64_t lf = a20_lwip_lock();
+    for (int i = 0; i < A20_NET_MAX_DEVS; i++) {
+        a20_lwip_netif_state_t *st = &g_netif_state[i];
+        if (!st->dev || !st->link_pending)
+            continue;
+        st->link_pending = 0;
+        struct netif *nif = &g_netifs[i];
+        events[n].index = (uint32_t)netif_get_index(nif);
+        events[n].want_up = netif_is_link_up(nif) ? 1 : 0;
+        n++;
+    }
+    __atomic_store_n(&g_netif_link_pending, 0, __ATOMIC_RELAXED);
+    a20_lwip_unlock(lf);
+
+    if (n > 0)
+        net_netlink_link_notify(events, n);
 }
 
 u32_t sys_now(void) {
@@ -613,6 +671,8 @@ void a20_lwip_poll(void) {
     uint64_t flags = a20_lwip_lock();
     a20_lwip_poll_locked();
     a20_lwip_unlock(flags);
+    /* With g_lwip_lock dropped, so this is allowed to touch socket buckets. */
+    a20_lwip_netlink_flush();
     net_inet_bottom_half_process_all();
     net_packet_bottom_half_process();
 }
@@ -1053,28 +1113,44 @@ int a20_lwip_if_set_addr(unsigned ifindex, const uint8_t addr[4],
     ip4_addr_t want;
     IP4_ADDR(&want, addr[0], addr[1], addr[2], addr[3]);
 
+    /* What the address event will carry.  Read under the lock, before the
+     * write, so it is the state that was actually in force -- not a re-read
+     * of an interface that has already been cleared.  An all-zero `want` is
+     * a delete, and net_netlink_addr_notify() turns it into RTM_DELADDR. */
+    uint8_t eff_addr[4], eff_mask[4];
+    eff_addr[0] = addr[0]; eff_addr[1] = addr[1];
+    eff_addr[2] = addr[2]; eff_addr[3] = addr[3];
+
     uint64_t flags = a20_lwip_lock();
     struct netif *n = a20_lwip_netif_by_index(ifindex);
     if (!n) {
         a20_lwip_unlock(flags);
         return -ENODEV;
     }
+    a20_lwip_copy_ip4(eff_mask, netif_ip4_netmask(n));
     netif_set_ipaddr(n, &want);
     if (ip4_addr_isany_val(want)) {
         ip4_addr_t zero;
         ip4_addr_set_zero(&zero);
         netif_set_netmask(n, &zero);
         netif_set_gw(n, &zero);
+        /* The prefix went with the address, so the notification must not carry
+         * the old one: RTM_DELADDR names the address that went away, and a
+         * stale /24 on it would tell a listener to remove the wrong prefix. */
+        memset(eff_mask, 0, sizeof(eff_mask));
     } else if (mask) {
         ip4_addr_t m;
         IP4_ADDR(&m, mask[0], mask[1], mask[2], mask[3]);
         netif_set_netmask(n, &m);
+        memcpy(eff_mask, mask, sizeof(eff_mask));
     } else if (gw) {
         ip4_addr_t g;
         IP4_ADDR(&g, gw[0], gw[1], gw[2], gw[3]);
         netif_set_gw(n, &g);
     }
     a20_lwip_unlock(flags);
+    /* Outside g_lwip_lock: the notify path takes socket-table bucket locks. */
+    net_netlink_addr_notify(ifindex, eff_addr, eff_mask);
     return 0;
 }
 
@@ -1123,11 +1199,27 @@ int a20_lwip_if_set_flags(unsigned ifindex, unsigned flags, unsigned mask)
         a20_lwip_unlock(lf);
         return -ENODEV;
     }
+    uint32_t index;
+    uint8_t up;
     if (flags & A20_LWIP_IF_F_UP)
         netif_set_up(n);
     else
         netif_set_down(n);
+    index = (uint32_t)netif_get_index(n);
+    up = netif_is_link_up(n) ? 1 : 0;
     a20_lwip_unlock(lf);
+    /* An admin up/down is a link change the same way a carrier flip is, and a
+     * listener of RTNLGRP_LINK cannot tell the two apart -- neither can the
+     * message format.  Published here rather than through link_pending
+     * because this call is synchronous with a userspace request: the caller
+     * (RTM_NEWLINK) is waiting for a result, and deferring the notification
+     * to the next poll would let it observe the new state from a dump before
+     * the event arrives. */
+    nlrt_link_event_t ev = {
+        .index = index,
+        .want_up = up,
+    };
+    net_netlink_link_notify(&ev, 1);
     return 0;
 }
 
