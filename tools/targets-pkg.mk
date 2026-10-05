@@ -62,12 +62,18 @@ QEMU_MEMORY_WORLD   := $(if $(filter $(QEMU_MEMORY_DEFAULT),$(QEMU_MEMORY)),$(QE
 # 桌面里用 parole / mpv 打开，或在 Thunar 里双击即可播放。
 # GUI_MEDIA 默认是「粘性」的：桌面镜像在每次 run 时都会重建，而 overlay 只在给出
 # GUI_MEDIA 时才生成 —— 于是 `make run-gui-x86_64`（不带变量）会把上次注入的
-# /usr/share/a20-media 悄悄丢掉，看起来像"媒体没进镜像"。默认从已取件的
+# /usr/share/a20-media 悄悄丢掉，看起来像"媒体没进镜像"。桌面 world 默认从已取件的
 # build/minecraft/* 注入；要显式关掉就传 `GUI_MEDIA=`。
 # 媒体里的 ELF 若与目标架构不符会在生成 overlay 时剔除并提示（Mojang 的 natives
 # 只有 x86_64，没有 riscv64）—— 不剔除的话 mkrootfs 的 overlay 架构检查会拒绝整个镜像。
+#
+# 自动注入只对桌面 world 生效。PKG_WORLD 由调用方（a20 run / run-world）给出，
+# 在本行展开时已知，所以可以直接判。非桌面 world 注入媒体是纯粹的伤害：一份
+# 535 MiB 的 Minecraft 数据集进没有 JVM、没有启动器、没有桌面的 server 镜像，
+# 既塞不进 world_size_mb=512 的 ext4（表现为 mkfs.ext4 的 "Could not allocate
+# block"，看着像磁盘满），又让 server 镜像白白多占几百 MiB。
 GUI_MEDIA_AUTO     := $(wildcard build/minecraft/*)
-GUI_MEDIA          ?= $(GUI_MEDIA_AUTO)
+GUI_MEDIA          ?= $(if $(filter $(PKG_WORLD_GUI),$(PKG_WORLD)),$(GUI_MEDIA_AUTO),)
 GUI_MEDIA_DIR      ?= /usr/share/a20-media
 GUI_MEDIA_OVERLAY  := build/overlay-media/$(PKG_WORLD)-$(PKG_ARCH)
 

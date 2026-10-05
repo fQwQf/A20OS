@@ -310,7 +310,14 @@ boot_pdpt_hh:
 boot_pd_id:
     .space 4096
 
+/* BSP boot stack, 64 KiB -- the same size the other arches reserve (see
+ * arch/aarch64/boot/entry.S).  .bss.stack is collected first by
+ * boot/ldscript.ld, so this range sits at the bottom of .bss and nothing else
+ * can be placed inside it; it also stays below _bss_end, which is where the
+ * physical frame allocator's reserved region begins. */
+    .section .bss.stack
     .align 4096
+    .globl _stack_bottom
 _stack_bottom:
     .space 4096 * 16
     .globl _stack_end

@@ -451,8 +451,15 @@ boot_pmd_tima:
 __boot_dtb_ptr:
     .quad 0
 
+    /* BSP boot stack, 64 KiB.  _start loads _stack_end straight into r1, so
+     * the label must be page aligned (the ABI's 16-byte SP rule included) and
+     * must carry a global symbol so boot/ldscript.ld can ASSERT its placement:
+     * the linker script collects this input section first inside .bss, which
+     * keeps the range exclusive and below _bss_end, the point from which the
+     * physical frame allocator owns the address space. */
     .section .bss.stack
     .align 12
+    .globl _stack_bottom
 _stack_bottom:
     .space 4096 * 16
     .globl _stack_end

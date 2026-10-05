@@ -60,9 +60,12 @@ class MemorySpecError(ValueError):
     """A -m style size string that cannot be parsed."""
 
 
-# QEMU's hostfwd grammar: [tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport
+# QEMU's hostfwd grammar: hostfwd=[tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport[=on|off]
+# The `hostfwd=` key and the boolean are optional here because an instance
+# manifest may write either the readable short form or the fully spelled one.
 _HOSTFWD_RE = re.compile(
-    r"^(?:tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)-(?P<gaddr>[^:]*):(?P<gport>\d+)$")
+    r"^(?:hostfwd=)?(?:tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)"
+    r"-(?P<gaddr>[^:]*):(?P<gport>\d+)(?:=(?:on|off))?$")
 
 
 def parse_hostfwd_ports(entries: Sequence[str] | None) -> tuple[tuple[str, int], ...]:
