@@ -242,6 +242,46 @@ def collect_nonroot_ownership(staging: Path,
     return fixups
 
 
+def check_fits_size_mb(staging: Path, size_mb: int) -> None:
+    """Refuse to build an image that cannot hold what was just staged.
+
+    ext4 reports an over-full image as `Could not allocate block in ext2
+    filesystem` partway through `mkfs.ext4 -d`, naming whichever file it
+    happened to be writing at the time.  That reads like a full disk and
+    points at the wrong thing: the real cause is that --size-mb is smaller
+    than the world plus its overlays.  server-riscv64 hit exactly this --
+    world_size_mb = 512 against a 535 MiB media overlay -- and the message
+    named icu4j-77.1.jar, a Minecraft library that has no business being in
+    a server image at all.
+
+    So check before mkfs, name the offenders, and say which knob to turn.
+    """
+    budget = size_mb * 1024 * 1024
+    totals: dict[str, int] = {}
+    total = 0
+    for root, _dirs, files in os.walk(staging):
+        for name in files:
+            path = Path(root) / name
+            try:
+                # st_size, not st_blocks: this is about how big the image
+                # has to be, and it must not depend on the host's fs.
+                nbytes = path.lstat().st_size
+            except OSError:
+                continue
+            total += nbytes
+            top = path.relative_to(staging).parts[0]
+            totals[top] = totals.get(top, 0) + nbytes
+
+    if total <= budget:
+        return
+    biggest = sorted(totals.items(), key=lambda kv: -kv[1])[:5]
+    detail = ", ".join(f"{name}/ {nbytes / (1024 * 1024):.0f} MiB"
+                       for name, nbytes in biggest)
+    die(f"staged rootfs is {total / (1024 * 1024):.0f} MiB but the image is "
+        f"only {size_mb} MiB ({detail}); raise world_size_mb / --size-mb, or "
+        f"stop injecting an overlay the world does not need")
+
+
 def read_world(paths: list[Path]) -> list[str]:
     pkgs: list[str] = []
     for path in paths:
@@ -483,6 +523,7 @@ def main() -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         tmp_img = output.with_suffix(output.suffix + ".tmp")
         tmp_img.unlink(missing_ok=True)
+        check_fits_size_mb(staging, args.size_mb)
         run(["truncate", "-s", f"{args.size_mb}M", str(tmp_img)], [])
         mkfs = EXT4_MKFS_ARGS + ["-L", args.label]
         mkfs_sudo = sudo

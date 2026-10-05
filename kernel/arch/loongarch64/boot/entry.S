@@ -221,7 +221,18 @@ early_halt:
     idle        0
     b           early_halt
 
+    /* BSP boot stack, 64 KiB per CPU.  _start loads boot_stack_top straight
+     * into $sp, so the label must be page aligned (the LoongArch ABI's 16-byte
+     * SP rule included) so the whole stack sits in whole pages that no other
+     * .bss object shares.  boot/ldscript.ld collects this input section first
+     * inside .bss, keeping the range exclusive and below _bss_end.
+     *
+     * NOTE: the LoongArch assembler takes .align as a power-of-two EXPONENT,
+     * not a byte count (aarch64, riscv64 and ppc64le do the same), so page
+     * alignment here is .align 12.  A byte-style ".align 4096" is clamped to
+     * 2^63 with an "alignment too large" diagnostic. */
     .section .bss.stack
+    .align 12
     .globl boot_stack
 boot_stack:
     .space 64 * 1024 * CONFIG_NR_CPUS

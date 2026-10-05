@@ -552,6 +552,27 @@ static inline uint64_t mm_pt_audit_errors(const mm_pt_audit_report_t *r)
 }
 
 
+/* Segment-dispatch statistics.  Kept outside the arch-ops guard with their
+ * definitions in mm/pt.c: they are counters, not capability, and fault.c
+ * increments them on every build.  arm32 has no dispatch path and so leaves
+ * them at zero. */
+extern uint64_t mm_seg_dispatch_seg;
+extern uint64_t mm_seg_dispatch_fallback;
+
+/* Mapping-record lifetime.  mm_seg_new() (mm/vma.c) creates one with a single
+ * reference the creator owns; the index and every annotation walk take their own
+ * with mm_seg_get(), and the last mm_seg_put() runs the record's release
+ * callback and frees it.
+ *
+ * Outside the arch-ops guard, with their definitions in mm/pt.c: these are a
+ * refcount on a slab object and have nothing to do with page tables, but
+ * vma.c drops and re-takes references on paths that are not guarded, so
+ * leaving them behind the guard made a NOMMU build call undeclared functions.
+ * Under NOMMU the segment table does not exist and nothing else here does
+ * either -- these simply never find a second holder. */
+mm_seg_t *mm_seg_get(mm_seg_t *s);
+void      mm_seg_put(mm_seg_t *s);
+
 #if defined(ARCH_HAS_PGTABLE_OPS) && !defined(CONFIG_NOMMU)
 
 /* Descriptor access.  table is a direct-mapped pointer to a page-table page. */
@@ -610,13 +631,6 @@ void mm_pt_unannotate_seg(mm_struct_t *mm, vaddr_t start, vaddr_t end,
  * a leaf.  Caller holds the parent node's lock. */
 void mm_pt_node_clear_seg(pte_t *table, int level, int idx);
 
-/* Mapping-record lifetime.  mm_seg_new() (mm/vma.c) creates one with a single
- * reference the creator owns; the index and every annotation walk take their own
- * with mm_seg_get(), and the last mm_seg_put() runs the record's release
- * callback and frees it. */
-mm_seg_t *mm_seg_get(mm_seg_t *s);
-void      mm_seg_put(mm_seg_t *s);
-
 /* Shadow check (P6, docs 12.6).  Asking the segment what it would have said,
  * and comparing against what the VMA actually said, turns "the segment is
  * good enough to replace the VMA" from a claim into a number.  It is a
@@ -644,9 +658,8 @@ extern uint64_t mm_seg_shadow_disagree;
 extern uint64_t mm_seg_shadow_miss;
 
 /* Which side of the P6 dispatch actually decided.  Both zero means the change
- * is inert; both equal means the segment is inert. */
-extern uint64_t mm_seg_dispatch_seg;
-extern uint64_t mm_seg_dispatch_fallback;
+ * is inert; both equal means the segment is inert.  Declared above, outside the
+ * arch-ops guard, because fault.c counts them on every build. */
 
 /* Why a lookup found nothing, and why an annotation could not be recorded.
  *

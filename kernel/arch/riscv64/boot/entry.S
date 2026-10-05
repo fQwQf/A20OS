@@ -335,12 +335,6 @@ _start:
 boot_pgdir:
     .space  4096
 
-    .align 12
-_stack_bottom:
-    .space  4096 * 16 * CONFIG_NR_CPUS
-    .globl _stack_end
-_stack_end:
-
     /* hart ID and DTB pointer saved at boot, written by entry.S _start */
     .globl __boot_hart_id
 __boot_hart_id:
@@ -348,6 +342,19 @@ __boot_hart_id:
     .globl __boot_dtb_ptr
 __boot_dtb_ptr:
     .dword 0
+
+/* BSP boot stacks, 64 KiB per CPU.  .bss.stack is collected first by
+ * boot/ldscript.ld, so these ranges sit at the bottom of .bss and no other
+ * statically allocated kernel object can be placed inside them; they also
+ * stay below _bss_end, which is where the physical frame allocator's
+ * reserved region begins (mm_init -> pfa_init(va_to_pa(_bss_end))). */
+    .section .bss.stack
+    .align 12
+    .globl _stack_bottom
+_stack_bottom:
+    .space  4096 * 16 * CONFIG_NR_CPUS
+    .globl _stack_end
+_stack_end:
 
     .section .data
     .align 3

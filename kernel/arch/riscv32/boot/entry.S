@@ -98,15 +98,22 @@ _start:
 boot_pgdir:
     .space 4096
 
-    .align 12
-_stack_bottom:
-    .space 4096 * 16
-    .globl _stack_end
-_stack_end:
-
     .globl __boot_hart_id
 __boot_hart_id:
     .word 0
     .globl __boot_dtb_ptr
 __boot_dtb_ptr:
     .word 0
+
+/* BSP boot stack, 64 KiB.  .bss.stack is collected first by
+ * boot/ldscript.ld, so this range sits at the bottom of .bss and no other
+ * statically allocated kernel object can be placed inside it; it also stays
+ * below _bss_end, which is where the physical frame allocator's reserved
+ * region begins (mm_init -> pfa_init(va_to_pa(_bss_end))). */
+    .section .bss.stack
+    .align 12
+    .globl _stack_bottom
+_stack_bottom:
+    .space 4096 * 16
+    .globl _stack_end
+_stack_end:

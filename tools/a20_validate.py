@@ -37,7 +37,13 @@ from a20_instance import (
 
 _NAME_RE: Final = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _MEMORY_RE: Final = re.compile(r"[0-9]+[KMGT]")
-_HOSTFWD_RE: Final = re.compile(r"(tcp|udp)::[0-9]*-[0-9]*:[0-9]+")
+# Accepts the readable short form a manifest writes (tcp::5555-:5555), the fully
+# spelled QEMU form (hostfwd=tcp::5555-:5555=on), and an optional host address
+# on either side.  The manifests use the short form; NetCfg rewrites it into
+# the explicit form before it reaches the QEMU command line, so the validator
+# has to be happy with what the author wrote, not with what QEMU ends up given.
+_HOSTFWD_RE: Final = re.compile(
+    r"(?:hostfwd=)?(?:tcp|udp):[^:,\s]*:\d*-[^:,\s]*:\d+(?:=(?:on|off))?")
 _TIMEOUT_RE: Final = re.compile(r"[0-9]+s")
 
 _UEFI_VARIANTS: Final = ("default", "text")
