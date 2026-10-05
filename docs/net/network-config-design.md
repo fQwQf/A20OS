@@ -102,13 +102,149 @@ tcpmode=fast
 `/proc/net/config` 是现成的控制面；但**开机第一个 listener 通常由用户态创建，
 shell 写入口来不及生效**，所以服务器仍应当用 `a20.tcpmode=lwip` 命令行键。
 
-**运行时切换的已知限制**（实测，可复现）：命令行选定 `lwip` 时回环 TCP 传输
-（`tcp_loopback_test`）通过；先用默认 `fast` 跑一次、再用写入口切到 `lwip`，
-则 listener 建立与 `accept()` 仍正常（`smoke-net-accept` 覆盖），但**数据传输
-不完成**。原因尚未定位。因此写入口只应视为调试/实验便利，**部署一律用命令行键**。
+**运行时切换的已知限制**（首次记录于 2026-10，**机制仍未查明**）：命令行选定 `lwip`
+时回环 TCP 传输（`tcp_loopback_test`）通过；当时观察到先用默认 `fast` 跑一次、
+再用写入口切到 `lwip`，则 listener 建立与 `accept()` 仍正常（`smoke-net-accept` 覆盖），
+但**数据传输不完成**，据此写下"部署一律用命令行键"。
+
+> **2026-10-06 更新：这条限制本轮一次都没复现。** 在合并后的
+> `feat/net-strengthening` 树上，`make smoke-net-accept` 10/10 PASS，12 轮
+> fast↔lwip 运行时切换共 24/24 PASS，lwip→fast 与 fast→lwip 之后
+> `tcp_loopback_test` / `tcp_accept_test` 全过，跨模式 `tcp_edge_test` 两次执行均
+> PASS（数字转引自本轮正确性加固工作流的实验记录）。**这不构成"已修复"**——触发
+> 条件在本轮环境里不存在，原因未查明；记载本身也可能来自更早的脏树。
+> 写入口的 `tcpmode` 功能**原样保留、未削减**，上面那句"部署一律用命令行键"的建议
+> 也保留，只是它的依据从"实测可复现"降级为"机理未查明"。详见
+> [net-lanes.md](net-lanes.md)「更正一则：2026-10-06 一轮里这条 flake 完全没复现」。
 
 **未来计划**：可以增加 `sys_net_get_config`/`sys_net_set_config` 来支持地址的原子更新。
 当前没有这些 syscall，地址类字段仍不能作为运行时设置入口。
+
+## 配置面的三个平面
+
+网络的可调项分三层，各层的可调范围不同。混在一起读会得到错误结论——例如
+"SO_SNDBUF 可调"不代表"能自动扩缩"，"档位可调"不代表"MCU 档位也在内"。
+
+| 平面 | 载体 | 本轮（`feat/net-strengthening`）新增 |
+|---|---|---|
+| 内核命令行 | `a20.*` 键 | 无 |
+| 编译期档位 | `kernel/net/net_profile.h` + `lwipopts.h` | SACK / 时间戳 / CUBIC 开关、conntrack 表尺寸、静态帧数组尺寸与预算 |
+| 运行时控制面 | `/proc/net/config`、`/proc/a20/netfilter` | conntrack/NAT 动词 |
+| 套接字选项 | `setsockopt` / `getsockopt` | `TCP_CONGESTION` 真算法名、`SO_SNDBUF` / `SO_RCVBUF` 真生效 |
+
+### 编译期档位：本轮新增的项
+
+`net_profile.h` 是所有上限的唯一来源，`lwipopts.h` 从这里取值。DEFAULT 与 SERVER
+是同一个 block 的两份拷贝，所以下面两行对这两档取值相同。
+
+| 宏 | EMBEDDED | DEFAULT / SERVER | 含义与代价 |
+|---|---|---|---|
+| `NET_PROFILE_TCP_SACK_OUT` | 0 | 1 | 发送侧 SACK（RFC 2018）。上游 `opt.h` 默认 0 |
+| `NET_PROFILE_TCP_MAX_SACK_NUM` | 1 | 4 | 每段最多 4 个 SACK 块 |
+| `NET_PROFILE_TCP_TIMESTAMPS` | 0 | 1 | TCP 时间戳与 PAWS（RFC 7323）。上游默认 0 |
+| `NET_PROFILE_TCP_CUBIC` | 0 | 1 | CUBIC 拥塞控制（RFC 8312 核心条款） |
+| `NET_PROFILE_CONNTRACK_ENTRIES` | 64 | 256 / 1024 | conntrack 静态表条目数 |
+| `NET_PROFILE_CONNTRACK_BUCKETS` | 8 | 32 / 128 | conntrack 哈希桶数 |
+| `NET_PROFILE_PACKET_RING_SLOTS` / `_FRAME_SIZE` | 4 / 512 | 16 / 1536 | `socket_packet.c` 的静态帧环 |
+| `NET_PROFILE_NETIF_MAX_DEVS` / `_FRAME_SIZE` / `_MTU` | 1 / 512 / 498 | 4 / 1536 / 1500 | 每 netif 的 `rx_frame` / `tx_frame` 与 MTU |
+| `NET_PROFILE_STATIC_BUDGET` | 20 KiB | 64 KiB / 128 KiB | 上面那些静态数组的 `.bss` 上界，由断言钉住 |
+
+**EMBEDDED 档把 SACK 与时间戳关掉是刻意的**：两者都会加大每个数据段的 TCP 头，
+也会加大每个已建立 PCB 的结构，而在 512 B 的池元素上这笔开销直接从载荷预算里扣。
+DEFAULT / SERVER 开启后，`NET_PROFILE_PBUF_BUFSIZE` 必须从 1536 涨到 1600——选项与
+载荷**共用池的头元素**，账是
+`1460 + 54 + 12 (TS) + 36 (四个 SACK 块) = 1562`。`lwipopts.h:209-213` 的
+`A20_TCP_OPT_HDR_MAX` 按 `(14 + 20 + 20 + 可选 12 + 可选 36)` 逐项展开，并由
+`lwipopts.h:214` 的 `_Static_assert(TCP_MSS + A20_TCP_OPT_HDR_MAX <= PBUF_POOL_BUFSIZE)`
+钉住"这个和不超过 `PBUF_POOL_BUFSIZE`"——**断言检查的是加了选项之后的和，不是原来
+那个无选项的 54**。DEVICE 侧的 `NETIF_FRAME_SIZE` 仍是 1536：它装的是整帧
+（MTU 1500 + 14 = 1514），而要装进池元素的是带选项的**段**，两者的几何不是一回事。
+
+CUBIC 的范围与未做的部分逐条登记在 `kernel/external/lwip/DIVERGENCE.md` §2.5
+（源码侧是 `lwip/priv/tcp_cubic_priv.h` 的头注释）。**它没有** RFC 8312 §4.2 的
+TCP-friendly 公式（只以 Reno 速率近似），没有 HyStart / TCP-AQ / DCTCP / Prague，
+没有 ECN，`W_max` 不跨 pcb 持久化。
+
+### 运行时控制面：`/proc/a20/netfilter` 的 conntrack 与 NAT 动词
+
+与 `/proc/net/config` 分开，因为写者不同：配置面只有 `/proc`，而 conntrack 表每包
+都要写、由 `g_lwip_lock` 保护。锁理由写在
+[network-lock-contract.md](network-lock-contract.md)「conntrack 与 NAT 用哪把锁」。
+
+| 写入 | 作用 |
+|---|---|
+| `ctflush` | 丢掉全部活跃流状态，保留规则 |
+| `cton` / `ctoff` | 开关 conntrack 插入。`ctoff` 只停**新**条目，保留既有条目 |
+| `natadd <rule>` | 加一条 NAT 规则（`snat` / `dnat` / `masquerade`） |
+| `natdel <idx>` | 按索引删一条 NAT 规则 |
+| `reset` / `flush` | `reset` 清配置与 NAT 规则，`flush` 只清 drop/accept 规则 |
+
+NAT 规则的语法、连接跟踪表的结构、以及**诚实的边界**（无 ALG、无 ICMP 跟踪、不做
+分片 NAT 等）写在 [conntrack-nat.md](conntrack-nat.md)，不重复于此。
+
+### 套接字选项：这三个现在不再是无操作
+
+| 选项 | 之前 | 现在 |
+|---|---|---|
+| `TCP_CONGESTION` | 接受 `"reno"`，把 `"cubic"` 也当成功——而本树**没有** CUBIC | 未知名返回 `-ENOPROTOOPT`；`getsockopt` 回真实算法名；`"cubic"` 走 RFC 8312 核心条款 |
+| `SO_SNDBUF` | 被接受然后忽略 | 约束该 socket 在 pcb 发送队列里的字节上限；`getsockopt` 回读夹紧后的生效值 |
+| `SO_RCVBUF` | 被接受然后忽略 | 经 pcb 的 `wnd_limit` 字段约束该连接的接收窗口；`getsockopt` 回读生效值 |
+
+**两条必须一起说的限制**，否则名字会骗人（理由写在
+`kernel/net/socket_inet.c:1611-1640` 的函数头注释里）：
+
+- `SO_SNDBUF` 只约束**已排队未确认**的字节，**不约束在途飞行字节**——在途由拥塞控制
+  负责，在这里也管它会与算法对着干。
+- **两者都没有自动调优。** 没有 `tcp_wmem` / `tcp_rmem`，没有内存压力反馈，也不从
+  实测吞吐调整。Linux 会据此增长 `sk_sndbuf` / `sk_rcvbuf`，本树不会；依赖那种增长的
+  调用方拿不到。另外抬高 `SO_SNDBUF` 只在**下一条连接**生效：lwIP 在已有未确认字节时
+  没有把 `snd_buf` 涨回去的机制，本轮没有发明该机制（`socket_inet.c:1664-1670`）。
+- 这两个选项与 CUBIC 都是 **TCP 范围**：UDP/RAW 的 `SO_SNDBUF` 仍返回
+  `-EOPNOTSUPP`（它们的缓冲区在 socket 层而不是 pcb 上）。
+
+### RTNETLINK 多播组
+
+`NETLINK_ROUTE` 套接字 bind 时可以选组。本轮新增两个
+（`kernel/net/socket_netlink.c:1011-1012`）：
+
+| 组 | 值 | 收到什么 |
+|---|---|---|
+| `RTNLGRP_LINK` | `0x1` | `RTM_NEWLINK`：链路状态变化（`a20_lwip_sync_link_state()` 观察到驱动翻转 admin/carrier 时） |
+| `RTNLGRP_IPV4_IFADDR` | `0x5` | `RTM_NEWADDR` / `RTM_DELADDR`：IPv4 地址写入或删除 |
+
+地址全零时发 `RTM_DELADDR` 而不是 `RTM_NEWADDR`——"你现在有地址 0.0.0.0"不是任何
+接口处于的状态，没有监听者能对它采取行动（`socket_netlink.c:1128-1130`，实现见 `:1152`）。
+**只覆盖 IPv4 地址组**：本树没有 IPv6 地址写入路径，所以没有 IPv6 地址组事件。
+一个监听者的接收队列满不会挡住其他监听者——Linux 在这里丢消息并报溢出，本树没有
+socket 级的溢出上报面，所以计数并 `klog` 一条
+（`[RTNETLINK] multicast group 0x%x dropped for %d listener(s)`）。
+
+### 观测面：`/proc/net/stats` 的本轮新增行
+
+| 行 | 何时出现 | 含义 |
+|---|---|---|
+| `lwip_lock: armed=… owner=… violations=… sites=…` | `CONFIG_NET_LOCK_ASSERT=1` | 核心锁断言探针状态。关闭时**显式**打印 `not checked (CONFIG_NET_LOCK_ASSERT=0)` |
+| `lwip_lock_siteN: <addr>` | 同上，且探针触发过 | 违约点（宏展开处的返回地址） |
+| `…[sg_tx=N sg_tx_bytes=M]` | 总是 | 走 `send_sg()` 描述符路径的发送帧数与字节 |
+| `…[tx_csum_offload:on/off][mrg_rxbuf:on/off]` | 总是 | 驱动上报的能力位 |
+
+`owner=4294967295` 表示采样时锁空闲；`sites=0` 表示探针一次都没触发。
+**`violations=0` 在开关关闭时是没有意义的**——那行 `not checked` 就是为了不让人
+把它读成"没问题"。细节见
+[network-lock-contract.md](network-lock-contract.md)「核心锁断言」。
+
+`/proc/net/` 下另有 `tcp6` 与 `udp6` 两个文件（`procfs.c:464-469`），按 v6 的四字布局
+渲染，与 `tcp` / `udp` 分开，v4 文件不再混入 v6 行。这一对文件是 `c34ddd7f8`
+（AF_INET6 socket 真正拿到 pcb）带进来的——在那之前 v6 的 bind/listen/accept 走不通，
+把它们渲染出来只会显示一张空表，把"v6 入站不可达"这件事藏起来。
+
+**`[tx_csum_offload:off]` 与 `[rx_csum_offload:off]` 是设计结果，不是没做完。**
+两个能力位已定义（`kernel/drivers/core/driver_class.h:145-146`）但**永不置位**：
+vendored 的 lwIP 2.2.2 没有任何承载校验和卸载握手的 flag（`opt.h:2449-2450` 的
+`LWIP_CHECKSUM_ON_COPY` 默认 0，所以 `pbuf_take()` 自己算自己验；
+`netif.h:84-107` 的七个 `NETIF_FLAG_*` 里没有一个是给校验和握手用的）。贸然置位会让
+lwIP 去验一个设备根本没算的校验和，属于静默损坏。`MRG_RXBUF` 不同：它是纯设备侧的
+接收属性，lwIP 从来看不见，所以协商了的驱动**应该**上报它（virtio-net 就是这样）。
 
 ## 用户命令消费方式
 
@@ -154,3 +290,22 @@ DHCP 作为 lwIP timeout 处理的一部分运行。它在更新 netif 地址和
 - [x] `user/cmds/net/udpsend.c` 能容忍未配置状态下的 `-ENETUNREACH`。
 - [x] 需要 NAT 配置的部分 QEMU run/smoke 目标传入 `a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os`；两个 AArch64 板级目标使用上述编译期 bootargs。
 - [x] 网络 smoke 测试覆盖已配置和未配置两种启动路径。
+
+本轮（`feat/net-strengthening`）新增，逐项对应上文「配置面的三个平面」：
+
+- [x] SACK / 时间戳 / CUBIC 按档位在 `net_profile.h` 里取值，EMBEDDED 关、
+      DEFAULT/SERVER 开。
+- [x] 带选项的 TCP 头对 MSS 的预算由 `lwipopts.h` 的 `_Static_assert` 钉住，
+      断言检查的是加了选项之后的和。
+- [x] `SO_SNDBUF` / `SO_RCVBUF` 真的约束发送队列深度与 pcb 接收窗口，
+      `getsockopt` 回读生效值；无自动调优这一点已写进源码注释与本文。
+- [x] `TCP_CONGESTION` 对未知名返回 `-ENOPROTOOPT`，`getsockopt` 回真实算法名。
+- [x] RTNETLINK 向 `RTNLGRP_LINK` / `RTNLGRP_IPV4_IFADDR` 投递 `RTM_NEWLINK` /
+      `RTM_NEWADDR`（全零地址改发 `RTM_DELADDR`）。
+- [x] conntrack 与 NAT 的运行时动词挂在 `/proc/a20/netfilter`，并有
+      `make smoke-netfilter-nat` 端到端门禁覆盖 DNAT。
+- [ ] **未做**：UDP / RAW 的 `SO_SNDBUF` 仍返回 `-EOPNOTSUPP`（缓冲区在 socket 层
+      而非 pcb 上）；rtnetlink 组播只覆盖 IPv4 地址组，无 IPv6 地址写入路径；
+      套接字缓冲无自动调优；抬高 `SO_SNDBUF` 只在下一条连接生效。
+- [ ] **未做**：`a20.tcpmode` 运行时写入口在 fast↔lwip 切换后数据传输不完成的
+      现象，本轮一次都没复现，原因未查明。功能未削减，建议（部署用命令行键）保留。
