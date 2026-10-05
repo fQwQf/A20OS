@@ -15,14 +15,32 @@
 
 #include "lwip/netif.h"
 
-#define NET_PACKET_RX_RING   16
-#define NET_PACKET_MAX_FRAME 1536
+/*
+ * Both the depth and the slot size follow the profile.  This array is
+ * unconditional .bss: 16 slots of 1540 B was 24640 B on every rung, more than
+ * a 20 KiB MCU part's entire SRAM, and no runtime counter reports it.  See
+ * docs/server-readiness.md and the budget assert in net_profile.h.
+ */
+#define NET_PACKET_RX_RING   NET_PROFILE_PACKET_RING_SLOTS
+#define NET_PACKET_MAX_FRAME NET_PROFILE_PACKET_FRAME_SIZE
 
 typedef struct {
     uint16_t len;
     uint16_t ifindex;
     uint8_t  frame[NET_PACKET_MAX_FRAME];
 } net_packet_slot_t;
+
+/*
+ * The macro arithmetic in net_profile.h is an upper bound; this is the layout
+ * the compiler actually produced, so the budget cannot silently stop
+ * describing the array because a field crept into the slot.  The four bytes of
+ * len + ifindex are padding-free here only because every rung's frame size is
+ * even, which keeps the struct at an even size with no tail padding.
+ */
+_Static_assert(sizeof(net_packet_slot_t) == NET_PROFILE_PACKET_SLOT_BYTES,
+               "net_packet_slot_t no longer matches the profile's per-slot "
+               "accounting; update NET_PROFILE_PACKET_SLOT_BYTES with the real "
+               "layout rather than letting the static budget become fiction");
 
 static net_packet_slot_t g_pkt_ring[NET_PACKET_RX_RING];
 static net_packet_slot_t g_pkt_drain;
@@ -33,14 +51,30 @@ static volatile int g_pkt_pending;
 static volatile unsigned g_pkt_drops;
 
 /*
+ * Bytes this file places in .bss unconditionally, for /proc/a20/netmem.
+ *
+ * The pool table above it reports what the lwIP heap hands out, and with
+ * MEMP_MEM_MALLOC=1 the heap is exactly where these arrays are *not*: they are
+ * reserved whether or not a single frame is ever captured.  Reporting them is
+ * what lets a tier's static footprint be read off a running system instead of
+ * only off a linker's symbol table, which is how the profile-scope fix for
+ * docs/server-readiness.md is meant to be checked in the future.
+ */
+size_t net_packet_static_bytes(void)
+{
+    return sizeof(g_pkt_ring) + sizeof(g_pkt_drain);
+}
+
+/*
  * Number of AF_PACKET sockets currently holding a bind filter, and the slot
  * bitmap that makes the accounting idempotent.
  *
  * Capturing costs a fixed-size copy of every frame on every interface plus a
  * walk of the whole registry per delivered frame, and on a host that never
- * opened a packet socket all of it is thrown away -- the ring is 16 frames
- * deep, so a burst overflows it and the frames are dropped having already
- * been copied.  A census turns both of those into a single atomic load.
+ * opened a packet socket all of it is thrown away -- the ring is
+ * NET_PACKET_RX_RING frames deep, so a burst overflows it and the frames are
+ * dropped having already been copied.  A census turns both of those into a
+ * single atomic load.
  *
  * The count is read on the receive path with g_lwip_lock held and is the only
  * lock-free reader, so it is published with a release and sampled with an
