@@ -9,8 +9,15 @@
 
 两个 hook 挂在 **lwIP 之下**、以太帧上：
 
-- input：`kernel/net/lwip_stack.c:542`，`netfilter_input()` 在 `pbuf_take()` 之前；
-- output：`kernel/net/lwip_stack.c:232`，`netfilter_output()` 在帧交给网卡之前。
+- input：`kernel/net/lwip_stack.c:969`（多 lane 构建，enqueue 之后、算 lane 之前）与
+  `:1188`（单 pbuf 路径，`pbuf_alloc()` 之前），`netfilter_input()` 都在从
+  `rx_frame` 解析之前；
+- output：`kernel/net/lwip_stack.c:391`（TX_SG 快路径）与 `:405`（普通路径），
+  `netfilter_output()` 在帧交给网卡之前。
+
+两处 input 的先后顺序是**承重的**，源码里就地写了理由：DNAT 原地改写目的地址，
+hook 跑在 lane 判定或 `pbuf_take()` 之后的话，下游读到的仍是翻译前的地址，规则会
+报匹配而连接永远建不起来。
 
 所以一次转换就是**原地改写调用方正在持有的帧缓冲**加一次校验和修正，不需要重组包、不
 需要分配。这是本实现能做 NAT 的唯一原因，也是它做不了更多事情的原因。
@@ -24,12 +31,31 @@
 
 | 档位 | entries | buckets | 静态占用 |
 |---|---|---|---|
-| EMBEDDED | 64 | 8 | 4 KiB |
+| EMBEDDED | 32 | 8 | 2 KiB |
 | DEFAULT | 256 | 32 | 16 KiB |
 | SERVER | 1024 | 128 | 64 KiB |
 
-每条 64 字节，由 `_Static_assert` 钉住（`netfilter_nat.c`），将来加字段撑破档位预算是
-编译错误，不是静悄悄变大的 `.bss`。
+entries 逐档取自 `net_profile.h:177`（EMBEDDED）、`:455`（DEFAULT）、`:404`（SERVER）。
+**EMBEDDED 是 32，不是早先文档写的 64**：`net_profile.h:170-176` 记着这次下调的理由——
+这张表每次引导都付，不管 netfilter 有没有被加载过，所以它的天花板属于档位的内存
+预算，而不是一个没人开启的功能（见「EMBEDDED 达标」那一节）。
+
+每条**上限** 64 字节（`NET_PROFILE_CONNTRACK_ENTRY_BYTES`，`net_profile.h:486-487`），
+由 `_Static_assert` 钉住（`netfilter_nat.c:44`），将来加字段撑破档位预算是编译错误，
+不是静悄悄变大的 `.bss`。
+
+**实测 sizeof 现在正好是 64 字节，即上界，本档的 filter 项没有余量。** `810e9e431`
+给条目加了 `icmp_off` / `icmp_type` / `icmp_id` 三个字段（`netfilter.h:281-284`），
+结构体从 56 涨到 64：原布局排到 `rhash_next` 是 52 B，尾部补齐到 56；加 5 B 后是 57 B，
+因含 `uint64_t` 而按 8 对齐，补到 64。于是 EMBEDDED 档的 filter 项是
+32×64 + 16×80 = **3328 B，正好等于** `NET_PROFILE_FILTER_BUDGET`
+（`netfilter_nat.c:561` 的断言取 `<=`，所以仍然通过）。**再加一个字节到条目上，
+EMBEDDED 档就编译不过**——这个方向是好的，但要知道余量已经归零。
+注意 `netfilter_nat.c:554-556` 那条预算注释仍写着旧的 "32 entries x 56 B … = 3072 B"，
+它没有跟着 `810e9e431` 一起更新，**以本行的编译期实测为准**。
+另两条断言钉住 `NET_CONNTRACK_MAX < NET_CONNTRACK_NONE` 与
+`NET_CONNTRACK_MAX % NET_CONNTRACK_BUCKETS == 0`（`:46-48`）——后者是回程链按下标
+取桶的前提，不成立会静默取错桶头。
 
 **每条目挂两条链**，不是一条：正向链按原始元组索引，回程链按**转换后**的元组索引。
 这不是冗余。NAT 之后线上跑的是转换后的元组，而条目里存的是转换前的；回程包带着转换后
@@ -38,11 +64,15 @@
 到条目，原样发出，对端收到一个不认识的源地址——没有任何计数器会动。
 
 **容量与超时。** 表满时退化成有界 LRU 缓存而不是失败：路由器留住新流、忘掉最老的流，对
-这么小的表是合适的取舍。清扫在 `a20_lwip_poll_timers_locked()` 里每秒一次，每次只扫
-`max_scan` 条并从上次的断点续扫（`netfilter_conntrack_expire`），所以满表也不会让某个
-tick 无界。空闲超时按协议和状态分开：TCP NEW 30s、TCP ESTABLISHED 120s、UDP 30s、**ICMP
-echo 30s（跟 UDP 一起）**。分开的理由是半开 TCP 流不能占着槽位等一个已建立连接的寿命，
-而 UDP 的"流"常常就是单个数据报，对端不会再回。
+这么小的表是合适的取舍。清扫在 `a20_lwip_poll_timers_locked()` 里做（调用点
+`kernel/net/lwip_stack.c:1326`，被一秒间隔的 `g_ct_sweep_at` 门控），每次只扫
+`max_scan`（固定传 32）条并从上次的断点续扫（`netfilter_conntrack_expire()`，
+`netfilter_nat.c:490-540`），所以满表也不会让某个 tick 无界。空闲超时按协议和状态分开：
+TCP NEW 30s、TCP ESTABLISHED 120s、UDP 30s、**ICMP echo 30s（与 UDP 共用同一个
+`g_to_udp`，`netfilter_nat.c:520-526`）**。分开的理由是半开 TCP 流不能占着槽位等一个
+已建立连接的寿命，而 UDP 的"流"常常就是单个数据报，对端不会再回。ICMP 不落到
+`g_to_tcp_new` 是有理由的：`netfilter_nat.c:515-519` 的注释写着——echo 没有握手，
+按连接超时计它是在陈述一个该协议并不拥有的握手。
 
 **ICMP echo 的元组编码。** 表里那两个 16 位字段对 TCP/UDP 是端口，对 echo 是**类型与
 标识符**：类型一律**归一化**成请求值 8 存进 `src_port`，标识符存进 `dst_port`。归一化
@@ -62,14 +92,18 @@ LRU 的键是 `last_ms`，没有独立的 LRU 链表：满表插入时线性扫�
 正在握手的 TCP 流和一个空闲的 UDP 报在竞争同一个受害者位置；被淘汰的流如果还有包到达，会
 按新流重新建条目并**重新翻译一次**——如果期间规则变了，翻译结果可能与之前不同。
 
-超时的边界同样要说清楚：清扫只在 `a20_lwip_poll_timers_locked()` 走到时发生，也就是每秒
-至多一次、每次 32 个槽位。一张 1024 条的满表因此最多需要 32 秒才被完整看过一遍；条目在
-被看到之前不会被回收，`ct_tracked` 会在这段时间里显示为满。
+超时的边界同样要说清楚：清扫由一秒间隔门控，因此是每秒**至多**一次、每次 32 个槽位。
+SERVER 档一张 1024 条的满表因此最多需要 32 轮才被完整看过一遍，也就是 32 秒；条目在被
+看到之前不会被回收，`ct_tracked` 会在这段时间里显示为满。断点每轮前移 `scanned` 个槽位
+（`netfilter_nat.c:538`），所以 32 秒是**上界**而不是平均——一个刚插进"还没被扫到的那
+一段"的条目，要等断点绕回来才可能被回收。EMBEDDED 档 32 条恰好一轮扫完，这个延迟不存在。
 
 `ct_sweeps`（`/proc/a20/netfilter`）统计清扫**运行过**的次数，和 `ct_timeout`（清扫回收了
 多少条）分开，因为"没有条目空闲"和"根本没人看过"在别的计数器上长得一样。`ct_lru_victim`
-是下一次满表插入会被淘汰的条目的源端口——计数器说不出"满表会忘掉哪条流"，而这正是排障时
-真正要问的问题。
+是下一次满表插入会被淘汰的条目的**源端口**（`netfilter_nat.c:407-410`）——计数器说不出
+"满表会忘掉哪条流"，而这正是排障时真正要问的问题。**它的边界**：ICMP echo 条目的
+`src_port` 存的是归一化后的类型值 8，所以对一条 echo 条目，这个字段打印出来是 `8`
+而不是端口；用它判断"下一条被忘掉的是哪条流"时要知道这一点。
 
 **状态推断只有元组和 TCP flags 字节。** 见到回程包，或前向包带 ACK 不带 SYN，就是
 ESTABLISHED。没有序列号窗口校验，没有 RST/FIN 拆除（关掉的流会挂到空闲超时），也没有独立
@@ -128,8 +162,11 @@ natadd out proto=tcp dport=80    action=masquerade
   echo 类型，所以它既不被跟踪也不被翻译。
 - **无 helper 模块**，无 fullcone / 端口保持变体，无 IPv6 NAT（hook 只解析 IPv4）。
 - **除 TCP/UDP/ICMP echo 外一律不跟踪**，即使 NAT 规则里写了 `proto=`。
-- **表是定长的**。SERVER 档 1024 条，满即 LRU 淘汰（`ct_evicted` 计数），不是拒绝新流。
-  淘汰的是全局最老条目，边界见上文"容量与超时"。
+- **表是定长的**，三档分别 32 / 256 / 1024 条（`net_profile.h:177` / `:455` / `:404`），
+  满即 LRU 淘汰（`ct_evicted` 计数），不是拒绝新流。淘汰的是全局最老条目，边界见上文
+  "容量与超时"。**EMBEDDED 档的 32 条是本轮从 64 下调的**，该档整张网络内存的断言上界
+  是 44 KiB（`NET_PROFILE_TOTAL_BUDGET`），下调的直接后果是这个目标上并发跟踪流数减半，
+  溢出表现为静默重新建条目 + 重新翻译，与上面 LRU 那一段同源。
 - **没有动态端口分配。** `masquerade` 不带 `toport=` 时保留客户端原端口，多个同源端口的
   并发连接不会被打散；只有显式写 `toport=` 才会改端口，而那是所有走这条规则的流共用的一个
   固定值，不是分配器。
@@ -150,12 +187,19 @@ DNAT。上表最后一行是这个方向上能拿到的最强证据——它跑�
 
 两个测试钩子是为了让上面的容量/超时断言不必靠 256 条真实流和 30 秒等待达成：
 `ctinject`（经由数据面同一个 `netfilter_ct_insert` 插入合成流）和 `cttimeout`（运行期覆盖
-三个毫秒常量，0 恢复默认）。两者都只是 `/proc` 动词，不新增内核状态。
+三个毫秒常量，0 恢复默认）。**只有三个**——ICMP 复用 UDP 那个（`netfilter_ct_time_init()`，
+`netfilter_nat.c:140-150`），所以覆盖超时测试同时改了 echo 条目的寿命，这一点是巧合
+而不是设计，测试脚本改三个值时要知道。**`ctinject` 只接受 TCP / UDP**
+（`netfilter_nat.c:411-418` 拒掉其他 proto 与其他状态），理由写在源码注释里：注入器
+只应当造出数据面真能造出的表形状。因此 `smoke-ct-capacity` 覆盖的是 TCP/UDP 的淘汰与
+超时，**ICMP 条目的淘汰与超时没有门禁**，它们只由代码路径本身保证。
+两者都只是 `/proc` 动词，不新增内核状态。
 
 DNAT 门禁有两个 QEMU 10 的坑，都写在 `tools/targets-smoke.mk` 的目标注释里：规则必须
 带 `hostfwd=` 前缀（裸短格式被当成已废弃的布尔量），guest 地址前**不能**有冒号（否则
 guest 段被解析成 `[addr]:port`，端口取到 10）。另外门禁必须用 `a20.tcpmode=lwip` 启动：
-默认的 `fast` 模式不建 lwIP LISTEN pcb，入站 SYN 只会得到 RST（`kernel/net/socket_control.c:204`）。
+默认的 `fast` 模式不建 lwIP LISTEN pcb，入站 SYN 只会得到 RST
+（`kernel/net/socket_control.c:211-231` 的注释与 `:253` 的 `/proc` 打印）。
 
 `user/cmds/net/netnat_test.c` 里的阶段划分是有意的：先在没有 NAT 的情况下验证 conntrack
 本身工作正常，再验证规则解析的拒绝路径，再装规则，最后用一次**注定失败**的直连做阴性对

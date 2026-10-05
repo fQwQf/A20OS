@@ -22,9 +22,37 @@
 >
 >最后核实：与 `7c7a4d7c8` 之后的 per-socket 锁树一致（桶锁仅剩 slot 表职责），并补入
 >`7d217d3fd`（`LWIP_ASSERT_CORE_LOCKED()` 接线）与 `edc29d31a`
->（回环 TCP 传输不结束）的事实。
+>（回环 TCP 传输不结束）的事实，以及 `2dd28758c`（net 锁侧探针）与 `067d0eb96`
+>（`lock_counters_register()` 被拒不再静默）——**本轮（2026-10-06 第二轮）最重要的一处
+> 更正是：net 锁一侧不再是"只有散文"**。
 >
->> **行号更正（2026-10-06）：** 本节「核心锁断言」原先引用的 `lwip_stack.c` 行号
+>> **行号更正（2026-10-06，第二轮）：** 下面这一条更正只覆盖了 `lwip_stack.c`。
+> 合并 `wt2/*` 五条流之后 `socket_internal.h` 与 `net_profile.h` 又并入了代码，
+> 本文里指向这两个文件的行号同样已经下移。第二轮按当前 `main`（`dcb85f44f`）
+> 重新核过并改正的有：
+>>
+>> | 位置 | 旧值 | 现值 |
+>> |---|---|---|
+>> | `net_socket_t` 里的 `spinlock_t lock` | `socket_internal.h:405` | `socket_internal.h:448` |
+>> | `net_bucket_scan()` | `socket_internal.h:652` | `socket_internal.h:849` |
+>> | `net_sock_lock2()` | `socket_internal.h:682` | `socket_internal.h:754` |
+>> | `net_bucket_slot_ref()` | `socket_internal.h:724` | `socket_internal.h:1002` |
+>> | 「桶锁不得在 socket 锁之下」的不变量注释 | `socket_internal.h:500` | `socket_internal.h:570-589` |
+>> | `NET_PROFILE_LANE_RXQ_SLOTS` / `_BUDGET` / 槽位下界断言 | `net_profile.h:344-346` / `347-349` / `350-351` | `net_profile.h:571-573` / `574-576` / `577-578` |
+>> | `CONFIG_NET_LOCK_ASSERT` 的三档说明 | `net_profile.h:44-45` | `net_profile.h:44-60`（`#ifndef` 兜底在 `:59-61`） |
+>> | `a20_lwip_poll_timers_locked()` | `lwip_stack.c:651` | `lwip_stack.c:1279` |
+>>
+>> 已复核**仍然正确**、因此未改的：`lwip_stack.c:634-635` / `:642-643`（owner 写入）、
+>> `:84` / `:87`（常量与变量）、`:612-615`（arm）、`:726-739`（记站点）、
+>> `:760-773`（断言函数）、`:767-768`（arm 前提前返回）、`:1613-1617` 与 `:1629-1632`
+>> （`/proc/net/stats` 两行）、`lwipopts.h:298-304`（宏映射）、`opt.h:227`（上游空宏）、
+>> `lock.h:95-98`（全局顺序不变式）、`net_lane.c:66`（lane 队列预算断言）。
+>> `driver_class.h` 的 `send_sg()` 由旧引的 `:174-175` 移到 `:190`，`caps()` 在 `:196`。
+>
+> **本轮新写的两段**（探针现状、以及迁移检查清单里随之改写的两行）在下文标了
+> `2dd28758c`。
+>
+>> **行号更正（2026-10-06，第一轮）：** 本节「核心锁断言」原先引用的 `lwip_stack.c` 行号
 > （`426-427` / `434-435` / `440-458` / `404-407` / `822-827` / `837-840`）是
 > `7d217d3fd` 那个提交当时的值，之后 `lwip_stack.c` 又并入了 conntrack/NAT、驱动 SG
 > 回退、rtnetlink 与 per-lane 分发的代码，行号已整体下移。下文已逐条改成按当前
@@ -68,7 +96,7 @@ A20OS 以 `NO_SYS=1` 模式运行 lwIP。一个全局 spinlock `g_lwip_lock` 串
 | `g_sockets[]`、空闲位图 | `g_net_lock` | 桶锁 | 桶锁（不变） |
 | 临时端口分配 | `g_net_lock` | 桶锁 | 无锁（本来就是 CAS） |
 
-- 声明于 `kernel/net/socket_internal.h:405`（`net_socket_t` 内，`vf` 与 `bh_ring` 之间）。
+- 声明于 `kernel/net/socket_internal.h:448`（`net_socket_t` 内，`vf` 与 `bh_ring` 之间）。
   内嵌而非指针：没有 slot 的 socket 也得有锁。
 - 获取走内联包装，**不要直接摸 `s->lock`**：
   `net_sock_lock(s)` / `net_sock_unlock(s, flags)` /
@@ -87,9 +115,9 @@ net_bucket[b]  ->  net_socket_t.lock  ->  （上文的任务锁）
 
 - **桶锁绝不在持有 socket 锁时被取。** 这就是现在全部的 ABBA 面：桶锁只能从
   `net_register_socket_locked()`、`net_socket_unregister()` 和
-  `net_bucket_slot_ref()`（`socket_internal.h:724`）到达，三者都是叶子，调用点必须
+  `net_bucket_slot_ref()`（`socket_internal.h:1002`）到达，三者都是叶子，调用点必须
   不持任何 net 锁。
-- 一个桶锁 + 一把 socket 锁可以同时持有——`net_bucket_scan()`（`socket_internal.h:652`）
+- 一个桶锁 + 一把 socket 锁可以同时持有——`net_bucket_scan()`（`socket_internal.h:849`）
   和四个全表广播（raw IPv6 send、uevent、rtnetlink、AF_PACKET）都是这个形状，因为它们
   要先读 `g_sockets[]` 再进 `g_sockets[i]` 那个 socket。但**两把桶锁同时持有**、
   **两把 socket 锁嵌在一把桶锁之下**都不允许。
@@ -163,13 +191,13 @@ g_lwip_lock -> virtio-net nonblocking send/recv paths only
 
 lwIP callback 在隐式持有 `g_lwip_lock` 的上下文中运行，只能向 per-socket 原子 `bh_ring` 写事件并设置 pending flag。`a20_lwip_poll()` 先释放 `g_lwip_lock`，再调用只持有 socket 锁的 `net_inet_bottom_half_process_all()`。驱动数据面是另一条允许顺序：`g_lwip_lock -> virtio-net/E1000 nonblocking device lock`，驱动锁下不得回调 lwIP。
 
-`089a2055c` 给 `net_dev_ops_t` 加了可选的 `send_sg()`（`driver_class.h:174-175`）。
-它在 `a20_lwip_linkoutput()` 里与原来的线性 `send()` **同一个临界区**、同一个设备锁
-下二选一（`lwip_stack.c:390-403`），所以不引入新的锁序；没实现 `send_sg` 的驱动走
-同函数的原线性拷贝分支（`lwip_stack.c:405-411`），逐字节不变。
+`089a2055c` 给 `net_dev_ops_t` 加了可选的 `send_sg()`（`driver_class.h:190`）与
+`caps()`（`:196`）。它在 `a20_lwip_linkoutput()` 里与原来的线性 `send()` **同一个
+临界区**、同一个设备锁下二选一（`lwip_stack.c:388-402`），所以不引入新的锁序；没实现
+`send_sg` 的驱动走同函数的原线性拷贝分支（`lwip_stack.c:403-411`），逐字节不变。
 
 **但它不是零拷贝，这一点不能含糊**：命中 SG 分支的前提是 `p->next == NULL`
-（`lwip_stack.c:390`，单段 pbuf），而且帧仍然先 `pbuf_copy_partial()` 进
+（`lwip_stack.c:388`，单段 pbuf），而且帧仍然先 `pbuf_copy_partial()` 进
 `st->tx_frame`——因为 netfilter 的 output hook 是**对调用方手里那块帧的原地改写**
 （NAT），它拿的是可写指针，而 pbuf payload 是别的持有者也在看的池内存，就地 SNAT 会
 写坏整块池。所以 SG 分支给驱动的是**描述符而不是 lwIP 的 pbuf**（省掉驱动内部再拷一
@@ -278,19 +306,31 @@ lwIP 侧那套把契约变成可执行代码之后，net 锁侧还只有散文�
   `2`（只计数）。第三档是为了长跑：计数型信号会被训练成噪声，而长跑里"最终计数
   多少"比"第一次命中就死机"更有用。
 - **桶锁注册预算**由 `net_socket_registry_init()` 自己核对：取锁计数表在注册循环
-  前后的差值必须等于 `NET_SOCK_BUCKETS`，否则报"contention 审计已经半盲"。
+  前后的差值必须等于 `NET_SOCK_BUCKETS`，否则报"contention 审计已经半盲"
+  （`kernel/net/socket_registry.c:109-122`；`#if CONFIG_NET_LOCK_ASSERT` 内才计数，
+  `=0` 的构建里 `net_lockcounters_short()` 只打印不计数）。
   配合 `067d0eb96` 给 `lock_counters_register()` 加的被拒计数
   （此前超出 `LOCK_COUNTERS_MAX` 是**静默丢弃**，报告因此会对一把从未被观测的锁
-  报"干净"）。
+  报"干净"）。`LOCK_COUNTERS_MAX = 192`（`kernel/core/lock_counters.c:14`），
+  SERVER 档的 128 把桶锁吃掉其中三分之二，这条预算因此不是形式主义的检查。
 
 `/proc/net/status` 上与 `lwip_lock:` 并排打印 `net_lock:`；开关关闭时打印
 `net_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)`，同样是为了不让"没报错"被读成
-"没问题"。
+"没问题"。渲染点不在 `net_format_status()` 而在 `a20_lwip_format_stats()`
+（`kernel/net/lwip_stack.c:1634-1643`）——那是已经拥有 `lwip_lock` 那一行的函数，
+两行本来就该一起读；它取不到任何锁，lane census 早就在那里放掉了自己那两把。
 
 **探针看不见什么**，写在这里免得把一次干净的长跑读成比它更强的结论：它只知道
 "哪个 CPU 取了哪把锁"，不知道是哪个任务，因此抓不到"取用顺序与释放顺序不一致"，
 也抓不到"某对锁提前放掉了一把"。它抓的是**集合**违反契约的那一类，而这一类正是
 本树历来所有 ABBA 的来源。
+
+**两组注入只覆盖了两个分支，不是七个。** 探针有七个上报分支（`net_lock_violation()`
+的七条 `why`，`kernel/net/net_lock_probe.c:118/125/136/144/158/164/198`），但故意注入
+过的只有两条：桶锁取在 socket 锁之下（`=1`，panic）与 socket 锁地址乱序（`=2`，计数
+不 abort）。**"第三把 socket 锁"那一支与地址乱序共用同一个 `net_lock_violation()`
+上报路径，没有单独注入过**；"第二把桶锁"、"重复取锁"、"释放一把没持有的锁"、
+"已持集合溢出"四支同样没有。两条注入两次分支，不要说成七次注入七个分支。
 
 ### 移植层自己补的断言
 
@@ -338,18 +378,23 @@ conntrack 的每个包都要写（`e->packets++`、`e->last_ms`），所以 seql
 
 - 两个 hook：input 在 `a20_lwip_process_netif_rx_tx_locked()`，output 在
   `a20_lwip_linkoutput()`；
-- 空闲超时清扫：`a20_lwip_poll_timers_locked()`（`kernel/net/lwip_stack.c:651`），
+- 空闲超时清扫：`a20_lwip_poll_timers_locked()`（`kernel/net/lwip_stack.c:1279`），
   选 timers 段正因为它是唯一无条件推进的驱动点，任务阻塞在 `connect()` 里时只有它还在走。
+  清扫调用在 `:1326`，每次扫 32 个槽位并从上次的断点续扫
+  （`netfilter_conntrack_expire(32)`，`kernel/net/netfilter_nat.c:490`）。
 
 **/proc 侧自己取锁**，因为 procfs 访问是系统调用，不在 `g_lwip_lock` 下：
 
-- 写动词 `ctflush` 在 `kernel/fs/procfs/procfs.c:1040` 显式取放；
-- 读渲染由 `netfilter_format()` 在 `kernel/net/netfilter.c:641` 取一次锁后调用
-  `netfilter_nat_format()`。**渲染路径不得再取第二次**：`spin_lock_irqsave()` 不可重入，
-  二次获取是自死锁。它表现得像锁竞争而不是自死锁——单 CPU 构建上是
-  `netfilter_nat_format` 里的 `[LOCK-STALL]`，`owner=-1`，因为 `g_lwip_lock` 的 owner
-  字段只在 `CONFIG_NET_LOCK_ASSERT=1` 下维护，否则一直是陈旧值。判据是单 CPU 上
-  trylock 必然失败：失败只可能意味着当前 CPU 已经持有它。
+- 写动词 `ctflush` 在 `kernel/fs/procfs/procfs.c:1047-1051` 显式取放；
+- 读渲染由 `netfilter_format()` 在 `kernel/net/netfilter.c:658-660` 取一次
+  `a20_lwip_lock` 后调用 `netfilter_nat_format()`。**渲染路径不得再取第二次**：
+  `spin_lock_irqsave()` 不可重入，二次获取是自死锁。它表现得像锁竞争而不是自死锁——
+  单 CPU 构建上是 `netfilter_nat_format` 里的 `[LOCK-STALL]`，`owner=-1`，因为
+  `g_lwip_lock` 的 owner 字段只在 `CONFIG_NET_LOCK_ASSERT=1` 下维护，否则一直是陈旧值。
+  判据是单 CPU 上 trylock 必然失败：失败只可能意味着当前 CPU 已经持有它。
+
+> 这两处行号同样是本轮重新核过的：并入 conntrack/NAT 与 ICMP 跟踪之后，`ctflush`
+> 从 `:1040` 移到 `:1047`，渲染侧取锁从 `:641` 移到 `:658`。
 
 同族先例：`a20_lwip_format_memp()`（`procfs_render.c`）渲染 lwIP 自有状态时取同一把锁。
 
@@ -664,6 +709,9 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 正是阶段 D 的目的——要搬的是分配，不是拷贝。
 **槽位是深度决策不是容量优化**：队列没法把压力推回网卡上，满了就只能丢并计数。
 
+阶段 D 之后并入的 per-socket 锁（阶段 E）与 conntrack/NAT 变更没有改变上面任何一条
+锁规则；`NET_PROFILE_LANE_RXQ_SLOTS` 与 `_BUDGET` 的现值见文首行号更正表。
+
 ## 已知未完成
 
 以下属于后续工作。每一项的**前置条件与阻塞原因**记录在
@@ -701,7 +749,9 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
   持锁集合探针 `kernel/net/net_lock_probe.c`，逐次取锁检查重复取锁、socket 锁
   地址乱序、第三把 socket 锁、桶锁取在 socket 锁之下、以及第二把桶锁。
   `/proc/net/status` 上与 lwip 行并排打印 `net_lock:` 一行，`CONFIG_NET_LOCK_ASSERT=0`
-  的构建显式打印 `not checked`。
+  的构建显式打印 `not checked`。配合 `067d0eb96`，取锁计数表超出
+  `LOCK_COUNTERS_MAX` 的那次丢弃也不再静默，而是让 `net_lockcounters_short()` 报
+  "contention 审计已经半盲"（`=1` 下直接 panic）。
   **仍然没有**的是"当前 CPU 是否持有期望的 socket 锁"这个**正向**查询原语
   （探针只回答"这一把取得合不合规"，不回答"我此刻持有什么"），以及 lane claim
   一侧的探针——两者形态见文末那两条未勾选项。
@@ -737,7 +787,7 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
       阶段 E 之后剩下的缺口已由 per-CPU 持锁集合探针填上：`net_sock_lock2()` 的
       **地址升序**与"同类至多两把 socket 锁"由 `net_lock_probe_acquire()` 在每次
       取锁时按**整个已持集合**判定（`net_sock_lock2()` 现于
-      `kernel/net/socket_internal.h:682`；不是重算一遍它自己已经算过的
+      `kernel/net/socket_internal.h:754`；不是重算一遍它自己已经算过的
       那个比较——那样只能抓到第三把乱序的锁，抓不到经由另一对已持有的锁再次取同一把）。
       "桶锁不得在 socket 锁之下取得"同样在里面；反向（socket 锁取在桶锁之内）是
       `net_bucket_scan()` 与 register/unregister 的合法形状，不算违规。
@@ -745,7 +795,11 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
       取最终计数）。`CONFIG_NET_LOCK_ASSERT=0` 的构建探针整个不存在，
       `/proc/net/status` 打印 `net_lock: not checked (CONFIG_NET_LOCK_ASSERT=0)`。
       探针本身在 4 CPU + 4 lane 下跑过 120 次真实 TCP 握手，`violations=0 sites=0`；
-      另有两组**故意注入**的对照证明它不是空转（详见 `impl-notes-net.md` §11）。
+      本轮另在 20 次 **4 CPU + 4 lane** 引导、797 次实际握手下复跑，
+      `net_lock: armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0`
+      （见 `net-lanes.md`「放大实验第二轮」）。**两组故意注入**的对照只证明其中两个
+      分支（桶锁在 socket 锁之下 / 地址乱序），第三把 socket 锁、第二把桶锁、重复取锁
+      三支没有单独注入过——详见上方「net 锁一侧的探针」末段与 `impl-notes-net.md` §11.3。
 - [ ] 仍然没有的是**正向**查询原语："当前 CPU 是否持有 socket X 的锁"。
       探针只回答"这一把取得合不合规"，调用方无法问"我此刻持有什么"。
       谁需要它：`net_inet_*` 里几处"我刚在 pair 里改过 `s`，现在想在不取第二次锁的
@@ -753,7 +807,13 @@ bottom-half 是 consumer，对每条事件：内联源走 `net_enqueue_msg_locke
 - [ ] `net_socket_unregister()` 的返回值把"槽位释放了没有"告诉了调用方
       （`2dd28758c`），但这是**引用计数**的对账，不是锁的断言：探针看不见
       "某条路径多释放了一次引用"。那件事由 `net_sock_ref:` 账本负责，见
-      `impl-notes-net.md` §11。
+      `impl-notes-net.md` §11。**该账本本轮有新的多核数据**：20 次 4 CPU + 4 lane
+      引导全部 `live=1 faults=0`，`allocs` 落在 159–167、`frees` 恒等于 `allocs-1`
+      （单 CPU 那个读数只有三个自带用例的量级，见 `impl-notes-net.md` §11.4 补记）。
 - [ ] lane claim 一侧同样没有探针：没有"当前 CPU 是否持有某条 lane 的消费权"的
       运行期判据，`net-lanes.md` 里"claim 先于 `g_lwip_lock`、判空在锁外"两条同样只由
       代码评审保证。
+- [ ] **本轮未做**：ASAN 压力测试与全量回归（`smoke-network-suite`、
+      `smoke-smp-lock-contention` 等）没有跑——按分工由编排层在合并后统一执行。
+      上面那些 `violations=0` 的读数因此只覆盖到各自那一组负载，**不构成"探针在
+      全量回归下也干净"的证据**。
