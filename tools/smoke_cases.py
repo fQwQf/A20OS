@@ -88,6 +88,25 @@ CASES: dict[str, dict] = {
         'timeout_msg': True,
         'pass_msg': 'smoke-driver-lifecycle: PASS; log saved to $log',
     },
+    # Platform-bus IRQ resource channel.  QEMU has no dw-mshc model, so this
+    # covers the half that is pure kernel code -- resource -> platform device
+    # -> request_irq -> simulated dispatch -> free_irq, plus the -ENODEV
+    # fallback and the driver's a20.dw-sdio.poll decision -- and NOT the
+    # controller's own interrupt generation, which remains unverified.
+    'smoke-platform-irq-fallback': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=riscv64', 'ABI=linux', 'BRINGUP=1', 'CONFIG_PLATFORM_IRQ_TEST=y'], 'target': 'kernel-only'},
+        'log': '.kernel-build/smoke/platform-irq-fallback-riscv64.log',
+        'stdin': None,
+        'timeout': '20s',
+        'qemu': 'qemu-system-riscv64',
+        'argv': ['qemu-system-riscv64', '-machine', 'virt', '-m', '1G', '-nographic', '-smp', '1', '-bios', 'default', '-global', 'virtio-mmio.force-legacy=false', '-kernel', '.kernel-build/riscv64-qemu-virt-riscv64-linux-bringup-platform-irq/kernel.elf'],
+        'expect': ['PLATFORM_IRQ_TEST: PASS'],
+        'forbid': ['PLATFORM_IRQ_TEST: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-platform-irq-fallback: PASS; log saved to $log',
+    },
     'smoke-drvmod-aarch64': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -271,6 +290,27 @@ CASES: dict[str, dict] = {
         'forbid': [],
         'timeout_msg': False,
         'pass_msg': 'smoke-hda: PASS; log saved to $log',
+    },
+    # virtio-rng over PCI: the driver binds virtio-rng-pci, publishes a CHAR
+    # class device named /dev/hwrng, and hwrng_test reads >= 256 bytes out of
+    # it.  The three shape checks live in the test program (not all 0x00, not
+    # all 0xff, not one repeated byte) so the kernel log only has to carry the
+    # driver's own readiness line and the test verdict.
+    'smoke-virtio-rng': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'BOARD=qemu-virt-x86_64', 'ABI=both', 'BRINGUP=0', 'DRIVER_DEPLOYMENT=generic'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/virtio-rng-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['hwrng_test', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-device', 'virtio-rng-pci', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': ['\\[VRNG\\] virtio-rng ready',
+                   'HWRNG_TEST: PASS',
+                   'System is going down for power-off'],
+        'forbid': ['PANIC|Kernel panic|virtio-rng.*unresolved symbol', 'HWRNG_TEST: FAIL'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-virtio-rng: PASS (virtio-rng.a20drv bound over PCI, /dev/hwrng returned entropy); log saved to $log',
     },
     'smoke-io-event': {
         'gate': {'mem': '1G', 'cpus': '1'},
@@ -1000,6 +1040,53 @@ CASES: dict[str, dict] = {
         'timeout_msg': True,
         'pass_msg': 'smoke-ptrace: PASS; log saved to $log',
     },
+    # The CMOS RTC half of the x86_64 wall clock.  -rtc base=utc is pinned so
+    # the guest clock and the host clock are comparable without the driver
+    # having to apply a local-time offset (it does not: see the module).
+    # The in-guest markers prove the wall clock came from the RTC rather than
+    # from the build timestamp; the host-side check proves the reported clock
+    # is real time.  Neither alone is enough, so both are asserted.
+    'smoke-rtc-cmos': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'BOARD=qemu-virt-x86_64', 'ABI=both', 'BRINGUP=0', 'DRIVER_DEPLOYMENT=generic'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/rtc-cmos-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['/bin/date -u +RTC_WALLCLOCK=%Y-%m-%dT%H:%M:%SZ', 'poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-rtc', 'base=utc', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'post': ['python3 tools/check_rtc_wallclock.py --max-skew 300 .kernel-build/smoke/rtc-cmos-x86_64.log'],
+        'expect': ['\\[CMOS-RTC\\] driver registered in core: 0',
+                   '\\[CMOS-RTC\\] wall clock: \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}',
+                   '\\[TIME\\] wallclock: hardware RTC adopted, unix=1[0-9]{9}',
+                   '\\[TIME\\] wallclock: no RTC readable yet, seed from build time',
+                   'RTC_WALLCLOCK=\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z',
+                   'System is going down for power-off'],
+        'forbid': ['PANIC|Kernel panic|cmos-rtc.*unresolved symbol'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-rtc-cmos: PASS (cmos-rtc.a20drv bound, wall clock from CMOS, guest clock matches the host); log saved to $log',
+    },
+    # The same boot with a CMOS the driver must refuse: QEMU's RTC is set to
+    # 1960, outside the window the driver accepts, so the read fails, the
+    # driver binds anyway and logs why, and the kernel keeps the build-time
+    # seed.  This is the fallback path: it must not panic, and it must not
+    # claim it adopted a hardware clock.
+    'smoke-rtc-cmos-fallback': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': [],
+        'build': {'vars': ['ARCH=x86_64', 'BOARD=qemu-virt-x86_64', 'ABI=both', 'BRINGUP=0', 'DRIVER_DEPLOYMENT=generic'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/rtc-cmos-fallback-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 8, 'lines': ['poweroff']},
+        'timeout': '30s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-rtc', 'base=1960-06-15T12:00:00', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': ['\\[CMOS-RTC\\] no usable time',
+                   '\\[TIME\\] wallclock: no RTC readable yet, seed from build time',
+                   'System is going down for power-off'],
+        'forbid': ['\\[CMOS-RTC\\] wall clock:', 'hardware RTC adopted', 'PANIC|Kernel panic'],
+        'timeout_msg': True,
+        'pass_msg': 'smoke-rtc-cmos-fallback: PASS (out-of-window CMOS refused, wall clock kept the build-time seed, no panic); log saved to $log',
+    },
     'smoke-pty-stress': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
@@ -1140,17 +1227,38 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-timer-edge: PASS; log saved to $log',
     },
+    # xHCI interrupt path.  Beyond "the keyboard and the mouse enumerate",
+    # this asserts the three things that only hold when completions are driven
+    # by the controller's own INTx line rather than by the core's global poll:
+    #   1. probe claimed a line (`completion=interrupt` on the ready line),
+    #   2. the handler actually ran and consumed ring entries (`irq=` > 0),
+    #   3. a key pressed through QMP arrives as an EV_KEY (code 30 == 'a').
+    #
+    # QEMU's `usb-kbd` reports only when its state changes, so an idle guest
+    # completes nothing and assertions 2 and 3 would be untestable without an
+    # injection.  The injection goes through QMP rather than the muxed stdio
+    # monitor because `sendkey` routes to the first console-less input handler
+    # -- see qmp_key_pump() in tools/smoke.py for why that is the PS/2 keyboard
+    # here and not the USB one.
     'smoke-usb-x86_64': {
         'gate': {'mem': '1G', 'cpus': '1'},
         'pre': [],
         'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/usb-x86_64.log',
         'stdin': None,
-        'timeout': '20s',
+        'timeout': '30s',
         'qemu': 'qemu-system-x86_64',
         'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-device', 'qemu-xhci,id=xhci', '-device', 'usb-kbd', '-device', 'usb-mouse', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
-        'expect': ['\\[USB-HID\\] keyboard ready', '\\[USB-HID\\] mouse ready'],
-        'forbid': ['\\[USB\\] port.*enumeration failed', '\\[XHCI\\].*failed'],
+        # Pressed across the whole window rather than once: the guest has no
+        # interrupt endpoint for the keyboard until it has enumerated it, so a
+        # single early press would prove nothing.
+        'qmp': {'keys': ['a'], 'hold': 0.05, 'gap': 0.3, 'duration': 18.0},
+        'expect': ['\\[USB-HID\\] keyboard ready', '\\[USB-HID\\] mouse ready',
+                   '\\[XHCI\\] controller ready: .*completion=interrupt',
+                   '\\[XHCI\\] completions: irq=[1-9]',
+                   '\\[USB-HID\\] key event: code=30 value=1'],
+        'forbid': ['\\[USB\\] port.*enumeration failed', '\\[XHCI\\].*failed',
+                   '\\[XHCI\\] controller ready: .*completion=polling'],
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-x86_64: PASS; log saved to $log',
     },
@@ -1195,6 +1303,61 @@ CASES: dict[str, dict] = {
         'timeout_msg': False,
         'pass_msg': 'smoke-usb-hub-x86_64: PASS; log saved to $log',
     },
+    # virtio-scsi command completion on the used-ring interrupt, end to end.
+    #
+    # The boot disk stays virtio-blk-pci on purpose: it is the path already
+    # known to work, so a failure here localises to the scsi controller rather
+    # than to "the machine came up at all".  The scsi-hd behind
+    # virtio-scsi-pci is the scratch medium the guest test writes.
+    #
+    # Two independent claims, because they fail for different reasons:
+    #   * the loopback assertions (write / flush / read back, three rounds with
+    #     an in-place rewrite) say the data plane survived moving completion
+    #     off the poll -- a completion path that skipped the response DMA sync
+    #     would still return the wrong bytes;
+    #   * `irq_count` in the guest's own stats line says the interrupt path was
+    #     the one that delivered them.  It is bumped only by the top-half, so a
+    #     driver that had silently fallen back to polling passes the loopback
+    #     and fails this.  `completion=poll` in the forbid list is the same
+    #     claim from the kernel side.
+    #
+    # The guest picks the device by probing /dev/diskN for the stats ioctl
+    # rather than by index, so the case does not depend on which class slot
+    # the controller was given.
+    'smoke-virtio-scsi-irq': {
+        'gate': {'mem': '1G', 'cpus': '1'},
+        'pre': ['rm -f /tmp/a20-virtio-scsi-irq.img',
+                'dd if=/dev/zero of=/tmp/a20-virtio-scsi-irq.img bs=1M count=64 2>/dev/null'],
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'log': '.kernel-build/smoke/virtio-scsi-irq-x86_64.log',
+        'stdin': {'kind': 'pipe', 'delay': 20, 'lines': ['virtio_scsi_test', 'poweroff']},
+        'timeout': '60s',
+        'qemu': 'qemu-system-x86_64',
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot',
+                 '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0',
+                 '-device', 'virtio-blk-pci,drive=x0',
+                 '-drive', 'file=/tmp/a20-virtio-scsi-irq.img,if=none,format=raw,id=xs',
+                 '-device', 'virtio-scsi-pci,id=scsi0',
+                 '-device', 'scsi-hd,drive=xs,bus=scsi0.0,scsi-id=0,lun=0',
+                 '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'expect': [
+            r'\[VIRTIO-SCSI\] disk ready: \d+ sectors \(\d+ MiB\), completion=(msix|intx) irq=-?\d+',
+            r'VIRTIO_SCSI_TEST: /dev/disk\d+ capacity=\d+ bytes irq_mode=[12] irq_line=-?\d+ irq_count=\d+',
+            r'VIRTIO_SCSI_TEST: stats commands=\d+ flushes=[1-9]\d* irq_count=\d+ \(\+[1-9]\d*\) irq_completions=\d+ spin_completions=\d+ timeouts=0',
+            'VIRTIO_SCSI_TEST: PASS',
+        ],
+        'forbid': [
+            'VIRTIO_SCSI_TEST: FAIL',
+            r'\[VIRTIO-SCSI\] .*completion polling',
+            r'\[VIRTIO-SCSI\] .*registration failed',
+            r'\[VIRTIO-SCSI\] request timeout',
+            r'\[VIRTIO-SCSI\] SCSI command \w+ failed',
+            r'\[VIRTIO-PCI\] .*incomplete capabilities',
+        ],
+        'post': ['rm -f /tmp/a20-virtio-scsi-irq.img'],
+        'timeout_msg': False,
+        'pass_msg': 'smoke-virtio-scsi-irq: PASS; log saved to $log',
+    },
     # Message-signalled interrupts, end to end, on the one machine type where
     # the kernel programs a real interrupt controller: x86_64's LAPIC.  Every
     # other board has no message-signalled path at all, so this case is where
@@ -1218,15 +1381,36 @@ CASES: dict[str, dict] = {
     # was registered on that vector.  Getting the message address wrong -- ORing
     # the vector into the LAPIC page, say -- produces a correctly programmed
     # table that never interrupts anything, and this line is what fails.
+    #
+    # The machine now runs two CPUs and the case drives every programmed vector
+    # off the boot processor part-way through.  -smp 1 was enough while the
+    # destination was hard-wired to APIC ID 0, but the second half of this case
+    # is exactly that it no longer is: a per-CPU destination is a different
+    # message address AND an LVT entry inside a different processor's own LAPIC
+    # page, and neither is exercised by a uniprocessor boot.  Everything
+    # asserted before the move is unchanged -- the delivery line is the same
+    # one, on the same vector, now carrying the CPU that took it.
+    #
+    # `/proc/a20/irq_affinity` is written once the shell is up: the move is a
+    # runtime property (mask, rewrite the address, arm the far LVT over IPI,
+    # unmask), and folding it into probe would make the boot-CPU delivery this
+    # case already proves untestable.  The `cat` first is the falsifiable
+    # half -- if the node did not exist the write would be a shell error, and
+    # the second delivery line would never appear either way.
     'smoke-msix-x86_64': {
-        'gate': {'mem': '1G', 'cpus': '1'},
+        'gate': {'mem': '1G', 'cpus': '2'},
         'pre': [],
-        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0'], 'target': 'dev-build'},
+        'build': {'vars': ['ARCH=x86_64', 'ABI=both', 'BRINGUP=0', 'NR_CPUS=2'], 'target': 'dev-build'},
         'log': '.kernel-build/smoke/msix-x86_64.log',
-        'stdin': {'kind': 'pipe', 'delay': 18, 'lines': ['poweroff']},
-        'timeout': '45s',
+        'stdin': {'kind': 'pipe', 'delay': 20,
+                  'lines': ['cat /proc/a20/irq_affinity',
+                            'echo 1 > /proc/a20/irq_affinity',
+                            'ls /bin',
+                            'cat /proc/a20/irq_affinity',
+                            'poweroff']},
+        'timeout': '60s',
         'qemu': 'qemu-system-x86_64',
-        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '1', '-no-reboot', '-net', 'nic,model=e1000e', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf'],
+        'argv': ['qemu-system-x86_64', '-machine', 'q35', '-m', '1G', '-nographic', '-smp', '2', '-no-reboot', '-net', 'nic,model=e1000e', '-drive', 'file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp2/fat32.img,if=none,format=raw,id=x0', '-device', 'virtio-blk-pci,drive=x0', '-kernel', '.kernel-build/x86_64-qemu-virt-x86_64-both-dev-smp2/kernel.elf'],
         'expect': [
             r'\[MSI-X\] pci-1af4:1001-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR1\+0x0 \(Message Address Low, pba BAR\d+\), 1 requested',
             r'\[VIRTIO-PCI\] pci-1af4:1001-\d+: MSI-X reserved, vectors 208\.\.208 for 1 queue\(s\)',
@@ -1235,6 +1419,15 @@ CASES: dict[str, dict] = {
             r'\[VIRTIO-BLK\] MSI-X delivery on vector 208',
             r'\[MSI-X\] pci-8086:10d3-\d+: capability at 0x[0-9a-f]+, table \d+ entries in BAR3\+0x0 \(Message Address Low, pba BAR\d+\), 2 requested',
             r'\[E1000\] MSI-X enabled on vectors 209\.\.210',
+            # The move itself, then delivery on the CPU it was moved to.
+            r'\[MSI-X\] affinity: \d+ vector\(s\) now target cpu 1',
+            r'\[VIRTIO-BLK\] MSI-X delivery on vector 208 cpu=1',
+            # The readback after the move: virtio-blk's entry now names cpu 1
+            # instead of the 0 the first cat printed.  The pre-move cat makes
+            # the same line end in \t0, so this pattern only the later one
+            # satisfies -- which is what stops "the node exists" from passing
+            # as "the node says what it just did".
+            r'pci-1af4:1001-\d+\t0\t208\t1',
         ],
         'forbid': [
             r'\[MSI-X\] .*capability names no table',
@@ -1242,6 +1435,9 @@ CASES: dict[str, dict] = {
             r'\[MSI-X\] .*this window is not an MSI-X table',
             r'\[VIRTIO-BLK\] .*MSI-X handler registration failed',
             r'\[VIRTIO-PCI\] .*MSI-X unavailable',
+            r'\[MSI-X\] .*controller entry could not be armed',
+            r'\[MSI-X\] .*entry \d+ refused cpu 1',
+            r'\[X86_64 MSI-X\] .*timed out',
         ],
         'timeout_msg': False,
         'pass_msg': 'smoke-msix-x86_64: PASS; log saved to $log',
