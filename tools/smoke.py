@@ -24,11 +24,15 @@ makes a future edit to this file falsifiable.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import re
+import socket
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -141,7 +145,19 @@ def qemu_argv(case: dict) -> list[str]:
             argv += ["--expect-line", marker, line]
     argv.append(case["timeout"])
     argv += case["argv"]
+    if case.get("qmp"):
+        # Private monitor socket, not the muxed stdio one: the pump needs to
+        # speak QMP and the serial line is carrying the guest log.
+        argv += ["-qmp", f"unix:{qmp_socket_path(case)},server=on,wait=off"]
     return argv
+
+
+def qmp_socket_path(case: dict) -> str:
+    """Per-case QMP socket path.  Derived from the case name, not the pid, so a
+    second run of the same case reuses the name and finds the stale socket it
+    has to remove."""
+    name = case.get("name", "case").replace("/", "_")
+    return str(Path(tempfile.gettempdir()) / f"a20-qmp-{name}.sock")
 
 
 def split_command(cmd: str) -> list[str]:
@@ -160,11 +176,90 @@ def split_command(cmd: str) -> list[str]:
     return shlex.split(cmd)
 
 
+def qmp_key_pump(sock_path: str, keys: list[str], hold: float, gap: float,
+                duration: float) -> None:
+    """Press and release keys on the guest through QEMU's QMP input device, on a
+    cadence, for `duration` seconds.
+
+    Why QMP and not the serial console: `-nographic` muxes the monitor onto the
+    same tty, and an HMP `sendkey` goes through `qemu_input_find_handler()`, which
+    returns the *first* console-less handler matching the event mask.  On q35 the
+    PS/2 keyboard registers first (hw/input/ps2.c:1242) and never calls
+    `qemu_input_handler_activate()`, whereas QEMU's `usb-kbd` does
+    (hw/input/hid.c:540-542), which moves the USB handler to the head of the
+    list.  So `input-send-event` lands on the USB keyboard and proves something
+    about the xHCI path, where `sendkey` would only exercise PS/2.
+
+    Why repeated rather than once: `usb-kbd` schedules a transfer only when its
+    report *changes* (hw/usb/dev-hid.c `usb_hid_changed`), and the guest has no
+    interrupt endpoint configured until it has enumerated the device.  One press
+    during boot is a coin flip; a cadence makes the press land after enumeration
+    whatever the boot takes.
+    """
+    deadline = time.time() + duration
+    sock = None
+    while time.time() < deadline:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(5.0)
+            sock.connect(sock_path)
+            break
+        except OSError:
+            sock = None
+            time.sleep(0.2)
+    if sock is None:
+        print(f"qmp: no connection to {sock_path}; keys not injected")
+        return
+
+    rx = sock.makefile("rwb")
+
+    def cmd(obj: dict) -> dict:
+        rx.write((json.dumps(obj) + "\r\n").encode())
+        rx.flush()
+        while True:
+            line = rx.readline()
+            if not line:
+                return {}
+            reply = json.loads(line.decode())
+            if "event" not in reply:
+                return reply
+
+    cmd({"execute": "qmp_capabilities"})
+    while time.time() < deadline:
+        for k in keys:
+            cmd({"execute": "input-send-event", "arguments": {"events": [
+                {"type": "key", "data": {"down": True,
+                                         "key": {"type": "qcode", "data": k}}}]}})
+        time.sleep(hold)
+        for k in keys:
+            cmd({"execute": "input-send-event", "arguments": {"events": [
+                {"type": "key", "data": {"down": False,
+                                         "key": {"type": "qcode", "data": k}}}]}})
+        time.sleep(gap)
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
 def run_qemu(case: dict) -> int:
     log = Path(case["log"])
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = qemu_argv(case)
     stdin = case.get("stdin")
+    pump = None
+    if case.get("qmp"):
+        sock_path = qmp_socket_path(case)
+        if os.path.exists(sock_path):
+            os.unlink(sock_path)
+        pump = threading.Thread(target=qmp_key_pump,
+                                args=(sock_path, case["qmp"]["keys"],
+                                      case["qmp"]["hold"], case["qmp"]["gap"],
+                                      case["qmp"]["duration"]),
+                                daemon=True)
+        # Started before QEMU, not after: the pump retries the connect, so it
+        # is waiting for the socket to appear while QEMU is still booting.
+        pump.start()
     with log.open("wb") as fh:
         if stdin and stdin["kind"] == "pipe":
             payload = "".join(f"{ln}\n" for ln in stdin["lines"]).encode()
@@ -177,8 +272,16 @@ def run_qemu(case: dict) -> int:
                 proc.stdin.close()
             except (BrokenPipeError, ValueError):
                 pass
-            return proc.wait()
-        return sh(argv, stdout=fh, stderr=subprocess.STDOUT).returncode
+            status = proc.wait()
+        else:
+            status = sh(argv, stdout=fh, stderr=subprocess.STDOUT).returncode
+    if pump:
+        # Bounded, because the thread's deadline starts before its connect-retry
+        # loop and only the per-iteration work can overshoot it: one hold+gap
+        # cycle plus at most one 5 s socket timeout.  An unbounded join would
+        # let a gate's wall clock exceed its QEMU timeout by `duration`.
+        pump.join(case["qmp"]["duration"] + 60)
+    return status
 
 
 def run_post_build(case: dict) -> int:
@@ -511,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unknown case {a.case!r}; try --list", file=sys.stderr)
         return 2
     case = CASES[a.case]
+    case.setdefault("name", a.case)
     if a.print_argv:
         print(" ".join(qemu_argv(case)))
         return 0

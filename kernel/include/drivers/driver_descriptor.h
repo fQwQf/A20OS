@@ -46,6 +46,10 @@ enum a20_driver_type {
     A20_DRIVER_TYPE_NET,
     A20_DRIVER_TYPE_DISPLAY,
     A20_DRIVER_TYPE_USB,
+    /* Character-class drivers whose data plane is a byte stream (virtio-console
+     * port 0).  Appended, so the numeric values of the types above are frozen
+     * and a module built against an older header still names the same type. */
+    A20_DRIVER_TYPE_CHAR,
 };
 
 /* Device identity buses (kept in sync with drvmod drv_device_id.bus). */

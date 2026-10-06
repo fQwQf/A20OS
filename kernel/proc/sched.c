@@ -1575,7 +1575,15 @@ int proc_sched_resume_stopped(task_t *t, int report_continued)
  * out-of-lock read left is the early-out below, which stays an explicit
  * relaxed atomic read exactly as INV-P4b requires. */
 int proc_runq_enqueue_locked(task_t *t) {
-    if (!t || t == proc_idle_task() || t->state != PROC_READY)
+    /* A NULL task has no ->on_rq to read, so it answers "not queued"
+     * directly.  Folding NULL into the early-out below instead would make the
+     * relaxed load itself conditional on t being non-NULL, and that is the
+     * shape the LoongArch -Waccess pass rejects when the callee is inlined
+     * into proc_make_ready.part.0 ("__atomic_load_4 writing 4 bytes into a
+     * region of size 0", destination object at address zero). */
+    if (!t)
+        return 0;
+    if (t == proc_idle_task() || t->state != PROC_READY)
         return __atomic_load_n(&t->on_rq, __ATOMIC_RELAXED);
 
     unsigned cpu = t->cpu_id < CONFIG_NR_CPUS ? t->cpu_id : cpu_current_id();

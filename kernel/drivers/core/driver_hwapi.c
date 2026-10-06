@@ -286,23 +286,151 @@ void driver_irq_dispatch(uint32_t irq) {
         current_board->irqchip->eoi(irq);
 }
 
-void *dma_alloc_coherent(size_t size, uint64_t *dma_handle) {
+/* DRIVER_DMA_MASK_MODEL (implementation side): a mask is a run of low-order
+ * ones, so its complement is a run of high-order ones.  dma_set_mask() checks
+ * that shape instead of rounding: a driver that wrote 0xffffffff80000000 by
+ * accident would otherwise get a window it never asked for, and the allocator
+ * would happily hand out memory the device cannot decode.
+ *
+ * The property is tested on @mask itself.  A run of low-order ones is exactly
+ * the value x with x & (x + 1) == 0, and running that test on ~mask instead
+ * asks for the opposite shape: it rejected every legitimate mask shorter than
+ * 64 bits -- DMA_MASK_32BIT among them, which is the only mask any driver in
+ * this tree asks for besides the 64-bit one -- and accepted masks that are a
+ * run of high-order ones, the half-declared window this function exists to
+ * refuse. */
+static int dma_mask_well_formed(uint64_t mask)
+{
+    if (!mask)
+        return 0;
+    return (mask & (mask + 1U)) == 0;
+}
+
+int dma_set_mask(struct device *dev, uint64_t mask)
+{
+    if (!dev)
+        return -EINVAL;
+    if (!dma_mask_well_formed(mask))
+        return -EINVAL;
+    dev->dma_mask = mask;
+    return 0;
+}
+
+uint64_t dma_get_mask(const struct device *dev)
+{
+    /* 0 is the undeclared state every zero-initialised device_t carries; it
+     * means the full window, not an empty one. */
+    if (!dev || !dev->dma_mask)
+        return DMA_MASK_64BIT;
+    return dev->dma_mask;
+}
+
+static int dma_range_ok_mask(uint64_t mask, uint64_t addr, size_t size)
+{
+    if (!size)
+        return 1;
+    if (addr & ~mask)
+        return 0;
+    uint64_t last = addr + (uint64_t)size - 1U;
+    if (last < addr)          /* the range wraps 64 bits: never addressable */
+        return 0;
+    return (last & ~mask) == 0;
+}
+
+int dma_addr_ok(const struct device *dev, uint64_t addr)
+{
+    return dma_range_ok_mask(dma_get_mask(dev), addr, 1);
+}
+
+int dma_range_ok(const struct device *dev, uint64_t addr, size_t size)
+{
+    return dma_range_ok_mask(dma_get_mask(dev), addr, size);
+}
+
+/* How many times the frame allocator is asked for a block inside a narrowed DMA
+ * window before the caller is told there is none.  Bounded so a mask that no
+ * memory on this board can satisfy costs a fixed number of allocations rather
+ * than spinning the whole probe. */
+#define DMA_MASK_ALLOC_ATTEMPTS 8
+
+static int dma_page_order(size_t size, size_t alignment);
+
+static void *dma_alloc_pages(uint64_t mask, size_t size, size_t alignment,
+                             uint64_t *dma_handle)
+{
+    int order = dma_page_order(size, alignment);
+    if (order < 0)
+        return NULL;
+    /* Bounded retry rather than a zone-aware allocator: the frame allocator has
+     * no "give me memory below 4 GiB" entry point, so the only way to honour a
+     * narrow mask is to try again and let a full order come from somewhere
+     * else.  Running out of attempts is reported as NULL, never as a handle the
+     * device cannot use. */
+    for (int attempt = 0; attempt < DMA_MASK_ALLOC_ATTEMPTS; attempt++) {
+        pfn_t pfn = pfa_alloc(order);
+        if (pfn == PFN_NONE)
+            return NULL;
+        void *ptr = pfn_to_virt(pfn);
+        if (!ptr) {
+            pfa_free(pfn, order);
+            continue;
+        }
+        uint64_t pa = pfn_to_phys(pfn);
+        if (!dma_range_ok_mask(mask, pa, PAGE_SIZE << order)) {
+            pfa_free(pfn, order);
+            continue;
+        }
+        extern void *memset(void *, int, size_t);
+        memset(ptr, 0, PAGE_SIZE << order);
+        if (dma_handle)
+            *dma_handle = pa;
+        return ptr;
+    }
+    return NULL;
+}
+
+void *dma_alloc_coherent(struct device *dev, size_t size, uint64_t *dma_handle)
+{
+    if (dma_handle)
+        *dma_handle = 0;
+    if (!size)
+        return NULL;
     extern void *kmalloc(size_t);
     void *ptr = kmalloc(size);
     if (ptr) {
         extern void *memset(void *, int, size_t);
         memset(ptr, 0, size);
+        uint64_t pa = va_to_pa(ptr);
+        if (dma_range_ok_mask(dma_get_mask(dev), pa, size)) {
+            if (dma_handle)
+                *dma_handle = pa;
+            return ptr;
+        }
+        /* The slab allocator picks the address, so there is nothing to retry:
+         * if the block is outside the window, hand it back and ask the frame
+         * allocator for something physically inside it instead. */
+        extern void kfree(void *);
+        kfree(ptr);
     }
-    if (dma_handle)
-        *dma_handle = ptr ? (uint64_t)va_to_pa(ptr) : 0;
-    return ptr;
+    return dma_alloc_pages(dma_get_mask(dev), size, PAGE_SIZE, dma_handle);
 }
 
 void dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle) {
-    (void)size;
-    (void)dma_handle;
-    extern void kfree(void *);
-    kfree(vaddr);
+    if (!vaddr)
+        return;
+    /* dma_alloc_coherent() has two provenances -- a kmalloc block on the fast
+     * path, a raw frame-allocator page block when the slab block landed outside
+     * the mask -- and only the pointer comes back here.  Ask the slab who owns
+     * it rather than guessing from alignment or from the handle: kmalloc() also
+     * returns page-aligned blocks (big allocs), so neither test distinguishes
+     * them, and a frame-allocator block handed to kfree() panics. */
+    extern int kmalloc_owns(const void *ptr);
+    if (kmalloc_owns(vaddr)) {
+        extern void kfree(void *);
+        kfree(vaddr);
+        return;
+    }
+    dma_free_coherent_aligned(vaddr, size, dma_handle);
 }
 
 static int dma_page_order(size_t size, size_t alignment)
@@ -318,28 +446,15 @@ static int dma_page_order(size_t size, size_t alignment)
     return (bytes < size || bytes < alignment) ? -1 : order;
 }
 
-void *dma_alloc_coherent_aligned(size_t size, size_t alignment,
-                                 uint64_t *dma_handle)
+void *dma_alloc_coherent_aligned(struct device *dev, size_t size,
+                                 size_t alignment, uint64_t *dma_handle)
 {
+    if (dma_handle)
+        *dma_handle = 0;
     if (!size || !alignment || alignment > PAGE_SIZE ||
         (alignment & (alignment - 1U)))
         return NULL;
-    int order = dma_page_order(size, alignment);
-    if (order < 0)
-        return NULL;
-    pfn_t pfn = pfa_alloc(order);
-    if (pfn == PFN_NONE)
-        return NULL;
-    void *ptr = pfn_to_virt(pfn);
-    if (!ptr) {
-        pfa_free(pfn, order);
-        return NULL;
-    }
-    extern void *memset(void *, int, size_t);
-    memset(ptr, 0, PAGE_SIZE << order);
-    if (dma_handle)
-        *dma_handle = pfn_to_phys(pfn);
-    return ptr;
+    return dma_alloc_pages(dma_get_mask(dev), size, alignment, dma_handle);
 }
 
 void dma_free_coherent_aligned(void *vaddr, size_t size, uint64_t dma_handle)

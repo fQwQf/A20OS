@@ -19,6 +19,7 @@ git diff --check
 make check-driver-core-model
 make check-doc-drift
 make smoke-driver-lifecycle
+make smoke-platform-irq-fallback
 make smoke-hda
 make smoke-audio-userspace
 make PYTHON='conda run -n a20os python' smoke-virtio-sound
@@ -28,6 +29,8 @@ make smoke-pci-portability
 这些命令不全是静态检查：`check-driver-core-model` 依赖 `smoke-driver-lifecycle`，其余 `smoke-*` 也会构建并启动 QEMU。按改动范围和宿主能力执行，并在提交证据中明确未运行项。
 
 `smoke-driver-lifecycle` 用 RISC-V64 bringup 配置和 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 启动合成 bus/device，验证注册、probe 失败解绑、class 发布、unregister 下线、陈旧引用返回 `-ENODEV` 和重新 probe；宿主需要能运行仓库配置的 QEMU。只改平台私有轻量设备时可以不跑它，但修改 driver core、bus 或生命周期代码时必须跑。
+
+`smoke-platform-irq-fallback` 同样用 RISC-V64 bringup 配置，但开 `CONFIG_PLATFORM_IRQ_TEST=y`，验证 `platform_device_irq()` 的四种返回（可用线号 / 无 IRQ 资源得 `-ENODEV` / `RES_IRQ` 区间得 `-EINVAL` / `request_irq` 重复占用得 `-EBUSY`）、`free_irq` 后可重新认领、`driver_irq_dispatch()` 能命中 handler，以及 DW-SDIO 的模式规则与 `a20.dw-sdio.poll=1` 参数解析。**QEMU 没有 dw-mshc 设备模型**，所以控制器侧中断从未被触发，handler 投递是经 `driver_irq_dispatch()` 模拟的；该门禁证明的是"有 IRQ 资源就注册成功、没有资源就干净回退"，不是硬件时序。
 
 `smoke-hda` 在 x86_64 q35 上挂载 Intel HDA controller 和 duplex codec，验证 codec 拓扑识别、audio class 绑定以及一段静音 PCM 的 BDL DMA 完成。该测试使用 QEMU null audio backend，不依赖宿主声卡。
 
@@ -74,7 +77,7 @@ make check-stm32f103
 | 健康检查超时 | `-ETIMEDOUT`，设备停止后才释放 DMA |
 | 成功 | `drv_priv`、class、容量/MAC/模式均有效 |
 
-核心合成测试由 `CONFIG_DRIVER_LIFECYCLE_TEST` 覆盖基本 register/probe failure/unregister/reprobe。复杂驱动应增加可注入失败点或独立 host-side 静态门禁。
+核心合成测试由 `CONFIG_DRIVER_LIFECYCLE_TEST` 覆盖基本 register/probe failure/unregister/reprobe，`CONFIG_PLATFORM_IRQ_TEST` 覆盖 platform IRQ 资源的"有则注册、无则轮询"回退契约。复杂驱动应增加可注入失败点或独立 host-side 静态门禁。
 
 ## I/O 测试
 
@@ -112,6 +115,7 @@ display：模式信息、pitch、全屏和边界矩形 flush、映射重叠拒�
 | `make check-driver-core-model` | driver core 头文件、ID 表、class ops 是否匹配规范 | 对照 [drivers/core-model.md](../guide/core-model.md) 和 `kernel/include/drivers/` 修正 |
 | `make check-doc-drift` | 文档与代码中同名常量、命令或矩阵不一致 | 同步文档和实现，确保命令矩阵和真实 Makefile 目标一致 |
 | `make smoke-driver-lifecycle` 失败 | 合成 bus/device 注册、probe 失败清理、unregister 路径 | 加 `CONFIG_DRIVER_LIFECYCLE_TEST=y` 日志，确认失败点是否释放资源 |
+| `make smoke-platform-irq-fallback` 失败 | `platform_device_irq()` 的四种返回、`request_irq`/`free_irq` 往返、`a20.dw-sdio.poll=1` 解析 | 加 `CONFIG_PLATFORM_IRQ_TEST=y` 日志，看是哪个断言行打印了 FAIL |
 | 构建矩阵中某一架构失败 | 是否用了 `#ifdef CONFIG_BOARD_` 或架构私有头 | 把板级常量移到 platform，把可跨架构代码改成通用 PCI/MMIO |
 | 块/网络/input/display I/O 失败 | 是否用了唯一数据镜像、是否满足类接口语义 | 用可丢弃镜像复跑，按设备类规范逐个检查返回值 |
 | 硬件验收失败 | 串口日志是否包含从 `[BUS] pci` 到类消费者的完整链路 | 不要只以“桌面黑了”或“shell 出来了”作结论 |

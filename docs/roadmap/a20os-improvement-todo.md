@@ -135,12 +135,27 @@ virtio-pci 与 e1000e 都把表位置写在后者里。BAR 号一律从能力读
 真机会忽略页内偏移，但实现不保证，前 1 KiB 落在寄存器文件里，结果是表项编程正
 确却一个中断都不来。
 
+- [x] MSI-X 的 IRQ 亲和性与 per-CPU 目标字段（x86_64）。消息地址现在按目标 CPU 的
+      APIC ID 生成（`LAPIC_PHYS_BASE + (apic_id << 12)`，xAPIC 物理目的模式），
+      每条目在 `pci_msix_state_t` 里记 `target_cpu`/`vector`，
+      `pci_msix_set_affinity()` / `pci_msix_get_affinity()` / `pci_msix_set_all_affinity()`
+      是驱动侧入口，`/proc/a20/irq_affinity` 是运行时入口。消息中断的 LVT 在**目标
+      CPU 自己的** LAPIC 页里，所以给别的 CPU 编程必须在那里执行：新增 IPI 向量
+      `IRQ_VECTOR_MSIX_VECTOR`，`arch_msix_vector_setup()` 在目标不是当前 CPU 时
+      经它下发，改写顺序为 mask → 改消息地址 → 远端 arm LVT → unmask；地址回读
+      不符时状态等同迁移前，远端 arm 失败时条目保持 masked 停在新地址（不丢中断，
+      但该 vector 不通），批量迁移不是事务。
+      默认目标仍是 boot CPU，逐位与改动前一致。门禁 `smoke-msix-x86_64` 现在以
+      `-smp 2` 跑，写入 `/proc/a20/irq_affinity` 把全部条目移到 CPU1，断言投递行
+      带 `cpu=1` 且读回表里目的已是 1。**该门禁已实跑通过**
+      （`smoke-msix-x86_64: PASS`，日志 `.kernel-build/smoke/msix-x86_64.log`）。
+      仍然缺的是：per-function/per-queue 的细粒度接口与
+      cmdline 亲和性策略（现只有一个全局 CPU id），以及非 x86 平台的实现——见上一条。
 - [ ] MSI-X 的非 x86 平台实现。`arch_msix_message_address()` /
-      `arch_msix_vector_setup()` / `arch_irq_msix_vector_range()` 目前只有
-      x86_64 有实现，其余架构返回失败，驱动干净地退回 INTx/轮询；riscv64/aarch64
+      `arch_msix_vector_setup()` / `arch_irq_msix_cpu_count()` 目前只有
+      x86_64 有实现，其余架构返回失败（`arch_irq_msix_cpu_count()` 返回 1，只有
+      boot CPU 合法），驱动干净地退回 INTx/轮询；riscv64/aarch64
       的 GIC、loongarch64 的 EIOINTC、ppc64le 的 MPIC 都没有接线。
-- [ ] MSI-X 的 IRQ 亲和性与 per-CPU 目标字段。消息数据里的目的 APIC ID 恒为 0，
-      向量窗口钉死在 boot processor；多 CPU 下设备中断全部落到 CPU0。
 - [ ] e1000e 的 MSI-X 只验证到表被解析并 arm。门禁里网卡收不到流量，两个向量没有
       真实投递；真实投递的那一路是 virtio-blk。见
       [../testing-gates.md](../testing-gates.md) "MSI-X 消息中断"。

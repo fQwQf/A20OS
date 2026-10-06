@@ -87,6 +87,70 @@ typedef enum a20_perf_counter {
     A20_PERF_VIRTIO_BLK_DIRECT_DMAS,
     A20_PERF_VIRTIO_BLK_BOUNCE_DMAS,
     A20_PERF_VIRTIO_BLK_BOUNCE_BYTES,
+    /*
+     * AHCI completion path.  A working interrupt path and a working polling
+     * fallback are indistinguishable from the outside -- both make the disk
+     * work -- so the split has to be counted explicitly.  A run that ends with
+     * ahci_poll_completions carrying every command and ahci_irq_completions
+     * at 0 has proven nothing about the IRQ path, whatever the driver printed.
+     * ahci_commands is the denominator; one command can be seen by both a park
+     * round and a poll, so the two completion counters bound it from above
+     * rather than summing to it.
+     */
+    A20_PERF_AHCI_COMMANDS,
+    A20_PERF_AHCI_IRQ_COMPLETIONS,
+    A20_PERF_AHCI_IRQ_WAKEUPS,
+    A20_PERF_AHCI_PARK_ROUNDS,
+    A20_PERF_AHCI_POLL_COMPLETIONS,
+    A20_PERF_AHCI_ERRORS,
+    /*
+     * E1000 interrupt data plane.  Same reasoning as the AHCI block above: an
+     * e1000 whose ring moves packets proves nothing about its interrupt path,
+     * because the polling hook drains the same ring from the same lwIP drain.
+     *
+     *   e1000_irq_calls        -- handler entries, whatever the ICR read found.
+     *   e1000_irq_rx          -- entries whose ICR carried a receive cause.
+     *   e1000_irq_tx          -- entries whose ICR carried a transmit-DW cause.
+     *                            One entry can carry both, so irq_rx and irq_tx
+     *                            bound irq_calls rather than summing to it.
+     *   e1000_irq_empty       -- entries that read ICR == 0.  These are the
+     *                            cost of a shared line, not a fault; a large
+     *                            share is what a throttle looks like.
+     *   e1000_tx_reclaimed    -- TX descriptors released back to software after
+     *                            the device retired them.  Bounded by the number
+     *                            of frames ever handed to send().
+     *   e1000_rx_drained      -- receive descriptors this driver retired,
+     *                            counted here because the drain the stack runs
+     *                            is the stack's counter, not the driver's.
+     */
+    A20_PERF_E1000_IRQ_CALLS,
+    A20_PERF_E1000_IRQ_RX,
+    A20_PERF_E1000_IRQ_TX,
+    A20_PERF_E1000_IRQ_EMPTY,
+    A20_PERF_E1000_TX_RECLAIMED,
+    A20_PERF_E1000_RX_DRAINED,
+    /*
+     * RTL8139 interrupt data plane.  The same gap as the E1000 block above, and
+     * it is wider here: .poll reclaims transmit descriptors from the same lwIP
+     * drain that runs whether or not a handler ever fires, so a working network
+     * is not evidence that the INTx line reached this driver.
+     *
+     *   rtl8139_irq_calls      -- handler entries that found a non-zero ISR.
+     *   rtl8139_irq_rx         -- entries that saw ISR.TOK, i.e. a cause that
+     *                            only the receive ring can raise.
+     *   rtl8139_irq_tx         -- entries that saw a transmit-retired cause.
+     *   rtl8139_tx_reclaimed   -- TSD descriptors released back to send().  Kept
+     *                            apart from irq_tx because that count can be
+     *                            positive while the reclaim was dropped, and four
+     *                            descriptors is deep enough to hide it.
+     *   rtl8139_rx_drained     -- frames retired out of the RX ring, delivered
+     *                            or dropped.
+     */
+    A20_PERF_RTL8139_IRQ_CALLS,
+    A20_PERF_RTL8139_IRQ_RX,
+    A20_PERF_RTL8139_IRQ_TX,
+    A20_PERF_RTL8139_TX_RECLAIMED,
+    A20_PERF_RTL8139_RX_DRAINED,
     A20_PERF_IDLE_WAIT_ATTEMPTS,
     A20_PERF_IDLE_WAIT_ENTRIES,
     A20_PERF_IDLE_WAIT_WAKE_RETURNS,

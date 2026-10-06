@@ -533,6 +533,13 @@ static int hda_probe(device_t *dev)
     spin_init(&hda->state_lock);
     uint16_t gcap = readw(hda_reg(hda, HDA_REG_GCAP));
     hda->dma64 = (gcap & 1U) != 0;
+    /* GCAP[0] is the controller's own DMA64 bit, so this is the one place in
+     * the tree where the DMA window comes from hardware rather than from a
+     * driver's assumption.  Declaring it before any allocation is what makes
+     * the handles below provably inside the window the controller can decode;
+     * without it both allocations would come from the full 64-bit space. */
+    if (dma_set_mask(dev, hda->dma64 ? DMA_MASK_64BIT : DMA_MASK_32BIT) < 0)
+        goto fail_nodev;
     uint8_t input_streams = (uint8_t)((gcap >> 8) & 0x0fU);
     uint8_t output_streams = (uint8_t)((gcap >> 12) & 0x0fU);
     uintptr_t stream = hda->regs + 0x80U + (uintptr_t)input_streams * 0x20U;
@@ -547,11 +554,16 @@ static int hda_probe(device_t *dev)
     ret = hda_codec_discover_and_setup(hda, &stage);
     if (ret < 0)
         goto fail_io;
-    hda->bdl = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE, &hda->bdl_dma);
-    hda->pcm = dma_alloc_coherent_aligned(HDA_DMA_BYTES, PAGE_SIZE,
+    hda->bdl = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE,
+                                           &hda->bdl_dma);
+    hda->pcm = dma_alloc_coherent_aligned(dev, HDA_DMA_BYTES, PAGE_SIZE,
                                            &hda->pcm_dma);
     if (!hda->bdl || !hda->pcm)
         goto fail_nomem;
+    /* dma_set_mask() already constrained the allocator, so a handle that still
+     * pokes above 4 GiB on a 32-bit controller cannot reach here.  The re-check
+     * is kept because it is what names the failure: fail_nomem above reports a
+     * controller with no memory, this reports one that cannot be programmed. */
     if (!hda->dma64 && ((hda->bdl_dma >> 32) || (hda->pcm_dma >> 32))) {
         stage = "dma-address";
         ret = -EOPNOTSUPP;

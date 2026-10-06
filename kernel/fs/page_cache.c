@@ -1495,18 +1495,25 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
         if (page->index < eof_index)
             continue;
         int partial_eof_page = eof_offset && page->index == eof_index;
+        /* For a file mapping this pin is permanent: the VMA holds the
+         * page-cache reference for its whole lifetime, so ref_count != 0 means
+         * some user mapping is still reading these bytes right now. */
+        int pinned = refcount_read(&page->ref_count) != 0;
         if (partial_eof_page &&
             (page->dirty || page_cache_is_uptodate(page))) {
             /* Buffered writes may be newer than storage.  Retain the prefix
              * of the partial EOF page and discard only bytes beyond the new
              * size; detaching an unpinned dirty page here would lose data that
-             * remains inside the truncated file. */
-            memset((char *)page->data + eof_offset, 0,
-                   PAGE_SIZE - eof_offset);
+             * remains inside the truncated file.  A pinned page must not be
+             * overwritten at all -- zeroing under a live mapping corrupts it,
+             * mapped executable code included -- so it is only marked. */
+            if (!pinned)
+                memset((char *)page->data + eof_offset, 0,
+                       PAGE_SIZE - eof_offset);
             page->invalidate_gen++;
             if (page->dirty)
                 __atomic_add_fetch(&page->dirty_gen, 1, __ATOMIC_RELEASE);
-        } else if (refcount_read(&page->ref_count) == 0) {
+        } else if (!pinned) {
             unsigned idx = page_cache_hash_key(page->vnode, page->index);
             uint64_t bflags = page_cache_bucket_lock_irqsave(idx);
             if (page->valid && page->vnode == vn &&
@@ -1518,13 +1525,12 @@ void page_cache_truncate(vnode_t *vn, uint64_t new_size)
             }
             page_cache_bucket_unlock_irqrestore(idx, bflags);
         } else {
-            /*
-             * Page is pinned by a concurrent reader/writer.  We cannot
-             * detach it, but we MUST invalidate its content so that if
-             * the file is later extended, the stale old data is never
-             * returned.  Zero the data and mark non-uptodate/non-dirty.
-             */
-            memset(page->data, 0, PAGE_SIZE);
+            /* Page is pinned by a live user mapping or a concurrent
+             * reader/writer.  We cannot detach it, but we MUST invalidate it
+             * so that if the file is later extended, the stale old data is
+             * never returned.  Invalidating is enough: the next fault or read
+             * refills from storage.  Zeroing it here would corrupt memory the
+             * mapping is still using, so the contents are left alone. */
             page->invalidate_gen++;
             __atomic_store_n(&page->uptodate, 0, __ATOMIC_RELEASE);
             dirty_remove_locked(page);
