@@ -86,9 +86,10 @@ int64_t sys_a20_ns_create(const a20_syscall_args_t *args)
 
     switch (ns_type) {
     case A20_NS_FILESYSTEM:
-        if (cur->fs.root_path[0])
-            strncpy(ns->root_path, cur->fs.root_path, MAX_PATH_LEN - 1);
-        else {
+        if (cur->fs.root_path[0]) {
+            strncpy(ns->root_path, cur->fs.root_path, sizeof(ns->root_path) - 1);
+            ns->root_path[sizeof(ns->root_path) - 1] = '\0';
+        } else {
             ns->root_path[0] = '/';
             ns->root_path[1] = '\0';
         }
@@ -127,6 +128,17 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
 
     if (r < 0) return r;
 
+    /* Only A20_NS_FILESYSTEM is applied: root_path lands in task->fs.root_path,
+     * which every path resolution reads (kernel/fs/vfs.c:311).  PID / NETWORK /
+     * DEVICE would copy fields no subsystem consumes, so they report
+     * A20_ERR_NOT_SUPPORTED instead of claiming isolation that does not
+     * exist. */
+    struct a20_namespace *ns = (struct a20_namespace *)ns_entry.object;
+    if (ns->ns_type != A20_NS_FILESYSTEM) {
+        a20_object_release(ns_entry.object, ns_entry.type);
+        return -A20_ERR_NOT_SUPPORTED;
+    }
+
     a20_handle_entry_t task_entry;
     r = a20_handle_lookup_task_like(ht, task_h,
                                     A20_RIGHT_CONTROL, &task_entry);
@@ -135,36 +147,27 @@ int64_t sys_a20_ns_apply(const a20_syscall_args_t *args)
         return r;
     }
 
-    struct a20_namespace *ns = (struct a20_namespace *)ns_entry.object;
     task_t *target = proc_find_get((int)(uintptr_t)task_entry.object);
-    if (!ns || !target) {
+    if (!target) {
         a20_object_release(ns_entry.object, ns_entry.type);
-        proc_put(target);
         return -A20_ERR_BAD_HANDLE;
     }
 
-
-    switch (ns->ns_type) {
-    case A20_NS_FILESYSTEM:
-        if (ns->root_path[0]) {
-            strncpy(target->fs.root_path, ns->root_path, MAX_PATH_LEN - 1);
-            strncpy(target->ns_ctx.fs_root, ns->root_path, MAX_PATH_LEN - 1);
-        }
-        target->ns_ctx.active_ns |= (1U << A20_NS_FILESYSTEM);
-        break;
-    case A20_NS_NETWORK:
-        target->ns_ctx.net_ifindex = ns->net_ifindex;
-        target->ns_ctx.active_ns |= (1U << A20_NS_NETWORK);
-        break;
-    case A20_NS_PID:
-        target->ns_ctx.pid_offset = ns->pid_offset;
-        target->ns_ctx.active_ns |= (1U << A20_NS_PID);
-        break;
-    case A20_NS_DEVICE:
-        target->ns_ctx.dev_access_mask = ns->dev_access_mask;
-        target->ns_ctx.active_ns |= (1U << A20_NS_DEVICE);
-        break;
+    /* Only the root_path string is moved: root_vn / root_mnt keep describing
+     * the old root and cwd is not reset, so t->fs now names two different
+     * roots until the next chroot/pivot_root.  Going through
+     * vfs_task_root_set() would need the path resolved to a live (mnt, vnode)
+     * pair, and refusing to apply a root that no longer resolves is a
+     * behaviour change ns_apply does not currently have. */
+    if (ns->root_path[0]) {
+        strncpy(target->fs.root_path, ns->root_path,
+                sizeof(target->fs.root_path) - 1);
+        target->fs.root_path[sizeof(target->fs.root_path) - 1] = '\0';
+        strncpy(target->ns_ctx.fs_root, ns->root_path,
+                sizeof(target->ns_ctx.fs_root) - 1);
+        target->ns_ctx.fs_root[sizeof(target->ns_ctx.fs_root) - 1] = '\0';
     }
+    target->ns_ctx.active_ns |= (1U << A20_NS_FILESYSTEM);
 
     proc_put(target);
     a20_object_release(ns_entry.object, ns_entry.type);

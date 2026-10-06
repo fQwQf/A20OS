@@ -94,6 +94,8 @@ int64_t a20_native_vfs_result(int r)
     case ENOTEMPTY:    return -A20_ERR_NOT_EMPTY;
     case ENAMETOOLONG: return -A20_ERR_NAME_TOO_LONG;
     case ENOSPC:       return -A20_ERR_NO_SPACE;
+    case EDQUOT:       return -A20_ERR_NO_SPACE;
+    case EROFS:        return -A20_ERR_ACCESS;
     case EAGAIN:       return -A20_ERR_WOULD_BLOCK;
     case ETIMEDOUT:    return -A20_ERR_TIMED_OUT;
     case EINVAL:       return -A20_ERR_INVALID_ARGUMENT;

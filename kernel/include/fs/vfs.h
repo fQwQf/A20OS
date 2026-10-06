@@ -467,6 +467,11 @@ int      vfs_fchown(int fd, int uid, int gid);
 int      vfs_utimensat(int dirfd, const char *path, const uint64_t times[4], int flags);
 int      vfs_futimens(int fd, const uint64_t times[4]);
 
+/* times[4] is {atime_sec, atime_nsec, mtime_sec, mtime_nsec}; a sentinel in
+ * an nsec slot means "take the clock" resp. "leave this field unchanged". */
+#define LINUX_UTIME_NOW  0x3fffffffULL
+#define LINUX_UTIME_OMIT 0x3ffffffeULL
+
 /* fileattr (LoongArch file_getattr/file_setattr core).  The opaque 10-word
  * layout matches Linux struct fileattr (uapi/linux/fs.h). */
 typedef struct a20_fileattr {

@@ -171,7 +171,7 @@ static int proc_clone_impl(uint64_t flags, vaddr_t stack, int *ptid, vaddr_t tls
     int child_pid = t->pid;
     proc_task_init_common(t, parent, flags);
     t->abi_mode = parent ? parent->abi_mode : 0;
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     /* Adopted native stdio wiring describes the process's fd 0/1/2 and
      * must survive fork: a clone child that execve()s without re-running
      * task_adopt would otherwise fall back to the Linux-fdtable stdio,
