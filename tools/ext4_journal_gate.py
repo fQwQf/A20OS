@@ -291,6 +291,7 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
 
     control = tempfile.mkdtemp(prefix="a20-journal-")
+    workdir = None
     try:
         run_clean(args.arch, build_dir, control, args.log_dir, args.delay,
                   args.e2fsck, args.timeout)
@@ -307,11 +308,22 @@ def main():
                   f"({expect}, {state}, e2fsck clean)")
             if not args.keep:
                 shutil.rmtree(workdir, ignore_errors=True)
+                workdir = None
         if not args.keep:
             shutil.rmtree(control, ignore_errors=True)
+            control = None
     except GateError as exc:
         print(f"ext4-journal-gate: FAIL\n{exc}", file=sys.stderr)
         return 1
+    finally:
+        # The per-crash-point workdir and the control dir each hold a full ext4
+        # image (hundreds of MB), so a failure or a killed run must reclaim them
+        # too -- previously only the success path did, leaking one image per
+        # aborted run into TMPDIR.
+        if not args.keep:
+            for leftover in (workdir, control):
+                if leftover is not None:
+                    shutil.rmtree(leftover, ignore_errors=True)
     return 0
 
 
