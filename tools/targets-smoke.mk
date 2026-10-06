@@ -330,6 +330,122 @@ smoke-fsync-durability:
 		exit 1; \
 	fi
 
+# ================================================================
+# AHCI completion path on a real ich9-ahci controller (x86_64 / q35)
+# ================================================================
+# The first gate that puts AHCI hardware under this kernel.  Until now ahci.c
+# was compile-verified only: nothing in the tree attached an AHCI controller,
+# so the PCI probe, the IDENTIFY, the FLUSH CACHE EXT that makes fsync durable,
+# and now the completion interrupt had never executed once.
+#
+# Device layout, and why it is this layout:
+#
+#   * -machine q35, with -device ich9-ahci,id=ahci placed on pcie.0.  QEMU
+#     puts that function at 00:02.0 (measured with `info pci` on the 10.0.13
+#     in this tree), and q35 routes root-bus PCI INTx through the IOAPIC with
+#     the swizzle arch_pci_intx_irq() implements -- dev 2 pin A lands on GSI 22,
+#     vector 0x56.  i440fx would return -1 and silently keep polling, which is
+#     why this gate is q35 and not the default PC machine.
+#
+#   * q35's own chipset exposes an AHCI function at 00:1f.2 (also measured).
+#     It has no drive behind it, and the driver binds the first matching
+#     function in enumeration order (00:02.0 comes first), so the chipset
+#     controller is declined without costing a 5 s port timeout.  The
+#     assertion below therefore also checks that exactly one "[AHCI] device
+#     on port" line exists -- two would mean both controllers bound.
+#
+#   * ext4.img goes on the ich9-ahci bus as ide-hd, and the FAT32 image stays
+#     on virtio-blk-pci.  mount_block_devices() mounts whichever class device
+#     carries each filesystem, so /bin is virtio and /extra is the AHCI disk --
+#     which is exactly the surface fsync_durability_test writes to.  The test's
+#     own "block_flushes grew" assertion is inherited from smoke-fsync-durability
+#     and is not restated here.
+#
+# What this gate adds on top of that test is the interrupt claim, and it is
+# stated as two separate assertions because they fail for different reasons:
+#
+#   1. "[AHCI] ... completion=irq" -- the driver took the interrupt path.  A
+#      run that reached the disk only by polling prints completion=poll and
+#      fails here even though the disk worked.
+#   2. ahci_irq_completions > 0 -- the top-half actually ran.  The driver's
+#      own counter, read from /proc/a20/perf.  Claim (1) only says the handler
+#      was registered; a controller that never asserts, or an IOAPIC route that
+#      never delivers, leaves this at 0 while the pre-poll window quietly
+#      retires every command.
+#
+# ahci_poll_completions is asserted to be 0 for the same reason: with a
+# registered handler nothing may take the fallback, so a non-zero value would
+# mean the two paths disagree about which one is live.
+#
+# The counters are read AFTER the test, because /proc/a20/perf is dormant until
+# its first read (a20_perf_format() enables collection on entry), and the
+# first cat only arms it.  The pre-test cat is what makes the second read a
+# real measurement rather than a snapshot of a counter nobody was counting.
+#
+# Honest scope: this is one controller, one port, one command slot, under TCG.
+# It says the completion interrupt is delivered and consumed on QEMU's model
+# of an AHCI controller.  It does not cover multi-port controllers, the
+# platform-bus variant, message-signalled interrupts (ahci.c has no MSI-X
+# path), or any real SATA PHY.
+#
+# Same directory spelling smoke-pci-bridge uses: `make ARCH=x86_64 dev-build`
+# writes .kernel-build/x86_64-qemu-virt-x86_64-both-dev (ABI=both, BRINGUP=0,
+# CONFIG_XLATOR=y).  Spelled once here so the two image paths and the kernel
+# path cannot drift apart inside one target.
+AHCI_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+# The explicit a20_resource.py call is HOST_RESOURCE_GATE_CONTRACT (docs/testing-gates.md):
+# this target launches QEMU itself rather than going through tools/a20 test or
+# tools/smoke.py, so it has to ask for the gate itself.  -m/-c must match the
+# -m/-smp below, or the preflight is protecting a different launch.
+smoke-ahci-ich9: NET_HOSTFWD=
+smoke-ahci-ich9:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/ahci-ich9-x86_64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY_AHCI); \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'fsync_durability_test\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_AHCI) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$(AHCI_X86_64_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-drive file=$(AHCI_X86_64_BUILD_DIR)/ext4.img,if=none,format=raw,id=xa \
+		-device ich9-ahci,id=ahci \
+		-device ide-hd,drive=xa,bus=ahci.0 \
+		-kernel $(AHCI_X86_64_BUILD_DIR)/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq=$$(last_counter ahci_irq_completions); \
+	wake=$$(last_counter ahci_irq_wakeups); \
+	poll=$$(last_counter ahci_poll_completions); \
+	cmds=$$(last_counter ahci_commands); \
+	park=$$(last_counter ahci_park_rounds); \
+	errs=$$(last_counter ahci_errors); \
+	bound=$$(grep -c '\[AHCI\] device on port' "$$log" || true); \
+	if grep -q 'FSYNC_TEST: PASS' "$$log" && \
+	   grep -q 'completion=irq' "$$log" && \
+	   [ "$$bound" -eq 1 ] && \
+	   [ "$$irq" -gt 0 ] && \
+	   [ "$$poll" -eq 0 ] && \
+	   [ "$$cmds" -gt 0 ] && \
+	   ! grep -qiE 'panic|assertion failed' "$$log"; then \
+		echo "smoke-ahci-ich9: PASS (one ich9-ahci port bound on the interrupt path;" \
+			 "$$cmds commands, $$irq of them completed through the IRQ top-half, $$poll via polling); log saved to $$log"; \
+		echo "  recorded, not asserted: ahci_irq_wakeups=$$wake ahci_park_rounds=$$park ahci_errors=$$errs"; \
+		grep -E '^\[AHCI\]' "$$log" || true; \
+	else \
+		echo "smoke-ahci-ich9: FAIL (status=$$status bound=$$bound cmds=$$cmds irq=$$irq wake=$$wake poll=$$poll park=$$park errs=$$errs)"; \
+		grep -E '^\[AHCI\]|FSYNC_TEST' "$$log" || echo "  (no AHCI or FSYNC line at all -- the guest never got that far)"; \
+		echo "  log saved to $$log; tail:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
 smoke-sysv-ipc-abi:
 	$(MAKE) ARCH=riscv64 ABI=linux BRINGUP=0 dev-build
 	$(MAKE) -s ARCH=riscv64 ABI=linux BRINGUP=0 .kernel-build/riscv64-qemu-virt-riscv64-linux-dev/ext4.img
@@ -444,6 +560,27 @@ smoke-msix-x86_64:
 	$(PYTHON) tools/smoke.py smoke-msix-x86_64
 
 # ================================================================
+# virtio-scsi completion smoke (x86_64)
+# ================================================================
+# The boot disk stays virtio-blk-pci and the scsi-hd behind virtio-scsi-pci is
+# the scratch medium, so a failure localises to the SCSI controller rather than
+# to "the machine came up at all".
+#
+# Unlike smoke-ahci-ich9, which reads ahci_irq_completions out of
+# /proc/a20/perf, this gate reads the controller's counters through the block
+# class stats ioctl (A20_BLK_IOCTL_GET_STATS) and has the guest print them.
+# /proc/a20/perf counters are global, so a machine with two virtio-scsi
+# controllers could not say which one the numbers came from, and a gate that
+# cannot attribute its counter to the device under test proves less than it
+# looks like it proves.  The guest still asserts the read/write/flush round
+# trip itself, so the counter is a second opinion on a transfer that already
+# had to be correct.
+#
+# See the case comment in tools/smoke_cases.py for the assertion list.
+smoke-virtio-scsi-irq:
+	$(PYTHON) tools/smoke.py smoke-virtio-scsi-irq
+
+# ================================================================
 # PCI bridge traversal smoke
 # ================================================================
 # Boots q35 with a virtio-blk device hung off two chained pcie-root-ports,
@@ -481,6 +618,66 @@ smoke-pci-bridge:
 		echo "smoke-pci-bridge: PASS (device behind 2 nested root ports enumerated); log saved to $$log"; \
 	else \
 		echo "smoke-pci-bridge: failed with status $$status; tail of $$log:"; \
+		tail -n 80 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# virtio-console / /dev/vport0 smoke
+# ================================================================
+# Both directions are asserted, and neither half is trusted on its own:
+#
+#   host -> guest: tools/vport_host_probe.py writes 64 bytes into the
+#     virtconsole chardev socket, and the guest program (user/cmds/core/
+#     vport_test.c) checks every byte it read back from /dev/vport0.  A receive
+#     path that silently drops or corrupts bytes fails inside the guest.
+#   guest -> host: the same 64 bytes are written back out of /dev/vport0 and
+#     the probe compares them with what it sent.
+#
+# The probe waits for the guest's "VPORT_TEST: READY" marker in the serial log
+# before connecting, so there is no fixed sleep racing the guest boot, and the
+# chardev is server=on,wait=off so QEMU does not block on a connection nobody
+# has made yet.  A guest PASS alone is not accepted: without the host echo the
+# transmit half of the driver would be untested.
+smoke-virtio-console: NET_HOSTFWD=
+smoke-virtio-console:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/virtio-console-x86_64.log"; \
+	sock="$(SMOKE_LOG_DIR)/virtio-console.sock"; \
+	status=0; probe=0; \
+	rm -f "$$log" "$$sock"; \
+	{ sleep $(SMOKE_INPUT_DELAY_VPORT); printf 'vport_test\n'; \
+	  sleep 30; printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_VPORT) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-chardev socket,id=vportch,path=$$sock,server=on,wait=off \
+		-device virtio-serial-pci,id=vser0 \
+		-device virtconsole,chardev=vportch,bus=vser0.0 \
+		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/vport_host_probe.py "$$sock" "$$log" || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-virtio-console: FAIL -- the host probe did not complete the round trip"; \
+		echo "  (tools/vport_host_probe.py exit $$probe). Guest verdict, if any:"; \
+		grep -E 'VPORT_TEST|\[VPORT\]' "$$log" || echo "  (none: the guest never got that far)"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif grep -q 'VPORT_TEST: PASS' "$$log" && ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-virtio-console: PASS (64 bytes host->guest->/dev/vport0->host)"; \
+		echo "  log saved to $$log"; \
+	elif grep -q 'VPORT_TEST: FAIL' "$$log"; then \
+		echo "smoke-virtio-console: FAIL -- the guest reported a failure:"; \
+		grep -E 'VPORT_TEST|\[VPORT\]' "$$log" | tail -n 5; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	else \
+		echo "smoke-virtio-console: failed with status $$status, no guest verdict; tail of $$log:"; \
 		tail -n 80 "$$log"; \
 		exit 1; \
 	fi
@@ -947,6 +1144,320 @@ smoke-net-ipv6:
 	else \
 		echo "smoke-net-ipv6: failed with status $$status (passes=$$passes of 4, fails=$$fails accept_drop=$$accept_drop bh_overflow=$$bh_overflow alloc_fail=$$alloc_fail); tail of $$log:"; \
 		grep -E 'IPV6_LOOPBACK_TEST: FAIL|procheck|server:|client:' "$$log" | head -20 || true; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
+# E1000 interrupt data plane (x86_64 / q35)
+# ================================================================
+# What this gate is for.
+#
+# The e1000 driver registered a line and unmasked IMS long before this gate
+# existed, so "the driver has an interrupt path" was never the thing in doubt.
+# What was in doubt is whether anything ever proved the device actually raised
+# it: a polling NIC and an interrupt-driven NIC move identical packets through
+# an identical ring, and the difference is invisible from the outside.  The
+# class .poll hook is called by the lwIP drain whether or not a handler ever
+# runs, so a gate asserting only "the network works" would pass with the
+# interrupt path completely dead -- which is exactly what a broken IOAPIC route
+# or a left-masked IMS leaves behind.
+#
+# So the gate asserts the interrupt count itself, and it needs traffic that can
+# only have arrived from the wire.  That is what the hostfwd round trip is for:
+# same shape as smoke-netfilter-nat (host connects, guest socket accepts and
+# echoes) but with the netfilter test replaced by the listener that already
+# exists for this purpose.
+#
+# Why a plain listener and not netnat_test: this gate is about the receive
+# interrupt, not about conntrack.  netnat_test would put a DNAT rewrite between
+# the wire and the driver, so a failure could be the filter rather than the NIC,
+# and a pass would not localise anything.  tcp_accept_test is the smallest thing
+# that moves a frame through the host forward, the e1000 RX ring and lwIP.  The
+# echo makes the outbound half real too, which is what moves e1000_irq_tx: an
+# accept that never answered would exercise RX alone.
+#
+# The assertions, stated separately because they fail for different reasons:
+#
+#   1. the ready line carries no dataplane=polling -- the driver claimed a line
+#      and unmasked IMS.  A run that fell back prints dataplane=polling and
+#      fails here even though the network worked.
+#   2. e1000_irq_calls > 0 and e1000_irq_rx > 0 -- the top-half actually ran.
+#      Claim (1) only says a handler was registered; nothing in it says the
+#      controller asserted or that the route delivered.  This is the assertion
+#      that catches a dead MSI-X table or a wrong INTx swizzle.
+#   3. e1000_irq_tx > 0 and e1000_tx_reclaimed > 0 -- the transmit completion
+#      path released descriptors.  Kept apart from (2) because it is a separate
+#      defect: the count can be positive while the reclaim was dropped, and
+#      this gate's handful of bytes would still move, because the ring is 256
+#      deep.  Only a sustained transmit would notice.
+#   4. e1000_rx_drained > 0 -- the driver retired receive descriptors, i.e. the
+#      ring was actually walked rather than the stack finding nothing.
+#
+# Counters are read AFTER the test from /proc/a20/perf.  Collection there is
+# dormant until the file is first read (a20_perf_format() enables it on entry),
+# so that single post-test cat is itself the first read and therefore the first
+# real measurement.  No pre-test cat is issued, unlike smoke-ahci-ich9, on
+# purpose: these are not a snapshot of a counter nobody was counting.
+#
+# Honest scope: one 82540EM behind QEMU's user-mode network, one port, under
+# TCG, single core, MSI-X if the part offers it and INTx otherwise.  It does not
+# cover multi-queue, the e1000e MSI-X path, a real PHY, receive coalescing, or
+# any throughput claim -- it asserts delivery and accounting, not bandwidth.
+#
+# a20.e1000.poll=1 is deliberately NOT passed here.  The forced-polling run is
+# the negative control; putting it in the same gate as the positive claim would
+# let a boot that ignored the driver entirely satisfy one of the two.  The knob's
+# own behaviour is therefore NOT verified by this gate.
+E1000_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+# This target launches QEMU itself rather than going through tools/a20 test or
+# tools/smoke.py, so it asks for the gate itself (HOST_RESOURCE_GATE_CONTRACT in
+# docs/testing-gates.md).  -m/-c match the launch below.
+smoke-net-e1000-irq: NET_HOSTFWD=
+smoke-net-e1000-irq:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-e1000-irq-x86_64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_E1000); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'cat /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18091 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_E1000) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$(E1000_X86_64_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18091-10.0.2.15:18091 \
+		-device e1000,netdev=net \
+		-kernel $(E1000_X86_64_BUILD_DIR)/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/e1000_host_probe.py 18091 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter e1000_irq_calls); \
+	irq_rx=$$(last_counter e1000_irq_rx); \
+	irq_tx=$$(last_counter e1000_irq_tx); \
+	irq_empty=$$(last_counter e1000_irq_empty); \
+	tx_reclaimed=$$(last_counter e1000_tx_reclaimed); \
+	rx_drained=$$(last_counter e1000_rx_drained); \
+	ready_line=$$(grep -m1 '\[E1000\] ready:' "$$log" || true); \
+	tcpmode_line=$$(grep -m1 '^tcpmode=' "$$log" || true); \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-net-e1000-irq: FAIL -- the host never completed the port forward"; \
+		echo "  (tools/e1000_host_probe.py exit $$probe). Guest verdict, if any:"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (none: the guest never got that far)"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif ! printf '%s' "$$tcpmode_line" | grep -qx 'tcpmode=lwip'; then \
+		echo "smoke-net-e1000-irq: FAIL -- the guest never reached tcpmode=lwip."; \
+		echo "  An off-box SYN is answered with RST unless the listener is a real lwIP LISTEN"; \
+		echo "  pcb (socket_control.c:213), so a run that stayed in the default fast mode would"; \
+		echo "  fail for a reason that says nothing about this driver.  Reported:"; \
+		echo "    $${tcpmode_line:-<absent: /proc/net/config never printed>}"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || true; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif [ -n "$$ready_line" ] && printf '%s' "$$ready_line" | grep -q 'dataplane=polling'; then \
+		echo "smoke-net-e1000-irq: FAIL -- the driver fell back to the polling data plane"; \
+		echo "  even though the network worked, which is precisely the state this gate exists"; \
+		echo "  to rule out. Driver line:"; \
+		echo "    $$ready_line"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" && \
+	     [ -n "$$ready_line" ] && \
+	     [ "$$irq_calls" -gt 0 ] && \
+	     [ "$$irq_rx" -gt 0 ] && \
+	     [ "$$irq_tx" -gt 0 ] && \
+	     [ "$$tx_reclaimed" -gt 0 ] && \
+	     [ "$$rx_drained" -gt 0 ] && \
+	     ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-e1000-irq: PASS (hostfwd round trip 18091 -> 10.0.2.15:18091 through the e1000;" \
+			 "$$irq_calls handler entries, $$irq_rx carrying an RX cause, $$irq_tx a TX cause," \
+			 "$$rx_drained RX descriptors drained, $$tx_reclaimed TX descriptors released); log saved to $$log"; \
+		echo "    $$ready_line"; \
+		echo "  recorded, not asserted: e1000_irq_empty=$$irq_empty (shared-line/throttle cost, not a fault)"; \
+	else \
+		echo "smoke-net-e1000-irq: FAIL (status=$$status probe=$$probe irq_calls=$$irq_calls irq_rx=$$irq_rx" \
+			 "irq_tx=$$irq_tx tx_reclaimed=$$tx_reclaimed rx_drained=$$rx_drained)"; \
+		echo "  driver ready line: $${ready_line:-<absent: the e1000 never probed>}"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (no TCP_ACCEPT_TEST line at all)"; \
+		echo "  log saved to $$log; tail:"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
+
+# ---------------------------------------------------------------------------
+# smoke-net-rtl8139 -- end-to-end round trip through the Realtek RTL8139
+# ---------------------------------------------------------------------------
+# Why this gate exists: the only NIC this tree carried for the x86_64 QEMU target
+# was e1000, and e1000's id table is Realtek-free, so `-nic user,model=rtl8139`
+# produced a PCI function that no driver claimed and therefore no device in
+# DEV_CLASS_NET at all.  A boot with no netif and no NIC is not a network failure
+# you can see; the stack simply never had a device.  This gate claims 10ec:8139
+# and then asserts traffic actually crossed it.
+#
+# Shape and reasoning are smoke-net-e1000-irq's, deliberately and in full: same
+# machine (q35, 1G, 1 cpu, the both-dev image), same hostfwd shape, the same
+# tcp_accept_test listener, the same /proc/a20/perf counter reads after the test.
+# Only the -device line differs.  Diverging the recipe would make a green here
+# incomparable to a green there, and there is nothing about an RTL8139 that
+# warrants a second guest boot model to understand.
+#
+# tcpmode is set twice, and the second write is the one that counts.  On this
+# host the -append string never reaches the guest: QEMU's multiboot loader puts
+# the command line in the page that follows the kernel image in its fw_cfg blob
+# (hw/i386/multiboot.c: mb_add_cmdline() returns mh_load_addr + offset_cmdlines)
+# and the info block correctly points at it -- g_mb_info=0x9500, flags=0x24f,
+# mi->cmdline=<load_addr + page-aligned image size> -- but SeaBIOS 1.16.3 copies
+# only the image bytes, so guest RAM there is zero and firmware_bootargs()
+# reports cmdline='' and then cmdline_size=0 from fw_cfg.  The kernel therefore
+# falls back to the string in kernel/platform/qemu-virt-x86_64/board.c:24, which
+# carries no a20.tcpmode, and boots in the default fast mode.  In fast mode
+# net_listen_sock() drops the bound pcb (socket_control.c:242), so the port is not
+# listening in the stack and an inbound SYN is answered with RST -- a failure
+# that has nothing to do with the NIC.  The `echo tcpmode lwip` line uses the
+# write path a20_net_config_write() already provides and that smoke-net-ipv4
+# already uses to switch the other way, and it runs after init's telnetd has
+# taken port 2323 in whatever mode the boot chose, so it cannot race the first
+# listener.  The gate asserts the readback, so a run that failed to switch
+# reports that instead of blaming the driver.
+#
+# The assertions, stated separately because they fail for different reasons:
+#
+#   1. probe=0 and TCP_ACCEPT_TEST: PASS -- the end-to-end round trip.  Host
+#      connects to a forwarded port, the guest socket accepts, echoes one byte,
+#      and the byte comes back carrying the forwarded source port.  This is the
+#      assertion the gate was asked for, and the only one that says the data
+#      plane works.
+#   2. the ready line exists and says mode=irq -- the driver bound the function
+#      and claimed an interrupt line instead of falling back to a20.rtl8139.poll.
+#      Claim (1) alone does not rule out the fallback: .poll runs from the same
+#      lwIP drain and a polled NIC moves bytes perfectly well.
+#   3. rtl8139_irq_calls > 0 and rtl8139_irq_rx > 0 -- the handler ran and saw a
+#      receive cause.  Neither (1) nor (2) implies this.  (2) says a handler was
+#      registered; only this says the controller asserted the line and the IOAPIC
+#      route delivered it.  It is the assertion that catches a wrong INTx swizzle.
+#   4. rtl8139_tx_reclaimed > 0 and rtl8139_rx_drained > 0 -- descriptors were
+#      retired on both halves.  Kept apart from (3) because each is a separate
+#      defect: the transmit ring is four descriptors deep, which is far too much
+#      runway for one frame to notice a reclaim that never happened, and
+#      rx_drained distinguishes "the ring was walked" from "the stack found
+#      nothing to walk".
+#   5. no panic / assertion failure / page fault anywhere in the log.
+#
+# Counters are read AFTER the test from /proc/a20/perf, on the same reasoning as
+# smoke-net-e1000-irq: a20_perf_format() enables collection on the first read, so
+# that single post-test cat is itself the first real measurement.  No pre-test cat
+# is issued, because these would not be a snapshot of a counter nobody was
+# counting.
+#
+# Honest scope: one RTL8139 behind QEMU's user-mode network, one port, under TCG,
+# single core, INTx (this part has no MSI-X).  It does not cover real silicon, the
+# RTL8139C register superset, WOL, power saving, cable-speed reporting, multi-
+# queue, receive coalescing, or any throughput claim -- it asserts delivery and
+# accounting, not bandwidth.  The RX ring geometry the driver programs
+# (RCR[13:11] = 0b11, a 64 KiB ring) was taken from QEMU's device model; it has
+# NOT been run against real silicon, which documents that same field as "8K + 16K".
+# Anything this gate says about the register map is a statement about QEMU's
+# implementation.
+#
+# a20.rtl8139.poll=1 is deliberately NOT passed here.  The forced-polling run is
+# the negative control; putting it in the same gate as the positive claim would
+# let a boot that ignored the driver entirely satisfy one of the two.  The knob's
+# own behaviour is therefore NOT verified by this gate.
+RTL8139_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+smoke-net-rtl8139: NET_HOSTFWD=
+smoke-net-rtl8139:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/net-rtl8139-x86_64.log"; \
+	status=0; probe=0; \
+	rm -f "$$log"; \
+	{ sleep $(SMOKE_INPUT_DELAY_RTL8139); \
+	  printf '\ncat /proc/a20/perf\n'; \
+	  printf 'echo tcpmode lwip > /proc/net/config\n'; \
+	  printf 'cat /proc/net/config\n'; \
+	  printf 'tcp_accept_test 18093 10.0.2.15\n'; \
+	  printf 'cat /proc/a20/perf\n'; \
+	  printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT_RTL8139) qemu-system-x86_64 \
+		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$(RTL8139_X86_64_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-netdev user,id=net,hostfwd=tcp:127.0.0.1:18093-10.0.2.15:18093 \
+		-device rtl8139,netdev=net \
+		-kernel $(RTL8139_X86_64_BUILD_DIR)/kernel.elf \
+		-append 'a20.ip=10.0.2.15 a20.netmask=255.255.255.0 a20.gateway=10.0.2.2 a20.dns=10.0.2.3 a20.hostname=a20os a20.tcpmode=lwip' \
+		> "$$log" 2>&1 & \
+	qemu_pid=$$!; \
+	$(PYTHON) tools/rtl8139_host_probe.py 18093 || probe=$$?; \
+	wait $$qemu_pid || status=$$?; \
+	last_counter() { awk -v k="$$1" '$$1==k":"{v=$$2} END{print v+0}' "$$log"; }; \
+	irq_calls=$$(last_counter rtl8139_irq_calls); \
+	irq_rx=$$(last_counter rtl8139_irq_rx); \
+	irq_tx=$$(last_counter rtl8139_irq_tx); \
+	tx_reclaimed=$$(last_counter rtl8139_tx_reclaimed); \
+	rx_drained=$$(last_counter rtl8139_rx_drained); \
+	ready_line=$$(grep -m1 '\[RTL8139\] ready:' "$$log" || true); \
+	tcpmode_line=$$(grep -m1 '^tcpmode=' "$$log" || true); \
+	if [ "$$probe" -ne 0 ]; then \
+		echo "smoke-net-rtl8139: FAIL -- the host never completed the port forward"; \
+		echo "  (tools/rtl8139_host_probe.py exit $$probe). Guest verdict, if any:"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (none: the guest never got that far)"; \
+		echo "  driver ready line: $${ready_line:-<absent: the rtl8139 never probed>}"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif [ -z "$$ready_line" ]; then \
+		echo "smoke-net-rtl8139: FAIL -- the port forward worked but no RTL8139 probed."; \
+		echo "  Something else answered on the forwarded port, so the round trip did not cross"; \
+		echo "  this driver and says nothing about it."; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || true; \
+		echo "  log saved to $$log; tail:"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	elif ! printf '%s' "$$tcpmode_line" | grep -qx 'tcpmode=lwip'; then \
+		echo "smoke-net-rtl8139: FAIL -- the guest never reached tcpmode=lwip."; \
+		echo "  An off-box SYN is answered with RST unless the listener is a real lwIP LISTEN"; \
+		echo "  pcb (socket_control.c:213), so a run that stayed in the default fast mode would"; \
+		echo "  fail for a reason that says nothing about this driver.  Reported:"; \
+		echo "    $${tcpmode_line:-<absent: /proc/net/config never printed>}"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || true; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif printf '%s' "$$ready_line" | grep -q 'mode=poll'; then \
+		echo "smoke-net-rtl8139: FAIL -- the driver fell back to the polling data plane"; \
+		echo "  even though the network worked, which is precisely the state this gate exists"; \
+		echo "  to rule out. Driver line:"; \
+		echo "    $$ready_line"; \
+		echo "  log saved to $$log"; \
+		exit 1; \
+	elif grep -q 'TCP_ACCEPT_TEST: PASS' "$$log" && \
+	     [ "$$irq_calls" -gt 0 ] && \
+	     [ "$$irq_rx" -gt 0 ] && \
+	     [ "$$tx_reclaimed" -gt 0 ] && \
+	     [ "$$rx_drained" -gt 0 ] && \
+	     ! grep -qiE 'panic|assertion failed|page fault' "$$log"; then \
+		echo "smoke-net-rtl8139: PASS (hostfwd round trip 18093 -> 10.0.2.15:18093 through the RTL8139;" \
+			 "$$irq_calls handler entries, $$irq_rx carrying an RX cause, $$irq_tx a TX cause," \
+			 "$$rx_drained frames retired from the RX ring, $$tx_reclaimed TX descriptors released); log saved to $$log"; \
+		echo "    $$ready_line"; \
+	else \
+		echo "smoke-net-rtl8139: FAIL (status=$$status probe=$$probe irq_calls=$$irq_calls irq_rx=$$irq_rx" \
+			 "irq_tx=$$irq_tx tx_reclaimed=$$tx_reclaimed rx_drained=$$rx_drained)"; \
+		echo "  driver ready line: $${ready_line:-<absent: the rtl8139 never probed>}"; \
+		grep -E 'TCP_ACCEPT_TEST' "$$log" || echo "  (no TCP_ACCEPT_TEST line at all)"; \
+		echo "  log saved to $$log; tail:"; \
 		tail -n 60 "$$log"; \
 		exit 1; \
 	fi
