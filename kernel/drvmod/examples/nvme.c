@@ -193,11 +193,11 @@ static int nvme_wait_ready(nvme_controller_t *ctrl, int ready)
 }
 
 static int nvme_queue_alloc(nvme_controller_t *ctrl, nvme_queue_t *q,
-                            uint16_t qid, uint16_t depth)
+                            uint16_t qid, uint16_t depth, device_t *dev)
 {
     memset(q, 0, sizeof(*q));
-    q->sq = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE, &q->sq_dma);
-    q->cq = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE, &q->cq_dma);
+    q->sq = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE, &q->sq_dma);
+    q->cq = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE, &q->cq_dma);
     if (!q->sq || !q->cq)
         return -ENOMEM;
     q->depth = depth;
@@ -591,7 +591,7 @@ static int nvme_probe(device_t *dev)
     writel(0xffffffffU, nvme_reg(ctrl, NVME_REG_INTMS));
     writel(0, nvme_reg(ctrl, NVME_REG_CC));
     if (nvme_wait_ready(ctrl, 0) < 0 ||
-        nvme_queue_alloc(ctrl, &ctrl->admin, 0, admin_depth) < 0)
+        nvme_queue_alloc(ctrl, &ctrl->admin, 0, admin_depth, dev) < 0)
         goto fail;
     uint32_t aqa = (admin_depth - 1U) | ((uint32_t)(admin_depth - 1U) << 16);
     writel(aqa, nvme_reg(ctrl, NVME_REG_AQA));
@@ -605,7 +605,7 @@ static int nvme_probe(device_t *dev)
     if (nvme_admin(ctrl, NVME_ADMIN_SET_FEATURE, 0, 0,
                    NVME_FID_NUM_QUEUES, 0, NULL) < 0)
         goto fail;
-    if (nvme_queue_alloc(ctrl, &ctrl->io, 1, io_depth) < 0)
+    if (nvme_queue_alloc(ctrl, &ctrl->io, 1, io_depth, dev) < 0)
         goto fail;
     /* Resolve the INTx line before CREATE_CQ so the queue is created with
      * interrupts enabled only when the platform can actually route one. */
@@ -619,9 +619,9 @@ static int nvme_probe(device_t *dev)
                    (1U << 16) | 1U, NULL) < 0)
         goto fail;
 
-    ctrl->identify = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE,
+    ctrl->identify = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE,
                                                  &ctrl->identify_dma);
-    ctrl->bounce = dma_alloc_coherent_aligned(NVME_DMA_BYTES, PAGE_SIZE,
+    ctrl->bounce = dma_alloc_coherent_aligned(dev, NVME_DMA_BYTES, PAGE_SIZE,
                                                &ctrl->bounce_dma);
 
     if (!ctrl->identify || !ctrl->bounce || nvme_identify(ctrl) < 0)
