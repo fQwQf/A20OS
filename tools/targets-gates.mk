@@ -10,6 +10,7 @@ HOST_TESTS_BIN := $(patsubst tools/tests/%.c,/tmp/a20-host-%,$(HOST_TESTS_SRC))
         check-component-registry regen-driver-fragment \
         check-trim-registry regen-trim-fragment \
         check-smoke-cases \
+        check-native-abi-coverage check-abi-config-guard \
         check-flash-backend-registry check-manifests \
         check-a20-tests
 
@@ -106,6 +107,19 @@ check-abi-boundary:
 	@$(PYTHON) tools/gen_linux_syscall_coverage.py --check
 	@$(PYTHON) tools/gates.py abi-boundary
 
+# The other half of the dual-ABI blind spot: the Linux side has had two coverage
+# generators, so a new LINUX_SYSCALL needs a coverage row and an envelope class,
+# while a new A20_NATIVE_SYSCALL needed neither.  check-native-abi-coverage
+# compares the three Native sources against each other (registration table,
+# syscall_nr.h, docs/native-abi/) and names the entries that disagree;
+# check-abi-config-guard forbids the bare `#ifdef CONFIG_ABI_*` spelling that
+# silently drops one ABI's code from a build.  Both are host-side.
+check-native-abi-coverage:
+	@$(PYTHON) tools/gates.py native-abi-coverage
+
+check-abi-config-guard:
+	@$(PYTHON) tools/gates.py abi-config-guard
+
 check-driver-core-model: smoke-driver-lifecycle
 	@$(PYTHON) tools/gates.py driver-core-model
 
@@ -127,7 +141,9 @@ check-external-dependency-boundary:
 # The list is a *tier*, not a wish list: every member is host-side (pure Python,
 # rg, or the host gcc) and needs neither a cross toolchain nor QEMU, so `make
 # check` is always runnable on a bare checkout.  The 11 remaining members of
-# check-doc-test-gates each boot a QEMU guest and belong to the `smoke` job.
+# check-doc-test-gates each boot a QEMU guest and belong to the `smoke` job; the
+# two Native ABI gates below are its other host-side members, so they are
+# counted in the tier rather than in that 11.
 #
 # When this list changes, .github/workflows/ci.yml's toolchain-gates job must
 # change with it; that file is the other half of the contract and is not
@@ -145,6 +161,8 @@ CHECK_FAST_GATES := \
     check-io-progress-model \
     check-external-dependency-boundary \
     check-abi-boundary \
+    check-native-abi-coverage \
+    check-abi-config-guard \
     check-envelope-coverage \
     check-task-state-boundary \
     check-abi-smoke-gate \

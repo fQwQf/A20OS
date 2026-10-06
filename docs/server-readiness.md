@@ -1,19 +1,36 @@
 # A20OS 服务器就绪度评估
 
-最后核实：2026-10（`feat/net-lanes`）。下文按服务器部署视角列出 A20OS 的
-当前能力边界、已知的结构性限制，以及按严重度排序的阻塞项；每条都给出文件位置，
-便于自行复核。
+最后核实：2026-10（`feat/net-lanes`；另见 §七点六 的 `wt/practical-readiness`
+复核）。下文按服务器部署视角列出 A20OS 的当前能力边界、已知的结构性限制，以及按
+严重度排序的阻塞项；每条都给出文件位置，便于自行复核。凡本文件没有亲自读代码确认
+过的，一律写「未核实」，不用推测填空。
 
 运行类结论以当期提交为准；历史记录见 [archive/](archive/)。
 
 ## 一句话结论
 
 A20OS 已经是一个认真的内核，但**当前形态是「QEMU 上的桌面/研究内核」**，
-不是「服务器内核」。差距不在功能数量，而在四个结构性问题：入站 TCP 此前完全
-不通、网络数据面被单一全局锁串行化、容器隔离的前置件（PID/userns/pivot_root）
-缺失、真机 PCIe 可用性受硬编码 QEMU 假设限制。
+不是「服务器内核」。差距不在功能数量，而在四个结构性问题：入站 TCP **已修**（下文
+第二节）、网络数据面被单一全局锁串行化、容器隔离的前置件（PID ns / userns /
+`pivot_root`）**已补齐**（第三节）、真机 PCIe 可用性受硬编码 QEMU 假设限制。
 
-第一条是本轮最大发现，且**已修**：`net_listen()` 此前丢弃已绑定的 PCB，
+这两处划线是本文件这一版补的，不是本轮（`wt/practical-readiness`）的成果：§二 与
+§三、§八 早就把这两项记为已完成，句首这半句却还停在补齐之前，属于本文自己前后
+不一致，按本文的规矩更正。
+
+**本轮没有改变这个结论——四项结构性问题一个都没动。** 本轮的代码改动全部落在
+默认 ABI=both 构建里的正确性与门禁盲区（§七点六）；文档侧动了两处排序与一处
+更正：§四 把「无内核抢占 + 无 RT 限流」的后果写成专门一节，§八 据此把同一项从
+P1 提为表首 P0（重新定级，不是新增阻塞项）；另外「`proc_lock` 超长持有的成因」
+一条按当前树更正——那把锁已在并入本分支基线的锁拆分轮（`65bd609eb`）里删除，
+见 §四 的更正注记与 §八 对应行。唯一可以说的是：§七点六 把「默认发布配置里有
+一整块代码是死的、有几个 syscall 会返回成功但不做事」这件事从推测变成了有编号
+有行号的既定事实，所以这份评估的**置信度**下降了——不是「更接近服务器内核」或
+「更远」，而是对现状知道得更多了。具体到服务器选型：**内核抢占与 RT 限流仍然
+缺席**，且它是当前距可投产最远的一项，后果见 §四 开头与 §八 首行。
+
+上列四项里的第一条（入站 TCP）是 `feat/net-lanes` 那一轮的最大发现，且**已修**：
+`net_listen()` 此前丢弃已绑定的 PCB，
 `tcp_listen()` 全树从未被调用，所以 listener 从来不存在于 lwIP 里，入站 SYN
 一律被回 RST——协议栈没有任何对外服务能力。现在 `net_listen()` 按 `a20.tcpmode`
 分两档，`lwip` 档会把绑定 PCB 转成真正的 LISTEN pcb；端到端实测（SLIRP
@@ -285,17 +302,68 @@ OOM 评分。
 
 ## 四、进程与调度
 
-- **无内核抢占**（无 `CONFIG_PREEMPT`，只有 `need_resched` 标志在安全点消费），
-  也无 IRQ 线程化。`SCHED_FIFO` 存在，但过不了长内核路径的 deadline。
-  `SCHED_RR` 本轮已修成真正轮转，但只能在调度器下次运行时让出 peers，
-  无法按时间片强制抢占，这依赖上面那条抢占缺口。
-- 无 RT 限流（`sched_rt_runtime_us`）、无 `RLIMIT_RTPRIO`：`SCHED_FIFO`
-  任务可以独占 100% CPU，无预算、无计量。
-- **`proc_lock` 是当前最大的压倒性热点**：4 核实测 2528 次竞争 / 951 万自旋，
+### 首先：无内核抢占 + 无 RT 限流是当前距可投产最远的一项
+
+**这一条排在所有其他阻塞项之前，理由不是它最容易修，而是它的后果是「整机永久
+停摆且不可观测」。** 具体到代码事实（下面每一条都在本次复核中重新读过）：
+
+- **没有 `CONFIG_PREEMPT`，全树一处都没有。** 对整个仓库
+  （`*.c` / `*.h` / `Makefile` / `*.mk` / `*.toml`）grep `CONFIG_PREEMPT` 命中 0 次。
+  调度器唯一的让出点是 `kernel/core/trap.c:589` 的
+  `proc_sched_safe_point()`，位置在 `trap_handler()` 的**用户态陷阱出口**——
+  也就是"从内核回到用户态的那一刻"才消费 `need_resched`。而
+  `proc_sched_safe_point()`（`kernel/proc/sched.c:1046-1053`，另一个编译单元）
+  读的也只是 per-CPU 的标志位，它本身不构成一个内核路径上的抢占点。
+- **`SCHED_FIFO` 头节点永不轮转。** `rt_pick_best_locked()`
+  （`kernel/proc/sched.c:350`）只在 `t->sched_policy == SCHED_RR` 时把头节点移到
+  队尾；FIFO 头被选中即返回。源码自己的注释（`kernel/proc/sched.c:346-348`）写明：
+  *"Forcing a switch mid-slice needs kernel preemption, which A20OS does not have;
+  without it an RR task that never blocks still runs until it does."*
+- **进入 RT 调度没有门槛。** `sys_sched_setscheduler()`
+  （`kernel/abi/linux/sys_sched.c:319-321`）对 RT policy 只校验
+  `1 <= sched_priority <= 99`，不做能力判定，也不查任何 RT 相关的 rlimit——
+  任何进程可以把自己设成 SCHED_FIFO 99。
+- **没有 RT 限流。** `sched_rt_runtime_us` 在 `kernel/` 与 `user/` 下 grep 命中 0 次；
+  `RLIMIT_RTPRIO` 只出现在 `user/external/` 下的 musl/mlibc/mksh 用户态头文件里，
+  内核侧没有任何一处定义或强制它。
+
+把四条合起来读，得到的就是"一个 `SCHED_FIFO` 任务可以独占 100% CPU，无预算、
+无计量"这个后果，而且不是"内核会慢慢公平回来"，是**不会回来**：只要它不阻塞、
+不返回用户态、没有一次陷阱落到 `trap_handler()` 的出口，它就不让出。叠加 §六 的
+两条——**无 watchdog**（只有 STM32 MCU 的 IWDG）、**panic 是关机不是重启**
+（`panic.c:89` 调 `firmware_shutdown()`，失败则 `arch_halt()` 死循环）——一次用户态
+的 RT 任务跑飞或一次内核里的长循环在这台机器上就是**永久挂死，且没有任何东西会
+来发现它**。对数据库或不受信任的工作负载，这意味着不是"尾延迟不达标"，而是
+"整机失联"。这也是 §八 把这一项排到表首的原因。
+
+`SCHED_RR` 已修成真正轮转（`rt_pick_best_locked()` 里按 policy 轮转），但正如上面
+那段源码注释所述，它只在**调度器下次运行时**让出 peers，无法按时间片强制抢占——
+同一个抢占缺口。修它需要的是内核态可抢占点（或 IRQ 线程化）加上 RT 运行时间预算
+与计量，二者本文件都没有找到任何在建的痕迹。
+
+### 其余条目
+
+- `SCHED_FIFO` 存在，但过不了长内核路径的 deadline（同上，无抢占）。
+- **[2026-10-06 更正] 本条描述的全局锁已不在当前树上。** `proc_lock` 已由并入本
+  分支基线的锁拆分轮删除（`65bd609eb`：全树 0 处获取点、定义已删；调度状态改由
+  per-task `park_lock` 保护，runq 成员关系仍归 per-CPU `runq_lock`，任务表迭代/
+  OOM 扫描/聚合统计等真正的全局残余改用新 `tasklist_lock`，
+  `kernel/proc/proc.c:56`；设计、验收标准与门禁演进见
+  [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)）。
+  下面保留的实测与分析因此只是**那把已删除的锁的历史**，「成因未定」的问题对它
+  失效。替代锁的竞争面尚未收口：`park_lock` 未注册进
+  `/proc/a20/lock_contention`，锁拆分轮自己的
+  [measured/lock-after.md](measured/lock-after.md) 末节列出了使 proc 侧
+  对比可解释还需做的事——本文件因此不声称「热点已消除」，只声称「该锁已删除」。
+  原文如下（其中 `sched.c` 的行号是产生这些结论的树上的，与当期文件对不上，
+  引用时按函数名定位）：
+  **`proc_lock` 是当时最大的压倒性热点**：4 核实测 2528 次竞争 / 951 万自旋，
   8 核 33335 次 / 1619 万自旋，多轮优化后仍 12–20K。根因是整个任务表只有
-  一把全局自旋锁（`kernel/proc/proc.c:43`），`sched.c` 里有 30 处取锁点。
+  一把全局自旋锁（定义在当时的 `kernel/proc/proc.c:43`），`sched.c` 里有 30 处
+  取锁点。
   归因标签要当心：实测最大的一行是 `proc_sched_safe_point+0x42`，但
-  `proc_sched_safe_point()`（`sched.c:1028-1036`）只读一个 per-CPU 的
+  `proc_sched_safe_point()`（当时的 `sched.c:1028-1036`，当期树在
+  `sched.c:1046-1053`）只读一个 per-CPU 的
   `need_resched`，它自己不取 `proc_lock`；那一行其实是内联进去的
   `proc_yield()`，与 lwIP 那次 `net_vfile_read+0xf6` 是同一个"返回地址跳过
   一帧"的假象。`proc_yield()`（`sched.c:1988-1999`）同样不直接取锁：它调
@@ -566,14 +634,254 @@ OOM 评分。
   头注），不声称可用。
 
 仍属本文件记录且**未**在本分支处理的：lwIP 全局锁分片（net-lanes 系列
-分支在做）、`proc_lock` 超长持有成因、
+分支在做）、`proc_lock` 超长持有成因（**后续已被锁拆分轮以删除该锁的方式终结**，
+`65bd609eb`，见 §四 更正注记——本行照录该分支当时的边界）、
 其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
 conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
+
+## 七点六、2026-10 默认 ABI=both 的双 ABI 盲区（`wt/practical-readiness`）
+
+本节记录本轮修掉的缺陷，各自附证据，并说明它们此前为什么能一路绿灯通过。**这一轮
+没有触碰第二节的网络、第三节的隔离、第五至第七节的可观测性/可靠性/真机，也没有动
+§八 的阻塞项表**；它改的是另一件事：默认发布配置（`ABI ?= both`，`Makefile:117`）
+里的正确性，以及覆盖这一配置的门禁本身。
+
+### 为什么这些缺陷能一路绿灯通过
+
+三件事叠加，使得"默认配置"这个事实从来没有被任何门禁兑现过：
+
+1. **唯一的 ABI 冒烟门禁构建的是 `ABI=linux`。** `instances/smoke-abi-linux.toml`
+   里明写 `abi = "linux"`，它跑的是 Linux syscall 冒烟。Native ABI 那 21 条
+   （`tools/smoke_cases.py` 中名字带 `native` 的用例，本次逐条导出确认是 21 条）
+   **全部**是 `ARCH=riscv64` + `ABI=both`，与上面那条不重叠。
+2. **两个覆盖生成器只读 Linux syscall 表。** `tools/gen_linux_syscall_coverage.py`
+   的 `TABLE` 指向 `kernel/abi/linux/syscall_table.def`，`tools/gen_envelope_coverage.py`
+   在 `:144` 用 `^LINUX_SYSCALL\(` 解析同一张表。两者对
+   `A20_NATIVE_SYSCALL` / `A20_SYS_` 一次都没有提及（grep 命中 0）。Native 侧此前的
+   `check-abi-boundary` 是 19 条单文件关键词存在性检查，没有一条跨表比对——所以
+   "加一个 native 入口不需要写任何文档行"这件事，没有任何一道门会红。
+3. **CI 从来没跑过任何一条 native 运行时门禁。** `git show
+   HEAD:.github/workflows/ci.yml | grep -c native` → **0**。21 条 native 运行时
+   门禁在主干上一次都没有执行过，本地绿与主干红之间不存在任何 native 差异。
+
+这三条合起来解释了一个此前没人注意到的形状：**CI 是绿的，默认配置却是不工作的**
+——不是"跑得少所以少见"，是那条唯一会执行的 ABI 门禁跑的是另一个 ABI。
+
+### 1. `#ifdef CONFIG_ABI_*` 在默认构建里恒假，POSIX 定时器整段驱动消失
+
+`Makefile:918` 只定义 `CONFIG_ABI_$(ABI)`，`Makefile:1087-1089` 在 `ABI=both` 时
+额外补 `CONFIG_ABI_NATIVE`。**`CONFIG_ABI_LINUX` 在默认构建里全树没有任何一处会
+定义它**，所以裸 `#ifdef CONFIG_ABI_LINUX` 恒假，整块 Linux 代码静默消失而不报错。
+
+本轮之前命中的是两处调用点：`kernel/proc/timer_heap.c` 的 `posix_timer_tick()`
+与 `kernel/proc/sched.c:1023` 的 `posix_itimer_cpu_tick(cur)`（卫语句在 `:1021`）。
+
+**后果一（本轮顺带修掉的一个既有缺陷）**：要紧的是分清哪一侧死、哪一侧活。
+`timer_posix.c` 的文件头自述它是 "ABI-agnostic process subsystem"，整份文件没有
+CONFIG 卫语句，默认构建一直在编；arm/删除一侧也是活的——`posix_timer_delete()`
+（`timer_posix.c:125`）与 `posix_timer_set_time()`（`:167`、`:194`）都会经
+`posix_timer_update_deadline()`（`:89`）调 `sched_set_posix_deadline()`
+（`kernel/proc/timer_heap.c:449`；它唯一的调用方是 `timer_posix.c:99`），所以
+`next_posix_scan`（`timer_heap.c:158`）**写得进去**。死的是过期一侧：
+`posix_timer_tick()`（`timer_posix.c:228`，末尾 `:293` 重算 deadline）此前唯一的
+调用点（`timer_heap.c:570-571`）被恒假卫语句挡住，于是过期没人扫描——信号不发、
+`expire_tick` 不推进、`next_posix_scan` 不重算。一旦 arm 过的 deadline 过去，
+`proc_next_timer_interval()`（`timer_heap.c:213`）每次重装都命中
+`if (next <= now) return SCHED_MIN_TIMER_INTERVAL;`（`:226-227`），
+`SCHED_MIN_TIMER_INTERVAL`（`:205`，`TICKS_PER_SEC/10000`）成为每次重装的下限
+——**在默认构建里 arm 过一个 POSIX 定时器、它的 deadline 过去之后，定时器中断
+就停在这个下限上**，直到该定时器被删除或清零（那条 syscall 路径会重跑
+`posix_timer_update_deadline()` 把它写回 `SCHED_NO_DEADLINE`）；过期路径自己
+永远不会清它。恢复 `posix_timer_tick()` 等于恢复了清理方。
+
+**后果二（本轮改动第一次把它变成活代码，它本身不是这次引入的缺陷）**：
+`g_posix_timers`（`kernel/proc/timer_posix.c:56`）与 `g_cpu_itimers`（`:67`）是
+无锁静态表；`ABI=linux` 下它们已经同时被定时器中断路径与 syscall 上下文改写，
+**不是新引入的**。但 `ABI=both` 此前根本编不进去，现在编进去了，默认 `NR_CPUS=1`
+的门禁不会暴露它，而 `instances/qemu-riscv64-smp4.toml` 设 `smp = 4` 且不覆盖
+`abi`（继承 `both`）。同时 `posix_itimer_set()` 在
+`kernel/proc/timer_posix.c:346` 于 `proc_get()` 失败时返回 `-EAGAIN`，经
+`sys_setitimer()` 透出——Linux 语义里 `setitimer` 不会因表满或引用失败返回
+`EAGAIN`。这一条本次**未核实**它在真实 SMP4 运行下是否会触发，只核实了代码路径。
+
+**armv7m 连带**：`Makefile:1177` 把 `KERNEL_SRC` 整体换成
+`components/trim.mk:8` 的 `TRIM_PROFILE_MCU_SOURCES`，那份表含
+`kernel/proc/timer_heap.c` 与 `kernel/proc/sched.c` 但**不含**
+`kernel/proc/timer_posix.c`，而它照样发 `-DCONFIG_ABI_BOTH`。守卫改宽之后
+`posix_timer_tick()` / `posix_itimer_cpu_tick()` 在 MCU 上会缺定义，因此在
+`kernel/mcu/mcu_stubs.c:55-56` 补了 stub（与同文件 `a20_timer_tick()` /
+`psi_tick()` 的处理同形——MCU 源集既无 `syscall/` 也无 `abi/linux/`，POSIX 定时器
+在那里根本无法被 arm）。**这一处本机未核实**：宿主没有 `arm-none-eabi-gcc`，
+armv7m 也不进 CI——`check-stm32f103` 只在 `Makefile:12-13` 的 `HOST_OS=Darwin`
+分支里进 `DEFAULT_KERNEL_CHECK_TARGETS`，托管构建矩阵（`Makefile:20`）走的是
+`ifeq` 的另一侧。
+
+**另外 15 处不是同一个 bug。** 命中列表里其余的都是裸 `#ifdef CONFIG_ABI_NATIVE`，
+而 `CONFIG_ABI_NATIVE` 在 `ABI=both` 下**是被定义的**，所以它们只是写法不统一，
+不是正确性问题。本轮一并改成完整形式是为形式统一（理由写在 `tools/gates.toml`
+的门禁注释里），本文件不把它们算成缺陷。
+
+**验证**：把新写的 `tools/gates.py` 与 `tools/gates.toml` 拷到 `git archive HEAD`
+出的干净副本上跑 `python3 tools/gates.py abi-config-guard`，退出码 1，点名 17 处；
+在当前树上跑 `make check-abi-config-guard` → PASS。`make ARCH=riscv64
+BOARD=qemu-virt-riscv64 ABI=both BRINGUP=0 kernel-only`（`-Werror`）零警告通过。
+
+### 2. Native ABI 的三份真源互不校验
+
+同一份 HEAD 快照上跑 `python3 tools/gates.py native-abi-coverage`，退出码 1，
+输出（摘）：
+
+```
+5/142 entries in kernel/abi/native/syscall_table.def are named nowhere in
+docs/native-abi/ (10 files): fs_serve, fs_block_io, monitor_query,
+device_free_dma, device_get_info
+16/142 numbers in kernel/include/abi/native/syscall_nr.h have no row in
+docs/native-abi/03-handle.md ## 6. 完整 Syscall 列表: device_free_dma,
+device_get_info, execve, fs_block_io, fs_serve, monitor_create,
+monitor_query, pager_create, pager_supply_pages, pager_vmo_attach,
+task_adopt, task_clone, task_mem_read, task_mem_write, vm_create_vmar,
+vm_share_region
+3/142 numbers ... are missing from user/liba20rt/a20_syscall.h:
+fs_block_io, fs_serve, handle_poll
+```
+
+逐条独立核对过：`syscall_nr.h` 在 HEAD 登记 142 个；`03-handle.md` §6 当时只有
+**126 行**表格行，却在末尾写着"总计：142"；`user/liba20rt/a20_syscall.h` 只有
+**139** 个 `#define A20_SYS_`，缺的就是点名的三个。也就是说，**规范文档的
+"总计"是一个和真实编号表对不上的数字，而没有任何门在意**；而
+`A20_SYS_handle_poll` 在用户态镜像里不存在，任何 include 该头的程序都**按名字找不到
+那个 syscall**，这三条同样没人发现。
+
+新增 `make check-native-abi-coverage`（宿主侧，并入 `check-doc-test-gates`、
+`make check` 与 CI `toolchain-gates` job）做四份真源的交叉：登记表
+`kernel/abi/native/syscall_table.def` ↔ 编号表 `kernel/include/abi/native/syscall_nr.h`
+↔ 用户态镜像 `user/liba20rt/a20_syscall.h` ↔ `docs/native-abi/`。§6 现在 142 行、
+"总计 142"、三份表各 142 条；当前树上 `make check-native-abi-coverage` → PASS。
+
+### 3. `vm_advise` 丢弃 advice 参数，纯提示会丢掉调用方的页
+
+改动前 `sys_a20_vm_advise()`（`kernel/abi/native/sys_native_mm.c`）读 `A20_ARG(0)`
+与 `A20_ARG(1)`，**`A20_ARG(2)` 的 advice 从未被读**，无条件调用
+`mm_madvise_dontneed()`，然后返回 `A20_OK`。也就是说 `MADV_NORMAL`——语义是
+"预期正常访问"，什么也不该做——会把调用方的页真的丢掉，并报告成功。
+`MADV_DONTFORK` / `MADV_WIPEONFORK` / `MADV_REMOVE` 等同样被当成 DONTNEED。
+
+现在 `sys_a20_vm_advise()` 把 advice 交给 `mm_madvise()`
+（`kernel/mm/madvise.c:219`）分派：DONTNEED/FREE 走丢页，DONTFORK/DOFORK/
+WIPEONFORK/KEEPONFORK 走 VMA fork 标志位，`MADV_REMOVE` 返回 `-ENOSYS`（本内核
+唯一能换出的路径是 OOM 受害者自己的 reclaim，没有按区间换出可调，丢掉等于毁掉
+调用方被承诺还能读回的内容），一批"实现了但不作用于这条路径"的 advice 做覆盖校验后
+返回成功，**未知值返回 `-EINVAL`**——这样调用方不会把"没实现"误读成"已生效"。
+
+**同一次改动里修掉的另一个溢出缺陷**：`mm_madvise_end()`
+（`kernel/mm/madvise.c:53`）现在显式拒绝 `end < addr` 的回绕区间。改动前 `end = (addr + len + PAGE_SIZE - 1)
+& ~…` 回绕后会落到 `addr` 之下，而下面 `for (va = addr; va < end;)` 的循环体
+**一次都不执行**，函数返回 0——一个溢出的区间得到的是"成功"，且什么都没碰。
+
+**验证（部分）**：新增的用户态断言在 `user/tests/test_native_mm.c` 第 8、9 节
+（MADV_NORMAL 不丢页、四个 fork-policy advice 的往返、区间越界与回绕、未知 advice、
+`MADV_REMOVE`）。**但我实测 `make smoke-native-mm` 是红的，且红在新增断言之前**：
+输出停在 `NATIVE_MM: FAIL vm_map FILE failed`（第 7 节，file-backed mapping 那一段）。
+在 HEAD 的干净副本上跑同一条门禁，失败点完全相同。所以**这两批新断言目前没有被
+任何一次成功执行验证过**——本文件不把它们记为 PASS。
+
+### 4. `handle_set_meta` 的五个 flag 是空实现，却返回 `A20_OK`
+
+改动前 `sys_a20_handle_set_meta()` 对 `ATIME` / `MTIME` / `CTIME` / `TRUNCATE` /
+`ALLOCATE` 的处理是 `(void)val0; (void)val1;`，然后 `return A20_OK`。也就是说
+`handle_set_meta(h, A20_SET_META_TRUNCATE, 0, 0)` 会**报告成功并保留原长度**。
+
+现在每个被 honored 的字段都走 VFS（`kernel/abi/native/sys_native_handle.c:288`
+起的 `vfs_ftruncate` / `vfs_futimens` / `vfs_fchmod` / `vfs_fchown`），而不是直接
+写 `vf->vnode->mode`——vnode cache 不是后端存储，而且只有 VFS 会检查调用者是否
+拥有该文件。保留位与未实现位在**任何字段被改动之前**就被拒绝
+（`kernel/abi/native/sys_native_handle.c:235-237`），`flags == 0` 同样拒绝；
+`CTIME`（`vfs_set_times()` 每次写都从时钟刷新 ctime，没有入口接受调用者给的 ctime）
+与 `ALLOCATE`（没有预分配内核可路由）返回 `A20_ERR_NOT_SUPPORTED`；只读挂载上
+三种写返回 `A20_ERR_ACCESS`。
+
+**验证（部分）**：新增断言在 `user/tests/test_native_handle.c` 的
+`set_meta_fields()` 与 `xattr_rights_split()`。**实测 `make smoke-native-handle`
+是红的，红在新增断言之前**：输出停在 `dup ok` 之后（`handle_transfer_byte_move()`，
+第一个 transfer 用例），`part ok` / `ac ok` 都没有打印。在 HEAD 的干净副本上跑同一
+条门禁，日志逐行相同。所以**这两组新断言同样没有被成功执行验证过**。
+
+### 5. xattr：只查 STAT 权限，且用户态 SDK 传的是结构体而不是线格式
+
+两处独立的缺陷：
+
+- **权限**：`xattr_common()` 此前对 set/get/list/remove 四种操作**一律**要求
+  `A20_RIGHT_STAT`。set 与 remove 改的是对象元数据却不需要 `WRITE`。现在按操作分
+  （`kernel/abi/native/sys_native_handle.c:375`）：set/remove 要 `WRITE`，
+  get/list 要 `STAT`。`A20_OBJ_DIRECTORY` 的 rights 上限不含 `WRITE`，所以对目录
+  句柄 set/remove 恒失败——这是 rights 代数自身的结果，不是新加的特殊判断。
+- **线格式**：内核的 `sys_a20_handle_xattr_set()` 读的是
+  `A20_ARG(0)=handle, ARG(1)=name, ARG(2)=value, ARG(3)=size`（四个平铺的字），
+  而 `user/liba20rt/a20_handle.h` 的 `a20_hdl_xattr_set/get/list` 此前构造了一个
+  `a20_xattr_args_t` 结构体、把 `&args` 塞进 `ARG(0)`——**把一个结构体指针当成
+  句柄传**。`a20_hdl_xattr_remove` 在 SDK 里则**根本不存在**（内核侧 0x010B 有实现）。
+
+SDK 三个 wrapper 改为传平铺参数，并补上 `a20_hdl_xattr_remove()`。
+
+### 6. `ns_apply` 宣称三种不存在的隔离
+
+改动前 `sys_a20_ns_apply()` 对四种 ns_type 都返回成功，并写入
+`target->ns_ctx.net_ifindex` / `pid_offset` / `dev_access_mask`。本次 grep 核实：
+这三个字段在整个 `kernel/` 与 `user/` 下**只有写入点，没有任何读取点**
+（`kernel/include/proc/proc.h:106-108` 的声明和
+`kernel/abi/native/sys_native_security.c` 的赋值之外零命中）。也就是说这三次写入
+不产生任何隔离效果，却报告 `A20_OK`。
+
+现在非 `A20_NS_FILESYSTEM` 的类型返回 `A20_ERR_NOT_SUPPORTED`
+（`kernel/abi/native/sys_native_security.c:139`），即承认"没有实现"而不是宣称
+"已经隔离"。只有 filesystem 生效，而且只写 `root_path` 字符串——**不更新
+`root_vn` / `root_mnt`，不重置 cwd**，所以同一 task 上 `fs.root_path` 与
+`root_vn`/`root_mnt` 会指向不同的 root，直到下一次 chroot/pivot_root 同时覆盖二者。
+这条边界原样保留（走 `vfs_task_root_set()` 需要把路径解析成活的 `(mnt, vnode)` 对，
+拒绝应用一个解析不了的 root 是 `ns_apply` 目前没有的行为变更），并写进了
+`docs/native-abi/06-security.md` §7.2。
+
+**另一处独立的截断**：`struct a20_namespace::root_path` 此前是 `char[256]`，而
+`task->fs.root_path` 是 `char[MAX_PATH_LEN]`，`MAX_PATH_LEN` 在托管构建下是 512
+（`kernel/include/core/consts.h:51`；MCU 下 32/64）。`ns_create` 把调用者的 root
+逐字快照进这个字段，于是**一条合法的路径会被静默截断**。现在两者同宽
+（`kernel/include/ipc/ipc.h:264`），并且 `ns_create` / `ns_apply` 两处的 `strncpy`
+都补了显式 NUL 终止——原先两处都只 `strncpy(dst, src, MAX_PATH_LEN - 1)` 而不写
+终止符。
+
+### 7. 接进 CI 的第一条 native 运行时门禁，当前是红的
+
+`.github/workflows/ci.yml` 的 `smoke` job 新增 `make smoke-native-contract`。
+选它是因为 `tools/smoke_cases.py` 里 21 条 native 用例全写死
+`ARCH=riscv64` + `ABI=both`，复用同一 dev-build 产物不会新增一次构建，代价是一次
+20 s 的 QEMU 启动。
+
+**我在本机跑过它，它是红的**：`make smoke-native-contract` 输出停在
+`F:vmol-leak-vmo`（`user/tests/test_native_contract.c:466`），`smoke.py` 随后报
+`missing ['vmol ok', 'dma ok']`。在 `git archive HEAD` 出的干净副本上跑同一条门禁，
+失败点逐行相同——**所以这是主干既有的 VMO 引用计数缺陷，与本轮改动无关**，归因
+不再需要靠"把改动还原再对比"来间接论证。
+
+接线本身是对的（它第一次让这个缺陷可见），但**在 `mm/` 的 VMO 释放路径修好之前，
+CI 的 `smoke` job 会因为这一行而红**。本文件不把它记为通过。
+
+### 本节遗留、未核实的部分
+
+- `smoke-native-handle` 与 `smoke-native-mm` 两条门禁**在本轮改动之前就是红的**
+  （各自在 HEAD 干净副本上复现，失败点相同），所以本轮新增的用户态断言
+  （`set_meta_fields()` / `xattr_rights_split()` / mm 第 8、9 节）**一次都没有被
+  成功执行验证过**。它们现在只是"已写下的断言"，不是"已验证的行为"。
+- 剩余 20 条 native 运行时门禁仍未进 CI。
+- Native 运行时仍然**只有 riscv64 一个架构**；`tools/targets-native*.mk` 里的
+  `native-<prog>-arch` 交叉编译目标 CI 一个都不调。
+- `ABI=both` 的 POSIX 定时器路径在 SMP 下的实际行为**未核实**（需要 SMP4 实例，
+  本轮没有跑）。
 
 ## 八、阻塞项排序
 
 | 级别 | 阻塞项 | 理由 |
 |---|---|---|
+| P0 | 内核抢占 + RT 限流 | **当前距可投产最远的一项，排在表首。** 无 `CONFIG_PREEMPT`（全树 grep 命中 0），唯一的让出点是用户态陷阱出口 `kernel/core/trap.c:589`；`rt_pick_best_locked()`（`kernel/proc/sched.c:350`）对 FIFO 头永不轮转；`sys_sched_setscheduler()`（`kernel/abi/linux/sys_sched.c:319-321`）对 RT 只校验优先级 1..99，无能力判定；`sched_rt_runtime_us` 与内核侧 `RLIMIT_RTPRIO` 均不存在。合起来就是：一个 `SCHED_FIFO` 任务可独占 100% CPU，无预算、无计量、不会自己让出；叠加 §六 的"无 watchdog"与"panic 是关机不是重启"，一次 RT 任务跑飞等于整机永久失联。详见 §四 开头 |
 | ~~P0~~ | ~~收包内存模型~~ | **已修**（`feat/net-lanes`）：两级暂存内联化，`net_socket_t` 1.05 MiB → 30 KiB，`net_msg_t` 68 KiB → 1368 B，锁内每包 memset 65535 B → 200 B，并由 `_Static_assert` 钉住 |
 | P0 | `g_net_lock` 分片 | **当前收益最大的未做项**。它同样是一把覆盖 1024 个 socket 的全局锁，52 处获取。改成 per-socket 锁 + 引用计数保护的 registry 是纯局部改动，不触碰 lwIP 核心 |
 | P0 | lwIP 全局锁分片 | 持锁方一侧的时长在 TCG 下拿不到，本文件已因此撤回过一次结论；分片方案不应再等这个数。spin 归因已修正（`spin_lock_at` 的 site 计数曾与 acquire 数重复）；4 核实测 4 次争用/83 万自旋，`max=472365`，即同样是少数几次长持有而非稳态高频。已确定的前提是：热路径要靠 socket 单一所有权避免全局 PCB 链表遍历，这需要先给 lwIP 的 `tcp_active`/`tcp_bound_pcbs`/`udp_pcbs` 做按端口哈希分桶 |
@@ -584,10 +892,9 @@ conntrack/NAT、ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
 | ~~P1~~ | ~~MSI-X~~ | **已完成（x86_64）**：能力解析 + LAPIC 编程 + virtio/e1000e 接入 + `smoke-msix-x86_64` 端到端投递断言。残留亲和性与非 x86 实现 |
 | P1 | ACPI `_PRT`（bridge 遍历已完成） | 真机服务器的准入条件 |
 | P1 | kdump 执行后端 + panic 改为重启 | 故障后能否自动恢复 |
-| P1 | 内核抢占 + RT 限流 | 实时性与尾延迟保证 |
 | P2 | 硬件 watchdog + A/B 分区 + dm-verity | 无人值守与安全更新 |
 | P2 | 硬件 PMU + ftrace/tracepoints | 生产环境可诊断性 |
-| P0 | `proc_lock` 超长持有的成因未定 | **只证伪了一半**。已证伪"被抢占"（成立）：全树 69 处 `proc_lock` 获取全部走 `spin_lock_irqsave`，无一处关中断之外；持锁临界区内无任何 `sched()`/`proc_yield()`。所以持有者确实在长时间执行。但**"成因类别已确定"这个说法不成立，本条已撤回**：先前据"持锁临界区里做全系统遍历"推出的 4 处候选，经核对在实测负载下基本不会执行：`net_stress_test` 的 `read()`/`write()` 是套接字调用，够不到 `mm_sync_shared_dirty_for_vnode()`；`proc_get_vm_stats()` 的唯一调用点是 `procfs_render.c:435` 的 `PF_MEMINFO`，而门禁只 cat `/proc/a20/perf` 与 `lock_contention`。更关键的是计数器自启动起累计、没有 reset 入口，所以那个 905K–136 万自旋的单次极值可能发生在引导期而非压力期。结论：成因仍未定位。**观测窗口缺陷已修**：`/proc/a20/{perf,lock_contention}` 现有 `reset` 写入口（`feat/net-lanes`），门禁可前后各读一次求差；`lock_counters_reset()` 连 `contended_max_spins` 一起清零，因为 reset 之后要回答的是"本窗口内的最大值" |
+| ~~P0~~ | ~~`proc_lock` 超长持有的成因未定~~ | **该行描述的锁已不在当前树上（2026-10-06 更正）**：`proc_lock` 已由并入本分支基线的锁拆分轮删除（`65bd609eb`，全树 0 处获取点、定义已删）；调度状态归 per-task `park_lock`，任务表迭代/OOM/聚合统计等低频残余归新 `tasklist_lock`（`kernel/proc/proc.c:56`），设计见 [roadmap/lock-serialization-split.md](roadmap/lock-serialization-split.md)，"成因未定"对已删除的锁失效。**未收口、不声称热点已消除**：`park_lock` 未注册进 `/proc/a20/lock_contention`，锁拆分之后的 proc 侧竞争现状不可测；`docs/measured/lock-after.md` 末节自列了收口前提（注册 `park_lock`、补 B1 基线、注册 slab 锁）。原文要点（历史）：已证伪"被抢占"——当时全树 69 处获取全部走 `spin_lock_irqsave`、持锁临界区内无 `sched()`/`proc_yield()`，持有者确实在长时间执行；"持锁临界区全系统遍历"成因说已撤回（4 处候选在实测负载下不执行）；观测窗口缺陷已修（`/proc/a20/{perf,lock_contention}` 的 `reset` 写入口，`lock_counters_reset()` 连 `contended_max_spins` 一起清零）。详见 §四 的更正注记与保留的原文 |
 | P2 | virtio-fs/DAX | 共享存储 |
 | P2 | 真 RTC + paravirt clock | 真机时间正确性 |
 | P3 | NUMA、热管理、C-states | 规模与能效 |

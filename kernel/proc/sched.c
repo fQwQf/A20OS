@@ -1018,7 +1018,7 @@ void proc_sched_tick(int from_user)
     } else if (cur->pid != 0) {
         cur->stime_ticks++;
     }
-#ifdef CONFIG_ABI_LINUX
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     /* ITIMER_VIRTUAL/ITIMER_PROF expiry is driven off these counters. */
     posix_itimer_cpu_tick(cur);
 #endif

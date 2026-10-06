@@ -7,7 +7,7 @@
 #include "core/klog.h"
 #include "core/string.h"
 #include "proc/signal.h"
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/ipc.h"
 #endif
 
@@ -567,7 +567,7 @@ void proc_sched_scan_signal_timers(uint64_t now)
             sched_rearm_timer();
     }
 
-#ifdef CONFIG_ABI_LINUX
+#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)
     posix_timer_tick();
 #endif
 }
@@ -582,7 +582,7 @@ void sched_scan_timers(uint64_t now)
     extern void psi_tick(void);
     psi_tick();
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     a20_timer_tick();
     /* Periodic monitor sampling (Native ABI perf-style counters). */
     extern void a20_monitor_tick(void);

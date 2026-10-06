@@ -266,30 +266,34 @@ Handle 过期后有两种行为：
 
 ### 7.1 Namespace 类型与当前边界
 
-| 类型 | 说明 | 隔离内容 |
-|------|------|---------|
-| filesystem | 文件系统命名空间 | 路径解析根 |
-| network | 网络命名空间 | socket 地址空间 |
-| pid | PID 命名空间 | task 编号空间 |
-| device | 设备命名空间 | 设备可见性 |
+| 类型 | 说明 | 隔离内容 | 当前状态 |
+|------|------|---------|---------|
+| filesystem | 文件系统命名空间 | 路径解析根 | 部分接入：`ns_apply` 只把 `root_path` 字符串写入 target 的 `fs.root_path`，路径解析逐次读取；不更新 `root_vn`/`root_mnt`，不重置 cwd（见 7.2） |
+| network | 网络命名空间 | socket 地址空间 | 未接入：`ns_apply` 返回 `A20_ERR_NOT_SUPPORTED` |
+| pid | PID 命名空间 | task 编号空间 | 未接入：`ns_apply` 返回 `A20_ERR_NOT_SUPPORTED` |
+| device | 设备命名空间 | 设备可见性 | 未接入：`ns_apply` 返回 `A20_ERR_NOT_SUPPORTED` |
 
 ### 7.2 Namespace 操作
 
 ```c
-/* 创建命名空间 */
-int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out);
+/* 创建命名空间；handle 由返回值交付，不写 arg2 */
+int64_t ns_create(uint32_t ns_type, a20_flags_t flags);
 
 /* 应用命名空间到目标 task */
 int64_t ns_apply(a20_handle_t ns, a20_handle_t target);
 ```
 
+`ns_create` 只读 arg0（`ns_type`，取值 0..3，越界返回 `A20_ERR_INVALID_ARGUMENT`）和 arg1（`flags`，内核取其低 32 位，存进对象后当前无人读取），成功时返回 namespace handle，失败时返回负的错误码；它没有输出参数。
+
 `ns_apply` 需要 namespace handle 的 `ADMIN` 和 target task handle 的 `CONTROL`。Namespace 是 handle，可以传递和降级。
 
-当前 `ns_create/ns_apply` 会创建对象并写入 target 的 `root_path`/`ns_ctx` 字段。文件系统 root 已接入路径解析；network/PID/device 字段是否形成完整隔离取决于各子系统消费点，不能仅凭对象和字段存在宣称完整 namespace 隔离。
+`ns_apply` 只对 `A20_NS_FILESYSTEM` 生效：`root_path` 写入 target 的 `fs.root_path` 与 `ns_ctx.fs_root`，路径解析由此获得隔离根。但它只写字符串，不走 `vfs_task_root_set()`（`kernel/fs/vfs.c`），因此 `root_vn`/`root_mnt` 仍描述旧 root，cwd 也不重置——同一 task 上 `fs.root_path` 与 `root_vn`/`root_mnt` 会指向不同的 root，直到下一次 chroot/pivot_root 覆盖二者。依赖对象的那两条语义因此不成立：`pivot_root` 用 `root_vn`/`root_mnt` 算 old_root，"已在该 root 内则拒绝"与"摘掉旧 root"会作用在旧 root 上。
+
+network/PID/device 三个类型没有任何消费点——写入的 `ns_ctx.net_ifindex`、`ns_ctx.pid_offset`、`ns_ctx.dev_access_mask` 全仓无人读取，因此这三个类型返回 `A20_ERR_NOT_SUPPORTED`。Linux ABI 侧对未实现类型返回 `EINVAL`（`kernel/abi/linux/sys_proc.c` 的 `sys_unshare`），本 ABI 拒绝未实现类型的行为一致，但 errno 不同：本 ABI 的 `A20_ERR_NOT_SUPPORTED` 映射到 `ENOSYS`（[02-errors.md](02-errors.md)）。Linux 侧也没有与 `ns_apply` 对应的 syscall。`ns_create` 对这三种类型仍会返回 handle，但该 handle 无法被 `ns_apply` 使用。
 
 ### 7.3 Spawn 中的 Namespace
 
-`task_spawn` 的 flags 可以指定新进程使用的 namespace。如果不指定，继承父进程的 namespace。
+`task_spawn`/`task_clone` 的 `flags` 当前只有 `A20_CLONE_COW_VM` 与 `A20_CLONE_STACK`，没有 namespace 选择位。子进程无条件从父进程复制 `fs.root_path`（`kernel/proc/task.c`），即继承父进程的 filesystem namespace；子进程自己的 namespace 需要在创建后用 `ns_apply` 设置。
 
 ---
 
