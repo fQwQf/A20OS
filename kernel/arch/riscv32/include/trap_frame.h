@@ -66,6 +66,12 @@ extern void user_trap_return(void);
 
 #define TRAP_CTX_EPC(ctx) ((ctx)->sepc)
 #define TRAP_CTX_STATUS(ctx) ((ctx)->sstatus)
+/* Taking a trap into S-mode copies SIE into SPIE and clears SIE before any
+ * software runs, so the sstatus __trap_from_kernel pushed (trap/trap.S, the
+ * first csrr on entry) reads SIE==0 no matter what the interrupted kernel
+ * context had.  SPIE is the only place that state survives -- and the return
+ * path's csrw sstatus / sret pair depends on exactly that copy. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->sstatus & SSTATUS_SPIE) != 0)
 #define TRAP_CTX_LAST_A0(ctx) ((ctx)->last_a0)
 #define TRAP_CTX_KScratch0(ctx) ((ctx)->x[0])
 

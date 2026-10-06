@@ -80,6 +80,17 @@ extern void trap_handler_la32(trap_context_t *ctx);
 #define TRAP_CTX_STATUS(ctx)       ((ctx)->prmd)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->regs[0])
 
+/* NaiLoong clears CRMD.IE before the entry vector runs and parks the
+ * interrupted value in PRMD.PIE, and the entry reads PRMD read-only, so this
+ * frame's prmd field is the pre-disable snapshot -- the role sstatus.SPIE plays
+ * on RISC-V.  SSTATUS_SPIE is PRMD bit 2 here, the same bit arch_local_irq_disable()
+ * clears in CRMD (include/cpu.h:36).  __trap_from_kernel only subtracts CTX_SIZE
+ * from the live sp instead of reloading a banked register the way
+ * __trap_from_user does, so a kernel trap frame lands on the interrupted task's
+ * own kernel stack; that is what lets the preemption decision point in
+ * core/trap.c switch out of this frame. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->prmd & SSTATUS_SPIE) != 0)
+
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->pgdl)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->prmd)
 

@@ -414,7 +414,7 @@ INCLUDE_DIR = $(KERNEL_DIR)/include
 # Preserve established generic and STM32 output paths used by smoke, release,
 # flash, and QEMU runners. Options that change compiled code, including
 # embedded deployment and cooperative boot, get distinct output directories.
-BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
+BUILD_VARIANT = $(ABI)-$(if $(filter 1,$(BRINGUP)),bringup,dev)$(if $(filter 1,$(RAMFS_USER)),-ramfs-user,)$(if $(and $(filter embedded,$(DRIVER_DEPLOYMENT)),$(filter-out armv7m,$(ARCH))),-embedded,)$(if $(filter 1,$(COOPERATIVE_BOOT)),-cooperative,)$(if $(filter 1,$(STORAGE_READ_ONLY)),-storage-ro,)$(if $(filter 1,$(EXTERNAL_ROOT)),-external-root,)$(if $(filter 1,$(NOMMU)),-nommu,)$(if $(filter-out 1,$(NR_CPUS)),-smp$(NR_CPUS),)$(if $(filter-out 1,$(NET_LANES)),-lanes$(NET_LANES),)$(if $(filter-out 2,$(NET_PROFILE)),-netp$(NET_PROFILE),)$(if $(filter 1,$(CONFIG_KERNEL_PREEMPT)),-preempt,)$(if $(filter y,$(CONFIG_DRIVER_LIFECYCLE_TEST)),-driver-lifecycle,)$(if $(filter y,$(CONFIG_HDA_SMOKE_TEST)),-hda-smoke,)$(if $(filter y,$(CONFIG_NVME_SMOKE_TEST)),-nvme-smoke,)$(if $(filter 1,$(CONFIG_SLAB_DEBUG)),-slabdbg,)$(if $(filter-out y,$(CONFIG_XLATOR)),-noxlator)
 
 ifeq ($(ARCH),armv7m)
 BUILD_VARIANT := $(BUILD_VARIANT)-$(BOARD)-f$(STM32_FLASH_KB)k-r$(STM32_RAM_KB)k
@@ -965,6 +965,15 @@ CFLAGS += -DCONFIG_COOPERATIVE_BOOT
 endif
 ifeq ($(STORAGE_READ_ONLY),1)
 CFLAGS += -DCONFIG_STORAGE_READ_ONLY -DCONFIG_AHCI
+endif
+# 内核抢占（CONFIG_KERNEL_PREEMPT）：hosted 架构默认开，MCU profile 保持协作式。
+# armv7m 用 PendSV 建模切换点，preempt 计数/tick 驱动的内核抢占模型与之不兼容；
+# 该 profile 的切换点必须由 PendSV 触发，不能由 IRQ 尾声触发。
+CONFIG_KERNEL_PREEMPT ?= 1
+ifeq ($(filter $(ARCH),$(TRIM_PROFILE_MCU_ARCHES)),)
+ifeq ($(filter 1,$(CONFIG_KERNEL_PREEMPT)),1)
+CFLAGS += -DCONFIG_KERNEL_PREEMPT
+endif
 endif
 # ARM32's short-descriptor abort path cannot safely demand-page large GUI
 # executables yet; eager loading also handles their shared PT_LOAD tail page.
