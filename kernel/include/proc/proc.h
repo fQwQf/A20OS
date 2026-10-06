@@ -550,6 +550,10 @@ void     proc_get_cpu_times(unsigned cpu, uint64_t *user, uint64_t *system,
                             uint64_t *idle);
 void     proc_sched_request_current(void);
 int      proc_sched_safe_point(void);
+/* Called by the trap layer at the IRQ return point; yields the current task
+ * when this CPU is preemptible and a reschedule is pending.  Never called from
+ * a synchronous-exception path -- see kernel/core/trap.c. */
+void     kernel_preempt_at_irq_return(void);
 /*
  * TASK_REFERENCE_LIFETIME:
  * proc_find_get() returns a referenced task which remains valid after the PID

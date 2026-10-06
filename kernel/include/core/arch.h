@@ -310,6 +310,21 @@ static inline int arch_syscall_resched_allowed(void)
 # define ARCH_TRAP_FAST_RETURN_DISARM(ctx) do { (void)(ctx); } while (0)
 #endif
 
+/*
+ * Was local interrupt delivery enabled in the context the trap interrupted?
+ * The kernel preemption decision point (core/trap.c) only switches out when
+ * this is true.  There is deliberately NO weak default here: a default of
+ * "never enabled" would let an arch that forgot its hook compile with
+ * CONFIG_KERNEL_PREEMPT on and then silently never preempt -- the config
+ * would be a lie no build or boot would expose.  Every hosted arch defines
+ * the macro against the status register its trap frame saved (the value the
+ * trap entry pushed, not the post-entry state); an arch that genuinely
+ * cannot report it has to say so by leaving CONFIG_KERNEL_PREEMPT off, and
+ * core/trap.c turns a missing definition under the config on into a compile
+ * error rather than a quiet zero.  Expands to an int expression, not a
+ * statement.
+ */
+
 /* Arch name string (for uname, procfs, etc.) */
 #if defined(CONFIG_RISCV64)
 # define ARCH_NAME "riscv64"

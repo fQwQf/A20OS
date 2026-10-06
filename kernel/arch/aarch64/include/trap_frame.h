@@ -118,6 +118,13 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->elr)
 #define TRAP_CTX_STATUS(ctx)       ((ctx)->spsr)
+/* On exception entry the hardware writes the interrupted PSTATE into SPSR_EL1
+ * and only then masks IRQs in the live PSTATE, so ctx->spsr still carries the
+ * pre-entry enable state: bit 7 (PSTATE.I) is set when the interrupt was
+ * already masked.  Written as a literal because the generic SSTATUS_SIE flag
+ * is deliberately 0 on AArch64 (see platform.h) and would silently answer
+ * "always enabled".  Same bit arch_irqs_enabled() reads out of DAIF. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->spsr & (1UL << 7)) == 0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->ttbr0)
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->ttbr0)

@@ -117,6 +117,24 @@ extern void user_trap_return(void);
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->pgdir)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->msr)
 
+/* An external interrupt copies the interrupted MSR into SRR1 and clears
+ * MSR[EE] in the newly installed one, and the real-mode vector stores SRR1
+ * to its scratch word before rewriting SRR1 for the ELFv2 return -- so the
+ * frame's msr field is the pre-disable snapshot, and MSR[EE] there says
+ * whether the interrupted kernel code could take an interrupt at all.
+ *
+ * A kernel-mode trap frame is built on the interrupted task's own kernel
+ * stack: with SRR1[PR] clear the entry takes SPRG2, which ARCH_SCHED_SWITCH
+ * and user_trap_return both refill from the outgoing task's kstack, so the
+ * nesting the preemption decision point in core/trap.c relies on holds here.
+ *
+ * Note that this predicate is reachable only since ppc64_trap_dispatch()
+ * learned to route kernel-mode traps to kernel_trap_handler() by SRR1[PR];
+ * before that split every trap went to trap_handler(), whose user tail both
+ * mischarged kernel ticks and could build a user signal frame over a kernel
+ * context. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->msr & PPC64_MSR_EE) != 0)
+
 static inline void arch_task_context_set_initial_sp(task_context_t *ctx,
                                                      trap_context_t *trap,
                                                      uint64_t stack_top) {
