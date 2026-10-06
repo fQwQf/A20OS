@@ -516,8 +516,8 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 #if CONFIG_NR_CPUS > 1
     if (irq == IRQ_VECTOR_TLB_FLUSH) {
-        lapic_write(LAPIC_EOI, 0);
         x86_64_ipi_tlb_flush_handler();
+        lapic_write(LAPIC_EOI, 0);
         return;
     }
     if (irq == IRQ_VECTOR_MSIX_VECTOR) {
