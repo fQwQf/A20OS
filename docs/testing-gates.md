@@ -41,7 +41,7 @@
 
 `DOC_DRIFT_KEYWORD_GATE`：`stub`、`partial`、`TODO`、`Future`、`not yet`、`for simplicity` 等漂移关键词只有在绑定到明确的覆盖表、TODO 条目或门禁契约时才允许出现。`kernel/external/` 和 `user/external/` 下导入的第三方代码树不参与该门禁。
 
-`HOST_RESOURCE_GATE_CONTRACT`：任何会启动 guest 的门禁都必须先做宿主资源预检。QEMU 申请到宿主机给不出的内存时不会返回非零退出码，而是宿主 OOM killer 挑一个进程杀掉，被杀的通常不是正在被调试的那个对象，所以"启动失败"在这里不是一个可观测的错误路径。预检由 `tools/a20_resource.py` 单一实现：经 `tools/a20` 的实例路径和经 `tools/targets-smoke.mk` 的 `smoke-gate` 宏（35 个直接起 `qemu-system-*` 的目标）调用的是同一个 `gate()` 与同一套 `A20_*` 环境策略，两者不得各自实现等待逻辑。门禁参数必须与该目标 `qemu` 命令行里的 `-m`/`-smp` 一致，否则预检在保护另一件事。等待策略有意分两种：`tools/a20 run/debug/test` 的 `A20_WAIT_TIMEOUT` 默认 `0`（一直等，因为交互式跑实例时"等资源释放"正是期望行为）；`smoke-*` 门禁的可覆盖默认是 `900s` 有界等待，因为 CI 在宿主机磁盘真的满时必须失败而不是挂死。可用性取 `/proc/meminfo` 的 `MemAvailable` 而非 `free`（后者不含可回收 page cache，会让门禁永远阻塞），并发 guest 数单独统计（空闲 vCPU 不进 loadavg，只看 load 无法判断是否已有 guest 占着 CPU）。
+`HOST_RESOURCE_GATE_CONTRACT`：任何会启动 guest 的门禁都必须先做宿主资源预检。QEMU 申请到宿主机给不出的内存时不会返回非零退出码，而是宿主 OOM killer 挑一个进程杀掉，被杀的通常不是正在被调试的那个对象，所以"启动失败"在这里不是一个可观测的错误路径。预检由 `tools/a20_resource.py` 单一实现：经 `tools/a20` 的实例路径，以及经 `tools/smoke.py` 的 `run_gate()`（每个 `smoke-*` 目标都在那里起 `qemu-system-*`，另有若干目标在自己的 recipe 里显式调用 `tools/a20_resource.py`），调用的是同一个 `gate()` 与同一套 `A20_*` 环境策略，两者不得各自实现等待逻辑。门禁参数必须与该目标 `qemu` 命令行里的 `-m`/`-smp` 一致，否则预检在保护另一件事。等待策略有意分两种：`tools/a20 run/debug/test` 的 `A20_WAIT_TIMEOUT` 默认 `0`（一直等，因为交互式跑实例时"等资源释放"正是期望行为）；`smoke-*` 门禁的可覆盖默认是 `900s` 有界等待，因为 CI 在宿主机磁盘真的满时必须失败而不是挂死。可用性取 `/proc/meminfo` 的 `MemAvailable` 而非 `free`（后者不含可回收 page cache，会让门禁永远阻塞），并发 guest 数单独统计（空闲 vCPU 不进 loadavg，只看 load 无法判断是否已有 guest 占着 CPU）。
 
 `make check-doc-test-gates` 是广泛的聚合门禁，不是快速的纯文档检查。其依赖包含内核构建以及 MM、VFS、驱动生命周期等 QEMU runtime smoke；阻塞点、信号/退出、timeout、SMP runqueue 与本地 pick 五个边界门禁分别依赖 `smoke-proc-stress`、`smoke-futex-stress` 和 `smoke-sched-stress`（在 QEMU 中 grep 运行时日志，而非源码标记），可能运行较长时间。
 
@@ -709,6 +709,40 @@ hub 后面，它的端口位图还会在最后两个端口上报幻影连接。�
 "hub 被正确识别、描述符被正确解析、下行总线被正确注册"，**不**证明"hub 后面的
 设备被枚举"。后者只能靠真机验证。
 
+### xHCI 中断路径（per-controller IRQ）
+
+`make smoke-usb-x86_64` 在 q35 上挂 `qemu-xhci` + `usb-kbd` + `usb-mouse`，
+断言键鼠枚举（原有两条），外加三条只有"完成由 controller 自己的 INTx 驱动"
+才成立的行：
+
+```
+[XHCI] controller ready: MMIO=0x… slots=… ports=… irq=… completion=interrupt
+[XHCI] completions: irq=1 poll=1
+[USB-HID] key event: code=30 value=1
+```
+
+forbid 侧加了 `[XHCI] controller ready: .*completion=polling`：中断没申领上时
+驱动会诚实地退回轮询，枚举照样成功，所以必须显式禁止这一行，否则门禁会在
+中断路径整个没跑的情况下变绿。
+
+**键值是怎么进去的**：`usb-kbd` 只在报告**变化**时才排一次传输，静止的 guest
+什么都不会完成，中断计数也就永远是 0，断言会变成空转。所以门禁给 QEMU 加一条
+私有 QMP socket（`-qmp unix:…`），`tools/smoke.py:qmp_key_pump()` 在整个窗口内
+反复按下/松开 qcode `a`（Linux keycode 30）。按 cadence 而不是只按一次，是因为
+guest 在枚举完成前没有为键盘配 interrupt endpoint，开机早期那一次按键什么都证明不了。
+
+**为什么走 QMP 而不是串口上的 monitor**：`-nographic` 把 monitor mux 到同一条
+tty，HMP `sendkey` 经 `qemu_input_find_handler()` 投递，它返回第一个 console-less
+且匹配事件掩码的 handler。q35 上 PS/2 键盘先注册（`hw/input/ps2.c`）且从不调用
+`qemu_input_handler_activate()`；QEMU 的 `usb-kbd` 会调用（`hw/input/hid.c`），
+而 `activate()` 做的是 `QTAILQ_INSERT_HEAD`，于是 USB 键盘排在 PS/2 前面。
+所以 `input-send-event` 落在 USB 键盘上，能证明 xHCI 这条路；`sendkey` 只会打到
+PS/2，证明不了任何 USB 的事。
+
+**门禁覆盖不到的部分**：机器是 `-smp 1`，SMP/多核压力未验证；`a20.xhci.poll=1`
+的回退路径本门禁没跑（需要另一个 case 或手动加 cmdline）；真机 xHCI 的 MSI/MSI-X
+也没覆盖（本驱动只用 INTx）。
+
 ### MSI-X 消息中断
 
 `make smoke-msix-x86_64` 在 q35 上同时挂一个 `virtio-blk-pci` 和一块
@@ -722,19 +756,262 @@ Control）、向量被预留并 arm、virtio-blk 改用 MSI-X 而让出 INTx，�
 了（把向量 OR 进 LAPIC 页基址），设备照样 notify 就是没有中断，只有这行能
 区分。
 
+**同一次运行还验亲和性**：这台机器是 `-smp 2`（构建变量多一个 `NR_CPUS=2`，
+产物目录 `x86_64-qemu-virt-x86_64-both-dev-smp2`）。shell 起来后脚本按顺序
+
+```
+cat /proc/a20/irq_affinity      # 打印 cpus: 2 和每个已编程条目 name/index/vector/cpu
+echo 1 > /proc/a20/irq_affinity # 把全部条目迁到 CPU1
+ls /bin                          # 真实块 I/O，制造迁移后的完成中断
+cat /proc/a20/irq_affinity      # 同一批条目现在以 \t1 结尾
+```
+
+再断言三条新增模式：`[MSI-X] affinity: N vector(s) now target cpu 1`、
+`[VIRTIO-BLK] MSI-X delivery on vector 208 cpu=1`（处理程序打印取走中断的
+CPU，同一向量迁移后会重新打印一次），以及读回行 `pci-1af4:1001-…\t0\t208\t1`。
+原来七条断言**一条没删**。forbid 侧加了三条失败模式：远端 LVT 没能 arm
+（`controller entry could not be armed`）、某条目拒绝目标 CPU
+（`entry N refused cpu 1`）、IPI 握手超时（`[X86_64 MSI-X] … timed out`）。
+
+迁移必须发生在运行时而不是 probe：写节点触发的是 mask → 改消息地址 → 经 IPI
+在远端 arm LVT → unmask 这一整条路径，折进 probe 的话本门禁已经证明过的
+boot-CPU 投递就没法再单独观察了。第一次 `cat` 也是可证伪的一半——节点不存在时
+写就是 shell 错误，第二条读回无论内容如何都不会满足。
+
 **门禁可证伪**：把 `arch_msix_message_address()` 里的 `LAPIC_PHYS_BASE` 改回
 `LAPIC_PHYS_BASE | (vector & 0xFF)`，`smoke-msix-x86_64` 会**只**缺
 `MSI-X delivery on vector 208` 这一条而失败——其余七条断言照常通过，因为表项、
 向量和 mask 都还是对的。把 capability 的解析改回只读 Vector Control，门禁会以
 缺 `MSI-X enabled` 失败；把 `queue_msix_vector` 写成向量号（208）而不是表
-索引（0），同样只缺这一条。
+索引（0），同样只缺这一条。把 `arch_msix_vector_setup()` 的远端分支去掉（直接
+`return -EOPNOTSUPP`），迁移会被拒绝，`affinity: … now target cpu 1` 与
+`cpu=1` 那条都不出现，且 forbid 里的 `entry N refused cpu 1` 命中——前七条仍
+照常通过。
 
 **门禁覆盖不到的部分**：只有 x86_64 有消息中断路径，其他架构的
-`arch_msix_message_address()` 返回失败，MSI-X 那段代码在这些板上只被验证到
-"干净地拒绝"为止，没有真实投递。e1000e 只验证到表被正确解析并 arm，网卡本身
+`arch_msix_message_address()` 返回失败、`arch_irq_msix_cpu_count()` 返回 1，
+MSI-X 那段代码在这些板上只被验证到"干净地拒绝"为止，没有真实投递。e1000e 只
+验证到表被正确解析并 arm，网卡本身
 不会收到流量，所以它的两个向量同样没有真实投递；virtio-blk 的那一路才是端到端
-的。IRQ 亲和性、多 CPU 下的 per-CPU 目标字段都不存在（见
-`docs/server-readiness.md`），向量窗口因此钉死在 boot processor。
+的。亲和性侧只覆盖"全局一个 CPU id"，没有 per-function / per-queue 的细粒度接口，
+也没有 cmdline 亲和性策略；CPU1 上的远端 LVT 由 IPI 写，但该 CPU 上是否真的
+长期均衡分配中断，未验证。
+
+上面所有断言都已由 `make smoke-msix-x86_64` 实跑验证：门禁 PASS，日志留在
+`.kernel-build/smoke/msix-x86_64.log`。它证明的仍只是 x86_64 QEMU 上的向量
+编程与投递行，不是真实硬件。
+
+### VirtIO-SCSI 完成中断（x86_64）
+
+`make smoke-virtio-scsi-irq` 在 q35 上挂 `-device virtio-scsi-pci` + 一块
+`scsi-hd`（64 MiB 稀疏 raw 盘，挂在 `/dev/sdX`），启动后运行用户态
+`virtio_scsi_test`。断言四层：
+
+1. probe 打印的 `completion=` 必须是 `msix` 或 `intx`，**不能**是 `polling`
+   （forbid 掉 `[VIRTIO-SCSI] ... completion polling`）；
+2. 测试用 `A20_BLK_IOCTL_GET_STATS` 探 `/dev/disk0..7`，只有 virtio-scsi
+   实现这个 ioctl，因此设备槽位顺序不影响门禁；它断言
+   `irq_mode ∈ {INTX, MSIX}`、`timeouts == 0`；
+3. 三轮回环：填图案 → 写盘尾 64 个扇区 → `ioctl(A20_BLK_IOCTL_SYNC)`
+   （SYNCHRONIZE CACHE(10)，cdb 里 LBNUM 与 count 全 0 = 整盘）→ 读回
+   `memcmp` → 再填再写 → flush → 读回 `memcmp`；每轮前后各取一次计数，
+   断言 `commands`/`flushes` 增长、`timeouts == 0`，且
+   `irq_count` 严格增长（`(+N)`，N ≥ 1）；
+4. `VIRTIO_SCSI_TEST: PASS`。
+
+**为什么用类 ioctl 而不是 `/proc/a20/perf`**：perf 是全局计数器，一台机器上
+同时有 virtio-blk 根盘和其他设备时，"IRQ 计数 > 0"无法归属到被测的 virtio-scsi
+控制器。`A20_BLK_IOCTL_GET_STATS`（`kernel/include/uapi/a20/block.h`）返回**该设备**
+的 `commands/flushes/timeouts/irq_count/irq_completions/spin_completions/
+irq_mode/irq_line`，归属是明确的。
+
+**门禁可证伪**：把 `virtio_scsi_command` 里的 park 前重查改成无条件 park（丢掉
+"完成先于入队"的重查），`irq_count` 仍会增长而读回 `memcmp` 会开始失败；
+把 `virtio_scsi_irq_handler` 换成 virtio-blk 那种"`isr == 0` 就返回"的写法，
+走 MSI-X 时 park 的等待者永远收不到唤醒，超时计数与 `PASS` 会一起消失。
+
+**门禁覆盖不到的部分**：只跑 x86_64 QEMU，INTx/MSI-X 的实际投递只在 q35 +
+x86 LAPIC 上验证过；riscv64/aarch64/loongarch64/ppc64le/aarch32 的 virtio-scsi
+中断路径**未验证**（VirtualBox ARM 那条路径仍以轮询为主）。混合完成窗口意味着
+**不能**断言 `irq_completions > 0`：`VIRTIO_SCSI_HYBRID_PRE_POLL_US`（800 µs）
+里的短命令本来就在自旋窗口完成，park 之后的 IRP 才计入 `irq_completions`，
+所以门禁只断言 handler 被调用过（`irq_count`），不断言完成是被中断唤醒的。
+门禁不覆盖：多 target / 多 LUN、READ(16)/WRITE(16)、非 512B 扇区、队列并发
+（驱动每控制器仍只有一条 in-flight 命令）、`-kernel` 之外的固件启动路径。
+`a20.virtio-scsi.poll=1` 的回退路径**未**被本门禁覆盖（要另跑一遍带该参数的
+boot 才验证得到）。
+
+失败时查看 `.kernel-build/smoke/virtio-scsi-irq-x86_64.log` 中首个
+`VIRTIO_SCSI_TEST: FAIL` 与其后的 `[VIRTIO-SCSI]` 行，对照
+`kernel/drivers/block/virtio_scsi.c` 与 `user/cmds/core/virtio_scsi_test.c`。
+
+### RTL8139 端到端回环与接收中断（x86_64）
+
+`make smoke-net-rtl8139` 在 q35 上挂 `-device rtl8139`（`-nic user` 的
+`model=rtl8139`），用 `hostfwd=tcp:127.0.0.1:18093-10.0.2.15:18093` 把宿主
+18093 转发到来客 18093，宿主侧跑 `tools/rtl8139_host_probe.py`，来客跑用户态
+`tcp_accept_test 18093`。
+
+**为什么要这个门禁**：此前树里 x86_64 只有 e1000，而 e1000 的 id 表里没有任何
+Realtek ID，所以 `-nic user,model=rtl8139` 起来的那个 PCI function 没有任何驱动
+认领，`DEV_CLASS_NET` 里根本没有网卡。这不是"网络不通"，是"栈从来没有过设备"，
+从外面看不出来。驱动补上以后才轮到这个门禁。
+
+断言分五层，每一条的失败原因不同：
+
+1. **端到端往返**：`rtl8139_host_probe.py` 连上转发端口、发一个字节、要求它回到
+   宿主（回来时源端口仍是 18093，这是 QEMU 转发规则保证的，所以回环证明的是双向
+   都真走通了），并且日志里出现 `TCP_ACCEPT_TEST: PASS`。
+2. **`mode=irq`**：`[RTL8139] ready:` 行必须存在且 `mode=irq`。第 1 条排除不了回退
+   —— `.poll` 是从同一个 lwIP drain 里跑的，纯轮询的网卡照样搬得动字节。
+3. **`rtl8139_irq_calls > 0` 且 `rtl8139_irq_rx > 0`**：handler 真的进去了，且看到
+   了只有接收 ring 能产生的 cause。第 1、2 条都推不出这一条：第 2 条只说明"注册过
+   handler"，只有它能抓到 INTx 路由/swizzle 写错的情况。计数在测试**之后**从
+   `/proc/a20/perf` 读，与 `smoke-net-e1000-irq` 同一个理由：`a20_perf_format()`
+   在首次读时才打开累计，所以那次 `cat` 本身就是第一次真实测量。
+4. **`rtl8139_tx_reclaimed > 0` 且 `rtl8139_rx_drained > 0`**：收发两半的描述符
+   确实退休了。与第 3 条分开，因为 TX ring 只有 4 个描述符深，一个帧根本看不出
+   "回收从未发生"；`rx_drained` 用来区分"真的走了 ring"和"栈发现没东西可取"。
+5. **日志里没有 panic / assertion failed / page fault**。
+
+**门禁可证伪**：把 `rtl8139_irq_handler` 整个换成空函数，第 1 条照样通过（`.poll`
+会驱动一切），第 3 条归零；把 `IMR` 的写去掉或写 0，第 3 条归零而第 1 条照样过；
+把 `RTL8139_TXPOLL` 的 `0x60` 改成 datasheet 上的 `0x20`，第 1 条在真硅片上会挂、
+在 QEMU 上不会（见下）。
+
+**门禁覆盖不到的部分**：一台 RTL8139、QEMU user-mode 网络后端、TCG、单核、
+INTx（这个型号没有 MSI-X）。寄存器图和 RX ring 几何是照着仓库内置的
+`qemu-10.0.13+ds/hw/net/rtl8139.c` 写的，**没有在真实硅片上跑过**；同一个
+`RCR[12:11]` 字段在 RTL8139C datasheet 上写的是「8K + 16K」，驱动按 QEMU 的语义
+编程成 64 KiB，硅片上是否一致**未验证**。`TxPoll` 也有同样的分歧：datasheet 是
+bit 5，QEMU 是 bit 6，驱动写 `0x60` 两边都满足，并在代码里写明了这个妥协。不覆盖：
+多队列、接收合并、WOL、省电、速率报告、任何吞吐结论、RTL8139C 的增强寄存器。
+`a20.rtl8139.poll=1` 的强制轮询分支**不**在本门禁里覆盖 —— 它是这条正向断言的
+阴性对照，要另跑一遍带该参数的 boot 才验证得到。
+
+失败时查看 `.kernel-build/smoke/net-rtl8139-x86_64.log` 中首个
+`TCP_ACCEPT_TEST: FAIL`、`[RTL8139]` 行，以及测试后的
+`cat /proc/a20/perf` 那两段，对照 `kernel/drivers/net/rtl8139.c`、
+`tools/rtl8139_host_probe.py` 与 `user/cmds/net/tcp_accept_test.c`。
+
+### virtio-console 双向回环（x86_64）
+
+`make smoke-virtio-console` 在 q35 上挂 `-device virtio-serial-pci` +
+`-device virtconsole,chardev=...`，chardev 是 `server=on,wait=off` 的 unix
+socket；宿主侧跑 `tools/vport_host_probe.py`，来客跑用户态 `vport_test`。
+
+**为什么是这个形状**：探针不会一上来就连 socket，而是先在串口日志里等
+`VPORT_TEST: READY`（来客已经 open 成功 `/dev/vport0` 并断开控制台镜像），
+再写 64 字节。这样两个半边都不需要猜来客的启动时间，QEMU 也不必在启动阶段
+阻塞等待一个还没人建立的连接。
+
+断言分两层，缺一不可：
+
+1. **宿主 -> 来客**：来客逐字节校验从 `/dev/vport0` 读到的 64 字节（`A`..`Z` 循环）。
+   只在宿主侧发完就宣布成功，会把「接收路径丢字节/写坏字节」这条最典型的故障放过。
+2. **来客 -> 宿主**：同样的 64 字节写回同一设备，探针比对回显。只看来客 PASS
+   则完全没覆盖发送半边——驱动把 used ring 游标或 notify 写错时，接收仍然正常。
+
+**门禁可证伪**：把 `vport_setup_queue()` 的 TX queue 号从 1 改成 0，接收仍然通、
+来客仍然打印 PASS，但探针等不到回显，第 2 条失败；把 rx 描述符的 `flags` 从
+`WRITE` 改成 0，第 1 条先失败。
+
+**门禁覆盖不到的部分（诚实边界）**：本条门禁已在 x86_64 QEMU 上实跑通过
+（`smoke-virtio-console: PASS (64 bytes host->guest->/dev/vport0->host)`，日志
+`.kernel-build/smoke/virtio-console-x86_64.log`），因此该环境下的双向回环与 INTx
+送达是已验证的。它仍只覆盖 x86_64 QEMU、
+单核、单个 port 0、无 MULTIPORT、无 MSI-X、无 termios 层；第二个 virtio-serial
+函数（`-device virtio-serial-pci` 挂两个）会因单静态实例返回 `-EBUSY`，这属于
+已知限制而非缺陷；riscv64/aarch64/loongarch64 上只做过单文件 `-fsyntax-only`
+自检，运行时未验证。
+
+失败时查看 `.kernel-build/smoke/virtio-console-x86_64.log` 中的 `VPORT_TEST:`
+与 `[VPORT]` 行，对照 `kernel/drivers/char/virtio_console.c`、
+`tools/vport_host_probe.py` 与 `user/cmds/core/vport_test.c`。
+
+### virtio-rng 熵源（x86_64）
+
+`make smoke-virtio-rng` 在 q35 上挂 `-device virtio-rng-pci`，来客跑用户态
+`hwrng_test`。断言 `[VRNG] virtio-rng ready` 与 `HWRNG_TEST: PASS`，并禁止
+`virtio-rng.*unresolved symbol` —— 后者专门盯 drvmod 白名单漏导出
+`random_reseed` 的情况，那种情况下模块会被 loader 直接拒绝而不是加载后行为异常。
+
+`hwrng_test` 读至少 256 B，并断言结果不是全 `0x00`、不是全 `0xff`、也不是单字节
+重复。之所以要这三条而不是"读到了就算"：设备不应答时 read 会走 500 ms 有界等待
+后返回 `-ETIMEDOUT`，一个只检查返回值的测试会把"读到零"和"读到熵"混为一谈。
+
+**这条门禁证明的边界**：熵来自 QEMU 的宿主熵池，不是真实硬件 RNG；单静态实例；
+riscv64 的 virtio-mmio 路径只做过 `-fsyntax-only`，运行时未验证。
+
+已实跑 PASS，日志 `.kernel-build/smoke/virtio-rng-x86_64.log`
+（`HWRNG_TEST: PASS bytes=256 first=0x87 second=0xa7 tries=1`）。
+
+### AHCI 完整块设备中断路径（x86_64）
+
+`make smoke-ahci-ich9` 在 q35 上把一个 ext4 镜像挂在 `-device ich9-ahci` +
+`-device ide-hd,bus=ahci.0` 上，来客先读一次 `/proc/a20/perf`，跑
+`fsync_durability_test`，再读一次。
+
+**为什么要有这条**：q35 芯片组自带一个 AHCI 在 00:1f.2，挂上去的 ich9-ahci 落在
+00:02.0，两者走不同的 INTx swizzle。只挂 virtio-blk 的门禁证明不了 AHCI 的
+top-half 跑过 —— 而 AHCI 原先是纯轮询的，正因为轮询也能把盘驱动起来，从外面
+看不出区别。
+
+断言：`[AHCI] device on port` 恰好出现 1 次（挂两个就说明匹配过宽）、日志里有
+`completion=irq`、`FSYNC_TEST: PASS`、`ahci_irq_completions > 0`、
+`ahci_commands > 0`，**并且 `ahci_poll_completions == 0`**。最后这条是整条门禁的
+关键：它要求每一条完成都经过中断 top-half，只要有一条走了轮询就失败。这正是把
+两条路径分开计数的意义 —— 否则"盘能用"这个观察对中断路径是否工作不提供任何信息。
+
+`ahci_irq_wakeups`、`ahci_park_rounds`、`ahci_errors` 只记录不断言，因为它们在
+本机 QEMU 上没有稳定的期望值。
+
+已实跑 PASS，日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`
+（`FSYNC_TEST: PASS`，12 条命令全部经中断完成）。真实 SATA PHY 上仍无任何证据，
+且只走 INTx、没有 MSI-X 路径。
+
+### E1000 端到端回环与接收中断（x86_64）
+
+`make smoke-net-e1000-irq` 用 `hostfwd=tcp:127.0.0.1:18091-10.0.2.15:18091`，
+宿主侧跑 `tools/e1000_host_probe.py`，来客跑 `tcp_accept_test 18091 10.0.2.15`
+（serve 模式，见 [TCP accept 路径](#tcp-accept-路径与-listener-存在性linux-abi-sockets-区域)）。
+
+断言分四层：`[E1000] ready:` 行存在且 `completion=msix`；宿主往返成功且来客打印
+`TCP_ACCEPT_TEST: PASS`；`e1000_irq_calls > 0` 且 `e1000_irq_rx > 0`；
+`e1000_tx_reclaimed > 0` 且 `e1000_rx_drained > 0`。计数在测试**之后**读，
+因为 `a20_perf_format()` 在首次读时才打开累计，那次 `cat` 本身就是第一次真实测量。
+
+`_rx`/`_tx` 是 `_calls` 的子集，不能相加。`e1000_irq_empty` 只记录不断言。
+
+已实跑 PASS，日志 `.kernel-build/smoke/net-e1000-irq-x86_64.log`。真实 82540EM
+硅片上未验证；`a20.e1000.poll=1` 的强制轮询分支本身未被这条门禁覆盖。
+
+### CMOS RTC 墙钟（x86_64）
+
+`make smoke-rtc-cmos` 以 `-rtc base=utc` 启动（让宿主与来客的时钟可比），来客跑
+`/bin/date -u +RTC_WALLCLOCK=...`。除日志断言外，还有个宿主侧 `post` 步骤：
+`tools/check_rtc_wallclock.py --max-skew 300` 拿日志里的来客时间与宿主时间比对，
+容差 300 s。
+
+日志断言同时要求两行：`[TIME] wallclock: no RTC readable yet, seed from build
+time`（`timekeeping_init()` 先用编译期种子起步）与 `[TIME] wallclock: hardware
+RTC adopted, unix=1...`。要求第一行是因为替换**必须**发生在 seed 之后 ——
+驱动是 Early DriverStore 模块，只有 `driver_manager_early_init()` 之后才能绑定，
+所以看到两行才说明替换真的发生了，而不是压根没走到 CMOS。
+
+已实跑 PASS，日志 `.kernel-build/smoke/rtc-cmos-x86_64.log`：来客采用
+epoch 1791231484，与编译期种子 1791230264 不同。
+
+### CMOS RTC 越界回退（x86_64）
+
+`make smoke-rtc-cmos-fallback` 是同一次启动，但把 RTC 设成
+`-rtc base=1960-06-15T12:00:00` —— 落在驱动接受的窗口之外。断言 `[CMOS-RTC] no
+usable time` 与 `seed from build time`，并且**禁止** `[CMOS-RTC] wall clock:`
+与 `hardware RTC adopted` 两行。
+
+**这条门禁尚未执行过**，目前只有 `smoke-rtc-cmos` 有运行证据。它验的是驱动在读不到
+可用时间时仍然完成绑定、不 panic、也不谎称采用了硬件时钟 —— 回退路径不能因为
+CMOS 不可信就把机器卡在 probe 里。
 
 ### 致命信号 core dump
 

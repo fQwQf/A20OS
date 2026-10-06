@@ -58,6 +58,25 @@ static void my_enumerate_devices(void) {
 
 平台 bus 的 `match` 应使用稳定的 ID 或 `plat_data` compatible 值，不要只比较驱动名称。若只有一个板内设备且暂时使用名称匹配，必须把它标为平台私有且禁止通配其他驱动。
 
+## 驱动侧读 IRQ 资源：`platform_device_irq()`
+
+`resource_t` 一直有 `RES_IRQ`，但板级**是否**发布中断线号是可选的，而且"没发布"和"发布了但是坏的"在 `device_get_resource()` 里都只是一个 `NULL`。驱动自己遍历 `dev->res[]` 区分不了这两者，所以读取线号只有一个入口：
+
+```c
+int platform_device_irq(device_t *dev);
+```
+
+| 返回 | 含义 | 驱动应当怎么做 |
+|---|---|---|
+| `>= 0` | 可用的线号（`RES_IRQ` 单点，`end == start`） | `request_irq()`，完成路径可以 park |
+| `-ENODEV` | 板级没发布 `RES_IRQ`（**不是错误**） | 轮询；行为与引入本函数之前完全一致 |
+| `-EINVAL` | `dev` 为空、非 platform bus，或 `RES_IRQ` 的 `end != start`（只接受单点线号） | 当作板级声明缺陷处理，可告警后轮询 |
+| `-ERANGE` | 线号超出固定 256 线 irq 表 | 当作板级声明缺陷处理，可告警后轮询 |
+
+向后兼容是完整的：不带 `RES_IRQ` 的 platform 设备读出 `-ENODEV`，而没有调用过本函数的驱动行为一点不变。`PLATFORM_IRQ_MAX_LINES` 与函数原型声明在 `kernel/include/drivers/bus/platform_bus.h`。
+
+板级在 `kernel/platform/*/board.c` 的固定表里发布 IRQ 时，把 `.start` 与 `.end` 都写成同一个线号；riscv64 的 FDT 枚举路径已自动从 `interrupts` 生成 `RES_IRQ`。**不要为了让驱动走中断而猜一个常量线号**：猜错时驱动会在超时后自行降级为轮询，代价是每个扇区先等满超时。
+
 ## MMIO 资源中的地址
 
 `resource_t.start/end` 存放驱动可直接访问的内核虚拟地址，不一定是裸物理地址。板级映射负责建立地址属性。PCI BAR 通过 `arch_pci_bar_to_resource()` 转换；AArch64 VirtualBox 会加 `PAGE_OFFSET`，VMSVGA 则在向用户态报告显存时再保存/计算物理地址。

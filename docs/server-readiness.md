@@ -67,11 +67,22 @@ virtio-blk（`VIRTIO_BLK_T_FLUSH`）、loop（转发 backing file 的 fsync）�
 AHCI（`FLUSH CACHE EXT`）。
 
 验证：`make smoke-fsync-durability`，断言 `block_flushes` 计数器确实增长。
+在 virtio-blk 之上还有第二条路径：`make smoke-ahci-ich9` 在 x86_64 QEMU q35
+上挂 `-device ich9-ahci` + `ide-hd`，把 ext4 镜像接到该控制器上，让
+`fsync_durability_test` 真的打在 SATA 盘上，并额外断言驱动走了中断完成路径。
 
 ### 仍缺
 
-- AHCI 路径仅编译验证。`ahci.c` 位于 `CONFIG_AHCI` 之后，树内没有任何
-  实例挂载 AHCI 控制器。补一个挂 `ich9-ahci` 的门禁是缺失的一环。
+- AHCI 中断路径已在 QEMU 上验证：`make smoke-ahci-ich9` 实跑 PASS
+  （日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`），一个 ich9-ahci port
+  绑在中断路径上，12 条命令全部完成，`/proc/a20/perf` 的
+  `ahci_irq_completions > 0`。用的命令行是
+  `-machine q35 -device ich9-ahci,id=ahci -device ide-hd,drive=xa,bus=ahci.0`
+  （该函数落在 00:02.0，q35 芯片组自带的 AHCI 在 00:1f.2），q35 root bus 的
+  INTx swizzle 由 `arch_pci_intx_irq()` 覆盖（dev 2 pin A → GSI 22 →
+  vector 0x56）。**这仍只是 QEMU 证据**，下面的边界没有因此改变。
+- AHCI 仍是单 controller / 单 port / 单 command slot，只走 INTx，没有 MSI-X
+  路径；真实 SATA PHY 上的行为没有任何证据。
 - 无 RAID、无数据校验和、无快照/CoW、无 fs-verity。
   文件数据块本身仍无校验和；`crc32c` 覆盖 JBD2 日志与 ext4 元数据
   （`metadata_csum`），不覆盖常规文件数据内容。
@@ -748,8 +759,10 @@ OOM 评分。
   Message Address Lower（pre-PCIe 编码，BIR `2:0` + 偏移 `31:3`）——
   `-kernel` 引导没有固件写前者，必须读后者。**残留**：只有 x86_64 实现了
   `arch_msix_message_address()`/`arch_msix_vector_setup()`，其余架构干净
-  拒绝并退回 INTx/轮询；无 IRQ 亲和性与 per-CPU 目标字段，向量窗口钉死
-  在 boot processor 的 `0xD0..0xF0`；e1000e 只验证到表被正确解析并 arm，
+  拒绝并退回 INTx/轮询；x86_64 的 per-CPU 目的与 IRQ 亲和性机制已落地
+  （默认目标仍是 boot CPU 的 `0xD0..0xF0`，见 §七 的 PCI MSI-X 条），
+  但没有 per-function/per-queue 的细粒度接口与 cmdline 亲和性策略；
+  e1000e 只验证到表被正确解析并 arm，
   网卡无流量故未实测投递（virtio-blk 一路是端到端的）。
 - INTx 路由硬编码 QEMU q35：`x86_64/trap/irqchip.c:297-311` 只认
   host bridge `0x29c08086`，否则 `return -1`。代码注释自述需要
@@ -757,11 +770,22 @@ OOM 评分。
 - ECAM 基址是编译期常量（仅 virtualbox-aarch64 从 MCFG 读）。
 - ACPI 基本没有：只有 RSDP + MADT + HPET + TPM2。**无 DSDT/AML 解释器**
   → 电源管理在架构上就不可能。
-- 无真 RTC：wall clock 从编译期常量 `A20_BUILD_UNIX_TIME` 起步。
+- RTC 只有 x86_64：`cmos-rtc.a20drv`（MC146818，Early DriverStore）读 CMOS
+  并经 `timekeeping_wallclock_set_hw()` 替换墙钟；因为它是模块，替换只能
+  发生在 `driver_manager_early_init()` 之后，`timekeeping_init()` 仍从编译期
+  常量 `A20_BUILD_UNIX_TIME` 起步并打一行日志。门禁 `smoke-rtc-cmos` 已实跑
+  PASS（`-rtc base=utc`，宿主侧复核来客墙钟；日志
+  `.kernel-build/smoke/rtc-cmos-x86_64.log`，来客采用 epoch 1791231484，
+  与编译期种子 1791230264 不同，说明读到的是硬件）。
+  **`smoke-rtc-cmos-fallback` 尚未执行** —— CMOS 落在可接受窗口外时回退到
+  编译期种子这条分支目前没有运行证据。该驱动只读、无 IRQ、
+  不做时区换算，century 寄存器不可信时按 20xx 处理。其余架构仍无真 RTC，
+  墙钟一律从编译期常量起步。
 - 无 paravirt clock：KVM 检测只用于决定是否信任 TSC，无 kvm-clock
   兜底 → KVM 下 guest 存在时钟漂移风险。
-- 无 virtio-fs/DAX（**服务器存储共享路径完全缺失**）、virtio-rng、
-  virtio-console、virtio-balloon。
+- 无 virtio-fs/DAX（**服务器存储共享路径完全缺失**）、virtio-balloon。
+  （virtio-rng 与 virtio-console 本分支已补上，见
+  `docs/drivers/meta/implementation-status.md`。）
 - 好的一面：RISC-V IOMMU 是 755 行真实现（fail-closed）；x86_64 TSC 校准
   完整（CPUID 0x15/0x16 + PIT + invariant-TSC）；idle 路径是真实架构停机
   （`sti;hlt` / `wfi`）而非忙等。
@@ -792,11 +816,17 @@ OOM 评分。
   以 `smoke-abi-linux`/`smoke-vfs-stress`/`smoke-mm-stress` 通过为前提。
 - **PCI MSI-X**：`kernel/drivers/bus/pci_msix.c` + 能力表位置双编码解析 +
   x86_64 LAPIC 向量/LVT 编程 + virtio transport 接入（`msix_prepare`/
-  `msix_arm`/`msix_teardown`）+ e1000e 接入；门禁 `smoke-msix-x86_64`
+  `msix_arm`/`msix_teardown`）+ e1000e 接入；**x86_64 上已有 per-CPU 目的**：
+  消息地址按目标 APIC ID 生成，目标不是当前 CPU 时经 IPI 在远端编程 LVT，
+  驱动入口 `pci_msix_set_affinity()` / `pci_msix_set_all_affinity()`，运行期
+  入口 `/proc/a20/irq_affinity`，默认仍是 boot CPU。门禁 `smoke-msix-x86_64`
   断言 `[VIRTIO-BLK] MSI-X delivery on vector 208`，该行由中断处理程序
   在首次消息中断时打印，且已做反向验证（把消息地址改回错误形式，门禁
-  只缺这一条而失败）。详见 `docs/drivers/guide/pci-and-virtio.md` 的
-  「MSI-X」一节。
+  只缺这一条而失败）；同一门禁以 `-smp 2` 追加断言迁到 CPU1 后投递行带
+  `cpu=1`。详见 `docs/drivers/guide/pci-and-virtio.md` 的
+  「MSI-X」一节。**本次亲和性改动已由 `make smoke-msix-x86_64` 实跑验证**
+  （PASS，日志 `.kernel-build/smoke/msix-x86_64.log`）：`-smp 2` 下投递行带
+  `cpu=1` 的断言成立。仍未验证的是非 x86 平台。
 - **server world 声明层**：`packages/world/server.world`（dropbear/chrony/
   busybox syslogd+crond）+ overlay init + `server-riscv64` 实例；
   声明过 `check-instances` 门禁，端到端组装与 SSH 登录验证未做（见 world
@@ -804,7 +834,8 @@ OOM 评分。
 
 仍属本文件记录且**未**在本分支处理的：`proc_lock` 超长持有成因、
 其余 5 个 namespace（net/cgroup/time/uts/ipc）与 `nsproxy`、
-ACPI `_PRT`、MSI-X 的 IRQ 亲和性与非 x86 平台实现。
+ACPI `_PRT`、MSI-X 的非 x86 平台实现，以及 IRQ 亲和性的**策略层**（per-function /
+per-queue 的细粒度接口与 cmdline 亲和性策略；机制层已在 x86_64 落地，见上一条）。
 
 其中 **conntrack/NAT 已在 `feat/net-strengthening` 落地**（见 §二 与 §八），
 lwIP 全局锁分片推进到阶段 E（`g_lwip_lock` 本身仍是全局锁）。
@@ -964,7 +995,13 @@ make ARCH=riscv64 BOARD=qemu-virt-riscv64 \
 ## 九、推荐的第一批动作
 按「改动小、风险低、避免真实事故」排序：
 
-1. 补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。
+1. ~~补一个挂 `ich9-ahci` 的门禁，让 AHCI flush 获得运行验证。~~ ——
+   **已完成**：门禁 `make smoke-ahci-ich9`（x86_64 QEMU q35 +
+   `-device ich9-ahci` + `ide-hd`，ext4 镜像挂 /extra，跑
+   `fsync_durability_test`，断言 `block_flushes` 增长且驱动自有的
+   `ahci_irq_completions > 0`）实跑 PASS，同期把 `ahci.c` 的完成路径改为
+   默认中断驱动（`a20.ahci.poll=1` 保留轮询回退）。
+   QEMU 上的运行验证已拿到；真实 SATA PHY 上仍无证据，那条边界不变。
 2. ~~崩溃注入测试基础设施~~ —— **已完成**，形式是 JBD2 提交序列内的定点
    panic（`/proc/a20/journal` 下发注入点）+ 同镜像重启 + 宿主 `e2fsck` 比对，
    见 `make smoke-ext4-journal`。仍未覆盖的是"到点就死"的粗粒度形态

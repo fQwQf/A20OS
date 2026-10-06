@@ -21,7 +21,7 @@
 | 内存 | 0x40000000 起，2/4/8 GiB | board 窗口上限 0x240000000 |
 | UART0 | 0x10000000 | 内核映射需加 `PAGE_OFFSET` |
 | PLIC | 0x0C000000 | 与 QEMU virt 相同基址 |
-| SDIO0 (dw-mci) | 0x16020000 | 轮询驱动 |
+| SDIO0 (dw-mci) | 0x16020000 | 中断优先，线号由 DTB `interrupts` 提供；无 DTB/无 IRQ 资源时纯轮询 |
 | GMAC1 (EQOS) | 0x16040000 | 时钟由 SYS_CRG 开启 |
 | SYS_CRG | 0x13020000 | GMAC1 时钟门控 + 复位 |
 | 定时器 | RISC-V `time` CSR | DTB `timebase-frequency`（JH7110 24 MHz，回退值同） |
@@ -44,14 +44,14 @@ GMAC 上电时被时钟门控并处于复位态，必须先使能再访问寄存
 
 ### 中断
 
-PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前 hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB 确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。DW-SDIO 当前不提供 IRQ 资源，纯轮询。
+PLIC 与 QEMU virt 同布局，board 复用 `PLIC_SENABLE/SPRIORITY/SCLAIM` 宏按当前 hart 编程；`0x16040000` GMAC1 的 `macirq` 为 PLIC 78（由随镜像构建的 VF2 DTB 确认），`ack/eoi` 由通用异常路径完成。GMAC 数据面当前使用轮询，故不会依赖该线。DW-SDIO 的线号由 DTB `interrupts` 经 riscv64 FDT 枚举器生成 `RES_IRQ`，驱动用 `platform_device_irq()` 读取；`board.c` 的 fallback 平台表**故意不发布** `RES_IRQ`（树内没有任何 DTB 带过这个数字，写死一个猜测会让每个扇区先等满超时才降级），此时 `platform_device_irq()` 返回 `-ENODEV`，驱动走轮询。内核参数 `a20.dw-sdio.poll=1` 可在有 IRQ 资源时也强制轮询。**该中断路径在真机上未验证过。**
 
 ### 驱动状态与边界
 
 - `starfive_gmac.c`：EQOS ring descriptor，TX 长度写入 des2，des3 = OWN|FD|LD|len；RX 使用 OWN|BUF1V 并在收包后重新推进 tail；每个实例持私有 spinlock 串行化 send/recv/poll；buffer/descriptor 在所有权移交前后调 `dma_sync_for_device/cpu`。
 - PHY：扫描 MDIO 0..31 定位（VF2 板载 Motorcomm YT8531），复位 + 自协商。
-- DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁，命令/数据路径同步轮询。
-- 已知边界：数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。
+- DW-SDIO（`dw_sdio.c`）：`g_sdio` 单实例 + 私有锁（`mutex` 串行化传输，`irq_lock` 保护中断 latch）。有 IRQ 资源时命令/数据完成走中断（bounded pre-poll 后 park 到 `wait_queue_t`），无 IRQ 资源时全同步轮询；IRQ 模式首次超时会释放线号并永久降级为轮询。卡枚举全程轮询（probe 上下文不能 park）。
+- 已知边界：GMAC 数据面全部轮询，未接 IRQ；GMAC 无 generic `.a20drv` 包，只能 embedded 静态部署（见 `docs/drivers/meta/implementation-status.md`）。DW-SDIO 中断路径真机未验证。
 - 架构级 `TICKS_PER_SEC` 已改为运行时值：riscv64 在首次使用时读取 DTB `timebase-frequency` 并缓存（QEMU virt 10 MHz、JH7110 24 MHz 均正确），`timer_set_interval` 与全部 tick↔时间换算随之按板校准。
 - 内核加载/链接地址与启动页表 RAM 窗口已由链接脚本符号（`BOOT_MAP_PHYS`/`BOOT_MAP_MMIO_HI`）参数化，board 级 `ldscript.ld` 把 VF2 内核定位在 PA 0x40200000；上板启动链与 Flash 烧录流程见 [visionfive2-boot.md](visionfive2-boot.md)。
 
