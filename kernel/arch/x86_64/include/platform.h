@@ -46,6 +46,10 @@ int arch_ram_range(size_t idx, paddr_t *base, paddr_t *end);
 #define IRQ_VECTOR_KEYBOARD 0x21
 #define IRQ_VECTOR_RESCHEDULE 0xF0
 #define IRQ_VECTOR_TLB_FLUSH 0xF1
+/* Arms a message-signalled vector on a secondary CPU.  Its LVT entry lives in
+ * that CPU's own LAPIC page, so programming it for a remote target means
+ * writing it from that CPU; this IPI is how the request gets there. */
+#define IRQ_VECTOR_MSIX_VECTOR 0xF2
 
 /* Publish the chipset PCI INTx -> IOAPIC GSI base (0 selects the q35
  * swizzle).  A board calls this once it knows the routing; see the setter in
@@ -74,6 +78,17 @@ int x86_64_smp_remote_tlb_flush(uint32_t logical_mask, uint64_t addr,
 /* IPI handler run on the target CPU: reloads CR3 (full local TLB flush) and
  * acknowledges the request generation. */
 void x86_64_ipi_tlb_flush_handler(void);
+/* Program (or mask) the LVT entry covering a message-signalled vector on the
+ * CPU that owns it.  Only valid on that CPU; x86_64_smp_msix_vector_setup()
+ * is what reaches a secondary one. */
+void x86_64_msix_lvt_program(uint32_t vector, int masked);
+/* Arm (or mask) a message-signalled vector on a secondary CPU over
+ * IRQ_VECTOR_MSIX_VECTOR and wait for its acknowledgement.  -EINVAL for a CPU
+ * this kernel does not manage, -ENODEV for one that is not online. */
+int x86_64_smp_msix_vector_setup(unsigned cpu, uint32_t vector, int masked);
+/* IPI handler run on the target CPU: programs the requested LVT entry and
+ * acknowledges the request generation. */
+void x86_64_ipi_msix_vector_handler(void);
 void x86_64_smp_secondary_init(void);
 
 /* Exception / pseudo-cause codes
