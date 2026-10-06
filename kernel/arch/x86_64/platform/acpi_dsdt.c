@@ -112,35 +112,41 @@ static int aml_pkg_length(const uint8_t **pp, const uint8_t *end, uint32_t *leng
     return 0;
 }
 
-/* One segment of a NameString: one to four characters.  The lead byte may set
- * bits 6:5 to say the name is two characters longer than the remaining ones --
- * a compressed form for hardware IDs, none of which this file needs to match,
- * but the character count still has to be right to stay in step. */
+/* One segment of a NameString.
+ *
+ * The lead byte's top two bits select the form (ACPI 6.4 section 5.3):
+ *
+ *   00  the low six bits are the character count, 1 to 4
+ *   40  eight characters follow
+ *   80  four follow
+ *   C0  two follow
+ *
+ * The compressed forms exist so hardware IDs can be written without paying for
+ * a lead byte per character.  None of them name an object this file looks for,
+ * but their bytes still have to be consumed the right number, or everything
+ * after them in the name is read as part of the name. */
 static int aml_seg(const uint8_t **pp, const uint8_t *end, char *out,
                    size_t *len)
 {
     const uint8_t *p = *pp;
     if (p >= end)
         return -1;
+
     uint8_t lead = *p++;
-    size_t n = (size_t)(lead & 0x3FU);
-    /* Bits 6:5 count extra two-character groups. */
-    size_t extra = ((lead >> 5) & 0x3U) * 2U;
-    size_t total = 4 + extra;
-    if (n == 0 || n > 4 || (size_t)(end - p) < extra)
+    size_t n;
+    switch (lead & 0xC0U) {
+    case 0x00: n = lead & 0x3FU; break;
+    case 0x40: n = 8; break;
+    case 0x80: n = 4; break;
+    default:   n = 2; break;
+    }
+    if (n == 0 || n > 8 || (size_t)(end - p) < n)
         return -1;
-    for (size_t i = 0; i < extra; i++) {
-        if (*len < AML_PATH_MAX)
+    for (size_t i = 0; i < n; i++) {
+        if (*len + 1 < AML_PATH_MAX)
             out[(*len)++] = (char)p[i];
     }
-    p += extra;
-    for (size_t i = n; i > 0; i--) {
-        if (p >= end)
-            return -1;
-        if (*len < AML_PATH_MAX)
-            out[(*len)++] = (char)p[i - 1];
-    }
-    *pp = p;
+    *pp = p + n;
     return 0;
 }
 

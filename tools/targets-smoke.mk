@@ -440,11 +440,13 @@ smoke-fsync-durability:
 # platform-bus variant, message-signalled interrupts (ahci.c has no MSI-X
 # path), or any real SATA PHY.
 #
-# Same directory spelling smoke-pci-bridge uses: `make ARCH=x86_64 dev-build`
-# writes .kernel-build/x86_64-qemu-virt-x86_64-both-dev (ABI=both, BRINGUP=0,
-# CONFIG_XLATOR=y).  Spelled once here so the two image paths and the kernel
-# path cannot drift apart inside one target.
-AHCI_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+# Same directory spelling smoke-pci-bridge uses, obtained from the Makefile
+# rather than written out: `make ARCH=x86_64 dev-build` derives BUILD_VARIANT
+# from every option that changes compiled code, so a literal here stops matching
+# the directory the build writes as soon as one of those defaults moves (see
+# the comment on print-build-dir in the Makefile).
+X86_64_DEV_BUILD_DIR = $(shell $(MAKE) --no-print-directory ARCH=x86_64 print-build-dir)
+AHCI_X86_64_BUILD_DIR = $(X86_64_DEV_BUILD_DIR)
 # The explicit a20_resource.py call is HOST_RESOURCE_GATE_CONTRACT (docs/testing-gates.md):
 # this target launches QEMU itself rather than going through tools/a20 test or
 # tools/smoke.py, so it has to ask for the gate itself.  -m/-c must match the
@@ -657,11 +659,11 @@ smoke-pci-bridge:
 	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=xb \
+		-drive file=$(X86_64_DEV_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
 		-device pcie-root-port,id=rp1,bus=pcie.0,addr=0x4,chassis=1 \
 		-device pcie-root-port,id=rp2,bus=rp1,addr=0x0,chassis=2 \
 		-device virtio-blk-pci,drive=xb,bus=rp2,addr=0x0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		-kernel $(X86_64_DEV_BUILD_DIR)/kernel.elf \
 		> "$$log" 2>&1 || status=$$?; \
 	if grep -q 'bridges walked' "$$log" && \
 	   grep -qE '\[BUS\] pci 0[12]:00\.0 id=1b36:000c .*class=06:04:00' "$$log" && \
@@ -704,12 +706,12 @@ smoke-virtio-console:
 	  sleep 30; printf 'poweroff\n'; } | \
 	$(TIMEOUT) $(SMOKE_TIMEOUT_VPORT) qemu-system-x86_64 \
 		-machine q35 -m 1G -nographic -smp 1 -no-reboot \
-		-drive file=.kernel-build/x86_64-qemu-virt-x86_64-both-dev/fat32.img,if=none,format=raw,id=xb \
+		-drive file=$(X86_64_DEV_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
 		-device virtio-blk-pci,drive=xb \
 		-chardev socket,id=vportch,path=$$sock,server=on,wait=off \
 		-device virtio-serial-pci,id=vser0 \
 		-device virtconsole,chardev=vportch,bus=vser0.0 \
-		-kernel .kernel-build/x86_64-qemu-virt-x86_64-both-dev/kernel.elf \
+		-kernel $(X86_64_DEV_BUILD_DIR)/kernel.elf \
 		> "$$log" 2>&1 & \
 	qemu_pid=$$!; \
 	$(PYTHON) tools/vport_host_probe.py "$$sock" "$$log" || probe=$$?; \
@@ -1261,7 +1263,7 @@ smoke-net-ipv6:
 # the negative control; putting it in the same gate as the positive claim would
 # let a boot that ignored the driver entirely satisfy one of the two.  The knob's
 # own behaviour is therefore NOT verified by this gate.
-E1000_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+E1000_X86_64_BUILD_DIR = $(X86_64_DEV_BUILD_DIR)
 # This target launches QEMU itself rather than going through tools/a20 test or
 # tools/smoke.py, so it asks for the gate itself (HOST_RESOURCE_GATE_CONTRACT in
 # docs/testing-gates.md).  -m/-c match the launch below.
@@ -1426,7 +1428,7 @@ smoke-net-e1000-irq:
 # the negative control; putting it in the same gate as the positive claim would
 # let a boot that ignored the driver entirely satisfy one of the two.  The knob's
 # own behaviour is therefore NOT verified by this gate.
-RTL8139_X86_64_BUILD_DIR = .kernel-build/x86_64-qemu-virt-x86_64-both-dev
+RTL8139_X86_64_BUILD_DIR = $(X86_64_DEV_BUILD_DIR)
 smoke-net-rtl8139: NET_HOSTFWD=
 smoke-net-rtl8139:
 	$(MAKE) ARCH=x86_64 dev-build
