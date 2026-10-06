@@ -230,10 +230,11 @@ static int virtio_snd_wait_used(virtio_snd_dev_t *snd,
     }
 }
 
-static int virtio_snd_setup_queue(virtio_snd_dev_t *snd, uint32_t index)
+static int virtio_snd_setup_queue(virtio_snd_dev_t *snd, device_t *dev,
+                                uint32_t index)
 {
     virtio_snd_queue_t *queue = &snd->queues[index];
-    queue->mem = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE,
+    queue->mem = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE,
                                              &queue->dma);
     if (!queue->mem)
         return -ENOMEM;
@@ -295,18 +296,18 @@ static void virtio_snd_quarantine(virtio_snd_dev_t *snd)
     g_virtio_snd_quarantine = snd;
 }
 
-static int virtio_snd_alloc_dma(virtio_snd_dev_t *snd)
+static int virtio_snd_alloc_dma(virtio_snd_dev_t *snd, device_t *dev)
 {
     for (uint32_t i = 0; i < VIRTIO_SND_QUEUE_COUNT; i++) {
-        int ret = virtio_snd_setup_queue(snd, i);
+        int ret = virtio_snd_setup_queue(snd, dev, i);
         if (ret < 0)
             return ret;
     }
-    snd->control = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE,
+    snd->control = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE,
                                                &snd->control_dma);
-    snd->events = dma_alloc_coherent_aligned(PAGE_SIZE, PAGE_SIZE,
+    snd->events = dma_alloc_coherent_aligned(dev, PAGE_SIZE, PAGE_SIZE,
                                               &snd->events_dma);
-    snd->tx_dma = dma_alloc_coherent_aligned(sizeof(*snd->tx_dma), PAGE_SIZE,
+    snd->tx_dma = dma_alloc_coherent_aligned(dev, sizeof(*snd->tx_dma), PAGE_SIZE,
                                               &snd->tx_dma_handle);
     return snd->control && snd->events && snd->tx_dma ? 0 : -ENOMEM;
 }
@@ -918,7 +919,7 @@ static int virtio_snd_init_transport(device_t *dev,
                                       VIRTIO_SND_CONFIG_STREAMS);
     if (!streams || streams > VIRTIO_SND_MAX_STREAMS)
         goto fail;
-    if (virtio_snd_alloc_dma(snd) < 0)
+    if (virtio_snd_alloc_dma(snd, dev) < 0)
         goto fail;
     virtio_snd_populate_events(snd);
 

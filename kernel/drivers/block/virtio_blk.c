@@ -7,6 +7,7 @@
 #include "drivers/core/driver_register.h"
 #include "mm/mm.h"
 #include "mm/frame.h"
+#include "core/cpu.h"
 #include "core/string.h"
 #include "core/stdio.h"
 #include "core/panic.h"
@@ -70,7 +71,14 @@ typedef struct {
     int                slot;
     int                in_flight;
     int                irq_registered;
-    int                msix_first_irq;   /* set once the first MSI-X message lands */
+    /* One bit per logical CPU: set the first time a message-signalled
+     * completion is handled there.  Keyed by CPU rather than by a single
+     * one-shot flag so a vector that has been re-affinitized away from the
+     * boot processor announces itself exactly the way the boot-CPU one does,
+     * and "delivered again, on the new CPU" after the destination was
+     * rewritten is the only observation that tells a moved vector from a
+     * moved vector that delivers. */
+    _Atomic uint32_t   msix_delivered_cpus;
 } virtio_blk_inst_t;
 
 static virtio_blk_inst_t g_insts[VIRTIO_MAX_DEVS];
@@ -113,13 +121,13 @@ static void virtio_blk_free_dma(virtio_blk_inst_t *inst)
  * own 64 KiB DMA buffer so concurrent filesystem requests cannot overwrite
  * each other while the device still owns a descriptor chain.
  */
-static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst)
+static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst, device_t *dev)
 {
     inst->queue_dma_mem =
-        dma_alloc_coherent_aligned(VIRTIO_BLK_QUEUE_DMA_BYTES, PAGE_SIZE,
+        dma_alloc_coherent_aligned(dev, VIRTIO_BLK_QUEUE_DMA_BYTES, PAGE_SIZE,
                                    &inst->queue_dma_addr);
     inst->request_dma_mem =
-        dma_alloc_coherent_aligned(VIRTIO_BLK_REQUEST_DMA_BYTES, PAGE_SIZE,
+        dma_alloc_coherent_aligned(dev, VIRTIO_BLK_REQUEST_DMA_BYTES, PAGE_SIZE,
                                    &inst->request_dma_addr);
     if (!inst->queue_dma_mem || !inst->request_dma_mem)
         goto fail;
@@ -133,7 +141,7 @@ static int virtio_blk_alloc_dma(virtio_blk_inst_t *inst)
 
     for (int i = 0; i < VIRTIO_BLK_REQ_SLOTS; i++) {
         inst->req[i].dma_buf =
-            dma_alloc_coherent_aligned(VIRTIO_BLK_BOUNCE_BYTES, PAGE_SIZE,
+            dma_alloc_coherent_aligned(dev, VIRTIO_BLK_BOUNCE_BYTES, PAGE_SIZE,
                                        &inst->req[i].dma_addr);
         if (!inst->req[i].dma_buf)
             goto fail;
@@ -269,12 +277,12 @@ static int virtio_blk_device_init_locked(virtio_blk_inst_t *inst) {
     return 0;
 }
 
-static int virtio_blk_init_instance(virtio_blk_inst_t *inst) {
+static int virtio_blk_init_instance(virtio_blk_inst_t *inst, device_t *dev) {
     int idx = inst->slot;
 
     inst->blk.legacy = inst->vt.legacy;
     spin_init(&inst->lock);
-    if (virtio_blk_alloc_dma(inst) != 0) {
+    if (virtio_blk_alloc_dma(inst, dev) != 0) {
         printf("[VIRTIO%d] Failed to allocate contiguous DMA memory\n", idx);
         return -1;
     }
@@ -353,7 +361,9 @@ int virtio_blk_init(void) {
         return -1;
 
     inst->slot = idx;
-    if (virtio_blk_init_instance(inst) != 0)
+    /* The legacy arch scan publishes a device_t only after the instance is
+     * up, so there is nothing here to constrain: the full 64-bit window. */
+    if (virtio_blk_init_instance(inst, NULL) != 0)
         return -1;
 
     g_ninst++;
@@ -516,15 +526,27 @@ static int virtio_blk_irq_handler(int irq, void *priv) {
     if (!inst)
         return 0;
 
-    /* One line per device, the first time a message-signalled completion
-     * arrives: it is the only observation that distinguishes "the capability
+    /* One line per CPU, the first time a message-signalled completion arrives
+     * there: it is the only observation that distinguishes "the capability
      * was programmed" from "the device actually posted a message and the
-     * platform took it".  It is counted before the ISR read, because a device
-     * whose queue interrupt is routed through a vector need not also set a
-     * shared ISR bit -- the arrival itself is the evidence. */
-    if (inst->vt.msix_vectors > 0 &&
-        __atomic_exchange_n(&inst->msix_first_irq, 1, __ATOMIC_RELAXED) == 0)
-        kinfo("[VIRTIO-BLK] MSI-X delivery on vector %d\n", irq);
+     * platform took it on that CPU".  It is counted before the ISR read,
+     * because a device whose queue interrupt is routed through a vector need
+     * not also set a shared ISR bit -- the arrival itself is the evidence. */
+    if (inst->vt.msix_vectors > 0) {
+        unsigned cpu = arch_current_cpu_id();
+        if (cpu < 32U) {
+            uint32_t bit = 1U << cpu;
+            uint32_t seen = __atomic_load_n(&inst->msix_delivered_cpus,
+                                            __ATOMIC_RELAXED);
+            if (!(seen & bit) &&
+                __atomic_compare_exchange_n(&inst->msix_delivered_cpus, &seen,
+                                            seen | bit, 0,
+                                            __ATOMIC_RELAXED,
+                                            __ATOMIC_RELAXED))
+                kinfo("[VIRTIO-BLK] MSI-X delivery on vector %d cpu=%u\n",
+                      irq, cpu);
+        }
+    }
 
     uint32_t isr = inst->vt.read32(&inst->vt, VIRTIO_MMIO_INTERRUPT_STATUS);
     if (!isr)
@@ -999,7 +1021,7 @@ static int virtio_blk_driver_probe(device_t *dev) {
     inst->slot = idx;
     dev->drv_priv = inst;
 
-    int ret = virtio_blk_init_instance(inst);
+    int ret = virtio_blk_init_instance(inst, dev);
     if (ret != 0) {
         kinfo("[VIRTIO-BLK] Init failed for device '%s'\n", dev->name);
         return ret;
