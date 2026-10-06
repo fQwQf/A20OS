@@ -2,6 +2,7 @@
 #include "core/defs.h"
 #include "core/timer.h"
 #include "core/lock.h"
+#include "core/klog.h"
 #include "mm/vdso.h"
 #include "build_time.h"
 
@@ -23,6 +24,37 @@ static uint64_t g_realtime_set_gen;
 static volatile uint32_t g_rt_seq;
 static spinlock_t g_timekeeping_lock = SPINLOCK_INIT;
 
+#if defined(CONFIG_X86_64)
+/* Wall clock source on x86_64.  Every other architecture seeds the wall clock
+ * from the build-time constant and never consults hardware; only x86_64 has a
+ * readable RTC, and only it can end up here.
+ *
+ * The CMOS RTC (MC146818) is reached through a loadable cmos-rtc.a20drv
+ * package bound to the board's platform device, so it cannot be read at
+ * timekeeping_init() time: this function runs before driver_core_init() and
+ * long before the early DriverStore is activated in init_kthread.  The seed
+ * therefore still starts from the build timestamp and the driver replaces it
+ * through timekeeping_wallclock_set_hw() when it binds.  That is why the
+ * fallback below is announced rather than silent: a boot that ends up with no
+ * RTC bound is indistinguishable, in the wall clock, from a boot that kept the
+ * seed, and only this line plus the absence of the driver's own line tells
+ * them apart. */
+static int g_wallclock_from_hw;
+
+void timekeeping_wallclock_set_hw(uint64_t sec)
+{
+    __atomic_store_n(&g_wallclock_from_hw, 1, __ATOMIC_RELEASE);
+    timekeeping_set_realtime(sec, 0);
+    klog_write("[TIME] wallclock: hardware RTC adopted, unix=%llu\n",
+               (unsigned long long)sec);
+}
+
+int timekeeping_wallclock_from_hw(void)
+{
+    return __atomic_load_n(&g_wallclock_from_hw, __ATOMIC_ACQUIRE);
+}
+#endif
+
 static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
     ts[0] = ticks / TICKS_PER_SEC;
     ts[1] = (ticks % TICKS_PER_SEC) * 1000000000ULL / TICKS_PER_SEC;
@@ -31,6 +63,11 @@ static void ticks_to_timespec(uint64_t ticks, uint64_t ts[2]) {
 void timekeeping_init(void) {
     g_boot_ticks = timer_get_ticks();
     g_boot_cycles = arch_vdso_counter();
+#if defined(CONFIG_X86_64)
+    klog_write("[TIME] wallclock: no RTC readable yet, seed from build time "
+               "unix=%llu (the CMOS RTC driver replaces it when it binds)\n",
+               (unsigned long long)A20_BUILD_UNIX_TIME);
+#endif
     timekeeping_set_realtime(A20_BUILD_UNIX_TIME, 0);
 }
 
