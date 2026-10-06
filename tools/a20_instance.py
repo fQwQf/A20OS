@@ -93,35 +93,65 @@ class NetCfg:
     def qemu_hostfwd(self) -> str:
         """[net].hostfwd as QEMU wants it on the -netdev command line.
 
-        QEMU 9 deprecated the bare short form and QEMU 10 rejects it outright,
-        so every instance that declared a forward died before the guest ever
-        booted, with
+        Two rewrites happen here, once, so no caller can forget either.
+
+        The first is the `hostfwd=` key and the explicit `=on`.  QEMU 9
+        deprecated the bare short form and QEMU 10 rejects it outright, so every
+        instance that declared a forward died before the guest ever booted,
+        with
 
             qemu-system-riscv64: -netdev user,id=net,tcp::2222-:22:
               Invalid parameter 'tcp::2222-:22'
 
-        The manifest format stays the readable `tcp::2222-:22`; the rewrite into
-        the explicit `hostfwd=...=on` form happens here, once, so no caller can
-        forget it.  An entry that already spells out `hostfwd=` is passed
-        through untouched.
+        The second is the guest address.  QEMU 10 requires the guest half of a
+        rule to name one, and `tcp::2222-:22` -- the readable short form, and
+        what instances/server-riscv64.toml writes -- does not:
+
+            qemu-system-riscv64: -netdev user,id=net,hostfwd=tcp::2222-:22=on:
+              Missing guest address
+
+        An empty *host* address is fine (QEMU reads it as "every interface"); an
+        empty guest address is not.  So the short form's implicit guest address
+        is filled in with the one the tree's own boards boot with under QEMU's
+        slirp, 10.0.2.15 -- see the `a20.ip=` default in
+        kernel/platform/qemu-virt-x86_64/board.c and the -append line shared by
+        the targets in tools/targets-smoke.mk.  A manifest whose guest has some
+        other address already spells it out, and this leaves that alone.
+
+        The spelling that works is the one smoke-netfilter-nat measures:
+        `hostfwd=tcp:127.0.0.1:18081-10.0.2.15:18081` -- no `=on`, because the
+        key already disambiguates the value, and no colon before the guest
+        address, because with one QEMU parses the guest half as [addr]:port, the
+        address field swallows the host part, and the port comes out as "10".
         """
         return ",".join(_qemu_hostfwd(f) for f in (self.hostfwd or ()))
 
 
-# A short-form rule: proto:hostaddr:hostport-guestaddr:guestport, carrying no
-# key in front and no explicit boolean.  An entry that already names its own
-# `hostfwd=` key is left alone, and a trailing `=on`/`=off` is an explicit
-# choice we must not double up.
-_HOSTFWD_SHORT_RE: Final = re.compile(r"^(?:tcp|udp):[^-]*-[^:]*:\d+$")
+# The guest address a manifest forward means when it does not name one.
+GUEST_ADDR_DEFAULT: Final = "10.0.2.15"
+
+# proto:hostaddr:hostport-guestaddr:guestport, with either address optional and
+# an explicit =on/=off tolerated.  An entry that already names its own
+# `hostfwd=` key is left alone, so a manifest can always be explicit.
+_HOSTFWD_SHORT_RE: Final = re.compile(
+    r"^(?P<proto>tcp|udp):(?P<haddr>[^:]*):(?P<hport>\d+)"
+    r"-(?P<gaddr>[^:]*):(?P<gport>\d+)(?:=(?:on|off))?$")
 
 
 def _qemu_hostfwd(entry: str) -> str:
     rule = entry.strip()
     if rule.startswith("hostfwd="):
         return rule
-    if _HOSTFWD_SHORT_RE.match(rule):
-        rule = f"{rule}=on"
-    return f"hostfwd={rule}"
+    m = _HOSTFWD_SHORT_RE.match(rule)
+    if m is None:
+        # Not a rule this function understands.  Pass it through with the key
+        # spelled out and let `a20 check` report it, rather than rewriting a
+        # shape it did not recognise into a different broken shape.
+        return f"hostfwd={rule}"
+    if not m.group("gaddr"):
+        rule = (f"{m.group('proto')}:{m.group('haddr')}:{m.group('hport')}"
+                f"-{GUEST_ADDR_DEFAULT}:{m.group('gport')}")
+    return f"hostfwd={rule}=on"
 
 
 @dataclass(frozen=True, slots=True)

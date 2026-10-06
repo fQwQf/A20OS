@@ -495,6 +495,20 @@ void *kmalloc_flags(size_t size, int can_reclaim) {
     return obj;
 }
 
+/* Ownership probe for allocators that can hand back either a slab block or a
+ * raw frame-allocator block and only get the pointer back at release time.
+ * It answers exactly the question kfree() asks before it frees -- "is this
+ * pointer one kmalloc() produced?" -- using the same two tests in the same
+ * order, so a caller that dispatches on it can never send a frame-allocator
+ * page to kfree().  It never frees and never takes a lock. */
+int kmalloc_owns(const void *ptr) {
+    if (!ptr) return 0;
+    big_alloc_hdr_t *bhdr = (big_alloc_hdr_t *)ptr - 1;
+    if (bhdr->magic == BIG_MAGIC && bhdr->order <= MAX_ORDER)
+        return 1;
+    return slab_page_valid((slab_page_t *)((uintptr_t)ptr & ~(PAGE_SIZE - 1)));
+}
+
 void kfree(void *ptr) {
     if (!ptr) return;
     uint64_t caller_ra = arch_read_ra();

@@ -148,6 +148,7 @@ CHECK_FAST_GATES := \
     check-envelope-coverage \
     check-task-state-boundary \
     check-abi-smoke-gate \
+    test-nat-rewrite \
     check-doc-drift
 
 # Recurse per gate instead of listing them as prerequisites.  A single make
@@ -176,6 +177,20 @@ check:
 	  exit 1; \
 	fi; \
 	echo "check: PASS -- all $(words $(CHECK_FAST_GATES)) host-side gates green"
+
+# ----------------------------------------------------------------
+# NAT rewrite host tests
+# ----------------------------------------------------------------
+# The SNAT/MASQUERADE half of netfilter has no end-to-end gate and cannot have
+# one on QEMU's user-mode network: there is no peer behind the guest's own NAT to
+# send a reply.  So the address rewrite, the port rewrite and the reply-direction
+# match are asserted here, on the host, against the shipped
+# kernel/net/netfilter_rewrite.c.  In `make check` because it takes about a
+# second and needs nothing the other gates do not already need.
+.PHONY: test-nat-rewrite
+test-nat-rewrite:
+	@sh tools/test-nat-rewrite-host.sh
+	@echo "test-nat-rewrite: PASS"
 
 # ----------------------------------------------------------------
 # clang-format drift gate (docs/CONTRIBUTING.md 4.2)

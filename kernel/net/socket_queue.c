@@ -179,15 +179,52 @@ static void net_msg_link_locked(net_socket_t *dst, net_msg_t *m,
     net_rxq_bytes_added_locked(dst, m->len);
 }
 
+/*
+ * Would one more message of `len` bytes still fit under this socket's
+ * SO_RCVBUF?
+ *
+ * Only datagram sockets are bounded this way, and deliberately so.  A stream
+ * socket's ceiling lives on its pcb (pcb->wnd_limit; see
+ * net_inet_tcp_buf_apply()), and bounding the staging queue as well would make
+ * the receive ceiling a function of how fast the application drains it, which is
+ * the opposite of what the option says.  So for a stream socket the answer is
+ * always yes and the message-count cap above remains the only limit, exactly as
+ * before this option was accepted for datagrams.
+ *
+ * The default ceiling is NET_DGRAM_RCV_BUF_DEFAULT, which is the message-count
+ * cap expressed in bytes, so a datagram socket that never set the option cannot
+ * fail this test: the byte check only bites for a socket that asked for
+ * something smaller.  That is what makes the default a real no-op rather than a
+ * behaviour change discovered later as dropped datagrams.
+ *
+ * Returns -EAGAIN, the same answer a full message-count queue already gives: the
+ * caller drops the datagram.  No ICMP port-unreachable is synthesised, which is
+ * the pre-existing boundary of this path.
+ *
+ * Called with the destination socket's lock held, which is what makes the byte
+ * tally consistent with the queue it describes.
+ */
+static int net_rxq_fits(net_socket_t *dst, size_t len)
+{
+    if (dst->type == SOCK_STREAM || dst->type == SOCK_SEQPACKET)
+        return 1;
+    uint32_t ceiling = dst->rcv_buf ? dst->rcv_buf : NET_DGRAM_RCV_BUF_DEFAULT;
+    if (ceiling >= NET_DGRAM_RCV_BUF_DEFAULT)
+        return 1;
+    return net_rxq_bytes_locked(dst) + len <= (size_t)ceiling;
+}
+
 int net_enqueue_msg_locked_meta(net_socket_t *dst, const void *buf, size_t len,
                                 const void *addr, size_t addrlen,
                                 const net_bh_event_t *meta)
 {
     if (!dst || dst->closed)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_ENQUEUE_META);
     if (len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
+        return -EAGAIN;
+    if (!net_rxq_fits(dst, len))
         return -EAGAIN;
     net_msg_t *m = NULL;
     uint8_t *payload = net_msg_alloc_payload(&m, len);
@@ -207,12 +244,14 @@ int net_enqueue_msg_locked_pbuf(net_socket_t *dst, const struct pbuf *p,
                                 const net_bh_event_t *meta)
 {
     if (!dst || dst->closed)
-        return -ENOTCONN;
+        return net_notconn(NET_NOTCONN_ENQUEUE_PBUF);
     if (!p || len > NET_MAX_PAYLOAD)
         return -EMSGSIZE;
     if (off > (uint32_t)p->tot_len || len > (size_t)p->tot_len - off)
         return -EMSGSIZE;
     if (dst->rx_count >= NET_MAX_QUEUE)
+        return -EAGAIN;
+    if (!net_rxq_fits(dst, len))
         return -EAGAIN;
     net_msg_t *m = NULL;
     uint8_t *payload = net_msg_alloc_payload(&m, len);
@@ -264,14 +303,14 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
         net_sock_pair_t pair = net_sock_lock2(s, dst);
         if (!net_socket_is_live(s) || !net_socket_is_live(dst)) {
             net_sock_unlock2(pair);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_PRE_PARK_RACE);
         }
         /* UDP connect sets peer_addr but NOT s->peer, so s->peer is
            legitimately NULL — skip this check for DGRAM. */
         if (s->connected && s->peer != dst &&
             s->type != SOCK_DGRAM) {
             net_sock_unlock2(pair);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_PEER_MISMATCH);
         }
         int r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN || dontwait) {
@@ -330,7 +369,7 @@ int net_enqueue_msg_blocking(net_socket_t *s, net_socket_t *dst, const void *buf
             net_sock_unlock2(pair);
             (void)proc_park_cancel(token);
             proc_park_finish(token);
-            return -ENOTCONN;
+            return net_notconn(NET_NOTCONN_BLOCKING_POST_PARK_RACE);
         }
         r = net_enqueue_msg_locked(dst, buf, len, addr, addrlen);
         if (r != -EAGAIN) {

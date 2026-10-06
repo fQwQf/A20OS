@@ -217,8 +217,34 @@ smoke-socket-stress:
 smoke-driver-lifecycle:
 	$(PYTHON) tools/smoke.py smoke-driver-lifecycle
 
+# Platform-bus IRQ resource channel: a synthetic platform device that published a
+# RES_IRQ is claimed, served by a simulated dispatch and released, and one that
+# published none falls back to polling.  No dw-mshc model exists in QEMU, so
+# this covers the resource channel and the driver's mode decision -- NOT the
+# controller's interrupt generation, which stays unverified.
+smoke-platform-irq-fallback:
+	$(PYTHON) tools/smoke.py smoke-platform-irq-fallback
+
 smoke-hda:
 	$(PYTHON) tools/smoke.py smoke-hda
+
+# x86_64 wall clock from the CMOS RTC (cmos-rtc.a20drv).  smoke-rtc-cmos runs
+# the guest with -rtc base=utc and re-asserts the guest clock against the host
+# one; smoke-rtc-cmos-fallback boots the same image with a CMOS the driver has
+# to refuse, so the build-time-seed path is covered too.  Both sit here, next
+# to smoke-hda, where the module-level x86_64 smokes already live.
+smoke-rtc-cmos:
+	$(PYTHON) tools/smoke.py smoke-rtc-cmos
+
+smoke-rtc-cmos-fallback:
+	$(PYTHON) tools/smoke.py smoke-rtc-cmos-fallback
+
+# virtio-rng over PCI (virtio-rng.a20drv).  The driver publishes /dev/hwrng as
+# a CHAR class device and hwrng_test reads >= 256 bytes out of it, so this is
+# the gate that covers the entropy path end to end: module load, PCI binding,
+# request queue, class publication and the kernel entropy pool feed.
+smoke-virtio-rng:
+	$(PYTHON) tools/smoke.py smoke-virtio-rng
 
 smoke-audio-userspace:
 	$(PYTHON) tools/smoke.py smoke-audio-userspace

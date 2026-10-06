@@ -165,6 +165,12 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
  * the IF state the trap interrupted rather than the cleared one. */
 #define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->rflags & SSTATUS_SIE) != 0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->kscratch0)
+/* trap.S already stores the fault address (CR2) in kscratch0 for every user
+ * trap, and build_siginfo_fault() reports kscratch0 as si_addr.  Overwriting
+ * it with CR3 the way an arch whose CSR 0 holds the page table base does turns
+ * every SIGSEGV into a report of the page table base instead of the faulting
+ * address. */
+#define ARCH_TRAP_PRESERVES_ADDR_SPACE_TOKEN 1
 
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->cr3)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->rflags)

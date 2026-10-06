@@ -2,10 +2,12 @@
 
 #include "core/trap.h"
 #include "core/cpu.h"
+#include "core/smp.h"
 #include "proc/proc.h"
 #include "core/timer.h"
 #include "drivers/char/uart.h"
 #include "drivers/core/driver_hwapi.h"
+#include "drivers/bus/pci_msix.h"
 #include "core/progress.h"
 #include "platform.h"
 #include "core/string.h"
@@ -337,9 +339,13 @@ static int x86_64_msix_vector_p(uint32_t vector) {
     return vector >= X86_64_MSIX_VECTOR_BASE && vector < X86_64_MSIX_VECTOR_END;
 }
 
-static void x86_64_msix_lvt(uint32_t vector, int masked) {
+void x86_64_msix_lvt_program(uint32_t vector, int masked) {
     uint32_t offset = LAPIC_LVT_TIMER + (((vector - 0x10U) & 0xFFU) * 16U);
     lapic_write(offset, vector | (masked ? (uint32_t)LAPIC_LVT_MASKED : 0U));
+}
+
+static void x86_64_msix_lvt(uint32_t vector, int masked) {
+    x86_64_msix_lvt_program(vector, masked);
 }
 
 int arch_irq_msix_vector_range(int *base, int *end) {
@@ -350,12 +356,47 @@ int arch_irq_msix_vector_range(int *base, int *end) {
     return 0;
 }
 
-int arch_msix_message_address(uint32_t vector, uint32_t *addr_lo,
+int arch_irq_msix_cpu_count(void)
+{
+#if CONFIG_NR_CPUS > 1
+    return (int)smp_online_cpu_count();
+#else
+    return 1;
+#endif
+}
+
+/* Message address that aims an interrupt at logical CPU @cpu.
+ *
+ * The kernel clears the x2APIC bit in IA32_APIC_BASE (lapic_enable()), so
+ * the device is in physical destination mode: bits 31:12 of the address are
+ * the APIC ID and the page it selects is that processor's own LAPIC window.
+ * The boot CPU keeps APIC ID zero, which is the bare page base and is exactly
+ * what was programmed here before affinity existed -- and the same APIC ID
+ * zero x86_64_route_pci_irq() already aims every routed INTx line at, so an
+ * MSI-X vector and the INTx line it replaces still agree.  A secondary CPU's
+ * APIC ID comes from the SMP topology rather than from its logical number,
+ * because the two are only equal on the board where CPU 1 happens to be APIC 1.
+ * An APIC ID that does not fit the field cannot be addressed at all, so it is
+ * refused rather than truncated into some other CPU's page. */
+static uint32_t x86_64_msix_addr_for_cpu(int cpu)
+{
+    uint64_t apic_id = 0;
+    if (cpu < 0 || (unsigned)cpu >= CONFIG_NR_CPUS)
+        return 0;
+    if (cpu != PCI_MSIX_CPU_BOOT &&
+        smp_logical_to_hw((unsigned)cpu, &apic_id) < 0)
+        return 0;
+    if (apic_id > 0xFFULL)
+        return 0;
+    return (uint32_t)(LAPIC_PHYS_BASE + (uint32_t)(apic_id << 12));
+}
+
+int arch_msix_message_address(uint32_t vector, int cpu, uint32_t *addr_lo,
                              uint32_t *addr_hi)
 {
     /* The vector travels in the message data, not in the address: the local
      * APIC takes the low byte of the data word as the interrupt to raise, and
-     * the address only says which APIC.  That address has to be the base of
+     * the address says which APIC.  That address has to be the base of
      * the APIC's own page.  A device is free to aim its message anywhere
      * inside that page -- real hardware ignores the offset -- but software
      * that goes off and ORs the vector into the address is relying on the
@@ -367,22 +408,29 @@ int arch_msix_message_address(uint32_t vector, uint32_t *addr_lo,
     (void)vector;
     if (!addr_lo || !addr_hi)
         return -EINVAL;
-    /* ID zero -- the boot processor, which is where x86_64_route_pci_irq()
-     * already points every routed INTx line.  A device cannot be steered to
-     * another core without a per-CPU destination field, and this kernel's IRQ
-     * API has no affinity, so pinning here keeps MSI-X consistent with the
-     * INTx path it replaces. */
-    *addr_lo = LAPIC_PHYS_BASE;
+    uint32_t addr = x86_64_msix_addr_for_cpu(cpu);
+    if (!addr)
+        return -EINVAL;
+    *addr_lo = addr;
     *addr_hi = 0;
     return 0;
 }
 
-int arch_msix_vector_setup(uint32_t vector, int masked)
+int arch_msix_vector_setup(uint32_t vector, int cpu, int masked)
 {
     if (!x86_64_msix_vector_p(vector))
         return -EINVAL;
-    x86_64_msix_lvt(vector, masked);
-    return 0;
+    if (cpu < 0 || (unsigned)cpu >= CONFIG_NR_CPUS)
+        return -EINVAL;
+    if ((unsigned)cpu == arch_current_cpu_id()) {
+        x86_64_msix_lvt(vector, masked);
+        return 0;
+    }
+#if CONFIG_NR_CPUS > 1
+    return x86_64_smp_msix_vector_setup((unsigned)cpu, vector, masked);
+#else
+    return -EINVAL;
+#endif
 }
 
 void x86_64_pci_irq_set_masked(int vector, int masked) {
@@ -468,8 +516,13 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     }
 #if CONFIG_NR_CPUS > 1
     if (irq == IRQ_VECTOR_TLB_FLUSH) {
-        lapic_write(LAPIC_EOI, 0);
         x86_64_ipi_tlb_flush_handler();
+        lapic_write(LAPIC_EOI, 0);
+        return;
+    }
+    if (irq == IRQ_VECTOR_MSIX_VECTOR) {
+        lapic_write(LAPIC_EOI, 0);
+        x86_64_ipi_msix_vector_handler();
         return;
     }
 #endif

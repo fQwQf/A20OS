@@ -87,17 +87,35 @@ make ARCH=riscv64 BOARD=milk-v-duo NOMMU=1 RAMFS_USER=1 BRINGUP=1 kernel-only
 * **入站 TCP 默认不通。** `a20.tcpmode` 默认 `fast`，此时 listener 只存在于 socket 层，
   任何入站 SYN 都会被 lwIP 回 RST。服务器必须显式传 `a20.tcpmode=lwip`，端口才真正在
   协议栈上 listen。命令行的优先级高于 `/proc/net/config` 写入口。
-* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、无 ICMP 跟踪、不做分片 NAT，
-  端到端门禁只覆盖 DNAT（SNAT/MASQUERADE 有解析器与 `/proc` 规则，没有端到端门禁）。
-  运行时动词挂在 `/proc/a20/netfilter`。
-* **TCP 选项按档位**：`SACK` / 时间戳 / `CUBIC`（RFC 8312 核心条款）在默认与服务器档
-  开启、嵌入式档关闭。`SO_SNDBUF` / `SO_RCVBUF` 真的生效，但**没有自动调优**，且抬高
-  `SO_SNDBUF` 只在下一条连接生效。
+* **conntrack + NAT 已实现**，但只覆盖 IPv4：无 ALG、**只跟踪 TCP / UDP / ICMP echo，
+  不跟踪任何 ICMP 差错报文**（所以依赖 PMTU 发现的路径在这条路径上不工作）、不分片 NAT。
+  ICMP echo 跟踪是本轮补上的（`810e9e431`）：类型归一化进 `src_port`、标识符进 `dst_port`，
+  回程匹配只交换地址。**端到端门禁只覆盖 DNAT**：QEMU user-net 自己在宿主侧做 NAT，
+  guest 外面没有第二个对端，回程包不存在，SNAT/MASQUERADE 不可能有端到端门禁——它由
+  主机侧单元门禁 `test-nat-rewrite` 直接编译并断言出货源码（`kernel/net/netfilter_rewrite.c`）
+  覆盖。LRU 淘汰与空闲超时有门禁 `smoke-ct-capacity`，但它经 `ctinject` 造流量，而注入器
+  只接受 TCP/UDP，**ICMP 条目的淘汰与超时因此没有门禁**。运行时动词挂在
+  `/proc/a20/netfilter`。
+* **TCP 选项按档位**：`SACK` / 时间戳 / `CUBIC`（RFC 8312 核心条款）默认与服务器档
+  开启、嵌入式档关闭。CUBIC **已经实现 §4.2 的 TCP-friendly 目标**（取 `W_cubic` 与
+  `W_est` 中较大者），未做的是 HyStart / TCP-AQ / DCTCP / Prague / ECN，以及 `W_max` 的
+  跨 RTT 持久化——lwIP 2.2.x 的 `struct tcp_pcb` 没有 `rtt` 字段，本树以
+  `TCP_SLOW_INTERVAL` 里的 `pcb->sa` 近似 RTT，因此 §4.2 只在 `W_max` ≳ 3.25 个报文段
+  时才真正起作用。`SO_SNDBUF` / `SO_RCVBUF` 真的生效，**抬高 `SO_SNDBUF` 现在对既有连接
+  也立即生效**（`272c80a2f`），UDP / RAW 同样接受并执行（`92b399e5d`），
+  但**仍然没有自动调优**：没有 `tcp_wmem`/`tcp_rmem`、没有内存压力反馈。
 * **驱动校验和卸载刻意不做**：`/proc/net/stats` 里 `tx_csum_offload` / `rx_csum_offload`
-  恒为 `off`。vendored 的 lwIP 2.2.2 没有任何承载该握手的 flag，贸然协商会让协议栈去
-  验一个设备根本没算的校验和——这是设计结果，不是未完成项。
-* **锁契约只有一半可执行**：`LWIP_ASSERT_CORE_LOCKED()` 已接到 `g_lwip_lock` 的持有者
-  CPU 上，但 net 锁一侧没有对应探针，`net_sock_lock2()` 的锁序只有代码评审在把关。
+  恒为 `off`，`virtio_net` 也从不协商 `VIRTIO_NET_F_CSUM`。这是设计结果，**不是**"上游
+  没有这套机制"：lwIP 2.2.2 有承载它的字段与宏（`netif->chksum_flags`、
+  `NETIF_SET_CHECKSUM_CTRL()`），只是被 `LWIP_CHECKSUM_CTRL_PER_NETIF`（默认 0）关着，
+  而打开它要和 NAT 的原地校验和修正互相打架。依据见
+  [docs/net/checksum-offload.md](docs/net/checksum-offload.md)。
+* **锁契约两侧现在都可执行**：`LWIP_ASSERT_CORE_LOCKED()` 接到 `g_lwip_lock` 的持有者
+  CPU 上，net 锁一侧有 per-CPU 持锁集合探针（`kernel/net/net_lock_probe.c`，`2dd28758c`），
+  逐次取锁检查锁序与嵌套深度。**仍未做**：正向查询原语（"当前 CPU 是否持有 socket X 的
+  锁"）与 lane claim 一侧探针——两项都在
+  [docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 文末的未勾选项里；
+  探针是 per-CPU 而非 per-task，抓不到"取用顺序与释放顺序不一致"。
 
 逐条见 [docs/net/network-config-design.md](docs/net/network-config-design.md)、
 [docs/net/network-lock-contract.md](docs/net/network-lock-contract.md) 与
@@ -190,7 +208,7 @@ make ARCH=riscv64 image-world PKG_WORLD=base   # 打包 → 建库 → 组镜像
 * **高负载压力测试**：包含 `smoke-sched-stress`、`smoke-vfs-stress` 等并发压力校验，用于捕获隐蔽的死锁或崩溃。
 * **用户态服务测试**：运行 `make smoke-native-fs-all`，验证 svcmgr 托管的用户态文件系统宿主 ufsd 四种后端（FAT/ext4 读写、ISO9660/NTFS 只读）及 SIGKILL 崩溃恢复；`smoke-native-svc`/`smoke-native-registry` 覆盖监管自愈与按名重绑。
 * **架构合规性验证**：例如 `make check-concurrency-foundation`，在编译期严格审查代码是否符合 SMP 锁模型契约。
-* **网络门禁**：`make smoke-network-suite` 覆盖 socket 与协议栈；`smoke-net-accept` 覆盖真实 lwIP LISTEN pcb 的入站 accept；`smoke-netfilter-nat` 用 QEMU `hostfwd` 打通 DNAT（宿主 18081 → guest 18082）并由宿主侧探针收到回显；`smoke-net-tcp-lanes` 是多 lane 下的 TCP 结构性门禁。
+* **网络门禁**：`make smoke-network-suite` 覆盖 socket 与协议栈；`smoke-net-accept` 覆盖真实 lwIP LISTEN pcb 的入站 accept；`smoke-netfilter-nat` 用 QEMU `hostfwd` 打通 DNAT（宿主 18081 → guest 18082）并由宿主侧探针收到回显；`smoke-ct-capacity` 把 conntrack 表填到 `ct_capacity` 断言 LRU 淘汰的是最久未用的那一条、再用短超时断言回收；`test-nat-rewrite` 在主机侧对 SNAT/MASQUERADE 的地址与端口改写、回程元组做单元断言；`smoke-net-tcp-lanes` 是多 lane 下的 TCP 结构性门禁。
 
 ## 参与贡献
 我们非常欢迎来自开源社区的代码贡献，共同探索下一代操作系统架构！

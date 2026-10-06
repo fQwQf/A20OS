@@ -2,7 +2,7 @@
 
 设备类把硬件细节和内核使用者隔开。子系统只看 `class_ops`，不看具体硬件。权威声明在 `kernel/drivers/core/driver_class.h`。
 
-驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针。probe 成功后核心自动发布 class device；char、block、audio 分别得到动态 `/dev/charN`、`/dev/diskN`、`/dev/audioN`，所有类都进入 `/sys/class/<class>/`。display 与 input 仍由固定聚合节点提供专用 ABI，详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
+驱动在 `driver_t.class_type` 里选择类，把完全匹配的 ops 指针放进 `class_ops`。类操作接收内核地址，不接收用户指针（唯一的例外是 char `ioctl`，它拿到原始用户指针，由驱动自己做 usercopy）。probe 成功后核心自动发布 class device；char、block、audio 分别得到动态 `/dev/charN`、`/dev/diskN`、`/dev/audioN`（char 驱动可在 probe 里改用自己的名字，见下文），所有类都进入 `/sys/class/<class>/`。display 与 input 仍由固定聚合节点提供专用 ABI，详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 ## 通用调用规则
 
@@ -178,7 +178,7 @@ typedef struct char_dev_ops {
 
 `read/write` 成功返回字节数。非阻塞无进展返回 `-EAGAIN`。`poll` 只观察 readiness，不得消费数据或睡眠。UART 硬件驱动只负责收发和中断，通用行规、前台进程组和 termios 应由 tty/devfs 层承担。
 
-char class 会按发布顺序自动生成 `/dev/charN`，通用适配器转发 read/write/ioctl。当前没有让驱动自选节点名或安装私有 vnode 的注册 API；稳定的命名、权限或专用 ABI 仍应在通用 class/devfs 层设计，不能在具体驱动里直接拼 VFS vnode。详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
+char class 会按发布顺序自动生成 `/dev/charN`，通用适配器转发 read/write/ioctl。驱动可以在 **probe 内**用 `device_set_devfs_name(dev, "vport0")` 为自己的 class device 指定节点名，取代生成的 `charN`；名字在 `class_device_publish()`（紧接 probe 返回 0 之后）复制进 class device，因此调用点只有这一处，且必须在返回 0 之前。名字为空、超长（`CLASS_DEVICE_NAME_MAX`）或含 `/` 一律 `-EINVAL`，已发布后再改名返回 `-EEXIST`——这条限制保证驱动只能影响自己那一个节点的命名，不能把名字伸出设备的 devfs 目录。`class_device_publish()` 另有一条**全局唯一性**检查：在 `g_class_lock` 下遍历已发布的 class device，名字撞车就返回 `-EEXIST`（索引/devt 的唯一性不覆盖名字，名字解析在 devfs/sysfs/netlink 上都是首个命中即返回）。两次 probe 要同一个名字时，第二次 probe 被判失败并按 `driver_probe_bound_device()` 的既有回滚路径调 `remove()` 拆干净——这也是 `vport0`、`hwrng` 的「单静态实例」由代码而非注释保证的地方。模块驱动经 `drv_device_set_devfs_name()` 走到同一个实现。除命名之外，仍没有让驱动自选权限或安装私有 vnode 的注册 API；这些仍应在通用 class/devfs 层设计，不能在具体驱动里直接拼 VFS vnode。详见[用户接口与 devfs](../classes/userspace-and-devfs.md)。
 
 char 类的对应骨架：
 

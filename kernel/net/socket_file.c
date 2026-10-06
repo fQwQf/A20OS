@@ -129,7 +129,8 @@ static int net_vfile_write(vfile_t *vf, const char *buf, size_t count) {
      * non-socket, so it owes the caller EPIPE rather than ENOTSOCK. */
     if (s->type == SOCK_STREAM && !s->local_tcp && !s->tcp &&
         (s->domain == AF_INET || s->domain == AF_INET6))
-        return s->ever_connected ? -EPIPE : -ENOTCONN;
+        return s->ever_connected ? -EPIPE
+                                  : net_notconn(NET_NOTCONN_VFS_WRITE_NO_PCB);
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, count, NULL, 0);
 
@@ -300,9 +301,15 @@ int net_socket_close_file(vfile_t *vf) {
     /* The registry slot is released with no net lock held at all:
      * net_socket_unregister() takes a bucket lock of its own, and a bucket lock
      * may never be nested under a socket lock.  s->closed is already set. */
-    net_socket_unregister(s);
+    /* Only if there was a slot to release: `s` may itself be an unregistered
+     * socket -- the AF_UNIX accepted child is exactly that, and this function
+     * runs for it too.  Dropping "the registry reference" unconditionally freed
+     * the socket here, in the middle of its own teardown, and the wake_all()
+     * calls below then read freed memory. */
+    bool had_slot = net_socket_unregister(s);
     /* Registry reference, dropped outside the lock because it can free. */
-    net_socket_free(s);
+    if (had_slot)
+        net_socket_free(s);
     (void)proc_wake_q_flush(&wake_q);
     if (drain_accept)
         (void)wait_queue_wake_all(
@@ -366,8 +373,12 @@ int net_socket_close_file(vfile_t *vf) {
         net_sock_unlock2(apair);
         /* Same rule as the listener above: the slot is released with no net
          * lock held, and accepted->closed is already set. */
-        net_socket_unregister(accepted);
-        net_socket_free(accepted);
+        /* Same rule as the listener above, and it matters here for the same
+         * reason: a queued AF_UNIX child owns no slot and carries one
+         * reference, not two. */
+        bool had_child_slot = net_socket_unregister(accepted);
+        if (had_child_slot)
+            net_socket_free(accepted);
         (void)proc_wake_q_flush(&wake_q);
         if (drain_read)
             (void)wait_queue_wake_all(
@@ -641,6 +652,33 @@ static int net_vfile_ifreq_ioctl(void *uarg, unsigned long req)
         int mtu = (int)nif->mtu;
         return copy_to_user((uint8_t *)uarg + A20_IFNAMSIZ, &mtu, sizeof(mtu)) < 0
                ? -EFAULT : 0;
+    }
+    case A20_SIOCSIFMTU: {
+        /*
+         * Routed through a20_lwip_if_set_mtu(), not a bare nif->mtu write, and
+         * the reason is the same one RTM_NEWLINK goes through it for: the
+         * RFC 791 floor and the profile's frame-size ceiling are enforced
+         * there and nowhere else.  Setting nif->mtu directly would be the one
+         * way to configure an MTU the receive path then silently truncates at
+         * its scratch-buffer clamp and the transmit path refuses with ERR_BUF.
+         *
+         * This case was missing -- SIOCSIFMTU was dispatched here by
+         * net_vfile_ioctl() but had no arm in the switch, so every caller got
+         * -ENOTTY and the ceiling a20_lwip_if_set_mtu() enforces was reachable
+         * only from netlink.  That is why the smoke for the ceiling had to go
+         * through RTM_NEWLINK until now; it now covers both entry points.
+         *
+         * The range check is here rather than in the callee because that takes
+         * uint16_t: an ifreq's ifr_mtu is an int, and 0x10000 would truncate
+         * back to 0 and be refused as a below-minimum MTU rather than as the
+         * out-of-range value it is.
+         */
+        int mtu;
+        if (copy_from_user(&mtu, (uint8_t *)uarg + A20_IFNAMSIZ, sizeof(mtu)) < 0)
+            return -EFAULT;
+        if (mtu < 0 || mtu > 0xffff)
+            return -EINVAL;
+        return a20_lwip_if_set_mtu(netif_get_index(nif), (uint16_t)mtu);
     }
     case A20_SIOCGIFINDEX: {
         /* Not netif_name_to_index(): netif->name is a two-character

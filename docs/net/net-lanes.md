@@ -925,6 +925,13 @@ ARP/ICMP/NDP 一致。包的归属 lane 要等解析出连接才知道，那是�
 
 所以"lane 0 有问题"这个假设**被证伪**，不能按 lane 去查。
 
+> **2026-10-06 更新——这个 2% 在当前树上不再复现。** 同一配置下又跑了 797 次实际执行
+> （含一轮放大器归零），0 失败，`0.98^797 ≈ 1.1e-7`。本轮**没有为它改过实现**，
+> 所以这不是"已修"，而是"那份 2% 很可能来自更早的脏树"。原始数据、被排除的假设、
+> 以及一个必须先修的测量方法问题（guest 串口会吃掉命令名里的字符，导致
+> `grep -c PASS` 把没执行的样本算成没失败）见下文
+> 「放大实验第二轮（2026-10-06）」。
+
 同时排除：
 
 - 不是 `16304db8`（双重索引）—— 已被证伪验证：放回去会 `passes=0/8` + `list-checker hits=3` + panic；
@@ -1137,32 +1144,128 @@ guest 参数 `a20.tcpmode=lwip`，每轮换一批端口跑多连接。
 判断"还有余量"的解读。已确认它有界：dev profile 的 `MEMP_NUM_TCP_PCB = 8192`，
 且 `tcp_alloc()`（`tcp.c:1953` 起）在池压力下会回收最老的 TIME_WAIT pcb。
 
+### 放大实验第二轮（2026-10-06）：补样本 + 放大器归零，**仍未复现**
+
+第一轮（2026-10-05）留下的最大缺口不是"嫌疑区选错了"，而是**样本量**：
+72 次阴性在 2% 下有 23% 的概率纯属偶然。第二轮按同一配方再跑两轮，
+两轮的差别在**参数组合**上，不在位置上：
+
+| 轮次 | `CONFIG_NET_RACE_DELAY_US` | 引导 | 下发样本 | **实际执行** | 失败 |
+|---|---|---|---|---|---|
+| A | **500**（第一轮用过 200 / 2000） | 4 CPU / 4 lane | 400 | **398** | **0** |
+| B | **0**（放大器关闭） | 4 CPU / 4 lane | 400 | **399** | **0** |
+
+两轮都是 `make ARCH=riscv64 ABI=linux BRINGUP=0 NR_CPUS=4 NET_LANES=4
+OPT="-DCONFIG_NET_PCB_SANE=1 -DCONFIG_NET_LOCK_ASSERT=1 -DCONFIG_NET_RACE_DELAY_US=<D>"
+dev-build`，guest 参数带 `a20.tcpmode=lwip`，每引导 5 遍 8 端口集、每端口间隔 1 s，
+10 次独立引导，每轮末尾落盘 `/proc/net/status`、`/proc/net/config`、
+`/proc/a20/lock_contention`。
+
+**合计 797 次实际执行、0 次失败。** 按 2% 计，797 次 0 失败的概率约
+`0.98^797 ≈ 1.1e-7`。
+
+**能说与不能说的**：
+
+- **仍然不能说"已修"**。本轮**没有为这条 flake 改过任何一行实现**，唯一的代码改动
+  是把 `server()` 的 `close()` 从 `tcp_abort()` 改成 `tcp_close()` 之外的历史修复，
+  与 `connect()` 不完成无关。"没复现"是观测，不是结论。
+- **能说的是**：在**当前树**上、4 lane + 4 CPU + `tcpmode=lwip` 这个配置下，
+  2% 的失败率**不再出现**；第一轮那份"2%"很可能来自更早的脏树。按下一步第 1 条
+  自己写的判据（"若 200 次 0 失败，去查历史样本的构建号"），该判据现在**已满足**。
+- 轮次 A 的 500 µs **不比第一轮的 2000 µs 更极端**，所以它新增的不是"放大强度"
+  而是"同一个放大强度下的样本量"。不要把 A 读成"把窗口拉得更开也没炸"。
+
+**20 次引导里探针一次没响**（每轮末尾逐次核对）：
+
+```
+lwip_lock: armed=1 owner=4294967295 violations=0 sites=0
+net_lock:  armed=1 violations=0 sites=0 held_cpu0=0 lockcounters_short=0
+lock_counters: registered=48 capacity=192 dropped=0
+net_notconn: total=0 window=0 reasons=13
+lanes: count=4 sockets=1 occupancy: 0 0 1 0
+```
+
+20 次引导均无 panic / page fault / `tcp_pcbs_sane` 命中。`net_lock:` 这一行是
+`2dd28758c` 新加的 net 锁契约探针（`CONFIG_NET_LOCK_ASSERT=1`，违规即 abort）；
+它在 4 CPU 下 800 次真实握手全程 `violations=0`，即**阶段 E 的锁序在本负载下没被违反**。
+
+上面那行 `lock_counters: registered=48 capacity=192 dropped=0` 是 **DEFAULT 档**的。
+**server 档**（`NET_PROFILE=3` → `NET_PROFILE_MAX_SOCKETS=65536` →
+`NET_SOCK_BUCKET_SHIFT=9` → 128 个桶锁）另测过一次：
+`registered=141 capacity=192 dropped=0`，即 128 个桶锁 + 13 个其他锁，**余量 51**，
+`lockcounters_short=0`。所以 `LOCK_COUNTERS_MAX = 192` 不是"勉强够"，是三档都够——
+而这个"够"现在每次引导都会由 `net_socket_registry_init()` 自己报出来
+（`kernel/net/socket_registry.c:109-122`），不再依赖有没有人记得去看。原始读数见
+`impl-notes-net.md` §11.4 补记。
+
+**引用计数账本顺带补上了多核数据**（`impl-notes-net.md` §11.4 自记缺的那一块）：
+20 次引导的 `net_sock_ref` 全部 `live=1 faults=0`，`allocs` 在 159–167 之间，
+`frees` 恒等于 `allocs-1`。这是"4 CPU + 4 lane 真实握手下引用计数不漏"的证据，
+单靠 §11.4 那个单 CPU 读数是拿不到的。
+
+#### 本轮的一个**测量方法**发现：控制台输入会吃掉字符
+
+3 次下发里有 3 条命令名在 guest 侧被**相邻字符换位或丢失**：
+
+```
+# tcp_accept_test 12407   ->  # tcp_aceptc_test 12407
+E: mksh: tcp_aceptc_test: inaccessible or not found
+# tcp_accept_test 12402   ->  # tpc_accept_test 12402
+E: mksh: tpc_accept_test: inaccessible or not found
+# tcp_accept_test 12401   ->  # ctp_accept_test 12401
+E: mksh: ctp_accept_test: inaccessible or not found
+```
+
+三处都在命令名前三个字符内，都是**换位/丢失**而不是丢字节串；输入速率是每 1 s 一行，
+远低于任何 overrun 阈值；宿主侧那 800 条命令是 shell `echo` 逐条写出的，字节本身正确。
+所以这是 **guest 串口接收路径**上的偶发字符错位（UART RX / 行规程），与 TCP 无关——
+它发生在命令**还没执行**的时候。
+
+**对这条 flake  hunt 的直接后果，必须写清楚**：光靠
+`grep -c 'TCP_ACCEPT_TEST: PASS'` 统计样本会把"没执行的"算成"没失败的"。
+`smoke-net-tcp-lanes` 判的是 `passes -eq 8`，若 8 条里有 1 条被吃掉，
+它同样只看到 7 条 PASS 并判 FAIL——**方向恰好相反**：门禁会误报一次失败，
+而手写的统计会把 3/800 的测量损耗悄悄吃掉。上面表里"下发"与"实际执行"分列两栏，
+就是为了不让后者被前者冒充。
+
 ### 下一步（配方被否定后该换哪一侧）
 
 按上文"如果加了延时仍然不炸，说明嫌疑区选错了"的约定，**换生产者一侧**。
 具体按这个顺序，因为成本递增：
 
-1. **先补样本，而不是先换位置。** 上面 78 次全是阴性，真正的缺口是"2% 这个数字本身
-   是在 80 次样本上估出来的，置信区间极宽"。在同样配置（4 lane + 4 CPU + lwip +
-   锁探针 + 链表检查器，**放大器保持 0**）下把 `smoke-net-tcp-lanes` 跑满 200 次以上。
-   - 若 200 次 0 失败：2% 的估计多半来自更早的脏树，问题已经不在当前代码里，
-     应当去查历史样本（`12404` / `12405` 两次失败）的构建号，而不是继续找竞态。
-   - 若仍出现 1-2 次失败：**这才是唯一值得带走的线索**，立刻把该轮的完整
-     `/proc/net/stats`、`/proc/net/config`、各 lane 计数和 console 全量存盘。
-2. **换放大器位置到生产者 `lwip_tcp_accept_cb()`。** 现有放大器只加在消费者
+1. ~~**先补样本，而不是先换位置。**~~ **2026-10-06 已执行**：两轮合计 **797 次实际
+   执行、0 失败**，其中一轮放大器为 0（正是这条要求的配置）。上面那句"若 200 次
+   0 失败"的判据**已满足**——按它自己写的结论，接下来该做的是**查历史样本
+   （`12404` / `12405` 两次失败）的构建号，而不是继续在当前树上找竞态**。
+   - 若在**当前树**上再出现失败：那才是唯一值得带走的线索，立刻把该轮的完整
+     `/proc/net/status`、`/proc/net/config`、各 lane 计数和 console 全量存盘。
+2. **修测量方法，否则下一轮还会被同一个坑绊倒。** 本轮发现 guest 串口接收会偶发
+   吃掉命令名里的相邻字符（3/800，见上），后果是 `grep -c PASS` 把"没执行"算成
+   "没失败"。任何统计这条 flake 的脚本都应当**同时**核对三件事：下发的命令回显数、
+   mksh 的 `inaccessible or not found` 数、以及 PASS/FAIL 行数，三者对不上就报
+   "样本受损"而不是报 0 失败。这条排在第 2 位不是因为它更重要，而是因为它**便宜**
+   且不做的话第 3、4 条的实验数据同样不可信。
+   **本轮未实施**：只做了记录，定位与修复会落到
+   `kernel/arch/riscv64/platform/timer.c` 与 `kernel/drivers/char/uart.c`，不属于网络
+   这条流的范围。本轮的做法是在统计口径上分列"下发"与"实际执行"两栏（宁可报
+   样本受损也不报 0 失败），但那只是**回避**这个问题，不是修它。
+3. **换放大器位置到生产者 `lwip_tcp_accept_cb()`。** 现有放大器只加在消费者
    （`net_inet_accept_stage_drain`）一侧。配方只覆盖了"跨两个锁域"这一半；
    另一半是生产者把 pcb 塞进 stage ring 的时刻，那里同样在 lwIP 锁下写、
    在桶锁外读。若要做，用一个新开关（**不要**复用 `CONFIG_NET_RACE_DELAY_US`，
-   否则两组实验的数据无法分开看）。
-3. **在 `netif_loop_output()` / `netif_poll()` 一侧再看一次。** 回环队列的无界性
+   否则两组实验的数据无法分开看）。**注意**：这一条现在是在"当前树已 797 次不复现"
+   的前提下做的——它值得做的理由是排除假设，不是预期还能复现。
+   **本轮未实施**：它按本文是成本递增的第 3 步，在"当前树 797 次不复现"的前提下
+   本轮的价值主要是排除假设，按时间盒留给下一轮。
+4. **在 `netif_loop_output()` / `netif_poll()` 一侧再看一次。** 回环队列的无界性
    （上文已记 `LWIP_LOOPBACK_MAX_PBUFS=0`）意味着"哪一 CPU 在哪一刻排空它"完全
    不受控；`net_tcp_lane_input()` 把包投给哪条 lane 的时机也就跟着漂。这不是可静态
    证明的东西，只能靠把"入队时刻"和"排空时刻"打上 CPU id + 时间戳对照来缩小范围。
-4. 仍然定位不到时，**把 TCP 层的连接建立时序全量打点**（SYN 入、pcb 分配、
+5. 仍然定位不到时，**把 TCP 层的连接建立时序全量打点**（SYN 入、pcb 分配、
    桶查找、SYN-ACK 出、SYN-ACK 重传、accept 入 stage、accept 出 stage），
    逐条打 lane / CPU / 时间戳，然后**用失败样本比对**。这是最后手段，因为它很慢。
 
-> 不要为了"能变红"而降低门禁或改弱 `smoke-net-tcp-lanes`。上面 78 次全绿
+> 不要为了"能变红"而降低门禁或改弱 `smoke-net-tcp-lanes`。三轮共 875 次下发全绿
 > **不是**把门禁改绿的结果——门禁配置全程未动，`CONFIG_NET_PCB_SANE=1` 与
 > `CONFIG_NET_LOCK_ASSERT=1` 只会让失败更容易被看见，不会更容易被隐藏。
 

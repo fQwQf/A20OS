@@ -12,6 +12,7 @@
 #include "core/consts.h"
 #include "core/cpu.h"
 #include "core/lock.h"
+#include "core/panic.h"
 #include "core/timer.h"
 #include "drivers/net/virtio_net.h"
 #include "drivers/core/driver_core.h"
@@ -19,6 +20,159 @@
 #include "lwip/tcp.h"
 
 static obj_cache_t g_net_socket_cache = OBJ_CACHE_INIT("net_socket", net_socket_t, 128);
+
+/*
+ * Reference-count ledger; see the block above net_socket_ref() in
+ * socket_internal.h for what each number means and why a leak and a double free
+ * need different counters to be visible.
+ *
+ * The reasons are a small fixed table rather than a format string: the whole
+ * point is that a reader of /proc/net/status can tell *which* path dropped one
+ * reference too many, and a line of pre-formatted text in a panic would say
+ * less than the site that produced it.
+ */
+#define NET_SOCK_REF_FAULT_REASONS 4
+static const char *const g_net_sock_ref_fault_why[NET_SOCK_REF_FAULT_REASONS] = {
+    "already-freed: refs was not positive",
+    "canary-mismatch: object was not a live socket",
+    "reserved",
+    "reserved",
+};
+static volatile int g_net_sock_ref_fault_n[NET_SOCK_REF_FAULT_REASONS];
+
+volatile int g_net_sock_ref_allocs;
+volatile int g_net_sock_ref_frees;
+volatile int g_net_sock_ref_faults;
+
+int net_sock_ref_live(void)
+{
+    return __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED) -
+           __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED);
+}
+
+static void net_sock_ref_fault(int reason, net_socket_t *s)
+{
+    if (reason < 0 || reason >= NET_SOCK_REF_FAULT_REASONS)
+        reason = 0;
+    __atomic_fetch_add(&g_net_sock_ref_faults, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_net_sock_ref_fault_n[reason], 1, __ATOMIC_RELAXED);
+    (void)s; /* only the panic line below reads it */
+#if CONFIG_NET_REF_ASSERT
+    panic("net_socket_free: %s s=%lx refs=%d allocs=%d frees=%d faults=%d",
+          g_net_sock_ref_fault_why[reason], (unsigned long)(uintptr_t)s,
+          __atomic_load_n(&s->refs, __ATOMIC_RELAXED),
+          __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED),
+          __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED),
+          __atomic_load_n(&g_net_sock_ref_faults, __ATOMIC_RELAXED));
+#endif
+}
+
+int net_sock_ref_format(char *buf, size_t bufsz)
+{
+    int off = 0;
+    int n = snprintf(buf, bufsz,
+                     "\nnet_sock_ref: live=%d allocs=%d frees=%d faults=%d\n",
+                     net_sock_ref_live(),
+                     __atomic_load_n(&g_net_sock_ref_allocs, __ATOMIC_RELAXED),
+                     __atomic_load_n(&g_net_sock_ref_frees, __ATOMIC_RELAXED),
+                     __atomic_load_n(&g_net_sock_ref_faults, __ATOMIC_RELAXED));
+    if (n < 0)
+        return 0;
+    off = n;
+    if ((size_t)n >= bufsz)
+        return (int)bufsz - 1;
+    for (int i = 0; i < NET_SOCK_REF_FAULT_REASONS; i++) {
+        int c = __atomic_load_n(&g_net_sock_ref_fault_n[i], __ATOMIC_RELAXED);
+        if (!c)
+            continue;
+        n = snprintf(buf + off, bufsz - (size_t)off, "net_sock_ref_fault%d: %s %d\n",
+                     i, g_net_sock_ref_fault_why[i], c);
+        if (n < 0)
+            break;
+        off += n;
+        if ((size_t)off >= bufsz)
+            return (int)bufsz - 1;
+    }
+    return off;
+}
+
+/*
+ * -ENOTCONN attribution; see the enum above in socket_internal.h.  The four
+ * reasons in the first group are the impl-notes-net.md §8.5 window and the rest
+ * are ordinary "no connection" errors, and keeping the two apart in one number
+ * is the entire reason this table exists.
+ */
+static const char *const g_net_notconn_why[NET_NOTCONN__COUNT] = {
+    [NET_NOTCONN_SEND_TCP_NO_PEER]        = "send_tcp: peer back-pointer absent",
+    [NET_NOTCONN_SEND_TCP_PEER_GONE]      = "send_tcp: peer died before the ordered pair",
+    [NET_NOTCONN_BLOCKING_PRE_PARK_RACE]  = "enqueue_blocking: race before park",
+    [NET_NOTCONN_BLOCKING_POST_PARK_RACE] = "enqueue_blocking: race after park",
+    [NET_NOTCONN_SENDTO_NOT_CONNECTED]    = "sendto: stream socket never connected",
+    [NET_NOTCONN_SEND_TCP_NOT_CONNECTED]  = "send_tcp: not connected",
+    [NET_NOTCONN_SEND_TCP_SHUT_WR]        = "send_tcp: write side shut down",
+    [NET_NOTCONN_GETPEERNAME]             = "getpeername: not connected",
+    [NET_NOTCONN_PEERPIDFD]               = "SO_PEERPIDFD: no peer pid",
+    [NET_NOTCONN_VFS_WRITE_NO_PCB]        = "vfs write: inet stream has no pcb",
+    [NET_NOTCONN_ENQUEUE_META]            = "enqueue_meta: destination gone",
+    [NET_NOTCONN_ENQUEUE_PBUF]            = "enqueue_pbuf: destination gone",
+    [NET_NOTCONN_BLOCKING_PEER_MISMATCH]  = "enqueue_blocking: destination is not the peer",
+};
+
+static volatile int g_net_notconn_n[NET_NOTCONN__COUNT];
+static volatile int g_net_notconn_window;
+
+int net_notconn_window_total(void)
+{
+    return __atomic_load_n(&g_net_notconn_window, __ATOMIC_RELAXED);
+}
+
+int net_notconn(net_notconn_reason_t why)
+{
+    if ((unsigned)why >= NET_NOTCONN__COUNT)
+        why = NET_NOTCONN_SEND_TCP_NOT_CONNECTED;
+    __atomic_fetch_add(&g_net_notconn_n[why], 1, __ATOMIC_RELAXED);
+    switch (why) {
+    case NET_NOTCONN_SEND_TCP_NO_PEER:
+    case NET_NOTCONN_SEND_TCP_PEER_GONE:
+    case NET_NOTCONN_BLOCKING_PRE_PARK_RACE:
+    case NET_NOTCONN_BLOCKING_POST_PARK_RACE:
+        __atomic_fetch_add(&g_net_notconn_window, 1, __ATOMIC_RELAXED);
+        break;
+    default:
+        break;
+    }
+    return -ENOTCONN;
+}
+
+int net_notconn_format(char *buf, size_t bufsz)
+{
+    int off = 0;
+    int total = 0;
+    for (int i = 0; i < NET_NOTCONN__COUNT; i++)
+        total += __atomic_load_n(&g_net_notconn_n[i], __ATOMIC_RELAXED);
+    int n = snprintf(buf, bufsz,
+                     "\nnet_notconn: total=%d window=%d reasons=%d\n", total,
+                     net_notconn_window_total(), NET_NOTCONN__COUNT);
+    if (n < 0)
+        return 0;
+    off = n;
+    if ((size_t)n >= bufsz)
+        return (int)bufsz - 1;
+    for (int i = 0; i < NET_NOTCONN__COUNT; i++) {
+        int c = __atomic_load_n(&g_net_notconn_n[i], __ATOMIC_RELAXED);
+        if (!c)
+            continue;
+        n = snprintf(buf + off, bufsz - (size_t)off, "net_notconn_%d: %s %d\n",
+                     i, g_net_notconn_why[i] ? g_net_notconn_why[i] : "unnamed",
+                     c);
+        if (n < 0)
+            break;
+        off += n;
+        if ((size_t)off >= bufsz)
+            return (int)bufsz - 1;
+    }
+    return off;
+}
 
 net_socket_t *net_socket_alloc(void) {
     net_socket_t *s = (net_socket_t *)obj_cache_alloc_zero(&g_net_socket_cache);
@@ -36,6 +190,8 @@ net_socket_t *net_socket_alloc(void) {
          * carries a second one, taken by net_register_socket_locked() and
          * dropped by one more net_socket_free() after the slot is released. */
         __atomic_store_n(&s->refs, 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&s->ref_magic, NET_SOCK_REF_MAGIC, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_net_sock_ref_allocs, 1, __ATOMIC_RELAXED);
         /* Provisional only: the authoritative lane comes from the bound address
          * and port, which net_inet_bind_pcb() recomputes. */
         s->lane = net_lane_of_cpu(cpu_current_id());
@@ -61,8 +217,33 @@ net_socket_t *net_socket_alloc(void) {
 void net_socket_free(net_socket_t *s) {
     if (!s)
         return;
-    if (__atomic_fetch_sub(&s->refs, 1, __ATOMIC_ACQ_REL) != 1)
+    /*
+     * A CAS loop rather than the fetch_sub this used to be, and the difference
+     * is the whole point of the change: fetch_sub cannot tell "dropped the last
+     * reference" from "dropped one too many", because both land on the same
+     * atomic.  A path that frees a socket twice therefore used to walk straight
+     * into obj_cache_free() with a negative count and no signal at all.  Here
+     * the second free sees refs == 0, refuses, and counts itself --
+     * impl-notes-net.md §8.3/§8.6 called this the unverified primitive.
+     */
+    if (__atomic_load_n(&s->ref_magic, __ATOMIC_RELAXED) != NET_SOCK_REF_MAGIC) {
+        net_sock_ref_fault(1, s);
         return;
+    }
+    int old = __atomic_load_n(&s->refs, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if (old <= 0) {
+            net_sock_ref_fault(0, s);
+            return;
+        }
+        if (__atomic_compare_exchange_n(&s->refs, &old, old - 1, 1,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+    if (old != 1)
+        return;
+    __atomic_store_n(&s->ref_magic, 0, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_net_sock_ref_frees, 1, __ATOMIC_RELAXED);
     if (s->ch_buf) {
         kfree(s->ch_buf);
         s->ch_buf = NULL;
@@ -223,6 +404,14 @@ void net_init(void) {
     /* Bus enumeration and driver core own transport discovery.  Network init
      * only consumes DEV_CLASS_NET; it must never run a second arch scanner. */
     a20_lwip_init();
+#if CONFIG_NET_LOCK_ASSERT
+    /* Same reasoning as g_lwip_lock_armed: nothing above this line may be
+     * judged, because the registry locks only exist from
+     * net_socket_registry_init() on and no socket has been created yet.  After
+     * arming, a violation of the net-lock contract is a panic rather than a
+     * counter -- see kernel/net/net_lock_probe.c. */
+    net_lock_probe_arm();
+#endif
     printf("[NET] socket layer initialized\n");
 }
 
@@ -274,6 +463,37 @@ int net_format_status(char *buf, size_t bufsz) {
         n += m;
     if ((size_t)n >= bufsz)
         return (int)bufsz - 1;
+
+    /*
+     * The reference-count ledger, next to the open-slot census because the two
+     * answer the same question from opposite ends: `open` counts sockets the
+     * table can still see, `live` counts sockets that exist at all -- including
+     * the ones being created and the ones mid-teardown that have no slot.  A
+     * create/destroy cycle that leaks moves `live` and not `open`, which is
+     * exactly the pair of readings that used to be unavailable.
+     */
+    {
+        char row[512];
+        int r = net_sock_ref_format(row, sizeof(row));
+        if (r > 0) {
+            m = snprintf(buf + n, bufsz - (size_t)n, "%s", row);
+            if (m > 0)
+                n += m;
+            if ((size_t)n >= bufsz)
+                return (int)bufsz - 1;
+        }
+    }
+    {
+        char row[1024];
+        int r = net_notconn_format(row, sizeof(row));
+        if (r > 0) {
+            m = snprintf(buf + n, bufsz - (size_t)n, "%s", row);
+            if (m > 0)
+                n += m;
+            if ((size_t)n >= bufsz)
+                return (int)bufsz - 1;
+        }
+    }
     return n;
 }
 
@@ -330,6 +550,23 @@ int net_socket_create(int domain, int type, int protocol) {
     s->protocol = protocol;
     s->nonblock = (type & SOCK_NONBLOCK) != 0;
     s->ipv6_checksum_offset = -1;
+    /*
+     * The SO_SNDBUF / SO_RCVBUF defaults are per type, not one pair for the
+     * whole tree.  net_socket_alloc() seeded the stream values because it does
+     * not know the type yet; a datagram socket has no pcb for either option to
+     * mean anything about, so leaving it with TCP_SND_BUF / TCP_WND would both
+     * misreport what it can honour and -- on the receive side -- silently bound
+     * its queue at one window's worth of bytes.  See the NET_DGRAM_* block in
+     * socket_internal.h for both numbers and for why the receive default is a
+     * no-op against the message-count cap that already exists.
+     */
+    if (base_type == SOCK_STREAM || base_type == SOCK_SEQPACKET) {
+        s->snd_buf = TCP_SND_BUF;
+        s->rcv_buf = TCP_WND;
+    } else {
+        s->snd_buf = NET_DGRAM_SND_BUF_DEFAULT;
+        s->rcv_buf = NET_DGRAM_RCV_BUF_DEFAULT;
+    }
 
     int init_r = net_inet_socket_init(s);
     if (init_r < 0) {
@@ -678,7 +915,8 @@ int net_sendto_sock(net_socket_t *s, const void *buf, size_t len, int flags,
      */
     if (s->type == SOCK_STREAM && !s->local_tcp && !s->tcp &&
         (s->domain == AF_INET || s->domain == AF_INET6))
-        return s->ever_connected ? -EPIPE : -ENOTCONN;
+        return s->ever_connected ? -EPIPE
+                                  : net_notconn(NET_NOTCONN_SENDTO_NOT_CONNECTED);
     if (s->domain == AF_UNIX)
         return net_unix_socket_sendto(s, buf, len, addr, addrlen);
 

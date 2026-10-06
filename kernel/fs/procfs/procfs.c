@@ -11,6 +11,7 @@
 #include "net/net_config.h"
 #include "net/lwip_stack.h"
 #include "fs/procfs_internal.h"
+#include "drivers/bus/pci_msix.h"
 #include "mm/pt.h"
 #include "core/klog.h"
 #include "core/panic.h"
@@ -130,6 +131,7 @@ static pf_type_t name_to_type(const char *name, int *out_pid) {
     if (strcmp(name, "driver_lifecycle") == 0) return PF_A20_DRIVER_LIFECYCLE;
     if (strcmp(name, "objects") == 0) return PF_A20_OBJECTS;
     if (strcmp(name, "iommu") == 0) return PF_A20_IOMMU;
+    if (strcmp(name, "irq_affinity") == 0) return PF_A20_IRQ_AFFINITY;
     if (strcmp(name, "cmdline") == 0) return PF_CMDLINE;
     if (is_pid_str(name)) {
         *out_pid = atoi(name);
@@ -502,6 +504,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     } else if (dp && dp->type == PF_A20 && strcmp(name, "iommu") == 0) {
         child = new_entry(name, PF_A20_IOMMU, 0);
         type = PF_A20_IOMMU;
+    } else if (dp && dp->type == PF_A20 &&
+               strcmp(name, "irq_affinity") == 0) {
+        child = new_entry(name, PF_A20_IRQ_AFFINITY, 0);
+        type = PF_A20_IRQ_AFFINITY;
     } else if (dp && dp->type == PF_A20 && strcmp(name, "netfilter") == 0) {
         child = new_entry(name, PF_A20_NETFILTER, 0);
         type = PF_A20_NETFILTER;
@@ -677,6 +683,10 @@ static int procfs_lookup(vnode_t *dir, const char *name, vnode_t **out) {
     else if (type == PF_PID_OOM_SCORE_ADJ ||
         type == PF_A20_SCHED_BASE_SLICE || type == PF_SYS_FS_PIPE_MAX_SIZE ||
         type == PF_SYS_FS_LEASE_BREAK_TIME ||
+        /* Same authority argument as the other a20 tunables: moving a
+         * device interrupt between CPUs the scheduler already uses grants no
+         * capability a process did not have. */
+        type == PF_A20_IRQ_AFFINITY ||
 #ifdef CONFIG_XLATOR
         /* 0644 like the other a20 tunables: enabling the channel grants no
          * new authority, since a process able to exec the configured
@@ -1058,6 +1068,96 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
             netfilter_conntrack_set_enabled(0);
             return (int)count;
         }
+        /* Idle-timeout override for the capacity gate: three milliseconds, 0
+         * restoring the compiled-in default for that one.  See the declaration
+         * comment in netfilter.h for why this is a runtime knob and not a
+         * per-build constant. */
+        if (strncmp(tmp, "cttimeout ", 10) == 0) {
+            unsigned ms[3] = { 0, 0, 0 };
+            const char *d = tmp + 10;
+            for (int i = 0; i < 3; i++) {
+                while (*d == ' ')
+                    d++;
+                if (*d < '0' || *d > '9')
+                    return -EINVAL;
+                unsigned v = 0;
+                while (*d >= '0' && *d <= '9') {
+                    if (v > 3600000u)
+                        return -ERANGE;
+                    v = v * 10 + (unsigned)(*d - '0');
+                    d++;
+                }
+                ms[i] = v;
+            }
+            while (*d == ' ')
+                d++;
+            if (*d != '\0')
+                return -EINVAL;
+            uint64_t lf = a20_lwip_lock();
+            netfilter_conntrack_set_timeouts(ms[0], ms[1], ms[2]);
+            a20_lwip_unlock(lf);
+            return (int)count;
+        }
+        /* Synthetic flow insertion: ctinject <src> <dst> <sport> <dport>
+         * <proto> <state>, all decimal, proto 6 or 17.  Goes through the same
+         * insert the packet path uses -- see netfilter.h. */
+        if (strncmp(tmp, "ctinject ", 9) == 0) {
+            const char *d = tmp + 9;
+            char *tok[6];
+            unsigned ntok = 0;
+            /* The first two tokens are addresses and are parsed separately, so
+             * split off six space-delimited tokens in place: `tmp` is this
+             * function's own stack buffer, so NUL-ing the separators in it is
+             * safe and needs no second buffer. */
+            while (ntok < 6) {
+                while (*d == ' ')
+                    d++;
+                if (*d == '\0')
+                    return -EINVAL;
+                tok[ntok++] = (char *)d;
+                while (*d && *d != ' ')
+                    d++;
+                if (*d)
+                    *(char *)d++ = '\0';
+            }
+            while (*d == ' ')
+                d++;
+            if (*d != '\0')
+                return -EINVAL;
+            uint32_t addr[2];
+            for (int i = 0; i < 2; i++) {
+                const char *s = tok[i];
+                size_t len = 0;
+                while (s[len])
+                    len++;
+                if (!netfilter_ipv4_from_str(s, len, &addr[i]))
+                    return -EINVAL;
+            }
+            unsigned num[4];
+            for (int i = 0; i < 4; i++) {
+                const char *s = tok[2 + i];
+                if (*s < '0' || *s > '9')
+                    return -EINVAL;
+                unsigned v = 0;
+                while (*s >= '0' && *s <= '9') {
+                    if (v > 65535u)
+                        return -ERANGE;
+                    v = v * 10 + (unsigned)(*s - '0');
+                    s++;
+                }
+                if (*s != '\0')
+                    return -EINVAL;
+                num[i] = v;
+            }
+            uint64_t lf = a20_lwip_lock();
+            int r = netfilter_conntrack_inject(addr[0], addr[1],
+                                               (uint16_t)num[0],
+                                               (uint16_t)num[1],
+                                               (uint8_t)num[2],
+                                               (uint8_t)num[3]);
+            a20_lwip_unlock(lf);
+            return r < 0 ? r : (int)count;
+        }
         if (strncmp(tmp, "add ", 4) == 0) {
             netfilter_rule_t rule;
             int r = netfilter_parse_rule(tmp + 4, strlen(tmp + 4), &rule);
@@ -1153,6 +1253,37 @@ static int procfs_fwrite(vfile_t *vf, const char *buf, size_t count) {
         if (value < 0 || value > 65536)
             return -EINVAL;
         int r = mm_pt_set_anon_prov_max((uint32_t)value);
+        return r < 0 ? r : (int)count;
+    }
+    /* Message-signalled vector affinity.  The write is exactly one CPU id,
+     * optionally followed by whitespace, and it applies to every programmed
+     * MSI-X entry in the system -- there is no per-function form here, so a
+     * typo cannot leave half the vectors on one core and half on another
+     * while the write reports success.  pci_msix_set_all_affinity() returns
+     * the first entry's refusal, so a partial move is an error, not a
+     * silent partial success. */
+    if (p->type == PF_A20_IRQ_AFFINITY) {
+        char tmp[32];
+        size_t n = count < sizeof(tmp) - 1 ? count : sizeof(tmp) - 1;
+        memcpy(tmp, buf, n);
+        tmp[n] = '\0';
+        /* Trim trailing newline/whitespace, then require a plain decimal
+         * number: atoi() reads "1x" and "" as 0, and moving every device
+         * interrupt to CPU 0 because the caller typed something odd is not a
+         * failure the caller should have to notice afterwards. */
+        while (n > 0 && (tmp[n - 1] == ' ' || tmp[n - 1] == '\t' ||
+                         tmp[n - 1] == '\n' || tmp[n - 1] == '\r'))
+            tmp[--n] = '\0';
+        if (n == 0)
+            return -EINVAL;
+        for (size_t i = 0; i < n; i++) {
+            if (tmp[i] < '0' || tmp[i] > '9')
+                return -EINVAL;
+        }
+        int cpu = 0;
+        for (size_t i = 0; i < n; i++)
+            cpu = cpu * 10 + (tmp[i] - '0');
+        int r = pci_msix_set_all_affinity(cpu);
         return r < 0 ? r : (int)count;
     }
 #ifdef CONFIG_XLATOR

@@ -12,6 +12,9 @@
 
 extern void uart_putc(char c);
 extern int  uart_getc(void);
+/* Owned by kernel/core/klog.c and kernel/core/printf.c: the one lock every
+ * console byte passes under.  Declared extern the same way printf.c:9 does. */
+extern spinlock_t klog_console_lock;
 
 /*
  * Console TTY line discipline, termios state and the stdin/stdout console
@@ -22,6 +25,10 @@ extern int  uart_getc(void);
 
 #define TTY_LINE_SLOTS 16
 #define TTY_LINE_BUF_SIZE 256
+/* Upper bound on the interrupt-off window of one console emit, see
+ * tty_console_write().  A chunk ends early at a newline so that a record
+ * never straddles two chunks. */
+#define TTY_EMIT_CHUNK 256
 
 typedef struct tty_line_buffer {
     int pid;
@@ -260,8 +267,11 @@ int tty_console_read(vfile_t *vf, char *buf, size_t count) {
     int c = uart_getc();
     if (c < 0) return 0;
     if (c == '\r') c = '\n';
-    if (g_dev_tty.termios.c_lflag & 0x00000008U)
+    if (g_dev_tty.termios.c_lflag & 0x00000008U) {
+        uint64_t kf = spin_lock_irqsave(&klog_console_lock);
         uart_putc((char)c);
+        spin_unlock_irqrestore(&klog_console_lock, kf);
+    }
     buf[0] = (char)c;
     return 1;
 }
@@ -388,21 +398,51 @@ int tty_console_write(vfile_t *vf, const char *buf, size_t count) {
     tty_parse_mouse_mode(buf, count);
 
     mutex_lock(&g_tty_write_lock);
-    tty_release_dead_owner_locked();
-    for (size_t i = 0; i < count; i++) {
-        char c = buf[i];
-        if (pid < 0 || g_tty_line_owner < 0 || g_tty_line_owner == pid) {
-            tty_write_owned_char(pid, c);
-        } else {
-            tty_buffer_pending_char(pid, c);
+    /* Every console byte must leave under klog_console_lock, the lock
+     * klog_write() and vprintf() already hold.  The line-owner protocol
+     * below only serialises userspace writers against each other; the kernel
+     * console was a second, independent domain feeding the same UART, so a
+     * printk landing mid-write spliced its record into the middle of the
+     * user's line character by character.  That is not cosmetic: the gate
+     * matches a literal "[mc-test] WAYLAND_DISPLAY" and read the spliced
+     * result as "the hook did not fire".
+     *
+     * The lock is handed back every TTY_EMIT_CHUNK bytes so a very large
+     * write cannot hold interrupts off for its whole length; a chunk ends
+     * early on a newline, so every record still leaves in one piece. */
+    {
+        uint64_t kf = spin_lock_irqsave(&klog_console_lock);
+        tty_release_dead_owner_locked();
+        spin_unlock_irqrestore(&klog_console_lock, kf);
+    }
+    for (size_t i = 0; i < count; ) {
+        size_t n = 0;
+        while (i + n < count && n < TTY_EMIT_CHUNK) {
+            if (buf[i + n++] == '\n')
+                break;
         }
+        uint64_t kf = spin_lock_irqsave(&klog_console_lock);
+        for (size_t j = 0; j < n; j++) {
+            char c = buf[i + j];
+            if (pid < 0 || g_tty_line_owner < 0 || g_tty_line_owner == pid) {
+                tty_write_owned_char(pid, c);
+            } else {
+                tty_buffer_pending_char(pid, c);
+            }
+        }
+        spin_unlock_irqrestore(&klog_console_lock, kf);
+        i += n;
     }
     /* Ownership is per write() call, not per '\n': a newline-less write
      * (a shell prompt, a progress spinner) must not leave the line claimed
      * forever, otherwise every other task's console output is parked in the
      * pending buffers and the drain is never reached. */
-    g_tty_line_owner = -1;
-    tty_drain_pending_locked();
+    {
+        uint64_t kf = spin_lock_irqsave(&klog_console_lock);
+        g_tty_line_owner = -1;
+        tty_drain_pending_locked();
+        spin_unlock_irqrestore(&klog_console_lock, kf);
+    }
     mutex_unlock(&g_tty_write_lock);
     return (int)count;
 }

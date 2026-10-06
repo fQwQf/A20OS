@@ -61,12 +61,21 @@
  *   - No ALG.  There is no FTP/SIP/ISAKMP payload inspection, so a protocol
  *     that carries its addresses in the body is translated only in the
  *     headers and its control channel will not follow.
- *   - No ICMP tracking.  Only TCP and UDP create conntrack entries; anything
- *     else, ICMP included, is passed through untracked and untranslated
- *     (netfilter_nat.c, the proto test at the top of the per-packet path).  An
- *     ICMP error is therefore neither matched against a flow nor able to
- *     create one, so path MTU discovery, which depends on ICMP error tracking,
- *     does not work through this.
+ *   - No ICMP error tracking, and no ALG to get it.  TCP, UDP and ICMP *echo*
+ *     create conntrack entries; every other ICMP type -- destination
+ *     unreachable, time exceeded, everything else -- is passed through
+ *     untracked and untranslated.  Pairing those with a flow means reading the
+ *     packet they quote from the original and matching on that, which is an
+ *     ALG, so it is not done here.  Path MTU discovery therefore does not work
+ *     through this: a translated flow that needs a PMTU will black-hole rather
+ *     than recover from the fragmentation-needed message.
+ *   - ICMP echo is translated by ADDRESS only.  It has no port, so a NAT rule
+ *     that asks for a toport= has no field to apply it to and the port is
+ *     ignored; and no ICMP payload rewriting happens at all (the embedded
+ *     headers inside a quoted packet, for instance).  The echo *identifier* is
+ *     never translated, which is what keeps a reply pairable.  Echo is also
+ *     exempt from the non-first-fragment rule below, since the parser only
+ *     recognises it unfragmented.
  *   - Flow state is inferred from the tuple and the TCP flags byte only.  A flow
  *     is ESTABLISHED once a reply is seen, or once a forward packet carries ACK
  *     without SYN.  There is no sequence-number window check, no RST/FIN teardown
@@ -95,6 +104,11 @@
 #define NETFILTER_PROTO_ICMP 1
 #define NETFILTER_PROTO_TCP  6
 #define NETFILTER_PROTO_UDP  17
+
+/* ICMP echo types (RFC 792).  The only two this tree tracks; see
+ * netfilter_frame_t::icmp_off and docs/net/conntrack-nat.md. */
+#define NETFILTER_ICMP_ECHO_REPLY   0
+#define NETFILTER_ICMP_ECHO_REQUEST 8
 
 typedef enum {
     NETFILTER_DIR_IN = 0,
@@ -162,6 +176,21 @@ typedef struct {
     uint16_t ip_off;      /* offset of the IPv4 header in the frame */
     uint16_t l4_off;      /* offset of the L4 header, 0 if none */
     uint16_t tcp_flags;   /* TCP flags byte 0, 0 otherwise */
+    /*
+     * ICMP echo, and only ICMP echo.  These are separate fields rather than an
+     * overload of src_port / dst_port on purpose: those two are the rule
+     * matcher's, and a rule written before this existed that says `sport=any`
+     * must keep meaning "any port", not "any ICMP identifier".  Widening them
+     * would silently change what every existing icmp rule matches.
+     *
+     * icmp_off is the offset of the ICMP header, 0 when the packet is not
+     * echo (request type 8 or reply type 0) or is a non-first fragment.  It is
+     * deliberately NOT l4_off: l4_off drives netfilter_set_port(), which would
+     * read an ICMP type and code as if they were a port and rewrite them.
+     */
+    uint16_t icmp_off;    /* offset of the ICMP header, 0 if not ICMP echo */
+    uint8_t  icmp_type;   /* 8 (request) or 0 (reply) when icmp_off is set */
+    uint16_t icmp_id;     /* the echo identifier, which pairs the two */
 } netfilter_frame_t;
 
 /* Returns 0 when the frame is not IPv4 (including VLAN-tagged ARP and IPv6)
@@ -363,6 +392,55 @@ void netfilter_conntrack_get_stats(net_conntrack_stats_t *out);
  * call stopped, so a full table cannot make one timer tick unbounded.
  */
 unsigned netfilter_conntrack_expire(unsigned max_scan);
+
+/*
+ * How many times the idle sweeper has run.  The timeout counter says what a
+ * sweep reclaimed; this says whether one ran at all, which is the difference
+ * between "nothing was idle" and "nothing ever looked".  /proc renders it as
+ * ct_sweeps, and the capacity gate asserts it moved across the idle wait.
+ */
+unsigned netfilter_conntrack_sweeps(void);
+
+/*
+ * The source port of the entry netfilter_ct_lru() would evict next, or -1 when
+ * the table is empty.  Exposed because the eviction *counters* cannot say which
+ * flow a full table would forget, and "the table is at capacity" is not an
+ * answer an operator debugging a dropped flow can act on.  /proc renders it as
+ * ct_lru_victim, and the capacity gate asserts the victim's identity rather
+ * than only that the evicted counter moved.
+ */
+int netfilter_conntrack_lru_victim(void);
+
+/*
+ * Test hooks.  Both exist because the two conntrack limits that matter most --
+ * capacity and idle timeout -- have the property that no realistic packet
+ * stream reaches them: filling a 256-entry table takes 256 distinct flows, and
+ * the shortest compiled-in timeout is 30 seconds, so a gate that had to drive
+ * either through the data plane would either be very slow or prove nothing
+ * about the limit itself.  These let a gate put the table in the state it is
+ * asking about, and then read the counters back.
+ *
+ * netfilter_conntrack_inject() inserts through the same netfilter_ct_insert()
+ * the packet path uses, so it exercises the real insert, chaining, LRU and
+ * eviction code -- it is not a second, easier implementation of them.
+ * netfilter_conntrack_set_timeouts() overrides the millisecond constants below
+ * at runtime; a 0 argument restores that one default, so "cttimeout 0 0 0" is
+ * how a gate puts the compiled-in values back.
+ */
+int netfilter_conntrack_inject(uint32_t src, uint32_t dst, uint16_t sport,
+                               uint16_t dport, uint8_t proto, uint8_t state);
+void netfilter_conntrack_set_timeouts(unsigned tcp_new_ms, unsigned tcp_est_ms,
+                                      unsigned udp_ms);
+
+/*
+ * Dotted-quad parse/format, defined in netfilter.c and shared by the filter
+ * rule parser, the NAT rule parser and the conntrack injection verb, so none
+ * of them carries a second copy that could disagree about what counts as a
+ * valid address.  `from_str` returns 1 on success and 0 on anything that is
+ * not exactly four decimal octets in s[0..len).
+ */
+int netfilter_ipv4_from_str(const char *s, size_t len, uint32_t *out);
+void netfilter_ipv4_to_str(uint32_t addr, char *buf, size_t bufsz);
 
 /*
  * Idle timeouts, in milliseconds.  Split by protocol and state because the

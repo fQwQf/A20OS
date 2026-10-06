@@ -77,13 +77,19 @@
   所有挂载都位于分区之上，这会静默剥离整个文件树的持久性能力。现已修复；
   新增包装层时必须转发全部能力。
 
-验证入口：`make smoke-fsync-durability`。该门禁断言 `block_flushes` 计数器
-确实增长，而非仅检查 `fsync()` 返回 0。后者在修复前同样返回 0，所以
-只检查返回值等于什么都没验证。
+验证入口：`make smoke-fsync-durability`（virtio-blk）与 `make smoke-ahci-ich9`
+（x86_64 QEMU q35 挂 `-device ich9-ahci` + `ide-hd`，ext4 落在该控制器上）。
+两者都断言 `block_flushes` 计数器确实增长，而非仅检查 `fsync()` 返回 0。后者
+在修复前同样返回 0，所以只检查返回值等于什么都没验证。
 
-未覆盖：AHCI 路径仅完成编译验证（`ahci.c` 位于 `CONFIG_AHCI` 之后，树内
-没有实例挂载 AHCI 控制器，补一个挂 ich9-ahci 的门禁是缺失的一环）；ext4
-仍无可写 journal，详见 [roadmap/next-horizon.md](../roadmap/next-horizon.md)。
+未覆盖：AHCI 中断路径的运行验证**已在 QEMU 上拿到**——`make smoke-ahci-ich9`
+实跑 PASS（日志 `.kernel-build/smoke/ahci-ich9-x86_64.log`，`FSYNC_TEST: PASS`
+且 `ahci_irq_completions > 0`）。**真实 SATA PHY 上的中断送达仍无任何证据**，
+AHCI 也仍只走 INTx、没有 MSI-X 路径（详见
+[server-readiness.md](../server-readiness.md) 第一节「仍缺」）。ext4 已有可写
+JBD2 ordered journal 并通过 `make smoke-ext4-journal` 的崩溃注入门禁；仍未覆盖
+的是文件数据块本身的校验和（`crc32c` 只覆盖 JBD2 日志与 ext4 元数据），见
+[server-readiness.md](../server-readiness.md)。
 
 ## 已评估、暂缓或进行中的项
 

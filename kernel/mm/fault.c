@@ -1391,7 +1391,12 @@ static int handle_demand_fault_attempt(task_t *t, uint64_t stval,
             return -1;
         }
         int shared   = mm_seg_shared(seg);
-        int file_pos = (int)(seg->backing_offset + (page_va - seg->start));
+        /* The callee takes this as uint64_t.  Narrowing it to int here
+         * truncated any offset at or above 4 GiB -- and, because the low 12
+         * bits survive, file_pos / PAGE_SIZE still named a page that is
+         * inside the file, so the fault silently read the WRONG page of the
+         * right file instead of failing. */
+        uint64_t file_pos = seg->backing_offset + (page_va - seg->start);
         vaddr_t seg_end = seg->end;
         /* Take our own reference on the open file description: the segment's
          * own reference can drop the moment mm_seg_put() does, and the fault

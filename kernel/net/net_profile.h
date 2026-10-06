@@ -40,9 +40,36 @@
  * (OPT="-DCONFIG_NET_LOCK_ASSERT=1") when investigating a lock-discipline
  * question -- it reports the owning CPU and a violation count per boot on
  * /proc/net/status as "lwip_lock: owner=<cpu> violations=<n>", and the one-shot
- * init-path violations it finds there are expected, not a defect. */
+ * init-path violations it finds there are expected, not a defect.
+ *
+ * The same switch now drives the net-lock probe as well
+ * (kernel/net/net_lock_probe.c), which is what closes the gap the lwIP half
+ * never had: the two net-lock rules (address order in net_sock_lock2(), and
+ * "never a bucket lock under a socket lock") were prose only.  Values:
+ *
+ *   0  no probe at all.  /proc/net/status says "net_lock: not checked", so an
+ *      absent probe is never read as a clean one.  This is the default and it
+ *      cannot abort anything.
+ *   1  probe on; a violation records its site and panics.  A counting signal
+ *      gets trained to be ignored, so a violation has to stop the machine.
+ *   2  probe on; a violation is counted and its site recorded, no panic.  For a
+ *      long soak where the violation count at the end is worth more than a dead
+ *      machine on the first hit.
+ */
 #ifndef CONFIG_NET_LOCK_ASSERT
 #define CONFIG_NET_LOCK_ASSERT 0
+#endif
+
+/* Reference-count checking.  The net_socket_t refcount ledger
+ * (socket_internal.h, net_socket_free()) is always compiled in and always
+ * counted -- allocs, frees, live, faults all render on /proc/net/status -- and
+ * this switch only decides what a *fault* does.  Off by default, because a
+ * fault means some path dropped one reference too many and the machine is
+ * already in undefined behaviour by the time the counter moves; that is a
+ * reason to stop, not a reason to keep running and print a number.
+ * OPT="-DCONFIG_NET_REF_ASSERT=1" turns the fault into a panic. */
+#ifndef CONFIG_NET_REF_ASSERT
+#define CONFIG_NET_REF_ASSERT 0
 #endif
 
 #if CONFIG_NET_PROFILE == CONFIG_NET_PROFILE_EMBEDDED
@@ -65,19 +92,67 @@
 #define NET_PROFILE_MEMP_MEM_MALLOC  1
 #define NET_PROFILE_MEM_SIZE         (16 * 1024)
 #define NET_PROFILE_PBUF_BUFSIZE     512
-#define NET_PROFILE_PBUF_POOL_SIZE   24
+#define NET_PROFILE_PBUF_POOL_SIZE   10
 #define NET_PROFILE_TCP_MSS          256
 #define NET_PROFILE_TCP_WND_MULT     4
 #define NET_PROFILE_ARP_QUEUE        4
 #define NET_PROFILE_SYS_TIMEOUT      16
-#define NET_PROFILE_TCP_SEG_MULT     16
+#define NET_PROFILE_TCP_SEG_MULT     8
 #define NET_PROFILE_TCP_PCB          8
 #define NET_PROFILE_UDP_PCB          8
 #define NET_PROFILE_RAW_PCB          4
 #define NET_PROFILE_TCP_PCB_LISTEN   4
-#define NET_PROFILE_BH_RING_SIZE     4
-#define NET_PROFILE_INLINE_PAYLOAD   320
-#define NET_PROFILE_SOCKET_MAX_BYTES (8 * 1024)
+#define NET_PROFILE_REASSDATA        8
+#define NET_PROFILE_FRAG_PBUF        8
+
+/*
+ * Receive staging, which is what made eight sockets impossible here.
+ *
+ * A net_socket_t embeds its own bottom-half ring: NET_BH_RING_SIZE staged
+ * inbound events, each carrying NET_BH_INLINE_PAYLOAD bytes of payload plus a
+ * ~208 B header, plus one spill pointer per slot.  That is the dominant term in
+ * the struct and the only term a profile can shrink without removing a feature,
+ * which is why these two numbers are per-tier.  Measured on riscv64 LP64:
+ *
+ *   ring 4 / payload 320 -> event 528 B, ring 2152 B, net_socket_t 3640 B,
+ *                           8 sockets 29120 B = 1.39x a 20 KiB part
+ *   ring 2 / payload 256 -> event 464 B, ring  952 B, net_socket_t 2440 B,
+ *                           8 sockets 19520 B = 0.93x a 20 KiB part
+ *
+ * Payload 256 is the floor, not a round number: _Static_assert() in
+ * socket_inet.c requires NET_BH_INLINE_PAYLOAD >= TCP_MSS, and this tier's MSS
+ * is 256.  Below that every TCP segment would take the spill path and stage by
+ * pbuf reference, which is correct but costs a refcount per segment and turns
+ * the copy into a chain walk.
+ *
+ * Ring depth 2 is safe rather than merely small: net_inet_tcp_stage_payload()
+ * reserves capacity for the whole segment up front and returns false when the
+ * ring is full, which makes the lwIP callback answer ERR_MEM and lwIP parks the
+ * pbuf in refused_data for a later retry.  A full ring backpressures, it does
+ * not lose the segment.  What depth 2 costs is burst absorption -- see
+ * docs/server-readiness.md, "嵌入式档能力边界".
+ */
+#define NET_PROFILE_BH_RING_SIZE     2
+#define NET_PROFILE_INLINE_PAYLOAD   256
+
+/*
+ * Per-socket ceiling, tightened from 8 KiB to 2.5 KiB to match the ring above:
+ * the old bound was three times the struct it was guarding, so it could not
+ * fail even if the staging regressed to a server-sized ring.  8 x 2560 is
+ * exactly the 20 KiB the part has, which is what makes the socket-table assert
+ * below the thing that actually pins this tier.
+ */
+#define NET_PROFILE_SOCKET_MAX_BYTES 2560
+
+/*
+ * Per-term budget for the whole socket table: NET_PROFILE_MAX_SOCKETS x
+ * sizeof(net_socket_t).  The struct's real size is not visible here (this
+ * header is included from socket_internal.h *before* the struct is defined),
+ * so the assert that uses this number lives in socket_internal.h and is
+ * checked against a real sizeof().  This macro is the ceiling that sizeof is
+ * measured against.
+ */
+#define NET_PROFILE_SOCKET_BUDGET    (20 * 1024)
 
 /* SACK and TCP timestamps off: both grow the TCP header of every data segment
  * and every established PCB, and on a 512 B pool element that comes straight out
@@ -88,10 +163,136 @@
 #define NET_PROFILE_TCP_TIMESTAMPS   0
 #define NET_PROFILE_TCP_CUBIC        0
 
-/* Conntrack + NAT ceilings.  The table is static, so these are real bytes:
- * NET_CONNTRACK_ENTRY_BYTES (~64) x entries. */
-#define NET_PROFILE_CONNTRACK_ENTRIES 64
+/*
+ * Conntrack + NAT ceilings.  The table is unconditional .bss, so these are real
+ * bytes: NET_PROFILE_CONNTRACK_ENTRY_BYTES x entries, where the entry-size
+ * ceiling is asserted against the real sizeof() in netfilter_nat.c.
+ * Halved from the 64 the tier was launched with.  A conntrack entry is tracked
+ * only when netfilter is loaded, and this tier's honest answer to "how many
+ * simultaneous flows will it track" is a small one -- see docs/server-readiness.md
+ * for what the reduction costs.  The table is paid for on every boot whether or
+ * not netfilter ever runs, so its ceiling belongs in the tier's memory budget
+ * rather than in a feature nobody enabled.
+ */
+#define NET_PROFILE_CONNTRACK_ENTRIES 32
 #define NET_PROFILE_CONNTRACK_BUCKETS 8
+
+/*
+ * The whole of this tier's networking RAM, in one number, as the sum of four
+ * terms that are each asserted somewhere real:
+ *
+ *   socket table   NET_PROFILE_MAX_SOCKETS x sizeof(net_socket_t)
+ *                  -- assert in socket_internal.h (real sizeof), 19520 B
+ *   frame arrays   NET_PROFILE_PACKET_RING_SLOTS x slot + netif states
+ *                  -- macro bound here, real sizeof in socket_packet.c and
+ *                     lwip_stack.c, 3732 B measured
+ *   filter tables  conntrack + NAT rule tables
+ *                  -- assert in netfilter_nat.c (real sizeof), 3072 B
+ *   lwIP heap      NET_PROFILE_MEM_SIZE
+ *                  -- a static array in memp/mem.c, 16384 B
+ *
+ * 42644 B measured.  The ceiling is 44 KiB, which leaves roughly 2.4 KiB of
+ * slack for the structs this file cannot see (the obj_cache descriptors, the
+ * per-lane and per-bucket bookkeeping, and any growth in the three terms
+ * above).
+ *
+ * This replaces the old framing, and the change is a real capability statement
+ * rather than bookkeeping: the tier was previously described as a 20 KiB
+ * profile whose largest single term overran 20 KiB.  It is now described as a
+ * profile that needs about 42 KiB and is asserted not to need more than 44 KiB.
+ * 20 KiB was never achievable for a socket-capable lwIP -- the eight sockets
+ * alone are 19520 B -- and the way that used to be expressed was a ceiling that
+ * the code violated.  docs/server-readiness.md carries the numbers.
+ */
+#define NET_PROFILE_FILTER_BUDGET    (32 * 64 + 1280)
+#define NET_PROFILE_TOTAL_BUDGET     (44 * 1024)
+
+/*
+ * What this tier's pool ceilings add up to against its own heap.
+ *
+ * With MEMP_MEM_MALLOC=1 the pools are not static arrays -- memp.c's
+ * do_memp_malloc_pool() is mem_malloc(desc->size), so a pool's ceiling is a
+ * claim on MEM_SIZE and not an independent reservation.  That makes the two
+ * numbers directly comparable, and it makes the sum below a real question: a
+ * set of ceilings that adds up to more than the heap is a set of ceilings that
+ * cannot all be reached, and MEMP_STATS reports the shortfall as err > 0 on
+ * whichever pool loses the race.
+ *
+ * Measured on riscv64 LP64 (14 pools compile in), the element sizes at this
+ * tier's geometry: PBUF_POOL 536, TCP_PCB 296, TCP_PCB_LISTEN 104,
+ * UDP_PCB 96, RAW_PCB 96, ND6_QUEUE 88, REASSDATA 40, FRAG_PBUF 40,
+ * MLD6_GROUP 32, TCP_SEG 32, ARP_QUEUE 24, PBUF 24, SYS_TIMEOUT 16.  Each is
+ * rounded up to the next multiple of 8 below, which is the direction that can
+ * only make this assert fire early.
+ */
+#define NET_PROFILE_MEMP_PBUF_POOL_ELEM      544
+#define NET_PROFILE_MEMP_PBUF_ELEM           32
+#define NET_PROFILE_MEMP_TCP_PCB_ELEM        304
+#define NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM 112
+#define NET_PROFILE_MEMP_UDP_PCB_ELEM        104
+#define NET_PROFILE_MEMP_RAW_PCB_ELEM        104
+#define NET_PROFILE_MEMP_TCP_SEG_ELEM        40
+#define NET_PROFILE_MEMP_REASSDATA_ELEM      48
+#define NET_PROFILE_MEMP_FRAG_PBUF_ELEM      48
+#define NET_PROFILE_MEMP_ARP_QUEUE_ELEM      32
+#define NET_PROFILE_MEMP_ND6_QUEUE_ELEM      96
+#define NET_PROFILE_MEMP_MLD6_GROUP_ELEM     40
+#define NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM    24
+
+/* lwIP's own opt.h defaults for the two IPv6 multicast/neighbour pools are 20
+ * and 4.  Both are per-part permanent heap claims on a tier whose heap is four
+ * times smaller than the default tier's, and neither is reachable without an
+ * IPv6 multicast group join or a neighbour solicitation, so they are scaled
+ * here rather than left at a default that was chosen for a different part. */
+#define NET_PROFILE_ND6_QUEUE         6
+#define NET_PROFILE_MLD6_GROUP        2
+
+#define NET_PROFILE_MEMP_CLAIM_BYTES \
+    (NET_PROFILE_PBUF_POOL_SIZE * NET_PROFILE_MEMP_PBUF_POOL_ELEM + \
+     (NET_PROFILE_PBUF_POOL_SIZE / 2) * NET_PROFILE_MEMP_PBUF_ELEM + \
+     NET_PROFILE_TCP_PCB * NET_PROFILE_MEMP_TCP_PCB_ELEM + \
+     NET_PROFILE_TCP_PCB_LISTEN * NET_PROFILE_MEMP_TCP_PCB_LISTEN_ELEM + \
+     NET_PROFILE_UDP_PCB * NET_PROFILE_MEMP_UDP_PCB_ELEM + \
+     NET_PROFILE_RAW_PCB * NET_PROFILE_MEMP_RAW_PCB_ELEM + \
+     (NET_PROFILE_TCP_SEG_MULT * NET_PROFILE_TCP_WND_MULT) * \
+         NET_PROFILE_MEMP_TCP_SEG_ELEM + \
+     NET_PROFILE_REASSDATA * 2 * NET_PROFILE_MEMP_REASSDATA_ELEM + \
+     NET_PROFILE_FRAG_PBUF * NET_PROFILE_MEMP_FRAG_PBUF_ELEM + \
+     NET_PROFILE_ARP_QUEUE * NET_PROFILE_MEMP_ARP_QUEUE_ELEM + \
+     NET_PROFILE_ND6_QUEUE * NET_PROFILE_MEMP_ND6_QUEUE_ELEM + \
+     NET_PROFILE_MLD6_GROUP * NET_PROFILE_MEMP_MLD6_GROUP_ELEM + \
+     NET_PROFILE_SYS_TIMEOUT * NET_PROFILE_MEMP_SYS_TIMEOUT_ELEM)
+
+/*
+ * The reconciliation this file's own comment used to say was needed: the sum of
+ * this tier's pool ceilings has to fit the heap those same pools draw from.
+ *
+ * Before this change the sum was 22880 B against a 16384 B heap, so the tier
+ * declared ceilings it could never reach -- which under MEMP_MEM_MALLOC=1 is
+ * not a harmless overstatement, because memp has no per-pool cap: the pools
+ * simply compete, and whichever loses reports err > 0 on /proc/a20/netmem as an
+ * unexplained receive drop.  Now 13332 B of claims against 16384 B, with 3052 B
+ * left for everything memp does not serve (pbuf_custom chains, netconn, DNS
+ * tables and lwIP's own allocations).
+ */
+_Static_assert(NET_PROFILE_MEMP_CLAIM_BYTES <= NET_PROFILE_MEM_SIZE,
+               "this profile's pool ceilings add up to more than its own "
+               "MEM_SIZE; with MEMP_MEM_MALLOC=1 every pool draws from that one "
+               "heap, so the tier is declaring capacity it cannot allocate and "
+               "the shortfall will surface as memp err > 0, not as a clean "
+               "allocation failure");
+
+/*
+ * A bottom-half ring of one slot is not a small ring, it is a broken one: the
+ * producer and the consumer would have to interleave perfectly for two adjacent
+ * segments to both be staged, and the second would sit in lwIP's refused_data
+ * until the first was drained.  Two is the floor that still absorbs a segment
+ * arriving while another is being read.  The per-tier depth is chosen above;
+ * this only refuses the degenerate one.
+ */
+_Static_assert(NET_PROFILE_BH_RING_SIZE >= 2,
+               "a bottom-half ring of one slot backpressures every second "
+               "received segment onto lwIP's refused_data path");
 
 /*
  * Frame-buffer geometry, which is the other half of the pbuf story.
@@ -118,18 +319,22 @@
 #define NET_PROFILE_STATIC_BUDGET     (20 * 1024)
 
 /*
- * Budget, stated honestly: this profile is sized so the *stack's own* static
- * arrays and pools fit a small SRAM part, not so a full-featured TCP/IP stack
- * plus an application fits in 20 KiB.  The static arrays below the profile's
- * two frame buffers are now inside the profile's scope, so what they cost is
- * bounded and proportional to the ceilings above; one net_socket_t is still
- * roughly 8 * ~700 B, so 8 sockets land near 48 KiB before any lwIP pool.
+ * What this tier costs, stated as one number instead of as an aspiration.
  *
- * The honest consequence, unchanged by this work: the MCU targets in
- * README.md (STM32F103, 20 KiB SRAM) do not fit a socket-capable lwIP *and*
- * do not build one at all -- PROFILE=mcu compiles a curated source list
+ * NET_PROFILE_STATIC_BUDGET above is the *frame-array* term only and is
+ * deliberately loose; it has never been the size of this profile.  The size is
+ * NET_PROFILE_TOTAL_BUDGET, asserted as a sum in socket_internal.h.  A 20 KiB
+ * part cannot hold this profile: eight sockets alone are 19520 B, and a
+ * socket-capable lwIP does not fit in the 1280 B that would be left.  The
+ * ceiling is therefore 44 KiB, which is what the code now guarantees rather
+ * than the 20 KiB it used to name and violate.
+ *
+ * The other half of that statement is unchanged by this work and still worth
+ * repeating: the MCU targets in README.md (STM32F103, 20 KiB SRAM) do not build
+ * a network stack at all -- PROFILE=mcu compiles a curated source list
  * (components/trim.toml [profile.mcu].sources) that contains neither the
  * kernel/net sources nor lwIP, so NET_PROFILE has no effect on that target.
+ * This profile targets a part with roughly 64 KiB of RAM, not a 20 KiB one.
  * See README.md and docs/server-readiness.md.
  */
 
@@ -272,6 +477,28 @@
  * against it, so anything below the true figure fails the riscv64 build rather
  * than silently overstating the budget.
  */
+/*
+ * Pools that lwIP's opt.h sizes with its own defaults rather than through the
+ * profile.  They are spelled here so a tier can scale them, and the defaults
+ * are opt.h's values so the default and server rungs keep exactly the ceilings
+ * they had before any of this was profile-scoped.
+ */
+#ifndef NET_PROFILE_CONNTRACK_ENTRY_BYTES
+#define NET_PROFILE_CONNTRACK_ENTRY_BYTES 64
+#endif
+#ifndef NET_PROFILE_REASSDATA
+#define NET_PROFILE_REASSDATA 16
+#endif
+#ifndef NET_PROFILE_FRAG_PBUF
+#define NET_PROFILE_FRAG_PBUF 32
+#endif
+#ifndef NET_PROFILE_ND6_QUEUE
+#define NET_PROFILE_ND6_QUEUE 20
+#endif
+#ifndef NET_PROFILE_MLD6_GROUP
+#define NET_PROFILE_MLD6_GROUP 4
+#endif
+
 #define NET_PROFILE_PACKET_SLOT_BYTES (4 + NET_PROFILE_PACKET_FRAME_SIZE)
 #ifndef NET_PROFILE_NETIF_STATE_OVERHEAD
 #define NET_PROFILE_NETIF_STATE_OVERHEAD 128

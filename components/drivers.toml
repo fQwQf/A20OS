@@ -52,6 +52,13 @@ early_arches = ["x86_64"]
 description = "PC speaker"
 
 [[driver]]
+name = "cmos-rtc"
+source = "kernel/drvmod/examples/cmos_rtc.c"
+arches = ["x86_64"]
+early_arches = ["x86_64"]
+description = "MC146818 CMOS RTC (x86_64 wall clock)"
+
+[[driver]]
 name = "virtio-net"
 source = "kernel/drvmod/examples/virtio_net.c"
 arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
@@ -124,6 +131,18 @@ arches = ["x86_64"]
 description = "VMware SVGA II GPU"
 
 [[driver]]
+name = "virtio-console"
+source = "kernel/drvmod/examples/virtio_console.c"
+arches = ["riscv64", "x86_64", "aarch64", "loongarch64"]
+description = "virtio-serial console port 0 as a CHAR device (/dev/vport0)"
+
+[[driver]]
+name = "virtio-rng"
+source = "kernel/drvmod/examples/virtio_rng.c"
+arches = ["riscv64", "x86_64"]
+description = "virtio-rng entropy source as a CHAR device (/dev/hwrng), feeding kernel/core/random.c"
+
+[[driver]]
 name = "xhci"
 source = "kernel/drvmod/examples/xhci.c"
 arches = ["x86_64", "aarch64", "loongarch64"]
@@ -146,3 +165,9 @@ name = "usb-hub"
 source = "kernel/drvmod/examples/usb_hub.c"
 arches = ["x86_64", "aarch64", "loongarch64"]
 description = "USB hub class driver"
+
+[[driver]]
+name = "rtl8139"
+source = "kernel/drvmod/examples/rtl8139.c"
+arches = ["x86_64"]
+description = "Realtek RTL8139 PCI NIC"
