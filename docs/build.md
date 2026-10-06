@@ -81,6 +81,7 @@ Makefile 之外的构建配置有两个声明式入口，日常应优先使用�
 - `BRINGUP`: `1` 只编译内核，`0` 编译完整用户态。
 - `ABI`: `linux` / `native` / `both`，默认 `both`。
 - `NR_CPUS`: 默认 `1`；只有 `riscv64`、`aarch64`、`loongarch64`、`x86_64` 的同名 QEMU virt 板列入已验证 SMP 白名单（出处：`components/trim.toml` 的 `smp-verified-qemu` 矩阵）。
+- `CONFIG_KERNEL_PREEMPT`: 默认 `1`（hosted 架构内核态抢占，机制见 `docs/process-scheduler.md` §4.1）；MCU profile（armv7m）固定关闭。设为 `0` 回到协作式内核。该开关参与 `BUILD_VARIANT`（构建目录带 `-preempt` 后缀），因此翻转它不会复用旧构建目录里的陈旧目标文件。
 - `NOMMU`: `1` 开启 NOMMU 模式；构建支持 `riscv64`、`riscv32`、`aarch64`、`arm32`、`armv7m`（出处：`components/trim.toml` 的 `nommu` 矩阵）。hosted MMU/NOMMU runtime matrix 只包含前四项，ARMv7-M 走独立 MCU 入口。
 - `DRIVER_DEPLOYMENT`: hosted 开发构建通常默认 `generic`，将可发现设备驱动打包为 `.a20drv`；`embedded` 静态链接完整驱动集。ARMv7-M、PPC64LE 和发布构建使用 embedded。
 - `QEMU_GUI_AUDIO_DRIVER`: RISC-V/x86_64/LoongArch64 图形 QEMU 的宿主音频 backend；Linux 默认 `pa`，macOS 默认 `coreaudio`，也可设置为 `pipewire`、`alsa`、`sdl` 或 `none`。

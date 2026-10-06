@@ -597,3 +597,20 @@ verifier 修复循环处理，修不动的如实记录 FAIL 状态并停在那�
   兜住——注意这**不是**旧稿设想的"退化到直连 cache 锁"，而是一开始就落在
   CPU 0 的数组上。旧稿 §3 是纯粹的重复设计工作，且两条约束的写法与已合入实现
   不同，照抄反而会把退化路径改坏。
+## 9. 后续叠加：抢占计数层（feat/kernel-preemption，2026-10-06）
+
+本文档的锁域拆分（tasklist_lock / park_lock / runq_lock / per-CPU 切换槽）在
+`CONFIG_KERNEL_PREEMPT`（hosted 默认开）下新增了一层由锁隐式携带的语义：
+
+- `spin_lock` / `spin_trylock_irqsave` / `spin_unlock` 现在同时是
+  preempt_disable / preempt_enable 括号（`kernel/core/preempt.c` 的 per-CPU
+  计数）；**等待锁不禁抢占**——自旋者仍是合法的切出目标。
+- 本文所有不变量的共同前提"持锁区间不发生上下文切换"由此从纯约定升级为两层
+  强制：计数>0 时抢占判定点（`kernel_preempt_at_irq_return`）拒绝切换，
+  `context_switch_locked()` 入口对计数非零无条件 panic。
+- `sched()` 的 pick→publish→`__switch` 段全程关中断，切换窗口对中断不可见；
+  `__switch` 本就按任务保存/恢复 flags，各任务在自己的 `out:` 处恢复，因此
+  INV-P1/P4b 的论证不受影响，只是多了一层"窗口内根本没有中断"的保险。
+
+机制、架构钩子与实测数据见 `docs/process-scheduler.md` §4.1 与
+`docs/measured/impl-notes-preempt.md`。
