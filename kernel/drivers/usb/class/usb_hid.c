@@ -49,6 +49,13 @@ typedef struct usb_hid_dev {
     struct input_event events[USB_HID_EVENTS];
     uint16_t         head;
     uint16_t         tail;
+    /* First decoded key transition, published once.  It is what the x86_64
+     * xHCI gate matches: "the interrupt path still carries keystrokes" is a
+     * claim about decoded reports, not about enumeration. */
+    uint16_t         first_key_code;
+    int32_t          first_key_value;
+    uint8_t          key_pending;
+    uint8_t          key_logged;
     spinlock_t       lock;
 } usb_hid_dev_t;
 
@@ -94,6 +101,11 @@ static void usb_hid_emit(usb_hid_dev_t *h, uint16_t type, uint16_t code,
     e->code = code;
     e->value = value;
     h->head = next;
+    if (type == EV_KEY && !h->key_logged) {
+        h->first_key_code = code;
+        h->first_key_value = value;
+        h->key_pending = 1;
+    }
 }
 
 static int usb_hid_key_present(const uint8_t report[8], uint8_t usage)
@@ -186,13 +198,22 @@ static void usb_hid_parse_tablet(usb_hid_dev_t *h)
     memcpy(h->previous, now, h->report_size);
 }
 
-/* Called from the HCD poll context while the class driver's lock is held. */
+/* Completion callback.  It takes h->lock itself: the HCD calls it from its
+ * interrupt handler, from the core's process-context poll, and from inside a
+ * synchronous control/bulk wait on another endpoint, so no single caller can
+ * be the one that already holds the lock.
+ *
+ * The documented order is h->lock -> xhci->lock (the re-arm below reaches the
+ * HCD), and the HCD never holds its own lock while calling in here -- it drops
+ * it before every callback.  See docs/drivers/guide/lock-order.md. */
 static void usb_hid_complete(usb_urb_t *urb)
 {
     usb_hid_dev_t *h = (usb_hid_dev_t *)urb->ctx;
-    if (!h || !h->running)
+    if (!h)
         return;
-    if (urb->status == 0) {
+    uint64_t flags = spin_lock_irqsave(&h->lock);
+    int running = h->running;
+    if (running && urb->status == 0) {
         if (h->kind == USB_HID_KBD)
             usb_hid_parse_keyboard(h);
         else if (h->kind == USB_HID_MOUSE)
@@ -200,7 +221,19 @@ static void usb_hid_complete(usb_urb_t *urb)
         else if (h->kind == USB_HID_TABLET)
             usb_hid_parse_tablet(h);
     }
-    /* Re-arm the periodic transfer. */
+    uint16_t code = h->first_key_code;
+    int32_t value = h->first_key_value;
+    int announce = h->key_pending;
+    h->key_logged = 1;
+    h->key_pending = 0;
+    spin_unlock_irqrestore(&h->lock, flags);
+    if (announce)
+        kinfo("[USB-HID] key event: code=%u value=%d\n", code, value);
+    if (!running)
+        return;
+    /* Re-arm the periodic transfer outside h->lock: usb_submit_urb() reaches
+     * the HCD, and nesting the controller lock inside the interface lock is
+     * the one order this driver is allowed to take. */
     (void)usb_submit_urb(urb);
 }
 
@@ -211,9 +244,12 @@ static int usb_hid_read(device_t *dev, void *buffer, size_t count)
         return -EINVAL;
     usb_hcd_t *hcd = h->iface->dev->hcd;
 
-    uint64_t flags = spin_lock_irqsave(&h->lock);
+    /* Drain the controller with h->lock released.  The HCD runs completion
+     * callbacks, which take h->lock themselves; calling it under that lock
+     * would be the reverse of the documented h->lock -> xhci->lock order. */
     if (hcd->ops->poll)
         hcd->ops->poll(hcd);
+    uint64_t flags = spin_lock_irqsave(&h->lock);
     size_t copied = 0;
     while (h->tail != h->head && copied + sizeof(struct input_event) <= count) {
         *(struct input_event *)((uint8_t *)buffer + copied) = h->events[h->tail];
@@ -231,9 +267,9 @@ static int usb_hid_poll(device_t *dev, short events)
     if (!h)
         return 0;
     usb_hcd_t *hcd = h->iface->dev->hcd;
-    uint64_t flags = spin_lock_irqsave(&h->lock);
     if (hcd->ops->poll)
         hcd->ops->poll(hcd);
+    uint64_t flags = spin_lock_irqsave(&h->lock);
     int ready = h->tail != h->head;
     spin_unlock_irqrestore(&h->lock, flags);
     return ready;
@@ -341,6 +377,12 @@ static int usb_hid_remove(device_t *dev)
 {
     usb_hid_dev_t *h = (usb_hid_dev_t *)dev->drv_priv;
     if (h) {
+        /* The HCD's transfer ring outlives this interface until abort_slot()
+         * runs, and its interrupt handler may still be draining the ring in
+         * that window.  Clearing complete/ctx first is what makes the stale
+         * URB a no-op there instead of a callback into freed memory. */
+        h->urb.complete = NULL;
+        h->urb.ctx = NULL;
         h->running = 0;
         dev->drv_priv = NULL;
         kfree(h);
