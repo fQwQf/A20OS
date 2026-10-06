@@ -33,6 +33,7 @@
 #include "core/stdio.h"
 #include "core/timer.h"
 #include "drivers/audio/pc_speaker.h"
+#include "drivers/char/cmos_rtc.h"
 #include "drivers/bus/pci_hal.h"
 #include "drivers/bus/platform_bus.h"
 #include "drivers/core/driver_core.h"
@@ -208,10 +209,31 @@ static void pc_enumerate_devices(void) {
             .device = A20_DEVICE_PC_SPEAKER,
         },
     };
+    /* MC146818 CMOS RTC: two fixed I/O ports, index then data.  A PC-AT
+     * machine has had these at 0x70/0x71 since the AT; the cmos-rtc.a20drv
+     * module binds to this device and seeds the wall clock from it. */
+    static resource_t cmos_rtc_resources[] = {
+        { .type = RES_IOPORT, .start = 0x70, .end = 0x70,
+          .name = "cmos-index" },
+        { .type = RES_IOPORT, .start = 0x71, .end = 0x71,
+          .name = "cmos-data" },
+    };
+    static platform_device_t cmos_rtc = {
+        .dev = {
+            .name = "cmos-rtc",
+            .res = cmos_rtc_resources,
+            .res_count = 2,
+        },
+        .id = {
+            .vendor = A20_PLATFORM_VENDOR,
+            .device = A20_DEVICE_CMOS_RTC,
+        },
+    };
 
     pci_enumerate(pc_ecam_base ? pc_ecam_base : PCI_ECAM_BASE,
                   pc_bus_start, pc_bus_end);
     (void)platform_device_register(&speaker);
+    (void)platform_device_register(&cmos_rtc);
 }
 
 static const board_config_t x86_64_pc = {
