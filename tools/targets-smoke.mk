@@ -677,6 +677,64 @@ smoke-pci-bridge:
 	fi
 
 # ================================================================
+# i440fx (no ECAM window) enumeration smoke
+# ================================================================
+# q35 has an ECAM window, so every other x86_64 gate reaches PCI through memory
+# and cannot tell a working config-space path from one that reads a window that
+# was never there.  i440fx has no ECAM at all: config space lives behind the
+# legacy 0xCF8/0xCFC ports and the compiled-in q35 address holds nothing.
+#
+# That distinction was worth a gate because the failure mode is invisible from
+# the outside.  Enumeration did not fail loudly -- it published one phantom
+# device per slot, all id=0000:0000, none matching a driver, and the machine
+# died much later at "no init program found" pointing at nothing.  Three separate
+# defects hid it: the phantom filter rejected only 0xffff and not 0x0000, the
+# ECAM-absence probe in pci_host.c also looked only for 0xffffffff, and pci_bus.c
+# computed ECAM addresses itself instead of calling the arch HAL that already
+# falls back to the ports.  Asserting the real device list is what would have
+# caught any one of them.
+#
+# What this does NOT cover: i440fx INTx routing.  Its PIRQ links are programmed
+# by firmware into the PIIX3 and there is no DSDT _PRT to read here, so these
+# devices keep their polling path -- that is the correct outcome, and the gate
+# asserts it rather than treating "no interrupt" as a failure.
+smoke-pci-i440fx: NET_HOSTFWD=
+smoke-pci-i440fx:
+	$(MAKE) ARCH=x86_64 dev-build
+	@mkdir -p $(SMOKE_LOG_DIR)
+	@$(PYTHON) tools/a20_resource.py -m 1G -c 1
+	@set -e; \
+	log="$(SMOKE_LOG_DIR)/pci-i440fx-x86_64.log"; \
+	status=0; \
+	{ sleep $(SMOKE_INPUT_DELAY); printf 'poweroff\n'; } | \
+	$(TIMEOUT) $(SMOKE_TIMEOUT) qemu-system-x86_64 \
+		-machine pc -m 1G -nographic -smp 1 -no-reboot \
+		-drive file=$(X86_64_DEV_BUILD_DIR)/fat32.img,if=none,format=raw,id=xb \
+		-device virtio-blk-pci,drive=xb \
+		-device e1000 \
+		-device ich9-ahci,id=ahci \
+		-kernel $(X86_64_DEV_BUILD_DIR)/kernel.elf \
+		> "$$log" 2>&1 || status=$$?; \
+	phantoms=$$(grep -c 'id=0000:0000' "$$log" || true); \
+	if grep -q 'bridges walked' "$$log" && \
+	   grep -qE '\[BUS\] pci 00:[0-9a-f]{2}\.0 id=8086:1237 .*class=06:00:00' "$$log" && \
+	   grep -qE '\[BUS\] pci 00:[0-9a-f]{2}\.0 id=1af4:1001' "$$log" && \
+	   grep -qE '\[BUS\] pci 00:[0-9a-f]{2}\.0 id=8086:100e' "$$log" && \
+	   grep -qE '\[BUS\] pci 00:[0-9a-f]{2}\.0 id=8086:2922' "$$log" && \
+	   [ "$$phantoms" -eq 0 ] && \
+	   ! grep -qi 'panic' "$$log"; then \
+		echo "smoke-pci-i440fx: PASS (i440fx enumerated through the legacy 0xCF8/0xCFC ports;" \
+			 "host bridge, virtio-blk, e1000 and AHCI all found, 0 phantom devices); log saved to $$log"; \
+	else \
+		echo "smoke-pci-i440fx: FAIL (status=$$status phantoms=$$phantoms) -- i440fx has no ECAM," \
+			 "so this only passes if config space is reached through the legacy ports"; \
+		grep -E '\[PCI\]|\[BUS\]' "$$log" | head -20 || true; \
+		echo "  log saved to $$log; tail:"; \
+		tail -n 60 "$$log"; \
+		exit 1; \
+	fi
+
+# ================================================================
 # virtio-console / /dev/vport0 smoke
 # ================================================================
 # Both directions are asserted, and neither half is trusted on its own:

@@ -65,7 +65,7 @@ A20OS 具备优秀的跨平台移植性，硬件抽象层 (HAL) 目前官方支�
   * [Milk-V Duo](docs/platforms/milk-v-duo.md)（SophGo CV1800B，riscv64，64 MiB，约 USD 10–13）
   * [Allwinner H616/H618](docs/platforms/sun50i-h616.md)（Orange Pi Zero 2 / Zero 3 / Zero 2W，aarch64，约 USD 18–35，**启动链零 blob**）
   * [Rockchip RK3328](docs/platforms/rk3328.md)（Rock64 / NanoPi R2S，aarch64，约 USD 25–35）
-  * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）
+  * [通用 PC 兼容机](docs/platforms/x86_64-pc.md)（x86_64 瘦客户机 / N100 迷你主机，约 USD 25–120）—— **ACPI 路径已按规范实现（FADT/MADT/`_PRT`/S5），但解释器从未在真实固件上跑过，实机中断投递未验证**
 * **MCU bring-up**：STM32F103（ARMv7-M/Cortex-M3，NOMMU；当前提供启动、USART1、SysTick 与基础堆）
   * **不含网络**：`PROFILE=mcu` 走 [components/trim.toml](components/trim.toml) `[profile.mcu].sources` 的独立源文件清单，其中既没有 `kernel/net/*.c` 也没有 lwIP，所以 socket 层与协议栈在这个目标上**从未被编译**，`NET_PROFILE` 对它完全无效。网络对 STM32F103 的支持需要先把网络栈纳入 MCU trim（并按 20 KiB SRAM 重新定档），那是尚未做的产品决定，不是打开某个开关即可。详见 [docs/server-readiness.md](docs/server-readiness.md) §二。
 
