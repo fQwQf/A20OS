@@ -20,6 +20,8 @@
 | I/O 进展 | `make check-io-progress-model` |
 | VFS 抽象 | `make check-vfs-abstraction` |
 | ABI 边界 | `make check-abi-boundary` |
+| Native ABI 三表交叉 | `make check-native-abi-coverage`（登记表 / 编号表 / `docs/native-abi/` 互相对齐；宿主侧） |
+| 双 ABI 编译守卫 | `make check-abi-config-guard`（禁裸 `#ifdef CONFIG_ABI_LINUX`/`#ifdef CONFIG_ABI_NATIVE`；宿主侧） |
 | 驱动核心 | `make check-driver-core-model` |
 | 外部依赖 | `make check-external-dependency-boundary` |
 | 剪裁注册表 | `make check-trim-registry`（`components/trim.toml` 自洽、生成的 `components/trim.mk` 不过期、每个发射变量都有 makefile 消费者；并入 `check-manifests`） |
@@ -352,6 +354,40 @@ device 半边的桥接由一个聚合 pending 位把门，活性下限由两件�
 
 失败时先运行 `conda run -n a20os python tools/gen_linux_syscall_coverage.py` 看是否生成失败，再检查 `kernel/abi/linux/syscall_impl.h`、`kernel/abi/linux/syscall_table.def`、`kernel/include/ipc/handle_table.h`、`kernel/abi/native/sys_phase2.c` 中契约字符串，并确认 `00-overview.md` 的 `Debug 分区受限` 说明未删除。
 
+`check-abi-boundary` 的 19 条断言全部是单文件关键词存在性检查，没有一条跨表比对：Linux 侧靠 `tools/gen_linux_syscall_coverage.py` 与 `tools/gen_envelope_coverage.py` 两个生成器逼着每个新 `LINUX_SYSCALL` 写覆盖行与信封分类，Native 侧两样都没有，加一个 `A20_NATIVE_SYSCALL` 不需要任何文档行。下面两条补的就是这个方向。
+
+### Native ABI 三表交叉（check-native-abi-coverage）
+
+`make check-native-abi-coverage` 把 Native ABI 的三份真源两两对齐，并按入口名报错而不是只报文件：
+
+1. `kernel/abi/native/syscall_table.def` 的 `A20_NATIVE_SYSCALL(...)` 与 `kernel/include/abi/native/syscall_nr.h` 的 `A20_SYS_<name>` 必须是同一组名字——登记了没有编号、或有编号没有登记都失败；
+2. 每个入口名必须在 `docs/native-abi/` 里出现过——规范文档目录才是“有人做过判断”的记录处；
+3. `docs/native-abi/03-handle.md` 的“## 6. 完整 Syscall 列表”里每一行的编号必须与 `syscall_nr.h` 相等，且行的名字必须有对应编号；
+4. 反向也查：`syscall_nr.h` 里每个编号都要在 §6 有行，§6 末尾的“总计：N 个 syscall”要等于 `syscall_nr.h` 的登记数，且 `syscall_nr.h` 内不得有两个入口共用一个编号；
+5. `user/liba20rt/a20_syscall.h` 这份用户态镜像要与 `syscall_nr.h` 逐个相等——它没有 `A20_SYS_handle_poll` 之类的新入口，用户态就按名字找不到那个 syscall，而任何 include 它的程序都绕不开它。
+
+第 2 条的判定域刻意是整个 `docs/native-abi/` 而不是 `09-native-abi-deepening.md` §1 的机制三分表（应包装 / 应拒绝 / 已有等价物）：§1 判定的是 21 类 Linux 独有内核机制（io_uring、perf、userfaultfd…），142 个 native 入口里只有 17 个是它的判定对象，按 §1 逐条断言会让另外 125 个入口永远无法通过，只能靠编造行把它变成橡皮图章。§1 的作用是判定“Linux 的机制要不要包装成 Native 形式”，不是逐条登记 142 个入口；两者的问题不同，混成一条断言就两头不靠。第 2 条因此查的是“目录里任何一篇出现过这个名字”，不能读成“§6 有这一行”——单行归属由第 3、4 条负责。
+
+失败时读门禁输出里点名的入口名：第 1 条要么在 `syscall_nr.h` 补 `#define`，要么从登记表撤掉；第 2 条说明该入口的语义、权限与边界从未写下来（不是“有意拒绝”，是没人判过），补进 `03-handle.md` §6 或 `09-native-abi-deepening.md` 的对应章节；第 3、4 条是文档编号与代码编号漂移，一律以 `syscall_nr.h` 为准改文档或改编号表；第 5 条在两份头文件里补同一行。§6 的行必须覆盖 `syscall_nr.h` 的每一个编号，只有这一条能抓住“文档漏写整行”——§6 曾经只有 135 行而末尾照抄“总计 142”，两种写法都在门禁加上反向检查之前一直是绿的。
+
+### 双 ABI 编译守卫（check-abi-config-guard）
+
+`make check-abi-config-guard` 禁止 `kernel/**/*.c` 与 `kernel/**/*.h` 里把 `CONFIG_ABI_LINUX` 或 `CONFIG_ABI_NATIVE` 单独当开关用，要求写成 `#if defined(CONFIG_ABI_LINUX) || defined(CONFIG_ABI_BOTH)` 这样的完整形式。匹配面覆盖 `#ifdef` / `#ifndef` / `#if` / `#elif`，行尾带注释、`#if !defined(X)`、`#if defined(X) && …` 都算违规——`$` 锚只拦得住裸写法，一行行尾注释就能绕过。头文件与 `.c` 同扫：`kernel/include/mm/elf.h` 里 `elf_setup_stack_a20()` 的声明曾长期是裸守卫，只扫 `.c` 就等于没看见——声明在头里、定义在 `.c` 里，而调用点（`kernel/proc/exec.c`、`kernel/drivers/core/driver_manager.c`）早已是完整形式。
+
+`Makefile:918` 只定义 `CONFIG_ABI_$(ABI)`，`ABI=both` 时由 `Makefile:1087` 追加 `CONFIG_ABI_NATIVE`。所以裸 `#ifdef CONFIG_ABI_LINUX` 在 both 构建里恒假（`CONFIG_ABI_LINUX` 在 both 下没有任何一处会定义），Linux 侧代码块静默消失——这一侧是正确性问题。`CONFIG_ABI_NATIVE` 一侧不同：`ABI=both` 时它是被定义了的（见上一句），裸 `#ifdef CONFIG_ABI_NATIVE` 今天已经等价于“native 参与本次构建”，并没有把两件事混为一谈；禁它是约定而不是不变量，理由是形式统一——一旦 ABI 宏被解耦，这一侧会以和 LINUX 侧完全相同的方式坏掉，而且坏得没人读得出来。两条当前都并入 `check-doc-test-gates`、`make check` 的宿主侧层与 CI `toolchain-gates` job，与 `check-abi-boundary` 同一步跑。
+
+失败时门禁会列出全部 `file:line`；把该行改成 `defined(...) || defined(...)` 的完整形式即可（当前两种 ABI 语义下等价），不要改成 `#ifdef CONFIG_ABI_BOTH` 单条件——那会让 `ABI=native` 构建丢掉该代码块。
+
+守卫改宽之后，缺的定义必须在每个源集里都存在。MCU 是一处源集与 ABI 宏解耦的地方：`Makefile:1177` 把 `KERNEL_SRC` 整体换成 `components/trim.mk` 的 `TRIM_PROFILE_MCU_SOURCES`，那份表含 `kernel/proc/timer_heap.c` 与 `kernel/proc/sched.c` 但不含 `kernel/proc/timer_posix.c`，而 `TRIM_PROFILE_MCU_CPPFLAGS` 照样发 `-DCONFIG_MCU`，`ABI=both` 照样发 `-DCONFIG_ABI_BOTH -DCONFIG_ABI_NATIVE`。所以 `posix_timer_tick()` / `posix_itimer_cpu_tick()` 在 armv7m 上唯一的定义在 MCU 源集之外，由 `kernel/mcu/mcu_stubs.c` stub（与同文件里 `a20_timer_tick()` / `a20_monitor_tick()` / `psi_tick()` 的处理同形——MCU 源集既无 `syscall/` 也无 `abi/linux/`，POSIX 定时器在那里根本无法被 arm）。armv7m 不进 CI（`Makefile` 的 `check-stm32f103` 只在 `HOST_OS=Darwin` 分支里进 `DEFAULT_KERNEL_CHECK_TARGETS`），所以“新增 ABI 守卫后 MCU 链接失败”这一类只能靠 `make -s print-trim-mcu-sources` 之类的静态比对挡住，CI 不会告诉你。
+
+#### 已知项：守卫改宽后新暴露的面
+
+这一段记的是把 POSIX 定时器守卫从裸 `#ifdef CONFIG_ABI_LINUX` 改成 `defined(...) || defined(CONFIG_ABI_BOTH)` 之后、默认 ABI=both 下的现状。三条都不是这次改动的缺陷，但都由这次改动第一次在默认发布配置里变成活代码，读 `kernel/proc/timer_posix.c` 前先知道：
+
+- **SMP 下的无锁表。** `g_posix_timers`（`kernel/proc/timer_posix.c:56`）与 `g_cpu_itimers`（`:67`）是无锁静态表。`ABI=linux` 下它们已经同时被定时器中断路径（`proc_sched_scan_signal_timers` → `posix_timer_tick()`）与 syscall 上下文（`posix_timer_set_time()`）并发改写，不是新引入的；但 `instances/qemu-riscv64-smp4.toml` 设 `smp = 4` 且不覆盖 `abi`（继承 `Makefile` 的 `both`），即 4 个 CPU 都会走到 `posix_itimer_cpu_tick()`。默认 `NR_CPUS=1`（`Makefile`），常规门禁不会暴露它，所以别按“both 与 linux 走同一段代码、风险相同”来读。
+- **错误码面变宽。** `posix_itimer_set()` 在 `kernel/proc/timer_posix.c:346` 于 `proc_get()` 失败时返回 `-EAGAIN`，经 `kernel/abi/linux/sys_timer_posix.c` 的 `sys_setitimer()` 透出成用户可见的 `setitimer` 返回值；`proc_get()` 走的是引用计数，对一个仍存活的 `cur` 失败属于异常路径。Linux 语义里 `setitimer` 不会因表满或引用失败返回 `EAGAIN`。改动前这段在 both 构建里是死代码。
+- **顺带修掉的一个既有缺陷。** `sched_set_posix_deadline()`（`kernel/proc/timer_heap.c:449`）唯一的调用方是 `kernel/proc/timer_posix.c:99`，而后者此前在 both 构建里根本没被编进去——`next_posix_scan` 写进去就没人清。改动前只要用户在 both 构建里 arm 过一个 POSIX 定时器，`proc_next_timer_interval()`（`:213`）就会因 `posix <= now` 一直返回 `SCHED_MIN_TIMER_INTERVAL`（`:205`，`TICKS_PER_SEC/10000`，即 100 µs）并被 `sched_rearm_timer()` 反复重装，定时器中断永久停在 100 µs 下限。恢复 `posix_timer_tick()` 等于恢复了清理方。
+
 ### 驱动核心
 
 `make check-driver-core-model` 检查 `DRIVER_CORE_CONCURRENCY_MODEL`、`DRIVER_CORE_DYNAMIC_LIMITS`、`DRIVER_PROBE_FAILURE_CLEANUP`、`DRIVER_ENUMERATION_FAILURE_MODEL`、`DRIVER_IRQ_DMA_SEMANTICS`、`DRIVER_SMOKE_MATRIX` 等静态契约；确认驱动生命周期测试、virtio-blk/net、UART、PTY、loop、PCI 与 virtio-mmio 枚举函数存在，且 `kernel/main.c` 不再直接调用 `virtio_blk_init`/`virtio_net_init`。
@@ -606,6 +642,18 @@ a20.xlator.aarch64=/bin/xlate_shim
 `make native-handle-test` 与 `make native-libc` 只构建对应原生程序，检查编译和链接，目标名不表示执行；`native-libc` 构建 liba20c 测试程序，`user/tests/test_liba20c.c` 由 `native-libc` 编译。QEMU 运行时覆盖只有 `make smoke-native-handle` 一条：`smoke-native-handle` 启动 `/bin/native-handle-rv` 并验证正常关机。
 
 失败时检查 `user/liba20rt/` 与 `user/liba20c/` 的编译错误，确认 `native-handle-rv` 已生成并放入 fat32 镜像，并查看 `.kernel-build/smoke/native-handle-riscv64.log`。
+
+#### Native 门禁的架构覆盖现状（2026-10 核实）
+
+这一段记的是**现状**而不是计划；新增 native 门禁前先读它，免得把“多跑了一条 riscv64”当成“架构覆盖已经有了”。
+
+- 运行时（QEMU）：`tools/smoke_cases.py` 共 87 条用例，其中 21 条名字带 `native`，**全部**写死 `ARCH=riscv64` + `ABI=both`（`'build': {'vars': ['ARCH=riscv64', 'ABI=both', 'BRINGUP=0']}`，`qemu: qemu-system-riscv64`）；这一组配置在用例表里出现 32 次，另外 11 条非 native 用例也用它，所以复用 both-ABI dev-build 的收益比 21 条更大。没有 x86_64 / aarch64 / loongarch64 的 native smoke，用例表里也没有让 smoke 换架构的参数。Native 运行时因此只有一个架构，且 mlibc 的 Native sysdeps（`user/external/mlibc/sysdeps/a20/`）也只支持 riscv64。
+- CI（核实于本文件这次更新）：在把 `make smoke-native-contract` 加进 `.github/workflows/ci.yml` 的 `smoke` job 之前，`smoke-native` 在该文件里出现 **0** 次——21 条 native 运行时门禁没有一条在 CI 跑过，本地绿与主干红之间没有任何 native 差异。现在跑的是 `smoke-native-contract`（timeout 20s，`pre` 无附加镜像，复用 `smoke` job 已有的 riscv64 both-ABI dev-build 产物），断言 rights algebra / BPF / EventQ / VMOL / DMA 五项加正常关机；其余 20 条仍未进 CI。
+- **这条门禁在 `main` 上是红的，且与双 ABI 守卫改动无关。** 核实于 2026-10-06：`user/tests/test_native_contract.c:466` 的 `vmol-leak-vmo` 断言失败（`a20_vm_unmap` 之后 `objstat` 的 `vmos` 计数没回到基线），`smoke.py` 随后报 `missing ['vmol ok', 'dma ok']` 并以 2 退出。归因做过两次对照：把本次改动的 `kernel/proc/sched.c` 与 `kernel/proc/timer_heap.c` 还原到 `HEAD` 重新构建后失败点完全相同；再在 `git archive HEAD` 出的干净副本上冷构建并跑同一条门禁，失败点仍然完全相同。所以这是主干既有的 VMO 引用计数缺陷，先于本节记录的所有改动。CI 接线本身是对的（它第一次让这条缺陷可见），但要让它转绿得先修 `mm/` 里的 VMO 释放路径，那是本门禁之外的工作。在修好之前，CI 的 `smoke` job 会因为这一行而红。
+- 编译（交叉编译，不起 QEMU）：`tools/targets-native*.mk` 里有 24 个 `native-<prog>-arch` 目标，其中 10 个家族有 `-all` 聚合目标（如 `native-contract-all`），每个覆盖 riscv64 / loongarch64 / aarch64 / x86_64 / arm32 / riscv32 / ppc64le 七个架构。CI 的 `build` 矩阵只跑 `dev-build`，不调用这些目标，所以**非 riscv64 的 native 用户态能否编译成功在 CI 里同样没有任何断言**。
+- 源码侧：`check-native-abi-coverage` 与 `check-abi-config-guard` 覆盖全部架构共用的那半边（Native ABI 的登记表/编号表/文档对齐，以及 `CONFIG_ABI_*` 守卫写法），见上面两节。这两条不能替代任何架构的运行门禁。
+
+扩到第二个架构需要先让 `tools/smoke_cases.py` 的 `argv`/`build.vars` 可按架构参数化（例如 `qemu-system-$(ARCH)` 与 `AX=ARCH=…`），再在 `smoke` job 里开一个架构矩阵；只把某条用例复制成 riscv64/x86_64 两份会让同一份断言在两处漂移。
 
 ### 用户态文件系统宿主（uxfs + ufsd）
 

@@ -6,8 +6,6 @@
 
 #define VFS_TIME_META_MAX 8192
 #define VFS_TIME_META_HASH_SIZE 2048
-#define LINUX_UTIME_NOW  0x3fffffffULL
-#define LINUX_UTIME_OMIT 0x3ffffffeULL
 
 typedef struct {
     int used;

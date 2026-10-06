@@ -33,7 +33,7 @@
 #include "core/string.h"
 #include "core/trap.h"
 #include "sys/usercopy.h"
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 #include "ipc/ipc.h"
 #include "ipc/start_info.h"
 
@@ -686,7 +686,7 @@ fail:
 /*  Native ABI setup                                                  */
 /* ================================================================== */
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 /*
  * Set up handle table, console handles, and a20_start_info_t on the
  * stack for a native ABI process.  Returns the new stack pointer, or 0
@@ -857,7 +857,7 @@ static int exec_install_process(task_t *t,
 {
     /* ---- 1. Build user stack (Linux or Native ABI) ---- */
     uint64_t sp;
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     vaddr_t native_start_info = 0;
 #endif
     /* The auxv this image is exec'd with, copied out of the stack the
@@ -865,7 +865,7 @@ static int exec_install_process(task_t *t,
      * native ABI, which builds no auxv. */
     uintptr_t auxv_pairs[A20_AUXV_MAX_PAIRS][2];
     uint32_t auxv_n = 0;
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     if (info->is_native_abi) {
         sp = exec_setup_native_abi(t, info, bprm->argc,
                                     (char *const *)bprm->args,
@@ -879,7 +879,7 @@ static int exec_install_process(task_t *t,
                               (char *const *)bprm->args,
                               (char *const *)bprm->envs, info, ehdr,
                               auxv_pairs, &auxv_n);
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
         /* Exec from a Native program into a Linux ABI program: the old
          * handle table is process-local and must be released here. */
         if (t->abi_mode == 1) {
@@ -901,7 +901,7 @@ static int exec_install_process(task_t *t,
     if (sp == 0)
         return -ENOMEM;
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
     t->abi_mode = info->is_native_abi ? 1 : 0;
 #else
     t->abi_mode = 0;
@@ -1025,7 +1025,7 @@ static int exec_install_process(task_t *t,
         arch_trap_ctx_set_user_entry(trap, info->entry);
         TRAP_CTX_SP(trap)        = sp;
         TRAP_CTX_TP(trap)        = info->tls_tp;
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
         if (info->is_native_abi) {
             TRAP_CTX_SET_ARG0(trap, native_start_info ? native_start_info : sp);
         }

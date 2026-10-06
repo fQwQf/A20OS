@@ -302,7 +302,7 @@ vaddr_t elf_setup_stack(vaddr_t stack_top, int argc, char *const argv[],
                         uintptr_t out_auxv[A20_AUXV_MAX_PAIRS][2],
                         uint32_t *out_auxv_n);
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 vaddr_t elf_setup_stack_a20(vaddr_t stack_top, int argc, char *const argv[],
                              char *const envp[], const elf_load_info_t *info,
                              uint32_t stdin_h, uint32_t stdout_h,

@@ -6,7 +6,7 @@
 
 ## 1. 机制三分清单
 
-内核为 Linux ABI 实现了 21 类"独有内核机制"（io_uring、perf、userfaultfd、 epoll、inotify/fanotify、eventfd/timerfd/signalfd、SysV 三件套、POSIX mq、 keyring、pidfd、AIO、file-handle、mount-context、Landlock、cgroupfs/PSI、 drvmod、acct、rseq 等）。按 A20 原则逐类判定：
+内核为 Linux ABI 实现了一批"独有内核机制"（io_uring、perf、userfaultfd、 epoll、inotify/fanotify、eventfd/timerfd/signalfd、SysV 三件套、POSIX mq、 keyring、pidfd、AIO、file-handle、mount-context、Landlock、cgroupfs/PSI、 drvmod、acct、rseq 等）。原始盘点（2026-08）列 21 项；此后落地的子系统另在 §1.4 补判。按 A20 原则逐类判定：
 
 ### 1.1 应包装（A20 对齐，用更干净的 Native 接口表达）
 
@@ -19,6 +19,9 @@
 | process_vm_readv/writev | `mm/process_vm.c` | task_mem_read / task_mem_write（TASK handle + rights） | P5.1 最小权限；debug 接口只覆盖已停止目标，新增运行时权限化访问 |
 | pidfd | `abi/linux/sys_pidfd.c` | 已有 TASK handle 等价物（`task_wait/kill/info` + `event_watch(EXITED)`） | — |
 | memfd / memfd_secret | `fs/memfd.c` | 已有 MEMORY handle 等价物（`vm_create_object` + `vm_map`） | — |
+| namespace（mount/pid/user） | `kernel/fs/vfs/mntns.c`、`kernel/proc/pidns.c`、`kernel/proc/userns.c` | 扩 `ns_create`/`ns_apply`（0x0800-0x0801）到 pid/user，发布可降级的 namespace handle（network 无核心 namespace 对象，不在扩展之列） | P1.1 + P2.3：三者在核心已是引用计数对象（`mnt_namespace_t`/`pid_namespace_t`/`user_namespace_t`，fork 时继承并 unshare）。当前 `ns_apply` 走的却是往 target 写 `fs.root_path` 字符串（`ns_ctx.pid_offset` 之类字段全仓无消费者），那正是 P2.3 要拒绝的全局状态投影；对象已经存在，没有理由再以字符串模拟 |
+| mseal | `kernel/mm/mseal.c`（`VM_SEALED`） | 新增区间封存。注意核心 `mm_mseal` 目前拒绝 `VM_VMO` 区间（与 `VM_SYSV_SHM`/`VM_PFNMAP` 一并），而 Native MEMORY 映射正是 `VM_VMO`——包装前要先给 VMO 侧封存语义或放宽该拒绝 | P5.3 sandbox 是原生能力：封存是 VMA 上一次性、单调的属性，不引入全局 ID 也不需要叠加层。拒绝点分层：`mm_munmap`/`mm_mprotect`/`mm_mremap` 在核心检查 `VM_SEALED`，页释放类 advice（DONTNEED/FREE/REMOVE）由 Linux ABI 层拒绝（`kernel/abi/linux/sys_mm.c` 的 `sys_madvise`），核心 madvise 不查；核心另与 `MM_SAFE_NO_FA` 交叉核对，`kernel/mm/mseal.c` 头部自己写明 "future Native ABI paths" |
+| setsockopt / getsockopt | `kernel/net/socket_control.c` | `handle_control` 的版本化 op，按类型发散 | P6：`level`/`optname`/`optval` 三元组是 ioctl 式的大杂烩，数值空间随 Linux 单调增长。03-handle §2.7 已有的类型化控制面（WINSIZE/TCFLUSH/SET_FLAGS）是同一件事的干净形式 |
 
 ### 1.2 应拒绝（A20 反模式，保持 Linux-only，不包装）
 
@@ -37,10 +40,30 @@
 | rseq | A20 无任意迁移中断保证需求 | thread_get_cpu |
 | drvmod / init_module | 特权加载面 | ext_prog (KEP) + device syscalls |
 | PSI | 全局压力统计 | monitor 的全局计数模式 |
+| pkeys（pkey_alloc/free/mprotect） | P5.1 最小权限。内核侧只剩每 task 16 个 key 的位图（`pkey_bitset`，`kernel/proc/sched_compat.c`）；`sys_pkey_mprotect` 校验 key 合法后直接转 `sys_mprotect`，key 不写入 PTE，CR4.PKE 也从未置位——即便补全硬件面，protection key 也是一条不经过 handle rights 代数的旁路授权 | handle rights（14 位）+ `vmar_cap` 收紧 |
+| capabilities（capget/capset） | P5.1 最小权限 + P5.3。capability 挂在进程身份上，不随 handle 降级、过期或关闭而失效，与 rights 代数的单调递减冲突；Native 侧也尚无此面：`a20_security_context_t.cap_effective` 字段存在但 `security_get_context` 从不填（结构体清零后只写 uid/gid/euid/egid/label），`kernel/abi/native/` 下无一处调用 `proc_has_cap` | handle rights + 时态权限（expiry_tick / remaining_ops）+ BLP 标签 |
 
 ### 1.3 已有等价物（不新增）
 
 ptrace ↔ debug handle（同一 proc_debug 状态机）；bpf ↔ ext_prog (KEP)； futex ↔ futex_wait/wake；channel IPC ↔ channel_*（已桥接）；定时器/时钟 ↔ timer_*； 网络 ↔ net_*；AIO 与 io_uring 同上（异步 I/O 走 channel_call + EventQ，见 §5）。
+
+### 1.4 补判（2026-10）
+
+上表的原始盘点停在 2026-08，namespace、mseal、pkeys、capabilities、socket option 五项都没有判定。只有 mount/pid/user namespace 的落地（2026-09-26、2026-10-03）确定晚于盘点；mseal 与 pkeys 落地于 2026-08 内（08-14、08-10），capabilities 与 socket option 早于盘点——无论先后，原表都没给判定，属漏判而非有意拒绝。判定按各自落地日期补做：
+
+| 机制 | 落地 | 判定 |
+|------|------|------|
+| mount namespace | 2026-09-26（`kernel/fs/vfs/mntns.c`，`unshare`/`setns` 随之实现） | 应包装（§1.1） |
+| PID / user namespace | 2026-10-03（`kernel/proc/pidns.c`、`kernel/proc/userns.c`） | 应包装（§1.1） |
+| mseal | 2026-08-14（`kernel/mm/mseal.c`） | 应包装（§1.1） |
+| pkeys | 2026-08-10（`kernel/proc/sched_compat.c`） | 应拒绝（§1.2），内核侧为存根，无可包装之物 |
+| capabilities | 早于盘点（`kernel/abi/linux/sys_capability.c`，2026-04-29；POSIX 凭据 2026-08-26 才下沉为 `kernel/proc/cred.c`） | 应拒绝（§1.2） |
+| socket option | 早于盘点（2026-04-29，`kernel/net/socket_control.c`） | 应包装（§1.1） |
+
+两处需要留意的既有表述：
+
+- 「capability」在 §1.2 出现两处，含义不同，不要互推：keyring 行的「密钥即能力」说的是把密钥当作可传递的对象来授权（落成 handle rights）；capabilities 行拒绝的是 capget/capset 那种挂在进程身份上的能力位，Native ABI 没有这个面（`a20_security_context_t.cap_effective` 无生产者，见该行）。
+- §8 的 `namespace 强制` 行描述的 `ns_apply` 行为属实且未变：三个 namespace 对象虽已在核心存在，`ns_apply` 仍只接受 `A20_NS_FILESYSTEM`。补判改变的是该不该包装，不改变它今天的行为。
 
 ## 2. 新增：Pager（0x0D00）
 
@@ -227,7 +250,7 @@ typedef struct a20_task_mem_args {
 | `thread_create` 返回类型 | ~~返回 TASK handle~~ **已落地**：proc_create_thread 发布专用 `A20_OBJ_THREAD`（02 §4.2 编号）；全部 task 类查找点经 `a20_handle_lookup_*_task_like` 接受 THREAD∪TASK（task_wait/kill/info/sched/limits、debug 目标、vm/pager/security 目标；handle_poll 原生双类型）；THREAD 权限天花板与 TASK 对齐（WAIT/SIGNAL/ADMIN 等，join 与 debug_attach 可用）。fork/exec 主任务句柄保持 TASK。回归：smoke-native-handle/contract/ipc + smoke-mlibc-fork 全 PASS |
 | `task_wait` flags | ~~忽略 flags~~ **已落地（05854979a）**：A20_TASK_WAIT_NONBLOCK 映射 WNOHANG，未知位拒绝；按 task 集合等待待需求明确后设计 |
 | `handle_stat` 非文件类型 | ~~全零结构~~ **已落地**：MEMORY→total_blocks=size/4096、CHANNEL_ENDPOINT→total_files=msg_count，FILE/DIR 维持 block_size |
-| `namespace` 强制 | `ns_apply` 只写字段 | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
+| `namespace` 强制 | `ns_apply` 只对 filesystem 写 `fs.root_path` 字符串（不更新 `root_vn`/`root_mnt`）；network/pid/device 返回 `A20_ERR_NOT_SUPPORTED`，尽管 `mntns`/`pidns`/`userns` 三个对象已在核心就位（判定见 §1.4） | pid/fs namespace 的路径解析与进程树可见性强制（逐步） |
 | `event_watch_fs` 路径过滤 | 无 | 前缀匹配（本期后） |
 | `clock_set` | ~~恒 PERM~~ **已落地**：安全标签 0（system）可设 CLOCK_REALTIME；monotonic 拒绝 INVALID_ARGUMENT |
 | EventQ 电平模式 | ~~事件为边沿触发~~ **已落地**：`event_watch` args 按 E-APPEND 追加 `flags`，bit0=`A20_WATCH_LEVEL`（未知位拒绝）；等待侧 park 前（且不进入 readiness 子系统）对非 vfile 类型的 level watch 直接查询对象就绪位（通道端点：msg_count/peer_closed，与 handle_poll 分派一致），就绪即返回、不要求注册后发生状态迁移。回归：test_native_ipc 新增 level/edge 对照分区，同一已就绪端点上 edge watch 零超时返回 WOULDBLOCK、level watch 立即返回 READABLE+user_data。 |

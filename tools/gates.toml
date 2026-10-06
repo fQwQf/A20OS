@@ -4,10 +4,12 @@
 # rg argv back out of this table and diffing it against the original, so the
 # gate set is the one that used to run -- not a retyped approximation of it.
 #
-# This file is now the single source of truth for these 97 checks.  Edit it by
-# hand from here on: a hand-typed regex is how a gate silently stops asserting
-# what its name claims, so prefer a copy-paste of a pattern already verified to
-# match, and add new checks with `negate` chosen deliberately.
+# This file is now the single source of truth for these 307 pattern checks (and
+# 6 non-rg ones: file existence, NOMMU build rejection, doc path resolution and
+# the Native ABI cross-table comparison).  Edit it by hand from here on: a
+# hand-typed regex is how a gate silently stops asserting what its name claims,
+# so prefer a copy-paste of a pattern already verified to match, and add new
+# checks with `negate` chosen deliberately.
 #
 # `negate = true` means the pattern must NOT appear.  `fixed = true` is rg -F.
 # A `*` in a path is expanded by the runner, not the shell, so adding a source
@@ -192,6 +194,51 @@ files = [
     "kernel/abi/native/sys_core.c",
     "kernel/abi/native/sys_phase2.c",
 ]
+
+# 双 ABI 盲区的另一半：Native 侧此前没有任何跨表比对，Linux 侧却有
+# tools/gen_linux_syscall_coverage.py 与 tools/gen_envelope_coverage.py 两个
+# 生成器，于是加 native syscall 不需要任何文档行。这里把四份真源对齐——登记表
+# （syscall_table.def）、编号表（syscall_nr.h）、用户态镜像
+# （user/liba20rt/a20_syscall.h）、规范文档（docs/native-abi/ 的 §6 行）——任一
+# 方向的缺口都报出入口名而不是只报文件。
+#
+# doc_dir 是 docs/native-abi/ 而不是 09-native-abi-deepening.md §1 的机制三分
+# 表：§1 判定的是 21 类 Linux 独有内核机制（io_uring/perf/userfaultfd…），142 个
+# native 入口里只有 17 个是它的判定对象（多为“已有等价物”列里的替代名），按 §1
+# 逐条断言会让 125 个入口永远无法通过，只能靠编造行把它变成橡皮图章。规范
+# 文档目录才是“有人做过判断”的记录处：入口在目录里任何一篇出现，即已写下来。
+# 这条判的是“在目录里被提到过”，不是“在 §6 有行”；行归属另由 syscall_list
+# 双向查（§6 缺行、编号漂移、总计对不上、编号重复都要红）。
+[[gate]]
+name = "native-abi-coverage"
+make_target = "check-native-abi-coverage"
+[[gate.assertion]]
+native_abi_coverage = { table = "kernel/abi/native/syscall_table.def", numbers = "kernel/include/abi/native/syscall_nr.h", sdk_numbers = "user/liba20rt/a20_syscall.h", doc_dir = "docs/native-abi", syscall_list = { doc = "docs/native-abi/03-handle.md", heading = "## 6. 完整 Syscall 列表" } }
+
+# CONFIG_ABI_* 的守卫必须写成 defined(...) || defined(CONFIG_ABI_BOTH)。
+# 只有 CONFIG_ABI_LINUX 一侧是正确性问题：Makefile:918 只定义
+# CONFIG_ABI_$(ABI)，而 ABI=both 时没有第二处补上 CONFIG_ABI_LINUX（全仓库唯一
+# 会定义它的写法不存在），所以裸 `#ifdef CONFIG_ABI_LINUX` 在 both 构建里恒假，
+# 整块 Linux 代码会静默消失。CONFIG_ABI_NATIVE 一侧今天并不恒等：Makefile:1087
+# 在 ABI=both 时显式补上它，因此 `#ifdef CONFIG_ABI_NATIVE` 已经等价于「native
+# 参与本次构建」，把它说成「本次构建就是 native」描述的是一个尚未存在的缺陷。
+# 仍然禁它是为形式统一：一旦 ABI 宏被解耦，这一侧会以完全相同的方式坏掉，所以按
+# 约定一起禁，但它是约定，不是今天就成立的不变量。
+# 头文件与 .c 同扫：kernel/include/mm/elf.h 的裸守卫曾经躲在这道门的
+# kernel/**/*.c 之外——声明写在头里、定义写在 .c 里，只扫 .c 就等于没看见。
+#
+# 匹配任何「把单个 ABI 宏当开关」的写法，而不只裸 #ifdef：`$` 锚下一行行尾注释
+# 就能逃逸，`#ifndef`、`#if !defined(X)`、`#if defined(X) && …`、`#elif` 同理。
+# 两条前瞻分别放过规范式与“三个宏全否定”（后者是 ABI=none 的判据，语义正确）。
+[[gate]]
+name = "abi-config-guard"
+make_target = "check-abi-config-guard"
+[[gate.assertion]]
+negate = true
+rg_flags = ["--pcre2"]
+pattern = '^\s*#\s*(?:if|ifdef|ifndef|elif)\s+(?!.*\bdefined\s*\(\s*CONFIG_ABI_(?:LINUX|NATIVE)\s*\)\s*\|\|)(?!.*!defined\s*\(\s*CONFIG_ABI_LINUX\s*\).*!defined\s*\(\s*CONFIG_ABI_NATIVE\s*\).*!defined\s*\(\s*CONFIG_ABI_BOTH\s*\)).*\bCONFIG_ABI_(?:LINUX|NATIVE)\b'
+globs = ["kernel/**/*.c", "kernel/**/*.h"]
+files = ["kernel"]
 
 [[gate]]
 name = "driver-core-model"

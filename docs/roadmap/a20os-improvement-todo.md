@@ -1,17 +1,114 @@
 # A20OS 改进 TODO
 
-只记录**尚未完成**的工程瓶颈与剩余工作（最后核实：2026-10）。条目在落地时即从本文
-删除，不保留已完成的 checkbox；实现细节与验证入口留在源码注释、提交历史和事实文档
+只记录**尚未完成**的工程瓶颈与剩余工作（最后核实：2026-10，含 `wt/practical-readiness`
+的一次全表复核）。条目在落地时即从本文删除，不保留已完成的 checkbox；实现细节与验证
+入口留在源码注释、提交历史和事实文档
 （[../testing-gates.md](../testing-gates.md)、
 [../security/hardening.md](../security/hardening.md)、
 [../../kernel/abi/linux/syscall_coverage.md](../../kernel/abi/linux/syscall_coverage.md)），
 下一个量级的方向评估见 [next-horizon.md](next-horizon.md)。
+
+**关于"移除已完成条目"**：`wt/practical-readiness` 那一轮把本文每一个未勾选条目
+逐条对着该轮的代码 diff 核过一遍，**没有任何一条因此完成**，所以这一轮从本文删除的
+条目数是 0。该轮实际落地的是两道新的宿主侧静态门禁与若干 Native ABI 正确性修复，
+它们对应的"还欠什么"已经作为新条目写进下面的「默认 ABI=both 构建缺少运行时门禁」
+——按本文的规矩，这些已落地的部分本身不该出现在本文里，缺的是门禁与运行验证，不是
+功能。本版另外改写了一处**不是该轮造成**的过时：「P0：并发与 SMP 就绪」的
+`proc_lock` 条目——它的对象已在并入本分支基线的锁拆分轮（`65bd609eb`）里删除，
+原文对"剩余工作"的描述被该轮自己的设计文档
+（[lock-serialization-split.md](lock-serialization-split.md)）标注为过时，现按
+当前树改写，把真正欠的度量收口列为剩余工作。
 
 面向服务器部署的当前能力边界与阻塞项排序见
 [../server-readiness.md](../server-readiness.md)。
 
 checkbox 表示实现里程碑，不表示运行结果已在当前提交复验；带日期的验证记录如何引用
 见文末"验证环境说明"。
+
+下面两条排在所有 P0 之前，因为它们都不是"功能还差点"，是"默认配置下没人验证过"
+与"整机可能永久失联"。其余条目仍按原顺序。
+
+## P0：距可投产最远的一项——内核抢占与 RT 限流
+
+排在最前不是因为它最容易，而是因为它的后果最重：**一次用户态 RT 任务跑飞，在这台
+机器上就是永久失联，而且没有任何东西会发现**。评估与证据见
+[../server-readiness.md](../server-readiness.md) §四 开头与 §八 首行。
+
+- [ ] 内核抢占点与 IRQ 线程化
+  - 现状：无 `CONFIG_PREEMPT`（全树 grep 命中 0），也无 IRQ 线程化。调度器唯一的
+    让出点是 `kernel/core/trap.c:589` 的 `proc_sched_safe_point()`，位于用户态陷阱
+    出口；`rt_pick_best_locked()`（`kernel/proc/sched.c:350`）只对 `SCHED_RR` 轮转，
+    FIFO 头选中即返回。
+  - 后果：`SCHED_FIFO` 任务只要不阻塞、不返回用户态就不让出，长内核路径（TLB 收敛、
+    页缓存同步、大段 copy）过不了 deadline。
+  - 已知障碍：**改调度器的时序协议之前需要先有正式基准**，否则会把一个未定位的
+    热点改成一个更难定位的热点。旧稿在这里写"`proc_lock` 的长持有成因至今未定"，
+    该前提已随 `65bd609eb`（并入本分支基线的锁拆分轮）失效：那把锁已删除，替代的
+    per-task `park_lock` 尚未注册进 `/proc/a20/lock_contention`，锁拆分之后的
+    proc 侧竞争现状不可测（收口清单见 `docs/measured/lock-after.md` 末节）。
+    QEMU TCG 下拿不到可信持锁时长的限制仍然成立。
+  - 完成条件：长内核路径上的抢占可观测（`/proc/a20/perf` 有 per-CPU 抢占计数），
+    且有一个门禁让"低优先级任务在 RT 任务持 CPU 时仍能在有界时间内运行"成为一条
+    会红的断言。
+- [ ] RT 限流与 `RLIMIT_RTPRIO`
+  - 现状：`sched_rt_runtime_us` 在 `kernel/`、`user/` 下 grep 命中 0；内核侧没有任何
+    一处定义或强制 `RLIMIT_RTPRIO`（该常量只出现在 `user/external/` 下的
+    musl/mlibc/mksh 用户态头文件里）。`sys_sched_setscheduler()`
+    （`kernel/abi/linux/sys_sched.c:319-321`）对 RT policy 只校验优先级 1..99，
+    **不做能力判定**，任何进程都能把自己设成 `SCHED_FIFO` 99。
+  - 后果：RT 任务可独占 100% CPU，无预算、无计量。
+  - 完成条件：RT 运行时间按周期核算并在超限时 throttled 到 SCHED_NORMAL；
+    设置 RT 策略需要 `CAP_SYS_NICE` 或 `RLIMIT_RTPRIO` 放行，两条路径都有门禁。
+
+## P0：默认 ABI=both 构建缺少运行时门禁
+
+`ABI ?= both`（`Makefile:117`），也就是说**上面两条之外，默认发布配置还有一类问题
+根本没有任何门禁能发现**。本轮（`wt/practical-readiness`）补的是静态断言；运行时
+那一半仍然空着。
+
+- 现状（本次逐条核实）：
+  - `tools/smoke_cases.py` 里名字带 `native` 的运行时门禁共 21 条，**全部**写死
+    `ARCH=riscv64` + `ABI=both`；Native 运行时只有 riscv64 一个架构。
+  - 本轮之前 `.github/workflows/ci.yml` 里 `native` 出现 **0** 次——21 条运行时门禁
+    在主干上一次都没跑过。本轮接入 `smoke-native-contract` 一条。
+  - 唯一的 ABI 冒烟门禁 `smoke-abi-linux` 构建的是 `ABI=linux`
+    （`instances/smoke-abi-linux.toml`），与 `ABI=both` 不重叠。
+  - 两个覆盖生成器（`tools/gen_linux_syscall_coverage.py`、
+    `tools/gen_envelope_coverage.py`）只读 Linux syscall 表，对
+    `A20_NATIVE_SYSCALL` / `A20_SYS_` 零引用。
+  - 已补的静态断言：`make check-native-abi-coverage`（登记表 / 编号表 /
+    `docs/native-abi/` 三表交叉）与 `make check-abi-config-guard`（禁裸
+    `#ifdef CONFIG_ABI_*`，默认构建里 `CONFIG_ABI_LINUX` 无人定义，该写法恒假）。
+    **这两条是源码侧的，不能替代任何架构的运行门禁。**
+- [ ] 让已接线的 native 运行时门禁转绿，并把它接进发布流水线
+  - 当前是红的：`make smoke-native-contract` 停在
+    `user/tests/test_native_contract.c:466` 的 `vmol-leak-vmo`（`a20_vm_unmap` 之后
+    objstat 的 `vmos` 没回到基线）。在 `git archive HEAD` 的干净副本上复现，失败点
+    逐行相同，**是主干既有的 VMO 引用计数缺陷，与本轮改动无关**。
+  - 完成条件：修好 `mm/` 的 VMO 释放路径，该门禁在 `ABI=both` 下通过并进入发布
+    流水线（与 `release.yml` 现有的 smoke 前置一致）。
+- [ ] 修好 `smoke-native-handle` 与 `smoke-native-mm`
+  - 两条在主干上本就是红的（HEAD 干净副本上失败点相同）：
+    `smoke-native-handle` 停在第一个 transfer 用例（`dup ok` 之后），
+    `smoke-native-mm` 停在 `vm_map FILE`。后果是本轮新写的用户态断言
+    （`handle_set_meta` 的 truncate/时间戳、`xattr` 的读写权限分离、`vm_advise` 的
+    `MADV_NORMAL` 与四个 fork-policy advice）**一次都没有被成功执行验证过**——
+    它们现在只是写下的断言，不是已验证的行为。
+  - 完成条件：两条门禁在当前提交 PASS，且新增断言确实被执行到（不是在到达它们
+    之前就失败）。
+- [ ] 把剩余 20 条 native 运行时门禁接进 CI，并扩到第二个架构
+  - 需要先让 `tools/smoke_cases.py` 的 `argv` / `build.vars` 可按架构参数化
+    （`qemu-system-$(ARCH)` 与 `AX=ARCH=…`），再在 `smoke` job 里开架构矩阵；只把
+    某条用例复制成 riscv64/x86_64 两份会让同一份断言在两处漂移。
+  - 交叉编译侧同样没有断言：`tools/targets-native*.mk` 里的 `native-<prog>-arch`
+    目标 CI 一个都不调，非 riscv64 的 native 用户态能否编译成功没有任何门禁。
+  - 完成条件：CI 的 smoke 矩阵里有 native 行，且至少两个架构各跑一遍同样的断言。
+- [ ] `ABI=linux` 与 `ABI=both` 的行为交叉断言
+  - 现状：没有任何一条门禁断言"同一份语义在两个 ABI 下结果一致"。本轮修的
+    `CONFIG_ABI_LINUX` 恒假就是这条缺口的直接产物——它让 Linux 侧代码在默认构建里
+    静默消失，而所有门禁都是绿的。
+  - 完成条件：至少有一组断言对两个 ABI 各跑一次并比较同一份可观测结果
+    （`/proc/a20/perf` 计数器或 procfs 输出）。
 
 ## P0：混合内核改造（Native ABI 本体化）
 
@@ -45,20 +142,23 @@ IDL 化）已落地，已从本文删除。
 
 ## P0：并发与 SMP 就绪
 
-- [ ] 按等待对象分锁，完整消除 `proc_lock` 竞争
-  - 现状：tokenized Park/Wake、task 引用与异步所有权收口、timeout heap 所有权、
-    SMP runqueue 迁移与持久抢占、本地 pick 锁拆分、EEVDF 替换 MLFQ 均已落地，已从
-    本文删除。riscv64 `-smp 8 -accel tcg,thread=multi`（`mm_stress` 后）实测
-    `proc_lock` 仍是压倒性热点：33335 次竞争 / 16191822 自旋；page cache、
-    dcache、block cache、vfile_table 的分桶锁已把各自竞争归零。切换路径的两次获取
-    已合并，`proc_wait4` 的 child 全局扫描已改为 per-task children/线程组链表。
-  - 剩余工作：callsite 归因显示 `proc_lock` 竞争高度集中在**互斥量 park/wake 协议**
-    （`proc_park_prepare/commit/finish` 与 `proc_try_wake` 各自单独持 `proc_lock`）
-    与**每次上下文切换的发布路径**（`sched()` 内联进 `idle_loop` 的
-    `spin_lock(&proc_lock)`）。消除它需要把 tokenized Park/Wake 状态机从单一全局锁
-    改为按等待对象（wait queue / mutex / futex）分锁。
-    [../eevdf-scheduler.md](../eevdf-scheduler.md) 与既往性能审计明确警告过这一点：
-    "无完整并行编译负载验证前不做的高风险核心协议重写"，需要先有正式基准复测。
+- [ ] 收口 proc 侧锁拆分的度量（`proc_lock` 本体已删除，旧条目按当前树改写）
+  - 已落地（`feat/lock-serialization-split`，并入本分支基线）：park/wake 协议早已
+    是 per-task 锁（`kernel/proc/park.c` 全部经 `task->park_lock`，设计文档 §1.1
+    核实并注明旧 TODO 描述过时）；`65bd609eb` 把剩余的切换发布路径从全局锁上摘掉
+    并删除了 `proc_lock`（全树 0 处获取点、定义已删）——调度状态归 per-task
+    `park_lock`，runq 成员关系归 per-CPU `runq_lock`，任务表迭代/OOM 扫描/聚合
+    统计等低频残余归新 `tasklist_lock`（`kernel/proc/proc.c:56`，锁序
+    `tasklist_lock -> park_lock`）。tokenized Park/Wake 语义逐位保留；三处刻意的
+    语义弱化见 `docs/measured/impl-notes-proc.md`。设计、验收标准与门禁演进见
+    [lock-serialization-split.md](lock-serialization-split.md)。旧条目引用的
+    8 核热点数字（`proc_lock` 33335 次竞争 / 16191822 自旋）是**被删除的锁的
+    历史**，不是现状。
+  - 剩余工作（`docs/measured/lock-after.md` 末节自列，本文照录）：把 `park_lock`
+    注册进 `/proc/a20/lock_contention`、补 roadmap §5.1 的 B1 基线（仅注册不改锁）、
+    注册 7 个 slab cache 锁——没有这些，"拆分后 proc 侧竞争降到了哪"在当前树上
+    不可回答。TCG 下 5 轮采样的噪声分辨率使多数活跃格子落在不可分辨带，
+    提高 RUNS 是出结论的前提而非可选项。
   - 测量与 callsite 归因工具：见 [perf-overhaul.md](perf-overhaul.md) §3。
 
 ## P0：Linux ABI 正确性

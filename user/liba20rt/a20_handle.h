@@ -166,47 +166,21 @@ static inline a20_status_t a20_hdl_set_label(a20_handle_t h, uint32_t label)
     return a20_hdl_control(h, A20_HANDLE_CTRL_SET_LABEL, label, 0);
 }
 
-static inline uint32_t a20__str_len(const char *s)
-{
-    const char *p = s;
-    while (*p)
-        ++p;
-    return (uint32_t)(p - s);
-}
-
+/* The xattr syscalls take their arguments flat (0x0108-0x010B in
+ * 03-handle.md §6); a20_xattr_args_t is not the wire form. */
 static inline a20_status_t a20_hdl_xattr_set(a20_handle_t h, const char *key,
                                               const void *val, uint64_t val_len)
 {
-    a20_xattr_args_t args;
-    args.size      = sizeof(args);
-    args.version   = 1;
-    args.handle    = h;
-    args._pad      = 0;
-    args.name      = (uint64_t)key;
-    args.name_len  = key ? a20__str_len(key) : 0;
-    args._pad2     = 0;
-    args.value     = (uint64_t)val;
-    args.value_len = val_len;
-    args.flags     = 0;
-    return a20_syscall6(A20_SYS_handle_xattr_set, (uint64_t)&args, 0, 0, 0, 0, 0);
+    return a20_syscall6(A20_SYS_handle_xattr_set, h, (uint64_t)key,
+                        (uint64_t)val, val_len, 0, 0);
 }
 
 static inline a20_status_t a20_hdl_xattr_get(a20_handle_t h, const char *key,
                                              void *val, uint64_t val_len,
                                              uint64_t *out_len)
 {
-    a20_xattr_args_t args;
-    args.size      = sizeof(args);
-    args.version   = 1;
-    args.handle    = h;
-    args._pad      = 0;
-    args.name      = (uint64_t)key;
-    args.name_len  = key ? a20__str_len(key) : 0;
-    args._pad2     = 0;
-    args.value     = (uint64_t)val;
-    args.value_len = val_len;
-    args.flags     = 0;
-    a20_status_t r = a20_syscall6(A20_SYS_handle_xattr_get, (uint64_t)&args, 0, 0, 0, 0, 0);
+    a20_status_t r = a20_syscall6(A20_SYS_handle_xattr_get, h, (uint64_t)key,
+                                  (uint64_t)val, val_len, 0, 0);
     if (out_len && !A20_IS_ERROR(r))
         *out_len = (uint64_t)r;
     return r;
@@ -215,15 +189,13 @@ static inline a20_status_t a20_hdl_xattr_get(a20_handle_t h, const char *key,
 static inline a20_status_t a20_hdl_xattr_list(a20_handle_t h, void *list,
                                               uint64_t list_len)
 {
-    a20_xattr_list_args_t args;
-    args.size    = sizeof(args);
-    args.version = 1;
-    args.handle  = h;
-    args._pad    = 0;
-    args.buf     = (uint64_t)list;
-    args.buf_len = list_len;
-    args.out_len = 0;
-    return a20_syscall6(A20_SYS_handle_xattr_list, (uint64_t)&args, 0, 0, 0, 0, 0);
+    return a20_syscall6(A20_SYS_handle_xattr_list, h, (uint64_t)list,
+                        list_len, 0, 0, 0);
+}
+
+static inline a20_status_t a20_hdl_xattr_remove(a20_handle_t h, const char *key)
+{
+    return a20_syscall6(A20_SYS_handle_xattr_remove, h, (uint64_t)key, 0, 0, 0, 0);
 }
 
 #endif

@@ -429,11 +429,11 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0104 | `handle_close_many` | `int64_t handle_close_many(const a20_handle_t *hs, uint32_t count)` | 批量关闭 |
 | 0x0105 | `handle_seek` | `int64_t handle_seek(a20_handle_t h, a20_off_t *offset, uint32_t whence)` | 设置/查询流偏移 |
 | 0x0106 | `handle_transfer` | `int64_t handle_transfer(a20_transfer_args_t *args)` | 内核缓冲拷贝传输（splice/sendfile/copy_file_range 语义统一；当前为 4 KiB 栈缓冲拷贝，非零拷贝） |
-| 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_handle_t h, uint32_t flags, uint64_t val0, uint64_t val1)` | 修改文件元数据（chmod/chown，当前仅支持 mode/owner） |
-| 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_handle_t h, const char *name, const void *value, uint64_t size)` | 设置扩展属性 |
-| 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_handle_t h, const char *name, void *value, uint64_t size)` | 获取扩展属性 |
-| 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名 |
-| 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性 |
+| 0x0107 | `handle_set_meta` | `int64_t handle_set_meta(a20_handle_t h, uint32_t flags, uint64_t val0, uint64_t val1)` | 修改文件元数据（chmod/chown/utimes/ftruncate）。要求 `WRITE \| STAT`；`flags` 必须非零且只含已定义位，否则 `A20_ERR_INVALID_ARGUMENT`。`val0` = `MODE`→mode、`OWNER`→uid、`ATIME`→atime_ns、`TRUNCATE`→长度 —— 这四个 flag 共用同一个字，因此一次调用最多只能带其中一个；`val1` = `OWNER`→gid、`MTIME`→mtime_ns，所以唯一的合法组合是 `TRUNCATE`+`MTIME`。`CTIME` 与 `ALLOCATE` 无内核实现，返回 `A20_ERR_NOT_SUPPORTED`。全部字段都走 VFS（`vfs_ftruncate`/`vfs_futimens`/`vfs_fchmod`/`vfs_fchown`），`MODE`/`OWNER` 因此需要属主身份或相应能力，只读挂载一律被拒。执行顺序是 truncate → 时间戳 → mode → owner：前两步失败时 mode/owner 不会被改动，但一次调用内部不是原子的，被拒的 chmod 不会回滚同一次调用里已写入的 truncate/时间戳。每次调用都要从进程 fd 表借一个临时 fd（表满返回 `A20_ERR_BAD_HANDLE`），`TRUNCATE` 还要求该文件当初以写方式打开；只读挂载上 `ATIME`/`MTIME`/`TRUNCATE` 返回 `A20_ERR_ACCESS` |
+| 0x0108 | `handle_xattr_set` | `int64_t handle_xattr_set(a20_handle_t h, const char *name, const void *value, uint64_t size)` | 设置扩展属性（要求 `WRITE`；目录句柄的 rights 上限不含 `WRITE`，故对目录句柄恒返回 `A20_ERR_ACCESS`） |
+| 0x0109 | `handle_xattr_get` | `int64_t handle_xattr_get(a20_handle_t h, const char *name, void *value, uint64_t size)` | 获取扩展属性（要求 `STAT`） |
+| 0x010A | `handle_xattr_list` | `int64_t handle_xattr_list(a20_handle_t h, void *list, uint64_t size)` | 列出扩展属性名（要求 `STAT`） |
+| 0x010B | `handle_xattr_remove` | `int64_t handle_xattr_remove(a20_handle_t h, const char *name)` | 删除扩展属性（要求 `WRITE`；同 0x0108，目录句柄不可用） |
 | 0x010C | `handle_poll` | `int64_t handle_poll(a20_handle_t h, uint32_t events, uint64_t timeout_ns)` | 非阻塞就绪查询（复用 `vfs_poll_events`，见 08-runtime-status.md §5a） |
 
 ### Task / Thread (0x0200)
@@ -457,6 +457,11 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x020E | `thread_get_cpu` | `int64_t thread_get_cpu(uint32_t *out)` | 查询当前线程所在 CPU |
 | 0x020F | `signal_check` | `int64_t signal_check(a20_signal_info_t *out)` | 检查点式信号模拟：查询挂起信号 |
 | 0x0210 | `signal_mask` | `int64_t signal_mask(uint64_t set, uint64_t *old)` | 检查点式信号模拟：设置/查询信号掩码 |
+| 0x0211 | `task_mem_read` | `int64_t task_mem_read(a20_task_mem_args_t *args)` | 按 iovec 从目标 task 的地址空间读入本地 |
+| 0x0212 | `task_mem_write` | `int64_t task_mem_write(a20_task_mem_args_t *args)` | 按 iovec 把本地数据写入目标 task 的地址空间 |
+| 0x0213 | `task_clone` | `int64_t task_clone(a20_clone_args_t *args)` | 按 handle manifest 克隆当前 task 并安装句柄 |
+| 0x0214 | `execve` | `int64_t execve(const char *path, char **argv, char **envp)` | 原地替换当前 task 的映像，成功不返回 |
+| 0x0216 | `task_adopt` | `int64_t task_adopt(const a20_handle_t handles[6])` | 接管当前 task 的 stdio/root/cwd/self 句柄，顺序固定 |
 
 ### Memory (0x0300)
 
@@ -470,8 +475,10 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0305 | `vm_flush` | `int64_t vm_flush(uint64_t addr, uint64_t len, uint32_t flags)` | 刷新内存 |
 | 0x0306 | `vm_advise` | `int64_t vm_advise(uint64_t addr, uint64_t len, uint32_t advice)` | 内存使用建议（madvise） |
 | 0x0307 | `vm_remap` | `int64_t vm_remap(a20_vm_remap_args_t *args)` | 重映射虚拟内存（mremap） |
-| 0x0308 | `vm_lock` | `int64_t vm_lock(uint64_t addr, uint64_t len, uint32_t flags)` | 锁定/解锁物理页面 |
+| 0x0308 | `vm_lock` | `int64_t vm_lock(uint64_t addr, uint64_t len, uint32_t flags)` | 设置/清除区间的 VMA 预留标记。地址向下、长度向上页对齐，`flags` bit0 为置位（其余位忽略）。当前实现**只翻转 `VM_NATIVE_LOCKED` 一个 `vm_flags` 位**（`mm_vma_set_lock`），全树无读者：不锁定页面、不参与 `mlock` 记账、也不影响 OOM 驱逐。Linux 侧 `mlock`/`mlockall` 走 `VM_LOCKED` 与 `mm->locked_vm`（`kernel/abi/linux/sys_mm.c`），两者不共用该位 |
 | 0x0309 | `vm_create_object` | `int64_t vm_create_object(a20_vm_object_args_t *args)` | 创建匿名内存对象（memfd） |
+| 0x030A | `vm_share_region` | `int64_t vm_share_region(a20_vm_share_args_t *args)` | 建立共享区域描述并把目标 task 接入 |
+| 0x030B | `vm_create_vmar` | `int64_t vm_create_vmar(a20_vm_create_vmar_args_t *args)` | 创建带权限与长度的虚拟地址区间 |
 
 ### Path / Filesystem (0x0400)
 
@@ -499,6 +506,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0413 | `path_link_at` | `int64_t path_link_at(a20_handle_t dir, const char *name, uint32_t len, a20_handle_t target_dir, const char *target, uint32_t target_len)` | 相对目录 handle 创建硬链接 |
 | 0x0414 | `path_symlink_at` | `int64_t path_symlink_at(a20_handle_t dir, const char *name, uint32_t len, const char *target, uint32_t target_len)` | 相对目录 handle 创建符号链接 |
 | 0x0415 | `path_readlink_at` | `int64_t path_readlink_at(a20_handle_t dir, const char *name, uint32_t len, char *buf, uint64_t buf_len)` | 相对目录 handle 读取符号链接目标 |
+| 0x0416 | `fs_serve` | `int64_t fs_serve(a20_fs_serve_args_t *args)` | 注册 uxfs 服务：把 channel 端点（需 `READ\|WRITE`）的所有权转交给挂载作为请求队列；注册是异步完成的，调用方就是服务自身（见 [../hybrid-kernel/06-user-fs.md](../hybrid-kernel/06-user-fs.md)） |
+| 0x0417 | `fs_block_io` | `int64_t fs_block_io(a20_fs_block_io_args_t *args)` | 受控块 IO；`count == 0` 是容量查询（`buf` 收到 u64 扇区数），否则单次上限 4096 扇区 / 1 MiB；只有注册该挂载的服务任务可以发起 |
 
 ### Event / IPC (0x0500)
 
@@ -544,8 +553,8 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 
 | 编号 | 名称 | 签名 | 说明 |
 |------|------|------|------|
-| 0x0800 | `ns_create` | `int64_t ns_create(uint32_t ns_type, a20_flags_t flags, a20_handle_t *out)` | 创建 namespace |
-| 0x0801 | `ns_apply` | `int64_t ns_apply(a20_handle_t ns, a20_handle_t target)` | 应用 namespace |
+| 0x0800 | `ns_create` | `int64_t ns_create(uint32_t ns_type, a20_flags_t flags)` | 创建 namespace；namespace handle 由返回值交付（无输出参数）。只有 filesystem 类型可被 `ns_apply` 应用 |
+| 0x0801 | `ns_apply` | `int64_t ns_apply(a20_handle_t ns, a20_handle_t target)` | 应用 namespace；network/PID/device 返回 `A20_ERR_NOT_SUPPORTED`（见 [06-security.md](06-security.md) §7） |
 | 0x0802 | `security_get_context` | `int64_t security_get_context(a20_security_context_t *out)` | 查询安全上下文（身份/能力） |
 | 0x0803 | `security_set_context` | `int64_t security_set_context(const a20_security_context_t *in)` | 修改安全上下文 |
 
@@ -600,6 +609,20 @@ L0 (IRQ) < L1 (handle table) < L2 (内核对象) < L3 (调度器) < L4 (mm)
 | 0x0C07 | `device_claim` | `int64_t device_claim(uint64_t phys)` | 声明设备窗口所有权（user-owned 窗口映射前必须 claim） |
 | 0x0C08 | `device_release` | `int64_t device_release(uint64_t phys)` | 释放设备窗口所有权 |
 | 0x0C09 | `device_alloc_dma` | `int64_t device_alloc_dma(uint32_t npages, a20_handle_t *out)` | 分配预物化连续 DMA heap（上限 64 页，帧清零） |
+| 0x0C0A | `device_free_dma` | `int64_t device_free_dma(a20_handle_t h)` | 释放 `device_alloc_dma` 分配的 DMA heap（需 `CONTROL`；先解 IOMMU 映射再释放 VMO） |
+| 0x0C0B | `device_get_info` | `int64_t device_get_info(a20_device_info_args_t *args)` | 按 bus/vendor/device/index 查设备：flags、devid、irq、MMIO 窗口与 IOMMU fault 计数；fault 记录由此拉取，不经中断投递 |
+
+### Pager / monitor (0x0D00)
+
+用户态分页供给与计数器对象，分别对应 Linux 的 userfaultfd 与 perf 软件事件；设计、字段与取舍见 [09-native-abi-deepening.md](09-native-abi-deepening.md) §2/§3。
+
+| 编号 | 名称 | 签名 | 说明 |
+|------|------|------|------|
+| 0x0D00 | `pager_create` | `int64_t pager_create(a20_pager_create_args_t *args)` | 创建 pager 对象与页请求 channel，输出 pager 与请求端点两个 handle |
+| 0x0D01 | `pager_vmo_attach` | `int64_t pager_vmo_attach(a20_pager_vmo_args_t *args)` | 把 PAGED VMO 关联到 pager（pager 需 `CONTROL`，vmo 需 `CONTROL`）；未关联的 PAGED VMO 缺页退回填零 |
+| 0x0D02 | `pager_supply_pages` | `int64_t pager_supply_pages(a20_pager_supply_args_t *args)` | 回填页：把 source VMO 的区间拷入 paged VMO，两个句柄都需 `WRITE`，长度必须页对齐 |
+| 0x0D10 | `monitor_create` | `int64_t monitor_create(a20_monitor_create_args_t *args)` | 创建计数器对象（`kind` 取 `A20_MONITOR_*`；给出 `queue` 时按 `period_ns` 周期投递 `A20_EVENT_SIGNALED`） |
+| 0x0D11 | `monitor_query` | `int64_t monitor_query(a20_handle_t mon, a20_monitor_value_t *out)` | 采样并返回计数与 `time_active_ns`/上次采样值（需 `READ`）；`period_ns` 非零的 monitor 另按周期向 EventQ 投递 |
 
 ### Kernel extension (0x0E00)
 

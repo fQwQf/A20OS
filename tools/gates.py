@@ -86,6 +86,8 @@ def run_one(a: dict, files: list[str]) -> tuple[bool, str]:
         return _run_build_must_fail(a)
     if a.get("doc_refs"):
         return _run_doc_refs(a)
+    if a.get("native_abi_coverage"):
+        return _run_native_abi_coverage(a)
 
     argv = ["rg", "-q", *a.get("rg_flags", ())]
     if a.get("fixed"):
@@ -243,6 +245,132 @@ def _run_doc_refs(a: dict) -> tuple[bool, str]:
     if broken:
         return False, (f"{len(broken)}/{total} cited source paths do not "
                        f"resolve:\n" + "\n".join(broken[:20]))
+    return True, ""
+
+
+_NR_DEFINE = re.compile(r"^#define A20_SYS_([A-Za-z0-9_]+)\s+(0x[0-9A-Fa-f]+)\s*$",
+                        re.M)
+_SYSCALL_ROW = re.compile(r"^\|\s*(0x[0-9A-Fa-f]+)\s*\|\s*`([A-Za-z0-9_]+)`", re.M)
+_HEADING = re.compile(r"^#{1,%(level)d}(\s|$)")
+
+
+def _section_span(text: str, heading: str) -> str | None:
+    """The text from `heading` up to the next heading of the same level or above.
+
+    Anchored on the heading text rather than a line number so that inserting a
+    section upstream cannot silently move the region this gate reads.  The body
+    is included: the syscall list is a `##` whose rows sit under `###` range
+    headings, so stopping at the first *deeper* heading would leave an empty
+    span and make every row assertion below vacuously true.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines) if ln.rstrip() == heading), None)
+    if start is None:
+        return None
+    level = len(lines[start]) - len(lines[start].lstrip("#"))
+    stop = next((j for j in range(start + 1, len(lines))
+                 if _HEADING.match(lines[j], 0, level)), len(lines))
+    return "".join(lines[start:stop])
+
+
+def _run_native_abi_coverage(a: dict) -> tuple[bool, str]:
+    """Cross-check the Native ABI's three tables against each other.
+
+    The Linux side has two coverage generators, so a new LINUX_SYSCALL needs a
+    coverage row and an envelope classification.  The Native side had neither:
+    `check-abi-boundary` was 19 single-file keyword checks, so a native entry
+    could be registered with no number, with a number the spec does not list, or
+    with no spec row at all and every gate stayed green -- which is how two
+    defective native entries reached main.  Nothing here re-derives a judgement:
+    it only asks that the sources agree, and names the entries that do not, so
+    the "nobody ever decided" case is a gate failure rather than an absence
+    nobody can see.  "Named somewhere under docs/native-abi/" is a weaker
+    statement than "has a row in the syscall list"; the list is checked in both
+    directions, and the SDK mirror is checked name-and-number, so a number can
+    no longer be correct in the kernel header yet unreachable from user space.
+    """
+    spec = a["native_abi_coverage"]
+    names = re.findall(r"^A20_NATIVE_SYSCALL\(\s*([A-Za-z0-9_]+)\s*,",
+                       (REPO / spec["table"]).read_text(encoding="utf-8"), re.M)
+    numbers = {n: int(v, 16) for n, v in
+               _NR_DEFINE.findall((REPO / spec["numbers"]).read_text(encoding="utf-8"))}
+
+    problems: list[str] = []
+    if not names:
+        problems.append(f"no A20_NATIVE_SYSCALL entries parsed from {spec['table']}")
+    unnumbered = [n for n in names if n not in numbers]
+    unregistered = [n for n in numbers if n not in names]
+    if unnumbered:
+        problems.append(f"{len(unnumbered)}/{len(names)} entries in {spec['table']} "
+                        f"have no A20_SYS_ number in {spec['numbers']}: "
+                        f"{', '.join(unnumbered)}")
+    if unregistered:
+        problems.append(f"{len(unregistered)} A20_SYS_ numbers in {spec['numbers']} "
+                        f"have no entry in {spec['table']}: {', '.join(unregistered)}")
+
+    docs = sorted((REPO / spec["doc_dir"]).rglob("*.md"))
+    prose = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in docs)
+    undocumented = [n for n in names
+                    if not re.search(r"(?<![0-9A-Za-z_])" + re.escape(n) +
+                                     r"(?![0-9A-Za-z_])", prose)]
+    if undocumented:
+        problems.append(f"{len(undocumented)}/{len(names)} entries in "
+                        f"{spec['table']} are named nowhere in {spec['doc_dir']}/ "
+                        f"({len(docs)} files): {', '.join(undocumented)}")
+
+    listed = spec["syscall_list"]
+    section = _section_span((REPO / listed["doc"]).read_text(encoding="utf-8"),
+                            listed["heading"])
+    if section is None:
+        problems.append(f"{listed['doc']} has no {listed['heading']!r} heading")
+    else:
+        rows = _SYSCALL_ROW.findall(section)
+        for num, name in rows:
+            if name not in numbers:
+                problems.append(f"{listed['doc']} {listed['heading']} lists {name}, "
+                                f"which has no A20_SYS_ number")
+            elif numbers[name] != int(num, 16):
+                problems.append(f"{listed['doc']} lists {name} as {num}, "
+                                f"{spec['numbers']} says {numbers[name]:#06x}")
+        listed_names = {name for _, name in rows}
+        unlisted = sorted(set(numbers) - listed_names)
+        if unlisted:
+            problems.append(f"{len(unlisted)}/{len(numbers)} numbers in "
+                            f"{spec['numbers']} have no row in {listed['doc']} "
+                            f"{listed['heading']}: {', '.join(unlisted)}")
+        claimed = re.search(r"总计[：:]\s*(\d+)", section)
+        if claimed and int(claimed.group(1)) != len(numbers):
+            problems.append(f"{listed['doc']} {listed['heading']} claims "
+                            f"{claimed.group(1)} syscalls but "
+                            f"{spec['numbers']} registers {len(numbers)}")
+
+    sdk = spec.get("sdk_numbers")
+    if sdk:
+        sdk_numbers = {n: int(v, 16) for n, v in
+                       _NR_DEFINE.findall((REPO / sdk).read_text(encoding="utf-8"))}
+        drifted = [f"{n}={v:#06x} vs {numbers[n]:#06x}"
+                   for n, v in sorted(sdk_numbers.items())
+                   if n not in numbers or numbers[n] != v]
+        if drifted:
+            problems.append(f"{len(drifted)}/{len(sdk_numbers)} numbers in {sdk} "
+                            f"disagree with {spec['numbers']}: "
+                            f"{', '.join(drifted)}")
+        absent = sorted(set(numbers) - set(sdk_numbers))
+        if absent:
+            problems.append(f"{len(absent)}/{len(numbers)} numbers in "
+                            f"{spec['numbers']} are missing from {sdk}, so a user "
+                            f"program including it cannot name them: "
+                            f"{', '.join(absent)}")
+
+    dupes = sorted({v for v in numbers.values()
+                    if list(numbers.values()).count(v) > 1})
+    if dupes:
+        problems.append(f"{len(dupes)} number(s) are shared by more than one "
+                        f"entry in {spec['numbers']}: "
+                        f"{', '.join(f'{v:#06x}' for v in dupes)}")
+
+    if problems:
+        return False, "\n".join(problems)
     return True, ""
 
 

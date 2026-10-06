@@ -34,7 +34,7 @@
 #include "drivers/bus/platform_bus.h"
 #include "drvmod/drvmod.h"
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 /* Layering contract: core modules include internal IPC headers directly;
  * abi/native/types.h and rights.h are mere re-export shims of ipc/ipc.h. */
 #include "ipc/ipc.h"
@@ -223,7 +223,7 @@ static void manager_register_board_devices(void)
 /*  User-service activation                                           */
 /* ------------------------------------------------------------------ */
 
-#ifdef CONFIG_ABI_NATIVE
+#if defined(CONFIG_ABI_NATIVE) || defined(CONFIG_ABI_BOTH)
 
 static struct a20_ht_internal *manager_ht_create(void);
 static struct a20_ht_internal *manager_ht_create(void)
