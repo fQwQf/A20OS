@@ -42,6 +42,9 @@ void riscv_iommu_early_probe(void);
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
 #include "drivers/core/driver_lifecycle_test.h"
 #endif
+#ifdef CONFIG_PLATFORM_IRQ_TEST
+#include "drivers/core/platform_irq_test.h"
+#endif
 
 /* Forward declarations */
 void init_kthread(void);
@@ -162,6 +165,12 @@ void kernel_main(void) {
      * the built-in init was removed by the drvmod migration. */
 #ifdef CONFIG_DRIVER_LIFECYCLE_TEST
     driver_lifecycle_test_run();
+#endif
+    /* Runs after driver_probe_all() so the IRQ registry already holds whatever
+     * the board claimed, and before vfs_init(): this only touches the driver
+     * core and the IRQ table. */
+#ifdef CONFIG_PLATFORM_IRQ_TEST
+    platform_irq_test_run();
 #endif
     vfs_init();
     printf("[INIT] VFS initialized\n");

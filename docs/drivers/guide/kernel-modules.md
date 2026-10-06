@@ -16,13 +16,13 @@ A20OS 现在同时支持三种驱动路径：
 
 - `magic` 与 `version`：描述符格式身份；
 - `placement`：`kernel-module` 或 `user-service`，强边界，不是可互换模式；
-- `type`：RTC、BLOCK、INPUT、AUDIO、SECURITY、NET、DISPLAY 或 USB；
+- `type`：RTC、BLOCK、INPUT、AUDIO、SECURITY、NET、DISPLAY、USB 或 CHAR；
 - `name`：稳定的驱动名；
 - `abi` 与 `resource_mask`：驱动接口版本与资源需求（MMIO/IRQ/IOPORT/DMA）；
 - `flags`：生命周期所有权（`A20_DRIVER_FLAG_SUPERVISED` 表示用户态服务的 spawn/restart/健康由外部服务监督者如 svcmgr 拥有，内核管理器只记录）；
 - `match[]` / `match_count`：该驱动可拥有的设备身份（bus/vendor/device）。
 
-后缀不决定权限域：ELF 类型与 `placement` 共同决定加载器。内核 `drvmod_load()` 只接受 ELF64 `ET_REL` 且 `placement=kernel-module` 的文件；普通 ELF 执行加载器在执行以 `.a20drv` 结尾的文件时只接受 `placement=user-service` 的描述符。因此内核模块不能作为用户程序执行，用户态驱动也不能被映射进内核 direct-map。当前普通 ELF 校验器只接受 RTC、BLOCK、INPUT、AUDIO、SECURITY 五种 user-service type；描述符枚举中的 NET、DISPLAY、USB 可供内核模块使用，但用户服务在扩展 `elf_validate_user_driver()` 前会被拒绝。
+后缀不决定权限域：ELF 类型与 `placement` 共同决定加载器。内核 `drvmod_load()` 只接受 ELF64 `ET_REL` 且 `placement=kernel-module` 的文件；普通 ELF 执行加载器在执行以 `.a20drv` 结尾的文件时只接受 `placement=user-service` 的描述符。因此内核模块不能作为用户程序执行，用户态驱动也不能被映射进内核 direct-map。当前普通 ELF 校验器只接受 RTC、BLOCK、INPUT、AUDIO、SECURITY 五种 user-service type；描述符枚举中的 NET、DISPLAY、USB、CHAR 可供内核模块使用，但用户服务在扩展 `elf_validate_user_driver()` 前会被拒绝。
 
 统一驱动管理器（`kernel/drivers/core/driver_manager.c`）是可选驱动发现与激活的唯一权威。`driver_manager_init()` 在启动期（`init_kthread`）：
 
@@ -40,15 +40,17 @@ A20OS 现在同时支持三种驱动路径：
 - 内存与日志：`drv_alloc`、`drv_free`、`drv_log`。
 - MMIO：`drv_map_mmio`（返回校验后的 direct-map VA）、`drv_unmap_mmio`、`drv_read32`、`drv_write32`。
 - 端口 I/O（x86）：`drv_in8`、`drv_out8`。
-- DMA：`drv_dma_alloc_coherent`、`drv_dma_free_coherent`（coherent，稳定设备地址）。
+- DMA：`drv_dma_alloc_coherent`、`drv_dma_free_coherent`（coherent，稳定设备地址）。该入口不受 mask 约束（drv_env 契约在内核/用户/模块三种放置下逐字节一致，都没有 `device_t`），恒定按 64 位全通分配；持有 `device_t` 的模块驱动必须改用导出的 `dma_set_mask()` + `dma_alloc_coherent(dev, ...)`。
 - 延时/时间：`drv_udelay`、`drv_mdelay`、`drv_clock_ticks`。
 - 中断：`drv_register_isr`、`drv_unregister_isr`（桥接 hwapi `request_irq`，向量在注册时校验范围，arch IRQ 分发真实投递）。
+- 板级 IRQ 资源与内核参数：`platform_device_irq`、`bootargs_get`。前者是模块驱动读自己 IRQ 线号的唯一入口，返回 `>= 0` 表示可用线号、`-ENODEV` 表示板级没发布 `RES_IRQ`（应当轮询，不是错误）；后者读 `a20.*` 内核参数串，配合导出表里已有的 `memcmp` 手工切 token，避免为一次参数解析再引入 `strncmp` 依赖。
 - 统一驱动核心桥接：`drv_driver_register/unregister`、`drv_device_get_resource`、`device_get_resource`、`device_find_by_class`、`device_register`、`drv_driver_probe_all`、`platform_bus`。`device_register` 是自建实例的驱动必须调用的发布入口：不调用，`device_find_by_class()` 就看不到它，class 消费者（例如 `mount_setup_block_device()`）会认为这块盘不存在。
 - PCI 类驱动访问器（device_t 为中心，模块以 `bus = &pci_bus` 注册标准 `driver_t` 后使用）：`pci_bus`、`pci_class_code`、`pci_device_id`、`pci_get_bar_resource`、`pci_intx_irq`、`pci_enable_and_assign_bars`。
 - 控制台输入路径（PS/2 模块）：`uart_receive_char`。
+- 内核熵池（硬件 RNG 模块）：`random_reseed`。内核已有 `kernel/core/random.c`（xoshiro 状态 + `random_u64`/`random_fill`，消费方是 `sys_getrandom()`、ASLR 与栈保护），硬件熵设备应当把读到的字节折进这个池而不是另起一套。该符号只能从进程上下文调用：`arch_entropy_sample()` 会取 `proc_current()` 与 `frame_free_count()`，在 ISR 里调它等于在中断里读调度器状态。
 - 调度/等待原语（模块完成路径）：`proc_park_prepare/commit/cancel/finish`、`proc_wake_q_init/flush`、`wait_queue_init/link/unlink/collect_one/collect_all`、`mutex_init/lock/unlock`、`timer_get_ticks`、`mdelay/udelay`。
 - 日志与分配器：`klog_write/klog_level`、`kmalloc/kfree/kcalloc`。模块内日志建议走 `drv_log`：`klog_level` 是外部变量，经 GOT 加载（loongarch64 的 GOT 支持已实现，但模块日志用纯 CALL36 更稳）。
-- DMA 增强：`dma_alloc_coherent_aligned/free_coherent_aligned`、`dma_sync_for_cpu/device`。
+- DMA 增强与地址 mask：`dma_alloc_coherent_aligned/free_coherent_aligned`、`dma_sync_for_cpu/device`、`dma_set_mask`、`dma_addr_ok`、`dma_range_ok`。分配器按 `dev->dma_mask` 校验，取不到满足窗口的内存时返回 `NULL`，由 probe 决定失败；语义见[运行时契约](runtime-contracts.md#dma-api)。
 - ACPI 发现（x86_64）：`firmware_acpi_tpm2`。
 - 输入 mux 唤醒与 virtio PCI 传输：`input_mux_wake`、`pci_virtio_transport_init`、`arch_current_cpu_id`。
 - 基础字符串/内存函数：`strncpy`、`memset`、`memcpy`、`memcmp`、`strcmp`、`strlen`、`strstr`，`snprintf`/`vsnprintf`（需要格式化到定长缓冲的驱动，例如拼设备名），以及自旋锁内联用到的 `proc_current`/`proc_task_pid`/`printf`/`panic`。
@@ -139,12 +141,16 @@ drvctl list
 |---|---|---|
 | `goldfish_rtc.c` → `rtc.a20drv` | riscv64/aarch64/loongarch64 | goldfish RTC，QEMU virt 启动即绑定 |
 | `pc_spkr.c` → `pc-spkr.a20drv` | x86_64 | PC speaker，统一驱动核心桥接注册 AUDIO 类 |
+| `cmos_rtc.c` → `cmos-rtc.a20drv` | x86_64 | MC146818 CMOS RTC，x86_64 墙钟来源；板级 platform 设备给 IOPORT 0x70/0x71；只读、无 IRQ、不做时区换算，century 寄存器不可信时按 20xx 处理 |
 | `vinput_probe.c` → `vinput-probe.a20drv` | riscv64/aarch64 | virtio-input 内核只读探针（双驻留共享代码的模块部署），挂键盘时输出设备身份 |
 | `vinput.c` → `vinput.a20drv` | 四架构 | virtio-input 完整驱动（状态迁移 + 事件 virtqueue + IRQ + input class 设备）；事件经 mux 的 `/dev/event0` 投递；slot 5 双驻留样本保持 user-owned 归 uinputd |
 | `ps2.c` → `ps2.a20drv` | x86_64 | PS/2 键鼠控制器，初始化 + 双向量 ISR 注册；键盘字符经 `uart_receive_char` 进控制台 |
 | `nvme.c` → `nvme.a20drv` | x86_64/loongarch64 | 架构无关 PCI 类 block 驱动（标准 `driver_t` 注册）；`DRVMOD_SMOKE=1` 构建携带与内建版本相同的 capability/I/O smoke 测试，`smoke-pci-portability` 在 loongarch64 上验证 |
 | `tpm.c` → `tpm.a20drv` | x86_64 | TPM 2.0 TIS/FIFO 驱动，经 `firmware_acpi_tpm2` 做 ACPI 发现；无 TPM 时 probe 优雅返回 |
 | `hda.c` → `hda.a20drv` | 四架构 | 架构无关 PCI 类 audio 驱动（`hda_match` 按 `pci_class_code` 匹配）；`DRVMOD_SMOKE=1` 携带 in-probe 流 smoke（`HDA_STREAM_SMOKE`），`smoke-hda`（x86_64）与 `smoke-pci-portability`（loongarch64）验证；原 `hda_codec.c` 已并入本模块 |
+| `virtio_console.c` → `virtio-console.a20drv` | riscv64/x86_64/aarch64/loongarch64 | virtio-serial port 0 作为 CHAR 类 `/dev/vport0`；只协商 `VIRTIO_F_VERSION_1`、不协商 MULTIPORT，q0=rx/q1=tx 承载唯一端口；rx 中断驱动、tx 同步有界等待 |
+| `virtio_rng.c` → `virtio-rng.a20drv` | riscv64/x86_64 | virtio-rng 熵源，CHAR 类 `/dev/hwrng`，读到的字节经新导出的 `random_reseed` 折进内核熵池；双 transport（PCI `1af4:1044`/`1005` 与 virtio-mmio device-id 4）；缓冲按需挂载，避免 probe 时持续抽宿主熵 |
+| `rtl8139.c` → `rtl8139.a20drv` | x86_64 | Realtek RTL8139 PCI 网卡（`10ec:8139` + 以太网控制器 class）；此前无任何驱动认领该型号；默认中断驱动，`a20.rtl8139.poll=1` 强制轮询 |
 
 验证命令：
 
@@ -155,7 +161,16 @@ make ARCH=aarch64 ABI=both smoke-drvmod-aarch64      # rtc.a20drv
 make ARCH=loongarch64 ABI=both smoke-drvmod-loongarch64  # rtc.a20drv
 make smoke-drvmod                                    # 全部四架构
 make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用户态 uinputd
+make smoke-rtc-cmos                                  # cmos-rtc.a20drv + x86_64 墙钟对宿主时间
+make smoke-rtc-cmos-fallback                         # CMOS 越界时的回退路径（尚未执行过）
+make smoke-virtio-console                            # virtio-console.a20drv + /dev/vport0 双向回环
+make smoke-virtio-rng                                # virtio-rng.a20drv + /dev/hwrng 读出真熵
+make smoke-net-rtl8139                               # rtl8139.a20drv + hostfwd 端到端回环与中断计数
 ```
+
+`smoke-rtc-cmos` 额外做了一件其它门禁不做的事：门禁内的 `expect` 只能证明来客
+打出了某一行，无法证明那行里的时间是真实时间，所以它把 `/bin/date` 的输出交给宿主
+侧的 `tools/check_rtc_wallclock.py` 复核（≥ 2026-01-01，与宿主相差 ≤ 300s）。
 
 这些门禁构建 dev 镜像、在对应架构 QEMU 中验证模块加载、DriverEntry、绑定与 probe。
 
@@ -167,6 +182,7 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 |---|---|---|---|---|
 | goldfish RTC | `kernel/drivers/char/goldfish_rtc_kdrv.c`（已删除）| `kernel/drvmod/examples/goldfish_rtc.c` | riscv64/aarch64/loongarch64 | 已迁移；QEMU virt 启动即绑定 |
 | PC speaker | `kernel/drivers/audio/pc_speaker.c`（已删除）| `kernel/drvmod/examples/pc_spkr.c` | x86_64 | 已迁移；统一驱动核心桥接注册 AUDIO 类并绑定 platform 设备 |
+| CMOS RTC (MC146818) | 无内建位置（新增）| `kernel/drvmod/examples/cmos_rtc.c` | x86_64（Early）| 新增；x86_64 墙钟来源，绑定两块 x86_64 板级声明的 platform 设备；限制见 [实现状态](../meta/implementation-status.md) |
 | virtio-input 内核探针 | `kernel/drivers/input/virtio_input_kprobe.c`（已删除）| `kernel/drvmod/examples/vinput_probe.c` | riscv64/aarch64 | 已迁移；`smoke-dual-input` 验证与用户态 uinputd 读到同一设备身份 |
 | virtio-input 完整驱动 | `kernel/drivers/input/virtio_input.c`（已删除）| `kernel/drvmod/examples/vinput.c` | 四架构 | 已迁移；`/dev/event0` 的 devfs mux 服务拆分至 `kernel/drivers/input/input_mux.c`（class 设备消费 + EVIOCG* ioctl 面），模块 ISR 经 `input_mux_wake` 唤醒 mux；riscv64 MMIO 与 x86_64 PCI 路径 QEMU 实测事件流（`[INPUT] event type=...` + EV_SYN）|
 | PS/2 键鼠控制器 | `kernel/drivers/input/ps2.c`（已删除）| `kernel/drvmod/examples/ps2.c` | x86_64 | 已迁移；arch IRQ 分发经 hwapi 投递到模块 ISR，`smoke-drvmod-x86_64` 验证初始化与双向量注册 |
@@ -185,13 +201,15 @@ make ARCH=riscv64 ABI=both smoke-dual-input          # vinput-probe.a20drv + 用
 | xHCI | `kernel/drivers/usb/host/xhci.c`（generic 不再内建）| `kernel/drvmod/examples/xhci.c` | x86_64/aarch64/loongarch64 | 已迁移；USB core 桥接符号导出；riscv64 generic 清单当前未列出 |
 | USB HID | `kernel/drivers/usb/class/usb_hid.c`（generic 不再内建）| `kernel/drvmod/examples/usb_hid.c` | x86_64/aarch64/loongarch64 | 已迁移；riscv64 generic 清单当前未列出 |
 | USB storage | `kernel/drivers/usb/class/usb_storage.c`（generic 不再内建）| `kernel/drvmod/examples/usb_storage.c` | x86_64/aarch64/loongarch64 | 已迁移；riscv64 generic 清单当前未列出 |
+| virtio-console | `kernel/drivers/char/virtio_console.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_console.c` | riscv64/x86_64/aarch64/loongarch64 | 新增；PCI 1af4:1043/1003，CHAR 类 `/dev/vport0`（`device_set_devfs_name()`），rx 中断 / tx 同步，默认把接收字节镜像进控制台输入。**single-port、无 MULTIPORT、单静态实例、无 MSI-X**；门禁 `smoke-virtio-console` 已实跑 PASS |
 | StarFive/LS2K GMAC | embedded 静态 | 无（板级 platform 驱动）| 板级 | 通过 `platform_bus` + `hardware_id` 绑定，不再无总线通配匹配 |
+| virtio-rng | `kernel/drivers/char/virtio_rng.c`（generic 不再内建）| `kernel/drvmod/examples/virtio_rng.c` | riscv64/x86_64 | 新增；PCI 1af4:1044/1005 与 virtio-mmio（device-id 4）双 transport，CHAR 类 `/dev/hwrng`（`device_set_devfs_name()`），读到的字节经新导出的 `random_reseed` 折进 `kernel/core/random.c`。**单静态实例、缓冲按需挂载、熵池只在 read 路径喂、无 MSI-X**；门禁 `smoke-virtio-rng` 已实跑 PASS |
 
 当前迁移账本受启动顺序约束：只有真正的设备驱动进入 `.a20drv` 迁移表。`loop`、`udisk`、`pty`、`uart`、`framebuffer`/`gpu_core`、`audio_core`、`input_mux` 和 `usb_core` 是内核服务或 class 聚合层，继续静态链接，不应标为 “不可迁移设备驱动”。
 
-generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Early DriverStore 按架构生成：x86_64 包含 PC speaker、virtio-blk、virtio-scsi、AHCI；riscv64/aarch64/loongarch64 包含 RTC、virtio-blk、virtio-scsi，riscv64 另含 DW SDIO。其余被该架构 `DRVMOD_MODULES` 列出的包进入 Runtime DriverStore（`/bin/lib/drivers`）。VF2 与 LS2K1000 的 GMAC 虽通过 `platform_bus` + `hardware_id` 注册绑定，但当前没有 generic `.a20drv` 包，只能由 embedded 静态账本部署。总线无关设备没有通配匹配：无总线设备只有在驱动显式 `match()` 接受时才绑定，UART 串口服务即通过名称匹配发布 char 设备，不再抢占任意板级设备。
+generic 不再保留 `EMBEDDED_DEVICE_DRIVER_SRCS` 中的内建设备驱动。Early DriverStore 按架构生成：x86_64 包含 PC speaker、CMOS RTC、virtio-blk、virtio-scsi、AHCI；riscv64/aarch64/loongarch64 包含 RTC、virtio-blk、virtio-scsi，riscv64 另含 DW SDIO。其余被该架构 `DRVMOD_MODULES` 列出的包进入 Runtime DriverStore（`/bin/lib/drivers`）。VF2 与 LS2K1000 的 GMAC 虽通过 `platform_bus` + `hardware_id` 注册绑定，但当前没有 generic `.a20drv` 包，只能由 embedded 静态账本部署。总线无关设备没有通配匹配：无总线设备只有在驱动显式 `match()` 接受时才绑定，UART 串口服务即通过名称匹配发布 char 设备，不再抢占任意板级设备。
 
-框架 API 现状：DMA 对象（coherent/aligned/sync）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）即以模块形式实现并受 smoke 门禁覆盖。
+框架 API 现状：DMA 对象（coherent/aligned/sync）与地址 mask（`dma_set_mask`/`dma_addr_ok`/`dma_range_ok`）、PCI BAR 访问（`pci_get_bar_resource`/`pci_enable_and_assign_bars`/`pci_intx_irq`/`pci_class_code`）、block/net/input/audio/display class 操作（统一核心桥接 + 头文件）、调度/等待原语（park/wait_queue/mutex）、`firmware_acpi_tpm2`、`random_reseed`、virtq（双驻留共享层）、`clock_ticks_per_sec` 与 `input_mux_wake` 均为可导出 API；NVMe、TPM、HDA、virtio-input 完整事件投递（`vinput.a20drv` + `input_mux.c`）与 virtio-rng（`virtio-rng.a20drv` → `/dev/hwrng`）即以模块形式实现并受 smoke 门禁覆盖。
 
 其余设备包：`tools/driver-modules.mk` 的每架构 `DRVMOD_MODULES` 是 generic 包的权威清单，不能从 `kernel/drvmod/examples/` 中存在某个包装文件推断所有架构都会部署它。PCI/MMIO/platform bus、USB core、framebuffer 和各类 mux/class consumer 仍是内核框架服务。`tools/driver-sources.mk` 的 `EMBEDDED_DEVICE_DRIVER_SRCS` 只表示 embedded 当前显式静态集合，不是 generic 模块清单或两种 profile 的能力并集。
 

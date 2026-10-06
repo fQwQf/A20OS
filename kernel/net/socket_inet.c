@@ -116,9 +116,35 @@ int net_sockaddr_in_local(const net_sockaddr_in_t *in)
     if (!in)
         return 0;
     uint32_t addr = in->sin_addr;
-    if (addr == 0 || addr == 0x0100007fU || addr == 0x0f02000aU)
+    /* INADDR_ANY: bind() means "any local address", always available.
+     * 127.0.0.1: loopback is up before any interface is configured. */
+    if (addr == 0 || addr == 0x0100007fU)
         return 1;
-    return 0;
+
+    /* Anything else has to be an address this host actually holds, so the
+     * question is asked of the netif list rather than answered from a table of
+     * literals.  The previous version accepted only 0x0f02000aU, which is
+     * 10.0.2.15 with its bytes reversed and so is not the network-byte-order
+     * value a sockaddr_in carries: binding the address the guest was actually
+     * configured with returned EADDRNOTAVAIL, and any bind that did match the
+     * literal was a bind to an address no interface held.  sin_addr is compared
+     * as it arrives (no ntohl), because user space hands bind() the address in
+     * network byte order and netif_ip4_addr(n)->addr is stored the same way --
+     * the same comparison net_ip_group_netif() makes (socket_control.c:120).
+     *
+     * g_lwip_lock alone: netif_list is lwIP state, and the two network locks
+     * must never be held together.  net_bind_sock() calls this before taking
+     * the socket's own lock, and nothing here allocates or sleeps. */
+    uint64_t flags = a20_lwip_lock();
+    int local = 0;
+    for (struct netif *n = netif_list; n; n = n->next) {
+        if (n->state && netif_ip4_addr(n)->addr == addr) {
+            local = 1;
+            break;
+        }
+    }
+    a20_lwip_unlock(flags);
+    return local;
 }
 
 static int net_inet_domains_overlap(int a, int b)

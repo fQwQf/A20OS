@@ -69,6 +69,7 @@ static const char *type_str(uint32_t t)
     case 6: return "net";
     case 7: return "display";
     case 8: return "usb";
+    case 9: return "char";
     default: return "?";
     }
 }

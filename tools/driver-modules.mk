@@ -101,6 +101,11 @@ $(USER_BUILD_DIR)/pc-spkr.a20drv: $(DRVMOD_DIR)/pc_spkr.c kernel/include/drvmod/
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+$(USER_BUILD_DIR)/cmos-rtc.a20drv: $(DRVMOD_DIR)/cmos_rtc.c \
+		kernel/include/drvmod/drvmod.h kernel/include/drivers/char/cmos_rtc.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
 $(USER_BUILD_DIR)/vinput.a20drv: $(DRVMOD_DIR)/vinput.c \
 		kernel/include/drvmod/drvmod.h kernel/include/drivers/input/virtio_input.h \
 		kernel/include/drivers/dual/virtio_mmio.h
@@ -170,7 +175,22 @@ $(USER_BUILD_DIR)/virtio-snd.a20drv: $(DRVMOD_DIR)/virtio_snd.c \
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 
+$(USER_BUILD_DIR)/virtio-console.a20drv: $(DRVMOD_DIR)/virtio_console.c \
+		kernel/drivers/char/virtio_console.c \
+		kernel/include/drivers/char/virtio_console.h
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/virtio-rng.a20drv: $(DRVMOD_DIR)/virtio_rng.c \
+		kernel/drivers/char/virtio_rng.c
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
 $(USER_BUILD_DIR)/e1000.a20drv: $(DRVMOD_DIR)/e1000.c kernel/drivers/net/e1000.c
+	@mkdir -p $(dir $@)
+	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
+
+$(USER_BUILD_DIR)/rtl8139.a20drv: $(DRVMOD_DIR)/rtl8139.c kernel/drivers/net/rtl8139.c
 	@mkdir -p $(dir $@)
 	$(DRVMOD_GCC) $(DRVMOD_CFLAGS) -c $< -o $@
 

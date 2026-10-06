@@ -30,33 +30,49 @@
 #define PCI_MSIX_MAX_FUNCTIONS 32
 
 typedef struct pci_msix_state {
-    const device_t *dev;
+    device_t *dev;
     uint8_t  table_size;
     uint8_t  table_bir;
     uint32_t table_offset;
     uintptr_t table;          /* kernel address of entry 0 */
     unsigned programed;       /* entries written by pci_msix_program_vector() */
+    /* Per-entry destination.  Index and vector are recorded here rather than
+     * re-derived because moving an entry needs the vector it carries and the
+     * CPU it currently points at, and neither is recoverable from the table
+     * once a later entry has been programmed. */
+    int16_t  target_cpu[PCI_MSIX_AFFINITY_VECTORS];
+    uint16_t vector[PCI_MSIX_AFFINITY_VECTORS];
 } pci_msix_state_t;
 
 static pci_msix_state_t g_msix[PCI_MSIX_MAX_FUNCTIONS];
 
-static pci_msix_state_t *msix_state(const device_t *dev, int create);
+static pci_msix_state_t *msix_state(device_t *dev, int create);
 
-int __attribute__((weak)) arch_msix_message_address(uint32_t vector,
+int __attribute__((weak)) arch_msix_message_address(uint32_t vector, int cpu,
                                                    uint32_t *addr_lo,
                                                    uint32_t *addr_hi)
 {
     (void)vector;
+    (void)cpu;
     (void)addr_lo;
     (void)addr_hi;
     return -EOPNOTSUPP;
 }
 
-int __attribute__((weak)) arch_msix_vector_setup(uint32_t vector, int masked)
+int __attribute__((weak)) arch_msix_vector_setup(uint32_t vector, int cpu,
+                                                 int masked)
 {
     (void)vector;
+    (void)cpu;
     (void)masked;
     return -EOPNOTSUPP;
+}
+
+int __attribute__((weak)) arch_irq_msix_cpu_count(void)
+{
+    /* No per-CPU destination: the only legal target is the boot processor,
+     * which is also where every vector already sits. */
+    return 1;
 }
 
 int pci_msix_capability(const device_t *dev, pci_msix_info_t *out)
@@ -119,7 +135,7 @@ int pci_msix_capability(const device_t *dev, pci_msix_info_t *out)
     return 0;
 }
 
-static pci_msix_state_t *msix_state(const device_t *dev, int create)
+static pci_msix_state_t *msix_state(device_t *dev, int create)
 {
     if (!dev)
         return NULL;
@@ -161,7 +177,7 @@ int pci_msix_enable(device_t *dev, unsigned vectors)
         return r;
 
     uint32_t addr_lo, addr_hi;
-    if (arch_msix_message_address(0, &addr_lo, &addr_hi) < 0) {
+    if (arch_msix_message_address(0, PCI_MSIX_CPU_BOOT, &addr_lo, &addr_hi) < 0) {
         kinfo("[MSI-X] %s: platform has no message-signalled interrupt path\n",
               dev->name);
         return -EOPNOTSUPP;
@@ -225,7 +241,8 @@ int pci_msix_program_vector(device_t *dev, unsigned index, uint32_t vector)
         return -EINVAL;
 
     uint32_t addr_lo, addr_hi;
-    int r = arch_msix_message_address(vector, &addr_lo, &addr_hi);
+    int r = arch_msix_message_address(vector, PCI_MSIX_CPU_BOOT, &addr_lo,
+                                      &addr_hi);
     if (r)
         return r;
 
@@ -235,7 +252,7 @@ int pci_msix_program_vector(device_t *dev, unsigned index, uint32_t vector)
     /* The local controller entry has to be armed before the device can post a
      * message for this vector, and it starts masked for the same reason the
      * table entry does: request_irq() is what unmasks either. */
-    r = arch_msix_vector_setup(vector, 1);
+    r = arch_msix_vector_setup(vector, PCI_MSIX_CPU_BOOT, 1);
     if (r)
         return r;
 
@@ -261,6 +278,10 @@ int pci_msix_program_vector(device_t *dev, unsigned index, uint32_t vector)
 
     if (index >= st->programed)
         st->programed = index + 1U;
+    if (index < PCI_MSIX_AFFINITY_VECTORS) {
+        st->vector[index] = (uint16_t)vector;
+        st->target_cpu[index] = PCI_MSIX_CPU_BOOT;
+    }
     return 0;
 }
 
@@ -337,4 +358,172 @@ void pci_msix_disable(device_t *dev)
     st->table = 0;
     st->programed = 0;
     st->dev = NULL;
+}
+
+int pci_msix_get_affinity(device_t *dev, unsigned index, int *cpu)
+{
+    if (!cpu)
+        return -EINVAL;
+    pci_msix_state_t *st = msix_state(dev, 0);
+    if (!st || index >= st->programed)
+        return -ENOENT;
+    if (index >= PCI_MSIX_AFFINITY_VECTORS)
+        return -ERANGE;
+    *cpu = st->target_cpu[index];
+    return 0;
+}
+
+int pci_msix_set_affinity(device_t *dev, unsigned index, int cpu)
+{
+    pci_msix_state_t *st = msix_state(dev, 0);
+    if (!st || !st->table || index >= st->programed)
+        return -EINVAL;
+    if (index >= PCI_MSIX_AFFINITY_VECTORS)
+        return -ERANGE;
+
+    uint32_t vector = st->vector[index];
+    int from_cpu = st->target_cpu[index];
+    if (from_cpu == cpu)
+        return 0;
+
+    /* Before the platform hook, which is itself side-effecting: it masks the
+     * vector's entry on the target CPU.  Validating the index only afterwards
+     * would leave that entry masked on a CPU this call then refuses to touch,
+     * and the caller has no way to learn the side effect happened.  Same
+     * ordering as pci_msix_set_all_affinity(). */
+    if (cpu < 0 || cpu >= arch_irq_msix_cpu_count()) {
+        kerr("[MSI-X] cpu %d is outside the 0..%d message-signalled window\n",
+             cpu, arch_irq_msix_cpu_count() - 1);
+        return -EINVAL;
+    }
+
+    /* Ask the platform first: on a board with no per-CPU destination these
+     * hooks refuse, so the entry is left exactly as it was rather than
+     * half-rewritten with an address nothing will deliver to. */
+    int r = arch_msix_vector_setup(vector, cpu, 1);
+    if (r)
+        return r;
+
+    uint32_t addr_lo, addr_hi;
+    r = arch_msix_message_address(vector, cpu, &addr_lo, &addr_hi);
+    if (r)
+        return r;
+
+    volatile uint32_t *entry = (volatile uint32_t *)
+        (st->table + (uintptr_t)index * PCI_MSIX_ENTRY_SIZE);
+    int was_unmasked = !(entry[3] & PCI_MSIX_ENTRY_MASK);
+
+    /* Mask before the address moves, not after: a message posted between the
+     * two writes would be aimed at a CPU whose controller entry is still
+     * masked, and a message into a masked vector is lost, not queued. */
+    if (was_unmasked)
+        pci_msix_set_vector_mask(dev, index, 1);
+
+    writel(addr_lo, (volatile void *)&entry[0]);
+    writel(addr_hi, (volatile void *)&entry[1]);
+    /* Message data is unchanged: it carries the vector, not the destination,
+     * and the destination is the address just rewritten. */
+    if (entry[0] != addr_lo || entry[1] != addr_hi) {
+        kerr("[MSI-X] %s: entry %u took the new address for cpu %d as %08x "
+             "%08x instead of %08x %08x; the table is not writable\n",
+             dev->name, index, cpu, entry[0], entry[1], addr_lo, addr_hi);
+        /* The address never moved, so the entry still points at @from_cpu and
+         * the local entry that was masked above has to come back before the
+         * device is unmasked -- otherwise the rollback itself drops every
+         * message for this vector from now on.  This is the mirror of the
+         * success path below: arm the destination, then clear the device mask.
+         * Nothing else is touched, so st->target_cpu[index] stays @from_cpu
+         * and the caller sees exactly the state it started from. */
+        if (was_unmasked) {
+            int back = arch_msix_vector_setup(vector, from_cpu, 0);
+            if (back) {
+                kerr("[MSI-X] %s: entry %u (vector %u) was masked for the "
+                     "rewrite and the old cpu %d entry could not be re-armed "
+                     "(%d); the vector stays masked\n",
+                     dev->name, index, vector, from_cpu, back);
+            } else {
+                pci_msix_set_vector_mask(dev, index, 0);
+            }
+        }
+        return -EIO;
+    }
+
+    if (was_unmasked) {
+        r = arch_msix_vector_setup(vector, cpu, 0);
+        if (r) {
+            /* The device is masked and aimed at a CPU with no armed entry;
+             * leaving it that way is the only silent state available. */
+            kerr("[MSI-X] %s: entry %u (vector %u) moved to cpu %d but the "
+                 "controller entry could not be armed (%d); the vector stays "
+                 "masked\n", dev->name, index, vector, cpu, r);
+            return r;
+        }
+        pci_msix_set_vector_mask(dev, index, 0);
+    }
+
+    /* The vector may only be left behind on the CPU it used to point at:
+     * request_irq() unmasked that CPU's local entry when the handler was
+     * registered, and nothing else will ever mask it again. */
+    (void)arch_msix_vector_setup(vector, from_cpu, 1);
+
+    st->target_cpu[index] = (int16_t)cpu;
+    kinfo("[MSI-X] %s: entry %u (vector %u) now targets cpu %d\n",
+          dev->name, index, vector, cpu);
+    return 0;
+}
+
+int pci_msix_set_all_affinity(int cpu)
+{
+    if (cpu < 0 || cpu >= arch_irq_msix_cpu_count()) {
+        kerr("[MSI-X] cpu %d is outside the 0..%d message-signalled window\n",
+             cpu, arch_irq_msix_cpu_count() - 1);
+        return -EINVAL;
+    }
+
+    int first_error = 0;
+    unsigned moved = 0;
+    for (int i = 0; i < PCI_MSIX_MAX_FUNCTIONS; i++) {
+        pci_msix_state_t *st = &g_msix[i];
+        if (!st->dev)
+            continue;
+        for (unsigned index = 0; index < st->programed &&
+                                index < PCI_MSIX_AFFINITY_VECTORS; index++) {
+            int r = pci_msix_set_affinity(st->dev, index, cpu);
+            if (r) {
+                if (!first_error)
+                    first_error = r;
+                kerr("[MSI-X] %s: entry %u refused cpu %d (%d)\n",
+                     st->dev->name, index, cpu, r);
+                continue;
+            }
+            if (st->target_cpu[index] == cpu)
+                moved++;
+        }
+    }
+    if (first_error)
+        return first_error;
+    kinfo("[MSI-X] affinity: %u vector(s) now target cpu %d\n", moved, cpu);
+    return 0;
+}
+
+unsigned pci_msix_affinity_snapshot(pci_msix_affinity_entry_t *out,
+                                    unsigned max)
+{
+    unsigned total = 0;
+    for (int i = 0; i < PCI_MSIX_MAX_FUNCTIONS; i++) {
+        pci_msix_state_t *st = &g_msix[i];
+        if (!st->dev)
+            continue;
+        for (unsigned index = 0; index < st->programed &&
+                                index < PCI_MSIX_AFFINITY_VECTORS; index++) {
+            if (total < max && out) {
+                out[total].name   = st->dev->name;
+                out[total].index  = index;
+                out[total].vector = st->vector[index];
+                out[total].cpu    = st->target_cpu[index];
+            }
+            total++;
+        }
+    }
+    return total;
 }

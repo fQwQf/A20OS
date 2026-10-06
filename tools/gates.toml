@@ -290,6 +290,123 @@ files = [
     "kernel/drivers/bus/platform_bus.c",
     "kernel/platform/qemu-virt-x86_64/board.c",
 ]
+# ---------------------------------------------------------------------------
+# Platform-bus IRQ resource channel.  RES_IRQ already existed in resource_t and
+# device_get_resource() already knew how to hand it out; what was missing was a
+# driver-facing accessor with defined semantics for "the board published no
+# line".  A driver that reaches into dev->res[] itself re-derives absence from a
+# NULL pointer and cannot tell a board that published nothing from one that
+# published something broken, so the accessor is the only supported way in.
+[[gate.assertion]]
+pattern = "int platform_device_irq\\(device_t \\*dev\\)"
+files = ["kernel/drivers/bus/platform_bus.c"]
+
+[[gate.assertion]]
+pattern = "PLATFORM_IRQ_RESOURCE_CHANNEL"
+files = ["kernel/include/drivers/bus/platform_bus.h"]
+
+# The lookup must go through the generic resource API rather than a private
+# walk of dev->res[], or a board that publishes several resources would resolve
+# the wrong one.
+[[gate.assertion]]
+pattern = "device_get_resource\\(dev, RES_IRQ, 0\\)"
+files = ["kernel/drivers/bus/platform_bus.c"]
+
+# -ENODEV is the whole backward-compatibility contract in one line: a platform
+# device with no RES_IRQ must read as "poll", never as an error.
+[[gate.assertion]]
+pattern = "return -ENODEV;"
+files = ["kernel/drivers/bus/platform_bus.c"]
+
+# The DW-SDIO mode rule lives in the header as a static inline so the in-kernel
+# self-test exercises the driver's real decision, not a copy of it.
+[[gate.assertion]]
+pattern = "dw_sdio_pick_irq_mode"
+files = [
+    "kernel/include/drivers/block/dw_sdio.h",
+    "kernel/drivers/block/dw_sdio.c",
+    "kernel/drivers/core/platform_irq_test.c",
+]
+
+[[gate.assertion]]
+pattern = "a20\\.dw-sdio\\.poll"
+files = [
+    "kernel/include/drivers/block/dw_sdio.h",
+    "kernel/drivers/core/platform_irq_test.c",
+]
+
+# The driver must ask the bus for its line, and must actually register it.
+[[gate.assertion]]
+pattern = "platform_device_irq"
+files = ["kernel/drivers/block/dw_sdio.c"]
+
+[[gate.assertion]]
+pattern = "request_irq"
+files = ["kernel/drivers/block/dw_sdio.c"]
+
+# Sticky downgrade: an IRQ-mode timeout frees the line and falls back to
+# polling rather than leaving a card wedged behind a wrong IRQ number.
+[[gate.assertion]]
+pattern = "return -ETIMEDOUT;"
+files = ["kernel/drivers/block/dw_sdio.c"]
+
+# The instance lock became a sleepable mutex so the completion path may park.
+# Re-introducing a spinlock there would forbid parking, and the park would then
+# have to become a spin -- which is the regression this negate catches.
+[[gate.assertion]]
+negate = true
+pattern = "spin_lock_irqsave\\(&g_sdio\\.lock\\)"
+files = ["kernel/drivers/block/dw_sdio.c"]
+
+# A .a20drv package resolves symbols only through drv_export_table[]; an entry
+# that is missing makes the whole package fail to load, not just one call.
+[[gate.assertion]]
+pattern = "\\{ \"platform_device_irq\""
+files = ["kernel/drvmod/framework.c"]
+
+[[gate.assertion]]
+pattern = "\\{ \"bootargs_get\""
+files = ["kernel/drvmod/framework.c"]
+
+# No board in the tree publishes a verified DW-SDIO line number.  Hard-coding a
+# guess would make every sector wait out a timeout before the driver could
+# downgrade itself; the FDT enumerator supplies the real line at runtime.
+[[gate.assertion]]
+negate = true
+pattern = "VF2_SDIO_IRQ"
+files = [
+    "kernel/platform/visionfive2/board.c",
+    "kernel/drivers/block/dw_sdio.c",
+]
+
+# In-kernel self-test: with a RES_IRQ the line is claimed and dispatchable,
+# without one the driver reports poll and nothing is claimed.
+[[gate.assertion]]
+pattern = "CONFIG_PLATFORM_IRQ_TEST"
+files = [
+    "kernel/drivers/core/platform_irq_test.c",
+    "kernel/main.c",
+    "Makefile",
+]
+
+[[gate.assertion]]
+pattern = "platform_irq_test_run"
+files = [
+    "kernel/drivers/core/platform_irq_test.c",
+    "kernel/main.c",
+]
+
+[[gate.assertion]]
+pattern = "PLATFORM_IRQ_TEST: PASS"
+files = ["kernel/drivers/core/platform_irq_test.c"]
+
+[[gate.assertion]]
+pattern = "smoke-platform-irq-fallback"
+files = [
+    "tools/targets-steps.mk",
+    "tools/smoke_cases.py",
+]
+
 
 [[gate.assertion]]
 pattern = "DEV_CLASS_AUDIO"

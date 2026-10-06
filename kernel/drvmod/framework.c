@@ -22,6 +22,7 @@
 
 #include "drvmod/drvmod.h"
 
+#include "core/bootargs.h"
 #include "core/kallsyms.h"
 #include "core/klog.h"
 #include "core/string.h"
@@ -31,14 +32,17 @@
 #include "core/cpu.h"
 #include "core/perf.h"
 #include "core/progress.h"
+#include "core/random.h"
 #include "proc/proc.h"
 #include "sys/usercopy.h"
 #include "drivers/core/driver_core.h"
 #include "drivers/core/driver_hwapi.h"
 #include "drivers/bus/pci_bus.h"
 #include "drivers/bus/pci_msix.h"
+#include "drivers/bus/platform_bus.h"
 #include "drivers/bus/virtio_transport.h"
 #include "drivers/char/uart.h"
+#include "core/timekeeping.h"
 extern void input_mux_wake(void);
 #include "core/sync.h"
 #include "core/timer.h"
@@ -179,9 +183,14 @@ void drv_out8(uint16_t port, uint8_t value)
 
 /* ---- DMA ---- */
 
+/* The drv_env contract is identical on the kernel, user and module placements
+ * and none of them carries a device_t, so this entry point is the unconstrained
+ * one: it allocates from the full 64-bit window.  A module driver that owns a
+ * device_t must call dma_set_mask() and dma_alloc_coherent(dev, ...) instead,
+ * both of which the framework exports. */
 void *drv_dma_alloc_coherent(size_t size, uint64_t *dma_handle)
 {
-    return dma_alloc_coherent(size, dma_handle);
+    return dma_alloc_coherent(NULL, size, dma_handle);
 }
 
 void drv_dma_free_coherent(void *vaddr, size_t size, uint64_t dma_handle)
@@ -278,6 +287,11 @@ void *drv_device_get_resource(void *dev, int type, int index)
                                        (enum resource_type)type, index);
 }
 
+int drv_device_set_devfs_name(void *dev, const char *name)
+{
+    return device_set_devfs_name((device_t *)dev, name);
+}
+
 void drv_driver_probe_all(void)
 {
     driver_probe_all();
@@ -324,9 +338,32 @@ const struct drv_export drv_export_table[] = {
     { "drv_driver_register", drv_driver_register },
     { "drv_driver_unregister", drv_driver_unregister },
     { "drv_device_get_resource", drv_device_get_resource },
+    /* Node-name request for a module's class device (e.g. /dev/vport0).  The
+     * name string itself has to live in the module's own memory, so the core
+     * takes a raw pointer instead of being exported directly. */
+    { "drv_device_set_devfs_name", drv_device_set_devfs_name },
     { "drv_driver_probe_all", drv_driver_probe_all },
     { "device_get_resource",  (void *)device_get_resource },
     { "device_find_by_class",  (void *)device_find_by_class },
+    /* platform bus IRQ resource channel.  A module-bound platform device
+     * learns its line from the same board resource -- or, on RISC-V, the same
+     * device-tree `interrupts` property -- a built-in driver reads, so the
+     * fallback decision (line published -> request_irq, otherwise poll) is
+     * made once, in the driver, instead of per package.  Without this export
+     * dw-sdio.a20drv is rejected at load with "unresolved symbol
+     * 'platform_device_irq'" and the SD card disappears with it. */
+    { "platform_device_irq",  (void *)platform_device_irq },
+    /* Kernel command line.  A driver that chooses between an interrupt and a
+     * polling fallback at probe has to be able to read a20.<driver>.poll, and
+     * the cmdline is the only place that can say whether the machine this
+     * image booted on wants the fallback.  bootargs_init() runs in kernel_main
+     * before driver enumeration, so the value is always readable by probe.
+     * It is also how a driver that owns a hardware data plane takes a runtime
+     * override -- e1000's a20.e1000.poll=1 forces the polling path on hardware
+     * where an interrupt would otherwise be claimed.  The export has to exist
+     * even for a module that never polls: the loader rejects a package with an
+     * unresolved symbol rather than let it load and misbehave. */
+    { "bootargs_get",         (void *)bootargs_get },
     /* A class driver that initialises its own instance (rather than being
      * handed one by a bus scan) has to publish it, or device_find_by_class()
      * cannot see it and mount_setup_block_device() finds no disk. */
@@ -351,6 +388,9 @@ const struct drv_export drv_export_table[] = {
     { "pci_msix_enable",     (void *)pci_msix_enable },
     { "pci_msix_program_vector", (void *)pci_msix_program_vector },
     { "pci_msix_set_vector_mask", (void *)pci_msix_set_vector_mask },
+    /* Which CPU a message-signalled entry is aimed at: read back, and move */
+    { "pci_msix_set_affinity", (void *)pci_msix_set_affinity },
+    { "pci_msix_get_affinity", (void *)pci_msix_get_affinity },
     { "pci_msix_commit",     (void *)pci_msix_commit },
     { "pci_msix_disable",    (void *)pci_msix_disable },
     { "irq_alloc_vectors",   (void *)irq_alloc_vectors },
@@ -387,6 +427,14 @@ const struct drv_export drv_export_table[] = {
     /* The block progress bridge is gated on an aggregated pending bit; a
      * deployed virtio-blk module ORs it when it publishes a request. */
     { "kernel_progress_note_pending", (void *)kernel_progress_note_pending },
+    /* Kernel entropy pool (kernel/core/random.c).  A hardware RNG module
+     * (virtio-rng) feeds what it reads back into the pool that sys_getrandom()
+     * and the ASLR/stack-canary seed draw from; without this entry the loader
+     * rejects the package with an unresolved symbol rather than letting it
+     * load and silently run with the entropy dropped.  random_reseed() is
+     * callable from a module read path but not from an ISR -- it reaches
+     * proc_current() through arch_entropy_sample(). */
+    { "random_reseed",        (void *)random_reseed },
     { "clock_get_ticks",     (void *)clock_get_ticks },
     { "klog_write",          (void *)klog_write },
     { "klog_level",          (void *)&klog_level },
@@ -395,9 +443,15 @@ const struct drv_export drv_export_table[] = {
     { "kmalloc",             (void *)kmalloc },
     { "kfree",               (void *)kfree },
     { "kcalloc",             (void *)kcalloc },
-    /* DMA enhancements (aligned coherent + cache sync) */
+    /* DMA enhancements (aligned coherent + cache sync) plus the address mask:
+     * a module that owns a device_t declares its window and then hands the
+     * device to the allocator, so its handles are constrained the same way a
+     * built-in driver's are. */
     { "dma_alloc_coherent_aligned", (void *)dma_alloc_coherent_aligned },
     { "dma_free_coherent_aligned",  (void *)dma_free_coherent_aligned },
+    { "dma_set_mask",   (void *)dma_set_mask },
+    { "dma_addr_ok",    (void *)dma_addr_ok },
+    { "dma_range_ok",   (void *)dma_range_ok },
     { "dma_sync_for_cpu",    (void *)dma_sync_for_cpu },
     { "dma_sync_for_device", (void *)dma_sync_for_device },
     /* input mux wake path (vinput module ISRs) */
@@ -406,6 +460,12 @@ const struct drv_export drv_export_table[] = {
     { "pci_virtio_transport_init", (void *)pci_virtio_transport_init },
 #if defined(CONFIG_X86_64)
     { "firmware_acpi_tpm2",  (void *)firmware_acpi_tpm2 },
+    /* x86_64 wall clock: the CMOS RTC module hands the epoch it read to the
+     * kernel here, which is what replaces the build-time seed taken by
+     * timekeeping_init().  Only x86_64 declares these symbols, so the entry
+     * is arch-gated with them. */
+    { "timekeeping_wallclock_set_hw", (void *)timekeeping_wallclock_set_hw },
+    { "timekeeping_wallclock_from_hw", (void *)timekeeping_wallclock_from_hw },
 #endif
     /* lock / scheduler primitives used by inline spinlock helpers
      * (arch_irqs_enabled & friends are static inline and compile into

@@ -289,15 +289,19 @@ static int usb_storage_probe(device_t *dev) {
     st->sector_size = 512;
     st->tag = 0;
 
-    /* Configure both bulk endpoints (xHCI type 2 = OUT, 6 = IN). */
-    int r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_out->addr, 2,
+    /* Configure both bulk endpoints.  The transfer type is the bmAttributes
+     * spelling; the direction comes from the endpoint address and the HCD
+     * translates the pair into the controller's own EP Type encoding. */
+    int r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_out->addr,
+                                               USB_XFER_BULK,
                                                bulk_out->max_packet, 0);
     if (r) {
         kfree(st);
         memset(st, 0, sizeof(*st));
         return r;
     }
-    r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_in->addr, 6,
+    r = udev->hcd->ops->configure_endpoint(udev->hcd, udev, bulk_in->addr,
+                                           USB_XFER_BULK,
                                            bulk_in->max_packet, 0);
     if (r) {
         kfree(st);

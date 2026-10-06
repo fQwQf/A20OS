@@ -301,7 +301,7 @@ static int vinput_init_transport(device_t *dev,
         goto fail;
     vt->write32(vt, VMMIO_QUEUE_NUM, VIRTIO_INPUT_QUEUE_SIZE);
 
-    inst->dma = dma_alloc_coherent_aligned(VIN_DMA_BYTES, PAGE_SIZE,
+    inst->dma = dma_alloc_coherent_aligned(dev, VIN_DMA_BYTES, PAGE_SIZE,
                                            &inst->dma_phys);
     if (!inst->dma)
         goto fail;
