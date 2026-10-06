@@ -3331,7 +3331,10 @@ static int drm_ioctl(vfile_t *vf, unsigned long req, void *arg)
          * driver from here.  They are gone: every one of them is covered by
          * the upstream VIRTGPU UAPI above, and keeping a second 3D ABI meant
          * two paths that can drift while only the upstream one is the one Mesa
-         * ever speaks.  Unknown requests stay EINVAL. */
+         * ever speaks.  Unknown requests stay EINVAL.  Name the request anyway:
+         * a client like Mesa walks a long ioctl path, and a silent EINVAL there
+         * is indistinguishable from a client that gave up on its own. */
+        kwarn("[DRM] unimplemented ioctl req=0x%lx\n", req);
         return -EINVAL;
     }
 }

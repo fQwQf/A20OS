@@ -68,7 +68,10 @@ void x86_64_set_trap_epc(uint64_t value);
 unsigned x86_64_apic_to_cpu(unsigned apic_id);
 int x86_64_smp_start_ap(unsigned apic_id, uintptr_t entry,
                         unsigned logical_id);
-void x86_64_smp_send_ipi(unsigned apic_id, uint32_t vector);
+/* Returns 0 once the ICR write for the message has been issued, non-zero if
+ * the ICR was still busy and no message went out.  Callers that wait for a
+ * reply have to be able to tell the two apart. */
+int x86_64_smp_send_ipi(unsigned apic_id, uint32_t vector);
 /* Remote TLB shootdown (SMP): sends an IPI to each target CPU and waits for
  * its CR3 reload to complete before returning.  Registered as the board's
  * remote_tlb_flush op; without it, x86_64 SMP leaves stale user translations

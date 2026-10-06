@@ -19,6 +19,33 @@
 
 /* Unmap paths: munmap and brk shrink. */
 
+/* An anonymous range that mm_pt_provision_anon() reserved but that was never
+ * faulted has a status mark and no PTE, so the loops below skip it and
+ * pt_unmap_leaf() never sees it.  Tearing the mapping down has to retire that
+ * mark: mm_fault_from_status() serves any MM_ST_ANON_VIRT it finds without
+ * consulting a VMA, so a mark left behind lets a later access into the hole
+ * map a page instead of failing.
+ *
+ * The table comes from mm_pt_leaf_table(), not from the `pte` the caller got
+ * back.  On this branch `pte` is NULL whenever the address has no leaf table
+ * at all, and it is also NULL when pt_lookup_leaf() merely stopped at a
+ * non-present entry inside a table that DOES exist -- so deriving the table as
+ * `pte - vpn` is pointer arithmetic on NULL and silently skipped the very
+ * pages that were about to fault from the status.  mm_pt_leaf_table() walks
+ * from the root without allocating, so the teardown path cannot conjure the
+ * intermediate levels it is in the middle of destroying. */
+static void mm_munmap_retire_reservation(mm_struct_t *mm, vaddr_t va)
+{
+    pte_t *table = mm_pt_leaf_table(mm->pgdir, va);
+    if (!table || table == mm->pgdir)
+        return;
+    int idx = arch_pt_vpn(va, 0);
+    mm_pt_node_lock(table);
+    if (MM_ST_GET_CLASS(mm_pt_peek(table, 0, idx)) == MM_ST_ANON_VIRT)
+        mm_pt_note_absent(table, 0, idx);
+    mm_pt_node_unlock(table);
+}
+
 int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
     if (!mm || !mm->pgdir) return -EINVAL;
     if (addr & (PAGE_SIZE - 1)) return -EINVAL;
@@ -75,6 +102,7 @@ int mm_munmap_locked(mm_struct_t *mm, vaddr_t addr, size_t len) {
                  && !pte_is_swap(*pte)
 #endif
                 )) {
+                mm_munmap_retire_reservation(mm, va);
                 va += PAGE_SIZE;
                 continue;
             }
@@ -262,6 +290,7 @@ vaddr_t mm_brk_locked(mm_struct_t *mm, vaddr_t newbrk) {
                  && !pte_is_swap(*pte)
 #endif
                 )) {
+                mm_munmap_retire_reservation(mm, va);
                 va += PAGE_SIZE;
                 continue;
             }

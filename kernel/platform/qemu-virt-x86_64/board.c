@@ -95,7 +95,7 @@ static int x86_64_smp_start(const smp_cpu_desc_t *cpu, uintptr_t entry_pa,
 static void x86_64_smp_send(const smp_cpu_desc_t *cpu,
                             smp_ipi_reason_t reason) {
     if (reason == SMP_IPI_RESCHEDULE)
-        x86_64_smp_send_ipi((unsigned)cpu->hw_id, IRQ_VECTOR_RESCHEDULE);
+        (void)x86_64_smp_send_ipi((unsigned)cpu->hw_id, IRQ_VECTOR_RESCHEDULE);
 }
 
 static void x86_64_smp_secondary(const smp_cpu_desc_t *cpu) {

@@ -47,7 +47,15 @@
 #define MAX_NAME_LEN       32
 #define MAX_GROUPS         8
 #else
-#define MAX_FILES          1024
+/* Descriptor ceiling per process, and the hard clamp on RLIMIT_NOFILE
+ * (sys_proc.c).  A Minecraft JVM keeps roughly three thousand asset files open
+ * at once while the resource reload runs, so 1024 left it stalling on EMFILE
+ * well before the main menu.  Per-process cost scales with this:
+ * files_struct_t embeds fd[MAX_FILES] plus cloexec[MAX_FILES], about 36 KiB per
+ * table, which is why this is not raised further.  Code that walks a whole
+ * table must not put a MAX_FILES-sized array on the 64 KiB kernel stack --
+ * see fdtable_files_put() and fdtable_close_on_exec(). */
+#define MAX_FILES          4096
 #define MAX_PATH_LEN       512
 #define MAX_NAME_LEN       256
 #define MAX_GROUPS         32

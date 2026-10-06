@@ -269,6 +269,39 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
                         ret = -ENOMEM;
                         goto out;
                     }
+                } else if (vma && (vma->vm_flags & VM_FILE) && vma->file_vnode &&
+                           !(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
+                    /* A MAP_PRIVATE file leaf can still BE the canonical
+                     * page-cache frame: handle_file_fault() installs it
+                     * read-only + PTE_COW and keeps a cache pin for the whole
+                     * VMA (window[i] = NULL).  Its allocator refcount belongs
+                     * to the page cache, not to this mapping, so the frame
+                     * branch below would frame_put() the cache's own frame --
+                     * one mapping release per MADV_DONTNEED drives it to 0,
+                     * buddy hands it to unrelated user memory, and the leaked
+                     * cache pin is never dropped.  Classify the leaf by its
+                     * frame exactly like mm_file_cache_mapping_get() does in
+                     * munmap.c, and use the page-cache hold/put pair there. */
+                    uint64_t idx = vma->backing_offset + (va - vma->start);
+                    pfn_t leaf_pfn = phys_to_pfn(arch_pte_addr(*pte));
+                    if (pfn_valid(leaf_pfn)) {
+                        held_pcp = page_cache_get(vma->file_vnode,
+                                                  idx / PAGE_SIZE, 0);
+                        if (held_pcp && page_cache_pfn(held_pcp) != leaf_pfn) {
+                            page_cache_put(held_pcp);
+                            held_pcp = NULL;
+                        }
+                    }
+                    if (held_pcp) {
+                        if (mm_tlb_hold_page(t->mm, held_pcp) < 0) {
+                            page_cache_put(held_pcp);
+                            ret = -ENOMEM;
+                            goto out;
+                        }
+                    } else if (mm_tlb_hold_frame(t->mm, leaf_pfn) < 0) {
+                        ret = -ENOMEM;
+                        goto out;
+                    }
                 } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {
                     pfn_t pfn = phys_to_pfn(arch_pte_addr(*pte));
                     if (!pfn_valid(pfn) ||
@@ -282,7 +315,7 @@ int64_t sys_madvise(uint64_t addr, size_t len, int advice) {
             if (pt_unmap_leaf(t->mm, va, &pa, &base, &size, NULL) == 0) {
                 mm_tlb_note_change(t->mm, base, size);
                 if (pa) {
-                    if (shared_file) {
+                    if (held_pcp) {
                         page_cache_put(held_pcp);
                         page_cache_put(held_pcp);
                     } else if (!(vma->vm_flags & (VM_PFNMAP | VM_VMO))) {

@@ -1282,6 +1282,15 @@ int bcache_write_bytes(bcache_t *bc, uint64_t byte_off, const void *buf, size_t 
  * written.  Without this a later read would return the pre-write contents.
  * Only ever called on clean pages: a dirty one is dropped as well, because a
  * journal log block has no legitimate buffered copy.
+ *
+ * A reader that is already inside bcache_read_bytes() holds this entry and is
+ * about to memcpy out of e->data.  Zeroing e->ref here would make the entry
+ * look unreferenced to pcache_evict_locked(), which would hand it straight to
+ * a fill for some OTHER page number -- and that fill overwrites e->data with
+ * another file's bytes while the reader is still copying from it.  The reader
+ * then returns a page of the wrong file, which is indistinguishable from disk
+ * corruption downstream.  So the entry keeps its reference count and stays on
+ * the LRU; the last holder's pcache_release() is what makes it evictable.
  */
 void bcache_invalidate_page(bcache_t *bc, uint64_t page_no)
 {
@@ -1292,12 +1301,15 @@ void bcache_invalidate_page(bcache_t *bc, uint64_t page_no)
     pcache_entry_t *e = pcache_find_locked(bc, page_no);
     if (e) {
         pcache_hash_remove_locked(bc, e);
-        page_lru_remove(e);
         e->valid = 0;
         e->held = 0;
         e->accessed = 0;
         bcache_set_page_dirty_locked(bc, e, 0);
-        e->ref = 0;
+        /* The entry stays on the LRU and keeps e->ref.  Off the hash and
+         * valid == 0, so pcache_find_locked() can never hand it out again,
+         * and pcache_evict_locked() skips it while the count is non-zero.
+         * Once the last holder's pcache_release() drops it to zero it becomes
+         * an ordinary invalid entry and is recycled like any other. */
     }
     pcache_bucket_unlock_irqrestore(bc, page_no, bf);
     spin_unlock_irqrestore(&bc->lock, flags);

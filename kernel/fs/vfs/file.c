@@ -289,15 +289,35 @@ int vfs_ioctl(int fd, unsigned long req, void *arg)
     return r;
 }
 
+/* mount_t::fs_data is only a bcache_t for the filesystem types below.  cgroup
+ * stores its cg_sb_t and uxfs its uxfs_sb_t there, both far smaller than a
+ * bcache_t, so handing them to bcache_sync() reads past the object and syncs
+ * whatever memory follows it. */
+static bcache_t *vfs_mount_bcache(mount_t *mnt)
+{
+    if (!mnt)
+        return NULL;
+    switch (mnt->type) {
+    case FS_TYPE_FAT32:
+    case FS_TYPE_NTFS:
+    case FS_TYPE_EXT4:
+    case FS_TYPE_LITTLEFS:
+    case FS_TYPE_ISOFS:
+        return (bcache_t *)mnt->fs_data;
+    default:
+        return NULL;
+    }
+}
+
 int vfs_sync(void)
 {
     int pc_r = page_cache_writeback_all(NULL, NULL);
     if (pc_r < 0)
         return pc_r;
     for (int i = 0; i < vfs_mount_count(); i++) {
-        mount_t *mnt = vfs_mount_at(i);
-        if (mnt && mnt->fs_data)
-            bcache_sync((bcache_t *)mnt->fs_data);
+        bcache_t *bc = vfs_mount_bcache(vfs_mount_at(i));
+        if (bc)
+            bcache_sync(bc);
     }
     return 0;
 }
@@ -326,8 +346,10 @@ int vfs_fsync_vfile(vfile_t *vf)
          * the full mount sync. */
         if (vf->vnode->ops && vf->vnode->ops->sync_vnode) {
             r = vf->vnode->ops->sync_vnode(vf->vnode);
-        } else if (vf->vnode->mnt && vf->vnode->mnt->fs_data) {
-            r = bcache_sync_checked((bcache_t *)vf->vnode->mnt->fs_data);
+        } else {
+            bcache_t *bc = vfs_mount_bcache(vf->vnode->mnt);
+            if (bc)
+                r = bcache_sync_checked(bc);
         }
     }
     return r;
