@@ -11,6 +11,7 @@
 #include "core/types.h"
 #include "core/refcount.h"
 #include "core/lock.h"
+#include "uapi/a20/block.h"
 
 struct device;
 struct audio_dev_ops;
@@ -65,10 +66,16 @@ typedef struct block_dev_ops {
     uint32_t (*sector_size)(struct device *dev);
 } block_dev_ops_t;
 
-/* block ioctl requests */
-#define BLK_IOCTL_GET_CAPACITY   0x1001
-#define BLK_IOCTL_GET_SECTOR_SZ  0x1002
-#define BLK_IOCTL_SYNC           0x1003
+/* block ioctl requests.  The numbers live in uapi/a20/block.h because they are
+ * reachable from userspace on /dev/diskN; these are the kernel-side names for
+ * the same values. */
+#define BLK_IOCTL_GET_CAPACITY   A20_BLK_IOCTL_GET_CAPACITY
+#define BLK_IOCTL_GET_SECTOR_SZ  A20_BLK_IOCTL_GET_SECTOR_SZ
+#define BLK_IOCTL_SYNC           A20_BLK_IOCTL_SYNC
+/* Fills an a20_blk_stats_t (uapi/a20/block.h).  Optional per driver: an
+ * unimplemented ioctl falls through to -ENOTTY, which is what a driver with
+ * no completion statistics must return rather than reporting zeros. */
+#define BLK_IOCTL_GET_STATS      A20_BLK_IOCTL_GET_STATS
 
 /* ============================================================
  * Network device operations

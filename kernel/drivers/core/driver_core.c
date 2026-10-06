@@ -458,6 +458,23 @@ int bus_probe_device(device_t *dev) {
     return -ENODEV;
 }
 
+int device_set_devfs_name(device_t *dev, const char *name) {
+    if (!dev || !name || !name[0])
+        return -EINVAL;
+    if (dev->class_dev)
+        return -EEXIST;  /* already published: too late to rename */
+    size_t len = strlen(name);
+    if (len >= CLASS_DEVICE_NAME_MAX)
+        return -EINVAL;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x20 || c == 0x7f || c == '/')
+            return -EINVAL;
+    }
+    memcpy(dev->devfs_name, name, len + 1);
+    return 0;
+}
+
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index) {
     if (!dev) return NULL;
     int found = 0;

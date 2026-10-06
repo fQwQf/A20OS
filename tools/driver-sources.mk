@@ -37,6 +37,7 @@ EMBEDDED_DEVICE_DRIVER_SRCS := \
     $(KERNEL_DIR)/drivers/block/virtio_scsi.c \
     $(KERNEL_DIR)/drivers/net/e1000.c \
     $(KERNEL_DIR)/drivers/net/ls2k_gmac.c \
+    $(KERNEL_DIR)/drivers/net/rtl8139.c \
     $(KERNEL_DIR)/drivers/net/starfive_gmac.c \
     $(KERNEL_DIR)/drivers/net/virtio_net.c \
     $(KERNEL_DIR)/drivers/gpu/virtio_gpu.c \
