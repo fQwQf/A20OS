@@ -274,9 +274,93 @@ int x86_64_smp_remote_tlb_flush(uint32_t pending, uint64_t addr,
             cpu_relax();
         }
     }
+if (irqs_were_off)
+            arch_local_irq_disable();
+    return 0;
+}
+
+/*
+ * Remote message-signalled vector setup.  A message-signalled vector needs a
+ * local APIC entry, and a local APIC entry is per processor: the LVT that
+ * covers vector V in the boot processor's page says nothing about the one in
+ * an AP's page.  So moving a vector to another CPU means writing that CPU's
+ * own LVT, which means running there.  Same shape as the TLB shootdown: a
+ * per-CPU mailbox published before the request generation, a dedicated IPI,
+ * and a bounded wait that lets interrupts be taken so two CPUs moving vectors
+ * at each other cannot deadlock.
+ */
+static _Atomic uint32_t msix_vector_request[CONFIG_NR_CPUS];
+static _Atomic uint32_t msix_vector_ack[CONFIG_NR_CPUS];
+/* vector in bits 7:0, mask request in bit 31 -- the LVT write takes both. */
+static _Atomic uint32_t msix_vector_arg[CONFIG_NR_CPUS];
+
+void x86_64_ipi_msix_vector_handler(void)
+{
+    unsigned cpu = arch_current_cpu_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    for (;;) {
+        uint32_t request = __atomic_load_n(&msix_vector_request[cpu],
+                                           __ATOMIC_ACQUIRE);
+        uint32_t ack = __atomic_load_n(&msix_vector_ack[cpu],
+                                       __ATOMIC_RELAXED);
+        if (ack == request)
+            break;
+        uint32_t arg = __atomic_load_n(&msix_vector_arg[cpu], __ATOMIC_RELAXED);
+        x86_64_msix_lvt_program(arg & 0xFFU, (arg >> 31) & 1U);
+        __atomic_store_n(&msix_vector_ack[cpu], request, __ATOMIC_RELEASE);
+    }
+}
+
+int x86_64_smp_msix_vector_setup(unsigned cpu, uint32_t vector, int masked)
+{
+#if CONFIG_NR_CPUS > 1
+    if (cpu == 0 || cpu >= CONFIG_NR_CPUS || vector > 0xFFU)
+        return -EINVAL;
+    if (!smp_cpu_is_online(cpu))
+        return -ENODEV;
+
+    uint64_t hw_id;
+    if (smp_logical_to_hw(cpu, &hw_id) < 0)
+        return -EINVAL;
+
+    __atomic_store_n(&msix_vector_arg[cpu],
+                     (vector & 0xFFU) | (masked ? (1U << 31) : 0U),
+                     __ATOMIC_RELAXED);
+    uint32_t expected = __atomic_add_fetch(&msix_vector_request[cpu], 1,
+                                           __ATOMIC_ACQ_REL);
+    x86_64_smp_send_ipi((unsigned)hw_id, IRQ_VECTOR_MSIX_VECTOR);
+
+    int irqs_were_off = !arch_irqs_enabled();
+    if (irqs_were_off)
+        arch_local_irq_enable();
+    uint64_t wait_start = timer_get_ticks();
+    while ((int32_t)(__atomic_load_n(&msix_vector_ack[cpu],
+                                     __ATOMIC_ACQUIRE) - expected) < 0) {
+        if (timer_get_ticks() - wait_start > TICKS_PER_SEC / 4) {
+            /* A timeout leaves the request published: the target may still
+             * apply it, which is the safe direction -- the caller keeps the
+             * vector masked either way. */
+            if (irqs_were_off)
+                arch_local_irq_disable();
+            printf("[X86_64 MSI-X] vector %u arm on cpu %u timed out "
+                   "(request=%u ack=%u online=0x%x)\n", vector, cpu,
+                   expected,
+                   __atomic_load_n(&msix_vector_ack[cpu], __ATOMIC_ACQUIRE),
+                   smp_online_cpu_mask());
+            return -ETIMEDOUT;
+        }
+        cpu_relax();
+    }
     if (irqs_were_off)
         arch_local_irq_disable();
     return 0;
+#else
+    (void)cpu;
+    (void)vector;
+    (void)masked;
+    return -EINVAL;
+#endif
 }
 #endif
 

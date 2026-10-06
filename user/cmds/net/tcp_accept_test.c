@@ -1,9 +1,23 @@
-/* Assert that a loopback TCP connection can be established and accepted.
+/* Assert that a TCP connection can be established and accepted.
  *
- * This deliberately checks only the handshake and the accept, not the data
- * transfer.  The two are separable: a connection can be accepted and then fail
- * to move bytes, and conflating them would make this test red for reasons that
- * have nothing to do with the accept path.
+ * Two modes, chosen by whether a bind address is given:
+ *
+ *   tcp_accept_test [port]
+ *       The loopback self-connect.  The parent connects to 127.0.0.1 on the
+ *       forked child's listener.  This deliberately checks only the handshake
+ *       and the accept, not the data transfer: the two are separable, and
+ *       conflating them would make this test red for reasons that have nothing
+ *       to do with the accept path.  Nothing crosses a NIC here.
+ *
+ *   tcp_accept_test <port> <bind-address>
+ *       Serve mode, for a NIC gate.  The peer is the host, arriving through
+ *       QEMU's hostfwd, which delivers to the guest's own address -- not to
+ *       loopback -- so the listener has to be bound there.  No in-guest client
+ *       is forked: a loopback client would connect to a listener that never
+ *       saw the wire and report a pass for a connection that crossed nothing.
+ *       One byte is read and echoed back, because the host probe's assertion is
+ *       that the byte comes back; a handshake alone would not show the data path
+ *       moved payload.
  *
  * The test is mode-agnostic on purpose.  Under "tcpmode fast" the listener is
  * matched by the socket layer pairing the two sockets; under "tcpmode lwip"
@@ -52,6 +66,24 @@ static int arm_timeout(int fd)
 
 static int test_port;
 
+/* Non-zero when this run serves an address other than loopback, i.e. it is the
+ * guest half of a QEMU hostfwd round trip and must NOT fork the loopback
+ * client below.  Set from argv[2]. */
+static int serve_only;
+/* argv[2] exactly as inet_aton() returned it, which is already in network byte
+ * order, so it is assigned to sin_addr unchanged.  htonl() must not be applied
+ * on top of it: that reverses the four bytes a second time and yields the
+ * reverse-order address no interface holds, so bind() fails with EADDRNOTAVAIL
+ * and the host's forwarded SYN is answered with RST -- a failure that looks
+ * exactly like a dead data path.  INADDR_LOOPBACK is the one address spelled as
+ * a host-order constant, which is why the two branches differ. */
+static uint32_t test_bind_addr;
+
+/* Which step of server() failed, so a FAIL names the step rather than reporting
+ * every failure as "no connection arrived" -- a bind that never happened says
+ * nothing at all about whether the data path works. */
+static const char *server_stage = "socket";
+
 static int server(void)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -64,19 +96,22 @@ static int server(void)
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = serve_only ? test_bind_addr : htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(test_port);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd);
+        server_stage = "bind";
         return -1;
     }
     if (listen(fd, 1) < 0) {
         close(fd);
+        server_stage = "listen";
         return -1;
     }
     if (arm_timeout(fd) < 0) {
         close(fd);
+        server_stage = "setsockopt(SO_RCVTIMEO)";
         return -1;
     }
 
@@ -84,8 +119,31 @@ static int server(void)
      * here with EAGAIN instead of parking the gate forever. */
     int c = accept(fd, NULL, NULL);
     close(fd);
-    if (c < 0)
+    if (c < 0) {
+        server_stage = "accept";
         return -1;
+    }
+    /* The connection crossed the wire, so the same bound the echo below. */
+    if (arm_timeout(c) < 0) {
+        close(c);
+        return -1;
+    }
+    if (serve_only) {
+        /* The host probe connects, sends one byte and requires it back.  Echoing
+         * it is what makes the round trip an assertion rather than a handshake:
+         * a connection that completes but never moves payload proves nothing
+         * about the data path it crossed.  Both directions are bounded by the
+         * timeout armed above. */
+        char b = 0;
+        ssize_t r = read(c, &b, 1);
+        if (r != 1) {
+            close(c);
+            return -1;
+        }
+        ssize_t w = write(c, &b, 1);
+        close(c);
+        return w == 1 ? 0 : -1;
+    }
     close(c);
     return 0;
 }
@@ -120,6 +178,35 @@ int main(int argc, char **argv)
     test_port = (argc > 1) ? atoi(argv[1]) : TEST_PORT_DEFAULT;
     if (test_port <= 0 || test_port > 65535) {
         printf("TCP_ACCEPT_TEST: FAIL (bad port %d)\n", test_port);
+        return 1;
+    }
+
+    /* argv[2], when present, is the address to listen on.  A NIC gate passes
+     * the guest's own address because that is where QEMU's hostfwd delivers
+     * the host's connection; the default loopback case is a self-connect and
+     * has no forward behind it. */
+    if (argc > 2) {
+        struct in_addr parsed;
+        if (inet_aton(argv[2], &parsed) != 1) {
+            printf("TCP_ACCEPT_TEST: FAIL (bad bind address %s)\n", argv[2]);
+            return 1;
+        }
+        test_bind_addr = parsed.s_addr;
+        serve_only = 1;
+    }
+
+    /* Serve mode has no in-guest client: the peer is the host, arriving through
+     * the port forward, so forking the loopback client here would accept a
+     * connection that never crossed the NIC and report a pass for it. */
+    if (serve_only) {
+        int r = server();
+        if (r == 0) {
+            printf("TCP_ACCEPT_TEST: PASS port=%d (hostfwd connection accepted and one byte echoed)\n",
+                   test_port);
+            return 0;
+        }
+        printf("TCP_ACCEPT_TEST: FAIL port=%d (serve mode: failed at %s, errno=%d)\n",
+               test_port, server_stage, errno);
         return 1;
     }
 
