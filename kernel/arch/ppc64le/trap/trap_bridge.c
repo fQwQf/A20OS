@@ -22,6 +22,21 @@ void ppc64_trap_dispatch(trap_context_t *ctx)
         return;
     }
 
+    /*
+     * Kernel-mode traps take the kernel path.  Everything below the dispatch
+     * used to run for them too: the user trap handler's tail ends in
+     * signal_deliver_user(), which would build a user signal frame on top of
+     * a context that was executing kernel code, and the tick was charged as
+     * user time.  kernel_trap_handler() is also what hosts the kernel-mode
+     * preemption decision point (core/trap.c), which is unreachable as long
+     * as kernel IRQs flow through the user path.
+     */
+    if (!(ctx->msr & PPC64_MSR_PR)) {
+        kernel_trap_handler(ctx);
+        ctx->msr |= PPC64_MSR_SF | PPC64_MSR_ISF;
+        return;
+    }
+
     uint64_t syscall_num = ctx->gpr[0];
 
     trap_handler(ctx);

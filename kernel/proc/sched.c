@@ -13,6 +13,7 @@
 #include "core/perf.h"
 #include "core/panic.h"
 #include "core/lock_counters.h"
+#include "core/preempt.h"
 #include "proc/signal.h"
 #include "mm/vm.h"
 #include "cg/cgroup.h"
@@ -342,10 +343,10 @@ static void rt_unlink_locked(proc_runq_t *rq, task_t *t)
  * A lone RR task is not rotated (the tail is NULL), so it keeps the CPU
  * instead of being penalised for having no competition.
  *
- * Note this yields RR among peers when the scheduler next runs, not on a timer
- * slice.  Forcing a switch mid-slice needs kernel preemption, which A20OS does
- * not have; without it an RR task that never blocks still runs until it does.
- * That limit is why the fix is at pick time rather than in the tick.
+ * Rotation still happens at pick time, so a competing RR peer waits for the
+ * running one to reach a reschedule point -- but with kernel preemption that
+ * point is now reachable: a task that burns its whole slice in the kernel
+ * trips need_resched on the tick and is rotated out at the next IRQ return.
  */
 static task_t *rt_pick_best_locked(proc_runq_t *rq)
 {
@@ -593,6 +594,7 @@ void proc_sched_runq_init(void) {
     for (unsigned i = 0; i < CONFIG_NR_CPUS; i++) {
         spin_init(&sched_runq[i].lock);
         lock_counters_register(&sched_runq[i].lock, "runq");
+        preempt_state_init(i);
     }
     sched_runqueue_migrations = 0;
     sched_violations = 0;
@@ -1051,6 +1053,54 @@ int proc_sched_safe_point(void)
         return 0;
     proc_yield();
     return 1;
+}
+
+/*
+ * Kernel preemption decision point, called by the trap layer once an interrupt
+ * it was handling is done and only if the interrupted context had interrupts
+ * enabled.
+ *
+ * The resume path is the reason this needs no new assembly.  At the call site
+ * the current task's kstack holds, from high to low:
+ *
+ *     [interrupted kernel frame]
+ *     [CPU-pushed IRQ frame]
+ *     [trap_context_t]
+ *     [kernel_trap_handler() frame]  <- includes this call
+ *     [proc_yield() / sched() frames]
+ *
+ * __switch() saves the callee-saved set plus rsp/ra/sstatus/rflags and parks
+ * them at the bottom of that same stack.  When the task is later resumed, it
+ * returns from sched(), unwinds proc_yield() and this function, returns from
+ * kernel_trap_handler(), and lands in the arch interrupt epilogue, which
+ * restores the CPU frame and iretq/sret/eret straight back into the code that
+ * was interrupted.  Every frame it walks past is still on its own stack.
+ *
+ * The cost is a stack that is deeper than any voluntary sched() call chain
+ * (the whole interrupt entry above), which is why KERNEL_STACK_SIZE has to
+ * cover a full interrupt nest on top of the deepest kernel call.
+ */
+void kernel_preempt_at_irq_return(void)
+{
+#ifdef CONFIG_KERNEL_PREEMPT
+    if (!preempt_allowed())
+        return;
+    unsigned cpu = cpu_current_id();
+    if (cpu >= CONFIG_NR_CPUS)
+        return;
+    if (!__atomic_load_n(&sched_cpu[cpu].need_resched, __ATOMIC_ACQUIRE))
+        return;
+    task_t *cur = proc_current();
+    if (!cur || cur->pid == 0 || cur == proc_idle_task())
+        return;
+    if (cur->state != PROC_RUNNING)
+        return;
+    /* sched()'s slow helpers (bottom halves, zombie reaping, the timer scan)
+     * reach code that expects interrupts on, so hand them a CPU with
+     * interrupts on rather than resuming into them masked. */
+    arch_local_irq_enable();
+    proc_yield();
+#endif
 }
 
 static void sched_consume_resched(unsigned cpu)
@@ -1869,6 +1919,21 @@ void proc_sched_note_zombie(void)
  */
 /* SCHED_SWITCH_PATH_BEGIN */
 static void context_switch_locked(task_t *next) {
+    /*
+     * The per-CPU preempt counter is deliberately not saved and restored
+     * across the switch, which is sound only because it is provably zero
+     * here: a voluntary switch while holding a lock is forbidden by the lock
+     * contract, and a forced switch at the IRQ return point requires
+     * preempt_allowed().  This assert is what makes that a checked fact rather
+     * than a convention -- if a switch ever happens with the counter raised,
+     * the task that inherits the CPU would inherit someone else's nesting
+     * depth and never come back.  Unconditional on purpose: it is a soundness
+     * check on the mechanism itself, not a debug aid, so it must not be
+     * compiled away by a debug build switch.
+     */
+    if (preempt_count() != 0)
+        panic("context switch with preempt_count=%u", preempt_count());
+
     if (!next || !next->kstack)
         return;
 
@@ -1991,6 +2056,16 @@ void context_switch(task_t *next) {
 
 void sched(void) {
     task_t *sched_owner = proc_current();
+    /* Interrupts are masked for the pick->publish->__switch region below and
+     * restored at out:.  Each task leaves sched() with the flag state it
+     * entered with, because __switch saves and restores rflags/sstatus per
+     * task from the task's own switch frame: the outgoing task stores the
+     * flags it is running with, and the incoming task is popped back into the
+     * flags it was last switched out with.  So the region is invisible to the
+     * interrupted context -- a task never observes an interrupt taken in the
+     * middle of someone else's switch window -- and the outgoing task
+     * resuming here finds sched_irq_flags in its own C frame, still 1. */
+    uint64_t sched_irq_flags = arch_irqs_enabled() ? 1 : 0;
     ARCH_SCHED_ENTER(sched_owner);
     sched_consume_resched(cpu_current_id());
     uint64_t now = timer_get_ticks();
@@ -2009,6 +2084,14 @@ void sched(void) {
      * avoiding O(n) traversal on every sched() call. */
     if (proc_sched_timers_due(now))
         sched_scan_timers(now);
+
+    /* From here to __switch() nothing may be interrupted: the pick publishes
+     * dispatch ownership and the switch publishes on_cpu, and an interrupt
+     * landing between the two would observe a task that is neither queued nor
+     * owned.  See the declaration above for why each task restores its own
+     * flags. */
+    if (sched_irq_flags)
+        arch_local_irq_disable();
 
     /*
      * Local queue traversal and on_rq -> dispatching no longer serialize on
@@ -2130,6 +2213,8 @@ void sched(void) {
 out:
     /* A switched-out task returns here only when that same task is resumed. */
     ARCH_SCHED_LEAVE(sched_owner);
+    if (sched_irq_flags)
+        arch_local_irq_enable();
 }
 
 void proc_yield(void) {

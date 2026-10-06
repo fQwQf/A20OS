@@ -16,6 +16,7 @@
 #include "core/consts.h"
 #include "core/klog.h"
 #include "core/kallsyms.h"
+#include "core/preempt.h"
 
 __attribute__((weak)) void arch_dump_trap_ring(void) {}
 __attribute__((weak)) void arch_dump_trap_extra_context(const trap_context_t *ctx)
@@ -596,7 +597,25 @@ void kernel_trap_handler(trap_context_t *ctx) {
     vaddr_t stval = arch_read_tval();
 
     if (scause & CAUSE_INTR_MASK) {
+        hardirq_enter();
         arch_handle_irq(scause & CAUSE_CODE_MASK, 0);
+        hardirq_exit();
+#if defined(CONFIG_KERNEL_PREEMPT) && !defined(ARCH_IRQ_WAS_ENABLED_IN_TRAP)
+#error "CONFIG_KERNEL_PREEMPT is on but this arch does not define ARCH_IRQ_WAS_ENABLED_IN_TRAP; there is no weak default, because one that returns 0 would make the config a silent lie"
+#endif
+        /*
+         * The one point where a kernel-mode task may lose the CPU.  Only the
+         * interrupt branch gets it: a synchronous exception is still on the
+         * faulting code's own stack and has no safe resumption point of its
+         * own.  The interrupt branch does, because the task's kstack still
+         * holds [interrupted kernel frame][CPU frame][trap_context] under the
+         * C frames of this handler, so a switch-out here resumes later by
+         * unwinding straight back through the interrupt epilogue -- no new
+         * assembly, no separate resume trampoline.
+         */
+        if (ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx))
+            kernel_preempt_at_irq_return();
+        return;
     } else {
         reg_t code = scause & CAUSE_CODE_MASK;
         task_t *cur = proc_current();

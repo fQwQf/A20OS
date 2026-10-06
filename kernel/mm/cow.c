@@ -44,7 +44,12 @@ static uint64_t mm_cow_flags(uint64_t pte) {
  * says.  If the status is empty there is nothing to sync against and the
  * caller skips the update, which is why this can fall back to a VMA lookup
  * only to recover a class for pages whose status was never written.
+ *
+ * The per-PTE status sidecar is a pgtable-ops feature: arm32's short-descriptor
+ * backend has none (same split as fault.c's status-driven path), so fork there
+ * keeps the PTE-level COW and only skips the status bookkeeping.
  */
+#if defined(ARCH_HAS_PGTABLE_OPS)
 static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
 {
     pte_t *tab = mm_pt_leaf_table(mm->pgdir, va);
@@ -66,6 +71,7 @@ static uint8_t mm_fork_page_class(struct mm_struct *mm, vaddr_t va)
                                          : MM_ST_FILE_PRIVATE;
     return MM_ST_ANON_MAPPED;
 }
+#endif /* ARCH_HAS_PGTABLE_OPS */
 
 int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
                        int shared) {
@@ -119,10 +125,12 @@ int mm_fork_clone_page(mm_struct_t *child, mm_struct_t *parent, vaddr_t va,
          * follow, or mm_pt_audit_all() reports a prot/cow mismatch and a
          * status-driven fault would keep installing the parent's old
          * write permission over a page the child now shares. */
+#if defined(ARCH_HAS_PGTABLE_OPS)
         pte_t *stab = mm_pt_leaf_table(parent->pgdir, base);
         if (stab)
             (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(base, 0),
                                     mm_fork_page_class(parent, base));
+#endif /* ARCH_HAS_PGTABLE_OPS */
     }
     mm_rss_add(child, size / PAGE_SIZE);
     return 0;
@@ -205,12 +213,14 @@ int mm_fork_clone_leaf(mm_struct_t *child, mm_struct_t *parent,
          * it just rewrote.  Only level-0 leaves have a per-PTE status slot;
          * a large leaf is one entry covering many virtual pages and the
          * auditor checks it as a whole. */
+#if defined(ARCH_HAS_PGTABLE_OPS)
         if (level == 0) {
             pte_t *stab = mm_pt_leaf_table(parent->pgdir, va);
             if (stab)
                 (void)mm_pt_sync_status(stab, 0, arch_pt_vpn(va, 0),
                                         mm_fork_page_class(parent, va));
         }
+#endif /* ARCH_HAS_PGTABLE_OPS */
     }
     mm_rss_add(child, vm_pt_level_size(level) / PAGE_SIZE);
     return 0;

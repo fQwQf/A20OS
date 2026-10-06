@@ -116,6 +116,14 @@ static inline void arch_trap_ctx_set_reg(trap_context_t *ctx, int i, uint64_t v)
 
 #define TRAP_CTX_EPC(ctx)          ((ctx)->pc)
 #define TRAP_CTX_STATUS(ctx)       ((ctx)->cpsr)
+/* Exception entry copies the interrupted CPSR into SPSR and masks I in the
+ * live CPSR before any instruction in the vector runs, so ctx->cpsr -- which
+ * trap.S stores from SPSR (trap/trap.S, the `mrs r2, spsr` before the CPSR
+ * writeback) -- still carries the pre-entry enable state.  Bit 7 is PSTATE.I,
+ * the same bit arch_irqs_enabled() reads out of the live CPSR (cpu.h); written
+ * as a literal because arch_task_kernel_status() ORs 0x13 into a status word
+ * and the generic SSTATUS_SIE spelling does not exist here. */
+#define ARCH_IRQ_WAS_ENABLED_IN_TRAP(ctx) (((ctx)->cpsr & (1U << 7)) == 0)
 #define TRAP_CTX_KScratch0(ctx)    ((ctx)->ttbr0)
 #define TASK_CTX_PAGE_TABLE(ctx)   ((ctx)->ttbr0)
 #define TASK_CTX_STATUS(ctx)       ((ctx)->cpsr)
