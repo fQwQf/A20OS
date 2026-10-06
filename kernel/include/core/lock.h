@@ -132,6 +132,14 @@ extern int proc_task_pid(const void *task);
  *   proc_unlock_two_tasks() so the order is written down once.  Per-CPU slots
  *   (g_cpu_switch_out[]) sit outside that order.
  * - Never block while holding a spinlock or while interrupts are disabled.
+ * - Every spin_lock/spin_trylock_irqsave/spin_unlock bracket is also a
+ *   preempt_disable/enable bracket (CONFIG_KERNEL_PREEMPT): a context switch
+ *   with the counter raised would inherit someone else's nesting depth, since
+ *   the per-CPU counter is only sound because it is provably zero at every
+ *   __switch.  context_switch_locked() panics on a nonzero count, so a switch
+ *   under a held lock fails loudly instead of corrupting the counter.  Waiting
+ *   for a lock does NOT raise the counter -- a spinner stays a legal
+ *   switch-out target.  See docs/process-scheduler.md §4.1.
  * - Do not call into VFS, memory allocation, or scheduler paths while holding a
  *   device or lwIP lock unless the callee is documented nonblocking.
  * - New locks must either fit this order or document a narrower local order in

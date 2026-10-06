@@ -63,6 +63,24 @@
 
 失败时先看 `kernel/proc/{sched,current}.c`、`kernel/include/proc/{proc,park}.h`、`kernel/include/core/sync.h` 中对应契约。不要通过删除所有权字段或放宽门禁来绕过失败。
 
+### 内核抢占探针
+
+`user/cmds/core/preempt_lat.c`（经 `instances/preempt-lat-*.toml`）回答一个窄问题：
+内核态长 syscall 期间，更高优先级的可运行任务能否在 syscall 返回前拿到 CPU。
+hog 子进程循环 `read()` 一个 256MB page-cache 热文件（单次 `read()` 在 TCG 下耗时
+数百毫秒，页间无重调度点），RT 子进程以 `SCHED_FIFO(10)` 睡眠-唤醒 20 次并报告
+每次迟到量。`preempt_lat <size_mb> [hog_cpu] [rt_cpu]` 的后两个参数用于 SMP 实例
+（`preempt-lat-smp-*`，`smp=2`）把两个子进程钉在同一 CPU 上——不钉扎时 RT 会被
+放到空闲 CPU，数字失去判别力。
+
+判读：有抢占时最大唤醒延迟为 tick 量级（smp=1 下 1-2 tick；smp=2 下定时器堆被两个
+CPU 的 tick 交错扫描，x86_64 实测 ≤1ms）；无抢占对照（CONFIG_KERNEL_PREEMPT=0）
+时延迟等于 hog 当前那次 read 的剩余时长。x86_64 必须经
+`tools/run_instance_tcg.py <instance>` 强制 TCG——宿主 KVM 下 256MB 的 read 只需
+几毫秒，"长 syscall"前提不成立；riscv64 直接 `tools/a20 test preempt-lat-riscv64`。
+失败时先核对 `PREEMPT_LAT: rt ... policy=1`（FIFO 是否生效）与 `pin_rc`（SMP 钉扎
+是否生效），再查 `kernel/proc/sched.c` 的 `kernel_preempt_at_irq_return()` 条件链。
+
 ### Task 引用与异步所有权
 
 主入口是 `make check-task-lifetime-boundary`，双架构累计运行使用 `make check-proc-step35-local`。
