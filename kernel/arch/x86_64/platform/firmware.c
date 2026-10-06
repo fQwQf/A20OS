@@ -346,6 +346,117 @@ uintptr_t firmware_acpi_hpet_address(void) {
     return PAGE_OFFSET + (uintptr_t)address;
 }
 
+/* Read a fixed-width field out of an ACPI table body, bounds-checked.
+ *
+ * The tables this file reads are firmware-supplied and the header length is
+ * firmware-supplied too, so every field read has to ask whether the bytes it
+ * wants are actually inside the table.  A short table is not an error worth
+ * reporting: it just means the field is absent, which is how the caller learns
+ * the answer is 0. */
+static uint64_t acpi_field(const acpi_sdt_t *table, size_t offset, size_t width) {
+    if (!table || offset + width > table->length)
+        return 0;
+    const uint8_t *p = (const uint8_t *)table + offset;
+    uint64_t value = 0;
+    for (size_t i = 0; i < width; i++)
+        value |= (uint64_t)p[i] << (i * 8);
+    return value;
+}
+
+/* Hand out a mapped ACPI table body, so a parser can walk one without
+ * re-implementing RSDP discovery and the checksum walk.  @sig is a four
+ * character signature.  Returns NULL when the machine published no such table.
+ *
+ * The returned pointer is in the direct map and stays valid for the life of the
+ * kernel: the tables are firmware ROM, and nothing here remaps or copies them.
+ * The length excludes the header, so a caller adding its own offset arithmetic
+ * to the body cannot run past the table. */
+const void *firmware_acpi_table(const char sig[4], uint32_t *length) {
+    const acpi_sdt_t *sdt = acpi_find_table(sig);
+    if (!sdt)
+        return NULL;
+    if (length)
+        *length = sdt->length - (uint32_t)sizeof(*sdt);
+    return (const uint8_t *)sdt + sizeof(*sdt);
+}
+
+int firmware_acpi_pm_get(firmware_acpi_pm_t *out) {
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+
+    /* "FACP" is the ACPI 2.0-and-later name for this table; revision 1 firmware
+     * called it "FADT".  Both are in the field and a machine may publish either,
+     * so try both rather than reporting no power-management support to hardware
+     * that has it. */
+    const acpi_sdt_t *fadt = acpi_find_table("FACP");
+    if (!fadt)
+        fadt = acpi_find_table("FADT");
+    if (!fadt)
+        return -ENOENT;
+
+    /* Offsets are absolute from the start of the table (ACPI 6.4 section 5.2.5).
+     * The two block bases live at 44 and 52; everything else below is the
+     * post-revision-2 restatement of the length fields, read only when the
+     * table is long enough to carry it. */
+    out->pm1a_evt    = (uint16_t)acpi_field(fadt, 44, 4);
+    out->pm1a_cnt    = (uint16_t)acpi_field(fadt, 52, 4);
+    out->pm2_cnt     = (uint16_t)acpi_field(fadt, 60, 4);
+    out->pm1a_evt_len = (uint8_t)acpi_field(fadt, 76, 1);
+    out->pm1a_cnt_len = (uint8_t)acpi_field(fadt, 77, 1);
+    out->pm2_cnt_len  = (uint8_t)acpi_field(fadt, 78, 1);
+
+    if (fadt->revision >= 2) {
+        out->gpe0_blk    = (uint16_t)acpi_field(fadt, 68, 4);
+        out->gpe1_blk    = (uint16_t)acpi_field(fadt, 72, 4);
+        out->sleep_states = (uint32_t)acpi_field(fadt, 116, 4);
+    }
+
+    /* A width the spec does not define is a corrupt field, not something to
+     * guess at: a mis-guessed access size to the sleep register is a write to
+     * whatever register is next to it.  Fall back to the only widths that have
+     * ever existed, and require the block to be addressable at all. */
+    if (out->pm1a_cnt_len != 2 && out->pm1a_cnt_len != 4)
+        out->pm1a_cnt_len = 2;
+    if (out->pm1a_evt_len != 2 && out->pm1a_evt_len != 4 && out->pm1a_evt_len != 8)
+        out->pm1a_evt_len = 2;
+    if (out->pm2_cnt_len != 1 && out->pm2_cnt_len != 2 && out->pm2_cnt_len != 4)
+        out->pm2_cnt_len = 1;
+
+    out->valid = out->pm1a_cnt != 0;
+    return 0;
+}
+
+/* One I/O APIC, MADT type 1.  The entry is 8 bytes through GSI Base and grows to
+ * 12 with the GSI segment number, which only exists to name a range outside
+ * segment 0 -- a range this kernel cannot reach, so those entries are dropped
+ * rather than silently treated as if they were in segment 0. */
+size_t firmware_acpi_ioapics(firmware_acpi_ioapic_t *out, size_t max) {
+    const acpi_sdt_t *madt = acpi_find_table("APIC");
+    if (!madt || madt->length < sizeof(*madt) + 10)
+        return 0;
+
+    size_t total = 0;
+    const uint8_t *entry = (const uint8_t *)madt + sizeof(*madt) + 8;
+    const uint8_t *end = (const uint8_t *)madt + madt->length;
+    while (entry + 2 <= end && entry[1] >= 2 && entry + entry[1] <= end) {
+        if (entry[0] == 1 && entry[1] >= 12) {
+            uint32_t segment = (entry[1] >= 16) ? *(const uint32_t *)(entry + 12) : 0;
+            if (segment == 0) {
+                if (out && total < max) {
+                    out[total].ioapic_id = entry[2];
+                    out[total].base      = *(const uint32_t *)(entry + 4);
+                    out[total].gsibase   = *(const uint32_t *)(entry + 8);
+                    out[total].gsiseg    = segment;
+                }
+                total++;
+            }
+        }
+        entry += entry[1];
+    }
+    return total;
+}
+
 /* TPM2 ACPI table: returns the physical address of the TPM2 control area
  * (or 0 if absent).  The control-area address points at the tail registers
  * for CRB; TIS uses the base. */
@@ -365,9 +476,50 @@ uint64_t firmware_acpi_tpm2(void) {
     return 0;
 }
 
-void firmware_shutdown(void) {
-    outw(0x604, 0x2000);
+/* PM1a_CNT: sleep type in bits 12:10, the enable that latches it in bit 13.
+ * S5 (soft off) is sleep type 5 (ACPI 6.4 table 5-383). */
+#define PM1A_CNT_SLP_TYP_S5 5U
+#define PM1A_CNT_SLP_EN     (1U << 13)
+
+void firmware_acpi_poweroff(void) {
+    firmware_acpi_pm_t pm;
+    if (firmware_acpi_pm_get(&pm) != 0 || !pm.valid) {
+        /* No FADT, or one that names no PM1a_CNT block.  There is no address to
+         * ask, and the port this kernel used to write blind is QEMU's PIIX4
+         * default rather than anything the architecture promises, so stopping
+         * here is the only write that cannot land on an unrelated register. */
+        arch_halt();
+        return;
+    }
+
+    uint32_t s5 = (PM1A_CNT_SLP_TYP_S5 << 10) | PM1A_CNT_SLP_EN;
+    if (pm.pm1a_cnt_len == 4)
+        outl(pm.pm1a_cnt, s5);
+    else
+        outw(pm.pm1a_cnt, (uint16_t)s5);
+
+    /* The conformant encoding above is all a real chipset needs, and on one the
+     * machine is gone before the next statement runs.  QEMU is not conformant
+     * here: hw/acpi/core.c acpi_pm_cnt_write() reads the sleep type, sends type 0
+     * straight to shutdown, sends type 1 to suspend, and treats everything else
+     * as an S4 request that only fires when the type matches the machine's s4_val
+     * (2 by default).  Type 5 therefore falls through and does nothing there,
+     * which would hang every QEMU gate that halts the guest.  So the legacy
+     * encoding is written as well, after a bounded spin: hardware has already
+     * stopped before reaching it, and QEMU reaches it and stops. */
+    for (volatile unsigned spin = 0; spin < 4096U; spin++)
+        __asm__ __volatile__("pause");
+
+    if (pm.pm1a_cnt_len == 4)
+        outl(pm.pm1a_cnt, PM1A_CNT_SLP_EN);
+    else
+        outw(pm.pm1a_cnt, (uint16_t)PM1A_CNT_SLP_EN);
+
     arch_halt();
+}
+
+void firmware_shutdown(void) {
+    firmware_acpi_poweroff();
 }
 
 /* QEMU fw_cfg (port 0x510 selector / 0x511 data).

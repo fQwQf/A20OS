@@ -10,6 +10,7 @@
 #include "drivers/bus/pci_msix.h"
 #include "core/progress.h"
 #include "platform.h"
+#include "firmware.h"
 #include "core/string.h"
 
 #include "trap_frame.h"
@@ -204,8 +205,19 @@ static void pic_init(void) {
 }
 
 static void pic_eoi(uint64_t vector) {
-    if (vector >= 0x28)
+    /* A cascade is not a shared interrupt.  The slave controller is wired to
+     * master line 2, so an interrupt arriving on a slave line leaves an
+     * in-service bit set in *both* chips and both have to be acknowledged --
+     * but only for lines that actually came from the slave.  EOIing the slave
+     * for every vector at 0x28 and above instead clears the slave's in-service
+     * bit on behalf of a master interrupt, which loses an unrelated interrupt
+     * whenever a keyboard and a slave line interleave.  The old test also had
+     * no upper bound, so a message-signalled vector from 0x30 up EOIed a
+     * controller that never raised anything. */
+    if (vector >= 0x28 && vector <= 0x2F)
         outb(0xA0, 0x20);
+    /* Master always: for its own lines, and for the cascade line that holds the
+     * master's in-service bit while a slave interrupt is being acknowledged. */
     outb(0x20, 0x20);
 }
 
@@ -232,89 +244,206 @@ static void lapic_enable(void) {
     lapic_write(LAPIC_LVT_LINT1, LAPIC_LVT_MASKED);
 }
 
-static void ioapic_init(void) {
-    /* Mask every redirection entry before any device line is routed; the
-     * reset state of unused entries is not guaranteed and an unmasked
-     * stale entry would deliver spurious vectors once LAPIC is enabled. */
-    uint32_t ver = ioapic_read(0x01);
-    uint32_t max_entries = ((ver >> 16) & 0xFF) + 1;
-    for (uint32_t i = 0; i < max_entries; i++) {
-        ioapic_write(0x10U + i * 2U + 1U, 0);
-        ioapic_write(0x10U + i * 2U, 0x10000U);
+/* X86_64_IOAPIC_MODEL:
+ * - A machine may have several I/O APICs, and neither their register base nor
+ *   the share of the global interrupt space each one owns is architecturally
+ *   fixed.  Both come from the MADT (type 1 entries).  A machine that publishes
+ *   none gets the single-controller arrangement QEMU's legacy path uses.
+ * - Each controller's redirection entries are numbered from 0, so a GSI names
+ *   (controller, entry) rather than an entry directly.  The split is
+ *   arch_ioapic_gsi_lookup()'s job and nothing below assumes GSI == entry.
+ * - The destination field names the APIC ID the controller forwards to.  It used
+ *   to be a literal 0, which is only correct when firmware left every I/O APIC
+ *   numbered zero; renumbering them is common, and an entry aimed at an ID no
+ *   processor answers to raises nothing at all.
+ * - Redirection-entry count is read from the controller's version register,
+ *   because a MADT entry says which GSIs a controller *starts* at but not how
+ *   many it has, and a GSI past the end belongs to the next controller. */
+
+static struct {
+    uintptr_t base;        /* kernel virtual */
+    uint32_t  gsibase;
+    uint32_t  dest_id;
+    uint32_t  entries;
+    int       valid;
+} g_ioapic[IOAPIC_MAX];
+
+static unsigned g_ioapic_count;
+
+static void ioapic_discover(void) {
+    firmware_acpi_ioapic_t listed[IOAPIC_MAX];
+    size_t found = firmware_acpi_ioapics(listed, IOAPIC_MAX);
+    if (found > IOAPIC_MAX)
+        found = IOAPIC_MAX;
+
+    for (size_t i = 0; i < found; i++) {
+        /* An entry with no address is a MADT this kernel cannot map; taking it
+         * would redirect the fallback controller onto a bogus window. */
+        if (!listed[i].base || listed[i].base > X86_HIGH_RAM_MAP_END)
+            continue;
+        uintptr_t base = listed[i].base + PAGE_OFFSET;
+        /* Version register: bits 23:16 hold max_entries minus one.  Reading it
+         * now rather than at route time keeps a controller whose window is not
+         * actually there from being probed later on an interrupt path. */
+        uint32_t version = ioapic_read_at(base, 0x01);
+        uint32_t entries = ((version >> 16) & 0xFFU) + 1U;
+        if (!entries)
+            continue;
+        g_ioapic[g_ioapic_count].base     = base;
+        g_ioapic[g_ioapic_count].gsibase  = listed[i].gsibase;
+        g_ioapic[g_ioapic_count].dest_id  = listed[i].ioapic_id;
+        g_ioapic[g_ioapic_count].entries  = entries;
+        g_ioapic[g_ioapic_count].valid    = 1;
+        g_ioapic_count++;
     }
+}
+
+unsigned arch_ioapic_count(void) {
+    if (!g_ioapic_count)
+        ioapic_discover();
+    return g_ioapic_count;
+}
+
+uintptr_t arch_ioapic_base(unsigned idx) {
+    if (idx < arch_ioapic_count() && g_ioapic[idx].valid)
+        return g_ioapic[idx].base;
+    return IOAPIC_FALLBACK_BASE + PAGE_OFFSET;
+}
+
+uint32_t arch_ioapic_entries(unsigned idx) {
+    if (idx < arch_ioapic_count() && g_ioapic[idx].valid)
+        return g_ioapic[idx].entries;
+    return 0;
+}
+
+uint32_t arch_ioapic_dest_id(unsigned idx) {
+    if (idx < arch_ioapic_count() && g_ioapic[idx].valid)
+        return g_ioapic[idx].dest_id;
+    return 0;
+}
+
+int arch_ioapic_gsi_lookup(uint32_t gsi, unsigned *idx, uint32_t *entry) {
+    unsigned count = arch_ioapic_count();
+    if (count) {
+        for (unsigned i = 0; i < count; i++) {
+            if (gsi >= g_ioapic[i].gsibase &&
+                gsi - g_ioapic[i].gsibase < g_ioapic[i].entries) {
+                *idx = i;
+                *entry = gsi - g_ioapic[i].gsibase;
+                return 0;
+            }
+        }
+        /* Inside the GSI space but owned by no published controller: programming
+         * a guess here would write some other controller's entry. */
+        return -ENODEV;
+    }
+    *idx = 0;
+    *entry = gsi;
+    return 0;
+}
+
+/* Interrupts delivered through a routed PCI vector, indexed by GSI.  A line that
+ * was programmed and never counted is the evidence that a routing guess was
+ * wrong -- the device is not idle, its interrupt is going somewhere else. */
+static uint64_t g_pci_gsi_firq[256];
+
+uint64_t x86_64_pci_gsi_firq_count(uint32_t gsi) {
+    return gsi < 256U ? g_pci_gsi_firq[gsi] : 0;
+}
+
+static void ioapic_init(void) {
+    unsigned count = arch_ioapic_count();
+    for (unsigned i = 0; i < count; i++) {
+        /* Mask every redirection entry before any device line is routed; the
+         * reset state of unused entries is not guaranteed and an unmasked
+         * stale entry would deliver spurious vectors once LAPIC is enabled. */
+        uintptr_t base = arch_ioapic_base(i);
+        uint32_t entries = arch_ioapic_entries(i);
+        for (uint32_t e = 0; e < entries; e++) {
+            ioapic_write_at(base, 0x10U + e * 2U + 1U, 0);
+            ioapic_write_at(base, 0x10U + e * 2U, 0x10000U);
+        }
+    }
+    if (!count)
+        kinfo("[IOAPIC] no MADT entries; assuming one controller at 0x%lx\n",
+              (unsigned long)IOAPIC_FALLBACK_BASE);
 }
 
 void x86_64_route_pci_irq(uint32_t gsi, uint8_t vector) {
     /* PCI INTx is level-triggered and active-low.  Route the GSI to the
-     * vector with physical destination mode aimed at the BSP (APIC ID 0).
+     * vector with physical destination mode aimed at the controller's own
+     * target APIC.
      * The entry starts MASKED: only request_irq()'s auto-enable (the board
      * irqchip enable hook) unmasks it, so a device whose handler failed to
      * register can never hold a shared level line asserted with nobody
      * clearing its interrupt source. */
-    uint32_t low_reg = 0x10U + gsi * 2U;
-    ioapic_write(low_reg + 1U, 0);
-    ioapic_write(low_reg, (uint32_t)vector | (1U << 13) | (1U << 15) |
-                          (1U << 16));
+    unsigned idx;
+    uint32_t entry;
+    if (arch_ioapic_gsi_lookup(gsi, &idx, &entry) != 0) {
+        kinfo("[IOAPIC] gsi %u is in no published range; not routed\n", gsi);
+        return;
+    }
+    uintptr_t base = arch_ioapic_base(idx);
+    uint32_t low_reg = 0x10U + entry * 2U;
+    ioapic_write_at(base, low_reg + 1U, arch_ioapic_dest_id(idx));
+    ioapic_write_at(base, low_reg, (uint32_t)vector | (1U << 13) | (1U << 15) |
+                                   (1U << 16));
 }
 
 /* X86_64_PCI_INTX_MODEL:
- * - QEMU q35 routes root-bus PCI INTx to GSI 20-23 with the swizzle
- *   GSI = 20 + ((dev + pin - 1) & 3).  This was verified empirically by
- *   routing the whole GSI 16-23 window and observing which vectors fire:
- *   dev 2/3/4 pin A land on GSI 22/23/20 respectively (the i440fx-style
- *   base of 16 does NOT match q35 hardware behavior).
- * - Each routed GSI owns vector 0x40 + gsi so arch_handle_irq() can hand
- *   the vector straight to driver_irq_dispatch() as the IRQ line id.
- * - Only bus 0 is routed: devices behind a bridge need the bridge swizzle
- *   and ACPI _PRT, which this platform does not parse; those transports
- *   keep the polling fallback by receiving -1. */
+ * - Where a device's INTx line lands is a firmware decision, published in the
+ *   ACPI DSDT as a per-bus _PRT routing table and, on i440fx, programmed into
+ *   the chipset's PIRQ links.  There is no formula for it.
+ * - Two things are known without firmware, and only two.  One is QEMU's q35,
+ *   which wires root-bus INTx straight to GSI 20-23 with the swizzle
+ *   GSI = 20 + ((dev + pin - 1) & 3), verified empirically against the
+ *   emulator.  The other is a DSDT whose _PRT can be evaluated, which
+ *   arch_pci_prt_gsi() answers for every other machine.
+ * - Anything else returns -1, and the driver keeps its polling fallback.  A
+ *   guessed GSI is worse than no GSI: firmware has usually already programmed
+ *   that entry for another device, so the guess does not merely fail to help,
+ *   it redirects a line somebody else owns.
+ * - Only bus 0 takes part in the q35 swizzle, because a device behind a bridge
+ *   arrives at the root bus on a pin the bridge chooses (its Interrupt Line
+ *   register, offset 0x3D of the bridge header). */
 #define X86_64_PCI_VECTOR_BASE 0x40
 #define X86_64_PCI_GSI_BASE    20U
 
-/* Set by a board that knows its chipset routes PCI INTx through the IOAPIC
- * with a fixed formula instead of q35's swizzle; 0 selects the swizzle.  Kept
- * as runtime state so the arch layer never learns a board name. */
-static uint32_t pci_intx_gsi_base;
-
-void arch_pci_set_intx_gsi_base(uint32_t gsi_base) {
-    pci_intx_gsi_base = gsi_base;
-}
+/* QEMU's host bridge device and vendor ID.  Used only to recognise the one
+ * machine whose INTx wiring is known without asking firmware. */
+#define X86_64_Q35_BRIDGE_ID   0x29c08086U
 
 int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
     (void)func;
     if (pin < 1 || pin > 4)
         return -1;
-    if (pci_intx_gsi_base) {
-        if (bus > 255)
+
+    /* Firmware first: on any machine with a usable DSDT this is the answer, and
+     * it is the only one that holds for a device behind a bridge. */
+    uint32_t gsi = arch_pci_prt_gsi(bus, dev, pin);
+    int from_prt = gsi != PCI_PRT_GSI_NONE;
+
+    if (!from_prt) {
+        if (bus != 0)
             return -1;
-        uint32_t gsi = pci_intx_gsi_base +
-                       (((uint32_t)bus << 8) | ((uint32_t)dev << 2) |
-                        ((uint32_t)pin - 1U));
-        if (gsi > 23U)
+        static int host_bridge_ok = -1;
+        if (host_bridge_ok < 0) {
+            uint32_t id = readl((const volatile void *)
+                                (PCI_ECAM_BASE + 0U));
+            host_bridge_ok = (id == X86_64_Q35_BRIDGE_ID) ? 1 : 0;
+        }
+        if (!host_bridge_ok)
             return -1;
-        uint8_t vector = (uint8_t)(X86_64_PCI_VECTOR_BASE + gsi);
-        x86_64_route_pci_irq(gsi, vector);
-        return (int)vector;
+        gsi = X86_64_PCI_GSI_BASE +
+              (((uint32_t)dev + (uint32_t)pin - 1U) & 3U);
     }
-    if (bus != 0)
-        return -1;
-    /* The swizzle below is q35-only, verified empirically against QEMU
-     * (dev 2/3/4 pin A land on GSI 22/23/20).  i440fx routes PIRQ through
-     * SeaBIOS-programmed legacy IRQs instead, which cannot be resolved
-     * without ACPI _PRT and PIRQ link programming, so it keeps the
-     * polling fallback.  Identify the machine by its host bridge. */
-    static int host_bridge_ok = -1;
-    if (host_bridge_ok < 0) {
-        uint32_t id = readl((const volatile void *)
-                            (PCI_ECAM_BASE + 0U));
-        host_bridge_ok = (id == 0x29c08086U) ? 1 : 0;
-    }
-    if (!host_bridge_ok)
-        return -1;
-    uint32_t gsi = X86_64_PCI_GSI_BASE +
-                   (((uint32_t)dev + (uint32_t)pin - 1U) & 3U);
+
     uint8_t vector = (uint8_t)(X86_64_PCI_VECTOR_BASE + gsi);
     x86_64_route_pci_irq(gsi, vector);
+    kinfo("[PCI] INTx %02u:%02u.%u pin %c -> gsi %u vector 0x%02x (%s)\n",
+          (unsigned)bus, (unsigned)dev, (unsigned)func,
+          (char)('A' + pin - 1), gsi, vector,
+          from_prt ? "ACPI _PRT" : "q35 swizzle");
     return (int)vector;
 }
 
@@ -327,12 +456,16 @@ int arch_pci_intx_irq(int bus, int dev, int func, int pin) {
  *   LINT0, LINT1, error), which is why MSI vectors are taken from the top of
  *   the interrupt range: there the delivery mode for the message data the
  *   device sends is fixed rather than derived from an implemented entry.  The
- *   window is 32 vectors, clear of the 8259 range below 0x30, the
- *   IOAPIC-routed PCI window at 0x50-0x57, and the IPIs at 0xF0/0xF1.
+ *   window is 152 vectors, starting just above the IOAPIC-routed PCI window at
+ *   0x40-0x57 and ending just below the IPIs at 0xF0-0xF2.  32 was not enough
+ *   once more than two devices took the message-signalled path -- virtio alone
+ *   wants one vector per queue -- and the allocator hands out a global free
+ *   list, so a window another device had already eaten turned into refusals for
+ *   requests that ought to have succeeded.
  * - Delivery mode lives in LVT bits 10:8 and 000b already means fixed, so an
  *   entry is just the vector plus the mask bit request_irq() controls.  (The
  *   value 0x10000 a local APIC resets to already decodes as "fixed".) */
-#define X86_64_MSIX_VECTOR_BASE 0xD0
+#define X86_64_MSIX_VECTOR_BASE 0x58
 #define X86_64_MSIX_VECTOR_END  0xF0
 
 static int x86_64_msix_vector_p(uint32_t vector) {
@@ -438,16 +571,24 @@ void x86_64_pci_irq_set_masked(int vector, int masked) {
         x86_64_msix_lvt((uint32_t)vector, masked);
         return;
     }
-    uint32_t gsi = (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
-    if (gsi < 16U || gsi > 23U)
+    if (vector < X86_64_PCI_VECTOR_BASE)
         return;
-    uint32_t low_reg = 0x10U + gsi * 2U;
-    uint32_t low = ioapic_read(low_reg);
+    uint32_t gsi = (uint32_t)(vector - X86_64_PCI_VECTOR_BASE);
+    unsigned idx;
+    uint32_t entry;
+    /* Re-resolve the line rather than assuming GSI N is entry N of controller
+     * 0: on a machine with more than one I/O APIC that assumption writes an
+     * unrelated controller's entry and leaves this one unmasked. */
+    if (arch_ioapic_gsi_lookup(gsi, &idx, &entry) != 0)
+        return;
+    uintptr_t base = arch_ioapic_base(idx);
+    uint32_t low_reg = 0x10U + entry * 2U;
+    uint32_t low = ioapic_read_at(base, low_reg);
     if (masked)
         low |= (1U << 16);
     else
         low &= ~(1U << 16);
-    ioapic_write(low_reg, low);
+    ioapic_write_at(base, low_reg, low);
 }
 
 void trap_init(void) {
@@ -531,7 +672,14 @@ void arch_handle_irq(uint64_t irq, int from_user) {
     } else if (irq == IRQ_VECTOR_UART || irq == IRQ_VECTOR_KEYBOARD ||
                irq == PS2_MOUSE_IRQ_VECTOR || irq == IRQ_VECTOR_PCI ||
                (irq >= X86_64_PCI_VECTOR_BASE && irq < IRQ_VECTOR_RESCHEDULE)) {
-        /* PCI vectors double as driver IRQ line ids (see X86_64_PCI_INTX_MODEL). */
+        /* PCI vectors double as driver IRQ line ids (see X86_64_PCI_INTX_MODEL).
+         * Count the IOAPIC-routed ones by GSI before dispatch: a line that was
+         * programmed and never counted here is a routing that went nowhere,
+         * which no per-driver counter can show because the driver's handler
+         * simply never ran. */
+        if (irq >= X86_64_PCI_VECTOR_BASE &&
+            irq < X86_64_PCI_VECTOR_BASE + 256U)
+            g_pci_gsi_firq[irq - X86_64_PCI_VECTOR_BASE]++;
         driver_irq_dispatch((uint32_t)irq);
     }
     if (irq == IRQ_VECTOR_KEYBOARD || irq == IRQ_VECTOR_UART ||

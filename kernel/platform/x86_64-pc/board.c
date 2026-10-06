@@ -13,8 +13,9 @@
  *     found.  early_init() now asks ACPI.
  *
  *  2. PCI INTx routing only recognised the q35 host bridge (0x29c08086), so
- *     every real chipset fell back to polling.  This board publishes the
- *     chipset's GSI base; see the caveat in x86_64-pc.md.
+ *     every real chipset fell back to polling.  This board publishes no GSI
+ *     formula at all -- routing now comes from the DSDT's _PRT, and a line
+ *     firmware does not describe keeps the polling fallback.
  *
  *  3. The kernel command line came from QEMU's fw_cfg device, which does not
  *     exist on a physical machine, so every a20.* knob was unreachable.  The
@@ -41,10 +42,18 @@
 #include "platform.h"
 
 /* ACPI's default IOAPIC GSI numbering places PCI INTx above the legacy PIC
- * lines, which occupy GSI 0..15.  Chipsets that override this publish a
- * different base; 0x10 is the ACPI-spec default and the safe assumption for
- * an otherwise unknown chipset. */
-#define X86_PC_PCI_INTX_GSI_BASE 0x10U
+ * lines, which occupy GSI 0..15.  This board deliberately publishes nothing:
+ * the number a line actually lands on is a firmware decision published in the
+ * DSDT's _PRT, and the flat formula that used to be declared here
+ * (gsi = 0x10 + 4*dev + pin - 1, capped at GSI 23) was not a routing rule at
+ * all.  Because of the cap it accepted only devices 0 and 1 -- the host bridge
+ * and the southbridge, the two slots a real machine has nothing in -- while
+ * rejecting every device that is actually present, and the boot log named the
+ * base as if it had worked.  Leaving the lines unrouted makes every INTx device
+ * take its polling fallback, which is slower and visibly marked, instead of
+ * silently redirecting an entry firmware had programmed for something else.
+ * arch_pci_intx_irq() asks firmware first and only falls back to a formula on
+ * the one machine whose wiring is known without asking. */
 
 /* ECAM window resolved from MCFG, kept for enumerate_devices(). */
 static uintptr_t pc_ecam_base;
@@ -150,7 +159,6 @@ static void pc_early_init(void) {
     pc_ecam_base = firmware_acpi_mcfg_base();
     if (pc_ecam_base) {
         arch_pci_host_init(pc_ecam_base);
-        arch_pci_set_intx_gsi_base(X86_PC_PCI_INTX_GSI_BASE);
         uint8_t first = 0, last = 0;
         if (firmware_acpi_mcfg_bus_range(&first, &last) == 0) {
             pc_bus_start = first;
@@ -159,9 +167,8 @@ static void pc_early_init(void) {
             pc_bus_start = 0;
             pc_bus_end   = 255;
         }
-        printf("[PCI] ECAM 0x%lx buses %d..%d intx_gsi_base=0x%x\n",
-               (unsigned long)pc_ecam_base, pc_bus_start, pc_bus_end,
-               X86_PC_PCI_INTX_GSI_BASE);
+        printf("[PCI] ECAM 0x%lx buses %d..%d\n",
+               (unsigned long)pc_ecam_base, pc_bus_start, pc_bus_end);
     } else {
         /* No MCFG: either a pre-PCIe machine, in which case pci_host.c falls
          * back to the 0xCF8/0xCFC pair, or a firmware that publishes no
@@ -173,10 +180,7 @@ static void pc_early_init(void) {
 }
 
 static void pc_poweroff(void) {
-    /* ACPI S5 (soft off) via the PM1a control register at the chipset's
-     * conventional address, then the QEMU port as a fallback. */
-    outw(0x604, 0x2000);
-    arch_halt();
+    firmware_acpi_poweroff();
 }
 
 static void pc_reboot(void) {
