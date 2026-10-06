@@ -1,0 +1,20 @@
+# Kernel-preemption RT wakeup-latency probe on riscv64.
+#
+# Single CPU on purpose: with a second CPU online the RT child could simply run
+# somewhere else and the measurement would report a fast wakeup whether or not
+# the kernel can cut a long syscall short.  The hog child and the RT child have
+# to contend for one CPU for the number to mean anything.
+name = "preempt-lat-riscv64"
+description = "riscv64 kernel-preemption RT wakeup latency (preempt_lat)"
+arch = "riscv64"
+abi = "linux"
+
+[machine]
+memory = "3G"
+smp = 1
+
+[test]
+commands = ["preempt_lat 256", "poweroff"]
+expect = ["PREEMPT_LAT: rt ", "PREEMPT_LAT: DONE"]
+input_delay = 60
+timeout = "1200s"
