@@ -442,9 +442,14 @@ static void user_trap_handler(trap_context_t *ctx) {
                  * does, to write hs_err -- used to return here with nothing
                  * printed, so every MC crash reached the log undecoded while
                  * the unhandled-fault path below dumped page_words/va_words/
-                 * frame refs.  Deliver exactly as before, but diagnose first. */
+                 * frame refs.  Deliver exactly as before, but diagnose first.
+                 * dump_fault_pte() is generic; the register-name and
+                 * user-object dumps below read x86_64-only context (rdi is
+                 * the load's base register on this ABI, and both helpers are
+                 * x86_64-only), so other arches take just the PTE dumps. */
                 dump_fault_pte(cur, stval);
                 dump_fault_pte(cur, sepc);
+#if defined(__x86_64__)
                 /* A load fault names its base register, not its source.  The
                  * failing walk is musl's `mov -0x10(%rdi),%rax` followed by
                  * `cmp %rcx,0x10(%rax)`, so rax is the null and rdi is the chunk
@@ -453,6 +458,7 @@ static void user_trap_handler(trap_context_t *ctx) {
                 vaddr_t rdi = (vaddr_t)arch_trap_ctx_reg(ctx, 5);
                 if (rdi && rdi != stval)
                     dump_user_object(cur, rdi, "FAULT-DI");
+#endif
                 if (deliver_user_sync_signal(ctx, SIGSEGV, -SIGSEGV))
                     return;
             }
