@@ -14,6 +14,9 @@
 #include "core/types.h"
 #include "core/defs.h"
 #include "drivers/driver_descriptor.h"
+/* For CLASS_DEVICE_NAME_MAX (the class-device publication object and the
+ * devfs_name field of device_t must agree on the name length). */
+#include "drivers/core/driver_class.h"
 
 /* ============================================================
  * Forward declarations
@@ -96,6 +99,29 @@ typedef struct device {
     int                user_owned; /* owned by a user-service driver; only
                                     * read-only kernel probes may bind */
     struct class_device *class_dev; /* core-owned userspace publication */
+
+    /* Bus-master DMA address mask: the address bits this device's DMA engine
+     * can be handed.  Appended last because a driver_t/device_t pair is shared
+     * with loadable .a20drv modules, whose layout must keep matching.
+     *
+     * 0 -- the value every zero-initialised device_t carries -- means "not
+     * declared", and dma_get_mask() reports it as DMA_MASK_64BIT.  That is what
+     * keeps a bus enumerator or board file that never calls dma_set_mask() on
+     * the full 64-bit window without having to edit every static device_t, and
+     * it is also the honest default: nothing narrows a device until its driver
+     * has read a capability out of the hardware and said so.
+     * dma_set_mask() rejects a mask that is not a run of low-order ones rather
+     * than rounding it, so this field never holds a half-declared window. */
+    uint64_t           dma_mask;
+
+    /* Node name the driver wants for the devfs entry class_device_publish()
+     * creates, e.g. "vport0" instead of the generated "char0".  NULL -- the
+     * zero-initialised default -- keeps the generated name.  Appended last for
+     * the same reason as dma_mask: the layout is shared with loadable .a20drv
+     * modules.  Set it from probe() with device_set_devfs_name(), which the
+     * driver calls before returning 0, because publication happens right after
+     * probe returns. */
+    char               devfs_name[CLASS_DEVICE_NAME_MAX];
 } device_t;
 
 /* ============================================================
@@ -201,6 +227,16 @@ void bus_unregister(bus_type_t *bus);
 int  bus_probe_device(device_t *dev);
 
 resource_t *device_get_resource(device_t *dev, enum resource_type type, int index);
+
+/*
+ * Ask for a specific devfs node name for this device, e.g. "vport0" instead of
+ * the generated "char3".  Callable only from probe(), before it returns: the
+ * class device is published immediately afterwards and copies the name then.
+ * Rejects an empty name, a name longer than CLASS_DEVICE_NAME_MAX - 1, and any
+ * name carrying '/', so a driver cannot steer the name outside the device's
+ * own devfs directory.  Returns 0 on success, -EINVAL otherwise.
+ */
+int device_set_devfs_name(device_t *dev, const char *name);
 
 /* iterate devices by class */
 device_t *device_find_by_class(uint32_t class_type, int index);

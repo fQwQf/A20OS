@@ -107,15 +107,20 @@ common config 偏移 `0x1A`（与队列选择 `0x16` 配合使用）里的值是
 ### 平台钩子与消息地址
 
 ```c
-int arch_msix_message_address(uint32_t vector, uint32_t *addr_lo, uint32_t *addr_hi);
-int arch_msix_vector_setup(uint32_t vector, int masked);
+int arch_msix_message_address(uint32_t vector, int cpu,
+                              uint32_t *addr_lo, uint32_t *addr_hi);
+int arch_msix_vector_setup(uint32_t vector, int cpu, int masked);
 int arch_irq_msix_vector_range(int *base, int *end);
+int arch_irq_msix_cpu_count(void);
 ```
 
-三个都是 weak 符号，默认返回负 errno。只有 x86_64 实现了它们：向量窗口
-`0xD0..0xF0`，LVT 按 `LAPIC_LVT_TIMER + ((V - 0x10) & 0xFF) * 16` 定位。
-其他架构返回失败，驱动因此停在轮询或 INTx，而不会去编程一条永远不会被投递
-的中断。
+前两个是 weak 符号，默认返回负 errno；`arch_irq_msix_vector_range()` 给出
+本平台的向量窗口，`arch_irq_msix_cpu_count()` 给出合法目标 CPU 的个数，只有
+x86_64 实现了它们：向量窗口 `0xD0..0xF0`，LVT 按 `LAPIC_LVT_TIMER +
+((V - 0x10) & 0xFF) * 16` 定位，CPU 个数取 `smp_online_cpu_count()`。其他架构
+返回失败，驱动因此停在轮询或 INTx，而不会去编程一条永远不会被投递的中断。
+`arch_irq_msix_cpu_count()` 返回 1 时只有 `PCI_MSIX_CPU_BOOT` 合法，迁移请求
+会被干净地拒绝。
 
 消息地址必须是 **APIC 自己那一页的基地址**（x86_64 上是 `LAPIC_PHYS_BASE`
 `0xFEE00000`），向量放在消息数据里，不放在地址里。真实硬件确实会忽略该页内
@@ -124,6 +129,52 @@ int arch_irq_msix_vector_range(int *base, int *end);
 报错**。表项编程正确、message control 正确、function mask 已清，设备照常
 notify，就是一条中断都没有。向页基址投递是所有实现都解释为"这是一个中断"
 的唯一地址。
+
+`cpu` 是这条消息要交给哪个处理器，boot CPU 是 `PCI_MSIX_CPU_BOOT`（0）。x86_64
+把它翻译成 `LAPIC_PHYS_BASE + (apic_id << 12)`（xAPIC 物理目的模式，APIC ID
+取自 `smp_logical_to_hw()`）。**LVT 住在目标处理器自己的 LAPIC 页里**，所以给
+别的 CPU 编程必须在那里执行：`arch_msix_vector_setup()` 在目标不是当前 CPU 时
+把请求经 IPI（向量 `IRQ_VECTOR_MSIX_VECTOR`）下发到目标 CPU，等它回 ack 再返回。
+没有这一步，表项会指向一个从未被 unmask 的 LVT，一条中断都不会来。
+
+### 把条目迁到别的 CPU
+
+```c
+int pci_msix_set_affinity(device_t *dev, unsigned index, int cpu);
+int pci_msix_get_affinity(device_t *dev, unsigned index, int *cpu);
+int pci_msix_set_all_affinity(int cpu);
+unsigned pci_msix_affinity_snapshot(pci_msix_affinity_entry_t *out, unsigned max);
+```
+
+`index` 是表索引，和 `queue_msix_vector` 是同一个坐标系。`pci_msix_set_affinity()`
+的顺序是固定的：先让平台把**目标 CPU** 上的 LVT mask 住（平台不支持就到这里为止，
+表项一个字节都没动），再 mask 该条目、改写 `message address`、读回校验，然后解除
+目标 CPU 上的 LVT mask，最后解除条目 mask。写入与读回之间条目是 masked 的，所以
+迁移过程中不会有中断丢在两个 CPU 之间。
+
+失败时的状态要分两种读：
+
+- **地址回读不符**（`pci_msix_program_vector()` 之外同一类"打错窗口"的错误）返回
+  `-EIO`。写本来就没进去，条目地址仍是旧 CPU 的，所以回滚按成功路径的镜像执行：先把
+  **旧 CPU** 的 LVT 重新 arm 回来，再解除条目 mask，条目与控制器两侧都回到调用前的
+  状态，`target_cpu[index]` 不动。旧 CPU 的 LVT 没能重新 arm 时打一条 `kerr` 并让
+  条目保持 masked（宁可停住也不丢中断），返回的仍是 `-EIO`。
+- **远端 LVT 没能 arm**（IPI 超时等）返回平台的 errno。**此时地址已经是新 CPU 的，
+  条目保持 masked，不再回滚**——设备被 mask 住、数据发不出去，这是唯一不丢中断的
+  落点。调用方拿到错误就应当知道这条 vector 现在是不通的，需要重试或退回。
+
+`cpu` 越界或平台没有 per-CPU 目的地时返回 `-EINVAL`/`-EOPNOTSUPP`，状态不变。
+目标已经是该 CPU 时直接返回 0，不产生一次多余的远端 IPI。
+
+`pci_msix_set_all_affinity()` 是遍历所有已登记 MSI-X function 的便捷版本，供
+`/proc/a20/irq_affinity` 这种"整机一个值"的运行时旋钮使用；它逐条目调用上面的
+单条目版本，返回第一个失败的 errno。**批量迁移不是一个事务**：已经迁走的条目留在
+新 CPU 上，失败的条目按上面的规则留在各自的状态上。`pci_msix_get_affinity()` /
+`pci_msix_affinity_snapshot()` 读的是内核侧的记录，不是回读硬件，回读只在写入路径
+上做。
+
+驱动自己调用这些接口不需要额外注册任何东西：`pci_msix_set_affinity()` 与
+`pci_msix_get_affinity()` 已在 drvmod 符号白名单里，`.a20drv` 模块可以直接用。
 
 ## PCI probe 模式
 
@@ -305,8 +356,12 @@ static int submit_request(vq_t *vq, void *out, size_t out_len,
 | SCSI (8) | `1af4:1048` | `1af4:1008` | `virtio_scsi.c` |
 | GPU (16) | `1af4:1050` | `1af4:1010` | `virtio_gpu.c` |
 | input (18) | `1af4:1052` | `1af4:1012` | `virtio_input.c` |
+| console (3) | `1af4:1043` | `1af4:1003` | `virtio_console.c` |
+| entropy (4) | `1af4:1044` | `1af4:1005` | `virtio_rng.c` |
 
 transitional ID 的 subsystem device 常用来区分 VirtIO type，ID 表必须按现有 bus match 语义填写。
+
+console(3) 与 virtio-guest-agent 共用 device id，本树只有 virtio-serial 设备模型实现驱动使用的端口队列。它的队列顺序与其它设备不同：非 multiport 的 virtio-serial 在 QEMU 里先加 port 0 的 receive/transmit，再加 control 一对，之后才是每个端口自己的一对（`hw/char/virtio-serial-bus.c`）。因此 `virtio_console.c` 只协商 `VIRTIO_F_VERSION_1`、**不协商 MULTIPORT**，用 q0=rx(port0)、q1=tx(port0) 承载唯一端口，并且完全不设控制队列；设备在驱动写 `DRIVER_OK` 时就把 port 0 标记为 guest_connected。若要支持 port 1 以上，必须补上 control virtqueue 的 `VIRTIO_CONSOLE_PORT_OPEN` 握手，而不是简单加队列。
 
 PCI BAR 的 sizing、分配和 capability 地址解析只属于 `pci_enumerate()` 与 `pci_virtio_transport_init()`。驱动、类消费者和 `arch_virtio_*_probe()` 不得再次扫描同一 PCI host 或重写 BAR。QEMU/VirtualBox 的 PCI VirtIO 设备走统一 PCI bus；VirtIO-MMIO 设备由 `virtio_mmio_enumerate()` 发布，二者最终进入同一 driver probe，不以运行期 fallback 互相探测。
 
